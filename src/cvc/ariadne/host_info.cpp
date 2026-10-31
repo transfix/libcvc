@@ -148,6 +148,7 @@ std::string format_host_info(const HostInfo &info, bool json, bool functions) {
       << ", \"gl\": " << (info.gl ? "true" : "false")
       << ", \"gl_info\": " << json_string(info.gl_info)
       << ", \"http\": " << (info.http ? "true" : "false")
+      << ", \"audio\": " << (info.audio ? "true" : "false")
       << "},\n  \"network\": {\"on\": " << (info.net ? "true" : "false") << ", \"allow\": [";
     for (std::size_t i = 0; i < info.net_allowed.size(); ++i)
       o << (i ? ", " : "") << json_string(info.net_allowed[i]);
@@ -209,6 +210,12 @@ std::string format_host_info(const HostInfo &info, bool json, bool functions) {
       o << "    " << line << "\n";
   }
   o << "  HTTP (cvc::net)               " << yes(info.http) << "\n";
+  o << "  audio output (SDL3)           " << yes(info.audio) << "\n";
+  if (!info.audio_info.empty()) {
+    std::istringstream lines(info.audio_info);
+    for (std::string line; std::getline(lines, line);)
+      o << "    " << line << "\n";
+  }
   o << "\nnetwork\n";
   if (!info.net) {
     o << "  off (--net, --net-allow ORIGIN or --net-policy FILE turn it on)\n";
