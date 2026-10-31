@@ -99,7 +99,7 @@ bool is_builtin_block(const std::string &k) {
          k == "children" || k == "scene" || k == "customs" || k == "init" || k == "on_tick" ||
          k == "on_key" || k == "on_pointer" || k == "on_signal" || k == "units" || k == "import" ||
          k == "channels" || k == "lint" || k == "args" || k == "requires" || k == "keys" ||
-         k == "windows_menu";
+         k == "windows_menu" || k == "tests";
 }
 } // namespace
 
@@ -2654,6 +2654,8 @@ void lint_channels(Ctx &ctx, LoadResult &r) {
   refs_from_script(r.on_key_script, refs);
   refs_from_script(r.on_pointer_script, refs);
   refs_from_script(r.on_signal_script, refs);
+  for (const auto &t : r.tests)
+    refs_from_script(t.second, refs);
   for (const KeyBinding &k : r.keys)
     refs_from_script(k.on, refs);
   refs_from_widget(r.root, refs);
@@ -2814,6 +2816,20 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
     else if (sg && !sg.IsScalar())
       ctx.warn("ari: on_signal: must be a scalar state_exec script string — ignored");
     r.keys = parse_keys(ctx, doc["keys"]);
+    // tests: a map of name -> program that `ari test` runs (the loader only captures them).
+    if (const YAML::Node ts = doc["tests"]; ts && !ts.IsNull()) { // `tests:` alone: none
+      if (!ts.IsMap())
+        ctx.warn("ari: tests: must be a MAP of test name -> state_exec program — ignored");
+      else
+        for (const auto &kv : ts) {
+          const std::string name = kv.first.IsScalar() ? kv.first.Scalar() : std::string();
+          if (name.empty() || !kv.second.IsScalar() || kv.second.Scalar().empty())
+            ctx.warn("ari: tests: '" + name +
+                     "' must be a non-empty scalar state_exec program — ignored");
+          else
+            r.tests.emplace_back(name, kv.second.Scalar());
+        }
+    }
   }
   // §12 channel lint (A): now that root + all scripts are populated, scan static msg-* refs
   // (only if the doc declared channels:). A strict violation fails the load (r.error set).

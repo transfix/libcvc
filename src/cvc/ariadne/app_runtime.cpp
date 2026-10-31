@@ -15,6 +15,7 @@
 #include <cvc/state/state_exec/async_host.h>      // register_async_fn
 #include <cvc/state/state_exec/async_scheduler.h> // exec_scheduler().post_message
 #include <cvc/state/state_exec/builtins.h>        // register_fn
+#include <cvc/state/state_exec/exceptions.h>      // dsl_error ((quit code) checks its code)
 #include <cvc/state/state_exec/intrinsics.h>      // intrinsics_context, resolve_channel_key
 #include <cvc/state/state_exec/types.h>           // value_t
 #include <filesystem>
@@ -39,6 +40,7 @@ AppRuntime::AppRuntime(cvc::app &app, std::string prefix, SceneAdapter *scene)
 AppRuntime::~AppRuntime() {
   verbs_->sync.clear(); // the provider outlives us in the registry: it must bind nothing of ours
   verbs_->async.clear();
+  verbs_->quit = nullptr;
   if (netEnabled_)
     disable_net(); // its provider holds app_ by reference
 }
@@ -242,6 +244,13 @@ void AppRuntime::register_async_verb(const std::string &name, const std::string 
   rt_.refresh_program_names();
 }
 
+void AppRuntime::register_quit() {
+  on("quit", [this] { request_close(0); });
+  verbs_->quit = [this](int code) { request_close(code); };
+  ensure_intrinsics();
+  rt_.refresh_program_names();
+}
+
 void AppRuntime::ensure_intrinsics() {
   if (intrinsicsRegistered_)
     return;
@@ -258,6 +267,27 @@ void AppRuntime::ensure_intrinsics() {
       std::function<void()> fn = v.second;
       se::builtins::register_fn(env, v.first, [fn](std::span<const se::value_t>) -> se::value_t {
         fn(); // host side effect, on the drain thread
+        return se::value_t(std::monostate{});
+      });
+    }
+    if (verbs->quit) {
+      std::function<void(int)> quit = verbs->quit;
+      se::builtins::register_fn(env, "quit", [quit](std::span<const se::value_t> args) {
+        if (args.size() > 1)
+          throw se::dsl_error("TypeError", "quit: expected an optional exit code, got " +
+                                               std::to_string(args.size()) + " args");
+        int64_t code = 0;
+        if (!args.empty()) {
+          const auto *n = std::get_if<int64_t>(&args[0].v);
+          if (!n)
+            throw se::dsl_error("TypeError",
+                                "quit: the exit code is an integer, not " + args[0].type_name());
+          if (*n < 0 || *n > 255)
+            throw se::dsl_error("ValueError",
+                                "quit: the exit code is 0..255, not " + std::to_string(*n));
+          code = *n;
+        }
+        quit(static_cast<int>(code)); // host side effect, on the drain thread
         return se::value_t(std::monostate{});
       });
     }
@@ -340,6 +370,8 @@ void check_host_requirements(const Runtime &rt, LoadResult &lr) {
   for (const auto &[where, script] : lanes)
     if (!script->empty())
       programs.emplace_back(where, *script);
+  for (const auto &[name, script] : lr.tests)
+    programs.emplace_back("test '" + name + "'", script);
   collect_programs(lr.root, programs);
   std::map<std::string, std::vector<std::string>> unprovided; // name -> where it is called
   for (const auto &[where, script] : programs)
@@ -375,6 +407,8 @@ void AppRuntime::set_document_args(std::vector<std::string> argv, std::string in
 }
 
 bool AppRuntime::has_args_block() const { return hasArgsBlock_; }
+
+const std::vector<std::pair<std::string, std::string>> &AppRuntime::tests() const { return tests_; }
 
 std::vector<std::string> AppRuntime::load(const std::string &path) {
   register_cvc_uri_handler(componentPaths_); // BEFORE load (cvc:// import resolver)
@@ -460,6 +494,7 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   add_keys(lr.root, std::move(lr.keys));
   rt_.set_root(std::move(lr.root)); // applied at the next frame boundary
   sources_ = std::move(lr.sources);
+  tests_ = std::move(lr.tests);
   stamps_ = std::move(lr.source_stamps);
   return lr.warnings;
 }
@@ -485,7 +520,13 @@ void AppRuntime::drain() {
 }
 
 bool AppRuntime::should_close() const { return quit_; }
-void AppRuntime::request_close() { quit_ = true; }
+void AppRuntime::request_close() { request_close(0); }
+void AppRuntime::request_close(int code) {
+  if (!quit_)
+    exitCode_ = code;
+  quit_ = true;
+}
+int AppRuntime::exit_code() const { return exitCode_; }
 
 // ── input seam ──────────────────────────────────────────────────────────────────────────────────
 

@@ -138,6 +138,13 @@ public:
   // (routes through the scheduler's MPSC ingress). A no-op if no matching handler is registered.
   void post_input(const InputEvent &ev);
 
+  // Run `script` as an action program (the on: lane: the full env, writes chrooted to the
+  // document's prefix), submitted in the next drain(). When its own process has ended, a later
+  // drain() calls `done` with "" for a normal finish, else why it did not finish ("failed: " an
+  // uncaught exception and where it was raised, "did not complete: " a limit or a kill). Its
+  // ending is reported only to `done`, never as a warning. `ari test` runs a tests: case this way.
+  void run_program(std::string script, std::function<void(const std::string &)> done);
+
   // Render one frame: apply any pending tree swap, then walk the tree driving the
   // Backend and binding cvc::state. Called by the active backend (from the host
   // render pass, or the backend's own loop). A pure reader of state that only

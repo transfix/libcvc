@@ -166,6 +166,7 @@ All are bound in every default environment.
 | `LockError` | `RuntimeError` | a `with-lock` refused: `reason` is `"upgrade"`, `"handler"`, `"generator"`, `"fork"`, `"no process"`, `"cannot wait here"` or `"restore"`; `key` and `mode` name the request (docs/STATE_EXEC_LOCKS.md 4.1) |
 | `DeadlockError` | `LockError` | a `with-lock` whose wait would close a cycle; `cycle` lists its edges, `{pid key}` each |
 | `PermissionError` | `Exception` | a `/` lock key (app-global) where the channel policy doesn't allow it |
+| `AssertionError` | `Exception` | `(assert cond [message [data]])` when `cond` is false |
 
 Mapping a C++ exception thrown by a native function:
 - `cvc::state_exec::dsl_exception` carries a class already;

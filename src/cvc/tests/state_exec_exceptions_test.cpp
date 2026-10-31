@@ -188,6 +188,43 @@ TEST(BuiltinClasses, LockClasses) {
                "2"});
 }
 
+// (assert cond [message [data]]): nil when cond holds, else an AssertionError, which any try sees.
+TEST(BuiltinClasses, AssertRaisesACatchableAssertionError) {
+  EXPECT_EQ(class_chain(exception_class("AssertionError")),
+            (std::vector<std::string>{"AssertionError", "Exception"}));
+  const program_case cases[] = {
+      {"assert-holds", "(begin (assert (= 1 1)) 7)", "7"},
+      {"assert-nil", "(assert true \"unused\")", "nil"},
+      {"assert-fails", "(assert (= 1 2))", nullptr, "AssertionError", "assertion failed"},
+      {"assert-message", "(assert false \"x is three\")", nullptr, "AssertionError",
+       "assertion failed: x is three"},
+      {"assert-message-not-a-string", "(assert nil 42)", nullptr, "AssertionError",
+       "assertion failed: 42"},
+      {"assert-catch",
+       "(try (assert (> 1 2) \"m\") (catch (AssertionError e) (get-attr e \"message\")))",
+       "assertion failed: m"},
+      {"assert-catch-any", "(try (assert false) (catch (Exception e) 1))", "1"},
+      {"assert-not-runtime", "(try (try (assert false) (catch (RuntimeError e) 1)) (catch (e) 2))",
+       "2"},
+      {"assert-data", "(try (assert false \"m\" 5) (catch (e) (get-attr e \"data\")))", "5"},
+      {"assert-arity", "(assert)", nullptr, "TypeError"},
+      {"assert-arity-4", "(assert false 1 2 3)", nullptr, "TypeError"},
+  };
+  for (const program_case &c : cases)
+    expect_case(c);
+}
+
+// An uncaught assert's traceback ends at the (assert ...) form, so a host can say what failed.
+TEST(BuiltinClasses, AssertTracebackNamesTheForm) {
+  for (unsigned e : {recursive, stackless}) {
+    SCOPED_TRACE(engine_name(e));
+    const outcome o =
+        run(e, "(try (assert (= (+ 1 1) 3) \"sum\") (catch (e) (get-attr e \"traceback\")))");
+    ASSERT_FALSE(o.raised) << o.message;
+    EXPECT_NE(o.value.find("(assert (= (+ 1 1) 3) \"sum\")"), std::string::npos) << o.value;
+  }
+}
+
 // ===========================================================================
 // 6.1 Raising and catching (EX)
 // ===========================================================================
