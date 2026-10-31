@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
+#include <cvc/ariadne/ftxui_backend.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/media.h>
 #include <cvc/ariadne/net_host.h>
@@ -394,6 +395,7 @@ struct ImageBackend : Backend {
     drawn.clear();
     tooltips.clear();
     texts.clear();
+    backdrops.clear();
   }
   bool begin_main_menu_bar() override { return false; }
   void end_main_menu_bar() override {}
@@ -440,6 +442,11 @@ struct ImageBackend : Backend {
     drawn.push_back(name);
     return published.count(name) > 0;
   }
+  std::vector<std::string> backdrops; // "begin:<image>:<window?>" / "end", in order, this frame
+  void begin_backdrop(const Backdrop &bd) override {
+    backdrops.push_back("begin:" + bd.image + (bd.window ? ":window" : ":group"));
+  }
+  void end_backdrop() override { backdrops.push_back("end"); }
 };
 
 struct NetGuard {
@@ -700,4 +707,151 @@ TEST(MediaWidget, LoaderWarnsOnBadFitAndShape) {
   for (const std::string &w : lr.warnings)
     warned += w.find("fit:") != std::string::npos || w.find("shape:") != std::string::npos;
   EXPECT_GE(warned, 2);
+}
+
+// ---- background: on a window or group (§5.12)
+// -----------------------------------------------------
+
+namespace {
+
+std::filesystem::path picture_dir() {
+  const std::filesystem::path dir =
+      std::filesystem::temp_directory_path() / "ariadne_media_test_backdrop";
+  std::filesystem::create_directories(dir);
+  const cvc::image img = make_image(32, 16, [](int x, int) -> std::array<unsigned char, 4> {
+    return x < 16 ? std::array<unsigned char, 4>{230, 120, 40, 255}
+                  : std::array<unsigned char, 4>{40, 160, 230, 255};
+  });
+  const std::string png = encode(img, "png");
+  std::ofstream(dir / "bg.png", std::ios::binary) << png;
+  return dir;
+}
+
+const char *kBackdropDoc = "meta: {min_libcvc: 3.0.0}\n"
+                           "windows:\n"
+                           "  - window: Profile\n"
+                           "    size: [320, auto]\n"
+                           "    background: {src: file://bg.png, opacity: 0.5, status: s.win}\n"
+                           "    children:\n"
+                           "      - type: group\n"
+                           "        id: banner\n"
+                           "        background:\n"
+                           "          src: file://bg.png\n"
+                           "          terminal: banner\n"
+                           "          banner_rows: 2\n"
+                           "          status: s.banner\n"
+                           "        children:\n"
+                           "          - text: Grace Hopper\n"
+                           "      - text: followers 1024\n";
+
+} // namespace
+
+TEST(MediaBackground, TheLoaderReadsAMapOrAUrl) {
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    background: https://x.test/bg.jpg\n"
+                              "    children:\n"
+                              "      - type: group\n"
+                              "        background: {bind: p.banner, fit: contain, opacity: 2,\n"
+                              "                     terminal: none, auth: svc}\n"
+                              "        children: [x]\n"
+                              "      - text: hi\n"
+                              "        background: https://x.test/no.jpg\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  const Widget &win = lr.root.children.at(0);
+  EXPECT_EQ(win.background.src, "https://x.test/bg.jpg");
+  EXPECT_EQ(win.background.fit, ImageFit::Cover);
+  const Widget &grp = win.children.at(0);
+  EXPECT_EQ(grp.background.bind, "p.banner");
+  EXPECT_EQ(grp.background.fit, ImageFit::Contain);
+  EXPECT_EQ(grp.background.opacity, 1.0f); // clamped
+  EXPECT_EQ(grp.background.terminal, BackdropTerminal::None);
+  EXPECT_EQ(grp.background.auth, "svc");
+  bool warned = false;
+  for (const std::string &w : lr.warnings)
+    warned = warned || w.find("background: is for a window") != std::string::npos;
+  EXPECT_TRUE(warned);
+  EXPECT_FALSE(win.children.at(1).background.any());
+}
+
+TEST(MediaBackground, TheCoreBracketsTheContentAndNamesThePictureOnceLoaded) {
+  const std::filesystem::path dir = picture_dir();
+  cvc::app app;
+  LoadResult lr = load_string(kBackdropDoc);
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  rt.set_media_base(dir.string());
+  ImageBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  ASSERT_EQ(b.backdrops.size(), 4u);
+  EXPECT_EQ(b.backdrops[0], "begin::window"); // nothing to draw yet: still bracketed
+  EXPECT_EQ(b.backdrops[1], "begin::group");
+  EXPECT_EQ(b.backdrops[2], "end");
+  EXPECT_EQ(b.backdrops[3], "end");
+  ASSERT_TRUE(settle([&] { rt.render(); },
+                     [&] {
+                       return read_state(app, "s.win") == "ready" &&
+                              read_state(app, "s.banner") == "ready";
+                     }));
+  rt.render();
+  ASSERT_EQ(b.backdrops.size(), 4u);
+  EXPECT_EQ(b.backdrops[0].rfind("begin:media:", 0), 0u) << b.backdrops[0];
+  EXPECT_NE(b.backdrops[0].find(":window"), std::string::npos);
+  // Both name the same picture at its own shape (one load), fitted by the backend.
+  EXPECT_EQ(b.backdrops[0].substr(0, b.backdrops[0].size() - 7),
+            b.backdrops[1].substr(0, b.backdrops[1].size() - 6));
+  const std::string name = b.backdrops[0].substr(6, b.backdrops[0].size() - 6 - 7);
+  ASSERT_TRUE(b.published.count(name));
+  EXPECT_EQ(b.published[name].width(), 32); // the source's own pixels, not upscaled
+  std::filesystem::remove_all(dir);
+}
+
+TEST(MediaBackground, FtxuiDrawsHalfBlocksBehindTextAndABannerAbove) {
+  if (!FtxuiBackend::available())
+    GTEST_SKIP() << "built without FTXUI";
+  const std::filesystem::path dir = picture_dir();
+  cvc::app app;
+  LoadResult lr = load_string(kBackdropDoc);
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  rt.set_media_base(dir.string());
+  FtxuiBackend::Options opt;
+  opt.image_color = FtxuiBackend::Options::ImageColor::Color;
+  FtxuiBackend b(opt);
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  std::string frame;
+  ASSERT_TRUE(settle([&] { frame = b.render_to_string(rt, 60, 0, false); },
+                     [&] {
+                       return read_state(app, "s.win") == "ready" &&
+                              read_state(app, "s.banner") == "ready";
+                     }));
+  frame = b.render_to_string(rt, 60, 0, false);
+  std::vector<std::string> rows;
+  std::size_t at = 0;
+  while (at < frame.size()) {
+    const std::size_t nl = frame.find('\n', at);
+    rows.push_back(frame.substr(at, nl == std::string::npos ? std::string::npos : nl - at));
+    at = nl == std::string::npos ? frame.size() : nl + 1;
+  }
+  // The banner: two rows of picture at the top of the window body, then the group's text, which
+  // sits on the window's own background, as does the next line.
+  int banner = 0, name_row = -1, follow_row = -1;
+  for (std::size_t i = 0; i < rows.size(); ++i) {
+    if (rows[i].find("Grace Hopper") != std::string::npos)
+      name_row = static_cast<int>(i);
+    if (rows[i].find("followers 1024") != std::string::npos)
+      follow_row = static_cast<int>(i);
+    if (name_row < 0 && rows[i].find("▀▀▀▀▀▀▀▀") != std::string::npos)
+      ++banner;
+  }
+  EXPECT_EQ(banner, 2) << frame;
+  ASSERT_GE(name_row, 0) << frame;
+  ASSERT_GE(follow_row, 0) << frame;
+  // Behind: the cells beside the text still show the picture.
+  EXPECT_NE(rows[name_row].find("Grace Hopper▀"), std::string::npos) << frame;
+  EXPECT_NE(rows[follow_row].find("followers 1024▀"), std::string::npos) << frame;
+  std::filesystem::remove_all(dir);
 }

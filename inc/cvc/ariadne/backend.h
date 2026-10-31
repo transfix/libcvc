@@ -130,6 +130,19 @@ struct WindowGeom {
   bool authored = false;
 };
 
+// A container's background (§5.12), handed to begin_backdrop: the published image to draw behind
+// the container's content and how. `image` is empty while the picture loads or when it failed: the
+// backend then draws nothing behind the content (but still brackets it).
+struct Backdrop {
+  std::string image;
+  ImageFit fit = ImageFit::Cover;
+  float opacity = 1.0f;
+  BackdropTerminal terminal = BackdropTerminal::Behind;
+  int banner_rows = 6;
+  bool window = false; // the window's own background: it fills the window's inner area
+  Size size;           // a group's authored size: the backdrop's area is at least this big
+};
+
 // What a surface can and cannot do. AppRuntime::load checks a document's
 // `requires:` against it (§16.3/§7.6, cvc/ariadne/requires.h, which maps the
 // capability tokens onto these fields), and (has? "...") reads it at run time —
@@ -369,6 +382,14 @@ public:
   // draws it (a picture by URI the media cache dropped, §5.11). Default: nothing kept, nothing to
   // do.
   virtual void drop_image(const std::string &name) { (void)name; }
+
+  // §5.12 a container's background: begin_backdrop comes right before a group's children (or
+  // right after begin_window, with Backdrop::window, for a window's), end_backdrop right after them
+  // (before end_window); balanced, nested like begin_grid. The backend draws `bd.image` behind
+  // what is emitted between them, fitted to the area they take. Default: no background, the
+  // content drawn as without one.
+  virtual void begin_backdrop(const Backdrop &bd) { (void)bd; }
+  virtual void end_backdrop() {}
 
   // A transfer-function editor (Kind::TfEditor; a port of VolumeRover2's ColorTable2): the colour
   // ramp, opacity curve, isocontour bars and the overlay layers over a zoomable canvas. `key` is

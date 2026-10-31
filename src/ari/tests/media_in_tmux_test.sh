@@ -3,7 +3,8 @@
 #
 # Run DOC (media_images.ari) with `ari run --backend BACKEND` (ftxui or tvision) in a 100x30 tmux
 # pane and wait for its status line to say every picture by URI went as expected (two ready, one
-# failed), then check the pictures really are on the screen: half-block cells inside the window.
+# failed), then check the pictures really are on the screen: half-block cells inside the window,
+# and the window's background beside its last line of text.
 # Exits 77 (skipped) without tmux or without the backend in this ari.
 set -euo pipefail
 ari=$1 doc=$2 backend=$3
@@ -45,4 +46,9 @@ if [ "$blocks" -lt 130 ]; then
   echo "$screen"
   exit 1
 fi
-echo "ari run --backend $backend: three pictures by URI, $blocks half-block cells"
+if ! grep -q 'background ready▀' <<<"$screen"; then
+  echo "--- no background beside the text on the $backend screen:"
+  echo "$screen"
+  exit 1
+fi
+echo "ari run --backend $backend: three pictures and a background by URI, $blocks half-block cells"

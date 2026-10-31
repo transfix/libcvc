@@ -1,11 +1,12 @@
-# media_images.ari -- pictures by URI (docs/ARIADNE.md §5.11) for media_in_tmux_test.sh: a cover
-# banner, a circle avatar and a missing file, each from a file:// URI beside this document, and a
-# line saying how each one went.
+# media_images.ari -- pictures by URI (docs/ARIADNE.md §5.11, §5.12) for media_in_tmux_test.sh: a
+# cover banner, a circle avatar and a missing file, each from a file:// URI beside this document,
+# the window's own background behind them, and a line saying how each one went.
 meta: {min_libcvc: 3.7.0}
 windows:
   - window: Media
     id: media
     size: [360, auto]
+    background: {src: file://media/checker.png, opacity: 0.4, status: m.bg}
     children:
       - image: banner
         src: file://media/checker.png
@@ -23,3 +24,5 @@ windows:
         status: m.gone
       - text: ""
         bind: (string.join (list "banner" (state-get "m.banner") "avatar" (state-get "m.avatar") "gone" (state-get "m.gone")) " ")
+      - text: ""
+        bind: (string.join (list "background" (state-get "m.bg")) " ")

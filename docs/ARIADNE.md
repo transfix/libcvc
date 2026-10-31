@@ -1058,7 +1058,7 @@ windows:
 ### 5.11 Pictures by URL: `image:` with a URI
 
 An `image:` whose `src` (or the value at its `bind:`) is a URI shows that picture. Design and
-the work still to come (backgrounds, video, audio, a card component):
+the work still to come (video, audio, a card component):
 [ARIADNE_MEDIA.md](roadmap/ARIADNE_MEDIA.md).
 
 ```yaml
@@ -1120,6 +1120,57 @@ windows:
   each picture's fetch and decode run between two frames, one picture at a time. Until the
   pictures' requests use the non-blocking transport (#914), that frame waits for the request,
   as an `http-get` does there today.
+
+### 5.12 Backgrounds: `background:` on a window or group
+
+A window, an overlay or a group can have a picture behind its content: a profile's background,
+a banner behind a name.
+
+```yaml
+windows:
+  - window: Profile
+    background: {src: https://media.example/bg/42.jpg, opacity: 0.4}
+    children:
+      - type: group
+        id: banner
+        size: [auto, 120]                    # a group's background area is at least this
+        background:
+          bind: profile.banner_url           # or src:; a URI (§5.11) or a published image name
+          auth: example
+          fit: cover                         # cover (default) | contain | fill
+          opacity: 1.0                       # 0..1
+          terminal: banner                   # behind (default) | banner | none
+          banner_rows: 6
+          status: profile.banner_status      # loading | ready | failed, as image:'s
+        children:
+          - image: avatar
+            bind: profile.avatar_url
+            size: [64, 64]
+            shape: circle
+          - text: ""
+            bind: profile.name
+```
+
+`background: URL` is short for `background: {src: URL}`. The picture loads as an `image:`'s does
+(§5.11), at its own shape, and each backend fits it to the area the content takes. Until it
+has loaded, or when it failed, nothing is drawn behind the content.
+
+- **ImGui** draws it behind the content: a window's fills the window's inner area, and a group's
+  fills the group's area. That area is the full width available unless `size:` says otherwise,
+  and at least `size:`'s height. `fit` decides which part of the picture shows, and `opacity` is
+  how strongly it shows over the window's own background.
+- **The terminal backends** (FTXUI, and tvision's window bodies):
+  - **`behind`** draws half-blocks under the content, dimmed toward black by `opacity`. A cell
+    the content writes text into keeps the picture's colour as its background, dimmed to at most
+    40%, and the text is drawn in the terminal's own foreground unless the document coloured it.
+    So text stays readable on any picture. Pixel protocols can't put text over pixels (Kitty's
+    pictures are themselves cells, and Sixel and iTerm draw over the cells), so `behind` is
+    half-blocks whatever `--graphics` says.
+  - **`banner`** draws the picture as a row `banner_rows` tall above the content instead, at full
+    strength, and in Kitty, Sixel or iTerm pixels where the terminal has them (from the second
+    frame, once the row's width is known).
+  - **`none`** draws nothing in a terminal.
+  - A terminal with no colour (`--graphics mono`) draws no background.
 
 ## 6. Composition: include / import / load
 

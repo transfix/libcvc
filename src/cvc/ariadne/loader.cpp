@@ -207,6 +207,7 @@ const char *const kAriSchema = R"ARISCHEMA({
         "status": {"type": "string"},
         "fit": {"enum": ["contain", "cover", "fill"]},
         "shape": {"enum": ["rect", "circle"]},
+        "background": {"type": ["string", "object"]},
         "items": {"type": "array", "items": {"$ref": "#/$defs/widget"}},
         "children": {"type": "array", "items": {"$ref": "#/$defs/widget"}}
       },
@@ -954,6 +955,42 @@ bool any_descendant_repeats(const Widget &w) {
   return false;
 }
 
+// §5.12 background: on a window / overlay / group — a map (src | bind, auth, fit, opacity,
+// terminal, banner_rows, status), or a bare URI or image name for src.
+void parse_background(Ctx &ctx, const YAML::Node &n, Widget &w) {
+  if (w.kind != Kind::Window && w.kind != Kind::Group) {
+    ctx.warn("ari: background: is for a window, overlay or group — ignored");
+    return;
+  }
+  Background &bg = w.background;
+  if (n.IsScalar()) {
+    bg.src = n.Scalar();
+    return;
+  }
+  if (!n.IsMap()) {
+    ctx.warn("ari: background: must be a map (src, fit, opacity, ...) or a URL — ignored");
+    return;
+  }
+  bg.src = str(n, "src");
+  bg.bind = str(n, "bind");
+  bg.auth = str(n, "auth");
+  bg.status = str(n, "status");
+  if (has(n, "fit") && !media::parse_fit(str(n, "fit"), bg.fit))
+    ctx.warn("ari: background fit: '" + str(n, "fit") +
+             "' is not contain, cover or fill — using cover");
+  bg.opacity = static_cast<float>(std::clamp(num(n, "opacity", 1.0), 0.0, 1.0));
+  const std::string term = str(n, "terminal", "behind");
+  if (term == "banner")
+    bg.terminal = BackdropTerminal::Banner;
+  else if (term == "none")
+    bg.terminal = BackdropTerminal::None;
+  else if (term != "behind")
+    ctx.warn("ari: background terminal: '" + term + "' is not behind, banner or none");
+  bg.banner_rows = std::clamp(static_cast<int>(num(n, "banner_rows", 6.0)), 1, 60);
+  if (!bg.any())
+    ctx.warn("ari: background: has neither src: nor bind: — nothing to draw");
+}
+
 Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
   Widget w = parse_widget_impl(ctx, n);
   // Assign each common field only when the node actually carries it. For a plain widget the
@@ -980,6 +1017,8 @@ Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
       w.autofocus = flag(n, "autofocus", false);
     if (has(n, "repeat"))
       w.repeat = str(n, "repeat"); // §3: a count expression -> emit this template N times
+    if (has(n, "background"))
+      parse_background(ctx, n["background"], w);
     if (has(n, "on_click"))
       w.on_click = str(n, "on_click"); // §4.6 widget-level click handler (any kind); like `on`
     if (has(n, "on_hover"))

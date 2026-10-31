@@ -183,6 +183,10 @@ public:
                         bool masked) override;
   void focus_next_widget() override;
   bool draw_image(const char *name, float width) override;
+  // §5.12 a container's background: half-blocks behind the content (dimmed, text kept readable),
+  // or the picture as a banner row above it (pixels where the terminal has them).
+  void begin_backdrop(const Backdrop &bd) override;
+  void end_backdrop() override;
   ColorEdit color(const char *label, const float rgb[3]) override;
 
   // Custom widgets (§16.1b), the terminal counterpart of cvc::gl::ImGuiBackend::register_widget: a
