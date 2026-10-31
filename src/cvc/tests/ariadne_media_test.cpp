@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdlib>
 #include <chrono>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
@@ -805,6 +806,46 @@ TEST(MediaBackground, TheCoreBracketsTheContentAndNamesThePictureOnceLoaded) {
   const std::string name = b.backdrops[0].substr(6, b.backdrops[0].size() - 6 - 7);
   ASSERT_TRUE(b.published.count(name));
   EXPECT_EQ(b.published[name].width(), 32); // the source's own pixels, not upscaled
+  std::filesystem::remove_all(dir);
+}
+
+// A coloured text: line's colour decorator covers its whole row, the backdrop's cells after the
+// text too; they keep the picture's colour, not the text's.
+TEST(MediaBackground, ColouredTextDoesNotPaintTheBackdropBesideIt) {
+  if (!FtxuiBackend::available())
+    GTEST_SKIP() << "built without FTXUI";
+  const std::filesystem::path dir = picture_dir();
+  cvc::app app;
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    size: [320, auto]\n"
+                              "    background: {src: file://bg.png, opacity: 0.5, status: s.bg}\n"
+                              "    children:\n"
+                              "      - text: admin\n"
+                              "        color: [0.95, 0.75, 0.3]\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  rt.set_media_base(dir.string());
+  FtxuiBackend::Options opt;
+  opt.image_color = FtxuiBackend::Options::ImageColor::Color;
+  FtxuiBackend b(opt);
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+#if defined(_WIN32)
+  _putenv_s("COLORTERM", "truecolor");
+#else
+  setenv("COLORTERM", "truecolor", 1);
+#endif
+  std::string frame;
+  ASSERT_TRUE(settle([&] { frame = b.render_to_string(rt, 60, 0, true); },
+                     [&] { return read_state(app, "s.bg") == "ready"; }));
+  frame = b.render_to_string(rt, 60, 0, true);
+  const std::size_t at = frame.find("admin");
+  ASSERT_NE(at, std::string::npos) << frame;
+  const std::string rest = frame.substr(at, frame.find('\n', at) - at);
+  // 0.95, 0.75, 0.3 is 242;191;76: none of the row's half-blocks after the text carries it.
+  EXPECT_EQ(rest.find("38;2;242;191;76m▀"), std::string::npos) << rest;
+  EXPECT_NE(rest.find("▀"), std::string::npos) << rest;
   std::filesystem::remove_all(dir);
 }
 

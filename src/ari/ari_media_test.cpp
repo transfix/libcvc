@@ -171,6 +171,10 @@ TEST(AriMedia, WithoutTheNetworkAnHttpPictureFailsAndAFileOneLoads) {
 }
 
 TEST(AriMedia, ACardFromTheComponentLibraryWithAnAvatarAndAMissingAttachment) {
+
+// A picture whose URL a reply puts in state (a profile's avatar from GET /user/): no frame asked
+// for it while the request was out, so the snapshot draws, sees it loading, waits and draws again.
+TEST(AriMedia, SnapshotWaitsForAPictureWhoseUrlComesFromAReply) {
   REQUIRE_ARI();
   set_env("COLORTERM", "truecolor");
   TempDir dir;
@@ -213,4 +217,38 @@ TEST(AriMedia, ACardFromTheComponentLibraryWithAnAvatarAndAMissingAttachment) {
   EXPECT_NE(r.output.find(sgr(230, 120, 40)), std::string::npos) << "the avatar's colour";
   EXPECT_NE(r.output.find(sgr(92, 72, 72)), std::string::npos) << "the attachment's failed box";
   EXPECT_EQ(r.output.find("warning"), std::string::npos) << r.output;
+
+    if (req.target == "/user")
+      return {200, {"Content-Type: application/json"}, "{\"avatar\": \"/a.png\"}"};
+    if (req.target == "/a.png")
+      return {200, {"Content-Type: image/png"}, orange};
+    return {404, {}, ""};
+  });
+  const fs::path doc = dir.write(
+      "late.ari",
+      "meta: {min_libcvc: 3.7.0}\n"
+      "init: (state-set \"p.url\" \"\")\n"
+      "on_tick: |\n"
+      "  (if (= (state-get \"p.url\") \"\")\n"
+      "    (begin (set r (json-parse (get-attr (http-get \"" +
+          srv.url("/user") +
+          "\") \"body\")))\n"
+          "      (state-set \"p.url\" (string.join (list \"" +
+          srv.origin() +
+          "\" (get-attr r \"avatar\")) \"\"))))\n"
+          "windows:\n"
+          "  - window: P\n"
+          "    children:\n"
+          "      - image: av\n"
+          "        bind: p.url\n"
+          "        size: [64, 64]\n"
+          "        status: p.st\n"
+          "        visible_when: (!= (state-get \"p.url\") \"\")\n"
+          "      - text: status\n"
+          "        bind: p.st\n");
+  const AriRun r =
+      ari("snapshot --net-allow " + srv.origin() + " --width 60 --ansi " + quoted(doc));
+  EXPECT_EQ(r.status, 0) << r.output;
+  EXPECT_NE(r.output.find("status: ready"), std::string::npos) << r.output;
+  EXPECT_NE(r.output.find(sgr(230, 120, 40)), std::string::npos) << r.output;
 }

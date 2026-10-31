@@ -60,6 +60,16 @@ void AppRuntime::settle(const std::function<void()> &step, double max_seconds) {
   }
 }
 
+void AppRuntime::settle_and_render(const std::function<void()> &step,
+                                   const std::function<void()> &render, double max_seconds) {
+  using clock = std::chrono::steady_clock;
+  const auto deadline = clock::now() + std::chrono::duration<double>(max_seconds);
+  do {
+    settle(step, std::max(0.0, std::chrono::duration<double>(deadline - clock::now()).count()));
+    render();
+  } while (rt_.media_stale() && clock::now() < deadline);
+}
+
 std::string AppRuntime::enable_net(const NetHostConfig &config) {
   std::string error = cvc::ariadne::enable_net(app_, config);
   if (error.empty() && config.enabled) {
