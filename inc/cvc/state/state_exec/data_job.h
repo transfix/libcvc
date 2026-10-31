@@ -203,6 +203,26 @@ constexpr std::size_t kNativeStackReserve = 32 * 1024;
 /// list of everything it yielded.
 std::unique_ptr<data_job> make_generator_job(generator_ptr gen, bool collect = false);
 
+/// How deep json-parse, json-encode and state-set-tree let lists and dicts nest. JSON comes from
+/// outside, so a document can't make a value deeper than this.
+inline constexpr std::size_t kJsonMaxDepth = 512;
+
+/// The most spaces json-encode indents a level by, as JSON.stringify.
+inline constexpr std::size_t kJsonMaxIndent = 10;
+
+/// The value of the JSON text `text`, as json-parse reads it ("JSON" in
+/// docs/STATE_EXEC_DEVELOPER_GUIDE.md §2): an object is a dict in document order, an array a
+/// list, null nil. A number without a fraction or exponent is an int when it fits in 64 bits;
+/// any other is a float. A malformed text is a ValueError with its `line`, `col` and `offset`.
+/// A node per value, and per kDataNodeBytes of text.
+std::unique_ptr<data_job> make_json_parse_job(std::string text);
+
+/// `v` as JSON text, as json-encode writes it: compact, or with each element on its own line,
+/// indented `indent` spaces a level (at most kJsonMaxIndent). Dicts keep their order. Anything
+/// JSON can't hold is an error: a TypeError for a type JSON lacks, a ValueError for a non-finite
+/// float, a string that isn't UTF-8 or a list or dict that contains itself.
+std::unique_ptr<data_job> make_json_encode_job(value_t v, std::size_t indent = 0);
+
 /// Count `nodes` units of deep-data work done in the current evaluator step (a walk run to
 /// completion counts itself; the release backlog counts what it frees).
 void count_data_nodes(std::size_t nodes);

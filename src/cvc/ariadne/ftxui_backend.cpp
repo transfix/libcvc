@@ -56,6 +56,7 @@
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/dom/node.hpp>
 #include <ftxui/screen/screen.hpp>
+#include <ftxui/screen/string.hpp> // string_width
 #include <ftxui/screen/terminal.hpp>
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h> // emscripten_sleep: the run loop yields to the browser (Asyncify)
@@ -2529,9 +2530,18 @@ std::string FtxuiBackend::render_to_string(Runtime &rt, int width, int height, b
   std::string out;
   for (int y = 0; y < screen.dimy(); ++y) {
     std::string line;
+    bool wide = false; // the cell before held a full-width glyph (an emoji, CJK)
     for (int x = 0; x < screen.dimx(); ++x) {
       const std::string &c = screen.CellAt(x, y).character;
+      // A full-width glyph takes this cell too: a terminal advances two columns for it, so the
+      // cell isn't written, as Screen::ToString() leaves it out. Written as a space, it pushed the
+      // rest of the line a column right.
+      if (wide) {
+        wide = false;
+        continue;
+      }
       line += c.empty() ? std::string(" ") : c;
+      wide = !c.empty() && fx::string_width(c) == 2;
     }
     const std::size_t end = line.find_last_not_of(' ');
     out += end == std::string::npos ? std::string() : line.substr(0, end + 1);
