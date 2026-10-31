@@ -53,6 +53,7 @@
 // verbs are absent without a compiled cvc::net backend; fetch is always there.
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -100,6 +101,12 @@ struct HostGet {
   std::string error;
 };
 HostGet host_get(const std::string &url, const std::string &auth, const NetAccess &access);
+
+// host_get without blocking where the transport starts requests (cvc::net::http_starts_async: a
+// browser build without threads): `done` gets the result later, from the browser's event loop on
+// this thread. Elsewhere it is host_get, and `done` is called before this returns.
+void host_get_start(const std::string &url, const std::string &auth, const NetAccess &access,
+                    std::function<void(HostGet)> done);
 
 } // namespace ariadne
 } // namespace cvc

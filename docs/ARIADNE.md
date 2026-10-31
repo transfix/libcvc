@@ -1121,10 +1121,10 @@ windows:
 - **`status:`** names a state key the widget keeps `loading`, `ready` or `failed` in, with the
   reason under `<key>.error`. A document reads it to show something else when a picture is
   missing, and a test asserts on it.
-- **In a browser build without threads** (ari.html, arigl-web) there is no pool to run them on, so
-  each picture's fetch and decode run between two frames, one picture at a time. Until the
-  pictures' requests use the non-blocking transport (#914), that frame waits for the request,
-  as an `http-get` does there today.
+- **In a browser build without threads** (ari.html, arigl-web) a picture's http(s) request is
+  started, not sent in place (§10.2), so the frame loop goes on while it is out. The reply is
+  decoded when the browser hands it over, between frames. A `file://`, `cvc://` or `state://`
+  picture is read and decoded between two frames, one at a time.
 
 ## 6. Composition: include / import / load
 

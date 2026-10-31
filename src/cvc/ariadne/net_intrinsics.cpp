@@ -942,44 +942,93 @@ void register_ws_verbs(const std::shared_ptr<se::environment> &env, se::async_ho
 
 } // namespace
 
-HostGet host_get(const std::string &url, const std::string &auth, const NetAccess &access) {
+namespace {
+
+// What a host-side GET may not do at all (checked before anything is sent); "" when it may.
+std::string host_get_refusal(const std::string &auth, const NetAccess &access) {
+  if (!is_live(access))
+    return "http: the host turned the network off";
+  if (!auth.empty() && !cvc::net::CredentialStore::valid_name(auth))
+    return "http: auth must name a credential (1-64 of A-Z a-z 0-9 . _ -)";
+  if (!auth.empty() && !access.credentials)
+    return "http: auth '" + auth + "' needs the host's credential store (--net)";
+  return std::string();
+}
+
+// A reply as a host-side GET's result: ok only for a 2xx.
+HostGet host_get_result(Outcome out) {
   HostGet g;
+  g.status = out.reply.status;
+  if (!out.reply.ok) {
+    g.error = out.reply.error.empty() ? std::string("http: no reply") : out.reply.error;
+    return g;
+  }
+  if (out.reply.status < 200 || out.reply.status >= 300) {
+    g.error = "http " + std::to_string(out.reply.status);
+    return g;
+  }
+  g.ok = true;
+  g.body = std::move(out.reply.body);
+  g.content_type = cvc::net::response_header(out.reply.headers, "Content-Type");
+  return g;
+}
+
+HostGet host_get_error(const std::string &message) {
+  HostGet g;
+  g.error = message;
+  return g;
+}
+
+} // namespace
+
+HostGet host_get(const std::string &url, const std::string &auth, const NetAccess &access) {
   try {
-    if (!is_live(access)) {
-      g.error = "http: the host turned the network off";
-      return g;
-    }
-    if (!auth.empty() && !cvc::net::CredentialStore::valid_name(auth)) {
-      g.error = "http: auth must name a credential (1-64 of A-Z a-z 0-9 . _ -)";
-      return g;
-    }
-    if (!auth.empty() && !access.credentials) {
-      g.error = "http: auth '" + auth + "' needs the host's credential store (--net)";
-      return g;
+    if (const std::string no = host_get_refusal(auth, access); !no.empty())
+      return host_get_error(no);
+    cvc::net::HttpRequest req;
+    req.url = url;
+    RequestAuth ra;
+    ra.use = auth;
+    return host_get_result(perform(std::move(req), ra, access));
+  } catch (const std::exception &e) {
+    return host_get_error(std::string("http: ") + e.what());
+  } catch (...) {
+    return host_get_error("http: unknown error");
+  }
+}
+
+void host_get_start(const std::string &url, const std::string &auth, const NetAccess &access,
+                    std::function<void(HostGet)> done) {
+  if (!cvc::net::http_starts_async()) {
+    done(host_get(url, auth, access));
+    return;
+  }
+  try {
+    if (const std::string no = host_get_refusal(auth, access); !no.empty()) {
+      done(host_get_error(no));
+      return;
     }
     cvc::net::HttpRequest req;
     req.url = url;
     RequestAuth ra;
     ra.use = auth;
-    Outcome out = perform(std::move(req), ra, access);
-    g.status = out.reply.status;
-    if (!out.reply.ok) {
-      g.error = out.reply.error.empty() ? std::string("http: no reply") : out.reply.error;
-      return g;
+    auto p = std::make_shared<Prepared>(prepare(std::move(req), ra, access));
+    if (p->failed) {
+      done(host_get_result(std::move(*p->failed)));
+      return;
     }
-    if (out.reply.status < 200 || out.reply.status >= 300) {
-      g.error = "http " + std::to_string(out.reply.status);
-      return g;
-    }
-    g.ok = true;
-    g.body = std::move(out.reply.body);
-    g.content_type = cvc::net::response_header(out.reply.headers, "Content-Type");
+    // The browser's event loop answers; the request's credentials are blanked in complete().
+    cvc::net::start(p->req, access.policy,
+                    [p, ra, access, done = std::move(done)](cvc::net::HttpResponse r) {
+                      try {
+                        done(host_get_result(complete(*p, std::move(r), ra, access)));
+                      } catch (const std::exception &e) {
+                        done(host_get_error(std::string("http: ") + e.what()));
+                      }
+                    });
   } catch (const std::exception &e) {
-    g.error = std::string("http: ") + e.what();
-  } catch (...) {
-    g.error = "http: unknown error";
+    done(host_get_error(std::string("http: ") + e.what()));
   }
-  return g;
 }
 
 void register_net_intrinsics(cvc::app &app) { register_net_intrinsics(app, NetAccess{}); }
