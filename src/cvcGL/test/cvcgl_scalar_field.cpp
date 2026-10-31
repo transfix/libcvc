@@ -138,13 +138,14 @@ vtkUnsignedCharArray *colorArray(GeometryNode &n) {
   return pd ? vtkUnsignedCharArray::SafeDownCast(pd->GetPointData()->GetScalars()) : nullptr;
 }
 
-// The node's per-vertex colours as packed RGB (empty without a colour array).
-std::vector<unsigned char> colorsOf(GeometryNode &n) {
+// The node's per-vertex colours as packed RGB, or RGBA for `channels` 4 (empty without a colour
+// array of that many channels).
+std::vector<unsigned char> colorsOf(GeometryNode &n, int channels = 3) {
   vtkUnsignedCharArray *c = colorArray(n);
-  if (!c || c->GetNumberOfComponents() != 3)
+  if (!c || c->GetNumberOfComponents() != channels)
     return {};
   const unsigned char *b = c->GetPointer(0);
-  return std::vector<unsigned char>(b, b + 3 * c->GetNumberOfTuples());
+  return std::vector<unsigned char>(b, b + channels * c->GetNumberOfTuples());
 }
 
 bool scalarsVisible(GeometryNode &n) {
@@ -296,6 +297,25 @@ void testScalarField(cvc::app &app) {
   node->setColorTable({0.f, 0.f, 0.f, 1.f}); // fewer than two entries: none
   check(colorsOf(*node) == cvc::colormap_rgb(x, colormap_kind::GRAY, -5.0, 5.0),
         "a table of fewer than two entries goes back to the colormap");
+  // Opacities, one per entry, are a fourth channel sampled the same way: 0, 0.5, 1 over [-5, 5]
+  // is t itself (within a rounding). The mapper then draws the node translucent. Opacities of
+  // another length are ignored: opaque RGB again.
+  node->setColorTable(table, {0.f, 0.5f, 1.f});
+  const std::vector<unsigned char> rgba = colorsOf(*node, 4);
+  bool alphaOk = rgba.size() == 4 * n;
+  for (size_t i = 0; alphaOk && i < n; ++i) {
+    const double t = std::min(1.0, std::max(0.0, (x[i] + 5.0) / 10.0));
+    alphaOk = std::equal(&want[3 * i], &want[3 * i] + 3, &rgba[4 * i]) &&
+              std::abs(int(rgba[4 * i + 3]) - int(std::lround(255.0 * t))) <= 1;
+  }
+  vtkMapper *mapper = actorOf(*node)->GetMapper();
+  check(alphaOk && mapper->HasTranslucentPolygonalGeometry(),
+        "setColorTable with opacities: RGBA, the alpha through the table too, drawn translucent");
+  check(pd->GetPoints() == pointsBefore.Get() && pd->GetPolys() == polysBefore.Get(),
+        "setColorTable with opacities: a new (RGBA) colour array, the points and cells kept");
+  node->setColorTable(table, {0.f, 1.f});
+  check(colorsOf(*node) == want && !mapper->HasTranslucentPolygonalGeometry(),
+        "opacities of another length are ignored: opaque RGB");
   node->setColorTable(table);
   node->setColorTable({});
   check(colorsOf(*node) == cvc::colormap_rgb(x, colormap_kind::GRAY, -5.0, 5.0),

@@ -44,8 +44,11 @@
 #include <vtkActor.h> // LOD test: a rung's material
 #include <vtkLight.h>
 #include <vtkLightCollection.h>
+#include <vtkMapper.h> // field colours: an opacity curve is an RGBA colour array
 #include <vtkPlane.h> // clip test: the planes handed to a node's renderer
 #include <vtkPlaneCollection.h>
+#include <vtkPointData.h>
+#include <vtkPolyData.h>
 #include <vtkProperty.h>
 #include <vtkRenderer.h>
 
@@ -364,6 +367,43 @@ static void test_lab_sources(cvc::app &app) {
         std::string(who) + ": the colormap key resets the domain to auto");
     chk(!val(T + ".contour_spectrum").empty() && !val(T + ".contour_tree").empty(),
         std::string(who) + ": recolouring the same values keeps their spectrum and tree");
+    // The opacity curve: below 1 anywhere, the node's colours carry it (RGBA, which the mapper
+    // draws translucent); the colormap key resets the model to its opaque ramp, and them to RGB.
+    // (fe_lab's boundary shows a Poisson field's u = 0, the curve's transparent end, so only the
+    // low end is checked here; cvcgl_scalar_field checks the mapping itself.)
+    const auto colours = [&]() -> vtkDataArray * {
+      vtkActor *act = vtkActor::SafeDownCast(node.prop());
+      vtkPolyData *pd = act && act->GetMapper()
+                            ? vtkPolyData::SafeDownCast(act->GetMapper()->GetInput())
+                            : nullptr;
+      return pd ? pd->GetPointData()->GetScalars() : nullptr;
+    };
+    const auto channels = [&] { return colours() ? colours()->GetNumberOfComponents() : 0; };
+    cvc::tf::model see;
+    cvc::tf::from_string(val(T), see);
+    see.alpha = {{0.0, 0.f}, {1.0, 1.f}};
+    set(T, cvc::tf::to_string(see));
+    tick();
+    double alpha_lo = 255.0;
+    if (channels() == 4) {
+      double r[2];
+      colours()->GetRange(r, 3);
+      alpha_lo = r[0];
+    }
+    vtkActor *act = vtkActor::SafeDownCast(node.prop());
+    const bool translucent =
+        act && act->GetMapper() && act->GetMapper()->HasTranslucentPolygonalGeometry();
+    chk(channels() == 4 && alpha_lo < 64.0 && translucent,
+        std::string(who) + ": an opacity curve from 0 to 1 is the colours' alpha (" +
+            std::to_string(channels()) + " channels, lowest alpha " + std::to_string(alpha_lo) +
+            "), drawn translucent");
+    set(cm_key, "gray");
+    tick();
+    set(cm_key, "viridis");
+    tick();
+    chk(channels() == 3, std::string(who) +
+                             ": the colormap key resets the opacity: RGB colours again (" +
+                             std::to_string(channels()) + " channels)");
   };
   field_colors(cvc::ariadne::resolve_bind("lsrc", "graphics.root.children.mesh.field_colors"),
                mb + ".color.colormap", mb + ".color.min", mb + ".color.max", *mesh, "mesh_lab");
@@ -1935,14 +1975,13 @@ int main() {
         chk(starts(fb + ".status", "heat: 100 steps"),
             "heat.steps = nan -> the default 100 steps (status '" + val(fb + ".status") + "')");
 
-        // Stop is honest. A Poisson solve cannot be interrupted: fe.stoppable stays 0 (the Stop
-        // button's enabled_when), a stop is consumed without claiming "stopping...", and the
-        // solve completes with its timing.
+        // Every job steps, so every job is stoppable: fe.stoppable is 1 while any runs (the Stop
+        // button's enabled_when), a Poisson solve included.
         st(fb + ".problem").value(std::string("poisson"));
         st(fb + ".request").value(std::string("solve"));
         tick(); // launches it; the job is applied on a later tick at the earliest
-        chk(val(fb + ".busy") == "1" && val(fb + ".stoppable") == "0",
-            "a running Poisson solve is not stoppable (fe.stoppable 0)");
+        chk(val(fb + ".busy") == "1" && val(fb + ".stoppable") == "1",
+            "a running Poisson solve is stoppable (fe.stoppable 1)");
         {
           bool listed = false;
           for (const auto &pi : app.exec_scheduler().list_processes())
@@ -1950,17 +1989,40 @@ int main() {
           chk(listed,
               "the solve runs as a sliced task on the app's scheduler (an fe_lab/ process)");
         }
-        st(fb + ".request").value(std::string("stop"));
-        tick();
-        chk(val(fb + ".request").empty() &&
-                val(fb + ".status").find("stopping") == std::string::npos,
-            "stop during a Poisson solve is consumed, not claimed (status '" + val(fb + ".status") +
-                "')");
         // Settle before building the message: argument evaluation order is unspecified, and
         // MSVC would otherwise report the status from before the job finished.
         const bool poisson_ran = settle(fb) && starts(fb + ".status", "poisson: solved (") &&
                                  val(fb + ".stoppable") == "0";
         chk(poisson_ran, "the Poisson solve ran to the end (status '" + val(fb + ".status") + "')");
+
+        // A stop ends a load at its next step with nothing (a gallery stepping on): the node
+        // keeps its volume and mesh, so a load of the old source finds it unchanged. A 160^3 SDF
+        // steps a block of nodes at a time, so it is still running once one block is done
+        // (progress past the 5% the SDF starts at).
+        const double tets = num(fb + ".stats.tets");
+        st(fb + ".source.dim").value(160);
+        st(fb + ".request").value(std::string("load"));
+        tick();
+        for (int i = 0; i < 12000 && val(fb + ".busy") == "1" && num(fb + ".progress") < 6.0; ++i) {
+          tick();
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        st(fb + ".request").value(std::string("stop"));
+        tick();
+        const std::string stopping = val(fb + ".status");
+        const bool load_stopped =
+            settle(fb) && val(fb + ".status") == "load: stopped" && val(fb + ".stoppable") == "0";
+        chk(load_stopped && stopping == "stopping..." && num(fb + ".stats.tets") == tets,
+            "stop ends a load with nothing and the mesh stays (status '" + stopping + "', then '" +
+                val(fb + ".status") + "')");
+        st(fb + ".source.dim").value(16);
+        st(fb + ".auto.solve").value(0); // so the status is the load's own
+        st(fb + ".request").value(std::string("load"));
+        const bool kept = settle(fb) && starts(fb + ".status", "ready: ");
+        chk(kept, "a stopped load keeps the old volume: loading its source again reads nothing "
+                  "(status '" +
+                      val(fb + ".status") + "')");
+        st(fb + ".auto.solve").value(1);
 
         // A heat solve is stoppable. heat.steps = 1e30 is clamped to the 1e6 cap -- not wrapped
         // to one step -- so the solve is still running when stop arrives.
@@ -1970,9 +2032,9 @@ int main() {
         tick();
         chk(val(fb + ".busy") == "1" && val(fb + ".stoppable") == "1",
             "a running heat solve is stoppable (fe.stoppable 1)");
-        // Stop it once it is under way. A stop that reaches the job while it still waits for the
-        // lane cancels it before its first step ('cancelled'), which proves nothing about the
-        // clamp; a loaded macOS runner did that. 1% of 1e6 steps is a few seconds, while a solve
+        // Stop it once it is under way. A stop that reaches the job before its solve starts ends it
+        // with nothing ('heat: stopped'), which proves nothing about the clamp; a loaded macOS
+        // runner did that. 1% of 1e6 steps is a few seconds, while a solve
         // wrapped to one step would be done (busy 0) instead.
         for (int i = 0; i < 12000 && val(fb + ".busy") == "1" && num(fb + ".progress") < 1.0; ++i) {
           tick();
