@@ -2823,6 +2823,42 @@ windows:
   EXPECT_EQ(g->children[4].label, "footer");
 }
 
+// §6.2: an optional import that is not there is no warning; a fallback unit stands in for it,
+// and yields to an import that defines the name.
+TEST(AriadneModularity, OptionalImportsAndFallbackUnits) {
+  SKIP_WITHOUT_YAML();
+  LoadResult missing = load_string(R"(
+import: [{uri: /nowhere/lib.ari, optional: true}]
+units:
+  card: {fallback: true, text: mine}
+windows:
+  - window: W
+    children:
+      - include: card
+)");
+  ASSERT_TRUE(missing.ok) << missing.error;
+  for (const std::string &w : missing.warnings)
+    EXPECT_EQ(w.find("could not be resolved"), std::string::npos) << w;
+  EXPECT_NE(find(missing.root, Kind::Text, "mine"), nullptr);
+
+  const std::filesystem::path lib = std::filesystem::temp_directory_path() / "ari_fallback_lib.ari";
+  std::ofstream(lib) << "units:\n  card: {text: theirs}\n";
+  LoadResult present = load_string("import: [{uri: " + lib.string() +
+                                   ", optional: true}]\n"
+                                   "units:\n  card: {fallback: true, text: mine}\n"
+                                   "windows:\n  - window: W\n    children:\n"
+                                   "      - include: card\n");
+  ASSERT_TRUE(present.ok) << present.error;
+  EXPECT_NE(find(present.root, Kind::Text, "theirs"), nullptr);
+  EXPECT_EQ(find(present.root, Kind::Text, "mine"), nullptr);
+  LoadResult required = load_string("import: /nowhere/lib.ari\nwindows: []\n");
+  bool warned = false;
+  for (const std::string &w : required.warnings)
+    warned = warned || w.find("could not be resolved") != std::string::npos;
+  EXPECT_TRUE(warned); // a plain import still says so
+  std::filesystem::remove(lib);
+}
+
 TEST(AriadneModularity, IncludeUnknownUnitWarns) {
   SKIP_WITHOUT_YAML();
   LoadResult r = load_string(R"(

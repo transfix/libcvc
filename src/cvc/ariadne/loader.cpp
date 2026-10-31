@@ -1047,9 +1047,21 @@ void merge_units(Ctx &ctx, const YAML::Node &unitsNode, bool warn_collision) {
     if (!kv.first.IsScalar())
       continue;
     const std::string name = kv.first.Scalar();
+    // §6.2 a document's own unit marked `fallback: true` stands in only where no import defines
+    // the name (a component the host's library may not have yet).
+    const bool fallback = kv.second.IsMap() && kv.second["fallback"] &&
+                          kv.second["fallback"].IsScalar() &&
+                          kv.second["fallback"].as<std::string>("") == "true";
+    if (fallback && ctx.units.count(name))
+      continue;
     if (warn_collision && ctx.units.count(name))
       ctx.warn("ari: import: unit '" + name + "' is defined by more than one library — last wins");
-    ctx.units[name] = kv.second;
+    YAML::Node unit = kv.second;
+    if (fallback) {
+      unit = YAML::Clone(kv.second);
+      unit.remove("fallback");
+    }
+    ctx.units[name] = unit;
   }
 }
 
@@ -1074,14 +1086,22 @@ void process_imports(Ctx &ctx, const YAML::Node &doc, const std::string &base_di
     return;
   }
   const YAML::Node imp = doc["import"];
-  std::vector<std::string> uris;
-  if (imp && imp.IsScalar())
-    uris.push_back(imp.Scalar());
-  else if (imp && imp.IsSequence())
+  // Each entry is a URI, or {uri: URI, optional: true}: a library the host may not have (a newer
+  // component), whose absence is no warning.
+  std::vector<std::pair<std::string, bool>> uris;
+  const auto entry = [&](const YAML::Node &p) {
+    if (p.IsScalar())
+      uris.emplace_back(p.Scalar(), false);
+    else if (p.IsMap() && p["uri"] && p["uri"].IsScalar())
+      uris.emplace_back(p["uri"].Scalar(),
+                        p["optional"] && p["optional"].as<std::string>("") == "true");
+  };
+  if (imp && imp.IsSequence())
     for (const auto &p : imp)
-      if (p.IsScalar())
-        uris.push_back(p.Scalar());
-  for (const std::string &uri : uris) {
+      entry(p);
+  else if (imp)
+    entry(imp);
+  for (const auto &[uri, optional] : uris) {
     if (ctx.imported.size() >= kMaxImports) {
       ctx.warn("ari: import limit reached (" + std::to_string(kMaxImports) +
                " libraries) — remaining imports skipped");
@@ -1089,7 +1109,8 @@ void process_imports(Ctx &ctx, const YAML::Node &doc, const std::string &base_di
     }
     const UriResult res = resolve(uri, base_dir);
     if (!res.ok) {
-      ctx.warn("ari: import '" + uri + "' could not be resolved: " + res.error);
+      if (!optional)
+        ctx.warn("ari: import '" + uri + "' could not be resolved: " + res.error);
       continue;
     }
     note_source(ctx, res.canonical); // §12.5 watch this imported file for hot-reload

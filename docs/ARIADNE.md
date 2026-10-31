@@ -1254,6 +1254,17 @@ and cycle-guards on the resolved `canonical` identity
 `kMaxImports = 4096` ([`loader.cpp:758`](../src/cvc/ariadne/loader.cpp)). Local units
 override imported ones. This is how a document composes a library of shipped panels.
 
+An entry may be `{uri: URI, optional: true}`: a library the host may not have (a component
+newer than it), whose absence is no warning, so `ari test` does not fail on it. A document's
+own unit marked `fallback: true` stands in for a unit of that name only where no import defines
+it, so a document adopts a shipped component and still runs on hosts without it:
+
+```yaml
+import: [{uri: cvc://components/card.ari, optional: true}]
+units:
+  card: {fallback: true, type: group, children: [...]}   # used where card.ari is not there
+```
+
 ### 6.3 `load:` — isolated sub-module mount
 
 `expand_load` ([`loader.cpp:928`](../src/cvc/ariadne/loader.cpp)) mounts an external
@@ -1332,7 +1343,9 @@ windows:
                 - { button: Reply, on: (state-set "compose.reply_to" "{i}") }
 ```
 
-A part whose key is empty is not drawn. The avatar is a circle `avatar_size` px across (40),
+Slots `note` (a row above the header), `extra` (lines under the byline, in the header's text
+column) and `body` (widgets after the body text) take more of a post's parts. A part whose key
+is empty is not drawn. The avatar is a circle `avatar_size` px across (40),
 loading through `avatar_auth`'s credential where its URL needs one. A one-column grid with an
 outer border frames the card: an ImGui table, a box in a terminal.
 
