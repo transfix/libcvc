@@ -15,6 +15,7 @@
 // full widget vocabulary follow the roadmap (docs/roadmap/CVCGL-UI-DSL-ROADMAP.md).
 
 #include <cvc/ariadne/value.h> // Widget::props for a Kind::Custom widget
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -124,6 +125,31 @@ struct LinkHole {
   bool writable = true; // false -> read-only (setLinkWritable(false))
 };
 
+// A function a document declares in its `functions:` block (docs/ARIADNE.md §6.6): its name and
+// its whole (defun name (params) body...) source.
+struct FunctionDef {
+  std::string name;
+  std::string source;
+};
+
+// The functions every program in one scope can call: at the document's root, its own and the ones
+// it imported; at a mount, the ones the mount granted and the module's own. `prelude` is their
+// sources, one a line, which the Runtime runs ahead of each program in the scope (so each program
+// defines them in its own process: code is shared, never a closure or a state grant).
+struct FunctionScope {
+  std::vector<FunctionDef> defs;
+  std::string prelude;
+};
+
+// A scope over `defs` (prelude built from their sources).
+inline std::shared_ptr<const FunctionScope> make_function_scope(std::vector<FunctionDef> defs) {
+  auto scope = std::make_shared<FunctionScope>();
+  for (const FunctionDef &d : defs)
+    scope->prelude += d.source + "\n";
+  scope->defs = std::move(defs);
+  return scope;
+}
+
 // One node of the retained tree. `bind` is a cvc::state path (relative to the
 // Runtime's prefix, or absolute with a leading '/'); `on` is an event name a
 // host handler is registered for (Runtime::on). Empty fields are simply unused
@@ -186,6 +212,13 @@ struct Widget {
   // §4 read-lane: a hover tooltip. A literal string, OR (if it starts with '(') a computed
   // expression re-evaluated each frame. Empty = no tooltip.
   std::string tooltip;
+
+  // `autofocus: true`: the widget takes keyboard focus each time it appears (a form's first field,
+  // so a person can just type). If it cannot take focus, the next one that can does.
+  bool autofocus = false;
+  // `password: true` on an input_text: the backend shows a mask, not the text. The value is still
+  // in state, as any input_text's is.
+  bool password = false;
 
   // §3/§4 dynamic repetition: when non-empty, this widget is a TEMPLATE emitted `repeat`
   // times, where `repeat` is a count expression re-evaluated each frame (capped, fail-safe
@@ -263,6 +296,17 @@ struct Widget {
   // them. A seed, not a per-frame action: it does not re-run on a reconcile. Only on a mount
   // wrapper; empty otherwise.
   std::string init_script;
+
+  // §12 load: the mounted fragment's own on_tick: body. The Runtime runs it as one resident per
+  // mount, chrooted to the sub-prefix with the mount's functions, woken once per drain like the
+  // document's: from the mount's first frame (after its init:) until a reconcile drops it. Only on
+  // a mount wrapper; empty otherwise.
+  std::string tick_script;
+
+  // §6.6 functions: set on the document's root and on every mount wrapper, null elsewhere. The
+  // programs started inside this subtree (on: actions, the mount's init:) run with these
+  // functions defined, and no others: a mount gets an empty scope unless it grants some.
+  std::shared_ptr<const FunctionScope> functions;
 
   // Kind::Custom: the registered type name, and the config bag (every widget key the
   // loader did not consume) a registered emit fn (register_widget_type) reads. Empty

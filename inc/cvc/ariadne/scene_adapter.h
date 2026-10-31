@@ -54,6 +54,11 @@ public:
   // everything, which is right only for an adapter that never realizes.
   virtual void clear() {}
 
+  // The document just loaded has no `scene:` (called after clear()). It is its widgets alone, so a
+  // host that draws a scene of its own by default (arigl's grid, axes and bounds box) can hide it
+  // rather than show it behind them. The default does nothing.
+  virtual void no_scene() {}
+
   // Mirror bound `visible:` state onto the realized scene's nodes. Called once per
   // AppRuntime::drain(). A no-op until something has been realized.
   virtual void sync_visibility(cvc::app &app) = 0;

@@ -19,6 +19,7 @@
 #include <cvc/core/types.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/utility/algorithm.h>
+#include <cvc/volume/contour_spectrum.h>
 #include <cvc/volume/volume.h>
 #include <gtest/gtest.h>
 
@@ -31,16 +32,19 @@
 #include <VolMagickCompat.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <boost/optional.hpp>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <geoframe_adapter.h>
 #include <limits>
 #include <map>
 #include <ostream>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -1261,6 +1265,122 @@ TEST_F(LbieMesherTest, IsoLibisocontourVoxelTypes) {
   EXPECT_GT(g64.num_points(), 0u);
 }
 
+namespace {
+
+// Runs each job on a thread of its own, all released together; returns what each threw ("" when
+// it returned).
+std::vector<std::string> run_together(const std::vector<std::function<void()>> &jobs) {
+  std::vector<std::string> errors(jobs.size());
+  std::atomic<std::size_t> waiting{jobs.size()};
+  std::vector<std::thread> threads;
+  for (std::size_t i = 0; i < jobs.size(); ++i)
+    threads.emplace_back([&, i] {
+      --waiting;
+      while (waiting.load() > 0)
+        std::this_thread::yield();
+      try {
+        jobs[i]();
+      } catch (const std::exception &e) {
+        errors[i] = e.what();
+      } catch (...) {
+        errors[i] = "unknown exception";
+      }
+    });
+  for (std::thread &t : threads)
+    t.join();
+  return errors;
+}
+
+// A sphere volume of its own size and radius for each job, so concurrent libContour calls work on
+// different data.
+volume job_volume(app &ctx, int job) {
+  return make_sphere_volume(ctx, 20 + 6 * job, 0.35 + 0.1 * job);
+}
+
+} // namespace
+
+// LIBISOCONTOUR runs the vendored libContour, whose state is process-wide (libcontour_mutex.h):
+// IntTree::Done() points global_tree at the tree it sorts, and its qsort comparators read the cell
+// ranges through it. The extraction holds libcontour_mutex(). Each thread meshes a volume of its
+// own size, so a comparator that read another thread's tree would sort by the wrong ranges, or
+// past the tree's end. Without the lock every round failed here.
+TEST_F(LbieMesherTest, ConcurrentLibisocontourMeshesMatchTheSerialOnes) {
+  constexpr int kThreads = 4, kRounds = 4;
+  std::vector<volume> vols;
+  std::vector<geometry> serial;
+  for (int t = 0; t < kThreads; ++t) {
+    vols.push_back(job_volume(ctx, t));
+    serial.push_back(cvc::iso(vols.back(), 0.0, LIBISOCONTOUR));
+    ASSERT_GT(serial.back().num_tris(), 0u);
+  }
+  for (int round = 0; round < kRounds; ++round) {
+    std::vector<geometry> got(kThreads);
+    std::vector<std::function<void()>> jobs;
+    for (int t = 0; t < kThreads; ++t)
+      jobs.push_back([&, t] { got[t] = cvc::iso(vols[t], 0.0, LIBISOCONTOUR); });
+    const std::vector<std::string> errors = run_together(jobs);
+    for (int t = 0; t < kThreads; ++t) {
+      SCOPED_TRACE("round " + std::to_string(round) + ", thread " + std::to_string(t));
+      ASSERT_EQ(errors[t], "");
+      EXPECT_TRUE(got[t].const_points() == serial[t].const_points())
+          << got[t].num_points() << " points, " << serial[t].num_points() << " serially";
+      EXPECT_TRUE(got[t].const_tris() == serial[t].const_tris())
+          << got[t].num_tris() << " triangles, " << serial[t].num_tris() << " serially";
+    }
+  }
+}
+
+// The contour spectrum's libContour oracle (cvc::compute_contour_spectrum_libcontour) shares that
+// state with LIBISOCONTOUR under the same lock: it sets `verbose`, which libContour reads
+// throughout (a race only a race detector would see; the two meshes' trees are what visibly
+// collide without the lock). Two threads mesh while two compute spectra.
+TEST_F(LbieMesherTest, LibisocontourMeshesBesideTheLibcontourSpectrumMatchTheSerialOnes) {
+  constexpr int kThreads = 4, kRounds = 4;
+  std::vector<volume> vols;
+  std::vector<geometry> serial_mesh(kThreads);
+  std::vector<contour_spectrum> serial_spectrum(kThreads);
+  for (int t = 0; t < kThreads; ++t) {
+    vols.push_back(job_volume(ctx, t));
+    if (t % 2 == 0) {
+      serial_mesh[t] = cvc::iso(vols.back(), 0.0, LIBISOCONTOUR);
+      ASSERT_GT(serial_mesh[t].num_tris(), 0u);
+    } else {
+      serial_spectrum[t] = compute_contour_spectrum_libcontour(vols.back());
+      ASSERT_GT(serial_spectrum[t].size(), 0u);
+    }
+  }
+  for (int round = 0; round < kRounds; ++round) {
+    std::vector<geometry> mesh(kThreads);
+    std::vector<contour_spectrum> spectrum(kThreads);
+    std::vector<std::function<void()>> jobs;
+    for (int t = 0; t < kThreads; ++t)
+      jobs.push_back([&, t] {
+        if (t % 2 == 0)
+          mesh[t] = cvc::iso(vols[t], 0.0, LIBISOCONTOUR);
+        else
+          spectrum[t] = compute_contour_spectrum_libcontour(vols[t]);
+      });
+    const std::vector<std::string> errors = run_together(jobs);
+    for (int t = 0; t < kThreads; ++t) {
+      SCOPED_TRACE("round " + std::to_string(round) + ", thread " + std::to_string(t));
+      ASSERT_EQ(errors[t], "");
+      if (t % 2 == 0) {
+        EXPECT_TRUE(mesh[t].const_points() == serial_mesh[t].const_points());
+        EXPECT_TRUE(mesh[t].const_tris() == serial_mesh[t].const_tris());
+      } else {
+        const contour_spectrum &a = spectrum[t], &b = serial_spectrum[t];
+        EXPECT_EQ(a.domain_min, b.domain_min);
+        EXPECT_EQ(a.domain_max, b.domain_max);
+        EXPECT_TRUE(a.isovalue == b.isovalue);
+        EXPECT_TRUE(a.surface_area == b.surface_area);
+        EXPECT_TRUE(a.min_volume == b.min_volume);
+        EXPECT_TRUE(a.max_volume == b.max_volume);
+        EXPECT_TRUE(a.gradient == b.gradient);
+      }
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // geoframe: construction helpers (header templates)
 // ---------------------------------------------------------------------------
@@ -1880,6 +2000,16 @@ TEST_F(LbieMesherTest, HexUtilityFunctions) {
 
 namespace {
 
+// The stepped tests' volumes are kSteppedSamples wide (2^n+1, which the mesher takes as it is).
+// Each case meshes its volume three times: at 33 samples SteppedTetrahedralize2MatchesOneShot took
+// 9 s in a Release build and 130-230 s in the Debug package lanes, past ctest's 300 s on a loaded
+// runner. Unoptimized builds mesh 17. By the optimizer, not NDEBUG, which a Debug build can define.
+#if defined(__OPTIMIZE__) || (defined(_MSC_VER) && !defined(_DEBUG))
+constexpr unsigned int kSteppedSamples = 33;
+#else
+constexpr unsigned int kSteppedSamples = 17;
+#endif
+
 // A torus' distance field on [-1,1]^3 at n^3 samples, positive inside the tube.
 volume make_torus_volume(app &ctx, unsigned int n) {
   volume v(ctx, dimension(n, n, n), Float, bounding_box(-1, -1, -1, 1, 1, 1));
@@ -1984,8 +2114,8 @@ std::string describe(const char *name, improvement_method m, int iterations) {
 // the same order, without improvement and with geometric flow, on a volume of (2^n+1)^3 samples
 // and on one the mesher resamples.
 TEST_F(LbieMesherTest, SteppedTetrahedralizeMatchesOneShot) {
-  const volume sphere = make_sphere_volume(ctx, 33, 0.6);
-  const volume torus = make_torus_volume(ctx, 30);
+  const volume sphere = make_sphere_volume(ctx, kSteppedSamples, 0.6);
+  const volume torus = make_torus_volume(ctx, kSteppedSamples - 3);
   for (const volume *v : {&sphere, &torus})
     for (const auto &im : {std::make_pair(NO_IMPROVE, 0), std::make_pair(GEO_FLOW, 1)}) {
       const std::string what = describe(v == &sphere ? "sphere" : "torus", im.first, im.second);
@@ -2008,7 +2138,7 @@ TEST_F(LbieMesherTest, SteppedTetrahedralizeMatchesOneShot) {
 // tetrahedralize2()'s layer between two isovalues (fe_lab's interval mesh) and its solid above
 // one isovalue, a slice at a time.
 TEST_F(LbieMesherTest, SteppedTetrahedralize2MatchesOneShot) {
-  const volume sphere = make_sphere_volume(ctx, 33, 0.6);
+  const volume sphere = make_sphere_volume(ctx, kSteppedSamples, 0.6);
   for (const auto &im : {std::make_pair(NO_IMPROVE, 0), std::make_pair(GEO_FLOW, 1)}) {
     const std::vector<std::string> phases = expect_stepped_matches(
         [&] {
@@ -2036,8 +2166,8 @@ TEST_F(LbieMesherTest, SteppedTetrahedralize2MatchesOneShot) {
 // iso() a slice at a time. iso() leaves the improvement method at geometric flow, so its mesh has
 // had the extraction's pass of it even with no iterations; the stepper's has too.
 TEST_F(LbieMesherTest, SteppedIsoMatchesOneShot) {
-  const volume sphere = make_sphere_volume(ctx, 33, 0.6);
-  const volume torus = make_torus_volume(ctx, 30);
+  const volume sphere = make_sphere_volume(ctx, kSteppedSamples, 0.6);
+  const volume torus = make_torus_volume(ctx, kSteppedSamples - 3);
   const volume prop = make_sphere_volume(ctx, 21, 0.3);
   for (const volume *v : {&sphere, &torus}) {
     const std::string name = v == &sphere ? "sphere" : "torus";

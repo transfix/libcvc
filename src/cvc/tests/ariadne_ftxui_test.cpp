@@ -376,6 +376,43 @@ TEST(AriadneFtxui, TextFieldCommitsOnEnterAndOnBlur) {
   EXPECT_EQ(val(t.app, "name"), "hi!");
 }
 
+// autofocus: a person can type into the field as soon as it is drawn, no Tab first; moving focus
+// away keeps it away (focus is taken when the field appears, not every frame).
+TEST(AriadneFtxui, AutofocusFieldTakesTheFirstKeys) {
+  REQUIRE_FTXUI();
+  Widget name = input_text("Name", "name");
+  name.autofocus = true;
+  Term t(group({checkbox("X", "x"), name}));
+  EXPECT_TRUE(t.type("hi"));
+  t.key("Return");
+  EXPECT_EQ(val(t.app, "name"), "hi");
+  t.key("Tab"); // to the checkbox (the walk's first focusable)
+  t.draw();
+  t.type("z");
+  t.key("Return");
+  EXPECT_EQ(val(t.app, "name"), "hi") << "the field did not take focus back";
+}
+
+// password: the field draws a mark per character, never the text; the text still commits.
+TEST(AriadneFtxui, PasswordFieldShowsAMask) {
+  REQUIRE_FTXUI();
+  Widget pw = input_text("Password", "pw");
+  pw.password = true;
+  Term t(group({pw}));
+  t.key("Tab");
+  t.type("s3cret");
+  t.draw();
+  EXPECT_FALSE(t.shows("s3cret")) << t.screen;
+  // Six U+2022 as UTF-8 bytes: MSVC encodes a "\u2022" literal in the code page (this target has no
+  // /utf-8), so the screen's UTF-8 would never match it.
+  EXPECT_TRUE(t.shows("\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2"))
+      << t.screen;
+  t.key("Return");
+  t.draw();
+  EXPECT_EQ(val(t.app, "pw"), "s3cret");
+  EXPECT_FALSE(t.shows("s3cret")) << "masked when not focused too:\n" << t.screen;
+}
+
 TEST(AriadneFtxui, TextFieldEditsAtTheCursor) {
   REQUIRE_FTXUI();
   Term t(group({input_text("Name", "name")}));
@@ -1594,6 +1631,163 @@ TEST(AriadneFtxui, TerminalTourDocumentRuns) {
   art.drain();
   EXPECT_TRUE(quit);
   clear_action_intrinsics(); // register_verb's provider is process-wide: drop it with this test
+}
+
+// ---- JSON replies on a terminal: json_feed.ari in both terminal backends ---------------------
+
+namespace {
+
+// The columns a terminal gives `s`: two for the wide code points these tests use (CJK, kana,
+// the emoji block), none for a combining mark, one for anything else.
+int columns(const std::string &s) {
+  int cols = 0;
+  for (std::size_t i = 0; i < s.size();) {
+    const auto b = static_cast<unsigned char>(s[i]);
+    const int len = b < 0x80 ? 1 : b < 0xE0 ? 2 : b < 0xF0 ? 3 : 4;
+    char32_t cp = len == 1 ? b : b & (0x3F >> (len - 1));
+    for (int k = 1; k < len && i + k < s.size(); ++k)
+      cp = (cp << 6) | (static_cast<unsigned char>(s[i + k]) & 0x3F);
+    i += static_cast<std::size_t>(len);
+    if (cp >= 0x300 && cp <= 0x36F)
+      continue;
+    const bool wide = (cp >= 0x3040 && cp <= 0x30FF) || (cp >= 0x4E00 && cp <= 0x9FFF) ||
+                      (cp >= 0x1F300 && cp <= 0x1FAFF);
+    cols += wide ? 2 : 1;
+  }
+  return cols;
+}
+
+// The lines of `screen` from the one holding `top` through the next one holding `bottom`.
+std::vector<std::string> box_lines(const std::string &screen, const std::string &top,
+                                   const std::string &bottom) {
+  std::vector<std::string> lines, box;
+  std::size_t start = 0;
+  for (std::size_t nl; (nl = screen.find('\n', start)) != std::string::npos; start = nl + 1)
+    lines.push_back(screen.substr(start, nl - start));
+  bool in = false;
+  for (const std::string &l : lines) {
+    in = in || l.find(top) != std::string::npos;
+    if (!in)
+      continue;
+    box.push_back(l);
+    if (box.size() > 1 && l.find(bottom) != std::string::npos)
+      break;
+  }
+  return box;
+}
+
+// A hosted window's row as the tvision backend draws it: a cell per column, and the empty cell a
+// wide glyph spills into left out, since the glyph covers it.
+std::string drawn_row(const TermRows &rows, std::size_t y) {
+  std::string out;
+  bool wide = false;
+  for (const TermCell &c : rows.at(y)) {
+    if (wide && c.ch.empty()) {
+      wide = false;
+      continue;
+    }
+    out += c.ch.empty() ? std::string(" ") : c.ch;
+    wide = columns(c.ch) == 2;
+  }
+  return out;
+}
+
+const char *const kFeedRows[] = {
+    "feed: tx.wtf/public", "posts: 4", "ada: hello from the fediverse", "grace: coffee at 9?",
+    "linus: JSON in, widgets out", "likes: 12",
+    // \u escapes in the JSON: accented letters, CJK and an emoji
+    "zo\xC3\xAB: caf\xC3\xA9 \xE6\x97\xA5\xE6\x9C\xAC \xF0\x9F\x8E\x89",
+    "body: {\"post\":101,\"like\":true}"};
+
+std::filesystem::path json_feed_doc() {
+  return std::filesystem::path(CVC_EXAMPLES_DIR) / "ariadne" / "documents" / "json_feed.ari";
+}
+
+} // namespace
+
+TEST(AriadneFtxui, WideGlyphsTakeTwoColumnsInTheTextSnapshot) {
+  REQUIRE_FTXUI();
+  // A full-width glyph's second cell isn't written: as a space it pushed the line right.
+  Term t(group({window("W", {text("\xE6\x97\xA5\xE6\x9C\xAC \xF0\x9F\x8E\x89 ok"),
+                             text("e\xCC\x81t\xC3\xA9 plain")})}));
+  EXPECT_TRUE(t.shows("\xE6\x97\xA5\xE6\x9C\xAC \xF0\x9F\x8E\x89 ok")) << t.screen;
+  EXPECT_TRUE(t.shows("e\xCC\x81t\xC3\xA9 plain")) << t.screen; // combining and composed
+  const std::vector<std::string> box = box_lines(t.screen, "W", "\xE2\x95\xB0");
+  ASSERT_EQ(box.size(), 4u) << t.screen;
+  for (const std::string &l : box)
+    EXPECT_EQ(columns(l), columns(box.front())) << "a ragged right edge\n" << t.screen;
+}
+
+TEST(AriadneFtxui, JsonFeedDocumentRepeatsOverAParsedArray) {
+  REQUIRE_FTXUI();
+  if (!AppRuntime::have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  ASSERT_TRUE(std::filesystem::exists(json_feed_doc())) << json_feed_doc().string();
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.feed");
+  art.set_backend(be);
+  const std::vector<std::string> warns = art.load(json_feed_doc().string());
+  EXPECT_TRUE(warns.empty()) << warns.front();
+  art.drain();
+  // What `ari snapshot` prints. init: parsed the JSON and wrote it with state-set-tree;
+  // repeat: made a row per element.
+  const std::string s = be.render_to_string(art.runtime(), 100, 30);
+  for (const char *want : kFeedRows)
+    EXPECT_NE(s.find(want), std::string::npos) << want << "\n" << s;
+  EXPECT_EQ(val(app, "ui.docs.feed.feed.items"), "4");
+  EXPECT_EQ(val(app, "ui.docs.feed.feed.items.2.author"), "linus");
+  // Every row of the window ends in the same column, the wide glyphs' rows too.
+  const std::vector<std::string> box = box_lines(s, "Feed", "\xE2\x95\xB0");
+  ASSERT_GE(box.size(), 15u) << s;
+  for (const std::string &l : box)
+    EXPECT_EQ(columns(l), columns(box.front())) << l << "\n" << s;
+}
+
+TEST(AriadneTvision, JsonFeedDocumentFillsItsHostedWindow) {
+  REQUIRE_FTXUI();
+  if (!AppRuntime::have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  // The tvision desktop draws the frame and has the shared layout draw the body (render_window),
+  // the cells it blits. That layout needs no terminal, so it is checked here with or without
+  // tvision in the build. The desktop itself needs a terminal: ari_run_json_feed_tvision runs it
+  // in tmux (src/ari/tests/run_in_tmux_test.sh).
+  cvc::app app;
+  TvisionBackend be;
+  AppRuntime art(app, "ui.docs.feed");
+  art.set_backend(be);
+  const std::vector<std::string> warns = art.load(json_feed_doc().string());
+  EXPECT_TRUE(warns.empty()) << warns.front();
+  art.drain();
+  be.render_to_string(art.runtime(), 100, 30); // the walk that collects the windows
+  const auto wins = be.hosted_windows();
+  ASSERT_EQ(wins.size(), 1u);
+  EXPECT_EQ(wins[0].id, "feed");
+  EXPECT_EQ(wins[0].title, "Feed");
+  const int w = wins[0].content_w, h = wins[0].content_h;
+  const TermRows rows = be.render_window("feed", w, h);
+  ASSERT_EQ(rows.size(), static_cast<std::size_t>(h));
+  std::string body;
+  for (std::size_t y = 0; y < rows.size(); ++y) {
+    ASSERT_EQ(rows[y].size(), static_cast<std::size_t>(w));
+    const std::string line = drawn_row(rows, y);
+    EXPECT_EQ(columns(line), w) << "row " << y << ": " << line;
+    body += line + "\n";
+  }
+  for (const char *want : kFeedRows)
+    EXPECT_NE(body.find(want), std::string::npos) << want << "\n" << body;
+  // A wide glyph's cell is followed by the empty cell it covers, and the text after it goes on in
+  // the column after that.
+  bool checked = false;
+  for (const auto &row : rows)
+    for (std::size_t x = 0; x + 3 < row.size(); ++x)
+      if (row[x].ch == "\xE6\x97\xA5") { // the first CJK character
+        EXPECT_EQ(row[x + 1].ch, "");
+        EXPECT_EQ(row[x + 2].ch, "\xE6\x9C\xAC");
+        EXPECT_EQ(row[x + 3].ch, "");
+        checked = true;
+      }
+  EXPECT_TRUE(checked) << body;
 }
 
 // ---- §10 tf_editor: the editor the core composes on a terminal --------------------------------

@@ -65,6 +65,10 @@ enum class eval_phase {
   // the frame), then the section's body.
   lock_enter,
   lock_body,
+  // (and ...) / (or ...): an argument evaluated, then the next, until one decides the form.
+  // Last, so the phases before keep their numbers.
+  and_next,
+  or_next,
 };
 
 /// A single evaluation frame on the explicit stack.
@@ -367,6 +371,7 @@ private:
   void step_if_cond(evaluator_state &state, eval_frame &frame);
   void step_if_branch(evaluator_state &state, eval_frame &frame);
   void step_begin_next(evaluator_state &state, eval_frame &frame);
+  void step_and_or_next(evaluator_state &state, eval_frame &frame);
   void step_while_cond(evaluator_state &state, eval_frame &frame);
   void step_while_body(evaluator_state &state, eval_frame &frame);
   void step_for_body(evaluator_state &state, eval_frame &frame);

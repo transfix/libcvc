@@ -171,6 +171,16 @@ def main() -> int:
             own_page = args.bin / (demo + ".html")
             if own_page.is_file():
                 shutil.copy2(own_page, ddir / "index.html")
+                # ...with the files it loads beside it (ari's: its loader, style sheet and xterm/),
+                # which <demo>.page-files lists, one path relative to the binaries per line.
+                listing = args.bin / (demo + ".page-files")
+                if listing.is_file():
+                    for rel in listing.read_text().split():
+                        src = args.bin / rel
+                        if src.is_dir():
+                            shutil.copytree(src, ddir / rel, dirs_exist_ok=True)
+                        else:
+                            shutil.copy2(src, ddir / rel)
             else:
                 (ddir / "index.html").write_text(render(
                     demo_tpl,

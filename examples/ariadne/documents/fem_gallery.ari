@@ -374,7 +374,8 @@ on_tick: |
                          (state-get (str-concat keys "stats.work_ms"))))
             nil)))
     ;; --tour S: step on once the item has been finished for S seconds of scene time.
-    ;; (and evaluates every argument, so the tests that parse numbers nest.)
+    ;; (The tests that parse numbers nest: written when `and` evaluated every argument. It stops at
+    ;; the first false one now.)
     (if (and (> (float (state-get "args.tour")) 0) (!= (state-get "gallery.ready_at") ""))
         (if (> (- (float (state-get "sim.time")) (float (state-get "gallery.ready_at")))
                (float (state-get "args.tour")))

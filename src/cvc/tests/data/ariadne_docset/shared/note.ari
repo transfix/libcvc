@@ -1,0 +1,4 @@
+# Imported by ../app/main.ari, from outside its directory.
+units:
+  note:
+    text: from shared/note.ari

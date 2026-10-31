@@ -292,6 +292,10 @@ value_t evaluator::eval_form(const value_t &expr, const environment_ptr &env) {
     return do_if(args, env);
   case detail::special_form::begin:
     return do_begin(args, env);
+  case detail::special_form::and_:
+    return do_and(args, env);
+  case detail::special_form::or_:
+    return do_or(args, env);
   case detail::special_form::while_:
     return do_while(args, env);
   case detail::special_form::for_:
@@ -389,6 +393,31 @@ value_t evaluator::do_begin(std::span<const value_t> args, const environment_ptr
     result = eval_internal(a, env);
   }
   return result;
+}
+
+// (and a b ...) and (or a b ...) evaluate their arguments left to right and stop at the first
+// that decides: `and` is #f at a falsy one, else the last value (#t with none); `or` is the first
+// truthy value, else #f. The builtins of the same names, which a program reaches by passing `and`
+// or `or` as a value, give the same answers from arguments already evaluated.
+value_t evaluator::do_and(std::span<const value_t> args, const environment_ptr &env) {
+  value_t result = true_value;
+  for (auto &a : args) {
+    check_interrupted();
+    result = eval_internal(a, env);
+    if (!result.is_truthy())
+      return false_value;
+  }
+  return result;
+}
+
+value_t evaluator::do_or(std::span<const value_t> args, const environment_ptr &env) {
+  for (auto &a : args) {
+    check_interrupted();
+    value_t v = eval_internal(a, env);
+    if (v.is_truthy())
+      return v;
+  }
+  return false_value;
 }
 
 value_t evaluator::do_while(const std::vector<value_t> &args, const environment_ptr &env) {
