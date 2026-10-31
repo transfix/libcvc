@@ -15,6 +15,7 @@
 #include <cvc/state/state_exec/async_host.h>      // register_async_fn
 #include <cvc/state/state_exec/async_scheduler.h> // exec_scheduler().post_message
 #include <cvc/state/state_exec/builtins.h>        // register_fn
+#include <cvc/state/state_exec/exceptions.h>      // dsl_error ((quit code) checks its code)
 #include <cvc/state/state_exec/intrinsics.h>      // intrinsics_context, resolve_channel_key
 #include <cvc/state/state_exec/types.h>           // value_t
 #include <filesystem>
@@ -39,6 +40,7 @@ AppRuntime::AppRuntime(cvc::app &app, std::string prefix, SceneAdapter *scene)
 AppRuntime::~AppRuntime() {
   verbs_->sync.clear(); // the provider outlives us in the registry: it must bind nothing of ours
   verbs_->async.clear();
+  verbs_->quit = nullptr;
   if (netEnabled_)
     disable_net(); // its provider holds app_ by reference
 }
@@ -242,6 +244,13 @@ void AppRuntime::register_async_verb(const std::string &name, const std::string 
   rt_.refresh_program_names();
 }
 
+void AppRuntime::register_quit() {
+  on("quit", [this] { request_close(0); });
+  verbs_->quit = [this](int code) { request_close(code); };
+  ensure_intrinsics();
+  rt_.refresh_program_names();
+}
+
 void AppRuntime::ensure_intrinsics() {
   if (intrinsicsRegistered_)
     return;
@@ -258,6 +267,27 @@ void AppRuntime::ensure_intrinsics() {
       std::function<void()> fn = v.second;
       se::builtins::register_fn(env, v.first, [fn](std::span<const se::value_t>) -> se::value_t {
         fn(); // host side effect, on the drain thread
+        return se::value_t(std::monostate{});
+      });
+    }
+    if (verbs->quit) {
+      std::function<void(int)> quit = verbs->quit;
+      se::builtins::register_fn(env, "quit", [quit](std::span<const se::value_t> args) {
+        if (args.size() > 1)
+          throw se::dsl_error("TypeError", "quit: expected an optional exit code, got " +
+                                               std::to_string(args.size()) + " args");
+        int64_t code = 0;
+        if (!args.empty()) {
+          const auto *n = std::get_if<int64_t>(&args[0].v);
+          if (!n)
+            throw se::dsl_error("TypeError",
+                                "quit: the exit code is an integer, not " + args[0].type_name());
+          if (*n < 0 || *n > 255)
+            throw se::dsl_error("ValueError",
+                                "quit: the exit code is 0..255, not " + std::to_string(*n));
+          code = *n;
+        }
+        quit(static_cast<int>(code)); // host side effect, on the drain thread
         return se::value_t(std::monostate{});
       });
     }
@@ -295,15 +325,39 @@ std::string describe_requirement(const std::string &name) {
   return name;
 }
 
-// Every program in a loaded document, with where it sits, for the free-head scan.
-void collect_programs(const Widget &w, std::vector<std::pair<std::string, std::string>> &out) {
+// A program for the free-head scan: where it sits, its text, and the functions its scope defines
+// (§6.6), which it may call.
+struct ScannedProgram {
+  std::string where;
+  std::string script;
+  const FunctionScope *functions = nullptr;
+};
+
+// Every program in a loaded document, with where it sits, for the free-head scan. A function
+// scope's own bodies are scanned too, once, as "functions:" (a mount's, "functions: of mount ...").
+void collect_programs(const Widget &w, const FunctionScope *functions,
+                      std::vector<ScannedProgram> &out) {
+  if (w.functions) {
+    functions = w.functions.get();
+    if (!functions->prelude.empty())
+      out.push_back(
+          {w.scope.empty() ? std::string("functions:") : "functions: of mount '" + w.scope + "'",
+           functions->prelude, functions});
+    if (!w.init_script.empty())
+      out.push_back({"init: of mount '" + w.scope + "'", w.init_script, functions});
+  }
   const std::string where = "widget '" + (w.id.empty() ? w.label : w.id) + "'";
   for (const std::string *p :
        {&w.on, &w.on_click, &w.on_hover, &w.on_drag, &w.on_drag_start, &w.on_drag_end})
     if (!p->empty())
-      out.emplace_back(where, *p);
+      out.push_back({where, *p, functions});
   for (const Widget &c : w.children)
-    collect_programs(c, out);
+    collect_programs(c, functions, out);
+}
+
+bool defines(const FunctionScope *functions, const std::string &name) {
+  return functions && std::any_of(functions->defs.begin(), functions->defs.end(),
+                                  [&](const FunctionDef &f) { return f.name == name; });
 }
 
 // The load-time preflight. requires: entries the host lacks fail the load (all named in one
@@ -330,7 +384,8 @@ void check_host_requirements(const Runtime &rt, LoadResult &lr) {
     throw std::runtime_error("this host does not provide what the document requires: " + list);
   }
 
-  std::vector<std::pair<std::string, std::string>> programs;
+  std::vector<ScannedProgram> programs;
+  const FunctionScope *own = lr.root.functions.get(); // the document's: every top-level lane's
   const std::pair<const char *, const std::string *> lanes[] = {
       {"init:", &lr.init_script},
       {"on_tick:", &lr.on_tick_script},
@@ -339,12 +394,14 @@ void check_host_requirements(const Runtime &rt, LoadResult &lr) {
       {"on_signal:", &lr.on_signal_script}};
   for (const auto &[where, script] : lanes)
     if (!script->empty())
-      programs.emplace_back(where, *script);
-  collect_programs(lr.root, programs);
+      programs.push_back({where, *script, own});
+  for (const auto &[name, script] : lr.tests)
+    programs.push_back({"test '" + name + "'", script, own});
+  collect_programs(lr.root, nullptr, programs);
   std::map<std::string, std::vector<std::string>> unprovided; // name -> where it is called
-  for (const auto &[where, script] : programs)
+  for (const auto &[where, script, functions] : programs)
     for (const std::string &name : free_heads(script))
-      if (!declared.count(name) && !rt.has_function(name)) {
+      if (!declared.count(name) && !defines(functions, name) && !rt.has_function(name)) {
         std::vector<std::string> &at = unprovided[name];
         if (at.empty() || at.back() != where)
           at.push_back(where);
@@ -375,6 +432,8 @@ void AppRuntime::set_document_args(std::vector<std::string> argv, std::string in
 }
 
 bool AppRuntime::has_args_block() const { return hasArgsBlock_; }
+
+const std::vector<std::pair<std::string, std::string>> &AppRuntime::tests() const { return tests_; }
 
 std::vector<std::string> AppRuntime::load(const std::string &path) {
   register_cvc_uri_handler(componentPaths_); // BEFORE load (cvc:// import resolver)
@@ -413,8 +472,11 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   seed_keys(lr.keys, new_document);
 
   std::vector<std::string> initErrors;
-  run_init(app_, prefix_, lr.init_script, &initErrors, // §init: seeds win over widget defaults
-           [this](const std::string &n) { return rt_.has(n); });
+  // §init: seeds win over widget defaults. It runs with the document's functions (§6.6).
+  const std::string init = lr.init_script.empty() || !lr.root.functions
+                               ? lr.init_script
+                               : lr.root.functions->prelude + lr.init_script;
+  run_init(app_, prefix_, init, &initErrors, [this](const std::string &n) { return rt_.has(n); });
   for (std::string &e : initErrors) // a failed init: is not fatal, but it must not be silent
     lr.warnings.push_back(std::move(e));
   rt_.set_tick_program(lr.on_tick_script);          // empty = no resident (safe)
@@ -460,6 +522,7 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   add_keys(lr.root, std::move(lr.keys));
   rt_.set_root(std::move(lr.root)); // applied at the next frame boundary
   sources_ = std::move(lr.sources);
+  tests_ = std::move(lr.tests);
   stamps_ = std::move(lr.source_stamps);
   return lr.warnings;
 }
@@ -485,7 +548,13 @@ void AppRuntime::drain() {
 }
 
 bool AppRuntime::should_close() const { return quit_; }
-void AppRuntime::request_close() { quit_ = true; }
+void AppRuntime::request_close() { request_close(0); }
+void AppRuntime::request_close(int code) {
+  if (!quit_)
+    exitCode_ = code;
+  quit_ = true;
+}
+int AppRuntime::exit_code() const { return exitCode_; }
 
 // ── input seam ──────────────────────────────────────────────────────────────────────────────────
 

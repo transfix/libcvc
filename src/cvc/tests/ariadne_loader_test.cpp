@@ -2503,6 +2503,54 @@ windows: [ { window: W, children: [] } ]
   EXPECT_NE(r.init_script.find("state-set"), std::string::npos);
 }
 
+// tests: (`ari test`): name -> program, captured in document order and never run by the loader.
+TEST(AriadneTests, BlockCapturedInOrder) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+root: [ { text: hi } ]
+tests:
+  zeta: (assert true)
+  alpha: |
+    (assert (= 1 1))
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.tests.size(), 2u);
+  EXPECT_EQ(r.tests[0].first, "zeta");
+  EXPECT_EQ(r.tests[0].second, "(assert true)");
+  EXPECT_EQ(r.tests[1].first, "alpha");
+  EXPECT_NE(r.tests[1].second.find("(assert (= 1 1))"), std::string::npos);
+  for (const std::string &w : r.warnings)
+    EXPECT_EQ(w.find("tests:"), std::string::npos) << w;
+}
+
+TEST(AriadneTests, BadShapesWarn) {
+  SKIP_WITHOUT_YAML();
+  LoadResult seq = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+tests: [ (assert true) ]
+)");
+  ASSERT_TRUE(seq.ok) << seq.error;
+  EXPECT_TRUE(seq.tests.empty());
+  EXPECT_TRUE(has_warning(seq, "tests: must be a MAP"));
+  LoadResult empty = load_string("meta: { min_libcvc: \"0.0.0\" }\ntests:\n");
+  ASSERT_TRUE(empty.ok) << empty.error;
+  EXPECT_TRUE(empty.tests.empty());
+  EXPECT_FALSE(has_warning(empty, "tests:")); // an empty block is no tests, not a mistake
+  LoadResult entry = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+tests:
+  good: (assert true)
+  nested: { not: a program }
+  empty: ""
+)");
+  ASSERT_TRUE(entry.ok) << entry.error;
+  ASSERT_EQ(entry.tests.size(), 1u);
+  EXPECT_EQ(entry.tests[0].first, "good");
+  EXPECT_TRUE(has_warning(entry, "tests: 'nested' must be a non-empty scalar"));
+  EXPECT_TRUE(has_warning(entry, "tests: 'empty' must be a non-empty scalar"));
+}
+
 TEST(AriadneInit, NonScalarInitWarns) {
   SKIP_WITHOUT_YAML();
   LoadResult r = load_string(R"(
@@ -4905,4 +4953,160 @@ TEST(AriadneComponents, TransferFunctionDemoLoadsClean) {
   ASSERT_EQ(r.scene.nodes.size(), 3u);
   EXPECT_TRUE(r.scene.nodes[0].has_volren);
   EXPECT_TRUE(r.scene.nodes[1].has_volslice);
+}
+
+// ── §6.6 functions: ────────────────────────────────────────────────────────────────────────────
+
+namespace {
+std::vector<std::string> names_of(const std::vector<FunctionDef> &defs) {
+  std::vector<std::string> out;
+  for (const FunctionDef &d : defs)
+    out.push_back(d.name);
+  return out;
+}
+} // namespace
+
+TEST(AriadneFunctions, BlockSplitsIntoDefunsInOrder) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"ARI(
+meta: { min_libcvc: "0.0.0" }
+root: [ { text: hi } ]
+functions: |
+  ; helpers
+  (defun double (x) (* 2 x))   ; a ) in a comment
+  (defun greet (name)
+    (str-concat "hi (" name ")"))
+)ARI");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(names_of(r.functions), (std::vector<std::string>{"double", "greet"}));
+  EXPECT_EQ(r.functions[0].source, "(defun double (x) (* 2 x))");
+  EXPECT_EQ(r.functions[1].source, "(defun greet (name)\n  (str-concat \"hi (\" name \")\"))");
+  ASSERT_TRUE(r.root.functions);
+  EXPECT_EQ(r.root.functions->prelude, r.functions[0].source + "\n" + r.functions[1].source + "\n");
+  for (const std::string &w : r.warnings)
+    EXPECT_EQ(w.find("functions:"), std::string::npos) << w;
+}
+
+TEST(AriadneFunctions, OnlyDefunsAndLaterWins) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+functions: |
+  (defun f (x) 1)
+  (set g 2)
+  loose
+  (defun (x) 3)
+  (defun f (x) 4)
+  (defun broken (x
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(names_of(r.functions), (std::vector<std::string>{"f"}));
+  EXPECT_EQ(r.functions[0].source, "(defun f (x) 4)");
+  EXPECT_TRUE(has_warning(r, "functions: holds only (defun name (params) body...) forms — "
+                             "skipped: (set g 2)"));
+  EXPECT_TRUE(has_warning(r, "skipped: loose"));
+  EXPECT_TRUE(has_warning(r, "skipped: (defun (x) 3)"));
+  EXPECT_TRUE(has_warning(r, "functions: 'f' is defined twice"));
+  EXPECT_TRUE(has_warning(r, "functions: a form does not parse"));
+  LoadResult bad = load_string("meta: { min_libcvc: \"0.0.0\" }\nfunctions: [ a ]\n");
+  EXPECT_TRUE(bad.functions.empty());
+  EXPECT_TRUE(has_warning(bad, "functions: must be a scalar"));
+}
+
+TEST(AriadneFunctions, ImportMergesAndOwnWins) {
+  SKIP_WITHOUT_YAML();
+  const std::string a = write_temp_ari("fn_lib_a.ari", "functions: |\n"
+                                                       "  (defun one () 1)\n"
+                                                       "  (defun shared () \"a\")\n");
+  const std::string b = write_temp_ari("fn_lib_b.ari", "functions: |\n"
+                                                       "  (defun shared () \"b\")\n"
+                                                       "  (defun two () 2)\n");
+  const std::string doc =
+      write_temp_ari("fn_importer.ari", "meta: { min_libcvc: \"0.0.0\" }\n"
+                                        "import: [fn_lib_a.ari, fn_lib_b.ari]\n"
+                                        "functions: |\n  (defun one () \"mine\")\n"
+                                        "root: [ { text: hi } ]\n");
+  LoadResult r = load_file(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(names_of(r.functions), (std::vector<std::string>{"one", "shared", "two"}));
+  EXPECT_EQ(r.functions[0].source, "(defun one () \"mine\")"); // own replaces the import's
+  EXPECT_EQ(r.functions[1].source, "(defun shared () \"b\")"); // the later import's
+  EXPECT_TRUE(has_warning(r, "functions: 'shared' is defined by two imports"));
+  EXPECT_FALSE(has_warning(r, "'one'"));
+}
+
+TEST(AriadneFunctions, AMountGetsOnlyWhatItIsGranted) {
+  SKIP_WITHOUT_YAML();
+  write_temp_ari("fn_mod.ari", "functions: |\n  (defun own () 0)\n"
+                               "init: (state-set \"x\" (str (quad 1)))\n"
+                               "root: [ { text: m } ]\n");
+  write_temp_ari("fn_mod_redefines.ari", "functions: |\n  (defun quad (x) 0)\n"
+                                         "root: [ { text: m } ]\n");
+  const std::string doc = write_temp_ari("fn_parent.ari", R"(
+meta: { min_libcvc: "0.0.0" }
+functions: |
+  (defun double (x) (* 2 x))
+  (defun quad (x) (double (double x)))
+  (defun unrelated () 7)
+root:
+  - load: fn_mod.ari
+    as: granted
+    functions: [quad]
+  - load: fn_mod.ari
+    as: bare
+  - load: fn_mod.ari
+    as: all
+    functions: "*"
+  - load: fn_mod.ari
+    as: one
+    functions: quad
+  - load: fn_mod.ari
+    as: missing
+    functions: [nope]
+  - load: fn_mod_redefines.ari
+    as: redefines
+    functions: [quad]
+)");
+  LoadResult r = load_file(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  const auto scope_names = [&](const char *as) {
+    const Widget *m = find_scope(r.root, std::string("includes.") + as);
+    EXPECT_NE(m, nullptr) << as;
+    EXPECT_TRUE(m && m->functions) << as; // every mount is a function scope, even an empty one
+    return m && m->functions ? names_of(m->functions->defs) : std::vector<std::string>{"?"};
+  };
+  // quad brings double, which it calls; the module's own come after.
+  EXPECT_EQ(scope_names("granted"), (std::vector<std::string>{"double", "quad", "own"}));
+  EXPECT_EQ(scope_names("bare"), (std::vector<std::string>{"own"}));
+  EXPECT_EQ(scope_names("all"), (std::vector<std::string>{"double", "quad", "unrelated", "own"}));
+  EXPECT_EQ(scope_names("one"), (std::vector<std::string>{"double", "quad", "own"}));
+  EXPECT_EQ(scope_names("missing"), (std::vector<std::string>{"own"}));
+  EXPECT_TRUE(has_warning(r, "functions: grants 'nope', which this document's functions: do not "
+                             "define"));
+  EXPECT_EQ(scope_names("redefines"), (std::vector<std::string>{"double", "quad"}));
+  EXPECT_TRUE(has_warning(r, "functions: 'quad' replaces the function of that name its mount "
+                             "granted"));
+  const Widget *granted = find_scope(r.root, "includes.granted");
+  ASSERT_NE(granted, nullptr);
+  EXPECT_EQ(granted->functions->prelude, "(defun double (x) (* 2 x))\n"
+                                         "(defun quad (x) (double (double x)))\n"
+                                         "(defun own () 0)\n");
+}
+
+// A grant passes down: a module can grant on what it was granted.
+TEST(AriadneFunctions, GrantsChainThroughNestedMounts) {
+  SKIP_WITHOUT_YAML();
+  write_temp_ari("fn_inner.ari", "root: [ { text: inner } ]\n");
+  write_temp_ari("fn_middle.ari", "root:\n  - load: fn_inner.ari\n    as: inner\n"
+                                  "    functions: [double]\n");
+  const std::string doc =
+      write_temp_ari("fn_outer.ari", "meta: { min_libcvc: \"0.0.0\" }\n"
+                                     "functions: |\n  (defun double (x) (* 2 x))\n"
+                                     "root:\n  - load: fn_middle.ari\n    as: middle\n"
+                                     "    functions: [double]\n");
+  LoadResult r = load_file(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *inner = find_scope(r.root, "includes.inner");
+  ASSERT_TRUE(inner && inner->functions);
+  EXPECT_EQ(names_of(inner->functions->defs), (std::vector<std::string>{"double"}));
 }
