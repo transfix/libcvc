@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
