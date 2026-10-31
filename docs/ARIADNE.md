@@ -1844,6 +1844,40 @@ a frame. `json-parse` and `json-encode` are pure, so reactive expressions may us
 
 ---
 
+### 10.5 WebSockets
+
+The `ws-*` verbs keep a WebSocket client open across ticks, for a server that pushes changes
+(a live feed) instead of being polled. Natively they use libcurl's WebSocket support (built with
+`ws` and `wss`, as the deps' libcurl is); in the browser build, the browser's own `WebSocket`
+(link with `-lwebsocket.js`, which the `cvc` target adds for Emscripten executables). A host
+without either has no `ws-*` verbs, so a document asks `(has? "ws-open")` and polls otherwise.
+
+| verb | what |
+|---|---|
+| `(ws-open URL [OPTS])`, `ws-open-async` | connect to a `ws://` or `wss://` URL; reply `{ok handle url error}` |
+| `(ws-send H TEXT)` | send a text message; `#t`, or an error when `H` is closed |
+| `(ws-poll H)` | the next message already in, or `nil`; never waits |
+| `(ws-recv H [SECONDS])`, `ws-recv-async` | the next message, waiting up to `SECONDS` (30); `nil` when none came |
+| `(ws-open? H)` | whether `H` is still open |
+| `(ws-close H [CODE])` | close `H` (code 1000) and forget it; `#t` if it was open, never an error |
+
+- `H` is a handle string (`"ws:3"`), so a program can keep it in state and use it on later
+  ticks. A host keeps at most 64 open.
+- A message is a dict `{type data code}`: `type` is `"text"` (`data` a string, ready for
+  `json-parse`), `"binary"` (`data` bytes), `"close"` (`code` the peer's close code, 1005 when it
+  sent none and 1006 when the connection dropped; `data` its reason) or `"error"`. A close or
+  an error is the last message; `ws-open?` is `#f` from then on. Fragmented messages arrive
+  whole; one longer than 16 MiB is an error and closes the connection.
+- `OPTS` takes `query`, `headers`, `auth` and credential values as the HTTP verbs do (§10.2,
+  §10.3), plus `timeout`, the seconds to connect (15). A browser's `WebSocket` can't send
+  request headers, so there `headers` and `auth` are refused; a server that wants a token takes
+  it in a message instead.
+- The host's policy (§10.3) checks the URL as its `http(s)` twin: `--net-allow
+  https://example.org` allows `wss://example.org/...`.
+- `ws-open` and `ws-recv` are async I/O calls like the HTTP verbs: the connect, or the wait,
+  runs on the background pool and the program parks. `ws-poll` is the one to call from an
+  `on_tick` that also does other work: it takes what has arrived and returns.
+
 ## 11. Caveats — what is not yet wired
 
 State plainly so authors are not misled. Each item cites the code; the roadmap items
