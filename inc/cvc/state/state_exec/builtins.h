@@ -116,7 +116,9 @@ value_t builtin_isinstance(std::span<const value_t> args); // (isinstance x Clas
 
 /// @name Exceptions (docs/STATE_EXEC_EXCEPTIONS.md)
 /// @{
-value_t builtin_error(std::span<const value_t> args); // (error message [data]): a RuntimeError
+value_t builtin_error(std::span<const value_t> args);  // (error message [data]): a RuntimeError
+value_t builtin_assert(std::span<const value_t> args); // (assert cond [message [data]]): an
+                                                       // AssertionError when cond is false
 /// @}
 
 /// @name Hashing and secure randomness

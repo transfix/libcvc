@@ -151,6 +151,7 @@ form and `if` dropped forms after its else branch, silently; scripts that wrappe
 **I/O:** `print`
 **Generator:** `generator`, `next`, `range`, `collect`, `gen-done?`
 **OOP:** `send` (method dispatch), `apply`
+**Errors:** `error`, `assert` ([Exceptions](#exceptions))
 **Hashing and secure randomness:** `sha256`, `sha256-hex`, `random-token` (below)
 **Stdlib:** `string.*`, `bytes.*`, `math.*`, `collections.*`, always loaded ([§11](#11-standard-library))
 
@@ -466,6 +467,20 @@ instance of `Exception` or a class derived from it. `raise` raises one, `error` 
   what was leaving.
 - `(error message [data])` is `(raise (RuntimeError message data))`. `(isinstance x Class)`
   works for any class.
+- `(assert cond [message [data]])` returns nil when `cond` is truthy. Otherwise it raises an
+  `AssertionError` (derived from `Exception`, not `RuntimeError`) whose message is
+  `assertion failed`, or `assertion failed: <message>` (a non-string message is printed), with
+  `data` as its data. Its traceback ends at the `(assert ...)` form, so a host that reports an
+  uncaught one (Ariadne's `failure_report`) shows the condition that failed:
+
+  ```lisp
+  (try (assert (= (+ 1 1) 3) "one and one")
+    (catch (AssertionError e) (get-attr e "message")))  ;; => "assertion failed: one and one"
+  (assert (> n 0) "n is positive")                       ;; uncaught:
+  ;; AssertionError: assertion failed: n is positive (at (assert (> n 0) "n is positive"))
+  ```
+
+  Ariadne's `ari test` runs documents whose programs assert (docs/ARIADNE.md §13).
 
 Every exception has `message`, `data`, `cause` (the exception being handled when it was raised),
 `origin` (`"dsl"`, `"builtin"` or `"native"`) and `traceback` (the expressions being evaluated,
