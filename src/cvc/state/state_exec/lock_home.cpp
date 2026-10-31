@@ -125,8 +125,10 @@ std::size_t lock_home::cache_hash::operator()(const cache_key &k) const noexcept
   return std::hash<std::string_view>{}(k.written) ^ (std::size_t(k.scope) * 0x9E3779B97F4A7C15ull);
 }
 
-lock_home::lock_home(std::shared_ptr<lock_manager> mgr, lock_sched_ops &ops)
-    : mgr_(std::move(mgr)), table_(mgr_->table()), ops_(ops) {
+lock_home::lock_home(std::shared_ptr<lock_manager> mgr, lock_sched_ops &ops,
+                     scheduling_policy policy)
+    : mgr_(std::move(mgr)), table_(mgr_->table()), ops_(ops),
+      prio_(policy != scheduling_policy::round_robin) {
   const lock_test_hooks *hooks = lock_test_hooks_get();
   const std::size_t capacity =
       hooks && hooks->home_cache_capacity ? hooks->home_cache_capacity : kDefaultCacheCapacity;
@@ -136,12 +138,12 @@ lock_home::lock_home(std::shared_ptr<lock_manager> mgr, lock_sched_ops &ops)
     free_.push_back(i);
   index_.reserve(capacity);
   lock_notes notes;
-  id_ = table_.attach_home(false, nullptr, nullptr, notes); // phase L1: no priorities, no port
-  deliver(notes);
+  id_ = table_.attach_home(prio_, nullptr, nullptr, notes); // no port before phase L3
+  deliver(notes); // none: an attach changes no edge and no base
 }
 
 lock_home::~lock_home() {
-  // 5.7. Phase L1 has no port to close. The detach ends every process of the home with
+  // 5.7. No port to close before phase L3. The detach ends every process of the home with
   // abandon and drops the cache's references; nothing it notifies targets this home.
   try {
     lock_notes notes;
@@ -413,7 +415,7 @@ std::optional<frame_outcome> lock_home::wait(process &p, home_request &req,
   pl.ticket_in_handler = p.in_signal_handler || p.in_watch_handler;
   pl.ticket_root.assign(root);
   pl.ticket_timeout = timeout;
-  deliver(notes); // relevels only (phase L2); none in L1
+  deliver(notes); // relevels only: the processes P now blocks, downstream
   if (br.state == ticket_state::queued) {
     p.lock_waiting = true;
     p.lock_deadline = deadline;
@@ -549,12 +551,16 @@ void lock_home::set_base(process &p) {
 void lock_home::deliver(const lock_notes &notes) {
   for (const lock_note &n : notes) {
     if (n.home != id_)
-      continue; // another home's: phase L3 posts it to that home's port
-    if (n.post.what == lock_post::kind::wake)
-      apply_wake(n.post.pid, n.post.tid);
-    else
-      apply_relevel(n.post.pid);
+      continue;         // another home's: phase L3 posts it to that home's port
+    apply_post(n.post); // this home's: at once (4.14)
   }
+}
+
+void lock_home::apply_post(const lock_post &post) {
+  if (post.what == lock_post::kind::wake)
+    apply_wake(post.pid, post.tid);
+  else
+    apply_relevel(post.pid);
 }
 
 void lock_home::apply_wake(int pid, std::uint64_t tid) {
@@ -638,6 +644,16 @@ void lock_home::check_quiescent() const {
       if (p.lock_waiting)
         fail("I2", who + " is lock_waiting with no ticket");
     }
+    // I8's quiescent clause: on a home that applies priorities a process carries read_inh's value
+    // (read here without its side effect on the coalescing flag); on any other home a relevel is
+    // never sent, so it carries none
+    const int inh = prio_ && rec ? rec->inh : lock_inf;
+    if (p.inherited_priority != inh)
+      fail("I8", who + " inherited_priority " +
+                     (p.inherited_priority == lock_inf ? std::string("INF")
+                                                       : std::to_string(p.inherited_priority)) +
+                     " != " + (inh == lock_inf ? std::string("INF") : std::to_string(inh)) +
+                     (prio_ ? ", the manager's" : " on a home that applies no priorities"));
     if (!rec)
       return;
     // I8's base clause.

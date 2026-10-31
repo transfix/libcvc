@@ -2,6 +2,7 @@
 // document's own arguments (doc_args.h: the argv list, the args: block, their read-only state and
 // the mount grant), and AppRuntime's host verbs and init: diagnostics.
 
+#include <algorithm>
 #include <chrono>
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/doc_args.h>
@@ -102,6 +103,21 @@ TEST(AriadneHostCli, RuntimeFlagsComeBeforeTheDocumentAndTheRestIsItsOwn) {
   EXPECT_EQ(o.doc, "doc.ari");
   EXPECT_EQ(o.doc_args, (std::vector<std::string>{"--fps", "5", "x"}));
   EXPECT_NE(misplaced_flag_note("ari", o.doc_args).find("'--fps'"), std::string::npos);
+}
+
+TEST(AriadneHostCli, SettleIsSecondsAboveZero) {
+  const char *ok[] = {"ari", "snapshot", "--settle", "2.5", "d.ari"};
+  const HostOptions o = parse_host_args(5, ok);
+  EXPECT_TRUE(o.error.empty()) << o.error;
+  EXPECT_DOUBLE_EQ(o.settle, 2.5);
+  const char *none[] = {"ari", "snapshot", "d.ari"};
+  EXPECT_DOUBLE_EQ(parse_host_args(3, none).settle, 0.0); // the default: kDefaultSettleSeconds
+  for (const char *bad : {"0", "-1", "soon", "2s"}) {
+    const char *argv[] = {"ari", "snapshot", "--settle", bad, "d.ari"};
+    EXPECT_NE(parse_host_args(5, argv).error.find("--settle needs a number of seconds"),
+              std::string::npos)
+        << bad;
+  }
 }
 
 TEST(AriadneHostCli, TimeoutIsSecondsAboveZero) {
@@ -1159,4 +1175,101 @@ TEST(AriadneModuleTick, AModulesInputLanesAreIgnoredWithAWarning) {
     told += w.find("the fragment's on_key: is ignored") != std::string::npos ||
             w.find("the fragment's on_signal: is ignored") != std::string::npos;
   EXPECT_EQ(told, 2);
+}
+
+// ── §7.6 a module's own requires: ───────────────────────────────────────────────────────────────
+
+namespace {
+// A module whose tick calls `absent-verb`, which no host provides, behind a has? guard, with
+// `requires` as its requires: block ("" for none).
+std::string guarded_module(const std::string &requires_block) {
+  return requires_block + "on_tick: (if (has? \"absent-verb\") (state-set \"t\" (absent-verb)))\n"
+                          "root:\n  - text: m\n";
+}
+
+std::vector<std::string> load_warnings(const fs::path &doc, const std::string &prefix) {
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, prefix);
+  art.set_backend(be);
+  return art.load(doc.string());
+}
+
+int count_with(const std::vector<std::string> &warnings, const std::string &text) {
+  return static_cast<int>(
+      std::count_if(warnings.begin(), warnings.end(),
+                    [&](const std::string &w) { return w.find(text) != std::string::npos; }));
+}
+} // namespace
+
+// A module's optional entry covers its own call: the load says the host lacks it, once, and does
+// not also warn about the call.
+TEST(AriadneModuleRequires, AnOptionalEntryCoversTheModulesCalls) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("mod_req_optional");
+  write(dir, "m.ari", guarded_module("requires:\n  - {name: absent-verb, optional: true}\n"));
+  const fs::path doc =
+      write(dir, "p.ari", "meta: {min_libcvc: 3.4.0}\nroot:\n  - load: m.ari\n    as: m\n");
+  const std::vector<std::string> warnings = load_warnings(doc, "ui.docs.mro");
+  EXPECT_EQ(count_with(warnings, "optional requirement absent-verb (module 'includes.m') is not "
+                                 "available on this host"),
+            1);
+  EXPECT_EQ(count_with(warnings, "calls (absent-verb"), 0);
+  EXPECT_EQ(warnings.size(), 1u) << warnings.front();
+}
+
+// Without it the call warns, as before; the document's own entry covers its modules too.
+TEST(AriadneModuleRequires, TheDocumentsEntryCoversItsModules) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("mod_req_document");
+  write(dir, "m.ari", guarded_module(""));
+  const fs::path bare =
+      write(dir, "bare.ari", "meta: {min_libcvc: 3.4.0}\nroot:\n  - load: m.ari\n    as: m\n");
+  EXPECT_EQ(count_with(load_warnings(bare, "ui.docs.mrb"),
+                       "on_tick: of mount 'includes.m' calls (absent-verb"),
+            1);
+  const fs::path covered = write(dir, "covered.ari",
+                                 "meta: {min_libcvc: 3.4.0}\n"
+                                 "requires:\n  - {name: absent-verb, optional: true}\n"
+                                 "root:\n  - load: m.ari\n    as: m\n");
+  const std::vector<std::string> warnings = load_warnings(covered, "ui.docs.mrc");
+  EXPECT_EQ(count_with(warnings, "calls (absent-verb"), 0);
+  EXPECT_EQ(count_with(warnings, "optional requirement absent-verb is not available"), 1);
+}
+
+// A module's entries are its own: they don't cover a call its parent makes.
+TEST(AriadneModuleRequires, AModulesEntryDoesNotCoverItsParent) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("mod_req_parent");
+  write(dir, "m.ari", guarded_module("requires:\n  - {name: absent-verb, optional: true}\n"));
+  const fs::path doc =
+      write(dir, "p.ari",
+            "meta: {min_libcvc: 3.4.0}\n"
+            "on_tick: (if (has? \"absent-verb\") (state-set \"t\" (absent-verb)))\n"
+            "root:\n  - load: m.ari\n    as: m\n");
+  const std::vector<std::string> warnings = load_warnings(doc, "ui.docs.mrp");
+  EXPECT_EQ(count_with(warnings, "on_tick: calls (absent-verb"), 1);
+  EXPECT_EQ(count_with(warnings, "of mount 'includes.m' calls (absent-verb"), 0);
+}
+
+// A module's required entry the host lacks fails the whole load, naming the module.
+TEST(AriadneModuleRequires, ARequiredEntryTheHostLacksFailsTheLoad) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("mod_req_hard");
+  write(dir, "m.ari", guarded_module("requires: [absent-verb]\n"));
+  const fs::path doc =
+      write(dir, "p.ari", "meta: {min_libcvc: 3.4.0}\nroot:\n  - load: m.ari\n    as: m\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.mrh");
+  art.set_backend(be);
+  try {
+    art.load(doc.string());
+    FAIL() << "the load should fail";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find("this host does not provide what the document requires: "
+                                         "absent-verb (module 'includes.m')"),
+              std::string::npos)
+        << e.what();
+  }
 }

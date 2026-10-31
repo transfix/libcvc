@@ -37,10 +37,13 @@
 #include <cvc/nav/belief_material.h>
 #include <cvc/nav/coef_energy_net.h>
 #include <cvc/nav/material_train.h>
+#include <cvc/physics/nav_plant.h>
+#include <cvc/physics/vehicle.h>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <limits>
+#include <memory>
 #include <random>
 #include <sstream>
 #include <string>
@@ -271,6 +274,23 @@ TEST(NavMaterialTrain, FullChainGradcheckDynamic) {
   d.v_blend = 0.1f;
   d.v_width = 0.03f;
   full_chain_gradcheck(cfg, "dynamic");
+}
+
+// The same chain through a vehicle simulation (material_integrator::jolt), here the four-wheel
+// model as its own plant (dyn4_rollout_plant): the plumbing of the Jolt rollout's tape and
+// reverse, exact where its forward is the model (physics_jolt_rollout_test runs it on Jolt). The
+// Humvee at the controller's wheelbase.
+TEST(NavMaterialTrain, FullChainGradcheckOnAPlant) {
+  material_loss_config cfg;
+  cfg.integrator = cvc::nav::material_integrator::jolt;
+  cfg.bicycle.L = 0.3f;
+  cfg.bicycle.a_max = 2.0f;
+  cfg.bicycle.a_lat_max = 1.5f;
+  cfg.bicycle.vmax = 1.5f;
+  cfg.dyn4 =
+      cvc::physics::nav_plant::dyn4_params_at(cvc::physics::vehicle_desc::humvee(), cfg.bicycle.L);
+  cfg.plant = std::make_shared<cvc::nav::dyn4_rollout_plant>();
+  full_chain_gradcheck(cfg, "plant");
 }
 
 // The same chains with an external force in the rollouts (material_batch::ext, a force patch per

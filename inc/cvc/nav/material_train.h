@@ -31,6 +31,9 @@
 // is identically zero, so it shifts J's value but seeds nothing.
 //
 // The rollout is the point-mass surrogate by default (the reference trainer's).
+// material_integrator::jolt takes it through a vehicle simulation, the Jolt Humvee
+// (integrate_plant_material; docs/NAV_TRAINING.md, "Training on Jolt"): the forward is
+// Jolt's, the gradient the four-wheel port-Hamiltonian model's at Jolt's states.
 // material_loss_config::integrator = bicycle takes the same loss through the deployed
 // kinematic bicycle instead (integrate_bicycle_material, P8b): the controller turns
 // the coefficients' forces into steering and acceleration, so training sees the
@@ -56,6 +59,7 @@
 #include <cvc/nav/coef_energy_net.h>
 #include <cvc/nav/geom_rollout.h>
 #include <cvc/nav/material.h>
+#include <memory>
 
 namespace cvc {
 namespace nav {
@@ -102,6 +106,7 @@ enum class material_integrator {
   surrogate, // the point-mass surrogate (integrate_surrogate_material), the reference trainer's
   bicycle,   // the deployed kinematic bicycle (integrate_bicycle_material), P8b
   dynamic,   // the bicycle's controller on the dynamic vehicle (integrate_dynamic_material), P8b
+  jolt,      // the bicycle's controller on a vehicle simulation (integrate_plant_material)
 };
 
 struct material_loss_config {
@@ -122,6 +127,18 @@ struct material_loss_config {
   // stays the controller's limits. The vehicle starts at rest in its further state, and
   // the vT L_vel compares is the rear axle's world velocity.
   diff::dyn_bike_params dynamic{};
+  // integrator == jolt: `plant` runs the forward (cvc::physics::jolt_rollout), reset to each batch;
+  // `dyn4` is the four-wheel model the gradient is, its wheelbase bicycle.L
+  // (cvc::physics::nav_plant::dyn4_params_at(desc, bicycle.L), then calibrated() to the plant:
+  // dyn4_ledger.h), on ground of friction ground_mu; hard_walls puts the patch's hard cells in the
+  // plant as walls. `bicycle` stays the controller's limits. The batch's agents share one dt, and
+  // the vT L_vel compares is the rear axle's world velocity, as on the dynamic vehicle. L_multi's
+  // short rollouts, many starts each, go through the kinematic bicycle
+  // (multi_start_penalty_bicycle). No external force (material_batch::ext) on it yet.
+  std::shared_ptr<rollout_plant> plant;
+  diff::dyn4_params dyn4{};
+  float ground_mu = 0.9f;
+  bool hard_walls = true;
   multi_start_params multi; // ms_h/ms_dt_mult/tau + start sampling (margin/mass synced)
   int num_threads = 0;
 };

@@ -22,6 +22,7 @@ deploys on and dropped straight into the swarm.
 - [The four-wheel vehicle: `dyn4_plant` (P8d)](#the-four-wheel-vehicle-dyn4_plant-p8d)
 - [An external force in the differentiable rollout](#an-external-force-in-the-differentiable-rollout)
 - [Energy in the loss: the power model (P8c)](#energy-in-the-loss-the-power-model-p8c)
+- [Training on Jolt: `rollout_kind::jolt`](#training-on-jolt-rollout_kindjolt)
 - [Scene source](#scene-source)
 - [CPU vs CUDA (device-resident)](#cpu-vs-cuda-device-resident)
 - [Exporting weights](#exporting-weights)
@@ -109,6 +110,7 @@ for both — only the integrator differs.**
 | `rollout_kind::surrogate` *(default)* | point-mass `sdf_rollout` (IPC wall force + goal spring + damping) | `(o, v)` | smooth, well-conditioned | the recommended default — refines the basin and **improves** reach |
 | `rollout_kind::bicycle` | the FULL deployment kinematic-bicycle integrator (`bicycle_rollout`), differentiated | `(o, θ, sp)` | correct but non-smooth (governor branches) | you want to train against the *exact* deployment dynamics |
 | `rollout_kind::dynamic` | the bicycle's controller driving the dynamic single-track vehicle (`dyn_bike_step`, below) | `(o, θ, vx)` + `(vy, r, δ, a)` | the bicycle's branches plus the tires' grip | you want the policy to learn what a real vehicle can do (P8b); CPU only |
+| `rollout_kind::jolt` | the bicycle's controller driving a vehicle simulation, the Jolt Humvee (`train_config::plant`, [below](#training-on-jolt-rollout_kindjolt)) | the four-wheel model's `dyn4_state`, held by the plant | the four-wheel pH model's, at Jolt's states, calibrated to Jolt's ledger | you want the vehicle in the loop to be the physics itself; CPU only |
 
 ```cpp
 train_config cfg;
@@ -441,8 +443,8 @@ top three then on the 20 held-out seeds against the seed.
 Not yet:
 - a learned, state-dependent policy that beats the seed on Jolt outside the CI (a tuned
   constant basin does, above);
-- pycvc (its `nav_train_coef_mlp` takes rollout 0/1 only, and the material trainer's binding
-  turns on only the bicycle);
+- the dynamic vehicle in pycvc (its `nav_train_coef_mlp` takes rollout 0/1 only, and the
+  material trainer's binding turns on the bicycle and Jolt, not this vehicle);
 - a CUDA build of the plant (it is `CVC_HD`, but nothing compiles it for the device yet).
 
 ## The four-wheel vehicle: `dyn4_plant` (P8d)
@@ -866,6 +868,206 @@ scenes, 30 s each, and judged on the runs of two held-out seeds that hit no othe
      blocking losses, on the same intents.
 - Not yet in the torch twin. Like any change to the loss, it must reach `sdf_nav`'s
   `train_bicycle` before the two are compared.
+
+## Training on Jolt: `rollout_kind::jolt`
+
+The other rollouts train through a model of the vehicle. `rollout_kind::jolt` trains through the
+vehicle simulation itself: Jolt moves the vehicles (with walls, contacts, the driver model, the
+drivetrain and the tires), and the gradient comes from the four-wheel port-Hamiltonian model
+(`dyn4_plant`, above) evaluated at the states Jolt reached:
+
+```
+x[t+1] = f(x[t], u[t]) + xi[t]      xi[t]: what Jolt did beyond the model, held fixed
+```
+
+The forward is Jolt's to the bit. The backward is the model's Jacobian along Jolt's trajectory
+(`dyn4_bike_step_bwd` at Jolt's state, step by step), so the gradient is the model's estimate of
+Jolt's. The model's books are calibrated to Jolt's own energy ledger first (`calibrate_dyn4`), so
+it moves energy into motion as Jolt does. Jolt is on the forward path and never differentiated.
+
+```cpp
+#include <cvc/nav/coef_train.h>
+#include <cvc/physics/jolt_rollout.h>
+
+const auto scene = cvc::nav::city_scene(96);
+const auto humvee = cvc::physics::vehicle_desc::humvee();
+cvc::nav::train_config cfg;
+cfg.veh_L = 0.35f;        // its 3.30 m wheelbase at about 0.106 normalized units per metre
+cfg.veh_a_max = 0.3f;     // 2.8 m/s^2
+cfg.veh_a_lat_max = 0.5f; // 4.7 m/s^2
+auto jolt = std::make_shared<cvc::physics::jolt_rollout>(humvee, cfg.veh_L);
+cfg.rollout = cvc::nav::rollout_kind::jolt;
+cfg.plant = jolt;
+cfg.dyn4 = cvc::physics::nav_plant::dyn4_params_at(humvee, cfg.veh_L);
+
+// Calibrate the model to Jolt: drive 16 Humvees for 200 steps under the untrained policy, fit.
+const auto ticks = cvc::nav::record_plant_ticks(scene, cfg, *jolt, 16, 200, /*seed=*/1);
+const auto cal = cvc::nav::calibrate_dyn4(cfg.dyn4, cvc::nav::bike_veh_of(scene, cfg),
+                                          cfg.ground_mu, ticks);
+cfg.dyn4 = cvc::nav::calibrated(cfg.dyn4, cal);
+cfg.dyn4_price = cal.price; // what w_energy's gradient prices the port with
+
+cvc::nav::coef_trainer tr(cfg);
+tr.train(scene); // each batch: a fresh Jolt world, one copy of the scene per agent
+```
+
+**The seam** (`cvc/nav/rollout_plant.h`). nav does not depend on physics, so the trainer talks to
+a `rollout_plant`: `reset` a batch, `step` every agent's command, read each agent's `state`
+(the model's `dyn4_state`) and the step's energy `lines`, and `save` / `restore` the whole run.
+`cvc::physics::jolt_rollout` is the Jolt one. `cvc::nav::dyn4_rollout_plant` is the model itself
+(xi = 0), which checks the trainer's plumbing against finite differences exactly.
+
+**The Jolt plant** (`cvc/physics/jolt_rollout.h`):
+
+- Each `reset()` builds a world: flat ground, the scene's obstacles as static boxes (its raster's
+  runs of cells merged into rectangles), and a `nav_plant` driving one vehicle per agent through
+  the driver model. Each agent drives its own copy of the scene, laid out on a grid, so a batch is
+  n independent runs that Jolt steps as separate islands.
+- The vehicles start at the height they rest at and settle for 5 ticks. A start where the body
+  would stand on a wall is turned, 15 degrees at a time, to the nearest heading at which it fits.
+  `train_config::start_clearance` keeps starts half a wheelbase from obstacles by default.
+- `state()` reads the vehicle back as the model's state: the rear axle and heading, the centre of
+  mass's velocity and yaw rate, heave, roll and pitch from rest and their rates, the steering
+  angle, and the model's own drive actuator run on the commands (Jolt has no such state).
+- `lines()` maps the step's ledger (`nav_plant::ledger_step`) onto the model's books: the port
+  (supplied + idle + drivetrain_split - drivetrain - brake), tire, drag, rolling, damper,
+  stored. `drawn` is what the source paid, and `contact` marks a step that touched a wall or
+  another vehicle.
+- `save()` / `restore()` replay a batch bit for bit (`nav_plant::save`, which includes
+  `world::save`). The finite-difference checks rely on it.
+
+**The window** (`coef_trainer::loss_and_grad`). All agents step together, since one world holds
+them. The loss is the same as the other rollouts' (goal distance, collision margin on the SDF,
+energy), on Jolt's positions. The window starts where the plant is, so `loss_and_grad` is not
+pure on this rollout: save the plant before a window and restore it to repeat one.
+
+**Energy.** With `w_energy`, the term's value is what Jolt's source drew each step. Its gradient
+goes through the calibrated port: `dyn4_step_energy` = hdt (price.drive softplus(port) +
+price.idle), with `port` the model's y^T u at the step's end.
+
+**The calibration** (`cvc/nav/dyn4_ledger.h`), per round:
+
+1. **Drag, rolling resistance and the dampers**: the ratio of Jolt's line to the model's, which
+   is linear in each.
+2. **The drive and the tires**, together, by Gauss-Newton on the one-tick twist (vx, vy and the
+   yaw rate times the wheelbase), from Jolt's state under the tick's command. The drive is
+   `dyn4_params::drive_gain`, `brake_gain`, `resist_comp` (a driver that trims to the command
+   makes up the resistances) and its lag `tau_drive`; the tires are B on both axles.
+
+Then, once:
+
+3. **The books' tire line** (NNLS): the model's lateral slip loss and a longitudinal-slip term,
+   since the model has no wheel spin.
+4. **The price** (NNLS): source energy per unit of positive port power, and idle power.
+
+The new `dyn4_params` drive fields default to the command as it is, so a model that is not
+calibrated steps bit for bit as before.
+
+**Measured** (`physics_jolt_rollout_test`, Windows MSVC Release; the Humvee on the city, 16
+agents, 200 steps each for the fit and for the held-out runs, other starts and goals):
+
+| | fitted | held out, before | held out, after |
+|---|---|---|---|
+| drive | gain 1.00, brake 1.00, trim 0, lag 0.068 s (spec 0.1 s) | | |
+| tires, drag, rolling, dampers | B x0.81, x1.00, x1.02, x1.32 | | |
+| dissipation (tire + drag + rolling + dampers) | | -46.7% | -10.5% |
+| drawn (fuel) | price 3.79 J per port J, idle 37 kW | (no price) | +3.5%, r2 0.53 |
+| one-tick twist rms | | 0.0183 | 0.0181 |
+
+The model's dynamics were already close to Jolt's (`nav_plant::kJoltTireStiffness` was fitted
+to Jolt's one-tick residual). Most of what the calibration adds is the energy books and the
+price.
+
+**The gradient against Jolt** (`JoltRollout.GradientAgreesWithJoltFiniteDifferences`: 32 agents,
+a 30-step window after 20 steps under way, central differences of the loss on Jolt with the plant
+restored between the two sides):
+
+| direction | model | Jolt | rel |
+|---|---|---|---|
+| alpha's output bias | -9.56e-3 | -1.05e-2 | 0.047 |
+| beta's | +5.18e-3 | +4.68e-3 | 0.050 |
+| gamma's | -4.35e-3 | -3.81e-3 | 0.065 |
+| along the gradient | 2.47e-2 | 3.12e-2 | ratio 1.26 |
+
+From rest a short window barely moves the vehicles. The loss then changes less under a small
+step in the parameters than Jolt's own float arithmetic leaves in it (the copies sit hundreds of
+metres from its origin), so the check starts with the vehicles under way.
+
+**Training.** 25 outer steps on one batch (a 60-step horizon in windows of 10) lower its horizon
+loss on Jolt from 1.2344 to 1.2321, a drop like the dynamic rollout's own test. A Jolt Humvee step
+costs about 80-90 us with the ledger on: one world, separate islands, no worker threads. So the
+default batch (192 agents x 28 steps) is about 0.5 s of Jolt per outer step.
+
+**The material trainer** (`material_integrator::jolt`, `material_train.h`). The material loss
+can be taken through Jolt too: `integrate_plant_material` (`material.h`) runs
+`integrate_dynamic_material`'s controller with its commands driving the plant. The VJP replays
+the material controller's reverse and the four-wheel model's along the plant's tape.
+
+```cpp
+cvc::nav::train_config tc;           // the controller's limits, for the calibration
+tc.veh_L = 0.35f;
+tc.veh_a_max = 0.3f;
+tc.veh_a_lat_max = 0.5f;
+cvc::physics::use_jolt_rollout(tc, cvc::nav::city_scene(96), humvee); // plant, dyn4, price
+
+cvc::nav::material_loss_config cfg;
+cfg.integrator = cvc::nav::material_integrator::jolt;
+cfg.bicycle.L = tc.veh_L;            // the controller, as on the bicycle
+cfg.bicycle.a_max = tc.veh_a_max;
+cfg.bicycle.a_lat_max = tc.veh_a_lat_max;
+cfg.plant = tc.plant;
+cfg.dyn4 = tc.dyn4;
+cvc::nav::material_loss_and_grad(model, batch, cfg, grads);
+```
+
+- **The batch's world.** Each call resets Jolt to the batch:
+  - each agent's own discs as 16-sided prisms and, with `hard_walls`, its patch's hard cells
+    (phi 0, one cell per unit) as boxes;
+  - every agent launched at its start speed (`rollout_batch::speed`: the chassis set moving, the
+    wheels spinning up in the first step, about 5-8% of the speed);
+  - room of `vmax dt max(H)` around each agent's obstacles.
+
+  So the loss is a function of the weights and the batch, and finite differences of it are
+  well defined.
+- **Limits.** The batch's agents share one `dt`. An agent past its `H` is frozen, as the other
+  rollouts freeze it. `L_multi`'s many short rollouts run on the kinematic bicycle. There is no
+  external force on this rollout yet.
+
+`use_jolt_rollout(cfg, scene, desc, agents, steps)` (`jolt_rollout.h`) is the one-call setup the
+coef trainer's example above spells out: the plant, the calibrated model and its price.
+
+Measured (`physics_jolt_rollout_test`, the Humvee at 0.106 units per metre; 24 agents of the
+material fixture, under way at 2.8 m/s, 40 steps of 0.06 s, every fourth with a block of hard
+cells):
+
+| | model | Jolt | rel |
+|---|---|---|---|
+| along the gradient | 3.07 | 2.57 | 0.089 |
+| `gamma_head.2.weight` | 1.239 | 1.245 | 0.002 |
+| `gamma_head.0.weight` | 1.150 | 1.148 | 0.001 |
+| `goal_enc.0.weight` | 0.947 | 0.980 | 0.017 |
+
+20 Adam steps at 1e-3 on that batch lower its loss on Jolt from 23.97 to 21.65. On the model as
+its own plant, the full chain's gradcheck (`NavMaterialTrain.FullChainGradcheckOnAPlant`) matches
+the dynamic vehicle's: dir_rel 7.1e-4, worst 5.5e-3 over 64 weights.
+
+**From Python** (pycvc):
+
+- `nav_train_coef_mlp_jolt(occ, ..., vehicle, veh_L, veh_a_max, veh_a_lat_max, calib_agents,
+  calib_steps, out_path)` trains the coefficient policy on Jolt and returns the calibration as a
+  dict. `vehicle` is "humvee" or "roboracer".
+- `nav_material_trainer_set_jolt(handle, 1, vehicle, L, dt, ...)` turns a material trainer's
+  loss onto Jolt, calibrating first, and returns the calibration.
+  `nav_material_trainer_integrator` then reads "jolt".
+
+Both are new symbols, so a caller can tell whether its pycvc has them (`hasattr`).
+`test_pycvc_nav_train.py`'s `test_jolt_integrator` checks the material trainer's: the loss changes
+from the point mass's, repeats, and descends over 10 steps.
+
+**Tests:** `physics_jolt_rollout_test`. The model-plant checks are in `nav_coef_train_test`:
+`JoltRolloutOnTheModelMatchesFiniteDifference` (dir_rel 1.3e-2, and 3.0e-5 with the energy term)
+and `CalibrationRecoversAPerturbedModel` (a model with known changes is recovered to three digits,
+and its held-out books close within 0.05%).
 
 ## Scene source
 

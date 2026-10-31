@@ -67,6 +67,7 @@ public:
   void text_value_colored(const char *label, const std::string &value, const float rgb[3]) override;
   void separator() override;
   void progress_bar(const char *label, float fraction, const std::string &overlay) override;
+  void spinner(const char *label, double seconds, bool ascii) override; // a turning arc
   bool button(const char *label) override;
   bool menu_item_action(const char *label) override;
   bool item_clicked() override; // §4.6 widget on_click: ImGui::IsItemClicked() on the last item

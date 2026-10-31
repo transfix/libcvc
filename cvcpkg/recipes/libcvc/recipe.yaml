@@ -165,10 +165,12 @@ recipe:
 provides: ["libcvc"]
 
 source:
-  # The recipe is co-located with the libcvc source tree. `pack-from-prefix`
-  # (see cvcpkg roadmap) does not consume this field, but the schema
-  # requires it; `../../..` points at the libcvc repo root for tools that walk
-  # the source tree.
+  # Co-located with the libcvc source tree.
+  # `path` is counted from cvcpkg/recipes/_vendored/, where `cvcpkg build`
+  # looks first, so `../../..` is the libcvc repo root (CVC_SOURCE_DIR).
+  # `cvcpkg recipe push` does not bundle it: counted from cvcpkg/, its
+  # fallback base, the same path points outside the repo.
+  # The publish workflow's `cvcpkg pack --from-prefix` does not read it.
   type: vendored
   path: ../../..
 

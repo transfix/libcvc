@@ -19,6 +19,7 @@
 #include <cvc/core/world_clock_binding.h>
 #include <cvc/core/world_units.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_exec/async_scheduler.h> // PR05: the policy exec_scheduler() has
 #include <filesystem>
 #include <future> // compute_async: deterministic wait on on_done via a promise
 #include <gtest/gtest.h>
@@ -1088,6 +1089,20 @@ TEST_F(AppTest, ThreadPoolActiveCount) {
   ctx.setThreadPoolSize(original_size);
 }
 
+// Wait until the background pool has nothing queued or running (bounded). The two counts take the
+// pool's lock one at a time, so the queue is read first: a task leaves the queue and counts as
+// running under one lock, and stops counting once its body has returned. Read the other way round,
+// a task taken between the two reads was in neither, and the pool looked idle while it ran. (Exact
+// while no task submits another, as here.)
+static bool wait_pool_idle(app &a, int ms = 5000) {
+  for (int i = 0; i < ms; i++) {
+    if (a.getPendingThreadCount() == 0 && a.getActiveThreadCount() == 0)
+      return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return false;
+}
+
 TEST_F(AppTest, ThreadPoolInterruption) {
   std::atomic<bool> task_started(false);
   std::atomic<bool> task_interrupted(false);
@@ -1109,8 +1124,10 @@ TEST_F(AppTest, ThreadPoolInterruption) {
       },
       PRIORITY_NORMAL, true);
 
-  // Give task time to start
-  boost::this_thread::sleep_for(boost::chrono::milliseconds(50));
+  // Wait for the task to start (bounded). It used to get a fixed 50 ms, which a loaded machine
+  // overran: the task had not started in 5-21 of 30 runs here with a build running.
+  for (int i = 0; i < 5000 && !task_started.load(); i++)
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(1));
   EXPECT_TRUE(task_started.load());
 
   // Interrupt the thread
@@ -1234,8 +1251,8 @@ TEST_F(AppTest, ThreadPoolStateConsistency) {
         PRIORITY_NORMAL, true);
   }
 
-  // Wait for all tasks to complete
-  boost::this_thread::sleep_for(boost::chrono::milliseconds(200));
+  // Wait for all tasks to complete (bounded; a fixed 200 ms was overrun on a loaded machine)
+  ASSERT_TRUE(wait_pool_idle(ctx));
 
   // Should have completed 4 tasks (task 2 threw exception)
   EXPECT_EQ(completed.load(), 4);
@@ -1385,20 +1402,6 @@ TEST_F(AppTest, ThreadPoolFloodPastPoolSizeCompletes) {
   EXPECT_EQ(ctx.getActiveThreadCount(), 0u);
   EXPECT_EQ(ctx.getPendingThreadCount(), 0u);
   ctx.setThreadPoolSize(original_size);
-}
-
-// Wait until the background pool has nothing queued or running (bounded). The two counts take the
-// pool's lock one at a time, so the queue is read first: a task leaves the queue and counts as
-// running under one lock, and stops counting once its body has returned. Read the other way round,
-// a task taken between the two reads was in neither, and the pool looked idle while it ran. (Exact
-// while no task submits another, as here.)
-static bool wait_pool_idle(app &a, int ms = 5000) {
-  for (int i = 0; i < ms; i++) {
-    if (a.getPendingThreadCount() == 0 && a.getActiveThreadCount() == 0)
-      return true;
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
-  return false;
 }
 
 // Anonymous tasks run on persistent workers: never more OS threads than the pool's size, the
@@ -3629,4 +3632,91 @@ TEST_F(AppTest, ClockKeysUnderAPrefixMatchThePrefixConstructor) {
   cvc::world_clock_binding b(ctx, ctx.world_clock(), "a.sim");
   EXPECT_EQ(b.keys().realized_speed, "a.sim.realized_speed");
   EXPECT_EQ(b.key("custom"), "a.sim.custom");
+}
+
+// PR-5 (docs/STATE_EXEC_LOCKS.md 7.3, 7.4): app::exec_scheduler() is built with the policy
+// state_exec.policy names, round_robin when it is unset (today's), and fixed then. An unknown
+// value is logged and round_robin used. state_exec.process_class is read then too, and its
+// result, or an unknown value, logged.
+TEST(AppExecScheduler, PR05_PolicySetting) {
+  using cvc::state_exec::scheduling_policy;
+  {
+    app a;
+    EXPECT_EQ(a.exec_scheduler().policy(), scheduling_policy::round_robin);
+  }
+  for (const auto &[name, policy] :
+       {std::pair<const char *, scheduling_policy>{"round_robin", scheduling_policy::round_robin},
+        {"priority", scheduling_policy::priority},
+        {"priority_rr", scheduling_policy::priority_rr}}) {
+    app a;
+    cvc::state::instance(a)("state_exec.policy").value(name);
+    EXPECT_EQ(a.exec_scheduler().policy(), policy) << name;
+    // Fixed when built: no runtime set_policy (7.3).
+    cvc::state::instance(a)("state_exec.policy").value("round_robin");
+    EXPECT_EQ(a.exec_scheduler().policy(), policy) << name;
+  }
+  {
+    app a;
+    const std::string log_key("pr05_log");
+    a.data(log_key, std::string());
+    a.properties("system.log_output", log_key);
+    cvc::state::instance(a)("state_exec.policy").value("fifo");
+    cvc::state::instance(a)("state_exec.process_class").value("idle");
+    EXPECT_EQ(a.exec_scheduler().policy(), scheduling_policy::round_robin);
+#ifndef USING_LOG4CPLUS_DEFAULT
+    const std::string logged = a.data<std::string>(log_key);
+    EXPECT_NE(logged.find("state_exec.policy: unknown value 'fifo'"), std::string::npos) << logged;
+    EXPECT_NE(logged.find("state_exec.process_class: unknown value 'idle'"), std::string::npos)
+        << logged;
+#endif
+  }
+  {
+    // normal, the one class a test process can take without slowing the tests after it (never
+    // above normal): the result is logged, applied or refused (on Linux a process started below
+    // normal can't come back up unprivileged).
+    app a;
+    const std::string log_key("pr05_class_log");
+    a.data(log_key, std::string());
+    a.properties("system.log_output", log_key);
+    cvc::state::instance(a)("state_exec.process_class").value("normal");
+    a.exec_scheduler();
+#ifndef USING_LOG4CPLUS_DEFAULT
+    const std::string logged = a.data<std::string>(log_key);
+    EXPECT_NE(logged.find("state_exec.process_class: "), std::string::npos) << logged;
+    EXPECT_NE(logged.find("normal"), std::string::npos) << logged;
+#endif
+  }
+}
+
+// The build reads the tree, whose reads are interruption points. A thread whose interruption is
+// pending (a pool worker at app shutdown) still builds the scheduler whole, with its settings,
+// and the interruption stays pending for the thread's next interruption point.
+TEST(AppExecScheduler, BuildsOnAnInterruptedThread) {
+  using cvc::state_exec::scheduling_policy;
+  app a;
+  cvc::state::instance(a)("state_exec.policy").value("priority_rr");
+  cvc::state::instance(a)("state_exec.process_class").value("normal");
+  std::atomic<bool> interrupted{false};
+  std::string outcome;
+  boost::thread t([&] {
+    while (!interrupted.load())
+      boost::this_thread::yield();
+    try {
+      outcome =
+          a.exec_scheduler().policy() == scheduling_policy::priority_rr ? "built" : "built wrong";
+    } catch (const boost::thread_interrupted &) {
+      outcome = "interrupted while building";
+      return;
+    }
+    try {
+      boost::this_thread::interruption_point();
+      outcome += ", interruption lost";
+    } catch (const boost::thread_interrupted &) {
+      outcome += ", interruption pending";
+    }
+  });
+  t.interrupt();
+  interrupted = true;
+  t.join();
+  EXPECT_EQ(outcome, "built, interruption pending");
 }

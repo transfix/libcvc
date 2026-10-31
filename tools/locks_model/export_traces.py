@@ -11,7 +11,9 @@ Phase L1 (docs/STATE_EXEC_LOCKS_PROTOCOL.md 4.4): every home attaches with prio 
 manager accepts one home. So every scenario runs with its homes merged into one home of prio
 false (the multi-home scenarios whose assertions do not hold on one home, or that need L2's
 inheritance, are left out and listed on stderr), and the random episodes are the seeds whose
-world is one home of prio false.
+world is one home of prio false. Phase L2 adds the same on one home of prio true (a scheduler
+under priority_rr), files named l2_*: the inheritance scenarios (L2_SCENARIOS) with their homes
+merged into that home, and the random episodes of the seeds whose world is one home of prio true.
 
 usage: python -I export_traces.py OUTDIR
 
@@ -236,16 +238,17 @@ class LoggingManager(lockmodel.Manager):
 
 # -- scenarios on one home ------------------------------------------------------------------------
 
-def one_home_mk(created):
-    """scenarios.mk with every home merged into home 1, of prio false (protocol 4.4 in L1), on a
-    manager that accepts one home; a late home stays a late home (prio false)."""
+def one_home_mk(created, prio=False):
+    """scenarios.mk with every home merged into home 1, of prio false (protocol 4.4 in L1) or, for
+    phase L2, of prio `prio`, on a manager that accepts one home; a late home stays a late home
+    (prio false)."""
     def mk(homes, procs, reqs, kinds=('wait', 'wait_dl', 'ifavail', 't0'), mutation=None, **kw):
         kw = dict(kw)
         late = [(h, False) for h, _ in kw.pop('late_homes', ())]
         lids = set(h for h, _ in late)
         procs = [(hid if hid in lids else 1, pid, owner, base) for hid, pid, owner, base in procs]
         kw.pop('one_home', None)
-        cfg = world.Config([(1, False)], procs, reqs, kinds=kinds, max_depth=3, max_hdepth=2, signals=2,
+        cfg = world.Config([(1, prio)], procs, reqs, kinds=kinds, max_depth=3, max_hdepth=2, signals=2,
                            kills=(True, False), destroy=True, prio_values=(-10, -2, 0, 2, 5, 10),
                            mutation=mutation, prio_changes=3, req_per_proc=5, late_homes=late,
                            one_home=True, **kw)
@@ -255,13 +258,20 @@ def one_home_mk(created):
     return mk
 
 
-def run_scenarios(out):
+# the inheritance scenarios phase L2 runs on one home of prio true
+L2_SCENARIOS = ('scenario_chain_cap8', 'scenario_coalesce', 'scenario_impl_note', 'scenario_l2_one_home',
+                'scenario_pi11', 'scenario_pi9', 'scenario_set_base')
+
+
+def run_scenarios(out, prio=False):
     skipped = []
     names = sorted(n for n in dir(scenarios) if n.startswith('scenario_'))
+    if prio:
+        names = [n for n in names if n in L2_SCENARIOS]
     for name in names:
         fn = getattr(scenarios, name)
         created = []
-        scenarios.mk = one_home_mk(created)
+        scenarios.mk = one_home_mk(created, prio)
         try:
             fn()
         except Violation as v:
@@ -277,34 +287,35 @@ def run_scenarios(out):
             skipped.append('%s (%d worlds)' % (name, len(created)))
             continue
         # scenario_one_home_refusal returns from its except clause: the refusal is its last line
-        out['scenario_' + name[len('scenario_'):]] = (
-            ['# scenarios.py %s, its homes merged into one home of prio false' % name]
+        out[('l2_' if prio else '') + 'scenario_' + name[len('scenario_'):]] = (
+            ['# scenarios.py %s, its homes merged into one home of prio %s'
+             % (name, 'true' if prio else 'false')]
             + created[0].M.lines)
     return skipped
 
 
 # -- random runs on one home ------------------------------------------------------------------------
 
-def one_home_seeds(coalesce, count, start=1):
-    """The first `count` seeds from `start` whose random_runs world is one home of prio false
-    (phase L1) with the given coalescing."""
+def one_home_seeds(coalesce, count, start=1, prio=False):
+    """The first `count` seeds from `start` whose random_runs world is one home of prio `prio`
+    (false: phase L1, true: phase L2) with the given coalescing."""
     seeds = []
     seed = start
     while len(seeds) < count:
         if random_runs.coalesce_of(seed) == coalesce:
             rnd = random.Random(seed)
             w = random_runs.make_world(rnd, seed % 3, coalesce)
-            if len(w.cfg.homes) == 1 and not w.cfg.late_homes and not w.cfg.homes[0][1]:
+            if len(w.cfg.homes) == 1 and not w.cfg.late_homes and w.cfg.homes[0][1] == prio:
                 seeds.append(seed)
         seed += 1
     return seeds
 
 
-def run_random(out, steps):
+def run_random(out, steps, prio=False):
     for coalesce in (False, True):
-        for seed in one_home_seeds(coalesce, 4):
+        for seed in one_home_seeds(coalesce, 4, prio=prio):
             n, w = random_runs.run_episode(seed, steps)
-            out['random_seed%d' % seed] = (
+            out[('l2_' if prio else '') + 'random_seed%d' % seed] = (
                 ['# random_runs.py seed %d (coalescing %s): %d steps then the fair drain; procs %r, '
                  'cache %r, inheritance %r' % (seed, 'on' if coalesce else 'off', n, w.cfg.procs,
                                                w.cfg.cache, w.cfg.inheritance)]
@@ -323,6 +334,8 @@ def main():
     out = {}
     skipped = run_scenarios(out)
     run_random(out, 200)
+    skipped += ['%s (prio true)' % s for s in run_scenarios(out, prio=True)]
+    run_random(out, 200, prio=True)
     _os.makedirs(outdir, exist_ok=True)
     total = 0
     for name in sorted(out):
