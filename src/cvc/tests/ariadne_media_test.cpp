@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdlib>
 #include <chrono>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
@@ -830,7 +831,11 @@ TEST(MediaBackground, ColouredTextDoesNotPaintTheBackdropBesideIt) {
   FtxuiBackend b(opt);
   rt.set_backend(&b);
   rt.set_root(std::move(lr.root));
+#if defined(_WIN32)
+  _putenv_s("COLORTERM", "truecolor");
+#else
   setenv("COLORTERM", "truecolor", 1);
+#endif
   std::string frame;
   ASSERT_TRUE(settle([&] { frame = b.render_to_string(rt, 60, 0, true); },
                      [&] { return read_state(app, "s.bg") == "ready"; }));
