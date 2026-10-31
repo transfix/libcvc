@@ -453,6 +453,25 @@ value_t intrinsic_state_root_path(intrinsics_context *ctx, std::span<const value
   return value_t(ctx->root_path);
 }
 
+namespace {
+// The process an intrinsic speaks for: the one the scheduler is stepping, as self-pid and
+// budget-usage find it, else the context's own (a bare evaluator, a unit-test context). A host
+// that runs programs on a shared scheduler (Ariadne's action and resident lanes) gives its context
+// a placeholder process that never runs and no pid, so the resource readers and state-watch must
+// not use those.
+process *running_process(const intrinsics_context *ctx) {
+  if (ctx->sched)
+    if (const process_ptr &running = ctx->sched->current_process())
+      return running.get();
+  return ctx->proc.get();
+}
+int running_pid(const intrinsics_context *ctx) {
+  if (ctx->sched && ctx->sched->current_pid() >= 0)
+    return ctx->sched->current_pid();
+  return ctx->pid;
+}
+} // namespace
+
 value_t intrinsic_state_watch(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 2, "state-watch");
   require_root(ctx, "state-watch");
@@ -463,21 +482,24 @@ value_t intrinsic_state_watch(intrinsics_context *ctx, std::span<const value_t> 
   // Navigate to the node (create if needed so we can watch it)
   (void)(*ctx->root)(path);
 
-  // Allocate a watch ID
-  int watch_id = ctx->proc->next_watch_id++;
+  // Allocate a watch ID, on the process the handler belongs to
+  process *self = running_process(ctx);
+  if (!self)
+    throw dsl_error("RuntimeError", "state-watch: no process to watch for");
+  int watch_id = self->next_watch_id++;
 
   // Register the handler.  The scheduler polls watched paths each step
   // instead of using boost::signals2 (which segfaults on macOS).
   if (ctx->sched) {
     ctx->sched->set_watch_root(ctx->root);
-    ctx->sched->register_watch_handler(ctx->pid, watch_id, handler, path);
+    ctx->sched->register_watch_handler(running_pid(ctx), watch_id, handler, path);
   } else {
     // No-scheduler path (unit tests): record handler + initial value.
     std::string initial;
     auto *node = ctx->root->findDescendant(path);
     if (node)
       initial = node->value();
-    ctx->proc->watch_handlers[watch_id] = {handler, path, initial};
+    self->watch_handlers[watch_id] = {handler, path, initial};
   }
 
   // Keep a local registry for unwatch; no signal connection needed.
@@ -495,9 +517,9 @@ value_t intrinsic_state_unwatch(intrinsics_context *ctx, std::span<const value_t
   ctx->watches.erase(it);
   // Remove handler from the scheduler's process (or ctx->proc if no scheduler)
   if (ctx->sched)
-    ctx->sched->unregister_watch_handler(ctx->pid, static_cast<int>(watch_id));
-  else
-    ctx->proc->watch_handlers.erase(static_cast<int>(watch_id));
+    ctx->sched->unregister_watch_handler(running_pid(ctx), static_cast<int>(watch_id));
+  else if (process *self = running_process(ctx))
+    self->watch_handlers.erase(static_cast<int>(watch_id));
   return value_t(true);
 }
 
@@ -838,51 +860,58 @@ value_t intrinsic_memory_usage(intrinsics_context *ctx, std::span<const value_t>
 
 value_t intrinsic_memory_limit(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 0, "memory-limit");
-  if (!ctx->proc)
+  const process *p = running_process(ctx);
+  if (!p)
     return value_t(int64_t(0));
-  return value_t(static_cast<int64_t>(ctx->proc->max_memory));
+  return value_t(static_cast<int64_t>(p->max_memory));
 }
 
 value_t intrinsic_time_elapsed(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 0, "time-elapsed");
-  if (!ctx->proc)
+  const process *p = running_process(ctx);
+  if (!p)
     return value_t(0.0);
-  return value_t(ctx->proc->elapsed_time());
+  return value_t(p->elapsed_time());
 }
 
 value_t intrinsic_time_limit(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 0, "time-limit");
-  if (!ctx->proc)
+  const process *p = running_process(ctx);
+  if (!p)
     return value_t(0.0);
-  return value_t(static_cast<double>(ctx->proc->max_time));
+  return value_t(static_cast<double>(p->max_time));
 }
 
 value_t intrinsic_message_count(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 0, "message-count");
-  if (!ctx->proc)
+  const process *p = running_process(ctx);
+  if (!p)
     return value_t(int64_t(0));
-  return value_t(static_cast<int64_t>(ctx->proc->message_count));
+  return value_t(static_cast<int64_t>(p->message_count));
 }
 
 value_t intrinsic_message_limit(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 0, "message-limit");
-  if (!ctx->proc)
+  const process *p = running_process(ctx);
+  if (!p)
     return value_t(int64_t(0));
-  return value_t(static_cast<int64_t>(ctx->proc->max_messages));
+  return value_t(static_cast<int64_t>(p->max_messages));
 }
 
 value_t intrinsic_message_bytes(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 0, "message-bytes");
-  if (!ctx->proc)
+  const process *p = running_process(ctx);
+  if (!p)
     return value_t(int64_t(0));
-  return value_t(static_cast<int64_t>(ctx->proc->message_bytes));
+  return value_t(static_cast<int64_t>(p->message_bytes));
 }
 
 value_t intrinsic_message_bytes_limit(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 0, "message-bytes-limit");
-  if (!ctx->proc)
+  const process *p = running_process(ctx);
+  if (!p)
     return value_t(int64_t(0));
-  return value_t(static_cast<int64_t>(ctx->proc->max_message_bytes));
+  return value_t(static_cast<int64_t>(p->max_message_bytes));
 }
 
 // What the current process's budget went on: steps, seconds and deep-data nodes by kind (read,
@@ -908,9 +937,10 @@ value_t intrinsic_budget_usage(intrinsics_context *ctx, std::span<const value_t>
 
 value_t intrinsic_step_count(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 0, "step-count");
-  if (!ctx->proc)
+  const process *p = running_process(ctx);
+  if (!p)
     return value_t(int64_t(0));
-  return value_t(static_cast<int64_t>(ctx->proc->step_count()));
+  return value_t(static_cast<int64_t>(p->step_count()));
 }
 
 // ---------------------------------------------------------------------------
