@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cvc/core/app.h>
+#include <cvc/core/sliced_task.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/tf/overlay_tasks.h>
@@ -254,6 +255,49 @@ TEST_F(TfOverlayTasks, ThreadedTaskRunsOnThePoolWithoutBlockingThePump) {
   EXPECT_LT(log.total_ms, 0.5 * wall);
   EXPECT_FALSE(sched().get_process_info(pid).has_value());
   EXPECT_TRUE(jobs_drop_to(0, 5000.0));
+}
+
+// The threaded pacing itself (cvc/core/sliced_task.h), with a job of its own: a pool chunk steps
+// its job in calls of up to a quarter of chunk_ms (50 ms at most), not the cooperative slice's
+// 2 ms ones, so a job's per-call costs are paid a few times a chunk. Each unit spins for 1 us, so
+// the job takes ~0.3 s on any machine: in 2 ms calls that would be ~150 of them.
+TEST_F(TfOverlayTasks, AThreadedChunkStepsItsJobInLongCalls) {
+  struct spin_job : cvc::sliced_job {
+    const std::size_t units = 300000;
+    std::size_t left = units;
+    int calls = 0;
+    double longest_ms = 0.0;
+    std::atomic<bool> stop{false};
+    bool step(std::size_t budget) override {
+      const steady::time_point t0 = steady::now();
+      ++calls;
+      for (std::size_t u = 0; u < budget && left > 0 && !stop; ++u, --left) {
+        const steady::time_point end = steady::now() + std::chrono::microseconds(1);
+        while (steady::now() < end) {
+        }
+      }
+      longest_ms = std::max(longest_ms, ms_since(t0));
+      return done();
+    }
+    bool done() const override { return left == 0 || stop; }
+    void cancel() override { stop = true; }
+    bool cancelled() const override { return stop; }
+    const char *phase() const override { return "spinning"; }
+    double progress() const override { return 1.0 - double(left) / double(units); }
+    std::string status() const override { return "spinning"; }
+  };
+  auto job = std::make_shared<spin_job>();
+  cvc::sliced_task_options opt;
+  opt.threading = cvc::sliced_threading::threaded;
+  const int pid = cvc::schedule_sliced_job(app, job, opt);
+  ASSERT_GT(pid, 0);
+  EXPECT_NE(name_of(pid).find("threaded"), std::string::npos) << name_of(pid);
+  ASSERT_TRUE(cvc::wait_sliced_job(app, pid, 60.0));
+  EXPECT_EQ(job->left, 0u);
+  std::printf("[threaded pacing] %zu units of 1 us: %d calls, the longest %.1f ms\n", job->units,
+              job->calls, job->longest_ms);
+  EXPECT_LT(job->calls, 75);
+  EXPECT_GT(job->longest_ms, 20.0);
 }
 
 TEST_F(TfOverlayTasks, AutomaticPicksThreadedNativelyAndWaitOverlaysFinishesIt) {

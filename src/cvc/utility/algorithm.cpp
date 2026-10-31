@@ -352,6 +352,22 @@ cvc::volume sdf_library_v2(cvc::app &ctx, const cvc::geometry &geom, const cvc::
   return cv;
 }
 
+// A query's buffers cost about 200 bytes a node. Blocks this big keep the query's parallel loops
+// busy on every core (a z-slab a query was 5x slower at 64^3) and cost about 50 MB whatever the
+// grid.
+constexpr cvc::uint64 kIglBlockNodes = cvc::uint64(1) << 18;
+
+// sdf_igl's query points: the nodes first .. first + q.size() - 1 of cv, in node order (x
+// fastest).
+void igl_nodes(const cvc::volume &cv, cvc::uint64 first, cvc::geometry::points_t &q) {
+  const cvc::uint64 nx = cv.XDim(), ny = cv.YDim();
+  for (std::size_t o = 0; o < q.size(); ++o) {
+    const cvc::uint64 id = first + o, i = id % nx, j = (id / nx) % ny, k = id / (nx * ny);
+    q[o] = {{cv.XMin() + double(i) * cv.XSpan(), cv.YMin() + double(j) * cv.YSpan(),
+             cv.ZMin() + double(k) * cv.ZSpan()}};
+  }
+}
+
 // -------
 // sdf_igl
 // -------
@@ -363,6 +379,7 @@ cvc::volume sdf_library_v2(cvc::app &ctx, const cvc::geometry &geom, const cvc::
 //   sensible inside. Throws mesh_ops_unavailable without CVC_ENABLE_LIBIGL.
 // ---- Change History ----
 // 10/08/2026 -- Joe R. -- Creation.
+// 10/30/2026 -- Joe R. -- Blocks of kIglBlockNodes nodes a query, not a z-slab.
 cvc::volume sdf_igl(cvc::app &ctx, const cvc::geometry &geom, const cvc::dimension &dim,
                     const cvc::bounding_box &bbox, bool flipNormals) {
   using namespace cvc;
@@ -371,18 +388,16 @@ cvc::volume sdf_igl(cvc::app &ctx, const cvc::geometry &geom, const cvc::dimensi
 
   volume cv(ctx, dim, Float, bbox);
   float *values = reinterpret_cast<float *>(*cv);
-  const uint64 nx = cv.XDim(), ny = cv.YDim(), nz = cv.ZDim();
-  // One z-slab of nodes per query batch keeps the query buffer small.
-  geometry::points_t slab(nx * ny);
-  for (uint64 k = 0; k < nz; k++) {
-    for (uint64 j = 0; j < ny; j++)
-      for (uint64 i = 0; i < nx; i++)
-        slab[i + j * nx] = {{cv.XMin() + double(i) * cv.XSpan(), cv.YMin() + double(j) * cv.YSpan(),
-                             cv.ZMin() + double(k) * cv.ZSpan()}};
-    const std::vector<double> d = locator.signed_distance(slab);
-    for (uint64 q = 0; q < nx * ny; q++)
-      values[q + k * nx * ny] = float(flipNormals ? -d[q] : d[q]);
-    ctx.threadProgress(0.10 + 0.89 * double(k + 1) / double(nz));
+  const uint64 n = cv.XDim() * cv.YDim() * cv.ZDim();
+  geometry::points_t q;
+  for (uint64 node = 0; node < n;) {
+    q.resize(static_cast<std::size_t>(std::min(kIglBlockNodes, n - node)));
+    igl_nodes(cv, node, q);
+    const std::vector<double> d = locator.signed_distance(q);
+    for (std::size_t o = 0; o < q.size(); ++o)
+      values[node + o] = float(flipNormals ? -d[o] : d[o]);
+    node += q.size();
+    ctx.threadProgress(0.10 + 0.89 * double(node) / double(n));
   }
 
   ctx.threadProgress(1.0); // Complete
@@ -874,15 +889,12 @@ struct sdf_stepper::impl {
     // A node's signed distance costs some tens of microseconds (its tree descent and winding
     // number): kUnitsPerNode units of budget, so a unit costs about what the runner's do.
     constexpr uint64 kUnitsPerNode = 32;
-    const uint64 nx = cv.XDim(), ny = cv.YDim(), n = nx * ny * cv.ZDim();
+    const uint64 n = cv.XDim() * cv.YDim() * cv.ZDim();
     const uint64 count =
-        budget == 0 ? n - node : std::clamp<uint64>(budget / kUnitsPerNode, 1, n - node);
+        std::min(kIglBlockNodes,
+                 budget == 0 ? n - node : std::clamp<uint64>(budget / kUnitsPerNode, 1, n - node));
     geometry::points_t q(static_cast<std::size_t>(count));
-    for (uint64 o = 0; o < count; ++o) {
-      const uint64 id = node + o, i = id % nx, j = (id / nx) % ny, k = id / (nx * ny);
-      q[o] = {{cv.XMin() + double(i) * cv.XSpan(), cv.YMin() + double(j) * cv.YSpan(),
-               cv.ZMin() + double(k) * cv.ZSpan()}};
-    }
+    igl_nodes(cv, node, q);
     const std::vector<double> d = locator->signed_distance(q);
     float *values = reinterpret_cast<float *>(*cv);
     for (uint64 o = 0; o < count; ++o)

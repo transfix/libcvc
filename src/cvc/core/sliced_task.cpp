@@ -72,6 +72,12 @@ constexpr std::size_t kMaxChunk = std::size_t(1) << 24;
 // vertex swept in a contour tree's join or split tree, ~0.3-0.6 us, is the dearest the overlay
 // jobs have).
 constexpr double kWorstUnitUs = 1.0;
+// Threaded mode: the longest a call aims at. No frame waits on a pool chunk, so its calls are long
+// enough that a job's per-call costs vanish and its batches are big enough to run in parallel
+// (sdf_stepper's SDF_IGL in 2 ms calls asks for ~100 nodes at a time, which libigl queries on one
+// core: 6x slower than one whole-grid query), and short enough that a job which looks for a cancel
+// only between calls stops within about this long.
+constexpr double kThreadedCallMs = 50.0;
 
 // CVC_SLICED_THREADING=cooperative in the environment (read once): `automatic` tasks run
 // cooperatively, so a native build runs its jobs the way a single-threaded wasm page does.
@@ -95,13 +101,19 @@ struct pacer {
   const char *phase = nullptr;
 };
 
-// Step `job` until about `ms` of wall time (steady_clock) has passed; true once it is done. Each
-// call aims at an eighth of `ms` (50 us .. 2 ms) and never asks for more units than the time left
-// pays for at kWorstUnitUs, so the slice overruns its budget by at most ~one call's estimate even
-// when the cost jumps mid-phase, and a cancel lands within one call.
-bool run_for(sliced_job &job, double ms, pacer &p) {
+// Step `job` until about `ms` of wall time (steady_clock) has passed; true once it is done.
+// Cooperative (a frame's slice): each call aims at an eighth of `ms` (50 us .. 2 ms) and never
+// asks for more units than the time left pays for at kWorstUnitUs, so the slice overruns its
+// budget by at most ~one call's estimate even when the cost jumps mid-phase, and a cancel lands
+// within one call. Threaded (a pool chunk): each call aims at a quarter of `ms` (50 us ..
+// kThreadedCallMs), less only as the chunk runs out, with no kWorstUnitUs cap -- under it a job
+// whose units cost a nanosecond (a factorization's multiply-adds) would get calls of a quarter
+// of a millisecond. A cost that jumps mid-phase makes that call run long, which delays only the
+// chunk's reply and a cancel.
+bool run_for(sliced_job &job, double ms, pacer &p, bool threaded) {
   const steady::time_point start = steady::now();
-  const double target = std::clamp(ms / 8.0, 0.05, 2.0);
+  const double target =
+      threaded ? std::clamp(ms / 4.0, 0.05, kThreadedCallMs) : std::clamp(ms / 8.0, 0.05, 2.0);
   for (;;) {
     const char *ph = job.phase();
     if (ph != p.phase) {
@@ -109,10 +121,11 @@ bool run_for(sliced_job &job, double ms, pacer &p) {
       p.chunk = kFirstChunk;
     }
     const steady::time_point t0 = steady::now();
-    const double left_us = std::max(0.0, (ms - ms_between(start, t0)) * 1000.0);
-    const std::size_t cap =
-        std::max(kMinChunk, static_cast<std::size_t>(std::min(left_us / kWorstUnitUs, 1e9)));
-    const std::size_t n = std::min(p.chunk, cap);
+    const double left_ms = std::max(0.0, ms - ms_between(start, t0));
+    const double cap = threaded ? static_cast<double>(p.chunk) * left_ms / target
+                                : std::min(left_ms * 1000.0 / kWorstUnitUs, 1e9);
+    const std::size_t n =
+        std::min(p.chunk, std::max(kMinChunk, static_cast<std::size_t>(std::min(cap, 1e9))));
     if (job.step(n))
       return true;
     const steady::time_point t1 = steady::now();
@@ -272,7 +285,7 @@ se::value_t launch_chunk(task_record &rec) {
         bool ok = true;
         try {
           if (const std::shared_ptr<job_box> box = weak.lock()) // gone: the task was stopped
-            run_for(*box->job, ms, box->pace);
+            run_for(*box->job, ms, box->pace, true);
         } catch (...) {
           ok = false; // the next step finds the job as this left it
         }
@@ -324,7 +337,7 @@ se::value_t task_step(task_record &rec) {
   }
   bool finished = false;
   try {
-    finished = run_for(*rec.box->job, rec.opt.slice_ms, rec.box->pace);
+    finished = run_for(*rec.box->job, rec.opt.slice_ms, rec.box->pace, false);
   } catch (...) {
     // A throwing step: the job reports it through status() and done() (sliced_job's contract);
     // a job that does not end here gets the next frame's slice as usual.
