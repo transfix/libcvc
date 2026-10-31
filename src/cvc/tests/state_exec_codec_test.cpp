@@ -527,6 +527,43 @@ TEST_F(EvaluatorStateCodecTest, PauseResumeProducesCorrectResult) {
   EXPECT_EQ(std::get<int64_t>(restored.result.v), 55);
 }
 
+TEST_F(EvaluatorStateCodecTest, AnAndRestoredMidWayGoesOnFromItsNextArgument) {
+  // Stopped inside (and ...), with arguments still to evaluate: the frame's phase (and_next)
+  // round-trips, and the restored run still stops at the falsy argument.
+  auto state = ev->create_state(std::string("(and 1 (+ 1 1) 3 nil (error \"never\"))"));
+  bool inside = false;
+  while (!inside && !ev->step(state))
+    for (const eval_frame &f : state.stack)
+      inside = inside || (f.phase == eval_phase::and_next && f.index >= 1);
+  ASSERT_TRUE(inside);
+  ASSERT_FALSE(state.done);
+  auto &node = ctx.root()("__es_and__");
+  encode_evaluator_state(node, state);
+  auto restored = decode_evaluator_state(node);
+  bool phase_kept = false;
+  for (const eval_frame &f : restored.stack)
+    phase_kept = phase_kept || f.phase == eval_phase::and_next;
+  EXPECT_TRUE(phase_kept);
+  auto builtins_env = builtins::make_default_environment();
+  auto patch_env = [&](environment_ptr env) {
+    if (!env)
+      return;
+    while (env->outer)
+      env = env->outer;
+    for (auto &[name, val] : builtins_env->bindings)
+      env->set(name, val);
+  };
+  patch_env(restored.global_env);
+  for (auto &frame : restored.stack) {
+    patch_env(frame.env);
+    patch_env(frame.extra_env);
+  }
+  auto ev2 = std::make_unique<stackless_evaluator>(builtins::make_default_environment());
+  ev2->run(restored);
+  ASSERT_TRUE(restored.done);
+  EXPECT_EQ(to_string(restored.result), "#f");
+}
+
 TEST_F(EvaluatorStateCodecTest, WithMacros) {
   auto state = ev->create_state(std::string("(begin "
                                             "  (defmacro double-it (x) (* x 2)) "

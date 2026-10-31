@@ -112,6 +112,8 @@ The full syntax (literals, escapes, Unicode rules) is specified in
 | `lambda` | `(lambda (x y) (+ x y))` | Anonymous function |
 | `if` | `(if cond then [else])` | Conditional; more than one else form is an error |
 | `begin` | `(begin e1 e2 ... en)` | Sequence; returns last value |
+| `and` | `(and a b ...)` | Evaluates left to right and stops at the first falsy value: `#f` there, else the last value (`#t` with none). The rest aren't evaluated. Passed as a value (`(apply and lst)`), `and` is a function of arguments already evaluated |
+| `or` | `(or a b ...)` | Evaluates left to right and stops at the first truthy value, which it returns; `#f` when none is. As a value, a function like `and` |
 | `while` | `(while cond body...)` | Loop while condition is true; the body forms run in order, as a `begin`; the loop's value is nil (or `break`'s) |
 | `for` | `(for x collection body...)` | Iterate over a list or generator; the body forms run in order, as a `begin` |
 | `let` | `(let ((x 1) (y 2)) (+ x y))` | Local bindings |
@@ -149,6 +151,7 @@ form and `if` dropped forms after its else branch, silently; scripts that wrappe
 **I/O:** `print`
 **Generator:** `generator`, `next`, `range`, `collect`, `gen-done?`
 **OOP:** `send` (method dispatch), `apply`
+**Errors:** `error`, `assert` ([Exceptions](#exceptions))
 **Stdlib:** `string.*`, `bytes.*`, `math.*`, `collections.*`, always loaded ([§11](#11-standard-library))
 
 `apply`, `send` and `collections.map`/`filter`/`reduce` call a native function or a DSL
@@ -160,6 +163,20 @@ function alike. A DSL function runs as the program's own frames on the same eval
 (set o (dict "__class__" (dict "inc" (lambda (self x) (+ x 1)))))
 (send o "inc" 41)                                ;; => 42
 ```
+
+#### Surprises
+
+- `and` and `or` short-circuit: `(and (net-auth-has? "txwtf") (load-home))` runs `load-home` only
+  with a credential. Until 2026-10 they were plain functions and evaluated every argument.
+- `false` and `#f` read as nil, and `(not true)` is the bool false. Both are falsy.
+- `str` prints its argument as `print` would, so a string comes back quoted: `(str "abc")` is
+  `"\"abc\""`. To join text, pass the strings to `str-concat` as they are:
+  `(str-concat "id=" s)`.
+- `/` always gives a float: `(/ 7 2)` is `3.5`, and `(/ 6 3)` is the float 2 (`is-float` is true;
+  it prints as `2`). For a whole quotient use `(math.floor (/ 7 2))` (`3`, an int) or
+  `(int (/ 7 2))`, which truncates toward zero; `%` is the remainder.
+- `collections.map`, `filter` and `reduce` take the list first, then the function:
+  `(collections.map (list 1 2 3) (lambda (x) (* x x)))`.
 
 #### Type Conversion
 
@@ -417,6 +434,20 @@ instance of `Exception` or a class derived from it. `raise` raises one, `error` 
   what was leaving.
 - `(error message [data])` is `(raise (RuntimeError message data))`. `(isinstance x Class)`
   works for any class.
+- `(assert cond [message [data]])` returns nil when `cond` is truthy. Otherwise it raises an
+  `AssertionError` (derived from `Exception`, not `RuntimeError`) whose message is
+  `assertion failed`, or `assertion failed: <message>` (a non-string message is printed), with
+  `data` as its data. Its traceback ends at the `(assert ...)` form, so a host that reports an
+  uncaught one (Ariadne's `failure_report`) shows the condition that failed:
+
+  ```lisp
+  (try (assert (= (+ 1 1) 3) "one and one")
+    (catch (AssertionError e) (get-attr e "message")))  ;; => "assertion failed: one and one"
+  (assert (> n 0) "n is positive")                       ;; uncaught:
+  ;; AssertionError: assertion failed: n is positive (at (assert (> n 0) "n is positive"))
+  ```
+
+  Ariadne's `ari test` runs documents whose programs assert (docs/ARIADNE.md §13).
 
 Every exception has `message`, `data`, `cause` (the exception being handled when it was raised),
 `origin` (`"dsl"`, `"builtin"` or `"native"`) and `traceback` (the expressions being evaluated,

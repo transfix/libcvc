@@ -37,11 +37,12 @@
 //                (job-step) launches about chunk_ms of the job on a background worker
 //                (app::compute_async) and returns the future of its reply; the process parks on it
 //                (it costs the scheduler nothing meanwhile) and the step after the last chunk
-//                returns #t. Chunking keeps the progress live, and a cancel lands within one job
-//                step. The chunk touches only the job, never state, and reaches the scheduler only
-//                through post_message, its thread-safe ingress (and only while the task still
-//                waits for the reply). If no thread can be started, the task carries on
-//                cooperatively.
+//                returns #t. A chunk steps the job in calls of about a quarter of chunk_ms (at
+//                most 50 ms), so a job's per-call costs vanish. Chunking keeps the progress live,
+//                and a cancel lands within one call. The chunk touches only the job, never state,
+//                and reaches the scheduler only through post_message, its thread-safe ingress
+//                (and only while the task still waits for the reply). If no thread can be
+//                started, the task carries on cooperatively.
 //
 // Either way opt.on_progress (at most every 100 ms while it runs) and opt.on_done (once, when the
 // job is done and not cancelled) run on the scheduler thread -- never on a worker -- so they may

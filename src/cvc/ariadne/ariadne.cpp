@@ -395,6 +395,24 @@ std::string failure_report(const std::optional<cvc::state_exec::value_t> &exc,
   return report;
 }
 
+// " [program]": which program a warning is about, on one line and at most 80 characters.
+std::string program_tag(const std::string &script) {
+  std::string one;
+  bool space = false;
+  for (char c : script) {
+    const bool ws = c == ' ' || c == '\n' || c == '\t' || c == '\r';
+    if (ws && (space || one.empty()))
+      continue;
+    space = ws;
+    one += ws ? ' ' : c;
+  }
+  while (!one.empty() && one.back() == ' ')
+    one.pop_back();
+  if (one.size() > 80)
+    one = one.substr(0, 77) + "...";
+  return one.empty() ? std::string() : " [" + one + "]";
+}
+
 std::string run_scoped_program(cvc::app &app, const std::string &prefix, const std::string &script,
                                uint64_t max_steps, double max_seconds, uint64_t max_bytes,
                                const std::function<bool(const std::string &)> &has = {}) {
@@ -582,8 +600,8 @@ public:
     // set is shared across every ReactiveEngine.
     static const std::shared_ptr<const std::set<std::string>> kAllowedForms =
         std::make_shared<const std::set<std::string>>(
-            std::set<std::string>{"if", "begin", "let", "while", "for", "lambda", "defun", "set",
-                                  "return", "quote", "yield", "break"});
+            std::set<std::string>{"if", "begin", "and", "or", "let", "while", "for", "lambda",
+                                  "defun", "set", "return", "quote", "yield", "break"});
     ev_->restrict_special_forms(kAllowedForms);
     resolve_data_settings();
   }
@@ -913,6 +931,8 @@ struct Runtime::Impl {
     bool has_event = false;
     float ex = 0.0f, ey = 0.0f, edx = 0.0f, edy = 0.0f;
     int ebutton = 0;
+    // Runtime::run_program: told how the program ended instead of a warning.
+    std::function<void(const std::string &)> done;
   };
   std::vector<QueuedAction> queued_events;
 
@@ -965,6 +985,8 @@ struct Runtime::Impl {
     cvc::state_exec::intrinsics_context ictx;
     bool ended = false;        // the action's own process has ended and been reaped
     std::vector<int> children; // pids it forked that may still be running (they share ictx)
+    std::function<void(const std::string &)> done; // run_program: how its own process ended
+    std::string script;                            // the program's text, to say which one failed
   };
   std::unordered_map<int, std::shared_ptr<ActionContext>> live_actions_;
   // Pids of the children actions and residents spawned (spawn_child), reaped once they finish.
@@ -2078,6 +2100,8 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
     }
     // A child the action forks shares this context: recorded, so the context stays until it ends.
     ac->ictx.on_child = [raw = ac.get()](int pid) { raw->children.push_back(pid); };
+    ac->done = action.done;
+    ac->script = script;
     se::execute_options opts;
     opts.env = ac->env;
     opts.owner = owner_; // so ~Impl's kill_owner reaps exactly this document's processes
@@ -2088,7 +2112,10 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
     live_actions_[pid] = std::move(ac); // keep the context alive until the process (and the
                                         // children it forked) end
   } catch (const std::exception &e) {
-    warn_once(std::string("ari: on: action program failed: ") + e.what() + " [" + script + "]");
+    if (action.done)
+      action.done(std::string("failed: ") + e.what());
+    else
+      warn_once(std::string("ari: on: action program failed: ") + e.what() + " [" + script + "]");
   }
 }
 
@@ -2139,29 +2166,42 @@ void Runtime::Impl::pump_and_sweep_actions(cvc::state_exec::async_scheduler &sch
   static constexpr double kPumpMaxSeconds = 0.1;
   sched.sync_run(kPumpMaxSteps, kPumpMaxSeconds);
   // Sweep: a finished process is reaped (nothing reads its result), a killed or failed one is
-  // reported, and a still-parked one is kept for a later frame.
-  const auto reap_ended = [&](int pid, const char *what) {
+  // reported, and a still-parked one is kept for a later frame. A run_program one's caller is told
+  // how it ended instead.
+  const auto reap_ended = [&](int pid, const char *what, const std::string &script = std::string(),
+                              const std::function<void(const std::string &)> &done = {}) {
     const auto info = sched.get_process_info(pid);
     if (info && !se::is_finished(info->status))
       return false; // ready/running/waiting — still in flight (e.g. parked on await/msg-recv)
+    if (done) {     // run_program: its caller reports it
+      std::string how;
+      if (info && info->status == se::process_status::killed)
+        how = "did not complete: " + sched.get_exit_error(pid).value_or("killed");
+      else if (info && info->status == se::process_status::failed)
+        how = "failed: " + failure_report(info->exit_exception, info->exit_error);
+      sched.reap(pid);
+      done(how);
+      return true;
+    }
     if (info && info->status == se::process_status::killed)
       // The exit error says why: a syntax error (scripts are read inside the process), a runtime
       // error or a resource limit.
-      warn_once(std::string("ari: on: ") + what +
-                " did not complete: " + sched.get_exit_error(pid).value_or("killed"));
+      warn_once(std::string("ari: on: ") + what + " did not complete: " +
+                sched.get_exit_error(pid).value_or("killed") + program_tag(script));
     else if (info && info->status == se::process_status::failed)
       // An exception the program didn't catch: its class, message and where it was raised.
-      warn_once(std::string("ari: on: ") + what +
-                " failed: " + failure_report(info->exit_exception, info->exit_error));
+      warn_once(std::string("ari: on: ") + what + " failed: " +
+                failure_report(info->exit_exception, info->exit_error) + program_tag(script));
     sched.reap(pid);
     return true;
   };
   for (auto it = live_actions_.begin(); it != live_actions_.end();) {
     ActionContext &ac = *it->second;
     if (!ac.ended)
-      ac.ended = reap_ended(it->first, "action program");
+      ac.ended = reap_ended(it->first, "action program", ac.script, ac.done);
     // The children it forked share its context, so the context stays until they end too.
-    std::erase_if(ac.children, [&](int pid) { return reap_ended(pid, "forked program"); });
+    std::erase_if(ac.children,
+                  [&](int pid) { return reap_ended(pid, "forked program", ac.script); });
     if (ac.ended && ac.children.empty())
       it = live_actions_.erase(it);
     else
@@ -2173,21 +2213,21 @@ void Runtime::Impl::pump_and_sweep_actions(cvc::state_exec::async_scheduler &sch
   // A resident never finishes on its own, so one that was killed (a syntax error in its body,
   // read inside the process; its per-step cap) or failed (an exception it didn't catch) is
   // reported, once per reason.
-  const auto report_killed_resident = [&](int pid, const std::string &channel) {
+  const auto report_killed_resident = [&](int pid, const char *lane, const std::string &channel) {
     if (pid < 0)
       return;
     auto info = sched.get_process_info(pid);
     if (info && info->status == se::process_status::killed)
-      warn_once("ari: resident [" + channel +
+      warn_once(std::string("ari: ") + lane + " resident [" + channel +
                 "] stopped: " + sched.get_exit_error(pid).value_or("killed"));
     else if (info && info->status == se::process_status::failed)
-      warn_once("ari: resident [" + channel +
+      warn_once(std::string("ari: ") + lane + " resident [" + channel +
                 "] failed: " + failure_report(info->exit_exception, info->exit_error));
   };
-  report_killed_resident(tick_resident_pid_, tick_channel());
-  report_killed_resident(key_resident_pid_, key_channel());
-  report_killed_resident(pointer_resident_pid_, pointer_channel());
-  report_killed_resident(signal_resident_pid_, signal_channel());
+  report_killed_resident(tick_resident_pid_, "on_tick:", tick_channel());
+  report_killed_resident(key_resident_pid_, "on_key:", key_channel());
+  report_killed_resident(pointer_resident_pid_, "on_pointer:", pointer_channel());
+  report_killed_resident(signal_resident_pid_, "on_signal:", signal_channel());
 }
 
 void Runtime::Impl::ensure_resident(const std::string &channel, const std::string &body,
@@ -2485,6 +2525,14 @@ void Runtime::Impl::run_key_bindings() {
 
 void Runtime::render() { m_->render(); }
 
+void Runtime::run_program(std::string script, std::function<void(const std::string &)> done) {
+  Impl::QueuedAction a;
+  a.event = std::move(script);
+  a.prefix = m_->prefix;
+  a.done = std::move(done);
+  m_->queued_events.push_back(std::move(a));
+}
+
 void Runtime::drain() {
   // Run the queued action events on the host thread, then clear. Never called
   // from inside render() (the deferred intent-buffer discipline, §7.2/§4.7). The keys pressed since
@@ -2495,7 +2543,7 @@ void Runtime::drain() {
   for (const Impl::QueuedAction &a : events) {
     // A program action (`on:` starting with '(', like a computed `bind:`/`tooltip:`) runs through
     // state_exec — the north-star lane: a flag toggle or reset is pure .ari, no C++ handler.
-    if (is_expr(a.event)) { // a program on: (whitespace-tolerant, exactly like a computed bind:)
+    if (a.done || is_expr(a.event)) { // a program on: (whitespace-tolerant, like a computed bind:)
       // SUBMIT it to the app-wide scheduler (owner-tagged, chrooted to the action's mount prefix)
       // and return — no run-to-completion inside drain(). The per-frame pump below advances it; a
       // quick action still finishes this drain, while an (await …)/(msg-recv …)/(sleep …) parks
