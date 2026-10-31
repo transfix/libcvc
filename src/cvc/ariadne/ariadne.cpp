@@ -18,8 +18,9 @@
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
 #include <cvc/ariadne/bind.h>
-#include <cvc/ariadne/input.h> // §4.6 InputEvent — Runtime::post_input feeds on_key/on_pointer
+#include <cvc/ariadne/input.h>  // §4.6 InputEvent — Runtime::post_input feeds on_key/on_pointer
 #include <cvc/ariadne/loader.h> // is_builtin_widget_type (has?)
+#include <cvc/ariadne/media.h>  // §5.11 pictures by URI
 #include <cvc/ariadne/net_host.h> // net_host_status (the net capability tokens)
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
@@ -185,6 +186,8 @@ Widget substitute_index(const Widget &w, int index) {
   out.disabled_when = replace_all(out.disabled_when, kTok, idx);
   out.tooltip = replace_all(out.tooltip, kTok, idx);
   out.options_expr = replace_all(out.options_expr, kTok, idx);
+  out.src = replace_all(out.src, kTok, idx); // §5.11: a picture per item (src: feed.{i}.png)
+  out.media_status = replace_all(out.media_status, kTok, idx);
   // §12: a repeated MOUNT (Widget::scope set) gets a per-instance sub-prefix — append the loop
   // index so each instance's fragment binds to its OWN state subtree (includes.<as>.<i>), rather
   // than all N instances sharing one, which would violate repeat's per-instance-state contract.
@@ -961,6 +964,23 @@ struct Runtime::Impl {
   // Kind::TfEditor parse caches, one per editor instance ("<model path>#<id>"): a state string is
   // re-parsed only when it changes.
   std::unordered_map<std::string, TfEditorCache> tf_caches;
+
+  // §5.11 pictures by URI: loaded off the frame by the cache, published to the backend under the
+  // cache's names (each once per raster, tracked in `published` against the backend it went to).
+  std::unique_ptr<media::ImageCache> images;
+  std::string media_base;                          // relative file:// URIs resolve against it
+  std::unordered_map<std::string, long> published; // name -> the raster generation published
+  Backend *published_to = nullptr;                 // the backend `published` describes
+  std::unordered_map<std::string, std::string> media_status_written; // status path -> last value
+  bool drew_loading = false; // the last frame drew a picture still loading (media_stale)
+  media::ImageCache &image_cache() {
+    if (!images) {
+      images = std::make_unique<media::ImageCache>(app);
+      images->set_base(media_base);
+    }
+    return *images;
+  }
+  void emit_media_image(const Widget &w, const std::string &uri, const char *label);
 
   // §4.7 action lane: a unique owner tag for this Runtime's processes on the app-wide
   // scheduler (app.exec_scheduler()), so teardown reaps exactly this document's process
@@ -1774,9 +1794,17 @@ void Runtime::Impl::emit_node(const Widget &w) {
   }
 
   case Kind::Image: {
-    // The image name: a bound key's value (a combo can switch rasters) else the static src.
+    // The image name: a bound key's value (a combo can switch rasters) else the static src. Either
+    // may be a computed expression, and either may be a URI (§5.11), which the cache loads.
+    const std::string src = is_expr(w.src) ? eval_text(w.src) : w.src;
     const std::string name =
-        w.bind.empty() ? w.src : read_or<std::string>(app, resolve(w.bind), w.src);
+        w.bind.empty() ? src
+                       : (is_expr(w.bind) ? eval_text(w.bind)
+                                          : read_or<std::string>(app, resolve(w.bind), src));
+    if (media::is_uri(name)) {
+      emit_media_image(w, name, label);
+      break;
+    }
     const float width = static_cast<float>(w.img_size > 0 ? w.img_size : 256.0);
     if (!b.draw_image(name.c_str(), width)) // a backend with no image path -> show the name as text
       b.text_value(w.label.empty() ? "image" : w.label.c_str(),
@@ -1871,9 +1899,73 @@ void Runtime::Impl::emit_node(const Widget &w) {
     b.end_disabled();
 }
 
+// §5.11: draw a picture by URI — the cache's fitted raster once it is ready, else a placeholder of
+// the same box — and report its state to the widget's status: path.
+void Runtime::Impl::emit_media_image(const Widget &w, const std::string &uri, const char *label) {
+  media::ImageRequest rq;
+  rq.uri = uri;
+  rq.auth = w.media_auth;
+  rq.w = std::max(1, static_cast<int>(std::lround(w.img_size > 0 ? w.img_size : 256.0)));
+  rq.h = w.img_h > 0 ? std::max(1, static_cast<int>(std::lround(w.img_h))) : 0;
+  rq.fit = w.img_fit;
+  rq.shape = w.img_shape;
+  const media::ImageView v = image_cache().image(rq);
+  drew_loading = drew_loading || v.status == media::Status::Loading;
+  std::string name;
+  if (v.status == media::Status::Ready) {
+    name = v.name;
+    auto it = published.find(name);
+    if (it == published.end() || it->second != v.gen) {
+      backend->set_image(name, v.image);
+      published[name] = v.gen;
+    }
+  } else {
+    // One placeholder per box shape and state, shared by every widget with that box.
+    const bool failed = v.status == media::Status::Failed;
+    const int ph = media::placeholder_height(rq.w, rq.h, rq.shape);
+    name = std::string("media:placeholder:") + (failed ? "failed:" : "loading:") +
+           std::to_string(rq.w) + "x" + std::to_string(ph) +
+           (rq.shape == ImageShape::Circle ? ":circle" : "");
+    if (!published.count(name)) {
+      backend->set_image(name, media::placeholder_image(rq.w, rq.h, rq.shape, failed));
+      published[name] = 0;
+    }
+  }
+  const float width = static_cast<float>(rq.w);
+  const std::string caption = (label && *label) ? std::string(label) : std::string("image");
+  if (!backend->draw_image(name.c_str(), width)) // a backend with no image path: say what it is
+    backend->text_value(caption.c_str(),
+                        v.status == media::Status::Ready
+                            ? uri
+                            : std::string("(") + media::status_name(v.status) + ")");
+  if (v.status == media::Status::Failed)
+    backend->set_tooltip((caption + ": " + v.error).c_str());
+  if (!w.media_status.empty()) {
+    const std::string path = resolve(w.media_status);
+    const std::string st = media::status_name(v.status);
+    std::string &seen = media_status_written[path];
+    if (seen != st) {
+      seen = st;
+      write<std::string>(app, path, st);
+      write<std::string>(app, path + ".error", v.error);
+    }
+  }
+}
+
 void Runtime::Impl::render() {
   if (!backend)
     return;
+  // §5.11: published pictures belong to the backend they went to; the cache's dropped ones go.
+  if (published_to != backend) {
+    published.clear();
+    published_to = backend;
+  }
+  drew_loading = false;
+  if (images)
+    for (const std::string &name : images->take_dropped()) {
+      backend->drop_image(name);
+      published.erase(name);
+    }
   // Reconcile commit boundary (roadmap §11.5.1): a queued tree swap is applied
   // here, at the top of the frame, before any node is emitted — never mid-walk.
   if (has_pending) {
@@ -2378,6 +2470,15 @@ void Runtime::refresh_program_names() {
 
 void Runtime::set_backend(Backend *backend) { m_->backend = backend; }
 
+bool Runtime::media_busy() const { return m_->images && m_->images->busy(); }
+bool Runtime::media_stale() const { return m_->drew_loading || media_busy(); }
+
+void Runtime::set_media_base(std::string dir) {
+  m_->media_base = std::move(dir);
+  if (m_->images)
+    m_->images->set_base(m_->media_base);
+}
+
 void Runtime::set_root(Widget root) {
   m_->pending = std::move(root);
   m_->has_pending = true;
@@ -2538,6 +2639,8 @@ void Runtime::drain() {
   // from inside render() (the deferred intent-buffer discipline, §7.2/§4.7). The keys pressed since
   // the last drain queue theirs first.
   m_->run_key_bindings();
+  if (m_->images) // §5.11: a build without threads loads its pictures here, a step per drain
+    m_->images->pump();
   std::vector<Impl::QueuedAction> events;
   events.swap(m_->queued_events);
   for (const Impl::QueuedAction &a : events) {

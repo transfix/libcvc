@@ -149,8 +149,9 @@ public:
   // The status a (quit code) asked for; 0 until something asks to close.
   int exit_code() const;
 
-  // Whether the document is idle: no async call (a request) in flight and no program step waiting
-  // to run (a resident still parsing a reply between two requests is not idle).
+  // Whether the document is idle: no async call (a request) in flight, no program step waiting
+  // to run (a resident still parsing a reply between two requests is not idle) and no picture it
+  // draws still loading (§5.11).
   bool idle() const;
   // For a snapshot of a document that uses the network: run `step` (a drain, or a host's whole
   // frame) until the document has been idle for three steps running, or `max_seconds` pass, so

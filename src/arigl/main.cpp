@@ -1664,19 +1664,23 @@ int run_window(const ari::HostOptions &o) {
   if (o.command == "snapshot") {
     rt.set_fixed_clock(true); // reproducible: the scene clock advances 1/30 s a frame
     const int frames = std::max(1, o.frames);
+    bool settle = false;
     const auto period = snapshot_period(o);
     for (int f = 0; f < frames; ++f) {
       const auto start = std::chrono::steady_clock::now();
       conf.pump(); // publish this frame's room-tree + media to the relay (run mode does this via
                    // the input pump, set below; a snapshot of a live conference must pump too)
       rt.frame(1.0 / 30.0);
-      if (f + 1 == frames && !o.net.enabled)
+      // The last frame waits for the document's requests and pictures (§5.11), if it has any out.
+      if (f + 1 == frames)
+        settle = o.net.enabled || rt.app_runtime().runtime().media_stale();
+      if (f + 1 == frames && !settle)
         view.writePNG(o.png.c_str()); // renders and writes the last frame
       else
         rt.render();
       std::this_thread::sleep_until(start + period);
     }
-    if (o.net.enabled) { // the frame shows what the document's requests brought back
+    if (settle) { // the frame shows what the document's requests brought back
       rt.app_runtime().settle([&] {
         rt.frame(1.0 / 30.0);
         rt.render();
@@ -1866,7 +1870,8 @@ int run_terminal(const ari::HostOptions &o) {
       frame = backend->render_to_string(rt.runtime(), width, height, o.ansi);
       std::this_thread::sleep_until(start + period);
     }
-    if (o.net.enabled) { // the frame shows what the document's requests brought back
+    // The frame shows what the document's requests brought back, and its pictures (§5.11).
+    if (o.net.enabled || rt.runtime().media_stale()) {
       rt.settle([&] { rt.drain(); });
       frame = backend->render_to_string(rt.runtime(), width, height, o.ansi);
     }

@@ -365,6 +365,10 @@ public:
     (void)name;
     (void)img;
   }
+  // Forget the image published as `name` (its texture, its resampled copies): the core no longer
+  // draws it (a picture by URI the media cache dropped, §5.11). Default: nothing kept, nothing to
+  // do.
+  virtual void drop_image(const std::string &name) { (void)name; }
 
   // A transfer-function editor (Kind::TfEditor; a port of VolumeRover2's ColorTable2): the colour
   // ramp, opacity curve, isocontour bars and the overlay layers over a zoomable canvas. `key` is

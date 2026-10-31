@@ -22,6 +22,7 @@ namespace {
 struct NetHost {
   std::shared_ptr<std::atomic<bool>> live;
   NetHostStatus status;
+  NetAccess access;
 };
 
 std::mutex &host_mutex() {
@@ -107,10 +108,11 @@ std::string enable_net(cvc::app &app, const NetHostConfig &config) {
     status.allowed.push_back(o.str());
 
   disable_net(); // a second enable replaces the first
-  register_net_intrinsics(app, NetAccess{policy, store, live});
+  NetAccess access{policy, store, live};
+  register_net_intrinsics(app, access);
   register_http_uri_handler(policy);
   std::lock_guard<std::mutex> lock(host_mutex());
-  host_cell() = NetHost{std::move(live), std::move(status)};
+  host_cell() = NetHost{std::move(live), std::move(status), std::move(access)};
   return std::string();
 }
 
@@ -130,6 +132,14 @@ void disable_net() {
 NetHostStatus net_host_status() {
   std::lock_guard<std::mutex> lock(host_mutex());
   return host_cell().status;
+}
+
+std::optional<NetAccess> net_host_access() {
+  std::lock_guard<std::mutex> lock(host_mutex());
+  const NetHost &h = host_cell();
+  if (!h.live)
+    return std::nullopt;
+  return h.access;
 }
 
 } // namespace ariadne

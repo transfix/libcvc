@@ -46,7 +46,8 @@ AppRuntime::~AppRuntime() {
 }
 
 bool AppRuntime::idle() const {
-  return app_.exec_async_host().in_flight() == 0 && !app_.exec_scheduler().has_runnable();
+  return app_.exec_async_host().in_flight() == 0 && !app_.exec_scheduler().has_runnable() &&
+         !rt_.media_busy();
 }
 
 void AppRuntime::settle(const std::function<void()> &step, double max_seconds) {
@@ -490,6 +491,11 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   if (new_document && !docPath_.empty())
     rt_.forget_layout();
   docPath_ = path;
+  { // §5.11: a picture's relative file:// URI is the document's neighbour
+    std::error_code ec;
+    const std::filesystem::path abs = std::filesystem::absolute(path, ec);
+    rt_.set_media_base(ec ? std::string() : abs.parent_path().string());
+  }
   add_host_menus(lr.root, hostMenus_);
   add_keys(lr.root, std::move(lr.keys));
   rt_.set_root(std::move(lr.root)); // applied at the next frame boundary

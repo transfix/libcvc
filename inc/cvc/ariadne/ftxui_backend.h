@@ -200,6 +200,7 @@ public:
   // to 8-bit RGB once here and box-filtered to the cell grid at draw time.
   void set_image(const std::string &name, const cvc::image &img) override;
   void clear_image(const std::string &name);
+  void drop_image(const std::string &name) override { clear_image(name); }
 
   // Draw the published image `name` behind everything, stretched over the whole screen: the
   // terminal counterpart of the GL canvas the ImGui backend draws over. Widgets, menus and windows

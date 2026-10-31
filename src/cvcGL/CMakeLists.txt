@@ -863,6 +863,11 @@ add_test(NAME cvcgl_imgui_windows_menu COMMAND cvcgl_imgui_windows_menu)
 add_executable(cvcgl_imgui_radio test/cvcgl_imgui_radio.cpp)
 target_link_libraries(cvcgl_imgui_radio PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_radio COMMAND cvcgl_imgui_radio)
+# Pictures by URI (§5.11): an image: widget's file:// picture reaches ImGuiBackend as an RGBA
+# raster fitted to its box, with placeholders before and on failure. No window, no GL.
+add_executable(cvcgl_imgui_media test/cvcgl_imgui_media.cpp)
+target_link_libraries(cvcgl_imgui_media PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_media COMMAND cvcgl_imgui_media)
 
 # The tf_editor transfer-function widget (ImGuiBackend::tf_editor) on a bare ImGui context, driven
 # by synthesized mouse input: drags, adds, deletes, the zoom strip, the context menu, commits.

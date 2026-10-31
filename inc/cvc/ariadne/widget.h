@@ -50,6 +50,15 @@ enum class Kind {
   Radio,          // bound enum-as-text state, every option shown (a combo's fields; radio_row)
 };
 
+// How a Kind::Image fills its box (`fit:`) and the box's shape (`shape:`); media.h fits a picture
+// loaded by URI to them.
+enum class ImageFit {
+  Contain, // the whole image, aspect kept, transparent padding (the default)
+  Cover,   // the box filled, aspect kept, the centre cropped
+  Fill     // stretched to the box
+};
+enum class ImageShape { Rect, Circle };
+
 // ---------------------------------------------------------------------------
 // Sizing & layout (roadmap §3.0.3 / §3.0.3b). A size or track value is one of:
 //   auto     — fit content
@@ -247,6 +256,17 @@ struct Widget {
   // aspect).
   std::string src;
   double img_size = 256.0;
+  // A picture by URI (§5.11, media.h): `src` (or bind's value) is an http(s)://, file://, cvc:// or
+  // state:// URI, loaded off the frame. `img_h` > 0 makes `size: [w, h]` a box the picture is
+  // fitted to (`img_fit`, `img_shape`); `media_auth` names the host credential an http(s) fetch
+  // sends
+  // (`auth:`); `media_status` is a state path the widget writes loading|ready|failed to, and the
+  // error to <path>.error (`status:`). `src` may also be a computed expression.
+  double img_h = 0.0;
+  ImageFit img_fit = ImageFit::Contain;
+  ImageShape img_shape = ImageShape::Rect;
+  std::string media_auth;
+  std::string media_status;
 
   // Kind::Progress: the bar is the number at `bind` placed in [lo, hi] (clamped); `overlay` is a
   // state path (or a computed expression) whose text is drawn over the bar, else the percent.
