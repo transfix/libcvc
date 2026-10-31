@@ -141,7 +141,7 @@ if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
       set_tests_properties(ari_run_media_card_${_backend} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60
         ENVIRONMENT "ARI_FLAGS=--component-path ${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne")
       # ari-media plays a video: (and opens an audio:) on SDL's dummy sound driver (§5.13).
-      if(TARGET ari-media)
+      if(TARGET ari-media AND CVC_MEDIA_HAVE_FFMPEG)
         add_test(NAME ari_run_media_player_${_backend}
           COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/media_in_tmux_test.sh"
                   $<TARGET_FILE:ari-media> "${CMAKE_CURRENT_SOURCE_DIR}/tests/media_player.ari"

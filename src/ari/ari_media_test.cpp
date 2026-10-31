@@ -285,6 +285,9 @@ TEST(AriMedia, OverSshAriMediaDoesNotPlayUnlessTold) {
   REQUIRE_ARI();
   if (ari_media().empty())
     GTEST_SKIP() << "no ari-media in this build";
+  if (run_with(ari_media(), "info").output.find("video/audio player            yes") ==
+      std::string::npos)
+    GTEST_SKIP() << "ari-media without FFmpeg (its players say unsupported, not remote)";
   set_env("SSH_CONNECTION", "203.0.113.7 51000 198.51.100.2 22");
   AriRun r = run_with(ari_media(), "snapshot --width 70 " + quoted(kPlayerDoc));
   EXPECT_NE(r.output.find("video remote audio remote"), std::string::npos) << r.output;
