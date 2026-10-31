@@ -99,6 +99,13 @@ if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
                 "${CMAKE_CURRENT_SOURCE_DIR}/../../examples/ariadne/documents/json_feed.ari"
                 ${_backend} "${CMAKE_CURRENT_SOURCE_DIR}/tests/json_feed.rows")
       set_tests_properties(ari_run_json_feed_${_backend} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+      # Windows that close and open again in one run (tests/reopen_refit.ari, driven by its keys):
+      # each fits the rows it gained while closed, and on tvision one the user resized (Ctrl-F5)
+      # comes back at their size.
+      add_test(NAME ari_run_reopen_refit_${_backend}
+        COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/reopen_refit_test.sh" $<TARGET_FILE:ari>
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/reopen_refit.ari" ${_backend})
+      set_tests_properties(ari_run_reopen_refit_${_backend} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
     endforeach()
   endif()
 endif()

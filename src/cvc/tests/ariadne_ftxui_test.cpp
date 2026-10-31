@@ -1030,13 +1030,108 @@ TEST(AriadneFtxuiHosted, TheHostClosesAndPlacesWindows) {
   w.id = "w";
   w.closable = true;
   Term t(group({w}), hosted_opts());
-  t.be.set_window_geometry("w", 10, 3, 30, 8);
+  t.be.set_window_geometry("w", 10, 3, 30, 8, /*user_sized=*/true);
   t.draw();
   EXPECT_EQ(val(t.app, "tree.w.geometry"), "80,48,240,128") << "host bounds persist in px";
   t.be.close_window(t.rt, "w");
   EXPECT_EQ(val(t.app, "tree.w.open"), "0");
   t.draw();
   EXPECT_TRUE(t.be.hosted_windows().empty());
+}
+
+// The host reports every window's bounds on each walk. The size it gave a window to fit its
+// content is not the window's: one that closes, gains a row and opens again must be reported as
+// fitting (0) with its new content size, not at its old size. Only a size the user gave it holds.
+namespace {
+void set(cvc::app &app, const std::string &path, const std::string &v) {
+  cvc::state::instance(app)(path).value(v);
+}
+} // namespace
+
+TEST(AriadneFtxuiHosted, AReopenedWindowFitsWhatItShowsThen) {
+  REQUIRE_FTXUI();
+  Widget msg = text(""); // the controller's message, a row only while there is one
+  msg.literal_text = false;
+  msg.bind = "ui.msg";
+  msg.visible_when = "(!= (state-get \"ui.msg\") \"\")";
+  Widget fits = window("Notes", {text("Welcome."), msg});
+  fits.id = "notes";
+  fits.visible_when = "(= (state-get \"ui.screen\") \"in\")";
+  Widget wide = window("Sign in", {text("Username: grace"), msg}); // width authored, height fits
+  wide.id = "signin";
+  wide.size.w = Extent{Unit::Px, 240};
+  wide.visible_when = fits.visible_when;
+  Term t(group({fits, wide}), hosted_opts());
+  set(t.app, "ui.screen", "in");
+  set(t.app, "ui.msg", "");
+  t.draw();
+  auto find = [&](const std::string &id) {
+    for (const auto &hw : t.be.hosted_windows())
+      if (hw.id == id)
+        return hw;
+    ADD_FAILURE() << "no hosted window " << id;
+    return FtxuiBackend::HostedWindow{};
+  };
+  const auto notes = find("notes"), signin = find("signin");
+  EXPECT_EQ(notes.w, 0);
+  EXPECT_EQ(notes.h, 0);
+  EXPECT_EQ(signin.w, 30) << "240 px is 30 cells";
+  EXPECT_EQ(signin.h, 0);
+  EXPECT_EQ(notes.content_h, 1);
+  // The host fitted them and reports that back, as tvision's does on every walk.
+  t.be.set_window_geometry("notes", 2, 14, notes.content_w + 2, notes.content_h + 2, false);
+  t.be.set_window_geometry("signin", 2, 2, 30, signin.content_h + 2, false);
+  t.draw();
+  EXPECT_EQ(val(t.app, "tree.notes.geometry"), "16,224,0,0") << "the place persists, not the fit";
+
+  // Sign out: both close, and a row appears while they are closed.
+  set(t.app, "ui.screen", "out");
+  set(t.app, "ui.msg", "Signed out, see you soon.");
+  t.draw();
+  EXPECT_TRUE(t.be.hosted_windows().empty());
+  set(t.app, "ui.screen", "in");
+  t.draw();
+  const auto notes2 = find("notes"), signin2 = find("signin");
+  EXPECT_FALSE(notes2.user_sized);
+  EXPECT_EQ(notes2.w, 0) << "it fits again, as on its first opening";
+  EXPECT_EQ(notes2.h, 0);
+  EXPECT_EQ(notes2.content_h, 2) << "the row that appeared while it was closed";
+  EXPECT_GT(notes2.content_w, notes.content_w);
+  EXPECT_EQ(notes2.x, 2) << "it opens where it was";
+  EXPECT_EQ(notes2.y, 14);
+  EXPECT_EQ(signin2.w, 30) << "the authored width";
+  EXPECT_EQ(signin2.h, 0) << "the height still fits";
+  EXPECT_EQ(signin2.content_h, 2);
+}
+
+TEST(AriadneFtxuiHosted, AWindowTheUserResizedKeepsItsSizeWhenItOpensAgain) {
+  REQUIRE_FTXUI();
+  Widget msg = text("");
+  msg.literal_text = false;
+  msg.bind = "ui.msg";
+  msg.visible_when = "(!= (state-get \"ui.msg\") \"\")";
+  Widget w = window("Notes", {text("Welcome."), msg});
+  w.id = "notes";
+  w.visible_when = "(= (state-get \"ui.screen\") \"in\")";
+  Term t(group({w}), hosted_opts());
+  set(t.app, "ui.screen", "in");
+  set(t.app, "ui.msg", "");
+  t.draw();
+  t.be.set_window_geometry("notes", 4, 5, 40, 9, /*user_sized=*/true); // the user's corner drag
+  t.draw();
+  EXPECT_EQ(val(t.app, "tree.notes.geometry"), "32,80,320,144") << "the user's size persists";
+  set(t.app, "ui.screen", "out");
+  set(t.app, "ui.msg", "Signed out.");
+  t.draw();
+  set(t.app, "ui.screen", "in");
+  t.draw();
+  ASSERT_EQ(t.be.hosted_windows().size(), 1u);
+  const auto hw = t.be.hosted_windows()[0];
+  EXPECT_TRUE(hw.user_sized);
+  EXPECT_EQ(hw.w, 40);
+  EXPECT_EQ(hw.h, 9);
+  EXPECT_EQ(hw.x, 4);
+  EXPECT_EQ(hw.y, 5);
 }
 
 TEST(AriadneFtxuiHosted, ComboListOpensInsideItsWindow) {
