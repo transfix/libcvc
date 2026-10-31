@@ -202,7 +202,7 @@ scheduler can parse a script the same way it evaluates one: a slice per step. Wi
   process, with the parse error as its exit error. The sync scheduler throws it from `step()` or
   `run()`. With step_tokens = 0, `execute()` throws it, as before. Ariadne reports a killed
   action or resident with its exit error ("ari: on: action program did not complete: …",
-  "ari: resident [...] stopped: …").
+  "ari: on_tick: resident [...] stopped: …").
 - **Signals and watch events** wait until the script is read, because their handlers run on the
   evaluation stack.
 - **Snapshots.** A process snapshotted while reading stores its source and parser settings. After
