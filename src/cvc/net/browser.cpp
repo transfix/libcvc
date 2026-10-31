@@ -19,8 +19,9 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include <shellapi.h>
 #include <windows.h>
+// windows.h first
+#include <shellapi.h>
 #else
 #include <fcntl.h>
 #include <spawn.h>

@@ -13,7 +13,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
-#include <functional>
 #include <cvc/ariadne/ariadne.h> // register_action_intrinsics
 #include <cvc/ariadne/oidc_host.h>
 #include <cvc/core/app.h>
@@ -29,6 +28,7 @@
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/types.h>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <optional>

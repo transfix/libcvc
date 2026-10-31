@@ -76,7 +76,7 @@
 #include <cvc/ariadne/web_document.h> // arigl-web: a document named by URL
 #include <cvc/core/app.h>
 #include <cvc/net/browser.h>
-#include <random>  // std::random_device — the conference node id's per-launch suffix
+#include <random> // std::random_device — the conference node id's per-launch suffix
 #include <sstream> // arigl info: the GL report, line by line
 #if CVC_ENABLE_WS || CVC_ENABLE_GRPC
 // Conference mode: a state transport joins a hosted room, chosen by the relay URL scheme —
