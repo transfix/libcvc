@@ -49,6 +49,9 @@ const std::vector<TokenRule> &rules() {
        [](const HostFacts &f) { return f.net_auth; }},
       {{"net.auth.persist", "the host keeps credentials across runs"},
        [](const HostFacts &f) { return f.net_auth_persist; }},
+      {{"image.url", "image: shows a picture by URI (§5.11): http(s) where the network is on, "
+                     "file://, cvc://, state://"},
+       [](const HostFacts &) { return true; }},
   };
   return kRules;
 }
