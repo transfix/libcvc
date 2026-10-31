@@ -26,6 +26,7 @@
 #include <cvc/core/app.h>
 #include <cvc/core/async_task.h> // launch_pool_task generalization test
 #include <cvc/core/thread_pool.h> // item 2: full type for app.computePool().parallel_for
+#include <cvc/net/credentials.h>  // the ws-send test's CredentialStore
 #include <cvc/net/http_client.h>  // §13.8: swap the transport for a fake in the http-get test
 #include <cvc/net/net_policy.h>   // the ws-* verb tests' policy
 #include <cvc/net/ws_client.h>    // have_ws_backend()
@@ -3460,22 +3461,26 @@ TEST(AriadneNetIntrinsics, WsVerbsRoundTripThroughAPolicy) {
   Runtime rt(app, "");
   MockBackend mb;
   rt.set_backend(&mb);
-  rt.set_root(
-      group({button("Go", "(begin"
-                          "  (set r (ws-open \"" +
-                              server.url("/live") +
-                              "\" (dict \"timeout\" 5)))"
-                              "  (state-set \"r.ok\" (get-attr r \"ok\"))"
-                              "  (set h (get-attr r \"handle\"))"
-                              "  (state-set \"r.live\" (ws-open? h))"
-                              "  (ws-send h \"ping\")"
-                              "  (set e (ws-recv h 5))"
-                              "  (state-set \"r.type\" (get-attr e \"type\"))"
-                              "  (state-set \"r.data\" (get-attr e \"data\"))"
-                              "  (state-set \"r.poll\" (if (= (ws-poll h) nil) \"none\" \"some\"))"
-                              "  (state-set \"r.closed\" (ws-close h))"
-                              "  (state-set \"r.after\" (ws-open? h))"
-                              "  (state-set \"r.done\" \"1\"))")}));
+  std::string program =
+      "(begin (set r (ws-open \"" + server.url("/live") + "\" (dict \"timeout\" 5)))";
+  program += "  (state-set \"r.ok\" (get-attr r \"ok\"))"
+             "  (set h (get-attr r \"handle\"))"
+             "  (state-set \"r.live\" (ws-open? h))"
+             "  (ws-send h \"ping\")"
+             "  (set e (ws-recv h 5))"
+             "  (state-set \"r.type\" (get-attr e \"type\"))"
+             "  (state-set \"r.data\" (get-attr e \"data\"))"
+             "  (state-set \"r.poll\" (if (= (ws-poll h) nil) \"none\" \"some\"))"
+             "  (ws-send h (dict \"n\" 1 \"tags\" (list \"a\")))"
+             "  (set j (ws-recv h 5))"
+             "  (state-set \"r.json\" (get-attr j \"data\"))"
+             "  (set c (dict \"t\" (dict \"credential\" \"x\")))"
+             "  (state-set \"r.nocred\""
+             "    (try (ws-send h c) (catch (x) (get-attr x \"message\"))))"
+             "  (state-set \"r.closed\" (ws-close h))"
+             "  (state-set \"r.after\" (ws-open? h))"
+             "  (state-set \"r.done\" \"1\"))";
+  rt.set_root(group({button("Go", program)}));
   mb.button_click = true;
   rt.render();
   rt.drain();
@@ -3488,6 +3493,10 @@ TEST(AriadneNetIntrinsics, WsVerbsRoundTripThroughAPolicy) {
   EXPECT_EQ(cvc::state::instance(app)("r.type").value(), "text");
   EXPECT_EQ(cvc::state::instance(app)("r.data").value(), "ping");
   EXPECT_EQ(cvc::state::instance(app)("r.poll").value(), "none");
+  EXPECT_EQ(cvc::state::instance(app)("r.json").value(), "{\"n\":1,\"tags\":[\"a\"]}");
+  EXPECT_NE(cvc::state::instance(app)("r.nocred").value().find("keeps no credentials"),
+            std::string::npos)
+      << cvc::state::instance(app)("r.nocred").value();
   EXPECT_EQ(cvc::state::instance(app)("r.closed").value(), "true");
   EXPECT_EQ(cvc::state::instance(app)("r.after").value(), "false");
 }
@@ -4187,6 +4196,84 @@ TEST(AriadneNetHost, CredentialOptionsNeedAHostThatKeepsCredentials) {
   EXPECT_NE(sval(app, "e2").find("must name a credential"), std::string::npos) << sval(app, "e2");
   EXPECT_NE(sval(app, "e3").find("needs a name"), std::string::npos) << sval(app, "e3");
   EXPECT_EQ(fake->calls.load(), 0) << "a misused request is never sent";
+}
+
+// (ws-send H DICT) sends the dict as JSON with the host's token wherever it holds a credential
+// value, fetched for the connection's origin (its URL's http twin), so a document authenticates a
+// WebSocket in a message, as a browser's must, without holding the token. A server that echoes it
+// reaches the program blanked; a name with no token there is an error that sends nothing; no state
+// node, error or warning holds the token.
+TEST(AriadneNetHost, WsSendPutsInTheHostsTokenThatNoValueHolds) {
+  if (!cvc::net::have_ws_backend())
+    GTEST_SKIP() << "libcvc built without a WebSocket backend";
+  const std::string kWsToken = "cvcws_bGl2ZS1mZWVkLXRva2VuLWZvci10aGUtdGVzdHM";
+  std::mutex mutex;
+  std::vector<std::string> got; // the messages the server received
+  cvc_test::LocalWsServer server([&](cvc_test::LocalWsServer::Stream &ws) {
+    for (;;) {
+      boost::beast::flat_buffer buf;
+      ws.read(buf);
+      const std::string text = boost::beast::buffers_to_string(buf.data());
+      {
+        std::lock_guard<std::mutex> lock(mutex);
+        got.push_back(text);
+      }
+      const std::string echo = "echo " + text;
+      ws.text(true);
+      ws.write(boost::asio::buffer(echo));
+    }
+  });
+  const std::string origin = "http://127.0.0.1:" + std::to_string(server.port());
+  cvc::app app;
+  NetIntrinsicsGuard guard;
+  auto policy = std::make_shared<cvc::net::NetPolicy>();
+  std::string why;
+  ASSERT_TRUE(cvc::net::parse_net_policy("allow " + origin + "\n", *policy, &why)) << why;
+  auto store = std::make_shared<cvc::net::CredentialStore>();
+  store->bind("live", {*cvc::net::parse_origin(origin)});
+  ASSERT_TRUE(store->provide("live", kWsToken, &why)) << why;
+  NetAccess access;
+  access.policy = policy;
+  access.credentials = store;
+  register_net_intrinsics(app, access);
+
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  std::string program =
+      "(begin (set r (ws-open \"" + server.url("/v1/live/ws") + "\" (dict \"timeout\" 5)))";
+  program += "  (set hello (dict \"type\" \"hello\" \"token\" (dict \"credential\" \"live\")"
+             "                   \"also\" (list 1 (dict \"credential\" \"live\"))))"
+             "  (state-set \"opened\" (get-attr r \"ok\"))"
+             "  (set h (get-attr r \"handle\"))"
+             "  (state-set \"sent\" (ws-send h hello))"
+             "  (set e (ws-recv h 5))"
+             "  (state-set \"echo\" (get-attr e \"data\"))"
+             "  (state-set \"e1\" (try (ws-send h (dict \"token\" (dict \"credential\" \"other\")))"
+             "                        (catch (x) (get-attr x \"message\"))))"
+             "  (ws-send h \"bye\")"
+             "  (set e (ws-recv h 5))"
+             "  (state-set \"bye\" (get-attr e \"data\"))"
+             "  (ws-close h)"
+             "  (state-set \"done\" 1))";
+  ASSERT_TRUE(run_program(app, rt, mb, program, "done"));
+  EXPECT_EQ(sval(app, "opened"), "true");
+  EXPECT_EQ(sval(app, "sent"), "true");
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    ASSERT_EQ(got.size(), 2u) << "the failed send sent something";
+    EXPECT_EQ(got[0], "{\"type\":\"hello\",\"token\":\"" + kWsToken + "\",\"also\":[1,\"" +
+                          kWsToken + "\"]}");
+    EXPECT_EQ(got[1], "bye");
+  }
+  EXPECT_EQ(sval(app, "echo"),
+            "echo {\"type\":\"hello\",\"token\":\"[redacted]\",\"also\":[1,\"[redacted]\"]}");
+  EXPECT_NE(sval(app, "e1").find("no credential 'other' for " + origin), std::string::npos)
+      << sval(app, "e1");
+  EXPECT_EQ(sval(app, "bye"), "echo bye");
+  EXPECT_EQ(whole_state(app).find(kWsToken), std::string::npos) << whole_state(app);
+  for (const std::string &w : rt.take_reactive_warnings())
+    EXPECT_EQ(w.find(kWsToken), std::string::npos) << w;
 }
 
 // ---------------------------------------------------------------------------
