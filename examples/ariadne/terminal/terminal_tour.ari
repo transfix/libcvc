@@ -111,6 +111,8 @@ windows:
         bind: tour.log
       - text: "heavy: over 256 agents"
         visible_when: (> (int (state-get "tour.agents")) 256)
+      # A spinner turns by the host's frame clock, whatever the document's programs are doing.
+      - spinner: simulating
 
   - window: Layout
     id: layout

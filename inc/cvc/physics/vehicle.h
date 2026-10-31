@@ -311,6 +311,13 @@ struct vehicle_energy {
   }
 };
 
+// The ledger over an interval, from two readings of it (`before`, then `now`): each line, supplied
+// through residual and engine, regen, source, fuel_used and distance, is now's less before's; the
+// levels (kinetic, potential, spring), the charge, the fuel left and the power are now's. The
+// lines balance as the ledger does: supplied + idle + fields + drivetrain_split = dissipated() +
+// stored + residual.
+vehicle_energy energy_lines(const vehicle_energy &before, const vehicle_energy &now);
+
 struct vehicle_state {
   body_id chassis;
   body_state body;

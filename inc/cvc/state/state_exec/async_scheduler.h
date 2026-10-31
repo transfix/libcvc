@@ -208,8 +208,10 @@ public:
   std::optional<priority_info> get_priority_as(int caller_pid, int pid) const override;
   bool set_priority_floor(int pid, int floor) override;
   void note_priority_clamped() override;
-  /// Thread-safe: `cmd` for process `pid`, applied between steps (unknown pids are ignored when
-  /// it is applied). True once queued.
+  /// Thread-safe: `cmd` for process `pid`, applied between steps by the next drain (a step's, or
+  /// drain_ingress()'s), as post_message's posts are; a driver blocked in wait_for_work() wakes.
+  /// set_priority applies through the host path (unchecked); an unknown pid is found, and ignored,
+  /// then. A query runs its function on the scheduler thread, and must not throw. True once queued.
   bool post_control(int pid, control_cmd cmd);
   bool set_max_steps(int pid, uint64_t max_steps);
   bool set_max_time(int pid, double seconds);
@@ -239,8 +241,18 @@ public:
   /// freeing its env/state/captured values. Returns false (no-op) for an unknown pid or a live one
   /// — never drops a runnable/waiting process. A one-shot driver (pycvc.Exec.run) reaps its pid
   /// after collecting the result so a long-lived scheduler does not accumulate dead processes.
-  /// Its async calls still in flight (futures it never awaited) are cancelled.
-  bool reap(int pid);
+  /// Its async calls still in flight (futures it never awaited) are cancelled. With `released`, the
+  /// erased process is handed out there instead of destroyed, so a caller that reaps under a lock
+  /// frees it, and whatever its captured values run as they go (a Python finalizer), after the
+  /// unlock (pycvc's Exec, docs/STATE_EXEC_LOCKS.md 7.4). A process reaped while it steps is erased
+  /// once its step is over, and `released` is left empty.
+  bool reap(int pid, process_ptr *released = nullptr);
+  /// Cancel a finished `pid`'s async calls still in flight, as reap() does first; what they ran so
+  /// far stays charged. The charge reads the async step rate, which a scheduler with an id
+  /// publishes to the tree, whose slots run then. A caller that reaps under a lock cancels first,
+  /// before taking it, and the reap then finds nothing left to cancel. A live process's calls are
+  /// left alone: dropped, they would leave it waiting on them for good (its kill cancels them).
+  void cancel_async_calls_of(int pid);
   std::unordered_map<int, value_t> get_results() const;
   scheduler_stats get_stats() const override;
 
@@ -339,6 +351,7 @@ private:
   bool running_ = false;
   bool stop_requested_ = false;
   uint64_t total_steps_ = 0;
+  uint64_t priority_clamped_ = 0; // spawns clamped to the spawner's floor (note_priority_clamped)
 
   int current_pid_ = -1;
   uint32_t cycle_check_ = 0; // steps, for checking every 64th whether a cycle collection is due
@@ -406,8 +419,9 @@ private:
   std::mutex ingress_mutex_;
   std::vector<std::pair<std::string, value_t>> ingress_;
   std::vector<std::shared_ptr<async_call>> completions_; // settled calls, guarded likewise
-  /// Set (under ingress_mutex_) while ingress_ or completions_ holds something, so a drain finds
-  /// an empty ingress without the lock.
+  std::vector<std::pair<int, control_cmd>> controls_;    // post_control's, guarded likewise
+  /// Set (under ingress_mutex_) while ingress_, completions_ or controls_ holds something, so a
+  /// drain finds an empty ingress without the lock.
   std::atomic<bool> ingress_pending_{false};
   /// A wait_for_work() is (about to be) blocked: a post notifies wakeup_.
   std::atomic<bool> idle_waiting_{false};
@@ -445,6 +459,8 @@ private:
   int step_once();
   // What a step does before picking a process: the ingress, the calls, the due timers.
   void drain(bool in_step);
+  // Apply one post_control command (scheduler thread).
+  void apply_control(int pid, control_cmd &cmd);
   uint64_t run_loop(std::optional<uint64_t> max_steps, std::optional<double> max_time);
   void execute_process_step(const process_ptr &pp);
   void handle_signal(process &proc);

@@ -155,6 +155,20 @@ struct Capabilities {
   bool sixel = false;      // the terminal draws DEC Sixel
 };
 
+// A spinner's glyph at `seconds` on a frame clock: ten braille dots a second, the cycle a terminal
+// spinner commonly turns (U+280B U+2819 U+2839 U+2838 U+283C U+2834 U+2826 U+2827 U+2807
+// U+280F), or with `ascii`, | / - \ at the same rate. Spelled as UTF-8 bytes: a \u literal is
+// encoded in the code page on MSVC without /utf-8.
+inline std::string spinner_glyph(double seconds, bool ascii) {
+  static constexpr const char *kBraille[] = {
+      "\xE2\xA0\x8B", "\xE2\xA0\x99", "\xE2\xA0\xB9", "\xE2\xA0\xB8", "\xE2\xA0\xBC",
+      "\xE2\xA0\xB4", "\xE2\xA0\xA6", "\xE2\xA0\xA7", "\xE2\xA0\x87", "\xE2\xA0\x8F"};
+  static constexpr const char *kAscii[] = {"|", "/", "-", "\\"};
+  const double steps = seconds > 0.0 ? seconds * 10.0 : 0.0; // NaN and negative read 0
+  const auto step = static_cast<unsigned long long>(steps < 1e15 ? steps : 0.0);
+  return ascii ? kAscii[step % 4] : kBraille[step % 10];
+}
+
 // The pluggable UI handler. The core walks the tree and calls these; structural
 // Begin*/End* pair unconditionally (End* is always called, even when Begin*
 // returned false), mirroring immediate-mode contracts. `key` on the sliders is
@@ -284,6 +298,18 @@ public:
     bar += overlay.empty() ? std::to_string(static_cast<int>(f * 100.f + 0.5f)) + "%" : overlay;
     text_value(label, bar);
   }
+  // An activity indicator (Kind::Spinner) at `seconds` on the host's frame clock (Runtime::
+  // frame_clock; frozen while the widget is disabled), with `label` beside it. By default a text
+  // line, the glyph spinner_glyph() picks and the label: braille dots, or | / - \ with `ascii` or
+  // where the surface cannot show braille (unicode_glyphs()).
+  virtual void spinner(const char *label, double seconds, bool ascii) {
+    std::string line = spinner_glyph(seconds, ascii || !unicode_glyphs());
+    if (label && *label)
+      line += std::string(" ") + label;
+    text_line(line.c_str());
+  }
+  // Whether the surface shows glyphs beyond ASCII (braille, box drawing). Default yes.
+  virtual bool unicode_glyphs() const { return true; }
   virtual bool button(const char *label) = 0;           // returns clicked
   virtual bool menu_item_action(const char *label) = 0; // returns clicked
 

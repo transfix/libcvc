@@ -45,6 +45,30 @@ double vehicle_desc::track() const {
   return 0.0;
 }
 
+vehicle_energy energy_lines(const vehicle_energy &before, const vehicle_energy &now) {
+  vehicle_energy d = now; // the levels, the charge, the fuel left and the power
+  d.supplied = now.supplied - before.supplied;
+  d.idle = now.idle - before.idle;
+  d.brake = now.brake - before.brake;
+  d.tire = now.tire - before.tire;
+  d.aero = now.aero - before.aero;
+  d.rolling = now.rolling - before.rolling;
+  d.medium = now.medium - before.medium;
+  d.drivetrain = now.drivetrain - before.drivetrain;
+  d.suspension = now.suspension - before.suspension;
+  d.chassis_damping = now.chassis_damping - before.chassis_damping;
+  d.fields = now.fields - before.fields;
+  d.drivetrain_split = now.drivetrain_split - before.drivetrain_split;
+  d.stored = now.stored - before.stored;
+  d.residual = now.residual - before.residual;
+  d.engine = now.engine - before.engine;
+  d.regen = now.regen - before.regen;
+  d.source = now.source - before.source;
+  d.fuel_used = now.fuel_used - before.fuel_used;
+  d.distance = now.distance - before.distance;
+  return d;
+}
+
 // An M1097A2 HMMWV (the heavy variant). Values marked [AMG] are from AM General's M1097A2
 // specification sheet (www.amgeneral.com, M1097A2R, AMP05072018DOM); [TM] from TM 9-2320-280-10,
 // table 1-15; [DTIC] from the Army's dynamometer tests of its 6.5 L engine (TARDEC TFLRF,

@@ -10,7 +10,9 @@
 // each frame the value moves and `committed` on release; the core writes each
 // change, or only the release for a `commit: release` slider.
 
+#include <algorithm> // std::max
 #include <cfloat>
+#include <cmath> // fmod: the arc's turn
 #include <cstring>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/gl/ImGuiBinding.h> // cvc::gl::ui::*
@@ -616,6 +618,32 @@ void ImGuiBackend::progress_bar(const char *label, float fraction, const std::st
   }
 #else
   Backend::progress_bar(label, fraction, overlay);
+#endif
+}
+void ImGuiBackend::spinner(const char *label, double seconds, bool ascii) {
+#ifdef CVC_ENABLE_IMGUI
+  // An arc drawn rather than a glyph, so it turns whatever the font holds (the browser build's is
+  // ASCII): three quarters of a circle a text line high, one turn a second, in the text colour
+  // (dimmed by a disabled scope like any text). The label follows on the same line.
+  (void)ascii;
+  const float h = ImGui::GetTextLineHeight();
+  const ImVec2 at = ImGui::GetCursorScreenPos();
+  ImGui::Dummy(ImVec2(h, h));
+  const float r = 0.5f * h - 1.5f;
+  if (r > 1.f) {
+    const ImVec2 c(at.x + 0.5f * h, at.y + 0.5f * h);
+    const double turns = seconds > 0.0 && std::isfinite(seconds) ? std::fmod(seconds, 1.0) : 0.0;
+    const float a0 = static_cast<float>(turns * 2.0 * IM_PI);
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    dl->PathArcTo(c, r, a0, a0 + 1.5f * IM_PI, 24);
+    dl->PathStroke(ImGui::GetColorU32(ImGuiCol_Text), ImDrawFlags_None, std::max(1.5f, 0.15f * h));
+  }
+  if (label && *label) {
+    ImGui::SameLine(0.f, ImGui::GetStyle().ItemInnerSpacing.x);
+    ImGui::TextUnformatted(label);
+  }
+#else
+  Backend::spinner(label, seconds, ascii);
 #endif
 }
 bool ImGuiBackend::button(const char *label) { return ui::Button(label); }

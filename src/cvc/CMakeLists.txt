@@ -80,6 +80,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/nav_es.h
   ../../inc/cvc/physics/plant_log.h
   ../../inc/cvc/physics/plant_log_scene.h
+  ../../inc/cvc/physics/jolt_rollout.h
   ../../inc/cvc/state/state_hash_partition.h
   ../../inc/cvc/state/distributed_state_session.h
   ../../inc/cvc/state/state_transport.h
@@ -136,6 +137,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/process.h
   ../../inc/cvc/core/text.h
   ../../inc/cvc/core/thread_pool.h
+  ../../inc/cvc/core/thread_class.h
   ../../inc/cvc/volume/volmagick.h
   ../../inc/cvc/geometry/geometry_file_io.h
   ../../inc/cvc/model/model.h
@@ -155,6 +157,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/nav/route_follower.h
   ../../inc/cvc/nav/plant_types.h
   ../../inc/cvc/nav/plant_ledger.h
+  ../../inc/cvc/nav/rollout_plant.h
+  ../../inc/cvc/nav/dyn4_ledger.h
   ../../inc/cvc/nav/terrain.h
   ../../inc/cvc/nav/vehicle_plant.h
   ../../inc/cvc/ph/mat3.h
@@ -230,6 +234,7 @@ set(SOURCE_FILES
   core/process.cpp
   core/text.cpp
   core/thread_pool.cpp
+  core/thread_class.cpp
   processing/bilateral_filter.cpp
   processing/contrast_enhancement.cpp
   volume/cvcraw_io.cpp
@@ -287,6 +292,7 @@ set(SOURCE_FILES
   state/state_exec/lock_manager.cpp
   state/state_exec/lock_home.cpp
   state/state_exec/lock_intrinsics.cpp
+  state/state_exec/priority.cpp
   core/world_clock.cpp
   core/world_clock_binding.cpp
   core/clock_driver.cpp
@@ -312,6 +318,7 @@ set(SOURCE_FILES
   physics/nav_es.cpp
   physics/plant_log.cpp
   physics/plant_log_scene.cpp
+  physics/jolt_rollout.cpp
   state/state_change_journal.cpp
   state/state_subscription_router.cpp
   state/state_sync_adapter.cpp
@@ -390,6 +397,8 @@ set(SOURCE_FILES
   nav/sim_thread.cpp
   nav/nav_stats.cpp
   nav/plant_ledger.cpp
+  nav/rollout_plant.cpp
+  nav/dyn4_ledger.cpp
   ph/se2_data.cpp
   ph/se2_model.cpp
   ph/se2_train.cpp
@@ -528,7 +537,8 @@ endif()
 # on their own target (below).
 set(_cvc_physics_exact_sources physics/world.cpp physics/vehicle.cpp physics/field_step.cpp
     physics/det_math.cpp physics/null_backend.cpp physics/nav_plant.cpp
-    physics/dyn_bike_plant.cpp physics/dyn_4w_plant.cpp physics/dyn_world.cpp)
+    physics/dyn_bike_plant.cpp physics/dyn_4w_plant.cpp physics/dyn_world.cpp
+    physics/jolt_rollout.cpp)
 if(NOT MSVC)
   set_source_files_properties(${_cvc_physics_exact_sources}
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")

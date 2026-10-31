@@ -165,7 +165,7 @@ All are bound in every default environment.
 | `PythonError` | `RuntimeError` | a Python exception from a registered Python function; `python_type` names it |
 | `LockError` | `RuntimeError` | a `with-lock` refused: `reason` is `"upgrade"`, `"handler"`, `"generator"`, `"fork"`, `"no process"`, `"cannot wait here"` or `"restore"`; `key` and `mode` name the request (docs/STATE_EXEC_LOCKS.md 4.1) |
 | `DeadlockError` | `LockError` | a `with-lock` whose wait would close a cycle; `cycle` lists its edges, `{pid key}` each |
-| `PermissionError` | `Exception` | a `/` lock key (app-global) where the channel policy doesn't allow it |
+| `PermissionError` | `Exception` | a `/` lock key (app-global) where the channel policy doesn't allow it; `set-priority` raising a process past its floor or the caller's; `pid` and `priority` name the request (docs/STATE_EXEC_LOCKS.md 7.2) |
 | `AssertionError` | `Exception` | `(assert cond [message [data]])` when `cond` is false |
 
 Mapping a C++ exception thrown by a native function:
