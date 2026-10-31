@@ -335,12 +335,14 @@ that differs from the range they were computed over.
 **Field colours: a colour ramp for a field, not a volume.** `mesh_lab` and `fe_lab` also colour
 the values they show (a curvature, a geodesic distance, a FEM solution, element sizes) through a
 model at `<node>.field_colors`, which the nodes follow themselves (no `tf_binding`): its colour
-ramp is baked into the table every GeometryNode showing the values maps through
+ramp and opacity curve are baked into the table every GeometryNode showing the values maps through
 (`GeometryNode::setColorTable`), over the model's explicit domain or else the values' own range.
-The opacity curve and isocontours are not used, so the components' editors hide them
-(`show_opacity: false`, `show_isocontours: false`). The node publishes `field_colors.range` and a
-128-bin `field_colors.histogram` of the values beside it. The colormap key (`color.colormap`,
-`fe.view.colormap`) seeds the model and resets it to that colormap's ramp when it changes: the
+Where the curve is below 1 the values draw see-through: the node's colours carry an alpha channel,
+and VTK draws it in the translucent pass (an all-opaque curve keeps plain RGB, out of that pass).
+The isocontours are not used, so the components' editors hide them (`show_isocontours: false`).
+The node publishes `field_colors.range` and a 128-bin `field_colors.histogram` of the values
+beside it. The colormap key (`color.colormap`, `fe.view.colormap`) seeds the model and resets it
+to that colormap's ramp, opaque, when it changes: the
 colormap sampled finely and thinned by `cvc::tf::simplify_ramp` to the few colour nodes that
 follow it within 0.02 per channel, at most 12 (viridis takes 9, jet 6; turbo, the busiest, keeps 12
 and stays within 0.05), so the editor shows a handful of bars to grab and move rather than 33.

@@ -769,9 +769,10 @@ down), centres it in x and y, sits it on z = 0 and scales its largest extent to 
 
 **Field colours (both node types).** The values a node shows are coloured through a transfer
 function at `<node>.field_colors` (a `cvc::tf::model` string, outside `mesh_ops.*` / `fe.*`), so
-a `tf_editor` edits the ramp: mesh_tools and fe_controls each hold one (`show_opacity: false`,
-`show_isocontours: false`). Only the colour ramp is used. The colormap key (`color.colormap`,
-`view.colormap`) seeds it and resets it to that colormap's ramp whenever it changes, so a
+a `tf_editor` edits the ramp and the opacity curve: mesh_tools and fe_controls each hold one
+(`show_isocontours: false`). The values draw see-through where the opacity curve is below 1 (times
+fe_lab's surface opacity); the isocontours are not used. The colormap key (`color.colormap`,
+`view.colormap`) seeds it and resets it to that colormap's ramp, opaque, whenever it changes, so a
 document stepping through colormaps still works; an edit stands until the next change. An
 explicit domain in the model is the range the values are coloured over (in fe_lab it wins over
 `view.fixed_range`). Beside it the node publishes `field_colors.range` (the colours' span under
@@ -825,13 +826,13 @@ Keys under `<node>.fe.*`:
 
 | key | meaning | seeded from prop |
 |---|---|---|
-| `request` | `load`, `reload`, `mesh`, `solve`, `stop` (`stop` interrupts a heat solve; any other job runs to the end and the status says so); several separated by spaces run in order | `auto_mesh: true` seeds `mesh` |
+| `request` | `load`, `reload`, `mesh`, `solve`, `stop` (`stop` ends the running job at its next step: a heat solve keeps its field so far, a load, mesh or other solve keeps nothing and the node keeps what it had); several separated by spaces run in order, so `stop load` drops the running job and loads | `auto_mesh: true` seeds `mesh` |
 | `busy`, `status`, `progress` (0-100), `stats.vertices`, `field.min`, `field.max` | published | — |
 | `phase` | published while a job runs: its stage and percent (`x lines 40%`, `factoring 62%`), `""` when idle; fe_controls' progress bar shows it | — |
 | `stats.tets`, `stats.hexes` | published: the element count (the other is 0) | — |
 | `stats.quality_min`, `stats.quality_mean` | published: minimum dihedral angle (tetrahedra, degrees) or scaled Jacobian (hexahedra) | — |
 | `stats.work_ms` | published: the wall time of the last run of commands, from the first to idle | — |
-| `stoppable` | published: 1 while a heat solve runs (the Stop button's `enabled_when`), else 0 | — |
+| `stoppable` | published: 1 while a job runs (the Stop button's `enabled_when`), else 0 | — |
 | `last_mesh` | published: the region and bounds the last mesh job started with (`solid <isovalue>` or `interval <lo> <hi>`), `""` before the first | — |
 | `source.type` | `sdf` (the signed distance field of a mesh) or `volume` (a volume file) | `source:` |
 | `source.file` | the mesh or the volume: a path or URI, a relative path resolved against the document's directory (`stanford.bunny` is built in) | `source.sdf.mesh` / `source.file` |

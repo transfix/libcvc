@@ -7,9 +7,9 @@
 # thread and publishes status / stats. While a job runs mesh_ops.busy is 1 and the command buttons
 # grey out. Colour by / Colormap / Geodesic source / Mode are FOLLOWED: changing them recolours the
 # mesh. The colours come from the node's field colours (graphics.root.children.mesh.field_colors, a
-# transfer function): the Colours editor edits its ramp over the values' histogram, and Colormap
-# resets it to a named ramp. Load reads another mesh file (source.*), so one node can switch
-# datasets.
+# transfer function): the Colours editor edits its ramp and opacity curve over the values'
+# histogram -- the surface is see-through where the curve is low -- and Colormap resets it to a
+# named, opaque ramp. Load reads another mesh file (source.*), so one node can switch datasets.
 # Needs a libcvc built with CVC_ENABLE_LIBIGL (the mesh_lab node type is registered only there).
 #
 # Convention: it binds a mesh_lab node named `mesh`. To drive a differently-named node, copy this
@@ -126,7 +126,6 @@ units:
         bind: graphics.root.children.mesh.field_colors
         height: 70
         layers: [histogram]
-        show_opacity: false
         show_isocontours: false
         interactive_updates: true
       - slider_int: Geodesic source vertex

@@ -139,8 +139,10 @@ public:
   // (3n floats, each channel 0..1) uniform over [lo, hi], sampled linearly between entries (a
   // transfer function's baked ramp, cvc::tf::model::bake). It stays across setScalarField,
   // setColorMap and clearScalarField; an empty (or shorter) table goes back to the colormap.
-  // Recolours in place. NaN values draw mid-gray, as with a colormap.
-  void setColorTable(const std::vector<float> &rgb);
+  // Recolours in place. NaN values draw mid-gray, as with a colormap. `alpha`, when it holds one
+  // opacity (0..1) per entry, is sampled the same way into a fourth channel, so the field draws
+  // translucent where it is below 1 (times the actor's opacity); any other length is opaque.
+  void setColorTable(const std::vector<float> &rgb, const std::vector<float> &alpha = {});
   void clearScalarField();
   // True while the mesh has a scalar field to colour by (an explicit one, or a
   // color_by field this geometry carries), shown or hidden by use_single_color.
@@ -322,6 +324,7 @@ private:
   std::string m_colorBy = "none";    // the color_by state key
   cvc::colormap_kind m_colorMap = cvc::colormap_kind::VIRIDIS;
   std::vector<float> m_colorTable; // setColorTable: replaces m_colorMap while it has >= 2 entries
+  std::vector<float> m_alphaTable; // ... and its opacities, one per entry, or empty (opaque)
   double m_scalarMin, m_scalarMax; // scalar_min / scalar_max; NaN = auto
   bool m_scalarActive = false;     // the last recolour mapped a field
   std::pair<double, double> m_scalarRangeUsed;
