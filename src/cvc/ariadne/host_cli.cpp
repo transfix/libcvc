@@ -23,15 +23,24 @@ namespace {
 
 namespace po = boost::program_options;
 
-constexpr const char *kValueFlags[] = {"--prefix",         "--component-path",
-                                       "--backend",        "--fps",
-                                       "--width",          "--height",
-                                       "--frames",         "--png",
-                                       "--graphics",       "--image",
-                                       "--cell-size",      "--net-allow",
-                                       "--net-policy",     "--credential-store",
-                                       "--credential-env", "--timeout",
-                                       "--oidc-issuer",    "--oidc-client",
+constexpr const char *kValueFlags[] = {"--prefix",
+                                       "--component-path",
+                                       "--backend",
+                                       "--fps",
+                                       "--width",
+                                       "--height",
+                                       "--frames",
+                                       "--png",
+                                       "--graphics",
+                                       "--image",
+                                       "--cell-size",
+                                       "--net-allow",
+                                       "--net-policy",
+                                       "--credential-store",
+                                       "--credential-env",
+                                       "--timeout",
+                                       "--oidc-issuer",
+                                       "--oidc-client",
                                        "--oidc-redirect-uri"};
 constexpr const char *kBoolFlags[] = {"--no-mouse", "--ansi", "--net", "--no-browser"};
 
