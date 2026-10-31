@@ -53,6 +53,28 @@ using async_kernel = std::function<value_t(async_call &call)>;
 /// them; a marshal that throws raises at the call like any native function.
 using async_marshal = std::function<async_kernel(std::span<const value_t> args)>;
 
+/// Work that runs by itself instead of on an executor (docs/STATE_EXEC_EXCEPTIONS.md 3.12): a
+/// browser fetch in a build without threads, which the page's event loop completes and reports
+/// through a callback. It runs on the scheduler's thread, in the calling step, and must not block:
+/// it begins the work and returns. The work then ends the call exactly once, from whatever thread
+/// its completion runs on, with async_call::settle and async_host::finish. A call cancelled first
+/// (its process killed or reaped, the call timed out, the host shut down) stops it through the
+/// hook it set with async_call::on_cancel, and then nothing may be posted for it any more: the
+/// call's host may be gone. A start that throws ends the call with its exception.
+using async_start = std::function<void(const std::shared_ptr<async_call> &call)>;
+
+/// What an async function's marshal step returns when its work may run by itself: `start`, used
+/// where the calling process can park (or a future is asked for), else `kernel`, the same work
+/// done in one blocking call, run as any kernel is (inline where the process can't park). Either
+/// may be empty, not both; a work with no kernel raises RuntimeError where it can't start.
+struct async_work {
+  async_kernel kernel;
+  async_start start;
+};
+
+/// The marshal step of an async function whose work may run by itself (register_async_fn).
+using async_work_marshal = std::function<async_work(std::span<const value_t> args)>;
+
 /// Where an async function's kernel runs (docs/STATE_EXEC_EXCEPTIONS.md 3.5).
 enum class executor_kind {
   /// The app's background task pool (app::submitPooled: its persistent workers), in the order
@@ -120,6 +142,12 @@ public:
   /// take the GIL): not charged as run time (docs/STATE_EXEC_EXCEPTIONS.md 3.8).
   void add_wait(double seconds);
 
+  /// Work that runs by itself (async_start): call `stop` once the call is cancelled, or now if
+  /// it already is. It runs on the thread that cancels the call, under no lock of the call's,
+  /// exactly once; a later hook replaces one not yet run. `stop` must not block, and once it
+  /// returns the work must not settle or post the call.
+  void on_cancel(std::function<void()> stop);
+
   // ---- awaitable: what an await_call frame or a future reads ----
 
   bool finished() const override { return finished_.load(std::memory_order_acquire); }
@@ -140,8 +168,11 @@ public:
   bool threaded() const { return async_sched_ != nullptr; }
   bool started() const { return start_ns_.load(std::memory_order_acquire) != 0; }
 
-  /// Cancel: cancelled() is true from now on.
-  void cancel() { cancel_.store(true, std::memory_order_release); }
+  /// Cancel: cancelled() is true from now on, and the on_cancel hook runs (here).
+  void cancel() {
+    if (!cancel_.exchange(true, std::memory_order_acq_rel))
+      run_cancel_hook();
+  }
   bool cancel_requested() const { return cancel_.load(std::memory_order_acquire); }
   /// Whether the call's timeout has passed at `now`.
   bool past_timeout(clock::time_point now) const;
@@ -232,6 +263,10 @@ private:
   std::optional<double> inline_rate_;
 
   std::atomic<bool> cancel_{false};
+  // on_cancel's hook: taken out under cancel_m_ and run outside it, once.
+  std::mutex cancel_m_;
+  std::function<void()> cancel_hook_;
+  void run_cancel_hook();
   std::thread::id kernel_thread_;
   double cpu0_ = 0.0; // the kernel thread's CPU clock when the kernel started
   // Steady-clock and CPU nanoseconds, written on the kernel's threads, read by the scheduler.
