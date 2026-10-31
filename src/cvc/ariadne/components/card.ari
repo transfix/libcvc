@@ -15,6 +15,10 @@
 #     avatar_auth  the host credential the avatar's URL needs ("" = none)
 #     avatar_size  the avatar's side in px (40)
 #   slots (widget lists the include site supplies; an empty one is left out):
+#     note      a row above the header ("Ada reposted", a pinned mark)
+#     extra     more lines under the title and byline, in the header's text column (a muted
+#               time row, badges)
+#     body      more widgets after the body text (further text lines, a quote)
 #     media     what the card shows under the body: image:, video:, audio: widgets, or any
 #     actions   the action row's widgets, laid out side by side (reply, like, share ...)
 #
@@ -70,6 +74,10 @@ units:
       borders: {show: outer}
     children:
       - type: group
+        id: "{id}_note"
+        children:
+          - slot: note
+      - type: group
         id: "{id}_header"
         layout: {kind: horizontal}
         visible_when: (or (!= (state-get "{avatar}") "") (!= (state-get "{title}") ""))
@@ -101,9 +109,17 @@ units:
                   - text: ""
                     bind: "{time}"
                     visible_when: (!= (state-get "{time}") "")
+              - type: group
+                id: "{id}_extra"
+                children:
+                  - slot: extra
       - text: ""
         bind: "{body}"
         visible_when: (!= (state-get "{body}") "")
+      - type: group
+        id: "{id}_body"
+        children:
+          - slot: body
       - type: group
         id: "{id}_media"
         children:
