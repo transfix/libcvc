@@ -139,6 +139,7 @@ add_executable(physics_vehicle_test physics_vehicle_test.cpp)
 add_executable(physics_energy_test physics_energy_test.cpp)
 add_executable(nav_plant_test nav_plant_test.cpp)
 add_executable(physics_plant_log_test physics_plant_log_test.cpp)
+add_executable(physics_jolt_rollout_test physics_jolt_rollout_test.cpp)
 add_executable(nav_dyn_bike_test nav_dyn_bike_test.cpp)
 add_executable(nav_dyn_4w_test nav_dyn_4w_test.cpp)
 add_executable(nav_potential_test nav_potential_test.cpp)
@@ -379,6 +380,7 @@ set(TEST_TARGETS
   physics_energy_test
   nav_plant_test
   physics_plant_log_test
+  physics_jolt_rollout_test
   nav_dyn_bike_test
   nav_dyn_4w_test
   nav_potential_test
@@ -1958,6 +1960,13 @@ target_link_libraries(physics_plant_log_test
     GTest::gtest_main
 )
 
+target_link_libraries(physics_jolt_rollout_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(nav_dyn_bike_test
   PRIVATE
     cvc
@@ -2379,6 +2388,7 @@ target_compile_features(physics_vehicle_test PRIVATE cxx_std_17)
 target_compile_features(physics_energy_test PRIVATE cxx_std_17)
 target_compile_features(nav_plant_test PRIVATE cxx_std_17)
 target_compile_features(physics_plant_log_test PRIVATE cxx_std_17)
+target_compile_features(physics_jolt_rollout_test PRIVATE cxx_std_17)
 target_compile_features(nav_dyn_bike_test PRIVATE cxx_std_17)
 target_compile_features(nav_dyn_4w_test PRIVATE cxx_std_17)
 target_compile_features(nav_potential_test PRIVATE cxx_std_17)
@@ -2883,6 +2893,7 @@ cvc_discover_tests(physics_vehicle_test)
 cvc_discover_tests(physics_energy_test)
 cvc_discover_tests(nav_plant_test)
 cvc_discover_tests(physics_plant_log_test)
+cvc_discover_tests(physics_jolt_rollout_test)
 cvc_discover_tests(nav_dyn_bike_test)
 cvc_discover_tests(nav_dyn_4w_test)
 cvc_discover_tests(nav_potential_test)

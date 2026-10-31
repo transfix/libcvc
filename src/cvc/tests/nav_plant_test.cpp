@@ -283,6 +283,132 @@ TEST(NavPlant, ReportsWhichVehicleItTouched) {
   EXPECT_GE(depth, 0.0);
 }
 
+// The ledger tick by tick (nav_plant::ledger_step): a Humvee accelerating, cornering and braking.
+// Each tick's lines balance as the ledger does, they sum to the vehicle's own ledger, and the
+// tick's energy_step is what the source paid of them.
+TEST(NavPlant, LedgerStepLinesBalanceAndSumToTheLedger) {
+  REQUIRE_JOLT();
+  scene sc;
+  world w(jolt_config());
+  sc.build(w, 0.9);
+  nav_plant plant(w, {vehicle_desc::humvee()});
+  cvc::world_units::normalized_frame f;
+  f.scale = kS;
+  cvc::nav::plant_state start;
+  plant.attach(1, &start, f, 0.06);
+  const vehicle_energy &zero = plant.ledger_step(0);
+  EXPECT_EQ(zero.supplied, 0.0);
+  EXPECT_EQ(zero.stored, 0.0);
+  vehicle_energy sum;
+  double worst = 0.0, supplied = 0.0;
+  for (int t = 0; t < 300; ++t) {
+    const float steer = t < 100 ? 0.0f : t < 200 ? 0.3f : 0.0f;
+    const float accel = static_cast<float>((t < 200 ? 2.0 : -4.0) * kS);
+    plant.command(0, steer, accel);
+    plant.advance();
+    const vehicle_energy &l = plant.ledger_step(0);
+    const double in = l.supplied + l.idle + l.fields + l.drivetrain_split;
+    const double out = l.dissipated() + l.stored + l.residual;
+    worst = std::max(worst, std::fabs(in - out) / std::max(1.0, std::fabs(in)));
+    // The Humvee burns fuel: what it drew is the source's line, net of regeneration (none).
+    EXPECT_NEAR(plant.energy_step(0), l.source - l.regen, 1e-9 * std::max(1.0, l.source))
+        << "tick " << t;
+    supplied += l.supplied;
+    sum.brake += l.brake;
+    sum.tire += l.tire;
+    sum.stored += l.stored;
+    sum.distance += l.distance;
+  }
+  const vehicle_energy e = w.vehicle_state(plant.vehicle(0)).energy;
+  std::printf("  300 ticks: supplied %.0f J, tire %.0f J, brake %.0f J, %.1f m; worst tick "
+              "imbalance %.2e\n",
+              supplied, sum.tire, sum.brake, sum.distance, worst);
+  EXPECT_LT(worst, 1e-9) << "a tick's lines do not balance";
+  EXPECT_NEAR(supplied, e.supplied, 1e-6 * e.supplied);
+  EXPECT_NEAR(sum.brake, e.brake, 1e-6 * std::max(1.0, e.brake));
+  EXPECT_NEAR(sum.tire, e.tire, 1e-6 * std::max(1.0, e.tire));
+  EXPECT_NEAR(sum.stored, e.stored, 1e-6 * std::max(1.0, std::fabs(e.stored)));
+  EXPECT_NEAR(sum.distance, e.distance, 1e-9 * std::max(1.0, e.distance));
+  EXPECT_GT(sum.brake, 0.0) << "the run should brake";
+  EXPECT_EQ(plant.ledger_step(0).kinetic, e.kinetic) << "a level is the tick's end's";
+}
+
+// A run restored (nav_plant::save / restore) continues bit for bit: three Humvees driven for 20
+// ticks, saved, driven 40 more; restored and driven the same 40 again, every state, sample and
+// ledger line repeats exactly. A state of other agents is refused and changes nothing.
+TEST(NavPlant, SaveRestoreReplaysBitForBit) {
+  REQUIRE_JOLT();
+  scene sc;
+  world w(jolt_config());
+  sc.build(w, 0.9);
+  nav_plant plant(w, {vehicle_desc::humvee()});
+  cvc::world_units::normalized_frame f;
+  f.scale = kS;
+  cvc::nav::plant_state start[3];
+  for (int i = 0; i < 3; ++i) {
+    start[i].x = static_cast<float>(20.0 * i * kS);
+    start[i].heading = 0.3f * static_cast<float>(i);
+  }
+  plant.attach(3, start, f, 0.06);
+  const auto drive = [&](int t) {
+    for (int i = 0; i < 3; ++i)
+      plant.command(i, 0.25f * std::sin(0.05f * static_cast<float>(t + 7 * i)),
+                    static_cast<float>((1.5 - 0.02 * (t % 60)) * kS));
+    plant.advance();
+  };
+  for (int t = 0; t < 20; ++t)
+    drive(t);
+  const std::vector<std::uint8_t> saved = plant.save();
+  struct tick {
+    cvc::nav::plant_state s;
+    cvc::nav::plant_sample sample;
+    double energy, supplied, tire, stored;
+  };
+  const auto run = [&] {
+    std::vector<tick> out;
+    for (int t = 20; t < 60; ++t) {
+      drive(t);
+      for (int i = 0; i < 3; ++i) {
+        const vehicle_energy &l = plant.ledger_step(i);
+        out.push_back(
+            {plant.state(i), plant.sample(i), plant.energy_step(i), l.supplied, l.tire, l.stored});
+      }
+    }
+    return out;
+  };
+  const std::vector<tick> first = run();
+  const std::uint64_t hash_after = w.state_hash();
+  plant.restore(saved);
+  const std::vector<tick> again = run();
+  ASSERT_EQ(first.size(), again.size());
+  for (std::size_t k = 0; k < first.size(); ++k) {
+    const tick &a = first[k], &b = again[k];
+    ASSERT_EQ(a.s.x, b.s.x) << "tick " << k / 3 << " agent " << k % 3;
+    ASSERT_EQ(a.s.y, b.s.y);
+    ASSERT_EQ(a.s.heading, b.s.heading);
+    ASSERT_EQ(a.s.speed, b.s.speed);
+    ASSERT_EQ(a.sample.vy, b.sample.vy);
+    ASSERT_EQ(a.sample.a_lat, b.sample.a_lat);
+    ASSERT_EQ(a.energy, b.energy);
+    ASSERT_EQ(a.supplied, b.supplied);
+    ASSERT_EQ(a.tire, b.tire);
+    ASSERT_EQ(a.stored, b.stored);
+  }
+  EXPECT_EQ(w.state_hash(), hash_after);
+  EXPECT_GT(first.back().s.speed, 0.0f) << "the vehicles should be moving";
+
+  // Another plant's state, of two agents on another world, is refused; this run is untouched.
+  world w2(jolt_config());
+  sc.build(w2, 0.9);
+  nav_plant other(w2, {vehicle_desc::humvee()});
+  other.attach(2, start, f, 0.06);
+  const std::uint64_t before = w.state_hash();
+  EXPECT_THROW(plant.restore(other.save()), cvc::physics_error);
+  EXPECT_THROW(plant.restore(std::vector<std::uint8_t>(saved.begin(), saved.end() - 1)),
+               cvc::physics_error);
+  EXPECT_EQ(w.state_hash(), before);
+}
+
 // The plant's own plan (nav_plant_options::plan_with_vehicle, on by default). Its limits are the
 // vehicle's: 0.8 of its max_accel, its rated top speed, 0.5 g of cornering (under 0.8 of its
 // static stability factor), and its body from the rear axle. A sim_world sized for no vehicle in
