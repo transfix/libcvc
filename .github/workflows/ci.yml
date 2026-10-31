@@ -656,7 +656,8 @@ jobs:
             kind: libcvc
             build_type: Debug
             enable_grpc: true
-          # Release gRPC: the config publish-cvcpkg.yml ships on Linux (CVC_ENABLE_GRPC=ON). The
+          # Release gRPC: the config publish-cvcpkg.yml ships (CVC_ENABLE_GRPC=ON and CVC_ENABLE_WS=ON,
+          # on every platform since 3.7.5+cvc.3; before that the publish set neither). The
           # debug-grpc lane proves the surface compiles+tests with asserts; this proves it in the
           # OPTIMIZED build we actually ship, so a Release-only grpc break is caught before publish.
           - name: libcvc-release-grpc
@@ -1606,6 +1607,7 @@ jobs:
             -DCVC_ENABLE_MESHER=ON \
             -DCVC_ENABLE_SDF=ON \
             -DCVC_ENABLE_GRPC=${{ matrix.enable_grpc == true && 'ON' || 'OFF' }} \
+            -DCVC_ENABLE_WS=${{ matrix.enable_grpc == true && 'ON' || 'OFF' }} \
             | tee configure.log
 
       # The terminal backends are optional at configure time: without ftxui / tvision the
@@ -1916,6 +1918,7 @@ jobs:
             -DCVC_ENABLE_MESHER=ON `
             -DCVC_ENABLE_SDF=ON `
             -DCVC_ENABLE_GRPC=${{ matrix.enable_grpc == true && 'ON' || 'OFF' }} `
+            -DCVC_ENABLE_WS=${{ matrix.enable_grpc == true && 'ON' || 'OFF' }} `
             | Tee-Object -FilePath configure.log
 
       # The terminal backends are optional at configure time: without ftxui / tvision the

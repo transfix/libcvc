@@ -512,6 +512,10 @@ jobs:
           # exported target. That regression already shipped once in +cvc.1 and broke
           # VolumeRover 2.x; the build.sh fix never reached the artifact. `pack` does not
           # fail on an unmatched file glob, so it stayed silent both times.
+          # CVC_ENABLE_GRPC/WS: the same drift. Neither was set here, so every published
+          # libcvc through 3.7.5+cvc.2 shipped WITHOUT the conference transports (their
+          # defaults are OFF) while the recipe declared grpc/protobuf as runtime deps: an
+          # arigl or arisrv built on the SDK compiled the conference out. Asserted below.
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE="$CMAKE_CFG" \
             -DCMAKE_PREFIX_PATH="$extra_prefix" \
@@ -523,6 +527,8 @@ jobs:
             -DCVC_ENABLE_MESHER=ON \
             -DCVC_ENABLE_SDF=ON \
             -DCVC_USING_XMLRPC=ON \
+            -DCVC_ENABLE_GRPC=ON \
+            -DCVC_ENABLE_WS=ON \
             | tee configure.log
 
       - name: Configure (Windows)
@@ -545,6 +551,7 @@ jobs:
           # exported target. That regression already shipped once in +cvc.1 and broke
           # VolumeRover 2.x; the build.sh fix never reached the artifact. `pack` does not
           # fail on an unmatched file glob, so it stayed silent both times.
+          # CVC_ENABLE_GRPC/WS: the same drift (see the Linux/macOS step); asserted below.
           cmake -B build `
             -DCMAKE_BUILD_TYPE="$env:CMAKE_CFG" `
             -DCMAKE_CONFIGURATION_TYPES="$env:CMAKE_CFG" `
@@ -557,6 +564,8 @@ jobs:
             -DCVC_ENABLE_MESHER=ON `
             -DCVC_ENABLE_SDF=ON `
             -DCVC_USING_XMLRPC=ON `
+            -DCVC_ENABLE_GRPC=ON `
+            -DCVC_ENABLE_WS=ON `
             | Tee-Object -FilePath configure.log
 
       - name: Assert the Ariadne terminal backends are configured
@@ -571,7 +580,9 @@ jobs:
           set -euo pipefail
           for want in "Ariadne: .ari YAML loader ENABLED" \
                       "Ariadne: FTXUI terminal backend ENABLED" \
-                      "Ariadne: tvision terminal backend ENABLED"; do
+                      "Ariadne: tvision terminal backend ENABLED" \
+                      "cvc::state: gRPC transport ENABLED" \
+                      "cvc::state: WebSocket transport ENABLED"; do
             grep -qF "$want" configure.log || {
               echo "::error::the ${{ matrix.target.platform }} configure did not print '$want': libcvc would ship a stub"
               exit 1
@@ -1513,7 +1524,9 @@ jobs:
             -DCVC_BUILD_VOLROVER3=OFF \
             -DCVC_ENABLE_MESHER=ON \
             -DCVC_ENABLE_SDF=ON \
-            -DCVC_USING_XMLRPC=ON
+            -DCVC_USING_XMLRPC=ON \
+            -DCVC_ENABLE_GRPC=ON \
+            -DCVC_ENABLE_WS=ON
 
       - name: Assert CUDA is actually enabled
         shell: bash
@@ -2168,7 +2181,9 @@ jobs:
             -DCVC_BUILD_VOLROVER3=OFF `
             -DCVC_ENABLE_MESHER=ON `
             -DCVC_ENABLE_SDF=ON `
-            -DCVC_USING_XMLRPC=ON
+            -DCVC_USING_XMLRPC=ON `
+            -DCVC_ENABLE_GRPC=ON `
+            -DCVC_ENABLE_WS=ON
 
       - name: Assert CUDA is actually enabled
         shell: pwsh
