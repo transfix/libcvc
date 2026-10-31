@@ -101,6 +101,35 @@ cvc_uri_search_dirs(const std::vector<std::string> &extra_search_dirs = {});
 UriResult resolve(const std::string &uri, const std::string &base = std::string());
 
 // -------------------------------------------------------------------------------------------------
+// Resolving without blocking (docs/ARIADNE.md 10.2, L4): a scheme's handler may have a second,
+// non-blocking form, which answers through a callback. The http(s) handler has one, so a browser
+// build without threads resolves an http(s) URI for (fetch ...) while its frame loop goes on.
+// -------------------------------------------------------------------------------------------------
+
+// What a non-blocking resolve calls with its result, once.
+using UriDone = std::function<void(UriResult)>;
+
+// The non-blocking form of a scheme's handler: resolve `u` as the handler would and call `done`
+// with the result, later where it can, else before it returns. It returns a function that stops
+// it (`done` is then not called), or an empty one when there is nothing to stop.
+using UriAsyncHandler =
+    std::function<std::function<void()>(const Uri &u, const std::string &base, UriDone done)>;
+
+// Register (or replace) the non-blocking form of `scheme`'s handler. register_uri_handler and
+// unregister_uri_handler for the scheme drop it: a handler a host registers in its place has no
+// non-blocking form unless the host registers one too.
+void register_uri_async_handler(const std::string &scheme, UriAsyncHandler handler);
+
+// Whether `scheme` has a non-blocking handler.
+bool has_uri_async_handler(const std::string &scheme);
+
+// resolve(uri, base) through the scheme's non-blocking handler: `done` gets what resolve() would
+// return (the same errors and canonical fallback), later where the handler can answer later. With
+// no non-blocking handler it resolves in place and calls `done` before it returns. Returns the
+// handler's stop function (empty when there is none). Never throws.
+std::function<void()> resolve_async(const std::string &uri, const std::string &base, UriDone done);
+
+// -------------------------------------------------------------------------------------------------
 // §13.10 the WRITE side — a `store` (PUT) capability symmetric with resolve(). One scheme registry
 // pair backs read (resolve) and write (store); a scheme may register a reader, a writer, or both.
 // -------------------------------------------------------------------------------------------------

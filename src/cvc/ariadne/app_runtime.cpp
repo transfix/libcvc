@@ -28,6 +28,10 @@
 #include <thread>
 #include <utility>
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h> // emscripten_sleep: settle() yields to the page's event loop
+#endif
+
 namespace cvc {
 namespace ariadne {
 
@@ -46,8 +50,11 @@ AppRuntime::~AppRuntime() {
 }
 
 bool AppRuntime::idle() const {
-  return app_.exec_async_host().in_flight() == 0 && !app_.exec_scheduler().has_runnable() &&
-         !rt_.media_busy();
+  // The scheduler's calls in flight include those no executor runs (a request a browser's fetch
+  // answers, docs/ARIADNE.md 10.2), which the host's count of running kernels leaves out.
+  return app_.exec_async_host().in_flight() == 0 &&
+         app_.exec_scheduler().async_calls_in_flight() == 0 &&
+         !app_.exec_scheduler().has_runnable() && !rt_.media_busy();
 }
 
 void AppRuntime::settle(const std::function<void()> &step, double max_seconds) {
@@ -56,7 +63,13 @@ void AppRuntime::settle(const std::function<void()> &step, double max_seconds) {
   for (int quiet = 0; quiet < 3 && clock::now() < deadline;) {
     step();
     quiet = idle() ? quiet + 1 : 0;
+#ifdef __EMSCRIPTEN__
+    // Yield to the browser's event loop (Asyncify), which answers the requests a build without
+    // threads starts: a sleep here would never let it run.
+    emscripten_sleep(2);
+#else
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
+#endif
   }
 }
 
