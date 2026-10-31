@@ -233,8 +233,10 @@ private:
       if (message.empty())
         binary = (meta->flags & CURLWS_BINARY) != 0;
       if (message.size() + n > max_bytes_) {
-        queue_.push({WsEvent::Kind::Error, "ws: a message is longer than the limit", 0});
+        // Closed before the error is queued, so whoever takes the error sees the connection
+        // closed (open() is false from the last event on), as the peer-close paths above do.
         close(1009);
+        queue_.push({WsEvent::Kind::Error, "ws: a message is longer than the limit", 0});
         return;
       }
       message.append(buf, n);
