@@ -367,7 +367,22 @@ public:
       for (int c = 0; c < cols; ++c) {
         fx::Cell &cell = screen.CellAt(box_.x_min + c, box_.y_min + r);
         const std::string &ch = cell.character;
-        if (ch.empty() || ch == "▀" || ch == "▄" || ch.rfind(kPlaceholderBase, 0) == 0)
+        if (ch == "▀" || ch == "▄") {
+          // Still the backdrop's own half-block (its character and background), but a colour
+          // decorator over the row (a coloured text: line) recoloured its foreground: put the
+          // picture's back. A picture the content drew has backgrounds of its own.
+          unsigned char t[3], u[3];
+          const bool tt = p_->at(c, 2 * r, p_->opacity, t);
+          const bool uu = p_->at(c, 2 * r + 1, p_->opacity, u);
+          if ((tt || uu) && ch == (tt ? "▀" : "▄") &&
+              cell.background_color ==
+                  (tt && uu ? fx::Color::RGB(u[0], u[1], u[2]) : fx::Color(fx::Color::Default))) {
+            const unsigned char *f = tt ? t : u;
+            cell.foreground_color = fx::Color::RGB(f[0], f[1], f[2]);
+          }
+          continue;
+        }
+        if (ch.empty() || ch.rfind(kPlaceholderBase, 0) == 0)
           continue;
         // The foreground BackdropCells gave this cell: its top pixel, else its bottom one.
         unsigned char top[3], bot[3], fg[3];
