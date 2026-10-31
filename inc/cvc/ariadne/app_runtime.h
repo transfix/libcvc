@@ -157,6 +157,11 @@ public:
   // frame) until the document has been idle for three steps running, or `max_seconds` pass, so
   // the frame shows what its requests brought back. ari and arigl call it when the network is on.
   void settle(const std::function<void()> &step, double max_seconds = 10.0);
+  // settle(), then draw a frame with `render`; while that frame drew a picture still loading (one
+  // whose URL a reply has just put in state, so no frame had asked for it yet), settle and draw
+  // again. All within `max_seconds`. A snapshot's last frame, with its requests and pictures in.
+  void settle_and_render(const std::function<void()> &step, const std::function<void()> &render,
+                         double max_seconds = 10.0);
 
   // --- input seam (document-level on_key/on_pointer residents) ---
   void post_key(bool down, const std::string &key, int mods = 0, bool repeat = false);

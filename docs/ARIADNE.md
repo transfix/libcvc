@@ -1100,8 +1100,9 @@ windows:
   decode and the fit run on the app's background pool. A failure shows a darker placeholder, says
   why in its tooltip, and is tried again after 30 s. Pictures are kept in memory per runtime, up to
   64 MiB, and dropped 30 s after the last frame that drew them. Two widgets that show the same URL
-  share one fetch. `ari snapshot` and `arigl snapshot` wait for the pictures they draw (at most
-  10 s, as for requests).
+  share one fetch. `ari snapshot` and `arigl snapshot` wait for the pictures they draw, those
+  whose URL a reply puts in state included: they draw again until no picture is still loading
+  (at most 10 s, as for requests).
 - **The box.** `size: [w, h]` is a box; `fit` says how the picture fills it: `contain` (all of it,
   transparent bars), `cover` (all of the box, the middle of the picture) or `fill` (stretched).
   `shape: circle` makes the outside of the inscribed circle transparent. `size: w` keeps the
@@ -1113,6 +1114,10 @@ windows:
   (§4). Hosted tvision always draws half-blocks. In half-blocks, a transparent pixel leaves its
   half of the cell to the terminal's own background, so a round avatar has no corners on a light
   or a dark terminal. Kitty, Sixel and iTerm draw transparent pixels black.
+- **The capability token `image.url`** (§5.7) holds in every host that does this, so a document
+  for older hosts too gates its pictures with `(has? "image.url")` or
+  `requires: [{name: image.url, optional: true}]` and draws its own placeholder elsewhere (an
+  older host shows an unknown URI as text).
 - **`status:`** names a state key the widget keeps `loading`, `ready` or `failed` in, with the
   reason under `<key>.error`. A document reads it to show something else when a picture is
   missing, and a test asserts on it.
