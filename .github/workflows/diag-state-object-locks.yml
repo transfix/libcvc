@@ -1,0 +1,101 @@
+name: diag state_object locks (macOS)
+
+# Throwaway diagnostic, on its own diag/ branch only (never merged): StateObjectFixture.
+# StateObjectMultipleLocks aborted once on "recipe / macos-latest / Release" (run 41162330512)
+# with no message at all, which on macOS points at libpthread's client checks (they abort through
+# abort_with_reason and only the crash report says why). This builds state_test as that lane does,
+# runs the test as separate processes until it aborts, and uploads the crash reports.
+
+on:
+  push:
+    branches: ['diag/state-object-locks-*']
+
+jobs:
+  loop:
+    runs-on: macos-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install cvcpkg
+        run: |
+          pip install 'git+https://github.com/transfix/libcvc-deps@master'
+          cvcpkg --version
+
+      - name: Install dependency closure from the catalog
+        run: |
+          set -euo pipefail
+          cvcpkg install-deps cvcpkg/recipes/libcvc --prefix "$RUNNER_TEMP/deps" \
+            --config release --link shared
+
+      # cvcpkg/recipes/libcvc/build.sh's flags, Release, shared; only state_test is built.
+      - name: Build state_test
+        run: |
+          set -euo pipefail
+          cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+            -DCVC_BUILD_TESTS=ON -DCVC_BUILD_CLI=OFF -DCVC_BUILD_ARI=OFF -DCVC_ENABLE_CUDA=OFF \
+            -DCVC_ENABLE_GRPC=OFF -DCVC_BUILD_PYCVC=OFF -DCVC_USING_XMLRPC=ON \
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/deps"
+          cmake --build build --target state_test -j "$(sysctl -n hw.ncpu)"
+
+      # As ctest runs it: one process per run. Three loops at once (the lane runs ctest -j), and
+      # the rest of StateObjectFixture beside them, for the load. Stops at the third abort.
+      - name: Run the test until it aborts
+        run: |
+          set -uo pipefail
+          export DYLD_LIBRARY_PATH="$RUNNER_TEMP/deps/lib"
+          bin=$(find build -name state_test -type f -perm -u+x | head -n 1)
+          echo "binary: $bin"
+          mkdir -p diag
+          loop() {
+            local n=0
+            for i in $(seq 1 2500); do
+              [ "$(ls diag/fail-*.txt 2>/dev/null | wc -l)" -ge 3 ] && break
+              "$bin" --gtest_filter=StateObjectFixture.StateObjectMultipleLocks >"diag/out-$1.txt" 2>&1
+              rc=$?
+              if [ $rc -ne 0 ]; then
+                cp "diag/out-$1.txt" "diag/fail-$1-$i.txt"
+                echo "loop $1 run $i: exit $rc"
+              fi
+              n=$i
+            done
+            echo "loop $1: $n runs"
+          }
+          others() {
+            for i in $(seq 1 400); do
+              [ "$(ls diag/fail-*.txt 2>/dev/null | wc -l)" -ge 3 ] && break
+              "$bin" --gtest_filter='StateObjectFixture.*-StateObjectFixture.StateObjectMultipleLocks' \
+                >/dev/null 2>&1 || echo "others run $i: exit $?"
+            done
+          }
+          loop 1 & loop 2 & loop 3 & others &
+          wait
+          echo "aborts: $(ls diag/fail-*.txt 2>/dev/null | wc -l)"
+          for f in diag/fail-*.txt; do [ -f "$f" ] && { echo "--- $f"; cat "$f"; }; done
+          true
+
+      - name: Collect crash reports
+        if: always()
+        run: |
+          mkdir -p diag/reports
+          for d in "$HOME/Library/Logs/DiagnosticReports" /Library/Logs/DiagnosticReports; do
+            ls -la "$d" 2>/dev/null | tail -n 20
+            cp "$d"/state_test* diag/reports/ 2>/dev/null || true
+          done
+          ls -la diag/reports
+          for f in diag/reports/*; do
+            [ -f "$f" ] || continue
+            echo "=== $f"
+            head -c 20000 "$f"
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: state-object-locks-diag
+          path: diag/
+          if-no-files-found: ignore
