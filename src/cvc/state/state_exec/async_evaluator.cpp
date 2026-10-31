@@ -190,6 +190,10 @@ task<value_t> async_evaluator::eval_internal(const value_t &expr, environment_pt
     co_return co_await do_if(args, env);
   if (name == "begin")
     co_return co_await do_begin(args, env);
+  if (name == "and")
+    co_return co_await do_and(args, env);
+  if (name == "or")
+    co_return co_await do_or(args, env);
   if (name == "while")
     co_return co_await do_while(args, env);
   if (name == "for")
@@ -276,6 +280,28 @@ task<value_t> async_evaluator::do_begin(const std::vector<value_t> &args, enviro
     result = co_await eval_internal(a, env);
   }
   co_return result;
+}
+
+// (and ...) and (or ...) stop at the first argument that decides them, as in evaluator.cpp.
+task<value_t> async_evaluator::do_and(const std::vector<value_t> &args, environment_ptr env) {
+  value_t result = true_value;
+  for (auto &a : args) {
+    co_await check_interrupted_async();
+    result = co_await eval_internal(a, env);
+    if (!result.is_truthy())
+      co_return false_value;
+  }
+  co_return result;
+}
+
+task<value_t> async_evaluator::do_or(const std::vector<value_t> &args, environment_ptr env) {
+  for (auto &a : args) {
+    co_await check_interrupted_async();
+    value_t v = co_await eval_internal(a, env);
+    if (v.is_truthy())
+      co_return v;
+  }
+  co_return false_value;
 }
 
 task<value_t> async_evaluator::do_while(const std::vector<value_t> &args, environment_ptr env) {

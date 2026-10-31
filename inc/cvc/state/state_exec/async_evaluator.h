@@ -75,6 +75,8 @@ private:
   // Special form handlers (coroutines)
   task<value_t> do_if(const std::vector<value_t> &args, environment_ptr env);
   task<value_t> do_begin(const std::vector<value_t> &args, environment_ptr env);
+  task<value_t> do_and(const std::vector<value_t> &args, environment_ptr env);
+  task<value_t> do_or(const std::vector<value_t> &args, environment_ptr env);
   task<value_t> do_while(const std::vector<value_t> &args, environment_ptr env);
   task<value_t> do_for(const std::vector<value_t> &args, environment_ptr env);
   task<value_t> do_set(const std::vector<value_t> &args, environment_ptr env);

@@ -582,8 +582,8 @@ public:
     // set is shared across every ReactiveEngine.
     static const std::shared_ptr<const std::set<std::string>> kAllowedForms =
         std::make_shared<const std::set<std::string>>(
-            std::set<std::string>{"if", "begin", "let", "while", "for", "lambda", "defun", "set",
-                                  "return", "quote", "yield", "break"});
+            std::set<std::string>{"if", "begin", "and", "or", "let", "while", "for", "lambda",
+                                  "defun", "set", "return", "quote", "yield", "break"});
     ev_->restrict_special_forms(kAllowedForms);
     resolve_data_settings();
   }

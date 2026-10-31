@@ -89,7 +89,7 @@ Reactive slots — `visible_when`, `enabled_when` / `disabled_when`, computed `b
   `json-encode` are on it ([§10.4](#104-json-replies)); `str-concat` is not, so a computed
   label joins its parts with `string.join`.
 - The special-form gate admits only `if / begin / let / while / for / lambda / defun /
-  set / return / quote / yield / break` (`kAllowedForms`,
+  set / return / quote / yield / break / and / or` (`kAllowedForms`,
   [`ariadne.cpp:433`](../src/cvc/ariadne/ariadne.cpp)).
 
 Nothing that writes state, schedules, watches, sends messages, or does I/O is
