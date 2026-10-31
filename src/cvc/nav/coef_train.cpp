@@ -1046,6 +1046,7 @@ void coef_trainer::adam_step(const std::vector<float> &grad) {
     const float t = std::min(1.0f, static_cast<float>(adam_t_) / static_cast<float>(adam_total_));
     lr = cfg_.lr_min + (cfg_.lr - cfg_.lr_min) * 0.5f * (1.0f + std::cos(3.14159265358979f * t));
   }
+  lr *= lr_scale_; // smaller after each rollback (train_config::rollback_drop)
   double sq = 0.0;
   for (float g : grad)
     sq += static_cast<double>(g) * g;
@@ -1083,8 +1084,10 @@ void coef_trainer::train(const training_scene &scene, bool verbose,
   // Checkpoint selection: score the untrained policy, then every `every` steps.
   checkpoints_.clear();
   selected_step_ = -1;
+  rollbacks_.clear();
+  lr_scale_ = 1.0f;
   const int every = cfg_.checkpoint_every > 0 ? cfg_.checkpoint_every : 25;
-  std::vector<float> best;
+  std::vector<float> best, best_m, best_u;
   double best_fit = 0.0;
   const auto score = [&](int step) {
     const double f = fitness(to_coef_mlp(), step);
@@ -1093,8 +1096,20 @@ void coef_trainer::train(const training_scene &scene, bool verbose,
       std::printf("  checkpoint at step %4d: fitness %.4f\n", step, f);
     if (best.empty() || f > best_fit) {
       best = p_;
+      best_m = m_;
+      best_u = u_;
       best_fit = f;
       selected_step_ = step;
+    } else if (cfg_.rollback_drop > 0.0f && f < best_fit - cfg_.rollback_drop) {
+      // Fallen past the margin: back to the best checkpoint, and on with smaller steps.
+      p_ = best;
+      m_ = best_m;
+      u_ = best_u;
+      lr_scale_ *= cfg_.rollback_lr_scale;
+      rollbacks_.push_back(step);
+      if (verbose)
+        std::printf("  rollback at step %4d to step %d's policy, lr x%.3g\n", step, selected_step_,
+                    lr_scale_);
     }
   };
   if (fitness)

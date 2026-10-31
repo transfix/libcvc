@@ -1312,6 +1312,46 @@ TEST(NavCoefTrain, CheckpointSelectionEndsOnTheBestScore) {
     EXPECT_FLOAT_EQ(after[k], before[k]);
 }
 
+// Rollback: a checkpoint scoring more than rollback_drop under the best sends training back to
+// the best checkpoint's parameters; one within the margin does not. The same run without
+// rollback (the default) matches it up to the rollback and parts from it after.
+TEST(NavCoefTrain, RollbackReturnsToTheBestCheckpoint) {
+  const training_scene sc = cvc::nav::city_scene(48);
+  train_config cfg = small_cfg();
+  cfg.steps = 20;
+  cfg.horizon = 8;
+  cfg.window = 4;
+  cfg.lr = 1e-3f;
+  cfg.checkpoint_every = 5;
+  EXPECT_EQ(cfg.rollback_drop, 0.0f) << "rollback is off by default";
+  const float feat[5] = {0.3f, 3.0f, 0.7f, 0.71f, 0.0f};
+  // Best at step 5, then 0.5 under it at 10 (past a 0.1 margin) and 0.05 under it at 15 and 20.
+  const auto run = [&](float drop, std::vector<std::vector<float>> &seen) {
+    train_config c = cfg;
+    c.rollback_drop = drop;
+    coef_trainer tr(c, 1);
+    tr.train(sc, false, [&](const cvc::nav::coef_mlp &policy, int step) {
+      std::vector<float> k(3);
+      policy.forward(feat, 1, k.data());
+      seen.push_back(k);
+      return step == 5 ? 1.0 : step == 10 ? 0.5 : step == 0 ? 0.0 : 0.95;
+    });
+    return tr;
+  };
+  std::vector<std::vector<float>> back, plain;
+  const coef_trainer rolled = run(0.1f, back), kept = run(0.0f, plain);
+  ASSERT_EQ(rolled.rollbacks().size(), 1u) << "only step 10 fell past the margin";
+  EXPECT_EQ(rolled.rollbacks()[0], 10);
+  EXPECT_TRUE(kept.rollbacks().empty());
+  EXPECT_EQ(rolled.selected_step(), 5);
+  ASSERT_EQ(back.size(), 5u);
+  ASSERT_EQ(plain.size(), 5u);
+  for (int s = 0; s <= 2; ++s) // steps 0, 5, 10: the same run until the rollback
+    EXPECT_EQ(back[s], plain[s]) << "checkpoint " << s;
+  // Step 15 was trained from step 5's policy (rolled back to at 10), not from step 10's.
+  EXPECT_NE(back[3], plain[3]);
+}
+
 // coef_mlp::with_flat_weights is export_flat's inverse: the same weights give the same policy,
 // and a changed weight changes it. (The zeroth-order fine-tune perturbs this flat vector.)
 TEST(NavCoefMlp, WithFlatWeightsInvertsExportFlat) {
