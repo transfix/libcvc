@@ -55,11 +55,12 @@ namespace {
 // They are used unqualified below (same cvc::ariadne namespace).
 
 // Read a state value as a plain string with no seeding (read-only Text view). Follows a
-// transparent-link hole to its target (§12), so a bound Text in a mounted module shows the
-// granted parent value, matching every other read path.
+// transparent-link hole to its target (§12), on every hop, so a bound Text in a mounted module
+// shows the granted parent value (or a value under it), matching every other read path.
 std::string read_string(cvc::app &ctx, const std::string &path) {
   try {
-    return read_effective(cvc::state::instance(ctx)(path)).value();
+    cvc::state *n = read_node(ctx, path);
+    return n ? n->value() : std::string();
   } catch (const std::exception &) {
     return "<unset>";
   }
@@ -394,6 +395,24 @@ std::string failure_report(const std::optional<cvc::state_exec::value_t> &exc,
   return report;
 }
 
+// " [program]": which program a warning is about, on one line and at most 80 characters.
+std::string program_tag(const std::string &script) {
+  std::string one;
+  bool space = false;
+  for (char c : script) {
+    const bool ws = c == ' ' || c == '\n' || c == '\t' || c == '\r';
+    if (ws && (space || one.empty()))
+      continue;
+    space = ws;
+    one += ws ? ' ' : c;
+  }
+  while (!one.empty() && one.back() == ' ')
+    one.pop_back();
+  if (one.size() > 80)
+    one = one.substr(0, 77) + "...";
+  return one.empty() ? std::string() : " [" + one + "]";
+}
+
 std::string run_scoped_program(cvc::app &app, const std::string &prefix, const std::string &script,
                                uint64_t max_steps, double max_seconds, uint64_t max_bytes,
                                const std::function<bool(const std::string &)> &has = {}) {
@@ -554,6 +573,8 @@ public:
         // state-json writes its document as sliced data steps, under the allocation limit)
         "state-get", "state-exists", "state-children", "state-data-get", "state-json",
         "state-root-path", "state-has-expiry", "state-is-expired",
+        // JSON text to values and back: pure, sliced data steps under the allocation limit
+        "json-parse", "json-encode",
         // the stdlib: the pure, bounded functions (a scalar, or a result no bigger than its
         // argument), and the materializers, which do their work as sliced data steps (each
         // eval slices, see data_step_nodes_) under the per-call allocation limit. A function
@@ -579,8 +600,8 @@ public:
     // set is shared across every ReactiveEngine.
     static const std::shared_ptr<const std::set<std::string>> kAllowedForms =
         std::make_shared<const std::set<std::string>>(
-            std::set<std::string>{"if", "begin", "let", "while", "for", "lambda", "defun", "set",
-                                  "return", "quote", "yield", "break"});
+            std::set<std::string>{"if", "begin", "and", "or", "let", "while", "for", "lambda",
+                                  "defun", "set", "return", "quote", "yield", "break"});
     ev_->restrict_special_forms(kAllowedForms);
     resolve_data_settings();
   }
@@ -910,6 +931,8 @@ struct Runtime::Impl {
     bool has_event = false;
     float ex = 0.0f, ey = 0.0f, edx = 0.0f, edy = 0.0f;
     int ebutton = 0;
+    // Runtime::run_program: told how the program ended instead of a warning.
+    std::function<void(const std::string &)> done;
   };
   std::vector<QueuedAction> queued_events;
 
@@ -920,6 +943,13 @@ struct Runtime::Impl {
   std::vector<std::string> reactive_warnings;
   std::set<std::string> reactive_warned;
   int frame_instances = 0; // §3: repeat instances emitted this frame (bounds many repeats)
+  // Where the walk is in the tree, as child indices from the root: names an unnamed grid
+  // (emit_container), so two in one window never share a backend id.
+  std::vector<std::size_t> emit_path;
+  // `autofocus:` widgets drawn last frame and this one, by tree position (and repeat index): one
+  // takes focus when it appears, not on every frame it stays.
+  std::set<std::string> autofocus_shown, autofocus_now;
+  void autofocus(const Widget &inst, int i);
   // §3: last successful repeat-count per expression. A reactive repeat-count eval fail-safes to 0
   // on a transient per-frame budget exhaustion (reactive eval is slow in wasm, and video decode can
   // eat the frame); collapsing a repeated list — the conference roster, the per-peer camera windows
@@ -955,6 +985,8 @@ struct Runtime::Impl {
     cvc::state_exec::intrinsics_context ictx;
     bool ended = false;        // the action's own process has ended and been reaped
     std::vector<int> children; // pids it forked that may still be running (they share ictx)
+    std::function<void(const std::string &)> done; // run_program: how its own process ended
+    std::string script;                            // the program's text, to say which one failed
   };
   std::unordered_map<int, std::shared_ptr<ActionContext>> live_actions_;
   // Pids of the children actions and residents spawned (spawn_child), reaped once they finish.
@@ -1240,8 +1272,11 @@ int Runtime::Impl::eval_count(const std::string &expr) {
 }
 
 void Runtime::Impl::emit_children(const Widget &w) {
-  for (const Widget &c : w.children)
-    emit(c);
+  for (std::size_t k = 0; k < w.children.size(); ++k) {
+    emit_path.push_back(k);
+    emit(w.children[k]);
+    emit_path.pop_back();
+  }
 }
 
 // Lay a container's children out per its layout (§3.0.3b): a Grid/Horizontal
@@ -1306,7 +1341,16 @@ void Runtime::Impl::emit_container(const Widget &w) {
   } guard{scope_stack, scoped};
 
   if (w.layout.kind == LayoutKind::Grid || w.layout.kind == LayoutKind::Horizontal) {
-    const std::string &id = w.id.empty() ? w.label : w.id;
+    // The grid's identity: its id:, else its label, else where it sits in the tree. Backends key
+    // their per-grid state by it (ImGui its table, whose column widths it keeps), and so does the
+    // persisted tree.<id>, so two unnamed grids in one window must not share it. The generated id
+    // is one state-path segment ("~0_2_1"), so tree.<id>.tracks stays one key.
+    std::string id = !w.id.empty() ? w.id : w.label;
+    if (id.empty()) {
+      id = "~";
+      for (std::size_t i = 0; i < emit_path.size(); ++i)
+        id += (i ? "_" : "") + std::to_string(emit_path[i]);
+    }
     // §11.4 two-way track edge: a resizable row-split grid persists its dragged pane sizes to
     // tree.<id>.tracks, and a resizable table its column widths to tree.<id>.columns. Seed the
     // backend from the persisted sizes before opening (apply-once on the backend side), then write
@@ -1334,7 +1378,9 @@ void Runtime::Impl::emit_container(const Widget &w) {
         b.seed_grid_columns(seed);
     }
     if (b.begin_grid(w.layout, id.c_str())) {
-      for (const Widget &c : w.children) {
+      for (std::size_t k = 0; k < w.children.size(); ++k) {
+        const Widget &c = w.children[k];
+        emit_path.push_back(k);
         // Expand a `repeat` child into per-instance cells; a plain child is one instance.
         // Decide visibility BEFORE advancing the cell, so a hidden child/instance consumes
         // no cell (otherwise it would leave an empty cell and shift the following siblings).
@@ -1344,10 +1390,12 @@ void Runtime::Impl::emit_container(const Widget &w) {
           b.grid_next_cell();
           if (i >= 0)
             b.push_id(std::to_string(i).c_str());
+          autofocus(inst, i);
           emit_node(inst);
           if (i >= 0)
             b.pop_id();
         });
+        emit_path.pop_back();
       }
       b.end_grid();
       if (split) {
@@ -1390,12 +1438,27 @@ void Runtime::Impl::each_instance(const Widget &w,
   }
 }
 
+void Runtime::Impl::autofocus(const Widget &inst, int i) {
+  if (!inst.autofocus)
+    return;
+  std::string key;
+  for (const std::size_t k : emit_path)
+    key += std::to_string(k) + ".";
+  if (i >= 0)
+    key += "#" + std::to_string(i);
+  if (!autofocus_shown.count(key))
+    backend->focus_next_widget();
+  autofocus_now.insert(std::move(key));
+}
+
 void Runtime::Impl::emit(const Widget &w) {
   each_instance(w, [this](const Widget &inst, int i) {
     if (i >= 0)
       backend->push_id(std::to_string(i).c_str()); // per-instance identity
-    if (visible(inst))                             // §4: a falsy visible_when hides it + subtree
+    if (visible(inst)) {                           // §4: a falsy visible_when hides it + subtree
+      autofocus(inst, i);
       emit_node(inst);
+    }
     if (i >= 0)
       backend->pop_id();
   });
@@ -1450,8 +1513,11 @@ void Runtime::Impl::emit_node(const Widget &w) {
     const bool cur =
         read_bool_or_seed(app, path, w.bdef ? 1 : 0) != 0; // tolerant of "true"/"false"
     const BoolEdit e = b.menu_item_toggle(label, cur);
-    if (e.committed)
+    if (e.committed) {
       write<int>(app, path, e.value ? 1 : 0);
+      if (!w.on.empty())
+        enqueue(w.on);
+    }
     break;
   }
 
@@ -1589,8 +1655,11 @@ void Runtime::Impl::emit_node(const Widget &w) {
     const bool cur =
         read_bool_or_seed(app, path, w.bdef ? 1 : 0) != 0; // tolerant of "true"/"false"
     const BoolEdit e = b.checkbox(label, cur);
-    if (e.committed)
+    if (e.committed) {
       write<int>(app, path, e.value ? 1 : 0);
+      if (!w.on.empty()) // fire AFTER the write so the handler sees the new value in state
+        enqueue(w.on);
+    }
     break;
   }
 
@@ -1600,6 +1669,8 @@ void Runtime::Impl::emit_node(const Widget &w) {
     const IntEdit e = b.slider_int(label, path.c_str(), cur, w.ilo, w.ihi);
     if (e.committed || (e.changed && !w.commit_on_release)) // live while dragged, by default
       write<int>(app, path, e.value);
+    if (e.committed && !w.on.empty()) // on: fires once per commit (drag end / key step), not
+      enqueue(w.on);                  // every live frame of a drag
     break;
   }
 
@@ -1609,10 +1680,13 @@ void Runtime::Impl::emit_node(const Widget &w) {
     const DoubleEdit e = b.slider_double(label, path.c_str(), cur, w.lo, w.hi, w.fmt.c_str());
     if (e.committed || (e.changed && !w.commit_on_release))
       write<double>(app, path, e.value);
+    if (e.committed && !w.on.empty())
+      enqueue(w.on);
     break;
   }
 
-  case Kind::Combo: {
+  case Kind::Combo:
+  case Kind::Radio: {
     // §4 read-lane: options are either a static list or a computed expression re-evaluated
     // each frame. A local holds the computed list so its lifetime spans the emit.
     std::vector<std::string> computed;
@@ -1635,16 +1709,20 @@ void Runtime::Impl::emit_node(const Widget &w) {
         idx = static_cast<int>(i);
         break;
       }
-    const IndexEdit e = b.combo(label, idx, opts); // always DISPLAY the labels
-    if (e.changed && e.index >= 0 && e.index < static_cast<int>(store.size()))
+    const IndexEdit e = w.kind == Kind::Radio ? b.radio(label, idx, opts, w.radio_row)
+                                              : b.combo(label, idx, opts); // DISPLAY the labels
+    if (e.changed && e.index >= 0 && e.index < static_cast<int>(store.size())) {
       write<std::string>(app, path, store[e.index]); // store the mapped value (or the text)
+      if (!w.on.empty())
+        enqueue(w.on);
+    }
     break;
   }
 
   case Kind::InputText: {
     const std::string path = resolve(w.bind);
     const std::string cur = read_or_seed<std::string>(app, path, w.sdef);
-    const StringEdit e = b.input_text(label, path.c_str(), cur);
+    const StringEdit e = b.input_text(label, path.c_str(), cur, w.password);
     if (e.committed) {
       write<std::string>(app, path, e.value);
       if (!w.on.empty()) // send-on-commit (e.g. a chat box's Enter) — fire AFTER the write so the
@@ -1656,7 +1734,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
   case Kind::InputInt: {
     const std::string path = resolve(w.bind);
     const int cur = read_or_seed<int>(app, path, w.idef);
-    const StringEdit e = b.input_text(label, path.c_str(), std::to_string(cur));
+    const StringEdit e = b.input_text(label, path.c_str(), std::to_string(cur), false);
     if (e.committed) {
       int next = cur; // fail-safe: a non-numeric entry keeps the current value
       try {
@@ -1687,8 +1765,11 @@ void Runtime::Impl::emit_node(const Widget &w) {
       b.text_value(label, cur); // a backend with no colour widget -> show the "r,g,b" value
       break;
     }
-    if (e.committed)
+    if (e.committed) {
       write<std::string>(app, path, format_rgb3(e.rgb)); // store "r,g,b"
+      if (!w.on.empty())
+        enqueue(w.on);
+    }
     break;
   }
 
@@ -1824,6 +1905,7 @@ void Runtime::Impl::render() {
   if (reactive)
     reactive->begin_frame(); // §4: reset the per-frame reactive eval budget
   frame_instances = 0;       // §3: reset the per-frame repeat-expansion budget
+  emit_path.clear();
   scope_stack.clear(); // §12: start every frame at the document scope (RAII keeps it balanced;
                        // this is belt-and-suspenders so one bad frame can't leak into the next)
   windows_menu_drawn = false;
@@ -1839,6 +1921,8 @@ void Runtime::Impl::render() {
   }
   emit(root);
   backend->end_frame();
+  autofocus_shown.swap(autofocus_now);
+  autofocus_now.clear();
 }
 
 void Runtime::Impl::plan_windows_menu() {
@@ -2016,6 +2100,8 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
     }
     // A child the action forks shares this context: recorded, so the context stays until it ends.
     ac->ictx.on_child = [raw = ac.get()](int pid) { raw->children.push_back(pid); };
+    ac->done = action.done;
+    ac->script = script;
     se::execute_options opts;
     opts.env = ac->env;
     opts.owner = owner_; // so ~Impl's kill_owner reaps exactly this document's processes
@@ -2026,7 +2112,10 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
     live_actions_[pid] = std::move(ac); // keep the context alive until the process (and the
                                         // children it forked) end
   } catch (const std::exception &e) {
-    warn_once(std::string("ari: on: action program failed: ") + e.what() + " [" + script + "]");
+    if (action.done)
+      action.done(std::string("failed: ") + e.what());
+    else
+      warn_once(std::string("ari: on: action program failed: ") + e.what() + " [" + script + "]");
   }
 }
 
@@ -2077,29 +2166,42 @@ void Runtime::Impl::pump_and_sweep_actions(cvc::state_exec::async_scheduler &sch
   static constexpr double kPumpMaxSeconds = 0.1;
   sched.sync_run(kPumpMaxSteps, kPumpMaxSeconds);
   // Sweep: a finished process is reaped (nothing reads its result), a killed or failed one is
-  // reported, and a still-parked one is kept for a later frame.
-  const auto reap_ended = [&](int pid, const char *what) {
+  // reported, and a still-parked one is kept for a later frame. A run_program one's caller is told
+  // how it ended instead.
+  const auto reap_ended = [&](int pid, const char *what, const std::string &script = std::string(),
+                              const std::function<void(const std::string &)> &done = {}) {
     const auto info = sched.get_process_info(pid);
     if (info && !se::is_finished(info->status))
       return false; // ready/running/waiting — still in flight (e.g. parked on await/msg-recv)
+    if (done) {     // run_program: its caller reports it
+      std::string how;
+      if (info && info->status == se::process_status::killed)
+        how = "did not complete: " + sched.get_exit_error(pid).value_or("killed");
+      else if (info && info->status == se::process_status::failed)
+        how = "failed: " + failure_report(info->exit_exception, info->exit_error);
+      sched.reap(pid);
+      done(how);
+      return true;
+    }
     if (info && info->status == se::process_status::killed)
       // The exit error says why: a syntax error (scripts are read inside the process), a runtime
       // error or a resource limit.
-      warn_once(std::string("ari: on: ") + what +
-                " did not complete: " + sched.get_exit_error(pid).value_or("killed"));
+      warn_once(std::string("ari: on: ") + what + " did not complete: " +
+                sched.get_exit_error(pid).value_or("killed") + program_tag(script));
     else if (info && info->status == se::process_status::failed)
       // An exception the program didn't catch: its class, message and where it was raised.
-      warn_once(std::string("ari: on: ") + what +
-                " failed: " + failure_report(info->exit_exception, info->exit_error));
+      warn_once(std::string("ari: on: ") + what + " failed: " +
+                failure_report(info->exit_exception, info->exit_error) + program_tag(script));
     sched.reap(pid);
     return true;
   };
   for (auto it = live_actions_.begin(); it != live_actions_.end();) {
     ActionContext &ac = *it->second;
     if (!ac.ended)
-      ac.ended = reap_ended(it->first, "action program");
+      ac.ended = reap_ended(it->first, "action program", ac.script, ac.done);
     // The children it forked share its context, so the context stays until they end too.
-    std::erase_if(ac.children, [&](int pid) { return reap_ended(pid, "forked program"); });
+    std::erase_if(ac.children,
+                  [&](int pid) { return reap_ended(pid, "forked program", ac.script); });
     if (ac.ended && ac.children.empty())
       it = live_actions_.erase(it);
     else
@@ -2111,21 +2213,21 @@ void Runtime::Impl::pump_and_sweep_actions(cvc::state_exec::async_scheduler &sch
   // A resident never finishes on its own, so one that was killed (a syntax error in its body,
   // read inside the process; its per-step cap) or failed (an exception it didn't catch) is
   // reported, once per reason.
-  const auto report_killed_resident = [&](int pid, const std::string &channel) {
+  const auto report_killed_resident = [&](int pid, const char *lane, const std::string &channel) {
     if (pid < 0)
       return;
     auto info = sched.get_process_info(pid);
     if (info && info->status == se::process_status::killed)
-      warn_once("ari: resident [" + channel +
+      warn_once(std::string("ari: ") + lane + " resident [" + channel +
                 "] stopped: " + sched.get_exit_error(pid).value_or("killed"));
     else if (info && info->status == se::process_status::failed)
-      warn_once("ari: resident [" + channel +
+      warn_once(std::string("ari: ") + lane + " resident [" + channel +
                 "] failed: " + failure_report(info->exit_exception, info->exit_error));
   };
-  report_killed_resident(tick_resident_pid_, tick_channel());
-  report_killed_resident(key_resident_pid_, key_channel());
-  report_killed_resident(pointer_resident_pid_, pointer_channel());
-  report_killed_resident(signal_resident_pid_, signal_channel());
+  report_killed_resident(tick_resident_pid_, "on_tick:", tick_channel());
+  report_killed_resident(key_resident_pid_, "on_key:", key_channel());
+  report_killed_resident(pointer_resident_pid_, "on_pointer:", pointer_channel());
+  report_killed_resident(signal_resident_pid_, "on_signal:", signal_channel());
 }
 
 void Runtime::Impl::ensure_resident(const std::string &channel, const std::string &body,
@@ -2423,6 +2525,14 @@ void Runtime::Impl::run_key_bindings() {
 
 void Runtime::render() { m_->render(); }
 
+void Runtime::run_program(std::string script, std::function<void(const std::string &)> done) {
+  Impl::QueuedAction a;
+  a.event = std::move(script);
+  a.prefix = m_->prefix;
+  a.done = std::move(done);
+  m_->queued_events.push_back(std::move(a));
+}
+
 void Runtime::drain() {
   // Run the queued action events on the host thread, then clear. Never called
   // from inside render() (the deferred intent-buffer discipline, §7.2/§4.7). The keys pressed since
@@ -2433,7 +2543,7 @@ void Runtime::drain() {
   for (const Impl::QueuedAction &a : events) {
     // A program action (`on:` starting with '(', like a computed `bind:`/`tooltip:`) runs through
     // state_exec — the north-star lane: a flag toggle or reset is pure .ari, no C++ handler.
-    if (is_expr(a.event)) { // a program on: (whitespace-tolerant, exactly like a computed bind:)
+    if (a.done || is_expr(a.event)) { // a program on: (whitespace-tolerant, like a computed bind:)
       // SUBMIT it to the app-wide scheduler (owner-tagged, chrooted to the action's mount prefix)
       // and return — no run-to-completion inside drain(). The per-frame pump below advances it; a
       // quick action still finishes this drain, while an (await …)/(msg-recv …)/(sleep …) parks

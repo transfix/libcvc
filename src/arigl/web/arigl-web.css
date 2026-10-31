@@ -1,0 +1,26 @@
+/* arigl-web.css — the arigl-web page (arigl-web.html): a full-window canvas under a loading /
+   error screen. */
+:root { color-scheme: dark; --bg: #10141a; --fg: #cdd6e0; --dim: #8b98a5; --line: #232a33;
+        --accent: #5aa9e6; --bad: #f08a7e; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+             font: 13px/1.5 system-ui, sans-serif; overflow: hidden; }
+canvas#canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block;
+                outline: none; background: #000; }
+#overlay { position: fixed; inset: 0; display: flex; flex-direction: column;
+           align-items: center; justify-content: center; gap: 12px; padding: 16px;
+           box-sizing: border-box; background: var(--bg); transition: opacity .4s; }
+#overlay.hidden { opacity: 0; pointer-events: none; }
+.spinner { width: 28px; height: 28px; border: 3px solid var(--line);
+           border-top-color: var(--accent); border-radius: 50%;
+           animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+#status { color: var(--dim); text-align: center; max-width: 60em; overflow-wrap: anywhere; }
+#overlay.failed #status { color: var(--bad); font-size: 15px; }
+#overlay.ended #status { color: var(--fg); }
+#details { display: none; width: min(60em, 100%); max-height: 50vh; margin: 0; padding: 10px;
+           overflow: auto; box-sizing: border-box; background: #0b0e12;
+           border: 1px solid var(--line); border-radius: 6px; color: var(--dim);
+           font: 12px/1.45 ui-monospace, monospace; white-space: pre-wrap; }
+#overlay.failed #details { display: block; }
+#overlay.failed .spinner, #overlay.ended .spinner { display: none; }
+#overlay a { color: var(--accent); }

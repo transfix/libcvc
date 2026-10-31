@@ -84,6 +84,10 @@ emcmake cmake -G Ninja \
     -DCVC_BUILD_CLI=OFF \
     `# ari (the terminal runner) has its own recipe; without FTXUI here its wasm link fails` \
     -DCVC_BUILD_ARI=OFF \
+    `# nor arigl: only the examples' gallery link gives it -sFETCH, which cvc::net's fetch backend` \
+    `# needs now that arigl takes the network flags, so with the examples off its link fails and` \
+    `# cmake --install stops on the missing bin/arigl.js (publish-cvcgl-wasm.yml turns both off too)` \
+    -DCVC_BUILD_ARIGL=OFF \
     -DCVC_ENABLE_OPENMP=OFF \
     -DDISABLE_CGAL=ON \
     -DCVC_USING_HDF5=OFF \

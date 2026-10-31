@@ -202,7 +202,7 @@ scheduler can parse a script the same way it evaluates one: a slice per step. Wi
   process, with the parse error as its exit error. The sync scheduler throws it from `step()` or
   `run()`. With step_tokens = 0, `execute()` throws it, as before. Ariadne reports a killed
   action or resident with its exit error ("ari: on: action program did not complete: …",
-  "ari: resident [...] stopped: …").
+  "ari: on_tick: resident [...] stopped: …").
 - **Signals and watch events** wait until the script is read, because their handlers run on the
   evaluation stack.
 - **Snapshots.** A process snapshotted while reading stores its source and parser settings. After
@@ -226,8 +226,9 @@ then `state_exec.defaults.data.step_nodes`, then the scheduler's built-in defaul
 A node is an element visited: a list element or a dict entry walked, or an element freed. With
 `step_nodes` = N:
 
-- **Native calls.** `=`, `!=`, `str`, `str-concat`, `print`, `state-data-get`, `state-json`,
-  `state-from-json` and `state-set` of a list or dict (printed into the node) hand their walk to
+- **Native calls.** `=`, `!=`, `str`, `str-concat`, `print`, `json-parse`, `json-encode`,
+  `state-data-get`, `state-json`, `state-from-json`, `state-set-tree` and `state-set` of a list
+  or dict (printed into the node) hand their walk to
   the evaluator (`run_data_job`). It does one slice inside the call's step; if the walk isn't
   done, the call's frame waits and the following steps are **data steps** that each run N more
   nodes. The step that finishes it completes the call. A walk under N nodes finishes in the
@@ -466,8 +467,10 @@ strings. Every row is a case in `state_exec_grammar_test`.
 | `r"a\nb"`, `br"…"` | the symbol `r` or `br`, then a string | raw string, raw bytes | P4 |
 | `r#"say "hi""#` | a symbol `r#`, strings and symbols | raw string `say "hi"` | P4 |
 
-Printing is not part of the grammar. `to_string` round-trip (escaping strings, shortest floats,
-`+inf.0`) is phase P5.
+Printing is not part of the grammar. `to_string` writes a float in its shortest round-trip form
+(`std::to_chars`): `0.30000000000000004`, `1e+21`, a whole float as an integer's digits (`2`),
+and the specials as `inf`, `-inf` and `nan`. The rest of the round trip (escaping strings,
+`+inf.0`, a whole float that reads back as a float) is phase P5.
 
 ## Not in the grammar
 

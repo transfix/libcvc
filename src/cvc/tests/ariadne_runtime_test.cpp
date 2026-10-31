@@ -4,6 +4,7 @@
 // the §3.0.3b grid dispatch.
 
 #include "local_http_server.h" // localhost origins for the net host tests
+#include "local_ws_server.h"   // a localhost WebSocket server for the ws-* verb tests
 
 #include <algorithm>
 #include <atomic> // item 2: the nav-step worker's arrived-count accumulator
@@ -26,6 +27,8 @@
 #include <cvc/core/async_task.h> // launch_pool_task generalization test
 #include <cvc/core/thread_pool.h> // item 2: full type for app.computePool().parallel_for
 #include <cvc/net/http_client.h>  // §13.8: swap the transport for a fake in the http-get test
+#include <cvc/net/net_policy.h>   // the ws-* verb tests' policy
+#include <cvc/net/ws_client.h>    // have_ws_backend()
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_host.h>      // register_async_fn on app.exec_async_host()
 #include <cvc/state/state_exec/async_scheduler.h> // exec_scheduler().post_message end-to-end test
@@ -99,8 +102,10 @@ struct MockBackend : Backend {
     return true;
   }
   void end_window() override { rec("end_window"); }
-  bool begin_grid(const Layout &L, const char *) override {
+  std::vector<std::string> grid_ids; // the id the core gave each begin_grid, in walk order
+  bool begin_grid(const Layout &L, const char *id) override {
     rec(std::string("begin_grid:cols=") + std::to_string(L.col_widths.size()));
+    grid_ids.push_back(id ? id : "");
     return true;
   }
   void grid_next_cell() override { rec("next_cell"); }
@@ -227,10 +232,18 @@ struct MockBackend : Backend {
   }
   StringEdit string_ret{};     // programmable return for the next input_text()
   std::string last_input_text; // the `current` text the core handed input_text() (read side)
-  StringEdit input_text(const char *l, const char *, const std::string &current) override {
+  bool last_input_masked = false; // the `masked` flag the core handed input_text()
+  StringEdit input_text(const char *l, const char *, const std::string &current,
+                        bool masked) override {
     last_input_text = current;
+    last_input_masked = masked;
     rec(std::string("input_text:") + l + "=" + current);
     return string_ret;
+  }
+  int focus_requests = 0; // focus_next_widget() calls (autofocus:)
+  void focus_next_widget() override {
+    ++focus_requests;
+    rec("focus_next");
   }
   ColorEdit color_ret{};           // programmable return for the next color()
   float last_color[3] = {0, 0, 0}; // the rgb the core handed color() (read side)
@@ -1530,6 +1543,27 @@ TEST(AriadneReactive, PredicateShowsThenHidesAsStateChanges) {
   EXPECT_TRUE(rt.take_reactive_warnings().empty()); // a passing predicate never warns
 }
 
+TEST(AriadneReactive, AndStopsBeforeAnArgumentThatWouldFail) {
+  // (and ...) is a special form on the read lane too: with the flag off, the (int ...) of an
+  // empty node is never evaluated, so the widget is plainly hidden, with no warning.
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget w = text("shown");
+  w.visible_when = "(and (= (state-get \"on\") \"1\") (> (int (state-get \"n\")) 2))";
+  rt.set_root(group({w}));
+  rt.render();
+  EXPECT_FALSE(mb.saw("text_line:shown"));
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+  cvc::state::instance(app)("on").value(std::string("1"));
+  cvc::state::instance(app)("n").value(std::string("5"));
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_line:shown"));
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
 // --- §12 module mount: a scoped subtree resolves at its own sub-prefix -------
 
 TEST(AriadneMountScope, BindsResolveAtSubPrefix) {
@@ -1706,6 +1740,108 @@ TEST(AriadneMountScope, RepeatedMountLinkTargetsAreIndexed) {
   rt.render();
   EXPECT_TRUE(mb.saw("slider_int:Slot=10")); // instance 0 -> fleet.0
   EXPECT_TRUE(mb.saw("slider_int:Slot=20")); // instance 1 -> fleet.1
+}
+
+// A hole on an interior node hands the module the whole subtree under it: a parsed reply
+// (search.res.packages.{i}.*) the parent fills, read through binds, expressions and children
+// counts. A read-only hole, the cypkg view's shape.
+namespace {
+Widget subtree_view_mount(bool writable) {
+  Widget name = text_bound("Name {i}", "tree.packages.{i}.name");
+  name.repeat = "(int (state-get \"tree.count\"))";
+  Widget ver = text_bound("Ver", "(state-get \"tree.packages.0.version\")");
+  Widget lvl = slider_int("Level", "tree.level", 0, 100, 0);
+  Widget mount;
+  mount.kind = Kind::Group;
+  mount.scope = "includes.view";
+  mount.links.push_back(LinkHole{"tree", "search.res", writable});
+  mount.children = {name, ver, lvl};
+  return mount;
+}
+} // namespace
+
+TEST(AriadneMountScope, LinkHoleExposesTheTargetsSubtree) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state &root = cvc::state::instance(app);
+  root("ui.demo.search.res.packages.0.name").value(std::string("zstd"));
+  root("ui.demo.search.res.packages.0.version").value(std::string("1.5"));
+  root("ui.demo.search.res.packages.1.name").value(std::string("lz4"));
+  root("ui.demo.search.res.count").value(2);
+  root("ui.demo.search.res.level").value(7);
+  rt.set_root(group({subtree_view_mount(false)}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_value:Name 0=zstd"));
+  EXPECT_TRUE(mb.saw("text_value:Name 1=lz4"));
+  EXPECT_FALSE(mb.saw("text_value:Name 2=")); // exactly the target's children
+  EXPECT_TRUE(mb.saw("text_value:Ver=1.5"));
+  EXPECT_TRUE(mb.saw("slider_int:Level=7"));
+  // A new reply the parent writes later shows through on the next frame.
+  root("ui.demo.search.res.packages.2.name").value(std::string("brotli"));
+  root("ui.demo.search.res.count").value(3);
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_value:Name 2=brotli"));
+  // The reads planted nothing under the hole.
+  EXPECT_TRUE(root("ui.demo.includes.view.tree").children().empty());
+}
+
+TEST(AriadneMountScope, ReadOnlySubtreeHoleKeepsWritesLocal) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state &root = cvc::state::instance(app);
+  root("ui.demo.search.res.level").value(3);
+  rt.set_root(group({subtree_view_mount(false)}));
+  rt.render();
+  mb.slider_int_ret.committed = true;
+  mb.slider_int_ret.value = 8;
+  rt.render();
+  EXPECT_EQ(root("ui.demo.search.res.level").value(), "3"); // parent untouched
+  ASSERT_NE(root.findDescendant("ui.demo.includes.view.tree.level"), nullptr);
+  EXPECT_EQ(root.findDescendant("ui.demo.includes.view.tree.level")->value(), "8"); // local
+}
+
+TEST(AriadneMountScope, WritableSubtreeHoleWritesTheParent) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state &root = cvc::state::instance(app);
+  root("ui.demo.search.res.level").value(3);
+  rt.set_root(group({subtree_view_mount(true)}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("slider_int:Level=3"));
+  mb.slider_int_ret.committed = true;
+  mb.slider_int_ret.value = 8;
+  rt.render();
+  EXPECT_EQ(root("ui.demo.search.res.level").value(), "8");
+  EXPECT_TRUE(root("ui.demo.includes.view.tree").children().empty());
+}
+
+TEST(AriadneMountScope, ReconcileTearsDownASubtreeHole) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state &root = cvc::state::instance(app);
+  root("ui.demo.search.res.packages.0.name").value(std::string("zstd"));
+  root("ui.demo.search.res.count").value(1);
+  rt.set_root(group({subtree_view_mount(false)}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_value:Name 0=zstd"));
+  // The same module re-mounted without the grant: nothing under the old target is reachable.
+  Widget again = subtree_view_mount(false);
+  again.links.clear();
+  rt.set_root(group({again}));
+  mb.log.clear();
+  rt.render();
+  EXPECT_FALSE(mb.saw("text_value:Name 0=zstd"));
+  EXPECT_FALSE(mb.saw("text_value:Ver=1.5"));
+  EXPECT_EQ(root("ui.demo.search.res.packages.0.name").value(), "zstd");
 }
 
 TEST(AriadneMountScope, MountInitSeedsAtSubPrefix) {
@@ -2452,6 +2588,98 @@ TEST(AriadneRuntime, ComboValueMappingReadsAndWrites) {
   mb.combo_ret = IndexEdit{/*changed*/ true, /*committed*/ true, /*index*/ 1};
   rt.render();
   EXPECT_EQ(cvc::state::instance(app)("ss").value(), "2"); // stored the value, not "2x"
+}
+
+// A combo's `on:` runs after a pick's write, off the walk like a Button's — a program on: through
+// state_exec at drain. Before, the combo wrote its key and dropped the on:.
+TEST(AriadneRuntime, ComboPickFiresOnAfterTheWrite) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget c = combo("Mode", "mode", {"a", "b"});
+  c.on = "(state-set \"x\" (state-get \"mode\"))"; // sees the value just written
+  rt.set_root(group({c}));
+  rt.render();
+  rt.drain();
+  EXPECT_FALSE(cvc::state::instance(app)("x").initialized()) << "no pick, no fire";
+  mb.combo_ret = IndexEdit{/*changed*/ true, /*committed*/ true, /*index*/ 1};
+  rt.render();
+  EXPECT_EQ(cvc::state::instance(app)("mode").value(), "b");
+  EXPECT_FALSE(cvc::state::instance(app)("x").initialized()) << "queued, not run in the walk";
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("x").value(), "b");
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
+// The other bound widgets fire their `on:` on the commit edge too: a checkbox / colour / bound
+// menu_item on each committed write; a slider once per commit (drag end, key step), not on every
+// live frame of a drag, though it writes on each of those.
+TEST(AriadneRuntime, BoundWidgetsFireOnOnCommit) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  std::map<std::string, int> fired;
+  for (const char *ev : {"cb", "si", "sf", "col", "mt"})
+    rt.on(ev, [&fired, ev] { ++fired[ev]; });
+  Widget cb = checkbox("Wire", "wire");
+  cb.on = "cb";
+  Widget si = slider_int("N", "n", 0, 10, 3);
+  si.on = "si";
+  Widget sf = slider_float("Speed", "speed", 0.0, 2.0, 1.0);
+  sf.on = "sf";
+  Widget col = color_widget("Tint", "tint");
+  col.on = "col";
+  Widget mt = menu_toggle("Grid", "grid");
+  mt.on = "mt";
+  rt.set_root(group({group({menubar({menu("View", {mt})})}), cb, si, sf, col}));
+
+  // A live drag frame: the sliders write but do not fire.
+  mb.slider_int_ret = IntEdit{/*changed*/ true, /*committed*/ false, 7};
+  mb.slider_double_ret["speed"] = DoubleEdit{true, false, 1.5};
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(cvc::state::instance(app)("n").value(), "7");
+  EXPECT_TRUE(fired.empty());
+
+  // The commit edge: each widget writes, then its on: runs at drain.
+  mb.checkbox_ret = BoolEdit{true, true, true};
+  mb.slider_int_ret = IntEdit{true, true, 8};
+  mb.slider_double_ret["speed"] = DoubleEdit{true, true, 1.75};
+  mb.color_ret = ColorEdit{/*drawn*/ true, true, true, {1, 0, 0}};
+  mb.click_toggle = "Grid";
+  rt.render();
+  EXPECT_TRUE(fired.empty()) << "queued, not run in the walk";
+  rt.drain();
+  for (const char *ev : {"cb", "si", "sf", "col", "mt"})
+    EXPECT_EQ(fired[ev], 1) << ev;
+  EXPECT_EQ(cvc::state::instance(app)("wire").value(), "1");
+  EXPECT_EQ(cvc::state::instance(app)("n").value(), "8");
+  EXPECT_EQ(cvc::state::instance(app)("grid").value(), "1");
+}
+
+// A radio stores what a combo stores and fires its on: the same way. MockBackend has no radio of
+// its own, so this also checks Backend::radio's fallback: the radio is drawn as a combo.
+TEST(AriadneRuntime, RadioFallsBackToAComboAndWritesTheMappedValue) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  int fired = 0;
+  rt.on("ss.changed", [&] { ++fired; });
+  Widget r = radio("Samples", "ss", {"Off", "2x", "4x"}, "4", /*row*/ true);
+  r.values = {"0", "2", "4"};
+  r.on = "ss.changed";
+  rt.set_root(group({r}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("combo:Samples=2")); // seeded "4", shown at index 2
+  EXPECT_EQ(cvc::state::instance(app)("ss").value(), "4");
+  mb.combo_ret = IndexEdit{/*changed*/ true, /*committed*/ true, /*index*/ 1};
+  rt.render();
+  EXPECT_EQ(cvc::state::instance(app)("ss").value(), "2");
+  rt.drain();
+  EXPECT_EQ(fired, 1);
 }
 
 // §G7: a color widget reads its "r,g,b" key into the backend's picker and writes the edited colour
@@ -3204,6 +3432,95 @@ TEST(AriadneNetIntrinsics, HttpGetTransparentReturnsDictNoMsgRecv) {
   EXPECT_EQ(cvc::state::instance(app)("r.status").value(), "200");
   EXPECT_EQ(node_data_string(app, "r.body"), "hi"); // the dict flowed into `set r` transparently
   EXPECT_EQ(fake->calls.load(), 1);                 // one transparent fetch, one transfer
+}
+
+// The ws-* verbs (docs/ARIADNE.md §10.5) against a localhost echo server: connect through a
+// policy that allows the server's http twin, send, receive (waiting and polling), close.
+TEST(AriadneNetIntrinsics, WsVerbsRoundTripThroughAPolicy) {
+  if (!cvc::net::have_ws_backend())
+    GTEST_SKIP() << "libcvc built without a WebSocket backend";
+  cvc_test::LocalWsServer server([](cvc_test::LocalWsServer::Stream &ws) {
+    for (;;) {
+      boost::beast::flat_buffer buf;
+      ws.read(buf);
+      ws.write(buf.data());
+    }
+  });
+  cvc::app app;
+  NetIntrinsicsGuard guard;
+  auto policy = std::make_shared<cvc::net::NetPolicy>();
+  std::string why;
+  ASSERT_TRUE(cvc::net::parse_net_policy(
+      "allow http://127.0.0.1:" + std::to_string(server.port()) + "\n", *policy, &why))
+      << why;
+  NetAccess access;
+  access.policy = policy;
+  register_net_intrinsics(app, access);
+
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(
+      group({button("Go", "(begin"
+                          "  (set r (ws-open \"" +
+                              server.url("/live") +
+                              "\" (dict \"timeout\" 5)))"
+                              "  (state-set \"r.ok\" (get-attr r \"ok\"))"
+                              "  (set h (get-attr r \"handle\"))"
+                              "  (state-set \"r.live\" (ws-open? h))"
+                              "  (ws-send h \"ping\")"
+                              "  (set e (ws-recv h 5))"
+                              "  (state-set \"r.type\" (get-attr e \"type\"))"
+                              "  (state-set \"r.data\" (get-attr e \"data\"))"
+                              "  (state-set \"r.poll\" (if (= (ws-poll h) nil) \"none\" \"some\"))"
+                              "  (state-set \"r.closed\" (ws-close h))"
+                              "  (state-set \"r.after\" (ws-open? h))"
+                              "  (state-set \"r.done\" \"1\"))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  mb.button_click = false;
+
+  ASSERT_TRUE(pump_until(rt, [&] { return !cvc::state::instance(app)("r.done").value().empty(); }))
+      << "the ws verbs never finished";
+  EXPECT_EQ(cvc::state::instance(app)("r.ok").value(), "true");
+  EXPECT_EQ(cvc::state::instance(app)("r.live").value(), "true");
+  EXPECT_EQ(cvc::state::instance(app)("r.type").value(), "text");
+  EXPECT_EQ(cvc::state::instance(app)("r.data").value(), "ping");
+  EXPECT_EQ(cvc::state::instance(app)("r.poll").value(), "none");
+  EXPECT_EQ(cvc::state::instance(app)("r.closed").value(), "true");
+  EXPECT_EQ(cvc::state::instance(app)("r.after").value(), "false");
+}
+
+// A WebSocket origin the policy does not allow is refused before anything connects.
+TEST(AriadneNetIntrinsics, WsOpenRefusesAnOriginThePolicyDoesNotAllow) {
+  if (!cvc::net::have_ws_backend())
+    GTEST_SKIP() << "libcvc built without a WebSocket backend";
+  cvc_test::LocalWsServer server([](cvc_test::LocalWsServer::Stream &) {});
+  cvc::app app;
+  NetIntrinsicsGuard guard;
+  NetAccess access;
+  access.policy = std::make_shared<cvc::net::NetPolicy>(); // allows nothing
+  register_net_intrinsics(app, access);
+
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button("Go", "(begin"
+                                  "  (set r (ws-open \"" +
+                                      server.url("/") +
+                                      "\"))"
+                                      "  (state-set \"r.ok\" (get-attr r \"ok\"))"
+                                      "  (state-set \"r.error\" (get-attr r \"error\")))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  mb.button_click = false;
+
+  ASSERT_TRUE(pump_until(rt, [&] { return !cvc::state::instance(app)("r.ok").value().empty(); }));
+  EXPECT_EQ(cvc::state::instance(app)("r.ok").value(), "false");
+  EXPECT_NE(cvc::state::instance(app)("r.error").value().find("refused"), std::string::npos);
+  EXPECT_TRUE(server.handshakes().empty());
 }
 
 // PR-A: PROPER await — (await (http-get-async url)) resolves the future returned by the async verb.
@@ -5610,6 +5927,7 @@ struct LogSceneAdapter : SceneAdapter {
     log.push_back("realize");
   }
   void clear() override { log.push_back("clear"); }
+  void no_scene() override { log.push_back("no_scene"); }
   void sync_visibility(cvc::app &) override {}
   void tick() override {}
 };
@@ -5981,7 +6299,95 @@ TEST(AriadneAppRuntime, EachLoadClearsTheLastScene) {
   art.load(with_scene);
   art.load(with_scene);
   art.load(write_doc("clear_scene_b.ari", "meta: {min_libcvc: 3.4.0}\nroot:\n  - text: x\n"));
-  EXPECT_EQ(scene.log, (std::vector<std::string>{"clear", "realize", "clear", "realize", "clear"}));
+  // A document without a scene is told so (a GL host hides its default grid, axes and bounds box).
+  EXPECT_EQ(scene.log, (std::vector<std::string>{"clear", "realize", "clear", "realize", "clear",
+                                                 "no_scene"}));
+}
+
+// Widgets a person meets first (nicotina's sign-in form): two unnamed rows in one window are two
+// grids, an autofocus: field takes focus when it appears, and a password: field reaches the
+// backend masked.
+TEST(AriadneRuntime, UnnamedGridsInOneWindowGetDistinctIds) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    children:\n"
+                              "      - type: group\n"
+                              "        layout: {kind: horizontal}\n"
+                              "        children: [{text: a}, {text: b}]\n"
+                              "      - type: group\n"
+                              "        layout: {kind: horizontal}\n"
+                              "        children: [{text: c}]\n"
+                              "      - type: group\n"
+                              "        id: named\n"
+                              "        layout: {kind: grid, col_widths: [auto, auto]}\n"
+                              "        children: [{text: d}]\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  ASSERT_EQ(mb.grid_ids.size(), 3u);
+  EXPECT_FALSE(mb.grid_ids[0].empty());
+  EXPECT_EQ(mb.grid_ids[0].find('.'), std::string::npos); // one segment of tree.<id>.tracks
+  EXPECT_NE(mb.grid_ids[0], mb.grid_ids[1]); // were both "", one ImGui table for two rows
+  EXPECT_EQ(mb.grid_ids[2], "named");        // an id: still names its grid
+  const std::vector<std::string> first = mb.grid_ids;
+  mb.grid_ids.clear();
+  rt.render();
+  EXPECT_EQ(mb.grid_ids, first); // stable from frame to frame (a table keeps its widths by it)
+}
+
+TEST(AriadneRuntime, AutofocusTakesFocusWhenTheWidgetAppears) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: Sign in\n"
+                              "    children:\n"
+                              "      - input_text: Name\n"
+                              "        bind: form.name\n"
+                              "        autofocus: true\n"
+                              "        visible_when: '(= (state-get \"form.show\") \"1\")'\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  cvc::state::instance(app)("ui.demo.form.show").value(std::string("1"));
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  EXPECT_EQ(mb.focus_requests, 1);
+  rt.render();
+  EXPECT_EQ(mb.focus_requests, 1) << "focus is taken when it appears, not on every frame";
+  cvc::state::instance(app)("ui.demo.form.show").value(std::string("0"));
+  rt.render();
+  cvc::state::instance(app)("ui.demo.form.show").value(std::string("1"));
+  rt.render();
+  EXPECT_EQ(mb.focus_requests, 2) << "shown again, it takes focus again";
+}
+
+TEST(AriadneRuntime, PasswordFieldReachesTheBackendMasked) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  LoadResult lr = load_string("meta: {min_libcvc: 3.4.0}\n"
+                              "root:\n"
+                              "  - input_text: User\n"
+                              "    bind: u\n"
+                              "  - input_text: Password\n"
+                              "    bind: p\n"
+                              "    password: true\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  EXPECT_TRUE(lr.warnings.empty()) << (lr.warnings.empty() ? "" : lr.warnings.front());
+  rt.set_root(std::move(lr.root));
+  rt.render(); // the last input_text drawn is the password
+  EXPECT_TRUE(mb.last_input_masked);
 }
 
 // ===========================================================================

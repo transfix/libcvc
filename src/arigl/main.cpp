@@ -24,6 +24,9 @@
 //   arigl snapshot [flags] doc.ari [document args...]
 //   arigl check    [flags] doc.ari
 //
+// In the browser shell (arigl-web, web/arigl-web.html) doc.ari is a URL: arigl fetches it and the
+// files it imports first (cvc/ariadne/web_document.h).
+//
 // By default the document runs in a real window with a GL context: its widgets are ImGui over the
 // VTK scene. With --terminal it runs in the terminal instead: the widgets go through libcvc's
 // terminal backends (FTXUI, or --backend tvision) and the scene is rendered offscreen and drawn
@@ -33,7 +36,8 @@
 // BEFORE the document path. Everything after it belongs to the document (doc_args.h): it reads it
 // as argv, or declares an args: block (`arigl run doc.ari --help` then shows its options).
 //
-// run ends on a "quit" action (a menu item with `on: quit`, or a program calling (quit)), when the
+// run ends on a "quit" action (a menu item with `on: quit`, or a program calling (quit [code]),
+// whose code is the exit status of run, snapshot and check), when the
 // window closes, or on Ctrl-C in the terminal. OS signals (SIGTERM, SIGHUP, SIGINT, SIGQUIT,
 // SIGUSR1/2) go to the document's on_signal: in both modes; one it does not handle ends the run
 // with exit status 128 + the signal number.
@@ -70,6 +74,7 @@
 #include <cvc/ariadne/loader.h> // run_init — seed conf.room / conf.self before the first tick
 #include <cvc/ariadne/stream/stream_view.h>
 #include <cvc/ariadne/tvision_backend.h>
+#include <cvc/ariadne/web_document.h> // arigl-web: a document named by URL
 #include <cvc/core/app.h>
 #include <random> // std::random_device — the conference node id's per-launch suffix
 #include <sstream> // arigl info: the GL report, line by line
@@ -1586,8 +1591,7 @@ int run_window(const ari::HostOptions &o) {
   }
   for (const std::string &d : o.component_paths)
     rt.add_component_path(d);
-  rt.on("quit", [&] { rt.request_close(); });
-  rt.register_verb("quit", [&] { rt.request_close(); });
+  rt.app_runtime().register_quit(); // on: quit and (quit [code]): the exit status is the code
   rt.app_runtime().set_document_args(o.doc_args, "arigl " + o.command + " " + o.doc,
                                      /*validate=*/o.command != "check");
   if (o.command == "info") {
@@ -1625,6 +1629,7 @@ int run_window(const ari::HostOptions &o) {
   if (const int status = load_document(rt, o); status >= 0)
     return status;
   note_misplaced(rt.app_runtime(), o);
+  ari::report_running(); // the browser shell takes its loading screen down
   // The rich scene panels (scene_panel / stage_lighting_panel / scene_menu), for a document that
   // uses them rather than the declarative components, and Settings' scene_settings. They need the
   // realized lighting rig, so a document loaded later registers them again.
@@ -1654,7 +1659,7 @@ int run_window(const ari::HostOptions &o) {
     }
   };
   if (o.command == "check")
-    return 0;
+    return rt.app_runtime().exit_code(); // an init: that called (quit code)
 
   if (o.command == "snapshot") {
     rt.set_fixed_clock(true); // reproducible: the scene clock advances 1/30 s a frame
@@ -1680,7 +1685,7 @@ int run_window(const ari::HostOptions &o) {
       view.writePNG(o.png.c_str());
     }
     print_warnings(rt.take_warnings());
-    return 0;
+    return rt.app_runtime().exit_code();
   }
 
   // Input the VTK interactor does not carry: touch navigation, SDL's keys and pointer (the
@@ -1741,7 +1746,7 @@ int run_window(const ari::HostOptions &o) {
   cam.detach();
   if (!exit_signal.empty())
     return 128 + ari::signal_number(exit_signal);
-  return 0;
+  return rt.app_runtime().exit_code();
 }
 
 // ── the terminal (FTXUI / tvision widgets, the scene rendered behind them) ──────────────────────
@@ -1794,8 +1799,7 @@ int run_terminal(const ari::HostOptions &o) {
   gla::register_streaming(app);
   for (const std::string &d : o.component_paths)
     rt.add_component_path(d);
-  rt.on("quit", [&] { rt.request_close(); });
-  rt.register_verb("quit", [&] { rt.request_close(); });
+  rt.register_quit(); // on: quit and (quit [code]): the exit status is the code
   // As in a window, Settings after the document's own menus opens the Keys window (the terminal's
   // camera has no keys to list; the scene's display settings are ImGui's).
   rt.set_host_menus({ari::AppRuntime::document_menus(), ari::menu("Settings", {keys_menu_item()})});
@@ -1836,7 +1840,7 @@ int run_terminal(const ari::HostOptions &o) {
     return status;
   note_misplaced(rt, o);
   if (o.command == "check")
-    return 0;
+    return rt.exit_code(); // an init: that called (quit code)
 
   if (o.command == "snapshot") {
     const int width = std::max(10, o.width ? o.width : 100);
@@ -1875,7 +1879,7 @@ int run_terminal(const ari::HostOptions &o) {
     if (!o.png.empty())
       scene.write_png(o.png);
     print_warnings(rt.take_warnings());
-    return 0;
+    return rt.exit_code();
   }
 
   ari::FtxuiBackend::RunOptions run;
@@ -1894,12 +1898,10 @@ int run_terminal(const ari::HostOptions &o) {
   print_warnings(rt.take_warnings());
   if (how.from_os) // an OS signal the document didn't handle: report it the way a shell expects
     return 128 + ari::signal_number(how.signal);
-  return 0;
+  return rt.exit_code();
 }
 
-} // namespace
-
-int main(int argc, char **argv) {
+int arigl_main(int argc, char **argv) {
 #ifdef CVC_ARIGL_WASM_TERMINAL
   // arigl_term, the browser terminal (web/arigl_term.html): the page passes the command line, and
   // opened without one it runs terminal_scene. Always in the terminal: its canvas is the scene's.
@@ -1945,5 +1947,21 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "arigl: libcvc was built without yaml-cpp, so it cannot load a .ari\n");
     return 1;
   }
-  return terminal ? run_terminal(o) : run_window(o);
+  // arigl-web, the browser shell, names its document by URL: fetch it into MEMFS first.
+  ari::HostOptions staged = o;
+  if (ari::is_url_document(staged.doc))
+    if (const int status = ari::stage_url_document(staged, "arigl"); status >= 0)
+      return status;
+#ifdef CVC_ARIGL_COMPONENT_DIR
+  staged.component_paths.push_back(CVC_ARIGL_COMPONENT_DIR); // arigl-web's embedded library
+#endif
+  return terminal ? run_terminal(staged) : run_window(staged);
+}
+
+} // namespace
+
+int main(int argc, char **argv) {
+  const int status = arigl_main(argc, argv);
+  cvc::ariadne::report_exit(status); // the browser shell's error page, or that the document ended
+  return status;
 }

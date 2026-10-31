@@ -381,6 +381,17 @@ bool ImGuiBackend::begin_grid(const ariadne::Layout &layout, const char *id) {
     return true; // the panes themselves open in grid_next_cell
   }
 
+  // A horizontal row with no col_widths: its cells side by side, one per child, as FTXUI lays it
+  // out. A table needs its column count before the first cell, which only the walk knows, so the
+  // cells flow on one line instead (each a group, so a cell's widgets stack inside it). Borders and
+  // resizable seams need columns: such a row keeps the table, one column per col_widths entry.
+  if (layout.kind == ariadne::LayoutKind::Horizontal && layout.col_widths.empty() &&
+      !layout.resizable && layout.borders == ariadne::BorderShow::Off) {
+    gs.flow = true;
+    m_grids.push_back(std::move(gs));
+    return true;
+  }
+
   // Table mode: columns sized by col_widths, optional per-row min-heights.
   ImGuiTableFlags flags = ImGuiTableFlags_SizingStretchProp;
   if (layout.resizable)
@@ -457,6 +468,15 @@ void ImGuiBackend::grid_next_cell() {
   if (m_grids.empty())
     return;
   GridState &g = m_grids.back();
+  if (g.flow) {
+    if (g.cell > 0) {
+      ImGui::EndGroup();
+      ImGui::SameLine();
+    }
+    ImGui::BeginGroup();
+    ++g.cell;
+    return;
+  }
   if (g.split) {
     const int i = g.cell;
     const int n = static_cast<int>(g.pane_keys.size());
@@ -504,7 +524,10 @@ void ImGuiBackend::end_grid() {
   // non-split grid so a stale split's sizes are never reported against it.
   m_lastGridTracks.clear();
   m_lastGridColumns.clear();
-  if (g.split) {
+  if (g.flow) {
+    if (g.cell > 0)
+      ImGui::EndGroup();
+  } else if (g.split) {
     if (g.cell > 0)
       ImGui::EndChild(); // close the last pane FIRST -> back to the parent window, whose
                          // StateStorage holds the pane slots we snapshot by key next.
@@ -773,8 +796,48 @@ ariadne::IndexEdit ImGuiBackend::combo(const char *label, int current_index,
   return e;
 }
 
+// The caption first (the part before any "##" id suffix), then one radio button per option, on
+// the caption's line for a row. Each option's id is scoped by the label, so two radios may share
+// option names.
+ariadne::IndexEdit ImGuiBackend::radio(const char *label, int current_index,
+                                       const std::vector<std::string> &options, bool row) {
+  ariadne::IndexEdit e;
+  e.index = current_index;
+  if (options.empty())
+    return e;
+#ifdef CVC_ENABLE_IMGUI
+  const char *hash = std::strstr(label, "##");
+  const std::string caption = hash ? std::string(label, hash) : std::string(label);
+  ImGui::PushID(label);
+  if (!caption.empty())
+    ImGui::TextUnformatted(caption.c_str());
+  for (std::size_t i = 0; i < options.size(); ++i) {
+    if (row && (i > 0 || !caption.empty()))
+      ImGui::SameLine();
+    ImGui::PushID(static_cast<int>(i));
+    if (ImGui::RadioButton(options[i].c_str(), static_cast<int>(i) == current_index)) {
+      e.index = static_cast<int>(i); // discrete: commit on pick
+      e.changed = true;
+      e.committed = true;
+    }
+    ImGui::PopID();
+  }
+  ImGui::PopID();
+#else
+  (void)label;
+  (void)row;
+#endif
+  return e;
+}
+
+void ImGuiBackend::focus_next_widget() {
+#ifdef CVC_ENABLE_IMGUI
+  ImGui::SetKeyboardFocusHere(); // the next widget submitted
+#endif
+}
+
 ariadne::StringEdit ImGuiBackend::input_text(const char *label, const char *key,
-                                             const std::string &current) {
+                                             const std::string &current, bool masked) {
 #ifdef CVC_ENABLE_IMGUI
   // Hold the in-progress text across frames keyed by `key`; follow external writes (script / config
   // / replicated peer) while no field is being edited, exactly like cache_int/cache_float.
@@ -785,15 +848,18 @@ ariadne::StringEdit ImGuiBackend::input_text(const char *label, const char *key,
   reserve_label_width(label);
   // EnterReturnsTrue commits on Enter (a chat box's send); IsItemDeactivatedAfterEdit commits on
   // focus-leave; CallbackResize lets the std::string grow past its initial capacity as typed.
+  // Password: ImGui draws a mask and refuses to copy the text out.
   const bool entered =
       ImGui::InputText(label, buf.data(), buf.capacity() + 1,
-                       ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackResize,
+                       ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackResize |
+                           (masked ? ImGuiInputTextFlags_Password : 0),
                        input_text_resize, &ud);
   const bool committed = entered || ImGui::IsItemDeactivatedAfterEdit();
   return {buf != current, committed, buf};
 #else
   (void)label;
   (void)key;
+  (void)masked;
   return {false, false, current};
 #endif
 }

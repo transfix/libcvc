@@ -237,6 +237,8 @@ private:
   // Special form handlers
   value_t do_if(const std::vector<value_t> &args, const environment_ptr &env);
   value_t do_begin(std::span<const value_t> args, const environment_ptr &env);
+  value_t do_and(std::span<const value_t> args, const environment_ptr &env);
+  value_t do_or(std::span<const value_t> args, const environment_ptr &env);
   value_t do_while(const std::vector<value_t> &args, const environment_ptr &env);
   value_t do_for(const std::vector<value_t> &args, const environment_ptr &env);
   value_t do_set(const std::vector<value_t> &args, const environment_ptr &env);

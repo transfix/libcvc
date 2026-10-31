@@ -112,6 +112,8 @@ The full syntax (literals, escapes, Unicode rules) is specified in
 | `lambda` | `(lambda (x y) (+ x y))` | Anonymous function |
 | `if` | `(if cond then [else])` | Conditional; more than one else form is an error |
 | `begin` | `(begin e1 e2 ... en)` | Sequence; returns last value |
+| `and` | `(and a b ...)` | Evaluates left to right and stops at the first falsy value: `#f` there, else the last value (`#t` with none). The rest aren't evaluated. Passed as a value (`(apply and lst)`), `and` is a function of arguments already evaluated |
+| `or` | `(or a b ...)` | Evaluates left to right and stops at the first truthy value, which it returns; `#f` when none is. As a value, a function like `and` |
 | `while` | `(while cond body...)` | Loop while condition is true; the body forms run in order, as a `begin`; the loop's value is nil (or `break`'s) |
 | `for` | `(for x collection body...)` | Iterate over a list or generator; the body forms run in order, as a `begin` |
 | `let` | `(let ((x 1) (y 2)) (+ x y))` | Local bindings |
@@ -140,7 +142,8 @@ form and `if` dropped forms after its else branch, silently; scripts that wrappe
 **Arithmetic:** `+`, `-`, `*`, `/`, `%`
 **Comparison:** `<`, `>`, `<=`, `>=`, `=`, `!=`
 **Logic:** `not`, `and`, `or`
-**String:** `str` (convert to string), `str-concat`
+**String:** `str` (convert to string), `str-concat`, `url-encode`, `url-decode`
+**JSON:** `json-parse`, `json-encode` ([below](#json))
 **List:** `list`, `car`, `cdr`, `cons`, `nth`, `set-nth`, `length`, `append`, `slice`, `del-nth`
 **Dict:** `dict`, `get-attr`, `set-attr`, `del-attr`
 **Type:** `null?`, `list?`, `type-of`, `generator?`, `is-int`, `is-float`, `is-string`
@@ -148,6 +151,7 @@ form and `if` dropped forms after its else branch, silently; scripts that wrappe
 **I/O:** `print`
 **Generator:** `generator`, `next`, `range`, `collect`, `gen-done?`
 **OOP:** `send` (method dispatch), `apply`
+**Errors:** `error`, `assert` ([Exceptions](#exceptions))
 **Stdlib:** `string.*`, `bytes.*`, `math.*`, `collections.*`, always loaded ([§11](#11-standard-library))
 
 `apply`, `send` and `collections.map`/`filter`/`reduce` call a native function or a DSL
@@ -159,6 +163,20 @@ function alike. A DSL function runs as the program's own frames on the same eval
 (set o (dict "__class__" (dict "inc" (lambda (self x) (+ x 1)))))
 (send o "inc" 41)                                ;; => 42
 ```
+
+#### Surprises
+
+- `and` and `or` short-circuit: `(and (net-auth-has? "txwtf") (load-home))` runs `load-home` only
+  with a credential. Until 2026-10 they were plain functions and evaluated every argument.
+- `false` and `#f` read as nil, and `(not true)` is the bool false. Both are falsy.
+- `str` prints its argument as `print` would, so a string comes back quoted: `(str "abc")` is
+  `"\"abc\""`. To join text, pass the strings to `str-concat` as they are:
+  `(str-concat "id=" s)`.
+- `/` always gives a float: `(/ 7 2)` is `3.5`, and `(/ 6 3)` is the float 2 (`is-float` is true;
+  it prints as `2`). For a whole quotient use `(math.floor (/ 7 2))` (`3`, an int) or
+  `(int (/ 7 2))`, which truncates toward zero; `%` is the remainder.
+- `collections.map`, `filter` and `reduce` take the list first, then the function:
+  `(collections.map (list 1 2 3) (lambda (x) (* x x)))`.
 
 #### Type Conversion
 
@@ -183,6 +201,54 @@ function alike. A DSL function runs as the program's own frames on the same eval
 ```
 
 Conversion errors throw a runtime error (e.g., `(int "abc")` fails).
+
+#### JSON
+
+`json-parse` reads JSON text (a string, or bytes such as an HTTP reply's body) into values, and
+`json-encode` writes values as JSON text. Both run as data jobs (see
+[Deep data on the executor](STATE_EXEC_GRAMMAR.md#deep-data-on-the-executor)), so a large
+document is read or written a slice per step.
+
+```lisp
+(json-parse "{\"name\": \"ada\", \"tags\": [1, 2.5, true, null]}")
+;; => {"name": "ada", "tags": (1 2.5 #t nil)}
+(json-encode (dict "name" "ada" "n" 3))      ;; => "{\"name\":\"ada\",\"n\":3}"
+(json-encode (list 1 (dict)) true)          ;; => "[\n  1,\n  {}\n]"
+(json-encode (list 1) 4)                    ;; four spaces a level
+```
+
+| JSON | value | back to JSON |
+|---|---|---|
+| object | dict, keys in document order | an object, keys in the dict's order |
+| array | list | an array |
+| string | string | a string: `"`, `\` and control characters escaped, other text as UTF-8 |
+| number without a fraction or exponent | int, when it fits in 64 bits; otherwise a float | digits |
+| any other number | float | its shortest round-trip form, with `.0` when it has neither a point nor an exponent |
+| `true`, `false` | the bools | `true`, `false` |
+| `null` | nil | `null` |
+
+- **A repeated key** keeps its first place and takes its last value, as JavaScript's
+  `JSON.parse` and Python's `json.loads` do: `{"a": 1, "b": 2, "a": 3}` is `{"a": 3, "b": 2}`.
+- **Big numbers.** An integer outside 64 bits reads as a float, as JavaScript reads it, so it is
+  exact only up to 2^53. A number too large for a float (`1e999`) is an error.
+- **Text.** A byte that is not part of valid UTF-8, or a `\u` escape of a lone surrogate (a
+  truncated emoji), becomes U+FFFD, so one bad character doesn't lose a whole reply.
+  `json-encode` refuses a string that isn't valid UTF-8.
+- **Errors.** Malformed text is a `ValueError` whose message names the line and column (in code
+  points), with `line`, `col` and `offset` (in bytes) as fields:
+  `(try (json-parse text) (catch (ValueError e) (get-attr e "line")))`. A raw control
+  character in a string is malformed too.
+- **Depth.** Lists and dicts nest at most 512 levels (`kJsonMaxDepth`), in both directions.
+  Deeper input is a `ValueError`, found without recursion.
+- **What JSON can't hold.** `json-encode` raises a `TypeError` for a symbol, function, bytes,
+  generator or data object, and a `ValueError` for `nan` or an infinity, or a list or dict that
+  contains itself. A value held twice is written twice. The indent is `true` (2 spaces), `nil`
+  or 0 (compact), or 1 to 10 spaces.
+- **`false` reads as nil** in source, and nil encodes as `null`. The bool false is `(not true)`.
+- **Limits.** What `json-parse` builds and what `json-encode` writes are held to the per-call
+  allocation limit (`limits.max_alloc_bytes`, a `MemoryError` past it).
+
+The C++ jobs are `make_json_parse_job` and `make_json_encode_job` (`data_job.h`).
 
 ### Example Programs
 
@@ -368,6 +434,20 @@ instance of `Exception` or a class derived from it. `raise` raises one, `error` 
   what was leaving.
 - `(error message [data])` is `(raise (RuntimeError message data))`. `(isinstance x Class)`
   works for any class.
+- `(assert cond [message [data]])` returns nil when `cond` is truthy. Otherwise it raises an
+  `AssertionError` (derived from `Exception`, not `RuntimeError`) whose message is
+  `assertion failed`, or `assertion failed: <message>` (a non-string message is printed), with
+  `data` as its data. Its traceback ends at the `(assert ...)` form, so a host that reports an
+  uncaught one (Ariadne's `failure_report`) shows the condition that failed:
+
+  ```lisp
+  (try (assert (= (+ 1 1) 3) "one and one")
+    (catch (AssertionError e) (get-attr e "message")))  ;; => "assertion failed: one and one"
+  (assert (> n 0) "n is positive")                       ;; uncaught:
+  ;; AssertionError: assertion failed: n is positive (at (assert (> n 0) "n is positive"))
+  ```
+
+  Ariadne's `ari test` runs documents whose programs assert (docs/ARIADNE.md §13).
 
 Every exception has `message`, `data`, `cause` (the exception being handled when it was raised),
 `origin` (`"dsl"`, `"builtin"` or `"native"`) and `traceback` (the expressions being evaluated,
@@ -916,6 +996,11 @@ register_intrinsics(env, &ictx);
 ;; relative to the node ("" for the node itself). Both run as sliced data steps.
 (state-json "myapp.config")   ;; => "{\n    \"timeout\": \"30\"\n}\n"
 (state-from-json "myapp.copy" (state-json "myapp.config"))
+
+;; A value of dicts, lists and scalars (what json-parse makes) as a subtree
+(state-set-tree "feed" (json-parse "{\"items\": [{\"text\": \"hi\"}, {\"text\": \"yo\"}]}"))
+(state-get "feed.items")          ;; => "2", the list's length
+(state-get "feed.items.1.text")   ;; => "yo"
 ```
 
 A node holds text, so `state-set` turns any other value into text. A string is stored as it is.
@@ -924,15 +1009,34 @@ reads back as the same number: `1234567.5` as `"1234567.5"`, `0.1` as `"0.1"`, `
 `"1e+21"`, `(+ 0.1 0.2)` as `"0.30000000000000004"`. Of the fixed and scientific forms the
 shorter is stored, so `100000.0` is `"1e+05"`. `true` and `false` are stored as `"true"` and
 `"false"`, and `nil` as `""`. A list or dict is stored as it prints; a structured value
-belongs on the data channel (`state-data-set`). Pass a number itself rather than `(str n)`:
-`str` prints a float with six significant digits, so `(state-set "x" (str 1234567.5))` stores
-`"1.23457e+06"`.
+belongs on the data channel (`state-data-set`). `str` and `str-concat` write a float the same
+way, so `(state-set "x" (str 1234567.5))` also stores `"1234567.5"`.
 
 `state-json` returns nil for a missing node and reads through a transparent link, as
 `state-get` does. `state-from-json` writes through a writable transparent link, as `state-set`
 does. It sets every non-empty string, number, `true`, `false` and `null` at its key, and returns
 nil. It checks the whole document before it sets anything, so a malformed document changes
 nothing. Its errors name the line, as in `state-from-json: line 3: expected ':'`.
+
+`state-set-tree` writes a value as the subtree at its path, so Ariadne's binds and `repeat:` can
+show it (docs/ARIADNE.md §10.4):
+
+- A dict's keys and a list's indices (`0`, `1`, ...) name child nodes. A scalar is a node's
+  value as `state-set` writes it: `true`/`false`, digits, a float in its shortest round-trip
+  form (`0.30000000000000004`), the string itself, and the empty string for nil.
+- A list's node holds its length, so `repeat: (state-get "feed.items")` repeats a widget per
+  element. A dict's node holds the empty string.
+- It replaces the subtree: a child the value doesn't name is removed with its subtree (the
+  expiry `state-delete` uses), and a node whose text doesn't change isn't written, so its
+  watchers don't fire.
+- It checks the whole value before it writes anything, so a value it can't write changes
+  nothing, not even the node at its path. A key must name one node: not empty, no `.`, and no
+  space at either end (paths are trimmed). Anything but nil, a bool, a number, a string, a list
+  or a dict is a `TypeError`; a bad key, a list or dict that contains itself, or nesting deeper
+  than 512 levels is a `ValueError`. So is an empty path: replacing the root's subtree would
+  remove everything else the program can reach.
+- It writes through a writable transparent link, as `state-set` does, and returns nil. Both
+  passes run as sliced data steps; a reader between two slices of the write sees part of it.
 
 #### Atomic single-node updates
 

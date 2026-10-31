@@ -285,6 +285,37 @@ namespace {
 constexpr std::size_t kElementUnits = 40; // one element's measure, shape test and assembly
 constexpr std::size_t kChunk = 256;       // elements assembled per libigl call
 
+// A chunk of elements as a mesh of its own: the vertices they use (in first-use order) and the
+// elements renumbered to them. The libigl calls copy every vertex they are given into an Eigen
+// matrix, so handing them the whole mesh cost O(#V) a chunk, O(#V #E / kChunk) in all; this costs
+// O(chunk), and each element's numbers come from the same coordinates.
+struct chunk_mesh {
+  std::vector<double> V;
+  std::vector<int> E;
+  std::vector<int> vertex; // local index -> the mesh's
+};
+
+// Elements e0 .. e1 - 1 of E (ss corners each) over the mesh's V. `slot` (mesh vertex -> local
+// index, -1 for none) is left all -1 again.
+void take_chunk(const std::vector<double> &V, const std::vector<int> &E, int ss, std::size_t e0,
+                std::size_t e1, std::vector<int> &slot, chunk_mesh &out) {
+  out.V.clear();
+  out.E.clear();
+  out.vertex.clear();
+  for (std::size_t q = std::size_t(ss) * e0; q < std::size_t(ss) * e1; ++q) {
+    const std::size_t v = std::size_t(E[q]);
+    if (slot[v] < 0) {
+      slot[v] = int(out.vertex.size());
+      out.vertex.push_back(int(v));
+      out.V.insert(out.V.end(), V.begin() + std::ptrdiff_t(3 * v),
+                   V.begin() + std::ptrdiff_t(3 * v + 3));
+    }
+    out.E.push_back(slot[v]);
+  }
+  for (const int v : out.vertex)
+    slot[std::size_t(v)] = -1;
+}
+
 } // namespace
 
 struct stepped_solve::impl {
@@ -323,6 +354,8 @@ struct stepped_solve::impl {
   double tol = 0.0;
   bool volume = false;
   std::size_t pos = 0;
+  std::vector<int> slot; // take_chunk's (prepare, assemble)
+  chunk_mesh cm;
   // assemble
   std::vector<int> tr, tc;
   std::vector<double> tv, mdiag;
@@ -370,10 +403,14 @@ struct stepped_solve::impl {
     tol = volume ? 1e-12 * diag * diag * diag : 1e-12 * diag * diag;
     es.active.assign(es.nv, 0);
     mdiag.assign(es.nv, 0.0);
+    slot.assign(es.nv, -1);
     if (what == kind::poisson) {
-      if (f.size() == 1)
-        f.assign(es.nv, f[0]);
-      else if (f.size() != es.nv)
+      if (f.size() == 1) {
+        // A copy: assign(n, t) may not take t from the vector itself. libc++ frees the old
+        // buffer before it reads t, so f[0] would be read from freed memory.
+        const double value = f[0];
+        f.assign(es.nv, value);
+      } else if (f.size() != es.nv)
         throw mesh_ops_error("fem::solve_poisson: f needs one value, or one per point");
     }
     if (what == kind::heat) {
@@ -399,16 +436,15 @@ struct stepped_solve::impl {
     const std::size_t ne = es.all.size() / std::size_t(ss);
     while (left > 0 && pos < ne) {
       const std::size_t e0 = pos, e1 = std::min(ne, pos + kChunk);
-      const std::vector<int> chunk(es.all.begin() + std::ptrdiff_t(ss * e0),
-                                   es.all.begin() + std::ptrdiff_t(ss * e1));
+      take_chunk(es.V, es.all, ss, e0, e1, slot, cm);
       if (volume) {
-        igl_detail::tet_volumes(es.V, chunk, measure);
+        igl_detail::tet_volumes(cm.V, cm.E, measure);
       } else {
-        igl_detail::double_areas(es.V, chunk, measure);
+        igl_detail::double_areas(cm.V, cm.E, measure);
         for (double &a : measure)
           a *= 0.5;
       }
-      igl_detail::well_shaped(es.V, chunk, ss, shaped);
+      igl_detail::well_shaped(cm.V, cm.E, ss, shaped);
       for (std::size_t e = e0; e < e1; ++e) {
         const double m = std::abs(measure[e - e0]);
         if (!(m > 0) || m < tol || !std::isfinite(m) || !shaped[e - e0])
@@ -443,19 +479,18 @@ struct stepped_solve::impl {
     igl_detail::triplets Kt, Mt;
     while (left > 0 && pos < ne) {
       const std::size_t e0 = pos, e1 = std::min(ne, pos + kChunk);
-      const std::vector<int> chunk(es.kept.begin() + std::ptrdiff_t(ss * e0),
-                                   es.kept.begin() + std::ptrdiff_t(ss * e1));
-      igl_detail::stiffness(es.V, chunk, ss, Kt);
-      igl_detail::mass(es.V, chunk, ss, true, Mt);
+      take_chunk(es.V, es.kept, ss, e0, e1, slot, cm);
+      igl_detail::stiffness(cm.V, cm.E, ss, Kt);
+      igl_detail::mass(cm.V, cm.E, ss, true, Mt);
       const double sc = what == kind::modes ? 1.0 : stiff_coef();
       for (std::size_t t = 0; t < Kt.val.size(); ++t) {
-        tr.push_back(Kt.row[t]);
-        tc.push_back(Kt.col[t]);
+        tr.push_back(cm.vertex[std::size_t(Kt.row[t])]);
+        tc.push_back(cm.vertex[std::size_t(Kt.col[t])]);
         tv.push_back(sc * Kt.val[t]);
       }
       for (std::size_t t = 0; t < Mt.val.size(); ++t)
         if (Mt.row[t] == Mt.col[t]) // lumped: diagonal
-          mdiag[std::size_t(Mt.row[t])] += Mt.val[t];
+          mdiag[std::size_t(cm.vertex[std::size_t(Mt.row[t])])] += Mt.val[t];
       spend((e1 - e0) * kElementUnits);
       pos = e1;
     }
@@ -473,6 +508,8 @@ struct stepped_solve::impl {
     tr.clear();
     tc.clear();
     tv.clear();
+    slot = std::vector<int>();
+    cm = chunk_mesh();
     st = stage::build;
   }
 

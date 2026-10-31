@@ -440,6 +440,8 @@ public:
   // The full names of every node under this one (its descendants, in pre-order: each child, then
   // its own descendants, children in name order), those matching `re` when it is not empty.
   std::vector<std::string> children(const std::string &re = std::string());
+  // The names of this node's own children (not their descendants), in name order.
+  std::vector<std::string> childNames();
   size_t numChildren();
 
   // Fired on a node when something under it changes, with that thing's path relative to the
@@ -686,6 +688,30 @@ public:
   // missing nodes. Returns nullptr when any segment is absent.
   // Useful for link resolution and any other read-only navigation.
   state *findDescendant(const std::string &path);
+
+  // Path walks that see THROUGH transparent links on every hop, not only the last. findDescendant
+  // and operator() walk physical children, so a path spelled through a link node ("hole.a" where
+  // "hole" links to "s") finds the link node's own child, not the target's "s.a". These two are
+  // for callers that address a subtree through a transparent link (an Ariadne `link:` hole, roadmap
+  // §7.8.3). Opaque links are never followed, and nothing is reachable that the links themselves
+  // do not point at. A link that cannot be resolved (broken / cycle / budget) is walked as the
+  // plain node it is, the same fallback resolvedValue() documents. `hop_budget` bounds each
+  // link's chain, as in resolveLink().
+  //
+  // findThroughLinks is the READ view, and creates nothing: every hop that lands on a resolvable
+  // transparent link continues at its terminal target, the last hop included, so the node returned
+  // is the one whose value/data/children a read should see. nullptr when a segment is absent.
+  state *findThroughLinks(const std::string &path, std::size_t hop_budget = 64);
+
+  // childThroughLinks is the WRITE view, create-or-get like operator(): an interior hop on a
+  // WRITABLE transparent link continues at its target (a write that cannot be resolved throws
+  // read_only_error, as value(v) does), and one on a non-writable transparent link continues at the
+  // link node's OWN children, so the write stays local and the target is never touched. With
+  // `refuse_read_only`, that second case throws read_only_error instead (the atomics' rule: a write
+  // must land on the node a read sees). The last hop is not followed: value(v)/data(d) route a
+  // writable link themselves and keep a read-only one's write local.
+  state &childThroughLinks(const std::string &path, bool refuse_read_only = false,
+                           std::size_t hop_budget = 64);
 
   // Normalize a state path to its canonical dot-separated form (trim; drop
   // leading/trailing/duplicate separators). A pure STRING operation — unlike fullName(), it never

@@ -9,7 +9,9 @@
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/data_job.h>
 #include <cvc/state/state_exec/evaluator.h>
+#include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/memory_tracker.h>
 #include <cvc/state/state_exec/process.h>
@@ -175,6 +177,82 @@ TEST_F(StateTreeIntrinsicsTest, TransparentLinkReadsThroughData) {
   EXPECT_EQ(std::get<std::string>(d.v), "dv");
 }
 
+// A hole on an interior node (an Ariadne `link:` on a subtree): a program chrooted to "mod" reads
+// the target's descendants through it, writes them through a writable one, and keeps its writes
+// local under a read-only one. Nothing outside the target's subtree becomes reachable.
+TEST_F(StateTreeIntrinsicsTest, AHoleExposesTheTargetsDescendantsToReads) {
+  cvc::state &root = cvc::state::instance(app_ctx);
+  root("parent.res.packages.0.name").value(std::string("zstd"));
+  root("parent.res.packages.1.name").value(std::string("lz4"));
+  root("parent.secret").value(std::string("no"));
+  root("mod.tree").linkTo("parent.res", cvc::state::link_mode::transparent);
+  ictx.root = &root("mod");
+  call("state-data-set", {std::string("tree.meta"), value_t(int64_t(3))}); // read-only: local
+  root("parent.res.meta").data(boost::any(value_t(int64_t(4))));
+  EXPECT_EQ(std::get<std::string>(call("state-get", {std::string("tree.packages.0.name")}).v),
+            "zstd");
+  auto ch = call("state-children", {std::string("tree.packages")});
+  auto *lst = std::get_if<list_ptr>(&ch.v);
+  ASSERT_NE(lst, nullptr);
+  ASSERT_NE(*lst, nullptr);
+  // The target's whole subtree by full name (state::children): packages.0, .0.name, .1, .1.name.
+  ASSERT_EQ((*lst)->size(), 4u);
+  EXPECT_EQ(std::get<std::string>((*lst)->at(3).v), "parent.res.packages.1.name");
+  EXPECT_TRUE(std::get<bool>(call("state-exists", {std::string("tree.packages.1.name")}).v));
+  EXPECT_FALSE(std::get<bool>(call("state-exists", {std::string("tree.packages.2")}).v));
+  auto d = call("state-data-get", {std::string("tree.meta")});
+  ASSERT_TRUE(std::holds_alternative<int64_t>(d.v));
+  EXPECT_EQ(std::get<int64_t>(d.v), 4); // the target's, not the local write
+  auto j = call("state-json", {std::string("tree.packages.1")});
+  ASSERT_TRUE(std::holds_alternative<std::string>(j.v));
+  EXPECT_NE(std::get<std::string>(j.v).find("lz4"), std::string::npos);
+  // Default-deny: the parent outside the hole's target is still out of reach.
+  EXPECT_TRUE(call("state-get", {std::string("parent.secret")}).is_nil());
+  EXPECT_TRUE(call("state-get", {std::string("tree.secret")}).is_nil());
+}
+
+TEST_F(StateTreeIntrinsicsTest, AWritableHoleTakesDescendantWritesOnTheTarget) {
+  cvc::state &root = cvc::state::instance(app_ctx);
+  root("parent.res.a").value(std::string("1"));
+  root("mod.tree").linkTo("parent.res", cvc::state::link_mode::transparent).setLinkWritable(true);
+  ictx.root = &root("mod");
+  call("state-set", {std::string("tree.a"), std::string("2")});
+  call("state-set", {std::string("tree.new.leaf"), std::string("x")});
+  call("state-data-set", {std::string("tree.d"), value_t(std::string("dv"))});
+  call("state-incr", {std::string("tree.n")});
+  EXPECT_TRUE(std::get<bool>(
+      call("state-cas", {std::string("tree.a"), std::string("2"), std::string("3")}).v));
+  EXPECT_EQ(root("parent.res.a").value(), "3");
+  EXPECT_EQ(root("parent.res.new.leaf").value(), "x");
+  EXPECT_EQ(root("parent.res.n").value(), "1");
+  EXPECT_FALSE(root("parent.res.d").data().empty());
+  EXPECT_TRUE(root("mod.tree").children().empty()); // nothing landed on the hole
+}
+
+TEST_F(StateTreeIntrinsicsTest, AReadOnlyHoleKeepsDescendantWritesLocal) {
+  cvc::state &root = cvc::state::instance(app_ctx);
+  root("parent.res.a").value(std::string("1"));
+  root("mod.tree").linkTo("parent.res", cvc::state::link_mode::transparent); // read-only
+  ictx.root = &root("mod");
+  call("state-set", {std::string("tree.a"), std::string("2")});
+  call("state-set", {std::string("tree.new"), std::string("x")});
+  call("state-data-set", {std::string("tree.d"), value_t(std::string("dv"))});
+  call("state-from-json", {std::string("tree.j"), std::string("{\"k\": \"v\"}")});
+  EXPECT_EQ(root("parent.res.a").value(), "1");
+  EXPECT_EQ(root.findDescendant("parent.res.new"), nullptr);
+  EXPECT_EQ(root.findDescendant("parent.res.d"), nullptr);
+  EXPECT_EQ(root.findDescendant("parent.res.j"), nullptr);
+  EXPECT_EQ(root.findDescendant("mod.tree.a")->value(), "2"); // the hole's own child
+  // A read still sees the target.
+  EXPECT_EQ(std::get<std::string>(call("state-get", {std::string("tree.a")}).v), "1");
+  // The atomics refuse: their write would not land on the node a read sees.
+  EXPECT_ANY_THROW(call("state-incr", {std::string("tree.n")}));
+  EXPECT_ANY_THROW(call("state-cas", {std::string("tree.a"), std::string("1"), std::string("5")}));
+  EXPECT_ANY_THROW(call("state-swap", {std::string("tree.a"), std::string("5")}));
+  EXPECT_EQ(root("parent.res.a").value(), "1");
+  EXPECT_EQ(root.findDescendant("parent.res.n"), nullptr);
+}
+
 TEST_F(StateTreeIntrinsicsTest, StateDelete) {
   call("state-set", {std::string("del.target"), std::string("bye")});
   EXPECT_TRUE(std::get<bool>(call("state-exists", {std::string("del.target")}).v));
@@ -305,6 +383,9 @@ TEST_F(StateTreeIntrinsicsTest, StateSetStoresAFloatInItsShortestRoundTripForm) 
     EXPECT_EQ(std::strtod(stored("state-set", d).c_str(), nullptr), d) << d;
   // state-swap and state-cas store a float as state-set does.
   EXPECT_EQ(stored("state-swap", 1234567.5), "1234567.5");
+  // str prints a float as state-set stores it, so (state-set k (str d)) stores the same text.
+  for (const double d : {1234567.5, 0.1 + 0.2, 2.0, 1e5, 1e21})
+    EXPECT_EQ(std::get<std::string>(call("str", {value_t{d}}).v), stored("state-set", d)) << d;
 }
 
 TEST_F(StateTreeIntrinsicsTest, StateDataGetNonexistent) {
@@ -364,6 +445,133 @@ TEST_F(StateTreeIntrinsicsTest, StateGetWrongArgCount) {
 
 TEST_F(StateTreeIntrinsicsTest, StateSetWrongArgCount) {
   EXPECT_THROW(call("state-set", {std::string("a")}), std::runtime_error);
+}
+
+// --- state-set-tree: a value of dicts, lists and scalars as a subtree --------------------------
+
+TEST_F(StateTreeIntrinsicsTest, StateSetTreeWritesDictsListsAndScalars) {
+  cvc::state &root = cvc::state::instance(app_ctx);
+  call("state-set-tree",
+       {std::string("t"),
+        make_dict({{"s", value_t(std::string("text"))},
+                   {"i", value_t(int64_t{-3})},
+                   {"f", value_t(0.1 + 0.2)},
+                   {"big", value_t(1234567.5)},
+                   {"yes", value_t(true)},
+                   {"no", value_t(false)},
+                   {"none", nil_value},
+                   {"items", make_list({make_dict({{"text", value_t(std::string("a"))}}),
+                                        make_dict({{"text", value_t(std::string("b"))}})})},
+                   {"empty", make_list()}})});
+  EXPECT_EQ(root("t.s").value(), "text");
+  EXPECT_EQ(root("t.i").value(), "-3");
+  EXPECT_EQ(root("t.f").value(), "0.30000000000000004"); // every digit, as state-set writes it
+  EXPECT_EQ(root("t.big").value(), "1234567.5");
+  EXPECT_EQ(root("t.yes").value(), "true");
+  EXPECT_EQ(root("t.no").value(), "false");
+  ASSERT_NE(root.findDescendant("t.none"), nullptr); // nil: the node, empty
+  EXPECT_EQ(root("t.none").value(), "");
+  EXPECT_EQ(root("t").value(), "");        // a dict's node
+  EXPECT_EQ(root("t.items").value(), "2"); // a list's node holds its length, for repeat:
+  EXPECT_EQ(root("t.items.0.text").value(), "a");
+  EXPECT_EQ(root("t.items.1.text").value(), "b");
+  EXPECT_EQ(root("t.empty").value(), "0");
+  EXPECT_EQ(root("t.items").childNames(), (std::vector<std::string>{"0", "1"}));
+}
+
+TEST_F(StateTreeIntrinsicsTest, StateSetTreeReplacesTheSubtree) {
+  cvc::state &root = cvc::state::instance(app_ctx);
+  root("t").value(std::string("old text"));
+  root("t.stale.deep").value(std::string("x"));
+  const auto items = [](int n) {
+    std::vector<value_t> v;
+    for (int i = 0; i < n; ++i)
+      v.push_back(make_dict({{"id", value_t(int64_t{i})}, {"extra", value_t(true)}}));
+    return make_list(std::move(v));
+  };
+  call("state-set-tree",
+       {std::string("t"), make_dict({{"items", items(12)}, {"error", nil_value}})});
+  EXPECT_EQ(root.findDescendant("t.stale"), nullptr);
+  EXPECT_EQ(root("t").value(), "");
+  EXPECT_EQ(root("t.items.11.id").value(), "11");
+  // Fewer items, a key gone, an element that lost a key: only what the value has is left.
+  call("state-set-tree",
+       {std::string("t"), make_dict({{"items", make_list({make_dict({{"id", value_t(int64_t{7})}}),
+                                                          value_t(std::string("plain"))})}})});
+  EXPECT_EQ(root("t.items").value(), "2");
+  EXPECT_EQ(root("t.items").childNames(), (std::vector<std::string>{"0", "1"}));
+  EXPECT_EQ(root("t.items.0.id").value(), "7");
+  EXPECT_EQ(root.findDescendant("t.items.0.extra"), nullptr);
+  EXPECT_EQ(root("t.items.1").value(), "plain");
+  EXPECT_EQ(root("t.items.1").numChildren(), 0u); // a scalar where a dict was
+  EXPECT_EQ(root.findDescendant("t.error"), nullptr);
+  // A scalar replaces the whole subtree; a list replaces a dict's keys.
+  call("state-set-tree", {std::string("t"), value_t(int64_t{5})});
+  EXPECT_EQ(root("t").value(), "5");
+  EXPECT_EQ(root("t").numChildren(), 0u);
+  call("state-set-tree", {std::string("t"), make_dict({{"10", value_t(true)}, {"x", nil_value}})});
+  call("state-set-tree", {std::string("t"), make_list({nil_value, nil_value})});
+  EXPECT_EQ(root("t").childNames(), (std::vector<std::string>{"0", "1"})); // "10" isn't below 2
+}
+
+TEST_F(StateTreeIntrinsicsTest, StateSetTreeLeavesUnchangedNodesUnwritten) {
+  cvc::state &root = cvc::state::instance(app_ctx);
+  const value_t v = make_dict({{"a", value_t(std::string("same"))}, {"b", value_t(int64_t{1})}});
+  call("state-set-tree", {std::string("t"), v});
+  int a_writes = 0, b_writes = 0;
+  auto ca = root("t.a").valueChanged.connect([&] { ++a_writes; });
+  auto cb = root("t.b").valueChanged.connect([&] { ++b_writes; });
+  call("state-set-tree", {std::string("t"), make_dict({{"a", value_t(std::string("same"))},
+                                                       {"b", value_t(int64_t{2})}})});
+  EXPECT_EQ(a_writes, 0);
+  EXPECT_EQ(b_writes, 1);
+  ca.disconnect();
+  cb.disconnect();
+}
+
+TEST_F(StateTreeIntrinsicsTest, StateSetTreeChecksTheValueBeforeWritingAnything) {
+  cvc::state &root = cvc::state::instance(app_ctx);
+  const auto refuses = [&](const value_t &v, const std::string &cls, const std::string &what) {
+    try {
+      call("state-set-tree", {std::string("t"), v});
+      ADD_FAILURE() << "accepted " << to_string(v);
+    } catch (const dsl_error &e) {
+      EXPECT_EQ(e.class_name(), cls) << e.what();
+      EXPECT_NE(std::string(e.what()).find(what), std::string::npos) << e.what();
+    }
+    EXPECT_EQ(root.findDescendant("t"), nullptr) << "wrote part of " << to_string(v);
+  };
+  // The bad part comes last, after values that would have been written.
+  const value_t good = make_dict({{"ok", value_t(int64_t{1})}});
+  for (const char *key : {"", "a.b", " a", "a ", "  "})
+    refuses(make_list({good, make_dict({{key, nil_value}})}), "ValueError", "can't name a node");
+  refuses(make_list({good, *env->lookup("+")}), "TypeError", "has no place in the state tree");
+  refuses(make_list({good, make_bytes("x")}), "TypeError", "a bytes");
+  value_t self = make_list({good});
+  std::get<list_ptr>(self.v)->push_back(self);
+  refuses(self, "ValueError", "a list that contains itself");
+  std::get<list_ptr>(self.v)->pop_back();
+  value_t deep = make_list();
+  for (std::size_t i = 0; i < kJsonMaxDepth; ++i)
+    deep = make_list({deep});
+  refuses(make_list({good, deep}), "ValueError", "nested deeper than 512");
+  // The path must name a node below the root.
+  root("keep").value(std::string("me"));
+  for (const char *path : {"", ".", " . "})
+    EXPECT_THROW(call("state-set-tree", {std::string(path), make_dict()}), dsl_error) << path;
+  EXPECT_EQ(root("keep").value(), "me");
+  // A value held twice is written twice.
+  call("state-set-tree", {std::string("t"), make_list({good, good})});
+  EXPECT_EQ(root("t.1.ok").value(), "1");
+}
+
+TEST_F(StateTreeIntrinsicsTest, StateSetTreeWritesThroughAWritableLink) {
+  cvc::state &root = cvc::state::instance(app_ctx);
+  root("target"); // a link resolves to a node that exists
+  root("hole").linkTo("target", cvc::state::link_mode::transparent);
+  root("hole").setLinkWritable(true);
+  call("state-set-tree", {std::string("hole"), make_dict({{"k", value_t(std::string("v"))}})});
+  EXPECT_EQ(root("target.k").value(), "v");
 }
 
 // ===========================================================================
@@ -885,7 +1093,7 @@ protected:
 
 TEST_F(RegisterIntrinsicsTest, AllStateIntrinsicsRegistered) {
   for (auto &name : {"state-get", "state-set", "state-children", "state-exists", "state-delete",
-                     "state-data-get", "state-data-set"}) {
+                     "state-data-get", "state-data-set", "state-set-tree"}) {
     EXPECT_NE(env->lookup(name), nullptr) << "Missing intrinsic: " << name;
   }
 }

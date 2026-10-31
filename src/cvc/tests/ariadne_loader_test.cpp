@@ -509,6 +509,111 @@ windows:
   EXPECT_TRUE(room->on.empty()); // on: is optional for input_text (no warning, unlike button)
 }
 
+// Every bound widget keeps its optional `on:` (a combo's used to be dropped, so a pick changed
+// the key but never ran the program). Each fires after its committed write (see the runtime).
+TEST(AriadneLoader, BoundWidgetsKeepTheirOn) {
+  SKIP_WITHOUT_YAML();
+  const char *doc = R"(
+meta: { name: T, min_libcvc: "3.4.0" }
+menubar:
+  - menu: View
+    items:
+      - menu_item: Grid
+        bind: view.grid
+        on: (state-set "g" "1")
+windows:
+  - window: W
+    children:
+      - combo: Mode
+        bind: mode
+        options: [a, b]
+        on: (state-set "x" "1")
+      - checkbox: Wire
+        bind: wire
+        on: wire.changed
+      - slider_int: N
+        bind: n
+        on: n.changed
+      - slider_float: Speed
+        bind: speed
+        on: speed.changed
+      - color: Tint
+        bind: tint
+        on: tint.changed
+      - combo: Plain
+        bind: plain
+        options: [a, b]
+)";
+  LoadResult r = load_string(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(r.warnings.empty()) << r.warnings.front();
+  const Widget *mode = find(r.root, Kind::Combo, "Mode");
+  ASSERT_NE(mode, nullptr);
+  EXPECT_EQ(mode->on, "(state-set \"x\" \"1\")");
+  const Widget *plain = find(r.root, Kind::Combo, "Plain");
+  ASSERT_NE(plain, nullptr);
+  EXPECT_TRUE(plain->on.empty()); // on: stays optional
+  const Widget *grid = find(r.root, Kind::MenuItemToggle);
+  ASSERT_NE(grid, nullptr);
+  EXPECT_EQ(grid->bind, "view.grid");
+  EXPECT_EQ(grid->on, "(state-set \"g\" \"1\")");
+  ASSERT_NE(find(r.root, Kind::Checkbox), nullptr);
+  EXPECT_EQ(find(r.root, Kind::Checkbox)->on, "wire.changed");
+  ASSERT_NE(find(r.root, Kind::SliderInt), nullptr);
+  EXPECT_EQ(find(r.root, Kind::SliderInt)->on, "n.changed");
+  ASSERT_NE(find(r.root, Kind::SliderFloat), nullptr);
+  EXPECT_EQ(find(r.root, Kind::SliderFloat)->on, "speed.changed");
+  ASSERT_NE(find(r.root, Kind::Color), nullptr);
+  EXPECT_EQ(find(r.root, Kind::Color)->on, "tint.changed");
+}
+
+// radio: and radio_row: take a combo's keys (options, values, def, on) and build Kind::Radio,
+// stacked or side by side.
+TEST(AriadneLoader, RadioAndRadioRow) {
+  SKIP_WITHOUT_YAML();
+  const char *doc = R"(
+meta: { name: T, min_libcvc: "3.4.0" }
+windows:
+  - window: W
+    children:
+      - radio: Shading
+        bind: view.shading
+        options: [Flat, Smooth]
+        def: Smooth
+        on: shading.changed
+      - radio_row: Samples
+        bind: view.ss
+        options: [Off, 2x, 4x]
+        values: [0, 2, 4]
+      - type: radio
+        label: Empty
+        bind: view.e
+)";
+  LoadResult r = load_string(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(count(r.root, Kind::Radio), 3);
+  EXPECT_EQ(count(r.root, Kind::Combo), 0);
+
+  const Widget *sh = find(r.root, Kind::Radio, "Shading");
+  ASSERT_NE(sh, nullptr);
+  EXPECT_FALSE(sh->radio_row);
+  EXPECT_EQ(sh->bind, "view.shading");
+  ASSERT_EQ(sh->options.size(), 2u);
+  EXPECT_EQ(sh->options[1], "Smooth");
+  EXPECT_EQ(sh->sdef, "Smooth");
+  EXPECT_EQ(sh->on, "shading.changed");
+
+  const Widget *ss = find(r.root, Kind::Radio, "Samples");
+  ASSERT_NE(ss, nullptr);
+  EXPECT_TRUE(ss->radio_row);
+  ASSERT_EQ(ss->values.size(), 3u);
+  EXPECT_EQ(ss->values[2], "4");
+
+  ASSERT_EQ(r.warnings.size(), 1u);
+  EXPECT_NE(r.warnings[0].find("radio 'Empty' has no options:"), std::string::npos)
+      << r.warnings[0];
+}
+
 // keys: -- each entry a rebindable action with its label, its default key(s) and its on:.
 TEST(AriadneLoader, KeysBlock) {
   SKIP_WITHOUT_YAML();
@@ -2396,6 +2501,54 @@ windows: [ { window: W, children: [] } ]
 )");
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_NE(r.init_script.find("state-set"), std::string::npos);
+}
+
+// tests: (`ari test`): name -> program, captured in document order and never run by the loader.
+TEST(AriadneTests, BlockCapturedInOrder) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+root: [ { text: hi } ]
+tests:
+  zeta: (assert true)
+  alpha: |
+    (assert (= 1 1))
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.tests.size(), 2u);
+  EXPECT_EQ(r.tests[0].first, "zeta");
+  EXPECT_EQ(r.tests[0].second, "(assert true)");
+  EXPECT_EQ(r.tests[1].first, "alpha");
+  EXPECT_NE(r.tests[1].second.find("(assert (= 1 1))"), std::string::npos);
+  for (const std::string &w : r.warnings)
+    EXPECT_EQ(w.find("tests:"), std::string::npos) << w;
+}
+
+TEST(AriadneTests, BadShapesWarn) {
+  SKIP_WITHOUT_YAML();
+  LoadResult seq = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+tests: [ (assert true) ]
+)");
+  ASSERT_TRUE(seq.ok) << seq.error;
+  EXPECT_TRUE(seq.tests.empty());
+  EXPECT_TRUE(has_warning(seq, "tests: must be a MAP"));
+  LoadResult empty = load_string("meta: { min_libcvc: \"0.0.0\" }\ntests:\n");
+  ASSERT_TRUE(empty.ok) << empty.error;
+  EXPECT_TRUE(empty.tests.empty());
+  EXPECT_FALSE(has_warning(empty, "tests:")); // an empty block is no tests, not a mistake
+  LoadResult entry = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+tests:
+  good: (assert true)
+  nested: { not: a program }
+  empty: ""
+)");
+  ASSERT_TRUE(entry.ok) << entry.error;
+  ASSERT_EQ(entry.tests.size(), 1u);
+  EXPECT_EQ(entry.tests[0].first, "good");
+  EXPECT_TRUE(has_warning(entry, "tests: 'nested' must be a non-empty scalar"));
+  EXPECT_TRUE(has_warning(entry, "tests: 'empty' must be a non-empty scalar"));
 }
 
 TEST(AriadneInit, NonScalarInitWarns) {

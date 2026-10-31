@@ -104,6 +104,21 @@ TEST(AriadneHostCli, RuntimeFlagsComeBeforeTheDocumentAndTheRestIsItsOwn) {
   EXPECT_NE(misplaced_flag_note("ari", o.doc_args).find("'--fps'"), std::string::npos);
 }
 
+TEST(AriadneHostCli, TimeoutIsSecondsAboveZero) {
+  const char *ok[] = {"ari", "test", "--timeout", "2.5", "a.ari", "b.ari"};
+  HostOptions o = parse_host_args(6, ok, {"--tap"});
+  EXPECT_TRUE(o.error.empty()) << o.error;
+  EXPECT_DOUBLE_EQ(o.timeout, 2.5);
+  EXPECT_EQ(o.doc, "a.ari");
+  EXPECT_EQ(o.doc_args, (std::vector<std::string>{"b.ari"})); // ari test reads them as documents
+  for (const char *bad : {"0", "-1", "soon", "2s"}) {
+    const char *argv[] = {"ari", "test", "--timeout", bad, "a.ari"};
+    EXPECT_NE(parse_host_args(5, argv).error.find("--timeout needs a number of seconds"),
+              std::string::npos)
+        << bad;
+  }
+}
+
 TEST(AriadneHostCli, InfoTakesNoDocument) {
   const char *info[] = {"ari", "info", "--json"};
   const HostOptions o = parse_host_args(3, info, {"--json"});
@@ -479,6 +494,66 @@ TEST(AriadneDocArgs, AModuleSeesThemOnlyThroughAReadOnlyGrant) {
   EXPECT_EQ(val(app, "ui.docs.p.includes.denied.seen_argv"), "no");
 }
 
+// A hole on an interior node grants the subtree under it: a module's programs read the parent's
+// parsed reply through it, write it only through a read-write grant, and reach nothing else.
+TEST(AriadneLinkHoles, ASubtreeGrantReachesItsDescendantsOnly) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("subtree");
+  const fs::path frag = write(
+      dir, "view.ari",
+      "init: |\n"
+      "  (state-set \"first\" (state-get \"tree.packages.0.name\"))\n"
+      "  (state-set \"count\" (length (state-children \"tree.packages\")))\n"
+      "  (state-set \"meta\" (if (state-exists \"tree.meta\")\n"
+      "                        (get-attr (state-data-get \"tree.meta\") \"total\") \"none\"))\n"
+      "  (state-set \"peek\" (if (state-exists \"search.secret\") \"leak\" \"none\"))\n"
+      "  (state-set \"tree.packages.0.seen\" \"yes\")\n"
+      "root:\n  - text: view\n");
+  const fs::path doc = write(dir, "parent.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "init: |\n"
+                             "  (state-set \"search.res.packages.0.name\" \"zstd\")\n"
+                             "  (state-set \"search.res.packages.1.name\" \"lz4\")\n"
+                             "  (state-data-set \"search.res.meta\" (dict \"total\" 2))\n"
+                             "  (state-set \"search.secret\" \"s3cret\")\n"
+                             "root:\n"
+                             "  - load: " +
+                                 frag.string() +
+                                 "\n"
+                                 "    as: ro\n"
+                                 "    link:\n"
+                                 "      tree: {to: search.res, mode: ro}\n"
+                                 "  - load: " +
+                                 frag.string() +
+                                 "\n"
+                                 "    as: rw\n"
+                                 "    link:\n"
+                                 "      tree: search.res\n"
+                                 "  - load: " +
+                                 frag.string() +
+                                 "\n"
+                                 "    as: denied\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.p");
+  art.set_backend(be);
+  art.load(doc.string());
+  art.runtime().render(); // the reconcile mounts the modules, wires the holes, runs their init:
+  for (const char *as : {"ro", "rw"}) {
+    const std::string at = std::string("ui.docs.p.includes.") + as + ".";
+    EXPECT_EQ(val(app, at + "first"), "zstd") << as;
+    EXPECT_EQ(val(app, at + "count"), "4") << as; // packages.0, .0.name, .1, .1.name
+    EXPECT_EQ(val(app, at + "meta"), "2") << as;
+    EXPECT_EQ(val(app, at + "peek"), "none") << as; // the parent outside the target stays out
+  }
+  // Only the read-write grant wrote the parent; the read-only one's write stayed in the module.
+  EXPECT_EQ(val(app, "ui.docs.p.search.res.packages.0.seen"), "yes");
+  EXPECT_EQ(val(app, "ui.docs.p.includes.ro.tree.packages.0.seen"), "yes");
+  EXPECT_EQ(val(app, "ui.docs.p.includes.rw.tree.packages.0.seen"), "");
+  EXPECT_EQ(val(app, "ui.docs.p.includes.denied.first"), "");
+  EXPECT_EQ(val(app, "ui.docs.p.includes.denied.count"), "0");
+}
+
 // ── host verbs and init: diagnostics ────────────────────────────────────────────────────────────
 
 TEST(AriadneHostVerbs, EveryRegisteredVerbIsBound) {
@@ -532,6 +607,187 @@ template <class Pred> bool drain_until(AppRuntime &art, Pred pred) {
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
   }
   return pred();
+}
+
+// ── (quit [code]), run_program and tests: (ari test) ───────────────────────────────────────────
+
+// Mount a lone button with `on` as its on:, and press it.
+void press_button(AppRuntime &art, FtxuiBackend &be, const std::string &on) {
+  art.set_root(group({button("Go", on)}));
+  be.render_to_string(art.runtime(), 80, 24);
+  be.feed(art.runtime(), TermEvent::key_event("Tab"));
+  be.render_to_string(art.runtime(), 80, 24);
+  be.feed(art.runtime(), TermEvent::key_event("Return"));
+}
+
+// A document that runs `tick` on its first tick only.
+std::string once_on_tick(const std::string &tick) {
+  return "meta: {min_libcvc: 3.4.0}\n"
+         "root:\n  - text: hi\n"
+         "init: (state-set \"t.done\" \"\")\n"
+         "on_tick: |\n"
+         "  (if (= (state-get \"t.done\") \"\") (begin (state-set \"t.done\" \"1\") " +
+         tick + "))\n";
+}
+
+TEST(AriadneQuit, QuitSetsTheExitCodeAndTheFirstOneStands) {
+  REQUIRE_YAML();
+  const fs::path doc = write(test_dir("quit_code"), "q.ari", once_on_tick("(quit 3) (quit 4)"));
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.q");
+  art.set_backend(be);
+  art.register_quit();
+  EXPECT_TRUE(art.runtime().has_function("quit"));
+  art.load(doc.string());
+  EXPECT_EQ(art.exit_code(), 0);
+  ASSERT_TRUE(drain_until(art, [&] { return art.should_close(); }));
+  EXPECT_EQ(art.exit_code(), 3);
+  EXPECT_TRUE(art.take_warnings().empty());
+}
+
+TEST(AriadneQuit, QuitFromInitAndWithNoCode) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("quit_init");
+  {
+    cvc::app app;
+    FtxuiBackend be;
+    AppRuntime art(app, "ui.docs.qi");
+    art.set_backend(be);
+    art.register_quit();
+    art.load(write(dir, "i.ari",
+                   "meta: {min_libcvc: 3.4.0}\nroot:\n  - text: hi\n"
+                   "init: (quit 7)\n")
+                 .string());
+    EXPECT_TRUE(art.should_close()); // init: runs in load()
+    EXPECT_EQ(art.exit_code(), 7);
+  }
+  {
+    cvc::app app;
+    FtxuiBackend be;
+    AppRuntime art(app, "ui.docs.qn");
+    art.set_backend(be);
+    art.register_quit();
+    art.load(write(dir, "n.ari", once_on_tick("(quit)")).string());
+    ASSERT_TRUE(drain_until(art, [&] { return art.should_close(); }));
+    EXPECT_EQ(art.exit_code(), 0);
+  }
+}
+
+TEST(AriadneQuit, ABadCodeRaisesAndNothingCloses) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("quit_bad");
+  const std::pair<const char *, const char *> cases[] = {
+      {"(quit 256)", "ValueError: quit: the exit code is 0..255, not 256"},
+      {"(quit -1)", "ValueError: quit: the exit code is 0..255, not -1"},
+      {"(quit \"x\")", "TypeError: quit: the exit code is an integer"},
+      {"(quit 1 2)", "TypeError: quit: expected an optional exit code"},
+  };
+  for (const auto &[call, want] : cases) {
+    SCOPED_TRACE(call);
+    cvc::app app;
+    FtxuiBackend be;
+    AppRuntime art(app, "ui.docs.qb");
+    art.set_backend(be);
+    art.register_quit();
+    art.load(write(dir, "b.ari", once_on_tick(call)).string());
+    std::vector<std::string> warnings;
+    ASSERT_TRUE(drain_until(art, [&] {
+      for (std::string &w : art.take_warnings())
+        warnings.push_back(std::move(w));
+      return !warnings.empty();
+    }));
+    EXPECT_NE(warnings.front().find(want), std::string::npos) << warnings.front();
+    EXPECT_FALSE(art.should_close());
+  }
+}
+
+// `on: quit` (a menu item's event) still closes, with code 0.
+TEST(AriadneQuit, TheQuitEventCloses) {
+  REQUIRE_YAML();
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.qe");
+  art.set_backend(be);
+  art.register_quit();
+  press_button(art, be, "quit"); // a menu item's on: quit is the same event
+  art.drain();
+  EXPECT_TRUE(art.should_close());
+  EXPECT_EQ(art.exit_code(), 0);
+}
+
+// run_program reports how the program ended to its callback, and never as a warning.
+TEST(AriadneRunProgram, DoneSaysHowItEnded) {
+  REQUIRE_YAML();
+  const fs::path doc =
+      write(test_dir("run_program"), "r.ari", "meta: {min_libcvc: 3.4.0}\nroot:\n  - text: hi\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.rp");
+  art.set_backend(be);
+  art.load(doc.string());
+  art.drain();
+  std::vector<std::string> how;
+  const auto run = [&](const std::string &script) {
+    const std::size_t before = how.size();
+    art.runtime().run_program(script, [&](const std::string &h) { how.push_back(h); });
+    EXPECT_TRUE(drain_until(art, [&] { return how.size() > before; })) << script;
+  };
+  run("(state-set \"x\" 5)");
+  run("(assert (= (state-get \"x\") 6) \"x is six\")");
+  run("(sleep 0.01) (error \"late\")"); // parks first: it ends on a later drain
+  run("(this is not closed");
+  ASSERT_EQ(how.size(), 4u);
+  EXPECT_EQ(how[0], "");
+  EXPECT_EQ(val(app, "ui.docs.rp.x"), "5"); // chrooted to the document, as an on: is
+  EXPECT_NE(how[1].find("failed: AssertionError: assertion failed: x is six (at (assert"),
+            std::string::npos)
+      << how[1];
+  EXPECT_NE(how[2].find("failed: RuntimeError: late"), std::string::npos) << how[2];
+  EXPECT_FALSE(how[3].empty());
+  EXPECT_TRUE(art.take_warnings().empty());
+}
+
+// An on: action's failure names the program it came from.
+TEST(AriadneRunProgram, AnActionsFailureNamesItsProgram) {
+  REQUIRE_YAML();
+  const fs::path doc = write(test_dir("action_names"), "a.ari", once_on_tick("(set y 1)"));
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.an");
+  art.set_backend(be);
+  art.load(doc.string());
+  press_button(art, be, "(assert (= 1 2)\n  \"one is two\")");
+  std::vector<std::string> warnings;
+  ASSERT_TRUE(drain_until(art, [&] {
+    for (std::string &w : art.take_warnings())
+      warnings.push_back(std::move(w));
+    return !warnings.empty();
+  }));
+  EXPECT_NE(warnings.front().find("action program failed: AssertionError: assertion failed: one "
+                                  "is two"),
+            std::string::npos)
+      << warnings.front();
+  EXPECT_NE(warnings.front().find("[(assert (= 1 2) \"one is two\")]"), std::string::npos)
+      << warnings.front();
+}
+
+TEST(AriadneTests, AppRuntimeKeepsTheTestsBlock) {
+  REQUIRE_YAML();
+  const fs::path doc = write(test_dir("tests_block"), "t.ari",
+                             "meta: {min_libcvc: 3.4.0}\nroot:\n  - text: hi\n"
+                             "tests:\n  one: (assert true)\n  two: (nope)\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.tb");
+  art.set_backend(be);
+  const std::vector<std::string> warnings = art.load(doc.string());
+  ASSERT_EQ(art.tests().size(), 2u);
+  EXPECT_EQ(art.tests()[1].first, "two");
+  bool named = false; // the free-head preflight covers a test's program too
+  for (const std::string &w : warnings)
+    named = named || w.find("test 'two' calls (nope ...)") != std::string::npos;
+  EXPECT_TRUE(named);
 }
 
 // register_async_verb makes an async function (docs/STATE_EXEC_EXCEPTIONS.md 3): (name) parks the
