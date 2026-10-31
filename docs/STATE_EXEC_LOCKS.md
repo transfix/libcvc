@@ -2,9 +2,9 @@
 
 Status: design, 2026-10-27. L0 (the atomic natives, section 4.4), L1 (`with-lock` on one
 scheduler) and L1b (the spawn context on one scheduler) are built. L2 (priorities and
-inheritance) is implemented in transfix/libcvc#868; its scheduler-level PI tests and two bench
-scenarios follow in a later PR, and its A/B gates are not run yet (section 12). L3 follows, and
-L4 onward are design only.
+inheritance) is implemented in transfix/libcvc#868, with its scheduler-level PI tests and its two
+bench scenarios; its A/B gates are not run yet (section 12). L3 follows, and L4 onward are design
+only.
 Tracked in the `state-exec-perf` workstream,
 beside the threaded design ([`docs/STATE_EXEC_THREADED.md`](STATE_EXEC_THREADED.md)), which this
 document extends. The exact lock protocol is
@@ -1384,9 +1384,10 @@ Stage M needs `locks_lost`: before L7 no held section can be snapshotted, so res
 implemented in transfix/libcvc#868: `set-priority` and `get-priority`, the floors and the spawn
 clamp, inheritance (homes attach with their scheduler's policy, and the run queue keys on
 `effective_priority()` through `level_key`), `state_exec.policy`, the thread classes,
-`post_control`, and pycvc's priority API. Its scheduler-level PI tests (PI-1..PI-5, PI-8, PI-9,
-PI-11) and the `prio.set` and `lock.inherit` bench scenarios follow in a later PR, and none of its
-A/B gates (11.2) has been run yet, so L2's exit is not met. L3 onward are not built.
+`post_control`, and pycvc's priority API. The same PR has its scheduler-level PI tests (PI-1..PI-5,
+PI-8, PI-9 and PI-11; PI-7 and PI-10 are L3's) and the `prio.set` and `lock.inherit` bench
+scenarios. None of its A/B gates (11.2) has been run yet, so L2's exit is not met. L3 onward are
+not built.
 
 ## 13. The test list
 
