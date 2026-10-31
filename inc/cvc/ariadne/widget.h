@@ -118,6 +118,15 @@ struct Layout {
 // its own subtree — reads/writes exactly this `target` through it. `target` is resolved against
 // the mount's PARENT scope (leading '/' = app root). `writable` false = a read-only hole (reads
 // see the target; a write stays on the hole's own local value, never scribbling the target).
+// One entry of a `requires:` list (roadmap §7.6): something a document or a module needs from the
+// host — a capability token, a function its programs call, or a widget type
+// (cvc/ariadne/requires.h). AppRuntime::load checks them: a missing entry fails the load, an
+// `optional: true` one warns.
+struct HostRequirement {
+  std::string name;
+  bool optional = false;
+};
+
 struct LinkHole {
   std::string name; // segment the module sees inside its chroot
   std::string
@@ -290,6 +299,11 @@ struct Widget {
   // the mount's sub-prefix for each, so the otherwise-sandboxed module can reach exactly the
   // granted parent/shared scopes and nothing else (§7.8.3). Only set on a mount wrapper.
   std::vector<LinkHole> links;
+
+  // §7.6 a mounted module's own `requires:`. They are checked against the host like the document's,
+  // and they cover the calls of the programs in this mount's subtree. The document's own entries
+  // cover them too. Only on a mount wrapper.
+  std::vector<HostRequirement> requirements;
 
   // §12 load: the mounted fragment's own init: script (a state_exec program), run ONCE at the
   // mount's sub-prefix when it first appears — after its holes are wired, so init may seed through
