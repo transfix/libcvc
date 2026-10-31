@@ -75,6 +75,11 @@ if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL 
     endmacro()
   endif()
   gtest_discover_tests(ari_net_test PROPERTIES ENVIRONMENT "ARI_BINARY=$<TARGET_FILE:ari>")
+  # The image: widget by URL end to end (ari_media_test.cpp, docs/ARIADNE.md §5.11).
+  add_executable(ari_media_test ari_media_test.cpp)
+  target_link_libraries(ari_media_test PRIVATE cvc GTest::gtest GTest::gtest_main)
+  add_dependencies(ari_media_test ari)
+  gtest_discover_tests(ari_media_test PROPERTIES ENVIRONMENT "ARI_BINARY=$<TARGET_FILE:ari>")
   # (quit code), assert and `ari test` end to end (ari_test_command_test.cpp).
   add_executable(ari_test_command_test ari_test_command_test.cpp)
   target_link_libraries(ari_test_command_test PRIVATE cvc GTest::gtest GTest::gtest_main)
@@ -99,6 +104,19 @@ if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
                 "${CMAKE_CURRENT_SOURCE_DIR}/../../examples/ariadne/documents/json_feed.ari"
                 ${_backend} "${CMAKE_CURRENT_SOURCE_DIR}/tests/json_feed.rows")
       set_tests_properties(ari_run_json_feed_${_backend} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+      # Pictures by URI (§5.11): a cover banner, a circle avatar and a missing file, drawn.
+      add_test(NAME ari_run_media_images_${_backend}
+        COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/media_in_tmux_test.sh" $<TARGET_FILE:ari>
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/media_images.ari" ${_backend}
+                "banner ready avatar ready gone failed" 130 "background ready▀")
+      set_tests_properties(ari_run_media_images_${_backend} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+      # Cards from the component library (§6.5): an avatar, a byline, a picture and a failed one.
+      add_test(NAME ari_run_media_card_${_backend}
+        COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/media_in_tmux_test.sh" $<TARGET_FILE:ari>
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/media_card.ari" ${_backend}
+                "pic ready clip failed" 60 "@grace · 2h")
+      set_tests_properties(ari_run_media_card_${_backend} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60
+        ENVIRONMENT "ARI_FLAGS=--component-path ${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne")
     endforeach()
   endif()
 endif()

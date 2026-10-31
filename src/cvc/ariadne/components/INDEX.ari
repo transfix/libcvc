@@ -120,3 +120,11 @@ catalog:
     binds: "<prefix>.graphics.root.children.{node}.transfer_function (+ the layers beside it) and <prefix>.tree.{id}.view.*"
     for: "the same editor without a window, to embed in a document's own window (several in one document: give each its own id)"
     args: { node: volume, label: Transfer function, id: transfer_function_editor }   # defaults
+  - component: card
+    file: card.ari
+    unit: card
+    binds: "the state keys its args name: {avatar} {title} {subtitle} {time} {body} (each optional)"
+    for: "a card in a list (a post in a feed, a message, a search hit): a bordered block with an avatar / title / subtitle / timestamp header, a body, a media slot and an action row"
+    args: { id: card, avatar: "", avatar_auth: "", avatar_size: 40, title: "", subtitle: "", time: "", body: "" }
+    slots: [media, actions]                # widget lists the include site supplies (§6.1)
+    note: "not a window: include it in a document's own window, once per item of a repeat: (id: post_{i})"
