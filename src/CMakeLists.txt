@@ -7,6 +7,13 @@ add_subdirectory(cvc)
 if(CVC_BUILD_CLI)
   add_subdirectory(cvc-cli)
 endif()
+# cvcMedia (src/cvcMedia): the GL-free media library, SDL3 audio output today. Its own package, like
+# cvcGL, so the libcvc SDK itself never links SDL: built here only for what uses it, cvcGL (which
+# links it) and ari-media (ari with sound, CVC_BUILD_ARI_MEDIA).
+option(CVC_BUILD_ARI_MEDIA "Build ari-media: ari with cvcMedia (sound through SDL3's audio, no GL)" OFF)
+if((CVC_BUILD_CVCGL OR CVC_BUILD_ARI_MEDIA) AND NOT TARGET cvcMedia)
+  add_subdirectory(cvcMedia)
+endif()
 if(CVC_BUILD_ARI)
   add_subdirectory(ari)
 endif()

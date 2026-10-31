@@ -31,6 +31,8 @@ struct HostFacts {
   bool net = false;              // the host turned the network on (net_host.h)
   bool net_auth = false;         // ... with a credential store
   bool net_auth_persist = false; // ... that keeps credentials across runs
+  bool media = false;            // video: / audio: play here (a player, the policy allows it)
+  bool media_player = false;     // ... a player is there at all (it may not play over SSH)
 };
 
 // One capability token and what it means.

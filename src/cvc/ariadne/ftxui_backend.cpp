@@ -36,6 +36,7 @@
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/ftxui_backend.h>
 #include <cvc/ariadne/input.h> // InputEvent::Kind, for forwarding pointer events
+#include <cvc/ariadne/media.h> // §5.12 fit a backdrop to its cells
 #include <cvc/image/image.h>
 #include <iostream>
 #include <map>
@@ -201,8 +202,13 @@ fx::Element isolated(fx::Element e) { return std::make_shared<Isolated>(std::mov
 // it falls back to a luminance ramp, one glyph per cell. `pixels` is cols x (2 * rows) RGB8.
 class HalfBlockImage : public fx::Node {
 public:
-  HalfBlockImage(cvc::image pixels, int cols, int rows, FtxuiBackend::Options::ImageColor mode)
-      : pixels_(std::move(pixels)), cols_(cols), rows_(rows), mode_(mode) {}
+  // `alpha` (GRAY u8, the size of `pixels`, or empty: all opaque): a pixel under half opacity is
+  // transparent, and that half of the cell keeps the terminal's own background (a round avatar on
+  // a light or a dark terminal alike); a cell both of whose pixels are transparent is not drawn.
+  HalfBlockImage(cvc::image pixels, int cols, int rows, FtxuiBackend::Options::ImageColor mode,
+                 cvc::image alpha = cvc::image())
+      : pixels_(std::move(pixels)), alpha_(std::move(alpha)), cols_(cols), rows_(rows),
+        mode_(mode) {}
 
   void ComputeRequirement() override {
     requirement_.min_x = cols_;
@@ -215,8 +221,12 @@ public:
         mode_ == Mode::Mono ||
         (mode_ == Mode::Auto && fx::Terminal::ColorSupport() == fx::Terminal::Color::Palette1);
     const unsigned char *px = std::as_const(pixels_).data(); // const: no copy-on-write fork
+    const unsigned char *al = alpha_.empty() ? nullptr : std::as_const(alpha_).data();
     const int w = pixels_.width();
     auto at = [&](int x, int y) { return px + (static_cast<std::size_t>(y) * w + x) * 3; };
+    auto solid = [&](int x, int y) {
+      return !al || al[static_cast<std::size_t>(y) * w + x] >= 128;
+    };
     static const char *kRamp[] = {" ", ".", ":", "-", "=", "+", "*", "#", "%", "@"};
     for (int r = 0; r < rows_; ++r) {
       const int y = box_.y_min + r;
@@ -226,17 +236,26 @@ public:
         const int x = box_.x_min + c;
         if (x > box_.x_max)
           break;
-        const unsigned char *top = at(c, 2 * r);
-        const unsigned char *bot = at(c, std::min(2 * r + 1, pixels_.height() - 1));
+        const int ty = 2 * r, by = std::min(2 * r + 1, pixels_.height() - 1);
+        const unsigned char *top = at(c, ty);
+        const unsigned char *bot = at(c, by);
+        const bool top_on = solid(c, ty), bot_on = solid(c, by);
+        if (!top_on && !bot_on)
+          continue; // all transparent: whatever is under it shows
         fx::Cell &cell = screen.CellAt(x, y);
         if (mono) {
-          const int lum =
-              (top[0] * 3 + top[1] * 6 + top[2] + bot[0] * 3 + bot[1] * 6 + bot[2]) / 20;
+          const unsigned char *a = top_on ? top : bot, *b = bot_on ? bot : top;
+          const int lum = (a[0] * 3 + a[1] * 6 + a[2] + b[0] * 3 + b[1] * 6 + b[2]) / 20;
           cell.character = kRamp[std::clamp(lum * 10 / 256, 0, 9)];
-        } else {
+        } else if (top_on && bot_on) {
           cell.character = "▀"; // ▀
           cell.foreground_color = fx::Color::RGB(top[0], top[1], top[2]);
           cell.background_color = fx::Color::RGB(bot[0], bot[1], bot[2]);
+        } else { // one half: drawn in the foreground, the other keeps the terminal's background
+          const unsigned char *p = top_on ? top : bot;
+          cell.character = top_on ? "▀" : "▄"; // ▀ ▄
+          cell.foreground_color = fx::Color::RGB(p[0], p[1], p[2]);
+          cell.background_color = fx::Color::Default;
         }
       }
     }
@@ -244,6 +263,7 @@ public:
 
 private:
   cvc::image pixels_;
+  cvc::image alpha_;
   int cols_, rows_;
   FtxuiBackend::Options::ImageColor mode_;
 };
@@ -252,6 +272,135 @@ using ImageMode = FtxuiBackend::Options::ImageColor;
 
 // The UTF-8 encoding of U+10EEEE, the kitty placeholder's base character.
 constexpr char kPlaceholderBase[] = "\xF4\x8E\xBB\xAE";
+
+// §5.12 a container's background picture, fitted to the cells its box covers (two pixels a cell)
+// at render time, when the box is known; kept by the backend across frames and fitted again only
+// when the box or the picture changes. Shared by the nodes drawing one backdrop.
+struct BackdropPaint {
+  cvc::image rgba; // the published picture as RGBA8
+  long gen = -1;   // its generation
+  ImageFit fit = ImageFit::Cover;
+  float opacity = 1.0f;
+  cvc::image cells; // fitted to cols x 2*rows, RGBA8
+  int cols = 0, rows = 0;
+  long fitted = -2;
+
+  void fit_to(int c, int r) {
+    if (c == cols && r == rows && fitted == gen)
+      return;
+    cols = c;
+    rows = r;
+    fitted = gen;
+    cells = cvc::image();
+    if (rgba.empty() || c <= 0 || r <= 0)
+      return;
+    cvc::image out = media::fit_image(rgba, c, 2 * r, fit, ImageShape::Rect, 1.0);
+    if (!out.empty() && (out.width() != c || out.height() != 2 * r))
+      out = out.resized(c, 2 * r, cvc::image::resize_filter::box);
+    cells = out;
+  }
+  // Pixel (x, y) of the fitted cells, dimmed by `k`; false where it is transparent.
+  bool at(int x, int y, float k, unsigned char out[3]) const {
+    const unsigned char *p =
+        std::as_const(cells).data() + (static_cast<std::size_t>(y) * cells.width() + x) * 4;
+    if (p[3] < 128)
+      return false;
+    for (int i = 0; i < 3; ++i)
+      out[i] = static_cast<unsigned char>(std::lround(p[i] * k));
+    return true;
+  }
+};
+
+// The backdrop under the content: half-blocks, dimmed by the backdrop's opacity. It asks for no
+// room of its own (the content's size is the box's), except a banner's `rows`.
+class BackdropCells : public fx::Node {
+public:
+  BackdropCells(std::shared_ptr<BackdropPaint> p, int rows = 0) : p_(std::move(p)), rows_(rows) {}
+  void ComputeRequirement() override {
+    requirement_.min_x = 0;
+    requirement_.min_y = rows_;
+  }
+  void Render(fx::Screen &screen) override {
+    const int cols = box_.x_max - box_.x_min + 1, rows = box_.y_max - box_.y_min + 1;
+    p_->fit_to(cols, rows);
+    if (p_->cells.empty())
+      return;
+    const float k = p_->opacity;
+    for (int r = 0; r < rows; ++r)
+      for (int c = 0; c < cols; ++c) {
+        unsigned char top[3], bot[3];
+        const bool t = p_->at(c, 2 * r, k, top), b = p_->at(c, 2 * r + 1, k, bot);
+        if (!t && !b)
+          continue;
+        fx::Cell &cell = screen.CellAt(box_.x_min + c, box_.y_min + r);
+        cell.character = t ? "▀" : "▄"; // ▀ ▄
+        const unsigned char *fg = t ? top : bot;
+        cell.foreground_color = fx::Color::RGB(fg[0], fg[1], fg[2]);
+        cell.background_color =
+            t && b ? fx::Color::RGB(bot[0], bot[1], bot[2]) : fx::Color::Default;
+      }
+  }
+
+private:
+  std::shared_ptr<BackdropPaint> p_;
+  int rows_;
+};
+
+// Over the content, after it: each cell the content wrote text into (anything but a half-block or
+// a Kitty placeholder, which are pictures) keeps the backdrop as its background, one colour, dimmed
+// to at most 40% so text stays readable, and the text the backdrop's foreground left in it is put
+// back in the terminal's own colour. Text the content coloured itself keeps its colour.
+class BackdropText : public fx::Node {
+public:
+  explicit BackdropText(std::shared_ptr<BackdropPaint> p) : p_(std::move(p)) {}
+  void ComputeRequirement() override {
+    requirement_.min_x = 0;
+    requirement_.min_y = 0;
+  }
+  void Render(fx::Screen &screen) override {
+    if (p_->cells.empty())
+      return;
+    const int cols = std::min(box_.x_max - box_.x_min + 1, p_->cols);
+    const int rows = std::min(box_.y_max - box_.y_min + 1, p_->rows);
+    const float k = std::min(p_->opacity, 0.4f);
+    for (int r = 0; r < rows; ++r)
+      for (int c = 0; c < cols; ++c) {
+        fx::Cell &cell = screen.CellAt(box_.x_min + c, box_.y_min + r);
+        const std::string &ch = cell.character;
+        if (ch == "▀" || ch == "▄") {
+          // Still the backdrop's own half-block (its character and background), but a colour
+          // decorator over the row (a coloured text: line) recoloured its foreground: put the
+          // picture's back. A picture the content drew has backgrounds of its own.
+          unsigned char t[3], u[3];
+          const bool tt = p_->at(c, 2 * r, p_->opacity, t);
+          const bool uu = p_->at(c, 2 * r + 1, p_->opacity, u);
+          if ((tt || uu) && ch == (tt ? "▀" : "▄") &&
+              cell.background_color ==
+                  (tt && uu ? fx::Color::RGB(u[0], u[1], u[2]) : fx::Color(fx::Color::Default))) {
+            const unsigned char *f = tt ? t : u;
+            cell.foreground_color = fx::Color::RGB(f[0], f[1], f[2]);
+          }
+          continue;
+        }
+        if (ch.empty() || ch.rfind(kPlaceholderBase, 0) == 0)
+          continue;
+        // The foreground BackdropCells gave this cell: its top pixel, else its bottom one.
+        unsigned char top[3], bot[3], fg[3];
+        if (p_->at(c, 2 * r, p_->opacity, fg) || p_->at(c, 2 * r + 1, p_->opacity, fg))
+          if (cell.foreground_color == fx::Color::RGB(fg[0], fg[1], fg[2]))
+            cell.foreground_color = fx::Color::Default;
+        const bool a = p_->at(c, 2 * r, k, top), b = p_->at(c, 2 * r + 1, k, bot);
+        if (!a && !b)
+          continue;
+        const unsigned char *x = a ? top : bot, *y = b ? bot : top;
+        cell.background_color =
+            fx::Color::RGB((x[0] + y[0]) / 2, (x[1] + y[1]) / 2, (x[2] + y[2]) / 2);
+      }
+  }
+
+private:
+  std::shared_ptr<BackdropPaint> p_;
+};
 
 // A block of a Kitty image's cells shown by one placement. A placement addresses at most
 // gfx::kKittyMaxCells rows and columns (one diacritic each), so a bigger image goes as tiles.
@@ -424,7 +573,7 @@ struct FtxuiBackend::Impl {
 
   // A container being filled during the walk.
   struct Frame {
-    enum class Type { Root, Menubar, Menu, InlineMenu, Window, Grid };
+    enum class Type { Root, Menubar, Menu, InlineMenu, Window, Grid, Backdrop };
     Type type = Type::Root;
     fx::Elements items;
     std::vector<fx::Elements> cells; // Grid: one list per cell
@@ -435,6 +584,7 @@ struct FtxuiBackend::Impl {
     std::string title;               // Window
     Size size;                       // Window: the authored size spec (min / max)
     bool *p_open = nullptr;          // Window
+    Backdrop backdrop;               // Backdrop
     void add(fx::Element e) {
       if (type == Type::Grid) {
         if (cells.empty())
@@ -543,8 +693,10 @@ struct FtxuiBackend::Impl {
     long gen = -1;
   };
   struct Picture {
-    cvc::image rgb;    // the published image as RGB8
+    cvc::image rgb;    // the published image as RGB8 (over black where it is transparent)
+    cvc::image alpha;  // its alpha as GRAY8, or empty when it is opaque throughout
     cvc::image scaled; // rgb resampled to the last drawn cell grid
+    cvc::image scaled_alpha; // alpha resampled to the same grid
     long gen = 0;      // bumped by each set_image
     PixCache px;       // the pixel modes' resampling
   };
@@ -591,6 +743,14 @@ struct FtxuiBackend::Impl {
   std::unordered_map<std::string, fx::Box> boxes; // node-based: reflect() keeps references
   std::map<std::string, Picture> images;
   long image_gen = 0;
+  // §5.12 backdrops by their uid: the fitted cells (behind) and a banner's cropped picture.
+  std::unordered_map<std::string, std::shared_ptr<BackdropPaint>> backdrops;
+  struct Banner {
+    Picture pic; // the picture cropped to the banner's shape
+    long src_gen = -1;
+    int cols = 0, rows = 0;
+  };
+  std::unordered_map<std::string, Banner> banners;
 
   // ---- pixel graphics (Kitty / Sixel) ----------------------------------------------------------
 
@@ -1789,6 +1949,92 @@ bool FtxuiBackend::begin_grid(const Layout &layout, const char *id) {
 
 void FtxuiBackend::grid_next_cell() { m_->top().cells.emplace_back(); }
 
+void FtxuiBackend::begin_backdrop(const Backdrop &bd) {
+  Impl &m = *m_;
+  Impl::Frame f;
+  f.type = Impl::Frame::Type::Backdrop;
+  f.backdrop = bd;
+  f.id = m.uid("bd|");
+  m.stack.push_back(std::move(f));
+}
+
+void FtxuiBackend::end_backdrop() {
+  Impl &m = *m_;
+  if (m.stack.empty() || m.top().type != Impl::Frame::Type::Backdrop)
+    return;
+  Impl::Frame f = m.pop();
+  const Backdrop &bd = f.backdrop;
+  fx::Element content = f.items.empty() ? fx::emptyElement() : fx::vbox(std::move(f.items));
+  // A group's authored size is the least it takes (in cells, as a window's).
+  if (!bd.window) {
+    if (const int w = m.extent_cols(bd.size.w); w > 0)
+      content = content | fx::size(fx::WIDTH, fx::GREATER_THAN, w);
+    if (const int h = m.extent_rows(bd.size.h); h > 0)
+      content = content | fx::size(fx::HEIGHT, fx::GREATER_THAN, h);
+  }
+  const auto it = bd.image.empty() ? m.images.end() : m.images.find(bd.image);
+  const bool mono = image_mode() == ImageMode::Mono; // no colours to put behind text
+  if (it == m.images.end() || it->second.rgb.empty() || bd.terminal == BackdropTerminal::Off ||
+      mono) {
+    m.add(content); // loading, failed or not drawn in a terminal: the content alone
+    return;
+  }
+  Impl::Picture &p = it->second;
+  std::shared_ptr<BackdropPaint> &paint = m.backdrops[f.id];
+  if (!paint)
+    paint = std::make_shared<BackdropPaint>();
+  if (paint->gen != p.gen) { // the picture as RGBA (its colour over black where transparent)
+    const int n = p.rgb.width() * p.rgb.height();
+    cvc::image rgba(p.rgb.width(), p.rgb.height(), cvc::image::pixel_format::RGBA,
+                    cvc::image::data_type::u8);
+    const unsigned char *s = std::as_const(p.rgb).data();
+    const unsigned char *a = p.alpha.empty() ? nullptr : std::as_const(p.alpha).data();
+    unsigned char *d = rgba.data();
+    for (int i = 0; i < n; ++i) {
+      d[i * 4 + 0] = s[i * 3 + 0];
+      d[i * 4 + 1] = s[i * 3 + 1];
+      d[i * 4 + 2] = s[i * 3 + 2];
+      d[i * 4 + 3] = a ? a[i] : 255;
+    }
+    paint->rgba = rgba;
+    paint->gen = p.gen;
+  }
+  paint->fit = bd.fit;
+  if (bd.terminal == BackdropTerminal::Behind) {
+    paint->opacity = bd.opacity;
+    m.add(fx::dbox(
+        {std::make_shared<BackdropCells>(paint), content, std::make_shared<BackdropText>(paint)}));
+    return;
+  }
+  // A banner: the picture as a row above the content, at full strength. In pixels once the row's
+  // width is known (the frame before laid it out), else half-blocks.
+  paint->opacity = 1.0f;
+  const int rows = std::max(1, bd.banner_rows);
+  const fx::Box &last = m.boxes["bdb|" + f.id];
+  const int cols = last.x_max - last.x_min + 1;
+  fx::Element banner;
+  if (m.pixels() && cols > 0) {
+    Impl::Banner &bn = m.banners[f.id];
+    if (bn.src_gen != p.gen || bn.cols != cols || bn.rows != rows) {
+      cvc::image fitted = media::fit_image(paint->rgba, cols * m.cell_w(), rows * m.cell_h(),
+                                           bd.fit, ImageShape::Rect, 1.0);
+      bn.pic.rgb = fitted.empty()
+                       ? cvc::image()
+                       : fitted.converted(cvc::image::pixel_format::RGB, cvc::image::data_type::u8);
+      bn.pic.gen = ++m.image_gen;
+      bn.src_gen = p.gen;
+      bn.cols = cols;
+      bn.rows = rows;
+    }
+    if (!bn.pic.rgb.empty())
+      banner = std::make_shared<PixelImage>(
+          m.pixel_image("bdb|" + f.id, bn.pic, bn.pic.px, cols, rows, m.mode()));
+  }
+  if (!banner)
+    banner = std::make_shared<BackdropCells>(paint, rows);
+  m.add(fx::vbox({banner | fx::reflect(m.boxes["bdb|" + f.id]), content}));
+}
+
 void FtxuiBackend::end_grid() {
   Impl &m = *m_;
   Impl::Frame f = m.pop();
@@ -2428,9 +2674,37 @@ ColorEdit FtxuiBackend::color(const char *label, const float rgb[3]) {
 
 void FtxuiBackend::set_image(const std::string &name, const cvc::image &img) {
   Impl::Picture &p = m_->images[name];
-  p.rgb = img.empty() ? cvc::image()
-                      : img.converted(cvc::image::pixel_format::RGB, cvc::image::data_type::u8);
+  p.alpha = cvc::image();
+  if (!img.empty() && (img.format() == cvc::image::pixel_format::RGBA ||
+                       img.format() == cvc::image::pixel_format::GRAY_ALPHA)) {
+    // Keep the alpha (half-blocks leave transparent halves to the terminal's background), and
+    // composite the colour over black for the pixel modes, which draw RGB.
+    const cvc::image rgba =
+        img.converted(cvc::image::pixel_format::RGBA, cvc::image::data_type::u8);
+    const int n = rgba.width() * rgba.height();
+    const unsigned char *s = rgba.data();
+    cvc::image rgb(rgba.width(), rgba.height(), cvc::image::pixel_format::RGB,
+                   cvc::image::data_type::u8);
+    cvc::image alpha(rgba.width(), rgba.height(), cvc::image::pixel_format::GRAY,
+                     cvc::image::data_type::u8);
+    unsigned char *d = rgb.data(), *a = alpha.data();
+    bool opaque = true;
+    for (int i = 0; i < n; ++i) {
+      const unsigned k = s[i * 4 + 3];
+      opaque = opaque && k == 255;
+      a[i] = static_cast<unsigned char>(k);
+      for (int c = 0; c < 3; ++c)
+        d[i * 3 + c] = static_cast<unsigned char>((s[i * 4 + c] * k + 127) / 255);
+    }
+    p.rgb = rgb;
+    if (!opaque)
+      p.alpha = alpha;
+  } else {
+    p.rgb = img.empty() ? cvc::image()
+                        : img.converted(cvc::image::pixel_format::RGB, cvc::image::data_type::u8);
+  }
   p.scaled = cvc::image();
+  p.scaled_alpha = cvc::image();
   p.gen = ++m_->image_gen;
   if (name == m_->background)
     m_->background_scaled = cvc::image(); // a new frame for the backdrop: resample it next draw
@@ -2492,10 +2766,14 @@ bool FtxuiBackend::draw_image(const char *name, float width) {
   }
   const int rows =
       std::max(1, static_cast<int>(std::lround(cols * aspect * m.opt.cell_px_w / m.opt.cell_px_h)));
-  if (p.scaled.width() != cols || p.scaled.height() != 2 * rows)
+  if (p.scaled.width() != cols || p.scaled.height() != 2 * rows) {
     p.scaled = p.rgb.resized(cols, 2 * rows, cvc::image::resize_filter::box);
+    p.scaled_alpha = p.alpha.empty()
+                         ? cvc::image()
+                         : p.alpha.resized(cols, 2 * rows, cvc::image::resize_filter::box);
+  }
   m.leaf(m.uid("img|"), false,
-         std::make_shared<HalfBlockImage>(p.scaled, cols, rows, m.opt.image_color));
+         std::make_shared<HalfBlockImage>(p.scaled, cols, rows, m.opt.image_color, p.scaled_alpha));
   return true;
 }
 
@@ -3054,6 +3332,8 @@ StringEdit FtxuiBackend::input_text(const char *, const char *, const std::strin
 }
 void FtxuiBackend::focus_next_widget() {}
 bool FtxuiBackend::draw_image(const char *, float) { return false; }
+void FtxuiBackend::begin_backdrop(const Backdrop &) {}
+void FtxuiBackend::end_backdrop() {}
 ColorEdit FtxuiBackend::color(const char *, const float[3]) { return {}; }
 void FtxuiBackend::set_image(const std::string &, const cvc::image &) {}
 void FtxuiBackend::clear_image(const std::string &) {}

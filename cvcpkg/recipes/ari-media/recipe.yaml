@@ -1,0 +1,63 @@
+schema_version: 1
+recipe:
+  name: ari-media
+  upstream_version: "3.7.5"
+  cvc_revision: 1
+  maintainer: "cvcpkg group"
+  maintainer_email: "info@cvcpkg.org"
+  maintainer_url: "https://cvcpkg.org"
+  description: "ari-media — ari, the terminal runner for Ariadne (.ari) documents, with sound and video (the video: and audio: widgets, decoded by FFmpeg). The same program as `ari` (FTXUI and tvision backends, Kitty/Sixel/iTerm/half-block pictures) with libcvc's GL-free media library linked in: SDL3's audio subsystem alone, so it plays sound with no window or display, and still no GL, VTK or ImGui."
+  homepage: https://github.com/transfix/libcvc
+  license: LGPL-2.1-only
+  tags: [ui, terminal, tui, cli, tools, audio, media]
+
+# Why a second package, not a second build of `ari` (docs/roadmap/ARIADNE_MEDIA.md §5):
+#   - the lean `ari` stays lean: it links libcvc alone, no SDL;
+#   - a separate binary name (bin/ari-media), so the two packages never install the same file and
+#     a launcher can prefer ari-media where it is installed;
+#   - a plugin `ari` would dlopen was set aside: an ABI contract with libcvc's exact build on three
+#     OSes, for the sake of one binary name.
+#
+# It builds src/ari standalone against the installed libcvc SDK, as the ari recipe does, with
+# -DARI_WITH_MEDIA=ON: src/ari then builds src/cvcMedia (the GL-free media library) STATICALLY into
+# bin/ari-media, so the package is that one file. SDL3 comes from the sdl3 package, linked
+# shared (zlib-licensed); FFmpeg, which decodes the video: and audio: widgets, from ffmpeg-lgpl,
+# linked SHARED (LGPL-2.1, the decoders only), which keeps the LGPL's terms.
+
+source:
+  type: vendored
+  path: ../../..
+
+patches: []
+
+depends:
+  build:
+    - name: libcvc
+    - name: sdl3
+    - name: ffmpeg-lgpl
+  runtime:
+    - name: libcvc
+    - name: sdl3
+    - name: ffmpeg-lgpl
+  host_tools:
+    - cmake
+    - ninja
+
+build:
+  matrix:
+    - platform: linux
+      script: build.sh
+    - platform: macos
+      script: build.sh
+      env:
+        MACOSX_DEPLOYMENT_TARGET: "13.0"
+    - platform: windows
+      script: build.ps1
+
+package:
+  # Just bin/ari-media (bin/ari-media.exe on Windows); cvcMedia is linked into it.
+  files:
+    - bin/ari-media*
+
+abi:
+  cxx_std: 20

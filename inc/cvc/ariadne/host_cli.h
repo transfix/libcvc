@@ -26,6 +26,7 @@
 //   --net-policy FILE     ... with FILE's allow and credential lines (repeatable; implies --net)
 //   --credential-store S  keep credentials across runs in S, a name or a path (implies --net)
 //   --credential-env N=V  credential N is the token in environment variable V (repeatable)
+//   --media-play WHEN     video: / audio: play here: auto (not over SSH), always or never
 //
 // boost::program_options reads them: --flag VALUE and --flag=VALUE both work, and an unknown flag
 // or one missing its value is an error.
@@ -56,6 +57,7 @@ struct HostOptions {
   std::vector<std::pair<std::string, std::string>> images; // --image NAME=FILE, in order
   int cell_w = 0, cell_h = 0;                              // --cell-size; 0 = ask the terminal
   NetHostConfig net;                    // --net, --net-allow, --net-policy, --credential-store
+  std::string media_play;               // --media-play auto|always|never; "" = auto (§5.13)
   std::vector<std::string> extra_flags; // the runtime's own flags that were given
   bool help = false;                    // -h / --help, or `help` as the command
   std::string error;                    // a usage error: print it with the usage and exit 2
