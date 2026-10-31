@@ -1541,6 +1541,27 @@ TEST(AriadneReactive, PredicateShowsThenHidesAsStateChanges) {
   EXPECT_TRUE(rt.take_reactive_warnings().empty()); // a passing predicate never warns
 }
 
+TEST(AriadneReactive, AndStopsBeforeAnArgumentThatWouldFail) {
+  // (and ...) is a special form on the read lane too: with the flag off, the (int ...) of an
+  // empty node is never evaluated, so the widget is plainly hidden, with no warning.
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget w = text("shown");
+  w.visible_when = "(and (= (state-get \"on\") \"1\") (> (int (state-get \"n\")) 2))";
+  rt.set_root(group({w}));
+  rt.render();
+  EXPECT_FALSE(mb.saw("text_line:shown"));
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+  cvc::state::instance(app)("on").value(std::string("1"));
+  cvc::state::instance(app)("n").value(std::string("5"));
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_line:shown"));
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
 // --- §12 module mount: a scoped subtree resolves at its own sub-prefix -------
 
 TEST(AriadneMountScope, BindsResolveAtSubPrefix) {

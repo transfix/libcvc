@@ -752,6 +752,171 @@ TEST_F(DataStepsStateJson, NodesRemovedBetweenSlicesAreStillWritten) {
   EXPECT_EQ(root("wide").numChildren(), 0u);
 }
 
+// ---- JSON: json-parse, json-encode, state-set-tree ------------------------------------
+
+namespace {
+
+// A feed reply: `n` items, each with a string `i` bytes long, numbers, a nested list; and a
+// deep tail.
+std::string feed_json(int n) {
+  std::string doc = "{\"items\": [";
+  for (int i = 0; i < n; ++i)
+    doc += std::string(i ? ", " : "") + "{\"id\": " + std::to_string(i) + ", \"text\": \"" +
+           std::string(static_cast<std::size_t>(i), 'x') +
+           "\\u00e9\", \"tags\": [1, 2.5, null, true, false]}";
+  doc += "], \"title\": \"feed\", \"deep\": " + std::string(100, '[') + std::string(100, ']') + "}";
+  return doc;
+}
+
+} // namespace
+
+// A scheduler slicing deep data 64 nodes a step, as DataStepsStateJson's, without its trees.
+class DataStepsJson : public ::testing::Test {
+protected:
+  cvc::app app_ctx;
+  cvc::state &root = cvc::state::instance(app_ctx);
+  async_scheduler sched;
+  memory_tracker tracker;
+  intrinsics_context ictx;
+  environment_ptr env = builtins::make_default_environment();
+
+  void SetUp() override {
+    root("state_exec.defaults.data.step_nodes").value("64");
+    sched.set_watch_root(&root);
+    ictx.sched = &sched;
+    ictx.root = &root;
+    ictx.tracker = &tracker;
+    register_intrinsics(env, &ictx);
+  }
+
+  int submit(const std::string &script) {
+    execute_options opts;
+    opts.env = environment::extend(env);
+    return sched.execute(script, opts);
+  }
+
+  std::string error(int pid) const { return sched.get_exit_error(pid).value_or(""); }
+};
+
+TEST(DataJob, JsonJobsMatchWholeRunsInAnySlice) {
+  const std::string doc = feed_json(300);
+  auto whole = make_json_parse_job(doc);
+  const value_t expect = run_sliced(*whole, 0).first;
+  auto whole_text = make_json_encode_job(expect);
+  const std::string text = std::get<std::string>(run_sliced(*whole_text, 0).first.v);
+  auto whole_pretty = make_json_encode_job(expect, 2);
+  const std::string pretty = std::get<std::string>(run_sliced(*whole_pretty, 0).first.v);
+  for (std::size_t slice : {1u, 7u, 100000u}) {
+    SCOPED_TRACE("slice " + std::to_string(slice));
+    auto parse = make_json_parse_job(doc);
+    auto [v, calls] = run_sliced(*parse, slice);
+    EXPECT_TRUE(values_equal(v, expect));
+    if (slice == 1)
+      EXPECT_GE(calls, 300 * 8); // a node per value, and per 256 bytes
+    auto encode = make_json_encode_job(v);
+    EXPECT_EQ(std::get<std::string>(run_sliced(*encode, slice).first.v), text);
+    auto indented = make_json_encode_job(v, 2);
+    EXPECT_EQ(std::get<std::string>(run_sliced(*indented, slice).first.v), pretty);
+  }
+  auto back = make_json_parse_job(pretty);
+  EXPECT_TRUE(values_equal(run_sliced(*back, 3).first, expect));
+}
+
+TEST(DataJob, JsonJobsAreHeldToTheAllocationLimit) {
+  const std::string doc = feed_json(100);
+  {
+    eval_alloc_guard limit(std::size_t{4096});
+    auto parse = make_json_parse_job(doc);
+    EXPECT_THROW(run_sliced(*parse, 16), std::runtime_error);
+  }
+  auto parse = make_json_parse_job(doc);
+  const value_t v = run_sliced(*parse, 0).first;
+  eval_alloc_guard limit(std::size_t{4096});
+  auto encode = make_json_encode_job(v);
+  EXPECT_THROW(run_sliced(*encode, 16), std::runtime_error);
+}
+
+TEST_F(DataStepsJson, JsonParseAndEncodeRunASliceAStep) {
+  const std::string doc = feed_json(300);
+  root("doc").value(doc);
+  const int pid = submit("(json-encode (json-parse (state-get \"doc\")) 2)");
+  sched.sync_run();
+  const auto info = sched.get_process_info(pid);
+  ASSERT_EQ(info->status, process_status::terminated) << error(pid);
+  auto parse = make_json_parse_job(doc);
+  auto encode = make_json_encode_job(run_to_completion(*parse), 2);
+  EXPECT_EQ(std::get<std::string>(sched.get_result(pid)->v),
+            std::get<std::string>(run_to_completion(*encode).v));
+  EXPECT_GT(info->data_steps, 100u);
+}
+
+TEST_F(DataStepsJson, AJsonErrorIsCatchableThoughItsParseSpansSteps) {
+  std::string doc = "[";
+  for (int i = 0; i < 5000; ++i)
+    doc += "1,\n";
+  doc += "]";
+  root("doc").value(doc);
+  const int pid = submit("(try (json-parse (state-get \"doc\"))"
+                         " (catch (ValueError e) (list (get-attr e \"line\") (get-attr e \"col\")"
+                         " (get-attr e \"message\"))))");
+  sched.sync_run();
+  const auto info = sched.get_process_info(pid);
+  ASSERT_EQ(info->status, process_status::terminated) << error(pid);
+  const value_t r = *sched.get_result(pid);
+  ASSERT_TRUE(std::holds_alternative<list_ptr>(r.v)) << to_string(r);
+  const auto &l = *std::get<list_ptr>(r.v);
+  EXPECT_EQ(std::get<int64_t>(l.at(0).v), 5001);
+  EXPECT_EQ(std::get<int64_t>(l.at(1).v), 1);
+  EXPECT_EQ(std::get<std::string>(l.at(2).v), "json-parse: line 5001, column 1: expected a value");
+  EXPECT_GT(info->data_steps, 10u);
+}
+
+TEST_F(DataStepsJson, StateSetTreeWritesAParsedReplyASliceAStep) {
+  root("doc").value(feed_json(300));
+  const int pid = submit("(state-set-tree \"feed\" (json-parse (state-get \"doc\")))");
+  sched.sync_run();
+  const auto info = sched.get_process_info(pid);
+  ASSERT_EQ(info->status, process_status::terminated) << error(pid);
+  EXPECT_GT(info->data_steps, 100u);
+  EXPECT_EQ(root("feed").value(), "");
+  EXPECT_EQ(root("feed.title").value(), "feed");
+  EXPECT_EQ(root("feed.items").value(), "300");
+  EXPECT_EQ(root("feed.items.0.id").value(), "0");
+  EXPECT_EQ(root("feed.items.299.text").value(), std::string(299, 'x') + "\xC3\xA9");
+  EXPECT_EQ(root("feed.items.5.tags.1").value(), "2.5");
+  EXPECT_EQ(root("feed.items.5.tags.2").value(), "");
+  EXPECT_EQ(root("feed.items.5.tags.4").value(), "false");
+  EXPECT_EQ(root("feed.deep").value(), "1");
+
+  // The next reply replaces it.
+  root("doc").value(R"({"items": [{"id": 7}], "error": "rate limited"})");
+  const int again = submit("(state-set-tree \"feed\" (json-parse (state-get \"doc\")))");
+  sched.sync_run();
+  ASSERT_EQ(sched.get_process_info(again)->status, process_status::terminated) << error(again);
+  EXPECT_EQ(root("feed.items").value(), "1");
+  EXPECT_EQ(root("feed.items").numChildren(), 1u);
+  EXPECT_EQ(root("feed.items.0").childNames(), std::vector<std::string>{"id"});
+  EXPECT_EQ(root.findDescendant("feed.title"), nullptr);
+  EXPECT_EQ(root("feed.error").value(), "rate limited");
+}
+
+TEST_F(DataStepsJson, StateSetTreeChecksTheWholeValueThoughTheCheckSpansSteps) {
+  std::string doc = "[";
+  for (int i = 0; i < 3000; ++i)
+    doc += "{\"k\": " + std::to_string(i) + "}, ";
+  doc += "{\"a.b\": 1}]";
+  root("doc").value(doc);
+  const int pid = submit("(state-set-tree \"target\" (json-parse (state-get \"doc\")))");
+  sched.sync_run();
+  const auto info = sched.get_process_info(pid);
+  EXPECT_EQ(info->status, process_status::failed);
+  EXPECT_NE(error(pid).find("ValueError: state-set-tree: the key \"a.b\" can't name a node"),
+            std::string::npos)
+      << error(pid);
+  EXPECT_GT(info->data_steps, 40u);
+  EXPECT_EQ(root.findDescendant("target"), nullptr);
+}
+
 // ---- methods and generators inside the process ----------------------------------
 //
 // A class method is a closure run as frames of the process that sends to it, and a DSL
