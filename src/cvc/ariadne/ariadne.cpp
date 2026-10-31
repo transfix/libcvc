@@ -573,6 +573,8 @@ public:
         // state-json writes its document as sliced data steps, under the allocation limit)
         "state-get", "state-exists", "state-children", "state-data-get", "state-json",
         "state-root-path", "state-has-expiry", "state-is-expired",
+        // JSON text to values and back: pure, sliced data steps under the allocation limit
+        "json-parse", "json-encode",
         // the stdlib: the pure, bounded functions (a scalar, or a result no bigger than its
         // argument), and the materializers, which do their work as sliced data steps (each
         // eval slices, see data_step_nodes_) under the per-call allocation limit. A function
@@ -598,8 +600,8 @@ public:
     // set is shared across every ReactiveEngine.
     static const std::shared_ptr<const std::set<std::string>> kAllowedForms =
         std::make_shared<const std::set<std::string>>(
-            std::set<std::string>{"if", "begin", "let", "while", "for", "lambda", "defun", "set",
-                                  "return", "quote", "yield", "break"});
+            std::set<std::string>{"if", "begin", "and", "or", "let", "while", "for", "lambda",
+                                  "defun", "set", "return", "quote", "yield", "break"});
     ev_->restrict_special_forms(kAllowedForms);
     resolve_data_settings();
   }

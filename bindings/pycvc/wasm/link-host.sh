@@ -81,20 +81,14 @@ fi
 
 printf "Module.preRun=Module.preRun||[];Module.preRun.push(function(){ENV.PYTHONHOME='/py';%sENV.PYTHONDONTWRITEBYTECODE='1';});\n" "$VTK_PYPATH" > "$OUT/pre.js"
 
-# Every deps archive goes into the group except VTK's bundled libxml2. VTK mangles only
-# libxml2's public API (vtklibxml2_xml*); 65 internals (__xmlRaiseError, xmlBuf*,
-# xmlDict*, ...) keep their plain names. Once ImageMagick pulls cvcpkg's libxml2 in, its
-# references to those internals resolve to VTK's copy, which sorts first, and under
-# --allow-multiple-definition both copies link. The newer libxml2's __xmlRaiseError
-# returns int and 2.12's callers expect void, so the module does not compile ("expected
-# 0 elements on the stack for fallthru"). Nothing here needs VTK's copy: its one user,
-# vtkXMLTreeReader, is not in the vtk-python build. If one is added, the log will show
-# vtklibxml2_* as undefined symbols.
-DEP_LIBS=()
-for a in "$DEPS"/lib/*.a; do
-    case "$(basename "$a")" in libvtklibxml2-*.a) continue ;; esac
-    DEP_LIBS+=("$a")
-done
+# Every deps archive goes into the group. This needs vtk 9.5.0+cvc.4 or later, whose wasm
+# builds use cvcpkg's libxml2, libtiff, liblzma and freetype instead of VTK's bundled
+# copies. Older vtk wasm bundles ship libvtklibxml2-9.5.a, which renames only libxml2's
+# public API. Its plain-named internals (__xmlRaiseError, xmlBuf*, ...) collide with the
+# libxml2 that ImageMagick brings, and under --allow-multiple-definition the module does
+# not compile ("expected 0 elements on the stack for fallthru"). The workflow's node check
+# fails on that.
+DEP_LIBS=("$DEPS"/lib/*.a)
 
 # TODO(cvcGL wasm app contract, docs/CVCGL_WASM.md): this host is node-only today, so it links
 # neither of cvcGL's browser-side speedups. When it gets a browser page, that link must add
