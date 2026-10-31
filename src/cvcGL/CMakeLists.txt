@@ -939,6 +939,13 @@ add_executable(cvcgl_shadow_casters test/cvcgl_shadow_casters.cpp)
 target_link_libraries(cvcgl_shadow_casters PRIVATE cvcGL)
 add_test(NAME cvcgl_shadow_casters COMMAND cvcgl_shadow_casters)
 
+# A low sun's shadows at a city's scale (a 3 km ground, the key 2.2 stage radii out, as cvcdbg's
+# demo3 lights Austin): a building's and a 2 m vehicle's shadows read on the ground. Renders;
+# skips without GL.
+add_executable(cvcgl_city_sun_shadows test/cvcgl_city_sun_shadows.cpp)
+target_link_libraries(cvcgl_city_sun_shadows PRIVATE cvcGL)
+add_test(NAME cvcgl_city_sun_shadows COMMAND cvcgl_city_sun_shadows)
+
 # Changing the shadow interval or resolution used to rebuild the whole pass chain
 # (the state echo re-ran setShadowsEnabled(true)), dropping the old baker with its
 # FBO and shadow maps still allocated; switching shadows off dropped it the same

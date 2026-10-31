@@ -223,6 +223,24 @@ public:
   // and re-made at the new size by the next frame's bake.
   void setShadowResolution(int pixels);
   int shadowResolution() const { return m_shadowResolution; }
+
+  // Spend the shadow maps on a sphere around (x, y, z) of `radius` world units instead of the
+  // whole scene. VTK fits each light's map to everything there is, so over a city a 4096 map
+  // gives several metres a texel and a vehicle no shadow at all. Focused, each light's map is
+  // aimed from the light at the sphere and just covers it (a spot keeps its own position, a
+  // directional light looks along its direction at it); whatever lies between the light and the
+  // sphere still casts into it. Outside the map the scene is lit, unshadowed, and the shadows
+  // fade out over its last tenth so its edge never shows. A follow camera's subject is the usual
+  // focus: move it every frame, and the maps re-bake when it has moved a fiftieth of the radius.
+  // radius <= 0 is clearShadowFocus().
+  void setShadowFocus(double x, double y, double z, double radius);
+  void clearShadowFocus();
+  bool shadowFocused() const { return m_shadowFocusRadius > 0.0; }
+
+  // The shadow edges' softness: the radius, in shadow-map texels, of the disc the lookup filters
+  // over (16 taps; 0 = one hard tap). Default 2.
+  void setShadowSoftness(double texels);
+  double shadowSoftness() const { return m_shadowSoftness; }
   void update();
 
   // Process pending events on the main thread
@@ -486,6 +504,11 @@ private:
   bool m_shadowsEnabled = false;
   int m_shadowInterval = 1;                             // re-bake every N frames
   int m_shadowResolution = 1024;                        // shadow-map pixels per side
+
+  // setShadowFocus (a radius of 0: the whole scene) and setShadowSoftness (texels).
+  double m_shadowFocus[3] = {0.0, 0.0, 0.0};
+  double m_shadowFocusRadius = 0.0;
+  double m_shadowSoftness = 2.0;
   // The installed chain (its root pass) and its baker, held so the interval and
   // resolution stay live. Only ever a chain on m_renderer, so its GL objects can
   // be freed against m_renderer's window.
