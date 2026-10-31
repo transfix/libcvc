@@ -189,3 +189,41 @@ TEST(AriTest, NetworkRulesAreSnapshots) {
   EXPECT_EQ(on.status, 0) << on.output;
   EXPECT_TRUE(has(on, "ok   " + p.string() + " (1 test, ")) << on.output;
 }
+
+// §6.6 functions under ari test: a library's functions imported and tested directly, and a module
+// that calls what its mount granted.
+TEST(AriTest, FunctionsImportedAndGranted) {
+  REQUIRE_ARI();
+  TempDir dir;
+  dir.write("semver.ari", "functions: |\n"
+                          "  (defun semver-part (v i) (int (nth (string.split v \".\") i)))\n"
+                          "  (defun semver-major (v) (semver-part v 0))\n");
+  dir.write("badge.ari", "init: (state-set \"major\" (str (semver-major (state-get \"v\"))))\n"
+                         "root:\n  - text: badge\n");
+  const std::string mount = "  - load: badge.ari\n    as: badge\n";
+  const fs::path p = dir.write("semver_test.ari",
+                               "meta: {min_libcvc: 3.7.0}\n"
+                               "import: semver.ari\n"
+                               "init: (state-set \"includes.badge.v\" \"3.7.5\")\n"
+                               "root:\n" +
+                                   mount + "    functions: [semver-major]\n" +
+                                   "tests:\n"
+                                   "  major: (assert (= (semver-major \"3.7.5\") 3))\n"
+                                   "  part: (assert (= (semver-part \"3.7.5\" 2) 5))\n"
+                                   "  module: |\n"
+                                   "    (assert (= (state-get \"includes.badge.major\") \"3\")\n"
+                                   "            (state-get \"includes.badge.major\"))\n");
+  const AriRun r = ari("test " + quoted(p));
+  EXPECT_EQ(r.status, 0) << r.output;
+  EXPECT_TRUE(has(r, "ok   " + p.string() + " (3 tests, ")) << r.output;
+
+  // Without the grant the module's init: cannot call it, and the load says so.
+  const fs::path q = dir.write("ungranted.ari", "meta: {min_libcvc: 3.7.0}\n"
+                                                "import: semver.ari\n"
+                                                "on_tick: (quit 0)\n"
+                                                "root:\n" +
+                                                    mount);
+  const AriRun u = ari("test " + quoted(q));
+  EXPECT_EQ(u.status, 1) << u.output;
+  EXPECT_TRUE(has(u, "calls (semver-major ...), which this host does not provide")) << u.output;
+}
