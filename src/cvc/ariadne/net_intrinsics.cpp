@@ -10,8 +10,6 @@
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
-#include <map>
-#include <mutex>
 #include <cvc/ariadne/ariadne.h> // register_action_intrinsics
 #include <cvc/ariadne/net_intrinsics.h>
 #include <cvc/ariadne/uri.h> // resolve() — the generic (fetch uri) async resolver
@@ -21,8 +19,11 @@
 #include <cvc/net/net_policy.h>
 #include <cvc/net/ws_client.h>
 #include <cvc/state/state_exec/async_host.h> // register_async_fn — the verbs are async functions
-#include <cvc/state/state_exec/builtins.h>   // percent_encode — the query string
+#include <cvc/state/state_exec/builtins.h>   // percent_encode, builtin_json_encode
+#include <cvc/state/state_exec/data_job.h>   // kJsonMaxDepth — a ws-send message's nesting
 #include <cvc/state/state_exec/types.h>      // value_t, make_dict/make_list/make_bytes
+#include <map>
+#include <mutex>
 #include <optional>
 #include <random>
 #include <span>
@@ -618,9 +619,30 @@ void register_net_verbs(const std::shared_ptr<se::environment> &env, const NetAc
 
 constexpr std::size_t kMaxWsConnections = 64;
 
+// The credentials a connection has sent (in its handshake or a message), by name: a message the
+// server echoes one in reaches the program with it blanked, as an HTTP reply does (perform()).
+// Shared with a (ws-recv) under way, so a token sent while it waits is blanked in what it gets.
+struct WsSent {
+  std::mutex mutex;
+  std::vector<std::string> names;
+  void add(const std::string &name) {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (std::find(names.begin(), names.end(), name) == names.end())
+      names.push_back(name);
+  }
+};
+
+// An open connection, the origin it was checked as (the http(s) twin of its URL), which
+// (ws-send) fetches credentials for, and the credentials it has sent there.
+struct WsEntry {
+  std::shared_ptr<cvc::net::WsConnection> conn;
+  cvc::net::Origin origin;
+  std::shared_ptr<WsSent> sent = std::make_shared<WsSent>();
+};
+
 struct WsTable {
   std::mutex mutex;
-  std::map<std::string, std::shared_ptr<cvc::net::WsConnection>> open;
+  std::map<std::string, WsEntry> open;
   std::uint64_t next = 1;
 };
 
@@ -629,8 +651,7 @@ WsTable &ws_table() {
   return table;
 }
 
-std::shared_ptr<cvc::net::WsConnection> ws_lookup(const char *verb,
-                                                  std::span<const se::value_t> args) {
+WsEntry ws_lookup(const char *verb, std::span<const se::value_t> args) {
   const std::string handle = arg_string(args, 0);
   WsTable &t = ws_table();
   std::lock_guard<std::mutex> lock(t.mutex);
@@ -639,6 +660,23 @@ std::shared_ptr<cvc::net::WsConnection> ws_lookup(const char *verb,
     throw std::runtime_error(std::string(verb) + ": no WebSocket '" + handle +
                              "' (closed, or not one ws-open returned)");
   return it->second;
+}
+
+// Blank, in an event, each token the connection has sent (WsSent), as the store holds it now.
+void scrub_ws_event(std::optional<cvc::net::WsEvent> &e, const WsEntry &entry,
+                    const NetAccess &access) {
+  if (!e || !access.credentials)
+    return;
+  std::vector<std::string> names;
+  {
+    std::lock_guard<std::mutex> lock(entry.sent->mutex);
+    names = entry.sent->names;
+  }
+  for (const std::string &name : names)
+    if (std::optional<std::string> token = access.credentials->token_for(name, entry.origin)) {
+      cvc::net::redact(e->data, *token);
+      wipe(*token);
+    }
 }
 
 double number_arg(std::span<const se::value_t> args, std::size_t idx, double fallback) {
@@ -764,12 +802,111 @@ se::async_kernel ws_open_kernel(std::span<const se::value_t> args, const NetAcce
                                  std::to_string(kMaxWsConnections) + "); close some first");
       }
       const std::string handle = "ws:" + std::to_string(t.next++);
-      t.open.emplace(handle, std::move(conn));
+      WsEntry entry{std::move(conn), *origin};
+      if (!auth.use.empty())
+        entry.sent->add(auth.use);
+      for (const CredentialValue &v : auth.values)
+        entry.sent->add(v.name);
+      t.open.emplace(handle, std::move(entry));
       return ws_open_reply(true, handle, req.url, "");
     } catch (const std::exception &e) {
       return ws_open_reply(false, "", req.url, std::string("ws-open: ") + e.what());
     }
   };
+}
+
+// `message`, ready to JSON-encode, with each credential value in it, (dict "credential" NAME), a
+// placeholder string (as in a header: the token goes in raw), at most as deep as json-encode goes.
+se::value_t with_placeholders(const se::value_t &message, RequestAuth &auth,
+                              std::size_t depth = 0) {
+  if (depth > se::kJsonMaxDepth)
+    throw std::runtime_error("ws-send: the message nests deeper than " +
+                             std::to_string(se::kJsonMaxDepth) + " levels");
+  if (const std::string *name = credential_value(message))
+    return se::value_t(placeholder(auth, *name, false));
+  if (const se::dict_ptr *d = std::get_if<se::dict_ptr>(&message.v)) {
+    std::vector<std::pair<std::string, se::value_t>> out;
+    out.reserve((*d)->size());
+    for (const auto &kv : **d)
+      out.emplace_back(kv.first, with_placeholders(kv.second, auth, depth + 1));
+    return se::make_dict(std::move(out));
+  }
+  if (const se::list_ptr *l = std::get_if<se::list_ptr>(&message.v)) {
+    std::vector<se::value_t> out;
+    out.reserve((*l)->size());
+    for (const se::value_t &e : **l)
+      out.push_back(with_placeholders(e, auth, depth + 1));
+    return se::make_list(std::move(out));
+  }
+  return message;
+}
+
+// (ws-send H DICT-OR-LIST): the message as JSON (json-encode, compact), each credential value in
+// it the token the host keeps for that name at the connection's origin, as a JSON string. So a
+// document authenticates a WebSocket in a message, the one way a browser's WebSocket can, without
+// holding the token: it is put in here, just before the send, and no value_t or error holds it.
+void ws_send_json(const WsEntry &entry, const se::value_t &message, const NetAccess &access) {
+  const cvc::net::Origin &origin = entry.origin;
+  RequestAuth auth;
+  const std::array<se::value_t, 1> shaped{with_placeholders(message, auth)};
+  if (!auth.values.empty()) {
+    if (!access.credentials)
+      throw std::runtime_error("ws-send: this host keeps no credentials, so a message takes no "
+                               "credential value");
+    if (access.policy && !access.policy->allows(origin))
+      throw std::runtime_error("ws-send: refused: " + origin.str() +
+                               " is not an origin this host allows");
+  }
+  std::string text = std::get<std::string>(se::builtin_json_encode(shaped).v);
+  // Room for every token up front (a token is at most 4096 bytes), so no replace below moves the
+  // text and leaves a copy of a token behind in a freed buffer.
+  text.reserve(text.size() + auth.values.size() * 4096);
+  std::vector<std::string> sent;
+  const auto forget = [&] {
+    wipe(text);
+    for (std::string &t : sent)
+      wipe(t);
+  };
+  for (const CredentialValue &v : auth.values) {
+    std::optional<std::string> token = access.credentials->token_for(v.name, origin);
+    // A kept token is token68 (CredentialStore::valid_token): nothing in it needs escaping in a
+    // JSON string. Check rather than trust it, as a token outside that set would break the text.
+    if (!token || !cvc::net::CredentialStore::valid_token(*token)) {
+      if (token)
+        wipe(*token);
+      forget();
+      throw std::runtime_error("ws-send: no credential '" + v.name + "' for " + origin.str() +
+                               " (sign in first)");
+    }
+    if (const std::size_t at = text.find(v.placeholder); at != std::string::npos)
+      text.replace(at, v.placeholder.size(), *token);
+    sent.push_back(std::move(*token));
+  }
+  for (const CredentialValue &v : auth.values)
+    entry.sent->add(v.name); // before the send, so a reply that echoes it is blanked
+  std::string error;
+  const bool ok = entry.conn->send_text(text, &error);
+  for (const std::string &t : sent)
+    cvc::net::redact(error, t);
+  forget();
+  if (!ok)
+    throw std::runtime_error("ws-send: " + error);
+}
+
+se::value_t ws_send(std::span<const se::value_t> args, const NetAccess &access) {
+  const WsEntry entry = ws_lookup("ws-send", args);
+  if (args.size() < 2)
+    throw std::runtime_error("ws-send: (ws-send H MESSAGE)");
+  const se::value_t &message = args[1];
+  if (std::holds_alternative<se::dict_ptr>(message.v) ||
+      std::holds_alternative<se::list_ptr>(message.v)) {
+    ws_send_json(entry, message, access);
+    return se::value_t(true);
+  }
+  std::string error;
+  if (!entry.conn->send_text(field_to_string(message), &error))
+    throw std::runtime_error("ws-send: " + error);
+  return se::value_t(true);
 }
 
 void register_ws_verbs(const std::shared_ptr<se::environment> &env, se::async_host &host,
@@ -786,34 +923,34 @@ void register_ws_verbs(const std::shared_ptr<se::environment> &env, se::async_ho
   // 30); nil when none came. Events: {type "text"|"binary"|"close"|"error", data, code}.
   se::register_async_fn(
       env, host, "ws-recv",
-      [live](std::span<const se::value_t> args) -> se::async_kernel {
+      [live, access](std::span<const se::value_t> args) -> se::async_kernel {
         live("ws-recv");
-        std::shared_ptr<cvc::net::WsConnection> conn = ws_lookup("ws-recv", args);
+        WsEntry entry = ws_lookup("ws-recv", args);
         const double secs = number_arg(args, 1, 30);
-        return [conn, secs](se::async_call &call) -> se::value_t {
-          return marshal_ws_event(
-              conn->recv(secs, [&call] { return call.cancel_requested(); }));
+        return [entry = std::move(entry), secs, access](se::async_call &call) -> se::value_t {
+          std::optional<cvc::net::WsEvent> e =
+              entry.conn->recv(secs, [&call] { return call.cancel_requested(); });
+          scrub_ws_event(e, entry, access);
+          return marshal_ws_event(e);
         };
       },
       io);
   // (ws-poll H): the next event already received, or nil; never waits. For on_tick loops.
   se::builtins::register_fn(env, "ws-poll",
-                            [live](std::span<const se::value_t> args) -> se::value_t {
+                            [live, access](std::span<const se::value_t> args) -> se::value_t {
                               live("ws-poll");
-                              return marshal_ws_event(ws_lookup("ws-poll", args)->recv(0));
+                              const WsEntry entry = ws_lookup("ws-poll", args);
+                              std::optional<cvc::net::WsEvent> e = entry.conn->recv(0);
+                              scrub_ws_event(e, entry, access);
+                              return marshal_ws_event(e);
                             });
-  // (ws-send H TEXT): send a text message. #t, or an error when the connection is closed.
+  // (ws-send H MESSAGE): send a text message: a string as it is, a dict or list as JSON, with the
+  // host's token for each credential value in it (ws_send_json). #t, or an error when the
+  // connection is closed.
   se::builtins::register_fn(env, "ws-send",
-                            [live](std::span<const se::value_t> args) -> se::value_t {
+                            [live, access](std::span<const se::value_t> args) -> se::value_t {
                               live("ws-send");
-                              std::shared_ptr<cvc::net::WsConnection> conn =
-                                  ws_lookup("ws-send", args);
-                              if (args.size() < 2)
-                                throw std::runtime_error("ws-send: (ws-send H TEXT)");
-                              std::string error;
-                              if (!conn->send_text(field_to_string(args[1]), &error))
-                                throw std::runtime_error("ws-send: " + error);
-                              return se::value_t(true);
+                              return ws_send(args, access);
                             });
   // (ws-close H [CODE]): close and forget H. #t if it was still open; a closed or unknown
   // handle is no error, so a program can close in any cleanup path.
@@ -825,7 +962,7 @@ void register_ws_verbs(const std::shared_ptr<se::environment> &env, se::async_ho
       auto it = t.open.find(arg_string(args, 0));
       if (it == t.open.end())
         return se::value_t(false);
-      conn = std::move(it->second);
+      conn = std::move(it->second.conn);
       t.open.erase(it);
     }
     const bool was = conn->open();
@@ -837,7 +974,7 @@ void register_ws_verbs(const std::shared_ptr<se::environment> &env, se::async_ho
     WsTable &t = ws_table();
     std::lock_guard<std::mutex> lock(t.mutex);
     auto it = t.open.find(arg_string(args, 0));
-    return se::value_t(it != t.open.end() && it->second->open());
+    return se::value_t(it != t.open.end() && it->second.conn->open());
   });
 }
 

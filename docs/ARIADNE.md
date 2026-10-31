@@ -1855,7 +1855,7 @@ without either has no `ws-*` verbs, so a document asks `(has? "ws-open")` and po
 | verb | what |
 |---|---|
 | `(ws-open URL [OPTS])`, `ws-open-async` | connect to a `ws://` or `wss://` URL; reply `{ok handle url error}` |
-| `(ws-send H TEXT)` | send a text message; `#t`, or an error when `H` is closed |
+| `(ws-send H MESSAGE)` | send a text message: a string as it is, a dict or list as JSON; `#t`, or an error when `H` is closed |
 | `(ws-poll H)` | the next message already in, or `nil`; never waits |
 | `(ws-recv H [SECONDS])`, `ws-recv-async` | the next message, waiting up to `SECONDS` (30); `nil` when none came |
 | `(ws-open? H)` | whether `H` is still open |
@@ -1871,7 +1871,25 @@ without either has no `ws-*` verbs, so a document asks `(has? "ws-open")` and po
 - `OPTS` takes `query`, `headers`, `auth` and credential values as the HTTP verbs do (§10.2,
   §10.3), plus `timeout`, the seconds to connect (15). A browser's `WebSocket` can't send
   request headers, so there `headers` and `auth` are refused; a server that wants a token takes
-  it in a message instead.
+  it in a message instead, which `ws-send` can carry without the document holding it (below).
+- `ws-send` sends a dict or a list as JSON, compact (`json-encode`'s rules: a value JSON lacks
+  is an error). A credential value in it, `(dict "credential" NAME)` at any depth, is sent as
+  the token the host keeps for `NAME`, a JSON string, so a document signs in to a live feed the
+  one way a browser allows, in a message:
+
+  ```lisp
+  (set r (ws-open "wss://tx.wtf/ws/events"))
+  (ws-send (get-attr r "handle") (dict "type" "hello" "token" (dict "credential" "txwtf")))
+  ;; the server gets {"type":"hello","token":"<the host's txwtf token>"}
+  ```
+
+  The token is fetched for the connection's origin (its URL's `http(s)` twin, as for the
+  policy), so a credential bound to other origins (§10.3) is not sent, and is put in on the
+  host just before the message goes; no value, state node, error or log line holds it. A name
+  with no token there is an error and sends nothing; so is a credential value on a host that
+  keeps no credentials. As with HTTP replies, a token a connection has sent (in its handshake
+  or a message) is blanked to `[redacted]` in what `ws-recv` and `ws-poll` return, should the
+  server echo it. A string is sent as it is: a document can't put a token in one.
 - The host's policy (§10.3) checks the URL as its `http(s)` twin: `--net-allow
   https://example.org` allows `wss://example.org/...`.
 - `ws-open` and `ws-recv` are async I/O calls like the HTTP verbs: the connect, or the wait,
