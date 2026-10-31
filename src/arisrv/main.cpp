@@ -537,6 +537,18 @@ int main(int argc, char **argv) {
     published.enabled = aoi_relay != nullptr;
     cvc::ariadne::conference::write_aoi_params(app, room, published);
   }
+  // The room steps on a fixed 50 ms grid (sleep_until, not sleep_for after each step's work), so
+  // pose samples leave evenly spaced: a client shows each peer a fixed delay behind its newest
+  // sample, and every late one is a stall it has to cover. A loop that falls a step behind (a
+  // stall) restarts the grid rather than running the missed steps back to back.
+  auto next_room_step = std::chrono::steady_clock::now();
+  const auto wait_room_step = [&]() {
+    next_room_step += kRoomStep;
+    const auto now = std::chrono::steady_clock::now();
+    if (next_room_step + kRoomStep < now)
+      next_room_step = now;
+    std::this_thread::sleep_until(next_room_step);
+  };
   while (!g_stop.load()) {
 #if CVC_ENABLE_WS
     // Reap ghosts (~every second): a tab that navigated or reloaded away without a clean WebSocket
@@ -576,9 +588,11 @@ int main(int argc, char **argv) {
         std::fflush(stdout);
     }
     cvc::ariadne::conference::room_relay_tick(app, room, relay, relayed);
-    // Advance the authoritative avatar holon and write each participant's pose. The
-    // pose writes are local shard mutations, fanned to clients by the drain below.
+    // Advance the authoritative avatar holon and write each participant's pose, then fan them out
+    // at once: the pose writes are local shard mutations, and the housekeeping below would
+    // otherwise make this step's samples later than the other three's.
     cvc::ariadne::server_pump(server_holon, app, room);
+    room_step();
     // CVC_ARISRV_ROOM_DEBUG=1: every ~5 s, log the room as the server holds it -- each present
     // participant's authoritative position and its proposed intent -- so replication across the
     // gRPC and WebSocket planes can be checked from the relay without a client.
@@ -740,7 +754,6 @@ int main(int argc, char **argv) {
           held_timeouts, shard.journal().size());
       std::fflush(stdout);
     }
-    room_step();
     const std::size_t n = relay.stream_count();
     const bool heartbeat = (n > 0 && ++ticks % 25 == 0); // ~every 5s while gRPC media is live
     if (n != last || heartbeat) {
@@ -780,11 +793,11 @@ int main(int argc, char **argv) {
     // The rest of this pass's room steps (the first ran above): advance the holon and fan its
     // poses between the loop's slower housekeeping.
     for (int i = 1; i < kRoomSubsteps && !g_stop.load(); ++i) {
-      std::this_thread::sleep_for(kRoomStep);
+      wait_room_step();
       cvc::ariadne::server_pump(server_holon, app, room);
       room_step();
     }
-    std::this_thread::sleep_for(kRoomStep);
+    wait_room_step();
   }
 
   std::printf("[arisrv] shutting down (relayed %zu stream(s), %llu frames forwarded)\n",

@@ -414,6 +414,19 @@ bundles them yet.
   validates it as an input to that avatar's physics body and writes the authoritative `…pose/body` —
   accept, veto (clamp/reject), or override at will (teleport, re-mass, re-parent). "Respect the veto" =
   authoritative wins on reconcile. This is the server-mediated-write path (§5d) applied per avatar.
+* **Peers play out from a buffer** (`holon::display_pose`). Each peer's samples are kept by server
+  tick, and the peer is shown on a wall-time timeline a delay behind its newest sample:
+  * the delay is one sample interval plus 1.5 times the measured arrival jitter;
+  * between samples the peer follows a cubic Hermite through their positions and velocities;
+  * when the buffer runs dry, it carries on along its velocity for up to 200 ms;
+  * a change of course eases out over about 100 ms, but a teleport snaps.
+
+  The old model walked from the shown pose to the newest sample, timed by arrival, so jitter made it
+  stop and go. Replayed through `HolonTest.APeerMovesSmoothlyThroughJitterAndLoss` (6-tick samples,
+  up to 40 ms late, 5% lost, 60 fps), the old walk stalled on 96 of 599 frames, with an RMS
+  acceleration of 107 m/s². The playout has no stalls and 2.3 m/s², against the walk's own 2.25. The
+  relay keeps the samples even by stepping the room on a fixed 50 ms grid and sending each step's
+  poses at once, and the WebSocket sockets set TCP_NODELAY.
   *(No client-prediction/reconcile/rollback loop exists today — it is new; distributed state resolves
   last-writer with vector clocks, not predict/rollback.)*
 * **LOD (realtime for large scenes).** A replica is a *scoped, decimated* view, not a full copy: **spatial

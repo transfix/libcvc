@@ -115,6 +115,7 @@ public:
   // host loop; draw_image references it by the name a `- image:` widget's src/bind resolves to.
   void set_image(const std::string &name, const cvc::image &img) override;
   bool draw_image(const char *name, float width) override; // §raster viewer (ImGui::Image over GL)
+  bool draw_image_fit(const char *name, float box_w, float box_h) override;
 
   // Convenience: install `rt`'s per-frame walk as `overlay`'s draw callback, so
   // VTK drives Runtime::render() once per rendered frame. Call after
@@ -211,6 +212,9 @@ private:
     bool dirty = true;    // needs (re-)upload
   };
   std::unordered_map<std::string, PublishedImage> m_images;
+  // The GL texture image `name` is published under, uploaded first if it changed, and its size in
+  // W x H; 0 when nothing is published under it. Render thread (the GL context current).
+  unsigned int image_texture(const char *name, int &W, int &H);
 
   // Per-key in-progress InputText / InputInt text. Follows the value in state while no field is
   // active and holds the edit while one is — the string counterpart of cache_int/cache_float.
