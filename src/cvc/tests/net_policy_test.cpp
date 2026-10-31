@@ -3,6 +3,8 @@
 //   - origins and the policy file: what parses, what is refused, and the errors;
 //   - send(req, policy): a refused origin is never dispatched, and redirects are followed here,
 //     each hop checked (a fake transport for the rules, two localhost servers end to end);
+//   - start(req[, policy]): the same without blocking, on a transport that answers later (the
+//     browser's fetch without threads), and abort();
 //   - CredentialStore: binding, capture, forget and clear, and its file (owner-only, round trip);
 //   - take_json_string / redact: the capture's JSON scan and the blanking.
 
@@ -16,6 +18,7 @@
 #include <fstream>
 #include <gtest/gtest.h>
 #include <memory>
+#include <optional>
 #include <random>
 #include <sstream>
 #include <string>
@@ -373,6 +376,167 @@ TEST(NetCheckedSend, LocalServersRedirectAcrossOrigins) {
   req.url = a.url("/plain");
   EXPECT_FALSE(cvc::net::send(req, none).ok);
   EXPECT_EQ(a.requests().size(), 2u) << "a default policy reaches nothing";
+}
+
+// --- start(req[, policy]): the same without blocking -------------------------------------------
+
+namespace {
+
+// A transport that answers later, as the browser's fetch does in a build without threads: start()
+// queues the request, and answer() replies to the oldest one from the script, as the page's event
+// loop would.
+class DeferredClient : public ScriptedClient {
+public:
+  struct Transfer : cvc::net::HttpTransfer {
+    bool aborted = false;
+    void abort() override { aborted = true; }
+  };
+  struct Pending {
+    HttpRequest req;
+    cvc::net::HttpDone done;
+    std::shared_ptr<Transfer> transfer;
+  };
+  std::vector<Pending> pending;
+
+  bool starts_async() const override { return true; }
+  std::shared_ptr<cvc::net::HttpTransfer> start(const HttpRequest &req,
+                                                cvc::net::HttpDone done) override {
+    auto t = std::make_shared<Transfer>();
+    pending.push_back({req, std::move(done), t});
+    return t;
+  }
+  // Answer the oldest request still wanted (an aborted one is dropped unanswered). False: none.
+  bool answer() {
+    while (!pending.empty()) {
+      Pending p = std::move(pending.front());
+      pending.erase(pending.begin());
+      if (p.transfer->aborted)
+        continue;
+      p.done(send(p.req));
+      return true;
+    }
+    return false;
+  }
+};
+
+} // namespace
+
+TEST(NetStart, ABlockingTransportAnswersBeforeStartReturns) {
+  ClientGuard guard;
+  auto *fake = new ScriptedClient;
+  fake->script = {{"https://tx.wtf/a", ok_body("now")}};
+  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  EXPECT_FALSE(cvc::net::http_starts_async());
+  HttpRequest req;
+  req.url = "https://tx.wtf/a";
+  std::optional<HttpResponse> got;
+  const auto t = cvc::net::start(req, [&](HttpResponse r) { got = std::move(r); });
+  EXPECT_EQ(t, nullptr);
+  ASSERT_TRUE(got);
+  EXPECT_EQ(got->body, "now");
+
+  // An invalid method is refused as send() refuses it, before anything is sent.
+  got.reset();
+  req.method = "NOT A VERB";
+  EXPECT_EQ(cvc::net::start(req, [&](HttpResponse r) { got = std::move(r); }), nullptr);
+  ASSERT_TRUE(got);
+  EXPECT_FALSE(got->ok);
+  EXPECT_EQ(fake->sent.size(), 1u);
+}
+
+TEST(NetStart, AnAsyncTransportAnswersLater) {
+  ClientGuard guard;
+  auto *fake = new DeferredClient;
+  fake->script = {{"https://tx.wtf/a", ok_body("later")}};
+  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  EXPECT_TRUE(cvc::net::http_starts_async());
+  HttpRequest req;
+  req.url = "https://tx.wtf/a";
+  req.method = ""; // normalized to GET before the transport sees it
+  std::optional<HttpResponse> got;
+  const auto t = cvc::net::start(req, [&](HttpResponse r) { got = std::move(r); });
+  ASSERT_NE(t, nullptr);
+  EXPECT_FALSE(got) << "no reply until the transport answers";
+  ASSERT_EQ(fake->pending.size(), 1u);
+  EXPECT_EQ(fake->pending[0].req.method, "GET");
+  ASSERT_TRUE(fake->answer());
+  ASSERT_TRUE(got);
+  EXPECT_EQ(got->body, "later");
+}
+
+TEST(NetStart, ThePolicyIsCheckedHopByHop) {
+  ClientGuard guard;
+  auto *fake = new DeferredClient;
+  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  auto p = std::make_shared<NetPolicy>();
+  p->allow(origin("https://tx.wtf"));
+  p->allow(origin("https://media.tx.wtf"));
+  fake->script = {
+      {"https://tx.wtf/a", redirect(302, "/b")},
+      {"https://tx.wtf/b", redirect(301, "https://media.tx.wtf/c")},
+      {"https://media.tx.wtf/c", ok_body("arrived")},
+      {"https://tx.wtf/out", redirect(302, "https://evil.example/")},
+  };
+  HttpRequest req;
+  req.url = "https://tx.wtf/a";
+  req.headers = {"Authorization: Bearer secret-for-tx"};
+  std::optional<HttpResponse> got;
+  const auto done = [&](HttpResponse r) { got = std::move(r); };
+  ASSERT_NE(cvc::net::start(req, p, done), nullptr);
+  int hops = 0;
+  while (!got && fake->answer())
+    ++hops;
+  EXPECT_EQ(hops, 3) << "each hop is started from the last one's reply";
+  ASSERT_TRUE(got && got->ok) << (got ? got->error : "no reply");
+  EXPECT_EQ(got->body, "arrived");
+  ASSERT_EQ(fake->sent.size(), 3u);
+  EXPECT_FALSE(fake->sent[0].follow_redirects) << "the transport never follows on its own";
+  EXPECT_TRUE(has_header(fake->sent[1].headers, "Authorization:"));
+  EXPECT_FALSE(has_header(fake->sent[2].headers, "Authorization:")) << "another origin drops it";
+
+  // A refused origin is answered in place, never dispatched; a refused hop ends the request.
+  got.reset();
+  fake->sent.clear();
+  req.url = "https://evil.example/steal";
+  EXPECT_EQ(cvc::net::start(req, p, done), nullptr);
+  ASSERT_TRUE(got);
+  EXPECT_NE(got->error.find("refused"), std::string::npos) << got->error;
+  EXPECT_TRUE(fake->pending.empty());
+  got.reset();
+  req.url = "https://tx.wtf/out";
+  cvc::net::start(req, p, done);
+  while (!got && fake->answer()) {
+  }
+  ASSERT_TRUE(got);
+  EXPECT_NE(got->error.find("https://evil.example is not an origin this host allows"),
+            std::string::npos)
+      << got->error;
+  EXPECT_EQ(fake->sent.size(), 1u) << "the disallowed hop is never requested";
+}
+
+TEST(NetStart, AbortEndsTheHopInFlightAndNothingAnswers) {
+  ClientGuard guard;
+  auto *fake = new DeferredClient;
+  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  auto p = std::make_shared<NetPolicy>();
+  p->allow(origin("https://tx.wtf"));
+  fake->script = {{"https://tx.wtf/a", redirect(302, "/b")}, {"https://tx.wtf/b", ok_body("b")}};
+  HttpRequest req;
+  req.url = "https://tx.wtf/a";
+  bool called = false;
+  auto captured = std::make_shared<int>(0); // what the callback holds goes with abort()
+  std::weak_ptr<int> watch = captured;
+  const auto t = cvc::net::start(req, p, [&called, captured](HttpResponse) { called = true; });
+  captured.reset();
+  ASSERT_NE(t, nullptr);
+  ASSERT_TRUE(fake->answer()); // the redirect: the second hop is in flight
+  ASSERT_EQ(fake->pending.size(), 1u);
+  t->abort();
+  EXPECT_TRUE(fake->pending[0].transfer->aborted) << "the hop in flight is aborted";
+  EXPECT_TRUE(watch.expired());
+  EXPECT_FALSE(fake->answer());
+  EXPECT_FALSE(called);
+  t->abort(); // idempotent
 }
 
 // --- the credential store ----------------------------------------------------------------------

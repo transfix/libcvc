@@ -13,6 +13,7 @@
 #include <cvc/ariadne/net_intrinsics.h>
 #include <cvc/ariadne/uri.h>
 #include <cvc/core/app.h>
+#include <cvc/net/http_client.h>
 #include <deque>
 #include <exception>
 #include <list>
@@ -294,6 +295,41 @@ FetchResult fetch_bytes(const std::string &uri, const std::string &auth, const s
   return r;
 }
 
+namespace {
+
+// fetch_bytes, started rather than sent where the transport starts requests without blocking (a
+// browser build without threads, #914): an http(s) URI through the host's network (host_get_start)
+// or the http(s) handler's non-blocking form (resolve_async). `done` is called later, from the
+// browser's event loop. False when this can't start it (another scheme: local, read in place).
+bool start_fetch(const std::string &uri, const std::string &auth, const std::string &base,
+                 FetchDone done) {
+  const std::string scheme = scheme_of(uri);
+  if (!cvc::net::http_starts_async() || (scheme != "http" && scheme != "https"))
+    return false;
+  if (const std::optional<NetAccess> access = net_host_access()) {
+    host_get_start(uri, auth, *access, [done](HostGet g) {
+      FetchResult r;
+      r.ok = g.ok;
+      r.bytes = std::move(g.body);
+      r.error = std::move(g.error);
+      done(std::move(r));
+    });
+    return true;
+  }
+  if (!auth.empty() || !has_uri_async_handler(scheme))
+    return false; // fetch_bytes says why, in place
+  resolve_async(uri, base, [done](UriResult u) {
+    FetchResult r;
+    r.ok = u.ok;
+    r.bytes = std::move(u.content);
+    r.error = u.error;
+    done(std::move(r));
+  });
+  return true;
+}
+
+} // namespace
+
 // ---- the cache ----------------------------------------------------------------------------------
 
 struct ImageCache::Impl {
@@ -462,6 +498,10 @@ struct ImageCache::Impl {
       return;
     }
     const std::string uri = v->req.uri, auth = v->req.auth, dir = base_dir;
+    // A browser build without threads starts the request, and the frame loop goes on while it is
+    // out; the reply is decoded when the browser hands it over, between frames.
+    if (!kThreaded && start_fetch(uri, auth, dir, done))
+      return;
     run([uri, auth, dir, done = std::move(done)] { done(fetch_bytes(uri, auth, dir)); });
   }
 
