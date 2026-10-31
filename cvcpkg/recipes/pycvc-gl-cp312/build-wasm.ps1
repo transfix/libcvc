@@ -75,6 +75,9 @@ Invoke-CvcWasmCMakeBuild -ExtraArgs @(
     '-DCVC_ENABLE_CUDA=OFF',
     '-DCVC_BUILD_TESTS=OFF',
     '-DCVC_BUILD_CLI=OFF',
+    # No ari or arigl runner in this build; build-wasm.sh says why.
+    '-DCVC_BUILD_ARI=OFF',
+    '-DCVC_BUILD_ARIGL=OFF',
     '-DCVC_ENABLE_OPENMP=OFF',
     '-DDISABLE_CGAL=ON',
     '-DCVC_USING_HDF5=OFF',
