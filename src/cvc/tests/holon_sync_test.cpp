@@ -251,8 +251,9 @@ TEST(HolonSyncTest, ClientPumpPredictsSelfAndWalksPeersSmoothly) {
       << "the server moved A per its intent (2 m/s for 2 s), no dropped quanta";
   // A's own prediction stays within a relay interval of the authority.
   EXPECT_NEAR(a.display_pose("A").position.x, server_x, 2.0 * kServerEvery * dt + 1e-9);
-  // B shows A at most one sample interval behind the authority.
-  EXPECT_NEAR(last_peer_x, server_x, 2.0 * kServerEvery * dt + 1e-9);
+  // B shows A one sample interval (and a tick) behind the authority: its playout delay with no
+  // jitter (holon::display_pose).
+  EXPECT_NEAR(last_peer_x, server_x, 2.0 * (kServerEvery + 2) * dt + 1e-9);
   // Both replicas count the server's ticks.
   EXPECT_LE(a.tick() > server.tick() ? a.tick() - server.tick() : server.tick() - a.tick(),
             static_cast<std::uint64_t>(kServerEvery));

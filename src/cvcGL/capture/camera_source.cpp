@@ -11,6 +11,18 @@
 #include <cvc/ariadne/stream/frame_source.h>
 #include <cvc/gl/capture/camera_source.h>
 
+// The single-threaded browser build captures the camera itself (browser_camera_source below), not
+// through SDL. A threaded one keeps SDL: its producer thread could not call into the page's DOM
+// without blocking on the main thread, which joins it at close.
+#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+#define CVC_BROWSER_CAMERA 1
+#include <cstdint>
+#include <emscripten/em_js.h>
+#include <emscripten/emscripten.h> // emscripten_get_now
+#include <memory>
+#include <string>
+#endif
+
 #if CVC_ENABLE_SDL
 #include <SDL3/SDL_camera.h>
 #include <SDL3/SDL_events.h> // SDL_PumpEvents
@@ -19,7 +31,6 @@
 #include <SDL3/SDL_stdinc.h> // SDL_free, Uint64
 #include <SDL3/SDL_surface.h>
 #include <SDL3/SDL_timer.h> // SDL_Delay
-#include <algorithm>        // std::min / std::max (native-aspect fit)
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -29,7 +40,154 @@ namespace cvc {
 namespace gl {
 namespace capture {
 
-#if CVC_ENABLE_SDL
+#if CVC_BROWSER_CAMERA
+namespace {
+namespace st = cvc::ariadne::stream;
+
+// The browser camera, read straight from a <video> on getUserMedia. SDL's own browser camera
+// stretches every frame into a canvas fixed at the size the track reported when it opened (and SDL
+// then stretches that to the size the app asked for), so a phone came out squashed: in portrait,
+// and again whenever it turned. This reads the <video>'s CURRENT size each frame, which follows the
+// device's orientation, and lets the canvas scale it to fit the budget.
+//
+// No size is asked of the camera: a size constraint lets a browser crop it to that shape, and the
+// canvas does the downscale. The front camera ('user') is the one a conference wants.
+EM_JS(int, cvc_webcam_available, (),
+      { return (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) ? 1 : 0; });
+
+EM_JS(int, cvc_webcam_open, (double fps), {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia)
+    return 0;
+  const cams = Module.cvcWebcams || (Module.cvcWebcams = {next : 1});
+  const id = cams.next++;
+  const cam = {
+    video : document.createElement("video"),
+    canvas : document.createElement("canvas"),
+    stream : null,
+    closed : false,
+    frames : 0, // frames the <video> has presented (requestVideoFrameCallback), when it can tell
+    taken : -1, // the `frames` count last read, so a frame is not sent twice
+  };
+  cam.ctx = cam.canvas.getContext("2d", {willReadFrequently : true});
+  cam.video.muted = true;
+  cam.video.playsInline = true; // iOS plays a camera only inline
+  cam.video.setAttribute("playsinline", "");
+  const video = {facingMode : "user"};
+  if (fps > 0)
+    video.frameRate = {ideal : fps};
+  // (function expressions, not arrows: clang-format splits `=>` in this C++ file.)
+  const stop = function(stream) {
+    stream.getTracks().forEach(function(t) { t.stop(); });
+  };
+  const presented = function() {
+    if (cam.closed)
+      return;
+    cam.frames++;
+    cam.video.requestVideoFrameCallback(presented);
+  };
+  navigator.mediaDevices.getUserMedia({video : video, audio : false})
+      .then(function(stream) {
+        if (cam.closed) {
+          stop(stream);
+          return;
+        }
+        cam.stream = stream;
+        cam.stop = stop;
+        cam.video.srcObject = stream;
+        const played = cam.video.play();
+        if (played && played.catch)
+          played.catch(function(){});
+        if (cam.video.requestVideoFrameCallback)
+          cam.video.requestVideoFrameCallback(presented);
+      })
+      .catch(function(e) { console.error("camera: " + e.name + ": " + e.message); });
+  cams[id] = cam;
+  return id;
+});
+
+// The camera's current frame size as (w << 16) | h, or 0 when there is no NEW frame to read: no
+// stream yet (permission pending or denied), no picture yet, or the one last read.
+EM_JS(int, cvc_webcam_size, (int id), {
+  const cam = Module.cvcWebcams && Module.cvcWebcams[id];
+  if (!cam || !cam.stream || cam.video.readyState < 2)
+    return 0;
+  const w = cam.video.videoWidth, h = cam.video.videoHeight;
+  if (!(w > 0 && h > 0) || w > 0x7fff || h > 0xffff)
+    return 0;
+  if (cam.video.requestVideoFrameCallback && cam.frames == cam.taken)
+    return 0;
+  return (w << 16) | h;
+});
+
+// Draw the current frame scaled to W x H and copy it into BUF as dense rgba8.
+EM_JS(int, cvc_webcam_read, (int id, int w, int h, std::uint8_t *buf), {
+  const cam = Module.cvcWebcams && Module.cvcWebcams[id];
+  if (!cam || !cam.stream)
+    return 0;
+  if (cam.canvas.width != w || cam.canvas.height != h) {
+    cam.canvas.width = w;
+    cam.canvas.height = h;
+  }
+  cam.ctx.drawImage(cam.video, 0, 0, w, h);
+  HEAPU8.set(cam.ctx.getImageData(0, 0, w, h).data, buf);
+  cam.taken = cam.frames;
+  return 1;
+});
+
+EM_JS(void, cvc_webcam_close, (int id), {
+  const cams = Module.cvcWebcams;
+  const cam = cams && cams[id];
+  if (!cam)
+    return;
+  cam.closed = true;
+  if (cam.stream)
+    cam.stop(cam.stream);
+  cam.video.srcObject = null;
+  delete cams[id];
+});
+
+class browser_camera_source : public st::frame_source {
+public:
+  // `native_aspect` as for the SDL source: w x h is a budget the frame fits within, its shape kept;
+  // else every frame is stretched to exactly w x h.
+  browser_camera_source(int id, int w, int h, bool native_aspect)
+      : id_(id), w_(w), h_(h), native_(native_aspect), cur_w_(w), cur_h_(h) {}
+  ~browser_camera_source() override { cvc_webcam_close(id_); }
+
+  std::size_t frame_bytes() const override {
+    return static_cast<std::size_t>(w_) * static_cast<std::size_t>(h_) * 4u;
+  }
+
+  st::produced_frame fill(std::uint8_t *buf, std::size_t cap) override {
+    st::produced_frame out; // bytes = 0: "no frame this tick"
+    if (buf == nullptr || cap < frame_bytes())
+      return out;
+    const int packed = cvc_webcam_size(id_);
+    if (packed == 0)
+      return out;
+    int ow = w_, oh = h_;
+    if (native_)
+      st::fit_frame(packed >> 16, packed & 0xffff, w_, h_, ow, oh);
+    if (!cvc_webcam_read(id_, ow, oh, buf))
+      return out;
+    cur_w_ = ow;
+    cur_h_ = oh;
+    out.bytes = static_cast<std::size_t>(ow) * static_cast<std::size_t>(oh) * 4u;
+    out.pts_seconds = emscripten_get_now() / 1000.0;
+    return out;
+  }
+
+  int cur_width() const override { return cur_w_; }
+  int cur_height() const override { return cur_h_; }
+
+private:
+  int id_;
+  int w_, h_;
+  bool native_;       // true: fit-to-budget preserving aspect; false: stretch to w_ x h_
+  int cur_w_, cur_h_; // actual size of the last produced frame
+};
+} // namespace
+#elif CVC_ENABLE_SDL
 namespace {
 namespace st = cvc::ariadne::stream;
 
@@ -70,21 +228,17 @@ public:
     // Convert the camera's native pixel format to byte-order RGBA, then scale to the output size
     // and copy densely into the slab (the surface's pitch may exceed w*4). native_ decides the
     // output size: when false, stretch to exactly w_ x h_ (a fixed-size raw stream); when true, fit
-    // the native frame within the w_ x h_ budget PRESERVING its aspect ratio (never upscaling), so
-    // a portrait / 16:9 camera keeps its true shape (a self-describing-codec wrapper encodes at
-    // cur_width/cur_height). getUserMedia's exact delivered size is unknown until frames flow, so
-    // this is computed per frame from the delivered size. The same-size case does no scaling.
+    // the native frame within the w_ x h_ budget PRESERVING its aspect ratio (never upscaling, the
+    // budget turned to the frame's orientation: st::fit_frame), so a portrait / 16:9 camera keeps
+    // its true shape (a self-describing-codec wrapper encodes at cur_width/cur_height). The
+    // delivered size can change while open, so this is computed per frame. The same-size case
+    // does no scaling.
     SDL_Surface *rgba = (raw->format == SDL_PIXELFORMAT_RGBA32)
                             ? raw
                             : SDL_ConvertSurface(raw, SDL_PIXELFORMAT_RGBA32);
     int ow = w_, oh = h_;
-    if (native_ && rgba && rgba->w > 0 && rgba->h > 0) {
-      const double s =
-          std::min(std::min(static_cast<double>(w_) / rgba->w, static_cast<double>(h_) / rgba->h),
-                   1.0); // fit within the budget, never upscale
-      ow = std::max(1, std::min(w_, static_cast<int>(rgba->w * s + 0.5)));
-      oh = std::max(1, std::min(h_, static_cast<int>(rgba->h * s + 0.5)));
-    }
+    if (native_ && rgba)
+      st::fit_frame(rgba->w, rgba->h, w_, h_, ow, oh);
     SDL_Surface *frame = rgba;
     if (rgba && (rgba->w != ow || rgba->h != oh) && ow > 0 && oh > 0) {
       if (scaled_ && (scaled_->w != ow || scaled_->h != oh)) {
@@ -130,12 +284,27 @@ private:
       nullptr; // lazily-created output-size scratch for rescaling off-size frames
 };
 } // namespace
-#endif // CVC_ENABLE_SDL
+#endif // CVC_BROWSER_CAMERA / CVC_ENABLE_SDL
 
 camera_open open_camera(int device_index, int want_w, int want_h, double want_fps,
                         bool native_aspect) {
   camera_open result;
-#if CVC_ENABLE_SDL
+#if CVC_BROWSER_CAMERA
+  // One camera, the browser's (its front one). Permission resolves asynchronously, so this hands
+  // back a source at once that skips frames until the user allows it and the picture starts.
+  if (device_index != 0)
+    return result;
+  const int id = cvc_webcam_open(want_fps);
+  if (id == 0)
+    return result; // no getUserMedia (an insecure page, or no camera API)
+  const int rw = want_w > 0 ? want_w : 640;
+  const int rh = want_h > 0 ? want_h : 480;
+  result.width = rw;
+  result.height = rh;
+  result.fps = want_fps > 0.0 ? want_fps : 30.0;
+  result.name = "Browser camera";
+  result.source = std::make_unique<browser_camera_source>(id, rw, rh, native_aspect);
+#elif CVC_ENABLE_SDL
   if (!SDL_InitSubSystem(SDL_INIT_CAMERA))
     return result; // refcounted; the source's dtor (or the cleanup below) quits it
   bool handed_off = false;
@@ -161,11 +330,16 @@ camera_open open_camera(int device_index, int want_w, int want_h, double want_fp
     SDL_CameraSpec want{};
     want.format =
         SDL_PIXELFORMAT_RGBA32; // byte-order RGBA; fill() converts anything else regardless
-    want.width = rw;
-    want.height = rh;
-    if (want_fps > 0.0) {
-      want.framerate_numerator = static_cast<int>(want_fps + 0.5);
-      want.framerate_denominator = 1;
+    // SDL scales every frame to the size asked for here, so a camera keeping its aspect asks for
+    // none (0 x 0): SDL then adopts the track's own size and fill() fits that. (A frame rate is
+    // only asked for with a size: SDL's request sets it on the size constraint.)
+    if (!native_aspect) {
+      want.width = rw;
+      want.height = rh;
+      if (want_fps > 0.0) {
+        want.framerate_numerator = static_cast<int>(want_fps + 0.5);
+        want.framerate_denominator = 1;
+      }
     }
     SDL_Camera *cam = SDL_OpenCamera(id, &want);
     if (cam) {
@@ -262,7 +436,7 @@ camera_open open_camera(int device_index, int want_w, int want_h, double want_fp
     SDL_free(ids);
   if (!handed_off)
     SDL_QuitSubSystem(SDL_INIT_CAMERA); // nothing took the ref we added above
-#else
+#else  // neither a browser camera nor SDL
   (void)device_index;
   (void)want_w;
   (void)want_h;
@@ -280,7 +454,10 @@ void pump_events() {
 
 std::vector<std::string> list_cameras() {
   std::vector<std::string> names;
-#if CVC_ENABLE_SDL
+#if CVC_BROWSER_CAMERA
+  if (cvc_webcam_available())
+    names.emplace_back("Browser camera"); // device 0, the one open_camera opens
+#elif CVC_ENABLE_SDL
   if (!SDL_InitSubSystem(SDL_INIT_CAMERA))
     return names;
   int count = 0;

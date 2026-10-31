@@ -115,6 +115,21 @@ TEST(MediaRungs, AJpegIsDownscaledByHalvesAndShrinks) {
   EXPECT_EQ(cvc::jpeg_downscale(full.data(), full.size(), 2, 55, w, h).size(), half.size());
 }
 
+// A portrait phone's frame (its shape kept within the 320x240 budget, turned upright) keeps that
+// shape on every rung: the rung reads the JPEG's own size, not the stream's 320x240.
+TEST(MediaRungs, APortraitFrameKeepsItsShapeOnEveryRung) {
+  if (!cvc::jpeg_transcode_available())
+    GTEST_SKIP() << "no libjpeg-turbo in this build";
+  cvc::media_rung_shaper shaper;
+  shaper.set_rung("small", cvc::video_rung::half);
+  cvc::media_frame f = camera_frame("phone", 1);
+  f.payload = camera_jpeg(180, 320);
+  const cvc::media_shape v = shaper.shape(f, "small");
+  ASSERT_NE(v.variant, nullptr);
+  EXPECT_EQ(v.variant->width, 90u);
+  EXPECT_EQ(v.variant->height, 160u);
+}
+
 // Each viewer gets the camera at its rung. A smaller rung's variant is made once per frame and
 // shared by every viewer on it; the mic and other codecs always go as sent.
 TEST(MediaRungs, TheShaperSendsEachViewerItsRung) {

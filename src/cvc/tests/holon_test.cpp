@@ -16,8 +16,10 @@
 // a server override snaps the client); a client never drives a peer; and a peer is
 // interpolated through the holon's frame alpha, never overshooting.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <cvc/ariadne/avatar_sim.h>
 #include <cvc/ariadne/holon.h>
@@ -151,86 +153,179 @@ TEST(HolonTest, PeerIsSampleDrivenNotIntentDriven) {
 }
 
 // A stale / duplicate / reordered peer sample (server_tick at or below the newest
-// applied) is ignored -- the interpolation window must not rewind or collapse.
+// applied) is ignored -- the path must not rewind.
 TEST(HolonTest, PeerIgnoresStaleOrDuplicateSample) {
   holon client(holon_role::client);
   client.add_participant("B", /*local=*/false);
+  const double dt = client.clock().fixed_dt();
   body_state s4, s5;
   s4.position = vec3{4.0, 0.0, 0.0};
   s5.position = vec3{5.0, 0.0, 0.0};
   client.apply_authoritative("B", s4, 4);
-  client.apply_authoritative("B", s5, 5); // window is [s4 -> s5]
+  client.apply_authoritative("B", s5, 10);
   // A reordered older sample (tick 4 again, different value) must be dropped.
   body_state stale;
   stale.position = vec3{-100.0, 0.0, 0.0};
   client.apply_authoritative("B", stale, 4);
-  const double dt = client.clock().fixed_dt();
-  client.advance(0.5 * dt); // alpha ~0.5 over the UNCHANGED window [4 -> 5]
-  EXPECT_NEAR(client.display_pose("B").position.x, 4.5, 1e-9)
-      << "stale sample must not rewind the interpolation window";
-}
-
-// ── a peer is interpolated through the holon's frame alpha, no overshoot ────
-
-TEST(HolonTest, PeerInterpolatesThroughFrameAlpha) {
-  holon client(holon_role::client);
-  client.add_participant("B", /*local=*/false);
-  const double dt = client.clock().fixed_dt();
-
-  body_state s1;
-  s1.position = vec3{0.0, 0.0, 0.0};
-  body_state s2;
-  s2.position = vec3{10.0, 0.0, 0.0};
-  client.apply_authoritative("B", s1, 1);
-  client.apply_authoritative("B", s2, 2); // window is now [s1, s2]
-
-  // Advance half a quantum: no step falls due, but the frame alpha becomes ~0.5.
-  client.advance(0.5 * dt);
-  const double x_half = client.display_pose("B").position.x;
-  EXPECT_GT(x_half, 0.0);
-  EXPECT_LT(x_half, 10.0) << "interpolated strictly between the two samples";
-  EXPECT_NEAR(x_half, 5.0, 1e-9);
-
-  // A near-full-quantum frame approaches but never reaches/passes the newest sample.
-  holon c2(holon_role::client);
-  c2.add_participant("B", false);
-  c2.apply_authoritative("B", s1, 1);
-  c2.apply_authoritative("B", s2, 2);
-  c2.advance(0.999 * dt);
-  const double x_near = c2.display_pose("B").position.x;
-  EXPECT_LT(x_near, 10.0) << "peer interpolation never overshoots newest";
-  EXPECT_GT(x_near, 9.0) << "and it did advance most of the way (not frozen)";
-}
-
-// ── a peer walks smoothly across SPARSE samples (the live ~5 Hz relay) ──────
-// Samples arrive every 24 quanta (5 Hz on a 120 Hz clock). The peer must walk from
-// one to the next over those 24 quanta: monotonic, never past the newest sample,
-// and actually moving (not held at the sample or flicking between the two).
-
-TEST(HolonTest, PeerWalksAcrossSparseSamples) {
-  holon client(holon_role::client);
-  client.add_participant("B", /*local=*/false);
-  const double dt = client.clock().fixed_dt();
-  constexpr int kSpan = 24;
-
-  double last_x = -1.0;
-  int moved_frames = 0;
-  for (int k = 0; k <= 4; ++k) {
-    body_state s;
-    s.position = vec3{static_cast<double>(k), 0.0, 0.0}; // 1 m per sample
-    client.apply_authoritative("B", s, 100 + static_cast<std::uint64_t>(k * kSpan));
-    for (int f = 0; f < kSpan; ++f) {
-      client.advance(dt);
-      const double x = client.display_pose("B").position.x;
-      EXPECT_GE(x, last_x) << "sample " << k << " frame " << f << ": the peer never steps back";
-      EXPECT_LE(x, static_cast<double>(k)) << "never past the newest sample";
-      if (x > last_x)
-        ++moved_frames;
-      last_x = x;
-    }
+  client.apply_authoritative("B", stale, 10);
+  double last = 4.0;
+  for (int i = 0; i < 30; ++i) {
+    client.advance(dt);
+    const double x = client.display_pose("B").position.x;
+    EXPECT_GE(x, last - 1e-12) << "frame " << i << ": a stale sample must not rewind the path";
+    EXPECT_LE(x, 5.0 + 1e-12);
+    last = x;
   }
-  EXPECT_GT(last_x, 3.9) << "it walked (nearly) all the way to the last sample";
-  EXPECT_GT(moved_frames, 4 * (kSpan - 2)) << "it moved on (nearly) every frame of each walk";
+  EXPECT_NEAR(last, 5.0, 1e-9) << "it walked to the newest sample and holds there";
+}
+
+namespace {
+// A peer's samples as a relay sends them: the true path at every `every` ticks, each with its
+// velocity, arriving `latency` ticks later plus `jitter` ticks drawn uniformly (a seeded LCG, so
+// the run is the same every time), one in `drop` lost (0: none). The client runs frames of
+// `frame_ticks` of wall time, applies the samples that have arrived, and records the peer.
+struct peer_run {
+  std::vector<double> t;     // the wall tick of each frame
+  std::vector<vec3> shown;   // where the peer was shown
+  std::vector<double> delay; // the server tick shown, behind the newest truth
+};
+template <class Path>
+peer_run run_peer(holon &client, Path path, int every, double latency, double jitter, int drop,
+                  double frame_ticks, int frames, std::uint32_t seed = 12345u) {
+  struct pending {
+    double arrive;
+    std::uint64_t tick;
+  };
+  std::vector<pending> inflight;
+  std::uint32_t lcg = seed;
+  const auto rnd = [&lcg] {
+    lcg = lcg * 1664525u + 1013904223u;
+    return static_cast<double>(lcg >> 8) / static_cast<double>(1u << 24);
+  };
+  const double dt = client.clock().fixed_dt();
+  peer_run out;
+  double wall = 0.0;
+  std::uint64_t next_sample = 100;
+  const double t0 = 100.0; // the server's tick when the wall clock reads 0
+  for (int f = 0; f < frames; ++f) {
+    wall += frame_ticks;
+    // The server's samples made by now, in flight; those that have arrived are applied in the
+    // order they arrive (a late one after a newer is stale, and dropped by the holon).
+    while (static_cast<double>(next_sample) <= t0 + wall) {
+      const bool lost = drop > 0 && static_cast<int>(rnd() * drop) == 0;
+      if (!lost)
+        inflight.push_back(
+            pending{static_cast<double>(next_sample) - t0 + latency + jitter * rnd(), next_sample});
+      next_sample += static_cast<std::uint64_t>(every);
+    }
+    std::sort(inflight.begin(), inflight.end(),
+              [](const pending &a, const pending &b) { return a.arrive < b.arrive; });
+    while (!inflight.empty() && inflight.front().arrive <= wall) {
+      const std::uint64_t tick = inflight.front().tick;
+      inflight.erase(inflight.begin());
+      client.apply_authoritative("B", path(static_cast<double>(tick) * dt), tick);
+    }
+    client.advance(frame_ticks * dt);
+    out.t.push_back(wall);
+    out.shown.push_back(client.display_pose("B").position);
+  }
+  return out;
+}
+
+// Walking a 4 m circle at 3 m/s, starting at rest and accelerating at 6 m/s^2.
+body_state circle(double t) {
+  constexpr double r = 4.0, top = 3.0, accel = 6.0;
+  const double t_up = top / accel;
+  const double arc = t < t_up ? 0.5 * accel * t * t : 0.5 * accel * t_up * t_up + top * (t - t_up);
+  const double speed = t < t_up ? accel * t : top;
+  const double a = arc / r;
+  body_state s;
+  s.position = vec3{r * std::cos(a), r * std::sin(a), 0.0};
+  s.linear_velocity = vec3{-speed * std::sin(a), speed * std::cos(a), 0.0};
+  s.rotation = cvc::physics::quat{std::cos(0.5 * (a + 1.5707963)), 0.0, 0.0,
+                                  std::sin(0.5 * (a + 1.5707963))};
+  return s;
+}
+} // namespace
+
+// On time, every 6 ticks, at 60 fps: the peer is shown a fixed delay behind, exactly on its path,
+// and it moves the same distance every frame. The delay is one interval and a tick (7) from the
+// frame that took the sample in, which here is that frame's start, 2 ticks after the sample was
+// made: 5 behind the server.
+TEST(HolonTest, APeerOnTimeIsShownAFixedDelayBehindOnItsPath) {
+  holon client(holon_role::client);
+  client.add_participant("B", /*local=*/false);
+  const auto line = [](double t) {
+    body_state s;
+    s.position = vec3{3.0 * t, 0.0, 0.0};
+    s.linear_velocity = vec3{3.0, 0.0, 0.0};
+    return s;
+  };
+  const peer_run r = run_peer(client, line, 6, 0.0, 0.0, 0, 2.0, 240);
+  const double dt = client.clock().fixed_dt();
+  for (std::size_t f = 60; f < r.shown.size(); ++f) {
+    const double shown_tick = r.shown[f].x / (3.0 * dt);
+    EXPECT_NEAR(100.0 + r.t[f] - shown_tick, 5.0, 1e-6) << "frame " << f;
+    EXPECT_NEAR(r.shown[f].x - r.shown[f - 1].x, 3.0 * 2.0 * dt, 1e-9) << "frame " << f;
+  }
+}
+
+// The live case the old walk stuttered in: samples every 6 ticks (the relay's ~20 Hz room step)
+// arriving up to 40 ms late at random, one in twenty lost, a peer walking a circle, at 60 fps. The
+// peer never stalls or lurches: every frame it moves close to its true speed, stays on its circle,
+// and its shown acceleration is that of the walk, not of a stop and go.
+TEST(HolonTest, APeerMovesSmoothlyThroughJitterAndLoss) {
+  holon client(holon_role::client);
+  client.add_participant("B", /*local=*/false);
+  const double dt = client.clock().fixed_dt();
+  const double frame_ticks = 2.0; // 60 fps
+  const peer_run r =
+      run_peer(client, circle, 6, 4.0, 0.040 / dt, 20, frame_ticks, 60 * 12, /*seed=*/777u);
+  const double frame_s = frame_ticks * dt;
+  int stalls = 0, off_speed = 0, n = 0;
+  double max_radius_err = 0.0, accel2 = 0.0;
+  for (std::size_t f = 120; f + 1 < r.shown.size(); ++f) { // after 2 s (at speed by then)
+    const double d =
+        std::sqrt(cvc::physics::dot(r.shown[f] - r.shown[f - 1], r.shown[f] - r.shown[f - 1]));
+    const double speed = d / frame_s;
+    if (speed < 0.3)
+      ++stalls;
+    if (speed < 0.75 * 3.0 || speed > 1.25 * 3.0)
+      ++off_speed;
+    const double radius = std::sqrt(r.shown[f].x * r.shown[f].x + r.shown[f].y * r.shown[f].y);
+    max_radius_err = std::max(max_radius_err, std::fabs(radius - 4.0));
+    const vec3 acc =
+        (r.shown[f + 1] - r.shown[f] * 2.0 + r.shown[f - 1]) * (1.0 / (frame_s * frame_s));
+    accel2 += cvc::physics::dot(acc, acc);
+    ++n;
+  }
+  const double accel_rms = std::sqrt(accel2 / n);
+  std::printf("jittered peer: %d stalls, %d of %d frames off speed, radius error %.3f m, "
+              "acceleration rms %.2f m/s^2 (the walk's own: 2.25)\n",
+              stalls, off_speed, n, max_radius_err, accel_rms);
+  EXPECT_EQ(stalls, 0);
+  EXPECT_LE(off_speed, n / 100) << "within 25% of its speed on 99% of frames";
+  EXPECT_LT(max_radius_err, 0.05);
+  EXPECT_LT(accel_rms, 6.0);
+}
+
+// A teleport (a respawn, an override) is no walk: the peer is shown there, not slid across.
+TEST(HolonTest, APeerTeleportIsShownAtOnce) {
+  holon client(holon_role::client);
+  client.add_participant("B", /*local=*/false);
+  const double dt = client.clock().fixed_dt();
+  for (int k = 0; k < 10; ++k) {
+    body_state s;
+    s.position = vec3{0.01 * k, 0.0, 0.0};
+    client.apply_authoritative("B", s, 10 + 6 * static_cast<std::uint64_t>(k));
+    for (int f = 0; f < 6; ++f)
+      client.advance(dt);
+  }
+  body_state away;
+  away.position = vec3{50.0, 0.0, 0.0};
+  client.apply_authoritative("B", away, 70);
+  client.advance(dt);
+  EXPECT_NEAR(client.display_pose("B").position.x, 50.0, 1e-9);
 }
 
 // ── a client replica counts the server's ticks ──────────────────────────────
@@ -253,24 +348,34 @@ TEST(HolonTest, ClientRealignsItsClockWhenSkewed) {
   EXPECT_EQ(client.tick(), 12u);
   EXPECT_DOUBLE_EQ(client.state("A").position.x, 3.0) << "the local avatar adopts the sample";
 
-  // Within max_skew_ticks the clocks are left alone (they run at the same rate).
-  body_state b0, b1;
-  b1.position = vec3{1.0, 0.0, 0.0};
-  client.apply_authoritative("B", b0, 12);
-  client.apply_authoritative("B", b1, 36); // B walks 0 -> 1 over 24 ticks
-  for (int i = 0; i < 10; ++i)
-    client.advance(dt);
-  client.apply_authoritative("A", s, 40); // 18 ticks away: no re-alignment
-  EXPECT_EQ(client.tick(), 22u);
+  // Within max_skew_ticks the clocks are left alone (they run at the same rate). B walks at
+  // 1 m/s, a sample every 6 ticks.
+  const auto b_at = [](std::uint64_t tick) {
+    body_state b;
+    b.position = vec3{(static_cast<double>(tick) - 12.0) / 120.0, 0.0, 0.0};
+    b.linear_velocity = vec3{1.0, 0.0, 0.0};
+    return b;
+  };
+  for (std::uint64_t t = 12; t <= 36; t += 6) {
+    client.apply_authoritative("B", b_at(t), t);
+    for (int i = 0; i < 6; ++i)
+      client.advance(dt);
+  }
+  client.apply_authoritative("A", s, 40); // 2 ticks away: no re-alignment
+  EXPECT_EQ(client.tick(), 42u);
   const double b_mid = client.display_pose("B").position.x;
-  EXPECT_GT(b_mid, 0.3);
-  EXPECT_LT(b_mid, 0.6);
+  EXPECT_GT(b_mid, 0.05);
+  EXPECT_LT(b_mid, 0.25);
 
-  // Past it (a stalled frame loop), the clock re-aligns -- and the peer's walk carries on
-  // from where it was shown rather than restarting.
+  // Past it (a stalled frame loop), the clock re-aligns -- and the peer, played out on wall time,
+  // is neither moved by the seek nor thrown off its walk after it.
   client.apply_authoritative("A", s, 400);
   EXPECT_EQ(client.tick(), 400u);
   EXPECT_NEAR(client.display_pose("B").position.x, b_mid, 1e-12);
+  client.apply_authoritative("B", b_at(42), 42);
+  client.advance(dt);
+  EXPECT_NEAR(client.display_pose("B").position.x - b_mid, 1.0 / 120.0, 1e-6)
+      << "a tick on at 1 m/s";
 }
 
 // ── a reconcile jump is reported once, for the renderer to ease out ─────────
@@ -575,7 +680,7 @@ TEST(HolonTest, PeerSampleSpanIsCapped) {
   client.apply_authoritative("B", s1, 250); // after a long still spell (a heartbeat gap)
   for (int i = 0; i < 31; ++i)
     client.advance(dt);
-  EXPECT_GT(client.display_pose("B").position.x, 0.99) << "walked in over 30 ticks, not 240";
+  EXPECT_GT(client.display_pose("B").position.x, 0.99) << "walked in over an interval, not 240";
 }
 
 // ── physics: rigid-body avatars in a Jolt world ─────────────────────────────

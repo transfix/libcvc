@@ -40,6 +40,11 @@ public:
   // one frame. Never stops on its own (an endless generator).
   produced_frame fill(std::uint8_t *buf, std::size_t cap) override;
 
+  // Its frames are always w x h, which may be a different shape from the stream's budget (a
+  // portrait pattern in a landscape camera stream): reported so a JPEG wrapper encodes them as-is.
+  int cur_width() const override { return w_; }
+  int cur_height() const override { return h_; }
+
 private:
   int w_;
   int h_;

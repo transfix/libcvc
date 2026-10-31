@@ -61,9 +61,9 @@ void register_stream_view_widget(ImGuiBackend &backend, cvc::app &app) {
                          const cvc::ariadne::Widget &w) -> cvc::ariadne::CustomEdit {
         // A bound value (a switchable token in state) wins over the static `stream:` prop.
         const std::string token = !current.empty() ? current : w.props.str("stream");
-        float width = static_cast<float>(w.props.num("size", 256.0));
-        if (!(width > 0.0f))
-          width = 256.0f; // guard size:0 / negative / NaN -> fall back to the default width
+        // `size:` a width (height from the frame's aspect) or [w, h], a box the frame fits inside.
+        float bw = 0.0f, bh = 0.0f;
+        const bool box = sx::stream_view_size(w.props, bw, bh);
         if (token.empty())
           return {}; // nothing addressed — draw nothing (handled)
         cvc::image img;
@@ -74,7 +74,8 @@ void register_stream_view_widget(ImGuiBackend &backend, cvc::app &app) {
         // Draw whatever image is published under `token`: the live frame fed above, or a static
         // image the host set via set_image(token, ...). draw_image returns false if nothing is
         // published yet (stream not live and no static image) — then draw a quiet placeholder.
-        if (!backend.draw_image(token.c_str(), width))
+        if (!(box ? backend.draw_image_fit(token.c_str(), bw, bh)
+                  : backend.draw_image(token.c_str(), bw)))
           backend.text_line(("[stream_view: " + token + " — no frame]").c_str());
         return {};
       });

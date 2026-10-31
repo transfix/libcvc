@@ -76,9 +76,11 @@ windows:
         color: [1.0, 0.4, 0.4]
         visible_when: (not (= (state-get "name_error") ""))
       - separator
+      # A box, not a width: a portrait phone camera shows whole, letterboxed, rather than squashed
+      # or standing taller than the window.
       - type: stream_view
         bind: cam_token
-        size: 320
+        size: [320, 240]
       - separator
       # Device pickers (real-device builds only; empty + hidden under ?synthetic=1). Picking a device
       # updates cam.sel / mic.sel; the host maps it to cam.want_device / mic.want_device and on_tick
@@ -230,7 +232,7 @@ windows:
       # Their camera, or "camera off" while they have it off (they send no frames then).
       - type: stream_view
         bind: peer.{i}.cam
-        size: 300
+        size: [300, 225]
         visible_when: (not (= (state-get "peer.{i}.video_off") "1"))
       - text: "camera off"
         visible_when: (= (state-get "peer.{i}.video_off") "1")
@@ -271,7 +273,9 @@ on_tick: |
                 (dict "device" 0 "rate" 48000 "ch" 1 "frames" 1024))
               (state-set "mic.cur_device" "0")))
         ; The camera at the size it is shown (peer tiles are ~300 px wide): 320x240 MJPEG at q60 and
-        ; 15 fps is ~0.6 Mbit/s per receiver, where 640x480 at q70 and 30 fps was ~5.
+        ; 15 fps is ~0.6 Mbit/s per receiver, where 640x480 at q70 and 30 fps was ~5. 320x240 is a
+        ; budget, not a shape: a camera keeps its own aspect within it, turned with it (a portrait
+        ; phone sends 240x320, or 180x320 at 9:16), and the tiles letterbox whatever arrives.
         (set cam (stream-open (dict "id" "camera" "codec" "mjpeg" "w" 320 "h" 240 "stride" 1280
                                     "expected_subscribers" 3)))
         (state-set "cam_token" (get-attr cam "token"))
