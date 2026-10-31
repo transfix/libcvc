@@ -86,9 +86,11 @@ Reactive slots — `visible_when`, `enabled_when` / `disabled_when`, computed `b
 - The value allowlist admits arithmetic, coercion, logic, and side-effect-free state
   *readers* only (`kAllowed`, [`ariadne.cpp:417`](../src/cvc/ariadne/ariadne.cpp)), plus
   `(has? "name")`, which asks what the host provides
-  ([§5.7](#57-requires-and-has--what-a-document-needs-from-its-host)).
+  ([§5.7](#57-requires-and-has--what-a-document-needs-from-its-host)). `json-parse` and
+  `json-encode` are on it ([§10.4](#104-json-replies)); `str-concat` is not, so a computed
+  label joins its parts with `string.join`.
 - The special-form gate admits only `if / begin / let / while / for / lambda / defun /
-  set / return / quote / yield / break` (`kAllowedForms`,
+  set / return / quote / yield / break / and / or` (`kAllowedForms`,
   [`ariadne.cpp:433`](../src/cvc/ariadne/ariadne.cpp)).
 
 Nothing that writes state, schedules, watches, sends messages, or does I/O is
@@ -1899,7 +1901,81 @@ A host of its own turns the network on with `AppRuntime::enable_net(NetHostConfi
 destroyed. `register_net_intrinsics(app)` alone still registers unchecked verbs with no
 credentials, for an embedding program that vouches for its documents.
 
+### 10.4 JSON replies
+
+A REST reply's body is text. Three verbs turn it into widgets
+([STATE_EXEC_DEVELOPER_GUIDE.md](STATE_EXEC_DEVELOPER_GUIDE.md) §2, "JSON", has the details):
+
+- `(json-parse text)` reads JSON into values: an object is a dict in document order, an array
+  a list, a number without a fraction or exponent an int, `null` nil. Malformed text raises a
+  `ValueError` with `line` and `col`, which a `try` can catch.
+- `(json-encode value [indent])` writes values as JSON, for a request body.
+- `(state-set-tree path value)` writes a parsed value as the subtree at `path`: a dict's keys
+  and a list's indices name child nodes, and a scalar is a node's value. A list's node holds
+  its length, so `repeat:` can count it. It replaces the subtree, removing what the value
+  doesn't name, and it checks the whole value before it writes anything.
+
+```yaml
+init: |
+  (state-set-tree "feed" (json-parse (get-attr (http-get "https://example.org/feed") "body")))
+windows:
+  - window: Feed
+    children:
+      - type: group
+        repeat: (state-get "feed.items")     # the list's length
+        children:
+          - text: ""
+            bind: feed.items.{i}.text         # each element's field
+```
+
+The request needs the host to allow its origin ([§10.3](#103-the-hosts-network-the-allowlist-and-credentials),
+`ari --net-allow https://example.org`).
+[`examples/ariadne/documents/json_feed.ari`](../examples/ariadne/documents/json_feed.ari) does
+this with a JSON string in place of the request, so it runs anywhere, `ari` included. Its last
+post has accented letters, CJK and an emoji: in both terminal backends a wide glyph takes two
+columns and the window's edge stays straight. `ari_run_json_feed_ftxui` and
+`ari_run_json_feed_tvision` check that on a real terminal: they run `ari run` in a tmux pane
+(Linux, where tmux is installed) and compare the window's rows. `ariadne_ftxui_test`'s
+`JsonFeed*` and `WideGlyphs*` tests check `ari snapshot` and the tvision backend's hosted layout;
+until they did, `ari snapshot`'s plain text put a space after each wide glyph. All
+three are data jobs: a large reply is parsed and written a slice per step, so it doesn't stall
+a frame. `json-parse` and `json-encode` are pure, so reactive expressions may use them too.
+
 ---
+
+### 10.5 WebSockets
+
+The `ws-*` verbs keep a WebSocket client open across ticks, for a server that pushes changes
+(a live feed) instead of being polled. Natively they use libcurl's WebSocket support (built with
+`ws` and `wss`, as the deps' libcurl is); in the browser build, the browser's own `WebSocket`
+(link with `-lwebsocket.js`, which the `cvc` target adds for Emscripten executables). A host
+without either has no `ws-*` verbs, so a document asks `(has? "ws-open")` and polls otherwise.
+
+| verb | what |
+|---|---|
+| `(ws-open URL [OPTS])`, `ws-open-async` | connect to a `ws://` or `wss://` URL; reply `{ok handle url error}` |
+| `(ws-send H TEXT)` | send a text message; `#t`, or an error when `H` is closed |
+| `(ws-poll H)` | the next message already in, or `nil`; never waits |
+| `(ws-recv H [SECONDS])`, `ws-recv-async` | the next message, waiting up to `SECONDS` (30); `nil` when none came |
+| `(ws-open? H)` | whether `H` is still open |
+| `(ws-close H [CODE])` | close `H` (code 1000) and forget it; `#t` if it was open, never an error |
+
+- `H` is a handle string (`"ws:3"`), so a program can keep it in state and use it on later
+  ticks. A host keeps at most 64 open.
+- A message is a dict `{type data code}`: `type` is `"text"` (`data` a string, ready for
+  `json-parse`), `"binary"` (`data` bytes), `"close"` (`code` the peer's close code, 1005 when it
+  sent none and 1006 when the connection dropped; `data` its reason) or `"error"`. A close or
+  an error is the last message; `ws-open?` is `#f` from then on. Fragmented messages arrive
+  whole; one longer than 16 MiB is an error and closes the connection.
+- `OPTS` takes `query`, `headers`, `auth` and credential values as the HTTP verbs do (§10.2,
+  §10.3), plus `timeout`, the seconds to connect (15). A browser's `WebSocket` can't send
+  request headers, so there `headers` and `auth` are refused; a server that wants a token takes
+  it in a message instead.
+- The host's policy (§10.3) checks the URL as its `http(s)` twin: `--net-allow
+  https://example.org` allows `wss://example.org/...`.
+- `ws-open` and `ws-recv` are async I/O calls like the HTTP verbs: the connect, or the wait,
+  runs on the background pool and the program parks. `ws-poll` is the one to call from an
+  `on_tick` that also does other work: it takes what has arrived and returns.
 
 ## 11. Caveats — what is not yet wired
 

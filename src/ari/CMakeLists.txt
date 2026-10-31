@@ -83,6 +83,26 @@ if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL 
                        PROPERTIES ENVIRONMENT "ARI_BINARY=$<TARGET_FILE:ari>")
 endif()
 
+# A document as each terminal backend really draws it: `ari run` in a 100x30 tmux pane, the text
+# inside its window's borders compared with the rows expected (tests/run_in_tmux_test.sh). `ari
+# snapshot` always lays out with FTXUI, so this is what checks the tvision desktop itself, and the
+# live FTXUI screen. json_feed.ari's rows include accents, CJK and an emoji, so a wide glyph that
+# took the wrong number of columns moves its row's right border. Linux, where tmux is; a backend
+# this ari lacks is skipped (77).
+if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
+   AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
+  find_program(CVC_TMUX_EXECUTABLE tmux)
+  if(CVC_TMUX_EXECUTABLE)
+    foreach(_backend ftxui tvision)
+      add_test(NAME ari_run_json_feed_${_backend}
+        COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_in_tmux_test.sh" $<TARGET_FILE:ari>
+                "${CMAKE_CURRENT_SOURCE_DIR}/../../examples/ariadne/documents/json_feed.ari"
+                ${_backend} "${CMAKE_CURRENT_SOURCE_DIR}/tests/json_feed.rows")
+      set_tests_properties(ari_run_json_feed_${_backend} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+    endforeach()
+  endif()
+endif()
+
 if(EMSCRIPTEN)
   # The browser build: ari.js/ari.wasm plus ari.html, an xterm.js page wired to the module's
   # stdin/stdout, which is all FTXUI's Emscripten screen talks to. Opened on ?src= (or with a page

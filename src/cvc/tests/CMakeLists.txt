@@ -17,6 +17,7 @@ add_executable(ariadne_requires_test ariadne_requires_test.cpp)
 add_executable(ariadne_stream_view_test ariadne_stream_view_test.cpp)
 add_executable(x11_macro_headers_test x11_macro_headers_test.cpp)
 add_executable(net_http_client_test net_http_client_test.cpp)
+add_executable(net_ws_client_test net_ws_client_test.cpp)
 add_executable(net_policy_test net_policy_test.cpp)
 add_executable(uri_http_cache_test uri_http_cache_test.cpp)
 add_executable(state_test state_test.cpp)
@@ -311,6 +312,7 @@ set(TEST_TARGETS
   ariadne_stream_view_test
   x11_macro_headers_test
   net_http_client_test
+  net_ws_client_test
   net_policy_test
   uri_http_cache_test
   state_test
@@ -655,7 +657,7 @@ target_link_libraries(ariadne_ftxui_test
     GTest::gtest
     GTest::gtest_main
 )
-# Two tests load the GL-free terminal documents from the repo's examples/ tree.
+# Three tests load GL-free documents from the repo's examples/ tree.
 target_compile_definitions(ariadne_ftxui_test PRIVATE
   CVC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../examples")
 
@@ -688,6 +690,13 @@ target_link_libraries(ariadne_stream_view_test
 )
 
 target_link_libraries(net_http_client_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(net_ws_client_test
   PRIVATE
     cvc
     GTest::gtest
@@ -2534,6 +2543,7 @@ cvc_discover_tests(ariadne_stream_view_test)
 cvc_discover_tests(ariadne_bind_test)
 cvc_discover_tests(x11_macro_headers_test)
 cvc_discover_tests(net_http_client_test)
+cvc_discover_tests(net_ws_client_test)
 cvc_discover_tests(net_policy_test)
 cvc_discover_tests(uri_http_cache_test)
 cvc_discover_tests(state_test)

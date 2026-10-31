@@ -2605,7 +2605,9 @@ PYCVC_STATE_EXEC_ENUM(cvc::state_exec::resource_policy::mode, pycvc_enum_resourc
          {"raise_value", static_cast<int>(eval_phase::raise_value)},
          {"await_call", static_cast<int>(eval_phase::await_call)},
          {"lock_enter", static_cast<int>(eval_phase::lock_enter)},
-         {"lock_body", static_cast<int>(eval_phase::lock_body)}});
+         {"lock_body", static_cast<int>(eval_phase::lock_body)},
+         {"and_next", static_cast<int>(eval_phase::and_next)},
+         {"or_next", static_cast<int>(eval_phase::or_next)}});
     if (pycvc_enum_eval_phase != NULL)
       PyDict_SetItemString(d, "eval_phase", pycvc_enum_eval_phase);
     using cvc::state_exec::step_kind;
@@ -4086,6 +4088,12 @@ std::unique_ptr<data_job> make_copy_job(value_t v);
 std::unique_ptr<data_job> make_substitute_job(value_t tmpl,
                                               const std::unordered_map<std::string, value_t> &subst);
 std::unique_ptr<data_job> make_heap_share_job(const process &proc);
+// json-parse and json-encode as jobs: a malformed text raises pycvc.dsl_error (a ValueError, with
+// the line and column in its message), as in the DSL.
+const size_t kJsonMaxDepth = 512;
+const size_t kJsonMaxIndent = 10;
+std::unique_ptr<data_job> make_json_parse_job(std::string text);
+std::unique_ptr<data_job> make_json_encode_job(value_t v, size_t indent = 0);
 value_t run_to_completion(data_job &job);
 void count_data_nodes(size_t nodes);
 
