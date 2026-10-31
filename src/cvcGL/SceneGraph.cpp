@@ -1187,6 +1187,19 @@ public:
 protected:
   StridedShadowBaker() = default;
 
+  // VTK's bake fragment, plus one: each texel drawn holds 1 + exp(c * depth), so it can never be
+  // mistaken for the clear (the renderer's background, at most 1). See bake().
+  bool PreReplaceShaderValues(std::string &vertexShader, std::string &geometryShader,
+                              std::string &fragmentShader, vtkAbstractMapper *mapper,
+                              vtkProp *prop) override {
+    if (!this->Superclass::PreReplaceShaderValues(vertexShader, geometryShader, fragmentShader,
+                                                  mapper, prop))
+      return false;
+    vtkShaderProgram::Substitute(fragmentShader, "gl_FragData[0].r = exp(depthC * ldepth);",
+                                 "gl_FragData[0].r = 1.0 + exp(depthC * ldepth);", false);
+    return true;
+  }
+
   bool focusChanged() const {
     if ((FocusRadius > 0.0) != (m_bakedFocusRadius > 0.0))
       return true;
@@ -1254,9 +1267,10 @@ protected:
   //     main camera kept after culling (VTK's PreRender(s)). A caster out of view otherwise draws
   //     into the map with its own shader -- its colour, not its depth -- which the exponential
   //     lookup happened to read as an occluder in front of everything, and a depth lookup cannot;
-  //   - the maps are cleared to 0, not to the background's red: a drawn texel holds
-  //     exp(c * depth) >= 1, so FilteredShadowMapPass tells an empty texel from a caster at the
-  //     light's near plane (exp(0) = 1, which a white background's red would equal).
+  //   - (PreReplaceShaderValues) a drawn texel holds 1 + exp(c * depth), at least 2: the renderer
+  //     clears each map to its background (its red, or a gradient's), anywhere in [0, 1], and
+  //     FilteredShadowMapPass must tell an empty texel from a caster at the light's near plane,
+  //     whose exp(c * 0) = 1 a pale background's red comes close to.
   // Otherwise as VTK has it: the same props, update test, maps, FBO and passes.
   void bake(const vtkRenderState *s) {
     vtkOpenGLClearErrorMacro();
@@ -1377,9 +1391,6 @@ protected:
 
     this->CurrentLightIndex = 0;
     this->PreRender(&s2);
-    // Each map's clear (the FBO's) to 0 for the bake; the frame's own colour comes back after.
-    vtkOpenGLState::ScopedglClearColor clearSaver(ostate);
-    ostate->vtkglClearColor(0.0f, 0.0f, 0.0f, 0.0f);
     lights->InitTraversal();
     for (vtkLight *l = lights->GetNextItem(); l; l = lights->GetNextItem()) {
       if (!l->GetSwitch() || !this->LightCreatesShadow(l))
@@ -1584,15 +1595,17 @@ vtkStandardNewMacro(StridedShadowBaker);
 // 4.7 km out, a 50 m building darkens the ground behind it by a fifth of its light and a 2 m
 // vehicle by a hundredth -- no visible shadow at all.
 //
-// The maps are left exactly as VTK bakes them (exp(c * depth), so log(texel) / c is the
-// occluder's depth again) and the lookup becomes a depth test per tap over a 16-tap Poisson disc
+// The maps are baked as VTK bakes them, plus one (1 + exp(c * depth): StridedShadowBaker, so
+// log(texel - 1) / c is the occluder's depth again) and the lookup becomes a depth test per tap
+// over a 16-tap Poisson disc
 // of Softness texels, averaged: shadowed or not whatever the scale, with a soft edge. Acne is held
 // off by moving the receiver along its normal and comparing against a depth bias, both measured
 // in shadow-map texels at the receiver (a perspective texel grows with distance from the light),
 // so neither depends on the scene's units, and each tap is compared at the depth the receiver's
 // own plane has under it (a receiver-plane bias, from the screen derivatives), so a surface the
 // light grazes does not shadow itself across the disc. A tap on a texel nothing was drawn into
-// (the bake clears the maps to 0; a drawn texel is at least 1) reads lit, and the shadow fades out
+// (StridedShadowBaker stores 1 + exp(c * depth), at least 2, over a clear of at most 1) reads
+// lit, and the shadow fades out
 // over the map's outer tenth: with a focus (StridedShadowBaker) the map covers part of the scene,
 // and its edge must not show.
 class FilteredShadowMapPass : public vtkShadowMapPass {
@@ -1721,11 +1734,11 @@ protected:
            "    if (k >= taps) { break; }\n"
            "    vec2 o = cvcPoisson[k]*r;\n"
            "    float t = texture2D(shadowMap, p + o).r;\n"
-           // Nothing drawn here: the bake clears to 0 (StridedShadowBaker::bake), and a drawn
-           // texel holds exp(c*z) >= 1.
-           "    if (t < 0.5) { lit += 1.0; continue; }\n"
+           // Nothing drawn here: the clear is at most 1, a drawn texel 1 + exp(c*z) >= 2
+           // (StridedShadowBaker::PreReplaceShaderValues).
+           "    if (t < 1.5) { lit += 1.0; continue; }\n"
            "    float zr = ldepth + clamp(dot(o, g), -lim, lim) - bias;\n"
-           "    lit += (zr > log(t)/depthC) ? 0.0 : 1.0;\n"
+           "    lit += (zr > log(t - 1.0)/depthC) ? 0.0 : 1.0;\n"
            "  }\n"
            "  lit /= float(taps);\n"
            "  float edge = 2.0*max(abs(p.x - 0.5), abs(p.y - 0.5));\n"

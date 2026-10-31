@@ -201,6 +201,19 @@ int main() {
   look(0.5 * run * dx, 0.5 * run * dy, 600.0);
   chk(luma(shadeX, shadeY) < 0.75 * sun, "B: clearing the focus brings the whole-city map back");
 
+  // C. demo3's case: a pale sky (the maps are cleared to the background, its red 0.78 here) and a
+  // ground that casts nothing (repainted every frame), so most of the map is clear colour. The
+  // sunlit ground stays lit, and the building's shadow still falls on it.
+  view.setBackground(0.78, 0.83, 0.88);
+  g->setCastsShadow(false);
+  sg.invalidateShadowBake();
+  look(0.5 * run * dx, 0.5 * run * dy, 600.0);
+  const double paleSun = luma(-1.2 * run * dx, -1.2 * run * dy);
+  const double paleShade = luma(shadeX, shadeY);
+  std::printf("  C pale sky, ground not casting: shadow %.1f  sunward %.1f\n", paleShade, paleSun);
+  chk(std::fabs(paleSun - sun) < 0.06 * sun, "C: the sunlit ground reads lit, as with a caster");
+  chk(paleShade < 0.75 * paleSun, "C: the building's shadow still falls on it");
+
   std::printf("%s (%d failures)\n", fails ? "FAILED" : "PASSED", fails);
   return fails ? 1 : 0;
 }
