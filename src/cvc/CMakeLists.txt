@@ -763,6 +763,7 @@ if(CVC_ENABLE_MESHER)
       geometry/cvc-mesher/contour/basic.h
       geometry/cvc-mesher/contour/dataslc.h
       geometry/cvc-mesher/contour/contour.h
+      geometry/cvc-mesher/contour/contour_verbose.h
       geometry/cvc-mesher/contour/dict.h
       geometry/cvc-mesher/contour/contour2d.h
       geometry/cvc-mesher/contour/seedchkr3.h
@@ -820,7 +821,6 @@ if(CVC_ENABLE_MESHER)
       geometry/cvc-mesher/LBIE/octree.h
       geometry/cvc-mesher/LBIE/LBIEMesherRenderable.h
       geometry/cvc-mesher/Mesher/mesher.h
-      geometry/cvc-mesher/libcontour_mutex.h
   )
   set(MESHER_SOURCE_FILES
       geometry/cvc-mesher/contour/squeue.cpp

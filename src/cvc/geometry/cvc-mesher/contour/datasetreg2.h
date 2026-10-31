@@ -14,7 +14,7 @@
 #include "dataset.h"
 #include "datareg2.h"
 
-extern int verbose;
+#include "contour_verbose.h"
 
 //--------------------------------------------------------------------
 //

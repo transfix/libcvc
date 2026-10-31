@@ -19,7 +19,7 @@
 // use a small prime # of buckets
 #define NBUCKETS 3001
 
-extern int verbose;
+#include "contour_verbose.h"
 
 using namespace std;
 

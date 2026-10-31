@@ -29,9 +29,9 @@
 #define FSAMPLES 256
 #define FSAMPLES_TOPO 128
 
-extern int verbose;
+#include "contour_verbose.h"
 
-int  Datareg3::cellFaceVert[6][4] = {
+const int  Datareg3::cellFaceVert[6][4] = {
    { 0, 1, 2, 3 },
    { 0, 3, 4, 7 },
    { 4, 5, 6, 7 },

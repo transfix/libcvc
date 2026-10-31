@@ -16,6 +16,8 @@
 
 #include <string.h>
 #include <iostream>
+#include <stdexcept>
+#include <string>
 #include <sys/types.h>
 
 #include "data.h"			// basic data and algorithm clases
@@ -35,21 +37,16 @@
 
 //------------------------------------------------------------------------
 //
-// defaultHandler() - contour library default error handler
+// errorHandler() - the contour library's error handler. It was the
+// default of a settable global function pointer (setErrorHandler), and
+// its fatal branch called exit(0): a fatal error throws instead.
 //
 //------------------------------------------------------------------------
 
-void	defaultHandler(const char *str, int fatal)
+void	errorHandler(const char *str, int fatal)
 {
     if (fatal)
-	{
-	fprintf(stderr, "libcontour: fatal error: %s\n", str);
-#ifndef WIN32
-	if (errno)
-#endif
-	    perror("libcontour");
-	exit(0);
-	}
+	throw std::runtime_error(std::string("libcontour: fatal error: ") + str);
     else
 	{
 	fprintf(stderr, "libcontour: error: %s\n", str);
@@ -62,16 +59,6 @@ void	defaultHandler(const char *str, int fatal)
 
 //------------------------------------------------------------------------
 //
-// verbose, errorHandler - global variables
-//
-//------------------------------------------------------------------------
-
-int	verbose = 1;					// verbose level
-
-void	(*errorHandler)(const char *, int) = defaultHandler;	// error handler
-
-//------------------------------------------------------------------------
-//
 // setPreprocessing() - display the progress of preprocessing
 //
 //------------------------------------------------------------------------
@@ -79,28 +66,6 @@ void	(*errorHandler)(const char *, int) = defaultHandler;	// error handler
 void    setPreprocessing(int percent, void *data)
 {
     fprintf(stderr, "Preprocessing: %d done\n", percent);
-}
-
-//------------------------------------------------------------------------
-//
-// setVerboseLevel() - set the library's verbose level, default is 1
-//
-//------------------------------------------------------------------------
-
-void	setVerboseLevel(int level)
-{
-    verbose = level;
-}
-
-//------------------------------------------------------------------------
-//
-// setErrorHandler() - set the library's error handler
-//
-//------------------------------------------------------------------------
-
-void	setErrorHandler(void (*handler)(const char *, int))
-{
-    errorHandler = handler;
 }
 
 //------------------------------------------------------------------------

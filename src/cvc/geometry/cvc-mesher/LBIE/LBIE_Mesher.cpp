@@ -3,7 +3,6 @@
 #include <cfloat>
 #include <cmath>
 #include <limits>
-#include <mutex>
 #include <vector>
 
 #include "LBIE_Mesher.h"
@@ -11,7 +10,6 @@
 //libcontour headers
 #include <contour.h>
 #include <datasetreg3.h>
-#include <libcontour_mutex.h>
 
 namespace LBIE
 {
@@ -487,11 +485,7 @@ namespace LBIE
     dim[0] = vol.XDim(); dim[1] = vol.YDim(); dim[2] = vol.ZDim();
     span[0] = vol.XSpan(); span[1] = vol.YSpan(); span[2] = vol.ZSpan();
     orig[0] = vol.XMin(); orig[1] = vol.YMin(); orig[2] = vol.ZMin();
-
-    //libcontour is not re-entrant (libcontour_mutex.h): hold its lock from the dataset's
-    //creation through the deletes below
-    std::lock_guard<std::mutex> lock(cvc::libcontour_mutex());
-
+    
     //convert it to a supported libcontour type and load it into libisocontour
     switch(vol.voxelType())
       {

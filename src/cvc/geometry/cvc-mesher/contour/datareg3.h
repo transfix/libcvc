@@ -287,7 +287,7 @@ class Datareg3 : public Data {
 	 gz = -gz;
       }
 
-      static int cellFaceVert[6][4];
+      static const int cellFaceVert[6][4];
 					 	// add by fan: compute topology
 
       float *compVolRelation(u_int &, float ***, float ***, float ***);

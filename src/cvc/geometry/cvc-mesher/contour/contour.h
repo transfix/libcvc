@@ -164,14 +164,6 @@ typedef struct ConDataset	// structure to store and entire dataset
  *
  *----------------------------------------------------------------------*/
 
-		/* set the library's level of verbosity, default is 1 */
-
-void		setVerboseLevel(int level);
-
-		/* set the library's error handler */
-
-void		setErrorHandler(void (*handler)(const char *, int));
-
 		/* create a new dataset for unstructured data */
 
 ConDataset	*newDatasetUnstr(int datatype, int meshtype, int nvars, 

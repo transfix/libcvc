@@ -15,5 +15,3 @@ using namespace std;
 
 #include "data.h"
 
-int Data::funtopol1;
-int Data::funtopol2;

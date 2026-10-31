@@ -23,8 +23,8 @@
 
 using namespace std;
 
-extern int verbose;
-extern void (*errorHandler)(const char *, int);
+#include "contour_verbose.h"
+void errorHandler(const char *, int);
 
 //------------------------------------------------------------------------
 //
@@ -32,7 +32,7 @@ extern void (*errorHandler)(const char *, int);
 //
 //------------------------------------------------------------------------
 
-static int unst2d[8][3] = {
+static const int unst2d[8][3] = {
    {0},
    {1, 2, 0},
    {1, 0, 1},
