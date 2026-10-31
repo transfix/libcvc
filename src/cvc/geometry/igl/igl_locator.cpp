@@ -26,6 +26,7 @@
 #include <cmath>
 #include <igl/AABB.h>
 #include <igl/fast_winding_number.h>
+#include <igl/parallel_for.h>
 #include <initializer_list>
 #include <limits>
 #include <mutex>
@@ -77,14 +78,26 @@ void locator_closest(const locator_state &s, const dvec &Qp, dvec &sqd,
     C.assign(3 * n, std::numeric_limits<double>::quiet_NaN());
     return;
   }
-  const Eigen::MatrixXd Q = to_matrix(Qp, 3);
-  Eigen::VectorXd D;
-  Eigen::VectorXi I;
-  Eigen::MatrixXd P;
-  s.tree.squared_distance(s.V, s.F, Q, D, I, P);
-  from_vector(D, sqd);
-  face.assign(I.data(), I.data() + I.size());
-  from_matrix(P, C);
+  // igl::AABB's batch query is its per-point one in a parallel_for that stays serial below 10000
+  // points, so the few thousand nodes a threaded sdf_stepper step asks for ran on one core (5x
+  // slower than one whole-grid query). The same per-point query, parallel from 1000 points as
+  // igl's winding-number query is.
+  sqd.resize(n);
+  face.resize(n);
+  C.resize(3 * n);
+  igl::parallel_for(
+      Eigen::Index(n),
+      [&](Eigen::Index p) {
+        const std::size_t q = std::size_t(p);
+        const Eigen::RowVector3d at(Qp[3 * q], Qp[3 * q + 1], Qp[3 * q + 2]);
+        Eigen::RowVector3d c;
+        int f = -1;
+        sqd[q] = s.tree.squared_distance(s.V, s.F, at, f, c);
+        face[q] = f;
+        for (int k = 0; k < 3; ++k)
+          C[3 * q + std::size_t(k)] = c(k);
+      },
+      1000);
 }
 
 // ---- ray casting ----------------------------------------------------------------
