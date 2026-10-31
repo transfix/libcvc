@@ -41,7 +41,9 @@
 // transfix/libcvc#808); it only chooses the bounds.
 //
 // No rendering: the node's tick is run directly. Plain main, non-zero on failure (NDEBUG is defined
-// in Release, so no assert()).
+// in Release, so no assert()). Without CVC_ENABLE_LIBIGL, orient_tets, tet_volumes and the
+// boundary throw cvc::mesh_ops_unavailable: their checks (volumes, sheets, normals), the FEM solves
+// and the fe_lab node are skipped, and the mesher's checks still run.
 
 #include <algorithm>
 #include <chrono>
@@ -219,9 +221,11 @@ std::pair<double, double> corner_radii(const cvc::geometry &tm) {
 // The boundary of a tet mesh of a shell round the origin, as fe_lab builds it (orient_tets +
 // tet_boundary_surface + compute_vertex_normals): its sheet count, and how many of its vertices'
 // normals point out of the shell -- away from the centre on the outermost sheet, towards it on
-// an inner one -- of how many.
+// an inner one -- of how many. -1 without the mesh ops (libcvc built without CVC_ENABLE_LIBIGL).
 int shell_sheets(const cvc::geometry &tm, std::size_t &good, std::size_t &n) {
   good = n = 0;
+  if (!cvc::mesh_ops_available())
+    return -1;
   cvc::geometry t(tm);
   cvc::orient_tets(t);
   cvc::geometry s = cvc::tet_boundary_surface(t);
@@ -313,7 +317,11 @@ int main() {
                 "[%.3f, %.3f], %zu outside)",
                 corners, vmin, vmax, outside);
   chk(corners > 0 && outside == 0, buf);
+  if (!cvc::mesh_ops_available())
+    std::printf("     (built without CVC_ENABLE_LIBIGL: the volume, sheet and normal checks are "
+                "skipped; -1 sheets below means not checked)\n");
 
+#ifdef CVC_ENABLE_LIBIGL
   // orient_tets (as fe_lab does): every tet right-handed, the shell's volume.
   cvc::orient_tets(tm);
   const std::vector<double> vols = cvc::tet_volumes(tm);
@@ -372,7 +380,6 @@ int main() {
     chk(n > 0 && good == n, buf);
   }
 
-#ifdef CVC_ENABLE_LIBIGL
   std::printf("== the FEM solves on the shell ==\n");
   {
     const cvc::fem::domain dom = cvc::fem::domain::VOLUME;
@@ -544,7 +551,7 @@ int main() {
                     "normals outward (%zu of %zu)",
                     at_end.const_tets().size(), solid.const_tets().size(), count, good, n);
       chk(!solid.const_tets().empty() && solid.const_tets().size() == at_end.const_tets().size() &&
-              count == 1 && n > 0 && good == n,
+              (count < 0 || (count == 1 && n > 0 && good == n)),
           buf);
     }
     {
@@ -587,7 +594,7 @@ int main() {
                   "... two sheets (%d) through the voxels on both bounds, their normals out of the "
                   "shell (%zu of %zu)",
                   ls, good, n);
-    chk(ls == 2 && n > 0 && good == n, buf);
+    chk(ls < 0 || (ls == 2 && n > 0 && good == n), buf);
     // The rule: a bound voxels sit on is meshed half way to the nearest value beyond it, so on
     // integer data [a, b] is [a - 0.5, b + 0.5] -- here and when EVERY voxel in the interval sits
     // on a bound ([2, 3]: labels 2 and 3 only, nothing strictly between).
@@ -608,7 +615,8 @@ int main() {
                     a, b, ha, hb, m.const_tets().size(), h.const_tets().size(), s2, g2, n2,
                     w.empty() ? "" : " -- ", w.c_str());
       chk(!m.const_tets().empty() && m.const_tets().size() == h.const_tets().size() &&
-              m.const_points().size() == h.const_points().size() && s2 == 2 && n2 > 0 && g2 == n2,
+              m.const_points().size() == h.const_points().size() &&
+              (s2 < 0 || (s2 == 2 && n2 > 0 && g2 == n2)),
           buf);
     };
     same_as(1.0, 3.0, 0.5, 3.5);
