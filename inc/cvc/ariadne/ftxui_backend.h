@@ -191,7 +191,9 @@ public:
   // it draws with this backend's own primitives (text_line, set_image + draw_image, ...). It gets
   // the bound value and the Widget and returns the edit; the core owns the cvc::state write. An
   // unregistered type is not handled, so the core draws a placeholder. TvisionBackend inherits it.
-  // `stream_view` registers this way (register_stream_view_widget, stream/stream_view.h).
+  // Registering also marks the type known (register_known_widget_type), so a document's
+  // requires: [type] and (has? "type") find it. `stream_view` registers this way
+  // (register_stream_view_widget, stream/stream_view.h).
   using CustomDrawFn = std::function<CustomEdit(const std::string &current, const Widget &w)>;
   void register_widget(std::string custom_type, CustomDrawFn draw);
   CustomEdit custom_widget(const char *type, const std::string &current, const Widget &w) override;

@@ -21,6 +21,11 @@ meta:
   name: Ariadne terminal tour
   min_libcvc: 3.4.0
 
+requires:
+  - ui.windows
+  - ui.menubar
+  - quit                           # the (quit) verb on_signal: calls; ari and arigl register it
+
 # The document's own command line. ari parses it into the read-only args.<name> before init: runs;
 # the raw strings are in argv, (state-data-get "argv").
 args:

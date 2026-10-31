@@ -23,6 +23,9 @@ meta:
   author: cvc
   min_libcvc: 3.4.0
 
+requires:
+  - gl.scene                       # a scene renderer realizes the scene: block (arigl; not ari)
+
 customs:
   - node: mesh_lab
     required: true
