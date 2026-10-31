@@ -64,7 +64,7 @@ enum class ImageShape { Rect, Circle };
 // image name; `bind` a key or computed expression naming one instead. In a terminal, text can't sit
 // on pixels, so `terminal` says what to draw there: dimmed half-blocks behind the content, the
 // picture as a row of `banner_rows` above it, or nothing.
-enum class BackdropTerminal { Behind, Banner, None };
+enum class BackdropTerminal { Behind, Banner, Off }; // Off: `terminal: none`
 struct Background {
   std::string src;
   std::string bind;
