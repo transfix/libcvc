@@ -1055,6 +1055,77 @@ windows:
   to scripts, `state://`, replication and the persisted tree as any other key; a document keeps a
   secret out of shared state by clearing the key once it has used it.
 
+### 5.11 Pictures by URL: `image:` with a URI
+
+An `image:` whose `src` (or the value at its `bind:`) is a URI shows that picture. Design and
+the work still to come (backgrounds, video, audio, a card component):
+[ARIADNE_MEDIA.md](roadmap/ARIADNE_MEDIA.md).
+
+```yaml
+windows:
+  - window: Profile
+    children:
+      - image: avatar                        # the label: the caption a failure shows
+        src: https://media.example/u/42.webp
+        auth: example                        # optional: the host sends credential `example`
+        size: [48, 48]                       # a box in px; one number is a width
+        fit: cover                           # contain (default) | cover | fill
+        shape: circle                        # rect (default) | circle
+        status: profile.avatar_status        # optional: loading | ready | failed
+      - type: group
+        repeat: (state-get "feed.items")
+        children:
+          - image: ""
+            bind: feed.items.{i}.picture     # a key, or a computed expression, naming a URL
+            size: [480, 270]
+```
+
+- **What counts as a URI.** A value that starts with `http://`, `https://`, `file://`, `cvc://` or
+  `state://`. Anything else is the name of an image the host published (`set_image`,
+  `--image NAME=FILE`), as before. `src:` may be a computed expression too.
+- **http(s)** goes through the host's network (§10.3). The host must turn it on and allow the
+  picture's origin (`ari --net-allow https://media.example`). `auth: NAME` sends credential
+  `NAME` as `Authorization: Bearer`, on the same terms as `http-get`'s `auth`: only to an origin
+  the credential is bound to, never following a redirect. The token never reaches state, an
+  error, a tooltip or a published name. Without the network, an http(s) picture fails ("the host
+  has the network off").
+- **`file://`** paths resolve against the document's directory (`file://img/logo.png`), or are
+  absolute (`file:///usr/share/...`). `cvc://` and `state://` resolve as `import:` does (§6.4).
+- **Formats:** PNG, JPEG, GIF (its first frame), BMP and, where libcvc has libwebp, WebP. Where it
+  has ImageMagick, also TIFF, AVIF and HEIC. The format comes from the bytes, not the name or the
+  Content-Type. A file over 64 MiB, or one wider or taller than 8192 px, is refused before it is
+  decoded. A decoded picture is downscaled to 2048 px on its long side.
+- **Off the frame.** The first frame that draws the widget starts the load, and the widget shows a
+  neutral placeholder of the same box until the picture arrives, so nothing moves. The fetch, the
+  decode and the fit run on the app's background pool. A failure shows a darker placeholder, says
+  why in its tooltip, and is tried again after 30 s. Pictures are kept in memory per runtime, up to
+  64 MiB, and dropped 30 s after the last frame that drew them. Two widgets that show the same URL
+  share one fetch. `ari snapshot` and `arigl snapshot` wait for the pictures they draw, those
+  whose URL a reply puts in state included: they draw again until no picture is still loading
+  (at most 10 s, as for requests).
+- **The box.** `size: [w, h]` is a box; `fit` says how the picture fills it: `contain` (all of it,
+  transparent bars), `cover` (all of the box, the middle of the picture) or `fill` (stretched).
+  `shape: circle` makes the outside of the inscribed circle transparent. `size: w` keeps the
+  picture's own shape at width `w`, and its placeholder is 16:9 (1:1 for a circle) until it loads.
+  The fitted picture is made at twice the box's size, where the source has the pixels, so it stays
+  sharp on a HiDPI screen.
+- **Every backend draws them**, since the core publishes the fitted picture as any other image:
+  ImGui as a texture, and the terminal backends as Kitty, Sixel or iTerm pixels, or half-blocks
+  (§4). Hosted tvision always draws half-blocks. In half-blocks, a transparent pixel leaves its
+  half of the cell to the terminal's own background, so a round avatar has no corners on a light
+  or a dark terminal. Kitty, Sixel and iTerm draw transparent pixels black.
+- **The capability token `image.url`** (§5.7) holds in every host that does this, so a document
+  for older hosts too gates its pictures with `(has? "image.url")` or
+  `requires: [{name: image.url, optional: true}]` and draws its own placeholder elsewhere (an
+  older host shows an unknown URI as text).
+- **`status:`** names a state key the widget keeps `loading`, `ready` or `failed` in, with the
+  reason under `<key>.error`. A document reads it to show something else when a picture is
+  missing, and a test asserts on it.
+- **In a browser build without threads** (ari.html, arigl-web) a picture's http(s) request is
+  started, not sent in place (§10.2), so the frame loop goes on while it is out. The reply is
+  decoded when the browser hands it over, between frames. A `file://`, `cvc://` or `state://`
+  picture is read and decoded between two frames, one at a time.
+
 ## 6. Composition: include / import / load
 
 Three mechanisms compose documents. They differ in **isolation**, not in how they
@@ -1485,7 +1556,8 @@ flag written after the document goes to the document, and `ari` points that out.
 
 Three of the general flags are for pictures. `--graphics auto|kitty|sixel|iterm|color|mono` sets
 how images draw (see *Pixel graphics* in §4), and `--image NAME=FILE` publishes a picture
-for the document's `image:` widgets with `src: NAME`
+for the document's `image:` widgets with `src: NAME` (an `image:` can also name a URL itself,
+§5.11)
 ([`terminal_images.ari`](../examples/ariadne/terminal/terminal_images.ari) is an example).
 With `--ansi` and `--graphics kitty`, `sixel` or `iterm`, `snapshot` also prints the images, after
 clearing the screen, at the terminal's cell size (`--cell-size WxH` where it can't be asked).

@@ -61,6 +61,15 @@ public:
   // the Backend (it must outlive the Runtime).
   void set_backend(Backend *backend);
 
+  // §5.11: the directory a picture's relative file:// URI resolves against (the document's own;
+  // AppRuntime::load sets it). Empty: the working directory.
+  void set_media_base(std::string dir);
+  // §5.11: whether a picture by URI the document draws is still loading.
+  bool media_busy() const;
+  // §5.11: whether the last frame drew a picture that was still loading (a placeholder), so a
+  // later frame shows more once media_busy() is false: a snapshot waits, then draws again.
+  bool media_stale() const;
+
   // Set/replace the widget tree. The swap is applied at the next frame boundary
   // (the top of render(), before any node is emitted), never mid-walk — the P0
   // form of the §11.5.1 reconcile commit boundary. Safe to call from the host

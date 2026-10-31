@@ -201,8 +201,13 @@ fx::Element isolated(fx::Element e) { return std::make_shared<Isolated>(std::mov
 // it falls back to a luminance ramp, one glyph per cell. `pixels` is cols x (2 * rows) RGB8.
 class HalfBlockImage : public fx::Node {
 public:
-  HalfBlockImage(cvc::image pixels, int cols, int rows, FtxuiBackend::Options::ImageColor mode)
-      : pixels_(std::move(pixels)), cols_(cols), rows_(rows), mode_(mode) {}
+  // `alpha` (GRAY u8, the size of `pixels`, or empty: all opaque): a pixel under half opacity is
+  // transparent, and that half of the cell keeps the terminal's own background (a round avatar on
+  // a light or a dark terminal alike); a cell both of whose pixels are transparent is not drawn.
+  HalfBlockImage(cvc::image pixels, int cols, int rows, FtxuiBackend::Options::ImageColor mode,
+                 cvc::image alpha = cvc::image())
+      : pixels_(std::move(pixels)), alpha_(std::move(alpha)), cols_(cols), rows_(rows),
+        mode_(mode) {}
 
   void ComputeRequirement() override {
     requirement_.min_x = cols_;
@@ -215,8 +220,12 @@ public:
         mode_ == Mode::Mono ||
         (mode_ == Mode::Auto && fx::Terminal::ColorSupport() == fx::Terminal::Color::Palette1);
     const unsigned char *px = std::as_const(pixels_).data(); // const: no copy-on-write fork
+    const unsigned char *al = alpha_.empty() ? nullptr : std::as_const(alpha_).data();
     const int w = pixels_.width();
     auto at = [&](int x, int y) { return px + (static_cast<std::size_t>(y) * w + x) * 3; };
+    auto solid = [&](int x, int y) {
+      return !al || al[static_cast<std::size_t>(y) * w + x] >= 128;
+    };
     static const char *kRamp[] = {" ", ".", ":", "-", "=", "+", "*", "#", "%", "@"};
     for (int r = 0; r < rows_; ++r) {
       const int y = box_.y_min + r;
@@ -226,17 +235,26 @@ public:
         const int x = box_.x_min + c;
         if (x > box_.x_max)
           break;
-        const unsigned char *top = at(c, 2 * r);
-        const unsigned char *bot = at(c, std::min(2 * r + 1, pixels_.height() - 1));
+        const int ty = 2 * r, by = std::min(2 * r + 1, pixels_.height() - 1);
+        const unsigned char *top = at(c, ty);
+        const unsigned char *bot = at(c, by);
+        const bool top_on = solid(c, ty), bot_on = solid(c, by);
+        if (!top_on && !bot_on)
+          continue; // all transparent: whatever is under it shows
         fx::Cell &cell = screen.CellAt(x, y);
         if (mono) {
-          const int lum =
-              (top[0] * 3 + top[1] * 6 + top[2] + bot[0] * 3 + bot[1] * 6 + bot[2]) / 20;
+          const unsigned char *a = top_on ? top : bot, *b = bot_on ? bot : top;
+          const int lum = (a[0] * 3 + a[1] * 6 + a[2] + b[0] * 3 + b[1] * 6 + b[2]) / 20;
           cell.character = kRamp[std::clamp(lum * 10 / 256, 0, 9)];
-        } else {
+        } else if (top_on && bot_on) {
           cell.character = "▀"; // ▀
           cell.foreground_color = fx::Color::RGB(top[0], top[1], top[2]);
           cell.background_color = fx::Color::RGB(bot[0], bot[1], bot[2]);
+        } else { // one half: drawn in the foreground, the other keeps the terminal's background
+          const unsigned char *p = top_on ? top : bot;
+          cell.character = top_on ? "▀" : "▄"; // ▀ ▄
+          cell.foreground_color = fx::Color::RGB(p[0], p[1], p[2]);
+          cell.background_color = fx::Color::Default;
         }
       }
     }
@@ -244,6 +262,7 @@ public:
 
 private:
   cvc::image pixels_;
+  cvc::image alpha_;
   int cols_, rows_;
   FtxuiBackend::Options::ImageColor mode_;
 };
@@ -543,8 +562,10 @@ struct FtxuiBackend::Impl {
     long gen = -1;
   };
   struct Picture {
-    cvc::image rgb;    // the published image as RGB8
+    cvc::image rgb;    // the published image as RGB8 (over black where it is transparent)
+    cvc::image alpha;  // its alpha as GRAY8, or empty when it is opaque throughout
     cvc::image scaled; // rgb resampled to the last drawn cell grid
+    cvc::image scaled_alpha; // alpha resampled to the same grid
     long gen = 0;      // bumped by each set_image
     PixCache px;       // the pixel modes' resampling
   };
@@ -2428,9 +2449,37 @@ ColorEdit FtxuiBackend::color(const char *label, const float rgb[3]) {
 
 void FtxuiBackend::set_image(const std::string &name, const cvc::image &img) {
   Impl::Picture &p = m_->images[name];
-  p.rgb = img.empty() ? cvc::image()
-                      : img.converted(cvc::image::pixel_format::RGB, cvc::image::data_type::u8);
+  p.alpha = cvc::image();
+  if (!img.empty() && (img.format() == cvc::image::pixel_format::RGBA ||
+                       img.format() == cvc::image::pixel_format::GRAY_ALPHA)) {
+    // Keep the alpha (half-blocks leave transparent halves to the terminal's background), and
+    // composite the colour over black for the pixel modes, which draw RGB.
+    const cvc::image rgba =
+        img.converted(cvc::image::pixel_format::RGBA, cvc::image::data_type::u8);
+    const int n = rgba.width() * rgba.height();
+    const unsigned char *s = rgba.data();
+    cvc::image rgb(rgba.width(), rgba.height(), cvc::image::pixel_format::RGB,
+                   cvc::image::data_type::u8);
+    cvc::image alpha(rgba.width(), rgba.height(), cvc::image::pixel_format::GRAY,
+                     cvc::image::data_type::u8);
+    unsigned char *d = rgb.data(), *a = alpha.data();
+    bool opaque = true;
+    for (int i = 0; i < n; ++i) {
+      const unsigned k = s[i * 4 + 3];
+      opaque = opaque && k == 255;
+      a[i] = static_cast<unsigned char>(k);
+      for (int c = 0; c < 3; ++c)
+        d[i * 3 + c] = static_cast<unsigned char>((s[i * 4 + c] * k + 127) / 255);
+    }
+    p.rgb = rgb;
+    if (!opaque)
+      p.alpha = alpha;
+  } else {
+    p.rgb = img.empty() ? cvc::image()
+                        : img.converted(cvc::image::pixel_format::RGB, cvc::image::data_type::u8);
+  }
   p.scaled = cvc::image();
+  p.scaled_alpha = cvc::image();
   p.gen = ++m_->image_gen;
   if (name == m_->background)
     m_->background_scaled = cvc::image(); // a new frame for the backdrop: resample it next draw
@@ -2492,10 +2541,14 @@ bool FtxuiBackend::draw_image(const char *name, float width) {
   }
   const int rows =
       std::max(1, static_cast<int>(std::lround(cols * aspect * m.opt.cell_px_w / m.opt.cell_px_h)));
-  if (p.scaled.width() != cols || p.scaled.height() != 2 * rows)
+  if (p.scaled.width() != cols || p.scaled.height() != 2 * rows) {
     p.scaled = p.rgb.resized(cols, 2 * rows, cvc::image::resize_filter::box);
+    p.scaled_alpha = p.alpha.empty()
+                         ? cvc::image()
+                         : p.alpha.resized(cols, 2 * rows, cvc::image::resize_filter::box);
+  }
   m.leaf(m.uid("img|"), false,
-         std::make_shared<HalfBlockImage>(p.scaled, cols, rows, m.opt.image_color));
+         std::make_shared<HalfBlockImage>(p.scaled, cols, rows, m.opt.image_color, p.scaled_alpha));
   return true;
 }
 

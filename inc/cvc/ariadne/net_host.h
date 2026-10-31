@@ -20,6 +20,8 @@
 //
 // The registrations are process-wide, like the action-intrinsic providers they add to.
 
+#include <cvc/ariadne/net_intrinsics.h>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -64,6 +66,11 @@ struct NetHostStatus {
   std::vector<std::string> env_credentials; // names --credential-env supplied a token for
 };
 NetHostStatus net_host_status();
+
+// What enable_net gave the http verbs (its allowlist, credential store and on/off switch), for a
+// host-side request made on the same terms (host_get: an image: widget's picture). Empty when the
+// network is off.
+std::optional<NetAccess> net_host_access();
 
 } // namespace ariadne
 } // namespace cvc

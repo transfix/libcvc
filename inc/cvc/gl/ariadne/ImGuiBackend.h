@@ -114,6 +114,8 @@ public:
   // host loop; draw_image references it by the name a `- image:` widget's src/bind resolves to.
   void set_image(const std::string &name, const cvc::image &img) override;
   bool draw_image(const char *name, float width) override; // §raster viewer (ImGui::Image over GL)
+  // Free the texture and pixels published as `name` (Runtime::render calls it, GL current).
+  void drop_image(const std::string &name) override;
 
   // Convenience: install `rt`'s per-frame walk as `overlay`'s draw callback, so
   // VTK drives Runtime::render() once per rendered frame. Call after

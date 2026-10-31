@@ -54,7 +54,7 @@ bool AppRuntime::idle() const {
   // answers, docs/ARIADNE.md 10.2), which the host's count of running kernels leaves out.
   return app_.exec_async_host().in_flight() == 0 &&
          app_.exec_scheduler().async_calls_in_flight() == 0 &&
-         !app_.exec_scheduler().has_runnable();
+         !app_.exec_scheduler().has_runnable() && !rt_.media_busy();
 }
 
 void AppRuntime::settle(const std::function<void()> &step, double max_seconds) {
@@ -71,6 +71,16 @@ void AppRuntime::settle(const std::function<void()> &step, double max_seconds) {
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
 #endif
   }
+}
+
+void AppRuntime::settle_and_render(const std::function<void()> &step,
+                                   const std::function<void()> &render, double max_seconds) {
+  using clock = std::chrono::steady_clock;
+  const auto deadline = clock::now() + std::chrono::duration<double>(max_seconds);
+  do {
+    settle(step, std::max(0.0, std::chrono::duration<double>(deadline - clock::now()).count()));
+    render();
+  } while (rt_.media_stale() && clock::now() < deadline);
 }
 
 std::string AppRuntime::enable_net(const NetHostConfig &config) {
@@ -532,6 +542,11 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   if (new_document && !docPath_.empty())
     rt_.forget_layout();
   docPath_ = path;
+  { // §5.11: a picture's relative file:// URI is the document's neighbour
+    std::error_code ec;
+    const std::filesystem::path abs = std::filesystem::absolute(path, ec);
+    rt_.set_media_base(ec ? std::string() : abs.parent_path().string());
+  }
   add_host_menus(lr.root, hostMenus_);
   add_keys(lr.root, std::move(lr.keys));
   rt_.set_root(std::move(lr.root)); // applied at the next frame boundary
