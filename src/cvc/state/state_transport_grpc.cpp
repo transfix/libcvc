@@ -8,6 +8,7 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include "pose_snapshot_wire.h"
 #include "proto/state_transport.grpc.pb.h"
 #include "proto/state_transport.pb.h"
 
@@ -500,6 +501,8 @@ public:
         _owner->increment_recv_messages();
       } else if (in.has_media()) {
         _owner->on_inbound_media(decode_media(in.media()), conn.get());
+      } else if (in.has_pose_snapshot()) {
+        _owner->on_inbound_pose_snapshot(cvc::pose_wire::decode(in.pose_snapshot()));
       } else if (in.has_chunk_request()) {
         _owner->on_inbound_chunk_request(conn.get(), in.chunk_request().digest(),
                                          in.chunk_request().request_id());
@@ -719,6 +722,8 @@ bool state_transport_grpc::connect_to_peer(const std::string &target,
         increment_recv_messages();
       } else if (in.has_media()) {
         on_inbound_media(decode_media(in.media()), conn.get());
+      } else if (in.has_pose_snapshot()) {
+        on_inbound_pose_snapshot(cvc::pose_wire::decode(in.pose_snapshot()));
       } else if (in.has_chunk_request()) {
         on_inbound_chunk_request(conn.get(), in.chunk_request().digest(),
                                  in.chunk_request().request_id());
@@ -1244,6 +1249,43 @@ void state_transport_grpc::set_on_media(media_frame_fn cb) {
     return;
   }
   _media_sink = [cb = std::move(cb)](const media_frame &f, const void * /*src_conn*/) { cb(f); };
+}
+
+void state_transport_grpc::set_on_pose_snapshot(pose_snapshot_fn fn) {
+  _on_pose_snapshot = std::move(fn);
+}
+
+void state_transport_grpc::on_inbound_pose_snapshot(const pose_snapshot &s) {
+  _poses_recv.fetch_add(1, std::memory_order_relaxed);
+  if (_on_pose_snapshot)
+    _on_pose_snapshot(s);
+}
+
+std::size_t state_transport_grpc::push_pose_snapshot_to(const std::string &node_id,
+                                                        const pose_snapshot &snap) {
+  std::vector<std::shared_ptr<connection>> targets;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    for (const auto &c : _conns) {
+      if (!c || !c->alive.load() || !c->can_write())
+        continue;
+      const std::string *pid = c->peer_id();
+      if (pid && *pid == node_id)
+        targets.push_back(c);
+    }
+  }
+  if (targets.empty())
+    return 0;
+  pb::Frame f;
+  cvc::pose_wire::encode(snap, f.mutable_pose_snapshot());
+  std::size_t n = 0;
+  for (auto &c : targets)
+    if (c->write(f)) {
+      _sent_frames.fetch_add(1, std::memory_order_relaxed);
+      _poses_sent.fetch_add(1, std::memory_order_relaxed);
+      ++n;
+    }
+  return n;
 }
 
 void state_transport_grpc::on_inbound_media(const media_frame &m, connection *origin) {

@@ -96,8 +96,8 @@ struct holon_config {
   std::uint64_t max_peer_span_ticks = 30;
   double peer_jitter_margin = 1.5;
   std::uint64_t peer_max_delay_ticks = 48; // 400 ms: the most a peer is shown behind its newest
-  // The relay's room step, the time between samples assumed until two have arrived.
-  std::uint64_t peer_interval_ticks = 6;
+  // The time between samples assumed until it is measured: the relay's room step (60 Hz: 2 ticks).
+  std::uint64_t peer_interval_ticks = 2;
   // Past its newest sample (a late one), a peer carries on along that sample's velocity for at
   // most this long, then holds.
   std::uint64_t peer_max_extrapolate_ticks = 24;
@@ -280,15 +280,16 @@ public:
   // A participant's DISPLAY pose this frame: predicted for the local avatar (between its last two
   // quanta), the integrated pose on a server, and for a peer its path through its samples.
   //
-  // A peer's samples arrive about every 6 ticks (the relay's ~20 Hz room step) and unevenly (the
-  // network). Each is buffered by its server tick, and the peer is shown at a server tick that
-  // runs with wall time a delay behind its newest sample (holon_config::peer_*): one interval
-  // plus a margin for the measured jitter, adapting smoothly. Between two samples the position
-  // follows a cubic through both and their velocities (a straight line when their velocities do
-  // not fit the move); past the newest it carries on along that sample's velocity for a while.
-  // A sample that changes the path already shown eases the difference out rather than jumping.
-  // Wall time, not this holon's clock, so the clock's re-alignments and slews never move a peer.
-  // Computed once a frame (advance); a sample applied since shows from the next frame.
+  // A peer's samples arrive every 2, 4 or 6 ticks (the relay's pose snapshots at 60, 30 or 20 Hz,
+  // by this client's link) and unevenly (the network). Each is buffered by its server tick, and the
+  // peer is shown at a server tick that runs with wall time a delay behind its newest sample
+  // (holon_config::peer_*): one interval plus a margin for the measured jitter, adapting smoothly.
+  // Between two samples the position follows a cubic through both and their velocities (a straight
+  // line when their velocities do not fit the move); past the newest it carries on along that
+  // sample's velocity for a while. A sample that changes the path already shown eases the
+  // difference out rather than jumping. Wall time, not this holon's clock, so the clock's
+  // re-alignments and slews never move a peer. Computed once a frame (advance); a sample applied
+  // since shows from the next frame.
   cvc::physics::pose display_pose(const std::string &pid) const;
 
   // CLIENT: the position jumps reconcile has applied to the local avatar `pid`

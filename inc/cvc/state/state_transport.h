@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cvc/core/namespace.h>
+#include <cvc/state/pose_snapshot.h>
 #include <cvc/state/state_change_journal.h>
 #include <cvc/state/state_inbound_gate.h>
 #include <cvc/state/state_link_stats.h>
@@ -241,6 +242,19 @@ public:
     (void)entries;
     return 0;
   }
+
+  // Conference avatar poses (pose_snapshot.h). A relay writes `snap` to every live connection
+  // identified as `node_id`, as one frame; it is link-level, like media: never journaled, relayed
+  // or bridged. Returns the connections written. A client gets each one it receives through
+  // set_on_pose_snapshot's callback, on the transport's reader thread (or the browser's event
+  // loop), so the callback must be thread-safe. Defaults: not supported.
+  virtual std::size_t push_pose_snapshot_to(const std::string &node_id, const pose_snapshot &snap) {
+    (void)node_id;
+    (void)snap;
+    return 0;
+  }
+  using pose_snapshot_fn = std::function<void(const pose_snapshot &)>;
+  virtual void set_on_pose_snapshot(pose_snapshot_fn fn) { (void)fn; }
 
   // Admission hold (a relay; off, 0, by default). With `max_hold` > 0, a connection the relay
   // ACCEPTS gets its Hello at once but no bootstrap (backfill or admit snapshot) and no live

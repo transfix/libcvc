@@ -84,6 +84,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/state/state_hash_partition.h
   ../../inc/cvc/state/distributed_state_session.h
   ../../inc/cvc/state/state_transport.h
+  ../../inc/cvc/state/pose_snapshot.h
   ../../inc/cvc/state/state_transport_inproc.h
   ../../inc/cvc/state/state_transport_ipc.h
   ../../inc/cvc/state/state_transport_grpc.h
@@ -1411,7 +1412,7 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/oidc.h ../../inc/cvc/net/loopback_re
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_rungs.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/requires.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/tf_editor_emit.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_pose_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_rungs.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/requires.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/pose_stream.cpp ariadne/tf_editor_emit.cpp)
 # A document set fetched from a URL, and a runtime's browser page loading one (arigl-web, ari).
 list(APPEND SOURCE_FILES ariadne/doc_fetch.cpp ariadne/web_document.cpp)
 list(APPEND INCLUDE_FILES
@@ -1422,6 +1423,7 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/avatar_physics.h
   ../../inc/cvc/ariadne/holon.h
   ../../inc/cvc/ariadne/holon_sync.h
+  ../../inc/cvc/ariadne/pose_stream.h
   ../../inc/cvc/ariadne/app_runtime.h
   ../../inc/cvc/ariadne/keys.h
   ../../inc/cvc/ariadne/doc_args.h
@@ -1446,6 +1448,7 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/conference/room_rungs.h
   ../../inc/cvc/ariadne/conference/room_aoi.h
   ../../inc/cvc/ariadne/conference/room_aoi_relay.h
+  ../../inc/cvc/ariadne/conference/room_pose_relay.h
   ../../inc/cvc/ariadne/conference/room_write_gate.h
   ../../inc/cvc/ariadne/state_io.h
   ../../inc/cvc/ariadne/scene.h

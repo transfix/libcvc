@@ -134,6 +134,7 @@ add_executable(physics_world_test physics_world_test.cpp)
 add_executable(avatar_sim_test avatar_sim_test.cpp)
 add_executable(holon_test holon_test.cpp)
 add_executable(holon_sync_test holon_sync_test.cpp)
+add_executable(pose_stream_test pose_stream_test.cpp)
 add_executable(state_link_stats_test state_link_stats_test.cpp)
 add_executable(room_scene_test room_scene_test.cpp)
 add_executable(room_aoi_test room_aoi_test.cpp)
@@ -377,6 +378,7 @@ set(TEST_TARGETS
   avatar_sim_test
   holon_test
   holon_sync_test
+  pose_stream_test
   state_link_stats_test
   room_scene_test
   room_aoi_test
@@ -1926,6 +1928,13 @@ target_link_libraries(holon_sync_test
     GTest::gtest_main
 )
 
+target_link_libraries(pose_stream_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(state_link_stats_test
   PRIVATE
     cvc
@@ -2408,6 +2417,7 @@ target_compile_features(physics_world_test PRIVATE cxx_std_17)
 target_compile_features(avatar_sim_test PRIVATE cxx_std_17)
 target_compile_features(holon_test PRIVATE cxx_std_17)
 target_compile_features(holon_sync_test PRIVATE cxx_std_17)
+target_compile_features(pose_stream_test PRIVATE cxx_std_17)
 target_compile_features(state_link_stats_test PRIVATE cxx_std_17)
 target_compile_features(room_scene_test PRIVATE cxx_std_17)
 target_compile_features(room_aoi_test PRIVATE cxx_std_17)
@@ -2916,6 +2926,7 @@ cvc_discover_tests(physics_world_test)
 cvc_discover_tests(avatar_sim_test)
 cvc_discover_tests(holon_test)
 cvc_discover_tests(holon_sync_test)
+cvc_discover_tests(pose_stream_test)
 cvc_discover_tests(state_link_stats_test)
 cvc_discover_tests(room_scene_test)
 cvc_discover_tests(room_aoi_test)

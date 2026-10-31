@@ -416,6 +416,11 @@ struct ConferenceSession {
   // the audio clock), and a queue of decoded audio chunks awaiting the mixer (below).
   std::mutex media_mu_;
   std::vector<cvc::media_frame> inbox_;
+  // Avatar pose snapshots from the relay (room_pose_relay), queued on the transport's thread and
+  // applied to the holon on the frame's (apply_pose_snapshot), through this connection's decoder.
+  std::mutex poses_mu_;
+  std::vector<cvc::pose_snapshot> pose_inbox_;
+  cvc::ariadne::pose_stream_decoder pose_decoder_;
   struct vframe {
     double pts = 0.0;
     std::shared_ptr<std::vector<std::uint8_t>> bytes;
@@ -614,6 +619,10 @@ struct ConferenceSession {
       std::lock_guard<std::mutex> lk(media_mu_);
       inbox_.push_back(m);
     };
+    auto on_poses = [this](const cvc::pose_snapshot &snap) {
+      std::lock_guard<std::mutex> lk(poses_mu_);
+      pose_inbox_.push_back(snap);
+    };
     // Pick the transport by the relay URL scheme: grpc:// dials the native gRPC state plane;
     // anything else (ws://|wss://) dials the WebSocket plane the browser uses. Both carry the
     // canonical media_frame and interop through the relay's media_router, so a native and a browser
@@ -660,6 +669,7 @@ struct ConferenceSession {
                    "conf"); // gRPC must start() (ephemeral port) even to dial
       grpc_->register_shard(shard.get());
       grpc_->set_on_media(on_media);
+      grpc_->set_on_pose_snapshot(on_poses);
       tp_ = grpc_.get();
       send_media_ = [p = grpc_.get()](const cvc::media_frame &m) { p->publish_media_frame(m); };
       stop_ = [p = grpc_.get()] { p->stop(); };
@@ -677,6 +687,7 @@ struct ConferenceSession {
       ws_->set_device_signer(deviceKey);
       ws_->register_shard(shard.get());
       ws_->set_on_media(on_media);
+      ws_->set_on_pose_snapshot(on_poses);
       tp_ = ws_.get();
       send_media_ = [p = ws_.get()](const cvc::media_frame &m) { p->publish_media_frame(m); };
       stop_ = [p = ws_.get()] { p->stop(); };
@@ -896,6 +907,15 @@ struct ConferenceSession {
     // Re-assert it locally every frame: our avatar joins the holon only once our room-join is in
     // the tree, so an intent proposed before then must still reach the prediction.
     holon_->set_intent(pid_, last_intent_);
+    // The relay's pose snapshots since the last frame, in order, then the tree (roster, statics)
+    // and the frame itself.
+    std::vector<cvc::pose_snapshot> snaps;
+    {
+      std::lock_guard<std::mutex> lk(poses_mu_);
+      snaps.swap(pose_inbox_);
+    }
+    for (const cvc::pose_snapshot &snap : snaps)
+      cvc::ariadne::apply_pose_snapshot(*holon_, pose_decoder_, snap);
     cvc::ariadne::client_pump(*holon_, *app_, room_, pid_, f.wall_dt);
     // Each re-alignment of our clock to the relay's drops our unacknowledged input (a visible
     // jump). The first sample after joining is one; any after that is worth a line.
