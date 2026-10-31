@@ -21,6 +21,9 @@
 #if LIBCURL_VERSION_NUM >= 0x075600 // curl_ws_* arrived in 7.86.0
 #define CVC_NET_WS_CURL 1
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX // winsock2.h pulls in windows.h, whose min/max macros break std::min
+#endif
 #include <winsock2.h>
 #else
 #include <poll.h>
@@ -85,7 +88,7 @@ public:
       const auto now = std::chrono::steady_clock::now();
       if (now >= deadline)
         return std::nullopt;
-      cv_.wait_until(lock, std::min(deadline, now + std::chrono::milliseconds(50)));
+      cv_.wait_until(lock, (std::min)(deadline, now + std::chrono::milliseconds(50)));
     }
   }
 
