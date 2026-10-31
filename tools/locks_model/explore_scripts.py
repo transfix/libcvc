@@ -20,6 +20,7 @@ import sys
 import time
 import traceback
 
+from explore import state_id
 from lockmodel import K, S, X, Violation, req_str, STATS
 from world import Config, World
 
@@ -49,7 +50,7 @@ NESTED_FAULTS = ('kill', 'raise', 'signal', 'deadline', 'prio', 'terminate', 'de
 def explore_cfg(cfg, max_states=400000, drain=True):
     w0 = World(cfg)
     w0.check()
-    k0 = hash(w0.key())
+    k0 = state_id(w0.key())
     parent = {k0: (None, None)}
     dq = collections.deque([(w0, k0)])
     viol = {}
@@ -99,7 +100,7 @@ def explore_cfg(cfg, max_states=400000, drain=True):
             for sn, sd in w2.soft:
                 if sn not in soft:
                     soft[sn] = (sd, trace_of(hk) + [a])
-            h2 = hash(w2.key())
+            h2 = state_id(w2.key())
             if h2 in parent:
                 continue
             parent[h2] = (hk, a)
