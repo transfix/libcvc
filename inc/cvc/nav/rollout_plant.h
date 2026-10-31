@@ -78,21 +78,42 @@ float dyn4_step_energy(const diff::dyn4_params &p, const diff::bike_veh &v, floa
                        float *g = nullptr);
 
 // A training batch's vehicles.
+// An obstacle of one agent's own (rollout_batch::obstacles), in the frame: a disc of radius r
+// centred on (x, y), or a box of half extents (hx, hy) there, axis-aligned.
+struct rollout_obstacle {
+  enum class kind : std::uint8_t { disc, box };
+  kind type = kind::box;
+  float x = 0.0f, y = 0.0f;
+  float r = 0.0f;             // disc
+  float hx = 0.0f, hy = 0.0f; // box
+};
+
 struct rollout_batch {
+  // The scene the agents share (its obstacles, for a plant that puts them in its world), or null
+  // for agents with only their own (`obstacles`).
   const training_scene *scene = nullptr;
-  diff::bike_veh veh;         // the controller's vehicle; hdt is the scene's dt
+  diff::bike_veh veh;         // the controller's vehicle; hdt is the step
   diff::dyn4_params model;    // the model the gradient is, whose actuator state() reports
   dyn4_energy_price price;    // the model's energy, for a plant that has no ledger of its own
   float mu = 0.9f;            // the ground's friction, as the model sees it
   int n = 0;                  // vehicles
   const float *o = nullptr;   // [n*2]: each one's rear axle
   const float *psi = nullptr; // [n]: and heading
+  // [n], optional: each one's forward speed at the start, along its heading (null: at rest).
+  const float *speed = nullptr;
+  // [n], optional: each agent's own obstacles, as well as the scene's (a material batch's discs
+  // and hard cells).
+  const std::vector<rollout_obstacle> *obstacles = nullptr;
+  // How far an agent may get from its start (the frame's length): room a plant that lays agents
+  // out side by side leaves around each one's obstacles. 0: the scene's extent.
+  float reach = 0.0f;
 };
 
 class rollout_plant {
 public:
   virtual ~rollout_plant() = default;
-  // A batch: b.n vehicles at rest, agent i's rear axle on (o[2i], o[2i+1]) heading psi[i].
+  // A batch: b.n vehicles, agent i's rear axle on (o[2i], o[2i+1]) heading psi[i], at rest or at
+  // b.speed[i].
   virtual void reset(const rollout_batch &b) = 0;
   virtual int size() const = 0;
   // Agent i now, as the model's state: the rear axle's pose; the body twist at the centre of
@@ -113,8 +134,9 @@ public:
 
 // The model as the plant: dyn4_plant on flat ground of the batch's mu, with the batch's model.
 // Its lines are the model's own books over each step (dyn4_ph_lines, the trapezoid between the
-// step's ends), its drawn energy dyn4_step_energy at the batch's price. Training on it is
-// training on the model, through rollout_kind::jolt's code.
+// step's ends), its drawn energy dyn4_step_energy at the batch's price. The batch's obstacles are
+// left out: the model has no walls. Training on it is training on the model, through
+// rollout_kind::jolt's code.
 class dyn4_rollout_plant final : public rollout_plant {
 public:
   void reset(const rollout_batch &b) override;

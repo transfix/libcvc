@@ -443,8 +443,8 @@ top three then on the 20 held-out seeds against the seed.
 Not yet:
 - a learned, state-dependent policy that beats the seed on Jolt outside the CI (a tuned
   constant basin does, above);
-- pycvc (its `nav_train_coef_mlp` takes rollout 0/1 only, and the material trainer's binding
-  turns on only the bicycle);
+- the dynamic vehicle in pycvc (its `nav_train_coef_mlp` takes rollout 0/1 only, and the
+  material trainer's binding turns on the bicycle and Jolt, not this vehicle);
 - a CUDA build of the plant (it is `CVC_HD`, but nothing compiles it for the device yet).
 
 ## The four-wheel vehicle: `dyn4_plant` (P8d)
@@ -997,6 +997,72 @@ metres from its origin), so the check starts with the vehicles under way.
 loss on Jolt from 1.2344 to 1.2321, a drop like the dynamic rollout's own test. A Jolt Humvee step
 costs about 80-90 us with the ledger on: one world, separate islands, no worker threads. So the
 default batch (192 agents x 28 steps) is about 0.5 s of Jolt per outer step.
+
+**The material trainer** (`material_integrator::jolt`, `material_train.h`). The material loss
+can be taken through Jolt too: `integrate_plant_material` (`material.h`) runs
+`integrate_dynamic_material`'s controller with its commands driving the plant. The VJP replays
+the material controller's reverse and the four-wheel model's along the plant's tape.
+
+```cpp
+cvc::nav::train_config tc;           // the controller's limits, for the calibration
+tc.veh_L = 0.35f;
+tc.veh_a_max = 0.3f;
+tc.veh_a_lat_max = 0.5f;
+cvc::physics::use_jolt_rollout(tc, cvc::nav::city_scene(96), humvee); // plant, dyn4, price
+
+cvc::nav::material_loss_config cfg;
+cfg.integrator = cvc::nav::material_integrator::jolt;
+cfg.bicycle.L = tc.veh_L;            // the controller, as on the bicycle
+cfg.bicycle.a_max = tc.veh_a_max;
+cfg.bicycle.a_lat_max = tc.veh_a_lat_max;
+cfg.plant = tc.plant;
+cfg.dyn4 = tc.dyn4;
+cvc::nav::material_loss_and_grad(model, batch, cfg, grads);
+```
+
+- **The batch's world.** Each call resets Jolt to the batch:
+  - each agent's own discs as 16-sided prisms and, with `hard_walls`, its patch's hard cells
+    (phi 0, one cell per unit) as boxes;
+  - every agent launched at its start speed (`rollout_batch::speed`: the chassis set moving, the
+    wheels spinning up in the first step, about 5-8% of the speed);
+  - room of `vmax dt max(H)` around each agent's obstacles.
+
+  So the loss is a function of the weights and the batch, and finite differences of it are
+  well defined.
+- **Limits.** The batch's agents share one `dt`. An agent past its `H` is frozen, as the other
+  rollouts freeze it. `L_multi`'s many short rollouts run on the kinematic bicycle. There is no
+  external force on this rollout yet.
+
+`use_jolt_rollout(cfg, scene, desc, agents, steps)` (`jolt_rollout.h`) is the one-call setup the
+coef trainer's example above spells out: the plant, the calibrated model and its price.
+
+Measured (`physics_jolt_rollout_test`, the Humvee at 0.106 units per metre; 24 agents of the
+material fixture, under way at 2.8 m/s, 40 steps of 0.06 s, every fourth with a block of hard
+cells):
+
+| | model | Jolt | rel |
+|---|---|---|---|
+| along the gradient | 3.07 | 2.57 | 0.089 |
+| `gamma_head.2.weight` | 1.239 | 1.245 | 0.002 |
+| `gamma_head.0.weight` | 1.150 | 1.148 | 0.001 |
+| `goal_enc.0.weight` | 0.947 | 0.980 | 0.017 |
+
+20 Adam steps at 1e-3 on that batch lower its loss on Jolt from 23.97 to 21.65. On the model as
+its own plant, the full chain's gradcheck (`NavMaterialTrain.FullChainGradcheckOnAPlant`) matches
+the dynamic vehicle's: dir_rel 7.1e-4, worst 5.5e-3 over 64 weights.
+
+**From Python** (pycvc):
+
+- `nav_train_coef_mlp_jolt(occ, ..., vehicle, veh_L, veh_a_max, veh_a_lat_max, calib_agents,
+  calib_steps, out_path)` trains the coefficient policy on Jolt and returns the calibration as a
+  dict. `vehicle` is "humvee" or "roboracer".
+- `nav_material_trainer_set_jolt(handle, 1, vehicle, L, dt, ...)` turns a material trainer's
+  loss onto Jolt, calibrating first, and returns the calibration.
+  `nav_material_trainer_integrator` then reads "jolt".
+
+Both are new symbols, so a caller can tell whether its pycvc has them (`hasattr`).
+`test_pycvc_nav_train.py`'s `test_jolt_integrator` checks the material trainer's: the loss changes
+from the point mass's, repeats, and descends over 10 steps.
 
 **Tests:** `physics_jolt_rollout_test`. The model-plant checks are in `nav_coef_train_test`:
 `JoltRolloutOnTheModelMatchesFiniteDifference` (dir_rel 1.3e-2, and 3.0e-5 with the energy term)

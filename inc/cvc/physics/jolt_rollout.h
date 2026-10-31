@@ -28,14 +28,18 @@
 //
 // Each reset() builds a Jolt world: flat ground of the batch's friction and, with
 // jolt_rollout_options::walls, the scene's obstacles as static boxes (its occupancy's runs of
-// cells merged into rectangles); and a nav_plant driving one vehicle per agent through the driver
-// model (nav_plant::command). The agents never meet: each drives its own copy of the scene, laid
-// out on a grid, so a batch is n independent runs in one world, which Jolt steps as separate
-// islands (on worker threads with jolt_rollout_options::threads). The vehicles start at the
-// height they rest at and settle for settle_ticks before the batch's first step. A start whose
-// body (the chassis box and the wheels, as nav_plant::limits has it) would stand on a wall at its
-// heading is turned, 15 degrees at a time either way, to the nearest heading at which it clears
-// every wall by clearance_m (start_turn); with none, it keeps its heading.
+// cells merged into rectangles) and each agent's own (rollout_batch::obstacles: a disc as a
+// 16-sided prism, a box as a box); and a nav_plant driving one vehicle per agent through the
+// driver model (nav_plant::command). The agents never meet: each drives its own copy of its
+// world, laid out on a grid around its extent (the scene's or its start's, its own obstacles,
+// rollout_batch::reach beyond them), so a batch is n independent runs in one world, which Jolt
+// steps as separate islands (on worker threads with jolt_rollout_options::threads). The vehicles
+// start at the height they rest at and settle for settle_ticks before the batch's first step;
+// one with a start speed (rollout_batch::speed) is then launched at it, its chassis set moving
+// along its heading (the wheels spin up in the first step, which costs a little speed). A start
+// whose body (the chassis box and the wheels, as nav_plant::limits has it) would stand on a wall
+// at its heading is turned, 15 degrees at a time either way, to the nearest heading at which it
+// clears every wall by clearance_m (start_turn); with none, it keeps its heading.
 //
 // The frame: k = wheelbase / desc.wheelbase() normalized units per metre (the trainer's veh_L
 // for its vehicle), metres_per_world_unit 1, at the scene's normalized origin. state() reads the
@@ -54,6 +58,8 @@
 #define __CVC_PHYSICS_JOLT_ROLLOUT_H__
 
 #include <cstdint>
+#include <cvc/nav/coef_train.h>
+#include <cvc/nav/dyn4_ledger.h>
 #include <cvc/nav/rollout_plant.h>
 #include <cvc/physics/nav_plant.h>
 #include <cvc/physics/world.h>
@@ -129,6 +135,18 @@ private:
   double _step_us = 0.0;
   std::uint64_t _steps = 0;
 };
+
+// Sets cfg up to train on `desc` in Jolt: cfg.rollout = jolt, cfg.plant a new jolt_rollout at
+// cfg.veh_L (with `options`), cfg.dyn4 nav_plant::dyn4_params_at(desc, cfg.veh_L) calibrated to it
+// and cfg.dyn4_price its price. The calibration drives `agents` vehicles for `steps` steps on
+// `scene` under the untrained policy (cvc::nav::record_plant_ticks, seed `seed`) and fits the
+// model to them (cvc::nav::calibrate_dyn4), which it returns. cfg's veh_* are the controller's
+// limits throughout: set them first.
+cvc::nav::dyn4_calibration use_jolt_rollout(cvc::nav::train_config &cfg,
+                                            const cvc::nav::training_scene &scene,
+                                            const vehicle_desc &desc, int agents = 16,
+                                            int steps = 200, unsigned seed = 1,
+                                            jolt_rollout_options options = {});
 
 } // namespace physics
 } // namespace cvc

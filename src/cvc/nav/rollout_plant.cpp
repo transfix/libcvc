@@ -70,6 +70,8 @@ void dyn4_rollout_plant::reset(const rollout_batch &b) {
     s.x = b.o[2 * i];
     s.y = b.o[2 * i + 1];
     s.psi = b.psi[i];
+    if (b.speed)
+      s.vx = b.speed[i];
   }
   _lines.assign(_s.size(), plant_energy_lines{});
 }
