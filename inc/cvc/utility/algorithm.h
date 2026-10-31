@@ -81,7 +81,8 @@ volume sdf(app &ctx, const geometry &geom,
 // cells, marking the voxels near the surface, the three 1-D passes, the near and the far
 // distances -- in budgets of units (a cell a triangle touches, a voxel), each step ending where
 // its stage does. SDF_IGL builds its AABB tree and its winding-number hierarchy (a step each),
-// then queries the grid's nodes a range at a time (32 units a node). Either way the result is
+// then queries the grid's nodes a range at a time (32 units a node, at most 2^18 nodes a step,
+// budget 0 included, as sdf() queries them). Either way the result is
 // sdf()'s, bit for bit. SDF_V1 runs in one step. The geometry is shared, so the stepper may
 // outlive its caller's. step(budget) returns true once the volume is ready for take(); it throws
 // where sdf() would, and after a throw every later step rethrows.

@@ -152,7 +152,104 @@ std::string resolve_reference(const std::string &base, const std::string &ref) {
   return origin + path.substr(0, path.rfind('/') + 1) + ref;
 }
 
+// After `r`, the reply to hop `hops` of a policy-checked request `req` (follow: the caller's
+// follow_redirects): true with `req` turned into the next hop's request, or false with `r` the
+// answer (an error now, where the redirect may not be followed).
+bool next_hop(HttpRequest &req, HttpResponse &r, long hops, bool follow, const NetPolicy &policy) {
+  if (!follow || !r.ok || !redirect_status(r.status))
+    return false;
+  const std::string location = response_header(r.headers, "Location");
+  if (location.empty())
+    return false;
+  if (hops >= req.max_redirects) {
+    r.ok = false;
+    r.error = "cvc::net: more than " + std::to_string(req.max_redirects) + " redirects";
+    return false;
+  }
+  const std::string next = resolve_reference(req.url, location);
+  std::string why;
+  if (!policy.allows_url(next, &why)) {
+    r = refused(next, "a redirect from " + req.url + ": " + why);
+    return false;
+  }
+  if (parse_origin(next) != parse_origin(req.url))
+    std::erase_if(req.headers, [](const std::string &h) {
+      return header_named(h, "Authorization") || header_named(h, "Cookie") ||
+             header_named(h, "Proxy-Authorization");
+    });
+  const bool to_get = (r.status == 303 && !method_ieq(req.method, "HEAD")) ||
+                      ((r.status == 301 || r.status == 302) && method_ieq(req.method, "POST"));
+  if (to_get) {
+    req.method = "GET";
+    req.body.clear();
+    std::erase_if(req.headers, [](const std::string &h) {
+      return header_named(h, "Content-Type") || header_named(h, "Content-Length");
+    });
+  }
+  req.url = next;
+  return true;
+}
+
+// start(req, policy, done) on a transport that does not follow redirects itself: each hop is
+// started from the last one's reply, and checked by next_hop as send(req, policy) checks it.
+class PolicyTransfer : public HttpTransfer, public std::enable_shared_from_this<PolicyTransfer> {
+public:
+  PolicyTransfer(std::shared_ptr<HttpClient> client, HttpRequest req,
+                 std::shared_ptr<const NetPolicy> policy, HttpDone done)
+      : client_(std::move(client)), req_(std::move(req)), policy_(std::move(policy)),
+        done_(std::move(done)), follow_(req_.follow_redirects) {
+    req_.follow_redirects = false; // every hop comes back here to be checked
+  }
+
+  void hop() {
+    const unsigned id = ++hop_id_;
+    std::shared_ptr<PolicyTransfer> self = shared_from_this();
+    std::shared_ptr<HttpTransfer> t =
+        client_->start(req_, [self](HttpResponse r) { self->reply(std::move(r)); });
+    if (hop_id_ == id && done_) // not answered in place
+      current_ = std::move(t);
+  }
+
+  void abort() override {
+    HttpDone dropped = std::move(done_);
+    done_ = nullptr;
+    if (std::shared_ptr<HttpTransfer> t = std::move(current_))
+      t->abort();
+  }
+
+private:
+  void reply(HttpResponse r) {
+    current_.reset();
+    if (!done_)
+      return; // aborted
+    if (next_hop(req_, r, hops_, follow_, *policy_)) {
+      ++hops_;
+      hop();
+      return;
+    }
+    HttpDone done = std::move(done_);
+    done_ = nullptr;
+    done(std::move(r));
+  }
+
+  std::shared_ptr<HttpClient> client_;
+  HttpRequest req_;
+  std::shared_ptr<const NetPolicy> policy_;
+  HttpDone done_;
+  bool follow_;
+  long hops_ = 0;
+  unsigned hop_id_ = 0;
+  std::shared_ptr<HttpTransfer> current_;
+};
+
 } // namespace
+
+std::shared_ptr<HttpTransfer> HttpClient::start(const HttpRequest &req, HttpDone done) {
+  HttpResponse r = send(req);
+  if (done)
+    done(std::move(r));
+  return nullptr;
+}
 
 HttpResponse send(const HttpRequest &in) {
   HttpRequest req = in; // a working copy we may normalize
@@ -177,36 +274,46 @@ HttpResponse send(const HttpRequest &in, const NetPolicy &policy) {
   req.follow_redirects = false; // every hop comes back here to be checked
   for (long hops = 0;; ++hops) {
     HttpResponse r = client->send(req);
-    if (!follow || !r.ok || !redirect_status(r.status))
+    if (!next_hop(req, r, hops, follow, policy))
       return r;
-    const std::string location = response_header(r.headers, "Location");
-    if (location.empty())
-      return r;
-    if (hops >= req.max_redirects) {
-      r.ok = false;
-      r.error = "cvc::net: more than " + std::to_string(req.max_redirects) + " redirects";
-      return r;
-    }
-    const std::string next = resolve_reference(req.url, location);
-    if (!policy.allows_url(next, &why))
-      return refused(next, "a redirect from " + req.url + ": " + why);
-    if (parse_origin(next) != parse_origin(req.url))
-      std::erase_if(req.headers, [](const std::string &h) {
-        return header_named(h, "Authorization") || header_named(h, "Cookie") ||
-               header_named(h, "Proxy-Authorization");
-      });
-    const bool to_get = (r.status == 303 && !method_ieq(req.method, "HEAD")) ||
-                        ((r.status == 301 || r.status == 302) && method_ieq(req.method, "POST"));
-    if (to_get) {
-      req.method = "GET";
-      req.body.clear();
-      std::erase_if(req.headers, [](const std::string &h) {
-        return header_named(h, "Content-Type") || header_named(h, "Content-Length");
-      });
-    }
-    req.url = next;
   }
 }
+
+std::shared_ptr<HttpTransfer> start(const HttpRequest &in, HttpDone done) {
+  HttpRequest req = in;
+  HttpResponse err;
+  if (!normalize(req, err)) {
+    if (done)
+      done(std::move(err));
+    return nullptr;
+  }
+  return current_client()->start(req, std::move(done));
+}
+
+std::shared_ptr<HttpTransfer> start(const HttpRequest &in, std::shared_ptr<const NetPolicy> policy,
+                                    HttpDone done) {
+  if (!policy)
+    return start(in, std::move(done));
+  HttpRequest req = in;
+  HttpResponse err;
+  std::string why;
+  if (!normalize(req, err) || !policy->allows_url(req.url, &why)) {
+    if (err.error.empty())
+      err = refused(req.url, why);
+    if (done)
+      done(std::move(err));
+    return nullptr;
+  }
+  std::shared_ptr<HttpClient> client = current_client();
+  if (client->follows_redirects_itself())
+    return client->start(req, std::move(done));
+  auto t = std::make_shared<PolicyTransfer>(std::move(client), std::move(req), std::move(policy),
+                                            std::move(done));
+  t->hop();
+  return t;
+}
+
+bool http_starts_async() { return current_client()->starts_async(); }
 
 std::string response_header(const std::vector<std::string> &lines, const std::string &name) {
   for (const std::string &line : lines) {

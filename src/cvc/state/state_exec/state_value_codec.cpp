@@ -773,6 +773,10 @@ std::string phase_to_string(eval_phase p) {
     return "lock_enter";
   case eval_phase::lock_body:
     return "lock_body";
+  case eval_phase::and_next:
+    return "and_next";
+  case eval_phase::or_next:
+    return "or_next";
   }
   return "init";
 }
@@ -826,6 +830,10 @@ eval_phase string_to_phase(const std::string &s) {
     return eval_phase::lock_enter;
   if (s == "lock_body")
     return eval_phase::lock_body;
+  if (s == "and_next")
+    return eval_phase::and_next;
+  if (s == "or_next")
+    return eval_phase::or_next;
   return eval_phase::init;
 }
 
