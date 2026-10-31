@@ -258,14 +258,17 @@ if(EMSCRIPTEN)
   ari_wasm_page(ari "ari"
     "Tab / Enter / arrows · mouse · F10 menu · Ctrl-C asks, twice quits"
     -sEXPORTED_FUNCTIONS=_main,_ftxui_on_resize)
-  # CI's network check (ci.yml, "ari terminal backend (wasm, node)") runs tests/net_probe.ari
-  # against tests/net_probe_server.py under node: the probe goes into MEMFS at /tests. Off by
-  # default, so the published page does not carry it.
+  # CI's network checks (ci.yml, "ari terminal backend (wasm, node)") run tests/net_probe.ari and
+  # tests/l4_frames.ari against tests/net_probe_server.py, and tests/l4_ws.ari against
+  # tests/ws_probe_server.py, under node: the documents go into MEMFS at /tests. Off by default, so
+  # the published page does not carry them.
   option(CVC_ARI_WASM_TEST_DOCS "Embed src/ari/tests at /tests in the wasm ari (CI)" OFF)
   if(CVC_ARI_WASM_TEST_DOCS)
     target_link_options(ari PRIVATE "--embed-file=${CMAKE_CURRENT_SOURCE_DIR}/tests@/tests")
     set_property(TARGET ari APPEND PROPERTY LINK_DEPENDS
-      "${CMAKE_CURRENT_SOURCE_DIR}/tests/net_probe.ari")
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/net_probe.ari"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/l4_frames.ari"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/l4_ws.ari")
   endif()
   # ari_tvision: the same runner and document on the tvision desktop (movable, overlapping
   # windows, a menu bar and a status line), when libcvc has the tvision backend: on wasm that is

@@ -1684,6 +1684,28 @@ In an Ariadne document's action lane, the network verbs are (from
   (`ariadne.limits.*`, §2), so charged like other calls no action could make one. The
   transport's own timeouts (10 s to connect, 30 s in all) and its 64 MiB reply cap bound a
   request instead.
+- **In a browser build without threads** (the single-threaded wasm pages: `ari.html`, arigl's
+  page) there is no background pool to wait on: its jobs run on the page's main thread, between
+  frames. There the verbs start the request instead of sending it
+  (`cvc::net::HttpClient::start`, a browser fetch) and return to the frame loop at once. The
+  calling program parks as it does natively, frames keep drawing and taking input, and the
+  fetch's callback posts the reply to the scheduler, which resumes the program on a later
+  frame. So a spinner (or a document's own progress bar between `(await f 0.05)` slices)
+  animates while a request is out. The contract is the same as natively: the reply dict, the
+  host's policy, `auth` / `capture_auth` and credential values (the token goes in and comes out
+  in C++ as the reply arrives), a 30 s timeout (the reply's `error` says it timed out), the 64
+  MiB cap (enforced as the body arrives), and a killed or reaped program aborts its fetch.
+  `fetch` of an `http(s)` URI is started the same way, through the http handler's non-blocking
+  form (`register_uri_async_handler`, `resolve_async` in [`uri.h`](../inc/cvc/ariadne/uri.h)); a
+  host that registers its own `http` handler in its place gets the blocking call for it. Two
+  things still wait in place in that build: a call where the program can't park (a generator's
+  body, a recursive evaluator), which runs the request inline as natively; and the loads the
+  host makes itself, outside any program: an `https` `import:`/`load:` while the document loads,
+  and a scene's `source:` mesh or texture URL when the scene is realized
+  (`resolve_to_file`). Those use the blocking `cvc::net::send()`, which yields to the browser
+  under Asyncify but holds the frame that called it. (The browser pages fetch a document's
+  relative imports themselves before it loads.) In builds with threads (native, wasm-mt) the
+  request runs on the background pool as before.
 
 ### 10.3 The host's network: the allowlist and credentials
 
@@ -1895,6 +1917,14 @@ without either has no `ws-*` verbs, so a document asks `(has? "ws-open")` and po
 - `ws-open` and `ws-recv` are async I/O calls like the HTTP verbs: the connect, or the wait,
   runs on the background pool and the program parks. `ws-poll` is the one to call from an
   `on_tick` that also does other work: it takes what has arrived and returns.
+- In a browser build without threads (`ari.html`, arigl's page) they are started instead, as the
+  HTTP verbs are (§10.2): `ws-open` creates the browser's `WebSocket` and returns to the frame
+  loop, and its open, error or `timeout` resumes the program; `ws-recv` waits on the socket's
+  next message from its callbacks, with a timer for `SECONDS`. Frames keep drawing meanwhile. A
+  killed or timed-out program abandons its connect (the socket is closed) or drops its wait
+  (`cvc::net::ws_start`, `WsConnection::recv_async` in
+  [`ws_client.h`](../inc/cvc/net/ws_client.h)). A page may close a socket only with code 1000
+  or 3000-4999, so there any other `CODE` is sent as 1000.
 
 ## 11. Caveats — what is not yet wired
 
