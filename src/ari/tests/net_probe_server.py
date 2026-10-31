@@ -1,9 +1,11 @@
 # A stand-in for a registry's sign-in, for the wasm ari's network check (ci.yml, "ari terminal
 # backend (wasm, node)"). POST /v1/auth/device/token answers an access and a refresh token;
 # POST /v1/auth/token refreshes with the refresh token in a form; GET /v1/me wants the current
-# access token. Prints its port, then serves until killed.
+# access token. GET /v1/slow answers after a second (l4_frames.ari). Prints its port, then serves
+# until killed.
 import http.server
 import json
+import time
 import urllib.parse
 
 ACCESS = "cvcses_d2FzbS1hY2Nlc3MtdG9rZW4tZm9yLWNp"
@@ -36,6 +38,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.reply(404, {})
 
     def do_GET(self):
+        if self.path == "/v1/slow":
+            time.sleep(1.0)
+            return self.reply(200, {"slow": True})
         if self.path == "/v1/me":
             ok = self.headers.get("Authorization") == "Bearer " + FRESH
             return self.reply(200 if ok else 401, {"user": "ci"} if ok else {})
