@@ -128,28 +128,59 @@ body_reach reach_of(const vehicle_desc &d) {
   return {ahead - rear, rear - behind, half_width};
 }
 
-// Whether the body, its rear axle at (x, y) (normalized) heading psi, clears every wall of the
-// scene by `clear` (normalized): the SDF at the raster node nearest each of 7 x 3 points over
-// the body. Off the raster is clear.
-bool body_fits(const cvc::nav::training_scene &sc, const body_reach &b, double k, double x,
-               double y, double psi, double clear) {
+// Whether the point (x, y) (normalized) is within `clear` (normalized) of a wall: the scene's
+// (the SDF at the raster node nearest it; off the raster is clear), or one of the agent's own
+// obstacles.
+bool blocked(const cvc::nav::training_scene *sc, const std::vector<cvc::nav::rollout_obstacle> *own,
+             double x, double y, double clear) {
+  if (sc && sc->rows > 1 && sc->cols > 1 && !sc->field_data.empty()) {
+    const double dx = (sc->max_x - sc->min_x) / (sc->cols - 1),
+                 dy = (sc->max_y - sc->min_y) / (sc->rows - 1);
+    const double wx = x / sc->scale + sc->cx, wy = y / sc->scale + sc->cy;
+    const long col = std::lround((wx - sc->min_x) / dx), row = std::lround((wy - sc->min_y) / dy);
+    if (col >= 0 && row >= 0 && col < sc->cols && row < sc->rows) {
+      const std::size_t cell = static_cast<std::size_t>(row) * sc->cols + col;
+      if (sc->occ[cell] || sc->field_data[cell] < clear)
+        return true;
+    }
+  }
+  if (own)
+    for (const cvc::nav::rollout_obstacle &o : *own) {
+      const double ex = x - o.x, ey = y - o.y;
+      if (o.type == cvc::nav::rollout_obstacle::kind::disc) {
+        if (ex * ex + ey * ey < (o.r + clear) * (o.r + clear))
+          return true;
+      } else if (std::fabs(ex) < o.hx + clear && std::fabs(ey) < o.hy + clear)
+        return true;
+    }
+  return false;
+}
+
+// Whether the body, its rear axle at (x, y) (normalized) heading psi, clears every wall by
+// `clear`: 7 x 3 points over the body.
+bool body_fits(const cvc::nav::training_scene *sc,
+               const std::vector<cvc::nav::rollout_obstacle> *own, const body_reach &b, double k,
+               double x, double y, double psi, double clear) {
   const double c = det::cos(psi), s = det::sin(psi);
-  const double dx = (sc.max_x - sc.min_x) / (sc.cols - 1),
-               dy = (sc.max_y - sc.min_y) / (sc.rows - 1);
   for (int i = 0; i < 7; ++i)
     for (int j = 0; j < 3; ++j) {
       const double bx = (-b.behind + (b.ahead + b.behind) * i / 6.0) * k;
       const double by = (j - 1) * b.half_width * k;
-      const double wx = (x + c * bx - s * by) / sc.scale + sc.cx;
-      const double wy = (y + s * bx + c * by) / sc.scale + sc.cy;
-      const long col = std::lround((wx - sc.min_x) / dx), row = std::lround((wy - sc.min_y) / dy);
-      if (col < 0 || row < 0 || col >= sc.cols || row >= sc.rows)
-        continue;
-      const std::size_t cell = static_cast<std::size_t>(row) * sc.cols + col;
-      if (sc.occ[cell] || sc.field_data[cell] < clear)
+      if (blocked(sc, own, x + c * bx - s * by, y + s * bx + c * by, clear))
         return false;
     }
   return true;
+}
+
+// A vertical prism of 16 sides around a disc's circle: a disc obstacle's shape.
+convex_hull disc_prism(double radius, double height) {
+  convex_hull h;
+  for (int k = 0; k < 16; ++k) {
+    const double a = 2.0 * kPi * k / 16.0;
+    for (const double z : {-0.5 * height, 0.5 * height})
+      h.points.push_back({radius * std::cos(a), radius * std::sin(a), z});
+  }
+  return h;
 }
 
 template <class T> void put(std::vector<std::uint8_t> &out, const T &v) {
@@ -217,19 +248,48 @@ nav_plant &jolt_rollout::plant() {
 }
 
 void jolt_rollout::reset(const cvc::nav::rollout_batch &b) {
-  if (!b.scene)
-    throw cvc::physics_error("jolt_rollout::reset: the batch needs its scene");
   if (b.n < 0 || (b.n > 0 && (!b.o || !b.psi)))
     throw cvc::physics_error("jolt_rollout::reset: needs n >= 0 starts");
-  const cvc::nav::training_scene &sc = *b.scene;
+  if (!b.scene && !(b.reach > 0.0f))
+    throw cvc::physics_error("jolt_rollout::reset: a batch without a scene needs its reach (how "
+                             "far an agent may get from its start)");
+  const cvc::nav::training_scene *sc = b.scene;
+  const auto own = [&](int i) { return b.obstacles ? &b.obstacles[i] : nullptr; };
   _veh = b.veh;
   _model = b.model;
   _plant.reset();
   _w = std::make_unique<world>(rollout_config(_o.threads));
 
-  // The copies of the scene on a grid, `spacing` apart, centred on the origin.
-  const double ex = (sc.max_x - sc.min_x) * sc.scale, ey = (sc.max_y - sc.min_y) * sc.scale;
-  const double spacing = std::max(ex, ey) * (1.0 + _o.margin);
+  // Each agent's extent in its frame: the scene's, or its start; its own obstacles; its reach.
+  // The copies sit on a grid `spacing` apart, centred on the origin, each centred on its extent.
+  std::vector<double> cx(static_cast<std::size_t>(b.n)), cy(cx), size(cx);
+  for (int i = 0; i < b.n; ++i) {
+    double x0 = b.o[2 * i], x1 = x0, y0 = b.o[2 * i + 1], y1 = y0;
+    if (sc) {
+      x0 = (sc->min_x - sc->cx) * sc->scale;
+      x1 = (sc->max_x - sc->cx) * sc->scale;
+      y0 = (sc->min_y - sc->cy) * sc->scale;
+      y1 = (sc->max_y - sc->cy) * sc->scale;
+    }
+    if (own(i))
+      for (const cvc::nav::rollout_obstacle &o : *own(i)) {
+        const double hx = o.type == cvc::nav::rollout_obstacle::kind::disc ? o.r : o.hx;
+        const double hy = o.type == cvc::nav::rollout_obstacle::kind::disc ? o.r : o.hy;
+        x0 = std::min(x0, o.x - hx);
+        x1 = std::max(x1, o.x + hx);
+        y0 = std::min(y0, o.y - hy);
+        y1 = std::max(y1, o.y + hy);
+      }
+    x0 -= b.reach;
+    x1 += b.reach;
+    y0 -= b.reach;
+    y1 += b.reach;
+    cx[i] = 0.5 * (x0 + x1);
+    cy[i] = 0.5 * (y0 + y1);
+    size[i] = std::max(x1 - x0, y1 - y0);
+  }
+  const double spacing =
+      (b.n > 0 ? *std::max_element(size.begin(), size.end()) : 1.0) * (1.0 + _o.margin);
   const int cols = std::max(1, static_cast<int>(std::ceil(std::sqrt(static_cast<double>(b.n)))));
   const int rows = std::max(1, (b.n + cols - 1) / cols);
   const material_id ground =
@@ -243,21 +303,32 @@ void jolt_rollout::reset(const cvc::nav::rollout_batch &b) {
   _agents.assign(static_cast<std::size_t>(b.n), agent{});
   for (int i = 0; i < b.n; ++i) {
     agent &a = _agents[static_cast<std::size_t>(i)];
-    a.ox = ((i % cols) - 0.5 * (cols - 1)) * spacing;
-    a.oy = ((i / cols) - 0.5 * (rows - 1)) * spacing;
+    a.ox = ((i % cols) - 0.5 * (cols - 1)) * spacing - cx[i];
+    a.oy = ((i / cols) - 0.5 * (rows - 1)) * spacing - cy[i];
   }
-  const std::vector<rect> rects = _o.walls ? scene_rects(sc) : std::vector<rect>{};
+  const std::vector<rect> rects = _o.walls && sc ? scene_rects(*sc) : std::vector<rect>{};
   _wall_boxes = static_cast<int>(rects.size());
-  for (const agent &a : _agents)
-    for (const rect &r : rects) {
-      body_desc w;
-      w.shape = box{{0.5 * (r.x1 - r.x0) / _k, 0.5 * (r.y1 - r.y0) / _k, 0.5 * _o.wall_height}};
-      w.motion = motion_type::static_;
-      w.position = {(0.5 * (r.x0 + r.x1) + a.ox) / _k, (0.5 * (r.y0 + r.y1) + a.oy) / _k,
-                    0.5 * _o.wall_height};
-      w.material = ground;
-      _w->add_body(w);
-    }
+  const auto add_static = [&](const shape &s, double x, double y) {
+    body_desc w;
+    w.shape = s;
+    w.motion = motion_type::static_;
+    w.position = {x / _k, y / _k, 0.5 * _o.wall_height};
+    w.material = ground;
+    _w->add_body(w);
+  };
+  for (int i = 0; i < b.n; ++i) {
+    const agent &a = _agents[static_cast<std::size_t>(i)];
+    for (const rect &r : rects)
+      add_static(box{{0.5 * (r.x1 - r.x0) / _k, 0.5 * (r.y1 - r.y0) / _k, 0.5 * _o.wall_height}},
+                 0.5 * (r.x0 + r.x1) + a.ox, 0.5 * (r.y0 + r.y1) + a.oy);
+    if (_o.walls && own(i))
+      for (const cvc::nav::rollout_obstacle &o : *own(i)) {
+        if (o.type == cvc::nav::rollout_obstacle::kind::disc)
+          add_static(disc_prism(o.r / _k, _o.wall_height), o.x + a.ox, o.y + a.oy);
+        else
+          add_static(box{{o.hx / _k, o.hy / _k, 0.5 * _o.wall_height}}, o.x + a.ox, o.y + a.oy);
+      }
+  }
 
   nav_plant_options po = _o.plant;
   po.metres_per_world_unit = 1.0;
@@ -274,10 +345,10 @@ void jolt_rollout::reset(const cvc::nav::rollout_batch &b) {
     // The nearest heading, 15 degrees at a time either way, at which the body clears the walls.
     agent &a = _agents[static_cast<std::size_t>(i)];
     a.turn = 0.0;
-    if (_o.walls && sc.rows > 1 && sc.cols > 1 && !sc.field_data.empty())
+    if (_o.walls && (sc || own(i)))
       for (int step = 0; step <= 24; ++step) {
         const double turn = (step % 2 == 1 ? 1.0 : -1.0) * ((step + 1) / 2) * kPi / 12.0;
-        if (body_fits(sc, reach, _k, b.o[2 * i], b.o[2 * i + 1], b.psi[i] + turn,
+        if (body_fits(sc, own(i), reach, _k, b.o[2 * i], b.o[2 * i + 1], b.psi[i] + turn,
                       _o.clearance_m * _k)) {
           a.turn = turn;
           break;
@@ -292,10 +363,18 @@ void jolt_rollout::reset(const cvc::nav::rollout_batch &b) {
     _plant->advance();
   for (int i = 0; i < b.n; ++i) {
     agent &a = _agents[static_cast<std::size_t>(i)];
-    const body_state bs = _w->vehicle_state(_plant->vehicle(i)).body;
-    a.z_rest = (bs.position + rotate(bs.rotation, _desc.center_of_mass)).z;
+    const vehicle_state vs = _w->vehicle_state(_plant->vehicle(i));
+    a.z_rest = (vs.body.position + rotate(vs.body.rotation, _desc.center_of_mass)).z;
     a.psi = b.psi[i] + a.turn;
     a.a = 0.0f;
+    // Launched at its start speed: the chassis's velocity along its heading. The wheels spin up
+    // in the first step, at the cost of a little speed.
+    if (b.speed && b.speed[i] != 0.0f) {
+      body_state s = _w->state(vs.chassis);
+      s.linear_velocity = rotate(s.rotation, {1.0, 0.0, 0.0}) * (b.speed[i] / _k);
+      s.angular_velocity = {0.0, 0.0, 0.0};
+      _w->set_state(vs.chassis, s);
+    }
   }
   _steps = 0;
   _step_us = 0.0;
@@ -416,6 +495,24 @@ void jolt_rollout::restore(const std::vector<std::uint8_t> &state) {
       std::vector<std::uint8_t>(state.begin() + static_cast<std::ptrdiff_t>(pos), state.end()));
   _agents = std::move(agents);
   _steps = steps;
+}
+
+cvc::nav::dyn4_calibration use_jolt_rollout(cvc::nav::train_config &cfg,
+                                            const cvc::nav::training_scene &scene,
+                                            const vehicle_desc &desc, int agents, int steps,
+                                            unsigned seed, jolt_rollout_options options) {
+  auto plant = std::make_shared<jolt_rollout>(desc, cfg.veh_L, std::move(options));
+  cfg.rollout = cvc::nav::rollout_kind::jolt;
+  cfg.plant = plant;
+  cfg.dyn4 = nav_plant::dyn4_params_at(desc, cfg.veh_L);
+  cfg.dyn4_price = {};
+  const std::vector<cvc::nav::dyn4_ledger_tick> ticks =
+      cvc::nav::record_plant_ticks(scene, cfg, *plant, agents, steps, seed);
+  const cvc::nav::dyn4_calibration cal =
+      cvc::nav::calibrate_dyn4(cfg.dyn4, cvc::nav::bike_veh_of(scene, cfg), cfg.ground_mu, ticks);
+  cfg.dyn4 = cvc::nav::calibrated(cfg.dyn4, cal);
+  cfg.dyn4_price = cal.price;
+  return cal;
 }
 
 } // namespace physics

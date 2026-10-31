@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -33,6 +34,7 @@
 #include <cvc/nav/route_follower.h>
 #include <cvc/nav/sim_world.h>
 #include <cvc/nav/vehicle_route.h>
+#include <cvc/physics/jolt_rollout.h>
 #include <cvc/physics/nav_es.h>
 #include <cvc/physics/nav_eval.h>
 #include <cvc/physics/nav_plant.h>
@@ -40,10 +42,13 @@
 #include <cvc/physics/plant_log_scene.h>
 #include <cvc/physics/world.h>
 #include <cvc/state/state.h>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <gtest/gtest.h>
 #include <memory>
 #include <random>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -1351,6 +1356,172 @@ TEST(NavPlantConvergence, CheckpointSelectionOnJoltReach) {
               nval, base.lr, base.steps, base.checkpoint_every, 100 * ma, 100 * mb, 100 * mc,
               100 * (mb - ma), 100 * lo1, 100 * hi1, 100 * (mb - mc), 100 * lo2, 100 * hi2);
   EXPECT_TRUE(std::isfinite(mb));
+}
+
+// ── Training on Jolt (rollout_kind::jolt) against the dynamic vehicle, scored on Jolt ──
+//
+// The Humvee at demo3's metric (0.05 normalized units per metre, its 3.30 m wheelbase 0.165), its
+// own envelope in training and in the scoring (plan_with_vehicle): 0.8 of its 2.5 m/s^2, 0.5 g of
+// cornering, its 0.457 rad lock. Each arm trains on the city with checkpoints selected on Jolt
+// reach over validation seeds (200...), and the selected policies are scored on the 20 held-out
+// seeds against the untrained seed with paired-bootstrap CIs. Arms (JOLT_EXP_ARMS, comma-separated
+// kind:seed:lr[:horizon[:w_coll]]): jolt (the Jolt rollout, its four-wheel model calibrated to Jolt
+// first: use_jolt_rollout) and dynamic (the single-track model). An experiment, not a check: it
+// runs for hours and asserts only that its numbers are finite. It runs when
+// CVC_JOLT_TRAIN_EXPERIMENT=1; JOLT_EXP_{STEPS, N, HORIZON, WINDOW, EVERY, VAL} size it,
+// JOLT_EXP_OUT names a directory for the selected policies (.cvcnav) and a summary.
+TEST(NavPlantConvergence, JoltTrainedHumveeOnJoltReach) {
+  REQUIRE_JOLT();
+  if (!std::getenv("CVC_JOLT_TRAIN_EXPERIMENT") ||
+      std::string(std::getenv("CVC_JOLT_TRAIN_EXPERIMENT")) != "1")
+    GTEST_SKIP() << "an experiment: set CVC_JOLT_TRAIN_EXPERIMENT=1 to run it";
+  const auto env_int = [](const char *k, int d) {
+    return std::getenv(k) ? std::atoi(std::getenv(k)) : d;
+  };
+  const std::string arms_spec = std::getenv("JOLT_EXP_ARMS")
+                                    ? std::getenv("JOLT_EXP_ARMS")
+                                    : "jolt:1:2e-4,jolt:2:2e-4,jolt:1:5e-4,dynamic:1:2e-4";
+  const std::string out = std::getenv("JOLT_EXP_OUT") ? std::getenv("JOLT_EXP_OUT") : "";
+  const cvc::nav::training_scene sc = cvc::nav::city_scene(96);
+  const vehicle_desc hv = vehicle_desc::humvee();
+  const double L = hv.wheelbase() * kS; // 0.165
+  cvc::nav::train_config base;
+  base.n = env_int("JOLT_EXP_N", 96);
+  base.hidden = 64;
+  base.horizon = env_int("JOLT_EXP_HORIZON", 60);
+  base.window = env_int("JOLT_EXP_WINDOW", 10);
+  base.steps = env_int("JOLT_EXP_STEPS", 1500);
+  base.checkpoint_every = env_int("JOLT_EXP_EVERY", 100);
+  base.veh_L = static_cast<float>(L);
+  base.veh_delta_max = static_cast<float>(hv.max_steer);
+  base.veh_a_max = static_cast<float>(0.8 * hv.max_accel * kS);
+  base.veh_a_lat_max = static_cast<float>(0.5 * kG * kS);
+  // Episodes long enough for Humvees to cross the 200 m city (JOLT_EXP_TICKS of 0.06 s), goals
+  // anywhere or JOLT_EXP_GOAL_MAX normalized units from the start.
+  plant_reach_options held; // the gate's 20 held-out seeds, 100..119
+  held.plan_with_vehicle = true;
+  held.ticks = env_int("JOLT_EXP_TICKS", 1500);
+  if (std::getenv("JOLT_EXP_GOAL_MAX")) {
+    held.goal_max = static_cast<float>(std::atof(std::getenv("JOLT_EXP_GOAL_MAX")));
+    held.goal_min = 0.25f * held.goal_max;
+    base.goal_min = held.goal_min;
+    base.goal_max = held.goal_max;
+  }
+  plant_reach_options val = held;
+  val.seeds.clear();
+  for (int k = 0; k < env_int("JOLT_EXP_VAL", 24); ++k)
+    val.seeds.push_back(200u + static_cast<unsigned>(k));
+  const auto jolt_reach = [&](const cvc::nav::coef_mlp &policy, int) {
+    return reach_on_plant(policy, sc, hv, L, val);
+  };
+  const auto now = [] { return std::chrono::steady_clock::now(); };
+  const auto mins = [](auto a, auto b) {
+    return std::chrono::duration<double>(b - a).count() / 60.0;
+  };
+
+  // Each arm is scored on the held-out seeds and saved as soon as it is trained, so a later arm's
+  // failure (reported, and the run goes on) cannot lose it.
+  std::ofstream summary;
+  if (!out.empty()) {
+    std::filesystem::create_directories(out);
+    summary.open(out + "/summary.txt", std::ios::app);
+  }
+  std::vector<double> seed_held;
+  const double seed_mean =
+      reach_on_plant(cvc::nav::coef_mlp::default_biased(), sc, hv, L, held, &seed_held);
+  const auto report = [&](const std::string &line) {
+    std::fputs(line.c_str(), stdout);
+    std::fflush(stdout);
+    if (summary) {
+      summary << line;
+      summary.flush();
+    }
+  };
+  {
+    char line[256];
+    std::snprintf(line, sizeof line,
+                  "held-out reach on Jolt (%zu seeds, %d Humvees, %d ticks): seed (untrained) "
+                  "%.1f%%\n",
+                  held.seeds.size(), held.agents, held.ticks, 100 * seed_mean);
+    report(line);
+  }
+  std::stringstream specs(arms_spec);
+  std::string spec;
+  while (std::getline(specs, spec, ',')) {
+    if (spec.empty())
+      continue;
+    std::stringstream f(spec);
+    std::string kind, seed_s, lr_s, horizon_s, wcoll_s;
+    std::getline(f, kind, ':');
+    std::getline(f, seed_s, ':');
+    std::getline(f, lr_s, ':');
+    std::getline(f, horizon_s, ':');
+    std::getline(f, wcoll_s, ':');
+    cvc::nav::train_config cfg = base;
+    cfg.seed = static_cast<unsigned>(std::atoi(seed_s.c_str()));
+    cfg.lr = static_cast<float>(std::atof(lr_s.c_str()));
+    if (!horizon_s.empty())
+      cfg.horizon = std::atoi(horizon_s.c_str());
+    if (!wcoll_s.empty())
+      cfg.w_coll = static_cast<float>(std::atof(wcoll_s.c_str()));
+    try {
+      const auto t0 = now();
+      if (kind == "jolt") {
+        const cvc::nav::dyn4_calibration cal =
+            use_jolt_rollout(cfg, sc, hv, 32, 200, 7u + cfg.seed);
+        std::printf(
+            "[%s] calibrated in %.1f min: drive %.3f brake %.3f comp %.3f lag %.3f s, tire x%.3f "
+            "drag x%.3f rolling x%.3f damper x%.3f, price %.3f; fitted books dissipated %+.3f "
+            "drawn %+.3f, twist %.4f\n",
+            spec.c_str(), mins(t0, now()), cal.drive_gain, cal.brake_gain, cal.resist_comp,
+            cal.tau_drive, cal.tire, cal.drag, cal.rolling, cal.damper, cal.price.drive,
+            cal.after.dissipated.error(), cal.after.drawn.error(), cal.after.twist_rms);
+      } else if (kind == "dynamic") {
+        cfg.rollout = cvc::nav::rollout_kind::dynamic;
+        cfg.dyn = nav_plant::dyn_bike_params_at(hv, cfg.veh_L);
+      } else {
+        ADD_FAILURE() << "unknown arm kind " << kind;
+        continue;
+      }
+      std::fflush(stdout);
+      cvc::nav::coef_trainer tr(cfg, cfg.seed);
+      const auto t1 = now();
+      tr.train(sc, true, jolt_reach);
+      std::printf("[%s] trained %d steps in %.1f min (%ld agents' gradients left out); "
+                  "checkpoints (validation reach):",
+                  spec.c_str(), cfg.steps, mins(t1, now()), tr.dropped_agents());
+      for (const cvc::nav::coef_trainer::checkpoint_score &k : tr.checkpoints())
+        std::printf(" %d:%.3f", k.step, k.fitness);
+      std::printf("; selected step %d\n", tr.selected_step());
+      std::fflush(stdout);
+      const cvc::nav::coef_mlp policy = tr.to_coef_mlp();
+      std::vector<double> a;
+      const double mean = reach_on_plant(policy, sc, hv, L, held, &a);
+      std::vector<double> d(a.size());
+      for (std::size_t s = 0; s < d.size(); ++s)
+        d[s] = a[s] - seed_held[s];
+      double lo = 0.0, hi = 0.0;
+      paired_ci(d, lo, hi);
+      char line[256];
+      std::snprintf(line, sizeof line,
+                    "  %-22s %.1f%%  vs the seed %+.1f [%+.1f, %+.1f]  (selected step %d)\n",
+                    spec.c_str(), 100 * mean, 100 * (mean - seed_mean), 100 * lo, 100 * hi,
+                    tr.selected_step());
+      report(line);
+      if (!out.empty()) {
+        std::string file = spec;
+        for (char &c : file)
+          if (c == ':')
+            c = '_';
+        policy.save(out + "/" + file + ".cvcnav",
+                    "trained on the city at demo3's metric (" + spec + "), selected on Jolt reach");
+      }
+      EXPECT_TRUE(std::isfinite(mean));
+    } catch (const std::exception &e) {
+      report("  " + spec + " FAILED: " + e.what() + "\n");
+      ADD_FAILURE() << spec << ": " << e.what();
+    }
+  }
 }
 
 // ── P8c's gate: a policy trained with the energy term against one trained without it, both on

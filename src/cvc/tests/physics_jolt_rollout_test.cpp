@@ -17,21 +17,30 @@
 //     reports the contact;
 //  4. calibrate_dyn4 closes the model's books against Jolt's ledger on held-out runs;
 //  5. the gradient agrees with central differences of the loss on Jolt;
-//  6. training on Jolt lowers the loss on Jolt.
+//  6. training on Jolt lowers the loss on Jolt;
+//  7. the material trainer (material_integrator::jolt) does the same on its own batches: their
+//     discs and hard cells as walls, the gradient against Jolt's, and training.
 // The Humvee drives the trainer's city at about 0.106 normalized units per metre (veh_L 0.35 for
 // its 3.30 m wheelbase), with a Humvee's acceleration and cornering.
+
+#include "coef_energy_test_model.h"
+#include "material_batch_fixture.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cvc/nav/coef_train.h>
 #include <cvc/nav/dyn4_ledger.h>
+#include <cvc/nav/material_train.h>
 #include <cvc/physics/backend.h>
 #include <cvc/physics/jolt_rollout.h>
 #include <cvc/physics/nav_plant.h>
 #include <gtest/gtest.h>
+#include <limits>
 #include <memory>
 #include <random>
+#include <string>
+#include <utility>
 #include <vector>
 
 using cvc::nav::coef_trainer;
@@ -184,6 +193,41 @@ TEST(JoltRollout, ReplaysABatchBitForBit) {
   for (std::size_t k = 0; k < first.size(); ++k)
     ASSERT_EQ(first[k], again[k]) << "value " << k;
   EXPECT_GT(std::fabs(first[3]), 0.0f) << "the vehicles should move";
+}
+
+// A batch with start speeds (rollout_batch::speed) is launched at them: the vehicles read back at
+// their speeds before the first step, and after it have lost little to their wheels spinning up.
+TEST(JoltRollout, LaunchesAtItsStartSpeed) {
+  REQUIRE_JOLT();
+  const training_scene sc = cvc::nav::city_scene(96);
+  train_config cfg = humvee_cfg(4);
+  std::vector<float> o, goal;
+  reset_batch(sc, cfg, 5, o, goal);
+  std::vector<float> psi(cfg.n), speed(cfg.n);
+  for (int i = 0; i < cfg.n; ++i) {
+    psi[i] = cfg.plant->state(i).psi;
+    speed[i] = static_cast<float>(0.106 * (2.0 + 2.0 * i)); // 2, 4, 6 and 8 m/s
+  }
+  cvc::nav::rollout_batch b;
+  b.scene = &sc;
+  b.veh = cvc::nav::bike_veh_of(sc, cfg);
+  b.model = cfg.dyn4;
+  b.n = cfg.n;
+  b.o = o.data();
+  b.psi = psi.data();
+  b.speed = speed.data();
+  cfg.plant->reset(b);
+  std::vector<float> d(cfg.n, 0.0f), a(cfg.n, 0.0f);
+  for (int i = 0; i < cfg.n; ++i)
+    EXPECT_NEAR(cfg.plant->state(i).vx, speed[i], 1e-3f * speed[i]);
+  cfg.plant->step(d.data(), a.data());
+  for (int i = 0; i < cfg.n; ++i) {
+    const float vx = cfg.plant->state(i).vx;
+    std::printf("  launched at %.1f m/s: %.2f m/s after the first step\n", speed[i] / 0.106,
+                vx / 0.106);
+    EXPECT_GT(vx, 0.85f * speed[i]);
+    EXPECT_LT(vx, 1.02f * speed[i]);
+  }
 }
 
 // Every agent drives its own copy of the scene, walls included: an agent driven straight at a
@@ -361,6 +405,28 @@ TEST(JoltRollout, GradientAgreesWithJoltFiniteDifferences) {
   EXPECT_LT(rel(dd, gnorm), 0.35);
 }
 
+// use_jolt_rollout sets a train_config up for Jolt in one call: the plant, the calibrated model and
+// its price, the same fit as the steps it takes one by one.
+TEST(JoltRollout, UseJoltRolloutSetsTheTrainerUp) {
+  REQUIRE_JOLT();
+  const training_scene sc = cvc::nav::city_scene(96);
+  train_config manual = humvee_cfg(16);
+  const cvc::nav::dyn4_calibration a = calibrate(sc, manual, 16, 150, 1);
+  train_config cfg;
+  cfg.veh_L = manual.veh_L;
+  cfg.veh_a_max = manual.veh_a_max;
+  cfg.veh_a_lat_max = manual.veh_a_lat_max;
+  const cvc::nav::dyn4_calibration b =
+      cvc::physics::use_jolt_rollout(cfg, sc, vehicle_desc::humvee(), 16, 150, 1);
+  EXPECT_EQ(cfg.rollout, cvc::nav::rollout_kind::jolt);
+  ASSERT_TRUE(cfg.plant);
+  EXPECT_EQ(a.drive_gain, b.drive_gain);
+  EXPECT_EQ(a.tire, b.tire);
+  EXPECT_EQ(a.price.drive, b.price.drive);
+  EXPECT_EQ(cfg.dyn4.B_f, manual.dyn4.B_f);
+  EXPECT_EQ(cfg.dyn4_price.idle, manual.dyn4_price.idle);
+}
+
 // Training on Jolt: 25 outer steps on one batch (train() with steps 1, the same seed, Adam's
 // state kept between calls), a horizon of 60 steps (3.6 s, long enough for the Humvees to get
 // under way: see the gradcheck) in windows of 10, lower the horizon loss on that batch on Jolt.
@@ -391,4 +457,176 @@ TEST(JoltRollout, TrainingLowersTheLossOnJolt) {
               before, after, jolt.step_us_per_vehicle());
   EXPECT_TRUE(std::isfinite(after));
   EXPECT_LT(after, before) << "training on Jolt did not lower the loss on Jolt";
+}
+
+// ── the material trainer on Jolt (material_integrator::jolt) ──
+
+namespace {
+
+// A material batch the Humvee drives (material_batch_fixture's, at the Humvee's frame): 24
+// agents, their discs 9 to 13 m off and 4 to 6 m across, under way toward their goals at about
+// 2.8 m/s, 40 steps of 0.06 s. Every fourth agent has a block of hard cells behind its start,
+// which the plant builds as walls.
+cvc_test::Batch humvee_material_batch(std::mt19937 &rng) {
+  cvc_test::Batch b = cvc_test::make_batch(rng, 24, 3, 16, 33, 33);
+  const std::size_t pp = static_cast<std::size_t>(b.Hp) * b.Wp;
+  for (int i = 0; i < b.B; ++i) {
+    b.dt[i] = 0.06f;
+    b.H[i] = 40;
+    const float gx = b.goal[2 * i] - b.o0[2 * i], gy = b.goal[2 * i + 1] - b.o0[2 * i + 1];
+    const float gd = std::sqrt(gx * gx + gy * gy);
+    b.v0[2 * i] = 0.3f * gx / gd;
+    b.v0[2 * i + 1] = 0.3f * gy / gd;
+    if (i % 4 == 0)
+      for (int r = 14; r <= 16; ++r)
+        for (int c = 8; c <= 10; ++c)
+          b.rollout_patch[(static_cast<std::size_t>(i) * 6 + 1) * pp + r * b.Wp + c] = 0.0f;
+  }
+  return b;
+}
+
+// The material loss through the Jolt Humvee, its model calibrated as the coef trainer's is.
+cvc::nav::material_loss_config humvee_material_cfg(const training_scene &sc) {
+  train_config tc = humvee_cfg(16);
+  calibrate(sc, tc, 16, 150, 1);
+  cvc::nav::material_loss_config cfg;
+  cfg.integrator = cvc::nav::material_integrator::jolt;
+  cfg.bicycle.L = tc.veh_L;
+  cfg.bicycle.a_max = tc.veh_a_max;
+  cfg.bicycle.a_lat_max = tc.veh_a_lat_max;
+  cfg.bicycle.vmax = sc.vmax;
+  cfg.plant = tc.plant;
+  cfg.dyn4 = tc.dyn4;
+  cfg.ground_mu = tc.ground_mu;
+  return cfg;
+}
+
+double grad_norm(const cvc::nav::coef_energy_net::param_grads &g,
+                 const std::vector<std::string> &names) {
+  double s = 0.0;
+  for (const auto &nm : names)
+    for (const float x : g.at(nm))
+      s += static_cast<double>(x) * x;
+  return std::sqrt(s);
+}
+
+} // namespace
+
+// The material loss on Jolt: the discs and the hard cells are walls in the world, the vehicles
+// launched at their start speeds; the loss is finite and its gradient not zero.
+TEST(JoltRollout, MaterialBatchesDriveAmongTheirOwnWalls) {
+  REQUIRE_JOLT();
+  const training_scene sc = cvc::nav::city_scene(96);
+  std::mt19937 rng(2024);
+  cvc::nav::coef_energy_net m = cvc_test::build_test_model(rng, 16, cvc_test::test_model_dims{});
+  cvc_test::Batch batch = humvee_material_batch(rng);
+  const cvc::nav::material_batch mb = batch.view();
+  cvc::nav::material_loss_config cfg = humvee_material_cfg(sc);
+  cvc::nav::coef_energy_net::param_grads g = m.zero_grads();
+  float eta = 0.0f;
+  cvc::nav::material_loss_parts parts;
+  const double L = cvc::nav::material_loss_and_grad(m, mb, cfg, g, &eta, false, &parts);
+  auto &jolt = static_cast<jolt_rollout &>(*cfg.plant);
+  const int walls = static_cast<int>(jolt.physics_world().body_count());
+  std::printf("  loss %.4f (traj %.4f vel %.4f nav %.4f multi %.4f), |g| %.4f; %d bodies\n", L,
+              parts.traj, parts.vel, parts.nav, parts.multi, grad_norm(g, m.param_names()), walls);
+  // The ground, the 24 vehicles, 2 discs an agent (one of the 3 is padding) and the hard rows.
+  EXPECT_GE(walls, 1 + 24 + 24 * 2 + 6 * 3);
+  EXPECT_TRUE(std::isfinite(L));
+  EXPECT_GT(grad_norm(g, m.param_names()), 0.0);
+  // Each call resets the plant to the batch, so the loss on Jolt repeats exactly (at the quantile
+  // as a float, as a gradcheck freezes it).
+  const double once = cvc::nav::material_loss(m, mb, cfg, eta);
+  EXPECT_EQ(cvc::nav::material_loss(m, mb, cfg, eta), once);
+  EXPECT_NEAR(once, L, 1e-6 * std::fabs(L));
+  // The untrained net drives a few agents back and forth; most get well away from their starts.
+  int away = 0;
+  for (int i = 0; i < batch.B; ++i) {
+    const cvc::nav::diff::dyn4_state<float> s = jolt.state(i);
+    away += std::hypot(s.x - batch.o0[2 * i], s.y - batch.o0[2 * i + 1]) > 0.1f ? 1 : 0;
+  }
+  EXPECT_GE(away, 18) << "of 24 agents, few drove a metre from their starts";
+  cfg.plant.reset();
+  EXPECT_THROW(cvc::nav::material_loss(m, mb, cfg, eta), std::invalid_argument);
+}
+
+// The material gradient against Jolt's central differences, with the CVaR quantile frozen at the
+// analytic gradient's (as nav_material_train_test's gradcheck): along the whole gradient, and
+// along it on each of the three tensors it is largest on.
+TEST(JoltRollout, MaterialGradientAgreesWithJoltFiniteDifferences) {
+  REQUIRE_JOLT();
+  const training_scene sc = cvc::nav::city_scene(96);
+  std::mt19937 rng(2024);
+  cvc::nav::coef_energy_net m = cvc_test::build_test_model(rng, 16, cvc_test::test_model_dims{});
+  cvc_test::Batch batch = humvee_material_batch(rng);
+  const cvc::nav::material_batch mb = batch.view();
+  const cvc::nav::material_loss_config cfg = humvee_material_cfg(sc);
+  cvc::nav::coef_energy_net::param_grads g = m.zero_grads();
+  float eta = 0.0f;
+  const double L0 = cvc::nav::material_loss_and_grad(m, mb, cfg, g, &eta);
+  const std::vector<std::string> names = m.param_names();
+  const auto fd_along = [&](const std::vector<std::string> &on, double eps) {
+    double norm = 0.0;
+    for (const auto &nm : on)
+      for (const float x : g.at(nm))
+        norm += static_cast<double>(x) * x;
+    norm = std::sqrt(norm);
+    const auto shift = [&](double t) {
+      for (const auto &nm : on) {
+        std::vector<float> &w = m.mutable_param(nm);
+        const std::vector<float> &gg = g.at(nm);
+        for (std::size_t i = 0; i < w.size(); ++i)
+          w[i] += static_cast<float>(t * gg[i] / norm);
+      }
+    };
+    shift(eps);
+    const double Lp = cvc::nav::material_loss(m, mb, cfg, eta);
+    shift(-2.0 * eps);
+    const double Lm = cvc::nav::material_loss(m, mb, cfg, eta);
+    shift(eps);
+    return std::pair<double, double>{norm, (Lp - Lm) / (2.0 * eps)};
+  };
+  const auto rel = [](double a, double b) {
+    return std::fabs(a - b) / (std::fabs(a) + std::fabs(b));
+  };
+  const auto whole = fd_along(names, 0.05);
+  std::printf("[jolt-material-gradcheck] loss %.4f; along the gradient: model %.4e Jolt %.4e "
+              "(rel %.3f)\n",
+              L0, whole.first, whole.second, rel(whole.first, whole.second));
+  EXPECT_GT(whole.second, 0.0) << "the model's gradient does not point uphill on Jolt";
+  EXPECT_LT(rel(whole.first, whole.second), 0.35);
+  std::vector<std::pair<double, std::string>> by;
+  for (const auto &nm : names)
+    by.push_back({grad_norm(g, {nm}), nm});
+  std::sort(by.rbegin(), by.rend());
+  for (int k = 0; k < 3 && k < static_cast<int>(by.size()); ++k) {
+    const auto t = fd_along({by[k].second}, 0.05);
+    std::printf("  %-28s model %.4e Jolt %.4e (rel %.3f)\n", by[k].second.c_str(), t.first,
+                t.second, rel(t.first, t.second));
+    EXPECT_GT(t.second, 0.0) << by[k].second;
+    EXPECT_LT(rel(t.first, t.second), 0.35) << by[k].second;
+  }
+}
+
+// Training the material net on Jolt: 20 Adam steps on one batch lower its loss on Jolt.
+TEST(JoltRollout, MaterialTrainingLowersTheLossOnJolt) {
+  REQUIRE_JOLT();
+  const training_scene sc = cvc::nav::city_scene(96);
+  std::mt19937 rng(2024);
+  cvc::nav::coef_energy_net m = cvc_test::build_test_model(rng, 16, cvc_test::test_model_dims{});
+  cvc_test::Batch batch = humvee_material_batch(rng);
+  const cvc::nav::material_batch mb = batch.view();
+  const cvc::nav::material_loss_config cfg = humvee_material_cfg(sc);
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  const double before = cvc::nav::material_loss(m, mb, cfg, nan);
+  cvc::nav::material_adam opt(m);
+  for (int step = 0; step < 20; ++step) {
+    cvc::nav::coef_energy_net::param_grads g = m.zero_grads();
+    cvc::nav::material_loss_and_grad(m, mb, cfg, g);
+    opt.step(m, g, 1e-3f);
+  }
+  const double after = cvc::nav::material_loss(m, mb, cfg, nan);
+  std::printf("[jolt-material-train] loss before %.4f after %.4f\n", before, after);
+  EXPECT_TRUE(std::isfinite(after));
+  EXPECT_LT(after, before) << "training on Jolt did not lower the material loss on Jolt";
 }
