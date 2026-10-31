@@ -13,17 +13,25 @@
 // over this — that is why they work identically native and in the browser.
 //
 // SYNCHRONY: send() BLOCKS until the full (capped) response body is buffered or an error occurs,
-// and returns by value. This matches Ariadne's synchronous resolve()/store() contract, so no caller
-// grows an async path. On native, libcurl blocks naturally. On wasm the fetch backend issues an
+// and returns by value. This matches Ariadne's synchronous resolve()/store() contract, so those
+// need no async path. On native, libcurl blocks naturally. On wasm the fetch backend issues an
 // async emscripten_fetch and spins on emscripten_sleep(0) — which only returns synchronously when
 // the EXECUTABLE is linked with -sASYNCIFY (the demo gallery) or runs off the main thread on a
 // -pthread build; see src/cvc/net/http_client_fetch.cpp and the CMake note. This is a LINK
 // requirement of the wasm executable, not a property of this interface.
 //
-// This header is deliberately dependency-light (only <cstddef>/<memory>/<string>/<vector>) and
-// knows nothing about curl, Emscripten, or Ariadne — the dependency arrows point INTO cvc::net.
+// NOT BLOCKING: start() is the other entry. Where the transport can (the browser's fetch in a build
+// without threads: starts_async()), it issues the request and returns at once, and the reply comes
+// later through a callback, from the browser's event loop on the calling thread. Everywhere else it
+// sends in place, calls back before it returns, and is as blocking as send(). Ariadne's network
+// verbs use it (docs/ARIADNE.md 10.2), so a page's frame loop does not wait on their requests.
+//
+// This header is deliberately dependency-light (only <cstddef>/<functional>/<memory>/<string>/
+// <vector>) and knows nothing about curl, Emscripten, or Ariadne — the dependency arrows point INTO
+// cvc::net.
 
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -68,6 +76,20 @@ struct HttpResponse {
   std::string error;                // non-empty transport/setup error text when !ok
 };
 
+// What start() calls with the reply: once, unless the transfer is aborted first.
+using HttpDone = std::function<void(HttpResponse)>;
+
+// A request start() has issued and not yet answered. abort() ends it: once abort() has returned,
+// its HttpDone is not called (nor ever was, if it had not been yet), and what it captured is
+// released. Call it on the thread that started the transfer (the browser's main thread).
+// Idempotent, and a no-op once the reply has been delivered. The transport keeps a transfer in
+// flight alive itself; dropping the handle neither aborts it nor stops the reply.
+class HttpTransfer {
+public:
+  virtual ~HttpTransfer() = default;
+  virtual void abort() = 0;
+};
+
 // The transport interface. One synchronous, non-throwing call: a network error is reported through
 // HttpResponse.ok/error, never as an exception (send() runs inside resolve()/store()'s barrier, but
 // callers must be able to rely on a value either way).
@@ -75,6 +97,13 @@ class HttpClient {
 public:
   virtual ~HttpClient() = default;
   virtual HttpResponse send(const HttpRequest &req) = 0;
+  // Issue `req` and call `done` with the reply. A transport that starts_async() returns a handle at
+  // once and calls `done` later, from the event loop of the calling thread. The default sends in
+  // place (send()), calls `done` before it returns, and returns null.
+  virtual std::shared_ptr<HttpTransfer> start(const HttpRequest &req, HttpDone done);
+  // Whether start() returns before the reply arrives (the browser's fetch in a build without
+  // threads). A caller on a frame loop's thread uses start() where this holds, never send().
+  virtual bool starts_async() const { return false; }
   // Whether this is a real transport (false only for the no-backend NullHttpClient). Lets a host
   // ask "was an HTTP backend compiled in?" without special-casing the null build. See
   // have_http_backend.
@@ -101,6 +130,20 @@ class NetPolicy; // net_policy.h
 // (follows_redirects_itself) the browser follows them and only the first URL is checked; CORS and
 // the browser's own rule of dropping Authorization on a cross-origin hop bound the rest.
 HttpResponse send(const HttpRequest &req, const NetPolicy &policy);
+
+// start() through the process-global client: send(req) without blocking where the client
+// starts_async(). `done` gets the reply send(req) would return. A request refused before it is made
+// (an invalid method) is answered before start() returns, and the handle is null then.
+std::shared_ptr<HttpTransfer> start(const HttpRequest &req, HttpDone done);
+
+// start(), checked against `policy` as send(req, policy) is: the URL and, where the transport does
+// not follow redirects itself, each hop (each one started in turn; abort() ends whichever is in
+// flight). `policy` is kept until the reply.
+std::shared_ptr<HttpTransfer> start(const HttpRequest &req, std::shared_ptr<const NetPolicy> policy,
+                                    HttpDone done);
+
+// Whether the process-global client starts_async() (an injected one included).
+bool http_starts_async();
 
 // The value of the first response-header line named `name` (case-insensitive), trimmed; "" when
 // there is none.
