@@ -55,6 +55,7 @@ struct HostOptions {
   // --settle SECONDS: how long snapshot waits, with the network on, for the document to go idle
   // after its frames; 0 = kDefaultSettleSeconds.
   double settle = 0;
+  double timeout = 0; // --timeout SECONDS (ari test); 0 = the default
   bool ansi = false;
   std::string png;
   std::string graphics; // empty = auto (FtxuiBackend::Options::ImageColor)

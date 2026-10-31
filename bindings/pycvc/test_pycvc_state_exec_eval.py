@@ -198,6 +198,18 @@ def test_restrict_special_forms():
     _raises(TypeError, ev.restrict_special_forms, [1])
 
 
+def test_and_or_stop_at_the_argument_that_decides():
+    assert {"and", "or"} <= pycvc.stackless_evaluator.all_special_forms()
+    assert int(pycvc.eval_phase["and_next"]) > int(pycvc.eval_phase["lock_body"])
+    assert int(pycvc.eval_phase["or_next"]) == int(pycvc.eval_phase["and_next"]) + 1
+    for ev in (pycvc.stackless_evaluator(_builtins()), pycvc.evaluator(_builtins())):
+        assert ev.evaluate_script("(begin (set n 0) (and (set n 1) nil (set n 2)) n)") == 1
+        assert ev.evaluate_script("(or 7 (error \"never\"))") == 7
+        assert ev.evaluate_script("(and 1 nil 3)") is False
+        assert ev.evaluate_script("(and)") is True and ev.evaluate_script("(or)") is False
+        assert ev.evaluate_script("(apply or (list nil 5))") == 5  # the builtin, as a value
+
+
 # ── codec ───────────────────────────────────────────────────────────────
 
 

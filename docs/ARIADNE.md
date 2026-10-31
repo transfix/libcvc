@@ -27,6 +27,7 @@ unfamiliar; every binding, computed field, and handler in an `.ari` document is 
 10. [Async and networking](#10-async-and-networking)
 11. [Caveats — what is not yet wired](#11-caveats--what-is-not-yet-wired)
 12. [Golden-image tests](#12-golden-image-tests)
+13. [Testing a document: `quit`, `assert` and `ari test`](#13-testing-a-document-quit-assert-and-ari-test)
 
 ---
 
@@ -85,9 +86,11 @@ Reactive slots — `visible_when`, `enabled_when` / `disabled_when`, computed `b
 - The value allowlist admits arithmetic, coercion, logic, and side-effect-free state
   *readers* only (`kAllowed`, [`ariadne.cpp:417`](../src/cvc/ariadne/ariadne.cpp)), plus
   `(has? "name")`, which asks what the host provides
-  ([§5.7](#57-requires-and-has--what-a-document-needs-from-its-host)).
+  ([§5.7](#57-requires-and-has--what-a-document-needs-from-its-host)). `json-parse` and
+  `json-encode` are on it ([§10.4](#104-json-replies)); `str-concat` is not, so a computed
+  label joins its parts with `string.join`.
 - The special-form gate admits only `if / begin / let / while / for / lambda / defun /
-  set / return / quote / yield / break` (`kAllowedForms`,
+  set / return / quote / yield / break / and / or` (`kAllowedForms`,
   [`ariadne.cpp:433`](../src/cvc/ariadne/ariadne.cpp)).
 
 Nothing that writes state, schedules, watches, sends messages, or does I/O is
@@ -204,12 +207,14 @@ drain sweep warns once per message, through the warnings `take_reactive_warnings
 
 | What ended | Warning |
 |---|---|
-| an action, by an exception | `ari: on: action program failed: Class: message (at <where>)` |
-| a resident, by an exception | `ari: resident [<channel>] failed: Class: message (at <where>)` |
-| an action, by a kill (its step or time cap, a syntax error found while reading it) | `ari: on: action program did not complete: <reason>` |
-| a resident, by a kill | `ari: resident [<channel>] stopped: <reason>` |
+| an action, by an exception | `ari: on: action program failed: Class: message (at <where>) [<program>]` |
+| a resident, by an exception | `ari: <lane> resident [<channel>] failed: Class: message (at <where>)` |
+| an action, by a kill (its step or time cap, a syntax error found while reading it) | `ari: on: action program did not complete: <reason> [<program>]` |
+| a resident, by a kill | `ari: <lane> resident [<channel>] stopped: <reason>` |
 
-`<where>` is the innermost line of the exception's traceback. An `init:` program that fails
+`<where>` is the innermost line of the exception's traceback. `<program>` is the action's text on
+one line, cut at 80 characters, and `<lane>` is `on_tick:`, `on_key:`, `on_pointer:` or
+`on_signal:`. An `init:` program that fails
 reports `failed: Class: message (at <where>)` to its caller.
 
 **Keeping a resident alive.** A resident is one process for the life of the document. An
@@ -437,8 +442,10 @@ The built-in top-level keys (`is_builtin_block`,
 ```
 meta  menubar  windows  overlays  root (alias: children)  scene  customs  requires
 init  on_tick  on_key  on_pointer  on_signal  keys  units  import  channels  lint  args
-windows_menu
+windows_menu  tests
 ```
+
+`tests:` is read only by `ari test` (§13).
 
 Any **other** top-level key is dispatched to a parser registered via
 `register_ari_block`, or — if none is registered — **silently ignored**. This is
@@ -1401,6 +1408,7 @@ the terminal with no GL, VTK, or ImGui:
 ari run      [flags] doc.ari [document args...]   # take over the terminal
 ari snapshot [flags] doc.ari [document args...]   # print a frame (--width W --height H --frames N --ansi)
 ari check    [flags] doc.ari                      # load + warnings
+ari test     [flags] doc.ari...                   # headless test run (§13)
 ```
 
 Its flags (`--backend ftxui|tvision`, `--prefix P`, `--fps N`, `--no-mouse`,
@@ -1419,17 +1427,19 @@ clearing the screen, at the terminal's cell size (`--cell-size WxH` where it can
 
 `ari` is its own cvcpkg package (`cvcpkg install ari`, linux for now), built from
 [`cvcpkg/recipes/ari`](../cvcpkg/recipes/ari/recipe.yaml) against the installed libcvc,
-like `cvc-cli`. It is a thin host over `AppRuntime` with no `SceneAdapter`; it routes
-`on: quit` and a `(quit)` verb to `request_close()`, and an OS signal the document does not
+like `cvc-cli`. It is a thin host over `AppRuntime` with no `SceneAdapter`. Its
+`register_quit()` routes `on: quit` and the `(quit [code])` verb to `request_close(code)`, and
+`run`, `snapshot` and `check` exit with `exit_code()` (§13). An OS signal the document does not
 handle ends it with exit status 128 + the signal number. Embedding the same thing:
 
 ```cpp
 cvc::ariadne::FtxuiBackend backend;          // outlives the AppRuntime
 cvc::ariadne::AppRuntime rt(app, prefix);    // no SceneAdapter: a scene: is dropped
 rt.set_backend(backend);
-rt.on("quit", [&] { rt.request_close(); });
+rt.register_quit();                          // on: quit and (quit [code])
 rt.load(path);
 backend.run(rt);  // owns the terminal; drains every iteration; returns on quit / Ctrl-C
+return rt.exit_code();
 ```
 
 To route OS signals as well, install your handlers in `RunOptions::on_start` (it runs after
@@ -1801,7 +1811,81 @@ A host of its own turns the network on with `AppRuntime::enable_net(NetHostConfi
 destroyed. `register_net_intrinsics(app)` alone still registers unchecked verbs with no
 credentials, for an embedding program that vouches for its documents.
 
+### 10.4 JSON replies
+
+A REST reply's body is text. Three verbs turn it into widgets
+([STATE_EXEC_DEVELOPER_GUIDE.md](STATE_EXEC_DEVELOPER_GUIDE.md) §2, "JSON", has the details):
+
+- `(json-parse text)` reads JSON into values: an object is a dict in document order, an array
+  a list, a number without a fraction or exponent an int, `null` nil. Malformed text raises a
+  `ValueError` with `line` and `col`, which a `try` can catch.
+- `(json-encode value [indent])` writes values as JSON, for a request body.
+- `(state-set-tree path value)` writes a parsed value as the subtree at `path`: a dict's keys
+  and a list's indices name child nodes, and a scalar is a node's value. A list's node holds
+  its length, so `repeat:` can count it. It replaces the subtree, removing what the value
+  doesn't name, and it checks the whole value before it writes anything.
+
+```yaml
+init: |
+  (state-set-tree "feed" (json-parse (get-attr (http-get "https://example.org/feed") "body")))
+windows:
+  - window: Feed
+    children:
+      - type: group
+        repeat: (state-get "feed.items")     # the list's length
+        children:
+          - text: ""
+            bind: feed.items.{i}.text         # each element's field
+```
+
+The request needs the host to allow its origin ([§10.3](#103-the-hosts-network-the-allowlist-and-credentials),
+`ari --net-allow https://example.org`).
+[`examples/ariadne/documents/json_feed.ari`](../examples/ariadne/documents/json_feed.ari) does
+this with a JSON string in place of the request, so it runs anywhere, `ari` included. Its last
+post has accented letters, CJK and an emoji: in both terminal backends a wide glyph takes two
+columns and the window's edge stays straight. `ari_run_json_feed_ftxui` and
+`ari_run_json_feed_tvision` check that on a real terminal: they run `ari run` in a tmux pane
+(Linux, where tmux is installed) and compare the window's rows. `ariadne_ftxui_test`'s
+`JsonFeed*` and `WideGlyphs*` tests check `ari snapshot` and the tvision backend's hosted layout;
+until they did, `ari snapshot`'s plain text put a space after each wide glyph. All
+three are data jobs: a large reply is parsed and written a slice per step, so it doesn't stall
+a frame. `json-parse` and `json-encode` are pure, so reactive expressions may use them too.
+
 ---
+
+### 10.5 WebSockets
+
+The `ws-*` verbs keep a WebSocket client open across ticks, for a server that pushes changes
+(a live feed) instead of being polled. Natively they use libcurl's WebSocket support (built with
+`ws` and `wss`, as the deps' libcurl is); in the browser build, the browser's own `WebSocket`
+(link with `-lwebsocket.js`, which the `cvc` target adds for Emscripten executables). A host
+without either has no `ws-*` verbs, so a document asks `(has? "ws-open")` and polls otherwise.
+
+| verb | what |
+|---|---|
+| `(ws-open URL [OPTS])`, `ws-open-async` | connect to a `ws://` or `wss://` URL; reply `{ok handle url error}` |
+| `(ws-send H TEXT)` | send a text message; `#t`, or an error when `H` is closed |
+| `(ws-poll H)` | the next message already in, or `nil`; never waits |
+| `(ws-recv H [SECONDS])`, `ws-recv-async` | the next message, waiting up to `SECONDS` (30); `nil` when none came |
+| `(ws-open? H)` | whether `H` is still open |
+| `(ws-close H [CODE])` | close `H` (code 1000) and forget it; `#t` if it was open, never an error |
+
+- `H` is a handle string (`"ws:3"`), so a program can keep it in state and use it on later
+  ticks. A host keeps at most 64 open.
+- A message is a dict `{type data code}`: `type` is `"text"` (`data` a string, ready for
+  `json-parse`), `"binary"` (`data` bytes), `"close"` (`code` the peer's close code, 1005 when it
+  sent none and 1006 when the connection dropped; `data` its reason) or `"error"`. A close or
+  an error is the last message; `ws-open?` is `#f` from then on. Fragmented messages arrive
+  whole; one longer than 16 MiB is an error and closes the connection.
+- `OPTS` takes `query`, `headers`, `auth` and credential values as the HTTP verbs do (§10.2,
+  §10.3), plus `timeout`, the seconds to connect (15). A browser's `WebSocket` can't send
+  request headers, so there `headers` and `auth` are refused; a server that wants a token takes
+  it in a message instead.
+- The host's policy (§10.3) checks the URL as its `http(s)` twin: `--net-allow
+  https://example.org` allows `wss://example.org/...`.
+- `ws-open` and `ws-recv` are async I/O calls like the HTTP verbs: the connect, or the wait,
+  runs on the background pool and the program parks. `ws-poll` is the one to call from an
+  `on_tick` that also does other work: it takes what has arrived and returns.
 
 ## 11. Caveats — what is not yet wired
 
@@ -1966,3 +2050,108 @@ ImGui overlay compiled as inert stubs.
 [`STATE_EXEC_DEVELOPER_GUIDE.md`](STATE_EXEC_DEVELOPER_GUIDE.md),
 [`APP_API.md`](APP_API.md), and the normative spec
 [`roadmap/CVCGL-UI-DSL-ROADMAP.md`](roadmap/CVCGL-UI-DSL-ROADMAP.md).
+
+---
+
+## 13. Testing a document: `quit`, `assert` and `ari test`
+
+Three pieces let a document test itself, and a CI job run those tests with no terminal.
+
+**`(quit [code])`.** A host verb every stock host registers (`AppRuntime::register_quit()`:
+`ari`, `arigl` in a window and with `--terminal`). It asks the host to close, with `code` (an
+integer 0..255, default 0) as its exit status. `ari run`, `snapshot` and `check` and `arigl`'s
+commands exit with that code. The first request's code stands, a later `(quit)` does not change
+it, and the program that called it keeps running to its end. A code that is not an integer is a
+`TypeError`, and one outside 0..255 a `ValueError`; neither closes anything. A menu item's
+`on: quit` is the same request with code 0. `(quit 3)` in `init:` makes `ari check` exit 3,
+since `check` runs `init:`. `snapshot` stops at the frame in which the document quit.
+
+**`(assert cond [message [data]])`.** A state_exec builtin, in every lane that has the builtins
+(not the read lane's reduced environment). It returns nil when `cond` is truthy and otherwise
+raises an `AssertionError` (a subclass of `Exception`, not of `RuntimeError`) with the message
+`assertion failed` or `assertion failed: <message>`, and `data` as its data. `try` catches it
+like any exception. Uncaught, its report ends with the `(assert ...)` form that failed, from the
+exception's traceback:
+
+```
+AssertionError: assertion failed: one and one (at (assert (= (+ 1 1) 3) "one and one"))
+```
+
+**The `tests:` block.** A map of test name to program, run by `ari test` and ignored by every
+other host:
+
+```yaml
+meta: {min_libcvc: 3.7.5}
+init: |
+  (state-set "query" "zlib")
+root:
+  - text: (state-get "query")
+tests:
+  reads_init: |
+    (assert (= (state-get "query") "zlib") "init: ran first")
+  fetches: |                            # a test may wait: (await), (sleep), a request
+    (set r (http-get "http://127.0.0.1:8080/ping"))
+    (assert (= (get-attr r "status") 200) (get-attr r "error"))
+```
+
+Each test runs as an `on:` action program would, chrooted to the document's prefix, with the
+document's host verbs and limits. The tests run one at a time, in document order, starting
+after `init:` and the first frame, and each starts once the one before has ended. A test fails
+when it raises an exception it doesn't catch, or is killed (a step or time cap, a syntax error).
+The rest still run. The loader's free-head check (§5.7) covers test programs too.
+
+**`ari test [flags] doc.ari...`.** Runs each document in turn, headless: a fresh app and state
+tree per document, laid out each frame by the FTXUI backend at `--width` x `--height` (100 x 30)
+as `snapshot` does, but never drawn. There is no input. A document runs until the first of:
+
+- it calls `(quit code)` (an `on: quit` cannot fire with no input);
+- its `tests:` have all ended;
+- `--frames N` frames have run (default: no limit);
+- `--timeout S` seconds have passed (default 30), which is a failure.
+
+A document with no `tests:` therefore ends with `(quit code)`, from `init:`, `on_tick:` or a
+program it starts, or runs a fixed number of frames with `--frames`.
+
+A document **fails** when:
+
+- its load fails, or warns (an unknown widget, no `meta.min_libcvc`, a failed `init:`, a free
+  head the host lacks, ...);
+- a program raises an exception nothing catches (an `assert` included) or is killed: an `on:`
+  action, a resident (`on_tick:`, ...), or a read-lane expression that fails. The run stops at
+  the first such warning;
+- a test fails;
+- it quits with a non-zero code, or quits before all its tests have ended;
+- it times out.
+
+The network is as `snapshot`'s (§10.3): off unless `--net`, `--net-allow`, `--net-policy` or
+`--credential-store` turns it on. A test that makes a request waits for its reply as any program
+does. A document run for `--frames N` with the network on waits after its frames, as `snapshot`
+does, until its requests have come back (at most 10 s, or `--settle S`), and a warning in that
+time fails it too.
+`--prefix`, `--component-path` and `--image` work as for `snapshot`. A document has no command
+line of its own under `ari test`: an `args:` block's arguments take their defaults. Flags go
+before the first document.
+
+The output is one line per document, then what failed, one line each, and a summary:
+
+```
+ok   tests/semver.ari (3 tests, 0.02 s)
+FAIL tests/search.ari (4 tests, 0.11 s)
+     test 'bad' failed: AssertionError: assertion failed: one and one (at (assert (= (+ 1 1) 3) "one and one"))
+     test 'raises' failed: RuntimeError: boom (at (error "boom"))
+FAIL tests/tick.ari (0.01 s)
+     on_tick: resident [ari#2:ui.docs.ari#tick] failed: AssertionError: assertion failed (at (assert (= 1 2)))
+ari test: 3 documents, 2 failed
+```
+
+Each failure line names its program: `test '<name>'`, `init:`, `on_tick:` (or another
+resident's lane), or for an `on:` action its text in brackets at the end (§2.4). `--tap` prints
+TAP version 13 instead: the plan, `ok N - doc # detail` or `not ok N - doc # detail`, and each
+failure as a `# ` line, with no summary. A document's own `(print ...)` output goes to stdout
+between the lines. `ari test` exits 0 when every document passed, 1 when any failed, and 2 on a
+usage error.
+
+Interactive behaviour, keys and both terminal backends are tested by driving `ari run` in tmux,
+as `src/ari/tests/run_in_tmux_test.sh` (transfix/libcvc#883) does. Scripted input for `snapshot` and `test`, and file
+descriptors as state channels, are on the agenda (transfix/libcvc#894).
+

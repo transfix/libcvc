@@ -36,7 +36,8 @@
 // BEFORE the document path. Everything after it belongs to the document (doc_args.h): it reads it
 // as argv, or declares an args: block (`arigl run doc.ari --help` then shows its options).
 //
-// run ends on a "quit" action (a menu item with `on: quit`, or a program calling (quit)), when the
+// run ends on a "quit" action (a menu item with `on: quit`, or a program calling (quit [code]),
+// whose code is the exit status of run, snapshot and check), when the
 // window closes, or on Ctrl-C in the terminal. OS signals (SIGTERM, SIGHUP, SIGINT, SIGQUIT,
 // SIGUSR1/2) go to the document's on_signal: in both modes; one it does not handle ends the run
 // with exit status 128 + the signal number.
@@ -1591,8 +1592,7 @@ int run_window(const ari::HostOptions &o) {
   }
   for (const std::string &d : o.component_paths)
     rt.add_component_path(d);
-  rt.on("quit", [&] { rt.request_close(); });
-  rt.register_verb("quit", [&] { rt.request_close(); });
+  rt.app_runtime().register_quit(); // on: quit and (quit [code]): the exit status is the code
   rt.app_runtime().set_document_args(o.doc_args, "arigl " + o.command + " " + o.doc,
                                      /*validate=*/o.command != "check");
   if (o.command == "info") {
@@ -1660,7 +1660,7 @@ int run_window(const ari::HostOptions &o) {
     }
   };
   if (o.command == "check")
-    return 0;
+    return rt.app_runtime().exit_code(); // an init: that called (quit code)
 
   if (o.command == "snapshot") {
     rt.set_fixed_clock(true); // reproducible: the scene clock advances 1/30 s a frame
@@ -1688,7 +1688,7 @@ int run_window(const ari::HostOptions &o) {
       view.writePNG(o.png.c_str());
     }
     print_warnings(rt.take_warnings());
-    return 0;
+    return rt.app_runtime().exit_code();
   }
 
   // Input the VTK interactor does not carry: touch navigation, SDL's keys and pointer (the
@@ -1749,7 +1749,7 @@ int run_window(const ari::HostOptions &o) {
   cam.detach();
   if (!exit_signal.empty())
     return 128 + ari::signal_number(exit_signal);
-  return 0;
+  return rt.app_runtime().exit_code();
 }
 
 // ── the terminal (FTXUI / tvision widgets, the scene rendered behind them) ──────────────────────
@@ -1802,8 +1802,7 @@ int run_terminal(const ari::HostOptions &o) {
   gla::register_streaming(app);
   for (const std::string &d : o.component_paths)
     rt.add_component_path(d);
-  rt.on("quit", [&] { rt.request_close(); });
-  rt.register_verb("quit", [&] { rt.request_close(); });
+  rt.register_quit(); // on: quit and (quit [code]): the exit status is the code
   // As in a window, Settings after the document's own menus opens the Keys window (the terminal's
   // camera has no keys to list; the scene's display settings are ImGui's).
   rt.set_host_menus({ari::AppRuntime::document_menus(), ari::menu("Settings", {keys_menu_item()})});
@@ -1844,7 +1843,7 @@ int run_terminal(const ari::HostOptions &o) {
     return status;
   note_misplaced(rt, o);
   if (o.command == "check")
-    return 0;
+    return rt.exit_code(); // an init: that called (quit code)
 
   if (o.command == "snapshot") {
     const int width = std::max(10, o.width ? o.width : 100);
@@ -1883,7 +1882,7 @@ int run_terminal(const ari::HostOptions &o) {
     if (!o.png.empty())
       scene.write_png(o.png);
     print_warnings(rt.take_warnings());
-    return 0;
+    return rt.exit_code();
   }
 
   ari::FtxuiBackend::RunOptions run;
@@ -1902,7 +1901,7 @@ int run_terminal(const ari::HostOptions &o) {
   print_warnings(rt.take_warnings());
   if (how.from_os) // an OS signal the document didn't handle: report it the way a shell expects
     return 128 + ari::signal_number(how.signal);
-  return 0;
+  return rt.exit_code();
 }
 
 int arigl_main(int argc, char **argv) {
