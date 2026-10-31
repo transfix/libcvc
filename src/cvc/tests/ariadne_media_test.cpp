@@ -6,8 +6,9 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <cstdlib>
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
 #include <cvc/ariadne/ftxui_backend.h>
@@ -461,7 +462,11 @@ struct ImageBackend : Backend {
   StringEdit input_text(const char *, const char *, const std::string &c, bool) override {
     return {false, false, c};
   }
-  void set_image(const std::string &name, const cvc::image &img) override { published[name] = img; }
+  std::map<std::string, int> publishes; // how many times each name was published
+  void set_image(const std::string &name, const cvc::image &img) override {
+    published[name] = img;
+    ++publishes[name];
+  }
   void drop_image(const std::string &name) override {
     dropped.push_back(name);
     published.erase(name);
@@ -1236,4 +1241,173 @@ TEST(MediaPlayer, AutoplayAndAFailure) {
   EXPECT_EQ(read_state(app, "p.b.state"), "failed");
   EXPECT_EQ(read_state(app, "p.b.error"), "fake failure");
   EXPECT_TRUE(b.drawn.empty()); // audio: draws no picture
+}
+
+// ---- moving pictures: animated GIF / WebP, decorative video (§5.11, §5.13) --------------------
+
+namespace {
+
+std::string media_file(const std::string &name) {
+  const std::filesystem::path p =
+      std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() / "ari" / "tests" /
+      "media" / name;
+  std::ifstream in(p, std::ios::binary);
+  return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+std::string media_dir() {
+  return (std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() / "ari" /
+          "tests")
+      .string();
+}
+
+} // namespace
+
+TEST(MediaDecode, AnimatedGifAndWebpKeepTheirFrames) {
+  const std::string gif = media_file("anim.gif");
+  ASSERT_FALSE(gif.empty());
+  std::string why;
+  const cvc::image_animation a =
+      cvc::decode_image_animation(gif.data(), gif.size(), cvc::image_decode_limits{}, &why);
+  ASSERT_EQ(a.frames.size(), 4u) << why;
+  EXPECT_EQ(a.delays_ms.size(), 4u);
+  EXPECT_EQ(a.total_ms(), 800); // 5 frames a second
+  EXPECT_EQ(a.frames[0].width(), 24);
+  EXPECT_NE(std::memcmp(a.frames[0].data(), a.frames[3].data(), a.frames[0].size_bytes()), 0);
+  // Past the frame cap it is a still picture: its first frame.
+  const cvc::image_animation still =
+      cvc::decode_image_animation(gif.data(), gif.size(), cvc::image_decode_limits{}, &why, 2);
+  EXPECT_EQ(still.frames.size(), 1u);
+  // A still picture is one frame.
+  const std::string png = encode(checker(8, 8), "png");
+  EXPECT_EQ(
+      cvc::decode_image_animation(png.data(), png.size(), cvc::image_decode_limits{}).frames.size(),
+      1u);
+  if (!cvc::have_webp_decoder())
+    GTEST_SKIP() << "no WebP decoder";
+  const std::string webp = media_file("anim.webp");
+  const cvc::image_animation w =
+      cvc::decode_image_animation(webp.data(), webp.size(), cvc::image_decode_limits{}, &why);
+  EXPECT_GE(w.frames.size(), 1u) << why; // every frame with libwebpdemux, else the first
+}
+
+TEST(MediaAnimated, TheWidgetShowsTheFramesOnTheClock) {
+  cvc::app app;
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    children:\n"
+                              "      - image: gif\n"
+                              "        src: file://media/anim.gif\n"
+                              "        size: [24, 24]\n"
+                              "        shape: circle\n"
+                              "        status: s.gif\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  rt.set_media_base(media_dir());
+  ImageBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  ASSERT_TRUE(settle([&] { rt.render(); }, [&] { return read_state(app, "s.gif") == "ready"; }));
+  rt.render();
+  std::string name;
+  for (const std::string &n : b.drawn)
+    if (n.rfind("media:placeholder:", 0) != 0 && n.rfind("media:", 0) == 0)
+      name = n;
+  ASSERT_FALSE(name.empty());
+  const int before = b.publishes[name];
+  const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(900);
+  while (std::chrono::steady_clock::now() < end) {
+    rt.render();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  EXPECT_GE(b.publishes[name] - before, 3) << "four 200 ms frames, a new one each 200 ms";
+  EXPECT_EQ(px(b.published[name], 0, 0)[3], 0); // fitted like a still: the circle's corner
+}
+
+TEST(MediaPlayer, ADecorativeVideoPlaysSilentlyWithNoControlsAnywhere) {
+  FakeFactory ff;
+  media::set_play_policy(media::PlayPolicy::Never); // a silent picture plays even so
+  cvc::app app;
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    background: {src: https://m.test/banner.mp4, status: s.bg}\n"
+                              "    children:\n"
+                              "      - video: decor\n"
+                              "        src: https://m.test/loop.webm\n"
+                              "        size: [96, 54]\n"
+                              "        controls: false\n"
+                              "        status: s.decor\n"
+                              "      - image: avatar\n"
+                              "        src: https://m.test/u/42.mov?v=2\n"
+                              "        size: [48, 48]\n"
+                              "        shape: circle\n"
+                              "        status: s.av\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  ImageBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  ASSERT_EQ(ff.made.size(), 3u);
+  for (const auto &f : ff.made) {
+    EXPECT_FALSE(f->src.audio) << f->src.uri; // no sound device for a silent picture
+    EXPECT_TRUE(f->src.loop && f->src.muted) << f->src.uri;
+    std::lock_guard<std::mutex> l(f->mu);
+    f->state = media::PlayerState::Ready;
+    f->frame = make_image(
+        32, 32, [](int, int) -> std::array<unsigned char, 4> { return {200, 50, 50, 255}; });
+    f->frame_gen = 1;
+  }
+  rt.render();
+  rt.render();
+  for (const auto &f : ff.made)
+    EXPECT_TRUE(called(*f, "play")) << f->src.uri; // autoplay
+  EXPECT_TRUE(b.buttons.empty());                  // no Play, no seek, no Mute
+  EXPECT_TRUE(b.slider_formats.empty());
+  EXPECT_EQ(read_state(app, "s.decor"), "playing");
+  EXPECT_EQ(read_state(app, "s.av"), "playing");
+  EXPECT_EQ(read_state(app, "s.bg"), "playing");
+  ASSERT_FALSE(b.backdrops.empty());
+  EXPECT_EQ(b.backdrops[0].rfind("begin:media:player:", 0), 0u) << b.backdrops[0];
+  // The avatar's frame is fitted to its square box and circle (never upscaled past the 32 px
+  // source): transparent corners, an opaque middle.
+  bool circle = false;
+  for (const auto &[name, img] : b.published)
+    if (name.rfind("media:player:", 0) == 0 && img.width() == img.height() && img.width() > 0)
+      circle =
+          circle || (px(img, 0, 0)[3] == 0 && px(img, img.width() / 2, img.height() / 2)[3] == 255);
+  EXPECT_TRUE(circle);
+}
+
+TEST(MediaPlayer, WithoutAPlayerAVideoAvatarIsAPlaceholderItsStatusNames) {
+  media::register_player_factory(nullptr);
+  cvc::app app;
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    children:\n"
+                              "      - image: avatar\n"
+                              "        src: https://m.test/u/42.mp4\n"
+                              "        size: [48, 48]\n"
+                              "        shape: circle\n"
+                              "        status: s.av\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  ImageBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  rt.render();
+  EXPECT_EQ(read_state(app, "s.av"), "unsupported");
+  EXPECT_NE(std::find(b.drawn.begin(), b.drawn.end(), "media:placeholder:loading:48x48:circle"),
+            b.drawn.end());
+  EXPECT_TRUE(b.buttons.empty());
+}
+
+TEST(MediaParse, VideoUris) {
+  EXPECT_TRUE(media::is_video_uri("https://x.test/a.MP4"));
+  EXPECT_TRUE(media::is_video_uri("https://x.test/a.webm?sig=1#t=2"));
+  EXPECT_TRUE(media::is_video_uri("file://clips/a.mov"));
+  EXPECT_FALSE(media::is_video_uri("https://x.test/a.gif"));
+  EXPECT_FALSE(media::is_video_uri("https://x.test/mp4"));
+  EXPECT_FALSE(media::is_video_uri("a.mp4")); // a published name, not a URI
 }

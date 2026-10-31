@@ -299,6 +299,7 @@ struct Widget {
   bool autoplay = false;
   bool loop = false;
   bool muted = false;
+  bool controls = true; // false: a decorative picture, no controls (autoplay/loop/muted default on)
 
   // Kind::Progress: the bar is the number at `bind` placed in [lo, hi] (clamped); `overlay` is a
   // state path (or a computed expression) whose text is drawn over the bar, else the percent.

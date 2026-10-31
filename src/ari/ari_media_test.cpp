@@ -229,28 +229,27 @@ TEST(AriMedia, SnapshotWaitsForAPictureWhoseUrlComesFromAReply) {
       return {200, {"Content-Type: image/png"}, orange};
     return {404, {}, ""};
   });
-  const fs::path doc = dir.write(
-      "late.ari",
-      "meta: {min_libcvc: 3.7.0}\n"
-      "init: (state-set \"p.url\" \"\")\n"
-      "on_tick: |\n"
-      "  (if (= (state-get \"p.url\") \"\")\n"
-      "    (begin (set r (json-parse (get-attr (http-get \"" +
-          srv.url("/user") +
-          "\") \"body\")))\n"
-          "      (state-set \"p.url\" (string.join (list \"" +
-          srv.origin() +
-          "\" (get-attr r \"avatar\")) \"\"))))\n"
-          "windows:\n"
-          "  - window: P\n"
-          "    children:\n"
-          "      - image: av\n"
-          "        bind: p.url\n"
-          "        size: [64, 64]\n"
-          "        status: p.st\n"
-          "        visible_when: (!= (state-get \"p.url\") \"\")\n"
-          "      - text: status\n"
-          "        bind: p.st\n");
+  const fs::path doc =
+      dir.write("late.ari", "meta: {min_libcvc: 3.7.0}\n"
+                            "init: (state-set \"p.url\" \"\")\n"
+                            "on_tick: |\n"
+                            "  (if (= (state-get \"p.url\") \"\")\n"
+                            "    (begin (set r (json-parse (get-attr (http-get \"" +
+                                srv.url("/user") +
+                                "\") \"body\")))\n"
+                                "      (state-set \"p.url\" (string.join (list \"" +
+                                srv.origin() +
+                                "\" (get-attr r \"avatar\")) \"\"))))\n"
+                                "windows:\n"
+                                "  - window: P\n"
+                                "    children:\n"
+                                "      - image: av\n"
+                                "        bind: p.url\n"
+                                "        size: [64, 64]\n"
+                                "        status: p.st\n"
+                                "        visible_when: (!= (state-get \"p.url\") \"\")\n"
+                                "      - text: status\n"
+                                "        bind: p.st\n");
   const AriRun r =
       ari("snapshot --net-allow " + srv.origin() + " --width 60 --ansi " + quoted(doc));
   EXPECT_EQ(r.status, 0) << r.output;
@@ -344,4 +343,16 @@ TEST(AriMedia, OverSshAriMediaDoesNotPlayUnlessTold) {
   EXPECT_NE(r.output.find("--media-play never"), std::string::npos) << r.output;
   r = run_with(ari_media(), "snapshot --media-play sometimes " + quoted(kPlayerDoc));
   EXPECT_EQ(r.status, 2) << r.output;
+}
+
+// Moving pictures in the lean ari: animated pictures animate; a video avatar has no player here,
+// so it is a placeholder its status: names.
+TEST(AriMedia, TheLeanAriAnimatesPicturesAndNamesTheVideosItCannotPlay) {
+  REQUIRE_ARI();
+  const fs::path doc = fs::path(__FILE__).parent_path() / "tests" / "media_animated.ari";
+  const AriRun r = ari("snapshot --width 90 " + quoted(doc));
+  EXPECT_EQ(r.status, 0) << r.output;
+  EXPECT_NE(r.output.find("gif ready webp ready vav unsupported decor unsupported bg unsupported"),
+            std::string::npos)
+      << r.output;
 }

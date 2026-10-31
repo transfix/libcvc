@@ -144,6 +144,18 @@ bool is_uri(const std::string &ref) {
   return s == "http" || s == "https" || s == "file" || s == "cvc" || s == "state";
 }
 
+bool is_video_uri(const std::string &ref) {
+  if (!is_uri(ref))
+    return false;
+  const std::string path = lower(ref.substr(0, ref.find_first_of("?#")));
+  for (const char *ext : {".mp4", ".webm", ".mov", ".m4v"}) {
+    const std::size_t n = std::strlen(ext);
+    if (path.size() > n && path.compare(path.size() - n, n, ext) == 0)
+      return true;
+  }
+  return false;
+}
+
 const char *status_name(Status s) {
   switch (s) {
   case Status::Loading:
@@ -289,7 +301,9 @@ struct ImageCache::Impl {
   struct Base {
     Status status = Status::Loading;
     bool started = false;
-    cvc::image decoded; // downscaled to max_image_px
+    cvc::image decoded;             // downscaled to max_image_px
+    std::vector<cvc::image> frames; // an animation's frames (decoded is the first), else empty
+    std::vector<int> delays;
     std::string error;
     double failed_at = 0.0;
   };
@@ -301,6 +315,7 @@ struct ImageCache::Impl {
     Status status = Status::Loading;
     bool preparing = false;
     cvc::image image;
+    std::shared_ptr<const Animation> animation;
     long gen = 0;
     std::string error;
     double last_used = 0.0;
@@ -347,8 +362,19 @@ struct ImageCache::Impl {
   // Decode the bytes, downscaled to the cache's cap. Off the frame.
   // The fitted raster for `v`, from its base's decoded image: under no lock. Then publish it.
   static void fit_into(const std::shared_ptr<Shared> &s, const std::shared_ptr<Variant> &v,
-                       const cvc::image &decoded) {
+                       const cvc::image &decoded, const std::vector<cvc::image> &frames = {},
+                       const std::vector<int> &delays = {}) {
     cvc::image out = fit_image(decoded, v->req.w, v->req.h, v->req.fit, v->req.shape);
+    std::shared_ptr<Animation> anim;
+    if (frames.size() > 1 && !out.empty()) { // every frame fitted to the same box
+      anim = std::make_shared<Animation>();
+      anim->frames.reserve(frames.size());
+      for (const cvc::image &f : frames)
+        anim->frames.push_back(fit_image(f, v->req.w, v->req.h, v->req.fit, v->req.shape));
+      anim->delays_ms = delays;
+      for (int d : delays)
+        anim->total_ms += d;
+    }
     std::lock_guard<std::mutex> lock(s->mu);
     v->preparing = false;
     if (out.empty()) {
@@ -358,6 +384,7 @@ struct ImageCache::Impl {
     } else {
       v->status = Status::Ready;
       v->image = std::move(out);
+      v->animation = std::move(anim);
       v->gen = ++s->gen;
     }
   }
@@ -367,17 +394,27 @@ struct ImageCache::Impl {
   static void decode_into(const std::shared_ptr<Shared> &s, const std::shared_ptr<Base> &b,
                           const std::shared_ptr<Variant> &v, FetchResult fr, const Limits &lim) {
     cvc::image img;
+    std::vector<cvc::image> frames;
+    std::vector<int> delays;
     std::string why = fr.error;
     if (fr.ok) {
-      img = cvc::decode_image(fr.bytes.data(), fr.bytes.size(), lim.decode, &why);
-      if (!img.empty()) {
-        const int lng = std::max(img.width(), img.height());
-        if (lng > lim.max_image_px && lim.max_image_px > 0) {
-          const double k = double(lim.max_image_px) / lng;
-          img = img.resized(std::max(1, static_cast<int>(std::lround(img.width() * k))),
-                            std::max(1, static_cast<int>(std::lround(img.height() * k))),
-                            cvc::image::resize_filter::box);
-        }
+      cvc::image_animation anim =
+          cvc::decode_image_animation(fr.bytes.data(), fr.bytes.size(), lim.decode, &why);
+      const auto shrink = [&](const cvc::image &f) {
+        const int lng = std::max(f.width(), f.height());
+        if (lng <= lim.max_image_px || lim.max_image_px <= 0)
+          return f;
+        const double k = double(lim.max_image_px) / lng;
+        return f.resized(std::max(1, static_cast<int>(std::lround(f.width() * k))),
+                         std::max(1, static_cast<int>(std::lround(f.height() * k))),
+                         cvc::image::resize_filter::box);
+      };
+      if (!anim.frames.empty())
+        img = shrink(anim.frames.front());
+      if (anim.frames.size() > 1) {
+        for (const cvc::image &f : anim.frames)
+          frames.push_back(shrink(f));
+        delays = anim.delays_ms;
       }
     }
     // The other boxes already waiting on this picture are fitted here too, so they need no
@@ -406,11 +443,13 @@ struct ImageCache::Impl {
       }
       b->status = Status::Ready;
       b->decoded = img;
+      b->frames = frames;
+      b->delays = delays;
       for (const auto &w : waiting)
         w->preparing = true;
     }
     for (const auto &w : waiting)
-      fit_into(s, w, img);
+      fit_into(s, w, img, frames, delays);
   }
 
   // Under sh->mu: mark both busy; the caller starts the fetch outside the lock.
@@ -426,9 +465,10 @@ struct ImageCache::Impl {
     run([uri, auth, dir, done = std::move(done)] { done(fetch_bytes(uri, auth, dir)); });
   }
 
-  void start_variant(const std::shared_ptr<Variant> &v, const cvc::image &decoded) {
+  void start_variant(const std::shared_ptr<Variant> &v, const cvc::image &decoded,
+                     const std::vector<cvc::image> &frames, const std::vector<int> &delays) {
     std::shared_ptr<Shared> s = sh;
-    run([s, v, decoded] { fit_into(s, v, decoded); });
+    run([s, v, decoded, frames, delays] { fit_into(s, v, decoded, frames, delays); });
   }
 
   // Drop pictures no widget asked for lately, and the least recently drawn beyond the byte cap.
@@ -443,7 +483,10 @@ struct ImageCache::Impl {
       }
       Variant &v = *vi->second;
       const bool busy = v.preparing;
-      const std::size_t size = v.image.size_bytes();
+      std::size_t size = v.image.size_bytes();
+      if (v.animation)
+        for (const cvc::image &f : v.animation->frames)
+          size += f.size_bytes();
       if (!busy && (now - v.last_used > limits.idle_seconds || total + size > limits.max_bytes)) {
         sh->dropped.push_back(v.name);
         sh->variants.erase(vi);
@@ -493,6 +536,8 @@ ImageView ImageCache::image(const ImageRequest &req) {
   std::shared_ptr<Impl::Base> b;
   bool start_b = false;
   cvc::image decoded;
+  std::vector<cvc::image> frames;
+  std::vector<int> delays;
   bool start_v = false;
   ImageView view;
   {
@@ -537,6 +582,8 @@ ImageView ImageCache::image(const ImageRequest &req) {
         start_v = true;
         v->preparing = true;
         decoded = b->decoded;
+        frames = b->frames;
+        delays = b->delays;
       }
     }
     // After this request touched its picture, so the sweep never drops what is being drawn.
@@ -547,6 +594,7 @@ ImageView ImageCache::image(const ImageRequest &req) {
     view.status = v->status;
     view.name = v->name;
     view.image = v->image;
+    view.animation = v->animation;
     view.gen = v->gen;
     view.error = v->error;
   }
@@ -554,7 +602,7 @@ ImageView ImageCache::image(const ImageRequest &req) {
   if (start_b)
     m.start_base(b, v);
   if (start_v)
-    m.start_variant(v, decoded);
+    m.start_variant(v, decoded, frames, delays);
   return view;
 }
 
@@ -563,6 +611,18 @@ std::vector<std::string> ImageCache::take_dropped() {
   std::vector<std::string> out;
   out.swap(m_->sh->dropped);
   return out;
+}
+
+std::size_t Animation::frame_at(double seconds) const {
+  if (frames.size() < 2 || total_ms <= 0)
+    return 0;
+  long t = static_cast<long>(std::fmod(std::max(0.0, seconds) * 1000.0, double(total_ms)));
+  for (std::size_t i = 0; i < delays_ms.size(); ++i) {
+    if (t < delays_ms[i])
+      return i;
+    t -= delays_ms[i];
+  }
+  return frames.size() - 1;
 }
 
 bool ImageCache::busy() const {

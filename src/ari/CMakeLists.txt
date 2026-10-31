@@ -148,6 +148,14 @@ if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
                   ${_backend} "video playing audio ready" 60)
         set_tests_properties(ari_run_media_player_${_backend} PROPERTIES SKIP_RETURN_CODE 77
           TIMEOUT 60 ENVIRONMENT "SDL_AUDIO_DRIVER=dummy")
+        # Moving pictures: an animated GIF and WebP, a video avatar, a decorative video and a
+        # video background, silent (no sound device opened).
+        add_test(NAME ari_run_media_animated_${_backend}
+          COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/media_in_tmux_test.sh"
+                  $<TARGET_FILE:ari-media> "${CMAKE_CURRENT_SOURCE_DIR}/tests/media_animated.ari"
+                  ${_backend} "vav playing decor playing bg playing" 60)
+        set_tests_properties(ari_run_media_animated_${_backend} PROPERTIES SKIP_RETURN_CODE 77
+          TIMEOUT 60)
       endif()
     endforeach()
   endif()

@@ -28,6 +28,8 @@ namespace detail {
 // stb_io.cpp, where stb's implementation lives.
 bool stb_info_memory(const void *data, std::size_t size, int &w, int &h);
 image stb_decode_memory(const void *data, std::size_t size, std::string *why);
+bool stb_decode_gif_memory(const void *data, std::size_t size, std::vector<image> &frames,
+                           std::vector<int> &delays, std::string *why);
 #ifdef CVC_ENABLE_IMAGEMAGICK
 // magick_io.cpp.
 image magick_decode_memory(const void *data, std::size_t size, const std::string &format,
@@ -120,7 +122,138 @@ image webp_decode(const unsigned char *p, std::size_t n, const image_decode_limi
 }
 #endif
 
+// A GIF's frame count, from its block structure (no pixel decoded), or -1 when it does not parse:
+// so an animation too large to keep is known before stb decodes every frame at once.
+int gif_frame_count(const unsigned char *p, std::size_t n) {
+  if (n < 13)
+    return -1;
+  std::size_t at = 13;
+  if (p[10] & 0x80)
+    at += 3u << ((p[10] & 7) + 1); // the global colour table
+  const auto sub_blocks = [&]() {
+    while (at < n && p[at] != 0)
+      at += 1u + p[at];
+    ++at; // the terminator
+  };
+  int frames = 0;
+  while (at < n) {
+    const unsigned char b = p[at++];
+    if (b == 0x3B)
+      return frames; // the trailer
+    if (b == 0x21) { // an extension: its label, then data sub-blocks
+      ++at;
+      sub_blocks();
+    } else if (b == 0x2C) { // an image: its descriptor, local colour table, LZW size, data
+      if (at + 9 > n)
+        return -1;
+      const unsigned char flags = p[at + 8];
+      at += 9;
+      if (flags & 0x80)
+        at += 3u << ((flags & 7) + 1);
+      ++at;
+      sub_blocks();
+      ++frames;
+    } else {
+      return -1;
+    }
+  }
+  return frames; // no trailer: what was there
+}
+
 } // namespace
+
+int image_animation::total_ms() const {
+  int t = 0;
+  for (int d : delays_ms)
+    t += d;
+  return t;
+}
+
+image_animation decode_image_animation(const void *data, std::size_t size,
+                                       const image_decode_limits &limits, std::string *why,
+                                       int max_frames, std::size_t max_decoded_bytes) {
+  image_animation out;
+  const auto still = [&]() {
+    out.frames.clear();
+    out.delays_ms.clear();
+    image img = decode_image(data, size, limits, why);
+    if (!img.empty()) {
+      out.frames.push_back(img);
+      out.delays_ms.push_back(0);
+    }
+    return out;
+  };
+  try {
+    const auto *p = static_cast<const unsigned char *>(data);
+    if (!p || size == 0 || size > limits.max_bytes)
+      return still();
+    const std::string fmt = sniff_image_format(p, size);
+    if (fmt == "gif") {
+      int w = 0, h = 0;
+      const int count = gif_frame_count(p, size);
+      if (count <= 1 || count > max_frames || !detail::stb_info_memory(p, size, w, h) ||
+          !within(limits, w, h, nullptr) ||
+          static_cast<std::size_t>(w) * h * 4 * static_cast<std::size_t>(count) > max_decoded_bytes)
+        return still();
+      std::string reason;
+      if (!detail::stb_decode_gif_memory(p, size, out.frames, out.delays_ms, &reason) ||
+          out.frames.empty())
+        return still();
+      for (int &d : out.delays_ms)
+        d = d <= 10 ? 100 : d; // browsers show a 0 or 10 ms GIF frame for 100 ms
+      return out;
+    }
+#if defined(CVC_HAVE_WEBP) && defined(CVC_HAVE_WEBP_DEMUX)
+    if (fmt == "webp") {
+      WebPBitstreamFeatures f;
+      if (WebPGetFeatures(p, size, &f) != VP8_STATUS_OK || !f.has_animation)
+        return still();
+      WebPAnimDecoderOptions opt;
+      if (!WebPAnimDecoderOptionsInit(&opt))
+        return still();
+      opt.color_mode = MODE_RGBA;
+      opt.use_threads = 0;
+      WebPData wd{p, size};
+      WebPAnimDecoder *dec = WebPAnimDecoderNew(&wd, &opt);
+      if (!dec)
+        return still();
+      WebPAnimInfo info;
+      const bool ok =
+          WebPAnimDecoderGetInfo(dec, &info) &&
+          within(limits, static_cast<int>(info.canvas_width), static_cast<int>(info.canvas_height),
+                 nullptr) &&
+          info.frame_count >= 1 && static_cast<int>(info.frame_count) <= max_frames &&
+          static_cast<std::size_t>(info.canvas_width) * info.canvas_height * 4 * info.frame_count <=
+              max_decoded_bytes;
+      if (!ok) {
+        WebPAnimDecoderDelete(dec);
+        return still();
+      }
+      int prev = 0;
+      while (WebPAnimDecoderHasMoreFrames(dec)) {
+        uint8_t *buf = nullptr;
+        int ts = 0;
+        if (!WebPAnimDecoderGetNext(dec, &buf, &ts))
+          break;
+        out.frames.emplace_back(static_cast<int>(info.canvas_width),
+                                static_cast<int>(info.canvas_height), image::pixel_format::RGBA,
+                                image::data_type::u8, buf);
+        const int d = ts - prev;
+        out.delays_ms.push_back(d <= 10 ? 100 : d);
+        prev = ts;
+      }
+      WebPAnimDecoderDelete(dec);
+      if (out.frames.empty())
+        return still();
+      return out;
+    }
+#endif
+  } catch (const std::exception &e) {
+    set_why(why, e.what());
+    return image_animation{};
+  }
+  return still();
+}
 
 std::string sniff_image_format(const void *data, std::size_t size) {
   const auto *p = static_cast<const unsigned char *>(data);

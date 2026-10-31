@@ -209,6 +209,7 @@ const char *const kAriSchema = R"ARISCHEMA({
         "shape": {"enum": ["rect", "circle"]},
         "background": {"type": ["string", "object"]},
         "poster": {"type": "string"},
+        "controls": {"$ref": "#/$defs/flag"},
         "autoplay": {"$ref": "#/$defs/flag"},
         "loop": {"$ref": "#/$defs/flag"},
         "muted": {"$ref": "#/$defs/flag"},
@@ -910,9 +911,16 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     if (has(n, "fit") && !media::parse_fit(str(n, "fit"), w.img_fit))
       ctx.warn("ari: " + type + " '" + label + "': fit: '" + str(n, "fit") +
                "' is not contain, cover or fill — using contain");
-    w.autoplay = flag(n, "autoplay", false);
-    w.loop = flag(n, "loop", false);
-    w.muted = flag(n, "muted", false);
+    // controls: false is a decorative picture (an avatar, a banner): it plays by itself, looping,
+    // silent, unless the document says otherwise.
+    w.controls = flag(n, "controls", true);
+    w.autoplay = flag(n, "autoplay", !w.controls);
+    w.loop = flag(n, "loop", !w.controls);
+    w.muted = flag(n, "muted", !w.controls);
+    if (has(n, "shape") && !media::parse_shape(str(n, "shape"), w.img_shape))
+      ctx.warn("ari: " + type + " '" + label + "': shape: '" + str(n, "shape") +
+               "' is not rect or circle — using rect");
+    w.media_status = str(n, "status");
     if (w.src.empty())
       ctx.warn("ari: " + type + " '" + label + "' has no src: — it plays nothing");
     return w;

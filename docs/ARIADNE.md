@@ -1090,7 +1090,7 @@ windows:
   has the network off").
 - **`file://`** paths resolve against the document's directory (`file://img/logo.png`), or are
   absolute (`file:///usr/share/...`). `cvc://` and `state://` resolve as `import:` does (§6.4).
-- **Formats:** PNG, JPEG, GIF (its first frame), BMP and, where libcvc has libwebp, WebP. Where it
+- **Formats:** PNG, JPEG, GIF, BMP and, where libcvc has libwebp, WebP. Where it
   has ImageMagick, also TIFF, AVIF and HEIC. The format comes from the bytes, not the name or the
   Content-Type. A file over 64 MiB, or one wider or taller than 8192 px, is refused before it is
   decoded. A decoded picture is downscaled to 2048 px on its long side.
@@ -1113,6 +1113,14 @@ windows:
   (§4). Hosted tvision always draws half-blocks. In half-blocks, a transparent pixel leaves its
   half of the cell to the terminal's own background, so a round avatar has no corners on a light
   or a dark terminal. Kitty, Sixel and iTerm draw transparent pixels black.
+- **Animated GIF and WebP pictures move**, every frame fitted to the box like a still, on a
+  loop the widgets showing one picture share. A terminal gets at most 8 new frames a second.
+  An animated WebP needs libwebp's demux library (cvcpkg's libwebp has it). An APNG, or an
+  animation over 512 frames or 128 MiB decoded, shows its first frame.
+- **A video URL** (`.mp4`, `.webm`, `.mov` or `.m4v`, a query or fragment after it allowed, the
+  rule web clients use for avatars) in an `image:` plays as a decorative video (§5.13): looping,
+  silent, fitted and shaped like the picture would be. Without a player it is the placeholder,
+  and `status:` says `unsupported` (or `remote`, `failed`) where a picture would say `ready`.
 - **The capability token `image.url`** (§5.7) holds in every host that does this, so a document
   for older hosts too gates its pictures with `(has? "image.url")` or
   `requires: [{name: image.url, optional: true}]` and draws its own placeholder elsewhere (an
@@ -1155,7 +1163,9 @@ windows:
             bind: profile.name
 ```
 
-`background: URL` is short for `background: {src: URL}`. The picture loads as an `image:`'s does
+`background: URL` is short for `background: {src: URL}`. A video URL (as `image:` takes it,
+§5.11) plays as a silent looping video behind the content, where the host has a player; an
+animated GIF or WebP moves. The picture loads as an `image:`'s does
 (§5.11), at its own shape, and each backend fits it to the area the content takes. Until it
 has loaded, or when it failed, nothing is drawn behind the content.
 
@@ -1193,6 +1203,10 @@ has loaded, or when it failed, nothing is drawn behind the content.
   bind: feed.items.{i}.voice
 ```
 
+- **`controls: false`** makes a decorative picture: no controls, and `autoplay`, `loop` and
+  `muted` default to true. A muted one opens no sound device, so it plays in an SSH session too
+  (it makes no sound there). `shape: circle` and `fit:` apply to its frames, and `status:` (as
+  `image:` takes it) holds its state. A video URL in `image:` or `background:` is one of these.
 - **The controls** are drawn with the widgets every backend has: Play / Pause, a seek slider
   with `m:ss / m:ss` as its value, and Mute. "Open" is added where the media can't play here.
   They look and work the same in ImGui, FTXUI and tvision.
@@ -1243,7 +1257,8 @@ has loaded, or when it failed, nothing is drawn behind the content.
     sign-in. The tooltip says so.
   - `--media-play always` plays anyway, and `--media-play never` never plays.
 - **Capability tokens** (§5.7): `media` means the media plays here, and `media.player` means
-  the host has a player at all.
+  the host has a player at all. `video.decorative` means `controls: false` and video URLs in
+  `image:` and `background:` are understood, and `image.animated` means GIF and WebP animate.
 - A player whose widget a frame did not draw (its window closed, its item scrolled out of a
   `repeat:`) is paused at once and closed 5 s later. `ari snapshot` waits while a player is
   still loading, as it waits for pictures.

@@ -24,6 +24,7 @@
 #include <cstddef>
 #include <cvc/image/image.h>
 #include <string>
+#include <vector>
 
 namespace cvc {
 
@@ -41,6 +42,22 @@ image decode_image(const void *data, std::size_t size, const image_decode_limits
 inline image decode_image(const void *data, std::size_t size, std::string *why = nullptr) {
   return decode_image(data, size, image_decode_limits{}, why);
 }
+
+// An animated picture's frames (GIF, animated WebP), each the canvas as it shows at that point,
+// with how long it shows. A still picture is one frame.
+struct image_animation {
+  std::vector<image> frames;
+  std::vector<int> delays_ms; // one per frame
+  int total_ms() const;
+};
+
+// decode_image, keeping every frame of an animated GIF or WebP (APNG and the rest: the first
+// frame). Bounded too: past `max_frames` frames, or past `max_decoded_bytes` of frames in all, the
+// picture is taken as still (its first frame). Empty, with `*why`, on failure.
+image_animation decode_image_animation(const void *data, std::size_t size,
+                                       const image_decode_limits &limits,
+                                       std::string *why = nullptr, int max_frames = 512,
+                                       std::size_t max_decoded_bytes = 128u * 1024u * 1024u);
 
 // The format decode_image would take the bytes as: "png", "jpeg", "gif", "bmp", "webp", or ""
 // when they are none of those. Reads at most the first 16 bytes.

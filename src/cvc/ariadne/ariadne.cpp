@@ -1021,6 +1021,18 @@ struct Runtime::Impl {
   std::uint64_t walk_count = 0;
   void emit_player(const Widget &w, const char *label);
   void players_end_walk();
+  // The player for `key` playing `ps` (made, or reported unsupported / remote, on first sight or a
+  // new source), marked drawn this walk.
+  PlayerSlot &player_slot(const std::string &key, const media::PlayerSource &ps);
+  // Publish its newest frame fitted to the box (8 a second at most in a terminal); true once one
+  // is up.
+  bool player_frame(PlayerSlot &p, int bw, int bh, ImageFit fit, ImageShape shape, double now);
+  // §5.13 the animated pictures' frame on screen: by published name, the index and when it went.
+  struct AnimShown {
+    std::size_t index = 0;
+    double at = 0.0;
+  };
+  std::unordered_map<std::string, AnimShown> anim_shown;
 
   // §4.7 action lane: a unique owner tag for this Runtime's processes on the app-wide
   // scheduler (app.exec_scheduler()), so teardown reaps exactly this document's process
@@ -1854,6 +1866,18 @@ void Runtime::Impl::emit_node(const Widget &w) {
         w.bind.empty() ? src
                        : (is_expr(w.bind) ? eval_text(w.bind)
                                           : read_or<std::string>(app, resolve(w.bind), src));
+    if (media::is_video_uri(name)) { // §5.13 a video avatar or picture: a decorative video
+      Widget vw = w;
+      vw.kind = Kind::Video;
+      vw.src = name;
+      vw.bind.clear();
+      vw.controls = false;
+      vw.autoplay = vw.loop = vw.muted = true;
+      if (vw.img_h <= 0)
+        vw.img_h = media::placeholder_height(static_cast<int>(vw.img_size), 0, vw.img_shape);
+      emit_player(vw, label);
+      break;
+    }
     if (media::is_uri(name)) {
       emit_media_image(w, name, label);
       break;
@@ -1952,6 +1976,25 @@ void Runtime::Impl::emit_node(const Widget &w) {
     b.end_disabled();
 }
 
+namespace {
+
+double steady_seconds() {
+  return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// A string as a state_exec literal: "..." with \ and " escaped.
+std::string program_string(const std::string &s) {
+  std::string out = "\"";
+  for (char c : s) {
+    if (c == '\\' || c == '"')
+      out += '\\';
+    out += c;
+  }
+  return out + "\"";
+}
+
+} // namespace
+
 // §5.11: draw a picture by URI — the cache's fitted raster once it is ready, else a placeholder of
 // the same box — and report its state to the widget's status: path.
 void Runtime::Impl::emit_media_image(const Widget &w, const std::string &uri, const char *label) {
@@ -1967,7 +2010,24 @@ void Runtime::Impl::emit_media_image(const Widget &w, const std::string &uri, co
   std::string name;
   if (v.status == media::Status::Ready) {
     name = v.name;
-    publish_media(v);
+    if (v.animation) {
+      // An animated GIF or WebP: the frame for now on a loop every widget showing it shares, a
+      // new one published as it comes (8 a second at most in a terminal).
+      const double now =
+          std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch())
+              .count();
+      const std::size_t i = v.animation->frame_at(now);
+      auto it = anim_shown.find(name);
+      const double gap = backend->capabilities().terminal ? 1.0 / 8.0 : 0.0;
+      if (it == anim_shown.end() || published.count(name) == 0 ||
+          (it->second.index != i && now - it->second.at >= gap)) {
+        backend->set_image(name, v.animation->frames[i]);
+        published[name] = v.gen;
+        anim_shown[name] = AnimShown{i, now};
+      }
+    } else {
+      publish_media(v);
+    }
   } else {
     // One placeholder per box shape and state, shared by every widget with that box.
     const bool failed = v.status == media::Status::Failed;
@@ -2029,7 +2089,39 @@ bool Runtime::Impl::open_backdrop(const Widget &w, bool window) {
   bd.banner_rows = bg.banner_rows;
   bd.window = window;
   bd.size = w.size;
-  if (media::is_uri(ref)) {
+  if (media::is_video_uri(ref)) {
+    // §5.13 a video background (a banner, a card's back): a silent player looping by itself, its
+    // frames at their own shape, fitted by the backend as a picture is.
+    std::string key = "bg";
+    for (std::size_t i = 0; i < emit_path.size(); ++i)
+      key += "_" + std::to_string(emit_path[i]);
+    key += "#" + ref;
+    media::PlayerSource ps;
+    ps.uri = ref;
+    ps.auth = bg.auth;
+    ps.video = true;
+    ps.frame_w = 960;
+    ps.frame_h = 540;
+    ps.loop = ps.muted = true;
+    ps.audio = false;
+    PlayerSlot &p = player_slot(key, ps);
+    if (p.player && !p.autoplay_done && p.state == media::PlayerState::Ready) {
+      p.autoplay_done = true;
+      p.player->play();
+    }
+    if (player_frame(p, 960, 0, ImageFit::Contain, ImageShape::Rect, steady_seconds()))
+      bd.image = p.frame_name;
+    if (!bg.status.empty()) {
+      const std::string path = resolve(bg.status);
+      const std::string st = media::player_state_name(p.state);
+      std::string &seen = media_status_written[path];
+      if (seen != st) {
+        seen = st;
+        write<std::string>(app, path, st);
+        write<std::string>(app, path + ".error", p.error);
+      }
+    }
+  } else if (media::is_uri(ref)) {
     // The picture at its own shape (the backend fits it to the area the content takes), no larger
     // than the cache's cap.
     media::ImageRequest rq;
@@ -2051,24 +2143,73 @@ bool Runtime::Impl::open_backdrop(const Widget &w, bool window) {
   return true;
 }
 
-namespace {
-
-double steady_seconds() {
-  return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
-}
-
-// A string as a state_exec literal: "..." with \ and " escaped.
-std::string program_string(const std::string &s) {
-  std::string out = "\"";
-  for (char c : s) {
-    if (c == '\\' || c == '"')
-      out += '\\';
-    out += c;
+Runtime::Impl::PlayerSlot &Runtime::Impl::player_slot(const std::string &key,
+                                                      const media::PlayerSource &ps) {
+  PlayerSlot &p = players[key];
+  p.drawn_walk = walk_count;
+  p.last_drawn = steady_seconds();
+  p.hidden_paused = false; // back on screen: it stays paused; the user (or the document) plays it
+  // A new source: a new player.
+  if (p.uri != ps.uri || p.auth != ps.auth) {
+    p.player.reset();
+    p.decided = false;
+    p.uri = ps.uri;
+    p.auth = ps.auth;
+    p.have_frame = false;
+    p.has_pending = false;
+    p.autoplay_done = false;
+    p.error.clear();
+    p.frame_name = "media:player:" + std::to_string(std::hash<std::string>()(key));
   }
-  return out + "\"";
+  if (!p.decided) {
+    p.decided = true;
+    if (ps.uri.empty()) {
+      p.state = media::PlayerState::Idle;
+    } else if (!media::have_player_factory()) {
+      p.state = media::PlayerState::Unsupported;
+      p.error = "no player in this host (ari-media and arigl play it)";
+    } else if (ps.audio && !media::may_play_here()) { // silent pictures play anywhere
+      p.state = media::PlayerState::Remote;
+      p.error = media::in_ssh_session() && media::play_policy() == media::PlayPolicy::Auto
+                    ? "not played over SSH (it would play remotely)"
+                    : "playing is off here (--media-play never)";
+    } else {
+      media::PlayerSource src = ps;
+      src.base = media_base;
+      p.player = media::make_player(src);
+      p.state = p.player ? media::PlayerState::Loading : media::PlayerState::Unsupported;
+      if (!p.player)
+        p.error = "this host's player cannot play it";
+    }
+  }
+  if (media::Player *pl = p.player.get()) {
+    p.state = pl->state();
+    p.error = p.state == media::PlayerState::Failed ? pl->error() : std::string();
+  }
+  drew_loading = drew_loading || p.state == media::PlayerState::Loading;
+  return p;
 }
 
-} // namespace
+bool Runtime::Impl::player_frame(PlayerSlot &p, int bw, int bh, ImageFit fit, ImageShape shape,
+                                 double now) {
+  if (media::Player *pl = p.player.get()) {
+    cvc::image f;
+    if (pl->frame(f, p.frame_gen)) {
+      p.pending = media::fit_image(f, bw, bh > 0 ? bh : 0, fit, shape, 1.0);
+      p.has_pending = !p.pending.empty();
+    }
+    // At most 8 frames a second to a terminal (each is a picture sent).
+    const double min_gap = backend->capabilities().terminal ? 1.0 / 8.0 : 0.0;
+    if (p.has_pending && now - p.last_publish >= min_gap) {
+      backend->set_image(p.frame_name, p.pending);
+      published[p.frame_name] = ++frame_publish_gen;
+      p.have_frame = true;
+      p.has_pending = false;
+      p.last_publish = now;
+    }
+  }
+  return p.have_frame;
+}
 
 void Runtime::Impl::emit_player(const Widget &w, const char *label) {
   Backend &b = *backend;
@@ -2091,59 +2232,23 @@ void Runtime::Impl::emit_player(const Widget &w, const char *label) {
           ? key
           : resolve("ariadne.media.players.p" +
                     std::to_string(std::hash<std::string>()(key) % 1000000007));
-  PlayerSlot &p = players[key];
+  const int bw = std::max(1, static_cast<int>(std::lround(w.img_size)));
+  const int bh = w.img_h > 0 ? static_cast<int>(std::lround(w.img_h)) : 0;
+  // A decorative picture (controls: false, muted) never makes a sound, so it opens no audio device
+  // and plays wherever it can, an SSH session included.
+  const bool decorative = !w.controls;
+  media::PlayerSource ps;
+  ps.uri = uri;
+  ps.auth = w.media_auth;
+  ps.video = video;
+  ps.frame_w = bw;
+  ps.frame_h = bh > 0 ? bh : bw;
+  ps.loop = w.loop;
+  ps.muted = w.muted;
+  ps.audio = !(decorative && w.muted);
+  PlayerSlot &p = player_slot(key, ps);
   const double now = steady_seconds();
-  p.drawn_walk = walk_count;
-  p.last_drawn = now;
-  if (p.hidden_paused) { // back on screen: it stays paused; the user (or the document) plays it
-    p.hidden_paused = false;
-  }
-  // A new source: a new player.
-  if (p.uri != uri || p.auth != w.media_auth) {
-    p.player.reset();
-    p.decided = false;
-    p.uri = uri;
-    p.auth = w.media_auth;
-    p.have_frame = false;
-    p.has_pending = false;
-    p.autoplay_done = false;
-    p.error.clear();
-    p.frame_name = "media:player:" + std::to_string(std::hash<std::string>()(key));
-  }
-  if (!p.decided) {
-    p.decided = true;
-    if (uri.empty()) {
-      p.state = media::PlayerState::Idle;
-    } else if (!media::have_player_factory()) {
-      p.state = media::PlayerState::Unsupported;
-      p.error = "no player in this host (ari-media and arigl play it)";
-    } else if (!media::may_play_here()) {
-      p.state = media::PlayerState::Remote;
-      p.error = media::in_ssh_session() && media::play_policy() == media::PlayPolicy::Auto
-                    ? "not played over SSH (it would play remotely)"
-                    : "playing is off here (--media-play never)";
-    } else {
-      media::PlayerSource ps;
-      ps.uri = uri;
-      ps.auth = w.media_auth;
-      ps.base = media_base;
-      ps.video = video;
-      ps.frame_w = std::max(1, static_cast<int>(std::lround(w.img_size)));
-      ps.frame_h = w.img_h > 0 ? static_cast<int>(std::lround(w.img_h)) : ps.frame_w;
-      ps.loop = w.loop;
-      ps.muted = w.muted;
-      p.player = media::make_player(ps);
-      p.state = p.player ? media::PlayerState::Loading : media::PlayerState::Unsupported;
-      if (!p.player)
-        p.error = "this host's player cannot play it";
-    }
-  }
   media::Player *pl = p.player.get();
-  if (pl) {
-    p.state = pl->state();
-    p.error = p.state == media::PlayerState::Failed ? pl->error() : std::string();
-  }
-  drew_loading = drew_loading || p.state == media::PlayerState::Loading;
   double pos = pl ? pl->position() : 0.0;
   const double dur = pl ? pl->duration() : 0.0;
 
@@ -2178,28 +2283,11 @@ void Runtime::Impl::emit_player(const Widget &w, const char *label) {
     }
   }
 
-  // The picture: the newest frame (at most term_fps a second in a terminal), else the poster,
-  // else a placeholder of the box.
+  // The picture: the newest frame (at most 8 a second in a terminal), else the poster, else a
+  // placeholder of the box.
   if (video) {
-    const int bw = std::max(1, static_cast<int>(std::lround(w.img_size)));
-    const int bh = w.img_h > 0 ? static_cast<int>(std::lround(w.img_h)) : 0;
-    if (pl) {
-      cvc::image f;
-      if (pl->frame(f, p.frame_gen)) {
-        p.pending = media::fit_image(f, bw, bh > 0 ? bh : 0, w.img_fit, ImageShape::Rect, 1.0);
-        p.has_pending = !p.pending.empty();
-      }
-      const double min_gap = b.capabilities().terminal ? 1.0 / 8.0 : 0.0;
-      if (p.has_pending && now - p.last_publish >= min_gap) {
-        b.set_image(p.frame_name, p.pending);
-        published[p.frame_name] = ++frame_publish_gen;
-        p.have_frame = true;
-        p.has_pending = false;
-        p.last_publish = now;
-      }
-    }
     std::string name;
-    if (p.have_frame) {
+    if (player_frame(p, bw, bh, w.img_fit, w.img_shape, now)) {
       name = p.frame_name;
     } else if (media::is_uri(w.poster)) {
       media::ImageRequest rq;
@@ -2208,6 +2296,7 @@ void Runtime::Impl::emit_player(const Widget &w, const char *label) {
       rq.w = bw;
       rq.h = bh;
       rq.fit = w.img_fit;
+      rq.shape = w.img_shape;
       const media::ImageView v = image_cache().image(rq);
       drew_loading = drew_loading || v.status == media::Status::Loading;
       if (v.status == media::Status::Ready) {
@@ -2217,11 +2306,12 @@ void Runtime::Impl::emit_player(const Widget &w, const char *label) {
     }
     if (name.empty()) {
       const bool failed = p.state == media::PlayerState::Failed;
-      const int ph = media::placeholder_height(bw, bh, ImageShape::Rect);
+      const int ph = media::placeholder_height(bw, bh, w.img_shape);
       name = std::string("media:placeholder:") + (failed ? "failed:" : "loading:") +
-             std::to_string(bw) + "x" + std::to_string(ph);
+             std::to_string(bw) + "x" + std::to_string(ph) +
+             (w.img_shape == ImageShape::Circle ? ":circle" : "");
       if (!published.count(name)) {
-        b.set_image(name, media::placeholder_image(bw, bh, ImageShape::Rect, failed));
+        b.set_image(name, media::placeholder_image(bw, bh, w.img_shape, failed));
         published[name] = 0;
       }
     }
@@ -2229,73 +2319,85 @@ void Runtime::Impl::emit_player(const Widget &w, const char *label) {
       b.text_value(caption.c_str(), "(" + std::string(media::player_state_name(p.state)) + ")");
   }
 
-  // The controls, with the widgets every backend has: play / pause, a seek slider, the time, mute,
-  // and "Open" (the user's browser) where it can't play here.
   const bool playing = p.state == media::PlayerState::Playing;
-  const bool usable =
-      pl && p.state != media::PlayerState::Loading && p.state != media::PlayerState::Failed;
   const bool elsewhere = p.state == media::PlayerState::Remote ||
                          p.state == media::PlayerState::Unsupported ||
                          p.state == media::PlayerState::Failed;
-  b.push_id(("player:" + key).c_str());
-  Layout row;
-  row.kind = LayoutKind::Horizontal;
-  if (b.begin_grid(row, ("player:" + key).c_str())) {
-    b.grid_next_cell();
-    if (!usable)
-      b.begin_disabled();
-    if (b.button(playing ? "Pause" : "Play") && usable) {
-      if (playing)
-        pl->pause();
-      else
-        pl->play();
-    }
-    b.grid_next_cell();
-    // The slider's value shows as the time line: a format with no conversion prints as it is, in
-    // ImGui and the terminal backends alike.
-    const std::string times = media::format_time(pos) + " / " + media::format_time(dur);
-    const DoubleEdit seek = b.slider_double("", ("seek:" + key).c_str(), pos, 0.0,
-                                            std::max({dur, pos, 0.001}), times.c_str());
-    if (seek.committed && usable) {
-      pl->seek(seek.value);
-      pos = seek.value;
-    }
-    if (!usable)
-      b.end_disabled();
-    b.grid_next_cell();
-    bool muted_now =
-        p.wrote_muted.empty() ? w.muted : (p.wrote_muted == "1" || p.wrote_muted == "true");
-    const BoolEdit mute = b.checkbox("Mute", muted_now);
-    if (mute.committed) {
-      muted_now = mute.value;
-      if (pl)
-        pl->set_muted(muted_now);
-      p.wrote_muted = muted_now ? "1" : "0";
-      write<std::string>(app, key_of("muted"), p.wrote_muted);
-    }
-    if (elsewhere && !uri.empty() && media::is_uri(uri) &&
-        (uri.rfind("http://", 0) == 0 || uri.rfind("https://", 0) == 0)) {
+  if (!decorative) {
+    // The controls, with the widgets every backend has: play / pause, a seek slider, the time,
+    // mute, and "Open" (the user's browser) where it can't play here.
+    const bool usable =
+        pl && p.state != media::PlayerState::Loading && p.state != media::PlayerState::Failed;
+    b.push_id(("player:" + key).c_str());
+    Layout row;
+    row.kind = LayoutKind::Horizontal;
+    if (b.begin_grid(row, ("player:" + key).c_str())) {
       b.grid_next_cell();
-      if (b.button("Open")) {
-        if (has_function("open-url"))
-          enqueue("(open-url " + program_string(uri) + ")");
+      if (!usable)
+        b.begin_disabled();
+      if (b.button(playing ? "Pause" : "Play") && usable) {
+        if (playing)
+          pl->pause();
         else
-          warn_once("ari: " + caption + ": this host cannot open a browser; the URL is " + uri);
+          pl->play();
       }
-      b.set_tooltip(!w.media_auth.empty() ? "Open in your browser (it needs its own sign-in)"
-                                          : "Open in your browser");
+      b.grid_next_cell();
+      // The slider's value shows as the time line: a format with no conversion prints as it is,
+      // in ImGui and the terminal backends alike.
+      const std::string times = media::format_time(pos) + " / " + media::format_time(dur);
+      const DoubleEdit seek = b.slider_double("", ("seek:" + key).c_str(), pos, 0.0,
+                                              std::max({dur, pos, 0.001}), times.c_str());
+      if (seek.committed && usable) {
+        pl->seek(seek.value);
+        pos = seek.value;
+      }
+      if (!usable)
+        b.end_disabled();
+      b.grid_next_cell();
+      bool muted_now =
+          p.wrote_muted.empty() ? w.muted : (p.wrote_muted == "1" || p.wrote_muted == "true");
+      const BoolEdit mute = b.checkbox("Mute", muted_now);
+      if (mute.committed) {
+        muted_now = mute.value;
+        if (pl)
+          pl->set_muted(muted_now);
+        p.wrote_muted = muted_now ? "1" : "0";
+        write<std::string>(app, key_of("muted"), p.wrote_muted);
+      }
+      if (elsewhere && !uri.empty() && media::is_uri(uri) &&
+          (uri.rfind("http://", 0) == 0 || uri.rfind("https://", 0) == 0)) {
+        b.grid_next_cell();
+        if (b.button("Open")) {
+          if (has_function("open-url"))
+            enqueue("(open-url " + program_string(uri) + ")");
+          else
+            warn_once("ari: " + caption + ": this host cannot open a browser; the URL is " + uri);
+        }
+        b.set_tooltip(!w.media_auth.empty() ? "Open in your browser (it needs its own sign-in)"
+                                            : "Open in your browser");
+      }
+      b.end_grid();
     }
-    b.end_grid();
+    b.pop_id();
+    if (elsewhere && !p.error.empty())
+      b.text_line((caption + ": " + p.error).c_str());
   }
-  b.pop_id();
-  if (elsewhere && !p.error.empty())
-    b.text_line((caption + ": " + p.error).c_str());
 
   // The state keys, written when they change (position at most 4 times a second while playing).
   const std::string st = media::player_state_name(p.state);
   if (st != p.wrote_state) {
     p.wrote_state = st;
     write<std::string>(app, key_of("state"), st);
+  }
+  // status: (an image:'s key, on a video it was promoted to): the player's state, and its error.
+  if (!w.media_status.empty()) {
+    const std::string path = resolve(w.media_status);
+    std::string &seen = media_status_written[path];
+    if (seen != st) {
+      seen = st;
+      write<std::string>(app, path, st);
+      write<std::string>(app, path + ".error", p.error);
+    }
   }
   const std::string playing_s = playing ? "1" : "0";
   if (playing_s != p.wrote_playing) {
