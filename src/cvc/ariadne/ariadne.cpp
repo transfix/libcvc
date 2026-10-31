@@ -939,6 +939,8 @@ struct Runtime::Impl {
     int ebutton = 0;
     // Runtime::run_program: told how the program ended instead of a warning.
     std::function<void(const std::string &)> done;
+    // §6.6 the functions of the scope it was started in (a FunctionScope prelude), run first.
+    std::string functions;
   };
   std::vector<QueuedAction> queued_events;
 
@@ -1106,6 +1108,14 @@ struct Runtime::Impl {
   const std::string &current_prefix() const {
     return scope_stack.empty() ? prefix : scope_stack.back();
   }
+  // §6.6 the function scopes the walk is inside (the root's, then each mount's), parallel to
+  // scope_stack, and the document's own (the root's, from set_root) for the programs no widget
+  // starts: residents, key bindings, run_program. A program runs its scope's prelude first.
+  std::vector<const FunctionScope *> fn_stack;
+  std::string doc_functions;
+  const std::string &current_functions() const {
+    return fn_stack.empty() ? doc_functions : fn_stack.back()->prelude;
+  }
 
   // §12 load: sub-prefixes whose parent-scope holes (link:) have been planted, so we wire each
   // mount's link nodes ONCE (idempotent, but findDescendant+linkTo per hole per frame is waste).
@@ -1149,14 +1159,18 @@ struct Runtime::Impl {
   }
 
   void enqueue(const std::string &event) {
-    if (!event.empty())
+    if (!event.empty()) {
       queued_events.push_back({event, current_prefix()}); // capture the mount scope for a program
+      queued_events.back().functions = current_functions(); // and its functions
+    }
   }
   // §4.6: enqueue a widget POINTER handler carrying its event data (a program gets an `event`
   // dict).
   void enqueue_event(const std::string &event, float x, float y, float dx, float dy, int button) {
-    if (!event.empty())
+    if (!event.empty()) {
       queued_events.push_back({event, current_prefix(), true, x, y, dx, dy, button});
+      queued_events.back().functions = current_functions();
+    }
   }
 
   void emit(const Widget &w);      // repeat + visibility gates (§4), then emit_node
@@ -1357,9 +1371,20 @@ void Runtime::Impl::emit_container(const Widget &w) {
     // Run the fragment's init: once (after its holes exist, so init may seed through them). Kept
     // in ran_inits, NOT cleared on reconcile — a one-shot seed, never re-run per frame/rebuild.
     if (!w.init_script.empty() && ran_inits.insert(sub_prefix).second)
-      run_mount_init(sub_prefix, w.init_script);
+      run_mount_init(sub_prefix, (w.functions ? w.functions->prelude : "") + w.init_script);
     scope_stack.push_back(sub_prefix);
   }
+  // §6.6 the root's and a mount's functions are the ones programs started in its subtree get.
+  if (w.functions)
+    fn_stack.push_back(w.functions.get());
+  struct FunctionsGuard {
+    std::vector<const FunctionScope *> &stack;
+    bool active;
+    ~FunctionsGuard() {
+      if (active)
+        stack.pop_back();
+    }
+  } functions_guard{fn_stack, static_cast<bool>(w.functions)};
   struct ScopeGuard {
     std::vector<std::string> &stack;
     bool active;
@@ -2263,7 +2288,8 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
     opts.max_steps = action_max_steps(root);
     opts.max_time = action_max_time(root);
     opts.max_memory = max_bytes;
-    const int pid = sched.execute(script, opts); // throws se::parse_error on a syntax error
+    // §6.6 its scope's functions first. Throws se::parse_error on a syntax error.
+    const int pid = sched.execute(action.functions + script, opts);
     live_actions_[pid] = std::move(ac); // keep the context alive until the process (and the
                                         // children it forked) end
   } catch (const std::exception &e) {
@@ -2406,8 +2432,9 @@ void Runtime::Impl::ensure_resident(const std::string &channel, const std::strin
     // on:tick simply ignores `event`. The body runs once per delivery, then loops back to park. No
     // total step cap (a resident loops forever; the per-frame pump budget bounds each activation,
     // and the msg-recv guarantees a park every iteration).
-    const std::string wrapped =
-        "(while t (let ((event (msg-recv \"" + channel + "\"))) " + body + "))";
+    const std::string wrapped = doc_functions + // §6.6 defined once, before the loop
+                                "(while t (let ((event (msg-recv \"" + channel + "\"))) " + body +
+                                "))";
     se::execute_options opts;
     opts.env = ac->env;
     opts.owner = owner_; // reaped by ~Impl's kill_owner(owner_) on teardown
@@ -2543,6 +2570,8 @@ void Runtime::set_media_base(std::string dir) {
 }
 
 void Runtime::set_root(Widget root) {
+  // Now, not at the swap: a resident submitted in the next drain() runs with these.
+  m_->doc_functions = root.functions ? root.functions->prelude : std::string();
   m_->pending = std::move(root);
   m_->has_pending = true;
 }
@@ -2670,8 +2699,10 @@ void Runtime::Impl::run_key_bindings() {
     for (const KeyBinding &b : key_bindings_)
       if (!b.on.empty() &&
           key_matches(read_or<std::string>(app, resolve_bind(prefix, key_binding_path(b)), ""),
-                      key))
+                      key)) {
         queued_events.push_back({b.on, prefix});
+        queued_events.back().functions = doc_functions;
+      }
   }
   // What the Keys window shows for each binding, written only when it changes.
   const std::string waiting =
@@ -2694,6 +2725,7 @@ void Runtime::run_program(std::string script, std::function<void(const std::stri
   a.event = std::move(script);
   a.prefix = m_->prefix;
   a.done = std::move(done);
+  a.functions = m_->doc_functions;
   m_->queued_events.push_back(std::move(a));
 }
 
