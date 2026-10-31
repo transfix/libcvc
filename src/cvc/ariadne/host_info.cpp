@@ -6,6 +6,7 @@
 #include <cvc/ariadne/ftxui_backend.h>
 #include <cvc/ariadne/host_info.h>
 #include <cvc/ariadne/loader.h>
+#include <cvc/ariadne/media_player.h>
 #include <cvc/ariadne/net_host.h>
 #include <cvc/ariadne/requires.h>
 #include <cvc/ariadne/tvision_backend.h>
@@ -110,6 +111,7 @@ HostInfo gather_host_info(const Runtime &rt, const std::string &runtime) {
   info.ftxui = FtxuiBackend::available();
   info.tvision = TvisionBackend::available();
   info.http = cvc::net::have_http_backend();
+  info.media_player = media::have_player_factory();
   const NetHostStatus net = net_host_status();
   info.net = net.enabled;
   info.net_allowed = net.allowed;
@@ -147,6 +149,7 @@ std::string format_host_info(const HostInfo &info, bool json, bool functions) {
       << ", \"gl_info\": " << json_string(info.gl_info)
       << ", \"http\": " << (info.http ? "true" : "false")
       << ", \"audio\": " << (info.audio ? "true" : "false")
+      << ", \"media_player\": " << (info.media_player ? "true" : "false")
       << "},\n  \"network\": {\"on\": " << (info.net ? "true" : "false") << ", \"allow\": [";
     for (std::size_t i = 0; i < info.net_allowed.size(); ++i)
       o << (i ? ", " : "") << json_string(info.net_allowed[i]);
@@ -206,6 +209,7 @@ std::string format_host_info(const HostInfo &info, bool json, bool functions) {
   }
   o << "  HTTP (cvc::net)               " << yes(info.http) << "\n";
   o << "  audio output (SDL3)           " << yes(info.audio) << "\n";
+  o << "  video/audio player            " << yes(info.media_player) << "\n";
   if (!info.audio_info.empty()) {
     std::istringstream lines(info.audio_info);
     for (std::string line; std::getline(lines, line);)

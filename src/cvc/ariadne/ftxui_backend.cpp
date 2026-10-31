@@ -1959,7 +1959,7 @@ void FtxuiBackend::end_backdrop() {
   }
   const auto it = bd.image.empty() ? m.images.end() : m.images.find(bd.image);
   const bool mono = image_mode() == ImageMode::Mono; // no colours to put behind text
-  if (it == m.images.end() || it->second.rgb.empty() || bd.terminal == BackdropTerminal::None ||
+  if (it == m.images.end() || it->second.rgb.empty() || bd.terminal == BackdropTerminal::Off ||
       mono) {
     m.add(content); // loading, failed or not drawn in a terminal: the content alone
     return;

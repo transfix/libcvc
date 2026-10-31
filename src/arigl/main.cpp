@@ -72,12 +72,14 @@
 #include <cvc/ariadne/host_info.h>
 #include <cvc/ariadne/host_signals.h>
 #include <cvc/ariadne/loader.h> // run_init — seed conf.room / conf.self before the first tick
+#include <cvc/ariadne/media_player.h> // §5.13 the play policy (--media-play)
 #include <cvc/ariadne/stream/stream_view.h>
 #include <cvc/ariadne/tvision_backend.h>
 #include <cvc/ariadne/web_document.h> // arigl-web: a document named by URL
 #include <cvc/core/app.h>
-#include <random> // std::random_device — the conference node id's per-launch suffix
-#include <sstream> // arigl info: the GL report, line by line
+#include <cvc/media/player.h> // cvcMedia's FFmpeg + SDL3 player for video: / audio:
+#include <random>             // std::random_device — the conference node id's per-launch suffix
+#include <sstream>            // arigl info: the GL report, line by line
 #if CVC_ENABLE_WS || CVC_ENABLE_GRPC
 // Conference mode: a state transport joins a hosted room, chosen by the relay URL scheme —
 // ws://|wss:// (WebSocket, what browsers dial; the host page sets wss://<page-origin>/…) or grpc://
@@ -1928,6 +1930,14 @@ int arigl_main(int argc, char **argv) {
   if (!o.error.empty()) {
     std::fprintf(stderr, "arigl: %s\n", o.error.c_str());
     return usage(2);
+  }
+  // §5.13 video: / audio:: the player (cvcMedia's FFmpeg + SDL3, where this host has it) and where
+  // it may play (--media-play; by default not over SSH, where the sound would play remotely).
+  cvc::media::register_ariadne_player();
+  if (!o.media_play.empty()) {
+    cvc::ariadne::media::PlayPolicy policy = cvc::ariadne::media::PlayPolicy::Auto;
+    cvc::ariadne::media::parse_play_policy(o.media_play, policy);
+    cvc::ariadne::media::set_play_policy(policy);
   }
   if (o.command != "run" && o.command != "snapshot" && o.command != "check" &&
       o.command != "info") {

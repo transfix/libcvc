@@ -1058,8 +1058,7 @@ windows:
 ### 5.11 Pictures by URL: `image:` with a URI
 
 An `image:` whose `src` (or the value at its `bind:`) is a URI shows that picture. Design and
-the work still to come (video and audio):
-[ARIADNE_MEDIA.md](roadmap/ARIADNE_MEDIA.md).
+the work still to come: [ARIADNE_MEDIA.md](roadmap/ARIADNE_MEDIA.md).
 
 ```yaml
 windows:
@@ -1171,6 +1170,62 @@ has loaded, or when it failed, nothing is drawn behind the content.
     frame, once the row's width is known).
   - **`none`** draws nothing in a terminal.
   - A terminal with no colour (`--graphics mono`) draws no background.
+
+### 5.13 Video and audio: `video:` and `audio:`
+
+```yaml
+- video: clip                           # the label: the caption its messages use
+  src: https://media.example/p/9.webm   # a URI (§5.11), or a computed expression giving one
+  auth: example                         # optional: the host's credential, as image: takes it
+  poster: https://media.example/p/9.jpg # optional: shown until the first frame
+  size: [480, 270]                      # the picture's box; fit: as image: takes it
+  bind: feed.items.{i}.player           # the player's state keys (below)
+  autoplay: false
+  loop: false
+  muted: false
+- audio: voice note                     # the same, with no picture
+  src: https://media.example/p/10.opus
+  bind: feed.items.{i}.voice
+```
+
+- **The controls** are drawn with the widgets every backend has: Play / Pause, a seek slider
+  with `m:ss / m:ss` as its value, and Mute. "Open" is added where the media can't play here.
+  They look and work the same in ImGui, FTXUI and tvision.
+- **The picture.** The newest frame is published as an image and drawn like one: an ImGui
+  texture, or Kitty, Sixel, iTerm or half-block cells. A terminal gets at most 8 frames a
+  second. Before the first frame the poster shows, else a placeholder of the box.
+- **The state keys** live under `bind:`, or `ariadne.media.players.p<n>` without one:
+
+  | key | |
+  |---|---|
+  | `state` | `idle`, `loading`, `ready`, `playing`, `paused`, `ended`, `failed`, `remote` or `unsupported` |
+  | `playing` | `1` / `0`; write it to play or pause |
+  | `position`, `duration` | seconds (position at most 4 times a second while playing) |
+  | `seek` | write seconds to seek; it is emptied once done |
+  | `muted` | `1` / `0`; write it to mute |
+  | `error` | why it failed, or why it plays elsewhere |
+
+- **A host plays them only if it has a player.**
+  - `ari-media` (§9.2) and `arigl` have cvcMedia's FFmpeg + SDL3 player. FFmpeg decodes,
+    frames are scaled to the box, and the sound plays through SDL3's audio subsystem, which is
+    the clock (the wall clock without sound). The source is fetched whole first (the host's
+    network policy and `auth:`, as for `image:`, at most 64 MiB) and read from memory.
+  - FFmpeg is cvcpkg's `ffmpeg-lgpl`, linked shared, so the LGPL's terms are kept.
+  - The lean `ari`, or any build without FFmpeg, has no player. Its media widgets say
+    `unsupported` and offer "Open".
+  - The browser pages play through the browser's own `<video>` and `<audio>`
+    ([ARIADNE_MEDIA.md](roadmap/ARIADNE_MEDIA.md) §4, M6).
+- **Over SSH** the sound would come out of the remote machine's speakers. So in an SSH session
+  (`SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY` set), players say `remote` and nothing is opened.
+  - "Open" runs `(open-url URL)` where the host has it, else it warns with the URL.
+  - An `auth:` source opened in a browser carries no token, so the browser needs its own
+    sign-in. The tooltip says so.
+  - `--media-play always` plays anyway, and `--media-play never` never plays.
+- **Capability tokens** (§5.7): `media` means the media plays here, and `media.player` means
+  the host has a player at all.
+- A player whose widget a frame did not draw (its window closed, its item scrolled out of a
+  `repeat:`) is paused at once and closed 5 s later. `ari snapshot` waits while a player is
+  still loading, as it waits for pictures.
 
 ## 6. Composition: include / import / load
 
@@ -1607,8 +1662,8 @@ a separate binary name, so the two never install the same file and a launcher ca
 `ari-media` where it is installed. In a libcvc build it is built with cvcGL or with
 `-DCVC_BUILD_ARI_MEDIA=ON`. cvcMedia holds the SDL3 audio output that used to be cvcGL's
 (`cvc::media::playback`; cvcGL links cvcMedia and keeps the `cvc::gl::playback` names), and
-the decoders for the `video:` and `audio:` widgets go there too
-([ARIADNE_MEDIA.md](roadmap/ARIADNE_MEDIA.md) §5).
+its FFmpeg player plays the `video:` and `audio:` widgets (§5.13). The `ari-media` package also
+depends on `ffmpeg-lgpl`, linked shared.
 
 `ari` is its own cvcpkg package (`cvcpkg install ari`, linux for now), built from
 [`cvcpkg/recipes/ari`](../cvcpkg/recipes/ari/recipe.yaml) against the installed libcvc,

@@ -208,6 +208,10 @@ const char *const kAriSchema = R"ARISCHEMA({
         "fit": {"enum": ["contain", "cover", "fill"]},
         "shape": {"enum": ["rect", "circle"]},
         "background": {"type": ["string", "object"]},
+        "poster": {"type": "string"},
+        "autoplay": {"$ref": "#/$defs/flag"},
+        "loop": {"$ref": "#/$defs/flag"},
+        "muted": {"$ref": "#/$defs/flag"},
         "items": {"type": "array", "items": {"$ref": "#/$defs/widget"}},
         "children": {"type": "array", "items": {"$ref": "#/$defs/widget"}}
       },
@@ -315,10 +319,10 @@ namespace {
 // so tf_editor precedes color — a tf_editor's own config may carry a `color:` node list — and
 // progress precedes overlay, a progress bar's text.
 constexpr const char *kBuiltinWidgetTypes[] = {
-    "group",   "menubar", "menu",      "menu_item",  "window",      "progress",
-    "overlay", "panel",   "text",      "checkbox",   "slider_int",  "slider_float",
-    "combo",   "radio",   "radio_row", "input_text", "input_int",   "tf_editor",
-    "color",   "image",   "button",    "separator",  "windows_menu"};
+    "group",     "menubar",      "menu",      "menu_item",  "window",       "progress", "overlay",
+    "panel",     "text",         "checkbox",  "slider_int", "slider_float", "combo",    "radio",
+    "radio_row", "input_text",   "input_int", "tf_editor",  "color",        "image",    "button",
+    "separator", "windows_menu", "video",     "audio"};
 } // namespace
 
 bool is_builtin_widget_type(const std::string &type) {
@@ -885,6 +889,34 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
       ctx.warn("ari: image '" + label + "': auth: is for a picture by URL (src: https://...)");
     return w;
   }
+  if (type == "video" || type == "audio") { // §5.13 a player: a source, controls, state keys
+    Widget w;
+    w.kind = type == "video" ? Kind::Video : Kind::Audio;
+    w.label = label;
+    w.src = str(n, "src");
+    w.media_auth = str(n, "auth");
+    w.poster = str(n, "poster");
+    w.bind = str(n, "bind");
+    w.img_size = type == "video" ? 480.0 : 320.0;
+    w.img_h = type == "video" ? 270.0 : 0.0;
+    const YAML::Node sz = n["size"];
+    if (sz && sz.IsSequence() && sz.size() >= 2) {
+      w.img_size = sz[0].as<double>(w.img_size);
+      w.img_h = sz[1].IsScalar() && sz[1].Scalar() != "auto" ? sz[1].as<double>(0.0) : 0.0;
+    } else if (sz && sz.IsScalar()) {
+      w.img_size = sz.as<double>(w.img_size);
+      w.img_h = 0.0;
+    }
+    if (has(n, "fit") && !media::parse_fit(str(n, "fit"), w.img_fit))
+      ctx.warn("ari: " + type + " '" + label + "': fit: '" + str(n, "fit") +
+               "' is not contain, cover or fill — using contain");
+    w.autoplay = flag(n, "autoplay", false);
+    w.loop = flag(n, "loop", false);
+    w.muted = flag(n, "muted", false);
+    if (w.src.empty())
+      ctx.warn("ari: " + type + " '" + label + "' has no src: — it plays nothing");
+    return w;
+  }
   if (type == "button") {
     const std::string on = action(n);
     if (on.empty())
@@ -983,7 +1015,7 @@ void parse_background(Ctx &ctx, const YAML::Node &n, Widget &w) {
   if (term == "banner")
     bg.terminal = BackdropTerminal::Banner;
   else if (term == "none")
-    bg.terminal = BackdropTerminal::None;
+    bg.terminal = BackdropTerminal::Off;
   else if (term != "behind")
     ctx.warn("ari: background terminal: '" + term + "' is not behind, banner or none");
   bg.banner_rows = std::clamp(static_cast<int>(num(n, "banner_rows", 6.0)), 1, 60);

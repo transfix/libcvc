@@ -12,6 +12,7 @@
 #include <cvc/ariadne/ftxui_backend.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/media.h>
+#include <cvc/ariadne/media_player.h>
 #include <cvc/ariadne/net_host.h>
 #include <cvc/ariadne/net_intrinsics.h>
 #include <cvc/ariadne/widget.h>
@@ -396,6 +397,8 @@ struct ImageBackend : Backend {
     tooltips.clear();
     texts.clear();
     backdrops.clear();
+    buttons.clear();
+    slider_formats.clear();
   }
   bool begin_main_menu_bar() override { return false; }
   void end_main_menu_bar() override {}
@@ -416,15 +419,39 @@ struct ImageBackend : Backend {
     texts.push_back(std::string(l) + "=" + v);
   }
   void separator() override {}
-  bool button(const char *) override { return false; }
+  std::string click;                // a button label that reports a click this frame
+  std::vector<std::string> buttons; // labels drawn, this frame
+  bool button(const char *l) override {
+    buttons.push_back(l);
+    if (click == l) {
+      click.clear();
+      return true;
+    }
+    return false;
+  }
   bool menu_item_action(const char *) override { return false; }
   BoolEdit menu_item_toggle(const char *, bool c) override { return {false, false, c}; }
-  BoolEdit checkbox(const char *, bool c) override { return {false, false, c}; }
+  std::string toggle; // a checkbox label that flips this frame
+  BoolEdit checkbox(const char *l, bool c) override {
+    if (toggle == l) {
+      toggle.clear();
+      return {true, true, !c};
+    }
+    return {false, false, c};
+  }
   IntEdit slider_int(const char *, const char *, int c, int, int) override {
     return {false, false, c};
   }
+  std::vector<std::string> slider_formats; // each slider's format (the player's time line)
+  double drag_to = -1.0;                   // a slider value committed this frame
   DoubleEdit slider_double(const char *, const char *, double c, double, double,
-                           const char *) override {
+                           const char *fmt) override {
+    slider_formats.push_back(fmt ? fmt : "");
+    if (drag_to >= 0.0) {
+      const double v = drag_to;
+      drag_to = -1.0;
+      return {true, true, v};
+    }
     return {false, false, c};
   }
   IndexEdit combo(const char *, int i, const std::vector<std::string> &) override {
@@ -765,7 +792,7 @@ TEST(MediaBackground, TheLoaderReadsAMapOrAUrl) {
   EXPECT_EQ(grp.background.bind, "p.banner");
   EXPECT_EQ(grp.background.fit, ImageFit::Contain);
   EXPECT_EQ(grp.background.opacity, 1.0f); // clamped
-  EXPECT_EQ(grp.background.terminal, BackdropTerminal::None);
+  EXPECT_EQ(grp.background.terminal, BackdropTerminal::Off);
   EXPECT_EQ(grp.background.auth, "svc");
   bool warned = false;
   for (const std::string &w : lr.warnings)
@@ -854,4 +881,318 @@ TEST(MediaBackground, FtxuiDrawsHalfBlocksBehindTextAndABannerAbove) {
   EXPECT_NE(rows[name_row].find("Grace Hopper▀"), std::string::npos) << frame;
   EXPECT_NE(rows[follow_row].find("followers 1024▀"), std::string::npos) << frame;
   std::filesystem::remove_all(dir);
+}
+
+// ---- video: / audio: players (§5.13)
+// ---------------------------------------------------------------
+
+namespace {
+
+// A player the test drives: what the controller asked of it, and the state it reports.
+struct FakePlayback {
+  std::mutex mu;
+  media::PlayerSource src;
+  media::PlayerState state = media::PlayerState::Loading;
+  double position = 0.0, duration = 12.0;
+  bool muted = false;
+  std::vector<std::string> calls;
+  long frame_gen = 0;
+  cvc::image frame;
+  bool destroyed = false;
+};
+
+class FakePlayer : public media::Player {
+public:
+  explicit FakePlayer(std::shared_ptr<FakePlayback> f) : f_(std::move(f)) {}
+  ~FakePlayer() override {
+    std::lock_guard<std::mutex> l(f_->mu);
+    f_->destroyed = true;
+  }
+  void play() override { call("play", media::PlayerState::Playing); }
+  void pause() override { call("pause", media::PlayerState::Paused); }
+  void seek(double t) override {
+    std::lock_guard<std::mutex> l(f_->mu);
+    f_->calls.push_back("seek:" + std::to_string(static_cast<int>(t * 10)));
+    f_->position = t;
+  }
+  void set_muted(bool m) override {
+    std::lock_guard<std::mutex> l(f_->mu);
+    f_->calls.push_back(m ? "mute" : "unmute");
+    f_->muted = m;
+  }
+  media::PlayerState state() const override {
+    std::lock_guard<std::mutex> l(f_->mu);
+    return f_->state;
+  }
+  double position() const override {
+    std::lock_guard<std::mutex> l(f_->mu);
+    return f_->position;
+  }
+  double duration() const override {
+    std::lock_guard<std::mutex> l(f_->mu);
+    return f_->duration;
+  }
+  std::string error() const override { return "fake failure"; }
+  bool frame(cvc::image &out, long &gen) override {
+    std::lock_guard<std::mutex> l(f_->mu);
+    if (f_->frame.empty() || f_->frame_gen == gen)
+      return false;
+    out = f_->frame;
+    gen = f_->frame_gen;
+    return true;
+  }
+
+private:
+  void call(const char *what, media::PlayerState to) {
+    std::lock_guard<std::mutex> l(f_->mu);
+    f_->calls.push_back(what);
+    if (f_->state != media::PlayerState::Loading && f_->state != media::PlayerState::Failed)
+      f_->state = to;
+  }
+  std::shared_ptr<FakePlayback> f_;
+};
+
+// Registers a factory making FakePlayers (each one's playback in `made`), and undoes it.
+struct FakeFactory {
+  std::vector<std::shared_ptr<FakePlayback>> made;
+  FakeFactory() {
+    media::register_player_factory([this](const media::PlayerSource &src) {
+      auto f = std::make_shared<FakePlayback>();
+      f->src = src;
+      made.push_back(f);
+      return std::make_unique<FakePlayer>(f);
+    });
+  }
+  ~FakeFactory() {
+    media::register_player_factory(nullptr);
+    media::set_play_policy(media::PlayPolicy::Auto);
+  }
+};
+
+bool called(const FakePlayback &f, const std::string &what) {
+  return std::find(f.calls.begin(), f.calls.end(), what) != f.calls.end();
+}
+
+const char *kPlayerDoc = "meta: {min_libcvc: 3.0.0}\n"
+                         "windows:\n"
+                         "  - window: Player\n"
+                         "    children:\n"
+                         "      - video: clip\n"
+                         "        src: https://media.test/clip.webm\n"
+                         "        auth: media\n"
+                         "        size: [160, 90]\n"
+                         "        bind: p.clip\n"
+                         "        visible_when: (!= (state-get \"p.hide\") \"1\")\n";
+
+} // namespace
+
+TEST(MediaPlayer, ThePolicyAndTheTimeLine) {
+  media::PlayPolicy p = media::PlayPolicy::Auto;
+  EXPECT_TRUE(media::parse_play_policy("never", p));
+  EXPECT_EQ(p, media::PlayPolicy::Never);
+  EXPECT_FALSE(media::parse_play_policy("sometimes", p));
+  EXPECT_EQ(media::format_time(0), "0:00");
+  EXPECT_EQ(media::format_time(65.9), "1:05");
+  EXPECT_EQ(media::format_time(3725), "1:02:05");
+  EXPECT_EQ(media::format_time(-1), "-:--");
+  EXPECT_STREQ(media::player_state_name(media::PlayerState::Remote), "remote");
+  media::set_play_policy(media::PlayPolicy::Always);
+  EXPECT_TRUE(media::may_play_here());
+  media::set_play_policy(media::PlayPolicy::Never);
+  EXPECT_FALSE(media::may_play_here());
+  media::set_play_policy(media::PlayPolicy::Auto);
+}
+
+TEST(MediaPlayer, TheLoaderReadsVideoAndAudio) {
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    children:\n"
+                              "      - video: clip\n"
+                              "        src: https://x.test/a.mp4\n"
+                              "        poster: https://x.test/a.jpg\n"
+                              "        size: [320, 180]\n"
+                              "        autoplay: true\n"
+                              "        loop: yes\n"
+                              "      - audio: voice\n"
+                              "        src: https://x.test/a.opus\n"
+                              "        muted: true\n"
+                              "      - audio: nothing\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  const Widget &win = lr.root.children.at(0);
+  const Widget &v = win.children.at(0);
+  EXPECT_EQ(v.kind, Kind::Video);
+  EXPECT_EQ(v.poster, "https://x.test/a.jpg");
+  EXPECT_EQ(v.img_size, 320.0);
+  EXPECT_EQ(v.img_h, 180.0);
+  EXPECT_TRUE(v.autoplay && v.loop && !v.muted);
+  const Widget &a = win.children.at(1);
+  EXPECT_EQ(a.kind, Kind::Audio);
+  EXPECT_TRUE(a.muted);
+  bool warned = false;
+  for (const std::string &w : lr.warnings)
+    warned = warned || w.find("'nothing' has no src") != std::string::npos;
+  EXPECT_TRUE(warned);
+}
+
+TEST(MediaPlayer, WithoutAPlayerTheWidgetSaysSoAndOffersTheBrowser) {
+  media::register_player_factory(nullptr);
+  cvc::app app;
+  LoadResult lr = load_string(kPlayerDoc);
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  ImageBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  rt.render();
+  EXPECT_EQ(read_state(app, "p.clip.state"), "unsupported");
+  EXPECT_NE(std::find(b.buttons.begin(), b.buttons.end(), "Open"), b.buttons.end());
+  bool said = false;
+  for (const std::string &t : b.texts)
+    said = said || t.find("no player in this host") != std::string::npos;
+  EXPECT_TRUE(said);
+  bool placeholder = false; // the picture's box is still there
+  for (const std::string &n : b.drawn)
+    placeholder = placeholder || n == "media:placeholder:loading:160x90";
+  EXPECT_TRUE(placeholder);
+}
+
+TEST(MediaPlayer, OverSshOrWithPlayingOffItIsRemote) {
+  FakeFactory ff;
+  media::set_play_policy(media::PlayPolicy::Never);
+  cvc::app app;
+  LoadResult lr = load_string(kPlayerDoc);
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  ImageBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  rt.render();
+  EXPECT_EQ(read_state(app, "p.clip.state"), "remote");
+  EXPECT_TRUE(ff.made.empty()); // nothing opened: nothing plays here
+  EXPECT_NE(std::find(b.buttons.begin(), b.buttons.end(), "Open"), b.buttons.end());
+  bool tip = false; // an auth: source tells the user the browser needs its own sign-in
+  for (const std::string &t : b.tooltips)
+    tip = tip || t.find("its own sign-in") != std::string::npos;
+  EXPECT_TRUE(tip);
+}
+
+TEST(MediaPlayer, TheControlsAndTheStateKeysDriveThePlayer) {
+  FakeFactory ff;
+  media::set_play_policy(media::PlayPolicy::Always);
+  cvc::app app;
+  LoadResult lr = load_string(kPlayerDoc);
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  ImageBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  ASSERT_EQ(ff.made.size(), 1u);
+  FakePlayback &f = *ff.made[0];
+  EXPECT_EQ(f.src.uri, "https://media.test/clip.webm");
+  EXPECT_EQ(f.src.auth, "media");
+  EXPECT_EQ(f.src.frame_w, 160);
+  EXPECT_EQ(f.src.frame_h, 90);
+  EXPECT_TRUE(f.src.video);
+  EXPECT_EQ(read_state(app, "p.clip.state"), "loading");
+
+  // Opened, with a first frame: it shows, and Play is offered.
+  {
+    std::lock_guard<std::mutex> l(f.mu);
+    f.state = media::PlayerState::Ready;
+    f.frame = make_image(
+        64, 36, [](int, int) -> std::array<unsigned char, 4> { return {10, 200, 30, 255}; });
+    f.frame_gen = 1;
+  }
+  rt.render();
+  EXPECT_EQ(read_state(app, "p.clip.state"), "ready");
+  bool frame_drawn = false;
+  for (const std::string &n : b.drawn)
+    frame_drawn = frame_drawn || n.rfind("media:player:", 0) == 0;
+  EXPECT_TRUE(frame_drawn);
+  ASSERT_FALSE(b.slider_formats.empty());
+  EXPECT_EQ(b.slider_formats[0], "0:00 / 0:12");
+
+  // The Play button plays; the state keys follow.
+  b.click = "Play";
+  rt.render();
+  EXPECT_TRUE(called(f, "play"));
+  rt.render();
+  EXPECT_EQ(read_state(app, "p.clip.state"), "playing");
+  EXPECT_EQ(read_state(app, "p.clip.playing"), "1");
+  EXPECT_NE(std::find(b.buttons.begin(), b.buttons.end(), "Pause"), b.buttons.end());
+
+  // The document writes playing / seek / muted; the player follows, seek is consumed.
+  cvc::state &root = cvc::state::instance(app);
+  root("p.clip.playing").value(std::string("0"));
+  root("p.clip.seek").value(std::string("7.5"));
+  root("p.clip.muted").value(std::string("1"));
+  rt.render();
+  EXPECT_TRUE(called(f, "pause"));
+  EXPECT_TRUE(called(f, "seek:75"));
+  EXPECT_TRUE(called(f, "mute"));
+  EXPECT_EQ(read_state(app, "p.clip.seek"), "");
+  rt.render();
+  EXPECT_EQ(read_state(app, "p.clip.state"), "paused");
+  EXPECT_EQ(std::stod(read_state(app, "p.clip.position")), 7.5);
+  EXPECT_EQ(std::stod(read_state(app, "p.clip.duration")), 12.0);
+
+  // The seek slider and the Mute checkbox.
+  b.drag_to = 3.0;
+  b.toggle = "Mute";
+  rt.render();
+  EXPECT_TRUE(called(f, "seek:30"));
+  EXPECT_TRUE(called(f, "unmute"));
+
+  // Hidden (its window closed, a repeat moved on): it stops at once.
+  b.click = "Play";
+  rt.render();
+  rt.render();
+  ASSERT_EQ(read_state(app, "p.clip.state"), "playing");
+  const std::size_t pauses = std::count(f.calls.begin(), f.calls.end(), "pause");
+  root("p.hide").value(std::string("1"));
+  rt.render();
+  EXPECT_EQ(static_cast<std::size_t>(std::count(f.calls.begin(), f.calls.end(), "pause")),
+            pauses + 1);
+}
+
+TEST(MediaPlayer, AutoplayAndAFailure) {
+  FakeFactory ff;
+  media::set_play_policy(media::PlayPolicy::Always);
+  cvc::app app;
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    children:\n"
+                              "      - audio: a\n"
+                              "        src: file:///nowhere/a.opus\n"
+                              "        bind: p.a\n"
+                              "        autoplay: true\n"
+                              "      - audio: b\n"
+                              "        src: file:///nowhere/b.opus\n"
+                              "        bind: p.b\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  ImageBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  ASSERT_EQ(ff.made.size(), 2u);
+  EXPECT_FALSE(ff.made[0]->src.video);
+  {
+    std::lock_guard<std::mutex> l(ff.made[0]->mu);
+    ff.made[0]->state = media::PlayerState::Ready;
+  }
+  {
+    std::lock_guard<std::mutex> l(ff.made[1]->mu);
+    ff.made[1]->state = media::PlayerState::Failed;
+  }
+  rt.render();
+  rt.render();
+  EXPECT_TRUE(called(*ff.made[0], "play"));
+  EXPECT_EQ(read_state(app, "p.a.state"), "playing");
+  EXPECT_EQ(read_state(app, "p.b.state"), "failed");
+  EXPECT_EQ(read_state(app, "p.b.error"), "fake failure");
+  EXPECT_TRUE(b.drawn.empty()); // audio: draws no picture
 }
