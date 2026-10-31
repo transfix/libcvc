@@ -442,7 +442,7 @@ The built-in top-level keys (`is_builtin_block`,
 ```
 meta  menubar  windows  overlays  root (alias: children)  scene  customs  requires
 init  on_tick  on_key  on_pointer  on_signal  keys  units  import  channels  lint  args
-windows_menu  tests
+windows_menu  tests  functions
 ```
 
 `tests:` is read only by `ari test` (§13).
@@ -1118,7 +1118,8 @@ based at its own directory. Guards: a resolved-URI cycle set, a per-chain depth 
 depth cap alone would miss. The mount id is the explicit `as:`, else it is derived from
 the URI basename, sanitized to a single state segment, with sibling duplicates
 disambiguated `_2` / `_3`. A mounted module is sandboxed to its own state sub-prefix
-(§7) and reaches the parent only through explicitly granted `link:` holes.
+(§7) and reaches the parent only through explicitly granted `link:` holes, and calls only the
+functions its mount grants (§6.6).
 
 ### 6.4 The URI resolver
 
@@ -1169,6 +1170,68 @@ root, where the component path resolves:
 `arigl run --component-path src/cvc/ariadne examples/ariadne/documents/fem_gallery.ari`.
 
 ---
+
+### 6.6 `functions:` — code a document shares with its programs and its modules
+
+`defun` inside a program defines a function for that program alone, and the stdlib scope is
+frozen. A document declares the functions all of its programs can call in a top-level
+`functions:` block, and grants some of them to the modules it `load:`s.
+
+```yaml
+functions: |
+  ; a scalar state_exec program of (defun name (params) body...) forms, nothing else
+  (defun semver-part (v i) (int (nth (string.split v ".") i)))
+  (defun semver-major (v) (semver-part v 0))
+  (defun fetch-text (url)
+    (set r (http-get url))
+    (bytes.decode (get-attr r "body")))
+init: (state-set "major" (str (semver-major "3.7.5")))
+root:
+  - button: Refresh
+    on: (state-set "latest" (fetch-text "https://example.org/version"))
+  - load: badge.ari
+    as: badge
+    link: {server: {to: args.server, mode: ro}}
+    functions: [semver-major]          # a list of names, one name, or "*" for all of them
+```
+
+- **Declaring.** The block is split into its top-level forms. Each must be
+  `(defun name (params) body...)`; anything else (a `set`, a bare atom, a form that does not
+  parse) is skipped with a warning. When a name is defined twice, the later definition stands,
+  with a warning.
+- **Who can call them.** Every program in the document's scope: `init:`, every `on:` action,
+  the residents (`on_tick:`, `on_key:`, `on_pointer:`, `on_signal:`), key bindings, `tests:`
+  (§13), and the functions themselves. The read lane (`bind:`, `visible_when:` and other reactive
+  expressions) has its own reduced environment and does not get them.
+- **`import:`.** A library's `functions:` merge into the importer's, as its `units:` do. When two
+  imports define the same name, the later one stands, with a warning. The document's own
+  definition replaces an imported one silently. A library of functions with an `ari test`
+  document that imports it is a unit test (§13).
+- **Granting.** A `load:` entry's `functions:` names the functions its module may call. They come
+  from the parent's scope: its own, its imports', and the ones its own mount granted, so a grant
+  can pass down nested mounts. A granted function brings along the parent's functions it calls,
+  transitively, and the module can call those too. A name the parent does not define is skipped
+  with a warning. A module whose mount grants nothing gets none: it is isolated by default, as
+  its state is.
+- **A module's own.** A loaded fragment may have its own `functions:` and `import:`s. They are
+  visible inside the module only, never to its parent. One that replaces a granted function of
+  the same name warns.
+- **Code, not authority.** A function runs in the program that calls it. In a module it is
+  chrooted to the module's sub-prefix (§7.3), so `(state-set "out" ...)` writes
+  `includes.<as>.out`, and it reaches the parent's state only through the module's `link:` holes.
+  Granting a function never grants state.
+- **How they run.** The functions are a prelude, their sources one per line, that the runtime
+  runs ahead of each program in the scope (`Widget::functions`, a `FunctionScope` on the root and
+  on every mount wrapper). Each program defines them in its own process at the start, at about one
+  step per function against the action's step budget (§7.4 limits), so no closure or environment
+  is shared between processes. A resident defines them once, before its loop.
+- **Checked at load.** The free-head preflight (§5.7) knows each scope's functions. A program that
+  calls a function its scope lacks, such as a module calling one its mount did not grant, gets
+  the same "this host does not provide" warning as a missing host verb. The function bodies are
+  checked too, as `functions:`.
+
+`LoadResult::functions` lists the document's functions, and `LoadResult::root.functions` holds the
+same as a `FunctionScope`. A mount's are on its wrapper widget.
 
 ## 7. State prefix and mount scoping
 
@@ -1262,7 +1325,9 @@ part of what the parent granted), an opaque one is not. `state-delete`, the expi
 and `state-watch` still act on the physical path and do not reach through a hole. A fragment may declare
 the holes it expects with `needs:`; an ungranted expectation warns and the fragment falls
 back to a local (fail-safe) binding. A per-mount `init:` runs once at the sub-prefix
-**after** the holes are wired.
+**after** the holes are wired, with the module's functions (§6.6). A module's functions come
+only from its own `functions:` and the mount's `functions:` grant, never from its parent
+implicitly.
 
 ---
 
@@ -1692,6 +1757,28 @@ In an Ariadne document's action lane, the network verbs are (from
   (`ariadne.limits.*`, §2), so charged like other calls no action could make one. The
   transport's own timeouts (10 s to connect, 30 s in all) and its 64 MiB reply cap bound a
   request instead.
+- **In a browser build without threads** (the single-threaded wasm pages: `ari.html`, arigl's
+  page) there is no background pool to wait on: its jobs run on the page's main thread, between
+  frames. There the verbs start the request instead of sending it
+  (`cvc::net::HttpClient::start`, a browser fetch) and return to the frame loop at once. The
+  calling program parks as it does natively, frames keep drawing and taking input, and the
+  fetch's callback posts the reply to the scheduler, which resumes the program on a later
+  frame. So a spinner (or a document's own progress bar between `(await f 0.05)` slices)
+  animates while a request is out. The contract is the same as natively: the reply dict, the
+  host's policy, `auth` / `capture_auth` and credential values (the token goes in and comes out
+  in C++ as the reply arrives), a 30 s timeout (the reply's `error` says it timed out), the 64
+  MiB cap (enforced as the body arrives), and a killed or reaped program aborts its fetch.
+  `fetch` of an `http(s)` URI is started the same way, through the http handler's non-blocking
+  form (`register_uri_async_handler`, `resolve_async` in [`uri.h`](../inc/cvc/ariadne/uri.h)); a
+  host that registers its own `http` handler in its place gets the blocking call for it. Two
+  things still wait in place in that build: a call where the program can't park (a generator's
+  body, a recursive evaluator), which runs the request inline as natively; and the loads the
+  host makes itself, outside any program: an `https` `import:`/`load:` while the document loads,
+  and a scene's `source:` mesh or texture URL when the scene is realized
+  (`resolve_to_file`). Those use the blocking `cvc::net::send()`, which yields to the browser
+  under Asyncify but holds the frame that called it. (The browser pages fetch a document's
+  relative imports themselves before it loads.) In builds with threads (native, wasm-mt) the
+  request runs on the background pool as before.
 
 ### 10.3 The host's network: the allowlist and credentials
 
@@ -2282,7 +2369,7 @@ tests:
 ```
 
 Each test runs as an `on:` action program would, chrooted to the document's prefix, with the
-document's host verbs and limits. The tests run one at a time, in document order, starting
+document's host verbs, functions (§6.6) and limits. The tests run one at a time, in document order, starting
 after `init:` and the first frame, and each starts once the one before has ended. A test fails
 when it raises an exception it doesn't catch, or is killed (a step or time cap, a syntax error).
 The rest still run. The loader's free-head check (§5.7) covers test programs too.

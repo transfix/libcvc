@@ -142,6 +142,10 @@ struct LoadResult {
   // order. Only `ari test` runs them, one at a time on the action lane, after init: and the first
   // frame; every other host ignores them.
   std::vector<std::pair<std::string, std::string>> tests;
+  // The document's functions (docs/ARIADNE.md §6.6): the ones its imports declare, then its own
+  // `functions:` block's (defun ...) forms, a later one of the same name replacing an earlier one.
+  // root.functions holds the same as a FunctionScope; a mount's are on its wrapper widget.
+  std::vector<FunctionDef> functions;
   // The document's `keys:` block (keys.h): its rebindable key actions, in document order. The host
   // hands them to AppRuntime, which binds them (Runtime::set_key_bindings) and lists them in the
   // Keys window.

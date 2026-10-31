@@ -212,13 +212,23 @@ public:
   // Mirror the status to the state tree when it changed (the host's thread).
   void mirror(cvc::app &app);
 
-  // The renewer's side, from any thread.
+  // The renewer's side, from any thread (renew_async: the one thread of a browser page).
   bool expiring() const;
   std::string renew(const std::string &rejected);
+  void renew_async(const std::string &rejected, std::function<void(std::string)> done);
   void close_listener() {
     if (listener_)
       listener_->close();
     listener_.reset();
+  }
+  // The host turned sign-in off: nothing more may arrive (on the host's thread).
+  void shutdown() {
+    close_listener();
+    if (std::shared_ptr<cvc::net::HttpTransfer> t = std::move(transfer_))
+      t->abort();
+    if (std::shared_ptr<cvc::net::HttpTransfer> t = std::move(renew_transfer_))
+      t->abort();
+    pending_.reset();
   }
 
 private:
@@ -239,6 +249,10 @@ private:
   std::string keep_tokens(oidc::TokenReply &t, std::optional<std::string> nonce, bool need_id_token,
                           const oidc::Provider &p, const std::string &client_id, Status &into);
   void bind_names(const oidc::Provider &p);
+  struct RefreshPlan;
+  void plan_refresh(const std::string &rejected, RefreshPlan &plan);
+  std::string take_refresh(RefreshPlan &plan, cvc::net::HttpResponse &reply);
+  void finish_renew(const std::string &why);
   void handle(cvc::net::HttpResponse &reply);
   void resume_from_store();
 
@@ -264,6 +278,11 @@ private:
   Step step_ = Step::idle;
   std::shared_ptr<Pending> pending_;
   std::shared_ptr<std::atomic<bool>> renewing_; // a pump-started renewal is out
+  // Where requests are started rather than sent (cvc::net::http_starts_async): the flow's request
+  // out, a refresh out, and the callers waiting for that refresh.
+  std::shared_ptr<cvc::net::HttpTransfer> transfer_;
+  std::shared_ptr<cvc::net::HttpTransfer> renew_transfer_;
+  std::vector<std::function<void(std::string)>> renew_waiters_;
   std::unique_ptr<cvc::net::LoopbackRedirect> listener_;
   std::string verifier_, state_, nonce_, redirect_uri_, device_code_, flow_;
   steady::time_point deadline_{}, next_poll_{};
@@ -283,6 +302,12 @@ public:
   std::string renew(const std::string &rejected) override {
     const std::shared_ptr<Session> s = s_.lock();
     return s ? s->renew(rejected) : std::string("the sign-in has ended");
+  }
+  void renew_async(const std::string &rejected, std::function<void(std::string)> done) override {
+    if (const std::shared_ptr<Session> s = s_.lock())
+      s->renew_async(rejected, std::move(done));
+    else
+      done("the sign-in has ended");
   }
 
 private:
@@ -370,6 +395,8 @@ void Session::stop_flow(bool ok, const std::string &message) {
   wipe(verifier_);
   wipe(device_code_);
   pending_.reset();
+  if (std::shared_ptr<cvc::net::HttpTransfer> t = std::move(transfer_))
+    t->abort();
   step_ = Step::idle;
 }
 
@@ -423,6 +450,14 @@ void Session::send(cvc::net::HttpRequest req, Step next) {
   auto pending = std::make_shared<Pending>();
   pending_ = pending;
   step_ = next;
+  if (cvc::net::http_starts_async()) { // a browser page without threads: never block a frame
+    transfer_ = cvc::net::start(req, policy_, [pending](cvc::net::HttpResponse r) {
+      pending->reply = std::move(r);
+      pending->done.store(true, std::memory_order_release);
+    });
+    wipe(req.body);
+    return;
+  }
   std::shared_ptr<const cvc::net::NetPolicy> policy = policy_;
   run_job(app_, [pending, policy, req = std::move(req)]() mutable {
     pending->reply = cvc::net::send(req, *policy);
@@ -584,11 +619,18 @@ void Session::resume_from_store() {
   auto pending = std::make_shared<Pending>();
   pending_ = pending;
   step_ = Step::resume;
-  std::weak_ptr<Session> weak = weak_from_this();
-  run_job(app_, [weak, pending] {
-    if (const std::shared_ptr<Session> self = weak.lock())
-      pending->reply.error = self->renew(std::string());
+  const auto finished = [pending](std::string why) {
+    pending->reply.error = std::move(why);
     pending->done.store(true, std::memory_order_release);
+  };
+  if (cvc::net::http_starts_async()) {
+    renew_async(std::string(), finished);
+    return;
+  }
+  std::weak_ptr<Session> weak = weak_from_this();
+  run_job(app_, [weak, finished] {
+    const std::shared_ptr<Session> self = weak.lock();
+    finished(self ? self->renew(std::string()) : std::string("the sign-in has ended"));
   });
 }
 
@@ -895,48 +937,69 @@ bool Session::expiring() const {
 
 // A refresh (RFC 6749 6), on whatever thread asks: the credential store's renewal before or after
 // a request, the pump's ahead of expiry, a resumed session's check. One at a time.
-std::string Session::renew(const std::string &rejected) {
-  std::lock_guard<std::mutex> one(renew_mutex_);
-  std::optional<oidc::Provider> p;
-  SignInOptions o;
+// What a refresh needs before it is sent: the provider, the client, and the refresh token, or why
+// it cannot be (an empty `why` with no request: a renewal raced this one, nothing to do).
+struct Session::RefreshPlan {
+  std::optional<oidc::Provider> provider;
+  SignInOptions opts;
+  std::string refresh;
+  cvc::net::HttpRequest req;
+  bool send = false;
+  std::string why;
+  ~RefreshPlan() {
+    wipe(refresh);
+    wipe(req.body);
+  }
+};
+
+void Session::plan_refresh(const std::string &rejected, RefreshPlan &plan) {
   {
     std::lock_guard<std::mutex> lock(m_);
-    p = provider_;
-    o = opts_;
+    plan.provider = provider_;
+    plan.opts = opts_;
   }
-  if (!p)
-    return "the provider is not known yet";
-  const cvc::net::Origin issuer = *cvc::net::parse_origin(p->issuer);
-  const cvc::net::Origin token_origin = *cvc::net::parse_origin(p->token_endpoint);
+  if (!plan.provider) {
+    plan.why = "the provider is not known yet";
+    return;
+  }
+  const oidc::Provider &p = *plan.provider;
+  const cvc::net::Origin issuer = *cvc::net::parse_origin(p.issuer);
+  const cvc::net::Origin token_origin = *cvc::net::parse_origin(p.token_endpoint);
   if (!rejected.empty()) {
     std::optional<std::string> now = store_->token_for(name_, issuer);
     const bool raced = now && *now != rejected;
     if (now)
       wipe(*now);
     if (raced)
-      return std::string(); // another request renewed it meanwhile
+      return; // another request renewed it meanwhile
   }
   std::optional<std::string> refresh = store_->token_for(refresh_name(), token_origin);
-  if (!refresh)
-    return "there is no refresh token";
-  oidc::Params f = {
-      {"grant_type", "refresh_token"}, {"refresh_token", *refresh}, {"client_id", o.client_id}};
-  if (!o.client_secret.empty())
-    f.emplace_back("client_secret", o.client_secret);
-  cvc::net::HttpRequest req = form_post(p->token_endpoint, f);
+  if (!refresh) {
+    plan.why = "there is no refresh token";
+    return;
+  }
+  plan.refresh = std::move(*refresh);
+  oidc::Params f = {{"grant_type", "refresh_token"},
+                    {"refresh_token", plan.refresh},
+                    {"client_id", plan.opts.client_id}};
+  if (!plan.opts.client_secret.empty())
+    f.emplace_back("client_secret", plan.opts.client_secret);
+  plan.req = form_post(p.token_endpoint, f);
   for (auto &kv : f)
     wipe(kv.second);
-  cvc::net::HttpResponse reply = cvc::net::send(req, *policy_);
-  wipe(req.body);
+  plan.send = true;
+}
+
+// The token endpoint's reply to a refresh (RFC 6749 6): keep the new tokens, or, when the provider
+// ended the session (invalid_grant), forget them all and say so. "" or why not.
+std::string Session::take_refresh(RefreshPlan &plan, cvc::net::HttpResponse &reply) {
   if (!reply.ok) {
-    wipe(*refresh);
     renew_backoff_until_.store(unix_now() + 30);
     return "the token endpoint could not be reached: " + oidc::printable(reply.error);
   }
   oidc::TokenReply t = oidc::parse_token_reply(reply.status, reply.body);
-  cvc::net::redact(reply.body, *refresh);
+  cvc::net::redact(reply.body, plan.refresh);
   wipe(reply.body);
-  wipe(*refresh);
   if (!t.ok) {
     if (t.error == "invalid_grant") { // the provider ended the session
       store_->forget(name_);
@@ -963,7 +1026,8 @@ std::string Session::renew(const std::string &rejected) {
     std::lock_guard<std::mutex> lock(m_);
     next = status_;
   }
-  const std::string why = keep_tokens(t, std::nullopt, false, *p, o.client_id, next);
+  const std::string why =
+      keep_tokens(t, std::nullopt, false, *plan.provider, plan.opts.client_id, next);
   t.wipe();
   if (!why.empty()) {
     renew_backoff_until_.store(unix_now() + 30);
@@ -975,6 +1039,49 @@ std::string Session::renew(const std::string &rejected) {
     s.flow = flow;
   });
   return std::string();
+}
+
+// A refresh, sent in place, on whatever thread asks: the credential store's renewal before or after
+// a request, the pump's ahead of expiry, a resumed session's check. One at a time.
+std::string Session::renew(const std::string &rejected) {
+  std::lock_guard<std::mutex> one(renew_mutex_);
+  RefreshPlan plan;
+  plan_refresh(rejected, plan);
+  if (!plan.send)
+    return plan.why;
+  cvc::net::HttpResponse reply = cvc::net::send(plan.req, *policy_);
+  return take_refresh(plan, reply);
+}
+
+// The same refresh started rather than sent, where requests must not block the frame loop (a
+// browser page without threads, cvc::net::http_starts_async): `done` hears from the browser's
+// event loop. Callers that ask while one is out wait for it and hear what it did.
+void Session::renew_async(const std::string &rejected, std::function<void(std::string)> done) {
+  if (!cvc::net::http_starts_async()) {
+    done(renew(rejected));
+    return;
+  }
+  renew_waiters_.push_back(std::move(done));
+  if (renew_waiters_.size() > 1)
+    return; // one is out: this caller hears what it did
+  auto plan = std::make_shared<RefreshPlan>();
+  plan_refresh(rejected, *plan);
+  if (!plan->send) {
+    finish_renew(plan->why);
+    return;
+  }
+  std::shared_ptr<Session> self = shared_from_this();
+  renew_transfer_ = cvc::net::start(plan->req, policy_, [self, plan](cvc::net::HttpResponse r) {
+    self->renew_transfer_.reset();
+    self->finish_renew(self->take_refresh(*plan, r));
+  });
+}
+
+void Session::finish_renew(const std::string &why) {
+  std::vector<std::function<void(std::string)>> waiters;
+  waiters.swap(renew_waiters_);
+  for (auto &w : waiters)
+    w(why);
 }
 
 bool Session::cancel() {
@@ -1235,6 +1342,10 @@ void Session::step() {
       return;
     auto flag = std::make_shared<std::atomic<bool>>(true);
     renewing_ = flag;
+    if (cvc::net::http_starts_async()) {
+      renew_async(std::string(), [flag](std::string) { flag->store(false); });
+      return;
+    }
     std::weak_ptr<Session> weak = weak_from_this();
     run_job(app_, [weak, flag] {
       if (const std::shared_ptr<Session> self = weak.lock())
@@ -1530,7 +1641,7 @@ void disable_oidc() {
     sessions.swap(host->sessions);
   }
   for (auto &[name, s] : sessions) {
-    s->close_listener();
+    s->shutdown();
     host->store->set_renewer(name, nullptr);
   }
   cvc::net::set_browser_disabled(false);

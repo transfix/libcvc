@@ -17,6 +17,7 @@
 #include <cvc/ariadne/uri_http.h>
 #include <cvc/net/http_client.h>
 #include <cvc/net/net_policy.h>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -147,8 +148,8 @@ StoreResult http_store_uncached(const Uri &u, const std::string &content,
 
 namespace {
 
-UriResult http_fetch(const Uri &u, const std::string & /*base*/,
-                     const cvc::net::NetPolicy *policy = nullptr) {
+// The request a read of `u` makes (follow: whether it follows redirects, see below).
+cvc::net::HttpRequest http_fetch_request(const Uri &u, bool &follow) {
   const HttpRequestOptions opts = detail::consult_http_provider(u.raw, /*for_write=*/false);
   cvc::net::HttpRequest req;
   req.url = u.raw;
@@ -157,12 +158,36 @@ UriResult http_fetch(const Uri &u, const std::string & /*base*/,
   // Follow a redirect only when uncredentialed (nothing to leak across an origin the untrusted .ari
   // document chose); a credentialed read stops at the redirect instead of carrying the token
   // onward.
-  const bool follow = opts.headers.empty();
+  follow = opts.headers.empty();
   req.follow_redirects = follow;
   // A method override on a read is a bodyless custom verb (default stays GET).
   if (!opts.method.empty() && opts.method != "GET")
     req.method = opts.method;
+  return req;
+}
+
+UriResult http_fetch(const Uri &u, const std::string & /*base*/,
+                     const cvc::net::NetPolicy *policy = nullptr) {
+  bool follow = true;
+  const cvc::net::HttpRequest req = http_fetch_request(u, follow);
   return detail::map_http_fetch_result(u.raw, follow, detail::send_http(req, policy));
+}
+
+// http_fetch's non-blocking form (register_uri_async_handler): the same request, started
+// (cvc::net::start), answered from the browser's event loop where the transport starts requests
+// without blocking.
+std::function<void()>
+http_fetch_async(const Uri &u, std::shared_ptr<const cvc::net::NetPolicy> policy, UriDone done) {
+  bool follow = true;
+  const cvc::net::HttpRequest req = http_fetch_request(u, follow);
+  std::shared_ptr<cvc::net::HttpTransfer> t =
+      cvc::net::start(req, std::move(policy),
+                      [raw = u.raw, follow, done = std::move(done)](cvc::net::HttpResponse r) {
+                        done(detail::map_http_fetch_result(raw, follow, r));
+                      });
+  if (!t)
+    return {};
+  return [t] { t->abort(); };
 }
 
 StoreResult http_store(const Uri &u, const std::string &content, const std::string &base) {
@@ -181,10 +206,14 @@ void register_http_uri_handler() {
     return; // no transport compiled — leave the scheme unresolved (as the old libcurl-less stub
             // did)
   const auto fetch = [](const Uri &u, const std::string &base) { return http_fetch(u, base); };
-  register_uri_handler("http", fetch);
-  register_uri_handler("https", fetch);
-  register_uri_store_handler("http", http_store);
-  register_uri_store_handler("https", http_store);
+  const auto fetch_async = [](const Uri &u, const std::string &, UriDone done) {
+    return http_fetch_async(u, nullptr, std::move(done));
+  };
+  for (const char *scheme : {"http", "https"}) {
+    register_uri_handler(scheme, fetch);
+    register_uri_async_handler(scheme, fetch_async);
+    register_uri_store_handler(scheme, http_store);
+  }
 }
 
 void register_http_uri_handler(std::shared_ptr<const cvc::net::NetPolicy> policy) {
@@ -197,13 +226,17 @@ void register_http_uri_handler(std::shared_ptr<const cvc::net::NetPolicy> policy
   const auto fetch = [policy](const Uri &u, const std::string &base) {
     return http_fetch(u, base, policy.get());
   };
+  const auto fetch_async = [policy](const Uri &u, const std::string &, UriDone done) {
+    return http_fetch_async(u, policy, std::move(done));
+  };
   const auto store = [policy](const Uri &u, const std::string &content, const std::string &base) {
     return detail::http_store_uncached(u, content, base, policy.get());
   };
-  register_uri_handler("http", fetch);
-  register_uri_handler("https", fetch);
-  register_uri_store_handler("http", store);
-  register_uri_store_handler("https", store);
+  for (const char *scheme : {"http", "https"}) {
+    register_uri_handler(scheme, fetch);
+    register_uri_async_handler(scheme, fetch_async);
+    register_uri_store_handler(scheme, store);
+  }
 }
 
 bool have_http_uri_handler() { return cvc::net::have_http_backend(); }

@@ -23,6 +23,7 @@
 
 #include <cstddef>
 #include <cvc/net/net_policy.h>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -47,6 +48,13 @@ public:
   // send: when the store holds another token by then, a renewal raced this one, and nothing more
   // is done. "" when the store now holds a token worth sending, else why not (never quoting one).
   virtual std::string renew(const std::string &rejected) = 0;
+  // renew() for a caller that must not block: a browser page's frame loop, where requests are
+  // started rather than sent (cvc::net::http_starts_async). `done` gets what renew() would return,
+  // later, from the browser's event loop, on the thread that called this. By default it calls
+  // renew() in place.
+  virtual void renew_async(const std::string &rejected, std::function<void(std::string)> done) {
+    done(renew(rejected));
+  }
 };
 
 class CredentialStore {
