@@ -1,6 +1,6 @@
 // A stand-in for a browser page under node, for the wasm ari's sign-in check (ci.yml): the page's
 // location, its sessionStorage and history.replaceState, which the redirect flow uses
-// (docs/ARIADNE.md §10.4). ARI_PAGE_URL is the page's URL. ARI_PAGE_STATE names a JSON file that
+// (docs/ARIADNE.md §10.5). ARI_PAGE_URL is the page's URL. ARI_PAGE_STATE names a JSON file that
 // keeps sessionStorage across runs (the page leaving for the provider and loading again when it
 // comes back) and records where the page went: `navigated` (location.assign) and `replaced`
 // (history.replaceState). No `window` is defined, so Emscripten still sees node.

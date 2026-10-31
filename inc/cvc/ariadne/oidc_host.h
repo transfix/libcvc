@@ -1,7 +1,7 @@
 #ifndef CVC_ARIADNE_OIDC_HOST_H
 #define CVC_ARIADNE_OIDC_HOST_H
 
-// Ariadne — OAuth 2.0 / OpenID Connect sign-in for documents (docs/ARIADNE.md §10.4).
+// Ariadne — OAuth 2.0 / OpenID Connect sign-in for documents (docs/ARIADNE.md §10.5).
 //
 // A document signs in with any standards-compliant provider (Keycloak, Authentik, Google, ...)
 // from the provider's issuer URL and a public client's id, and then names the credential on its

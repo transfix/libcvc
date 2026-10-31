@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sign-in in the browser build (docs/ARIADNE.md §10.4), the wasm ari under node: the page shim
+# Sign-in in the browser build (docs/ARIADNE.md §10.5), the wasm ari under node: the page shim
 # (page-shim.cjs) stands in for the page's location, sessionStorage and history, and xhr-shim.cjs
 # for the browser's XMLHttpRequest. Against stub_oidc_provider.py:
 #   1. the redirect flow: the page leaves for the authorization endpoint (the PKCE record in

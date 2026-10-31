@@ -1,4 +1,4 @@
-"""A stub OpenID Provider for testing Ariadne sign-in (docs/ARIADNE.md §10.4) by hand, in the
+"""A stub OpenID Provider for testing Ariadne sign-in (docs/ARIADNE.md §10.5) by hand, in the
 ari/arigl tmux tests and under node for the browser builds. Standard library only.
 
   python3 stub_oidc_provider.py [--port N] [--secrets FILE] [--no-device] [--expires-in S]

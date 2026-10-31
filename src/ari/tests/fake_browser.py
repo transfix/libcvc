@@ -1,4 +1,4 @@
-"""A stand-in for the user's web browser, for $BROWSER in the sign-in tests (docs/ARIADNE.md §10.4).
+"""A stand-in for the user's web browser, for $BROWSER in the sign-in tests (docs/ARIADNE.md §10.5).
 
   BROWSER="python3 fake_browser.py" ari run ...
 

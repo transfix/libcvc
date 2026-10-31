@@ -270,6 +270,7 @@ set(SOURCE_FILES
   state/state_exec/async_stackless_evaluator.cpp
   state/state_exec/state_value_codec.cpp
   state/state_exec/data_job.cpp
+  state/state_exec/json.cpp
   state/state_exec/native_stack.cpp
   state/state_exec/native_stack.h
   state/state_exec/heap.cpp
@@ -1387,7 +1388,7 @@ list(APPEND SOURCE_FILES net/http_client.cpp net/http_client_curl.cpp net/http_c
   net/net_policy.cpp net/credentials.cpp)
 list(APPEND INCLUDE_FILES ../../inc/cvc/net/http_client.h ../../inc/cvc/net/net_policy.h
   ../../inc/cvc/net/credentials.h)
-# OAuth 2.0 / OpenID Connect sign-in (docs/ARIADNE.md §10.4): the protocol pieces, the loopback
+# OAuth 2.0 / OpenID Connect sign-in (docs/ARIADNE.md §10.5): the protocol pieces, the loopback
 # redirect listener (native), the user's browser and a browser page's own URL and sessionStorage,
 # and the Ariadne host that runs the flows for documents.
 list(APPEND SOURCE_FILES net/json_lite.cpp net/oidc.cpp net/loopback_redirect.cpp net/browser.cpp

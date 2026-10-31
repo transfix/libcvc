@@ -2,7 +2,7 @@
 #define CVC_NET_LOOPBACK_REDIRECT_H
 
 // cvc::net — the loopback redirect URI of a native OAuth 2.0 client (RFC 8252 7.3,
-// docs/ARIADNE.md §10.4).
+// docs/ARIADNE.md §10.5).
 //
 // A native app that signs in through the system browser asks the provider to send the browser
 // back to http://127.0.0.1:PORT/PATH, where this listens. It binds 127.0.0.1 only, on an ephemeral

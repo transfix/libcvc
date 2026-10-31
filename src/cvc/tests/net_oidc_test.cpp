@@ -1,4 +1,4 @@
-// cvc::net::oidc — the OAuth 2.0 / OpenID Connect client's protocol pieces (docs/ARIADNE.md §10.4):
+// cvc::net::oidc — the OAuth 2.0 / OpenID Connect client's protocol pieces (docs/ARIADNE.md §10.5):
 // issuers and discovery (fail closed), PKCE, the authorization request and reply, token and device
 // replies, ID token checks, the policy's oidc lines, the loopback redirect listener and the browser
 // seam. The flows themselves are tested through the Ariadne host (ariadne_runtime_test,

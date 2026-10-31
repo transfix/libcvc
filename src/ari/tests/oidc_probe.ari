@@ -1,4 +1,4 @@
-# The sign-in tests' document (docs/ARIADNE.md §10.4): on its first tick it signs in with the
+# The sign-in tests' document (docs/ARIADNE.md §10.5): on its first tick it signs in with the
 # issuer it is given, waits for the host's message that the sign-in ended, then calls the API with
 # the credential, and shows what a person would see. The flow is the host's choice (a browser, a
 # device code, a browser page). Used by oidc_hosts_test.sh (ari and arigl in tmux) and, embedded at

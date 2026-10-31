@@ -124,15 +124,29 @@ void expect_same_tree(const contour_tree &a, const contour_tree &b, const std::s
   EXPECT_EQ(a.arcs.size(), b.arcs.size()) << what;
 }
 
+// A whole number in [0, hi] from rng, mapped as libc++'s uniform_int_distribution maps it: the low
+// bits of a draw, redrawn while out of range. std::uniform_int_distribution leaves its mapping to
+// each standard library (macOS's libc++ drew fields the others never did, one of which broke the
+// merge), so the tests map by hand and every platform tests the same fields.
+std::uint32_t draw(std::mt19937 &rng, std::uint32_t hi) {
+  std::uint32_t mask = 0;
+  while (mask < hi)
+    mask = mask << 1 | 1;
+  std::uint32_t x;
+  do
+    x = std::uint32_t(rng()) & mask;
+  while (x > hi);
+  return x;
+}
+
 // The grid builder on the same values, as floats (what it reads), and the mesh on them.
 void check_against_grid(int nx, int ny, int nz, unsigned seed, int levels) {
   std::mt19937 rng(seed);
-  std::uniform_int_distribution<int> q(0, levels - 1);
   std::uniform_real_distribution<float> r(-1.f, 1.f);
   const std::size_t n = std::size_t(nx) * ny * nz;
   std::vector<float> f(n);
   for (float &v : f)
-    v = levels > 0 ? float(q(rng)) : r(rng);
+    v = levels > 0 ? float(draw(rng, std::uint32_t(levels - 1))) : r(rng);
   const contour_tree grid = cvc::compute_contour_tree(f.data(), nx, ny, nz);
   const auto mesh = field(grid_mesh(nx, ny, nz), std::vector<double>(f.begin(), f.end()));
   const contour_tree whole = cvc::compute_contour_tree(*mesh);
@@ -214,57 +228,72 @@ TEST(MeshContourTree, ARingStillGivesATree) {
   EXPECT_EQ(t.nodes.back().value, *std::max_element(v.begin(), v.end()));
 }
 
-TEST(MeshContourTree, RandomFieldsOnLoopyDomainsStillGiveTrees) {
-  // A torus (a u x v grid wrapping both ways) and an annulus (wrapping one way), random values:
-  // level sets that loop in every way a surface allows. Each must come out one tree, from the
-  // global minimum to the global maximum, however it is stepped.
-  const auto wrapped = [](int nu, int nv, bool wrap_v) {
-    auto g = std::make_shared<geometry>();
-    for (int j = 0; j < nv; ++j)
-      for (int i = 0; i < nu; ++i)
-        g->points().push_back(geometry::point_t{{double(i), double(j), 0.0}});
-    const auto id = [&](int i, int j) { return geometry::index_t((j % nv) * nu + (i % nu)); };
-    for (int j = 0; j < (wrap_v ? nv : nv - 1); ++j)
-      for (int i = 0; i < nu; ++i) {
-        g->tris().push_back(geometry::tri_t{{id(i, j), id(i + 1, j), id(i + 1, j + 1)}});
-        g->tris().push_back(geometry::tri_t{{id(i, j), id(i, j + 1), id(i + 1, j + 1)}});
-      }
-    return g;
-  };
-  for (const bool torus : {true, false}) {
-    const auto g = wrapped(9, 7, torus);
-    for (unsigned seed = 1; seed <= 40; ++seed) {
-      std::mt19937 rng(seed);
-      // Not std::uniform_int_distribution, whose mapping each standard library picks for itself
-      // (macOS's libc++ drew fields the others never did, one of which broke the merge): libc++'s
-      // mapping, the low bits of a draw, redrawn while out of range, so every platform tests the
-      // same fields.
-      const std::uint32_t hi = seed % 2 ? 5 : 1000, mask = seed % 2 ? 7 : 1023;
-      const auto q = [&] {
-        std::uint32_t x;
-        do
-          x = std::uint32_t(rng()) & mask;
-        while (x > hi);
-        return x;
-      };
-      std::vector<double> v;
-      for (std::size_t i = 0; i < g->const_points().size(); ++i)
-        v.push_back(double(q()));
-      const auto mesh = field(g, v);
-      const std::string what =
-          std::string(torus ? "torus" : "annulus") + " seed " + std::to_string(seed);
-      contour_tree t;
-      ASSERT_NO_THROW(t = cvc::compute_contour_tree(*mesh)) << what;
-      ASSERT_GE(t.nodes.size(), 2u) << what;
-      EXPECT_EQ(t.arcs.size() + 1, t.nodes.size()) << what << ": one piece, one tree";
-      EXPECT_EQ(t.nodes.front().value, *std::min_element(v.begin(), v.end())) << what;
-      EXPECT_EQ(t.nodes.back().value, *std::max_element(v.begin(), v.end())) << what;
-      cvc::mesh_contour_tree_builder b(mesh);
-      while (!b.step(5)) {
-      }
-      expect_same_tree(b.take(), t, what + " (stepped)");
+// A u x v grid of triangles that wraps in u (an annulus) and, with wrap_v, in v too (a torus).
+std::shared_ptr<geometry> wrapped_grid(int nu, int nv, bool wrap_v) {
+  auto g = std::make_shared<geometry>();
+  for (int j = 0; j < nv; ++j)
+    for (int i = 0; i < nu; ++i)
+      g->points().push_back(geometry::point_t{{double(i), double(j), 0.0}});
+  const auto id = [&](int i, int j) { return geometry::index_t((j % nv) * nu + (i % nu)); };
+  for (int j = 0; j < (wrap_v ? nv : nv - 1); ++j)
+    for (int i = 0; i < nu; ++i) {
+      g->tris().push_back(geometry::tri_t{{id(i, j), id(i + 1, j), id(i + 1, j + 1)}});
+      g->tris().push_back(geometry::tri_t{{id(i, j), id(i, j + 1), id(i + 1, j + 1)}});
     }
+  return g;
+}
+
+// One piece's field: one tree, from the global minimum to the global maximum, however stepped.
+void expect_one_tree(std::shared_ptr<geometry> g, const std::vector<double> &v,
+                     const std::string &what) {
+  const auto mesh = field(std::move(g), v);
+  contour_tree t;
+  ASSERT_NO_THROW(t = cvc::compute_contour_tree(*mesh)) << what;
+  ASSERT_GE(t.nodes.size(), 2u) << what;
+  EXPECT_EQ(t.arcs.size() + 1, t.nodes.size()) << what << ": one piece, one tree";
+  EXPECT_EQ(t.nodes.front().value, *std::min_element(v.begin(), v.end())) << what;
+  EXPECT_EQ(t.nodes.back().value, *std::max_element(v.begin(), v.end())) << what;
+  cvc::mesh_contour_tree_builder b(mesh);
+  while (!b.step(5)) {
   }
+  expect_same_tree(b.take(), t, what + " (stepped)");
+}
+
+TEST(MeshContourTree, AForcedLeafThatTopsItsSplitTreeStillGivesATree) {
+  // The 9 x 7 annulus field that broke the merge on macOS (seed 21 of the sweep below). Out of
+  // leaves, the merge forces the highest vertex left out as an upper leaf; here that vertex also
+  // topped its split tree, so its kids were each left a root, and a later lower leaf found no
+  // split neighbour ("internal error: a leaf with no split neighbour").
+  const std::vector<double> v = {
+      1, 0, 4, 0, 0, 0, 3, 4, 2, //
+      1, 2, 0, 4, 5, 5, 1, 5, 2, //
+      0, 4, 4, 3, 4, 4, 0, 1, 5, //
+      5, 2, 2, 0, 4, 2, 0, 5, 5, //
+      0, 2, 3, 0, 0, 3, 1, 4, 0, //
+      2, 4, 2, 4, 1, 0, 5, 0, 5, //
+      5, 3, 1, 3, 4, 4, 4, 1, 0, //
+  };
+  expect_one_tree(wrapped_grid(9, 7, false), v, "9x7 annulus seed 21");
+}
+
+TEST(MeshContourTree, RandomFieldsOnLoopyDomainsStillGiveTrees) {
+  // Tori and annuli, random values: level sets that loop in every way a surface allows. Each must
+  // come out one tree, from the global minimum to the global maximum, however stepped. With the
+  // case above unhandled, about 1 field in 10 broke the 12 x 4 annulus, 1 in 300 the 9 x 7 one.
+  for (const int nv : {7, 4})
+    for (const bool torus : {true, false}) {
+      const int nu = nv == 7 ? 9 : 12;
+      const auto g = wrapped_grid(nu, nv, torus);
+      for (unsigned seed = 1; seed <= 200; ++seed) {
+        std::mt19937 rng(seed);
+        std::vector<double> v;
+        for (std::size_t i = 0; i < g->const_points().size(); ++i)
+          v.push_back(double(draw(rng, seed % 2 ? 5 : 1000)));
+        expect_one_tree(g, v,
+                        std::to_string(nu) + "x" + std::to_string(nv) +
+                            (torus ? " torus" : " annulus") + " seed " + std::to_string(seed));
+      }
+    }
 }
 
 TEST(MeshContourTree, SeparatePiecesGetATreeEach) {

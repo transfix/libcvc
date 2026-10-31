@@ -1,7 +1,7 @@
 #ifndef CVC_NET_BROWSER_H
 #define CVC_NET_BROWSER_H
 
-// cvc::net — the user's web browser (docs/ARIADNE.md §10.4, §10.5).
+// cvc::net — the user's web browser (docs/ARIADNE.md §10.5, §10.6).
 //
 // open_url opens an http(s) URL in the user's browser: natively with $BROWSER when it is set (a
 // command, or a ':'-separated list of them tried in turn; "%s" in one stands for the URL, else the

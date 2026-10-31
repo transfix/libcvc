@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sign-in through the hosts as a person runs them (docs/ARIADNE.md §10.4): ari run (FTXUI and
+# Sign-in through the hosts as a person runs them (docs/ARIADNE.md §10.5): ari run (FTXUI and
 # tvision) and arigl run --terminal in tmux, and arigl's window snapshot, against
 # stub_oidc_provider.py. Each host signs in twice with tests/oidc_probe.ari: with a device code
 # (--no-browser), approved through the stub as a person would on another device, and through the

@@ -1,5 +1,5 @@
 // Ariadne — OAuth 2.0 / OpenID Connect sign-in for documents. See inc/cvc/ariadne/oidc_host.h and
-// docs/ARIADNE.md §10.4.
+// docs/ARIADNE.md §10.5.
 //
 // Every token stays in C++ here. A flow's secrets (the PKCE verifier, the authorization code, the
 // device code) and the tokens a reply carries live in a Session or a request on its way, are

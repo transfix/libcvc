@@ -490,7 +490,7 @@ TEST(AriNet, BadFlagsExitTwo) {
   EXPECT_NE(ari("--help").output.find("--net-allow ORIGIN"), std::string::npos);
 }
 
-// OAuth 2.0 / OpenID Connect sign-in (docs/ARIADNE.md §10.4) through the built ari, against a stub
+// OAuth 2.0 / OpenID Connect sign-in (docs/ARIADNE.md §10.5) through the built ari, against a stub
 // OpenID Provider: tests/oidc_probe.ari signs in, waits for the end of the sign-in and calls the
 // API with the credential. The "browser" is tests/fake_browser.py, through $BROWSER, the way a
 // user's would be. No token, code or device code the provider issued may reach any output.

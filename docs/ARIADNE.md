@@ -85,9 +85,11 @@ Reactive slots — `visible_when`, `enabled_when` / `disabled_when`, computed `b
 - The value allowlist admits arithmetic, coercion, logic, and side-effect-free state
   *readers* only (`kAllowed`, [`ariadne.cpp:417`](../src/cvc/ariadne/ariadne.cpp)), plus
   `(has? "name")`, which asks what the host provides
-  ([§5.7](#57-requires-and-has--what-a-document-needs-from-its-host)).
+  ([§5.7](#57-requires-and-has--what-a-document-needs-from-its-host)). `json-parse` and
+  `json-encode` are on it ([§10.4](#104-json-replies)); `str-concat` is not, so a computed
+  label joins its parts with `string.join`.
 - The special-form gate admits only `if / begin / let / while / for / lambda / defun /
-  set / return / quote / yield / break` (`kAllowedForms`,
+  set / return / quote / yield / break / and / or` (`kAllowedForms`,
   [`ariadne.cpp:433`](../src/cvc/ariadne/ariadne.cpp)).
 
 Nothing that writes state, schedules, watches, sends messages, or does I/O is
@@ -1713,9 +1715,9 @@ against a local test server. `ari snapshot` prints the programs' warnings after 
 | `--net-policy FILE` | read `allow` and `credential` lines from `FILE` (repeatable; implies `--net`) |
 | `--credential-store S` | keep credentials across runs in `S` (implies `--net`; not in a browser) |
 | `--credential-env N=V` | credential `N` is the token in environment variable `V`, for this run (repeatable; a policy `credential` line must bind `N`; not in a browser) |
-| `--oidc-issuer ISSUER` | documents may sign in (§10.4) with `ISSUER` only; allows its origin (repeatable; implies `--net`) |
+| `--oidc-issuer ISSUER` | documents may sign in (§10.5) with `ISSUER` only; allows its origin (repeatable; implies `--net`) |
 | `--oidc-client I=ID` | sign in to issuer `I` as client `ID`, the launcher's registration (repeatable; pins `I` too) |
-| `--oidc-redirect-uri U` | the redirect URI a browser page registers (§10.4; default: the page's own URL) |
+| `--oidc-redirect-uri U` | the redirect URI a browser page registers (§10.5; default: the page's own URL) |
 | `--no-browser` | never open the user's browser: sign-in shows a device code, `open-url` shows the URL |
 
 Without them a document has no `http-get` or `http-request`, and an `http(s)://` URI does not
@@ -1804,7 +1806,47 @@ A host of its own turns the network on with `AppRuntime::enable_net(NetHostConfi
 destroyed. `register_net_intrinsics(app)` alone still registers unchecked verbs with no
 credentials, for an embedding program that vouches for its documents.
 
-### 10.4 Signing in: OAuth 2.0 and OpenID Connect
+### 10.4 JSON replies
+
+A REST reply's body is text. Three verbs turn it into widgets
+([STATE_EXEC_DEVELOPER_GUIDE.md](STATE_EXEC_DEVELOPER_GUIDE.md) §2, "JSON", has the details):
+
+- `(json-parse text)` reads JSON into values: an object is a dict in document order, an array
+  a list, a number without a fraction or exponent an int, `null` nil. Malformed text raises a
+  `ValueError` with `line` and `col`, which a `try` can catch.
+- `(json-encode value [indent])` writes values as JSON, for a request body.
+- `(state-set-tree path value)` writes a parsed value as the subtree at `path`: a dict's keys
+  and a list's indices name child nodes, and a scalar is a node's value. A list's node holds
+  its length, so `repeat:` can count it. It replaces the subtree, removing what the value
+  doesn't name, and it checks the whole value before it writes anything.
+
+```yaml
+init: |
+  (state-set-tree "feed" (json-parse (get-attr (http-get "https://example.org/feed") "body")))
+windows:
+  - window: Feed
+    children:
+      - type: group
+        repeat: (state-get "feed.items")     # the list's length
+        children:
+          - text: ""
+            bind: feed.items.{i}.text         # each element's field
+```
+
+The request needs the host to allow its origin ([§10.3](#103-the-hosts-network-the-allowlist-and-credentials),
+`ari --net-allow https://example.org`).
+[`examples/ariadne/documents/json_feed.ari`](../examples/ariadne/documents/json_feed.ari) does
+this with a JSON string in place of the request, so it runs anywhere, `ari` included. Its last
+post has accented letters, CJK and an emoji: in both terminal backends a wide glyph takes two
+columns and the window's edge stays straight. `ari_run_json_feed_ftxui` and
+`ari_run_json_feed_tvision` check that on a real terminal: they run `ari run` in a tmux pane
+(Linux, where tmux is installed) and compare the window's rows. `ariadne_ftxui_test`'s
+`JsonFeed*` and `WideGlyphs*` tests check `ari snapshot` and the tvision backend's hosted layout;
+until they did, `ari snapshot`'s plain text put a space after each wide glyph. All
+three are data jobs: a large reply is parsed and written a slice per step, so it doesn't stall
+a frame. `json-parse` and `json-encode` are pure, so reactive expressions may use them too.
+
+### 10.5 Signing in: OAuth 2.0 and OpenID Connect
 
 A document signs its user in with any OpenID Connect provider (Keycloak, Authentik, Google, a
 txwtf instance, ...) from two public facts: the provider's **issuer** URL and the **client id** of
@@ -1829,7 +1871,7 @@ HTTP backend (every `ari` and `arigl`, in a terminal, a window and a browser pag
 | `(oidc-cancel NAME)` | stop a sign-in in progress; `#t` if there was one |
 | `(oidc-sign-out NAME [OPTS])` | forget the tokens; revoke them where the provider can (`"sent"` or `"no"`) |
 | `(oidc-status NAME)` | the sign-in's status as a dict: the keys of the table below, `claims` a dict |
-| `(open-url URL)` | open an http(s) URL the host allows in the user's browser (§10.5) |
+| `(open-url URL)` | open an http(s) URL the host allows in the user's browser (§10.6) |
 
 `oidc-sign-in`'s options (an unknown one is an error):
 
@@ -1973,7 +2015,7 @@ stderr), and the wasm ari under node (ci.yml: the redirect flow there and back, 
 [`src/ari/tests/stub_oidc_provider.py`](../src/ari/tests/stub_oidc_provider.py) is a stub provider
 to try a document against by hand.
 
-### 10.5 Opening the user's browser: `open-url`
+### 10.6 Opening the user's browser: `open-url`
 
 `(open-url URL)` opens an http(s) URL in the user's web browser
 ([`browser.h`](../inc/cvc/net/browser.h)): natively with `$BROWSER` when it is set, else
@@ -1991,7 +2033,7 @@ http(s), raises. One URL a second at most. It needs the network on, like the oth
 State plainly so authors are not misled. Each item cites the code; the roadmap items
 below (G17–G21 in the internal gap report) are tracked for reconciliation.
 
-- **Sign-in checks an ID token's claims, not its signature** (§10.4): the token comes straight from
+- **Sign-in checks an ID token's claims, not its signature** (§10.5): the token comes straight from
   the token endpoint over TLS. A sign-in kept in a `--credential-store` file is picked up only when
   the document calls `oidc-sign-in` again (with `"interactive" #f`); until then its access token is
   sent but not refreshed.

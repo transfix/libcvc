@@ -44,8 +44,9 @@ stackless_evaluator::stackless_evaluator(environment_ptr global_env)
 
 const std::set<std::string> &stackless_evaluator::all_special_forms() {
   static const std::set<std::string> forms = {
-      "if",  "begin", "while",    "for",  "set",  "quote", "lambda",   "return", "yield", "break",
-      "let", "defun", "defmacro", "eval", "root", "super", "defclass", "try",    "raise"};
+      "if",     "begin", "while",    "for", "set",   "quote",    "lambda",
+      "return", "yield", "break",    "let", "defun", "defmacro", "eval",
+      "root",   "super", "defclass", "try", "raise", "and",      "or"};
   return forms;
 }
 
@@ -956,6 +957,10 @@ void stackless_evaluator::step_frame(evaluator_state &state) {
   case eval_phase::begin_next:
     step_begin_next(state, frame);
     break;
+  case eval_phase::and_next:
+  case eval_phase::or_next:
+    step_and_or_next(state, frame);
+    break;
   case eval_phase::while_cond:
     step_while_cond(state, frame);
     break;
@@ -1214,6 +1219,21 @@ void stackless_evaluator::step_init(evaluator_state &state, eval_frame &frame) {
     frame.phase = eval_phase::begin_next;
     fill_values(frame.extra_vals, args);
     make_room(frame.results, args.size());
+    frame.index = 0;
+    push_frame(state, frame.extra_vals[0], env);
+    return;
+  }
+  case detail::special_form::and_:
+  case detail::special_form::or_: {
+    // An argument a step, stopping at the first that decides (step_and_or_next).
+    const bool is_and = form == detail::special_form::and_;
+    if (args.empty()) {
+      pop_frame(state, is_and ? true_value : false_value);
+      return;
+    }
+    frame.phase = is_and ? eval_phase::and_next : eval_phase::or_next;
+    fill_values(frame.extra_vals, args);
+    make_room(frame.results, 1);
     frame.index = 0;
     push_frame(state, frame.extra_vals[0], env);
     return;
@@ -1612,6 +1632,24 @@ void stackless_evaluator::step_begin_next(evaluator_state &state, eval_frame &fr
   } else {
     hand_up(state, std::move(frame.results.back()));
   }
+}
+
+// (and ...) is #f at its first falsy argument and (or ...) its first truthy value, the arguments
+// after it unevaluated; past the last, `and` is that value and `or` #f (evaluator.cpp's do_and).
+void stackless_evaluator::step_and_or_next(evaluator_state &state, eval_frame &frame) {
+  const bool is_and = frame.phase == eval_phase::and_next;
+  value_t &v = frame.results.back();
+  if (v.is_truthy() != is_and) {
+    hand_up(state, is_and ? false_value : std::move(v));
+    return;
+  }
+  frame.index++;
+  if (static_cast<size_t>(frame.index) >= frame.extra_vals.size()) {
+    hand_up(state, is_and ? std::move(v) : false_value);
+    return;
+  }
+  frame.results.clear();
+  push_frame(state, frame.extra_vals[frame.index], frame.env); // may move `frame`: last
 }
 
 // ---------------------------------------------------------------------------

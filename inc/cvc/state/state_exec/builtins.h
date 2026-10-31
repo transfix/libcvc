@@ -68,6 +68,12 @@ std::string percent_encode(const std::string &s);
 /// (the application/x-www-form-urlencoded convention, so a decoded query value reads naturally).
 std::string percent_decode(const std::string &s);
 
+/// @name JSON (make_json_parse_job, make_json_encode_job in data_job.h)
+/// @{
+value_t builtin_json_parse(std::span<const value_t> args);  // (json-parse text) -> value
+value_t builtin_json_encode(std::span<const value_t> args); // (json-encode v [indent]) -> text
+/// @}
+
 /// @name List
 /// @{
 value_t builtin_list(std::span<const value_t> args);

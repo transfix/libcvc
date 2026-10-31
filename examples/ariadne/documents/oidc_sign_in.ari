@@ -1,5 +1,5 @@
 # oidc_sign_in.ari — sign in to any OpenID Connect provider and show who you are
-# (docs/ARIADNE.md §10.4).
+# (docs/ARIADNE.md §10.5).
 #
 # The host runs the whole sign-in and keeps every token. This document only names the provider and
 # its public client, says which credential to keep the sign-in under (me), and shows the progress

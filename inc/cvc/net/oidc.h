@@ -2,7 +2,7 @@
 #define CVC_NET_OIDC_H
 
 // cvc::net::oidc — the protocol pieces of an OAuth 2.0 / OpenID Connect public client
-// (docs/ARIADNE.md §10.4). Nothing here sends a request or keeps a token: these build requests and
+// (docs/ARIADNE.md §10.5). Nothing here sends a request or keeps a token: these build requests and
 // read replies, and the host (cvc/ariadne/oidc_host.h) drives the flows with them, sending through
 // cvc::net::send(req, policy) and keeping tokens in a CredentialStore.
 //

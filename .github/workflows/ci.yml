@@ -473,7 +473,7 @@ jobs:
           fi
 
       - name: Sign in from the wasm ari under node
-        # The browser pages' sign-in (docs/ARIADNE.md 10.4) against tests/stub_oidc_provider.py:
+        # The browser pages' sign-in (docs/ARIADNE.md 10.5) against tests/stub_oidc_provider.py:
         # the redirect flow there and back (page-shim.cjs stands in for the page's location,
         # sessionStorage and history), the code exchange, the address bar cleaned, a request with
         # the credential; and the device code. No token may reach the output.

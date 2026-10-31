@@ -55,7 +55,7 @@ std::optional<Origin> parse_origin(const std::string &url, std::string *error = 
 // A path is refused, so nobody reads an allow line as allowing only part of a site.
 std::optional<Origin> parse_origin_spec(const std::string &spec, std::string *error = nullptr);
 
-// An OpenID Connect issuer the host lets documents sign in with (docs/ARIADNE.md §10.4).
+// An OpenID Connect issuer the host lets documents sign in with (docs/ARIADNE.md §10.5).
 struct OidcIssuer {
   std::string issuer;                   // exactly as the provider writes it
   std::vector<Origin> endpoint_origins; // origins besides the issuer's its endpoints may be at
