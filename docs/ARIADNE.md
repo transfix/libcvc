@@ -85,7 +85,9 @@ Reactive slots — `visible_when`, `enabled_when` / `disabled_when`, computed `b
 - The value allowlist admits arithmetic, coercion, logic, and side-effect-free state
   *readers* only (`kAllowed`, [`ariadne.cpp:417`](../src/cvc/ariadne/ariadne.cpp)), plus
   `(has? "name")`, which asks what the host provides
-  ([§5.7](#57-requires-and-has--what-a-document-needs-from-its-host)).
+  ([§5.7](#57-requires-and-has--what-a-document-needs-from-its-host)). `json-parse` and
+  `json-encode` are on it ([§10.4](#104-json-replies)); `str-concat` is not, so a computed
+  label joins its parts with `string.join`.
 - The special-form gate admits only `if / begin / let / while / for / lambda / defun /
   set / return / quote / yield / break` (`kAllowedForms`,
   [`ariadne.cpp:433`](../src/cvc/ariadne/ariadne.cpp)).
@@ -1799,6 +1801,46 @@ A host of its own turns the network on with `AppRuntime::enable_net(NetHostConfi
 `AriRuntime::enable_net`, before `load()`; the runtime turns it off again when it is
 destroyed. `register_net_intrinsics(app)` alone still registers unchecked verbs with no
 credentials, for an embedding program that vouches for its documents.
+
+### 10.4 JSON replies
+
+A REST reply's body is text. Three verbs turn it into widgets
+([STATE_EXEC_DEVELOPER_GUIDE.md](STATE_EXEC_DEVELOPER_GUIDE.md) §2, "JSON", has the details):
+
+- `(json-parse text)` reads JSON into values: an object is a dict in document order, an array
+  a list, a number without a fraction or exponent an int, `null` nil. Malformed text raises a
+  `ValueError` with `line` and `col`, which a `try` can catch.
+- `(json-encode value [indent])` writes values as JSON, for a request body.
+- `(state-set-tree path value)` writes a parsed value as the subtree at `path`: a dict's keys
+  and a list's indices name child nodes, and a scalar is a node's value. A list's node holds
+  its length, so `repeat:` can count it. It replaces the subtree, removing what the value
+  doesn't name, and it checks the whole value before it writes anything.
+
+```yaml
+init: |
+  (state-set-tree "feed" (json-parse (get-attr (http-get "https://example.org/feed") "body")))
+windows:
+  - window: Feed
+    children:
+      - type: group
+        repeat: (state-get "feed.items")     # the list's length
+        children:
+          - text: ""
+            bind: feed.items.{i}.text         # each element's field
+```
+
+The request needs the host to allow its origin ([§10.3](#103-the-hosts-network-the-allowlist-and-credentials),
+`ari --net-allow https://example.org`).
+[`examples/ariadne/documents/json_feed.ari`](../examples/ariadne/documents/json_feed.ari) does
+this with a JSON string in place of the request, so it runs anywhere, `ari` included. Its last
+post has accented letters, CJK and an emoji: in both terminal backends a wide glyph takes two
+columns and the window's edge stays straight. `ari_run_json_feed_ftxui` and
+`ari_run_json_feed_tvision` check that on a real terminal: they run `ari run` in a tmux pane
+(Linux, where tmux is installed) and compare the window's rows. `ariadne_ftxui_test`'s
+`JsonFeed*` and `WideGlyphs*` tests check `ari snapshot` and the tvision backend's hosted layout;
+until they did, `ari snapshot`'s plain text put a space after each wide glyph. All
+three are data jobs: a large reply is parsed and written a slice per step, so it doesn't stall
+a frame. `json-parse` and `json-encode` are pure, so reactive expressions may use them too.
 
 ---
 
