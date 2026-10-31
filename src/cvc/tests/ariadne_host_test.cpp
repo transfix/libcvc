@@ -1186,6 +1186,104 @@ TEST(AriadneModuleTick, AModulesInputLanesAreIgnoredWithAWarning) {
   EXPECT_EQ(told, 2);
 }
 
+// ── residents that stop are restarted ───────────────────────────────────────────────────────────
+
+namespace {
+// Drain until `pred`, gathering the warnings as they come.
+template <class Pred>
+bool drain_collecting(AppRuntime &art, std::vector<std::string> &warnings, Pred pred) {
+  return drain_until(art, [&] {
+    for (std::string &w : art.take_warnings())
+      warnings.push_back(std::move(w));
+    return pred();
+  });
+}
+
+bool any_has(const std::vector<std::string> &warnings, const std::string &text) {
+  return std::any_of(warnings.begin(), warnings.end(),
+                     [&](const std::string &w) { return w.find(text) != std::string::npos; });
+}
+} // namespace
+
+// A tick resident ended by an exception it didn't catch is reported, then started again.
+TEST(AriadneResidents, AFailedTickIsRestarted) {
+  REQUIRE_YAML();
+  const fs::path doc =
+      write(test_dir("resident_fail"), "r.ari",
+            "meta: {min_libcvc: 3.4.0}\n"
+            "on_tick: |\n"
+            "  (if (state-exists \"failed\")\n"
+            "      (state-set \"ran\" \"again\")\n"
+            "      (begin (state-set \"failed\" 1) (raise (ValueError \"first\"))))\n"
+            "root:\n  - text: r\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.rf");
+  art.set_backend(be);
+  art.load(doc.string());
+  std::vector<std::string> warnings;
+  ASSERT_TRUE(
+      drain_collecting(art, warnings, [&] { return val(app, "ui.docs.rf.ran") == "again"; }));
+  EXPECT_TRUE(any_has(warnings, "on_tick: resident [")) << warnings.size();
+  EXPECT_TRUE(any_has(warnings, "failed: ValueError: first"));
+}
+
+// A module's tick killed by its per-step cap is restarted, and runs once the cap allows it.
+TEST(AriadneResidents, AKilledModuleTickIsRestarted) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("resident_kill");
+  write(dir, "mod.ari",
+        "init: (state-set \"n\" 0)\n"
+        "on_tick: |\n"
+        "  (collect (range 0 20000))\n" // a step that checks its time cap as it goes
+        "  (state-set \"n\" (+ 1 (int (state-get \"n\"))))\n"
+        "root:\n  - text: m\n");
+  const fs::path doc =
+      write(dir, "p.ari", "meta: {min_libcvc: 3.4.0}\nroot:\n  - load: mod.ari\n    as: m\n");
+  cvc::app app;
+  cvc::state::instance(app)("ariadne.limits.resident_max_step_time").value(std::string("1e-9"));
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.rk");
+  art.set_backend(be);
+  art.load(doc.string());
+  be.render_to_string(art.runtime(), 80, 24); // mounts the module: its tick starts, under the cap
+  std::vector<std::string> warnings;
+  ASSERT_TRUE(drain_collecting(art, warnings, [&] {
+    return any_has(warnings, "on_tick: of mount 'ui.docs.rk.includes.m'");
+  }));
+  EXPECT_TRUE(any_has(warnings, "] stopped: ")) << warnings.front();
+  cvc::state::instance(app)("ariadne.limits.resident_max_step_time").value(std::string("0"));
+  ASSERT_TRUE(drain_until(art, [&] { return count_of(app, "ui.docs.rk.includes.m.n") >= 2; }));
+}
+
+// One that stops every time soon after starting is given up after a few restarts, with a warning;
+// loading the document again starts it afresh.
+TEST(AriadneResidents, OneThatAlwaysFailsIsGivenUp) {
+  REQUIRE_YAML();
+  const fs::path doc = write(test_dir("resident_give_up"), "g.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "init: (state-set \"starts\" 0)\n"
+                             "on_tick: |\n"
+                             "  (state-set \"starts\" (+ 1 (int (state-get \"starts\"))))\n"
+                             "  (raise (ValueError \"always\"))\n"
+                             "root:\n  - text: g\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.gu");
+  art.set_backend(be);
+  art.load(doc.string());
+  std::vector<std::string> warnings;
+  ASSERT_TRUE(drain_collecting(art, warnings, [&] { return any_has(warnings, "not restarted"); }));
+  EXPECT_TRUE(any_has(warnings, "stopped 8 times in a row soon after starting")) << warnings.back();
+  EXPECT_EQ(count_of(app, "ui.docs.gu.starts"), 9); // the first run and 8 restarts
+  for (int i = 0; i < 200; ++i)
+    art.drain();
+  EXPECT_EQ(count_of(app, "ui.docs.gu.starts"), 9); // given up: no more
+
+  art.load(doc.string()); // its program set again: a fresh start (init: seeds starts to 0)
+  ASSERT_TRUE(drain_until(art, [&] { return count_of(app, "ui.docs.gu.starts") >= 1; }));
+}
+
 // ── §7.6 a module's own requires: ───────────────────────────────────────────────────────────────
 
 namespace {
