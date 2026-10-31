@@ -1369,13 +1369,23 @@ bool exec_coordinator::deserialize_process_list(const std::string &json,
     if (start == std::string::npos)
       break;
 
-    // Find matching closing brace (handles nested braces)
+    // Find matching closing brace (handles nested braces), skipping the strings: a name or a
+    // waiting_on ("msg <channel>", "lock /<key>") may hold either brace.
     int depth = 0;
+    bool in_string = false;
     size_t end = start;
     for (; end < json.size(); ++end) {
-      if (json[end] == '{')
+      const char c = json[end];
+      if (in_string) {
+        if (c == '\\')
+          ++end; // the escaped character
+        else if (c == '"')
+          in_string = false;
+      } else if (c == '"') {
+        in_string = true;
+      } else if (c == '{') {
         ++depth;
-      else if (json[end] == '}') {
+      } else if (c == '}') {
         --depth;
         if (depth == 0)
           break;

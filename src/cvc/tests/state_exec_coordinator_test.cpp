@@ -1082,6 +1082,26 @@ TEST_F(CoordinatorTest, SerializeProcessInfoPriorityAndLocks) {
   EXPECT_FALSE(old.waiting_on.has_value());
 }
 
+// A brace inside a string (a name, or a waiting_on such as "msg <channel>") is not an entry's end.
+TEST_F(CoordinatorTest, SerializeProcessListBracesInStrings) {
+  std::vector<process_info> procs(3);
+  procs[0].pid = 1;
+  procs[0].name = "a{b";
+  procs[1].pid = 2;
+  procs[1].waiting_on = "msg chan}x{";
+  procs[2].pid = 3;
+  procs[2].name = "plain \"quoted\" }";
+  std::vector<process_info> back;
+  ASSERT_TRUE(exec_coordinator::deserialize_process_list(
+      exec_coordinator::serialize_process_list(procs), back));
+  ASSERT_EQ(back.size(), 3u);
+  EXPECT_EQ(back[0].name, "a{b");
+  ASSERT_TRUE(back[1].waiting_on.has_value());
+  EXPECT_EQ(*back[1].waiting_on, "msg chan}x{");
+  EXPECT_EQ(back[2].pid, 3);
+  EXPECT_EQ(back[2].name, "plain \"quoted\" }");
+}
+
 TEST_F(CoordinatorTest, SerializeProcessList) {
   std::vector<process_info> procs;
   process_info p1{};

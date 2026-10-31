@@ -5496,6 +5496,8 @@ TEST(LocksModel, Mutation_ImplNoteAfterOnly) {
 // oracle alone, where no table runs to report anything.
 void expect_violation_on_each_side(const std::string &want_table, const std::string &want_oracle,
                                    const std::function<std::string()> &scenario) {
+  if (!real_flag())
+    GTEST_SKIP() << "needs the real table (CVC_LOCKS_MODEL_REAL=0)";
   for (const mutation_side side : {mutation_side::table, mutation_side::oracle}) {
     const bool table = side == mutation_side::table;
     const std::string &want = table ? want_table : want_oracle;

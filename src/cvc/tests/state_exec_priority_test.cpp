@@ -121,10 +121,16 @@ struct prio_world {
   // the process table's indexes. The first violation fails the case; the later ones are not
   // reported again.
   bool broken = false;
+  bool self_check_seen = false;
   void check_all() {
     if (broken)
       return;
     if (detail::lock_home *home = base().locks()) {
+      if (!self_check_seen) {
+        self_check_seen = true;
+        EXPECT_TRUE(home->manager().table().opts().self_check)
+            << "CVC_STATE_EXEC_CHECK=1 did not reach the library";
+      }
       try {
         home->manager().check();
         home->check_quiescent();
@@ -571,6 +577,25 @@ TEST_P(Priority, PR07_SpawnPriority) {
   EXPECT_EQ(to_string(r[0]), prio_dict(6, 6, 0, "priority_rr"));
   EXPECT_EQ(to_string(r[1]), "#t");
   EXPECT_EQ(pw.base().get_stats().priority_clamped, 0u);
+}
+
+// A spawned child's floor is a host's only when its parent's is: under a priority policy a parent
+// with no host floor gives its child its own floor (0, better than the child's priority 5), and
+// that floor stays one no host gave, which a migration or a snapshot carries as such.
+TEST_P(Priority, SpawnFloorKeepsWhetherAHostGaveIt) {
+  for (const std::optional<int> host_floor : {std::optional<int>(), std::optional<int>(0)}) {
+    prio_world &pw = world(scheduling_policy::priority_rr);
+    const int parent =
+        pw.submit(R"S((spawn "(msg-recv \"never\")" "kid" 5))S", {.floor = host_floor});
+    ASSERT_TRUE(pw.step_until([&] { return pw.finished(parent); }));
+    const int kid = static_cast<int>(as_int(pw.result(parent)));
+    const std::optional<priority_info> pi = pw.base().get_priority(kid);
+    ASSERT_TRUE(pi.has_value());
+    EXPECT_EQ(pi->base, 5);
+    EXPECT_EQ(pi->floor, 0);
+    EXPECT_EQ(pi->floor_explicit, host_floor.has_value()) << (host_floor ? "host floor" : "none");
+    EXPECT_TRUE(pw.base().kill(kid));
+  }
 }
 
 // Forked children copy the floor and whether a host gave it (design 7.2).

@@ -538,7 +538,8 @@ struct Exec::ExecImpl {
   // Exec.scheduler()'s methods, hold). The GIL comes before the mutex: every thread takes the
   // mutex with the GIL held (run() at entry, for its quiesce and its reaps, in RunGuard; a
   // priority call), and no thread ever waits for the GIL while it holds the mutex. Nothing under
-  // the mutex builds or frees a Python object (reap() frees its process after the unlock), and a
+  // the mutex runs Python or frees a Python object (reap() cancels its program's async calls
+  // before it and frees the process after it), and a
   // priority call that waits for run() releases the GIL under the mutex and takes it back only
   // once the mutex is unlocked (priority_call).
   std::mutex control_mutex;
@@ -571,13 +572,16 @@ struct Exec::ExecImpl {
 
   // run()'s reap of its program (both exit paths), under control_mutex, so a thread acting
   // directly during the quiesce never touches the process table while the reap erases from it.
-  // The GIL is held, taken before the mutex. The process is freed after the unlock: its captured
-  // values may hold the last reference to a Python object (an exception's traceback, and the
-  // frames and locals in it), whose finalizer may release and retake the GIL, or call this Exec,
-  // and under the mutex either would deadlock.
+  // The GIL is held, taken before the mutex. Nothing that can run Python happens under the
+  // mutex, where a finalizer or a slot that released and retook the GIL, or called this Exec,
+  // would deadlock: the program's async calls are cancelled first (their charge reads the step
+  // rate, which a scheduler with an id publishes to the tree, where a state_observer's
+  // on_changed runs), and the process is freed after the unlock (its captured values may hold the
+  // last reference to a Python object: an exception's traceback, and the frames and locals in it).
   void reap(int pid) {
     if (test_quiesce_delay_ms > 0) // PR-8: a woken caller reaches its GIL while run() holds it
       std::this_thread::sleep_for(std::chrono::milliseconds(test_quiesce_delay_ms));
+    sched.cancel_async_calls_of(pid);
     process_ptr gone; // freed when this returns: the GIL held, the mutex not
     std::lock_guard<std::mutex> lock(control_mutex);
     sched.reap(pid, &gone);

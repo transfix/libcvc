@@ -598,13 +598,14 @@ def test_pr08_reap_frees_python_after_the_mutex():
     app = pycvc.make_app()
     ex = pycvc.Exec(app)
     freed = threading.Event()
+    reentered = threading.Event()
     seen = {}
 
     class Held:
         def __del__(self):
             seen["get_priority"] = ex.get_priority(seen["pid"])
             freed.set()
-            time.sleep(0.3)  # the GIL released while the other thread calls run()
+            reentered.wait(WAIT)  # the GIL released until the other thread's run() returns
 
     def boom():
         seen["pid"] = ex.scheduler().current_pid()
@@ -620,8 +621,11 @@ def test_pr08_reap_frees_python_after_the_mutex():
     ex.register_fn("boom", boom)
 
     def reenter():
-        if freed.wait(WAIT):
-            seen["reentry"] = str(_raises(RuntimeError, ex.run, "1"))
+        try:
+            if freed.wait(WAIT):
+                seen["reentry"] = str(_raises(RuntimeError, ex.run, "1"))
+        finally:
+            reentered.set()
 
     t = threading.Thread(target=reenter, name="pr08-reenter")
     t.start()
@@ -636,6 +640,41 @@ def test_pr08_reap_frees_python_after_the_mutex():
     assert seen["get_priority"] is None  # reaped by then
     assert "re-entrant" in seen["reentry"]
     assert ex.run("(+ 1 2)") == "3"
+
+
+def test_pr08_reap_runs_no_python_under_the_mutex():
+    # The reap cancels the program's async calls still in flight, and their charge reads the step
+    # rate, which a scheduler with an id publishes to the tree, where a state_observer's
+    # on_changed runs Python on the publishing thread. Here the call ends after run() left its
+    # loop, having changed the rate setting, so the reap's read publishes the new rate, and the
+    # observer calls the Exec. Under the control mutex that call relocks it. A hang fails the case
+    # through faulthandler.
+    app = pycvc.make_app()
+    ex = pycvc.Exec(app)
+    ex.scheduler().set_id("pr08")
+    published = "state_exec.schedulers.pr08.effective.async_steps_per_cpu_ms"
+    seen = []
+
+    class Rate(pycvc.state_observer):
+        def on_changed(self, path):
+            if path == published and pycvc.state_get(app, path) == "123":
+                seen.append(ex.get_priority(0))
+
+    def late():
+        time.sleep(1.0)  # run() has left its loop and waits for this call (wait_idle)
+        pycvc.state_set(app, "state_exec.schedulers.pr08.limits.async_steps_per_cpu_ms", "123")
+        return 1
+
+    ex.register_async_fn("late", late)
+    obs = Rate()
+    obs.watch(app)
+    faulthandler.dump_traceback_later(3 * WAIT, exit=True)
+    try:
+        assert ex.run("(begin (late-async) 1)") == "1"  # its future never awaited
+    finally:
+        faulthandler.cancel_dump_traceback_later()
+        obs.unwatch()
+    assert seen == [None]  # the reap's publish ran the observer, and its call was answered
 
 
 def test_pr08_idle_calls_beside_scheduler_calls():

@@ -1608,6 +1608,9 @@ bool async_scheduler::reap(int pid, process_ptr *released) {
   const process_status st = it->second->status;
   if (!is_finished(st))
     return false; // never drop a still-live (ready/running/waiting/paused) process
+  // Held across the cancel, whose rate read may publish to the tree: its slots may change the
+  // process table (reap this process, add others), so `it` is not read after it.
+  process_ptr proc = it->second;
   cancel_async_calls(pid);
   // Its env, state, watch_handlers and captured values (including any Python holders) all live on
   // the process object, so erasing it frees them, or `released` takes them to free later. The
@@ -1615,9 +1618,9 @@ bool async_scheduler::reap(int pid, process_ptr *released) {
   if (pid == current_pid_) {
     reap_after_step_ = pid;
   } else {
-    if (released)
-      *released = it->second;
     procs_.erase(pid);
+    if (released)
+      *released = std::move(proc);
   }
   return true;
 }

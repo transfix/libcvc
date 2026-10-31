@@ -550,15 +550,17 @@ value_t intrinsic_spawn(intrinsics_context *ctx, std::span<const value_t> args) 
     opts.priority = detail::clamp_spawn_priority(*running, opts.priority, policy, &clamped);
     if (clamped)
       ctx->sched->note_priority_clamped();
-    // The child's floor is the parent's, or its granted priority when better. execute() marks a
-    // given floor explicit, as a host's, which clamps under every policy, so the floor is given
-    // when the parent's is explicit (a host's floor binds the child too), and else only where it
-    // differs from the granted priority under a priority policy, which clamps anyway: under
-    // round_robin with no host floor a spawn stays unchecked at every depth, as before.
+    // The child's floor is the parent's, or its granted priority when better, and a host's only
+    // when the parent's is (a host's floor binds the child too). It is given when the parent's is
+    // a host's, and else only where it differs from the granted priority under a priority policy,
+    // which clamps anyway: under round_robin with no host floor a spawn stays unchecked at every
+    // depth, as before, and a floor that is no host's stays so when the child moves (migration).
     const int floor = std::min(detail::floor_of(*running), opts.priority);
     if (running->priority_floor_explicit ||
-        (floor != opts.priority && policy != scheduling_policy::round_robin))
+        (floor != opts.priority && policy != scheduling_policy::round_robin)) {
       opts.priority_floor = floor;
+      opts.priority_floor_explicit = running->priority_floor_explicit;
+    }
   }
   // The host's spawn context (td 4.15) gives the child an environment and a context of its own,
   // which the child's process keeps alive. Without one the child gets the bare builtins.

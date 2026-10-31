@@ -247,6 +247,11 @@ public:
   /// unlock (pycvc's Exec, docs/STATE_EXEC_LOCKS.md 7.4). A process reaped while it steps is erased
   /// once its step is over, and `released` is left empty.
   bool reap(int pid, process_ptr *released = nullptr);
+  /// Cancel `pid`'s async calls still in flight, as reap() does first; what they ran so far stays
+  /// charged. The charge reads the async step rate, which a scheduler with an id publishes to the
+  /// tree, whose slots run then. A caller that reaps under a lock cancels first, before taking
+  /// it, and the reap then finds nothing left to cancel.
+  void cancel_async_calls_of(int pid) { cancel_async_calls(pid); }
   std::unordered_map<int, value_t> get_results() const;
   scheduler_stats get_stats() const override;
 

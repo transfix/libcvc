@@ -771,13 +771,19 @@ the next `run()` applies the grant (LT-2).
     steps. Debug owner checks (8.3, 9.1) accept it.
   - **The GIL comes before the control mutex.** A thread may take the control mutex while it holds
     the GIL (`run()` at entry, for its clear and its `reap`, `RunGuard`, a direct action), but never
-    takes the GIL while it holds the control mutex. Nor does it free a Python object under it:
-    `run()`'s reap takes its process out of the scheduler and frees it after the unlock, since a
-    value it captured may hold the last reference to a Python object whose finalizer releases and
-    retakes the GIL, or calls the `Exec` again. A direct action keeps the GIL throughout, so it is
-    serialized with Python's own calls on the scheduler, which hold only the GIL. A caller waiting for its entry's answer waits on
-    the condition variable with the GIL released; once woken it copies the answer out and releases
-    the control mutex, and only then re-takes the GIL to build the Python result. The scheduler
+    takes the GIL while it holds the control mutex. Nor does anything under it run Python or free
+    a Python object: `run()`'s reap cancels its program's async calls before it (their charge
+    reads the step rate, which a scheduler with an id publishes to the tree, whose observers may
+    run Python), and takes its process out of the scheduler and frees it after the unlock, since
+    a value it captured may hold the last reference to a Python object whose finalizer releases
+    and retakes the GIL, or calls the `Exec` again. A direct action keeps the GIL throughout, so it
+    is serialized with Python's own calls on the scheduler that hold the GIL. It is not with the
+    stepping calls that release it (`step`, `run`, `sync_step`, `sync_run`, `wait_for_work`):
+    stepping an `Exec`'s scheduler from another thread meanwhile is the caller's to avoid, as
+    stepping it from two threads always was. A caller waiting for its entry's answer
+    waits on the condition variable with the GIL released (released under the mutex); once woken
+    it copies the answer out and releases the control mutex, and only then re-takes the GIL to
+    build the Python result. The scheduler
     thread answers entries between steps with C++ values and never calls into Python under the
     mutex. So a woken caller never holds the mutex while it waits for a GIL that `run()` holds while
     it waits for the mutex (PR-8).
