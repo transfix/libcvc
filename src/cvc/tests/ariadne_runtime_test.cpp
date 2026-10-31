@@ -4,6 +4,7 @@
 // the §3.0.3b grid dispatch.
 
 #include "local_http_server.h" // localhost origins for the net host tests
+#include "local_ws_server.h"   // a localhost WebSocket server for the ws-* verb tests
 #include "stub_oidc_provider.h" // a stub OpenID Provider for the sign-in tests
 
 #include <algorithm>
@@ -28,6 +29,8 @@
 #include <cvc/core/thread_pool.h> // item 2: full type for app.computePool().parallel_for
 #include <cvc/net/browser.h>      // OIDC: a fake browser, a browser page
 #include <cvc/net/http_client.h>  // §13.8: swap the transport for a fake in the http-get test
+#include <cvc/net/net_policy.h>   // the ws-* verb tests' policy
+#include <cvc/net/ws_client.h>    // have_ws_backend()
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_host.h>      // register_async_fn on app.exec_async_host()
 #include <cvc/state/state_exec/async_scheduler.h> // exec_scheduler().post_message end-to-end test
@@ -3431,6 +3434,95 @@ TEST(AriadneNetIntrinsics, HttpGetTransparentReturnsDictNoMsgRecv) {
   EXPECT_EQ(cvc::state::instance(app)("r.status").value(), "200");
   EXPECT_EQ(node_data_string(app, "r.body"), "hi"); // the dict flowed into `set r` transparently
   EXPECT_EQ(fake->calls.load(), 1);                 // one transparent fetch, one transfer
+}
+
+// The ws-* verbs (docs/ARIADNE.md §10.5) against a localhost echo server: connect through a
+// policy that allows the server's http twin, send, receive (waiting and polling), close.
+TEST(AriadneNetIntrinsics, WsVerbsRoundTripThroughAPolicy) {
+  if (!cvc::net::have_ws_backend())
+    GTEST_SKIP() << "libcvc built without a WebSocket backend";
+  cvc_test::LocalWsServer server([](cvc_test::LocalWsServer::Stream &ws) {
+    for (;;) {
+      boost::beast::flat_buffer buf;
+      ws.read(buf);
+      ws.write(buf.data());
+    }
+  });
+  cvc::app app;
+  NetIntrinsicsGuard guard;
+  auto policy = std::make_shared<cvc::net::NetPolicy>();
+  std::string why;
+  ASSERT_TRUE(cvc::net::parse_net_policy(
+      "allow http://127.0.0.1:" + std::to_string(server.port()) + "\n", *policy, &why))
+      << why;
+  NetAccess access;
+  access.policy = policy;
+  register_net_intrinsics(app, access);
+
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(
+      group({button("Go", "(begin"
+                          "  (set r (ws-open \"" +
+                              server.url("/live") +
+                              "\" (dict \"timeout\" 5)))"
+                              "  (state-set \"r.ok\" (get-attr r \"ok\"))"
+                              "  (set h (get-attr r \"handle\"))"
+                              "  (state-set \"r.live\" (ws-open? h))"
+                              "  (ws-send h \"ping\")"
+                              "  (set e (ws-recv h 5))"
+                              "  (state-set \"r.type\" (get-attr e \"type\"))"
+                              "  (state-set \"r.data\" (get-attr e \"data\"))"
+                              "  (state-set \"r.poll\" (if (= (ws-poll h) nil) \"none\" \"some\"))"
+                              "  (state-set \"r.closed\" (ws-close h))"
+                              "  (state-set \"r.after\" (ws-open? h))"
+                              "  (state-set \"r.done\" \"1\"))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  mb.button_click = false;
+
+  ASSERT_TRUE(pump_until(rt, [&] { return !cvc::state::instance(app)("r.done").value().empty(); }))
+      << "the ws verbs never finished";
+  EXPECT_EQ(cvc::state::instance(app)("r.ok").value(), "true");
+  EXPECT_EQ(cvc::state::instance(app)("r.live").value(), "true");
+  EXPECT_EQ(cvc::state::instance(app)("r.type").value(), "text");
+  EXPECT_EQ(cvc::state::instance(app)("r.data").value(), "ping");
+  EXPECT_EQ(cvc::state::instance(app)("r.poll").value(), "none");
+  EXPECT_EQ(cvc::state::instance(app)("r.closed").value(), "true");
+  EXPECT_EQ(cvc::state::instance(app)("r.after").value(), "false");
+}
+
+// A WebSocket origin the policy does not allow is refused before anything connects.
+TEST(AriadneNetIntrinsics, WsOpenRefusesAnOriginThePolicyDoesNotAllow) {
+  if (!cvc::net::have_ws_backend())
+    GTEST_SKIP() << "libcvc built without a WebSocket backend";
+  cvc_test::LocalWsServer server([](cvc_test::LocalWsServer::Stream &) {});
+  cvc::app app;
+  NetIntrinsicsGuard guard;
+  NetAccess access;
+  access.policy = std::make_shared<cvc::net::NetPolicy>(); // allows nothing
+  register_net_intrinsics(app, access);
+
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button("Go", "(begin"
+                                  "  (set r (ws-open \"" +
+                                      server.url("/") +
+                                      "\"))"
+                                      "  (state-set \"r.ok\" (get-attr r \"ok\"))"
+                                      "  (state-set \"r.error\" (get-attr r \"error\")))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  mb.button_click = false;
+
+  ASSERT_TRUE(pump_until(rt, [&] { return !cvc::state::instance(app)("r.ok").value().empty(); }));
+  EXPECT_EQ(cvc::state::instance(app)("r.ok").value(), "false");
+  EXPECT_NE(cvc::state::instance(app)("r.error").value().find("refused"), std::string::npos);
+  EXPECT_TRUE(server.handshakes().empty());
 }
 
 // PR-A: PROPER await — (await (http-get-async url)) resolves the future returned by the async verb.

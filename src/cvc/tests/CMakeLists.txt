@@ -17,6 +17,7 @@ add_executable(ariadne_requires_test ariadne_requires_test.cpp)
 add_executable(ariadne_stream_view_test ariadne_stream_view_test.cpp)
 add_executable(x11_macro_headers_test x11_macro_headers_test.cpp)
 add_executable(net_http_client_test net_http_client_test.cpp)
+add_executable(net_ws_client_test net_ws_client_test.cpp)
 add_executable(net_policy_test net_policy_test.cpp)
 add_executable(net_oidc_test net_oidc_test.cpp)
 add_executable(uri_http_cache_test uri_http_cache_test.cpp)
@@ -312,6 +313,7 @@ set(TEST_TARGETS
   ariadne_stream_view_test
   x11_macro_headers_test
   net_http_client_test
+  net_ws_client_test
   net_policy_test
   net_oidc_test
   uri_http_cache_test
@@ -697,6 +699,13 @@ target_link_libraries(net_http_client_test
 )
 
 target_link_libraries(net_oidc_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(net_ws_client_test
   PRIVATE
     cvc
     GTest::gtest
@@ -2543,6 +2552,7 @@ cvc_discover_tests(ariadne_stream_view_test)
 cvc_discover_tests(ariadne_bind_test)
 cvc_discover_tests(x11_macro_headers_test)
 cvc_discover_tests(net_http_client_test)
+cvc_discover_tests(net_ws_client_test)
 cvc_discover_tests(net_policy_test)
 cvc_discover_tests(net_oidc_test)
 cvc_discover_tests(uri_http_cache_test)

@@ -798,6 +798,25 @@ jobs:
           # cvcgl_sdl_attach skips.
           cvcpkg install imgui sdl3 --prefix "$prefix" --config release --link shared
 
+      # tmux, for ari_run_json_feed_ftxui / _tvision (src/ari/CMakeLists.txt): each runs `ari run`
+      # in a 100x30 tmux pane and compares what that backend drew (tests/run_in_tmux_test.sh), the
+      # only check of the real tvision desktop. They are registered only when find_program finds
+      # tmux, and the script runs the tmux on PATH. The runner image has none, so it comes from
+      # cvcpkg, in a prefix of its own. Only tmux goes on PATH, as a link in an otherwise empty
+      # directory: the prefix's bin/ also holds ncurses' tput, clear and tic. bin/tmux finds the
+      # prefix's terminfo itself.
+      - name: Install tmux (cvcpkg)
+        if: matrix.kind == 'libcvc'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmux_prefix="$RUNNER_TEMP/tmux"
+          cvcpkg install tmux --prefix "$tmux_prefix" --config release --link shared
+          mkdir -p "$RUNNER_TEMP/tmux-bin"
+          ln -sf "$tmux_prefix/bin/tmux" "$RUNNER_TEMP/tmux-bin/tmux"
+          "$RUNNER_TEMP/tmux-bin/tmux" -V
+          echo "$RUNNER_TEMP/tmux-bin" >> "$GITHUB_PATH"
+
       - name: Configure
         run: |
           # libcvc needs libiimod from the libcvc-deps bundle. Fall
@@ -963,6 +982,18 @@ jobs:
           if [ "$n_igl" -eq 0 ]; then
             echo "::error::CVC_ENABLE_LIBIGL resolved OFF: eigen/libigl are missing from the deps prefix."
             exit 1
+          fi
+          # And for the tmux tests of both terminal backends, wherever src/ari defines them: they
+          # register only when configure found tmux, and skip (77) when the script cannot run it.
+          # The configure step already made both backends required.
+          if grep -q 'ari_run_json_feed_' src/ari/CMakeLists.txt; then
+            command -v tmux >/dev/null || { echo "::error::no tmux on PATH: the ari_run_json_feed_* tests would skip"; exit 1; }
+            n_tmux=$(ctest --test-dir build -N 2>/dev/null | grep -c 'Test *#[0-9]*: ari_run_json_feed_' || true)
+            echo "ari_run_json_feed_* (tmux) tests registered with ctest: $n_tmux"
+            if [ "$n_tmux" -ne 2 ]; then
+              echo "::error::configure did not find tmux: ari_run_json_feed_ftxui/_tvision are not registered."
+              exit 1
+            fi
           fi
           # Heavy suites:
           #   Stress|Convergence|Benchmark            : long-running suites
