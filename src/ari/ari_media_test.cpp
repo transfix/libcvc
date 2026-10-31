@@ -171,10 +171,6 @@ TEST(AriMedia, WithoutTheNetworkAnHttpPictureFailsAndAFileOneLoads) {
 }
 
 TEST(AriMedia, ACardFromTheComponentLibraryWithAnAvatarAndAMissingAttachment) {
-
-// A picture whose URL a reply puts in state (a profile's avatar from GET /user/): no frame asked
-// for it while the request was out, so the snapshot draws, sees it loading, waits and draws again.
-TEST(AriMedia, SnapshotWaitsForAPictureWhoseUrlComesFromAReply) {
   REQUIRE_ARI();
   set_env("COLORTERM", "truecolor");
   TempDir dir;
@@ -217,7 +213,16 @@ TEST(AriMedia, SnapshotWaitsForAPictureWhoseUrlComesFromAReply) {
   EXPECT_NE(r.output.find(sgr(230, 120, 40)), std::string::npos) << "the avatar's colour";
   EXPECT_NE(r.output.find(sgr(92, 72, 72)), std::string::npos) << "the attachment's failed box";
   EXPECT_EQ(r.output.find("warning"), std::string::npos) << r.output;
+}
 
+// A picture whose URL a reply puts in state (a profile's avatar from GET /user/): no frame asked
+// for it while the request was out, so the snapshot draws, sees it loading, waits and draws again.
+TEST(AriMedia, SnapshotWaitsForAPictureWhoseUrlComesFromAReply) {
+  REQUIRE_ARI();
+  set_env("COLORTERM", "truecolor");
+  TempDir dir;
+  const std::string orange = flat_png(dir, 230, 120, 40);
+  LocalHttpServer srv([&](const LocalHttpServer::Request &req) -> LocalHttpServer::Reply {
     if (req.target == "/user")
       return {200, {"Content-Type: application/json"}, "{\"avatar\": \"/a.png\"}"};
     if (req.target == "/a.png")

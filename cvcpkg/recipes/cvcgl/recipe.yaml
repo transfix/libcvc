@@ -134,6 +134,12 @@ depends:
     # CVC_ENABLE_SDL=ON. This is the foundation for the §4.6 input handlers
     # (on_key / on_click / on_drag / …) and later audio/peripheral support.
     - name: sdl3
+    # FFmpeg, its LGPL build: cvcMedia (built and shipped beside cvcGL) decodes Ariadne's video:
+    # and audio: widgets with it (docs/ARIADNE.md §5.13), so arigl plays them. Linked SHARED,
+    # which keeps the LGPL's terms. No wasm build exists or is wanted: the pages play through the
+    # browser's own <video> / <audio>.
+    - name: ffmpeg-lgpl
+      platforms: [linux, macos, windows]
   runtime:
     # cvcGL's public interface links cvc::cvc and the VTK modules.
     - name: libcvc
@@ -144,6 +150,9 @@ depends:
     # cvcGL's export links SDL3::SDL3 (re-found via find_dependency(SDL3) in
     # cvcGLConfig.cmake), so a consumer of cvc::cvcGL must have sdl3 in its prefix.
     - name: sdl3
+    # cvcMedia's FFmpeg libraries (private, shared): loaded at run time.
+    - name: ffmpeg-lgpl
+      platforms: [linux, macos, windows]
   host_tools:
     - cmake
     - ninja
