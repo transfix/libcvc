@@ -1,0 +1,115 @@
+# card.ari — a REUSABLE Ariadne component: a card, the bordered block social feeds, inboxes and
+# search results are lists of. A header row (an avatar, a title, a subtitle, a timestamp), a body
+# text, a media slot and an action row. Generic: it names no app, and every part but the frame is
+# optional, so a post, a message, a search hit or a notification are all cards.
+#
+# One unit, `card`, parametrized by include args and slots (docs/ARIADNE.md §6.1, §6.5):
+#   args, each a STATE KEY (a path, so a repeat: names one item's: feed.items.{i}.author.name);
+#   a part whose key is empty or unset is not drawn:
+#     id        the card's id (card); give each instance its own inside a repeat: (post_{i})
+#     avatar    a key holding the avatar's URL or published image name (drawn as a circle)
+#     title     a key holding the title (an author's name, a subject)
+#     subtitle  a key holding the subtitle (a handle, a sender)
+#     time      a key holding the timestamp, as text the document formatted
+#     body      a key holding the body text
+#     avatar_auth  the host credential the avatar's URL needs ("" = none)
+#     avatar_size  the avatar's side in px (40)
+#   slots (widget lists the include site supplies; an empty one is left out):
+#     media     what the card shows under the body: image:, video:, audio: widgets, or any
+#     actions   the action row's widgets, laid out side by side (reply, like, share ...)
+#
+# Use it, once per item of a feed the document fetched into feed.items:
+#     import: cvc://components/card.ari
+#     windows:
+#       - window: Feed
+#         children:
+#           - type: group
+#             repeat: (state-get "feed.items")
+#             children:
+#               - include: card
+#                 args:
+#                   id: post_{i}
+#                   avatar: feed.items.{i}.author.avatar
+#                   title: feed.items.{i}.author.name
+#                   subtitle: feed.items.{i}.author.handle
+#                   time: feed.items.{i}.when
+#                   body: feed.items.{i}.text
+#                 slots:
+#                   media:
+#                     - image: ""
+#                       bind: feed.items.{i}.media.0.url
+#                       visible_when: (!= (state-get "feed.items.{i}.media.0.url") "")
+#                       size: [440, 248]
+#                       fit: cover
+#                   actions:
+#                     - button: Reply
+#                       on: (state-set "compose.reply_to" "{i}")
+#                     - button: Like
+#                       on: (http-request "POST" ...)
+#
+# Draws in every backend from built-in widgets only: a one-column grid with an outer border (an
+# ImGui table frame, a terminal box), its header row a horizontal row (the avatar beside the
+# lines of text).
+
+units:
+  card:
+    args:
+      id: card
+      avatar: ""
+      avatar_auth: ""
+      avatar_size: 40
+      title: ""
+      subtitle: ""
+      time: ""
+      body: ""
+    type: group
+    id: "{id}"
+    layout:
+      kind: grid
+      col_widths: ["100%"]
+      borders: {show: outer}
+    children:
+      - type: group
+        id: "{id}_header"
+        layout: {kind: horizontal}
+        visible_when: (or (!= (state-get "{avatar}") "") (!= (state-get "{title}") ""))
+        children:
+          - image: ""
+            bind: "{avatar}"
+            auth: "{avatar_auth}"
+            size: ["{avatar_size}", "{avatar_size}"]
+            fit: cover
+            shape: circle
+            visible_when: (!= (state-get "{avatar}") "")
+          - text: " "
+            visible_when: (!= (state-get "{avatar}") "")
+          - type: group
+            id: "{id}_names"
+            children:
+              - text: ""
+                bind: "{title}"
+                visible_when: (!= (state-get "{title}") "")
+              - type: group
+                id: "{id}_byline"
+                layout: {kind: horizontal}
+                children:
+                  - text: ""
+                    bind: "{subtitle}"
+                    visible_when: (!= (state-get "{subtitle}") "")
+                  - text: " · "
+                    visible_when: (and (!= (state-get "{subtitle}") "") (!= (state-get "{time}") ""))
+                  - text: ""
+                    bind: "{time}"
+                    visible_when: (!= (state-get "{time}") "")
+      - text: ""
+        bind: "{body}"
+        visible_when: (!= (state-get "{body}") "")
+      - type: group
+        id: "{id}_media"
+        children:
+          - slot: media
+      - type: group
+        id: "{id}_actions"
+        layout: {kind: horizontal}
+        children:
+          - slot: actions

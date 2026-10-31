@@ -1156,6 +1156,49 @@ void substitute_node(YAML::Node node, const std::map<std::string, std::string> &
   }
 }
 
+// §6.1 slots: a unit marks where an include site's widgets go with a `- slot: NAME` item in any of
+// its widget lists, and the include's `slots: {NAME: [widget, ...]}` puts those widgets there, in
+// place of the item (a single widget map works too). A slot the include leaves empty is dropped.
+// So a component takes whole widget lists (a card's media, its action row) where args take only
+// strings. The include site's widgets are its own: args are not substituted into them.
+void fill_slots(Ctx &ctx, YAML::Node node, const YAML::Node &slots, const std::string &unit) {
+  if (node.IsMap()) {
+    for (auto it = node.begin(); it != node.end(); ++it)
+      fill_slots(ctx, it->second, slots, unit);
+    return;
+  }
+  if (!node.IsSequence())
+    return;
+  bool any = false;
+  for (const YAML::Node &item : node)
+    any = any || (item.IsMap() && item["slot"] && item.size() == 1);
+  if (!any) {
+    for (std::size_t i = 0; i < node.size(); ++i)
+      fill_slots(ctx, node[i], slots, unit);
+    return;
+  }
+  YAML::Node out(YAML::NodeType::Sequence);
+  for (const YAML::Node &item : node) {
+    if (item.IsMap() && item["slot"] && item.size() == 1) {
+      const std::string name = item["slot"].as<std::string>("");
+      const YAML::Node given = slots && slots.IsMap() ? slots[name] : YAML::Node();
+      if (given && given.IsSequence()) {
+        for (const YAML::Node &g : given)
+          out.push_back(YAML::Clone(g));
+      } else if (given && given.IsMap()) {
+        out.push_back(YAML::Clone(given));
+      } else if (given && !given.IsNull()) {
+        ctx.warn("ari: include " + unit + ": slots." + name + " must be a widget list — ignored");
+      }
+      continue;
+    }
+    YAML::Node copy = item;
+    fill_slots(ctx, copy, slots, unit);
+    out.push_back(copy);
+  }
+  node = out;
+}
+
 // §12: expand `include: <unit>` — instantiate a units: template with its `args:` substituted.
 Widget expand_include(Ctx &ctx, const YAML::Node &n) {
   const std::string name = str(n, "include");
@@ -1190,6 +1233,7 @@ Widget expand_include(Ctx &ctx, const YAML::Node &n) {
   if (declares && inst["args"])
     inst.remove("args"); // the declaration, not a widget key
   substitute_node(inst, args);
+  fill_slots(ctx, inst, n["slots"], name); // after args: the include site's widgets are its own
   Widget w = parse_widget(ctx, inst);
   ctx.expanding.erase(name);
   // §12/§3.0.3b geometry override at the include site: a window `include:` may carry its own

@@ -169,3 +169,48 @@ TEST(AriMedia, WithoutTheNetworkAnHttpPictureFailsAndAFileOneLoads) {
   EXPECT_NE(r.output.find("local ready remote failed"), std::string::npos) << r.output;
   EXPECT_NE(r.output.find(sgr(200, 30, 90)), std::string::npos) << r.output;
 }
+
+TEST(AriMedia, ACardFromTheComponentLibraryWithAnAvatarAndAMissingAttachment) {
+  REQUIRE_ARI();
+  set_env("COLORTERM", "truecolor");
+  TempDir dir;
+  const std::string orange = flat_png(dir, 230, 120, 40);
+  LocalHttpServer srv([&](const LocalHttpServer::Request &req) -> LocalHttpServer::Reply {
+    if (req.target == "/u/grace.png")
+      return {200, {"Content-Type: image/png"}, orange};
+    return {404, {}, "gone"};
+  });
+  const fs::path components = fs::path(__FILE__).parent_path().parent_path() / "cvc" / "ariadne";
+  const fs::path doc = dir.write(
+      "card.ari", "meta: {min_libcvc: 3.7.0}\n"
+                  "import: cvc://components/card.ari\n"
+                  "init: |\n"
+                  "  (state-set-tree \"post\" (dict \"name\" \"Grace Hopper\" \"handle\" \"@grace\""
+                  " \"when\" \"2h\" \"text\" \"Nanoseconds are this long.\" \"avatar\" \"" +
+                      srv.url("/u/grace.png") + "\" \"pic\" \"" + srv.url("/p/9.jpg") +
+                      "\"))\n"
+                      "windows:\n"
+                      "  - window: Feed\n"
+                      "    size: [480, auto]\n"
+                      "    children:\n"
+                      "      - include: card\n"
+                      "        args: {id: post, avatar: post.avatar, title: post.name,\n"
+                      "               subtitle: post.handle, time: post.when, body: post.text}\n"
+                      "        slots:\n"
+                      "          media:\n"
+                      "            - image: attachment\n"
+                      "              bind: post.pic\n"
+                      "              size: [320, 48]\n"
+                      "              status: s.pic\n"
+                      "          actions:\n"
+                      "            - button: Reply\n"
+                      "              on: (state-set \"s.reply\" \"1\")\n");
+  const AriRun r = ari("snapshot --net-allow " + srv.origin() + " --component-path " +
+                       quoted(components) + " --width 70 --ansi " + quoted(doc));
+  EXPECT_EQ(r.status, 0) << r.output;
+  for (const char *want : {"Grace Hopper", "@grace", "2h", "Nanoseconds are this long.", "Reply"})
+    EXPECT_NE(r.output.find(want), std::string::npos) << want << "\n" << r.output;
+  EXPECT_NE(r.output.find(sgr(230, 120, 40)), std::string::npos) << "the avatar's colour";
+  EXPECT_NE(r.output.find(sgr(92, 72, 72)), std::string::npos) << "the attachment's failed box";
+  EXPECT_EQ(r.output.find("warning"), std::string::npos) << r.output;
+}
