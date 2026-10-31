@@ -52,6 +52,8 @@ const std::vector<TokenRule> &rules() {
       {{"image.url", "image: shows a picture by URI (§5.11): http(s) where the network is on, "
                      "file://, cvc://, state://"},
        [](const HostFacts &) { return true; }},
+      {{"image.background", "a window, overlay or group draws a background: picture (§5.12)"},
+       [](const HostFacts &) { return true; }},
   };
   return kRules;
 }
