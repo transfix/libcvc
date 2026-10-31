@@ -19,6 +19,10 @@
 #include "utilities.h"
 #include "queue.h"
 
+#ifndef WIN32
+#include <unistd.h>	// sleep
+#endif
+
 #include "contour_verbose.h"
 
 template <class T, class K>
