@@ -4,9 +4,15 @@
 // over the structures of 2.4: a path trie whose nodes count the holds and queued tickets of their
 // subtree, records, holds and tickets in slot pools found through open-addressing indexes, and the
 // queue as an intrusive list in seq order, each queued ticket also linked into the `wq` of each of
-// its keys. Phase L1: single mode (one thread calls the table, no mutex), one home per manager,
-// and no inheritance: relevel_all is the implementation note's "lending false before and after"
-// case (4.3), so every `inh` stays INF and nothing is posted.
+// its keys. Phases L1 and L2: single mode (one thread calls the table, no mutex) and one home per
+// manager.
+//
+// Inheritance (3.3, 4.3; phase L2) follows the implementation note of 4.3: while no attached home
+// applies priorities nothing is computed; otherwise each operation recomputes the inherited
+// priority of the processes within 8 edges downstream of its seeds, in the wait-for graph before
+// and after it, each by a reverse breadth-first search over predecessor edges found through the
+// trie. check() compares every record with its own from-scratch search over edges recomputed from
+// the definitions (I8), never with the code relevel_all uses.
 //
 // No trie node is freed inside an operation: a node that may have emptied is queued and checked
 // when the operation ends (end_op), so the regions an operation re-examines, which are made of
@@ -305,6 +311,7 @@ struct lock_table::impl {
   using kposes = small_vector<kpos, 4>;
   using region = small_vector<lock_node *, 8>;
   using pid_list = small_vector<lock_pid, 4>;
+  using pred_map = std::unordered_map<std::uint64_t, std::vector<lock_pid>>; // by packed pid
 
   explicit impl(const lock_table::options &o)
       : opts(o), divergence_pending((o.mutations & lock_table::plant_divergence) != 0) {
@@ -341,9 +348,10 @@ struct lock_table::impl {
 
   // lock_stats
   std::uint64_t n_grants = 0, n_fast = 0, n_waits = 0, n_timeouts = 0, n_deadlocks = 0;
-  std::uint64_t n_abandoned = 0, n_ends = 0;
+  std::uint64_t n_abandoned = 0, n_ends = 0, n_relevels = 0, n_coalesced = 0;
   bool divergence_pending = false; // plant_divergence, until a release grants
   bool in_release = false;
+  bool in_cancel = false; // cancel_skips_relevel's test
 
   // ghosts (self_check's grant-time assertions, I11's conservation)
   std::uint64_t g_last_x_gen = 0, g_max_gen = 0;
@@ -352,8 +360,20 @@ struct lock_table::impl {
   // per operation
   lock_notes *out = nullptr;
   bool lending_before = false;
+  bool queued_before = false; // a ticket was queued when the operation started: the graph had edges
   std::vector<lock_ticket *> scratch;
   std::uint64_t mark_epoch = 0;
+  // 4.3's implementation note, while lending: the seeds the operation knows when it starts (the
+  // process whose request, holds or base it changes; the processes it ends), their inh then (INF
+  // without a record), and every process within 8 edges downstream of them in the graph before
+  pid_list op_seeds;
+  small_vector<std::pair<lock_pid, int>, 4> op_old;
+  std::vector<lock_pid> op_before;
+  // relevel_all's scratch: the predecessors found through the trie, per process, this operation;
+  // the set A; the processes whose inh changed; a breadth-first search's layers
+  std::unordered_map<std::uint64_t, std::vector<lock_pid>> pred_memo;
+  std::vector<lock_pid> relevel_set, relevel_changed, bfs_layer, bfs_next;
+  std::unordered_set<std::uint64_t> bfs_seen;
 
   // -- lookups ----------------------------------------------------------------------------------
   rec *rec_of(lock_pid p) const { return recs.find(p.packed()); }
@@ -363,6 +383,7 @@ struct lock_table::impl {
   bool applies(lock_pid p) const {
     return p.home < homes.size() && homes[p.home].attached && homes[p.home].prio;
   }
+  bool lends(lock_pid p) const { return opts.inheritance && applies(p); }
   bool lending() const {
     if (!opts.inheritance)
       return false;
@@ -1117,25 +1138,212 @@ struct lock_table::impl {
       maybe_drop_rec(p);
     for (lock_pid p : granted)
       maybe_drop_rec(p);
-    relevel_all(skip);
+    relevel_all(skip, granted);
   }
 
-  /// 4.3's relevel_all. Phase L1 is the implementation note's "lending false before and after"
-  /// case: every inh is already INF (I8), and nothing changes or is posted. attach_home refuses
-  /// a home that would make lending true before phase L2, which completes this.
-  void relevel_all(std::span<const lock_pid> skip) {
-    (void)skip;
+  // -- 3.3, 4.3: inheritance ----------------------------------------------------------------------
+  /// The processes with an edge to `a` (3.2), found through the trie: the queued tickets of other
+  /// processes that conflict with a hold of `a`, and the later queued tickets of other processes
+  /// that conflict with a's queued ticket and are not exempt from it. Memoized per operation.
+  const std::vector<lock_pid> &predecessors(lock_pid a) {
+    const auto [it, fresh] = pred_memo.try_emplace(a.packed());
+    std::vector<lock_pid> &into = it->second;
+    if (!fresh)
+      return into;
+    const rec *r = rec_of(a);
+    if (!r)
+      return into;
+    for (std::uint64_t id : r->holds) {
+      const lock_hold *h = hold_of(id);
+      for (lock_node *n : h->keys)
+        visit_waiters(kpos{n, true}, [&](lock_ticket *u) { // u overlaps the key
+          if (u->pid != a && !compat(u->mode, h->mode))
+            into.push_back(u->pid);
+          return true;
+        });
+    }
+    const lock_ticket *t = ticket_of(r->ticket);
+    if (t && t->state == ticket_state::queued)
+      for (lock_node *n : t->nodes)
+        visit_waiters(kpos{n, true}, [&](lock_ticket *u) {
+          if (u->seq > t->seq && u->pid != a && !compat(u->mode, t->mode) && !exempt(u->pid, t))
+            into.push_back(u->pid);
+          return true;
+        });
+    sort_unique(into);
+    return into;
+  }
+
+  /// Appends to `into` every process within 8 edges downstream of `from` (succ, 3.2), and `from`.
+  void reach8(std::span<const lock_pid> from, std::vector<lock_pid> &into) {
+    if (!q_head) { // no queued ticket, no edge
+      into.insert(into.end(), from.begin(), from.end());
+      return;
+    }
+    bfs_seen.clear();
+    bfs_layer.clear();
+    for (lock_pid p : from)
+      if (bfs_seen.insert(p.packed()).second) {
+        bfs_layer.push_back(p);
+        into.push_back(p);
+      }
+    for (int d = 0; d < 8 && !bfs_layer.empty(); ++d) {
+      bfs_next.clear();
+      for (lock_pid a : bfs_layer)
+        for (lock_pid b : successors(a))
+          if (bfs_seen.insert(b.packed()).second) {
+            bfs_next.push_back(b);
+            into.push_back(b);
+          }
+      bfs_layer.swap(bfs_next);
+    }
+  }
+
+  /// inh_formula(X) for relevel_all (3.3): a reverse breadth-first search from X of depth 8 over
+  /// predecessor edges, so anc8(X) as a set, taking min of base over the lenders it finds. Never a
+  /// recursion over effective or inherited values: a process that lends nothing still passes on
+  /// what it inherits, and the cap bounds paths.
+  int recompute_inh(lock_pid x) {
+    bfs_seen.clear();
+    bfs_seen.insert(x.packed());
+    bfs_layer.assign(1, x);
+    int best = lock_inf;
+    for (int d = 0; d < 8 && !bfs_layer.empty(); ++d) {
+      bfs_next.clear();
+      for (lock_pid a : bfs_layer)
+        for (lock_pid y : predecessors(a)) {
+          if (!bfs_seen.insert(y.packed()).second)
+            continue;
+          bfs_next.push_back(y);
+          if (lends(y))
+            best = std::min(best, rec_of(y)->base);
+        }
+      bfs_layer.swap(bfs_next);
+    }
+    return best;
+  }
+
+  /// 4.3's relevel_all, by its implementation note. `lending` before and after the operation
+  /// decides the case: false and false, nothing (every inh is INF, I8); true then false, every inh
+  /// INF and no post (no attached home applies priorities); false then true, the reference loop
+  /// over every record; true and true, only the set A. A record whose inh changes, of a process
+  /// not in `skip` whose home applies priorities, gets a relevel note, after the operation's
+  /// wakes and in (home, pid) order; under options.coalesce_relevels at most one is pending per
+  /// record (relevel_pending, cleared by read_inh), the others counted as coalesced.
+  void relevel_all(std::span<const lock_pid> skip, std::span<const lock_pid> granted) {
+    if (in_cancel && mut(lock_table::cancel_skips_relevel))
+      return; // the mutation: a timeout leaves every inherited priority as it was
     const bool lending_after = lending();
     if (!lending_before && !lending_after)
       return;
-    throw std::logic_error("lock_table: priority inheritance is phase L2");
+    if (!lending_after) {
+      recs.for_each([](std::uint64_t, rec *r) { r->inh = lock_inf; });
+      return;
+    }
+    if (!queued_before && !q_head)
+      return; // no edge before or after: every inh was INF (I8) and stays so (the uncontended path)
+    pred_memo.clear();
+    relevel_changed.clear();
+    const auto update = [&](lock_pid x, int old) {
+      rec *r = rec_of(x);
+      const int now = r ? recompute_inh(x) : lock_inf; // no record any more: INF, as in the loop
+      if (r)
+        r->inh = now;
+      if (now != old)
+        relevel_changed.push_back(x);
+    };
+    if (!lending_before) {
+      relevel_set.clear();
+      recs.for_each([&](std::uint64_t, rec *r) { relevel_set.push_back(r->pid); });
+      for (lock_pid x : relevel_set)
+        update(x, lock_inf); // lending was false: every inh was INF (I8)
+    } else {
+      set_a(granted);
+      for (lock_pid x : relevel_set) {
+        // a seed's record may be gone or new: its inh when the operation started; any other
+        // process of A kept its record through the operation, inh not yet rewritten
+        std::optional<int> old;
+        for (const auto &[p, v] : op_old)
+          if (p == x)
+            old = v;
+        if (!old)
+          old = rec_of(x) ? rec_of(x)->inh : lock_inf;
+        update(x, *old);
+      }
+      if (opts.self_check)
+        check_impl_note();
+    }
+    sort_unique(relevel_changed);
+    for (lock_pid x : relevel_changed) {
+      if (std::find(skip.begin(), skip.end(), x) != skip.end() || !applies(x))
+        continue;
+      rec *r = rec_of(x);
+      if (opts.coalesce_relevels && r) {
+        if (r->relevel_pending) {
+          ++n_coalesced; // one is pending already: its apply reads the current value (5.9)
+          continue;
+        }
+        r->relevel_pending = true;
+      }
+      out->push_back(
+          lock_note{x.home, homes[x.home].port, lock_post{lock_post::kind::relevel, x.pid, 0}});
+      ++n_relevels;
+    }
+  }
+
+  /// 4.3's set A into relevel_set, sorted: the seeds and the processes granted, and every process
+  /// within 8 edges downstream of them in the graph before the operation (op_before) and after
+  /// it. A process granted here had, before, edges only to the seeds (its blockers were what the
+  /// operation removed: a grant in the same pass would have blocked it), so its share of the
+  /// graph before is the seeds'. Under impl_note_after_only, the graph after only.
+  void set_a(std::span<const lock_pid> granted) {
+    relevel_set.assign(op_before.begin(), op_before.end());
+    pid_list from(op_seeds.begin(), op_seeds.end());
+    from.insert(from.end(), granted.begin(), granted.end());
+    reach8(view(from), relevel_set);
+    sort_unique(relevel_set);
+  }
+
+  /// self_check: protocol 4.3's implementation note itself. After the operation no record outside
+  /// A may differ from inh_formula computed from scratch (inh_def, check()'s own search), i.e.
+  /// the reference loop changes nothing outside A (lockmodel.py's 'impl-note').
+  void check_impl_note() const {
+    const pred_map pred = preds_def();
+    recs.for_each([&](std::uint64_t, rec *r) {
+      if (std::binary_search(relevel_set.begin(), relevel_set.end(), r->pid, pid_less))
+        return;
+      const int want = inh_def(r->pid, pred, true);
+      if (r->inh != want) {
+        std::string seeds;
+        for (lock_pid p : op_seeds)
+          seeds += (seeds.empty() ? "" : " ") + pid_text(p);
+        violation("impl-note", "the inherited priority of " + pid_text(r->pid) + " is now " +
+                                   std::to_string(want) + ", not " + std::to_string(r->inh) +
+                                   ", but it is outside the set A of seeds [" + seeds + "]");
+      }
+    });
   }
 
   // -- operation framing --------------------------------------------------------------------------
-  void begin_op(lock_notes *notes) {
+  /// `seeds`: those of 4.3's implementation note that the operation knows when it starts (none
+  /// for an operation that changes no edge and no base).
+  void begin_op(lock_notes *notes, std::span<const lock_pid> seeds = {}) {
     out = notes;
     in_release = false;
+    in_cancel = false;
     lending_before = lending();
+    queued_before = q_head != nullptr;
+    op_seeds.assign(seeds.begin(), seeds.end());
+    op_old.clear();
+    op_before.clear();
+    if (!lending_before || seeds.empty())
+      return;
+    for (lock_pid p : seeds) {
+      const rec *r = rec_of(p);
+      op_old.emplace_back(p, r ? r->inh : lock_inf);
+    }
+    if (!mut(lock_table::impl_note_after_only))
+      reach8(seeds, op_before);
   }
   void end_op() {
     sweep();
@@ -1358,6 +1566,46 @@ struct lock_table::impl {
   // -- section 6 ----------------------------------------------------------------------------------
   void check() const;
   void check_trie() const;
+
+  /// I8's own predecessor edges: succ of every queued ticket from the definitions of 3.1
+  /// (successors_def, over every hold and the queue, not the trie), inverted.
+  pred_map preds_def() const {
+    pred_map pred;
+    for (const lock_ticket *t = q_head; t; t = t->next)
+      for (lock_pid b : successors_def(t))
+        pred[b.packed()].push_back(t->pid);
+    return pred;
+  }
+
+  /// inh_formula(X) from scratch (3.3), for check() and the implementation note's self-check: a
+  /// breadth-first search backwards from X layered by distance and cut at 8 edges, which finds
+  /// anc8(X) as a set (in a graph without cycles, I7, exactly the processes with some path of 1 to
+  /// 8 edges to X) in O(8E), then min of base over its lenders. Shares no code with relevel_all.
+  int inh_def(lock_pid x, const pred_map &pred, bool lend) const {
+    if (!lend)
+      return lock_inf;
+    std::unordered_set<std::uint64_t> seen{x.packed()};
+    std::vector<lock_pid> layer{x}, next;
+    int best = lock_inf;
+    for (int dist = 1; dist <= 8 && !layer.empty(); ++dist) {
+      next.clear();
+      for (lock_pid a : layer) {
+        const auto it = pred.find(a.packed());
+        if (it == pred.end())
+          continue;
+        for (lock_pid y : it->second) {
+          if (!seen.insert(y.packed()).second)
+            continue;
+          next.push_back(y);
+          const rec *ry = rec_of(y);
+          if (ry && opts.inheritance && applies(y) && ry->base < best)
+            best = ry->base;
+        }
+      }
+      layer.swap(next);
+    }
+    return best;
+  }
 };
 
 void lock_table::impl::check() const {
@@ -1377,9 +1625,6 @@ void lock_table::impl::check() const {
     }
     if (r->pid.home >= homes.size() || !homes[r->pid.home].attached)
       violation("4.13", "the record of " + pid_text(r->pid) + " is on a home not attached");
-    if (r->inh != lock_inf && !lending())
-      violation("I8", "the record of " + pid_text(r->pid) + " has inh " + std::to_string(r->inh) +
-                          " with no lending home");
   }
   for (const lock_hold *h : hs) {
     const rec *r = rec_of(h->pid);
@@ -1528,6 +1773,24 @@ void lock_table::impl::check() const {
     }
   }
 
+  // I8's manager clause: every inh is inh_formula, computed from scratch over the edges just
+  // recomputed from the definitions (g), never through relevel_all's code or its set A
+  const bool lend = lending();
+  pred_map pred;
+  if (lend)
+    for (const lock_ticket *t = q_head; t; t = t->next)
+      for (lock_pid b : g[t->pid.packed()])
+        pred[b.packed()].push_back(t->pid);
+  for (const rec *r : rs) {
+    const int want = inh_def(r->pid, pred, lend);
+    if (r->inh != want)
+      violation("I8", "the record of " + pid_text(r->pid) + " has inh " +
+                          (r->inh == lock_inf ? std::string("INF") : std::to_string(r->inh)) +
+                          ", inh_formula " +
+                          (want == lock_inf ? std::string("INF") : std::to_string(want)) +
+                          (lend ? "" : " (no lending home)"));
+  }
+
   // I9's key-cache clause
   for (std::size_t h = 0; h < homes.size(); ++h) {
     if (homes[h].attached && !homes[h].has_refs)
@@ -1645,8 +1908,6 @@ home_id lock_table::attach_home(bool prio, std::shared_ptr<lock_port> port,
   owner_scope token(m.owner);
   if (opts_.one_home && m.attached > 0)
     throw std::logic_error("lock_table::attach_home: before L3 a manager accepts one home");
-  if (prio && opts_.inheritance)
-    throw std::logic_error("lock_table::attach_home: priority inheritance is phase L2");
   m.begin_op(&out);
   const home_id h = home_id(m.homes.size());
   impl::home_entry &e = m.homes.emplace_back();
@@ -1656,7 +1917,7 @@ home_id lock_table::attach_home(bool prio, std::shared_ptr<lock_port> port,
   e.progress = std::move(progress);
   e.has_refs = true; // M.cache_refs[H] = {}
   ++m.attached;
-  m.relevel_all({});
+  m.relevel_all({}, {}); // lending may have become true
   m.end_op();
   return h;
 }
@@ -1703,7 +1964,8 @@ block_result lock_table::block(lock_pid p, rec_info info, lock_request &req,
     violation("4.6", "block: " + pid_text(p) + " has a ticket");
   if (opts_.self_check)
     m.check_request(req);
-  m.begin_op(&out);
+  const lock_pid seeds[] = {p};
+  m.begin_op(&out, seeds);
   m.apply_refs(p.home, req, refs);
   impl::rec *r = m.ensure_rec(p, info);
   const std::uint64_t s = ++m.next_seq;
@@ -1756,7 +2018,7 @@ block_result lock_table::block(lock_pid p, rec_info info, lock_request &req,
   r->ticket = s;
   m.enqueue(t);
   ++m.n_waits;
-  m.relevel_all({}); // P has edges out now
+  m.relevel_all({}, {}); // P has edges out now
   m.end_op();
   return res;
 }
@@ -1806,7 +2068,8 @@ void lock_table::start_body(lock_pid p, std::uint64_t hold) {
 std::optional<ticket_state> lock_table::cancel(lock_pid p, std::uint64_t tid, lock_notes &out) {
   impl &m = *impl_;
   owner_scope token(m.owner);
-  m.begin_op(&out);
+  const lock_pid seeds[] = {p};
+  m.begin_op(&out, seeds);
   lock_ticket *t = m.ticket_of(tid);
   std::optional<ticket_state> res;
   if (!t || t->pid != p) {
@@ -1830,8 +2093,9 @@ std::optional<ticket_state> lock_table::cancel(lock_pid p, std::uint64_t tid, lo
   ++m.n_timeouts;
   if (m.mut(cancel_reexamines_holds_only))
     reg.clear(); // the mutation re-examines nothing for a ticket's region
-  const lock_pid seeds[] = {p};
+  m.in_cancel = true;
   m.finish(reg, seeds, {});
+  m.in_cancel = false;
   res = ticket_state::cancelled;
   m.end_op();
   return res;
@@ -1840,12 +2104,13 @@ std::optional<ticket_state> lock_table::cancel(lock_pid p, std::uint64_t tid, lo
 void lock_table::release(lock_pid p, std::uint64_t hold, lock_notes &out) {
   impl &m = *impl_;
   owner_scope token(m.owner);
-  m.begin_op(&out);
   lock_hold *h = m.hold_of(hold);
-  if (h && h->pid == p) { // the owner check (I12)
+  const bool own = h && h->pid == p; // the owner check (I12)
+  const lock_pid seeds[] = {p};
+  m.begin_op(&out, own ? std::span<const lock_pid>(seeds) : std::span<const lock_pid>());
+  if (own) {
     impl::region reg;
     m.drop_hold(h, false, reg);
-    const lock_pid seeds[] = {p};
     m.in_release = true;
     m.finish(reg, seeds, {});
     m.in_release = false;
@@ -1856,11 +2121,11 @@ void lock_table::release(lock_pid p, std::uint64_t hold, lock_notes &out) {
 void lock_table::end(lock_pid p, bool abandon, lock_notes &out) {
   impl &m = *impl_;
   owner_scope token(m.owner);
-  m.begin_op(&out);
+  const lock_pid ended[] = {p};
+  m.begin_op(&out, ended);
   impl::region reg;
   m.end_locked(p, abandon, reg);
-  const lock_pid skip[] = {p};
-  m.finish(reg, {}, skip);
+  m.finish(reg, {}, ended); // ended: the seed of 4.3's note, and skipped
   m.end_op();
 }
 
@@ -1869,7 +2134,13 @@ void lock_table::detach_home(home_id h, lock_notes &out) {
   owner_scope token(m.owner);
   if (h >= m.homes.size() || !m.homes[h].attached)
     violation("4.11", "detach_home: home " + std::to_string(h) + " is not attached");
-  m.begin_op(&out);
+  std::vector<lock_pid> ended;
+  m.recs.for_each([&](std::uint64_t, impl::rec *r) {
+    if (r->pid.home == h)
+      ended.push_back(r->pid);
+  });
+  std::sort(ended.begin(), ended.end(), pid_less);
+  m.begin_op(&out, ended); // the ended processes: the seeds of 4.3's note
   impl::home_entry &e = m.homes[h];
   if (!m.mut(keep_detached_refs)) {
     for (const auto &kv : e.refs) { // every cache reference of H (4.15's unref)
@@ -1880,12 +2151,6 @@ void lock_table::detach_home(home_id h, lock_notes &out) {
     e.refs.clear();
     e.has_refs = false; // delete M.cache_refs[H]
   }
-  std::vector<lock_pid> ended;
-  m.recs.for_each([&](std::uint64_t, impl::rec *r) {
-    if (r->pid.home == h)
-      ended.push_back(r->pid);
-  });
-  std::sort(ended.begin(), ended.end(), pid_less);
   impl::region reg;
   for (lock_pid p : ended)
     m.end_locked(p, true, reg);
@@ -1901,10 +2166,12 @@ void lock_table::detach_home(home_id h, lock_notes &out) {
 void lock_table::set_base(lock_pid p, int base, lock_notes &out) {
   impl &m = *impl_;
   owner_scope token(m.owner);
-  m.begin_op(&out);
-  if (impl::rec *r = m.rec_of(p)) {
+  impl::rec *r = m.rec_of(p);
+  const lock_pid seeds[] = {p};
+  m.begin_op(&out, r ? std::span<const lock_pid>(seeds) : std::span<const lock_pid>());
+  if (r) {
     r->base = base;
-    m.relevel_all({});
+    m.relevel_all({}, {});
   }
   m.end_op();
 }
@@ -1915,7 +2182,8 @@ int lock_table::read_inh(lock_pid p) {
   impl::rec *r = m.rec_of(p);
   if (!r)
     return lock_inf;
-  r->relevel_pending = false; // the apply clears the coalescing flag (4.3, 5.9)
+  if (!m.mut(coalesce_no_clear))
+    r->relevel_pending = false; // the apply clears the coalescing flag (4.3, 5.9)
   return r->inh;
 }
 
@@ -2022,6 +2290,8 @@ lock_stats lock_table::stats() const {
   s.ends = m.n_ends;
   s.trie_nodes = m.trie_nodes;
   s.cache_refs = m.refs_total;
+  s.relevels = m.n_relevels;
+  s.relevels_coalesced = m.n_coalesced;
   return s;
 }
 

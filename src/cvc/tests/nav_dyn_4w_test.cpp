@@ -1394,6 +1394,82 @@ dyn4_state<float> ext_start(float ox, float oy, float th, float sp) {
 
 } // namespace
 
+// The power split the Jolt rollout's calibration sets against a simulation's ledger
+// (dyn4_ph_lines): at random states, sliding or not, forward and reversing, on flat ground and on
+// golden_ground, its port is the rates' supplied and its four dissipation lines sum to their
+// dissipated, each line >= 0.
+TEST(Dyn4PH, ThePowerLinesSplitTheRates) {
+  const dyn4_params p = humvee4();
+  const bike_veh lim = limits(p.lf + p.lr);
+  std::mt19937 rng(17);
+  std::uniform_real_distribution<double> u(-1.0, 1.0);
+  diff::flat_ground flat;
+  double worst = 0.0;
+  for (int k = 0; k < 400; ++k) {
+    dyn4_state<double> s{};
+    s.vx = k % 4 == 0 ? -3.0 * std::fabs(u(rng)) : 20.0 * std::fabs(u(rng));
+    s.vy = 2.0 * u(rng);
+    s.r = 0.6 * u(rng);
+    s.z = 0.03 * u(rng);
+    s.zd = 0.3 * u(rng);
+    s.phi = 0.03 * u(rng);
+    s.phid = 0.3 * u(rng);
+    s.th = 0.02 * u(rng);
+    s.thd = 0.3 * u(rng);
+    s.delta = 0.5 * u(rng);
+    s.a = 4.0 * u(rng);
+    s.x = 2.0 * u(rng);
+    s.y = 2.0 * u(rng);
+    s.psi = 3.0 * u(rng);
+    const auto check = [&](const auto &ground) {
+      const diff::dyn4_ph_lines<double> l = diff::dyn4_ph_lines_at(p, lim, ground, s);
+      const diff::dyn4_ph_rates<double> r = diff::dyn4_ph_rates_at(p, lim, ground, s);
+      const double diss = l.tire + l.drag + l.rolling + l.damper;
+      const double scale = std::max(1.0, std::fabs(r.dissipated) + std::fabs(r.supplied));
+      worst = std::max(worst, std::fabs(l.port - r.supplied) / scale);
+      worst = std::max(worst, std::fabs(diss - r.dissipated) / scale);
+      EXPECT_GE(l.tire, 0.0);
+      EXPECT_GE(l.drag, 0.0);
+      EXPECT_GE(l.rolling, 0.0);
+      EXPECT_GE(l.damper, 0.0);
+    };
+    check(flat);
+    check(golden_ground());
+  }
+  std::printf("  400 states x 2 grounds: worst |lines - rates| / scale %.2e\n", worst);
+  EXPECT_LT(worst, 1e-12);
+}
+
+// The drive's answer to the command (dyn4_params::drive_gain, brake_gain, resist_comp): the
+// defaults pass the command through exactly; a gain scales it, driving or braking; resist_comp 1
+// adds the drag and rolling resistance at the state, so on a level road with the actuator at its
+// target the commanded acceleration is the one the body gets.
+TEST(Dyn4, TheDriveAnswersTheCommand) {
+  dyn4_params p = humvee4();
+  const bike_veh lim = limits(p.lf + p.lr);
+  const dyn4_state<double> s = rolling(15.0);
+  EXPECT_EQ(diff::dyn4_drive_target(p, s, 1.7), 1.7);
+  EXPECT_EQ(diff::dyn4_drive_target(p, s, -2.3), -2.3);
+  p.drive_gain = 0.8f;
+  p.brake_gain = 1.25f;
+  EXPECT_DOUBLE_EQ(diff::dyn4_drive_target(p, s, 2.0), static_cast<double>(0.8f) * 2.0);
+  EXPECT_DOUBLE_EQ(diff::dyn4_drive_target(p, s, -2.0), static_cast<double>(1.25f) * -2.0);
+  p.drive_gain = p.brake_gain = 1.0f;
+  p.resist_comp = 1.0f;
+  p.tau_drive = 0.0f; // the actuator reaches its target in the step
+  const double u0 = std::sqrt(15.0 * 15.0 + p.eps * p.eps);
+  const double res = p.drag * 15.0 * u0 / p.m + p.c_rr * p.g * (15.0 / u0);
+  EXPECT_NEAR(diff::dyn4_drive_target(p, s, 0.5), 0.5 + res, 1e-9);
+  EXPECT_GT(res, 0.05) << "the Humvee keeps its drag and rolling resistance";
+  dyn4_state<double> o;
+  diff::dyn4_plant<double>(p, lim, diff::flat_ground{}, s, 0.0, 0.5, o);
+  EXPECT_NEAR(o.a, 0.5 + res, 1e-9);
+  const double accel = (o.vx - s.vx) / lim.hdt;
+  std::printf("  at 15 m/s, a_cmd 0.5: the drive adds %.3f m/s^2, the body gets %.3f m/s^2\n", res,
+              accel);
+  EXPECT_NEAR(accel, 0.5, 0.05) << "made-up resistance: the command is the acceleration";
+}
+
 // A zero force, steering or not, is the step without one, bit for bit; and a null ext_in is the
 // step as it was.
 TEST(Dyn4ExtForce, AZeroForceIsTheStepWithoutIt) {

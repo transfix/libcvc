@@ -57,7 +57,8 @@
 // --net-allow ORIGIN, --net-policy FILE and --credential-store NAME|PATH (net_host.h;
 // docs/ARIADNE.md §10.3). In a browser --net alone lets the document reach the page's own origin.
 // With it on, snapshot (in a window or with --terminal) waits after its frames until the
-// document's requests have come back and its programs are idle (at most 10 s).
+// document's requests have come back and its programs are idle (at most --settle seconds, 10 by
+// default).
 
 #include <algorithm>
 #include <cctype> // std::isalnum / std::isdigit — sanitize the conference node id
@@ -183,7 +184,7 @@ int usage(int code) {
                "allowed (in a browser, the page's own origin too), and sign-in tokens stay with\n"
                "arigl: a request names one (auth:, a credential value), it never sees it.\n"
                "With it on, snapshot waits after its frames until the document's requests are\n"
-               "back and its programs idle (at most 10 s).\n",
+               "back and its programs idle (at most --settle S seconds, 10 by default).\n",
                ari::host_flags_help().c_str());
   return code;
 }
@@ -1678,10 +1679,12 @@ int run_window(const ari::HostOptions &o) {
       std::this_thread::sleep_until(start + period);
     }
     if (o.net.enabled) { // the frame shows what the document's requests brought back
-      rt.app_runtime().settle([&] {
-        rt.frame(1.0 / 30.0);
-        rt.render();
-      });
+      rt.app_runtime().settle(
+          [&] {
+            rt.frame(1.0 / 30.0);
+            rt.render();
+          },
+          o.settle > 0 ? o.settle : ari::kDefaultSettleSeconds);
       rt.frame(1.0 / 30.0);
       view.writePNG(o.png.c_str());
     }
@@ -1868,7 +1871,7 @@ int run_terminal(const ari::HostOptions &o) {
       std::this_thread::sleep_until(start + period);
     }
     if (o.net.enabled) { // the frame shows what the document's requests brought back
-      rt.settle([&] { rt.drain(); });
+      rt.settle([&] { rt.drain(); }, o.settle > 0 ? o.settle : ari::kDefaultSettleSeconds);
       frame = backend->render_to_string(rt.runtime(), width, height, o.ansi);
     }
     if (pixels) { // Sixel draws at screen positions, so the frame starts at the top-left

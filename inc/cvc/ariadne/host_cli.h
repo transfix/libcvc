@@ -43,6 +43,9 @@
 namespace cvc {
 namespace ariadne {
 
+// snapshot's wait for the document's requests when --settle does not say (AppRuntime::settle).
+inline constexpr double kDefaultSettleSeconds = 10.0;
+
 struct HostOptions {
   std::string command;               // argv[1] (the runtime decides which it accepts)
   std::string doc;                   // the document path
@@ -53,7 +56,10 @@ struct HostOptions {
   int fps = 0;         // 0 = the backend's default
   bool mouse = true;
   int width = 0, height = 0, frames = 0; // 0 = the runtime's default
-  double timeout = 0;                    // --timeout SECONDS (ari test); 0 = the default
+  // --settle SECONDS: how long snapshot waits, with the network on, for the document to go idle
+  // after its frames; 0 = kDefaultSettleSeconds.
+  double settle = 0;
+  double timeout = 0; // --timeout SECONDS (ari test); 0 = the default
   bool ansi = false;
   std::string png;
   std::string graphics; // empty = auto (FtxuiBackend::Options::ImageColor)

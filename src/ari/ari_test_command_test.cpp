@@ -227,3 +227,31 @@ TEST(AriTest, FunctionsImportedAndGranted) {
   EXPECT_EQ(u.status, 1) << u.output;
   EXPECT_TRUE(has(u, "calls (semver-major ...), which this host does not provide")) << u.output;
 }
+
+// §6.3 a module's on_tick: under ari test: it runs at the mount, so a document testing the module
+// sees it tick, and a failing one fails the document, named by its mount.
+TEST(AriTest, AModulesOnTickRuns) {
+  REQUIRE_ARI();
+  TempDir dir;
+  dir.write("poller.ari", "init: (state-set \"n\" 0)\n"
+                          "on_tick: (state-set \"n\" (+ 1 (int (state-get \"n\"))))\n"
+                          "root:\n  - text: poller\n");
+  const fs::path p = dir.write("poller_test.ari",
+                               "meta: {min_libcvc: 3.7.0}\n"
+                               "root:\n  - load: poller.ari\n    as: p\n"
+                               "tests:\n"
+                               "  ticks: |\n"
+                               "    (while (< (int (state-get \"includes.p.n\")) 3) (sleep 0.01))\n"
+                               "    (assert (not (state-exists \"n\")) \"the parent's own n\")\n");
+  const AriRun r = ari("test " + quoted(p));
+  EXPECT_EQ(r.status, 0) << r.output;
+  EXPECT_TRUE(has(r, "ok   " + p.string() + " (1 test, ")) << r.output;
+
+  dir.write("broken.ari", "on_tick: (assert (= 1 2))\nroot:\n  - text: broken\n");
+  const fs::path q = dir.write("broken_test.ari", "meta: {min_libcvc: 3.7.0}\n"
+                                                  "root:\n  - load: broken.ari\n    as: b\n");
+  const AriRun f = ari("test --frames 50 " + quoted(q));
+  EXPECT_EQ(f.status, 1) << f.output;
+  EXPECT_TRUE(has(f, "on_tick: of mount 'ui.docs.")) << f.output;
+  EXPECT_TRUE(has(f, ".includes.b' resident")) << f.output;
+}

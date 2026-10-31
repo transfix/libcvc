@@ -309,10 +309,10 @@ namespace {
 // so tf_editor precedes color — a tf_editor's own config may carry a `color:` node list — and
 // progress precedes overlay, a progress bar's text.
 constexpr const char *kBuiltinWidgetTypes[] = {
-    "group",   "menubar", "menu",      "menu_item",  "window",      "progress",
-    "overlay", "panel",   "text",      "checkbox",   "slider_int",  "slider_float",
-    "combo",   "radio",   "radio_row", "input_text", "input_int",   "tf_editor",
-    "color",   "image",   "button",    "separator",  "windows_menu"};
+    "group",   "menubar", "menu",      "menu_item",  "window",       "progress",
+    "overlay", "panel",   "text",      "checkbox",   "slider_int",   "slider_float",
+    "combo",   "radio",   "radio_row", "input_text", "input_int",    "tf_editor",
+    "color",   "image",   "button",    "separator",  "windows_menu", "spinner"};
 } // namespace
 
 bool is_builtin_widget_type(const std::string &type) {
@@ -432,6 +432,8 @@ std::string action(const YAML::Node &n) {
 Widget parse_widget(Ctx &ctx, const YAML::Node &n);
 Widget expand_include(Ctx &ctx, const YAML::Node &n);   // §12 include: expand a units: template
 Widget expand_load(Ctx &ctx, const YAML::Node &n);      // §12 load: mount an isolated fragment
+std::vector<HostRequirement> parse_requires(Ctx &ctx, const YAML::Node &n,
+                                            const std::string &where = ""); // §7.6
 Widget parse_document(Ctx &ctx, const YAML::Node &doc); // §12 load: parses a mounted fragment
 Value to_value(const YAML::Node &n); // defined below; used by the Kind::Custom fallback
 
@@ -666,6 +668,8 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
       return separator();
     if (s == "windows_menu")
       return windows_menu();
+    if (s == "spinner")
+      return spinner("");
     return text(s);
   }
   if (!n.IsMap()) {
@@ -728,6 +732,16 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     if (col && col.IsSequence() && col.size() >= 3)
       w = with_text_color(w, col[0].as<float>(1.0f), col[1].as<float>(1.0f),
                           col[2].as<float>(1.0f));
+    return w;
+  }
+  if (type == "spinner") { // an activity indicator the host turns by its frame clock
+    Widget w = spinner(label, str(n, "bind"));
+    const std::string glyphs = str(n, "glyphs", "braille");
+    if (glyphs == "ascii")
+      w.ascii_glyphs = true;
+    else if (glyphs != "braille")
+      ctx.warn("ari: spinner '" + label + "': glyphs '" + glyphs +
+               "' is not braille or ascii — braille");
     return w;
   }
   if (type == "progress") { // a read-only bar: bind's number over [lo, hi]
@@ -1485,6 +1499,24 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
       ctx.warn("ari: load '" + uri +
                "': the fragment's init: must be a scalar state_exec script string — ignored");
   }
+  // Its on_tick: too, which the Runtime runs as the mount's own tick resident. The document-level
+  // input lanes stay the document's: a module reacts to its own widgets, and the parent passes on
+  // what else it needs through a link: hole (docs/ARIADNE.md §6.3).
+  if (frag.IsMap() && frag["on_tick"]) {
+    if (frag["on_tick"].IsScalar())
+      wrapper.tick_script = frag["on_tick"].Scalar();
+    else
+      ctx.warn("ari: load '" + uri +
+               "': the fragment's on_tick: must be a scalar state_exec script string — ignored");
+  }
+  // §7.6 and its requires:, which AppRuntime checks against the host like the document's.
+  if (frag.IsMap())
+    wrapper.requirements = parse_requires(ctx, frag["requires"], "load '" + uri + "': ");
+  for (const char *lane : {"on_key", "on_pointer", "on_signal"})
+    if (frag.IsMap() && frag[lane])
+      ctx.warn("ari: load '" + uri + "': the fragment's " + lane +
+               ": is ignored — only the outermost document receives input and signals; pass "
+               "what the module needs through a link: hole");
   // Only the outermost document takes arguments (doc_args.h); a module reaches them through a hole.
   if (frag.IsMap() && frag["args"])
     ctx.warn("ari: load '" + uri +
@@ -2691,14 +2723,17 @@ LintConfig parse_lint(Ctx &ctx, const YAML::Node &l) {
   return cfg;
 }
 
-// The top-level `requires:` (§7.6): a sequence of names, or {name, optional} maps. The loader only
-// parses it; AppRuntime::load checks it against the host.
-std::vector<HostRequirement> parse_requires(Ctx &ctx, const YAML::Node &n) {
+// A document's or a module's `requires:` (§7.6): a sequence of names, or {name, optional} maps.
+// The loader only parses it; AppRuntime::load checks it against the host. `where` starts each
+// warning ("load 'x.ari': " for a module's).
+std::vector<HostRequirement> parse_requires(Ctx &ctx, const YAML::Node &n,
+                                            const std::string &where) {
   std::vector<HostRequirement> out;
   if (!n)
     return out;
   if (!n.IsSequence()) {
-    ctx.warn("ari: requires: must be a SEQUENCE of names or {name, optional} entries — it is not, "
+    ctx.warn("ari: " + where +
+             "requires: must be a SEQUENCE of names or {name, optional} entries — it is not, "
              "so nothing it lists is checked");
     return out;
   }
@@ -2711,7 +2746,7 @@ std::vector<HostRequirement> parse_requires(Ctx &ctx, const YAML::Node &n) {
       req.optional = flag(e, "optional", false);
     }
     if (req.name.empty()) {
-      ctx.warn("ari: requires: entry with no name — ignored");
+      ctx.warn("ari: " + where + "requires: entry with no name — ignored");
       continue;
     }
     out.push_back(std::move(req));
@@ -2806,9 +2841,11 @@ void refs_from_script(const std::string &script, std::vector<std::string> &out) 
   } catch (...) {
   }
 }
-// Recurse the widget tree collecting each widget's action-program (`on:`) channel refs.
+// Recurse the widget tree collecting each widget's action-program (`on:`) channel refs, and each
+// mount's on_tick:.
 void refs_from_widget(const Widget &w, std::vector<std::string> &out) {
   refs_from_script(w.on, out);
+  refs_from_script(w.tick_script, out);
   for (const Widget &c : w.children)
     refs_from_widget(c, out);
 }

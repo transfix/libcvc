@@ -1413,7 +1413,7 @@ jobs:
       SAN_CXX_TESTS: >-
         state_exec_scheduler_test state_exec_async_test state_exec_integration_test
         state_exec_coordinator_test ariadne_runtime_test thread_pool_test async_lane_test
-        state_exec_locks_test state_exec_locks_model_test
+        state_exec_locks_test state_exec_locks_model_test state_exec_priority_test
       # pycvc test scripts (bindings/pycvc/<name>).
       SAN_PY_TESTS: >-
         test_pycvc_exec.py test_pycvc_exec_async.py test_pycvc_exec_coro.py

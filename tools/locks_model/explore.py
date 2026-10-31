@@ -23,12 +23,21 @@ import os as _os, sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 
 import collections
+import hashlib
 import json
 import sys
 import time
 
 from lockmodel import K, S, X, Violation
 from world import Config, World
+
+
+def state_id(key):
+    """A state's identity for deduplication: a 128-bit digest of its key's repr. Not hash(key):
+    CPython's hash(-1) == hash(-2), so two states that differed only in a priority of -1 against -2
+    collided and the second was never explored. Not the key itself: the bound-5 runs keep every
+    state they visit, and the keys would multiply their memory."""
+    return hashlib.blake2b(repr(key).encode(), digest_size=16).digest()
 
 A, AB, AC, B = K('a'), K('a.b'), K('a.c'), K('b')
 
@@ -149,7 +158,7 @@ def explore(name, bound, max_states=10 ** 8, drain_at_bound=True, log=None):
     cfg = make(name)
     w0 = World(cfg)
     w0.check()
-    k0 = hash(w0.key())
+    k0 = state_id(w0.key())
     parent = {k0: (None, None, 0)}
     dq = collections.deque([(w0, 0)])
     viol = {}
@@ -180,7 +189,7 @@ def explore(name, bound, max_states=10 ** 8, drain_at_bound=True, log=None):
         states += 1
         if states > max_states:
             break
-        hk = hash(w.key())
+        hk = state_id(w.key())
         if parent[hk][2] < cost:
             continue
         acts = w.enabled()
@@ -208,7 +217,7 @@ def explore(name, bound, max_states=10 ** 8, drain_at_bound=True, log=None):
                 continue
             for sn, sd in w2.soft:
                 note(soft, sn, sd, trace_of(hk) + [a], nc)
-            h2 = hash(w2.key())
+            h2 = state_id(w2.key())
             prev = parent.get(h2)
             if prev is not None and prev[2] <= nc:
                 continue

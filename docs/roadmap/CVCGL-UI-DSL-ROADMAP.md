@@ -1470,7 +1470,7 @@ Both, complementary:
 
 > **Status (2026-10-20):** the whole-document gate is built, and so are the auto-derived
 > warnings (`AppRuntime::load`, `inc/cvc/ariadne/requires.h`, `docs/ARIADNE.md` §5.7).
-> Entries may also be §16.3 capability tokens (`gl.scene`, `gl.shaders`, `raster.bitmap`,
+> Entries may also be §16.3 capability tokens (`gl.scene`, `gl.scene.shaders`, `gl.ui.shaders`, `raster.bitmap`,
 > `term.kitty`, …) or widget types, and `{name, optional: true}` warns instead of failing.
 > Programs and predicates can ask with `(has? "name")`. **Not yet:** per-program and per-unit
 > `requires:`, strict mode, the reduced-env (sandboxed) check, and per-widget `fallback:`
@@ -4146,11 +4146,11 @@ A leaf widget whose *paint is a fragment shader*, realized as **fragment-shader-
 
 #### Capability gating and degradation (the critical point)
 
-**GLSL is a GL-backend capability; a terminal backend cannot render it.** Both the scene `shaders:` block and `shader_canvas` carry an **implicit `requires: [gl.shaders]`** (auto-derived per §7.6; the author may state it). The loader checks `requires:` against `backend.capabilities()` at **load** — §7.6's preflight, extended from intrinsic-names to backend capabilities. Granularity is the author's choice:
+**GLSL is a GL capability, and it lives in two places: the scene's renderer and the UI backend.** A terminal backend cannot draw GLSL in its UI, but a GL scene adapter behind it still can render the scene (cvcGL's TerminalScene renders offscreen; §16.6). So they are two tokens (built 2026-10-30): **`gl.scene.shaders`** (the scene adapter's renderer compiles a node's `shader:` block; `SceneAdapter::runs_shaders`) and **`gl.ui.shaders`** (the backend draws a `shader_canvas`; `Capabilities::glsl`). **`gl.shaders`** is both. arigl in a window has both; `arigl --terminal` has only `gl.scene.shaders`; ari has neither. The scene `shader:` block carries an **implicit `requires: [gl.scene.shaders]`** and `shader_canvas` an **implicit `requires: [gl.ui.shaders]`** (auto-derived per §7.6, not built yet; the author may state them). The loader checks `requires:` against `backend.capabilities()` at **load** — §7.6's preflight, extended from intrinsic-names to backend capabilities. Granularity is the author's choice:
 - **per-widget/per-node `requires:`** → degrades just that node: a `shader_canvas` is replaced by its `fallback:` if declared, else omitted (the layout closes the gap + one-time log) while the rest of the doc loads.
-- **whole-doc `requires: [gl.shaders]`** → fails the load fast on a terminal build with a precise message.
+- **whole-doc `requires: [gl.ui.shaders]`** → fails the load fast on a terminal build with a precise message.
 
-Never a crash — the `CVC_ENABLE_IMGUI=OFF` philosophy. Nuance: `raster.bitmap != gl.shaders`. notcurses can blit a *video* frame (Sixel) but cannot run a *shader*, so a video texture degrades differently from a shader node on the same backend.
+Never a crash — the `CVC_ENABLE_IMGUI=OFF` philosophy. Nuance: `raster.bitmap != gl.ui.shaders`. notcurses can blit a *video* frame (Sixel) but cannot run a *shader*, so a video texture degrades differently from a shader node on the same backend.
 
 #### Where GLSL lives + two footguns to auto-handle
 

@@ -4,6 +4,9 @@ cmake_minimum_required(VERSION 3.15)
 # Test executables
 add_executable(app_test app_test.cpp)
 add_executable(thread_pool_test thread_pool_test.cpp)
+# The OS thread and process classes (PR-9): an executable of its own, since a process class can't
+# be undone unprivileged on Linux.
+add_executable(thread_class_test thread_class_test.cpp)
 add_executable(text_test text_test.cpp)
 add_executable(ariadne_loader_test ariadne_loader_test.cpp)
 add_executable(ariadne_doc_fetch_test ariadne_doc_fetch_test.cpp)
@@ -89,6 +92,7 @@ add_executable(state_exec_async_test state_exec_async_test.cpp)
 add_executable(async_lane_test async_lane_test.cpp)
 add_executable(state_exec_scheduler_test state_exec_scheduler_test.cpp)
 add_executable(state_exec_locks_test state_exec_locks_test.cpp)
+add_executable(state_exec_priority_test state_exec_priority_test.cpp)
 # The lock manager's table: its directed cases (state_exec_lock_table_test.cpp) and the model check
 # (state_exec_locks_model_test.cpp), one executable with two authors (locks plan L1.2, L1.3).
 add_executable(state_exec_locks_model_test state_exec_locks_model_test.cpp
@@ -140,6 +144,7 @@ add_executable(physics_vehicle_test physics_vehicle_test.cpp)
 add_executable(physics_energy_test physics_energy_test.cpp)
 add_executable(nav_plant_test nav_plant_test.cpp)
 add_executable(physics_plant_log_test physics_plant_log_test.cpp)
+add_executable(physics_jolt_rollout_test physics_jolt_rollout_test.cpp)
 add_executable(nav_dyn_bike_test nav_dyn_bike_test.cpp)
 add_executable(nav_dyn_4w_test nav_dyn_4w_test.cpp)
 add_executable(nav_potential_test nav_potential_test.cpp)
@@ -300,6 +305,7 @@ add_executable(world_bundle_test world_bundle_test.cpp)
 set(TEST_TARGETS
   app_test
   thread_pool_test
+  thread_class_test
   text_test
   ariadne_loader_test
   ariadne_doc_fetch_test
@@ -381,6 +387,7 @@ set(TEST_TARGETS
   physics_energy_test
   nav_plant_test
   physics_plant_log_test
+  physics_jolt_rollout_test
   nav_dyn_bike_test
   nav_dyn_4w_test
   nav_potential_test
@@ -523,6 +530,7 @@ list(APPEND TEST_TARGETS
   state_exec_scheduler_test
   state_exec_locks_test
   state_exec_locks_model_test
+  state_exec_priority_test
   state_exec_intrinsics_test
   state_exec_coordinator_test
   state_exec_bench_test
@@ -612,6 +620,13 @@ target_link_libraries(app_test
 )
 
 target_link_libraries(thread_pool_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(thread_class_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1747,6 +1762,13 @@ target_link_libraries(state_exec_locks_model_test
     GTest::gtest_main
 )
 
+target_link_libraries(state_exec_priority_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(state_exec_intrinsics_test
   PRIVATE
     cvc
@@ -1961,6 +1983,13 @@ target_link_libraries(nav_plant_test
 )
 
 target_link_libraries(physics_plant_log_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(physics_jolt_rollout_test
   PRIVATE
     cvc
     GTest::gtest
@@ -2343,6 +2372,7 @@ target_compile_features(async_lane_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_scheduler_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_locks_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_locks_model_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_priority_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_intrinsics_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_coordinator_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_bench_test PRIVATE cxx_std_20)
@@ -2388,6 +2418,7 @@ target_compile_features(physics_vehicle_test PRIVATE cxx_std_17)
 target_compile_features(physics_energy_test PRIVATE cxx_std_17)
 target_compile_features(nav_plant_test PRIVATE cxx_std_17)
 target_compile_features(physics_plant_log_test PRIVATE cxx_std_17)
+target_compile_features(physics_jolt_rollout_test PRIVATE cxx_std_17)
 target_compile_features(nav_dyn_bike_test PRIVATE cxx_std_17)
 target_compile_features(nav_dyn_4w_test PRIVATE cxx_std_17)
 target_compile_features(nav_potential_test PRIVATE cxx_std_17)
@@ -2539,6 +2570,7 @@ endfunction()
 
 cvc_discover_tests(app_test)
 cvc_discover_tests(thread_pool_test)
+cvc_discover_tests(thread_class_test)
 cvc_discover_tests(text_test)
 cvc_discover_tests(ariadne_loader_test)
 cvc_discover_tests(ariadne_doc_fetch_test)
@@ -2847,6 +2879,7 @@ cvc_discover_tests(async_lane_test)
 cvc_discover_tests(state_exec_scheduler_test)
 cvc_discover_tests(state_exec_locks_test)
 cvc_discover_tests(state_exec_locks_model_test)
+cvc_discover_tests(state_exec_priority_test)
 cvc_discover_tests(state_exec_intrinsics_test)
 cvc_discover_tests(state_exec_coordinator_test)
 cvc_discover_tests(state_exec_bench_test)
@@ -2893,6 +2926,7 @@ cvc_discover_tests(physics_vehicle_test)
 cvc_discover_tests(physics_energy_test)
 cvc_discover_tests(nav_plant_test)
 cvc_discover_tests(physics_plant_log_test)
+cvc_discover_tests(physics_jolt_rollout_test)
 cvc_discover_tests(nav_dyn_bike_test)
 cvc_discover_tests(nav_dyn_4w_test)
 cvc_discover_tests(nav_potential_test)

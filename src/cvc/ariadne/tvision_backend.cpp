@@ -6,7 +6,7 @@
 //     window (created at the document's placement, destroyed when the document stops drawing it,
 //     retitled), the menu bar rebuilt from the hosted menu model when it changes, the background
 //     view for widgets outside any window — and report every window's bounds back
-//     (set_window_geometry) so a move or resize persists. Then redraw.
+//     (set_window_geometry) so a move, or a size the user chose, persists. Then redraw.
 //   - a content view's draw() asks the backend to lay its window's body out at the view's size
 //     (render_window) and blits the cells; its handleEvent() turns tvision input into TermEvents
 //     in window-local cells (feed_window).
@@ -90,6 +90,9 @@ FtxuiBackend::RunExit TvisionBackend::run(AppRuntime &app, const RunOptions &opt
 namespace {
 
 constexpr ushort cmAriMenuBase = 1000; // menu item k is command cmAriMenuBase + k
+// The smallest window, frame included: room for its title and one row. (tvision's own is 16 x 6,
+// which would leave a window that refits, or a drag, two rows taller than its content.)
+constexpr TPoint kMinWindow{16, 4};
 
 #if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
 // tvision reads the terminal's description through ncurses. A cvcpkg prefix ships ncurses' own
@@ -221,14 +224,31 @@ public:
     insert(content);
   }
   void close() override; // the close box: the document decides (tree.<id>.open)
+  // How the user moves and resizes a window: a drag of its frame (the corner resizes), the
+  // keyboard's Ctrl-F5, the zoom box. A size they leave it at is theirs.
+  void dragView(TEvent &ev, uchar mode, TRect &limits, TPoint minSize, TPoint maxSize) override {
+    const TPoint before = size;
+    TWindow::dragView(ev, mode, limits, minSize, maxSize);
+    if (size != before)
+      user_sized = true;
+  }
+  void zoom() override {
+    TWindow::zoom();
+    user_sized = true;
+  }
+  void sizeLimits(TPoint &min, TPoint &max) override {
+    TWindow::sizeLimits(min, max);
+    min = kMinWindow;
+  }
   ContentView *content = nullptr;
   std::string id;
   std::string shown_title;
-  // A window the document did not size fits its content on every walk, as in the FTXUI loop
-  // (ARIADNE.md §5.8), in the axes it did not size, until the user resizes it: fitted is the size
-  // the host last gave it, so a size that differs is the user's.
-  bool fit_w = false, fit_h = false;
-  TPoint fitted{0, 0};
+  // Until the user resizes it, the host sizes the window on every walk, as the FTXUI loop does
+  // (ARIADNE.md §5.8): the document's size where it gave one, else the content's. Only the user's
+  // own resize stops that, never a size tvision or the host gave it (a refit, or the windows
+  // scaling with the desktop when the terminal resizes), so a window that closes and opens again
+  // fits what it shows then.
+  bool user_sized = false;
 
 private:
   Host &host_;
@@ -274,7 +294,10 @@ public:
     return new HostStatusLine(r, *new TStatusDef(0, 0xFFFF) +
                                      *new TStatusItem("~F10~ Menu", kbF10, cmMenu) +
                                      *new TStatusItem("~F6~ Next", kbF6, cmNext) +
-                                     *new TStatusItem("~Alt-X~ Exit", kbAltX, cmQuit));
+                                     *new TStatusItem("~Alt-X~ Exit", kbAltX, cmQuit) +
+                                     // unlabelled, as in tvision's own status line: Ctrl-F5
+                                     // moves / resizes the window from the keyboard
+                                     *new TStatusItem(TStringView(), kbCtrlF5, cmResize));
   }
   void getEvent(TEvent &ev) override;
   void handleEvent(TEvent &ev) override;
@@ -352,9 +375,10 @@ struct Host {
   // One walk, then make the desktop match it.
   void sync() {
     TDeskTop *desk = TProgram::deskTop;
-    // Report the windows' current bounds first, so a move / resize persists in this walk.
+    // Report the windows' current bounds first, so a move / resize persists in this walk. Only
+    // the user's size is the window's own (FtxuiBackend::set_window_geometry).
     for (auto &[id, w] : windows)
-      be.set_window_geometry(id, w->origin.x, w->origin.y, w->size.x, w->size.y);
+      be.set_window_geometry(id, w->origin.x, w->origin.y, w->size.x, w->size.y, w->user_sized);
     be.set_screen_size(desk->size.x, desk->size.y);
     rt.render();
     dirty = false;
@@ -364,36 +388,23 @@ struct Host {
     for (const FtxuiBackend::HostedWindow &hw : be.hosted_windows()) {
       seen[hw.id] = true;
       auto it = windows.find(hw.id);
-      // The outer size for a body of the given natural size, on this desktop.
-      const auto fit_w = [&](int content) {
-        return std::max(16, std::min(content + 2, desk->size.x));
-      };
-      const auto fit_h = [&](int content) {
-        return std::max(4, std::min(content + 2, desk->size.y));
-      };
+      // Its outer size on this desktop, per axis: the user's or the document's (hw.w / hw.h),
+      // else its body's natural size plus the frame.
+      const TPoint want{
+          std::max<int>(kMinWindow.x, std::min(hw.w > 0 ? hw.w : hw.content_w + 2, desk->size.x)),
+          std::max<int>(kMinWindow.y, std::min(hw.h > 0 ? hw.h : hw.content_h + 2, desk->size.y))};
       if (it == windows.end()) {
-        const int w = hw.w > 0 ? std::max(16, std::min(hw.w, desk->size.x)) : fit_w(hw.content_w);
-        const int h = hw.h > 0 ? std::max(4, std::min(hw.h, desk->size.y)) : fit_h(hw.content_h);
-        TRect r(hw.x, hw.y, hw.x + w, hw.y + h);
+        TRect r(hw.x, hw.y, hw.x + want.x, hw.y + want.y);
         auto *win = new ContentWindow(r, *this, hw.id, hw.title, hw.closable);
         win->shown_title = hw.title;
-        win->fit_w = hw.w <= 0;
-        win->fit_h = hw.h <= 0;
-        win->fitted = win->size;
+        win->user_sized = hw.user_sized; // reopened after the user resized it: still theirs
         desk->insert(win);
         it = windows.emplace(hw.id, win).first;
-      } else if (ContentWindow *win = it->second; win->fit_w || win->fit_h) {
-        if (win->size != win->fitted) { // the user resized it: theirs from now on
-          win->fit_w = win->fit_h = false;
-        } else {
-          const TPoint want{win->fit_w ? fit_w(hw.content_w) : win->size.x,
-                            win->fit_h ? fit_h(hw.content_h) : win->size.y};
-          if (want != win->size) {
-            TRect r(win->origin.x, win->origin.y, win->origin.x + want.x, win->origin.y + want.y);
-            win->locate(r);
-          }
-          win->fitted = win->size;
-        }
+      } else if (ContentWindow *win = it->second;
+                 !win->user_sized && !(win->state & sfDragging) && want != win->size) {
+        // (Not while the user drags it: tvision's drag loop runs this sync between moves.)
+        TRect r(win->origin.x, win->origin.y, win->origin.x + want.x, win->origin.y + want.y);
+        win->locate(r);
       }
       if (it->second->shown_title != hw.title) {
         ContentWindow *win = it->second;

@@ -10,6 +10,7 @@
 #define CVC_STATE_EXEC_RESOURCE_POLICY_H
 
 #include <cstdint>
+#include <optional>
 #include <string>
 
 namespace cvc::state_exec {
@@ -52,6 +53,12 @@ struct resource_policy {
   /// Enforcement mode.
   enum class mode { strict, clamp, warn };
   mode enforce = mode::clamp;
+
+  /// The best priority a process submitted (or migrated) under this policy may have and ask for
+  /// (docs/STATE_EXEC_LOCKS.md 7.2; lower is better): a better priority is clamped to it, and it is
+  /// the process's floor, a host's, so it clamps under every scheduling policy. A stricter floor
+  /// the submitter gave stays. Unset: no floor of the policy's.
+  std::optional<int> priority_floor;
 };
 
 /// Limits requested for a single process.

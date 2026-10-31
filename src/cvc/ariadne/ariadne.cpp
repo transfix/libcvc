@@ -37,6 +37,7 @@
 #include <functional>
 #include <locale> // §11.4 geometry (de)serialize: pin std::locale::classic() so digit grouping
                   // in a global locale can't corrupt the comma-joined "x,y,w,h" round-trip
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -871,6 +872,7 @@ struct Runtime::Impl {
   // probe env built exactly like an action's, then cached; the cache is rebuilt when a provider is
   // registered (the registry's generation moves) or refresh_program_names() drops it.
   bool scene_capable = false;
+  bool scene_shaders = false;
   mutable std::mutex names_mutex;
   mutable bool names_valid = false;
   mutable std::uint64_t names_generation = 0;
@@ -888,6 +890,7 @@ struct Runtime::Impl {
     if (backend)
       f.caps = backend->capabilities();
     f.scene = scene_capable;
+    f.scene_shaders = scene_capable && scene_shaders;
     const NetHostStatus net = net_host_status();
     f.net = net.enabled;
     f.net_auth = net.auth;
@@ -1051,6 +1054,11 @@ struct Runtime::Impl {
   // (get-attr event "key") etc. (on:tick's body simply ignores `event`).
   void ensure_resident(const std::string &channel, const std::string &body,
                        std::shared_ptr<ActionContext> &ctx_slot, int &pid_slot);
+  // The same, chrooted to `chroot` with `functions` (a FunctionScope prelude) defined first: a
+  // mount's tick resident. The four-argument form is the document's (prefix, doc_functions).
+  void ensure_resident(const std::string &channel, const std::string &body,
+                       std::shared_ptr<ActionContext> &ctx_slot, int &pid_slot,
+                       const std::string &chroot, const std::string &functions);
   void ensure_tick_resident();   // submit the tick resident (woken by the coalesced post_tick)
   void post_tick();              // wake the tick resident once this drain
   void ensure_input_residents(); // submit the key + pointer residents (woken by post_input)
@@ -1075,6 +1083,11 @@ struct Runtime::Impl {
   // forget_layout(): applied at the next render. Each window's and grid's first frame after it
   // (by its tree.<id>.geometry / .tracks / .columns path) seeds only what the document authored.
   bool forget_layout_pending = false;
+  // The frame clock (Runtime::frame_clock): seconds since clock_epoch, read at each render(), or
+  // the host's pinned time (set_frame_clock).
+  std::chrono::steady_clock::time_point clock_epoch = std::chrono::steady_clock::now();
+  std::optional<double> pinned_clock;
+  double frame_t = 0.0;
   bool windows_forgotten = false;
   std::set<std::string> laid_out;
 
@@ -1116,6 +1129,33 @@ struct Runtime::Impl {
   // Run a mounted fragment's init: once at its sub-prefix (chrooted there by run_init); any error
   // is surfaced as a one-time runtime warning rather than thrown into the frame.
   void run_mount_init(const std::string &sub_prefix, const std::string &script);
+
+  // §12 load: a mounted fragment's on_tick: — one resident per mount sub-prefix, chrooted there
+  // with the mount's functions, on its own channel, woken by post_tick like the document's. Started
+  // as the mount is first drawn (after its init:), so a module in a closed tab starts when the tab
+  // opens; it then runs whether or not the mount is drawn, until a reconcile drops it
+  // (drop_mount_ticks) or the Runtime goes (kill_owner: it carries owner_). A repeated mount's
+  // instance also stops when its repeat's count drops below it (sweep_repeated_ticks).
+  struct MountTick {
+    std::string program; // prelude + body: what a reconcile compares to keep it running
+    std::string channel;
+    std::shared_ptr<ActionContext> ctx;
+    int pid = -1;
+    const Widget *repeat = nullptr; // the outermost repeat: template it was emitted under, if any
+    int instance = -1;              // and that repeat's instance index
+  };
+  std::map<std::string, MountTick> mount_ticks_; // by sub-prefix
+  // The outermost repeat: template being emitted and the instance index (a template in `root`,
+  // whose address holds until the next reconcile; an inner one is copied per frame).
+  const Widget *emitting_repeat_ = nullptr;
+  int emitting_instance_ = -1;
+  void ensure_mount_tick(const std::string &sub_prefix, const Widget &w);
+  void stop_mount_tick(MountTick &t);
+  // On a reconcile: stop every mount tick the new tree does not have at the same sub-prefix with
+  // the same program (a repeated mount's restart at their next frame).
+  void drop_mount_ticks();
+  // A repeat of `tmpl` made `count` instances this frame: stop the ticks of the ones past it.
+  void sweep_repeated_ticks(const Widget *tmpl, int count);
 
   // Resolve a widget bind path to an absolute cvc::state path. Delegates to the
   // shared rule (bind.h) so widget binds and scene `visible:` binds collide on the
@@ -1349,6 +1389,8 @@ void Runtime::Impl::emit_container(const Widget &w) {
     // in ran_inits, NOT cleared on reconcile — a one-shot seed, never re-run per frame/rebuild.
     if (!w.init_script.empty() && ran_inits.insert(sub_prefix).second)
       run_mount_init(sub_prefix, (w.functions ? w.functions->prelude : "") + w.init_script);
+    if (!w.tick_script.empty())
+      ensure_mount_tick(sub_prefix, w); // after its init:, so the first tick sees the seed
     scope_stack.push_back(sub_prefix);
   }
   // §6.6 the root's and a mount's functions are the ones programs started in its subtree get.
@@ -1452,6 +1494,24 @@ void Runtime::Impl::each_instance(const Widget &w,
     return;
   }
   const int n = eval_count(w.repeat); // capped, fail-safe 0
+  // §12 the outermost repeat's instance, for the mount ticks started under it (a nested repeat is
+  // a per-frame copy, so its instances are tracked by the outer one's).
+  const bool outermost = emitting_repeat_ == nullptr;
+  if (outermost && !mount_ticks_.empty())
+    sweep_repeated_ticks(&w, n);
+  struct RepeatGuard {
+    const Widget *&tmpl;
+    int &instance;
+    bool active;
+    ~RepeatGuard() {
+      if (active) {
+        tmpl = nullptr;
+        instance = -1;
+      }
+    }
+  } repeat_guard{emitting_repeat_, emitting_instance_, outermost};
+  if (outermost)
+    emitting_repeat_ = &w;
   // Per-FRAME instance budget: each repeat is capped individually, but many repeats could
   // still compound into an unbounded per-frame walk (substitute_index deep-copy + emit),
   // which the eval-time budget doesn't see. Bound the total across the whole frame.
@@ -1465,6 +1525,8 @@ void Runtime::Impl::each_instance(const Widget &w,
     ++frame_instances;
     Widget inst = substitute_index(w, i);
     inst.repeat.clear(); // the instance renders once
+    if (outermost)
+      emitting_instance_ = i;
     f(inst, i);
   }
 }
@@ -1666,6 +1728,16 @@ void Runtime::Impl::emit_node(const Widget &w) {
   case Kind::Separator:
     b.separator();
     break;
+
+  case Kind::Spinner: {
+    // The host's frame clock turns it, whatever the document's programs are doing; disabled, it
+    // stands still. A bind (a state path, or a computed expression) is its label.
+    const std::string text = w.bind.empty()    ? w.label
+                             : is_expr(w.bind) ? eval_text(w.bind)
+                                               : read_string(app, resolve(w.bind));
+    b.spinner(text.c_str(), dis ? 0.0 : frame_t, w.ascii_glyphs);
+    break;
+  }
 
   case Kind::Progress: {
     // Read-only: the number (a state path or a computed expression) placed in [lo, hi].
@@ -1926,7 +1998,12 @@ void Runtime::Impl::render() {
     }
     planted_holes.clear();
     wired_mounts.clear();
+    drop_mount_ticks(); // §12 the old tree's module ticks the new one does not keep
   }
+  frame_t =
+      pinned_clock
+          ? *pinned_clock
+          : std::chrono::duration<double>(std::chrono::steady_clock::now() - clock_epoch).count();
   if (forget_layout_pending) { // a new document: its windows are laid out afresh
     forget_layout_pending = false;
     laid_out.clear();
@@ -2245,35 +2322,45 @@ void Runtime::Impl::pump_and_sweep_actions(cvc::state_exec::async_scheduler &sch
   // A resident never finishes on its own, so one that was killed (a syntax error in its body,
   // read inside the process; its per-step cap) or failed (an exception it didn't catch) is
   // reported, once per reason.
-  const auto report_killed_resident = [&](int pid, const char *lane, const std::string &channel) {
+  const auto report_killed_resident = [&](int pid, const std::string &lane,
+                                          const std::string &channel) {
     if (pid < 0)
       return;
     auto info = sched.get_process_info(pid);
     if (info && info->status == se::process_status::killed)
-      warn_once(std::string("ari: ") + lane + " resident [" + channel +
+      warn_once("ari: " + lane + " resident [" + channel +
                 "] stopped: " + sched.get_exit_error(pid).value_or("killed"));
     else if (info && info->status == se::process_status::failed)
-      warn_once(std::string("ari: ") + lane + " resident [" + channel +
+      warn_once("ari: " + lane + " resident [" + channel +
                 "] failed: " + failure_report(info->exit_exception, info->exit_error));
   };
   report_killed_resident(tick_resident_pid_, "on_tick:", tick_channel());
   report_killed_resident(key_resident_pid_, "on_key:", key_channel());
   report_killed_resident(pointer_resident_pid_, "on_pointer:", pointer_channel());
   report_killed_resident(signal_resident_pid_, "on_signal:", signal_channel());
+  for (const auto &[sub_prefix, t] : mount_ticks_)
+    report_killed_resident(t.pid, "on_tick: of mount '" + sub_prefix + "'", t.channel);
 }
 
 void Runtime::Impl::ensure_resident(const std::string &channel, const std::string &body,
                                     std::shared_ptr<ActionContext> &ctx_slot, int &pid_slot) {
+  ensure_resident(channel, body, ctx_slot, pid_slot, prefix, doc_functions);
+}
+
+void Runtime::Impl::ensure_resident(const std::string &channel, const std::string &body,
+                                    std::shared_ptr<ActionContext> &ctx_slot, int &pid_slot,
+                                    const std::string &chroot, const std::string &functions) {
   if (body.empty() || pid_slot >= 0)
     return; // nothing to run, or already submitted (residents submit ONCE, not per frame)
   namespace se = cvc::state_exec;
   try {
     auto &sched = app.exec_scheduler();
-    // Resident writes confined to the document prefix. A resident has no with-lock default
+    // Resident writes confined to its document or mount. A resident has no with-lock default
     // (docs/STATE_EXEC_LOCKS.md 14.2 Q1): a request with no :timeout waits as long as it takes.
-    std::shared_ptr<ActionContext> ac = make_action_context(prefix, std::nullopt);
-    // A child it spawns runs in the document's scope, as the resident does; one it forks shares
-    // the resident's context, which lives until the Runtime does. Both are reaped once they end.
+    std::shared_ptr<ActionContext> ac = make_action_context(chroot, std::nullopt);
+    // A child it spawns runs in the resident's scope (its document's or its mount's); one it forks
+    // shares the resident's context, which lives until the Runtime does. Both are reaped once they
+    // end.
     ac->ictx.spawn_context = [this](const se::intrinsics_context &parent) {
       return spawn_child(parent);
     };
@@ -2283,7 +2370,7 @@ void Runtime::Impl::ensure_resident(const std::string &channel, const std::strin
     // on:tick simply ignores `event`. The body runs once per delivery, then loops back to park. No
     // total step cap (a resident loops forever; the per-frame pump budget bounds each activation,
     // and the msg-recv guarantees a park every iteration).
-    const std::string wrapped = doc_functions + // §6.6 defined once, before the loop
+    const std::string wrapped = functions + // §6.6 defined once, before the loop
                                 "(while t (let ((event (msg-recv \"" + channel + "\"))) " + body +
                                 "))";
     se::execute_options opts;
@@ -2310,13 +2397,81 @@ void Runtime::Impl::ensure_tick_resident() {
 }
 
 void Runtime::Impl::post_tick() {
-  if (tick_resident_pid_ < 0)
+  if (tick_resident_pid_ < 0 && mount_ticks_.empty())
     return; // no tick resident registered
-  // Wake the tick resident for one activation this frame. Post only when nothing is queued on the
+  // Wake each tick resident for one activation this frame. Post only when nothing is queued on its
   // channel, so a resident that can't keep up doesn't accrue a backlog of ticks (coalesce).
   auto &sched = app.exec_scheduler();
-  if (sched.pending_message_count(tick_channel()) == 0)
-    sched.post_message(tick_channel(), cvc::state_exec::value_t(std::string("tick")));
+  const auto wake = [&](const std::string &channel) {
+    if (sched.pending_message_count(channel) == 0)
+      sched.post_message(channel, cvc::state_exec::value_t(std::string("tick")));
+  };
+  if (tick_resident_pid_ >= 0)
+    wake(tick_channel());
+  for (const auto &[sub_prefix, t] : mount_ticks_)
+    if (t.pid >= 0)
+      wake(t.channel);
+}
+
+void Runtime::Impl::ensure_mount_tick(const std::string &sub_prefix, const Widget &w) {
+  MountTick &t = mount_ticks_[sub_prefix];
+  if (t.pid >= 0 || !t.channel.empty())
+    return; // running (or failed to start, already warned): once per mount, not per frame
+  const std::string &functions = w.functions ? w.functions->prelude : std::string();
+  t.program = functions + w.tick_script;
+  t.channel = owner_ + "#tick@" + sub_prefix;
+  t.repeat = emitting_repeat_;
+  t.instance = emitting_instance_;
+  ensure_resident(t.channel, w.tick_script, t.ctx, t.pid, sub_prefix, functions);
+}
+
+void Runtime::Impl::stop_mount_tick(MountTick &t) {
+  if (t.pid >= 0)
+    app.exec_scheduler().kill(t.pid);
+  t.ctx.reset();
+  t.pid = -1;
+}
+
+void Runtime::Impl::drop_mount_ticks() {
+  if (mount_ticks_.empty())
+    return;
+  // The new tree's mounts outside any repeat: (a repeated one is made per frame), by sub-prefix,
+  // composed as emit_container composes them.
+  std::map<std::string, std::string> kept;
+  const std::function<void(const Widget &, const std::string &)> walk =
+      [&](const Widget &w, const std::string &scope) {
+        if (!w.repeat.empty())
+          return;
+        std::string inner = scope;
+        if (!w.scope.empty()) {
+          inner = resolve_bind(scope, w.scope);
+          if (!w.tick_script.empty())
+            kept[inner] = (w.functions ? w.functions->prelude : std::string()) + w.tick_script;
+        }
+        for (const Widget &c : w.children)
+          walk(c, inner);
+      };
+  walk(root, prefix);
+  for (auto it = mount_ticks_.begin(); it != mount_ticks_.end();) {
+    const auto k = kept.find(it->first);
+    if (it->second.repeat || k == kept.end() || k->second != it->second.program) {
+      stop_mount_tick(it->second);
+      it = mount_ticks_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
+void Runtime::Impl::sweep_repeated_ticks(const Widget *tmpl, int count) {
+  for (auto it = mount_ticks_.begin(); it != mount_ticks_.end();) {
+    if (it->second.repeat == tmpl && it->second.instance >= count) {
+      stop_mount_tick(it->second);
+      it = mount_ticks_.erase(it);
+    } else {
+      ++it;
+    }
+  }
 }
 
 void Runtime::Impl::ensure_input_residents() {
@@ -2399,6 +2554,7 @@ std::vector<std::string> Runtime::program_names() const {
 }
 
 void Runtime::set_scene_capable(bool on) { m_->scene_capable = on; }
+void Runtime::set_scene_shaders(bool on) { m_->scene_shaders = on; }
 
 HostFacts Runtime::host_facts() const { return m_->facts(); }
 
@@ -2561,6 +2717,9 @@ void Runtime::Impl::run_key_bindings() {
 }
 
 void Runtime::render() { m_->render(); }
+
+void Runtime::set_frame_clock(std::optional<double> seconds) { m_->pinned_clock = seconds; }
+double Runtime::frame_clock() const { return m_->frame_t; }
 
 void Runtime::run_program(std::string script, std::function<void(const std::string &)> done) {
   Impl::QueuedAction a;
