@@ -33,6 +33,18 @@ using namespace cvc::state_exec;
 
 namespace {
 
+// Every manager operation checks the manager's invariants when CVC_STATE_EXEC_CHECK=1 (gap G-4),
+// which the library reads once, when the first manager is made: set during static
+// initialization, before any, as state_exec_locks_test.cpp does.
+[[maybe_unused]] const bool g_self_check_forced = [] {
+#ifdef _WIN32
+  _putenv_s("CVC_STATE_EXEC_CHECK", "1");
+#else
+  setenv("CVC_STATE_EXEC_CHECK", "1", 1);
+#endif
+  return true;
+}();
+
 // One app and one scheduler of the given kind ("sync" or "async") and policy, with one intrinsics
 // context per program (as state_exec_locks_test.cpp's locks_world), each installing the spawn
 // context, so a spawned child has the natives and its parent's owner and uid.
@@ -93,10 +105,38 @@ struct prio_world {
   int submit(const std::string &script) { return submit(script, as{}); }
 
   int step() {
-    if (sync)
-      return sync->step();
-    async->drain_ingress();
-    return async->sync_step();
+    int stepped;
+    if (sync) {
+      stepped = sync->step();
+    } else {
+      async->drain_ingress();
+      stepped = async->sync_step();
+    }
+    check_all();
+    return stepped;
+  }
+
+  // After every step and host action: the manager's invariants, the home's quiescent clauses (on
+  // a priority home, I8's base and quiescent clauses: no inherited value stale between steps) and
+  // the process table's indexes. The first violation fails the case; the later ones are not
+  // reported again.
+  bool broken = false;
+  void check_all() {
+    if (broken)
+      return;
+    if (detail::lock_home *home = base().locks()) {
+      try {
+        home->manager().check();
+        home->check_quiescent();
+      } catch (const detail::lock_violation &v) {
+        broken = true;
+        ADD_FAILURE() << v.what();
+      }
+    }
+    if (!broken && !base().check_tables()) {
+      broken = true;
+      ADD_FAILURE() << "the process table's check failed";
+    }
   }
 
   // Step until `done()` holds or `seconds` pass. True when done() held.
@@ -133,6 +173,7 @@ struct prio_world {
   // Wakes the programs waiting on `channel`, as a host does.
   void deliver(const std::string &channel) {
     base().deliver_to_receivers(channel, value_t(std::string("go")));
+    check_all();
   }
   bool snapshot(int pid, cvc::state &node) {
     return sync ? sync->snapshot(pid, node) : async->snapshot(pid, node);
@@ -576,7 +617,7 @@ TEST_P(Priority, PI01_LowHolderHighWaiterMediumLoop) {
   EXPECT_EQ(pw.info(h).priority, 10);
   EXPECT_EQ(to_string(pw.run("(get-priority " + std::to_string(h) + ")")),
             prio_dict(10, -10, 10, "priority_rr"));
-  EXPECT_TRUE(pw.base().check_tables());
+  pw.check_all();
 
   const int m = pw.submit(spin(20000), {.priority = 0});
   pw.deliver("h.go");
@@ -587,7 +628,7 @@ TEST_P(Priority, PI01_LowHolderHighWaiterMediumLoop) {
               GetParam().c_str(), static_cast<unsigned long long>(pw.info(m).step_count));
   ASSERT_TRUE(pw.step_until([&] { return pw.parked(h); }));
   EXPECT_EQ(pw.effective(h), 10);
-  EXPECT_TRUE(pw.base().check_tables());
+  pw.check_all();
   ASSERT_TRUE(pw.step_until([&] { return pw.finished(m); }));
   pw.deliver("h.after");
   ASSERT_TRUE(pw.step_until([&] { return pw.finished(h); }));
@@ -610,7 +651,7 @@ TEST_P(Priority, PI02_ChainOfThree) {
   EXPECT_EQ(pw.effective(b), -10);
   EXPECT_EQ(pw.effective(c), -10); // two edges from W
   EXPECT_EQ(pw.effective(wt), -10);
-  EXPECT_TRUE(pw.base().check_tables());
+  pw.check_all();
 
   // C releases "b": B is granted it and parks inside, still blocking W; C blocks no one.
   pw.deliver("c.go");
@@ -622,7 +663,7 @@ TEST_P(Priority, PI02_ChainOfThree) {
   ASSERT_TRUE(pw.step_until([&] { return pw.finished(wt); }));
   ASSERT_TRUE(pw.step_until([&] { return pw.parked(b) && !pw.inside(b); }));
   EXPECT_EQ(pw.effective(b), 5);
-  EXPECT_TRUE(pw.base().check_tables());
+  pw.check_all();
   pw.deliver("b.after");
   pw.deliver("c.after");
   ASSERT_TRUE(pw.step_until([&] { return pw.finished(b) && pw.finished(c); }));
@@ -642,7 +683,7 @@ TEST_P(Priority, PI03_BoostWithdrawnOnTimeoutAndKill) {
   EXPECT_EQ(pw.effective(h), -10);
   ASSERT_TRUE(pw.step_until([&] { return !pw.lock_waiting(t); }));
   EXPECT_EQ(pw.effective(h), 10) << "the timeout left the boost";
-  EXPECT_TRUE(pw.base().check_tables());
+  pw.check_all();
   ASSERT_TRUE(pw.step_until([&] { return pw.finished(t); }));
   EXPECT_EQ(to_string(pw.result(t)), "\"timed out\"");
 
@@ -651,7 +692,7 @@ TEST_P(Priority, PI03_BoostWithdrawnOnTimeoutAndKill) {
   EXPECT_EQ(pw.effective(h), -10);
   ASSERT_TRUE(pw.base().kill(k));
   EXPECT_EQ(pw.effective(h), 10) << "the kill left the boost";
-  EXPECT_TRUE(pw.base().check_tables());
+  pw.check_all();
   pw.deliver("h.go");
   ASSERT_TRUE(pw.step_until([&] { return pw.finished(h); }));
 }
@@ -675,7 +716,7 @@ TEST_P(Priority, PI04_SetPriorityOnBoostedHolder) {
   EXPECT_EQ(pw.effective(h), -15);
   EXPECT_TRUE(pw.base().set_priority(h, 12));
   EXPECT_EQ(pw.effective(h), -10);
-  EXPECT_TRUE(pw.base().check_tables());
+  pw.check_all();
   pw.deliver("h.go");
   ASSERT_TRUE(pw.step_until([&] { return pw.finished(wt) && pw.parked(h) && !pw.inside(h); }));
   EXPECT_EQ(pw.effective(h), 12);
@@ -721,7 +762,7 @@ TEST_P(Priority, PI05_SnapshotAndInspectShowBase) {
   EXPECT_EQ(pw.info(r).priority, 10);
   EXPECT_EQ(pw.effective(r), 10) << "the restored waiter carried the boost";
   EXPECT_EQ(pw.effective(v), -10);
-  EXPECT_TRUE(pw.base().check_tables());
+  pw.check_all();
   ASSERT_TRUE(pw.base().kill(r));
   pw.deliver("h.go");
   ASSERT_TRUE(pw.step_until([&] { return pw.inside(v); }));
@@ -747,7 +788,7 @@ TEST_P(Priority, PI08_ChainWithdrawnWhole) {
   ASSERT_TRUE(pw.step_until([&] { return !pw.lock_waiting(t); }));
   EXPECT_EQ(pw.effective(h1), 7);
   EXPECT_EQ(pw.effective(h2), 7);
-  EXPECT_TRUE(pw.base().check_tables());
+  pw.check_all();
   pw.deliver("h2.go");
   ASSERT_TRUE(pw.step_until([&] { return pw.finished(h1) && pw.finished(h2) && pw.finished(t); }));
   EXPECT_EQ(to_string(pw.result(t)), "\"timed out\"");
@@ -768,7 +809,7 @@ TEST_P(Priority, PI09_BoostThroughWaiterEdge) {
   ASSERT_TRUE(pw.step_until([&] { return pw.lock_waiting(wt); }));
   EXPECT_EQ(pw.effective(h), -10);
   EXPECT_EQ(pw.effective(v), -10);
-  EXPECT_TRUE(pw.base().check_tables());
+  pw.check_all();
 
   const int m = pw.submit(spin(20000), {.priority = 0});
   pw.deliver("h.go");
@@ -803,11 +844,11 @@ TEST_P(Priority, PI11_MultiHolderBoostAndWithdraw) {
   ASSERT_TRUE(pw.step_until([&] { return pw.lock_waiting(t); }));
   EXPECT_EQ(pw.effective(p), -10);
   EXPECT_EQ(pw.effective(r), -10);
-  EXPECT_TRUE(pw.base().check_tables());
+  pw.check_all();
   ASSERT_TRUE(pw.step_until([&] { return !pw.lock_waiting(t); }));
   EXPECT_EQ(pw.effective(p), 5);
   EXPECT_EQ(pw.effective(r), 5);
-  EXPECT_TRUE(pw.base().check_tables());
+  pw.check_all();
   ASSERT_TRUE(pw.step_until([&] { return pw.finished(t); }));
   EXPECT_EQ(to_string(pw.result(t)), "\"timed out\"");
   pw.deliver("r.go");

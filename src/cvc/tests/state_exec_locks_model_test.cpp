@@ -1559,10 +1559,12 @@ public:
     bool one_home = true;
     std::uint32_t mutations = 0;      // both sides (lockmodel.py's single Manager takes them)
     std::uint32_t real_mutations = 0; // the real table only (plant_divergence)
+    std::uint32_t spec_mutations = 0; // the oracle only
   };
 
   explicit lockstep(const options &o)
-      : opts(o), spec(spec_manager::options{o.inheritance, o.coalesce, o.one_home, o.mutations}) {
+      : opts(o), spec(spec_manager::options{o.inheritance, o.coalesce, o.one_home,
+                                            o.mutations | o.spec_mutations}) {
     if (o.real) {
       dt::lock_table::options t;
       t.inheritance = o.inheritance;
@@ -2218,6 +2220,7 @@ struct config {
   bool inheritance = true;
   std::uint32_t mutations = 0;       // the manager's, on both sides
   std::uint32_t real_mutations = 0;  // the real table's only
+  std::uint32_t spec_mutations = 0;  // the oracle's only
   std::uint32_t world_mutations = 0; // world_mutation bits
   int prio_changes = 0;
   int req_per_proc = 2;
@@ -3089,6 +3092,7 @@ private:
     o.one_home = c.one_home;
     o.mutations = c.mutations;
     o.real_mutations = c.real_mutations;
+    o.spec_mutations = c.spec_mutations;
     return o;
   }
 
@@ -4221,6 +4225,14 @@ config core_config() {
 // 7. Scenarios (scenarios.py), on one home unless they need posts between two homes
 // =============================================================================================
 
+/// Where mk puts a scenario's manager mutation: on both sides, as lockmodel.py's single Manager
+/// takes it; on the real table alone, the oracle unmutated beside it; or on the oracle alone,
+/// with no table (the explorer's oracle-only mode). In lockstep the side that throws first stops
+/// the step before the other runs, so only a side run alone shows that it reports the violation
+/// itself.
+enum class mutation_side { both, table, oracle };
+thread_local mutation_side g_mutation_side = mutation_side::both;
+
 /// scenarios.py's mk: every request kind, nesting 3 (2 in a handler), two signals, kills and
 /// terminations, priorities, five requests per process.
 world mk(std::vector<bool> homes, std::vector<proc_cfg> procs, std::uint32_t mut = 0,
@@ -4236,7 +4248,9 @@ world mk(std::vector<bool> homes, std::vector<proc_cfg> procs, std::uint32_t mut
   c.kills = {true, false};
   c.destroy = true;
   c.prio_values = {-10, -2, 0, 2, 5, 10};
-  c.mutations = mut;
+  (g_mutation_side == mutation_side::both    ? c.mutations
+   : g_mutation_side == mutation_side::table ? c.real_mutations
+                                             : c.spec_mutations) = mut;
   c.world_mutations = wmut;
   c.prio_changes = 3;
   c.req_per_proc = 5;
@@ -4244,7 +4258,7 @@ world mk(std::vector<bool> homes, std::vector<proc_cfg> procs, std::uint32_t mut
   c.cache_clear = cache_clear;
   c.coalesce = coalesce;
   c.one_home = c.homes.size() == 1;
-  c.real = use_real();
+  c.real = use_real() && g_mutation_side != mutation_side::oracle;
   return world(std::move(c));
 }
 
@@ -5474,6 +5488,52 @@ TEST(LocksModel, Mutation_ImplNoteAfterOnly) {
   // the set A without the graph before misses P and Q, whose inh the timeout changes
   expect_violation("impl-note",
                    [] { return scenario_impl_note(dt::lock_table::impl_note_after_only); });
+}
+// Each manager mutation of L2 on one side alone, each side required to report it (R2a: in
+// lockstep one side's violation stops the step before the other runs): `want_table` from the
+// table beside an unmutated oracle, tagged [table], or, for a mutation the table's own check()
+// cannot see, as the two sides' notifications differing ("lockstep"); `want_oracle` from the
+// oracle alone, where no table runs to report anything.
+void expect_violation_on_each_side(const std::string &want_table, const std::string &want_oracle,
+                                   const std::function<std::string()> &scenario) {
+  for (const mutation_side side : {mutation_side::table, mutation_side::oracle}) {
+    const bool table = side == mutation_side::table;
+    const std::string &want = table ? want_table : want_oracle;
+    const std::string who = table ? "the table" : "the oracle";
+    const std::string tag = !table ? "" : want == "lockstep" ? "lockstep:" : "[table]";
+    SCOPED_TRACE(who + " alone");
+    g_mutation_side = side;
+    try {
+      const std::string r = scenario();
+      ADD_FAILURE() << "no violation (wanted " << want << " from " << who << "): " << r;
+    } catch (const lock_violation &v) {
+      EXPECT_EQ(v.invariant(), want) << v.what();
+      EXPECT_NE(std::string(v.what()).find(tag), std::string::npos) << v.what();
+      std::printf("  %s alone, caught as expected (%s): %s\n", who.c_str(), want.c_str(), v.what());
+    } catch (const std::exception &e) {
+      ADD_FAILURE() << who << " alone (wanted " << want << "): " << e.what();
+    }
+    g_mutation_side = mutation_side::both;
+  }
+}
+
+TEST(LocksModel, Mutation_CancelSkipsRelevel_EachSide) {
+  LT5_NEEDS_TABLE();
+  expect_violation_on_each_side("I8", "I8",
+                                [] { return scenario_pi11(dt::lock_table::cancel_skips_relevel); });
+}
+TEST(LocksModel, Mutation_CoalesceNoClear_EachSide) {
+  LT5_NEEDS_TABLE();
+  // On the table the second relevel is coalesced away while every inh stays right: only the
+  // notifications show it, against the oracle's
+  expect_violation_on_each_side(
+      "lockstep", "I8", [] { return scenario_coalesce(dt::lock_table::coalesce_no_clear); });
+}
+TEST(LocksModel, Mutation_ImplNoteAfterOnly_EachSide) {
+  LT5_NEEDS_TABLE();
+  expect_violation_on_each_side("impl-note", "impl-note", [] {
+    return scenario_impl_note(dt::lock_table::impl_note_after_only);
+  });
 }
 TEST(LocksModel, Mutation_NoSetBase) {
   LT5_NEEDS_TABLE();
