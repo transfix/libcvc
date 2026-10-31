@@ -49,6 +49,17 @@ const std::vector<TokenRule> &rules() {
        [](const HostFacts &f) { return f.net_auth; }},
       {{"net.auth.persist", "the host keeps credentials across runs"},
        [](const HostFacts &f) { return f.net_auth_persist; }},
+      {{"image.url", "image: shows a picture by URI (§5.11): http(s) where the network is on, "
+                     "file://, cvc://, state://"},
+       [](const HostFacts &) { return true; }},
+      {{"image.background", "a window, overlay or group draws a background: picture (§5.12)"},
+       [](const HostFacts &) { return true; }},
+      {{"media", "video: and audio: play here (a player, and not an SSH session it would play "
+                 "remotely from, unless --media-play always)"},
+       [](const HostFacts &f) { return f.media; }},
+      {{"media.player",
+        "the host has a player for video: and audio: (ari-media, arigl, a browser)"},
+       [](const HostFacts &f) { return f.media_player; }},
   };
   return kRules;
 }

@@ -35,6 +35,26 @@ include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcInstallRpath.cmake")
 cvc_set_install_rpath(ari bin)
 install(TARGETS ari RUNTIME DESTINATION bin COMPONENT ari)
 
+# ari-media: the same ari with cvcMedia linked, so it plays sound through SDL3's audio subsystem
+# (no window, no display; no GL, VTK or ImGui). The lean `ari` above stays as it was. In-tree it is
+# built wherever cvcMedia is (CVC_BUILD_ARI_MEDIA, or with cvcGL); standalone (the ari-media cvcpkg
+# recipe, -DARI_WITH_MEDIA=ON) it builds cvcMedia from src/cvcMedia, statically, into the binary.
+option(ARI_WITH_MEDIA "Also build ari-media, with cvcMedia (src/cvcMedia) linked in" OFF)
+if(NOT EMSCRIPTEN AND (TARGET cvcMedia OR ARI_WITH_MEDIA))
+  if(NOT TARGET cvcMedia)
+    set(CVC_MEDIA_NO_INSTALL ON)
+    set(_ari_shared "${BUILD_SHARED_LIBS}")
+    set(BUILD_SHARED_LIBS OFF)
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../cvcMedia" "${CMAKE_CURRENT_BINARY_DIR}/cvcMedia")
+    set(BUILD_SHARED_LIBS "${_ari_shared}")
+  endif()
+  add_executable(ari-media main.cpp)
+  target_link_libraries(ari-media PRIVATE cvcMedia)
+  target_compile_definitions(ari-media PRIVATE ARI_MEDIA=1)
+  cvc_set_install_rpath(ari-media bin)
+  install(TARGETS ari-media RUNTIME DESTINATION bin COMPONENT ari)
+endif()
+
 # ctest coverage of the binary, in-tree only. A document set as an app installs one
 # (share/<app>/main.ari), run from another working directory: its relative imports, out of its own
 # directory and its parent's, resolve against the importing file's directory, as in arigl
@@ -75,6 +95,14 @@ if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL 
     endmacro()
   endif()
   gtest_discover_tests(ari_net_test PROPERTIES ENVIRONMENT "ARI_BINARY=$<TARGET_FILE:ari>")
+  # The image: widget by URL end to end (ari_media_test.cpp, docs/ARIADNE.md §5.11).
+  add_executable(ari_media_test ari_media_test.cpp)
+  target_link_libraries(ari_media_test PRIVATE cvc GTest::gtest GTest::gtest_main)
+  add_dependencies(ari_media_test ari)
+  if(TARGET ari-media) # the video:/audio: tests run ari-media, built beside ari
+    add_dependencies(ari_media_test ari-media)
+  endif()
+  gtest_discover_tests(ari_media_test PROPERTIES ENVIRONMENT "ARI_BINARY=$<TARGET_FILE:ari>")
   # (quit code), assert and `ari test` end to end (ari_test_command_test.cpp).
   add_executable(ari_test_command_test ari_test_command_test.cpp)
   target_link_libraries(ari_test_command_test PRIVATE cvc GTest::gtest GTest::gtest_main)
@@ -99,6 +127,28 @@ if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
                 "${CMAKE_CURRENT_SOURCE_DIR}/../../examples/ariadne/documents/json_feed.ari"
                 ${_backend} "${CMAKE_CURRENT_SOURCE_DIR}/tests/json_feed.rows")
       set_tests_properties(ari_run_json_feed_${_backend} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+      # Pictures by URI (§5.11): a cover banner, a circle avatar and a missing file, drawn.
+      add_test(NAME ari_run_media_images_${_backend}
+        COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/media_in_tmux_test.sh" $<TARGET_FILE:ari>
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/media_images.ari" ${_backend}
+                "banner ready avatar ready gone failed" 130 "background ready▀")
+      set_tests_properties(ari_run_media_images_${_backend} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+      # Cards from the component library (§6.5): an avatar, a byline, a picture and a failed one.
+      add_test(NAME ari_run_media_card_${_backend}
+        COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/media_in_tmux_test.sh" $<TARGET_FILE:ari>
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/media_card.ari" ${_backend}
+                "pic ready clip failed" 60 "@grace · 2h")
+      set_tests_properties(ari_run_media_card_${_backend} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60
+        ENVIRONMENT "ARI_FLAGS=--component-path ${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne")
+      # ari-media plays a video: (and opens an audio:) on SDL's dummy sound driver (§5.13).
+      if(TARGET ari-media AND CVC_MEDIA_HAVE_FFMPEG)
+        add_test(NAME ari_run_media_player_${_backend}
+          COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/media_in_tmux_test.sh"
+                  $<TARGET_FILE:ari-media> "${CMAKE_CURRENT_SOURCE_DIR}/tests/media_player.ari"
+                  ${_backend} "video playing audio ready" 60)
+        set_tests_properties(ari_run_media_player_${_backend} PROPERTIES SKIP_RETURN_CODE 77
+          TIMEOUT 60 ENVIRONMENT "SDL_AUDIO_DRIVER=dummy")
+      endif()
     endforeach()
   endif()
 endif()

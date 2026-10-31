@@ -1,0 +1,18 @@
+# media_player.ari -- a video: and an audio: widget (docs/ARIADNE.md §5.13) on file:// sources
+# beside this document, for the player tests: each line says how its player is.
+meta: {min_libcvc: 3.7.0}
+windows:
+  - window: Player
+    id: player
+    size: [420, auto]
+    children:
+      - video: clip
+        src: file://media/clip.webm
+        size: [192, 108]
+        bind: m.video
+        autoplay: true
+      - audio: tone
+        src: file://media/tone.opus
+        bind: m.audio
+      - text: ""
+        bind: (string.join (list "video" (state-get "m.video.state") "audio" (state-get "m.audio.state")) " ")

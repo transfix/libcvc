@@ -16,10 +16,10 @@
 #include <cvc/ariadne/stream/frame.h>
 #include <cvc/ariadne/stream/stream.h>
 #include <cvc/ariadne/stream/stream_channel.h>
-#include <cvc/gl/playback/audio_stream_player.h>
+#include <cvc/media/playback/audio_stream_player.h>
 
 namespace cvc {
-namespace gl {
+namespace media {
 namespace playback {
 
 namespace cs = cvc::ariadne::stream;
@@ -73,5 +73,5 @@ void audio_stream_player::stop() {
 }
 
 } // namespace playback
-} // namespace gl
+} // namespace media
 } // namespace cvc

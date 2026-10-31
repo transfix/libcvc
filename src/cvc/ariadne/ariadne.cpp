@@ -18,8 +18,10 @@
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
 #include <cvc/ariadne/bind.h>
-#include <cvc/ariadne/input.h> // §4.6 InputEvent — Runtime::post_input feeds on_key/on_pointer
+#include <cvc/ariadne/input.h>  // §4.6 InputEvent — Runtime::post_input feeds on_key/on_pointer
 #include <cvc/ariadne/loader.h> // is_builtin_widget_type (has?)
+#include <cvc/ariadne/media.h>  // §5.11 pictures by URI
+#include <cvc/ariadne/media_player.h> // §5.13 video: / audio: players
 #include <cvc/ariadne/net_host.h> // net_host_status (the net capability tokens)
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
@@ -185,6 +187,12 @@ Widget substitute_index(const Widget &w, int index) {
   out.disabled_when = replace_all(out.disabled_when, kTok, idx);
   out.tooltip = replace_all(out.tooltip, kTok, idx);
   out.options_expr = replace_all(out.options_expr, kTok, idx);
+  out.src = replace_all(out.src, kTok, idx); // §5.11: a picture per item (src: feed.{i}.png)
+  out.media_status = replace_all(out.media_status, kTok, idx);
+  out.background.src = replace_all(out.background.src, kTok, idx); // §5.12
+  out.background.bind = replace_all(out.background.bind, kTok, idx);
+  out.background.status = replace_all(out.background.status, kTok, idx);
+  out.poster = replace_all(out.poster, kTok, idx); // §5.13
   // §12: a repeated MOUNT (Widget::scope set) gets a per-instance sub-prefix — append the loop
   // index so each instance's fragment binds to its OWN state subtree (includes.<as>.<i>), rather
   // than all N instances sharing one, which would violate repeat's per-instance-state contract.
@@ -891,6 +899,8 @@ struct Runtime::Impl {
     f.net = net.enabled;
     f.net_auth = net.auth;
     f.net_auth_persist = net.persist;
+    f.media_player = media::have_player_factory(); // §5.13
+    f.media = f.media_player && media::may_play_here();
     return f;
   }
   bool has(const std::string &name) const {
@@ -963,6 +973,56 @@ struct Runtime::Impl {
   // Kind::TfEditor parse caches, one per editor instance ("<model path>#<id>"): a state string is
   // re-parsed only when it changes.
   std::unordered_map<std::string, TfEditorCache> tf_caches;
+
+  // §5.11 pictures by URI: loaded off the frame by the cache, published to the backend under the
+  // cache's names (each once per raster, tracked in `published` against the backend it went to).
+  std::unique_ptr<media::ImageCache> images;
+  std::string media_base;                          // relative file:// URIs resolve against it
+  std::unordered_map<std::string, long> published; // name -> the raster generation published
+  Backend *published_to = nullptr;                 // the backend `published` describes
+  std::unordered_map<std::string, std::string> media_status_written; // status path -> last value
+  bool drew_loading = false;  // the last frame drew a picture still loading (media_stale)
+  long frame_publish_gen = 0; // §5.13 a player's frames, as published generations
+  media::ImageCache &image_cache() {
+    if (!images) {
+      images = std::make_unique<media::ImageCache>(app);
+      images->set_base(media_base);
+    }
+    return *images;
+  }
+  void emit_media_image(const Widget &w, const std::string &uri, const char *label);
+  // §5.11: publish a ready picture once per raster generation; keep a status: key current.
+  void publish_media(const media::ImageView &v);
+  void write_media_status(const std::string &status_path, const media::ImageView &v);
+  // §5.12: open a container's background (its picture, loading through the cache) before its
+  // content; true when it did, so the caller closes it with backend->end_backdrop().
+  bool open_backdrop(const Widget &w, bool window);
+
+  // §5.13 video: / audio: players, one per widget instance (its bind:, else its place and source),
+  // kept while the widget is drawn: paused at once when a walk does not draw it, dropped after 5 s.
+  struct PlayerSlot {
+    std::string uri, auth;
+    std::unique_ptr<media::Player> player;
+    media::PlayerState state = media::PlayerState::Idle;
+    bool decided = false; // state chosen for this source (a player made, or Remote/Unsupported)
+    std::string error;
+    std::string frame_name; // the published picture's name
+    long frame_gen = 0;
+    bool have_frame = false;
+    cvc::image pending; // a frame waiting for the terminal's frame-rate cap
+    bool has_pending = false;
+    double last_publish = 0.0;
+    bool autoplay_done = false;
+    std::string wrote_playing, wrote_muted, wrote_state, wrote_duration, wrote_error;
+    double wrote_position = -1.0, wrote_position_at = 0.0;
+    std::uint64_t drawn_walk = 0;
+    double last_drawn = 0.0;
+    bool hidden_paused = false;
+  };
+  std::unordered_map<std::string, PlayerSlot> players;
+  std::uint64_t walk_count = 0;
+  void emit_player(const Widget &w, const char *label);
+  void players_end_walk();
 
   // §4.7 action lane: a unique owner tag for this Runtime's processes on the app-wide
   // scheduler (app.exec_scheduler()), so teardown reaps exactly this document's process
@@ -1618,7 +1678,10 @@ void Runtime::Impl::emit_node(const Widget &w) {
       write<std::string>(app, geo_path, format_geom(persist));
     if (visible) {
       b.push_id(id.c_str());
+      const bool backdrop = open_backdrop(w, /*window=*/true); // §5.12
       emit_container(w); // §3.0.3b: the window body honours w.layout
+      if (backdrop)
+        b.end_backdrop();
       b.pop_id();
     }
     b.end_window();
@@ -1632,7 +1695,12 @@ void Runtime::Impl::emit_node(const Widget &w) {
     // hold a "Change" button.
     if (!w.id.empty())
       b.push_id(w.id.c_str());
-    emit_container(w); // §3.0.3b: a group honours w.layout (grid / vertical)
+    {
+      const bool backdrop = open_backdrop(w, /*window=*/false); // §5.12
+      emit_container(w); // §3.0.3b: a group honours w.layout (grid / vertical)
+      if (backdrop)
+        b.end_backdrop();
+    }
     if (!w.id.empty())
       b.pop_id();
     break;
@@ -1798,10 +1866,23 @@ void Runtime::Impl::emit_node(const Widget &w) {
     break;
   }
 
+  case Kind::Video:
+  case Kind::Audio:
+    emit_player(w, label); // §5.13
+    break;
+
   case Kind::Image: {
-    // The image name: a bound key's value (a combo can switch rasters) else the static src.
+    // The image name: a bound key's value (a combo can switch rasters) else the static src. Either
+    // may be a computed expression, and either may be a URI (§5.11), which the cache loads.
+    const std::string src = is_expr(w.src) ? eval_text(w.src) : w.src;
     const std::string name =
-        w.bind.empty() ? w.src : read_or<std::string>(app, resolve(w.bind), w.src);
+        w.bind.empty() ? src
+                       : (is_expr(w.bind) ? eval_text(w.bind)
+                                          : read_or<std::string>(app, resolve(w.bind), src));
+    if (media::is_uri(name)) {
+      emit_media_image(w, name, label);
+      break;
+    }
     const float width = static_cast<float>(w.img_size > 0 ? w.img_size : 256.0);
     if (!b.draw_image(name.c_str(), width)) // a backend with no image path -> show the name as text
       b.text_value(w.label.empty() ? "image" : w.label.c_str(),
@@ -1896,9 +1977,411 @@ void Runtime::Impl::emit_node(const Widget &w) {
     b.end_disabled();
 }
 
+// §5.11: draw a picture by URI — the cache's fitted raster once it is ready, else a placeholder of
+// the same box — and report its state to the widget's status: path.
+void Runtime::Impl::emit_media_image(const Widget &w, const std::string &uri, const char *label) {
+  media::ImageRequest rq;
+  rq.uri = uri;
+  rq.auth = w.media_auth;
+  rq.w = std::max(1, static_cast<int>(std::lround(w.img_size > 0 ? w.img_size : 256.0)));
+  rq.h = w.img_h > 0 ? std::max(1, static_cast<int>(std::lround(w.img_h))) : 0;
+  rq.fit = w.img_fit;
+  rq.shape = w.img_shape;
+  const media::ImageView v = image_cache().image(rq);
+  drew_loading = drew_loading || v.status == media::Status::Loading;
+  std::string name;
+  if (v.status == media::Status::Ready) {
+    name = v.name;
+    publish_media(v);
+  } else {
+    // One placeholder per box shape and state, shared by every widget with that box.
+    const bool failed = v.status == media::Status::Failed;
+    const int ph = media::placeholder_height(rq.w, rq.h, rq.shape);
+    name = std::string("media:placeholder:") + (failed ? "failed:" : "loading:") +
+           std::to_string(rq.w) + "x" + std::to_string(ph) +
+           (rq.shape == ImageShape::Circle ? ":circle" : "");
+    if (!published.count(name)) {
+      backend->set_image(name, media::placeholder_image(rq.w, rq.h, rq.shape, failed));
+      published[name] = 0;
+    }
+  }
+  const float width = static_cast<float>(rq.w);
+  const std::string caption = (label && *label) ? std::string(label) : std::string("image");
+  if (!backend->draw_image(name.c_str(), width)) // a backend with no image path: say what it is
+    backend->text_value(caption.c_str(),
+                        v.status == media::Status::Ready
+                            ? uri
+                            : std::string("(") + media::status_name(v.status) + ")");
+  if (v.status == media::Status::Failed)
+    backend->set_tooltip((caption + ": " + v.error).c_str());
+  write_media_status(w.media_status, v);
+}
+
+void Runtime::Impl::publish_media(const media::ImageView &v) {
+  auto it = published.find(v.name);
+  if (it == published.end() || it->second != v.gen) {
+    backend->set_image(v.name, v.image);
+    published[v.name] = v.gen;
+  }
+}
+
+void Runtime::Impl::write_media_status(const std::string &status_path, const media::ImageView &v) {
+  if (status_path.empty())
+    return;
+  const std::string path = resolve(status_path);
+  const std::string st = media::status_name(v.status);
+  std::string &seen = media_status_written[path];
+  if (seen != st) {
+    seen = st;
+    write<std::string>(app, path, st);
+    write<std::string>(app, path + ".error", v.error);
+  }
+}
+
+bool Runtime::Impl::open_backdrop(const Widget &w, bool window) {
+  const Background &bg = w.background;
+  if (!bg.any())
+    return false;
+  const std::string src = is_expr(bg.src) ? eval_text(bg.src) : bg.src;
+  const std::string ref =
+      bg.bind.empty() ? src
+                      : (is_expr(bg.bind) ? eval_text(bg.bind)
+                                          : read_or<std::string>(app, resolve(bg.bind), src));
+  Backdrop bd;
+  bd.fit = bg.fit;
+  bd.opacity = bg.opacity;
+  bd.terminal = bg.terminal;
+  bd.banner_rows = bg.banner_rows;
+  bd.window = window;
+  bd.size = w.size;
+  if (media::is_uri(ref)) {
+    // The picture at its own shape (the backend fits it to the area the content takes), no larger
+    // than the cache's cap.
+    media::ImageRequest rq;
+    rq.uri = ref;
+    rq.auth = bg.auth;
+    rq.w = std::max(1, image_cache().limits().max_image_px / 2);
+    rq.h = 0;
+    const media::ImageView v = image_cache().image(rq);
+    drew_loading = drew_loading || v.status == media::Status::Loading;
+    if (v.status == media::Status::Ready) {
+      publish_media(v);
+      bd.image = v.name;
+    }
+    write_media_status(bg.status, v);
+  } else {
+    bd.image = ref; // a host-published image, by name
+  }
+  backend->begin_backdrop(bd);
+  return true;
+}
+
+namespace {
+
+double steady_seconds() {
+  return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// A string as a state_exec literal: "..." with \ and " escaped.
+std::string program_string(const std::string &s) {
+  std::string out = "\"";
+  for (char c : s) {
+    if (c == '\\' || c == '"')
+      out += '\\';
+    out += c;
+  }
+  return out + "\"";
+}
+
+} // namespace
+
+void Runtime::Impl::emit_player(const Widget &w, const char *label) {
+  Backend &b = *backend;
+  const bool video = w.kind == Kind::Video;
+  const std::string uri = is_expr(w.src) ? eval_text(w.src) : w.src;
+  const std::string caption =
+      (label && *label) ? std::string(label) : std::string(video ? "video" : "audio");
+  // The instance: its state prefix where it has one (a feed binds each post's own), else where it
+  // sits and what it plays.
+  std::string key;
+  if (!w.bind.empty() && !is_expr(w.bind)) {
+    key = resolve(w.bind);
+  } else {
+    for (std::size_t i = 0; i < emit_path.size(); ++i)
+      key += (i ? "_" : "") + std::to_string(emit_path[i]);
+    key += "#" + uri;
+  }
+  const std::string prefix =
+      !w.bind.empty() && !is_expr(w.bind)
+          ? key
+          : resolve("ariadne.media.players.p" +
+                    std::to_string(std::hash<std::string>()(key) % 1000000007));
+  PlayerSlot &p = players[key];
+  const double now = steady_seconds();
+  p.drawn_walk = walk_count;
+  p.last_drawn = now;
+  if (p.hidden_paused) { // back on screen: it stays paused; the user (or the document) plays it
+    p.hidden_paused = false;
+  }
+  // A new source: a new player.
+  if (p.uri != uri || p.auth != w.media_auth) {
+    p.player.reset();
+    p.decided = false;
+    p.uri = uri;
+    p.auth = w.media_auth;
+    p.have_frame = false;
+    p.has_pending = false;
+    p.autoplay_done = false;
+    p.error.clear();
+    p.frame_name = "media:player:" + std::to_string(std::hash<std::string>()(key));
+  }
+  if (!p.decided) {
+    p.decided = true;
+    if (uri.empty()) {
+      p.state = media::PlayerState::Idle;
+    } else if (!media::have_player_factory()) {
+      p.state = media::PlayerState::Unsupported;
+      p.error = "no player in this host (ari-media and arigl play it)";
+    } else if (!media::may_play_here()) {
+      p.state = media::PlayerState::Remote;
+      p.error = media::in_ssh_session() && media::play_policy() == media::PlayPolicy::Auto
+                    ? "not played over SSH (it would play remotely)"
+                    : "playing is off here (--media-play never)";
+    } else {
+      media::PlayerSource ps;
+      ps.uri = uri;
+      ps.auth = w.media_auth;
+      ps.base = media_base;
+      ps.video = video;
+      ps.frame_w = std::max(1, static_cast<int>(std::lround(w.img_size)));
+      ps.frame_h = w.img_h > 0 ? static_cast<int>(std::lround(w.img_h)) : ps.frame_w;
+      ps.loop = w.loop;
+      ps.muted = w.muted;
+      p.player = media::make_player(ps);
+      p.state = p.player ? media::PlayerState::Loading : media::PlayerState::Unsupported;
+      if (!p.player)
+        p.error = "this host's player cannot play it";
+    }
+  }
+  media::Player *pl = p.player.get();
+  if (pl) {
+    p.state = pl->state();
+    p.error = p.state == media::PlayerState::Failed ? pl->error() : std::string();
+  }
+  drew_loading = drew_loading || p.state == media::PlayerState::Loading;
+  double pos = pl ? pl->position() : 0.0;
+  const double dur = pl ? pl->duration() : 0.0;
+
+  // What the document wrote to the player's keys since the last frame.
+  const auto key_of = [&](const char *k) { return prefix + "." + k; };
+  if (pl) {
+    const std::string want = read_or<std::string>(app, key_of("playing"), p.wrote_playing);
+    if (want != p.wrote_playing &&
+        (want == "1" || want == "0" || want == "true" || want == "false")) {
+      if (want == "1" || want == "true")
+        pl->play();
+      else
+        pl->pause();
+      p.wrote_playing = want;
+    }
+    const std::string seek = read_or<std::string>(app, key_of("seek"), std::string());
+    if (!seek.empty()) {
+      char *end = nullptr;
+      const double t = std::strtod(seek.c_str(), &end);
+      if (end != seek.c_str() && std::isfinite(t))
+        pl->seek(t);
+      write<std::string>(app, key_of("seek"), std::string());
+    }
+    const std::string mute = read_or<std::string>(app, key_of("muted"), p.wrote_muted);
+    if (mute != p.wrote_muted && !mute.empty()) {
+      pl->set_muted(mute == "1" || mute == "true");
+      p.wrote_muted = mute;
+    }
+    if (w.autoplay && !p.autoplay_done && p.state == media::PlayerState::Ready) {
+      p.autoplay_done = true;
+      pl->play();
+    }
+  }
+
+  // The picture: the newest frame (at most term_fps a second in a terminal), else the poster,
+  // else a placeholder of the box.
+  if (video) {
+    const int bw = std::max(1, static_cast<int>(std::lround(w.img_size)));
+    const int bh = w.img_h > 0 ? static_cast<int>(std::lround(w.img_h)) : 0;
+    if (pl) {
+      cvc::image f;
+      if (pl->frame(f, p.frame_gen)) {
+        p.pending = media::fit_image(f, bw, bh > 0 ? bh : 0, w.img_fit, ImageShape::Rect, 1.0);
+        p.has_pending = !p.pending.empty();
+      }
+      const double min_gap = b.capabilities().terminal ? 1.0 / 8.0 : 0.0;
+      if (p.has_pending && now - p.last_publish >= min_gap) {
+        b.set_image(p.frame_name, p.pending);
+        published[p.frame_name] = ++frame_publish_gen;
+        p.have_frame = true;
+        p.has_pending = false;
+        p.last_publish = now;
+      }
+    }
+    std::string name;
+    if (p.have_frame) {
+      name = p.frame_name;
+    } else if (media::is_uri(w.poster)) {
+      media::ImageRequest rq;
+      rq.uri = w.poster;
+      rq.auth = w.media_auth;
+      rq.w = bw;
+      rq.h = bh;
+      rq.fit = w.img_fit;
+      const media::ImageView v = image_cache().image(rq);
+      drew_loading = drew_loading || v.status == media::Status::Loading;
+      if (v.status == media::Status::Ready) {
+        publish_media(v);
+        name = v.name;
+      }
+    }
+    if (name.empty()) {
+      const bool failed = p.state == media::PlayerState::Failed;
+      const int ph = media::placeholder_height(bw, bh, ImageShape::Rect);
+      name = std::string("media:placeholder:") + (failed ? "failed:" : "loading:") +
+             std::to_string(bw) + "x" + std::to_string(ph);
+      if (!published.count(name)) {
+        b.set_image(name, media::placeholder_image(bw, bh, ImageShape::Rect, failed));
+        published[name] = 0;
+      }
+    }
+    if (!b.draw_image(name.c_str(), static_cast<float>(bw)))
+      b.text_value(caption.c_str(), "(" + std::string(media::player_state_name(p.state)) + ")");
+  }
+
+  // The controls, with the widgets every backend has: play / pause, a seek slider, the time, mute,
+  // and "Open" (the user's browser) where it can't play here.
+  const bool playing = p.state == media::PlayerState::Playing;
+  // Play works while the player loads (it starts once it can), so it is the first stop for
+  // autofocus and Tab; only a player that failed, or none, can't take it.
+  const bool usable = pl && p.state != media::PlayerState::Failed;
+  const bool elsewhere = p.state == media::PlayerState::Remote ||
+                         p.state == media::PlayerState::Unsupported ||
+                         p.state == media::PlayerState::Failed;
+  b.push_id(("player:" + key).c_str());
+  Layout row;
+  row.kind = LayoutKind::Horizontal;
+  if (b.begin_grid(row, ("player:" + key).c_str())) {
+    b.grid_next_cell();
+    if (!usable)
+      b.begin_disabled();
+    if (b.button(playing ? "Pause" : "Play") && usable) {
+      if (playing)
+        pl->pause();
+      else
+        pl->play();
+    }
+    b.grid_next_cell();
+    // The slider's value shows as the time line: a format with no conversion prints as it is, in
+    // ImGui and the terminal backends alike.
+    const std::string times = media::format_time(pos) + " / " + media::format_time(dur);
+    const DoubleEdit seek = b.slider_double("", ("seek:" + key).c_str(), pos, 0.0,
+                                            std::max({dur, pos, 0.001}), times.c_str());
+    if (seek.committed && usable) {
+      pl->seek(seek.value);
+      pos = seek.value;
+    }
+    if (!usable)
+      b.end_disabled();
+    b.grid_next_cell();
+    bool muted_now =
+        p.wrote_muted.empty() ? w.muted : (p.wrote_muted == "1" || p.wrote_muted == "true");
+    const BoolEdit mute = b.checkbox("Mute", muted_now);
+    if (mute.committed) {
+      muted_now = mute.value;
+      if (pl)
+        pl->set_muted(muted_now);
+      p.wrote_muted = muted_now ? "1" : "0";
+      write<std::string>(app, key_of("muted"), p.wrote_muted);
+    }
+    if (elsewhere && !uri.empty() && media::is_uri(uri) &&
+        (uri.rfind("http://", 0) == 0 || uri.rfind("https://", 0) == 0)) {
+      b.grid_next_cell();
+      if (b.button("Open")) {
+        if (has_function("open-url"))
+          enqueue("(open-url " + program_string(uri) + ")");
+        else
+          warn_once("ari: " + caption + ": this host cannot open a browser; the URL is " + uri);
+      }
+      b.set_tooltip(!w.media_auth.empty() ? "Open in your browser (it needs its own sign-in)"
+                                          : "Open in your browser");
+    }
+    b.end_grid();
+  }
+  b.pop_id();
+  if (elsewhere && !p.error.empty())
+    b.text_line((caption + ": " + p.error).c_str());
+
+  // The state keys, written when they change (position at most 4 times a second while playing).
+  const std::string st = media::player_state_name(p.state);
+  if (st != p.wrote_state) {
+    p.wrote_state = st;
+    write<std::string>(app, key_of("state"), st);
+  }
+  const std::string playing_s = playing ? "1" : "0";
+  if (playing_s != p.wrote_playing) {
+    p.wrote_playing = playing_s;
+    write<std::string>(app, key_of("playing"), playing_s);
+  }
+  if (std::fabs(pos - p.wrote_position) > 0.01 && (!playing || now - p.wrote_position_at >= 0.25)) {
+    p.wrote_position = pos;
+    p.wrote_position_at = now;
+    write<double>(app, key_of("position"), pos);
+  }
+  const std::string dur_s = std::to_string(dur);
+  if (dur_s != p.wrote_duration) {
+    p.wrote_duration = dur_s;
+    write<double>(app, key_of("duration"), dur);
+  }
+  if (p.error != p.wrote_error) {
+    p.wrote_error = p.error;
+    write<std::string>(app, key_of("error"), p.error);
+  }
+}
+
+void Runtime::Impl::players_end_walk() {
+  const double now = steady_seconds();
+  for (auto it = players.begin(); it != players.end();) {
+    PlayerSlot &p = it->second;
+    if (p.drawn_walk != walk_count) {
+      // Not drawn this walk (its window closed, scrolled out of a repeat): stop the sound now,
+      // and let it go after a while.
+      if (p.player && !p.hidden_paused && p.player->state() == media::PlayerState::Playing) {
+        p.player->pause();
+        p.hidden_paused = true;
+      }
+      if (now - p.last_drawn > 5.0) {
+        if (backend)
+          backend->drop_image(p.frame_name);
+        published.erase(p.frame_name);
+        it = players.erase(it);
+        continue;
+      }
+    }
+    ++it;
+  }
+  ++walk_count;
+}
+
 void Runtime::Impl::render() {
   if (!backend)
     return;
+  // §5.11: published pictures belong to the backend they went to; the cache's dropped ones go.
+  if (published_to != backend) {
+    published.clear();
+    published_to = backend;
+  }
+  drew_loading = false;
+  if (images)
+    for (const std::string &name : images->take_dropped()) {
+      backend->drop_image(name);
+      published.erase(name);
+    }
   // Reconcile commit boundary (roadmap §11.5.1): a queued tree swap is applied
   // here, at the top of the frame, before any node is emitted — never mid-walk.
   if (has_pending) {
@@ -1945,6 +2428,7 @@ void Runtime::Impl::render() {
     backend->end_main_menu_bar();
   }
   emit(root);
+  players_end_walk(); // §5.13: a player whose widget this walk did not draw stops
   backend->end_frame();
   autofocus_shown.swap(autofocus_now);
   autofocus_now.clear();
@@ -2405,6 +2889,22 @@ void Runtime::refresh_program_names() {
 
 void Runtime::set_backend(Backend *backend) { m_->backend = backend; }
 
+bool Runtime::media_busy() const {
+  if (m_->images && m_->images->busy())
+    return true;
+  for (const auto &kv : m_->players) // §5.13 a player still fetching or opening its source
+    if (kv.second.player && kv.second.player->state() == media::PlayerState::Loading)
+      return true;
+  return false;
+}
+bool Runtime::media_stale() const { return m_->drew_loading || media_busy(); }
+
+void Runtime::set_media_base(std::string dir) {
+  m_->media_base = std::move(dir);
+  if (m_->images)
+    m_->images->set_base(m_->media_base);
+}
+
 void Runtime::set_root(Widget root) {
   // Now, not at the swap: a resident submitted in the next drain() runs with these.
   m_->doc_functions = root.functions ? root.functions->prelude : std::string();
@@ -2570,6 +3070,8 @@ void Runtime::drain() {
   // from inside render() (the deferred intent-buffer discipline, §7.2/§4.7). The keys pressed since
   // the last drain queue theirs first.
   m_->run_key_bindings();
+  if (m_->images) // §5.11: a build without threads loads its pictures here, a step per drain
+    m_->images->pump();
   std::vector<Impl::QueuedAction> events;
   events.swap(m_->queued_events);
   for (const Impl::QueuedAction &a : events) {

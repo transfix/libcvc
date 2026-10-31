@@ -72,12 +72,14 @@
 #include <cvc/ariadne/host_info.h>
 #include <cvc/ariadne/host_signals.h>
 #include <cvc/ariadne/loader.h> // run_init — seed conf.room / conf.self before the first tick
+#include <cvc/ariadne/media_player.h> // §5.13 the play policy (--media-play)
 #include <cvc/ariadne/stream/stream_view.h>
 #include <cvc/ariadne/tvision_backend.h>
 #include <cvc/ariadne/web_document.h> // arigl-web: a document named by URL
 #include <cvc/core/app.h>
-#include <random> // std::random_device — the conference node id's per-launch suffix
-#include <sstream> // arigl info: the GL report, line by line
+#include <cvc/media/player.h> // cvcMedia's FFmpeg + SDL3 player for video: / audio:
+#include <random>             // std::random_device — the conference node id's per-launch suffix
+#include <sstream>            // arigl info: the GL report, line by line
 #if CVC_ENABLE_WS || CVC_ENABLE_GRPC
 // Conference mode: a state transport joins a hosted room, chosen by the relay URL scheme —
 // ws://|wss:// (WebSocket, what browsers dial; the host page sets wss://<page-origin>/…) or grpc://
@@ -1664,19 +1666,23 @@ int run_window(const ari::HostOptions &o) {
   if (o.command == "snapshot") {
     rt.set_fixed_clock(true); // reproducible: the scene clock advances 1/30 s a frame
     const int frames = std::max(1, o.frames);
+    bool settle = false;
     const auto period = snapshot_period(o);
     for (int f = 0; f < frames; ++f) {
       const auto start = std::chrono::steady_clock::now();
       conf.pump(); // publish this frame's room-tree + media to the relay (run mode does this via
                    // the input pump, set below; a snapshot of a live conference must pump too)
       rt.frame(1.0 / 30.0);
-      if (f + 1 == frames && !o.net.enabled)
+      // The last frame waits for the document's requests and pictures (§5.11), if it has any out.
+      if (f + 1 == frames)
+        settle = o.net.enabled || rt.app_runtime().runtime().media_stale();
+      if (f + 1 == frames && !settle)
         view.writePNG(o.png.c_str()); // renders and writes the last frame
       else
         rt.render();
       std::this_thread::sleep_until(start + period);
     }
-    if (o.net.enabled) { // the frame shows what the document's requests brought back
+    if (settle) { // the frame shows what the document's requests brought back
       rt.app_runtime().settle([&] {
         rt.frame(1.0 / 30.0);
         rt.render();
@@ -1866,10 +1872,11 @@ int run_terminal(const ari::HostOptions &o) {
       frame = backend->render_to_string(rt.runtime(), width, height, o.ansi);
       std::this_thread::sleep_until(start + period);
     }
-    if (o.net.enabled) { // the frame shows what the document's requests brought back
-      rt.settle([&] { rt.drain(); });
-      frame = backend->render_to_string(rt.runtime(), width, height, o.ansi);
-    }
+    // The frame shows what the document's requests brought back, and its pictures (§5.11).
+    if (o.net.enabled || rt.runtime().media_stale())
+      rt.settle_and_render([&] { rt.drain(); },
+                           [&] { frame = backend->render_to_string(rt.runtime(), width, height,
+                                                                   o.ansi); });
     if (pixels) { // Sixel draws at screen positions, so the frame starts at the top-left
       const int rows = static_cast<int>(std::count(frame.begin(), frame.end(), '\n')) + 1;
       frame = "\x1b[H\x1b[2J" + frame + backend->take_graphics() + "\x1b[" +
@@ -1923,6 +1930,14 @@ int arigl_main(int argc, char **argv) {
   if (!o.error.empty()) {
     std::fprintf(stderr, "arigl: %s\n", o.error.c_str());
     return usage(2);
+  }
+  // §5.13 video: / audio:: the player (cvcMedia's FFmpeg + SDL3, where this host has it) and where
+  // it may play (--media-play; by default not over SSH, where the sound would play remotely).
+  cvc::media::register_ariadne_player();
+  if (!o.media_play.empty()) {
+    cvc::ariadne::media::PlayPolicy policy = cvc::ariadne::media::PlayPolicy::Auto;
+    cvc::ariadne::media::parse_play_policy(o.media_play, policy);
+    cvc::ariadne::media::set_play_policy(policy);
   }
   if (o.command != "run" && o.command != "snapshot" && o.command != "check" &&
       o.command != "info") {
