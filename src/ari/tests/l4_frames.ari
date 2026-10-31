@@ -1,0 +1,32 @@
+# The wasm ari's frame check for requests (ci.yml, "ari terminal backend (wasm, node)"): run with
+#   ari snapshot --net-allow BASE /tests/l4_frames.ari --base BASE
+# against net_probe_server.py, whose /v1/slow answers after a second. on_tick counts frames; a
+# child it spawns makes the request and, once the reply is in, records how many frames ran while
+# it was out. A request that blocks the frame loop (a build without threads before L4) leaves
+# that near 0; started without blocking, the frames go on for the whole second.
+meta:
+  name: Ariadne L4 frame check
+  min_libcvc: 3.7.5
+requires: [net]
+args:
+  base: {type: string, help: The server's origin}
+windows:
+  - window: L4 frames
+    children:
+      - text: "frames"
+        bind: (state-get "l4.frames")
+      - text: "status"
+        bind: (state-get "l4.status")
+      - text: "frames while out"
+        bind: (state-get "l4.frames_out")
+init: (begin (state-set "l4.frames" 0) (state-set "l4.started" ""))
+on_tick: |
+  (state-set "l4.frames" (+ (int (state-get "l4.frames")) 1))
+  (if (= (state-get "l4.started") "")
+    (begin
+      (state-set "l4.started" "1")
+      (spawn "(begin
+                (set before (int (state-get \"l4.frames\")))
+                (set r (http-get (str-concat (state-get \"args.base\") \"/v1/slow\")))
+                (state-set \"l4.status\" (get-attr r \"status\"))
+                (state-set \"l4.frames_out\" (- (int (state-get \"l4.frames\")) before)))")))
