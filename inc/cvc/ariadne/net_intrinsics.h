@@ -9,7 +9,10 @@
 //
 // Each is an async function: the call parks the program while the request runs on the app's
 // background task pool and resumes it with the reply; its "-async" form returns a future for
-// (await f). The http verbs' reply is a dict with every key present:
+// (await f). In a browser build without threads (cvc::net::http_starts_async) the request is
+// started instead, a browser fetch, and the fetch's callback posts the reply, so the frame loop
+// goes on meanwhile (state_exec's async_work, docs/STATE_EXEC_EXCEPTIONS.md 3.12). The http verbs'
+// reply is a dict with every key present:
 //
 //   ok            the transport worked (a reply came back), whatever its status
 //   status        the HTTP status (0 when no reply came)

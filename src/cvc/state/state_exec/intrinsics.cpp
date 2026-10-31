@@ -1,4 +1,5 @@
 #include <algorithm> // §12 enforce_channel_policy: std::find over the declared/global channel lists
+#include <boost/algorithm/string/trim.hpp>
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/lexical_cast.hpp>
 #include <boost/property_tree/json_parser/error.hpp>
@@ -12,6 +13,7 @@
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/data_job.h>
 #include <cvc/state/state_exec/detail/lock_home.h>
+#include <cvc/state/state_exec/detail/priority.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/memory_tracker.h>
 #include <cvc/state/state_exec/parser.h> // detail::read_number_text, for state-incr
@@ -21,7 +23,9 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace cvc::state_exec {
 
@@ -427,6 +431,183 @@ private:
   cvc::state_json_reader reader_;
 };
 
+// ---------------------------------------------------------------------------
+// A value as a subtree, a slice at a time
+// ---------------------------------------------------------------------------
+//
+// (state-set-tree path value) writes a value of dicts, lists and scalars (what json-parse makes)
+// as the subtree at `path`, so binds and `repeat:` can show it. A dict's keys and a list's indices
+// name children; a scalar is a node's value, as state-set writes it (a float in its shortest
+// round-trip form). A list's node holds its length, so `repeat: (state-get "feed.items")` repeats
+// a widget per element and `feed.items.{i}.text` reads each; a dict's node holds "". The subtree
+// is replaced: a child the value doesn't name is removed, with its subtree, and a node whose text
+// is unchanged isn't written. The value is checked whole before anything is written, so one that
+// can't be written changes nothing. A unit is an element checked or written, and a node removed.
+
+// A key names one node of its own: not empty, no '.', and nothing a path's trim would drop.
+bool names_a_node(const std::string &key) {
+  return !key.empty() && key.find(cvc::state::SEPARATOR[0]) == std::string::npos &&
+         boost::algorithm::trim_copy(key) == key;
+}
+
+// Whether `name` is an index of a list of `size` elements, as state-set-tree writes them.
+bool is_index_below(const std::string &name, std::size_t size) {
+  if (name.empty() || name.size() > 19 || (name.size() > 1 && name[0] == '0'))
+    return false;
+  std::size_t i = 0;
+  for (const char c : name) {
+    if (c < '0' || c > '9')
+      return false;
+    i = i * 10 + static_cast<std::size_t>(c - '0');
+  }
+  return i < size;
+}
+
+class state_set_tree_job final : public data_job {
+public:
+  // The node at `path` under `root` is made (or found, through a writable link) once the value
+  // has passed its check.
+  state_set_tree_job(cvc::state &root, std::string path, value_t v)
+      : keep_(root.weak_from_this().lock()), tree_(&root), path_(std::move(path)),
+        root_(std::move(v)) {}
+
+  bool step(std::size_t budget) override {
+    const std::size_t start = nodes_;
+    while (budget == 0 || nodes_ - start < budget) {
+      if (!started_) {
+        started_ = true;
+        visit(root_, writing_ ? write_through_link(&(*tree_)(path_)) : nullptr);
+        continue;
+      }
+      if (open_.empty()) {
+        if (writing_)
+          return true;
+        writing_ = true; // the check passed: the same walk again, writing
+        started_ = false;
+        continue;
+      }
+      eval_deadline_check("state-set-tree");
+      frame &f = open_.back();
+      const std::size_t i = f.next++;
+      if (i >= f.size()) {
+        on_path_.erase(f.id());
+        open_.pop_back();
+        continue;
+      }
+      ++nodes_;
+      if (f.list) {
+        const value_t &e = (*f.list)[i];
+        visit(e, writing_ ? &(*f.node)(std::to_string(i)) : nullptr); // may push, invalidating f
+      } else {
+        const auto &[key, e] = (*f.dict)[i];
+        if (!names_a_node(key))
+          throw dsl_error("ValueError",
+                          "state-set-tree: the key \"" + key +
+                              "\" can't name a node (it is empty, has a '.' or space at an end)");
+        visit(e, writing_ ? &(*f.node)(key) : nullptr); // may push, invalidating f
+      }
+    }
+    return false;
+  }
+
+  value_t result() override { return nil_value; }
+
+  void held_values(const std::function<void(const value_t &)> &visit) const override {
+    visit(root_);
+  }
+
+private:
+  // A list or dict being walked, held by owning pointer and read by index, and (writing) its node.
+  struct frame {
+    list_ptr list;
+    dict_ptr dict;
+    std::size_t next = 0;
+    cvc::state::state_ptr node;
+    std::size_t size() const { return list ? list->size() : dict->size(); }
+    const void *id() const {
+      return list ? static_cast<const void *>(list.get()) : static_cast<const void *>(dict.get());
+    }
+  };
+
+  // Check `v`, and when writing, write it at `n`: a scalar's text, or a list's or dict's own
+  // text, its stale children removed and its elements left for step().
+  void visit(const value_t &v, cvc::state *n) {
+    frame f;
+    std::string text;
+    if (v.is_nil()) {
+    } else if (const auto *b = std::get_if<bool>(&v.v)) {
+      text = *b ? "true" : "false";
+    } else if (const auto *i = std::get_if<int64_t>(&v.v)) {
+      text = std::to_string(*i);
+    } else if (const auto *d = std::get_if<double>(&v.v)) {
+      text = format_number_shortest(*d);
+    } else if (const auto *s = std::get_if<std::string>(&v.v)) {
+      text = *s;
+    } else if (const auto *l = std::get_if<list_ptr>(&v.v); l && *l) {
+      f.list = *l;
+      text = std::to_string(f.list->size());
+    } else if (const auto *m = std::get_if<dict_ptr>(&v.v); m && *m) {
+      f.dict = *m;
+    } else {
+      throw dsl_error("TypeError",
+                      "state-set-tree: a " + v.type_name() + " has no place in the state tree");
+    }
+    const bool compound = f.list || f.dict;
+    if (compound && open_.size() >= kJsonMaxDepth) // a level, empty or not, as json-parse counts
+      throw dsl_error("ValueError", "state-set-tree: nested deeper than " +
+                                        std::to_string(kJsonMaxDepth) + " levels");
+    if (compound && f.size() > 0) {
+      if (!on_path_.insert(f.id()).second)
+        throw dsl_error("ValueError", std::string("state-set-tree: a ") +
+                                          (f.list ? "list" : "dict") + " that contains itself");
+    }
+    if (n) {
+      if (n->value() != text)
+        n->value(text);
+      remove_stale(*n, f);
+      f.node = n->weak_from_this().lock();
+    }
+    if (compound && f.size() > 0)
+      open_.push_back(std::move(f));
+  }
+
+  // Remove the children of `n` that the value written there doesn't name: all of them for a
+  // scalar. The same expiry state-delete uses, swept from `n`.
+  void remove_stale(cvc::state &n, const frame &f) {
+    const std::vector<std::string> names = n.childNames();
+    if (names.empty())
+      return;
+    std::unordered_set<std::string_view> keys;
+    if (f.dict)
+      for (const auto &[k, e] : *f.dict)
+        keys.insert(k);
+    const auto now = boost::posix_time::microsec_clock::universal_time();
+    bool stale = false;
+    for (const std::string &name : names) {
+      const bool named = f.list   ? is_index_below(name, f.list->size())
+                         : f.dict ? keys.count(name) > 0
+                                  : false;
+      if (named)
+        continue;
+      if (cvc::state *child = n.findDescendant(name)) {
+        child->expireAt(now);
+        stale = true;
+      }
+    }
+    if (stale)
+      nodes_ += n.sweepExpired();
+  }
+
+  cvc::state::state_ptr keep_;
+  cvc::state *tree_;
+  std::string path_;
+  value_t root_;
+  bool started_ = false;
+  bool writing_ = false; // false: the check pass
+  std::vector<frame> open_;
+  std::unordered_set<const void *> on_path_; // the lists and dicts open now, for cycles
+};
+
 } // namespace
 
 value_t intrinsic_state_json(intrinsics_context *ctx, std::span<const value_t> args) {
@@ -446,6 +627,16 @@ value_t intrinsic_state_from_json(intrinsics_context *ctx, std::span<const value
   auto &doc = as_string(args[1], "state-from-json");
   cvc::state *node = write_through_link(&write_node(ctx->root, path));
   return run_data_job(std::make_unique<state_from_json_job>(*node, doc));
+}
+
+value_t intrinsic_state_set_tree(intrinsics_context *ctx, std::span<const value_t> args) {
+  expect_exact(args, 2, "state-set-tree");
+  require_root(ctx, "state-set-tree");
+  auto &path = as_string(args[0], "state-set-tree");
+  // The root's subtree is everything the program can reach: replacing it is never what's meant.
+  if (path.find_first_not_of(". \t\r\n") == std::string::npos)
+    throw dsl_error("ValueError", "state-set-tree: an empty path would replace the whole tree");
+  return run_data_job(std::make_unique<state_set_tree_job>(*ctx->root, path, args[1]));
 }
 
 value_t intrinsic_state_root_path(intrinsics_context *ctx, std::span<const value_t> args) {
@@ -516,10 +707,32 @@ value_t intrinsic_spawn(intrinsics_context *ctx, std::span<const value_t> args) 
     opts.priority = static_cast<int>(as_int(args[2], "spawn"));
   opts.uid = ctx->uid;
   // A child keeps its parent's owner (design 7.2; td 5 item 6), so a host's kill_owner reaps it.
-  if (const process_ptr &running = ctx->sched->current_process())
+  const process_ptr &running = ctx->sched->current_process();
+  if (running)
     opts.owner = running->owner;
   else if (ctx->proc)
     opts.owner = ctx->proc->owner;
+  // Its parent, and its priority and floor (design 7.2). A host's spawn, with no process
+  // stepping, is unchecked, as a host's calls are.
+  opts.parent_pid = ctx->sched->current_pid();
+  if (running) {
+    const scheduling_policy policy = ctx->sched->policy();
+    bool clamped = false;
+    opts.priority = detail::clamp_spawn_priority(*running, opts.priority, policy, &clamped);
+    if (clamped)
+      ctx->sched->note_priority_clamped();
+    // The child's floor is the parent's, or its granted priority when better, and a host's only
+    // when the parent's is (a host's floor binds the child too). It is given when the parent's is
+    // a host's, and else only where it differs from the granted priority under a priority policy,
+    // which clamps anyway: under round_robin with no host floor a spawn stays unchecked at every
+    // depth, as before, and a floor that is no host's stays so when the child moves (migration).
+    const int floor = std::min(detail::floor_of(*running), opts.priority);
+    if (running->priority_floor_explicit ||
+        (floor != opts.priority && policy != scheduling_policy::round_robin)) {
+      opts.priority_floor = floor;
+      opts.priority_floor_explicit = running->priority_floor_explicit;
+    }
+  }
   // The host's spawn context (td 4.15) gives the child an environment and a context of its own,
   // which the child's process keeps alive. Without one the child gets the bare builtins.
   std::function<void(int)> spawned;
@@ -814,6 +1027,11 @@ value_t intrinsic_inspect(intrinsics_context *ctx, std::span<const value_t> args
   if (info->exit_exception)
     entries.emplace_back("exception", *info->exit_exception);
   entries.emplace_back("locks_held", value_t(static_cast<int64_t>(info->locks_held)));
+  // The priority it is picked by, a boost included, and its floor (design 7.1, 6.2): `priority`
+  // above stays the base.
+  entries.emplace_back("effective_priority",
+                       value_t(static_cast<int64_t>(info->effective_priority)));
+  entries.emplace_back("priority_floor", value_t(static_cast<int64_t>(info->priority_floor)));
   if (info->waiting_on) {
     // A lock key as this program would write it (gap G-17).
     const std::string_view lock_prefix = "lock /";
@@ -1201,6 +1419,7 @@ void register_intrinsics(environment_ptr env, intrinsics_context *ctx) {
   reg("state-data-set", intrinsic_state_data_set);
   reg("state-json", intrinsic_state_json);
   reg("state-from-json", intrinsic_state_from_json);
+  reg("state-set-tree", intrinsic_state_set_tree);
   reg("state-root-path", intrinsic_state_root_path);
   reg("state-watch", intrinsic_state_watch);
   reg("state-unwatch", intrinsic_state_unwatch);
@@ -1252,7 +1471,8 @@ void register_intrinsics(environment_ptr env, intrinsics_context *ctx) {
   reg("msg-recv", intrinsic_msg_recv);
   reg("msg-pending", intrinsic_msg_pending);
 
-  // Locks: with-lock, locks-held, lock-query, %lock-wait (docs/STATE_EXEC_LOCKS.md)
+  // Locks: with-lock, locks-held, lock-query, %lock-wait; set-priority, get-priority
+  // (docs/STATE_EXEC_LOCKS.md)
   detail::register_lock_intrinsics(env, ctx);
 }
 

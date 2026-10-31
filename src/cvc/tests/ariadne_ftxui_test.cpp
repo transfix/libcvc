@@ -413,6 +413,23 @@ TEST(AriadneFtxui, PasswordFieldShowsAMask) {
   EXPECT_FALSE(t.shows("s3cret")) << "masked when not focused too:\n" << t.screen;
 }
 
+// A spinner in a terminal: braille dots turned by the frame clock, the label after them; ASCII
+// with glyphs: ascii. (The tvision host draws the same widgets; tests/spinner_test.sh runs both
+// under tmux.)
+TEST(AriadneFtxui, SpinnerTurnsByTheFrameClock) {
+  REQUIRE_FTXUI();
+  Term t(group({spinner("Loading"), spinner("Plain", "", /*ascii*/ true)}));
+  t.rt.set_frame_clock(0.0);
+  t.draw();
+  // U+280B, U+2819 as UTF-8 bytes (this target has no /utf-8 on MSVC).
+  EXPECT_TRUE(t.shows("\xE2\xA0\x8B Loading")) << t.screen;
+  EXPECT_TRUE(t.shows("| Plain")) << t.screen;
+  t.rt.set_frame_clock(0.1);
+  t.draw();
+  EXPECT_TRUE(t.shows("\xE2\xA0\x99 Loading")) << t.screen;
+  EXPECT_TRUE(t.shows("/ Plain")) << t.screen;
+}
+
 TEST(AriadneFtxui, TextFieldEditsAtTheCursor) {
   REQUIRE_FTXUI();
   Term t(group({input_text("Name", "name")}));
@@ -1030,13 +1047,108 @@ TEST(AriadneFtxuiHosted, TheHostClosesAndPlacesWindows) {
   w.id = "w";
   w.closable = true;
   Term t(group({w}), hosted_opts());
-  t.be.set_window_geometry("w", 10, 3, 30, 8);
+  t.be.set_window_geometry("w", 10, 3, 30, 8, /*user_sized=*/true);
   t.draw();
   EXPECT_EQ(val(t.app, "tree.w.geometry"), "80,48,240,128") << "host bounds persist in px";
   t.be.close_window(t.rt, "w");
   EXPECT_EQ(val(t.app, "tree.w.open"), "0");
   t.draw();
   EXPECT_TRUE(t.be.hosted_windows().empty());
+}
+
+// The host reports every window's bounds on each walk. The size it gave a window to fit its
+// content is not the window's: one that closes, gains a row and opens again must be reported as
+// fitting (0) with its new content size, not at its old size. Only a size the user gave it holds.
+namespace {
+void set(cvc::app &app, const std::string &path, const std::string &v) {
+  cvc::state::instance(app)(path).value(v);
+}
+} // namespace
+
+TEST(AriadneFtxuiHosted, AReopenedWindowFitsWhatItShowsThen) {
+  REQUIRE_FTXUI();
+  Widget msg = text(""); // the controller's message, a row only while there is one
+  msg.literal_text = false;
+  msg.bind = "ui.msg";
+  msg.visible_when = "(!= (state-get \"ui.msg\") \"\")";
+  Widget fits = window("Notes", {text("Welcome."), msg});
+  fits.id = "notes";
+  fits.visible_when = "(= (state-get \"ui.screen\") \"in\")";
+  Widget wide = window("Sign in", {text("Username: grace"), msg}); // width authored, height fits
+  wide.id = "signin";
+  wide.size.w = Extent{Unit::Px, 240};
+  wide.visible_when = fits.visible_when;
+  Term t(group({fits, wide}), hosted_opts());
+  set(t.app, "ui.screen", "in");
+  set(t.app, "ui.msg", "");
+  t.draw();
+  auto find = [&](const std::string &id) {
+    for (const auto &hw : t.be.hosted_windows())
+      if (hw.id == id)
+        return hw;
+    ADD_FAILURE() << "no hosted window " << id;
+    return FtxuiBackend::HostedWindow{};
+  };
+  const auto notes = find("notes"), signin = find("signin");
+  EXPECT_EQ(notes.w, 0);
+  EXPECT_EQ(notes.h, 0);
+  EXPECT_EQ(signin.w, 30) << "240 px is 30 cells";
+  EXPECT_EQ(signin.h, 0);
+  EXPECT_EQ(notes.content_h, 1);
+  // The host fitted them and reports that back, as tvision's does on every walk.
+  t.be.set_window_geometry("notes", 2, 14, notes.content_w + 2, notes.content_h + 2, false);
+  t.be.set_window_geometry("signin", 2, 2, 30, signin.content_h + 2, false);
+  t.draw();
+  EXPECT_EQ(val(t.app, "tree.notes.geometry"), "16,224,0,0") << "the place persists, not the fit";
+
+  // Sign out: both close, and a row appears while they are closed.
+  set(t.app, "ui.screen", "out");
+  set(t.app, "ui.msg", "Signed out, see you soon.");
+  t.draw();
+  EXPECT_TRUE(t.be.hosted_windows().empty());
+  set(t.app, "ui.screen", "in");
+  t.draw();
+  const auto notes2 = find("notes"), signin2 = find("signin");
+  EXPECT_FALSE(notes2.user_sized);
+  EXPECT_EQ(notes2.w, 0) << "it fits again, as on its first opening";
+  EXPECT_EQ(notes2.h, 0);
+  EXPECT_EQ(notes2.content_h, 2) << "the row that appeared while it was closed";
+  EXPECT_GT(notes2.content_w, notes.content_w);
+  EXPECT_EQ(notes2.x, 2) << "it opens where it was";
+  EXPECT_EQ(notes2.y, 14);
+  EXPECT_EQ(signin2.w, 30) << "the authored width";
+  EXPECT_EQ(signin2.h, 0) << "the height still fits";
+  EXPECT_EQ(signin2.content_h, 2);
+}
+
+TEST(AriadneFtxuiHosted, AWindowTheUserResizedKeepsItsSizeWhenItOpensAgain) {
+  REQUIRE_FTXUI();
+  Widget msg = text("");
+  msg.literal_text = false;
+  msg.bind = "ui.msg";
+  msg.visible_when = "(!= (state-get \"ui.msg\") \"\")";
+  Widget w = window("Notes", {text("Welcome."), msg});
+  w.id = "notes";
+  w.visible_when = "(= (state-get \"ui.screen\") \"in\")";
+  Term t(group({w}), hosted_opts());
+  set(t.app, "ui.screen", "in");
+  set(t.app, "ui.msg", "");
+  t.draw();
+  t.be.set_window_geometry("notes", 4, 5, 40, 9, /*user_sized=*/true); // the user's corner drag
+  t.draw();
+  EXPECT_EQ(val(t.app, "tree.notes.geometry"), "32,80,320,144") << "the user's size persists";
+  set(t.app, "ui.screen", "out");
+  set(t.app, "ui.msg", "Signed out.");
+  t.draw();
+  set(t.app, "ui.screen", "in");
+  t.draw();
+  ASSERT_EQ(t.be.hosted_windows().size(), 1u);
+  const auto hw = t.be.hosted_windows()[0];
+  EXPECT_TRUE(hw.user_sized);
+  EXPECT_EQ(hw.w, 40);
+  EXPECT_EQ(hw.h, 9);
+  EXPECT_EQ(hw.x, 4);
+  EXPECT_EQ(hw.y, 5);
 }
 
 TEST(AriadneFtxuiHosted, ComboListOpensInsideItsWindow) {
@@ -1631,6 +1743,163 @@ TEST(AriadneFtxui, TerminalTourDocumentRuns) {
   art.drain();
   EXPECT_TRUE(quit);
   clear_action_intrinsics(); // register_verb's provider is process-wide: drop it with this test
+}
+
+// ---- JSON replies on a terminal: json_feed.ari in both terminal backends ---------------------
+
+namespace {
+
+// The columns a terminal gives `s`: two for the wide code points these tests use (CJK, kana,
+// the emoji block), none for a combining mark, one for anything else.
+int columns(const std::string &s) {
+  int cols = 0;
+  for (std::size_t i = 0; i < s.size();) {
+    const auto b = static_cast<unsigned char>(s[i]);
+    const int len = b < 0x80 ? 1 : b < 0xE0 ? 2 : b < 0xF0 ? 3 : 4;
+    char32_t cp = len == 1 ? b : b & (0x3F >> (len - 1));
+    for (int k = 1; k < len && i + k < s.size(); ++k)
+      cp = (cp << 6) | (static_cast<unsigned char>(s[i + k]) & 0x3F);
+    i += static_cast<std::size_t>(len);
+    if (cp >= 0x300 && cp <= 0x36F)
+      continue;
+    const bool wide = (cp >= 0x3040 && cp <= 0x30FF) || (cp >= 0x4E00 && cp <= 0x9FFF) ||
+                      (cp >= 0x1F300 && cp <= 0x1FAFF);
+    cols += wide ? 2 : 1;
+  }
+  return cols;
+}
+
+// The lines of `screen` from the one holding `top` through the next one holding `bottom`.
+std::vector<std::string> box_lines(const std::string &screen, const std::string &top,
+                                   const std::string &bottom) {
+  std::vector<std::string> lines, box;
+  std::size_t start = 0;
+  for (std::size_t nl; (nl = screen.find('\n', start)) != std::string::npos; start = nl + 1)
+    lines.push_back(screen.substr(start, nl - start));
+  bool in = false;
+  for (const std::string &l : lines) {
+    in = in || l.find(top) != std::string::npos;
+    if (!in)
+      continue;
+    box.push_back(l);
+    if (box.size() > 1 && l.find(bottom) != std::string::npos)
+      break;
+  }
+  return box;
+}
+
+// A hosted window's row as the tvision backend draws it: a cell per column, and the empty cell a
+// wide glyph spills into left out, since the glyph covers it.
+std::string drawn_row(const TermRows &rows, std::size_t y) {
+  std::string out;
+  bool wide = false;
+  for (const TermCell &c : rows.at(y)) {
+    if (wide && c.ch.empty()) {
+      wide = false;
+      continue;
+    }
+    out += c.ch.empty() ? std::string(" ") : c.ch;
+    wide = columns(c.ch) == 2;
+  }
+  return out;
+}
+
+const char *const kFeedRows[] = {
+    "feed: tx.wtf/public", "posts: 4", "ada: hello from the fediverse", "grace: coffee at 9?",
+    "linus: JSON in, widgets out", "likes: 12",
+    // \u escapes in the JSON: accented letters, CJK and an emoji
+    "zo\xC3\xAB: caf\xC3\xA9 \xE6\x97\xA5\xE6\x9C\xAC \xF0\x9F\x8E\x89",
+    "body: {\"post\":101,\"like\":true}"};
+
+std::filesystem::path json_feed_doc() {
+  return std::filesystem::path(CVC_EXAMPLES_DIR) / "ariadne" / "documents" / "json_feed.ari";
+}
+
+} // namespace
+
+TEST(AriadneFtxui, WideGlyphsTakeTwoColumnsInTheTextSnapshot) {
+  REQUIRE_FTXUI();
+  // A full-width glyph's second cell isn't written: as a space it pushed the line right.
+  Term t(group({window("W", {text("\xE6\x97\xA5\xE6\x9C\xAC \xF0\x9F\x8E\x89 ok"),
+                             text("e\xCC\x81t\xC3\xA9 plain")})}));
+  EXPECT_TRUE(t.shows("\xE6\x97\xA5\xE6\x9C\xAC \xF0\x9F\x8E\x89 ok")) << t.screen;
+  EXPECT_TRUE(t.shows("e\xCC\x81t\xC3\xA9 plain")) << t.screen; // combining and composed
+  const std::vector<std::string> box = box_lines(t.screen, "W", "\xE2\x95\xB0");
+  ASSERT_EQ(box.size(), 4u) << t.screen;
+  for (const std::string &l : box)
+    EXPECT_EQ(columns(l), columns(box.front())) << "a ragged right edge\n" << t.screen;
+}
+
+TEST(AriadneFtxui, JsonFeedDocumentRepeatsOverAParsedArray) {
+  REQUIRE_FTXUI();
+  if (!AppRuntime::have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  ASSERT_TRUE(std::filesystem::exists(json_feed_doc())) << json_feed_doc().string();
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.feed");
+  art.set_backend(be);
+  const std::vector<std::string> warns = art.load(json_feed_doc().string());
+  EXPECT_TRUE(warns.empty()) << warns.front();
+  art.drain();
+  // What `ari snapshot` prints. init: parsed the JSON and wrote it with state-set-tree;
+  // repeat: made a row per element.
+  const std::string s = be.render_to_string(art.runtime(), 100, 30);
+  for (const char *want : kFeedRows)
+    EXPECT_NE(s.find(want), std::string::npos) << want << "\n" << s;
+  EXPECT_EQ(val(app, "ui.docs.feed.feed.items"), "4");
+  EXPECT_EQ(val(app, "ui.docs.feed.feed.items.2.author"), "linus");
+  // Every row of the window ends in the same column, the wide glyphs' rows too.
+  const std::vector<std::string> box = box_lines(s, "Feed", "\xE2\x95\xB0");
+  ASSERT_GE(box.size(), 15u) << s;
+  for (const std::string &l : box)
+    EXPECT_EQ(columns(l), columns(box.front())) << l << "\n" << s;
+}
+
+TEST(AriadneTvision, JsonFeedDocumentFillsItsHostedWindow) {
+  REQUIRE_FTXUI();
+  if (!AppRuntime::have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  // The tvision desktop draws the frame and has the shared layout draw the body (render_window),
+  // the cells it blits. That layout needs no terminal, so it is checked here with or without
+  // tvision in the build. The desktop itself needs a terminal: ari_run_json_feed_tvision runs it
+  // in tmux (src/ari/tests/run_in_tmux_test.sh).
+  cvc::app app;
+  TvisionBackend be;
+  AppRuntime art(app, "ui.docs.feed");
+  art.set_backend(be);
+  const std::vector<std::string> warns = art.load(json_feed_doc().string());
+  EXPECT_TRUE(warns.empty()) << warns.front();
+  art.drain();
+  be.render_to_string(art.runtime(), 100, 30); // the walk that collects the windows
+  const auto wins = be.hosted_windows();
+  ASSERT_EQ(wins.size(), 1u);
+  EXPECT_EQ(wins[0].id, "feed");
+  EXPECT_EQ(wins[0].title, "Feed");
+  const int w = wins[0].content_w, h = wins[0].content_h;
+  const TermRows rows = be.render_window("feed", w, h);
+  ASSERT_EQ(rows.size(), static_cast<std::size_t>(h));
+  std::string body;
+  for (std::size_t y = 0; y < rows.size(); ++y) {
+    ASSERT_EQ(rows[y].size(), static_cast<std::size_t>(w));
+    const std::string line = drawn_row(rows, y);
+    EXPECT_EQ(columns(line), w) << "row " << y << ": " << line;
+    body += line + "\n";
+  }
+  for (const char *want : kFeedRows)
+    EXPECT_NE(body.find(want), std::string::npos) << want << "\n" << body;
+  // A wide glyph's cell is followed by the empty cell it covers, and the text after it goes on in
+  // the column after that.
+  bool checked = false;
+  for (const auto &row : rows)
+    for (std::size_t x = 0; x + 3 < row.size(); ++x)
+      if (row[x].ch == "\xE6\x97\xA5") { // the first CJK character
+        EXPECT_EQ(row[x + 1].ch, "");
+        EXPECT_EQ(row[x + 2].ch, "\xE6\x9C\xAC");
+        EXPECT_EQ(row[x + 3].ch, "");
+        checked = true;
+      }
+  EXPECT_TRUE(checked) << body;
 }
 
 // ---- §10 tf_editor: the editor the core composes on a terminal --------------------------------

@@ -80,6 +80,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/nav_es.h
   ../../inc/cvc/physics/plant_log.h
   ../../inc/cvc/physics/plant_log_scene.h
+  ../../inc/cvc/physics/jolt_rollout.h
   ../../inc/cvc/state/state_hash_partition.h
   ../../inc/cvc/state/distributed_state_session.h
   ../../inc/cvc/state/state_transport.h
@@ -136,6 +137,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/process.h
   ../../inc/cvc/core/text.h
   ../../inc/cvc/core/thread_pool.h
+  ../../inc/cvc/core/thread_class.h
   ../../inc/cvc/volume/volmagick.h
   ../../inc/cvc/geometry/geometry_file_io.h
   ../../inc/cvc/model/model.h
@@ -155,6 +157,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/nav/route_follower.h
   ../../inc/cvc/nav/plant_types.h
   ../../inc/cvc/nav/plant_ledger.h
+  ../../inc/cvc/nav/rollout_plant.h
+  ../../inc/cvc/nav/dyn4_ledger.h
   ../../inc/cvc/nav/terrain.h
   ../../inc/cvc/nav/vehicle_plant.h
   ../../inc/cvc/ph/mat3.h
@@ -230,6 +234,7 @@ set(SOURCE_FILES
   core/process.cpp
   core/text.cpp
   core/thread_pool.cpp
+  core/thread_class.cpp
   processing/bilateral_filter.cpp
   processing/contrast_enhancement.cpp
   volume/cvcraw_io.cpp
@@ -270,6 +275,7 @@ set(SOURCE_FILES
   state/state_exec/async_stackless_evaluator.cpp
   state/state_exec/state_value_codec.cpp
   state/state_exec/data_job.cpp
+  state/state_exec/json.cpp
   state/state_exec/native_stack.cpp
   state/state_exec/native_stack.h
   state/state_exec/heap.cpp
@@ -286,6 +292,7 @@ set(SOURCE_FILES
   state/state_exec/lock_manager.cpp
   state/state_exec/lock_home.cpp
   state/state_exec/lock_intrinsics.cpp
+  state/state_exec/priority.cpp
   core/world_clock.cpp
   core/world_clock_binding.cpp
   core/clock_driver.cpp
@@ -311,6 +318,7 @@ set(SOURCE_FILES
   physics/nav_es.cpp
   physics/plant_log.cpp
   physics/plant_log_scene.cpp
+  physics/jolt_rollout.cpp
   state/state_change_journal.cpp
   state/state_subscription_router.cpp
   state/state_sync_adapter.cpp
@@ -389,6 +397,8 @@ set(SOURCE_FILES
   nav/sim_thread.cpp
   nav/nav_stats.cpp
   nav/plant_ledger.cpp
+  nav/rollout_plant.cpp
+  nav/dyn4_ledger.cpp
   ph/se2_data.cpp
   ph/se2_model.cpp
   ph/se2_train.cpp
@@ -527,7 +537,8 @@ endif()
 # on their own target (below).
 set(_cvc_physics_exact_sources physics/world.cpp physics/vehicle.cpp physics/field_step.cpp
     physics/det_math.cpp physics/null_backend.cpp physics/nav_plant.cpp
-    physics/dyn_bike_plant.cpp physics/dyn_4w_plant.cpp physics/dyn_world.cpp)
+    physics/dyn_bike_plant.cpp physics/dyn_4w_plant.cpp physics/dyn_world.cpp
+    physics/jolt_rollout.cpp)
 if(NOT MSVC)
   set_source_files_properties(${_cvc_physics_exact_sources}
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
@@ -809,6 +820,7 @@ if(CVC_ENABLE_MESHER)
       geometry/cvc-mesher/LBIE/octree.h
       geometry/cvc-mesher/LBIE/LBIEMesherRenderable.h
       geometry/cvc-mesher/Mesher/mesher.h
+      geometry/cvc-mesher/libcontour_mutex.h
   )
   set(MESHER_SOURCE_FILES
       geometry/cvc-mesher/contour/squeue.cpp
@@ -1384,9 +1396,9 @@ endif()
 # are thin adapters over it, so they work identically on both targets. All three TUs are always
 # compiled; the inactive backend #ifdefs to empty, so exactly one make_default_backend() links.
 list(APPEND SOURCE_FILES net/http_client.cpp net/http_client_curl.cpp net/http_client_fetch.cpp
-  net/net_policy.cpp net/credentials.cpp)
+  net/net_policy.cpp net/credentials.cpp net/ws_client.cpp)
 list(APPEND INCLUDE_FILES ../../inc/cvc/net/http_client.h ../../inc/cvc/net/net_policy.h
-  ../../inc/cvc/net/credentials.h)
+  ../../inc/cvc/net/credentials.h ../../inc/cvc/net/ws_client.h)
 
 # Ariadne — the context-agnostic UI/scene DSL core (cvc::ariadne). Pure libcvc:
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
@@ -1572,6 +1584,9 @@ if(EMSCRIPTEN)
   # EXECUTABLE that links it must add -sFETCH=1 and EITHER -sASYNCIFY (main thread, the demo gallery)
   # OR -pthread (off the main thread). Link flags do not propagate out of this static archive; the
   # executable sets them (see examples/CMakeLists.txt).
+  # The WebSocket client (net/ws_client.cpp) uses the browser's WebSocket through Emscripten's
+  # library; unlike the fetch flags this one rides along to every executable that links cvc.
+  target_link_options(cvc INTERFACE "-lwebsocket.js")
   message(STATUS "cvc::net: Emscripten-fetch HTTP backend ENABLED "
                  "(link exes with -sFETCH=1 + -sASYNCIFY or -pthread)")
 else()

@@ -68,6 +68,12 @@ std::string percent_encode(const std::string &s);
 /// (the application/x-www-form-urlencoded convention, so a decoded query value reads naturally).
 std::string percent_decode(const std::string &s);
 
+/// @name JSON (make_json_parse_job, make_json_encode_job in data_job.h)
+/// @{
+value_t builtin_json_parse(std::span<const value_t> args);  // (json-parse text) -> value
+value_t builtin_json_encode(std::span<const value_t> args); // (json-encode v [indent]) -> text
+/// @}
+
 /// @name List
 /// @{
 value_t builtin_list(std::span<const value_t> args);
@@ -113,6 +119,15 @@ value_t builtin_isinstance(std::span<const value_t> args); // (isinstance x Clas
 value_t builtin_error(std::span<const value_t> args);  // (error message [data]): a RuntimeError
 value_t builtin_assert(std::span<const value_t> args); // (assert cond [message [data]]): an
                                                        // AssertionError when cond is false
+/// @}
+
+/// @name Hashing and secure randomness
+/// @{
+value_t builtin_sha256(std::span<const value_t> args);     // (sha256 x): 32 bytes
+value_t builtin_sha256_hex(std::span<const value_t> args); // (sha256-hex x): 64 lowercase hex
+/// (random-token nbytes ["base64url"|"hex"]): nbytes (1..kRandomTokenMaxBytes) from the OS CSPRNG
+value_t builtin_random_token(std::span<const value_t> args);
+inline constexpr int64_t kRandomTokenMaxBytes = 256;
 /// @}
 
 /// @name I/O

@@ -4,6 +4,7 @@
 #include <cvc/state/state_exec/async_call.h>
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/detail/priority.h>
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/scheduler.h>         // max_alloc_bytes_from_state
 #include <cvc/state/state_exec/state_value_codec.h> // snapshot / restore
@@ -28,12 +29,13 @@ void async_scheduler::set_lock_manager(std::shared_ptr<lock_manager> mgr) {
         throw std::logic_error("set_lock_manager: process " + std::to_string(pid) +
                                " holds or waits for a lock");
   home_.reset();
-  home_ = std::make_unique<detail::lock_home>(std::move(mgr), lock_ops_);
+  home_ = std::make_unique<detail::lock_home>(std::move(mgr), lock_ops_, policy_);
 }
 
 detail::lock_home *async_scheduler::locks() {
   if (!home_)
-    home_ = std::make_unique<detail::lock_home>(std::make_shared<lock_manager>(), lock_ops_);
+    home_ =
+        std::make_unique<detail::lock_home>(std::make_shared<lock_manager>(), lock_ops_, policy_);
   return home_.get();
 }
 
@@ -93,7 +95,7 @@ int async_scheduler::execute(const std::string &script, const execute_options &o
   // The floor (design 7.2): a host's, explicit, or the submit priority; and what the process
   // keeps alive (a spawned child's context, td 4.15).
   proc.priority_floor = opts.priority_floor.value_or(opts.priority);
-  proc.priority_floor_explicit = opts.priority_floor.has_value();
+  proc.priority_floor_explicit = opts.priority_floor.has_value() && opts.priority_floor_explicit;
   proc.parent_pid = opts.parent_pid;
   proc.keep_alive = opts.keep_alive;
   proc.max_steps = opts.max_steps;
@@ -134,7 +136,7 @@ int async_scheduler::execute(const value_t &expr, const execute_options &opts) {
   // The floor (design 7.2): a host's, explicit, or the submit priority; and what the process
   // keeps alive (a spawned child's context, td 4.15).
   proc.priority_floor = opts.priority_floor.value_or(opts.priority);
-  proc.priority_floor_explicit = opts.priority_floor.has_value();
+  proc.priority_floor_explicit = opts.priority_floor.has_value() && opts.priority_floor_explicit;
   proc.parent_pid = opts.parent_pid;
   proc.keep_alive = opts.keep_alive;
   proc.max_steps = opts.max_steps;
@@ -381,10 +383,12 @@ void async_scheduler::drain(bool in_step) {
   if (ingress_pending_.load(std::memory_order_acquire)) {
     std::vector<std::pair<std::string, value_t>> batch;
     std::vector<std::shared_ptr<async_call>> finished;
+    std::vector<std::pair<int, control_cmd>> controls;
     {
       std::lock_guard<std::mutex> lock(ingress_mutex_);
       batch.swap(ingress_);
       finished.swap(completions_);
+      controls.swap(controls_);
       ingress_pending_.store(false, std::memory_order_relaxed);
     }
     // On the scheduler thread now: deliver_to_receivers mutates process state, which is safe
@@ -394,6 +398,9 @@ void async_scheduler::drain(bool in_step) {
       deliver_to_receivers(path, msg);
     for (const std::shared_ptr<async_call> &call : finished)
       finish_async_call(call);
+    // Commands posted from other threads (post_control), in the order they came.
+    for (auto &[pid, cmd] : controls)
+      apply_control(pid, cmd);
     chain_valid_ = false;
   }
   if (!async_calls_.empty()) {
@@ -893,6 +900,13 @@ void async_scheduler::cancel_async_calls(int pid) {
     detail::charge_async_call(*proc, *call, rate, true, now);
 }
 
+void async_scheduler::cancel_async_calls_of(int pid) {
+  const process *proc = procs_.find(pid);
+  if (proc && !is_finished(proc->status))
+    return; // live: its calls wake it when they finish, or its kill cancels them
+  cancel_async_calls(pid);
+}
+
 double async_scheduler::async_steps_per_cpu_ms(const process &proc) {
   if (proc.async_steps_per_cpu_ms)
     return *proc.async_steps_per_cpu_ms;
@@ -1308,6 +1322,8 @@ int async_scheduler::fork(int pid) {
   child->gid = parent.gid;
   child->root_path = parent.root_path;
   child->owner = parent.owner; // td B28: a host reaps the child with its parent (kill_owner)
+  child->priority_floor = parent.priority_floor; // design 7.2: fork copies the floor
+  child->priority_floor_explicit = parent.priority_floor_explicit;
   child->max_steps = parent.max_steps;
   child->max_time = parent.max_time;
   child->max_step_time = parent.max_step_time;
@@ -1373,25 +1389,53 @@ bool async_scheduler::set_priority(int pid, int priority) {
 }
 
 // ---------------------------------------------------------------------------
-// Priorities (docs/STATE_EXEC_LOCKS.md 7.4): declared now, built in phase L2
+// Priorities (docs/STATE_EXEC_LOCKS.md 7.4; the sync scheduler's, on the same table)
 // ---------------------------------------------------------------------------
+
+namespace {
+// The effective priority get-priority and inspect report: the one the pick uses, which under
+// round_robin is the base (design 7.1).
+int reported_effective(const process &p, scheduling_policy policy) {
+  return policy == scheduling_policy::round_robin ? p.priority : p.effective_priority();
+}
+
+// The descent walk's lookup (design 7.2): a live process of `procs`.
+std::function<const process *(int)> live_in(const detail::process_table &procs) {
+  return [&procs](int pid) -> const process * {
+    const process *p = procs.find(pid);
+    return p && !is_finished(p->status) ? p : nullptr;
+  };
+}
+} // namespace
 
 std::optional<priority_info> async_scheduler::get_priority(int pid) const {
   const process *p = procs_.find(pid);
   if (!p)
     return std::nullopt;
-  return priority_info{p->priority,
-                       policy_ == scheduling_policy::round_robin ? p->priority
-                                                                 : p->effective_priority(),
-                       p->priority_floor.value_or(p->priority), policy_};
+  return priority_info{p->priority, reported_effective(*p, policy_), detail::floor_of(*p), policy_,
+                       p->priority_floor_explicit};
 }
 
-priority_change async_scheduler::set_priority_checked(int, int, int) {
-  return priority_change::unknown;
+priority_change async_scheduler::set_priority_checked(int caller_pid, int pid, int priority) {
+  const process *caller = procs_.find(caller_pid);
+  const process *target = procs_.find(pid);
+  if (!caller || !target)
+    return priority_change::unknown;
+  const priority_change r =
+      detail::check_priority_change(*caller, *target, priority, live_in(procs_));
+  if (r == priority_change::applied)
+    set_priority(pid, priority);
+  return r;
 }
 
-std::optional<priority_info> async_scheduler::get_priority_as(int, int) const {
-  return std::nullopt;
+std::optional<priority_info> async_scheduler::get_priority_as(int caller_pid, int pid) const {
+  if (caller_pid != pid) { // a caller's own pid is always visible to it
+    const process *caller = procs_.find(caller_pid);
+    const process *target = procs_.find(pid);
+    if (!caller || !target || !detail::visible_to(*caller, *target, live_in(procs_)))
+      return std::nullopt;
+  }
+  return get_priority(pid);
 }
 
 bool async_scheduler::set_priority_floor(int pid, int floor) {
@@ -1403,9 +1447,33 @@ bool async_scheduler::set_priority_floor(int pid, int floor) {
   return true;
 }
 
-void async_scheduler::note_priority_clamped() {}
+void async_scheduler::note_priority_clamped() {
+  // The count is the record: state_exec has no log sink to tell once (gap G-5).
+  ++priority_clamped_;
+}
 
-bool async_scheduler::post_control(int, control_cmd) { return false; }
+bool async_scheduler::post_control(int pid, control_cmd cmd) {
+  // Any thread. Queued with the ingress and applied by the next drain, on the scheduler thread
+  // (apply_control): the posting thread may not read procs_, so an unknown pid is found, and
+  // ignored, there. Notified under the lock, as post_message is.
+  std::lock_guard<std::mutex> lock(ingress_mutex_);
+  controls_.emplace_back(pid, std::move(cmd));
+  ingress_pending_.store(true, std::memory_order_seq_cst);
+  notify_work();
+  return true;
+}
+
+void async_scheduler::apply_control(int pid, control_cmd &cmd) {
+  switch (cmd.what) {
+  case control_cmd::kind::set_priority:
+    set_priority(pid, cmd.value); // the host path, unchecked (design 7.4); false for a gone pid
+    break;
+  case control_cmd::kind::query:
+    if (cmd.query)
+      cmd.query(*this);
+    break;
+  }
+}
 
 bool async_scheduler::set_max_steps(int pid, uint64_t max_steps) {
   auto it = procs_.all().find(pid);
@@ -1477,6 +1545,8 @@ process_info async_scheduler::make_info(const process &proc) const {
   info.exit_error = proc.exit_error;
   info.exit_exception = proc.exit_exception;
   info.locks_held = proc.locks ? proc.locks->holds.size() : 0;
+  info.effective_priority = reported_effective(proc, policy_);
+  info.priority_floor = detail::floor_of(proc);
   if (proc.status == process_status::waiting) {
     if (proc.lock_waiting)
       info.waiting_on = "lock /" + detail::lock_home::waiting_key(proc);
@@ -1538,21 +1608,27 @@ void async_scheduler::raise_exit_exception(int pid) const {
   throw dsl_exception(*it->second->exit_exception, it->second->exit_original);
 }
 
-bool async_scheduler::reap(int pid) {
+bool async_scheduler::reap(int pid, process_ptr *released) {
   auto it = procs_.all().find(pid);
   if (it == procs_.all().end())
     return false;
   const process_status st = it->second->status;
   if (!is_finished(st))
     return false; // never drop a still-live (ready/running/waiting/paused) process
+  // Held across the cancel, whose rate read may publish to the tree: its slots may change the
+  // process table (reap this process, add others), so `it` is not read after it.
+  process_ptr proc = it->second;
   cancel_async_calls(pid);
   // Its env, state, watch_handlers and captured values (including any Python holders) all live on
-  // the process object, so erasing it frees them. The process stepping now (its on_complete
-  // reaping it) is erased once its step is over.
-  if (pid == current_pid_)
+  // the process object, so erasing it frees them, or `released` takes them to free later. The
+  // process stepping now (its on_complete reaping it) is erased once its step is over.
+  if (pid == current_pid_) {
     reap_after_step_ = pid;
-  else
+  } else {
     procs_.erase(pid);
+    if (released)
+      *released = std::move(proc);
+  }
   return true;
 }
 
@@ -1570,6 +1646,7 @@ scheduler_stats async_scheduler::get_stats() const {
   scheduler_stats s;
   s.total_processes = static_cast<int>(procs_.size());
   s.total_steps = total_steps_;
+  s.priority_clamped = priority_clamped_;
   for (const auto &[pid, proc] : procs_.all()) {
     switch (proc->status) {
     case process_status::running:

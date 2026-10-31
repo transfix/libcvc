@@ -31,6 +31,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib> // getenv: TERM
 #include <cstring>
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/ariadne.h>
@@ -56,6 +57,7 @@
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/dom/node.hpp>
 #include <ftxui/screen/screen.hpp>
+#include <ftxui/screen/string.hpp> // string_width
 #include <ftxui/screen/terminal.hpp>
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h> // emscripten_sleep: the run loop yields to the browser (Asyncify)
@@ -525,8 +527,8 @@ struct FtxuiBackend::Impl {
   struct Win {
     int x = 0, y = 0; // top-left cell, as placed (by the document, the persisted geometry, a drag)
     int sx = 0, sy = 0; // where it is drawn this frame: x / y kept on the current screen
-    int w = 0, h = 0;   // outer size in cells when `sized`
-    bool sized = false;
+    int w = 0, h = 0;   // outer size in cells: the authored size, or the user's when `sized`
+    bool sized = false; // w x h is the user's: persisted (seeded) or a host's user resize
     bool placed = false;
     bool seeded = false;
     long z = 0;
@@ -1414,7 +1416,8 @@ Capabilities FtxuiBackend::capabilities() const {
   c.mouse = true;
   c.keyboard = true;
   c.color = true;
-  c.glsl = false; // no GLSL on a terminal: a shader widget degrades (§16.3)
+  c.glsl = false; // the cells draw no GLSL: a shader widget degrades (§16.3); a GL scene adapter
+                  // behind them still runs the scene's (gl.scene.shaders)
   c.view_embed = false;
   c.owns_loop = true; // run() owns the terminal's event loop (§16.2)
   c.terminal = true;
@@ -2529,9 +2532,18 @@ std::string FtxuiBackend::render_to_string(Runtime &rt, int width, int height, b
   std::string out;
   for (int y = 0; y < screen.dimy(); ++y) {
     std::string line;
+    bool wide = false; // the cell before held a full-width glyph (an emoji, CJK)
     for (int x = 0; x < screen.dimx(); ++x) {
       const std::string &c = screen.CellAt(x, y).character;
+      // A full-width glyph takes this cell too: a terminal advances two columns for it, so the
+      // cell isn't written, as Screen::ToString() leaves it out. Written as a space, it pushed the
+      // rest of the line a column right.
+      if (wide) {
+        wide = false;
+        continue;
+      }
       line += c.empty() ? std::string(" ") : c;
+      wide = !c.empty() && fx::string_width(c) == 2;
     }
     const std::size_t end = line.find_last_not_of(' ');
     out += end == std::string::npos ? std::string() : line.substr(0, end + 1);
@@ -2584,6 +2596,7 @@ std::vector<FtxuiBackend::HostedWindow> FtxuiBackend::hosted_windows() const {
       hw.y = w->second.y;
       hw.w = w->second.w;
       hw.h = w->second.h;
+      hw.user_sized = w->second.sized;
     }
     if (b->second.body) {
       b->second.body->ComputeRequirement();
@@ -2663,13 +2676,18 @@ void FtxuiBackend::close_window(Runtime &rt, const std::string &id) {
   m.end_event();
 }
 
-void FtxuiBackend::set_window_geometry(const std::string &id, int x, int y, int w, int h) {
+void FtxuiBackend::set_window_geometry(const std::string &id, int x, int y, int w, int h,
+                                       bool user_sized) {
   Impl::Win &win = m_->windows[id];
   win.x = x;
   win.y = y;
-  win.w = w;
-  win.h = h;
-  win.placed = win.seeded = win.sized = true;
+  win.placed = win.seeded = true;
+  // A size the host computed to fit the content is not the window's: keeping it would hold the
+  // window at that size when it next opens, whatever it shows by then. The next walk takes the
+  // authored size again (begin_window), or none.
+  win.sized = user_sized;
+  win.w = user_sized ? w : 0;
+  win.h = user_sized ? h : 0;
 }
 
 void FtxuiBackend::set_screen_size(int width, int height) {
@@ -3081,7 +3099,7 @@ TermRows FtxuiBackend::render_window(const std::string &, int, int) { return {};
 bool FtxuiBackend::feed_window(Runtime &, const std::string &, const TermEvent &) { return false; }
 void FtxuiBackend::activate_menu_item(Runtime &, const std::string &) {}
 void FtxuiBackend::close_window(Runtime &, const std::string &) {}
-void FtxuiBackend::set_window_geometry(const std::string &, int, int, int, int) {}
+void FtxuiBackend::set_window_geometry(const std::string &, int, int, int, int, bool) {}
 void FtxuiBackend::set_screen_size(int, int) {}
 FtxuiBackend::RunExit FtxuiBackend::run_loop(Runtime &, const RunOptions &,
                                              const std::function<void()> &,
@@ -3107,6 +3125,17 @@ void FtxuiBackend::route(Runtime &rt, const TermEvent &ev,
   }
   if (!feed(rt, ev) && !(background && background(ev)) && unhandled)
     unhandled(ev);
+}
+
+// A spinner's braille dots need a terminal that shows them: not the Linux console (its font has
+// none), a dumb terminal or a VT-series one. Read once; a browser's xterm.js sets no TERM.
+bool FtxuiBackend::unicode_glyphs() const {
+  static const bool unicode = [] {
+    const char *t = std::getenv("TERM");
+    const std::string term = t ? t : "";
+    return !(term == "linux" || term == "dumb" || term.rfind("vt", 0) == 0);
+  }();
+  return unicode;
 }
 
 // ── custom widgets: the same in both builds (a host's draw fn calls the primitives above)

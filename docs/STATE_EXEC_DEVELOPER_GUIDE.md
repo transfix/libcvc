@@ -112,6 +112,8 @@ The full syntax (literals, escapes, Unicode rules) is specified in
 | `lambda` | `(lambda (x y) (+ x y))` | Anonymous function |
 | `if` | `(if cond then [else])` | Conditional; more than one else form is an error |
 | `begin` | `(begin e1 e2 ... en)` | Sequence; returns last value |
+| `and` | `(and a b ...)` | Evaluates left to right and stops at the first falsy value: `#f` there, else the last value (`#t` with none). The rest aren't evaluated. Passed as a value (`(apply and lst)`), `and` is a function of arguments already evaluated |
+| `or` | `(or a b ...)` | Evaluates left to right and stops at the first truthy value, which it returns; `#f` when none is. As a value, a function like `and` |
 | `while` | `(while cond body...)` | Loop while condition is true; the body forms run in order, as a `begin`; the loop's value is nil (or `break`'s) |
 | `for` | `(for x collection body...)` | Iterate over a list or generator; the body forms run in order, as a `begin` |
 | `let` | `(let ((x 1) (y 2)) (+ x y))` | Local bindings |
@@ -140,7 +142,8 @@ form and `if` dropped forms after its else branch, silently; scripts that wrappe
 **Arithmetic:** `+`, `-`, `*`, `/`, `%`
 **Comparison:** `<`, `>`, `<=`, `>=`, `=`, `!=`
 **Logic:** `not`, `and`, `or`
-**String:** `str` (convert to string), `str-concat`
+**String:** `str` (convert to string), `str-concat`, `url-encode`, `url-decode`
+**JSON:** `json-parse`, `json-encode` ([below](#json))
 **List:** `list`, `car`, `cdr`, `cons`, `nth`, `set-nth`, `length`, `append`, `slice`, `del-nth`
 **Dict:** `dict`, `get-attr`, `set-attr`, `del-attr`
 **Type:** `null?`, `list?`, `type-of`, `generator?`, `is-int`, `is-float`, `is-string`
@@ -149,6 +152,7 @@ form and `if` dropped forms after its else branch, silently; scripts that wrappe
 **Generator:** `generator`, `next`, `range`, `collect`, `gen-done?`
 **OOP:** `send` (method dispatch), `apply`
 **Errors:** `error`, `assert` ([Exceptions](#exceptions))
+**Hashing and secure randomness:** `sha256`, `sha256-hex`, `random-token` (below)
 **Stdlib:** `string.*`, `bytes.*`, `math.*`, `collections.*`, always loaded ([§11](#11-standard-library))
 
 `apply`, `send` and `collections.map`/`filter`/`reduce` call a native function or a DSL
@@ -160,6 +164,52 @@ function alike. A DSL function runs as the program's own frames on the same eval
 (set o (dict "__class__" (dict "inc" (lambda (self x) (+ x 1)))))
 (send o "inc" 41)                                ;; => 42
 ```
+
+#### Hashing and Secure Randomness
+
+```lisp
+(sha256-hex "abc")      ;; => "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+(sha256 "abc")          ;; => the same digest as 32 bytes
+(random-token 32)       ;; => 43 characters of unpadded base64url, e.g. "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+(random-token 16 "hex") ;; => 32 lowercase hex digits
+```
+
+- `(sha256 x)` and `(sha256-hex x)` hash a string's UTF-8 bytes or a bytes value's octets, and
+  return the SHA-256 digest as 32 bytes or as 64 lowercase hex digits. Any other argument is a
+  `TypeError`. They are libcvc's own SHA-256 (`cvc::sha256_hex`, `state_blob_store.h`), so they
+  need no crypto library, and they hash the whole input in one step.
+- `(random-token nbytes [encoding])` returns `nbytes` (1..256, `kRandomTokenMaxBytes`) from the
+  operating system's CSPRNG as text: unpadded base64url (RFC 4648 §5, the default, with the
+  alphabet `A-Z a-z 0-9 - _`) or `"hex"`. The bytes come from `getentropy` on Linux, macOS and
+  other POSIX systems, `crypto.getRandomValues` under Emscripten (its `getentropy`), and
+  `rand_s` on Windows. A count outside 1..256 or an unknown encoding is a `ValueError`, and a
+  non-integer count a `TypeError`. `math.random` is not a CSPRNG; use `random-token` for
+  secrets, nonces and verifiers.
+- A device-pairing or PKCE flow draws a secret verifier, sends only its hash first, and proves
+  it holds the verifier later:
+
+  ```lisp
+  (set verifier (random-token 32))
+  (set verifier-hash (sha256-hex verifier)) ;; sent when pairing starts; verifier when it ends
+  ```
+
+- None of the three is in Ariadne's read lane (`bind:`, `visible_when:`). Its environment is an
+  allowlist, and `random-token` would make a predicate nondeterministic. The `init:` and action
+  lanes have all three.
+
+#### Surprises
+
+- `and` and `or` short-circuit: `(and (net-auth-has? "txwtf") (load-home))` runs `load-home` only
+  with a credential. Until 2026-10 they were plain functions and evaluated every argument.
+- `false` and `#f` read as nil, and `(not true)` is the bool false. Both are falsy.
+- `str` prints its argument as `print` would, so a string comes back quoted: `(str "abc")` is
+  `"\"abc\""`. To join text, pass the strings to `str-concat` as they are:
+  `(str-concat "id=" s)`.
+- `/` always gives a float: `(/ 7 2)` is `3.5`, and `(/ 6 3)` is the float 2 (`is-float` is true;
+  it prints as `2`). For a whole quotient use `(math.floor (/ 7 2))` (`3`, an int) or
+  `(int (/ 7 2))`, which truncates toward zero; `%` is the remainder.
+- `collections.map`, `filter` and `reduce` take the list first, then the function:
+  `(collections.map (list 1 2 3) (lambda (x) (* x x)))`.
 
 #### Type Conversion
 
@@ -184,6 +234,54 @@ function alike. A DSL function runs as the program's own frames on the same eval
 ```
 
 Conversion errors throw a runtime error (e.g., `(int "abc")` fails).
+
+#### JSON
+
+`json-parse` reads JSON text (a string, or bytes such as an HTTP reply's body) into values, and
+`json-encode` writes values as JSON text. Both run as data jobs (see
+[Deep data on the executor](STATE_EXEC_GRAMMAR.md#deep-data-on-the-executor)), so a large
+document is read or written a slice per step.
+
+```lisp
+(json-parse "{\"name\": \"ada\", \"tags\": [1, 2.5, true, null]}")
+;; => {"name": "ada", "tags": (1 2.5 #t nil)}
+(json-encode (dict "name" "ada" "n" 3))      ;; => "{\"name\":\"ada\",\"n\":3}"
+(json-encode (list 1 (dict)) true)          ;; => "[\n  1,\n  {}\n]"
+(json-encode (list 1) 4)                    ;; four spaces a level
+```
+
+| JSON | value | back to JSON |
+|---|---|---|
+| object | dict, keys in document order | an object, keys in the dict's order |
+| array | list | an array |
+| string | string | a string: `"`, `\` and control characters escaped, other text as UTF-8 |
+| number without a fraction or exponent | int, when it fits in 64 bits; otherwise a float | digits |
+| any other number | float | its shortest round-trip form, with `.0` when it has neither a point nor an exponent |
+| `true`, `false` | the bools | `true`, `false` |
+| `null` | nil | `null` |
+
+- **A repeated key** keeps its first place and takes its last value, as JavaScript's
+  `JSON.parse` and Python's `json.loads` do: `{"a": 1, "b": 2, "a": 3}` is `{"a": 3, "b": 2}`.
+- **Big numbers.** An integer outside 64 bits reads as a float, as JavaScript reads it, so it is
+  exact only up to 2^53. A number too large for a float (`1e999`) is an error.
+- **Text.** A byte that is not part of valid UTF-8, or a `\u` escape of a lone surrogate (a
+  truncated emoji), becomes U+FFFD, so one bad character doesn't lose a whole reply.
+  `json-encode` refuses a string that isn't valid UTF-8.
+- **Errors.** Malformed text is a `ValueError` whose message names the line and column (in code
+  points), with `line`, `col` and `offset` (in bytes) as fields:
+  `(try (json-parse text) (catch (ValueError e) (get-attr e "line")))`. A raw control
+  character in a string is malformed too.
+- **Depth.** Lists and dicts nest at most 512 levels (`kJsonMaxDepth`), in both directions.
+  Deeper input is a `ValueError`, found without recursion.
+- **What JSON can't hold.** `json-encode` raises a `TypeError` for a symbol, function, bytes,
+  generator or data object, and a `ValueError` for `nan` or an infinity, or a list or dict that
+  contains itself. A value held twice is written twice. The indent is `true` (2 spaces), `nil`
+  or 0 (compact), or 1 to 10 spaces.
+- **`false` reads as nil** in source, and nil encodes as `null`. The bool false is `(not true)`.
+- **Limits.** What `json-parse` builds and what `json-encode` writes are held to the per-call
+  allocation limit (`limits.max_alloc_bytes`, a `MemoryError` past it).
+
+The C++ jobs are `make_json_parse_job` and `make_json_encode_job` (`data_job.h`).
 
 ### Example Programs
 
@@ -538,10 +636,13 @@ it picks.)
   priority, however many are tied there (before the run queue the tie went to whatever an
   unstable `std::sort` left first, which was the lowest pid only while the runnable set fit the
   sort's insertion pass: 32 processes on MSVC, 16 on libstdc++); `priority_rr` goes round robin
-  among the best priority's. A process that becomes
-  runnable takes its place by pid, so the order in which a set of processes interleaves is fixed
-  by their pids, their statuses and their priorities, step by step. The run queue finds the pick
-  without scanning (order statistics over the processes in pid order).
+  among the best priority's. Under a priority policy the run queue's level key is the process's
+  effective priority (`process_table::level_key`), which is its base unless it inherits a better
+  one through a lock ([Priorities](#priorities)); under `round_robin` every process is on one
+  level. A process that becomes runnable takes its place by pid, so the order in which a set of
+  processes interleaves is fixed by their pids, their statuses and their priorities, step by step.
+  The run queue finds the pick without scanning (order statistics over the processes in pid
+  order).
 - **Sleeps and timed waits** wake from a timer heap, when their deadline comes; a message wakes
   the processes waiting on its channel from an index of waiters by channel.
 - **The sync `run()` does not spin.** `max_steps` counts the run loop's iterations, the idle ones
@@ -752,6 +853,107 @@ The child's environment is `environment::extend(base)` with the intrinsics regis
 then `after_register(env, ctx)`, the host's own bindings. A null `base` is one default
 environment, shared by the callback's children.
 
+### Priorities
+
+Every process has a base priority, a Unix nice value from -20 (best) to 19 (worst), given at
+submit (`execute_options::priority`, `spawn`'s third argument; 0 by default). What it does depends
+on the scheduler's policy, and under a priority policy a lock holder can run at a better priority
+than its base. The full rules are in [STATE_EXEC_LOCKS.md](STATE_EXEC_LOCKS.md) sections 6.2
+(inheritance) and 7 (changes and permissions).
+
+| Policy | The pick |
+|---|---|
+| `round_robin` (the default) | every runnable process in turn: priorities are stored and reported, and change no pick |
+| `priority` | the lowest pid at the best effective priority |
+| `priority_rr` | round robin among the processes at the best effective priority |
+
+Both priority policies are strict: while a better process is runnable, a worse one does not step.
+
+**Changing and reading.** `(set-priority p)` changes the caller's base priority, and
+`(set-priority pid p)` another process's. Each returns `#t` when applied and `#f` for a pid the
+caller may not see (unknown, ended, or out of reach under the rules below), and raises
+`PermissionError` (with `pid` and `priority`) for a raise past the floors. `p` must be an int in
+-20..19, else `ValueError`: nothing is clamped. `(get-priority [pid])` returns
+`{base effective floor policy}` for the caller or a process it may see, else `nil`; `policy` is
+the policy's name. Under `round_robin` a change is stored and reported, and `effective` is the
+base.
+
+```lisp
+;; under priority_rr, in a process submitted at 0 with no host floor
+(get-priority)          ;; => {"base": 0, "effective": 0, "floor": 0, "policy": "priority_rr"}
+(set-priority 5)        ;; => #t: a process may always lower itself
+(set-priority 0)        ;; => #t: and come back, down to its floor
+(set-priority -1)       ;; PermissionError: past its floor
+(set-priority 20)       ;; ValueError: out of range
+
+(set kid (spawn "(msg-recv \"kid.go\")" "kid" 3))
+(set-priority kid 10)   ;; => #t: its own child
+(set-priority kid 0)    ;; => #t: raised back to the worse of the two floors, not past it
+(set-priority 9999 0)   ;; => #f: no process it may see
+```
+
+**Floors.** Every process has a `priority_floor`, the best priority it may ask for: its submit
+priority, unless the host gives one (`execute_options::priority_floor`,
+`set_priority_floor(pid, floor)`, or an `exec_coordinator`'s `resource_policy::priority_floor`).
+Fork copies the parent's floor, a host's included.
+
+- **Itself.** A process may lower itself freely and raise itself down to its floor, never past
+  it: one that demoted itself can come back, never above what its host gave it.
+- **Another process.** It may see another process of the same owner (unowned hosts count `""` as
+  one owner) that has its uid or descends from it by `parent_pid` within 64 hops, through live
+  processes (an orphan no longer descends from its grandparent). It may lower such a process
+  freely, and raise it only down to the worse of the two floors, the target's and its own.
+- **`spawn`'s priority.** Under `priority` and `priority_rr` a spawn asking for a priority better
+  than the caller's floor gets the floor instead, counted in `scheduler_stats::priority_clamped`,
+  and the child's floor is the caller's, so a child spawned at a worse priority can be raised back
+  to it. Under `round_robin`, unless the host gave the caller a floor, the requested priority is
+  stored unchecked, as before priorities could change, and the child's floor is the priority it
+  was spawned at. A floor the host gave clamps under every policy, and the process's forked and
+  spawned children inherit it as a host's floor. A host's own spawn (no process stepping) is
+  unchecked.
+
+**Inheritance under locks.** Under `priority` and `priority_rr` only, a process runs at the best
+of its own base and the bases of the processes it blocks, directly or through other waiters (a
+process queued behind a waiter the holder blocks lends to the holder too), up to 8 edges of the
+wait-for graph. So a low-priority holder that a high-priority process waits for runs ahead of
+medium-priority work until it releases, instead of starving the waiter behind it. The value is
+exact at every step: the lock manager recomputes it whenever a request queues, is granted or
+cancelled, a lock is released, a process ends or a base changes, so a boost is withdrawn at once,
+down the whole chain, when the waiter times out or is killed or the holder releases.
+`set-priority` on a boosted holder changes its base only: it keeps running at the boost while it
+blocks the better waiter. The boost shows in `get-priority`'s `effective` (a holder at 10 that a
+-10 process waits for reports `{"base": 10, "effective": -10, ...}`) and in `inspect`'s
+`effective_priority` (its `priority` stays the base, and `priority_floor` is the floor); `ps`,
+snapshots and migration carry only the base. Under `round_robin` nothing is lent or inherited.
+
+**Hosts.** A host's calls are unchecked, and belong on the thread that steps the scheduler:
+
+```cpp
+sched.set_priority(pid, -5);        // the base; no range or floor check; false for an unknown pid
+sched.set_priority_floor(pid, 0);   // a host's floor: its spawns clamp under every policy
+auto pi = sched.get_priority(pid);  // priority_info{base, effective, floor, policy}
+
+control_cmd cmd;                    // from another thread: applied between steps
+cmd.what = control_cmd::kind::set_priority;
+cmd.value = -5;
+sched.post_control(pid, std::move(cmd));
+```
+
+`exec_coordinator::admin_set_priority(pid, node, p)` reaches the named node's scheduler the same
+way. pycvc's `Exec.set_priority(pid, p)` and `Exec.get_priority(pid)` (a dict, or `None`) may be
+called from any thread. A scheduler's policy is fixed when it is built: the constructor's
+argument, pycvc's `Exec(app, policy=...)`, or, for `app::exec_scheduler()` and an `Exec` built
+with `policy=None`, the app tree's `state_exec.policy` (`round_robin`, `priority` or
+`priority_rr`), read when that scheduler is first built. Unset, it is `round_robin`, as before;
+an unknown value is logged and `round_robin` used; changing the setting later changes nothing.
+
+**OS thread classes** are a different thing: `cvc::thread_class` (`background`, `utility`,
+`normal`), with `set_current_thread_class` and `set_process_class` in
+`cvc/core/thread_class.h`, asks the OS for less of the machine for a thread or for the whole
+process. They are for hosts only (no DSL intrinsic reaches them) and never go above normal;
+`state_exec.process_class` applies one when `app::exec_scheduler()` is first built. See
+[THREAD_POOL.md](THREAD_POOL.md#thread-classes).
+
 ---
 
 ## 5. The State Tree
@@ -827,6 +1029,11 @@ register_intrinsics(env, &ictx);
 ;; relative to the node ("" for the node itself). Both run as sliced data steps.
 (state-json "myapp.config")   ;; => "{\n    \"timeout\": \"30\"\n}\n"
 (state-from-json "myapp.copy" (state-json "myapp.config"))
+
+;; A value of dicts, lists and scalars (what json-parse makes) as a subtree
+(state-set-tree "feed" (json-parse "{\"items\": [{\"text\": \"hi\"}, {\"text\": \"yo\"}]}"))
+(state-get "feed.items")          ;; => "2", the list's length
+(state-get "feed.items.1.text")   ;; => "yo"
 ```
 
 A node holds text, so `state-set` turns any other value into text. A string is stored as it is.
@@ -843,6 +1050,26 @@ way, so `(state-set "x" (str 1234567.5))` also stores `"1234567.5"`.
 does. It sets every non-empty string, number, `true`, `false` and `null` at its key, and returns
 nil. It checks the whole document before it sets anything, so a malformed document changes
 nothing. Its errors name the line, as in `state-from-json: line 3: expected ':'`.
+
+`state-set-tree` writes a value as the subtree at its path, so Ariadne's binds and `repeat:` can
+show it (docs/ARIADNE.md §10.4):
+
+- A dict's keys and a list's indices (`0`, `1`, ...) name child nodes. A scalar is a node's
+  value as `state-set` writes it: `true`/`false`, digits, a float in its shortest round-trip
+  form (`0.30000000000000004`), the string itself, and the empty string for nil.
+- A list's node holds its length, so `repeat: (state-get "feed.items")` repeats a widget per
+  element. A dict's node holds the empty string.
+- It replaces the subtree: a child the value doesn't name is removed with its subtree (the
+  expiry `state-delete` uses), and a node whose text doesn't change isn't written, so its
+  watchers don't fire.
+- It checks the whole value before it writes anything, so a value it can't write changes
+  nothing, not even the node at its path. A key must name one node: not empty, no `.`, and no
+  space at either end (paths are trimmed). Anything but nil, a bool, a number, a string, a list
+  or a dict is a `TypeError`; a bad key, a list or dict that contains itself, or nesting deeper
+  than 512 levels is a `ValueError`. So is an empty path: replacing the root's subtree would
+  remove everything else the program can reach.
+- It writes through a writable transparent link, as `state-set` does, and returns nil. Both
+  passes run as sliced data steps; a reader between two slices of the write sees part of it.
 
 #### Atomic single-node updates
 
@@ -1374,6 +1601,9 @@ section on such a key sees `abandoned: #t` through `:as`, once.
 raises `DeadlockError` at once, its `cycle` a list of `{pid key}` (a pid only for a process of
 the same scheduler and owner). A `try` around the `with-lock` can catch it and retry.
 
+**Priority inversion.** Under `priority` and `priority_rr` a holder runs at the best of its own
+priority and those of the processes it blocks, while it blocks them ([Priorities](#priorities)).
+
 **Reads.** `(locks-held)` lists the program's own holds, outermost first:
 `{key mode count generation}`. `(lock-query [prefix])` lists every lock under the prefix (the
 program's chroot by default): `{held: [{key mode pids count generation abandoned}], waiting:
@@ -1571,6 +1801,10 @@ configuration back to the state tree:
 - `state_exec.schedulers.<id>.limits.max_alloc_bytes` — the resolved per-call allocation limit
 - `state_exec.schedulers.<id>.limits.heap_check_steps` — the resolved heap re-measure interval
 - `state_exec.schedulers.<id>.policy` — `"round_robin"`, `"priority"`, or `"priority_rr"`
+
+The published `policy` is a report: a scheduler's policy is fixed when it is built, and
+`load_settings()` does not change it. `state_exec.policy`, which chooses the policy of
+`app::exec_scheduler()` when it is first built, is described in [Priorities](#priorities).
 
 ---
 

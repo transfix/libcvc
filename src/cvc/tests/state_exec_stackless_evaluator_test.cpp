@@ -1,7 +1,9 @@
 #include <atomic>
 #include <chrono>
+#include <cvc/state/state_exec/async_evaluator.h>
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/evaluator.h>
 #include <cvc/state/state_exec/generator.h>
 #include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/scheduler.h>
@@ -1049,4 +1051,85 @@ TEST(StacklessClosureBody, ABodyIsSharedOnlyWithFormsThatEvaluateTheSame) {
   ASSERT_EQ(l.size(), 2u);
   EXPECT_TRUE(std::signbit(std::get<double>(l[0].v)));
   EXPECT_FALSE(std::signbit(std::get<double>(l[1].v)));
+}
+
+// ─── and / or ──────────────────────────────────────────────────────────────
+
+// (and ...) and (or ...) are special forms in every evaluator: they stop at the first argument
+// that decides them, and give what the builtins of the same names give.
+TEST(AndOr, EveryEvaluatorStopsAtTheArgumentThatDecides) {
+  const std::pair<const char *, const char *> cases[] = {
+      // A later argument isn't evaluated: its side effect doesn't happen, its error isn't raised.
+      {"(begin (set n 0) (and (set n 1) nil (set n 2)) n)", "1"},
+      {"(begin (set n 0) (or nil (set n 1) (set n 2)) n)", "1"},
+      {"(begin (set n 0) (and (set n 1) (set n 2)) n)", "2"},
+      {"(and nil (no-such-function))", "#f"},
+      {"(or 7 (error \"never\"))", "7"},
+      {"(begin (set calls 0) (defun load () (set calls (+ calls 1)))"
+       " (if (and nil (load)) 1 2) calls)",
+       "0"},
+      // The values: and is #f at a falsy argument, else the last (#t with none); or is the
+      // first truthy one, else #f.
+      {"(and)", "#t"},
+      {"(or)", "#f"},
+      {"(and 1 2 3)", "3"},
+      {"(and 1 nil 3)", "#f"},
+      {"(and 1 false 3)", "#f"},
+      {"(or nil 2 3)", "2"},
+      {"(or nil nil)", "#f"},
+      {"(or false (not true) \"x\")", "\"x\""},
+      // Nested, and in a function body.
+      {"(and (or nil 1) (and 2 (or nil nil 3)))", "3"},
+      {"(begin (defun f (x) (or (and (> x 1) \"big\") \"small\")) (list (f 5) (f 0)))",
+       "(\"big\" \"small\")"},
+      // Passed as values, `and` and `or` are the builtins: every argument already evaluated.
+      {"(apply and (list 1 2))", "2"},
+      {"(apply and (list 1 nil))", "#f"},
+      {"(apply or (list nil 5))", "5"},
+  };
+  const auto env = [] { return builtins::make_default_environment(); };
+  stackless_evaluator stackless(env());
+  evaluator recursive(env());
+  async_evaluator async(env());
+  for (const auto &[script, want] : cases) {
+    SCOPED_TRACE(script);
+    EXPECT_EQ(to_string(stackless.evaluate_script(script)), want) << "stackless";
+    EXPECT_EQ(to_string(recursive.evaluate_script(script)), want) << "recursive";
+    EXPECT_EQ(to_string(async.sync_evaluate_script(script)), want) << "async";
+  }
+}
+
+TEST(AndOr, AStacklessAndTakesAStepAnArgument) {
+  // 2000 arguments, then a falsy one, then one that would raise: a step each, none native.
+  std::string script = "(and";
+  for (int i = 0; i < 2000; ++i)
+    script += " 1";
+  script += " nil (error \"never\"))";
+  stackless_evaluator ev(builtins::make_default_environment());
+  evaluator_state st = ev.create_state(script);
+  int steps = 0;
+  while (!ev.step(st))
+    ++steps;
+  EXPECT_GE(steps, 2000);
+  EXPECT_EQ(to_string(st.result), "#f");
+  // Nested 5000 deep, on the heap as any form is.
+  std::string deep;
+  for (int i = 0; i < 5000; ++i)
+    deep += "(and 1 (or nil ";
+  deep += "7";
+  for (int i = 0; i < 5000; ++i)
+    deep += "))";
+  EXPECT_EQ(to_string(ev.evaluate_script(deep)), "7");
+}
+
+TEST(AndOr, ARestrictedEvaluatorGatesThemAsSpecialForms) {
+  EXPECT_TRUE(stackless_evaluator::all_special_forms().count("and"));
+  EXPECT_TRUE(stackless_evaluator::all_special_forms().count("or"));
+  stackless_evaluator ev(builtins::make_default_environment());
+  ev.restrict_special_forms(
+      std::make_shared<const std::set<std::string>>(std::set<std::string>{"if", "begin"}));
+  EXPECT_THROW(ev.evaluate_script("(and 1 2)"), std::exception);
+  ev.restrict_special_forms(
+      std::make_shared<const std::set<std::string>>(std::set<std::string>{"if", "and", "or"}));
+  EXPECT_EQ(to_string(ev.evaluate_script("(if (and 1 (or nil 2)) 3 4)")), "3");
 }

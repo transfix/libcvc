@@ -55,6 +55,13 @@ approach agreed for closing the gap, and the plan.
    `Exec.scheduler()` returns its `async_scheduler`, which keeps the `Exec` alive. Its registered
    functions and the intrinsics live in a natives scope that the programs' environment extends;
    a spawned child extends the natives too, so it calls the registered functions (td 4.15).
+   `Exec(app, policy=None, idle_timeout=60.0)` takes keywords (`%feature("kwargs")`; one
+   constructor declaration, since SWIG takes keywords only where nothing is overloaded): `policy`
+   is `None` (the tree's `state_exec.policy`, else `round_robin`), a `pycvc.scheduling_policy`
+   member or its name, and `idle_timeout` replaces `run()`'s fixed 60 s; anything else raises
+   `ValueError` (docs/STATE_EXEC_LOCKS.md 7.4). `Exec.set_priority(pid, p)` and
+   `Exec.get_priority(pid)` (a dict `{base, effective, floor, policy}` or `None`) are the host's
+   unchecked calls, and the one part of `Exec` any thread may call (item 12).
 6. **Enums are `enum.IntEnum` classes** with the C++ names and values:
    `pycvc.process_status.killed` is `process_status::killed`. An enum argument must be a member
    of its enum, so a plain int stays a value: `to_string(process_status)` and `to_string(value_t)`
@@ -85,6 +92,20 @@ approach agreed for closing the gap, and the plan.
     lock form object; pycvc's copy keeps the context alive too. The context's
     `lock_wait_allowed` (False: a busy request never waits) and `lock_default_timeout` (a
     float, or None: wait as long as it takes) set its lock rules.
+12. **`Exec`'s priority calls from any thread** (docs/STATE_EXEC_LOCKS.md 7.4). The `Exec` keeps a
+    control mutex that stands in for the pump token: its scheduler is touched only by the thread of
+    the active `run()` or, with none active, by a holder of the mutex. With no `run()` active, or
+    from inside it (a registered function, coroutine or callback), `set_priority`/`get_priority`
+    act at once; from another thread while `run()` pumps they are posted to the scheduler
+    (`post_control`, a query) and answered by `run()` between steps, the caller waiting with the
+    GIL released. From a thread running another `Exec`'s `run()` they raise
+    `RuntimeError("Exec.run is active on another thread")`. The GIL always comes before the mutex:
+    `run()` takes the mutex holding the GIL (at entry, for its quiesce and both of its reaps); every
+    other caller releases the GIL first and takes it back only once the mutex is unlocked, and the
+    answer is plain C++ data until then. On every exit path, after its last step and any kill and
+    before it waits for its kernels, `run()` stops taking calls and answers every one still
+    waiting. A second `run()` of the same `Exec`, from any thread, still raises at once until the
+    first returns.
 
 ## Inventory
 
@@ -101,7 +122,7 @@ are listed too. Status after PR 4:
 | | `script_reader` | `pycvc.script_reader` | wrapped (PR 1). `forms()`, `source()` and `options()` return copies |
 | | `parser` (`read`, `parse_expr`) | none | exception: it holds a `string_view` of its input, which Python can't keep alive. `script_reader` owns its source and gives the same slice-by-slice reading |
 | data_job.h (#658) | `data_options`, `data_options_from_state(state&, id, base)` | `pycvc.data_options`, `pycvc.data_options_from_state(State, …)` | wrapped (#658) |
-| | `data_job` (`step`, `result`, `nodes`), `make_equal_job`, `make_print_job`, `make_concat_job`, `make_copy_job`, `make_substitute_job`, `run_to_completion`, `run_data_job`, `call_function` (with or without #683's `then`), `make_generator_job` (#683; the generator is a `pycvc.value`), `is_compound`, `count_data_nodes`, `kDataNodeBytes`, `kMaxNativeNesting`, `kNativeStackReserve` (#682) (#658, #665) | the same names under `pycvc.` | wrapped (PR 4). A factory hands Python an owned job, which `run_data_job` takes over. `who` (C++ keeps the pointer for its errors) is kept for good. `run_data_job`'s `then` is a Python callable. From a Python function a program calls, `run_data_job` and `call_function` work as for a C++ native: return what they return at once |
+| | `data_job` (`step`, `result`, `nodes`), `make_equal_job`, `make_print_job`, `make_concat_job`, `make_copy_job`, `make_substitute_job`, `run_to_completion`, `run_data_job`, `call_function` (with or without #683's `then`), `make_generator_job` (#683; the generator is a `pycvc.value`), `is_compound`, `count_data_nodes`, `kDataNodeBytes`, `kMaxNativeNesting`, `kNativeStackReserve` (#682) (#658, #665); `make_json_parse_job`, `make_json_encode_job`, `kJsonMaxDepth`, `kJsonMaxIndent` (json-parse / json-encode) | the same names under `pycvc.` | wrapped (PR 4). A factory hands Python an owned job, which `run_data_job` takes over. `who` (C++ keeps the pointer for its errors) is kept for good. `run_data_job`'s `then` is a Python callable. From a Python function a program calls, `run_data_job` and `call_function` work as for a C++ native: return what they return at once |
 | | the call protocol (`data_job::call_request`, `take_call`, `pending_call`, `call_returned`, `own_inputs`), `detail::deferred_data_job`, `detail::data_step_scope`, `detail::native_nesting` (#682) | none | exception: for C++ job implementations and the evaluator's own bookkeeping; Python can't subclass a data job |
 | types.h | `symbol` | `pycvc.symbol` | wrapped (PR 1) |
 | | `value_t` | native types, or `pycvc.value` | wrapped (PR 1), see the table above |
@@ -119,6 +140,9 @@ are listed too. Status after PR 4:
 | scheduler_base.h | `execute_options`, `process_info`, `scheduler_stats` | `pycvc.execute_options`, `pycvc.process_info`, `pycvc.scheduler_stats` | wrapped (PR 2). `on_complete` is a Python callable, `signal_handlers` a dict, the `uint64_t` fields Python ints. `process_info` includes #658's steps and times by kind (`read_steps`, `eval_steps`, `data_steps`, `data_nodes`, `read_time`, `eval_time`, `data_time`) |
 | | `fill_budget_usage` (#658) | none | exception: how the schedulers fill `process_info`, from the evaluator's stats |
 | | `scheduling_policy` | `pycvc.scheduling_policy` | wrapped (PR 2), an `IntEnum` |
+| scheduler_base.h (locks L2) | `execute_options::priority_floor`, `parent_pid`; `process_info::effective_priority`, `priority_floor`; `scheduler_stats::priority_clamped` | the same names | wrapped. `priority_floor` is an int or None |
+| | `priority_info`; the schedulers' `get_priority`, `set_priority_checked`; `priority_change` | `get_priority` returns a dict `{base, effective, floor, policy}` or None (as `Exec.get_priority` does); `pycvc.priority_change`, an `IntEnum` | wrapped |
+| | `get_priority_as`, `set_priority_floor`, `note_priority_clamped`, `policy_from_state`, `control_cmd`, the schedulers' `post_control` | none | not wrapped: the DSL's own check (`set-priority`/`get-priority` reach it), the spawn clamp's counter, and the settings reader `Exec(policy=None)` uses; `post_control` carries a C++ functor, and `Exec`'s priority calls are what Python posts with it (approach item 12) |
 | | `scheduler_base` | `pycvc.scheduler_base` | wrapped (PR 3) as the common base of the two classes (what `intrinsics_context.sched` holds). Its members are on the concrete classes |
 | scheduler.h | `scheduler` (about 45 members) | `pycvc.scheduler` | wrapped (PR 2). `run`/`step` release the GIL. `execute(str)` is the script overload, so a string can't be passed as a `value_t` expression (write it as the script `"\"text\""`). `id()`, `parser_settings()` and `data_settings()` (#658) return copies. `current_process()` (shares the process), `queue_watch_event()` and `max_alloc_bytes()` (#660) are wrapped in PR 3. Not wrapped: `mem_tracker()` (see memory_tracker.h) |
 | | `max_alloc_bytes_from_state(state&, id, base)` (#660) | `pycvc.max_alloc_bytes_from_state(State, …)` | wrapped (PR 3) |
@@ -130,9 +154,9 @@ are listed too. Status after PR 4:
 | | `process::exit_exception` (exceptions P2) | `process.exit_exception` | wrapped: the exception, or None |
 | | `process`, `process::watch_event`, `process::watch_handler_entry`, `make_process` | `pycvc.process` (shared, as `process_ptr`), `pycvc.watch_event`, `pycvc.watch_handler_entry` (also `process.watch_event`, ...), `pycvc.make_process()` | wrapped (PR 3). `state` is a reference into the process; `inbox` reads as a list. The `steady_clock` time points (`create_time`, `last_run_start`, `wake_time`) are an exception: `elapsed_time()` and `accumulated_time` carry the same information |
 | builtins.h | `builtins::make_default_environment`, `builtins::register_fn` | `pycvc.builtins.make_default_environment()`, `pycvc.builtins.register_fn(env, name, fn)` | wrapped (PR 2). `fn` is a Python callable, or a `pycvc.value` holding a native fn |
-| | 38 `builtin_*` functions | none | exception: DSL builtins, called from DSL source |
+| | 42 `builtin_*` functions (38 at the audit; `json-parse` and `json-encode` among those since) | none | exception: DSL builtins, called from DSL source. pycvc runs them in programs like any builtin (`test_pycvc_state_exec_data.py::test_json_in_a_program`) |
 | | `percent_encode`, `percent_decode` | `pycvc.percent_encode`, `pycvc.percent_decode` | wrapped (PR 2) |
-| stackless_evaluator.h, evaluator.h | `stackless_evaluator`, `evaluator`, `evaluator_state`, `eval_frame`, `eval_phase`, `evaluation_stats`, `step_kind` (#658), `evaluation_interrupted`, `evaluation_timeout` | the same names under `pycvc.` | wrapped (PR 3). `eval_phase` and `step_kind` are `IntEnum`s, and `evaluation_stats` has #658's counts by kind (`steps`, `step_time`, `data_nodes`, ...); the two exceptions are `RuntimeError` subclasses. `on_complete` is a Python callable. `evaluator.user_macros()` returns a copy, a dict of name -> (params, body). `restrict_special_forms` takes any iterable of str, or None |
+| stackless_evaluator.h, evaluator.h | `stackless_evaluator`, `evaluator`, `evaluator_state`, `eval_frame`, `eval_phase`, `evaluation_stats`, `step_kind` (#658), `evaluation_interrupted`, `evaluation_timeout` | the same names under `pycvc.` | wrapped (PR 3). `eval_phase` and `step_kind` are `IntEnum`s, and `evaluation_stats` has #658's counts by kind (`steps`, `step_time`, `data_nodes`, ...); the two exceptions are `RuntimeError` subclasses. `on_complete` is a Python callable. `evaluator.user_macros()` returns a copy, a dict of name -> (params, body). `restrict_special_forms` takes any iterable of str, or None. `eval_phase.and_next` and `or_next` (the `and`/`or` special forms) are the last members, so the others keep their numbers |
 | | `evaluator_state.data_work`, `evaluator_state.backlog`, `pending_data_work` (#658), `waits_on_data_work` | none | exception: deep-data work in flight between steps, internal to the evaluator; `data_step_nodes` is wrapped |
 | | `return_exception` | none | exception: the internal unwinding of `(return ...)`, never seen outside an evaluation |
 | async_evaluator.h, async_stackless_evaluator.h | the async evaluators | none | exception: coroutine API |
@@ -151,7 +175,9 @@ are listed too. Status after PR 4:
 | | `async_kernel`/`async_marshal` as C++ callables, `async_host::call`, `begin_external`/`finish`, `make_async_future`, `async_call_of_future` | none | exception: a Python kernel is a callable (`register_async_fn`'s `fn`), not a marshal step returning a kernel. An external call's outcome is supplied by C++ host code (pycvc's own is `register_async_coro`), so `begin_external`/`finish` have no Python caller; a future is made by `(name-async ...)`, and `async_call_of_future` returns the evaluator's internal `detail::awaitable` |
 | | `process_info`/`process` `async_calls`, `async_time`, `async_cpu_time`, `async_steps`, `process_info.heap_alloc_bytes`; `execute_options.async_steps_per_cpu_ms`; `step_kind.async`, `eval_phase.await_call`, `evaluation_stats.add_steps`; `async_steps_per_cpu_ms_from_state`, `publish_async_steps_per_cpu_ms`, `kDefaultAsyncStepsPerCpuMs`; the schedulers' `receive_message_until`, `async_steps_per_cpu_ms`, `snapshot`, `restore`, and the async scheduler's `set_id`/`id`/`async_calls_in_flight`; `encode_process`, `decode_process`, `rebind_natives` | the same names | wrapped. `execute_options.async_steps_per_cpu_ms` is a float or None |
 | | `can_await`, `request_await`, `detail::await_request`, `detail::awaitable`, `park_forbidden_scope`, `parking_forbidden`, `deliver_await`, `expire_await`, `async_scheduler::track_async_call`/`post_async_completion` | none | exception: the evaluator's and schedulers' parking machinery, valid only inside a running native function or the scheduler's own drain |
-| resource_policy.h | `resource_policy`, `process_limits`, `validate_limits` | `pycvc.resource_policy` (its `mode` is `pycvc.resource_policy.mode`, an `IntEnum`), `pycvc.process_limits`, `pycvc.validate_limits` | wrapped (PR 3) |
+| resource_policy.h | `resource_policy`, `process_limits`, `validate_limits` | `pycvc.resource_policy` (its `mode` is `pycvc.resource_policy.mode`, an `IntEnum`), `pycvc.process_limits`, `pycvc.validate_limits` | wrapped (PR 3); `priority_floor` (locks L2) is an int or None |
+| cvc/core/thread_class.h (locks L2) | `thread_class`, `set_current_thread_class` | `pycvc.thread_class` (an `IntEnum`), `pycvc.set_thread_class(cls)` | wrapped: the calling thread's class, as far as the OS allows; returns whether it took |
+| | `set_process_class`, `detail::apply_process_class_here` | none | not wrapped: the process class is the host's (`state_exec.process_class`, read when the app's exec scheduler is built) |
 | intrinsics.h | `register_intrinsics`, `intrinsics_context`, `apply_chroot`, `channel_policy`, `resolve_channel_key`, `make_future`, `future_channel_of` | the same names under `pycvc.` | wrapped (PR 3). See approach item 11 for the context's lifetime. `channel_policy.global` is `global_` (a Python keyword). The context's `tracker`, `document` and `watches` aren't wrapped: `memory_tracker` is internal, `document_scope`'s slots are C++ templates, and `watches` is the intrinsics' own registry |
 | | `document_scope`, `park_on_channel` | none | exception: Ariadne/runtime internals. `document_scope` is typed C++ template slots; `park_on_channel` takes raw process pointers and is valid only inside a running native function |
 | stdlib.h | `stdlib_registry` (`standard`, `shared_scope`, `register_function`, `list_functions`, `list_modules`, `import_module`, `lookup_qualified`) | `pycvc.stdlib_registry` | wrapped (PR 4). `standard()` returns a copy, so Python can't add to the shared registry; `register_function` takes a Python callable or a `pycvc.value` native; `lookup_qualified` raises `KeyError` where C++ returns nullptr |

@@ -50,7 +50,10 @@
 #include <cvc/nav/detail/dyn_bike.h>  // diff::dyn_bike_params
 #include <cvc/nav/detail/dyn_power.h> // diff::power_params
 #include <cvc/nav/drive.h>            // field_stack
+#include <cvc/nav/dyn4_ledger.h>      // dyn4_ledger_tick
+#include <cvc/nav/rollout_plant.h>    // rollout_plant (rollout_kind::jolt)
 #include <functional>
+#include <memory>
 #include <vector>
 
 namespace cvc {
@@ -84,8 +87,13 @@ struct training_scene {
   // goal_max == 0 (the default) is the whole component, the same draws as before.
   // Throws std::invalid_argument on a negative or inverted range, or when no start
   // drawn has a cell in range.
+  //
+  // clearance > 0 draws the starts only from the component's cells at least that far
+  // (normalized) from an obstacle, the SDF at the cell, so a vehicle with a body fits
+  // where it is put; goals are drawn as without it. 0 (the default) is any cell, the
+  // same draws as before. Throws std::invalid_argument when no cell has the clearance.
   void sample_starts_goals(int n, unsigned seed, float *o, float *goal, float goal_min = 0.0f,
-                           float goal_max = 0.0f) const;
+                           float goal_max = 0.0f, float clearance = 0.0f) const;
   // Build field_data + free_cells from occ (called by the factories).
   void build();
 };
@@ -115,8 +123,14 @@ training_scene occupancy_scene(const std::uint8_t *occ, int rows, int cols, doub
 //               tires and their grip, load transfer, actuator lag, so the policy
 //               learns what the vehicle can actually do. State is (o, th, vx) plus
 //               (vy, r, delta, a); train_config::dyn is the vehicle. CPU only for now.
+//   jolt      — the bicycle's controller driving a vehicle simulation (train_config::plant,
+//               rollout_plant.h; the Jolt Humvee is cvc::physics::jolt_rollout): the forward is
+//               the simulation's, bit for bit, and the backward is the four-wheel model's
+//               (train_config::dyn4, dyn_4w's port-Hamiltonian plant) evaluated at the states the
+//               simulation reached, its books calibrated to the simulation's energy ledger
+//               (calibrate_dyn4). State is the model's (dyn4_state), held by the plant. CPU only.
 // All share the SAME coef_feats -> CoefMLP -> loss; only the integrator differs.
-enum class rollout_kind { surrogate, bicycle, dynamic };
+enum class rollout_kind { surrogate, bicycle, dynamic, jolt };
 
 // Self-supervised training hyperparameters (mirror coef_train.py train()).
 struct train_config {
@@ -195,6 +209,23 @@ struct train_config {
   float w_energy = 0.0f;
   float energy_ref = 0.0f;
   diff::power_params power{};
+  // The simulation and its model (rollout == jolt). `plant` runs the forward: train() resets it
+  // to each batch (rollout_plant::reset), and loss_and_grad() steps it from where it is. `dyn4` is
+  // the model the gradient is, in the scene's normalized frame with wheelbase lf + lr = veh_L
+  // (cvc::physics::nav_plant::dyn4_params_at(desc, veh_L), then calibrated()); `ground_mu` the
+  // ground's friction as it sees it. w_energy prices what the simulation's source drew each step
+  // (rollout_plant::lines' drawn): the term's value is the simulation's, its gradient
+  // dyn4_step_energy's at dyn4_price (calibrate_dyn4's price, which must not be zero), and its
+  // scale dyn4_full_power where the dynamic rollout's is power_full. energy_ref works as there.
+  std::shared_ptr<rollout_plant> plant;
+  diff::dyn4_params dyn4{};
+  dyn4_energy_price dyn4_price{};
+  float ground_mu = 0.9f;
+  // Each batch's starts at least this far from an obstacle (normalized; sample_starts_goals'
+  // clearance). 0: any cell, except on rollout == jolt, where a vehicle's body must fit where it
+  // is put: half veh_L, room for its width around the rear axle, the plant turning the start's
+  // heading until the body fits (cvc::physics::jolt_rollout) (start_clearance_of).
+  float start_clearance = 0.0f;
   // Checkpoint selection (P8b): with a fitness function passed to train(), the policy is
   // scored before training and every `checkpoint_every` outer steps (and after the last), and
   // train() ends on the best-scoring parameters. 0 = every 25 steps when a fitness is given.
@@ -227,6 +258,10 @@ public:
              const checkpoint_fitness &fitness = checkpoint_fitness());
   const std::vector<checkpoint_score> &checkpoints() const { return checkpoints_; }
   int selected_step() const { return selected_step_; }
+  // rollout == jolt: the agents whose gradient was not finite and was left out of a window's
+  // (the model's reverse at a state outside its domain, such as a vehicle the simulation rolled
+  // over), counted over this trainer's loss_and_grad calls.
+  long dropped_agents() const { return dropped_agents_; }
 
   // Bake the frozen inference policy: softplus(net + log(expm1(bias))), the same
   // topology and semantics a loaded .cvcnav has. Persist with its save().
@@ -246,6 +281,11 @@ public:
   // `potential` ([n*window], agent-major), when given, receives U_nav (detail/nav_potential.h,
   // diff::surr_potential) at the state each step starts from, with the coefficients the network
   // gave that step: the energy every rollout kind's force law descends. Nothing else changes.
+  //
+  // rollout == jolt: the window starts where train_config::plant is (its size must be n) and
+  // leaves it `window` steps on; o, v and x are not read. o_out and v_out get the window-final
+  // (o, (psi, vx)), x_out nothing. So the call is not pure: to repeat a window (a finite
+  // difference), save() the plant before it and restore() it between calls.
   double loss_and_grad(const training_scene &scene, const float *o, const float *v,
                        const float *goal, int n, int window, std::vector<float> *grad,
                        float *o_out = nullptr, float *v_out = nullptr, const float *x = nullptr,
@@ -272,6 +312,7 @@ private:
   long adam_total_ = 0; // total adam steps this train() run, for the cosine LR anneal (0 = off)
   std::vector<checkpoint_score> checkpoints_; // the last train()'s checkpoint scores
   int selected_step_ = -1;                    // and the one it ended on (-1 = no selection)
+  mutable long dropped_agents_ = 0;           // dropped_agents()
   // Per-layer flat offsets into p_ (w then b), plus (rows, cols).
   int off_w_[3] = {0, 0, 0}, off_b_[3] = {0, 0, 0};
   int lrows_[3] = {0, 0, 0}, lcols_[3] = {0, 0, 0};
@@ -279,6 +320,21 @@ private:
 
   void adam_step(const std::vector<float> &grad);
 };
+
+// The controller's vehicle the trainer's rollouts drive with: the scene's clearance (rr, d_hat),
+// top speed and step, and cfg's veh_* limits.
+diff::bike_veh bike_veh_of(const training_scene &scene, const train_config &cfg);
+// The starts' clearance train() draws batches with (train_config::start_clearance).
+float start_clearance_of(const train_config &cfg);
+
+// Drives `plant` under the trainer's controller (train_config's veh_* and scene) at the fixed
+// coefficients (al, be, ga) for `steps` steps of a batch of n agents from cfg's start and goal
+// draws (seed), and returns every tick: what calibrate_dyn4 fits the model to. The batch's model
+// and price are cfg.dyn4 and cfg.dyn4_price.
+std::vector<dyn4_ledger_tick> record_plant_ticks(const training_scene &scene,
+                                                 const train_config &cfg, rollout_plant &plant,
+                                                 int n, int steps, unsigned seed, float al = 1.0f,
+                                                 float be = 3.0f, float ga = 4.0f);
 
 // ── CUDA trainer (defined in coef_train.cu; CVC_ENABLE_CUDA only) ─────────────
 // The same self-supervised training on the GPU: the field, params and per-window

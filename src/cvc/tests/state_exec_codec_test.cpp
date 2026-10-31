@@ -527,6 +527,43 @@ TEST_F(EvaluatorStateCodecTest, PauseResumeProducesCorrectResult) {
   EXPECT_EQ(std::get<int64_t>(restored.result.v), 55);
 }
 
+TEST_F(EvaluatorStateCodecTest, AnAndRestoredMidWayGoesOnFromItsNextArgument) {
+  // Stopped inside (and ...), with arguments still to evaluate: the frame's phase (and_next)
+  // round-trips, and the restored run still stops at the falsy argument.
+  auto state = ev->create_state(std::string("(and 1 (+ 1 1) 3 nil (error \"never\"))"));
+  bool inside = false;
+  while (!inside && !ev->step(state))
+    for (const eval_frame &f : state.stack)
+      inside = inside || (f.phase == eval_phase::and_next && f.index >= 1);
+  ASSERT_TRUE(inside);
+  ASSERT_FALSE(state.done);
+  auto &node = ctx.root()("__es_and__");
+  encode_evaluator_state(node, state);
+  auto restored = decode_evaluator_state(node);
+  bool phase_kept = false;
+  for (const eval_frame &f : restored.stack)
+    phase_kept = phase_kept || f.phase == eval_phase::and_next;
+  EXPECT_TRUE(phase_kept);
+  auto builtins_env = builtins::make_default_environment();
+  auto patch_env = [&](environment_ptr env) {
+    if (!env)
+      return;
+    while (env->outer)
+      env = env->outer;
+    for (auto &[name, val] : builtins_env->bindings)
+      env->set(name, val);
+  };
+  patch_env(restored.global_env);
+  for (auto &frame : restored.stack) {
+    patch_env(frame.env);
+    patch_env(frame.extra_env);
+  }
+  auto ev2 = std::make_unique<stackless_evaluator>(builtins::make_default_environment());
+  ev2->run(restored);
+  ASSERT_TRUE(restored.done);
+  EXPECT_EQ(to_string(restored.result), "#f");
+}
+
 TEST_F(EvaluatorStateCodecTest, WithMacros) {
   auto state = ev->create_state(std::string("(begin "
                                             "  (defmacro double-it (x) (* x 2)) "
@@ -984,4 +1021,55 @@ TEST(LockCodec, RemainingTimeoutWritten) {
   EXPECT_TRUE(timeout_written(forever).is_nil());
   w.send("go");
   ASSERT_TRUE(w.step_until([&] { return w.finished(t30) && w.finished(forever); }));
+}
+
+// ===========================================================================
+// The lock phases' fields (docs/STATE_EXEC_LOCKS.md)
+// ===========================================================================
+
+// The priority floor (7.2; locks plan L2.6) and whether a host gave it: written beside the
+// priority and read back, through a scheduler's snapshot and restore too. A snapshot without them
+// (older than the floor, or of a process no scheduler submitted) reads the decoded priority as its
+// floor, not an explicit one.
+TEST(LockCodec, FloorRoundTrips) {
+  cvc::app ctx;
+  scheduler sched;
+  execute_options explicit_floor;
+  explicit_floor.priority = 4;
+  explicit_floor.priority_floor = 2;
+  const int pid = sched.execute(std::string("(+ 1 2)"), explicit_floor);
+  execute_options submit_floor;
+  submit_floor.priority = 5;
+  const int pid2 = sched.execute(std::string("(+ 1 2)"), submit_floor);
+
+  auto &node = ctx.root()("__floor_explicit__");
+  ASSERT_TRUE(sched.snapshot(pid, node));
+  EXPECT_EQ(node("priority").value(), "4");
+  EXPECT_EQ(node("priority_floor").value(), "2");
+  EXPECT_EQ(node("priority_floor_explicit").value(), "1");
+  const process_ptr decoded = decode_process(node);
+  EXPECT_EQ(decoded->priority, 4);
+  EXPECT_EQ(decoded->priority_floor, std::optional<int>(2));
+  EXPECT_TRUE(decoded->priority_floor_explicit);
+  const int restored = sched.restore(node);
+  EXPECT_EQ(sched.get_priority(restored)->floor, 2);
+
+  auto &node2 = ctx.root()("__floor_submit__");
+  ASSERT_TRUE(sched.snapshot(pid2, node2));
+  EXPECT_EQ(node2("priority_floor").value(), "5");
+  EXPECT_EQ(node2("priority_floor_explicit").value(), "0");
+  const process_ptr decoded2 = decode_process(node2);
+  EXPECT_EQ(decoded2->priority_floor, std::optional<int>(5));
+  EXPECT_FALSE(decoded2->priority_floor_explicit);
+
+  // No floor: a process no scheduler submitted writes none, and reads its priority back.
+  process_ptr bare = make_process();
+  bare->priority = 7;
+  auto &node3 = ctx.root()("__floor_none__");
+  encode_process(node3, *bare);
+  EXPECT_EQ(node3.findDescendant("priority_floor"), nullptr);
+  const process_ptr decoded3 = decode_process(node3);
+  EXPECT_EQ(decoded3->priority, 7);
+  EXPECT_EQ(decoded3->priority_floor, std::optional<int>(7));
+  EXPECT_FALSE(decoded3->priority_floor_explicit);
 }

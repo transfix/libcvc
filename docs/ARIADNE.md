@@ -86,9 +86,11 @@ Reactive slots — `visible_when`, `enabled_when` / `disabled_when`, computed `b
 - The value allowlist admits arithmetic, coercion, logic, and side-effect-free state
   *readers* only (`kAllowed`, [`ariadne.cpp:417`](../src/cvc/ariadne/ariadne.cpp)), plus
   `(has? "name")`, which asks what the host provides
-  ([§5.7](#57-requires-and-has--what-a-document-needs-from-its-host)).
+  ([§5.7](#57-requires-and-has--what-a-document-needs-from-its-host)). `json-parse` and
+  `json-encode` are on it ([§10.4](#104-json-replies)); `str-concat` is not, so a computed
+  label joins its parts with `string.join`.
 - The special-form gate admits only `if / begin / let / while / for / lambda / defun /
-  set / return / quote / yield / break` (`kAllowedForms`,
+  set / return / quote / yield / break / and / or` (`kAllowedForms`,
   [`ariadne.cpp:433`](../src/cvc/ariadne/ariadne.cpp)).
 
 Nothing that writes state, schedules, watches, sends messages, or does I/O is
@@ -141,6 +143,12 @@ or key step, a text field's Enter, a colour edit) and the resident
 handlers (`on_tick` / `on_key` / `on_pointer`) run in the action lane, on the
 **app-wide scheduler** (`app.exec_scheduler()`), **off** the render walk, inside
 `Runtime::drain()` ([`ariadne.cpp:1642`](../src/cvc/ariadne/ariadne.cpp)).
+
+That scheduler's policy is the app tree's `state_exec.policy` (`round_robin`, `priority` or
+`priority_rr`), read once, when `app.exec_scheduler()` is first built, and fixed from then on; an
+unknown value is logged and `round_robin` used. Ariadne sets none, so its default stays
+`round_robin`: a program's `set-priority` is stored and reported but changes no pick (developer
+guide, "Priorities").
 
 A fire-once handler is *submitted* (`submit_action`,
 [`ariadne.cpp:1375`](../src/cvc/ariadne/ariadne.cpp)) with the full default environment
@@ -334,6 +342,33 @@ A `progress:` widget is read-only: a bar showing the number at `bind` placed in 
 state path or a computed expression) drawn over it, else the percent. ImGui draws a progress bar;
 a backend with none gets a text value (`[########------------] 40%`).
 
+A `spinner:` widget says something is under way when there is no amount to show (a request, a
+search). The host turns it by its own frame clock (`Runtime::frame_clock`), not by state, so it keeps
+moving while the document's programs are parked: a program waiting on `http-get` still has a
+turning spinner beside it, in every backend and in the single-threaded browser pages (§10.2).
+Show it while the work runs with `visible_when`:
+
+```yaml
+- spinner: Signing in...
+  visible_when: (= (state-get "ui.busy") "1")
+- spinner:                                # the label from state, or a computed expression
+  bind: (string.join (list "Loading" (state-get "feed.name")) " ")
+- spinner: Working
+  glyphs: ascii                           # | / - \ rather than braille dots
+```
+
+- The label is the widget's key, or `bind:` (a state path, or a computed expression, read-lane
+  rules: `string.join`, not `str-concat`) when it has one; a bare `- spinner` has none.
+- Disabled (`enabled_when` falsy, or `disabled_when` truthy), it stands still, greyed where the
+  backend greys.
+- The terminal backends (FTXUI, tvision) draw ten braille dots a second (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`), then
+  the label. `glyphs: ascii` turns `| / - \` instead, as they do by themselves on the Linux console
+  and on a `dumb` or `vt*` terminal, which have no braille (`Backend::unicode_glyphs`). ImGui draws
+  a turning arc, a text line high, one turn a second, so it needs no glyph from the font (the browser
+  build's is ASCII).
+- A snapshot reads frame `f` at `f / fps` (`ari snapshot`: `--fps`, default 20; arigl's fixed
+  clock: 1/30 s a frame), so `--frames 3` shows the spinner one step on from `--frames 1`.
+
 A backend advertises `Capabilities{windows, menubar, mouse, keyboard, color, glsl,
 view_embed, owns_loop, terminal, bitmap, kitty, sixel}`
 ([`backend.h`](../inc/cvc/ariadne/backend.h)). A document's `requires:` and `(has? ...)`
@@ -458,8 +493,10 @@ Three backends ship:
   ([`inc/cvc/ariadne/tvision_backend.h`](../inc/cvc/ariadne/tvision_backend.h)) — the
   native-desktop terminal backend (roadmap §16.5 row 5). Turbo Vision owns the terminal
   and draws the chrome itself: movable, resizable, overlapping windows with close and
-  zoom boxes, a pull-down menu bar, a status line, and its own keys (F10, F6, Alt-X,
-  Ctrl-F5). The windows' *contents* are the FTXUI backend's: a `TvisionBackend` is an
+  zoom boxes, a pull-down menu bar, a status line, and its own keys (F10 for the menu bar, F6
+  for the next window, Alt-X to quit, Ctrl-F5 to move or resize the window from the keyboard:
+  the arrows move it, Shift and the arrows resize it, Return keeps it, Escape puts it back).
+  The windows' *contents* are the FTXUI backend's: a `TvisionBackend` is an
   `FtxuiBackend` in hosted mode (`Options::hosted`), which lays each window body out
   offscreen for tvision to draw and takes that window's input in its own cells. So both
   terminal backends share one widget engine, focus and commit rule, and the hosted mode
@@ -966,14 +1003,23 @@ entry warns. An entry is one of:
 
   | token | holds when |
   |---|---|
-  | `gl.scene` | a scene adapter realizes `scene:` (arigl, the cvcGL hosts) |
-  | `gl.shaders` | GLSL runs (scene `shaders:`, `shader_canvas`) |
+  | `gl.scene` | a scene adapter realizes `scene:` (arigl in a window or `--terminal`, the cvcGL hosts) |
+  | `gl.scene.shaders` | the scene runs the document's GLSL (a node's `shader:` block); arigl in a window or `--terminal` |
+  | `gl.ui.shaders` | the UI draws GLSL itself (`shader_canvas`): a GL window, never a terminal |
+  | `gl.shaders` | both `gl.scene.shaders` and `gl.ui.shaders` |
   | `gl.view` | a live render view can sit in a widget |
   | `ui.windows`, `ui.menubar`, `ui.color` | movable windows; a menu bar; coloured styling |
   | `input.mouse`, `input.keyboard` | pointer input; key and text input |
   | `raster.bitmap` | images show in real pixels (a GL window, or a kitty or Sixel terminal) |
   | `term`, `term.kitty`, `term.sixel` | a text terminal; one that speaks kitty graphics; one that draws Sixel |
 
+  GLSL runs in two places, and they are separate facts. The scene's shaders run in the
+  scene adapter's renderer (`SceneAdapter::runs_shaders`), the UI's in the backend
+  (`Capabilities::glsl`). `arigl --terminal` has the first without the second: it renders
+  the scene offscreen through GL and draws the UI as text cells. So a document whose only
+  GLSL is in `shader:` blocks requires `gl.scene.shaders` and runs there. One with a
+  `shader_canvas` requires `gl.ui.shaders`, or lists it as optional and checks
+  `(has? "gl.ui.shaders")`. `gl.shaders` asks for both, so it fails on `--terminal`.
 - a **function** a program can call: a builtin, a stdlib function, a state intrinsic or a
   host verb (`Runtime::has_function`);
 - a **widget type**, built in (`slider_int`, `button`, …) or registered
@@ -989,7 +1035,10 @@ listed there is not warned about again. `ari check doc.ari` shows both.
 
 A document that can run without something asks for it at run time with `(has? "name")`,
 which answers the same question for a token, a function or a widget type. It works in
-programs and in reactive expressions:
+programs and in reactive expressions. The load-time scan does not follow the guard: a call
+behind `(has? "name")` still warns, until `requires:` lists the name as `optional: true`. So
+the two go together: the entry says the document can do without it, and the guard is how it
+does.
 
 ```yaml
 windows:
@@ -1004,6 +1053,17 @@ windows:
 A host can ask the same thing in C++: `Runtime::has`, `has_function`, `program_names` and
 `host_facts`.
 
+A `load:`ed module (§6.3) may have its own `requires:`, kept on its mount wrapper
+(`Widget::requirements`), and `AppRuntime::load` checks it with the document's:
+
+- A required entry the host lacks fails the whole load. The error names the module:
+  `... requires: room-join (module 'includes.call')`.
+- A missing optional entry warns, also naming the module.
+- An entry covers the calls of the programs in that module and the modules it mounts. The
+  document's own entries cover every program, its modules' included. A module's entries never
+  cover its parent's calls: what a module needs is its own business, and a parent that calls the
+  same verb lists it too.
+
 ### 5.8 Window size, placement and scrolling
 
 A window needs neither `pos:` nor `size:`. Its size:
@@ -1014,6 +1074,9 @@ A window needs neither `pos:` nor `size:`. Its size:
 - A window with no `size:` fits its content every frame, so it grows and shrinks with what it
   shows. It stops at the edge of the view, measured from where it stands, and never goes below an
   authored `min:` or past a `max:`. Its persisted geometry places it but does not size it.
+- A window that closes and opens again in the same run (§5.9, or its `visible_when` turning true
+  again) is sized as on its first opening: by its `size:`, else by what it shows now, rows it
+  gained while closed included. Only a size the user gave it holds.
 
 Content that does not fit the window, whatever set its size, scrolls. A window gets a scroll bar
 on each axis where it needs one, and never clips its content or shrinks to a stub.
@@ -1042,15 +1105,24 @@ How each backend does it:
   and cascade new windows instead of flowing them. A window that would run off the screen stops at
   the screen's edge, and a window whose content is larger than it is (or than its `size:`) gets a
   scroll bar. Its body scrolls to keep the focused widget in view; there is no wheel scrolling.
-  On the tvision desktop, tvision's frame holds the window, and the host refits that frame to the
-  content in each axis the document did not size, until the user resizes the window with the
-  frame's own corner; from then on it keeps the user's size.
+  On the tvision desktop, tvision's frame holds the window, and the host sizes that frame on every
+  walk, in each axis: the document's size where it gave one, else the content's. That stops when
+  the user resizes the window (the frame's corner, Ctrl-F5 then Shift and the arrows, or the zoom
+  box): from then on it keeps the user's size, through a close and a reopen too. Nothing else
+  counts as the user's: not a size the host gave the window to fit it, nor tvision scaling the
+  windows when the terminal is resized, nor a move. Only the user's size is reported back to
+  `tree.<id>.geometry`; for any other window the host reports its place alone.
+  `ari_run_reopen_refit_ftxui` and `_tvision` check this in a tmux pane (Linux):
+  [`src/ari/tests/reopen_refit.ari`](../src/ari/tests/reopen_refit.ari)'s windows gain rows while
+  closed and must show them when they open again, and on tvision a window resized with Ctrl-F5
+  must come back at that size.
 
 ### 5.9 Closing and reopening windows: the Windows menu
 
 A window's open state is `tree.<id>.open` (default open; `<id>` is its `id:`, else its title). A
 window whose state is `0` is not drawn. A `closable: true` window has a close button that sets it
-to `0`.
+to `0`. One that opens again is sized as §5.8 says: by its `size:` or its content, unless the user
+resized it.
 
 Every document gets a **Windows** menu to open such a window again, with no menu items to write:
 
@@ -1178,7 +1250,8 @@ disambiguated `_2` / `_3`. A mounted module is sandboxed to its own state sub-pr
 (§7) and reaches the parent only through explicitly granted `link:` holes, and calls only the
 functions its mount grants (§6.6).
 
-A module's own programs are its `init:`, its `on_tick:` and its widgets' actions. The loader
+A module's own programs are its `init:`, its `on_tick:` and its widgets' actions. What they need
+from the host goes in the module's own `requires:` (§5.7). The loader
 captures `init:` and `on_tick:` onto the mount wrapper (`Widget::init_script`,
 `Widget::tick_script`), and the runtime runs both at the sub-prefix with the mount's functions:
 `init:` once, `on_tick:` as the mount's own tick resident (§2.3). So a module can own a loop, a
@@ -1834,6 +1907,28 @@ In an Ariadne document's action lane, the network verbs are (from
   (`ariadne.limits.*`, §2), so charged like other calls no action could make one. The
   transport's own timeouts (10 s to connect, 30 s in all) and its 64 MiB reply cap bound a
   request instead.
+- **In a browser build without threads** (the single-threaded wasm pages: `ari.html`, arigl's
+  page) there is no background pool to wait on: its jobs run on the page's main thread, between
+  frames. There the verbs start the request instead of sending it
+  (`cvc::net::HttpClient::start`, a browser fetch) and return to the frame loop at once. The
+  calling program parks as it does natively, frames keep drawing and taking input, and the
+  fetch's callback posts the reply to the scheduler, which resumes the program on a later
+  frame. So a spinner (or a document's own progress bar between `(await f 0.05)` slices)
+  animates while a request is out. The contract is the same as natively: the reply dict, the
+  host's policy, `auth` / `capture_auth` and credential values (the token goes in and comes out
+  in C++ as the reply arrives), a 30 s timeout (the reply's `error` says it timed out), the 64
+  MiB cap (enforced as the body arrives), and a killed or reaped program aborts its fetch.
+  `fetch` of an `http(s)` URI is started the same way, through the http handler's non-blocking
+  form (`register_uri_async_handler`, `resolve_async` in [`uri.h`](../inc/cvc/ariadne/uri.h)); a
+  host that registers its own `http` handler in its place gets the blocking call for it. Two
+  things still wait in place in that build: a call where the program can't park (a generator's
+  body, a recursive evaluator), which runs the request inline as natively; and the loads the
+  host makes itself, outside any program: an `https` `import:`/`load:` while the document loads,
+  and a scene's `source:` mesh or texture URL when the scene is realized
+  (`resolve_to_file`). Those use the blocking `cvc::net::send()`, which yields to the browser
+  under Asyncify but holds the frame that called it. (The browser pages fetch a document's
+  relative imports themselves before it loads.) In builds with threads (native, wasm-mt) the
+  request runs on the background pool as before.
 
 ### 10.3 The host's network: the allowlist and credentials
 
@@ -1853,7 +1948,8 @@ arigl run --net-allow https://tx.wtf --credential-store nicotina share/nicotina/
 The flags hold for `run`, `snapshot`, `check` and `info` alike. With the network on, `ari
 snapshot` and `arigl snapshot` (in a window or with `--terminal`) keep running after their
 frames until the document is idle, no request in flight and no program step waiting (a program
-parsing one reply before it sends the next is not idle), for three steps running, at most 10 s.
+parsing one reply before it sends the next is not idle), for three steps running, at most 10 s
+(`--settle S` sets another limit, for a slow server or a slow build).
 So one frame shows what a document that signs in and fetches brought back, and CI can render it
 against a local test server. `ari snapshot` prints the programs' warnings after the frame, as
 `arigl snapshot` does.
@@ -1952,7 +2048,99 @@ A host of its own turns the network on with `AppRuntime::enable_net(NetHostConfi
 destroyed. `register_net_intrinsics(app)` alone still registers unchecked verbs with no
 credentials, for an embedding program that vouches for its documents.
 
+### 10.4 JSON replies
+
+A REST reply's body is text. Three verbs turn it into widgets
+([STATE_EXEC_DEVELOPER_GUIDE.md](STATE_EXEC_DEVELOPER_GUIDE.md) §2, "JSON", has the details):
+
+- `(json-parse text)` reads JSON into values: an object is a dict in document order, an array
+  a list, a number without a fraction or exponent an int, `null` nil. Malformed text raises a
+  `ValueError` with `line` and `col`, which a `try` can catch.
+- `(json-encode value [indent])` writes values as JSON, for a request body.
+- `(state-set-tree path value)` writes a parsed value as the subtree at `path`: a dict's keys
+  and a list's indices name child nodes, and a scalar is a node's value. A list's node holds
+  its length, so `repeat:` can count it. It replaces the subtree, removing what the value
+  doesn't name, and it checks the whole value before it writes anything.
+
+```yaml
+init: |
+  (state-set-tree "feed" (json-parse (get-attr (http-get "https://example.org/feed") "body")))
+windows:
+  - window: Feed
+    children:
+      - type: group
+        repeat: (state-get "feed.items")     # the list's length
+        children:
+          - text: ""
+            bind: feed.items.{i}.text         # each element's field
+```
+
+The request needs the host to allow its origin ([§10.3](#103-the-hosts-network-the-allowlist-and-credentials),
+`ari --net-allow https://example.org`).
+[`examples/ariadne/documents/json_feed.ari`](../examples/ariadne/documents/json_feed.ari) does
+this with a JSON string in place of the request, so it runs anywhere, `ari` included. Its last
+post has accented letters, CJK and an emoji: in both terminal backends a wide glyph takes two
+columns and the window's edge stays straight. `ari_run_json_feed_ftxui` and
+`ari_run_json_feed_tvision` check that on a real terminal: they run `ari run` in a tmux pane
+(Linux, where tmux is installed) and compare the window's rows. `ariadne_ftxui_test`'s
+`JsonFeed*` and `WideGlyphs*` tests check `ari snapshot` and the tvision backend's hosted layout;
+until they did, `ari snapshot`'s plain text put a space after each wide glyph. All
+three are data jobs: a large reply is parsed and written a slice per step, so it doesn't stall
+a frame. `json-parse` and `json-encode` are pure, so reactive expressions may use them too.
+
 ---
+
+### 10.5 WebSockets
+
+The `ws-*` verbs keep a WebSocket client open across ticks, for a server that pushes changes
+(a live feed) instead of being polled. Natively they use libcurl's WebSocket support (built with
+`ws` and `wss`, as the deps' libcurl is); in the browser build, the browser's own `WebSocket`
+(link with `-lwebsocket.js`, which the `cvc` target adds for Emscripten executables). A host
+without either has no `ws-*` verbs, so a document asks `(has? "ws-open")` and polls otherwise.
+
+| verb | what |
+|---|---|
+| `(ws-open URL [OPTS])`, `ws-open-async` | connect to a `ws://` or `wss://` URL; reply `{ok handle url error}` |
+| `(ws-send H MESSAGE)` | send a text message: a string as it is, a dict or list as JSON; `#t`, or an error when `H` is closed |
+| `(ws-poll H)` | the next message already in, or `nil`; never waits |
+| `(ws-recv H [SECONDS])`, `ws-recv-async` | the next message, waiting up to `SECONDS` (30); `nil` when none came |
+| `(ws-open? H)` | whether `H` is still open |
+| `(ws-close H [CODE])` | close `H` (code 1000) and forget it; `#t` if it was open, never an error |
+
+- `H` is a handle string (`"ws:3"`), so a program can keep it in state and use it on later
+  ticks. A host keeps at most 64 open.
+- A message is a dict `{type data code}`: `type` is `"text"` (`data` a string, ready for
+  `json-parse`), `"binary"` (`data` bytes), `"close"` (`code` the peer's close code, 1005 when it
+  sent none and 1006 when the connection dropped; `data` its reason) or `"error"`. A close or
+  an error is the last message; `ws-open?` is `#f` from then on. Fragmented messages arrive
+  whole; one longer than 16 MiB is an error and closes the connection.
+- `OPTS` takes `query`, `headers`, `auth` and credential values as the HTTP verbs do (§10.2,
+  §10.3), plus `timeout`, the seconds to connect (15). A browser's `WebSocket` can't send
+  request headers, so there `headers` and `auth` are refused; a server that wants a token takes
+  it in a message instead, which `ws-send` can carry without the document holding it (below).
+- `ws-send` sends a dict or a list as JSON, compact (`json-encode`'s rules: a value JSON lacks
+  is an error). A credential value in it, `(dict "credential" NAME)` at any depth, is sent as
+  the token the host keeps for `NAME`, a JSON string, so a document signs in to a live feed the
+  one way a browser allows, in a message:
+
+  ```lisp
+  (set r (ws-open "wss://tx.wtf/ws/events"))
+  (ws-send (get-attr r "handle") (dict "type" "hello" "token" (dict "credential" "txwtf")))
+  ;; the server gets {"type":"hello","token":"<the host's txwtf token>"}
+  ```
+
+  The token is fetched for the connection's origin (its URL's `http(s)` twin, as for the
+  policy), so a credential bound to other origins (§10.3) is not sent, and is put in on the
+  host just before the message goes; no value, state node, error or log line holds it. A name
+  with no token there is an error and sends nothing; so is a credential value on a host that
+  keeps no credentials. As with HTTP replies, a token a connection has sent (in its handshake
+  or a message) is blanked to `[redacted]` in what `ws-recv` and `ws-poll` return, should the
+  server echo it. A string is sent as it is: a document can't put a token in one.
+- The host's policy (§10.3) checks the URL as its `http(s)` twin: `--net-allow
+  https://example.org` allows `wss://example.org/...`.
+- `ws-open` and `ws-recv` are async I/O calls like the HTTP verbs: the connect, or the wait,
+  runs on the background pool and the program parks. `ws-poll` is the one to call from an
+  `on_tick` that also does other work: it takes what has arrived and returns.
 
 ## 11. Caveats — what is not yet wired
 
@@ -2193,7 +2381,8 @@ A document **fails** when:
 The network is as `snapshot`'s (§10.3): off unless `--net`, `--net-allow`, `--net-policy` or
 `--credential-store` turns it on. A test that makes a request waits for its reply as any program
 does. A document run for `--frames N` with the network on waits after its frames, as `snapshot`
-does, until its requests have come back (at most 10 s), and a warning in that time fails it too.
+does, until its requests have come back (at most 10 s, or `--settle S`), and a warning in that
+time fails it too.
 `--prefix`, `--component-path` and `--image` work as for `snapshot`. A document has no command
 line of its own under `ari test`: an `args:` block's arguments take their defaults. Flags go
 before the first document.

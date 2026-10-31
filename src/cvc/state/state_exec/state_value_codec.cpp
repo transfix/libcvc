@@ -773,6 +773,10 @@ std::string phase_to_string(eval_phase p) {
     return "lock_enter";
   case eval_phase::lock_body:
     return "lock_body";
+  case eval_phase::and_next:
+    return "and_next";
+  case eval_phase::or_next:
+    return "or_next";
   }
   return "init";
 }
@@ -826,6 +830,10 @@ eval_phase string_to_phase(const std::string &s) {
     return eval_phase::lock_enter;
   if (s == "lock_body")
     return eval_phase::lock_body;
+  if (s == "and_next")
+    return eval_phase::and_next;
+  if (s == "or_next")
+    return eval_phase::or_next;
   return eval_phase::init;
 }
 
@@ -1183,6 +1191,12 @@ void encode_process(cvc::state &node, const process &proc) {
   node("name").value(proc.name);
   node("status").value(std::string(to_string(proc.status)));
   node("priority").value(std::to_string(proc.priority));
+  // The floor (docs/STATE_EXEC_LOCKS.md 7.2), and whether a host gave it: unset on a process no
+  // scheduler submitted, which reads it as its priority.
+  if (proc.priority_floor) {
+    node("priority_floor").value(std::to_string(*proc.priority_floor));
+    node("priority_floor_explicit").value(std::string(proc.priority_floor_explicit ? "1" : "0"));
+  }
   node("uid").value(proc.uid);
   node("gid").value(proc.gid);
   node("root_path").value(proc.root_path);
@@ -1237,6 +1251,13 @@ process_ptr decode_process(cvc::state &node) {
   proc->name = child_text(node, "name");
   proc->status = parse_process_status(child_text(node, "status"));
   proc->priority = static_cast<int>(std::strtol(child_text(node, "priority").c_str(), nullptr, 10));
+  // A snapshot without a floor (older than it, or of a process no scheduler submitted) gets the
+  // decoded priority as its floor, not an explicit one.
+  proc->priority_floor =
+      has_child(node, "priority_floor")
+          ? static_cast<int>(std::strtol(child_text(node, "priority_floor").c_str(), nullptr, 10))
+          : proc->priority;
+  proc->priority_floor_explicit = child_text(node, "priority_floor_explicit") == "1";
   proc->uid = child_text(node, "uid");
   proc->gid = child_text(node, "gid");
   proc->root_path = child_text(node, "root_path");

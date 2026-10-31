@@ -10,7 +10,7 @@
 #include <boost/program_options.hpp>
 #include <cctype>
 #include <charconv>
-#include <cstdlib> // strtod (--timeout)
+#include <cstdlib> // strtod (--settle, --timeout)
 #include <cvc/ariadne/host_cli.h>
 #include <cvc/net/credentials.h>
 #include <cvc/net/net_policy.h>
@@ -22,23 +22,15 @@ namespace {
 
 namespace po = boost::program_options;
 
-constexpr const char *kValueFlags[] = {"--prefix",
-                                       "--component-path",
-                                       "--backend",
-                                       "--fps",
-                                       "--width",
-                                       "--height",
-                                       "--frames",
-                                       "--png",
-                                       "--graphics",
-                                       "--image",
-                                       "--cell-size",
-                                       "--net-allow",
-                                       "--net-policy",
-                                       "--credential-store",
-                                       "--credential-env",
-                                       "--timeout",
-                                       "--log"};
+constexpr const char *kValueFlags[] = {"--prefix",         "--component-path",
+                                       "--backend",        "--fps",
+                                       "--width",          "--height",
+                                       "--frames",         "--png",
+                                       "--graphics",       "--image",
+                                       "--cell-size",      "--net-allow",
+                                       "--net-policy",     "--credential-store",
+                                       "--credential-env", "--settle",
+                                       "--timeout",        "--log"};
 constexpr const char *kBoolFlags[] = {"--no-mouse", "--ansi", "--net"};
 
 bool is_general_flag(const std::string &a) {
@@ -112,6 +104,14 @@ bool apply(const po::option &opt, HostOptions &o) {
       return false;
     }
     (a == "--fps" ? o.fps : a == "--width" ? o.width : a == "--height" ? o.height : o.frames) = n;
+  } else if (a == "--settle") {
+    char *end = nullptr;
+    const double t = std::strtod(value.c_str(), &end);
+    if (value.empty() || end != value.c_str() + value.size() || !(t > 0)) {
+      o.error = "--settle needs a number of seconds above 0, not '" + value + "'";
+      return false;
+    }
+    o.settle = t;
   } else if (a == "--timeout") {
     char *end = nullptr;
     const double t = std::strtod(value.c_str(), &end);
@@ -265,6 +265,8 @@ std::string host_flags_help() {
          "  --png FILE             snapshot: also write a PNG\n"
          "  --log FILE             run: append each warning to FILE as it happens (or set\n"
          "                         ARIADNE_LOG=FILE)\n"
+         "  --settle S             snapshot: with the network on, wait at most S seconds\n"
+         "                         for the document to go idle (default 10)\n"
          "  --graphics MODE        images in a terminal: auto, kitty, sixel, iterm, color or mono\n"
          "  --image NAME=FILE      publish FILE's picture as NAME, for image: widgets\n"
          "  --cell-size WxH        snapshot: a terminal cell's size in pixels\n"

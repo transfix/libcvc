@@ -83,6 +83,43 @@ if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL 
                        PROPERTIES ENVIRONMENT "ARI_BINARY=$<TARGET_FILE:ari>")
 endif()
 
+# A spinner turns by the host's frame clock while the document's program is parked: `ari snapshot`
+# frame 1 against frame 3, then `ari run` in tmux under each terminal backend this ari has
+# (tests/spinner_test.sh). Where bash is; without tmux only the snapshots are checked.
+if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND NOT WIN32 AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
+  add_test(NAME ari_spinner
+    COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/spinner_test.sh" $<TARGET_FILE:ari>
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/spinner.ari")
+  set_tests_properties(ari_spinner PROPERTIES TIMEOUT 60)
+endif()
+
+# A document as each terminal backend really draws it: `ari run` in a 100x30 tmux pane, the text
+# inside its window's borders compared with the rows expected (tests/run_in_tmux_test.sh). `ari
+# snapshot` always lays out with FTXUI, so this is what checks the tvision desktop itself, and the
+# live FTXUI screen. json_feed.ari's rows include accents, CJK and an emoji, so a wide glyph that
+# took the wrong number of columns moves its row's right border. Linux, where tmux is; a backend
+# this ari lacks is skipped (77).
+if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
+   AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
+  find_program(CVC_TMUX_EXECUTABLE tmux)
+  if(CVC_TMUX_EXECUTABLE)
+    foreach(_backend ftxui tvision)
+      add_test(NAME ari_run_json_feed_${_backend}
+        COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_in_tmux_test.sh" $<TARGET_FILE:ari>
+                "${CMAKE_CURRENT_SOURCE_DIR}/../../examples/ariadne/documents/json_feed.ari"
+                ${_backend} "${CMAKE_CURRENT_SOURCE_DIR}/tests/json_feed.rows")
+      set_tests_properties(ari_run_json_feed_${_backend} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+      # Windows that close and open again in one run (tests/reopen_refit.ari, driven by its keys):
+      # each fits the rows it gained while closed, and on tvision one the user resized (Ctrl-F5)
+      # comes back at their size.
+      add_test(NAME ari_run_reopen_refit_${_backend}
+        COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/reopen_refit_test.sh" $<TARGET_FILE:ari>
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/reopen_refit.ari" ${_backend})
+      set_tests_properties(ari_run_reopen_refit_${_backend} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+    endforeach()
+  endif()
+endif()
+
 if(EMSCRIPTEN)
   # The browser build: ari.js/ari.wasm plus ari.html, an xterm.js page wired to the module's
   # stdin/stdout, which is all FTXUI's Emscripten screen talks to. Opened on ?src= (or with a page
@@ -244,14 +281,15 @@ if(EMSCRIPTEN)
   ari_wasm_page(ari "ari"
     "Tab / Enter / arrows · mouse · F10 menu · Ctrl-C asks, twice quits"
     -sEXPORTED_FUNCTIONS=_main,_ftxui_on_resize)
-  # CI's network check (ci.yml, "ari terminal backend (wasm, node)") runs tests/net_probe.ari
-  # against tests/net_probe_server.py under node: the probe goes into MEMFS at /tests. Off by
-  # default, so the published page does not carry it.
+  # CI's network checks (ci.yml, "ari terminal backend (wasm, node)") run tests/net_probe.ari and
+  # tests/l4_frames.ari against tests/net_probe_server.py under node: the documents go into MEMFS
+  # at /tests. Off by default, so the published page does not carry them.
   option(CVC_ARI_WASM_TEST_DOCS "Embed src/ari/tests at /tests in the wasm ari (CI)" OFF)
   if(CVC_ARI_WASM_TEST_DOCS)
     target_link_options(ari PRIVATE "--embed-file=${CMAKE_CURRENT_SOURCE_DIR}/tests@/tests")
     set_property(TARGET ari APPEND PROPERTY LINK_DEPENDS
-      "${CMAKE_CURRENT_SOURCE_DIR}/tests/net_probe.ari")
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/net_probe.ari"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/l4_frames.ari")
   endif()
   # ari_tvision: the same runner and document on the tvision desktop (movable, overlapping
   # windows, a menu bar and a status line), when libcvc has the tvision backend: on wasm that is

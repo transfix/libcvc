@@ -618,6 +618,18 @@ TEST(AsyncCalls, AS9_KillingAParkedProcessCancelsItsCall) {
   EXPECT_FALSE(w.result(pid));
 }
 
+// The cancel a reap makes first (pycvc's Exec makes it before its control mutex) leaves a live
+// process's calls alone: dropped, its call would leave the process parked on it for good.
+TEST(AsyncCalls, CancelBeforeAReapLeavesALiveProcessesCalls) {
+  world w(async_sched);
+  const int pid = w.submit("(slow-op 3 50)");
+  ASSERT_TRUE(w.pump([&] { return w.waiting(pid) && w.p.started; }));
+  w.async->cancel_async_calls_of(pid);
+  EXPECT_EQ(w.async->async_calls_in_flight(), 1u);
+  ASSERT_TRUE(w.pump([&] { return w.result(pid).has_value(); }));
+  EXPECT_EQ(to_string(*w.result(pid)), "6");
+}
+
 TEST(AsyncCalls, AS10_HostTeardownWaitsForItsKernels) {
   auto w = std::make_unique<world>(async_sched);
   const int pid = w->submit("(slow-op 1 5000)");
@@ -1581,4 +1593,180 @@ TEST(AsyncCalls, DestroyingTheAppEndsACallQueuedOnAPoolWithNoWorker) {
   }
   EXPECT_EQ(destroyed.wait_for(10s), std::future_status::ready);
   EXPECT_FALSE(started.load());
+}
+
+// ===========================================================================
+// Work that runs by itself (docs/STATE_EXEC_EXCEPTIONS.md 3.12): an async_work's start, which the
+// work completes later (a browser fetch's callback), and the kernel where the call can't park.
+// ===========================================================================
+
+namespace {
+
+// The calls started by (self-op x) and what became of them: a test answers them (answer), as a
+// browser's event loop answers a fetch, between drains.
+struct started_probe {
+  std::vector<std::shared_ptr<async_call>> pending; // started, not yet answered
+  std::vector<int64_t> args;                        // their x, in order
+  int starts = 0, kernels = 0, stopped = 0;
+};
+
+// (self-op x): 2x, started (the work answers later) where the call can park, else the kernel.
+// (self-op-throws): a start that throws.
+void register_started(world &w, started_probe &sp, async_options opts = {}) {
+  register_async_fn(
+      w.env, *w.host, "self-op",
+      [&sp](std::span<const value_t> a) -> async_work {
+        const int64_t x = int_arg(a, 0, 0);
+        async_work work;
+        work.kernel = [&sp, x](async_call &) -> value_t {
+          ++sp.kernels;
+          return value_t(x * 2);
+        };
+        work.start = [&sp, x](const std::shared_ptr<async_call> &call) {
+          ++sp.starts;
+          sp.pending.push_back(call);
+          sp.args.push_back(x);
+          call->on_cancel([&sp] { ++sp.stopped; });
+        };
+        return work;
+      },
+      opts);
+  register_async_fn(
+      w.env, *w.host, "self-op-throws",
+      [](std::span<const value_t>) -> async_work {
+        async_work work;
+        work.start = [](const std::shared_ptr<async_call> &) {
+          throw std::invalid_argument("self-op-throws: no transport");
+        };
+        return work;
+      },
+      opts);
+}
+
+// Answer the oldest pending call, as its work would: with 2x, or by raising `error`.
+void answer(world &w, started_probe &sp, const char *error = nullptr) {
+  ASSERT_FALSE(sp.pending.empty());
+  std::shared_ptr<async_call> call = sp.pending.front();
+  const int64_t x = sp.args.front();
+  sp.pending.erase(sp.pending.begin());
+  sp.args.erase(sp.args.begin());
+  const bool settled = error ? call->settle({}, std::make_exception_ptr(std::runtime_error(error)))
+                             : call->settle(value_t(x * 2), nullptr);
+  if (settled)
+    w.host->finish(call);
+}
+
+} // namespace
+
+TEST(AsyncCalls, AStartedCallParksUntilItsWorkAnswers) {
+  world w(async_sched);
+  started_probe sp;
+  register_started(w, sp);
+  const int a = w.submit("(self-op 21)");
+  const int c = w.submit("(begin (set i 0) (while (< i 2000) (set i (+ i 1))) i)");
+  // Nothing answers: the caller parks, the other process runs to its end, no kernel runs.
+  ASSERT_TRUE(w.pump([&] { return w.waiting(a) && w.finished(c); }));
+  EXPECT_EQ(sp.starts, 1);
+  EXPECT_EQ(sp.kernels, 0);
+  EXPECT_EQ(w.async->async_calls_in_flight(), 1u);
+  EXPECT_EQ(w.host->in_flight(), 0u) << "no executor runs it";
+  for (int i = 0; i < 20; ++i) // more drains change nothing
+    w.pump([] { return false; }, 0.005);
+  EXPECT_TRUE(w.waiting(a));
+  answer(w, sp);
+  w.run_to_end(a);
+  EXPECT_EQ(show(*w.result(a)), "42");
+  EXPECT_EQ(w.async->async_calls_in_flight(), 0u);
+  EXPECT_EQ(sp.stopped, 0) << "an answered call isn't stopped";
+}
+
+TEST(AsyncCalls, AStartedCallsFutureAwaitsWithATimeoutAsTheWorkGoesOn) {
+  world w(async_sched);
+  started_probe sp;
+  register_started(w, sp);
+  // cypkg's loop: poll the future in slices, counting the slices that time out, until it is done.
+  const int pid = w.submit("(begin (set f (self-op-async 5)) (set slices 0) (set r 0)"
+                           "  (while (= r 0)"
+                           "    (set got (try (await f 0.01) (catch (TimeoutError e) 0)))"
+                           "    (if (= got 0) (set slices (+ slices 1)) (set r got)))"
+                           "  (list r (> slices 2) (await f)))");
+  ASSERT_TRUE(w.pump([&] { return !sp.pending.empty(); }));
+  w.pump([] { return false; }, 0.1); // several slices time out meanwhile
+  EXPECT_FALSE(w.finished(pid));
+  answer(w, sp);
+  w.run_to_end(pid);
+  ASSERT_TRUE(w.result(pid)) << (w.exit_exception(pid) ? exception_message(*w.exit_exception(pid))
+                                                       : std::string());
+  EXPECT_EQ(show(*w.result(pid)), "(10 #t 10)");
+}
+
+TEST(AsyncCalls, AStartedCallsErrorRaisesAtTheCall) {
+  world w(async_sched);
+  started_probe sp;
+  register_started(w, sp);
+  const int pid =
+      w.submit("(try (self-op 1) (catch (RuntimeError e) (list (get-attr e \"function\") "
+               "(get-attr e \"origin\") (get-attr e \"message\"))))");
+  ASSERT_TRUE(w.pump([&] { return !sp.pending.empty(); }));
+  answer(w, sp, "the network is down");
+  w.run_to_end(pid);
+  EXPECT_EQ(show(*w.result(pid)), "(\"self-op\" \"async\" \"the network is down\")");
+
+  // A start that throws ends its call with that exception.
+  const outcome o =
+      run(w, "(try (self-op-throws) (catch (ValueError e) (get-attr e \"message\")))");
+  EXPECT_EQ(o.value, "self-op-throws: no transport") << o.cls << ": " << o.message;
+}
+
+TEST(AsyncCalls, KillingAProcessStopsItsStartedCall) {
+  world w(async_sched);
+  started_probe sp;
+  register_started(w, sp);
+  const int pid = w.submit("(self-op 1)");
+  ASSERT_TRUE(w.pump([&] { return w.waiting(pid) && !sp.pending.empty(); }));
+  ASSERT_TRUE(w.async->kill(pid));
+  EXPECT_EQ(sp.stopped, 1) << "the kill runs the call's cancel hook";
+  EXPECT_EQ(w.async->async_calls_in_flight(), 0u);
+  EXPECT_TRUE(sp.pending.front()->cancel_requested());
+  w.async->drain_ingress();
+  EXPECT_EQ(w.info(pid).status, process_status::killed);
+  // A hook set on a cancelled call runs at once.
+  int late = 0;
+  sp.pending.front()->on_cancel([&late] { ++late; });
+  EXPECT_EQ(late, 1);
+}
+
+TEST(AsyncCalls, ARegistrationTimeoutStopsAStartedCall) {
+  async_options opts;
+  opts.timeout = 0.05;
+  world w(async_sched);
+  started_probe sp;
+  register_started(w, sp, opts);
+  const auto start = clock_type::now();
+  const outcome o = run(w, "(try (self-op 1) (catch (TimeoutError e) (get-attr e \"function\")))");
+  EXPECT_EQ(o.value, "self-op") << o.cls << ": " << o.message;
+  EXPECT_LT(seconds_since(start), 2.0);
+  EXPECT_EQ(sp.stopped, 1);
+}
+
+TEST(AsyncCalls, HostShutdownStopsAStartedCall) {
+  world w(async_sched);
+  started_probe sp;
+  register_started(w, sp);
+  const int pid = w.submit("(self-op 1)");
+  ASSERT_TRUE(w.pump([&] { return !sp.pending.empty(); }));
+  w.host->shutdown();
+  EXPECT_EQ(sp.stopped, 1);
+}
+
+TEST(AsyncCalls, WhereAStartedCallCantParkItsKernelRuns) {
+  // No parking scheduler (the evaluators, the sync scheduler): the work's kernel, in the step.
+  for_engines(recursive | stackless | sync_sched, [](unsigned e) {
+    world w(e);
+    started_probe sp;
+    register_started(w, sp);
+    EXPECT_EQ(run(w, "(self-op 4)").value, "8");
+    EXPECT_EQ(sp.starts, 0);
+    EXPECT_EQ(sp.kernels, 1);
+  });
 }
