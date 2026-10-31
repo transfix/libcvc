@@ -1009,10 +1009,10 @@ listed there is not warned about again. `ari check doc.ari` shows both.
 
 A document that can run without something asks for it at run time with `(has? "name")`,
 which answers the same question for a token, a function or a widget type. It works in
-programs and in reactive expressions. The load-time scan does not follow the guard: a call
-behind `(has? "name")` still warns, until `requires:` lists the name as `optional: true`. So
-the two go together: the entry says the document can do without it, and the guard is how it
-does.
+programs and in reactive expressions, a `load:`ed module's included (its `init:` too: a module's
+host is the document's host). The load-time scan does not follow the guard: a call behind
+`(has? "name")` still warns, until `requires:` lists the name as `optional: true`. So the two go
+together: the entry says the document can do without it, and the guard is how it does.
 
 ```yaml
 windows:
@@ -1442,7 +1442,8 @@ part of what the parent granted), an opaque one is not. `state-delete`, the expi
 and `state-watch` still act on the physical path and do not reach through a hole. A fragment may declare
 the holes it expects with `needs:`; an ungranted expectation warns and the fragment falls
 back to a local (fail-safe) binding. A per-mount `init:` runs once at the sub-prefix
-**after** the holes are wired, with the module's functions (§6.6). The mount's `on_tick:`
+**after** the holes are wired, with `(has? ...)` as the document's own `init:` has it and
+with the module's functions (§6.6). The mount's `on_tick:`
 resident starts right after it (§2.3). A reconcile keeps that resident running when the new tree
 has the same mount at the same sub-prefix with the same program (its body and its functions), as
 a reload of an unchanged document does, and stops it otherwise. A repeated mount's resident runs
