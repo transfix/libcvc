@@ -1026,6 +1026,33 @@ The same setup at `w_coll` 3 (the default) gives 50.5% and 55.4% (Jolt, seeds 1 
 (dynamic, seed 1). A 120-step horizon stays at the seed (41.9%), and lr 2e-4 lowers reach. The
 collision weight, not the rollout, is what moved reach at this scale.
 
+**Holding the peak: rollback** (`train_config::rollback_drop`). Every run above climbs from
+about 0.40 to about 0.70 validation reach in about 100 steps and then falls back. In a screen with
+checkpoints every 25 steps on 48 validation seeds (training seed 1), `w_coll` 20 reached 0.72 at
+step 350 and was at 0.44 by step 1000; `w_coll` 30 fell to 0.40, and 192 agents (at `w_coll` 10)
+to 0.46. Their held-out results (73.8%, 72.9%, 69.3%) rested on selection alone. With
+`rollback_drop` 0.03, a checkpoint more than 0.03 under the best sends training back to the best
+checkpoint and halves the learning rate. Checkpoints were every 25 steps on 32 validation seeds
+(`JOLT_EXP_ROLLBACK=0.03 JOLT_EXP_EVERY=25 JOLT_EXP_VAL=32`). Training then holds the peak:
+
+| arm (training seed) | held out | selected step | validation: selected / step 1000 | rollbacks |
+|---|---|---|---|---|
+| `w_coll` 10 (1) | 70.9% | 650 | 0.71 / 0.69 | 2 |
+| `w_coll` 10 (2) | 73.2% | 575 | 0.69 / 0.68 | 1 |
+| `w_coll` 20 (1) | 73.8% | 350 | 0.72 / 0.72 | 3 |
+| `w_coll` 20 (2) | 72.5% | 575 | 0.71 / 0.69 | 2 |
+
+The four runs pool to 72.6% held out, against 70.6% for the table above's `w_coll` 10 seeds 1
+and 2: +2.0 [+0.3, +3.7], seed by seed and averaged over the training seeds. `w_coll` 20 alone is
++2.5 [+0.7, +4.3], and `w_coll` 10 alone is +1.5 [-0.4, +3.3]. Rollback does not raise the peak:
+`w_coll` 20 seed 1 selects the same step-350 policy as without it. It keeps the end of training at
+the peak, so the last checkpoint is within 0.03 of the best.
+
+Rollback is armed only once the best checkpoint is more than `rollback_drop` above the first one.
+Before the climb, validation dips under the seed's level (0.40 to 0.36 by step 150 at `w_coll`
+10). Rolling back there returns the run to the seed at a smaller learning rate, and both `w_coll`
+10 runs of an unarmed sweep never made the climb (held out 42.8% and 40.5%).
+
 **The material trainer** (`material_integrator::jolt`, `material_train.h`). The material loss
 can be taken through Jolt too: `integrate_plant_material` (`material.h`) runs
 `integrate_dynamic_material`'s controller with its commands driving the plant. The VJP replays
@@ -1167,6 +1194,9 @@ Drop it in the canonical install location `$PREFIX/share/cvc/nav/coef_mlp.cvcnav
 | `w_coll` | 3.0 | the safety-for-reach dial — see [the loss](#the-loss-and-why-both-terms-are-normalized) |
 | `d_safe` | 0.0 | clearance below which the penalty engages; 0 = use the scene's `d_hat` |
 | `grad_clip` | 5.0 | global-norm gradient clip |
+| `checkpoint_every` | 0 | with a fitness passed to `train()`: score every this many steps (0 = 25) and end on the best |
+| `rollback_drop` | 0.0 | with a fitness: a checkpoint this far under the best returns to the best, armed once the best is this far over the first; 0 = off. See [Holding the peak](#training-on-jolt-rollout_kindjolt) |
+| `rollback_lr_scale` | 0.5 | the learning rate's factor after each rollback |
 | `rollout` | `surrogate` | see [the switch](#the-rollout-switch-surrogate-vs-bicycle) |
 
 ## How it works
