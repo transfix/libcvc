@@ -998,6 +998,34 @@ loss on Jolt from 1.2344 to 1.2321, a drop like the dynamic rollout's own test. 
 costs about 80-90 us with the ledger on: one world, separate islands, no worker threads. So the
 default batch (192 agents x 28 steps) is about 0.5 s of Jolt per outer step.
 
+**Measured: Jolt against the dynamic vehicle** (`NavPlantConvergence.JoltTrainedHumveeOnJoltReach`,
+an experiment: `CVC_JOLT_TRAIN_EXPERIMENT=1`; Windows MSVC Release). The Humvee at demo3's metric
+(0.05 units per metre, veh_L 0.165) with its own envelope, on the city: 96 agents, a 60-step
+horizon in windows of 10, lr 5e-5, `w_coll` 10, 1000 steps, goals 0.5-2.0 units away. Checkpoints
+every 50 steps are selected on Jolt reach over 24 validation seeds (200..223), and the selected
+policy is scored on the 20 held-out seeds (100..119): 48 Jolt Humvees for 1000 ticks each, paired
+bootstrap 95% CIs.
+
+| arm (training seed) | held-out reach | vs the untrained seed (41.5%) | selected step | training |
+|---|---|---|---|---|
+| jolt (1) | 70.4% | +29.0 [+24.6, +33.0] | 350 | 16 min |
+| jolt (2) | 70.8% | +29.4 [+25.0, +33.2] | 500 | 16 min |
+| jolt (3) | 70.3% | +28.9 [+24.7, +32.7] | 550 | 16 min |
+| dynamic (1) | 72.0% | +30.5 [+26.4, +34.4] | 350 | 5.4 min |
+| dynamic (2) | 70.8% | +29.4 [+25.3, +32.9] | 350 | 5.5 min |
+
+Jolt minus dynamic, seed by seed: -1.6 [-5.3, +2.3] (training seed 1), +0.0 [-3.6, +3.5]
+(seed 2), -0.9 [-2.6, +0.8] pooled over the replicates, [-3.6, +1.7] with the replicates
+resampled too. **At this budget, training through Jolt is no better on Jolt than training through
+the single-track model, and takes three times as long.** With selection on Jolt reach, both reach
+about 0.69 on validation. Past the peak the dynamic arms fall further: validation reach at step
+1000 is 0.60 and 0.54 against Jolt's 0.60, 0.60 and 0.62. So without selection the Jolt rollout
+may hold its policy better. That is two and three replicates, not a result.
+
+The same setup at `w_coll` 3 (the default) gives 50.5% and 55.4% (Jolt, seeds 1 and 2) and 59.0%
+(dynamic, seed 1). A 120-step horizon stays at the seed (41.9%), and lr 2e-4 lowers reach. The
+collision weight, not the rollout, is what moved reach at this scale.
+
 **The material trainer** (`material_integrator::jolt`, `material_train.h`). The material loss
 can be taken through Jolt too: `integrate_plant_material` (`material.h`) runs
 `integrate_dynamic_material`'s controller with its commands driving the plant. The VJP replays
