@@ -77,6 +77,7 @@
 #include <cvc/ariadne/tvision_backend.h>
 #include <cvc/ariadne/web_document.h> // arigl-web: a document named by URL
 #include <cvc/core/app.h>
+#include <cvc/net/browser.h>
 #include <random> // std::random_device — the conference node id's per-launch suffix
 #include <sstream> // arigl info: the GL report, line by line
 #if CVC_ENABLE_WS || CVC_ENABLE_GRPC
@@ -1893,6 +1894,9 @@ int run_terminal(const ari::HostOptions &o) {
   run.on_stop = ari::restore_signal_traps;
   run.take_signal = ari::take_trapped_signal;
   run.background_input = [&](const ari::TermEvent &e) { return scene.handle_input(e); };
+  // The screen is the document's: a URL the host cannot open in a browser (open-url, a sign-in)
+  // is the document's to show, not printed over the frame.
+  cvc::net::set_url_notice([](const std::string &) {});
   ari::FtxuiBackend::RunExit how;
   if (tvision)
     how = static_cast<ari::TvisionBackend &>(*backend).run(rt, run);

@@ -26,6 +26,10 @@
 //   --net-policy FILE     ... with FILE's allow and credential lines (repeatable; implies --net)
 //   --credential-store S  keep credentials across runs in S, a name or a path (implies --net)
 //   --credential-env N=V  credential N is the token in environment variable V (repeatable)
+//   --oidc-issuer ISSUER  documents may sign in with ISSUER only (repeatable; implies --net)
+//   --oidc-client I=ID    sign in to issuer I as client ID (repeatable; implies --net)
+//   --oidc-redirect-uri U a browser page's OAuth redirect URI
+//   --no-browser          never open the user's browser (sign-in shows a device code instead)
 //
 // boost::program_options reads them: --flag VALUE and --flag=VALUE both work, and an unknown flag
 // or one missing its value is an error.

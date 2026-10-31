@@ -5,6 +5,7 @@
 
 #include "local_http_server.h" // localhost origins for the net host tests
 #include "local_ws_server.h"   // a localhost WebSocket server for the ws-* verb tests
+#include "stub_oidc_provider.h" // a stub OpenID Provider for the sign-in tests
 
 #include <algorithm>
 #include <atomic> // item 2: the nav-step worker's arrived-count accumulator
@@ -26,6 +27,7 @@
 #include <cvc/core/app.h>
 #include <cvc/core/async_task.h> // launch_pool_task generalization test
 #include <cvc/core/thread_pool.h> // item 2: full type for app.computePool().parallel_for
+#include <cvc/net/browser.h>      // OIDC: a fake browser, a browser page
 #include <cvc/net/credentials.h>  // the ws-send test's CredentialStore
 #include <cvc/net/http_client.h>  // §13.8: swap the transport for a fake in the http-get test
 #include <cvc/net/net_policy.h>   // the ws-* verb tests' policy
@@ -7199,4 +7201,652 @@ TEST(Locks, LW09_InitChildNeverWaits) {
   EXPECT_EQ(root("doc.r").value(), "timeout");
   EXPECT_EQ(root.findDescendant("r"), nullptr);
   EXPECT_LT(took, 10.0);
+}
+
+// ── OAuth 2.0 / OpenID Connect sign-in (docs/ARIADNE.md §10.5) ─────────────────────────────────
+// Every flow against a stub OpenID Provider (stub_oidc_provider.h): the document calls
+// (oidc-sign-in ...), the host runs the flow from Runtime::drain, and the document sees only the
+// phase and the claims under oidc.<credential>. No token the provider issued may reach the state
+// tree.
+
+namespace {
+
+using cvc_test::FakeBrowser;
+using cvc_test::StubOidcProvider;
+
+struct OidcGuard {
+  OidcGuard() {
+    cvc::net::set_url_notice([this](const std::string &u) { noticed.push_back(u); });
+  }
+  ~OidcGuard() {
+    cvc::net::set_url_opener(nullptr);
+    cvc::net::page::set_hooks(nullptr);
+    cvc::net::set_url_notice(nullptr);
+    disable_net();
+    clear_action_intrinsics();
+  }
+  std::vector<std::string> noticed;
+};
+
+NetHostConfig oidc_config(const StubOidcProvider &op, bool no_browser = false) {
+  NetHostConfig c;
+  c.enabled = true;
+  c.oidc.issuers = {op.issuer()};
+  c.oidc.no_browser = no_browser;
+  return c;
+}
+
+std::string oidc_sign_in(const StubOidcProvider &op, const std::string &extra = "",
+                         const char *done = "r.started") {
+  return "(state-set \"" + std::string(done) + "\" (oidc-sign-in (dict \"issuer\" \"" +
+         op.issuer() + "\" \"client_id\" \"" + op.client_id() +
+         "\" \"credential\" \"id\" \"scopes\" (list \"openid\" \"profile\" \"email\")" + extra +
+         ")))";
+}
+
+bool wait_phase(cvc::app &app, Runtime &rt, const std::string &phase, int ms = 8000) {
+  if (pump_until(rt, [&] { return sval(app, "oidc.id.phase") == phase; }, ms))
+    return true;
+  std::fprintf(stderr, "wait_phase(%s): the phase is '%s' (%s: %s)\n", phase.c_str(),
+               sval(app, "oidc.id.phase").c_str(), sval(app, "oidc.id.error").c_str(),
+               sval(app, "oidc.id.error_description").c_str());
+  for (const std::string &w : rt.take_reactive_warnings())
+    std::fprintf(stderr, "  %s\n", w.c_str());
+  return false;
+}
+
+void expect_no_secret(cvc::app &app, const StubOidcProvider &op) {
+  const std::string state = whole_state(app);
+  for (const std::string &secret : op.secrets())
+    EXPECT_EQ(state.find(secret), std::string::npos)
+        << "a secret the provider issued reached the state tree: " << secret.substr(0, 10) << "...";
+}
+
+// (http-get /api/me (dict "auth" "id")) -> its status, in state at `key`.
+std::string me_status(cvc::app &app, Runtime &rt, MockBackend &mb, const StubOidcProvider &op,
+                      const std::string &key) {
+  run_program(app, rt, mb,
+              "(state-set \"" + key + "\" (get-attr (http-get \"" + op.url("/api/me") +
+                  "\" (dict \"auth\" \"id\")) \"status\"))",
+              key.c_str());
+  return sval(app, key.c_str());
+}
+
+#define REQUIRE_HTTP()                                                                             \
+  do {                                                                                             \
+    if (!cvc::net::have_http_backend())                                                            \
+      GTEST_SKIP() << "libcvc built without an HTTP backend";                                      \
+  } while (0)
+
+} // namespace
+
+TEST(AriadneOidc, LoopbackSignsInThroughTheBrowserAndKeepsEveryToken) {
+  REQUIRE_HTTP();
+  StubOidcProvider op;
+  cvc::app app;
+  OidcGuard guard;
+  FakeBrowser browser;
+  cvc::net::set_url_opener([&](const std::string &u) { return browser.open(u); });
+  ASSERT_EQ(enable_net(app, oidc_config(op)), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  EXPECT_TRUE(rt.has("oidc"));
+  EXPECT_TRUE(rt.has("oidc.loopback"));
+  EXPECT_TRUE(rt.has("oidc.device"));
+  EXPECT_FALSE(rt.has("oidc.redirect")) << "no browser page here";
+  EXPECT_TRUE(rt.has("browser"));
+
+  ASSERT_TRUE(run_program(app, rt, mb, oidc_sign_in(op), "r.started"));
+  EXPECT_EQ(sval(app, "r.started"), "started");
+  ASSERT_TRUE(wait_phase(app, rt, "signed_in")) << sval(app, "oidc.id.error_description");
+  EXPECT_EQ(sval(app, "oidc.id.flow"), "loopback");
+  EXPECT_EQ(sval(app, "oidc.id.signed_in"), "true");
+  EXPECT_EQ(sval(app, "oidc.id.claims.sub"), "user-42");
+  EXPECT_EQ(sval(app, "oidc.id.claims.name"), "Ada Lovelace");
+  EXPECT_EQ(sval(app, "oidc.id.claims.email"), "ada@example.test");
+  EXPECT_EQ(sval(app, "oidc.id.claims.preferred_username"), "ada");
+  EXPECT_EQ(sval(app, "oidc.id.claims.iss"), op.issuer());
+  EXPECT_EQ(sval(app, "oidc.id.has_refresh"), "true");
+  EXPECT_NE(sval(app, "oidc.id.expires_at"), "0");
+
+  // The browser was sent to the authorization endpoint with PKCE S256, state and nonce, and the
+  // listener answered its tab.
+  ASSERT_EQ(browser.opened().size(), 1u);
+  const std::string url = browser.opened().front();
+  EXPECT_EQ(url.rfind(op.url("/authorize?"), 0), 0u) << url;
+  for (const char *want : {"code_challenge_method=S256",
+                           "&state=", "&nonce=", "redirect_uri=http%3A%2F%2F127.0.0.1%3A"})
+    EXPECT_NE(url.find(want), std::string::npos) << want;
+  ASSERT_TRUE(pump_until(rt, [&] { return !browser.pages().empty(); }));
+  EXPECT_EQ(browser.pages().front().rfind("200 ", 0), 0u);
+  EXPECT_NE(browser.pages().front().find("close this tab"), std::string::npos);
+
+  // The document names the credential; the host sends the access token.
+  EXPECT_EQ(me_status(app, rt, mb, op, "r.me"), "200");
+  run_program(app, rt, mb,
+              "(begin (set s (oidc-status \"id\")) (state-set \"r.status_phase\" (get-attr s "
+              "\"phase\")) (state-set \"r.status_name\" (get-attr (get-attr s \"claims\") "
+              "\"name\")))",
+              "r.status_name");
+  EXPECT_EQ(sval(app, "r.status_phase"), "signed_in");
+  EXPECT_EQ(sval(app, "r.status_name"), "Ada Lovelace");
+  expect_no_secret(app, op);
+}
+
+TEST(AriadneOidc, DeviceFlowShowsTheCodeAndSignsInOnceApproved) {
+  REQUIRE_HTTP();
+  StubOidcProvider::Options opt;
+  opt.device_pending_polls = 1;
+  StubOidcProvider op(opt);
+  cvc::app app;
+  OidcGuard guard;
+  ASSERT_EQ(enable_net(app, oidc_config(op, /*no_browser=*/true)), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  EXPECT_FALSE(rt.has("browser"));
+  ASSERT_TRUE(run_program(app, rt, mb, oidc_sign_in(op), "r.started"));
+  ASSERT_TRUE(wait_phase(app, rt, "device_code_shown")) << sval(app, "oidc.id.error_description");
+  EXPECT_EQ(sval(app, "oidc.id.flow"), "device");
+  EXPECT_EQ(sval(app, "oidc.id.user_code"), op.last_user_code());
+  EXPECT_EQ(sval(app, "oidc.id.verification_uri"), op.url("/activate"));
+  EXPECT_EQ(sval(app, "oidc.id.verification_uri_complete"),
+            op.url("/activate?user_code=" + op.last_user_code()));
+  EXPECT_EQ(sval(app, "oidc.id.interval"), "1");
+  pump_until(rt, [&] { return op.count("/token") >= 1; }, 3000); // still pending
+  EXPECT_EQ(sval(app, "oidc.id.phase"), "device_code_shown");
+  op.approve(op.last_user_code());
+  ASSERT_TRUE(wait_phase(app, rt, "signed_in")) << sval(app, "oidc.id.error_description");
+  EXPECT_EQ(sval(app, "oidc.id.user_code"), "") << "the code is cleared once used";
+  EXPECT_EQ(sval(app, "oidc.id.claims.name"), "Ada Lovelace");
+  EXPECT_EQ(me_status(app, rt, mb, op, "r.me"), "200");
+  expect_no_secret(app, op);
+}
+
+TEST(AriadneOidc, DeviceFlowHonoursSlowDownAndADenial) {
+  REQUIRE_HTTP();
+  StubOidcProvider::Options opt;
+  opt.slow_down_once = true;
+  StubOidcProvider op(opt);
+  cvc::app app;
+  OidcGuard guard;
+  ASSERT_EQ(enable_net(app, oidc_config(op, true)), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_program(app, rt, mb, oidc_sign_in(op, " \"flow\" \"device\""), "r.started"));
+  ASSERT_TRUE(wait_phase(app, rt, "device_code_shown"));
+  ASSERT_TRUE(pump_until(
+      rt, [&] { return sval(app, "oidc.id.interval") == "6"; }, 4000))
+      << "slow_down adds 5 s to the interval (RFC 8628 3.5)";
+  op.approve(op.last_user_code(), /*allow=*/false);
+  ASSERT_TRUE(wait_phase(app, rt, "error", 12000));
+  EXPECT_EQ(sval(app, "oidc.id.error"), "access_denied");
+  EXPECT_EQ(sval(app, "oidc.id.user_code"), "");
+  EXPECT_EQ(op.count("/token"), 2) << "one slow_down, then one poll six seconds later";
+}
+
+TEST(AriadneOidc, ARedirectFromABrowserPageCompletesWhenThePageComesBack) {
+  REQUIRE_HTTP();
+  StubOidcProvider op;
+  cvc::app app;
+  OidcGuard guard;
+  // A browser page: its URL, its sessionStorage (which outlives the navigation) and where it went.
+  struct Page {
+    std::string url = "https://app.example/ari.html?src=main.ari";
+    std::map<std::string, std::string> session;
+    std::vector<std::string> navigated, replaced;
+  };
+  auto page = std::make_shared<Page>();
+  auto hooks = std::make_shared<cvc::net::page::Hooks>();
+  hooks->url = [page] { return page->url; };
+  hooks->session_get = [page](const std::string &k) {
+    const auto it = page->session.find(k);
+    return it == page->session.end() ? std::string() : it->second;
+  };
+  hooks->session_set = [page](const std::string &k, const std::string &v) {
+    page->session[k] = v;
+    return true;
+  };
+  hooks->session_remove = [page](const std::string &k) { page->session.erase(k); };
+  hooks->navigate = [page](const std::string &u) {
+    page->navigated.push_back(u);
+    return true;
+  };
+  hooks->replace_url = [page](const std::string &u) {
+    page->replaced.push_back(u);
+    page->url = u;
+    return true;
+  };
+  cvc::net::page::set_hooks(hooks);
+
+  ASSERT_EQ(enable_net(app, oidc_config(op)), "");
+  {
+    Runtime rt(app, "");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    EXPECT_TRUE(rt.has("oidc.redirect"));
+    ASSERT_TRUE(run_program(app, rt, mb, oidc_sign_in(op), "r.started"));
+    ASSERT_TRUE(wait_phase(app, rt, "redirecting")) << sval(app, "oidc.id.error_description");
+    EXPECT_EQ(sval(app, "oidc.id.flow"), "redirect");
+  }
+  ASSERT_EQ(page->navigated.size(), 1u);
+  const std::string authorize = page->navigated.front();
+  EXPECT_NE(authorize.find("redirect_uri=https%3A%2F%2Fapp.example%2Fari.html%3Fsrc%3Dmain.ari"),
+            std::string::npos)
+      << "back to this very page: " << authorize;
+  ASSERT_EQ(page->session.size(), 1u);
+  EXPECT_NE(page->session.begin()->second.find("\"verifier\""), std::string::npos);
+
+  // The provider sends the browser back; the page loads again from scratch: a new host and a new
+  // document, only sessionStorage and the URL carried over.
+  FakeBrowser browser;
+  browser.follow(false);
+  browser.open(authorize);
+  for (int i = 0; i < 2500 && browser.locations().empty(); ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  ASSERT_FALSE(browser.locations().empty());
+  page->url = browser.locations().front();
+  EXPECT_EQ(page->url.rfind("https://app.example/ari.html?src=main.ari&code=", 0), 0u) << page->url;
+  disable_net();
+  clear_action_intrinsics();
+  ASSERT_EQ(enable_net(app, oidc_config(op)), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_program(app, rt, mb, oidc_sign_in(op, " \"interactive\" #f", "r.started2"),
+                          "r.started2"));
+  ASSERT_TRUE(wait_phase(app, rt, "signed_in")) << sval(app, "oidc.id.error_description");
+  EXPECT_EQ(sval(app, "oidc.id.flow"), "redirect");
+  EXPECT_EQ(sval(app, "oidc.id.claims.name"), "Ada Lovelace");
+  ASSERT_EQ(page->replaced.size(), 1u);
+  EXPECT_EQ(page->replaced.front(), "https://app.example/ari.html?src=main.ari")
+      << "code and state leave the address bar";
+  EXPECT_TRUE(page->session.empty()) << "the verifier is gone from sessionStorage";
+  EXPECT_EQ(me_status(app, rt, mb, op, "r.me"), "200");
+  expect_no_secret(app, op);
+}
+
+TEST(AriadneOidc, AForgedStateOrAReplayedNonceSignsNothingIn) {
+  REQUIRE_HTTP();
+  for (const bool state : {true, false}) {
+    SCOPED_TRACE(state ? "state" : "nonce");
+    StubOidcProvider::Options opt;
+    opt.tamper_state = state;
+    opt.tamper_nonce = !state;
+    StubOidcProvider op(opt);
+    cvc::app app;
+    OidcGuard guard;
+    FakeBrowser browser;
+    cvc::net::set_url_opener([&](const std::string &u) { return browser.open(u); });
+    ASSERT_EQ(enable_net(app, oidc_config(op)), "");
+    Runtime rt(app, "");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    ASSERT_TRUE(run_program(app, rt, mb, oidc_sign_in(op), "r.started"));
+    ASSERT_TRUE(wait_phase(app, rt, "error"));
+    if (state) {
+      EXPECT_EQ(sval(app, "oidc.id.error"), "state_mismatch");
+      EXPECT_EQ(op.count("/token"), 0) << "a forged reply's code is never exchanged";
+      ASSERT_TRUE(pump_until(rt, [&] { return !browser.pages().empty(); }));
+      EXPECT_EQ(browser.pages().front().rfind("400 ", 0), 0u) << "the tab says it failed";
+    } else {
+      EXPECT_EQ(sval(app, "oidc.id.error"), "invalid_token_reply");
+      EXPECT_NE(sval(app, "oidc.id.error_description").find("nonce"), std::string::npos);
+    }
+    EXPECT_EQ(sval(app, "oidc.id.signed_in"), "false");
+    EXPECT_NE(me_status(app, rt, mb, op, "r.me"), "200");
+    expect_no_secret(app, op);
+  }
+}
+
+TEST(AriadneOidc, TheHostsPolicyDecidesWhichIssuers) {
+  REQUIRE_HTTP();
+  StubOidcProvider op, other;
+  cvc::app app;
+  OidcGuard guard;
+  NetHostConfig c = oidc_config(op);
+  c.allow = {other.origin()}; // allowed for requests, but sign-in is pinned to `op`
+  ASSERT_EQ(enable_net(app, c), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  const auto attempt = [&](const std::string &issuer, const std::string &key) {
+    run_program(
+        app, rt, mb,
+        "(state-set \"" + key + "\" (try (oidc-sign-in (dict \"issuer\" \"" + issuer +
+            "\" \"client_id\" \"c\" \"credential\" \"id\")) (catch (e) (get-attr e \"message\"))))",
+        key.c_str());
+    return sval(app, key.c_str());
+  };
+  EXPECT_NE(attempt(other.issuer(), "r.pinned").find("signs in only with " + op.issuer()),
+            std::string::npos)
+      << sval(app, "r.pinned");
+  EXPECT_NE(attempt("https://unlisted.example", "r.unlisted").find("does not allow"),
+            std::string::npos)
+      << sval(app, "r.unlisted");
+  EXPECT_NE(attempt("http://evil.example", "r.http").find("not https"), std::string::npos);
+  EXPECT_EQ(op.count("/"), 0) << "nothing was fetched";
+  EXPECT_EQ(other.count("/"), 0);
+
+  // Unpinned: any issuer whose origin is allowed, but its endpoints must be at its origin.
+  disable_net();
+  clear_action_intrinsics();
+  StubOidcProvider::Options foreign;
+  foreign.foreign_token_endpoint = other.url("/token");
+  StubOidcProvider split(foreign);
+  NetHostConfig open;
+  open.enabled = true;
+  open.allow = {split.origin(), other.origin()};
+  ASSERT_EQ(enable_net(app, open), "");
+  Runtime rt2(app, "");
+  MockBackend mb2;
+  rt2.set_backend(&mb2);
+  ASSERT_TRUE(run_program(app, rt2, mb2,
+                          "(state-set \"r.s\" (oidc-sign-in (dict \"issuer\" \"" + split.issuer() +
+                              "\" \"client_id\" \"" + split.client_id() +
+                              "\" \"credential\" \"id\")))",
+                          "r.s"));
+  ASSERT_TRUE(wait_phase(app, rt2, "error"));
+  EXPECT_EQ(sval(app, "oidc.id.error"), "discovery_failed");
+  EXPECT_NE(sval(app, "oidc.id.error_description").find("not the issuer's origin"),
+            std::string::npos)
+      << sval(app, "oidc.id.error_description");
+}
+
+TEST(AriadneOidc, AProviderWithoutTheDeviceFlowSaysSo) {
+  REQUIRE_HTTP();
+  StubOidcProvider::Options opt;
+  opt.device = false;
+  StubOidcProvider op(opt);
+  cvc::app app;
+  OidcGuard guard;
+  ASSERT_EQ(enable_net(app, oidc_config(op, true)), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_program(app, rt, mb, oidc_sign_in(op, " \"flow\" \"device\""), "r.started"));
+  ASSERT_TRUE(wait_phase(app, rt, "error"));
+  EXPECT_EQ(sval(app, "oidc.id.error"), "unsupported_flow");
+  EXPECT_NE(sval(app, "oidc.id.error_description").find("device_authorization_endpoint"),
+            std::string::npos);
+  // With no browser and no device flow, auto still offers the loopback flow: the user opens the
+  // URL the document shows (and the host's notice prints).
+  ASSERT_TRUE(run_program(app, rt, mb, oidc_sign_in(op, "", "r.again"), "r.again"));
+  ASSERT_TRUE(wait_phase(app, rt, "waiting_for_browser"));
+  EXPECT_EQ(sval(app, "oidc.id.browser_opened"), "false");
+  EXPECT_EQ(sval(app, "oidc.id.browser_url").rfind(op.url("/authorize?"), 0), 0u);
+  ASSERT_EQ(guard.noticed.size(), 1u);
+  EXPECT_EQ(guard.noticed.front(), sval(app, "oidc.id.browser_url"));
+  run_program(app, rt, mb, "(state-set \"r.cancel\" (oidc-cancel \"id\"))", "r.cancel");
+  EXPECT_EQ(sval(app, "r.cancel"), "true");
+  EXPECT_EQ(sval(app, "oidc.id.phase"), "cancelled");
+}
+
+TEST(AriadneOidc, TokensAreRefreshedBeforeExpiryAndAfterA401) {
+  REQUIRE_HTTP();
+  StubOidcProvider::Options opt;
+  opt.expires_in = 2; // renewed once a second is left
+  StubOidcProvider op(opt);
+  cvc::app app;
+  OidcGuard guard;
+  FakeBrowser browser;
+  cvc::net::set_url_opener([&](const std::string &u) { return browser.open(u); });
+  ASSERT_EQ(enable_net(app, oidc_config(op)), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_program(app, rt, mb, oidc_sign_in(op), "r.started"));
+  ASSERT_TRUE(wait_phase(app, rt, "signed_in"));
+  const auto refreshes = [&] {
+    int n = 0;
+    for (const auto &r : op.requests())
+      if (r.target == "/token" && r.body.find("grant_type=refresh_token") != std::string::npos)
+        ++n;
+    return n;
+  };
+  EXPECT_EQ(refreshes(), 0);
+  // Ahead of expiry the host renews on its own (the pump), and a request renews first.
+  ASSERT_TRUE(pump_until(rt, [&] { return refreshes() >= 1; }, 4000));
+  EXPECT_EQ(me_status(app, rt, mb, op, "r.me1"), "200");
+  EXPECT_EQ(sval(app, "oidc.id.phase"), "signed_in");
+  // A 401 (the provider dropped the access token early): renewed once, and sent again.
+  op.expire_access_tokens();
+  const int before = refreshes();
+  EXPECT_EQ(me_status(app, rt, mb, op, "r.me2"), "200");
+  EXPECT_GT(refreshes(), before);
+  expect_no_secret(app, op);
+}
+
+TEST(AriadneOidc, SignOutForgetsTheTokensAndRevokesThem) {
+  REQUIRE_HTTP();
+  StubOidcProvider op;
+  cvc::app app;
+  OidcGuard guard;
+  FakeBrowser browser;
+  cvc::net::set_url_opener([&](const std::string &u) { return browser.open(u); });
+  ASSERT_EQ(enable_net(app, oidc_config(op)), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_program(app, rt, mb, oidc_sign_in(op), "r.started"));
+  ASSERT_TRUE(wait_phase(app, rt, "signed_in"));
+  ASSERT_TRUE(run_program(app, rt, mb,
+                          "(state-set \"r.out\" (oidc-sign-out \"id\" (dict \"end_session\" #t)))",
+                          "r.out"));
+  EXPECT_EQ(sval(app, "r.out"), "sent");
+  ASSERT_TRUE(wait_phase(app, rt, "signed_out"));
+  EXPECT_EQ(sval(app, "oidc.id.claims.sub"), "");
+  ASSERT_TRUE(pump_until(rt, [&] { return !op.revoked().empty(); }));
+  EXPECT_EQ(op.revoked().front().rfind("oidcRT_", 0), 0u) << "the refresh token was revoked";
+  // The provider's own session ends in the browser (RP-initiated logout).
+  ASSERT_EQ(browser.opened().size(), 2u);
+  EXPECT_EQ(browser.opened().back().rfind(op.url("/logout?client_id="), 0), 0u);
+  EXPECT_NE(browser.opened().back().find("id_token_hint="), std::string::npos);
+  run_program(app, rt, mb,
+              "(begin (state-set \"r.has\" (net-auth-has? \"id\")) (state-set \"r.hasr\" "
+              "(net-auth-has? \"id.refresh\")) (state-set \"r.me\" (get-attr (http-get \"" +
+                  op.url("/api/me") + "\" (dict \"auth\" \"id\")) \"error\")))",
+              "r.me");
+  EXPECT_EQ(sval(app, "r.has"), "false");
+  EXPECT_EQ(sval(app, "r.hasr"), "false");
+  EXPECT_NE(sval(app, "r.me").find("no credential 'id'"), std::string::npos);
+  expect_no_secret(app, op);
+}
+
+TEST(AriadneOidc, AKeptSessionResumesAndEndsWhenTheProviderEndsIt) {
+  REQUIRE_HTTP();
+  StubOidcProvider op;
+  const std::filesystem::path dir =
+      std::filesystem::temp_directory_path() / ("oidc-store-" + cvc::net::oidc::random_token(6));
+  const std::string store = (dir / "credentials").string();
+  NetHostConfig c = oidc_config(op);
+  c.credential_store = store;
+  {
+    cvc::app app;
+    OidcGuard guard;
+    FakeBrowser browser;
+    cvc::net::set_url_opener([&](const std::string &u) { return browser.open(u); });
+    ASSERT_EQ(enable_net(app, c), "");
+    Runtime rt(app, "");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    ASSERT_TRUE(run_program(app, rt, mb, oidc_sign_in(op), "r.started"));
+    ASSERT_TRUE(wait_phase(app, rt, "signed_in"));
+  }
+  {
+    // The next run: no browser is opened; the kept session is refreshed and its claims shown.
+    cvc::app app;
+    OidcGuard guard;
+    cvc::net::set_url_opener([&](const std::string &) {
+      ADD_FAILURE() << "a kept session opened a browser";
+      return false;
+    });
+    ASSERT_EQ(enable_net(app, c), "");
+    Runtime rt(app, "");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    ASSERT_TRUE(run_program(app, rt, mb, oidc_sign_in(op, " \"interactive\" #f"), "r.started"));
+    ASSERT_TRUE(wait_phase(app, rt, "signed_in")) << sval(app, "oidc.id.error_description");
+    EXPECT_EQ(sval(app, "oidc.id.flow"), "stored");
+    EXPECT_EQ(sval(app, "oidc.id.claims.name"), "Ada Lovelace");
+    EXPECT_EQ(me_status(app, rt, mb, op, "r.me"), "200");
+    expect_no_secret(app, op);
+  }
+  {
+    // The provider ended the session: the refresh fails, the tokens are forgotten, and without
+    // interactive the document is told it is signed out.
+    op.end_sessions();
+    cvc::app app;
+    OidcGuard guard;
+    ASSERT_EQ(enable_net(app, c), "");
+    Runtime rt(app, "");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    ASSERT_TRUE(run_program(app, rt, mb, oidc_sign_in(op, " \"interactive\" #f"), "r.started"));
+    ASSERT_TRUE(wait_phase(app, rt, "signed_out"));
+    EXPECT_EQ(sval(app, "oidc.id.error"), "session_expired");
+    run_program(app, rt, mb, "(state-set \"r.has\" (net-auth-has? \"id\"))", "r.has");
+    EXPECT_EQ(sval(app, "r.has"), "false");
+  }
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(AriadneOidc, OpenUrlOpensOnlyWhatThePolicyAllows) {
+  StubOidcProvider op;
+  cvc::app app;
+  OidcGuard guard;
+  std::vector<std::string> opened;
+  cvc::net::set_url_opener([&](const std::string &u) {
+    opened.push_back(u);
+    return true;
+  });
+  ASSERT_EQ(enable_net(app, oidc_config(op)), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_program(
+      app, rt, mb,
+      "(begin (state-set \"r.ok\" (open-url \"" + op.url("/help") +
+          "\")) (state-set \"r.no\" (try (open-url \"https://elsewhere.example/?leak=1\") (catch "
+          "(e) (get-attr e \"message\")))))",
+      "r.no"));
+  EXPECT_EQ(sval(app, "r.ok"), "true");
+  EXPECT_NE(sval(app, "r.no").find("refused"), std::string::npos) << sval(app, "r.no");
+  ASSERT_EQ(opened.size(), 1u);
+  EXPECT_EQ(opened.front(), op.url("/help"));
+}
+
+// The launcher registered the client (--oidc-client ISSUER=ID): its id is the one sent, whatever
+// the document says, and the document need not say one.
+TEST(AriadneOidc, TheLaunchersClientIdWins) {
+  REQUIRE_HTTP();
+  StubOidcProvider op;
+  cvc::app app;
+  OidcGuard guard;
+  FakeBrowser browser;
+  cvc::net::set_url_opener([&](const std::string &u) { return browser.open(u); });
+  NetHostConfig c;
+  c.enabled = true;
+  c.oidc.clients = {{op.issuer(), op.client_id()}};
+  ASSERT_EQ(enable_net(app, c), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_program(app, rt, mb,
+                          "(state-set \"r.started\" (oidc-sign-in (dict \"issuer\" \"" +
+                              op.issuer() +
+                              "\" \"client_id\" \"not-registered\" \"credential\" \"id\")))",
+                          "r.started"));
+  ASSERT_TRUE(wait_phase(app, rt, "signed_in"));
+  ASSERT_EQ(browser.opened().size(), 1u);
+  EXPECT_NE(browser.opened().front().find("client_id=" + op.client_id()), std::string::npos);
+  EXPECT_EQ(sval(app, "oidc.id.claims.sub"), "user-42");
+}
+
+// A browser page without threads (cvc::net::http_starts_async): a kept sign-in resumes and a 401 is
+// cured by a refresh, and nothing blocks a frame. The session's own requests (discovery, the
+// refresh) are started, and a request whose credential the server refuses renews it with a started
+// refresh (CredentialRenewer::renew_async) and is started again: the transport sees no blocking
+// send.
+TEST(AriadneNetL4, AnOidcSessionRenewsWithoutBlockingAFrame) {
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / ("oidc-l4-" + cvc::net::oidc::random_token(6));
+  fs::create_directories(dir);
+  fs::permissions(dir, fs::perms::owner_all, fs::perm_options::replace);
+  const fs::path store = dir / "credentials";
+  const std::string at1 = "AT1-l4-access-0123456789", rt1 = "RT1-l4-refresh-0123456789";
+  {
+    std::ofstream(store) << "id https://op.test " << at1 << "\nid.refresh https://op.test " << rt1
+                         << "\n";
+  }
+  fs::permissions(store, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace);
+  int minted = 1;
+  std::string access = at1, refresh = rt1;
+  const auto op = [&](const cvc::net::HttpRequest &req) -> cvc::net::HttpResponse {
+    if (req.url == "https://op.test/.well-known/openid-configuration")
+      return http_ok(200,
+                     "{\"issuer\":\"https://op.test\",\"authorization_endpoint\":"
+                     "\"https://op.test/auth\",\"token_endpoint\":\"https://op.test/token\"}",
+                     {"Content-Type: application/json"}, req.url);
+    if (req.url == "https://op.test/token") {
+      if (req.body.find("refresh_token=" + refresh) == std::string::npos)
+        return http_ok(400, "{\"error\":\"invalid_grant\"}", {}, req.url);
+      ++minted;
+      access = "AT" + std::to_string(minted) + "-l4-access-0123456789";
+      refresh = "RT" + std::to_string(minted) + "-l4-refresh-0123456789";
+      return http_ok(200,
+                     "{\"access_token\":\"" + access +
+                         "\",\"token_type\":\"Bearer\",\"expires_in\":3600,\"refresh_token\":\"" +
+                         refresh + "\"}",
+                     {"Content-Type: application/json"}, req.url);
+    }
+    if (req.url == "https://op.test/api/me") { // the third access token is the one it takes
+      const bool ok =
+          minted >= 3 && std::find(req.headers.begin(), req.headers.end(),
+                                   "Authorization: Bearer " + access) != req.headers.end();
+      return http_ok(ok ? 200 : 401, ok ? "{\"sub\":\"u\"}" : "{}", {}, req.url);
+    }
+    return http_ok(404, "", {}, req.url);
+  };
+  {
+    cvc::app app;
+    L4Guard guard;
+    auto *net = new DeferredHttpClient(op);
+    cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(net));
+    NetHostConfig c;
+    c.enabled = true;
+    c.credential_store = store.string();
+    c.oidc.issuers = {"https://op.test"};
+    ASSERT_EQ(enable_net(app, c), "");
+    Runtime rt(app, "");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    click(rt, mb,
+          "(begin (oidc-sign-in (dict \"issuer\" \"https://op.test\" \"client_id\" \"c\""
+          "                         \"credential\" \"id\" \"interactive\" #f))"
+          "  (state-set \"r.resumed\" (get-attr (msg-recv \"oidc#id\") \"phase\"))"
+          "  (set me (http-get \"https://op.test/api/me\" (dict \"auth\" \"id\")))"
+          "  (state-set \"r.me\" (get-attr me \"status\")))");
+    for (int i = 0; i < 400 && sval(app, "r.me").empty(); ++i) {
+      frames(rt, 2);
+      net->answer(); // the page's event loop delivers one reply between frames
+    }
+    EXPECT_EQ(sval(app, "r.resumed"), "signed_in");
+    EXPECT_EQ(sval(app, "oidc.id.flow"), "stored");
+    EXPECT_EQ(sval(app, "r.me"), "200") << "renewed after the 401 and sent again";
+    std::vector<std::string> urls;
+    for (const cvc::net::HttpRequest &r : net->answered)
+      urls.push_back(r.url.substr(std::string("https://op.test").size()));
+    EXPECT_EQ(urls, (std::vector<std::string>{"/.well-known/openid-configuration", "/token",
+                                              "/api/me", "/token", "/api/me"}));
+    EXPECT_EQ(net->sends, 0) << "no request blocked a frame";
+    const std::string state = whole_state(app);
+    for (const std::string &t : {at1, rt1, access, refresh})
+      EXPECT_EQ(state.find(t), std::string::npos);
+  }
+  std::error_code ec;
+  fs::remove_all(dir, ec);
 }

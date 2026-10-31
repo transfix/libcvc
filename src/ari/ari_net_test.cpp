@@ -4,6 +4,7 @@
 // output may carry: not a frame, not a warning, not an error, whichever path fails.
 
 #include "../cvc/tests/local_http_server.h"
+#include "../cvc/tests/stub_oidc_provider.h"
 #include "ari_run.h"
 
 #include <filesystem>
@@ -423,4 +424,126 @@ TEST(AriNet, BadFlagsExitTwo) {
     EXPECT_NE(r.output.find(c.says), std::string::npos) << c.flags << ": " << r.output;
   }
   EXPECT_NE(ari("--help").output.find("--net-allow ORIGIN"), std::string::npos);
+}
+
+// OAuth 2.0 / OpenID Connect sign-in (docs/ARIADNE.md §10.5) through the built ari, against a stub
+// OpenID Provider: tests/oidc_probe.ari signs in, waits for the end of the sign-in and calls the
+// API with the credential. The "browser" is tests/fake_browser.py, through $BROWSER, the way a
+// user's would be. No token, code or device code the provider issued may reach any output.
+namespace {
+
+using cvc_test::StubOidcProvider;
+
+const fs::path kProbe = fs::path(ARI_TESTS_DIR) / "oidc_probe.ari";
+
+bool have_python() {
+#if defined(_WIN32)
+  return false; // fake_browser.py backgrounds itself with fork()
+#else
+  return std::system("python3 -c pass >/dev/null 2>&1") == 0;
+#endif
+}
+
+std::string fake_browser() {
+  return "python3 " + (fs::path(ARI_TESTS_DIR) / "fake_browser.py").string();
+}
+
+void expect_no_secret(const StubOidcProvider &op, const std::string &out, const std::string &what) {
+  for (const std::string &s : op.secrets())
+    EXPECT_EQ(out.find(s), std::string::npos)
+        << what << ": a secret the provider issued reached the output (" << s.substr(0, 10)
+        << "...)";
+}
+
+std::string probe(const StubOidcProvider &op) {
+  return quoted(kProbe) + " --issuer " + op.issuer() + " --api " + op.url("/api/me");
+}
+
+} // namespace
+
+TEST(AriOidc, ABrowserSignInReachesTheApiInBothBackends) {
+  REQUIRE_ARI();
+  if (!have_python())
+    GTEST_SKIP() << "the fake browser needs python3 and fork()";
+  StubOidcProvider op;
+  set_env("BROWSER", fake_browser().c_str());
+  for (const char *backend : {"ftxui", "tvision"}) {
+    SCOPED_TRACE(backend);
+    const AriRun r = ari(std::string("snapshot --backend ") + backend + " --oidc-issuer " +
+                         op.issuer() + " --width 120 --height 16 " + probe(op));
+    EXPECT_EQ(r.status, 0) << r.output;
+    for (const char *want : {"phase: signed_in", "flow: loopback", "name: Ada Lovelace",
+                             "done: signed_in", "api: 200"})
+      EXPECT_NE(r.output.find(want), std::string::npos) << want << "\n" << r.output;
+    expect_no_secret(op, r.output, backend);
+  }
+  set_env("BROWSER", nullptr);
+  EXPECT_EQ(op.count("/authorize"), 2);
+}
+
+TEST(AriOidc, WithoutABrowserItShowsADeviceCode) {
+  REQUIRE_ARI();
+  StubOidcProvider op;
+  set_env("BROWSER", nullptr);
+  const AriRun r = ari("snapshot --no-browser --oidc-issuer " + op.issuer() +
+                       " --width 120 --height 16 " + probe(op));
+  EXPECT_EQ(r.status, 0) << r.output;
+  for (const std::string &want :
+       {std::string("phase: device_code_shown"), std::string("flow: device"),
+        "code: " + op.last_user_code(), "visit: " + op.url("/activate")})
+    EXPECT_NE(r.output.find(want), std::string::npos) << want << "\n" << r.output;
+  expect_no_secret(op, r.output, "device");
+  EXPECT_EQ(op.count("/authorize"), 0) << "no browser was involved";
+}
+
+TEST(AriOidc, AKeptSignInIsResumedByTheNextRun) {
+  REQUIRE_ARI();
+  if (!have_python())
+    GTEST_SKIP() << "the fake browser needs python3 and fork()";
+  StubOidcProvider op;
+  TempDir dir;
+  const fs::path store = dir.path / "store" / "credentials";
+  const std::string flags = "--oidc-issuer " + op.issuer() + " --credential-store " +
+                            quoted(store) + " --width 120 --height 16 ";
+  set_env("BROWSER", fake_browser().c_str());
+  AriRun r = ari("snapshot " + flags + probe(op));
+  set_env("BROWSER", nullptr);
+  EXPECT_NE(r.output.find("api: 200"), std::string::npos) << r.output;
+  expect_no_secret(op, r.output, "first run");
+  ASSERT_TRUE(fs::exists(store));
+#if !defined(_WIN32)
+  struct stat st {};
+  ASSERT_EQ(::stat(store.c_str(), &st), 0);
+  EXPECT_EQ(st.st_mode & 0777, 0600u);
+#endif
+  r = ari("snapshot --no-browser " + flags + probe(op));
+  for (const char *want : {"phase: signed_in", "flow: stored", "name: Ada Lovelace", "api: 200"})
+    EXPECT_NE(r.output.find(want), std::string::npos) << want << "\n" << r.output;
+  EXPECT_EQ(r.output.find("code: WDJB"), std::string::npos) << "no new sign-in was needed";
+  expect_no_secret(op, r.output, "second run");
+}
+
+TEST(AriOidc, BadSignInFlagsExitTwo) {
+  REQUIRE_ARI();
+  TempDir dir;
+  const fs::path doc = dir.write("d.ari", document("", {"x"}, "(state-set \"t.x\" 1)"));
+  struct Case {
+    const char *flags, *says;
+  } cases[] = {
+      {"--oidc-issuer http://id.example", "not https"},
+      {"--oidc-issuer https://id.example/?x=1", "query"},
+      {"--oidc-client https://id.example", "ISSUER=CLIENT_ID"},
+      {"--oidc-client https://id.example=", "ISSUER=CLIENT_ID"},
+      {"--oidc-redirect-uri javascript:x", "--oidc-redirect-uri"},
+      {"--no-browser=1", "--no-browser takes no value"},
+  };
+  for (const Case &c : cases) {
+    const AriRun r = ari(std::string("check ") + c.flags + " " + quoted(doc));
+    EXPECT_EQ(r.status, 2) << c.flags << ": " << r.output;
+    EXPECT_NE(r.output.find(c.says), std::string::npos) << c.flags << ": " << r.output;
+  }
+  const AriRun info = ari("info --oidc-issuer https://id.example/realms/demo --no-browser");
+  EXPECT_NE(info.output.find("sign-in with    https://id.example/realms/demo"), std::string::npos)
+      << info.output;
+  EXPECT_NE(ari("--help").output.find("--oidc-issuer ISSUER"), std::string::npos);
 }

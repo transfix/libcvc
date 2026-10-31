@@ -16,10 +16,14 @@
 //     both, so (http-get ...), (http-request ...), (fetch "https://...") and an import: of an
 //     https URL are all checked;
 //   - makes the capability tokens net, net.auth and net.auth.persist hold (requires.h), so a
-//     document's requires: fails clearly where its launcher did not turn the network on.
+//     document's requires: fails clearly where its launcher did not turn the network on;
+//   - turns on sign-in with OAuth 2.0 / OpenID Connect providers (oidc_host.h): the oidc-* verbs
+//     and open-url, the --oidc-issuer and --oidc-client pins, and the tokens oidc, oidc.loopback,
+//     oidc.device, oidc.redirect and browser.
 //
 // The registrations are process-wide, like the action-intrinsic providers they add to.
 
+#include <cvc/ariadne/oidc_host.h> // OidcHostConfig
 #include <string>
 #include <utility>
 #include <vector>
@@ -37,6 +41,8 @@ struct NetHostConfig {
   // --credential-env NAME=VAR, in order: credential NAME is the token in environment variable VAR
   // (a policy credential line binds NAME); held for the run, never written.
   std::vector<std::pair<std::string, std::string>> credential_env;
+  // --oidc-issuer, --oidc-client, --oidc-redirect-uri, --no-browser (oidc_host.h).
+  OidcHostConfig oidc;
 };
 
 // Turn the network on for documents run in `app`, as `config` says. Call once at setup, before
@@ -62,6 +68,10 @@ struct NetHostStatus {
   std::vector<std::string> allowed; // the allowlist, as origins
   std::string credential_store;     // the file, or ""
   std::vector<std::string> env_credentials; // names --credential-env supplied a token for
+  bool oidc = false;                        // sign-in with an OpenID provider (oidc_host.h)
+  OidcFlows oidc_flows;                     // ... and its flows here
+  std::vector<std::string> oidc_issuers;    // the issuers sign-in is pinned to (empty: any allowed)
+  bool browser = false;                     // open-url can open a browser here
 };
 NetHostStatus net_host_status();
 

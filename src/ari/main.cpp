@@ -73,6 +73,7 @@
 #include <cvc/ariadne/web_document.h> // the browser page's document, named by URL
 #include <cvc/core/app.h>
 #include <cvc/image/image.h>
+#include <cvc/net/browser.h>
 #include <exception>
 #include <memory>
 #include <string>
@@ -112,7 +113,12 @@ int usage(int code) {
                "sign-in tokens stay with ari: a request names one (auth:, a credential value),\n"
                "it never sees it. With it on, snapshot waits after its frames until the\n"
                "document's requests are back and its programs idle (at most --settle S\n"
-               "seconds, 10 by default).\n",
+               "seconds, 10 by default).\n"
+               "\n"
+               "A document signs in with an OpenID Connect provider by itself (oidc-sign-in):\n"
+               "through the system browser where there is one, else with a code to enter on\n"
+               "another device (over SSH). --oidc-issuer and --oidc-client pin the provider\n"
+               "and the client; the tokens stay with ari like any other credential.\n",
                cvc::ariadne::host_flags_help().c_str());
   return code;
 }
@@ -544,6 +550,9 @@ int main(int argc, char **argv) {
   run.on_start = ari::install_signal_traps;
   run.on_stop = ari::restore_signal_traps;
   run.take_signal = ari::take_trapped_signal;
+  // The screen is the document's: a URL the host cannot open in a browser (open-url, a sign-in)
+  // is the document's to show, not printed over the frame.
+  cvc::net::set_url_notice([](const std::string &) {});
   ari::FtxuiBackend::RunExit how;
   if (tvision) {
     how = static_cast<ari::TvisionBackend &>(*backend).run(rt, run);
