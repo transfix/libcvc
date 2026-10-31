@@ -56,18 +56,18 @@ in the app's repository.
   answers at once with *loading*, *ready* or *failed*. The fetch, the decode, the downscale
   and the fit (crop or pad, plus the circle mask) run as one job.
   - Natively, the job runs on the app's background pool.
-  - In single-threaded wasm, the request is started with `cvc::net::start` (#914), so the frame
-    loop keeps going while it is out. There is no thread to decode on, so the decode runs on the
-    frame thread, at most one image per frame. A feed's images then arrive over several frames
-    instead of stalling one. Decoding in the browser (`createImageBitmap`) would take even that
-    off the frame, and is later work.
+  - In single-threaded wasm there is no pool thread. The cache runs one step (a fetch with its
+    decode, or a fit) per `Runtime::drain`, between frames and never inside the walk, so a feed's
+    images arrive over several frames instead of stalling one. Until #914 lands, that step's
+    request blocks its frame, as `http-get` does there today. After #914, the request is started
+    with `cvc::net::start`, so the frame loop keeps going while it is out. Decoding in the
+    browser (`createImageBitmap`) would take the decode off the frame too, and is later work.
   - Each decode is bounded by a size cap: 8192 px a side and 64 MiB of encoded bytes.
   - The frame thread only publishes the finished raster (`set_image`) and draws it.
 - **Formats.** PNG, JPEG, GIF (first frame) and BMP decode with stb from memory, and WebP with
   libwebp. libwebp is already a libcvc dependency (for ImageMagick and libtiff); it is linked
   directly and is optional. AVIF and the rest decode through ImageMagick where the build has it.
-  A decoded image is downscaled to at most `ariadne.media.max_image_px` (default 2048) on its
-  long side.
+  A decoded image is downscaled to at most 2048 px on its long side.
 - **Fit.** The core turns the decoded image into a raster with the box's aspect ratio, so every
   backend draws it unchanged at the box size:
   - `contain` pads the image with transparent pixels;
@@ -77,12 +77,12 @@ in the app's repository.
   The raster is prepared at twice the box size for HiDPI, capped at the source size.
 - **Placeholder and error states.** While loading, the widget draws a neutral raster the size
   of the box (a disc for `circle`), so the layout doesn't move. On failure it draws a darker
-  one with the label as its caption, and the error goes in the tooltip, never with a token in
-  it. Each state can be read back: `ariadne.media.images.<key>.state` is
-  `loading|ready|failed`. Inside a mount, the key is under the mount's `sys.` (section 7).
+  one, and the error goes in the tooltip, never with a token in it. `status: KEY` (optional)
+  has the widget keep `loading|ready|failed` at that state key, with the reason at
+  `KEY.error`, for a document's fallback and for tests.
 - **Cache.** The cache lives in memory, per runtime, keyed by `(uri, auth name)`. It holds
-  decoded images up to `ariadne.media.cache_mb` (default 64) in LRU order, and evicts entries
-  no widget has drawn for 30 s. Requests for the same URL share one fetch (single-flight). A
+  fitted rasters up to 64 MiB in LRU order, and evicts entries no widget has drawn for 30 s
+  (`ImageCache::Limits`; the backends drop an evicted raster's texture too). Requests for the same URL share one fetch (single-flight). A
   failed entry is retried after 30 s, or when the URL changes.
 - **Transparency in terminals.** Half-blocks leave a transparent pixel's half of the cell at
   the terminal's own background, so a circle avatar has no black corners on a light terminal.
