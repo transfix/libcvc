@@ -108,6 +108,29 @@ void async_call::add_wait(double seconds) {
     wait_ns_.fetch_add(to_ns(seconds), std::memory_order_acq_rel);
 }
 
+void async_call::on_cancel(std::function<void()> stop) {
+  {
+    std::lock_guard<std::mutex> lk(cancel_m_);
+    if (!cancel_requested()) {
+      cancel_hook_ = std::move(stop);
+      return;
+    }
+  }
+  // Cancelled already: cancel() found no hook to run, or ran the one this replaces.
+  if (stop)
+    stop();
+}
+
+void async_call::run_cancel_hook() {
+  std::function<void()> stop;
+  {
+    std::lock_guard<std::mutex> lk(cancel_m_);
+    stop.swap(cancel_hook_);
+  }
+  if (stop)
+    stop();
+}
+
 bool async_call::wait(std::optional<double> seconds) {
   std::unique_lock<std::mutex> lk(m_);
   if (external_ && !settled_)
@@ -691,6 +714,65 @@ void async_host::submit(const std::shared_ptr<async_call> &call, async_kernel ke
   }
 }
 
+value_t async_host::call(const std::string &name, async_work work, const async_options &opts,
+                         bool future) {
+  if (!work.kernel && !work.start)
+    throw dsl_error("TypeError", name + ": its marshal step returned no work", "async",
+                    function_fields(name));
+  if (parking_forbidden())
+    throw dsl_error("RuntimeError",
+                    name + ": an async function can't be called here (this context can't wait "
+                           "for it)",
+                    "async", function_fields(name));
+  check_open(name);
+  process *proc = sched_ && sched_->current_process() ? sched_->current_process().get() : nullptr;
+  // Started only where a threaded call would be: a step of the parking scheduler, and, for a
+  // transparent call, at a point that can park. Elsewhere the kernel runs as any kernel does.
+  const bool starts = work.start && proc && async_sched_ &&
+                      async_sched_->current_pid() == proc->pid && (future || can_await());
+  if (!starts) {
+    if (!work.kernel)
+      throw dsl_error("RuntimeError", name + ": can't wait for its result here", "async",
+                      function_fields(name));
+    return call(name, std::move(work.kernel), opts, future);
+  }
+
+  // An external call (begin_external) with the registration's timeout and charging: nothing runs
+  // it here, the work posts its outcome itself (finish).
+  auto call = std::make_shared<async_call>(name, proc->pid);
+  call->timeout_ = opts.timeout;
+  call->io_ = opts.io;
+  call->channel_ = reply_channel(name, ".async#");
+  call->sched_ = sched_;
+  call->async_sched_ = async_sched_;
+  call->external_ = true;
+  call->has_progress_ = true;
+  call->progress_root_ = proc->root_path;
+  ++proc->async_calls;
+  state_->add(call, false);
+  async_sched_->track_async_call(call);
+  value_t result = nil_value;
+  if (future) {
+    result = make_async_future(call);
+  } else {
+    if (!async_sched_->receive_message(proc->pid, call->channel_)) {
+      call->cancel();
+      throw dsl_error("RuntimeError", name + ": can't park process " + std::to_string(proc->pid),
+                      "async", function_fields(name));
+    }
+    request_await({call->channel_, name, detail::make_awaitable_handle(call)});
+  }
+  // Started once the process waits for it: an outcome posted at once (a transport that answers
+  // in place) is taken by the next drain like any other.
+  try {
+    work.start(call);
+  } catch (...) {
+    if (call->settle({}, std::current_exception()))
+      finish(call);
+  }
+  return result;
+}
+
 std::shared_ptr<async_call> async_host::begin_external(const std::string &name, bool future,
                                                        value_t &result) {
   if (parking_forbidden())
@@ -739,19 +821,19 @@ void async_host::finish(const std::shared_ptr<async_call> &call) {
 // register_async_fn and futures
 // ---------------------------------------------------------------------------
 
-void register_async_fn(environment_ptr env, async_host &host, const std::string &name,
-                       async_marshal marshal, async_options opts) {
-  auto shared = std::make_shared<const async_marshal>(std::move(marshal));
-  const auto make = [&host, name, shared, opts](bool future) -> native_fn {
-    return [&host, name, shared, opts, future](std::span<const value_t> args) -> value_t {
-      // With its arguments copied (3.7), marshal them and make the call.
-      auto start = [&host, name, shared, opts, future](value_t copied) -> value_t {
+namespace {
+
+// Register `name` (and `<name>-async`) as natives that copy their arguments (3.7) and hand the
+// copies to `call(args, future)`, which marshals them and makes the call.
+using make_call_fn = std::function<value_t(std::span<const value_t> args, bool future)>;
+
+void register_async_natives(const environment_ptr &env, const std::string &name,
+                            std::shared_ptr<const make_call_fn> call, bool future_variant) {
+  const auto make = [call](bool future) -> native_fn {
+    return [call, future](std::span<const value_t> args) -> value_t {
+      auto start = [call, future](value_t copied) -> value_t {
         const std::vector<value_t> &argv = *std::get<list_ptr>(copied.v);
-        async_kernel kernel = (*shared)(std::span<const value_t>(argv));
-        if (!kernel)
-          throw dsl_error("TypeError", name + ": its marshal step returned no kernel", "async",
-                          {{"function", value_t(name)}});
-        return host.call(name, std::move(kernel), opts, future);
+        return (*call)(std::span<const value_t>(argv), future);
       };
       value_t argv = make_list(std::vector<value_t>(args.begin(), args.end()));
       if (std::none_of(args.begin(), args.end(), [](const value_t &a) { return is_compound(a); }))
@@ -762,8 +844,34 @@ void register_async_fn(environment_ptr env, async_host &host, const std::string 
     };
   };
   builtins::register_fn(env, name, make(false));
-  if (opts.future_variant)
+  if (future_variant)
     builtins::register_fn(env, name + "-async", make(true));
+}
+
+} // namespace
+
+void register_async_fn(environment_ptr env, async_host &host, const std::string &name,
+                       async_marshal marshal, async_options opts) {
+  auto call = std::make_shared<const make_call_fn>(
+      [&host, name, marshal = std::move(marshal), opts](std::span<const value_t> args,
+                                                        bool future) -> value_t {
+        async_kernel kernel = marshal(args);
+        if (!kernel)
+          throw dsl_error("TypeError", name + ": its marshal step returned no kernel", "async",
+                          {{"function", value_t(name)}});
+        return host.call(name, std::move(kernel), opts, future);
+      });
+  register_async_natives(env, name, std::move(call), opts.future_variant);
+}
+
+void register_async_fn(environment_ptr env, async_host &host, const std::string &name,
+                       async_work_marshal marshal, async_options opts) {
+  auto call = std::make_shared<const make_call_fn>(
+      [&host, name, marshal = std::move(marshal), opts](std::span<const value_t> args,
+                                                        bool future) -> value_t {
+        return host.call(name, marshal(args), opts, future);
+      });
+  register_async_natives(env, name, std::move(call), opts.future_variant);
 }
 
 value_t make_async_future(const std::shared_ptr<async_call> &call) {

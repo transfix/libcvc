@@ -19,6 +19,10 @@
  * (volume-blur v 3) then parks the calling process and resumes it with the kernel's value, or
  * raises the kernel's exception at the call; (volume-blur-async v 3) returns a future for
  * (await f [seconds]) or (await-all (list f ...)).
+ *
+ * Work that runs by itself (a browser's fetch, which its event loop completes) returns an
+ * async_work instead, whose start begins it and whose completion settles the call
+ * (docs/STATE_EXEC_EXCEPTIONS.md 3.12).
  */
 #ifndef CVC_STATE_EXEC_ASYNC_HOST_H
 #define CVC_STATE_EXEC_ASYNC_HOST_H
@@ -80,6 +84,11 @@ public:
   /// Raises RuntimeError where parking is forbidden (park_forbidden_scope).
   value_t call(const std::string &name, async_kernel kernel, const async_options &opts,
                bool future);
+  /// Call `work` as `name` (docs/STATE_EXEC_EXCEPTIONS.md 3.12): where a threaded call could park
+  /// (or return a future), start it, with the call parked on it (or its future returned), and
+  /// charged and timed out as `opts` say; the work posts its outcome itself (finish). Elsewhere
+  /// run work.kernel as call(name, kernel, ...) does, or raise RuntimeError when it has none.
+  value_t call(const std::string &name, async_work work, const async_options &opts, bool future);
 
   /// A call whose outcome another part of the host supplies, by settle() and finish()
   /// (pycvc's coroutines, run by the Exec's own event loop): park the calling process on it
@@ -121,6 +130,12 @@ private:
 /// `host` must outlive every call of the functions.
 void register_async_fn(environment_ptr env, async_host &host, const std::string &name,
                        async_marshal marshal, async_options opts = {});
+
+/// The same for a function whose work may run by itself (async_work, docs/STATE_EXEC_EXCEPTIONS.md
+/// 3.12): its marshal step returns the work's start and its blocking kernel, and the call is made
+/// with async_host::call(name, work, ...).
+void register_async_fn(environment_ptr env, async_host &host, const std::string &name,
+                       async_work_marshal marshal, async_options opts = {});
 
 /// A future of `call`: {"__future__": its channel, "__async_call__": a handle to it}, which
 /// (await f) reads directly.
