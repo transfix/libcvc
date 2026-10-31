@@ -778,7 +778,7 @@ the next `run()` applies the grant (LT-2).
     a value it captured may hold the last reference to a Python object whose finalizer releases
     and retakes the GIL, or calls the `Exec` again. A direct action keeps the GIL throughout, so it
     is serialized with Python's own calls on the scheduler that hold the GIL. It is not with the
-    stepping calls that release it (`step`, `run`, `sync_step`, `sync_run`, `wait_for_work`):
+    stepping calls that release it (`sync_step`, `sync_run`, `wait_for_work`):
     stepping an `Exec`'s scheduler from another thread meanwhile is the caller's to avoid, as
     stepping it from two threads always was. A caller waiting for its entry's answer
     waits on the condition variable with the GIL released (released under the mutex); once woken

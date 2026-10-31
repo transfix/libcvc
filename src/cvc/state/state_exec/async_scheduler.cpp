@@ -900,6 +900,13 @@ void async_scheduler::cancel_async_calls(int pid) {
     detail::charge_async_call(*proc, *call, rate, true, now);
 }
 
+void async_scheduler::cancel_async_calls_of(int pid) {
+  const process *proc = procs_.find(pid);
+  if (proc && !is_finished(proc->status))
+    return; // live: its calls wake it when they finish, or its kill cancels them
+  cancel_async_calls(pid);
+}
+
 double async_scheduler::async_steps_per_cpu_ms(const process &proc) {
   if (proc.async_steps_per_cpu_ms)
     return *proc.async_steps_per_cpu_ms;

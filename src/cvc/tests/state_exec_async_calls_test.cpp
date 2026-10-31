@@ -618,6 +618,18 @@ TEST(AsyncCalls, AS9_KillingAParkedProcessCancelsItsCall) {
   EXPECT_FALSE(w.result(pid));
 }
 
+// The cancel a reap makes first (pycvc's Exec makes it before its control mutex) leaves a live
+// process's calls alone: dropped, its call would leave the process parked on it for good.
+TEST(AsyncCalls, CancelBeforeAReapLeavesALiveProcessesCalls) {
+  world w(async_sched);
+  const int pid = w.submit("(slow-op 3 50)");
+  ASSERT_TRUE(w.pump([&] { return w.waiting(pid) && w.p.started; }));
+  w.async->cancel_async_calls_of(pid);
+  EXPECT_EQ(w.async->async_calls_in_flight(), 1u);
+  ASSERT_TRUE(w.pump([&] { return w.result(pid).has_value(); }));
+  EXPECT_EQ(to_string(*w.result(pid)), "6");
+}
+
 TEST(AsyncCalls, AS10_HostTeardownWaitsForItsKernels) {
   auto w = std::make_unique<world>(async_sched);
   const int pid = w->submit("(slow-op 1 5000)");

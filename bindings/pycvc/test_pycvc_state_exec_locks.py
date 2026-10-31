@@ -658,7 +658,11 @@ def test_pr08_reap_runs_no_python_under_the_mutex():
     class Rate(pycvc.state_observer):
         def on_changed(self, path):
             if path == published and pycvc.state_get(app, path) == "123":
-                seen.append(ex.get_priority(0))
+                # Whether the program had ended: then this is the reap's publish, not a charge's
+                # inside run()'s loop (a run() slower than the kernel's second would leave the
+                # loop after it).
+                ended = all(p.status in _ENDED for p in ex.scheduler().list_processes())
+                seen.append((ex.get_priority(0), ended))
 
     def late():
         time.sleep(1.0)  # run() has left its loop and waits for this call (wait_idle)
@@ -674,7 +678,8 @@ def test_pr08_reap_runs_no_python_under_the_mutex():
     finally:
         faulthandler.cancel_dump_traceback_later()
         obs.unwatch()
-    assert seen == [None]  # the reap's publish ran the observer, and its call was answered
+    # The reap's publish ran the observer, after the program ended, and its call was answered.
+    assert seen == [(None, True)]
 
 
 def test_pr08_idle_calls_beside_scheduler_calls():
