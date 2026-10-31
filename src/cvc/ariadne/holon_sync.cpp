@@ -279,7 +279,8 @@ void sync_statics(holon &h, cvc::app &app, const std::string &room) {
 }
 } // namespace
 
-void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_dt) {
+void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_dt,
+                 bool write_poses) {
   sync_statics(h, app, room);
   // The present participants, straight from the replicated room tree.
   const std::vector<conference::room_participant> roster = conference::room_roster(app, room);
@@ -314,6 +315,8 @@ void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_d
       h.remove_participant(pid);
   // One authoritative frame.
   h.advance(wall_dt);
+  if (!write_poses)
+    return;
   // Publish each participant's authoritative pose (these are local writes on the
   // relay's shard; the caller fans them to the clients): what changed, and a
   // heartbeat of about a second for an avatar standing still.
@@ -355,6 +358,20 @@ void client_pump(holon &h, cvc::app &app, const std::string &room, const std::st
     if (!present.count(pid))
       h.remove_participant(pid);
   h.advance(wall_dt);
+}
+
+std::size_t apply_pose_snapshot(holon &h, pose_stream_decoder &decoder,
+                                const cvc::pose_snapshot &snap) {
+  std::vector<pose_sample> samples;
+  if (!decoder.decode(snap, samples))
+    return 0;
+  std::size_t applied = 0;
+  for (const pose_sample &s : samples)
+    if (h.has_participant(s.pid)) {
+      h.apply_authoritative(s.pid, s.state, snap.server_tick);
+      ++applied;
+    }
+  return applied;
 }
 
 std::uint64_t propose_intent(holon &h, cvc::app &app, const std::string &room,

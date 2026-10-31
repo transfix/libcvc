@@ -35,12 +35,13 @@
 #include <cvc/ariadne/conference/room_aoi_relay.h>  // room_aoi_relay, relay_room_step
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_leave (retract a departed peer)
 #include <cvc/ariadne/conference/room_media_intrinsics.h> // room_relay_tick
-#include <cvc/ariadne/conference/room_net.h>   // per-participant + room link-quality stats
-#include <cvc/ariadne/conference/room_rungs.h> // each viewer's video rung, adapted to its link
-#include <cvc/ariadne/conference/room_scene.h> // seed_default_scene (the shared 3D scene)
+#include <cvc/ariadne/conference/room_net.h>        // per-participant + room link-quality stats
+#include <cvc/ariadne/conference/room_pose_relay.h> // room_pose_relay (avatar pose snapshots)
+#include <cvc/ariadne/conference/room_rungs.h>      // each viewer's video rung, adapted to its link
+#include <cvc/ariadne/conference/room_scene.h>      // seed_default_scene (the shared 3D scene)
 #include <cvc/ariadne/conference/room_write_gate.h> // bound writes: a client writes only itself
-#include <cvc/ariadne/holon.h>                 // server-authoritative avatar holon (H1)
-#include <cvc/ariadne/holon_sync.h>            // server_pump: intent -> holon -> authoritative pose
+#include <cvc/ariadne/holon.h>                      // server-authoritative avatar holon (H1)
+#include <cvc/ariadne/holon_sync.h> // server_pump: intent -> holon -> authoritative pose
 #include <cvc/ariadne/stream/stream_relay.h>
 #include <cvc/core/app.h>
 #include <cvc/media/media_router.h> // protocol-agnostic media hub (WS + gRPC + future protocols)
@@ -466,18 +467,35 @@ int main(int argc, char **argv) {
   int reapticks = 0; // cadence for reaping ghost (navigated-away) connections
 #endif
   // The server-authoritative avatar holon for this room (H1): each room step it reads
-  // every participant's proposed intent from the replicated tree, integrates it on
-  // its own clock (a stamped intent at the tick the client applied it), and writes
-  // the authoritative pose back -- what changed, plus a ~1 s heartbeat -- fanned to
-  // clients by room_step. The relay loop paces ~5 Hz; the room steps
-  // kRoomSubsteps times per pass (~20 Hz), so a pose sample is at most ~50 ms old
-  // and an intent waits at most that long before the server integrates it.
+  // every participant's proposed intent from the replicated tree and integrates it on
+  // its own clock (a stamped intent at the tick the client applied it). The relay loop
+  // paces ~5 Hz; the room steps kRoomSubsteps times per pass (60 Hz), so an intent waits
+  // at most ~17 ms before the server integrates it. Each step the pose relay sends every
+  // viewer that is due its snapshot of the poses it sees (room_pose_relay: 60, 30 or 20 Hz
+  // by its round trip); the tree's copy of the poses is written every kTreePoseSteps steps
+  // (1 Hz), for late joiners and the log.
   cvc::ariadne::holon server_holon(cvc::ariadne::holon_role::server,
                                    cvc::ariadne::room_holon_config());
   std::printf("[arisrv] avatar physics: %s\n",
               server_holon.physics() ? "Jolt rigid bodies" : "kinematic (no Jolt in this build)");
-  constexpr int kRoomSubsteps = 4;
-  constexpr auto kRoomStep = std::chrono::milliseconds(50); // x kRoomSubsteps = the loop's 200 ms
+  constexpr int kRoomSubsteps = 12;
+  constexpr auto kRoomStep = std::chrono::microseconds(16667); // x kRoomSubsteps = the 200 ms pass
+  constexpr std::uint64_t kTreePoseSteps = 60;
+  cvc::ariadne::conference::room_pose_relay::config pose_cfg;
+  pose_cfg.heartbeat_ticks =
+      static_cast<std::uint64_t>(std::llround(1.0 / server_holon.clock().fixed_dt()));
+  pose_cfg.push_interval_ticks = cvc::ariadne::conference::aoi_pose_push_interval_ticks(
+      aoiParams, 1.0 / server_holon.clock().fixed_dt());
+  pose_cfg.keyframe_ticks = 2 * pose_cfg.heartbeat_ticks;
+  cvc::ariadne::conference::room_pose_relay pose_relay(pose_cfg);
+  pose_relay.add_transport(&state_tp);
+#if CVC_ENABLE_WS
+  pose_relay.add_transport(&ws_tp);
+#endif
+  std::uint64_t room_steps = 0;
+  const auto pump_room = [&] {
+    cvc::ariadne::server_pump(server_holon, app, room, -1.0, room_steps % kTreePoseSteps == 0);
+  };
   // Fan the relay's OWN room-tree writes -- the room_leave retractions, room_relay_tick's
   // per-stream "ready" markers, the holon's poses -- out to EVERY client on BOTH transports.
   // The shard's publish cursor is shared by the two transports, so a plain state_tp.pump_all()
@@ -500,6 +518,9 @@ int main(int argc, char **argv) {
         std::chrono::duration<double>(std::chrono::steady_clock::now() - room_start).count();
     cvc::ariadne::conference::relay_room_step(shard, planes, aoi_relay.get(), server_holon, now_s,
                                               trimJournal);
+    const std::shared_ptr<const cvc::ariadne::conference::aoi_snapshot> tiers =
+        aoi_relay ? aoi_relay->snapshot() : nullptr;
+    pose_relay.step(server_holon, room_steps++, tiers.get());
   };
   const char *room_debug_env = std::getenv("CVC_ARISRV_ROOM_DEBUG");
   const bool room_debug =
@@ -591,7 +612,7 @@ int main(int argc, char **argv) {
     // Advance the authoritative avatar holon and write each participant's pose, then fan them out
     // at once: the pose writes are local shard mutations, and the housekeeping below would
     // otherwise make this step's samples later than the other three's.
-    cvc::ariadne::server_pump(server_holon, app, room);
+    pump_room();
     room_step();
     // CVC_ARISRV_ROOM_DEBUG=1: every ~5 s, log the room as the server holds it -- each present
     // participant's authoritative position and its proposed intent -- so replication across the
@@ -622,6 +643,8 @@ int main(int argc, char **argv) {
           continue;
         cvc::ariadne::conference::write_relay_net(app, room, r.remote_node_id,
                                                   {r.stats.rtt_ms, in_kbps, out_kbps});
+        if (r.stats.rtt_ms >= 0.0) // its pose snapshot rate
+          pose_relay.set_rtt(r.remote_node_id, r.stats.rtt_ms);
       }
       cvc::ariadne::conference::write_link_devices(app, room, links, present);
       // Each viewer's video rung for its link, to the shaper and to the room (its net.relay.video,
@@ -752,6 +775,15 @@ int main(int argc, char **argv) {
           static_cast<unsigned long long>(state_tp.total_media_gated()), ws_gated,
           static_cast<unsigned long long>(state_tp.total_media_stall_dropped()), ws_backlog, held,
           held_timeouts, shard.journal().size());
+      const auto ps = pose_relay.take_stats();
+      std::printf("[arisrv] poses: %llu snapshot(s), %llu entries, %llu unsent |",
+                  static_cast<unsigned long long>(ps.snapshots),
+                  static_cast<unsigned long long>(ps.entries),
+                  static_cast<unsigned long long>(ps.unsent));
+      for (const auto &p : cvc::ariadne::conference::room_roster(app, room))
+        std::printf(" %s %u Hz", p.pid.c_str(),
+                    60u / std::max(1u, pose_relay.interval_steps(p.pid)));
+      std::printf("\n");
       std::fflush(stdout);
     }
     const std::size_t n = relay.stream_count();
@@ -794,7 +826,7 @@ int main(int argc, char **argv) {
     // poses between the loop's slower housekeeping.
     for (int i = 1; i < kRoomSubsteps && !g_stop.load(); ++i) {
       wait_room_step();
-      cvc::ariadne::server_pump(server_holon, app, room);
+      pump_room();
       room_step();
     }
     wait_room_step();

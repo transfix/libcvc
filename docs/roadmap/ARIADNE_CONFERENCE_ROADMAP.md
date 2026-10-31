@@ -427,6 +427,32 @@ bundles them yet.
   acceleration of 107 m/s². The playout has no stalls and 2.3 m/s², against the walk's own 2.25. The
   relay keeps the samples even by stepping the room on a fixed 50 ms grid and sending each step's
   poses at once, and the WebSocket sockets set TCP_NODELAY.
+* **Poses travel as compact per-viewer snapshots** (`room_pose_relay`, `pose_stream.h`). The relay
+  steps the room at 60 Hz. Each step, a viewer that is due gets one `PoseSnapshot` frame with the
+  participants it sees.
+  * **Encoding:** millimetres, mm/s and quaternion components times 32767. Each value is the
+    difference from what that connection was last sent, so a walking avatar costs about a dozen
+    bytes and a still one a 2-byte heartbeat a second.
+  * **Rate:** each viewer gets snapshots at 60 Hz under an 80 ms round trip, 30 Hz under 160 ms and
+    20 Hz beyond, with 10% hysteresis.
+  * **Tiers:** middle and outer pairs get the AOI push cadence.
+  * **Recovery:** every 2 s a viewer's stream restarts with absolute entries, so a client that lost
+    its place is back in step.
+  * **Tree copy:** the tree's copy of the poses is written at 1 Hz, for late joiners and the log.
+
+  `arisrv_aoi_bench --poses tree|stream` (loopback, clients at 60 fps):
+
+  | | into each client | relay out | peer shown behind, p50 / p95 |
+  |---|---|---|---|
+  | 2 clients, 20 Hz tree poses | 168 kb/s | 0.35 Mb/s | 70 / 87 ms |
+  | 2 clients, 60 Hz snapshots | 47 kb/s | 0.10 Mb/s | 48 / 62 ms |
+  | 6 clients, 20 Hz tree poses | 400–431 kb/s | 2.5 Mb/s | 103 / 130 ms |
+  | 6 clients, 60 Hz snapshots | 92–122 kb/s | 0.66 Mb/s | 42 / 60 ms |
+
+  A snapshot frame is a link-level message like media: never journaled, relayed or bridged. It
+  carries a sequence number and the base it is a difference from. On the reliable transports the
+  base is always the previous snapshot. An unreliable channel would make it the last one the client
+  acknowledged.
   *(No client-prediction/reconcile/rollback loop exists today — it is new; distributed state resolves
   last-writer with vector clocks, not predict/rollback.)*
 * **LOD (realtime for large scenes).** A replica is a *scoped, decimated* view, not a full copy: **spatial

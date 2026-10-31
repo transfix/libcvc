@@ -249,6 +249,14 @@ public:
   // encoded, when none matches or `entries` is empty.
   std::size_t push_snapshot_to(const std::string &node_id,
                                const std::vector<snapshot_entry> &entries) override;
+  // See state_transport::push_pose_snapshot_to / set_on_pose_snapshot. A connection with more than
+  // kPoseBacklogSkip bytes unsent is skipped (the next snapshot supersedes this one, and stale
+  // poses must not queue up). Set the callback before connecting.
+  std::size_t push_pose_snapshot_to(const std::string &node_id, const pose_snapshot &snap) override;
+  void set_on_pose_snapshot(pose_snapshot_fn fn) override;
+  static constexpr std::size_t kPoseBacklogSkip = 64 * 1024;
+  std::uint64_t total_pose_snapshots_sent() const noexcept { return _poses_sent.load(); }
+  std::uint64_t total_pose_snapshots_received() const noexcept { return _poses_recv.load(); }
   // See state_transport::set_admission_hold. Applies to the connections this relay accepts.
   void set_admission_hold(std::chrono::milliseconds max_hold) override;
   std::size_t release_admissions() override;
@@ -391,6 +399,9 @@ private:
   std::atomic<std::uint64_t> _relay_withheld{0}; // inbound frames the interest gate kept local
   connection_closed_fn _on_conn_closed; // set by a relay; invoked on a peer close (see above)
   media_sink_fn _media_sink; // media_router ingress (relay) OR set_on_media leaf sugar; see above
+  pose_snapshot_fn _on_pose_snapshot;
+  std::atomic<std::uint64_t> _poses_sent{0};
+  std::atomic<std::uint64_t> _poses_recv{0};
 
   // The media egress gate: replaced whole under _media_gate_mu, and copied once per fanned frame so
   // the per-receiver loop (and its socket writes) runs without the lock. Null = no gate.

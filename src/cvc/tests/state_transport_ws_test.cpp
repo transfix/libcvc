@@ -1018,6 +1018,91 @@ TEST(StateTransportWsTest, PushSnapshotToReachesOnlyNamedPeer) {
   S.stop();
 }
 
+namespace {
+// A pose snapshot with one named entry and one difference, every field set.
+cvc::pose_snapshot sample_poses() {
+  cvc::pose_snapshot s;
+  s.server_tick = 123456789;
+  s.seq = 7;
+  s.base_seq = 6;
+  cvc::pose_entry a;
+  a.slot = 3;
+  a.pid = "alice";
+  a.x = 4000, a.y = -2500, a.z = 1;
+  a.vx = 3000, a.vy = -1, a.vz = 0;
+  a.qw = 32767, a.qx = 0, a.qy = -5, a.qz = 12;
+  cvc::pose_entry b;
+  b.slot = 4;
+  b.x = 67, b.y = -66;
+  s.entries = {a, b};
+  s.gone = {1, 2};
+  return s;
+}
+bool same_poses(const cvc::pose_snapshot &a, const cvc::pose_snapshot &b) {
+  if (a.server_tick != b.server_tick || a.seq != b.seq || a.base_seq != b.base_seq ||
+      a.gone != b.gone || a.entries.size() != b.entries.size())
+    return false;
+  for (std::size_t i = 0; i < a.entries.size(); ++i) {
+    const cvc::pose_entry &x = a.entries[i], &y = b.entries[i];
+    if (x.slot != y.slot || x.pid != y.pid || x.x != y.x || x.y != y.y || x.z != y.z ||
+        x.vx != y.vx || x.vy != y.vy || x.vz != y.vz || x.qw != y.qw || x.qx != y.qx ||
+        x.qy != y.qy || x.qz != y.qz)
+      return false;
+  }
+  return true;
+}
+} // namespace
+
+// A pose snapshot reaches only the named peer, intact, through its set_on_pose_snapshot.
+TEST(StateTransportWsTest, PoseSnapshotReachesOnlyNamedPeer) {
+  cvc::app aB, aC;
+  cvc::state_transport_ws S, tB, tC;
+  S.start("127.0.0.1:0", "S", "C");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  cvc::state_cluster_shard sC(aC, "C", "C1");
+  sB.attach();
+  sC.attach();
+  tB.register_shard(&sB);
+  tC.register_shard(&sC);
+  std::mutex mu;
+  std::vector<cvc::pose_snapshot> atB, atC;
+  tB.set_on_pose_snapshot([&](const cvc::pose_snapshot &s) {
+    std::lock_guard<std::mutex> lk(mu);
+    atB.push_back(s);
+  });
+  tC.set_on_pose_snapshot([&](const cvc::pose_snapshot &s) {
+    std::lock_guard<std::mutex> lk(mu);
+    atC.push_back(s);
+  });
+  ASSERT_TRUE(tB.connect_to_peer(ws(S.listen_address()), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tC.connect_to_peer(ws(S.listen_address()), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_identified(S, 2, std::chrono::milliseconds(2000)));
+
+  const cvc::pose_snapshot snap = sample_poses();
+  EXPECT_EQ(S.push_pose_snapshot_to("nobody", snap), 0u);
+  EXPECT_EQ(S.push_pose_snapshot_to("B", snap), 1u);
+  cvc::pose_snapshot forC;
+  forC.server_tick = 1;
+  forC.seq = 1;
+  EXPECT_EQ(S.push_pose_snapshot_to("C1", forC), 1u);
+  ASSERT_TRUE(wait_until(
+      [&] {
+        std::lock_guard<std::mutex> lk(mu);
+        return atB.size() == 1 && atC.size() == 1;
+      },
+      std::chrono::milliseconds(3000)));
+  std::lock_guard<std::mutex> lk(mu);
+  EXPECT_TRUE(same_poses(atB[0], snap));
+  EXPECT_EQ(atC[0].seq, 1u) << "C got its own, not B's";
+  EXPECT_TRUE(atC[0].entries.empty());
+  EXPECT_EQ(S.total_pose_snapshots_sent(), 2u);
+  EXPECT_EQ(tB.total_pose_snapshots_received(), 1u);
+
+  tB.stop();
+  tC.stop();
+  S.stop();
+}
+
 // A push and the publishes after it share the connection's FIFO, so a pushed value never lands on
 // top of a newer live write -- and a push after the last live write wins.
 TEST(StateTransportWsTest, PushThenPublishKeepsOrder) {
