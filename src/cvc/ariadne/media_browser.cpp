@@ -23,6 +23,7 @@
 // origin when it is another).
 
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <cvc/ariadne/media.h>
 #include <cvc/ariadne/media_player.h>
