@@ -196,7 +196,7 @@ private:
   }
 
   void read_loop() {
-    std::string message;   // the message being assembled
+    std::string message; // the message being assembled
     bool binary = false;
     char buf[16384];
     while (!stop_) {
@@ -215,8 +215,8 @@ private:
         if (!stop_) {
           closed_by_peer_ = true;
           open_ = false;
-          queue_.push({WsEvent::Kind::Close, rc == CURLE_GOT_NOTHING ? "" : curl_easy_strerror(rc),
-                       1006});
+          queue_.push(
+              {WsEvent::Kind::Close, rc == CURLE_GOT_NOTHING ? "" : curl_easy_strerror(rc), 1006});
         }
         return;
       }

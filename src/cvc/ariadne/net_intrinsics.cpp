@@ -10,8 +10,6 @@
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
-#include <map>
-#include <mutex>
 #include <cvc/ariadne/ariadne.h> // register_action_intrinsics
 #include <cvc/ariadne/net_intrinsics.h>
 #include <cvc/ariadne/uri.h> // resolve() — the generic (fetch uri) async resolver
@@ -23,6 +21,8 @@
 #include <cvc/state/state_exec/async_host.h> // register_async_fn — the verbs are async functions
 #include <cvc/state/state_exec/builtins.h>   // percent_encode — the query string
 #include <cvc/state/state_exec/types.h>      // value_t, make_dict/make_list/make_bytes
+#include <map>
+#include <mutex>
 #include <optional>
 #include <random>
 #include <span>
@@ -711,7 +711,7 @@ void register_net_verbs(const std::shared_ptr<se::environment> &env, const NetAc
                             });
 }
 
-// --- WebSocket verbs (docs/ARIADNE.md §10.5) ------------------------------------------------------
+// --- WebSocket verbs (docs/ARIADNE.md §10.5) ---
 //
 // A connection is a handle string ("ws:N") in a process-global table, so a program can keep it in
 // state and use it from later ticks. (ws-open) connects on the background pool; the rest are plain
@@ -963,8 +963,7 @@ void register_ws_verbs(const std::shared_ptr<se::environment> &env, se::async_ho
         const double secs = number_arg(args, 1, 30);
         se::async_work work;
         work.kernel = [conn, secs](se::async_call &call) -> se::value_t {
-          return marshal_ws_event(
-              conn->recv(secs, [&call] { return call.cancel_requested(); }));
+          return marshal_ws_event(conn->recv(secs, [&call] { return call.cancel_requested(); }));
         };
         // Without threads: wait for the socket's next message from its callbacks, not in a loop
         // on the frame's thread (ws_open_work).
@@ -987,18 +986,17 @@ void register_ws_verbs(const std::shared_ptr<se::environment> &env, se::async_ho
                               return marshal_ws_event(ws_lookup("ws-poll", args)->recv(0));
                             });
   // (ws-send H TEXT): send a text message. #t, or an error when the connection is closed.
-  se::builtins::register_fn(env, "ws-send",
-                            [live](std::span<const se::value_t> args) -> se::value_t {
-                              live("ws-send");
-                              std::shared_ptr<cvc::net::WsConnection> conn =
-                                  ws_lookup("ws-send", args);
-                              if (args.size() < 2)
-                                throw std::runtime_error("ws-send: (ws-send H TEXT)");
-                              std::string error;
-                              if (!conn->send_text(field_to_string(args[1]), &error))
-                                throw std::runtime_error("ws-send: " + error);
-                              return se::value_t(true);
-                            });
+  se::builtins::register_fn(
+      env, "ws-send", [live](std::span<const se::value_t> args) -> se::value_t {
+        live("ws-send");
+        std::shared_ptr<cvc::net::WsConnection> conn = ws_lookup("ws-send", args);
+        if (args.size() < 2)
+          throw std::runtime_error("ws-send: (ws-send H TEXT)");
+        std::string error;
+        if (!conn->send_text(field_to_string(args[1]), &error))
+          throw std::runtime_error("ws-send: " + error);
+        return se::value_t(true);
+      });
   // (ws-close H [CODE]): close and forget H. #t if it was still open; a closed or unknown
   // handle is no error, so a program can close in any cleanup path.
   se::builtins::register_fn(env, "ws-close", [](std::span<const se::value_t> args) -> se::value_t {
@@ -1048,8 +1046,8 @@ void register_net_intrinsics(cvc::app &app, NetAccess access) {
   se::async_options io;
   io.io = true;
   const bool have_ws = cvc::net::have_ws_backend();
-  register_action_intrinsics([&host, have_http, have_ws, access, io](std::shared_ptr<se::environment> env,
-                                                            se::intrinsics_context &) {
+  register_action_intrinsics([&host, have_http, have_ws, access,
+                              io](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
     if (!is_live(access))
       return; // the host turned the network off: later programs do not get the verbs
     // Async functions on the app's exec scheduler (docs/STATE_EXEC_EXCEPTIONS.md 3): each verb
