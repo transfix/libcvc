@@ -534,19 +534,25 @@ The pose rows here are the lane's first payload: whole float poses, with a book 
    - In 2 of 3 runs here, with the snapshots on gRPC, everything on the stream queued for seconds:
      pose p99 up to 7.8 s, camera p95 up to 8.5 s, and the clients' clocks re-aligned again and
      again (25 times each in one run).
-   - The snapshot session reran it with the same build and conditions (transfix/libcvc#951):
-     - tree poses at 60 Hz client frames stalled in 3 of 3 runs, with camera p95 up to 26 s;
-     - snapshots stalled in 0 of 3 (camera p95 48–50 ms).
-     So the stall predates both changes. It is not caused by the snapshots, and its run-to-run
-     variance is large.
+   - The snapshot session reran it with the same build and conditions (transfix/libcvc#951), with
+     3 runs per cell:
+
+     | poses on gRPC | 60 Hz client frames | 30 Hz client frames |
+     |---|---|---|
+     | tree poses | 3 of 3 stalled, camera p95 4.1–31 s | 1 of 3 stalled, camera p95 6.7 s |
+     | snapshots | 0 of 3 stalled, camera p95 116–520 ms (p99 up to 1.6 s) | 2 of 3 stalled, camera p95 2.4–3.0 s |
+
+     So the stall is random in both pose modes and at both client rates. It predates both
+     changes, and neither the snapshots nor the 60 Hz client rate cause it.
    - gRPC accepts every write and queues it while TCP waits out a burst, so the media arrives
      seconds late instead of being dropped. The transport's media stall drop (`--media-stall-ms`)
-     never fired in these runs (`stalled 0`), presumably because the library queues the writes
-     out of the transport's sight.
+     never fired in any of the 15 bursty gRPC runs (`stalled 0`), presumably because the library
+     queues the writes out of the transport's sight.
    - With the poses on the lane, gRPC carried the media through the same bursts without a stall in
-     3 of 3 runs. Given the variance, that is a hint, not a proof.
+     3 of 3 runs (camera p95 112–137 ms). Snapshots on gRPC stalled in 4 of 9 runs across both
+     batches and rates, so 3 clean runs is a hint, not a proof.
    - The first spike's one bursty gRPC run (20 Hz room steps, 30 Hz client frames) did not stall
-     either (§7.3). Whether the 60 Hz client rate is the trigger is being tested.
+     either (§7.3). With odds like these, one run says nothing.
 4. **One association was not enough.** With poses and video on one SCTP association, the poses
    waited for the video's congestion window at 3 % loss: p95 97 ms, worse than gRPC's 80 (§7.3).
    Splitting them is what makes the lane work.
