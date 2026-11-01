@@ -49,39 +49,55 @@
 // VTK's pointer positions stand still, so the motion comes from the document's mousemove events
 // (movementX/Y), summed here until update() takes it. The browser ends the lock on Escape or when
 // the tab loses focus; `lost` counts those, so update() releases the capture too. An exit the
-// camera asked for itself is not counted. The camera asks from the frame, just after the click
-// (VTK's events are queued): a browser that grants the lock only inside the click's own handler
-// refuses that, so the request is made again inside the next click on the canvas, and only a
-// second refusal counts as lost.
+// camera asked for itself is not counted.
+// A refusal comes as pointerlockerror, as the request's rejected promise, or both (Chromium
+// rejects a page that can never lock, an embedded one, with WrongDocumentError and no event): it
+// counts once. The camera asks from the frame, just after the click (VTK's events are queued), and
+// a browser that grants the lock only inside the click's own handler refuses that: it is asked
+// again inside the next click on the canvas. A second refusal, or one that can never be granted,
+// counts as lost.
 // clang-format off: JavaScript bodies (only == and != in them: the preprocessor reads them as C++
 // tokens, and a === would come out split)
 EM_JS(void, cvcgl_pointer_lock, (int on, const char *selector), {
   var st = Module.cvcglPointerLock;
   if (!st) {
     st = Module.cvcglPointerLock = {dx: 0, dy: 0, locked: false, exiting: false, lost: 0,
-                                    canvas: null, want: false, retried: false};
+                                    canvas: null, want: false, pending: false, retried: false};
+    st.refused = function(name) {
+      if (!st.pending)
+        return; // the same refusal's other report
+      st.pending = false;
+      if (st.want && !st.retried && name != 'WrongDocumentError' && name != 'NotSupportedError') {
+        st.retried = true; // again in the next click
+        return;
+      }
+      st.retried = false;
+      st.lost++;
+    };
+    st.request = function() {
+      var c = st.canvas;
+      if (!c || !c.requestPointerLock || document.pointerLockElement == c)
+        return;
+      st.pending = true;
+      var p = c.requestPointerLock();
+      if (p && p.catch)
+        p.catch(function(e) { st.refused(e && e.name); });
+    };
     document.addEventListener('pointerlockchange', function() {
       var locked = !!st.canvas && document.pointerLockElement == st.canvas;
       if (st.locked && !locked && !st.exiting)
         st.lost++;
       st.locked = locked;
       st.exiting = false;
-      if (locked)
+      if (locked) {
+        st.pending = false;
         st.retried = false;
-    });
-    document.addEventListener('pointerlockerror', function() {
-      if (st.want && !st.retried) {
-        st.retried = true; // again in the next click
-        return;
       }
-      st.lost++;
     });
+    document.addEventListener('pointerlockerror', function() { st.refused(''); });
     document.addEventListener('mouseup', function(e) {
-      if (st.want && st.retried && !st.locked && st.canvas && e.target == st.canvas) {
-        var p = st.canvas.requestPointerLock();
-        if (p && p.catch)
-          p.catch(function() {}); // a refusal is pointerlockerror's
-      }
+      if (st.want && st.retried && !st.locked && e.target == st.canvas)
+        st.request();
     });
     document.addEventListener('mousemove', function(e) {
       if (st.locked) {
@@ -91,20 +107,14 @@ EM_JS(void, cvcgl_pointer_lock, (int on, const char *selector), {
     });
   }
   st.canvas = document.querySelector(UTF8ToString(selector)) || Module.canvas || null;
-  var canvas = st.canvas;
-  if (!canvas)
-    return;
   if (on) {
     st.want = true;
-    if (document.pointerLockElement != canvas && canvas.requestPointerLock) {
-      var p = canvas.requestPointerLock();
-      if (p && p.catch)
-        p.catch(function() {}); // a refusal is pointerlockerror's
-    }
+    st.request();
   } else {
     st.want = false;
+    st.pending = false;
     st.retried = false;
-    if (document.pointerLockElement == canvas) {
+    if (st.canvas && document.pointerLockElement == st.canvas) {
       st.exiting = true;
       document.exitPointerLock();
     }

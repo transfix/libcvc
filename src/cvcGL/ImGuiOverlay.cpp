@@ -482,7 +482,7 @@ struct ImGuiOverlay::Impl {
   }
 
   // Mouse look's cue, under the UI's windows: a small cross at the centre while the mouse turns
-  // the view, and how to have it do that while it does not.
+  // the view, and below the centre how to have it do that while it does not.
   void drawLookCue(bool looking) {
     ImDrawList *dl = ImGui::GetBackgroundDrawList();
     const ImVec2 size = ImGui::GetIO().DisplaySize;
@@ -501,9 +501,10 @@ struct ImGuiOverlay::Impl {
       }
       return;
     }
+    // Just under the middle, where the click goes (a corner is where the windows are).
     const char *hint = "Click the scene to look around with the mouse. Esc gives the mouse back.";
     const ImVec2 ts = ImGui::CalcTextSize(hint);
-    const ImVec2 p(c.x - 0.5f * ts.x, size.y - ts.y - 20.0f * k);
+    const ImVec2 p(c.x - 0.5f * ts.x, c.y + 40.0f * k);
     const float pad = 8.0f * k;
     dl->AddRectFilled(ImVec2(p.x - pad, p.y - 0.5f * pad),
                       ImVec2(p.x + ts.x + pad, p.y + ts.y + 0.5f * pad), IM_COL32(0, 0, 0, 130),
