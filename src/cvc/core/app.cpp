@@ -1371,6 +1371,14 @@ std::shared_ptr<cvc::state_exec::lock_manager> app::lock_manager_locked(std::str
   return _lockManager;
 }
 
+std::shared_ptr<cvc::state_exec::lock_manager> app::lock_manager_locked() {
+  std::string note;
+  std::shared_ptr<cvc::state_exec::lock_manager> mgr = lock_manager_locked(note);
+  if (!note.empty())
+    log(1, note); // log() takes only _logMutex
+  return mgr;
+}
+
 std::shared_ptr<cvc::state_exec::lock_manager> app::lock_manager() {
   std::shared_ptr<cvc::state_exec::lock_manager> mgr;
   std::string note;
