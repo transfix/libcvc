@@ -1420,9 +1420,16 @@ number of mutexes. Sharding by subtree would split that hold between keys in dif
 and leave every lock's cost where it is. Cutting the per-lock cost toward 11.2's 60 ns cuts the
 hold for every key. So that work, L1's speed, comes first. Then `lock.cross_thread` is measured
 again in a window that meets the quiet rule. If the 3 us, t = 4 gate misses then, on Windows or
-on Linux, the subtree-sharding design opens as 3.3 and 14.2 question 9 say. The Linux record
-comes from `locks-deep.yml`'s `stress` lane on this branch (run 41340188915) and is added here
-when that run finishes.
+on Linux, the subtree-sharding design opens as 3.3 and 14.2 question 9 say.
+
+The Linux record (`locks-deep.yml`'s `stress` lane on this branch, run 41340188915, GCC Release
+on a 4-vCPU hosted runner, one round of 5 reps, unpinned, not gated) points the same way. At
+t = 1 and 2 the noise is low enough to read. Disjoint 3 us sections run at 0.91 of unlocked at
+t = 1, 0.88 at t = 2 and 0.83 at t = 4 (reps 0.82-0.94). At t = 4 a quarter of the locks wait on
+the mutex, about 190 ns each, and the lock itself costs 615-665 ns at t = 1. At t = 8 the runner
+is oversubscribed, so the unlocked loop is the slower one and the ratio means nothing. The hot
+key's handoff p50 is 9.4-9.5, 11.6-11.8 and 17.1-17.2 us at t = 2, 4 and 8. At t = 4 that is
+under 11.2's 20 us, which the stress lane reports without gating.
 
 ## 12. Phases
 
