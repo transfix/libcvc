@@ -343,6 +343,8 @@ public:
   std::size_t home_cache_refs(home_id h, const lock_node *n) const;
   /// Every key-cache reference home h holds.
   std::size_t home_cache_refs(home_id h) const;
+  /// The manager's home entries (tests): one per attached home, none left by a detached one.
+  std::size_t home_entries() const;
 
   // -- checks ---------------------------------------------------------------------------------
   lock_stats stats() const;
