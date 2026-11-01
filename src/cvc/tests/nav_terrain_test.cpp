@@ -289,19 +289,23 @@ TEST(NavTerrain, TheRiskGovernorHoldsAnOverrideCommand) {
 namespace {
 
 // A plant that integrates whatever acceleration it is told, with no top speed of its own and
-// no limits to report (nav's envelope then applies): whatever holds an override_command to
-// nav's vmax on a plant has to be sim_world.
+// only the limits it is given to report (none by default, so nav's envelope applies): whatever
+// holds an override_command to nav's vmax on a plant has to be sim_world. Its agents start at
+// speed v0 (normalized / s).
 class free_plant : public vehicle_plant {
 public:
+  explicit free_plant(plant_limits lim = {}, float v0 = 0.0f) : lim_(lim), v0_(v0) {}
   plant_kind kind() const override { return plant_kind::kinematic; }
   void attach(int n, const plant_state *start, const cvc::world_units::normalized_frame &,
               double dt) override {
     s_.assign(start, start + n);
+    for (plant_state &s : s_)
+      s.speed = v0_;
     accel_.assign(static_cast<std::size_t>(n), 0.0f);
     dt_ = static_cast<float>(dt);
   }
   plant_state state(int i) const override { return s_[static_cast<std::size_t>(i)]; }
-  plant_limits limits(int) const override { return {}; }
+  plant_limits limits(int) const override { return lim_; }
   void command(int i, float, float accel) override { accel_[static_cast<std::size_t>(i)] = accel; }
   void advance() override {
     for (std::size_t i = 0; i < s_.size(); ++i) {
@@ -313,6 +317,8 @@ public:
   }
 
 private:
+  plant_limits lim_;
+  float v0_ = 0.0f;
   std::vector<plant_state> s_;
   std::vector<float> accel_;
   float dt_ = 0.0f;
@@ -338,6 +344,44 @@ TEST(NavTerrain, AnOverrideCommandIsHeldToTheTopSpeed) {
   std::printf("  full throttle on a plant with no top speed: %.2f m/s (nav's vmax 8)\n", top);
   EXPECT_LE(top, 8.0 + 0.01);
   EXPECT_GT(top, 7.5) << "held at the top speed, not below it";
+}
+
+// A parked agent on a plant brakes at what the plant says its brakes achieve (plant_limits::
+// a_brake), not at the drive's a_max: arriving at 8 m/s, 2 m short of its goal, with 6 m/s^2 of
+// brakes it stops within v^2 / 2 a_brake (about 5 m) and holds inside its 4 m reach tolerance. A
+// plant that reports no brakes is stopped at a_max (2 m/s^2), about 16 m on, well past it.
+TEST(NavTerrain, AParkedAgentStopsOnItsBrakes) {
+  std::vector<std::uint8_t> occ(static_cast<std::size_t>(R) * C, 0);
+  const sim_world::config c = config(8.0);
+  const double dt = c.veh.dt;
+  for (const double a_brake : {6.0, 0.0}) {
+    sim_world w = make(c, occ, 0.0, 0.0, 2.0, 0.0);
+    plant_limits lim;
+    lim.a_brake = static_cast<float>(a_brake * kS);
+    free_plant plant(lim, static_cast<float>(8.0 * kS));
+    w.set_plant(&plant);
+    float p[2], h, s;
+    int m;
+    std::uint8_t rc = 0;
+    int t = 0;
+    for (; t < 10 && !rc; ++t) {
+      w.step();
+      w.snapshot(p, &h, &s, &m, &rc);
+    }
+    ASSERT_TRUE(rc) << "it arrives within the tolerance";
+    const double px = p[0], py = p[1], v = s; // world metres, m/s
+    for (int k = 0; k < 200; ++k)
+      w.step();
+    w.snapshot(p, &h, &s, &m, &rc);
+    const double rolled = std::hypot(p[0] - px, p[1] - py);
+    const double a = a_brake > 0.0 ? a_brake : 2.0;
+    std::printf("  brakes %.0f m/s^2: parked at %.2f m/s, rolled %.2f m (v^2 / 2a %.2f m), %s\n",
+                a_brake, v, rolled, v * v / (2.0 * a), rc ? "held at its goal" : "past its goal");
+    EXPECT_NEAR(s, 0.0, 1e-4) << "stopped";
+    EXPECT_LE(rolled, v * v / (2.0 * a) + v * dt);
+    EXPECT_GE(rolled, v * v / (2.0 * a) - v * dt) << "no harder than the plant's brakes";
+    EXPECT_EQ(rc != 0, a_brake > 0.0);
+  }
 }
 
 // H1, the soft force: with the grade cost's weight, the agent driving past a hill leans away

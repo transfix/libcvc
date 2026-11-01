@@ -1,8 +1,11 @@
 schema_version: 1
 recipe:
   name: arigl-web
-  upstream_version: "3.7.5"
-  cvc_revision: 1
+  upstream_version: "3.7.8"
+  # 2: the same files with no runtime deps (depends.runtime below), so a site's install stops
+  # pulling the static build closure. publish-cvcgl-wasm packs at this revision and skips one the
+  # catalog already has, so the bump is what lets it republish 3.7.8.
+  cvc_revision: 2
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
@@ -27,7 +30,11 @@ recipe:
 # Another recipe can depend on it and install the same files beside its own .ari files.
 
 source:
-  # Co-located with the libcvc source tree (`../../..` is the repo root).
+  # Co-located with the libcvc source tree.
+  # `path` is counted from cvcpkg/recipes/_vendored/, where `cvcpkg build`
+  # looks first, so `../../..` is the libcvc repo root (CVC_SOURCE_DIR).
+  # `cvcpkg recipe push` does not bundle it: counted from cvcpkg/, its
+  # fallback base, the same path points outside the repo.
   type: vendored
   path: ../../..
 
@@ -81,6 +88,11 @@ depends:
     - name: bzip2
     - name: libxml2
     - name: freetype
+  # Nothing at run time: the bundle is finished page files (share/arigl-web/), the libraries above
+  # all linked into arigl.wasm. Without this list cvcpkg records the build list as the bundle's
+  # required deps, and `cvcpkg install arigl-web` lays the whole static closure (vtk, boost,
+  # imagemagick, ...: ~600 MB) down beside the ~100 MB of page.
+  runtime: []
   host_tools:
     - cmake
     - ninja

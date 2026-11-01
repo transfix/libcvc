@@ -160,6 +160,7 @@ public:
   void text_line_colored(const char *text, const float rgb[3]) override;
   void text_value_colored(const char *label, const std::string &value, const float rgb[3]) override;
   void separator() override;
+  bool unicode_glyphs() const override; // not on the Linux console, a dumb or a VT terminal
   bool button(const char *label) override;
   bool menu_item_action(const char *label) override;
 
@@ -183,6 +184,7 @@ public:
                         bool masked) override;
   void focus_next_widget() override;
   bool draw_image(const char *name, float width) override;
+  bool draw_image_fit(const char *name, float box_w, float box_h) override;
   ColorEdit color(const char *label, const float rgb[3]) override;
 
   // Custom widgets (§16.1b), the terminal counterpart of cvc::gl::ImGuiBackend::register_widget: a
@@ -190,7 +192,9 @@ public:
   // it draws with this backend's own primitives (text_line, set_image + draw_image, ...). It gets
   // the bound value and the Widget and returns the edit; the core owns the cvc::state write. An
   // unregistered type is not handled, so the core draws a placeholder. TvisionBackend inherits it.
-  // `stream_view` registers this way (register_stream_view_widget, stream/stream_view.h).
+  // Registering also marks the type known (register_known_widget_type), so a document's
+  // requires: [type] and (has? "type") find it. `stream_view` registers this way
+  // (register_stream_view_widget, stream/stream_view.h).
   using CustomDrawFn = std::function<CustomEdit(const std::string &current, const Widget &w)>;
   void register_widget(std::string custom_type, CustomDrawFn draw);
   CustomEdit custom_widget(const char *type, const std::string &current, const Widget &w) override;
@@ -267,8 +271,12 @@ public:
   struct HostedWindow {
     std::string id, title;
     bool closable = false;
-    int x = 0, y = 0; // placement from the authored pos / persisted geometry (cells)
-    int w = 0, h = 0; // outer size when authored / persisted / host-set, else 0
+    int x = 0, y = 0; // placement from the authored pos / persisted geometry / the host (cells)
+    // Outer size per axis: the user's (user_sized), else the authored size, else 0 (fit the
+    // content). A size the host gave the window to fit its content is never reported back here,
+    // so a window that closes and opens again fits what it shows then.
+    int w = 0, h = 0;
+    bool user_sized = false;          // w x h is a size the user gave the window (or persisted)
     int content_w = 0, content_h = 0; // the body's natural size (cells)
   };
   struct HostedMenuItem {
@@ -296,7 +304,11 @@ public:
   void activate_menu_item(Runtime &rt, const std::string &item_id);
   void close_window(Runtime &rt, const std::string &id);
   // The host's current bounds for window `id` (cells), reported back as its geometry (§11.4).
-  void set_window_geometry(const std::string &id, int x, int y, int w, int h);
+  // The place is always the window's from now on. The size is only when `user_sized`: the user
+  // resized the window (its frame's corner, a keyboard resize, zoom), so it persists and holds
+  // when the window opens again. Otherwise w x h is the size the host gave it, which the next
+  // walk recomputes from the document and the content.
+  void set_window_geometry(const std::string &id, int x, int y, int w, int h, bool user_sized);
   // The host's screen size in cells, which percent sizes resolve against.
   void set_screen_size(int width, int height);
 
@@ -324,6 +336,12 @@ public:
     // coordinates are screen cells (on the tvision desktop, the desktop's). cvcGL's TerminalScene
     // turns background drags and the wheel into camera moves with it.
     std::function<bool(const TermEvent &)> background_input;
+
+    // A line to show along the bottom of the screen, over the document (wrapped when it is wider
+    // than the screen), asked every frame; "" shows none. ari shows its latest warning there for a
+    // few seconds (LiveWarnings::notice, host_warnings.h). The tvision desktop shows it in its
+    // status line.
+    std::function<std::string()> notice;
   };
 
   // Why run() returned.

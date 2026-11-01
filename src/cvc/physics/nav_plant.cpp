@@ -14,12 +14,14 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/core/exception.h>
 #include <cvc/physics/nav_plant.h>
 #include <cvc/state/state.h>
 #include <limits>
 #include <map>
+#include <type_traits>
 #include <utility>
 
 namespace cvc {
@@ -246,6 +248,7 @@ void nav_plant::attach(int n, const cvc::nav::plant_state *start,
     const physics::vehicle_state vs = _w.vehicle_state(a.vehicle);
     a.chassis = vs.chassis;
     a.drawn = drawn(a, vs.energy);
+    a.ledger = vs.energy;
     measure(a, vs, false);
     _agents.push_back(a);
   }
@@ -502,6 +505,8 @@ void nav_plant::advance() {
     const double now = drawn(a, vs.energy);
     a.energy_step = now - a.drawn;
     a.drawn = now;
+    a.line = energy_lines(a.ledger, vs.energy);
+    a.ledger = vs.energy;
     measure(a, vs, true);
   }
   _advance_us +=
@@ -660,6 +665,10 @@ double nav_plant::energy_step(int i) const {
   return _agents.at(static_cast<std::size_t>(i)).energy_step;
 }
 
+const vehicle_energy &nav_plant::ledger_step(int i) const {
+  return _agents.at(static_cast<std::size_t>(i)).line;
+}
+
 cvc::nav::plant_sample nav_plant::sample(int i) const {
   return _agents.at(static_cast<std::size_t>(i)).sample;
 }
@@ -780,6 +789,108 @@ double nav_plant::advance_us() const {
 
 double nav_plant::advance_us_per_vehicle() const {
   return _agents.empty() ? 0.0 : advance_us() / static_cast<double>(_agents.size());
+}
+
+namespace {
+
+// save()'s format: the magic, then the world's state and the plant's, plain values in this
+// build's layout (as world::save's vehicles are).
+constexpr char kPlantMagic[8] = {'C', 'V', 'C', 'N', 'P', 'L', 'T', '1'};
+
+template <class T> void put_pod(std::vector<std::uint8_t> &out, const T &v) {
+  static_assert(std::is_trivially_copyable<T>::value, "save() copies plain values");
+  const auto *b = reinterpret_cast<const std::uint8_t *>(&v);
+  out.insert(out.end(), b, b + sizeof(T));
+}
+
+template <class T> T get_pod(const std::vector<std::uint8_t> &in, std::size_t &pos) {
+  static_assert(std::is_trivially_copyable<T>::value, "restore() copies plain values");
+  if (in.size() - pos < sizeof(T))
+    throw cvc::physics_error("nav_plant::restore: the state is truncated");
+  T v;
+  std::memcpy(&v, in.data() + pos, sizeof(T));
+  pos += sizeof(T);
+  return v;
+}
+
+} // namespace
+
+std::vector<std::uint8_t> nav_plant::save() const {
+  std::vector<std::uint8_t> out(kPlantMagic, kPlantMagic + sizeof(kPlantMagic));
+  const std::vector<std::uint8_t> world_state = _w.save();
+  put_pod(out, static_cast<std::uint64_t>(world_state.size()));
+  out.insert(out.end(), world_state.begin(), world_state.end());
+  put_pod(out, static_cast<std::uint64_t>(_agents.size()));
+  for (const agent &a : _agents) {
+    put_pod(out, a.vehicle.value);
+    put_pod(out, a.drawn);
+    put_pod(out, a.energy_step);
+    put_pod(out, a.contacts_step);
+    put_pod(out, a.touched);
+    put_pod(out, a.touch_depth);
+    put_pod(out, a.steer_command);
+    put_pod(out, a.accel_command);
+    put_pod(out, a.drift);
+    put_pod(out, a.sample);
+    put_pod(out, a.psi);
+    put_pod(out, a.vwx);
+    put_pod(out, a.vwy);
+    put_pod(out, a.ledger);
+    put_pod(out, a.line);
+  }
+  put_pod(out, _ticks);
+  put_pod(out, static_cast<std::uint64_t>(_bins.size()));
+  for (const bin_sums &b : _bins)
+    put_pod(out, b);
+  return out;
+}
+
+void nav_plant::restore(const std::vector<std::uint8_t> &state) {
+  if (state.size() < sizeof(kPlantMagic) ||
+      std::memcmp(state.data(), kPlantMagic, sizeof(kPlantMagic)) != 0)
+    throw cvc::physics_error("nav_plant::restore: not a nav_plant state");
+  std::size_t pos = sizeof(kPlantMagic);
+  const auto world_bytes = get_pod<std::uint64_t>(state, pos);
+  if (world_bytes > state.size() - pos)
+    throw cvc::physics_error("nav_plant::restore: the state is truncated");
+  const std::vector<std::uint8_t> world_state(state.begin() + static_cast<std::ptrdiff_t>(pos),
+                                              state.begin() +
+                                                  static_cast<std::ptrdiff_t>(pos + world_bytes));
+  pos += static_cast<std::size_t>(world_bytes);
+  // Read the whole plant first, so a state that does not fit changes nothing.
+  if (get_pod<std::uint64_t>(state, pos) != _agents.size())
+    throw cvc::physics_error("nav_plant::restore: the state has a different number of agents");
+  std::vector<agent> agents = _agents;
+  for (agent &a : agents) {
+    if (get_pod<std::uint32_t>(state, pos) != a.vehicle.value)
+      throw cvc::physics_error("nav_plant::restore: the state's agents drive other vehicles");
+    a.drawn = get_pod<double>(state, pos);
+    a.energy_step = get_pod<double>(state, pos);
+    a.contacts_step = get_pod<int>(state, pos);
+    a.touched = get_pod<int>(state, pos);
+    a.touch_depth = get_pod<double>(state, pos);
+    a.steer_command = get_pod<double>(state, pos);
+    a.accel_command = get_pod<double>(state, pos);
+    a.drift = get_pod<drift_si>(state, pos);
+    a.sample = get_pod<cvc::nav::plant_sample>(state, pos);
+    a.psi = get_pod<double>(state, pos);
+    a.vwx = get_pod<double>(state, pos);
+    a.vwy = get_pod<double>(state, pos);
+    a.ledger = get_pod<vehicle_energy>(state, pos);
+    a.line = get_pod<vehicle_energy>(state, pos);
+  }
+  const auto ticks = get_pod<std::uint64_t>(state, pos);
+  if (get_pod<std::uint64_t>(state, pos) != _bins.size())
+    throw cvc::physics_error("nav_plant::restore: the state has other drift bins");
+  std::vector<bin_sums> bins(_bins.size());
+  for (bin_sums &b : bins)
+    b = get_pod<bin_sums>(state, pos);
+  if (pos != state.size())
+    throw cvc::physics_error("nav_plant::restore: the state has trailing bytes");
+  _w.restore(world_state);
+  _agents = std::move(agents);
+  _ticks = ticks;
+  _bins = std::move(bins);
 }
 
 void nav_plant::publish(cvc::app &ctx, const std::string &prefix,

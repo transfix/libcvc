@@ -174,8 +174,9 @@ private:
   void free_bucket(std::uint32_t b);
   void push_timer(clock::time_point at, int pid);
   bool timer_live(const timer_entry &t) const;
-  /// The run-queue level a process is counted in (phase L2 switches to effective_priority()).
-  int level_key(const process &p) const { return by_priority_ ? p.priority : 0; }
+  /// The run-queue level a process is counted in: its effective priority under a priority policy
+  /// (design 8.7; its base while it inherits nothing), the one level otherwise.
+  int level_key(const process &p) const { return by_priority_ ? p.effective_priority() : 0; }
 
   bool by_priority_;
   map_type map_;

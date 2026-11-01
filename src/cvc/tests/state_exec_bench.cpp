@@ -82,6 +82,7 @@
 #include <cvc/state/state_exec/lock_manager.h>
 #include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/process.h>
+#include <cvc/state/state_exec/process_table.h>
 #include <cvc/state/state_exec/scheduler.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <cvc/state/state_exec/types.h>
@@ -2688,10 +2689,12 @@ se::scheduling_policy policy_of(const std::string &name) {
 struct world_opts {
   se::scheduling_policy policy = se::scheduling_policy::round_robin;
   std::string locks = "none";
+  bool inherit = true; // a private manager's priority inheritance (lock.inherit's off points)
   static world_opts of(const point_ctx &pc) {
     world_opts o;
     o.policy = policy_of(pc.s("policy", "rr"));
     o.locks = pc.s("locks", "none");
+    o.inherit = pc.s("inherit", "on") != "off";
     return o;
   }
 };
@@ -2713,9 +2716,11 @@ struct world {
   world(const std::string &exec, cvc::app *a, const world_opts &o = {}) : app(a) {
     if (app)
       tree = &cvc::state::instance(*app);
-    if (o.locks == "private")
-      lock_mgr = std::make_shared<se::lock_manager>();
-    else if (o.locks != "none")
+    if (o.locks == "private") {
+      se::lock_manager::options lo;
+      lo.inheritance = o.inherit;
+      lock_mgr = std::make_shared<se::lock_manager>(lo);
+    } else if (o.locks != "none")
       throw std::invalid_argument("locks=" + o.locks + ": this build has none and private");
     if (exec == "sync") {
       sync = std::make_unique<se::scheduler>(o.policy);
@@ -6275,6 +6280,229 @@ std::vector<scenario> make_scenarios() {
             .raw("detection_step_ns", percentiles(detect_ns).str())
             .raw("queue_step_ns", percentiles(queue_ns).str())
             .d("ns_per_cycle", double(m.wall()) / double(cycles));
+      });
+    };
+    all.push_back(std::move(sc));
+  }
+  {
+    scenario sc;
+    sc.name = "lock.inherit";
+    sc.what = "priority inversion under priority_rr: a low holder (10) parked in its section, a "
+              "high waiter (-10) queued behind it, m medium spinners (0); the holder released "
+              "into a section of `section` loop iterations, `samples` times a rep. wait_ns runs "
+              "from the release to the waiter's grant, section_ns is the holder's section, and "
+              "wait_p99_over_section their ratio (gate with inherit=on: at most 2). inherit=off "
+              "is the manager without inheritance (a test-only switch): there the spinners, "
+              "which stop 50 ms after the release, starve the holder, and starved counts the "
+              "waits that lasted that window";
+    sc.executors = {"async"};
+    sc.sizes = {{"m", {"0", "1", "8"}}, {"inherit", {"on", "off"}}, {"policy", {"priority_rr"}},
+                {"section", {"2000"}},  {"samples", {"20"}},        {"driver", {"spin"}}};
+    sc.smoke = {{"m", {"0", "2"}},    {"inherit", {"on", "off"}}, {"policy", {"priority_rr"}},
+                {"section", {"200"}}, {"samples", {"3"}},         {"driver", {"spin"}}};
+    sc.run = [](point_ctx &pc) {
+      const int64_t spinners_n = std::max<int64_t>(0, pc.i("m"));
+      const int64_t section = std::max<int64_t>(1, pc.i("section"));
+      const int64_t samples = std::max<int64_t>(1, pc.i("samples"));
+      constexpr int64_t kWindowNs = 50'000'000; // the spinners stop this long after the release
+      world_opts wo = world_opts::of(pc);
+      wo.locks = "private";
+      const se::value_t holder = se::parse(
+          "(with-lock \"bench.pi.k\" (msg-recv \"bench.pi.go\") (bench-sec 0) (set j 0) (while (< "
+          "j " +
+          istr(section) + ") (set j (+ j 1))) (bench-sec 1))");
+      const se::value_t waiter = se::parse("(with-lock \"bench.pi.k\" (bench-got))");
+      const se::value_t spinner =
+          se::parse("(begin (set i 0) (while (bench-spinning) (set i (+ i 1))) i)");
+      auto app = make_app();
+      pc.reps([&](meter &m, rep_out &o) {
+        // What the natives record, declared before the world, whose natives point at them.
+        int64_t got_ns = 0, sec0 = 0, sec1 = 0, spin_until = INT64_MAX;
+        std::vector<int64_t> waits, sections;
+        world w(pc.executor, app.get(), wo);
+        se::builtins::register_fn(w.env, "bench-got", [&](std::span<const se::value_t>) {
+          got_ns = now_ns();
+          return se::value_t(int64_t(0));
+        });
+        se::builtins::register_fn(w.env, "bench-sec", [&](std::span<const se::value_t> a) {
+          (int_arg(a, 0, 0) ? sec1 : sec0) = now_ns();
+          return se::value_t(int64_t(0));
+        });
+        se::builtins::register_fn(w.env, "bench-spinning", [&](std::span<const se::value_t>) {
+          return se::value_t(now_ns() < spin_until);
+        });
+        const auto submit = [&](const se::value_t &ast, int priority) {
+          se::execute_options opts;
+          opts.env = w.process_env("extend");
+          opts.priority = priority;
+          return w.submit(ast, opts);
+        };
+        const auto parked = [&](int pid, bool on_lock) {
+          const auto i = w.info(pid);
+          if (!i || i->status != se::process_status::waiting)
+            return false;
+          const bool lock_wait = i->waiting_on && i->waiting_on->rfind("lock ", 0) == 0;
+          return on_lock ? lock_wait : i->locks_held > 0 && !lock_wait;
+        };
+        const auto finished = [&](int pid) {
+          const auto i = w.info(pid);
+          return !i || se::is_finished(i->status);
+        };
+        drive_cfg d = driver_of(pc);
+        d.slice_steps = 200; // done() is read between slices: keep the spinners' overshoot small
+        const se::lock_stats s0 = w.lock_stats();
+        std::string why;
+        m.begin();
+        for (int64_t k = 0; k < samples && why.empty(); ++k) {
+          spin_until = INT64_MAX;
+          const int l = submit(holder, 10);
+          why = drive(w, d, [&] { return parked(l, false); }, [] {});
+          if (!why.empty())
+            break;
+          std::vector<int> spinning;
+          for (int64_t j = 0; j < spinners_n; ++j)
+            spinning.push_back(submit(spinner, 0));
+          const int h = submit(waiter, -10);
+          why = drive(w, d, [&] { return parked(h, true); }, [] {});
+          if (!why.empty())
+            break;
+          const int64_t release = now_ns();
+          spin_until = release + kWindowNs;
+          w.base().deliver_to_receivers("bench.pi.go", se::value_t(int64_t(1)));
+          why = drive(w, d, [&] { return finished(h); }, [] {});
+          if (!why.empty())
+            break;
+          waits.push_back(got_ns - release);
+          sections.push_back(sec1 - sec0);
+          spin_until = 0;
+          why = drive(
+              w, d,
+              [&] {
+                if (!finished(l))
+                  return false;
+                for (int pid : spinning)
+                  if (!finished(pid))
+                    return false;
+                return true;
+              },
+              [] {});
+        }
+        m.end();
+        if (!why.empty()) {
+          o.fail(why);
+          for (const se::process_info &pi : w.base().list_processes())
+            w.kill(pi.pid);
+          return;
+        }
+        int64_t starved = 0;
+        for (const int64_t v : waits)
+          starved += v >= kWindowNs;
+        std::vector<int64_t> ws = waits, ss = sections;
+        std::sort(ws.begin(), ws.end());
+        std::sort(ss.begin(), ss.end());
+        const se::lock_stats s = w.lock_stats();
+        o.iterations = samples;
+        o.programs = 2 + spinners_n;
+        o.extra.raw("wait_ns", percentiles(waits).str())
+            .raw("section_ns", percentiles(sections).str())
+            .d("wait_p99_over_section",
+               double(pct_at(ws, 0.99)) / double(std::max<int64_t>(1, pct_at(ss, 0.50))))
+            .i("starved", starved)
+            .i("relevels", int64_t(s.relevels - s0.relevels));
+      });
+    };
+    all.push_back(std::move(sc));
+  }
+  // N. prio.*: priority changes (docs/STATE_EXEC_LOCKS.md 7 and 11.2).
+  {
+    scenario sc;
+    sc.name = "prio.set";
+    sc.what = "one process's priority flipped `changes` times between its level and the next, "
+              "n ready processes queued on `levels` levels, through the scheduler's checked call "
+              "(set_priority_checked, what set-priority makes once it has read its arguments): "
+              "ns_per_change, the permission check and the re-level in the run queue; and "
+              "ns_per_pick, the pick a step makes over those levels, timed on a process table of "
+              "the same shape (pick_first under priority, the round-robin pick under rr)";
+    sc.executors = both_sched;
+    sc.sizes = {{"n", {"1", "1000"}},
+                {"policy", {"rr", "priority"}},
+                {"levels", {"1", "40"}},
+                {"changes", {"100000"}}};
+    sc.smoke = {{"n", {"1", "50"}},
+                {"policy", {"rr", "priority"}},
+                {"levels", {"1", "40"}},
+                {"changes", {"2000"}}};
+    sc.accept = [](const std::string &exec, const point_ctx &pc) {
+      if (pc.i("levels") <= pc.i("n"))
+        return true;
+      std::printf("  %-28s %-9s %-34s skipped: %s processes fill fewer than %s levels\n",
+                  pc.sc.name.c_str(), exec.c_str(), params_text(pc.params).c_str(),
+                  pc.s("n").c_str(), pc.s("levels").c_str());
+      return false;
+    };
+    sc.run = [](point_ctx &pc) {
+      const int64_t n = std::max<int64_t>(1, pc.i("n"));
+      const int64_t levels = std::clamp<int64_t>(pc.i("levels"), 1, 40);
+      // Even, so the flipped process ends at its own level.
+      const int64_t changes = std::max<int64_t>(2, pc.i("changes")) & ~int64_t(1);
+      // Process j's level: 0 for all, or -20 + j mod levels. The flipped process is the first,
+      // at its floor (its submit priority): lowered by one and raised back, a pair at a time.
+      const auto level = [levels](int64_t j) { return levels == 1 ? 0 : int(-20 + j % levels); };
+      const world_opts wo = world_opts::of(pc);
+      const se::value_t parked = se::parse("(msg-recv \"bench.prio.never\")");
+      auto app = make_app();
+      pc.reps([&](meter &m, rep_out &o) {
+        world w(pc.executor, app.get(), wo);
+        std::vector<int> pids;
+        for (int64_t j = 0; j < n; ++j) {
+          se::execute_options opts;
+          opts.env = w.process_env("extend");
+          opts.priority = level(j);
+          pids.push_back(w.submit(parked, opts));
+        }
+        se::scheduler_base &s = w.base();
+        const int me = pids[0], at = level(0);
+        int64_t refused = 0;
+        m.begin();
+        for (int64_t k = 0; k < changes; k += 2) {
+          refused += s.set_priority_checked(me, me, at + 1) != se::priority_change::applied;
+          refused += s.set_priority_checked(me, me, at) != se::priority_change::applied;
+        }
+        m.end();
+        if (refused)
+          o.fail(istr(refused) + " of " + istr(changes) + " changes were not applied");
+        const std::optional<se::priority_info> pi = s.get_priority(me);
+        if (!pi || pi->base != at)
+          o.fail("the flipped process did not end at its own level");
+        if (!s.check_tables())
+          o.fail("the process table's check failed after the changes");
+        for (const int pid : pids)
+          w.kill(pid);
+        // The pick, on a table of the same shape (the schedulers' own is private), `changes`
+        // times. The pids picked are summed so the loop is not optimized away.
+        se::detail::process_table table(wo.policy != se::scheduling_policy::round_robin);
+        for (int64_t j = 0; j < n; ++j) {
+          se::process_ptr p = se::make_process();
+          p->pid = int(j + 1);
+          p->priority = level(j);
+          p->status = se::process_status::ready;
+          table.insert(std::move(p));
+        }
+        const bool first = wo.policy == se::scheduling_policy::priority;
+        int rr = 0;
+        int64_t picked = 0;
+        const int64_t t0 = now_ns();
+        for (int64_t k = 0; k < changes; ++k) {
+          const se::process_ptr *pp = first ? table.pick_first() : table.pick_round_robin(rr);
+          picked += pp ? (*pp)->pid : 0;
+        }
+        const int64_t pick_ns = now_ns() - t0;
+        if (picked < changes)
+          o.fail("a pick found no process");
+        o.iterations = changes;
+        o.programs = n;
+        o.extra.d("ns_per_change", double(m.wall()) / double(changes))
+            .d("ns_per_pick", double(pick_ns) / double(changes));
       });
     };
     all.push_back(std::move(sc));

@@ -13,6 +13,10 @@ meta:
   name: Ariadne terminal images
   min_libcvc: 3.6.0
 
+requires:
+  - ui.windows                     # the pictures sit in free, overlapping windows
+  - {name: raster.bitmap, optional: true}   # real pixels on a GL window, kitty or Sixel; half-blocks otherwise
+
 menubar:
   - menu: File
     items:

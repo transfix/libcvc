@@ -21,10 +21,16 @@ struct TokenRule {
 
 const std::vector<TokenRule> &rules() {
   static const std::vector<TokenRule> kRules = {
-      {{"gl.scene", "scene: blocks are realized (a GL scene adapter is present)"},
+      // GLSL runs in two places, and a host can have one without the other: arigl --terminal
+      // renders the scene offscreen through GL (its shaders run) but draws the UI as text cells.
+      {{"gl.scene", "scene: blocks are realized (a scene adapter is present)"},
        [](const HostFacts &f) { return f.scene; }},
-      {{"gl.shaders", "GLSL shaders run (scene shaders:, shader_canvas)"},
+      {{"gl.scene.shaders", "the scene runs the document's GLSL (a node's shader: block)"},
+       [](const HostFacts &f) { return f.scene_shaders; }},
+      {{"gl.ui.shaders", "the UI itself draws GLSL (shader_canvas): a GL window, not a terminal"},
        [](const HostFacts &f) { return f.caps.glsl; }},
+      {{"gl.shaders", "both gl.scene.shaders and gl.ui.shaders (name the one you need)"},
+       [](const HostFacts &f) { return f.scene_shaders && f.caps.glsl; }},
       {{"gl.view", "a live render view can be embedded in a widget"},
        [](const HostFacts &f) { return f.caps.view_embed; }},
       {{"ui.windows", "real movable windows (free layout)"},
@@ -52,6 +58,16 @@ const std::vector<TokenRule> &rules() {
       {{"image.url", "image: shows a picture by URI (§5.11): http(s) where the network is on, "
                      "file://, cvc://, state://"},
        [](const HostFacts &) { return true; }},
+      {{"oidc", "the host signs in with OAuth 2.0 / OpenID Connect providers (oidc-sign-in)"},
+       [](const HostFacts &f) { return f.oidc; }},
+      {{"oidc.loopback", "sign-in through the system browser and a loopback redirect (RFC 8252)"},
+       [](const HostFacts &f) { return f.oidc_loopback; }},
+      {{"oidc.device", "sign-in with a code entered on another device (RFC 8628)"},
+       [](const HostFacts &f) { return f.oidc_device; }},
+      {{"oidc.redirect", "sign-in by sending the browser page to the provider and back"},
+       [](const HostFacts &f) { return f.oidc_redirect; }},
+      {{"browser", "open-url opens the user's web browser here (not over SSH or --no-browser)"},
+       [](const HostFacts &f) { return f.browser; }},
   };
   return kRules;
 }

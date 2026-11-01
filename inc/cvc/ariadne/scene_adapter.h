@@ -35,6 +35,13 @@ public:
     return true;
   }
 
+  // Whether this adapter's renderer compiles the GLSL a document hands its scene (a node's shader:
+  // block: presets and vertex / fragment splices). That is the gl.scene.shaders capability, and it
+  // is the adapter's, not the backend's: cvcGL's terminal adapter renders offscreen through GL, so
+  // the scene runs its shaders while the terminal backend draws none (Capabilities::glsl). The
+  // default is false, for an adapter that realizes the scene some other way.
+  virtual bool runs_shaders() const { return false; }
+
   // Realize the parsed `scene` under state `prefix` (and frame the view's camera to it,
   // when the adapter has one). Non-fatal messages are appended to `warns` if non-null.
   // Called from AppRuntime::load() when the document carries a scene.
