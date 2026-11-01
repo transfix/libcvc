@@ -242,6 +242,7 @@ public:
     bool one_home = true; // before phase L3 a manager accepts one home (protocol 4.4)
     bool shared = false;  // shared mode: every operation under M.mu, from any thread (L3.1)
     std::uint32_t mutations = 0;
+    std::uint64_t first_home = 0; // test-only: the first home id attach_home hands out
   };
 
   explicit lock_table(options opts);
@@ -259,6 +260,8 @@ public:
   /// home's last-progress cell (steady_clock ticks; null reads as never). With options::one_home
   /// a second home is refused, and with `attach.cross_thread` a manager not in shared mode refuses
   /// the home (std::logic_error naming state_exec.locks.threading; protocol 4.4, design 8.3).
+  /// Ids are never reused: once all 2^32 are handed out, every attach is refused
+  /// (std::logic_error).
   home_id attach_home(bool prio, std::shared_ptr<lock_port> port,
                       std::shared_ptr<std::atomic<std::int64_t>> progress, lock_notes &out,
                       lock_attach attach = {});
@@ -299,6 +302,11 @@ public:
   /// no edge out, other than `p`, each with its home's progress cell loaded under M.mu (0 for a
   /// home with none). Sorted by pid; empty when `p` waits for nothing.
   std::vector<std::pair<lock_pid, std::int64_t>> blocking_sinks(lock_pid p) const;
+  /// The same from every process of `from` at once (pycvc's idle pass over all its lock waits):
+  /// one search under one M.mu hold, each process's successors computed once; every sink
+  /// reachable from one of them that is not itself one of them. Sorted by pid.
+  std::vector<std::pair<lock_pid, std::int64_t>>
+  blocking_sinks(std::span<const lock_pid> from) const;
 
   // -- 4.15 -----------------------------------------------------------------------------------
   /// Take one key-cache reference of home `h` on each key (filling each key_ref's node).

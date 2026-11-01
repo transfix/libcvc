@@ -23,6 +23,8 @@
 #include <functional>
 #include <gtest/gtest.h>
 #include <initializer_list>
+#include <limits>
+#include <map>
 #include <memory>
 #include <random>
 #include <string>
@@ -256,7 +258,7 @@ TEST(LockTable, AttachHomeOneHomeBeforeL3) {
   t3.check();
 }
 
-// -- 3.3, 4.3, 4.12, 4.13: inheritance (phase L2) ------------------------------------------------
+// -- 3.3, 4.3, 4.12, 4.13: inheritance (phase L2) -------------------------------------------------
 
 TEST(LockTable, InheritanceBoostsTheHolderAndWithdrawsIt) {
   // PI-1's shape: a better waiter boosts the holder; its timeout withdraws the boost
@@ -2556,6 +2558,208 @@ TEST(LockHomes, DrainFinishesAfterAThrow) {
     EXPECT_EQ(mgr->stats().holds, 0u);
     a.reset();
     b.reset();
+    EXPECT_TRUE(mgr->table().empty());
+  }
+}
+
+// -- second round: blocking_sinks from several waiters --------------------------------------------
+
+namespace {
+
+/// What blocking_sinks(from) must be: the union of the single-pid results, less the sources.
+sinks_t union_of_singles(const lock_table &t, const std::vector<detail::lock_pid> &from) {
+  std::map<std::uint64_t, std::pair<detail::lock_pid, std::int64_t>> u;
+  for (detail::lock_pid p : from)
+    for (const auto &s : t.blocking_sinks(p))
+      u.emplace(s.first.packed(), s);
+  for (detail::lock_pid p : from)
+    u.erase(p.packed());
+  sinks_t out;
+  for (const auto &kv : u)
+    out.push_back(kv.second);
+  return out;
+}
+
+/// blocking_sinks(from) on `t`: equal to union_of_singles, and its pids.
+std::vector<int> multi_sinks(const lock_table &t, const std::vector<detail::lock_pid> &from) {
+  const sinks_t multi =
+      t.blocking_sinks(std::span<const detail::lock_pid>(from.data(), from.size()));
+  EXPECT_EQ(multi, union_of_singles(t, from));
+  return sink_pids(multi);
+}
+
+} // namespace
+
+TEST(LockTable, BlockingSinksFromSeveralWaiters) {
+  {
+    // A chain: 1 waits for 2, which waits for 3.
+    world w;
+    w.acquire(3, X, {"c"});
+    w.acquire(2, X, {"b"});
+    w.wait(2, X, {"c"});
+    w.wait(1, X, {"b"});
+    EXPECT_EQ(multi_sinks(w.t, {w.pid(1), w.pid(2)}), (std::vector<int>{3}));
+    EXPECT_EQ(multi_sinks(w.t, {w.pid(1)}), (std::vector<int>{3}));
+    EXPECT_EQ(multi_sinks(w.t, {w.pid(2), w.pid(1), w.pid(2)}), (std::vector<int>{3}));
+    EXPECT_TRUE(multi_sinks(w.t, {}).empty());
+  }
+  {
+    // Two shared holders, two writers waiting.
+    world w;
+    w.acquire(1, S, {"k"});
+    w.acquire(2, S, {"k.x"});
+    w.wait(3, X, {"k"});
+    w.wait(4, X, {"k"});
+    EXPECT_EQ(multi_sinks(w.t, {w.pid(3), w.pid(4)}), (std::vector<int>{1, 2}));
+  }
+  {
+    // A long FIFO queue on one key: every waiter waits for the holder and the waiters before it;
+    // the one sink is the holder. (The reference, one search per waiter, is the cubic cost the
+    // single search removes: 100 waiters keep it quick under the sanitizers.)
+    world w(0, false); // no self_check: each check() would be a full recount
+    w.acquire(1, X, {"k"});
+    std::vector<detail::lock_pid> from;
+    for (int p = 2; p <= 101; ++p) {
+      w.wait(p, X, {"k"});
+      from.push_back(w.pid(p));
+    }
+    EXPECT_EQ(multi_sinks(w.t, from), (std::vector<int>{1}));
+  }
+  {
+    // Sources that wait for each other: 3 waits for 2, which waits for 1.
+    world w;
+    w.acquire(1, X, {"a"});
+    w.acquire(2, X, {"b"});
+    w.wait(2, X, {"a"});
+    w.wait(3, X, {"b"});
+    EXPECT_EQ(multi_sinks(w.t, {w.pid(3), w.pid(2)}), (std::vector<int>{1}));
+    // A source with no edge out is a sink of the others, but never in the result.
+    EXPECT_TRUE(multi_sinks(w.t, {w.pid(1), w.pid(2), w.pid(3)}).empty());
+  }
+}
+
+TEST(LockHomes, BlockingSinksOfSeveralWaitersOfAHome) {
+  for (const lock_threading mode : {lock_threading::single, lock_threading::shared}) {
+    SCOPED_TRACE(mode_name(mode));
+    const std::shared_ptr<lock_manager> mgr = make_manager(mode);
+    auto a = std::make_unique<sched_side>(mgr);
+    auto b = std::make_unique<sched_side>(mgr);
+    process &pa = a->add(1);
+    process &pb1 = b->add(1);
+    process &pb2 = b->add(2);
+    const std::optional<std::uint64_t> ha = a->take(pa, X, {"k"});
+    ASSERT_TRUE(ha);
+    ASSERT_TRUE(b->wait(pb1, X, {"k"}));
+    ASSERT_TRUE(b->wait(pb2, S, {"k"}));
+    a->home->store_progress(detail::lock_clock::time_point(detail::lock_clock::duration(777)));
+    const std::vector<int> pids{pb1.pid, pb2.pid};
+    EXPECT_EQ(b->home->blocking_sinks(std::span<const int>(pids.data(), pids.size())),
+              (sinks_t{{{a->home->id(), 1}, 777}}));
+    a->release(pa, *ha);
+    b->home->drain_port();
+    b->release(pb1, sched_side::last_hold(pb1));
+    b->home->drain_port();
+    b->release(pb2, sched_side::last_hold(pb2));
+    check_all(*mgr, {a.get(), b.get()});
+    a.reset();
+    b.reset();
+    EXPECT_TRUE(mgr->table().empty());
+  }
+}
+
+// -- second round: home ids never wrap ------------------------------------------------------------
+
+TEST(LockTable, HomeIdsNeverWrap) {
+  // Ids are never reused (protocol 2.1), and a home_id has 32 bits: past the last one, attach_home
+  // refuses rather than wrapping onto 0, which a live home may hold (and the entries' binary
+  // search assumes ascending ids). options::first_home starts the count near the end.
+  constexpr detail::home_id last = std::numeric_limits<detail::home_id>::max();
+  lock_table::options o;
+  o.self_check = true;
+  o.one_home = false;
+  o.first_home = last - 1;
+  lock_table t(o);
+  detail::lock_notes n;
+  const detail::home_id a = t.attach_home(false, nullptr, nullptr, n);
+  const detail::home_id b = t.attach_home(true, nullptr, nullptr, n);
+  EXPECT_EQ(a, last - 1);
+  EXPECT_EQ(b, last);
+  try {
+    t.attach_home(false, nullptr, nullptr, n);
+    ADD_FAILURE() << "an attach past the last home id";
+  } catch (const std::logic_error &e) {
+    EXPECT_NE(std::string(e.what()).find("home id"), std::string::npos) << e.what();
+  }
+  t.detach_home(a, n); // a freed id is never handed out again
+  EXPECT_THROW(t.attach_home(false, nullptr, nullptr, n), std::logic_error);
+  EXPECT_EQ(t.home_entries(), 1u);
+  t.check();
+  // The last id works as any other: a process of it locks and releases.
+  const std::vector<std::string> k{"k"};
+  detail::lock_request r = request_of(X, k);
+  const auto g = t.try_acquire({b, 7}, {"o", 0}, r, {});
+  ASSERT_TRUE(g);
+  EXPECT_TRUE(t.rec_of({b, 7}).has_value());
+  t.release({b, 7}, g->hold, n);
+  t.detach_home(b, n);
+  EXPECT_TRUE(t.empty());
+  EXPECT_EQ(t.home_entries(), 0u);
+  t.check();
+}
+
+// -- second round: the unwound wait's notes in order ----------------------------------------------
+
+namespace {
+
+/// What the cross_home_note hook saw of the unwinding process's ticket when the cancel's note
+/// went out.
+struct cancel_probe {
+  const lock_table *table = nullptr;
+  std::uint64_t tid = 0;
+  int notes = 0;
+  bool ticket_there = false;
+};
+cancel_probe g_cancel_probe;
+void probe_cancel_note(const detail::lock_note &) {
+  ++g_cancel_probe.notes;
+  g_cancel_probe.ticket_there = g_cancel_probe.table->ticket_of(g_cancel_probe.tid).has_value();
+}
+
+} // namespace
+
+TEST(LockHomes, UnwoundWaitDeliversTheCancelsNotesFirst) {
+  // 5.4's defensive path delivers the cancel's notes (the wakes of the waiters the cancel lets
+  // in) right after the cancel, before its resume and any release, so neither can lose them.
+  for (const lock_threading mode : {lock_threading::single, lock_threading::shared}) {
+    SCOPED_TRACE(mode_name(mode));
+    const std::shared_ptr<lock_manager> mgr = make_manager(mode);
+    auto a = std::make_unique<sched_side>(mgr);
+    auto b = std::make_unique<sched_side>(mgr);
+    auto c = std::make_unique<sched_side>(mgr);
+    process &pa = a->add(1);
+    process &pb = b->add(2);
+    process &pc = c->add(3);
+    const std::optional<std::uint64_t> ha = a->take(pa, S, {"k"});
+    ASSERT_TRUE(ha);
+    ASSERT_TRUE(b->wait(pb, X, {"k"})); // behind A's S hold
+    ASSERT_TRUE(c->wait(pc, S, {"k"})); // behind B's earlier X ticket (FIFO)
+    g_cancel_probe = cancel_probe{&mgr->table(), *pb.locks->ticket};
+    detail::lock_test_hooks hooks;
+    hooks.cross_home_note = probe_cancel_note;
+    detail::set_lock_test_hooks(&hooks);
+    b->home->release_frame(pb, std::nullopt, true); // the cancel lets C's waiter in
+    detail::set_lock_test_hooks(nullptr);
+    EXPECT_EQ(g_cancel_probe.notes, 1);
+    EXPECT_TRUE(g_cancel_probe.ticket_there); // not resumed yet when the wake went out
+    EXPECT_FALSE(pb.locks->ticket);
+    c->home->drain_port();
+    EXPECT_EQ(c->ops.readies, (std::vector<int>{3}));
+    c->release(pc, sched_side::last_hold(pc));
+    a->release(pa, *ha);
+    check_all(*mgr, {a.get(), b.get(), c.get()});
+    a.reset();
+    b.reset();
+    c.reset();
     EXPECT_TRUE(mgr->table().empty());
   }
 }

@@ -27,6 +27,7 @@
 #include <cvc/state/state_exec/detail/lock_table.h>
 #include <cvc/state/state_exec/lock_manager.h>
 #include <deque>
+#include <limits>
 #include <mutex>
 #include <set>
 #include <stdexcept>
@@ -294,7 +295,8 @@ struct lock_table::impl {
   using pred_map = std::unordered_map<std::uint64_t, std::vector<lock_pid>>; // by packed pid
 
   explicit impl(const lock_table::options &o)
-      : opts(o), divergence_pending((o.mutations & lock_table::plant_divergence) != 0) {
+      : opts(o), next_home(o.first_home),
+        divergence_pending((o.mutations & lock_table::plant_divergence) != 0) {
     root.live = true;
   }
 
@@ -358,7 +360,7 @@ struct lock_table::impl {
   // as many as the attached homes however many came and went. lending_homes counts the attached
   // homes with prio: lending() is that count, not a walk.
   std::vector<home_entry> homes;
-  home_id next_home = 0;
+  std::uint64_t next_home = 0; // the next id; past home_id's range, no attach is taken
   std::size_t attached = 0;
   std::size_t lending_homes = 0;
 
@@ -778,21 +780,27 @@ struct lock_table::impl {
     return out;
   }
 
-  /// 4.13's blocking_sinks(P): every Q in reach({P}) other than P with succ(Q) empty, each with
-  /// its home's progress cell loaded (0 for a home with none). A relaxed load: the cell is a hint
-  /// its home's steps write (design 8.4), and only the shared cell is read, never the home.
-  /// Sorted by pid.
-  std::vector<std::pair<lock_pid, std::int64_t>> blocking_sinks(lock_pid p) {
+  /// 4.13's blocking_sinks, from every process of `from` at once: every Q reachable from one of
+  /// them, not one of them, with succ(Q) empty, each with its home's progress cell loaded (0 for
+  /// a home with none). A relaxed load: the cell is a hint its home's steps write (design 8.4),
+  /// and only the shared cell is read, never the home. One breadth-first search: each process is
+  /// visited, and its successors computed, once. Sorted by pid.
+  std::vector<std::pair<lock_pid, std::int64_t>> blocking_sinks(std::span<const lock_pid> from) {
     std::vector<std::pair<lock_pid, std::int64_t>> out;
     if (!q_head)
       return out; // no queued ticket, no edge
-    std::unordered_set<std::uint64_t> seen{p.packed()};
-    std::vector<lock_pid> layer{p}, next;
+    std::unordered_set<std::uint64_t> sources, seen;
+    std::vector<lock_pid> layer, next;
+    for (lock_pid p : from) {
+      sources.insert(p.packed());
+      if (seen.insert(p.packed()).second)
+        layer.push_back(p);
+    }
     while (!layer.empty()) {
       next.clear();
       for (lock_pid a : layer) {
         const std::vector<lock_pid> succ = successors(a);
-        if (succ.empty() && a != p) {
+        if (succ.empty() && sources.count(a.packed()) == 0) {
           const home_entry *h = find_home(a.home);
           const bool cell = h && h->attached && h->progress; // a rec's home is attached (4.11)
           out.emplace_back(a, cell ? h->progress->load(std::memory_order_relaxed) : 0);
@@ -1999,8 +2007,11 @@ home_id lock_table::attach_home(bool prio, std::shared_ptr<lock_port> port,
     throw std::logic_error("lock_manager: a home pumped on another thread needs a shared manager "
                            "(state_exec.locks.threading, fixed when the app first makes its "
                            "manager)");
+  if (m.next_home > std::numeric_limits<home_id>::max())
+    throw std::logic_error("lock_table::attach_home: every home id has been handed out (ids are "
+                           "never reused)");
   m.begin_op(&out);
-  const home_id h = m.next_home++;              // never reused (2.1)
+  const home_id h = home_id(m.next_home++);     // never reused (2.1)
   impl::home_entry &e = m.homes.emplace_back(); // ids ascend: the entries stay in id order
   e.id = h;
   e.attached = true;
@@ -2426,7 +2437,13 @@ std::string lock_table::canonical() const {
 
 std::vector<std::pair<lock_pid, std::int64_t>> lock_table::blocking_sinks(lock_pid p) const {
   impl::guard g(*impl_);
-  return impl_->blocking_sinks(p);
+  return impl_->blocking_sinks(std::span<const lock_pid>(&p, 1));
+}
+
+std::vector<std::pair<lock_pid, std::int64_t>>
+lock_table::blocking_sinks(std::span<const lock_pid> from) const {
+  impl::guard g(*impl_);
+  return impl_->blocking_sinks(from);
 }
 
 namespace {
