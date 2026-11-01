@@ -52,6 +52,12 @@ struct lock_attach {
   bool cross_thread = false;
 };
 
+/// The attach a host makes for a scheduler it may pump on a thread of its own (pycvc's Exec, the
+/// wasm smoke): cross-thread wherever threads exist, a same-thread attach on a build without them.
+inline constexpr lock_attach threaded_host_attach() noexcept {
+  return lock_attach{threads_compiled_in};
+}
+
 /// One locked key, as lock-query reports it (protocol 4.13). Keys are absolute here; the DSL shows
 /// them relative to the caller's chroot.
 struct lock_info {

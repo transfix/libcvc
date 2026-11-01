@@ -2406,3 +2406,30 @@ TEST(LockTable, LendingFollowsTheAttachedPrioHomes) {
   EXPECT_EQ(inh(), detail::lock_inf);
   t.check();
 }
+
+// -- review fixes: the host's attach (R3b F4) -----------------------------------------------------
+
+TEST(LockShared, ThreadedHostAttach) {
+  // What pycvc's Exec and the wasm smoke attach with: cross-thread where threads exist (a shared
+  // manager takes it, a single one refuses it), a same-thread attach on a build without them.
+  static_assert(threaded_host_attach().cross_thread == threads_compiled_in);
+  fake_ops ops;
+  const std::shared_ptr<lock_manager> shared = make_manager(lock_threading::shared);
+  {
+    detail::lock_home h{shared, ops, scheduling_policy::round_robin, nullptr,
+                        threaded_host_attach()};
+    EXPECT_EQ(h.id(), 0u);
+  }
+  const std::shared_ptr<lock_manager> single = make_manager(lock_threading::single);
+  if constexpr (threads_compiled_in) {
+    EXPECT_THROW((detail::lock_home{single, ops, scheduling_policy::round_robin, nullptr,
+                                    threaded_host_attach()}),
+                 std::logic_error);
+  } else {
+    detail::lock_home h{single, ops, scheduling_policy::round_robin, nullptr,
+                        threaded_host_attach()};
+    EXPECT_EQ(h.id(), 0u);
+  }
+  EXPECT_TRUE(shared->table().empty());
+  EXPECT_TRUE(single->table().empty());
+}
