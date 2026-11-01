@@ -457,18 +457,19 @@ std::optional<std::string> lock_waited_for(const process_info &info) {
   return info.waiting_on->substr(tag.size());
 }
 
-// run()'s idle rule for a lock wait (docs/STATE_EXEC_LOCKS.md 9.2): of the processes `pid`'s wait
-// ultimately waits for (blocking_sinks, protocol 4.13) that are on another home, the latest of
-// their homes' progress within `idle_timeout` of `now`; nullopt when there is none. Each sink
-// comes with its home's progress, loaded under the manager's mutex, so no other home is reached
-// here. A sink on this home counts only through run()'s own test, never because this run() pumps
-// it (LT-8b).
+// run()'s idle rule for the lock waits of an Exec's processes (docs/STATE_EXEC_LOCKS.md 9.2: a
+// lock wait of any of them counts, not only run()'s own): of the processes they ultimately wait
+// for (blocking_sinks, protocol 4.13) that are on another home, the latest of their homes'
+// progress within `idle_timeout` of `now`; nullopt when there is none. One search from all of
+// `pids` at once, under one hold of the manager's mutex. Each sink comes with its home's progress,
+// loaded under that mutex, so no other home is reached here. A sink on this home counts only
+// through run()'s own test, never because this run() pumps it (LT-8b).
 std::optional<std::chrono::steady_clock::time_point>
-progress_waited_for(const lock_home &home, int pid, double idle_timeout,
+progress_waited_for(const lock_home &home, std::span<const int> pids, double idle_timeout,
                     std::chrono::steady_clock::time_point now) {
   using clock = std::chrono::steady_clock;
   std::optional<clock::time_point> latest;
-  for (const auto &[sink, ticks] : home.blocking_sinks(pid)) {
+  for (const auto &[sink, ticks] : home.blocking_sinks(pids)) {
     if (sink.home == home.id())
       continue;
     const clock::time_point progress{clock::duration(ticks)};
@@ -478,30 +479,18 @@ progress_waited_for(const lock_home &home, int pid, double idle_timeout,
   return latest;
 }
 
-// The lock waits of an Exec's processes, for run()'s idle rule: a lock wait of any of them counts,
-// not only of run()'s own (design 9.2). `progress` is the latest progress_waited_for over them,
-// `named` one of them (pid and absolute key) for a kill's message, `root` when it waits.
-struct exec_lock_waits {
-  std::optional<std::chrono::steady_clock::time_point> progress;
-  std::optional<std::pair<int, std::string>> named;
-};
-
-exec_lock_waits lock_waits_of(const async_scheduler &sched, const lock_home &home, int root,
-                              double idle_timeout, std::chrono::steady_clock::time_point now) {
-  exec_lock_waits out;
-  for (const process_info &p : sched.list_processes()) {
-    if (p.status != process_status::waiting)
-      continue;
-    std::optional<std::string> key = lock_waited_for(p);
-    if (!key)
-      continue;
-    if (!out.named || p.pid == root)
-      out.named.emplace(p.pid, std::move(*key));
-    if (const std::optional<std::chrono::steady_clock::time_point> t =
-            progress_waited_for(home, p.pid, idle_timeout, now))
-      out.progress = std::max(out.progress.value_or(*t), *t);
-  }
-  return out;
+// A lock wait to name in a kill's message (pid and absolute key): run()'s own (`root`), else one
+// of the other lock waiters', or nullopt. Read only for a kill.
+std::optional<std::pair<int, std::string>> lock_wait_named(const async_scheduler &sched,
+                                                           const process_info &root,
+                                                           std::span<const int> waiters) {
+  if (std::optional<std::string> key = lock_waited_for(root))
+    return std::make_pair(root.pid, std::move(*key));
+  for (int pid : waiters)
+    if (const std::optional<process_info> info = sched.get_process_info(pid))
+      if (std::optional<std::string> key = lock_waited_for(*info))
+        return std::make_pair(pid, std::move(*key));
+  return std::nullopt;
 }
 
 // A lock-query answer as the DSL's (lock-query) builds it (lock_intrinsics.cpp), its keys shown
@@ -960,6 +949,7 @@ std::string Exec::run(const std::string &src) {
     return cvc::state_exec::detail::time_after(clock::now(), idle_timeout);
   };
   clock::time_point idle_deadline = fresh_idle_deadline();
+  std::vector<int> lock_waiters; // the idle rule's lock-waiting pids, reused across passes
   std::optional<value_t> result;
   std::optional<std::string> error; // set -> throw AFTER the pool is quiesced
   bool killed = false;              // the scheduler killed the process (error has its exit error)
@@ -1036,14 +1026,22 @@ std::string Exec::run(const std::string &src) {
         idle_deadline = cvc::state_exec::detail::time_after(now, idle_timeout);
         home.store_progress(now);
       } else {
-        const exec_lock_waits waits = lock_waits_of(sched, home, pid, idle_timeout, clock::now());
-        if (waits.progress)
-          idle_deadline = std::max(
-              idle_deadline, cvc::state_exec::detail::time_after(*waits.progress, idle_timeout));
+        // The lock rule, only while a process of ours waits for a lock: one search from all of
+        // them (lock_waiters, reused across passes).
+        lock_waiters.clear();
+        if (sched.lock_waiting_count() > 0) {
+          sched.lock_waiting_pids(lock_waiters);
+          if (const std::optional<clock::time_point> progress =
+                  progress_waited_for(home, lock_waiters, idle_timeout, clock::now()))
+            idle_deadline = std::max(idle_deadline,
+                                     cvc::state_exec::detail::time_after(*progress, idle_timeout));
+        }
         if (clock::now() > idle_deadline) {
+          const std::optional<std::pair<int, std::string>> named =
+              lock_wait_named(sched, *info, lock_waiters);
           sched.kill(pid);
           error = "pycvc.Exec.run: parked with no pending work (pid " + std::to_string(pid);
-          if (const auto &named = waits.named) // ", waiting for lock k" or ", pid 2 waiting ..."
+          if (named) // ", waiting for lock k" for our own wait, else ", pid 2 waiting for lock k"
             *error +=
                 (named->first == pid ? std::string(",") : ", pid " + std::to_string(named->first)) +
                 " waiting for lock " + lock_home::show(named->second, impl->ictx.root_path);
