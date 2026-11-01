@@ -1,0 +1,42 @@
+# scenarios.py scenario_pi9, its homes as written
+config inheritance=1 coalesce=0 one_home=0 mutations=-
+attach_home 1 -> 0 |
+attach_home 1 -> 1 |
+try_acquire 0 1 o 10 X a.b - - -> granted 1 1 0 |
+query - 0 o -> held a.b/X/1/1/1/0 waiting |
+query - 1 o -> held a.b/X/-/1/1/0 waiting |
+try_acquire 1 2 o 10 X a - - -> busy |
+block 1 2 o 10 X a - - -> 1 queued | relevel(0,1)
+read_inh 0 1 -> 10 |
+blocking_sinks 1 2 0:1,1:1 -> 0:1:1 |
+query - 0 o -> held a.b/X/1/1/1/0 waiting a/X/- |
+query - 1 o -> held a.b/X/-/1/1/0 waiting a/X/2 |
+try_acquire 0 3 o -10 S a.c - - -> busy |
+block 0 3 o -10 S a.c - - -> 2 queued | relevel(0,1) relevel(1,2)
+read_inh 0 1 -> -10 |
+read_inh 1 2 -> -10 |
+blocking_sinks 0 3 0:2,1:1 -> 0:1:2 |
+blocking_sinks 1 2 0:2,1:1 -> 0:1:2 |
+query - 0 o -> held a.b/X/1/1/1/0 waiting a/X/- a.c/S/3 |
+query - 1 o -> held a.b/X/-/1/1/0 waiting a/X/2 a.c/S/- |
+release 0 1 1 -> ok | wake(1,2,1) relevel(0,1)
+read_inh 0 1 -> INF |
+resume 1 2 1 -> granted 2 2 0 |
+blocking_sinks 0 3 0:3,1:1 -> 1:2:1 |
+query - 0 o -> held a/X/-/1/2/0 waiting a.c/S/3 |
+query - 1 o -> held a/X/2/1/2/0 waiting a.c/S/- |
+start_body 1 2 2 -> ok |
+blocking_sinks 0 3 0:3,1:2 -> 1:2:2 |
+query - 0 o -> held a/X/-/1/2/0 waiting a.c/S/3 |
+query - 1 o -> held a/X/2/1/2/0 waiting a.c/S/- |
+release 1 2 2 -> ok | wake(0,3,2) relevel(1,2)
+read_inh 1 2 -> INF |
+resume 0 3 2 -> granted 3 2 0 |
+query - 0 o -> held a.c/S/3/1/-/0 waiting |
+query - 1 o -> held a.c/S/-/1/-/0 waiting |
+start_body 0 3 3 -> ok |
+query - 0 o -> held a.c/S/3/1/-/0 waiting |
+query - 1 o -> held a.c/S/-/1/-/0 waiting |
+release 0 3 3 -> ok |
+query - 0 o -> held waiting |
+query - 1 o -> held waiting |
