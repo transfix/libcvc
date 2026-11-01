@@ -938,9 +938,6 @@ std::string Exec::run(const std::string &src) {
 
   async_scheduler &sched = impl_->sched;
   cvc::state_exec::async_host &host = *impl_->host;
-  // The Exec's lock home, attached by the constructor: the idle test reads its blocking_sinks and
-  // stores its progress.
-  lock_home &home = *sched.locks();
   execute_options opts;
   opts.name = "pycvc";
   opts.env = impl_->env;
@@ -1031,7 +1028,9 @@ std::string Exec::run(const std::string &src) {
       // stopped is killed about idle_timeout after its last progress. It stores none, so two
       // Execs whose waiters wait on each other's parked holders can't keep each other alive.
       // A post in the lock port (a grant made on another thread after this pass's drain) is work
-      // pending too: the next pass applies it.
+      // pending too: the next pass applies it. The Exec's lock home is read where it is used, never
+      // kept across the loop.
+      lock_home &home = *sched.locks();
       if (host.in_flight() > 0 || !impl_->pending_coros.empty() || sched.has_runnable() ||
           had_runnable || home.port_pending()) {
         const clock::time_point now = clock::now();
@@ -1136,13 +1135,17 @@ PyObject *Exec::lock_query(const std::string &prefix) {
     abs = cvc::state_exec::detail::resolve_lock_key(ctx, prefix, "Exec.lock_query");
   // Straight to the manager, from any thread (docs/STATE_EXEC_LOCKS.md 7.4): it never waits for
   // run() or the control mutex, only for the manager's mutex, which nothing holds while it waits
-  // for the GIL. The GIL is released for the query and taken back once it has returned, and only
-  // then are Python objects made. The home is the viewer: only this Exec's pids show (owner "").
-  lock_home &home = *impl->sched.locks();
+  // for the GIL. The home is the viewer (only this Exec's pids show, owner ""): its manager and id
+  // are copied while the GIL is held, and the home itself is never touched without it. The GIL is
+  // released for the query and taken back once it has returned, and only then are Python objects
+  // made.
+  const lock_home &home = *impl->sched.locks();
+  const std::shared_ptr<lock_manager> manager = home.manager_ptr();
+  const cvc::state_exec::detail::home_id viewer = home.id();
   lock_query_result r;
   {
     gil_released nogil;
-    r = home.manager().query(abs, &home, "");
+    r = manager->table().query(abs, viewer, "");
   }
   return value_to_py(lock_query_value(r, ctx.root_path));
 }

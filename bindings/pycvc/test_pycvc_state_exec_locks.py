@@ -928,6 +928,40 @@ def test_l3_exec_needs_a_shared_manager():
     assert pycvc.Exec(app).run('(with-lock "k" (+ 1 2))') == "3"
 
 
+def test_l3_set_lock_manager_attaches_only_a_first_home():
+    # scheduler.set_lock_manager(app) attaches a scheduler's first lock home only: a home replaced
+    # would be freed under what uses it. An Exec's run() and lock_query use their scheduler's, so a
+    # swap from inside run() raises (it used to free the home run() kept), and the Exec runs on.
+    app = pycvc.make_app()
+    ex = pycvc.Exec(app, idle_timeout=0.2)
+    ex.register_fn("swap", lambda: ex.scheduler().set_lock_manager(app) or True)
+    e = _raises(RuntimeError, ex.run, '(begin (swap) (msg-recv "never"))')
+    assert "already has its lock home" in str(e), e
+    assert ex.run('(with-lock "k" (+ 1 2))') == "3"
+    assert ex.lock_query("") == {"held": [], "waiting": []}
+    # A fresh scheduler attaches (LT-7 steps one), and then has its home; so does one whose first
+    # with-lock made it a private one.
+    s, env = _app_scheduler(app)
+    pid = s.execute('(with-lock "k" 1)', _env_opts(env))
+    s.run()
+    assert s.get_result(pid) == 1
+    _raises(RuntimeError, s.set_lock_manager, app)
+    t = pycvc.scheduler()
+    ctx = pycvc.intrinsics_context()
+    ctx.sched = t
+    ctx.root = pycvc.State.instance(app)
+    env = pycvc.builtins.make_default_environment()
+    pycvc.register_intrinsics(env, ctx)
+    pid = t.execute('(with-lock "k" 2)', _env_opts(env))
+    t.run()
+    assert t.get_result(pid) == 2
+    e = _raises(RuntimeError, t.set_lock_manager, app)
+    assert "already has its lock home" in str(e), e
+    for sched in (s, t):
+        for p in [i.pid for i in sched.list_processes()]:
+            assert sched.reap(p)  # their environments hold the context, which holds the scheduler
+
+
 def test_lt01_two_execs_hot_key():
     # LT-1: two Execs on two Python threads, one hot key, each section a read-modify-write of a
     # tree value, which isn't atomic without the lock: the count exact.
