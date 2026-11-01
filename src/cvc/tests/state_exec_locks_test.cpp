@@ -4994,14 +4994,8 @@ threads_result run_threads(const threads_config &c) {
   return r;
 }
 
-} // namespace
-namespace cvc::state_exec::detail { // F-TEMP-FUZZ: until L3.7 lands
-inline void set_lock_fuzz_seed(std::uint64_t) {}
-} // namespace cvc::state_exec::detail
-namespace {
-
 // CVC_EXEC_FUZZ's seed for the manager operations and port actions that follow (L3.7): with a
-// seed, each protocol point yields its thread, sometimes sleeping 0-50 us; 0 turns it off.
+// seed, each protocol point runs on, yields its thread, or pauses it 0-50 us; 0 turns it off.
 struct fuzz_seed_scope {
   explicit fuzz_seed_scope(std::uint64_t seed) { detail::set_lock_fuzz_seed(seed); }
   ~fuzz_seed_scope() { detail::set_lock_fuzz_seed(0); }
@@ -5016,8 +5010,10 @@ void fuzzed_protocol_points(std::size_t seeds, std::size_t ops_per_seed,
   const auto t0 = steady::now();
   std::size_t ops = 0;
   std::uint64_t stops = 0, posts = 0, relevels = 0;
+  const std::uint64_t hits0 = detail::lock_fuzz_hits();
   std::size_t seed = 1;
   for (; seed <= seeds && !::testing::Test::HasFailure(); ++seed) {
+    const std::uint64_t seed_hits = detail::lock_fuzz_hits();
     fuzz_seed_scope fuzz(seed);
     threads_config c;
     c.name = "LT-4 seed " + std::to_string(seed);
@@ -5034,11 +5030,15 @@ void fuzzed_protocol_points(std::size_t seeds, std::size_t ops_per_seed,
     stops += r.stops;
     posts += r.stats.posts;
     relevels += r.stats.relevels;
+    // The seed was in effect: its runs reached the protocol points.
+    EXPECT_GT(detail::lock_fuzz_hits(), seed_hits) << c.name;
   }
-  std::printf("LT-4: %zu seeds, %zu operations, %llu stops, %llu posts, %llu relevels; %.2f s\n",
+  const std::uint64_t hits = detail::lock_fuzz_hits() - hits0;
+  std::printf("LT-4: %zu seeds, %zu operations, %llu stops, %llu posts, %llu relevels, %llu fuzzed "
+              "protocol points; %.2f s\n",
               seed - 1, ops, static_cast<unsigned long long>(stops),
               static_cast<unsigned long long>(posts), static_cast<unsigned long long>(relevels),
-              seconds_since(t0));
+              static_cast<unsigned long long>(hits), seconds_since(t0));
   EXPECT_GT(posts, 0u); // the homes did meet
 }
 
