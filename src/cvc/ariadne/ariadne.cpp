@@ -20,7 +20,8 @@
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/input.h> // §4.6 InputEvent — Runtime::post_input feeds on_key/on_pointer
 #include <cvc/ariadne/loader.h> // is_builtin_widget_type (has?)
-#include <cvc/ariadne/net_host.h> // net_host_status (the net capability tokens)
+#include <cvc/ariadne/net_host.h>  // net_host_status (the net capability tokens)
+#include <cvc/ariadne/oidc_host.h> // pump_oidc
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_scheduler.h> // §4.7 app-wide action scheduler (exec_scheduler)
@@ -922,6 +923,11 @@ struct Runtime::Impl {
     f.net = net.enabled;
     f.net_auth = net.auth;
     f.net_auth_persist = net.persist;
+    f.oidc = net.oidc;
+    f.oidc_loopback = net.oidc && net.oidc_flows.loopback;
+    f.oidc_device = net.oidc && net.oidc_flows.device;
+    f.oidc_redirect = net.oidc && net.oidc_flows.redirect;
+    f.browser = net.enabled && net.browser;
     return f;
   }
   bool has(const std::string &name) const {
@@ -1793,6 +1799,27 @@ void Runtime::Impl::emit_node(const Widget &w) {
     if (!w.overlay.empty())
       overlay = is_expr(w.overlay) ? eval_text(w.overlay) : read_string(app, resolve(w.overlay));
     b.progress_bar(label, static_cast<float>(f < 0.0 ? 0.0 : (f > 1.0 ? 1.0 : f)), overlay);
+    break;
+  }
+
+  case Kind::Plot: {
+    // Read-only: the comma-separated numbers (a state path or a computed expression), oldest
+    // first; anything that is not a number is skipped.
+    const std::string v = is_expr(w.bind) ? eval_text(w.bind) : read_string(app, resolve(w.bind));
+    std::vector<float> values;
+    for (std::size_t i = 0; i <= v.size();) {
+      const std::size_t j = std::min(v.find(',', i), v.size());
+      const std::string item = v.substr(i, j - i);
+      char *end = nullptr;
+      const double x = std::strtod(item.c_str(), &end);
+      if (end != item.c_str() && std::isfinite(x))
+        values.push_back(static_cast<float>(x));
+      i = j + 1;
+    }
+    std::string overlay;
+    if (!w.overlay.empty())
+      overlay = is_expr(w.overlay) ? eval_text(w.overlay) : read_string(app, resolve(w.overlay));
+    b.plot_lines(label, values, w.lo, w.hi, overlay, w.plot_height);
     break;
   }
 
@@ -2786,6 +2813,9 @@ void Runtime::run_program(std::string script, std::function<void(const std::stri
 
 void Runtime::drain() {
   ++m_->drains_; // the residents' restart clock
+  // A sign-in in progress (oidc_host.h) takes its step first: a reply, a browser's redirect, a
+  // device poll that is due. It writes its status to the state tree on this thread.
+  pump_oidc();
   // Run the queued action events on the host thread, then clear. Never called
   // from inside render() (the deferred intent-buffer discipline, §7.2/§4.7). The keys pressed since
   // the last drain queue theirs first.

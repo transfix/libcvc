@@ -1367,9 +1367,11 @@ TEST(NavPlantConvergence, CheckpointSelectionOnJoltReach) {
 // seeds against the untrained seed with paired-bootstrap CIs. Arms (JOLT_EXP_ARMS, comma-separated
 // kind:seed:lr[:horizon[:w_coll]]): jolt (the Jolt rollout, its four-wheel model calibrated to Jolt
 // first: use_jolt_rollout) and dynamic (the single-track model). An experiment, not a check: it
-// runs for hours and asserts only that its numbers are finite. It runs when
-// CVC_JOLT_TRAIN_EXPERIMENT=1; JOLT_EXP_{STEPS, N, HORIZON, WINDOW, EVERY, VAL} size it,
-// JOLT_EXP_OUT names a directory for the selected policies (.cvcnav) and a summary.
+// runs for about 20 minutes an arm and asserts only that its numbers are finite. It runs when
+// CVC_JOLT_TRAIN_EXPERIMENT=1; JOLT_EXP_{STEPS, N, HORIZON, WINDOW, EVERY, VAL, TICKS, GOAL_MAX}
+// size it (the defaults are the run docs/NAV_TRAINING.md reports), JOLT_EXP_OUT names a directory
+// for the selected policies (.cvcnav), each arm's and the seed's per-seed held-out reach
+// (.held.txt, for comparing two arms seed by seed) and a summary.
 TEST(NavPlantConvergence, JoltTrainedHumveeOnJoltReach) {
   REQUIRE_JOLT();
   if (!std::getenv("CVC_JOLT_TRAIN_EXPERIMENT") ||
@@ -1380,7 +1382,7 @@ TEST(NavPlantConvergence, JoltTrainedHumveeOnJoltReach) {
   };
   const std::string arms_spec = std::getenv("JOLT_EXP_ARMS")
                                     ? std::getenv("JOLT_EXP_ARMS")
-                                    : "jolt:1:2e-4,jolt:2:2e-4,jolt:1:5e-4,dynamic:1:2e-4";
+                                    : "jolt:1:5e-5:60:10,dynamic:1:5e-5:60:10";
   const std::string out = std::getenv("JOLT_EXP_OUT") ? std::getenv("JOLT_EXP_OUT") : "";
   const cvc::nav::training_scene sc = cvc::nav::city_scene(96);
   const vehicle_desc hv = vehicle_desc::humvee();
@@ -1390,19 +1392,22 @@ TEST(NavPlantConvergence, JoltTrainedHumveeOnJoltReach) {
   base.hidden = 64;
   base.horizon = env_int("JOLT_EXP_HORIZON", 60);
   base.window = env_int("JOLT_EXP_WINDOW", 10);
-  base.steps = env_int("JOLT_EXP_STEPS", 1500);
-  base.checkpoint_every = env_int("JOLT_EXP_EVERY", 100);
+  base.steps = env_int("JOLT_EXP_STEPS", 1000);
+  base.checkpoint_every = env_int("JOLT_EXP_EVERY", 50);
   base.veh_L = static_cast<float>(L);
   base.veh_delta_max = static_cast<float>(hv.max_steer);
   base.veh_a_max = static_cast<float>(0.8 * hv.max_accel * kS);
   base.veh_a_lat_max = static_cast<float>(0.5 * kG * kS);
-  // Episodes long enough for Humvees to cross the 200 m city (JOLT_EXP_TICKS of 0.06 s), goals
-  // anywhere or JOLT_EXP_GOAL_MAX normalized units from the start.
+  // Episodes of JOLT_EXP_TICKS of 0.06 s, goals JOLT_EXP_GOAL_MAX normalized units from the start
+  // (100 m; 0 = anywhere, which the untrained seed reaches 8% of in 1000 ticks).
   plant_reach_options held; // the gate's 20 held-out seeds, 100..119
   held.plan_with_vehicle = true;
-  held.ticks = env_int("JOLT_EXP_TICKS", 1500);
-  if (std::getenv("JOLT_EXP_GOAL_MAX")) {
-    held.goal_max = static_cast<float>(std::atof(std::getenv("JOLT_EXP_GOAL_MAX")));
+  held.ticks = env_int("JOLT_EXP_TICKS", 1000);
+  const float goal_max = std::getenv("JOLT_EXP_GOAL_MAX")
+                             ? static_cast<float>(std::atof(std::getenv("JOLT_EXP_GOAL_MAX")))
+                             : 2.0f;
+  if (goal_max > 0.0f) {
+    held.goal_max = goal_max;
     held.goal_min = 0.25f * held.goal_max;
     base.goal_min = held.goal_min;
     base.goal_max = held.goal_max;
@@ -1437,6 +1442,11 @@ TEST(NavPlantConvergence, JoltTrainedHumveeOnJoltReach) {
       summary.flush();
     }
   };
+  if (!out.empty()) {
+    std::ofstream per_seed(out + "/seed.held.txt");
+    for (std::size_t s = 0; s < seed_held.size(); ++s)
+      per_seed << held.seeds[s] << " " << seed_held[s] << "\n";
+  }
   {
     char line[256];
     std::snprintf(line, sizeof line,
@@ -1513,6 +1523,10 @@ TEST(NavPlantConvergence, JoltTrainedHumveeOnJoltReach) {
         for (char &c : file)
           if (c == ':')
             c = '_';
+        // Each held-out seed's reach, in held.seeds order, for comparing two arms seed by seed.
+        std::ofstream per_seed(out + "/" + file + ".held.txt");
+        for (std::size_t s = 0; s < a.size(); ++s)
+          per_seed << held.seeds[s] << " " << a[s] << "\n";
         policy.save(out + "/" + file + ".cvcnav",
                     "trained on the city at demo3's metric (" + spec + "), selected on Jolt reach");
       }

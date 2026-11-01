@@ -8,6 +8,7 @@
 #include <cvc/ariadne/doc_args.h>
 #include <cvc/ariadne/ftxui_backend.h>
 #include <cvc/ariadne/host_cli.h>
+#include <cvc/ariadne/host_warnings.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
@@ -236,6 +237,41 @@ TEST(AriadneHostCli, NetworkFlagsTurnItOnAndCheckTheirOrigins) {
        {"CVCPKG_TOKEN", "cvcpkg=", "=CVCPKG_TOKEN", "bad name=V", "c=1X", "c=X-Y"}) {
     const char *argv[] = {"ari", "run", "--credential-env", bad, "d.ari"};
     EXPECT_NE(parse_host_args(5, argv).error.find("--credential-env is NAME=VAR"),
+              std::string::npos)
+        << bad;
+  }
+}
+
+TEST(AriadneHostCli, SignInFlags) {
+  const char *a[] = {"ari",
+                     "run",
+                     "--oidc-issuer",
+                     "https://id.example/realms/demo",
+                     "--oidc-client",
+                     "https://accounts.example=123=abc.apps",
+                     "--oidc-redirect-uri=https://app.example/ari.html",
+                     "--no-browser",
+                     "d.ari",
+                     "--no-browser"};
+  HostOptions o = parse_host_args(10, a);
+  ASSERT_TRUE(o.error.empty()) << o.error;
+  EXPECT_TRUE(o.net.enabled) << "naming an issuer implies --net";
+  ASSERT_EQ(o.net.oidc.issuers.size(), 1u);
+  EXPECT_EQ(o.net.oidc.issuers[0], "https://id.example/realms/demo");
+  ASSERT_EQ(o.net.oidc.clients.size(), 1u);
+  EXPECT_EQ(o.net.oidc.clients[0].first, "https://accounts.example");
+  EXPECT_EQ(o.net.oidc.clients[0].second, "123=abc.apps") << "the issuer ends at the first '='";
+  EXPECT_EQ(o.net.oidc.redirect_uri, "https://app.example/ari.html");
+  EXPECT_TRUE(o.net.oidc.no_browser);
+  ASSERT_EQ(o.doc_args.size(), 1u) << "after the document, --no-browser is the document's";
+  EXPECT_NE(host_flags_help().find("--oidc-issuer ISSUER"), std::string::npos);
+  for (const char *bad : {"http://id.example", "https://id.example/?q=1", "id.example"}) {
+    const char *argv[] = {"ari", "run", "--oidc-issuer", bad, "d.ari"};
+    EXPECT_NE(parse_host_args(5, argv).error.find("--oidc-issuer"), std::string::npos) << bad;
+  }
+  for (const char *bad : {"https://id.example", "https://id.example=", "=client", "http://x=y"}) {
+    const char *argv[] = {"ari", "run", "--oidc-client", bad, "d.ari"};
+    EXPECT_NE(parse_host_args(5, argv).error.find("--oidc-client is ISSUER=CLIENT_ID"),
               std::string::npos)
         << bad;
   }
@@ -1273,6 +1309,73 @@ TEST(AriadneResidents, OneThatAlwaysFailsIsGivenUp) {
 
   art.load(doc.string()); // its program set again: a fresh start (init: seeds starts to 0)
   ASSERT_TRUE(drain_until(art, [&] { return count_of(app, "ui.docs.gu.starts") >= 1; }));
+}
+
+// ── warnings while a document runs (docs/ARIADNE.md §2.4) ──────────────────────────────────────
+
+// The listener hears each warning at the drain that produces it, with nothing taking them; the
+// summary at exit (take_warnings) still has it.
+TEST(AriadneLiveWarnings, TheListenerHearsEachAsItComes) {
+  REQUIRE_YAML();
+  const fs::path doc =
+      write(test_dir("live_warning"), "w.ari",
+            "meta: {min_libcvc: 3.4.0}\n"
+            "on_tick: |\n"
+            "  (if (state-exists \"failed\")\n"
+            "      (state-set \"ran\" \"again\")\n"
+            "      (begin (state-set \"failed\" 1) (raise (ValueError \"live\"))))\n"
+            "root:\n  - text: w\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.lw");
+  art.set_backend(be);
+  art.load(doc.string());
+  std::vector<std::string> heard;
+  art.set_warning_listener([&](const std::string &w) { heard.push_back(w); });
+  ASSERT_TRUE(drain_until(art, [&] { return any_has(heard, "failed: ValueError: live"); }));
+  EXPECT_TRUE(any_has(heard, "on_tick: resident [")) << heard.front();
+  ASSERT_TRUE(drain_until(art, [&] { return val(app, "ui.docs.lw.ran") == "again"; }));
+  EXPECT_EQ(heard.size(), 1u); // once per message, restarted or not
+  const std::vector<std::string> all = art.take_warnings();
+  EXPECT_EQ(all, heard);
+  EXPECT_TRUE(art.take_warnings().empty());
+  art.set_warning_listener(nullptr);
+}
+
+// A host's LiveWarnings: each warning appended to the log file with the time, the latest as a
+// notice while it is recent, and a log it cannot open reported.
+TEST(AriadneLiveWarnings, LogFileAndNotice) {
+  const fs::path dir = test_dir("live_warning_log");
+  const fs::path log = dir / "warnings.log";
+  {
+    LiveWarnings live("ari", log.string(), /*stderr_when_not_a_terminal=*/false);
+    ASSERT_EQ(live.error(), "");
+    EXPECT_EQ(live.notice(), "");
+    live.log("ari: from the load");
+    EXPECT_EQ(live.count(), 0u); // the load's: logged, not counted
+    live("ari: on_tick: resident [t] stopped: killed");
+    live("ari: on_tick: resident [t] failed: ValueError: x");
+    EXPECT_EQ(live.count(), 2u);
+    const std::string n = live.notice();
+    EXPECT_NE(n.find("ari: warning: on_tick: resident [t] failed: ValueError: x"),
+              std::string::npos)
+        << n;
+    EXPECT_NE(n.find("2 warnings; in " + log.string()), std::string::npos) << n;
+    EXPECT_EQ(live.notice(-1.0), ""); // no longer recent
+  }
+  std::ifstream in(log);
+  std::vector<std::string> lines;
+  for (std::string line; std::getline(in, line);)
+    lines.push_back(line);
+  ASSERT_EQ(lines.size(), 3u);
+  EXPECT_NE(lines[0].find(" ari: warning: from the load"), std::string::npos) << lines[0];
+  EXPECT_NE(lines[1].find(" ari: warning: on_tick: resident [t] stopped: killed"),
+            std::string::npos);
+  EXPECT_EQ(lines[2][4], '-'); // 2026-10-30 18:31:02 ari: ...
+  EXPECT_EQ(lines[2][13], ':');
+
+  LiveWarnings nowhere("ari", (dir / "no" / "such" / "dir.log").string(), false);
+  EXPECT_NE(nowhere.error().find("--log "), std::string::npos);
 }
 
 // ── §7.6 a module's own requires: ───────────────────────────────────────────────────────────────

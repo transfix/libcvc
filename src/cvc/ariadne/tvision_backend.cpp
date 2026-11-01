@@ -437,7 +437,9 @@ struct Host {
 
     sync_menus();
     if (auto *status = dynamic_cast<HostStatusLine *>(TProgram::statusLine)) {
-      const std::string tip = be.tooltip();
+      std::string tip = opts.notice ? opts.notice() : std::string(); // a warning, while recent
+      if (tip.empty())
+        tip = be.tooltip();
       if (tip != status->tip) {
         status->tip = tip;
         status->drawView();

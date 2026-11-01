@@ -620,6 +620,29 @@ void ImGuiBackend::progress_bar(const char *label, float fraction, const std::st
   Backend::progress_bar(label, fraction, overlay);
 #endif
 }
+void ImGuiBackend::plot_lines(const char *label, const std::vector<float> &values, double lo,
+                              double hi, const std::string &overlay, double height) {
+#ifdef CVC_ENABLE_IMGUI
+  // Laid out as the progress bar is: the graph fills the line but leaves the label's width. ImGui
+  // shows the value under the mouse; FLT_MAX for a range fits it to the values.
+  const char *end = label ? ImGui::FindRenderedTextEnd(label) : label;
+  const bool labelled = label && end != label;
+  const float width = labelled ? ImGui::CalcItemWidth() : -FLT_MIN;
+  const float a = lo < hi ? static_cast<float>(lo) : FLT_MAX;
+  const float z = lo < hi ? static_cast<float>(hi) : FLT_MAX;
+  ImGui::PushID(label ? label : "plot");
+  ImGui::PlotLines("##plot", values.empty() ? nullptr : values.data(),
+                   static_cast<int>(values.size()), 0, overlay.empty() ? nullptr : overlay.c_str(),
+                   a, z, ImVec2(width, static_cast<float>(height)));
+  ImGui::PopID();
+  if (labelled) {
+    ImGui::SameLine(0.f, ImGui::GetStyle().ItemInnerSpacing.x);
+    ImGui::TextUnformatted(label, end);
+  }
+#else
+  Backend::plot_lines(label, values, lo, hi, overlay, height);
+#endif
+}
 void ImGuiBackend::spinner(const char *label, double seconds, bool ascii) {
 #ifdef CVC_ENABLE_IMGUI
   // An arc drawn rather than a glyph, so it turns whatever the font holds (the browser build's is
@@ -928,20 +951,21 @@ void ImGuiBackend::set_image(const std::string &name, const cvc::image &img) {
   p.dirty = true;
 }
 
-bool ImGuiBackend::draw_image(const char *name, float width) {
 #ifdef CVC_ENABLE_IMGUI
+unsigned int ImGuiBackend::image_texture(const char *name, int &W, int &H) {
   const auto it = m_images.find(name ? name : "");
   if (it == m_images.end())
-    return false;
+    return 0;
   PublishedImage &p = it->second;
   if (p.img.width() <= 0 || p.img.height() <= 0)
-    return false;
+    return 0;
   // Upload as RGBA8. `const` so data() reads the shared buffer without a COW detach.
   const cvc::image rgba =
       (p.img.format() == cvc::image::pixel_format::RGBA)
           ? p.img
           : p.img.converted(cvc::image::pixel_format::RGBA, cvc::image::data_type::u8);
-  const int W = rgba.width(), H = rgba.height();
+  W = rgba.width();
+  H = rgba.height();
   if (p.tex == 0) {
     glGenTextures(1, &p.tex);
     glBindTexture(GL_TEXTURE_2D, p.tex);
@@ -957,12 +981,48 @@ bool ImGuiBackend::draw_image(const char *name, float width) {
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
     p.dirty = false;
   }
+  return p.tex;
+}
+#endif
+
+bool ImGuiBackend::draw_image(const char *name, float width) {
+#ifdef CVC_ENABLE_IMGUI
+  int W = 0, H = 0;
+  const unsigned int tex = image_texture(name, W, H);
+  if (tex == 0)
+    return false;
   const float h = width * static_cast<float>(H) / static_cast<float>(W);
-  ImGui::Image(static_cast<ImTextureID>(static_cast<std::intptr_t>(p.tex)), ImVec2(width, h));
+  ImGui::Image(static_cast<ImTextureID>(static_cast<std::intptr_t>(tex)), ImVec2(width, h));
   return true;
 #else
   (void)name;
   (void)width;
+  return false;
+#endif
+}
+
+bool ImGuiBackend::draw_image_fit(const char *name, float box_w, float box_h) {
+#ifdef CVC_ENABLE_IMGUI
+  int W = 0, H = 0;
+  const unsigned int tex = image_texture(name, W, H);
+  if (tex == 0 || !(box_w > 0.0f) || !(box_h > 0.0f))
+    return false;
+  const float s = std::min(box_w / static_cast<float>(W), box_h / static_cast<float>(H));
+  const ImVec2 size(static_cast<float>(W) * s, static_cast<float>(H) * s);
+  // The box (black bars where the picture leaves it), the picture centred in it, then the box's
+  // space in the layout.
+  const ImVec2 p0 = ImGui::GetCursorScreenPos();
+  const ImVec2 at(p0.x + 0.5f * (box_w - size.x), p0.y + 0.5f * (box_h - size.y));
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+  dl->AddRectFilled(p0, ImVec2(p0.x + box_w, p0.y + box_h), IM_COL32(0, 0, 0, 255));
+  dl->AddImage(static_cast<ImTextureID>(static_cast<std::intptr_t>(tex)), at,
+               ImVec2(at.x + size.x, at.y + size.y));
+  ImGui::Dummy(ImVec2(box_w, box_h));
+  return true;
+#else
+  (void)name;
+  (void)box_w;
+  (void)box_h;
   return false;
 #endif
 }
