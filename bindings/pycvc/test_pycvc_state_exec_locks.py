@@ -19,6 +19,7 @@ deadlock across Execs (LD-5), and Exec.lock_query from any thread (PR-8).
 CVC_LOCKS_SANITIZER=1 (the sanitizer jobs) runs the smaller sizes.
 """
 
+import asyncio
 import faulthandler
 import gc
 import json
@@ -1151,6 +1152,26 @@ def test_lt08_idle_limit():
     print(f"  killed {gap:.2f} s after A's last step (idle_timeout {idle} s): {e}")
     assert isinstance(e, RuntimeError) and "waiting for lock lt08.k3)" in str(e), ob
     assert idle <= gap < WAIT
+
+
+def test_lt08c_grant_posted_before_the_idle_test():
+    # A grant posted to the Exec's lock port after run()'s drain, in the pass whose idle test finds
+    # the limit passed, is work pending, which the next pass applies: not a kill. idle_timeout=0
+    # makes the limit pass at the first pass with nothing else pending. B's own coroutine, which
+    # runs between B's steps and that idle test, kills A's holder after 50 ms, and B's grant is
+    # posted then.
+    app = pycvc.make_app()
+    a = pycvc.Exec(app)
+    holder = _spawn_holder(a, "lt08c.k", "lt08c.never")
+    b = pycvc.Exec(app, idle_timeout=0.0)
+
+    async def release():
+        await asyncio.sleep(0.05)
+        return a.scheduler().kill(holder)
+
+    b.register_async_coro("release", release)
+    assert b.run('(begin (spawn "(release)") (with-lock "lt08c.k" "b"))') == "b"
+    assert a.scheduler().get_process_info(holder).status == process_status.killed
 
 
 def test_lt08b_same_exec_holder_parked():

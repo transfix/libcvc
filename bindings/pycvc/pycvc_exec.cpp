@@ -1030,8 +1030,10 @@ std::string Exec::run(const std::string &src) {
       // (9.2), as of that progress: the idle window runs from it, so a wait behind a home that
       // stopped is killed about idle_timeout after its last progress. It stores none, so two
       // Execs whose waiters wait on each other's parked holders can't keep each other alive.
+      // A post in the lock port (a grant made on another thread after this pass's drain) is work
+      // pending too: the next pass applies it.
       if (host.in_flight() > 0 || !impl_->pending_coros.empty() || sched.has_runnable() ||
-          had_runnable) {
+          had_runnable || home.port_pending()) {
         const clock::time_point now = clock::now();
         idle_deadline = cvc::state_exec::detail::time_after(now, idle_timeout);
         home.store_progress(now);
