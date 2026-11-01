@@ -323,7 +323,7 @@ constexpr const char *kBuiltinWidgetTypes[] = {
     "group",   "menubar",   "menu",         "menu_item", "window",     "progress",     "plot",
     "overlay", "panel",     "text",         "checkbox",  "slider_int", "slider_float", "combo",
     "radio",   "radio_row", "input_text",   "input_int", "tf_editor",  "color",        "image",
-    "button",  "separator", "windows_menu", "spinner", "video", "audio"};
+    "button",  "separator", "windows_menu", "spinner",   "video",      "audio"};
 } // namespace
 
 bool is_builtin_widget_type(const std::string &type) {

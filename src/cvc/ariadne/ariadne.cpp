@@ -2120,8 +2120,8 @@ void Runtime::Impl::emit_node(const Widget &w) {
     b.end_disabled();
 }
 
-// §5.11: draw a picture by URI — the cache's fitted raster once it is ready, else a placeholder of
-// the same box — and report its state to the widget's status: path.
+// §5.11: draw a picture by URI — the cache's fitted raster once it is ready, else a placeholder
+// of the same box — and report its state to the widget's status: path.
 void Runtime::Impl::emit_media_image(const Widget &w, const std::string &uri, const char *label) {
   media::ImageRequest rq;
   rq.uri = uri;
