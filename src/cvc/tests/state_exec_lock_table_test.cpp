@@ -2268,3 +2268,59 @@ TEST(LockFuzz, PostsRacingACloseNeverLandUnderFuzz) {
   run_post_close_races(100);
   EXPECT_GT(detail::lock_fuzz_hits(), hits);
 }
+
+// -- the manager mutex's waits (lock.cross_thread) ------------------------------------------------
+
+TEST(LockShared, MutexWaitsCounted) {
+  // A single table has no mutex: nothing to count.
+  {
+    world w;
+    const std::uint64_t h1 = w.acquire(1, X, {"a"});
+    w.wait(2, X, {"a"});
+    w.release(1, h1);
+    w.end(2, false);
+    EXPECT_EQ(w.t.stats().mutex_waits, 0u);
+    EXPECT_EQ(w.t.stats().mutex_wait_ns, 0u);
+  }
+  lock_manager single;
+  EXPECT_EQ(single.stats().mutex_waits, 0u);
+  // Two threads on one shared table, each on its own key: they contend only for M.mu, and some
+  // operation finds it held sooner or later. A bounded loop, no timing.
+  lock_table::options o;
+  o.one_home = false;
+  o.shared = true;
+  lock_table t(o);
+  detail::home_id homes[2];
+  {
+    detail::lock_notes n;
+    for (detail::home_id &h : homes)
+      h = t.attach_home(false, nullptr, nullptr, n, lock_attach{true});
+  }
+  std::atomic<bool> seen{false};
+  std::atomic<int> started{0};
+  const std::vector<std::string> keys[2] = {{"k0"}, {"k1"}};
+  const auto driver = [&](int i) {
+    ++started;
+    while (started < 2)
+      std::this_thread::yield();
+    detail::lock_notes notes;
+    for (int k = 1; k <= 2000000 && !seen; ++k) {
+      detail::lock_request r = request_of(X, keys[i]);
+      const auto g = t.try_acquire({homes[i], 1}, {"o", 0}, r, {});
+      if (g)
+        t.release({homes[i], 1}, g->hold, notes);
+      notes.clear();
+      if (k % 256 == 0 && t.stats().mutex_waits > 0)
+        seen = true;
+    }
+  };
+  std::thread a(driver, 0), b(driver, 1);
+  a.join();
+  b.join();
+  const lock_stats s = t.stats();
+  std::printf("LockShared: %llu mutex waits, %llu ns blocked\n", (unsigned long long)s.mutex_waits,
+              (unsigned long long)s.mutex_wait_ns);
+  EXPECT_GT(s.mutex_waits, 0u);
+  EXPECT_TRUE(t.empty());
+  t.check();
+}
