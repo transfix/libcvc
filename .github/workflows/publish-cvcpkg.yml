@@ -19,6 +19,12 @@
 #                      Built through the recipe's own build.sh so the workflow
 #                      and the remote builders cannot drift. (Its browser
 #                      gallery, libcvc-examples-web, is publish-cvcgl-wasm.yml's.)
+#   * ari / arigl    — the Ariadne (.ari) runners: `ari` (terminal) on Linux, macOS
+#                      and Windows, `arigl` (ImGui over VTK, or the terminal) where
+#                      cvcgl builds (Linux, Windows). Each is built by its recipe's
+#                      own script against the libcvc (and cvcGL) built here, and
+#                      must render a document before it packs. (Their browser
+#                      host, arigl-web, is publish-cvcgl-wasm.yml's.)
 # The interpreter column is a matrix dimension (`pyver`): every job carries
 # the base "311", and extra linux-x86_64 release jobs (matrix include) build
 # the cp312/cp313 columns. Those column jobs rebuild libcvc + cvcgl locally
@@ -26,14 +32,15 @@
 # pair — libcvc/cvcgl publish exactly once, from the pyver-311 job (see the
 # `matrix.pyver == '311'` guards).
 # Platform coverage (see the guards on each step below):
-#   * Linux   — libcvc + cvcgl + libcvc-examples + pycvc-cp311/312/313 +
+#   * Linux   — libcvc + cvcgl + libcvc-examples + ari + arigl + pycvc-cp311/312/313 +
 #               pycvc-gl-cp311/312/313 (release config; the 312/313 columns on
-#               x86_64 only; libcvc-examples from the pyver-311 column only).
-#   * Windows — libcvc + cvcgl always; pycvc-cp311/pycvc-gl-cp311 only behind
+#               x86_64 only; libcvc-examples, ari and arigl from the pyver-311
+#               column only).
+#   * Windows — libcvc + cvcgl + ari + arigl always; pycvc-cp311/pycvc-gl-cp311 only behind
 #               the `windows_pycvc` dispatch input (still a TODO — unverified;
 #               Windows stays cp311-only for now).
-#   * macOS   — libcvc only: there is no macOS VTK bundle on the catalog
-#               yet, so the cvcgl/pycvc-gl-cp31X recipes cannot build and the
+#   * macOS   — libcvc + ari only: there is no macOS VTK bundle on the catalog
+#               yet, so the cvcgl/pycvc-gl-cp31X/arigl recipes cannot build and the
 #               pycvc-cp31X columns are skipped to keep the family consistent
 #               per-platform.
 # The family packages are built in the RELEASE matrix jobs only (they pack
@@ -185,6 +192,7 @@ jobs:
       cvcgl: ${{ steps.rev.outputs.cvcgl }}
       libcvc_examples: ${{ steps.rev.outputs.libcvc_examples }}
       ari: ${{ steps.rev.outputs.ari }}
+      arigl: ${{ steps.rev.outputs.arigl }}
       # One output per pycvc interpreter column; the build matrix selects the
       # right one via outputs[format('pycvc_cp{0}', matrix.pyver)].
       pycvc_cp311: ${{ steps.rev.outputs.pycvc_cp311 }}
@@ -226,6 +234,7 @@ jobs:
           emit cvcgl          cvcgl
           emit libcvc-examples libcvc_examples
           emit ari            ari
+          emit arigl          arigl
           emit pycvc-cp311    pycvc_cp311
           emit pycvc-cp312    pycvc_cp312
           emit pycvc-cp313    pycvc_cp313
@@ -751,6 +760,7 @@ jobs:
         # Builds in EVERY linux release column job (pycvc-gl-cp31X links the
         # installed cvcgl), but packs+publishes only from the pyver-311 job so
         # cvcgl is published exactly once.
+        id: cvcgl-linux
         if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' }}
         shell: bash
         env:
@@ -1075,10 +1085,104 @@ jobs:
             echo "dry-run: skipping $PKG publish"
           fi
 
+      - name: Build, pack & publish arigl [Linux]
+        # `arigl`, the GL sibling of `ari` (src/arigl): a document's widgets in Dear ImGui over its
+        # VTK scene, or with --terminal in the terminal, the scene drawn behind them. Packaged apart
+        # from the cvcgl SDK the way ari is apart from libcvc, and built the same way: the recipe's
+        # own build.sh, against the libcvc ($STAGE) and the shared cvcGL (stage-cvcgl) this job just
+        # built, with the VTK, imgui and SDL3 the cvcgl step linked. So it builds only where cvcgl
+        # does (no macOS VTK bundle yet), and last among the Linux steps: its smoke installs Mesa and
+        # Xvfb beside VTK's libglvnd in $PY, which nothing else may link.
+        #
+        # Its backends are other packages' options, and each turns into a stub when a dep is missing
+        # while everything still builds and packs. The .ari loader and the terminal backends are
+        # libcvc's (asserted at libcvc's configure above); the ImGui overlay and the SDL3 input seam
+        # are cvcGL's, asserted here in the cvcGL config arigl links. Then the binary must say it has
+        # them and render: in the terminal, and in a window on Mesa's llvmpipe under Xvfb (as
+        # ci.yml's package-linux runs arigl's ctests).
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && steps.cvcgl-linux.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' && matrix.pyver == '311' }}
+        shell: bash
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+          DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/stage"
+          DEPS="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
+          CVCGL="$GITHUB_WORKSPACE/stage-cvcgl"
+          IMGUI="$GITHUB_WORKSPACE/prefix-imgui-cvcgl"
+          SDL3="$GITHUB_WORKSPACE/prefix-sdl3-cvcgl"
+          grep -q CVC_ENABLE_IMGUI "$CVCGL/lib/cmake/cvcGL/cvcGLTargets.cmake" \
+            || { echo "::error::cvcGL was built without Dear ImGui: arigl's widgets would be inert"; exit 1; }
+          grep -qF "find_dependency(SDL3" "$CVCGL/lib/cmake/cvcGL/cvcGLConfig.cmake" \
+            || { echo "::error::cvcGL was built without SDL3: arigl would have no keyboard or mouse seam"; exit 1; }
+          export CVC_SOURCE_DIR="$GITHUB_WORKSPACE"
+          export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-arigl"
+          export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-arigl"
+          export CVC_DEPS_PREFIX="$STAGE;$CVCGL;$PY;$IMGUI;$SDL3;$DEPS"
+          export CVC_BUILD_TYPE=Release
+          export CVC_JOBS="$(nproc)"
+          bash cvcpkg/recipes/arigl/build.sh
+          test -x stage-arigl/bin/arigl
+          # cvcpkg's Mesa (llvmpipe) and Xvfb, beside the vtk bundle's libglvnd so libGLX.so.0 finds
+          # libGLX_mesa.so.0 through its $ORIGIN RUNPATH, as in ci.yml's package-linux.
+          cvcpkg install xvfb mesa --prefix "$PY" --config release --link shared
+          "$PY/bin/Xvfb" :99 -screen 0 1280x1024x24 >xvfb.log 2>&1 &
+          xvfb=$!
+          trap 'kill "$xvfb" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 50); do
+            [ -e /tmp/.X11-unix/X99 ] && break
+            sleep 0.2
+          done
+          [ -e /tmp/.X11-unix/X99 ] \
+            || { echo "::error::cvcpkg's Xvfb did not come up on :99"; cat xvfb.log; exit 1; }
+          export DISPLAY=:99 LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe
+          # Its rpath is $ORIGIN/../lib, the flat prefix it is installed into; here the libraries
+          # are split across six.
+          export LD_LIBRARY_PATH="$STAGE/lib:$CVCGL/lib:$PY/lib:$IMGUI/lib:$SDL3/lib:$DEPS/lib:${LD_LIBRARY_PATH:-}"
+          arigl=stage-arigl/bin/arigl
+          "$arigl" info --terminal --json | tee arigl-info.json
+          for want in '"yaml": true' '"ftxui": true' '"tvision": true'; do
+            grep -qF "$want" arigl-info.json \
+              || { echo "::error::arigl info does not report $want: it would ship a stub"; exit 1; }
+          done
+          "$arigl" snapshot --terminal --width 100 --height 26 \
+            examples/ariadne/terminal/terminal_tour.ari | tee arigl-tour.txt
+          grep -qF "agents: 64" arigl-tour.txt \
+            || { echo "::error::the arigl terminal snapshot is missing the tour (agents: 64)"; exit 1; }
+          "$arigl" snapshot --terminal --width 60 --height 16 \
+            examples/ariadne/documents/terminal_scene.ari | tee arigl-scene.txt
+          grep -qF "Show mesh" arigl-scene.txt \
+            || { echo "::error::the arigl terminal snapshot is missing its scene's widgets (Show mesh)"; exit 1; }
+          "$arigl" snapshot --frames 2 --png arigl-window.png examples/ariadne/documents/hello.ari
+          test -s arigl-window.png \
+            || { echo "::error::arigl rendered no window snapshot"; exit 1; }
+          mkdir -p dist
+          cvcpkg pack cvcpkg/recipes/arigl \
+            --from-prefix stage-arigl \
+            --platform "${{ matrix.target.platform }}" \
+            --config release --link shared --local \
+            --cvc-revision ${{ needs.compute-revisions.outputs.arigl }} \
+            --output-dir dist
+          if [ "$DO_PUBLISH" = "1" ]; then
+            if [ -z "${CVCPKG_TOKEN:-}" ]; then
+              echo "CVCPKG_TOKEN secret is required to publish"; exit 1
+            fi
+            cvcpkg publish arigl \
+              --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
+              --platform "${{ matrix.target.platform }}" \
+              --config release --link shared --output-dir dist \
+              --token "$CVCPKG_TOKEN"
+          else
+            echo "dry-run: skipping arigl publish"
+          fi
+
       - name: Build, pack & publish cvcgl [Windows]
         # cvcgl needs no Python, so it runs on Windows unconditionally (release).
         # Mirrors the libcvc Windows path: default VS2022 generator (no vcpkg
         # toolchain), multi-config `--config Release`.
+        id: cvcgl-windows
         if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'windows' && matrix.config == 'release' }}
         shell: pwsh
         env:
@@ -1244,10 +1348,11 @@ jobs:
             Write-Host 'dry-run: skipping pycvc-cp311/pycvc-gl-cp311 publish'
           }
 
-      # ── ari on macOS and Windows ──
-      # The twins of "Build, pack & publish ari [Linux]": the recipe's own build script against the
-      # libcvc just installed into $STAGE. Last in the job because they take cmake and ninja from
-      # cvcpkg, which this action puts first on PATH for every later step.
+      # ── ari on macOS and Windows, arigl on Windows ──
+      # The twins of "Build, pack & publish ari [Linux]" and "... arigl [Linux]": the recipe's own
+      # build script against the libcvc just installed into $STAGE (and for arigl the cvcGL in
+      # stage-cvcgl). Last in the job because they take cmake and ninja from cvcpkg, which this
+      # action puts first on PATH for every later step.
       - name: Install build tools (cvcpkg) for ari
         if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform != 'linux' && matrix.config == 'release' && matrix.pyver == '311' }}
         uses: ./.github/actions/cvcpkg-build-tools
@@ -1349,6 +1454,73 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "ari publish failed ($LASTEXITCODE)" }
           } else {
             Write-Host 'dry-run: skipping ari publish'
+          }
+
+      - name: Build, pack & publish arigl [Windows]
+        # build.ps1 builds with cl and Ninja through _common/env-windows.ps1, as ari's does, against
+        # the libcvc and the shared cvcGL (stage-cvcgl, cvcGL.dll) this job built, with the cvcgl
+        # step's VTK, imgui and SDL3. The same cvcGL asserts as on Linux. The hosted image has no
+        # OpenGL 3.2 driver, so here the binary only has to say what it was built with and load a
+        # document; Linux renders.
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && steps.cvcgl-windows.outcome == 'success' && matrix.target.platform == 'windows' && matrix.config == 'release' && matrix.pyver == '311' }}
+        shell: pwsh
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $depsPath = '${{ steps.libcvc-deps.outputs.path }}'
+          if (-not $depsPath) {
+            $depsPath = if ($env:LIBCVC_DEPS_PREFIX) { $env:LIBCVC_DEPS_PREFIX } else { 'D:\libcvc-deps' }
+          }
+          $stage = "$env:GITHUB_WORKSPACE/stage"
+          $cvcgl = "$env:GITHUB_WORKSPACE/stage-cvcgl"
+          $py    = "$env:GITHUB_WORKSPACE/py"
+          $imgui = "$env:GITHUB_WORKSPACE/prefix-imgui-cvcgl"
+          $sdl3  = "$env:GITHUB_WORKSPACE/prefix-sdl3-cvcgl"
+          if (-not (Select-String -Path "$cvcgl/lib/cmake/cvcGL/cvcGLTargets.cmake" -SimpleMatch 'CVC_ENABLE_IMGUI' -Quiet)) {
+            throw "cvcGL was built without Dear ImGui: arigl's widgets would be inert"
+          }
+          if (-not (Select-String -Path "$cvcgl/lib/cmake/cvcGL/cvcGLConfig.cmake" -SimpleMatch 'find_dependency(SDL3' -Quiet)) {
+            throw 'cvcGL was built without SDL3: arigl would have no keyboard or mouse seam'
+          }
+          $env:CVC_SOURCE_DIR = "$env:GITHUB_WORKSPACE"
+          $env:CVC_BUILD_DIR = "$env:GITHUB_WORKSPACE/build-arigl"
+          $env:CVC_INSTALL_DIR = "$env:GITHUB_WORKSPACE/stage-arigl"
+          $env:CVC_DEPS_PREFIX = "$stage;$cvcgl;$py;$imgui;$sdl3;$depsPath"
+          $env:CVC_BUILD_TYPE = 'Release'
+          $env:CVC_LINK = 'shared'
+          & ./cvcpkg/recipes/arigl/build.ps1
+          if (-not (Test-Path 'stage-arigl/bin/arigl.exe')) { throw 'arigl build installed no bin/arigl.exe' }
+          # cvc.dll, cvcGL.dll and every dependency DLL sit in the prefixes' bin/ directories.
+          $savedPath = $env:PATH
+          $env:PATH = "$stage\bin;$cvcgl\bin;$py\bin;$imgui\bin;$sdl3\bin;$depsPath\bin;$env:PATH"
+          & ./stage-arigl/bin/arigl.exe info --terminal --json | Tee-Object -FilePath arigl-info.json
+          if ($LASTEXITCODE -ne 0) { throw "arigl info failed ($LASTEXITCODE)" }
+          & ./stage-arigl/bin/arigl.exe check --terminal examples/ariadne/terminal/terminal_tour.ari
+          if ($LASTEXITCODE -ne 0) { throw "arigl check failed ($LASTEXITCODE)" }
+          $env:PATH = $savedPath
+          foreach ($want in @('"yaml": true', '"ftxui": true', '"tvision": true')) {
+            if (-not (Select-String -Path arigl-info.json -SimpleMatch $want -Quiet)) {
+              throw "arigl info does not report $($want): it would ship a stub"
+            }
+          }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          cvcpkg pack cvcpkg/recipes/arigl `
+            --from-prefix stage-arigl `
+            --platform windows --config release --link shared --local `
+            --cvc-revision ${{ needs.compute-revisions.outputs.arigl }} `
+            --output-dir dist
+          if ($LASTEXITCODE -ne 0) { throw "arigl pack failed ($LASTEXITCODE)" }
+          $doPublish = ($env:GITHUB_EVENT_NAME -eq 'push') -or ('${{ github.event.inputs.dry_run }}' -eq 'false')
+          if ($doPublish) {
+            if (-not $env:CVCPKG_TOKEN) { throw 'CVCPKG_TOKEN secret is required to publish' }
+            cvcpkg publish arigl `
+              --server "$env:CVCPKG_SERVER" --org "$env:CVCPKG_ORG" `
+              --platform windows --config release --link shared --output-dir dist `
+              --token "$env:CVCPKG_TOKEN"
+            if ($LASTEXITCODE -ne 0) { throw "arigl publish failed ($LASTEXITCODE)" }
+          } else {
+            Write-Host 'dry-run: skipping arigl publish'
           }
 
   # ── Linux libcvc-cuda (GPU variant) ──────────────────────────────────────
