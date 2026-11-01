@@ -469,6 +469,53 @@ TEST(JoltRollout, ProgressTermPricesTheShortfall) {
   EXPECT_LT(worst, 1e-5) << "the term is each step's shortfall, as a fraction of a step's worth";
   EXPECT_GT(total, 0.0) << "the Humvees under way still fall short of 4 m/s somewhere";
 
+  // With a stopping profile (progress_decel), p* is capped at the speed v_stop it can still stop
+  // from at the tolerance, and a step pays for its speed over v_stop at its end. Checked as it is
+  // (the Humvees far from their goals, so v_stop is above their speed) and with a tolerance past
+  // every goal (v_stop 0: each step pays its whole speed).
+  for (const float tol : {with.progress_tol, 1000.0f}) {
+    train_config stop = with;
+    stop.progress_decel = 1.5f * cfg.veh_L / static_cast<float>(vehicle_desc::humvee().wheelbase());
+    stop.progress_tol = tol;
+    coef_trainer ts(stop, 1);
+    const auto vstop = [&](float d) {
+      return std::sqrt(2.0f * stop.progress_decel * std::max(0.0f, d - stop.progress_tol));
+    };
+    cfg.plant->restore(start);
+    double worst_s = 0.0, over_total = 0.0;
+    for (int k = 0; k < 10; ++k) {
+      const std::vector<std::uint8_t> here = cfg.plant->save();
+      std::vector<cvc::nav::diff::dyn4_state<float>> s0(n);
+      for (int i = 0; i < n; ++i)
+        s0[i] = cfg.plant->state(i);
+      const double l0 =
+          t0.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n, 1, nullptr);
+      cfg.plant->restore(here);
+      const double ls =
+          ts.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n, 1, nullptr);
+      double expect = 0.0;
+      for (int i = 0; i < n; ++i) {
+        const cvc::nav::diff::dyn4_state<float> s1 = cfg.plant->state(i);
+        const float gx = goal[2 * i], gy = goal[2 * i + 1];
+        const float d0 = std::hypot(s0[i].x - gx, s0[i].y - gy);
+        const float d1 = std::hypot(s1.x - gx, s1.y - gy);
+        const float want = std::min({p_step, std::max(0.0f, d0 - stop.progress_tol),
+                                     vstop(d0) * static_cast<float>(sc.dt)});
+        expect += std::max(0.0f, want - (d0 - d1)) / p_step / n;
+        const float over = std::max(0.0f, std::fabs(s1.vx) - vstop(d1)) / stop.progress_speed / n;
+        expect += over;
+        over_total += over;
+      }
+      worst_s = std::max(worst_s, std::fabs((ls - l0) - expect));
+    }
+    std::printf("[progress] stopping profile, tolerance %g: overspeed over 10 steps %.4f\n", tol,
+                over_total);
+    EXPECT_LT(worst_s, 1e-5) << "the stopping profile's shortfall and overspeed, step by step";
+    if (tol > 100.0f)
+      EXPECT_GT(over_total, 0.0) << "at the goal every moving Humvee pays its speed";
+  }
+  cfg.plant->restore(start);
+
   // The gradient along alpha's bias over a 30-step window.
   const int window = 30;
   cfg.plant->restore(start);

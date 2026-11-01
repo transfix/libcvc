@@ -110,9 +110,10 @@ void validate_progress(const train_config &c) {
   if (c.rollout != rollout_kind::jolt)
     throw std::invalid_argument("cvc::nav::coef_trainer: w_progress needs rollout_kind::jolt");
   if (!(std::isfinite(c.w_progress) && c.w_progress > 0.0f && std::isfinite(c.progress_speed) &&
-        c.progress_speed > 0.0f && std::isfinite(c.progress_tol) && c.progress_tol >= 0.0f))
+        c.progress_speed > 0.0f && std::isfinite(c.progress_tol) && c.progress_tol >= 0.0f &&
+        std::isfinite(c.progress_decel) && c.progress_decel >= 0.0f))
     throw std::invalid_argument("cvc::nav::coef_trainer: w_progress needs w_progress > 0, "
-                                "progress_speed > 0 and progress_tol >= 0");
+                                "progress_speed > 0, progress_tol >= 0 and progress_decel >= 0");
 }
 
 // w_energy > 0 needs the dynamic rollout and a power model of the same vehicle, or the Jolt
@@ -331,22 +332,49 @@ double plant_window(const training_scene &scene, const train_config &cfg, const 
   const std::vector<float> &disc_off = cfg.coll_offsets.empty() ? axle_only : cfg.coll_offsets;
   const float disc_r = cfg.coll_offsets.empty() ? rr : cfg.coll_rr;
   // The time pressure (train_config::w_progress): a step's shortfall from the progress
-  // progress_speed makes, as a fraction of it. `full` tells the backward which bound p* took: a
-  // step's worth (the shortfall falls as |o_t - goal| grows) or the distance left to progress_tol
-  // (it does not depend on o_t then).
+  // progress_speed makes, as a fraction of it. p* is the least of a step's worth, the distance
+  // left to progress_tol and (progress_decel) a step at the stopping speed v_stop; `dp` is its
+  // derivative in |o_t - goal| for the backward (0, 1, or hdt v_stop'). With progress_decel, a
+  // step also pays for its speed over v_stop at its end, as a fraction of progress_speed.
   const bool progress = cfg.w_progress != 0.0f;
+  const bool stopping = progress && cfg.progress_decel > 0.0f;
   const float p_step = cfg.progress_speed * hdt;
   const float prog_w = progress ? cfg.w_progress / (static_cast<float>(window) * p_step) : 0.0f;
+  const float speed_w =
+      stopping ? cfg.w_progress / (static_cast<float>(window) * cfg.progress_speed) : 0.0f;
+  // v_stop(d) and its derivative (held finite as it goes to 0 at the tolerance).
+  const auto v_stop = [&](float d, float &dv) {
+    const float room = std::max(0.0f, d - cfg.progress_tol);
+    const float v = std::sqrt(2.0f * cfg.progress_decel * room);
+    dv = room > 0.0f ? cfg.progress_decel / std::max(v, 1e-3f * cfg.progress_speed) : 0.0f;
+    return v;
+  };
   struct shortfall {
     float value;
-    bool full;
+    float dp;
   };
   const auto progress_shortfall = [&](const diff::dyn4_state<float> &s0,
                                       const diff::dyn4_state<float> &s1, float gx, float gy) {
     const float d0 = std::hypot(s0.x - gx, s0.y - gy), d1 = std::hypot(s1.x - gx, s1.y - gy);
+    float want = p_step, dp = 0.0f;
     const float left = std::max(0.0f, d0 - cfg.progress_tol);
-    const bool full = p_step <= left;
-    return shortfall{(full ? p_step : left) - (d0 - d1), full};
+    if (left < want) {
+      want = left;
+      dp = 1.0f;
+    }
+    if (stopping) {
+      float dv;
+      const float stop_step = v_stop(d0, dv) * hdt;
+      if (stop_step < want) {
+        want = stop_step;
+        dp = dv * hdt;
+      }
+    }
+    return shortfall{want - (d0 - d1), dp};
+  };
+  // Speed over v_stop at a step's end, and its derivative in |o - goal| (dv, through v_stop).
+  const auto overspeed = [&](const diff::dyn4_state<float> &s1, float gx, float gy, float &dv) {
+    return std::fabs(s1.vx) - v_stop(std::hypot(s1.x - gx, s1.y - gy), dv);
   };
 
   std::vector<policy_step> st(static_cast<std::size_t>(n) * window);
@@ -395,6 +423,12 @@ double plant_window(const training_scene &scene, const train_config &cfg, const 
             progress_shortfall(tape[at(t, ag)], s1, goal[2 * ag], goal[2 * ag + 1]);
         if (sf.value > 0.0f)
           total_loss += static_cast<double>(prog_w) * sf.value * inv_n;
+        if (stopping) {
+          float dv;
+          const float over = overspeed(s1, goal[2 * ag], goal[2 * ag + 1], dv);
+          if (over > 0.0f)
+            total_loss += static_cast<double>(speed_w) * over * inv_n;
+        }
       }
       if (energy) {
         const float E = static_cast<float>(plant.lines(ag).drawn);
@@ -467,20 +501,30 @@ double plant_window(const training_scene &scene, const train_config &cfg, const 
             g1.psi += off * (ch * doy - sh * dox);
         }
       }
-      // The shortfall rises with |o_{t+1} - goal| and, at a full step's p*, falls with
-      // |o_t - goal|: that part goes on o_t's gradient below.
+      // The shortfall rises with |o_{t+1} - goal| and moves with |o_t - goal| as p* does, less 1:
+      // that part goes on o_t's gradient below. The overspeed rises with |vx_{t+1}| and falls as
+      // v_stop does with |o_{t+1} - goal|.
       float prog_g0 = 0.0f;
       if (progress) {
+        const float d1 = std::hypot(s1.x - gx, s1.y - gy);
+        float g_d1 = 0.0f;
         const shortfall sf = progress_shortfall(s0, s1, gx, gy);
         if (sf.value > 0.0f) {
           const float c = prog_w * static_cast<float>(inv_n);
-          const float d1 = std::hypot(s1.x - gx, s1.y - gy);
-          if (d1 > 1e-9f) {
-            g1.x += c * (s1.x - gx) / d1;
-            g1.y += c * (s1.y - gy) / d1;
+          g_d1 += c;
+          prog_g0 = c * (sf.dp - 1.0f);
+        }
+        if (stopping) {
+          float dv;
+          if (overspeed(s1, gx, gy, dv) > 0.0f) {
+            const float c = speed_w * static_cast<float>(inv_n);
+            g1.vx += s1.vx >= 0.0f ? c : -c;
+            g_d1 -= c * dv;
           }
-          if (sf.full)
-            prog_g0 = -c;
+        }
+        if (g_d1 != 0.0f && d1 > 1e-9f) {
+          g1.x += g_d1 * (s1.x - gx) / d1;
+          g1.y += g_d1 * (s1.y - gy) / d1;
         }
       }
       if (energy) {

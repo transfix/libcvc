@@ -143,6 +143,16 @@ std::vector<float> &footprint_of(const vehicle_desc &d) {
   return offsets;
 }
 
+// The city the Jolt experiments train and score on. JOLT_EXP_DHAT_M > 0 sets the controller's
+// barrier range (the scene's d_hat, in metres; 7 m at its 0.35): how far from a wall its repulsion
+// starts, in training and in sim_world's scoring alike.
+cvc::nav::training_scene experiment_scene() {
+  cvc::nav::training_scene sc = cvc::nav::city_scene(96);
+  if (const char *e = std::getenv("JOLT_EXP_DHAT_M"); e && std::atof(e) > 0.0)
+    sc.d_hat = static_cast<float>(std::atof(e) * kS);
+  return sc;
+}
+
 // JOLT_EXP_BODY_MARGIN_M > 0: the training's collision penalty on the vehicle's own body, nav's
 // footprint (four discs of 1.3 half-widths, tail to nose, which cover the corners) with that
 // margin in metres, instead of the scene's 3 m disc on the rear axle and its 7 m d_hat.
@@ -1390,7 +1400,9 @@ TEST(NavPlantConvergence, CheckpointSelectionOnJoltReach) {
 // instead of reach. JOLT_EXP_PROGRESS_MPS (4) is train_config::progress_speed for the arms that
 // give a w_progress. JOLT_EXP_EPISODE is train_config::episode_steps (0, a fresh batch every
 // outer step). JOLT_EXP_BODY_MARGIN_M (metres) charges the collision penalty on the Humvee's own
-// footprint with that margin (use_body_penalty). JOLT_EXP_SCORE (paths separated by ';') scores
+// footprint with that margin (use_body_penalty). JOLT_EXP_STOP_DECEL (m/s^2) is
+// train_config::progress_decel, and JOLT_EXP_DHAT_M the controller's barrier range in metres
+// (experiment_scene). JOLT_EXP_SCORE (paths separated by ';') scores
 // saved policies on the
 // held-out seeds first, untrained, with the same report (JOLT_EXP_ARMS=none: only those).
 TEST(NavPlantConvergence, JoltTrainedHumveeOnJoltReach) {
@@ -1405,7 +1417,7 @@ TEST(NavPlantConvergence, JoltTrainedHumveeOnJoltReach) {
                                     ? std::getenv("JOLT_EXP_ARMS")
                                     : "jolt:1:5e-5:60:10,dynamic:1:5e-5:60:10";
   const std::string out = std::getenv("JOLT_EXP_OUT") ? std::getenv("JOLT_EXP_OUT") : "";
-  const cvc::nav::training_scene sc = cvc::nav::city_scene(96);
+  const cvc::nav::training_scene sc = experiment_scene();
   const vehicle_desc hv = vehicle_desc::humvee();
   const double L = hv.wheelbase() * kS; // 0.165
   cvc::nav::train_config base;
@@ -1576,6 +1588,8 @@ TEST(NavPlantConvergence, JoltTrainedHumveeOnJoltReach) {
       cfg.w_progress = static_cast<float>(std::atof(wprog_s.c_str()));
       cfg.progress_speed = static_cast<float>(progress_mps * kS);
       cfg.progress_tol = held.reach_tol;
+      if (const char *e = std::getenv("JOLT_EXP_STOP_DECEL")) // m/s^2: the stopping profile
+        cfg.progress_decel = static_cast<float>(std::atof(e) * kS);
     }
     try {
       const auto t0 = now();
@@ -1661,7 +1675,7 @@ TEST(NavPlantConvergence, WhyTrainingSlowsTheJoltHumvee) {
   const float eps = std::getenv("JOLT_WHY_EPS")
                         ? static_cast<float>(std::atof(std::getenv("JOLT_WHY_EPS")))
                         : 5e-3f;
-  const cvc::nav::training_scene sc = cvc::nav::city_scene(96);
+  const cvc::nav::training_scene sc = experiment_scene();
   const vehicle_desc hv = vehicle_desc::humvee();
   const double L = hv.wheelbase() * kS;
   cvc::nav::train_config cfg;

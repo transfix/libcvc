@@ -252,9 +252,17 @@ struct train_config {
   // and a sum of the steps' progress would telescope back to it), so at w_coll 10-20 the policy
   // traded its speed for clearance: about 2 m/s on the Jolt Humvee against the untrained 6.5.
   // 0 (the default) leaves the loss and its gradient as without it.
+  //
+  // progress_decel > 0 (normalized units / s^2) brings the vehicle in to stop: p* is also capped
+  // at a step of v_stop(|o_t - goal|), v_stop(d) = sqrt(2 progress_decel max(0, d - progress_tol))
+  // the speed it can still stop from at the tolerance, and each step adds
+  //   w_progress / window * max(0, |vx_{t+1}| - v_stop(|o_{t+1} - goal|)) / progress_speed
+  // for arriving faster than that (at the goal, any speed). Without it the term asked for full
+  // speed up to the tolerance, and trained Humvees came in at 6-7 m/s and stopped 7-10 m past.
   float w_progress = 0.0f;
   float progress_speed = 0.0f;
   float progress_tol = 0.0f;
+  float progress_decel = 0.0f;
   // Episodes (rollout == jolt). 0 (the default): each outer step drives a fresh batch from rest
   // for `horizon` steps -- 3.6 s at 60, while the goals are 25-100 m away, so training never sees
   // a vehicle cruise or arrive. > 0: a batch keeps driving across outer steps, `horizon` more
