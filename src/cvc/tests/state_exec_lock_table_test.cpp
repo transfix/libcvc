@@ -1548,6 +1548,10 @@ TEST(LockShared, CrossThreadAttachNeedsASharedManager) {
       } catch (const std::logic_error &e) {
         EXPECT_NE(std::string(e.what()).find("state_exec.locks.threading"), std::string::npos)
             << e.what();
+        // and when that mode is chosen (R3b F6)
+        EXPECT_NE(std::string(e.what()).find("fixed when the app first makes its manager"),
+                  std::string::npos)
+            << e.what();
       }
       EXPECT_NE(t.canonical().find("homes\nH0 prio=0\nrecs\n"), std::string::npos); // no H1
     }

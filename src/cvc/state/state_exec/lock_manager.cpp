@@ -1997,7 +1997,8 @@ home_id lock_table::attach_home(bool prio, std::shared_ptr<lock_port> port,
     throw std::logic_error("lock_table::attach_home: before L3 a manager accepts one home");
   if (attach.cross_thread && !opts_.shared)
     throw std::logic_error("lock_manager: a home pumped on another thread needs a shared manager "
-                           "(state_exec.locks.threading)");
+                           "(state_exec.locks.threading, fixed when the app first makes its "
+                           "manager)");
   m.begin_op(&out);
   const home_id h = m.next_home++;              // never reused (2.1)
   impl::home_entry &e = m.homes.emplace_back(); // ids ascend: the entries stay in id order
