@@ -19,10 +19,13 @@ deadlock across Execs (LD-5), and Exec.lock_query from any thread (PR-8).
 CVC_LOCKS_SANITIZER=1 (the sanitizer jobs) runs the smaller sizes.
 """
 
+import asyncio
 import faulthandler
 import gc
+import json
 import math
 import os
+import re
 import sys
 import threading
 import time
@@ -925,6 +928,40 @@ def test_l3_exec_needs_a_shared_manager():
     assert pycvc.Exec(app).run('(with-lock "k" (+ 1 2))') == "3"
 
 
+def test_l3_set_lock_manager_attaches_only_a_first_home():
+    # scheduler.set_lock_manager(app) attaches a scheduler's first lock home only: a home replaced
+    # would be freed under what uses it. An Exec's run() and lock_query use their scheduler's, so a
+    # swap from inside run() raises (it used to free the home run() kept), and the Exec runs on.
+    app = pycvc.make_app()
+    ex = pycvc.Exec(app, idle_timeout=0.2)
+    ex.register_fn("swap", lambda: ex.scheduler().set_lock_manager(app) or True)
+    e = _raises(RuntimeError, ex.run, '(begin (swap) (msg-recv "never"))')
+    assert "already has its lock home" in str(e), e
+    assert ex.run('(with-lock "k" (+ 1 2))') == "3"
+    assert ex.lock_query("") == {"held": [], "waiting": []}
+    # A fresh scheduler attaches (LT-7 steps one), and then has its home; so does one whose first
+    # with-lock made it a private one.
+    s, env = _app_scheduler(app)
+    pid = s.execute('(with-lock "k" 1)', _env_opts(env))
+    s.run()
+    assert s.get_result(pid) == 1
+    _raises(RuntimeError, s.set_lock_manager, app)
+    t = pycvc.scheduler()
+    ctx = pycvc.intrinsics_context()
+    ctx.sched = t
+    ctx.root = pycvc.State.instance(app)
+    env = pycvc.builtins.make_default_environment()
+    pycvc.register_intrinsics(env, ctx)
+    pid = t.execute('(with-lock "k" 2)', _env_opts(env))
+    t.run()
+    assert t.get_result(pid) == 2
+    e = _raises(RuntimeError, t.set_lock_manager, app)
+    assert "already has its lock home" in str(e), e
+    for sched in (s, t):
+        for p in [i.pid for i in sched.list_processes()]:
+            assert sched.reap(p)  # their environments hold the context, which holds the scheduler
+
+
 def test_lt01_two_execs_hot_key():
     # LT-1: two Execs on two Python threads, one hot key, each section a read-modify-write of a
     # tree value, which isn't atomic without the lock: the count exact.
@@ -1072,6 +1109,43 @@ def test_lt07_progress_keeps_waiter_alive():
         assert s.reap(pid)  # their environments hold the context, which holds the scheduler
 
 
+def test_lt07b_spawned_waiter_counts():
+    # The idle rule counts a lock wait of any of the Exec's processes, not only run()'s own
+    # (design 9.2: "a lock wait"). A's program waits on msg-recv for a child that waits for a key B
+    # holds for 2 s while it keeps stepping: granted after B releases, never killed. Behind a B
+    # nobody pumps, the same is killed at the limit, naming the child and its key.
+    app = pycvc.make_app()
+    a = pycvc.Exec(app, idle_timeout=0.5)
+    b = pycvc.Exec(app)
+    holds = threading.Event()
+    released = {}
+    b.register_fn("holds", lambda: holds.set() or True)
+    b.register_fn("releasing", lambda: released.setdefault("t", time.monotonic()) > 0)
+
+    def child_waits(key, channel):
+        return (f'(begin (spawn "(with-lock \\"{key}\\" (msg-send \\"{channel}\\" \\"ok\\"))") '
+                f'(msg-recv "{channel}"))')
+
+    tb, ob = _in_thread("lt07b-b", b.run, '(with-lock "lt07b.k" (begin (holds) '
+                        '(for i (range 20) (sleep 0.1)) (releasing)))')
+    assert holds.wait(WAIT)
+    t0 = time.monotonic()
+    got = a.run(child_waits("lt07b.k", "lt07b.done"))
+    done = time.monotonic()
+    _join(tb)
+    print(f"  a spawned waiter behind B's 2 s section: granted after {done - t0:.2f} s")
+    assert json.loads(got)["payload"] == "ok" and "error" not in ob, (got, ob)  # the message
+    assert done >= released["t"] and done - t0 < WAIT
+
+    _spawn_holder(b, "lt07b.k2", "lt07b.never")
+    t0 = time.monotonic()
+    e = _raises(RuntimeError, a.run, child_waits("lt07b.k2", "lt07b.done2"))
+    print(f"  behind an unpumped Exec: killed after {time.monotonic() - t0:.2f} s: {e}")
+    assert re.search(r"parked with no pending work \(pid \d+, pid \d+ waiting for lock lt07b\.k2\)",
+                     str(e)), e
+    assert time.monotonic() - t0 < WAIT
+
+
 def test_lt08_idle_limit():
     # LT-8: the idle rule is per home. B (idle_timeout 0.5) waits behind A's holder.
     idle = 0.5
@@ -1112,6 +1186,26 @@ def test_lt08_idle_limit():
     print(f"  killed {gap:.2f} s after A's last step (idle_timeout {idle} s): {e}")
     assert isinstance(e, RuntimeError) and "waiting for lock lt08.k3)" in str(e), ob
     assert idle <= gap < WAIT
+
+
+def test_lt08c_grant_posted_before_the_idle_test():
+    # A grant posted to the Exec's lock port after run()'s drain, in the pass whose idle test finds
+    # the limit passed, is work pending, which the next pass applies: not a kill. idle_timeout=0
+    # makes the limit pass at the first pass with nothing else pending. B's own coroutine, which
+    # runs between B's steps and that idle test, kills A's holder after 50 ms, and B's grant is
+    # posted then.
+    app = pycvc.make_app()
+    a = pycvc.Exec(app)
+    holder = _spawn_holder(a, "lt08c.k", "lt08c.never")
+    b = pycvc.Exec(app, idle_timeout=0.0)
+
+    async def release():
+        await asyncio.sleep(0.05)
+        return a.scheduler().kill(holder)
+
+    b.register_async_coro("release", release)
+    assert b.run('(begin (spawn "(release)") (with-lock "lt08c.k" "b"))') == "b"
+    assert a.scheduler().get_process_info(holder).status == process_status.killed
 
 
 def test_lt08b_same_exec_holder_parked():

@@ -80,8 +80,8 @@ static const char *kDefaultScript =
     "    print('PYCVC_VTK_BRIDGE_OK')\n"
     "except Exception as _e:\n"
     "    print('vtk bridge not embedded:', type(_e).__name__, _e)\n"
-    // An Exec attaches its home as Exec(app) does everywhere (cross_thread = threads_compiled_in,
-    // false here); were that refused, this raises and the host exits non-zero.
+    // An Exec attaches its home as Exec(app) does everywhere (threaded_host_attach(), same-thread
+    // here, with no threads); were that refused, this raises and the host exits non-zero.
     "_ex = pycvc.Exec(pycvc.make_app())\n"
     "_r = _ex.run('(with-lock \"k\" (+ 1 2))')\n"
     "assert _r == '3', _r\n"

@@ -3924,13 +3924,18 @@ class scheduler_base {};
   // set_lock_manager(app): the scheduler's with-lock table becomes app's (app::lock_manager(), as
   // for any host scheduler over an app's tree, docs/STATE_EXEC_LOCKS.md 8.4), shared with the
   // app's Execs. It may then be pumped on any Python thread: its home attaches as an Exec's does,
-  // so state_exec.locks.threading single refuses it (RuntimeError naming the setting). Raises
-  // RuntimeError too while a process of the scheduler holds or waits for a lock.
+  // so state_exec.locks.threading single refuses it (RuntimeError naming the setting). It attaches
+  // only a scheduler's first lock home, so call it before the scheduler's first with-lock: a home
+  // replaced would be freed under what uses it (an Exec's run() and lock_query use their
+  // scheduler's), so a scheduler that has one (an Exec's always does) raises RuntimeError.
   void set_lock_manager(const std::shared_ptr<cvc::app> &app) {
     if (!app)
       throw std::invalid_argument("set_lock_manager: app is None");
-    $self->set_lock_manager(app->lock_manager(),
-                            cvc::state_exec::lock_attach{cvc::state_exec::threads_compiled_in});
+    if ($self->has_lock_home())
+      throw std::logic_error("set_lock_manager: the scheduler already has its lock home (an "
+                             "Exec's scheduler, or one that has run a with-lock); only its first "
+                             "can be attached");
+    $self->set_lock_manager(app->lock_manager(), cvc::state_exec::threaded_host_attach());
   }
 }
 %enddef

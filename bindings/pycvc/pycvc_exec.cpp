@@ -478,6 +478,32 @@ progress_waited_for(const lock_home &home, int pid, double idle_timeout,
   return latest;
 }
 
+// The lock waits of an Exec's processes, for run()'s idle rule: a lock wait of any of them counts,
+// not only of run()'s own (design 9.2). `progress` is the latest progress_waited_for over them,
+// `named` one of them (pid and absolute key) for a kill's message, `root` when it waits.
+struct exec_lock_waits {
+  std::optional<std::chrono::steady_clock::time_point> progress;
+  std::optional<std::pair<int, std::string>> named;
+};
+
+exec_lock_waits lock_waits_of(const async_scheduler &sched, const lock_home &home, int root,
+                              double idle_timeout, std::chrono::steady_clock::time_point now) {
+  exec_lock_waits out;
+  for (const process_info &p : sched.list_processes()) {
+    if (p.status != process_status::waiting)
+      continue;
+    std::optional<std::string> key = lock_waited_for(p);
+    if (!key)
+      continue;
+    if (!out.named || p.pid == root)
+      out.named.emplace(p.pid, std::move(*key));
+    if (const std::optional<std::chrono::steady_clock::time_point> t =
+            progress_waited_for(home, p.pid, idle_timeout, now))
+      out.progress = std::max(out.progress.value_or(*t), *t);
+  }
+  return out;
+}
+
 // A lock-query answer as the DSL's (lock-query) builds it (lock_intrinsics.cpp), its keys shown
 // under `root` (protocol 5.10). Plain C++ values: Exec::lock_query converts them once it holds the
 // GIL again.
@@ -727,11 +753,10 @@ Exec::Exec(const std::shared_ptr<cvc::app> &app, PyObject *policy, double idle_t
   impl_->sched.set_data_defaults(async_scheduler::host_data_defaults());
   // Its locks are the app's (docs/STATE_EXEC_LOCKS.md 8.4, 9.2): one namespace for every Exec and
   // the app's exec scheduler, the home attached now. An Exec may run() on any Python thread, so
-  // its home attaches as one pumped on a thread of its own wherever the build has threads, which
-  // a single-mode manager refuses, naming state_exec.locks.threading (8.3). Without threads (the
-  // static Emscripten pycvc) auto made the manager single, and it takes this attach (9.5).
-  impl_->sched.set_lock_manager(app->lock_manager(),
-                                cvc::state_exec::lock_attach{cvc::state_exec::threads_compiled_in});
+  // its home attaches as a threaded host's: cross-thread wherever the build has threads, which a
+  // single-mode manager refuses, naming state_exec.locks.threading (8.3). Without threads (the
+  // static Emscripten pycvc) auto made the manager single, and it takes that attach (9.5).
+  impl_->sched.set_lock_manager(app->lock_manager(), cvc::state_exec::threaded_host_attach());
 
   impl_->host_proc = make_process();
   impl_->host_proc->pid = 0;
@@ -912,9 +937,6 @@ std::string Exec::run(const std::string &src) {
 
   async_scheduler &sched = impl_->sched;
   cvc::state_exec::async_host &host = *impl_->host;
-  // The Exec's lock home, attached by the constructor: the idle test reads its blocking_sinks and
-  // stores its progress.
-  lock_home &home = *sched.locks();
   execute_options opts;
   opts.name = "pycvc";
   opts.env = impl_->env;
@@ -999,28 +1021,32 @@ std::string Exec::run(const std::string &src) {
       // a delivery is coming, so keep the idle clock fresh; only a park with NOTHING pending can
       // time out (e.g. a msg-recv on a channel nobody sends to) — safe to abandon then, no worker
       // to outlive us. Work pending here is this home's progress too (docs/STATE_EXEC_LOCKS.md
-      // 8.4), which a waiter on another Exec behind one of our processes reads. A lock wait is
-      // pending only while another home it waits for makes progress (9.2), as of that progress:
-      // the idle window runs from it, so a wait behind a home that stopped is killed about
-      // idle_timeout after its last progress. It stores none, so two Execs whose waiters wait on
-      // each other's parked holders can't keep each other alive.
-      const std::optional<std::string> lock_key = lock_waited_for(*info);
+      // 8.4), which a waiter on another Exec behind one of our processes reads. A lock wait of
+      // any of our processes is pending only while another home it waits for makes progress
+      // (9.2), as of that progress: the idle window runs from it, so a wait behind a home that
+      // stopped is killed about idle_timeout after its last progress. It stores none, so two
+      // Execs whose waiters wait on each other's parked holders can't keep each other alive.
+      // A post in the lock port (a grant made on another thread after this pass's drain) is work
+      // pending too: the next pass applies it. The Exec's lock home is read where it is used, never
+      // kept across the loop.
+      lock_home &home = *sched.locks();
       if (host.in_flight() > 0 || !impl_->pending_coros.empty() || sched.has_runnable() ||
-          had_runnable) {
+          had_runnable || home.port_pending()) {
         const clock::time_point now = clock::now();
         idle_deadline = cvc::state_exec::detail::time_after(now, idle_timeout);
         home.store_progress(now);
       } else {
-        const std::optional<clock::time_point> progress =
-            lock_key ? progress_waited_for(home, pid, idle_timeout, clock::now()) : std::nullopt;
-        if (progress)
-          idle_deadline =
-              std::max(idle_deadline, cvc::state_exec::detail::time_after(*progress, idle_timeout));
+        const exec_lock_waits waits = lock_waits_of(sched, home, pid, idle_timeout, clock::now());
+        if (waits.progress)
+          idle_deadline = std::max(
+              idle_deadline, cvc::state_exec::detail::time_after(*waits.progress, idle_timeout));
         if (clock::now() > idle_deadline) {
           sched.kill(pid);
           error = "pycvc.Exec.run: parked with no pending work (pid " + std::to_string(pid);
-          if (lock_key)
-            *error += ", waiting for lock " + lock_home::show(*lock_key, impl->ictx.root_path);
+          if (const auto &named = waits.named) // ", waiting for lock k" or ", pid 2 waiting ..."
+            *error +=
+                (named->first == pid ? std::string(",") : ", pid " + std::to_string(named->first)) +
+                " waiting for lock " + lock_home::show(named->second, impl->ictx.root_path);
           *error += ")";
           break;
         }
@@ -1108,13 +1134,17 @@ PyObject *Exec::lock_query(const std::string &prefix) {
     abs = cvc::state_exec::detail::resolve_lock_key(ctx, prefix, "Exec.lock_query");
   // Straight to the manager, from any thread (docs/STATE_EXEC_LOCKS.md 7.4): it never waits for
   // run() or the control mutex, only for the manager's mutex, which nothing holds while it waits
-  // for the GIL. The GIL is released for the query and taken back once it has returned, and only
-  // then are Python objects made. The home is the viewer: only this Exec's pids show (owner "").
-  lock_home &home = *impl->sched.locks();
+  // for the GIL. The home is the viewer (only this Exec's pids show, owner ""): its manager and id
+  // are copied while the GIL is held, and the home itself is never touched without it. The GIL is
+  // released for the query and taken back once it has returned, and only then are Python objects
+  // made.
+  const lock_home &home = *impl->sched.locks();
+  const std::shared_ptr<lock_manager> manager = home.manager_ptr();
+  const cvc::state_exec::detail::home_id viewer = home.id();
   lock_query_result r;
   {
     gil_released nogil;
-    r = home.manager().query(abs, &home, "");
+    r = manager->table().query(abs, viewer, "");
   }
   return value_to_py(lock_query_value(r, ctx.root_path));
 }
