@@ -12,13 +12,14 @@
 # libigl assembly). The field is shown on the tet boundary surface and on a movable axis-aligned
 # cut; the elements view shows the mesh itself, cut away, each element coloured by its size or
 # quality. Both are coloured through the node's field colours (graphics.root.children.domain
-# .field_colors, a transfer function: the Colours editor edits its ramp over the values' histogram,
-# and the Colormap combo resets it to a named ramp). Binds the fe.* keys
+# .field_colors, a transfer function: the Colours editor edits its ramp and opacity curve over the
+# values' histogram -- the field is see-through where the curve is low -- and the Colormap combo
+# resets it to a named, opaque ramp). Binds the fe.* keys
 # the cvcGL fe_lab realizer owns (state at "<scene>.graphics.root.children.domain.fe.*"). Commands
 # go through fe.request: the realizer consumes it and runs the job off the render thread; Stop
-# interrupts a heat solve at its next step, and is enabled only while one runs (fe.stoppable):
-# loading, tet meshing and the other solves cannot be interrupted. Needs a libcvc built with
-# CVC_ENABLE_LIBIGL (and CVC_ENABLE_MESHER for tet meshing).
+# ends the running job at its next step, and is enabled only while one runs (fe.stoppable): a heat
+# solve keeps its field so far, a load, mesh or other solve keeps nothing (the node keeps what it
+# had). Needs a libcvc built with CVC_ENABLE_LIBIGL (and CVC_ENABLE_MESHER for tet meshing).
 #
 #   Poisson: -lap u = f inside, u = 0 on the whole boundary.
 #   Heat:    u_t = k lap u from u = 0, the bottom 5% of the boundary held at 1 (a hot floor), the
@@ -171,7 +172,7 @@ units:
       - button: Stop
         on: (state-set "graphics.root.children.domain.fe.request" "stop")
         enabled_when: (= (state-get "graphics.root.children.domain.fe.stoppable") "1")
-        tooltip: "interrupts a running heat solve; loading, meshing and the other solves run to the end"
+        tooltip: "ends the running job: a heat solve keeps its field so far, anything else keeps nothing"
       - separator
       - text: "3. Show"
       - combo: View
@@ -204,7 +205,6 @@ units:
         bind: graphics.root.children.domain.field_colors
         height: 70
         layers: [histogram]
-        show_opacity: false
         show_isocontours: false
         interactive_updates: true
       - checkbox: Boundary surface

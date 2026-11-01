@@ -332,6 +332,12 @@ public:
     // coordinates are screen cells (on the tvision desktop, the desktop's). cvcGL's TerminalScene
     // turns background drags and the wheel into camera moves with it.
     std::function<bool(const TermEvent &)> background_input;
+
+    // A line to show along the bottom of the screen, over the document (wrapped when it is wider
+    // than the screen), asked every frame; "" shows none. ari shows its latest warning there for a
+    // few seconds (LiveWarnings::notice, host_warnings.h). The tvision desktop shows it in its
+    // status line.
+    std::function<std::string()> notice;
   };
 
   // Why run() returned.
