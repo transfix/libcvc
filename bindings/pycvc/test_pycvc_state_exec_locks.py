@@ -1146,6 +1146,33 @@ def test_lt07b_spawned_waiter_counts():
     assert time.monotonic() - t0 < WAIT
 
 
+def test_lt07c_many_spawned_waiters():
+    # The idle rule searches from all of an Exec's lock waiters at once, one search per idle pass:
+    # 200 spawned waiters on one key behind another Exec's holder that keeps stepping for 2 s are
+    # granted after its release, every one, and the Exec is never killed.
+    n = 50 if SANITIZER else 200
+    app = pycvc.make_app()
+    a = pycvc.Exec(app, idle_timeout=0.5)
+    b = pycvc.Exec(app)
+    holds = threading.Event()
+    released = {}
+    b.register_fn("holds", lambda: holds.set() or True)
+    b.register_fn("releasing", lambda: released.setdefault("t", time.monotonic()) > 0)
+    tb, ob = _in_thread("lt07c-b", b.run, '(with-lock "lt07c.k" (begin (holds) '
+                        '(for i (range 20) (sleep 0.1)) (releasing)))')
+    assert holds.wait(WAIT)
+    child = '(with-lock \\"lt07c.k\\" (msg-send \\"lt07c.done\\" \\"x\\"))'
+    t0 = time.monotonic()
+    got = a.run(f'(begin (for i (range {n}) (spawn "{child}")) '
+                f'(for i (range {n}) (msg-recv "lt07c.done")) "all")')
+    done = time.monotonic()
+    _join(tb)
+    print(f"  {n} spawned waiters behind B's 2 s section: all granted after {done - t0:.2f} s")
+    assert got == "all" and "error" not in ob, ob
+    assert done >= released["t"] and done - t0 < LONG
+    assert a.lock_query("") == {"held": [], "waiting": []}
+
+
 def test_lt08_idle_limit():
     # LT-8: the idle rule is per home. B (idle_timeout 0.5) waits behind A's holder.
     idle = 0.5
