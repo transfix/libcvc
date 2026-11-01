@@ -281,7 +281,8 @@ unset, as for the app's exec scheduler; an unknown value is logged and
 `round_robin` used), or pass a `pycvc.scheduling_policy` member or its name
 (`"round_robin"`, `"priority"`, `"priority_rr"`). `idle_timeout` is how long, in
 seconds, `run()` waits while its program is parked with nothing pending before it
-kills it. Anything else, or a negative or NaN `idle_timeout`, raises `ValueError`.
+kills it (a lock wait's rule is under "Locks across `Exec`s and threads", below).
+Anything else, or a negative or NaN `idle_timeout`, raises `ValueError`.
 
 ```python
 ex = pycvc.Exec(app, policy="priority_rr")    # or policy=pycvc.scheduling_policy.priority_rr
@@ -295,7 +296,8 @@ ex.get_priority(pid)   # {'base': 5, 'effective': 5, 'floor': 0, 'policy': sched
 returns the dict above, or `None` for a pid the scheduler doesn't have (a reaped one
 included). Under `round_robin` a change is stored and reported and changes no pick.
 
-They are the two `Exec` calls any thread may make:
+They and `lock_query` (below) are the `Exec` calls any thread may make. `lock_query` never
+waits; these two act as follows:
 
 - With no `run()` active, they act at once.
 - From inside `run()` (a registered function, coroutine or callback), they act at once.
@@ -376,3 +378,65 @@ ctx.lock_default_timeout = 1.0              # with-lock with no :timeout gives u
 Contract tests: `test_pycvc_exec.py`, `test_pycvc_state_exec.py`,
 `test_pycvc_state_exec_sched.py`, `test_pycvc_state_exec_eval.py`,
 `test_pycvc_state_exec_data.py`.
+
+### Locks across `Exec`s and threads
+
+Every `Exec` attaches its scheduler to the app's lock manager (`app::lock_manager()`,
+`docs/STATE_EXEC_LOCKS.md` 8.4, 9.2), so the `with-lock` keys of all an app's `Exec`s, and of its
+exec scheduler (Ariadne's), are one namespace: a section in one excludes an overlapping section in
+any other, whatever thread runs it. pycvc runs schedulers on threads of its own and says so at
+import, so the manager's default mode (`state_exec.locks.threading` `auto`) is `shared`: one mutex
+around every lock operation. With the setting at `single`, `Exec(app)` raises `RuntimeError`
+naming it. A build without threads (the static Emscripten pycvc) makes a `single` manager and
+attaches every `Exec` to it.
+
+```python
+import threading
+app = pycvc.make_app()
+pycvc.state_set(app, "n", "0")
+prog = '(for i (range 1000) (with-lock "k" (state-set "n" (+ (int (state-get "n")) 1))))'
+execs = [pycvc.Exec(app) for _ in range(2)]
+threads = [threading.Thread(target=ex.run, args=(prog,)) for ex in execs]
+for t in threads: t.start()
+for t in threads: t.join()
+pycvc.state_get(app, "n")         # "2000"
+execs[0].lock_query()             # {'held': [], 'waiting': []}
+```
+
+A grant to a waiter in another `Exec` is posted to that `Exec`'s scheduler, and its `run()`
+applies it between steps; a `run()` waiting for work wakes on the post. An `Exec` with no `run()`
+active keeps the grant, and the key, for its waiter until its next `run()`. A cycle across `Exec`s
+raises `DeadlockError` in the request that closes it, when it blocks; its `cycle` shows another
+`Exec`'s pids as `None`, since pids repeat across `Exec`s. Each handoff of a key between threads
+costs a post and a wake, so keep a hot key's sections in one `Exec`.
+
+`Exec.lock_query(prefix="")` returns the app's locks under `prefix` as `(lock-query prefix)` does
+in the `Exec`'s programs: `{"held": [{"key", "mode", "pids", "count", "generation",
+"abandoned"}], "waiting": [{"key", "mode", "pid"}]}`. `""` is every key; otherwise `prefix` is a
+key as a program writes it. Counts include every `Exec`'s holds and waiters; pids show only for
+this `Exec`'s processes (another's are left out of `pids`, and are `None` in `waiting`). Any thread
+may call it, with or without a `run()` active: it reads the manager under the manager's mutex,
+with the GIL released, and never waits for `run()`.
+
+**`idle_timeout` and lock waits.** `run()` kills a program left parked with nothing pending for
+`idle_timeout` seconds. A lock wait counts as pending only while one of the processes it
+ultimately waits for (a holder, or an earlier waiter, that waits for no lock itself) is on another
+`Exec`, or a scheduler given the app's manager, that made progress within the last `idle_timeout`
+seconds; the window then runs from that progress. A scheduler makes progress at each step, and an
+`Exec`'s `run()` also whenever it has work pending. So a waiter behind another `Exec` that keeps
+stepping, or awaits an async call, lives; one behind an `Exec` that nobody runs, or that stopped,
+is killed about `idle_timeout` after that `Exec`'s last progress. The rule is per `Exec`, not per
+holder: a holder parked for ever on an `Exec` that keeps stepping other processes keeps the waiter
+alive. A holder on the waiter's own `Exec` counts only through `run()`'s own test (async calls in
+flight, pending coroutines, runnable processes): one parked on `msg-recv`, with nothing else
+pending there, is no progress. The kill raises `RuntimeError`, naming the key:
+`pycvc.Exec.run: parked with no pending work (pid N, waiting for lock k)`.
+
+`pycvc.scheduler` and `pycvc.async_scheduler` can take the app's manager too:
+`sched.set_lock_manager(app)` gives the scheduler `app::lock_manager()`, so its programs' locks meet
+the `Exec`s'. It attaches as an `Exec` does, since Python may step it on any thread: with
+`state_exec.locks.threading` at `single` it raises `RuntimeError` naming the setting. It raises
+`RuntimeError` too while a process of the scheduler holds or waits for a lock. A scheduler given no
+manager keeps a private one, as in C++.
+
+Contract test: `test_pycvc_state_exec_locks.py`.

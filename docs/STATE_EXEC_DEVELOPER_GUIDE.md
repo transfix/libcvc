@@ -1626,11 +1626,82 @@ it asks again, at the back of the queue, with what was left of its timeout. A re
 environment has no `with-lock` lock form raises `LockError` (`"restore"`) in the restored
 program.
 
-**Hosts.** Each scheduler has its own lock manager, made when a program first locks, unless the
-host gives it one with `set_lock_manager`. The app's `exec_scheduler()` uses the app's manager
-(`app::lock_manager()`). Ariadne's actions give up after `ariadne.exec.lock_timeout` seconds (1.0)
-when they name no `:timeout`. pycvc's `register_intrinsics` keeps the lock form's context alive,
-and `intrinsics_context.lock_wait_allowed` / `lock_default_timeout` set the context's rules.
+**Hosts: one manager per app.** A scheduler given no manager makes a private one when a program
+first locks, unless the host gives it one with `set_lock_manager`. An app has one,
+`app::lock_manager()`, and its host schedulers use it: `app::exec_scheduler()` (Ariadne's residents
+and actions), Ariadne's `init:` lane, and every pycvc `Exec`. So their `with-lock` keys are one
+namespace: a section in any of them excludes an overlapping section in any other, whichever thread
+steps it. Ariadne's actions give up after `ariadne.exec.lock_timeout` seconds (1.0) when they name
+no `:timeout`, and its `init:` lane never waits ([ARIADNE.md](ARIADNE.md)). pycvc's
+`register_intrinsics` keeps the lock form's context alive, and
+`intrinsics_context.lock_wait_allowed` / `lock_default_timeout` set the context's rules.
+
+**Single and shared mode.** A manager is called by one thread (`single`: no mutex) or by several,
+each operation under the manager's one mutex (`shared`); `lock_manager::options::threading` fixes
+it at construction ([STATE_EXEC_LOCKS.md](STATE_EXEC_LOCKS.md) 8.3). A scheduler's private manager
+is single. The app's takes its mode from the app tree's `state_exec.locks.threading`:
+
+| Value | The app manager's mode |
+|---|---|
+| `auto` (the default) | `shared` when the build has threads (`threads_compiled_in`, false only on Emscripten without pthreads) and either `state_exec.threads` is above 0 (a whole number, or `auto` where `std::thread::hardware_concurrency()` is above 1) or a host that steps schedulers on threads of its own announced itself (`detail::note_threaded_host()`, which pycvc calls at import); else `single` |
+| `single` | `single` |
+| `shared` | `shared` |
+
+An unknown value is logged and `auto` used. The mode is chosen once, when the manager is made: by
+the first of `app::lock_manager()` (which a pycvc `Exec(app)` calls), `app::exec_scheduler()` and
+an Ariadne init script, each of which makes it. A host sets the setting before any of those;
+changing it later changes nothing. Shared mode adds an uncontended mutex lock and unlock to each
+manager operation (STATE_EXEC_LOCKS.md 8.8).
+
+**A scheduler stepped on another thread.** `set_lock_manager(mgr, attach)` (both schedulers)
+makes the scheduler's lock home and attaches it to `mgr` at once. `lock_attach{true}` says the
+scheduler may be stepped on a thread other than the one the manager's other homes use; a single
+manager refuses such a home with `std::logic_error` naming `state_exec.locks.threading`, in every
+build. Pass `threads_compiled_in` rather than `true`, as pycvc's `Exec` does, so a build without
+threads, whose app manager `auto` makes single, never asks. `app::exec_scheduler()` attaches this
+way when the app's manager is shared. `set_lock_manager` also throws `std::logic_error` while a
+process of the scheduler holds or waits for a lock.
+
+```cpp
+namespace se = cvc::state_exec;
+// Before anything makes the app's manager:
+cvc::state::instance(app)("state_exec.locks.threading").value("shared");
+se::async_scheduler worker; // stepped on a thread of its own
+worker.set_lock_manager(app.lock_manager(), se::lock_attach{se::threads_compiled_in});
+```
+
+**Several threads.** Each scheduler is still stepped by one thread at a time. Several schedulers,
+each on its own thread (or several pycvc `Exec`s, each `run()` on its own Python thread), share the
+app's shared-mode manager: a request is granted or queued under its mutex, in one FIFO across every
+scheduler.
+
+**Grants across threads.** A release on one thread may grant a waiter of a scheduler on another.
+The grant is made at once, under the manager's mutex, and the key is the waiter's from then on.
+The waiter's scheduler learns of it from a wake posted to its lock port, which it applies between
+steps ([STATE_EXEC_LOCKS_PROTOCOL.md](STATE_EXEC_LOCKS_PROTOCOL.md) 2.3, 4.14, 5.9). So the waiter
+resumes at its scheduler's next step boundary after the post. The waits end on a post:
+`async_scheduler::wait_for_work` returns, and the next `drain_ingress()` applies the post first; a
+sync `run()` waiting with nothing ready steps again. A sync `run(N)` bounded by steps and left with
+only waiters and no timer returns at once, as with only message waiters, and the next `run()`
+applies the wake (STATE_EXEC_LOCKS.md 6.1). A scheduler nobody steps keeps its granted waiter
+parked, and the key held, until it is stepped again: for a pycvc `Exec`, its next `run()`. Priority
+relevels for a holder on another scheduler travel the same way. A handoff between threads thus
+costs the release, the post, and the other thread's wake, drain and resume steps; the bench's
+`lock.cross_thread` measures it ([STATE_EXEC_BENCH.md](STATE_EXEC_BENCH.md)).
+
+**Deadlocks across threads** are found as on one scheduler: the check runs under the manager's
+mutex over every scheduler's holds and waiters, so the request that closes a cycle across `Exec`s
+or schedulers on different threads raises `DeadlockError` when it blocks. Its `cycle` shows the
+pids of another scheduler's processes as `nil`, since pids repeat across schedulers. Which request
+closes the cycle, and so raises, depends on the order in which the threads reach the manager.
+
+**Keep hot keys in one thread.** Every lock operation of every thread takes the manager's one
+mutex. Sections on keys of their own run in parallel (disjoint keys share only the mutex and their
+common ancestors' counts); sections on one key run one at a time, and on several threads each
+handoff adds a post and a wake. So keep a hot key's sections in one scheduler (one `Exec`), and give
+each thread keys of its own. `lock_manager::stats()` counts the `posts` and, in shared mode,
+`mutex_waits` and `mutex_wait_ns`: the operations that found the mutex held, and the time they
+waited for it.
 
 ## 7. Resource Limits & Policies
 
