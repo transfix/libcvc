@@ -718,9 +718,13 @@ TEST(MediaWidget, LoaderWarnsOnBadFitAndShape) {
 
 namespace {
 
+// The picture a backdrop test draws, in a directory of that test's own: ctest runs the cases in
+// separate processes at the same time, and each removes its directory when it is done.
 std::filesystem::path picture_dir() {
+  const ::testing::TestInfo *test = ::testing::UnitTest::GetInstance()->current_test_info();
   const std::filesystem::path dir =
-      std::filesystem::temp_directory_path() / "ariadne_media_test_backdrop";
+      std::filesystem::temp_directory_path() /
+      ("ariadne_media_test_backdrop_" + std::string(test ? test->name() : "none"));
   std::filesystem::create_directories(dir);
   const cvc::image img = make_image(32, 16, [](int x, int) -> std::array<unsigned char, 4> {
     return x < 16 ? std::array<unsigned char, 4>{230, 120, 40, 255}
