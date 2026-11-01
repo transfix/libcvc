@@ -97,9 +97,17 @@ enum class lock_fuzz_at : std::uint8_t {
   drain_between,     // lock_home::drain_port, between two posts
   close_then_detach, // ~lock_home, between the port's close and detach_home
 };
-/// With CVC_EXEC_FUZZ set (read once): a per-thread PRNG seeded from it and the thread yields,
-/// sometimes sleeping 0-50 us. Unset: one relaxed load.
+/// With CVC_EXEC_FUZZ set (read once): a per-thread PRNG seeded from it and the thread runs on,
+/// yields, or sometimes pauses 0-50 us (yielding until the time has passed). Unset: one relaxed
+/// load.
 void lock_fuzz_point(lock_fuzz_at where) noexcept;
+/// Overrides CVC_EXEC_FUZZ for the process (LT-4 runs many seeds in one process); 0 turns the
+/// yields off. Each thread re-seeds its PRNG at its next protocol point.
+void set_lock_fuzz_seed(std::uint64_t seed) noexcept;
+/// The seed in effect (0: off).
+std::uint64_t lock_fuzz_seed() noexcept;
+/// How many protocol points have been reached with a seed in effect, over every thread (tests).
+std::uint64_t lock_fuzz_hits() noexcept;
 
 // ---------------------------------------------------------------------------------------------
 // The lock frames (design 8.5)
@@ -405,6 +413,9 @@ private:
   void free_entry(std::size_t slot);
   /// 5.9's collect: resume the ticket and keep the outcome; a grant joins the mirror.
   frame_outcome collect(process &p, std::uint64_t tid);
+  /// 4.14 after an operation: its notes delivered, with the fuzz point between (L3.7) when there
+  /// are any.
+  void deliver_op(const lock_notes &notes);
   /// 5.9's apply_wake: a ticket's wait is over (granted, cancelled or failed).
   void apply_wake(int pid, std::uint64_t tid);
   void apply_relevel(int pid);
