@@ -247,6 +247,8 @@ public:
   // connection with more than 2 MB of unsent backlog is skipped -- the caller's next push or the
   // periodic broadcast_snapshot heals it. Returns the connections written; 0, with nothing
   // encoded, when none matches or `entries` is empty.
+  // The message to `node_id`'s connections only (see state_transport::send_message_to).
+  std::size_t send_message_to(const std::string &node_id, const state_message &m) override;
   std::size_t push_snapshot_to(const std::string &node_id,
                                const std::vector<snapshot_entry> &entries) override;
   // See state_transport::push_pose_snapshot_to / set_on_pose_snapshot. A connection with more than

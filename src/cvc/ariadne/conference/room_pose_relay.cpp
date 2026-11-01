@@ -15,6 +15,7 @@
 #include <cvc/ariadne/pose_stream.h>
 #include <cvc/state/state_transport.h>
 #include <map>
+#include <mutex>
 #include <set>
 #include <utility>
 #include <vector>
@@ -45,6 +46,7 @@ struct viewer {
   std::uint32_t phase = 0;    // spreads viewers on the same interval over the steps
   std::uint64_t key_tick = 0; // its stream's last restart that was written (0: none yet)
   double rtt_ms = -1.0;
+  bool on_lane = false; // its stream is the acked one on its pose lane
 };
 } // namespace
 
@@ -55,6 +57,9 @@ struct room_pose_relay::impl {
   std::map<std::string, double> rtts; // measured before a viewer's first step, too
   std::uint32_t next_phase = 0;
   stats st;
+  pose_snapshot_lane *lane = nullptr;
+  std::mutex ack_mu; // acks arrive on lane threads
+  std::vector<std::pair<std::string, std::uint32_t>> acks;
 };
 
 room_pose_relay::room_pose_relay(config c) : _impl(std::make_unique<impl>()) { _impl->cfg = c; }
@@ -65,6 +70,13 @@ void room_pose_relay::add_transport(cvc::state_transport *tp) {
   if (tp &&
       std::find(_impl->transports.begin(), _impl->transports.end(), tp) == _impl->transports.end())
     _impl->transports.push_back(tp);
+}
+
+void room_pose_relay::set_lane(pose_snapshot_lane *lane) { _impl->lane = lane; }
+
+void room_pose_relay::acknowledge(const std::string &pid, std::uint32_t seq) {
+  std::lock_guard<std::mutex> lk(_impl->ack_mu);
+  _impl->acks.emplace_back(pid, seq);
 }
 
 void room_pose_relay::set_rtt(const std::string &pid, double rtt_ms) {
@@ -90,6 +102,17 @@ void room_pose_relay::step(const holon &server, std::uint64_t step, const aoi_sn
     it = present.count(it->first) ? std::next(it) : m.viewers.erase(it);
   for (auto it = m.rtts.begin(); it != m.rtts.end();)
     it = present.count(it->first) ? std::next(it) : m.rtts.erase(it);
+  // The lane acks since the last step: each moves its viewer's base on.
+  std::vector<std::pair<std::string, std::uint32_t>> acks;
+  {
+    std::lock_guard<std::mutex> lk(m.ack_mu);
+    acks.swap(m.acks);
+  }
+  for (const auto &[pid, seq] : acks) {
+    const auto it = m.viewers.find(pid);
+    if (it != m.viewers.end() && it->second.on_lane && it->second.enc.ack(seq))
+      ++m.st.acks;
+  }
   if (pids.empty() || m.transports.empty())
     return;
 
@@ -109,6 +132,13 @@ void room_pose_relay::step(const holon &server, std::uint64_t step, const aoi_sn
       v.rtt_ms = r == m.rtts.end() ? -1.0 : r->second;
       v.interval = pose_send_interval_steps(v.rtt_ms);
       v.phase = m.next_phase++;
+    }
+    // On its lane or on its connection: a switch restarts the stream (a keyframe on the new path).
+    const bool lane_now = m.lane && m.lane->carries(pid);
+    if (lane_now != v.on_lane) {
+      v.on_lane = lane_now;
+      v.enc.set_acked(lane_now);
+      v.key_tick = 0;
     }
     if ((step + v.phase) % v.interval != 0)
       continue;
@@ -131,14 +161,20 @@ void room_pose_relay::step(const holon &server, std::uint64_t step, const aoi_sn
     if (snap.entries.empty() && snap.gone.empty())
       continue; // nothing new for this viewer (it is all still, between heartbeats)
     std::size_t written = 0;
-    for (cvc::state_transport *tp : m.transports)
-      if ((written = tp->push_pose_snapshot_to(pid, snap)) > 0)
-        break;
+    if (v.on_lane)
+      written = m.lane->send(pid, snap) ? 1 : 0;
+    else
+      for (cvc::state_transport *tp : m.transports)
+        if ((written = tp->push_pose_snapshot_to(pid, snap)) > 0)
+          break;
     if (written == 0) {
       ++m.st.unsent;
       continue; // not connected here (yet), or backed up: the next snapshot carries it
     }
-    v.enc.commit();
+    if (v.on_lane)
+      ++m.st.lane; // its base moves on the viewer's ack, not here
+    else
+      v.enc.commit();
     if (key)
       v.key_tick = tick;
     ++m.st.snapshots;

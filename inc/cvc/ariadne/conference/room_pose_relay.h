@@ -16,6 +16,7 @@
 #include <string>
 
 namespace cvc {
+struct pose_snapshot;
 class state_transport;
 namespace ariadne {
 class holon;
@@ -30,6 +31,19 @@ class aoi_snapshot;
 // `current` (0 = none yet) holds within 10% of a threshold, so a round trip hovering at one does
 // not flip the rate.
 std::uint32_t pose_send_interval_steps(double rtt_ms, std::uint32_t current = 0) noexcept;
+
+// An unreliable path to some viewers: the fast lane's pose lanes (room_lane.h). A viewer it
+// carries gets its snapshots there instead of on its connection, from an ACKED stream
+// (pose_stream_encoder::set_acked): each one differs from the last the viewer acknowledged, so one
+// that is lost is never waited for. Asked on the relay's main loop.
+class pose_snapshot_lane {
+public:
+  virtual ~pose_snapshot_lane() = default;
+  // Whether `pid` has a pose lane open now.
+  virtual bool carries(const std::string &pid) const = 0;
+  // Send `snap` on `pid`'s lane; false when the lane could not take it (closed, or full).
+  virtual bool send(const std::string &pid, const cvc::pose_snapshot &snap) = 0;
+};
 
 // The relay's pose stream (pose_stream.h): every room step, each viewer that is due gets ONE
 // pose_snapshot of the participants it sees, written to its own connection on whichever transport
@@ -56,6 +70,13 @@ public:
   // A transport whose connections carry the snapshots. Null or a repeat: ignored.
   void add_transport(cvc::state_transport *tp);
 
+  // The pose lane (null: none, the default). A viewer whose lane is open switches to an acked
+  // stream there, with a keyframe; one whose lane closes switches back the same way. It must
+  // outlive the relay, or be cleared first.
+  void set_lane(pose_snapshot_lane *lane);
+  // `pid` applied lane snapshot `seq` (its ack). Any thread: taken at the next step.
+  void acknowledge(const std::string &pid, std::uint32_t seq);
+
   // `pid`'s measured round trip, in ms (the transports' link reports): sets its rate.
   void set_rtt(const std::string &pid, double rtt_ms);
   // The steps between `pid`'s snapshots now (0 for a pid it has not seen).
@@ -70,6 +91,8 @@ public:
     std::uint64_t snapshots = 0; // written (one per viewer's connection)
     std::uint64_t entries = 0;   // in them
     std::uint64_t unsent = 0;    // due, but no transport could write it (carried by the next)
+    std::uint64_t lane = 0;      // of the snapshots, those sent on a pose lane
+    std::uint64_t acks = 0;      // lane acks that moved a viewer's base
   };
   stats take_stats();
 

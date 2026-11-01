@@ -255,6 +255,20 @@ public:
   }
   using pose_snapshot_fn = std::function<void(const pose_snapshot &)>;
   virtual void set_on_pose_snapshot(pose_snapshot_fn fn) { (void)fn; }
+  // Write the out-of-band message M to every live connection whose peer identified (Hello) as
+  // `node_id`, bypassing the peer registry, and nowhere else: never to local shards, never across
+  // the bridge, and also while the admission hold still has the connection (a message is not tree
+  // state, so it cannot get ahead of the bootstrap). A relay uses it to answer one client (the fast
+  // lane's signaling, cvc/net/fast_lane_rtc.h). Returns the number of connections written.
+  // Default: not supported (returns 0).
+  //
+  // A message whose ttl_hops is 0 is never forwarded: a relay delivers it to its own shards only,
+  // so a client can address the relay alone (state_message's "0 means do not forward").
+  virtual std::size_t send_message_to(const std::string &node_id, const state_message &m) {
+    (void)node_id;
+    (void)m;
+    return 0;
+  }
 
   // Admission hold (a relay; off, 0, by default). With `max_hold` > 0, a connection the relay
   // ACCEPTS gets its Hello at once but no bootstrap (backfill or admit snapshot) and no live

@@ -393,8 +393,10 @@ public:
 
   bool can_write() const { return static_cast<bool>(write_raw); }
 
-  bool write_locked(const pb::Frame &f) {
-    if (!alive.load() || !write_raw || held.load(std::memory_order_relaxed))
+  // THROUGH_HOLD: written even while held (send_message_to: an out-of-band answer is not tree
+  // state, so it cannot get ahead of the bootstrap's view of the tree).
+  bool write_locked(const pb::Frame &f, bool through_hold = false) {
+    if (!alive.load() || !write_raw || (held.load(std::memory_order_relaxed) && !through_hold))
       return false;
     const std::size_t bytes = f.ByteSizeLong();
     write_started_ns.store(link_now_ns(), std::memory_order_relaxed);
@@ -423,6 +425,10 @@ public:
   bool write(const pb::Frame &f) {
     std::lock_guard<std::timed_mutex> lk(write_mu);
     return write_locked(f);
+  }
+  bool write_through_hold(const pb::Frame &f) {
+    std::lock_guard<std::timed_mutex> lk(write_mu);
+    return write_locked(f, /*through_hold=*/true);
   }
 
   // Client-side only.
@@ -1051,8 +1057,8 @@ void state_transport_grpc::on_inbound_message(const state_message &m, connection
   for (auto *peer : peers)
     (void)peer->ingest_remote_message(m);
   const bool relay = _relay.load(std::memory_order_relaxed);
-  if (!relay && !_bridge)
-    return;
+  if ((!relay && !_bridge) || m.ttl_hops == 0)
+    return; // ttl 0: for this node alone (state_transport::send_message_to)
   if (!relay_admits(m, peers)) {
     _relay_withheld.fetch_add(1, std::memory_order_relaxed);
     return;
@@ -1919,6 +1925,34 @@ bool state_transport_grpc::request_snapshot(const std::string &cluster_id,
     _snap_waiters.erase(req_id);
   }
   return result;
+}
+
+std::size_t state_transport_grpc::send_message_to(const std::string &node_id,
+                                                  const state_message &m) {
+  if (node_id.empty())
+    return 0;
+  std::vector<std::shared_ptr<connection>> targets;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    for (const auto &c : _conns) {
+      if (!c || !c->alive.load() || !c->can_write())
+        continue;
+      const std::string *pid = c->peer_id();
+      if (pid && *pid == node_id)
+        targets.push_back(c);
+    }
+  }
+  if (targets.empty())
+    return 0;
+  pb::Frame frame;
+  encode_message(m, frame.mutable_message());
+  std::size_t n = 0;
+  for (auto &c : targets)
+    if (c->write_through_hold(frame)) {
+      _sent_frames.fetch_add(1, std::memory_order_relaxed);
+      ++n;
+    }
+  return n;
 }
 
 std::size_t state_transport_grpc::push_snapshot_to(const std::string &node_id,

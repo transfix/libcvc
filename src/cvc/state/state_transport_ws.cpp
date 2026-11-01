@@ -577,6 +577,12 @@ public:
     std::lock_guard<std::mutex> lk(write_mu);
     return !admission_held.load(std::memory_order_relaxed) && write_locked(f);
   }
+  // Written even while the admission hold has the connection (send_message_to: an out-of-band
+  // answer is not tree state, so it cannot get ahead of the bootstrap's view of the tree).
+  bool write_through_hold(const pb::Frame &f) {
+    std::lock_guard<std::mutex> lk(write_mu);
+    return write_locked(f);
+  }
 
   // Write only if no other write holds the connection right now (the link probe never waits).
   bool try_write(const pb::Frame &f) {
@@ -1703,8 +1709,8 @@ void state_transport_ws::on_inbound_message(const state_message &m, connection *
   for (auto *peer : peers)
     (void)peer->ingest_remote_message(m);
   const bool relay = _relay.load(std::memory_order_relaxed);
-  if (!relay && _bridge == nullptr)
-    return;
+  if ((!relay && _bridge == nullptr) || m.ttl_hops == 0)
+    return; // ttl 0: for this node alone (state_transport::send_message_to)
   // Interest gate (opt-in), as in on_inbound_mutation.
   if (_relay_requires_interest.load(std::memory_order_relaxed) && !peers.empty() &&
       std::none_of(peers.begin(), peers.end(),
@@ -2229,6 +2235,33 @@ std::size_t state_transport_ws::request_full_refresh() {
       ++n;
     }
   }
+  return n;
+}
+
+std::size_t state_transport_ws::send_message_to(const std::string &node_id,
+                                                const state_message &m) {
+  if (node_id.empty())
+    return 0;
+  std::vector<std::shared_ptr<connection>> targets;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    for (const auto &c : _conns) {
+      if (!c || !c->alive.load() || !c->can_write())
+        continue;
+      if (const std::string *pid = c->peer_id(); pid && *pid == node_id)
+        targets.push_back(c);
+    }
+  }
+  if (targets.empty())
+    return 0;
+  pb::Frame frame;
+  encode_message(m, frame.mutable_message());
+  std::size_t n = 0;
+  for (auto &c : targets)
+    if (c->write_through_hold(frame)) {
+      _sent_frames.fetch_add(1, std::memory_order_relaxed);
+      ++n;
+    }
   return n;
 }
 

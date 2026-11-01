@@ -88,6 +88,7 @@
 // in the host; both transports carry the canonical media_frame and interop via the relay's router.
 #include <cvc/ariadne/conference/room_aoi.h>        // the relay's AOI params -> peers' audio gain
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_join (re-assert after a reconnect)
+#include <cvc/ariadne/conference/room_lane.h>       // the fast lane (CVC_ARIADNE_LANE=1)
 #include <cvc/ariadne/conference/room_net.h>        // our link quality + voice activity to the room
 #include <cvc/ariadne/holon.h>                 // the client replica of the room holon (avatars, H1)
 #include <cvc/ariadne/holon_sync.h>            // client_pump / propose_intent over the room tree
@@ -104,6 +105,7 @@
 #include <cvc/gl/playback/audio_output.h> // open_audio_output — play each peer's mic
 #include <cvc/media/media_frame.h>        // cvc::media_frame — the canonical media frame
 #include <cvc/media/media_opus.h>         // our mic in Opus, and peers' Opus mics decoded
+#include <cvc/net/fast_lane_rtc.h>        // fast_lane_rtc_available
 #include <cvc/state/state.h>              // cvc::state::instance — conference media state keys
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_device_key.h> // load_device_seed, state_device_signer
@@ -349,6 +351,18 @@ struct ConferenceSession {
   std::function<void(const cvc::media_frame &)> send_media_;
   std::function<void()> stop_;
   bool active = false;
+  // The fast lane (CVC_ARIADNE_LANE=1; docs/roadmap/CONFERENCE_UNRELIABLE_TRANSPORT.md): poses and
+  // media on an unreliable WebRTC data channel to the relay, offered over tp_. Declared after the
+  // shard and the transports, so it goes first. Until it opens, and whenever it is down, everything
+  // stays on tp_. Offered again every few seconds while down (three times, until it has opened
+  // once).
+  std::unique_ptr<cvc::ariadne::conference::room_lane_session> lane_;
+  struct lane_retry {
+    double next_s = 0.0; // offer again at or after this (steady_s)
+    int offers = 0;      // offers since the connection was made
+    bool opened = false; // it has opened at least once on this connection
+  };
+  lane_retry lane_retry_[2]; // by lane_role: pose, media
 
   // ── media plane (browser camera + mic over the WS control channel) ──
   cvc::app *app_ = nullptr;
@@ -422,6 +436,9 @@ struct ConferenceSession {
   std::mutex poses_mu_;
   std::vector<cvc::pose_snapshot> pose_inbox_;
   cvc::ariadne::pose_stream_decoder pose_decoder_;
+  // The pose lane's samples (room_lane_session decodes and acknowledges them as they arrive), for
+  // the frame to apply the same way.
+  std::vector<std::pair<std::uint64_t, std::vector<cvc::ariadne::pose_sample>>> lane_pose_samples_;
   struct vframe {
     double pts = 0.0;
     std::shared_ptr<std::vector<std::uint8_t>> bytes;
@@ -701,6 +718,37 @@ struct ConferenceSession {
     }
     std::fprintf(stderr, "arigl: conference: %s %s as '%s' (room '%s')\n",
                  ok ? "connected to" : "could NOT reach relay", relay, self.c_str(), room.c_str());
+    if (const char *laneEnv = std::getenv("CVC_ARIADNE_LANE");
+        laneEnv && *laneEnv && std::string(laneEnv) != "0") {
+      if (!cvc::fast_lane_rtc_available()) {
+        std::fprintf(stderr,
+                     "arigl: conference: CVC_ARIADNE_LANE is set but this build has no "
+                     "WebRTC (CVC_ENABLE_RTC=OFF); staying on %s\n",
+                     want_grpc ? "gRPC" : "the WebSocket");
+      } else {
+        lane_ = std::make_unique<cvc::ariadne::conference::room_lane_session>(*shard, *tp_, room,
+                                                                              nodeId);
+        lane_->set_on_media(on_media);
+        lane_->set_on_pose_samples(
+            [this](std::uint64_t tick, const std::vector<cvc::ariadne::pose_sample> &samples) {
+              std::lock_guard<std::mutex> lk(poses_mu_);
+              lane_pose_samples_.emplace_back(tick, samples);
+            });
+        lane_->set_on_state([this](cvc::ariadne::conference::lane_role role, bool open) {
+          lane_retry_[static_cast<int>(role)].opened |= open;
+          std::fprintf(stderr, "arigl: conference: %s lane %s\n",
+                       cvc::ariadne::conference::lane_role_name(role),
+                       open ? "open" : "closed (that traffic is on the connection)");
+        });
+        // Media rides the lane while it is open; the connection takes what the lane will not.
+        send_media_ = [this, onConnection = send_media_](const cvc::media_frame &m) {
+          if (!lane_ || !lane_->send_media(m))
+            onConnection(m);
+        };
+        if (ok)
+          offer_lanes(steady_s());
+      }
+    }
     // ?synthetic=1 (the host page sets CVC_ARIADNE_SYNTHETIC_CAM) drives the self-cam from a
     // hardware-free MJPEG test pattern instead of the real camera, so the conference — peer video
     // included — can be exercised in a browser with no camera.
@@ -779,6 +827,23 @@ struct ConferenceSession {
     st(prefix_ + ".self.up").value(cvc::ariadne::conference::format_rate(s.out_kbps));
     if (holon_ && s.rtt_ms > 0.0)
       set_lead(s.rtt_ms / 1000.0);
+    if (lane_) {
+      // Each lane on its own: open but silent (the relay pings every second) means the path is
+      // gone, and one that is down is offered again -- three times, until it has opened once (a
+      // relay without media lanes never answers that one).
+      using cvc::ariadne::conference::lane_role;
+      lane_->probe();
+      for (lane_role role : {lane_role::pose, lane_role::media}) {
+        lane_retry &r = lane_retry_[static_cast<int>(role)];
+        const bool open = lane_->open(role);
+        const bool silent = open && lane_->lane(role).link_report().idle_s > kLaneIdleS;
+        if (silent || (!open && now >= r.next_s && (r.opened || r.offers < 3))) {
+          lane_->start(role);
+          ++r.offers;
+          r.next_s = now + kLaneRetryS;
+        }
+      }
+    }
     if (now < rejoin_until_s_)
       cvc::ariadne::conference::room_join(*app_, room_, pid_, st(prefix_ + ".conf.self").value());
   }
@@ -797,6 +862,8 @@ struct ConferenceSession {
       holon_->set_lead_ticks(lead);
   }
   static constexpr double kLeadMarginS = 0.06;
+  static constexpr double kLaneRetryS = 5.0; // a lane that has not opened by then is offered again
+  static constexpr double kLaneIdleS = 3.0;  // an open lane silent this long is offered anew
 
   void reconnect(double now) {
     next_reconnect_s_ = now + 3.0;
@@ -813,6 +880,15 @@ struct ConferenceSession {
 #endif
     if (ok)
       rejoin_until_s_ = now + 6.0; // re-assert presence until the relay's snapshot has landed
+    if (ok && lane_)
+      offer_lanes(now); // a new connection: the relay's end of the old lanes went with the old one
+  }
+
+  // Offer both lanes afresh, for a new connection.
+  void offer_lanes(double now) {
+    lane_->start();
+    for (lane_retry &r : lane_retry_)
+      r = lane_retry{now + kLaneRetryS, 1, false};
   }
 
   // Window mode: show the room in 3D in `view` — the server's shared scene and an avatar per
@@ -911,12 +987,16 @@ struct ConferenceSession {
     // The relay's pose snapshots since the last frame, in order, then the tree (roster, statics)
     // and the frame itself.
     std::vector<cvc::pose_snapshot> snaps;
+    std::vector<std::pair<std::uint64_t, std::vector<cvc::ariadne::pose_sample>>> lane_samples;
     {
       std::lock_guard<std::mutex> lk(poses_mu_);
       snaps.swap(pose_inbox_);
+      lane_samples.swap(lane_pose_samples_);
     }
     for (const cvc::pose_snapshot &snap : snaps)
       cvc::ariadne::apply_pose_snapshot(*holon_, pose_decoder_, snap);
+    for (const auto &[tick, samples] : lane_samples) // decoded (and acked) on the pose lane
+      cvc::ariadne::apply_pose_samples(*holon_, samples, tick);
     cvc::ariadne::client_pump(*holon_, *app_, room_, pid_, f.wall_dt);
     // Each re-alignment of our clock to the relay's drops our unacknowledged input (a visible
     // jump). The first sample after joining is one; any after that is worth a line.
@@ -1177,6 +1257,7 @@ struct ConferenceSession {
     mix_out_.reset();
     for (publisher &p : pubs_)
       p.sub.reset();
+    lane_.reset(); // its callbacks feed inbox_ and the shard: gone before either
     if (stop_)
       stop_(); // joins the transport reader thread (idempotent: _running.exchange(false))
   }

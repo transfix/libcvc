@@ -153,6 +153,10 @@ void client_pump(holon &h, cvc::app &app, const std::string &room, const std::st
 // before client_pump. Returns the samples applied; 0 for a snapshot out of step (decoder::gaps).
 std::size_t apply_pose_snapshot(holon &h, pose_stream_decoder &decoder,
                                 const cvc::pose_snapshot &snap);
+// The same for samples decoded elsewhere (the fast lane decodes, and acknowledges, on its own
+// thread: room_lane_session::set_on_pose_samples), at the snapshot's SERVER_TICK.
+std::size_t apply_pose_samples(holon &h, const std::vector<pose_sample> &samples,
+                               std::uint64_t server_tick);
 
 // Propose the local avatar's intent (client side): the client holon predicts with it from its next
 // tick, and it is written to <self>.intent stamped with that tick, for the server to validate and
