@@ -3,15 +3,17 @@
 Status: design, 2026-10-27. L0 (the atomic natives, section 4.4), L1 (`with-lock` on one
 scheduler) and L1b (the spawn context on one scheduler) are built. L2 (priorities and
 inheritance) is implemented in transfix/libcvc#868, with its scheduler-level PI tests and its two
-bench scenarios; its A/B gates are not run yet (section 12). L3 (one app, several threads) is
+bench scenarios; its A/B's step counts are unchanged, and its timing gates have no verdict yet
+(two windows too noisy, section 12). L3 (one app, several threads) is
 built: shared mode, every manager operation under `M.mu` (protocol 0, 2.1); several homes on a
 manager, and the refusal of a cross-thread home by a single one (protocol 4.4; 8.3); the homes'
 ports, posts and destruction order (protocol 2.3, 4.14, 5.7, 5.9); `last_progress` and
 `blocking_sinks` (protocol 2.1, 4.13) under pycvc's idle rule (9.2); the app manager's mode, with
 Ariadne's init lane and pycvc's `Exec`s on it (8.3, 8.4); `CVC_EXEC_FUZZ`'s yields at the protocol
 points; the model check on two and three homes (protocol 7); and the bench's `locks=shared` and
-`lock.cross_thread` (11.2). Its A/B gates are not run yet; `lock.cross_thread`'s numbers and the
-sharding decision go in 11.3. L4 onward are design only.
+`lock.cross_thread` (11.2). Its A/B's step counts are unchanged; its timing gates have no verdict
+yet, and `lock.cross_thread`'s numbers and the sharding decision so far are in 11.3. L4 onward are
+design only.
 Tracked in the `state-exec-perf` workstream,
 beside the threaded design ([`docs/STATE_EXEC_THREADED.md`](STATE_EXEC_THREADED.md)), which this
 document extends. The exact lock protocol is
@@ -1376,7 +1378,51 @@ figures are not far outside 11.2's, the manager keeps its one mutex. A miss on W
 figure far outside 11.2's even on a hosted runner, opens the subtree-sharding design, with its own
 review and model check, outside L3. `mt.groups.locks` (L4) can reopen the question.
 
-<!-- L3 A/B: lock.cross_thread numbers and the sharding decision go here -->
+**L3's numbers (2026-11-01).** Two windows, `perf/locks-l3` against master baf8b6da, on a
+22-thread Windows 11 machine, MSVC Release, driver pinned (`--pin auto`), two rounds of 5 reps
+each. Neither window was quiet as `docs/STATE_EXEC_BENCH.md` requires. No build ran and the
+package builder was idle, but an editor, other agent sessions and an unrelated renderer took 0.5-1
+core between them, with bursts to 77% load. So no timing point below is under its noise limit,
+and none of them decides anything: a noisy point is no pass. The manager mutex's counters do not
+depend on noise, and they show where the time goes.
+
+Disjoint keys, `extra.ratio_to_nolock` (median of 10 reps; window 1, window 2), and the manager
+mutex's waits per lock with their wait time per lock (window 2):
+
+| section | t = 1 | t = 2 | t = 4 | t = 8 |
+|---|---|---|---|---|
+| 0.3 us | 0.82, 0.87; no waits | 0.70, 0.76; 0.13, 125 ns | 0.60, 0.60; 0.67, 1.1 us | 0.34, 0.32; 1.03, 7.2 us |
+| 3 us | 0.92, 0.95; no waits | 0.86, 0.86; 0.04, 41 ns | **0.80, 0.86**; 0.36, 432 ns | 0.53, 0.62; 0.91, 3.8 us |
+| 30 us | 1.01, 1.00; no waits | 0.95, 0.94; 0.02, 40 ns | 0.99, 0.96; 0.07, 161 ns | 0.94, 0.95; 0.20, 388 ns |
+
+The hot key's `extra.handoff_p50_ns` (gate 50 us) is 12.8-17.3, 16.4-21.0 and 28.5-34.5 us at
+t = 2, 4 and 8 in window 1, and 9.8-11.7, 11.1-14.3 and 16.7-22.8 us in window 2, the range over
+the three section lengths. Every point is under the gate, at noise of 18-154%.
+`lock.uncontended` at `threading=shared` (gate 120 ns) measures 468-1360 ns in window 1 and
+518-934 ns in window 2. Measured beside it under load, `threading=single` was the same, about
+900 ns. So shared mode adds nothing visible here; the gate is waiting on the per-lock cost that
+11.2's 60 ns single-mode gate also misses.
+
+What they show:
+- At t = 1, 3 us sections run at 0.92-0.95 of the unlocked loop, with no mutex wait. The gap is
+  the lock's own cost, 255-455 ns per lock in these runs, against 8.8's 65-90 ns in shared mode.
+- From t = 2 the mutex waits appear and grow with t. At t = 4, 3 us sections wait on more than a
+  third of their locks, and lose about 430-580 ns per lock to it. That is what four threads see
+  when each holds `M.mu` for about the whole lock cost (shared mode does all of a lock's table
+  work under it). 3.3 assumed 30-150 ns per operation, which is why it expected sections of a
+  few microseconds to be safe. At this hold time they are not: the 3 us, t = 4 medians are under
+  0.9 in both windows. 30 us sections stay at 0.94 or better through t = 8.
+
+**The decision so far: no verdict, and the manager keeps its one mutex.** By the noise rule
+neither window's 3 us, t = 4 point is a miss, so 3.3's fallback is not opened yet. The counters
+also say what a confirmed miss would be made of: the time each lock holds the mutex, not the
+number of mutexes. Sharding by subtree would split that hold between keys in different subtrees,
+and leave every lock's cost where it is. Cutting the per-lock cost toward 11.2's 60 ns cuts the
+hold for every key. So that work, L1's speed, comes first. Then `lock.cross_thread` is measured
+again in a window that meets the quiet rule. If the 3 us, t = 4 gate misses then, on Windows or
+on Linux, the subtree-sharding design opens as 3.3 and 14.2 question 9 say. The Linux record
+comes from `locks-deep.yml`'s `stress` lane on this branch (run 41340188915) and is added here
+when that run finishes.
 
 ## 12. Phases
 
@@ -1412,10 +1458,13 @@ clamp, inheritance (homes attach with their scheduler's policy, and the run queu
 `effective_priority()` through `level_key`), `state_exec.policy`, the thread classes,
 `post_control`, and pycvc's priority API. The same PR has its scheduler-level PI tests (PI-1..PI-5,
 PI-8, PI-9 and PI-11; PI-7 and PI-10 are L3's) and the `prio.set` and `lock.inherit` bench
-scenarios. None of its A/B gates (11.2) has been run yet, so L2's exit is not met. L3 is built
-(the status at the top lists what it added), with its tests (13.7, and the L3 cases of 13.3 to
-13.6) and its cases in the sanitizer jobs (`docs/TESTING.md`). Its A/B gates (11.2, 11.3) have not
-been run yet, so L3's exit is not met either. L4 onward are not built.
+scenarios. Its A/B (11.2) ran with #868 and twice more on 2026-11-01: the step counts are
+unchanged and `lock.inherit` passes, but the timing comparisons and part of `prio.set` were too
+noisy for a verdict, so L2's exit is not met. L3 is built (the status at the top lists what it
+added), with its tests (13.7, and the L3 cases of 13.3 to 13.6) and its cases in the sanitizer
+jobs (`docs/TESTING.md`). Its A/B (11.2, 11.3) has run in two windows: the step counts are
+unchanged, and the timing gates have no verdict (11.3), so L3's exit is not met either. L4 onward
+are not built.
 
 ## 13. The test list
 
