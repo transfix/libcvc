@@ -242,6 +242,27 @@ struct train_config {
   // against 70% without). 0 = off.
   float rollback_drop = 0.0f;
   float rollback_lr_scale = 0.5f;
+  // Time pressure (rollout == jolt). Each step adds
+  //   w_progress / window * relu(p* - p_t) / (progress_speed * hdt)
+  // per agent, with p_t = |o_t - goal| - |o_{t+1} - goal| the step's progress toward the goal and
+  // p* = min(progress_speed * hdt, |o_t - goal| - progress_tol), at least 0, the progress a vehicle
+  // keeping progress_speed (normalized units per second) makes: the shortfall as a fraction of a
+  // step's worth, 1 for a step stood still, 0 once it keeps up or is within progress_tol of its
+  // goal. The window-end distance alone hardly prices time (it is over the world's half-extent,
+  // and a sum of the steps' progress would telescope back to it), so at w_coll 10-20 the policy
+  // traded its speed for clearance: about 2 m/s on the Jolt Humvee against the untrained 6.5.
+  // 0 (the default) leaves the loss and its gradient as without it.
+  float w_progress = 0.0f;
+  float progress_speed = 0.0f;
+  float progress_tol = 0.0f;
+  // Episodes (rollout == jolt). 0 (the default): each outer step drives a fresh batch from rest
+  // for `horizon` steps -- 3.6 s at 60, while the goals are 25-100 m away, so training never sees
+  // a vehicle cruise or arrive. > 0: a batch keeps driving across outer steps, `horizon` more
+  // steps each from where it was, until every agent is within episode_tol of its goal or the batch
+  // has driven episode_steps steps; the next outer step then starts a fresh one. w_progress then
+  // prices a vehicle's lateness over its whole trip.
+  int episode_steps = 0;
+  float episode_tol = 0.15f;
 };
 
 // The trainable CoefMLP: its dense layers as flat params + Adam state. Distinct
@@ -276,6 +297,10 @@ public:
   // (the model's reverse at a state outside its domain, such as a vehicle the simulation rolled
   // over), counted over this trainer's loss_and_grad calls.
   long dropped_agents() const { return dropped_agents_; }
+  // The last train()'s batches (train_config::episode_steps): how many it drew, and how many of
+  // those ended with every agent at its goal rather than at the time limit.
+  int episodes() const { return episodes_; }
+  int episodes_arrived() const { return episodes_arrived_; }
 
   // Bake the frozen inference policy: softplus(net + log(expm1(bias))), the same
   // topology and semantics a loaded .cvcnav has. Persist with its save().
@@ -329,6 +354,7 @@ private:
   std::vector<checkpoint_score> checkpoints_; // the last train()'s checkpoint scores
   int selected_step_ = -1;                    // and the one it ended on (-1 = no selection)
   mutable long dropped_agents_ = 0;           // dropped_agents()
+  int episodes_ = 0, episodes_arrived_ = 0;   // episodes(), episodes_arrived()
   // Per-layer flat offsets into p_ (w then b), plus (rows, cols).
   int off_w_[3] = {0, 0, 0}, off_b_[3] = {0, 0, 0};
   int lrows_[3] = {0, 0, 0}, lcols_[3] = {0, 0, 0};

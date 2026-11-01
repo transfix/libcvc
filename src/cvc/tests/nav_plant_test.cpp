@@ -1365,13 +1365,20 @@ TEST(NavPlantConvergence, CheckpointSelectionOnJoltReach) {
 // cornering, its 0.457 rad lock. Each arm trains on the city with checkpoints selected on Jolt
 // reach over validation seeds (200...), and the selected policies are scored on the 20 held-out
 // seeds against the untrained seed with paired-bootstrap CIs. Arms (JOLT_EXP_ARMS, comma-separated
-// kind:seed:lr[:horizon[:w_coll]]): jolt (the Jolt rollout, its four-wheel model calibrated to Jolt
-// first: use_jolt_rollout) and dynamic (the single-track model). An experiment, not a check: it
-// runs for about 20 minutes an arm and asserts only that its numbers are finite. It runs when
-// CVC_JOLT_TRAIN_EXPERIMENT=1; JOLT_EXP_{STEPS, N, HORIZON, WINDOW, EVERY, VAL, TICKS, GOAL_MAX}
-// size it (the defaults are the run docs/NAV_TRAINING.md reports), JOLT_EXP_OUT names a directory
-// for the selected policies (.cvcnav), each arm's and the seed's per-seed held-out reach
-// (.held.txt, for comparing two arms seed by seed) and a summary.
+// kind:seed:lr[:horizon[:w_coll[:w_progress]]]): jolt (the Jolt rollout, its four-wheel model
+// calibrated to Jolt first: use_jolt_rollout) and dynamic (the single-track model). An
+// experiment, not a check: it runs for about 20 minutes an arm and asserts only that its numbers
+// are finite. It runs when CVC_JOLT_TRAIN_EXPERIMENT=1; JOLT_EXP_{STEPS, N, HORIZON, WINDOW,
+// EVERY, VAL, TICKS, GOAL_MAX} size it (the defaults are the run docs/NAV_TRAINING.md reports),
+// JOLT_EXP_OUT names a directory for the selected policies (.cvcnav), each arm's and the seed's
+// per-seed held-out scores (.held.txt, for comparing two arms seed by seed) and a summary.
+//
+// Time pressure: JOLT_EXP_BUDGET_MPS (4) is the speed reach within a time budget is scored at
+// (plant_reach_options::time_budget_mps), and JOLT_EXP_SELECT_MPS=1 selects checkpoints on that
+// instead of reach. JOLT_EXP_PROGRESS_MPS (4) is train_config::progress_speed for the arms that
+// give a w_progress. JOLT_EXP_EPISODE is train_config::episode_steps (0, a fresh batch every
+// outer step). JOLT_EXP_SCORE (paths separated by ';') scores saved policies on the
+// held-out seeds first, untrained, with the same report (JOLT_EXP_ARMS=none: only those).
 TEST(NavPlantConvergence, JoltTrainedHumveeOnJoltReach) {
   REQUIRE_JOLT();
   if (!std::getenv("CVC_JOLT_TRAIN_EXPERIMENT") ||
@@ -1417,12 +1424,22 @@ TEST(NavPlantConvergence, JoltTrainedHumveeOnJoltReach) {
     base.goal_min = held.goal_min;
     base.goal_max = held.goal_max;
   }
+  held.time_budget_mps =
+      std::getenv("JOLT_EXP_BUDGET_MPS") ? std::atof(std::getenv("JOLT_EXP_BUDGET_MPS")) : 4.0;
+  const bool select_in_time = env_int("JOLT_EXP_SELECT_MPS", 0) != 0;
+  const double progress_mps =
+      std::getenv("JOLT_EXP_PROGRESS_MPS") ? std::atof(std::getenv("JOLT_EXP_PROGRESS_MPS")) : 4.0;
+  // JOLT_EXP_EPISODE: train_config::episode_steps (0: a fresh batch every outer step).
+  base.episode_steps = env_int("JOLT_EXP_EPISODE", 0);
+  base.episode_tol = held.reach_tol;
   plant_reach_options val = held;
   val.seeds.clear();
   for (int k = 0; k < env_int("JOLT_EXP_VAL", 24); ++k)
     val.seeds.push_back(200u + static_cast<unsigned>(k));
   const auto jolt_reach = [&](const cvc::nav::coef_mlp &policy, int) {
-    return reach_on_plant(policy, sc, hv, L, val);
+    if (!select_in_time)
+      return reach_on_plant(policy, sc, hv, L, val);
+    return score_on_plant({policy}, sc, hv, L, val)[0].reach_in_time;
   };
   const auto now = [] { return std::chrono::steady_clock::now(); };
   const auto mins = [](auto a, auto b) {
@@ -1436,9 +1453,6 @@ TEST(NavPlantConvergence, JoltTrainedHumveeOnJoltReach) {
     std::filesystem::create_directories(out);
     summary.open(out + "/summary.txt", std::ios::app);
   }
-  std::vector<double> seed_held;
-  const double seed_mean =
-      reach_on_plant(cvc::nav::coef_mlp::default_biased(), sc, hv, L, held, &seed_held);
   const auto report = [&](const std::string &line) {
     std::fputs(line.c_str(), stdout);
     std::fflush(stdout);
@@ -1447,31 +1461,93 @@ TEST(NavPlantConvergence, JoltTrainedHumveeOnJoltReach) {
       summary.flush();
     }
   };
-  if (!out.empty()) {
-    std::ofstream per_seed(out + "/seed.held.txt");
-    for (std::size_t s = 0; s < seed_held.size(); ++s)
-      per_seed << held.seeds[s] << " " << seed_held[s] << "\n";
-  }
+  // A policy's held-out scores, each seed's in `out`/<file>.held.txt (seed, reach, reach in time,
+  // speed, building hits, vehicle contact s).
+  const auto score_held = [&](const cvc::nav::coef_mlp &policy, const std::string &file,
+                              std::vector<plant_drive_score> &per) {
+    std::vector<std::vector<plant_drive_score>> all;
+    const plant_drive_score m = score_on_plant({policy}, sc, hv, L, held, &all)[0];
+    per = all[0];
+    if (!out.empty()) {
+      std::ofstream f(out + "/" + file + ".held.txt");
+      for (std::size_t s = 0; s < per.size(); ++s)
+        f << held.seeds[s] << " " << per[s].reach << " " << per[s].reach_in_time << " "
+          << per[s].speed_mps << " " << per[s].arrive_mps << " " << per[s].stopped_frac << " "
+          << per[s].building_hits << " " << per[s].vehicle_contact_s << "\n";
+    }
+    return m;
+  };
+  std::vector<plant_drive_score> seed_per;
+  const plant_drive_score seed_m =
+      score_held(cvc::nav::coef_mlp::default_biased(), "seed", seed_per);
+  const double seed_mean = seed_m.reach;
+  const auto scores_line = [&](const plant_drive_score &m) {
+    char line[256];
+    std::snprintf(line, sizeof line,
+                  "in %.0f m/s %.1f%%, %.2f m/s en route (%.2f arriving, %.0f%% stopped), "
+                  "building hits %.2f, vehicle contact %.1f s an agent",
+                  held.time_budget_mps, 100 * m.reach_in_time, m.speed_mps, m.arrive_mps,
+                  100 * m.stopped_frac, m.building_hits, m.vehicle_contact_s);
+    return std::string(line);
+  };
+  // Paired CIs against the seed, seed by seed: reach and reach in time (points).
+  const auto vs_seed = [&](const std::vector<plant_drive_score> &per) {
+    std::vector<double> d(per.size()), e(per.size());
+    for (std::size_t s = 0; s < per.size(); ++s) {
+      d[s] = per[s].reach - seed_per[s].reach;
+      e[s] = per[s].reach_in_time - seed_per[s].reach_in_time;
+    }
+    double lo = 0.0, hi = 0.0, elo = 0.0, ehi = 0.0;
+    paired_ci(d, lo, hi);
+    paired_ci(e, elo, ehi);
+    double dm = 0.0, em = 0.0;
+    for (std::size_t s = 0; s < per.size(); ++s) {
+      dm += d[s] / per.size();
+      em += e[s] / per.size();
+    }
+    char line[256];
+    std::snprintf(line, sizeof line,
+                  "vs the seed %+.1f [%+.1f, %+.1f], in time %+.1f [%+.1f, %+.1f]", 100 * dm,
+                  100 * lo, 100 * hi, 100 * em, 100 * elo, 100 * ehi);
+    return std::string(line);
+  };
   {
     char line[256];
     std::snprintf(line, sizeof line,
-                  "held-out reach on Jolt (%zu seeds, %d Humvees, %d ticks): seed (untrained) "
-                  "%.1f%%\n",
+                  "held-out on Jolt (%zu seeds, %d Humvees, %d ticks): seed (untrained) reach "
+                  "%.1f%%, ",
                   held.seeds.size(), held.agents, held.ticks, 100 * seed_mean);
-    report(line);
+    report(line + scores_line(seed_m) + "\n");
+  }
+  // Saved policies, scored as they are.
+  if (const char *e = std::getenv("JOLT_EXP_SCORE")) {
+    std::stringstream files(e);
+    std::string path;
+    while (std::getline(files, path, ';')) {
+      if (path.empty())
+        continue;
+      const std::string name = std::filesystem::path(path).stem().string();
+      std::vector<plant_drive_score> per;
+      const plant_drive_score m = score_held(cvc::nav::coef_mlp::load(path), "scored_" + name, per);
+      char line[256];
+      std::snprintf(line, sizeof line, "  %-22s %.1f%%  ", name.c_str(), 100 * m.reach);
+      report(line + vs_seed(per) + "; " + scores_line(m) + "\n");
+      EXPECT_TRUE(std::isfinite(m.reach));
+    }
   }
   std::stringstream specs(arms_spec);
   std::string spec;
   while (std::getline(specs, spec, ',')) {
-    if (spec.empty())
+    if (spec.empty() || spec == "none") // none: only the seed and JOLT_EXP_SCORE's policies
       continue;
     std::stringstream f(spec);
-    std::string kind, seed_s, lr_s, horizon_s, wcoll_s;
+    std::string kind, seed_s, lr_s, horizon_s, wcoll_s, wprog_s;
     std::getline(f, kind, ':');
     std::getline(f, seed_s, ':');
     std::getline(f, lr_s, ':');
     std::getline(f, horizon_s, ':');
     std::getline(f, wcoll_s, ':');
+    std::getline(f, wprog_s, ':');
     cvc::nav::train_config cfg = base;
     cfg.seed = static_cast<unsigned>(std::atoi(seed_s.c_str()));
     cfg.lr = static_cast<float>(std::atof(lr_s.c_str()));
@@ -1479,6 +1555,11 @@ TEST(NavPlantConvergence, JoltTrainedHumveeOnJoltReach) {
       cfg.horizon = std::atoi(horizon_s.c_str());
     if (!wcoll_s.empty())
       cfg.w_coll = static_cast<float>(std::atof(wcoll_s.c_str()));
+    if (!wprog_s.empty() && std::atof(wprog_s.c_str()) != 0.0) {
+      cfg.w_progress = static_cast<float>(std::atof(wprog_s.c_str()));
+      cfg.progress_speed = static_cast<float>(progress_mps * kS);
+      cfg.progress_tol = held.reach_tol;
+    }
     try {
       const auto t0 = now();
       if (kind == "jolt") {
@@ -1507,7 +1588,8 @@ TEST(NavPlantConvergence, JoltTrainedHumveeOnJoltReach) {
                   spec.c_str(), cfg.steps, mins(t1, now()), tr.dropped_agents());
       for (const cvc::nav::coef_trainer::checkpoint_score &k : tr.checkpoints())
         std::printf(" %d:%.3f", k.step, k.fitness);
-      std::printf("; selected step %d", tr.selected_step());
+      std::printf("; selected step %d; %d batches, %d ended with every agent arrived",
+                  tr.selected_step(), tr.episodes(), tr.episodes_arrived());
       if (!tr.rollbacks().empty()) {
         std::printf("; rolled back at");
         for (int s : tr.rollbacks())
@@ -1516,35 +1598,228 @@ TEST(NavPlantConvergence, JoltTrainedHumveeOnJoltReach) {
       std::printf("\n");
       std::fflush(stdout);
       const cvc::nav::coef_mlp policy = tr.to_coef_mlp();
-      std::vector<double> a;
-      const double mean = reach_on_plant(policy, sc, hv, L, held, &a);
-      std::vector<double> d(a.size());
-      for (std::size_t s = 0; s < d.size(); ++s)
-        d[s] = a[s] - seed_held[s];
-      double lo = 0.0, hi = 0.0;
-      paired_ci(d, lo, hi);
+      std::string file = spec;
+      for (char &c : file)
+        if (c == ':')
+          c = '_';
+      std::vector<plant_drive_score> per;
+      const plant_drive_score m = score_held(policy, file, per);
       char line[256];
-      std::snprintf(line, sizeof line,
-                    "  %-22s %.1f%%  vs the seed %+.1f [%+.1f, %+.1f]  (selected step %d)\n",
-                    spec.c_str(), 100 * mean, 100 * (mean - seed_mean), 100 * lo, 100 * hi,
-                    tr.selected_step());
-      report(line);
-      if (!out.empty()) {
-        std::string file = spec;
-        for (char &c : file)
-          if (c == ':')
-            c = '_';
-        // Each held-out seed's reach, in held.seeds order, for comparing two arms seed by seed.
-        std::ofstream per_seed(out + "/" + file + ".held.txt");
-        for (std::size_t s = 0; s < a.size(); ++s)
-          per_seed << held.seeds[s] << " " << a[s] << "\n";
-        policy.save(out + "/" + file + ".cvcnav",
-                    "trained on the city at demo3's metric (" + spec + "), selected on Jolt reach");
-      }
-      EXPECT_TRUE(std::isfinite(mean));
+      std::snprintf(line, sizeof line, "  %-22s %.1f%%  ", spec.c_str(), 100 * m.reach);
+      char sel[64];
+      std::snprintf(sel, sizeof sel, " (selected step %d)", tr.selected_step());
+      report(line + vs_seed(per) + "; " + scores_line(m) + sel + "\n");
+      if (!out.empty())
+        policy.save(out + "/" + file + ".cvcnav", "trained on the city at demo3's metric (" + spec +
+                                                      "), selected on Jolt " +
+                                                      (select_in_time ? "reach in time" : "reach"));
+      EXPECT_TRUE(std::isfinite(m.reach));
     } catch (const std::exception &e) {
       report("  " + spec + " FAILED: " + e.what() + "\n");
       ADD_FAILURE() << spec << ": " << e.what();
+    }
+  }
+}
+
+// ── Why training slows the Jolt Humvee: the loss's parts and where their gradients point ──
+//
+// For the trainer's untrained start (seed 1) and each policy in JOLT_WHY_POLICIES (.cvcnav, ';'),
+// over JOLT_WHY_BATCHES (8) of JoltTrainedHumveeOnJoltReach's batches (96 Humvees, 60 steps in
+// windows of 10, w_coll 20): the horizon loss split into its goal term (each window's end
+// distance) and its collision term, with the shortfall from 4 m/s's progress beside them (priced
+// as train_config::w_progress 1 prices it, not in the loss); each part's gradient summed over the
+// batches, its size, its cosines with the others, and the share of the parameters whose summed
+// gradient takes its sign (Adam moves each parameter by about the learning rate in its averaged
+// gradient's sign, so that share is how much of a step each part decides). Then, on Jolt, the
+// same batches after one sign step of JOLT_WHY_EPS (5e-3, about 100 of the experiment's Adam
+// steps) along each part's gradient and the loss's: the Humvees' progress toward their goals
+// (m/s) and the loss's parts. An experiment (CVC_JOLT_TRAIN_EXPERIMENT=1, JOLT_WHY=1): it asserts
+// only that its numbers are finite. JOLT_EXP_OUT, if set, gets why.txt.
+TEST(NavPlantConvergence, WhyTrainingSlowsTheJoltHumvee) {
+  REQUIRE_JOLT();
+  if (!std::getenv("CVC_JOLT_TRAIN_EXPERIMENT") || !std::getenv("JOLT_WHY"))
+    GTEST_SKIP() << "an experiment: set CVC_JOLT_TRAIN_EXPERIMENT=1 and JOLT_WHY=1 to run it";
+  const int batches =
+      std::getenv("JOLT_WHY_BATCHES") ? std::atoi(std::getenv("JOLT_WHY_BATCHES")) : 8;
+  const float eps = std::getenv("JOLT_WHY_EPS")
+                        ? static_cast<float>(std::atof(std::getenv("JOLT_WHY_EPS")))
+                        : 5e-3f;
+  const cvc::nav::training_scene sc = cvc::nav::city_scene(96);
+  const vehicle_desc hv = vehicle_desc::humvee();
+  const double L = hv.wheelbase() * kS;
+  cvc::nav::train_config cfg;
+  cfg.n = 96;
+  cfg.hidden = 64;
+  cfg.horizon = 60;
+  cfg.window = 10;
+  cfg.w_coll = 20.0f;
+  cfg.veh_L = static_cast<float>(L);
+  cfg.veh_delta_max = static_cast<float>(hv.max_steer);
+  cfg.veh_a_max = static_cast<float>(0.8 * hv.max_accel * kS);
+  cfg.veh_a_lat_max = static_cast<float>(0.5 * kG * kS);
+  cfg.goal_max = 2.0f;
+  cfg.goal_min = 0.5f;
+  use_jolt_rollout(cfg, sc, hv, 32, 200, 8u);
+  cvc::nav::train_config goal_only = cfg, priced = cfg;
+  goal_only.w_coll = 0.0f;
+  priced.w_coll = 0.0f;
+  priced.w_progress = 1.0f;
+  priced.progress_speed = static_cast<float>(4.0 * kS);
+  priced.progress_tol = 0.15f;
+  const int n = cfg.n;
+
+  std::ofstream why;
+  if (const char *o = std::getenv("JOLT_EXP_OUT"))
+    why.open(std::string(o) + "/why.txt", std::ios::app);
+  const auto say = [&](const std::string &line) {
+    std::fputs(line.c_str(), stdout);
+    std::fflush(stdout);
+    if (why) {
+      why << line;
+      why.flush();
+    }
+  };
+  // Batch b, as train() starts one: starts and goals from seed 5000 + b, aimed at the goals.
+  std::vector<float> o, goal, psi, dummy(2 * n, 0.0f), o_end(2 * n);
+  const auto reset = [&](int b) {
+    o.resize(2 * n);
+    goal.resize(2 * n);
+    psi.resize(n);
+    sc.sample_starts_goals(n, 5000u + static_cast<unsigned>(b), o.data(), goal.data(), cfg.goal_min,
+                           cfg.goal_max, cvc::nav::start_clearance_of(cfg));
+    for (int i = 0; i < n; ++i)
+      psi[i] = std::atan2(goal[2 * i + 1] - o[2 * i + 1], goal[2 * i] - o[2 * i]);
+    cvc::nav::rollout_batch rb;
+    rb.scene = &sc;
+    rb.veh = cvc::nav::bike_veh_of(sc, cfg);
+    rb.model = cfg.dyn4;
+    rb.price = cfg.dyn4_price;
+    rb.mu = cfg.ground_mu;
+    rb.n = n;
+    rb.o = o.data();
+    rb.psi = psi.data();
+    cfg.plant->reset(rb);
+  };
+  struct parts {
+    double goal = 0.0, coll = 0.0, shortfall = 0.0, progress_mps = 0.0;
+  };
+  // The batches' loss parts (per batch) and the Humvees' progress, at params p; with grads, each
+  // part's gradient summed over the batches.
+  const auto run = [&](const std::vector<float> &p, std::vector<double> *g_goal,
+                       std::vector<double> *g_coll, std::vector<double> *g_short) {
+    cvc::nav::coef_trainer tf(cfg, 1), tg(goal_only, 1), tp(priced, 1);
+    tf.set_params(p);
+    tg.set_params(p);
+    tp.set_params(p);
+    const bool grads = g_goal != nullptr;
+    if (grads)
+      for (std::vector<double> *v : {g_goal, g_coll, g_short})
+        v->assign(p.size(), 0.0);
+    parts r;
+    std::vector<float> gf, gg, gp;
+    for (int b = 0; b < batches; ++b) {
+      reset(b);
+      const std::vector<float> o0 = o;
+      for (int w = 0; w < cfg.horizon / cfg.window; ++w) {
+        const std::vector<std::uint8_t> here = cfg.plant->save();
+        const double lf = tf.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n,
+                                           cfg.window, grads ? &gf : nullptr);
+        cfg.plant->restore(here);
+        const double lp = tp.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n,
+                                           cfg.window, grads ? &gp : nullptr);
+        cfg.plant->restore(here);
+        const double lg = tg.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n,
+                                           cfg.window, grads ? &gg : nullptr, o_end.data());
+        r.goal += lg / batches;
+        r.coll += (lf - lg) / batches;
+        r.shortfall += (lp - lg) / batches;
+        if (grads)
+          for (std::size_t i = 0; i < p.size(); ++i) {
+            (*g_goal)[i] += gg[i];
+            (*g_coll)[i] += gf[i] - gg[i];
+            (*g_short)[i] += gp[i] - gg[i];
+          }
+      }
+      double prog = 0.0;
+      for (int i = 0; i < n; ++i)
+        prog += std::hypot(o0[2 * i] - goal[2 * i], o0[2 * i + 1] - goal[2 * i + 1]) -
+                std::hypot(o_end[2 * i] - goal[2 * i], o_end[2 * i + 1] - goal[2 * i + 1]);
+      r.progress_mps += prog / n / (cfg.horizon * sc.dt) / kS / batches;
+    }
+    return r;
+  };
+  const auto norm = [](const std::vector<double> &a) {
+    double s = 0.0;
+    for (double x : a)
+      s += x * x;
+    return std::sqrt(s);
+  };
+  const auto cosine = [&](const std::vector<double> &a, const std::vector<double> &b) {
+    double s = 0.0;
+    for (std::size_t i = 0; i < a.size(); ++i)
+      s += a[i] * b[i];
+    return s / (norm(a) * norm(b) + 1e-30);
+  };
+
+  std::vector<std::pair<std::string, std::vector<float>>> policies;
+  {
+    cvc::nav::coef_trainer t(cfg, 1);
+    policies.push_back({"untrained (seed 1)", t.params()});
+  }
+  if (const char *e = std::getenv("JOLT_WHY_POLICIES")) {
+    std::stringstream files(e);
+    std::string path;
+    while (std::getline(files, path, ';'))
+      if (!path.empty())
+        policies.push_back({std::filesystem::path(path).stem().string(),
+                            cvc::nav::coef_mlp::load(path).export_flat().data});
+  }
+  for (const auto &[name, p] : policies) {
+    ASSERT_EQ(p.size(), cvc::nav::coef_trainer(cfg, 1).params().size()) << name;
+    std::vector<double> gg, gc, gs;
+    const parts at = run(p, &gg, &gc, &gs);
+    std::vector<double> gt(p.size());
+    for (std::size_t i = 0; i < p.size(); ++i)
+      gt[i] = gg[i] + gc[i];
+    // Where the goal and collision terms pull a parameter opposite ways, which one the sum takes.
+    int split = 0, coll_wins = 0;
+    for (std::size_t i = 0; i < p.size(); ++i)
+      if (gg[i] * gc[i] < 0.0) {
+        ++split;
+        coll_wins += (gt[i] * gc[i] > 0.0) ? 1 : 0;
+      }
+    const std::size_t P = p.size();
+    char line[1024];
+    std::snprintf(
+        line, sizeof line,
+        "%s: loss per batch goal %.4f collision %.4f (4 m/s shortfall %.4f); progress %.2f m/s\n"
+        "  |g| goal %.3e collision %.3e shortfall %.3e; cos(goal, collision) %+.3f, cos(loss, "
+        "goal) %+.3f, cos(loss, collision) %+.3f, cos(loss, shortfall) %+.3f\n"
+        "  goal and collision disagree on %d of %zu parameters; the collision term's sign wins %d "
+        "(%.0f%%)\n"
+        "  output biases (alpha, beta, gamma): goal %+.2e %+.2e %+.2e; collision %+.2e %+.2e "
+        "%+.2e; shortfall %+.2e %+.2e %+.2e\n",
+        name.c_str(), at.goal, at.coll, at.shortfall, at.progress_mps, norm(gg), norm(gc), norm(gs),
+        cosine(gg, gc), cosine(gt, gg), cosine(gt, gc), cosine(gt, gs), split, P, coll_wins,
+        split ? 100.0 * coll_wins / split : 0.0, gg[P - 3], gg[P - 2], gg[P - 1], gc[P - 3],
+        gc[P - 2], gc[P - 1], gs[P - 3], gs[P - 2], gs[P - 1]);
+    say(line);
+    // One sign step down each gradient, then the same batches on Jolt.
+    const std::pair<const char *, const std::vector<double> *> dirs[] = {
+        {"loss", &gt}, {"goal", &gg}, {"collision", &gc}, {"shortfall", &gs}};
+    for (const auto &[dname, g] : dirs) {
+      std::vector<float> q = p;
+      for (std::size_t i = 0; i < P; ++i)
+        q[i] -= eps * static_cast<float>(((*g)[i] > 0.0) - ((*g)[i] < 0.0));
+      const parts after = run(q, nullptr, nullptr, nullptr);
+      std::snprintf(line, sizeof line,
+                    "  a step down %-9s: progress %.2f m/s (%+.2f), goal %.4f (%+.4f), collision "
+                    "%.4f (%+.4f), shortfall %.4f (%+.4f)\n",
+                    dname, after.progress_mps, after.progress_mps - at.progress_mps, after.goal,
+                    after.goal - at.goal, after.coll, after.coll - at.coll, after.shortfall,
+                    after.shortfall - at.shortfall);
+      say(line);
+      EXPECT_TRUE(std::isfinite(after.progress_mps));
     }
   }
 }

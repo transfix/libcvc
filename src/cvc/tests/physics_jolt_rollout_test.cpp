@@ -421,6 +421,132 @@ TEST(JoltRollout, GradientAgreesWithJoltFiniteDifferences) {
   EXPECT_LT(rel(dd, gnorm), 0.35);
 }
 
+// The time pressure (train_config::w_progress) on Jolt. Its value: from the same start, one step at
+// a time, the loss with it less the loss without is each step's shortfall from progress_speed's
+// progress, read from the vehicles' states, as a fraction of a step's worth. Its gradient: along
+// the goal spring's bias (alpha) the model's derivative of the term and Jolt's central difference
+// agree in sign (both positive on this batch, so a stiffer spring alone does not keep the Humvees
+// up to speed). And outside the Jolt rollout, or without a speed, it throws.
+TEST(JoltRollout, ProgressTermPricesTheShortfall) {
+  REQUIRE_JOLT();
+  const training_scene sc = cvc::nav::city_scene(96);
+  train_config cfg = humvee_cfg(16);
+  const int n = cfg.n;
+  coef_trainer warm_tr(cfg, 1);
+  std::vector<float> o, goal, dummy(2 * n, 0.0f);
+  reset_batch(sc, cfg, 21, o, goal);
+  warm_tr.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n, 20, nullptr);
+  const std::vector<std::uint8_t> start = cfg.plant->save();
+
+  train_config with = cfg;
+  with.w_progress = 1.0f;
+  with.progress_speed = 4.0f * cfg.veh_L / static_cast<float>(vehicle_desc::humvee().wheelbase());
+  with.progress_tol = 0.15f;
+  coef_trainer t0(cfg, 1), t1(with, 1);
+  const float p_step = with.progress_speed * sc.dt;
+  double worst = 0.0, total = 0.0;
+  for (int k = 0; k < 10; ++k) {
+    const std::vector<std::uint8_t> here = cfg.plant->save();
+    std::vector<cvc::nav::diff::dyn4_state<float>> s0(n), s1(n);
+    for (int i = 0; i < n; ++i)
+      s0[i] = cfg.plant->state(i);
+    const double l0 = t0.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n, 1, nullptr);
+    cfg.plant->restore(here);
+    const double l1 = t1.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n, 1, nullptr);
+    double expect = 0.0;
+    for (int i = 0; i < n; ++i) {
+      s1[i] = cfg.plant->state(i);
+      const float gx = goal[2 * i], gy = goal[2 * i + 1];
+      const float d0 = std::hypot(s0[i].x - gx, s0[i].y - gy);
+      const float d1 = std::hypot(s1[i].x - gx, s1[i].y - gy);
+      const float want = std::min(p_step, std::max(0.0f, d0 - with.progress_tol));
+      expect += std::max(0.0f, want - (d0 - d1)) / p_step / n;
+    }
+    worst = std::max(worst, std::fabs((l1 - l0) - expect));
+    total += expect;
+  }
+  std::printf("[progress] shortfall over 10 steps %.4f (a step's worth an agent each)\n", total);
+  EXPECT_LT(worst, 1e-5) << "the term is each step's shortfall, as a fraction of a step's worth";
+  EXPECT_GT(total, 0.0) << "the Humvees under way still fall short of 4 m/s somewhere";
+
+  // The gradient along alpha's bias over a 30-step window.
+  const int window = 30;
+  cfg.plant->restore(start);
+  std::vector<float> g0, g1;
+  t0.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n, window, &g0);
+  cfg.plant->restore(start);
+  t1.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n, window, &g1);
+  const int P = t1.num_params();
+  const double model = static_cast<double>(g1[P - 3]) - g0[P - 3];
+  const std::vector<float> base = t1.params();
+  const auto term_at = [&](float shift) {
+    std::vector<float> p = base;
+    p[P - 3] += shift;
+    t0.set_params(p);
+    t1.set_params(p);
+    cfg.plant->restore(start);
+    const double a =
+        t1.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n, window, nullptr);
+    cfg.plant->restore(start);
+    const double b =
+        t0.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n, window, nullptr);
+    return a - b;
+  };
+  const double eps = 0.05;
+  const double jolt =
+      (term_at(static_cast<float>(eps)) - term_at(static_cast<float>(-eps))) / (2 * eps);
+  std::printf("  d(term)/d(alpha bias): model %+.4e  Jolt %+.4e\n", model, jolt);
+  EXPECT_NE(model, 0.0);
+  EXPECT_EQ(model > 0.0, jolt > 0.0) << "the model's gradient of the term and Jolt's disagree";
+
+  train_config surrogate;
+  surrogate.w_progress = 1.0f;
+  surrogate.progress_speed = 0.4f;
+  coef_trainer ts(surrogate, 1);
+  std::vector<float> og(2 * n, 0.0f);
+  EXPECT_THROW(ts.loss_and_grad(sc, og.data(), og.data(), og.data(), n, 1, nullptr),
+               std::invalid_argument);
+  train_config no_speed = cfg;
+  no_speed.w_progress = 1.0f;
+  coef_trainer tn(no_speed, 1);
+  EXPECT_THROW(tn.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n, 1, nullptr),
+               std::invalid_argument);
+}
+
+// Continuing episodes (train_config::episode_steps): with a limit of two outer steps' worth, five
+// outer steps draw three batches (steps 0-1, 2-3, 4); with none, a batch each; with a limit past
+// the run, one. The batch's goals stay put while it drives on, and training stays finite. Asked
+// of a rollout other than Jolt's, it throws.
+TEST(JoltRollout, ContinuingEpisodesKeepTheBatchDriving) {
+  REQUIRE_JOLT();
+  const training_scene sc = cvc::nav::city_scene(96);
+  train_config cfg = humvee_cfg(8);
+  cfg.horizon = 20;
+  cfg.window = 10;
+  cfg.steps = 5;
+  cfg.seed = 3;
+  const auto batches = [&](int episode_steps) {
+    train_config c = cfg;
+    c.episode_steps = episode_steps;
+    coef_trainer tr(c, 1);
+    tr.train(sc);
+    for (float p : tr.params())
+      EXPECT_TRUE(std::isfinite(p));
+    return std::make_pair(tr.episodes(), tr.episodes_arrived());
+  };
+  EXPECT_EQ(batches(0).first, 5);
+  EXPECT_EQ(batches(40).first, 3);
+  const auto one = batches(10000);
+  EXPECT_EQ(one.first, 1);
+  EXPECT_EQ(one.second, 0) << "eight Humvees cannot all cross the city to their goals in 6 s";
+
+  train_config surrogate;
+  surrogate.episode_steps = 100;
+  surrogate.steps = 1;
+  coef_trainer ts(surrogate, 1);
+  EXPECT_THROW(ts.train(sc), std::invalid_argument);
+}
+
 // use_jolt_rollout sets a train_config up for Jolt in one call: the plant, the calibrated model and
 // its price, the same fit as the steps it takes one by one.
 TEST(JoltRollout, UseJoltRolloutSetsTheTrainerUp) {
