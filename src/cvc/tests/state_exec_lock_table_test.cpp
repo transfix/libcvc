@@ -23,6 +23,7 @@
 #include <functional>
 #include <gtest/gtest.h>
 #include <initializer_list>
+#include <limits>
 #include <map>
 #include <memory>
 #include <random>
@@ -2663,4 +2664,44 @@ TEST(LockHomes, BlockingSinksOfSeveralWaitersOfAHome) {
     b.reset();
     EXPECT_TRUE(mgr->table().empty());
   }
+}
+
+// -- second round: home ids never wrap ------------------------------------------------------------
+
+TEST(LockTable, HomeIdsNeverWrap) {
+  // Ids are never reused (protocol 2.1), and a home_id has 32 bits: past the last one, attach_home
+  // refuses rather than wrapping onto 0, which a live home may hold (and the entries' binary
+  // search assumes ascending ids). options::first_home starts the count near the end.
+  constexpr detail::home_id last = std::numeric_limits<detail::home_id>::max();
+  lock_table::options o;
+  o.self_check = true;
+  o.one_home = false;
+  o.first_home = last - 1;
+  lock_table t(o);
+  detail::lock_notes n;
+  const detail::home_id a = t.attach_home(false, nullptr, nullptr, n);
+  const detail::home_id b = t.attach_home(true, nullptr, nullptr, n);
+  EXPECT_EQ(a, last - 1);
+  EXPECT_EQ(b, last);
+  try {
+    t.attach_home(false, nullptr, nullptr, n);
+    ADD_FAILURE() << "an attach past the last home id";
+  } catch (const std::logic_error &e) {
+    EXPECT_NE(std::string(e.what()).find("home id"), std::string::npos) << e.what();
+  }
+  t.detach_home(a, n); // a freed id is never handed out again
+  EXPECT_THROW(t.attach_home(false, nullptr, nullptr, n), std::logic_error);
+  EXPECT_EQ(t.home_entries(), 1u);
+  t.check();
+  // The last id works as any other: a process of it locks and releases.
+  const std::vector<std::string> k{"k"};
+  detail::lock_request r = request_of(X, k);
+  const auto g = t.try_acquire({b, 7}, {"o", 0}, r, {});
+  ASSERT_TRUE(g);
+  EXPECT_TRUE(t.rec_of({b, 7}).has_value());
+  t.release({b, 7}, g->hold, n);
+  t.detach_home(b, n);
+  EXPECT_TRUE(t.empty());
+  EXPECT_EQ(t.home_entries(), 0u);
+  t.check();
 }

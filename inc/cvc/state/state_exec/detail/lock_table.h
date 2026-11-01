@@ -242,6 +242,7 @@ public:
     bool one_home = true; // before phase L3 a manager accepts one home (protocol 4.4)
     bool shared = false;  // shared mode: every operation under M.mu, from any thread (L3.1)
     std::uint32_t mutations = 0;
+    std::uint64_t first_home = 0; // test-only: the first home id attach_home hands out
   };
 
   explicit lock_table(options opts);
@@ -259,6 +260,8 @@ public:
   /// home's last-progress cell (steady_clock ticks; null reads as never). With options::one_home
   /// a second home is refused, and with `attach.cross_thread` a manager not in shared mode refuses
   /// the home (std::logic_error naming state_exec.locks.threading; protocol 4.4, design 8.3).
+  /// Ids are never reused: once all 2^32 are handed out, every attach is refused
+  /// (std::logic_error).
   home_id attach_home(bool prio, std::shared_ptr<lock_port> port,
                       std::shared_ptr<std::atomic<std::int64_t>> progress, lock_notes &out,
                       lock_attach attach = {});
