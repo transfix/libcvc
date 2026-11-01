@@ -21,7 +21,7 @@
 #include <cvc/ariadne/input.h>  // §4.6 InputEvent — Runtime::post_input feeds on_key/on_pointer
 #include <cvc/ariadne/loader.h> // is_builtin_widget_type (has?)
 #include <cvc/ariadne/media.h>  // §5.11 pictures by URI
-#include <cvc/ariadne/media_player.h> // �5.13 video: / audio: players
+#include <cvc/ariadne/media_player.h> // §5.13 video: / audio: players
 #include <cvc/ariadne/net_host.h>  // net_host_status (the net capability tokens)
 #include <cvc/ariadne/oidc_host.h> // pump_oidc
 #include <cvc/core/app.h>
