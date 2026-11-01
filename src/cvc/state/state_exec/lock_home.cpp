@@ -235,24 +235,44 @@ std::vector<std::pair<lock_pid, std::int64_t>> lock_home::blocking_sinks(int pid
 }
 
 lock_home::~lock_home() {
+  // 5.7, in its order. Nothing here throws out: a destructor can't report a failure, and the
+  // table's own check() finds whatever a failed step leaves.
   action a(*this);
-  // 5.7. The port closes first: no post lands after it. The detach ends every process of the
-  // home with abandon and drops the cache's references; nothing it notifies targets this home.
-  port_->close();
   try {
+    // The port closes first, under its own mutex: a post racing it lands before (and is
+    // discarded below) or is dropped (2.3). detach_home's precondition, asserted outside M.mu.
+    port_->close();
+    assert(port_->closed());
+  } catch (...) {
+  }
+  try {
+    // Every process of the home ended with abandon, the cache's references dropped. No note
+    // targets this home; the others' wakes and relevels go to their ports.
     lock_notes notes;
     table_.detach_home(id_, notes);
+    deliver(notes);
   } catch (...) {
-    // A destructor can't report it; the table's own check() finds what is left.
   }
-  ops_.for_each_process([](process &p) {
-    if (p.locks) {
-      p.locks->holds.clear();
-      p.locks->ticket.reset();
-    }
-    clear_wait_fields(p);
-    p.inherited_priority = INT_MAX;
-  });
+  try {
+    // The posts that landed before the close: their processes have just ended.
+    port_->drain(drained_);
+    if (!drained_.empty())
+      mgr_->posts_discarded_.fetch_add(drained_.size(), std::memory_order_relaxed);
+    drained_.clear();
+  } catch (...) {
+  }
+  port_.reset();
+  try {
+    ops_.for_each_process([](process &p) {
+      if (p.locks) {
+        p.locks->holds.clear();
+        p.locks->ticket.reset();
+      }
+      clear_wait_fields(p);
+      p.inherited_priority = INT_MAX;
+    });
+  } catch (...) {
+  }
 }
 
 lock_pid lock_home::pid_of(const process &p) const { return {id_, p.pid}; }
@@ -657,10 +677,17 @@ void lock_home::set_base(process &p) {
 void lock_home::deliver(const lock_notes &notes) {
   action a(*this);
   for (const lock_note &n : notes) {
-    if (n.home == id_)
+    if (n.home == id_) {
       apply_post(n.post); // this home's: at once (4.14)
-    else if (n.port)
-      n.port->post(n.post); // another home's: to its port; dropped when closed (2.3)
+    } else if (n.port) {
+      // Another home's: to its port, or dropped when the port is closed (2.3). The counters are
+      // the manager's, bumped outside M.mu.
+      if (const lock_test_hooks *hooks = lock_test_hooks_get(); hooks && hooks->cross_home_note)
+        hooks->cross_home_note(n);
+      std::atomic<std::uint64_t> &count =
+          n.port->post(n.post) ? mgr_->posts_ : mgr_->posts_dropped_;
+      count.fetch_add(1, std::memory_order_relaxed);
+    }
   }
 }
 

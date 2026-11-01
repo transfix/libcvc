@@ -1813,3 +1813,280 @@ TEST(LockShared, TableDrivenFromSeveralThreads) {
   EXPECT_NE(t.canonical().find("homes\nrecs\n"), std::string::npos);
   t.check();
 }
+
+// -- L3.2: the port, posts, and a home's destruction
+// ------------------------------------------------
+
+namespace {
+
+/// Counts the notes deliver hands to another home's port (lock_test_hooks::cross_home_note), from
+/// any thread, while alive.
+std::atomic<std::uint64_t> g_cross_notes{0};
+void count_cross_note(const detail::lock_note &) {
+  g_cross_notes.fetch_add(1, std::memory_order_relaxed);
+}
+struct note_counter {
+  detail::lock_test_hooks hooks;
+  note_counter() {
+    g_cross_notes = 0;
+    hooks.cross_home_note = count_cross_note;
+    detail::set_lock_test_hooks(&hooks);
+  }
+  ~note_counter() { detail::set_lock_test_hooks(nullptr); }
+  note_counter(const note_counter &) = delete;
+  note_counter &operator=(const note_counter &) = delete;
+  std::uint64_t count() const { return g_cross_notes.load(); }
+};
+
+detail::lock_post wake_post(int pid, std::uint64_t tid) {
+  return detail::lock_post{detail::lock_post::kind::wake, pid, tid};
+}
+detail::lock_post relevel_post(int pid) {
+  return detail::lock_post{detail::lock_post::kind::relevel, pid, 0};
+}
+std::string text(const detail::lock_post &p) {
+  return p.what == detail::lock_post::kind::wake
+             ? "wake(" + std::to_string(p.pid) + "," + std::to_string(p.tid) + ")"
+             : "relevel(" + std::to_string(p.pid) + ")";
+}
+std::vector<std::string> texts(const std::vector<detail::lock_post> &v) {
+  std::vector<std::string> out;
+  for (const detail::lock_post &p : v)
+    out.push_back(text(p));
+  return out;
+}
+
+/// What one round of PostsRacingACloseNeverLand saw.
+struct race_result {
+  std::uint64_t attempted = 0, posts = 0, dropped = 0, drained = 0, discarded = 0;
+  bool landed_after_close = false;
+};
+
+/// Posters on `kPosters` threads, each through a home of its own, deliver notes for home B's
+/// process while B's thread drains some and then destroys B (protocol 5.7). Every post lands
+/// before the close or is dropped.
+race_result post_close_race(std::uint64_t round) {
+  constexpr int kPosters = 3;
+  race_result r;
+  const std::shared_ptr<lock_manager> mgr = make_manager(lock_threading::shared);
+  note_counter notes_seen;
+  auto b = std::make_unique<sched_side>(mgr, lock_attach{true}, std::make_shared<detail::wakeup>());
+  const std::shared_ptr<detail::lock_port> port = b->home->port();
+  detail::lock_notes one;
+  one.push_back(
+      detail::lock_note{b->home->id(), port, round % 2 ? wake_post(1, round) : relevel_post(1)});
+  std::vector<std::unique_ptr<sched_side>> posters;
+  for (int i = 0; i < kPosters; ++i)
+    posters.push_back(std::make_unique<sched_side>(mgr, lock_attach{true}));
+  std::atomic<int> ready{0};
+  std::vector<std::thread> threads;
+  for (int i = 0; i < kPosters; ++i)
+    threads.emplace_back([&, i] {
+      ++ready;
+      // Post until this thread has seen the port closed and posted a few times more, so every
+      // round has posts on both sides of the close; bounded in case the close never comes.
+      const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+      int after = 0;
+      for (int k = 1; after < 8; ++k) {
+        posters[i]->home->deliver(one);
+        if (port->closed())
+          ++after;
+        if (k % 1024 == 0 && std::chrono::steady_clock::now() > give_up)
+          break;
+      }
+    });
+  while (ready < kPosters)
+    std::this_thread::yield();
+  // B's thread: wait for a post (a bounded spin), drain what has landed so far, then go.
+  std::vector<detail::lock_post> got;
+  for (int spin = 0; spin < 100000 && !port->pending(); ++spin)
+    std::this_thread::yield();
+  port->drain(got);
+  r.drained = got.size();
+  b.reset();
+  for (std::thread &t : threads)
+    t.join();
+  port->drain(got); // nothing may have landed after the close
+  r.landed_after_close = !got.empty() || port->pending();
+  r.attempted = notes_seen.count();
+  const lock_stats s = mgr->stats();
+  r.posts = s.posts;
+  r.dropped = s.posts_dropped;
+  r.discarded = s.posts_discarded;
+  posters.clear();
+  EXPECT_TRUE(mgr->table().empty());
+  return r;
+}
+
+/// Runs post_close_race `rounds` times and checks each round's counts.
+void run_post_close_races(int rounds) {
+  std::uint64_t attempted = 0, dropped = 0, discarded = 0;
+  for (int round = 0; round < rounds; ++round) {
+    const race_result r = post_close_race(std::uint64_t(round));
+    attempted += r.attempted;
+    dropped += r.dropped;
+    discarded += r.discarded;
+    EXPECT_FALSE(r.landed_after_close) << "round " << round;
+    EXPECT_EQ(r.posts + r.dropped, r.attempted) << "round " << round;
+    EXPECT_EQ(r.posts, r.drained + r.discarded) << "round " << round;
+    EXPECT_GE(r.dropped, 1u) << "round " << round; // every poster posted after the close
+    if (::testing::Test::HasFailure())
+      break;
+  }
+  std::printf("LockHomes: %d rounds, %llu notes, %llu dropped at the close, %llu discarded\n",
+              rounds, (unsigned long long)attempted, (unsigned long long)dropped,
+              (unsigned long long)discarded);
+}
+
+} // namespace
+
+TEST(LockPort, PostCloseDrain) {
+  const auto wake = std::make_shared<detail::wakeup>();
+  detail::lock_port port(wake);
+  std::vector<detail::lock_post> out{relevel_post(99)}; // drain clears what it is given
+  EXPECT_FALSE(port.pending());
+  EXPECT_FALSE(port.closed());
+  port.drain(out);
+  EXPECT_TRUE(out.empty());
+  EXPECT_TRUE(port.post(wake_post(1, 10)));
+  EXPECT_TRUE(port.pending());
+  // The post notified the shared wakeup: a wait begun after it ends at once (a one-sided
+  // ceiling; the time printed).
+  const auto t0 = std::chrono::steady_clock::now();
+  EXPECT_TRUE(wake->wait_until(t0 + std::chrono::seconds(10)));
+  std::printf(
+      "LockPort: the notified wait took %.3f ms\n",
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+  EXPECT_TRUE(port.post(relevel_post(2)));
+  EXPECT_TRUE(port.post(wake_post(3, 11)));
+  port.drain(out); // FIFO
+  EXPECT_EQ(texts(out), (std::vector<std::string>{"wake(1,10)", "relevel(2)", "wake(3,11)"}));
+  EXPECT_FALSE(port.pending());
+  port.drain(out);
+  EXPECT_TRUE(out.empty());
+  EXPECT_TRUE(port.post(relevel_post(4)));
+  port.close();
+  EXPECT_TRUE(port.closed());
+  EXPECT_TRUE(port.pending()); // the close keeps what landed before it
+  EXPECT_FALSE(port.post(wake_post(5, 12)));
+  EXPECT_FALSE(port.post(relevel_post(6)));
+  port.drain(out);
+  EXPECT_EQ(texts(out), (std::vector<std::string>{"relevel(4)"})); // nothing after the close
+  EXPECT_FALSE(port.pending());
+  EXPECT_FALSE(port.post(relevel_post(7)));
+  EXPECT_FALSE(port.pending());
+  // A port with no wakeup takes posts all the same.
+  detail::lock_port bare(nullptr);
+  EXPECT_TRUE(bare.post(relevel_post(1)));
+  EXPECT_TRUE(bare.pending());
+}
+
+TEST(LockHomes, CrossHomeNoteLandsInItsPort) {
+  for (const lock_threading mode : {lock_threading::single, lock_threading::shared}) {
+    SCOPED_TRACE(mode_name(mode));
+    note_counter notes_seen;
+    const std::shared_ptr<lock_manager> mgr = make_manager(mode);
+    auto a = std::make_unique<sched_side>(mgr);
+    auto b = std::make_unique<sched_side>(mgr);
+    process &pa = a->add(1);
+    process &pb = b->add(7);
+    const std::optional<std::uint64_t> ha = a->take(pa, X, {"k"});
+    ASSERT_TRUE(ha);
+    ASSERT_TRUE(b->wait(pb, X, {"k"}));
+    // A's release grants B's waiter; its wake is a note for B, posted to B's port.
+    a->release(pa, *ha);
+    EXPECT_EQ(notes_seen.count(), 1u);
+    EXPECT_EQ(mgr->stats().posts, 1u);
+    EXPECT_EQ(mgr->stats().posts_dropped, 0u);
+    EXPECT_TRUE(b->home->port_pending());
+    // A note handed to deliver by hand goes the same way, behind the first.
+    detail::lock_notes hand;
+    hand.push_back(detail::lock_note{b->home->id(), b->home->port(), relevel_post(7)});
+    a->home->deliver(hand);
+    EXPECT_EQ(notes_seen.count(), 2u);
+    EXPECT_EQ(mgr->stats().posts, 2u);
+    // A note for this home is applied at once, never posted or counted.
+    detail::lock_notes own;
+    own.push_back(detail::lock_note{a->home->id(), a->home->port(), relevel_post(1)});
+    a->home->deliver(own);
+    EXPECT_EQ(notes_seen.count(), 2u);
+    EXPECT_FALSE(a->home->port_pending());
+    // B applies both in order: the wake readies its waiter, the relevel re-reads (no change).
+    b->home->drain_port();
+    EXPECT_EQ(b->ops.readies, (std::vector<int>{7}));
+    const std::uint64_t hb = sched_side::last_hold(pb);
+    ASSERT_NE(hb, 0u);
+    check_all(*mgr, {a.get(), b.get()});
+    // A note captured for a home that is then destroyed finds its port closed: dropped.
+    const std::shared_ptr<detail::lock_port> b_port = b->home->port();
+    const detail::home_id b_id = b->home->id();
+    b.reset();
+    EXPECT_TRUE(b_port->closed());
+    detail::lock_notes late;
+    late.push_back(detail::lock_note{b_id, b_port, wake_post(7, 1)});
+    a->home->deliver(late);
+    EXPECT_EQ(notes_seen.count(), 3u);
+    const lock_stats s = mgr->stats();
+    EXPECT_EQ(s.posts, 2u);
+    EXPECT_EQ(s.posts_dropped, 1u);
+    EXPECT_EQ(s.posts_discarded, 0u); // B drained both before it went
+    EXPECT_EQ(s.holds, 0u);           // B's detach released its grant
+    a.reset();
+    EXPECT_TRUE(mgr->table().empty());
+    mgr->check();
+  }
+}
+
+TEST(LockHomes, DestroyedHomeDiscardsItsPosts) {
+  for (const lock_threading mode : {lock_threading::single, lock_threading::shared}) {
+    SCOPED_TRACE(mode_name(mode));
+    const std::shared_ptr<lock_manager> mgr = make_manager(mode);
+    auto a = std::make_unique<sched_side>(mgr);
+    auto b = std::make_unique<sched_side>(mgr);
+    process &pa = a->add(1);
+    process &pb = b->add(2);
+    process &pb2 = b->add(3);
+    const std::optional<std::uint64_t> ha = a->take(pa, X, {"k"});
+    ASSERT_TRUE(ha);
+    ASSERT_TRUE(b->wait(pb, X, {"k"}));
+    const std::optional<std::uint64_t> hb2 = b->take(pb2, S, {"j"});
+    ASSERT_TRUE(hb2);
+    a->release(pa, *ha); // grants pb: a wake in B's port
+    detail::lock_notes hand;
+    hand.push_back(detail::lock_note{b->home->id(), b->home->port(), relevel_post(2)});
+    a->home->deliver(hand);
+    EXPECT_EQ(mgr->stats().posts, 2u);
+    EXPECT_EQ(mgr->stats().holds, 2u); // pb's grant, not yet collected, and pb2's S j
+    // B goes with both posts unapplied (5.7): closed, detached (pb's grant and pb2's hold
+    // released), its posts discarded and counted, its processes' lock fields cleared.
+    const std::shared_ptr<detail::lock_port> b_port = b->home->port();
+    b->home.reset();
+    EXPECT_TRUE(b_port->closed());
+    EXPECT_FALSE(b_port->pending());
+    const lock_stats s = mgr->stats();
+    EXPECT_EQ(s.posts_discarded, 2u);
+    EXPECT_EQ(s.posts_dropped, 0u);
+    EXPECT_EQ(s.holds, 0u);
+    EXPECT_TRUE(b->ops.readies.empty()); // the wake was never applied
+    for (const process *p : {&pb, &pb2}) {
+      EXPECT_FALSE(p->lock_waiting);
+      EXPECT_TRUE(!p->locks || (p->locks->holds.empty() && !p->locks->ticket));
+    }
+    // k is A's to take again.
+    const std::optional<std::uint64_t> ha2 = a->take(pa, X, {"k"});
+    ASSERT_TRUE(ha2);
+    a->release(pa, *ha2);
+    check_all(*mgr, {a.get()});
+    b.reset();
+    a.reset();
+    EXPECT_TRUE(mgr->table().empty());
+    mgr->check();
+  }
+}
+
+TEST(LockHomes, PostsRacingACloseNeverLand) {
+  // Protocol 2.3: post and close exclude each other. Over many rounds of posters on other
+  // threads racing a home's destruction, every note handed to the port either landed before the
+  // close (and was drained, or discarded at the close) or was dropped; none landed after.
+  run_post_close_races(200);
+}

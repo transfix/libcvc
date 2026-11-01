@@ -270,8 +270,8 @@ public:
   lock_home(std::shared_ptr<lock_manager> mgr, lock_sched_ops &ops, scheduling_policy policy,
             std::shared_ptr<wakeup> wake = nullptr, lock_attach attach = {});
   /// Protocol 5.7: close the port, detach (every process of the home ended with abandon), deliver,
-  /// discard the port's posts, then clear every process's lock fields. Runs before any other
-  /// scheduler member is destroyed.
+  /// discard the port's posts (lock_stats::posts_discarded), drop the port, then clear every
+  /// process's lock fields. Runs before any other scheduler member is destroyed; never throws.
   ~lock_home();
   lock_home(const lock_home &) = delete;
   lock_home &operator=(const lock_home &) = delete;
@@ -313,7 +313,8 @@ public:
   void wait_expired(std::vector<process *> &expired);
   /// 5.8: `p`'s base priority changed (p.priority).
   void set_base(process &p);
-  /// 4.14: apply notifications: this home's at once, another home's posted to its port.
+  /// 4.14: apply notifications: this home's at once, another home's posted to its port
+  /// (lock_stats::posts when it lands, posts_dropped when the port is closed).
   void deliver(const lock_notes &notes);
   /// 5.9: apply one post to this home's process: a wake (stale ones ignored), or a relevel, which
   /// reads the manager's current value and re-levels the process only when it changed.

@@ -2377,7 +2377,13 @@ lock_query_result lock_manager::query(std::string_view abs_prefix, const detail:
                        viewer ? std::optional<detail::home_id>(viewer->id()) : std::nullopt, owner);
 }
 
-lock_stats lock_manager::stats() const { return table_->stats(); }
+lock_stats lock_manager::stats() const {
+  lock_stats s = table_->stats();
+  s.posts = posts_.load(std::memory_order_relaxed);
+  s.posts_dropped = posts_dropped_.load(std::memory_order_relaxed);
+  s.posts_discarded = posts_discarded_.load(std::memory_order_relaxed);
+  return s;
+}
 lock_threading lock_manager::threading() const { return opts_.threading; }
 const lock_manager::options &lock_manager::opts() const { return opts_; }
 void lock_manager::check() const { table_->check(); }

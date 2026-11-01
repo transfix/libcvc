@@ -17,6 +17,7 @@
 #ifndef CVC_STATE_EXEC_LOCK_MANAGER_H
 #define CVC_STATE_EXEC_LOCK_MANAGER_H
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -147,8 +148,15 @@ public:
   const detail::lock_table &table() const { return *table_; }
 
 private:
+  friend class detail::lock_home; // counts its posts (below)
+
   options opts_;
   std::unique_ptr<detail::lock_table> table_;
+  // lock_stats' port counters (protocol 4.14, 5.7): bumped by the homes with relaxed adds outside
+  // M.mu, read by stats().
+  std::atomic<std::uint64_t> posts_{0};
+  std::atomic<std::uint64_t> posts_dropped_{0};
+  std::atomic<std::uint64_t> posts_discarded_{0};
 };
 
 } // namespace cvc::state_exec
