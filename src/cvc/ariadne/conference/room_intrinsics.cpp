@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstdlib>               // strtod (room-set-intent numeric args)
 #include <cvc/ariadne/ariadne.h> // register_action_intrinsics
+#include <cvc/ariadne/conference/room_avatar.h> // room-avatar-options / room-set-avatar
 #include <cvc/ariadne/conference/room_intrinsics.h>
 #include <cvc/ariadne/conference/room_net.h> // the roster entries carry each link's quality
 #include <cvc/ariadne/holon_sync.h>        // write_intent (room-set-intent verb)
@@ -342,6 +343,89 @@ void register_room_intrinsics(cvc::app &app) {
           else if (in.move.x != 0.0 || in.move.y != 0.0)
             in.yaw = std::atan2(in.move.y, in.move.x);
           cvc::ariadne::write_intent(app, rh->room_id, rh->self_pid, in);
+          return se::make_dict({{"ok", se::value_t(true)}});
+        });
+
+    // (room-avatar-options ROOM KIND) -> list of labels. KIND is "color" or "accessory"; the
+    // labels of what the room's catalog offers (room_avatar.h), in its order, the default first.
+    // Empty until the relay's catalog has arrived. ROOM is a room-join handle or a room-id.
+    se::builtins::register_fn(
+        env, "room-avatar-options", [&app, doc](std::span<const se::value_t> args) -> se::value_t {
+          if (!doc)
+            return err("room-avatar-options: no document scope");
+          room_table *tbl = doc_rooms(doc);
+          if (!tbl)
+            return err("room-avatar-options: internal: room-table slot unavailable");
+          if (args.size() < 2)
+            return err("room-avatar-options: (room-avatar-options ROOM KIND)");
+          room_handle *rh = tbl->find(handle_token(args[0]));
+          const std::string room_id = rh ? rh->room_id : handle_token(args[0]);
+          const std::string kind = get_str(&args[1]);
+          if (kind != "color" && kind != "accessory")
+            return err("room-avatar-options: KIND must be \"color\" or \"accessory\"");
+          const avatar_catalog cat = read_avatar_catalog(app, room_id);
+          std::vector<se::value_t> list;
+          if (kind == "color")
+            for (const avatar_color_option &o : cat.colors)
+              list.push_back(se::value_t(o.label));
+          else
+            for (const avatar_accessory_option &o : cat.accessories)
+              list.push_back(se::value_t(o.label));
+          return se::make_list(std::move(list));
+        });
+
+    // (room-avatar HANDLE) -> { color accessory }: the labels of the caller's avatar as every
+    // client draws it -- its choice resolved through the catalog, so the defaults until it chose
+    // (and both "" until the catalog has arrived).
+    se::builtins::register_fn(
+        env, "room-avatar", [&app, doc](std::span<const se::value_t> args) -> se::value_t {
+          if (!doc)
+            return err("room-avatar: no document scope");
+          room_table *tbl = doc_rooms(doc);
+          if (!tbl)
+            return err("room-avatar: internal: room-table slot unavailable");
+          if (args.empty())
+            return err("room-avatar: (room-avatar HANDLE)");
+          room_handle *rh = tbl->find(handle_token(args[0]));
+          if (!rh)
+            return err("room-avatar: HANDLE must be a room-join handle (needs the caller's pid)");
+          const avatar_catalog cat = read_avatar_catalog(app, rh->room_id);
+          const avatar_look look = resolve_avatar_look(
+              cat, read_avatar_choice(app, rh->room_id, rh->self_pid), rh->self_pid);
+          const avatar_color_option *c = cat.find_color(look.color_id);
+          const avatar_accessory_option *a = cat.find_accessory(look.accessory_id);
+          return se::make_dict({
+              {"color", se::value_t(c ? c->label : std::string())},
+              {"accessory", se::value_t(a ? a->label : std::string())},
+          });
+        });
+
+    // (room-set-avatar HANDLE COLOR ACCESSORY) -> { ok #t }. The caller picks its own avatar from
+    // the room's catalog: COLOR and ACCESSORY are option ids or labels. Writes only the caller's
+    // own avatar.* choice (the handle supplies its pid); everyone, the caller included, draws
+    // what it resolves to. An option the catalog does not offer is an error, not a write.
+    se::builtins::register_fn(
+        env, "room-set-avatar", [&app, doc](std::span<const se::value_t> args) -> se::value_t {
+          if (!doc)
+            return err("room-set-avatar: no document scope");
+          room_table *tbl = doc_rooms(doc);
+          if (!tbl)
+            return err("room-set-avatar: internal: room-table slot unavailable");
+          if (args.size() < 3)
+            return err("room-set-avatar: (room-set-avatar HANDLE COLOR ACCESSORY)");
+          room_handle *rh = tbl->find(handle_token(args[0]));
+          if (!rh)
+            return err(
+                "room-set-avatar: HANDLE must be a room-join handle (needs the caller's pid)");
+          const avatar_catalog cat = read_avatar_catalog(app, rh->room_id);
+          const std::string color = get_str(&args[1]), accessory = get_str(&args[2]);
+          const avatar_color_option *c = cat.find_color(color);
+          if (!c)
+            return err("room-set-avatar: the room offers no colour '" + color + "'");
+          const avatar_accessory_option *a = cat.find_accessory(accessory);
+          if (!a)
+            return err("room-set-avatar: the room offers no accessory '" + accessory + "'");
+          write_avatar_choice(app, rh->room_id, rh->self_pid, avatar_choice{c->id, a->id});
           return se::make_dict({{"ok", se::value_t(true)}});
         });
   });
