@@ -485,6 +485,8 @@ void scheduler::execute_process_step(const process_ptr &pp) {
 
   // 4. Accumulate running time, and charge it to what the step was spent on
   const clock::time_point now = clock::now();
+  if (home_)
+    home_->store_progress(now); // the home's last_progress, read by blocking_sinks (design 8.4)
   const double step_seconds = std::chrono::duration<double>(now - start).count();
   proc.accumulated_time += step_seconds;
   proc.state.stats.add_step_time(step_seconds - proc.step_async_wall);

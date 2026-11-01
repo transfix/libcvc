@@ -331,6 +331,8 @@ void async_scheduler::execute_process_step(const process_ptr &pp) {
   }
 
   const clock::time_point now = clock::now();
+  if (home_)
+    home_->store_progress(now); // the home's last_progress, read by blocking_sinks (design 8.4)
   // A parking intrinsic (sleep / yield-frame / receive_message) already closed out this running
   // slice into accumulated_time and flipped status to `waiting`; accrue here only while still
   // running, so a parking step's slice is not double-counted (mirrors process::elapsed_time()'s own
