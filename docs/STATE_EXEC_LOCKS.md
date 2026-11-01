@@ -3,8 +3,15 @@
 Status: design, 2026-10-27. L0 (the atomic natives, section 4.4), L1 (`with-lock` on one
 scheduler) and L1b (the spawn context on one scheduler) are built. L2 (priorities and
 inheritance) is implemented in transfix/libcvc#868, with its scheduler-level PI tests and its two
-bench scenarios; its A/B gates are not run yet (section 12). L3 follows, and L4 onward are design
-only.
+bench scenarios; its A/B gates are not run yet (section 12). L3 (one app, several threads) is
+built: shared mode, every manager operation under `M.mu` (protocol 0, 2.1); several homes on a
+manager, and the refusal of a cross-thread home by a single one (protocol 4.4; 8.3); the homes'
+ports, posts and destruction order (protocol 2.3, 4.14, 5.7, 5.9); `last_progress` and
+`blocking_sinks` (protocol 2.1, 4.13) under pycvc's idle rule (9.2); the app manager's mode, with
+Ariadne's init lane and pycvc's `Exec`s on it (8.3, 8.4); `CVC_EXEC_FUZZ`'s yields at the protocol
+points; the model check on two and three homes (protocol 7); and the bench's `locks=shared` and
+`lock.cross_thread` (11.2). Its A/B gates are not run yet; `lock.cross_thread`'s numbers and the
+sharding decision go in 11.3. L4 onward are design only.
 Tracked in the `state-exec-perf` workstream,
 beside the threaded design ([`docs/STATE_EXEC_THREADED.md`](STATE_EXEC_THREADED.md)), which this
 document extends. The exact lock protocol is
@@ -195,9 +202,10 @@ with its invariants and their proofs, for a model checker to implement literally
   and its cache lines. An operation holds it for about 30-150 ns, so sections of a few
   microseconds see no difference, while sections of a few hundred nanoseconds on 8 threads can
   serialize. `lock.cross_thread` measures it (11.2; gate: disjoint at t = 4 at least 0.9x the
-  no-lock run). If it fails, the documented fallback is **sharding by subtree**: a manager per
-  top-level subtree or document prefix, requests spanning subtrees taking their mutexes in a fixed
-  order, behind the same API, after its own review and model check (14.2, question 9).
+  no-lock run; L3's numbers in 11.3). If it fails, the documented fallback is **sharding by
+  subtree**: a manager per top-level subtree or document prefix, requests spanning subtrees taking
+  their mutexes in a fixed order, behind the same API, after its own review and model check (14.2,
+  question 9).
 - **No document domains.** An unchrooted X on `docs` now excludes every document's locks below it,
   as the tree means, instead of being refused. Documents share only their common ancestors'
   counters.
@@ -1352,6 +1360,24 @@ and `msg.*`, within 3% (and the noise).
 and `eval.raise_depth` (d 16, 64; stackless) within noise (base and candidate interleaved twice
 with 5 reps, `docs/STATE_EXEC_BENCH.md`).
 
+### 11.3 `lock.cross_thread`: the numbers and the sharding decision
+
+L3's A/B measures `lock.cross_thread` (11.2; the scenario, its extras and its gate commands are in
+`docs/STATE_EXEC_BENCH.md`, "lock.cross_thread" and "The phase L3 gates") on Windows, MSVC
+Release, in recorded quiet windows with the driver pinned: at least two rounds of 5 reps or more,
+every point under its noise limit. The gates are the disjoint keys' `extra.ratio_to_nolock` at
+least 0.9 with 3 us sections at t = 4, and the hot key's `extra.handoff_p50_ns` at most 50 us at
+each t that hands off; the manager mutex's waits (`lock_stats::mutex_waits`, `mutex_wait_ns`) are
+recorded beside them. The Linux figures come from `locks-deep.yml`'s `stress` lane on a hosted
+runner, recorded beside 11.2's 20 us handoff p50 and not gated: there is no Linux bench host.
+
+The numbers decide sharding (3.3, 14.2 question 9). If every Windows gate passes and the Linux
+figures are not far outside 11.2's, the manager keeps its one mutex. A miss on Windows, or a Linux
+figure far outside 11.2's even on a hosted runner, opens the subtree-sharding design, with its own
+review and model check, outside L3. `mt.groups.locks` (L4) can reopen the question.
+
+<!-- L3 A/B: lock.cross_thread numbers and the sharding decision go here -->
+
 ## 12. Phases
 
 Every phase builds on `perf/sched`, `perf/eval` and `perf/async` together: the lock wait is a
@@ -1386,8 +1412,10 @@ clamp, inheritance (homes attach with their scheduler's policy, and the run queu
 `effective_priority()` through `level_key`), `state_exec.policy`, the thread classes,
 `post_control`, and pycvc's priority API. The same PR has its scheduler-level PI tests (PI-1..PI-5,
 PI-8, PI-9 and PI-11; PI-7 and PI-10 are L3's) and the `prio.set` and `lock.inherit` bench
-scenarios. None of its A/B gates (11.2) has been run yet, so L2's exit is not met. L3 onward are
-not built.
+scenarios. None of its A/B gates (11.2) has been run yet, so L2's exit is not met. L3 is built
+(the status at the top lists what it added), with its tests (13.7, and the L3 cases of 13.3 to
+13.6) and its cases in the sanitizer jobs (`docs/TESTING.md`). Its A/B gates (11.2, 11.3) have not
+been run yet, so L3's exit is not met either. L4 onward are not built.
 
 ## 13. The test list
 
@@ -1630,4 +1658,4 @@ Each case runs with the process queued, and granted but not yet resumed.
    landed. The threaded design records it.
 9. **When to shard the manager**: only if `lock.cross_thread` misses its disjoint gate at t = 4 on
    Windows or Linux, or `mt.groups.locks` its 5% gate; then by subtree (3.3), with its own review
-   and model check.
+   and model check. L3's measurement and decision are in 11.3.

@@ -107,7 +107,11 @@ no build option to drop it), so the engine is always present.
 after `ariadne.exec.lock_timeout` seconds (default 1.0, a tree setting beside the
 `ariadne.limits.action_max_*` keys, read at each submission): a document never hangs on another's
 lock. A resident's request has no such default: it waits as long as it takes. The `init:` lane
-never waits for a lock: a busy request there is as `:timeout 0` (`TimeoutError`, or `:else` with
+locks on the app's lock manager (`app::lock_manager()`), the one the residents and actions use, so
+an init script's request meets their holds: its scheduler's lock home attaches when the script
+starts and detaches when it ends. The lane never waits for a lock (docs/STATE_EXEC_LOCKS.md 5.5,
+LW-9): the host thread that runs the script also steps the residents, so a holder could not
+release meanwhile, and a busy request there is as `:timeout 0` (`TimeoutError`, or `:else` with
 `:if-available`). An action's `(fork)` forks the action's process, and the child is reaped with
 the document.
 

@@ -334,8 +334,8 @@ these also record `blocking_sinks` with the progress cells it loaded, which the 
 into its own cells first. It records every manager operation the world makes, with its result and
 notifications, one per line; its docstring specifies the format. `LocksModel.PythonTraces` replays
 every file into the oracle and into the table and requires the recorded results and notifications.
-Regenerate the committed files after
-a change to the model (the output does not depend on the hash seed):
+Regenerate the committed files after a change to the model (the output does not depend on the hash
+seed):
 
     python -I export_traces.py ../../src/cvc/tests/data/locks_model_traces
 
