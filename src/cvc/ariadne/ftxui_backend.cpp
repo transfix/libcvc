@@ -2501,6 +2501,17 @@ bool FtxuiBackend::draw_image(const char *name, float width) {
   return true;
 }
 
+bool FtxuiBackend::draw_image_fit(const char *name, float box_w, float box_h) {
+  // The width whose aspect-following height fits the box: no bars in a terminal, but the same
+  // bound on the picture.
+  const auto it = m_->images.find(name ? name : "");
+  if (it == m_->images.end() || it->second.rgb.empty() || !(box_w > 0.0f) || !(box_h > 0.0f))
+    return draw_image(name, box_w);
+  const auto &img = it->second.rgb;
+  const float fit_w = box_h * static_cast<float>(img.width()) / static_cast<float>(img.height());
+  return draw_image(name, std::min(box_w, fit_w));
+}
+
 // ---- headless driving
 // ----------------------------------------------------------------------------
 
@@ -3068,6 +3079,7 @@ StringEdit FtxuiBackend::input_text(const char *, const char *, const std::strin
 }
 void FtxuiBackend::focus_next_widget() {}
 bool FtxuiBackend::draw_image(const char *, float) { return false; }
+bool FtxuiBackend::draw_image_fit(const char *, float, float) { return false; }
 ColorEdit FtxuiBackend::color(const char *, const float[3]) { return {}; }
 void FtxuiBackend::set_image(const std::string &, const cvc::image &) {}
 void FtxuiBackend::clear_image(const std::string &) {}

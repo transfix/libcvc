@@ -417,6 +417,12 @@ Three backends ship:
     streams. A compressed codec needs a decoder from the host; `arigl` adds cvcGL's JPEG
     one for `mjpeg`. `ari` and `arigl --terminal` both register it. With no live stream,
     it shows whatever still image is published under the stream's name (`--image`).
+    Its `size:` is a width (`size: 320`, the height following each frame's aspect) or a box
+    (`size: [320, 240]`). In a box each frame is fitted inside it with its shape kept, and
+    ImGui fills the spare space with black bars, so a tile stays one size whatever a camera
+    sends: a portrait phone shows whole, not squashed. A camera captured with `jpeg:#t`
+    keeps its own aspect within the capture's `w` x `h`, a budget turned to the camera's
+    orientation (a portrait phone at 320x240 sends 240x320).
 
   Commit edges match the ImGui backend: discrete widgets commit on the edit, a
   mouse-dragged slider reports each move and commits on release (arrow-key steps commit at
