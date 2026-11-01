@@ -173,8 +173,8 @@ void avatar_panel::publish(cvc::app &app, const std::string &prefix) const {
   put("ledger.time", duration(b.time));
   put("ledger.exhausted", duration(b.exhausted_time));
   put("ledger.peak", watts(b.peak_power));
-  put("ledger.balance", printf_str("balances (residual %.3f J)",
-                                   std::fabs(residual) < 5e-4 ? 0.0 : residual));
+  put("ledger.balance",
+      printf_str("balances (residual %.3f J)", std::fabs(residual) < 5e-4 ? 0.0 : residual));
   const double spent = b.work + b.carried;
   put("ledger.per_km",
       b.distance >= 10.0 ? printf_str("%.1f kJ/km", spent / 1000.0 / (b.distance / 1000.0)) : "--");
