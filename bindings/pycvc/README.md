@@ -319,7 +319,10 @@ can't raise itself back once lowered: that returns `False`. The app tree's
 scheduler is first built.
 
 The rest of state_exec is the C++ API under the C++ names
-(`docs/PYCVC_STATE_EXEC_PARITY.md` lists what is wrapped and what comes next):
+(`docs/PYCVC_STATE_EXEC_PARITY.md` lists what is wrapped and what comes next). A scheduler built
+this way runs the policy passed to it and does not read `state_exec.policy`; only `Exec(app)` and
+the app's exec scheduler do (`docs/STATE_EXEC_DEVELOPER_GUIDE.md`, "Which Scheduler Runs a
+Program"):
 
 ```python
 from pycvc import symbol
@@ -388,7 +391,9 @@ any other, whatever thread runs it. pycvc runs schedulers on threads of its own 
 import, so the manager's default mode (`state_exec.locks.threading` `auto`) is `shared`: one mutex
 around every lock operation. With the setting at `single`, `Exec(app)` raises `RuntimeError`
 naming it. A build without threads (the static Emscripten pycvc) makes a `single` manager and
-attaches every `Exec` to it.
+attaches every `Exec` to it. The import's mark is process-wide and permanent, but it only counts
+for a manager made after it: an app whose manager was already made (its exec scheduler built
+first, by an Ariadne `AppRuntime` for instance) keeps the mode it got then.
 
 ```python
 import threading

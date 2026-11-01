@@ -935,11 +935,13 @@ class lock_manager {                        // app::lock_manager(), or a schedul
   inline at threads 0, Emscripten); they still exchange wakes by post (9.5).
 - **`shared`** (from L3). One `std::mutex` (an SRWLOCK on MSVC, a futex on glibc) guards the whole
   manager: about 20 ns for an uncontended lock and unlock.
-- **Which mode.** A scheduler's private manager is `single`. The app manager's mode is chosen at the
-  first `app::lock_manager()` call: `shared` if threads are compiled in and either
-  `state_exec.threads > 0` or pycvc is loaded, otherwise `single`; `state_exec.locks.threading`
-  (`auto`, `single`, `shared`) overrides it. Attaching a home that may be pumped on another thread
-  to a single-mode manager is refused with an error naming the setting, in every build.
+- **Which mode.** A scheduler's private manager is `single`. The app manager's mode is chosen when
+  the manager is made, by the first `app::lock_manager()` or `app::exec_scheduler()` call (an
+  Ariadne init script and a pycvc `Exec` call the first): `shared` if threads are compiled in and
+  either `state_exec.threads > 0` or pycvc is loaded, otherwise `single`;
+  `state_exec.locks.threading` (`auto`, `single`, `shared`) overrides it. Attaching a home that
+  may be pumped on another thread to a single-mode manager is refused with an error naming the
+  setting, in every build.
 - **Lock order.** The manager mutex is innermost apart from the tree's node mutexes, and nothing
   else is locked under it. It is never held while calling into a scheduler, a port, a process or
   a tree node: an operation collects its wakes and relevels and the caller delivers them after the
@@ -1690,8 +1692,9 @@ Each case runs with the process queued, and granted but not yet resumed.
    `prio.groups_weighted` passes.
 3. **L5 and L6**: built only on a concrete request.
 4. **The app manager's mode**: `shared` when threads are compiled in and `state_exec.threads > 0` or
-   pycvc is loaded, else `single`, chosen at the first `app::lock_manager()` call. The alternative
-   is `shared` whenever the build has threads (65-90 ns instead of 25-50 ns per section).
+   pycvc is loaded, else `single`, chosen when the manager is made (the first
+   `app::lock_manager()` or `app::exec_scheduler()` call). The alternative is `shared` whenever
+   the build has threads (65-90 ns instead of 25-50 ns per section). Built in L3 as proposed.
 5. **Default policy for Ariadne, pycvc and the coordinator**: keep `round_robin`, since
    `priority_rr` changes step interleaving and step-count tests; hosts opt in.
 6. **Inheritance, `lock-query` and `DeadlockError` across owners** (a reading of Q5): inheritance may

@@ -560,13 +560,17 @@ public:
   cvc::world_units &world_units();
 
   // This application's single, app-wide state_exec scheduler — the one long-lived
-  // async_stackless-backed scheduler on which all Ariadne program lanes (init:/action
-  // on:/on:tick·on:key residents/spawned), and any other state_exec host, schedule.
-  // Per-app-instance and lazily constructed (like computePool()/world_clock()), wired
-  // to this app's state root for state-watches. "App-wide" = scoped to this cvc::app:
-  // one cooperative timeline shared by every .ari document the app hosts, with
-  // per-document isolation layered on top by the Ariadne runtime (owner scope +
-  // per-process chroot + per-document child env). See CVCGL-UI-DSL-ROADMAP §4.7.
+  // async_stackless-backed scheduler on which Ariadne's action lanes (action on:, on:tick·on:key
+  // residents, their spawned children), AppRuntime's verbs and the app's posting hosts (sliced
+  // tasks, net and stream intrinsics) schedule. Ariadne's init: runs on a private sync scheduler
+  // of its own, and each pycvc Exec owns a private async_scheduler; both share this app's
+  // lock_manager(). Per-app-instance and lazily constructed (like computePool()/world_clock()),
+  // wired to this app's state root for state-watches; state_exec.policy and
+  // state_exec.process_class are read once, when it is built. "App-wide" = scoped to this
+  // cvc::app: one cooperative timeline shared by every .ari document the app hosts, with
+  // per-document isolation layered on top by the Ariadne runtime (owner scope + per-process
+  // chroot + per-document child env). See docs/STATE_EXEC_DEVELOPER_GUIDE.md, "Which Scheduler
+  // Runs a Program".
   cvc::state_exec::async_scheduler &exec_scheduler();
 
   // The async host for exec_scheduler() (docs/STATE_EXEC_EXCEPTIONS.md 3.2): an async function

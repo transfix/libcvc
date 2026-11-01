@@ -15,7 +15,9 @@ Every scheduler steps its processes on one thread today. The design for
 running programs on several threads is in
 [STATE_EXEC_THREADED.md](STATE_EXEC_THREADED.md) (adopted, not yet built):
 execution groups, each one scheduler stepped by one thread at a time, run in
-parallel on a shared worker pool, added in stages.
+parallel on a shared worker pool, added in stages. Which scheduler each host
+and Ariadne lane runs, and which settings choose what, is in
+[Which Scheduler Runs a Program](#which-scheduler-runs-a-program).
 
 ---
 
@@ -554,6 +556,61 @@ scheduler sched(scheduling_policy::round_robin);   // default
 scheduler sched2(scheduling_policy::priority);     // -20..19 nice values
 scheduler sched3(scheduling_policy::priority_rr);  // priority + RR within tier
 ```
+
+### Which Scheduler Runs a Program
+
+There are two scheduler classes. Both step the stackless evaluator, one process step at a time,
+on whichever thread calls them: `scheduler` holds a `stackless_evaluator`, and `async_scheduler`
+an `async_stackless_evaluator`, which wraps one and steps it the same way.
+
+- `scheduler` (synchronous): `(await)` returns at once, and an async function's kernel runs
+  inline, so a process never parks on one.
+- `async_scheduler`: a process parks on an async call or `(await)`, and resumes when the result
+  comes back through the scheduler's ingress.
+
+The recursive `evaluator` and `async_evaluator` run only where code builds one directly: tests,
+`pycvc.evaluator`, and `state_exec_bench --executor recursive`. No scheduler uses them.
+
+Which class each host and lane uses is fixed in code. No setting, command-line flag or
+environment variable chooses it.
+
+| Host or lane | Scheduler | Policy | Lock home |
+|---|---|---|---|
+| Ariadne actions (`on:`), residents (`on_tick`, `on_key`, `on_pointer`, `on_signal`) and the children they spawn; `AppRuntime`'s verbs; sliced tasks, net and stream intrinsics | the app's `async_scheduler`, `app::exec_scheduler()`, one for every document the app hosts, stepped by whichever thread calls `Runtime::drain` | `state_exec.policy` | the app's manager; attached cross-thread when that manager is shared |
+| Ariadne `init:` | a private `scheduler`, run to completion on the loading thread (at most 10 million steps and 5 s) | `round_robin` | the app's manager, same thread; never waits for a lock |
+| Ariadne's read lane (`visible_when`, computed `bind:`, ...) | none: a long-lived `stackless_evaluator` (`ReactiveEngine`), during the render walk | - | - |
+| pycvc `Exec(app)` | a private `async_scheduler` per `Exec`, stepped by whichever Python thread calls `run()` | its `policy` argument, else `state_exec.policy` | the app's manager, `threaded_host_attach()` |
+| `pycvc.scheduler(policy)`, `pycvc.async_scheduler(policy)`, or one built in C++ | the one built | the one passed (`round_robin` by default in C++) | private, unless given one with `set_lock_manager` |
+| `cvc exec`, `cvc ps`, `cvc serve --enable-exec` (`exec_coordinator`) | a `scheduler` | `round_robin` | private |
+
+**Threads.** Every scheduler is stepped by one thread at a time, and no pool steps DSL code.
+Programs run in parallel today only where a host steps several schedulers on threads of its own:
+several pycvc `Exec`s, each `run()` on its own Python thread, or a C++ host that does the same.
+Async functions' kernels and threaded sliced-task chunks do run on other threads, and post their
+results back to the scheduler. The design for stepping schedulers on a shared worker pool is
+[STATE_EXEC_THREADED.md](STATE_EXEC_THREADED.md), not built yet. `state_exec.threads`, its pool
+size, starts no thread today; it only feeds the lock manager's `auto` mode
+([Locks](#locks-with-lock), "Single and shared mode").
+
+**Nothing here changes while programs run.** Each choice is made when its object is built:
+
+- `state_exec.policy` is read when `app::exec_scheduler()` is first built, and by each `Exec(app)`
+  given no policy ([Priorities](#priorities)).
+- `state_exec.locks.threading` and `state_exec.threads` are read when the app's lock manager is
+  made.
+- `state_exec.process_class` is read when `app::exec_scheduler()` is first built.
+
+A host sets these on the app tree before anything calls `app::exec_scheduler()`,
+`app::exec_async_host()` or `app::lock_manager()`. `ari` and `arigl` build the app scheduler while
+they set up, before any document loads (`AppRuntime::register_quit`, `register_verb` and
+`enable_net` each build it), and have no option that sets `state_exec.*`. A document cannot set
+them either: its programs' writes are chrooted under its own prefix. So `ari` runs `round_robin`,
+with a `single` lock manager unless pycvc is loaded in the same process.
+
+What does change at run time: a process's priority (`set-priority`, `Exec.set_priority`,
+`post_control`), and the settings read on every submission (`state_exec.defaults.parser.*`,
+`state_exec.defaults.data.*` and `state_exec.defaults.limits.*` on the async scheduler,
+`ariadne.limits.*` and `ariadne.exec.lock_timeout`).
 
 ### Submitting Programs
 
@@ -1648,9 +1705,12 @@ is single. The app's takes its mode from the app tree's `state_exec.locks.thread
 | `shared` | `shared` |
 
 An unknown value is logged and `auto` used. The mode is chosen once, when the manager is made: by
-the first of `app::lock_manager()` (which a pycvc `Exec(app)` calls), `app::exec_scheduler()` and
-an Ariadne init script, each of which makes it. A host sets the setting before any of those;
-changing it later changes nothing. Shared mode adds an uncontended mutex lock and unlock to each
+the first of `app::lock_manager()` (which a pycvc `Exec(app)` and pycvc's
+`set_lock_manager(app)` call), `app::exec_scheduler()` and an Ariadne init script, each of which
+makes it. A host sets the setting before any of those; changing it later changes nothing. `ari`
+and `arigl` build `app::exec_scheduler()` while they set up, so their manager is `single` unless
+pycvc was imported first. `state_exec.threads` starts no thread today: it is read here, by `auto`,
+and nowhere else. Shared mode adds an uncontended mutex lock and unlock to each
 manager operation (STATE_EXEC_LOCKS.md 8.8).
 
 **A scheduler stepped on another thread.** `set_lock_manager(mgr, attach)` (both schedulers)
@@ -1888,6 +1948,17 @@ configuration back to the state tree:
 The published `policy` is a report: a scheduler's policy is fixed when it is built, and
 `load_settings()` does not change it. `state_exec.policy`, which chooses the policy of
 `app::exec_scheduler()` when it is first built, is described in [Priorities](#priorities).
+
+**App-level settings.** These configure the app's own objects, not a scheduler `load_settings()`
+reads. Each is read once, when that object is built, and a later change does nothing
+([Which Scheduler Runs a Program](#which-scheduler-runs-a-program)):
+
+| Setting | Read when | Values | Default |
+|---------|-----------|--------|---------|
+| `state_exec.policy` | `app::exec_scheduler()` is first built; each pycvc `Exec(app)` given no policy | `round_robin`, `priority`, `priority_rr` (anything else is logged) | `round_robin` |
+| `state_exec.locks.threading` | the app's lock manager is made ([Locks](#locks-with-lock)) | `auto`, `single`, `shared` (anything else is logged and `auto` used) | `auto` |
+| `state_exec.threads` | with `state_exec.locks.threading`, by `auto` only; it starts no thread yet | a whole number, or `auto` | unset (0) |
+| `state_exec.process_class` | `app::exec_scheduler()` is first built ([THREAD_POOL.md](THREAD_POOL.md)) | `background`, `utility`, `normal` (anything else is logged and ignored) | unset (the OS's) |
 
 ---
 

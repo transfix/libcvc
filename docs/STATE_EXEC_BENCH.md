@@ -476,6 +476,8 @@ frames.
 `sched.single.*`, `flood.small` and `msg.*` have two more sweep keys, both at one value by default:
 
 - `policy`: the scheduler's policy. `rr` (round robin, the default), `priority` or `priority_rr`.
+  `rr` is the bench's short name only: on the state tree `state_exec.policy` takes `round_robin`,
+  and logs `rr` as unknown.
 - `locks`: which lock manager the scheduler gets (docs/STATE_EXEC_LOCKS.md 11.2). `none` (the
   default) passes none: the scheduler every existing suite builds, which makes its private manager
   and lock home only at its first lock request, so programs that never lock run as they did
@@ -485,10 +487,11 @@ frames.
   every manager operation under the manager's mutex), attached the same way; the async
   scheduler's home attaches with `lock_attach{cross_thread}` (`threads_compiled_in`), as pycvc's
   `Exec` attaches its own. From phase L3 an attached home pays a port test and a progress store
-  per step (design 8.4, 8.8), so the async `locks=shared` points are the hosts' shape: an
+  per step (design 8.4, 8.8), so the async `locks=shared` points are the threaded hosts' shape: an
   `async_scheduler` with a shared-mode home, running a program that never locks, which is what
-  pycvc's `Exec`s and `app::exec_scheduler()` run for a program without `with-lock`. Any other
-  value is skipped, with a line saying so.
+  pycvc's `Exec`s run for a program without `with-lock`, and `app::exec_scheduler()` too when the
+  app's manager is shared. A plain `ari` run makes it `single`, attached on one thread: the
+  async `locks=private` shape. Any other value is skipped, with a line saying so.
 
 Sweep them with `--size policy=rr,priority_rr` or `--size locks=none,shared`, and compare the two
 sides of a sweep with `compare --pair` ("Runner options"; L3's gate is under "lock.cross_thread",

@@ -97,7 +97,8 @@ input had been truncated. With all five judged, the decision changed (section 3.
 ### 2.1 What runs where
 
 - **Schedulers.** Two schedulers step a `stackless_evaluator`, one step at a time:
-  - the sync `scheduler` (the CLI, tests, `exec_coordinator`);
+  - the sync `scheduler` (the CLI, tests, `exec_coordinator`, and Ariadne's `init:` lane, which
+    runs each script to completion on a private one);
   - the `async_scheduler`. Ariadne uses the app-wide one (`app::exec_scheduler()`,
     `app.cpp:1024-1038`). pycvc's `Exec` builds its own (`pycvc_exec.cpp:410-423`).
 - **The step loop.** Each step selects a process, sets the scheduler's current process, arms the
@@ -114,7 +115,9 @@ input had been truncated. With all five judged, the decision changed (section 3.
 - **pycvc.** `Exec.run` pumps the `Exec`'s private scheduler.
   - It releases the GIL around each slice (`pycvc_exec.cpp:594`).
   - When its program is parked it sleeps 1 ms (`pycvc_exec.cpp:648`), which is about 15.6 ms on
-    Windows.
+    Windows. (Since the scheduler track, #842, it waits on the scheduler's wakeup instead,
+    `wait_for_work`, which an ingress post or the next timer ends; since the locks track's L3, a
+    lock post too.)
   - Several `Exec`s on several Python threads therefore already step DSL in parallel today. The
     docs recommend exactly that ("a separate `Exec` per thread", `docs/ARIADNE.md:1151-1152`).
     That usage is exposed to the process-global hazards below (B7, B10, B14, B23).
@@ -181,7 +184,7 @@ blocker cannot occur until several threads step one group.
 | B26 | `math.random` is `thread_local`; `print` lines from several threads interleave | `stdlib.cpp:1279`; `builtins.cpp:688-707` | Stage 1 |
 | B27 | Spawned children get the bare base env, with no intrinsics, no chroot and no owner, so they cannot `msg-send`, touch the tree or report a result | `intrinsics.cpp:420-431` -> `stackless_evaluator.cpp:53, 66`; `builtins.cpp:855-938`; intrinsics come only from `register_intrinsics` (`intrinsics.cpp:1062`) | Stage 1; its single-scheduler part landed with the locks track's L1b |
 | B28 | `(fork)` forks `ctx->pid`, which hosts leave at -1 or 0, not the running process; a forked child does not inherit `owner` | `intrinsics.cpp:437`; `ariadne.cpp:1645-1660`; `pycvc_exec.cpp:416`; `async_scheduler.cpp:957-976` | Stage 0, or the locks track's L1 if that lands first (a bug today) |
-| B29 | With several documents Ariadne pumps the shared scheduler once per document per frame, so `wake_awaiting` runs D times a frame and "an await crosses exactly one frame" does not hold | `ariadne.cpp:2021-2023`, `1694-1697` | Stage 1 |
+| B29 | With several documents Ariadne pumps the shared scheduler once per document per frame, so `wake_awaiting` runs D times a frame and "an await crosses exactly one frame" does not hold | `ariadne.cpp:2021-2023`, `1694-1697` | Stage 1. The `wake_awaiting` half is fixed: it now runs once per app frame however many documents pump (`Runtime::Impl::starts_frame`) |
 | B30 | Host posting and async-function sites are bound to the app scheduler and host, not to the scheduler that runs the program | `app_runtime.cpp:96-101`; `net_intrinsics.cpp:268-276`; `stream/stream.cpp:132-148, 238`; `ariadne.cpp:1843, 1967` | Stage 1 |
 | B31 | Envs capture a concrete scheduler and host: `ictx->sched` is a raw pointer (`intrinsics.h:140`), and `register_async_fn`'s natives capture `&host` (`async_host.cpp:589-591`). A process moved to another scheduler would call the old one from another thread | as listed | Stage 3 (moving a process) |
 | B32 | Pids are per scheduler (`next_pid_`, `async_scheduler.h:257`), so several schedulers reuse pids; `restore(process_ptr)` re-pids a process and clears its receive state | `async_scheduler.cpp:652-664` | Stage 1 (pids), Stage 3 (moves) |
@@ -1344,9 +1347,11 @@ The pool reads them when it is built. `threads` cannot change while groups are a
 
 **Lock and priority settings** ([`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md)) follow the same
 precedence: `state_exec.policy` (`round_robin` by default), `state_exec.locks.threading` (`auto`,
-`single`, `shared`; `auto` makes the app's lock manager `shared` when `threads` is above 0 or pycvc
-is loaded), `state_exec.groups.priority_weights` (on), `state_exec.worker_class` (`normal`,
-`pool_options::worker_class`), `state_exec.process_class`, and `ariadne.exec.lock_timeout` (1.0 s).
+`single`, `shared`; `auto` makes the app's lock manager `shared` when the build has threads and
+either `threads` is above 0 or pycvc is loaded; built with L3, which reads `threads` for this
+alone, since nothing else here is built yet), `state_exec.groups.priority_weights` (on),
+`state_exec.worker_class` (`normal`, `pool_options::worker_class`), `state_exec.process_class`,
+and `ariadne.exec.lock_timeout` (1.0 s).
 Their names await approval as Q14's did ([`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) 14.2).
 
 | Host | How it opts in | Stage |
