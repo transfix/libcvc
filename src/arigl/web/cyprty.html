@@ -47,7 +47,8 @@
   <h1>cyberpcangel &middot; cyprty</h1>
   <span class="keys">Ariadne conference — the browser joins the room and shows who is present,
     live with native clients &middot; <b>WASD</b> walk/strafe &middot; <b>click</b> the floor to
-    face it &middot; <b>drag</b> to orbit &middot;
+    face it &middot; <b>drag</b> to orbit &middot; <b>Settings &rsaquo; Controls</b> for mouse
+    look &middot;
     <a href="https://github.com/transfix/libcvc">libcvc</a></span>
   <button id="fs" title="Fullscreen (best on a phone)">⛶ Fullscreen</button>
 </header>
@@ -93,6 +94,9 @@
   // ?synthetic=1 drives the self-cam from a hardware-free MJPEG test pattern instead of the real
   // camera, so the conference (peer video included) can be tried in a browser with no camera.
   const SYNTH = PARAMS.get('synthetic');
+  // ?look=mouse starts in mouse look (click the scene, then the mouse aims and W walks where you
+  // aim; Esc gives the mouse back), ?look=drag in drag to look. Settings > Controls switches.
+  const LOOK = PARAMS.get('look');
   // A private room's token, when the invite link carries one: in the URL FRAGMENT (#token=...),
   // which the browser never sends to a server, so it stays out of proxy and access logs. The
   // relay refuses a connection without it (arisrv --room-token-file).
@@ -153,6 +157,7 @@
         ENV.CVC_ARIADNE_RELAY = RELAY;
         ENV.CVC_ARIADNE_NAME = NAME;
         if (SYNTH && SYNTH !== '0') ENV.CVC_ARIADNE_SYNTHETIC_CAM = '1';
+        if (LOOK === 'mouse' || LOOK === 'drag') ENV.CVC_ARIGL_LOOK = LOOK;
         if (TOKEN) ENV.CVC_ARIADNE_ROOM_TOKEN = TOKEN;
         if (DEVICE) ENV.CVC_DEVICE_ID = DEVICE;
         if (DEVICE_KEY) ENV.CVC_DEVICE_KEY = DEVICE_KEY;
