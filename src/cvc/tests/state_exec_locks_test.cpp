@@ -3,11 +3,17 @@
 ///        atomic natives state-incr, state-cas and state-swap (section 4.4, tests AT-1..AT-13).
 ///        L1: with-lock on one scheduler (sections 13.2-13.5: LK, LX, LW, LD), the lock home
 ///        over a fake scheduler (LockHome), and the random-operations stress (LocksStress).
+///        L3: several schedulers' homes on one shared manager, on threads of their own
+///        (LocksThreads; LT, LD-6, PI-7, PI-10 and the posted LX cases), and the cross-thread
+///        stress at full size (LocksStress).
 
 #include <algorithm>
+#include <atomic>
+#include <barrier>
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -30,10 +36,12 @@
 #include <cvc/state/state_exec/state_value_codec.h>
 #include <deque>
 #include <functional>
+#include <future>
 #include <gtest/gtest.h>
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <set>
 #include <sstream>
@@ -863,6 +871,30 @@ struct checked_submit_options {
   std::optional<double> lock_default_timeout;
   bool lock_wait_allowed = true;
   std::optional<int> ctx_pid; // what the context's pid says (a host's placeholder); else the pid
+  bool spawn = false;         // the context installs make_spawn_context (a child gets the natives)
+};
+
+// What check_all() checks after each round (L3: a home among several).
+enum class world_checks : std::uint8_t {
+  all,        // the manager, the home's quiescent clauses, the process table (one home: L1, L2)
+  sequenced,  // the same, the quiescent clauses only while the home's port is empty: a home
+              // among several whose actions run one at a time in an order the test fixes, so
+              // every delivery is done when an action returns and only a post is in flight
+  concurrent, // the manager and the process table: a home stepping while another home's thread
+              // acts, whose delivery may be under way (the quiescent clauses need every home
+              // delivered and drained, protocol 6)
+  stepping,   // the process table only: LT-4's and LT-10's drivers, where CVC_STATE_EXEC_CHECK=1
+              // checks the manager after every operation, and the quiescent clauses wait for
+              // the stops
+};
+
+// How checked_world is made (L3). At namespace scope, as checked_submit_options is.
+struct checked_world_options {
+  std::shared_ptr<lock_manager> mgr; // the manager to attach to; else a private one
+  lock_attach attach;                // cross_thread: a home pumped on a thread of its own
+  scheduling_policy policy = scheduling_policy::round_robin;
+  cvc::state *tree = nullptr; // the programs' tree, shared with other worlds; else the world's own
+  world_checks checks = world_checks::all;
 };
 
 // One app and one scheduler of the given kind, its lock home made at once (on a private manager
@@ -871,7 +903,7 @@ struct checked_world {
   using submit_options = checked_submit_options;
 
   std::string kind;
-  cvc::app app;
+  std::unique_ptr<cvc::app> app; // the world's own, unless its options give a tree
   cvc::state &tree;
   std::unique_ptr<scheduler> sync;
   std::unique_ptr<async_scheduler> async;
@@ -884,23 +916,34 @@ struct checked_world {
   int next_channel = 0;
   bool broken = false; // a check failed: the drivers stop
   std::uint64_t rounds = 0;
+  world_checks checks = world_checks::all;
+  std::function<void(const std::string &)> on_hook; // (hook x) calls it with x, in the step
 
   explicit checked_world(const std::string &k, std::shared_ptr<lock_manager> m = nullptr)
-      : kind(k), tree(cvc::state::instance(app)) {
+      : checked_world(k, checked_world_options{std::move(m)}) {}
+
+  checked_world(const std::string &k, const checked_world_options &o)
+      : kind(k), tree(tree_of(app, o.tree)), checks(o.checks) {
     if (kind == "sync")
-      sync = std::make_unique<scheduler>();
+      sync = std::make_unique<scheduler>(o.policy);
     else
-      async = std::make_unique<async_scheduler>();
+      async = std::make_unique<async_scheduler>(o.policy);
     base().set_watch_root(&tree);
-    if (m) {
+    if (o.mgr) {
       if (sync)
-        sync->set_lock_manager(m);
+        sync->set_lock_manager(o.mgr, o.attach);
       else
-        async->set_lock_manager(m);
+        async->set_lock_manager(o.mgr, o.attach);
     }
     mgr = base().locks()->manager_ptr();
     EXPECT_TRUE(mgr->table().opts().self_check)
         << "CVC_STATE_EXEC_CHECK=1 did not reach the library";
+  }
+  static cvc::state &tree_of(std::unique_ptr<cvc::app> &app, cvc::state *given) {
+    if (given)
+      return *given;
+    app = std::make_unique<cvc::app>();
+    return cvc::state::instance(*app);
   }
   checked_world(const checked_world &) = delete;
   checked_world &operator=(const checked_world &) = delete;
@@ -913,6 +956,13 @@ struct checked_world {
   void register_test_natives(const environment_ptr &env) {
     builtins::register_fn(env, "mark", [this](std::span<const value_t> a) -> value_t {
       trace.push_back(a.empty() ? std::string() : text_of(a[0]));
+      return nil_value;
+    });
+    // The test's own code, inside the step of the process calling it (L3: another home's action
+    // placed at an exact point of this one's).
+    builtins::register_fn(env, "hook", [this](std::span<const value_t> a) -> value_t {
+      if (on_hook)
+        on_hook(a.empty() ? std::string() : text_of(a[0]));
       return nil_value;
     });
     // A nested evaluator, inside the step of the process calling it (design 5.5).
@@ -952,6 +1002,8 @@ struct checked_world {
     ctx.channels = so.policy;
     ctx.lock_default_timeout = so.lock_default_timeout;
     ctx.lock_wait_allowed = so.lock_wait_allowed;
+    if (so.spawn)
+      ctx.spawn_context = make_spawn_context();
     environment_ptr env = builtins::make_default_environment();
     register_intrinsics(env, &ctx);
     register_test_natives(env);
@@ -978,14 +1030,17 @@ struct checked_world {
 
   // -- the checked driver (L1.md section 3) --------------------------------------------------
 
-  // The manager's invariants, the home's quiescent clauses and the process table's indexes. A
-  // violation is a failure, and stops the drivers.
+  // The manager's invariants, the home's quiescent clauses and the process table's indexes, as
+  // `checks` says. A violation is a failure, and stops the drivers.
   bool check_all() {
     if (broken)
       return false;
     try {
-      mgr->check();
-      home().check_quiescent();
+      if (checks != world_checks::stepping)
+        mgr->check();
+      if (checks == world_checks::all ||
+          (checks == world_checks::sequenced && !home().port_pending()))
+        home().check_quiescent();
     } catch (const detail::lock_violation &v) {
       broken = true;
       ADD_FAILURE() << "after round " << rounds << ": " << v.what();
@@ -3704,3 +3759,1327 @@ TEST_P(LocksSpawn, LK24_SpawnedChildrenLockUnderTheParentsChroot) {
   EXPECT_EQ(w.node("doc.q.m"), total);
   EXPECT_EQ(w.tree.findDescendant("q"), nullptr);
 }
+
+// ===========================================================================
+// Phase L3: one app, several threads (locks plan L3.md section 3). Several schedulers' homes on
+// one shared manager: posts between homes (protocol 2.3, 4.14, 5.9), the races between their
+// threads, and the stops where every home has delivered and drained its port (protocol 6).
+// ===========================================================================
+
+namespace {
+
+// A shared-mode manager (L3.1), as app::lock_manager() makes one when threads are about.
+std::shared_ptr<lock_manager> shared_manager() {
+  lock_manager::options o;
+  o.threading = lock_threading::shared;
+  return std::make_shared<lock_manager>(o);
+}
+
+// A world whose home is attached to `mgr` as a home pumped on a thread of its own.
+std::unique_ptr<checked_world> home_on(const std::string &kind,
+                                       const std::shared_ptr<lock_manager> &mgr,
+                                       scheduling_policy policy = scheduling_policy::round_robin,
+                                       world_checks checks = world_checks::sequenced,
+                                       cvc::state *tree = nullptr) {
+  checked_world_options o;
+  o.mgr = mgr;
+  o.attach.cross_thread = true;
+  o.policy = policy;
+  o.tree = tree;
+  o.checks = checks;
+  return std::make_unique<checked_world>(kind, o);
+}
+
+// A home's own thread: it runs the closures it is given one at a time, each to its end, so a test
+// fixes the order of the homes' actions while each runs on its home's thread.
+class home_thread {
+public:
+  home_thread() : thread_([this] { loop(); }) {}
+  ~home_thread() {
+    {
+      std::lock_guard<std::mutex> g(mu_);
+      done_ = true;
+    }
+    cv_.notify_all();
+    thread_.join();
+  }
+  home_thread(const home_thread &) = delete;
+  home_thread &operator=(const home_thread &) = delete;
+
+  // `fn` runs on the thread after the closures given before it; the future is ready when it
+  // returns.
+  std::future<void> post(std::function<void()> fn) {
+    std::packaged_task<void()> task(std::move(fn));
+    std::future<void> done = task.get_future();
+    {
+      std::lock_guard<std::mutex> g(mu_);
+      queue_.push_back(std::move(task));
+    }
+    cv_.notify_all();
+    return done;
+  }
+  // `fn` run on the thread, and waited for.
+  void run(std::function<void()> fn) { post(std::move(fn)).get(); }
+
+private:
+  void loop() {
+    for (;;) {
+      std::packaged_task<void()> task;
+      {
+        std::unique_lock<std::mutex> g(mu_);
+        cv_.wait(g, [this] { return done_ || !queue_.empty(); });
+        if (queue_.empty())
+          return;
+        task = std::move(queue_.front());
+        queue_.pop_front();
+      }
+      task();
+    }
+  }
+
+  std::mutex mu_;
+  std::condition_variable cv_;
+  std::deque<std::packaged_task<void()>> queue_;
+  bool done_ = false;
+  std::thread thread_; // last: it starts once the members it uses are made
+};
+
+// A cross-thread case's size (L1.md section 3, "Sizes, by lane"): `var` when it is set, else by
+// lane: an optimized build, an unoptimized one (Debug and the coverage lanes, 25-50 times
+// slower), or a sanitizer job (CVC_LOCKS_SANITIZER=1). By the optimizer, as LK-18's sizes are.
+std::size_t lane_size(const char *var, std::size_t release, std::size_t debug,
+                      std::size_t sanitizer) {
+  if (const char *v = std::getenv(var); v && *v)
+    return static_cast<std::size_t>(std::strtoull(v, nullptr, 10));
+  if (under_sanitizer())
+    return sanitizer;
+#if defined(__OPTIMIZE__) || (defined(_MSC_VER) && !defined(_DEBUG))
+  (void)debug;
+  return release;
+#else
+  (void)release;
+  return debug;
+#endif
+}
+
+// The sync and async schedulers' own control queue: `fn` runs on the scheduler's thread at its
+// next step, after the step has drained the lock port and before it services the timers.
+void post_query(checked_world &v, int pid, std::function<void()> fn) {
+  control_cmd cmd;
+  cmd.what = control_cmd::kind::query;
+  cmd.query = [fn = std::move(fn)](scheduler_base &) { fn(); };
+  if (v.sync)
+    v.sync->post_control(pid, std::move(cmd));
+  else
+    v.async->post_control(pid, std::move(cmd));
+}
+
+void reap(checked_world &v, int pid) {
+  if (v.sync)
+    v.sync->reap(pid);
+  else
+    v.async->reap(pid);
+  v.envs.erase(pid);
+}
+
+// A wake for `pid`'s ticket `tid`, for `to`'s port: a note as another home's delivery posts it.
+detail::lock_notes wake_note(checked_world &to, int pid, std::uint64_t tid) {
+  detail::lock_notes notes;
+  notes.push_back({to.home().id(), to.home().port(), {detail::lock_post::kind::wake, pid, tid}});
+  return notes;
+}
+
+class LocksThreads : public ::testing::TestWithParam<std::string> {};
+INSTANTIATE_TEST_SUITE_P(Schedulers, LocksThreads, ::testing::Values("sync", "async"),
+                         [](const auto &info) { return info.param; });
+
+} // namespace
+
+// LT-2: a grant made on another thread wakes the waiter's scheduler wherever it waits: an
+// async_scheduler in wait_for_work, and a sync run() in idle_wait beside a 5 s sleeper, once the
+// wake is posted; a sync run(N) too short for the wait returns on its budget and the next run(N)
+// applies the wake; a sync run(10^7) left with only the waiter and no timer returns at once
+// (design 6.1), and the next run() applies the wake. What each proves is structural (the sleeper
+// still asleep, the waiter still queued); the times are printed.
+TEST(LocksThreads, LT02_CrossThreadGrantWakes) {
+  {
+    SCOPED_TRACE("an async_scheduler in wait_for_work");
+    const auto mgr = shared_manager();
+    home_thread ta;
+    auto a = home_on("sync", mgr);
+    auto b = home_on("async", mgr);
+    int h = -1;
+    ta.run([&] { h = a->holder("\"k\""); });
+    const int w = b->queued("\"k\"", "", "W");
+    ASSERT_TRUE(b->settle());
+    const lock_stats s0 = mgr->stats();
+    std::atomic<steady::rep> released_at{0};
+    std::future<void> release = ta.post([&] {
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      released_at = steady::now().time_since_epoch().count();
+      a->release(h);
+      EXPECT_TRUE(a->step_until([&] { return a->finished(h); }));
+    });
+    const auto t0 = steady::now();
+    const bool work = b->async->wait_for_work(deadline_after(30.0));
+    const auto woke = steady::now();
+    release.get();
+    const double waited = std::chrono::duration<double>(woke - t0).count();
+    const double latency = std::chrono::duration<double>(woke.time_since_epoch() -
+                                                         steady::duration(released_at.load()))
+                               .count();
+    std::printf("LT-2 async: wait_for_work(30 s) returned after %.3f s, %.1f us after the "
+                "release began\n",
+                waited, latency * 1e6);
+    EXPECT_TRUE(work);
+    EXPECT_LT(waited, 10.0);
+    EXPECT_EQ(mgr->stats().posts - s0.posts, 1u); // the wake, through B's port
+    b->async->drain_ingress();                    // applies it
+    EXPECT_FALSE(b->lock_waiting(w));
+    EXPECT_TRUE(b->async->has_runnable());
+    ASSERT_TRUE(b->step_until([&] { return b->finished(w); }));
+    EXPECT_EQ(as_str(b->result(w)), "W");
+    EXPECT_TRUE(mgr->table().empty());
+  }
+  {
+    SCOPED_TRACE("a sync run() in idle_wait beside a 5 s sleeper");
+    const auto mgr = shared_manager();
+    home_thread ta;
+    auto a = home_on("async", mgr);
+    auto b = home_on("sync", mgr);
+    int h = -1;
+    ta.run([&] { h = a->holder("\"k\""); });
+    const int s = b->submit("(begin (sleep 5) \"slept\")");
+    std::optional<process_status> sleeper_at_end;
+    steady::time_point ended;
+    checked_world::submit_options so;
+    so.opts.on_complete = [&](value_t) {
+      ended = steady::now();
+      sleeper_at_end = b->status(s);
+      b->sync->stop();
+    };
+    const int w = b->submit(R"((with-lock "k" "W"))", so);
+    ASSERT_TRUE(b->step_until([&] { return b->lock_waiting(w) && b->parked(s); }));
+    std::atomic<steady::rep> released_at{0};
+    std::future<void> release = ta.post([&] {
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      released_at = steady::now().time_since_epoch().count();
+      a->release(h);
+      EXPECT_TRUE(a->step_until([&] { return a->finished(h); }));
+    });
+    const auto t0 = steady::now();
+    b->sync->run(std::nullopt, 30.0);
+    const double took = seconds_since(t0);
+    release.get();
+    ASSERT_TRUE(sleeper_at_end.has_value()) << "the waiter never ended";
+    const double latency = std::chrono::duration<double>(ended.time_since_epoch() -
+                                                         steady::duration(released_at.load()))
+                               .count();
+    std::printf("LT-2 sync idle_wait: run() returned after %.3f s; the waiter ended %.1f us after "
+                "the release began\n",
+                took, latency * 1e6);
+    // The post ended the wait: the sleeper was still asleep when the waiter ended.
+    EXPECT_EQ(*sleeper_at_end, process_status::waiting);
+    EXPECT_LT(took, 10.0);
+    EXPECT_EQ(as_str(b->result(w)), "W");
+    EXPECT_TRUE(b->check_all());
+    b->kill(s);
+    EXPECT_TRUE(mgr->table().empty());
+  }
+  {
+    SCOPED_TRACE("a sync run(N) too short for the wait, then another run(N)");
+    const auto mgr = shared_manager();
+    home_thread ta;
+    auto a = home_on("async", mgr);
+    auto b = home_on("sync", mgr);
+    int h = -1;
+    ta.run([&] { h = a->holder("\"k\""); });
+    const int s = b->submit("(begin (sleep 5) \"slept\")");
+    const int w = b->queued("\"k\"", "", "W");
+    ASSERT_TRUE(b->step_until([&] { return b->parked(s); }));
+    const auto t0 = steady::now();
+    b->sync->run(1000); // its budget runs out long before the sleeper's 5 s
+    const double took = seconds_since(t0);
+    std::printf("LT-2 sync run(1000) beside a 5 s sleeper returned after %.4f s\n", took);
+    EXPECT_TRUE(b->check_all());
+    EXPECT_TRUE(b->lock_waiting(w)); // returned on its budget, the grant not made yet
+    EXPECT_TRUE(b->parked(s));
+    ta.run([&] {
+      a->release(h);
+      EXPECT_TRUE(a->step_until([&] { return a->finished(h); }));
+    });
+    EXPECT_TRUE(b->home().port_pending());
+    b->sync->run(1000); // its first step drains the port
+    EXPECT_TRUE(b->check_all());
+    EXPECT_TRUE(b->finished(w));
+    EXPECT_EQ(as_str(b->result(w)), "W");
+    b->kill(s);
+    EXPECT_TRUE(mgr->table().empty());
+  }
+  {
+    SCOPED_TRACE("a sync run(10^7) left with only the waiter");
+    const auto mgr = shared_manager();
+    home_thread ta;
+    auto a = home_on("sync", mgr);
+    auto b = home_on("sync", mgr);
+    int h = -1;
+    ta.run([&] { h = a->holder("\"k\""); });
+    const int w = b->queued("\"k\"", "", "W");
+    const auto t0 = steady::now();
+    b->sync->run(10000000); // no timer: nothing in this run can be counted on to wake it
+    const double took = seconds_since(t0);
+    std::printf("LT-2 sync run(10^7) with only a lock waiter returned after %.4f s\n", took);
+    EXPECT_TRUE(b->check_all());
+    EXPECT_TRUE(b->lock_waiting(w));
+    EXPECT_LT(took, 10.0);
+    ta.run([&] {
+      a->release(h);
+      EXPECT_TRUE(a->step_until([&] { return a->finished(h); }));
+    });
+    b->sync->run(std::nullopt, 30.0); // applies the wake, and ends with the waiter
+    EXPECT_TRUE(b->check_all());
+    EXPECT_TRUE(b->finished(w));
+    EXPECT_EQ(as_str(b->result(w)), "W");
+    EXPECT_TRUE(mgr->table().empty());
+  }
+}
+
+// LT-3 (C++; pycvc's test_lt03_exec_destroyed is its Exec twin): a holder killed on its thread
+// while another home's thread pumps a waiter: the waiter is granted through its port, and sees
+// the abandoned flag of the killed X holder; a scheduler destroyed on its thread with a wake in
+// its port: nothing is held by its processes, the post is discarded, check() clean.
+TEST_P(LocksThreads, LT03_HolderKilledAndSchedulerDestroyed) {
+  const std::string kind = GetParam();
+  {
+    SCOPED_TRACE("the holder killed");
+    const auto mgr = shared_manager();
+    home_thread ta, tb;
+    auto a = home_on(kind, mgr, scheduling_policy::round_robin, world_checks::concurrent);
+    auto b = home_on(kind, mgr, scheduling_policy::round_robin, world_checks::concurrent);
+    int h = -1, w = -1;
+    ta.run([&] { h = a->holder("\"k\""); });
+    tb.run([&] {
+      w = b->submit(R"((with-lock "k" :as g (get-attr g "abandoned")))");
+      EXPECT_TRUE(b->step_until([&] { return b->lock_waiting(w); }));
+    });
+    const lock_stats s0 = mgr->stats();
+    // B's thread pumps, as a host's run() would, while A's kills the holder.
+    std::future<void> pump =
+        tb.post([&] { EXPECT_TRUE(b->step_until([&] { return b->finished(w); }, 30.0)); });
+    ta.run([&] { EXPECT_TRUE(a->kill(h)); });
+    pump.get();
+    tb.run([&] { EXPECT_TRUE(as_bool(b->result(w))); }); // an X body had started: abandoned
+    const lock_stats s1 = mgr->stats();
+    EXPECT_EQ(s1.posts - s0.posts, 1u);
+    EXPECT_EQ(s1.abandoned - s0.abandoned, 1u);
+    EXPECT_FALSE(a->broken);
+    EXPECT_FALSE(b->broken);
+    EXPECT_NO_THROW(mgr->check());
+    EXPECT_TRUE(mgr->table().empty());
+  }
+  {
+    SCOPED_TRACE("the scheduler destroyed with a wake in its port");
+    const auto mgr = shared_manager();
+    home_thread ta, tb;
+    auto a = home_on(kind, mgr);
+    auto b = home_on(kind, mgr);
+    int h = -1;
+    ta.run([&] { h = a->holder("\"k\""); });
+    tb.run([&] {
+      b->queued("\"k\"", "", "W");
+      b->holder("\"x\"", "", "X"); // a hold of its own as well
+    });
+    ta.run([&] {
+      a->release(h);
+      EXPECT_TRUE(a->step_until([&] { return a->finished(h); }));
+    });
+    const lock_stats s0 = mgr->stats();
+    EXPECT_TRUE(b->home().port_pending());
+    EXPECT_EQ(s0.holds, 2u); // W's grant, its wake not applied, and X's hold
+    tb.run([&] { b.reset(); });
+    const lock_stats s1 = mgr->stats();
+    EXPECT_EQ(s1.holds, 0u); // nothing held by B's processes
+    EXPECT_EQ(s1.queued, 0u);
+    EXPECT_EQ(s1.posts_discarded - s0.posts_discarded, 1u);
+    EXPECT_EQ(s1.abandoned - s0.abandoned, 1u); // X's body had started; W's had not
+    EXPECT_NO_THROW(mgr->check());
+    EXPECT_TRUE(mgr->table().empty()) << mgr->table().canonical();
+    ta.run([&] {
+      EXPECT_TRUE(a->next_x_abandoned("x"));
+      EXPECT_FALSE(a->next_x_abandoned("k"));
+    });
+  }
+}
+
+namespace {
+
+// LT-3b's count of the notes deliver hands to another home's port (lock_test_hooks).
+std::atomic<std::uint64_t> g_cross_home_notes{0};
+void count_cross_home_note(const detail::lock_note &) {
+  g_cross_home_notes.fetch_add(1, std::memory_order_relaxed);
+}
+
+// Installs a set of hooks for its scope.
+struct test_hooks_scope {
+  explicit test_hooks_scope(const detail::lock_test_hooks &h) { detail::set_lock_test_hooks(&h); }
+  ~test_hooks_scope() { detail::set_lock_test_hooks(nullptr); }
+  test_hooks_scope(const test_hooks_scope &) = delete;
+  test_hooks_scope &operator=(const test_hooks_scope &) = delete;
+};
+
+} // namespace
+
+// LT-3b: a post in flight racing the destruction of its scheduler. A's thread releases a key B's
+// waiter waits for, while B's thread steps B a few rounds and lets go of its reference, and a
+// third thread drops the last one, so ~lock_home (protocol 5.7) runs there. Each post lands
+// before the close or is dropped: over the run, posts + posts_dropped equals the cross-home notes
+// delivered (counted through lock_test_hooks), and every post that landed was applied by B's
+// drain or discarded at the close. ASan and TSan (ci.yml's sanitizer jobs) watch for a use after
+// free and a race. 10^4 runs (10^3 in an unoptimized build; CVC_LOCKS_LT03B_RUNS).
+TEST_P(LocksThreads, LT03b_PostRacesDestruction) {
+  const std::string kind = GetParam();
+  const std::size_t runs = lane_size("CVC_LOCKS_LT03B_RUNS", 10000, 1000, 10000);
+  detail::lock_test_hooks hooks;
+  hooks.cross_home_note = count_cross_home_note;
+  test_hooks_scope installed(hooks);
+  cvc::app app;
+  cvc::state &tree = cvc::state::instance(app);
+  const auto mgr = shared_manager();
+  auto a = home_on(kind, mgr, scheduling_policy::round_robin, world_checks::stepping, &tree);
+
+  // A run's parts: set by this thread before the run starts, read by the others once it has.
+  std::shared_ptr<checked_world> b_pump, b_last; // B's two references
+  int h = -1, w = -1;
+  int release_spin = 0, pump_spin = 0, pump_rounds = 0, drop_spin = 0;
+  bool applied = false;
+  bool quit = false;
+  std::atomic<bool> pumped{false};
+  std::barrier<> sync(4);
+  const auto spin = [](int n) {
+    for (int i = 0; i < n; ++i)
+      std::this_thread::yield();
+  };
+
+  std::thread releaser([&] { // A's thread
+    for (;;) {
+      sync.arrive_and_wait();
+      if (quit)
+        return;
+      spin(release_spin);
+      a->release(h);
+      EXPECT_TRUE(a->step_until([&] { return a->finished(h); }));
+      reap(*a, h);
+      sync.arrive_and_wait();
+    }
+  });
+  std::thread pump([&] { // B's thread
+    for (;;) {
+      sync.arrive_and_wait();
+      if (quit)
+        return;
+      const steady::time_point end = deadline_after(30.0);
+      spin(pump_spin);
+      for (int r = 0; r < pump_rounds; ++r)
+        b_pump->round(end, false);
+      applied = !b_pump->lock_waiting(w); // only a drain of its port ends the wait
+      EXPECT_FALSE(b_pump->broken);
+      b_pump.reset();
+      pumped.store(true, std::memory_order_release);
+      sync.arrive_and_wait();
+    }
+  });
+  std::thread dropper([&] { // the third thread
+    for (;;) {
+      sync.arrive_and_wait();
+      if (quit)
+        return;
+      while (!pumped.load(std::memory_order_acquire))
+        std::this_thread::yield();
+      spin(drop_spin);
+      b_last.reset(); // the last reference: B is destroyed here
+      sync.arrive_and_wait();
+    }
+  });
+
+  std::mt19937_64 rng(31);
+  const auto pick = [&](int n) { return std::uniform_int_distribution<int>(0, n - 1)(rng); };
+  std::uint64_t no_note = 0, landed_applied = 0, landed_discarded = 0, dropped = 0;
+  const auto t0 = steady::now();
+  std::size_t run = 0;
+  for (; run < runs && !::testing::Test::HasFailure(); ++run) {
+    auto b = std::make_shared<checked_world>(
+        kind, checked_world_options{mgr, lock_attach{true}, scheduling_policy::round_robin, &tree,
+                                    world_checks::stepping});
+    h = a->holder("\"k\"");
+    w = b->submit(R"((with-lock "k" 1))");
+    if (!b->step_until([&] { return b->lock_waiting(w); })) {
+      ADD_FAILURE() << "run " << run << ": the waiter never queued";
+      break;
+    }
+    release_spin = pick(64);
+    pump_spin = pick(256);
+    pump_rounds = pick(4);
+    drop_spin = pick(64);
+    pumped.store(false, std::memory_order_relaxed);
+    b_pump = b;
+    b_last = std::move(b);
+    const std::uint64_t n0 = g_cross_home_notes.load();
+    const lock_stats s0 = mgr->stats();
+    sync.arrive_and_wait(); // the run starts
+    sync.arrive_and_wait(); // and ends
+    const std::uint64_t notes = g_cross_home_notes.load() - n0;
+    const lock_stats s1 = mgr->stats();
+    const std::uint64_t posts = s1.posts - s0.posts, drops = s1.posts_dropped - s0.posts_dropped,
+                        discarded = s1.posts_discarded - s0.posts_discarded;
+    // One note at most: H's release grants W, unless B's detach withdrew W's ticket first.
+    EXPECT_LE(notes, 1u) << "run " << run;
+    EXPECT_EQ(posts + drops, notes) << "run " << run;
+    EXPECT_EQ(posts, (applied ? 1u : 0u) + discarded) << "run " << run;
+    EXPECT_EQ(s1.holds, 0u) << "run " << run;
+    EXPECT_EQ(s1.queued, 0u) << "run " << run;
+    if (notes == 0)
+      ++no_note;
+    else if (drops)
+      ++dropped;
+    else if (applied)
+      ++landed_applied;
+    else
+      ++landed_discarded;
+  }
+  quit = true;
+  sync.arrive_and_wait();
+  releaser.join();
+  pump.join();
+  dropper.join();
+  std::printf("LT-3b %s: %zu runs in %.2f s: the post landed and was applied %llu, landed and was "
+              "discarded %llu, was dropped %llu; no post (the detach came first) %llu\n",
+              kind.c_str(), run, seconds_since(t0), static_cast<unsigned long long>(landed_applied),
+              static_cast<unsigned long long>(landed_discarded),
+              static_cast<unsigned long long>(dropped), static_cast<unsigned long long>(no_note));
+  EXPECT_FALSE(a->broken);
+  EXPECT_NO_THROW(mgr->check());
+  EXPECT_TRUE(mgr->table().empty()) << mgr->table().canonical();
+}
+
+// LD-6: a cycle across two homes, both on one shared manager, stepped alternately by one thread
+// in a fixed order: the same victim, with the same cycle, in 20 runs. The victim is the request
+// that closes the cycle (I7); the other home's pid shows as nil in it (protocol 4.6).
+TEST_P(LocksThreads, LD06_CrossHomeCycleDeterministic) {
+  const std::string kind = GetParam();
+  const auto program = [](const char *first, const char *second) {
+    return std::string("(try (with-lock \"") + first +
+           "\" (begin (sleep 0) (sleep 0) (with-lock \"" + second +
+           "\" \"ok\"))) (catch (DeadlockError e) (get-attr e \"cycle\")))";
+  };
+  std::optional<std::string> first_run;
+  for (int run = 0; run < 20; ++run) {
+    SCOPED_TRACE("run " + std::to_string(run));
+    const auto mgr = shared_manager();
+    auto a = home_on(kind, mgr);
+    auto b = home_on(kind, mgr);
+    const int pa = a->submit(program("a", "b"));
+    const int pb = b->submit(program("b", "a"));
+    const steady::time_point until = deadline_after(10.0);
+    while (!(a->finished(pa) && b->finished(pb)) && steady::now() < until &&
+           !(a->broken || b->broken)) {
+      a->round(until, false);
+      b->round(until, false);
+    }
+    ASSERT_TRUE(a->finished(pa) && b->finished(pb));
+    const value_t ra = a->result(pa), rb = b->result(pb);
+    const bool a_victim = !std::holds_alternative<std::string>(ra.v);
+    const bool b_victim = !std::holds_alternative<std::string>(rb.v);
+    ASSERT_NE(a_victim, b_victim) << to_string(ra) << " / " << to_string(rb);
+    const cycle_view c = cycle_of(a_victim ? ra : rb);
+    const std::string seen = std::string(a_victim ? "A's" : "B's") + " pid " +
+                             std::to_string(a_victim ? pa : pb) + ": " + show_cycle(c);
+    // From the victim round the cycle: its own pid, then the other home's, shown as nil.
+    EXPECT_EQ(c.pids, (std::vector<int>{a_victim ? pa : pb, -1}));
+    EXPECT_EQ(c.keys,
+              (a_victim ? std::vector<std::string>{"b", "a"} : std::vector<std::string>{"a", "b"}));
+    if (!first_run) {
+      first_run = seen;
+      std::printf("LD-6 %s: the victim is %s\n", kind.c_str(), seen.c_str());
+    }
+    EXPECT_EQ(seen, *first_run);
+    EXPECT_EQ(mgr->stats().deadlocks, 1u);
+    EXPECT_TRUE(mgr->table().empty());
+  }
+}
+
+// PI-7: a relevel post for a holder on another home that arrives after the holder released: its
+// apply re-reads the manager (protocol 5.9), so the holder stays at its base. H (base 10, a
+// priority_rr home A) holds k; inside H's step, through the hook, B's thread queues W (base -10,
+// priority_rr home B) behind it, whose block posts a relevel for H to A's port; the hook then
+// raises, and the unwind releases k in that same step. A's next step drains the post.
+TEST_P(LocksThreads, PI07_LateRelevelRereads) {
+  const std::string kind = GetParam();
+  const auto mgr = shared_manager();
+  home_thread tb;
+  auto a = home_on(kind, mgr, scheduling_policy::priority_rr);
+  auto b = home_on(kind, mgr, scheduling_policy::priority_rr);
+  checked_world::submit_options hs;
+  hs.opts.priority = 10;
+  const int h = a->submit(R"((begin
+      (try (with-lock "k" (begin (msg-recv "h.go") (hook "queue W") "body"))
+        (catch (RuntimeError e) "unwound"))
+      (msg-recv "h.after")))",
+                          hs);
+  ASSERT_TRUE(a->step_until([&] { return a->inside(h); }));
+  int w = -1;
+  tb.run([&] {
+    checked_world::submit_options ws;
+    ws.opts.priority = -10;
+    w = b->submit(R"((with-lock "k" "W"))", ws);
+  });
+  bool hooked = false;
+  a->on_hook = [&](const std::string &) {
+    tb.run([&] { EXPECT_TRUE(b->step_until([&] { return b->lock_waiting(w); })); });
+    hooked = true;
+    throw std::runtime_error("the section unwinds in this step");
+  };
+  const lock_stats s0 = mgr->stats();
+  a->send("h.go");
+  const steady::time_point until = deadline_after(10.0);
+  while (!hooked && !a->broken && steady::now() < until)
+    a->round(until);
+  ASSERT_TRUE(hooked);
+  // The relevel was emitted while H held k, and is still in A's port now that H holds nothing.
+  const lock_stats s1 = mgr->stats();
+  EXPECT_GT(s1.relevels, s0.relevels);
+  EXPECT_EQ(a->held(h), 0u);
+  EXPECT_TRUE(a->home().port_pending()) << "A drained the relevel before H released";
+  EXPECT_EQ(a->info(h)->effective_priority, 10);
+  ASSERT_TRUE(a->step_until([&] { return !a->home().port_pending(); })); // drained: applied
+  ASSERT_TRUE(a->step_until([&] { return a->parked(h); }));
+  EXPECT_EQ(a->info(h)->effective_priority, 10); // at its base
+  EXPECT_EQ(a->info(h)->priority, 10);
+  EXPECT_EQ(as_int(entry_of(a->run("(get-priority " + std::to_string(h) + ")"), "effective")), 10);
+  EXPECT_TRUE(a->check_all());
+  tb.run([&] {
+    EXPECT_TRUE(b->step_until([&] { return b->finished(w); }));
+    EXPECT_EQ(as_str(b->result(w)), "W");
+  });
+  a->send("h.after");
+  ASSERT_TRUE(a->step_until([&] { return a->finished(h); }));
+  EXPECT_EQ(as_str(a->result(h)), "go");
+  EXPECT_TRUE(mgr->table().empty());
+}
+
+// PI-10: a round-robin home lends nothing (design 6.2). Its child, spawned at -20, waits behind a
+// priority_rr home's holder at 10: the holder is not boosted (get-priority's effective is 10), and
+// no relevel is emitted or posted while it waits (stats().relevels and posts unchanged).
+TEST_P(LocksThreads, PI10_RoundRobinChildLendsNothing) {
+  const std::string kind = GetParam();
+  const auto mgr = shared_manager();
+  auto a = home_on(kind, mgr, scheduling_policy::priority_rr);
+  auto b = home_on(kind, mgr, scheduling_policy::round_robin);
+  checked_world::submit_options hs;
+  hs.opts.priority = 10;
+  const int h = a->holder("\"k\"", "", "H", hs);
+  checked_world::submit_options ps;
+  ps.spawn = true;
+  const int parent = b->submit(
+      R"S((spawn "(begin (msg-recv \"kid.go\") (with-lock \"k\" \"kid\"))" "kid" -20))S", ps);
+  ASSERT_TRUE(b->step_until([&] { return b->finished(parent); }));
+  const int kid = static_cast<int>(as_int(b->result(parent)));
+  ASSERT_TRUE(b->step_until([&] { return b->parked(kid); }));
+  EXPECT_EQ(b->info(kid)->priority, -20);
+  const lock_stats s0 = mgr->stats();
+  b->send("kid.go");
+  ASSERT_TRUE(b->step_until([&] { return b->lock_waiting(kid); }));
+  ASSERT_TRUE(a->settle());
+  const lock_stats s1 = mgr->stats();
+  EXPECT_EQ(s1.waits - s0.waits, 1u);
+  EXPECT_EQ(s1.relevels, s0.relevels);
+  EXPECT_EQ(s1.posts, s0.posts);
+  EXPECT_FALSE(a->home().port_pending());
+  EXPECT_EQ(a->info(h)->effective_priority, 10);
+  EXPECT_EQ(as_int(entry_of(a->run("(get-priority " + std::to_string(h) + ")"), "effective")), 10);
+  a->release(h);
+  ASSERT_TRUE(a->step_until([&] { return a->finished(h); }));
+  EXPECT_EQ(mgr->stats().posts - s1.posts, 1u); // the kid's wake
+  ASSERT_TRUE(b->step_until([&] { return b->finished(kid); }));
+  EXPECT_EQ(as_str(b->result(kid)), "kid");
+  EXPECT_TRUE(mgr->table().empty());
+}
+
+// LX-5: a timeout and a kill, each racing a grant made on another home's thread, before and after
+// the wake is applied: one outcome. The timeout adopts the grant (protocol 5.5) and the late wake
+// is ignored; the kill releases the grant, the next waiter is granted, and the late wake is
+// ignored. "Before" places A's release inside B's step, after its port was drained and before its
+// timers (the schedulers' control queue), so B's timeout finds the ticket granted with the wake
+// still in its port.
+TEST_P(LocksThreads, LX05_TimeoutAndKillRaceAnotherHomesGrant) {
+  const std::string kind = GetParam();
+  for (const char *variant : {"before", "after"}) {
+    const bool before = std::string(variant) == "before";
+    {
+      SCOPED_TRACE(std::string(variant) + " the wake, a timeout");
+      const auto mgr = shared_manager();
+      home_thread ta;
+      auto a = home_on(kind, mgr);
+      auto b = home_on(kind, mgr);
+      int h = -1;
+      ta.run([&] { h = a->holder("\"k\""); });
+      const int p = b->submit(R"((try (with-lock "k" :timeout 0.2 (begin (mark "P-body") "body"))
+                                   (catch (TimeoutError e) "timeout")))");
+      ASSERT_TRUE(b->step_until([&] { return b->lock_waiting(p); }));
+      const auto release = [&] {
+        ta.run([&] {
+          a->release(h);
+          EXPECT_TRUE(a->step_until([&] { return a->finished(h); }));
+        });
+      };
+      const lock_stats s0 = mgr->stats();
+      if (before) {
+        post_query(*b, p, release);
+        std::this_thread::sleep_for(std::chrono::milliseconds(250)); // past P's deadline
+        // B's next drain: its port (empty), then the query (A's release posts the wake), then
+        // the timers, where P's deadline finds its ticket granted and adopts it.
+        if (b->sync)
+          b->sync->step();
+        else
+          b->async->drain_ingress();
+        EXPECT_FALSE(b->lock_waiting(p));
+        EXPECT_TRUE(b->home().port_pending()) << "the wake was applied before the timeout";
+      } else {
+        release();
+        std::this_thread::sleep_for(std::chrono::milliseconds(250)); // past P's deadline
+        EXPECT_TRUE(b->home().port_pending());
+      }
+      ASSERT_TRUE(b->step_until([&] { return b->finished(p); }));
+      EXPECT_FALSE(b->home().port_pending());
+      EXPECT_EQ(as_str(b->result(p)), "body"); // the grant kept: one outcome
+      EXPECT_EQ(std::count(b->trace.begin(), b->trace.end(), "P-body"), 1);
+      const lock_stats s1 = mgr->stats();
+      EXPECT_EQ(s1.timeouts, s0.timeouts);
+      EXPECT_EQ(s1.posts - s0.posts, 1u);
+      EXPECT_TRUE(mgr->table().empty());
+      EXPECT_FALSE(a->broken || b->broken);
+    }
+    {
+      SCOPED_TRACE(std::string(variant) + " the wake, a kill");
+      const auto mgr = shared_manager();
+      home_thread ta;
+      auto a = home_on(kind, mgr);
+      auto b = home_on(kind, mgr);
+      int h = -1, q = -1;
+      ta.run([&] { h = a->holder("\"k\""); });
+      const int p = b->queued("\"k\"", "", "P");
+      ta.run([&] { q = a->queued("\"k\"", "", "Q"); });
+      ta.run([&] {
+        a->release(h);
+        EXPECT_TRUE(a->step_until([&] { return a->finished(h); }));
+      });
+      EXPECT_TRUE(b->home().port_pending());
+      if (!before) {
+        b->home().drain_port(); // applied: granted, not resumed
+        EXPECT_FALSE(b->lock_waiting(p));
+        EXPECT_EQ(b->held(p), 1u);
+      }
+      b->kill(p);
+      ASSERT_TRUE(b->settle()); // drains whatever is left: a late wake is ignored
+      EXPECT_FALSE(b->home().port_pending());
+      EXPECT_EQ(b->status(p), process_status::killed);
+      EXPECT_EQ(b->trace, std::vector<std::string>{});
+      ta.run([&] {
+        EXPECT_TRUE(a->step_until([&] { return a->finished(q); }));
+        EXPECT_EQ(a->trace, (std::vector<std::string>{"H", "Q"}));
+        EXPECT_FALSE(a->next_x_abandoned("k")); // P's body never began
+      });
+      EXPECT_TRUE(mgr->table().empty());
+      EXPECT_FALSE(a->broken || b->broken);
+    }
+  }
+}
+
+// LX-7 (posted): a scheduler destroyed with holders and waiters, one of them granted by another
+// home with the wake still in its port: one detach releases every hold and cancels every ticket,
+// the post is discarded, and the other home's waiters are granted through their port.
+TEST_P(LocksThreads, LX07_DestroyedWithAWakeInItsPort) {
+  const std::string kind = GetParam();
+  const auto mgr = shared_manager();
+  home_thread ta, tb;
+  auto a = home_on(kind, mgr);
+  auto b = home_on(kind, mgr);
+  int hx = -1, hy = -1, wa = -1, wb = -1;
+  ta.run([&] {
+    hx = a->holder("\"x\"", "", "HX");
+    hy = a->holder("\"y\"", "", "HY");
+  });
+  tb.run([&] {
+    b->holder("\"a\"", "", "A");        // X, its body begun
+    b->holder("\"b\"", ":shared", "B"); // S
+    b->queued("\"x\"", "", "WX");       // granted below, its wake left in the port
+    b->queued("\"y\"", "", "WY");       // still queued at the end
+  });
+  ta.run([&] {
+    wa = a->submit(R"((with-lock "a" :as g (get-attr g "abandoned")))");
+    EXPECT_TRUE(a->step_until([&] { return a->lock_waiting(wa); }));
+    wb = a->queued("\"b\"", "", "WB");
+    a->release(hx);
+    EXPECT_TRUE(a->step_until([&] { return a->finished(hx); }));
+  });
+  const lock_stats s0 = mgr->stats();
+  EXPECT_TRUE(b->home().port_pending());
+  EXPECT_EQ(s0.holds, 4u);  // HY, A, B, and WX's grant
+  EXPECT_EQ(s0.queued, 3u); // WY, WA, WB
+  tb.run([&] { b.reset(); });
+  const lock_stats s1 = mgr->stats();
+  EXPECT_EQ(s1.posts_discarded - s0.posts_discarded, 1u); // WX's wake
+  EXPECT_EQ(s1.posts - s0.posts, 2u);                     // WA's and WB's grants, to A's port
+  EXPECT_EQ(s1.abandoned - s0.abandoned, 1u);             // A's X section had begun
+  EXPECT_EQ(s1.holds, 3u);                                // HY, WA, WB
+  EXPECT_EQ(s1.queued, 0u);
+  EXPECT_NO_THROW(mgr->check());
+  ta.run([&] {
+    EXPECT_TRUE(a->home().port_pending());
+    EXPECT_TRUE(a->step_until([&] { return a->finished(wa) && a->finished(wb); }));
+    EXPECT_TRUE(as_bool(a->result(wa))); // B's X section on "a" had begun
+    a->release(hy);
+    EXPECT_TRUE(a->step_until([&] { return a->finished(hy); }));
+    EXPECT_FALSE(a->next_x_abandoned("x")); // WX's body never began
+  });
+  EXPECT_TRUE(mgr->table().empty()) << mgr->table().canonical();
+}
+
+// LX-10: a grant to a waiter on another home, then the waiter killed and reaped before the wake
+// is applied: its end releases the granted hold, the next waiter (on a third home) is granted,
+// and the wake, drained later, finds no process and is ignored.
+TEST_P(LocksThreads, LX10_GrantThenWaiterKilledBeforeWake) {
+  const std::string kind = GetParam();
+  const auto mgr = shared_manager();
+  home_thread ta, tc;
+  auto a = home_on(kind, mgr);
+  auto b = home_on(kind, mgr);
+  auto c = home_on(kind, mgr);
+  int h = -1, q = -1;
+  ta.run([&] { h = a->holder("\"k\""); });
+  const int p = b->queued("\"k\"", "", "P");
+  tc.run([&] { q = c->queued("\"k\"", "", "Q"); });
+  const lock_stats s0 = mgr->stats();
+  ta.run([&] {
+    a->release(h);
+    EXPECT_TRUE(a->step_until([&] { return a->finished(h); }));
+  });
+  EXPECT_TRUE(b->home().port_pending());
+  EXPECT_TRUE(b->kill(p));
+  reap(*b, p);
+  EXPECT_FALSE(b->info(p).has_value());
+  EXPECT_TRUE(c->home().port_pending()); // P's end granted Q
+  EXPECT_EQ(mgr->stats().posts - s0.posts, 2u);
+  ASSERT_TRUE(b->settle()); // the wake for P: no such process
+  EXPECT_FALSE(b->home().port_pending());
+  EXPECT_TRUE(b->trace.empty());
+  tc.run([&] {
+    EXPECT_TRUE(c->step_until([&] { return c->finished(q); }));
+    EXPECT_EQ(as_str(c->result(q)), "Q");
+    EXPECT_FALSE(c->next_x_abandoned("k")); // P's body never began
+  });
+  EXPECT_TRUE(mgr->table().empty());
+}
+
+// LX-11 (posted): a wake for a ticket its process no longer waits on, posted by another home's
+// thread: one adopted by its timeout (queued variant), or collected by its grant (granted
+// variant), then a new request queued. The stale wake, drained from the port, leaves the new
+// request queued until its own grant.
+TEST_P(LocksThreads, LX11_StalePostedWake) {
+  const std::string kind = GetParam();
+  for (const char *variant : kVariants) {
+    SCOPED_TRACE(variant);
+    const bool queued = std::string(variant) == "queued";
+    const auto mgr = shared_manager();
+    home_thread ta;
+    auto a = home_on(kind, mgr);
+    auto b = home_on(kind, mgr);
+    int h = -1, x = -1;
+    ta.run([&] { h = a->holder("\"k\""); });
+    const int p = b->submit(std::string(R"((begin
+        (try (with-lock "k" :timeout )") +
+                            (queued ? "0.1" : "30") + R"( (msg-recv "p.first"))
+          (catch (TimeoutError e) nil))
+        (with-lock "k" (mark "P-second"))))");
+    ASSERT_TRUE(b->step_until([&] { return b->lock_waiting(p); }));
+    const detail::lock_pid P{b->home().id(), p};
+    const std::uint64_t old_tid = *mgr->table().rec_of(P)->ticket;
+    if (queued) {
+      // Times out; the second request queues behind H.
+      ASSERT_TRUE(b->step_until([&] {
+        const auto rec = mgr->table().rec_of(P);
+        return b->lock_waiting(p) && rec && rec->ticket && *rec->ticket != old_tid;
+      }));
+    } else {
+      ta.run([&] {
+        a->release(h);
+        EXPECT_TRUE(a->step_until([&] { return a->finished(h); }));
+        // X takes k when P's first section ends, before P's second request.
+        x = a->submit(R"((with-lock "k" (msg-recv "x.go")))");
+        EXPECT_TRUE(a->step_until([&] { return a->lock_waiting(x); }));
+      });
+      ASSERT_TRUE(b->step_until([&] { return b->inside(p); })); // the grant collected
+      b->send("p.first");
+      ASSERT_TRUE(b->step_until([&] { return b->lock_waiting(p); }));
+      ta.run([&] { EXPECT_TRUE(a->step_until([&] { return a->inside(x); })); });
+    }
+    const lock_stats s0 = mgr->stats();
+    ta.run([&] { a->home().deliver(wake_note(*b, p, old_tid)); }); // the stale wake, posted
+    EXPECT_EQ(mgr->stats().posts - s0.posts, 1u);
+    EXPECT_TRUE(b->home().port_pending());
+    ASSERT_TRUE(b->settle()); // drained, and ignored
+    EXPECT_FALSE(b->home().port_pending());
+    EXPECT_TRUE(b->lock_waiting(p)); // the new request stays queued
+    EXPECT_EQ(b->held(p), 0u);
+    ta.run([&] {
+      if (queued) {
+        a->release(h); // its own grant
+        EXPECT_TRUE(a->step_until([&] { return a->finished(h); }));
+      } else {
+        a->send("x.go");
+        EXPECT_TRUE(a->step_until([&] { return a->finished(x); }));
+      }
+    });
+    ASSERT_TRUE(b->step_until([&] { return b->finished(p); }));
+    EXPECT_EQ(b->trace.back(), "P-second");
+    EXPECT_TRUE(mgr->table().empty());
+    EXPECT_FALSE(a->broken || b->broken);
+  }
+}
+
+// The progress store (L3.3; design 8.4): after a step on another home, blocking_sinks for a
+// waiter reports that home's cell as moved; a step of the waiter's own home leaves it as it was.
+TEST_P(LocksThreads, ProgressStoreMovesTheSinksCell) {
+  const std::string kind = GetParam();
+  const auto mgr = shared_manager();
+  auto a = home_on(kind, mgr);
+  auto b = home_on(kind, mgr);
+  const int h = a->holder("\"k\"");
+  const int spinner = a->submit("(begin (msg-recv \"spin\") (sleep 0) (sleep 0) 1)");
+  ASSERT_TRUE(a->settle());
+  const int w = b->queued("\"k\"", "", "W");
+  const int other = b->submit("(begin (msg-recv \"other\") (sleep 0) 1)");
+  ASSERT_TRUE(b->settle());
+  const auto sinks = [&] { return b->home().blocking_sinks(w); };
+  const auto s0 = sinks();
+  ASSERT_EQ(s0.size(), 1u);
+  EXPECT_EQ(s0[0].first, (detail::lock_pid{a->home().id(), h}));
+  // A step on the waiter's home stores its own cell, not the sink's.
+  std::this_thread::sleep_for(std::chrono::milliseconds(2)); // the clock moves between readings
+  b->send("other");
+  ASSERT_TRUE(b->round(deadline_after(10.0), false));
+  const auto s1 = sinks();
+  ASSERT_EQ(s1.size(), 1u);
+  EXPECT_EQ(s1[0].second, s0[0].second);
+  // A step on the sink's home moves it.
+  std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  a->send("spin");
+  ASSERT_TRUE(a->round(deadline_after(10.0), false));
+  const auto s2 = sinks();
+  ASSERT_EQ(s2.size(), 1u);
+  EXPECT_GT(s2[0].second, s1[0].second);
+  std::printf(
+      "ProgressStore %s: the sink's cell moved by %.1f us\n", kind.c_str(),
+      std::chrono::duration<double, std::micro>(steady::duration(s2[0].second - s1[0].second))
+          .count());
+  a->release(h);
+  ASSERT_TRUE(a->step_until([&] { return a->finished(h) && a->finished(spinner); }));
+  ASSERT_TRUE(b->step_until([&] { return b->finished(w) && b->finished(other); }));
+  EXPECT_TRUE(sinks().empty());
+  EXPECT_TRUE(mgr->table().empty());
+}
+
+// ---------------------------------------------------------------------------
+// LT-4 and LT-10: random programs on several homes, each home's scheduler stepped by a thread of
+// its own one step at a time (as Exec::run drives its scheduler), every operation checked by the
+// manager (CVC_STATE_EXEC_CHECK=1), and stops where every home has delivered and drained its
+// port, for the quiescent clauses of protocol 6 (I6's second half, I8's quiescent clause).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// LT-4's and LT-10's programs (gap G-42): sections over 16 keys k0..k15, of one key or of two or
+// three, S and X, waiting, with :timeout 0, with :if-available, or with a timeout of 1-20 ms, some
+// nested, and set-priority between and inside them. An X section at top level counts itself into
+// in.<key> for each of its keys and out again, and a count other than 1 inside is an overlap
+// (state-incr "overlap"): the exclusion as the programs see it. A holder killed inside leaves its
+// count at 1; the key's abandoned flag (I11) tells the next X holder, which resets it.
+struct thread_programs {
+  std::mt19937_64 rng;
+  explicit thread_programs(std::uint64_t seed) : rng(seed) {}
+  int pick(int n) { return std::uniform_int_distribution<int>(0, n - 1)(rng); }
+
+  std::vector<int> keys() {
+    std::vector<int> ks{pick(16)};
+    for (int i = 0, n = pick(4) == 0 ? 1 + pick(2) : 0; i < n; ++i)
+      if (const int k = pick(16); std::find(ks.begin(), ks.end(), k) == ks.end())
+        ks.push_back(k);
+    return ks;
+  }
+  static std::string key_text(const std::vector<int> &ks) {
+    if (ks.size() == 1)
+      return "\"k" + std::to_string(ks[0]) + "\"";
+    std::string l = "(list";
+    for (int k : ks)
+      l += " \"k" + std::to_string(k) + "\"";
+    return l + ")";
+  }
+  std::string options() {
+    const int t = pick(10);
+    if (t < 3)
+      return ""; // waits as long as it takes
+    if (t < 4)
+      return " :timeout 0";
+    if (t < 5)
+      return " :if-available :else (state-incr \"else\")";
+    char buf[32];
+    std::snprintf(buf, sizeof buf, " :timeout %.3f", 0.001 * (1 + pick(20)));
+    return buf;
+  }
+  std::string priority() { return "(set-priority " + std::to_string(pick(40) - 20) + ")"; }
+  // `held`: the keys of the sections around this one, which the same process holds.
+  std::string body(int depth, const std::vector<int> &held) {
+    switch (pick(depth < 2 ? 6 : 4)) {
+    case 0:
+      return "(sleep 0)";
+    case 1:
+      return "(state-incr \"n\")";
+    case 2:
+      return "(locks-held)";
+    case 3:
+      return priority();
+    default:
+      return section(depth + 1, held);
+    }
+  }
+  std::string section(int depth, const std::vector<int> &held) {
+    const std::vector<int> ks = keys();
+    const bool x = pick(2) == 0;
+    std::string reset, in, out;
+    if (x)
+      for (int k : ks) {
+        const std::string count = "\"in.k" + std::to_string(k) + "\"";
+        // A grant reports `abandoned` for any of its keys. A key the process already holds
+        // carries no flag (its own X grant took it, and an X request on its own S key is
+        // refused), and its count belongs to the section around this one: left alone.
+        if (std::find(held.begin(), held.end(), k) == held.end())
+          reset += " (state-set " + count + " \"0\")";
+        if (depth == 0) {
+          in += " (begin (set c (state-incr " + count +
+                ")) (if (!= c 1) (begin (state-incr \"overlap\") (hook (list \"overlap\" \"k" +
+                std::to_string(k) + "\" (self-pid) c))) nil))";
+          out += " (state-incr " + count + " -1)";
+        }
+      }
+    std::vector<int> inner = held;
+    inner.insert(inner.end(), ks.begin(), ks.end());
+    std::string b = "(begin";
+    if (!reset.empty())
+      b += " (if (get-attr g \"abandoned\") (begin" + reset + ") nil)";
+    b += in + " " + body(depth, inner) + " " + body(depth, inner) + out + ")";
+    const std::string lock =
+        "(with-lock " + key_text(ks) + (x ? "" : " :shared") + options() + " :as g " + b + ")";
+    return "(try " + lock +
+           " (catch (TimeoutError e) nil) (catch (DeadlockError e) nil) (catch (LockError e) nil))";
+  }
+  std::string program() {
+    std::string p = "(begin";
+    if (pick(2))
+      p += " " + priority();
+    for (int i = 0, n = 3 + pick(6); i < n; ++i)
+      p += " " + section(0, {});
+    return p + ")";
+  }
+};
+
+// How a run_threads run is made.
+struct threads_config {
+  std::string name;
+  std::vector<std::string> kinds; // one home per entry, each on a thread of its own
+  std::vector<scheduling_policy> policies;
+  std::size_t target_ops = 0; // operations: grants, timeouts and deadlocks
+  std::size_t stop_every = 0; // the drivers stop every this many operations
+  int per_home = 4;           // programs live on each home at a time
+  std::uint64_t seed = 0;
+  double max_seconds = 120.0;
+  bool print = true;
+};
+
+struct threads_result {
+  std::size_t ops = 0;
+  std::uint64_t stops = 0, kills = 0, ended = 0;
+  lock_stats stats;
+};
+
+// A home's thread kills one of its programs every this many rounds: with 4 programs a home, about
+// as often per program as LK-18's 50 rounds over 16.
+constexpr std::uint64_t kKillEvery = 200;
+
+// Each home's thread: steps its scheduler a round at a time (step, then check_tables(); the async
+// one as Exec::run does: drain_ingress, sync_step, wait_for_work when nothing stepped), kills one
+// of its programs every kKillEvery rounds, replaces each that ends while the operations are short
+// of the target, and stops whenever the operations reach the next stop: every thread waits at a
+// barrier (every delivery is done, since each operation delivers before its action returns),
+// drains its home's port, waits again (every post applied), checks its home's quiescent clauses
+// and process table while one checks the manager, and waits a third time before it steps again
+// (a home's clauses read the manager, which another home's step would change). At the end every
+// program has ended: the ports are drained once more, every home checked, and the manager is
+// empty (I9).
+threads_result run_threads(const threads_config &c) {
+  const auto t0 = steady::now();
+  cvc::app app; // the programs' tree, shared: in.<key>, n, else, overlap
+  cvc::state &tree = cvc::state::instance(app);
+  const auto mgr = shared_manager();
+  const std::size_t n = c.kinds.size();
+  std::vector<std::unique_ptr<checked_world>> worlds;
+  for (std::size_t i = 0; i < n; ++i)
+    worlds.push_back(home_on(c.kinds[i], mgr, c.policies[i], world_checks::stepping, &tree));
+  const auto done_ops = [&] {
+    const lock_stats s = mgr->stats();
+    return static_cast<std::size_t>(s.grants + s.timeouts + s.deadlocks);
+  };
+
+  std::mutex errors_mu;
+  std::vector<std::string> errors;
+  std::atomic<bool> failed{false};
+  const auto fail = [&](const std::string &what) {
+    std::lock_guard<std::mutex> g(errors_mu);
+    errors.push_back(what);
+    failed = true;
+  };
+  std::atomic<std::size_t> stop_at{c.stop_every};
+  std::atomic<std::uint64_t> kills{0}, ended{0};
+  std::uint64_t phases = 0, stops = 0; // the barrier's completion only
+  auto completion = [&]() noexcept {
+    switch (++phases % 3) {
+    case 2: // every port drained, nothing stepping
+      try {
+        mgr->check();
+      } catch (const std::exception &e) {
+        fail(std::string("at stop ") + std::to_string(stops + 1) + ": " + e.what());
+      }
+      break;
+    case 0: // every home checked: on to the next stop
+      ++stops;
+      stop_at.fetch_add(c.stop_every);
+      break;
+    default:
+      break;
+    }
+  };
+  std::barrier<decltype(completion)> sync(static_cast<std::ptrdiff_t>(n), completion);
+  const steady::time_point until = deadline_after(c.max_seconds);
+
+  const auto drive = [&](std::size_t i) {
+    checked_world &v = *worlds[i];
+    const std::string who = c.kinds[i] + " home " + std::to_string(i);
+    // A program that saw an overlap says which key, its pid and the count it found.
+    v.on_hook = [&, who](const std::string &what) { fail(who + ": " + what); };
+    thread_programs gen(c.seed * 7919 + i);
+    std::vector<int> live;
+    const auto spawn = [&] {
+      checked_world::submit_options so;
+      so.opts.priority = gen.pick(16) - 5;
+      so.opts.priority_floor = -20; // a host's floor: set-priority may take any level
+      live.push_back(v.submit(gen.program(), so));
+    };
+    const auto stop = [&] {
+      sync.arrive_and_wait();
+      v.home().drain_port();
+      sync.arrive_and_wait();
+      try {
+        v.home().check_quiescent();
+      } catch (const detail::lock_violation &e) {
+        fail(who + " at a stop: " + e.what());
+      }
+      if (!v.base().check_tables())
+        fail(who + " at a stop: the process table's check failed");
+      sync.arrive_and_wait();
+    };
+    try {
+      for (int k = 0; k < c.per_home; ++k)
+        spawn();
+      std::uint64_t rounds = 0;
+      while (!live.empty() && !failed) {
+        if (steady::now() >= until) {
+          fail(who + ": " + std::to_string(live.size()) + " programs still running after " +
+               std::to_string(c.max_seconds) + " s");
+          break;
+        }
+        v.round(until);
+        if (v.broken) {
+          fail(who + ": a check failed after a step");
+          break;
+        }
+        if (++rounds % kKillEvery == 0 &&
+            v.kill(live[static_cast<std::size_t>(gen.pick(static_cast<int>(live.size())))]))
+          ++kills;
+        std::size_t replace = 0;
+        for (auto it = live.begin(); it != live.end();) {
+          const int pid = *it;
+          if (!v.finished(pid)) {
+            ++it;
+            continue;
+          }
+          const auto info = v.info(pid);
+          if (info->status == process_status::failed)
+            fail(who + ": pid " + std::to_string(pid) +
+                 " failed: " + info->exit_error.value_or(""));
+          ++ended;
+          it = live.erase(it);
+          reap(v, pid);
+          if (done_ops() < c.target_ops)
+            ++replace;
+        }
+        for (std::size_t k = 0; k < replace; ++k)
+          spawn();
+        if (done_ops() >= stop_at.load())
+          stop();
+      }
+      for (int pid : live) // left on a failure
+        v.kill(pid);
+    } catch (const std::exception &e) {
+      fail(who + ": " + e.what());
+    }
+    sync.arrive_and_drop();
+  };
+  std::vector<std::thread> threads;
+  for (std::size_t i = 0; i < n; ++i)
+    threads.emplace_back(drive, i);
+  for (std::thread &t : threads)
+    t.join();
+  for (const std::string &e : errors)
+    ADD_FAILURE() << c.name << ": " << e;
+
+  // The end: what is left in the ports (posts for programs that ended) drained, then the quiescent
+  // clauses of every home, and the manager empty (I9).
+  for (std::size_t i = 0; i < n; ++i) {
+    checked_world &v = *worlds[i];
+    v.home().drain_port();
+    try {
+      v.home().check_quiescent();
+    } catch (const detail::lock_violation &e) {
+      ADD_FAILURE() << c.name << ": home " << i << " at the end: " << e.what();
+    }
+    EXPECT_TRUE(v.base().check_tables()) << c.name << ": home " << i;
+  }
+  threads_result r;
+  r.ops = done_ops();
+  r.stops = stops;
+  r.kills = kills;
+  r.ended = ended;
+  r.stats = mgr->stats();
+  EXPECT_NO_THROW(mgr->check()) << c.name;
+  EXPECT_TRUE(mgr->table().empty()) << c.name << ": " << mgr->table().canonical();
+  EXPECT_EQ(r.stats.holds, 0u) << c.name;
+  EXPECT_EQ(r.stats.queued, 0u) << c.name;
+  EXPECT_EQ(tree.findDescendant("overlap"), nullptr)
+      << c.name << ": two X sections were inside one key at once";
+  if (!failed)
+    EXPECT_GE(r.ops, c.target_ops) << c.name;
+  if (c.print) {
+    const lock_stats &s = r.stats;
+    std::printf(
+        "%s: %zu operations, %llu stops, %llu kills, %llu ended; grants %llu (fast %llu), "
+        "waits %llu, timeouts %llu, deadlocks %llu, abandoned %llu, relevels %llu; posts "
+        "%llu, dropped %llu, discarded %llu; %.2f s\n",
+        c.name.c_str(), r.ops, static_cast<unsigned long long>(r.stops),
+        static_cast<unsigned long long>(r.kills), static_cast<unsigned long long>(r.ended),
+        static_cast<unsigned long long>(s.grants), static_cast<unsigned long long>(s.fast_grants),
+        static_cast<unsigned long long>(s.waits), static_cast<unsigned long long>(s.timeouts),
+        static_cast<unsigned long long>(s.deadlocks), static_cast<unsigned long long>(s.abandoned),
+        static_cast<unsigned long long>(s.relevels), static_cast<unsigned long long>(s.posts),
+        static_cast<unsigned long long>(s.posts_dropped),
+        static_cast<unsigned long long>(s.posts_discarded), seconds_since(t0));
+  }
+  return r;
+}
+
+} // namespace
+namespace cvc::state_exec::detail { // F-TEMP-FUZZ: until L3.7 lands
+inline void set_lock_fuzz_seed(std::uint64_t) {}
+} // namespace cvc::state_exec::detail
+namespace {
+
+// CVC_EXEC_FUZZ's seed for the manager operations and port actions that follow (L3.7): with a
+// seed, each protocol point yields its thread, sometimes sleeping 0-50 us; 0 turns it off.
+struct fuzz_seed_scope {
+  explicit fuzz_seed_scope(std::uint64_t seed) { detail::set_lock_fuzz_seed(seed); }
+  ~fuzz_seed_scope() { detail::set_lock_fuzz_seed(0); }
+  fuzz_seed_scope(const fuzz_seed_scope &) = delete;
+  fuzz_seed_scope &operator=(const fuzz_seed_scope &) = delete;
+};
+
+// LT-4: CVC_EXEC_FUZZ's seeds 1..seeds, each a run of 4 homes on 4 threads (sync and async, round
+// robin and priority_rr) for `ops` operations, stopping every 100.
+void fuzzed_protocol_points(std::size_t seeds, std::size_t ops_per_seed,
+                            double max_seconds_per_seed) {
+  const auto t0 = steady::now();
+  std::size_t ops = 0;
+  std::uint64_t stops = 0, posts = 0, relevels = 0;
+  std::size_t seed = 1;
+  for (; seed <= seeds && !::testing::Test::HasFailure(); ++seed) {
+    fuzz_seed_scope fuzz(seed);
+    threads_config c;
+    c.name = "LT-4 seed " + std::to_string(seed);
+    c.kinds = {"sync", "async", "sync", "async"};
+    c.policies = {scheduling_policy::round_robin, scheduling_policy::priority_rr,
+                  scheduling_policy::priority_rr, scheduling_policy::round_robin};
+    c.target_ops = ops_per_seed;
+    c.stop_every = 100;
+    c.seed = seed;
+    c.max_seconds = max_seconds_per_seed;
+    c.print = false;
+    const threads_result r = run_threads(c);
+    ops += r.ops;
+    stops += r.stops;
+    posts += r.stats.posts;
+    relevels += r.stats.relevels;
+  }
+  std::printf("LT-4: %zu seeds, %zu operations, %llu stops, %llu posts, %llu relevels; %.2f s\n",
+              seed - 1, ops, static_cast<unsigned long long>(stops),
+              static_cast<unsigned long long>(posts), static_cast<unsigned long long>(relevels),
+              seconds_since(t0));
+  EXPECT_GT(posts, 0u); // the homes did meet
+}
+
+// LT-10: 8 priority_rr async_schedulers on 8 threads, attached with cross_thread, stopping every
+// 1000 operations.
+void eight_schedulers_random(std::size_t ops, double max_seconds) {
+  threads_config c;
+  c.name = "LT-10";
+  c.kinds.assign(8, "async");
+  c.policies.assign(8, scheduling_policy::priority_rr);
+  c.target_ops = ops;
+  c.stop_every = 1000;
+  c.seed = 10;
+  c.max_seconds = max_seconds;
+  const threads_result r = run_threads(c);
+  EXPECT_GT(r.stats.posts, 0u);
+  EXPECT_GT(r.stats.waits, 0u);
+  EXPECT_GT(r.stats.timeouts, 0u);
+  EXPECT_GT(r.stats.relevels, 0u);
+  EXPECT_GE(r.stops + 1, ops / 1000);
+}
+
+} // namespace
+
+// LT-4: fuzzed yields at the protocol points (CVC_EXEC_FUZZ, L3.7), 100 seeds (20 unoptimized or
+// under a sanitizer; CVC_LOCKS_FUZZ_SEEDS) of 200 operations each (100 unoptimized, where an
+// operation costs 30-40 times what it does in Release: LK-18's measure; CVC_LOCKS_FUZZ_OPS): no
+// lost wakeup (every program ends), no double grant (I1 after every operation, and no overlap the
+// programs see), FIFO kept (I5, asserted at each grant by the self-check), check() after every
+// operation, check_quiescent() at each stop and at the end, the manager empty at the end (I9).
+TEST(LocksThreads, LT04_FuzzedProtocolPoints) {
+  fuzzed_protocol_points(lane_size("CVC_LOCKS_FUZZ_SEEDS", 100, 20, 20),
+                         lane_size("CVC_LOCKS_FUZZ_OPS", 200, 100, 200), 120.0);
+}
+
+// LT-10 (gap G-42): 10^4 operations (2*10^3 unoptimized or under a sanitizer;
+// CVC_LOCKS_THREAD_OPS).
+TEST(LocksThreads, LT10_EightSchedulersRandom) {
+  eight_schedulers_random(lane_size("CVC_LOCKS_THREAD_OPS", 10000, 2000, 2000), 240.0);
+}
+
+TEST(LocksStress, LT04_FuzzedProtocolPoints) { fuzzed_protocol_points(1000, 200, 120.0); }
+
+TEST(LocksStress, LT10_EightSchedulersRandom) { eight_schedulers_random(100000, 3000.0); }
