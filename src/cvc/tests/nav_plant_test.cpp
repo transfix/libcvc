@@ -1394,6 +1394,11 @@ TEST(NavPlantConvergence, JoltTrainedHumveeOnJoltReach) {
   base.window = env_int("JOLT_EXP_WINDOW", 10);
   base.steps = env_int("JOLT_EXP_STEPS", 1000);
   base.checkpoint_every = env_int("JOLT_EXP_EVERY", 50);
+  // JOLT_EXP_ROLLBACK: train_config::rollback_drop (0, off), JOLT_EXP_ROLLBACK_SCALE its lr scale.
+  if (const char *e = std::getenv("JOLT_EXP_ROLLBACK"))
+    base.rollback_drop = static_cast<float>(std::atof(e));
+  if (const char *e = std::getenv("JOLT_EXP_ROLLBACK_SCALE"))
+    base.rollback_lr_scale = static_cast<float>(std::atof(e));
   base.veh_L = static_cast<float>(L);
   base.veh_delta_max = static_cast<float>(hv.max_steer);
   base.veh_a_max = static_cast<float>(0.8 * hv.max_accel * kS);
@@ -1502,7 +1507,13 @@ TEST(NavPlantConvergence, JoltTrainedHumveeOnJoltReach) {
                   spec.c_str(), cfg.steps, mins(t1, now()), tr.dropped_agents());
       for (const cvc::nav::coef_trainer::checkpoint_score &k : tr.checkpoints())
         std::printf(" %d:%.3f", k.step, k.fitness);
-      std::printf("; selected step %d\n", tr.selected_step());
+      std::printf("; selected step %d", tr.selected_step());
+      if (!tr.rollbacks().empty()) {
+        std::printf("; rolled back at");
+        for (int s : tr.rollbacks())
+          std::printf(" %d", s);
+      }
+      std::printf("\n");
       std::fflush(stdout);
       const cvc::nav::coef_mlp policy = tr.to_coef_mlp();
       std::vector<double> a;

@@ -230,6 +230,18 @@ struct train_config {
   // scored before training and every `checkpoint_every` outer steps (and after the last), and
   // train() ends on the best-scoring parameters. 0 = every 25 steps when a fitness is given.
   int checkpoint_every = 0;
+  // Rollback (with a fitness): a checkpoint that scores more than rollback_drop under the best so
+  // far sends training back to the best checkpoint -- its parameters and Adam moments -- and
+  // scales the learning rate by rollback_lr_scale from there on. On the Jolt Humvee every run
+  // climbs to its best reach within a few hundred steps and then falls back toward the seed,
+  // the loss pulling past the policy reach likes (docs/NAV_TRAINING.md); going back and taking
+  // smaller steps keeps training at the peak instead of leaving it to selection. Armed only once
+  // the best is more than rollback_drop over the first checkpoint: before the climb validation
+  // wanders around the seed's level, and a rollback there (to the seed, at a smaller learning
+  // rate) kept w_coll 10 runs from ever making it (0.40 -> 0.36 at step 150; held out 41-43%
+  // against 70% without). 0 = off.
+  float rollback_drop = 0.0f;
+  float rollback_lr_scale = 0.5f;
 };
 
 // The trainable CoefMLP: its dense layers as flat params + Adam state. Distinct
@@ -258,6 +270,8 @@ public:
              const checkpoint_fitness &fitness = checkpoint_fitness());
   const std::vector<checkpoint_score> &checkpoints() const { return checkpoints_; }
   int selected_step() const { return selected_step_; }
+  // The last train()'s rollbacks (train_config::rollback_drop), and the steps they came at.
+  const std::vector<int> &rollbacks() const { return rollbacks_; }
   // rollout == jolt: the agents whose gradient was not finite and was left out of a window's
   // (the model's reverse at a state outside its domain, such as a vehicle the simulation rolled
   // over), counted over this trainer's loss_and_grad calls.
@@ -309,7 +323,9 @@ private:
   std::vector<float> p_;     // flat params: [L0.w(h*5) L0.b(h) L1.w(h*h) L1.b(h) L2.w(3*h) L2.b(3)]
   std::vector<float> m_, u_; // Adam first/second moments (u_ = "v", renamed to avoid the vel v)
   long adam_t_ = 0;
-  long adam_total_ = 0; // total adam steps this train() run, for the cosine LR anneal (0 = off)
+  long adam_total_ = 0;   // total adam steps this train() run, for the cosine LR anneal (0 = off)
+  float lr_scale_ = 1.0f; // the learning rate's factor after rollbacks (1 before any)
+  std::vector<int> rollbacks_; // rollbacks(): the steps the last train() rolled back at
   std::vector<checkpoint_score> checkpoints_; // the last train()'s checkpoint scores
   int selected_step_ = -1;                    // and the one it ended on (-1 = no selection)
   mutable long dropped_agents_ = 0;           // dropped_agents()
