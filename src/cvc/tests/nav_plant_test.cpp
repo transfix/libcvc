@@ -1497,12 +1497,14 @@ TEST(NavPlantConvergence, JoltTrainedHumveeOnJoltReach) {
       score_held(cvc::nav::coef_mlp::default_biased(), "seed", seed_per);
   const double seed_mean = seed_m.reach;
   const auto scores_line = [&](const plant_drive_score &m) {
-    char line[256];
+    char line[512];
     std::snprintf(line, sizeof line,
-                  "in %.0f m/s %.1f%%, %.2f m/s en route (%.2f arriving, %.0f%% stopped), "
-                  "building hits %.2f, vehicle contact %.1f s an agent",
+                  "in %.0f m/s %.1f%%, %.2f m/s en route (%.2f arriving, %.0f%% stopped); of the "
+                  "arrived %.0f%% held, ending %.1f m off, arriving at %.1f m/s; building hits "
+                  "%.2f, vehicle contact %.1f s an agent",
                   held.time_budget_mps, 100 * m.reach_in_time, m.speed_mps, m.arrive_mps,
-                  100 * m.stopped_frac, m.building_hits, m.vehicle_contact_s);
+                  100 * m.stopped_frac, 100 * m.held_frac, m.end_m, m.arrival_mps, m.building_hits,
+                  m.vehicle_contact_s);
     return std::string(line);
   };
   // Paired CIs against the seed, seed by seed: reach and reach in time (points).

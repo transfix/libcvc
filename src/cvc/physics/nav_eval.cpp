@@ -158,21 +158,30 @@ plant_drive_score drive_once(const cvc::nav::coef_mlp &policy, const cvc::nav::t
         path[i] += step;
         if (step * mpw < 0.5 * sc.dt)
           ++stopped_ticks;
-        if (at_goal[i])
+        if (at_goal[i]) {
           arrived[i] = t + 1;
+          s.arrival_mps += step * mpw / sc.dt; // summed here, a mean over the arrived below
+        }
       }
     }
     std::swap(prev, pos);
   }
   {
     double metres = 0.0, seconds = 0.0, arrive_m = 0.0, arrive_s = 0.0;
-    int in_time = 0;
+    int in_time = 0, n_arrived = 0;
     for (std::size_t i = 0; i < na; ++i) {
       metres += path[i] * mpw;
       seconds += (arrived[i] < 0 ? o.ticks : arrived[i]) * static_cast<double>(sc.dt);
       if (arrived[i] >= 0) {
+        ++n_arrived;
         arrive_m += path[i] * mpw;
         arrive_s += arrived[i] * static_cast<double>(sc.dt);
+        // prev holds the last tick's positions (the loop swapped them in).
+        const double end =
+            std::hypot(prev[2 * i] - goal_w[2 * i], prev[2 * i + 1] - goal_w[2 * i + 1]);
+        s.end_m += end * mpw;
+        if (end * sc.scale < o.reach_tol)
+          s.held_frac += 1.0;
       }
       if (o.time_budget_mps > 0.0 && arrived[i] >= 0) {
         const double d0 =
@@ -187,6 +196,11 @@ plant_drive_score drive_once(const cvc::nav::coef_mlp &policy, const cvc::nav::t
     s.arrive_mps = arrive_s > 0.0 ? arrive_m / arrive_s : 0.0;
     s.stopped_frac = seconds > 0.0 ? stopped_ticks * static_cast<double>(sc.dt) / seconds : 0.0;
     s.reach_in_time = static_cast<double>(in_time) / o.agents;
+    if (n_arrived > 0) {
+      s.held_frac /= n_arrived;
+      s.end_m /= n_arrived;
+      s.arrival_mps /= n_arrived;
+    }
     s.building_hits /= o.agents;
     s.vehicle_contact_s /= o.agents;
   }
@@ -297,6 +311,9 @@ std::vector<plant_drive_score> score_on_plant(const std::vector<cvc::nav::coef_m
       mean[p].speed_mps += x.speed_mps;
       mean[p].arrive_mps += x.arrive_mps;
       mean[p].stopped_frac += x.stopped_frac;
+      mean[p].held_frac += x.held_frac;
+      mean[p].end_m += x.end_m;
+      mean[p].arrival_mps += x.arrival_mps;
       mean[p].building_hits += x.building_hits;
       mean[p].vehicle_contact_s += x.vehicle_contact_s;
       add_ledger(mean[p].ledger, x.ledger, 1.0 / ns);
@@ -309,6 +326,9 @@ std::vector<plant_drive_score> score_on_plant(const std::vector<cvc::nav::coef_m
     mean[p].speed_mps /= ns;
     mean[p].arrive_mps /= ns;
     mean[p].stopped_frac /= ns;
+    mean[p].held_frac /= ns;
+    mean[p].end_m /= ns;
+    mean[p].arrival_mps /= ns;
     mean[p].building_hits /= ns;
     mean[p].vehicle_contact_s /= ns;
     if (per_seed)

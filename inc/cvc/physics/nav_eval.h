@@ -91,6 +91,9 @@ struct plant_drive_score {
   double arrive_mps = 0.0;
   // The share of that time (up to arrival or the run's end) spent stopped, under 0.5 m/s.
   double stopped_frac = 0.0;
+  // Of the agents that arrived: the share still within reach_tol at the run's end, how far from
+  // their goals they ended (m), and how fast they were going at the tick they arrived (m/s).
+  double held_frac = 0.0, end_m = 0.0, arrival_mps = 0.0;
   // Collisions, per agent over the run: the contacts its chassis began with the static world
   // (the buildings; the ground only on a roll), and the seconds it spent touching another agent.
   double building_hits = 0.0;
