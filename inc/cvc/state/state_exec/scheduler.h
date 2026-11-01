@@ -89,7 +89,9 @@ public:
   /// (a frame's run(N) pump), waits when it would not (a bounded run to completion), and
   /// returns when the time budget runs out first. While only processes waiting for a message
   /// with no time limit are left, nothing can wake them in a synchronous run: run() returns at
-  /// once when `max_steps` bounds it, else waits out `max_time`, else waits until stop().
+  /// once when `max_steps` bounds it, else waits out `max_time`, else waits until stop(). A post
+  /// to the scheduler's lock port (a grant for a lock waiter, made on another home's thread) ends
+  /// any such wait, and run() steps again (design 8.7).
   std::unordered_map<int, value_t> run(std::optional<uint64_t> max_steps = std::nullopt,
                                        std::optional<double> max_time = std::nullopt);
 
@@ -330,8 +332,10 @@ private:
   uint64_t rate_seen_ = 0;
   bool rate_valid_ = false;
   double rate_ = kDefaultAsyncStepsPerCpuMs;
-  std::unique_ptr<detail::wakeup> idle_; // run()'s idle wait, made on first use
-  std::vector<process *> woken_;         // reused by deliver_to_receivers
+  /// run()'s idle wait: made with the lock home, which shares it with its port so a post ends the
+  /// wait (protocol 2.3), else on the first idle wait.
+  std::shared_ptr<detail::wakeup> idle_;
+  std::vector<process *> woken_; // reused by deliver_to_receivers
 
   /// Per-path FIFO queue for messages sent when no receiver is waiting.
   std::unordered_map<std::string, std::queue<value_t>> pending_messages_;
@@ -341,10 +345,12 @@ private:
   /// Select the next process to run based on scheduling policy.
   const process_ptr *select_process();
 
-  /// One step of the run loop (step() starts a fresh clock chain).
+  /// One step of the run loop (step() starts a fresh clock chain). It first applies the lock
+  /// port's posts, when there are any (protocol 5.9).
   int step_once();
   /// run()'s wait while nothing is ready, charged to its budgets (`steps`, the loop's
-  /// iterations so far, and `budget`, running): false to end the run.
+  /// iterations so far, and `budget`, running): false to end the run. A post to the lock port
+  /// ends it (true: the next step_once applies the post).
   bool idle_wait(std::optional<uint64_t> max_steps, uint64_t &steps, time_budget *budget);
 
   /// Execute one step on a specific process and check resource limits.

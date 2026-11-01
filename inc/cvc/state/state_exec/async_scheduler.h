@@ -136,7 +136,8 @@ public:
   void post_message(const std::string &path, const value_t &msg);
 
   /// Block the calling (scheduler) thread until there is work for the next drain_ingress() and
-  /// run: a post_message() or a settled async call (from any thread), a sleeper's or a timed
+  /// run: a post_message() or a settled async call (from any thread), a post to the lock port
+  /// (another home's wake or relevel for one of its processes), a sleeper's or a timed
   /// wait's deadline, an async call's registration timeout, the next charge of a call whose
   /// process has a step or time limit (every millisecond while one runs: the charge may find
   /// the limit reached, docs/STATE_EXEC_EXCEPTIONS.md 3.8), or `deadline`, whichever comes
@@ -163,6 +164,8 @@ public:
   /// It also takes the async calls that finished, and charges the ones still running
   /// (docs/STATE_EXEC_EXCEPTIONS.md 3.8): a driver that calls it often (every frame) keeps
   /// their processes' budgets current. And it wakes the sleepers and timed waits that are due.
+  /// Before all of it, it applies the lock port's posts (protocol 5.9): a lock waiter granted on
+  /// another thread becomes ready here.
   void drain_ingress();
 
   // --- Async calls (docs/STATE_EXEC_EXCEPTIONS.md 3; for async_host) ---
@@ -427,7 +430,9 @@ private:
   std::atomic<bool> ingress_pending_{false};
   /// A wait_for_work() is (about to be) blocked: a post notifies wakeup_.
   std::atomic<bool> idle_waiting_{false};
-  std::unique_ptr<detail::wakeup> wakeup_;
+  /// What wait_for_work() blocks on. Made at construction and shared with the lock home's port,
+  /// whose posts notify it whatever idle_waiting_ says (protocol 2.3).
+  std::shared_ptr<detail::wakeup> wakeup_;
   // Notify a wait_for_work() in progress (any thread, after ingress_pending_ is set).
   void notify_work();
 
@@ -459,7 +464,8 @@ private:
   const process_ptr *select_process();
   // One step of the run loop (sync_step() and step() start a fresh clock chain).
   int step_once();
-  // What a step does before picking a process: the ingress, the calls, the due timers.
+  // What a step does before picking a process: the lock port's posts, the ingress, the calls,
+  // the due timers.
   void drain(bool in_step);
   // Apply one post_control command (scheduler thread).
   void apply_control(int pid, control_cmd &cmd);

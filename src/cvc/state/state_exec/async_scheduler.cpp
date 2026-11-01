@@ -18,7 +18,7 @@ namespace cvc::state_exec {
 async_scheduler::async_scheduler(scheduling_policy policy)
     : policy_(policy), evaluator_(builtins::make_default_environment()),
       procs_(policy != scheduling_policy::round_robin),
-      wakeup_(std::make_unique<detail::wakeup>()) {}
+      wakeup_(std::make_shared<detail::wakeup>()) {}
 
 async_scheduler::~async_scheduler() { home_.reset(); }
 
@@ -29,13 +29,14 @@ void async_scheduler::set_lock_manager(std::shared_ptr<lock_manager> mgr, lock_a
         throw std::logic_error("set_lock_manager: process " + std::to_string(pid) +
                                " holds or waits for a lock");
   home_.reset();
-  home_ = std::make_unique<detail::lock_home>(std::move(mgr), lock_ops_, policy_, nullptr, attach);
+  // The port shares wakeup_, so a post ends a wait_for_work() (protocol 2.3).
+  home_ = std::make_unique<detail::lock_home>(std::move(mgr), lock_ops_, policy_, wakeup_, attach);
 }
 
 detail::lock_home *async_scheduler::locks() {
   if (!home_)
-    home_ =
-        std::make_unique<detail::lock_home>(std::make_shared<lock_manager>(), lock_ops_, policy_);
+    home_ = std::make_unique<detail::lock_home>(std::make_shared<lock_manager>(), lock_ops_,
+                                                policy_, wakeup_);
   return home_.get();
 }
 
@@ -330,6 +331,8 @@ void async_scheduler::execute_process_step(const process_ptr &pp) {
   }
 
   const clock::time_point now = clock::now();
+  if (home_)
+    home_->store_progress(now); // the home's last_progress, read by blocking_sinks (design 8.4)
   // A parking intrinsic (sleep / yield-frame / receive_message) already closed out this running
   // slice into accumulated_time and flipped status to `waiting`; accrue here only while still
   // running, so a parking step's slice is not double-counted (mirrors process::elapsed_time()'s own
@@ -378,6 +381,12 @@ void async_scheduler::execute_process_step(const process_ptr &pp) {
 // ---------------------------------------------------------------------------
 
 void async_scheduler::drain(bool in_step) {
+  // Posts from other homes' threads (wakes, relevels), first (protocol 5.9). The drain clears
+  // the port's pending flag, so wait_for_work, which returns while it is set, never spins.
+  if (home_ && home_->port_pending()) {
+    home_->drain_port();
+    chain_valid_ = false; // the posts are no step's time
+  }
   // Cross-thread posts and settled calls, when there are any: the flag spares an empty ingress
   // the lock.
   if (ingress_pending_.load(std::memory_order_acquire)) {
@@ -541,7 +550,8 @@ bool async_scheduler::wait_for_work(clock::time_point deadline) {
   const std::optional<clock::time_point> charge =
       async_calls_.empty() ? std::nullopt : next_call_charge(clock::now());
   for (;;) {
-    if (procs_.runnable_count() > 0 || ingress_pending_.load(std::memory_order_acquire))
+    if (procs_.runnable_count() > 0 || ingress_pending_.load(std::memory_order_acquire) ||
+        (home_ && home_->port_pending()))
       return true;
     const std::optional<clock::time_point> timer = procs_.next_timer();
     const clock::time_point now = clock::now();
@@ -557,9 +567,10 @@ bool async_scheduler::wait_for_work(clock::time_point deadline) {
     // A sleeper's or timed wait's deadline is kept precisely; the others need not be.
     const bool precise = timer && *timer == until;
     // Announce the wait, then look at the ingress once more: a post either lands before this
-    // look (seen here) or sees idle_waiting_ and notifies (both sides are seq_cst).
+    // look (seen here) or sees idle_waiting_ and notifies (both sides are seq_cst). A lock post
+    // notifies whatever idle_waiting_ says (protocol 2.3): one this look misses ends the wait.
     idle_waiting_.store(true, std::memory_order_seq_cst);
-    if (!ingress_pending_.load(std::memory_order_seq_cst))
+    if (!ingress_pending_.load(std::memory_order_seq_cst) && !(home_ && home_->port_pending()))
       wakeup_->wait_until(until, precise);
     idle_waiting_.store(false, std::memory_order_relaxed);
   }
