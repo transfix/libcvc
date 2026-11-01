@@ -71,8 +71,10 @@ if ($cvcTests -eq 'ON') {
   Push-Location $env:CVC_BUILD_DIR
   try {
     # CVC_CTEST_EXCLUDE: a ctest -E regex of tests to leave out (CI's long-running suites).
+    # CVC_CTEST_REPEAT: a ctest --repeat mode (CI's until-pass:3, as its package jobs run).
     $exclude = if ($env:CVC_CTEST_EXCLUDE) { @('-E', $env:CVC_CTEST_EXCLUDE) } else { @() }
-    & ctest --output-on-failure -j $env:CVC_JOBS @exclude
+    $repeat = if ($env:CVC_CTEST_REPEAT) { @('--repeat', $env:CVC_CTEST_REPEAT) } else { @() }
+    & ctest --output-on-failure -j $env:CVC_JOBS @exclude @repeat
     if ($LASTEXITCODE -ne 0) { throw 'ctest reported failures' }
   } finally {
     Pop-Location

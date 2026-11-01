@@ -61,6 +61,8 @@ endif()
 if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
   add_executable(ari_net_test ari_net_test.cpp)
   target_link_libraries(ari_net_test PRIVATE cvc GTest::gtest GTest::gtest_main)
+  # The sign-in tests' document and fake browser (tests/oidc_probe.ari, tests/fake_browser.py).
+  target_compile_definitions(ari_net_test PRIVATE ARI_TESTS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests")
   add_dependencies(ari_net_test ari)
   # As src/cvc-cli/CMakeLists.txt does (its note explains): GoogleTest in this directory's scope,
   # discovery at test time on macOS and with a generous timeout on Windows.
@@ -81,6 +83,26 @@ if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL 
   add_dependencies(ari_test_command_test ari)
   gtest_discover_tests(ari_test_command_test
                        PROPERTIES ENVIRONMENT "ARI_BINARY=$<TARGET_FILE:ari>")
+  # Sign-in in the hosts as a person runs them (tests/oidc_hosts_test.sh): ari (FTXUI, tvision) and
+  # arigl --terminal in tmux, with a device code and through the loopback redirect, and arigl's
+  # window snapshot where there is a display. No output may carry a token. Skipped (77) without
+  # tmux or python3.
+  if(NOT WIN32)
+    add_test(NAME ari_oidc_hosts
+      COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/oidc_hosts_test.sh $<TARGET_FILE:ari>
+              "$<$<TARGET_EXISTS:arigl>:$<TARGET_FILE:arigl>>")
+    set_tests_properties(ari_oidc_hosts PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+  endif()
+endif()
+
+# A spinner turns by the host's frame clock while the document's program is parked: `ari snapshot`
+# frame 1 against frame 3, then `ari run` in tmux under each terminal backend this ari has
+# (tests/spinner_test.sh). Where bash is; without tmux only the snapshots are checked.
+if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND NOT WIN32 AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
+  add_test(NAME ari_spinner
+    COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/spinner_test.sh" $<TARGET_FILE:ari>
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/spinner.ari")
+  set_tests_properties(ari_spinner PROPERTIES TIMEOUT 60)
 endif()
 
 # A document as each terminal backend really draws it: `ari run` in a 100x30 tmux pane, the text
@@ -99,6 +121,13 @@ if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
                 "${CMAKE_CURRENT_SOURCE_DIR}/../../examples/ariadne/documents/json_feed.ari"
                 ${_backend} "${CMAKE_CURRENT_SOURCE_DIR}/tests/json_feed.rows")
       set_tests_properties(ari_run_json_feed_${_backend} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+      # Windows that close and open again in one run (tests/reopen_refit.ari, driven by its keys):
+      # each fits the rows it gained while closed, and on tvision one the user resized (Ctrl-F5)
+      # comes back at their size.
+      add_test(NAME ari_run_reopen_refit_${_backend}
+        COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/reopen_refit_test.sh" $<TARGET_FILE:ari>
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/reopen_refit.ari" ${_backend})
+      set_tests_properties(ari_run_reopen_refit_${_backend} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
     endforeach()
   endif()
 endif()
@@ -272,6 +301,7 @@ if(EMSCRIPTEN)
     target_link_options(ari PRIVATE "--embed-file=${CMAKE_CURRENT_SOURCE_DIR}/tests@/tests")
     set_property(TARGET ari APPEND PROPERTY LINK_DEPENDS
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/net_probe.ari"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/oidc_probe.ari"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/l4_frames.ari")
   endif()
   # ari_tvision: the same runner and document on the tvision desktop (movable, overlapping

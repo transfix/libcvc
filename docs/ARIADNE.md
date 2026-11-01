@@ -144,6 +144,12 @@ handlers (`on_tick` / `on_key` / `on_pointer`) run in the action lane, on the
 **app-wide scheduler** (`app.exec_scheduler()`), **off** the render walk, inside
 `Runtime::drain()` ([`ariadne.cpp:1642`](../src/cvc/ariadne/ariadne.cpp)).
 
+That scheduler's policy is the app tree's `state_exec.policy` (`round_robin`, `priority` or
+`priority_rr`), read once, when `app.exec_scheduler()` is first built, and fixed from then on; an
+unknown value is logged and `round_robin` used. Ariadne sets none, so its default stays
+`round_robin`: a program's `set-priority` is stored and reported but changes no pick (developer
+guide, "Priorities").
+
 A fire-once handler is *submitted* (`submit_action`,
 [`ariadne.cpp:1375`](../src/cvc/ariadne/ariadne.cpp)) with the full default environment
 plus host intrinsics, its writes chrooted to the action's mount prefix (§7), under
@@ -190,10 +196,35 @@ process, wrapped by the runtime as `(while t (let ((event (msg-recv "chan"))) bo
   `event` = `{kind: "signal", signal: "SIGINT", source: "terminal"}`. Signal names are
   POSIX: a terminal's Ctrl-C is `SIGINT`, Ctrl-\ is `SIGQUIT`.
 
-Residents have no total budget (they run for the life of the document), but each *step*
-is wall-capped at `kResidentStepSeconds = 0.05`
-([`ariadne.cpp:1497`](../src/cvc/ariadne/ariadne.cpp)). On teardown they are reaped as a
-group via their owner tag.
+Residents have no total budget (they run for the life of the document), but each *step* is
+time-capped, so that one runaway step cannot hang the host's drain. The cap is the tree setting
+`ariadne.limits.resident_max_step_time`, in seconds (`0` = no cap). It is read as each resident
+starts, and a missing or unparsable value keeps the default. The default is `0.05 s`, or `1 s` in a
+wasm build. The deadline is checked inside long builtin loops (`collect`, a generator, a big
+`state-data-get`), not by a plain body. It is a `se::time_budget`: its first half is charged on the
+steady clock, and its second half on the thread's CPU clock, with each gap between two checks
+counted up to a sixteenth of that half. So a native step that the OS deschedules must still run for
+half the cap itself before it is killed. Single-threaded wasm has no thread CPU clock: there,
+`thread_cpu_seconds` is the steady clock, so on a loaded machine a step that checks often (a big
+`collect`, decoding a large reply) is charged for its waits too, up to a sixteenth of the half per
+check. That is why its default is higher. On teardown, residents are reaped as a group by their owner tag.
+
+**A resident that stops is restarted.** A killed one (its step cap, or a syntax error read inside
+it) or a failed one (an exception it didn't catch) is reported once per message (§2.4). Then it
+is started again on a later drain, with a fresh loop; what it wrote to state stays:
+
+- the first time, at once;
+- while it keeps stopping within 100 drains of starting, after 1, 2, 4 … up to 64 drains;
+- after 8 such stops in a row, never again, with the warning `ari: <lane> resident [<channel>]
+  stopped 8 times in a row soon after starting: not restarted again`. Setting its program again,
+  which a reload does, starts it afresh.
+
+This holds for every lane: `on_tick`, each module's `on_tick` (whether or not the mount is
+drawn), `on_key`, `on_pointer` and `on_signal`. A dead input handler would leave the document
+deaf to keys. A dead signal handler would swallow every Ctrl-C, since declaring one takes the
+signal over (§5.3). A signal that arrives while its handler waits out a restart delay starts it
+at once. A key or pointer event that arrives in that wait is dropped, as it is for a document
+with no handler.
 
 A `load:`ed module's own `on_tick:` is a tick resident too, one per mount (§6.3): chrooted to the
 mount's sub-prefix, with the mount's functions (§6.6), on the channel
@@ -224,9 +255,36 @@ one line, cut at 80 characters, and `<lane>` is `on_tick:`, `on_key:`, `on_point
 `on_signal:`, or `on_tick: of mount '<sub-prefix>'` for a module's tick. An `init:` program that fails
 reports `failed: Class: message (at <where>)` to its caller.
 
-**Keeping a resident alive.** A resident is one process for the life of the document. An
-exception it doesn't catch ends it, and its channel goes unserved from then on. Catch inside the
-body to keep it running:
+**Where a host shows them, while the document runs.** Each warning reaches the host as it is
+produced, not only when the document exits. `AppRuntime::set_warning_listener` hears each one at the
+drain that collects it, and `take_warnings()` still returns them all for a summary at exit. The
+stock hosts hand them to a `LiveWarnings` ([`host_warnings.h`](../inc/cvc/ariadne/host_warnings.h)),
+which sends each one to:
+
+| Where | When |
+|---|---|
+| the bottom of the screen, wrapped, for 8 s, with how many there have been so far | `ari run` and `arigl run --terminal` with the FTXUI backend, or the status line on the tvision desktop |
+| a log file, one line each, with the time: `2026-10-30 18:31:02 ari: warning: on_tick: resident [...] stopped: ...` | `--log FILE`, or the environment variable `ARIADNE_LOG=FILE`. Appended, and flushed per line. |
+| stderr, as `ari: warning: ...` | when stderr is not the terminal: `ari run doc.ari 2>warnings.txt`, a pipe, or the browser page. On a terminal, a full-screen UI owns it, so they wait for the exit. |
+| the browser page: `Module.ariadneWarning(text)` ([`web_document.h`](../inc/cvc/ariadne/web_document.h)) | ari.html shows the latest in its header. arigl-web shows it in the canvas's corner for 8 s. Both keep them in `window.ariadneWeb.warnings`. |
+
+When `ari run` exits it lists every warning of the run on stderr. When they already went to stderr
+as they came, it prints only how many there were. arigl's window prints each one to stderr at the
+frame it comes, as it always has. A message is reported once per run (`warn_once`). So a resident
+that stops the same way each time shows one `stopped:` warning, and then the give-up warning if it
+gets that far. `snapshot`, `check` and `test` print their warnings when they finish, as before.
+
+To watch the warnings of a running document from another terminal:
+
+```sh
+ari run --log /tmp/ari.log app.ari     # or: ARIADNE_LOG=/tmp/ari.log ari run app.ari
+tail -f /tmp/ari.log                   # in another terminal
+```
+
+**Keeping a resident running.** An exception a resident doesn't catch ends its process. The
+runtime restarts it (§2.3), but the activation that raised is lost, and so is any request it had
+in flight. One that raises every time is given up after 8 quick restarts. Catch inside the body to
+keep it running:
 
 ```yaml
 on_key: |
@@ -284,6 +342,41 @@ A `progress:` widget is read-only: a bar showing the number at `bind` placed in 
 state path or a computed expression) drawn over it, else the percent. ImGui draws a progress bar;
 a backend with none gets a text value (`[########------------] 40%`).
 
+A `plot:` widget is read-only too: a line graph of the comma-separated numbers at `bind` (a state
+path or a computed expression), oldest first, between `lo` and `hi`. Leave them out (or give
+`lo` >= `hi`) and the range is fitted to the numbers. The text at `overlay` is its caption, and
+`height` its height in pixels (default 60). The host keeps the series (the conference's Avatar
+window plots the history `avatar_panel` publishes). ImGui draws a line plot that reads out the
+value under the mouse; a backend with none gets a text sparkline of the last 32 numbers with the
+newest and the range (`[ _.-=+*#] 12.3 (1..30)`).
+
+A `spinner:` widget says something is under way when there is no amount to show (a request, a
+search). The host turns it by its own frame clock (`Runtime::frame_clock`), not by state, so it keeps
+moving while the document's programs are parked: a program waiting on `http-get` still has a
+turning spinner beside it, in every backend and in the single-threaded browser pages (§10.2).
+Show it while the work runs with `visible_when`:
+
+```yaml
+- spinner: Signing in...
+  visible_when: (= (state-get "ui.busy") "1")
+- spinner:                                # the label from state, or a computed expression
+  bind: (string.join (list "Loading" (state-get "feed.name")) " ")
+- spinner: Working
+  glyphs: ascii                           # | / - \ rather than braille dots
+```
+
+- The label is the widget's key, or `bind:` (a state path, or a computed expression, read-lane
+  rules: `string.join`, not `str-concat`) when it has one; a bare `- spinner` has none.
+- Disabled (`enabled_when` falsy, or `disabled_when` truthy), it stands still, greyed where the
+  backend greys.
+- The terminal backends (FTXUI, tvision) draw ten braille dots a second (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`), then
+  the label. `glyphs: ascii` turns `| / - \` instead, as they do by themselves on the Linux console
+  and on a `dumb` or `vt*` terminal, which have no braille (`Backend::unicode_glyphs`). ImGui draws
+  a turning arc, a text line high, one turn a second, so it needs no glyph from the font (the browser
+  build's is ASCII).
+- A snapshot reads frame `f` at `f / fps` (`ari snapshot`: `--fps`, default 20; arigl's fixed
+  clock: 1/30 s a frame), so `--frames 3` shows the spinner one step on from `--frames 1`.
+
 A backend advertises `Capabilities{windows, menubar, mouse, keyboard, color, glsl,
 view_embed, owns_loop, terminal, bitmap, kitty, sixel}`
 ([`backend.h`](../inc/cvc/ariadne/backend.h)). A document's `requires:` and `(has? ...)`
@@ -332,6 +425,12 @@ Three backends ship:
     streams. A compressed codec needs a decoder from the host; `arigl` adds cvcGL's JPEG
     one for `mjpeg`. `ari` and `arigl --terminal` both register it. With no live stream,
     it shows whatever still image is published under the stream's name (`--image`).
+    Its `size:` is a width (`size: 320`, the height following each frame's aspect) or a box
+    (`size: [320, 240]`). In a box each frame is fitted inside it with its shape kept, and
+    ImGui fills the spare space with black bars, so a tile stays one size whatever a camera
+    sends: a portrait phone shows whole, not squashed. A camera captured with `jpeg:#t`
+    keeps its own aspect within the capture's `w` x `h`, a budget turned to the camera's
+    orientation (a portrait phone at 320x240 sends 240x320).
 
   Commit edges match the ImGui backend: discrete widgets commit on the edit, a
   mouse-dragged slider reports each move and commits on release (arrow-key steps commit at
@@ -408,8 +507,10 @@ Three backends ship:
   ([`inc/cvc/ariadne/tvision_backend.h`](../inc/cvc/ariadne/tvision_backend.h)) — the
   native-desktop terminal backend (roadmap §16.5 row 5). Turbo Vision owns the terminal
   and draws the chrome itself: movable, resizable, overlapping windows with close and
-  zoom boxes, a pull-down menu bar, a status line, and its own keys (F10, F6, Alt-X,
-  Ctrl-F5). The windows' *contents* are the FTXUI backend's: a `TvisionBackend` is an
+  zoom boxes, a pull-down menu bar, a status line, and its own keys (F10 for the menu bar, F6
+  for the next window, Alt-X to quit, Ctrl-F5 to move or resize the window from the keyboard:
+  the arrows move it, Shift and the arrows resize it, Return keeps it, Escape puts it back).
+  The windows' *contents* are the FTXUI backend's: a `TvisionBackend` is an
   `FtxuiBackend` in hosted mode (`Options::hosted`), which lays each window body out
   offscreen for tvision to draw and takes that window's input in its own cells. So both
   terminal backends share one widget engine, focus and commit rule, and the hosted mode
@@ -682,9 +783,10 @@ down), centres it in x and y, sits it on z = 0 and scales its largest extent to 
 
 **Field colours (both node types).** The values a node shows are coloured through a transfer
 function at `<node>.field_colors` (a `cvc::tf::model` string, outside `mesh_ops.*` / `fe.*`), so
-a `tf_editor` edits the ramp: mesh_tools and fe_controls each hold one (`show_opacity: false`,
-`show_isocontours: false`). Only the colour ramp is used. The colormap key (`color.colormap`,
-`view.colormap`) seeds it and resets it to that colormap's ramp whenever it changes, so a
+a `tf_editor` edits the ramp and the opacity curve: mesh_tools and fe_controls each hold one
+(`show_isocontours: false`). The values draw see-through where the opacity curve is below 1 (times
+fe_lab's surface opacity); the isocontours are not used. The colormap key (`color.colormap`,
+`view.colormap`) seeds it and resets it to that colormap's ramp, opaque, whenever it changes, so a
 document stepping through colormaps still works; an edit stands until the next change. An
 explicit domain in the model is the range the values are coloured over (in fe_lab it wins over
 `view.fixed_range`). Beside it the node publishes `field_colors.range` (the colours' span under
@@ -738,13 +840,13 @@ Keys under `<node>.fe.*`:
 
 | key | meaning | seeded from prop |
 |---|---|---|
-| `request` | `load`, `reload`, `mesh`, `solve`, `stop` (`stop` interrupts a heat solve; any other job runs to the end and the status says so); several separated by spaces run in order | `auto_mesh: true` seeds `mesh` |
+| `request` | `load`, `reload`, `mesh`, `solve`, `stop` (`stop` ends the running job at its next step: a heat solve keeps its field so far, a load, mesh or other solve keeps nothing and the node keeps what it had); several separated by spaces run in order, so `stop load` drops the running job and loads | `auto_mesh: true` seeds `mesh` |
 | `busy`, `status`, `progress` (0-100), `stats.vertices`, `field.min`, `field.max` | published | — |
 | `phase` | published while a job runs: its stage and percent (`x lines 40%`, `factoring 62%`), `""` when idle; fe_controls' progress bar shows it | — |
 | `stats.tets`, `stats.hexes` | published: the element count (the other is 0) | — |
 | `stats.quality_min`, `stats.quality_mean` | published: minimum dihedral angle (tetrahedra, degrees) or scaled Jacobian (hexahedra) | — |
 | `stats.work_ms` | published: the wall time of the last run of commands, from the first to idle | — |
-| `stoppable` | published: 1 while a heat solve runs (the Stop button's `enabled_when`), else 0 | — |
+| `stoppable` | published: 1 while a job runs (the Stop button's `enabled_when`), else 0 | — |
 | `last_mesh` | published: the region and bounds the last mesh job started with (`solid <isovalue>` or `interval <lo> <hi>`), `""` before the first | — |
 | `source.type` | `sdf` (the signed distance field of a mesh) or `volume` (a volume file) | `source:` |
 | `source.file` | the mesh or the volume: a path or URI, a relative path resolved against the document's directory (`stanford.bunny` is built in) | `source.sdf.mesh` / `source.file` |
@@ -946,12 +1048,27 @@ quoted data and names the program binds itself. It cannot see a name built at ru
 handed to `apply`, so it only warns; `requires:` is the authoritative list, and a name
 listed there is not warned about again. `ari check doc.ari` shows both.
 
+A `shader:` block is an implicit `gl.scene.shaders` the same way. When the host has a scene
+but its renderer does not run the document's GLSL, the load warns once, naming the shaded
+nodes; they draw unshaded. Listing `gl.scene.shaders` makes that an error, or (optional)
+one "optional requirement" warning instead. A host with no scene at all already warns that
+the scene is ignored, so it adds nothing. (`shader_canvas` would be an implicit
+`gl.ui.shaders`, once that widget exists.)
+
+Every document under `examples/ariadne/` declares a `requires:` block, and
+`AriadneComponents.ShippedExamplesDeclareWhatTheyNeed` keeps it so. A document with a
+`scene:` lists `gl.scene`, so `ari` refuses it with one error where it used to drop the scene
+with a warning. One with a `shader:` block also lists `gl.scene.shaders` (`lsystem_forest.ari`,
+as optional: its bump and bark presets are detail). Write `requires:` the same way in a new example: list what the document cannot
+work without, and mark the rest `optional: true` (as `terminal_images.ari` does for
+`raster.bitmap`, since half-block cells still show the picture).
+
 A document that can run without something asks for it at run time with `(has? "name")`,
 which answers the same question for a token, a function or a widget type. It works in
-programs and in reactive expressions. The load-time scan does not follow the guard: a call
-behind `(has? "name")` still warns, until `requires:` lists the name as `optional: true`. So
-the two go together: the entry says the document can do without it, and the guard is how it
-does.
+programs and in reactive expressions, a `load:`ed module's included (its `init:` too: a module's
+host is the document's host). The load-time scan does not follow the guard: a call behind
+`(has? "name")` still warns, until `requires:` lists the name as `optional: true`. So the two go
+together: the entry says the document can do without it, and the guard is how it does.
 
 ```yaml
 windows:
@@ -987,6 +1104,9 @@ A window needs neither `pos:` nor `size:`. Its size:
 - A window with no `size:` fits its content every frame, so it grows and shrinks with what it
   shows. It stops at the edge of the view, measured from where it stands, and never goes below an
   authored `min:` or past a `max:`. Its persisted geometry places it but does not size it.
+- A window that closes and opens again in the same run (§5.9, or its `visible_when` turning true
+  again) is sized as on its first opening: by its `size:`, else by what it shows now, rows it
+  gained while closed included. Only a size the user gave it holds.
 
 Content that does not fit the window, whatever set its size, scrolls. A window gets a scroll bar
 on each axis where it needs one, and never clips its content or shrinks to a stub.
@@ -1015,15 +1135,24 @@ How each backend does it:
   and cascade new windows instead of flowing them. A window that would run off the screen stops at
   the screen's edge, and a window whose content is larger than it is (or than its `size:`) gets a
   scroll bar. Its body scrolls to keep the focused widget in view; there is no wheel scrolling.
-  On the tvision desktop, tvision's frame holds the window, and the host refits that frame to the
-  content in each axis the document did not size, until the user resizes the window with the
-  frame's own corner; from then on it keeps the user's size.
+  On the tvision desktop, tvision's frame holds the window, and the host sizes that frame on every
+  walk, in each axis: the document's size where it gave one, else the content's. That stops when
+  the user resizes the window (the frame's corner, Ctrl-F5 then Shift and the arrows, or the zoom
+  box): from then on it keeps the user's size, through a close and a reopen too. Nothing else
+  counts as the user's: not a size the host gave the window to fit it, nor tvision scaling the
+  windows when the terminal is resized, nor a move. Only the user's size is reported back to
+  `tree.<id>.geometry`; for any other window the host reports its place alone.
+  `ari_run_reopen_refit_ftxui` and `_tvision` check this in a tmux pane (Linux):
+  [`src/ari/tests/reopen_refit.ari`](../src/ari/tests/reopen_refit.ari)'s windows gain rows while
+  closed and must show them when they open again, and on tvision a window resized with Ctrl-F5
+  must come back at that size.
 
 ### 5.9 Closing and reopening windows: the Windows menu
 
 A window's open state is `tree.<id>.open` (default open; `<id>` is its `id:`, else its title). A
 window whose state is `0` is not drawn. A `closable: true` window has a close button that sets it
-to `0`.
+to `0`. One that opens again is sized as §5.8 says: by its `size:` or its content, unless the user
+resized it.
 
 Every document gets a **Windows** menu to open such a window again, with no menu items to write:
 
@@ -1369,7 +1498,8 @@ part of what the parent granted), an opaque one is not. `state-delete`, the expi
 and `state-watch` still act on the physical path and do not reach through a hole. A fragment may declare
 the holes it expects with `needs:`; an ungranted expectation warns and the fragment falls
 back to a local (fail-safe) binding. A per-mount `init:` runs once at the sub-prefix
-**after** the holes are wired, with the module's functions (§6.6). The mount's `on_tick:`
+**after** the holes are wired, with `(has? ...)` as the document's own `init:` has it and
+with the module's functions (§6.6). The mount's `on_tick:`
 resident starts right after it (§2.3). A reconcile keeps that resident running when the new tree
 has the same mount at the same sub-prefix with the same program (its body and its functions), as
 a reload of an unchanged document does, and stops it otherwise. A repeated mount's resident runs
@@ -1527,7 +1657,8 @@ ari test     [flags] doc.ari...                   # headless test run (§13)
 ```
 
 Its flags (`--backend ftxui|tvision`, `--prefix P`, `--fps N`, `--no-mouse`,
-`--component-path DIR`, and the snapshot ones) go **before** the document. They are the
+`--component-path DIR`, `--log FILE` for the run's warnings as they happen (§2.4), and the snapshot
+ones) go **before** the document. They are the
 general flags every runtime shares, parsed by
 [`host_cli.h`](../inc/cvc/ariadne/host_cli.h). Whatever follows the document is the
 document's (§5.6): `ari run doc.ari --help` prints the document's own usage. A general
@@ -1848,7 +1979,8 @@ arigl run --net-allow https://tx.wtf --credential-store nicotina share/nicotina/
 The flags hold for `run`, `snapshot`, `check` and `info` alike. With the network on, `ari
 snapshot` and `arigl snapshot` (in a window or with `--terminal`) keep running after their
 frames until the document is idle, no request in flight and no program step waiting (a program
-parsing one reply before it sends the next is not idle), for three steps running, at most 10 s.
+parsing one reply before it sends the next is not idle), for three steps running, at most 10 s
+(`--settle S` sets another limit, for a slow server or a slow build).
 So one frame shows what a document that signs in and fetches brought back, and CI can render it
 against a local test server. `ari snapshot` prints the programs' warnings after the frame, as
 `arigl snapshot` does.
@@ -1860,6 +1992,10 @@ against a local test server. `ari snapshot` prints the programs' warnings after 
 | `--net-policy FILE` | read `allow` and `credential` lines from `FILE` (repeatable; implies `--net`) |
 | `--credential-store S` | keep credentials across runs in `S` (implies `--net`; not in a browser) |
 | `--credential-env N=V` | credential `N` is the token in environment variable `V`, for this run (repeatable; a policy `credential` line must bind `N`; not in a browser) |
+| `--oidc-issuer ISSUER` | documents may sign in (§10.5) with `ISSUER` only; allows its origin (repeatable; implies `--net`) |
+| `--oidc-client I=ID` | sign in to issuer `I` as client `ID`, the launcher's registration (repeatable; pins `I` too) |
+| `--oidc-redirect-uri U` | the redirect URI a browser page registers (§10.5; default: the page's own URL) |
+| `--no-browser` | never open the user's browser: sign-in shows a device code, `open-url` shows the URL |
 
 Without them a document has no `http-get` or `http-request`, and an `http(s)://` URI does not
 resolve. With them the host ([`net_host.h`](../inc/cvc/ariadne/net_host.h), `enable_net`):
@@ -1987,6 +2123,186 @@ until they did, `ari snapshot`'s plain text put a space after each wide glyph. A
 three are data jobs: a large reply is parsed and written a slice per step, so it doesn't stall
 a frame. `json-parse` and `json-encode` are pure, so reactive expressions may use them too.
 
+### 10.5 Signing in: OAuth 2.0 and OpenID Connect
+
+A document signs its user in with any OpenID Connect provider (Keycloak, Authentik, Google, a
+txwtf instance, ...) from two public facts: the provider's **issuer** URL and the **client id** of
+a public client registered with it. The host ([`oidc_host.h`](../inc/cvc/ariadne/oidc_host.h))
+reads the provider's discovery document (`/.well-known/openid-configuration`), runs the whole flow
+and keeps every token in its credential store (§10.3) under a name the document chose. The
+document then names that credential on its requests, as it does any other:
+
+```lisp
+(oidc-sign-in (dict "issuer" "https://id.example/realms/demo" "client_id" "my-app"
+                    "scopes" (list "openid" "profile" "email") "credential" "me"))
+;; ... later, once oidc.me.phase is "signed_in":
+(http-get "https://api.example/v1/me" (dict "auth" "me"))
+```
+
+Nothing in libcvc is specific to a provider. The verbs exist wherever the network is on with an
+HTTP backend (every `ari` and `arigl`, in a terminal, a window and a browser page):
+
+| verb | what |
+|---|---|
+| `(oidc-sign-in OPTS)` | start a sign-in, or resume one kept from before; returns `"started"` at once (or `"in_progress"`) |
+| `(oidc-cancel NAME)` | stop a sign-in in progress; `#t` if there was one |
+| `(oidc-sign-out NAME [OPTS])` | forget the tokens; revoke them where the provider can (`"sent"` or `"no"`) |
+| `(oidc-status NAME)` | the sign-in's status as a dict: the keys of the table below, `claims` a dict |
+| `(open-url URL)` | open an http(s) URL the host allows in the user's browser (§10.6) |
+
+`oidc-sign-in`'s options (an unknown one is an error):
+
+| option | what |
+|---|---|
+| `issuer` | the issuer URL, exactly as the provider's discovery document writes it (required) |
+| `client_id` | the public client (required unless the launcher gives one with `--oidc-client`, which wins) |
+| `credential` | the credential to keep the sign-in under (required; 1-56 of `A-Z a-z 0-9 . _ -`) |
+| `scopes` | a list of scopes or one space-separated string; default `openid` (`openid` asks for an ID token, and so for the claims) |
+| `params` | a dict of extra authorization parameters: `prompt`, `login_hint`, `acr_values`, `audience`, ... (never one the host sets: `state`, `nonce`, `redirect_uri`, `code_challenge`, ...) |
+| `flow` | `auto` (default), `loopback`, `device` or `redirect` |
+| `interactive` | `#f`: only resume a kept sign-in (or complete a browser page's return); start nothing new. Default `#t` |
+| `status` | the state path the progress goes to, under the document's root; default `oidc.<credential>` |
+| `client_secret` | for a provider that gives installed apps a non-confidential "secret" (Google's desktop clients); never a confidential client's |
+| `port`, `redirect_path` | the loopback flow's port (default 0: any free one) and path (default `/callback`) |
+| `redirect_uri` | the redirect flow's redirect URI (default: the page's own URL; `--oidc-redirect-uri` wins) |
+| `timeout` | seconds to wait for the browser's redirect (default 300) |
+
+**Progress** goes to the state tree, so a widget shows it with a `bind:` or a `visible_when:`,
+and to the channel `oidc#<credential>`, which gets the final status dict when a sign-in ends
+(signed in, error, cancelled, signed out), so a program can wait with
+`(msg-recv "oidc#me")`. None of it is secret:
+
+| key under `oidc.<credential>` | what |
+|---|---|
+| `phase` | `signed_out`, `discovering`, `waiting_for_browser`, `redirecting`, `device_code_shown`, `exchanging`, `refreshing`, `signed_in`, `error`, `cancelled` |
+| `signed_in` | `true` or `false` |
+| `flow` | `loopback`, `device`, `redirect`, or `stored` (a sign-in kept from before) |
+| `issuer` | the issuer |
+| `error`, `error_description` | a short code (the provider's OAuth error, or `state_mismatch`, `invalid_token_reply`, `unsupported_flow`, `discovery_failed`, `timeout`, `network_error`, `session_expired`, ...) and a sentence for the user |
+| `user_code`, `verification_uri`, `verification_uri_complete`, `code_expires_at`, `interval` | the device flow's code and where to enter it |
+| `browser_url`, `browser_opened` | the authorization URL, and whether a browser was opened at it (show the URL when not) |
+| `expires_at`, `has_refresh` | when the access token expires (Unix seconds, `0` unknown), whether there is a refresh token |
+| `claims.sub`, `.iss`, `.name`, `.email`, `.preferred_username`, `.exp` | the signed-in user, from the ID token |
+
+**The flows.** `flow: auto` picks per host; a flow the host or the provider cannot run fails with
+`unsupported_flow` and says why (a provider without `device_authorization_endpoint` cannot run the
+device flow). All of them check the provider's reply against the request: the authorization code
+flows send PKCE S256 (RFC 7636), a random `state` and a `nonce`, check the `state` (and `iss`,
+RFC 9207, when the provider sends it) of the reply, and check the ID token.
+
+| host | auto picks | how |
+|---|---|---|
+| `ari` (FTXUI, tvision) or `arigl --terminal` on a machine with a desktop, `arigl` in a window | `loopback` (RFC 8252) | listens on `127.0.0.1` on a free port, opens the system browser at the authorization endpoint, takes the one redirect back and shows the tab "you can close this tab" |
+| the same over SSH, with no display, or `--no-browser` | `device` (RFC 8628) | shows `user_code` and `verification_uri` (the document shows them; `verification_uri_complete` carries the code in the URL) and polls the token endpoint every `interval` seconds, `slow_down` adding 5; `access_denied` and `expired_token` end it |
+| the arigl-web page and the `ari.html` (xterm.js) page | `redirect` | navigates the page to the authorization endpoint; the PKCE verifier, `state` and `nonce` wait in `sessionStorage` (this tab's, this origin's) meanwhile. When the provider sends the page back, the document's `oidc-sign-in` (run again as the page loads, `interactive` `#f` will do) exchanges the code, removes the record and takes `code` and `state` out of the address bar with `history.replaceState`. A page can also run `device` |
+
+With no browser and no device flow at the provider, `auto` still runs `loopback` and shows the
+authorization URL (`browser_url`) for the user to open on the same machine. A host that cannot open
+a browser prints the URL on stderr, except while a full-screen terminal UI owns the screen, where
+the document shows it.
+
+**Capability tokens** (`requires:`, `has?`, §5.7): `oidc` (the verbs are here), `oidc.loopback`
+(native hosts), `oidc.device` (every host), `oidc.redirect` (a browser page) and `browser` (a
+browser can be opened here: not over SSH, not with `--no-browser`).
+
+**Tokens** never reach the document. The access token is credential `NAME`, bound to the issuer's
+origin and to any origins a policy `credential NAME ...` line names (so an API on another origin
+gets it when the launcher says so). The refresh token is `NAME.refresh`, bound to the token
+endpoint's origin, and the ID token `NAME.id`. The host:
+
+- refreshes the access token (RFC 6749 6) before it expires, while the document is idle and before a
+  request that names it, and once more when a request is answered 401, then sends the request again;
+- with `--credential-store`, keeps the sign-in across runs: the next `oidc-sign-in` (`interactive`
+  `#f` is enough) refreshes it and reports `flow` `stored`, or, when the provider has ended the
+  session (`invalid_grant`), forgets it and reports `signed_out` with `error` `session_expired`;
+- on `(oidc-sign-out NAME)` forgets all three and revokes the refresh token (RFC 7009) where the
+  provider has a `revocation_endpoint` (`"revoke" #f` skips it). `"end_session" #t` also ends the
+  provider's own session in the browser (RP-initiated logout at `end_session_endpoint`, with
+  `post_logout_redirect_uri` when given).
+
+The ID token's `iss`, `aud` (and `azp`), `exp`, `iat` and `nonce` are checked (OIDC Core 3.1.3.7);
+a refreshed one must name the same `sub`. Its signature is not checked against the provider's
+JWKS: the host takes ID tokens only from the token endpoint, over TLS, which 3.1.3.7 (6) allows in
+place of the signature, and libcvc has no RSA/EC verification in every build (OpenSSL is optional,
+and absent from the browser builds). An unsigned token (`alg` `none`) is refused.
+
+**Which issuers.** By default a document may sign in with any issuer whose origin the host allows
+(§10.3), and the provider's endpoints must share the issuer's origin. A launcher pins it, gives
+the client id, or lets endpoints live elsewhere with flags or policy lines:
+
+```sh
+ari run --oidc-issuer https://id.example/realms/demo --oidc-client https://id.example/realms/demo=my-app \
+    --credential-store demo app.ari
+```
+
+```text
+oidc https://id.example/realms/demo                      # sign in with this issuer only
+oidc https://accounts.google.com https://oauth2.googleapis.com   # its endpoints are also there
+oidc-client https://accounts.google.com 1234.apps.googleusercontent.com
+credential me https://api.example                        # the access token may go to the API too
+```
+
+Naming an issuer in either form allows its origin (and the endpoint origins listed) and pins
+sign-in to the issuers named. An endpoint that is not https (http only for a loopback issuer, as a
+local provider and the tests use), or is at an origin the policy does not list for its issuer,
+fails the discovery: the host never contacts it. In a browser page the same flags go in the page
+config's `flags` (`ariadne.config.json`):
+
+```json
+{"flags": ["--net", "--oidc-issuer", "https://id.example/realms/demo",
+           "--oidc-client", "https://id.example/realms/demo=my-app"]}
+```
+
+**What a provider must allow** for a public client:
+
+- the authorization code grant with PKCE S256 and no client secret (a "public" client); the
+  device grant (`urn:ietf:params:oauth:grant-type:device_code`) for terminals over SSH;
+- for the loopback flow, the redirect URI `http://127.0.0.1/callback` with any port (RFC 8252
+  7.3), or a fixed `port` the document asks for;
+- for a browser page, the page's URL as a redirect URI, exactly (with its query, e.g.
+  `?src=app.ari`, or pin the page's document with `src_param: false` so it has none), and CORS for
+  the page's origin on the discovery document and the token, device authorization and revocation
+  endpoints (the page calls them with `fetch`), and the page's own Content-Security-Policy must list
+  the provider's origin in `connect-src` (the arigl-web and `ari.html` pages run under a strict
+  one);
+- refresh tokens if sessions should outlive the access token (some providers want the
+  `offline_access` scope, or a parameter such as Google's `access_type=offline` in `params`);
+- a `post_logout_redirect_uri` registered, if a document uses one.
+
+**What stays where.** The authorization URL holds no secret (the PKCE verifier never leaves the
+host; a leaked `state` cannot complete a sign-in without it), so it may go to the state tree. A
+browser page keeps its tokens in memory, like every credential there (§10.3): a reload signs in
+again, which the provider's own session cookie usually makes a redirect there and back. The
+loopback listener binds `127.0.0.1` only, takes one redirect, answers anything else 404, and
+closes.
+
+[`examples/ariadne/documents/oidc_sign_in.ari`](../examples/ariadne/documents/oidc_sign_in.ari)
+signs in to a provider given on its command line and shows the claims:
+
+```sh
+ari run --oidc-issuer https://id.example/realms/demo examples/ariadne/documents/oidc_sign_in.ari \
+    --issuer https://id.example/realms/demo --client my-app --api https://api.example/v1/me
+```
+
+The tests run every flow against a stub provider: `net_oidc_test` (the protocol pieces),
+`ariadne_runtime_test` `AriadneOidc.*` (the flows, a redirect included, refresh, sign-out, a forged
+`state` or `nonce`, the policy), `ari_net_test` `AriOidc.*` and `ari_oidc_hosts` (`ari` with FTXUI
+and tvision and `arigl --terminal` in tmux, `arigl` in a window: no token in any screen, stdout or
+stderr), and the wasm ari under node (ci.yml: the redirect flow there and back, the device code).
+[`src/ari/tests/stub_oidc_provider.py`](../src/ari/tests/stub_oidc_provider.py) is a stub provider
+to try a document against by hand.
+
+### 10.6 Opening the user's browser: `open-url`
+
+`(open-url URL)` opens an http(s) URL in the user's web browser
+([`browser.h`](../inc/cvc/net/browser.h)): natively with `$BROWSER` when it is set, else
+`xdg-open`, `open` or `ShellExecute`, its output thrown away; in a browser page with
+`window.open`. It returns `#t` when a browser was asked to open it and `#f` where there is none
+(over SSH, no display, `--no-browser`): the host then prints the URL, outside a full-screen terminal
+UI, and the document should show it. The URL's origin must be one the host allows (§10.3), since a
+page opened in a browser carries whatever its URL says; anything else, and a scheme other than
+http(s), raises. One URL a second at most. It needs the network on, like the other verbs here.
+
 ---
 
 ### 10.5 WebSockets
@@ -2000,7 +2316,7 @@ without either has no `ws-*` verbs, so a document asks `(has? "ws-open")` and po
 | verb | what |
 |---|---|
 | `(ws-open URL [OPTS])`, `ws-open-async` | connect to a `ws://` or `wss://` URL; reply `{ok handle url error}` |
-| `(ws-send H TEXT)` | send a text message; `#t`, or an error when `H` is closed |
+| `(ws-send H MESSAGE)` | send a text message: a string as it is, a dict or list as JSON; `#t`, or an error when `H` is closed |
 | `(ws-poll H)` | the next message already in, or `nil`; never waits |
 | `(ws-recv H [SECONDS])`, `ws-recv-async` | the next message, waiting up to `SECONDS` (30); `nil` when none came |
 | `(ws-open? H)` | whether `H` is still open |
@@ -2016,7 +2332,25 @@ without either has no `ws-*` verbs, so a document asks `(has? "ws-open")` and po
 - `OPTS` takes `query`, `headers`, `auth` and credential values as the HTTP verbs do (§10.2,
   §10.3), plus `timeout`, the seconds to connect (15). A browser's `WebSocket` can't send
   request headers, so there `headers` and `auth` are refused; a server that wants a token takes
-  it in a message instead.
+  it in a message instead, which `ws-send` can carry without the document holding it (below).
+- `ws-send` sends a dict or a list as JSON, compact (`json-encode`'s rules: a value JSON lacks
+  is an error). A credential value in it, `(dict "credential" NAME)` at any depth, is sent as
+  the token the host keeps for `NAME`, a JSON string, so a document signs in to a live feed the
+  one way a browser allows, in a message:
+
+  ```lisp
+  (set r (ws-open "wss://tx.wtf/ws/events"))
+  (ws-send (get-attr r "handle") (dict "type" "hello" "token" (dict "credential" "txwtf")))
+  ;; the server gets {"type":"hello","token":"<the host's txwtf token>"}
+  ```
+
+  The token is fetched for the connection's origin (its URL's `http(s)` twin, as for the
+  policy), so a credential bound to other origins (§10.3) is not sent, and is put in on the
+  host just before the message goes; no value, state node, error or log line holds it. A name
+  with no token there is an error and sends nothing; so is a credential value on a host that
+  keeps no credentials. As with HTTP replies, a token a connection has sent (in its handshake
+  or a message) is blanked to `[redacted]` in what `ws-recv` and `ws-poll` return, should the
+  server echo it. A string is sent as it is: a document can't put a token in one.
 - The host's policy (§10.3) checks the URL as its `http(s)` twin: `--net-allow
   https://example.org` allows `wss://example.org/...`.
 - `ws-open` and `ws-recv` are async I/O calls like the HTTP verbs: the connect, or the wait,
@@ -2028,6 +2362,10 @@ without either has no `ws-*` verbs, so a document asks `(has? "ws-open")` and po
 State plainly so authors are not misled. Each item cites the code; the roadmap items
 below (G17–G21 in the internal gap report) are tracked for reconciliation.
 
+- **Sign-in checks an ID token's claims, not its signature** (§10.5): the token comes straight from
+  the token endpoint over TLS. A sign-in kept in a `--credential-store` file is picked up only when
+  the document calls `oidc-sign-in` again (with `"interactive" #f`); until then its access token is
+  sent but not refreshed.
 - **`http(s)://` resolves only where the host turned the network on** (§10.3). `ari` and
   `arigl` register the handler, checked against their allowlist, when given `--net` or its
   kin; otherwise `import:` / `load:` over http and `fetch("http://…")` fail with an
@@ -2262,7 +2600,8 @@ A document **fails** when:
 The network is as `snapshot`'s (§10.3): off unless `--net`, `--net-allow`, `--net-policy` or
 `--credential-store` turns it on. A test that makes a request waits for its reply as any program
 does. A document run for `--frames N` with the network on waits after its frames, as `snapshot`
-does, until its requests have come back (at most 10 s), and a warning in that time fails it too.
+does, until its requests have come back (at most 10 s, or `--settle S`), and a warning in that
+time fails it too.
 `--prefix`, `--component-path` and `--image` work as for `snapshot`. A document has no command
 line of its own under `ari test`: an `args:` block's arguments take their defaults. Flags go
 before the first document.

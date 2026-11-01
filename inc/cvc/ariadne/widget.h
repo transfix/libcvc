@@ -35,6 +35,7 @@ enum class Kind {
   Text,           // static caption OR a read-only view of a state path
   Separator,      // a horizontal rule
   Progress,       // a read-only bar: the number at a state path, over [lo, hi]
+  Plot,           // a read-only line graph: the comma-separated numbers at a state path
   Checkbox,       // bound bool state
   SliderInt,      // bound int state, [ilo, ihi]
   SliderFloat,    // bound double state, [lo, hi]
@@ -49,6 +50,7 @@ enum class Kind {
   WindowsMenu,    // the built-in Windows menu (reopen a closed window): placed here in a menubar,
                   // or, outside one, the document's setting for it (bdef false: no such menu)
   Radio,          // bound enum-as-text state, every option shown (a combo's fields; radio_row)
+  Spinner,        // an activity indicator: a glyph the host turns by its frame clock, and a label
 };
 
 // ---------------------------------------------------------------------------
@@ -228,6 +230,8 @@ struct Widget {
   // `password: true` on an input_text: the backend shows a mask, not the text. The value is still
   // in state, as any input_text's is.
   bool password = false;
+  // Kind::Spinner `glyphs: ascii`: turn | / - \ rather than braille dots (a console without them).
+  bool ascii_glyphs = false;
 
   // §3/§4 dynamic repetition: when non-empty, this widget is a TEMPLATE emitted `repeat`
   // times, where `repeat` is a count expression re-evaluated each frame (capped, fail-safe
@@ -285,7 +289,10 @@ struct Widget {
 
   // Kind::Progress: the bar is the number at `bind` placed in [lo, hi] (clamped); `overlay` is a
   // state path (or a computed expression) whose text is drawn over the bar, else the percent.
+  // Kind::Plot: `overlay` is the graph's caption the same way, and [lo, hi] its vertical range
+  // (lo >= hi: fitted to the numbers).
   std::string overlay;
+  double plot_height = 60.0; // Kind::Plot: pixels (a window backend's)
 
   // §12 module mount (load:): when non-empty, this widget is a MOUNT POINT — a relative
   // state-path segment (e.g. "includes.stats") appended to the enclosing scope, so its whole
@@ -428,6 +435,19 @@ inline Widget separator() {
   return w;
 }
 
+inline Widget plot(std::string label, std::string bind, double lo = 0.0, double hi = 0.0,
+                   std::string overlay = "", double height = 60.0) {
+  Widget w;
+  w.kind = Kind::Plot;
+  w.label = std::move(label);
+  w.bind = std::move(bind);
+  w.lo = lo;
+  w.hi = hi;
+  w.overlay = std::move(overlay);
+  w.plot_height = height;
+  return w;
+}
+
 inline Widget progress(std::string label, std::string bind, double lo = 0.0, double hi = 1.0,
                        std::string overlay = "") {
   Widget w;
@@ -437,6 +457,19 @@ inline Widget progress(std::string label, std::string bind, double lo = 0.0, dou
   w.lo = lo;
   w.hi = hi;
   w.overlay = std::move(overlay);
+  return w;
+}
+
+// An activity indicator (Kind::Spinner): the host turns its glyph by the host's frame clock, not by
+// any state, so it moves while the document's programs are parked (on a request, say). `label` is
+// shown beside it; a non-empty `bind` (a state path, or a computed expression) gives the label
+// instead. Show it while something is under way with visible_when.
+inline Widget spinner(std::string label, std::string bind = "", bool ascii_glyphs = false) {
+  Widget w;
+  w.kind = Kind::Spinner;
+  w.label = std::move(label);
+  w.bind = std::move(bind);
+  w.ascii_glyphs = ascii_glyphs;
   return w;
 }
 

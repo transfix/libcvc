@@ -70,10 +70,12 @@ cmake --build "$CVC_BUILD_DIR" -j "$CVC_JOBS"
 # related reaches CVC_INSTALL_DIR or the published bundle. Running before the
 # install step keeps a failed suite from staging a bundle at all.
 # CVC_CTEST_EXCLUDE: a ctest -E regex of tests to leave out (CI's long-running suites).
+# CVC_CTEST_REPEAT: a ctest --repeat mode (CI's until-pass:3, as its package jobs run).
 case "$(printf %s "${CVC_BUILD_TESTS:-OFF}" | tr "[:upper:]" "[:lower:]")" in
   on|1|true|yes)
     ctest --test-dir "$CVC_BUILD_DIR" --output-on-failure -j "$CVC_JOBS" \
-      ${CVC_CTEST_EXCLUDE:+-E "$CVC_CTEST_EXCLUDE"} ;;
+      ${CVC_CTEST_EXCLUDE:+-E "$CVC_CTEST_EXCLUDE"} \
+      ${CVC_CTEST_REPEAT:+--repeat "$CVC_CTEST_REPEAT"} ;;
 esac
 
 cmake --install "$CVC_BUILD_DIR"

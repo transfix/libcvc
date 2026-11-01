@@ -472,6 +472,16 @@ jobs:
             echo "::error::a token reached the wasm ari's output"; exit 1
           fi
 
+      - name: Sign in from the wasm ari under node
+        # The browser pages' sign-in (docs/ARIADNE.md 10.5) against tests/stub_oidc_provider.py:
+        # the redirect flow there and back (page-shim.cjs stands in for the page's location,
+        # sessionStorage and history), the code exchange, the address bar cleaned, a request with
+        # the credential; and the device code. No token may reach the output.
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          bash src/ari/tests/oidc_wasm_node_test.sh "$node" "$PWD/build-wasm/bin/ari.js"
+
       - name: Frames go on while a request is out (L4)
         # The single-threaded build's requests are started, not sent in place: the browser's
         # fetch answers from the event loop while the frame loop goes on. tests/l4_frames.ari
@@ -1403,7 +1413,7 @@ jobs:
       SAN_CXX_TESTS: >-
         state_exec_scheduler_test state_exec_async_test state_exec_integration_test
         state_exec_coordinator_test ariadne_runtime_test thread_pool_test async_lane_test
-        state_exec_locks_test state_exec_locks_model_test
+        state_exec_locks_test state_exec_locks_model_test state_exec_priority_test
       # pycvc test scripts (bindings/pycvc/<name>).
       SAN_PY_TESTS: >-
         test_pycvc_exec.py test_pycvc_exec_async.py test_pycvc_exec_coro.py

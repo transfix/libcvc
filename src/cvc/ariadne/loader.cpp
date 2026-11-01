@@ -307,12 +307,12 @@ namespace {
 // else is a custom type, drawn by register_widget_type / a backend-native widget.
 // ORDER MATTERS: the short-form dispatch (widget_type) takes the FIRST of these present as a key,
 // so tf_editor precedes color — a tf_editor's own config may carry a `color:` node list — and
-// progress precedes overlay, a progress bar's text.
+// progress and plot precede overlay, their caption.
 constexpr const char *kBuiltinWidgetTypes[] = {
-    "group",   "menubar", "menu",      "menu_item",  "window",      "progress",
-    "overlay", "panel",   "text",      "checkbox",   "slider_int",  "slider_float",
-    "combo",   "radio",   "radio_row", "input_text", "input_int",   "tf_editor",
-    "color",   "image",   "button",    "separator",  "windows_menu"};
+    "group",   "menubar",   "menu",         "menu_item", "window",     "progress",     "plot",
+    "overlay", "panel",     "text",         "checkbox",  "slider_int", "slider_float", "combo",
+    "radio",   "radio_row", "input_text",   "input_int", "tf_editor",  "color",        "image",
+    "button",  "separator", "windows_menu", "spinner"};
 } // namespace
 
 bool is_builtin_widget_type(const std::string &type) {
@@ -668,6 +668,8 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
       return separator();
     if (s == "windows_menu")
       return windows_menu();
+    if (s == "spinner")
+      return spinner("");
     return text(s);
   }
   if (!n.IsMap()) {
@@ -732,6 +734,16 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
                           col[2].as<float>(1.0f));
     return w;
   }
+  if (type == "spinner") { // an activity indicator the host turns by its frame clock
+    Widget w = spinner(label, str(n, "bind"));
+    const std::string glyphs = str(n, "glyphs", "braille");
+    if (glyphs == "ascii")
+      w.ascii_glyphs = true;
+    else if (glyphs != "braille")
+      ctx.warn("ari: spinner '" + label + "': glyphs '" + glyphs +
+               "' is not braille or ascii — braille");
+    return w;
+  }
   if (type == "progress") { // a read-only bar: bind's number over [lo, hi]
     const std::string bind = str(n, "bind");
     check_bind(ctx, "progress", label, bind);
@@ -739,6 +751,15 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     if (lo >= hi)
       ctx.warn("ari: progress '" + label + "' has lo >= hi");
     return progress(label, bind, lo, hi, str(n, "overlay"));
+  }
+  if (type == "plot") { // a read-only line graph: bind's comma-separated numbers
+    const std::string bind = str(n, "bind");
+    check_bind(ctx, "plot", label, bind);
+    const double lo = num(n, "lo", 0.0), hi = num(n, "hi", 0.0);
+    const double height = num(n, "height", 60.0);
+    if (!(height > 0.0))
+      ctx.warn("ari: plot '" + label + "' height must be > 0 — 60");
+    return plot(label, bind, lo, hi, str(n, "overlay"), height > 0.0 ? height : 60.0);
   }
   if (type == "checkbox") {
     const std::string bind = str(n, "bind");

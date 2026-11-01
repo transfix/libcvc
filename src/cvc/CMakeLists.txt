@@ -137,6 +137,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/process.h
   ../../inc/cvc/core/text.h
   ../../inc/cvc/core/thread_pool.h
+  ../../inc/cvc/core/thread_class.h
   ../../inc/cvc/volume/volmagick.h
   ../../inc/cvc/geometry/geometry_file_io.h
   ../../inc/cvc/model/model.h
@@ -233,6 +234,7 @@ set(SOURCE_FILES
   core/process.cpp
   core/text.cpp
   core/thread_pool.cpp
+  core/thread_class.cpp
   processing/bilateral_filter.cpp
   processing/contrast_enhancement.cpp
   volume/cvcraw_io.cpp
@@ -290,6 +292,7 @@ set(SOURCE_FILES
   state/state_exec/lock_manager.cpp
   state/state_exec/lock_home.cpp
   state/state_exec/lock_intrinsics.cpp
+  state/state_exec/priority.cpp
   core/world_clock.cpp
   core/world_clock_binding.cpp
   core/clock_driver.cpp
@@ -1396,12 +1399,19 @@ list(APPEND SOURCE_FILES net/http_client.cpp net/http_client_curl.cpp net/http_c
   net/net_policy.cpp net/credentials.cpp net/ws_client.cpp)
 list(APPEND INCLUDE_FILES ../../inc/cvc/net/http_client.h ../../inc/cvc/net/net_policy.h
   ../../inc/cvc/net/credentials.h ../../inc/cvc/net/ws_client.h)
+# OAuth 2.0 / OpenID Connect sign-in (docs/ARIADNE.md §10.5): the protocol pieces, the loopback
+# redirect listener (native), the user's browser and a browser page's own URL and sessionStorage,
+# and the Ariadne host that runs the flows for documents.
+list(APPEND SOURCE_FILES net/json_lite.cpp net/oidc.cpp net/loopback_redirect.cpp net/browser.cpp
+  ariadne/oidc_host.cpp)
+list(APPEND INCLUDE_FILES ../../inc/cvc/net/oidc.h ../../inc/cvc/net/loopback_redirect.h
+  ../../inc/cvc/net/browser.h ../../inc/cvc/ariadne/oidc_host.h)
 
 # Ariadne — the context-agnostic UI/scene DSL core (cvc::ariadne). Pure libcvc:
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_rungs.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/requires.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/tf_editor_emit.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_rungs.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/tf_editor_emit.cpp)
 # A document set fetched from a URL, and a runtime's browser page loading one (arigl-web, ari).
 list(APPEND SOURCE_FILES ariadne/doc_fetch.cpp ariadne/web_document.cpp)
 list(APPEND INCLUDE_FILES
@@ -1419,6 +1429,7 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/web_document.h
   ../../inc/cvc/ariadne/host_cli.h
   ../../inc/cvc/ariadne/host_signals.h
+  ../../inc/cvc/ariadne/host_warnings.h
   ../../inc/cvc/ariadne/scene_adapter.h
   ../../inc/cvc/ariadne/bind.h
   ../../inc/cvc/ariadne/loader.h
@@ -1431,6 +1442,8 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/stream_intrinsics.h
   ../../inc/cvc/ariadne/conference/room_intrinsics.h
   ../../inc/cvc/ariadne/conference/room_media_intrinsics.h
+  ../../inc/cvc/ariadne/conference/avatar_panel.h
+  ../../inc/cvc/ariadne/conference/room_avatar.h
   ../../inc/cvc/ariadne/conference/room_scene.h
   ../../inc/cvc/ariadne/conference/room_net.h
   ../../inc/cvc/ariadne/conference/room_rungs.h

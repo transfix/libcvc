@@ -85,8 +85,8 @@ public:
   // where a host feeds its own input (touch gestures, SDL events, trapped OS signals) so the
   // document sees it this same frame.
   void set_input_pump(std::function<void()> pump);
-  // Advance the scene clock by frame()'s dt rather than by wall time, so captured frames are
-  // reproducible. Off by default.
+  // Advance the scene clock, and the UI's frame clock (Runtime::set_frame_clock), by frame()'s dt
+  // rather than by wall time, so captured frames are reproducible. Off by default.
   void set_fixed_clock(bool fixed);
 
   // --- the parts a host composes with ---
@@ -110,6 +110,7 @@ private:
   cvc::ariadne::AppRuntime app_rt_; // owns the neutral bundling; holds scene_.get()
   std::function<void()> inputPump_;
   bool fixedClock_ = false;
+  double fixedSeconds_ = 0.0; // the fixed clock's reading for the next frame
 };
 
 } // namespace ariadne

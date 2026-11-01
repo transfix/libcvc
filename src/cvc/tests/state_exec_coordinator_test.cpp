@@ -1053,6 +1053,55 @@ TEST_F(CoordinatorTest, SerializeProcessInfo) {
   EXPECT_EQ(pi2.parent_pid, -1);
 }
 
+// The priority and lock fields cross the status broadcast too (ps_all() of a remote process),
+// and an entry from a node that sends none reads as unboosted, its floor its priority.
+TEST_F(CoordinatorTest, SerializeProcessInfoPriorityAndLocks) {
+  process_info pi{};
+  pi.pid = 7;
+  pi.priority = 10;
+  pi.effective_priority = -10;
+  pi.priority_floor = 3;
+  pi.locks_held = 2;
+  pi.waiting_on = "lock /a.b";
+  process_info pi2{};
+  ASSERT_TRUE(exec_coordinator::deserialize_process_info(
+      exec_coordinator::serialize_process_info(pi), pi2));
+  EXPECT_EQ(pi2.priority, 10);
+  EXPECT_EQ(pi2.effective_priority, -10);
+  EXPECT_EQ(pi2.priority_floor, 3);
+  EXPECT_EQ(pi2.locks_held, 2u);
+  ASSERT_TRUE(pi2.waiting_on.has_value());
+  EXPECT_EQ(*pi2.waiting_on, "lock /a.b");
+
+  process_info old{};
+  ASSERT_TRUE(exec_coordinator::deserialize_process_info(
+      R"({"pid": 8, "name": "old", "status": "ready", "priority": 10})", old));
+  EXPECT_EQ(old.effective_priority, 10);
+  EXPECT_EQ(old.priority_floor, 10);
+  EXPECT_EQ(old.locks_held, 0u);
+  EXPECT_FALSE(old.waiting_on.has_value());
+}
+
+// A brace inside a string (a name, or a waiting_on such as "msg <channel>") is not an entry's end.
+TEST_F(CoordinatorTest, SerializeProcessListBracesInStrings) {
+  std::vector<process_info> procs(3);
+  procs[0].pid = 1;
+  procs[0].name = "a{b";
+  procs[1].pid = 2;
+  procs[1].waiting_on = "msg chan}x{";
+  procs[2].pid = 3;
+  procs[2].name = "plain \"quoted\" }";
+  std::vector<process_info> back;
+  ASSERT_TRUE(exec_coordinator::deserialize_process_list(
+      exec_coordinator::serialize_process_list(procs), back));
+  ASSERT_EQ(back.size(), 3u);
+  EXPECT_EQ(back[0].name, "a{b");
+  ASSERT_TRUE(back[1].waiting_on.has_value());
+  EXPECT_EQ(*back[1].waiting_on, "msg chan}x{");
+  EXPECT_EQ(back[2].pid, 3);
+  EXPECT_EQ(back[2].name, "plain \"quoted\" }");
+}
+
 TEST_F(CoordinatorTest, SerializeProcessList) {
   std::vector<process_info> procs;
   process_info p1{};
@@ -1351,4 +1400,247 @@ TEST_F(CoordinatorTest, LW08_MetadataMigrateReleases) {
   EXPECT_FALSE(abandoned());
   EXPECT_NO_THROW(sched.locks()->manager().check());
   EXPECT_TRUE(sched.locks()->manager().table().empty());
+}
+
+// ===========================================================================
+// Priorities (docs/STATE_EXEC_LOCKS.md 7.2, 7.4; locks plan L2.6)
+// ===========================================================================
+
+class Priority : public CoordinatorTest {
+protected:
+  void lead() {
+    coord.start();
+    auto victory = state_message::make_text(
+        "__state_exec.cluster-1.election", "{\"type\":\"election-victory\",\"node_id\":\"node-A\"}",
+        MIME_EXEC_ELECTION);
+    coord.on_message(victory);
+  }
+
+  // A process of many steps (builtins only: the coordinator's processes get no environment).
+  int submit_long(execute_options opts = {}) {
+    const submit_result r =
+        coord.submit("(begin (set i 0) (while (< i 100000) (set i (+ i 1))) i)", opts);
+    EXPECT_TRUE(r.accepted) << r.error;
+    return r.pid;
+  }
+
+  int base_of(int pid) { return sched.get_priority(pid).value().base; }
+  int floor_of(int pid) { return sched.get_priority(pid).value().floor; }
+  bool floor_explicit(int pid) { return sched.get_priority(pid).value().floor_explicit; }
+
+  int pid_named(const std::string &name) {
+    for (const process_info &pi : sched.list_processes())
+      if (pi.name == name)
+        return pi.pid;
+    return -1;
+  }
+
+  // A migration request from node-B, as migrate() sends it: process_data is the metadata JSON.
+  // Without `floor_explicit`, as a source older than the flag sends it.
+  void receive_migration(const std::string &name, int priority, int floor,
+                         std::optional<bool> floor_explicit = std::nullopt) {
+    std::string data = "{\\\"name\\\":\\\"" + name +
+                       "\\\",\\\"priority\\\":" + std::to_string(priority) +
+                       ",\\\"priority_floor\\\":" + std::to_string(floor);
+    if (floor_explicit)
+      data +=
+          std::string(",\\\"priority_floor_explicit\\\":") + (*floor_explicit ? "true" : "false");
+    data += "}";
+    auto msg = state_message::make_text(
+        "__state_exec.cluster-1.migrate.node-A",
+        "{\"action\":\"migrate-request\",\"source_node\":\"node-B\",\"source_pid\":42,"
+        "\"process_data\":\"" +
+            data + "\"}",
+        MIME_EXEC_MIGRATE);
+    msg.cluster_id = "cluster-1";
+    msg.origin_node_id = "node-B";
+    coord.on_message(msg);
+  }
+};
+
+// PR-8, the coordinator's control: set_priority from a control message (a bus thread) or from
+// admin_set_priority is posted to the scheduler (post_control) and applied between its steps, as
+// the host's change (unchecked); remotely it is a control message.
+TEST_F(Priority, PR08_CoordinatorSetPriority) {
+  lead();
+  const int pid = submit_long();
+  ASSERT_GE(pid, 0);
+  sched.step();
+
+  // From another thread, as a bus thread delivers it: posted, applied at the next step.
+  std::thread bus_thread([&] {
+    auto msg =
+        state_message::make_text("__state_exec.cluster-1.control.node-A",
+                                 "{\"command\":\"set_priority\",\"pid\":" + std::to_string(pid) +
+                                     ",\"priority\":7,\"from\":\"node-B\"}",
+                                 MIME_EXEC_CONTROL);
+    msg.cluster_id = "cluster-1";
+    msg.origin_node_id = "node-B";
+    coord.on_message(msg);
+  });
+  bus_thread.join();
+  EXPECT_EQ(base_of(pid), 0); // not on the bus thread
+  sched.step();
+  EXPECT_EQ(base_of(pid), 7);
+  EXPECT_EQ(sched.get_process_info(pid)->priority, 7);
+  EXPECT_EQ(floor_of(pid), 0); // a host's change is unchecked, and leaves the floor
+
+  // A control without a priority is ignored.
+  auto bare = state_message::make_text(
+      "__state_exec.cluster-1.control.node-A",
+      "{\"command\":\"set_priority\",\"pid\":" + std::to_string(pid) + ",\"from\":\"node-B\"}",
+      MIME_EXEC_CONTROL);
+  bare.cluster_id = "cluster-1";
+  bare.origin_node_id = "node-B";
+  coord.on_message(bare);
+  sched.step();
+  EXPECT_EQ(base_of(pid), 7);
+
+  // admin_set_priority on this node (empty or its own id): the same post.
+  EXPECT_TRUE(coord.admin_set_priority(pid, "", 3));
+  EXPECT_EQ(base_of(pid), 7);
+  sched.step();
+  EXPECT_EQ(base_of(pid), 3);
+  EXPECT_TRUE(coord.admin_set_priority(pid, "node-A", -2));
+  sched.step();
+  EXPECT_EQ(base_of(pid), -2);
+  // An unknown pid is found, and ignored, when the scheduler applies it.
+  EXPECT_TRUE(coord.admin_set_priority(9999, "", 1));
+  EXPECT_EQ(sched.step(), 1);
+
+  // Another node: a control message naming the command, the pid and the priority.
+  std::vector<state_message> captured;
+  bus.subscribe("__state_exec.cluster-1.control",
+                [&](const state_message &m) { captured.push_back(m); });
+  EXPECT_TRUE(coord.admin_set_priority(pid, "node-B", 5));
+  ASSERT_EQ(captured.size(), 1u);
+  EXPECT_EQ(captured[0].path, "__state_exec.cluster-1.control.node-B");
+  EXPECT_NE(captured[0].string_value.find("\"command\":\"set_priority\""), std::string::npos);
+  EXPECT_NE(captured[0].string_value.find("\"priority\":5"), std::string::npos);
+  EXPECT_EQ(coord.stats().admin_commands, 4u);
+
+  // No scheduler: nothing to post to.
+  exec_coordinator lone;
+  EXPECT_FALSE(lone.admin_set_priority(pid, "", 1));
+}
+
+// PR-8 across two nodes: node-A's admin_set_priority reaches node-B's scheduler over the bus.
+TEST_F(TwoCoordinatorTest, PR08_SetPriorityOnAnotherNode) {
+  coord1.start();
+  coord2.start();
+  const int pid =
+      sched2.execute(std::string("(begin (set i 0) (while (< i 1000) (set i (+ i 1))))"));
+  EXPECT_TRUE(coord1.admin_set_priority(pid, "node-B", 6));
+  EXPECT_EQ(sched2.get_priority(pid)->base, 0);
+  sched2.step();
+  EXPECT_EQ(sched2.get_priority(pid)->base, 6);
+}
+
+// PR-11: the floor goes with the base in the migration metadata, and the target applies its own
+// resource_policy::priority_floor over it: a target with floor 3 that receives base 5 floor 0
+// keeps base 5, at floor 3; base 1 is clamped to 3, and counted (the count is the record:
+// state_exec has no log of its own, gap G-5). Local submits, forwarded submits and the policy's
+// broadcast carry the floor too.
+TEST_F(Priority, PR11_FloorInMetadata) {
+  lead();
+
+  // The source writes the floor beside the base.
+  execute_options src_opts;
+  src_opts.name = "src";
+  src_opts.priority = 4;
+  src_opts.priority_floor = 2;
+  const int src = submit_long(src_opts);
+  EXPECT_EQ(floor_of(src), 2);
+  std::vector<state_message> sent;
+  bus.subscribe("__state_exec.cluster-1.migrate.node-B",
+                [&](const state_message &m) { sent.push_back(m); });
+  ASSERT_TRUE(coord.migrate(src, "node-B").success);
+  ASSERT_EQ(sent.size(), 1u);
+  EXPECT_NE(sent[0].string_value.find("\\\"priority\\\":4"), std::string::npos)
+      << sent[0].string_value;
+  EXPECT_NE(sent[0].string_value.find("\\\"priority_floor\\\":2"), std::string::npos)
+      << sent[0].string_value;
+  EXPECT_NE(sent[0].string_value.find("\\\"priority_floor_explicit\\\":true"), std::string::npos)
+      << sent[0].string_value;
+  // A floor no host gave goes as such: a process that lowered itself from 0 to 6.
+  const int own = submit_long();
+  ASSERT_TRUE(sched.set_priority(own, 6));
+  sent.clear();
+  ASSERT_TRUE(coord.migrate(own, "node-B").success);
+  ASSERT_EQ(sent.size(), 1u);
+  EXPECT_NE(sent[0].string_value.find("\\\"priority_floor\\\":0"), std::string::npos)
+      << sent[0].string_value;
+  EXPECT_NE(sent[0].string_value.find("\\\"priority_floor_explicit\\\":false"), std::string::npos)
+      << sent[0].string_value;
+
+  // The target with no floor of its own keeps whether a host gave the floor: one that none gave
+  // stays one the process may come back to without clamping its spawns under round_robin.
+  receive_migration("own", 6, 0, false);
+  EXPECT_EQ(base_of(pid_named("own")), 6);
+  EXPECT_EQ(floor_of(pid_named("own")), 0);
+  EXPECT_FALSE(floor_explicit(pid_named("own")));
+  receive_migration("hosts", 6, 0, true);
+  EXPECT_TRUE(floor_explicit(pid_named("hosts")));
+  receive_migration("older", 6, 0); // a source older than the flag sent a host's floor
+  EXPECT_TRUE(floor_explicit(pid_named("older")));
+
+  // The target, with a floor of 3.
+  resource_policy policy;
+  policy.priority_floor = 3;
+  coord.set_resource_policy(policy);
+  receive_migration("m5", 5, 0);
+  const int m5 = pid_named("m5");
+  ASSERT_GE(m5, 0);
+  EXPECT_EQ(base_of(m5), 5);
+  EXPECT_EQ(floor_of(m5), 3);
+  EXPECT_EQ(coord.stats().priority_clamped, 0u);
+  receive_migration("m1", 1, 0);
+  const int m1 = pid_named("m1");
+  ASSERT_GE(m1, 0);
+  EXPECT_EQ(base_of(m1), 3);
+  EXPECT_EQ(floor_of(m1), 3);
+  EXPECT_EQ(coord.stats().priority_clamped, 1u);
+  // A stricter floor the process came with stays.
+  receive_migration("m6", 6, 4);
+  EXPECT_EQ(floor_of(pid_named("m6")), 4);
+  EXPECT_EQ(coord.stats().priority_clamped, 1u);
+
+  // A local submit is held to the policy's floor the same way.
+  execute_options better;
+  better.priority = -5;
+  const int clamped = submit_long(better);
+  EXPECT_EQ(base_of(clamped), 3);
+  EXPECT_EQ(floor_of(clamped), 3);
+  EXPECT_EQ(coord.stats().priority_clamped, 2u);
+  const int plain = submit_long();
+  EXPECT_EQ(base_of(plain), 3);
+  EXPECT_EQ(coord.stats().priority_clamped, 3u);
+
+  // A forwarded submit carries the submitter's floor: node-A forwards once node-B leads.
+  auto other = state_message::make_text("__state_exec.cluster-1.election",
+                                        "{\"type\":\"election-victory\",\"node_id\":\"node-B\"}",
+                                        MIME_EXEC_ELECTION);
+  coord.on_message(other);
+  std::vector<state_message> forwarded;
+  bus.subscribe("__state_exec.cluster-1.submit",
+                [&](const state_message &m) { forwarded.push_back(m); });
+  execute_options fwd;
+  fwd.priority = 2;
+  fwd.priority_floor = 1;
+  coord.submit("1", fwd);
+  ASSERT_FALSE(forwarded.empty());
+  EXPECT_NE(forwarded[0].string_value.find("\"priority_floor\":1"), std::string::npos);
+
+  // The policy's floor crosses the bus with the rest of it; a policy without one has none.
+  resource_policy back;
+  ASSERT_TRUE(exec_coordinator::deserialize_resource_policy(
+      exec_coordinator::serialize_resource_policy(policy), back));
+  EXPECT_EQ(back.priority_floor, std::optional<int>(3));
+  resource_policy none;
+  EXPECT_EQ(exec_coordinator::serialize_resource_policy(none).find("priority_floor"),
+            std::string::npos);
+  resource_policy none_back;
+  ASSERT_TRUE(exec_coordinator::deserialize_resource_policy(
+      exec_coordinator::serialize_resource_policy(none), none_back));
+  EXPECT_FALSE(none_back.priority_floor.has_value());
 }

@@ -33,14 +33,15 @@
 #include <cstring>
 #include <cvc/ariadne/conference/room_aoi.h>        // aoi_params, the presets, write_aoi_params
 #include <cvc/ariadne/conference/room_aoi_relay.h>  // room_aoi_relay, relay_room_step
+#include <cvc/ariadne/conference/room_avatar.h>     // seed_avatar_catalog (what avatars may wear)
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_leave (retract a departed peer)
 #include <cvc/ariadne/conference/room_media_intrinsics.h> // room_relay_tick
-#include <cvc/ariadne/conference/room_net.h>   // per-participant + room link-quality stats
-#include <cvc/ariadne/conference/room_rungs.h> // each viewer's video rung, adapted to its link
-#include <cvc/ariadne/conference/room_scene.h> // seed_default_scene (the shared 3D scene)
+#include <cvc/ariadne/conference/room_net.h>        // per-participant + room link-quality stats
+#include <cvc/ariadne/conference/room_rungs.h>      // each viewer's video rung, adapted to its link
+#include <cvc/ariadne/conference/room_scene.h>      // seed_default_scene (the shared 3D scene)
 #include <cvc/ariadne/conference/room_write_gate.h> // bound writes: a client writes only itself
-#include <cvc/ariadne/holon.h>                 // server-authoritative avatar holon (H1)
-#include <cvc/ariadne/holon_sync.h>            // server_pump: intent -> holon -> authoritative pose
+#include <cvc/ariadne/holon.h>                      // server-authoritative avatar holon (H1)
+#include <cvc/ariadne/holon_sync.h> // server_pump: intent -> holon -> authoritative pose
 #include <cvc/ariadne/stream/stream_relay.h>
 #include <cvc/core/app.h>
 #include <cvc/media/media_router.h> // protocol-agnostic media hub (WS + gRPC + future protocols)
@@ -173,6 +174,14 @@ int main(int argc, char **argv) {
   //   --video-floor RUNG         the lowest adaptation goes (default thumb; off allows audio only)
   //   --viewer-kbps-max N        a viewer's budget, kbit/s: above it, it steps down (default 0 =
   //                              none)
+  // Avatars (ARIADNE_CONFERENCE_ROADMAP.md §5k). The relay sets the policy every avatar moves
+  // under, the same for everyone, and publishes it so clients predict under it too:
+  //   --avatar-energy on|off     an energy budget for every avatar's movement: a push of at most
+  //                              840 N, 1.2 kW at most, a 30 kJ reserve refilled at 300 W, and
+  //                              carrying the body along costs 0.2 m g |v| (default on)
+  //   --avatar-empty rest|stop   when an avatar's reserve runs out: rest leaves resting power (it
+  //                              slows to what that sustains); stop holds it until a quarter has
+  //                              refilled (default rest)
   const char *s7_env = std::getenv("CVC_ARISRV_S7");
   const char *aoi_env = std::getenv("CVC_ARISRV_AOI");
   // CVC_ARISRV_S7: 0/off or 1/on (unset: on).
@@ -188,6 +197,7 @@ int main(int argc, char **argv) {
   bool devicePinsFlag = false; // --device-pins was given (even with no path)
   std::string adaptArg = "on", videoMaxArg = "full", videoFloorArg = "thumb", viewerKbpsArg = "0";
   std::string aoiVideoMaxArg = "0", mediaStallArg = "40", admissionHoldArg = "2000";
+  std::string avatarEnergyArg = "on", avatarEmptyArg = "rest";
   for (int i = 1; i < argc; ++i) {
     const char *a = argv[i];
     auto next = [&](const char *d) { return (i + 1 < argc) ? argv[++i] : d; };
@@ -235,6 +245,10 @@ int main(int argc, char **argv) {
       videoFloorArg = next("");
     else if (!std::strcmp(a, "--viewer-kbps-max"))
       viewerKbpsArg = next("");
+    else if (!std::strcmp(a, "--avatar-energy"))
+      avatarEnergyArg = next("on");
+    else if (!std::strcmp(a, "--avatar-empty"))
+      avatarEmptyArg = next("rest");
   }
   if (aoiMode.empty())
     aoiMode = scene == "large" ? "hall" : "conference";
@@ -246,7 +260,9 @@ int main(int argc, char **argv) {
       !check_choice("--bind-writes", bindWritesArg, {"on", "off"}) ||
       !check_choice("--adapt", adaptArg, {"on", "off"}) ||
       !check_choice("--video-max", videoMaxArg, {"full", "half", "quarter", "thumb", "off"}) ||
-      !check_choice("--video-floor", videoFloorArg, {"full", "half", "quarter", "thumb", "off"}))
+      !check_choice("--video-floor", videoFloorArg, {"full", "half", "quarter", "thumb", "off"}) ||
+      !check_choice("--avatar-energy", avatarEnergyArg, {"on", "off"}) ||
+      !check_choice("--avatar-empty", avatarEmptyArg, {"rest", "stop"}))
     return 2;
   long aoiVideoMaxN = 0, mediaStallMs = 40, admissionHoldMs = 2000;
   if (!check_count("--aoi-video-max", aoiVideoMaxArg, aoiVideoMaxN) ||
@@ -529,6 +545,29 @@ int main(int argc, char **argv) {
                 room.c_str(), static_cast<unsigned long long>(rev));
     std::fflush(stdout);
   }
+  // What an avatar may wear (room_avatar.h): the relay supplies the catalog, each participant
+  // picks from it, and every client draws the pick the same way, for itself as for everyone else.
+  if (cvc::ariadne::conference::seed_avatar_catalog(app, room)) {
+    const auto cat = cvc::ariadne::conference::read_avatar_catalog(app, room);
+    std::printf("[arisrv] seeded the avatar catalog for room '%s' (%zu colours, %zu accessories)\n",
+                room.c_str(), cat.colors.size(), cat.accessories.size());
+    std::fflush(stdout);
+  }
+  // And the policy every avatar moves under (§5k): written each start, so a changed flag takes
+  // effect for the clients already in the room as well as for the relay's own holon.
+  {
+    cvc::ariadne::avatar_energy_policy energy;
+    energy.enabled = avatarEnergyArg == "on";
+    energy.empty = avatarEmptyArg == "stop" ? cvc::ariadne::avatar_energy_policy::when_empty::stop
+                                            : cvc::ariadne::avatar_energy_policy::when_empty::rest;
+    cvc::ariadne::conference::write_avatar_policy(app, room, energy);
+    std::printf("[arisrv] avatar energy: %s\n",
+                energy.enabled ? (avatarEmptyArg == "stop"
+                                      ? "on, 840 N, 1.2 kW, 30 kJ refilled at 300 W; empty stops"
+                                      : "on, 840 N, 1.2 kW, 30 kJ refilled at 300 W; empty rests")
+                               : "off (only the 840 N push limit)");
+    std::fflush(stdout);
+  }
   // The AOI's parameters, once, under conf.rooms.<room>.aoi: clients derive their audio gain from
   // them. With --aoi off (and --s7 off) they are written disabled, so every peer plays at full
   // gain -- also on a client that lived through an earlier relay's AOI and kept its leaves.
@@ -537,6 +576,18 @@ int main(int argc, char **argv) {
     published.enabled = aoi_relay != nullptr;
     cvc::ariadne::conference::write_aoi_params(app, room, published);
   }
+  // The room steps on a fixed 50 ms grid (sleep_until, not sleep_for after each step's work), so
+  // pose samples leave evenly spaced: a client shows each peer a fixed delay behind its newest
+  // sample, and every late one is a stall it has to cover. A loop that falls a step behind (a
+  // stall) restarts the grid rather than running the missed steps back to back.
+  auto next_room_step = std::chrono::steady_clock::now();
+  const auto wait_room_step = [&]() {
+    next_room_step += kRoomStep;
+    const auto now = std::chrono::steady_clock::now();
+    if (next_room_step + kRoomStep < now)
+      next_room_step = now;
+    std::this_thread::sleep_until(next_room_step);
+  };
   while (!g_stop.load()) {
 #if CVC_ENABLE_WS
     // Reap ghosts (~every second): a tab that navigated or reloaded away without a clean WebSocket
@@ -576,9 +627,11 @@ int main(int argc, char **argv) {
         std::fflush(stdout);
     }
     cvc::ariadne::conference::room_relay_tick(app, room, relay, relayed);
-    // Advance the authoritative avatar holon and write each participant's pose. The
-    // pose writes are local shard mutations, fanned to clients by the drain below.
+    // Advance the authoritative avatar holon and write each participant's pose, then fan them out
+    // at once: the pose writes are local shard mutations, and the housekeeping below would
+    // otherwise make this step's samples later than the other three's.
     cvc::ariadne::server_pump(server_holon, app, room);
+    room_step();
     // CVC_ARISRV_ROOM_DEBUG=1: every ~5 s, log the room as the server holds it -- each present
     // participant's authoritative position and its proposed intent -- so replication across the
     // gRPC and WebSocket planes can be checked from the relay without a client.
@@ -740,7 +793,6 @@ int main(int argc, char **argv) {
           held_timeouts, shard.journal().size());
       std::fflush(stdout);
     }
-    room_step();
     const std::size_t n = relay.stream_count();
     const bool heartbeat = (n > 0 && ++ticks % 25 == 0); // ~every 5s while gRPC media is live
     if (n != last || heartbeat) {
@@ -780,11 +832,11 @@ int main(int argc, char **argv) {
     // The rest of this pass's room steps (the first ran above): advance the holon and fan its
     // poses between the loop's slower housekeeping.
     for (int i = 1; i < kRoomSubsteps && !g_stop.load(); ++i) {
-      std::this_thread::sleep_for(kRoomStep);
+      wait_room_step();
       cvc::ariadne::server_pump(server_holon, app, room);
       room_step();
     }
-    std::this_thread::sleep_for(kRoomStep);
+    wait_room_step();
   }
 
   std::printf("[arisrv] shutting down (relayed %zu stream(s), %llu frames forwarded)\n",
