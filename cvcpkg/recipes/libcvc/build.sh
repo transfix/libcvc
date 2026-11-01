@@ -45,7 +45,12 @@ CMAKE_ARGS=(
   # CPU build); the sibling `libcvc-cuda` recipe sets CVC_ENABLE_CUDA=ON in its
   # build.matrix env so this same script produces the GPU variant.
   -DCVC_ENABLE_CUDA="${CVC_ENABLE_CUDA:-OFF}"
-  -DCVC_ENABLE_GRPC=OFF
+  # The conference transports: cvc::state over gRPC and WebSocket, which arigl and the arisrv
+  # relay need to join a room. The recipe's runtime deps already carry grpc, protobuf, abseil and
+  # re2 for every platform this builds; with these OFF the SDK shipped without them, so an arigl or
+  # arisrv built against it compiled the conference out.
+  -DCVC_ENABLE_GRPC=ON
+  -DCVC_ENABLE_WS=ON
   # libcvc is a pure C++ SDK: the Python bindings are a SEPARATE `pycvc`
   # recipe that builds bindings/pycvc against the installed libcvc, so a plain
   # libcvc bundle pulls in no Python/numpy/swig/VTK dependency. (Default is
