@@ -1377,8 +1377,7 @@ TEST(LockTable, MutationImplNoteAfterOnly) {
   EXPECT_EQ(normal.inh(2), detail::lock_inf);
 }
 
-// == L3: shared mode, several homes
-// ================================================================
+// == L3: shared mode, several homes ===============================================================
 
 namespace {
 
@@ -1510,8 +1509,7 @@ detail::lock_request request_of(lock_mode m, const std::vector<std::string> &key
 
 } // namespace
 
-// -- L3.1: shared mode, the attach rules, several homes
-// ---------------------------------------------
+// -- L3.1: shared mode, the attach rules, several homes -------------------------------------------
 
 TEST(LockShared, SharedModeConstructs) {
   const std::shared_ptr<lock_manager> m = make_manager(lock_threading::shared);
@@ -1814,8 +1812,7 @@ TEST(LockShared, TableDrivenFromSeveralThreads) {
   t.check();
 }
 
-// -- L3.2: the port, posts, and a home's destruction
-// ------------------------------------------------
+// -- L3.2: the port, posts, and a home's destruction ----------------------------------------------
 
 namespace {
 
@@ -1884,7 +1881,8 @@ race_result post_close_race(std::uint64_t round) {
     threads.emplace_back([&, i] {
       ++ready;
       // Post until this thread has seen the port closed and posted a few times more, so every
-      // round has posts on both sides of the close; bounded in case the close never comes.
+      // round has posts on both sides of the close; bounded in case the close never comes. A
+      // yield after each post keeps three posters from starving the closing thread.
       const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(60);
       int after = 0;
       for (int k = 1; after < 8; ++k) {
@@ -1893,6 +1891,7 @@ race_result post_close_race(std::uint64_t round) {
           ++after;
         if (k % 1024 == 0 && std::chrono::steady_clock::now() > give_up)
           break;
+        std::this_thread::yield();
       }
     });
   while (ready < kPosters)
@@ -2089,4 +2088,115 @@ TEST(LockHomes, PostsRacingACloseNeverLand) {
   // threads racing a home's destruction, every note handed to the port either landed before the
   // close (and was drained, or discarded at the close) or was dropped; none landed after.
   run_post_close_races(200);
+}
+
+// -- L3.3: blocking_sinks (protocol 4.13) ---------------------------------------------------------
+
+namespace {
+
+using sinks_t = std::vector<std::pair<detail::lock_pid, std::int64_t>>;
+
+std::vector<int> sink_pids(const sinks_t &v) {
+  std::vector<int> out;
+  for (const auto &[p, progress] : v)
+    out.push_back(p.pid);
+  return out;
+}
+
+} // namespace
+
+TEST(LockTable, BlockingSinksFollowTheChain) {
+  world w;
+  w.acquire(3, X, {"c"});
+  w.acquire(2, X, {"b"});
+  w.wait(2, X, {"c"}); // 2 -> 3
+  w.wait(1, X, {"b"}); // 1 -> 2
+  // 1's one sink is 3, with 0 for its progress: this home was attached with no cell.
+  EXPECT_EQ(w.t.blocking_sinks(w.pid(1)), (sinks_t{{w.pid(3), 0}}));
+  EXPECT_EQ(sink_pids(w.t.blocking_sinks(w.pid(2))), (std::vector<int>{3}));
+  EXPECT_TRUE(w.t.blocking_sinks(w.pid(3)).empty()); // holds, waits for nothing
+  EXPECT_TRUE(w.t.blocking_sinks(w.pid(9)).empty()); // no record at all
+  // Through a waiter edge too: 4 waits behind 2's hold and 1's earlier ticket on b.
+  w.wait(4, X, {"b"});
+  EXPECT_EQ(sink_pids(w.t.blocking_sinks(w.pid(4))), (std::vector<int>{3}));
+  for (int p : {1, 2, 3, 4})
+    w.end(p, false);
+  EXPECT_TRUE(w.t.empty());
+}
+
+TEST(LockTable, BlockingSinksBothSharedHolders) {
+  world w;
+  w.acquire(1, S, {"k"});
+  w.acquire(2, S, {"k.x"});
+  w.acquire(5, S, {"other"});
+  w.wait(3, X, {"k"});
+  EXPECT_EQ(sink_pids(w.t.blocking_sinks(w.pid(3))), (std::vector<int>{1, 2}));
+  EXPECT_TRUE(w.t.blocking_sinks(w.pid(1)).empty());
+  for (int p : {1, 2, 3, 5})
+    w.end(p, false);
+  EXPECT_TRUE(w.t.empty());
+}
+
+TEST(LockTable, BlockingSinksCarryTheirHomesProgress) {
+  lock_table::options o;
+  o.self_check = true;
+  o.one_home = false;
+  lock_table t(o);
+  const auto cell0 = std::make_shared<std::atomic<std::int64_t>>(100);
+  const auto cell1 = std::make_shared<std::atomic<std::int64_t>>(200);
+  detail::lock_notes n;
+  const detail::home_id h0 = t.attach_home(false, nullptr, cell0, n);
+  const detail::home_id h1 = t.attach_home(false, nullptr, cell1, n);
+  const detail::home_id h2 = t.attach_home(false, nullptr, nullptr, n); // no cell
+  const auto take = [&](detail::lock_pid p, std::vector<std::string> ks) {
+    detail::lock_request r = request_of(X, ks);
+    EXPECT_TRUE(t.try_acquire(p, {"o", 0}, r, {}));
+  };
+  const auto queue = [&](detail::lock_pid p, std::vector<std::string> ks) {
+    detail::lock_request r = request_of(X, ks);
+    EXPECT_EQ(t.block(p, {"o", 0}, r, {}, n).state, ticket_state::queued);
+  };
+  take({h1, 5}, {"a"});
+  take({h2, 6}, {"b"});
+  take({h0, 2}, {"c"});
+  queue({h0, 1}, {"a", "b"});
+  EXPECT_EQ(t.blocking_sinks({h0, 1}), (sinks_t{{{h1, 5}, 200}, {{h2, 6}, 0}}));
+  cell1->store(250); // loaded at each call
+  EXPECT_EQ(t.blocking_sinks({h0, 1}), (sinks_t{{{h1, 5}, 250}, {{h2, 6}, 0}}));
+  // A sink on the waiter's own home carries its own home's cell.
+  queue({h1, 7}, {"c"});
+  EXPECT_EQ(t.blocking_sinks({h1, 7}), (sinks_t{{{h0, 2}, 100}}));
+  t.check();
+  for (detail::home_id h : {h0, h1, h2})
+    t.detach_home(h, n);
+  EXPECT_TRUE(t.empty());
+  t.check();
+}
+
+TEST(LockHomes, BlockingSinksReadTheHomesProgressCell) {
+  for (const lock_threading mode : {lock_threading::single, lock_threading::shared}) {
+    SCOPED_TRACE(mode_name(mode));
+    const std::shared_ptr<lock_manager> mgr = make_manager(mode);
+    auto a = std::make_unique<sched_side>(mgr);
+    auto b = std::make_unique<sched_side>(mgr);
+    process &pa = a->add(1);
+    process &pb = b->add(1);
+    const std::optional<std::uint64_t> ha = a->take(pa, X, {"k"});
+    ASSERT_TRUE(ha);
+    ASSERT_TRUE(b->wait(pb, X, {"k"}));
+    // The scheduler's per-step store (design 8.4) is what B's waiter sees for A's holder.
+    a->home->store_progress(detail::lock_clock::time_point(detail::lock_clock::duration(12345)));
+    EXPECT_EQ(b->home->blocking_sinks(pb.pid), (sinks_t{{{a->home->id(), 1}, 12345}}));
+    a->home->store_progress(detail::lock_clock::time_point(detail::lock_clock::duration(12346)));
+    EXPECT_EQ(b->home->blocking_sinks(pb.pid), (sinks_t{{{a->home->id(), 1}, 12346}}));
+    EXPECT_TRUE(a->home->blocking_sinks(pa.pid).empty());
+    a->release(pa, *ha);
+    EXPECT_TRUE(b->home->blocking_sinks(pb.pid).empty()); // granted: it waits for nothing
+    b->home->drain_port();
+    b->release(pb, sched_side::last_hold(pb));
+    check_all(*mgr, {a.get(), b.get()});
+    a.reset();
+    b.reset();
+    EXPECT_TRUE(mgr->table().empty());
+  }
 }

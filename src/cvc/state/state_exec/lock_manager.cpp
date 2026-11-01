@@ -747,6 +747,36 @@ struct lock_table::impl {
     return out;
   }
 
+  /// 4.13's blocking_sinks(P): every Q in reach({P}) other than P with succ(Q) empty, each with
+  /// its home's progress cell loaded (0 for a home with none). A relaxed load: the cell is a hint
+  /// its home's steps write (design 8.4), and only the shared cell is read, never the home.
+  /// Sorted by pid.
+  std::vector<std::pair<lock_pid, std::int64_t>> blocking_sinks(lock_pid p) {
+    std::vector<std::pair<lock_pid, std::int64_t>> out;
+    if (!q_head)
+      return out; // no queued ticket, no edge
+    std::unordered_set<std::uint64_t> seen{p.packed()};
+    std::vector<lock_pid> layer{p}, next;
+    while (!layer.empty()) {
+      next.clear();
+      for (lock_pid a : layer) {
+        const std::vector<lock_pid> succ = successors(a);
+        if (succ.empty() && a != p) {
+          const home_entry *h = a.home < homes.size() ? &homes[a.home] : nullptr;
+          const bool cell = h && h->attached && h->progress; // a rec's home is attached (4.11)
+          out.emplace_back(a, cell ? h->progress->load(std::memory_order_relaxed) : 0);
+        }
+        for (lock_pid b : succ)
+          if (seen.insert(b.packed()).second)
+            next.push_back(b);
+      }
+      layer.swap(next);
+    }
+    std::sort(out.begin(), out.end(),
+              [](const auto &x, const auto &y) { return x.first < y.first; });
+    return out;
+  }
+
   /// succ(A) from the definition (check()'s I7).
   std::vector<lock_pid> successors_def(const lock_ticket *t) const {
     std::vector<lock_pid> out;
@@ -2333,8 +2363,9 @@ std::string lock_table::canonical() const {
   return impl_->canonical();
 }
 
-std::vector<std::pair<lock_pid, std::int64_t>> lock_table::blocking_sinks(lock_pid) const {
-  return {}; // phase L3.3
+std::vector<std::pair<lock_pid, std::int64_t>> lock_table::blocking_sinks(lock_pid p) const {
+  impl::guard g(*impl_);
+  return impl_->blocking_sinks(p);
 }
 
 namespace {
