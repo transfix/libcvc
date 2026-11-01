@@ -429,9 +429,9 @@ private:
   lock_sched_ops &ops_;
   home_id id_ = 0;
   bool prio_ = false; // protocol 2.1's Home.prio
-  std::shared_ptr<lock_port> port_;                      // Home.port
+  std::shared_ptr<lock_port> port_;                     // Home.port
   std::shared_ptr<std::atomic<std::int64_t>> progress_; // Home.progress (lock_clock ticks)
-  std::vector<lock_post> drained_;                       // drain_port's buffer, reused
+  std::vector<lock_post> drained_;                      // drain_port's buffer, reused
   // The home token (debug builds only; present in every build so the layout never depends on
   // NDEBUG): the thread running this home's actions, and how deeply they nest on it.
   mutable std::atomic<std::thread::id> token_{};
