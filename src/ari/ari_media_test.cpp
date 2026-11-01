@@ -229,28 +229,27 @@ TEST(AriMedia, SnapshotWaitsForAPictureWhoseUrlComesFromAReply) {
       return {200, {"Content-Type: image/png"}, orange};
     return {404, {}, ""};
   });
-  const fs::path doc = dir.write(
-      "late.ari",
-      "meta: {min_libcvc: 3.7.0}\n"
-      "init: (state-set \"p.url\" \"\")\n"
-      "on_tick: |\n"
-      "  (if (= (state-get \"p.url\") \"\")\n"
-      "    (begin (set r (json-parse (get-attr (http-get \"" +
-          srv.url("/user") +
-          "\") \"body\")))\n"
-          "      (state-set \"p.url\" (string.join (list \"" +
-          srv.origin() +
-          "\" (get-attr r \"avatar\")) \"\"))))\n"
-          "windows:\n"
-          "  - window: P\n"
-          "    children:\n"
-          "      - image: av\n"
-          "        bind: p.url\n"
-          "        size: [64, 64]\n"
-          "        status: p.st\n"
-          "        visible_when: (!= (state-get \"p.url\") \"\")\n"
-          "      - text: status\n"
-          "        bind: p.st\n");
+  const fs::path doc =
+      dir.write("late.ari", "meta: {min_libcvc: 3.7.0}\n"
+                            "init: (state-set \"p.url\" \"\")\n"
+                            "on_tick: |\n"
+                            "  (if (= (state-get \"p.url\") \"\")\n"
+                            "    (begin (set r (json-parse (get-attr (http-get \"" +
+                                srv.url("/user") +
+                                "\") \"body\")))\n"
+                                "      (state-set \"p.url\" (string.join (list \"" +
+                                srv.origin() +
+                                "\" (get-attr r \"avatar\")) \"\"))))\n"
+                                "windows:\n"
+                                "  - window: P\n"
+                                "    children:\n"
+                                "      - image: av\n"
+                                "        bind: p.url\n"
+                                "        size: [64, 64]\n"
+                                "        status: p.st\n"
+                                "        visible_when: (!= (state-get \"p.url\") \"\")\n"
+                                "      - text: status\n"
+                                "        bind: p.st\n");
   const AriRun r =
       ari("snapshot --net-allow " + srv.origin() + " --width 60 --ansi " + quoted(doc));
   EXPECT_EQ(r.status, 0) << r.output;

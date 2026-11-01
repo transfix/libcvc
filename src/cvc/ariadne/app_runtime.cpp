@@ -9,6 +9,7 @@
 #include <cvc/ariadne/bind.h>     // resolve_bind / read_or_seed / write
 #include <cvc/ariadne/doc_args.h> // the document's command line
 #include <cvc/ariadne/loader.h>   // load_file / LoadResult / ChannelDecl / sources_changed
+#include <cvc/ariadne/oidc_host.h>
 #include <cvc/ariadne/requires.h> // requires:, free_heads (what a document needs from its host)
 #include <cvc/ariadne/uri.h>      // register_cvc_uri_handler
 #include <cvc/core/app.h>
@@ -18,6 +19,7 @@
 #include <cvc/state/state_exec/exceptions.h>      // dsl_error ((quit code) checks its code)
 #include <cvc/state/state_exec/intrinsics.h>      // intrinsics_context, resolve_channel_key
 #include <cvc/state/state_exec/types.h>           // value_t
+#include <deque>
 #include <filesystem>
 #include <iterator>
 #include <map>
@@ -39,6 +41,7 @@ AppRuntime::AppRuntime(cvc::app &app, std::string prefix, SceneAdapter *scene)
     : app_(app), prefix_(std::move(prefix)), scene_(scene), rt_(app, prefix_),
       verbs_(std::make_shared<Verbs>()) {
   rt_.set_scene_capable(scene_ != nullptr); // the gl.scene capability (requires:, has?)
+  rt_.set_scene_shaders(scene_ && scene_->runs_shaders()); // gl.scene.shaders
 }
 
 AppRuntime::~AppRuntime() {
@@ -54,7 +57,7 @@ bool AppRuntime::idle() const {
   // answers, docs/ARIADNE.md 10.2), which the host's count of running kernels leaves out.
   return app_.exec_async_host().in_flight() == 0 &&
          app_.exec_scheduler().async_calls_in_flight() == 0 &&
-         !app_.exec_scheduler().has_runnable() && !rt_.media_busy();
+         !app_.exec_scheduler().has_runnable() && !rt_.media_busy() && !oidc_busy();
 }
 
 void AppRuntime::settle(const std::function<void()> &step, double max_seconds) {
@@ -349,34 +352,70 @@ std::string describe_requirement(const std::string &name) {
   return name;
 }
 
-// A program for the free-head scan: where it sits, its text, and the functions its scope defines
-// (§6.6), which it may call.
+// A program for the free-head scan: where it sits, its text, the functions its scope defines
+// (§6.6), which it may call, and the names its scope's requires: lists (§7.6), which it may call
+// without a warning.
 struct ScannedProgram {
   std::string where;
   std::string script;
   const FunctionScope *functions = nullptr;
+  const std::set<std::string> *declared = nullptr;
+};
+
+// The requires: of the document and its modules, as the free-head scan walks them.
+struct RequirementScan {
+  const Runtime &rt;
+  std::vector<std::string> missing;         // required and not on this host: the load fails
+  std::vector<std::string> warnings;        // optional and not on this host
+  std::deque<std::set<std::string>> scopes; // each scope's declared names (stable addresses)
+
+  // Check `reqs` (the document's, or the module mounted at `scope`) against the host, and return
+  // the names its programs may call: these and the enclosing scope's.
+  const std::set<std::string> *add(const std::vector<HostRequirement> &reqs,
+                                   const std::set<std::string> *outer, const std::string &scope) {
+    const std::string of = scope.empty() ? std::string() : " (module '" + scope + "')";
+    std::set<std::string> names = outer ? *outer : std::set<std::string>();
+    for (const HostRequirement &req : reqs) {
+      names.insert(req.name);
+      if (rt.has(req.name))
+        continue;
+      if (req.optional)
+        warnings.push_back("optional requirement " + describe_requirement(req.name) + of +
+                           " is not available on this host");
+      else
+        missing.push_back(describe_requirement(req.name) + of);
+    }
+    scopes.push_back(std::move(names));
+    return &scopes.back();
+  }
 };
 
 // Every program in a loaded document, with where it sits, for the free-head scan. A function
 // scope's own bodies are scanned too, once, as "functions:" (a mount's, "functions: of mount ...").
+// A mount's requires: are checked as the walk reaches it, and cover its subtree's programs.
 void collect_programs(const Widget &w, const FunctionScope *functions,
+                      const std::set<std::string> *declared, RequirementScan &reqs,
                       std::vector<ScannedProgram> &out) {
+  if (!w.requirements.empty())
+    declared = reqs.add(w.requirements, declared, w.scope);
   if (w.functions) {
     functions = w.functions.get();
     if (!functions->prelude.empty())
       out.push_back(
           {w.scope.empty() ? std::string("functions:") : "functions: of mount '" + w.scope + "'",
-           functions->prelude, functions});
+           functions->prelude, functions, declared});
     if (!w.init_script.empty())
-      out.push_back({"init: of mount '" + w.scope + "'", w.init_script, functions});
+      out.push_back({"init: of mount '" + w.scope + "'", w.init_script, functions, declared});
+    if (!w.tick_script.empty())
+      out.push_back({"on_tick: of mount '" + w.scope + "'", w.tick_script, functions, declared});
   }
   const std::string where = "widget '" + (w.id.empty() ? w.label : w.id) + "'";
   for (const std::string *p :
        {&w.on, &w.on_click, &w.on_hover, &w.on_drag, &w.on_drag_start, &w.on_drag_end})
     if (!p->empty())
-      out.push_back({where, *p, functions});
+      out.push_back({where, *p, functions, declared});
   for (const Widget &c : w.children)
-    collect_programs(c, functions, out);
+    collect_programs(c, functions, declared, reqs, out);
 }
 
 bool defines(const FunctionScope *functions, const std::string &name) {
@@ -384,30 +423,25 @@ bool defines(const FunctionScope *functions, const std::string &name) {
                                   [&](const FunctionDef &f) { return f.name == name; });
 }
 
-// The load-time preflight. requires: entries the host lacks fail the load (all named in one
-// error) or, when optional, warn. Then every name a program calls that the host does not provide
-// gets one warning: today that program would stop with "undefined symbol" the first time it runs.
-// A name the document already listed in requires: is not repeated.
-void check_host_requirements(const Runtime &rt, LoadResult &lr) {
-  std::set<std::string> declared;
-  std::vector<std::string> missing;
-  for (const HostRequirement &req : lr.requirements) {
-    declared.insert(req.name);
-    if (rt.has(req.name))
-      continue;
-    if (req.optional)
-      lr.warnings.push_back("optional requirement " + describe_requirement(req.name) +
-                            " is not available on this host");
-    else
-      missing.push_back(describe_requirement(req.name));
+// The scene nodes that carry a shader: block, by id: each one needs gl.scene.shaders (§16.3).
+void collect_shaded_nodes(const std::vector<SceneNode> &nodes, std::vector<std::string> &out) {
+  for (const SceneNode &n : nodes) {
+    if (n.shader.present)
+      out.push_back(n.id);
+    collect_shaded_nodes(n.children, out);
   }
-  if (!missing.empty()) {
-    std::string list;
-    for (const std::string &m : missing)
-      list += (list.empty() ? "" : ", ") + m;
-    throw std::runtime_error("this host does not provide what the document requires: " + list);
-  }
+}
 
+// The load-time preflight. requires: entries the host lacks, the document's or a module's, fail
+// the load (all named in one error) or, when optional, warn. A shader: block is an implicit
+// gl.scene.shaders: on a scene that does not run the document's GLSL, the node draws unshaded, so
+// that warns unless the document listed the token. Then every name a program calls that the host
+// does not provide gets one warning: today that program would stop with "undefined symbol" the
+// first time it runs. A name its scope listed in requires: is not repeated: the document's covers
+// every program, a module's those in its mount.
+void check_host_requirements(const Runtime &rt, LoadResult &lr) {
+  RequirementScan reqs{rt};
+  const std::set<std::string> *declared = reqs.add(lr.requirements, nullptr, "");
   std::vector<ScannedProgram> programs;
   const FunctionScope *own = lr.root.functions.get(); // the document's: every top-level lane's
   const std::pair<const char *, const std::string *> lanes[] = {
@@ -418,14 +452,44 @@ void check_host_requirements(const Runtime &rt, LoadResult &lr) {
       {"on_signal:", &lr.on_signal_script}};
   for (const auto &[where, script] : lanes)
     if (!script->empty())
-      programs.push_back({where, *script, own});
+      programs.push_back({where, *script, own, declared});
   for (const auto &[name, script] : lr.tests)
-    programs.push_back({"test '" + name + "'", script, own});
-  collect_programs(lr.root, nullptr, programs);
+    programs.push_back({"test '" + name + "'", script, own, declared});
+  collect_programs(lr.root, nullptr, declared, reqs, programs); // and checks the modules' requires:
+  for (std::string &w : reqs.warnings)
+    lr.warnings.push_back(std::move(w));
+  if (!reqs.missing.empty()) {
+    std::string list;
+    for (const std::string &m : reqs.missing)
+      list += (list.empty() ? "" : ", ") + m;
+    throw std::runtime_error("this host does not provide what the document requires: " + list);
+  }
+
+  // Without a scene adapter the whole scene is ignored, and load says so; only a scene that does
+  // run, without the shaders, needs this.
+  std::vector<std::string> shaded;
+  collect_shaded_nodes(lr.scene.nodes, shaded);
+  if (!shaded.empty() && !declared->count("gl.scene.shaders") && !declared->count("gl.shaders") &&
+      rt.has("gl.scene") && !rt.has("gl.scene.shaders")) {
+    std::string which;
+    for (std::size_t i = 0; i < shaded.size() && i < 3; ++i)
+      which += (i ? ", '" : "'") + shaded[i] + "'";
+    if (shaded.size() > 3)
+      which += " and " + std::to_string(shaded.size() - 3) + " more";
+    const bool one = shaded.size() == 1;
+    lr.warnings.push_back(std::string(one ? "scene node " : "scene nodes ") + which +
+                          (one ? " has a shader: block" : " have shader: blocks") +
+                          ", but this host's scene does not run the document's GLSL "
+                          "(gl.scene.shaders), so " +
+                          (one ? "it draws" : "they draw") +
+                          " unshaded (list gl.scene.shaders in requires: to make this an error, "
+                          "or as optional to accept it)");
+  }
+
   std::map<std::string, std::vector<std::string>> unprovided; // name -> where it is called
-  for (const auto &[where, script, functions] : programs)
+  for (const auto &[where, script, functions, names] : programs)
     for (const std::string &name : free_heads(script))
-      if (!declared.count(name) && !defines(functions, name) && !rt.has_function(name)) {
+      if (!names->count(name) && !defines(functions, name) && !rt.has_function(name)) {
         std::vector<std::string> &at = unprovided[name];
         if (at.empty() || at.back() != where)
           at.push_back(where);
@@ -571,9 +635,16 @@ void AppRuntime::drain() {
     scene_->sync_visibility(app_); // bound visible: -> node .visible
     scene_->tick();                // volren/volslice per-frame service
   }
-  // Keep the read-lane diagnostics for take_warnings(); the Runtime reports each one only once.
-  for (std::string &w : rt_.take_reactive_warnings())
+  collect_warnings();
+}
+
+// Keep the read-lane diagnostics for take_warnings(); the Runtime reports each one only once.
+void AppRuntime::collect_warnings() {
+  for (std::string &w : rt_.take_reactive_warnings()) {
     pendingWarnings_.push_back(std::move(w));
+    if (warningListener_)
+      warningListener_(pendingWarnings_.back());
+  }
 }
 
 bool AppRuntime::should_close() const { return quit_; }
@@ -616,11 +687,14 @@ bool AppRuntime::post_signal(const std::string &signal, const std::string &sourc
 // ── diagnostics ─────────────────────────────────────────────────────────────────────────────────
 
 std::vector<std::string> AppRuntime::take_warnings() {
+  collect_warnings();
   std::vector<std::string> out = std::move(pendingWarnings_);
   pendingWarnings_.clear();
-  for (std::string &w : rt_.take_reactive_warnings())
-    out.push_back(std::move(w));
   return out;
+}
+
+void AppRuntime::set_warning_listener(std::function<void(const std::string &)> listener) {
+  warningListener_ = std::move(listener);
 }
 
 bool AppRuntime::reload_if_changed() {

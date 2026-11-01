@@ -30,6 +30,7 @@
 #include <cvc/nav/material.h>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace cvc {
@@ -1256,6 +1257,274 @@ double multi_start_penalty_dynamic(const float *alphas, const float *beta, const
       }
   }
   return L;
+}
+
+// ── the material rollout on a vehicle simulation (the Jolt rollout) ──────────────
+
+namespace {
+// The four-wheel model must be the controller's (its wheelbase v.L), and the batch one step.
+void validate_plant(const bicycle_material_params &v, const diff::dyn4_params &d, const float *dt,
+                    int B, const char *who) {
+  validate(v);
+  const float wb = d.lf + d.lr;
+  if (!(d.m > 0.0f && d.Iz > 0.0f && d.Ix > 0.0f && d.Iy > 0.0f && d.g > 0.0f && d.lf > 0.0f &&
+        d.lr > 0.0f) ||
+      !(std::fabs(wb - v.L) <= 1e-3f * v.L))
+    throw std::invalid_argument(
+        std::string(who) + ": the four-wheel model (dyn4_params) needs positive mass, inertias, "
+                           "gravity and axle distances, and lf + lr equal to the controller's "
+                           "wheelbase L");
+  for (int b = 1; b < B; ++b)
+    if (dt[b] != dt[0])
+      throw std::invalid_argument(std::string(who) +
+                                  ": every agent of a batch on a simulation takes the same step "
+                                  "(dt)");
+}
+
+// Agent b's own obstacles in the plant: its valid discs, and with hard_walls its patch's hard cells
+// (phi 0), each row's runs merged into boxes. The patch has one cell per unit, centred on o0.
+std::vector<rollout_obstacle> obstacles_of(int b, const float *o0, const float *C, const float *R,
+                                           const std::uint8_t *mask, const float *rollout_patch,
+                                           int N, int Hp, int Wp, bool hard_walls) {
+  std::vector<rollout_obstacle> out;
+  for (int j = 0; j < N; ++j) {
+    const long k = static_cast<long>(b) * N + j;
+    if (!mask[k])
+      continue;
+    rollout_obstacle d;
+    d.type = rollout_obstacle::kind::disc;
+    d.x = C[2 * k];
+    d.y = C[2 * k + 1];
+    d.r = R[k];
+    out.push_back(d);
+  }
+  if (!hard_walls)
+    return out;
+  const long chan = static_cast<long>(Hp) * Wp;
+  const float *phi = rollout_patch + (static_cast<long>(b) * 6 + 1) * chan;
+  const float half_w = 0.5f * (Wp - 1), half_h = 0.5f * (Hp - 1);
+  for (int r = 0; r < Hp; ++r)
+    for (int c = 0; c < Wp;) {
+      if (!(phi[r * Wp + c] <= 0.0f)) {
+        ++c;
+        continue;
+      }
+      int e = c;
+      while (e + 1 < Wp && phi[r * Wp + e + 1] <= 0.0f)
+        ++e;
+      rollout_obstacle q;
+      q.type = rollout_obstacle::kind::box;
+      q.x = o0[2 * b] + 0.5f * (c + e) - half_w;
+      q.y = o0[2 * b + 1] + static_cast<float>(r) - half_h;
+      q.hx = 0.5f * (e - c + 1);
+      q.hy = 0.5f;
+      out.push_back(q);
+      c = e + 1;
+    }
+  return out;
+}
+} // namespace
+
+void integrate_plant_material(rollout_plant &plant, float *o, float *th, float *vx, float *x,
+                              const float *goal, const float *C, const float *R,
+                              const std::uint8_t *mask, const float *alphas, const float *beta,
+                              const float *gamma, const float *lam_soft, const float *lam_hard,
+                              const float *rollout_patch, const float *rr, const float *d_hat,
+                              const float *dt, const int *H, int B, int N, int Hp, int Wp,
+                              const surrogate_material_params &p, const bicycle_material_params &v,
+                              const diff::dyn4_params &dyn4, float mu, bool hard_walls,
+                              float *min_clear, float *cum_risk, float *hard_count,
+                              float *arc_length, material_plant_tape &tape) {
+  validate_plant(v, dyn4, dt, B, "integrate_plant_material");
+  const int max_H = max_horizon(H, B);
+  tape.B = B;
+  tape.max_H = max_H;
+  tape.o0.assign(o, o + 2 * B);
+  tape.S.assign(static_cast<std::size_t>(max_H + 1) * B, diff::dyn4_state<float>{});
+  if (B == 0)
+    return;
+  std::vector<agent> A;
+  A.reserve(static_cast<std::size_t>(B));
+  std::vector<std::vector<rollout_obstacle>> obs(static_cast<std::size_t>(B));
+  for (int b = 0; b < B; ++b) {
+    A.push_back(make_agent(b, tape.o0.data(), goal, C, R, mask, alphas, beta, gamma, lam_soft,
+                           lam_hard, rollout_patch, rr, d_hat, dt, N, Hp, Wp, p, v));
+    obs[static_cast<std::size_t>(b)] =
+        obstacles_of(b, tape.o0.data(), C, R, mask, rollout_patch, N, Hp, Wp, hard_walls);
+  }
+  rollout_batch rb;
+  rb.veh = dyn_limits(A[0]);
+  rb.veh.rr = rr[0];
+  rb.veh.d_hat = d_hat[0];
+  rb.veh.a_max = v.a_max;
+  rb.veh.a_lat_max = v.a_lat_max;
+  rb.veh.k_steer = v.k_steer;
+  rb.model = dyn4;
+  rb.mu = mu;
+  rb.n = B;
+  rb.o = tape.o0.data();
+  rb.psi = th;
+  rb.speed = vx;
+  rb.obstacles = obs.data();
+  rb.reach = v.vmax * dt[0] * static_cast<float>(std::max(1, max_H));
+  plant.reset(rb);
+
+  std::vector<diff::dyn4_state<float>> L(static_cast<std::size_t>(B));
+  std::vector<float> minclr(static_cast<std::size_t>(B), std::numeric_limits<float>::infinity()),
+      cum(B, 0.0f), hard(B, 0.0f), arc(B, 0.0f), dcmd(B), acmd(B);
+  for (int b = 0; b < B; ++b)
+    tape.S[b] = L[b] = plant.state(b);
+  std::vector<rec> recs(static_cast<std::size_t>(B));
+  for (int s = 0; s < max_H; ++s) {
+    for (int b = 0; b < B; ++b) {
+      rec &r = recs[b];
+      r = rec{};
+      r.active = s < H[b];
+      float dmin;
+      int jmin;
+      step_fwd(A[b], state{L[b].x, L[b].y, L[b].psi, L[b].vx}, r, dmin, jmin);
+      minclr[b] = std::min(minclr[b], dmin);
+      dcmd[b] = r.active ? r.delta4 : 0.0f;
+      acmd[b] = r.active ? r.a3 : -A[b].a_max; // past its H: stopping, unread
+    }
+    plant.step(dcmd.data(), acmd.data());
+    for (int b = 0; b < B; ++b) {
+      const rec &r = recs[b];
+      if (r.active) {
+        const diff::dyn4_state<float> n = plant.state(b);
+        const float sdx = n.x - L[b].x, sdy = n.y - L[b].y;
+        const float disp = std::sqrt(sdx * sdx + sdy * sdy);
+        arc[b] += disp;
+        cum[b] += r.risk * disp;
+        hard[b] += r.sdf < 1.0f ? 1.0f : 0.0f;
+        L[b] = n;
+      }
+      tape.S[static_cast<std::size_t>(s + 1) * B + b] = L[b];
+    }
+  }
+  for (int b = 0; b < B; ++b) {
+    const diff::dyn4_state<float> &st = L[b];
+    o[2 * b] = st.x;
+    o[2 * b + 1] = st.y;
+    th[b] = st.psi;
+    vx[b] = st.vx;
+    if (x) {
+      x[4 * b] = st.vy;
+      x[4 * b + 1] = st.r;
+      x[4 * b + 2] = st.delta;
+      x[4 * b + 3] = st.a;
+    }
+    min_clear[b] = minclr[b];
+    cum_risk[b] = cum[b];
+    hard_count[b] = hard[b];
+    arc_length[b] = arc[b];
+  }
+}
+
+void integrate_plant_material_vjp(
+    const material_plant_tape &tape, const float *goal, const float *C, const float *R,
+    const std::uint8_t *mask, const float *alphas, const float *beta, const float *gamma,
+    const float *lam_soft, const float *lam_hard, const float *rollout_patch, const float *rr,
+    const float *d_hat, const float *dt, const int *H, int B, int N, int Hp, int Wp,
+    const surrogate_material_params &p, const bicycle_material_params &v,
+    const diff::dyn4_params &dyn4, float mu, const float *g_oT, const float *g_thT,
+    const float *g_vxT, const float *g_xT, const float *g_min_clear, const float *g_cum_risk,
+    const float *g_arc_length, float *g_alphas, float *g_beta, float *g_gamma, float *g_lam_soft,
+    float *g_lam_hard, int num_threads) {
+  validate_plant(v, dyn4, dt, B, "integrate_plant_material_vjp");
+  const int max_H = max_horizon(H, B);
+  if (tape.B != B || tape.max_H != max_H ||
+      tape.S.size() != static_cast<std::size_t>(max_H + 1) * B)
+    throw std::invalid_argument("integrate_plant_material_vjp: the tape is not this batch's");
+  const diff::flat_ground ground{mu};
+  const auto S = [&](int s, int b) -> const diff::dyn4_state<float> & {
+    return tape.S[static_cast<std::size_t>(s) * B + b];
+  };
+  detail::parallel_for(B, num_threads, [&](int b) {
+    const agent a = make_agent(b, tape.o0.data(), goal, C, R, mask, alphas, beta, gamma, lam_soft,
+                               lam_hard, rollout_patch, rr, d_hat, dt, N, Hp, Wp, p, v);
+    const diff::bike_veh bv = dyn_limits(a);
+    // The step whose start had the least clearance: min_clear's.
+    float minclr = std::numeric_limits<float>::infinity();
+    int s_star = -1;
+    for (int s = 0; s < max_H; ++s) {
+      rec r;
+      r.active = s < H[b];
+      float dmin;
+      int jmin;
+      step_fwd(a, state{S(s, b).x, S(s, b).y, S(s, b).psi, S(s, b).vx}, r, dmin, jmin);
+      if (dmin < minclr) {
+        minclr = dmin;
+        s_star = jmin >= 0 ? s : -1;
+      }
+    }
+
+    diff::dyn4_state<float> g;
+    for (int k = 0; k < diff::dyn4_state<float>::size; ++k)
+      g[k] = 0.0f;
+    if (g_oT) {
+      g.x = g_oT[2 * b];
+      g.y = g_oT[2 * b + 1];
+    }
+    if (g_thT)
+      g.psi = g_thT[b];
+    if (g_vxT)
+      g.vx = g_vxT[b];
+    if (g_xT) {
+      g.vy = g_xT[4 * b];
+      g.r = g_xT[4 * b + 1];
+      g.delta = g_xT[4 * b + 2];
+      g.a = g_xT[4 * b + 3];
+    }
+    const float gmin = g_min_clear ? g_min_clear[b] : 0.0f;
+    const float gcum = g_cum_risk ? g_cum_risk[b] : 0.0f;
+    const float garc = g_arc_length ? g_arc_length[b] : 0.0f;
+    float gbe = 0.0f, gga = 0.0f, gls = 0.0f, glh = 0.0f;
+    float *gal = g_alphas + static_cast<long>(b) * N;
+    for (int s = max_H - 1; s >= 0; --s) {
+      const diff::dyn4_state<float> &s0 = S(s, b);
+      const state st{s0.x, s0.y, s0.psi, s0.vx};
+      rec r;
+      r.active = s < H[b];
+      float dmin;
+      int jmin;
+      step_fwd(a, st, r, dmin, jmin); // rebuild the step's record
+      if (r.active) {
+        // The simulation's displacement in place of the kinematic one (as step_fwd_dyn's).
+        const diff::dyn4_state<float> &s1 = S(s + 1, b);
+        const float sdx = s1.x - s0.x, sdy = s1.y - s0.y;
+        r.disp = std::sqrt(sdx * sdx + sdy * sdy);
+        r.ux = r.disp > 0.0f ? sdx / r.disp : 0.0f;
+        r.uy = r.disp > 0.0f ? sdy / r.disp : 0.0f;
+        // arc += disp, cum += risk * disp: the displacement's share, as step_bwd_dyn's.
+        const float g_disp = garc + gcum * r.risk;
+        diff::dyn4_state<float> g_out = g;
+        g_out.x += g_disp * r.ux;
+        g_out.y += g_disp * r.uy;
+        diff::dyn4_state<float> g_in;
+        float g_dc, g_ac;
+        diff::dyn4_plant_vjp<float>(dyn4, bv, ground, s0, r.delta4, r.a3, g_out, g_in, g_dc, g_ac);
+        g_in.x -= g_disp * r.ux;
+        g_in.y -= g_disp * r.uy;
+        float cox = 0.0f, coy = 0.0f, cth = 0.0f, csp = 0.0f;
+        step_bwd(a, st, r, garc, gcum, cox, coy, cth, csp, gal, gbe, gga, gls, glh, false, g_dc,
+                 g_ac);
+        g_in.x += cox;
+        g_in.y += coy;
+        g_in.psi += cth;
+        g_in.vx += csp;
+        g = g_in;
+      }
+      if (s == s_star) { // min_clear = d of the nearest disc at o_s
+        g.x += gmin * r.ngx;
+        g.y += gmin * r.ngy;
+      }
+    }
+    g_beta[b] += gbe;
+    g_gamma[b] += gga;
+    g_lam_soft[b] += gls;
+    g_lam_hard[b] += glh;
+  });
 }
 
 } // namespace nav

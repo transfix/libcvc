@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cvc/ariadne/avatar_sim.h>
+#include <cvc/ariadne/conference/room_avatar.h>
 #include <cvc/ariadne/conference/room_intrinsics.h>
 #include <cvc/ariadne/conference/room_scene.h>
 #include <cvc/ariadne/holon.h>
@@ -251,8 +252,9 @@ TEST(HolonSyncTest, ClientPumpPredictsSelfAndWalksPeersSmoothly) {
       << "the server moved A per its intent (2 m/s for 2 s), no dropped quanta";
   // A's own prediction stays within a relay interval of the authority.
   EXPECT_NEAR(a.display_pose("A").position.x, server_x, 2.0 * kServerEvery * dt + 1e-9);
-  // B shows A at most one sample interval behind the authority.
-  EXPECT_NEAR(last_peer_x, server_x, 2.0 * kServerEvery * dt + 1e-9);
+  // B shows A one sample interval (and a tick) behind the authority: its playout delay with no
+  // jitter (holon::display_pose).
+  EXPECT_NEAR(last_peer_x, server_x, 2.0 * (kServerEvery + 2) * dt + 1e-9);
   // Both replicas count the server's ticks.
   EXPECT_LE(a.tick() > server.tick() ? a.tick() - server.tick() : server.tick() - a.tick(),
             static_cast<std::uint64_t>(kServerEvery));
@@ -270,6 +272,65 @@ TEST(HolonSyncTest, ClientPumpPredictsSelfAndWalksPeersSmoothly) {
   EXPECT_TRUE(server.has_participant("A"));
 
   for (cvc::state_cluster_shard *s : {&ss, &as, &bs}) {
+    tp.unregister_shard(s);
+    s->detach();
+  }
+}
+
+// The relay's avatar policy reaches every holon through the pumps -- the relay's own and the
+// client's -- and the relay publishes each reserve beside the pose: the client's prediction of its
+// own spending stays with the authority's, and what it shows as stamina is the relay's count.
+TEST(HolonSyncTest, TheEnergyPolicyAndEachReserveReachTheClient) {
+  cvc::app server_app, a_app;
+  cvc::state_transport_inproc tp;
+  cvc::state_cluster_shard ss(server_app, "conf", "server");
+  cvc::state_cluster_shard as(a_app, "conf", "A");
+  for (cvc::state_cluster_shard *s : {&ss, &as}) {
+    s->attach();
+    tp.register_shard(s);
+  }
+  const std::string room = "r";
+  cvc::ariadne::holon_config cfg;
+  cfg.physics = true;
+  holon server(holon_role::server, cfg), a(holon_role::client, cfg);
+  if (!server.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  cvc::ariadne::conference::seed_default_scene(server_app, room); // something to stand on
+  cvc::ariadne::avatar_energy_policy policy;
+  policy.reserve_max = 2000.0; // small, so a walk visibly spends it
+  cvc::ariadne::conference::write_avatar_policy(server_app, room, policy);
+  cvc::ariadne::conference::room_join(a_app, room, "A");
+  tp.pump_all();
+
+  const double dt = server.clock().fixed_dt();
+  constexpr int kServerEvery = 6;
+  cvc::ariadne::server_pump(server, server_app, room, dt);
+  tp.pump_all();
+  cvc::ariadne::client_pump(a, a_app, room, "A", dt);
+  EXPECT_DOUBLE_EQ(server.energy_policy().reserve_max, 2000.0) << "the relay runs the room's";
+  EXPECT_DOUBLE_EQ(a.energy_policy().reserve_max, 2000.0) << "and so does the client";
+  EXPECT_EQ(a.energy_policy_revision(), server.energy_policy_revision());
+
+  cvc::ariadne::propose_intent(a, a_app, room, "A", avatar_intent{vec3{4.0, 0.0, 0.0}});
+  tp.pump_all();
+  for (int frame = 1; frame <= 360; ++frame) { // 3 s
+    if (frame % kServerEvery == 0)
+      cvc::ariadne::server_pump(server, server_app, room, kServerEvery * dt);
+    tp.pump_all();
+    cvc::ariadne::client_pump(a, a_app, room, "A", dt);
+  }
+  cvc::ariadne::avatar_energy se, ae;
+  ASSERT_TRUE(server.energy("A", se));
+  ASSERT_TRUE(a.energy("A", ae));
+  EXPECT_LT(se.reserve, 1500.0) << "the walk spent from the authority's reserve";
+  double published = 0.0;
+  std::uint64_t at_tick = 0;
+  ASSERT_TRUE(cvc::ariadne::conference::read_avatar_reserve(a_app, room, "A", published, at_tick))
+      << "the relay published it";
+  EXPECT_NEAR(published, se.reserve, 0.005 * 2000.0 + 1.0);
+  EXPECT_NEAR(ae.reserve, se.reserve, 60.0) << "the prediction keeps up with the authority";
+
+  for (cvc::state_cluster_shard *s : {&ss, &as}) {
     tp.unregister_shard(s);
     s->detach();
   }

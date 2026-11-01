@@ -21,6 +21,11 @@ meta:
   name: Ariadne terminal tour
   min_libcvc: 3.4.0
 
+requires:
+  - ui.windows
+  - ui.menubar
+  - quit                           # the (quit) verb on_signal: calls; ari and arigl register it
+
 # The document's own command line. ari parses it into the read-only args.<name> before init: runs;
 # the raw strings are in argv, (state-data-get "argv").
 args:
@@ -106,6 +111,8 @@ windows:
         bind: tour.log
       - text: "heavy: over 256 agents"
         visible_when: (> (int (state-get "tour.agents")) 256)
+      # A spinner turns by the host's frame clock, whatever the document's programs are doing.
+      - spinner: simulating
 
   - window: Layout
     id: layout

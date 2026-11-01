@@ -18,6 +18,18 @@ meta:
   author: cvc
   min_libcvc: 3.6.0
 
+requires:
+  - stream_view
+  - stream-open                    # media: capture, mute and play
+  - stream-capture-camera
+  - stream-capture-audio
+  - stream-play-audio
+  - stream-set-muted
+  - room-join                      # the room: join, publish, discover and subscribe
+  - room-publish
+  - room-roster
+  - room-subscribe
+
 menubar:
   - menu: Sim
     items:

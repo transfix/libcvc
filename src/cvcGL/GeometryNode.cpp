@@ -780,19 +780,25 @@ bool isColorBy(const std::string &s) {
 }
 
 // colormap_rgb through a colour table (setColorTable) instead of a colormap: entry i of the
-// table's n sits at lo + i (hi - lo) / (n - 1), linear between entries, clamped at the ends.
-std::vector<unsigned char> tableRgb(const std::vector<double> &values,
-                                    const std::vector<float> &table, double lo, double hi) {
+// table's n sits at lo + i (hi - lo) / (n - 1), linear between entries, clamped at the ends. With
+// an opacity table (n entries too) each value gets a fourth byte, its opacity, sampled the same
+// way; NaN stays opaque.
+std::vector<unsigned char> tableColors(const std::vector<double> &values,
+                                       const std::vector<float> &table,
+                                       const std::vector<float> &alpha, double lo, double hi) {
   const std::size_t n = table.size() / 3;
-  std::vector<unsigned char> rgb(3 * values.size());
+  const std::size_t k = alpha.empty() ? 3 : 4;
+  std::vector<unsigned char> rgb(k * values.size());
   const double span = hi - lo;
   const auto byte = [](double c) {
     return static_cast<unsigned char>(std::lround(255.0 * std::clamp(c, 0.0, 1.0)));
   };
   for (std::size_t i = 0; i < values.size(); ++i) {
-    unsigned char *out = &rgb[3 * i];
+    unsigned char *out = &rgb[k * i];
     if (!std::isfinite(values[i])) {
       out[0] = out[1] = out[2] = 128;
+      if (k == 4)
+        out[3] = 255;
       continue;
     }
     const double t = span > 0.0 ? std::clamp((values[i] - lo) / span, 0.0, 1.0) : 0.5;
@@ -801,6 +807,8 @@ std::vector<unsigned char> tableRgb(const std::vector<double> &values,
     const double f = x - static_cast<double>(a);
     for (int c = 0; c < 3; ++c)
       out[c] = byte((1.0 - f) * table[3 * a + c] + f * table[3 * (a + 1) + c]);
+    if (k == 4)
+      out[3] = byte((1.0 - f) * alpha[a] + f * alpha[a + 1]);
   }
   return rgb;
 }
@@ -850,13 +858,16 @@ void GeometryNode::setColorMap(cvc::colormap_kind cm) {
   });
 }
 
-void GeometryNode::setColorTable(const std::vector<float> &rgb) {
-  runOnMainThread([this, table = rgb]() mutable {
+void GeometryNode::setColorTable(const std::vector<float> &rgb, const std::vector<float> &alpha) {
+  runOnMainThread([this, table = rgb, opacity = alpha]() mutable {
     if (table.size() < 6 || table.size() % 3 != 0)
       table.clear();
-    if (table == m_colorTable)
+    if (opacity.size() != table.size() / 3)
+      opacity.clear();
+    if (table == m_colorTable && opacity == m_alphaTable)
       return;
     m_colorTable = std::move(table);
+    m_alphaTable = std::move(opacity);
     recolor();
   });
 }
@@ -1039,12 +1050,15 @@ const cvc::geometry::curvatures_t *GeometryNode::vertexCurvatures(const cvc::geo
 // SetColorModeToDirectScalars() is ALSO set — the omission that turned red
 // meshes blue. This uchar path is also texture-ready: when UVs land later they
 // go in the dedicated SetTCoords slot and never collide with these colors.
-// geom.colors() are RGB doubles in [0,1] (geometry.h color_t).
+// geom.colors() are RGB doubles in [0,1] (geometry.h color_t). A field through
+// a colour table with opacities is a 4-component (RGBA) array: VTK takes its
+// alpha too, and draws the actor in the translucent pass while any is < 255.
 void GeometryNode::applyVertexColors(const cvc::geometry &geom, bool inPlace) {
   const size_t n = geom.num_points();
   std::vector<double> field;
   bool robust = false;
-  std::vector<unsigned char> rgb;
+  std::vector<unsigned char> rgb; // `comps` bytes a point: RGB, or RGBA through an opacity table
+  std::size_t comps = 3;
   m_scalarActive = resolveScalarField(geom, field, robust);
   m_scalarRangeUsed = {kAutoRange, kAutoRange};
   if (m_scalarActive) {
@@ -1071,10 +1085,16 @@ void GeometryNode::applyVertexColors(const cvc::geometry &geom, bool inPlace) {
     }
     m_scalarRangeUsed = {lo, hi};
     if (!m_useSingleColor) {
-      rgb = m_colorTable.empty() ? cvc::colormap_rgb(field, m_colorMap, lo, hi)
-                                 : tableRgb(field, m_colorTable, lo, hi);
-      if (rgb.size() != 3 * n)
+      if (m_colorTable.empty()) {
+        rgb = cvc::colormap_rgb(field, m_colorMap, lo, hi);
+      } else {
+        rgb = tableColors(field, m_colorTable, m_alphaTable, lo, hi);
+        comps = m_alphaTable.empty() ? 3 : 4;
+      }
+      if (rgb.size() != comps * n) {
         rgb.clear();
+        comps = 3;
+      }
     }
   }
 
@@ -1089,10 +1109,10 @@ void GeometryNode::applyVertexColors(const cvc::geometry &geom, bool inPlace) {
       inPlace ? vtkUnsignedCharArray::SafeDownCast(m_polyData->GetPointData()->GetScalars())
               : nullptr;
   vtkSmartPointer<vtkUnsignedCharArray> fresh;
-  if (!colors || colors->GetNumberOfComponents() != 3 ||
+  if (!colors || static_cast<size_t>(colors->GetNumberOfComponents()) != comps ||
       static_cast<size_t>(colors->GetNumberOfTuples()) != n) {
     fresh = vtkSmartPointer<vtkUnsignedCharArray>::New();
-    fresh->SetNumberOfComponents(3);
+    fresh->SetNumberOfComponents(static_cast<int>(comps));
     fresh->SetNumberOfTuples(n);
     fresh->SetName("Colors");
     colors = fresh;

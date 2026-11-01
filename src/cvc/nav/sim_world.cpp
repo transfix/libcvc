@@ -855,10 +855,13 @@ void sim_world::step(int num_threads) {
     const float dt = cfg_.veh.dt;
     for (int i = 0; i < n_; ++i) {
       if (parked_[i] && !(ov_any_ && ov_on_[i])) {
-        // Parked: brake to a stop within the tick, at most at a_max, then hold.
+        // Parked: brake to a stop within the tick, at most at what the vehicle's brakes achieve
+        // (plant_limits::a_brake; a_max without one), then hold. At a_max (2 m/s^2 on the
+        // Humvee) a vehicle arriving at 7 m/s rolled ~12 m on, well past its reach_tol.
         const float a_max_i = pl_a_max_[i];
+        const float a_b = pl_a_brake_[i] > 0.0f ? pl_a_brake_[i] : a_max_i;
         const float sp0 = pl_start_[i].speed;
-        pl_accel_cmd_[i] = std::min(std::max(-sp0 / dt, -a_max_i), a_max_i);
+        pl_accel_cmd_[i] = std::min(std::max(-sp0 / dt, -a_b), a_max_i);
       }
       pl_accel_cmd_[i] = yield_accel(i, pl_start_[i].speed, pl_accel_cmd_[i]);
       plant_->command(i, pl_steer_cmd_[i], pl_accel_cmd_[i]);

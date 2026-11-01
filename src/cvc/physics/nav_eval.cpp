@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cvc/nav/sim_world.h>
 #include <cvc/physics/nav_eval.h>
@@ -131,12 +132,77 @@ plant_drive_score drive_once(const cvc::nav::coef_mlp &policy, const cvc::nav::t
     log = std::make_unique<plant_log>(w, plant);
     log->start();
   }
+  // Each agent's first arrival (the tick it first came within reach_tol; -1 none), its path up to
+  // it in world units, and where it started.
+  const std::size_t na = static_cast<std::size_t>(o.agents);
+  std::vector<int> arrived(na, -1);
+  std::vector<double> path(na, 0.0);
+  std::vector<float> pos(2 * na), prev(2 * na), start_w(2 * na), goal_w(2 * na);
+  std::vector<std::uint8_t> at_goal(na);
+  long stopped_ticks = 0; // agent-ticks under 0.5 m/s before arriving
+  w.snapshot(start_w.data(), nullptr, nullptr, nullptr, nullptr);
+  w.goals_world(goal_w.data());
+  prev = start_w;
   for (int t = 0; t < o.ticks; ++t) {
     w.step(step_threads);
     if (log)
       log->record();
-    for (int i = 0; i < o.agents; ++i)
+    w.snapshot(pos.data(), nullptr, nullptr, nullptr, at_goal.data());
+    for (int i = 0; i < o.agents; ++i) {
       s.energy_J += plant.energy_step(i);
+      s.building_hits += plant.static_contacts_step(i);
+      if (plant.vehicle_contact_step(i) >= 0)
+        s.vehicle_contact_s += sc.dt;
+      if (arrived[i] < 0) {
+        const double step = std::hypot(pos[2 * i] - prev[2 * i], pos[2 * i + 1] - prev[2 * i + 1]);
+        path[i] += step;
+        if (step * mpw < 0.5 * sc.dt)
+          ++stopped_ticks;
+        if (at_goal[i]) {
+          arrived[i] = t + 1;
+          s.arrival_mps += step * mpw / sc.dt; // summed here, a mean over the arrived below
+        }
+      }
+    }
+    std::swap(prev, pos);
+  }
+  {
+    double metres = 0.0, seconds = 0.0, arrive_m = 0.0, arrive_s = 0.0;
+    int in_time = 0, n_arrived = 0;
+    for (std::size_t i = 0; i < na; ++i) {
+      metres += path[i] * mpw;
+      seconds += (arrived[i] < 0 ? o.ticks : arrived[i]) * static_cast<double>(sc.dt);
+      if (arrived[i] >= 0) {
+        ++n_arrived;
+        arrive_m += path[i] * mpw;
+        arrive_s += arrived[i] * static_cast<double>(sc.dt);
+        // prev holds the last tick's positions (the loop swapped them in).
+        const double end =
+            std::hypot(prev[2 * i] - goal_w[2 * i], prev[2 * i + 1] - goal_w[2 * i + 1]);
+        s.end_m += end * mpw;
+        if (end * sc.scale < o.reach_tol)
+          s.held_frac += 1.0;
+      }
+      if (o.time_budget_mps > 0.0 && arrived[i] >= 0) {
+        const double d0 =
+            std::hypot(goal_w[2 * i] - start_w[2 * i], goal_w[2 * i + 1] - start_w[2 * i + 1]);
+        const double budget_s =
+            std::max(0.0, d0 - o.reach_tol / sc.scale) * mpw / o.time_budget_mps;
+        if (arrived[i] * static_cast<double>(sc.dt) <= budget_s)
+          ++in_time;
+      }
+    }
+    s.speed_mps = seconds > 0.0 ? metres / seconds : 0.0;
+    s.arrive_mps = arrive_s > 0.0 ? arrive_m / arrive_s : 0.0;
+    s.stopped_frac = seconds > 0.0 ? stopped_ticks * static_cast<double>(sc.dt) / seconds : 0.0;
+    s.reach_in_time = static_cast<double>(in_time) / o.agents;
+    if (n_arrived > 0) {
+      s.held_frac /= n_arrived;
+      s.end_m /= n_arrived;
+      s.arrival_mps /= n_arrived;
+    }
+    s.building_hits /= o.agents;
+    s.vehicle_contact_s /= o.agents;
   }
   if (log && o.predict_energy)
     for (const power_run &r : evaluate_power(log->runs(), log->dt(), d, o.power).runs)
@@ -241,12 +307,30 @@ std::vector<plant_drive_score> score_on_plant(const std::vector<cvc::nav::coef_m
       mean[p].energy_J += x.energy_J;
       mean[p].distance_m += x.distance_m;
       mean[p].model_J += x.model_J;
+      mean[p].reach_in_time += x.reach_in_time;
+      mean[p].speed_mps += x.speed_mps;
+      mean[p].arrive_mps += x.arrive_mps;
+      mean[p].stopped_frac += x.stopped_frac;
+      mean[p].held_frac += x.held_frac;
+      mean[p].end_m += x.end_m;
+      mean[p].arrival_mps += x.arrival_mps;
+      mean[p].building_hits += x.building_hits;
+      mean[p].vehicle_contact_s += x.vehicle_contact_s;
       add_ledger(mean[p].ledger, x.ledger, 1.0 / ns);
     }
     mean[p].reach /= ns;
     mean[p].energy_J /= ns;
     mean[p].distance_m /= ns;
     mean[p].model_J /= ns;
+    mean[p].reach_in_time /= ns;
+    mean[p].speed_mps /= ns;
+    mean[p].arrive_mps /= ns;
+    mean[p].stopped_frac /= ns;
+    mean[p].held_frac /= ns;
+    mean[p].end_m /= ns;
+    mean[p].arrival_mps /= ns;
+    mean[p].building_hits /= ns;
+    mean[p].vehicle_contact_s /= ns;
     if (per_seed)
       (*per_seed)[p].assign(r.begin() + static_cast<long>(p * ns),
                             r.begin() + static_cast<long>((p + 1) * ns));

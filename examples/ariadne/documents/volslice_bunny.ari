@@ -10,6 +10,9 @@ meta:
   author: cvc
   min_libcvc: 3.4.0
 
+requires:
+  - gl.scene                       # a scene renderer realizes the scene: block (arigl; not ari)
+
 # Reusable control components (shared with the other bunny demos): the lighting rig + camera
 # navigation, the volume-slice panel and the transfer-function editor. All declarative — no host
 # C++ panels.
