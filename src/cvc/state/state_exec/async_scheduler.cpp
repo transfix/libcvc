@@ -45,6 +45,23 @@ detail::lock_home *async_scheduler::locks() {
   return home_.get();
 }
 
+void async_scheduler::lock_waiting_pids(std::vector<int> &out) const {
+  out.clear();
+  std::size_t left = procs_.lock_waiting_count();
+  if (left == 0)
+    return;
+  // The table counts the waiters (its entry's lock_waiting) but keeps no list of them: the walk
+  // stops once it has found them all.
+  for (const auto &[pid, p] : procs_.all()) {
+    if (!p->table.lock_waiting)
+      continue;
+    out.push_back(pid);
+    if (--left == 0)
+      break;
+  }
+  std::sort(out.begin(), out.end());
+}
+
 bool async_scheduler::lock_ops_impl::park_lock(process &p) {
   if (p.status != process_status::ready && p.status != process_status::running)
     return false;

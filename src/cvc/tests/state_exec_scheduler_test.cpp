@@ -2964,6 +2964,52 @@ TEST(SchedulerLockPort, HasLockHomeOnceLocksOrSetLockManagerMadeIt) {
   EXPECT_TRUE(s1.has_lock_home() && s2.has_lock_home() && a1.has_lock_home() && a2.has_lock_home());
 }
 
+namespace {
+
+// lock_waiting_count() and lock_waiting_pids() before, during and after two waits behind one
+// holder.
+template <class S> void lists_its_lock_waiters() {
+  lock_run_world w;
+  S sched;
+  std::vector<int> pids{-1};
+  EXPECT_EQ(sched.lock_waiting_count(), 0u);
+  sched.lock_waiting_pids(pids);
+  EXPECT_TRUE(pids.empty()); // cleared, though nothing waits
+  const int h = w.submit(sched, R"((with-lock "k" (msg-recv "go")))");
+  const int q1 = w.submit(sched, R"((with-lock "k" 1))");
+  const int q2 = w.submit(sched, R"((with-lock "k" 2))");
+  for (int i = 0; i < 1000 && (sched.lock_waiting_count() < 2 || waiting_on(sched, h) != "msg go");
+       ++i)
+    step_of(sched);
+  ASSERT_EQ(waiting_on(sched, h), "msg go");
+  EXPECT_EQ(sched.lock_waiting_count(), 2u);
+  sched.lock_waiting_pids(pids);
+  EXPECT_EQ(pids, (std::vector<int>{q1, q2}));
+
+  ASSERT_EQ(sched.deliver_to_receivers("go", value_t(std::string("go"))), 1);
+  for (int i = 0; i < 1000 && !is_finished(sched.get_process_info(q2)->status); ++i)
+    step_of(sched);
+  ASSERT_TRUE(is_finished(sched.get_process_info(q1)->status));
+  ASSERT_TRUE(is_finished(sched.get_process_info(q2)->status));
+  EXPECT_EQ(sched.lock_waiting_count(), 0u);
+  sched.lock_waiting_pids(pids);
+  EXPECT_TRUE(pids.empty());
+  EXPECT_TRUE(sched.check_tables());
+}
+
+} // namespace
+
+TEST(SchedulerLockPort, ListsItsLockWaiters) {
+  {
+    SCOPED_TRACE("sync");
+    lists_its_lock_waiters<scheduler>();
+  }
+  {
+    SCOPED_TRACE("async");
+    lists_its_lock_waiters<async_scheduler>();
+  }
+}
+
 TEST(SchedulerLockPort, ARefusedAttachKeepsTheHomeAndManager) {
   {
     SCOPED_TRACE("sync");
