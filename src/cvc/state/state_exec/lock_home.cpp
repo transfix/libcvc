@@ -8,6 +8,7 @@
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/process_table.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
+#include <exception>
 #include <sstream>
 #include <unordered_set>
 
@@ -311,12 +312,22 @@ lock_home::lock_home(std::shared_ptr<lock_manager> mgr, lock_sched_ops &ops,
 void lock_home::drain_port() {
   action a(*this);
   port_->drain(drained_);
+  // Every post taken is applied even when one throws (as deliver does), then the first error is
+  // rethrown.
+  std::exception_ptr first;
   for (std::size_t i = 0; i < drained_.size(); ++i) {
     if (i > 0)
       lock_fuzz_point(lock_fuzz_at::drain_between);
-    apply_post(drained_[i]);
+    try {
+      apply_post(drained_[i]);
+    } catch (...) {
+      if (!first)
+        first = std::current_exception();
+    }
   }
   drained_.clear();
+  if (first)
+    std::rethrow_exception(first);
 }
 
 std::vector<std::pair<lock_pid, std::int64_t>> lock_home::blocking_sinks(int pid) const {
@@ -709,14 +720,19 @@ void lock_home::release_frame(process &p, std::optional<std::uint64_t> hold,
       }
     }
     if (lock_enter && pl.ticket) {
-      // Defensive (protocol 5.4): a lock_enter frame unwound with its ticket still queued.
+      // Defensive (protocol 5.4): a lock_enter frame unwound with its ticket still set, as when
+      // the step that queued it throws. Another home may have granted the ticket meanwhile: the
+      // cancel then finds it granted, and that grant, which never reached the mirror, is given
+      // back as any lock_enter frame's grant is. The notes are delivered once both are done.
       const std::uint64_t tid = *pl.ticket;
       lock_notes notes;
       table_.cancel(pid_of(p), tid, notes);
-      deliver_op(notes);
-      table_.resume(pid_of(p), tid);
+      const lock_outcome out = table_.resume(pid_of(p), tid);
       pl.ticket.reset();
       clear_wait_fields(p);
+      if (out.what == lock_outcome::kind::granted)
+        table_.release(pid_of(p), out.g.hold, notes);
+      deliver_op(notes);
     }
   } catch (...) {
     // noexcept: a release can't fail on a consistent table; check() reports an inconsistent one.
@@ -725,7 +741,10 @@ void lock_home::release_frame(process &p, std::optional<std::uint64_t> hold,
 
 void lock_home::process_ended(process &p, bool abandon) {
   action a(*this);
-  if (!p.locks || (p.locks->holds.empty() && !p.locks->ticket))
+  // A process that never reached the manager has nothing there. One that did is ended there
+  // whatever its mirror says (an end that finds no record changes nothing), so a record the
+  // mirror missed can't outlive the process: a grant whose collect failed after the resume.
+  if (!p.locks)
     return;
   if (!abandon && !p.locks->holds.empty())
     table_.note_leaked_at_exit();
@@ -766,19 +785,29 @@ void lock_home::set_base(process &p) {
 
 void lock_home::deliver(const lock_notes &notes) {
   action a(*this);
+  // Every note is delivered even when one throws (a scheduler's callback, an allocation): the
+  // note after it may be a granted waiter's only wake. The first error is rethrown after.
+  std::exception_ptr first;
   for (const lock_note &n : notes) {
-    if (n.home == id_) {
-      apply_post(n.post); // this home's: at once (4.14)
-    } else if (n.port) {
-      // Another home's: to its port, or dropped when the port is closed (2.3). The counters are
-      // the manager's, bumped outside M.mu.
-      if (const lock_test_hooks *hooks = lock_test_hooks_get(); hooks && hooks->cross_home_note)
-        hooks->cross_home_note(n);
-      std::atomic<std::uint64_t> &count =
-          n.port->post(n.post) ? mgr_->posts_ : mgr_->posts_dropped_;
-      count.fetch_add(1, std::memory_order_relaxed);
+    try {
+      if (n.home == id_) {
+        apply_post(n.post); // this home's: at once (4.14)
+      } else if (n.port) {
+        // Another home's: to its port, or dropped when the port is closed (2.3). The counters
+        // are the manager's, bumped outside M.mu.
+        if (const lock_test_hooks *hooks = lock_test_hooks_get(); hooks && hooks->cross_home_note)
+          hooks->cross_home_note(n);
+        std::atomic<std::uint64_t> &count =
+            n.port->post(n.post) ? mgr_->posts_ : mgr_->posts_dropped_;
+        count.fetch_add(1, std::memory_order_relaxed);
+      }
+    } catch (...) {
+      if (!first)
+        first = std::current_exception();
     }
   }
+  if (first)
+    std::rethrow_exception(first);
 }
 
 void lock_home::deliver_op(const lock_notes &notes) {
