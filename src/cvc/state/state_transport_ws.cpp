@@ -392,6 +392,14 @@ void bound_blocking_writes(tcp::socket &s) {
   (void)s;
 #endif
 }
+
+// Send each message as it is written. The room's pose samples are small writes ~20 times a second,
+// and with Nagle's algorithm on, one waits for the peer to acknowledge the last: a delayed ACK
+// holds it up to 40 ms (200 ms from a Windows peer), so peers' avatars arrive in stutters.
+void send_promptly(tcp::socket &s) {
+  beast::error_code ec;
+  s.set_option(tcp::no_delay(true), ec); // best effort: a socket without it still works
+}
 } // namespace
 #endif
 
@@ -769,6 +777,7 @@ void state_transport_ws::accept_loop() {
     conn->ws = std::make_unique<websocket::stream<tcp::socket>>(std::move(sock));
     conn->ws->read_message_max(kMaxWsMessageBytes);
     bound_blocking_writes(conn->ws->next_layer());
+    send_promptly(conn->ws->next_layer());
     conn->handshake_started_ns.store(steady_ns(), std::memory_order_relaxed);
     {
       std::lock_guard<std::mutex> lk(_conns_mu);
@@ -871,6 +880,7 @@ bool state_transport_ws::connect_to_peer(const std::string &url,
     conn->ws = std::make_unique<websocket::stream<tcp::socket>>(std::move(sock));
     conn->ws->read_message_max(kMaxWsMessageBytes);
     bound_blocking_writes(conn->ws->next_layer());
+    send_promptly(conn->ws->next_layer());
     if (!_auth.outbound_token.empty())
       conn->ws->set_option(websocket::stream_base::decorator(
           [offer = protocol_offer(_auth.outbound_token)](websocket::request_type &req) {

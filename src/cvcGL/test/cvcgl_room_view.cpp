@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cvc/ariadne/avatar_sim.h>
+#include <cvc/ariadne/conference/room_avatar.h>
 #include <cvc/ariadne/conference/room_scene.h>
 #include <cvc/ariadne/holon.h>
 #include <cvc/core/app.h>
@@ -240,6 +241,65 @@ int main() {
     }
     chk(sg.getGraphics("avatar_A") == nullptr && sg.getGraphics("avatar_A_visor") == nullptr,
         "teardown removes the avatar markers");
+  }
+
+  // ── everyone is drawn as they chose, the local avatar included ───────────
+  // Two viewers of the same room: A (whose own avatar it is) and B. Each draws A from the room
+  // tree, so both draw the same thing -- before any choice and after one.
+  {
+    SceneGraph sga(app, "room_looks_a"), sgb(app, "room_looks_b");
+    SceneRenderer viewa(sga, 64, 64, /*offscreen=*/true, "main");
+    SceneRenderer viewb(sgb, 64, 64, /*offscreen=*/true, "main");
+    holon h(holon_role::client);
+    body_state a0, b0;
+    a0.position = vec3{2.0, 0.0, 0.0};
+    b0.position = vec3{0.0, 2.0, 0.0};
+    h.add_participant("A", /*local=*/true, a0);
+    h.add_participant("B", /*local=*/false, b0);
+    const double dt = h.clock().fixed_dt();
+    {
+      room_view as_a(viewa, app, "looks", "A", sga.getStatePrefix());
+      room_view as_b(viewb, app, "looks", "B", sgb.getStatePrefix());
+      const auto frames = [&](int n) {
+        for (int i = 0; i < n; ++i) { // past the views' periodic re-read of the choices
+          h.advance(dt);
+          as_a.update(h, dt);
+          as_b.update(h, dt);
+        }
+      };
+      frames(1);
+      rs::avatar_look la, lb;
+      float auto_a[3];
+      rs::auto_avatar_color("A", auto_a);
+      chk(as_a.avatar_look("A", la) && as_b.avatar_look("A", lb) && la.key == lb.key &&
+              la.body[0] == auto_a[0] && la.body[1] == auto_a[1] && la.body[2] == auto_a[2],
+          "before any choice A looks the same to itself as to B: its automatic colour");
+
+      rs::seed_avatar_catalog(app, "looks");
+      rs::write_avatar_choice(app, "looks", "A", rs::avatar_choice{"crimson", "tophat"});
+      frames(20);
+      chk(as_a.avatar_look("A", la) && la.color_id == "crimson" && la.accessory_id == "tophat" &&
+              la.parts.size() == 2 && sga.getGraphics("avatar_A_part1") != nullptr,
+          "A's choice rebuilds its own marker in crimson with the top hat");
+      chk(as_b.avatar_look("A", lb) && lb.key == la.key && sgb.getGraphics("avatar_A_part1"),
+          "and B draws A exactly so");
+      double body[3], crown[3];
+      chk(node_xyz(sga, "avatar_A", body) && node_xyz(sga, "avatar_A_part1", crown) &&
+              near(crown[0], body[0], 1e-4) && near(crown[1], body[1], 1e-4) &&
+              crown[2] > body[2] + 0.5 * rs::kAvatarHeight,
+          "the hat's crown sits on top of the body");
+
+      rs::write_avatar_choice(app, "looks", "A", rs::avatar_choice{"crimson", "none"});
+      frames(20);
+      chk(sga.getGraphics("avatar_A_part0") == nullptr &&
+              sgb.getGraphics("avatar_A_part0") == nullptr,
+          "taking the hat off removes its parts for everyone");
+      h.remove_participant("B");
+      frames(1);
+      chk(sgb.getGraphics("avatar_B") == nullptr, "a departed avatar's marker goes");
+    }
+    chk(sga.getGraphics("avatar_A") == nullptr && sgb.getGraphics("avatar_A") == nullptr,
+        "teardown removes every marker");
   }
 
   // ── no marker for a peer whose pose is not known yet ──────────────────────

@@ -574,6 +574,7 @@ std::vector<std::string> CredentialStore::names() const {
 
 bool CredentialStore::forget(const std::string &name, std::string *error) {
   std::lock_guard<std::mutex> lock(mutex_);
+  std::erase_if(renewers_, [&](const auto &r) { return r.first == name; });
   const std::size_t dropped =
       std::erase_if(entries_, [&](const Entry &e) { return e.name == name; });
   if (dropped > 0)
@@ -584,7 +585,24 @@ bool CredentialStore::forget(const std::string &name, std::string *error) {
 void CredentialStore::clear(std::string *error) {
   std::lock_guard<std::mutex> lock(mutex_);
   entries_.clear();
+  renewers_.clear();
   save_locked(error);
+}
+
+void CredentialStore::set_renewer(const std::string &name,
+                                  std::shared_ptr<CredentialRenewer> renewer) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::erase_if(renewers_, [&](const auto &r) { return r.first == name; });
+  if (renewer)
+    renewers_.emplace_back(name, std::move(renewer));
+}
+
+std::shared_ptr<CredentialRenewer> CredentialStore::renewer(const std::string &name) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (const auto &r : renewers_)
+    if (r.first == name)
+      return r.second;
+  return nullptr;
 }
 
 bool take_json_string(std::string &body, const std::string &field, std::string &token) {

@@ -184,6 +184,7 @@ public:
                         bool masked) override;
   void focus_next_widget() override;
   bool draw_image(const char *name, float width) override;
+  bool draw_image_fit(const char *name, float box_w, float box_h) override;
   ColorEdit color(const char *label, const float rgb[3]) override;
 
   // Custom widgets (§16.1b), the terminal counterpart of cvc::gl::ImGuiBackend::register_widget: a
@@ -191,7 +192,9 @@ public:
   // it draws with this backend's own primitives (text_line, set_image + draw_image, ...). It gets
   // the bound value and the Widget and returns the edit; the core owns the cvc::state write. An
   // unregistered type is not handled, so the core draws a placeholder. TvisionBackend inherits it.
-  // `stream_view` registers this way (register_stream_view_widget, stream/stream_view.h).
+  // Registering also marks the type known (register_known_widget_type), so a document's
+  // requires: [type] and (has? "type") find it. `stream_view` registers this way
+  // (register_stream_view_widget, stream/stream_view.h).
   using CustomDrawFn = std::function<CustomEdit(const std::string &current, const Widget &w)>;
   void register_widget(std::string custom_type, CustomDrawFn draw);
   CustomEdit custom_widget(const char *type, const std::string &current, const Widget &w) override;
@@ -332,6 +335,12 @@ public:
     // coordinates are screen cells (on the tvision desktop, the desktop's). cvcGL's TerminalScene
     // turns background drags and the wheel into camera moves with it.
     std::function<bool(const TermEvent &)> background_input;
+
+    // A line to show along the bottom of the screen, over the document (wrapped when it is wider
+    // than the screen), asked every frame; "" shows none. ari shows its latest warning there for a
+    // few seconds (LiveWarnings::notice, host_warnings.h). The tvision desktop shows it in its
+    // status line.
+    std::function<std::string()> notice;
   };
 
   // Why run() returned.

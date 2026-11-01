@@ -61,6 +61,8 @@ endif()
 if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
   add_executable(ari_net_test ari_net_test.cpp)
   target_link_libraries(ari_net_test PRIVATE cvc GTest::gtest GTest::gtest_main)
+  # The sign-in tests' document and fake browser (tests/oidc_probe.ari, tests/fake_browser.py).
+  target_compile_definitions(ari_net_test PRIVATE ARI_TESTS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests")
   add_dependencies(ari_net_test ari)
   # As src/cvc-cli/CMakeLists.txt does (its note explains): GoogleTest in this directory's scope,
   # discovery at test time on macOS and with a generous timeout on Windows.
@@ -81,6 +83,16 @@ if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL 
   add_dependencies(ari_test_command_test ari)
   gtest_discover_tests(ari_test_command_test
                        PROPERTIES ENVIRONMENT "ARI_BINARY=$<TARGET_FILE:ari>")
+  # Sign-in in the hosts as a person runs them (tests/oidc_hosts_test.sh): ari (FTXUI, tvision) and
+  # arigl --terminal in tmux, with a device code and through the loopback redirect, and arigl's
+  # window snapshot where there is a display. No output may carry a token. Skipped (77) without
+  # tmux or python3.
+  if(NOT WIN32)
+    add_test(NAME ari_oidc_hosts
+      COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/oidc_hosts_test.sh $<TARGET_FILE:ari>
+              "$<$<TARGET_EXISTS:arigl>:$<TARGET_FILE:arigl>>")
+    set_tests_properties(ari_oidc_hosts PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+  endif()
 endif()
 
 # A spinner turns by the host's frame clock while the document's program is parked: `ari snapshot`
@@ -289,6 +301,7 @@ if(EMSCRIPTEN)
     target_link_options(ari PRIVATE "--embed-file=${CMAKE_CURRENT_SOURCE_DIR}/tests@/tests")
     set_property(TARGET ari APPEND PROPERTY LINK_DEPENDS
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/net_probe.ari"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/oidc_probe.ari"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/l4_frames.ari")
   endif()
   # ari_tvision: the same runner and document on the tvision desktop (movable, overlapping

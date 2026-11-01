@@ -68,6 +68,31 @@ public:
   virtual int cur_height() const { return 0; }
 };
 
+// The size a SRC_W x SRC_H frame takes within a BUDGET_W x BUDGET_H budget: its aspect ratio kept,
+// never upscaled. The budget turns with the frame, its long side bounding the frame's long side, so
+// a portrait phone camera in a 320x240 budget comes out 240x320 (a 9:16 one 180x320), not a
+// postage stamp 180x240; either way it fits the budget's pixel count, so the slab is unchanged. A
+// degenerate source or budget gives the budget.
+inline void fit_frame(int src_w, int src_h, int budget_w, int budget_h, int &out_w, int &out_h) {
+  out_w = budget_w;
+  out_h = budget_h;
+  if (src_w <= 0 || src_h <= 0 || budget_w <= 0 || budget_h <= 0)
+    return;
+  int bw = budget_w, bh = budget_h;
+  if ((src_h > src_w) != (bh > bw)) { // orient the budget like the frame
+    bw = budget_h;
+    bh = budget_w;
+  }
+  double s = static_cast<double>(bw) / src_w;
+  if (static_cast<double>(bh) / src_h < s)
+    s = static_cast<double>(bh) / src_h;
+  if (s > 1.0)
+    s = 1.0;
+  const int w = static_cast<int>(src_w * s + 0.5), h = static_cast<int>(src_h * s + 0.5);
+  out_w = w < 1 ? 1 : (w > bw ? bw : w);
+  out_h = h < 1 ? 1 : (h > bh ? bh : h);
+}
+
 } // namespace stream
 } // namespace ariadne
 } // namespace cvc

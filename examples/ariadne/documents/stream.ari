@@ -13,6 +13,10 @@ meta:
   author: cvc
   min_libcvc: 3.4.0
 
+requires:
+  - gl.scene                       # a scene renderer realizes the scene: block (arigl; not ari)
+  - stream_view                    # the Camera window's widget
+
 menubar:
   - menu: Sim
     items:
