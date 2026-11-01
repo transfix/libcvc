@@ -1,9 +1,10 @@
 # state_exec locks: the protocol
 
-Status: specification, 2026-10-27. Phase L1 (one home, single mode, no inheritance) is built:
-section 4 in `src/cvc/state/state_exec/lock_manager.cpp` (`detail::lock_table`, one member per
-operation), section 5 in `lock_home.cpp`, the lock form in `stackless_evaluator.cpp` and the
-natives in `lock_intrinsics.cpp`; the clause-to-code map is the locks plan's L1 section 2. It is
+Status: specification, 2026-10-27. Phases L1-L3 are built (several homes, single and shared
+mode, inheritance): section 4 in `src/cvc/state/state_exec/lock_manager.cpp`
+(`detail::lock_table`, one member per operation, each under `M.mu` in shared mode), section 5 and
+the port of 2.3 in `lock_home.cpp`, the lock form in `stackless_evaluator.cpp` and the natives in
+`lock_intrinsics.cpp`; the clause-to-code maps are the locks plan's L1, L2 and L3 sections 2. It is
 the exact protocol behind
 [`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) (the design), section 8.6. `td` is
 [`docs/STATE_EXEC_THREADED.md`](STATE_EXEC_THREADED.md); `Qn` are its decisions (td 9.2). A model
