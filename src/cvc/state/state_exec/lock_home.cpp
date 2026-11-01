@@ -8,6 +8,7 @@
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/process_table.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
+#include <exception>
 #include <sstream>
 #include <unordered_set>
 
@@ -311,12 +312,22 @@ lock_home::lock_home(std::shared_ptr<lock_manager> mgr, lock_sched_ops &ops,
 void lock_home::drain_port() {
   action a(*this);
   port_->drain(drained_);
+  // Every post taken is applied even when one throws (as deliver does), then the first error is
+  // rethrown.
+  std::exception_ptr first;
   for (std::size_t i = 0; i < drained_.size(); ++i) {
     if (i > 0)
       lock_fuzz_point(lock_fuzz_at::drain_between);
-    apply_post(drained_[i]);
+    try {
+      apply_post(drained_[i]);
+    } catch (...) {
+      if (!first)
+        first = std::current_exception();
+    }
   }
   drained_.clear();
+  if (first)
+    std::rethrow_exception(first);
 }
 
 std::vector<std::pair<lock_pid, std::int64_t>> lock_home::blocking_sinks(int pid) const {
@@ -774,19 +785,29 @@ void lock_home::set_base(process &p) {
 
 void lock_home::deliver(const lock_notes &notes) {
   action a(*this);
+  // Every note is delivered even when one throws (a scheduler's callback, an allocation): the
+  // note after it may be a granted waiter's only wake. The first error is rethrown after.
+  std::exception_ptr first;
   for (const lock_note &n : notes) {
-    if (n.home == id_) {
-      apply_post(n.post); // this home's: at once (4.14)
-    } else if (n.port) {
-      // Another home's: to its port, or dropped when the port is closed (2.3). The counters are
-      // the manager's, bumped outside M.mu.
-      if (const lock_test_hooks *hooks = lock_test_hooks_get(); hooks && hooks->cross_home_note)
-        hooks->cross_home_note(n);
-      std::atomic<std::uint64_t> &count =
-          n.port->post(n.post) ? mgr_->posts_ : mgr_->posts_dropped_;
-      count.fetch_add(1, std::memory_order_relaxed);
+    try {
+      if (n.home == id_) {
+        apply_post(n.post); // this home's: at once (4.14)
+      } else if (n.port) {
+        // Another home's: to its port, or dropped when the port is closed (2.3). The counters
+        // are the manager's, bumped outside M.mu.
+        if (const lock_test_hooks *hooks = lock_test_hooks_get(); hooks && hooks->cross_home_note)
+          hooks->cross_home_note(n);
+        std::atomic<std::uint64_t> &count =
+            n.port->post(n.post) ? mgr_->posts_ : mgr_->posts_dropped_;
+        count.fetch_add(1, std::memory_order_relaxed);
+      }
+    } catch (...) {
+      if (!first)
+        first = std::current_exception();
     }
   }
+  if (first)
+    std::rethrow_exception(first);
 }
 
 void lock_home::deliver_op(const lock_notes &notes) {

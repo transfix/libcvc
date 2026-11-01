@@ -1398,6 +1398,7 @@ const char *mode_name(lock_threading m) {
 struct fake_ops : detail::lock_sched_ops {
   detail::process_table procs;
   std::vector<int> parks, readies;
+  int throw_ready_for = -1; // ready_lock_waiter throws for this pid (an injected failure)
 
   bool park_lock(process &p) override {
     parks.push_back(p.pid);
@@ -1405,6 +1406,8 @@ struct fake_ops : detail::lock_sched_ops {
     return true;
   }
   void ready_lock_waiter(process &p) override {
+    if (p.pid == throw_ready_for)
+      throw std::runtime_error("ready_lock_waiter: injected");
     readies.push_back(p.pid);
     procs.set_status(p, process_status::ready);
   }
@@ -2493,6 +2496,66 @@ TEST(LockHomes, ProcessEndedEndsARecordTheMirrorMissed) {
     EXPECT_EQ(mgr->stats().leaked_at_exit, 0u); // the mirror held nothing
     mgr->check();
     a.reset();
+    EXPECT_TRUE(mgr->table().empty());
+  }
+}
+
+// -- review fixes: a throw while delivering (R3a) -------------------------------------------------
+
+TEST(LockHomes, DeliverFinishesAfterAThrow) {
+  // An exception applying one note (here from the scheduler's ready_lock_waiter) doesn't drop the
+  // notes after it: a dropped wake would leave its granted waiter parked for ever.
+  for (const lock_threading mode : {lock_threading::single, lock_threading::shared}) {
+    SCOPED_TRACE(mode_name(mode));
+    const std::shared_ptr<lock_manager> mgr = make_manager(mode);
+    auto a = std::make_unique<sched_side>(mgr);
+    process &p0 = a->add(1);
+    process &p1 = a->add(2);
+    process &p2 = a->add(3);
+    const std::optional<std::uint64_t> h0 = a->take(p0, X, {"k1", "k2"});
+    ASSERT_TRUE(h0);
+    ASSERT_TRUE(a->wait(p1, X, {"k1"}));
+    ASSERT_TRUE(a->wait(p2, X, {"k2"}));
+    a->ops.throw_ready_for = 2;
+    a->release(p0, *h0); // two wakes, this home's: p1's apply throws, p2's still runs
+    EXPECT_EQ(a->ops.readies, (std::vector<int>{3}));
+    EXPECT_FALSE(p2.lock_waiting);
+    EXPECT_NE(sched_side::last_hold(p2), 0u);
+    a->ops.throw_ready_for = -1;
+    a->release(p1, sched_side::last_hold(p1));
+    a->release(p2, sched_side::last_hold(p2));
+    EXPECT_EQ(mgr->stats().holds, 0u);
+    a.reset();
+    EXPECT_TRUE(mgr->table().empty());
+  }
+}
+
+TEST(LockHomes, DrainFinishesAfterAThrow) {
+  // drain_port applies every post it took, then rethrows the first error.
+  for (const lock_threading mode : {lock_threading::single, lock_threading::shared}) {
+    SCOPED_TRACE(mode_name(mode));
+    const std::shared_ptr<lock_manager> mgr = make_manager(mode);
+    auto a = std::make_unique<sched_side>(mgr);
+    auto b = std::make_unique<sched_side>(mgr);
+    process &pa = a->add(1);
+    process &pb1 = b->add(2);
+    process &pb2 = b->add(3);
+    const std::optional<std::uint64_t> ha = a->take(pa, X, {"k1", "k2"});
+    ASSERT_TRUE(ha);
+    ASSERT_TRUE(b->wait(pb1, X, {"k1"}));
+    ASSERT_TRUE(b->wait(pb2, X, {"k2"}));
+    a->release(pa, *ha); // two wakes in B's port
+    b->ops.throw_ready_for = 2;
+    EXPECT_THROW(b->home->drain_port(), std::runtime_error);
+    EXPECT_EQ(b->ops.readies, (std::vector<int>{3}));
+    EXPECT_FALSE(pb2.lock_waiting);
+    EXPECT_FALSE(b->home->port_pending());
+    b->ops.throw_ready_for = -1;
+    b->release(pb1, sched_side::last_hold(pb1));
+    b->release(pb2, sched_side::last_hold(pb2));
+    EXPECT_EQ(mgr->stats().holds, 0u);
+    a.reset();
+    b.reset();
     EXPECT_TRUE(mgr->table().empty());
   }
 }
