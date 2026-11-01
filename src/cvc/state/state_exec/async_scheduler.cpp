@@ -45,14 +45,18 @@ detail::lock_home *async_scheduler::locks() {
   return home_.get();
 }
 
-void async_scheduler::keep_lock_expiries() {
-  // As scheduler::keep_lock_expiries: no raw pointer outlives a pass that threw; the lock waiters
-  // it had not yet timed out are flagged for the next wait_expired.
+void async_scheduler::keep_lock_expiries(clock::time_point now) {
+  // As scheduler::keep_lock_expiries: no raw pointer outlives a pass that threw; each lock waiter
+  // it had not yet timed out gets a deadline due `now`, back on the timer heap, so the next timer
+  // pass expires it.
   for (process *p : lock_expired_) {
-    if (is_finished(p->status) || !p->lock_waiting || p->lock_expired_pending)
+    if (p->status != process_status::waiting || !p->lock_waiting || p->lock_deadline)
       continue;
-    p->lock_expired_pending = true;
-    procs_.update(*p);
+    p->lock_deadline = now;
+    try {
+      procs_.update(*p);
+    } catch (...) { // the pass's own exception is the one to report
+    }
   }
   lock_expired_.clear();
 }
@@ -462,7 +466,7 @@ void async_scheduler::drain(bool in_step) {
             home_->wait_expired(lock_expired_);
         }
       } catch (...) {
-        keep_lock_expiries();
+        keep_lock_expiries(now);
         throw;
       }
       lock_expired_.clear();

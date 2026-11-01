@@ -388,8 +388,9 @@ private:
   /// Made by locks() or set_lock_manager(); null until a with-lock needs it.
   std::unique_ptr<detail::lock_home> home_;
   std::vector<process *> lock_expired_; // reused by drain's lock expiries
-  /// An expiry pass threw: flag the lock waiters it had not timed out and empty lock_expired_.
-  void keep_lock_expiries();
+  /// An expiry pass (at `now`) threw: the lock waiters it had not timed out get a deadline due
+  /// `now`, back on the timer heap, and lock_expired_ is emptied.
+  void keep_lock_expiries(std::chrono::steady_clock::time_point now);
 
   /// A steady_clock reading the next step may start from (see scheduler.h).
   using clock = std::chrono::steady_clock;
