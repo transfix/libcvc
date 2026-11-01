@@ -1,12 +1,16 @@
 // ari's testing features end to end (docs/ARIADNE.md "Testing a document"): (quit code) as the
 // exit status of check and snapshot, and `ari test` over passing, failing, quitting, timing-out
-// and networked documents, in its line and TAP forms. The ari binary is run as a launcher would.
+// and networked documents, in its line and TAP forms; and `ari run` reporting a warning while the
+// document runs. The ari binary is run as a launcher would.
 
 #include "../cvc/tests/local_http_server.h"
 #include "ari_run.h"
 
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
+#include <iterator>
 #include <string>
 
 namespace fs = std::filesystem;
@@ -255,3 +259,54 @@ TEST(AriTest, AModulesOnTickRuns) {
   EXPECT_TRUE(has(f, "on_tick: of mount 'ui.docs.")) << f.output;
   EXPECT_TRUE(has(f, ".includes.b' resident")) << f.output;
 }
+
+#ifndef _WIN32
+// docs/ARIADNE.md §2.4: `ari run` reports a warning while the document runs. Its on_tick: fails
+// once (and is restarted); the document never quits. While ari is still running the warning is
+// already in --log FILE and on stderr (a file here, not the terminal), and FTXUI's screen shows it
+// on the bottom line. A SIGTERM ends the run; the exit summary then counts it.
+TEST(AriRun, WarningsWhileTheDocumentRuns) {
+  REQUIRE_ARI();
+  TempDir dir;
+  const fs::path d = dir.write("w.ari", doc("init: (state-set \"n\" 0)\n"
+                                            "on_tick: |\n"
+                                            "  (state-set \"n\" (+ 1 (int (state-get \"n\"))))\n"
+                                            "  (if (= (int (state-get \"n\")) 3)\n"
+                                            "      (raise (ValueError \"boom\")))\n"));
+  const fs::path log = dir.path / "w.log", out = dir.path / "out.txt", err = dir.path / "err.txt";
+  // Start ari, wait (at most 20 s) for the warning in the log, then see that ari is still running.
+  const std::string script =
+      "\"" + std::string(std::getenv("ARI_BINARY")) + "\" run --log " + quoted(log) + " " +
+      quoted(d) + " </dev/null >" + quoted(out) + " 2>" + quoted(err) +
+      " & pid=$!; i=0; until grep -q 'ValueError: boom' " + quoted(log) +
+      " 2>/dev/null || [ $i -ge 400 ]; do i=$((i+1)); sleep 0.05; done; "
+      "kill -0 $pid && echo still-running; kill -TERM $pid; wait $pid; echo \"exit $?\"";
+  const std::string sh = "sh -c '" + [&] {
+    std::string q;
+    for (char c : script)
+      q += c == '\'' ? std::string("'\\''") : std::string(1, c);
+    return q;
+  }() + "'";
+  FILE *fp = popen(sh.c_str(), "r");
+  ASSERT_NE(fp, nullptr);
+  std::string said;
+  char buf[256];
+  while (std::fgets(buf, sizeof buf, fp))
+    said += buf;
+  pclose(fp);
+  const auto slurp = [](const fs::path &p) {
+    std::ifstream in(p, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+  };
+  const std::string logged = slurp(log), stderr_text = slurp(err), screen = slurp(out);
+  EXPECT_NE(said.find("still-running"), std::string::npos) << said << stderr_text;
+  EXPECT_NE(said.find("exit 143"), std::string::npos) << said; // 128 + SIGTERM
+  const std::string line = "ari: warning: on_tick: resident [";
+  EXPECT_NE(logged.find(line), std::string::npos) << logged;
+  EXPECT_NE(logged.find("failed: ValueError: boom"), std::string::npos) << logged;
+  EXPECT_NE(stderr_text.find(line), std::string::npos) << stderr_text;
+  EXPECT_NE(stderr_text.find("ari: 1 warning while the document ran (above)"), std::string::npos)
+      << stderr_text;
+  EXPECT_NE(screen.find(line), std::string::npos); // the notice line
+}
+#endif

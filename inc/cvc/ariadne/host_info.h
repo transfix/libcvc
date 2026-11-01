@@ -42,6 +42,8 @@ struct HostInfo {
   std::vector<std::string> net_allowed; // the origins requests may reach
   std::string credential_store;         // where credentials are kept ("" = in memory)
   std::vector<std::string> env_credentials; // names --credential-env supplied a token for
+  std::vector<std::string> oidc_issuers;    // the issuers sign-in is pinned to (empty: any allowed)
+  bool browser = false;                     // open-url can open a browser here
 
   std::vector<std::pair<std::string, bool>> capabilities; // every token, and whether it holds
   std::vector<std::string> functions;                     // what programs can call, sorted

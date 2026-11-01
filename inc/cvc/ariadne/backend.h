@@ -385,6 +385,16 @@ public:
     return false;
   }
 
+  // Draw image `name` inside a BOX_W x BOX_H px box, its aspect ratio kept ("contain"): scaled to
+  // touch the box on one axis and centred, the spare width or height left as bars. The box keeps
+  // its size whatever shape the image is, so a portrait phone camera in a landscape tile shows
+  // whole and unsquashed, and the tile does not grow. The default draws at the box width (the
+  // image's height then follows its aspect), for a backend that cannot fit; same return.
+  virtual bool draw_image_fit(const char *name, float box_w, float box_h) {
+    (void)box_h;
+    return draw_image(name, box_w);
+  }
+
   // Publish/replace the image draw_image(name, ...) shows. The ImGui and terminal backends store
   // it (the ImGui one uploads it to a texture lazily); the core uses it for raster previews it
   // renders itself (the composed tf_editor). Default: dropped, matching a backend with no image

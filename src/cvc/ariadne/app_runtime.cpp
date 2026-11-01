@@ -9,6 +9,7 @@
 #include <cvc/ariadne/bind.h>     // resolve_bind / read_or_seed / write
 #include <cvc/ariadne/doc_args.h> // the document's command line
 #include <cvc/ariadne/loader.h>   // load_file / LoadResult / ChannelDecl / sources_changed
+#include <cvc/ariadne/oidc_host.h>
 #include <cvc/ariadne/requires.h> // requires:, free_heads (what a document needs from its host)
 #include <cvc/ariadne/uri.h>      // register_cvc_uri_handler
 #include <cvc/core/app.h>
@@ -56,7 +57,7 @@ bool AppRuntime::idle() const {
   // answers, docs/ARIADNE.md 10.2), which the host's count of running kernels leaves out.
   return app_.exec_async_host().in_flight() == 0 &&
          app_.exec_scheduler().async_calls_in_flight() == 0 &&
-         !app_.exec_scheduler().has_runnable();
+         !app_.exec_scheduler().has_runnable() && !oidc_busy();
 }
 
 void AppRuntime::settle(const std::function<void()> &step, double max_seconds) {
@@ -619,9 +620,16 @@ void AppRuntime::drain() {
     scene_->sync_visibility(app_); // bound visible: -> node .visible
     scene_->tick();                // volren/volslice per-frame service
   }
-  // Keep the read-lane diagnostics for take_warnings(); the Runtime reports each one only once.
-  for (std::string &w : rt_.take_reactive_warnings())
+  collect_warnings();
+}
+
+// Keep the read-lane diagnostics for take_warnings(); the Runtime reports each one only once.
+void AppRuntime::collect_warnings() {
+  for (std::string &w : rt_.take_reactive_warnings()) {
     pendingWarnings_.push_back(std::move(w));
+    if (warningListener_)
+      warningListener_(pendingWarnings_.back());
+  }
 }
 
 bool AppRuntime::should_close() const { return quit_; }
@@ -664,11 +672,14 @@ bool AppRuntime::post_signal(const std::string &signal, const std::string &sourc
 // ── diagnostics ─────────────────────────────────────────────────────────────────────────────────
 
 std::vector<std::string> AppRuntime::take_warnings() {
+  collect_warnings();
   std::vector<std::string> out = std::move(pendingWarnings_);
   pendingWarnings_.clear();
-  for (std::string &w : rt_.take_reactive_warnings())
-    out.push_back(std::move(w));
   return out;
+}
+
+void AppRuntime::set_warning_listener(std::function<void(const std::string &)> listener) {
+  warningListener_ = std::move(listener);
 }
 
 bool AppRuntime::reload_if_changed() {

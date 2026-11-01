@@ -39,11 +39,15 @@ EM_JS(int, ariadne_page_origin, (char *buf, int cap), {
   stringToUTF8(s, buf, cap);
   return lengthBytesUTF8(s);
 });
-// The page's hooks: the document is loaded and running; the runtime has stopped (its stderr says
-// why).
+// The page's hooks: the document is loaded and running; a warning while it runs; the runtime has
+// stopped (its stderr says why).
 EM_JS(void, ariadne_tell_page_running, (), {
   if (typeof Module !== 'undefined' && typeof Module.ariadneRunning === 'function')
     Module.ariadneRunning();
+});
+EM_JS(void, ariadne_tell_page_warning, (const char *text), {
+  if (typeof Module !== 'undefined' && typeof Module.ariadneWarning === 'function')
+    Module.ariadneWarning(UTF8ToString(text));
 });
 EM_JS(void, ariadne_tell_page_exit, (int status), {
   if (typeof Module !== 'undefined' && typeof Module.ariadneExit === 'function')
@@ -131,6 +135,14 @@ int stage_url_document(HostOptions &o, const std::string &runtime) {
 void report_running() {
 #ifdef __EMSCRIPTEN__
   ariadne_tell_page_running();
+#endif
+}
+
+void report_warning(const std::string &text) {
+#ifdef __EMSCRIPTEN__
+  ariadne_tell_page_warning(text.c_str());
+#else
+  (void)text;
 #endif
 }
 

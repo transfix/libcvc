@@ -184,6 +184,7 @@ public:
                         bool masked) override;
   void focus_next_widget() override;
   bool draw_image(const char *name, float width) override;
+  bool draw_image_fit(const char *name, float box_w, float box_h) override;
   ColorEdit color(const char *label, const float rgb[3]) override;
 
   // Custom widgets (§16.1b), the terminal counterpart of cvc::gl::ImGuiBackend::register_widget: a
@@ -334,6 +335,12 @@ public:
     // coordinates are screen cells (on the tvision desktop, the desktop's). cvcGL's TerminalScene
     // turns background drags and the wheel into camera moves with it.
     std::function<bool(const TermEvent &)> background_input;
+
+    // A line to show along the bottom of the screen, over the document (wrapped when it is wider
+    // than the screen), asked every frame; "" shows none. ari shows its latest warning there for a
+    // few seconds (LiveWarnings::notice, host_warnings.h). The tvision desktop shows it in its
+    // status line.
+    std::function<std::string()> notice;
   };
 
   // Why run() returned.
