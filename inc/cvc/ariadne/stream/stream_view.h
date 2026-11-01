@@ -46,10 +46,18 @@ class app;
 class image;
 namespace ariadne {
 class FtxuiBackend;
+struct Value;
 namespace stream {
 
 class subscription;
 class stream_channel;
+
+// A stream_view's `size:` prop, either a width (`size: 320`: the height follows each frame's
+// aspect, so a portrait frame stands taller than a landscape one) or a box (`size: [320, 240]`:
+// each frame fitted inside it with its shape kept, Backend::draw_image_fit, so the tile stays one
+// size whatever the camera sends). Sets W, and H for a box (0 for a width), and returns whether it
+// is a box. A missing, malformed or non-positive size is the 256 px width.
+bool stream_view_size(const Value &props, float &w, float &h);
 
 // If `sub` holds a frame NEWER than `last_seq`, alias it into `out`, advance `last_seq` and return
 // true; else leave both alone and return false. A frame that cannot be aliased losslessly (padded

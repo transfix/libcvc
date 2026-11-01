@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <cvc/core/async_lane.h>
+#include <cvc/core/thread_class.h>
 #include <cvc/state/state_exec/async_scheduler.h> // post_message + the pump calls
 #include <cvc/state/state_exec/intrinsics.h> // resolve_channel_key, make_future, park_on_channel
 #include <exception>
@@ -110,6 +111,8 @@ bool async_lane::pop_front(job &out) {
 }
 
 void async_lane::worker_loop() {
+  // A process class set before this worker started (Linux, where the class is per thread).
+  detail::apply_process_class_here();
   name_this_thread(name_);
   running_lane_scope scope(this);
   for (;;) {

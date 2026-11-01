@@ -23,12 +23,14 @@ Roadmap: [`roadmap/NAV-VEHICLE-PHYSICS-ROADMAP.md`](roadmap/NAV-VEHICLE-PHYSICS-
 | `cvc/gl/physics_scene_binding.h` (cvcGL) | `physics_scene_binding`: a world's bodies drawn in a scene graph |
 | `cvc/physics/world_geometry.h` | `add_world_geometry`: a `cvc::world::world_geometry`'s static bodies and materials |
 | `cvc/physics/nav_plant.h` | `nav_plant`: a world's vehicles as `cvc::nav`'s plant (`cvc/nav/vehicle_plant.h`) |
+| `cvc/physics/jolt_rollout.h` | `jolt_rollout`: the Jolt vehicle as `cvc::nav`'s training rollout (`rollout_kind::jolt`, `cvc/nav/rollout_plant.h`; NAV_TRAINING.md, "Training on Jolt") |
 
 The physics headers include only the standard library, except:
 
 - `world_binding.h`, which needs `cvc::app`;
 - `world_geometry.h`, which reads `cvc::world`;
-- `nav_plant.h`, which implements `cvc::nav`'s plant interface.
+- `nav_plant.h`, which implements `cvc::nav`'s plant interface;
+- `jolt_rollout.h`, which implements `cvc::nav`'s training rollout interface.
 
 No header names an engine. `cvc::nav` never includes `cvc::physics`; a configure-time check in
 `src/cvc/CMakeLists.txt` enforces it.
@@ -620,6 +622,20 @@ boxes' contacts, and say in `plant_sample::measured` what their models lack (the
 load transfer, roll rate and wheels off the ground; both plants' contacts without a world). Those
 items are not applicable, and `cvc/nav/plant_ledger.h` lists every item with what it needs, so
 the JSON (null), `publish_nav_stats` ("n/a") and a screen show the whole ledger on any plant.
+
+**The ledger a tick** (`nav_plant::ledger_step(i)`): agent i's `vehicle_energy` over the last
+tick, `energy_lines` (vehicle.h) of its ledger at the tick's start and end. Each line (supplied
+through residual, and engine, regen, source, fuel, distance) is the difference; the levels
+(kinetic, potential, spring), the charge, the fuel left and the power are the end's. So a tick's
+lines balance as the ledger does, and they sum to it. `energy_step(i)` is what the source paid of
+them. The Jolt rollout calibrates the four-wheel model's books against these lines.
+
+**Replay** (`nav_plant::save()` / `restore()`). The run's whole state: `world::save` and each
+agent's last command, energy so far and over the last tick, contacts, sample and drift, and the
+drift summary. A run restored to it continues bit for bit: the states, samples and ledger lines
+repeat exactly. `restore()` needs the same plant attached to the same agents, on a world that
+`world::restore` accepts. Otherwise it throws and changes nothing. The cost (`advance_us`) and the
+settings are not part of it, as a world's materials are not part of `world::save`.
 
 Gates (`nav_plant_test`, Windows MSVC, the Humvee in nav's trained metric, 1 unit = 20 m):
 

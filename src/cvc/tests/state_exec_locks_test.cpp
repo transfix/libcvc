@@ -3186,7 +3186,7 @@ struct home_world {
   std::deque<value_t> request_keys;
 
   explicit home_world(std::size_t cache_capacity = 0) : hooks(cache_capacity) {
-    home = std::make_unique<detail::lock_home>(mgr, sched);
+    home = std::make_unique<detail::lock_home>(mgr, sched, scheduling_policy::round_robin);
   }
 
   process &add(int pid) {

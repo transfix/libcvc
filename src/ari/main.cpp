@@ -38,6 +38,11 @@
 // decides for itself; three Ctrl-Cs within two seconds always quit. Signals sent to the process
 // (SIGTERM, SIGHUP, SIGINT, SIGQUIT, SIGUSR1/2) reach on_signal: too, with source "os"; one the
 // document doesn't handle ends the run with exit status 128 + the signal number.
+// Warnings while a document runs (a program that failed, an on_tick: or on_key: resident that
+// stopped, was restarted or given up) show at once: on the bottom line of run's screen for a few
+// seconds, appended to --log FILE (or $ARIADNE_LOG), and on stderr when stderr is not the terminal
+// (2>file, a pipe, the browser page's console). At exit run lists them all on stderr, or counts
+// them when they already went there.
 // snapshot drains N frames (default 1) and prints the last one as text — for CI, logs, and docs.
 // check loads the document and prints its warnings; it exits non-zero when the load fails.
 // test runs each document headless, with no terminal, until it calls (quit code), its tests:
@@ -57,7 +62,7 @@
 // document's programs get the http verbs, every request checked against the allowed origins, and
 // the host keeps any credential they sign in with, out of the document's reach. With it on,
 // snapshot waits after its frames until the document is idle, its requests back and its programs
-// done (AppRuntime::settle, at most 10 s).
+// done (AppRuntime::settle, at most --settle seconds, 10 by default).
 
 #include <algorithm>
 #include <cstdio>
@@ -75,11 +80,13 @@
 #include <cvc/media/playback/audio_output.h> // ari-media: sound through SDL3's audio subsystem
 #endif
 #include <cvc/ariadne/host_signals.h>
+#include <cvc/ariadne/host_warnings.h>
 #include <cvc/ariadne/stream/stream_view.h>
 #include <cvc/ariadne/tvision_backend.h>
 #include <cvc/ariadne/web_document.h> // the browser page's document, named by URL
 #include <cvc/core/app.h>
 #include <cvc/image/image.h>
+#include <cvc/net/browser.h>
 #include <exception>
 #include <memory>
 #include <string>
@@ -120,12 +127,24 @@ int usage(int code) {
                "with what failed and in which program; --tap prints TAP. Exits 1 if any failed.\n"
                "run, snapshot and check exit with the code a document passed to (quit code).\n"
                "\n"
+               "Warnings while a document runs (a program that failed, an on_tick: or on_key:\n"
+               "program that stopped, was restarted or given up) show at once: on run's bottom\n"
+               "line for a few seconds, in --log FILE (or $ARIADNE_LOG) with the time, and on\n"
+               "stderr when it is not the terminal (ari run doc.ari 2>warnings.txt). run lists\n"
+               "them all on stderr when it exits.\n"
+               "\n"
                "The network is off unless --net, --net-allow, --net-policy, --credential-store\n"
                "or --credential-env turns it on, for run, snapshot and check alike and with\n"
                "either backend. Then the document may reach only the origins allowed, and\n"
                "sign-in tokens stay with ari: a request names one (auth:, a credential value),\n"
                "it never sees it. With it on, snapshot waits after its frames until the\n"
-               "document's requests are back and its programs idle (at most 10 s).\n",
+               "document's requests are back and its programs idle (at most --settle S\n"
+               "seconds, 10 by default).\n"
+               "\n"
+               "A document signs in with an OpenID Connect provider by itself (oidc-sign-in):\n"
+               "through the system browser where there is one, else with a code to enter on\n"
+               "another device (over SSH). --oidc-issuer and --oidc-client pin the provider\n"
+               "and the client; the tokens stay with ari like any other credential.\n",
                cvc::ariadne::host_flags_help().c_str());
   return code;
 }
@@ -331,7 +350,7 @@ TestOutcome run_test_document(const cvc::ariadne::HostOptions &o, const std::str
   }
   // As snapshot: what the document asked for comes back first, and its pictures.
   if (by_frames && (o.net.enabled || rt.runtime().media_stale())) {
-    rt.settle([&] { rt.drain(); });
+    rt.settle([&] { rt.drain(); }, o.settle > 0 ? o.settle : ari::kDefaultSettleSeconds);
     for (const std::string &w : rt.take_warnings())
       fail(trim_ari(w));
   }
@@ -501,6 +520,13 @@ int main(int argc, char **argv) {
   if (cmd == "run" && !tvision)
     probe_terminal(*backend, o); // before the load, so requires: / has? see the terminal
 
+  // Warnings as they happen (host_warnings.h). The load's are printed below, before any screen.
+  ari::LiveWarnings live("ari", o.log, /*stderr_when_not_a_terminal=*/true);
+  if (!live.error().empty()) {
+    std::fprintf(stderr, "ari: %s\n", live.error().c_str());
+    return 2;
+  }
+
   std::vector<std::string> warnings;
   try {
     warnings = rt.load(o.doc);
@@ -519,8 +545,10 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "ari: %s\n", e.what());
     return 1;
   }
-  for (const std::string &w : warnings)
+  for (const std::string &w : warnings) {
     std::fprintf(stderr, "ari: warning: %s\n", w.c_str());
+    live.log(w);
+  }
   if (!rt.has_args_block()) {
     const std::string note = ari::misplaced_flag_note("ari", o.doc_args);
     if (!note.empty())
@@ -545,7 +573,11 @@ int main(int argc, char **argv) {
     }
     std::string frame;
     const int width = std::max(10, o.width ? o.width : 100);
+    // The frames are drawn back to back, so the frame clock (a spinner's) reads frame / fps, as if
+    // `ari run` had drawn them: reproducible, and it moves from one frame to the next.
+    const double fps = o.fps > 0 ? o.fps : 20.0;
     for (int f = 0; f < std::max(1, o.frames); ++f) {
+      rt.runtime().set_frame_clock(f / fps);
       rt.drain();
       frame = backend->render_to_string(rt.runtime(), width, o.height, o.ansi);
       if (rt.should_close()) // (quit code): the frame it quit on
@@ -553,20 +585,22 @@ int main(int argc, char **argv) {
     }
     // The frame shows what the requests brought back, and the pictures it draws.
     if ((o.net.enabled || rt.runtime().media_stale()) && !rt.should_close())
-      rt.settle_and_render([&] { rt.drain(); },
-                           [&] { frame = backend->render_to_string(rt.runtime(), width, o.height,
-                                                                   o.ansi); });
+      rt.settle_and_render(
+          [&] { rt.drain(); },
+          [&] { frame = backend->render_to_string(rt.runtime(), width, o.height, o.ansi); },
+          o.settle > 0 ? o.settle : ari::kDefaultSettleSeconds);
     if (pixels) { // Sixel draws at screen positions, so the frame starts at the top-left
       const int rows = static_cast<int>(std::count(frame.begin(), frame.end(), '\n')) + 1;
       frame = "\x1b[H\x1b[2J" + frame + backend->take_graphics() + "\x1b[" +
               std::to_string(rows + 1) + ";1H";
     }
     std::fputs(frame.c_str(), stdout);
-    for (const std::string &w : rt.take_warnings()) // what the programs complained about
-      std::fprintf(stderr, "ari: warning: %s\n", w.c_str());
+    std::fflush(stdout);
+    live.summarize(rt.take_warnings()); // what the programs complained about
     return rt.exit_code();
   }
 
+  rt.set_warning_listener([&live](const std::string &w) { live(w); });
   ari::FtxuiBackend::RunOptions run;
   if (o.fps > 0)
     run.fps = o.fps;
@@ -574,15 +608,18 @@ int main(int argc, char **argv) {
   run.on_start = ari::install_signal_traps;
   run.on_stop = ari::restore_signal_traps;
   run.take_signal = ari::take_trapped_signal;
+  run.notice = [&live] { return live.notice(); }; // the latest warning, for a few seconds
+  // The screen is the document's: a URL the host cannot open in a browser (open-url, a sign-in)
+  // is the document's to show, not printed over the frame.
+  cvc::net::set_url_notice([](const std::string &) {});
   ari::FtxuiBackend::RunExit how;
   if (tvision) {
     how = static_cast<ari::TvisionBackend &>(*backend).run(rt, run);
   } else {
     how = backend->run(rt, run);
   }
-  // The fullscreen screen is gone; anything the read lane complained about is worth seeing now.
-  for (const std::string &w : rt.take_warnings())
-    std::fprintf(stderr, "ari: warning: %s\n", w.c_str());
+  // The fullscreen screen is gone: every warning of the run, or how many went to stderr live.
+  live.summarize(rt.take_warnings());
   if (how.from_os) // an OS signal the document didn't handle: report it the way a shell expects
     return 128 + ari::signal_number(how.signal);
   return rt.exit_code();
