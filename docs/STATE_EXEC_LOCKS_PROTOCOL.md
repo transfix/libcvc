@@ -668,6 +668,10 @@ query(prefix, viewer) -> { held, waiting }:    # lock-query, design 4.1; viewer 
 blocking_sinks(P) -> set of (Pid, time):     # pycvc's idle test (design 9.2), L3
     with M: return { (Q, M.homes[Q.home].progress.load()) :
                      Q in reach({P}), Q != P, succ(Q) == {} }
+
+blocking_sinks(S) -> set of (Pid, time):     # every lock waiter of a home at once
+    with M: return { (Q, M.homes[Q.home].progress.load()) :
+                     Q in reach(S), Q not in S, succ(Q) == {} }
 ```
 
 `query(prefix, viewer)` takes the viewer's home with its owner, copies under `M.mu` and formats
@@ -680,7 +684,10 @@ it deletes the home), and the cell is shared, so the load needs no other lock an
 home object. pycvc counts only a sink on another home whose value lies within its idle window,
 and a sink on the waiter's own home is judged by `run()`'s own test (design 9.2). The caller
 gets values only: it never reaches another home after `M.mu` is released, so a home destroyed
-meanwhile on another thread is never touched.
+meanwhile on another thread is never touched. The set form is one search from every source under
+one `M.mu` hold, for an `Exec` with several lock waiters; it is the union of the single-source
+results less the sources, which differs from that union only by a source that is another's sink
+(on the caller's own home, so judged by `run()`'s test anyway).
 
 ### 4.14 Delivery
 
