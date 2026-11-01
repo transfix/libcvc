@@ -1271,9 +1271,14 @@ protected:
   //     clears each map to its background (its red, or a gradient's), anywhere in [0, 1], and
   //     FilteredShadowMapPass must tell an empty texel from a caster at the light's near plane,
   //     whose exp(c * 0) = 1 a pale background's red comes close to.
-  // Otherwise as VTK has it: the same props, update test, maps, FBO and passes.
+  // Otherwise as VTK has it: the same props, update test, maps, FBO and passes. But not VTK's
+  // vtkOpenGL{Clear,Check}ErrorMacro around it: those report only in a build without NDEBUG, so
+  // VTK's own compile away in the VTK we link, and here they would report in libcvc's Debug
+  // builds the draws VTK raises on its own. VTK's low-memory mapper raises GL_INVALID_OPERATION in
+  // the first bake after vtkOpenGLShaderCache::ReleaseGraphicsResources() (and
+  // GL_INVALID_VALUE in that frame's main pass), on its stock draw path and through
+  // vtkShadowMapBakerPass::Render alike (cvcgl_lowmem_fastdraw's lifecycle step).
   void bake(const vtkRenderState *s) {
-    vtkOpenGLClearErrorMacro();
     this->NumberOfRenderedProps = 0;
     this->HasShadows = false;
     auto *r = static_cast<vtkOpenGLRenderer *>(s->GetRenderer());
@@ -1447,7 +1452,6 @@ protected:
     ostate->vtkglEnable(GL_DEPTH_TEST);
     ostate->vtkglDepthFunc(GL_LEQUAL);
     r->SetAutomaticLightCreation(autoLight);
-    vtkOpenGLCheckErrorMacro("failed after the focused shadow bake");
   }
 
   // What the downstream pass will count when it walks the light list: a light
