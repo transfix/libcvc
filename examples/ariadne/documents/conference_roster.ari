@@ -2,6 +2,8 @@
 #
 # Layout (all windows are closable + openable from the View menu):
 #   • My Camera  (id mycam)   — your own camera, a camera + mic device picker, and camera/mic toggles.
+#   • My Avatar  (id myavatar) — what you look like in the room: a colour and something to wear, from
+#                               the relay's catalog. Everyone sees the same avatar, you included.
 #   • Users      (id users)   — everyone in the room: name (lights up GREEN while talking), per-peer
 #                               LOCAL camera/mic mute + a volume slider, and click a name to raise
 #                               that peer's camera window. These controls are LOCAL — they change only
@@ -30,6 +32,7 @@ requires:
   - stream-set-muted
   - room-join                      # the room (arigl registers these when CVC_ARIADNE_RELAY is set)
   - room-roster
+  - room-set-avatar                # the My Avatar window
 
 # The room's LOOK. The relay owns what is IN the room (conf.rooms.<room>.scene: the ground, the
 # reference box; the avatars), and every client draws it under this document's lighting, so the
@@ -63,6 +66,8 @@ menubar:
         bind: tree.mycam.open
       - menu_item: Users
         bind: tree.users.open
+      - menu_item: My Avatar
+        bind: tree.myavatar.open
 
 windows:
   # ── My Camera: your name, self-view, device pickers + on/off toggles ──
@@ -125,6 +130,28 @@ windows:
       # keep up (more ping from queueing, frames dropped) and back up once it can.
       - text: ""
         bind: self.video_in
+
+  # ── My Avatar: how you look in the room ──
+  # The relay offers the choices (conf.rooms.<room>.avatars, room_avatar.h); on_tick writes a pick to
+  # your own participant subtree, and every client -- yours too -- draws what it resolves to. So the
+  # avatar you walk around as is the one everyone else sees. Automatic is a colour derived from your
+  # id, which is what you look like until you choose. What you wear is only drawn: you collide as
+  # the same 0.5 x 0.5 x 1.7 m body whatever you pick.
+  - window: My Avatar
+    id: myavatar
+    pos: [20, 610]
+    size: [360, 130]
+    closable: true
+    children:
+      - text: "How everyone sees you in the room, you included."
+      - type: combo
+        label: "Colour"
+        bind: avatar.color
+        options: (room-avatar-options (state-get "conf.room") "color")
+      - type: combo
+        label: "Wear"
+        bind: avatar.accessory
+        options: (room-avatar-options (state-get "conf.room") "accessory")
 
   # ── Users: the roster with per-peer local controls ──
   # One compact ROW per participant, as a table of unit widgets: every row is its own grid with the
@@ -254,6 +281,12 @@ on_tick: |
       (begin
         (state-set "joined" "1")
         (state-set "name_error" "") ; no name conflict yet (the web client's launch name is random)
+        ; the avatar pickers start blank; on_tick fills them once the relay's catalog is here
+        ; (an unset key reads as nil, which compares unequal to "")
+        (state-set "avatar.color" "")
+        (state-set "avatar.accessory" "")
+        (state-set "avatar.sent.color" "")
+        (state-set "avatar.sent.accessory" "")
         ; ── pre-seed each peer camera window at a distinct TILED position ──
         ; every cam_<i> declares the SAME authored pos:, so without this the per-peer windows land
         ; exactly on top of one another and look like a single window — the #1 reason a user reports
@@ -270,7 +303,8 @@ on_tick: |
         (state-set "tree.cam_5.geometry" "1216,662,330,290")
         (state-set "cam_on" "1") ; on/off toggles start ON (streams open unmuted)
         (state-set "mic_on" "1")
-        (room-join "" (state-get "conf.room") (dict "name" (state-get "conf.self")))
+        (state-set "room.token"
+          (get-attr (room-join "" (state-get "conf.room") (dict "name" (state-get "conf.self"))) "token"))
         (state-set "joined.name" (state-get "conf.self")) ; remember it for name-change detection
         (set mic (stream-open (dict "id" "mic" "codec" "f32" "rate" 48000 "ch" 1 "frames_per_chunk" 1024
                                     "subscriber_depth" 8 "expected_subscribers" 2)))
@@ -314,7 +348,8 @@ on_tick: |
             (state-set "name_error" (str-concat "name '" want "' is taken; pick another"))
             (begin
               (state-set "name_error" "")
-              (room-join "" (state-get "conf.room") (dict "name" want))
+              (state-set "room.token"
+                (get-attr (room-join "" (state-get "conf.room") (dict "name" want)) "token"))
               (state-set "joined.name" want))))
       (state-set "name_error" "")) ; back at the current name: clear any stale error
     ; ── device switch: re-capture when the user picks a different camera / mic (real devices only) ──
@@ -334,6 +369,28 @@ on_tick: |
                 (dict "device" (int (state-get "mic.want_device")) "rate" 48000 "ch" 1 "frames" 1024))
               (state-set "mic.cur_device" (state-get "mic.want_device")))
             #f)))
+    ; ── my avatar: once the relay's catalog has arrived, show the current look in the pickers (the
+    ;    defaults until you choose); after that, write a changed pick. room-set-avatar checks it
+    ;    against the catalog and writes only your own choice; every client draws it from there. ──
+    (if (= (state-get "joined") "1")
+      (if (= (state-get "avatar.sent.color") "")
+        (begin
+          (set look (room-avatar (state-get "room.token")))
+          (if (= (get-attr look "color") "") #f
+            (begin
+              (state-set "avatar.color" (get-attr look "color"))
+              (state-set "avatar.accessory" (get-attr look "accessory"))
+              (state-set "avatar.sent.color" (get-attr look "color"))
+              (state-set "avatar.sent.accessory" (get-attr look "accessory")))))
+        (if (or (not (= (state-get "avatar.color") (state-get "avatar.sent.color")))
+                (not (= (state-get "avatar.accessory") (state-get "avatar.sent.accessory"))))
+          (begin
+            (room-set-avatar (state-get "room.token")
+                             (state-get "avatar.color") (state-get "avatar.accessory"))
+            (state-set "avatar.sent.color" (state-get "avatar.color"))
+            (state-set "avatar.sent.accessory" (state-get "avatar.accessory")))
+          #f))
+      #f)
     ; ── mirror self voice-activity for the (you) row ──
     (state-set "self.talking" (state-get (str-concat "media." (state-get "self.pid") ".talking")))
     ; ── per-peer controls follow the PERSON, not the row: rows are sorted by pid, so they shift when

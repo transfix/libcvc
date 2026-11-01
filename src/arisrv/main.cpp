@@ -33,14 +33,15 @@
 #include <cstring>
 #include <cvc/ariadne/conference/room_aoi.h>        // aoi_params, the presets, write_aoi_params
 #include <cvc/ariadne/conference/room_aoi_relay.h>  // room_aoi_relay, relay_room_step
+#include <cvc/ariadne/conference/room_avatar.h>     // seed_avatar_catalog (what avatars may wear)
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_leave (retract a departed peer)
 #include <cvc/ariadne/conference/room_media_intrinsics.h> // room_relay_tick
-#include <cvc/ariadne/conference/room_net.h>   // per-participant + room link-quality stats
-#include <cvc/ariadne/conference/room_rungs.h> // each viewer's video rung, adapted to its link
-#include <cvc/ariadne/conference/room_scene.h> // seed_default_scene (the shared 3D scene)
+#include <cvc/ariadne/conference/room_net.h>        // per-participant + room link-quality stats
+#include <cvc/ariadne/conference/room_rungs.h>      // each viewer's video rung, adapted to its link
+#include <cvc/ariadne/conference/room_scene.h>      // seed_default_scene (the shared 3D scene)
 #include <cvc/ariadne/conference/room_write_gate.h> // bound writes: a client writes only itself
-#include <cvc/ariadne/holon.h>                 // server-authoritative avatar holon (H1)
-#include <cvc/ariadne/holon_sync.h>            // server_pump: intent -> holon -> authoritative pose
+#include <cvc/ariadne/holon.h>                      // server-authoritative avatar holon (H1)
+#include <cvc/ariadne/holon_sync.h> // server_pump: intent -> holon -> authoritative pose
 #include <cvc/ariadne/stream/stream_relay.h>
 #include <cvc/core/app.h>
 #include <cvc/media/media_router.h> // protocol-agnostic media hub (WS + gRPC + future protocols)
@@ -527,6 +528,14 @@ int main(int argc, char **argv) {
     const auto rev = cvc::ariadne::conference::scene_revision(app, room);
     std::printf("[arisrv] seeded the shared %s scene for room '%s' (rev %llu)\n", scene.c_str(),
                 room.c_str(), static_cast<unsigned long long>(rev));
+    std::fflush(stdout);
+  }
+  // What an avatar may wear (room_avatar.h): the relay supplies the catalog, each participant
+  // picks from it, and every client draws the pick the same way, for itself as for everyone else.
+  if (cvc::ariadne::conference::seed_avatar_catalog(app, room)) {
+    const auto cat = cvc::ariadne::conference::read_avatar_catalog(app, room);
+    std::printf("[arisrv] seeded the avatar catalog for room '%s' (%zu colours, %zu accessories)\n",
+                room.c_str(), cat.colors.size(), cat.accessories.size());
     std::fflush(stdout);
   }
   // The AOI's parameters, once, under conf.rooms.<room>.aoi: clients derive their audio gain from

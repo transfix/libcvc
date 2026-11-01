@@ -19,6 +19,10 @@
 //   * Each marker carries a dark visor on its front face, so its facing (the pose rotation, from
 //     the participant's intent.yaw) reads at a glance; each peer's display name floats above it
 //     (draw_labels, from the host's ImGuiOverlay scene-draw callback).
+//   * Every marker is drawn as its participant chose to look (room_avatar.h: a colour and an
+//     accessory from the relay's catalog, resolved the same way on every client), the local
+//     avatar included: you see yourself as everyone else sees you. A changed choice or catalog
+//     rebuilds the marker.
 //   * Third-person controls: intent_from_keys turns held WASD / arrow keys into forward / back /
 //     strafe relative to the avatar's FACING; the host turns the avatar by a click on the scene
 //     (pick_ground -> face that point). self_position is where the host keeps the orbit centre.
@@ -34,8 +38,9 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <cvc/ariadne/avatar_sim.h> // avatar_intent
-#include <cvc/lod/select.h>         // quality_preset
+#include <cvc/ariadne/avatar_sim.h>             // avatar_intent
+#include <cvc/ariadne/conference/room_avatar.h> // avatar_catalog, avatar_look
+#include <cvc/lod/select.h>                     // quality_preset
 #include <cvc/physics/types.h>      // vec3
 #include <map>
 #include <memory>
@@ -126,6 +131,10 @@ public:
   // The pids that have an avatar marker right now, in pid order.
   std::vector<std::string> avatar_pids() const;
 
+  // The look PID's marker was last built with (its body colour, its accessory's parts); false if
+  // PID has no marker.
+  bool avatar_look(const std::string &pid, cvc::ariadne::conference::avatar_look &out) const;
+
   // The SceneGraph node ids room_view uses, for hosts and tests.
   static std::string object_node_id(const std::string &id) { return "room_" + id; }
   static std::string avatar_node_id(const std::string &pid) { return "avatar_" + pid; }
@@ -137,6 +146,9 @@ private:
   void sync_scene();
   void clear_scene();
   void sync_avatars(cvc::ariadne::holon &h, double wall_dt);
+  void sync_looks(const std::vector<std::string> &pids);
+  void build_marker(const std::string &pid, const cvc::ariadne::conference::avatar_look &look);
+  void remove_marker(const std::string &pid);
   void sync_names();
   void select_lod();
 
@@ -151,7 +163,14 @@ private:
   std::unique_ptr<LodPyramidCache> _lod_cache;
   std::unique_ptr<cvc::gl::lod_stats> _lod_stats; // the last update's selection
   cvc::lod::quality_preset _lod_preset;
-  std::map<std::string, bool> _avatars;             // pid -> marker created
+  std::map<std::string, cvc::ariadne::conference::avatar_look>
+      _avatars; // pid -> look it was built with
+  // What each participant wears: the room's catalog (re-read when its revision moves) and each
+  // pid's resolved look, re-read a few times a second like the names.
+  cvc::ariadne::conference::avatar_catalog _catalog;
+  std::uint64_t _catalog_rev = 0;
+  std::map<std::string, cvc::ariadne::conference::avatar_look> _looks;
+  int _looks_age = 0;                               // frames until _looks is re-read
   std::map<std::string, std::string> _names;        // pid -> display name (the roster), for labels
   std::map<std::string, cvc::physics::vec3> _heads; // pid -> where its label goes (world)
   int _names_age = 0;                               // frames until _names is re-read
