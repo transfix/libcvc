@@ -2324,3 +2324,81 @@ TEST(LockShared, MutexWaitsCounted) {
   EXPECT_TRUE(t.empty());
   t.check();
 }
+
+// -- review fixes: detached homes (R3b F1) --------------------------------------------------------
+
+TEST(LockTable, DetachedHomesLeaveNoEntry) {
+  // A manager outlives its homes (every pycvc Exec, every Ariadne init script attaches one), so a
+  // detached home leaves nothing behind: its entry goes with it, and no operation walks the homes
+  // that came before. Ids are still never reused (protocol 2.1).
+  lock_table::options o;
+  o.self_check = true;
+  o.one_home = false;
+  lock_table t(o);
+  detail::lock_notes n;
+  const detail::home_id first = t.attach_home(false, nullptr, nullptr, n); // lives throughout
+  const std::vector<std::string> w{"w"}, k{"k"};
+  detail::lock_request rw = request_of(X, w);
+  const auto hw = t.try_acquire({first, 1}, {"o", 0}, rw, {});
+  ASSERT_TRUE(hw);
+  for (int i = 1; i <= 10000; ++i) {
+    const detail::home_id h = t.attach_home(i % 3 == 0, nullptr, nullptr, n);
+    ASSERT_EQ(h, detail::home_id(i)); // never reused
+    if (i % 500 == 0) {
+      // Now and then the home goes holding a key, waiting, and with a cache reference.
+      detail::lock_request rk = request_of(S, k);
+      ASSERT_TRUE(t.try_acquire({h, 1}, {"o", 0}, rk, {}));
+      detail::lock_request rq = request_of(X, w);
+      ASSERT_EQ(t.block({h, 2}, {"o", -1}, rq, {}, n).state, ticket_state::queued);
+      std::vector<detail::key_ref> refs{detail::key_ref{nullptr, "c", false}};
+      t.ref_nodes(h, refs);
+    }
+    t.detach_home(h, n);
+    ASSERT_EQ(t.home_entries(), 1u) << "after home " << h;
+  }
+  t.release({first, 1}, hw->hold, n);
+  EXPECT_TRUE(t.empty());
+  EXPECT_EQ(t.stats().cache_refs, 0u);
+  EXPECT_EQ(t.stats().trie_nodes, 1u);
+  EXPECT_NE(t.canonical().find("homes\nH0 prio=0\nrecs\n"), std::string::npos);
+  t.check();
+  EXPECT_EQ(t.attach_home(false, nullptr, nullptr, n), 10001u); // the next id is still fresh
+  EXPECT_EQ(t.home_entries(), 2u);
+  t.check();
+}
+
+TEST(LockTable, LendingFollowsTheAttachedPrioHomes) {
+  // lending (protocol 2.1) holds exactly while a home that applies priorities is attached, through
+  // attaches and detaches in any order.
+  lock_table::options o;
+  o.self_check = true;
+  o.one_home = false;
+  lock_table t(o);
+  detail::lock_notes n;
+  const std::vector<std::string> a{"a"};
+  const detail::home_id rr = t.attach_home(false, nullptr, nullptr, n);
+  detail::lock_request r = request_of(X, a);
+  ASSERT_TRUE(t.try_acquire({rr, 1}, {"o", 5}, r, {})); // the holder, base 5
+  const auto waiter = [&](detail::home_id h, int base) {
+    detail::lock_request q = request_of(X, a);
+    EXPECT_EQ(t.block({h, 1}, {"o", base}, q, {}, n).state, ticket_state::queued);
+  };
+  const auto inh = [&] { return t.rec_of({rr, 1})->inh; };
+  const detail::home_id p1 = t.attach_home(true, nullptr, nullptr, n);
+  waiter(p1, -5);
+  EXPECT_EQ(inh(), -5); // P1's waiter lends to the holder
+  t.detach_home(p1, n);
+  EXPECT_EQ(inh(), detail::lock_inf); // no lending home left
+  const detail::home_id p2 = t.attach_home(true, nullptr, nullptr, n);
+  const detail::home_id p3 = t.attach_home(true, nullptr, nullptr, n);
+  waiter(p2, -3);
+  EXPECT_EQ(inh(), -3);
+  t.detach_home(p3, n);
+  EXPECT_EQ(inh(), -3); // P2 still lends
+  // A round-robin home's waiter lends nothing.
+  waiter(t.attach_home(false, nullptr, nullptr, n), -9);
+  EXPECT_EQ(inh(), -3);
+  t.detach_home(p2, n);
+  EXPECT_EQ(inh(), detail::lock_inf);
+  t.check();
+}

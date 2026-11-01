@@ -274,6 +274,7 @@ struct lock_table::impl {
 
   /// 2.1's Home, and the home's M.cache_refs entry.
   struct home_entry {
+    home_id id = 0; // from next_home, never reused
     bool attached = false;
     bool prio = false;
     std::shared_ptr<lock_port> port;
@@ -352,8 +353,14 @@ struct lock_table::impl {
   std::atomic<std::thread::id> owner{}; // debug builds: the single-mode token (design 8.3)
   std::uint64_t n_mutex_waits = 0, mutex_wait_ns = 0; // under mu: lock_stats::mutex_waits, _ns
 
-  std::vector<home_entry> homes; // by home_id
+  // M.homes: an entry per attached home, ascending by id. A detached home's entry goes with it
+  // (only keep_detached_refs keeps one, with its references, for I9 to find), so the entries stay
+  // as many as the attached homes however many came and went. lending_homes counts the attached
+  // homes with prio: lending() is that count, not a walk.
+  std::vector<home_entry> homes;
+  home_id next_home = 0;
   std::size_t attached = 0;
+  std::size_t lending_homes = 0;
 
   pool<rec> rec_pool;
   index<rec> recs; // by lock_pid::packed()
@@ -408,18 +415,28 @@ struct lock_table::impl {
   lock_hold *hold_of(std::uint64_t id) const { return id ? holds.find(id) : nullptr; }
   lock_ticket *ticket_of(std::uint64_t id) const { return id ? tickets.find(id) : nullptr; }
 
+  /// M.homes[h], or null once h is detached. The entries are few and in id order: a binary
+  /// search over contiguous storage.
+  const home_entry *find_home(home_id h) const {
+    const auto it = std::lower_bound(homes.begin(), homes.end(), h,
+                                     [](const home_entry &e, home_id x) { return e.id < x; });
+    return it != homes.end() && it->id == h ? &*it : nullptr;
+  }
+  home_entry *find_home(home_id h) {
+    return const_cast<home_entry *>(std::as_const(*this).find_home(h));
+  }
+  /// The port a note for home h captures (4.14): null for a home attached without one.
+  std::shared_ptr<lock_port> port_of(home_id h) const {
+    const home_entry *e = find_home(h);
+    return e ? e->port : nullptr;
+  }
+
   bool applies(lock_pid p) const {
-    return p.home < homes.size() && homes[p.home].attached && homes[p.home].prio;
+    const home_entry *e = find_home(p.home);
+    return e && e->attached && e->prio;
   }
   bool lends(lock_pid p) const { return opts.inheritance && applies(p); }
-  bool lending() const {
-    if (!opts.inheritance)
-      return false;
-    for (const home_entry &h : homes)
-      if (h.attached && h.prio)
-        return true;
-    return false;
-  }
+  bool lending() const { return opts.inheritance && lending_homes > 0; }
 
   // -- the trie (2.4) ---------------------------------------------------------------------------
   kpos locate(std::string_view key) {
@@ -776,7 +793,7 @@ struct lock_table::impl {
       for (lock_pid a : layer) {
         const std::vector<lock_pid> succ = successors(a);
         if (succ.empty() && a != p) {
-          const home_entry *h = a.home < homes.size() ? &homes[a.home] : nullptr;
+          const home_entry *h = find_home(a.home);
           const bool cell = h && h->attached && h->progress; // a rec's home is attached (4.11)
           out.emplace_back(a, cell ? h->progress->load(std::memory_order_relaxed) : 0);
         }
@@ -1108,10 +1125,11 @@ struct lock_table::impl {
 
   // -- 4.15 -------------------------------------------------------------------------------------
   home_entry &refs_entry(home_id h, const char *what) {
-    if (h >= homes.size() || !homes[h].attached || !homes[h].has_refs)
+    home_entry *e = find_home(h);
+    if (!e || !e->attached || !e->has_refs)
       violation("4.15", std::string(what) + ": home " + std::to_string(h) +
                             " is not attached or has no key-cache entry");
-    return homes[h];
+    return *e;
   }
 
   lock_node *ref(home_id h, const key_ref &k) {
@@ -1124,8 +1142,8 @@ struct lock_table::impl {
   }
 
   void unref(home_id h, lock_node *n) {
-    home_entry *e = h < homes.size() && homes[h].has_refs ? &homes[h] : nullptr;
-    if (!e || e->refs.find(n) == e->refs.end())
+    home_entry *e = find_home(h);
+    if (!e || !e->has_refs || e->refs.find(n) == e->refs.end())
       violation("4.15", "unref: no reference of home " + std::to_string(h) + " on " +
                             (n ? n->key : std::string("<null>")));
     const auto it = e->refs.find(n);
@@ -1183,7 +1201,7 @@ struct lock_table::impl {
       dequeue(t);
       t->hold = new_hold(t->pid, t->mode, view(t->nodes), false, t->seq);
       t->state = ticket_state::granted;
-      out->push_back(lock_note{t->pid.home, homes[t->pid.home].port,
+      out->push_back(lock_note{t->pid.home, port_of(t->pid.home),
                                lock_post{lock_post::kind::wake, t->pid.pid, t->seq}});
       granted.push_back(t->pid);
     }
@@ -1344,7 +1362,7 @@ struct lock_table::impl {
         r->relevel_pending = true;
       }
       out->push_back(
-          lock_note{x.home, homes[x.home].port, lock_post{lock_post::kind::relevel, x.pid, 0}});
+          lock_note{x.home, port_of(x.home), lock_post{lock_post::kind::relevel, x.pid, 0}});
       ++n_relevels;
     }
   }
@@ -1553,9 +1571,9 @@ struct lock_table::impl {
       return join_keys(v.begin(), v.end());
     };
     std::string s = "homes\n";
-    for (std::size_t h = 0; h < homes.size(); ++h)
-      if (homes[h].attached)
-        s += "H" + std::to_string(h) + " prio=" + (homes[h].prio ? "1" : "0") + "\n";
+    for (const home_entry &e : homes)
+      if (e.attached)
+        s += "H" + std::to_string(e.id) + " prio=" + (e.prio ? "1" : "0") + "\n";
     s += "recs\n";
     for (const rec *r : sorted_recs()) {
       s += pid_text(r->pid) + " owner=\"" + r->owner + "\" base=" + std::to_string(r->base) +
@@ -1603,15 +1621,15 @@ struct lock_table::impl {
     s += "next seq=" + std::to_string(next_seq) + " hold=" + std::to_string(next_hold) +
          " gen=" + std::to_string(next_gen) + "\n";
     s += "cache_refs\n";
-    for (std::size_t h = 0; h < homes.size(); ++h) {
-      if (!homes[h].has_refs)
+    for (const home_entry &e : homes) {
+      if (!e.has_refs)
         continue;
       std::vector<std::pair<std::string_view, std::uint32_t>> v;
-      for (const auto &kv : homes[h].refs)
+      for (const auto &kv : e.refs)
         v.emplace_back(kv.first->key, kv.second);
       std::sort(v.begin(), v.end(),
                 [](const auto &a, const auto &b) { return key_less(a.first, b.first); });
-      s += "H" + std::to_string(h) + " {";
+      s += "H" + std::to_string(e.id) + " {";
       for (std::size_t i = 0; i < v.size(); ++i)
         s +=
             std::string(i ? "," : "") + std::string(v[i].first) + ":" + std::to_string(v[i].second);
@@ -1681,7 +1699,7 @@ void lock_table::impl::check() const {
         violation("I3", "the record of " + pid_text(r->pid) + " lists hold " +
                             std::to_string(r->holds[i]) + ", which is not one of its own");
     }
-    if (r->pid.home >= homes.size() || !homes[r->pid.home].attached)
+    if (const home_entry *he = find_home(r->pid.home); !he || !he->attached)
       violation("4.13", "the record of " + pid_text(r->pid) + " is on a home not attached");
   }
   for (const lock_hold *h : hs) {
@@ -1849,14 +1867,25 @@ void lock_table::impl::check() const {
                           (lend ? "" : " (no lending home)"));
   }
 
-  // I9's key-cache clause
-  for (std::size_t h = 0; h < homes.size(); ++h) {
-    if (homes[h].attached && !homes[h].has_refs)
-      violation("I9", "attached home H" + std::to_string(h) + " has no key-cache entry");
-    if (!homes[h].attached && homes[h].has_refs)
-      violation("I9",
-                "the key-cache references of detached home H" + std::to_string(h) + " are kept");
+  // I9's key-cache clause; and M.homes itself: in id order, an entry per attached home (a
+  // detached one's only while keep_detached_refs keeps its references), the counts right
+  std::size_t n_attached = 0, n_lending = 0;
+  for (std::size_t i = 0; i < homes.size(); ++i) {
+    const home_entry &e = homes[i];
+    const std::string name = "H" + std::to_string(e.id);
+    if (e.attached && !e.has_refs)
+      violation("I9", "attached home " + name + " has no key-cache entry");
+    if (!e.attached && e.has_refs)
+      violation("I9", "the key-cache references of detached home " + name + " are kept");
+    if (!e.attached && !e.has_refs)
+      violation("2.1", "detached home " + name + " left its entry");
+    if ((i > 0 && homes[i - 1].id >= e.id) || e.id >= next_home)
+      violation("2.1", "home " + name + "'s entry is out of order");
+    n_attached += e.attached ? 1 : 0;
+    n_lending += e.attached && e.prio ? 1 : 0;
   }
+  if (n_attached != attached || n_lending != lending_homes)
+    violation("2.1", "the attached or lending homes are miscounted");
 }
 
 void lock_table::impl::check_trie() const {
@@ -1890,10 +1919,10 @@ void lock_table::impl::check_trie() const {
       path(n, [](expect &x) { ++x.subw; });
     }
   std::size_t total_refs = 0;
-  for (std::size_t h = 0; h < homes.size(); ++h)
-    for (const auto &kv : homes[h].refs) {
+  for (const home_entry &he : homes)
+    for (const auto &kv : he.refs) {
       if (kv.second == 0 || !kv.first->live)
-        violation("I4", "home H" + std::to_string(h) + " has a bad key-cache reference");
+        violation("I4", "home H" + std::to_string(he.id) + " has a bad key-cache reference");
       e[kv.first].refs += kv.second;
       total_refs += kv.second;
       path(kv.first, [](expect &) {});
@@ -1970,14 +1999,17 @@ home_id lock_table::attach_home(bool prio, std::shared_ptr<lock_port> port,
     throw std::logic_error("lock_manager: a home pumped on another thread needs a shared manager "
                            "(state_exec.locks.threading)");
   m.begin_op(&out);
-  const home_id h = home_id(m.homes.size());
-  impl::home_entry &e = m.homes.emplace_back();
+  const home_id h = m.next_home++;              // never reused (2.1)
+  impl::home_entry &e = m.homes.emplace_back(); // ids ascend: the entries stay in id order
+  e.id = h;
   e.attached = true;
   e.prio = prio;
   e.port = std::move(port);
   e.progress = std::move(progress);
   e.has_refs = true; // M.cache_refs[H] = {}
   ++m.attached;
+  if (prio)
+    ++m.lending_homes;
   m.relevel_all({}, {}); // lending may have become true
   m.end_op();
   return h;
@@ -2197,7 +2229,8 @@ void lock_table::detach_home(home_id h, lock_notes &out) {
   std::shared_ptr<lock_port> port;
   std::shared_ptr<std::atomic<std::int64_t>> progress;
   impl::guard g(m);
-  if (h >= m.homes.size() || !m.homes[h].attached)
+  impl::home_entry *he = m.find_home(h);
+  if (!he || !he->attached)
     violation("4.11", "detach_home: home " + std::to_string(h) + " is not attached");
   std::vector<lock_pid> ended;
   m.recs.for_each([&](std::uint64_t, impl::rec *r) {
@@ -2206,7 +2239,7 @@ void lock_table::detach_home(home_id h, lock_notes &out) {
   });
   std::sort(ended.begin(), ended.end(), pid_less);
   m.begin_op(&out, ended); // the ended processes: the seeds of 4.3's note
-  impl::home_entry &e = m.homes[h];
+  impl::home_entry &e = *he;
   if (!m.mut(keep_detached_refs)) {
     for (const auto &kv : e.refs) { // every cache reference of H (4.15's unref)
       kv.first->refs -= kv.second;
@@ -2220,10 +2253,14 @@ void lock_table::detach_home(home_id h, lock_notes &out) {
   for (lock_pid p : ended)
     m.end_locked(p, true, reg);
   e.attached = false; // delete M.homes[H]
+  if (e.prio)
+    --m.lending_homes;
   e.prio = false;
   port = std::move(e.port);
   progress = std::move(e.progress);
   --m.attached;
+  if (!e.has_refs) // the entry goes too; keep_detached_refs keeps it, with its references
+    m.homes.erase(m.homes.begin() + (&e - m.homes.data()));
   m.finish(reg, {}, ended);
   m.end_op();
 }
@@ -2322,21 +2359,28 @@ std::optional<lock_table::hold_view> lock_table::hold_of(std::uint64_t id) const
 
 std::size_t lock_table::home_cache_refs(home_id h, const lock_node *n) const {
   impl::guard g(*impl_);
-  if (h >= impl_->homes.size())
+  const impl::home_entry *e = impl_->find_home(h);
+  if (!e)
     return 0;
-  const auto &refs = impl_->homes[h].refs;
+  const auto &refs = e->refs;
   const auto it = refs.find(const_cast<lock_node *>(n));
   return it == refs.end() ? 0 : it->second;
 }
 
 std::size_t lock_table::home_cache_refs(home_id h) const {
   impl::guard g(*impl_);
-  if (h >= impl_->homes.size())
+  const impl::home_entry *e = impl_->find_home(h);
+  if (!e)
     return 0;
   std::size_t total = 0;
-  for (const auto &kv : impl_->homes[h].refs)
+  for (const auto &kv : e->refs)
     total += kv.second;
   return total;
+}
+
+std::size_t lock_table::home_entries() const {
+  impl::guard g(*impl_);
+  return impl_->homes.size();
 }
 
 lock_stats lock_table::stats() const {
