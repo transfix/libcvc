@@ -731,16 +731,23 @@ void lock_home::release_frame(process &p, std::optional<std::uint64_t> hold,
       // Defensive (protocol 5.4): a lock_enter frame unwound with its ticket still set, as when
       // the step that queued it throws. Another home may have granted the ticket meanwhile: the
       // cancel then finds it granted, and that grant, which never reached the mirror, is given
-      // back as any lock_enter frame's grant is. The notes are delivered once both are done.
+      // back as any lock_enter frame's grant is. Each operation's notes go right after it.
       const std::uint64_t tid = *pl.ticket;
       lock_notes notes;
       table_.cancel(pid_of(p), tid, notes);
+      try {
+        deliver_op(notes); // the cancel's own, now: they don't wait on the resume or a release
+      } catch (...) {
+        // delivered in full all the same (deliver); the resume must still happen
+      }
       const lock_outcome out = table_.resume(pid_of(p), tid);
       pl.ticket.reset();
       clear_wait_fields(p);
-      if (out.what == lock_outcome::kind::granted)
-        table_.release(pid_of(p), out.g.hold, notes);
-      deliver_op(notes);
+      if (out.what == lock_outcome::kind::granted) {
+        lock_notes freed;
+        table_.release(pid_of(p), out.g.hold, freed);
+        deliver_op(freed);
+      }
     }
   } catch (...) {
     // noexcept: a release can't fail on a consistent table; check() reports an inconsistent one.

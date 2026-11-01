@@ -2614,11 +2614,12 @@ TEST(LockTable, BlockingSinksFromSeveralWaiters) {
   }
   {
     // A long FIFO queue on one key: every waiter waits for the holder and the waiters before it;
-    // the one sink is the holder.
-    world w(0, false); // no self_check: 300 waiters, each check() a full recount
+    // the one sink is the holder. (The reference, one search per waiter, is the cubic cost the
+    // single search removes: 100 waiters keep it quick under the sanitizers.)
+    world w(0, false); // no self_check: each check() would be a full recount
     w.acquire(1, X, {"k"});
     std::vector<detail::lock_pid> from;
-    for (int p = 2; p <= 301; ++p) {
+    for (int p = 2; p <= 101; ++p) {
       w.wait(p, X, {"k"});
       from.push_back(w.pid(p));
     }
@@ -2704,4 +2705,61 @@ TEST(LockTable, HomeIdsNeverWrap) {
   EXPECT_TRUE(t.empty());
   EXPECT_EQ(t.home_entries(), 0u);
   t.check();
+}
+
+// -- second round: the unwound wait's notes in order ----------------------------------------------
+
+namespace {
+
+/// What the cross_home_note hook saw of the unwinding process's ticket when the cancel's note
+/// went out.
+struct cancel_probe {
+  const lock_table *table = nullptr;
+  std::uint64_t tid = 0;
+  int notes = 0;
+  bool ticket_there = false;
+};
+cancel_probe g_cancel_probe;
+void probe_cancel_note(const detail::lock_note &) {
+  ++g_cancel_probe.notes;
+  g_cancel_probe.ticket_there = g_cancel_probe.table->ticket_of(g_cancel_probe.tid).has_value();
+}
+
+} // namespace
+
+TEST(LockHomes, UnwoundWaitDeliversTheCancelsNotesFirst) {
+  // 5.4's defensive path delivers the cancel's notes (the wakes of the waiters the cancel lets
+  // in) right after the cancel, before its resume and any release, so neither can lose them.
+  for (const lock_threading mode : {lock_threading::single, lock_threading::shared}) {
+    SCOPED_TRACE(mode_name(mode));
+    const std::shared_ptr<lock_manager> mgr = make_manager(mode);
+    auto a = std::make_unique<sched_side>(mgr);
+    auto b = std::make_unique<sched_side>(mgr);
+    auto c = std::make_unique<sched_side>(mgr);
+    process &pa = a->add(1);
+    process &pb = b->add(2);
+    process &pc = c->add(3);
+    const std::optional<std::uint64_t> ha = a->take(pa, S, {"k"});
+    ASSERT_TRUE(ha);
+    ASSERT_TRUE(b->wait(pb, X, {"k"})); // behind A's S hold
+    ASSERT_TRUE(c->wait(pc, S, {"k"})); // behind B's earlier X ticket (FIFO)
+    g_cancel_probe = cancel_probe{&mgr->table(), *pb.locks->ticket};
+    detail::lock_test_hooks hooks;
+    hooks.cross_home_note = probe_cancel_note;
+    detail::set_lock_test_hooks(&hooks);
+    b->home->release_frame(pb, std::nullopt, true); // the cancel lets C's waiter in
+    detail::set_lock_test_hooks(nullptr);
+    EXPECT_EQ(g_cancel_probe.notes, 1);
+    EXPECT_TRUE(g_cancel_probe.ticket_there); // not resumed yet when the wake went out
+    EXPECT_FALSE(pb.locks->ticket);
+    c->home->drain_port();
+    EXPECT_EQ(c->ops.readies, (std::vector<int>{3}));
+    c->release(pc, sched_side::last_hold(pc));
+    a->release(pa, *ha);
+    check_all(*mgr, {a.get(), b.get(), c.get()});
+    a.reset();
+    b.reset();
+    c.reset();
+    EXPECT_TRUE(mgr->table().empty());
+  }
 }
