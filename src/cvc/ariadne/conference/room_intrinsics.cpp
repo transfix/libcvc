@@ -374,9 +374,10 @@ void register_room_intrinsics(cvc::app &app) {
           return se::make_list(std::move(list));
         });
 
-    // (room-avatar HANDLE) -> { color accessory }: the labels of the caller's avatar as every
-    // client draws it -- its choice resolved through the catalog, so the defaults until it chose
-    // (and both "" until the catalog has arrived).
+    // (room-avatar HANDLE) -> { color accessory stamina }: the labels of the caller's avatar as
+    // every client draws it -- its choice resolved through the catalog, so the defaults until it
+    // chose (and both "" until the catalog has arrived) -- and its reserve as the relay last
+    // published it, a whole percent of the most it can hold ("" without an energy policy).
     se::builtins::register_fn(
         env, "room-avatar", [&app, doc](std::span<const se::value_t> args) -> se::value_t {
           if (!doc)
@@ -394,9 +395,19 @@ void register_room_intrinsics(cvc::app &app) {
               cat, read_avatar_choice(app, rh->room_id, rh->self_pid), rh->self_pid);
           const avatar_color_option *c = cat.find_color(look.color_id);
           const avatar_accessory_option *a = cat.find_accessory(look.accessory_id);
+          std::string stamina;
+          avatar_energy_policy policy;
+          double reserve = 0.0;
+          std::uint64_t reserve_tick = 0;
+          if (read_avatar_policy(app, rh->room_id, policy) && policy.enabled &&
+              policy.reserve_max > 0.0 &&
+              read_avatar_reserve(app, rh->room_id, rh->self_pid, reserve, reserve_tick))
+            stamina = std::to_string(
+                static_cast<long>(std::floor(100.0 * reserve / policy.reserve_max + 0.5)));
           return se::make_dict({
               {"color", se::value_t(c ? c->label : std::string())},
               {"accessory", se::value_t(a ? a->label : std::string())},
+              {"stamina", se::value_t(stamina)},
           });
         });
 

@@ -342,6 +342,14 @@ A `progress:` widget is read-only: a bar showing the number at `bind` placed in 
 state path or a computed expression) drawn over it, else the percent. ImGui draws a progress bar;
 a backend with none gets a text value (`[########------------] 40%`).
 
+A `plot:` widget is read-only too: a line graph of the comma-separated numbers at `bind` (a state
+path or a computed expression), oldest first, between `lo` and `hi`. Leave them out (or give
+`lo` >= `hi`) and the range is fitted to the numbers. The text at `overlay` is its caption, and
+`height` its height in pixels (default 60). The host keeps the series (the conference's Avatar
+window plots the history `avatar_panel` publishes). ImGui draws a line plot that reads out the
+value under the mouse; a backend with none gets a text sparkline of the last 32 numbers with the
+newest and the range (`[ _.-=+*#] 12.3 (1..30)`).
+
 A `spinner:` widget says something is under way when there is no amount to show (a request, a
 search). The host turns it by its own frame clock (`Runtime::frame_clock`), not by state, so it keeps
 moving while the document's programs are parked: a program waiting on `http-get` still has a

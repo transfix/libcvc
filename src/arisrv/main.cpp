@@ -174,6 +174,14 @@ int main(int argc, char **argv) {
   //   --video-floor RUNG         the lowest adaptation goes (default thumb; off allows audio only)
   //   --viewer-kbps-max N        a viewer's budget, kbit/s: above it, it steps down (default 0 =
   //                              none)
+  // Avatars (ARIADNE_CONFERENCE_ROADMAP.md §5k). The relay sets the policy every avatar moves
+  // under, the same for everyone, and publishes it so clients predict under it too:
+  //   --avatar-energy on|off     an energy budget for every avatar's movement: a push of at most
+  //                              840 N, 1.2 kW at most, a 30 kJ reserve refilled at 300 W, and
+  //                              carrying the body along costs 0.2 m g |v| (default on)
+  //   --avatar-empty rest|stop   when an avatar's reserve runs out: rest leaves resting power (it
+  //                              slows to what that sustains); stop holds it until a quarter has
+  //                              refilled (default rest)
   const char *s7_env = std::getenv("CVC_ARISRV_S7");
   const char *aoi_env = std::getenv("CVC_ARISRV_AOI");
   // CVC_ARISRV_S7: 0/off or 1/on (unset: on).
@@ -189,6 +197,7 @@ int main(int argc, char **argv) {
   bool devicePinsFlag = false; // --device-pins was given (even with no path)
   std::string adaptArg = "on", videoMaxArg = "full", videoFloorArg = "thumb", viewerKbpsArg = "0";
   std::string aoiVideoMaxArg = "0", mediaStallArg = "40", admissionHoldArg = "2000";
+  std::string avatarEnergyArg = "on", avatarEmptyArg = "rest";
   for (int i = 1; i < argc; ++i) {
     const char *a = argv[i];
     auto next = [&](const char *d) { return (i + 1 < argc) ? argv[++i] : d; };
@@ -236,6 +245,10 @@ int main(int argc, char **argv) {
       videoFloorArg = next("");
     else if (!std::strcmp(a, "--viewer-kbps-max"))
       viewerKbpsArg = next("");
+    else if (!std::strcmp(a, "--avatar-energy"))
+      avatarEnergyArg = next("on");
+    else if (!std::strcmp(a, "--avatar-empty"))
+      avatarEmptyArg = next("rest");
   }
   if (aoiMode.empty())
     aoiMode = scene == "large" ? "hall" : "conference";
@@ -247,7 +260,9 @@ int main(int argc, char **argv) {
       !check_choice("--bind-writes", bindWritesArg, {"on", "off"}) ||
       !check_choice("--adapt", adaptArg, {"on", "off"}) ||
       !check_choice("--video-max", videoMaxArg, {"full", "half", "quarter", "thumb", "off"}) ||
-      !check_choice("--video-floor", videoFloorArg, {"full", "half", "quarter", "thumb", "off"}))
+      !check_choice("--video-floor", videoFloorArg, {"full", "half", "quarter", "thumb", "off"}) ||
+      !check_choice("--avatar-energy", avatarEnergyArg, {"on", "off"}) ||
+      !check_choice("--avatar-empty", avatarEmptyArg, {"rest", "stop"}))
     return 2;
   long aoiVideoMaxN = 0, mediaStallMs = 40, admissionHoldMs = 2000;
   if (!check_count("--aoi-video-max", aoiVideoMaxArg, aoiVideoMaxN) ||
@@ -536,6 +551,21 @@ int main(int argc, char **argv) {
     const auto cat = cvc::ariadne::conference::read_avatar_catalog(app, room);
     std::printf("[arisrv] seeded the avatar catalog for room '%s' (%zu colours, %zu accessories)\n",
                 room.c_str(), cat.colors.size(), cat.accessories.size());
+    std::fflush(stdout);
+  }
+  // And the policy every avatar moves under (§5k): written each start, so a changed flag takes
+  // effect for the clients already in the room as well as for the relay's own holon.
+  {
+    cvc::ariadne::avatar_energy_policy energy;
+    energy.enabled = avatarEnergyArg == "on";
+    energy.empty = avatarEmptyArg == "stop" ? cvc::ariadne::avatar_energy_policy::when_empty::stop
+                                            : cvc::ariadne::avatar_energy_policy::when_empty::rest;
+    cvc::ariadne::conference::write_avatar_policy(app, room, energy);
+    std::printf("[arisrv] avatar energy: %s\n",
+                energy.enabled ? (avatarEmptyArg == "stop"
+                                      ? "on, 840 N, 1.2 kW, 30 kJ refilled at 300 W; empty stops"
+                                      : "on, 840 N, 1.2 kW, 30 kJ refilled at 300 W; empty rests")
+                               : "off (only the 840 N push limit)");
     std::fflush(stdout);
   }
   // The AOI's parameters, once, under conf.rooms.<room>.aoi: clients derive their audio gain from

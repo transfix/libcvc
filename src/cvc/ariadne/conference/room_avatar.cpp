@@ -405,6 +405,78 @@ void auto_avatar_color(const std::string &pid, float out[3]) {
   out[0] = r + (v - c), out[1] = g + (v - c), out[2] = b + (v - c);
 }
 
+namespace {
+
+std::string policy_path(const std::string &room) {
+  return sub(room_avatars_path(room), {"policy"});
+}
+std::string reserve_path(const std::string &room, const std::string &pid) {
+  return sub(room_participant_path(room, pid), {"energy"});
+}
+
+} // namespace
+
+void write_avatar_policy(cvc::app &app, const std::string &room_id, const avatar_energy_policy &p) {
+  const std::string e = sub(policy_path(room_id), {"energy"});
+  set_b(app, sub(e, {"enabled"}), p.enabled);
+  set_replicated(app, sub(e, {"force_max"}), fmt(static_cast<float>(p.force_max)));
+  set_replicated(app, sub(e, {"power_max"}), fmt(static_cast<float>(p.power_max)));
+  set_replicated(app, sub(e, {"power_rest"}), fmt(static_cast<float>(p.power_rest)));
+  set_replicated(app, sub(e, {"reserve_max"}), fmt(static_cast<float>(p.reserve_max)));
+  set_replicated(app, sub(e, {"transport_cost"}), fmt(static_cast<float>(p.transport_cost)));
+  set_replicated(app, sub(e, {"empty"}),
+                 p.empty == avatar_energy_policy::when_empty::stop ? "stop" : "rest");
+  set_replicated(app, sub(e, {"recover_fraction"}), fmt(static_cast<float>(p.recover_fraction)));
+  // Written last, so a reader that sees the new revision also sees what it covers.
+  set_replicated(
+      app, sub(policy_path(room_id), {"rev"}),
+      std::to_string(static_cast<unsigned long long>(avatar_policy_revision(app, room_id) + 1)));
+}
+
+std::uint64_t avatar_policy_revision(cvc::app &app, const std::string &room_id) {
+  const std::string v = get_s(app, sub(policy_path(room_id), {"rev"}));
+  return v.empty() ? 0 : std::strtoull(v.c_str(), nullptr, 10);
+}
+
+bool read_avatar_policy(cvc::app &app, const std::string &room_id, avatar_energy_policy &out) {
+  if (avatar_policy_revision(app, room_id) == 0)
+    return false;
+  const std::string e = sub(policy_path(room_id), {"energy"});
+  avatar_energy_policy p;
+  p.enabled = get_b(app, sub(e, {"enabled"}), p.enabled);
+  p.force_max = get_f(app, sub(e, {"force_max"}), static_cast<float>(p.force_max));
+  p.power_max = get_f(app, sub(e, {"power_max"}), static_cast<float>(p.power_max));
+  p.power_rest = get_f(app, sub(e, {"power_rest"}), static_cast<float>(p.power_rest));
+  p.reserve_max = get_f(app, sub(e, {"reserve_max"}), static_cast<float>(p.reserve_max));
+  p.transport_cost = get_f(app, sub(e, {"transport_cost"}), static_cast<float>(p.transport_cost));
+  p.empty = get_s(app, sub(e, {"empty"})) == "stop" ? avatar_energy_policy::when_empty::stop
+                                                    : avatar_energy_policy::when_empty::rest;
+  p.recover_fraction =
+      get_f(app, sub(e, {"recover_fraction"}), static_cast<float>(p.recover_fraction));
+  out = p;
+  return true;
+}
+
+void write_avatar_reserve(cvc::app &app, const std::string &room_id, const std::string &pid,
+                          double joules, std::uint64_t server_tick) {
+  const std::string base = reserve_path(room_id, pid);
+  set_replicated(app, sub(base, {"reserve"}), std::to_string(static_cast<long long>(joules + 0.5)));
+  set_replicated(app, sub(base, {"server_tick"}),
+                 std::to_string(static_cast<unsigned long long>(server_tick)));
+}
+
+bool read_avatar_reserve(cvc::app &app, const std::string &room_id, const std::string &pid,
+                         double &joules, std::uint64_t &server_tick) {
+  const std::string base = reserve_path(room_id, pid);
+  const std::string r = get_s(app, sub(base, {"reserve"}));
+  const std::string t = get_s(app, sub(base, {"server_tick"}));
+  if (r.empty() || t.empty())
+    return false;
+  joules = std::strtod(r.c_str(), nullptr);
+  server_tick = std::strtoull(t.c_str(), nullptr, 10);
+  return true;
+}
+
 bool avatar_part_fits(const avatar_part &part) {
   float half[3];
   if (part.shape == "sphere") {

@@ -118,6 +118,9 @@ struct holon_config {
   // (physics() reports which is running).
   bool physics = false;
   avatar_body body; // with physics: every avatar's body
+  // With physics: what every avatar's controller may spend (§5k). The server's is the room's
+  // (holon_sync reads it from the room tree into both pumps' holons: set_energy_policy).
+  avatar_energy_policy energy;
   // SERVER with physics: an avatar that fell off the world (below this z) respawns where it
   // joined.
   double respawn_below_z = -10.0;
@@ -223,6 +226,24 @@ public:
   // `revision`. Avatars stand still until the first set_statics (there is nothing to stand on).
   void set_statics(const std::vector<avatar_static> &statics, std::uint64_t revision);
   std::uint64_t statics_revision() const noexcept { return _statics_rev; }
+
+  // With physics: the energy policy every avatar spends under (avatar_world::set_energy_policy),
+  // as of the room's policy REVISION (what a pump compares to re-read it only when it changes).
+  void set_energy_policy(const avatar_energy_policy &p, std::uint64_t revision = 0);
+  const avatar_energy_policy &energy_policy() const noexcept { return _cfg.energy; }
+  // Every avatar's body (holon_config::body).
+  const avatar_body &body() const noexcept { return _cfg.body; }
+  std::uint64_t energy_policy_revision() const noexcept { return _energy_rev; }
+  // With physics: PID's energy now (on a client, the local avatar's is its prediction). False
+  // without physics or for a pid with no body.
+  bool energy(const std::string &pid, avatar_energy &out) const;
+  // CLIENT: the server's reserve for the local avatar PID as of SERVER_TICK. The prediction is
+  // corrected by how far it was off at that tick (its log of what it predicted then), and the
+  // inputs replayed since keep their spending on top; with no log entry for that tick it takes
+  // the server's value as it stands. A tick no newer than the last one applied is a no-op, so a
+  // pump may re-read the tree every frame. Ignored on a server, for a peer, or without physics.
+  void apply_authoritative_reserve(const std::string &pid, std::uint64_t server_tick,
+                                   double joules);
 
   // CLIENT: run the replica's clock `ticks` AHEAD of the server's (default 0: in step
   // with the samples). With a lead, an intent the client applies at its tick T reaches
@@ -358,10 +379,13 @@ private:
       std::uint64_t tick = 0;
       avatar_intent in;
       cvc::physics::body_state after; // its state after the step at `tick`
+      double reserve_before = 0.0;    // its reserve (J) before that step, where a replay begins
+      double reserve_after = 0.0;     // and after it, to compare with the server's
     };
     std::deque<logged> log;
     bool acked = false;
     std::uint64_t last_acked = 0;
+    std::uint64_t reserve_tick = 0; // the server tick of the last reserve applied (0: none)
   };
 
   // physics: one quantum of the world (the drive, the peers' kinematic poses, the step).
@@ -391,6 +415,7 @@ private:
   double _peer_clock = 0.0;             // CLIENT: wall time in ticks, for the peers' playout
   std::uint64_t _lead = 0;              // CLIENT: ticks ahead of the server (set_lead_ticks)
   std::unique_ptr<avatar_world> _world; // physics (holon_config::physics + a Jolt build)
+  std::uint64_t _energy_rev = 0;        // the room policy revision set_energy_policy last took
   std::uint64_t _vetoes = 0;            // SERVER: intents sanitize_intent changed
   std::uint64_t _realigns = 0;          // CLIENT: clock seeks in apply_authoritative
   std::uint64_t _slews = 0;             // CLIENT: slews started in apply_authoritative

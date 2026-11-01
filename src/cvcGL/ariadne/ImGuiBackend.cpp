@@ -620,6 +620,29 @@ void ImGuiBackend::progress_bar(const char *label, float fraction, const std::st
   Backend::progress_bar(label, fraction, overlay);
 #endif
 }
+void ImGuiBackend::plot_lines(const char *label, const std::vector<float> &values, double lo,
+                              double hi, const std::string &overlay, double height) {
+#ifdef CVC_ENABLE_IMGUI
+  // Laid out as the progress bar is: the graph fills the line but leaves the label's width. ImGui
+  // shows the value under the mouse; FLT_MAX for a range fits it to the values.
+  const char *end = label ? ImGui::FindRenderedTextEnd(label) : label;
+  const bool labelled = label && end != label;
+  const float width = labelled ? ImGui::CalcItemWidth() : -FLT_MIN;
+  const float a = lo < hi ? static_cast<float>(lo) : FLT_MAX;
+  const float z = lo < hi ? static_cast<float>(hi) : FLT_MAX;
+  ImGui::PushID(label ? label : "plot");
+  ImGui::PlotLines("##plot", values.empty() ? nullptr : values.data(),
+                   static_cast<int>(values.size()), 0, overlay.empty() ? nullptr : overlay.c_str(),
+                   a, z, ImVec2(width, static_cast<float>(height)));
+  ImGui::PopID();
+  if (labelled) {
+    ImGui::SameLine(0.f, ImGui::GetStyle().ItemInnerSpacing.x);
+    ImGui::TextUnformatted(label, end);
+  }
+#else
+  Backend::plot_lines(label, values, lo, hi, overlay, height);
+#endif
+}
 void ImGuiBackend::spinner(const char *label, double seconds, bool ascii) {
 #ifdef CVC_ENABLE_IMGUI
   // An arc drawn rather than a glyph, so it turns whatever the font holds (the browser build's is
