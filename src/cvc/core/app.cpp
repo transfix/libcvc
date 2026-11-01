@@ -32,6 +32,7 @@
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_host.h>
 #include <cvc/state/state_exec/async_scheduler.h>
+#include <cvc/state/state_exec/lock_manager.h>
 #include <cvc/utility/utility.h>
 #include <cvc/volume/bounding_box.h>
 #include <cvc/volume/dimension.h>
@@ -64,6 +65,7 @@
 #include <iterator>
 #include <queue>
 #include <set>
+#include <thread>
 #include <utility>
 
 namespace cvc {
@@ -1245,6 +1247,38 @@ std::string setting_text(cvc::state &root, const char *path) {
   return node ? const_cast<cvc::state *>(node)->value() : std::string();
 }
 
+// Whether state_exec.threads asks for worker threads (docs/STATE_EXEC_THREADED.md 4.1, 4.13): a
+// whole number above 0, or auto (hardware_concurrency() - 1 workers). Unset, as it is until the
+// threaded executor lands, or anything else: 0.
+bool exec_threads_above_zero(cvc::state &root) {
+  const std::string v = setting_text(root, "state_exec.threads");
+  if (v == "auto")
+    return std::thread::hardware_concurrency() > 1;
+  char *end = nullptr;
+  const long long n = v.empty() ? 0 : std::strtoll(v.c_str(), &end, 10);
+  return !v.empty() && end == v.c_str() + v.size() && n > 0;
+}
+
+// The app lock manager's mode (docs/STATE_EXEC_LOCKS.md 8.3, 14.2 Q4): state_exec.locks.threading
+// single or shared as it says; auto (the default) is shared when the build has threads and either
+// state_exec.threads is above 0 or a threaded host (pycvc, at import) announced itself, else
+// single. An unknown value is auto, and sets *unknown.
+cvc::state_exec::lock_threading lock_threading_from_state(cvc::state &root, bool *unknown) {
+  namespace se = cvc::state_exec;
+  *unknown = false;
+  const std::string v = setting_text(root, "state_exec.locks.threading");
+  if (v == "single")
+    return se::lock_threading::single;
+  if (v == "shared")
+    return se::lock_threading::shared;
+  if (!v.empty() && v != "auto")
+    *unknown = true;
+  return se::threads_compiled_in &&
+                 (exec_threads_above_zero(root) || se::detail::threaded_host_noted())
+             ? se::lock_threading::shared
+             : se::lock_threading::single;
+}
+
 } // namespace
 
 cvc::state_exec::async_scheduler &app::exec_scheduler() {
@@ -1271,6 +1305,13 @@ cvc::state_exec::async_scheduler &app::exec_scheduler() {
         notes.emplace_back(1, "state_exec.policy: unknown value '" +
                                   setting_text(root(), "state_exec.policy") +
                                   "' (round_robin, priority or priority_rr); using round_robin");
+      // The app's lock manager, made first if no call has made it yet (its mode is chosen then),
+      // so a manager that cannot be made leaves no scheduler half built.
+      std::string threading_note;
+      const std::shared_ptr<cvc::state_exec::lock_manager> locks =
+          lock_manager_locked(threading_note);
+      if (!threading_note.empty())
+        notes.emplace_back(1, std::move(threading_note));
       _execScheduler.reset(new cvc::state_exec::async_scheduler(policy));
       // Wire it to this app's state root so state-watches (state-watch/on_change:)
       // resolve against the app tree. Processes are chrooted per-owner on submit.
@@ -1281,8 +1322,11 @@ cvc::state_exec::async_scheduler &app::exec_scheduler() {
       // Deep-data work a slice per step too (host_data_defaults); state_exec.defaults.data.*
       // overrides it.
       _execScheduler->set_data_defaults(cvc::state_exec::async_scheduler::host_data_defaults());
-      // Its with-lock table is the app's (docs/STATE_EXEC_LOCKS.md 8.4: an eager home).
-      _execScheduler->set_lock_manager(lock_manager_locked());
+      // Its with-lock table is the app's (docs/STATE_EXEC_LOCKS.md 8.4: an eager home). A shared
+      // manager has homes on other threads (pycvc's Execs), and this scheduler may be pumped on
+      // any thread: it attaches cross_thread then (8.3). A single one has every home on one thread.
+      const bool shared = locks->threading() == cvc::state_exec::lock_threading::shared;
+      _execScheduler->set_lock_manager(locks, cvc::state_exec::lock_attach{shared});
       // state_exec.process_class (7.6) is read once, here, and applied on this thread: no setting
       // exists at app start (gap G-19). On Linux the class reaches every thread that exists now
       // and every library worker started later.
@@ -1311,15 +1355,37 @@ cvc::state_exec::async_scheduler &app::exec_scheduler() {
   return *sched;
 }
 
-std::shared_ptr<cvc::state_exec::lock_manager> app::lock_manager_locked() {
-  if (!_lockManager)
-    _lockManager = std::make_shared<cvc::state_exec::lock_manager>();
+std::shared_ptr<cvc::state_exec::lock_manager> app::lock_manager_locked(std::string &note) {
+  if (!_lockManager) {
+    // The mode is chosen now and fixed (docs/STATE_EXEC_LOCKS.md 8.3). An unknown value is logged,
+    // and auto used, as state_exec.policy's is.
+    bool unknown = false;
+    cvc::state_exec::lock_manager::options opts;
+    opts.threading = lock_threading_from_state(root(), &unknown);
+    if (unknown)
+      note = "state_exec.locks.threading: unknown value '" +
+             setting_text(root(), "state_exec.locks.threading") +
+             "' (auto, single or shared); using auto";
+    _lockManager = std::make_shared<cvc::state_exec::lock_manager>(opts);
+  }
   return _lockManager;
 }
 
 std::shared_ptr<cvc::state_exec::lock_manager> app::lock_manager() {
-  boost::mutex::scoped_lock lock(_execSchedulerMutex);
-  return lock_manager_locked();
+  std::shared_ptr<cvc::state_exec::lock_manager> mgr;
+  std::string note;
+  // As in exec_scheduler(): the call that makes the manager reads the tree and may log, both
+  // interruption points, so it holds interruption off and logs once the mutex is released.
+  std::optional<boost::this_thread::disable_interruption> keep_interrupt_pending;
+  {
+    boost::mutex::scoped_lock lock(_execSchedulerMutex);
+    if (!_lockManager)
+      keep_interrupt_pending.emplace();
+    mgr = lock_manager_locked(note);
+  }
+  if (!note.empty())
+    log(1, note);
+  return mgr;
 }
 
 cvc::state_exec::async_host &app::exec_async_host() {

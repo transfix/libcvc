@@ -578,10 +578,14 @@ public:
   // those first, and their calls raise RuntimeError.)
   cvc::state_exec::async_host &exec_async_host();
 
-  // The app's lock manager (docs/STATE_EXEC_LOCKS.md 8.3): the with-lock table that
-  // exec_scheduler()'s processes share. Made on first use; exec_scheduler() attaches its home to
-  // it when it is built. Phase L1: single mode, so only exec_scheduler() uses it (another
-  // scheduler keeps a private manager of its own).
+  // The app's lock manager (docs/STATE_EXEC_LOCKS.md 8.3, 8.4): the with-lock table that the
+  // schedulers over this app's tree share: exec_scheduler() (which attaches its home when it is
+  // built), Ariadne's init lane, and pycvc's Execs. A scheduler given no manager keeps a private
+  // one. Made at the first call, which fixes its mode from state_exec.locks.threading: single or
+  // shared as it says, or auto (the default): shared when the build has threads
+  // (state_exec::threads_compiled_in) and either state_exec.threads is above 0 or a threaded host
+  // announced itself (state_exec::detail::note_threaded_host(), pycvc's import), else single. An
+  // unknown value is logged and auto used. A single manager refuses a home attached cross_thread.
   std::shared_ptr<cvc::state_exec::lock_manager> lock_manager();
 
   // Used to easily manage saving/restoring thread info as we
@@ -961,8 +965,10 @@ protected:
   std::unique_ptr<cvc::state_exec::async_host> _execAsyncHost;
   // lock_manager(); guarded by _execSchedulerMutex. Its homes hold it too.
   std::shared_ptr<cvc::state_exec::lock_manager> _lockManager;
-  // lock_manager() with _execSchedulerMutex held (a boost::mutex: not recursive).
-  std::shared_ptr<cvc::state_exec::lock_manager> lock_manager_locked();
+  // lock_manager() with _execSchedulerMutex held (a boost::mutex: not recursive). The call that
+  // makes the manager chooses its mode; an unknown state_exec.locks.threading leaves the warning
+  // in `note`, for the caller to log once the mutex is released.
+  std::shared_ptr<cvc::state_exec::lock_manager> lock_manager_locked(std::string &note);
 
   // Interrupt and join this app's tracked threads (two-phase, per-thread
   // timeout). Call it (or wait()) from main() before exit if you spawned work;
