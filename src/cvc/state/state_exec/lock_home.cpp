@@ -709,14 +709,19 @@ void lock_home::release_frame(process &p, std::optional<std::uint64_t> hold,
       }
     }
     if (lock_enter && pl.ticket) {
-      // Defensive (protocol 5.4): a lock_enter frame unwound with its ticket still queued.
+      // Defensive (protocol 5.4): a lock_enter frame unwound with its ticket still set, as when
+      // the step that queued it throws. Another home may have granted the ticket meanwhile: the
+      // cancel then finds it granted, and that grant, which never reached the mirror, is given
+      // back as any lock_enter frame's grant is. The notes are delivered once both are done.
       const std::uint64_t tid = *pl.ticket;
       lock_notes notes;
       table_.cancel(pid_of(p), tid, notes);
-      deliver_op(notes);
-      table_.resume(pid_of(p), tid);
+      const lock_outcome out = table_.resume(pid_of(p), tid);
       pl.ticket.reset();
       clear_wait_fields(p);
+      if (out.what == lock_outcome::kind::granted)
+        table_.release(pid_of(p), out.g.hold, notes);
+      deliver_op(notes);
     }
   } catch (...) {
     // noexcept: a release can't fail on a consistent table; check() reports an inconsistent one.
@@ -725,7 +730,10 @@ void lock_home::release_frame(process &p, std::optional<std::uint64_t> hold,
 
 void lock_home::process_ended(process &p, bool abandon) {
   action a(*this);
-  if (!p.locks || (p.locks->holds.empty() && !p.locks->ticket))
+  // A process that never reached the manager has nothing there. One that did is ended there
+  // whatever its mirror says (an end that finds no record changes nothing), so a record the
+  // mirror missed can't outlive the process: a grant whose collect failed after the resume.
+  if (!p.locks)
     return;
   if (!abandon && !p.locks->holds.empty())
     table_.note_leaked_at_exit();

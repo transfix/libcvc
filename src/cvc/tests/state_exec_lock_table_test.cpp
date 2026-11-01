@@ -2433,3 +2433,66 @@ TEST(LockShared, ThreadedHostAttach) {
   EXPECT_TRUE(shared->table().empty());
   EXPECT_TRUE(single->table().empty());
 }
+
+// -- review fixes: a grant the mirror never took (R3a F2) -----------------------------------------
+
+TEST(LockHomes, UnwoundWaitGrantedByAnotherHomeIsReleased) {
+  // 5.4's defensive path: a lock_enter frame unwinds with its ticket still set (an exception in
+  // the step that queued it), and another home granted the ticket meanwhile. The cancel finds it
+  // granted; the grant never reached the mirror, so the unwind gives it back.
+  for (const lock_threading mode : {lock_threading::single, lock_threading::shared}) {
+    SCOPED_TRACE(mode_name(mode));
+    const std::shared_ptr<lock_manager> mgr = make_manager(mode);
+    auto a = std::make_unique<sched_side>(mgr);
+    auto b = std::make_unique<sched_side>(mgr);
+    process &pa = a->add(1);
+    process &pb = b->add(2);
+    const std::optional<std::uint64_t> ha = a->take(pa, X, {"k"});
+    ASSERT_TRUE(ha);
+    ASSERT_TRUE(b->wait(pb, X, {"k"}));
+    a->release(pa, *ha); // grants pb's ticket on A's thread; the wake waits in B's port
+    ASSERT_TRUE(b->home->port_pending());
+    ASSERT_EQ(mgr->stats().holds, 1u);
+    b->home->release_frame(pb, std::nullopt, true); // the unwind, before B drains
+    EXPECT_EQ(mgr->stats().holds, 0u);
+    EXPECT_FALSE(pb.lock_waiting);
+    EXPECT_TRUE(pb.locks->holds.empty());
+    EXPECT_FALSE(pb.locks->ticket);
+    b->home->drain_port(); // the wake is stale now: ignored
+    EXPECT_TRUE(b->ops.readies.empty());
+    const std::optional<std::uint64_t> ha2 = a->take(pa, X, {"k"}); // k is free
+    ASSERT_TRUE(ha2);
+    a->release(pa, *ha2);
+    check_all(*mgr, {a.get(), b.get()});
+    a.reset();
+    b.reset();
+    EXPECT_TRUE(mgr->table().empty());
+  }
+}
+
+TEST(LockHomes, ProcessEndedEndsARecordTheMirrorMissed) {
+  // A process that has reached the manager is ended there when it ends, whatever its mirror
+  // says, so a record the mirror missed (a grant whose collect failed to record it) can't outlive
+  // the process and keep its keys.
+  for (const lock_threading mode : {lock_threading::single, lock_threading::shared}) {
+    SCOPED_TRACE(mode_name(mode));
+    const std::shared_ptr<lock_manager> mgr = make_manager(mode);
+    auto a = std::make_unique<sched_side>(mgr);
+    process &pa = a->add(1);
+    const std::optional<std::uint64_t> h = a->take(pa, X, {"k"});
+    ASSERT_TRUE(h);
+    a->release(pa, *h);
+    // A hold of pa's that its mirror doesn't have.
+    const std::vector<std::string> k{"k"};
+    detail::lock_request r = request_of(X, k);
+    ASSERT_TRUE(mgr->table().try_acquire({a->home->id(), pa.pid}, {"o", 0}, r, {}));
+    ASSERT_TRUE(pa.locks && pa.locks->holds.empty() && !pa.locks->ticket);
+    a->ops.procs.set_status(pa, process_status::terminated);
+    a->home->process_ended(pa, false);
+    EXPECT_EQ(mgr->stats().holds, 0u);
+    EXPECT_EQ(mgr->stats().leaked_at_exit, 0u); // the mirror held nothing
+    mgr->check();
+    a.reset();
+    EXPECT_TRUE(mgr->table().empty());
+  }
+}
