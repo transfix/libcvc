@@ -74,7 +74,7 @@ holon::holon(holon_role role, holon_config cfg)
     : _role(role), _cfg(cfg), _clock(cfg.clock), _driver(_clock) {
   if (_cfg.physics) {
     try {
-      _world = std::make_unique<avatar_world>(_clock.fixed_dt(), _cfg.body);
+      _world = std::make_unique<avatar_world>(_clock.fixed_dt(), _cfg.body, _cfg.energy);
     } catch (const std::exception &e) {
       std::fprintf(stderr,
                    "holon: no avatar physics in this build (%s); avatars move kinematically and "
@@ -207,6 +207,53 @@ bool holon::override_state(const std::string &pid, const cvc::physics::body_stat
   else
     it->second.sim.set_state(feet);
   return true;
+}
+
+void holon::set_energy_policy(const avatar_energy_policy &p, std::uint64_t revision) {
+  _cfg.energy = p;
+  _energy_rev = revision;
+  if (_world)
+    _world->set_energy_policy(p);
+}
+
+bool holon::energy(const std::string &pid, avatar_energy &out) const {
+  if (!_world || !_world->has_avatar(pid))
+    return false;
+  out = _world->energy(pid);
+  return true;
+}
+
+void holon::apply_authoritative_reserve(const std::string &pid, std::uint64_t server_tick,
+                                        double joules) {
+  if (_role != holon_role::client || !_world || !_world->has_avatar(pid))
+    return;
+  const auto it = _participants.find(pid);
+  if (it == _participants.end() || !it->second.local)
+    return;
+  participant &p = it->second;
+  if (server_tick <= p.reserve_tick)
+    return; // already applied (a pump re-reads the tree every frame)
+  p.reserve_tick = server_tick;
+  const double now = _world->energy(pid).reserve;
+  for (participant::logged &e : p.log)
+    if (e.tick == server_tick) {
+      // Off by D at that tick: so is everything predicted since (the replay's spending is the
+      // same either way, until a limit bites, which the next correction catches).
+      const double d = joules - e.reserve_after;
+      if (d == 0.0)
+        return;
+      for (participant::logged &f : p.log)
+        if (f.tick > server_tick)
+          f.reserve_before += d, f.reserve_after += d;
+      e.reserve_after = joules;
+      _world->set_reserve(pid, now + d);
+      return;
+    }
+  // Too old for the log (or not yet in it): the server's value stands, unless the prediction is
+  // close enough that the difference is the inputs in flight.
+  const double tol = 0.02 * _cfg.energy.reserve_max;
+  if (std::fabs(joules - now) > tol)
+    _world->set_reserve(pid, joules);
 }
 
 bool holon::set_mass(const std::string &pid, double kg) {
@@ -525,9 +572,14 @@ bool holon::world_reconcile(const std::string &pid, participant &p,
   _world->place(pid, auth);
   while (!p.log.empty() && p.log.front().tick <= server_tick)
     p.log.pop_front();
+  // Replay from the reserve the first replayed step began with, so the steps are not paid twice.
+  if (!p.log.empty())
+    _world->set_reserve(pid, p.log.front().reserve_before);
   for (participant::logged &e : p.log) {
+    e.reserve_before = _world->energy(pid).reserve;
     world_step_client(pid, e.in);
     e.after = _world->state(pid);
+    e.reserve_after = _world->energy(pid).reserve;
   }
   const cvc::physics::vec3 d = _world->state(pid).position - before;
   p.correction = p.correction + d;
@@ -564,11 +616,13 @@ void holon::on_step(const cvc::clock_driver::clock_frame &f) {
           continue;
         self->second.render_prev = _world->state(self->first);
         self->second.have_render_prev = true;
-        world_step_client(self->first, self->second.intent);
         participant::logged e;
+        e.reserve_before = _world->energy(self->first).reserve;
+        world_step_client(self->first, self->second.intent);
         e.tick = tick;
         e.in = self->second.intent;
         e.after = _world->state(self->first);
+        e.reserve_after = _world->energy(self->first).reserve;
         self->second.log.push_back(e);
         if (self->second.log.size() > predicted_avatar::kMaxLog)
           self->second.log.pop_front();

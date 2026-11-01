@@ -130,6 +130,7 @@ std::vector<avatar_static> room_statics(cvc::app &app, const std::string &room);
 // (what the relay wants); a test injects a fixed dt for a deterministic step count.
 // WRITE_POSES false skips the pose write-back: a relay that streams poses to its clients
 // (room_pose_relay) writes the tree's copy only now and then, for late joiners and the log.
+// Each participant's reserve (room_avatar.h) is written either way: no snapshot carries it.
 void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_dt = -1.0,
                  bool write_poses = true);
 

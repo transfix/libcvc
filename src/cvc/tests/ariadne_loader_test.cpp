@@ -466,6 +466,41 @@ windows:
   EXPECT_TRUE(fraction->overlay.empty());
 }
 
+// plot: a read-only line graph of the comma-separated numbers at bind, its range fitted to them
+// unless lo < hi, with an optional caption (overlay) and height. It precedes overlay: in the short
+// form, so a plot with a caption is a plot.
+TEST(AriadneLoader, PlotWidget) {
+  const std::string doc = R"(
+meta: { name: T, min_libcvc: 3.4.0 }
+windows:
+  - window: W
+    children:
+      - plot: Reserve
+        bind: self.avatar.history.reserve
+        lo: 0
+        hi: 30
+        height: 80
+        overlay: self.avatar.history.window
+      - plot: Power
+        bind: self.avatar.history.power
+)";
+  LoadResult r = load_string(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(count(r.root, Kind::Plot), 2);
+  const Widget *reserve = find(r.root, Kind::Plot, "Reserve");
+  ASSERT_NE(reserve, nullptr);
+  EXPECT_EQ(reserve->bind, "self.avatar.history.reserve");
+  EXPECT_EQ(reserve->lo, 0.0);
+  EXPECT_EQ(reserve->hi, 30.0);
+  EXPECT_EQ(reserve->plot_height, 80.0);
+  EXPECT_EQ(reserve->overlay, "self.avatar.history.window");
+  const Widget *power = find(r.root, Kind::Plot, "Power");
+  ASSERT_NE(power, nullptr);
+  EXPECT_GE(power->lo, power->hi) << "no range given: fitted to the numbers";
+  EXPECT_EQ(power->plot_height, 60.0);
+  EXPECT_TRUE(is_builtin_widget_type("plot")) << "so requires: and (has? \"plot\") see it";
+}
+
 TEST(AriadneLoader, InputTextAndInputInt) {
   SKIP_WITHOUT_YAML();
   const char *doc = R"(
@@ -5027,6 +5062,19 @@ TEST(AriadneComponents, ShippedExamplesDeclareWhatTheyNeed) {
       ASSERT_NE(it, r.requirements.end()) << name << " has a scene: but does not require gl.scene";
       EXPECT_FALSE(it->optional) << name << " lists gl.scene as optional";
     }
+    // A shader: block runs only where the scene runs the document's GLSL; the example says
+    // whether it can do without (optional) or not.
+    const std::function<bool(const std::vector<SceneNode> &)> shaded =
+        [&](const std::vector<SceneNode> &nodes) {
+          return std::any_of(nodes.begin(), nodes.end(), [&](const SceneNode &n) {
+            return n.shader.present || shaded(n.children);
+          });
+        };
+    if (shaded(r.scene.nodes))
+      EXPECT_TRUE(
+          std::any_of(r.requirements.begin(), r.requirements.end(),
+                      [](const HostRequirement &q) { return q.name == "gl.scene.shaders"; }))
+          << name << " has a shader: block but does not list gl.scene.shaders";
   }
   EXPECT_GE(seen, 18); // the examples under examples/ariadne
 }

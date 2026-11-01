@@ -13,9 +13,12 @@
 // itself included. The two-node test uses room_intrinsics_test's harness (two apps + two shards +
 // an inproc transport).
 
+#include <algorithm>
+#include <cvc/ariadne/conference/avatar_panel.h>
 #include <cvc/ariadne/conference/room_avatar.h>
 #include <cvc/ariadne/conference/room_intrinsics.h>
 #include <cvc/ariadne/conference/room_write_gate.h>
+#include <cvc/ariadne/holon.h>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
@@ -184,6 +187,46 @@ TEST(RoomAvatar, PartsOutsideTheEnvelopeAreNotDrawn) {
       << "the two outside parts dropped, then the rest capped";
 }
 
+// The relay's policy (§5k) round-trips through the tree, bumping its revision; a reserve reads back
+// as written, in whole joules.
+TEST(RoomAvatar, ThePolicyAndAReserveRoundTrip) {
+  cvc::app app;
+  cvc::ariadne::avatar_energy_policy p;
+  EXPECT_FALSE(conf::read_avatar_policy(app, "r", p)) << "none written yet";
+  EXPECT_EQ(conf::avatar_policy_revision(app, "r"), 0u);
+  p.enabled = true;
+  p.force_max = 600.0;
+  p.power_rest = 150.0;
+  p.reserve_max = 12000.0;
+  p.transport_cost = 0.25;
+  p.empty = cvc::ariadne::avatar_energy_policy::when_empty::stop;
+  p.recover_fraction = 0.5;
+  conf::write_avatar_policy(app, "r", p);
+  EXPECT_EQ(conf::avatar_policy_revision(app, "r"), 1u);
+  cvc::ariadne::avatar_energy_policy q;
+  ASSERT_TRUE(conf::read_avatar_policy(app, "r", q));
+  EXPECT_TRUE(q.enabled);
+  EXPECT_DOUBLE_EQ(q.force_max, 600.0);
+  EXPECT_DOUBLE_EQ(q.power_rest, 150.0);
+  EXPECT_DOUBLE_EQ(q.reserve_max, 12000.0);
+  EXPECT_FLOAT_EQ(static_cast<float>(q.transport_cost), 0.25f);
+  EXPECT_EQ(q.empty, cvc::ariadne::avatar_energy_policy::when_empty::stop);
+  EXPECT_DOUBLE_EQ(q.recover_fraction, 0.5);
+  p.enabled = false;
+  conf::write_avatar_policy(app, "r", p);
+  EXPECT_EQ(conf::avatar_policy_revision(app, "r"), 2u);
+  ASSERT_TRUE(conf::read_avatar_policy(app, "r", q));
+  EXPECT_FALSE(q.enabled);
+
+  double j = 0.0;
+  std::uint64_t t = 0;
+  EXPECT_FALSE(conf::read_avatar_reserve(app, "r", "A", j, t));
+  conf::write_avatar_reserve(app, "r", "A", 1234.4, 77);
+  ASSERT_TRUE(conf::read_avatar_reserve(app, "r", "A", j, t));
+  EXPECT_DOUBLE_EQ(j, 1234.0);
+  EXPECT_EQ(t, 77u);
+}
+
 // Across the wire: the relay's catalog reaches a client, the client's choice reaches the relay and
 // the other client, and both clients resolve the chooser's look the same -- the chooser included.
 // The relay's write gate lets a participant write its own choice and nothing else.
@@ -230,9 +273,66 @@ TEST(RoomAvatar, AChoiceReplicatesAndOnlyItsOwnerMayWriteIt) {
       << "but not someone else's";
   EXPECT_FALSE(gate.may_write("A", catalog, cvc::state_mutation_op::set_value))
       << "nor the catalog: only the relay supplies it";
+  const std::string reserve = conf::room_participant_path("room", "A") + cvc::state::SEPARATOR +
+                              "energy" + cvc::state::SEPARATOR + "reserve";
+  EXPECT_FALSE(gate.may_write("A", reserve, cvc::state_mutation_op::set_value))
+      << "nor its own reserve: the relay counts it";
 
   for (cvc::state_cluster_shard *s : {&sS, &sA, &sB}) {
     tp.unregister_shard(s);
     s->detach();
   }
+}
+
+// The Avatar window's model (avatar_panel.h): from the client holon and the room tree it publishes
+// the look, the body, the relay's policy, the reserve, balanced books and a history that grows a
+// sample per period, under <prefix>.self.avatar.
+TEST(RoomAvatar, ThePanelPublishesTheBudgetLedgerAndHistory) {
+  cvc::app app;
+  conf::seed_avatar_catalog(app, "room");
+  conf::write_avatar_choice(app, "room", "A", {"teal", "cap"});
+  cvc::ariadne::holon_config cfg;
+  cfg.physics = true;
+  cvc::ariadne::holon client(cvc::ariadne::holon_role::client, cfg);
+  conf::avatar_panel panel(/*period=*/0.25, /*capacity=*/8);
+  client.add_participant("A", /*local=*/true);
+  panel.update(client, app, "room", "A", 0.0);
+  if (!client.physics()) {
+    EXPECT_FALSE(panel.ready()) << "no physics, no energy to show";
+    GTEST_SKIP() << "no Jolt backend in this build";
+  }
+  cvc::ariadne::avatar_static floor;
+  floor.center = cvc::physics::vec3{0.0, 0.0, -0.1};
+  floor.half_extents = cvc::physics::vec3{200.0, 200.0, 0.1};
+  client.set_statics({floor}, 1);
+  client.set_intent("A", cvc::ariadne::avatar_intent{cvc::physics::vec3{4.0, 0.0, 0.0}});
+  const double dt = client.clock().fixed_dt();
+  for (int i = 0; i < 240; ++i) { // 2 s: eight samples of a quarter second
+    client.advance(dt);
+    panel.update(client, app, "room", "A", dt);
+  }
+  ASSERT_TRUE(panel.ready());
+  EXPECT_EQ(panel.reserve_history().size(), 8u) << "capped at its capacity";
+  EXPECT_GT(panel.power_history().back(), 500.0) << "walking at 4 m/s spends ~549 W";
+  panel.publish(app, "ui.docs.conf");
+  const auto get = [&](const std::string &k) {
+    cvc::state *n = app.root().findDescendant("ui.docs.conf.self.avatar." + k);
+    return n ? n->value() : std::string("<missing>");
+  };
+  EXPECT_EQ(get("ready"), "1");
+  EXPECT_EQ(get("look.color"), "Teal");
+  EXPECT_EQ(get("look.accessory"), "Cap");
+  EXPECT_EQ(get("controller"), "walker");
+  EXPECT_EQ(get("body"), "0.50 x 0.50 x 1.70 m box, 70 kg");
+  EXPECT_EQ(get("policy.reserve"), "30.0 kJ");
+  EXPECT_EQ(get("policy.sustains"), "2.2 m/s on resting power");
+  EXPECT_EQ(get("energy.state"), "spending");
+  EXPECT_LT(std::stod(get("energy.fraction")), 1.0);
+  EXPECT_EQ(get("ledger.start"), "30.0 kJ");
+  EXPECT_EQ(get("ledger.residual"), "0.000 J") << "the books balance";
+  EXPECT_NE(get("ledger.work").find("J"), std::string::npos);
+  EXPECT_GT(std::stod(get("ledger.share.carried")), 0.5) << "a steady walk is mostly carrying";
+  const std::string reserve = get("history.reserve");
+  EXPECT_EQ(std::count(reserve.begin(), reserve.end(), ','), 7) << "eight samples";
+  EXPECT_EQ(get("history.window"), "the last 2 s");
 }

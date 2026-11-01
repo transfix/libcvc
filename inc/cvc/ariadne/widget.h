@@ -35,6 +35,7 @@ enum class Kind {
   Text,           // static caption OR a read-only view of a state path
   Separator,      // a horizontal rule
   Progress,       // a read-only bar: the number at a state path, over [lo, hi]
+  Plot,           // a read-only line graph: the comma-separated numbers at a state path
   Checkbox,       // bound bool state
   SliderInt,      // bound int state, [ilo, ihi]
   SliderFloat,    // bound double state, [lo, hi]
@@ -288,7 +289,10 @@ struct Widget {
 
   // Kind::Progress: the bar is the number at `bind` placed in [lo, hi] (clamped); `overlay` is a
   // state path (or a computed expression) whose text is drawn over the bar, else the percent.
+  // Kind::Plot: `overlay` is the graph's caption the same way, and [lo, hi] its vertical range
+  // (lo >= hi: fitted to the numbers).
   std::string overlay;
+  double plot_height = 60.0; // Kind::Plot: pixels (a window backend's)
 
   // §12 module mount (load:): when non-empty, this widget is a MOUNT POINT — a relative
   // state-path segment (e.g. "includes.stats") appended to the enclosing scope, so its whole
@@ -428,6 +432,19 @@ inline Widget with_text_color(Widget w, float r, float g, float b) {
 inline Widget separator() {
   Widget w;
   w.kind = Kind::Separator;
+  return w;
+}
+
+inline Widget plot(std::string label, std::string bind, double lo = 0.0, double hi = 0.0,
+                   std::string overlay = "", double height = 60.0) {
+  Widget w;
+  w.kind = Kind::Plot;
+  w.label = std::move(label);
+  w.bind = std::move(bind);
+  w.lo = lo;
+  w.hi = hi;
+  w.overlay = std::move(overlay);
+  w.plot_height = height;
   return w;
 }
 

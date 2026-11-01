@@ -979,6 +979,61 @@ Each viewer's rung adapts to its link.
     bundle is cy-pca/cvcpkg#467; the browser client needs it to hear Opus.
   - Audio is not re-encoded per viewer: 32 kbit/s is already far below anything video sends.
 
+### 5k. Avatars: look, body, controller, energy (the frame for bring-your-own)
+
+What a participant is in the room, as four parts. Today the server supplies every part. The frame is
+chosen so each part can later come from the user without changing who decides.
+
+| Part | What it is | Now | Later |
+|---|---|---|---|
+| **Look** | what is drawn | a colour + accessory from the relay's catalog (§5g) | a user's mesh inside the body's envelope |
+| **Body** | the collision shape and mass the physics simulates | one box for everyone | server-supplied bodies, then a user's description, within the server's size limits |
+| **Controller** | what turns a participant's intent into forces on the body | the server's walker | other server controllers a user picks (a Jolt vehicle: a Humvee like DBG demo3-csma's), then a user's own vehicle or controller |
+| **Energy** | what the controller may spend | the server's budget, the same for everyone | the same rule for every controller, user-supplied ones included |
+
+**Rules that hold at every step:**
+- **The relay is the authority.** It simulates every body and runs every controller. A participant
+  only asks (its intent) and picks from what the server offers. What a user brings is a description
+  the server validates (sizes, masses, a controller it can run), never code it trusts.
+- **The server sets the policy.**
+  - The size limits a body must fit (once bodies vary).
+  - The energy budget, the same for every avatar (decided 2026-11-01): size and mass are trade-offs,
+    not advantages.
+  - What an empty reserve means.
+
+  The relay publishes the policy in the room (`conf.rooms.<room>.avatars.policy`), so clients predict
+  under the same rule.
+- **Controllers are deterministic** on the relay and in the client's prediction (the same inputs,
+  the same state, the same result), and **metered by the budget**: whatever a controller does with
+  the body is paid for from the same reserve.
+
+**The energy budget (walker, built first).**
+- **Limits** are the same for everyone:
+  - a push of at most `force_max` (840 N), so a heavier body accelerates more slowly;
+  - at most `power_max` (1.2 kW);
+  - a reserve of `reserve_max` (30 kJ) that refills at `power_rest` (300 W) less what is being
+    spent.
+- **What it costs:**
+  - the positive work the controller does on the body;
+  - plus carrying its weight along at `transport_cost` x m g |v| (0.2, a walking human's cost of
+    transport).
+- **What that buys:** a 70 kg walker sustains about 2.2 m/s on resting power and walks at the 4 m/s
+  limit for about two minutes on its reserve.
+- **When the reserve is empty** (server policy):
+  - `rest`: resting power only;
+  - `stop`: no speeding up until a quarter has refilled.
+- **Replication:** the relay publishes each avatar's reserve beside its pose. The owner's client
+  predicts with it and shows it as stamina.
+
+**Phases:**
+1. Server looks (§5g).
+2. The energy budget, server policy, and the walker as the first controller (this step).
+3. Server-supplied bodies and controllers a participant picks from the catalog (sizes within the
+   policy; a Jolt vehicle among them).
+4. User looks, then user bodies.
+5. User controllers (sandboxed, deterministic, metered), or a user's body driven by a server
+   controller of their choosing.
+
 ---
 
 ## 6. Data plane & transport
