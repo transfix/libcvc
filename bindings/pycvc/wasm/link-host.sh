@@ -12,7 +12,9 @@
 #            libcvcGL.a, the .py proxies). May equal DEPS (one-prefix layout).
 #   SRC    = libcvc repo root (for bindings/pycvc/wasm/pycvc_host.cpp).
 #   EMSDK  = activated emsdk (emcc.bat/em++ on it); OUT = output dir.
-#   NODE   = optional node to smoke-run the result.
+#   NODE   = optional node to smoke-run the result. When set, the script's exit
+#            status is the smoke's (pycvc_host.cpp's default script exits non-zero
+#            when an import, or Exec(app) running a with-lock, fails).
 #
 # Key facts it encodes:
 #   * numpy's wasm C-extensions are RELOCATABLE objects (not side modules), so
@@ -112,4 +114,9 @@ DEP_LIBS=("$DEPS"/lib/*.a)
     --pre-js "$OUT/pre.js" \
     -o "$OUT/pycvc_host.js"
 echo "link-host: built $OUT/pycvc_host.wasm"
-[ -n "${NODE:-}" ] && [ -f "$OUT/pycvc_host.wasm" ] && "$NODE" "$OUT/pycvc_host.js" || true
+# The smoke, only with NODE set; under set -e a failing smoke fails the script. build-wasm.sh
+# keeps the link (and so this) non-fatal for packaging; the release workflow runs the installed
+# host itself and fails on it.
+if [ -n "${NODE:-}" ]; then
+    "$NODE" "$OUT/pycvc_host.js"
+fi
