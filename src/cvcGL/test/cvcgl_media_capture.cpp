@@ -27,10 +27,12 @@
 #include <cvc/ariadne/stream_intrinsics.h> // register_stream_intrinsics
 #include <cvc/core/app.h>
 #include <cvc/gl/ariadne/media_verbs.h> // register_media_intrinsics (this PR)
+#include <cvc/gl/jpeg_codec.h>          // decode_jpeg_to_rgba
 #include <cvc/state/state.h>
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace ari = cvc::ariadne;
 namespace sx = cvc::ariadne::stream;
@@ -126,6 +128,38 @@ int main() {
   std::printf("jpeg 160x120: q20 %zu bytes, q95 %zu bytes\n", lo, hi);
   assert(lo > 0 && hi > 0 && "both encoders published");
   assert(lo < hi && "a lower quality encodes smaller frames");
+
+  // A portrait camera in the conference's landscape stream (a phone held upright). Its frames go
+  // out at their own shape within the 320x240 budget, and the JPEG says so: a viewer decodes
+  // 180x320, not the stream's 320x240 (which is how a phone came out squashed).
+  rt.set_tick_program(
+      "(if (= (state-get \"tall.done\") \"1\") #f"
+      "  (begin"
+      "    (stream-capture-camera"
+      "      (get-attr (stream-open (dict \"id\" \"tall\" \"codec\" \"mjpeg\" \"w\" 320"
+      "                                   \"h\" 240))"
+      "                \"token\")"
+      "      (dict \"synthetic\" #t \"w\" 180 \"h\" 320 \"hz\" 240 \"jpeg\" #t))"
+      "    (state-set \"tall.done\" \"1\")))");
+  rt.drain();
+  assert(cvc::state::instance(app)("tall.done").value() == "1" && "the portrait program ran");
+  {
+    sx::stream_channel *c =
+        sx::stream_registry::for_app(app).lookup(sx::stream::registry_key("", "tall"));
+    assert(c && "the portrait stream is open");
+    std::shared_ptr<sx::subscription> s = c->subscribe(sx::deliver_mode::latest);
+    sx::frame_ptr f;
+    for (int i = 0; i < 400 && !(f = s->latest()); ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    std::vector<std::uint8_t> rgba;
+    int w = 0, h = 0;
+    assert(f &&
+           cvc::gl::decode_jpeg_to_rgba(static_cast<const std::uint8_t *>(f->data), f->size, rgba,
+                                        w, h) &&
+           "the portrait capture published a decodable JPEG");
+    std::printf("portrait capture in a 320x240 stream: %dx%d\n", w, h);
+    assert(w == 180 && h == 320 && "the JPEG carries the frame's own shape");
+  }
 
   std::printf("cvcgl_media_capture: OK (synthetic capture via DSL verb -> %lld frames)\n",
               published);

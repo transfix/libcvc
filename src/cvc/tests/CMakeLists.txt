@@ -4,6 +4,9 @@ cmake_minimum_required(VERSION 3.15)
 # Test executables
 add_executable(app_test app_test.cpp)
 add_executable(thread_pool_test thread_pool_test.cpp)
+# The OS thread and process classes (PR-9): an executable of its own, since a process class can't
+# be undone unprivileged on Linux.
+add_executable(thread_class_test thread_class_test.cpp)
 add_executable(text_test text_test.cpp)
 add_executable(ariadne_loader_test ariadne_loader_test.cpp)
 add_executable(ariadne_doc_fetch_test ariadne_doc_fetch_test.cpp)
@@ -19,6 +22,7 @@ add_executable(x11_macro_headers_test x11_macro_headers_test.cpp)
 add_executable(net_http_client_test net_http_client_test.cpp)
 add_executable(net_ws_client_test net_ws_client_test.cpp)
 add_executable(net_policy_test net_policy_test.cpp)
+add_executable(net_oidc_test net_oidc_test.cpp)
 add_executable(uri_http_cache_test uri_http_cache_test.cpp)
 add_executable(state_test state_test.cpp)
 add_executable(state_lifetime_stress_test state_lifetime_stress_test.cpp)
@@ -88,6 +92,7 @@ add_executable(state_exec_async_test state_exec_async_test.cpp)
 add_executable(async_lane_test async_lane_test.cpp)
 add_executable(state_exec_scheduler_test state_exec_scheduler_test.cpp)
 add_executable(state_exec_locks_test state_exec_locks_test.cpp)
+add_executable(state_exec_priority_test state_exec_priority_test.cpp)
 # The lock manager's table: its directed cases (state_exec_lock_table_test.cpp) and the model check
 # (state_exec_locks_model_test.cpp), one executable with two authors (locks plan L1.2, L1.3).
 add_executable(state_exec_locks_model_test state_exec_locks_model_test.cpp
@@ -131,6 +136,7 @@ add_executable(holon_test holon_test.cpp)
 add_executable(holon_sync_test holon_sync_test.cpp)
 add_executable(state_link_stats_test state_link_stats_test.cpp)
 add_executable(room_scene_test room_scene_test.cpp)
+add_executable(room_avatar_test room_avatar_test.cpp)
 add_executable(room_aoi_test room_aoi_test.cpp)
 add_executable(room_aoi_relay_test room_aoi_relay_test.cpp)
 add_executable(physics_codec_test physics_codec_test.cpp)
@@ -300,6 +306,7 @@ add_executable(world_bundle_test world_bundle_test.cpp)
 set(TEST_TARGETS
   app_test
   thread_pool_test
+  thread_class_test
   text_test
   ariadne_loader_test
   ariadne_doc_fetch_test
@@ -315,6 +322,7 @@ set(TEST_TARGETS
   net_http_client_test
   net_ws_client_test
   net_policy_test
+  net_oidc_test
   uri_http_cache_test
   state_test
   state_lifetime_stress_test
@@ -372,6 +380,7 @@ set(TEST_TARGETS
   holon_sync_test
   state_link_stats_test
   room_scene_test
+  room_avatar_test
   room_aoi_test
   room_aoi_relay_test
   physics_codec_test
@@ -523,6 +532,7 @@ list(APPEND TEST_TARGETS
   state_exec_scheduler_test
   state_exec_locks_test
   state_exec_locks_model_test
+  state_exec_priority_test
   state_exec_intrinsics_test
   state_exec_coordinator_test
   state_exec_bench_test
@@ -618,6 +628,13 @@ target_link_libraries(thread_pool_test
     GTest::gtest_main
 )
 
+target_link_libraries(thread_class_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(text_test
   PRIVATE
     cvc
@@ -692,6 +709,13 @@ target_link_libraries(ariadne_stream_view_test
 )
 
 target_link_libraries(net_http_client_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(net_oidc_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1740,6 +1764,13 @@ target_link_libraries(state_exec_locks_model_test
     GTest::gtest_main
 )
 
+target_link_libraries(state_exec_priority_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(state_exec_intrinsics_test
   PRIVATE
     cvc
@@ -1905,6 +1936,13 @@ target_link_libraries(state_link_stats_test
 )
 
 target_link_libraries(room_scene_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(room_avatar_test
   PRIVATE
     cvc
     GTest::gtest
@@ -2343,6 +2381,7 @@ target_compile_features(async_lane_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_scheduler_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_locks_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_locks_model_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_priority_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_intrinsics_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_coordinator_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_bench_test PRIVATE cxx_std_20)
@@ -2380,6 +2419,7 @@ target_compile_features(holon_test PRIVATE cxx_std_17)
 target_compile_features(holon_sync_test PRIVATE cxx_std_17)
 target_compile_features(state_link_stats_test PRIVATE cxx_std_17)
 target_compile_features(room_scene_test PRIVATE cxx_std_17)
+target_compile_features(room_avatar_test PRIVATE cxx_std_17)
 target_compile_features(room_aoi_test PRIVATE cxx_std_17)
 target_compile_features(room_aoi_relay_test PRIVATE cxx_std_17)
 target_compile_features(physics_codec_test PRIVATE cxx_std_17)
@@ -2540,6 +2580,7 @@ endfunction()
 
 cvc_discover_tests(app_test)
 cvc_discover_tests(thread_pool_test)
+cvc_discover_tests(thread_class_test)
 cvc_discover_tests(text_test)
 cvc_discover_tests(ariadne_loader_test)
 cvc_discover_tests(ariadne_doc_fetch_test)
@@ -2555,6 +2596,7 @@ cvc_discover_tests(x11_macro_headers_test)
 cvc_discover_tests(net_http_client_test)
 cvc_discover_tests(net_ws_client_test)
 cvc_discover_tests(net_policy_test)
+cvc_discover_tests(net_oidc_test)
 cvc_discover_tests(uri_http_cache_test)
 cvc_discover_tests(state_test)
 cvc_discover_tests(state_lifetime_stress_test)
@@ -2847,6 +2889,7 @@ cvc_discover_tests(async_lane_test)
 cvc_discover_tests(state_exec_scheduler_test)
 cvc_discover_tests(state_exec_locks_test)
 cvc_discover_tests(state_exec_locks_model_test)
+cvc_discover_tests(state_exec_priority_test)
 cvc_discover_tests(state_exec_intrinsics_test)
 cvc_discover_tests(state_exec_coordinator_test)
 cvc_discover_tests(state_exec_bench_test)
@@ -2885,6 +2928,7 @@ cvc_discover_tests(holon_test)
 cvc_discover_tests(holon_sync_test)
 cvc_discover_tests(state_link_stats_test)
 cvc_discover_tests(room_scene_test)
+cvc_discover_tests(room_avatar_test)
 cvc_discover_tests(room_aoi_test)
 cvc_discover_tests(room_aoi_relay_test)
 cvc_discover_tests(physics_codec_test)

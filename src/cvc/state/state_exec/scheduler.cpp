@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/detail/priority.h>
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/scheduler.h>
 #include <cvc/state/state_exec/state_value_codec.h> // snapshot / restore
@@ -27,12 +28,13 @@ void scheduler::set_lock_manager(std::shared_ptr<lock_manager> mgr) {
         throw std::logic_error("set_lock_manager: process " + std::to_string(pid) +
                                " holds or waits for a lock");
   home_.reset();
-  home_ = std::make_unique<detail::lock_home>(std::move(mgr), lock_ops_);
+  home_ = std::make_unique<detail::lock_home>(std::move(mgr), lock_ops_, policy_);
 }
 
 detail::lock_home *scheduler::locks() {
   if (!home_)
-    home_ = std::make_unique<detail::lock_home>(std::make_shared<lock_manager>(), lock_ops_);
+    home_ =
+        std::make_unique<detail::lock_home>(std::make_shared<lock_manager>(), lock_ops_, policy_);
   return home_.get();
 }
 
@@ -267,7 +269,7 @@ int scheduler::execute(const std::string &script, const execute_options &opts) {
   // The floor (design 7.2): a host's, explicit, or the submit priority; and what the process
   // keeps alive (a spawned child's context, td 4.15).
   proc.priority_floor = opts.priority_floor.value_or(opts.priority);
-  proc.priority_floor_explicit = opts.priority_floor.has_value();
+  proc.priority_floor_explicit = opts.priority_floor.has_value() && opts.priority_floor_explicit;
   proc.parent_pid = opts.parent_pid;
   proc.keep_alive = opts.keep_alive;
   proc.max_steps = opts.max_steps;
@@ -305,7 +307,7 @@ int scheduler::execute(const value_t &expr, const execute_options &opts) {
   // The floor (design 7.2): a host's, explicit, or the submit priority; and what the process
   // keeps alive (a spawned child's context, td 4.15).
   proc.priority_floor = opts.priority_floor.value_or(opts.priority);
-  proc.priority_floor_explicit = opts.priority_floor.has_value();
+  proc.priority_floor_explicit = opts.priority_floor.has_value() && opts.priority_floor_explicit;
   proc.parent_pid = opts.parent_pid;
   proc.keep_alive = opts.keep_alive;
   proc.max_steps = opts.max_steps;
@@ -525,6 +527,9 @@ int scheduler::step() {
 
 int scheduler::step_once() {
   detail::check_not_in_async_kernel("scheduler::step");
+  // Commands posted from other threads (post_control), between steps.
+  if (control_pending_.load(std::memory_order_acquire))
+    apply_controls();
   // Wake sleeping processes (and timed waits) whose deadline has passed; time out the lock waits
   // whose deadline passed (a program with no timer pays nothing for them).
   if (procs_.timed_count() > 0) {
@@ -1139,6 +1144,8 @@ int scheduler::fork(int pid) {
   child->gid = parent.gid;
   child->root_path = parent.root_path;
   child->owner = parent.owner; // td B28: a host reaps the child with its parent (kill_owner)
+  child->priority_floor = parent.priority_floor; // design 7.2: fork copies the floor
+  child->priority_floor_explicit = parent.priority_floor_explicit;
   child->max_steps = parent.max_steps;
   child->max_time = parent.max_time;
   child->max_memory = parent.max_memory;
@@ -1207,22 +1214,54 @@ bool scheduler::set_priority(int pid, int priority) {
 }
 
 // ---------------------------------------------------------------------------
-// Priorities (docs/STATE_EXEC_LOCKS.md 7.4): declared now, built in phase L2
+// Priorities (docs/STATE_EXEC_LOCKS.md 7.4)
 // ---------------------------------------------------------------------------
+
+namespace {
+// The effective priority get-priority and inspect report: the one the pick uses, which under
+// round_robin is the base (design 7.1).
+int reported_effective(const process &p, scheduling_policy policy) {
+  return policy == scheduling_policy::round_robin ? p.priority : p.effective_priority();
+}
+
+// The descent walk's lookup (design 7.2): a live process of `procs`.
+std::function<const process *(int)> live_in(const detail::process_table &procs) {
+  return [&procs](int pid) -> const process * {
+    const process *p = procs.find(pid);
+    return p && !is_finished(p->status) ? p : nullptr;
+  };
+}
+} // namespace
 
 std::optional<priority_info> scheduler::get_priority(int pid) const {
   const process *p = procs_.find(pid);
   if (!p)
     return std::nullopt;
-  return priority_info{p->priority,
-                       policy_ == scheduling_policy::round_robin ? p->priority
-                                                                 : p->effective_priority(),
-                       p->priority_floor.value_or(p->priority), policy_};
+  return priority_info{p->priority, reported_effective(*p, policy_), detail::floor_of(*p), policy_,
+                       p->priority_floor_explicit};
 }
 
-priority_change scheduler::set_priority_checked(int, int, int) { return priority_change::unknown; }
+priority_change scheduler::set_priority_checked(int caller_pid, int pid, int priority) {
+  const process *caller = procs_.find(caller_pid);
+  const process *target = procs_.find(pid);
+  if (!caller || !target)
+    return priority_change::unknown;
+  const priority_change r =
+      detail::check_priority_change(*caller, *target, priority, live_in(procs_));
+  if (r == priority_change::applied)
+    set_priority(pid, priority);
+  return r;
+}
 
-std::optional<priority_info> scheduler::get_priority_as(int, int) const { return std::nullopt; }
+std::optional<priority_info> scheduler::get_priority_as(int caller_pid, int pid) const {
+  if (caller_pid != pid) { // a caller's own pid is always visible to it
+    const process *caller = procs_.find(caller_pid);
+    const process *target = procs_.find(pid);
+    if (!caller || !target || !detail::visible_to(*caller, *target, live_in(procs_)))
+      return std::nullopt;
+  }
+  return get_priority(pid);
+}
 
 bool scheduler::set_priority_floor(int pid, int floor) {
   process *p = procs_.find(pid);
@@ -1233,9 +1272,41 @@ bool scheduler::set_priority_floor(int pid, int floor) {
   return true;
 }
 
-void scheduler::note_priority_clamped() {}
+void scheduler::note_priority_clamped() {
+  // The count is the record: state_exec has no log sink to tell once (gap G-5).
+  ++priority_clamped_;
+}
 
-bool scheduler::post_control(int, control_cmd) { return false; }
+bool scheduler::post_control(int pid, control_cmd cmd) {
+  // Any thread: queued, and applied at the top of the next step (apply_controls), on the
+  // scheduler's thread. The posting thread may not read procs_, so an unknown pid is found, and
+  // ignored, there. An idle run() is not woken: it applies the command once its wait ends.
+  std::lock_guard<std::mutex> lock(control_mutex_);
+  controls_.emplace_back(pid, std::move(cmd));
+  control_pending_.store(true, std::memory_order_release);
+  return true;
+}
+
+void scheduler::apply_controls() {
+  std::vector<std::pair<int, control_cmd>> controls;
+  {
+    std::lock_guard<std::mutex> lock(control_mutex_);
+    controls.swap(controls_);
+    control_pending_.store(false, std::memory_order_relaxed);
+  }
+  chain_valid_ = false; // a query's time is no step's
+  for (auto &[pid, cmd] : controls) {
+    switch (cmd.what) {
+    case control_cmd::kind::set_priority:
+      set_priority(pid, cmd.value); // the host path, unchecked (design 7.4); false for a gone pid
+      break;
+    case control_cmd::kind::query:
+      if (cmd.query)
+        cmd.query(*this);
+      break;
+    }
+  }
+}
 
 bool scheduler::set_max_steps(int pid, uint64_t max_steps) {
   auto it = procs_.all().find(pid);
@@ -1307,6 +1378,8 @@ process_info scheduler::make_info(const process &proc) const {
   info.exit_error = proc.exit_error;
   info.exit_exception = proc.exit_exception;
   info.locks_held = proc.locks ? proc.locks->holds.size() : 0;
+  info.effective_priority = reported_effective(proc, policy_);
+  info.priority_floor = detail::floor_of(proc);
   if (proc.status == process_status::waiting) {
     if (proc.lock_waiting)
       info.waiting_on = "lock /" + detail::lock_home::waiting_key(proc);
@@ -1396,6 +1469,7 @@ scheduler_stats scheduler::get_stats() const {
   scheduler_stats s;
   s.total_processes = static_cast<int>(procs_.size());
   s.total_steps = total_steps_;
+  s.priority_clamped = priority_clamped_;
   for (const auto &[pid, proc] : procs_.all()) {
     switch (proc->status) {
     case process_status::running:

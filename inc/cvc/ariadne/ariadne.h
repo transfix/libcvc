@@ -27,6 +27,7 @@
 #include <cvc/ariadne/widget.h>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -149,6 +150,15 @@ public:
   // render pass, or the backend's own loop). A pure reader of state that only
   // ENQUEUES action intents — it never runs a handler or reloads a document.
   void render();
+
+  // The frame clock that animations read rather than state (a spinner, Kind::Spinner): seconds
+  // since this Runtime was made, read from the steady clock at the top of each render(), so it
+  // moves with the host's frames whatever the document's programs are doing. A host that renders
+  // frames with no real time between them (a snapshot) pins it instead: set_frame_clock(t) holds t
+  // from the next render() on; nullopt goes back to the steady clock.
+  void set_frame_clock(std::optional<double> seconds);
+  // The clock's reading for the frame render() last drew.
+  double frame_clock() const;
 
   // Run every queued action event's handler, then clear the queue. Call once per
   // frame in the host loop, BEFORE your sim tick and OUTSIDE render().
