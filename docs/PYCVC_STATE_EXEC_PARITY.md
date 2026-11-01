@@ -110,12 +110,13 @@ approach agreed for closing the gap, and the plan.
 13. **Locks: one namespace per app** (docs/STATE_EXEC_LOCKS.md 8.3, 8.4, 9.2). Every `Exec`
     attaches its scheduler to `app::lock_manager()`, so the `with-lock` keys of all an app's
     `Exec`s and of its exec scheduler are one namespace. It attaches with
-    `lock_attach{threads_compiled_in}`, since its `run()` may be on any Python thread. pycvc calls
+    `threaded_host_attach()` (`lock_attach{threads_compiled_in}`), since its `run()` may be on any
+    Python thread. pycvc calls
     `detail::note_threaded_host()` at import, so `state_exec.locks.threading`'s `auto` makes the
     manager `shared` where the build has threads; with the setting at `single` the constructor
     raises `RuntimeError` naming it. `scheduler.set_lock_manager(app)` and
     `async_scheduler.set_lock_manager(app)` give a Python scheduler the same manager, attached the
-    same way. `Exec.lock_query(prefix="")` is `(lock-query prefix)` from the host:
+    same way, as its first lock home only (`RuntimeError` when it already has one). `Exec.lock_query(prefix="")` is `(lock-query prefix)` from the host:
     `lock_manager::query` with the `Exec`'s home as the viewer and owner `""`, so every `Exec`'s
     holds are counted and only this one's pids shown. Any thread may call it: it releases the GIL
     and takes only the manager's mutex, never the control mutex, so it never waits for `run()`; the
@@ -166,7 +167,7 @@ are listed too. Status after PR 4:
 | | `scheduler_base` | `pycvc.scheduler_base` | wrapped (PR 3) as the common base of the two classes (what `intrinsics_context.sched` holds). Its members are on the concrete classes |
 | scheduler.h | `scheduler` (about 45 members) | `pycvc.scheduler` | wrapped (PR 2). `run`/`step` release the GIL. `execute(str)` is the script overload, so a string can't be passed as a `value_t` expression (write it as the script `"\"text\""`). `id()`, `parser_settings()` and `data_settings()` (#658) return copies. `current_process()` (shares the process), `queue_watch_event()` and `max_alloc_bytes()` (#660) are wrapped in PR 3. Not wrapped: `mem_tracker()` (see memory_tracker.h) |
 | | `max_alloc_bytes_from_state(state&, id, base)` (#660) | `pycvc.max_alloc_bytes_from_state(State, …)` | wrapped (PR 3) |
-| scheduler.h, async_scheduler.h (locks L3) | `set_lock_manager(mgr, lock_attach)`; `lock_attach` and `threads_compiled_in` (lock_manager.h) | `scheduler.set_lock_manager(app)`, `async_scheduler.set_lock_manager(app)` | wrapped as the app's manager (approach item 13): the scheduler gets `app::lock_manager()`, attached with `lock_attach{threads_compiled_in}`. `RuntimeError` when the manager is `single` (naming `state_exec.locks.threading`) or while a process of the scheduler holds or waits for a lock. `lock_manager` itself is not wrapped: Python reaches the app's through these and `Exec`, and reads it with `Exec.lock_query` |
+| scheduler.h, async_scheduler.h (locks L3) | `set_lock_manager(mgr, lock_attach)`; `lock_attach` and `threads_compiled_in` (lock_manager.h) | `scheduler.set_lock_manager(app)`, `async_scheduler.set_lock_manager(app)` | wrapped as the app's manager (approach item 13): the scheduler gets `app::lock_manager()`, attached with `threaded_host_attach()`. `RuntimeError` when the manager is `single` (naming `state_exec.locks.threading`) or when the scheduler already has a lock home (an `Exec`'s does; so does one whose `with-lock` made a private home): only a first home is attached, so one in use is never replaced. The C++ `has_lock_home()` it checks is not wrapped. `lock_manager` itself is not wrapped: Python reaches the app's through these and `Exec`, and reads it with `Exec.lock_query` |
 | scheduler.h, async_scheduler.h (exceptions P2) | `get_exit_error` (the sync scheduler's is new), `get_exit_exception`, `raise_exit_exception`; `process_info::exit_error`, `process_info::exit_exception`, `scheduler_stats::failed` | the same names | wrapped. `get_exit_exception` returns the exception or None; `raise_exit_exception` raises `pycvc.dsl_error`, or a Python function's own exception |
 | async_scheduler.h | `async_scheduler` (about 55 members) | `pycvc.async_scheduler` | wrapped (PR 2), with the same notes as `scheduler`; `sync_run`/`sync_step` release the GIL, and `parser_defaults()` returns a copy. #658's `set_data_defaults`/`data_defaults`/`data_settings`/`host_data_defaults` sit beside the parser ones. Coroutine `step()`/`run()` are an exception: Python gets `sync_step()`/`sync_run()` |
 | process.h | `process_status`, `to_string(process_status)`, `parse_process_status` | `pycvc.process_status` (an `IntEnum`), `pycvc.to_string`, `pycvc.parse_process_status` | wrapped (PR 2); `failed` (exceptions P2) is a member |

@@ -419,18 +419,20 @@ may call it, with or without a `run()` active: it reads the manager under the ma
 with the GIL released, and never waits for `run()`.
 
 **`idle_timeout` and lock waits.** `run()` kills a program left parked with nothing pending for
-`idle_timeout` seconds. A lock wait counts as pending only while one of the processes it
-ultimately waits for (a holder, or an earlier waiter, that waits for no lock itself) is on another
-`Exec`, or a scheduler given the app's manager, that made progress within the last `idle_timeout`
-seconds; the window then runs from that progress. A scheduler makes progress at each step, and an
-`Exec`'s `run()` also whenever it has work pending. So a waiter behind another `Exec` that keeps
-stepping, or awaits an async call, lives; one behind an `Exec` that nobody runs, or that stopped,
-is killed about `idle_timeout` after that `Exec`'s last progress. The rule is per `Exec`, not per
-holder: a holder parked for ever on an `Exec` that keeps stepping other processes keeps the waiter
-alive. A holder on the waiter's own `Exec` counts only through `run()`'s own test (async calls in
-flight, pending coroutines, runnable processes): one parked on `msg-recv`, with nothing else
-pending there, is no progress. The kill raises `RuntimeError`, naming the key:
-`pycvc.Exec.run: parked with no pending work (pid N, waiting for lock k)`.
+`idle_timeout` seconds. A lock wait, the program's own or a spawned process's, counts as pending
+only while one of the processes it ultimately waits for (a holder, or an earlier waiter, that waits
+for no lock itself) is on another `Exec`, or a scheduler given the app's manager, that made
+progress within the last `idle_timeout` seconds; the window then runs from that progress. A
+scheduler makes progress at each step, and an `Exec`'s `run()` also whenever it has work pending.
+So a waiter behind another `Exec` that keeps stepping, or awaits an async call, lives; one behind
+an `Exec` that nobody runs, or that stopped, is killed about `idle_timeout` after that `Exec`'s last
+progress. The rule is per `Exec`, not per holder: a holder parked for ever on an `Exec` that keeps
+stepping other processes keeps the waiter alive. A holder on the waiter's own `Exec` counts only
+through `run()`'s own test (async calls in flight, pending coroutines, runnable processes): one
+parked on `msg-recv`, with nothing else pending there, is no progress. A post in the `Exec`'s lock port (a grant that landed, not yet
+applied) is pending work too. The kill raises `RuntimeError`, naming the key:
+`pycvc.Exec.run: parked with no pending work (pid N, waiting for lock k)`, or
+`(pid N, pid M waiting for lock k)` when the waiter is a process the program spawned.
 
 Two consequences. A holder inside a long synchronous Python call (`register_fn`) makes no progress
 until its step ends, so a waiter on another `Exec` whose `idle_timeout` is shorter than the call is
@@ -442,8 +444,9 @@ page that long.
 `pycvc.scheduler` and `pycvc.async_scheduler` can take the app's manager too:
 `sched.set_lock_manager(app)` gives the scheduler `app::lock_manager()`, so its programs' locks meet
 the `Exec`s'. It attaches as an `Exec` does, since Python may step it on any thread: with
-`state_exec.locks.threading` at `single` it raises `RuntimeError` naming the setting. It raises
-`RuntimeError` too while a process of the scheduler holds or waits for a lock. A scheduler given no
-manager keeps a private one, as in C++.
+`state_exec.locks.threading` at `single` it raises `RuntimeError` naming the setting. It attaches
+only a scheduler's first lock home: it raises `RuntimeError` when the scheduler already has one (an
+`Exec`'s scheduler always does, and so does one whose first `with-lock` made a private home), so a
+home in use is never replaced. A scheduler given no manager keeps a private one, as in C++.
 
 Contract test: `test_pycvc_state_exec_locks.py`.

@@ -2,8 +2,8 @@
 // pthreads that ci.yml's ari-wasm job makes; locks plan L1.12, L3.6). A plain main(), no gtest: on
 // the sync scheduler and on the async scheduler, a section's value, then a holder parked inside a
 // section and a waiter granted once the holder lets go, then an empty lock-query. Then the same on
-// an async scheduler attached to the app's lock manager as pycvc's Exec attaches (lock_attach{
-// threads_compiled_in }): where there are no threads, auto mode makes that manager single and the
+// an async scheduler attached to the app's lock manager as pycvc's Exec attaches
+// (threaded_host_attach()): where there are no threads, auto mode makes that manager single and the
 // attach is accepted. It prints STATE_EXEC_WASM_OK and returns 0, or prints what failed and
 // returns 1. Built only with CVC_BUILD_STATE_EXEC_WASM_SMOKE (it runs natively too, where threads
 // are compiled in: there the single manager refuses that attach, naming
@@ -131,7 +131,7 @@ bool run_on_app_manager() {
   ok &= expect(mgr->threading() == se::lock_threading::single, kind,
                "app::lock_manager()'s auto mode is not single");
   try {
-    w.async->set_lock_manager(mgr, se::lock_attach{se::threads_compiled_in});
+    w.async->set_lock_manager(mgr, se::threaded_host_attach());
     ok &= expect(!se::threads_compiled_in, kind, "the single manager took a cross-thread attach");
   } catch (const std::logic_error &e) {
     // Threads are compiled in (a native run): the single manager refuses the attach, naming the

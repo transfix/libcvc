@@ -1657,17 +1657,19 @@ manager operation (STATE_EXEC_LOCKS.md 8.8).
 makes the scheduler's lock home and attaches it to `mgr` at once. `lock_attach{true}` says the
 scheduler may be stepped on a thread other than the one the manager's other homes use; a single
 manager refuses such a home with `std::logic_error` naming `state_exec.locks.threading`, in every
-build. Pass `threads_compiled_in` rather than `true`, as pycvc's `Exec` does, so a build without
-threads, whose app manager `auto` makes single, never asks. `app::exec_scheduler()` attaches this
-way when the app's manager is shared. `set_lock_manager` also throws `std::logic_error` while a
-process of the scheduler holds or waits for a lock.
+build. Pass `threaded_host_attach()` (`lock_attach{threads_compiled_in}`) rather than `true`, as
+pycvc's `Exec` does, so a build without threads, whose app manager `auto` makes single, never asks.
+`app::exec_scheduler()` attaches cross-thread when the app's manager is shared. `set_lock_manager`
+also throws `std::logic_error` while a process of the scheduler holds or waits for a lock. A
+refused attach changes nothing: the scheduler keeps its home and manager. `has_lock_home()` says
+whether a scheduler has its home yet.
 
 ```cpp
 namespace se = cvc::state_exec;
 // Before anything makes the app's manager:
 cvc::state::instance(app)("state_exec.locks.threading").value("shared");
 se::async_scheduler worker; // stepped on a thread of its own
-worker.set_lock_manager(app.lock_manager(), se::lock_attach{se::threads_compiled_in});
+worker.set_lock_manager(app.lock_manager(), se::threaded_host_attach());
 ```
 
 **Several threads.** Each scheduler is still stepped by one thread at a time. Several schedulers,
