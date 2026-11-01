@@ -1116,9 +1116,40 @@ selection "in time" is on reach within 4 m/s; progress at 4 m/s):
 
 With the old penalty no arm improves on timely arrival. With the footprint and 60 s episodes,
 training raises it for the first time, but the policies arrive at 6-7 m/s and the park's 2 m/s²
-cannot stop them inside the tolerance: they end 7.5-10 m off and reach falls. Training does not
-model stopping at the goal (the progress term asks for speed right up to `progress_tol`), and the
-deployment's park brakes at the acceleration limit, not the brakes'. Both are the next step.
+cannot stop them inside the tolerance: they end 7.5-10 m off and reach falls.
+
+**The park, and what reach measured.** `sim_world` parked an arrived vehicle by braking at the
+controller's `a_max`. It now brakes at `plant_limits::a_brake` (`nav_plant`'s `brake_margin` x
+`max_decel`, 6 m/s² on the Humvee). The same policies, re-scored:
+
+| policy | reach, old park | reach, park on the brakes | held | in 4 m/s |
+|---|---|---|---|---|
+| untrained | 41.5% | 77.2% | 95% | 42.6% |
+| rollback, `w_coll` 20 (1) | 73.8% | 73.1% (-4.1 [-7.1, -1.1]) | 92% | 4.7% |
+| K | 24.5% | 62.8% | 78% | 45.2% |
+| J | 15.1% | 49.2% | 62% | 47.8% |
+
+The untrained policy reached its goals and could not stop in them; the rollback policy's +32
+points were it learning to creep in slowly enough for the park. With the park fixed, the untrained
+policy is the best on reach and in time.
+
+**Every fix, and the controller's barrier.** `progress_decel` caps the progress target at a step of
+v_stop = sqrt(2 decel (d - tol)) and charges speed over v_stop. `JOLT_EXP_DHAT_M` sets the
+controller's barrier range (the scene's `d_hat`) for training and scoring. Arms with the footprint
+penalty, 60 s episodes, `w_progress` 1 at 4 m/s with a 1.5 m/s² stopping profile, and the park on
+the brakes (each scored against the untrained policy at its own `d_hat`):
+
+| arm | `d_hat` | selected on | validation over training | held out reach / in 4 m/s | untrained at that `d_hat` |
+|---|---|---|---|---|---|
+| M | 7 m | in time | 0.430 -> 0.397 | 77.1% / 42.6% (step 0) | 77.2% / 42.6%, 1.23 hits |
+| N | 2 m | in time | 0.428 -> 0.394 | 74.7% / 42.4% (step 0) | 74.3% / 42.7%, 1.59 hits |
+| O | 1 m | in time | 0.425 -> 0.391 | 74.4% / 42.3% (step 0) | 73.9% / 42.5%, 1.44 hits |
+| P | 2 m | reach | 0.71, flat | 74.0% (-0.3 [-1.2, +0.6]) / 39.8% (step 475) | |
+
+No arm improves on the untrained policy: timely arrival drifts down over training and reach stays
+flat. A shorter barrier alone costs the untrained policy about 3 points of reach and adds building
+hits. What training gained before answered the park and the 7 m clearance; with both fixed, this
+loss's gradient (the model's, along Jolt's trajectories) does not point at the 60 s outcome.
 
 **The material trainer** (`material_integrator::jolt`, `material_train.h`). The material loss
 can be taken through Jolt too: `integrate_plant_material` (`material.h`) runs
@@ -1266,6 +1297,7 @@ Drop it in the canonical install location `$PREFIX/share/cvc/nav/coef_mlp.cvcnav
 | `rollback_lr_scale` | 0.5 | the learning rate's factor after each rollback |
 | `w_progress` | 0.0 | `rollout == jolt`: each step's shortfall from `progress_speed`'s progress toward the goal, as a fraction of a step's worth, until within `progress_tol`; 0 = off. See [What the climb buys](#training-on-jolt-rollout_kindjolt) |
 | `progress_speed`, `progress_tol` | 0.0, 0.0 | the term's speed (normalized units / s) and the distance from the goal it stops at |
+| `progress_decel` | 0.0 | with `w_progress`: a stopping profile, v_stop = sqrt(2 decel (d - tol)), capping the target and charging speed over it (normalized units / s²); 0 = off |
 | `episode_steps` | 0 | `rollout == jolt`: a batch drives on across outer steps until every agent is within `episode_tol` of its goal or this many steps; 0 = a fresh batch from rest every outer step |
 | `episode_tol` | 0.15 | the arrival distance that ends an episode early |
 | `coll_offsets`, `coll_rr` | empty, 0.0 | `rollout == jolt`: the collision penalty on discs of radius `coll_rr` along the heading from the rear axle; empty = one disc of the scene's `rr` on the axle |
