@@ -865,9 +865,12 @@ release_lock_frame(p, frame):        # noexcept; the body's last form completing
         if h.count == 0:
             remove h from p.locks
             N = M.release(P, h.id); deliver(N)
-    if frame is lock_enter and p.lock_ticket != none:  # defensive: woken without a grant
+    if frame is lock_enter and p.lock_ticket != none:  # defensive: unwound with its ticket set
         tid = p.lock_ticket
-        (_, N) = M.cancel(P, tid); deliver(N); M.resume(P, tid)
+        (_, N) = M.cancel(P, tid); deliver(N)
+        (out, _) = M.resume(P, tid)
+        if out is granted(id, _, _):                    # granted by another home meanwhile
+            N = M.release(P, id); deliver(N)
         p.lock_ticket = none; p.lock_waiting = false; p.lock_deadline = none
 ```
 
@@ -877,6 +880,11 @@ release_lock_frame(p, frame):        # noexcept; the body's last form completing
   was woken but left before its body began: a signal handler that raised, or an error injected
   into the `lock_enter` step (LX-4, LX-8). Its hold was never started, so the release is clean
   and returns any abandoned flag the grant took.
+- A `lock_enter` frame unwound with its ticket still set (an error in the step that queued it,
+  after `block`) may find the ticket granted: from L3 another home's thread can grant it at any
+  time, so `cancel` returns `granted` and `resume` hands over a hold the mirror never collected.
+  That hold is released at once, as a grant whose body never began; dropping it would leave a
+  record no `end` releases (I3). With one home the ticket was always still queued here.
 
 ### 5.5 A lock deadline
 
@@ -904,7 +912,9 @@ on_end(p, abandon):                  # in kill_process (true), fail_process (tru
 
 `kill`, SIGKILL, `kill_owner`, every budget, a step deadline and an internal step error reach
 `kill_process`. The test `p.locks == [] and p.lock_ticket == none` is exact: `M.recs` has `P`
-exactly when one of them is set (I3).
+exactly when one of them is set (I3). The implementation tests a superset, every process that
+ever reached the manager (`process::locks` allocated), so a record the mirror missed through an
+error is still ended; an `end` that finds no record changes nothing.
 
 ### 5.7 A scheduler is destroyed
 

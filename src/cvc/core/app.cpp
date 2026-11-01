@@ -1356,6 +1356,8 @@ cvc::state_exec::async_scheduler &app::exec_scheduler() {
 }
 
 std::shared_ptr<cvc::state_exec::lock_manager> app::lock_manager_locked(std::string &note) {
+  if (!_lockManagerNote.empty())
+    note = std::exchange(_lockManagerNote, std::string());
   if (!_lockManager) {
     // The mode is chosen now and fixed (docs/STATE_EXEC_LOCKS.md 8.3). An unknown value is logged,
     // and auto used, as state_exec.policy's is.
@@ -1372,10 +1374,12 @@ std::shared_ptr<cvc::state_exec::lock_manager> app::lock_manager_locked(std::str
 }
 
 std::shared_ptr<cvc::state_exec::lock_manager> app::lock_manager_locked() {
+  // Not logged here: log() is an interruption point and may fire data signals whose slots call
+  // back into this app, under _execSchedulerMutex. The next public call logs it after unlocking.
   std::string note;
   std::shared_ptr<cvc::state_exec::lock_manager> mgr = lock_manager_locked(note);
   if (!note.empty())
-    log(1, note); // log() takes only _logMutex
+    _lockManagerNote = std::move(note);
   return mgr;
 }
 

@@ -966,10 +966,12 @@ protected:
   // lock_manager(); guarded by _execSchedulerMutex. Its homes hold it too.
   std::shared_ptr<cvc::state_exec::lock_manager> _lockManager;
   // lock_manager() with _execSchedulerMutex held (a boost::mutex: not recursive). The call that
-  // makes the manager chooses its mode; an unknown state_exec.locks.threading is logged at once.
+  // makes the manager chooses its mode; an unknown state_exec.locks.threading is kept and logged
+  // by the next lock_manager() or exec_scheduler() call, once its mutex is released.
   std::shared_ptr<cvc::state_exec::lock_manager> lock_manager_locked();
-  // The same, leaving that warning in `note` for the caller to log once the mutex is released.
+  // The same, leaving that warning (or a kept one) in `note` for the caller to log after unlocking.
   std::shared_ptr<cvc::state_exec::lock_manager> lock_manager_locked(std::string &note);
+  std::string _lockManagerNote; // lock_manager_locked()'s kept warning; guarded by the mutex
 
   // Interrupt and join this app's tracked threads (two-phase, per-thread
   // timeout). Call it (or wait()) from main() before exit if you spawned work;
