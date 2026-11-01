@@ -552,10 +552,10 @@ int main(int argc, char **argv) {
     }
     // The frame shows what the requests brought back, and the pictures it draws.
     if ((o.net.enabled || rt.runtime().media_stale()) && !rt.should_close())
-      rt.settle_and_render([&] { rt.drain(); },
-                           [&] { frame = backend->render_to_string(rt.runtime(), width, o.height,
-                                                                   o.ansi); },
-                           o.settle > 0 ? o.settle : ari::kDefaultSettleSeconds);
+      rt.settle_and_render(
+          [&] { rt.drain(); },
+          [&] { frame = backend->render_to_string(rt.runtime(), width, o.height, o.ansi); },
+          o.settle > 0 ? o.settle : ari::kDefaultSettleSeconds);
     if (pixels) { // Sixel draws at screen positions, so the frame starts at the top-left
       const int rows = static_cast<int>(std::count(frame.begin(), frame.end(), '\n')) + 1;
       frame = "\x1b[H\x1b[2J" + frame + backend->take_graphics() + "\x1b[" +

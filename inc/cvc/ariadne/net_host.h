@@ -24,8 +24,8 @@
 // The registrations are process-wide, like the action-intrinsic providers they add to.
 
 #include <cvc/ariadne/net_intrinsics.h>
-#include <optional>
 #include <cvc/ariadne/oidc_host.h> // OidcHostConfig
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
