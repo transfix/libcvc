@@ -421,6 +421,246 @@ TEST(JoltRollout, GradientAgreesWithJoltFiniteDifferences) {
   EXPECT_LT(rel(dd, gnorm), 0.35);
 }
 
+// The time pressure (train_config::w_progress) on Jolt. Its value: from the same start, one step at
+// a time, the loss with it less the loss without is each step's shortfall from progress_speed's
+// progress, read from the vehicles' states, as a fraction of a step's worth. Its gradient along the
+// goal spring's bias (alpha) reaches the parameters: finite and non-zero. Jolt's central difference
+// is printed beside it but not held to it: the term's slope along one bias is small enough that a
+// contact the perturbation adds or removes can flip Jolt's difference, and macOS arm64's Jolt
+// runs part from the others' (on Windows the model's is +8.5e-4 and Jolt's +1.6e-3; on macOS
+// arm64, +1.2e-5 and -9.7e-5). And outside the Jolt rollout, or without a speed, it throws.
+TEST(JoltRollout, ProgressTermPricesTheShortfall) {
+  REQUIRE_JOLT();
+  const training_scene sc = cvc::nav::city_scene(96);
+  train_config cfg = humvee_cfg(16);
+  const int n = cfg.n;
+  coef_trainer warm_tr(cfg, 1);
+  std::vector<float> o, goal, dummy(2 * n, 0.0f);
+  reset_batch(sc, cfg, 21, o, goal);
+  warm_tr.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n, 20, nullptr);
+  const std::vector<std::uint8_t> start = cfg.plant->save();
+
+  train_config with = cfg;
+  with.w_progress = 1.0f;
+  with.progress_speed = 4.0f * cfg.veh_L / static_cast<float>(vehicle_desc::humvee().wheelbase());
+  with.progress_tol = 0.15f;
+  coef_trainer t0(cfg, 1), t1(with, 1);
+  const float p_step = with.progress_speed * sc.dt;
+  double worst = 0.0, total = 0.0;
+  for (int k = 0; k < 10; ++k) {
+    const std::vector<std::uint8_t> here = cfg.plant->save();
+    std::vector<cvc::nav::diff::dyn4_state<float>> s0(n), s1(n);
+    for (int i = 0; i < n; ++i)
+      s0[i] = cfg.plant->state(i);
+    const double l0 = t0.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n, 1, nullptr);
+    cfg.plant->restore(here);
+    const double l1 = t1.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n, 1, nullptr);
+    double expect = 0.0;
+    for (int i = 0; i < n; ++i) {
+      s1[i] = cfg.plant->state(i);
+      const float gx = goal[2 * i], gy = goal[2 * i + 1];
+      const float d0 = std::hypot(s0[i].x - gx, s0[i].y - gy);
+      const float d1 = std::hypot(s1[i].x - gx, s1[i].y - gy);
+      const float want = std::min(p_step, std::max(0.0f, d0 - with.progress_tol));
+      expect += std::max(0.0f, want - (d0 - d1)) / p_step / n;
+    }
+    worst = std::max(worst, std::fabs((l1 - l0) - expect));
+    total += expect;
+  }
+  std::printf("[progress] shortfall over 10 steps %.4f (a step's worth an agent each)\n", total);
+  EXPECT_LT(worst, 1e-5) << "the term is each step's shortfall, as a fraction of a step's worth";
+  EXPECT_GT(total, 0.0) << "the Humvees under way still fall short of 4 m/s somewhere";
+
+  // With a stopping profile (progress_decel), p* is capped at the speed v_stop it can still stop
+  // from at the tolerance, and a step pays for its speed over v_stop at its end. Checked as it is
+  // (the Humvees far from their goals, so v_stop is above their speed) and with a tolerance past
+  // every goal (v_stop 0: each step pays its whole speed).
+  for (const float tol : {with.progress_tol, 1000.0f}) {
+    train_config stop = with;
+    stop.progress_decel = 1.5f * cfg.veh_L / static_cast<float>(vehicle_desc::humvee().wheelbase());
+    stop.progress_tol = tol;
+    coef_trainer ts(stop, 1);
+    const auto vstop = [&](float d) {
+      return std::sqrt(2.0f * stop.progress_decel * std::max(0.0f, d - stop.progress_tol));
+    };
+    cfg.plant->restore(start);
+    double worst_s = 0.0, over_total = 0.0;
+    for (int k = 0; k < 10; ++k) {
+      const std::vector<std::uint8_t> here = cfg.plant->save();
+      std::vector<cvc::nav::diff::dyn4_state<float>> s0(n);
+      for (int i = 0; i < n; ++i)
+        s0[i] = cfg.plant->state(i);
+      const double l0 =
+          t0.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n, 1, nullptr);
+      cfg.plant->restore(here);
+      const double ls =
+          ts.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n, 1, nullptr);
+      double expect = 0.0;
+      for (int i = 0; i < n; ++i) {
+        const cvc::nav::diff::dyn4_state<float> s1 = cfg.plant->state(i);
+        const float gx = goal[2 * i], gy = goal[2 * i + 1];
+        const float d0 = std::hypot(s0[i].x - gx, s0[i].y - gy);
+        const float d1 = std::hypot(s1.x - gx, s1.y - gy);
+        const float want = std::min({p_step, std::max(0.0f, d0 - stop.progress_tol),
+                                     vstop(d0) * static_cast<float>(sc.dt)});
+        expect += std::max(0.0f, want - (d0 - d1)) / p_step / n;
+        const float over = std::max(0.0f, std::fabs(s1.vx) - vstop(d1)) / stop.progress_speed / n;
+        expect += over;
+        over_total += over;
+      }
+      worst_s = std::max(worst_s, std::fabs((ls - l0) - expect));
+    }
+    std::printf("[progress] stopping profile, tolerance %g: overspeed over 10 steps %.4f\n", tol,
+                over_total);
+    EXPECT_LT(worst_s, 1e-5) << "the stopping profile's shortfall and overspeed, step by step";
+    if (tol > 100.0f)
+      EXPECT_GT(over_total, 0.0) << "at the goal every moving Humvee pays its speed";
+  }
+  cfg.plant->restore(start);
+
+  // The gradient along alpha's bias over a 30-step window.
+  const int window = 30;
+  cfg.plant->restore(start);
+  std::vector<float> g0, g1;
+  t0.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n, window, &g0);
+  cfg.plant->restore(start);
+  t1.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n, window, &g1);
+  const int P = t1.num_params();
+  const double model = static_cast<double>(g1[P - 3]) - g0[P - 3];
+  const std::vector<float> base = t1.params();
+  const auto term_at = [&](float shift) {
+    std::vector<float> p = base;
+    p[P - 3] += shift;
+    t0.set_params(p);
+    t1.set_params(p);
+    cfg.plant->restore(start);
+    const double a =
+        t1.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n, window, nullptr);
+    cfg.plant->restore(start);
+    const double b =
+        t0.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n, window, nullptr);
+    return a - b;
+  };
+  const double eps = 0.05;
+  const double jolt =
+      (term_at(static_cast<float>(eps)) - term_at(static_cast<float>(-eps))) / (2 * eps);
+  std::printf("  d(term)/d(alpha bias): model %+.4e  Jolt %+.4e\n", model, jolt);
+  EXPECT_TRUE(std::isfinite(model));
+  EXPECT_NE(model, 0.0) << "the term's gradient does not reach alpha's bias";
+
+  train_config surrogate;
+  surrogate.w_progress = 1.0f;
+  surrogate.progress_speed = 0.4f;
+  coef_trainer ts(surrogate, 1);
+  std::vector<float> og(2 * n, 0.0f);
+  EXPECT_THROW(ts.loss_and_grad(sc, og.data(), og.data(), og.data(), n, 1, nullptr),
+               std::invalid_argument);
+  train_config no_speed = cfg;
+  no_speed.w_progress = 1.0f;
+  coef_trainer tn(no_speed, 1);
+  EXPECT_THROW(tn.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n, 1, nullptr),
+               std::invalid_argument);
+}
+
+// Continuing episodes (train_config::episode_steps): with a limit of two outer steps' worth, five
+// outer steps draw three batches (steps 0-1, 2-3, 4); with none, a batch each; with a limit past
+// the run, one. The batch's goals stay put while it drives on, and training stays finite. Asked
+// of a rollout other than Jolt's, it throws.
+TEST(JoltRollout, ContinuingEpisodesKeepTheBatchDriving) {
+  REQUIRE_JOLT();
+  const training_scene sc = cvc::nav::city_scene(96);
+  train_config cfg = humvee_cfg(8);
+  cfg.horizon = 20;
+  cfg.window = 10;
+  cfg.steps = 5;
+  cfg.seed = 3;
+  const auto batches = [&](int episode_steps) {
+    train_config c = cfg;
+    c.episode_steps = episode_steps;
+    coef_trainer tr(c, 1);
+    tr.train(sc);
+    for (float p : tr.params())
+      EXPECT_TRUE(std::isfinite(p));
+    return std::make_pair(tr.episodes(), tr.episodes_arrived());
+  };
+  EXPECT_EQ(batches(0).first, 5);
+  EXPECT_EQ(batches(40).first, 3);
+  const auto one = batches(10000);
+  EXPECT_EQ(one.first, 1);
+  EXPECT_EQ(one.second, 0) << "eight Humvees cannot all cross the city to their goals in 6 s";
+
+  train_config surrogate;
+  surrogate.episode_steps = 100;
+  surrogate.steps = 1;
+  coef_trainer ts(surrogate, 1);
+  EXPECT_THROW(ts.train(sc), std::invalid_argument);
+}
+
+// The collision penalty on the vehicle's body (train_config::coll_offsets): one disc of the
+// scene's rr on the axle is the default, bit for bit, loss and gradient. The Humvee's footprint
+// (four discs of 1.3 half-widths, tail to nose) with a margin of half a half-width gives a finite,
+// non-negative term (at this metric, 0.106 units a metre, the default's disc is 1.4 m with a
+// 3.3 m d_hat, and the footprint's four discs, each paying per its own small margin, charge more;
+// at demo3's 0.05 the default is 3 m and 7 m). A body without a radius, or on a rollout other
+// than Jolt's, throws.
+TEST(JoltRollout, BodyPenaltyOnTheVehiclesFootprint) {
+  REQUIRE_JOLT();
+  const training_scene sc = cvc::nav::city_scene(96);
+  train_config cfg = humvee_cfg(16);
+  const int n = cfg.n;
+  coef_trainer warm(cfg, 1);
+  std::vector<float> o, goal, dummy(2 * n, 0.0f);
+  reset_batch(sc, cfg, 21, o, goal);
+  warm.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n, 20, nullptr);
+  const std::vector<std::uint8_t> start = cfg.plant->save();
+  const auto loss = [&](const train_config &c, std::vector<float> *g) {
+    cfg.plant->restore(start);
+    coef_trainer t(c, 1);
+    return t.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n, 30, g);
+  };
+  train_config axle = cfg;
+  axle.coll_offsets = {0.0f};
+  axle.coll_rr = sc.rr;
+  std::vector<float> g0, g1;
+  EXPECT_EQ(loss(cfg, &g0), loss(axle, &g1));
+  EXPECT_EQ(g0, g1);
+
+  const vehicle_desc hv = vehicle_desc::humvee();
+  const double k = cfg.veh_L / hv.wheelbase(); // normalized units per metre
+  double rear = 0.0;
+  for (const cvc::physics::axle_desc &a : hv.axles)
+    if (!a.steered)
+      rear = std::min(rear, a.x);
+  const double hy = hv.half_extents.y;
+  const double tail = -hv.half_extents.x - rear + 0.7 * hy,
+               nose = hv.half_extents.x - rear - 0.7 * hy;
+  train_config body = cfg, none = cfg;
+  for (int i = 0; i < 4; ++i)
+    body.coll_offsets.push_back(static_cast<float>((tail + (nose - tail) * i / 3.0) * k));
+  body.coll_rr = static_cast<float>(1.3 * hy * k);
+  body.d_safe = static_cast<float>(0.5 * hy * k);
+  none.w_coll = 0.0f;
+  const double goal_part = loss(none, nullptr);
+  const double old_coll = loss(cfg, nullptr) - goal_part,
+               new_coll = loss(body, nullptr) - goal_part;
+  std::printf("[body] collision term over 30 steps: 3 m disc + 7 m d_hat %.4f, footprint + %.2f m "
+              "%.4f\n",
+              old_coll, 0.5 * hy, new_coll);
+  EXPECT_GE(new_coll, 0.0);
+  EXPECT_TRUE(std::isfinite(new_coll));
+
+  train_config no_radius = body;
+  no_radius.coll_rr = 0.0f;
+  EXPECT_THROW(loss(no_radius, nullptr), std::invalid_argument);
+  train_config surrogate;
+  surrogate.coll_offsets = {0.0f};
+  surrogate.coll_rr = 0.1f;
+  coef_trainer ts(surrogate, 1);
+  std::vector<float> og(2 * n, 0.0f);
+  EXPECT_THROW(ts.loss_and_grad(sc, og.data(), og.data(), og.data(), n, 1, nullptr),
+               std::invalid_argument);
+}
+
 // use_jolt_rollout sets a train_config up for Jolt in one call: the plant, the calibrated model and
 // its price, the same fit as the steps it takes one by one.
 TEST(JoltRollout, UseJoltRolloutSetsTheTrainerUp) {
