@@ -86,6 +86,7 @@
 // ws://|wss:// (WebSocket, what browsers dial; the host page sets wss://<page-origin>/…) or grpc://
 // (native gRPC). register_conference supplies the room verbs and the shard/transport are wired here
 // in the host; both transports carry the canonical media_frame and interop via the relay's router.
+#include <cvc/ariadne/conference/avatar_panel.h>    // the Avatar window: settings, energy, ledger
 #include <cvc/ariadne/conference/room_aoi.h>        // the relay's AOI params -> peers' audio gain
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_join (re-assert after a reconnect)
 #include <cvc/ariadne/conference/room_net.h>        // our link quality + voice activity to the room
@@ -379,6 +380,9 @@ struct ConferenceSession {
   // is declared after holon_ and torn down first (stop()).
   std::unique_ptr<cvc::ariadne::holon> holon_;
   std::unique_ptr<gla::room_view> room_view_;
+  // The Avatar window's model: our avatar's settings, energy budget and ledger, with their recent
+  // history, published to the document as self.avatar.* (avatar_panel.h).
+  cvc::ariadne::conference::avatar_panel avatar_panel_;
   cvc::gl::CameraController *cam_ = nullptr;
   cvc::ariadne::avatar_intent last_intent_; // the intent our avatar runs on (predicted with)
   cvc::ariadne::avatar_intent last_user_;   // what the keys + facing asked for last frame
@@ -898,6 +902,9 @@ struct ConferenceSession {
     // the tree, so an intent proposed before then must still reach the prediction.
     holon_->set_intent(pid_, last_intent_);
     cvc::ariadne::client_pump(*holon_, *app_, room_, pid_, f.wall_dt);
+    avatar_panel_.update(*holon_, *app_, room_, pid_, f.wall_dt);
+    if (avatar_panel_.sampled())
+      avatar_panel_.publish(*app_, prefix_);
     // Each re-alignment of our clock to the relay's drops our unacknowledged input (a visible
     // jump). The first sample after joining is one; any after that is worth a line.
     if (holon_->clock_realigns() != logged_realigns_) {

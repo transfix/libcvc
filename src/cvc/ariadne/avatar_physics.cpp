@@ -115,6 +115,7 @@ void avatar_world::add_avatar(const std::string &pid, const ph::body_state &feet
   a.dynamic = dynamic;
   a.mass = _body.mass;
   a.energy.reserve = _energy.reserve_max; // rested
+  a.energy.ledger.start = a.energy.reserve;
   a.id = create_avatar(feet, dynamic, a.mass);
   _avatars[pid] = a;
 }
@@ -154,10 +155,17 @@ void avatar_world::drive_walker(avatar &a, ph::body_state &s, const avatar_inten
   };
   double dvx = 0.0, dvy = 0.0;
   avatar_energy &e = a.energy;
+  avatar_ledger &book = e.ledger;
   if (!_energy.enabled) {
     capped_change(in.move.x, in.move.y, dvx, dvy);
     s.linear_velocity.x += dvx, s.linear_velocity.y += dvy;
+    // No budget: nothing is spent, and the reserve stays full (any change booked as a correction).
+    book.corrections += _energy.reserve_max - e.reserve;
     e.reserve = _energy.reserve_max, e.power = 0.0, e.exhausted = false;
+    book.distance += std::sqrt(s.linear_velocity.x * s.linear_velocity.x +
+                               s.linear_velocity.y * s.linear_velocity.y) *
+                     dt;
+    book.time += dt;
     return;
   }
 
@@ -192,10 +200,23 @@ void avatar_world::drive_walker(avatar &a, ph::body_state &s, const avatar_inten
     v1x = v0x + k * dvx, v1y = v0y + k * dvy;
   }
   s.linear_velocity.x = v1x, s.linear_velocity.y = v1y;
+  const double speed = std::sqrt(v1x * v1x + v1y * v1y);
   const double work = std::max(0.0, a2 * k * k + b * k);
-  const double spent = work + carry * std::sqrt(v1x * v1x + v1y * v1y) * dt;
-  e.reserve = std::clamp(e.reserve + refill - spent, 0.0, _energy.reserve_max);
+  const double carried = carry * speed * dt;
+  const double spent = work + carried;
+  const double unclamped = e.reserve + refill - spent;
+  e.reserve = std::clamp(unclamped, 0.0, _energy.reserve_max);
   e.power = spent / dt;
+  book.refilled += refill;
+  book.work += work;
+  book.carried += carried;
+  book.overflow += std::max(0.0, unclamped - _energy.reserve_max);
+  book.unpaid += std::max(0.0, -unclamped);
+  book.distance += speed * dt;
+  book.time += dt;
+  book.peak_power = std::max(book.peak_power, e.power);
+  if (e.exhausted)
+    book.exhausted_time += dt;
   if (e.reserve <= 0.0)
     e.exhausted = true;
   else if (e.exhausted && e.reserve >= _energy.recover_fraction * _energy.reserve_max)
@@ -206,7 +227,9 @@ void avatar_world::set_energy_policy(const avatar_energy_policy &p) {
   _energy = p;
   for (auto &kv : _avatars) {
     avatar_energy &e = kv.second.energy;
+    const double before = e.reserve;
     e.reserve = p.enabled ? std::min(e.reserve, p.reserve_max) : p.reserve_max;
+    e.ledger.corrections += e.reserve - before; // a new policy's cut or fill
     if (!p.enabled || p.empty != avatar_energy_policy::when_empty::stop)
       e.exhausted = false;
   }
@@ -218,7 +241,9 @@ void avatar_world::set_reserve(const std::string &pid, double joules) {
   avatar &a = _avatars.at(pid);
   if (!a.dynamic || !std::isfinite(joules))
     return;
+  const double before = a.energy.reserve;
   a.energy.reserve = std::clamp(joules, 0.0, _energy.reserve_max);
+  a.energy.ledger.corrections += a.energy.reserve - before;
 }
 
 void avatar_world::place(const std::string &pid, const ph::body_state &feet) {

@@ -956,6 +956,16 @@ TEST(HolonEnergyTest, WalkingFastSpendsTheReserveAndRestingRefillsIt) {
   server.set_intent("A", avatar_intent{});
   run(server, 240);
   EXPECT_GT(reserve(server, "A"), walked + 400.0) << "standing refills it";
+  // The books: every joule in and out is a line, and they balance.
+  ASSERT_TRUE(server.energy("A", e));
+  const cvc::ariadne::avatar_ledger &b = e.ledger;
+  EXPECT_DOUBLE_EQ(b.start, full);
+  EXPECT_NEAR(b.refilled, 300.0 * b.time, 1e-6) << "resting power over every drive";
+  EXPECT_GT(b.work, 500.0) << "getting 70 kg up to 4 m/s: 560 J";
+  EXPECT_GT(b.carried, 1000.0);
+  EXPECT_GT(b.distance, 7.0);
+  EXPECT_GT(b.peak_power, 1000.0);
+  EXPECT_NEAR(b.residual(e.reserve), 0.0, 1e-6) << "now = start + refilled - spent - overflow";
 }
 
 // An empty reserve under the `rest` policy leaves resting power: it slows to the speed that
@@ -1050,6 +1060,10 @@ TEST(HolonEnergyTest, ThePredictionSpendsLikeTheServerAndTakesItsCorrection) {
   EXPECT_LT(corrected, predicted - 5000.0) << "corrected by how far it was off at that tick";
   client.apply_authoritative_reserve("A", t, 20000.0);
   EXPECT_DOUBLE_EQ(reserve(client, "A"), corrected) << "the same tick again is a no-op";
+  cvc::ariadne::avatar_energy ce;
+  ASSERT_TRUE(client.energy("A", ce));
+  EXPECT_NEAR(ce.ledger.corrections, corrected - predicted, 1e-6) << "the correction is a line";
+  EXPECT_NEAR(ce.ledger.residual(ce.reserve), 0.0, 1e-6) << "and the books still balance";
   server.apply_authoritative_reserve("A", t, 0.0);
   EXPECT_GT(reserve(server, "A"), 20000.0) << "the server takes no correction";
 }

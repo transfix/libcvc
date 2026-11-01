@@ -1797,6 +1797,27 @@ void Runtime::Impl::emit_node(const Widget &w) {
     break;
   }
 
+  case Kind::Plot: {
+    // Read-only: the comma-separated numbers (a state path or a computed expression), oldest
+    // first; anything that is not a number is skipped.
+    const std::string v = is_expr(w.bind) ? eval_text(w.bind) : read_string(app, resolve(w.bind));
+    std::vector<float> values;
+    for (std::size_t i = 0; i <= v.size();) {
+      const std::size_t j = std::min(v.find(',', i), v.size());
+      const std::string item = v.substr(i, j - i);
+      char *end = nullptr;
+      const double x = std::strtod(item.c_str(), &end);
+      if (end != item.c_str() && std::isfinite(x))
+        values.push_back(static_cast<float>(x));
+      i = j + 1;
+    }
+    std::string overlay;
+    if (!w.overlay.empty())
+      overlay = is_expr(w.overlay) ? eval_text(w.overlay) : read_string(app, resolve(w.overlay));
+    b.plot_lines(label, values, w.lo, w.hi, overlay, w.plot_height);
+    break;
+  }
+
   case Kind::Checkbox: {
     const std::string path = resolve(w.bind);
     const bool cur =

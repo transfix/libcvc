@@ -2,8 +2,10 @@
 #
 # Layout (all windows are closable + openable from the View menu):
 #   • My Camera  (id mycam)   — your own camera, a camera + mic device picker, and camera/mic toggles.
-#   • My Avatar  (id myavatar) — what you look like in the room: a colour and something to wear, from
-#                               the relay's catalog. Everyone sees the same avatar, you included.
+#   • Avatar     (id myavatar) — your avatar: what you look like (a colour and something to wear, from
+#                               the relay's catalog; everyone sees the same avatar, you included),
+#                               your body and controller, and your energy -- the relay's budget,
+#                               where your reserve went (the ledger) and its recent history.
 #   • Users      (id users)   — everyone in the room: name (lights up GREEN while talking), per-peer
 #                               LOCAL camera/mic mute + a volume slider, and click a name to raise
 #                               that peer's camera window. These controls are LOCAL — they change only
@@ -32,7 +34,8 @@ requires:
   - stream-set-muted
   - room-join                      # the room (arigl registers these when CVC_ARIADNE_RELAY is set)
   - room-roster
-  - room-set-avatar                # the My Avatar window
+  - room-set-avatar                # the Avatar window
+  - plot                           # its history graphs
 
 # The room's LOOK. The relay owns what is IN the room (conf.rooms.<room>.scene: the ground, the
 # reference box; the avatars), and every client draws it under this document's lighting, so the
@@ -66,7 +69,7 @@ menubar:
         bind: tree.mycam.open
       - menu_item: Users
         bind: tree.users.open
-      - menu_item: My Avatar
+      - menu_item: Avatar
         bind: tree.myavatar.open
 
 windows:
@@ -131,31 +134,183 @@ windows:
       - text: ""
         bind: self.video_in
 
-  # ── My Avatar: how you look in the room ──
-  # The relay offers the choices (conf.rooms.<room>.avatars, room_avatar.h); on_tick writes a pick to
-  # your own participant subtree, and every client -- yours too -- draws what it resolves to. So the
-  # avatar you walk around as is the one everyone else sees. Automatic is a colour derived from your
-  # id, which is what you look like until you choose. What you wear is only drawn: you collide as
-  # the same 0.5 x 0.5 x 1.7 m body whatever you pick. Stamina is your energy reserve, as the relay
-  # counts it: walking fast or pushing spends it, resting refills it, and the relay's policy says
-  # what an empty one means (slow to what resting power sustains, or stop until it refills).
-  - window: My Avatar
+  # ── Avatar: how you look, what you move with, and where your energy went ──
+  # The look: the relay offers the choices (conf.rooms.<room>.avatars, room_avatar.h); on_tick writes
+  # a pick to your own participant subtree, and every client -- yours too -- draws what it resolves
+  # to. So the avatar you walk around as is the one everyone else sees. Automatic is a colour derived
+  # from your id, which is what you look like until you choose. What you wear is only drawn.
+  # The rest is published by the host as self.avatar.* (avatar_panel.h), four times a second:
+  #   * body and controller: what the physics simulates (everyone's is the same box, walking);
+  #   * the energy budget: the relay's policy, the same for everyone -- a push of at most 840 N, at
+  #     most 1.2 kW, a 30 kJ reserve refilled at 300 W, carrying the body costs 0.2 m g |v| -- and
+  #     your reserve now (your client's count, which the relay's corrects);
+  #   * the ledger: where the reserve went since you joined, line by line. The lines balance:
+  #     now = started with + refilled - work - carried - overflow + unpaid + corrections, so the
+  #     residual is 0 (rounding aside);
+  #   * the history: the reserve and the power you spent over the last minute.
+  - window: Avatar
     id: myavatar
     pos: [20, 610]
-    size: [360, 150]
+    size: [440, 680]
     closable: true
     children:
       - text: "How everyone sees you in the room, you included."
+      # The pickers' options: the catalog's labels, which on_tick publishes newline-joined (a widget's
+      # expression may only use pure functions, so it cannot call room-avatar-options itself).
       - type: combo
         label: "Colour"
         bind: avatar.color
-        options: (room-avatar-options (state-get "conf.room") "color")
+        options: (string.split (state-get "avatar.colors") "\n")
+        visible_when: (not (= (state-get "avatar.colors") ""))
       - type: combo
         label: "Wear"
         bind: avatar.accessory
-        options: (room-avatar-options (state-get "conf.room") "accessory")
+        options: (string.split (state-get "avatar.accessories") "\n")
+        visible_when: (not (= (state-get "avatar.accessories") ""))
+      - type: group
+        layout: { kind: grid, col_widths: [104, 300] }
+        children:
+          - text: "body"
+          - text: ""
+            bind: self.avatar.body
+      - type: group
+        layout: { kind: grid, col_widths: [104, 300] }
+        children:
+          - text: "controller"
+          - text: ""
+            bind: self.avatar.controller
+      - separator
+      - text: "Energy budget"
+        color: [0.75, 0.85, 1.0]
+      - text: "waiting for your avatar to join the room"
+        visible_when: (not (= (state-get "self.avatar.ready") "1"))
+      - progress: Reserve
+        bind: self.avatar.energy.fraction
+        overlay: self.avatar.energy.text
+      - type: group
+        layout: { kind: grid, col_widths: [104, 300] }
+        children:
+          - text: "now"
+          - text: ""
+            bind: self.avatar.energy.line
+      - type: group
+        layout: { kind: grid, col_widths: [104, 300] }
+        children:
+          - text: "budget"
+          - text: ""
+            bind: self.avatar.policy.budget
+      - type: group
+        layout: { kind: grid, col_widths: [104, 300] }
+        children:
+          - text: "push"
+          - text: ""
+            bind: self.avatar.policy.push
+      - type: group
+        layout: { kind: grid, col_widths: [104, 300] }
+        children:
+          - text: "power"
+          - text: ""
+            bind: self.avatar.policy.power
+      - type: group
+        layout: { kind: grid, col_widths: [104, 300] }
+        children:
+          - text: "reserve"
+          - text: ""
+            bind: self.avatar.policy.reserve
+      - type: group
+        layout: { kind: grid, col_widths: [104, 300] }
+        children:
+          - text: "carrying"
+          - text: ""
+            bind: self.avatar.policy.carrying
+      - type: group
+        layout: { kind: grid, col_widths: [104, 300] }
+        children:
+          - text: "sustains"
+          - text: ""
+            bind: self.avatar.policy.sustains
+      - type: group
+        layout: { kind: grid, col_widths: [104, 300] }
+        children:
+          - text: "when empty"
+          - text: ""
+            bind: self.avatar.policy.empty
+      - separator
+      - text: "Ledger: where your reserve went since you joined"
+        color: [0.75, 0.85, 1.0]
+      - type: group
+        layout: { kind: grid, col_widths: [104, 84, 220] }
+        children:
+          - text: "started with"
+          - text: ""
+            bind: self.avatar.ledger.start
+          - text: ""
+      - type: group
+        layout: { kind: grid, col_widths: [104, 84, 220] }
+        children:
+          - text: "refilled"
+          - text: ""
+            bind: self.avatar.ledger.refilled
+          - text: "resting power, all the time"
+      - type: group
+        layout: { kind: grid, col_widths: [104, 84, 220] }
+        children:
+          - text: "work"
+          - text: ""
+            bind: self.avatar.ledger.work
+          - text: "speeding up, pushing"
+      - type: group
+        layout: { kind: grid, col_widths: [104, 84, 220] }
+        children:
+          - text: "carried"
+          - text: ""
+            bind: self.avatar.ledger.carried
+          - text: "carrying your weight along"
+      - type: group
+        layout: { kind: grid, col_widths: [104, 84, 220] }
+        children:
+          - text: "overflow"
+          - text: ""
+            bind: self.avatar.ledger.overflow
+          - text: "refill a full reserve lost"
+      - type: group
+        layout: { kind: grid, col_widths: [104, 84, 220] }
+        children:
+          - text: "unpaid"
+          - text: ""
+            bind: self.avatar.ledger.unpaid
+          - text: "stopping on an empty reserve"
+      - type: group
+        layout: { kind: grid, col_widths: [104, 84, 220] }
+        children:
+          - text: "corrections"
+          - text: ""
+            bind: self.avatar.ledger.corrections
+          - text: "the relay's count over yours"
+      - type: group
+        layout: { kind: grid, col_widths: [104, 84, 220] }
+        children:
+          - text: "now"
+          - text: ""
+            bind: self.avatar.ledger.now
+          - text: ""
+            bind: self.avatar.ledger.balance
+      - progress: Work
+        bind: self.avatar.ledger.share.work
+      - progress: Carried
+        bind: self.avatar.ledger.share.carried
+      - progress: Overflow
+        bind: self.avatar.ledger.share.overflow
       - text: ""
-        bind: (if (= (state-get "avatar.stamina") "") "" (str-concat "stamina " (state-get "avatar.stamina") "%"))
+        bind: self.avatar.ledger.summary
+      - separator
+      - plot: Reserve kJ
+        bind: self.avatar.history.reserve
+        height: 70
+        overlay: self.avatar.history.window
+      - plot: Power W
+        bind: self.avatar.history.power
+        height: 70
 
   # ── Users: the roster with per-peer local controls ──
   # One compact ROW per participant, as a table of unit widgets: every row is its own grid with the
@@ -291,7 +446,8 @@ on_tick: |
         (state-set "avatar.accessory" "")
         (state-set "avatar.sent.color" "")
         (state-set "avatar.sent.accessory" "")
-        (state-set "avatar.stamina" "")
+        (state-set "avatar.colors" "")
+        (state-set "avatar.accessories" "")
         ; ── pre-seed each peer camera window at a distinct TILED position ──
         ; every cam_<i> declares the SAME authored pos:, so without this the per-peer windows land
         ; exactly on top of one another and look like a single window — the #1 reason a user reports
@@ -379,8 +535,11 @@ on_tick: |
     ;    against the catalog and writes only your own choice; every client draws it from there. ──
     (if (= (state-get "joined") "1")
       (begin
+        (state-set "avatar.colors"
+          (string.join (room-avatar-options (state-get "conf.room") "color") "\n"))
+        (state-set "avatar.accessories"
+          (string.join (room-avatar-options (state-get "conf.room") "accessory") "\n"))
         (set look (room-avatar (state-get "room.token")))
-        (state-set "avatar.stamina" (get-attr look "stamina"))
         (if (= (state-get "avatar.sent.color") "")
           (if (= (get-attr look "color") "") #f
             (begin

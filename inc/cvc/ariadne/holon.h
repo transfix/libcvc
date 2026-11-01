@@ -231,6 +231,8 @@ public:
   // as of the room's policy REVISION (what a pump compares to re-read it only when it changes).
   void set_energy_policy(const avatar_energy_policy &p, std::uint64_t revision = 0);
   const avatar_energy_policy &energy_policy() const noexcept { return _cfg.energy; }
+  // Every avatar's body (holon_config::body).
+  const avatar_body &body() const noexcept { return _cfg.body; }
   std::uint64_t energy_policy_revision() const noexcept { return _energy_rev; }
   // With physics: PID's energy now (on a client, the local avatar's is its prediction). False
   // without physics or for a pid with no body.

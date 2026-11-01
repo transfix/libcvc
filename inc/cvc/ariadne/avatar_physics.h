@@ -90,11 +90,32 @@ struct avatar_energy_policy {
   double recover_fraction = 0.25;
 };
 
+// Where an avatar's reserve went since it was added, in J (the energy books). They balance:
+//   reserve now = start + refilled - work - carried - overflow + unpaid + corrections
+struct avatar_ledger {
+  double start = 0.0;       // the reserve it was added with
+  double refilled = 0.0;    // power_rest over every drive
+  double work = 0.0;        // positive work on the body: speeding up, pushing
+  double carried = 0.0;     // carrying the body along (transport_cost x m g |v|)
+  double overflow = 0.0;    // refill a full reserve could not hold
+  double unpaid = 0.0;      // spending an empty reserve could not cover (a `stop` coming to rest)
+  double corrections = 0.0; // set_reserve's changes: the server correcting a client's prediction
+  double distance = 0.0;    // m moved horizontally
+  double time = 0.0;        // s of drives booked
+  double exhausted_time = 0.0;
+  double peak_power = 0.0; // W, the most one drive spent
+  // The books' own error: what the lines do not account for (0 up to rounding).
+  double residual(double reserve) const {
+    return reserve - (start + refilled - work - carried - overflow + unpaid + corrections);
+  }
+};
+
 // An avatar's energy now.
 struct avatar_energy {
   double reserve = 0.0;   // J
   double power = 0.0;     // W spent over the last drive
   bool exhausted = false; // `stop`: ran out, waiting for recover_fraction
+  avatar_ledger ledger;
 };
 
 // A static object avatars collide with (the room scene's ground, boxes, spheres).

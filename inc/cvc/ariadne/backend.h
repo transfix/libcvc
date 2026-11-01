@@ -22,6 +22,7 @@
 // The core writes to cvc::state on `committed`, so a slider drag costs ONE state
 // write (which fans out to observers / replicated peers), not one per frame.
 
+#include <cstdio>               // snprintf (plot_lines' text sparkline)
 #include <cvc/ariadne/widget.h> // Size / Layout / Extent (§3.0.3b) passed to the backend
 #include <cvc/tf/editor.h>      // tf_editor: the model + view the backend edits
 #include <cvc/tf/overlays.h>    // tf_editor: the histogram / contour spectrum / tree layers
@@ -288,6 +289,35 @@ public:
     text_value(label, value);
   }
   virtual void separator() = 0;
+  // A read-only line graph of VALUES (oldest first) between LO and HI (LO >= HI: fitted to them),
+  // with OVERLAY as its caption, HEIGHT pixels tall where the backend has pixels. By default a
+  // text sparkline of the last 32, with the newest value and the range, so every backend has one.
+  virtual void plot_lines(const char *label, const std::vector<float> &values, double lo, double hi,
+                          const std::string &overlay, double height) {
+    (void)height;
+    static const char kLevels[] = " _.-=+*#";
+    const std::size_t n = values.size(), first = n > 32 ? n - 32 : 0;
+    double a = lo, z = hi;
+    if (!(lo < hi) && n > 0) {
+      a = z = values[first];
+      for (std::size_t i = first; i < n; ++i)
+        a = values[i] < a ? values[i] : a, z = values[i] > z ? values[i] : z;
+    }
+    std::string line = overlay.empty() ? std::string() : overlay + " ";
+    line += "[";
+    for (std::size_t i = first; i < n; ++i) {
+      double f = z > a ? (values[i] - a) / (z - a) : 0.5;
+      f = f < 0.0 ? 0.0 : (f > 1.0 ? 1.0 : f);
+      line += kLevels[static_cast<int>(f * 7.0 + 0.5)];
+    }
+    line += "]";
+    if (n > 0) {
+      char buf[96];
+      std::snprintf(buf, sizeof(buf), " %.4g (%.4g..%.4g)", values[n - 1], a, z);
+      line += buf;
+    }
+    text_value(label, line);
+  }
   // A read-only progress bar at `fraction` (0..1) with `overlay` drawn over it (empty: the
   // percent). By default a text value, "[########------------] 40%", so every backend has one.
   virtual void progress_bar(const char *label, float fraction, const std::string &overlay) {
