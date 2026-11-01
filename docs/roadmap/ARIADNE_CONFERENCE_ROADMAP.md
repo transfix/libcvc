@@ -153,6 +153,9 @@ These hide the transport/bridge/relay behind a room abstraction; a conferencing 
 | `(room-roster room) → [ {pid name flags…} … ]` | current participants + their published kinds + flags; backs the tile grid via `repeat`. |
 | `(room-flag room PID KEY)` / `(room-set-flag room {mic cam hand …})` | read any participant's flag; write only my own (server-validated). |
 | `(room-chat-send room TEXT)` / `(room-chat-stream room) → sub` | the room's ordered **chat stream** — send a line, or subscribe (backlog + live). Rendered in the UI; composing needs the `input_text` widget (§9). |
+| `(room-avatar-options ROOM KIND) → [label …]` | what the relay's avatar catalog offers (§5g): KIND `"color"` or `"accessory"`, in catalog order, default first. Empty until the catalog arrives. **Implemented.** |
+| `(room-avatar room) → {color accessory}` | the labels of my avatar as everyone draws it (the defaults until I choose). **Implemented.** |
+| `(room-set-avatar room COLOR ACCESSORY)` | pick my avatar from the catalog (ids or labels); writes only my own `avatar.*`, and refuses what the catalog lacks. **Implemented.** |
 
 ### 4c. Low-level transport verbs (escape hatch / mesh / tooling)
 
@@ -384,6 +387,20 @@ The conference is not just floating video windows: it is a **shared 3D space** t
   client's per-document `graphics.root` that gave the earlier build a de-facto shared scene; scoping
   replication to the room tree (the name-collision fix) correctly removed that. This section makes the
   shared scene a **first-class, server-authoritative** feature instead of a replication side effect.
+* **Avatar looks (built 2026-11-01).** Everyone sees an avatar the same way, its owner included (the
+  owner used to see itself gold while everyone else saw a hue from its pid).
+  * **Catalog.** The relay seeds `conf.rooms.<room>.avatars` (`room_avatar.h`): colours (an automatic
+    hue from the pid, the default, plus named ones) and accessories (nothing, the default, or parts:
+    boxes and spheres posed from the feet and tinted like the body, like the visor, or a fixed colour).
+  * **Choice.** Each participant writes its pick to its own `participants.<pid>.avatar.{color,
+    accessory}`, which the write gate already allows and nothing else may write.
+  * **Rendering.** `room_view` resolves each pid's look through the catalog. A pick the catalog lacks
+    draws as the default, and a changed pick rebuilds the marker everywhere.
+  * **Cosmetic only.** Parts must fit an envelope (the 0.5 x 0.5 x 1.7 m body grown 0.15 m sideways and
+    0.3 m up; at most 6 parts), and the physics body is the same for everyone.
+  * **UI.** The conference document's **My Avatar** window picks with two combos.
+  * **Next:** user-supplied avatars with their own physics, bounded by size and an energy budget (design
+    in progress).
 * **Sequencing.** MVP first = a minimal server-seeded environment (ground + grid + a reference object) to
   prove the shared-scene render path end-to-end; then layer avatars (pose publish + the avatars node).
   Schema impact (a `scene:` driven from state, a custom scene-node type) is coordinated with the host-caps
