@@ -24,7 +24,9 @@
 // examples/cvcgl/terrain_lab.cpp so the native lab, the generated_world Ariadne node type and a
 // headless consumer build the same world.
 
+#ifndef _USE_MATH_DEFINES
 #define _USE_MATH_DEFINES
+#endif
 #include <algorithm>
 #include <cmath>
 #include <cvc/lsys/derive.h>
@@ -75,15 +77,16 @@ Vec3d fromLsys(const lsys::vec3 &v) { return {v.x, v.y, v.z}; }
 Vec3d rotZ(Vec3d p, double c, double s) { return {p.x * c - p.y * s, p.x * s + p.y * c, p.z}; }
 
 // ── raster cell colour ───────────────────────────────────────────────────────
+cvc::geometry::color_t heat(double t) { // blue -> green -> yellow -> red over [0, 1]
+  t = std::min(1.0, std::max(0.0, t));
+  double r = std::min(1.0, std::max(0.0, 1.5 - std::fabs(4.0 * t - 3.0)));
+  double g = std::min(1.0, std::max(0.0, 1.5 - std::fabs(4.0 * t - 2.0)));
+  double b = std::min(1.0, std::max(0.0, 1.5 - std::fabs(4.0 * t - 1.0)));
+  return {r, g, b};
+}
+
 cvc::geometry::color_t cellColor(const raster_out &ro, const surface_registry &reg, std::size_t i,
                                  int mode, float hmin, float hmax) {
-  auto heat = [](double t) -> cvc::geometry::color_t { // blue -> green -> yellow -> red
-    t = std::min(1.0, std::max(0.0, t));
-    double r = std::min(1.0, std::max(0.0, 1.5 - std::fabs(4.0 * t - 3.0)));
-    double g = std::min(1.0, std::max(0.0, 1.5 - std::fabs(4.0 * t - 2.0)));
-    double b = std::min(1.0, std::max(0.0, 1.5 - std::fabs(4.0 * t - 1.0)));
-    return {r, g, b};
-  };
   if (mode == 1)
     return heat(ro.risk_raw[i]);
   if (mode == 2)
@@ -799,25 +802,91 @@ std::vector<unsigned char> paint_surface(const generated_world &w, surface_color
     img[o + 1] = (unsigned char)std::min(255.0, std::max(0.0, c[1] * 255.0));
     img[o + 2] = (unsigned char)std::min(255.0, std::max(0.0, c[2] * 255.0));
   };
+  // The raster is coarse (a few metres a cell) and the texture fine, so a texel does not take its
+  // nearest cell's colour, which paints the grid. Material mode blends the four cells around it,
+  // at a position pushed about a cell by low-frequency noise (domain warping), with the blend's
+  // fractions jittered by finer noise and eased: class boundaries wander and fray like real ground
+  // cover instead of following the grid, and a lone cell is a soft patch, not a square. Asphalt
+  // is not warped, so the road edges stay straight. Risk and height, continuous fields, are
+  // interpolated; occupancy, a yes/no QA view, keeps its cells.
+  const int maxc = g.cols - 1, maxr = g.rows - 1;
+  const double cellx = spanx / std::max(1, maxc), celly = spany / std::max(1, maxr);
+  const double warpAmp = 0.9 * std::max(cellx, celly),
+               warpFreq = 1.0 / (3.0 * std::max(cellx, celly));
+  const double jitterFreq = 1.0 / std::max(0.5, 0.35 * std::max(cellx, celly));
+  std::uint16_t asphalt = 0;
+  const bool hasAsphalt = reg.find("asphalt", asphalt);
+  auto isGrass = [](std::uint16_t k) { return k == 6 || k == 7 || k == 8; }; // grass/tall/bush
+  auto ease = [](double t) { return t * t * (3.0 - 2.0 * t); };
+  auto cell = [&](int r, int c) { return std::size_t(r) * g.cols + c; };
+  // Each texel is a pure function of its position, so the rows paint in parallel (the same
+  // bytes on any thread count).
+#ifdef CVC_USING_OPENMP
+#pragma omp parallel for schedule(static)
+#endif
   for (int ty = 0; ty < T; ++ty) {
     double v = double(ty) / (T - 1), wy = g.min_y + v * spany;
-    int r = std::min(g.rows - 1, std::max(0, int(std::lround(v * (g.rows - 1)))));
     for (int tx = 0; tx < T; ++tx) {
       double u = double(tx) / (T - 1), wx = g.min_x + u * spanx;
-      int c = std::min(g.cols - 1, std::max(0, int(std::lround(u * (g.cols - 1)))));
-      std::size_t i = std::size_t(r) * g.cols + c;
-      cvc::geometry::color_t col = cellColor(ro, reg, i, m, hmin, hmax);
-      if (m == 0) {
-        std::uint16_t k = ro.klass[i];
-        if (k == 6 || k == 7 || k == 8) { // grass / tall_grass / bush_cover
-          double n1 = gfbm2(wx * 0.020, wy * 0.020), n2 = gfbm2(wx * 0.006 + 11, wy * 0.006 + 7);
-          double dfac = std::min(1.0, std::max(0.0, (n1 - 0.52) / 0.30));
-          double gfac = std::min(1.0, std::max(0.0, (n2 - 0.55) / 0.30));
-          for (int q = 0; q < 3; ++q)
-            col[q] = col[q] * (1 - dfac) + dirt[q] * dfac;
-          for (int q = 0; q < 3; ++q)
-            col[q] = col[q] * (1 - 0.5 * gfac) + dryGrass[q] * 0.5 * gfac;
-        }
+      double fx = u * maxc, fy = v * maxr;
+      if (m == 2) { // occupancy: its cells, as they are
+        const int c = std::min(maxc, std::max(0, int(std::lround(fx))));
+        const int r = std::min(maxr, std::max(0, int(std::lround(fy))));
+        put(tx, ty, cellColor(ro, reg, cell(r, c), m, hmin, hmax));
+        continue;
+      }
+      int c0 = std::min(std::max(0, maxc - 1), int(std::floor(fx)));
+      int r0 = std::min(std::max(0, maxr - 1), int(std::floor(fy)));
+      bool road = false;
+      if (m == 0 && hasAsphalt)
+        for (int dr = 0; dr < 2 && !road; ++dr)
+          for (int dc = 0; dc < 2 && !road; ++dc)
+            road = ro.klass[cell(std::min(maxr, r0 + dr), std::min(maxc, c0 + dc))] == asphalt;
+      double fu = fx - c0, fv = fy - r0;
+      if (m == 0 && !road) {
+        const double qx =
+            wx + warpAmp * (2.0 * gfbm2(wx * warpFreq + 3.1, wy * warpFreq + 7.7) - 1.0);
+        const double qy =
+            wy + warpAmp * (2.0 * gfbm2(wx * warpFreq + 13.9, wy * warpFreq + 1.3) - 1.0);
+        fx = std::min(double(maxc), std::max(0.0, (qx - g.min_x) / cellx));
+        fy = std::min(double(maxr), std::max(0.0, (qy - g.min_y) / celly));
+        c0 = std::min(std::max(0, maxc - 1), int(std::floor(fx)));
+        r0 = std::min(std::max(0, maxr - 1), int(std::floor(fy)));
+        fu = fx - c0;
+        fv = fy - r0;
+        fu = ease(std::min(
+            1.0, std::max(0.0, fu + 0.6 * (gnoise2(wx * jitterFreq, wy * jitterFreq) - 0.5))));
+        fv = ease(std::min(
+            1.0, std::max(0.0, fv + 0.6 * (gnoise2(wx * jitterFreq + 5.3, wy * jitterFreq + 9.1) -
+                                           0.5))));
+      }
+      const int c1 = std::min(maxc, c0 + 1), r1 = std::min(maxr, r0 + 1);
+      const std::size_t idx[4] = {cell(r0, c0), cell(r0, c1), cell(r1, c0), cell(r1, c1)};
+      const double wt[4] = {(1 - fu) * (1 - fv), fu * (1 - fv), (1 - fu) * fv, fu * fv};
+      if (m != 0) { // risk / height: the field interpolated, then coloured
+        double s = 0.0;
+        for (int k = 0; k < 4; ++k)
+          s += wt[k] * (m == 1 ? ro.risk_raw[idx[k]] : ro.height[idx[k]]);
+        put(tx, ty, heat(m == 1 ? s : (hmax > hmin ? (s - hmin) / (hmax - hmin) : 0.0)));
+        continue;
+      }
+      cvc::geometry::color_t col{0.0, 0.0, 0.0};
+      double grass = 0.0;
+      for (int k = 0; k < 4; ++k) {
+        const surface_class &sc = reg[ro.klass[idx[k]]];
+        for (int q = 0; q < 3; ++q)
+          col[q] += wt[k] * sc.albedo[q];
+        if (isGrass(ro.klass[idx[k]]))
+          grass += wt[k];
+      }
+      if (grass > 0.0) { // grass broken up by dirt and dry patches, as much as the texel is grass
+        double n1 = gfbm2(wx * 0.020, wy * 0.020), n2 = gfbm2(wx * 0.006 + 11, wy * 0.006 + 7);
+        double dfac = grass * std::min(1.0, std::max(0.0, (n1 - 0.52) / 0.30));
+        double gfac = grass * std::min(1.0, std::max(0.0, (n2 - 0.55) / 0.30));
+        for (int q = 0; q < 3; ++q)
+          col[q] = col[q] * (1 - dfac) + dirt[q] * dfac;
+        for (int q = 0; q < 3; ++q)
+          col[q] = col[q] * (1 - 0.5 * gfac) + dryGrass[q] * 0.5 * gfac;
       }
       put(tx, ty, col);
     }

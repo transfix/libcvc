@@ -26,8 +26,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cvc/world/generated_world.h>
 #include <gtest/gtest.h>
+#include <map>
+#include <set>
 #include <vector>
 
 using namespace cvc::world;
@@ -159,4 +162,49 @@ TEST(WorldGenerated, TreesAreTreeSized) {
       tallest = std::max(tallest, q[2] - w.model->hf().sample(q[0], q[1]));
   EXPECT_GT(tallest, 5.0);
   EXPECT_LT(tallest, 35.0);
+}
+
+// The raster is coarse (here ~3 m a cell under a 256-texel texture of 1.6 m texels), and the
+// texture must not paint its cells as squares: risk, one value per cell, is interpolated (many
+// more colours than cells' values), and in material mode a texel's colour does not hold constant
+// across a cell (the cells blend at a noise-warped position). Painting is deterministic.
+TEST(WorldGenerated, SurfaceIsInterpolatedNotCells) {
+  const generated_world w = generate_world(small_world());
+  std::set<float> risks(w.raster.risk_raw.begin(), w.raster.risk_raw.end());
+  const std::vector<unsigned char> risk = paint_surface(w, surface_color::risk, 256);
+  std::set<std::uint32_t> colours;
+  for (std::size_t i = 0; i + 2 < risk.size(); i += 3)
+    colours.insert(std::uint32_t(risk[i]) << 16 | std::uint32_t(risk[i + 1]) << 8 | risk[i + 2]);
+  EXPECT_GT(colours.size(), 4 * risks.size());
+
+  // Material: of the texels falling in one raster cell, how often do all share one colour? With
+  // nearest-cell painting a non-grass cell was one flat colour; blended, almost none are.
+  const int T = 256;
+  const std::vector<unsigned char> mat = paint_surface(w, surface_color::material, T);
+  EXPECT_EQ(mat, paint_surface(w, surface_color::material, T));
+  const int R = w.grid.rows, C = w.grid.cols;
+  std::map<std::size_t, std::set<std::uint32_t>> perCell;
+  for (int ty = 0; ty < T; ++ty)
+    for (int tx = 0; tx < T; ++tx) {
+      const int r = int(std::lround(double(ty) / (T - 1) * (R - 1)));
+      const int c = int(std::lround(double(tx) / (T - 1) * (C - 1)));
+      const std::size_t o = (std::size_t(ty) * T + tx) * 3;
+      perCell[std::size_t(r) * C + c].insert(std::uint32_t(mat[o]) << 16 |
+                                             std::uint32_t(mat[o + 1]) << 8 | mat[o + 2]);
+    }
+  // Only the cells on a boundary between classes (not grass, whose dirt breakup varies anyway):
+  // those were one flat colour, and now blend into their neighbours.
+  auto klass = [&](int r, int c) { return w.raster.klass[std::size_t(r) * C + c]; };
+  auto grass = [](std::uint16_t k) { return k == 6 || k == 7 || k == 8; };
+  std::size_t flat = 0, multi = 0;
+  for (int r = 1; r + 1 < R; ++r)
+    for (int c = 1; c + 1 < C; ++c) {
+      const std::uint16_t k = klass(r, c);
+      if (grass(k) || (klass(r - 1, c) == k && klass(r + 1, c) == k && klass(r, c - 1) == k &&
+                       klass(r, c + 1) == k))
+        continue;
+      (perCell[std::size_t(r) * C + c].size() == 1 ? flat : multi) += 1;
+    }
+  EXPECT_GT(multi, 0u);
+  EXPECT_GT(multi, 4 * flat);
 }
