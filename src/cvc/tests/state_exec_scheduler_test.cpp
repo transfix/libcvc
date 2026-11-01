@@ -2919,3 +2919,58 @@ TEST(SchedulerLockPort, APostEndsTheSyncIdleWait) {
   EXPECT_TRUE(sched.check_tables());
   sched.kill(pid);
 }
+
+namespace {
+
+// set_lock_manager makes the new home before the old one goes, so a refused attach (a
+// cross-thread home on a single-mode manager, design 8.3) throws with the old home still in place:
+// locks() is the same home on the same manager, and makes no private manager, after the throw.
+template <class S> void a_refused_attach_keeps_the_home() {
+  lock_run_world w;
+  const auto mgr = std::make_shared<lock_manager>(); // single mode
+  const auto other = std::make_shared<lock_manager>();
+  S sched;
+  sched.set_lock_manager(mgr);
+  detail::lock_home *const home = sched.locks();
+  ASSERT_EQ(home->manager_ptr().get(), mgr.get());
+  for (const std::shared_ptr<lock_manager> &target : {mgr, other}) {
+    EXPECT_THROW(sched.set_lock_manager(target, lock_attach{true}), std::logic_error);
+    EXPECT_EQ(sched.locks(), home);
+    EXPECT_EQ(sched.locks()->manager_ptr().get(), mgr.get());
+  }
+  const std::uint64_t grants = mgr->stats().grants;
+  const int pid = w.submit(sched, R"((with-lock "k" 7))");
+  for (int i = 0; i < 1000 && !is_finished(sched.get_process_info(pid)->status); ++i)
+    step_of(sched);
+  ASSERT_TRUE(is_finished(sched.get_process_info(pid)->status));
+  EXPECT_EQ(std::get<int64_t>(sched.get_result(pid)->v), 7);
+  EXPECT_GT(mgr->stats().grants, grants) << "the with-lock was not granted by the kept manager";
+  EXPECT_EQ(other->stats().grants, 0u);
+  EXPECT_TRUE(sched.check_tables());
+}
+
+} // namespace
+
+// A fresh scheduler has no lock home (design 8.4); locks() or set_lock_manager makes one.
+TEST(SchedulerLockPort, HasLockHomeOnceLocksOrSetLockManagerMadeIt) {
+  scheduler s1, s2;
+  async_scheduler a1, a2;
+  EXPECT_FALSE(s1.has_lock_home() || s2.has_lock_home() || a1.has_lock_home() ||
+               a2.has_lock_home());
+  s1.locks();
+  a1.locks();
+  s2.set_lock_manager(std::make_shared<lock_manager>());
+  a2.set_lock_manager(std::make_shared<lock_manager>());
+  EXPECT_TRUE(s1.has_lock_home() && s2.has_lock_home() && a1.has_lock_home() && a2.has_lock_home());
+}
+
+TEST(SchedulerLockPort, ARefusedAttachKeepsTheHomeAndManager) {
+  {
+    SCOPED_TRACE("sync");
+    a_refused_attach_keeps_the_home<scheduler>();
+  }
+  {
+    SCOPED_TRACE("async");
+    a_refused_attach_keeps_the_home<async_scheduler>();
+  }
+}

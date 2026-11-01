@@ -1013,9 +1013,8 @@ last thread's end, read from the threads' own clocks. Extras:
   core class than another thread;
 - `mutex_waits`, `mutex_wait_ns`, `mutex_wait_ns_per_lock`: the manager mutex's contended
   acquisitions in the locked run and the time they blocked, from `lock_stats` fields of those
-  names. This build's `lock_stats` has no such counter, and the mutex is the manager's own, so
-  these fields are absent; `ns_per_lock`'s growth over t = 1 bounds the wait from above. The bench
-  reads the counter, with no change here, once `lock_stats` has it;
+  names. Shared mode counts them: an operation that finds the mutex held reads the clock around
+  its wait, so an uncontended one pays only its `try_lock`;
 - hot, t at least 2: `handoffs` (the grants that reached their thread through its port),
   `handoff_ns` (p50/p90/p99/max/n) and `handoff_p50_ns` (its p50, the gate's figure), and
   `post_to_grant_ns`.

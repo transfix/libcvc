@@ -432,6 +432,13 @@ flight, pending coroutines, runnable processes): one parked on `msg-recv`, with 
 pending there, is no progress. The kill raises `RuntimeError`, naming the key:
 `pycvc.Exec.run: parked with no pending work (pid N, waiting for lock k)`.
 
+Two consequences. A holder inside a long synchronous Python call (`register_fn`) makes no progress
+until its step ends, so a waiter on another `Exec` whose `idle_timeout` is shorter than the call is
+killed meanwhile: make such a call async (`register_async_fn`), or give the waiter a longer
+`idle_timeout`. And without threads (the Emscripten pycvc) nothing steps another `Exec` while one
+`run()` waits, so a wait behind another `Exec`'s holder ends only at `idle_timeout`, blocking the
+page that long.
+
 `pycvc.scheduler` and `pycvc.async_scheduler` can take the app's manager too:
 `sched.set_lock_manager(app)` gives the scheduler `app::lock_manager()`, so its programs' locks meet
 the `Exec`s'. It attaches as an `Exec` does, since Python may step it on any thread: with

@@ -27,12 +27,17 @@ void scheduler::set_lock_manager(std::shared_ptr<lock_manager> mgr, lock_attach 
       if (p->locks && (!p->locks->holds.empty() || p->locks->ticket))
         throw std::logic_error("set_lock_manager: process " + std::to_string(pid) +
                                " holds or waits for a lock");
-  home_.reset();
   // The port shares run()'s idle wakeup, made with the first home (protocol 2.3), so a post ends
   // an idle wait; a replacing home gets the same one.
   if (!idle_)
     idle_ = std::make_shared<detail::wakeup>();
-  home_ = std::make_unique<detail::lock_home>(std::move(mgr), lock_ops_, policy_, idle_, attach);
+  // The new home is attached before the old one goes, so a refused attach (lock_attach) leaves
+  // the scheduler its home and manager. Both are attached meanwhile, which a manager allows; the
+  // old one is destroyed here, before any other member (protocol 5.7).
+  auto home =
+      std::make_unique<detail::lock_home>(std::move(mgr), lock_ops_, policy_, idle_, attach);
+  home_.swap(home);
+  home.reset();
 }
 
 detail::lock_home *scheduler::locks() {
