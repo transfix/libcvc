@@ -2951,6 +2951,19 @@ template <class S> void a_refused_attach_keeps_the_home() {
 
 } // namespace
 
+// A fresh scheduler has no lock home (design 8.4); locks() or set_lock_manager makes one.
+TEST(SchedulerLockPort, HasLockHomeOnceLocksOrSetLockManagerMadeIt) {
+  scheduler s1, s2;
+  async_scheduler a1, a2;
+  EXPECT_FALSE(s1.has_lock_home() || s2.has_lock_home() || a1.has_lock_home() ||
+               a2.has_lock_home());
+  s1.locks();
+  a1.locks();
+  s2.set_lock_manager(std::make_shared<lock_manager>());
+  a2.set_lock_manager(std::make_shared<lock_manager>());
+  EXPECT_TRUE(s1.has_lock_home() && s2.has_lock_home() && a1.has_lock_home() && a2.has_lock_home());
+}
+
 TEST(SchedulerLockPort, ARefusedAttachKeepsTheHomeAndManager) {
   {
     SCOPED_TRACE("sync");

@@ -62,6 +62,9 @@ public:
   /// scheduler then keeps the home and manager it had.
   void set_lock_manager(std::shared_ptr<lock_manager> mgr, lock_attach attach = {});
   detail::lock_home *locks() override;
+  /// Whether the scheduler has its lock home yet (made by set_lock_manager, or by locks() on first
+  /// use); locks() makes one when it doesn't.
+  bool has_lock_home() const noexcept { return home_ != nullptr; }
   bool check_tables() const override { return procs_.check(); }
 
   // --- Process submission ---
