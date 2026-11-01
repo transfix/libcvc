@@ -753,11 +753,10 @@ Exec::Exec(const std::shared_ptr<cvc::app> &app, PyObject *policy, double idle_t
   impl_->sched.set_data_defaults(async_scheduler::host_data_defaults());
   // Its locks are the app's (docs/STATE_EXEC_LOCKS.md 8.4, 9.2): one namespace for every Exec and
   // the app's exec scheduler, the home attached now. An Exec may run() on any Python thread, so
-  // its home attaches as one pumped on a thread of its own wherever the build has threads, which
-  // a single-mode manager refuses, naming state_exec.locks.threading (8.3). Without threads (the
-  // static Emscripten pycvc) auto made the manager single, and it takes this attach (9.5).
-  impl_->sched.set_lock_manager(app->lock_manager(),
-                                cvc::state_exec::lock_attach{cvc::state_exec::threads_compiled_in});
+  // its home attaches as a threaded host's: cross-thread wherever the build has threads, which a
+  // single-mode manager refuses, naming state_exec.locks.threading (8.3). Without threads (the
+  // static Emscripten pycvc) auto made the manager single, and it takes that attach (9.5).
+  impl_->sched.set_lock_manager(app->lock_manager(), cvc::state_exec::threaded_host_attach());
 
   impl_->host_proc = make_process();
   impl_->host_proc->pid = 0;

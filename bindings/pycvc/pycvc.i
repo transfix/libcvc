@@ -3935,8 +3935,7 @@ class scheduler_base {};
       throw std::logic_error("set_lock_manager: the scheduler already has its lock home (an "
                              "Exec's scheduler, or one that has run a with-lock); only its first "
                              "can be attached");
-    $self->set_lock_manager(app->lock_manager(),
-                            cvc::state_exec::lock_attach{cvc::state_exec::threads_compiled_in});
+    $self->set_lock_manager(app->lock_manager(), cvc::state_exec::threaded_host_attach());
   }
 }
 %enddef
