@@ -380,10 +380,12 @@ on_tick: |
     ;    against the catalog and writes only your own choice; every client draws it from there. ──
     (if (= (state-get "joined") "1")
       (begin
-        (state-set "avatar.colors"
-          (string.join (room-avatar-options (state-get "conf.room") "color") "\n"))
-        (state-set "avatar.accessories"
-          (string.join (room-avatar-options (state-get "conf.room") "accessory") "\n"))
+        ; write a list only when it changes: an options list rewritten every tick is re-read
+        ; every frame, and a picker that drops out for a frame closes its open popup
+        (set colors (string.join (room-avatar-options (state-get "conf.room") "color") "\n"))
+        (if (= colors (state-get "avatar.colors")) #f (state-set "avatar.colors" colors))
+        (set wear (string.join (room-avatar-options (state-get "conf.room") "accessory") "\n"))
+        (if (= wear (state-get "avatar.accessories")) #f (state-set "avatar.accessories" wear))
         (if (= (state-get "avatar.sent.color") "")
           (begin
             (set look (room-avatar (state-get "room.token")))
