@@ -3020,14 +3020,25 @@ double seconds_since(std::chrono::steady_clock::time_point t0) {
   return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 }
 
+// What follows the throw on B.
+enum class after_throw {
+  b2_times_out,       // b1 kept; then b2 waits and times out
+  b1_reaped,          // b1 killed and reaped; then b2 waits and times out
+  only_a_sleeper_due, // b1 kept, and the only other timer is a sleeper's, set before the throw
+};
+
 // Two homes on one manager, stepped by this thread. A's a1 holds "k" shared, parked on a message;
 // B's b1 asks for it exclusive with a 0.1 s timeout and queues; A's a2 asks for it shared and
 // queues behind b1 (FIFO, protocol 3.1). b1's expiry cancels its ticket, which grants a2: a note
 // for A, whose delivery the hook makes throw, so B's wait_expired throws in the middle of its
-// pass, b1 not yet timed out. Then b2 on B times out with no hook. With `reap`, b1 is killed and
-// reaped between the two passes: an expiry list still holding it would be read after the free
-// (ASan reports it). Without, b1 was flagged by the throw, and b2's pass times it out too.
-template <class S> void a_throwing_wait_expired_keeps_no_stale_expiry(bool reap) {
+// pass, b1 not yet timed out. The pass gives b1 a deadline due at once, back on the timer heap:
+// - b2_times_out: B's next pass times b1 out, and b2 times out on its own deadline;
+// - b1_reaped: b1 is killed and reaped first, so an expiry list still holding it would be read
+//   after the free (ASan reports it); b2 times out;
+// - only_a_sleeper_due: no other lock waiter ever expires on B, only a 0.5 s sleeper's timer
+//   follows; b1 is still timed out by the next pass, not left parked.
+template <class S> void a_throwing_wait_expired_keeps_no_stale_expiry(after_throw then) {
+  const bool reap = then == after_throw::b1_reaped;
   lock_run_world w;
   const auto mgr = std::make_shared<lock_manager>();
   S a;
@@ -3048,6 +3059,13 @@ template <class S> void a_throwing_wait_expired_keeps_no_stale_expiry(bool reap)
   for (int i = 0; i < 1000 && waiting_on(a, a2) != "lock /k"; ++i)
     step_of(a);
   ASSERT_EQ(waiting_on(a, a2), "lock /k");
+  int s = -1;
+  if (then == after_throw::only_a_sleeper_due) {
+    s = w.submit(b, R"((begin (sleep 0.5) "slept"))");
+    for (int i = 0; i < 1000 && b.get_process_info(s)->status != process_status::waiting; ++i)
+      step_of(b);
+    ASSERT_EQ(b.get_process_info(s)->status, process_status::waiting);
+  }
 
   {
     static const detail::lock_test_hooks hooks{.cross_home_note = throw_on_cross_home_note};
@@ -3066,19 +3084,22 @@ template <class S> void a_throwing_wait_expired_keeps_no_stale_expiry(bool reap)
     ASSERT_TRUE(threw) << "b1's expiry never reached the throwing delivery";
   }
   EXPECT_EQ(waiting_on(b, b1), "lock /k"); // the throw cut its timeout short
+  EXPECT_TRUE(b.check_tables());
   if (reap) {
     ASSERT_TRUE(b.kill(b1));
     ASSERT_TRUE(b.reap(b1));
   }
-  const int b2 = w.submit(b, timed);
+  // The process that closes the run: b2, a second timed wait, or the sleeper.
+  const int last = then == after_throw::only_a_sleeper_due ? s : w.submit(b, timed);
   const auto done = [&] {
-    return is_finished(b.get_process_info(b2)->status) &&
+    return is_finished(b.get_process_info(last)->status) &&
            (reap || is_finished(b.get_process_info(b1)->status));
   };
   for (const auto t0 = std::chrono::steady_clock::now(); !done() && seconds_since(t0) < 10.0;)
     step_of(b);
-  ASSERT_TRUE(is_finished(b.get_process_info(b2)->status));
-  EXPECT_EQ(std::get<std::string>(b.get_result(b2)->v), "timeout");
+  ASSERT_TRUE(is_finished(b.get_process_info(last)->status));
+  EXPECT_EQ(std::get<std::string>(b.get_result(last)->v),
+            then == after_throw::only_a_sleeper_due ? "slept" : "timeout");
   if (!reap) {
     ASSERT_TRUE(is_finished(b.get_process_info(b1)->status)) << "b1's expiry was lost";
     EXPECT_EQ(std::get<std::string>(b.get_result(b1)->v), "timeout");
@@ -3094,15 +3115,18 @@ template <class S> void a_throwing_wait_expired_keeps_no_stale_expiry(bool reap)
 } // namespace
 
 TEST(SchedulerLockPort, AThrowingWaitExpiredKeepsNoStaleExpiry) {
-  for (const bool reap : {false, true}) {
-    SCOPED_TRACE(reap ? "b1 reaped after the throw" : "b1 kept");
+  for (const after_throw then :
+       {after_throw::b2_times_out, after_throw::b1_reaped, after_throw::only_a_sleeper_due}) {
+    SCOPED_TRACE(then == after_throw::b2_times_out ? "b1 kept, b2 times out"
+                 : then == after_throw::b1_reaped  ? "b1 reaped, b2 times out"
+                                                   : "b1 kept, only a sleeper's timer follows");
     {
       SCOPED_TRACE("sync");
-      a_throwing_wait_expired_keeps_no_stale_expiry<scheduler>(reap);
+      a_throwing_wait_expired_keeps_no_stale_expiry<scheduler>(then);
     }
     {
       SCOPED_TRACE("async");
-      a_throwing_wait_expired_keeps_no_stale_expiry<async_scheduler>(reap);
+      a_throwing_wait_expired_keeps_no_stale_expiry<async_scheduler>(then);
     }
   }
 }

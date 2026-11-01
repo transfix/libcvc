@@ -50,17 +50,21 @@ detail::lock_home *scheduler::locks() {
   return home_.get();
 }
 
-void scheduler::keep_lock_expiries() {
+void scheduler::keep_lock_expiries(clock::time_point now) {
   // An expiry pass that throws (wake_due, or wait_expired: an allocation, a callback) keeps no
-  // raw pointer past it, since a process may be reaped before the next pass. The lock waiters it
-  // had not yet timed out are flagged instead (lock_expired_pending, design 8.7): the table drops
-  // the flag with an ended process, and the next wait_expired collects the rest. Updating a flag
-  // only moves the table's count.
+  // raw pointer past it, since a process may be reaped before the next pass. wake_due spent the
+  // deadline of each lock waiter it listed, so one the pass had not yet timed out gets a deadline
+  // due `now` and goes back on the timer heap: the next timer pass expires it the normal way,
+  // whatever else is due then. A process ended meanwhile leaves the heap with its timer. Only an
+  // allocation failure re-heaping one loses it (its wait then lasts until a grant or a kill).
   for (process *p : lock_expired_) {
-    if (is_finished(p->status) || !p->lock_waiting || p->lock_expired_pending)
+    if (p->status != process_status::waiting || !p->lock_waiting || p->lock_deadline)
       continue;
-    p->lock_expired_pending = true;
-    procs_.update(*p);
+    p->lock_deadline = now;
+    try {
+      procs_.update(*p);
+    } catch (...) { // the pass's own exception is the one to report
+    }
   }
   lock_expired_.clear();
 }
@@ -593,7 +597,7 @@ int scheduler::step_once() {
             home_->wait_expired(lock_expired_);
         }
       } catch (...) {
-        keep_lock_expiries();
+        keep_lock_expiries(now);
         throw;
       }
       lock_expired_.clear();
