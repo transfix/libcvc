@@ -134,6 +134,7 @@
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/SdlInput.h>
+#include <cvc/gl/Settings.h> // UiSettings: the overlay's UI size, for the Controls window
 #include <cvc/gl/StageLighting.h>
 #include <cvc/gl/TouchGestures.h>
 #include <cvc/gl/ariadne/AriRuntime.h>
@@ -267,7 +268,7 @@ std::chrono::duration<double> snapshot_period(const ari::HostOptions &o) {
 
 // Settings' item that opens the Keys window AppRuntime puts in every document.
 ari::Widget keys_menu_item() {
-  return ari::menu_toggle("Keys...", std::string("tree.") + ari::kKeysWindow + ".open");
+  return ari::menu_toggle("Controls...", std::string("tree.") + ari::kKeysWindow + ".open");
 }
 
 // The camera's fly keys, for the Keys window: the camera reads them from its own state, so the
@@ -1632,6 +1633,10 @@ int run_window(const ari::HostOptions &o) {
         ari::menu("Settings", {keys_menu_item(), ari::separator(), ari::custom("scene_settings")}));
     return menus;
   };
+  // The Controls window's UI size: the overlay's own scale in the state tree, which it applies at
+  // the next frame (1.25 on a touch device, 1 with a mouse, until the user picks another).
+  rt.app_runtime().set_host_ui_size(
+      {"/" + cvc::gl::UiSettings::viewerStatePath(sg.getStatePrefix(), view.name()) + ".scale"});
   rt.app_runtime().set_host_menus(host_menus(o.doc));
   rt.app_runtime().set_host_keys(camera_keys(cam));
   if (!gallery.empty())

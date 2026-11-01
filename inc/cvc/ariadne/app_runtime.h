@@ -73,9 +73,14 @@ public:
   // stand in the bar as written, and a host menu named like one of them adds its items to it.
   static Widget document_menus(std::string label = std::string());
 
+  // The host's UI size (keys.h), offered at the top of the Controls window as "UI size": arigl's
+  // ImGuiOverlay scale, which a phone may want larger or smaller. A host that calls this gets the
+  // window. Applied by the next load() or set_root().
+  void set_host_ui_size(UiSizeControl ui);
+
   // Key bindings of the host's own (keys.h), beside each document's `keys:`: arigl's camera keys.
   // Once a host has called this (even with none), or for a document with keys, the document gets
-  // a Keys window (id ariadne_keys, closed until tree.ariadne_keys.open is set -- a host's
+  // a Controls window (id ariadne_keys, closed until tree.ariadne_keys.open is set -- a host's
   // menu_toggle on that key opens it) listing them all, each with a Change button: click it, then
   // press the new key (Escape keeps the old one). Applied by the next load() or set_root().
   void set_host_keys(std::vector<KeyBinding> keys);
@@ -202,13 +207,16 @@ private:
   std::function<void(const std::string &)> warningListener_; // set_warning_listener
   void collect_warnings(); // the Runtime's new warnings -> pendingWarnings_, each to the listener
   std::vector<Widget> hostMenus_;            // set_host_menus: put in every mounted tree
+  UiSizeControl hostUiSize_;                 // set_host_ui_size: the Controls window's first row
+  // The Controls window's Display rows (hostUiSize_), ahead of everything else in it.
+  void add_ui_size(Widget &root) const;
   std::vector<KeyBinding> hostKeys_;         // set_host_keys: bound, and listed, in every one
   bool keysWindow_ = false;                  // set_host_keys was called: always a Keys window
   // The keys' defaults at keys.<id>, before init: (which may set its own). A new document's own
   // replace whatever an earlier document left at the same keys.<id> (they share the prefix), ""
   // for one with no key; a reload keeps the user's keys, and the host's are only seeded.
   void seed_keys(const std::vector<KeyBinding> &own, bool new_document);
-  // Bind them, and the host's, and add the Keys window.
+  // Bind them, and the host's, and add the Controls window.
   void add_keys(Widget &root, std::vector<KeyBinding> keys);
   std::string docPath_; // the document load() last loaded, to tell a reload from a new one
   std::vector<std::string> docArgv_;         // the document's command line (set_document_args)

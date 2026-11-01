@@ -18,6 +18,7 @@
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/Settings.h>
 #include <imgui.h>
+#include <imgui_internal.h> // the toggle's z-order; carrying windows along with a new UI size
 // The GL loader must match VTK's context: WebGL2/GLES3 in the browser build.
 #if defined(__EMSCRIPTEN__) && !defined(IMGUI_IMPL_OPENGL_ES3)
 #define IMGUI_IMPL_OPENGL_ES3
@@ -31,6 +32,182 @@
 EM_JS(int, cvcgl_is_touch_device, (), {
   return ('ontouchstart' in globalThis ||
           (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0)) ? 1 : 0;
+});
+
+// Device pixels per CSS pixel: what VTK multiplies the canvas's CSS size by.
+EM_JS(double, cvcgl_device_pixel_ratio, (), {
+  var r = globalThis.devicePixelRatio;
+  return r > 0 ? r : 1.0;
+});
+
+// The system keyboard (see the header). A phone raises its keyboard only for a focused text
+// field, so this adds a hidden <input> beside the canvas, focuses it while an ImGui text field is
+// active after a touch, and queues what the keyboard does to it for cvcgl_ime_take: a code point
+// (> 0) per character typed, or a key (< 0, kImeKeys). The state lives on the canvas element, as
+// TouchGestures' does, so each viewer has its own.
+//
+// Text is read from what the keyboard did to the field, not from key events: a phone's keyboard
+// sends keyCode 229 for most keys, composes words (Android), and replaces them (autocorrect,
+// suggestions). Each change is compared with the last: Backspaces for what went, then what came.
+// The field starts as two spaces so a Backspace always has something to delete (a keyboard sends
+// nothing for a Backspace in an empty field), and is reset to them when it runs short or long.
+//
+// iOS raises the keyboard only for a focus made inside a user gesture. VTK turns a touchstart into
+// a press that ImGui takes at the next frame, so by the time the finger lifts the field has become
+// active: the touchend handler focuses the input then. A field that becomes active with no finger
+// down (one that took the text by itself, or a very quick tap) is focused at once, which raises the
+// keyboard on Android; on iOS the next tap on it does.
+EM_JS(void, cvcgl_ime_install, (const char *sel), {
+  var el = document.querySelector(UTF8ToString(sel)) || document.getElementById('canvas') ||
+           document.querySelector('canvas');
+  if (!el || el.__cvcglIme)
+    return;
+  var SENT = '  ';
+  var inp = document.createElement('input');
+  inp.type = 'text';
+  inp.autocomplete = 'off';
+  inp.spellcheck = false;
+  inp.tabIndex = -1;
+  inp.setAttribute('autocorrect', 'off');
+  inp.setAttribute('autocapitalize', 'off');
+  inp.setAttribute('enterkeyhint', 'done');
+  inp.setAttribute('aria-hidden', 'true');
+  // Invisible but laid out, since a field with no box cannot take the focus; 16px, or iOS zooms the
+  // page into it. Style properties, not a style attribute, which a Content-Security-Policy refuses.
+  var s = inp.style;
+  s.position = 'fixed';
+  s.left = '0px';
+  s.top = '0px';
+  s.width = '1px';
+  s.height = '16px';
+  s.margin = '0';
+  s.padding = '0';
+  s.border = '0';
+  s.outline = 'none';
+  s.opacity = '0';
+  s.color = 'transparent';
+  s.background = 'transparent';
+  s.caretColor = 'transparent';
+  s.fontSize = '16px';
+  s.pointerEvents = 'none';
+  document.body.appendChild(inp);
+  var st = {inp: inp, q: [], last: SENT, want: false, touch: false, touching: false,
+            composing: false, mine: false, fullH: 0};
+  el.__cvcglIme = st;
+  var vv = globalThis.visualViewport;
+  function viewH() { return vv ? vv.height * vv.scale : 0; }
+  function reset() {
+    inp.value = SENT;
+    st.last = SENT;
+    try { inp.setSelectionRange(SENT.length, SENT.length); } catch (e) {}
+  }
+  function sync() {
+    var cur = inp.value, prev = st.last, p = 0, n = Math.min(cur.length, prev.length);
+    while (p < n && cur.charCodeAt(p) == prev.charCodeAt(p))
+      ++p;
+    if (p > 0 && (prev.charCodeAt(p - 1) & 0xFC00) == 0xD800)
+      --p; // not between the halves of a surrogate pair
+    Array.from(prev.slice(p)).forEach(function() { st.q.push(-1); });
+    Array.from(cur.slice(p)).forEach(function(c) {
+      var cp = c.codePointAt(0);
+      st.q.push(cp == 10 || cp == 13 ? -2 : cp);
+    });
+    st.last = cur;
+    if (!st.composing && (cur.length < SENT.length || cur.length > 64))
+      reset();
+  }
+  // Focus the input. Already focused with the keyboard up (a tap that moved the caret): leave it.
+  // Focused with no keyboard (focused outside a gesture on iOS, or the keyboard was put away):
+  // blur and focus again, inside this gesture. The view shrinks by a keyboard's height while one
+  // is up; with no visualViewport, trust the focus.
+  st.open = function() {
+    if (document.activeElement == inp) {
+      if (!vv || viewH() < 0.8 * st.fullH) {
+        reset();
+        return;
+      }
+      st.mine = true;
+      inp.blur();
+      st.mine = false;
+    } else {
+      st.fullH = viewH();
+    }
+    reset();
+    inp.focus(); // and the browser scrolls it, at the field's caret, into view
+  };
+  st.close = function() {
+    if (document.activeElement != inp)
+      return;
+    st.mine = true;
+    inp.blur();
+    st.mine = false;
+    try { el.focus({preventScroll: true}); } catch (e) {} // keys go to the canvas again
+  };
+  var KEYS = {Enter: -2, Tab: -3, Escape: -4, ArrowLeft: -5, ArrowRight: -6, ArrowUp: -7,
+              ArrowDown: -8, Home: -9, End: -10, Delete: -11};
+  inp.addEventListener('keydown', function(e) {
+    if (e.isComposing || e.keyCode == 229 || e.ctrlKey || e.metaKey || e.altKey)
+      return;
+    var k = KEYS[e.key];
+    if (k == undefined)
+      return; // characters and Backspace: from what they do to the field
+    st.q.push(k);
+    e.preventDefault();
+    if (k == -2)
+      reset();
+  });
+  inp.addEventListener('input', sync);
+  inp.addEventListener('compositionstart', function() { st.composing = true; });
+  inp.addEventListener('compositionend', function() {
+    st.composing = false;
+    sync();
+  });
+  // A finger (or a pen) wants the system keyboard; a mouse types through the canvas as before.
+  var opt = {capture: true, passive: true};
+  document.addEventListener('pointerdown', function(e) { st.touch = e.pointerType != 'mouse'; }, opt);
+  el.addEventListener('touchstart', function() {
+    st.touch = true;
+    st.touching = true;
+  }, opt);
+  el.addEventListener('touchend', function(e) {
+    st.touching = e.touches.length > 0;
+    if (st.want && !st.touching)
+      st.open();
+  }, opt);
+  el.addEventListener('touchcancel', function(e) { st.touching = e.touches.length > 0; }, opt);
+});
+
+// ImGui's text-input state, when it changes (Platform_SetImeDataFn): the input goes over the
+// caret, so the browser keeps the field in view above the keyboard, and opens or closes with it.
+EM_JS(void, cvcgl_ime_set, (const char *sel, int want, double x, double y, double h), {
+  var el = document.querySelector(UTF8ToString(sel)) || document.getElementById('canvas') ||
+           document.querySelector('canvas');
+  var st = el && el.__cvcglIme;
+  if (!st)
+    return;
+  var r = el.getBoundingClientRect(), k = el.width > 0 ? r.width / el.width : 1;
+  st.inp.style.left = (r.left + x * k) + 'px';
+  st.inp.style.top = (r.top + y * k) + 'px';
+  st.inp.style.height = Math.max(16, h * k) + 'px';
+  if (want && !st.want && st.touch && !st.touching)
+    st.open();
+  else if (!want && st.want)
+    st.close();
+  st.want = !!want;
+});
+
+// Drain up to `cap` of the keyboard's queued events into out[]; returns how many.
+EM_JS(int, cvcgl_ime_take, (const char *sel, int *out, int cap), {
+  var el = document.querySelector(UTF8ToString(sel)) || document.getElementById('canvas') ||
+           document.querySelector('canvas');
+  var st = el && el.__cvcglIme;
+  if (!st)
+    return 0;
+  var n = Math.min(st.q.length, cap);
+  for (var i = 0; i < n; ++i)
+    setValue(out + 4 * i, st.q[i], 'i32');
+  st.q.splice(0, n);
+  return n;
 });
 // clang-format on
 #endif
@@ -262,6 +439,53 @@ bool detectTouchDevice() {
 #endif
 }
 
+// The UI size a touch device starts at: a laptop's UI a quarter larger, in the display's logical
+// pixels -- 20 px text, and with the touch slop a button's hit area about 38 px tall (a fingertip
+// wants 40 or so), on a phone too.
+constexpr float kTouchUiScale = 1.25f;
+
+float clampUiScale(float scale) { return scale < 0.25f ? 0.25f : scale > 4.0f ? 4.0f : scale; }
+
+// Device pixels per logical pixel (see setPixelRatio).
+float detectPixelRatio() {
+#ifdef __EMSCRIPTEN__
+  const double r = cvcgl_device_pixel_ratio();
+  return r > 0.0 ? static_cast<float>(r) : 1.0f;
+#else
+  return 1.0f;
+#endif
+}
+
+#ifdef __EMSCRIPTEN__
+// VTK's canvas, which TouchGestures listens on as well.
+constexpr const char *kCanvas = "#canvas";
+
+// The system keyboard's keys (cvcgl_ime_install's KEYS), by minus their code.
+const ImGuiKey kImeKeys[] = {ImGuiKey_None,       ImGuiKey_Backspace, ImGuiKey_Enter,
+                             ImGuiKey_Tab,        ImGuiKey_Escape,    ImGuiKey_LeftArrow,
+                             ImGuiKey_RightArrow, ImGuiKey_UpArrow,   ImGuiKey_DownArrow,
+                             ImGuiKey_Home,       ImGuiKey_End,       ImGuiKey_Delete};
+
+// What the system keyboard typed since the last frame, in order: characters as text, the rest
+// as a key's press and release (ImGui trickles them across frames, in order).
+void feedSystemKeyboard() {
+  ImGuiIO &io = ImGui::GetIO();
+  int ev[64];
+  for (int n; (n = cvcgl_ime_take(kCanvas, ev, 64)) > 0;)
+    for (int i = 0; i < n; ++i) {
+      if (ev[i] > 0) {
+        io.AddInputCharacter(static_cast<unsigned int>(ev[i]));
+        continue;
+      }
+      const int k = -ev[i];
+      if (k < static_cast<int>(sizeof(kImeKeys) / sizeof(kImeKeys[0])) && k > 0) {
+        io.AddKeyEvent(kImeKeys[k], true);
+        io.AddKeyEvent(kImeKeys[k], false);
+      }
+    }
+}
+#endif
+
 // A big, round, translucent show/hide button pinned to the bottom-right corner.
 //
 // ImGui has no round button, so this is an InvisibleButton (whose hit area is
@@ -284,6 +508,10 @@ bool floatingCircleToggle(const char *id, bool *open, float diameter, const char
       ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove;
   bool clicked = false;
   if (ImGui::Begin(id, nullptr, flags)) {
+    // Above every window, even one dragged over this corner: on a phone it is the way back to the
+    // scene. Not above a popup, though (a menu, or a combo's list open over the corner).
+    if (!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel))
+      ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
     const ImVec2 p0 = ImGui::GetCursorScreenPos();
     ImGui::InvisibleButton("##hit", ImVec2(diameter, diameter));
     clicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
@@ -328,8 +556,12 @@ struct ImGuiOverlay::Impl {
   bool hadKeyboard = false; // for the rising edge of WantCaptureKeyboard
   ImGuiStyle pristineStyle; // the unscaled style, captured once
   bool haveStyle = false;
-  float appliedScale = -1.0f; // guard: applyScale is idempotent per value
-  float uiScale = 1.0f;
+  float appliedScale = -1.0f; // the style's scale (uiScale x pixelRatio); applyScale's guard
+  bool appliedTouch = false;
+  float uiScale = 1.0f;    // the UI size, in logical pixels
+  float pixelRatio = 1.0f; // device pixels per logical pixel
+  float ratioOverride = 0; // setPixelRatio; 0 = the display's
+  float windowRescale = 1; // the open windows' share of a scale change, for the next frame
   bool touchMode = false;
   bool panelsOpen = true;               // the floating toggle drives this
   bool showToggle = true;               // draw the floating show/hide button
@@ -385,6 +617,17 @@ struct ImGuiOverlay::Impl {
     if (fixedDt > 0.0f)
       io.DeltaTime = fixedDt;
     lastTime = now;
+    // Scale changes (the UI size, the display's pixel ratio) land here, between frames: the style
+    // must not change under a frame's widgets, and the open windows come along.
+    pixelRatio = ratioOverride > 0.0f ? ratioOverride : detectPixelRatio();
+    applyScale();
+    if (windowRescale != 1.0f) {
+      rescaleWindows(windowRescale);
+      windowRescale = 1.0f;
+    }
+#ifdef __EMSCRIPTEN__
+    feedSystemKeyboard();
+#endif
     ImGui_ImplOpenGL3_NewFrame();
     ImGui::NewFrame();
     frameOpen = true;
@@ -393,12 +636,13 @@ struct ImGuiOverlay::Impl {
     // it loads — the UI has to be reachable, not permanently in the way. The
     // toggle button is always there to bring it back. Decided once, on the
     // first frame that has a real size, so a later resize does not fight the
-    // user's own choice.
+    // user's own choice. In logical pixels: a phone's canvas is ~1200 device
+    // pixels across.
     if (!sizedOnce && io.DisplaySize.x > 1.0f && io.DisplaySize.y > 1.0f) {
       sizedOnce = true;
       const float shortSide =
           io.DisplaySize.x < io.DisplaySize.y ? io.DisplaySize.x : io.DisplaySize.y;
-      if (shortSide < 700.0f)
+      if (shortSide / pixelRatio < 700.0f)
         panelsOpen = false;
     }
     if (sceneDraw) // scene annotations: under the UI, and shown with the panels hidden too
@@ -454,28 +698,48 @@ struct ImGuiOverlay::Impl {
   }
 
   // ---- scaling -------------------------------------------------------------
-  // Re-derive the whole style from the pristine copy at a new scale.
-  // ScaleAllSizes() multiplies IN PLACE (and truncates to integers), so calling
-  // it repeatedly compounds: five calls at 2x give FramePadding 128 instead of
-  // 8. Always start from the unscaled style.
-  void applyScale(float scale) {
-    if (!haveStyle || scale == appliedScale)
+  // Re-derive the whole style from the pristine copy at the UI size times the
+  // pixel ratio. ScaleAllSizes() multiplies IN PLACE (and truncates to
+  // integers), so calling it repeatedly compounds: five calls at 2x give
+  // FramePadding 128 instead of 8. Always start from the unscaled style.
+  void applyScale() {
+    const float scale = uiScale * pixelRatio;
+    if (!haveStyle || (scale == appliedScale && touchMode == appliedTouch))
       return;
+    if (appliedScale > 0.0f)
+      windowRescale *= scale / appliedScale;
     appliedScale = scale;
+    appliedTouch = touchMode;
     ImGuiStyle &style = ImGui::GetStyle();
     style = pristineStyle;
     style.ScaleAllSizes(scale);
     // ScaleAllSizes cannot grow this one: it defaults to (0,0) and 0 * scale is
     // still 0. It is the slop around a widget's hit rect, which is exactly what
     // a fingertip needs.
-    if (scale > 1.0f)
+    if (touchMode)
       style.TouchExtraPadding = ImVec2(4.0f * scale, 4.0f * scale);
     // Fonts are dynamic in 1.92 (re-baked at the final size), so this is both
     // crisp and safe to change at runtime. io.FontGlobalScale is OBSOLETE and
-    // asserts against this field — do not use it.
-    style.FontScaleMain = scale;
+    // asserts against these fields — do not use it. Their product is the whole
+    // UI's scale, which the Ariadne backend applies to a document's px as well.
+    style.FontScaleMain = uiScale;
+    style.FontScaleDpi = pixelRatio;
+    ImGuiIO &io = ImGui::GetIO();
     // Fingers wobble; the 6px default drag threshold turns a tap into a drag.
-    ImGui::GetIO().MouseDragThreshold = scale > 1.0f ? 10.0f : 6.0f;
+    // Logical pixels, as the rest of the scale.
+    io.MouseDragThreshold = (touchMode ? 10.0f : 6.0f) * pixelRatio;
+    io.ConfigWindowsMoveFromTitleBarOnly = touchMode;
+  }
+
+  // The UI's scale changed under its open windows: carry them along, place and
+  // size, as ImGui does for a monitor's DPI, and let each table take its
+  // authored column widths again, at the new size.
+  static void rescaleWindows(float factor) {
+    ImGui::ScaleWindowsInViewport(static_cast<ImGuiViewportP *>(ImGui::GetMainViewport()), factor);
+    ImGuiContext &g = *GImGui;
+    for (int i = 0; i < g.Tables.GetMapSize(); ++i)
+      if (ImGuiTable *t = g.Tables.TryGetMapData(i))
+        ImGui::TableResetSettings(t);
   }
 
   // ---- input --------------------------------------------------------------
@@ -632,12 +896,15 @@ ImGuiOverlay::ImGuiOverlay(SceneRenderer &viewer) : m_impl(new Impl) {
   m_impl->haveStyle = true;
 
   // Touch devices get a bigger UI by default — the widget sizes that suit a
-  // mouse are unusable with a finger.
+  // mouse are hard to hit with a finger. And the display's pixel ratio from
+  // the start, so the first frame is already at its size.
   m_impl->touchMode = detectTouchDevice();
-  m_impl->uiScale = m_impl->touchMode ? 2.0f : 1.0f;
-  m_impl->applyScale(m_impl->uiScale);
+  m_impl->uiScale = m_impl->touchMode ? kTouchUiScale : 1.0f;
+  m_impl->pixelRatio = detectPixelRatio();
+  m_impl->applyScale();
 
   // Every UI setting is reachable as cvc::state, like the camera and the HUD.
+  // A write lands at the next frame (beginFrame), as the setters' do.
   Impl *impl = m_impl.get();
   m_impl->settings = std::make_unique<UiSettings>(
       viewer.scene().appContext(),
@@ -648,8 +915,7 @@ ImGuiOverlay::ImGuiOverlay(SceneRenderer &viewer) : m_impl(new Impl) {
         impl->touchMode = v.touchMode;
         impl->panelsOpen = v.panelsOpen;
         impl->showToggle = v.toggleButton;
-        impl->uiScale = static_cast<float>(v.scale);
-        impl->applyScale(impl->uiScale);
+        impl->uiScale = clampUiScale(static_cast<float>(v.scale));
         impl->applyingState = false;
       });
   m_impl->syncSettings();
@@ -670,6 +936,15 @@ ImGuiOverlay::ImGuiOverlay(SceneRenderer &viewer) : m_impl(new Impl) {
     buf = cvc::gl::clipboard::get();
     return buf.c_str();
   };
+#ifdef __EMSCRIPTEN__
+  // The system keyboard, for a phone (see the header): ImGui reports here, at the end of each
+  // frame where it changed, whether a text field wants text and where its caret is.
+  cvcgl_ime_install(kCanvas);
+  pio.Platform_SetImeDataFn = [](ImGuiContext *, ImGuiViewport *, ImGuiPlatformImeData *d) {
+    cvcgl_ime_set(kCanvas, d->WantTextInput || d->WantVisible ? 1 : 0, d->InputPos.x, d->InputPos.y,
+                  d->InputLineHeight);
+  };
+#endif
 
   m_impl->ready = true; // GL backend is initialized lazily (see ensureBackend)
 
@@ -732,19 +1007,20 @@ void ImGuiOverlay::setSceneDrawCallback(std::function<void()> draw) {
 ImGuiContext *ImGuiOverlay::imguiContext() const { return m_impl->ctx; }
 
 void ImGuiOverlay::setUiScale(float scale) {
-  if (scale < 0.25f)
-    scale = 0.25f;
-  if (scale > 4.0f)
-    scale = 4.0f;
-  m_impl->uiScale = scale;
-  m_impl->applyScale(scale);
+  m_impl->uiScale = clampUiScale(scale); // applied at the next frame (beginFrame)
   m_impl->syncSettings();
 }
 float ImGuiOverlay::uiScale() const { return m_impl->uiScale; }
 
+void ImGuiOverlay::setPixelRatio(float ratio) {
+  m_impl->ratioOverride = ratio > 0.0f ? ratio : 0.0f;
+  m_impl->pixelRatio = ratio > 0.0f ? ratio : detectPixelRatio();
+}
+float ImGuiOverlay::pixelRatio() const { return m_impl->pixelRatio; }
+
 void ImGuiOverlay::setTouchMode(bool on) {
   m_impl->touchMode = on;
-  setUiScale(on ? 2.0f : 1.0f); // also syncs
+  setUiScale(on ? kTouchUiScale : 1.0f); // also syncs
 }
 bool ImGuiOverlay::touchMode() const { return m_impl->touchMode; }
 
@@ -814,6 +1090,8 @@ bool ImGuiOverlay::visible() const { return false; }
 bool ImGuiOverlay::enabled() const { return false; }
 void ImGuiOverlay::setUiScale(float) {}
 float ImGuiOverlay::uiScale() const { return 1.0f; }
+void ImGuiOverlay::setPixelRatio(float) {}
+float ImGuiOverlay::pixelRatio() const { return 1.0f; }
 void ImGuiOverlay::setTouchMode(bool) {}
 bool ImGuiOverlay::touchMode() const { return false; }
 void ImGuiOverlay::setFixedDeltaTime(float) {}

@@ -6526,8 +6526,9 @@ TEST(AriadneAppRuntime, HostMenusBesideTheDocumentsOwn) {
   EXPECT_FALSE(mb.saw("separator"));
 }
 
-// §5.9: a host's menus count as the document's for the Windows menu. arigl's Settings > Keys...
-// opens the Keys window, so the Windows menu, after the host's menus, lists only the document's.
+// §5.9: a host's menus count as the document's for the Windows menu. arigl's Settings >
+// Controls... opens the Controls window, so the Windows menu, after the host's menus, lists only
+// the document's.
 TEST(AriadneAppRuntime, TheWindowsMenuLeavesOutWhatTheHostsMenusOpen) {
   if (!have_yaml())
     GTEST_SKIP() << "libcvc built without yaml-cpp";
@@ -6535,8 +6536,9 @@ TEST(AriadneAppRuntime, TheWindowsMenuLeavesOutWhatTheHostsMenusOpen) {
   MockBackend mb;
   AppRuntime art(app, "ui.docs.d");
   art.set_backend(mb);
-  art.set_host_menus({AppRuntime::document_menus(),
-                      menu("Settings", {menu_toggle("Keys...", "tree.ariadne_keys.open", false)})});
+  art.set_host_menus(
+      {AppRuntime::document_menus(),
+       menu("Settings", {menu_toggle("Controls...", "tree.ariadne_keys.open", false)})});
   art.set_host_keys({});
   art.load(write_doc("host_windows_menu.ari", "meta: {min_libcvc: 3.4.0}\n"
                                               "windows:\n"
@@ -6549,9 +6551,9 @@ TEST(AriadneAppRuntime, TheWindowsMenuLeavesOutWhatTheHostsMenusOpen) {
   EXPECT_LT(menu_at(mb, "Settings"), menu_at(mb, "Windows"));
   EXPECT_EQ(std::count(mb.log.begin(), mb.log.end(), "begin_menubar"), 1); // one bar, the host's
   EXPECT_TRUE(mb.saw("toggle:Panel"));
-  EXPECT_FALSE(mb.saw("toggle:Keys")) << "Settings > Keys... opens it";
+  EXPECT_FALSE(mb.saw("toggle:Controls")) << "Settings > Controls... opens it";
 
-  // Without such a menu the Keys window is listed: the one way to open it.
+  // Without such a menu the Controls window is listed: the one way to open it.
   cvc::app app2;
   MockBackend mb2;
   AppRuntime plain(app2, "ui.docs.d");
@@ -6565,11 +6567,11 @@ TEST(AriadneAppRuntime, TheWindowsMenuLeavesOutWhatTheHostsMenusOpen) {
                                                 "      - text: body\n"));
   plain.runtime().render();
   EXPECT_TRUE(mb2.saw("toggle:Panel"));
-  EXPECT_TRUE(mb2.saw("toggle:Keys"));
-  EXPECT_FALSE(mb2.saw("begin_window:Keys(closable)")) << "listed, but still closed";
+  EXPECT_TRUE(mb2.saw("toggle:Controls"));
+  EXPECT_FALSE(mb2.saw("begin_window:Controls(closable)")) << "listed, but still closed";
 }
 
-// Every document a host mounts after set_host_keys gets a Keys window: closed until
+// Every document a host mounts after set_host_keys gets a Controls window: closed until
 // tree.ariadne_keys.open is set, a row per binding (the document's keys:, then the host's) whose
 // Change button names it in tree.ariadne_keys.capture, and each binding's default keys seeded.
 // With no keys at all it says so.
@@ -6591,12 +6593,12 @@ TEST(AriadneAppRuntime, KeysWindowListsTheDocumentsAndTheHostsKeys) {
   auto &st = cvc::state::instance(app);
   EXPECT_EQ(st("ui.docs.d.keys.next").value(), "Right, PageDown");
   art.runtime().render();
-  EXPECT_FALSE(mb.saw("begin_window:Keys(closable)")) << "closed until asked for";
+  EXPECT_FALSE(mb.saw("begin_window:Controls(closable)")) << "closed until asked for";
 
   st("ui.docs.d.tree.ariadne_keys.open").value(1);
   mb.log.clear();
   art.runtime().render();
-  ASSERT_TRUE(mb.saw("begin_window:Keys(closable)"));
+  ASSERT_TRUE(mb.saw("begin_window:Controls(closable)"));
   EXPECT_TRUE(mb.saw("text_line:Next item"));
   EXPECT_TRUE(mb.saw("text_value:=Right, PageDown"));
   EXPECT_TRUE(mb.saw("text_line:Camera"));
@@ -6636,7 +6638,7 @@ TEST(AriadneAppRuntime, KeysWindowListsTheDocumentsAndTheHostsKeys) {
                                           "root:\n"
                                           "  - text: no keys here\n"));
   art.runtime().render();
-  EXPECT_TRUE(mb.saw("begin_window:Keys(closable)")) << "still open, and still there";
+  EXPECT_TRUE(mb.saw("begin_window:Controls(closable)")) << "still open, and still there";
   EXPECT_TRUE(mb.saw("text_line:No keys to change here."));
 }
 
@@ -6734,6 +6736,57 @@ TEST(AriadneAppRuntime, InitCanSetAKeyOverItsDefault) {
                                      "    key: Right\n"
                                      "    on: (state-set \"n\" 1)\n"));
   EXPECT_EQ(cvc::state::instance(app)("ui.docs.i.keys.next").value(), "Space");
+}
+
+// The Controls window offers the host's UI size first (set_host_ui_size), bound where the host
+// keeps it: the list shows the size the host has, and a pick writes a number the host reads back.
+TEST(AriadneAppRuntime, ControlsWindowOffersTheHostsUiSize) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  MockBackend mb;
+  AppRuntime art(app, "ui.docs.d");
+  art.set_backend(mb);
+  art.set_host_ui_size({"/view.ui.scale"});
+  auto &st = cvc::state::instance(app);
+  st("view.ui.scale").value(1.25); // the overlay's own, written as it writes it: a touch device's
+  art.load(write_doc("controls_ui_size.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                             "root:\n"
+                                             "  - text: no keys here\n"));
+  st("ui.docs.d.tree.ariadne_keys.open").value(1);
+  art.runtime().render();
+  ASSERT_TRUE(mb.saw("begin_window:Controls(closable)"))
+      << "set_host_ui_size alone gives the window";
+  EXPECT_TRUE(mb.saw("combo:UI size=2")) << "125%, the size the host has";
+  const auto at = [&](const std::string &line) {
+    return std::find(mb.log.begin(), mb.log.end(), line) - mb.log.begin();
+  };
+  EXPECT_LT(at("text_line:Display"), at("text_line:No keys to change here."))
+      << "the UI size first, then the keys";
+
+  mb.combo_ret = IndexEdit{true, true, 3}; // 150%
+  art.runtime().render();
+  mb.combo_ret = IndexEdit{};
+  EXPECT_EQ(st("view.ui.scale").value(), "1.5");
+  EXPECT_DOUBLE_EQ(st("view.ui.scale").value<double>(), 1.5);
+  mb.log.clear();
+  art.runtime().render();
+  EXPECT_TRUE(mb.saw("combo:UI size=3"));
+
+  // A host without one: no Display rows.
+  cvc::app app2;
+  MockBackend mb2;
+  AppRuntime plain(app2, "ui.docs.d");
+  plain.set_backend(mb2);
+  plain.set_host_keys({});
+  plain.load(write_doc("controls_ui_size.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                               "root:\n"
+                                               "  - text: no keys here\n"));
+  cvc::state::instance(app2)("ui.docs.d.tree.ariadne_keys.open").value(1);
+  plain.runtime().render();
+  ASSERT_TRUE(mb2.saw("begin_window:Controls(closable)"));
+  EXPECT_FALSE(mb2.saw("text_line:Display"));
+  EXPECT_FALSE(mb2.saw_prefix("combo:UI size"));
 }
 
 // Every load clears the last document's scene before anything is realized -- a host switching

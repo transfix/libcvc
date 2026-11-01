@@ -44,7 +44,9 @@ private:
 };
 
 // UI settings for an ImGuiOverlay: "<scene prefix>.viewers.<viewer>.ui".
-// Keys: visible, scale, touch_mode, panels_open, toggle_button.
+// Keys: visible, scale, touch_mode, panels_open, toggle_button. scale is the
+// UI size in logical pixels (ImGuiOverlay::setUiScale), which the overlay
+// multiplies by the display's pixel ratio.
 class UiSettings : public cvc::state_object<UiSettings> {
 public:
   struct Values {

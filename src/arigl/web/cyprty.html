@@ -40,6 +40,12 @@
   footer { flex: none; padding: 4px 14px; border-top: 1px solid #232a33;
            display: flex; justify-content: space-between; color: #8b98a5;
            font-variant-numeric: tabular-nums; white-space: pre; }
+  /* A phone: the keyboard hints (there is no keyboard) and the log line give their rows to the
+     scene; the title and Fullscreen stay. */
+  @media (max-width: 600px) {
+    header .keys, footer { display: none; }
+    header { padding: 6px 12px; }
+  }
 </style>
 </head>
 <body>

@@ -51,6 +51,16 @@ constexpr ImGuiID kCacheSalt = 0x63766367; // 'cvcg'
 constexpr float kFlowGap = 10.0f;   // between flowing windows, and from the viewport's edges
 constexpr float kFitFloor = 120.0f; // a fitting window's smallest limit, however near the edge
 
+// A document's px at the UI's size. ImGuiOverlay scales the whole UI by the UI size and the
+// display's pixel ratio (style.FontScaleMain x FontScaleDpi), so a window's size:, a column's
+// width or a picture's scales with it: a 360 px window holds the same widgets at any UI size and on
+// a phone's dense screen. What the core persists (§11.4 geometry, tracks, columns) is in the same
+// logical px, so it holds through a change of UI size too.
+float ui_px(float v) {
+  const ImGuiStyle &s = ImGui::GetStyle();
+  return v * s.FontScaleMain * s.FontScaleDpi;
+}
+
 float *cache_float(const char *key, float seed, bool active) {
   ImGuiStorage *store = ImGui::GetStateStorage();
   const ImGuiID id = ImHashStr(key, 0, kCacheSalt);
@@ -87,7 +97,7 @@ int input_text_resize(ImGuiInputTextCallbackData *data) {
 // parent extent, auto -> 0 (fit / default).
 float resolve_track(const ariadne::Track &t, float parent) {
   if (t.unit == ariadne::Unit::Px)
-    return t.value;
+    return ui_px(t.value);
   if (t.unit == ariadne::Unit::Percent)
     return parent * t.value / 100.0f;
   return 0.0f;
@@ -148,9 +158,10 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
   // lags a frame, so a document's first frame would put its windows under its menu bar.
   const ImRect work = static_cast<ImGuiViewportP *>(ImGui::GetMainViewport())->GetBuildWorkRect();
   const ImVec2 avail = work.GetSize();
+  const float gap = ui_px(kFlowGap), fitFloor = ui_px(kFitFloor);
   auto px = [](const ariadne::Extent &e, float parent) -> float {
     if (e.unit == ariadne::Unit::Px)
-      return e.value;
+      return ui_px(e.value);
     if (e.unit == ariadne::Unit::Percent)
       return parent * e.value / 100.0f;
     return 0.0f; // Auto
@@ -176,24 +187,37 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
   // An authored `pos:` is in the work area, below a main menu bar; a persisted one is ImGui's own.
   const bool seededPos = m_haveSeed && m_pendingSeed.has_pos;
   const bool seededSize = m_haveSeed && m_pendingSeed.has_size && !fits;
+  // A window opens inside the view, which on a phone is narrower than most documents were laid out
+  // for: no larger than the work area, and placed so that all of it shows (a window that fits its
+  // content, not yet measured, so that its smallest fit does, and again the next frame, measured).
+  // Only where it opens: the user may drag it anywhere after.
+  ImVec2 openSize(0.0f, 0.0f); // 0 on an axis: fit it
+  if (seededSize)
+    openSize = ImVec2(ui_px(m_pendingSeed.w), ui_px(m_pendingSeed.h));
+  else if (!fits)
+    openSize = ImVec2(px(size.w, avail.x), px(size.h, avail.y));
+  openSize = ImMin(openSize, avail);
   if (m_haveSeed) {
     if (m_pendingSeed.has_pos) {
       const ImVec2 origin = m_pendingSeed.authored ? work.Min : ImVec2(0.0f, 0.0f);
-      ImGui::SetNextWindowPos(origin + ImVec2(m_pendingSeed.x, m_pendingSeed.y), once);
+      const ImVec2 shows(openSize.x > 0.0f ? openSize.x : ImMin(fitFloor, avail.x),
+                         openSize.y > 0.0f ? openSize.y : ImMin(fitFloor, avail.y));
+      const ImVec2 at = origin + ImVec2(ui_px(m_pendingSeed.x), ui_px(m_pendingSeed.y));
+      ImGui::SetNextWindowPos(ImMax(work.Min, ImMin(at, work.Max - shows)), once);
+      if (fits && !existing)
+        m_placedUnmeasured.insert(id);
     }
-    if (seededSize)
-      ImGui::SetNextWindowSize(ImVec2(m_pendingSeed.w, m_pendingSeed.h), once);
     m_haveSeed = false;
   }
-  if (!seededSize && !fits)
-    ImGui::SetNextWindowSize(ImVec2(px(size.w, avail.x), px(size.h, avail.y)), once);
+  if (seededSize || !fits)
+    ImGui::SetNextWindowSize(openSize, once);
 
   // A new window with no place of its own joins the flow down the left of the viewport (m_flow);
   // one the user has dragged since it was put there leaves it.
   if (ImGui::GetFrameCount() != m_flowFrame) {
     m_flowFrame = ImGui::GetFrameCount();
-    m_flowX = work.Min.x + kFlowGap;
-    m_flowY = work.Min.y + kFlowGap;
+    m_flowX = work.Min.x + gap;
+    m_flowY = work.Min.y + gap;
     m_flowColumnW = 0.0f;
     m_flowObstacles.clear();
     // The first frame of a new document has nothing in its way: what was drawn last frame was
@@ -225,17 +249,25 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
     m_flow.erase(spot);
     spot = m_flow.end();
   }
-  ImVec2 at = existing ? existing->Pos : work.Min + ImVec2(60.0f, 60.0f);
+  ImVec2 at = existing ? existing->Pos : work.Min + ImVec2(ui_px(60.0f), ui_px(60.0f));
+  if (existing && m_placedUnmeasured.erase(id)) {
+    const ImVec2 want = ImMin(ImGui::CalcWindowNextAutoFitSize(existing), avail);
+    const ImVec2 in = ImMax(work.Min, ImMin(existing->Pos, work.Max - want));
+    if (in.x != at.x || in.y != at.y) {
+      ImGui::SetNextWindowPos(in, ImGuiCond_Always);
+      at = in;
+    }
+  }
   if (spot != m_flow.end()) {
     // The room it wants: all its widgets, for a window that fits them; else its size. (Nothing
     // yet for a window not drawn before -- the next frame places it again, measured.)
     const ImVec2 want = !existing                      ? ImVec2(0.0f, 0.0f)
                         : fits && !existing->Collapsed ? ImGui::CalcWindowNextAutoFitSize(existing)
                                                        : existing->Size;
-    const float top = work.Min.y + kFlowGap, bottom = work.Max.y;
-    const float left = work.Min.x + kFlowGap, right = work.Max.x;
+    const float top = work.Min.y + gap, bottom = work.Max.y;
+    const float left = work.Min.x + gap, right = work.Max.x;
     const auto new_column = [&] {
-      m_flowX += ImMax(m_flowColumnW, want.x) + kFlowGap;
+      m_flowX += ImMax(m_flowColumnW, want.x) + gap;
       m_flowY = top;
       m_flowColumnW = 0.0f;
     };
@@ -251,15 +283,15 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
           hit = &o;
       if (!hit)
         break;
-      m_flowY = hit->y1 + kFlowGap;
+      m_flowY = hit->y1 + gap;
       if (m_flowY + want.y > bottom)
         new_column();
     }
     // Never past the right edge: a column that would start beyond it overlaps the last instead.
-    at = ImTrunc(ImVec2(ImMax(left, ImMin(m_flowX, right - want.x - kFlowGap)), m_flowY));
+    at = ImTrunc(ImVec2(ImMax(left, ImMin(m_flowX, right - want.x - gap)), m_flowY));
     ImGui::SetNextWindowPos(at, ImGuiCond_Always);
     spot->second = FlowSpot{at.x, at.y, ImHashStr(name.c_str())};
-    m_flowY = at.y + ImMin(want.y, ImMax(bottom - at.y, kFitFloor)) + kFlowGap;
+    m_flowY = at.y + ImMin(want.y, ImMax(bottom - at.y, fitFloor)) + gap;
     m_flowColumnW = ImMax(m_flowColumnW, want.x);
   }
 
@@ -268,8 +300,8 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
   ImVec2 mx(size.max_w.is_set() ? px(size.max_w, avail.x) : FLT_MAX,
             size.max_h.is_set() ? px(size.max_h, avail.y) : FLT_MAX);
   if (fits) { // no further than the viewport's far edges from where the window stands
-    mx.x = ImMin(mx.x, ImMax(work.Max.x - at.x, kFitFloor));
-    mx.y = ImMin(mx.y, ImMax(work.Max.y - at.y, kFitFloor));
+    mx.x = ImMin(mx.x, ImMax(work.Max.x - at.x, fitFloor));
+    mx.y = ImMin(mx.y, ImMax(work.Max.y - at.y, fitFloor));
   }
   if (fits || size.min_w.is_set() || size.min_h.is_set() || size.max_w.is_set() ||
       size.max_h.is_set())
@@ -291,18 +323,20 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
   // §11.4: snapshot this window's current geometry for the core to persist. Position is always
   // valid; size only when NOT collapsed (a collapsed window reports just its title-bar height,
   // which must not clobber the persisted content size — the core back-fills the size from the
-  // seed). A build without ImGui reports nothing (has_pos/has_size stay false).
+  // seed). A build without ImGui reports nothing (has_pos/has_size stay false). In logical px
+  // (ui_px), as the seed is.
   m_lastWindowGeom = ariadne::WindowGeom{};
 #ifdef CVC_ENABLE_IMGUI
+  const float unit = ui_px(1.0f);
   const ImVec2 wp = ImGui::GetWindowPos();
   m_lastWindowGeom.has_pos = true;
-  m_lastWindowGeom.x = wp.x;
-  m_lastWindowGeom.y = wp.y;
+  m_lastWindowGeom.x = wp.x / unit;
+  m_lastWindowGeom.y = wp.y / unit;
   if (!ImGui::IsWindowCollapsed()) {
     const ImVec2 ws = ImGui::GetWindowSize();
     m_lastWindowGeom.has_size = true;
-    m_lastWindowGeom.w = ws.x;
-    m_lastWindowGeom.h = ws.y;
+    m_lastWindowGeom.w = ws.x / unit;
+    m_lastWindowGeom.h = ws.y / unit;
   }
 #endif
   return vis;
@@ -310,6 +344,7 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
 
 void ImGuiBackend::reset_layout() {
   m_flow.clear();
+  m_placedUnmeasured.clear();
   m_relaid.clear();
   m_relaidGrids.clear();
   m_relayout = true;
@@ -367,9 +402,9 @@ bool ImGuiBackend::begin_grid(const ariadne::Layout &layout, const char *id) {
       // wins when the ImGui-storage slot is (re)created after a reload; a live slot keeps the
       // user's drag (GetFloatRef ignores the default when the slot exists — apply-once). No / short
       // seed → the authored row track (or an 80px floor).
-      float def = gs.row_px[i] > 0.0f ? gs.row_px[i] : 80.0f;
+      float def = gs.row_px[i] > 0.0f ? gs.row_px[i] : ui_px(80.0f);
       if (haveTrackSeed && i < m_pendingTracks.size() && m_pendingTracks[i] > 0.0f)
-        def = m_pendingTracks[i];
+        def = ui_px(m_pendingTracks[i]);
       if (relaid)
         store->SetFloat(key, def);
       else
@@ -433,7 +468,7 @@ bool ImGuiBackend::begin_grid(const ariadne::Layout &layout, const char *id) {
         const ariadne::Track &t = layout.col_widths[i];
         if (t.unit == ariadne::Unit::Px) {
           cf = ImGuiTableColumnFlags_WidthFixed;
-          w = t.value;
+          w = ui_px(t.value);
         } else if (t.unit == ariadne::Unit::Percent) {
           cf = ImGuiTableColumnFlags_WidthStretch;
           w = t.value;
@@ -448,7 +483,7 @@ bool ImGuiBackend::begin_grid(const ariadne::Layout &layout, const char *id) {
       // persisted proportions at any table width.
       if (layout.resizable && haveColumnSeed && i < static_cast<int>(m_pendingColumns.size()) &&
           m_pendingColumns[static_cast<std::size_t>(i)] > 0.0f)
-        w = m_pendingColumns[static_cast<std::size_t>(i)];
+        w = ui_px(m_pendingColumns[static_cast<std::size_t>(i)]);
       ImGui::TableSetupColumn("", cf, w);
     }
     m_grids.push_back(std::move(gs));
@@ -535,7 +570,7 @@ void ImGuiBackend::end_grid() {
                          // StateStorage holds the pane slots we snapshot by key next.
     ImGuiStorage *store = ImGui::GetStateStorage();
     for (unsigned int k : g.pane_keys)
-      m_lastGridTracks.push_back(store->GetFloat(k));
+      m_lastGridTracks.push_back(store->GetFloat(k) / ui_px(1.0f)); // logical px, as seeded
   } else {
     // §11.4: a resizable table's column widths (the width each column was given this frame, the
     // value TableSetupColumn takes back), read before EndTable while the table is current. Not
@@ -543,7 +578,7 @@ void ImGuiBackend::end_grid() {
     const ImGuiTable *t = ImGui::GetCurrentTable();
     if (g.resizable && t && t->IsLayoutLocked)
       for (int i = 0; i < t->ColumnsCount; ++i)
-        m_lastGridColumns.push_back(t->Columns[i].WidthGiven);
+        m_lastGridColumns.push_back(t->Columns[i].WidthGiven / ui_px(1.0f));
     ImGui::EndTable();
     if (g.color_pushes)
       ImGui::PopStyleColor(g.color_pushes);
@@ -633,7 +668,7 @@ void ImGuiBackend::plot_lines(const char *label, const std::vector<float> &value
   ImGui::PushID(label ? label : "plot");
   ImGui::PlotLines("##plot", values.empty() ? nullptr : values.data(),
                    static_cast<int>(values.size()), 0, overlay.empty() ? nullptr : overlay.c_str(),
-                   a, z, ImVec2(width, static_cast<float>(height)));
+                   a, z, ImVec2(width, ui_px(static_cast<float>(height))));
   ImGui::PopID();
   if (labelled) {
     ImGui::SameLine(0.f, ImGui::GetStyle().ItemInnerSpacing.x);
@@ -991,6 +1026,7 @@ bool ImGuiBackend::draw_image(const char *name, float width) {
   const unsigned int tex = image_texture(name, W, H);
   if (tex == 0)
     return false;
+  width = ui_px(width); // a document's px (the image widget's size:, a stream view's)
   const float h = width * static_cast<float>(H) / static_cast<float>(W);
   ImGui::Image(static_cast<ImTextureID>(static_cast<std::intptr_t>(tex)), ImVec2(width, h));
   return true;
@@ -1007,6 +1043,8 @@ bool ImGuiBackend::draw_image_fit(const char *name, float box_w, float box_h) {
   const unsigned int tex = image_texture(name, W, H);
   if (tex == 0 || !(box_w > 0.0f) || !(box_h > 0.0f))
     return false;
+  box_w = ui_px(box_w);
+  box_h = ui_px(box_h);
   const float s = std::min(box_w / static_cast<float>(W), box_h / static_cast<float>(H));
   const ImVec2 size(static_cast<float>(W) * s, static_cast<float>(H) * s);
   // The box (black bars where the picture leaves it), the picture centred in it, then the box's
