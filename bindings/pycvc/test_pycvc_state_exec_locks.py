@@ -11,6 +11,12 @@ L2: Exec's policy (Exec(app, policy=None, idle_timeout=60.0), PR-5), its
 set_priority and get_priority from any thread (PR-8, design 7.4), and
 pycvc.set_thread_class (PR-9, design 7.6). PR-8's stress cases run
 CVC_PYCVC_LOCKS_RUNS times each (500 by default).
+
+L3: Execs on several Python threads share the app's lock manager (design 9.2):
+cross-thread sections and grants (LT-1, LT-3, LT-10's smoke), run()'s idle rule
+for a lock wait (LT-7, LT-8, LT-8b), pids hidden across Execs (LT-11), a
+deadlock across Execs (LD-5), and Exec.lock_query from any thread (PR-8).
+CVC_LOCKS_SANITIZER=1 (the sanitizer jobs) runs the smaller sizes.
 """
 
 import faulthandler
@@ -22,8 +28,9 @@ import threading
 import time
 
 # Every lock manager operation checks the manager's invariants (gap G-38); the
-# library reads this once, when the first manager is made.
-os.environ["CVC_STATE_EXEC_CHECK"] = "1"
+# library reads this once, when the first manager is made. CVC_STATE_EXEC_CHECK=0
+# in the environment runs without the checks.
+os.environ.setdefault("CVC_STATE_EXEC_CHECK", "1")
 
 import pycvc  # noqa: E402
 from pycvc import eval_phase, process_status  # noqa: E402
@@ -33,6 +40,10 @@ _ENDED = (process_status.terminated, process_status.killed, process_status.faile
 RUNS = int(os.environ.get("CVC_PYCVC_LOCKS_RUNS", "500"))
 # A case's outcome must come within this many seconds (a hang fails it); the times are printed.
 WAIT = 10.0
+# The sanitizer jobs' sizes (L1 section 3, "Sizes, by lane").
+SANITIZER = os.environ.get("CVC_LOCKS_SANITIZER") == "1"
+# The ceiling for a case that runs 10^4-10^5 sections across threads (its time is printed).
+LONG = 600.0
 
 
 def _raises(exc, fn, *args, **kwargs):
@@ -842,6 +853,24 @@ def test_pr09_set_thread_class():
     elif sys.platform.startswith("linux"):
         assert results[0] is True  # a demotion needs no privilege
     _raises(TypeError, pycvc.set_thread_class, 0)  # a pycvc.thread_class member, as for any enum
+
+
+# ── L3: Execs on several threads (design 9.2) ───────────────────────────
+
+
+def test_l3_exec_needs_a_shared_manager():
+    # An Exec may run() on any Python thread, so its home attaches as one pumped on a thread of its
+    # own (design 8.3): a single-mode app manager refuses it, naming the setting, and so it does a
+    # scheduler's set_lock_manager(app). (auto, the default, is shared once pycvc is imported.)
+    app = pycvc.make_app()
+    pycvc.state_set(app, "state_exec.locks.threading", "single")
+    e = _raises(RuntimeError, pycvc.Exec, app)
+    assert "state_exec.locks.threading" in str(e), e
+    e = _raises(RuntimeError, pycvc.scheduler().set_lock_manager, app)
+    assert "state_exec.locks.threading" in str(e), e
+    app = pycvc.make_app()
+    pycvc.state_set(app, "state_exec.locks.threading", "auto")
+    assert pycvc.Exec(app).run('(with-lock "k" (+ 1 2))') == "3"
 
 
 if __name__ == "__main__":

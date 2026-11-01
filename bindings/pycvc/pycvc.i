@@ -2575,6 +2575,10 @@ PYCVC_STATE_EXEC_ENUM(cvc::state_exec::scheduling_policy, pycvc_enum_scheduling_
        {"priority_rr", static_cast<int>(cvc::state_exec::scheduling_policy::priority_rr)}});
   if (pycvc_enum_scheduling_policy != NULL)
     PyDict_SetItemString(d, "scheduling_policy", pycvc_enum_scheduling_policy);
+  // pycvc pumps schedulers on threads of its own (an Exec's run() on any Python thread), so from
+  // its import an app's lock manager is made shared where the build has threads
+  // (state_exec.locks.threading auto; docs/STATE_EXEC_LOCKS.md 8.3, gap G-24).
+  cvc::state_exec::detail::note_threaded_host();
 %}
 %pythoncode %{
 process_status = _pycvc.process_status
@@ -3917,6 +3921,17 @@ class scheduler_base {};
       return *m;
     throw pycvc::no_value{path};
   }
+  // set_lock_manager(app): the scheduler's with-lock table becomes app's (app::lock_manager(), as
+  // for any host scheduler over an app's tree, docs/STATE_EXEC_LOCKS.md 8.4), shared with the
+  // app's Execs. It may then be pumped on any Python thread: its home attaches as an Exec's does,
+  // so state_exec.locks.threading single refuses it (RuntimeError naming the setting). Raises
+  // RuntimeError too while a process of the scheduler holds or waits for a lock.
+  void set_lock_manager(const std::shared_ptr<cvc::app> &app) {
+    if (!app)
+      throw std::invalid_argument("set_lock_manager: app is None");
+    $self->set_lock_manager(app->lock_manager(),
+                            cvc::state_exec::lock_attach{cvc::state_exec::threads_compiled_in});
+  }
 }
 %enddef
 
@@ -4416,6 +4431,8 @@ def register_intrinsics(env, ctx):
 // module enables none, and SWIG takes them only on a function that isn't overloaded, so the
 // constructor is one declaration. A policy or idle_timeout it can't take raises ValueError.
 %feature("kwargs") pycvc::Exec::Exec;
+// Exec.lock_query(prefix="") too.
+%feature("kwargs") pycvc::Exec::lock_query;
 %exception pycvc::Exec::Exec {
   try {
     $action

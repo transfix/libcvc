@@ -49,8 +49,11 @@ extern "C" int pycvc_register_numpy_inittab(void); // generated; 0 = success
 extern "C" PyObject *PyInit__vtkmodules_static(void);
 #endif
 
-// Default smoke script when no entry script is passed: prove the modules import
-// and the scene surface is live. The recipe's node smoke greps for PYCVC_WASM_OK.
+// Default smoke script when no entry script is passed: prove the modules import,
+// the scene surface is live, and an Exec runs a with-lock on the app's lock manager
+// (single in this no-threads build: docs/STATE_EXEC_LOCKS.md 9.5). The release
+// workflow (publish-pycvc-gl-wasm.yml) runs it under node and requires exit 0 with
+// PYCVC_WASM_OK and PYCVC_EXEC_OK.
 static const char *kDefaultScript =
     "import sys\n"
     "print('pycvc-wasm host:', sys.version.split()[0])\n"
@@ -77,6 +80,12 @@ static const char *kDefaultScript =
     "    print('PYCVC_VTK_BRIDGE_OK')\n"
     "except Exception as _e:\n"
     "    print('vtk bridge not embedded:', type(_e).__name__, _e)\n"
+    // An Exec attaches its home as Exec(app) does everywhere (cross_thread = threads_compiled_in,
+    // false here); were that refused, this raises and the host exits non-zero.
+    "_ex = pycvc.Exec(pycvc.make_app())\n"
+    "_r = _ex.run('(with-lock \"k\" (+ 1 2))')\n"
+    "assert _r == '3', _r\n"
+    "print('PYCVC_EXEC_OK')\n"
     "print('PYCVC_WASM_OK')\n";
 
 int main(int argc, char **argv) {
