@@ -184,6 +184,46 @@ TEST(RoomAvatar, PartsOutsideTheEnvelopeAreNotDrawn) {
       << "the two outside parts dropped, then the rest capped";
 }
 
+// The relay's policy (§5k) round-trips through the tree, bumping its revision; a reserve reads back
+// as written, in whole joules.
+TEST(RoomAvatar, ThePolicyAndAReserveRoundTrip) {
+  cvc::app app;
+  cvc::ariadne::avatar_energy_policy p;
+  EXPECT_FALSE(conf::read_avatar_policy(app, "r", p)) << "none written yet";
+  EXPECT_EQ(conf::avatar_policy_revision(app, "r"), 0u);
+  p.enabled = true;
+  p.force_max = 600.0;
+  p.power_rest = 150.0;
+  p.reserve_max = 12000.0;
+  p.transport_cost = 0.25;
+  p.empty = cvc::ariadne::avatar_energy_policy::when_empty::stop;
+  p.recover_fraction = 0.5;
+  conf::write_avatar_policy(app, "r", p);
+  EXPECT_EQ(conf::avatar_policy_revision(app, "r"), 1u);
+  cvc::ariadne::avatar_energy_policy q;
+  ASSERT_TRUE(conf::read_avatar_policy(app, "r", q));
+  EXPECT_TRUE(q.enabled);
+  EXPECT_DOUBLE_EQ(q.force_max, 600.0);
+  EXPECT_DOUBLE_EQ(q.power_rest, 150.0);
+  EXPECT_DOUBLE_EQ(q.reserve_max, 12000.0);
+  EXPECT_FLOAT_EQ(static_cast<float>(q.transport_cost), 0.25f);
+  EXPECT_EQ(q.empty, cvc::ariadne::avatar_energy_policy::when_empty::stop);
+  EXPECT_DOUBLE_EQ(q.recover_fraction, 0.5);
+  p.enabled = false;
+  conf::write_avatar_policy(app, "r", p);
+  EXPECT_EQ(conf::avatar_policy_revision(app, "r"), 2u);
+  ASSERT_TRUE(conf::read_avatar_policy(app, "r", q));
+  EXPECT_FALSE(q.enabled);
+
+  double j = 0.0;
+  std::uint64_t t = 0;
+  EXPECT_FALSE(conf::read_avatar_reserve(app, "r", "A", j, t));
+  conf::write_avatar_reserve(app, "r", "A", 1234.4, 77);
+  ASSERT_TRUE(conf::read_avatar_reserve(app, "r", "A", j, t));
+  EXPECT_DOUBLE_EQ(j, 1234.0);
+  EXPECT_EQ(t, 77u);
+}
+
 // Across the wire: the relay's catalog reaches a client, the client's choice reaches the relay and
 // the other client, and both clients resolve the chooser's look the same -- the chooser included.
 // The relay's write gate lets a participant write its own choice and nothing else.
@@ -230,6 +270,10 @@ TEST(RoomAvatar, AChoiceReplicatesAndOnlyItsOwnerMayWriteIt) {
       << "but not someone else's";
   EXPECT_FALSE(gate.may_write("A", catalog, cvc::state_mutation_op::set_value))
       << "nor the catalog: only the relay supplies it";
+  const std::string reserve = conf::room_participant_path("room", "A") + cvc::state::SEPARATOR +
+                              "energy" + cvc::state::SEPARATOR + "reserve";
+  EXPECT_FALSE(gate.may_write("A", reserve, cvc::state_mutation_op::set_value))
+      << "nor its own reserve: the relay counts it";
 
   for (cvc::state_cluster_shard *s : {&sS, &sA, &sB}) {
     tp.unregister_shard(s);

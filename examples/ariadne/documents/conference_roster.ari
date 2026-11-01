@@ -136,11 +136,13 @@ windows:
   # your own participant subtree, and every client -- yours too -- draws what it resolves to. So the
   # avatar you walk around as is the one everyone else sees. Automatic is a colour derived from your
   # id, which is what you look like until you choose. What you wear is only drawn: you collide as
-  # the same 0.5 x 0.5 x 1.7 m body whatever you pick.
+  # the same 0.5 x 0.5 x 1.7 m body whatever you pick. Stamina is your energy reserve, as the relay
+  # counts it: walking fast or pushing spends it, resting refills it, and the relay's policy says
+  # what an empty one means (slow to what resting power sustains, or stop until it refills).
   - window: My Avatar
     id: myavatar
     pos: [20, 610]
-    size: [360, 130]
+    size: [360, 150]
     closable: true
     children:
       - text: "How everyone sees you in the room, you included."
@@ -152,6 +154,8 @@ windows:
         label: "Wear"
         bind: avatar.accessory
         options: (room-avatar-options (state-get "conf.room") "accessory")
+      - text: ""
+        bind: (if (= (state-get "avatar.stamina") "") "" (str-concat "stamina " (state-get "avatar.stamina") "%"))
 
   # ── Users: the roster with per-peer local controls ──
   # One compact ROW per participant, as a table of unit widgets: every row is its own grid with the
@@ -287,6 +291,7 @@ on_tick: |
         (state-set "avatar.accessory" "")
         (state-set "avatar.sent.color" "")
         (state-set "avatar.sent.accessory" "")
+        (state-set "avatar.stamina" "")
         ; ── pre-seed each peer camera window at a distinct TILED position ──
         ; every cam_<i> declares the SAME authored pos:, so without this the per-peer windows land
         ; exactly on top of one another and look like a single window — the #1 reason a user reports
@@ -373,23 +378,24 @@ on_tick: |
     ;    defaults until you choose); after that, write a changed pick. room-set-avatar checks it
     ;    against the catalog and writes only your own choice; every client draws it from there. ──
     (if (= (state-get "joined") "1")
-      (if (= (state-get "avatar.sent.color") "")
-        (begin
-          (set look (room-avatar (state-get "room.token")))
+      (begin
+        (set look (room-avatar (state-get "room.token")))
+        (state-set "avatar.stamina" (get-attr look "stamina"))
+        (if (= (state-get "avatar.sent.color") "")
           (if (= (get-attr look "color") "") #f
             (begin
               (state-set "avatar.color" (get-attr look "color"))
               (state-set "avatar.accessory" (get-attr look "accessory"))
               (state-set "avatar.sent.color" (get-attr look "color"))
-              (state-set "avatar.sent.accessory" (get-attr look "accessory")))))
-        (if (or (not (= (state-get "avatar.color") (state-get "avatar.sent.color")))
-                (not (= (state-get "avatar.accessory") (state-get "avatar.sent.accessory"))))
-          (begin
-            (room-set-avatar (state-get "room.token")
-                             (state-get "avatar.color") (state-get "avatar.accessory"))
-            (state-set "avatar.sent.color" (state-get "avatar.color"))
-            (state-set "avatar.sent.accessory" (state-get "avatar.accessory")))
-          #f))
+              (state-set "avatar.sent.accessory" (get-attr look "accessory"))))
+          (if (or (not (= (state-get "avatar.color") (state-get "avatar.sent.color")))
+                  (not (= (state-get "avatar.accessory") (state-get "avatar.sent.accessory"))))
+            (begin
+              (room-set-avatar (state-get "room.token")
+                               (state-get "avatar.color") (state-get "avatar.accessory"))
+              (state-set "avatar.sent.color" (state-get "avatar.color"))
+              (state-set "avatar.sent.accessory" (state-get "avatar.accessory")))
+            #f)))
       #f)
     ; ── mirror self voice-activity for the (you) row ──
     (state-set "self.talking" (state-get (str-concat "media." (state-get "self.pid") ".talking")))

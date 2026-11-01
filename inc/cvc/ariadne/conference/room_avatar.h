@@ -18,6 +18,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cvc/ariadne/avatar_physics.h> // avatar_energy_policy
 #include <string>
 #include <vector>
 
@@ -148,6 +149,33 @@ avatar_look resolve_avatar_look(const avatar_catalog &catalog, const avatar_choi
 
 // Whether PART lies wholly inside the accessory envelope.
 bool avatar_part_fits(const avatar_part &part);
+
+// ----------------
+// The server's avatar policy, and each avatar's reserve (ARIADNE_CONFERENCE_ROADMAP.md §5k)
+// ----------------
+//   conf.rooms.<room>.avatars.policy.rev                bumped by every policy write (written last)
+//   conf.rooms.<room>.avatars.policy.energy.{enabled, force_max, power_max, power_rest,
+//       reserve_max, transport_cost, empty ("rest" | "stop"), recover_fraction}
+//   conf.rooms.<room>.participants.<pid>.energy.{reserve, server_tick}   relay-owned
+//
+// The relay writes the policy; every holon, the relay's and each client's, runs under it
+// (holon_sync reads it into both pumps), so a client predicts its avatar's spending as the
+// server does. The relay publishes each avatar's reserve beside its pose; the owner's client
+// corrects its prediction to it (holon::apply_authoritative_reserve) and shows it as stamina.
+
+// Write the policy (bumping its revision).
+void write_avatar_policy(cvc::app &app, const std::string &room_id, const avatar_energy_policy &p);
+// The policy revision: 0 when none was ever written.
+std::uint64_t avatar_policy_revision(cvc::app &app, const std::string &room_id);
+// Read the policy into OUT; false (OUT untouched) when none was written.
+bool read_avatar_policy(cvc::app &app, const std::string &room_id, avatar_energy_policy &out);
+
+// PID's reserve (J) as of SERVER_TICK, written by the relay.
+void write_avatar_reserve(cvc::app &app, const std::string &room_id, const std::string &pid,
+                          double joules, std::uint64_t server_tick);
+// False when the relay has published none for PID.
+bool read_avatar_reserve(cvc::app &app, const std::string &room_id, const std::string &pid,
+                         double &joules, std::uint64_t &server_tick);
 
 } // namespace conference
 } // namespace ariadne

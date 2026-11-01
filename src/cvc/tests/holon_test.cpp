@@ -886,6 +886,174 @@ TEST(HolonPhysicsTest, PoseLessPeerHasNoBodyUntilFirstSample) {
   EXPECT_NEAR(a.y, 5.0, 0.05);
 }
 
+// ── energy: what an avatar's controller may spend (ARIADNE_CONFERENCE_ROADMAP.md §5k) ──
+
+namespace {
+holon_config energy_config(double reserve_max, double power_rest = 300.0,
+                           cvc::ariadne::avatar_energy_policy::when_empty empty =
+                               cvc::ariadne::avatar_energy_policy::when_empty::rest) {
+  holon_config cfg = physics_config();
+  cfg.energy.reserve_max = reserve_max;
+  cfg.energy.power_rest = power_rest;
+  cfg.energy.empty = empty;
+  return cfg;
+}
+// A 400 m floor and nothing on it: room for the long walks an energy budget takes to run down
+// (the room's 20 m floor would see them walk off its edge and respawn).
+std::vector<cvc::ariadne::avatar_static> open_floor() {
+  cvc::ariadne::avatar_static ground;
+  ground.center = vec3{0.0, 0.0, -0.1};
+  ground.half_extents = vec3{200.0, 200.0, 0.1};
+  return {ground};
+}
+double speed(const holon &h, const char *pid) {
+  const vec3 v = h.state(pid).linear_velocity;
+  return std::sqrt(v.x * v.x + v.y * v.y);
+}
+double reserve(const holon &h, const char *pid) {
+  cvc::ariadne::avatar_energy e;
+  EXPECT_TRUE(h.energy(pid, e));
+  return e.reserve;
+}
+} // namespace
+
+// The same push for every avatar: twice the mass speeds up at half the rate.
+TEST(HolonEnergyTest, AHeavierAvatarAcceleratesMoreSlowly) {
+  holon server(holon_role::server, physics_config());
+  if (!server.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  server.set_statics(open_floor(), 1);
+  server.add_participant("A", false, at(-6.0, -5.0));
+  server.add_participant("B", false, at(-6.0, 5.0));
+  ASSERT_TRUE(server.set_mass("B", 140.0));
+  run(server, 12);
+  server.set_intent("A", avatar_intent{vec3{3.0, 0.0, 0.0}});
+  server.set_intent("B", avatar_intent{vec3{3.0, 0.0, 0.0}});
+  run(server, 12); // 100 ms at 840 N: 1.2 m/s for 70 kg, 0.6 m/s for 140
+  const double a = speed(server, "A"), b = speed(server, "B");
+  EXPECT_NEAR(a, 1.2, 0.1);
+  EXPECT_NEAR(b, 0.5 * a, 0.05) << "the push is the same; the mass is not";
+}
+
+// Walking fast costs more than resting power refills, so the reserve drains; standing refills it.
+TEST(HolonEnergyTest, WalkingFastSpendsTheReserveAndRestingRefillsIt) {
+  holon server(holon_role::server, physics_config());
+  if (!server.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  server.set_statics(open_floor(), 1);
+  server.add_participant("A", false, at(-8.0, 5.0));
+  run(server, 12);
+  const double full = server.energy_policy().reserve_max;
+  EXPECT_DOUBLE_EQ(reserve(server, "A"), full) << "it joins rested";
+  server.set_intent("A", avatar_intent{vec3{4.0, 0.0, 0.0}});
+  run(server, 240); // 2 s
+  cvc::ariadne::avatar_energy e;
+  ASSERT_TRUE(server.energy("A", e));
+  // Carrying 70 kg at 4 m/s: 0.2 x 70 x 9.81 x 4 = 549 W, more than the 300 W that refills it.
+  EXPECT_NEAR(e.power, 549.4, 15.0);
+  const double walked = e.reserve;
+  EXPECT_LT(walked, full - 300.0) << "the walk drains it";
+  server.set_intent("A", avatar_intent{});
+  run(server, 240);
+  EXPECT_GT(reserve(server, "A"), walked + 400.0) << "standing refills it";
+}
+
+// An empty reserve under the `rest` policy leaves resting power: it slows to the speed that
+// carries the body for 300 W, 300 / (0.2 x 70 x 9.81) = 2.18 m/s, and keeps walking at that.
+TEST(HolonEnergyTest, AnEmptyReserveSlowsToWhatRestingPowerSustains) {
+  holon server(holon_role::server, energy_config(/*reserve_max=*/2000.0));
+  if (!server.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  server.set_statics(open_floor(), 1);
+  server.add_participant("A", false, at(-9.0, 5.0));
+  run(server, 12);
+  server.set_intent("A", avatar_intent{vec3{4.0, 0.0, 0.0}});
+  // Up to 4 m/s in about a second: the push gives 12 m/s^2 until 1.2 kW caps it, near 1.2 m/s.
+  run(server, 180);
+  EXPECT_GT(speed(server, "A"), 3.9) << "the reserve pays for the walk while it lasts";
+  run(server, 960); // 8 s: the ~1.3 kJ left at 249 W net runs out in about 5
+  EXPECT_LT(reserve(server, "A"), 1.0);
+  EXPECT_NEAR(speed(server, "A"), 300.0 / (0.2 * 70.0 * 9.81), 0.05);
+}
+
+// Under `stop` an empty avatar speeds up no more -- it comes to a halt -- until a quarter of the
+// reserve has refilled. (Walking off again then spends that quarter in a fraction of a second, so
+// it is checked standing still until then, and setting off at once.)
+TEST(HolonEnergyTest, AStopPolicyHoldsAnEmptyAvatarUntilAQuarterRefills) {
+  holon server(holon_role::server,
+               energy_config(/*reserve_max=*/1000.0, /*power_rest=*/50.0,
+                             cvc::ariadne::avatar_energy_policy::when_empty::stop));
+  if (!server.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  server.set_statics(open_floor(), 1);
+  server.add_participant("A", false, at(-9.0, 5.0));
+  run(server, 12);
+  server.set_intent("A", avatar_intent{vec3{4.0, 0.0, 0.0}});
+  run(server, 300); // 1000 J at 499 W net is gone in about 2 s
+  cvc::ariadne::avatar_energy e;
+  ASSERT_TRUE(server.energy("A", e));
+  EXPECT_TRUE(e.exhausted);
+  EXPECT_LT(speed(server, "A"), 0.05) << "out of energy, it stopped";
+  run(server, 240); // 2 s at 50 W: 100 J, short of the 250 J it waits for
+  ASSERT_TRUE(server.energy("A", e));
+  EXPECT_TRUE(e.exhausted);
+  EXPECT_LT(speed(server, "A"), 0.05) << "and stays stopped while it refills";
+  server.set_intent("A", avatar_intent{});
+  run(server, 480); // 4 s more standing: past a quarter (250 J at 50 W is 5 s in all)
+  ASSERT_TRUE(server.energy("A", e));
+  EXPECT_FALSE(e.exhausted);
+  EXPECT_GE(e.reserve, 250.0);
+  server.set_intent("A", avatar_intent{vec3{4.0, 0.0, 0.0}});
+  run(server, 24);
+  EXPECT_GT(speed(server, "A"), 1.0) << "then it walks again";
+}
+
+// With the budget off, only the push is limited, and the reserve stays full.
+TEST(HolonEnergyTest, WithoutABudgetOnlyThePushIsLimited) {
+  holon_config cfg = energy_config(/*reserve_max=*/100.0);
+  cfg.energy.enabled = false;
+  holon server(holon_role::server, cfg);
+  if (!server.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  server.set_statics(open_floor(), 1);
+  server.add_participant("A", false, at(-9.0, 5.0));
+  run(server, 12);
+  server.set_intent("A", avatar_intent{vec3{4.0, 0.0, 0.0}});
+  run(server, 480);
+  EXPECT_NEAR(speed(server, "A"), 4.0, 0.01) << "no reserve to run out of";
+  EXPECT_DOUBLE_EQ(reserve(server, "A"), 100.0);
+}
+
+// The client predicts its avatar's spending as the server does, and a server reserve corrects the
+// prediction by how far it was off at that tick (once: the same tick again is a no-op).
+TEST(HolonEnergyTest, ThePredictionSpendsLikeTheServerAndTakesItsCorrection) {
+  holon server(holon_role::server, physics_config());
+  holon client(holon_role::client, physics_config());
+  if (!server.physics() || !client.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  server.set_statics(open_floor(), 1);
+  client.set_statics(open_floor(), 1);
+  server.add_participant("A", false, at(-8.0, 5.0));
+  client.add_participant("A", true, at(-8.0, 5.0));
+  run(server, 12);
+  run(client, 12);
+  server.set_intent("A", avatar_intent{vec3{4.0, 0.0, 0.0}});
+  client.set_intent("A", avatar_intent{vec3{4.0, 0.0, 0.0}});
+  run(server, 120);
+  run(client, 120);
+  const double predicted = reserve(client, "A");
+  EXPECT_NEAR(predicted, reserve(server, "A"), 1e-6) << "the same rule, the same spending";
+
+  const std::uint64_t t = client.tick() - 30; // a tick still in the prediction's log
+  client.apply_authoritative_reserve("A", t, 20000.0);
+  const double corrected = reserve(client, "A");
+  EXPECT_LT(corrected, predicted - 5000.0) << "corrected by how far it was off at that tick";
+  client.apply_authoritative_reserve("A", t, 20000.0);
+  EXPECT_DOUBLE_EQ(reserve(client, "A"), corrected) << "the same tick again is a no-op";
+  server.apply_authoritative_reserve("A", t, 0.0);
+  EXPECT_GT(reserve(server, "A"), 20000.0) << "the server takes no correction";
+}
+
 // ── authority: the server's veto and overrides (§5h propose -> veto -> override) ──
 
 TEST(HolonAuthorityTest, TheVetoCapsSpeedDropsTheVerticalAndRejectsNonFinite) {
