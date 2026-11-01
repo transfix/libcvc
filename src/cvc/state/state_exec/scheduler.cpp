@@ -28,13 +28,20 @@ void scheduler::set_lock_manager(std::shared_ptr<lock_manager> mgr, lock_attach 
         throw std::logic_error("set_lock_manager: process " + std::to_string(pid) +
                                " holds or waits for a lock");
   home_.reset();
-  home_ = std::make_unique<detail::lock_home>(std::move(mgr), lock_ops_, policy_, nullptr, attach);
+  // The port shares run()'s idle wakeup, made with the first home (protocol 2.3), so a post ends
+  // an idle wait; a replacing home gets the same one.
+  if (!idle_)
+    idle_ = std::make_shared<detail::wakeup>();
+  home_ = std::make_unique<detail::lock_home>(std::move(mgr), lock_ops_, policy_, idle_, attach);
 }
 
 detail::lock_home *scheduler::locks() {
-  if (!home_)
-    home_ =
-        std::make_unique<detail::lock_home>(std::make_shared<lock_manager>(), lock_ops_, policy_);
+  if (!home_) {
+    if (!idle_)
+      idle_ = std::make_shared<detail::wakeup>();
+    home_ = std::make_unique<detail::lock_home>(std::make_shared<lock_manager>(), lock_ops_,
+                                                policy_, idle_);
+  }
   return home_.get();
 }
 
@@ -527,6 +534,11 @@ int scheduler::step() {
 
 int scheduler::step_once() {
   detail::check_not_in_async_kernel("scheduler::step");
+  // Posts from other homes' threads (wakes, relevels), between steps (protocol 5.9).
+  if (home_ && home_->port_pending()) {
+    home_->drain_port();
+    chain_valid_ = false; // the posts are no step's time
+  }
   // Commands posted from other threads (post_control), between steps.
   if (control_pending_.load(std::memory_order_acquire))
     apply_controls();
@@ -604,7 +616,8 @@ uint64_t scheduler::run_steps(std::optional<uint64_t> max_steps, std::optional<d
 }
 
 bool scheduler::idle_wait(std::optional<uint64_t> max_steps, uint64_t &steps, time_budget *budget) {
-  // Nothing is ready: only sleepers and processes waiting for messages are left (has_runnable).
+  // Nothing is ready: only sleepers and processes waiting for messages or locks are left
+  // (has_runnable).
   // run() used to spin here, each idle iteration one of max_steps, until a deadline passed or
   // its budgets ran out. It waits instead, burning no CPU, and keeps both budgets as the spin
   // spent them: the wait is charged to max_time as run time (time_budget::charge_wait), and to
@@ -622,8 +635,9 @@ bool scheduler::idle_wait(std::optional<uint64_t> max_steps, uint64_t &steps, ti
     budget->stop(); // what is left of it, as of now
     until = std::min(until, detail::time_after(now, budget->remaining()));
   }
-  // The step budget runs out first (or only message waiters without a time limit are left,
-  // whom nothing in a synchronous run can wake): what spinning through it would come to.
+  // The step budget runs out first (or only message or lock waiters without a time limit are
+  // left, whom nothing in this run can be counted on to wake): what spinning through it would
+  // come to. A lock waiter's posted wake is applied by the next run (design 6.1, 8.7).
   if (max_steps && (!next || detail::time_after(now, static_cast<double>(steps_left) *
                                                          kIdleStepSeconds) < until)) {
     if (budget)
@@ -631,12 +645,15 @@ bool scheduler::idle_wait(std::optional<uint64_t> max_steps, uint64_t &steps, ti
     return false;
   }
   if (!idle_)
-    idle_ = std::make_unique<detail::wakeup>();
+    idle_ = std::make_shared<detail::wakeup>();
   // stop() may come meanwhile (from another thread, a signal handler): checked every 10 ms. A
   // sleeper's or a timed wait's deadline is waited for precisely, the budget's end need not be.
+  // A post to the lock port (another home's wake or relevel) ends the wait: it is tested before
+  // each slice, and its notify() ends the slice it lands in (protocol 2.3, 5.9).
   constexpr auto kStopCheck = std::chrono::milliseconds(10);
   const bool for_timer = next && *next == until;
-  for (clock::time_point t = now; !stop_requested_ && t < until; t = clock::now()) {
+  const auto posted = [this] { return home_ && home_->port_pending(); };
+  for (clock::time_point t = now; !stop_requested_ && t < until && !posted(); t = clock::now()) {
     const clock::time_point slice = until - t > kStopCheck ? t + kStopCheck : until;
     idle_->wait_until(slice, for_timer && slice == until);
   }
@@ -648,7 +665,9 @@ bool scheduler::idle_wait(std::optional<uint64_t> max_steps, uint64_t &steps, ti
   }
   if (max_steps && steps_left > 1)
     steps += std::min(static_cast<uint64_t>(waited / kIdleStepSeconds), steps_left - 1);
-  return next.has_value(); // only message waiters: the budget ran out or stop() came
+  // Only message or lock waiters: the budget ran out or stop() came, unless a post ended the wait
+  // (run() then steps again, and step_once applies it).
+  return next.has_value() || posted();
 }
 
 void scheduler::stop() { stop_requested_ = true; }

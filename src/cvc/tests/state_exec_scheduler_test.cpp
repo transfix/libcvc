@@ -2780,3 +2780,142 @@ TEST(SchedulerLocks, RunServicesALockDeadline) {
   EXPECT_TRUE(sched.check_tables());
   sched.kill(h);
 }
+
+// ===========================================================================
+// The lock port: posts between homes, drained between steps, ending the schedulers' waits
+// (protocol 2.3, 5.9; design 8.7; locks plan L3.2)
+// ===========================================================================
+
+namespace {
+
+int step_of(scheduler &s) { return s.step(); }
+int step_of(async_scheduler &s) { return s.sync_step(); }
+
+detail::lock_post unknown_relevel() {
+  detail::lock_post post;
+  post.what = detail::lock_post::kind::relevel;
+  post.pid = 999999; // no such process: ignored when applied (protocol 5.9)
+  return post;
+}
+
+// Two schedulers on one manager, stepped by this thread: A's holder releases, the grant for B's
+// waiter is a wake posted to B's port, and B's next step drains it and runs the waiter.
+template <class A, class B> void a_release_wakes_a_waiter_on_another_home() {
+  lock_run_world w;
+  const auto mgr = std::make_shared<lock_manager>();
+  A a;
+  B b;
+  a.set_lock_manager(mgr);
+  b.set_lock_manager(mgr);
+  const int h = w.submit(a, R"((with-lock "k" (msg-recv "go")))");
+  const int q = w.submit(b, R"((with-lock "k" 1))");
+  for (int i = 0; i < 1000 && (waiting_on(a, h) != "msg go" || waiting_on(b, q) != "lock /k");
+       ++i) {
+    step_of(a);
+    step_of(b);
+  }
+  ASSERT_EQ(waiting_on(a, h), "msg go");
+  ASSERT_EQ(waiting_on(b, q), "lock /k");
+  const std::shared_ptr<detail::lock_port> port = b.locks()->port();
+  EXPECT_FALSE(port->pending());
+
+  ASSERT_EQ(a.deliver_to_receivers("go", value_t(std::string("go"))), 1);
+  for (int i = 0; i < 1000 && !is_finished(a.get_process_info(h)->status); ++i)
+    step_of(a);
+  ASSERT_TRUE(is_finished(a.get_process_info(h)->status));
+  EXPECT_TRUE(port->pending()) << "A's release posted no wake to B's port";
+  EXPECT_EQ(waiting_on(b, q), "lock /k") << "the waiter moved before B drained its port";
+
+  // B's next step drains the port first, readies the waiter and steps it.
+  EXPECT_EQ(step_of(b), 1);
+  EXPECT_FALSE(port->pending());
+  EXPECT_NE(waiting_on(b, q), "lock /k");
+  for (int i = 0; i < 1000 && !is_finished(b.get_process_info(q)->status); ++i)
+    step_of(b);
+  ASSERT_TRUE(is_finished(b.get_process_info(q)->status));
+  EXPECT_EQ(std::get<int64_t>(b.get_result(q)->v), 1);
+  EXPECT_FALSE(port->pending());
+  EXPECT_TRUE(a.check_tables());
+  EXPECT_TRUE(b.check_tables());
+}
+
+} // namespace
+
+TEST(SchedulerLockPort, AReleaseOnOneHomeWakesAWaiterOnAnotherThroughItsPort) {
+  {
+    SCOPED_TRACE("sync and sync");
+    a_release_wakes_a_waiter_on_another_home<scheduler, scheduler>();
+  }
+  {
+    SCOPED_TRACE("async and async");
+    a_release_wakes_a_waiter_on_another_home<async_scheduler, async_scheduler>();
+  }
+  {
+    SCOPED_TRACE("sync holder, async waiter");
+    a_release_wakes_a_waiter_on_another_home<scheduler, async_scheduler>();
+  }
+  {
+    SCOPED_TRACE("async holder, sync waiter");
+    a_release_wakes_a_waiter_on_another_home<async_scheduler, scheduler>();
+  }
+}
+
+// An async_scheduler blocked in wait_for_work with a long deadline returns when another thread
+// posts to its home's port: the port shares the wakeup it blocks on. The drain clears the
+// pending flag, so the next wait blocks again rather than returning at once.
+TEST(SchedulerLockPort, APostEndsAnAsyncWaitForWork) {
+  async_scheduler sched;
+  sched.set_lock_manager(std::make_shared<lock_manager>());
+  const std::shared_ptr<detail::lock_port> port = sched.locks()->port();
+  std::atomic<bool> posted{false};
+  std::thread poster([port, &posted] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    posted = port->post(unknown_relevel());
+  });
+  const auto t0 = std::chrono::steady_clock::now();
+  const bool work = sched.wait_for_work(30.0);
+  const double waited =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  poster.join();
+  std::printf("wait_for_work(30 s), posted to after 50 ms, returned after %.3f s\n", waited);
+  EXPECT_TRUE(posted.load());
+  EXPECT_TRUE(work);
+  EXPECT_LT(waited, 10.0);
+  EXPECT_TRUE(port->pending()); // the wait reports the post; the drain applies it
+  sched.drain_ingress();
+  EXPECT_FALSE(port->pending());
+  EXPECT_FALSE(sched.wait_for_work(0.05)) << "a drained port still ended the wait";
+}
+
+// A sync run() idle beside a 5 s sleeper returns to its loop when another thread posts to its
+// home's port: the loop's next step drains the port, and applies a stop queued with
+// post_control before the post (a queued command alone wakes no idle run). The sleeper is still
+// asleep when run() returns, so the post, not the sleeper's deadline, ended the wait.
+TEST(SchedulerLockPort, APostEndsTheSyncIdleWait) {
+  scheduler sched;
+  const int pid = sched.execute(std::string("(begin 1 2 3)"));
+  sched.step();
+  ASSERT_TRUE(sched.sleep(pid, 5.0));
+  sched.locks(); // a private home first; the replacing one shares the same wakeup
+  sched.set_lock_manager(std::make_shared<lock_manager>());
+  const std::shared_ptr<detail::lock_port> port = sched.locks()->port();
+  std::atomic<bool> posted{false};
+  std::thread poster([&sched, port, &posted, pid] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    control_cmd stop;
+    stop.what = control_cmd::kind::query;
+    stop.query = [&sched](scheduler_base &) { sched.stop(); }; // on the scheduler's thread
+    sched.post_control(pid, std::move(stop));
+    posted = port->post(unknown_relevel());
+  });
+  const auto t0 = std::chrono::steady_clock::now();
+  sched.run();
+  const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  poster.join();
+  std::printf("run() beside a 5 s sleeper, posted to after 50 ms, returned after %.3f s\n", took);
+  EXPECT_TRUE(posted.load());
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::waiting) << "the sleeper woke";
+  EXPECT_FALSE(port->pending()); // the run's step drained it
+  EXPECT_TRUE(sched.check_tables());
+  sched.kill(pid);
+}
