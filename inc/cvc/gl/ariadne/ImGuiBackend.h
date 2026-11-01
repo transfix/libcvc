@@ -67,6 +67,9 @@ public:
   void text_value_colored(const char *label, const std::string &value, const float rgb[3]) override;
   void separator() override;
   void progress_bar(const char *label, float fraction, const std::string &overlay) override;
+  void plot_lines(const char *label, const std::vector<float> &values, double lo, double hi,
+                  const std::string &overlay, double height) override;
+  void spinner(const char *label, double seconds, bool ascii) override; // a turning arc
   bool button(const char *label) override;
   bool menu_item_action(const char *label) override;
   bool item_clicked() override; // §4.6 widget on_click: ImGui::IsItemClicked() on the last item
@@ -120,6 +123,7 @@ public:
   // the picture, which is drawn once the content's area is known (a window's inner area).
   void begin_backdrop(const cvc::ariadne::Backdrop &bd) override;
   void end_backdrop() override;
+  bool draw_image_fit(const char *name, float box_w, float box_h) override;
 
   // Convenience: install `rt`'s per-frame walk as `overlay`'s draw callback, so
   // VTK drives Runtime::render() once per rendered frame. Call after
@@ -216,9 +220,9 @@ private:
     bool dirty = true;    // needs (re-)upload
   };
   std::unordered_map<std::string, PublishedImage> m_images;
-  // The GL texture of the published image `name`, uploaded if it changed (its size in w, h); 0 when
-  // there is no such image. GL context current.
-  unsigned int image_texture(const std::string &name, int &w, int &h);
+  // The GL texture image `name` is published under, uploaded first if it changed, and its size in
+  // W x H; 0 when nothing is published under it. Render thread (the GL context current).
+  unsigned int image_texture(const char *name, int &W, int &H);
 
   // §5.12 backdrops open in this frame, innermost last (a splitter each, so they nest).
   struct BackdropFrame;

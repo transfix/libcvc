@@ -6,8 +6,8 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <cstdlib>
 #include <chrono>
+#include <cstdlib>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
 #include <cvc/ariadne/ftxui_backend.h>
@@ -65,8 +65,11 @@ std::string encode(const cvc::image &img, const std::string &ext) {
       ("ariadne_media_test_" +
        std::to_string(std::hash<std::thread::id>()(std::this_thread::get_id())) + "." + ext);
   cvc::write_image(img, path.string(), 95);
-  std::ifstream in(path, std::ios::binary);
-  std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  std::string bytes;
+  { // closed before the remove: Windows won't delete a file that is open
+    std::ifstream in(path, std::ios::binary);
+    bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+  }
   std::filesystem::remove(path);
   return bytes;
 }
@@ -742,9 +745,13 @@ TEST(MediaWidget, LoaderWarnsOnBadFitAndShape) {
 
 namespace {
 
+// The picture a backdrop test draws, in a directory of that test's own: ctest runs the cases in
+// separate processes at the same time, and each removes its directory when it is done.
 std::filesystem::path picture_dir() {
+  const ::testing::TestInfo *test = ::testing::UnitTest::GetInstance()->current_test_info();
   const std::filesystem::path dir =
-      std::filesystem::temp_directory_path() / "ariadne_media_test_backdrop";
+      std::filesystem::temp_directory_path() /
+      ("ariadne_media_test_backdrop_" + std::string(test ? test->name() : "none"));
   std::filesystem::create_directories(dir);
   const cvc::image img = make_image(32, 16, [](int x, int) -> std::array<unsigned char, 4> {
     return x < 16 ? std::array<unsigned char, 4>{230, 120, 40, 255}

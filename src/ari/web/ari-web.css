@@ -8,6 +8,8 @@ header { display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap;
 header b { color: var(--accent); font-weight: 600; }
 header .hint { color: var(--dim); }
 header #status { margin-left: auto; color: var(--dim); }
+header #status.warning { color: #e5c07b; max-width: 60%; overflow: hidden; text-overflow: ellipsis;
+                         white-space: nowrap; }
 header a { color: var(--accent); }
 header button { font: inherit; color: var(--fg); background: #1f242c; border: 1px solid #2d333b;
                 border-radius: 4px; padding: 1px 8px; cursor: pointer; }

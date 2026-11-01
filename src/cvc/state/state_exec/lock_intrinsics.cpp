@@ -1,5 +1,6 @@
 // The lock natives (docs/STATE_EXEC_LOCKS.md 4.1): the with-lock binding, locks-held, lock-query
-// and %lock-wait, and the resolution of a lock key as a program writes it.
+// and %lock-wait, and the resolution of a lock key as a program writes it; and the priority
+// natives set-priority and get-priority (7.1).
 
 #include <cctype>
 #include <cvc/state/state_exec/builtins.h>
@@ -10,6 +11,7 @@
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/scheduler_base.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
+#include <limits>
 
 namespace cvc::state_exec::detail {
 
@@ -100,6 +102,40 @@ value_t make_lock_wait_handle() {
   auto obj = std::make_shared<data_object>();
   obj->type_name = kLockWaitType;
   return value_t(std::move(obj));
+}
+
+const char *policy_name(scheduling_policy p) {
+  switch (p) {
+  case scheduling_policy::priority:
+    return "priority";
+  case scheduling_policy::priority_rr:
+    return "priority_rr";
+  case scheduling_policy::round_robin:
+    break;
+  }
+  return "round_robin";
+}
+
+// The process a priority native acts for: the one stepping, else the context's (self-pid's
+// rule).
+int calling_pid(const intrinsics_context &ctx) {
+  const int pid = ctx.sched->current_pid();
+  return pid >= 0 ? pid : ctx.pid;
+}
+
+// A pid argument: an int; one out of int's range names no process.
+int pid_arg(const value_t &v, const char *who) {
+  const auto *i = std::get_if<int64_t>(&v.v);
+  if (!i)
+    throw dsl_error("TypeError", std::string(who) + ": a pid is an int, got " + v.type_name());
+  if (*i < std::numeric_limits<int>::min() || *i > std::numeric_limits<int>::max())
+    return -1;
+  return static_cast<int>(*i);
+}
+
+void require_scheduler(const intrinsics_context *ctx, const char *who) {
+  if (!ctx || !ctx->sched)
+    throw std::runtime_error(std::string(who) + ": no scheduler bound");
 }
 
 } // namespace
@@ -275,6 +311,54 @@ void register_lock_intrinsics(environment_ptr env, intrinsics_context *ctx) {
   // Called by a program directly, with no lock form's token, it refuses (LW-2).
   builtins::register_fn(env, "%lock-wait", [ctx](std::span<const value_t> args) -> value_t {
     return lock_wait_call(lock_ops{ctx, nullptr}, args);
+  });
+
+  // (set-priority p) or (set-priority pid p) (design 7.1, 7.2): #t when applied, #f for a pid
+  // the caller may not see, PermissionError for a raise past the floors. Under round_robin the
+  // change is stored and reported, and changes no pick.
+  builtins::register_fn(env, "set-priority", [ctx](std::span<const value_t> args) -> value_t {
+    if (args.size() != 1 && args.size() != 2)
+      throw dsl_error("TypeError",
+                      "set-priority: expected (set-priority p) or (set-priority pid p)");
+    require_scheduler(ctx, "set-priority");
+    const int caller = calling_pid(*ctx);
+    const int pid = args.size() == 2 ? pid_arg(args[0], "set-priority") : caller;
+    const value_t &pv = args.back();
+    const auto *pi = std::get_if<int64_t>(&pv.v);
+    if (!pi || *pi < -20 || *pi > 19)
+      throw dsl_error("ValueError",
+                      "set-priority: a priority is an int in -20..19, got " + to_string(pv));
+    const int p = static_cast<int>(*pi);
+    switch (ctx->sched->set_priority_checked(caller, pid, p)) {
+    case priority_change::applied:
+      return value_t(true);
+    case priority_change::unknown:
+      return value_t(false);
+    case priority_change::refused:
+      break;
+    }
+    throw dsl_error("PermissionError",
+                    "set-priority: pid " + std::to_string(pid) + " may not be raised to " +
+                        std::to_string(p) + ", past its floor or the caller's",
+                    "dsl",
+                    {{"pid", value_t(static_cast<int64_t>(pid))},
+                     {"priority", value_t(static_cast<int64_t>(p))}});
+  });
+
+  // (get-priority [pid]): {base effective floor policy}, or nil for a pid the caller may not see.
+  builtins::register_fn(env, "get-priority", [ctx](std::span<const value_t> args) -> value_t {
+    if (args.size() > 1)
+      throw dsl_error("TypeError", "get-priority: expected at most a pid");
+    require_scheduler(ctx, "get-priority");
+    const int caller = calling_pid(*ctx);
+    const int pid = args.empty() ? caller : pid_arg(args[0], "get-priority");
+    const std::optional<priority_info> info = ctx->sched->get_priority_as(caller, pid);
+    if (!info)
+      return nil_value;
+    return make_dict({{"base", value_t(static_cast<int64_t>(info->base))},
+                      {"effective", value_t(static_cast<int64_t>(info->effective))},
+                      {"floor", value_t(static_cast<int64_t>(info->floor))},
+                      {"policy", value_t(std::string(policy_name(info->policy)))}});
   });
 }
 

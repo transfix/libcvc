@@ -56,7 +56,12 @@ Invoke-CvcCMakeBuild @(
   # CVC_ENABLE_CUDA=ON in its build.matrix env to reuse this script for the GPU,
   # variant.,
   "-DCVC_ENABLE_CUDA=$(if ($env:CVC_ENABLE_CUDA) { $env:CVC_ENABLE_CUDA } else { 'OFF' })",
-  '-DCVC_ENABLE_GRPC=OFF',
+  # The conference transports: cvc::state over gRPC and WebSocket, which arigl and the arisrv
+  # relay need to join a room. The recipe's runtime deps already carry grpc, protobuf, abseil and
+  # re2 for every platform this builds; with these OFF the SDK shipped without them, so an arigl or
+  # arisrv built against it compiled the conference out.
+  '-DCVC_ENABLE_GRPC=ON',
+  '-DCVC_ENABLE_WS=ON',
   # Enable the XMLRPC module so the bundle exports cvc::xmlrpc (+ libxmlrpc),
   # for downstream consumers like VolumeRover 2.x. Self-contained STATIC lib.,
   '-DCVC_USING_XMLRPC=ON'
@@ -71,8 +76,10 @@ if ($cvcTests -eq 'ON') {
   Push-Location $env:CVC_BUILD_DIR
   try {
     # CVC_CTEST_EXCLUDE: a ctest -E regex of tests to leave out (CI's long-running suites).
+    # CVC_CTEST_REPEAT: a ctest --repeat mode (CI's until-pass:3, as its package jobs run).
     $exclude = if ($env:CVC_CTEST_EXCLUDE) { @('-E', $env:CVC_CTEST_EXCLUDE) } else { @() }
-    & ctest --output-on-failure -j $env:CVC_JOBS @exclude
+    $repeat = if ($env:CVC_CTEST_REPEAT) { @('--repeat', $env:CVC_CTEST_REPEAT) } else { @() }
+    & ctest --output-on-failure -j $env:CVC_JOBS @exclude @repeat
     if ($LASTEXITCODE -ne 0) { throw 'ctest reported failures' }
   } finally {
     Pop-Location

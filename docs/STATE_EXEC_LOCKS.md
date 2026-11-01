@@ -1,8 +1,10 @@
 # state_exec: locks on the state tree, and process priority changes
 
 Status: design, 2026-10-27. L0 (the atomic natives, section 4.4), L1 (`with-lock` on one
-scheduler) and L1b (the spawn context on one scheduler) are built; L2 and L3 follow, and L4
-onward are design only.
+scheduler) and L1b (the spawn context on one scheduler) are built. L2 (priorities and
+inheritance) is implemented in transfix/libcvc#868, with its scheduler-level PI tests and its two
+bench scenarios; its A/B gates are not run yet (section 12). L3 follows, and L4 onward are design
+only.
 Tracked in the `state-exec-perf` workstream,
 beside the threaded design ([`docs/STATE_EXEC_THREADED.md`](STATE_EXEC_THREADED.md)), which this
 document extends. The exact lock protocol is
@@ -768,9 +770,19 @@ the next `run()` applies the grant (LT-2).
     steps. Debug owner checks (8.3, 9.1) accept it.
   - **The GIL comes before the control mutex.** A thread may take the control mutex while it holds
     the GIL (`run()` at entry, for its clear and its `reap`, `RunGuard`, a direct action), but never
-    takes the GIL while it holds the control mutex. A caller waiting for its entry's answer waits on
-    the condition variable with the GIL released; once woken it copies the answer out and releases
-    the control mutex, and only then re-takes the GIL to build the Python result. The scheduler
+    takes the GIL while it holds the control mutex. Nor does anything under it run Python or free
+    a Python object: `run()`'s reap cancels its program's async calls before it (their charge
+    reads the step rate, which a scheduler with an id publishes to the tree, whose observers may
+    run Python), and takes its process out of the scheduler and frees it after the unlock, since
+    a value it captured may hold the last reference to a Python object whose finalizer releases
+    and retakes the GIL, or calls the `Exec` again. A direct action keeps the GIL throughout, so it
+    is serialized with Python's own calls on the scheduler that hold the GIL. It is not with the
+    stepping calls that release it (`sync_step`, `sync_run`, `wait_for_work`):
+    stepping an `Exec`'s scheduler from another thread meanwhile is the caller's to avoid, as
+    stepping it from two threads always was. A caller waiting for its entry's answer
+    waits on the condition variable with the GIL released (released under the mutex); once woken
+    it copies the answer out and releases the control mutex, and only then re-takes the GIL to
+    build the Python result. The scheduler
     thread answers entries between steps with C++ values and never calls into Python under the
     mutex. So a woken caller never holds the mutex while it waits for a GIL that `run()` holds while
     it waits for the mutex (PR-8).
@@ -1368,6 +1380,15 @@ the "hardened on one machine, single or multiple threads" milestone: host-submit
 spawned programs all lock there. L4 follows the threaded stages, and L7 comes last. Nothing before
 Stage M needs `locks_lost`: before L7 no held section can be snapshotted, so restore refuses one.
 
+**Where the phases stand.** L0, L1 and L1b are built (transfix/libcvc#860, #862, #865). L2 is
+implemented in transfix/libcvc#868: `set-priority` and `get-priority`, the floors and the spawn
+clamp, inheritance (homes attach with their scheduler's policy, and the run queue keys on
+`effective_priority()` through `level_key`), `state_exec.policy`, the thread classes,
+`post_control`, and pycvc's priority API. The same PR has its scheduler-level PI tests (PI-1..PI-5,
+PI-8, PI-9 and PI-11; PI-7 and PI-10 are L3's) and the `prio.set` and `lock.inherit` bench
+scenarios. None of its A/B gates (11.2) has been run yet, so L2's exit is not met. L3 onward are
+not built.
+
 ## 13. The test list
 
 Unless a case says otherwise, cases run on both schedulers, on Windows (MSVC) and Linux (gcc).
@@ -1513,7 +1534,7 @@ Each case runs with the process queued, and granted but not yet resumed.
 | PI-2 | a chain of 3 | the boost propagates |
 | PI-3 | the waiter times out; is killed | the boost withdrawn at once |
 | PI-4 | `set-priority` on a boosted holder | the base changes; the effective priority stays at the boost |
-| PI-5 | a snapshot and `inspect` of a boosted holder | the base, never the boost |
+| PI-5 | a snapshot and `inspect` of a boosted holder; a snapshot of a waiter boosted through another waiter's edge | `inspect`: `priority` the base, the boost only in `effective_priority`; the holder's snapshot refused (5.8); the waiter's writes its base, and restored it queues afresh at the base |
 | PI-7 | (L3) a relevel post for a holder on another home arrives after it released | re-reads the manager; the holder at its base |
 | PI-8 | W (-10) waits for H1, which waits for H2; W times out | H1 and H2 both back to their base |
 | PI-9 | `priority_rr`: H (10) holds X `a.b`; V (10) queues X `a`; W (-10) queues S `a.c`; medium spinners | H and V boosted to -10 through W's waiter edge; V granted within H's section, W within V's |
