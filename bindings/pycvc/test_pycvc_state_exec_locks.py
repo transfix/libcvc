@@ -21,8 +21,10 @@ CVC_LOCKS_SANITIZER=1 (the sanitizer jobs) runs the smaller sizes.
 
 import faulthandler
 import gc
+import json
 import math
 import os
+import re
 import sys
 import threading
 import time
@@ -1070,6 +1072,43 @@ def test_lt07_progress_keeps_waiter_alive():
     assert granted >= released["t"] and granted - t0 < WAIT
     for pid in [p.pid for p in s.list_processes()]:
         assert s.reap(pid)  # their environments hold the context, which holds the scheduler
+
+
+def test_lt07b_spawned_waiter_counts():
+    # The idle rule counts a lock wait of any of the Exec's processes, not only run()'s own
+    # (design 9.2: "a lock wait"). A's program waits on msg-recv for a child that waits for a key B
+    # holds for 2 s while it keeps stepping: granted after B releases, never killed. Behind a B
+    # nobody pumps, the same is killed at the limit, naming the child and its key.
+    app = pycvc.make_app()
+    a = pycvc.Exec(app, idle_timeout=0.5)
+    b = pycvc.Exec(app)
+    holds = threading.Event()
+    released = {}
+    b.register_fn("holds", lambda: holds.set() or True)
+    b.register_fn("releasing", lambda: released.setdefault("t", time.monotonic()) > 0)
+
+    def child_waits(key, channel):
+        return (f'(begin (spawn "(with-lock \\"{key}\\" (msg-send \\"{channel}\\" \\"ok\\"))") '
+                f'(msg-recv "{channel}"))')
+
+    tb, ob = _in_thread("lt07b-b", b.run, '(with-lock "lt07b.k" (begin (holds) '
+                        '(for i (range 20) (sleep 0.1)) (releasing)))')
+    assert holds.wait(WAIT)
+    t0 = time.monotonic()
+    got = a.run(child_waits("lt07b.k", "lt07b.done"))
+    done = time.monotonic()
+    _join(tb)
+    print(f"  a spawned waiter behind B's 2 s section: granted after {done - t0:.2f} s")
+    assert json.loads(got)["payload"] == "ok" and "error" not in ob, (got, ob)  # the message
+    assert done >= released["t"] and done - t0 < WAIT
+
+    _spawn_holder(b, "lt07b.k2", "lt07b.never")
+    t0 = time.monotonic()
+    e = _raises(RuntimeError, a.run, child_waits("lt07b.k2", "lt07b.done2"))
+    print(f"  behind an unpumped Exec: killed after {time.monotonic() - t0:.2f} s: {e}")
+    assert re.search(r"parked with no pending work \(pid \d+, pid \d+ waiting for lock lt07b\.k2\)",
+                     str(e)), e
+    assert time.monotonic() - t0 < WAIT
 
 
 def test_lt08_idle_limit():

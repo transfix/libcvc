@@ -478,6 +478,32 @@ progress_waited_for(const lock_home &home, int pid, double idle_timeout,
   return latest;
 }
 
+// The lock waits of an Exec's processes, for run()'s idle rule: a lock wait of any of them counts,
+// not only of run()'s own (design 9.2). `progress` is the latest progress_waited_for over them,
+// `named` one of them (pid and absolute key) for a kill's message, `root` when it waits.
+struct exec_lock_waits {
+  std::optional<std::chrono::steady_clock::time_point> progress;
+  std::optional<std::pair<int, std::string>> named;
+};
+
+exec_lock_waits lock_waits_of(const async_scheduler &sched, const lock_home &home, int root,
+                              double idle_timeout, std::chrono::steady_clock::time_point now) {
+  exec_lock_waits out;
+  for (const process_info &p : sched.list_processes()) {
+    if (p.status != process_status::waiting)
+      continue;
+    std::optional<std::string> key = lock_waited_for(p);
+    if (!key)
+      continue;
+    if (!out.named || p.pid == root)
+      out.named.emplace(p.pid, std::move(*key));
+    if (const std::optional<std::chrono::steady_clock::time_point> t =
+            progress_waited_for(home, p.pid, idle_timeout, now))
+      out.progress = std::max(out.progress.value_or(*t), *t);
+  }
+  return out;
+}
+
 // A lock-query answer as the DSL's (lock-query) builds it (lock_intrinsics.cpp), its keys shown
 // under `root` (protocol 5.10). Plain C++ values: Exec::lock_query converts them once it holds the
 // GIL again.
@@ -999,28 +1025,28 @@ std::string Exec::run(const std::string &src) {
       // a delivery is coming, so keep the idle clock fresh; only a park with NOTHING pending can
       // time out (e.g. a msg-recv on a channel nobody sends to) — safe to abandon then, no worker
       // to outlive us. Work pending here is this home's progress too (docs/STATE_EXEC_LOCKS.md
-      // 8.4), which a waiter on another Exec behind one of our processes reads. A lock wait is
-      // pending only while another home it waits for makes progress (9.2), as of that progress:
-      // the idle window runs from it, so a wait behind a home that stopped is killed about
-      // idle_timeout after its last progress. It stores none, so two Execs whose waiters wait on
-      // each other's parked holders can't keep each other alive.
-      const std::optional<std::string> lock_key = lock_waited_for(*info);
+      // 8.4), which a waiter on another Exec behind one of our processes reads. A lock wait of
+      // any of our processes is pending only while another home it waits for makes progress
+      // (9.2), as of that progress: the idle window runs from it, so a wait behind a home that
+      // stopped is killed about idle_timeout after its last progress. It stores none, so two
+      // Execs whose waiters wait on each other's parked holders can't keep each other alive.
       if (host.in_flight() > 0 || !impl_->pending_coros.empty() || sched.has_runnable() ||
           had_runnable) {
         const clock::time_point now = clock::now();
         idle_deadline = cvc::state_exec::detail::time_after(now, idle_timeout);
         home.store_progress(now);
       } else {
-        const std::optional<clock::time_point> progress =
-            lock_key ? progress_waited_for(home, pid, idle_timeout, clock::now()) : std::nullopt;
-        if (progress)
-          idle_deadline =
-              std::max(idle_deadline, cvc::state_exec::detail::time_after(*progress, idle_timeout));
+        const exec_lock_waits waits = lock_waits_of(sched, home, pid, idle_timeout, clock::now());
+        if (waits.progress)
+          idle_deadline = std::max(
+              idle_deadline, cvc::state_exec::detail::time_after(*waits.progress, idle_timeout));
         if (clock::now() > idle_deadline) {
           sched.kill(pid);
           error = "pycvc.Exec.run: parked with no pending work (pid " + std::to_string(pid);
-          if (lock_key)
-            *error += ", waiting for lock " + lock_home::show(*lock_key, impl->ictx.root_path);
+          if (const auto &named = waits.named) // ", waiting for lock k" or ", pid 2 waiting ..."
+            *error +=
+                (named->first == pid ? std::string(",") : ", pid " + std::to_string(named->first)) +
+                " waiting for lock " + lock_home::show(named->second, impl->ictx.root_path);
           *error += ")";
           break;
         }
