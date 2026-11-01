@@ -21,6 +21,16 @@ meta:
   author: cvc
   min_libcvc: 3.6.0
 
+requires:
+  - gl.scene                       # a scene renderer realizes the scene: block (arigl; not ari)
+  - stream_view
+  - stream-open                    # media: capture and mute
+  - stream-capture-camera
+  - stream-capture-audio
+  - stream-set-muted
+  - room-join                      # the room (arigl registers these when CVC_ARIADNE_RELAY is set)
+  - room-roster
+
 # The room's LOOK. The relay owns what is IN the room (conf.rooms.<room>.scene: the ground, the
 # reference box; the avatars), and every client draws it under this document's lighting, so the
 # rig lives here, not in the server. A three-point rig staged over the 20 m floor: the key spot casts
