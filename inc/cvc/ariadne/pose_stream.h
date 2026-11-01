@@ -11,6 +11,7 @@
 #ifndef __CVC_ARIADNE_POSE_STREAM_H__
 #define __CVC_ARIADNE_POSE_STREAM_H__
 
+#include <cstddef>
 #include <cstdint>
 #include <cvc/physics/body.h>
 #include <cvc/state/pose_snapshot.h>
@@ -73,10 +74,23 @@ public:
   // last commit, so an unwritten snapshot's changes are carried by the next.
   cvc::pose_snapshot encode(std::uint64_t tick, const std::vector<pose_subject> &subjects,
                             std::uint64_t heartbeat_ticks);
-  // The last encode() was written: the connection now has it.
+  // The last encode() was written: the connection now has it. (Acked mode: no-op; see ack.)
   void commit();
   // Start the stream again: the next snapshot names every slot afresh, with base_seq 0.
   void reset();
+
+  // ACKED mode, for an unreliable path (the fast lane, room_lane.h): a written snapshot is not
+  // known to have arrived, so nothing is committed on write. Every encode() gets a seq of its own
+  // and its state is kept (the last kAckWindow of them) until the viewer acknowledges a seq; that
+  // snapshot then becomes the base the next ones differ from. A lost snapshot costs only its own
+  // latency: the next one still differs from what the viewer has. Switching the mode restarts the
+  // stream.
+  static constexpr std::size_t kAckWindow = 64;
+  void set_acked(bool on);
+  bool acked() const noexcept;
+  // The viewer applied snapshot SEQ (acked mode): it becomes the base. False for a seq that is
+  // unknown, out of the window, or older than the base already acknowledged.
+  bool ack(std::uint32_t seq);
   // The tick `pid` was last committed at, 0 if never (or since it went).
   std::uint64_t last_sent_tick(const std::string &pid) const;
 
@@ -101,7 +115,16 @@ public:
   // Apply `snap`, appending a sample to `out` for each of its entries (at snap.server_tick).
   // False, with nothing applied, when it is not the next one (its base_seq is not the seq last
   // applied, nor 0): the stream is out of step, and waits for a restart.
+  //
+  // With set_bases(n > 1), for an acked stream (pose_stream_encoder::set_acked): the states of the
+  // last n snapshots applied are kept, and `snap` is applied against whichever one its base_seq
+  // names (false, counted as a gap, when it is not among them). Snapshots arrive in any order: one
+  // whose server_tick is not newer than the newest applied is kept as a base but gives no samples
+  // (true, so it may still be acknowledged). A keyframe (base_seq 0) keeps the older bases, since
+  // its encoder's seqs carry on; one whose seq goes back (a new encoder) forgets them.
   bool decode(const cvc::pose_snapshot &snap, std::vector<pose_sample> &out);
+  // Keep the last `n` snapshots' states as bases (default 1: the reliable stream's rule).
+  void set_bases(std::size_t n);
   // Snapshots refused for being out of step.
   std::uint64_t gaps() const noexcept;
 

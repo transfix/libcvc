@@ -255,6 +255,8 @@ public:
   // connection whose Hello named `node_id`, unfiltered by the peer registry. Returns the number of
   // connections written: 0, with nothing encoded, when none matches or `entries` is empty. A write
   // to a peer that stopped reading is bounded by the write watchdog.
+  // The message to `node_id`'s connections only (see state_transport::send_message_to).
+  std::size_t send_message_to(const std::string &node_id, const state_message &m) override;
   std::size_t push_snapshot_to(const std::string &node_id,
                                const std::vector<snapshot_entry> &entries) override;
   // See state_transport::push_pose_snapshot_to / set_on_pose_snapshot. Set the callback before

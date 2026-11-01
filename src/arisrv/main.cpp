@@ -34,6 +34,7 @@
 #include <cvc/ariadne/conference/room_aoi.h>        // aoi_params, the presets, write_aoi_params
 #include <cvc/ariadne/conference/room_aoi_relay.h>  // room_aoi_relay, relay_room_step
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_leave (retract a departed peer)
+#include <cvc/ariadne/conference/room_lane.h>       // the pose lane + lane signaling
 #include <cvc/ariadne/conference/room_media_intrinsics.h> // room_relay_tick
 #include <cvc/ariadne/conference/room_net.h>        // per-participant + room link-quality stats
 #include <cvc/ariadne/conference/room_pose_relay.h> // room_pose_relay (avatar pose snapshots)
@@ -45,6 +46,7 @@
 #include <cvc/ariadne/stream/stream_relay.h>
 #include <cvc/core/app.h>
 #include <cvc/media/media_router.h> // protocol-agnostic media hub (WS + gRPC + future protocols)
+#include <cvc/net/fast_lane_rtc.h>  // the unreliable lane (WebRTC data channels)
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_device_key.h> // device-key pins (trust on first use)
 #include <cvc/state/state_identity.h>   // valid_room_token
@@ -174,6 +176,19 @@ int main(int argc, char **argv) {
   //   --video-floor RUNG         the lowest adaptation goes (default thumb; off allows audio only)
   //   --viewer-kbps-max N        a viewer's budget, kbit/s: above it, it steps down (default 0 =
   //                              none)
+  // The fast lanes (docs/roadmap/CONFERENCE_UNRELIABLE_TRANSPORT.md; needs CVC_ENABLE_RTC). A
+  // client may open unreliable, unordered WebRTC data channels to the relay, offered over its
+  // reliable connection: a pose lane, which carries its pose snapshots (room_pose_relay's stream,
+  // acknowledged so a lost one is never waited for), and a media lane. A lost packet is superseded
+  // by the next instead of holding anything up. Off unless --lane-listen.
+  //   --lane-listen ADDR:PORT    the one UDP port every lane shares (e.g. 0.0.0.0:7703)
+  //   --lane-advertise IP[,IP]   the address(es) clients reach that port at, put in each answer
+  //                              (the public IP of a NAT that forwards the port); default: only
+  //                              the host's own addresses
+  //   --lane-media on|off        a media lane beside each pose lane (default off: media stays on
+  //                              the reliable connections and poses alone ride the lanes, which
+  //                              measured best under loss -- SCTP's congestion control holds
+  //                              video longer than TCP's; the design doc's section 7)
   const char *s7_env = std::getenv("CVC_ARISRV_S7");
   const char *aoi_env = std::getenv("CVC_ARISRV_AOI");
   // CVC_ARISRV_S7: 0/off or 1/on (unset: on).
@@ -189,6 +204,7 @@ int main(int argc, char **argv) {
   bool devicePinsFlag = false; // --device-pins was given (even with no path)
   std::string adaptArg = "on", videoMaxArg = "full", videoFloorArg = "thumb", viewerKbpsArg = "0";
   std::string aoiVideoMaxArg = "0", mediaStallArg = "40", admissionHoldArg = "2000";
+  std::string laneListen, laneAdvertise, laneMediaArg = "off";
   for (int i = 1; i < argc; ++i) {
     const char *a = argv[i];
     auto next = [&](const char *d) { return (i + 1 < argc) ? argv[++i] : d; };
@@ -236,6 +252,12 @@ int main(int argc, char **argv) {
       videoFloorArg = next("");
     else if (!std::strcmp(a, "--viewer-kbps-max"))
       viewerKbpsArg = next("");
+    else if (!std::strcmp(a, "--lane-listen"))
+      laneListen = next("");
+    else if (!std::strcmp(a, "--lane-advertise"))
+      laneAdvertise = next("");
+    else if (!std::strcmp(a, "--lane-media"))
+      laneMediaArg = next("on");
   }
   if (aoiMode.empty())
     aoiMode = scene == "large" ? "hall" : "conference";
@@ -247,7 +269,8 @@ int main(int argc, char **argv) {
       !check_choice("--bind-writes", bindWritesArg, {"on", "off"}) ||
       !check_choice("--adapt", adaptArg, {"on", "off"}) ||
       !check_choice("--video-max", videoMaxArg, {"full", "half", "quarter", "thumb", "off"}) ||
-      !check_choice("--video-floor", videoFloorArg, {"full", "half", "quarter", "thumb", "off"}))
+      !check_choice("--video-floor", videoFloorArg, {"full", "half", "quarter", "thumb", "off"}) ||
+      !check_choice("--lane-media", laneMediaArg, {"on", "off"}))
     return 2;
   long aoiVideoMaxN = 0, mediaStallMs = 40, admissionHoldMs = 2000;
   if (!check_count("--aoi-video-max", aoiVideoMaxArg, aoiVideoMaxN) ||
@@ -266,8 +289,39 @@ int main(int argc, char **argv) {
   // shaper, on the transports' reader threads). Declared before the transports, so they outlive
   // every fan that calls the shaper.
   cvc::ariadne::conference::room_rung_controller rung_ctl(rungs);
+  cvc::fast_lane_server_config laneCfg;
+  if (!laneListen.empty()) {
+    const std::size_t colon = laneListen.rfind(':');
+    long port = 0;
+    if (colon == std::string::npos ||
+        !check_count("--lane-listen (port)", laneListen.substr(colon + 1), port) || port < 1 ||
+        port > 65535)
+      return 2;
+    if (!cvc::fast_lane_rtc_available()) {
+      std::fprintf(stderr, "arisrv: --lane-listen: this build has no WebRTC (CVC_ENABLE_RTC)\n");
+      return 2;
+    }
+    laneCfg.bind_address = laneListen.substr(0, colon);
+    laneCfg.port = static_cast<std::uint16_t>(port);
+    for (std::size_t at = 0; at < laneAdvertise.size();) {
+      const std::size_t comma = laneAdvertise.find(',', at);
+      const std::string ip =
+          laneAdvertise.substr(at, comma == std::string::npos ? comma : comma - at);
+      if (!ip.empty())
+        laneCfg.advertise.push_back(ip);
+      at = comma == std::string::npos ? laneAdvertise.size() : comma + 1;
+    }
+  }
   cvc::media_rung_shaper shaper;
-  const auto shape = [&shaper](const cvc::media_frame &f, const std::string &viewer) {
+  // Set once, before the loop, when the lane is on: a viewer whose lane is open gets its media
+  // there, so the reliable endpoints send it none.
+  std::atomic<cvc::fast_lane_server *> laneOf{nullptr};
+  const auto shape = [&shaper, &laneOf](const cvc::media_frame &f, const std::string &viewer) {
+    if (cvc::fast_lane_server *l = laneOf.load(); l && l->lane_open(viewer))
+      return cvc::media_shape{true, nullptr};
+    return shaper.shape(f, viewer);
+  };
+  const auto lane_shape = [&shaper](const cvc::media_frame &f, const std::string &viewer) {
     return shaper.shape(f, viewer);
   };
   const int aoiVideoMax = static_cast<int>((std::min)(aoiVideoMaxN, 1000000L));
@@ -512,6 +566,38 @@ int main(int argc, char **argv) {
 #else
   const std::vector<cvc::state_transport *> planes{&state_tp};
 #endif
+  // The fast lanes, two per participant on the one UDP port: the pose lane (room_pose_relay's
+  // snapshots, from an acked stream) and the media lane (an endpoint of the media hub like the
+  // others: the area of interest's gate and the rung shaper apply to it too). Apart, so poses never
+  // queue behind video in one SCTP congestion window.
+  std::unique_ptr<cvc::fast_lane_server> lanes, mediaLanes;
+  std::unique_ptr<cvc::ariadne::conference::room_lane_relay> laneRelay;
+  if (!laneListen.empty()) {
+    cvc::fast_lane_server_config poseCfg = laneCfg, mediaCfg = laneCfg;
+    poseCfg.transport_name = "webrtc/pose";
+    mediaCfg.transport_name = "webrtc/media";
+    lanes = std::make_unique<cvc::fast_lane_server>(poseCfg);
+    if (laneMediaArg == "on") {
+      mediaLanes = std::make_unique<cvc::fast_lane_server>(mediaCfg);
+      mediaLanes->set_media_shaper(lane_shape);
+      mrouter.add_endpoint(mediaLanes.get());
+      if (aoi_relay)
+        aoi_relay->add_media_endpoint(mediaLanes.get());
+      laneOf.store(mediaLanes.get());
+    }
+    laneRelay = std::make_unique<cvc::ariadne::conference::room_lane_relay>(
+        shard, planes, room, *lanes, mediaLanes.get(), pose_relay);
+    pose_relay.set_lane(laneRelay.get()); // a viewer with an open pose lane gets its stream there
+    std::string adv;
+    for (const std::string &a : laneCfg.advertise)
+      adv += (adv.empty() ? "" : ",") + a;
+    std::printf("[arisrv] fast lanes: udp %s:%u | advertised %s | poses %s | media %s\n",
+                laneCfg.bind_address.c_str(), static_cast<unsigned>(laneCfg.port),
+                adv.empty() ? "(host addresses)" : adv.c_str(),
+                "on the pose lane (acked snapshots)",
+                mediaLanes ? "on the lane" : "on the reliable connection (--lane-media off)");
+    std::fflush(stdout);
+  }
   const auto room_start = std::chrono::steady_clock::now();
   const auto room_step = [&] {
     const double now_s =
@@ -603,6 +689,8 @@ int main(int argc, char **argv) {
         cvc::ariadne::write_intent(app, room, nid, cvc::ariadne::avatar_intent{});
         shaper.forget_viewer(nid);
         shaper.forget_publisher(nid);
+        if (laneRelay)
+          laneRelay->forget(nid);
         std::printf("[arisrv] participant left: %s\n", nid.c_str());
       }
       if (!gone.empty())
@@ -646,10 +734,20 @@ int main(int argc, char **argv) {
         if (r.stats.rtt_ms >= 0.0) // its pose snapshot rate
           pose_relay.set_rtt(r.remote_node_id, r.stats.rtt_ms);
       }
+      // A viewer whose poses ride its pose lane gets its snapshot rate from that lane's round trip.
+      if (lanes)
+        for (const cvc::state_link_report &r : lanes->link_reports())
+          if (r.stats.rtt_ms >= 0.0 && present.count(r.remote_node_id))
+            pose_relay.set_rtt(r.remote_node_id, r.stats.rtt_ms);
       cvc::ariadne::conference::write_link_devices(app, room, links, present);
       // Each viewer's video rung for its link, to the shaper and to the room (its net.relay.video,
       // which its client shows).
-      for (const auto &[pid, s] : rung_ctl.step(links, now_s)) {
+      // A viewer's video rung follows the link that carries its media: its lane's report, when it
+      // has one, comes first (the controller takes the first report per participant).
+      std::vector<cvc::state_link_report> mediaLinks =
+          mediaLanes ? mediaLanes->link_reports() : std::vector<cvc::state_link_report>{};
+      mediaLinks.insert(mediaLinks.end(), links.begin(), links.end());
+      for (const auto &[pid, s] : rung_ctl.step(mediaLinks, now_s)) {
         shaper.set_rung(pid, s.rung);
         if (present.count(pid))
           cvc::ariadne::conference::write_relay_video_rung(app, room, pid,
@@ -717,6 +815,36 @@ int main(int argc, char **argv) {
                         it == rates.end() ? 0.0 : it->second.in_bps * 8.0 / 1000.0,
                         it == rates.end() ? 0.0 : it->second.out_bps * 8.0 / 1000.0, r.idle_s);
           }
+        if (detail && lanes) {
+          cvc::fast_lane_server::totals t = lanes->counters();
+          const cvc::fast_lane_server::totals m =
+              mediaLanes ? mediaLanes->counters() : cvc::fast_lane_server::totals{};
+          t.offers += m.offers;
+          t.opened += m.opened;
+          t.datagrams_in += m.datagrams_in;
+          t.datagrams_out += m.datagrams_out;
+          t.dropped_full += m.dropped_full;
+          t.media_in = m.media_in;
+          t.media_out = m.media_out;
+          std::printf("[arisrv]   lanes: %llu offer(s), %llu opened | datagrams in %llu out %llu, "
+                      "%llu dropped at a full buffer | media in %llu out %llu\n",
+                      static_cast<unsigned long long>(t.offers),
+                      static_cast<unsigned long long>(t.opened),
+                      static_cast<unsigned long long>(t.datagrams_in),
+                      static_cast<unsigned long long>(t.datagrams_out),
+                      static_cast<unsigned long long>(t.dropped_full),
+                      static_cast<unsigned long long>(t.media_in),
+                      static_cast<unsigned long long>(t.media_out));
+          std::vector<cvc::state_link_report> laneLinks = lanes->link_reports();
+          laneLinks.insert(laneLinks.end(), mediaLinks.begin(), mediaLinks.end());
+          for (const cvc::state_link_report &r : laneLinks)
+            if (r.transport.rfind("webrtc", 0) == 0)
+              std::printf("[arisrv]   %-12s %-16s rtt %6.1f ms (min %.1f) | in %llu B | out %llu "
+                          "B | idle %.1fs\n",
+                          r.transport.c_str(), r.remote_node_id.c_str(), r.stats.rtt_ms,
+                          r.stats.rtt_min_ms, static_cast<unsigned long long>(r.stats.bytes_in),
+                          static_cast<unsigned long long>(r.stats.bytes_out), r.idle_s);
+        }
         if (detail)
           std::printf(
               "[arisrv]   video shaping: %llu variant(s) made, %llu delivered, %llu KB saved\n",
@@ -776,10 +904,12 @@ int main(int argc, char **argv) {
           static_cast<unsigned long long>(state_tp.total_media_stall_dropped()), ws_backlog, held,
           held_timeouts, shard.journal().size());
       const auto ps = pose_relay.take_stats();
-      std::printf("[arisrv] poses: %llu snapshot(s), %llu entries, %llu unsent |",
-                  static_cast<unsigned long long>(ps.snapshots),
-                  static_cast<unsigned long long>(ps.entries),
-                  static_cast<unsigned long long>(ps.unsent));
+      std::printf(
+          "[arisrv] poses: %llu snapshot(s) (%llu on pose lanes, %llu acks), %llu entries, "
+          "%llu unsent |",
+          static_cast<unsigned long long>(ps.snapshots), static_cast<unsigned long long>(ps.lane),
+          static_cast<unsigned long long>(ps.acks), static_cast<unsigned long long>(ps.entries),
+          static_cast<unsigned long long>(ps.unsent));
       for (const auto &p : cvc::ariadne::conference::room_roster(app, room))
         std::printf(" %s %u Hz", p.pid.c_str(),
                     60u / std::max(1u, pose_relay.interval_steps(p.pid)));

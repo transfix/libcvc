@@ -365,10 +365,15 @@ std::size_t apply_pose_snapshot(holon &h, pose_stream_decoder &decoder,
   std::vector<pose_sample> samples;
   if (!decoder.decode(snap, samples))
     return 0;
+  return apply_pose_samples(h, samples, snap.server_tick);
+}
+
+std::size_t apply_pose_samples(holon &h, const std::vector<pose_sample> &samples,
+                               std::uint64_t server_tick) {
   std::size_t applied = 0;
   for (const pose_sample &s : samples)
     if (h.has_participant(s.pid)) {
-      h.apply_authoritative(s.pid, s.state, snap.server_tick);
+      h.apply_authoritative(s.pid, s.state, server_tick);
       ++applied;
     }
   return applied;
