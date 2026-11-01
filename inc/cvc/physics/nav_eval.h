@@ -69,6 +69,10 @@ struct plant_reach_options {
   // score_on_plant: predict each run's energy with `power` too (plant_drive_score::model_J).
   bool predict_energy = false;
   cvc::nav::dyn_power_si power{};
+  // plant_drive_score::reach_in_time's speed, m/s over the straight line from start to goal:
+  // an agent counts if it first reached its goal within (that distance - reach_tol) / this.
+  // 0 = not scored (reach_in_time 0).
+  double time_budget_mps = 0.0;
 };
 
 // One run's score, or a mean of runs'.
@@ -77,6 +81,23 @@ struct plant_drive_score {
   double energy_J = 0.0;   // drawn by all its agents, moving or not
   double distance_m = 0.0; // their chassis' paths, summed
   double model_J = 0.0;    // the power model's energy over the same ticks (predict_energy)
+  // The fraction that first reached their goals within the time budget at
+  // plant_reach_options::time_budget_mps (0 when that is 0).
+  double reach_in_time = 0.0;
+  // How fast they drove on the way: the agents' paths up to their first arrival (or the run's
+  // end) over the time they took, m/s. A vehicle stuck short of its goal counts its whole run, so
+  // this falls with reach; arrive_mps is the same over the agents that arrived only.
+  double speed_mps = 0.0;
+  double arrive_mps = 0.0;
+  // The share of that time (up to arrival or the run's end) spent stopped, under 0.5 m/s.
+  double stopped_frac = 0.0;
+  // Of the agents that arrived: the share still within reach_tol at the run's end, how far from
+  // their goals they ended (m), and how fast they were going at the tick they arrived (m/s).
+  double held_frac = 0.0, end_m = 0.0, arrival_mps = 0.0;
+  // Collisions, per agent over the run: the contacts its chassis began with the static world
+  // (the buildings; the ground only on a roll), and the seconds it spent touching another agent.
+  double building_hits = 0.0;
+  double vehicle_contact_s = 0.0;
   // Where it went: the agents' P3 ledgers at the run's end, every field summed (a mean's, the
   // seeds' mean). charge and fuel_left are sums too, so read them per agent.
   vehicle_energy ledger{};

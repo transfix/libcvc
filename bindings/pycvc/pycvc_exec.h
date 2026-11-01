@@ -28,8 +28,18 @@ namespace pycvc {
 
 class Exec {
 public:
-  // Build a DSL environment + scheduler over `app`'s state root.
-  explicit Exec(const std::shared_ptr<cvc::app> &app);
+  // Build a DSL environment + scheduler over `app`'s state root. Python takes keywords:
+  // Exec(app, policy=None, idle_timeout=60.0).
+  //
+  // `policy` is the scheduler's scheduling policy, fixed for its life (docs/STATE_EXEC_LOCKS.md
+  // 7.3): None reads the app tree's state_exec.policy (round_robin when it is unset; an unknown
+  // value is logged and round_robin used, as app::exec_scheduler() does); otherwise a
+  // pycvc.scheduling_policy member or its name ("round_robin", "priority", "priority_rr").
+  // `idle_timeout` is how long, in seconds, run() waits while its program is parked with nothing
+  // pending before it kills it. Anything else, or a negative or NaN idle_timeout, raises
+  // ValueError (std::invalid_argument).
+  explicit Exec(const std::shared_ptr<cvc::app> &app, PyObject *policy = nullptr,
+                double idle_timeout = 60.0);
   ~Exec();
 
   // Register a Python callable as a DSL function named `name`. DSL programs run
@@ -96,8 +106,27 @@ public:
   //
   // NOT thread-safe: one Exec is driven by ONE thread. Do not call run() (or
   // register*) concurrently on the same Exec; use a separate Exec per thread
-  // (each owns its own scheduler, so they do not interfere).
+  // (each owns its own scheduler, so they do not interfere). A second run() of the
+  // same Exec, from any thread, raises RuntimeError until the first has returned.
+  // set_priority and get_priority are the exceptions: any thread may call them.
   std::string run(const std::string &src);
+
+  // A process's priorities (docs/STATE_EXEC_LOCKS.md 7.4). set_priority(pid, p)
+  // changes its base priority, unchecked, as a host does, and returns whether the
+  // pid was found; get_priority(pid) returns {"base", "effective", "floor",
+  // "policy"} (policy a pycvc.scheduling_policy) or None for a pid this Exec's
+  // scheduler doesn't have (a reaped one included). Under round_robin a change is
+  // stored and reported and changes no pick.
+  //
+  // THREADS: any thread may call them. While run() pumps on another thread they
+  // are answered by run() between its steps, the caller waiting with the GIL
+  // released; with no run() active, or from inside run() (a registered function,
+  // coroutine or callback), they act at once. A call waiting as run() ends is
+  // answered by run() before it returns. From a thread running ANOTHER Exec's
+  // run() they raise RuntimeError("Exec.run is active on another thread"), so two
+  // Execs whose functions call each other can't wait for each other.
+  bool set_priority(int pid, int priority);
+  PyObject *get_priority(int pid);
 
   // The parser settings this Exec's scheduler parses programs with when the app tree's
   // state_exec.defaults.parser.* keys don't say otherwise; the same calls as

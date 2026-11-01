@@ -121,6 +121,15 @@ value_t builtin_assert(std::span<const value_t> args); // (assert cond [message 
                                                        // AssertionError when cond is false
 /// @}
 
+/// @name Hashing and secure randomness
+/// @{
+value_t builtin_sha256(std::span<const value_t> args);     // (sha256 x): 32 bytes
+value_t builtin_sha256_hex(std::span<const value_t> args); // (sha256-hex x): 64 lowercase hex
+/// (random-token nbytes ["base64url"|"hex"]): nbytes (1..kRandomTokenMaxBytes) from the OS CSPRNG
+value_t builtin_random_token(std::span<const value_t> args);
+inline constexpr int64_t kRandomTokenMaxBytes = 256;
+/// @}
+
 /// @name I/O
 /// @{
 value_t builtin_print(std::span<const value_t> args);

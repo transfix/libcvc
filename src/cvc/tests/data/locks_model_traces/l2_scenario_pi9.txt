@@ -1,0 +1,28 @@
+# scenarios.py scenario_pi9, its homes merged into one home of prio true
+config inheritance=1 coalesce=0 one_home=1 mutations=-
+attach_home 1 -> 0 |
+try_acquire 0 1 o 10 X a.b - - -> granted 1 1 0 |
+query - 0 o -> held a.b/X/1/1/1/0 waiting |
+try_acquire 0 2 o 10 X a - - -> busy |
+block 0 2 o 10 X a - - -> 1 queued | relevel(0,1)
+read_inh 0 1 -> 10 |
+query - 0 o -> held a.b/X/1/1/1/0 waiting a/X/2 |
+try_acquire 0 3 o -10 S a.c - - -> busy |
+block 0 3 o -10 S a.c - - -> 2 queued | relevel(0,1) relevel(0,2)
+read_inh 0 1 -> -10 |
+read_inh 0 2 -> -10 |
+query - 0 o -> held a.b/X/1/1/1/0 waiting a/X/2 a.c/S/3 |
+release 0 1 1 -> ok | wake(0,2,1) relevel(0,1)
+resume 0 2 1 -> granted 2 2 0 |
+read_inh 0 1 -> INF |
+query - 0 o -> held a/X/2/1/2/0 waiting a.c/S/3 |
+start_body 0 2 2 -> ok |
+query - 0 o -> held a/X/2/1/2/0 waiting a.c/S/3 |
+release 0 2 2 -> ok | wake(0,3,2) relevel(0,2)
+resume 0 3 2 -> granted 3 2 0 |
+read_inh 0 2 -> INF |
+query - 0 o -> held a.c/S/3/1/-/0 waiting |
+start_body 0 3 3 -> ok |
+query - 0 o -> held a.c/S/3/1/-/0 waiting |
+release 0 3 3 -> ok |
+query - 0 o -> held waiting |

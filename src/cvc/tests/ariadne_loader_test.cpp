@@ -4,6 +4,7 @@
 // Parsing tests are skipped when the build has no yaml-cpp (the loader is then a
 // stub); the version/schema surface is tested unconditionally.
 
+#include <algorithm>
 #include <boost/asio.hpp> // a localhost server for the http handler test
 #include <cctype>
 #include <chrono>
@@ -465,6 +466,41 @@ windows:
   EXPECT_TRUE(fraction->overlay.empty());
 }
 
+// plot: a read-only line graph of the comma-separated numbers at bind, its range fitted to them
+// unless lo < hi, with an optional caption (overlay) and height. It precedes overlay: in the short
+// form, so a plot with a caption is a plot.
+TEST(AriadneLoader, PlotWidget) {
+  const std::string doc = R"(
+meta: { name: T, min_libcvc: 3.4.0 }
+windows:
+  - window: W
+    children:
+      - plot: Reserve
+        bind: self.avatar.history.reserve
+        lo: 0
+        hi: 30
+        height: 80
+        overlay: self.avatar.history.window
+      - plot: Power
+        bind: self.avatar.history.power
+)";
+  LoadResult r = load_string(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(count(r.root, Kind::Plot), 2);
+  const Widget *reserve = find(r.root, Kind::Plot, "Reserve");
+  ASSERT_NE(reserve, nullptr);
+  EXPECT_EQ(reserve->bind, "self.avatar.history.reserve");
+  EXPECT_EQ(reserve->lo, 0.0);
+  EXPECT_EQ(reserve->hi, 30.0);
+  EXPECT_EQ(reserve->plot_height, 80.0);
+  EXPECT_EQ(reserve->overlay, "self.avatar.history.window");
+  const Widget *power = find(r.root, Kind::Plot, "Power");
+  ASSERT_NE(power, nullptr);
+  EXPECT_GE(power->lo, power->hi) << "no range given: fitted to the numbers";
+  EXPECT_EQ(power->plot_height, 60.0);
+  EXPECT_TRUE(is_builtin_widget_type("plot")) << "so requires: and (has? \"plot\") see it";
+}
+
 TEST(AriadneLoader, InputTextAndInputInt) {
   SKIP_WITHOUT_YAML();
   const char *doc = R"(
@@ -565,6 +601,49 @@ windows:
   EXPECT_EQ(find(r.root, Kind::SliderFloat)->on, "speed.changed");
   ASSERT_NE(find(r.root, Kind::Color), nullptr);
   EXPECT_EQ(find(r.root, Kind::Color)->on, "tint.changed");
+}
+
+// spinner: an activity indicator; its key is the label, bind: a state-bound or computed label,
+// glyphs: braille (the default) or ascii; a bare `- spinner` has no label.
+TEST(AriadneLoader, Spinner) {
+  SKIP_WITHOUT_YAML();
+  const char *doc = R"(
+meta: { name: T, min_libcvc: "3.4.0" }
+windows:
+  - window: W
+    children:
+      - spinner: Loading
+        visible_when: (= (state-get "busy") "1")
+      - spinner: Plain
+        glyphs: ascii
+      - spinner: Named
+        bind: (state-get "job.name")
+      - spinner
+      - spinner: Odd
+        glyphs: emoji
+)";
+  LoadResult r = load_string(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(count(r.root, Kind::Spinner), 5);
+  const Widget *loading = find(r.root, Kind::Spinner, "Loading");
+  ASSERT_NE(loading, nullptr);
+  EXPECT_FALSE(loading->ascii_glyphs);
+  EXPECT_EQ(loading->visible_when, "(= (state-get \"busy\") \"1\")");
+  const Widget *plain = find(r.root, Kind::Spinner, "Plain");
+  ASSERT_NE(plain, nullptr);
+  EXPECT_TRUE(plain->ascii_glyphs);
+  const Widget *named = find(r.root, Kind::Spinner, "Named");
+  ASSERT_NE(named, nullptr);
+  EXPECT_EQ(named->bind, "(state-get \"job.name\")");
+  const Widget *win = find(r.root, Kind::Window);
+  ASSERT_NE(win, nullptr);
+  ASSERT_EQ(win->children.size(), 5u);
+  EXPECT_EQ(win->children[3].kind, Kind::Spinner) << "a bare spinner";
+  EXPECT_EQ(win->children[3].label, "");
+  ASSERT_EQ(r.warnings.size(), 1u);
+  EXPECT_NE(r.warnings[0].find("spinner 'Odd': glyphs 'emoji' is not braille or ascii"),
+            std::string::npos)
+      << r.warnings[0];
 }
 
 // radio: and radio_row: take a combo's keys (options, values, def, on) and build Kind::Radio,
@@ -4953,6 +5032,51 @@ TEST(AriadneComponents, TransferFunctionDemoLoadsClean) {
   ASSERT_EQ(r.scene.nodes.size(), 3u);
   EXPECT_TRUE(r.scene.nodes[0].has_volren);
   EXPECT_TRUE(r.scene.nodes[1].has_volslice);
+}
+
+// Every shipped example says what it needs from its host (requires:, roadmap §7.6), so a runner
+// that lacks it refuses the load with one clear error instead of failing in the middle of a run.
+// A document with a scene: needs a scene renderer, which arigl has and ari does not.
+TEST(AriadneComponents, ShippedExamplesDeclareWhatTheyNeed) {
+  SKIP_WITHOUT_YAML();
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::path(__FILE__).parent_path().parent_path().parent_path().parent_path() /
+                       "examples" / "ariadne";
+  if (!fs::exists(dir))
+    GTEST_SKIP() << "examples not found at " << dir.string();
+  if (!register_source_components())
+    GTEST_SKIP() << "component sources not found";
+  SchemeGuard g{"cvc"};
+  int seen = 0;
+  for (const fs::directory_entry &e : fs::recursive_directory_iterator(dir)) {
+    if (!e.is_regular_file() || e.path().extension() != ".ari")
+      continue;
+    const std::string name = e.path().lexically_relative(dir).generic_string();
+    LoadResult r = load_file(e.path().string());
+    ASSERT_TRUE(r.ok) << name << ": " << r.error;
+    ++seen;
+    EXPECT_FALSE(r.requirements.empty()) << name << " has no requires: block";
+    if (r.scene.any()) {
+      const auto it = std::find_if(r.requirements.begin(), r.requirements.end(),
+                                   [](const HostRequirement &q) { return q.name == "gl.scene"; });
+      ASSERT_NE(it, r.requirements.end()) << name << " has a scene: but does not require gl.scene";
+      EXPECT_FALSE(it->optional) << name << " lists gl.scene as optional";
+    }
+    // A shader: block runs only where the scene runs the document's GLSL; the example says
+    // whether it can do without (optional) or not.
+    const std::function<bool(const std::vector<SceneNode> &)> shaded =
+        [&](const std::vector<SceneNode> &nodes) {
+          return std::any_of(nodes.begin(), nodes.end(), [&](const SceneNode &n) {
+            return n.shader.present || shaded(n.children);
+          });
+        };
+    if (shaded(r.scene.nodes))
+      EXPECT_TRUE(
+          std::any_of(r.requirements.begin(), r.requirements.end(),
+                      [](const HostRequirement &q) { return q.name == "gl.scene.shaders"; }))
+          << name << " has a shader: block but does not list gl.scene.shaders";
+  }
+  EXPECT_GE(seen, 18); // the examples under examples/ariadne
 }
 
 // ── §6.6 functions: ────────────────────────────────────────────────────────────────────────────

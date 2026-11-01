@@ -64,8 +64,11 @@ std::string encode(const cvc::image &img, const std::string &ext) {
       ("ariadne_media_test_" +
        std::to_string(std::hash<std::thread::id>()(std::this_thread::get_id())) + "." + ext);
   cvc::write_image(img, path.string(), 95);
-  std::ifstream in(path, std::ios::binary);
-  std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  std::string bytes;
+  { // closed before the remove: Windows won't delete a file that is open
+    std::ifstream in(path, std::ios::binary);
+    bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+  }
   std::filesystem::remove(path);
   return bytes;
 }

@@ -21,7 +21,8 @@
 #include <cvc/ariadne/input.h>  // §4.6 InputEvent — Runtime::post_input feeds on_key/on_pointer
 #include <cvc/ariadne/loader.h> // is_builtin_widget_type (has?)
 #include <cvc/ariadne/media.h>  // §5.11 pictures by URI
-#include <cvc/ariadne/net_host.h> // net_host_status (the net capability tokens)
+#include <cvc/ariadne/net_host.h>  // net_host_status (the net capability tokens)
+#include <cvc/ariadne/oidc_host.h> // pump_oidc
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_scheduler.h> // §4.7 app-wide action scheduler (exec_scheduler)
@@ -37,6 +38,7 @@
 #include <functional>
 #include <locale> // §11.4 geometry (de)serialize: pin std::locale::classic() so digit grouping
                   // in a global locale can't corrupt the comma-joined "x,y,w,h" round-trip
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -363,6 +365,29 @@ double action_lock_timeout(cvc::state &root) {
 double action_max_time(cvc::state &root) {
   constexpr double kDefault = 0.1;
   cvc::state *node = root.findDescendant("ariadne.limits.action_max_time");
+  if (!node)
+    return kDefault;
+  const std::string v = node->value();
+  char *end = nullptr;
+  const double seconds = v.empty() ? -1.0 : std::strtod(v.c_str(), &end);
+  return end == v.c_str() + v.size() && std::isfinite(seconds) && seconds >= 0.0 ? seconds
+                                                                                 : kDefault;
+}
+
+// §13.8 a resident's per-step time cap: the tree setting ariadne.limits.resident_max_step_time
+// (seconds; 0 = none), read as each resident starts. The cap keeps one runaway step from hanging
+// the host's drain. It is a se::time_budget, so time the OS deschedules the thread for counts
+// only for its first half; but single-threaded wasm has no thread CPU clock (thread_cpu_seconds
+// is the steady clock there), so on a loaded machine a step that checks often is charged for its
+// waits too, up to a sixteenth of the half per check, and the default there is higher (cypkg's
+// browser test, single-threaded, load 10-33: 1 run of 9 lost a module tick at 0.05 s, none at 2).
+double resident_max_step_time(cvc::state &root) {
+#ifdef __EMSCRIPTEN__
+  constexpr double kDefault = 1.0;
+#else
+  constexpr double kDefault = 0.05;
+#endif
+  cvc::state *node = root.findDescendant("ariadne.limits.resident_max_step_time");
   if (!node)
     return kDefault;
   const std::string v = node->value();
@@ -876,6 +901,7 @@ struct Runtime::Impl {
   // probe env built exactly like an action's, then cached; the cache is rebuilt when a provider is
   // registered (the registry's generation moves) or refresh_program_names() drops it.
   bool scene_capable = false;
+  bool scene_shaders = false;
   mutable std::mutex names_mutex;
   mutable bool names_valid = false;
   mutable std::uint64_t names_generation = 0;
@@ -893,10 +919,16 @@ struct Runtime::Impl {
     if (backend)
       f.caps = backend->capabilities();
     f.scene = scene_capable;
+    f.scene_shaders = scene_capable && scene_shaders;
     const NetHostStatus net = net_host_status();
     f.net = net.enabled;
     f.net_auth = net.auth;
     f.net_auth_persist = net.persist;
+    f.oidc = net.oidc;
+    f.oidc_loopback = net.oidc && net.oidc_flows.loopback;
+    f.oidc_device = net.oidc && net.oidc_flows.device;
+    f.oidc_redirect = net.oidc && net.oidc_flows.redirect;
+    f.browser = net.enabled && net.browser;
     return f;
   }
   bool has(const std::string &name) const {
@@ -1060,9 +1092,31 @@ struct Runtime::Impl {
   std::string key_script_;     // §4.6 document-level on_key body (keyboard events, via post_input)
   std::string pointer_script_; // §4.6 document-level on_pointer body (mouse events, via post_input)
   std::string signal_script_;  // document-level on_signal body (signals, via post_signal)
-  std::shared_ptr<ActionContext> tick_resident_, key_resident_, pointer_resident_, signal_resident_;
-  int tick_resident_pid_ = -1, key_resident_pid_ = -1, pointer_resident_pid_ = -1,
-      signal_resident_pid_ = -1;
+  // A resident's process and context, and how it has been restarted. A resident that is killed
+  // (its per-step cap, a syntax error read inside it) or fails (an exception it didn't catch) is
+  // reported once per reason, then restarted on a later drain: at once the first time, then after
+  // 1, 2, 4 ... up to kRestartMaxDelay drains while it keeps stopping within kQuickStop drains of
+  // starting. After kMaxQuickStops such stops in a row it is given up, with a warning, until its
+  // program is set again.
+  struct Resident {
+    std::shared_ptr<ActionContext> ctx;
+    int pid = -1;
+    std::uint64_t started = 0;  // the drain it last started on
+    int quick_stops = 0;        // stops soon after starting, in a row
+    std::uint64_t retry_at = 0; // not restarted before this drain
+    bool given_up = false;
+  };
+  static constexpr std::uint64_t kQuickStop = 100;
+  static constexpr int kMaxQuickStops = 8;
+  static constexpr std::uint64_t kRestartMaxDelay = 64;
+  std::uint64_t drains_ = 0; // drain() calls so far: the restart clock
+  Resident tick_resident_, key_resident_, pointer_resident_, signal_resident_;
+  // Stop a resident now (a new program, a dropped mount) and forget its restart history.
+  void stop_resident(Resident &r);
+  // A resident that was killed or failed: report it, reap it, and schedule its restart (or give
+  // it up). A no-op for one that is running or parked.
+  void retire_if_stopped(cvc::state_exec::async_scheduler &sched, Resident &r,
+                         const std::string &lane, const std::string &channel);
   std::string tick_channel() const { return owner_ + "#tick"; }
   std::string key_channel() const { return owner_ + "#key"; }
   std::string pointer_channel() const { return owner_ + "#pointer"; }
@@ -1072,8 +1126,12 @@ struct Runtime::Impl {
   // (while t (let ((event (msg-recv "<channel>"))) <body>)): msg-recv parks the process between
   // deliveries and binds each delivered value as `event`, so an on_key/on_pointer body reads
   // (get-attr event "key") etc. (on:tick's body simply ignores `event`).
-  void ensure_resident(const std::string &channel, const std::string &body,
-                       std::shared_ptr<ActionContext> &ctx_slot, int &pid_slot);
+  // Not before its restart drain, nor once it has been given up.
+  void ensure_resident(const std::string &channel, const std::string &body, Resident &r);
+  // The same, chrooted to `chroot` with `functions` (a FunctionScope prelude) defined first: a
+  // mount's tick resident. The three-argument form is the document's (prefix, doc_functions).
+  void ensure_resident(const std::string &channel, const std::string &body, Resident &r,
+                       const std::string &chroot, const std::string &functions);
   void ensure_tick_resident();   // submit the tick resident (woken by the coalesced post_tick)
   void post_tick();              // wake the tick resident once this drain
   void ensure_input_residents(); // submit the key + pointer residents (woken by post_input)
@@ -1098,6 +1156,11 @@ struct Runtime::Impl {
   // forget_layout(): applied at the next render. Each window's and grid's first frame after it
   // (by its tree.<id>.geometry / .tracks / .columns path) seeds only what the document authored.
   bool forget_layout_pending = false;
+  // The frame clock (Runtime::frame_clock): seconds since clock_epoch, read at each render(), or
+  // the host's pinned time (set_frame_clock).
+  std::chrono::steady_clock::time_point clock_epoch = std::chrono::steady_clock::now();
+  std::optional<double> pinned_clock;
+  double frame_t = 0.0;
   bool windows_forgotten = false;
   std::set<std::string> laid_out;
 
@@ -1139,6 +1202,32 @@ struct Runtime::Impl {
   // Run a mounted fragment's init: once at its sub-prefix (chrooted there by run_init); any error
   // is surfaced as a one-time runtime warning rather than thrown into the frame.
   void run_mount_init(const std::string &sub_prefix, const std::string &script);
+
+  // §12 load: a mounted fragment's on_tick: — one resident per mount sub-prefix, chrooted there
+  // with the mount's functions, on its own channel, woken by post_tick like the document's. Started
+  // as the mount is first drawn (after its init:), so a module in a closed tab starts when the tab
+  // opens; it then runs whether or not the mount is drawn, until a reconcile drops it
+  // (drop_mount_ticks) or the Runtime goes (kill_owner: it carries owner_). A repeated mount's
+  // instance also stops when its repeat's count drops below it (sweep_repeated_ticks).
+  struct MountTick {
+    std::string body;      // the on_tick: body
+    std::string functions; // and the mount's prelude, defined before its loop
+    std::string channel;
+    Resident resident;
+    const Widget *repeat = nullptr; // the outermost repeat: template it was emitted under, if any
+    int instance = -1;              // and that repeat's instance index
+  };
+  std::map<std::string, MountTick> mount_ticks_; // by sub-prefix
+  // The outermost repeat: template being emitted and the instance index (a template in `root`,
+  // whose address holds until the next reconcile; an inner one is copied per frame).
+  const Widget *emitting_repeat_ = nullptr;
+  int emitting_instance_ = -1;
+  void ensure_mount_tick(const std::string &sub_prefix, const Widget &w);
+  // On a reconcile: stop every mount tick the new tree does not have at the same sub-prefix with
+  // the same program (a repeated mount's restart at their next frame).
+  void drop_mount_ticks();
+  // A repeat of `tmpl` made `count` instances this frame: stop the ticks of the ones past it.
+  void sweep_repeated_ticks(const Widget *tmpl, int count);
 
   // Resolve a widget bind path to an absolute cvc::state path. Delegates to the
   // shared rule (bind.h) so widget binds and scene `visible:` binds collide on the
@@ -1350,7 +1439,8 @@ void Runtime::Impl::wire_holes(const std::string &parent_prefix, const std::stri
 
 void Runtime::Impl::run_mount_init(const std::string &sub_prefix, const std::string &script) {
   std::vector<std::string> errs;
-  run_init(app, sub_prefix, script, &errs);
+  // (has? ...) as in the document's own init: and every action: a module's host is the same host.
+  run_init(app, sub_prefix, script, &errs, [this](const std::string &n) { return has(n); });
   for (const std::string &e : errs)
     warn_once("ari: mount init at '" + sub_prefix + "': " + e);
 }
@@ -1372,6 +1462,8 @@ void Runtime::Impl::emit_container(const Widget &w) {
     // in ran_inits, NOT cleared on reconcile — a one-shot seed, never re-run per frame/rebuild.
     if (!w.init_script.empty() && ran_inits.insert(sub_prefix).second)
       run_mount_init(sub_prefix, (w.functions ? w.functions->prelude : "") + w.init_script);
+    if (!w.tick_script.empty())
+      ensure_mount_tick(sub_prefix, w); // after its init:, so the first tick sees the seed
     scope_stack.push_back(sub_prefix);
   }
   // §6.6 the root's and a mount's functions are the ones programs started in its subtree get.
@@ -1475,6 +1567,24 @@ void Runtime::Impl::each_instance(const Widget &w,
     return;
   }
   const int n = eval_count(w.repeat); // capped, fail-safe 0
+  // §12 the outermost repeat's instance, for the mount ticks started under it (a nested repeat is
+  // a per-frame copy, so its instances are tracked by the outer one's).
+  const bool outermost = emitting_repeat_ == nullptr;
+  if (outermost && !mount_ticks_.empty())
+    sweep_repeated_ticks(&w, n);
+  struct RepeatGuard {
+    const Widget *&tmpl;
+    int &instance;
+    bool active;
+    ~RepeatGuard() {
+      if (active) {
+        tmpl = nullptr;
+        instance = -1;
+      }
+    }
+  } repeat_guard{emitting_repeat_, emitting_instance_, outermost};
+  if (outermost)
+    emitting_repeat_ = &w;
   // Per-FRAME instance budget: each repeat is capped individually, but many repeats could
   // still compound into an unbounded per-frame walk (substitute_index deep-copy + emit),
   // which the eval-time budget doesn't see. Bound the total across the whole frame.
@@ -1488,6 +1598,8 @@ void Runtime::Impl::each_instance(const Widget &w,
     ++frame_instances;
     Widget inst = substitute_index(w, i);
     inst.repeat.clear(); // the instance renders once
+    if (outermost)
+      emitting_instance_ = i;
     f(inst, i);
   }
 }
@@ -1698,6 +1810,16 @@ void Runtime::Impl::emit_node(const Widget &w) {
     b.separator();
     break;
 
+  case Kind::Spinner: {
+    // The host's frame clock turns it, whatever the document's programs are doing; disabled, it
+    // stands still. A bind (a state path, or a computed expression) is its label.
+    const std::string text = w.bind.empty()    ? w.label
+                             : is_expr(w.bind) ? eval_text(w.bind)
+                                               : read_string(app, resolve(w.bind));
+    b.spinner(text.c_str(), dis ? 0.0 : frame_t, w.ascii_glyphs);
+    break;
+  }
+
   case Kind::Progress: {
     // Read-only: the number (a state path or a computed expression) placed in [lo, hi].
     const std::string v = is_expr(w.bind) ? eval_text(w.bind) : read_string(app, resolve(w.bind));
@@ -1709,6 +1831,27 @@ void Runtime::Impl::emit_node(const Widget &w) {
     if (!w.overlay.empty())
       overlay = is_expr(w.overlay) ? eval_text(w.overlay) : read_string(app, resolve(w.overlay));
     b.progress_bar(label, static_cast<float>(f < 0.0 ? 0.0 : (f > 1.0 ? 1.0 : f)), overlay);
+    break;
+  }
+
+  case Kind::Plot: {
+    // Read-only: the comma-separated numbers (a state path or a computed expression), oldest
+    // first; anything that is not a number is skipped.
+    const std::string v = is_expr(w.bind) ? eval_text(w.bind) : read_string(app, resolve(w.bind));
+    std::vector<float> values;
+    for (std::size_t i = 0; i <= v.size();) {
+      const std::size_t j = std::min(v.find(',', i), v.size());
+      const std::string item = v.substr(i, j - i);
+      char *end = nullptr;
+      const double x = std::strtod(item.c_str(), &end);
+      if (end != item.c_str() && std::isfinite(x))
+        values.push_back(static_cast<float>(x));
+      i = j + 1;
+    }
+    std::string overlay;
+    if (!w.overlay.empty())
+      overlay = is_expr(w.overlay) ? eval_text(w.overlay) : read_string(app, resolve(w.overlay));
+    b.plot_lines(label, values, w.lo, w.hi, overlay, w.plot_height);
     break;
   }
 
@@ -2075,7 +2218,12 @@ void Runtime::Impl::render() {
     }
     planted_holes.clear();
     wired_mounts.clear();
+    drop_mount_ticks(); // §12 the old tree's module ticks the new one does not keep
   }
+  frame_t =
+      pinned_clock
+          ? *pinned_clock
+          : std::chrono::duration<double>(std::chrono::steady_clock::now() - clock_epoch).count();
   if (forget_layout_pending) { // a new document: its windows are laid out afresh
     forget_layout_pending = false;
     laid_out.clear();
@@ -2391,38 +2539,73 @@ void Runtime::Impl::pump_and_sweep_actions(cvc::state_exec::async_scheduler &sch
   // Spawned children, and what they and the residents fork: a finished one's process would keep
   // its context (an environment with every intrinsic) for the app's life.
   std::erase_if(spawned_children_, [&](int pid) { return reap_ended(pid, "spawned program"); });
-  // A resident never finishes on its own, so one that was killed (a syntax error in its body,
-  // read inside the process; its per-step cap) or failed (an exception it didn't catch) is
-  // reported, once per reason.
-  const auto report_killed_resident = [&](int pid, const char *lane, const std::string &channel) {
-    if (pid < 0)
-      return;
-    auto info = sched.get_process_info(pid);
-    if (info && info->status == se::process_status::killed)
-      warn_once(std::string("ari: ") + lane + " resident [" + channel +
-                "] stopped: " + sched.get_exit_error(pid).value_or("killed"));
-    else if (info && info->status == se::process_status::failed)
-      warn_once(std::string("ari: ") + lane + " resident [" + channel +
-                "] failed: " + failure_report(info->exit_exception, info->exit_error));
-  };
-  report_killed_resident(tick_resident_pid_, "on_tick:", tick_channel());
-  report_killed_resident(key_resident_pid_, "on_key:", key_channel());
-  report_killed_resident(pointer_resident_pid_, "on_pointer:", pointer_channel());
-  report_killed_resident(signal_resident_pid_, "on_signal:", signal_channel());
+  // A resident never finishes on its own, so one that was killed or failed is reported and
+  // restarted (retire_if_stopped).
+  retire_if_stopped(sched, tick_resident_, "on_tick:", tick_channel());
+  retire_if_stopped(sched, key_resident_, "on_key:", key_channel());
+  retire_if_stopped(sched, pointer_resident_, "on_pointer:", pointer_channel());
+  retire_if_stopped(sched, signal_resident_, "on_signal:", signal_channel());
+  for (auto &[sub_prefix, t] : mount_ticks_)
+    retire_if_stopped(sched, t.resident, "on_tick: of mount '" + sub_prefix + "'", t.channel);
+}
+
+void Runtime::Impl::retire_if_stopped(cvc::state_exec::async_scheduler &sched, Resident &r,
+                                      const std::string &lane, const std::string &channel) {
+  namespace se = cvc::state_exec;
+  if (r.pid < 0)
+    return;
+  const auto info = sched.get_process_info(r.pid);
+  if (!info || !se::is_finished(info->status))
+    return;
+  if (info->status == se::process_status::killed)
+    warn_once("ari: " + lane + " resident [" + channel +
+              "] stopped: " + sched.get_exit_error(r.pid).value_or("killed"));
+  else if (info->status == se::process_status::failed)
+    warn_once("ari: " + lane + " resident [" + channel +
+              "] failed: " + failure_report(info->exit_exception, info->exit_error));
+  sched.reap(r.pid);
+  r.pid = -1;
+  r.ctx.reset(); // a child it forked keeps the context alive itself (process::keep_alive)
+  r.quick_stops = drains_ - r.started < kQuickStop ? r.quick_stops + 1 : 1;
+  if (r.quick_stops > kMaxQuickStops) {
+    r.given_up = true;
+    warn_once("ari: " + lane + " resident [" + channel + "] stopped " +
+              std::to_string(kMaxQuickStops) +
+              " times in a row soon after starting: not restarted "
+              "again");
+    return;
+  }
+  // At once after its first stop, then 1, 2, 4 ... drains later.
+  const std::uint64_t delay =
+      r.quick_stops <= 1 ? 0 : std::min(kRestartMaxDelay, std::uint64_t{1} << (r.quick_stops - 2));
+  r.retry_at = drains_ + delay;
+}
+
+void Runtime::Impl::stop_resident(Resident &r) {
+  if (r.pid >= 0)
+    app.exec_scheduler().kill(r.pid);
+  r = Resident{};
 }
 
 void Runtime::Impl::ensure_resident(const std::string &channel, const std::string &body,
-                                    std::shared_ptr<ActionContext> &ctx_slot, int &pid_slot) {
-  if (body.empty() || pid_slot >= 0)
-    return; // nothing to run, or already submitted (residents submit ONCE, not per frame)
+                                    Resident &r) {
+  ensure_resident(channel, body, r, prefix, doc_functions);
+}
+
+void Runtime::Impl::ensure_resident(const std::string &channel, const std::string &body,
+                                    Resident &r, const std::string &chroot,
+                                    const std::string &functions) {
+  if (body.empty() || r.pid >= 0 || r.given_up || drains_ < r.retry_at)
+    return; // nothing to run, already running (residents submit ONCE), or not restarted yet
   namespace se = cvc::state_exec;
   try {
     auto &sched = app.exec_scheduler();
-    // Resident writes confined to the document prefix. A resident has no with-lock default
+    // Resident writes confined to its document or mount. A resident has no with-lock default
     // (docs/STATE_EXEC_LOCKS.md 14.2 Q1): a request with no :timeout waits as long as it takes.
-    std::shared_ptr<ActionContext> ac = make_action_context(prefix, std::nullopt);
-    // A child it spawns runs in the document's scope, as the resident does; one it forks shares
-    // the resident's context, which lives until the Runtime does. Both are reaped once they end.
+    std::shared_ptr<ActionContext> ac = make_action_context(chroot, std::nullopt);
+    // A child it spawns runs in the resident's scope (its document's or its mount's); one it forks
+    // shares the resident's context, which lives until the Runtime does. Both are reaped once they
+    // end.
     ac->ictx.spawn_context = [this](const se::intrinsics_context &parent) {
       return spawn_child(parent);
     };
@@ -2432,7 +2615,7 @@ void Runtime::Impl::ensure_resident(const std::string &channel, const std::strin
     // on:tick simply ignores `event`. The body runs once per delivery, then loops back to park. No
     // total step cap (a resident loops forever; the per-frame pump budget bounds each activation,
     // and the msg-recv guarantees a park every iteration).
-    const std::string wrapped = doc_functions + // §6.6 defined once, before the loop
+    const std::string wrapped = functions + // §6.6 defined once, before the loop
                                 "(while t (let ((event (msg-recv \"" + channel + "\"))) " + body +
                                 "))";
     se::execute_options opts;
@@ -2444,33 +2627,101 @@ void Runtime::Impl::ensure_resident(const std::string &channel, const std::strin
     // deadline (fresh each step) so a single step that loops in-place (a runaway native builtin)
     // can't HANG the host's per-frame drain — it is aborted + the resident killed. A healthy
     // on:tick/on_key body is far under this, and a per-node DSL loop is bounded by the pump's own
-    // per-drain cap; this only bites an in-STEP loop the pump can't interrupt.
-    constexpr double kResidentStepSeconds = 0.05;
-    opts.max_step_time = kResidentStepSeconds;
-    pid_slot = sched.execute(wrapped, opts);
-    ctx_slot = std::move(ac);
+    // per-drain cap; this only bites an in-STEP loop the pump can't interrupt. One it kills is
+    // restarted (retire_if_stopped).
+    opts.max_step_time = resident_max_step_time(cvc::state::instance(app));
+    r.pid = sched.execute(wrapped, opts);
+    r.ctx = std::move(ac);
+    r.started = drains_;
   } catch (const std::exception &e) {
+    r.given_up = true; // its text is what failed: starting it again would fail the same way
     warn_once("ari: resident failed to start [" + channel + "]: " + e.what());
   }
 }
 
 void Runtime::Impl::ensure_tick_resident() {
-  ensure_resident(tick_channel(), tick_script_, tick_resident_, tick_resident_pid_);
+  ensure_resident(tick_channel(), tick_script_, tick_resident_);
+  // A mount's starts as the mount is first drawn (ensure_mount_tick); this restarts a stopped one,
+  // drawn or not.
+  for (auto &[sub_prefix, t] : mount_ticks_)
+    ensure_resident(t.channel, t.body, t.resident, sub_prefix, t.functions);
 }
 
 void Runtime::Impl::post_tick() {
-  if (tick_resident_pid_ < 0)
+  if (tick_resident_.pid < 0 && mount_ticks_.empty())
     return; // no tick resident registered
-  // Wake the tick resident for one activation this frame. Post only when nothing is queued on the
+  // Wake each tick resident for one activation this frame. Post only when nothing is queued on its
   // channel, so a resident that can't keep up doesn't accrue a backlog of ticks (coalesce).
   auto &sched = app.exec_scheduler();
-  if (sched.pending_message_count(tick_channel()) == 0)
-    sched.post_message(tick_channel(), cvc::state_exec::value_t(std::string("tick")));
+  const auto wake = [&](const std::string &channel) {
+    if (sched.pending_message_count(channel) == 0)
+      sched.post_message(channel, cvc::state_exec::value_t(std::string("tick")));
+  };
+  if (tick_resident_.pid >= 0)
+    wake(tick_channel());
+  for (const auto &[sub_prefix, t] : mount_ticks_)
+    if (t.resident.pid >= 0)
+      wake(t.channel);
+}
+
+void Runtime::Impl::ensure_mount_tick(const std::string &sub_prefix, const Widget &w) {
+  MountTick &t = mount_ticks_[sub_prefix];
+  if (!t.channel.empty())
+    return; // started once per mount, not per frame (ensure_tick_resident restarts it)
+  t.body = w.tick_script;
+  t.functions = w.functions ? w.functions->prelude : std::string();
+  t.channel = owner_ + "#tick@" + sub_prefix;
+  t.repeat = emitting_repeat_;
+  t.instance = emitting_instance_;
+  ensure_resident(t.channel, t.body, t.resident, sub_prefix, t.functions);
+}
+
+void Runtime::Impl::drop_mount_ticks() {
+  if (mount_ticks_.empty())
+    return;
+  // The new tree's mounts outside any repeat: (a repeated one is made per frame), by sub-prefix,
+  // composed as emit_container composes them.
+  std::map<std::string, std::string> kept;
+  const std::function<void(const Widget &, const std::string &)> walk =
+      [&](const Widget &w, const std::string &scope) {
+        if (!w.repeat.empty())
+          return;
+        std::string inner = scope;
+        if (!w.scope.empty()) {
+          inner = resolve_bind(scope, w.scope);
+          if (!w.tick_script.empty())
+            kept[inner] = (w.functions ? w.functions->prelude : std::string()) + w.tick_script;
+        }
+        for (const Widget &c : w.children)
+          walk(c, inner);
+      };
+  walk(root, prefix);
+  for (auto it = mount_ticks_.begin(); it != mount_ticks_.end();) {
+    const auto k = kept.find(it->first);
+    if (it->second.repeat || k == kept.end() ||
+        k->second != it->second.functions + it->second.body) {
+      stop_resident(it->second.resident);
+      it = mount_ticks_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
+void Runtime::Impl::sweep_repeated_ticks(const Widget *tmpl, int count) {
+  for (auto it = mount_ticks_.begin(); it != mount_ticks_.end();) {
+    if (it->second.repeat == tmpl && it->second.instance >= count) {
+      stop_resident(it->second.resident);
+      it = mount_ticks_.erase(it);
+    } else {
+      ++it;
+    }
+  }
 }
 
 void Runtime::Impl::ensure_input_residents() {
-  ensure_resident(key_channel(), key_script_, key_resident_, key_resident_pid_);
-  ensure_resident(pointer_channel(), pointer_script_, pointer_resident_, pointer_resident_pid_);
+  ensure_resident(key_channel(), key_script_, key_resident_);
+  ensure_resident(pointer_channel(), pointer_script_, pointer_resident_);
 }
 
 void Runtime::Impl::deliver_input(const InputEvent &ev) {
@@ -2478,7 +2729,7 @@ void Runtime::Impl::deliver_input(const InputEvent &ev) {
   // Keyboard events feed the on_key resident, mouse events the on_pointer resident. Drop the event
   // if that handler is not registered (no point queueing events nothing will drain).
   const bool keyboard = ev.is_keyboard();
-  if ((keyboard ? key_resident_pid_ : pointer_resident_pid_) < 0)
+  if ((keyboard ? key_resident_ : pointer_resident_).pid < 0)
     return;
   // A dict with EVERY field always populated: get-attr throws on a missing key, so an on_* body can
   // read any field of any event kind (unused fields are 0/""). These names are the .ari event
@@ -2548,6 +2799,7 @@ std::vector<std::string> Runtime::program_names() const {
 }
 
 void Runtime::set_scene_capable(bool on) { m_->scene_capable = on; }
+void Runtime::set_scene_shaders(bool on) { m_->scene_shaders = on; }
 
 HostFacts Runtime::host_facts() const { return m_->facts(); }
 
@@ -2582,38 +2834,22 @@ void Runtime::on(std::string event, std::function<void()> handler) {
 
 void Runtime::set_tick_program(std::string script) {
   // Replacing the program kills any running resident so the new body starts fresh next drain.
-  if (m_->tick_resident_pid_ >= 0) {
-    m_->app.exec_scheduler().kill(m_->tick_resident_pid_);
-    m_->tick_resident_.reset();
-    m_->tick_resident_pid_ = -1;
-  }
+  m_->stop_resident(m_->tick_resident_);
   m_->tick_script_ = std::move(script);
 }
 
 void Runtime::set_key_program(std::string script) {
-  if (m_->key_resident_pid_ >= 0) {
-    m_->app.exec_scheduler().kill(m_->key_resident_pid_);
-    m_->key_resident_.reset();
-    m_->key_resident_pid_ = -1;
-  }
+  m_->stop_resident(m_->key_resident_);
   m_->key_script_ = std::move(script);
 }
 
 void Runtime::set_pointer_program(std::string script) {
-  if (m_->pointer_resident_pid_ >= 0) {
-    m_->app.exec_scheduler().kill(m_->pointer_resident_pid_);
-    m_->pointer_resident_.reset();
-    m_->pointer_resident_pid_ = -1;
-  }
+  m_->stop_resident(m_->pointer_resident_);
   m_->pointer_script_ = std::move(script);
 }
 
 void Runtime::set_signal_program(std::string script) {
-  if (m_->signal_resident_pid_ >= 0) {
-    m_->app.exec_scheduler().kill(m_->signal_resident_pid_);
-    m_->signal_resident_.reset();
-    m_->signal_resident_pid_ = -1;
-  }
+  m_->stop_resident(m_->signal_resident_);
   m_->signal_script_ = std::move(script);
 }
 
@@ -2622,9 +2858,11 @@ bool Runtime::has_signal_program() const { return !m_->signal_script_.empty(); }
 bool Runtime::post_signal(const std::string &signal, const std::string &source) {
   if (m_->signal_script_.empty())
     return false; // no handler: the host applies the signal's default action
-  m_->ensure_resident(m_->signal_channel(), m_->signal_script_, m_->signal_resident_,
-                      m_->signal_resident_pid_);
-  if (m_->signal_resident_pid_ < 0)
+  // A stopped handler waiting out its restart delay is started now: the signal is for it.
+  if (m_->signal_resident_.pid < 0)
+    m_->signal_resident_.retry_at = 0;
+  m_->ensure_resident(m_->signal_channel(), m_->signal_script_, m_->signal_resident_);
+  if (m_->signal_resident_.pid < 0)
     return false; // it failed to start (already warned): fall back to the default too
   namespace se = cvc::state_exec;
   std::vector<std::pair<std::string, se::value_t>> f;
@@ -2720,6 +2958,9 @@ void Runtime::Impl::run_key_bindings() {
 
 void Runtime::render() { m_->render(); }
 
+void Runtime::set_frame_clock(std::optional<double> seconds) { m_->pinned_clock = seconds; }
+double Runtime::frame_clock() const { return m_->frame_t; }
+
 void Runtime::run_program(std::string script, std::function<void(const std::string &)> done) {
   Impl::QueuedAction a;
   a.event = std::move(script);
@@ -2730,6 +2971,10 @@ void Runtime::run_program(std::string script, std::function<void(const std::stri
 }
 
 void Runtime::drain() {
+  ++m_->drains_; // the residents' restart clock
+  // A sign-in in progress (oidc_host.h) takes its step first: a reply, a browser's redirect, a
+  // device poll that is due. It writes its status to the state tree on this thread.
+  pump_oidc();
   // Run the queued action events on the host thread, then clear. Never called
   // from inside render() (the deferred intent-buffer discipline, §7.2/§4.7). The keys pressed since
   // the last drain queue theirs first.
