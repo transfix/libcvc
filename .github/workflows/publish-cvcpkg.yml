@@ -1126,8 +1126,10 @@ jobs:
           bash cvcpkg/recipes/arigl/build.sh
           test -x stage-arigl/bin/arigl
           # cvcpkg's Mesa (llvmpipe) and Xvfb, beside the vtk bundle's libglvnd so libGLX.so.0 finds
-          # libGLX_mesa.so.0 through its $ORIGIN RUNPATH, as in ci.yml's package-linux.
-          cvcpkg install xvfb mesa --prefix "$PY" --config release --link shared
+          # libGLX_mesa.so.0 through its $ORIGIN RUNPATH, as in ci.yml's package-linux. Without the
+          # job's LD_LIBRARY_PATH (the family-deps step put $PY/lib on it): cvcpkg's own Python
+          # would load $PY/lib's libz and then overwrite it in place, and die of SIGBUS.
+          env -u LD_LIBRARY_PATH cvcpkg install xvfb mesa --prefix "$PY" --config release --link shared
           "$PY/bin/Xvfb" :99 -screen 0 1280x1024x24 >xvfb.log 2>&1 &
           xvfb=$!
           trap 'kill "$xvfb" 2>/dev/null || true' EXIT
