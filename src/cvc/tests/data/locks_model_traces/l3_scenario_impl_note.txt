@@ -1,0 +1,39 @@
+# scenarios.py scenario_impl_note, its homes as written
+config inheritance=1 coalesce=0 one_home=0 mutations=-
+attach_home 1 -> 0 |
+attach_home 1 -> 1 |
+try_acquire 0 1 o 0 X a - - -> granted 1 1 0 |
+query - 0 o -> held a/X/1/1/1/0 waiting |
+query - 1 o -> held a/X/-/1/1/0 waiting |
+try_acquire 1 2 o 10 X a - - -> busy |
+block 1 2 o 10 X a - - -> 1 queued | relevel(0,1)
+read_inh 0 1 -> 10 |
+blocking_sinks 1 2 0:1,1:1 -> 0:1:1 |
+query - 0 o -> held a/X/1/1/1/0 waiting a/X/- |
+query - 1 o -> held a/X/-/1/1/0 waiting a/X/2 |
+try_acquire 0 3 o -5 X a - - -> busy |
+block 0 3 o -5 X a - - -> 2 queued | relevel(0,1) relevel(1,2)
+read_inh 0 1 -> -5 |
+read_inh 1 2 -> -5 |
+blocking_sinks 0 3 0:2,1:1 -> 0:1:2 |
+blocking_sinks 1 2 0:2,1:1 -> 0:1:2 |
+query - 0 o -> held a/X/1/1/1/0 waiting a/X/- a/X/3 |
+query - 1 o -> held a/X/-/1/1/0 waiting a/X/2 a/X/- |
+cancel 0 3 2 -> cancelled | relevel(0,1) relevel(1,2)
+read_inh 0 1 -> 10 |
+resume 0 3 2 -> timeout |
+read_inh 1 2 -> INF |
+blocking_sinks 1 2 0:2,1:1 -> 0:1:2 |
+query - 0 o -> held a/X/1/1/1/0 waiting a/X/- |
+query - 1 o -> held a/X/-/1/1/0 waiting a/X/2 |
+release 0 1 1 -> ok | wake(1,2,1) relevel(0,1)
+read_inh 0 1 -> INF |
+resume 1 2 1 -> granted 2 2 0 |
+query - 0 o -> held a/X/-/1/2/0 waiting |
+query - 1 o -> held a/X/2/1/2/0 waiting |
+start_body 1 2 2 -> ok |
+query - 0 o -> held a/X/-/1/2/0 waiting |
+query - 1 o -> held a/X/2/1/2/0 waiting |
+release 1 2 2 -> ok |
+query - 0 o -> held waiting |
+query - 1 o -> held waiting |
