@@ -1074,9 +1074,10 @@ def test_lt07_progress_keeps_waiter_alive():
 
 def test_lt08_idle_limit():
     # LT-8: the idle rule is per home. B (idle_timeout 0.5) waits behind A's holder.
+    idle = 0.5
     app = pycvc.make_app()
     a = pycvc.Exec(app)
-    b = pycvc.Exec(app, idle_timeout=0.5)
+    b = pycvc.Exec(app, idle_timeout=idle)
 
     # (1) A's run() has returned and nothing pumps A: B is killed at the limit, naming the key.
     _spawn_holder(a, "lt08.k1", "lt08.never")
@@ -1097,7 +1098,8 @@ def test_lt08_idle_limit():
     assert ob.get("value") == "b", ob
 
     # (3) A pumped while its holder stays parked on msg-recv, a sibling (A's program) stepping
-    # every 0.05 s for 2 s: B alive while A steps, then killed at the limit.
+    # every 0.05 s for 2 s: B alive while A steps, then killed at the limit, which runs from A's
+    # last progress: no earlier than idle_timeout after A's last step began.
     _spawn_holder(a, "lt08.k3", "lt08.never")
     stepped = {}
     a.register_fn("stepped", lambda: stepped.setdefault("t", time.monotonic()) > 0)
@@ -1106,9 +1108,10 @@ def test_lt08_idle_limit():
     a.run("(begin (for i (range 40) (sleep 0.05)) (stepped))")
     _join(tb)
     e = ob.get("error")
-    print(f"  killed {ob['t'] - stepped['t']:.2f} s after A's last step: {e}")
+    gap = ob["t"] - stepped["t"]
+    print(f"  killed {gap:.2f} s after A's last step (idle_timeout {idle} s): {e}")
     assert isinstance(e, RuntimeError) and "waiting for lock lt08.k3)" in str(e), ob
-    assert ob["t"] >= stepped["t"]
+    assert idle <= gap < WAIT
 
 
 def test_lt08b_same_exec_holder_parked():

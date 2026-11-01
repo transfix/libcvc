@@ -457,22 +457,25 @@ std::optional<std::string> lock_waited_for(const process_info &info) {
   return info.waiting_on->substr(tag.size());
 }
 
-// run()'s idle rule for a lock wait (docs/STATE_EXEC_LOCKS.md 9.2): `pid`'s wait counts as pending
-// while a process it ultimately waits for (blocking_sinks, protocol 4.13) is on another home whose
-// last progress lies within `idle_timeout` of `now`. Each sink comes with its home's progress,
-// loaded under the manager's mutex, so no other home is reached here. A sink on this home counts
-// only through run()'s own test, never because this run() pumps it (LT-8b).
-bool lock_wait_progresses(const lock_home &home, int pid, double idle_timeout,
-                          std::chrono::steady_clock::time_point now) {
+// run()'s idle rule for a lock wait (docs/STATE_EXEC_LOCKS.md 9.2): of the processes `pid`'s wait
+// ultimately waits for (blocking_sinks, protocol 4.13) that are on another home, the latest of
+// their homes' progress within `idle_timeout` of `now`; nullopt when there is none. Each sink
+// comes with its home's progress, loaded under the manager's mutex, so no other home is reached
+// here. A sink on this home counts only through run()'s own test, never because this run() pumps
+// it (LT-8b).
+std::optional<std::chrono::steady_clock::time_point>
+progress_waited_for(const lock_home &home, int pid, double idle_timeout,
+                    std::chrono::steady_clock::time_point now) {
   using clock = std::chrono::steady_clock;
+  std::optional<clock::time_point> latest;
   for (const auto &[sink, ticks] : home.blocking_sinks(pid)) {
     if (sink.home == home.id())
       continue;
     const clock::time_point progress{clock::duration(ticks)};
     if (std::chrono::duration<double>(now - progress).count() <= idle_timeout)
-      return true;
+      latest = std::max(latest.value_or(progress), progress);
   }
-  return false;
+  return latest;
 }
 
 // A lock-query answer as the DSL's (lock-query) builds it (lock_intrinsics.cpp), its keys shown
@@ -997,23 +1000,30 @@ std::string Exec::run(const std::string &src) {
       // time out (e.g. a msg-recv on a channel nobody sends to) — safe to abandon then, no worker
       // to outlive us. Work pending here is this home's progress too (docs/STATE_EXEC_LOCKS.md
       // 8.4), which a waiter on another Exec behind one of our processes reads. A lock wait is
-      // pending only while another home it waits for makes progress (9.2); it stores none, so two
-      // Execs whose waiters wait on each other's parked holders can't keep each other alive.
+      // pending only while another home it waits for makes progress (9.2), as of that progress:
+      // the idle window runs from it, so a wait behind a home that stopped is killed about
+      // idle_timeout after its last progress. It stores none, so two Execs whose waiters wait on
+      // each other's parked holders can't keep each other alive.
       const std::optional<std::string> lock_key = lock_waited_for(*info);
       if (host.in_flight() > 0 || !impl_->pending_coros.empty() || sched.has_runnable() ||
           had_runnable) {
         const clock::time_point now = clock::now();
         idle_deadline = cvc::state_exec::detail::time_after(now, idle_timeout);
         home.store_progress(now);
-      } else if (lock_key && lock_wait_progresses(home, pid, idle_timeout, clock::now())) {
-        idle_deadline = fresh_idle_deadline();
-      } else if (clock::now() > idle_deadline) {
-        sched.kill(pid);
-        error = "pycvc.Exec.run: parked with no pending work (pid " + std::to_string(pid);
-        if (lock_key)
-          *error += ", waiting for lock " + lock_home::show(*lock_key, impl->ictx.root_path);
-        *error += ")";
-        break;
+      } else {
+        const std::optional<clock::time_point> progress =
+            lock_key ? progress_waited_for(home, pid, idle_timeout, clock::now()) : std::nullopt;
+        if (progress)
+          idle_deadline =
+              std::max(idle_deadline, cvc::state_exec::detail::time_after(*progress, idle_timeout));
+        if (clock::now() > idle_deadline) {
+          sched.kill(pid);
+          error = "pycvc.Exec.run: parked with no pending work (pid " + std::to_string(pid);
+          if (lock_key)
+            *error += ", waiting for lock " + lock_home::show(*lock_key, impl->ictx.root_path);
+          *error += ")";
+          break;
+        }
       }
       // Idle-wait with the GIL released (so a worker can take it and deliver) until there is
       // work: a kernel's post or result, a sleeper's or timed wait's deadline, a call's timeout
