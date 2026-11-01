@@ -11,6 +11,9 @@ meta:
   name: Nav convoy (Ariadne)
   min_libcvc: 3.4.0
 
+requires:
+  - gl.scene                       # a scene renderer realizes the scene: block (arigl; not ari)
+
 import:
   - cvc://components/stage_lighting.ari
   - cvc://components/scene_controls.ari
