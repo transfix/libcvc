@@ -1,16 +1,31 @@
 /// @file state_exec_lock_table_test.cpp
-/// @brief Directed cases of the lock manager's table on one home, no scheduler (suite LockTable;
-///        locks plan L1.2). Compiled into state_exec_locks_model_test beside the model check.
+/// @brief Directed cases of the lock manager's table, no scheduler (suite LockTable; locks plan
+///        L1.2), and of its shared mode, several homes and ports (suites LockShared, LockHomes;
+///        L3). Compiled into state_exec_locks_model_test beside the model check.
 ///
-/// Each case drives detail::lock_table as a lock home would (protocol section 4), on a table built
-/// with options::self_check on, and calls check() after every operation. The case names follow
-/// the design's test list (docs/STATE_EXEC_LOCKS.md section 13) where a case is the manager-level
-/// shape of one of its tests.
+/// Each LockTable case drives detail::lock_table as a lock home would (protocol section 4), on a
+/// table built with options::self_check on, and calls check() after every operation. The case
+/// names follow the design's test list (docs/STATE_EXEC_LOCKS.md section 13) where a case is the
+/// manager-level shape of one of its tests. The LockHomes cases drive real lock homes over a
+/// minimal fake scheduler (lock_sched_ops); the scheduler-driven cross-thread cases (LT-*) are
+/// state_exec_locks_test's.
 
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cvc/state/state_exec/detail/lock_home.h>
 #include <cvc/state/state_exec/detail/lock_table.h>
+#include <cvc/state/state_exec/lock_manager.h>
+#include <cvc/state/state_exec/process.h>
+#include <cvc/state/state_exec/process_table.h>
+#include <deque>
+#include <functional>
 #include <gtest/gtest.h>
 #include <initializer_list>
+#include <memory>
+#include <random>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -1360,4 +1375,828 @@ TEST(LockTable, MutationImplNoteAfterOnly) {
   EXPECT_EQ(normal.posts(), (std::vector<std::string>{"relevel(1)", "relevel(2)"}));
   EXPECT_EQ(normal.inh(1), 10);
   EXPECT_EQ(normal.inh(2), detail::lock_inf);
+}
+
+// == L3: shared mode, several homes ===============================================================
+
+namespace {
+
+std::shared_ptr<lock_manager> make_manager(lock_threading mode) {
+  lock_manager::options o;
+  o.threading = mode;
+  o.self_check = true;
+  return std::make_shared<lock_manager>(o);
+}
+
+const char *mode_name(lock_threading m) {
+  return m == lock_threading::shared ? "shared" : "single";
+}
+
+/// A scheduler as its lock home sees it (lock_sched_ops), over a process table of its own: what
+/// the home-level cases need and no more.
+struct fake_ops : detail::lock_sched_ops {
+  detail::process_table procs;
+  std::vector<int> parks, readies;
+
+  bool park_lock(process &p) override {
+    parks.push_back(p.pid);
+    procs.set_status(p, process_status::waiting);
+    return true;
+  }
+  void ready_lock_waiter(process &p) override {
+    readies.push_back(p.pid);
+    procs.set_status(p, process_status::ready);
+  }
+  void relevel(process &p) override { procs.update(p); }
+  std::size_t lock_expired_count() const override { return procs.lock_expired_count(); }
+  void take_lock_expired(std::vector<process *> &out) override { procs.take_lock_expired(out); }
+  process *find_process(int pid) override { return procs.find(pid); }
+  void for_each_process(const std::function<void(process &)> &fn) override {
+    for (const auto &[pid, p] : procs.all())
+      fn(*p);
+  }
+};
+
+/// One scheduler's side of a home-level case: its processes and its home, which goes first, as
+/// a scheduler's does (protocol 5.7).
+struct sched_side {
+  fake_ops ops;
+  std::deque<std::string> written; // the request keys as written, alive as long as the side
+  std::unique_ptr<detail::lock_home> home;
+
+  explicit sched_side(std::shared_ptr<lock_manager> mgr, lock_attach attach = {},
+                      std::shared_ptr<detail::wakeup> wake = nullptr)
+      : home(std::make_unique<detail::lock_home>(
+            std::move(mgr), ops, scheduling_policy::round_robin, std::move(wake), attach)) {}
+  ~sched_side() { home.reset(); }
+  sched_side(const sched_side &) = delete;
+  sched_side &operator=(const sched_side &) = delete;
+
+  process &add(int pid) {
+    process_ptr p = make_process();
+    p->pid = pid;
+    p->status = process_status::ready;
+    return *ops.procs.insert(std::move(p));
+  }
+
+  /// A request as build_request makes one: each key found in the home's cache or passed absolute.
+  detail::home_request request(lock_mode m, keys_t keys) {
+    home->begin_request();
+    detail::home_request r;
+    r.mode = m;
+    for (std::string_view k : keys) {
+      const std::string &w = written.emplace_back(k);
+      detail::home_request::key hk;
+      hk.written = w;
+      hk.node = home->lookup(0, w);
+      if (!hk.node)
+        hk.absolute = w;
+      r.keys.push_back(std::move(hk));
+    }
+    detail::canonicalize(r);
+    return r;
+  }
+  /// P takes KEYS on the fast path (5.1): the hold, or nullopt when busy.
+  std::optional<std::uint64_t> take(process &p, lock_mode m, keys_t keys) {
+    detail::home_request r = request(m, keys);
+    const detail::enter_result e = home->try_enter(p, r, "");
+    if (e.what == detail::enter_result::kind::busy)
+      return std::nullopt;
+    return e.hold;
+  }
+  /// P (stepping) waits for KEYS (5.2): true when it is queued and parked.
+  bool wait(process &p, lock_mode m, keys_t keys) {
+    ops.procs.set_status(p, process_status::running);
+    detail::home_request r = request(m, keys);
+    return !home->wait(p, r, std::nullopt, "").has_value();
+  }
+  /// The hold P was granted last (a wake's collect appends it to the mirror).
+  static std::uint64_t last_hold(const process &p) {
+    return p.locks && !p.locks->holds.empty() ? p.locks->holds.back().id : 0;
+  }
+  void release(process &p, std::uint64_t hold) { home->release_frame(p, hold, false); }
+};
+
+/// The manager's check() and every given side's check_quiescent(), as failures.
+void check_all(const lock_manager &mgr, std::initializer_list<const sched_side *> sides) {
+  try {
+    mgr.check();
+    for (const sched_side *s : sides)
+      if (s)
+        s->home->check_quiescent();
+  } catch (const detail::lock_violation &v) {
+    ADD_FAILURE() << v.what();
+  }
+}
+
+/// Whether two canonical key lists overlap (protocol 1).
+bool keys_overlap(const std::vector<std::string> &a, const std::vector<std::string> &b) {
+  for (const std::string &x : a)
+    for (const std::string &y : b)
+      if (detail::key_prefix(x, y) || detail::key_prefix(y, x))
+        return true;
+  return false;
+}
+
+/// A table request over `keys`, which it views: they must outlive it.
+detail::lock_request request_of(lock_mode m, const std::vector<std::string> &keys) {
+  detail::lock_request r;
+  r.mode = m;
+  for (const std::string &k : keys)
+    r.keys.push_back(detail::key_ref{nullptr, k, false});
+  return r;
+}
+
+} // namespace
+
+// -- L3.1: shared mode, the attach rules, several homes -------------------------------------------
+
+TEST(LockShared, SharedModeConstructs) {
+  const std::shared_ptr<lock_manager> m = make_manager(lock_threading::shared);
+  EXPECT_EQ(m->threading(), lock_threading::shared);
+  EXPECT_TRUE(m->table().opts().shared);
+  EXPECT_FALSE(m->table().opts().one_home);
+  EXPECT_TRUE(m->table().empty());
+  m->check();
+  lock_manager single;
+  EXPECT_EQ(single.threading(), lock_threading::single);
+  EXPECT_FALSE(single.table().opts().shared);
+  EXPECT_FALSE(single.table().opts().one_home);
+}
+
+TEST(LockShared, CrossThreadAttachNeedsASharedManager) {
+  // 4.4's L3 rule (design 8.3): a home that may be pumped on another thread is refused by a
+  // single manager, naming the setting; a shared manager takes it. On the table, and through a
+  // home (the schedulers' set_lock_manager makes one).
+  for (const lock_threading mode : {lock_threading::single, lock_threading::shared}) {
+    SCOPED_TRACE(mode_name(mode));
+    const bool shared = mode == lock_threading::shared;
+    lock_table::options o;
+    o.self_check = true;
+    o.one_home = false;
+    o.shared = shared;
+    lock_table t(o);
+    detail::lock_notes n;
+    EXPECT_EQ(t.attach_home(false, nullptr, nullptr, n), 0u); // a same-thread home: accepted
+    if (shared) {
+      EXPECT_EQ(t.attach_home(false, nullptr, nullptr, n, lock_attach{true}), 1u);
+    } else {
+      try {
+        t.attach_home(false, nullptr, nullptr, n, lock_attach{true});
+        ADD_FAILURE() << "a cross-thread home attached to a single table";
+      } catch (const std::logic_error &e) {
+        EXPECT_NE(std::string(e.what()).find("state_exec.locks.threading"), std::string::npos)
+            << e.what();
+      }
+      EXPECT_NE(t.canonical().find("homes\nH0 prio=0\nrecs\n"), std::string::npos); // no H1
+    }
+    t.check();
+
+    const std::shared_ptr<lock_manager> mgr = make_manager(mode);
+    fake_ops ops;
+    if (shared) {
+      detail::lock_home h(mgr, ops, scheduling_policy::round_robin, nullptr, lock_attach{true});
+      EXPECT_EQ(h.id(), 0u);
+      check_all(*mgr, {});
+    } else {
+      try {
+        detail::lock_home h(mgr, ops, scheduling_policy::round_robin, nullptr, lock_attach{true});
+        ADD_FAILURE() << "a cross-thread home attached to a single manager";
+      } catch (const std::logic_error &e) {
+        EXPECT_NE(std::string(e.what()).find("state_exec.locks.threading"), std::string::npos)
+            << e.what();
+      }
+      EXPECT_NE(mgr->table().canonical().find("homes\nrecs\n"), std::string::npos); // none
+      detail::lock_home h(mgr, ops, scheduling_policy::round_robin); // same thread: accepted
+      EXPECT_EQ(h.id(), 0u);                                         // the refused home took no id
+    }
+    EXPECT_TRUE(mgr->table().empty());
+    mgr->check();
+  }
+}
+
+TEST(LockHomes, SeveralHomesAttachAndDetach) {
+  for (const lock_threading mode : {lock_threading::single, lock_threading::shared}) {
+    SCOPED_TRACE(mode_name(mode));
+    const std::shared_ptr<lock_manager> mgr = make_manager(mode);
+    auto a = std::make_unique<sched_side>(mgr);
+    auto b = std::make_unique<sched_side>(mgr);
+    auto c = std::make_unique<sched_side>(mgr);
+    EXPECT_EQ(a->home->id(), 0u);
+    EXPECT_EQ(b->home->id(), 1u);
+    EXPECT_EQ(c->home->id(), 2u);
+    process &pa = a->add(1);
+    process &pb = b->add(1); // pids repeat across homes: (1,1) is not (0,1)
+    process &pc = c->add(2);
+    const std::optional<std::uint64_t> ha = a->take(pa, X, {"k"});
+    ASSERT_TRUE(ha);
+    EXPECT_FALSE(b->take(pb, X, {"k"})); // A's hold blocks B's process
+    ASSERT_TRUE(b->wait(pb, X, {"k"}));
+    EXPECT_EQ(b->ops.parks, (std::vector<int>{1}));
+    const std::optional<std::uint64_t> hc = c->take(pc, S, {"j"});
+    ASSERT_TRUE(hc);
+    check_all(*mgr, {a.get(), b.get(), c.get()});
+    // A's release grants B's waiter on A's thread; the wake goes to B's port (4.14), and B
+    // applies it when it drains (5.9).
+    a->release(pa, *ha);
+    EXPECT_FALSE(a->home->port_pending());
+    EXPECT_TRUE(b->home->port_pending());
+    EXPECT_TRUE(b->ops.readies.empty());
+    b->home->drain_port();
+    EXPECT_FALSE(b->home->port_pending());
+    EXPECT_EQ(b->ops.readies, (std::vector<int>{1}));
+    const std::uint64_t hb = sched_side::last_hold(pb);
+    EXPECT_NE(hb, 0u);
+    EXPECT_EQ(mgr->stats().holds, 2u);
+    check_all(*mgr, {a.get(), b.get(), c.get()});
+    // B is destroyed holding k: its detach ends its process; the others keep theirs.
+    b.reset();
+    EXPECT_EQ(mgr->stats().holds, 1u);
+    check_all(*mgr, {a.get(), c.get()});
+    // k is free again for A.
+    const std::optional<std::uint64_t> ha2 = a->take(pa, X, {"k"});
+    ASSERT_TRUE(ha2);
+    a->release(pa, *ha2);
+    c->release(pc, *hc);
+    // A home attached later gets a new id; ids are never reused.
+    auto d = std::make_unique<sched_side>(mgr);
+    EXPECT_EQ(d->home->id(), 3u);
+    check_all(*mgr, {a.get(), c.get(), d.get()});
+    a.reset();
+    c.reset();
+    d.reset();
+    EXPECT_TRUE(mgr->table().empty());
+    EXPECT_EQ(mgr->stats().cache_refs, 0u);
+    EXPECT_EQ(mgr->stats().trie_nodes, 1u);
+    EXPECT_NE(mgr->table().canonical().find("homes\nrecs\n"), std::string::npos);
+    mgr->check();
+  }
+}
+
+TEST(LockShared, TableDrivenFromSeveralThreads) {
+  // One shared table, a home per thread, each thread driving its own pids: contended keys,
+  // nested requests that may close a cycle, waits resolved by other threads' releases, and
+  // timeouts. self_check runs check() inside every operation, under M.mu. As homes do, a thread
+  // hands each operation's wakes for another home to that home (here a flag, not a port), and a
+  // waiter reads its ticket when woken.
+  constexpr int kThreads = 4;
+  constexpr int kOps = 1500;
+  lock_table::options o;
+  o.self_check = true;
+  o.one_home = false;
+  o.shared = true;
+  lock_table t(o);
+  std::vector<detail::home_id> homes;
+  {
+    detail::lock_notes n;
+    for (int i = 0; i < kThreads; ++i)
+      homes.push_back(t.attach_home(false, nullptr, nullptr, n, lock_attach{true}));
+    EXPECT_TRUE(n.empty());
+  }
+  const std::vector<std::vector<std::string>> requests = {
+      {"a"}, {"a.b"},      {"a.c"},        {"b"},      {"b.x"},
+      {"c"}, {"a.b", "c"}, {"a.c", "b.x"}, {"b", "d"}, {"d"}};
+  std::atomic<int> started{0}, hot_queued{0};
+  std::atomic<bool> stop{false};
+  std::atomic<std::uint64_t> waited{0}, deadlocked{0}, timed_out{0};
+  std::vector<std::string> errors(kThreads);
+  std::vector<std::atomic<bool>> woken(kThreads); // by home id: a wake was handed to it
+
+  const auto driver = [&](int i) {
+    const detail::home_id h = homes[i];
+    std::mt19937 rng(0x5eed + i);
+    detail::lock_notes notes;
+    const auto fail = [&](const std::string &what) {
+      if (errors[i].empty())
+        errors[i] = what;
+      stop = true;
+    };
+    // 4.14 for this test: every note is a wake (no home applies priorities), handed to its home.
+    const auto deliver = [&] {
+      for (const detail::lock_note &n : notes)
+        woken[n.home].store(true);
+      notes.clear();
+    };
+    // Wait for ticket `tid` of `p` until it is granted or failed, reading it when woken, or
+    // cancel it after `patience` idle turns (a timeout: cancelled, or granted already and
+    // adopted). The outcome, collected.
+    const auto await = [&](detail::lock_pid p, std::uint64_t tid,
+                           int patience) -> detail::lock_outcome {
+      const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+      for (int idle = 0;; ++idle) {
+        if (idle == 0 || woken[h].exchange(false)) {
+          const auto v = t.ticket_of(tid);
+          if (!v) {
+            fail("ticket " + std::to_string(tid) + " vanished");
+            return {};
+          }
+          if (v->state != ticket_state::queued)
+            break;
+        }
+        if (idle == patience) {
+          t.cancel(p, tid, notes);
+          deliver();
+          ++timed_out;
+          break;
+        }
+        if (stop || std::chrono::steady_clock::now() > give_up) {
+          fail("a wait never ended");
+          return {};
+        }
+        std::this_thread::yield();
+      }
+      return t.resume(p, tid);
+    };
+    // Acquire for p as a home would: the fast path, else block and wait. The hold, or 0.
+    const auto acquire = [&](detail::lock_pid p, lock_mode m, const std::vector<std::string> &ks,
+                             int patience, bool hot = false) -> std::uint64_t {
+      detail::lock_request r = request_of(m, ks);
+      if (const auto g = t.try_acquire(p, {"o", 0}, r, {}))
+        return g->hold;
+      r = request_of(m, ks);
+      const detail::block_result b = t.block(p, {"o", 0}, r, {}, notes);
+      deliver();
+      if (b.state == ticket_state::queued) {
+        ++waited;
+        if (hot)
+          ++hot_queued;
+      }
+      const detail::lock_outcome out = await(p, b.tid, patience);
+      if (out.what == detail::lock_outcome::kind::deadlock)
+        ++deadlocked;
+      if (out.what != detail::lock_outcome::kind::granted)
+        return 0;
+      t.start_body(p, out.g.hold);
+      return out.g.hold;
+    };
+    const auto release = [&](detail::lock_pid p, std::uint64_t hold) {
+      t.release(p, hold, notes);
+      deliver();
+    };
+
+    ++started;
+    while (started < kThreads)
+      std::this_thread::yield();
+    try {
+      // A first round on one hot key: whoever is granted holds it until every other thread has
+      // queued behind it, so every run has real waits resolved by a release.
+      {
+        const detail::lock_pid p{h, 1};
+        const std::vector<std::string> hot{"hot"}; // the request's keys view these strings
+        detail::lock_request r = request_of(X, hot);
+        if (const auto g = t.try_acquire(p, {"o", 0}, r, {})) {
+          const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+          while (hot_queued < kThreads - 1 && !stop) {
+            if (std::chrono::steady_clock::now() > give_up)
+              fail("the hot key's waiters never queued");
+            std::this_thread::yield();
+          }
+          release(p, g->hold);
+        } else if (const std::uint64_t hold = acquire(p, X, hot, -1, true)) {
+          release(p, hold);
+        } else {
+          fail("a hot-key wait was not granted");
+        }
+      }
+      for (int op = 0; op < kOps && !stop; ++op) {
+        const detail::lock_pid p{h, 1 + op % 3};
+        const std::vector<std::string> &outer = requests[rng() % requests.size()];
+        const lock_mode mo = rng() % 3 == 0 ? S : X;
+        const int patience = rng() % 8 == 0 ? int(rng() % 64) : -1;
+        const std::uint64_t ho = acquire(p, mo, outer, patience);
+        if (ho && rng() % 2 == 0) {
+          // A nested request on keys apart from the outer ones: it may close a cycle with
+          // another thread's process (DeadlockError), or wait while holding.
+          std::vector<std::string> inner;
+          for (int tries = 0; tries < 8 && inner.empty(); ++tries) {
+            const std::vector<std::string> &c = requests[rng() % requests.size()];
+            if (!keys_overlap(c, outer))
+              inner = c;
+          }
+          if (!inner.empty())
+            if (const std::uint64_t hi = acquire(p, rng() % 3 == 0 ? S : X, inner, patience))
+              release(p, hi);
+        }
+        if (ho)
+          release(p, ho);
+        if (op % 97 == 0) {
+          t.check();
+          (void)t.query("", h, "o");
+          (void)t.stats();
+        }
+      }
+    } catch (const std::exception &e) {
+      fail(e.what());
+    }
+  };
+
+  std::vector<std::thread> threads;
+  for (int i = 0; i < kThreads; ++i)
+    threads.emplace_back(driver, i);
+  for (std::thread &th : threads)
+    th.join();
+  for (int i = 0; i < kThreads; ++i)
+    EXPECT_TRUE(errors[i].empty()) << "thread " << i << ": " << errors[i];
+  std::printf("LockShared: %llu waits, %llu deadlocks, %llu timeouts over %d threads\n",
+              (unsigned long long)waited.load(), (unsigned long long)deadlocked.load(),
+              (unsigned long long)timed_out.load(), kThreads);
+  EXPECT_GE(waited.load(), std::uint64_t(kThreads - 1)); // the hot round's, at least
+  EXPECT_TRUE(t.empty()) << t.canonical();
+  t.check();
+  detail::lock_notes n;
+  for (detail::home_id h : homes)
+    t.detach_home(h, n);
+  EXPECT_TRUE(n.empty());
+  EXPECT_EQ(t.stats().trie_nodes, 1u);
+  EXPECT_NE(t.canonical().find("homes\nrecs\n"), std::string::npos);
+  t.check();
+}
+
+// -- L3.2: the port, posts, and a home's destruction ----------------------------------------------
+
+namespace {
+
+/// Counts the notes deliver hands to another home's port (lock_test_hooks::cross_home_note), from
+/// any thread, while alive.
+std::atomic<std::uint64_t> g_cross_notes{0};
+void count_cross_note(const detail::lock_note &) {
+  g_cross_notes.fetch_add(1, std::memory_order_relaxed);
+}
+struct note_counter {
+  detail::lock_test_hooks hooks;
+  note_counter() {
+    g_cross_notes = 0;
+    hooks.cross_home_note = count_cross_note;
+    detail::set_lock_test_hooks(&hooks);
+  }
+  ~note_counter() { detail::set_lock_test_hooks(nullptr); }
+  note_counter(const note_counter &) = delete;
+  note_counter &operator=(const note_counter &) = delete;
+  std::uint64_t count() const { return g_cross_notes.load(); }
+};
+
+detail::lock_post wake_post(int pid, std::uint64_t tid) {
+  return detail::lock_post{detail::lock_post::kind::wake, pid, tid};
+}
+detail::lock_post relevel_post(int pid) {
+  return detail::lock_post{detail::lock_post::kind::relevel, pid, 0};
+}
+std::string text(const detail::lock_post &p) {
+  return p.what == detail::lock_post::kind::wake
+             ? "wake(" + std::to_string(p.pid) + "," + std::to_string(p.tid) + ")"
+             : "relevel(" + std::to_string(p.pid) + ")";
+}
+std::vector<std::string> texts(const std::vector<detail::lock_post> &v) {
+  std::vector<std::string> out;
+  for (const detail::lock_post &p : v)
+    out.push_back(text(p));
+  return out;
+}
+
+/// What one round of PostsRacingACloseNeverLand saw.
+struct race_result {
+  std::uint64_t attempted = 0, posts = 0, dropped = 0, drained = 0, discarded = 0;
+  bool landed_after_close = false;
+};
+
+/// Posters on `kPosters` threads, each through a home of its own, deliver notes for home B's
+/// process while B's thread drains some and then destroys B (protocol 5.7). Every post lands
+/// before the close or is dropped.
+race_result post_close_race(std::uint64_t round) {
+  constexpr int kPosters = 3;
+  race_result r;
+  const std::shared_ptr<lock_manager> mgr = make_manager(lock_threading::shared);
+  note_counter notes_seen;
+  auto b = std::make_unique<sched_side>(mgr, lock_attach{true}, std::make_shared<detail::wakeup>());
+  const std::shared_ptr<detail::lock_port> port = b->home->port();
+  detail::lock_notes one;
+  one.push_back(
+      detail::lock_note{b->home->id(), port, round % 2 ? wake_post(1, round) : relevel_post(1)});
+  std::vector<std::unique_ptr<sched_side>> posters;
+  for (int i = 0; i < kPosters; ++i)
+    posters.push_back(std::make_unique<sched_side>(mgr, lock_attach{true}));
+  std::atomic<int> ready{0};
+  std::vector<std::thread> threads;
+  for (int i = 0; i < kPosters; ++i)
+    threads.emplace_back([&, i] {
+      ++ready;
+      // Post until this thread has seen the port closed and posted a few times more, so every
+      // round has posts on both sides of the close; bounded in case the close never comes. A
+      // yield after each post keeps three posters from starving the closing thread.
+      const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+      int after = 0;
+      for (int k = 1; after < 8; ++k) {
+        posters[i]->home->deliver(one);
+        if (port->closed())
+          ++after;
+        if (k % 1024 == 0 && std::chrono::steady_clock::now() > give_up)
+          break;
+        std::this_thread::yield();
+      }
+    });
+  while (ready < kPosters)
+    std::this_thread::yield();
+  // B's thread: wait for a post (a bounded spin), drain what has landed so far, then go.
+  std::vector<detail::lock_post> got;
+  for (int spin = 0; spin < 100000 && !port->pending(); ++spin)
+    std::this_thread::yield();
+  port->drain(got);
+  r.drained = got.size();
+  b.reset();
+  for (std::thread &t : threads)
+    t.join();
+  port->drain(got); // nothing may have landed after the close
+  r.landed_after_close = !got.empty() || port->pending();
+  r.attempted = notes_seen.count();
+  const lock_stats s = mgr->stats();
+  r.posts = s.posts;
+  r.dropped = s.posts_dropped;
+  r.discarded = s.posts_discarded;
+  posters.clear();
+  EXPECT_TRUE(mgr->table().empty());
+  return r;
+}
+
+/// Runs post_close_race `rounds` times and checks each round's counts.
+void run_post_close_races(int rounds) {
+  std::uint64_t attempted = 0, dropped = 0, discarded = 0;
+  for (int round = 0; round < rounds; ++round) {
+    const race_result r = post_close_race(std::uint64_t(round));
+    attempted += r.attempted;
+    dropped += r.dropped;
+    discarded += r.discarded;
+    EXPECT_FALSE(r.landed_after_close) << "round " << round;
+    EXPECT_EQ(r.posts + r.dropped, r.attempted) << "round " << round;
+    EXPECT_EQ(r.posts, r.drained + r.discarded) << "round " << round;
+    EXPECT_GE(r.dropped, 1u) << "round " << round; // every poster posted after the close
+    if (::testing::Test::HasFailure())
+      break;
+  }
+  std::printf("LockHomes: %d rounds, %llu notes, %llu dropped at the close, %llu discarded\n",
+              rounds, (unsigned long long)attempted, (unsigned long long)dropped,
+              (unsigned long long)discarded);
+}
+
+} // namespace
+
+TEST(LockPort, PostCloseDrain) {
+  const auto wake = std::make_shared<detail::wakeup>();
+  detail::lock_port port(wake);
+  std::vector<detail::lock_post> out{relevel_post(99)}; // drain clears what it is given
+  EXPECT_FALSE(port.pending());
+  EXPECT_FALSE(port.closed());
+  port.drain(out);
+  EXPECT_TRUE(out.empty());
+  EXPECT_TRUE(port.post(wake_post(1, 10)));
+  EXPECT_TRUE(port.pending());
+  // The post notified the shared wakeup: a wait begun after it ends at once (a one-sided
+  // ceiling; the time printed).
+  const auto t0 = std::chrono::steady_clock::now();
+  EXPECT_TRUE(wake->wait_until(t0 + std::chrono::seconds(10)));
+  std::printf(
+      "LockPort: the notified wait took %.3f ms\n",
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+  EXPECT_TRUE(port.post(relevel_post(2)));
+  EXPECT_TRUE(port.post(wake_post(3, 11)));
+  port.drain(out); // FIFO
+  EXPECT_EQ(texts(out), (std::vector<std::string>{"wake(1,10)", "relevel(2)", "wake(3,11)"}));
+  EXPECT_FALSE(port.pending());
+  port.drain(out);
+  EXPECT_TRUE(out.empty());
+  EXPECT_TRUE(port.post(relevel_post(4)));
+  port.close();
+  EXPECT_TRUE(port.closed());
+  EXPECT_TRUE(port.pending()); // the close keeps what landed before it
+  EXPECT_FALSE(port.post(wake_post(5, 12)));
+  EXPECT_FALSE(port.post(relevel_post(6)));
+  port.drain(out);
+  EXPECT_EQ(texts(out), (std::vector<std::string>{"relevel(4)"})); // nothing after the close
+  EXPECT_FALSE(port.pending());
+  EXPECT_FALSE(port.post(relevel_post(7)));
+  EXPECT_FALSE(port.pending());
+  // A port with no wakeup takes posts all the same.
+  detail::lock_port bare(nullptr);
+  EXPECT_TRUE(bare.post(relevel_post(1)));
+  EXPECT_TRUE(bare.pending());
+}
+
+TEST(LockHomes, CrossHomeNoteLandsInItsPort) {
+  for (const lock_threading mode : {lock_threading::single, lock_threading::shared}) {
+    SCOPED_TRACE(mode_name(mode));
+    note_counter notes_seen;
+    const std::shared_ptr<lock_manager> mgr = make_manager(mode);
+    auto a = std::make_unique<sched_side>(mgr);
+    auto b = std::make_unique<sched_side>(mgr);
+    process &pa = a->add(1);
+    process &pb = b->add(7);
+    const std::optional<std::uint64_t> ha = a->take(pa, X, {"k"});
+    ASSERT_TRUE(ha);
+    ASSERT_TRUE(b->wait(pb, X, {"k"}));
+    // A's release grants B's waiter; its wake is a note for B, posted to B's port.
+    a->release(pa, *ha);
+    EXPECT_EQ(notes_seen.count(), 1u);
+    EXPECT_EQ(mgr->stats().posts, 1u);
+    EXPECT_EQ(mgr->stats().posts_dropped, 0u);
+    EXPECT_TRUE(b->home->port_pending());
+    // A note handed to deliver by hand goes the same way, behind the first.
+    detail::lock_notes hand;
+    hand.push_back(detail::lock_note{b->home->id(), b->home->port(), relevel_post(7)});
+    a->home->deliver(hand);
+    EXPECT_EQ(notes_seen.count(), 2u);
+    EXPECT_EQ(mgr->stats().posts, 2u);
+    // A note for this home is applied at once, never posted or counted.
+    detail::lock_notes own;
+    own.push_back(detail::lock_note{a->home->id(), a->home->port(), relevel_post(1)});
+    a->home->deliver(own);
+    EXPECT_EQ(notes_seen.count(), 2u);
+    EXPECT_FALSE(a->home->port_pending());
+    // B applies both in order: the wake readies its waiter, the relevel re-reads (no change).
+    b->home->drain_port();
+    EXPECT_EQ(b->ops.readies, (std::vector<int>{7}));
+    const std::uint64_t hb = sched_side::last_hold(pb);
+    ASSERT_NE(hb, 0u);
+    check_all(*mgr, {a.get(), b.get()});
+    // A note captured for a home that is then destroyed finds its port closed: dropped.
+    const std::shared_ptr<detail::lock_port> b_port = b->home->port();
+    const detail::home_id b_id = b->home->id();
+    b.reset();
+    EXPECT_TRUE(b_port->closed());
+    detail::lock_notes late;
+    late.push_back(detail::lock_note{b_id, b_port, wake_post(7, 1)});
+    a->home->deliver(late);
+    EXPECT_EQ(notes_seen.count(), 3u);
+    const lock_stats s = mgr->stats();
+    EXPECT_EQ(s.posts, 2u);
+    EXPECT_EQ(s.posts_dropped, 1u);
+    EXPECT_EQ(s.posts_discarded, 0u); // B drained both before it went
+    EXPECT_EQ(s.holds, 0u);           // B's detach released its grant
+    a.reset();
+    EXPECT_TRUE(mgr->table().empty());
+    mgr->check();
+  }
+}
+
+TEST(LockHomes, DestroyedHomeDiscardsItsPosts) {
+  for (const lock_threading mode : {lock_threading::single, lock_threading::shared}) {
+    SCOPED_TRACE(mode_name(mode));
+    const std::shared_ptr<lock_manager> mgr = make_manager(mode);
+    auto a = std::make_unique<sched_side>(mgr);
+    auto b = std::make_unique<sched_side>(mgr);
+    process &pa = a->add(1);
+    process &pb = b->add(2);
+    process &pb2 = b->add(3);
+    const std::optional<std::uint64_t> ha = a->take(pa, X, {"k"});
+    ASSERT_TRUE(ha);
+    ASSERT_TRUE(b->wait(pb, X, {"k"}));
+    const std::optional<std::uint64_t> hb2 = b->take(pb2, S, {"j"});
+    ASSERT_TRUE(hb2);
+    a->release(pa, *ha); // grants pb: a wake in B's port
+    detail::lock_notes hand;
+    hand.push_back(detail::lock_note{b->home->id(), b->home->port(), relevel_post(2)});
+    a->home->deliver(hand);
+    EXPECT_EQ(mgr->stats().posts, 2u);
+    EXPECT_EQ(mgr->stats().holds, 2u); // pb's grant, not yet collected, and pb2's S j
+    // B goes with both posts unapplied (5.7): closed, detached (pb's grant and pb2's hold
+    // released), its posts discarded and counted, its processes' lock fields cleared.
+    const std::shared_ptr<detail::lock_port> b_port = b->home->port();
+    b->home.reset();
+    EXPECT_TRUE(b_port->closed());
+    EXPECT_FALSE(b_port->pending());
+    const lock_stats s = mgr->stats();
+    EXPECT_EQ(s.posts_discarded, 2u);
+    EXPECT_EQ(s.posts_dropped, 0u);
+    EXPECT_EQ(s.holds, 0u);
+    EXPECT_TRUE(b->ops.readies.empty()); // the wake was never applied
+    for (const process *p : {&pb, &pb2}) {
+      EXPECT_FALSE(p->lock_waiting);
+      EXPECT_TRUE(!p->locks || (p->locks->holds.empty() && !p->locks->ticket));
+    }
+    // k is A's to take again.
+    const std::optional<std::uint64_t> ha2 = a->take(pa, X, {"k"});
+    ASSERT_TRUE(ha2);
+    a->release(pa, *ha2);
+    check_all(*mgr, {a.get()});
+    b.reset();
+    a.reset();
+    EXPECT_TRUE(mgr->table().empty());
+    mgr->check();
+  }
+}
+
+TEST(LockHomes, PostsRacingACloseNeverLand) {
+  // Protocol 2.3: post and close exclude each other. Over many rounds of posters on other
+  // threads racing a home's destruction, every note handed to the port either landed before the
+  // close (and was drained, or discarded at the close) or was dropped; none landed after.
+  run_post_close_races(200);
+}
+
+// -- L3.3: blocking_sinks (protocol 4.13) ---------------------------------------------------------
+
+namespace {
+
+using sinks_t = std::vector<std::pair<detail::lock_pid, std::int64_t>>;
+
+std::vector<int> sink_pids(const sinks_t &v) {
+  std::vector<int> out;
+  for (const auto &[p, progress] : v)
+    out.push_back(p.pid);
+  return out;
+}
+
+} // namespace
+
+TEST(LockTable, BlockingSinksFollowTheChain) {
+  world w;
+  w.acquire(3, X, {"c"});
+  w.acquire(2, X, {"b"});
+  w.wait(2, X, {"c"}); // 2 -> 3
+  w.wait(1, X, {"b"}); // 1 -> 2
+  // 1's one sink is 3, with 0 for its progress: this home was attached with no cell.
+  EXPECT_EQ(w.t.blocking_sinks(w.pid(1)), (sinks_t{{w.pid(3), 0}}));
+  EXPECT_EQ(sink_pids(w.t.blocking_sinks(w.pid(2))), (std::vector<int>{3}));
+  EXPECT_TRUE(w.t.blocking_sinks(w.pid(3)).empty()); // holds, waits for nothing
+  EXPECT_TRUE(w.t.blocking_sinks(w.pid(9)).empty()); // no record at all
+  // Through a waiter edge too: 4 waits behind 2's hold and 1's earlier ticket on b.
+  w.wait(4, X, {"b"});
+  EXPECT_EQ(sink_pids(w.t.blocking_sinks(w.pid(4))), (std::vector<int>{3}));
+  for (int p : {1, 2, 3, 4})
+    w.end(p, false);
+  EXPECT_TRUE(w.t.empty());
+}
+
+TEST(LockTable, BlockingSinksBothSharedHolders) {
+  world w;
+  w.acquire(1, S, {"k"});
+  w.acquire(2, S, {"k.x"});
+  w.acquire(5, S, {"other"});
+  w.wait(3, X, {"k"});
+  EXPECT_EQ(sink_pids(w.t.blocking_sinks(w.pid(3))), (std::vector<int>{1, 2}));
+  EXPECT_TRUE(w.t.blocking_sinks(w.pid(1)).empty());
+  for (int p : {1, 2, 3, 5})
+    w.end(p, false);
+  EXPECT_TRUE(w.t.empty());
+}
+
+TEST(LockTable, BlockingSinksCarryTheirHomesProgress) {
+  lock_table::options o;
+  o.self_check = true;
+  o.one_home = false;
+  lock_table t(o);
+  const auto cell0 = std::make_shared<std::atomic<std::int64_t>>(100);
+  const auto cell1 = std::make_shared<std::atomic<std::int64_t>>(200);
+  detail::lock_notes n;
+  const detail::home_id h0 = t.attach_home(false, nullptr, cell0, n);
+  const detail::home_id h1 = t.attach_home(false, nullptr, cell1, n);
+  const detail::home_id h2 = t.attach_home(false, nullptr, nullptr, n); // no cell
+  const auto take = [&](detail::lock_pid p, std::vector<std::string> ks) {
+    detail::lock_request r = request_of(X, ks);
+    EXPECT_TRUE(t.try_acquire(p, {"o", 0}, r, {}));
+  };
+  const auto queue = [&](detail::lock_pid p, std::vector<std::string> ks) {
+    detail::lock_request r = request_of(X, ks);
+    EXPECT_EQ(t.block(p, {"o", 0}, r, {}, n).state, ticket_state::queued);
+  };
+  take({h1, 5}, {"a"});
+  take({h2, 6}, {"b"});
+  take({h0, 2}, {"c"});
+  queue({h0, 1}, {"a", "b"});
+  EXPECT_EQ(t.blocking_sinks({h0, 1}), (sinks_t{{{h1, 5}, 200}, {{h2, 6}, 0}}));
+  cell1->store(250); // loaded at each call
+  EXPECT_EQ(t.blocking_sinks({h0, 1}), (sinks_t{{{h1, 5}, 250}, {{h2, 6}, 0}}));
+  // A sink on the waiter's own home carries its own home's cell.
+  queue({h1, 7}, {"c"});
+  EXPECT_EQ(t.blocking_sinks({h1, 7}), (sinks_t{{{h0, 2}, 100}}));
+  t.check();
+  for (detail::home_id h : {h0, h1, h2})
+    t.detach_home(h, n);
+  EXPECT_TRUE(t.empty());
+  t.check();
+}
+
+TEST(LockHomes, BlockingSinksReadTheHomesProgressCell) {
+  for (const lock_threading mode : {lock_threading::single, lock_threading::shared}) {
+    SCOPED_TRACE(mode_name(mode));
+    const std::shared_ptr<lock_manager> mgr = make_manager(mode);
+    auto a = std::make_unique<sched_side>(mgr);
+    auto b = std::make_unique<sched_side>(mgr);
+    process &pa = a->add(1);
+    process &pb = b->add(1);
+    const std::optional<std::uint64_t> ha = a->take(pa, X, {"k"});
+    ASSERT_TRUE(ha);
+    ASSERT_TRUE(b->wait(pb, X, {"k"}));
+    // The scheduler's per-step store (design 8.4) is what B's waiter sees for A's holder.
+    a->home->store_progress(detail::lock_clock::time_point(detail::lock_clock::duration(12345)));
+    EXPECT_EQ(b->home->blocking_sinks(pb.pid), (sinks_t{{{a->home->id(), 1}, 12345}}));
+    a->home->store_progress(detail::lock_clock::time_point(detail::lock_clock::duration(12346)));
+    EXPECT_EQ(b->home->blocking_sinks(pb.pid), (sinks_t{{{a->home->id(), 1}, 12346}}));
+    EXPECT_TRUE(a->home->blocking_sinks(pa.pid).empty());
+    a->release(pa, *ha);
+    EXPECT_TRUE(b->home->blocking_sinks(pb.pid).empty()); // granted: it waits for nothing
+    b->home->drain_port();
+    b->release(pb, sched_side::last_hold(pb));
+    check_all(*mgr, {a.get(), b.get()});
+    a.reset();
+    b.reset();
+    EXPECT_TRUE(mgr->table().empty());
+  }
 }
