@@ -14,6 +14,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib> // std::exit: AppLockManager.AutoIsSharedForAThreadedHost's child
 #include <cvc/ariadne/app_runtime.h> // AppRuntime: host menus, the scene between documents
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
@@ -7179,10 +7180,10 @@ TEST(Locks, LK31_ActionChildTimesOutOnResidentsLock) {
 }
 
 // LW-9, the L1b part (docs/STATE_EXEC_LOCKS.md 5.5): an init script's child never waits for a lock.
-// The init script holds k on its own scheduler (and private lock manager) while its child asks for
-// k with :timeout 30. The child inherited lock_wait_allowed false, so it raises TimeoutError at
-// once and writes r under the document's prefix, and the init succeeds. A child that waited would
-// take 30 s, against the 10 s ceiling (the init lane's 5 s cap would stop it first, with no r).
+// The init script holds k (on the app's lock manager, from L3) while its child asks for k with
+// :timeout 30. The child inherited lock_wait_allowed false, so it raises TimeoutError at once and
+// writes r under the document's prefix, and the init succeeds. A child that waited would take 30 s,
+// against the 10 s ceiling (the init lane's 5 s cap would stop it first, with no r).
 TEST(Locks, LW09_InitChildNeverWaits) {
   cvc::app app;
   cvc::state &root = cvc::state::instance(app);
@@ -7199,4 +7200,211 @@ TEST(Locks, LW09_InitChildNeverWaits) {
   EXPECT_EQ(root("doc.r").value(), "timeout");
   EXPECT_EQ(root.findDescendant("r"), nullptr);
   EXPECT_LT(took, 10.0);
+}
+
+// LW-9, the L3 part (docs/STATE_EXEC_LOCKS.md 5.5, 13.4): the init lane is on the app's lock
+// manager, so its requests meet a resident's hold. The tick resident holds k; an init script asks
+// for k with no :timeout, with :timeout 30 and with :if-available, and spawns a child that asks
+// with :timeout 30. Each raises TimeoutError at once (lock_wait_allowed false, which the child
+// copied), and :if-available takes :else. The host thread never waited, read from the manager: the
+// init queued no request (lock_stats::waits and timeouts unchanged), so no init-lane process was
+// ever lock_waiting. A request that waited would take 30 s against the 10 s ceiling (the init
+// lane's 5 s cap would stop it first, with no outcome written).
+TEST(Locks, LW09_InitLaneNeverWaits) {
+  cvc::app app;
+  Runtime rt(app, "ui.doc");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_tick_program(R"S((with-lock "k" (msg-recv "res.rel")))S");
+  ASSERT_TRUE(pump_until(rt, [&] { return held_keys(app) == strings{"ui.doc.k"}; }));
+  const se::lock_stats before = app.lock_manager()->stats();
+  std::vector<std::string> errs;
+  const auto t0 = std::chrono::steady_clock::now();
+  const bool ok = run_init(app, "ui.doc", R"S((begin
+      (try (begin (with-lock "k" 1) (state-set "plain" "granted"))
+        (catch (TimeoutError e) (state-set "plain" "timeout")))
+      (try (begin (with-lock "k" :timeout 30 1) (state-set "timed" "granted"))
+        (catch (TimeoutError e) (state-set "timed" "timeout")))
+      (state-set "avail" (with-lock "k" :if-available :else "else" "granted"))
+      (spawn "(try (begin (with-lock \"k\" :timeout 30 1) (state-set \"child\" \"granted\"))
+                (catch (TimeoutError e) (state-set \"child\" \"timeout\")))")
+      (sleep 0.05)))S",
+                           &errs);
+  const double took = seconds_since(t0);
+  const se::lock_stats after = app.lock_manager()->stats();
+  std::printf("LW-9: the init script and its child, against a resident's hold, took %.3f s (a "
+              "request that waited: 30 s)\n",
+              took);
+  EXPECT_TRUE(ok) << ::testing::PrintToString(errs);
+  EXPECT_EQ(node_value(app, "ui.doc.plain"), "timeout");
+  EXPECT_EQ(node_value(app, "ui.doc.timed"), "timeout");
+  EXPECT_EQ(node_value(app, "ui.doc.avail"), "else");
+  EXPECT_EQ(node_value(app, "ui.doc.child"), "timeout");
+  EXPECT_EQ(after.waits, before.waits);
+  EXPECT_EQ(after.timeouts, before.timeouts);
+  EXPECT_EQ(after.queued, 0u);
+  EXPECT_LT(took, 10.0);
+  // The resident still holds k, and the init lane's home, detached, left nothing behind.
+  EXPECT_EQ(held_keys(app), strings{"ui.doc.k"});
+  EXPECT_TRUE(lock_waits(app).empty());
+  EXPECT_NO_THROW(app.lock_manager()->check());
+  post_to(app, "ui.doc", "res.rel");
+}
+
+// --- the app lock manager's mode (docs/STATE_EXEC_LOCKS.md 8.3, 14.2 Q4) ------------------------
+//
+// app::lock_manager() fixes its mode at the first call, from state_exec.locks.threading (auto,
+// single, shared) and, for auto, state_exec.threads and whether a threaded host announced itself
+// (state_exec::detail::note_threaded_host()). That flag is process-wide and never cleared, so no
+// case in this process sets it: AutoIsSharedForAThreadedHost sets it in a child process. The
+// cases that make a shared manager need shared mode (phase L3.1).
+
+namespace {
+
+// A new app's lock manager mode, with the settings given (null: unset).
+se::lock_threading app_lock_threading(const char *threading, const char *threads = nullptr) {
+  cvc::app app;
+  if (threading)
+    cvc::state::instance(app)("state_exec.locks.threading").value(std::string(threading));
+  if (threads)
+    cvc::state::instance(app)("state_exec.threads").value(std::string(threads));
+  return app.lock_manager()->threading();
+}
+
+} // namespace
+
+// auto, unset or named, is single with no worker threads (state_exec.threads unset, 0, or not a
+// whole number) and no threaded host.
+TEST(AppLockManager, AutoIsSingleWithNoThreads) {
+  ASSERT_FALSE(se::detail::threaded_host_noted());
+  EXPECT_EQ(app_lock_threading(nullptr), se::lock_threading::single);
+  EXPECT_EQ(app_lock_threading("auto"), se::lock_threading::single);
+  EXPECT_EQ(app_lock_threading("auto", "0"), se::lock_threading::single);
+  EXPECT_EQ(app_lock_threading(nullptr, "-2"), se::lock_threading::single);
+  EXPECT_EQ(app_lock_threading(nullptr, "2x"), se::lock_threading::single);
+}
+
+// single is honored whatever state_exec.threads says.
+TEST(AppLockManager, SingleIsHonored) {
+  EXPECT_EQ(app_lock_threading("single"), se::lock_threading::single);
+  EXPECT_EQ(app_lock_threading("single", "4"), se::lock_threading::single);
+  EXPECT_EQ(app_lock_threading("single", "auto"), se::lock_threading::single);
+}
+
+// An unknown value is logged, and auto used (as an unknown state_exec.policy is), whether
+// lock_manager() or exec_scheduler() makes the manager.
+TEST(AppLockManager, UnknownValueIsLoggedAndAuto) {
+  ASSERT_FALSE(se::detail::threaded_host_noted());
+  for (const bool by_scheduler : {false, true}) {
+    cvc::app app;
+    const std::string log_key("locks_threading_log");
+    app.data(log_key, std::string());
+    app.properties("system.log_output", log_key);
+    cvc::state::instance(app)("state_exec.locks.threading").value(std::string("multi"));
+    if (by_scheduler)
+      app.exec_scheduler();
+    EXPECT_EQ(app.lock_manager()->threading(), se::lock_threading::single) << by_scheduler;
+#ifndef USING_LOG4CPLUS_DEFAULT
+    const std::string logged = app.data<std::string>(log_key);
+    const std::string line = "state_exec.locks.threading: unknown value 'multi'";
+    const std::size_t at = logged.find(line);
+    EXPECT_NE(at, std::string::npos) << logged;
+    if (at != std::string::npos) // once: the manager is made once
+      EXPECT_EQ(logged.find(line, at + 1), std::string::npos) << logged;
+#endif
+  }
+}
+
+// The mode is fixed at the first call: a later change to the settings changes nothing. Every call
+// returns the one manager, the one exec_scheduler() attaches its home to: a hold taken there is
+// the manager's.
+TEST(AppLockManager, ModeFixedAtFirstCall) {
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  root("state_exec.locks.threading").value(std::string("single"));
+  const std::shared_ptr<se::lock_manager> mgr = app.lock_manager();
+  root("state_exec.locks.threading").value(std::string("shared"));
+  root("state_exec.threads").value(std::string("4"));
+  EXPECT_EQ(app.lock_manager(), mgr);
+  EXPECT_EQ(mgr->threading(), se::lock_threading::single);
+  HostProgram holder(app, R"((with-lock "k" (msg-recv "rel")))");
+  se::async_scheduler &sched = app.exec_scheduler();
+  for (int i = 0; i < 1000 && mgr->stats().holds == 0; ++i) {
+    sched.drain_ingress();
+    sched.sync_step();
+  }
+  EXPECT_EQ(held_keys(app), strings{"k"});
+  EXPECT_EQ(mgr->stats().holds, 1u);
+}
+
+// shared is honored (phase L3.1). On a shared manager exec_scheduler() attaches cross_thread, and
+// Ariadne's init lane (this thread) attaches beside it: an init script meets a resident's hold, and
+// takes a free key.
+TEST(AppLockManager, SharedIsHonored) {
+  EXPECT_EQ(app_lock_threading("shared"), se::lock_threading::shared);
+  EXPECT_EQ(app_lock_threading("shared", "0"), se::lock_threading::shared);
+  cvc::app app;
+  cvc::state::instance(app)("state_exec.locks.threading").value(std::string("shared"));
+  ASSERT_EQ(app.lock_manager()->threading(), se::lock_threading::shared);
+  Runtime rt(app, "ui.doc");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_tick_program(R"S((with-lock "k" (msg-recv "res.rel")))S");
+  ASSERT_TRUE(pump_until(rt, [&] { return held_keys(app) == strings{"ui.doc.k"}; }));
+  std::vector<std::string> errs;
+  EXPECT_TRUE(run_init(app, "ui.doc",
+                       R"S((begin (state-set "busy" (with-lock "k" :if-available :else "else" 1))
+                                  (state-set "free" (with-lock "j" "granted"))))S",
+                       &errs))
+      << ::testing::PrintToString(errs);
+  EXPECT_EQ(node_value(app, "ui.doc.busy"), "else");
+  EXPECT_EQ(node_value(app, "ui.doc.free"), "granted");
+  EXPECT_EQ(held_keys(app), strings{"ui.doc.k"});
+  EXPECT_NO_THROW(app.lock_manager()->check());
+  post_to(app, "ui.doc", "res.rel");
+}
+
+// auto is shared when state_exec.threads asks for worker threads (a whole number above 0, or auto
+// where the machine has more than one hardware thread) in a build with threads (phase L3.1).
+TEST(AppLockManager, AutoIsSharedWithWorkerThreads) {
+  ASSERT_FALSE(se::detail::threaded_host_noted());
+  const se::lock_threading with_threads =
+      se::threads_compiled_in ? se::lock_threading::shared : se::lock_threading::single;
+  EXPECT_EQ(app_lock_threading(nullptr, "2"), with_threads);
+  EXPECT_EQ(app_lock_threading("auto", "1"), with_threads);
+  EXPECT_EQ(app_lock_threading(nullptr, "auto"),
+            std::thread::hardware_concurrency() > 1 ? with_threads : se::lock_threading::single);
+}
+
+// auto is shared once a threaded host announced itself (pycvc, at import), in a build with
+// threads (phase L3.1). The flag is process-wide and never cleared, so the case runs in a child
+// process (a death test expecting a clean exit) and this process's flag stays clear for the
+// other cases.
+TEST(AppLockManager, AutoIsSharedForAThreadedHost) {
+#ifdef GTEST_HAS_DEATH_TEST
+  GTEST_FLAG_SET(death_test_style, "threadsafe"); // the child runs this case alone
+  EXPECT_EXIT(
+      {
+        se::detail::note_threaded_host();
+        int code = 1;
+        try {
+          const se::lock_threading want =
+              se::threads_compiled_in ? se::lock_threading::shared : se::lock_threading::single;
+          if (app_lock_threading(nullptr) == want && app_lock_threading("auto") == want &&
+              app_lock_threading("single") == se::lock_threading::single)
+            code = 0;
+          else
+            std::fprintf(stderr, "the threaded host did not change auto's choice\n");
+        } catch (const std::exception &e) {
+          std::fprintf(stderr, "%s\n", e.what());
+          code = 2;
+        }
+        std::fflush(stderr);
+        std::exit(code);
+      },
+      ::testing::ExitedWithCode(0), "");
+  EXPECT_FALSE(se::detail::threaded_host_noted());
+#else
+  GTEST_SKIP() << "needs death tests (a child process)";
+#endif
 }

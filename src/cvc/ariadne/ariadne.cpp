@@ -445,6 +445,10 @@ std::string run_scoped_program(cvc::app &app, const std::string &prefix, const s
     // All of these must outlive execute()+run(): the intrinsics capture &ictx by pointer. A
     // synchronous run-to-completion in this one scope satisfies that.
     se::scheduler sched;
+    // Its with-lock table is the app's (docs/STATE_EXEC_LOCKS.md 8.4), so a request meets the
+    // residents' and actions' holds. This thread pumps it: not cross_thread. The home attaches
+    // here and detaches with the scheduler, at the end of this scope.
+    sched.set_lock_manager(app.lock_manager());
     se::memory_tracker tracker;
     auto proc = se::make_process();
     proc->pid = 1;
@@ -455,8 +459,9 @@ std::string run_scoped_program(cvc::app &app, const std::string &prefix, const s
     ictx.tracker = &tracker;
     ictx.proc = proc;
     ictx.pid = 1;
-    // The init lane never waits for a lock (docs/STATE_EXEC_LOCKS.md 5.5): a busy request is as
-    // :timeout 0 (TimeoutError, or :else with :if-available).
+    // The init lane never waits for a lock (docs/STATE_EXEC_LOCKS.md 5.5): this thread steps the
+    // residents too, so a holder could never release meanwhile. A busy request is as :timeout 0
+    // (TimeoutError, or :else with :if-available).
     ictx.lock_wait_allowed = false;
     ictx.lock_default_timeout = 0.0;
     // A child the script spawns copies both (so it never waits either), the chroot and this
