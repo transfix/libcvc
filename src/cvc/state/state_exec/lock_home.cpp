@@ -1,6 +1,7 @@
 // A scheduler's lock home: the home actions of docs/STATE_EXEC_LOCKS_PROTOCOL.md section 5.
 
 #include <algorithm>
+#include <cassert>
 #include <cvc/state/state_exec/detail/lock_home.h>
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/process.h>
@@ -166,6 +167,41 @@ std::size_t lock_home::cache_hash::operator()(const cache_key &k) const noexcept
   return std::hash<std::string_view>{}(k.written) ^ (std::size_t(k.scope) * 0x9E3779B97F4A7C15ull);
 }
 
+#ifdef NDEBUG
+constexpr bool kHomeToken = false;
+#else
+constexpr bool kHomeToken = true;
+#endif
+
+// The home token (protocol 0, design 9.1): only one thread runs a home's actions at a time, its
+// pumping thread, or for a pycvc Exec with no run() active whichever thread holds its control
+// mutex. Taken at an action's entry and released at its exit; the holder may re-enter (an action
+// delivers, the delivery applies a post, the post calls the table and delivers again). Release
+// builds compile it to nothing.
+class lock_home::action {
+public:
+  explicit action(const lock_home &h) noexcept : h_(h) {
+    if constexpr (kHomeToken) {
+      const std::thread::id me = std::this_thread::get_id();
+      std::thread::id none{};
+      const bool mine = h_.token_.compare_exchange_strong(none, me) || none == me;
+      assert(mine && "lock_home: two threads run one home's actions at once");
+      (void)mine;
+      ++h_.token_depth_;
+    }
+  }
+  ~action() {
+    if constexpr (kHomeToken)
+      if (--h_.token_depth_ == 0)
+        h_.token_.store(std::thread::id{});
+  }
+  action(const action &) = delete;
+  action &operator=(const action &) = delete;
+
+private:
+  const lock_home &h_;
+};
+
 lock_home::lock_home(std::shared_ptr<lock_manager> mgr, lock_sched_ops &ops,
                      scheduling_policy policy, std::shared_ptr<wakeup> wake, lock_attach attach)
     : mgr_(std::move(mgr)), table_(mgr_->table()), ops_(ops),
@@ -187,6 +223,7 @@ lock_home::lock_home(std::shared_ptr<lock_manager> mgr, lock_sched_ops &ops,
 }
 
 void lock_home::drain_port() {
+  action a(*this);
   port_->drain(drained_);
   for (const lock_post &post : drained_)
     apply_post(post);
@@ -198,6 +235,7 @@ std::vector<std::pair<lock_pid, std::int64_t>> lock_home::blocking_sinks(int pid
 }
 
 lock_home::~lock_home() {
+  action a(*this);
   // 5.7. The port closes first: no post lands after it. The detach ends every process of the
   // home with abandon and drops the cache's references; nothing it notifies targets this home.
   port_->close();
@@ -228,11 +266,13 @@ process_locks &lock_home::locks_of(process &p) {
 }
 
 void lock_home::begin_request() {
+  action a(*this);
   ++pin_epoch_;
   misses_.clear();
 }
 
 std::uint32_t lock_home::scope_id(std::string_view root_path) {
+  action a(*this);
   const auto it = scopes_.find(root_path);
   if (it != scopes_.end())
     return it->second;
@@ -242,6 +282,7 @@ std::uint32_t lock_home::scope_id(std::string_view root_path) {
 }
 
 lock_node *lock_home::lookup(std::uint32_t scope, std::string_view written) {
+  action a(*this);
   const auto it = index_.find(cache_key{scope, written});
   if (it == index_.end())
     return nullptr;
@@ -353,6 +394,7 @@ void lock_home::abandon_misses() noexcept {
 }
 
 enter_result lock_home::try_enter(process &p, home_request &req, std::string_view root) {
+  action a(*this);
   const bool in_handler = p.in_signal_handler || p.in_watch_handler;
   if (p.locks && !p.locks->holds.empty()) {
     std::vector<mhold> &holds = p.locks->holds;
@@ -445,6 +487,7 @@ enter_result lock_home::try_enter(process &p, home_request &req, std::string_vie
 
 std::optional<frame_outcome> lock_home::wait(process &p, home_request &req,
                                              std::optional<double> timeout, std::string_view root) {
+  action a(*this);
   // The busy path's one clock read (protocol 5.2).
   std::optional<lock_clock::time_point> deadline;
   if (timeout)
@@ -530,10 +573,14 @@ value_t lock_home::outcome_error(const lock_outcome &out, const process_locks &p
       dsl_error("TimeoutError", msg.str(), "dsl", {{"key", std::move(key)}, {"mode", mode}}));
 }
 
-void lock_home::start_body(process &p, std::uint64_t hold) { table_.start_body(pid_of(p), hold); }
+void lock_home::start_body(process &p, std::uint64_t hold) {
+  action a(*this);
+  table_.start_body(pid_of(p), hold);
+}
 
 void lock_home::release_frame(process &p, std::optional<std::uint64_t> hold,
                               bool lock_enter) noexcept {
+  action a(*this);
   try {
     if (!p.locks)
       return;
@@ -567,6 +614,7 @@ void lock_home::release_frame(process &p, std::optional<std::uint64_t> hold,
 }
 
 void lock_home::process_ended(process &p, bool abandon) {
+  action a(*this);
   if (!p.locks || (p.locks->holds.empty() && !p.locks->ticket))
     return;
   if (!abandon && !p.locks->holds.empty())
@@ -581,6 +629,7 @@ void lock_home::process_ended(process &p, bool abandon) {
 }
 
 void lock_home::wait_expired(std::vector<process *> &expired) {
+  action a(*this);
   // A waiter flagged by a wake_due with no vector is collected here too (design 8.7).
   if (ops_.lock_expired_count() > 0)
     ops_.take_lock_expired(expired);
@@ -597,6 +646,7 @@ void lock_home::wait_expired(std::vector<process *> &expired) {
 }
 
 void lock_home::set_base(process &p) {
+  action a(*this);
   if (!p.locks || (p.locks->holds.empty() && !p.locks->ticket))
     return;
   lock_notes notes;
@@ -605,6 +655,7 @@ void lock_home::set_base(process &p) {
 }
 
 void lock_home::deliver(const lock_notes &notes) {
+  action a(*this);
   for (const lock_note &n : notes) {
     if (n.home == id_)
       apply_post(n.post); // this home's: at once (4.14)
@@ -614,6 +665,7 @@ void lock_home::deliver(const lock_notes &notes) {
 }
 
 void lock_home::apply_post(const lock_post &post) {
+  action a(*this);
   if (post.what == lock_post::kind::wake)
     apply_wake(post.pid, post.tid);
   else
@@ -685,6 +737,7 @@ std::string lock_home::waiting_key(const process &p) {
 // ---------------------------------------------------------------------------------------------
 
 void lock_home::check_quiescent() const {
+  action a(*this);
   const auto fail = [](const char *inv, const std::string &what) {
     throw lock_violation(inv, what);
   };

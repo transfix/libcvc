@@ -4,8 +4,9 @@
 // over the structures of 2.4: a path trie whose nodes count the holds and queued tickets of their
 // subtree, records, holds and tickets in slot pools found through open-addressing indexes, and the
 // queue as an intrusive list in seq order, each queued ticket also linked into the `wq` of each of
-// its keys. Phases L1 and L2: single mode (one thread calls the table, no mutex) and one home per
-// manager.
+// its keys. Single mode (phases L1, L2): one thread calls the table, with no mutex. Shared mode
+// (phase L3): every public operation holds M.mu throughout (impl::guard), and a manager has any
+// number of homes, each pumped on its own thread or all on one.
 //
 // Inheritance (3.3, 4.3; phase L2) follows the implementation note of 4.3: while no attached home
 // applies priorities nothing is computed; otherwise each operation recomputes the inherited
@@ -25,6 +26,7 @@
 #include <cvc/state/state_exec/detail/lock_table.h>
 #include <cvc/state/state_exec/lock_manager.h>
 #include <deque>
+#include <mutex>
 #include <set>
 #include <stdexcept>
 #include <thread>
@@ -121,30 +123,6 @@ const char *state_text(ticket_state s) {
   }
   return "?";
 }
-
-/// Debug builds: the single-mode owner-thread token (design 8.3), asserted free on entry to
-/// every operation and released on exit.
-class owner_scope {
-public:
-  explicit owner_scope(std::atomic<std::thread::id> &token) : token_(token) {
-#ifndef NDEBUG
-    std::thread::id none{};
-    const bool was_free = token_.compare_exchange_strong(none, std::this_thread::get_id());
-    assert(was_free && "lock_table: two threads in a single-mode lock manager at once");
-    (void)was_free;
-#endif
-  }
-  ~owner_scope() {
-#ifndef NDEBUG
-    token_.store(std::thread::id{});
-#endif
-  }
-  owner_scope(const owner_scope &) = delete;
-  owner_scope &operator=(const owner_scope &) = delete;
-
-private:
-  [[maybe_unused]] std::atomic<std::thread::id> &token_;
-};
 } // namespace
 
 void set_lock_test_hooks(const lock_test_hooks *hooks) {
@@ -320,8 +298,44 @@ struct lock_table::impl {
 
   bool mut(std::uint32_t bit) const { return (opts.mutations & bit) != 0; }
 
+  /// Every public operation of the table runs under one guard, so each is atomic (protocol 0). In
+  /// shared mode it holds M.mu for the whole operation; in single mode, in debug builds, it takes
+  /// the owner-thread token, asserted free (design 8.3). No public operation calls another, and
+  /// nothing is called out of the table under it: an operation returns its notifications, which
+  /// the caller delivers after the unlock (4.14).
+  class guard {
+  public:
+    explicit guard(impl &m) : m_(m) {
+      if (m_.opts.shared) {
+        m_.mu.lock();
+        return;
+      }
+#ifndef NDEBUG
+      std::thread::id none{};
+      const bool was_free = m_.owner.compare_exchange_strong(none, std::this_thread::get_id());
+      assert(was_free && "lock_table: two threads in a single-mode lock manager at once");
+      (void)was_free;
+#endif
+    }
+    ~guard() {
+      if (m_.opts.shared) {
+        m_.mu.unlock();
+        return;
+      }
+#ifndef NDEBUG
+      m_.owner.store(std::thread::id{});
+#endif
+    }
+    guard(const guard &) = delete;
+    guard &operator=(const guard &) = delete;
+
+  private:
+    impl &m_;
+  };
+
   // -- state ------------------------------------------------------------------------------------
   lock_table::options opts;
+  std::mutex mu;                        // M.mu: shared mode only (protocol 2.1)
   std::atomic<std::thread::id> owner{}; // debug builds: the single-mode token (design 8.3)
 
   std::vector<home_entry> homes; // by home_id
@@ -1905,7 +1919,7 @@ home_id lock_table::attach_home(bool prio, std::shared_ptr<lock_port> port,
                                 std::shared_ptr<std::atomic<std::int64_t>> progress,
                                 lock_notes &out, lock_attach attach) {
   impl &m = *impl_;
-  owner_scope token(m.owner);
+  impl::guard g(m);
   if (opts_.one_home && m.attached > 0)
     throw std::logic_error("lock_table::attach_home: before L3 a manager accepts one home");
   if (attach.cross_thread && !opts_.shared)
@@ -1928,7 +1942,7 @@ home_id lock_table::attach_home(bool prio, std::shared_ptr<lock_port> port,
 std::optional<grant> lock_table::try_acquire(lock_pid p, rec_info info, lock_request &req,
                                              const cache_delta &refs) {
   impl &m = *impl_;
-  owner_scope token(m.owner);
+  impl::guard g(m);
   if (const impl::rec *r = m.rec_of(p); r && r->ticket)
     violation("4.5", "try_acquire: " + pid_text(p) + " has a ticket");
   if (opts_.self_check)
@@ -1962,7 +1976,7 @@ std::optional<grant> lock_table::try_acquire(lock_pid p, rec_info info, lock_req
 block_result lock_table::block(lock_pid p, rec_info info, lock_request &req,
                                const cache_delta &refs, lock_notes &out) {
   impl &m = *impl_;
-  owner_scope token(m.owner);
+  impl::guard g(m);
   if (const impl::rec *r = m.rec_of(p); r && r->ticket)
     violation("4.6", "block: " + pid_text(p) + " has a ticket");
   if (opts_.self_check)
@@ -2028,7 +2042,7 @@ block_result lock_table::block(lock_pid p, rec_info info, lock_request &req,
 
 lock_outcome lock_table::resume(lock_pid p, std::uint64_t tid) {
   impl &m = *impl_;
-  owner_scope token(m.owner);
+  impl::guard g(m);
   lock_ticket *t = m.ticket_of(tid);
   impl::rec *r = m.rec_of(p);
   if (!t || t->pid != p || !r || r->ticket != tid)
@@ -2058,7 +2072,7 @@ lock_outcome lock_table::resume(lock_pid p, std::uint64_t tid) {
 
 void lock_table::start_body(lock_pid p, std::uint64_t hold) {
   impl &m = *impl_;
-  owner_scope token(m.owner);
+  impl::guard g(m);
   lock_hold *h = m.hold_of(hold);
   if (!h || h->pid != p)
     violation("4.8", "start_body: hold " + std::to_string(hold) + " is not " + pid_text(p) + "'s");
@@ -2070,7 +2084,7 @@ void lock_table::start_body(lock_pid p, std::uint64_t hold) {
 
 std::optional<ticket_state> lock_table::cancel(lock_pid p, std::uint64_t tid, lock_notes &out) {
   impl &m = *impl_;
-  owner_scope token(m.owner);
+  impl::guard g(m);
   const lock_pid seeds[] = {p};
   m.begin_op(&out, seeds);
   lock_ticket *t = m.ticket_of(tid);
@@ -2106,7 +2120,7 @@ std::optional<ticket_state> lock_table::cancel(lock_pid p, std::uint64_t tid, lo
 
 void lock_table::release(lock_pid p, std::uint64_t hold, lock_notes &out) {
   impl &m = *impl_;
-  owner_scope token(m.owner);
+  impl::guard g(m);
   lock_hold *h = m.hold_of(hold);
   const bool own = h && h->pid == p; // the owner check (I12)
   const lock_pid seeds[] = {p};
@@ -2123,7 +2137,7 @@ void lock_table::release(lock_pid p, std::uint64_t hold, lock_notes &out) {
 
 void lock_table::end(lock_pid p, bool abandon, lock_notes &out) {
   impl &m = *impl_;
-  owner_scope token(m.owner);
+  impl::guard g(m);
   const lock_pid ended[] = {p};
   m.begin_op(&out, ended);
   impl::region reg;
@@ -2134,7 +2148,11 @@ void lock_table::end(lock_pid p, bool abandon, lock_notes &out) {
 
 void lock_table::detach_home(home_id h, lock_notes &out) {
   impl &m = *impl_;
-  owner_scope token(m.owner);
+  // The home's port and progress cell leave the table here but are released after the unlock:
+  // nothing is destroyed under M.mu (the home holds both anyway until after its detach, 5.7).
+  std::shared_ptr<lock_port> port;
+  std::shared_ptr<std::atomic<std::int64_t>> progress;
+  impl::guard g(m);
   if (h >= m.homes.size() || !m.homes[h].attached)
     violation("4.11", "detach_home: home " + std::to_string(h) + " is not attached");
   std::vector<lock_pid> ended;
@@ -2159,8 +2177,8 @@ void lock_table::detach_home(home_id h, lock_notes &out) {
     m.end_locked(p, true, reg);
   e.attached = false; // delete M.homes[H]
   e.prio = false;
-  e.port.reset();
-  e.progress.reset();
+  port = std::move(e.port);
+  progress = std::move(e.progress);
   --m.attached;
   m.finish(reg, {}, ended);
   m.end_op();
@@ -2168,7 +2186,7 @@ void lock_table::detach_home(home_id h, lock_notes &out) {
 
 void lock_table::set_base(lock_pid p, int base, lock_notes &out) {
   impl &m = *impl_;
-  owner_scope token(m.owner);
+  impl::guard g(m);
   impl::rec *r = m.rec_of(p);
   const lock_pid seeds[] = {p};
   m.begin_op(&out, r ? std::span<const lock_pid>(seeds) : std::span<const lock_pid>());
@@ -2181,7 +2199,7 @@ void lock_table::set_base(lock_pid p, int base, lock_notes &out) {
 
 int lock_table::read_inh(lock_pid p) {
   impl &m = *impl_;
-  owner_scope token(m.owner);
+  impl::guard g(m);
   impl::rec *r = m.rec_of(p);
   if (!r)
     return lock_inf;
@@ -2192,13 +2210,13 @@ int lock_table::read_inh(lock_pid p) {
 
 lock_query_result lock_table::query(std::string_view abs_prefix, std::optional<home_id> viewer_home,
                                     std::string_view viewer_owner) const {
-  owner_scope token(impl_->owner);
+  impl::guard g(*impl_);
   return impl_->query(abs_prefix, viewer_home, viewer_owner);
 }
 
 void lock_table::ref_nodes(home_id h, std::span<key_ref> keys) {
   impl &m = *impl_;
-  owner_scope token(m.owner);
+  impl::guard g(m);
   m.begin_op(nullptr);
   for (key_ref &k : keys)
     k.node = m.ref(h, k);
@@ -2207,7 +2225,7 @@ void lock_table::ref_nodes(home_id h, std::span<key_ref> keys) {
 
 void lock_table::unref_nodes(home_id h, std::span<lock_node *const> nodes) {
   impl &m = *impl_;
-  owner_scope token(m.owner);
+  impl::guard g(m);
   m.begin_op(nullptr);
   for (lock_node *n : nodes)
     m.unref(h, n);
@@ -2215,7 +2233,7 @@ void lock_table::unref_nodes(home_id h, std::span<lock_node *const> nodes) {
 }
 
 std::span<lock_node *const> lock_table::hold_keys(std::uint64_t hold) const {
-  owner_scope token(impl_->owner);
+  impl::guard g(*impl_);
   const lock_hold *h = impl_->hold_of(hold);
   if (!h)
     return {};
@@ -2223,7 +2241,7 @@ std::span<lock_node *const> lock_table::hold_keys(std::uint64_t hold) const {
 }
 
 std::optional<lock_table::rec_view> lock_table::rec_of(lock_pid p) const {
-  owner_scope token(impl_->owner);
+  impl::guard g(*impl_);
   const impl::rec *r = impl_->rec_of(p);
   if (!r)
     return std::nullopt;
@@ -2238,7 +2256,7 @@ std::optional<lock_table::rec_view> lock_table::rec_of(lock_pid p) const {
 }
 
 std::optional<lock_table::ticket_view> lock_table::ticket_of(std::uint64_t tid) const {
-  owner_scope token(impl_->owner);
+  impl::guard g(*impl_);
   const lock_ticket *t = impl_->ticket_of(tid);
   if (!t)
     return std::nullopt;
@@ -2251,7 +2269,7 @@ std::optional<lock_table::ticket_view> lock_table::ticket_of(std::uint64_t tid) 
 }
 
 std::optional<lock_table::hold_view> lock_table::hold_of(std::uint64_t id) const {
-  owner_scope token(impl_->owner);
+  impl::guard g(*impl_);
   const lock_hold *h = impl_->hold_of(id);
   if (!h)
     return std::nullopt;
@@ -2259,7 +2277,7 @@ std::optional<lock_table::hold_view> lock_table::hold_of(std::uint64_t id) const
 }
 
 std::size_t lock_table::home_cache_refs(home_id h, const lock_node *n) const {
-  owner_scope token(impl_->owner);
+  impl::guard g(*impl_);
   if (h >= impl_->homes.size())
     return 0;
   const auto &refs = impl_->homes[h].refs;
@@ -2268,7 +2286,7 @@ std::size_t lock_table::home_cache_refs(home_id h, const lock_node *n) const {
 }
 
 std::size_t lock_table::home_cache_refs(home_id h) const {
-  owner_scope token(impl_->owner);
+  impl::guard g(*impl_);
   if (h >= impl_->homes.size())
     return 0;
   std::size_t total = 0;
@@ -2279,7 +2297,7 @@ std::size_t lock_table::home_cache_refs(home_id h) const {
 
 lock_stats lock_table::stats() const {
   const impl &m = *impl_;
-  owner_scope token(impl_->owner);
+  impl::guard g(*impl_);
   lock_stats s;
   s.holds = m.holds.size();
   s.queued = m.queued;
@@ -2289,7 +2307,7 @@ lock_stats lock_table::stats() const {
   s.timeouts = m.n_timeouts;
   s.deadlocks = m.n_deadlocks;
   s.abandoned = m.n_abandoned;
-  s.leaked_at_exit = leaked_at_exit_;
+  s.leaked_at_exit = leaked_at_exit_.load(std::memory_order_relaxed);
   s.ends = m.n_ends;
   s.trie_nodes = m.trie_nodes;
   s.cache_refs = m.refs_total;
@@ -2299,19 +2317,19 @@ lock_stats lock_table::stats() const {
 }
 
 void lock_table::check() const {
-  owner_scope token(impl_->owner);
+  impl::guard g(*impl_);
   impl_->check();
 }
 
 bool lock_table::empty() const {
   const impl &m = *impl_;
-  owner_scope token(impl_->owner);
+  impl::guard g(*impl_);
   return m.recs.size() == 0 && m.holds.size() == 0 && m.tickets.size() == 0 && m.queued == 0 &&
          m.root.sub[0] == 0 && m.root.sub[1] == 0 && m.root.subw == 0;
 }
 
 std::string lock_table::canonical() const {
-  owner_scope token(impl_->owner);
+  impl::guard g(*impl_);
   return impl_->canonical();
 }
 
@@ -2341,10 +2359,9 @@ bool check_forced_by_environment() {
 lock_manager::lock_manager() : lock_manager(options{}) {}
 
 lock_manager::lock_manager(options opts) : opts_(opts) {
-  if (opts_.threading != lock_threading::single)
-    throw std::invalid_argument("lock_manager: shared mode is phase L3");
   detail::lock_table::options t;
-  t.one_home = false; // several homes (phase L3; protocol 4.4)
+  t.one_home = false;                                   // several homes (protocol 4.4)
+  t.shared = opts_.threading == lock_threading::shared; // every operation under M.mu (L3.1)
   t.inheritance = opts_.inheritance;
   t.self_check = opts_.self_check || check_forced_by_environment();
   t.coalesce_relevels = opts_.coalesce_relevels;

@@ -6,8 +6,10 @@
  * Internal. One home per scheduler, made when the scheduler first needs one (design 8.4). It owns
  * the private state of protocol 2.2 for its processes (process::locks and the lock wait fields),
  * a key cache (design 8.4), its port (protocol 2.3), and the calls into the manager's table. It
- * runs on the thread that pumps its scheduler; nothing here is thread-safe but lock_port, whose
- * post() any thread calls.
+ * runs on the thread that pumps its scheduler (protocol 0: for a pycvc Exec with no run() active,
+ * whichever thread holds its control mutex); debug builds assert that no two threads run one
+ * home's actions at once. Nothing here is thread-safe but lock_port, whose post() any thread
+ * calls, the per-step reads port_pending() and store_progress(), and blocking_sinks().
  */
 #ifndef CVC_STATE_EXEC_DETAIL_LOCK_HOME_H
 #define CVC_STATE_EXEC_DETAIL_LOCK_HOME_H
@@ -28,6 +30,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -375,6 +378,9 @@ private:
   struct cache_hash {
     std::size_t operator()(const cache_key &k) const noexcept;
   };
+  /// The home token (debug builds; L3.1): held by a thread for the length of a home action, and
+  /// re-entered by that thread when the action nests another (a delivery applying a post).
+  class action;
   struct cache_eq {
     bool operator()(const cache_key &a, const cache_key &b) const noexcept {
       return a.scope == b.scope && a.written == b.written;
@@ -411,6 +417,10 @@ private:
   std::shared_ptr<lock_port> port_;                      // Home.port
   std::shared_ptr<std::atomic<std::int64_t>> progress_; // Home.progress (lock_clock ticks)
   std::vector<lock_post> drained_;                       // drain_port's buffer, reused
+  // The home token (debug builds only; present in every build so the layout never depends on
+  // NDEBUG): the thread running this home's actions, and how deeply they nest on it.
+  mutable std::atomic<std::thread::id> token_{};
+  mutable std::uint32_t token_depth_ = 0;
 
   std::vector<entry> entries_;
   std::unordered_map<cache_key, std::size_t, cache_hash, cache_eq> index_;
