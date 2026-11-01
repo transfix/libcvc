@@ -2266,6 +2266,8 @@ enum world_mutation : std::uint32_t {
   wake_carries_outcome = 1u << 0,    // ('wake-no-tid-check') a wake resumes whatever waits now
   cache_miss_unreferenced = 1u << 1, // ('cache-miss-unreferenced') a miss cached with no reference
   no_set_base = 1u << 2,             // ('no-set-base') set-priority skips the home's set_base
+  wait_unwind_drops_grant = 1u << 3, // 5.4 before the L3 review fix: the defensive path's resume
+                                     // drops a grant another home made (its hold left unmirrored)
 };
 
 struct proc_cfg {
@@ -2338,7 +2340,8 @@ enum class ak : std::uint8_t {
   deadline,
   frelease,
   fcancel,
-  attach
+  attach,
+  wraise // scenarios only, never enabled: a raise into a parked waiter (5.4's defensive path)
 };
 /// One action: a = pid or home (or the capacity), b = request index, value or abandon, c = the
 /// request kind or a foreign id.
@@ -2358,7 +2361,7 @@ bool costs_event(ak k) { return k != ak::hstep && k != ak::post && k != ak::cach
 /// cell (a logical clock).
 bool steps_process(ak k) {
   return k == ak::req || k == ak::enter_step || k == ak::finish || k == ak::raise ||
-         k == ak::hraise || k == ak::signal || k == ak::hend;
+         k == ak::hraise || k == ak::signal || k == ak::hend || k == ak::wraise;
 }
 
 struct post_t {
@@ -2717,6 +2720,8 @@ public:
                   : post_str(homes.at(std::size_t(a.a)).port.front()));
     case ak::destroy:
       return "destroy H" + std::to_string(a.a);
+    case ak::wraise:
+      return "raise into parked p" + std::to_string(a.a);
     case ak::attach:
       return "attach H" + std::to_string(a.a) + " (prio " +
              (homes.at(std::size_t(a.a)).prio ? "1" : "0") + ")";
@@ -2803,6 +2808,9 @@ public:
       return;
     case ak::attach:
       a_attach(a.a);
+      return;
+    case ak::wraise:
+      a_wraise(a.a);
       return;
     }
   }
@@ -3437,13 +3445,24 @@ private:
       return;
     }
     case pk::defensive_resume: {
+      // 5.4's defensive path, after its cancel and that cancel's delivery: resume; a grant
+      // another home made meanwhile is released, as any lock_enter frame's grant is, and the
+      // release's notes delivered
       auto &p = procs.at(op.pid);
       auto b = snap();
-      M.resume(p.P(), op.tid);
+      auto out = M.resume(p.P(), op.tid);
       transitions("resume", b);
       p.lock_ticket.reset();
       p.lock_waiting = false;
       p.lock_deadline = false;
+      if (out.what == dt::lock_outcome::kind::granted && !wmut(wait_unwind_drops_grant)) {
+        soft.push_back({"defensive-grant", "an unwound wait's grant from another home released"});
+        spec_notes N;
+        auto b2 = snap();
+        M.release(p.P(), out.g.hold, N);
+        transitions("release", b2);
+        push_front(hid, dlv_ops(N));
+      }
       return;
     }
     case pk::detach:
@@ -3687,6 +3706,8 @@ private:
       }
     }
     if (f.enter && p.lock_ticket) {
+      // the defensive path (5.4): withdraw the ticket and deliver the cancel's notes; then the
+      // resume, which releases a grant the cancel found (defensive_resume)
       soft.push_back({"defensive-path", "release_lock_frame withdrew a ticket still pending"});
       std::uint64_t tid = *p.lock_ticket;
       spec_notes N2;
@@ -3974,6 +3995,19 @@ private:
     pending_op d;
     d.k = pk::detach;
     push_front(hid, {d});
+  }
+
+  void a_wraise(int pid) {
+    // the lock_enter frame of a parked waiter unwinds with its ticket still set (5.4's defensive
+    // path; 5.3's unreachable "woken without a grant" is one way): the process runs again, its
+    // wait left (its deadline leaves the heap), and the frame's unwind withdraws the ticket
+    auto &p = procs.at(pid);
+    if (p.status != pstatus::parked || p.frames.empty() || !p.frames.back().enter)
+      fail("model", "raise into p" + std::to_string(pid) + ", which is not parked on a lock");
+    p.status = pstatus::run;
+    p.lock_waiting = false;
+    p.lock_deadline = false;
+    a_finish(pid);
   }
 
   void a_attach(int hid) {
@@ -5231,6 +5265,32 @@ std::string scenario_sinks_progress() {
   return "ok " + fmt_sinks(s);
 }
 
+std::string scenario_unwound_wait_granted(std::uint32_t wmut = 0) {
+  // 5.4's defensive path across homes (L3 review fix): p2's ticket is granted by H0's release,
+  // its wake still in H1's port, when its lock_enter frame unwinds. The cancel finds the ticket
+  // granted; the resume returns the grant, which is released, so p3 is granted next and the late
+  // wake is ignored
+  auto w = mk({true, true}, {{0, 1, "o", 0}, {1, 2, "o", 0}, {0, 3, "o", 0}}, 0, wmut);
+  run(w, {R(w, 1, {"k"}, X), R(w, 2, {"k"}, X), R(w, 3, {"k"}, X)});
+  step(w, act(ak::finish, 1)); // H0 releases k: p2 granted, its wake for H1's port
+  while (!w.homes[0].pending.empty())
+    step(w, act(ak::hstep, 0));
+  MODEL_ASSERT(!w.homes[1].port.empty() && w.procs.at(2).status == pstatus::parked,
+               "p2's wake should be in flight");
+  step(w, act(ak::wraise, 2)); // p2's lock_enter frame unwinds, its ticket still set
+  while (!w.homes[1].pending.empty())
+    step(w, act(ak::hstep, 1));
+  const auto &p2 = w.procs.at(2);
+  MODEL_ASSERT(p2.locks.empty() && !p2.lock_ticket && !w.M.spec.recs.count(lock_pid{1, 2}),
+               "p2 left with a hold or a ticket");
+  settle(w); // the late wake is ignored; p3's wake is applied
+  MODEL_ASSERT(w.procs.at(2).frames.empty() && w.procs.at(3).status == pstatus::run &&
+                   w.procs.at(3).locks.size() == 1,
+               "p3 not granted k");
+  w.drain();
+  return "ok";
+}
+
 // =============================================================================================
 // 8. Random runs (random_runs.py: on one home of prio false, phase L1, or prio true, phase L2;
 //    over one to three homes, phase L3)
@@ -6414,4 +6474,15 @@ TEST(LocksModel, TwoHomesMutationImplNoteAfterOnly) {
 TEST(LocksModel, TwoHomesMutationNoSetBase) {
   LT5_NEEDS_TABLE();
   expect_violation("I8", on_two_homes([] { return scenario_set_base_l2(no_set_base); }));
+}
+
+// 5.4's defensive path on two homes (L3 review fix, R3a F2): an unwound wait's grant from another
+// home is released; the reading before the fix, which dropped it, leaves a hold no mirror has.
+TEST(LocksModel, TwoHomesUnwoundWaitGrantedByAnotherHome) {
+  LT5_NEEDS_TABLE();
+  expect_ok([] { return scenario_unwound_wait_granted(); });
+}
+TEST(LocksModel, TwoHomesMutationUnwoundWaitDropsGrant) {
+  LT5_NEEDS_TABLE();
+  expect_violation("I3", [] { return scenario_unwound_wait_granted(wait_unwind_drops_grant); });
 }
