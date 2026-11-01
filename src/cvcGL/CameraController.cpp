@@ -48,23 +48,41 @@
 // Pointer capture in the browser is the page's pointer lock on VTK's canvas. While it holds,
 // VTK's pointer positions stand still, so the motion comes from the document's mousemove events
 // (movementX/Y), summed here until update() takes it. The browser ends the lock on Escape or when
-// the tab loses focus; `lost` counts those (and a refused request), so update() releases the
-// capture too. An exit the camera asked for itself is not counted.
+// the tab loses focus; `lost` counts those, so update() releases the capture too. An exit the
+// camera asked for itself is not counted. The camera asks from the frame, just after the click
+// (VTK's events are queued): a browser that grants the lock only inside the click's own handler
+// refuses that, so the request is made again inside the next click on the canvas, and only a
+// second refusal counts as lost.
 // clang-format off: JavaScript bodies (only == and != in them: the preprocessor reads them as C++
 // tokens, and a === would come out split)
 EM_JS(void, cvcgl_pointer_lock, (int on, const char *selector), {
   var st = Module.cvcglPointerLock;
   if (!st) {
     st = Module.cvcglPointerLock = {dx: 0, dy: 0, locked: false, exiting: false, lost: 0,
-                                    canvas: null};
+                                    canvas: null, want: false, retried: false};
     document.addEventListener('pointerlockchange', function() {
       var locked = !!st.canvas && document.pointerLockElement == st.canvas;
       if (st.locked && !locked && !st.exiting)
         st.lost++;
       st.locked = locked;
       st.exiting = false;
+      if (locked)
+        st.retried = false;
     });
-    document.addEventListener('pointerlockerror', function() { st.lost++; });
+    document.addEventListener('pointerlockerror', function() {
+      if (st.want && !st.retried) {
+        st.retried = true; // again in the next click
+        return;
+      }
+      st.lost++;
+    });
+    document.addEventListener('mouseup', function(e) {
+      if (st.want && st.retried && !st.locked && st.canvas && e.target == st.canvas) {
+        var p = st.canvas.requestPointerLock();
+        if (p && p.catch)
+          p.catch(function() {}); // a refusal is pointerlockerror's
+      }
+    });
     document.addEventListener('mousemove', function(e) {
       if (st.locked) {
         st.dx += e.movementX || 0;
@@ -77,14 +95,19 @@ EM_JS(void, cvcgl_pointer_lock, (int on, const char *selector), {
   if (!canvas)
     return;
   if (on) {
+    st.want = true;
     if (document.pointerLockElement != canvas && canvas.requestPointerLock) {
       var p = canvas.requestPointerLock();
       if (p && p.catch)
-        p.catch(function() { st.lost++; });
+        p.catch(function() {}); // a refusal is pointerlockerror's
     }
-  } else if (document.pointerLockElement == canvas) {
-    st.exiting = true;
-    document.exitPointerLock();
+  } else {
+    st.want = false;
+    st.retried = false;
+    if (document.pointerLockElement == canvas) {
+      st.exiting = true;
+      document.exitPointerLock();
+    }
   }
 });
 // The motion along `axis` (0 = x, 1 = y; CSS pixels, y down) since the last call.
