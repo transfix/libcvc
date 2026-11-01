@@ -45,6 +45,35 @@ detail::lock_home *async_scheduler::locks() {
   return home_.get();
 }
 
+void async_scheduler::keep_lock_expiries() {
+  // As scheduler::keep_lock_expiries: no raw pointer outlives a pass that threw; the lock waiters
+  // it had not yet timed out are flagged for the next wait_expired.
+  for (process *p : lock_expired_) {
+    if (is_finished(p->status) || !p->lock_waiting || p->lock_expired_pending)
+      continue;
+    p->lock_expired_pending = true;
+    procs_.update(*p);
+  }
+  lock_expired_.clear();
+}
+
+void async_scheduler::lock_waiting_pids(std::vector<int> &out) const {
+  out.clear();
+  std::size_t left = procs_.lock_waiting_count();
+  if (left == 0)
+    return;
+  // The table counts the waiters (its entry's lock_waiting) but keeps no list of them: the walk
+  // stops once it has found them all.
+  for (const auto &[pid, p] : procs_.all()) {
+    if (!p->table.lock_waiting)
+      continue;
+    out.push_back(pid);
+    if (--left == 0)
+      break;
+  }
+  std::sort(out.begin(), out.end());
+}
+
 bool async_scheduler::lock_ops_impl::park_lock(process &p) {
   if (p.status != process_status::ready && p.status != process_status::running)
     return false;
@@ -425,10 +454,17 @@ void async_scheduler::drain(bool in_step) {
   // waits whose deadline passed time out.
   if (procs_.timed_count() > 0) {
     const clock::time_point now = in_step ? now_for_step() : clock::now();
-    if (procs_.timer_due(now) && procs_.wake_due(now, &lock_expired_) > 0) {
-      chain_valid_ = false; // the wakes are no step's time
-      if (!lock_expired_.empty() && home_)
-        home_->wait_expired(lock_expired_);
+    if (procs_.timer_due(now)) {
+      try {
+        if (procs_.wake_due(now, &lock_expired_) > 0) {
+          chain_valid_ = false; // the wakes are no step's time
+          if (!lock_expired_.empty() && home_)
+            home_->wait_expired(lock_expired_);
+        }
+      } catch (...) {
+        keep_lock_expiries();
+        throw;
+      }
       lock_expired_.clear();
     }
   }

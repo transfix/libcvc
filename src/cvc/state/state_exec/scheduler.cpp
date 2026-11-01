@@ -50,6 +50,38 @@ detail::lock_home *scheduler::locks() {
   return home_.get();
 }
 
+void scheduler::keep_lock_expiries() {
+  // An expiry pass that throws (wake_due, or wait_expired: an allocation, a callback) keeps no
+  // raw pointer past it, since a process may be reaped before the next pass. The lock waiters it
+  // had not yet timed out are flagged instead (lock_expired_pending, design 8.7): the table drops
+  // the flag with an ended process, and the next wait_expired collects the rest. Updating a flag
+  // only moves the table's count.
+  for (process *p : lock_expired_) {
+    if (is_finished(p->status) || !p->lock_waiting || p->lock_expired_pending)
+      continue;
+    p->lock_expired_pending = true;
+    procs_.update(*p);
+  }
+  lock_expired_.clear();
+}
+
+void scheduler::lock_waiting_pids(std::vector<int> &out) const {
+  out.clear();
+  std::size_t left = procs_.lock_waiting_count();
+  if (left == 0)
+    return;
+  // The table counts the waiters (its entry's lock_waiting) but keeps no list of them: the walk
+  // stops once it has found them all.
+  for (const auto &[pid, p] : procs_.all()) {
+    if (!p->table.lock_waiting)
+      continue;
+    out.push_back(pid);
+    if (--left == 0)
+      break;
+  }
+  std::sort(out.begin(), out.end());
+}
+
 bool scheduler::lock_ops_impl::park_lock(process &p) {
   if (p.status != process_status::ready && p.status != process_status::running)
     return false;
@@ -553,10 +585,17 @@ int scheduler::step_once() {
   // whose deadline passed (a program with no timer pays nothing for them).
   if (procs_.timed_count() > 0) {
     const clock::time_point now = now_for_step();
-    if (procs_.timer_due(now) && procs_.wake_due(now, &lock_expired_) > 0) {
-      chain_valid_ = false; // the wakes are no step's time
-      if (!lock_expired_.empty() && home_)
-        home_->wait_expired(lock_expired_);
+    if (procs_.timer_due(now)) {
+      try {
+        if (procs_.wake_due(now, &lock_expired_) > 0) {
+          chain_valid_ = false; // the wakes are no step's time
+          if (!lock_expired_.empty() && home_)
+            home_->wait_expired(lock_expired_);
+        }
+      } catch (...) {
+        keep_lock_expiries();
+        throw;
+      }
       lock_expired_.clear();
     }
   }

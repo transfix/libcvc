@@ -65,6 +65,12 @@ public:
   /// Whether the scheduler has its lock home yet (made by set_lock_manager, or by locks() on first
   /// use); locks() makes one when it doesn't.
   bool has_lock_home() const noexcept { return home_ != nullptr; }
+  /// The processes parked on a with-lock request: the process table's count (0: none, and
+  /// nothing to look for).
+  std::size_t lock_waiting_count() const noexcept { return procs_.lock_waiting_count(); }
+  /// Clear `out`, then append the pid of every process parked on a with-lock request, in pid
+  /// order. Walks the processes only while lock_waiting_count() is not zero.
+  void lock_waiting_pids(std::vector<int> &out) const;
   bool check_tables() const override { return procs_.check(); }
 
   // --- Process submission ---
@@ -382,6 +388,8 @@ private:
   /// Made by locks() or set_lock_manager(); null until a with-lock needs it.
   std::unique_ptr<detail::lock_home> home_;
   std::vector<process *> lock_expired_; // reused by drain's lock expiries
+  /// An expiry pass threw: flag the lock waiters it had not timed out and empty lock_expired_.
+  void keep_lock_expiries();
 
   /// A steady_clock reading the next step may start from (see scheduler.h).
   using clock = std::chrono::steady_clock;

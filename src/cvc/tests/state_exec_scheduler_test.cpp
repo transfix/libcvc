@@ -2964,6 +2964,149 @@ TEST(SchedulerLockPort, HasLockHomeOnceLocksOrSetLockManagerMadeIt) {
   EXPECT_TRUE(s1.has_lock_home() && s2.has_lock_home() && a1.has_lock_home() && a2.has_lock_home());
 }
 
+namespace {
+
+// lock_waiting_count() and lock_waiting_pids() before, during and after two waits behind one
+// holder.
+template <class S> void lists_its_lock_waiters() {
+  lock_run_world w;
+  S sched;
+  std::vector<int> pids{-1};
+  EXPECT_EQ(sched.lock_waiting_count(), 0u);
+  sched.lock_waiting_pids(pids);
+  EXPECT_TRUE(pids.empty()); // cleared, though nothing waits
+  const int h = w.submit(sched, R"((with-lock "k" (msg-recv "go")))");
+  const int q1 = w.submit(sched, R"((with-lock "k" 1))");
+  const int q2 = w.submit(sched, R"((with-lock "k" 2))");
+  for (int i = 0; i < 1000 && (sched.lock_waiting_count() < 2 || waiting_on(sched, h) != "msg go");
+       ++i)
+    step_of(sched);
+  ASSERT_EQ(waiting_on(sched, h), "msg go");
+  EXPECT_EQ(sched.lock_waiting_count(), 2u);
+  sched.lock_waiting_pids(pids);
+  EXPECT_EQ(pids, (std::vector<int>{q1, q2}));
+
+  ASSERT_EQ(sched.deliver_to_receivers("go", value_t(std::string("go"))), 1);
+  for (int i = 0; i < 1000 && !is_finished(sched.get_process_info(q2)->status); ++i)
+    step_of(sched);
+  ASSERT_TRUE(is_finished(sched.get_process_info(q1)->status));
+  ASSERT_TRUE(is_finished(sched.get_process_info(q2)->status));
+  EXPECT_EQ(sched.lock_waiting_count(), 0u);
+  sched.lock_waiting_pids(pids);
+  EXPECT_TRUE(pids.empty());
+  EXPECT_TRUE(sched.check_tables());
+}
+
+} // namespace
+
+TEST(SchedulerLockPort, ListsItsLockWaiters) {
+  {
+    SCOPED_TRACE("sync");
+    lists_its_lock_waiters<scheduler>();
+  }
+  {
+    SCOPED_TRACE("async");
+    lists_its_lock_waiters<async_scheduler>();
+  }
+}
+
+namespace {
+
+void throw_on_cross_home_note(const detail::lock_note &) {
+  throw std::runtime_error("injected: cross_home_note");
+}
+
+double seconds_since(std::chrono::steady_clock::time_point t0) {
+  return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+}
+
+// Two homes on one manager, stepped by this thread. A's a1 holds "k" shared, parked on a message;
+// B's b1 asks for it exclusive with a 0.1 s timeout and queues; A's a2 asks for it shared and
+// queues behind b1 (FIFO, protocol 3.1). b1's expiry cancels its ticket, which grants a2: a note
+// for A, whose delivery the hook makes throw, so B's wait_expired throws in the middle of its
+// pass, b1 not yet timed out. Then b2 on B times out with no hook. With `reap`, b1 is killed and
+// reaped between the two passes: an expiry list still holding it would be read after the free
+// (ASan reports it). Without, b1 was flagged by the throw, and b2's pass times it out too.
+template <class S> void a_throwing_wait_expired_keeps_no_stale_expiry(bool reap) {
+  lock_run_world w;
+  const auto mgr = std::make_shared<lock_manager>();
+  S a;
+  S b;
+  a.set_lock_manager(mgr);
+  b.set_lock_manager(mgr);
+  const std::string timed =
+      R"((try (with-lock "k" :timeout 0.1 "granted") (catch (TimeoutError e) "timeout")))";
+  const int a1 = w.submit(a, R"((with-lock "k" :shared (msg-recv "go")))");
+  for (int i = 0; i < 1000 && waiting_on(a, a1) != "msg go"; ++i)
+    step_of(a);
+  ASSERT_EQ(waiting_on(a, a1), "msg go");
+  const int b1 = w.submit(b, timed);
+  for (int i = 0; i < 1000 && waiting_on(b, b1) != "lock /k"; ++i)
+    step_of(b);
+  ASSERT_EQ(waiting_on(b, b1), "lock /k");
+  const int a2 = w.submit(a, R"((with-lock "k" :shared 2))");
+  for (int i = 0; i < 1000 && waiting_on(a, a2) != "lock /k"; ++i)
+    step_of(a);
+  ASSERT_EQ(waiting_on(a, a2), "lock /k");
+
+  {
+    static const detail::lock_test_hooks hooks{.cross_home_note = throw_on_cross_home_note};
+    struct hooks_guard {
+      hooks_guard() { detail::set_lock_test_hooks(&hooks); }
+      ~hooks_guard() { detail::set_lock_test_hooks(nullptr); }
+    } guard;
+    bool threw = false;
+    for (const auto t0 = std::chrono::steady_clock::now(); !threw && seconds_since(t0) < 10.0;) {
+      try {
+        step_of(b);
+      } catch (const std::runtime_error &) {
+        threw = true;
+      }
+    }
+    ASSERT_TRUE(threw) << "b1's expiry never reached the throwing delivery";
+  }
+  EXPECT_EQ(waiting_on(b, b1), "lock /k"); // the throw cut its timeout short
+  if (reap) {
+    ASSERT_TRUE(b.kill(b1));
+    ASSERT_TRUE(b.reap(b1));
+  }
+  const int b2 = w.submit(b, timed);
+  const auto done = [&] {
+    return is_finished(b.get_process_info(b2)->status) &&
+           (reap || is_finished(b.get_process_info(b1)->status));
+  };
+  for (const auto t0 = std::chrono::steady_clock::now(); !done() && seconds_since(t0) < 10.0;)
+    step_of(b);
+  ASSERT_TRUE(is_finished(b.get_process_info(b2)->status));
+  EXPECT_EQ(std::get<std::string>(b.get_result(b2)->v), "timeout");
+  if (!reap) {
+    ASSERT_TRUE(is_finished(b.get_process_info(b1)->status)) << "b1's expiry was lost";
+    EXPECT_EQ(std::get<std::string>(b.get_result(b1)->v), "timeout");
+  }
+  EXPECT_TRUE(b.check_tables());
+  // a2's grant was made, but its wake was the note the hook threw on: a kill ends both.
+  EXPECT_TRUE(a.kill(a2));
+  EXPECT_TRUE(a.kill(a1));
+  EXPECT_TRUE(a.check_tables());
+  EXPECT_NO_THROW(mgr->check());
+}
+
+} // namespace
+
+TEST(SchedulerLockPort, AThrowingWaitExpiredKeepsNoStaleExpiry) {
+  for (const bool reap : {false, true}) {
+    SCOPED_TRACE(reap ? "b1 reaped after the throw" : "b1 kept");
+    {
+      SCOPED_TRACE("sync");
+      a_throwing_wait_expired_keeps_no_stale_expiry<scheduler>(reap);
+    }
+    {
+      SCOPED_TRACE("async");
+      a_throwing_wait_expired_keeps_no_stale_expiry<async_scheduler>(reap);
+    }
+  }
+}
+
 TEST(SchedulerLockPort, ARefusedAttachKeepsTheHomeAndManager) {
   {
     SCOPED_TRACE("sync");
