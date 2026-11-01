@@ -143,6 +143,18 @@ std::vector<float> &footprint_of(const vehicle_desc &d) {
   return offsets;
 }
 
+// JOLT_EXP_BODY_MARGIN_M > 0: the training's collision penalty on the vehicle's own body, nav's
+// footprint (four discs of 1.3 half-widths, tail to nose, which cover the corners) with that
+// margin in metres, instead of the scene's 3 m disc on the rear axle and its 7 m d_hat.
+void use_body_penalty(cvc::nav::train_config &cfg, const vehicle_desc &d) {
+  const char *e = std::getenv("JOLT_EXP_BODY_MARGIN_M");
+  if (!e || !(std::atof(e) > 0.0))
+    return;
+  cfg.coll_offsets = footprint_of(d);
+  cfg.coll_rr = static_cast<float>(1.3 * d.half_extents.y * kS);
+  cfg.d_safe = static_cast<float>(std::atof(e) * kS);
+}
+
 // nav's vehicle in the trained metric, sized from the physics vehicle: its body, wheelbase and
 // steering lock, an acceleration it can make, and a corner cap of `a_lat_g`.
 sim_world::config nav_config(const vehicle_desc &d, double vmax_mps, double a_lat_g) {
@@ -1377,7 +1389,9 @@ TEST(NavPlantConvergence, CheckpointSelectionOnJoltReach) {
 // (plant_reach_options::time_budget_mps), and JOLT_EXP_SELECT_MPS=1 selects checkpoints on that
 // instead of reach. JOLT_EXP_PROGRESS_MPS (4) is train_config::progress_speed for the arms that
 // give a w_progress. JOLT_EXP_EPISODE is train_config::episode_steps (0, a fresh batch every
-// outer step). JOLT_EXP_SCORE (paths separated by ';') scores saved policies on the
+// outer step). JOLT_EXP_BODY_MARGIN_M (metres) charges the collision penalty on the Humvee's own
+// footprint with that margin (use_body_penalty). JOLT_EXP_SCORE (paths separated by ';') scores
+// saved policies on the
 // held-out seeds first, untrained, with the same report (JOLT_EXP_ARMS=none: only those).
 TEST(NavPlantConvergence, JoltTrainedHumveeOnJoltReach) {
   REQUIRE_JOLT();
@@ -1432,6 +1446,7 @@ TEST(NavPlantConvergence, JoltTrainedHumveeOnJoltReach) {
   // JOLT_EXP_EPISODE: train_config::episode_steps (0: a fresh batch every outer step).
   base.episode_steps = env_int("JOLT_EXP_EPISODE", 0);
   base.episode_tol = held.reach_tol;
+  use_body_penalty(base, hv);
   plant_reach_options val = held;
   val.seeds.clear();
   for (int k = 0; k < env_int("JOLT_EXP_VAL", 24); ++k)
@@ -1659,6 +1674,7 @@ TEST(NavPlantConvergence, WhyTrainingSlowsTheJoltHumvee) {
   cfg.veh_a_lat_max = static_cast<float>(0.5 * kG * kS);
   cfg.goal_max = 2.0f;
   cfg.goal_min = 0.5f;
+  use_body_penalty(cfg, hv);
   use_jolt_rollout(cfg, sc, hv, 32, 200, 8u);
   cvc::nav::train_config goal_only = cfg, priced = cfg;
   goal_only.w_coll = 0.0f;

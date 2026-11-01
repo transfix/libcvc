@@ -263,6 +263,15 @@ struct train_config {
   // prices a vehicle's lateness over its whole trip.
   int episode_steps = 0;
   float episode_tol = 0.15f;
+  // The collision penalty's body (rollout == jolt): discs of radius coll_rr centred coll_offsets
+  // along the heading from the rear axle (normalized), each paying w_coll / window * (d_safe -
+  // its clearance) / d_safe while it is within d_safe of an obstacle. Empty (the default): one
+  // disc of the scene's rr on the rear axle. For the Humvee at demo3's metric that is a 3 m disc,
+  // and with the scene's d_hat (7 m) as d_safe it charged a vehicle within ~10 m of any wall:
+  // the collision term then outweighed the goal's 13 to 1, and training bought clearance with
+  // speed.
+  std::vector<float> coll_offsets;
+  float coll_rr = 0.0f;
 };
 
 // The trainable CoefMLP: its dense layers as flat params + Adam state. Distinct

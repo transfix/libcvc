@@ -90,6 +90,19 @@ void validate_jolt(const train_config &c) {
         "), and ground_mu > 0: cvc::physics::nav_plant::dyn4_params_at(desc, veh_L)");
 }
 
+// A collision body (coll_offsets) needs the Jolt rollout and a disc radius.
+void validate_body(const train_config &c) {
+  if (c.coll_offsets.empty())
+    return;
+  if (c.rollout != rollout_kind::jolt)
+    throw std::invalid_argument("cvc::nav::coef_trainer: coll_offsets needs rollout_kind::jolt");
+  if (!(std::isfinite(c.coll_rr) && c.coll_rr > 0.0f) ||
+      !std::all_of(c.coll_offsets.begin(), c.coll_offsets.end(),
+                   [](float o) { return std::isfinite(o); }))
+    throw std::invalid_argument(
+        "cvc::nav::coef_trainer: coll_offsets needs coll_rr > 0 and finite offsets");
+}
+
 // w_progress != 0 needs the Jolt rollout and a speed to keep.
 void validate_progress(const train_config &c) {
   if (c.w_progress == 0.0f)
@@ -286,6 +299,7 @@ double plant_window(const training_scene &scene, const train_config &cfg, const 
   validate_jolt(cfg);
   validate_energy(cfg);
   validate_progress(cfg);
+  validate_body(cfg);
   rollout_plant &plant = *cfg.plant;
   if (plant.size() != n)
     throw std::invalid_argument("cvc::nav::coef_trainer: train_config::plant holds " +
@@ -311,6 +325,11 @@ double plant_window(const training_scene &scene, const train_config &cfg, const 
   const float d_safe = cfg.d_safe > 0.0f ? cfg.d_safe : d_hat;
   const float inv_d_safe = 1.0f / d_safe;
   const auto at = [n](int t, int ag) { return static_cast<std::size_t>(t) * n + ag; };
+  // The collision penalty's discs (train_config::coll_offsets): their offsets along the heading
+  // from the rear axle and their radius; by default one disc of the scene's rr on the axle.
+  const std::vector<float> axle_only{0.0f};
+  const std::vector<float> &disc_off = cfg.coll_offsets.empty() ? axle_only : cfg.coll_offsets;
+  const float disc_r = cfg.coll_offsets.empty() ? rr : cfg.coll_rr;
   // The time pressure (train_config::w_progress): a step's shortfall from the progress
   // progress_speed makes, as a fraction of it. `full` tells the backward which bound p* took: a
   // step's worth (the shortfall falls as |o_t - goal| grows) or the distance left to progress_tol
@@ -364,10 +383,13 @@ double plant_window(const training_scene &scene, const train_config &cfg, const 
     for (int ag = 0; ag < n; ++ag) {
       const diff::dyn4_state<float> s1 = plant.state(ag);
       tape[at(t + 1, ag)] = s1;
-      const diff::sample cs = diff::sample_fwd(F, s1.x, s1.y);
-      const float pen = d_safe - (cs.phi - rr);
-      if (pen > 0.0f)
-        total_loss += static_cast<double>(coll_w) * pen * inv_d_safe * inv_n;
+      const float ch = std::cos(s1.psi), sh = std::sin(s1.psi);
+      for (const float off : disc_off) {
+        const diff::sample cs = diff::sample_fwd(F, s1.x + off * ch, s1.y + off * sh);
+        const float pen = d_safe - (cs.phi - disc_r);
+        if (pen > 0.0f)
+          total_loss += static_cast<double>(coll_w) * pen * inv_d_safe * inv_n;
+      }
       if (progress) {
         const shortfall sf =
             progress_shortfall(tape[at(t, ag)], s1, goal[2 * ag], goal[2 * ag + 1]);
@@ -431,13 +453,19 @@ double plant_window(const training_scene &scene, const train_config &cfg, const 
       const diff::dyn4_state<float> &s0 = tape[at(t, ag)], &s1 = tape[at(t + 1, ag)];
       const float al = S.coef[0], be = S.coef[1], ga = S.coef[2];
       float e_prog_t = 0.0f;
-      const diff::sample cs = diff::sample_fwd(F, s1.x, s1.y);
-      if (d_safe - (cs.phi - rr) > 0.0f) {
-        float dox, doy;
-        diff::sample_bwd(cs, -static_cast<float>(coll_w) * inv_d_safe * static_cast<float>(inv_n),
-                         0.0f, 0.0f, dox, doy);
-        g1.x += dox;
-        g1.y += doy;
+      // Each disc's centre is the axle plus off along the heading, so its gradient reaches psi too.
+      const float ch = std::cos(s1.psi), sh = std::sin(s1.psi);
+      for (const float off : disc_off) {
+        const diff::sample cs = diff::sample_fwd(F, s1.x + off * ch, s1.y + off * sh);
+        if (d_safe - (cs.phi - disc_r) > 0.0f) {
+          float dox, doy;
+          diff::sample_bwd(cs, -static_cast<float>(coll_w) * inv_d_safe * static_cast<float>(inv_n),
+                           0.0f, 0.0f, dox, doy);
+          g1.x += dox;
+          g1.y += doy;
+          if (off != 0.0f)
+            g1.psi += off * (ch * doy - sh * dox);
+        }
       }
       // The shortfall rises with |o_{t+1} - goal| and, at a full step's p*, falls with
       // |o_t - goal|: that part goes on o_t's gradient below.
@@ -857,6 +885,7 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
     validate_dynamic(cfg_);
   validate_energy(cfg_);
   validate_progress(cfg_);
+  validate_body(cfg_);
   const float rr = scene.rr, d_hat = scene.d_hat, vmax = scene.vmax, hdt = scene.dt;
   // The energy term (P8c): each step's energy as a fraction of what full power draws over it;
   // with energy_ref, only what the step's progress does not pay for (`priced`).

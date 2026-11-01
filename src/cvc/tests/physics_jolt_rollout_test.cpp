@@ -547,6 +547,71 @@ TEST(JoltRollout, ContinuingEpisodesKeepTheBatchDriving) {
   EXPECT_THROW(ts.train(sc), std::invalid_argument);
 }
 
+// The collision penalty on the vehicle's body (train_config::coll_offsets): one disc of the
+// scene's rr on the axle is the default, bit for bit, loss and gradient. The Humvee's footprint
+// (four discs of 1.3 half-widths, tail to nose) with a margin of half a half-width gives a finite,
+// non-negative term (at this metric, 0.106 units a metre, the default's disc is 1.4 m with a
+// 3.3 m d_hat, and the footprint's four discs, each paying per its own small margin, charge more;
+// at demo3's 0.05 the default is 3 m and 7 m). A body without a radius, or on a rollout other
+// than Jolt's, throws.
+TEST(JoltRollout, BodyPenaltyOnTheVehiclesFootprint) {
+  REQUIRE_JOLT();
+  const training_scene sc = cvc::nav::city_scene(96);
+  train_config cfg = humvee_cfg(16);
+  const int n = cfg.n;
+  coef_trainer warm(cfg, 1);
+  std::vector<float> o, goal, dummy(2 * n, 0.0f);
+  reset_batch(sc, cfg, 21, o, goal);
+  warm.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n, 20, nullptr);
+  const std::vector<std::uint8_t> start = cfg.plant->save();
+  const auto loss = [&](const train_config &c, std::vector<float> *g) {
+    cfg.plant->restore(start);
+    coef_trainer t(c, 1);
+    return t.loss_and_grad(sc, dummy.data(), dummy.data(), goal.data(), n, 30, g);
+  };
+  train_config axle = cfg;
+  axle.coll_offsets = {0.0f};
+  axle.coll_rr = sc.rr;
+  std::vector<float> g0, g1;
+  EXPECT_EQ(loss(cfg, &g0), loss(axle, &g1));
+  EXPECT_EQ(g0, g1);
+
+  const vehicle_desc hv = vehicle_desc::humvee();
+  const double k = cfg.veh_L / hv.wheelbase(); // normalized units per metre
+  double rear = 0.0;
+  for (const cvc::physics::axle_desc &a : hv.axles)
+    if (!a.steered)
+      rear = std::min(rear, a.x);
+  const double hy = hv.half_extents.y;
+  const double tail = -hv.half_extents.x - rear + 0.7 * hy,
+               nose = hv.half_extents.x - rear - 0.7 * hy;
+  train_config body = cfg, none = cfg;
+  for (int i = 0; i < 4; ++i)
+    body.coll_offsets.push_back(static_cast<float>((tail + (nose - tail) * i / 3.0) * k));
+  body.coll_rr = static_cast<float>(1.3 * hy * k);
+  body.d_safe = static_cast<float>(0.5 * hy * k);
+  none.w_coll = 0.0f;
+  const double goal_part = loss(none, nullptr);
+  const double old_coll = loss(cfg, nullptr) - goal_part,
+               new_coll = loss(body, nullptr) - goal_part;
+  std::printf("[body] collision term over 30 steps: 3 m disc + 7 m d_hat %.4f, footprint + %.2f m "
+              "%.4f\n",
+              old_coll, 0.5 * hy, new_coll);
+  EXPECT_GE(new_coll, 0.0);
+  EXPECT_TRUE(std::isfinite(new_coll));
+
+  train_config no_radius = body;
+  no_radius.coll_rr = 0.0f;
+  EXPECT_THROW(loss(no_radius, nullptr), std::invalid_argument);
+  train_config surrogate;
+  surrogate.coll_offsets = {0.0f};
+  surrogate.coll_rr = 0.1f;
+  coef_trainer ts(surrogate, 1);
+  std::vector<float> og(2 * n, 0.0f);
+  EXPECT_THROW(ts.loss_and_grad(sc, og.data(), og.data(), og.data(), n, 1, nullptr),
+               std::invalid_argument);
+}
+
 // use_jolt_rollout sets a train_config up for Jolt in one call: the plant, the calibrated model and
 // its price, the same fit as the steps it takes one by one.
 TEST(JoltRollout, UseJoltRolloutSetsTheTrainerUp) {
