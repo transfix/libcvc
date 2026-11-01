@@ -17,6 +17,7 @@
 #ifndef CVC_STATE_EXEC_LOCK_MANAGER_H
 #define CVC_STATE_EXEC_LOCK_MANAGER_H
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -30,8 +31,8 @@ namespace cvc::state_exec {
 /// A request's mode: shared (S) or exclusive (X). Two shared requests never conflict.
 enum class lock_mode : std::uint8_t { shared, exclusive };
 
-/// How a manager is called: by one thread (single), or by several under its mutex (shared,
-/// phase L3). Fixed at construction.
+/// How a manager is called: by one thread (single), or by several, each operation under the
+/// manager's mutex (shared). Fixed at construction.
 enum class lock_threading : std::uint8_t { single, shared };
 
 /// Whether this build has threads. False only on Emscripten without pthreads, where every home is
@@ -120,8 +121,10 @@ public:
   };
 
   lock_manager();
-  /// Until phase L3.1 lands, options.threading must be single: throws std::invalid_argument
-  /// otherwise.
+  /// A single manager is called by one thread at a time (debug builds assert it); a shared one
+  /// takes its mutex (M.mu) around every operation, so homes on several threads can share it
+  /// (design 8.3). Either accepts any number of homes; only a shared one accepts a home attached
+  /// with lock_attach::cross_thread.
   explicit lock_manager(options opts);
   ~lock_manager();
   lock_manager(const lock_manager &) = delete;
@@ -145,8 +148,15 @@ public:
   const detail::lock_table &table() const { return *table_; }
 
 private:
+  friend class detail::lock_home; // counts its posts (below)
+
   options opts_;
   std::unique_ptr<detail::lock_table> table_;
+  // lock_stats' port counters (protocol 4.14, 5.7): bumped by the homes with relaxed adds outside
+  // M.mu, read by stats().
+  std::atomic<std::uint64_t> posts_{0};
+  std::atomic<std::uint64_t> posts_dropped_{0};
+  std::atomic<std::uint64_t> posts_discarded_{0};
 };
 
 } // namespace cvc::state_exec

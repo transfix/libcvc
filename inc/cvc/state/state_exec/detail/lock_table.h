@@ -4,11 +4,12 @@
  *        member function per manager operation.
  *
  * Internal: a lock home (detail/lock_home.h) and the lock tests call it; programs and hosts use
- * lock_manager.h. Each operation is atomic (single mode: one thread calls the table; shared mode,
- * phase L3, adds the manager's mutex around each). Each returns its result and appends its
- * notifications (protocol 2.3) to the `out` list it is given; the caller delivers them after the
- * operation returns (protocol 4.14). No operation calls into a scheduler, a port, a process or the
- * state tree.
+ * lock_manager.h. Each public member is atomic (protocol 0): in single mode one thread calls the
+ * table (debug builds assert it); in shared mode (options::shared, phase L3.1) each runs under the
+ * manager's mutex M.mu, from any thread. Each returns its result and appends its notifications
+ * (protocol 2.3) to the `out` list it is given; the caller delivers them after the operation
+ * returns, with M.mu released (protocol 4.14). No operation calls into a scheduler, a port, a
+ * process or the state tree.
  *
  * Keys are absolute and canonical (protocol 1): segments joined by '.', each non-empty with no '.'
  * and no '#'; a request's keys are sorted by their segment tuples and none is a prefix of another.
@@ -239,7 +240,7 @@ public:
     bool self_check = false;
     bool coalesce_relevels = true;
     bool one_home = true; // before phase L3 a manager accepts one home (protocol 4.4)
-    bool shared = false;  // shared mode: every operation under M.mu (phase L3.1)
+    bool shared = false;  // shared mode: every operation under M.mu, from any thread (L3.1)
     std::uint32_t mutations = 0;
   };
 
@@ -309,8 +310,9 @@ public:
   /// A hold's keys (its trie nodes, canonical order), mode and generation; empty keys when the
   /// hold is gone.
   std::span<lock_node *const> hold_keys(std::uint64_t hold) const;
-  /// Count a hold left at a normal termination (protocol 5.6; lock_stats::leaked_at_exit).
-  void note_leaked_at_exit() { ++leaked_at_exit_; }
+  /// Count a hold left at a normal termination (protocol 5.6; lock_stats::leaked_at_exit). Any
+  /// thread: a relaxed add, outside M.mu.
+  void note_leaked_at_exit() { leaked_at_exit_.fetch_add(1, std::memory_order_relaxed); }
 
   // -- reads for checks (lock_home::check_quiescent's home-side clauses) -----------------------
   struct rec_view {
@@ -383,7 +385,7 @@ private:
   struct impl;
   options opts_;
   std::unique_ptr<impl> impl_;
-  std::uint64_t leaked_at_exit_ = 0;
+  std::atomic<std::uint64_t> leaked_at_exit_{0};
 };
 
 /// Sorts canonical keys by their segment tuples: '.' orders before every other character.
