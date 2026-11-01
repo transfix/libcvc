@@ -121,14 +121,58 @@ std::optional<frame_outcome> outcome_of(const value_t &slot) {
 // The home
 // ---------------------------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------------------------
+// The port (protocol 2.3)
+// ---------------------------------------------------------------------------------------------
+
+lock_port::lock_port(std::shared_ptr<wakeup> wake) : wake_(std::move(wake)) {}
+lock_port::~lock_port() = default;
+
+bool lock_port::post(const lock_post &x) {
+  std::lock_guard<std::mutex> g(mu_);
+  if (closed_)
+    return false;
+  queue_.push_back(x);
+  pending_.store(true, std::memory_order_relaxed);
+  if (wake_)
+    wake_->notify();
+  return true;
+}
+
+void lock_port::close() {
+  std::lock_guard<std::mutex> g(mu_);
+  closed_ = true;
+}
+
+bool lock_port::closed() const {
+  std::lock_guard<std::mutex> g(mu_);
+  return closed_;
+}
+
+void lock_port::drain(std::vector<lock_post> &out) {
+  out.clear();
+  std::lock_guard<std::mutex> g(mu_);
+  out.swap(queue_);
+  pending_.store(false, std::memory_order_relaxed);
+}
+
+void lock_fuzz_point(lock_fuzz_at) noexcept {} // phase L3.7
+
+// ---------------------------------------------------------------------------------------------
+// The home
+// ---------------------------------------------------------------------------------------------
+
 std::size_t lock_home::cache_hash::operator()(const cache_key &k) const noexcept {
   return std::hash<std::string_view>{}(k.written) ^ (std::size_t(k.scope) * 0x9E3779B97F4A7C15ull);
 }
 
 lock_home::lock_home(std::shared_ptr<lock_manager> mgr, lock_sched_ops &ops,
-                     scheduling_policy policy)
+                     scheduling_policy policy, std::shared_ptr<wakeup> wake, lock_attach attach)
     : mgr_(std::move(mgr)), table_(mgr_->table()), ops_(ops),
-      prio_(policy != scheduling_policy::round_robin) {
+      prio_(policy != scheduling_policy::round_robin),
+      port_(std::make_shared<lock_port>(std::move(wake))),
+      progress_(std::make_shared<std::atomic<std::int64_t>>(
+          lock_clock::now().time_since_epoch().count())) {
   const lock_test_hooks *hooks = lock_test_hooks_get();
   const std::size_t capacity =
       hooks && hooks->home_cache_capacity ? hooks->home_cache_capacity : kDefaultCacheCapacity;
@@ -138,13 +182,25 @@ lock_home::lock_home(std::shared_ptr<lock_manager> mgr, lock_sched_ops &ops,
     free_.push_back(i);
   index_.reserve(capacity);
   lock_notes notes;
-  id_ = table_.attach_home(prio_, nullptr, nullptr, notes); // no port before phase L3
+  id_ = table_.attach_home(prio_, port_, progress_, notes, attach);
   deliver(notes); // none: an attach changes no edge and no base
 }
 
+void lock_home::drain_port() {
+  port_->drain(drained_);
+  for (const lock_post &post : drained_)
+    apply_post(post);
+  drained_.clear();
+}
+
+std::vector<std::pair<lock_pid, std::int64_t>> lock_home::blocking_sinks(int pid) const {
+  return table_.blocking_sinks(lock_pid{id_, pid});
+}
+
 lock_home::~lock_home() {
-  // 5.7. No port to close before phase L3. The detach ends every process of the home with
-  // abandon and drops the cache's references; nothing it notifies targets this home.
+  // 5.7. The port closes first: no post lands after it. The detach ends every process of the
+  // home with abandon and drops the cache's references; nothing it notifies targets this home.
+  port_->close();
   try {
     lock_notes notes;
     table_.detach_home(id_, notes);
@@ -550,9 +606,10 @@ void lock_home::set_base(process &p) {
 
 void lock_home::deliver(const lock_notes &notes) {
   for (const lock_note &n : notes) {
-    if (n.home != id_)
-      continue;         // another home's: phase L3 posts it to that home's port
-    apply_post(n.post); // this home's: at once (4.14)
+    if (n.home == id_)
+      apply_post(n.post); // this home's: at once (4.14)
+    else if (n.port)
+      n.port->post(n.post); // another home's: to its port; dropped when closed (2.3)
   }
 }
 

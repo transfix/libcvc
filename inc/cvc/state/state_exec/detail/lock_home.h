@@ -5,12 +5,14 @@
  *
  * Internal. One home per scheduler, made when the scheduler first needs one (design 8.4). It owns
  * the private state of protocol 2.2 for its processes (process::locks and the lock wait fields),
- * a key cache (design 8.4), and the calls into the manager's table. It runs on the thread that
- * pumps its scheduler; nothing here is thread-safe.
+ * a key cache (design 8.4), its port (protocol 2.3), and the calls into the manager's table. It
+ * runs on the thread that pumps its scheduler; nothing here is thread-safe but lock_port, whose
+ * post() any thread calls.
  */
 #ifndef CVC_STATE_EXEC_DETAIL_LOCK_HOME_H
 #define CVC_STATE_EXEC_DETAIL_LOCK_HOME_H
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -21,6 +23,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -42,6 +45,58 @@ using lock_clock = std::chrono::steady_clock;
 
 struct home_request;
 class lock_home;
+class wakeup; // process_table.h
+
+// ---------------------------------------------------------------------------------------------
+// The port (protocol 2.3)
+// ---------------------------------------------------------------------------------------------
+
+/// A home's port: the posts that operations on other homes' threads make for its processes. Held
+/// by its home and by every notification captured for it, so a poster keeps it (and the wakeup
+/// it shares with its scheduler) alive while the scheduler is destroyed. Its mutex is its own,
+/// never a scheduler's: post, close and drain take it, and nothing but the wakeup's notify() is
+/// called under it.
+class lock_port {
+public:
+  /// `wake`: the scheduler's wakeup, notified by every post (null: none to notify).
+  explicit lock_port(std::shared_ptr<wakeup> wake);
+  ~lock_port();
+  lock_port(const lock_port &) = delete;
+  lock_port &operator=(const lock_port &) = delete;
+
+  /// Any thread: append `x`, set pending and notify the wakeup, all under the port's mutex; false
+  /// (and nothing appended) when the port is closed. The closed test, the append and the signal
+  /// are one critical section, so a post either lands before close() or is dropped.
+  bool post(const lock_post &x);
+  /// The home's thread, as the home is destroyed (protocol 5.7): no post lands after it.
+  void close();
+  bool closed() const;
+  /// The home's thread: swap the queue into `out` (cleared first, so its capacity is reused) and
+  /// clear pending, under the port's mutex.
+  void drain(std::vector<lock_post> &out);
+  /// Whether a post landed since the last drain. A relaxed load: a post racing it is seen at the
+  /// next test, and its notify() ends any wait begun meanwhile.
+  bool pending() const noexcept { return pending_.load(std::memory_order_relaxed); }
+
+private:
+  mutable std::mutex mu_;
+  std::vector<lock_post> queue_;
+  bool closed_ = false;
+  std::atomic<bool> pending_{false};
+  std::shared_ptr<wakeup> wake_;
+};
+
+/// The protocol points where CVC_EXEC_FUZZ=<seed> yields (phase L3.7, LT-4; gap G-27).
+enum class lock_fuzz_at : std::uint8_t {
+  after_op,          // after a manager operation, before its notes are delivered
+  post_enter,        // lock_port::post, before its critical section
+  post_exit,         // lock_port::post, after its critical section
+  drain_between,     // lock_home::drain_port, between two posts
+  close_then_detach, // ~lock_home, between the port's close and detach_home
+};
+/// With CVC_EXEC_FUZZ set (read once): a per-thread PRNG seeded from it and the thread yields,
+/// sometimes sleeping 0-50 us. Unset: one relaxed load.
+void lock_fuzz_point(lock_fuzz_at where) noexcept;
 
 // ---------------------------------------------------------------------------------------------
 // The lock frames (design 8.5)
@@ -206,11 +261,14 @@ struct frame_outcome {
 class lock_home {
 public:
   /// Attach a home to `mgr` for a scheduler (`ops`) of `policy`: the home applies priorities
-  /// (protocol 2.1's prio) exactly when the policy is priority or priority_rr (design 12). No port
-  /// before phase L3.
-  lock_home(std::shared_ptr<lock_manager> mgr, lock_sched_ops &ops, scheduling_policy policy);
-  /// Protocol 5.7: detach (every process of the home ended with abandon), then clear every
-  /// process's lock fields. Runs before any other scheduler member is destroyed.
+  /// (protocol 2.1's prio) exactly when the policy is priority or priority_rr (design 12). The
+  /// home makes its port, sharing `wake` (the scheduler's wakeup; null: posts notify nothing), and
+  /// its progress cell, and passes both and `attach` to the manager (protocol 4.4).
+  lock_home(std::shared_ptr<lock_manager> mgr, lock_sched_ops &ops, scheduling_policy policy,
+            std::shared_ptr<wakeup> wake = nullptr, lock_attach attach = {});
+  /// Protocol 5.7: close the port, detach (every process of the home ended with abandon), deliver,
+  /// discard the port's posts, then clear every process's lock fields. Runs before any other
+  /// scheduler member is destroyed.
   ~lock_home();
   lock_home(const lock_home &) = delete;
   lock_home &operator=(const lock_home &) = delete;
@@ -252,11 +310,28 @@ public:
   void wait_expired(std::vector<process *> &expired);
   /// 5.8: `p`'s base priority changed (p.priority).
   void set_base(process &p);
-  /// 4.14: apply notifications (before phase L3 every one is this home's, applied at once).
+  /// 4.14: apply notifications: this home's at once, another home's posted to its port.
   void deliver(const lock_notes &notes);
   /// 5.9: apply one post to this home's process: a wake (stale ones ignored), or a relevel, which
   /// reads the manager's current value and re-levels the process only when it changed.
   void apply_post(const lock_post &post);
+
+  // -- the scheduler's per-step calls (protocol 5.9, design 8.4) --------------------------------
+  /// Whether the port holds posts: the scheduler then calls drain_port() between steps, and its
+  /// waits (wait_for_work, idle_wait) end.
+  bool port_pending() const noexcept { return port_->pending(); }
+  /// Apply the port's posts in FIFO order (5.9).
+  void drain_port();
+  /// The end-of-step clock reading of a step of this home's scheduler (a relaxed store; read only
+  /// by the manager's blocking_sinks).
+  void store_progress(lock_clock::time_point now) noexcept {
+    progress_->store(now.time_since_epoch().count(), std::memory_order_relaxed);
+  }
+  const std::shared_ptr<lock_port> &port() const { return port_; }
+
+  /// The manager's blocking_sinks for this home's `pid` (pycvc's idle test, design 9.2): each
+  /// sink with its home's last progress, in lock_clock ticks.
+  std::vector<std::pair<lock_pid, std::int64_t>> blocking_sinks(int pid) const;
 
   // -- reads
   // ---------------------------------------------------------------------------------------
@@ -333,6 +408,9 @@ private:
   lock_sched_ops &ops_;
   home_id id_ = 0;
   bool prio_ = false; // protocol 2.1's Home.prio
+  std::shared_ptr<lock_port> port_;                      // Home.port
+  std::shared_ptr<std::atomic<std::int64_t>> progress_; // Home.progress (lock_clock ticks)
+  std::vector<lock_post> drained_;                       // drain_port's buffer, reused
 
   std::vector<entry> entries_;
   std::unordered_map<cache_key, std::size_t, cache_hash, cache_eq> index_;

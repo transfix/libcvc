@@ -21,14 +21,14 @@ scheduler::scheduler(scheduling_policy policy)
 
 scheduler::~scheduler() { home_.reset(); }
 
-void scheduler::set_lock_manager(std::shared_ptr<lock_manager> mgr) {
+void scheduler::set_lock_manager(std::shared_ptr<lock_manager> mgr, lock_attach attach) {
   if (home_)
     for (const auto &[pid, p] : procs_.all())
       if (p->locks && (!p->locks->holds.empty() || p->locks->ticket))
         throw std::logic_error("set_lock_manager: process " + std::to_string(pid) +
                                " holds or waits for a lock");
   home_.reset();
-  home_ = std::make_unique<detail::lock_home>(std::move(mgr), lock_ops_, policy_);
+  home_ = std::make_unique<detail::lock_home>(std::move(mgr), lock_ops_, policy_, nullptr, attach);
 }
 
 detail::lock_home *scheduler::locks() {

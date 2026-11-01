@@ -1903,11 +1903,14 @@ lock_table::~lock_table() = default;
 
 home_id lock_table::attach_home(bool prio, std::shared_ptr<lock_port> port,
                                 std::shared_ptr<std::atomic<std::int64_t>> progress,
-                                lock_notes &out) {
+                                lock_notes &out, lock_attach attach) {
   impl &m = *impl_;
   owner_scope token(m.owner);
   if (opts_.one_home && m.attached > 0)
     throw std::logic_error("lock_table::attach_home: before L3 a manager accepts one home");
+  if (attach.cross_thread && !opts_.shared)
+    throw std::logic_error("lock_manager: a home pumped on another thread needs a shared manager "
+                           "(state_exec.locks.threading)");
   m.begin_op(&out);
   const home_id h = home_id(m.homes.size());
   impl::home_entry &e = m.homes.emplace_back();
@@ -2312,6 +2315,17 @@ std::string lock_table::canonical() const {
   return impl_->canonical();
 }
 
+std::vector<std::pair<lock_pid, std::int64_t>> lock_table::blocking_sinks(lock_pid) const {
+  return {}; // phase L3.3
+}
+
+namespace {
+std::atomic<bool> g_threaded_host{false};
+} // namespace
+
+void note_threaded_host() noexcept { g_threaded_host.store(true, std::memory_order_relaxed); }
+bool threaded_host_noted() noexcept { return g_threaded_host.load(std::memory_order_relaxed); }
+
 } // namespace detail
 
 namespace {
@@ -2330,6 +2344,7 @@ lock_manager::lock_manager(options opts) : opts_(opts) {
   if (opts_.threading != lock_threading::single)
     throw std::invalid_argument("lock_manager: shared mode is phase L3");
   detail::lock_table::options t;
+  t.one_home = false; // several homes (phase L3; protocol 4.4)
   t.inheritance = opts_.inheritance;
   t.self_check = opts_.self_check || check_forced_by_environment();
   t.coalesce_relevels = opts_.coalesce_relevels;
