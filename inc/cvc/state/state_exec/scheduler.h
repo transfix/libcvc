@@ -415,6 +415,8 @@ private:
   /// Made by locks() or set_lock_manager(); null until a with-lock needs it.
   std::unique_ptr<detail::lock_home> home_;
   std::vector<process *> lock_expired_; // reused by step_once's lock expiries
+  /// An expiry pass threw: flag the lock waiters it had not timed out and empty lock_expired_.
+  void keep_lock_expiries();
 
   /// post_control's commands, from any thread: guarded by control_mutex_, applied at the top of
   /// step_once. control_pending_ is set (under the mutex) while there are any, so a step finds
