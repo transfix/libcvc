@@ -185,7 +185,8 @@ void AppRuntime::set_host_mouse(MouseControls mouse) {
 namespace {
 
 bool any_mouse_rows(const MouseControls &m) {
-  return !m.look.empty() || !m.sensitivity.empty() || !m.invert_y.empty() || !m.invert_x.empty();
+  return !m.look.empty() || !m.sensitivity.empty() || !m.invert_y.empty() || !m.invert_x.empty() ||
+         !m.distance.empty();
 }
 
 // The Controls window: the host's pointer settings, then every key binding, with its keys and a
@@ -193,7 +194,7 @@ bool any_mouse_rows(const MouseControls &m) {
 Widget keys_window(const std::vector<KeyBinding> &bindings, const MouseControls &mouse) {
   std::vector<Widget> kids;
   if (any_mouse_rows(mouse)) {
-    kids.push_back(text("Mouse"));
+    kids.push_back(text("Mouse and camera"));
     if (!mouse.look.empty()) {
       Widget look = radio("Look", mouse.look, {"Drag to look", "Mouse look"}, "0", true);
       look.values = {"0", "1"};
@@ -206,6 +207,9 @@ Widget keys_window(const std::vector<KeyBinding> &bindings, const MouseControls 
       kids.push_back(checkbox("Invert up/down", mouse.invert_y));
     if (!mouse.invert_x.empty())
       kids.push_back(checkbox("Invert left/right", mouse.invert_x));
+    if (!mouse.distance.empty())
+      kids.push_back(slider_float("Camera distance", mouse.distance, mouse.distance_lo,
+                                  mouse.distance_hi, 10.0, "%.1f m"));
     if (!mouse.note.empty())
       kids.push_back(text(mouse.note));
     kids.push_back(separator());

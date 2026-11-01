@@ -394,6 +394,48 @@ int main() {
     check("turned off: clicks are reported again", mc.takeClick(cx, cy));
   }
 
+  printf("N. the orbit floor: looking up slides the eye in, never under the floor\n");
+  {
+    vtkNew<vtkCamera> fcam;
+    CameraController fc(ctx, "fl.camera");
+    fc.setCamera(fcam);
+    fc.frameBounds(-5, -5, 0, 5, 5, 2);
+    fc.setOrbitCenter(0.0, 0.0, 1.2); // a head 1.2 m above the floor
+    root("fl.camera.orbit.distance").value(6.0);
+    fc.setOrbitFloor(0.0, 0.25);
+    check("the floor is in the state tree",
+          root("fl.camera.orbit.floor.on").value<int>() == 1 &&
+              std::fabs(root("fl.camera.orbit.floor.clearance").value<double>() - 0.25) < 1e-9);
+    double e[3], f[3], v[3];
+    const auto pose = [&] { fc.getPose(e, f, v); };
+    // Level: 6 m out, well above the floor.
+    root("fl.camera.orbit.elevation").value(0.0);
+    pose();
+    check("level: the full distance", std::fabs(dist(e, f) - 6.0) < 1e-6);
+    // Looking up (the eye below the head) far enough to go under the floor: slid in instead.
+    root("fl.camera.orbit.elevation").value(-45.0);
+    pose();
+    check("looking up: the eye stays just above the floor", std::fabs(e[2] - 0.25) < 1e-6);
+    check("looking up: slid in along its line of sight",
+          dist(e, f) < 6.0 && std::fabs((f[2] - e[2]) / dist(e, f) -
+                                        std::sin(45.0 * 3.14159265358979323846 / 180.0)) < 1e-6);
+    // Straight up: just above the floor, under the head.
+    root("fl.camera.orbit.elevation").value(-89.0);
+    pose();
+    check("straight up: still above the floor", e[2] >= 0.25 - 1e-9 && dist(e, f) < 1.0);
+    // Back down: the distance is kept, so the eye goes back out.
+    root("fl.camera.orbit.elevation").value(20.0);
+    pose();
+    check("back down: the eye goes back out", std::fabs(dist(e, f) - 6.0) < 1e-6);
+    check("the orbit's distance was never changed",
+          std::fabs(root("fl.camera.orbit.distance").value<double>() - 6.0) < 1e-9);
+    // Without the floor the eye goes under it.
+    fc.clearOrbitFloor();
+    root("fl.camera.orbit.elevation").value(-45.0);
+    pose();
+    check("no floor: the eye goes under", e[2] < 0.0);
+  }
+
   printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
   // cvcGL's state_object / handler-thread teardown races at process exit (a known,
   // harmless issue, independent of the checks above). Hard-exit with the real

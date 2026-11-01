@@ -6657,6 +6657,7 @@ TEST(AriadneAppRuntime, ControlsWindowShowsTheHostsMouseSettings) {
   m.sensitivity = "/cam.settings.mouse_sensitivity";
   m.invert_y = "/cam.settings.invert_pitch";
   m.invert_x = "/cam.settings.invert_yaw";
+  m.distance = "/cam.orbit.distance";
   m.note = "Click the scene to start.";
   art.set_host_mouse(m);
   auto &st = cvc::state::instance(app);
@@ -6673,8 +6674,9 @@ TEST(AriadneAppRuntime, ControlsWindowShowsTheHostsMouseSettings) {
   EXPECT_TRUE(mb.saw("slider_double:Sensitivity"));
   EXPECT_TRUE(mb.saw("checkbox:Invert up/down"));
   EXPECT_TRUE(mb.saw("checkbox:Invert left/right"));
+  EXPECT_TRUE(mb.saw("slider_double:Camera distance"));
   EXPECT_TRUE(mb.saw("text_line:Click the scene to start."));
-  const std::ptrdiff_t mouse = log_index(mb, "text_line:Mouse"),
+  const std::ptrdiff_t mouse = log_index(mb, "text_line:Mouse and camera"),
                        keys = log_index(mb, "text_line:No keys to change here.");
   ASSERT_GE(mouse, 0);
   EXPECT_LT(mouse, keys) << "the mouse first, then the keys";
@@ -6703,7 +6705,7 @@ TEST(AriadneAppRuntime, ControlsWindowShowsTheHostsMouseSettings) {
   cvc::state::instance(app2)("ui.docs.d.tree.ariadne_keys.open").value(1);
   plain.runtime().render();
   ASSERT_TRUE(mb2.saw("begin_window:Controls(closable)"));
-  EXPECT_FALSE(mb2.saw("text_line:Mouse"));
+  EXPECT_FALSE(mb2.saw("text_line:Mouse and camera"));
   EXPECT_FALSE(mb2.saw_prefix("combo:Look"));
 }
 

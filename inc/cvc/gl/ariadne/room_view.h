@@ -109,6 +109,10 @@ public:
   // Where the local avatar is shown (the eased display position, at the marker's feet). False
   // until the holon has the local avatar with a known pose.
   bool self_position(double out[3]) const;
+  // Show or hide our own avatar (the box, its visor and what it wears). A third-person camera that
+  // comes inside it -- looking straight up from just above the floor -- hides it rather than show
+  // its inside. Shown by default; applied from the next update().
+  void set_self_visible(bool visible) { _self_visible = visible; }
 
   // The point on the horizontal plane z = GROUND_Z under display pixel (X, Y) (VTK display
   // coordinates, origin bottom-left, as CameraController::takeClick reports). False when the ray
@@ -176,6 +180,7 @@ private:
   int _names_age = 0;                               // frames until _names is re-read
   cvc::physics::vec3 _self_offset{0.0, 0.0, 0.0};   // easing offset on the local avatar
   bool _have_self = false;
+  bool _self_visible = true; // set_self_visible
   double _self_pos[3] = {0.0, 0.0, 0.0};
   std::vector<std::string> _warnings;
 };

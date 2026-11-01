@@ -630,13 +630,19 @@ the loader only *captures*. The host wires them:
   | the camera's fly keys, Orbit / fly, Free the mouse | `viewers.main.camera.keys.<action>` | W A S D, Space, Left Ctrl, Left Shift, Tab, Escape |
   | the avatar's walk keys (conference mode) | `viewers.main.avatar.keys.<action>` | W or Up, S or Down, A or Left, D or Right |
 
-  A host's pointer settings (`set_host_mouse`, a `MouseControls`) go above the keys, bound where
-  its camera reads them: arigl's are `viewers.main.camera.settings.mouse_look` (*Drag to look* or
-  *Mouse look*), `mouse_sensitivity`, `invert_pitch` and `invert_yaw`. Under mouse look a click
-  on the scene captures the pointer and the mouse turns the view with no button held, until
-  *Free the mouse* (Escape; in a browser, Escape always ends its pointer lock). In conference
-  mode the avatar faces where the camera aims and walks that way. `$CVC_ARIGL_LOOK=mouse` (the
-  browser page's `?look=mouse`) starts in mouse look. A touch screen keeps dragging. Change writes the binding's id to
+  A host's pointer and camera settings (`set_host_mouse`, a `MouseControls`) go above the keys,
+  bound where its camera reads them: arigl's are `viewers.main.camera.settings.mouse_look`
+  (*Drag to look* or *Mouse look*), `mouse_sensitivity`, `invert_pitch` and `invert_yaw`, and
+  *Camera distance*, the camera's `orbit.distance` (the wheel changes it too). Under mouse look
+  a click on the scene captures the pointer and the mouse turns the view with no button held,
+  until *Free the mouse* (Escape; in a browser, Escape always ends its pointer lock). In
+  conference mode the avatar faces where the camera aims and walks that way, and in either look
+  the ground is the camera's floor (`orbit.floor.*`): looking up slides the eye in along its line
+  of sight rather than under the ground, and an eye that comes inside the avatar hides it.
+  `$CVC_ARIGL_LOOK=mouse` (the browser page's `?look=mouse`) starts in mouse look. A touch
+  screen keeps dragging.
+
+  A row's Change writes the binding's id to
   `tree.ariadne_keys.capture`; while the window is open the next key down becomes its key
   (Escape keeps the old one; the comma key is stored as `Comma`), and no handler sees that key.
   Closing the window drops a capture still waiting. In the terminal every key goes to the

@@ -28,11 +28,11 @@ struct KeyBinding {
   std::string path; // the state key holding its keys ("" = keys.<id>; a leading '/' is absolute)
 };
 
-// The pointer settings a host's camera reads, for the Controls window to change beside the keys
-// (AppRuntime::set_host_mouse). Each is a state path, as KeyBinding::path is (a leading '/' is
-// absolute); "" leaves its row out. The window writes what its widgets write: the look as the
-// string "0" or "1", the inverts as 0 or 1, the sensitivity as a double; the host's camera reads
-// them, and seeds them (arigl's: CameraController's settings.*).
+// The pointer and camera settings a host's camera reads, for the Controls window to change beside
+// the keys (AppRuntime::set_host_mouse). Each is a state path, as KeyBinding::path is (a leading
+// '/' is absolute); "" leaves its row out. The window writes what its widgets write: the look as
+// the string "0" or "1", the inverts as 0 or 1, the sensitivity and distance as doubles; the host's
+// camera reads them, and seeds them (arigl's: CameraController's settings.* and orbit.distance).
 struct MouseControls {
   std::string look;        // 1: mouse look (once the scene is clicked the mouse turns the view,
                            // Escape gives the mouse back); 0: drag to look, click the scene
@@ -40,7 +40,9 @@ struct MouseControls {
   double sensitivity_lo = 0.02, sensitivity_hi = 1.0;
   std::string invert_y; // 1: moving the mouse up looks down
   std::string invert_x; // 1: moving the mouse right turns left
-  std::string note;     // a line under them, what the look does here ("" = none)
+  std::string distance; // the camera's distance from what it orbits (the wheel changes it too)
+  double distance_lo = 1.5, distance_hi = 40.0;
+  std::string note; // a line under them, what the look does here ("" = none)
 };
 
 // The Controls window's id, its open state, and the state key naming the binding whose Change

@@ -285,6 +285,17 @@ void room_view::sync_avatars(cvc::ariadne::holon &h, double wall_dt) {
                              parts[i].pos[2] - 0.5 * kAvatarHeight};
       place(part_node_id(pid, i), off);
     }
+    if (self) { // shown or hidden (set_self_visible); a rebuilt marker starts shown
+      const auto show = [&](const std::string &node_id) {
+        if (std::shared_ptr<GraphicsNode> g = sg.getGraphics(node_id);
+            g && g->isVisible() != _self_visible)
+          g->setVisible(_self_visible);
+      };
+      show(id);
+      show(visor_node_id(pid));
+      for (std::size_t i = 0; i < parts.size(); ++i)
+        show(part_node_id(pid, i));
+    }
     _heads[pid] = cvc::physics::vec3{p.position.x, p.position.y, p.position.z + kLabelHeight};
   }
 }

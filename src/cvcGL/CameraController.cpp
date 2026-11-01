@@ -352,6 +352,8 @@ struct CameraController::Impl {
   bool invertPitch = false, invertYaw = false, pointerCapture = false;
   bool mouseLook = false; // setMouseLookEnabled: in Orbit, the captured pointer turns the orbit
   double minElevation = -89.0, maxElevation = 89.0; // setOrbitElevationRange
+  bool floorOn = false; // setOrbitFloor: the eye stays above floorHeight + floorClearance
+  double floorHeight = 0.0, floorClearance = 0.25;
   double poseMirrorHz = 15.0;
   // key bindings, in SDL's names (canonical_key matches them with VTK's keysyms)
   std::string kForward = "W", kBackward = "S", kLeft = "A", kRight = "D";
@@ -504,6 +506,9 @@ void CameraController::seedState() {
   getState("orbit.elevation").value(s.orbitElevation);
   getState("orbit.min_elevation").value(s.minElevation);
   getState("orbit.max_elevation").value(s.maxElevation);
+  getState("orbit.floor.on").value(s.floorOn ? 1 : 0);
+  getState("orbit.floor.height").value(s.floorHeight);
+  getState("orbit.floor.clearance").value(s.floorClearance);
   getState("fly.position.x").value(s.flyPos.x);
   getState("fly.position.y").value(s.flyPos.y);
   getState("fly.position.z").value(s.flyPos.z);
@@ -584,6 +589,9 @@ void CameraController::readAllFromState() {
   s.orbitElevation = d("orbit.elevation", s.orbitElevation);
   s.minElevation = d("orbit.min_elevation", s.minElevation);
   s.maxElevation = d("orbit.max_elevation", s.maxElevation);
+  s.floorOn = i("orbit.floor.on", s.floorOn ? 1 : 0) != 0;
+  s.floorHeight = d("orbit.floor.height", s.floorHeight);
+  s.floorClearance = d("orbit.floor.clearance", s.floorClearance);
   s.flyPos = {d("fly.position.x", s.flyPos.x), d("fly.position.y", s.flyPos.y),
               d("fly.position.z", s.flyPos.z)};
   s.flyYaw = d("fly.yaw", s.flyYaw);
@@ -635,6 +643,9 @@ void CameraController::syncConfigToState() {
   getState("orbit.distance").value(s.orbitDistance);
   getState("orbit.min_elevation").value(s.minElevation);
   getState("orbit.max_elevation").value(s.maxElevation);
+  getState("orbit.floor.on").value(s.floorOn ? 1 : 0);
+  getState("orbit.floor.height").value(s.floorHeight);
+  getState("orbit.floor.clearance").value(s.floorClearance);
   getState("settings.move_speed").value(s.moveSpeed);
   getState("settings.sprint_multiplier").value(s.sprintMultiplier);
   getState("settings.mouse_sensitivity").value(s.sensitivity);
@@ -1335,6 +1346,21 @@ void CameraController::setOrbitElevationRange(double minDeg, double maxDeg) {
   applyToCamera();
 }
 
+void CameraController::setOrbitFloor(double height, double clearance) {
+  Impl &s = *m_impl;
+  s.floorOn = true;
+  s.floorHeight = height;
+  s.floorClearance = std::max(0.0, clearance);
+  syncConfigToState();
+  applyToCamera();
+}
+
+void CameraController::clearOrbitFloor() {
+  m_impl->floorOn = false;
+  syncConfigToState();
+  applyToCamera();
+}
+
 void CameraController::applyPointerCapture() {
   Impl &s = *m_impl;
   if (s.captureApplied == s.pointerCapture)
@@ -1528,6 +1554,11 @@ void CameraController::getPose(double eye[3], double focal[3], double up[3]) con
   } else {
     e = s.orbitCenter + orbitOffset(b, s.orbitAzimuth, s.orbitElevation, s.orbitDistance);
     f = s.orbitCenter;
+    // Under the floor (setOrbitFloor): slide the eye in along its line of sight until it is just
+    // above it. A centre below the floor is left alone (there is nowhere above it to slide to).
+    const double lo = s.floorHeight + s.floorClearance, ce = dot(f, b.up), ee = dot(e, b.up);
+    if (s.floorOn && ee < lo && ce > lo)
+      e = f + (e - f) * ((ce - lo) / (ce - ee));
   }
   eye[0] = e.x;
   eye[1] = e.y;

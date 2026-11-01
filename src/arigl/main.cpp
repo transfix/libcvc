@@ -273,8 +273,9 @@ ari::Widget keys_menu_item() {
   return ari::menu_toggle("Controls...", std::string("tree.") + ari::kKeysWindow + ".open");
 }
 
-// The camera's mouse settings, for the Controls window: it reads them from its own state. Mouse
-// look needs a mouse: a touch screen keeps dragging (a tap there must stay a tap on the scene).
+// The camera's mouse settings and distance, for the Controls window: it reads them from its own
+// state. Mouse look needs a mouse: a touch screen keeps dragging (a tap there must stay a tap on
+// the scene).
 ari::MouseControls camera_mouse(const cvc::gl::CameraController &cam, bool touch, bool room) {
   const std::string at = "/" + cam.stateName() + ".settings.";
   ari::MouseControls m;
@@ -289,6 +290,7 @@ ari::MouseControls camera_mouse(const cvc::gl::CameraController &cam, bool touch
   m.sensitivity = at + "mouse_sensitivity";
   m.invert_y = at + "invert_pitch";
   m.invert_x = at + "invert_yaw";
+  m.distance = "/" + cam.stateName() + ".orbit.distance";
   return m;
 }
 
@@ -452,16 +454,18 @@ struct ConferenceSession {
   static constexpr double kEyeHeight = 1.2; // orbit centre above the avatar's feet (m)
   // Mouse look (the Controls window; CameraController::setMouseLookEnabled): the camera aims, we
   // face where it does and walk that way. Turning proposes at most kTurnHz intents a second (a
-  // key still proposes at once), the camera pivots over our right shoulder, and its elevation is
-  // kept off the floor.
+  // key still proposes at once), and the camera pivots over our right shoulder.
   std::string walk_keys_;    // where our walk keys are bound (avatar_keys_path)
-  bool looking_ = false;     // mouse look was on at the last frame
   unsigned last_keys_ = 0;   // the movement keys held at the last proposal (a bit each)
   double next_turn_s_ = 0.0; // steady_s() before which a turn alone proposes nothing
   static constexpr double kTurnHz = 20.0;
-  static constexpr double kShoulder = 0.45;    // the pivot's offset to the right (m)
-  static constexpr double kLookDistance = 4.5; // the third-person distance it starts at (m)
-  static constexpr double kLookMinElevation = -10.0, kLookMaxElevation = 70.0; // degrees
+  static constexpr double kShoulder = 0.45; // the pivot's offset to the right (m)
+  // Either look: the ground under us is the camera's floor (an eye that would go under it, looking
+  // up, slides in instead), and an eye inside our own avatar hides it.
+  double floor_z_ = -1e300;                       // the floor last given to the camera
+  static constexpr double kFloorClearance = 0.25; // the eye's least height above the ground (m)
+  static constexpr double kInsideRadius = 0.6;    // around our feet, and up to
+  static constexpr double kInsideTop = 1.9;       // this high, the eye is inside our avatar (m)
 
   // Publish: forward the local camera (latest) and mic (ring) streams. The .ari puts their tokens
   // in "cam_token" / "mic_token". We re-stamp each outgoing frame with a COMMON host clock (one
@@ -904,30 +908,11 @@ struct ConferenceSession {
                                 [this](const cvc::clock_driver::clock_frame &f) { step_room(f); });
   }
 
-  // Mouse look starts the camera at a third-person distance, unless it is already closer.
-  void come_close() {
-    cvc::state &dist =
-        cvc::state::instance(cam_->appContext())(cam_->stateName() + ".orbit.distance");
-    if (dist.value<double>() > kLookDistance + 1.5)
-      dist.value(kLookDistance);
-  }
-
   void step_room(const cvc::clock_driver::clock_frame &f) {
     if (!holon_ || !room_view_ || !cam_)
       return;
-    // Mouse look turned on or off (the Controls window): frame the third-person view, or give the
-    // orbit back its full range.
     const bool look =
         cam_->mouseLookEnabled() && cam_->mode() == cvc::gl::CameraController::Mode::Orbit;
-    if (look != looking_) {
-      looking_ = look;
-      if (look) {
-        cam_->setOrbitElevationRange(kLookMinElevation, kLookMaxElevation);
-        come_close();
-      } else {
-        cam_->setOrbitElevationRange(-89.0, 89.0);
-      }
-    }
     // A click on the scene (not a drag, and not one the UI took) turns us to face the ground point
     // under it. Only once we are in the room: the pick needs our position. (Under mouse look the
     // camera takes the clicks: one captures the pointer.)
@@ -1039,8 +1024,6 @@ struct ConferenceSession {
         // Frame the room around you, not just you: arriving at a party, you want to see who's here.
         cam_->frameBounds(p[0] - 8.0, p[1] - 8.0, p[2], p[0] + 8.0, p[1] + 8.0, p[2] + 2.0);
         framed_ = true;
-        if (look)
-          come_close();
       }
       double c[3] = {p[0], p[1], p[2] + kEyeHeight};
       if (look) { // over the right shoulder: the crosshair clears our own head
@@ -1053,6 +1036,16 @@ struct ConferenceSession {
         cam_->setOrbitCenter(c[0], c[1], c[2]);
         orbit_center_[0] = c[0], orbit_center_[1] = c[1], orbit_center_[2] = c[2];
       }
+      if (std::fabs(p[2] - floor_z_) > 1e-3) { // we stand on the ground: the camera's floor
+        cam_->setOrbitFloor(p[2], kFloorClearance);
+        floor_z_ = p[2];
+      }
+      // Looking straight up from just above the floor, the eye comes inside our own avatar: hide
+      // it then, rather than show its inside.
+      double eye[3], focal[3], up[3];
+      cam_->getPose(eye, focal, up);
+      room_view_->set_self_visible(std::hypot(eye[0] - p[0], eye[1] - p[1]) >= kInsideRadius ||
+                                   eye[2] >= p[2] + kInsideTop);
     }
   }
 

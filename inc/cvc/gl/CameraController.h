@@ -157,6 +157,13 @@ public:
   // "orbit.max_elevation"; -89 and 89 by default). A third-person camera over a floor keeps it
   // above the floor this way: looking up past the lower limit would put the eye under it.
   void setOrbitElevationRange(double minDeg, double maxDeg);
+  // A floor the orbit's eye stays above, `height` along the up axis plus `clearance` (state
+  // "orbit.floor.on", "orbit.floor.height", "orbit.floor.clearance"; off by default). An eye
+  // that would go under it -- a third-person view looking up -- slides in along its line of sight
+  // toward the centre instead, so the view can look straight up from just above the floor. The
+  // orbit's distance is kept: the eye goes back out as the view comes down.
+  void setOrbitFloor(double height, double clearance = 0.25);
+  void clearOrbitFloor();
 
   // Cinematic TRACK mode (the third mode) — follow a named actor in the scene
   // with two-stage smoothing (position -> heading) and a critically-damped pose,
