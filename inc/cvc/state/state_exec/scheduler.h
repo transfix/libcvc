@@ -58,7 +58,8 @@ public:
   /// Use `mgr` for this scheduler's locks: the home is made and attached now, with `attach`
   /// (lock_attach::cross_thread when this scheduler may be pumped on another thread than the
   /// manager's other homes; a single-mode manager refuses it). Throws std::logic_error when a
-  /// process of this scheduler holds or waits for a lock.
+  /// process of this scheduler holds or waits for a lock, or when `mgr` refuses the attach; the
+  /// scheduler then keeps the home and manager it had.
   void set_lock_manager(std::shared_ptr<lock_manager> mgr, lock_attach attach = {});
   detail::lock_home *locks() override;
   bool check_tables() const override { return procs_.check(); }
