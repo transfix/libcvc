@@ -27,6 +27,10 @@
 //   --credential-store S  keep credentials across runs in S, a name or a path (implies --net)
 //   --credential-env N=V  credential N is the token in environment variable V (repeatable)
 //   --media-play WHEN     video: / audio: play here: auto (not over SSH), always or never
+//   --oidc-issuer ISSUER  documents may sign in with ISSUER only (repeatable; implies --net)
+//   --oidc-client I=ID    sign in to issuer I as client ID (repeatable; implies --net)
+//   --oidc-redirect-uri U a browser page's OAuth redirect URI
+//   --no-browser          never open the user's browser (sign-in shows a device code instead)
 //
 // boost::program_options reads them: --flag VALUE and --flag=VALUE both work, and an unknown flag
 // or one missing its value is an error.
@@ -40,6 +44,9 @@
 namespace cvc {
 namespace ariadne {
 
+// snapshot's wait for the document's requests when --settle does not say (AppRuntime::settle).
+inline constexpr double kDefaultSettleSeconds = 10.0;
+
 struct HostOptions {
   std::string command;               // argv[1] (the runtime decides which it accepts)
   std::string doc;                   // the document path
@@ -50,9 +57,13 @@ struct HostOptions {
   int fps = 0;         // 0 = the backend's default
   bool mouse = true;
   int width = 0, height = 0, frames = 0; // 0 = the runtime's default
-  double timeout = 0;                    // --timeout SECONDS (ari test); 0 = the default
+  // --settle SECONDS: how long snapshot waits, with the network on, for the document to go idle
+  // after its frames; 0 = kDefaultSettleSeconds.
+  double settle = 0;
+  double timeout = 0; // --timeout SECONDS (ari test); 0 = the default
   bool ansi = false;
   std::string png;
+  std::string log;      // --log FILE: the run's warnings, appended as they happen (host_warnings.h)
   std::string graphics; // empty = auto (FtxuiBackend::Options::ImageColor)
   std::vector<std::pair<std::string, std::string>> images; // --image NAME=FILE, in order
   int cell_w = 0, cell_h = 0;                              // --cell-size; 0 = ask the terminal

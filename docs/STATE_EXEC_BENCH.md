@@ -916,6 +916,55 @@ Checked: the members' caught errors add up to `cycles`, the manager counted as m
 coordinator returned `cycles`, and q requests are still queued at the end. Each step reads the clock
 and the lock stats around it: the per-step times leave that out, the region's wall includes it.
 
+#### lock.inherit (async)
+
+Priority inversion under `priority_rr` (docs/STATE_EXEC_LOCKS.md 6.2), `samples` (20) times a rep.
+A low holder (priority 10) takes `bench.pi.k` and parks in its section on `bench.pi.go`; then `m`
+(0, 1, 8) medium spinners (0) loop on `(bench-spinning)`, and a high waiter (-10) queues for the
+key. The bench delivers `bench.pi.go`, and the holder runs its section, `section` (2000) loop
+iterations between `(bench-sec 0)` and `(bench-sec 1)`, and releases; the waiter's grant runs
+`(bench-got)`. The spinners stop 50 ms after the release, and the next sample starts once
+everything has ended. The drive checks between slices of 200 steps. Extras:
+
+- `wait_ns`: p50/p90/p99/max from the release to `bench-got`. The time the holder sat parked
+  before the release is left out: only what the holder does once it can run is the inversion;
+- `section_ns`: p50/p90/p99/max of the holder's section, `bench-sec 0` to `bench-sec 1`;
+- `wait_p99_over_section`: the `wait_ns` p99 over the `section_ns` p50, the gate's ratio;
+- `starved`: the waits that lasted the 50 ms window or more;
+- `relevels`: the manager's `lock_stats::relevels` over the rep.
+
+`inherit` is `on`, or `off`: the private manager is built with
+`lock_manager::options::inheritance` false, a test-only switch. With inheritance the waiter boosts
+the holder to -10, so the holder runs its section ahead of the spinners and the ratio stays near 1.
+Without it the spinners, strictly better than the holder, run until their window ends, and every
+wait with `m` above 0 is starved. At `m=0` both settings measure the section alone.
+
+Gate (design 11.2): `gate RUN --scenario lock.inherit --where inherit=on --metric
+extra.wait_p99_over_section --max 2`.
+
+### prio.* (sync, async)
+
+Priority changes (docs/STATE_EXEC_LOCKS.md 7).
+
+#### prio.set
+
+`n` (1, 1000) processes submitted parked on a channel no one sends to, so they stay ready and in
+the run queue, and nothing steps. Process j's priority is 0 when `levels` is 1, or -20 + j mod
+`levels` when it is 40 (a point whose n is below `levels` is skipped). The region flips the first
+process's priority `changes` (100000) times between its own level and the next one down, through
+the scheduler's `set_priority_checked` with the process as its own caller. That is what
+`set-priority` calls once it has read its arguments: the permission check, the base, the re-level
+in the run queue. Extras:
+
+- `ns_per_change`: the region over the changes. Checked: every change applied, the process back at
+  its own level, and the scheduler's `check_tables()`;
+- `ns_per_pick`: `changes` picks on a `process_table` of the same shape (the schedulers' own is
+  private), timed after the region: `pick_first` under `priority`, the round-robin pick under `rr`.
+
+Under `rr` the table has one level, so a change re-levels nothing and the pick never scans levels.
+Gate (design 11.2): `gate RUN --scenario prio.set --where n=1000 --where policy=priority --metric
+extra.ns_per_change --max 500 --max-noise 10`.
+
 ## Known pathologies the suite exposes
 
 Each names the scenario that shows it; the file:line references are to the runtime at the time this

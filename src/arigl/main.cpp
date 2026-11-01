@@ -57,7 +57,8 @@
 // --net-allow ORIGIN, --net-policy FILE and --credential-store NAME|PATH (net_host.h;
 // docs/ARIADNE.md §10.3). In a browser --net alone lets the document reach the page's own origin.
 // With it on, snapshot (in a window or with --terminal) waits after its frames until the
-// document's requests have come back and its programs are idle (at most 10 s).
+// document's requests have come back and its programs are idle (at most --settle seconds, 10 by
+// default).
 
 #include <algorithm>
 #include <cctype> // std::isalnum / std::isdigit — sanitize the conference node id
@@ -71,6 +72,7 @@
 #include <cvc/ariadne/host_cli.h>
 #include <cvc/ariadne/host_info.h>
 #include <cvc/ariadne/host_signals.h>
+#include <cvc/ariadne/host_warnings.h>
 #include <cvc/ariadne/loader.h> // run_init — seed conf.room / conf.self before the first tick
 #include <cvc/ariadne/media_player.h> // §5.13 the play policy (--media-play)
 #include <cvc/ariadne/stream/stream_view.h>
@@ -78,13 +80,15 @@
 #include <cvc/ariadne/web_document.h> // arigl-web: a document named by URL
 #include <cvc/core/app.h>
 #include <cvc/media/player.h> // cvcMedia's FFmpeg + SDL3 player for video: / audio:
-#include <random>             // std::random_device — the conference node id's per-launch suffix
-#include <sstream>            // arigl info: the GL report, line by line
+#include <cvc/net/browser.h>
+#include <random> // std::random_device — the conference node id's per-launch suffix
+#include <sstream> // arigl info: the GL report, line by line
 #if CVC_ENABLE_WS || CVC_ENABLE_GRPC
 // Conference mode: a state transport joins a hosted room, chosen by the relay URL scheme —
 // ws://|wss:// (WebSocket, what browsers dial; the host page sets wss://<page-origin>/…) or grpc://
 // (native gRPC). register_conference supplies the room verbs and the shard/transport are wired here
 // in the host; both transports carry the canonical media_frame and interop via the relay's router.
+#include <cvc/ariadne/conference/avatar_panel.h>    // the Avatar window: settings, energy, ledger
 #include <cvc/ariadne/conference/room_aoi.h>        // the relay's AOI params -> peers' audio gain
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_join (re-assert after a reconnect)
 #include <cvc/ariadne/conference/room_net.h>        // our link quality + voice activity to the room
@@ -184,7 +188,7 @@ int usage(int code) {
                "allowed (in a browser, the page's own origin too), and sign-in tokens stay with\n"
                "arigl: a request names one (auth:, a credential value), it never sees it.\n"
                "With it on, snapshot waits after its frames until the document's requests are\n"
-               "back and its programs idle (at most 10 s).\n",
+               "back and its programs idle (at most --settle S seconds, 10 by default).\n",
                ari::host_flags_help().c_str());
   return code;
 }
@@ -378,6 +382,9 @@ struct ConferenceSession {
   // is declared after holon_ and torn down first (stop()).
   std::unique_ptr<cvc::ariadne::holon> holon_;
   std::unique_ptr<gla::room_view> room_view_;
+  // The Avatar window's model: our avatar's settings, energy budget and ledger, with their recent
+  // history, published to the document as self.avatar.* (avatar_panel.h).
+  cvc::ariadne::conference::avatar_panel avatar_panel_;
   cvc::gl::CameraController *cam_ = nullptr;
   cvc::ariadne::avatar_intent last_intent_; // the intent our avatar runs on (predicted with)
   cvc::ariadne::avatar_intent last_user_;   // what the keys + facing asked for last frame
@@ -897,6 +904,9 @@ struct ConferenceSession {
     // the tree, so an intent proposed before then must still reach the prediction.
     holon_->set_intent(pid_, last_intent_);
     cvc::ariadne::client_pump(*holon_, *app_, room_, pid_, f.wall_dt);
+    avatar_panel_.update(*holon_, *app_, room_, pid_, f.wall_dt);
+    if (avatar_panel_.sampled())
+      avatar_panel_.publish(*app_, prefix_);
     // Each re-alignment of our clock to the relay's drops our unacknowledged input (a visible
     // jump). The first sample after joining is one; any after that is worth a line.
     if (holon_->clock_realigns() != logged_realigns_) {
@@ -1683,16 +1693,27 @@ int run_window(const ari::HostOptions &o) {
       std::this_thread::sleep_until(start + period);
     }
     if (settle) { // the frame shows what the document's requests brought back
-      rt.app_runtime().settle([&] {
-        rt.frame(1.0 / 30.0);
-        rt.render();
-      });
+      rt.app_runtime().settle(
+          [&] {
+            rt.frame(1.0 / 30.0);
+            rt.render();
+          },
+          o.settle > 0 ? o.settle : ari::kDefaultSettleSeconds);
       rt.frame(1.0 / 30.0);
       view.writePNG(o.png.c_str());
     }
     print_warnings(rt.take_warnings());
     return rt.app_runtime().exit_code();
   }
+
+  // The frame loop prints each warning as it comes (print_warnings below); they also go to
+  // --log FILE and to the browser page (host_warnings.h).
+  ari::LiveWarnings live("arigl", o.log, /*stderr_when_not_a_terminal=*/false);
+  if (!live.error().empty()) {
+    std::fprintf(stderr, "arigl: %s\n", live.error().c_str());
+    return 2;
+  }
+  rt.app_runtime().set_warning_listener([&live](const std::string &w) { live(w); });
 
   // Input the VTK interactor does not carry: touch navigation, SDL's keys and pointer (the
   // documents' on_key / on_pointer), and the OS signals trapped below. Fed before the drain, so
@@ -1876,7 +1897,8 @@ int run_terminal(const ari::HostOptions &o) {
     if (o.net.enabled || rt.runtime().media_stale())
       rt.settle_and_render(
           [&] { rt.drain(); },
-          [&] { frame = backend->render_to_string(rt.runtime(), width, height, o.ansi); });
+          [&] { frame = backend->render_to_string(rt.runtime(), width, height, o.ansi); },
+          o.settle > 0 ? o.settle : ari::kDefaultSettleSeconds);
     if (pixels) { // Sixel draws at screen positions, so the frame starts at the top-left
       const int rows = static_cast<int>(std::count(frame.begin(), frame.end(), '\n')) + 1;
       frame = "\x1b[H\x1b[2J" + frame + backend->take_graphics() + "\x1b[" +
@@ -1889,6 +1911,14 @@ int run_terminal(const ari::HostOptions &o) {
     return rt.exit_code();
   }
 
+  // Warnings as they happen, as ari's (host_warnings.h): the screen's bottom line, --log FILE, and
+  // stderr when it is not the terminal.
+  ari::LiveWarnings live("arigl", o.log, /*stderr_when_not_a_terminal=*/true);
+  if (!live.error().empty()) {
+    std::fprintf(stderr, "arigl: %s\n", live.error().c_str());
+    return 2;
+  }
+  rt.set_warning_listener([&live](const std::string &w) { live(w); });
   ari::FtxuiBackend::RunOptions run;
   if (o.fps > 0)
     run.fps = o.fps;
@@ -1897,12 +1927,16 @@ int run_terminal(const ari::HostOptions &o) {
   run.on_stop = ari::restore_signal_traps;
   run.take_signal = ari::take_trapped_signal;
   run.background_input = [&](const ari::TermEvent &e) { return scene.handle_input(e); };
+  run.notice = [&live] { return live.notice(); }; // the latest warning, for a few seconds
+  // The screen is the document's: a URL the host cannot open in a browser (open-url, a sign-in)
+  // is the document's to show, not printed over the frame.
+  cvc::net::set_url_notice([](const std::string &) {});
   ari::FtxuiBackend::RunExit how;
   if (tvision)
     how = static_cast<ari::TvisionBackend &>(*backend).run(rt, run);
   else
     how = backend->run(rt, run);
-  print_warnings(rt.take_warnings());
+  live.summarize(rt.take_warnings());
   if (how.from_os) // an OS signal the document didn't handle: report it the way a shell expects
     return 128 + ari::signal_number(how.signal);
   return rt.exit_code();

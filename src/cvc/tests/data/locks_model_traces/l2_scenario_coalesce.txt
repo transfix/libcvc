@@ -1,0 +1,15 @@
+# scenarios.py scenario_coalesce, its homes merged into one home of prio true
+config inheritance=1 coalesce=1 one_home=1 mutations=-
+attach_home 1 -> 0 |
+try_acquire 0 1 o 5 X a - - -> granted 1 1 0 |
+query - 0 o -> held a/X/1/1/1/0 waiting |
+try_acquire 0 2 o -1 X a - - -> busy |
+block 0 2 o -1 X a - - -> 1 queued | relevel(0,1)
+read_inh 0 1 -> -1 |
+query - 0 o -> held a/X/1/1/1/0 waiting a/X/2 |
+cancel 0 2 1 -> cancelled | relevel(0,1)
+read_inh 0 1 -> INF |
+resume 0 2 1 -> timeout |
+query - 0 o -> held a/X/1/1/1/0 waiting |
+release 0 1 1 -> ok |
+query - 0 o -> held waiting |

@@ -86,10 +86,29 @@ struct holon_config {
   // with the round trip, so this is the common case. 0.05 closes 6 ticks in about a second; 0
   // always seeks.
   double lead_slew = 0.05;
-  // CLIENT: the longest walk between two peer samples, in ticks. A server that publishes only
-  // what changed (write_pose's heartbeat) leaves a long gap before a peer's first sample after
-  // standing still; walking that sample in over the whole gap would leave the peer far behind.
+  // CLIENT peers (display_pose): each is played out from a buffer of its samples on the server's
+  // timeline, a delay behind its newest: the time between samples plus `peer_jitter_margin` times
+  // how much later than the earliest they arrive, so a late one rarely leaves the buffer dry.
+  //
+  // The longest time between samples the delay covers, in ticks. The relay steps the room every
+  // 6 and pushes a far peer every 24 (room_aoi), a step late at worst; a still peer's heartbeat
+  // gap is not a walk (its first sample after standing still is walked in over one interval).
   std::uint64_t max_peer_span_ticks = 30;
+  double peer_jitter_margin = 1.5;
+  std::uint64_t peer_max_delay_ticks = 48; // 400 ms: the most a peer is shown behind its newest
+  // The relay's room step, the time between samples assumed until two have arrived.
+  std::uint64_t peer_interval_ticks = 6;
+  // Past its newest sample (a late one), a peer carries on along that sample's velocity for at
+  // most this long, then holds.
+  std::uint64_t peer_max_extrapolate_ticks = 24;
+  // A change of course a new sample brings (one late, or after an extrapolation it disagrees
+  // with) eases out with this time constant, in seconds, instead of jumping; one of more than
+  // peer_snap_distance metres (a teleport, a respawn) is shown at once.
+  double peer_smoothing_s = 0.1;
+  double peer_snap_distance = 2.0;
+  // How fast the playout delay follows a change (more jitter, a new route): the peer's clock runs
+  // at most this fraction faster or slower than real time while it does.
+  double peer_retime = 0.1;
   // SERVER: how far ahead of its own tick a stamped intent may be (queue_intent); a stamp
   // further out (a client whose clock is off) takes effect at once instead of waiting.
   std::uint64_t max_intent_lead_ticks = 240;
@@ -99,6 +118,9 @@ struct holon_config {
   // (physics() reports which is running).
   bool physics = false;
   avatar_body body; // with physics: every avatar's body
+  // With physics: what every avatar's controller may spend (§5k). The server's is the room's
+  // (holon_sync reads it from the room tree into both pumps' holons: set_energy_policy).
+  avatar_energy_policy energy;
   // SERVER with physics: an avatar that fell off the world (below this z) respawns where it
   // joined.
   double respawn_below_z = -10.0;
@@ -205,6 +227,24 @@ public:
   void set_statics(const std::vector<avatar_static> &statics, std::uint64_t revision);
   std::uint64_t statics_revision() const noexcept { return _statics_rev; }
 
+  // With physics: the energy policy every avatar spends under (avatar_world::set_energy_policy),
+  // as of the room's policy REVISION (what a pump compares to re-read it only when it changes).
+  void set_energy_policy(const avatar_energy_policy &p, std::uint64_t revision = 0);
+  const avatar_energy_policy &energy_policy() const noexcept { return _cfg.energy; }
+  // Every avatar's body (holon_config::body).
+  const avatar_body &body() const noexcept { return _cfg.body; }
+  std::uint64_t energy_policy_revision() const noexcept { return _energy_rev; }
+  // With physics: PID's energy now (on a client, the local avatar's is its prediction). False
+  // without physics or for a pid with no body.
+  bool energy(const std::string &pid, avatar_energy &out) const;
+  // CLIENT: the server's reserve for the local avatar PID as of SERVER_TICK. The prediction is
+  // corrected by how far it was off at that tick (its log of what it predicted then), and the
+  // inputs replayed since keep their spending on top; with no log entry for that tick it takes
+  // the server's value as it stands. A tick no newer than the last one applied is a no-op, so a
+  // pump may re-read the tree every frame. Ignored on a server, for a peer, or without physics.
+  void apply_authoritative_reserve(const std::string &pid, std::uint64_t server_tick,
+                                   double joules);
+
   // CLIENT: run the replica's clock `ticks` AHEAD of the server's (default 0: in step
   // with the samples). With a lead, an intent the client applies at its tick T reaches
   // the server before the server integrates T, so the server's pose agrees with the
@@ -258,13 +298,18 @@ public:
   // std::out_of_range for an unknown pid.
   cvc::physics::body_state state(const std::string &pid) const;
 
-  // A participant's DISPLAY pose this frame: predicted for the local avatar, the
-  // integrated pose on a server, and for a peer an interpolation between its last
-  // two samples (never extrapolated). Samples arrive far less often than quanta (the
-  // relay publishes ~5 Hz against a 120 Hz clock), so a peer is shown ONE SAMPLE
-  // INTERVAL behind: the newest sample's arrival starts a walk from `prev` to
-  // `newest` that takes as long as the server took between the two (their
-  // server_tick gap), measured on this holon's own clock (tick + alpha).
+  // A participant's DISPLAY pose this frame: predicted for the local avatar (between its last two
+  // quanta), the integrated pose on a server, and for a peer its path through its samples.
+  //
+  // A peer's samples arrive about every 6 ticks (the relay's ~20 Hz room step) and unevenly (the
+  // network). Each is buffered by its server tick, and the peer is shown at a server tick that
+  // runs with wall time a delay behind its newest sample (holon_config::peer_*): one interval
+  // plus a margin for the measured jitter, adapting smoothly. Between two samples the position
+  // follows a cubic through both and their velocities (a straight line when their velocities do
+  // not fit the move); past the newest it carries on along that sample's velocity for a while.
+  // A sample that changes the path already shown eases the difference out rather than jumping.
+  // Wall time, not this holon's clock, so the clock's re-alignments and slews never move a peer.
+  // Computed once a frame (advance); a sample applied since shows from the next frame.
   cvc::physics::pose display_pose(const std::string &pid) const;
 
   // CLIENT: the position jumps reconcile has applied to the local avatar `pid`
@@ -297,14 +342,36 @@ private:
     // the whole view). A reconcile shifts it with the correction.
     bool have_render_prev = false;
     cvc::physics::body_state render_prev;
-    // peer interpolation: the last two authoritative samples + a monotonic guard
-    // (mirroring predicted_avatar's stale/duplicate-ack rejection) so a reordered
-    // or duplicate peer sample never rewinds or freezes the interpolation window.
+    // CLIENT peer playout (display_pose): its samples in tick order, newest last, behind a
+    // monotonic guard (mirroring predicted_avatar's stale/duplicate-ack rejection) so a reordered
+    // or duplicate sample never rewinds the path.
+    struct sample {
+      std::uint64_t tick = 0;
+      cvc::physics::body_state s;
+    };
     bool have_sample = false;
     std::uint64_t last_sample_tick = 0;
-    cvc::physics::body_state prev, newest;
-    std::uint64_t newest_arrival_tick = 0; // this clock's tick when `newest` arrived
-    std::uint64_t sample_span = 0;         // server ticks from prev to newest (0 = one sample)
+    std::deque<sample> samples;
+    cvc::physics::body_state newest; // its newest sample (state)
+    int samples_seen = 0;            // up to kSettleSamples: the timeline snaps until then
+    // The timeline, in ticks of the holon's wall-time clock (_peer_clock): a sample's server tick
+    // minus its arrival, the best (earliest) of late, decaying; how much later than that samples
+    // arrive, and the ticks between them, smoothed; and the offset of the server tick shown.
+    double arrival_lead = 0.0;
+    double last_arrival = 0.0;
+    double lateness = 0.0;
+    double interval = 0.0;
+    bool interval_known = false; // measured, not the configured guess
+    bool last_moved = false;     // its newest sample moved from the one before
+    double play_offset = 0.0;
+    // Last frame: the server tick shown, the path there, the correction still easing out (shown =
+    // path + ease_pos, rotated by ease_rot), and what that came to.
+    double render_tick = 0.0;
+    cvc::physics::pose path;
+    cvc::physics::vec3 ease_pos{0.0, 0.0, 0.0};
+    cvc::physics::quat ease_rot;
+    bool have_shown = false;
+    cvc::physics::pose shown;
     // physics: where it joined (a SERVER respawn point), and the CLIENT-local avatar's
     // prediction log -- predicted_avatar's, over the Jolt world instead of avatar_sim.
     cvc::physics::body_state spawn;
@@ -312,10 +379,13 @@ private:
       std::uint64_t tick = 0;
       avatar_intent in;
       cvc::physics::body_state after; // its state after the step at `tick`
+      double reserve_before = 0.0;    // its reserve (J) before that step, where a replay begins
+      double reserve_after = 0.0;     // and after it, to compare with the server's
     };
     std::deque<logged> log;
     bool acked = false;
     std::uint64_t last_acked = 0;
+    std::uint64_t reserve_tick = 0; // the server tick of the last reserve applied (0: none)
   };
 
   // physics: one quantum of the world (the drive, the peers' kinematic poses, the step).
@@ -325,6 +395,12 @@ private:
 
   void on_step(const cvc::clock_driver::clock_frame &f);
   void on_present(const cvc::clock_driver::clock_frame &f);
+  // CLIENT peer playout (display_pose): take a sample; show this frame (`frame_ticks` of wall time
+  // since the last); the path through the samples at server tick `t`.
+  void receive_peer_sample(participant &p, const cvc::physics::body_state &auth,
+                           std::uint64_t server_tick);
+  void present_peer(participant &p, double frame_ticks);
+  cvc::physics::pose peer_path(const participant &p, double t) const;
 
   holon_role _role;
   holon_config _cfg;
@@ -336,8 +412,10 @@ private:
   std::map<std::string, std::uint64_t> _left;
   static constexpr std::size_t kMaxLeft = 1024;
   double _alpha = 0.0;                  // the last frame's interpolation alpha, for display_pose
+  double _peer_clock = 0.0;             // CLIENT: wall time in ticks, for the peers' playout
   std::uint64_t _lead = 0;              // CLIENT: ticks ahead of the server (set_lead_ticks)
   std::unique_ptr<avatar_world> _world; // physics (holon_config::physics + a Jolt build)
+  std::uint64_t _energy_rev = 0;        // the room policy revision set_energy_policy last took
   std::uint64_t _vetoes = 0;            // SERVER: intents sanitize_intent changed
   std::uint64_t _realigns = 0;          // CLIENT: clock seeks in apply_authoritative
   std::uint64_t _slews = 0;             // CLIENT: slews started in apply_authoritative

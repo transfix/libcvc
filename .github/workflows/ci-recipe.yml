@@ -133,11 +133,17 @@ jobs:
       # The long-running suites (stress, convergence, benchmarks) are left out, as the package
       # jobs leave them out (ci.yml's STRESS_REGEX): the Jolt convergence experiments alone take
       # most of a Debug job's 90 minutes.
+      #
+      # A failing test runs up to 3 times, as in the package jobs (ci.yml's --repeat
+      # until-pass:3). Without it, one timing miss on a loaded hosted runner failed the lane:
+      # macOS's recipe lanes went red on AsyncCalls.AS1, TfOverlayTasks and AppTest
+      # ThreadPool flakes that the package-macos jobs absorbed on retry.
       - name: Build libcvc from its recipe
         shell: bash
         env:
           CVC_BUILD_TESTS: "ON"
           CVC_CTEST_EXCLUDE: "(Stress|Convergence|Benchmark|Performance|BunnySDF_IsoRoundtrip|QualityImproveAllMethods|Integration)"
+          CVC_CTEST_REPEAT: "until-pass:3"
         run: |
           set -euo pipefail
           config=$(echo "${{ matrix.build_type }}" | tr '[:upper:]' '[:lower:]')

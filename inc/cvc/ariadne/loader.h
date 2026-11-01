@@ -75,15 +75,6 @@ struct CustomRequirement {
   bool required = false;
 };
 
-// One entry of the document's top-level `requires:` (roadmap §7.6): something it needs from the
-// host — a capability token, a function its programs call, or a widget type
-// (cvc/ariadne/requires.h). AppRuntime::load checks them: a missing entry fails the load, an
-// `optional: true` one warns.
-struct HostRequirement {
-  std::string name;
-  bool optional = false;
-};
-
 // A channel declared in the document's `channels:` block (§12 channel scoping). `shared` marks a
 // channel that a mount may be granted (documentation/intent). `global` puts the channel at app-root
 // and adds it to the default-deny GLOBALS allowlist, so a '/'-prefixed reference to it is permitted

@@ -40,6 +40,7 @@
 // they sleep.
 
 #include <algorithm>
+#include <cvc/core/thread_class.h>
 #include <cvc/core/thread_pool.h>
 #include <exception>
 
@@ -126,6 +127,8 @@ void thread_pool::unlink_locked(job &j) {
 }
 
 void thread_pool::worker_loop(int /*worker_index*/) {
+  // A process class set before this worker started (Linux, where the class is per thread).
+  detail::apply_process_class_here();
   for (;;) {
     job *j = nullptr;
     {
