@@ -334,6 +334,14 @@ std::vector<std::pair<lock_pid, std::int64_t>> lock_home::blocking_sinks(int pid
   return table_.blocking_sinks(lock_pid{id_, pid});
 }
 
+std::vector<std::pair<lock_pid, std::int64_t>>
+lock_home::blocking_sinks(std::span<const int> pids) const {
+  small_vector<lock_pid, 8> from;
+  for (int pid : pids)
+    from.push_back(lock_pid{id_, pid});
+  return table_.blocking_sinks(std::span<const lock_pid>(from.data(), from.size()));
+}
+
 lock_home::~lock_home() {
   // 5.7, in its order. Nothing here throws out: a destructor can't report a failure, and the
   // table's own check() finds whatever a failed step leaves.

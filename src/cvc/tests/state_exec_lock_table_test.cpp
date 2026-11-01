@@ -23,6 +23,7 @@
 #include <functional>
 #include <gtest/gtest.h>
 #include <initializer_list>
+#include <map>
 #include <memory>
 #include <random>
 #include <string>
@@ -256,7 +257,7 @@ TEST(LockTable, AttachHomeOneHomeBeforeL3) {
   t3.check();
 }
 
-// -- 3.3, 4.3, 4.12, 4.13: inheritance (phase L2) ------------------------------------------------
+// -- 3.3, 4.3, 4.12, 4.13: inheritance (phase L2) -------------------------------------------------
 
 TEST(LockTable, InheritanceBoostsTheHolderAndWithdrawsIt) {
   // PI-1's shape: a better waiter boosts the holder; its timeout withdraws the boost
@@ -2554,6 +2555,110 @@ TEST(LockHomes, DrainFinishesAfterAThrow) {
     b->release(pb1, sched_side::last_hold(pb1));
     b->release(pb2, sched_side::last_hold(pb2));
     EXPECT_EQ(mgr->stats().holds, 0u);
+    a.reset();
+    b.reset();
+    EXPECT_TRUE(mgr->table().empty());
+  }
+}
+
+// -- second round: blocking_sinks from several waiters --------------------------------------------
+
+namespace {
+
+/// What blocking_sinks(from) must be: the union of the single-pid results, less the sources.
+sinks_t union_of_singles(const lock_table &t, const std::vector<detail::lock_pid> &from) {
+  std::map<std::uint64_t, std::pair<detail::lock_pid, std::int64_t>> u;
+  for (detail::lock_pid p : from)
+    for (const auto &s : t.blocking_sinks(p))
+      u.emplace(s.first.packed(), s);
+  for (detail::lock_pid p : from)
+    u.erase(p.packed());
+  sinks_t out;
+  for (const auto &kv : u)
+    out.push_back(kv.second);
+  return out;
+}
+
+/// blocking_sinks(from) on `t`: equal to union_of_singles, and its pids.
+std::vector<int> multi_sinks(const lock_table &t, const std::vector<detail::lock_pid> &from) {
+  const sinks_t multi =
+      t.blocking_sinks(std::span<const detail::lock_pid>(from.data(), from.size()));
+  EXPECT_EQ(multi, union_of_singles(t, from));
+  return sink_pids(multi);
+}
+
+} // namespace
+
+TEST(LockTable, BlockingSinksFromSeveralWaiters) {
+  {
+    // A chain: 1 waits for 2, which waits for 3.
+    world w;
+    w.acquire(3, X, {"c"});
+    w.acquire(2, X, {"b"});
+    w.wait(2, X, {"c"});
+    w.wait(1, X, {"b"});
+    EXPECT_EQ(multi_sinks(w.t, {w.pid(1), w.pid(2)}), (std::vector<int>{3}));
+    EXPECT_EQ(multi_sinks(w.t, {w.pid(1)}), (std::vector<int>{3}));
+    EXPECT_EQ(multi_sinks(w.t, {w.pid(2), w.pid(1), w.pid(2)}), (std::vector<int>{3}));
+    EXPECT_TRUE(multi_sinks(w.t, {}).empty());
+  }
+  {
+    // Two shared holders, two writers waiting.
+    world w;
+    w.acquire(1, S, {"k"});
+    w.acquire(2, S, {"k.x"});
+    w.wait(3, X, {"k"});
+    w.wait(4, X, {"k"});
+    EXPECT_EQ(multi_sinks(w.t, {w.pid(3), w.pid(4)}), (std::vector<int>{1, 2}));
+  }
+  {
+    // A long FIFO queue on one key: every waiter waits for the holder and the waiters before it;
+    // the one sink is the holder.
+    world w(0, false); // no self_check: 300 waiters, each check() a full recount
+    w.acquire(1, X, {"k"});
+    std::vector<detail::lock_pid> from;
+    for (int p = 2; p <= 301; ++p) {
+      w.wait(p, X, {"k"});
+      from.push_back(w.pid(p));
+    }
+    EXPECT_EQ(multi_sinks(w.t, from), (std::vector<int>{1}));
+  }
+  {
+    // Sources that wait for each other: 3 waits for 2, which waits for 1.
+    world w;
+    w.acquire(1, X, {"a"});
+    w.acquire(2, X, {"b"});
+    w.wait(2, X, {"a"});
+    w.wait(3, X, {"b"});
+    EXPECT_EQ(multi_sinks(w.t, {w.pid(3), w.pid(2)}), (std::vector<int>{1}));
+    // A source with no edge out is a sink of the others, but never in the result.
+    EXPECT_TRUE(multi_sinks(w.t, {w.pid(1), w.pid(2), w.pid(3)}).empty());
+  }
+}
+
+TEST(LockHomes, BlockingSinksOfSeveralWaitersOfAHome) {
+  for (const lock_threading mode : {lock_threading::single, lock_threading::shared}) {
+    SCOPED_TRACE(mode_name(mode));
+    const std::shared_ptr<lock_manager> mgr = make_manager(mode);
+    auto a = std::make_unique<sched_side>(mgr);
+    auto b = std::make_unique<sched_side>(mgr);
+    process &pa = a->add(1);
+    process &pb1 = b->add(1);
+    process &pb2 = b->add(2);
+    const std::optional<std::uint64_t> ha = a->take(pa, X, {"k"});
+    ASSERT_TRUE(ha);
+    ASSERT_TRUE(b->wait(pb1, X, {"k"}));
+    ASSERT_TRUE(b->wait(pb2, S, {"k"}));
+    a->home->store_progress(detail::lock_clock::time_point(detail::lock_clock::duration(777)));
+    const std::vector<int> pids{pb1.pid, pb2.pid};
+    EXPECT_EQ(b->home->blocking_sinks(std::span<const int>(pids.data(), pids.size())),
+              (sinks_t{{{a->home->id(), 1}, 777}}));
+    a->release(pa, *ha);
+    b->home->drain_port();
+    b->release(pb1, sched_side::last_hold(pb1));
+    b->home->drain_port();
+    b->release(pb2, sched_side::last_hold(pb2));
+    check_all(*mgr, {a.get(), b.get()});
     a.reset();
     b.reset();
     EXPECT_TRUE(mgr->table().empty());

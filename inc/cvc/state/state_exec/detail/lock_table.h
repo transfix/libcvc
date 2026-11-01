@@ -299,6 +299,11 @@ public:
   /// no edge out, other than `p`, each with its home's progress cell loaded under M.mu (0 for a
   /// home with none). Sorted by pid; empty when `p` waits for nothing.
   std::vector<std::pair<lock_pid, std::int64_t>> blocking_sinks(lock_pid p) const;
+  /// The same from every process of `from` at once (pycvc's idle pass over all its lock waits):
+  /// one search under one M.mu hold, each process's successors computed once; every sink
+  /// reachable from one of them that is not itself one of them. Sorted by pid.
+  std::vector<std::pair<lock_pid, std::int64_t>>
+  blocking_sinks(std::span<const lock_pid> from) const;
 
   // -- 4.15 -----------------------------------------------------------------------------------
   /// Take one key-cache reference of home `h` on each key (filling each key_ref's node).

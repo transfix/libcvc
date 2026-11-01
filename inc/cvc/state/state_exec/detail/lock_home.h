@@ -344,6 +344,9 @@ public:
   /// The manager's blocking_sinks for this home's `pid` (pycvc's idle test, design 9.2): each
   /// sink with its home's last progress, in lock_clock ticks.
   std::vector<std::pair<lock_pid, std::int64_t>> blocking_sinks(int pid) const;
+  /// The same for several of this home's pids at once (pycvc's idle pass over its lock waits):
+  /// one search under one M.mu hold; a sink that is one of `pids` is left out.
+  std::vector<std::pair<lock_pid, std::int64_t>> blocking_sinks(std::span<const int> pids) const;
 
   // -- reads
   // ---------------------------------------------------------------------------------------
