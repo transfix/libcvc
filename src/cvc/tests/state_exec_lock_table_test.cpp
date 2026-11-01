@@ -13,6 +13,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cvc/state/state_exec/detail/lock_home.h>
 #include <cvc/state/state_exec/detail/lock_table.h>
 #include <cvc/state/state_exec/lock_manager.h>
@@ -2199,4 +2200,127 @@ TEST(LockHomes, BlockingSinksReadTheHomesProgressCell) {
     b.reset();
     EXPECT_TRUE(mgr->table().empty());
   }
+}
+
+// -- L3.7: CVC_EXEC_FUZZ --------------------------------------------------------------------------
+
+namespace {
+
+/// The fuzz seed while alive (0: off); off again after.
+struct fuzz_scope {
+  explicit fuzz_scope(std::uint64_t seed) { detail::set_lock_fuzz_seed(seed); }
+  ~fuzz_scope() { detail::set_lock_fuzz_seed(0); }
+  fuzz_scope(const fuzz_scope &) = delete;
+  fuzz_scope &operator=(const fuzz_scope &) = delete;
+};
+
+/// A few operations through every protocol point on one thread: an operation with notes and its
+/// delivery, posts, a drain of two posts, and a home's destruction.
+void pass_every_point() {
+  const std::shared_ptr<lock_manager> mgr = make_manager(lock_threading::shared);
+  auto a = std::make_unique<sched_side>(mgr);
+  auto b = std::make_unique<sched_side>(mgr);
+  process &pa = a->add(1);
+  process &pb = b->add(2);
+  const std::optional<std::uint64_t> ha = a->take(pa, X, {"k"});
+  ASSERT_TRUE(ha);
+  ASSERT_TRUE(b->wait(pb, X, {"k"}));
+  a->release(pa, *ha); // after_op, post_enter, post_exit
+  detail::lock_notes hand;
+  hand.push_back(detail::lock_note{b->home->id(), b->home->port(), relevel_post(2)});
+  a->home->deliver(hand);
+  b->home->drain_port(); // drain_between
+  EXPECT_EQ(b->ops.readies, (std::vector<int>{2}));
+  check_all(*mgr, {a.get(), b.get()});
+  b.reset(); // close_then_detach
+  a.reset();
+  EXPECT_TRUE(mgr->table().empty());
+  EXPECT_EQ(mgr->stats().posts, 2u);
+}
+
+} // namespace
+
+TEST(LockFuzz, OffByDefault) {
+  const char *env = std::getenv("CVC_EXEC_FUZZ");
+  if (!env || !*env)
+    EXPECT_EQ(detail::lock_fuzz_seed(), 0u);
+  {
+    fuzz_scope off(0);
+    const std::uint64_t hits = detail::lock_fuzz_hits();
+    pass_every_point();
+    EXPECT_EQ(detail::lock_fuzz_hits(), hits); // off: no point fuzzed
+  }
+  {
+    fuzz_scope on(42);
+    EXPECT_EQ(detail::lock_fuzz_seed(), 42u);
+    const std::uint64_t hits = detail::lock_fuzz_hits();
+    pass_every_point();
+    // after_op (the release), post_enter and post_exit (two posts), drain_between (one), and
+    // close_then_detach (two homes): 8 at least
+    EXPECT_GE(detail::lock_fuzz_hits() - hits, 8u);
+  }
+  EXPECT_EQ(detail::lock_fuzz_seed(), 0u);
+}
+
+TEST(LockFuzz, PostsRacingACloseNeverLandUnderFuzz) {
+  fuzz_scope on(0xC0FFEE);
+  const std::uint64_t hits = detail::lock_fuzz_hits();
+  run_post_close_races(100);
+  EXPECT_GT(detail::lock_fuzz_hits(), hits);
+}
+
+// -- the manager mutex's waits (lock.cross_thread) ------------------------------------------------
+
+TEST(LockShared, MutexWaitsCounted) {
+  // A single table has no mutex: nothing to count.
+  {
+    world w;
+    const std::uint64_t h1 = w.acquire(1, X, {"a"});
+    w.wait(2, X, {"a"});
+    w.release(1, h1);
+    w.end(2, false);
+    EXPECT_EQ(w.t.stats().mutex_waits, 0u);
+    EXPECT_EQ(w.t.stats().mutex_wait_ns, 0u);
+  }
+  lock_manager single;
+  EXPECT_EQ(single.stats().mutex_waits, 0u);
+  // Two threads on one shared table, each on its own key: they contend only for M.mu, and some
+  // operation finds it held sooner or later. A bounded loop, no timing.
+  lock_table::options o;
+  o.one_home = false;
+  o.shared = true;
+  lock_table t(o);
+  detail::home_id homes[2];
+  {
+    detail::lock_notes n;
+    for (detail::home_id &h : homes)
+      h = t.attach_home(false, nullptr, nullptr, n, lock_attach{true});
+  }
+  std::atomic<bool> seen{false};
+  std::atomic<int> started{0};
+  const std::vector<std::string> keys[2] = {{"k0"}, {"k1"}};
+  const auto driver = [&](int i) {
+    ++started;
+    while (started < 2)
+      std::this_thread::yield();
+    detail::lock_notes notes;
+    for (int k = 1; k <= 2000000 && !seen; ++k) {
+      detail::lock_request r = request_of(X, keys[i]);
+      const auto g = t.try_acquire({homes[i], 1}, {"o", 0}, r, {});
+      if (g)
+        t.release({homes[i], 1}, g->hold, notes);
+      notes.clear();
+      if (k % 256 == 0 && t.stats().mutex_waits > 0)
+        seen = true;
+    }
+  };
+  std::thread a(driver, 0), b(driver, 1);
+  a.join();
+  b.join();
+  const lock_stats s = t.stats();
+  std::printf("LockShared: %llu mutex waits, %llu ns blocked\n", (unsigned long long)s.mutex_waits,
+              (unsigned long long)s.mutex_wait_ns);
+  EXPECT_GT(s.mutex_waits, 0u);
+  EXPECT_TRUE(t.empty());
+  t.check();
 }

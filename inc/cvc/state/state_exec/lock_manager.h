@@ -96,6 +96,8 @@ struct lock_stats {
   std::uint64_t posts = 0;              // posts that landed in a port (phase L3)
   std::uint64_t posts_dropped = 0;      // posts refused by a closed port (phase L3)
   std::uint64_t posts_discarded = 0;    // posts accepted, then discarded at the close (phase L3)
+  std::uint64_t mutex_waits = 0;        // shared mode: operations that found M.mu held
+  std::uint64_t mutex_wait_ns = 0;      // shared mode: the time those operations blocked on it
 };
 
 namespace detail {

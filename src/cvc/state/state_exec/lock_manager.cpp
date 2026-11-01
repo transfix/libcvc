@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cstdlib>
 #include <cvc/state/state_exec/detail/lock_home.h>
 #include <cvc/state/state_exec/detail/lock_table.h>
@@ -307,7 +308,8 @@ struct lock_table::impl {
   public:
     explicit guard(impl &m) : m_(m) {
       if (m_.opts.shared) {
-        m_.mu.lock();
+        if (!m_.mu.try_lock()) // the uncontended path: this one try_lock
+          m_.lock_contended();
         return;
       }
 #ifndef NDEBUG
@@ -333,10 +335,22 @@ struct lock_table::impl {
     impl &m_;
   };
 
+  /// M.mu was held: wait for it, and count the wait and how long it blocked (lock_stats::
+  /// mutex_waits, mutex_wait_ns; the counters are guarded by the mutex itself).
+  void lock_contended() {
+    const auto t0 = std::chrono::steady_clock::now();
+    mu.lock();
+    const auto waited = std::chrono::steady_clock::now() - t0;
+    ++n_mutex_waits;
+    mutex_wait_ns +=
+        std::uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(waited).count());
+  }
+
   // -- state ------------------------------------------------------------------------------------
   lock_table::options opts;
   std::mutex mu;                        // M.mu: shared mode only (protocol 2.1)
   std::atomic<std::thread::id> owner{}; // debug builds: the single-mode token (design 8.3)
+  std::uint64_t n_mutex_waits = 0, mutex_wait_ns = 0; // under mu: lock_stats::mutex_waits, _ns
 
   std::vector<home_entry> homes; // by home_id
   std::size_t attached = 0;
@@ -2343,6 +2357,8 @@ lock_stats lock_table::stats() const {
   s.cache_refs = m.refs_total;
   s.relevels = m.n_relevels;
   s.relevels_coalesced = m.n_coalesced;
+  s.mutex_waits = m.n_mutex_waits;
+  s.mutex_wait_ns = m.mutex_wait_ns;
   return s;
 }
 

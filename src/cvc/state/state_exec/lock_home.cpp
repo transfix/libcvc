@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdlib>
 #include <cvc/state/state_exec/detail/lock_home.h>
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/process.h>
@@ -130,14 +131,20 @@ lock_port::lock_port(std::shared_ptr<wakeup> wake) : wake_(std::move(wake)) {}
 lock_port::~lock_port() = default;
 
 bool lock_port::post(const lock_post &x) {
-  std::lock_guard<std::mutex> g(mu_);
-  if (closed_)
-    return false;
-  queue_.push_back(x);
-  pending_.store(true, std::memory_order_relaxed);
-  if (wake_)
-    wake_->notify();
-  return true;
+  lock_fuzz_point(lock_fuzz_at::post_enter);
+  bool landed = false;
+  {
+    std::lock_guard<std::mutex> g(mu_);
+    if (!closed_) {
+      queue_.push_back(x);
+      pending_.store(true, std::memory_order_relaxed);
+      if (wake_)
+        wake_->notify();
+      landed = true;
+    }
+  }
+  lock_fuzz_point(lock_fuzz_at::post_exit);
+  return landed;
 }
 
 void lock_port::close() {
@@ -157,7 +164,86 @@ void lock_port::drain(std::vector<lock_post> &out) {
   pending_.store(false, std::memory_order_relaxed);
 }
 
-void lock_fuzz_point(lock_fuzz_at) noexcept {} // phase L3.7
+// ---------------------------------------------------------------------------------------------
+// CVC_EXEC_FUZZ (L3.7; LT-4, gap G-27)
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+std::uint64_t fuzz_mix(std::uint64_t x) { // splitmix64's finalizer
+  x += 0x9e3779b97f4a7c15ull;
+  x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull;
+  x = (x ^ (x >> 27)) * 0x94d049bb133111ebull;
+  return x ^ (x >> 31);
+}
+
+// CVC_EXEC_FUZZ=<seed>, read once as the library loads: decimal or 0x hex; any other non-empty
+// value is hashed, so it turns the yields on too. Unset, empty or 0: off.
+std::uint64_t fuzz_seed_from_environment() {
+  const char *v = std::getenv("CVC_EXEC_FUZZ");
+  if (!v || !*v)
+    return 0;
+  char *end = nullptr;
+  const unsigned long long n = std::strtoull(v, &end, 0);
+  if (end && *end == '\0')
+    return n;
+  std::uint64_t h = 1469598103934665603ull; // FNV-1a
+  for (const char *c = v; *c; ++c)
+    h = (h ^ static_cast<unsigned char>(*c)) * 1099511628211ull;
+  return h ? h : 1;
+}
+
+std::atomic<std::uint64_t> g_fuzz_seed{fuzz_seed_from_environment()};
+std::atomic<std::uint64_t> g_fuzz_hits{0};
+std::atomic<std::uint64_t> g_fuzz_threads{0}; // numbers each thread's PRNG stream
+
+struct fuzz_prng {
+  std::uint64_t seed = 0; // the seed the stream was made from
+  std::uint64_t state = 0;
+};
+thread_local fuzz_prng t_fuzz;
+
+// The fuzzed point itself, out of the off path: run on, yield, or pause 0-50 us. The pause yields
+// until it has passed, rather than sleeping: a sleep rounds up to the OS tick (up to ~16 ms on
+// Windows), far longer than the windows LT-4 means to widen.
+void fuzz_yield(std::uint64_t seed, lock_fuzz_at where) noexcept {
+  fuzz_prng &r = t_fuzz;
+  if (r.seed != seed) {
+    r.seed = seed;
+    r.state = fuzz_mix(seed ^ fuzz_mix(g_fuzz_threads.fetch_add(1, std::memory_order_relaxed)));
+  }
+  g_fuzz_hits.fetch_add(1, std::memory_order_relaxed);
+  r.state = fuzz_mix(r.state + static_cast<std::uint64_t>(where));
+  const std::uint64_t x = r.state;
+  switch (x & 7) {
+  case 0:
+  case 1:
+    return; // run on
+  case 7: {
+    const auto until = lock_clock::now() + std::chrono::microseconds((x >> 8) % 51);
+    do
+      std::this_thread::yield();
+    while (lock_clock::now() < until);
+    return;
+  }
+  default:
+    std::this_thread::yield();
+  }
+}
+
+} // namespace
+
+void lock_fuzz_point(lock_fuzz_at where) noexcept {
+  const std::uint64_t seed = g_fuzz_seed.load(std::memory_order_relaxed);
+  if (seed != 0)
+    fuzz_yield(seed, where);
+}
+
+void set_lock_fuzz_seed(std::uint64_t seed) noexcept {
+  g_fuzz_seed.store(seed, std::memory_order_relaxed);
+}
+std::uint64_t lock_fuzz_seed() noexcept { return g_fuzz_seed.load(std::memory_order_relaxed); }
+std::uint64_t lock_fuzz_hits() noexcept { return g_fuzz_hits.load(std::memory_order_relaxed); }
 
 // ---------------------------------------------------------------------------------------------
 // The home
@@ -219,14 +305,17 @@ lock_home::lock_home(std::shared_ptr<lock_manager> mgr, lock_sched_ops &ops,
   index_.reserve(capacity);
   lock_notes notes;
   id_ = table_.attach_home(prio_, port_, progress_, notes, attach);
-  deliver(notes); // none: an attach changes no edge and no base
+  deliver_op(notes); // none: an attach changes no edge and no base
 }
 
 void lock_home::drain_port() {
   action a(*this);
   port_->drain(drained_);
-  for (const lock_post &post : drained_)
-    apply_post(post);
+  for (std::size_t i = 0; i < drained_.size(); ++i) {
+    if (i > 0)
+      lock_fuzz_point(lock_fuzz_at::drain_between);
+    apply_post(drained_[i]);
+  }
   drained_.clear();
 }
 
@@ -245,12 +334,13 @@ lock_home::~lock_home() {
     assert(port_->closed());
   } catch (...) {
   }
+  lock_fuzz_point(lock_fuzz_at::close_then_detach);
   try {
     // Every process of the home ended with abandon, the cache's references dropped. No note
     // targets this home; the others' wakes and relevels go to their ports.
     lock_notes notes;
     table_.detach_home(id_, notes);
-    deliver(notes);
+    deliver_op(notes);
   } catch (...) {
   }
   try {
@@ -534,7 +624,7 @@ std::optional<frame_outcome> lock_home::wait(process &p, home_request &req,
   pl.ticket_in_handler = p.in_signal_handler || p.in_watch_handler;
   pl.ticket_root.assign(root);
   pl.ticket_timeout = timeout;
-  deliver(notes); // relevels only: the processes P now blocks, downstream
+  deliver_op(notes); // relevels only: the processes P now blocks, downstream
   if (br.state == ticket_state::queued) {
     p.lock_waiting = true;
     p.lock_deadline = deadline;
@@ -615,7 +705,7 @@ void lock_home::release_frame(process &p, std::optional<std::uint64_t> hold,
         pl.holds.erase(it); // the vector keeps its capacity
         lock_notes notes;
         table_.release(pid_of(p), id, notes);
-        deliver(notes);
+        deliver_op(notes);
       }
     }
     if (lock_enter && pl.ticket) {
@@ -623,7 +713,7 @@ void lock_home::release_frame(process &p, std::optional<std::uint64_t> hold,
       const std::uint64_t tid = *pl.ticket;
       lock_notes notes;
       table_.cancel(pid_of(p), tid, notes);
-      deliver(notes);
+      deliver_op(notes);
       table_.resume(pid_of(p), tid);
       pl.ticket.reset();
       clear_wait_fields(p);
@@ -645,7 +735,7 @@ void lock_home::process_ended(process &p, bool abandon) {
   p.locks->ticket.reset();
   clear_wait_fields(p);
   p.inherited_priority = INT_MAX;
-  deliver(notes);
+  deliver_op(notes);
 }
 
 void lock_home::wait_expired(std::vector<process *> &expired) {
@@ -659,7 +749,7 @@ void lock_home::wait_expired(std::vector<process *> &expired) {
     const std::uint64_t tid = *p->locks->ticket;
     lock_notes notes;
     table_.cancel(pid_of(*p), tid, notes); // cancelled, or granted already: adopted
-    deliver(notes);
+    deliver_op(notes);
     apply_wake(p->pid, tid);
   }
   expired.clear();
@@ -671,7 +761,7 @@ void lock_home::set_base(process &p) {
     return;
   lock_notes notes;
   table_.set_base(pid_of(p), p.priority, notes);
-  deliver(notes);
+  deliver_op(notes);
 }
 
 void lock_home::deliver(const lock_notes &notes) {
@@ -689,6 +779,13 @@ void lock_home::deliver(const lock_notes &notes) {
       count.fetch_add(1, std::memory_order_relaxed);
     }
   }
+}
+
+void lock_home::deliver_op(const lock_notes &notes) {
+  if (notes.empty())
+    return;
+  lock_fuzz_point(lock_fuzz_at::after_op); // another home may act between the two (protocol 7)
+  deliver(notes);
 }
 
 void lock_home::apply_post(const lock_post &post) {
