@@ -221,6 +221,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/world/raster.h
   ../../inc/cvc/world/npy.h
   ../../inc/cvc/world/bundle.h
+  ../../inc/cvc/world/generated_world.h
 )
 
 # Source files
@@ -440,6 +441,7 @@ set(SOURCE_FILES
   world/raster.cpp
   world/npy.cpp
   world/bundle.cpp
+  world/generated_world.cpp
 )
 
 # Architectural rule (roadmap §14.4): the cvc::world generator library is a FILE

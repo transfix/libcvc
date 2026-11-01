@@ -1706,7 +1706,8 @@ Value to_value(const YAML::Node &n) {
 bool known_scene_node_key(const std::string &k) {
   return k == "node" || k == "id" || k == "type" || k == "source" || k == "material" ||
          k == "transform" || k == "fit" || k == "visible" || k == "volren" || k == "volslice" ||
-         k == "volume" || k == "shader" || k == "clip" || k == "body" || k == "children";
+         k == "volume" || k == "shader" || k == "clip" || k == "body" || k == "children" ||
+         k == "casts_shadow";
 }
 
 std::string lowered(std::string s) {
@@ -2263,6 +2264,11 @@ SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
       else if (tex.IsMap())
         sn.material_texture = str(tex, "uri", str(tex, "file"));
     }
+    sn.material_opaque = flag(mat, "opaque", false);
+  }
+  if (n["casts_shadow"]) {
+    sn.has_casts_shadow = true;
+    sn.casts_shadow = flag(n, "casts_shadow", true);
   }
   const YAML::Node tf = n["transform"];
   if (tf && tf.IsMap()) {
@@ -2421,6 +2427,16 @@ SceneLight parse_scene_light(const YAML::Node &n) {
     sl.has_rig_ambient = true;
     sl.rig_ambient = static_cast<float>(num(n, "ambient", sl.rig_ambient));
   }
+  if (const YAML::Node wash = n["wash"]) { // wash: <intensity> | { intensity, count, height }
+    sl.has_wash = true;
+    if (wash.IsMap()) {
+      sl.wash = static_cast<float>(num(wash, "intensity", sl.wash));
+      sl.wash_count = static_cast<int>(num(wash, "count", sl.wash_count));
+      sl.wash_height = static_cast<float>(num(wash, "height", sl.wash_height));
+    } else {
+      sl.wash = static_cast<float>(num(n, "wash", sl.wash));
+    }
+  }
   return sl;
 }
 
@@ -2455,6 +2471,29 @@ Scene parse_scene(Ctx &ctx, const YAML::Node &s) {
     if (sh["update_interval"]) {
       sc.has_shadow_interval = true;
       sc.shadow_interval = static_cast<int>(num(sh, "update_interval", sc.shadow_interval));
+    }
+    if (sh["softness"]) {
+      sc.has_shadow_softness = true;
+      sc.shadow_softness = num(sh, "softness", sc.shadow_softness);
+    }
+    if (const YAML::Node fo = sh["focus"]) {
+      SceneShadowFocus &f = sc.shadow_focus;
+      if (fo.IsScalar() && fo.Scalar() == "camera") {
+        f.present = f.follow_camera = true;
+      } else if (fo.IsMap()) {
+        f.present = true;
+        f.follow_camera = str(fo, "follow") == "camera";
+        if (const YAML::Node c = fo["center"]; c && c.IsSequence() && c.size() >= 3)
+          for (int i = 0; i < 3; ++i)
+            f.center[i] = c[i].as<double>();
+        f.radius = num(fo, "radius", f.radius);
+        f.min_radius = num(fo, "min_radius", f.min_radius);
+        f.max_radius = num(fo, "max_radius", f.max_radius);
+        f.per_distance = num(fo, "per_distance", f.per_distance);
+        f.lead = num(fo, "lead", f.lead);
+        f.lift = num(fo, "lift", f.lift);
+        f.ground = str(fo, "ground");
+      }
     }
   }
   if (s["chrome"]) { // scene-level: the diagnostic grid/axis/bounding-box chrome
