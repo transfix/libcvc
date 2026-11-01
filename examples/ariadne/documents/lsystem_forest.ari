@@ -20,6 +20,7 @@ meta:
 
 requires:
   - gl.scene                       # a scene renderer realizes the scene: block (arigl; not ari)
+  - {name: gl.scene.shaders, optional: true}   # the ground bump and bark presets; unshaded without
 
 # Reusable control components (shared across the ported demos): the lighting rig, camera
 # navigation and the shadow/chrome scene toggles — all declarative, no host C++ panels.
