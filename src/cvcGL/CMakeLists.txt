@@ -916,6 +916,11 @@ add_test(NAME cvcgl_imgui_ui_size COMMAND cvcgl_imgui_ui_size)
 add_executable(cvcgl_imgui_panels_start test/cvcgl_imgui_panels_start.cpp)
 target_link_libraries(cvcgl_imgui_panels_start PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_panels_start COMMAND cvcgl_imgui_panels_start)
+# ImGuiBackend when the view gets smaller after its windows opened: a window that showed in full
+# moves back in, one the user left partly outside stays. No window, no GL.
+add_executable(cvcgl_imgui_view_shrink test/cvcgl_imgui_view_shrink.cpp)
+target_link_libraries(cvcgl_imgui_view_shrink PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_view_shrink COMMAND cvcgl_imgui_view_shrink)
 
 # Golden images of the Ariadne ImGui/VTK backend (roadmap §16.6 phase 1): each .ari in
 # test/golden runs through AriRuntime + ImGuiBackend offscreen and its frame is compared with the

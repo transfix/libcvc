@@ -1187,11 +1187,14 @@ How each backend does it:
   window opens inside the view: no larger than the work area, and moved in from its `pos:` (or
   its persisted place) until all of it shows, so a layout made for a laptop opens on a phone in
   reach. In a browser the view is the canvas from the first frame, as the page has laid it out.
-  ImGui gives a window with no size ImGui's always-auto-resize: it measures the window's
-  widgets each frame, its labeled widgets at the width ImGui gives an auto-resizing window's items
-  (16 font sizes), and a row-split pane as wide as its own widgets. A window with a size gets a
-  horizontal scroll bar as well as ImGui's vertical one, and a long label shrinks its slider,
-  input, combo or colour widget rather than run past the window's edge. A
+  When the view gets smaller later (a browser window made smaller, a phone turned on its side,
+  fullscreen left), a window that showed in full moves back in the same way, no larger than the
+  work area; one the user left partly outside the view stays where it is, and a view that grows
+  again moves nothing. ImGui gives a window with no size ImGui's always-auto-resize: it measures
+  the window's widgets each frame, its labeled widgets at the width ImGui gives an auto-resizing
+  window's items (16 font sizes), and a row-split pane as wide as its own widgets. A window with
+  a size gets a horizontal scroll bar as well as ImGui's vertical one, and a long label shrinks
+  its slider, input, combo or colour widget rather than run past the window's edge. A
   `layout: {kind: horizontal}` row with no `col_widths` puts its cells side by side on one line,
   each at its natural width, as the terminal backends do. One with `col_widths` is an ImGui table
   with a column per entry. `borders` and `resizable` need that table, so a row using them needs

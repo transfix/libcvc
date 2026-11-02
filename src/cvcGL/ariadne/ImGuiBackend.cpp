@@ -191,7 +191,8 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
   // A window opens inside the view, which on a phone is narrower than most documents were laid out
   // for: no larger than the work area, and placed so that all of it shows (a window that fits its
   // content, not yet measured, so that its smallest fit does, and again the next frame, measured).
-  // Only where it opens: the user may drag it anywhere after.
+  // The user may drag it anywhere after; when the view gets smaller, a window that showed in full
+  // moves back in (below).
   ImVec2 openSize(0.0f, 0.0f); // 0 on an axis: fit it
   if (seededSize)
     openSize = ImVec2(ui_px(m_pendingSeed.w), ui_px(m_pendingSeed.h));
@@ -259,6 +260,28 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
       at = in;
     }
   }
+  // The view got smaller since this window was last drawn (a browser window made smaller, a phone
+  // turned on its side, fullscreen left): a window that showed in full there moves back in, as it
+  // opened, no larger than the work area. One the user left partly outside stays where it is. A
+  // window in the flow is placed again every frame anyway.
+  if (auto last = m_lastView.find(id);
+      existing && spot == m_flow.end() && last != m_lastView.end()) {
+    const ImRect was(last->second.x0, last->second.y0, last->second.x1, last->second.y1);
+    const ImRect shown(existing->Pos, existing->Pos + existing->Size); // collapsed: its title bar
+    ImRect wasRoom = was;
+    wasRoom.Expand(1.0f); // a window moved in to the very edge
+    if ((work.Min.x > was.Min.x || work.Min.y > was.Min.y || work.Max.x < was.Max.x ||
+         work.Max.y < was.Max.y) &&
+        wasRoom.Contains(shown) && !work.Contains(shown)) {
+      if (!fits && !existing->Collapsed &&
+          (existing->SizeFull.x > avail.x || existing->SizeFull.y > avail.y))
+        ImGui::SetNextWindowSize(ImMin(existing->SizeFull, avail), ImGuiCond_Always);
+      const ImVec2 want = ImMin(existing->Size, avail);
+      at = ImMax(work.Min, ImMin(at, work.Max - want));
+      ImGui::SetNextWindowPos(at, ImGuiCond_Always);
+    }
+  }
+  m_lastView[id] = FlowRect{work.Min.x, work.Min.y, work.Max.x, work.Max.y};
   if (spot != m_flow.end()) {
     // The room it wants: all its widgets, for a window that fits them; else its size. (Nothing
     // yet for a window not drawn before -- the next frame places it again, measured.)
@@ -346,6 +369,7 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
 void ImGuiBackend::reset_layout() {
   m_flow.clear();
   m_placedUnmeasured.clear();
+  m_lastView.clear();
   m_relaid.clear();
   m_relaidGrids.clear();
   m_relayout = true;

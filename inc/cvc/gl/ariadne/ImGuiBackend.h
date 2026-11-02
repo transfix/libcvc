@@ -51,8 +51,8 @@ public:
   bool begin_grid(const cvc::ariadne::Layout &layout, const char *id) override;
   void grid_next_cell() override;
   void end_grid() override;
-  void seed_grid_tracks(const std::vector<float> &sizes) override; // §11.4 (pre begin_grid)
-  std::vector<float> grid_tracks() const override;                 // §11.4 (post end_grid)
+  void seed_grid_tracks(const std::vector<float> &sizes) override;   // §11.4 (pre begin_grid)
+  std::vector<float> grid_tracks() const override;                   // §11.4 (post end_grid)
   void seed_grid_columns(const std::vector<float> &widths) override; // §11.4 (pre begin_grid)
   std::vector<float> grid_columns() const override;                  // §11.4 (post end_grid)
   void begin_disabled() override; // §4: ImGui::BeginDisabled (greyed, non-interactive)
@@ -203,6 +203,9 @@ private:
   // Windows that fit their content and opened at a place of their own before ImGui had measured
   // them: the next frame moves each in again, measured, until all of it shows (§5.8).
   std::unordered_set<std::string> m_placedUnmeasured;
+  // The work area each window was last drawn in: when the view gets smaller, a window that showed
+  // in full there moves back in (§5.8).
+  std::unordered_map<std::string, FlowRect> m_lastView;
 
   // reset_layout(): the windows drawn since, by id. A window's first draw after it takes its
   // authored place and size (or rejoins the flow) though ImGui still holds the last document's.
