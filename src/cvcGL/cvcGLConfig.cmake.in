@@ -20,6 +20,10 @@ if(NOT TARGET cvc::cvc)
   find_dependency(cvc CONFIG)
 endif()
 find_dependency(VTK COMPONENTS @CVCGL_VTK_COMPONENTS@)
+# cvcGL links cvcMedia (the GL-free media library, installed beside it): its audio output.
+if(NOT TARGET cvc::cvcMedia)
+  find_dependency(cvcMedia CONFIG HINTS "${CMAKE_CURRENT_LIST_DIR}/../cvcMedia")
+endif()
 
 # When cvcGL was built against an imgui that ships a cmake config, its public
 # interface links the imgui::imgui imported target, so consumers must re-find it

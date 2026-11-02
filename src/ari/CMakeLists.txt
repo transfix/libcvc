@@ -35,6 +35,26 @@ include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcInstallRpath.cmake")
 cvc_set_install_rpath(ari bin)
 install(TARGETS ari RUNTIME DESTINATION bin COMPONENT ari)
 
+# ari-media: the same ari with cvcMedia linked, so it plays sound through SDL3's audio subsystem
+# (no window, no display; no GL, VTK or ImGui). The lean `ari` above stays as it was. In-tree it is
+# built wherever cvcMedia is (CVC_BUILD_ARI_MEDIA, or with cvcGL); standalone (the ari-media cvcpkg
+# recipe, -DARI_WITH_MEDIA=ON) it builds cvcMedia from src/cvcMedia, statically, into the binary.
+option(ARI_WITH_MEDIA "Also build ari-media, with cvcMedia (src/cvcMedia) linked in" OFF)
+if(NOT EMSCRIPTEN AND (TARGET cvcMedia OR ARI_WITH_MEDIA))
+  if(NOT TARGET cvcMedia)
+    set(CVC_MEDIA_NO_INSTALL ON)
+    set(_ari_shared "${BUILD_SHARED_LIBS}")
+    set(BUILD_SHARED_LIBS OFF)
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../cvcMedia" "${CMAKE_CURRENT_BINARY_DIR}/cvcMedia")
+    set(BUILD_SHARED_LIBS "${_ari_shared}")
+  endif()
+  add_executable(ari-media main.cpp)
+  target_link_libraries(ari-media PRIVATE cvcMedia)
+  target_compile_definitions(ari-media PRIVATE ARI_MEDIA=1)
+  cvc_set_install_rpath(ari-media bin)
+  install(TARGETS ari-media RUNTIME DESTINATION bin COMPONENT ari)
+endif()
+
 # ctest coverage of the binary, in-tree only. A document set as an app installs one
 # (share/<app>/main.ari), run from another working directory: its relative imports, out of its own
 # directory and its parent's, resolve against the importing file's directory, as in arigl
