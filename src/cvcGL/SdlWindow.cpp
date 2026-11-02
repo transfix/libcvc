@@ -122,6 +122,8 @@ void SdlGLRenderWindow::CreateAWindow() {
     return;
   }
   ++g_openWindows;
+  if (relative_) // asked for before the window was made
+    SDL_SetWindowRelativeMouseMode(window_, true);
   SDL_GL_MakeCurrent(window_, context_);
   this->SetOpenGLSymbolLoader(
       [](void *, const char *name) -> VTKOpenGLAPIProc {
@@ -330,6 +332,12 @@ void SdlGLRenderWindow::SetFullScreen(vtkTypeBool on) {
 
 void SdlGLRenderWindow::HideCursor() { SDL_HideCursor(); }
 void SdlGLRenderWindow::ShowCursor() { SDL_ShowCursor(); }
+
+void SdlGLRenderWindow::SetRelativeMouse(bool on) {
+  relative_ = on;
+  if (window_)
+    SDL_SetWindowRelativeMouseMode(window_, on);
+}
 
 void SdlGLRenderWindow::SetCursorPosition(int x, int y) {
   if (!window_)
@@ -703,6 +711,7 @@ void SdlRenderWindowInteractor::dispatch(const SDL_Event &e) {
       (e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_KEY_UP) ? e.key.mod : SDL_GetModState();
   const int ctrl = (mods & SDL_KMOD_CTRL) ? 1 : 0, shift = (mods & SDL_KMOD_SHIFT) ? 1 : 0;
   this->SetAltKey((mods & SDL_KMOD_ALT) ? 1 : 0);
+  const bool relative = win && win->relativeMouse(); // positions follow the motion (pointerX_)
   const auto pointer = [&](float x, float y, int repeat = 0) {
     int px = 0, py = 0;
     if (win)
@@ -734,13 +743,24 @@ void SdlRenderWindowInteractor::dispatch(const SDL_Event &e) {
     this->InvokeEvent(vtkCommand::LeaveEvent, nullptr);
     break;
   case SDL_EVENT_MOUSE_MOTION:
-    pointer(e.motion.x, e.motion.y);
+    if (relative) {
+      pointerX_ += e.motion.xrel;
+      pointerY_ += e.motion.yrel;
+    } else {
+      pointerX_ = e.motion.x;
+      pointerY_ = e.motion.y;
+    }
+    pointer(pointerX_, pointerY_);
     this->InvokeEvent(vtkCommand::MouseMoveEvent, nullptr);
     break;
   case SDL_EVENT_MOUSE_BUTTON_DOWN:
   case SDL_EVENT_MOUSE_BUTTON_UP: {
     const bool down = e.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
-    pointer(e.button.x, e.button.y, down && e.button.clicks > 1 ? 1 : 0); // a double click repeats
+    if (!relative) {
+      pointerX_ = e.button.x;
+      pointerY_ = e.button.y;
+    }
+    pointer(pointerX_, pointerY_, down && e.button.clicks > 1 ? 1 : 0); // a double click repeats
     unsigned long ev = 0;
     switch (e.button.button) {
     case SDL_BUTTON_LEFT:
@@ -770,7 +790,11 @@ void SdlRenderWindowInteractor::dispatch(const SDL_Event &e) {
     const float flip = e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -1.0f : 1.0f;
     wheelY_ += flip * e.wheel.y;
     wheelX_ += flip * e.wheel.x;
-    pointer(e.wheel.mouse_x, e.wheel.mouse_y);
+    if (!relative) {
+      pointerX_ = e.wheel.mouse_x;
+      pointerY_ = e.wheel.mouse_y;
+    }
+    pointer(pointerX_, pointerY_);
     for (; wheelY_ >= 1.0f; wheelY_ -= 1.0f)
       this->InvokeEvent(vtkCommand::MouseWheelForwardEvent, nullptr);
     for (; wheelY_ <= -1.0f; wheelY_ += 1.0f)

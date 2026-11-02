@@ -67,12 +67,14 @@
 #include <cstdlib> // std::getenv — the conference relay / room / name come from the environment
 #include <cstring> // std::memcpy — a peer's f32 mic chunk out of its payload
 #include <cvc/ariadne/app_runtime.h>
+#include <cvc/ariadne/bind.h> // read_or: the avatar's walk keys, from the state tree
 #include <cvc/ariadne/doc_args.h>
 #include <cvc/ariadne/ftxui_backend.h>
 #include <cvc/ariadne/host_cli.h>
 #include <cvc/ariadne/host_info.h>
 #include <cvc/ariadne/host_signals.h>
 #include <cvc/ariadne/host_warnings.h>
+#include <cvc/ariadne/keys.h>   // split_keys, MouseControls
 #include <cvc/ariadne/loader.h> // run_init — seed conf.room / conf.self before the first tick
 #include <cvc/ariadne/media_player.h> // §5.13 the play policy (--media-play)
 #include <cvc/ariadne/stream/stream_view.h>
@@ -138,6 +140,7 @@
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/SdlInput.h>
+#include <cvc/gl/Settings.h> // UiSettings: the overlay's UI size, for the Controls window
 #include <cvc/gl/StageLighting.h>
 #include <cvc/gl/TouchGestures.h>
 #include <cvc/gl/ariadne/AriRuntime.h>
@@ -269,27 +272,76 @@ std::chrono::duration<double> snapshot_period(const ari::HostOptions &o) {
   return std::chrono::duration<double>(1.0 / (o.fps > 0 ? o.fps : 20));
 }
 
-// Settings' item that opens the Keys window AppRuntime puts in every document.
+// Settings' item that opens the Controls window AppRuntime puts in every document (its keys, and
+// the camera's mouse settings).
 ari::Widget keys_menu_item() {
-  return ari::menu_toggle("Keys...", std::string("tree.") + ari::kKeysWindow + ".open");
+  return ari::menu_toggle("Controls...", std::string("tree.") + ari::kKeysWindow + ".open");
 }
 
-// The camera's fly keys, for the Keys window: the camera reads them from its own state, so the
-// bindings have no `on`.
+// The camera's mouse settings and distance, for the Controls window: it reads them from its own
+// state. Mouse look needs a mouse: a touch screen keeps dragging (a tap there must stay a tap on
+// the scene).
+ari::MouseControls camera_mouse(const cvc::gl::CameraController &cam, bool touch, bool room) {
+  const std::string at = "/" + cam.stateName() + ".settings.";
+  ari::MouseControls m;
+  if (!touch) {
+    m.look = at + "mouse_look";
+    m.note = room ? "Mouse look: the mouse aims and W walks where you aim. Click the scene to\n"
+                    "start, Esc to get the mouse back. Drag to look: drag to look around, and\n"
+                    "click the floor to face it."
+                  : "Mouse look: the mouse turns the view. Click the scene to start, Esc to get\n"
+                    "the mouse back.";
+  }
+  m.sensitivity = at + "mouse_sensitivity";
+  m.invert_y = at + "invert_pitch";
+  m.invert_x = at + "invert_yaw";
+  m.distance = "/" + cam.stateName() + ".orbit.distance";
+  return m;
+}
+
+// The camera's keys, for the Controls window: the camera reads them from its own state
+// (<viewer>.camera.keys.<action>), so the bindings have no `on`.
 std::vector<ari::KeyBinding> camera_keys(const cvc::gl::CameraController &cam) {
   const std::string at = "/" + cam.stateName() + ".keys.";
-  const std::string group = "Camera (fly mode; Tab switches)";
+  const std::string group = "Camera";
   std::vector<ari::KeyBinding> keys;
   for (const auto &[key, label] :
-       std::vector<std::pair<const char *, const char *>>{{"forward", "Forward"},
-                                                          {"backward", "Back"},
-                                                          {"strafe_left", "Left"},
-                                                          {"strafe_right", "Right"},
-                                                          {"up", "Up"},
-                                                          {"down", "Down"},
-                                                          {"sprint", "Faster"},
-                                                          {"toggle_mode", "Orbit / fly"}})
+       std::vector<std::pair<const char *, const char *>>{{"forward", "Fly forward"},
+                                                          {"backward", "Fly back"},
+                                                          {"strafe_left", "Fly left"},
+                                                          {"strafe_right", "Fly right"},
+                                                          {"up", "Fly up"},
+                                                          {"down", "Fly down"},
+                                                          {"sprint", "Fly faster"},
+                                                          {"toggle_mode", "Orbit / fly"},
+                                                          {"release_pointer", "Free the mouse"}})
     keys.push_back({std::string("camera_") + key, label, group, {}, "", at + key});
+  return keys;
+}
+
+// Our avatar's walk keys (conference mode, in Orbit): each action, what the Controls window calls
+// it, and its default keys. They live beside the camera's, under the viewer that walks the avatar
+// (<viewer>.avatar.keys.<action>, avatar_keys_path), each one key or more.
+struct WalkKey {
+  const char *action, *label;
+  std::vector<std::string> keys;
+};
+const std::vector<WalkKey> &walk_keys() {
+  static const std::vector<WalkKey> keys = {{"forward", "Walk forward", {"W", "Up"}},
+                                            {"backward", "Walk back", {"S", "Down"}},
+                                            {"strafe_left", "Step left", {"A", "Left"}},
+                                            {"strafe_right", "Step right", {"D", "Right"}}};
+  return keys;
+}
+std::string avatar_keys_path(const cvc::gl::SceneRenderer &view) {
+  return view.scene().getStatePrefix() + ".viewers." + view.name() + ".avatar.keys.";
+}
+std::vector<ari::KeyBinding> avatar_keys(const cvc::gl::SceneRenderer &view) {
+  const std::string at = "/" + avatar_keys_path(view);
+  std::vector<ari::KeyBinding> keys;
+  for (const WalkKey &k : walk_keys())
+    keys.push_back({std::string("avatar_") + k.action, k.label,
+                    "Avatar (mouse look: walk where you aim)", k.keys, "", at + k.action});
   return keys;
 }
 
@@ -417,6 +469,24 @@ struct ConferenceSession {
   bool facing_chosen_ = false; // the user clicked to face (the facing is theirs from then on)
   static constexpr double kWalkSpeed = 2.0; // m/s
   static constexpr double kEyeHeight = 1.2; // orbit centre above the avatar's feet (m)
+  // Mouse look (the Controls window; CameraController::setMouseLookEnabled): the camera aims, we
+  // face where it does and walk that way. Turning proposes at most kTurnHz intents a second (a
+  // key still proposes at once; our own avatar turns every frame), and the camera looks past our
+  // right shoulder at a point ahead of us.
+  std::string walk_keys_;    // where our walk keys are bound (avatar_keys_path)
+  unsigned last_keys_ = 0;   // the movement keys held at the last proposal (a bit each)
+  double next_turn_s_ = 0.0; // steady_s() before which a turn alone proposes nothing
+  static constexpr double kTurnHz = 20.0;
+  static constexpr double kShoulder = 0.45; // the pivot's offset to the right (m)
+  static constexpr double kAimAhead = 4.0;  // and ahead of us: the crosshair's point (m)
+  static constexpr double kAimEaseS = 0.2;  // the pivot's easing as mouse look turns on and off
+  double aim_blend_ = 0.0;                  // 0 = the pivot on us, 1 = over the shoulder, ahead
+  // Either look: the ground under us is the camera's floor (an eye that would go under it, looking
+  // up, slides in instead), and an eye inside our own avatar hides it.
+  double floor_z_ = -1e300;                       // the floor last given to the camera
+  static constexpr double kFloorClearance = 0.25; // the eye's least height above the ground (m)
+  static constexpr double kInsideRadius = 0.6;    // around our feet, and up to
+  static constexpr double kInsideTop = 1.9;       // this high, the eye is inside our avatar (m)
 
   // Publish: forward the local camera (latest) and mic (ring) streams. The .ari puts their tokens
   // in "cam_token" / "mic_token". We re-stamp each outgoing frame with a COMMON host clock (one
@@ -923,6 +993,7 @@ struct ConferenceSession {
       std::fprintf(stderr, "arigl: room: LOD off (CVC_ARIGL_LOD=0): meshes at full detail\n");
     }
     cam_ = &cam;
+    walk_keys_ = avatar_keys_path(view);
     // Peers' names over their markers: a scene annotation, so it shows with the panels hidden too
     // and sits under the document's windows.
     ui.setSceneDrawCallback([this] {
@@ -936,8 +1007,11 @@ struct ConferenceSession {
   void step_room(const cvc::clock_driver::clock_frame &f) {
     if (!holon_ || !room_view_ || !cam_)
       return;
+    const bool look =
+        cam_->mouseLookEnabled() && cam_->mode() == cvc::gl::CameraController::Mode::Orbit;
     // A click on the scene (not a drag, and not one the UI took) turns us to face the ground point
-    // under it. Only once we are in the room: the pick needs our position.
+    // under it. Only once we are in the room: the pick needs our position. (Under mouse look the
+    // camera takes the clicks: one captures the pointer.)
     int cx = 0, cy = 0;
     double self[3];
     if (cam_->takeClick(cx, cy) && room_view_->self_position(self)) {
@@ -951,12 +1025,26 @@ struct ConferenceSession {
     // Keys -> intent, only in Orbit: in Fly the same keys move the camera instead. The camera's
     // held set is dropped while the UI has the keyboard, so typing a name never walks.
     cvc::ariadne::avatar_intent in;
-    const auto held = [this](const char *a, const char *b) {
-      return cam_->keyHeld(a) || cam_->keyHeld(b);
-    };
-    const bool walking =
-        held("w", "Up") || held("s", "Down") || held("a", "Left") || held("d", "Right");
-    if (!facing_chosen_ && !walking) {
+    // Our walk keys as the Controls window has them (walk_keys; their defaults until the document's
+    // load seeds them): any of an action's keys held.
+    unsigned keys = 0, bit = 1;
+    for (const WalkKey &k : walk_keys()) {
+      const std::string stored =
+          cvc::ariadne::read_or<std::string>(*app_, walk_keys_ + k.action, std::string());
+      bool down = false;
+      for (const std::string &key : stored.empty() ? k.keys : cvc::ariadne::split_keys(stored))
+        down = down || cam_->keyHeld(key);
+      keys |= down ? bit : 0u;
+      bit <<= 1;
+    }
+    const bool walking = keys != 0;
+    if (look) {
+      // We face where the camera looks, standing or walking: the mouse aims.
+      double eye[3], focal[3], up[3];
+      cam_->getPose(eye, focal, up);
+      facing_yaw_ = gla::heading_yaw(eye, focal);
+      facing_chosen_ = true; // back in drag to look, we keep facing where we last aimed
+    } else if (!facing_chosen_ && !walking) {
       // No facing of the user's own yet: track where the camera looks, so the first W walks into
       // the screen. A default, not an ask: mirrored into last_user_ so it proposes nothing.
       double eye[3], focal[3], up[3];
@@ -966,8 +1054,8 @@ struct ConferenceSession {
     }
     in.yaw = facing_yaw_;
     if (cam_->mode() == cvc::gl::CameraController::Mode::Orbit) {
-      in = gla::intent_from_keys(held("w", "Up"), held("s", "Down"), held("a", "Left"),
-                                 held("d", "Right"), facing_yaw_, kWalkSpeed);
+      in = gla::intent_from_keys((keys & 1u) != 0, (keys & 2u) != 0, (keys & 4u) != 0,
+                                 (keys & 8u) != 0, facing_yaw_, kWalkSpeed);
     }
     // Propose when the USER changed what they ask for (a key, a click to face) -- a replicated
     // write, so only on change. Otherwise run on whatever intent the tree holds for us: the
@@ -980,18 +1068,32 @@ struct ConferenceSession {
     };
     // An intent in the tree stamped before our last proposal is an echo of an earlier one (the
     // relay's re-broadcast can carry it back after the newer write left): not ours any more.
-    if (differs(in, last_user_)) {
+    // Under mouse look the facing moves with every frame's turn, the walk's direction with it:
+    // what only turned waits until kTurnHz allows, a key at once.
+    const double now = steady_s();
+    bool ask = differs(in, last_user_);
+    if (ask && look && keys == last_keys_ && now < next_turn_s_)
+      ask = false;
+    if (ask) {
       proposed_tick_ = cvc::ariadne::propose_intent(*holon_, *app_, room_, pid_, in);
       last_intent_ = in;
       last_user_ = in;
+      last_keys_ = keys;
+      next_turn_s_ = now + 1.0 / kTurnHz;
     } else if (cvc::ariadne::avatar_intent tree;
                cvc::ariadne::read_current_intent(*app_, room_, pid_, proposed_tick_, tree) &&
                differs(tree, last_intent_)) {
       last_intent_ = tree;
     }
     // Re-assert it locally every frame: our avatar joins the holon only once our room-join is in
-    // the tree, so an intent proposed before then must still reach the prediction.
-    holon_->set_intent(pid_, last_intent_);
+    // the tree, so an intent proposed before then must still reach the prediction. Under mouse look
+    // our own avatar also turns with the camera every frame, between the proposals that tell the
+    // relay: only its facing, so the walk we predict stays the one the relay runs. (Not while the
+    // document drives us: the tree's intent is not the one we last proposed then.)
+    cvc::ariadne::avatar_intent local = last_intent_;
+    if (look && !differs(last_intent_, last_user_))
+      local.yaw = facing_yaw_;
+    holon_->set_intent(pid_, local);
     // The relay's pose snapshots since the last frame, in order, then the tree (roster, statics)
     // and the frame itself.
     std::vector<cvc::pose_snapshot> snaps;
@@ -1038,13 +1140,36 @@ struct ConferenceSession {
         cam_->frameBounds(p[0] - 8.0, p[1] - 8.0, p[2], p[0] + 8.0, p[1] + 8.0, p[2] + 2.0);
         framed_ = true;
       }
-      const double c[3] = {p[0], p[1], p[2] + kEyeHeight};
+      // Under mouse look the camera looks past us: at a point over our right shoulder and
+      // kAimAhead down the way we face, so the crosshair marks where we aim, ahead of us, and
+      // clears our own head. We face where the camera looks, so that point turns with us and the
+      // camera still turns about us. Never more than a third of the orbit's distance ahead, so the
+      // camera stays behind us; eased in and out as mouse look turns on and off.
+      aim_blend_ += ((look ? 1.0 : 0.0) - aim_blend_) *
+                    (1.0 - std::exp(-std::max(0.0, f.wall_dt) / kAimEaseS));
+      if (std::fabs(aim_blend_ - (look ? 1.0 : 0.0)) < 1e-3)
+        aim_blend_ = look ? 1.0 : 0.0;
+      const double ahead = aim_blend_ * std::min(kAimAhead, cam_->orbitDistance() / 3.0);
+      const double side = aim_blend_ * kShoulder;
+      const double fx = std::cos(facing_yaw_), fy = std::sin(facing_yaw_); // right is (fy, -fx)
+      double c[3] = {p[0] + ahead * fx + side * fy, p[1] + ahead * fy - side * fx,
+                     p[2] + kEyeHeight};
       if (std::fabs(c[0] - orbit_center_[0]) + std::fabs(c[1] - orbit_center_[1]) +
               std::fabs(c[2] - orbit_center_[2]) >
           1e-4) {
         cam_->setOrbitCenter(c[0], c[1], c[2]);
         orbit_center_[0] = c[0], orbit_center_[1] = c[1], orbit_center_[2] = c[2];
       }
+      if (std::fabs(p[2] - floor_z_) > 1e-3) { // we stand on the ground: the camera's floor
+        cam_->setOrbitFloor(p[2], kFloorClearance);
+        floor_z_ = p[2];
+      }
+      // Looking straight up from just above the floor, the eye comes inside our own avatar: hide
+      // it then, rather than show its inside.
+      double eye[3], focal[3], up[3];
+      cam_->getPose(eye, focal, up);
+      room_view_->set_self_visible(std::hypot(eye[0] - p[0], eye[1] - p[1]) >= kInsideRadius ||
+                                   eye[2] >= p[2] + kInsideTop);
     }
   }
 
@@ -1739,8 +1864,25 @@ int run_window(const ari::HostOptions &o) {
         ari::menu("Settings", {keys_menu_item(), ari::separator(), ari::custom("scene_settings")}));
     return menus;
   };
+  // The Controls window's UI size: the overlay's own scale in the state tree, which it applies at
+  // the next frame (1.25 on a touch device, 1 with a mouse, until the user picks another).
+  rt.app_runtime().set_host_ui_size(
+      {"/" + cvc::gl::UiSettings::viewerStatePath(sg.getStatePrefix(), view.name()) + ".scale"});
   rt.app_runtime().set_host_menus(host_menus(o.doc));
-  rt.app_runtime().set_host_keys(camera_keys(cam));
+  std::vector<ari::KeyBinding> host_keys = camera_keys(cam);
+  if (conf.active) // walking our avatar in the room
+    for (ari::KeyBinding &k : avatar_keys(view))
+      host_keys.push_back(std::move(k));
+  rt.app_runtime().set_host_keys(std::move(host_keys));
+  rt.app_runtime().set_host_mouse(camera_mouse(cam, ui.touchMode(), conf.active));
+  // $CVC_ARIGL_LOOK=mouse starts in mouse look (the browser page's ?look=mouse), =drag in drag to
+  // look; otherwise the camera's own setting stands.
+  if (const char *look = std::getenv("CVC_ARIGL_LOOK"); look && !ui.touchMode()) {
+    if (std::string(look) == "mouse")
+      cam.setMouseLookEnabled(true);
+    else if (std::string(look) == "drag")
+      cam.setMouseLookEnabled(false);
+  }
   if (!gallery.empty())
     gallery.install(rt.app_runtime(), &gallery_next, &gallery_left);
   if (const int status = load_document(rt, o); status >= 0)

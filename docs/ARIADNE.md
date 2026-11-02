@@ -620,10 +620,36 @@ the loader only *captures*. The host wires them:
       on: (state-set "item" (+ (int (state-get "item")) 1))
   ```
 
-  `AppRuntime` lists every binding, the document's and the host's
-  (`set_host_keys`: `arigl` adds its camera's fly keys), in a **Keys** window it puts in the
-  document: closed until `tree.ariadne_keys.open` is set (arigl's *Settings > Keys...*), a row
-  per binding with its keys and a **Change** button. Change writes the binding's id to
+  `AppRuntime` lists every binding, the document's and the host's (`set_host_keys`), in a
+  **Controls** window it puts in the document: closed until `tree.ariadne_keys.open` is set
+  (arigl's *Settings > Controls...*), a row per binding with its keys and a **Change** button.
+  Every key a host acts on is such a binding, in the state tree beside what reads it. arigl's:
+
+  | binding | state key (under the scene prefix) | default |
+  |---|---|---|
+  | the camera's fly keys, Orbit / fly, Free the mouse | `viewers.main.camera.keys.<action>` | W A S D, Space, Left Ctrl, Left Shift, Tab, Escape |
+  | the avatar's walk keys (conference mode) | `viewers.main.avatar.keys.<action>` | W or Up, S or Down, A or Left, D or Right |
+
+  A host's pointer and camera settings (`set_host_mouse`, a `MouseControls`) go above the keys,
+  bound where its camera reads them: arigl's are `viewers.main.camera.settings.mouse_look`
+  (*Drag to look* or *Mouse look*), `mouse_sensitivity`, `invert_pitch` and `invert_yaw`, and
+  *Camera distance*, the camera's `orbit.distance` (the wheel changes it too). Under mouse look
+  a click on the scene captures the pointer and the mouse turns the view with no button held,
+  until *Free the mouse* (Escape; in a browser, Escape always ends its pointer lock). In a
+  browser the page takes its pointer lock inside that press itself (the cursor goes, and the
+  view keeps turning past the screen's edge): a press over a window is the UI's
+  (`CameraController::setPointerOverUi`, which the overlay sets each frame). In conference mode
+  the avatar faces where the camera aims, standing or walking, and walks that way: it turns
+  with the camera every frame on your screen, and the relay hears each turn (at most 20 intents
+  a second, a key at once) and shows it to everyone else. The camera looks past the avatar's
+  right shoulder at a point 4 m ahead of it (at most a third of the camera's distance), so the
+  crosshair marks where you aim, downrange. In either look
+  the ground is the camera's floor (`orbit.floor.*`): looking up slides the eye in along its line
+  of sight rather than under the ground, and an eye that comes inside the avatar hides it.
+  `$CVC_ARIGL_LOOK=mouse` (the browser page's `?look=mouse`) starts in mouse look. A touch
+  screen keeps dragging.
+
+  A row's Change writes the binding's id to
   `tree.ariadne_keys.capture`; while the window is open the next key down becomes its key
   (Escape keeps the old one; the comma key is stored as `Comma`), and no handler sees that key.
   Closing the window drops a capture still waiting. In the terminal every key goes to the
@@ -1153,7 +1179,14 @@ the Windows menu (§5.9), takes its place in the column again. A new document
 
 How each backend does it:
 
-- **ImGui** gives a window with no size ImGui's always-auto-resize: it measures the window's
+- **ImGui** measures in logical pixels at the UI size (§5.14): a document's `px` (a window's
+  `pos:` and `size:`, a column's width, a picture's or a plot's size, the area a group's
+  `background:` takes) is multiplied by the UI size
+  and the display's pixel ratio, as the UI's text and widgets are, and the geometry it persists
+  is divided back, so a layout looks the same at any UI size and on a phone's dense screen. A
+  window opens inside the view: no larger than the work area, and moved in from its `pos:` (or
+  its persisted place) until all of it shows, so a layout made for a laptop opens on a phone in
+  reach. ImGui gives a window with no size ImGui's always-auto-resize: it measures the window's
   widgets each frame, its labeled widgets at the width ImGui gives an auto-resizing window's items
   (16 font sizes), and a row-split pane as wide as its own widgets. A window with a size gets a
   horizontal scroll bar as well as ImGui's vertical one, and a long label shrinks its slider,
@@ -1199,8 +1232,8 @@ Every document gets a **Windows** menu to open such a window again, with no menu
   `conference_roster.ari` sets `windows_menu: View`, so its per-peer camera windows are listed by
   name at the end of its View menu.
 - A host's menus (`AppRuntime::set_host_menus`) count as the document's: arigl's
-  *Settings > Keys...* opens the Keys window, so arigl's Windows menu leaves it out. Under a host
-  without one, the Windows menu is how the Keys window opens.
+  *Settings > Controls...* opens the Controls window, so arigl's Windows menu leaves it out. Under
+  a host without one, the Windows menu is how the Controls window opens.
 - It goes after the document's own menus (and a host's). When the menu bar already has a menu of
   the same title (`fem_gallery.ari`'s own Windows menu), the items go at the end of that menu,
   after a separator, instead of a second menu of that name. A document with no `menubar:` gets a
@@ -1456,7 +1489,39 @@ has loaded, or when it failed, nothing is drawn behind the content.
   `repeat:`) is paused at once and closed 5 s later. `ari snapshot` waits while a player is
   still loading, as it waits for pictures.
 
-### 5.14 Text buffers and message fields: `text_view:` and `message_input:`
+### 5.14 On a phone: UI size, hiding windows, the system keyboard
+
+A document needs nothing of its own to work on a phone: the ImGui host (arigl, cyprty) does
+this for every one.
+
+- **UI size.** The UI is sized in logical pixels (CSS pixels in a browser) times the UI size,
+  times the display's pixel ratio. A phone's canvas is about three device pixels to the CSS
+  pixel, so without the ratio its UI would come out a third of its size. The UI size starts at
+  1.25 on a touch device and 1 with a mouse, and is the state key
+  `<scene>.viewers.<viewer>.ui.scale` (arigl's: `ui.docs.ari.viewers.main.ui.scale`). The
+  Controls window offers it as **UI size** (75% to 200%), under *Display* above the keys, for any
+  host that calls `AppRuntime::set_host_ui_size`. A new size takes effect at the next frame, and
+  the open windows grow or shrink with it. It holds for the run.
+- **Hiding windows.** On a view whose short side is under 700 logical pixels the panels start
+  hidden, and a round button in the bottom-right corner shows and hides them all (the menu bar
+  too), so the scene is never buried. The button stays above every window, even one dragged over
+  its corner. A window collapses to its title bar with the arrow at the title's left (or a double
+  tap on the title), closes with its X when it is `closable:`, and comes back from the View or
+  Windows menu (§5.9). On a touch screen a window moves by its title bar only, so a finger that
+  slips off a widget does not carry its window away.
+- **The system keyboard.** A browser raises a phone's keyboard only for a focused text field,
+  which the canvas is not. When a finger (or a pen) activates an `input_text`, the page focuses a
+  hidden `<input>` placed at the field's caret, so the keyboard comes up and the browser keeps
+  the field in view above it; what the keyboard types goes to the field, autocorrect and
+  composed words included, and the field's deactivation puts the keyboard away. iOS raises its
+  keyboard only for a focus made while the finger lifts, which is when the page makes it; a field
+  that becomes active with no finger down (an `autofocus:` one) raises it on Android, and on iOS
+  at the first tap on it. While the hidden input has the keys the canvas does not, so typing never
+  reaches `on_key` or walks an avatar. A mouse click on a field types through the canvas as
+  before. A native build has no phone yet; SDL3's `SDL_StartTextInput` is how one would raise the
+  keyboard on iOS and Android.
+
+### 5.15 Text buffers and message fields: `text_view:` and `message_input:`
 
 Two widgets for a log and the field under it (a chat window, a console):
 
@@ -1516,7 +1581,7 @@ back (a window reopened) keeps its place.
   hint is drawn over it while it is empty. A bare-name `on:` (a host handler) gets no `event`;
   give it a program.
 
-### 5.15 Conference chat: the chat verbs and the chat component
+### 5.16 Conference chat: the chat verbs and the chat component
 
 In a conference, the relay (arisrv) keeps the chat. Each client is pushed what it may read:
 
@@ -1720,7 +1785,7 @@ includes. Each binds state keys a C++ object owns, so it needs no host code;
 | `fe_controls` | an `fe_lab` node named `domain` (§5.4) |
 | `card` | a card in a list: avatar / title / subtitle / timestamp header, body, `media` and `actions` slots; its args are state keys, so a `repeat:` includes one per item (not a window: embed it) |
 | `transfer_function`, `transfer_function_editor` | any node's `transfer_function` model (args `node`, `id`): the ColorTable2 editor with histogram / contour spectrum / contour tree layers — see [`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) |
-| `chat`, `chat_panel` | a room's chat and direct messages through the chat verbs (args `id`, `title`, `room`); its functions come with the import: call `(chat-ui-step ID ROOM)` from `on_tick` (§5.15) |
+| `chat`, `chat_panel` | a room's chat and direct messages through the chat verbs (args `id`, `title`, `room`); its functions come with the import: call `(chat-ui-step ID ROOM)` from `on_tick` (§5.16) |
 | `room_users`, `room_users_compact` | everyone in a room from `room-roster`, with local cam / mic / volume and a message button (args `id`, `title`, `rows`, `chat`, `self`); call `(room-users-step ROWS ROOM CHAT)` from `on_tick` |
 
 The `card` is a generic social or inbox card (§5.11 pictures, slots in §6.1):
@@ -2035,7 +2100,8 @@ Two `AppRuntime` pieces make that possible for any host:
   host menu named like one of them adds its items to it. With no `document_menus()`, the host's
   menus go first.
 - `set_host_keys(keys)` adds the host's key bindings to every document's, and gives each
-  document the Keys window (§5.3), even one with no keys of its own.
+  document the Controls window (§5.3), even one with no keys of its own. `set_host_mouse(m)`
+  adds the host camera's pointer settings to that window, above the keys.
 - `load()` clears the last document's scene first (`SceneAdapter::clear()`: its nodes, free
   lights, rigs, physics, and the background, shadows and chrome it set), whether it is a hot
   reload or a switch to another document. A document without `channels:` also drops the last

@@ -168,6 +168,8 @@ windows:
   #     now = started with + refilled - work - carried - overflow + unpaid + corrections, so the
   #     residual is 0 (rounding aside);
   #   * the history: the reserve and the power you spent over the last minute.
+  # Each line shows a short value; what it means is its tooltip (a policy line's is published as
+  # self.avatar.policy.<line>_tip), since a sentence beside the value is cut off in a narrow window.
   - window: Avatar
     id: myavatar
     pos: [20, 610]
@@ -217,104 +219,123 @@ windows:
         layout: { kind: grid, col_widths: [104, 300] }
         children:
           - text: "budget"
+            tooltip: (state-get "self.avatar.policy.budget_tip")
           - text: ""
             bind: self.avatar.policy.budget
+            tooltip: (state-get "self.avatar.policy.budget_tip")
       - type: group
         layout: { kind: grid, col_widths: [104, 300] }
         children:
           - text: "push"
+            tooltip: (state-get "self.avatar.policy.push_tip")
           - text: ""
             bind: self.avatar.policy.push
+            tooltip: (state-get "self.avatar.policy.push_tip")
       - type: group
         layout: { kind: grid, col_widths: [104, 300] }
         children:
           - text: "power"
+            tooltip: (state-get "self.avatar.policy.power_tip")
           - text: ""
             bind: self.avatar.policy.power
+            tooltip: (state-get "self.avatar.policy.power_tip")
       - type: group
         layout: { kind: grid, col_widths: [104, 300] }
         children:
           - text: "reserve"
+            tooltip: (state-get "self.avatar.policy.reserve_tip")
           - text: ""
             bind: self.avatar.policy.reserve
+            tooltip: (state-get "self.avatar.policy.reserve_tip")
       - type: group
         layout: { kind: grid, col_widths: [104, 300] }
         children:
           - text: "carrying"
+            tooltip: (state-get "self.avatar.policy.carrying_tip")
           - text: ""
             bind: self.avatar.policy.carrying
+            tooltip: (state-get "self.avatar.policy.carrying_tip")
       - type: group
         layout: { kind: grid, col_widths: [104, 300] }
         children:
           - text: "sustains"
+            tooltip: (state-get "self.avatar.policy.sustains_tip")
           - text: ""
             bind: self.avatar.policy.sustains
+            tooltip: (state-get "self.avatar.policy.sustains_tip")
       - type: group
         layout: { kind: grid, col_widths: [104, 300] }
         children:
           - text: "when empty"
+            tooltip: (state-get "self.avatar.policy.empty_tip")
           - text: ""
             bind: self.avatar.policy.empty
+            tooltip: (state-get "self.avatar.policy.empty_tip")
       - separator
       - text: "Ledger: where your reserve went since you joined"
         color: [0.75, 0.85, 1.0]
       - type: group
-        layout: { kind: grid, col_widths: [104, 84, 220] }
+        layout: { kind: grid, col_widths: [104, 300] }
         children:
           - text: "started with"
           - text: ""
             bind: self.avatar.ledger.start
-          - text: ""
       - type: group
-        layout: { kind: grid, col_widths: [104, 84, 220] }
+        layout: { kind: grid, col_widths: [104, 300] }
         children:
           - text: "refilled"
+            tooltip: "Resting power refills the reserve, all the time."
           - text: ""
             bind: self.avatar.ledger.refilled
-          - text: "resting power, all the time"
+            tooltip: "Resting power refills the reserve, all the time."
       - type: group
-        layout: { kind: grid, col_widths: [104, 84, 220] }
+        layout: { kind: grid, col_widths: [104, 300] }
         children:
           - text: "work"
+            tooltip: "Speeding up and pushing."
           - text: ""
             bind: self.avatar.ledger.work
-          - text: "speeding up, pushing"
+            tooltip: "Speeding up and pushing."
       - type: group
-        layout: { kind: grid, col_widths: [104, 84, 220] }
+        layout: { kind: grid, col_widths: [104, 300] }
         children:
           - text: "carried"
+            tooltip: "Carrying your weight along."
           - text: ""
             bind: self.avatar.ledger.carried
-          - text: "carrying your weight along"
+            tooltip: "Carrying your weight along."
       - type: group
-        layout: { kind: grid, col_widths: [104, 84, 220] }
+        layout: { kind: grid, col_widths: [104, 300] }
         children:
           - text: "overflow"
+            tooltip: "Refill lost to a reserve that was already full."
           - text: ""
             bind: self.avatar.ledger.overflow
-          - text: "refill a full reserve lost"
+            tooltip: "Refill lost to a reserve that was already full."
       - type: group
-        layout: { kind: grid, col_widths: [104, 84, 220] }
+        layout: { kind: grid, col_widths: [104, 300] }
         children:
           - text: "unpaid"
+            tooltip: "Stopping on an empty reserve, which it could not pay for."
           - text: ""
             bind: self.avatar.ledger.unpaid
-          - text: "stopping on an empty reserve"
+            tooltip: "Stopping on an empty reserve, which it could not pay for."
       - type: group
-        layout: { kind: grid, col_widths: [104, 84, 220] }
+        layout: { kind: grid, col_widths: [104, 300] }
         children:
           - text: "corrections"
+            tooltip: "The relay's count over yours."
           - text: ""
             bind: self.avatar.ledger.corrections
-          - text: "the relay's count over yours"
+            tooltip: "The relay's count over yours."
       - type: group
-        layout: { kind: grid, col_widths: [104, 84, 220] }
+        layout: { kind: grid, col_widths: [104, 300] }
         children:
           - text: "now"
+            tooltip: (state-get "self.avatar.ledger.balance")
           - text: ""
             bind: self.avatar.ledger.now
-          - text: ""
-            bind: self.avatar.ledger.balance
+            tooltip: (state-get "self.avatar.ledger.balance")
       - progress: Work
         bind: self.avatar.ledger.share.work
       - progress: Carried

@@ -66,6 +66,11 @@ public:
   void SetFullScreen(vtkTypeBool on) override;
   void HideCursor() override;
   void ShowCursor() override;
+  // Relative mouse mode, for a camera's pointer capture: while the window has focus the cursor is
+  // hidden and held in it, and the pointer's motion keeps coming at its edge. The interactor moves
+  // VTK's event position by each motion's delta, so VTK's observers read the motion as before.
+  void SetRelativeMouse(bool on);
+  bool relativeMouse() const { return relative_; }
   void SetCursorPosition(int x, int y) override; // VTK's coordinates: pixels, y up
   void SetCurrentCursor(int shape) override;
   void SetShowWindow(bool show) override;
@@ -116,6 +121,7 @@ private:
   std::map<int, SDL_Cursor *> cursors_;
   std::stack<std::pair<SDL_Window *, SDL_GLContext>> contexts_; // PushContext's
   int screen_[2] = {0, 0};
+  bool relative_ = false; // SetRelativeMouse
 };
 
 class SdlRenderWindowInteractor : public vtkRenderWindowInteractor {
@@ -161,6 +167,9 @@ private:
   int nextSink_ = 1;
   std::vector<Kept> kept_;
   float wheelY_ = 0.0f, wheelX_ = 0.0f; // fractional wheel steps (trackpads) carried over
+  // Where the pointer is, in window points: SDL's, or in relative mode SDL's last one moved by
+  // each motion since (SDL holds its own still), so a delta from VTK's positions is the motion.
+  float pointerX_ = 0.0f, pointerY_ = 0.0f;
   std::map<int, SDL_TimerID> timers_;   // VTK platform timer id -> SDL timer
 };
 

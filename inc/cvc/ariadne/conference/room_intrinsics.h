@@ -32,7 +32,7 @@
 //
 // and the chat verbs (room_chat.h; CHANNEL is "" for the room or a peer's pid): (chat-post ROOM
 // TEXT [TO]), (chat-info ROOM [CHANNEL]), (chat-messages ROOM [CHANNEL [AFTER]]), (chat-more ROOM
-// [CHANNEL]), (chat-conversations ROOM) and (chat-rev ROOM). docs/ARIADNE.md §5.15 has what each
+// [CHANNEL]), (chat-conversations ROOM) and (chat-rev ROOM). docs/ARIADNE.md §5.16 has what each
 // returns; the handle keeps the caller's room_chat_client.
 //
 // THE ROOM TREE (roadmap §5a) is SHARED, not document-scoped: it lives at the absolute path

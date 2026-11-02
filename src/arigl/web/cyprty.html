@@ -40,6 +40,12 @@
   footer { flex: none; padding: 4px 14px; border-top: 1px solid #232a33;
            display: flex; justify-content: space-between; color: #8b98a5;
            font-variant-numeric: tabular-nums; white-space: pre; }
+  /* A phone: the keyboard hints (there is no keyboard) and the log line give their rows to the
+     scene; the title and Fullscreen stay. */
+  @media (max-width: 600px) {
+    header .keys, footer { display: none; }
+    header { padding: 6px 12px; }
+  }
 </style>
 </head>
 <body>
@@ -47,7 +53,8 @@
   <h1>cyberpcangel &middot; cyprty</h1>
   <span class="keys">Ariadne conference — the browser joins the room and shows who is present,
     live with native clients &middot; <b>WASD</b> walk/strafe &middot; <b>click</b> the floor to
-    face it &middot; <b>drag</b> to orbit &middot;
+    face it &middot; <b>drag</b> to orbit &middot; <b>Settings &rsaquo; Controls</b> for mouse
+    look &middot;
     <a href="https://github.com/transfix/libcvc">libcvc</a></span>
   <button id="fs" title="Fullscreen (best on a phone)">⛶ Fullscreen</button>
 </header>
@@ -93,6 +100,9 @@
   // ?synthetic=1 drives the self-cam from a hardware-free MJPEG test pattern instead of the real
   // camera, so the conference (peer video included) can be tried in a browser with no camera.
   const SYNTH = PARAMS.get('synthetic');
+  // ?look=mouse starts in mouse look (click the scene, then the mouse aims and W walks where you
+  // aim; Esc gives the mouse back), ?look=drag in drag to look. Settings > Controls switches.
+  const LOOK = PARAMS.get('look');
   // ?lane=1 offers the relay a fast lane: poses and media on an unreliable WebRTC data channel
   // beside the WebSocket (docs/roadmap/CONFERENCE_UNRELIABLE_TRANSPORT.md). A relay without one, or
   // a network that blocks UDP, leaves everything on the WebSocket.
@@ -157,6 +167,7 @@
         ENV.CVC_ARIADNE_RELAY = RELAY;
         ENV.CVC_ARIADNE_NAME = NAME;
         if (SYNTH && SYNTH !== '0') ENV.CVC_ARIADNE_SYNTHETIC_CAM = '1';
+        if (LOOK === 'mouse' || LOOK === 'drag') ENV.CVC_ARIGL_LOOK = LOOK;
         if (LANE && LANE !== '0') ENV.CVC_ARIADNE_LANE = '1';
         if (TOKEN) ENV.CVC_ARIADNE_ROOM_TOKEN = TOKEN;
         if (DEVICE) ENV.CVC_DEVICE_ID = DEVICE;

@@ -38,7 +38,9 @@ namespace conference {
 //
 //   look.{color, accessory}            the labels everyone draws (room_avatar.h)
 //   body, controller                   "0.50 x 0.50 x 1.70 m box, 70 kg", "walker"
-//   policy.{budget, push, power, reserve, carrying, empty, sustains}   the relay's rule, as text
+//   policy.{budget, push, power, reserve, carrying, empty, sustains}   the relay's rule, each a
+//                                      short value ("840 N"), with what it means as
+//                                      policy.<line>_tip (for a tooltip)
 //   energy.{fraction, text, power, speed, state, line}   the reserve now (fraction 0..1 for a
 //                                      bar; line: "spending, 549 W at 4.00 m/s")
 //   ledger.{start, refilled, work, carried, overflow, unpaid, corrections, now, residual,

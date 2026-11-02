@@ -872,12 +872,8 @@ void ViewportManager::routeKey(const std::string &keySym, bool down) {
   if (!vp)
     return;
   if (down) {
-    // Escape releases pointer capture (the single-view style intercepts it too),
-    // and is NOT forwarded as a held key — a held "Escape" would drift the camera.
-    if (keySym == "Escape") {
-      vp->camera().setPointerCapture(false);
-      return;
-    }
+    // The camera's release_pointer key (Escape) lets its captured pointer go there, and is not
+    // held: a held "Escape" would drift the camera.
     vp->camera().keyDown(keySym);
   } else {
     vp->camera().keyUp(keySym);

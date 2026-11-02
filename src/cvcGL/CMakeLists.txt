@@ -878,7 +878,7 @@ add_test(NAME cvcgl_imgui_media COMMAND cvcgl_imgui_media)
 add_executable(cvcgl_imgui_spinner test/cvcgl_imgui_spinner.cpp)
 target_link_libraries(cvcgl_imgui_spinner PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_spinner COMMAND cvcgl_imgui_spinner)
-# text_view and message_input (§5.14) driven by synthesized keys and the wheel: Enter sends and keeps
+# text_view and message_input (§5.15) driven by synthesized keys and the wheel: Enter sends and keeps
 # the focus, Shift+Enter adds a line, the log's top asks for older lines and lines added above keep
 # it in place. No window, no GL.
 add_executable(cvcgl_imgui_chat_widgets test/cvcgl_imgui_chat_widgets.cpp)
@@ -911,6 +911,12 @@ add_test(NAME cvcgl_fe_interval COMMAND cvcgl_fe_interval)
 add_executable(cvcgl_imgui_window_fit test/cvcgl_imgui_window_fit.cpp)
 target_link_libraries(cvcgl_imgui_window_fit PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_window_fit COMMAND cvcgl_imgui_window_fit)
+# ImGuiBackend at a phone's UI size: a document's px scale with the UI (its windows, columns and
+# persisted geometry), and a window laid out for a laptop opens inside a phone's view. No window,
+# no GL.
+add_executable(cvcgl_imgui_ui_size test/cvcgl_imgui_ui_size.cpp)
+target_link_libraries(cvcgl_imgui_ui_size PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_ui_size COMMAND cvcgl_imgui_ui_size)
 
 # Golden images of the Ariadne ImGui/VTK backend (roadmap §16.6 phase 1): each .ari in
 # test/golden runs through AriRuntime + ImGuiBackend offscreen and its frame is compared with the
