@@ -19,6 +19,11 @@
 // layout plus "modulation_dim", with D's and G's features reading the twist and the modulations
 // ("D_input" and "G_input": "twist+modulation") and one control scale per input. A reader of /1
 // refuses it rather than misreading it; a model without modulations is still written as /1.
+//
+// A model whose potential is not V(x, y) (se2_setup::potential none or terrain) is written as
+// "cvc-ph-se2/3": /2's layout (modulation_dim always written) plus "potential": "none" or
+// "terrain"; with terrain, two more control scales (the attitude's inputs, last). V's levels are
+// terrain's two coefficients; V's GP is kept but not read.
 
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
@@ -38,6 +43,11 @@ namespace pt = boost::property_tree;
 
 constexpr const char *kFormat = "cvc-ph-se2/1";
 constexpr const char *kFormatModulated = "cvc-ph-se2/2";
+constexpr const char *kFormatPotential = "cvc-ph-se2/3";
+
+const char *potential_name(se2_potential p) {
+  return p == se2_potential::none ? "none" : (p == se2_potential::terrain ? "terrain" : "world");
+}
 
 // Random streams, one per purpose (rng::derive tags).
 enum stream : std::uint64_t { features_D = 1, features_G, features_V, levels, means };
@@ -142,7 +152,8 @@ se2_model se2_model::initialize(const se2_init &init, std::uint64_t seed,
       init.control_dim + init.modulation_dim > kSe2MaxControls)
     throw std::invalid_argument(
         "se2_model: control_dim must be 1-4, modulation_dim 0-2, and 4 inputs in all at most");
-  if (static_cast<int>(control_scale.size()) != init.control_dim + init.modulation_dim)
+  const int terrain = init.potential == se2_potential::terrain ? 2 : 0;
+  if (static_cast<int>(control_scale.size()) != init.control_dim + init.modulation_dim + terrain)
     throw std::invalid_argument("se2_model: one control scale per input");
   if (init.features < 1 || interval <= 0.0 || substeps < 1)
     throw std::invalid_argument("se2_model: features, interval and substeps must be positive");
@@ -155,6 +166,7 @@ se2_model se2_model::initialize(const se2_init &init, std::uint64_t seed,
   s.matern_length = init.matern_length;
   s.v_gp = init.v_gp;
   s.v_length = init.v_length;
+  s.potential = init.potential;
   {
     rng r = rng::derive(seed, features_D);
     s.D = rff::draw(r, s.gp_inputs(), init.features, init.matern_nu, init.matern_length);
@@ -213,13 +225,17 @@ se2_model se2_model::initialize(const se2_init &init, std::uint64_t seed,
 
 std::string se2_model::to_json() const {
   std::ostringstream o;
+  const bool potential = setup.potential != se2_potential::world;
   const bool modulated = setup.modulation_dim > 0;
-  o << "{\"format\":\"" << (modulated ? kFormatModulated : kFormat) << "\",\"provenance\":{";
+  o << "{\"format\":\"" << (potential ? kFormatPotential : (modulated ? kFormatModulated : kFormat))
+    << "\",\"provenance\":{";
   for (std::size_t i = 0; i < provenance.size(); ++i)
     o << (i ? "," : "") << quoted(provenance[i].first) << ':' << quoted(provenance[i].second);
   o << "},\"control_dim\":" << setup.control_dim;
-  if (modulated)
+  if (modulated || potential)
     o << ",\"modulation_dim\":" << setup.modulation_dim;
+  if (potential)
+    o << ",\"potential\":\"" << potential_name(setup.potential) << '"';
   o << ",\"feature_count\":" << setup.features;
   if (modulated)
     o << ",\"D_input\":\"twist+modulation\",\"G_input\":\"twist+modulation\"";
@@ -293,10 +309,11 @@ se2_model se2_model::from_json(const std::string &text) {
   // A golden file wraps the model in "model".
   const pt::ptree &node = root.get_child_optional("model") ? root.get_child("model") : root;
   const std::string format = node.get<std::string>("format", "");
-  const bool modulated = format == kFormatModulated;
-  if (format != kFormat && !modulated)
-    throw std::runtime_error(std::string("se2_model: not a ") + kFormat + " or " +
-                             kFormatModulated + " model");
+  const bool v3 = format == kFormatPotential;
+  const bool modulated = format == kFormatModulated || (v3 && node.get<int>("modulation_dim") > 0);
+  if (format != kFormat && format != kFormatModulated && !v3)
+    throw std::runtime_error(std::string("se2_model: not a ") + kFormat + ", " + kFormatModulated +
+                             " or " + kFormatPotential + " model");
   const std::string gp_in = modulated ? "twist+modulation" : "twist";
   if (node.get<std::string>("G_input", gp_in) != gp_in ||
       node.get<std::string>("D_input", gp_in) != gp_in)
@@ -305,8 +322,17 @@ se2_model se2_model::from_json(const std::string &text) {
   se2_setup &s = m.setup;
   s.control_dim = node.get<int>("control_dim");
   s.modulation_dim = modulated ? node.get<int>("modulation_dim") : 0;
+  if (v3) {
+    const std::string pot = node.get<std::string>("potential");
+    if (pot == "none")
+      s.potential = se2_potential::none;
+    else if (pot == "terrain")
+      s.potential = se2_potential::terrain;
+    else
+      throw std::runtime_error("se2_model: " + format + "'s potential is none or terrain");
+  }
   s.features = node.get<int>("feature_count");
-  if (s.control_dim < 1 || s.input_dim() > kSe2MaxControls || s.features < 1 ||
+  if (s.control_dim < 1 || s.control_dim + s.modulation_dim > kSe2MaxControls || s.features < 1 ||
       (modulated && (s.modulation_dim < 1 || s.modulation_dim > kSe2MaxModulations)))
     throw std::runtime_error("se2_model: control_dim 1-4, modulation_dim 1-2 in a " +
                              std::string(kFormatModulated) +

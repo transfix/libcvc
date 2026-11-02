@@ -138,6 +138,25 @@ planar_sample plant_log::sample(int i) const {
   for (const wheel_state &w : vs.wheels)
     s.wheels_down += w.contact ? 1 : 0;
   s.grounded = s.wheels_down + 1 >= s.wheels;
+  // The single track's two axles (wheel 2a is axle a's left one, 2a + 1 its right).
+  int front_axle = -1, rear_axle = -1;
+  for (int a = 0; a < static_cast<int>(d.axles.size()); ++a) {
+    const axle_desc &ax = d.axles[a];
+    if (ax.steered && (front_axle < 0 || ax.x > d.axles[front_axle].x))
+      front_axle = a;
+    if (!ax.steered && (rear_axle < 0 || ax.x < d.axles[rear_axle].x))
+      rear_axle = a;
+  }
+  const auto axle_speed = [&](int a, double &om, double &rim) {
+    if (a < 0 || 2 * a + 1 >= static_cast<int>(vs.wheels.size()))
+      return;
+    om = 0.5 * (vs.wheels[2 * a].angular_velocity + vs.wheels[2 * a + 1].angular_velocity);
+    rim = om * d.axles[a].wheel_radius;
+  };
+  axle_speed(front_axle, s.om_front, s.rim_front);
+  axle_speed(rear_axle, s.om_rear, s.rim_rear);
+  s.throttle = vs.throttle;
+  s.brake = vs.brake;
   if (i < static_cast<int>(_vmax.size()))
     s.vmax = _vmax[i];
   return s;
@@ -147,9 +166,14 @@ void plant_log::start() {
   const int n = _plant.size();
   _runs.assign(static_cast<std::size_t>(n), {});
   _tire.assign(static_cast<std::size_t>(n), 0.0);
+  _shaft.assign(static_cast<std::size_t>(n), 0.0);
+  _brake.assign(static_cast<std::size_t>(n), 0.0);
   for (int i = 0; i < n; ++i) {
     _runs[i].push_back(sample(i));
-    _tire[i] = _plant.physics_world().vehicle_state(_plant.vehicle(i)).energy.tire;
+    const vehicle_energy e = _plant.physics_world().vehicle_state(_plant.vehicle(i)).energy;
+    _tire[i] = e.tire;
+    _shaft[i] = e.supplied;
+    _brake[i] = e.brake;
   }
 }
 
@@ -171,9 +195,13 @@ void plant_log::record() {
     s.contacts = _plant.static_contacts_step(i);
     s.vehicle_contact = _plant.vehicle_contact_step(i);
     s.energy = _plant.energy_step(i);
-    const double tire = _plant.physics_world().vehicle_state(_plant.vehicle(i)).energy.tire;
-    s.tire = tire - _tire[i];
-    _tire[i] = tire;
+    const vehicle_energy e = _plant.physics_world().vehicle_state(_plant.vehicle(i)).energy;
+    s.tire = e.tire - _tire[i];
+    s.shaft = e.supplied - _shaft[i];
+    s.braked = e.brake - _brake[i];
+    _tire[i] = e.tire;
+    _shaft[i] = e.supplied;
+    _brake[i] = e.brake;
     // The centre of mass's acceleration over the tick, across the mean heading.
     const double c0 = std::cos(prev.psi), s0 = std::sin(prev.psi);
     const double c1 = std::cos(s.psi), s1 = std::sin(s.psi);
@@ -674,12 +702,27 @@ power_fit evaluate_power(const std::vector<std::vector<planar_sample>> &runs, do
   return f;
 }
 
+const std::vector<std::string> &flight_columns(flight_layout layout) {
+  static const std::vector<std::string> planar = {"x",  "y", "psi",   "vx",
+                                                  "vy", "r", "drive", "steer"};
+  static const std::vector<std::string> wide = [] {
+    std::vector<std::string> c = planar;
+    for (const char *k : {"grade", "roll", "om_front", "om_rear", "rim_front", "rim_rear",
+                          "throttle", "brake", "shaft_power", "brake_power"})
+      c.push_back(k);
+    return c;
+  }();
+  return layout == flight_layout::wide ? wide : planar;
+}
+
 flight_set cut_flights(const std::vector<std::vector<planar_sample>> &runs, std::size_t rows,
-                       std::size_t stride, double min_speed, steer_input steer) {
+                       std::size_t stride, double min_speed, steer_input steer,
+                       flight_layout layout) {
   if (rows < 2 || stride < 1)
     throw std::invalid_argument("cvc::physics::cut_flights: needs rows >= 2 and stride >= 1");
   flight_set f;
   f.rows = rows;
+  f.width = layout == flight_layout::wide ? kPlanarWideWidth : kPlanarWidth;
   for (std::size_t a = 0; a < runs.size(); ++a) {
     const std::vector<planar_sample> &run = runs[a];
     for (std::size_t s = 0; s + rows <= run.size(); s += stride) {
@@ -705,6 +748,23 @@ flight_set cut_flights(const std::vector<std::vector<planar_sample>> &runs, std:
                                    : (k > 0 ? 0.5 * (run[k - 1].steer + q.steer) : q.steer);
         const double row[kPlanarWidth] = {q.x, q.y, q.psi, q.vx, q.vy, q.r, q.drive, u_steer};
         f.data.insert(f.data.end(), row, row + kPlanarWidth);
+        if (layout == flight_layout::wide) {
+          // The interval's means of the states, and the pedals and powers over it.
+          const planar_sample &p = k > 0 ? run[k - 1] : q;
+          const auto mean = [](double a, double b) { return 0.5 * (a + b); };
+          const double dt = k > 0 ? q.t - p.t : 0.0;
+          const double extra[kPlanarWideWidth - kPlanarWidth] = {mean(p.grade, q.grade),
+                                                                 mean(p.roll, q.roll),
+                                                                 mean(p.om_front, q.om_front),
+                                                                 mean(p.om_rear, q.om_rear),
+                                                                 mean(p.rim_front, q.rim_front),
+                                                                 mean(p.rim_rear, q.rim_rear),
+                                                                 q.throttle,
+                                                                 q.brake,
+                                                                 dt > 0.0 ? q.shaft / dt : 0.0,
+                                                                 dt > 0.0 ? q.braked / dt : 0.0};
+          f.data.insert(f.data.end(), extra, extra + (kPlanarWideWidth - kPlanarWidth));
+        }
       }
       f.agent.push_back(static_cast<int>(a));
       f.first.push_back(static_cast<int>(s));

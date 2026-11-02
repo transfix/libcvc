@@ -79,6 +79,16 @@ struct planar_sample {
   double energy = 0.0;
   // J its tires lost to slip over that tick (the ledger's `tire`); 0 at start()
   double tire = 0.0;
+  // The wheels: the frontmost steered axle's and the rearmost unsteered axle's (the single
+  // track's two, as dyn_bike_si_of picks them) wheels' mean angular speed (rad/s, + rolling
+  // forward), and those times their rolling radius: the wheels' surface speed (m/s), which a
+  // wheel that does not slip shares with the ground under it.
+  double om_front = 0.0, om_rear = 0.0;
+  double rim_front = 0.0, rim_rear = 0.0;
+  // The pedals the driver applied at the sample ([0, 1]), and the ledger's shaft work (the
+  // engine's, `supplied`) and the brakes' energy over the tick that ended here (J; 0 at start()).
+  double throttle = 0.0, brake = 0.0;
+  double shaft = 0.0, braked = 0.0;
 };
 
 // Records every agent of `sim`, which drives `plant`. Both must outlive the log.
@@ -97,7 +107,8 @@ private:
   nav_plant &_plant;
   double _dt = 0.0, _accel_si = 1.0;
   std::vector<double> _vmax;
-  std::vector<double> _tire; // each agent's ledger `tire` at its last sample
+  std::vector<double> _tire;          // each agent's ledger `tire` at its last sample
+  std::vector<double> _shaft, _brake; // and its `supplied` and `brake`
   std::vector<std::vector<planar_sample>> _runs;
 };
 
@@ -227,13 +238,31 @@ power_fit evaluate_power(const std::vector<std::vector<planar_sample>> &runs, do
 // Row k's inputs acted from t_k-1 to t_k (row 0's from before the flight; unused by a model).
 constexpr int kPlanarWidth = 8;
 
+// The wide row (flight_layout::wide, opt-in): the planar row's eight, then what the vehicle's
+// attitude, wheels and pedals did over the same interval:
+//   8 grade, 9 roll           the body's attitude (planar_sample's), the mean of the two ends
+//   10 om_front, 11 om_rear   the wheels' angular speeds (rad/s), the mean of the two ends
+//   12 rim_front, 13 rim_rear their surface speeds (m/s), the mean of the two ends
+//   14 throttle, 15 brake     the pedals at the interval's end
+//   16 shaft_power            the engine's shaft work over the interval / its length (W)
+//   17 brake_power            the brakes' energy over the interval / its length (W)
+constexpr int kPlanarWideWidth = 18;
+
+// The column names of each layout, in order (meta.json's "layout").
+enum class flight_layout {
+  planar, // kPlanarWidth columns
+  wide    // kPlanarWideWidth columns
+};
+const std::vector<std::string> &flight_columns(flight_layout layout);
+
 enum class steer_input {
   actual, // the mean of the road-wheel angle at the interval's two ends
   command // nav's command, held over the interval
 };
 
 struct flight_set {
-  std::vector<double> data; // [flights * rows * kPlanarWidth], row-major
+  std::vector<double> data; // [flights * rows * width], row-major
+  int width = kPlanarWidth; // kPlanarWidth, or kPlanarWideWidth for the wide layout
   std::size_t flights = 0, rows = 0;
   std::vector<int> agent, first; // each flight's agent and first sample
   std::size_t dropped = 0;       // windows left out: a contact, an impact, a wheel off the
@@ -243,10 +272,13 @@ struct flight_set {
 
 // Every window of `rows` samples, `stride` apart, of every run. A window is kept when it has no
 // static contact, no impact and no wheel off the ground, and the vehicle moves faster than
-// `min_speed` (m/s) somewhere in it. The drive input is planar_sample::drive.
+// `min_speed` (m/s) somewhere in it. The drive input is planar_sample::drive. `layout` picks the
+// row: the planar eight columns (the default) or the wide row with the wheels, the attitude and
+// the pedals.
 flight_set cut_flights(const std::vector<std::vector<planar_sample>> &runs, std::size_t rows,
                        std::size_t stride, double min_speed = 1.0,
-                       steer_input steer = steer_input::actual);
+                       steer_input steer = steer_input::actual,
+                       flight_layout layout = flight_layout::planar);
 
 // A little-endian float64 .npy file (format 1.0, C order). Throws std::runtime_error.
 void write_npy(const std::string &path, const std::vector<double> &data,
