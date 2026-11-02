@@ -42,6 +42,11 @@ bool parse_shape(const std::string &s, Shape &out);
 // state://) rather than an image the host published by name.
 bool is_uri(const std::string &ref);
 
+// Whether a URI names a video by its extension (.mp4, .webm, .mov, .m4v; a query or fragment after
+// it is fine), as web clients decide an avatar or a banner is one: an image: or a background: with
+// such a URI plays it as a decorative video (§5.13).
+bool is_video_uri(const std::string &ref);
+
 // The decoded image `src` as a raster with the box's aspect (`box_w` x `box_h` px, as `fit` and
 // `shape` say), `scale` times the box's size (2: sharp on a HiDPI screen) but no larger than the
 // source's pixels allow. `box_h` <= 0: the image's own aspect at width `box_w` (`fit` unused). RGBA
@@ -71,6 +76,15 @@ struct ImageRequest {
   Shape shape = Shape::Rect;
 };
 
+// An animated picture's frames, fitted to the widget's box like ImageView::image (its first).
+struct Animation {
+  std::vector<cvc::image> frames;
+  std::vector<int> delays_ms;
+  int total_ms = 0;
+  // The frame showing `seconds` into a loop that started at 0.
+  std::size_t frame_at(double seconds) const;
+};
+
 struct ImageView {
   Status status = Status::Loading;
   // The name the raster is published under (Backend::set_image): stable for the request, a hash
@@ -79,6 +93,8 @@ struct ImageView {
   cvc::image image;  // the fitted raster when Ready
   long gen = 0;      // bumped each time `image` changes (publish again when it moves)
   std::string error; // why it failed (Failed); never holds a token
+  // An animated GIF or WebP's frames (more than one), when Ready; null for a still picture.
+  std::shared_ptr<const Animation> animation;
 };
 
 // What a fetch brings back: the encoded bytes, or why there are none.

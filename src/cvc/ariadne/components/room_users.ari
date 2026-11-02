@@ -29,7 +29,8 @@
 #   self.talking, self.dot,     your row: talking, the size the relay sends you video at, that as a
 #   self.video_in, self.count   sentence when it is reduced, and how many are in the room
 #   ROWS.count, ROWS.<i>.*      pid name cam talking video_off dot ping down up unread von aon vol
-#   ctl.<pid>.{von,aon,vol}     the parked local controls
+#   ctl.<pid>.{von,aon,vol,win} the parked local controls, and whether their camera window
+#                               (tree.cam_<i>.open, a document's repeated cam_<i>) is open
 # The dot is the size the relay sends that person video at, adapted to THEIR link: green full, red
 # reduced (half, quarter, thumbnails), black none; hover it for which. Every column has a FIXED
 # width: an auto-width column is re-fitted to its content each frame, and a slider sized from its
@@ -49,14 +50,17 @@ functions: |
     (if (or (is-null room) (= room "")) #f
       (begin
         (state-set "self.talking" (state-get (str-concat "media." (state-get "self.pid") ".talking")))
-        ; park each row's local controls under its person before the rows move
+        ; park each row's local controls, and whether its camera window is open, under its person
+        ; before the rows move
         (set n (state-get (str-concat rows ".count")))
         (for i (range (if (or (is-null n) (= n "")) 0 (int n)))
           (begin
             (set opid (state-get (str-concat rows "." i ".pid")))
             (if (or (is-null opid) (= opid "")) #f
-              (for k (list "vol" "von" "aon")
-                (state-set (str-concat "ctl." opid "." k) (state-get (str-concat rows "." i "." k)))))))
+              (begin
+                (for k (list "vol" "von" "aon")
+                  (state-set (str-concat "ctl." opid "." k) (state-get (str-concat rows "." i "." k))))
+                (state-set (str-concat "ctl." opid ".win") (state-get (str-concat "tree.cam_" i ".open")))))))
         (set idx 0)
         (set total 1)
         (for p (room-roster room)
@@ -71,9 +75,11 @@ functions: |
               (begin
                 (set row (str-concat rows "." idx "."))
                 (state-set (str-concat row "pid") pid)
-                ; "" lets a widget seed its default (a new person is seen and heard)
+                ; "" lets a widget seed its default (a new person is seen and heard, and their
+                ; camera window opens)
                 (for k (list "vol" "von" "aon")
                   (state-set (str-concat row k) (state-get (str-concat "ctl." pid "." k))))
+                (state-set (str-concat "tree.cam_" idx ".open") (state-get (str-concat "ctl." pid ".win")))
                 (state-set (str-concat row "name") (get-attr p "name"))
                 (state-set (str-concat row "cam") (state-get (str-concat "media." pid ".camera")))
                 (state-set (str-concat row "talking") (state-get (str-concat "media." pid ".talking")))
@@ -154,11 +160,13 @@ units:
               - text: ""
                 bind: "{rows}.{i}.name"
                 on_click: (begin (state-set "tree.cam_{i}.open" "1") (state-set "tree.cam_{i}.raise" "1"))
+                tooltip: "Show their camera"
                 visible_when: (not (= (state-get "{rows}.{i}.talking") "1"))
               - text: ""
                 bind: "{rows}.{i}.name"
                 color: [0.30, 1.0, 0.40]
                 on_click: (begin (state-set "tree.cam_{i}.open" "1") (state-set "tree.cam_{i}.raise" "1"))
+                tooltip: "Show their camera"
                 visible_when: (= (state-get "{rows}.{i}.talking") "1")
           - text: ""
             bind: "{rows}.{i}.ping"

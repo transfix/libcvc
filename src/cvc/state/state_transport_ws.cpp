@@ -18,6 +18,7 @@
 // is Boost.Beast (header-only); under __EMSCRIPTEN__ the client would use the browser WebSocket
 // (emscripten/websocket.h) — scaffolded here, implemented with the wasm build (Phase 2).
 
+#include "pose_snapshot_wire.h"
 #include "proto/state_transport.pb.h"
 
 #include <algorithm>
@@ -575,6 +576,12 @@ public:
   bool write(const pb::Frame &f) {
     std::lock_guard<std::mutex> lk(write_mu);
     return !admission_held.load(std::memory_order_relaxed) && write_locked(f);
+  }
+  // Written even while the admission hold has the connection (send_message_to: an out-of-band
+  // answer is not tree state, so it cannot get ahead of the bootstrap's view of the tree).
+  bool write_through_hold(const pb::Frame &f) {
+    std::lock_guard<std::mutex> lk(write_mu);
+    return write_locked(f);
   }
 
   // Write only if no other write holds the connection right now (the link probe never waits).
@@ -1256,6 +1263,11 @@ void state_transport_ws::deliver_inbound(connection *c, const void *data, std::s
       out.payload.assign(p.begin(), p.end());
       _media_sink(out, /*src_conn=*/c);
     }
+  } else if (in.has_pose_snapshot()) {
+    // Avatar poses from the relay (link-level, like media): straight to the client's callback.
+    _poses_recv.fetch_add(1, std::memory_order_relaxed);
+    if (_on_pose_snapshot)
+      _on_pose_snapshot(cvc::pose_wire::decode(in.pose_snapshot()));
   }
 }
 
@@ -1696,12 +1708,9 @@ void state_transport_ws::on_inbound_message(const state_message &m, connection *
   }
   for (auto *peer : peers)
     (void)peer->ingest_remote_message(m);
-  // ttl_hops 0: for this end only (state_message.h), so neither relayed nor bridged.
-  if (m.ttl_hops == 0)
-    return;
   const bool relay = _relay.load(std::memory_order_relaxed);
-  if (!relay && _bridge == nullptr)
-    return;
+  if ((!relay && _bridge == nullptr) || m.ttl_hops == 0)
+    return; // ttl 0: for this node alone (state_transport::send_message_to)
   // Interest gate (opt-in), as in on_inbound_mutation.
   if (_relay_requires_interest.load(std::memory_order_relaxed) && !peers.empty() &&
       std::none_of(peers.begin(), peers.end(),
@@ -2229,6 +2238,33 @@ std::size_t state_transport_ws::request_full_refresh() {
   return n;
 }
 
+std::size_t state_transport_ws::send_message_to(const std::string &node_id,
+                                                const state_message &m) {
+  if (node_id.empty())
+    return 0;
+  std::vector<std::shared_ptr<connection>> targets;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    for (const auto &c : _conns) {
+      if (!c || !c->alive.load() || !c->can_write())
+        continue;
+      if (const std::string *pid = c->peer_id(); pid && *pid == node_id)
+        targets.push_back(c);
+    }
+  }
+  if (targets.empty())
+    return 0;
+  pb::Frame frame;
+  encode_message(m, frame.mutable_message());
+  std::size_t n = 0;
+  for (auto &c : targets)
+    if (c->write_through_hold(frame)) {
+      _sent_frames.fetch_add(1, std::memory_order_relaxed);
+      ++n;
+    }
+  return n;
+}
+
 std::size_t state_transport_ws::push_snapshot_to(const std::string &node_id,
                                                  const std::vector<snapshot_entry> &entries) {
   return push_to(node_id, entries, false);
@@ -2273,6 +2309,41 @@ std::size_t state_transport_ws::push_to(const std::string &node_id,
     // each path, and a broadcast that delivers one sends the tree's value there.
     if (c->write_entries(f, entries)) {
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
+      ++n;
+    }
+  }
+  return n;
+}
+
+void state_transport_ws::set_on_pose_snapshot(pose_snapshot_fn fn) {
+  _on_pose_snapshot = std::move(fn);
+}
+
+std::size_t state_transport_ws::push_pose_snapshot_to(const std::string &node_id,
+                                                      const pose_snapshot &snap) {
+  if (node_id.empty())
+    return 0;
+  std::vector<std::shared_ptr<connection>> targets;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    for (const auto &c : _conns) {
+      if (!c || !c->alive.load() || !c->can_write())
+        continue;
+      if (const std::string *pid = c->peer_id(); pid && *pid == node_id)
+        targets.push_back(c);
+    }
+  }
+  if (targets.empty())
+    return 0;
+  pb::Frame f;
+  cvc::pose_wire::encode(snap, f.mutable_pose_snapshot());
+  std::size_t n = 0;
+  for (auto &c : targets) {
+    if (c->send_backlog() > kPoseBacklogSkip)
+      continue;
+    if (c->write(f)) {
+      _sent_frames.fetch_add(1, std::memory_order_relaxed);
+      _poses_sent.fetch_add(1, std::memory_order_relaxed);
       ++n;
     }
   }

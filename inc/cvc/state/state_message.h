@@ -42,7 +42,7 @@ namespace cvc {
 //   relaying transports (gRPC, WebSocket) already honour 0: the
 //   relay's own shards take the message, and it is neither
 //   relayed to other connections nor bridged (a request to the
-//   relay itself, such as a conference chat post).
+//   relay itself: a fast lane's offer, a conference chat post).
 //
 // Payload:
 //   `content_type` is a media type chosen by the sender. Use

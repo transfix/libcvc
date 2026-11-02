@@ -255,11 +255,19 @@ public:
   // connection whose Hello named `node_id`, unfiltered by the peer registry. Returns the number of
   // connections written: 0, with nothing encoded, when none matches or `entries` is empty. A write
   // to a peer that stopped reading is bounded by the write watchdog.
+  // The message to `node_id`'s connections only (see state_transport::send_message_to).
+  std::size_t send_message_to(const std::string &node_id, const state_message &m) override;
   std::size_t push_snapshot_to(const std::string &node_id,
                                const std::vector<snapshot_entry> &entries) override;
   // As push_snapshot_to, but under an inbound gate only to the stream holding `node_id`.
   std::size_t push_snapshot_to_holder(const std::string &node_id,
                                       const std::vector<snapshot_entry> &entries) override;
+  // See state_transport::push_pose_snapshot_to / set_on_pose_snapshot. Set the callback before
+  // connecting.
+  std::size_t push_pose_snapshot_to(const std::string &node_id, const pose_snapshot &snap) override;
+  void set_on_pose_snapshot(pose_snapshot_fn fn) override;
+  std::uint64_t total_pose_snapshots_sent() const noexcept { return _poses_sent.load(); }
+  std::uint64_t total_pose_snapshots_received() const noexcept { return _poses_recv.load(); }
   // See state_transport::set_admission_hold. Applies to the streams this relay accepts.
   void set_admission_hold(std::chrono::milliseconds max_hold) override;
   std::size_t release_admissions() override;
@@ -311,6 +319,7 @@ public:
   // A MediaFrame arrived from `origin`: hand the decoded media_frame to the media sink tagged with
   // `origin` as the opaque source token (a relay's media_router fans it, skipping `origin`).
   void on_inbound_media(const media_frame &m, connection *origin = nullptr);
+  void on_inbound_pose_snapshot(const pose_snapshot &s);
   // Chunk fetch request/response dispatch (called from connection
   // reader threads when a ChunkRequest/ChunkResponse frame arrives).
   void on_inbound_chunk_request(connection *conn, const std::string &digest,
@@ -418,6 +427,9 @@ private:
   std::atomic<std::uint64_t> _delivered{0};
 
   media_sink_fn _media_sink; // media_router ingress (relay) OR set_on_media leaf sugar
+  pose_snapshot_fn _on_pose_snapshot;
+  std::atomic<std::uint64_t> _poses_sent{0};
+  std::atomic<std::uint64_t> _poses_recv{0};
   std::atomic<std::uint64_t> _media_sent{0};
   std::atomic<std::uint64_t> _media_recv{0};
   std::atomic<std::uint64_t> _media_fwd{0};

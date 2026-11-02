@@ -43,7 +43,8 @@ constexpr const char *kValueFlags[] = {"--prefix",
                                        "--log",
                                        "--oidc-issuer",
                                        "--oidc-client",
-                                       "--oidc-redirect-uri"};
+                                       "--oidc-redirect-uri",
+                                       "--media-play"};
 constexpr const char *kBoolFlags[] = {"--no-mouse", "--ansi", "--net", "--no-browser"};
 
 bool is_general_flag(const std::string &a) {
@@ -152,6 +153,12 @@ bool apply(const po::option &opt, HostOptions &o) {
       return false;
     }
     o.graphics = value;
+  } else if (a == "--media-play") {
+    if (value != "auto" && value != "always" && value != "never") {
+      o.error = "--media-play is auto, always or never, not '" + value + "'";
+      return false;
+    }
+    o.media_play = value;
   } else if (a == "--image") {
     const std::size_t at = value.find('=');
     if (at == std::string::npos || at == 0 || at + 1 == value.size()) {
@@ -311,6 +318,8 @@ std::string host_flags_help() {
          "                         for the document to go idle (default 10)\n"
          "  --graphics MODE        images in a terminal: auto, kitty, sixel, iterm, color or mono\n"
          "  --image NAME=FILE      publish FILE's picture as NAME, for image: widgets\n"
+         "  --media-play WHEN      video: / audio: play here: auto (not over SSH), always,\n"
+         "                         never\n"
          "  --cell-size WxH        snapshot: a terminal cell's size in pixels\n"
          "  --net                  let the document use the network (off by default); in a\n"
          "                         browser it may reach the page's own origin\n"

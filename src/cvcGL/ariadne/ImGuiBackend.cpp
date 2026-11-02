@@ -18,6 +18,7 @@
 #include <cvc/gl/ImGuiBinding.h> // cvc::gl::ui::*
 #include <cvc/gl/ImGuiOverlay.h>
 #include <cvc/gl/ariadne/ImGuiBackend.h>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -1276,6 +1277,94 @@ bool ImGuiBackend::draw_image(const char *name, float width) {
   (void)name;
   (void)width;
   return false;
+#endif
+}
+
+#ifdef CVC_ENABLE_IMGUI
+struct ImGuiBackend::BackdropFrame {
+  cvc::ariadne::Backdrop bd;
+  ImDrawList *dl = nullptr;
+  ImDrawListSplitter split;
+  ImVec2 start;
+  float avail_w = 0.0f, avail_h = 0.0f;
+};
+#else
+struct ImGuiBackend::BackdropFrame {};
+#endif
+
+void ImGuiBackend::begin_backdrop(const cvc::ariadne::Backdrop &bd) {
+#ifdef CVC_ENABLE_IMGUI
+  auto f = std::make_shared<BackdropFrame>();
+  f->bd = bd;
+  f->dl = ImGui::GetWindowDrawList();
+  f->start = ImGui::GetCursorScreenPos();
+  const ImVec2 avail = ImGui::GetContentRegionAvail();
+  f->avail_w = avail.x;
+  f->avail_h = avail.y;
+  // The content on channel 1, so the picture, drawn last on channel 0, ends up under it.
+  f->split.Split(f->dl, 2);
+  f->split.SetCurrentChannel(f->dl, 1);
+  ImGui::BeginGroup();
+  m_backdrops.push_back(std::move(f));
+#else
+  (void)bd;
+#endif
+}
+
+void ImGuiBackend::end_backdrop() {
+#ifdef CVC_ENABLE_IMGUI
+  if (m_backdrops.empty())
+    return;
+  std::shared_ptr<BackdropFrame> f = std::move(m_backdrops.back());
+  m_backdrops.pop_back();
+  const cvc::ariadne::Backdrop &bd = f->bd;
+  // A group's area: at least its authored size (px, or percent of the space it started in), and
+  // the full width available where it set none, as a banner is.
+  const auto extent = [](const cvc::ariadne::Extent &e, float avail) {
+    if (e.unit == cvc::ariadne::Unit::Px)
+      return e.value;
+    if (e.unit == cvc::ariadne::Unit::Percent)
+      return avail * e.value / 100.0f;
+    return 0.0f;
+  };
+  const float want_w = bd.size.w.is_set() ? extent(bd.size.w, f->avail_w) : f->avail_w;
+  const float want_h = extent(bd.size.h, f->avail_h);
+  const ImVec2 now = ImGui::GetCursorScreenPos();
+  if (!bd.window && want_h > now.y - f->start.y)
+    ImGui::Dummy(ImVec2(0.0f, want_h - (now.y - f->start.y)));
+  ImGui::EndGroup();
+  ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+  if (bd.window) {
+    const ImRect inner = ImGui::GetCurrentWindow()->InnerRect;
+    mn = inner.Min;
+    mx = inner.Max;
+  } else {
+    mx.x = std::max(mx.x, mn.x + want_w);
+  }
+  f->split.SetCurrentChannel(f->dl, 0);
+  int W = 0, H = 0;
+  const unsigned int tex = bd.image.empty() ? 0 : image_texture(bd.image.c_str(), W, H);
+  if (tex != 0 && mx.x > mn.x && mx.y > mn.y) {
+    const float rw = mx.x - mn.x, rh = mx.y - mn.y;
+    ImVec2 p0 = mn, p1 = mx, uv0(0.0f, 0.0f), uv1(1.0f, 1.0f);
+    if (bd.fit == cvc::ariadne::ImageFit::Cover) { // the middle of the picture, the area filled
+      const float k = std::max(rw / W, rh / H);
+      const float u = std::min(1.0f, rw / (W * k)), v = std::min(1.0f, rh / (H * k));
+      uv0 = ImVec2((1.0f - u) * 0.5f, (1.0f - v) * 0.5f);
+      uv1 = ImVec2(uv0.x + u, uv0.y + v);
+    } else if (bd.fit == cvc::ariadne::ImageFit::Contain) { // all of the picture, centred
+      const float k = std::min(rw / W, rh / H);
+      const ImVec2 size(W * k, H * k);
+      p0 = ImVec2(mn.x + (rw - size.x) * 0.5f, mn.y + (rh - size.y) * 0.5f);
+      p1 = ImVec2(p0.x + size.x, p0.y + size.y);
+    }
+    const int alpha = std::clamp(static_cast<int>(bd.opacity * 255.0f + 0.5f), 0, 255);
+    f->dl->PushClipRect(mn, mx, true);
+    f->dl->AddImage(static_cast<ImTextureID>(static_cast<std::intptr_t>(tex)), p0, p1, uv0, uv1,
+                    IM_COL32(255, 255, 255, alpha));
+    f->dl->PopClipRect();
+  }
+  f->split.Merge(f->dl);
 #endif
 }
 

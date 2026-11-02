@@ -15,7 +15,10 @@
 #                               the room or a conversation, scroll up for older messages, Enter sends
 #                               and Shift+Enter adds a line.
 #   • cam_<i>    (per peer)    — one window per OTHER participant, titled by their name, showing their
-#                               camera. Repeated over peer.count; opened automatically, closable.
+#                               camera. Repeated over peer.count; opened automatically, closable, and
+#                               listed by name at the end of the View menu to open again (or click
+#                               the name in Users). Closed or open, it stays with the person when
+#                               the list reorders.
 #
 # The host (arigl ConferenceSession) drives the media: it forwards our camera+mic, mixes every peer's
 # audio into one output (per-peer volume + mute from the Users window), measures voice activity
@@ -68,6 +71,10 @@ scene:
     enabled: true
     resolution: 2048
     update_interval: 1
+
+# The peers' camera windows (cam_<i>, made by a repeat) are listed by name at the end of View: the
+# built-in Windows menu under that title joins it (ARIADNE.md §5.9).
+windows_menu: View
 
 menubar:
   - menu: Room

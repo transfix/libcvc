@@ -1,4 +1,4 @@
-// ImGuiBackend's text_view and message_input (docs/ARIADNE.md §5.12) on a bare ImGui context (no
+// ImGuiBackend's text_view and message_input (docs/ARIADNE.md §5.14) on a bare ImGui context (no
 // GL), driven by synthesized keys and the mouse wheel: Enter sends and keeps the focus, Shift+Enter
 // adds a line and the field grows; the log starts at its bottom, the wheel takes it to the top
 // (on_top), lines added above keep it in place, a text that fits asks once, and a log of height 0

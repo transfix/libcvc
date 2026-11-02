@@ -84,6 +84,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/state/state_hash_partition.h
   ../../inc/cvc/state/distributed_state_session.h
   ../../inc/cvc/state/state_transport.h
+  ../../inc/cvc/state/pose_snapshot.h
   ../../inc/cvc/state/state_transport_inproc.h
   ../../inc/cvc/state/state_transport_ipc.h
   ../../inc/cvc/state/state_transport_grpc.h
@@ -601,6 +602,10 @@ option(CVC_ENABLE_GRPC "Enable gRPC-based state_transport (Phase 3e)" OFF)
 # (protobuf) + Boost.Beast (native) — independent of CVC_ENABLE_GRPC. OFF by default so a build with
 # no protobuf in its deps is unaffected; the wasm/conference builds turn it ON.
 option(CVC_ENABLE_WS "Enable WebSocket-based state_transport (wasm interop)" OFF)
+# The conference's unreliable lane over WebRTC data channels (cvc/net/fast_lane_rtc.h):
+# libdatachannel natively, datachannel-wasm under Emscripten (both cvcpkg packages). OFF: the lane's
+# classes are inert stubs and every client stays on its reliable connection.
+option(CVC_ENABLE_RTC "WebRTC data-channel fast lane for the conference (libdatachannel)" OFF)
 # XMLRPC support
 if(CVC_USING_XMLRPC)
   list(APPEND CVC_LINK_LIBS xmlrpc)
@@ -1399,7 +1404,8 @@ endif()
 # are thin adapters over it, so they work identically on both targets. All three TUs are always
 # compiled; the inactive backend #ifdefs to empty, so exactly one make_default_backend() links.
 list(APPEND SOURCE_FILES net/http_client.cpp net/http_client_curl.cpp net/http_client_fetch.cpp
-  net/net_policy.cpp net/credentials.cpp net/ws_client.cpp)
+  net/net_policy.cpp net/credentials.cpp net/ws_client.cpp net/fast_lane.cpp net/fast_lane_rtc.cpp)
+list(APPEND INCLUDE_FILES ../../inc/cvc/net/fast_lane.h ../../inc/cvc/net/fast_lane_rtc.h)
 list(APPEND INCLUDE_FILES ../../inc/cvc/net/http_client.h ../../inc/cvc/net/net_policy.h
   ../../inc/cvc/net/credentials.h ../../inc/cvc/net/ws_client.h)
 # OAuth 2.0 / OpenID Connect sign-in (docs/ARIADNE.md §10.5): the protocol pieces, the loopback
@@ -1414,7 +1420,7 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/oidc.h ../../inc/cvc/net/loopback_re
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/media.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_chat.cpp ariadne/conference/room_rungs.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/tf_editor_emit.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/media.cpp ariadne/media_player.cpp ariadne/media_browser.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_pose_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_chat.cpp ariadne/conference/room_rungs.cpp ariadne/conference/room_lane.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/pose_stream.cpp ariadne/tf_editor_emit.cpp)
 # A document set fetched from a URL, and a runtime's browser page loading one (arigl-web, ari).
 list(APPEND SOURCE_FILES ariadne/doc_fetch.cpp ariadne/web_document.cpp)
 list(APPEND INCLUDE_FILES
@@ -1425,6 +1431,7 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/avatar_physics.h
   ../../inc/cvc/ariadne/holon.h
   ../../inc/cvc/ariadne/holon_sync.h
+  ../../inc/cvc/ariadne/pose_stream.h
   ../../inc/cvc/ariadne/app_runtime.h
   ../../inc/cvc/ariadne/keys.h
   ../../inc/cvc/ariadne/doc_args.h
@@ -1443,6 +1450,7 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/net_intrinsics.h
   ../../inc/cvc/ariadne/net_host.h
   ../../inc/cvc/ariadne/media.h
+  ../../inc/cvc/ariadne/media_player.h
   ../../inc/cvc/ariadne/stream_intrinsics.h
   ../../inc/cvc/ariadne/conference/room_intrinsics.h
   ../../inc/cvc/ariadne/conference/room_media_intrinsics.h
@@ -1453,6 +1461,8 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/conference/room_rungs.h
   ../../inc/cvc/ariadne/conference/room_aoi.h
   ../../inc/cvc/ariadne/conference/room_aoi_relay.h
+  ../../inc/cvc/ariadne/conference/room_pose_relay.h
+  ../../inc/cvc/ariadne/conference/room_lane.h
   ../../inc/cvc/ariadne/conference/room_write_gate.h
   ../../inc/cvc/ariadne/conference/room_chat.h
   ../../inc/cvc/ariadne/state_io.h
@@ -1618,6 +1628,24 @@ else()
   else()
     message(STATUS "cvc::net: no HTTP backend (libcurl not found) - http(s):// compiles to a stub")
   endif()
+endif()
+
+# The fast lane (CVC_ENABLE_RTC): libdatachannel natively; in a browser datachannel-wasm, whose
+# target also hands emcc the two JS libraries that implement it over RTCPeerConnection.
+if(CVC_ENABLE_RTC)
+  if(EMSCRIPTEN)
+    find_package(datachannel-wasm CONFIG REQUIRED)
+    # PUBLIC: the target's link options (the two --js-library files) must reach the final emcc
+    # link of whatever links the static cvc; a PRIVATE (LINK_ONLY) dependency's do not.
+    target_link_libraries(cvc PUBLIC datachannel-wasm::datachannel-wasm)
+    list(APPEND CVC_PRIVATE_LINK_PACKAGES datachannel-wasm)
+  else()
+    find_package(LibDataChannel CONFIG REQUIRED)
+    target_link_libraries(cvc PRIVATE LibDataChannel::LibDataChannel)
+    list(APPEND CVC_PRIVATE_LINK_PACKAGES LibDataChannel)
+  endif()
+  target_compile_definitions(cvc PUBLIC CVC_ENABLE_RTC)
+  message(STATUS "cvc::net: WebRTC fast lane ENABLED")
 endif()
 
 # Device keys (state_device_key.h): a device proves its id with an Ed25519 key the relay pins on

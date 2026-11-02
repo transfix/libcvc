@@ -72,6 +72,13 @@
 #include <cvc/ariadne/ftxui_backend.h>
 #include <cvc/ariadne/host_cli.h>
 #include <cvc/ariadne/host_info.h>
+#include <cvc/ariadne/media_player.h> // §5.13 the play policy (--media-play)
+#ifdef ARI_MEDIA
+#include <cvc/media/player.h> // ari-media: cvcMedia's FFmpeg + SDL3 player
+#endif
+#ifdef ARI_MEDIA
+#include <cvc/media/playback/audio_output.h> // ari-media: sound through SDL3's audio subsystem
+#endif
 #include <cvc/ariadne/host_signals.h>
 #include <cvc/ariadne/host_warnings.h>
 #include <cvc/ariadne/stream/stream_view.h>
@@ -88,6 +95,13 @@
 #include <vector>
 
 namespace {
+
+// What `ari info` and the like call this runtime: ari-media is ari with cvcMedia's sound.
+#ifdef ARI_MEDIA
+constexpr const char *kRuntimeName = "ari-media";
+#else
+constexpr const char *kRuntimeName = "ari";
+#endif
 
 int usage(int code) {
   std::fprintf(code ? stderr : stdout,
@@ -201,8 +215,14 @@ int print_info(const cvc::ariadne::HostOptions &o) {
   const bool probed = term.tty && !tvision; // tvision draws half-blocks only
   if (probed)
     graphics = probe_terminal(*backend, o);
-  ari::HostInfo info = ari::gather_host_info(rt.runtime(), "ari");
+  ari::HostInfo info = ari::gather_host_info(rt.runtime(), kRuntimeName);
   info.backend = tvision ? "tvision" : "ftxui";
+#ifdef ARI_MEDIA
+  // ari-media: cvcMedia's SDL3 audio, its subsystem alone (no window, no display).
+  info.audio = cvc::media::playback::have_audio_output();
+  for (const std::string &dev : cvc::media::playback::list_audio_playback_devices())
+    info.audio_info += "device: " + dev + "\n";
+#endif
   if (probed) {
     info.graphics = graphics;
     info.probed = true;
@@ -411,6 +431,19 @@ int main(int argc, char **argv) {
   if (!o.error.empty()) {
     std::fprintf(stderr, "ari: %s\n", o.error.c_str());
     return usage(2);
+  }
+  // §5.13 video: / audio:: the player (cvcMedia's FFmpeg + SDL3, where this host has it) and where
+  // it may play (--media-play; by default not over SSH, where the sound would play remotely).
+#ifdef ARI_MEDIA
+  cvc::media::register_ariadne_player();
+#endif
+#ifdef __EMSCRIPTEN__
+  cvc::ariadne::media::register_browser_player(); // ari.html: the page's <video> / <audio>
+#endif
+  if (!o.media_play.empty()) {
+    cvc::ariadne::media::PlayPolicy policy = cvc::ariadne::media::PlayPolicy::Auto;
+    cvc::ariadne::media::parse_play_policy(o.media_play, policy);
+    cvc::ariadne::media::set_play_policy(policy);
   }
   const std::string &cmd = o.command;
   if (cmd != "run" && cmd != "snapshot" && cmd != "check" && cmd != "info" && cmd != "test") {

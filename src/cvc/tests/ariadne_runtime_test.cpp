@@ -106,6 +106,7 @@ struct MockBackend : Backend {
     return true;
   }
   void end_window() override { rec("end_window"); }
+  void focus_next_window() override { rec("focus_next_window"); }
   std::vector<std::string> grid_ids; // the id the core gave each begin_grid, in walk order
   bool begin_grid(const Layout &L, const char *id) override {
     rec(std::string("begin_grid:cols=") + std::to_string(L.col_widths.size()));
@@ -5383,13 +5384,86 @@ TEST(AriadneRuntime, WindowsMenuWithoutADocumentMenubar) {
     MockBackend mb;
     Runtime rt(app, "");
     rt.set_backend(&mb);
-    Widget repeated = window_with_id("Cam {i}", "cam_{i}", true);
-    repeated.repeat = "2"; // made per frame: not listed (the document opens these itself)
+    Widget repeated = window_with_id("Cam {i}", "cam_{i}", false);
+    repeated.repeat = "2";
     rt.set_root(group({window_with_id("Alpha", "a", false), repeated}));
     rt.render();
     EXPECT_FALSE(mb.saw("begin_menubar"));
     EXPECT_FALSE(mb.saw("begin_menu:Windows"));
   }
+  {
+    // A closable window made by a repeat counts: its instances could not come back otherwise.
+    MockBackend mb;
+    Runtime rt(app, "");
+    rt.set_backend(&mb);
+    Widget repeated = window_with_id("Cam {i}", "cam_{i}", true);
+    repeated.repeat = "2";
+    rt.set_root(group({repeated}));
+    rt.render();
+    EXPECT_TRUE(mb.saw("begin_menubar"));
+    EXPECT_TRUE(mb.saw("toggle:Cam 0"));
+    EXPECT_TRUE(mb.saw("toggle:Cam 1"));
+  }
+}
+
+// §5.9: the windows a repeat makes are listed per instance, under the title each one shows,
+// following the count. conference_roster's per-peer cameras: closed with their X, they come back
+// from its View menu (the Windows menu's title, so its items join that menu).
+TEST(AriadneRuntime, WindowsMenuListsEachRepeatedWindowUnderItsTitle) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_init(app, "",
+                       "(begin (state-set \"n\" \"2\") (state-set \"peer.0.name\" \"ann\")"
+                       " (state-set \"peer.1.name\" \"\"))",
+                       nullptr));
+  Widget cam = window_with_id("Peer", "cam_{i}", true);
+  cam.bind = "peer.{i}.name"; // titled by the peer's name, once it has one
+  cam.repeat = "(int (state-get \"n\"))";
+  rt.set_root(group({menubar({menu("View", {menu_toggle("Users", "tree.users.open", true)})}),
+                     window_with_id("Users", "users", true), cam, windows_menu("View")}));
+  rt.render();
+  // In the View menu, after its own items: ann's camera by her name, the other by the label.
+  EXPECT_EQ(std::count(mb.log.begin(), mb.log.end(), "begin_menu:View"), 1);
+  const std::ptrdiff_t users = log_index(mb, "toggle:Users"), sep = log_index(mb, "separator"),
+                       ann = log_index(mb, "toggle:ann"), peer = log_index(mb, "toggle:Peer");
+  ASSERT_GE(ann, 0);
+  ASSERT_GE(peer, 0);
+  EXPECT_LT(users, sep);
+  EXPECT_LT(sep, ann);
+  EXPECT_LT(ann, peer);
+  EXPECT_TRUE(mb.saw("push_id:cam_0"));
+
+  // Closed with its X, ann's camera loses its tick; the item opens it again, in front.
+  cvc::state &st = cvc::state::instance(app);
+  st("tree.cam_0.open").value(std::string("0"));
+  mb.log.clear();
+  rt.render();
+  EXPECT_FALSE(mb.saw("begin_window:ann(closable)"));
+  EXPECT_FALSE(mb.toggle_shown["ann"]);
+  // The menu is drawn before the windows, so it is back, and raised, the same frame.
+  mb.click_toggle = "ann";
+  mb.log.clear();
+  rt.render();
+  mb.click_toggle.clear();
+  EXPECT_EQ(st("tree.cam_0.open").value(), "1");
+  const std::ptrdiff_t raised = log_index(mb, "focus_next_window");
+  ASSERT_GE(raised, 0);
+  EXPECT_EQ(raised + 1, log_index(mb, "begin_window:ann(closable)"));
+  EXPECT_EQ(st("tree.cam_0.raise").value(), ""); // consumed: in front once
+
+  // The list follows the count: a third peer gets an item, and none are left when all go.
+  ASSERT_TRUE(run_init(app, "", "(state-set \"peer.2.name\" \"cy\")", nullptr));
+  st("n").value(3);
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("toggle:cy"));
+  st("n").value(0);
+  mb.log.clear();
+  rt.render();
+  EXPECT_FALSE(mb.saw_prefix("toggle:ann"));
+  EXPECT_FALSE(mb.saw("separator")) << "no separator over an empty list";
 }
 
 // ── Phase-2 PR6: cvc::ariadne::stream DSL surface (stream-open/stream-info/stream-close) ──
