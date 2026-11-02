@@ -2672,7 +2672,7 @@ TextViewEvent FtxuiBackend::text_view(const char *label, const char *key, const 
   v.top = std::clamp(v.top + step, 0, std::max(0, n - rows));
   v.at_bottom = v.top >= n - rows;
   if (n <= rows) {
-    if (!v.reported) { // all of it fits: there is room above for more
+    if (!v.reported && !v.text.empty()) { // all of it fits: there is room above for more
       ev.at_top = true;
       v.reported = true;
     }

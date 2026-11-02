@@ -1142,12 +1142,12 @@ ariadne::TextViewEvent ImGuiBackend::text_view(const char *label, const char *ke
   m_lastTextViewWindow = host;
 
   // The top: reached by scrolling (once, until the view leaves it), the wheel turned up there
-  // (at most twice a second), or a text that does not fill the view (once per text: there is
-  // room above it for more).
+  // (at most twice a second), or a text that does not fill the view (once per text, an empty one
+  // aside: there is room above it for more).
   const double now = ImGui::GetTime();
   const bool at_top = v.scroll <= 0.5f;
   if (v.scroll_max <= 0.5f) {
-    if (!v.reported) {
+    if (!v.reported && !v.text.empty()) {
       ev.at_top = true;
       v.reported = true;
     }

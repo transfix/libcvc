@@ -823,6 +823,8 @@ struct room_chat_client::impl {
     out.available = !epoch.empty();
     out.rev = c.view_rev;
     out.count = c.count;
+    out.oldest = c.oldest;
+    out.newest = c.newest;
     out.head = c.head;
     out.first = c.first;
     out.more = c.count > 0 ? c.oldest > c.first : c.head > c.first;
@@ -865,6 +867,23 @@ std::vector<chat_message> room_chat_client::messages(const std::string &channel)
   for (auto m = c.held.find(c.oldest); m != c.held.end() && m->first <= c.newest; ++m)
     out.push_back(m->second);
   return out;
+}
+
+std::vector<chat_message> room_chat_client::messages(const std::string &channel,
+                                                    std::uint64_t after) const {
+  std::vector<chat_message> out;
+  auto it = _impl->channels.find(channel);
+  if (it == _impl->channels.end() || it->second.count == 0 || after >= it->second.newest)
+    return out;
+  const client_channel &c = it->second;
+  for (auto m = c.held.lower_bound(std::max(after + 1, c.oldest));
+       m != c.held.end() && m->first <= c.newest; ++m)
+    out.push_back(m->second);
+  return out;
+}
+
+std::uint64_t room_chat_client::pushes() const {
+  return parse_u64(leaf(_impl->app, join2(_impl->root, "rev")));
 }
 
 bool room_chat_client::more(const std::string &channel, double now_s) {

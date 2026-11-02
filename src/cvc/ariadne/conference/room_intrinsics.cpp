@@ -8,6 +8,7 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include <algorithm> // max
 #include <chrono> // the chat verbs' steady clock
 #include <cmath>  // atan2 (room-set-intent facing)
 #include <ctime>  // a chat message's local clock time
@@ -508,7 +509,8 @@ void register_room_intrinsics(cvc::app &app) {
           return se::make_dict({{"ok", se::value_t(true)}});
         });
 
-    // (chat-info ROOM [CHANNEL]) -> { available rev count head first more loading error }. Reads
+    // (chat-info ROOM [CHANNEL]) -> { available rev count oldest newest head first more loading
+    // error }. `oldest` and `newest` are the seqs that begin and end the run (when count > 0). Reads
     // what this participant holds of CHANNEL and asks the relay for what keeps it complete (the
     // newest page the first time, a lost push). `rev` changes whenever the messages change, so a
     // tick re-reads chat-messages only then.
@@ -523,6 +525,8 @@ void register_room_intrinsics(cvc::app &app) {
               {"available", se::value_t(i.available)},
               {"rev", se::value_t(static_cast<std::int64_t>(i.rev))},
               {"count", se::value_t(static_cast<std::int64_t>(i.count))},
+              {"oldest", se::value_t(static_cast<std::int64_t>(i.oldest))},
+              {"newest", se::value_t(static_cast<std::int64_t>(i.newest))},
               {"head", se::value_t(static_cast<std::int64_t>(i.head))},
               {"first", se::value_t(static_cast<std::int64_t>(i.first))},
               {"more", se::value_t(i.more)},
@@ -531,9 +535,10 @@ void register_room_intrinsics(cvc::app &app) {
           });
         });
 
-    // (chat-messages ROOM [CHANNEL]) -> list of { seq from name text t clock mine }, oldest
-    // first: the contiguous run held as of the last chat-info. `clock` is the local "HH:MM" of the
-    // relay's timestamp `t`; `mine` is #t for the caller's own messages.
+    // (chat-messages ROOM [CHANNEL [AFTER]]) -> list of { seq from name text t clock mine }, oldest
+    // first: the contiguous run held as of the last chat-info, or with AFTER (a seq) only its
+    // messages after that one. `clock` is the local "HH:MM" of the relay's timestamp `t`; `mine` is
+    // #t for the caller's own messages.
     se::builtins::register_fn(
         env, "chat-messages", [chat_of](std::span<const se::value_t> args) -> se::value_t {
           std::string error;
@@ -541,7 +546,11 @@ void register_room_intrinsics(cvc::app &app) {
           if (!c)
             return err(error);
           std::vector<se::value_t> list;
-          for (const chat_message &m : c->messages(channel_arg(args, 1)))
+          const std::vector<chat_message> run =
+              args.size() > 2 ? c->messages(channel_arg(args, 1),
+                                            static_cast<std::uint64_t>(std::max(0.0, get_num(&args[2]))))
+                              : c->messages(channel_arg(args, 1));
+          for (const chat_message &m : run)
             list.push_back(se::make_dict({
                 {"seq", se::value_t(static_cast<std::int64_t>(m.seq))},
                 {"from", se::value_t(m.from)},
@@ -552,6 +561,17 @@ void register_room_intrinsics(cvc::app &app) {
                 {"mine", se::value_t(m.from == c->pid())},
             }));
           return se::make_list(std::move(list));
+        });
+
+    // (chat-rev ROOM) -> a number that changes with every push the relay makes to the caller (a
+    // message, a page, a conversation's heads): a tick re-reads chat-conversations only then.
+    se::builtins::register_fn(
+        env, "chat-rev", [chat_of](std::span<const se::value_t> args) -> se::value_t {
+          std::string error;
+          room_chat_client *c = chat_of(args, "chat-rev", error);
+          if (!c)
+            return err(error);
+          return se::value_t(static_cast<std::int64_t>(c->pushes()));
         });
 
     // (chat-more ROOM [CHANNEL]) -> { ok loading more }: asks the relay for the page before the

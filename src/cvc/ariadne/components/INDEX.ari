@@ -127,3 +127,25 @@ catalog:
     binds: "<prefix>.graphics.root.children.{node}.transfer_function (+ the layers beside it) and <prefix>.tree.{id}.view.*"
     for: "the same editor without a window, to embed in a document's own window (several in one document: give each its own id)"
     args: { node: volume, label: Transfer function, id: transfer_function_editor }   # defaults
+  - component: chat
+    file: chat.ari
+    unit: chat
+    binds: "<prefix>.{id}.* (channel, pick, view.text, draft, read.*, unread.*) and <prefix>.tree.{id}.*"
+    for: "a room's chat and its direct messages: a channel picker with unread counts, a log that asks for older messages when scrolled to the top, Enter to send and Shift+Enter for a new line"
+    args: { id: chat, title: Chat, room: room.token }   # room: the key holding the room-join token
+    verbs: [chat-post, chat-info, chat-messages, chat-more, chat-conversations, chat-rev]
+    note: "call (chat-ui-step ID ROOM) from on_tick; the functions come with the import (room verbs: arigl joined to a relay)"
+  - component: chat_panel
+    file: chat.ari
+    unit: chat_panel
+    binds: "<prefix>.{id}.*"
+    for: "the same chat without a window, to embed in a document's own window"
+    args: { id: chat, room: room.token }
+  - component: room_users
+    file: room_users.ari
+    unit: room_users
+    binds: "<prefix>.{rows}.* rows, self.*, ctl.<pid>.* (local cam / mic / volume), media.<pid>.* (host)"
+    for: "everyone in a room: video dot, name (green while talking; click for their camera window), link, local cam / mic / volume, and a message button that opens a conversation in the chat component"
+    args: { id: users, title: Users, rows: peer, chat: chat, self: conf.self }
+    verbs: [room-roster]
+    note: "call (room-users-step ROWS ROOM CHAT) from on_tick; room_users_compact is the same list without the media columns"

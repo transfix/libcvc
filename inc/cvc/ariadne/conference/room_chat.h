@@ -177,6 +177,7 @@ public:
     bool available = false;  // the relay keeps chat (it published chat.epoch)
     std::uint64_t rev = 0;   // changes whenever the messages held for the channel change
     std::size_t count = 0;   // messages in the contiguous run
+    std::uint64_t oldest = 0, newest = 0; // its first and last seq (when count > 0)
     std::uint64_t head = 0;  // the channel's next seq, as last heard
     std::uint64_t first = 0; // the oldest seq the relay keeps
     bool more = false;       // older messages the relay keeps than the run holds
@@ -198,8 +199,13 @@ public:
   // text is empty or too long once cleaned, or it could not be sent.
   bool post(const std::string &text, const std::string &to, std::string &why);
   info refresh(const std::string &channel, double now_s);
-  // The contiguous run, oldest first, as of the last refresh of the channel.
+  // The contiguous run, oldest first, as of the last refresh of the channel; with AFTER, only its
+  // messages whose seq is greater (what a view showing up to AFTER has not shown yet).
   std::vector<chat_message> messages(const std::string &channel) const;
+  std::vector<chat_message> messages(const std::string &channel, std::uint64_t after) const;
+  // The relay's push count to this participant (chat.rev): it changes with every push, a
+  // message, a page or a conversation's heads.
+  std::uint64_t pushes() const;
   // Ask for the page before the oldest message held (the newest page when none is). True when a
   // request is in flight after the call.
   bool more(const std::string &channel, double now_s);

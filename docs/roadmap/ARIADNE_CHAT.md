@@ -137,7 +137,7 @@ The widgets:
   on: (chat-ui-send "chat" (get-attr event "text"))   # Enter sends: event.text is the message
 ```
 
-`components/chat.ari` provides the `chat_window` unit and the functions behind it, `chat-ui-step`,
+`components/chat.ari` provides the `chat` window unit (and `chat_panel`) and the functions behind it, `chat-ui-step`,
 `chat-ui-send` and `chat-ui-more`. `components/room_users.ari` provides the users list as units,
 and `room-users-step`, which builds its rows from `room-roster`. `conference_roster.ari` imports
 both.
