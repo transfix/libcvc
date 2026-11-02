@@ -34,6 +34,14 @@ namespace {
       GTEST_SKIP() << "libcvc built without yaml-cpp";                                             \
   } while (0)
 
+// For a test that presses a widget or mounts a module through the backend: without FTXUI the
+// backend is an inert stub that draws and feeds nothing, so the test would wait out drain_until.
+#define REQUIRE_FTXUI()                                                                            \
+  do {                                                                                             \
+    if (!FtxuiBackend::available())                                                                \
+      GTEST_SKIP() << "libcvc built without FTXUI";                                                \
+  } while (0)
+
 std::string val(cvc::app &app, const std::string &path) {
   return cvc::state::instance(app)(path).value();
 }
@@ -783,6 +791,7 @@ TEST(AriadneQuit, ABadCodeRaisesAndNothingCloses) {
 // `on: quit` (a menu item's event) still closes, with code 0.
 TEST(AriadneQuit, TheQuitEventCloses) {
   REQUIRE_YAML();
+  REQUIRE_FTXUI();
   cvc::app app;
   FtxuiBackend be;
   AppRuntime art(app, "ui.docs.qe");
@@ -829,6 +838,7 @@ TEST(AriadneRunProgram, DoneSaysHowItEnded) {
 // An on: action's failure names the program it came from.
 TEST(AriadneRunProgram, AnActionsFailureNamesItsProgram) {
   REQUIRE_YAML();
+  REQUIRE_FTXUI();
   const fs::path doc = write(test_dir("action_names"), "a.ari", once_on_tick("(set y 1)"));
   cvc::app app;
   FtxuiBackend be;
@@ -963,6 +973,7 @@ void press_only_button(AppRuntime &art, FtxuiBackend &be) {
 
 TEST(AriadneFunctions, EveryLaneOfTheDocumentCallsItsFunctions) {
   REQUIRE_YAML();
+  REQUIRE_FTXUI();
   const fs::path doc = write(test_dir("fn_lanes"), "f.ari",
                              "meta: {min_libcvc: 3.4.0}\n"
                              "functions: |\n"
@@ -995,6 +1006,7 @@ TEST(AriadneFunctions, EveryLaneOfTheDocumentCallsItsFunctions) {
 // granted, not the parent's state), and a module granted nothing cannot call it.
 TEST(AriadneFunctions, AModuleCallsWhatItsMountGrants) {
   REQUIRE_YAML();
+  REQUIRE_FTXUI();
   const fs::path dir = test_dir("fn_grant");
   write(dir, "mod.ari",
         "init: (record \"init\")\n"
@@ -1026,6 +1038,7 @@ TEST(AriadneFunctions, AModuleCallsWhatItsMountGrants) {
 
 TEST(AriadneFunctions, AModuleGrantedNothingCannotCall) {
   REQUIRE_YAML();
+  REQUIRE_FTXUI();
   const fs::path dir = test_dir("fn_deny");
   write(dir, "mod.ari", "root:\n  - button: Go\n    on: (record \"click\")\n");
   const fs::path doc = write(dir, "p.ari",
@@ -1072,6 +1085,7 @@ int count_of(cvc::app &app, const std::string &path) {
 // the functions the mount granted; the document's own runs beside it.
 TEST(AriadneModuleTick, RunsAtTheMountWithItsFunctions) {
   REQUIRE_YAML();
+  REQUIRE_FTXUI();
   const fs::path dir = test_dir("mod_tick");
   write(dir, "mod.ari", kTickModule);
   const fs::path doc = write(dir, "p.ari",
@@ -1101,6 +1115,7 @@ TEST(AriadneModuleTick, RunsAtTheMountWithItsFunctions) {
 // A failing module tick is reported under its mount, once.
 TEST(AriadneModuleTick, AFailureNamesTheMount) {
   REQUIRE_YAML();
+  REQUIRE_FTXUI();
   const fs::path dir = test_dir("mod_tick_fail");
   write(dir, "mod.ari", "on_tick: (raise (ValueError \"boom\"))\nroot:\n  - text: m\n");
   const fs::path doc = write(dir, "p.ari",
@@ -1128,6 +1143,7 @@ TEST(AriadneModuleTick, AFailureNamesTheMount) {
 // document) leaves it running.
 TEST(AriadneModuleTick, StopsWhenAReconcileDropsTheMount) {
   REQUIRE_YAML();
+  REQUIRE_FTXUI();
   const fs::path dir = test_dir("mod_tick_drop");
   write(dir, "mod.ari", kTickModule);
   const fs::path doc = write(dir, "p.ari",
@@ -1164,6 +1180,7 @@ TEST(AriadneModuleTick, StopsWhenAReconcileDropsTheMount) {
 // stops.
 TEST(AriadneModuleTick, ARepeatedMountTicksPerInstance) {
   REQUIRE_YAML();
+  REQUIRE_FTXUI();
   const fs::path dir = test_dir("mod_tick_repeat");
   write(dir, "mod.ari", kTickModule);
   const fs::path doc = write(dir, "p.ari",
@@ -1258,6 +1275,7 @@ TEST(AriadneResidents, AFailedTickIsRestarted) {
 // A module's tick killed by its per-step cap is restarted, and runs once the cap allows it.
 TEST(AriadneResidents, AKilledModuleTickIsRestarted) {
   REQUIRE_YAML();
+  REQUIRE_FTXUI();
   const fs::path dir = test_dir("resident_kill");
   write(dir, "mod.ari",
         "init: (state-set \"n\" 0)\n"
@@ -1511,6 +1529,7 @@ TEST(AriadneResourceIntrinsics, AResidentSeesItsOwnProcess) {
 
 TEST(AriadneResourceIntrinsics, AnActionSeesItsLimits) {
   REQUIRE_YAML();
+  REQUIRE_FTXUI();
   const fs::path doc = write(test_dir("resource_limits"), "a.ari",
                              "meta: {min_libcvc: 3.4.0}\nroot:\n  - text: hi\n");
   cvc::app app;
