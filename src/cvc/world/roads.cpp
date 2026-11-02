@@ -176,11 +176,13 @@ struct Grid {
 // The lazy proximity index cached on a road_network for its public distance/near queries.
 struct road_index {
   Grid g;
+  double max_width = 0.0; // the widest segment (on_or_near_road's search radius)
   explicit road_index(const road_network &net) {
     // Cell ~ a fraction of the region, bounded, so a typical query touches a handful of cells.
     g.init(net.half, std::max(6.0, net.half / 128.0));
     for (std::size_t i = 0; i < net.segments.size(); ++i) {
       const road_segment &s = net.segments[i];
+      max_width = std::max(max_width, s.width);
       if (s.a < 0 || s.b < 0 || s.a >= int(net.nodes.size()) || s.b >= int(net.nodes.size()))
         continue;
       g.add_segment(int(i), net.nodes[s.a].x, net.nodes[s.a].y, net.nodes[s.b].x, net.nodes[s.b].y);
@@ -190,26 +192,28 @@ struct road_index {
 
 } // namespace
 
-double road_network::distance_to_road(double x, double y, int *seg, double *t) const {
-  if (segments.empty()) {
-    if (seg)
-      *seg = -1;
-    if (t)
-      *t = 0;
+double road_network::distance_within(double x, double y, double r, int *seg, double *t) const {
+  if (seg)
+    *seg = -1;
+  if (t)
+    *t = 0;
+  if (segments.empty())
     return 1e30;
-  }
   // Build / refresh the cached grid index when the segment count changes.
   if (idx_nseg_ != segments.size()) {
     idx_cache_ = std::make_shared<road_index>(*this);
     idx_nseg_ = segments.size();
   }
   const Grid &g = static_cast<const road_index *>(idx_cache_.get())->g;
-  const double cell = g.inv_cell > 0 ? 1.0 / g.inv_cell : (2.0 * half);
   const V2 p{x, y};
   double best = 1e30;
   int bi = -1;
   double bt = 0;
-  auto consider = [&](int i) {
+  // Every segment within r of p touches the window's square, so it is among the gathered ids:
+  // a nearest within r is the global nearest, and the ascending scan keeps the lowest-index tie.
+  std::vector<int> buf;
+  g.gather(x, y, r, buf);
+  for (int i : buf) {
     const road_segment &s = segments[i];
     double tt;
     const double d =
@@ -219,22 +223,54 @@ double road_network::distance_to_road(double x, double y, int *seg, double *t) c
       bi = i;
       bt = tt;
     }
-  };
-  // Fast path: scan a local window. If the nearest road found is within the window radius, it is
-  // the global nearest (nothing outside the window can be closer). The window (a few cells, at
-  // least ~30 m) comfortably covers the road-adjacent queries a site layout / scatter makes.
-  const double R0 = std::max(cell * 3.0, 30.0);
-  std::vector<int> buf;
-  g.gather(x, y, R0, buf);
-  for (int i : buf)
-    consider(i);
-  if (bi < 0 || best > R0) {
-    // Slow path (rare: the query is far from every road) — an exact brute scan. Still O(segments),
-    // not O(segments^2), and the ascending order matches the fast path's lowest-index tie-break.
-    best = 1e30;
-    bi = -1;
-    for (std::size_t i = 0; i < segments.size(); ++i)
-      consider(int(i));
+  }
+  if (bi < 0 || best > r)
+    return 1e30;
+  if (seg)
+    *seg = bi;
+  if (t)
+    *t = bt;
+  return best;
+}
+
+double road_network::distance_to_road(double x, double y, int *seg, double *t) const {
+  if (segments.empty()) {
+    if (seg)
+      *seg = -1;
+    if (t)
+      *t = 0;
+    return 1e30;
+  }
+  // A window of a few cells (at least ~30 m) covers the road-adjacent queries a site layout or a
+  // scatter makes; a query far from every road doubles it until a road is found inside, which on
+  // a large world (blocks half a kilometre across) costs a few windows, not a scan of every
+  // segment. Once the window covers the whole region nothing can be outside it.
+  double r = std::max(6.0, half / 128.0) * 3.0;
+  r = std::max(r, 30.0);
+  const double whole = 2.0 * half * std::sqrt(2.0) + 1.0;
+  for (;;) {
+    const double d = distance_within(x, y, r, seg, t);
+    if (d < 1e30)
+      return d;
+    if (r >= whole)
+      break;
+    r = std::min(2.0 * r, whole);
+  }
+  // Outside the region (or past the index's clamped edge cells): an exact scan.
+  const V2 p{x, y};
+  double best = 1e30;
+  int bi = -1;
+  double bt = 0;
+  for (std::size_t i = 0; i < segments.size(); ++i) {
+    const road_segment &s = segments[i];
+    double tt;
+    const double d =
+        point_seg(p, V2{nodes[s.a].x, nodes[s.a].y}, V2{nodes[s.b].x, nodes[s.b].y}, tt);
+    if (d < best) {
+      best = d;
+      bi = int(i);
+      bt = tt;
+    }
   }
   if (seg)
     *seg = bi;
@@ -246,7 +282,14 @@ double road_network::distance_to_road(double x, double y, int *seg, double *t) c
 bool road_network::on_or_near_road(double x, double y, double margin) const {
   int si = -1;
   double tt = 0;
-  const double d = distance_to_road(x, y, &si, &tt);
+  // Only a road within its half-width + margin counts, so the search stops at the widest one's.
+  if (idx_nseg_ != segments.size() && !segments.empty()) {
+    idx_cache_ = std::make_shared<road_index>(*this);
+    idx_nseg_ = segments.size();
+  }
+  const double maxw =
+      segments.empty() ? 0.0 : static_cast<const road_index *>(idx_cache_.get())->max_width;
+  const double d = distance_within(x, y, 0.5 * maxw + std::max(0.0, margin), &si, &tt);
   if (si < 0)
     return false;
   return d <= segments[si].width * 0.5 + margin;

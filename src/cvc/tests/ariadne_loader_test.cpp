@@ -1644,6 +1644,49 @@ scene:
   EXPECT_FLOAT_EQ(t->heightfield.colors[1].color[1], 0.50f);
 }
 
+// A generated terrain as a geometry source: source: { terrain: {...} } is a heightfield whose
+// ground is a cvc::world terrain generator's (fbm by default, at a generated world's scale), and a
+// heightfield may name a generator too.
+TEST(AriadneScene, TerrainSource) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: hills
+      source: { terrain: { size: 5000, seed: 3, amp: 120 } }
+    - node: valley
+      source: { terrain: { generator: dem, file: valley.npy, size: 800, resolution: 129 } }
+    - node: bumpy
+      source: { heightfield: { generator: fbm, size: 100, layers: [{ kind: dome, amplitude: 4, radius: 20 }] } }
+    - node: plain
+      source: { heightfield: { size: 10, resolution: 4 } }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const SceneNode *h = find_scene_node(r.scene.nodes, "hills");
+  ASSERT_NE(h, nullptr);
+  ASSERT_TRUE(h->has_heightfield);
+  EXPECT_EQ(h->heightfield.generator, "fbm");
+  EXPECT_FLOAT_EQ(h->heightfield.size, 5000.0f);
+  EXPECT_EQ(h->heightfield.resolution, 1001); // one vertex per 5 m
+  EXPECT_DOUBLE_EQ(h->heightfield.seed, 3.0);
+  EXPECT_DOUBLE_EQ(h->heightfield.amp, 120.0);
+  const SceneNode *v = find_scene_node(r.scene.nodes, "valley");
+  ASSERT_NE(v, nullptr);
+  EXPECT_EQ(v->heightfield.generator, "dem");
+  EXPECT_EQ(v->heightfield.file, "valley.npy");
+  EXPECT_EQ(v->heightfield.resolution, 129);
+  const SceneNode *b = find_scene_node(r.scene.nodes, "bumpy");
+  ASSERT_NE(b, nullptr);
+  EXPECT_EQ(b->heightfield.generator, "fbm");
+  EXPECT_EQ(b->heightfield.resolution, 21);
+  EXPECT_EQ(b->heightfield.layers.size(), 1u);
+  const SceneNode *p = find_scene_node(r.scene.nodes, "plain");
+  ASSERT_NE(p, nullptr);
+  EXPECT_TRUE(p->heightfield.generator.empty()); // the layers alone, as before
+  EXPECT_EQ(p->heightfield.resolution, 4);
+}
+
 // physics: and body: (WORLD-GEOMETRY-ROADMAP.md, G5) — the scene's rigid-body world and each node's
 // body, plus the box and sphere primitives a crate or a ball is drawn with. Values are lower-cased;
 // the realizer checks them. `body:` never lands in props.

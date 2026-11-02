@@ -69,7 +69,7 @@ TEST(WorldRaster, RowZeroIsMinY) {
   const double y0 = g.min_y;
   for (int c = 0; c < g.cols; ++c) {
     double x = g.world_x(c);
-    EXPECT_NEAR(o.height[std::size_t(0) * g.cols + c], float(wm.hf().sample(x, y0)), 1e-3);
+    EXPECT_NEAR(o.height[std::size_t(0) * g.cols + c], float(wm.terrain().sample(x, y0)), 1e-3);
   }
 }
 

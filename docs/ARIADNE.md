@@ -732,6 +732,15 @@ south-west to north-east), a body on it collides with the same triangles, and a 
 standing on it (`ground:` in `forest_trees`, `wave_sea`, `cloud_sky`) samples the triangle under
 each point.
 
+**Generated terrain.** `source: { terrain: { generator, size, resolution, seed, amp, file,
+preset } }` draws a `cvc::world` terrain generator's ground as such a heightfield: `fbm` (the
+analytic relief the terrain lab stands on; the default), `dem` (an elevation `.npy` at `file`, a URI
+or a path relative to the document, anchored at 0 and stretched to `amp`), or one a host
+registered (`cvc::world::register_terrain_generator`). The size defaults to 1200 and the resolution
+to one vertex per 5 m (at most 2049). A `heightfield:` source takes the same `generator:` keys, its
+layers adding on top. The `generated_world` node type uses the same generators (its `terrain:`,
+`city:` and `terrain_file:` props; `world_controls.ari` switches them live).
+
 **The fast render path.** A big static world draws fast when it is a few merged meshes and its
 shadow maps are re-baked rarely and spent where the camera looks. These keys say so
 (`examples/ariadne/documents/terrain_lab.ari` uses all of them):

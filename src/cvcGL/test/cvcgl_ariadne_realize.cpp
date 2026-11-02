@@ -19,7 +19,7 @@
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
 #include <cvc/geometry/height_field.h> // generated_world test: the published ground
-#include <cvc/geometry/mesh_ops.h> // field colours: the colormap a seeded ramp follows
+#include <cvc/geometry/mesh_ops.h>     // field colours: the colormap a seeded ramp follows
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/LodGraphicsNode.h> // LOD test: RealizeOptions realizes mesh nodes as ladders
@@ -34,19 +34,20 @@
 #include <cvc/gl/ariadne/lsystem_nodes.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/image/image.h>
-#include <cvc/state/state.h> // clock test: read/write the bound sim.* keys
+#include <cvc/state/state.h>                      // clock test: read/write the bound sim.* keys
 #include <cvc/state/state_exec/async_scheduler.h> // fe_lab: its jobs are scheduler processes
-#include <cvc/tf/model.h>    // mesh_lab / fe_lab field colours
+#include <cvc/tf/model.h>                         // mesh_lab / fe_lab field colours
 #include <cvc/tf/overlays.h>
 #include <cvc/volume/volume.h>
 #include <cvc/volume/volume_file_io.h>
-#include <filesystem> // mesh_lab / fe_lab sources: a temp "document directory"
+#include <cvc/world/generated_world.h> // terrain source test: the generator it draws
+#include <filesystem>                  // mesh_lab / fe_lab sources: a temp "document directory"
 #include <thread>
 #include <vtkActor.h> // LOD test: a rung's material
 #include <vtkLight.h>
 #include <vtkLightCollection.h>
 #include <vtkMapper.h> // field colours: an opacity curve is an RGBA colour array
-#include <vtkPlane.h> // clip test: the planes handed to a node's renderer
+#include <vtkPlane.h>  // clip test: the planes handed to a node's renderer
 #include <vtkPlaneCollection.h>
 #include <vtkPointData.h>
 #include <vtkPolyData.h>
@@ -1194,6 +1195,70 @@ int main() {
     chk(realized.height_fields["world"]->rows() * realized.height_fields["world"]->cols() ==
             int(pts1),
         "the published ground follows the regenerated world");
+    // The generators, by name: the realizer publishes what a panel can offer, and a switch
+    // regenerates; an unknown one keeps the world and says why.
+    const std::string terrains =
+        st(cvc::ariadne::resolve_bind("gw", "world.generators.terrain")).value<std::string>();
+    chk(terrains.find("fbm") != std::string::npos && terrains.find("dem") != std::string::npos,
+        "generated_world published its terrain generators");
+    st(cvc::ariadne::resolve_bind("gw", "world.city")).value(std::string("none"));
+    cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+    const auto bld =
+        std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("world_buildings"));
+    chk(bld && bld->getGeometry()->const_points().empty(),
+        "world.city: none regenerated a world without buildings");
+    st(cvc::ariadne::resolve_bind("gw", "world.terrain")).value(std::string("no_such"));
+    cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+    const std::string status =
+        st(cvc::ariadne::resolve_bind("gw", "world.status")).value<std::string>();
+    chk(status.rfind("error:", 0) == 0 && terrain->getGeometry()->const_points().size() == pts1,
+        "an unknown terrain generator keeps the world and reports the error");
+  }
+
+  // ── a generated terrain as a geometry source (source: { terrain: {...} }) ─────────────────
+  {
+    printf("== terrain geometry source ==\n");
+    SceneGraph sg(app, "tsrc");
+    SceneRenderer view(sg, 64, 64, /*offscreen=*/true, "main");
+    Scene scene;
+    SceneNode t;
+    t.id = "hills";
+    t.type = "geometry";
+    t.has_heightfield = true;
+    t.heightfield.generator = "fbm";
+    t.heightfield.size = 400.0f;
+    t.heightfield.resolution = 81;
+    t.heightfield.seed = 4.0;
+    t.heightfield.amp = 30.0;
+    scene.nodes.push_back(t);
+    std::vector<std::string> warnings;
+    auto realized = cvc::gl::ariadne::realize_scene(sg, scene, "tsrc", &warnings);
+    chk(realized.height_fields.count("hills") == 1, "a terrain source publishes its ground");
+    cvc::world::generated_world_params p;
+    p.half_m = 200.0;
+    p.seed = 4;
+    p.amp_m = 30.0;
+    const auto ground = cvc::world::make_terrain(p);
+    bool same = realized.height_fields.count("hills") == 1;
+    if (same) {
+      const auto &f = *realized.height_fields["hills"];
+      for (int j = 0; j < f.rows(); j += 9)
+        for (int i = 0; i < f.cols(); i += 9)
+          same = same && std::fabs(f.height_at(j, i) -
+                                   ground->sample(-200.0 + i * 5.0, -200.0 + j * 5.0)) < 1e-3;
+    }
+    chk(same, "the terrain source's ground is the fbm generator's");
+    SceneNode bad = t;
+    bad.id = "bad";
+    bad.heightfield.generator = "no_such";
+    Scene s2;
+    s2.nodes.push_back(bad);
+    std::vector<std::string> w2;
+    cvc::gl::ariadne::realize_scene(sg, s2, "tsrc", &w2);
+    bool said = false;
+    for (const std::string &m : w2)
+      said = said || m.find("no_such") != std::string::npos;
+    chk(said, "an unknown terrain generator warns");
   }
 
   // ── two top-level volren nodes share an id -> last wins, no leaked orphan ────

@@ -30,8 +30,10 @@
 //   water_field(w, t, ...)                                    // the water, as a volume of depth
 //   w.geometry()     // the world as cvc::world::world_geometry, for physics and nav
 //
-// The pieces: world_model::generate (the relief and the L-system prop scatter), the city, and the
-// props tessellated into merged meshes. The city is roads first:
+// The pieces: the ground from a terrain generator (make_terrain: "fbm", the analytic relief, or
+// "dem", an elevation .npy, or one a host registered), world_model::generate (the L-system prop
+// scatter on it), the city from a city generator ("districts", below, or "none"), and the props
+// tessellated into merged meshes. The default city is roads first:
 //
 //   * district cores, about one per 600 m of world side, on dry, gentle ground: an urbanity field
 //     that is 1 at a core and fades out over a few hundred metres;
@@ -46,9 +48,9 @@
 //     load_building_library), or without one procedural massing whose heights rise with urbanity
 //     (houses with gable roofs outside the cores, a rare tower in them).
 //
-// The roads are extruded into a surface and burned into the raster as asphalt, and trees and rocks
-// keep off the roads and buildings. Water is everything below water_level_m, and water_field fills
-// it with a gently travelling wave.
+// The roads are extruded into a surface and burned into the raster as asphalt, the buildings as
+// occupied concrete wall, and trees and rocks keep off the roads and buildings. Water is everything
+// below water_level_m, and water_field fills it with a gently travelling wave.
 //
 // GL-free and deterministic: a pure function of the params and the library. Every mesh is one
 // merged cvc::geometry, so a renderer draws the world in a handful of nodes.
@@ -61,7 +63,10 @@
 #include <cvc/world/building_archetypes.h>
 #include <cvc/world/grid.h>
 #include <cvc/world/raster.h>
+#include <cvc/world/roads.h>
+#include <cvc/world/terrain_source.h>
 #include <cvc/world/world_geometry.h>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -79,7 +84,7 @@ int world_preset_from_name(const std::string &n); // its index, or 0
 enum class surface_color : int { material = 0, risk, occupancy, height };
 
 struct generated_world_params {
-  std::uint64_t seed = 7;
+  std::uint64_t seed = 5;
   double half_m = 600.0; // the world spans [-half_m, half_m]^2 metres
   int trees = 500;
   int rocks = 90;
@@ -94,14 +99,56 @@ struct generated_world_params {
   double cell_m = 5.0;      // the terrain mesh's target cell size
   int max_terrain_n = 2049; // its samples per side are capped
   int raster_n = 385;       // the material raster's cells per side (capped by the terrain's)
+  // The generators, by name (register_terrain_generator, register_city_generator). Terrain:
+  // "fbm" (the analytic relief) or "dem" (an elevation .npy at terrain_file, anchored at 0 and
+  // stretched to amp_m). City: "districts" (the roads-first city) or "none" (no streets or
+  // buildings).
+  std::string terrain = "fbm";
+  std::string city = "districts";
+  std::string terrain_file;
 };
 
 // The counts and relief a preset starts from (the lab's quick-set): fills trees, rocks, buildings
 // and amp_m for p.preset.
 void apply_world_preset(generated_world_params &p);
 
-// The world_model params for these (the relief scaled to the world size).
+// The world_model params for these (the relief scaled to the world size), the ground from
+// make_terrain(p).
 world_params to_world_params(const generated_world_params &p);
+
+// ── generators, by name ──────────────────────────────────────────────────────────────────────────
+// A terrain generator makes the ground for p over [-p.half_m, p.half_m]^2, its floor near 0 and its
+// relief about p.amp_m, so p.water_level_m means the same thing whatever made the relief. A
+// generator's own masks (channel, cliff, buildable) are respected by the city.
+using terrain_generator =
+    std::function<std::shared_ptr<const terrain_source>(const generated_world_params &p)>;
+// Add a generator, or replace the one of that name. Thread-safe.
+void register_terrain_generator(const std::string &name, terrain_generator g);
+// The names: the built-ins first ("fbm", "dem"), then in registration order.
+std::vector<std::string> terrain_generator_names();
+// The ground for p, from p.terrain's generator. Throws std::invalid_argument on an unknown name,
+// and passes on the generator's own errors (a missing DEM file, say).
+std::shared_ptr<const terrain_source> make_terrain(const generated_world_params &p);
+// The analytic relief's params for p (the "fbm" generator), scaled to the world size.
+heightfield_params fbm_terrain_params(const generated_world_params &p);
+
+// A city generator lays out the streets; the lots and buildings along them are the same for all.
+struct city_streets {
+  road_network roads;
+  road_density_fn urbanity; // in [0, 1] (1 = a core); empty = 1 everywhere
+  std::size_t districts = 0;
+};
+struct city_context {
+  const generated_world_params &params; // half_m already clamped
+  const terrain_source &terrain;
+  // True where no road may go: the water (and 1.5 m of shore), and the terrain's channel and
+  // cliff masks where it has them.
+  road_mask_fn blocked;
+};
+using city_generator = std::function<city_streets(const city_context &c)>;
+void register_city_generator(const std::string &name, city_generator g);
+// The names: the built-ins first ("districts", "none"), then in registration order.
+std::vector<std::string> city_generator_names();
 
 struct generated_world {
   generated_world_params params;
@@ -137,6 +184,7 @@ struct generated_world {
 };
 
 // Generate. `library` may be null or empty: the city's buildings are then procedural massing.
+// Throws std::invalid_argument on an unknown generator name.
 generated_world generate_world(const generated_world_params &p,
                                const building_library *library = nullptr);
 

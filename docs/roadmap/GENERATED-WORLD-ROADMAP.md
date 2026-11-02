@@ -1,7 +1,8 @@
 # Generated worlds: one template, switchable generators, the conference's world
 
-**Status:** plan, revision 2 (2026-11-02). G0 landed with this document; first passes of G2 (the
-street model) and G3 (building placement) landed in revision 2; G1 and the rest are the plan.
+**Status:** plan, revision 3 (2026-11-02). G0 landed with this document; first passes of G2 (the
+street model) and G3 (building placement) landed in revision 2; G1 (the terrain-source interface
+and the generator switch) in revision 3; the rest are the plan.
 
 **Goal.** One generated world that every app builds on: the terrain lab, the Ariadne conference's
 rooms (arisrv + arigl, the cyprty browser client), and the next demo. It is a document template
@@ -33,30 +34,57 @@ switches between generators at run time, and libcvc's water whatever the generat
 
 ## G1 — a generator interface and the switch
 
-The terrain lab's world is three choices, each switchable in the panel:
+**Landed (revision 3).** The terrain lab's world is three choices, the first two switchable by name
+in the panel:
 
 | choice | today | adds |
 |---|---|---|
-| terrain | `world::heightfield` (fBm + warp + island dome) | an eroded, drainage-aware relief (G4) |
-| streets | `generate_roads`: tensor-field tracing, districts, kinds, graded (G2) | A* routing, district modes |
+| terrain | `fbm` (`world::heightfield`: fBm + warp + island dome), `dem` (an elevation .npy) | an eroded, drainage-aware relief (G4) |
+| streets | `districts` (`generate_roads`: tensor-field tracing, districts, kinds, graded; G2), `none` | A* routing, district modes |
 | buildings | block-deep lots, core-first fill, procedural or archetype (G3) | archetype by area, sheds |
 
-- **A terrain source interface**: `sample(x, y)`, `slope_deg`, `bounds()`, and masks
-  (buildable, channel, cliff). `world::heightfield` implements it. A new `raster_heightfield` (a
-  gridded relief, bilinear) carries any generator's DEM. `world_model`, `raster()` and the scatter
-  take the interface, not the concrete heightfield. They read `params().sea_level_m` / `amp`
-  today (`raster.cpp`), and that moves into `world_params`.
-- **Generator choice in `generated_world_params`**: `terrain_generator` and `city_generator`
-  (enums, or registry names so a host can add one). They are new `world.*` keys, with combos in
-  `world_controls.ari`.
-- **Water stays libcvc's**: everything under `water_level_m` is water, whatever made the relief.
-  That level's mask joins the excluded mask a generator's lots and roads avoid. A generator's own
-  water (river channels) is dropped, or kept as land-cover only. A generator whose relief is
-  relative (not referenced to 0) is anchored, so the water level means the same thing.
-- **Roads carry a kind**: `road_segment::kind` (local / collector / arterial, each with its width)
-  landed with G2; a service kind is still to come. A converter turns any generator's polylines with
-  shared junction vertices into a `road_network`, so `extrude_roads`, `rasterize_roads` and
-  `layout_lots` keep working.
+- **`cvc::world::terrain_source`** (`inc/cvc/world/terrain_source.h`): `sample`, `slope_deg`,
+  `bounds()`, its datum (`sea_level_m`, `relief_m`: what the raster's height and slope classes
+  scale by, which `raster.cpp` used to read from the heightfield's params), and optional masks
+  (`buildable`, `channel`, `cliff`). `world::heightfield` implements it. **`raster_heightfield`**
+  is a gridded relief (bilinear, clamped to its edge, optional mask planes) that carries any
+  generator's DEM; `sample_terrain` rasterizes any source onto a grid, and `load_dem` reads an
+  elevation .npy (`read_npy`: f4, f8 and the integer dtypes). `world_model` (`terrain()`),
+  `raster()`, the scatter and the city take the interface; `world_params::terrain` hands one in.
+- **Generators by name**: `generated_world_params::terrain` / `city` / `terrain_file`;
+  `register_terrain_generator` and `register_city_generator` let a host add its own (a city
+  generator returns the streets and an urbanity field; the lots and buildings along them are
+  shared). An unknown name throws `std::invalid_argument` before any work. The `generated_world`
+  node reads `terrain:`, `city:` and `terrain_file:`, seeds `world.terrain`, `world.city` and
+  `world.terrain_file`, and publishes the registered names (`world.generators.terrain` / `.city`,
+  one per line) for `world_controls.ari`'s Terrain and City combos. A generator that fails (a
+  missing DEM) keeps the current world and puts the error in `world.status`.
+- **The terrain as a geometry source**: `source: { terrain: { generator, size, resolution, seed,
+  amp, file, preset } }` in any document (or `heightfield: { generator: ... }`, whose layers add on
+  top) draws a generator's ground as a `cvc::height_field`, so `ground:`, bodies and band colours
+  work on it as on any heightfield.
+- **Water stays libcvc's**: everything under `water_level_m` is water, whatever made the relief. A
+  DEM is anchored (its floor at 0) and stretched to `amp_m`, so the water level means the same
+  thing. The roads' no-go mask is the water plus the terrain's channel and cliff masks; lots also
+  stay on its buildable mask; district centres keep off it.
+- **Fixed on the way** (bugs, not kept): the fBm seed was XORed with the world seed, which was the
+  same number, so every seed stood on the same ground (the default document is now seed 5, whose
+  two towns fill the 110 buildings asked; seed 7 builds 76 on its new ground). The city's
+  buildings were never stamped into the material / occupancy raster (a nav consumer saw open
+  ground under them); they are now concrete-wall cells, occupied and hard, at least one per
+  building. The terrain mesh's cells read the raster's material half a cell off.
+  `road_network::distance_to_road` scanned every segment when no road was within about 30 to 60 m,
+  which on a large world (blocks half a kilometre across) is most queries:
+  `distance_within(x, y, r)` bounds a query, `on_or_near_road` and the lots' block-depth probe use
+  it, and `distance_to_road` widens its window instead of scanning. Results are unchanged (the same
+  nearest, the same tie-break).
+- **Large worlds, measured** (native, Release, this box; `CVC_TL_PROF=1 terrain_lab --half H`):
+  the world half slider already goes to 10 km. Generating a 1.2 km world takes about 0.5 s; a 5 km
+  world (half 2500) took 10 s, 8 of them in the city's proximity queries, and now takes about
+  1.4 s (raster 0.5 s and terrain mesh 0.5 s for its 1001² samples, streets 0.13 s, city 0.13 s).
+  The browser build is single-threaded, so expect a few times that there.
+- Still to do: a converter from any generator's polylines (with shared junction vertices) to a
+  `road_network`, for an imported street map; a service road kind.
 
 ## G2 — the street model
 
@@ -73,8 +101,9 @@ opt-in through `road_params` (the defaults are the classic network):
   steps either way, up to 75° (80° in the lab), and is dropped if no turn fits. Hill roads wind
   instead of climbing the fall line. The lab allows 35 % (San Francisco's steepest streets are
   about 31 %): its relief is hilly, with a median slope of about 33 % and only a tenth of the land
-  under 13 %. Measured on the lab's default world (seed 7): at 25 % and 6 m of lot relief its two
-  districts grew 2.3 km of road and 31 buildings; at 35 % and 10 m, 5.8 km and the 110 asked for.
+  under 13 %. Measured on the lab's default world of the time (seed 7, on the seed-blind ground
+  G1 fixed): at 25 % and 6 m of lot relief its two districts grew 2.3 km of road and 31
+  buildings; at 35 % and 10 m, 5.8 km and the 110 asked for.
 - **Fading local grids** (`local_min_urbanity`): local streets stop where the urbanity drops off,
   while the arterials and collectors run on between the districts.
 - **A continuation fix**: a road continues along whichever field direction it is already on.

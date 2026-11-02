@@ -50,6 +50,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -118,7 +119,8 @@ const world::building_library &find_library(const ari::SceneNode &n,
 // The world.* keys a world_controls panel drives, as absolute state paths.
 struct WorldKeys {
   std::string seed, half, trees, rocks, buildings, tree_gen, amp, water_level, preset, ontology,
-      color, request, status, props, building_count, occupied, terrain;
+      color, request, status, props, building_count, occupied, terrain, terrain_gen, city,
+      terrain_file;
 };
 
 // Everything the tick needs, in one shared handle.
@@ -126,6 +128,7 @@ struct WorldRT {
   cvc::app *app = nullptr;
   WorldKeys k;
   world::generated_world_params base; // the authored props
+  std::string base_dir;               // the document's, for a relative terrain_file
   const world::building_library *library = nullptr;
   world::generated_world w;
   std::string sig; // the params the current world was made from
@@ -154,6 +157,9 @@ world::generated_world_params read_live(WorldRT &rt) {
   p.water_level_m = ari::read_or<double>(app, rt.k.water_level, rt.base.water_level_m);
   p.preset = static_cast<int>(ari::read_or<double>(app, rt.k.preset, rt.base.preset));
   p.ontology = static_cast<int>(ari::read_or<double>(app, rt.k.ontology, rt.base.ontology));
+  p.terrain = ari::read_or<std::string>(app, rt.k.terrain_gen, rt.base.terrain);
+  p.city = ari::read_or<std::string>(app, rt.k.city, rt.base.city);
+  p.terrain_file = ari::read_or<std::string>(app, rt.k.terrain_file, rt.base.terrain_file);
   return p;
 }
 
@@ -162,7 +168,35 @@ std::string params_sig(const world::generated_world_params &p) {
   return to_string((unsigned long long)p.seed) + "|" + to_string(p.half_m) + "|" +
          to_string(p.trees) + "|" + to_string(p.rocks) + "|" + to_string(p.buildings) + "|" +
          to_string(p.tree_gen) + "|" + to_string(p.amp_m) + "|" + to_string(p.water_level_m) + "|" +
-         to_string(p.preset) + "|" + to_string(p.ontology);
+         to_string(p.preset) + "|" + to_string(p.ontology) + "|" + p.terrain + "|" + p.city + "|" +
+         p.terrain_file;
+}
+
+std::string joined(const std::vector<std::string> &v) {
+  std::string s;
+  for (const std::string &e : v)
+    s += (s.empty() ? "" : "\n") + e;
+  return s;
+}
+
+// Generate p's world into rt.w. A terrain_file is a URI or a path relative to the document. On a
+// failure (an unknown generator, a missing DEM) the world is kept, the status says why, and
+// false is returned.
+bool regenerate(WorldRT &rt, world::generated_world_params p) {
+  try {
+    ari::ResolvedFile f; // alive until the world is made: a fetched URI's temp file goes with it
+    if (!p.terrain_file.empty()) {
+      f = ari::resolve_to_file(p.terrain_file, rt.base_dir);
+      if (!f.ok)
+        throw std::runtime_error("terrain_file " + f.error);
+      p.terrain_file = f.path;
+    }
+    rt.w = world::generate_world(p, rt.library);
+    return true;
+  } catch (const std::exception &e) {
+    ari::write<std::string>(*rt.app, rt.k.status, std::string("error: ") + e.what());
+    return false;
+  }
 }
 
 cvc::image surface_image(const WorldRT &rt) {
@@ -193,9 +227,10 @@ void publish_stats(WorldRT &rt) {
   ari::write<std::string>(app, rt.k.occupied, buf);
   const int n = w.terrain ? w.terrain->rows() : 0;
   ari::write<std::string>(app, rt.k.terrain, std::to_string(n) + " x " + std::to_string(n));
-  ari::write<std::string>(app, rt.k.status,
-                          w.archetypes ? "city: roads first, Austin archetypes"
-                                       : "city: roads first, procedural buildings");
+  std::string status = w.params.terrain + " terrain, " + w.params.city + " city";
+  if (w.building_count)
+    status += w.archetypes ? ", Austin archetypes" : ", procedural buildings";
+  ari::write<std::string>(app, rt.k.status, status);
 }
 
 // Style each mesh node the first time it exists. soft = demo3's daylight look (matte ground and
@@ -304,6 +339,10 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
   for (int i = 0; i < 3; ++i)
     if (onto == world::world_ontology_name(i))
       b.ontology = i;
+  b.terrain = n.props.str("terrain", b.terrain);
+  b.city = n.props.str("city", b.city);
+  b.terrain_file = n.props.str("terrain_file", b.terrain_file);
+  rt->base_dir = n.base_dir;
   rt->color = color_from(n.props.str("color", "material"), 0);
   rt->texture_size = std::max(256, std::min(4096, int(n.props.num("texture", 2048.0))));
   rt->soft = n.props.str("look", "soft") != "classic";
@@ -336,11 +375,37 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
   rt->k.building_count = key("world.stats.buildings");
   rt->k.occupied = key("world.stats.occupied");
   rt->k.terrain = key("world.stats.terrain");
+  auto seed_str = [&](const char *k, const std::string &def) {
+    const std::string path = key(k);
+    ari::read_or_seed<std::string>(app, path, def);
+    return path;
+  };
+  rt->k.terrain_gen = seed_str("world.terrain", b.terrain);
+  rt->k.city = seed_str("world.city", b.city);
+  rt->k.terrain_file = seed_str("world.terrain_file", b.terrain_file);
+  // The generators a panel can offer (a host may have registered its own), one per line.
+  ari::write<std::string>(app, key("world.generators.terrain"),
+                          joined(world::terrain_generator_names()));
+  ari::write<std::string>(app, key("world.generators.city"), joined(world::city_generator_names()));
 
-  const world::generated_world_params p0 = read_live(*rt);
+  world::generated_world_params p0 = read_live(*rt);
   rt->preset = p0.preset;
   rt->color = int(ari::read_or<double>(app, rt->k.color, rt->color));
-  rt->w = world::generate_world(p0, rt->library);
+  if (!regenerate(*rt, p0)) {
+    // The document's generators failed (an unknown name, a missing DEM): start from the default
+    // ones, so there is a world to show, and say why.
+    const std::string why = ari::read_or<std::string>(app, rt->k.status, std::string());
+    if (warnings)
+      warnings->push_back("ari: generated_world '" + n.id + "': " + why);
+    const world::generated_world_params def;
+    p0.terrain = def.terrain;
+    p0.city = def.city;
+    p0.terrain_file.clear();
+    ari::write<std::string>(app, rt->k.terrain_gen, p0.terrain);
+    ari::write<std::string>(app, rt->k.city, p0.city);
+    ari::write<std::string>(app, rt->k.terrain_file, std::string());
+    rt->w = world::generate_world(p0, rt->library);
+  }
   rt->sig = params_sig(p0);
 
   // The node is the terrain; its height_field is what `ground: <id>` and a body stand on.
@@ -404,8 +469,8 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
     const std::string sig = params_sig(p);
     if (force || sig != rt->sig) {
       rt->sig = sig;
-      rt->w = world::generate_world(p, rt->library);
-      apply_world(*sgp, id, *rt);
+      if (regenerate(*rt, p)) // a failure keeps the world and shows why in the status
+        apply_world(*sgp, id, *rt);
     } else if (const int c = int(ari::read_or<double>(app, rt->k.color, rt->color));
                c != rt->color) {
       rt->color = c; // a recolour repaints the texture only

@@ -163,6 +163,11 @@ struct road_network {
   // tie-break).
   double distance_to_road(double x, double y, int *seg = nullptr, double *t = nullptr) const;
 
+  // distance_to_road when the nearest centerline is within r metres; otherwise a large value and
+  // *seg = -1, found without looking further than r (a query far inside a big block stays cheap).
+  double distance_within(double x, double y, double r, int *seg = nullptr,
+                         double *t = nullptr) const;
+
   // True when (x, y) is within `margin` metres of any road surface (its half-width + margin) — the
   // test a road-aware scatter uses to keep trees/props off the pavement.
   bool on_or_near_road(double x, double y, double margin = 0.0) const;
