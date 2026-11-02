@@ -8,11 +8,14 @@
 //  - the geometry persisted at tree.<id>.geometry is in the document's px, not the device's;
 //  - at UI size 1 and pixel ratio 1 nothing changes: the same document on a laptop opens where it
 //    says, at the size it says.
+// And the overlay's UI size reaches it: UiSettings hands its owner only edits made by others, so
+// a touch device's size isn't lost to the settings' own defaults before the first frame.
 #include <cmath>
 #include <cstdio>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>
+#include <cvc/gl/Settings.h>
 #include <cvc/gl/ariadne/ImGuiBackend.h>
 #include <cvc/state/state.h>
 #include <string>
@@ -166,6 +169,27 @@ int main() {
     chk(t && near(t->Columns[0].WidthGiven, 100.0f) && near(t->Columns[1].WidthGiven, 80.0f),
         "the columns at their px");
     chk(s.geometry("cam") == "20,40,360,560", "persisted as authored (" + s.geometry("cam") + ")");
+  }
+  {
+    // ImGuiOverlay picks 1.25 on a touch device, then makes its UiSettings, which seed their
+    // defaults (1, no touch). Handed back to the overlay, those would run a phone at 1.
+    using cvc::gl::UiSettings;
+    cvc::app app;
+    int applied = 0;
+    UiSettings::Values last;
+    UiSettings ui(app, "ui.size_test", [&](UiSettings::Values v) {
+      ++applied;
+      last = v;
+    });
+    chk(applied == 0, "UiSettings' seed of its defaults isn't handed to the owner");
+    UiSettings::Values touch;
+    touch.scale = 1.25;
+    touch.touchMode = true;
+    ui.set(touch);
+    chk(applied == 0, "nor is the owner's own set()");
+    cvc::state::instance(app)("ui.size_test.scale").value(1.5);
+    chk(applied == 1 && last.scale == 1.5 && last.touchMode,
+        "an edit from outside (the Controls window's UI size) is, with the owner's other keys");
   }
 
   std::printf("%s\n", failures ? "FAILED" : "PASSED");

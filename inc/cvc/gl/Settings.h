@@ -70,6 +70,10 @@ private:
   void seedState();
   Values m_v;
   std::function<void(Values)> m_apply;
+  // Our own object->state writes don't call back into the owner: the constructor's seed would
+  // otherwise hand it these defaults (an overlay's touch mode and UI size lost before its first
+  // frame), and set() a mix of new and old keys.
+  bool m_writing = false;
 };
 
 // Layout of a Viewport within its ViewportManager window:
