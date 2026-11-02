@@ -212,6 +212,46 @@ Under the controller it ends 1.122 from the goal against 1.111.
 VJP to 1e-9, its gradient from autograd rather than duals. A double plant is double
 throughout (its lag factors and floors too), so the two can agree to rounding.
 
+**A step whose energy books close exactly** (`diff::dyn_plant_dg`, opt-in;
+`inc/cvc/nav/detail/dyn_bike_dg.h`, `nav_dyn_bike_dg_test`). `dyn_plant` is first order, so
+`dyn_plant_books` leaves its error, second order per step, in the books' residual. `dyn_plant_dg`
+is the discrete gradient of the plant's port-Hamiltonian form instead. `H = 1/2 v^T M v` is
+quadratic in the twist `v = (vx, vy, r)`, so its discrete gradient is the midpoint twist, and the
+step solves
+
+```
+M (v1 - v) / hdt = J(M vbar) vbar + Q(vbar),   vbar = (v + v1) / 2,
+```
+
+`Q` being the tires, the axles' forces, drag, rolling resistance and grade at the midpoint state
+(the actuators' outputs at the step's midpoint). `J` is skew, so `dH = hdt vbar^T Q(vbar)` line for
+line, and `dyn_plant_dg_books` closes to the Newton solve's tolerance. Its actuators, speed clamp
+and low-speed blend are `dyn_plant`'s, and the books charge the last two to the limiter line as
+`dyn_plant_books` does. Nothing that calls `dyn_plant` changes: the defaults are byte-identical.
+
+| Gate (the Humvee) | `dyn_plant_dg` | `dyn_plant` |
+|---|---|---|
+| Books' residual, swerving past the peak at mu 0.6, hdt 0.06 to 0.0025 s | at most 1.7e-10 J a step, 3.5e-14 to 1.3e-12 of the step's flow | 25 J to 0.056 J a step (second order) |
+| Books' residual, braking to a stop through the clamp and the blend | at most 6e-11 J a step | |
+| Error at 2 s of a turn-in past the peak, per halving of hdt (0.04 to 0.005 s) | 3.92x to 4.03x smaller: second order (5.3e-3 at 0.04 s) | 1.98x to 2.13x: first order (0.45 at 0.04 s) |
+| Coasting at full lock, tires 1x, 4x and 16x the Humvee's, 1 x 0.06 s and 6 x 0.01 s | no step gains energy (dH - limiter <= 0 exactly, every step) | |
+| Steady 5 m/s turn, tires 16x, both step sizes | yaw rate within 0.02% of the kinematic bicycle's | within 0.03% |
+| Newton steps | 3 to 4 a step at the Humvee's tires; up to 13 with 16x tires at a crawl at 0.06 s | 3, fixed |
+| Cost per step, double (float) | 3.3 to 3.6 us (1.9 to 2.1 us); with its books 3.6 to 4.1 us | 0.34 to 0.42 us; with its books 1.0 to 1.7 us |
+
+**Where it differs from `dyn_plant`.** The midpoint rule is A-stable but not L-stable. A tire
+much stiffer than the step resolves, `S hdt / m >> 1` (a crawl, or very stiff tires at 0.06 s),
+swings its slip past zero and back, decaying, where `dyn_plant`'s implicit Euler lands on the
+root in one step. At the live plant's 6 x 0.01 s substeps with the Humvee's own tires it does
+not: no swings at a crawl, one in a slide, as `dyn_plant`. At a single 0.06 s step at 0.5 m/s
+with the blend off the slip swings 15 times in 6 s with the Humvee's tires and every step with
+16x tires. The low-speed blend, on in the plant as it runs, takes the crawl over (at most 2
+swings at 0.5 m/s), but 16x tires at a single 0.06 s step still swing at 3 and 12 m/s (19 to 43
+times in 6 s; 1 to 3 at 6 x 0.01 s). It never gains energy while it swings, and where each coasting
+run ends is closer to the
+0.5 ms solution than `dyn_plant`'s at 0.06 s (sliding from 12 m/s: 9.7 kJ against 10.1 kJ, where
+`dyn_plant` ends at 23.4 kJ).
+
 **Training through it** (`rollout_kind::dynamic`, P8b):
 
 ```cpp
