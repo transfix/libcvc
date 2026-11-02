@@ -489,10 +489,11 @@ ViewportManager::ViewportManager(SceneGraph &mainScene, int width, int height, b
     }
 #ifdef __EMSCRIPTEN__
     // In a browser the canvas fills its container (VTK's ExpandCanvasToContainer), but VTK sizes
-    // it only when it handles a resize event, and the first one comes from a ResizeObserver after
-    // the first frames have drawn at width x height. Take the container's size now, as that event
-    // would: the first frame is where ImGui places its windows, and a window placed inside a
-    // 1024 x 768 view stays where it was put when the canvas turns out shorter.
+    // it only when it handles a window resize event: the first is the one Initialize() dispatches,
+    // handled by the next processUIEvents(), after the first frame has drawn at width x height.
+    // Take the container's size now, as that event would: the first frame is where ImGui places
+    // its windows, and a window placed inside a 1024 x 768 view stays where it was put when the
+    // canvas turns out shorter.
     if (auto *wi = vtkWebAssemblyRenderWindowInteractor::SafeDownCast(m_impl->interactor))
       if (wi->GetExpandCanvasToContainer())
         if (int *fit = vtkGetParentElementBoundingRectSize(wi->GetCanvasSelector())) {
