@@ -136,7 +136,54 @@ TEST(NavCoefTrain, LocalGoalsLieInTheirRange) {
       << "no two cells of the +-5 city are 20 apart";
 }
 
+namespace {
+void surrogate_gradcheck(cvc::nav::point_mass_integrator integ, const char *tag);
+}
+
 TEST(NavCoefTrain, GradcheckMatchesFiniteDifference) {
+  surrogate_gradcheck(cvc::nav::point_mass_integrator::semi_implicit, "");
+}
+
+// The integrator A/B's other arms (train_config::point_mass): explicit Euler and the Strang
+// splitting, each with its own backward.
+TEST(NavCoefTrain, ExplicitEulerGradcheckMatchesFiniteDifference) {
+  surrogate_gradcheck(cvc::nav::point_mass_integrator::explicit_euler, " explicit");
+}
+
+TEST(NavCoefTrain, StrangGradcheckMatchesFiniteDifference) {
+  surrogate_gradcheck(cvc::nav::point_mass_integrator::strang, " strang");
+}
+
+// The three integrators are three rollouts, and the default is semi-implicit, bit for bit.
+TEST(NavCoefTrain, PointMassIntegratorsDiffer) {
+  const training_scene sc = cvc::nav::city_scene(48);
+  train_config cfg = small_cfg();
+  cfg.n = 24;
+  const int n = cfg.n, window = 6;
+  std::vector<float> o(2 * n), goal(2 * n), v(2 * n, 0.0f);
+  sc.sample_starts_goals(n, 7, o.data(), goal.data());
+  auto loss = [&](cvc::nav::point_mass_integrator pm, std::vector<float> *g) {
+    train_config c = cfg;
+    c.point_mass = pm;
+    coef_trainer tr(c, 1);
+    return tr.loss_and_grad(sc, o.data(), v.data(), goal.data(), n, window, g);
+  };
+  std::vector<float> g_def, g_semi;
+  const double def = loss(train_config{}.point_mass, &g_def);
+  const double semi = loss(cvc::nav::point_mass_integrator::semi_implicit, &g_semi);
+  const double expl = loss(cvc::nav::point_mass_integrator::explicit_euler, nullptr);
+  const double strang = loss(cvc::nav::point_mass_integrator::strang, nullptr);
+  EXPECT_EQ(def, semi);
+  EXPECT_EQ(g_def, g_semi);
+  EXPECT_NE(semi, expl);
+  EXPECT_NE(semi, strang);
+  EXPECT_NE(expl, strang);
+  std::printf("  window loss: semi-implicit %.6f, explicit %.6f, strang %.6f\n", semi, expl,
+              strang);
+}
+
+namespace {
+void surrogate_gradcheck(cvc::nav::point_mass_integrator integ, const char *tag) {
 #if defined(__APPLE__)
   // Skipped on Apple only. This test never actually ran until the ctest
   // registration fix in this PR, so its float32 tolerances were only ever
@@ -153,6 +200,7 @@ TEST(NavCoefTrain, GradcheckMatchesFiniteDifference) {
   cfg.n = 24;
   cfg.window = 6;
   cfg.horizon = 6;
+  cfg.point_mass = integ;
   coef_trainer tr(cfg, /*init_seed=*/1);
   const int n = cfg.n, window = cfg.window, P = tr.num_params();
 
@@ -218,13 +266,14 @@ TEST(NavCoefTrain, GradcheckMatchesFiniteDifference) {
     ++checked;
   }
   tr.set_params(base);
-  std::printf("[gradcheck] params=%d |g|=%.4f dir_rel=%.3e checked=%d worst_rel=%.3e\n", P, gnorm,
-              dir_rel, checked, worst_rel);
+  std::printf("[gradcheck%s] params=%d |g|=%.4f dir_rel=%.3e checked=%d worst_rel=%.3e\n", tag, P,
+              gnorm, dir_rel, checked, worst_rel);
   EXPECT_LT(dir_rel, 2e-2)
       << "analytic gradient fails the gradient-direction finite-difference check";
   EXPECT_LT(worst_rel, 5e-2) << "a large-gradient parameter disagrees with finite differences";
   EXPECT_GE(checked, 3) << "too few params cleared the FD noise floor to check per-param";
 }
+} // namespace
 
 // Same gradient-direction gradcheck, but training through the FULL bicycle
 // integrator (train_config::rollout = bicycle). The bicycle's branch boundaries

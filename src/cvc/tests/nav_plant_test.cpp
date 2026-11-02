@@ -31,6 +31,7 @@
 #include <cvc/nav/coef_train.h>
 #include <cvc/nav/dyn_power.h>
 #include <cvc/nav/grid_nav.h>
+#include <cvc/nav/material.h>
 #include <cvc/nav/route_follower.h>
 #include <cvc/nav/sim_world.h>
 #include <cvc/nav/vehicle_route.h>
@@ -1305,6 +1306,366 @@ TEST(NavPlantConvergence, DynamicTrainedPolicyAgainstPointMassOnJolt) {
   for (int s = 0; s < seeds; ++s)
     std::printf("    seed %d: %.3f %.3f %.3f\n", 100 + s, a[s], b[s], c[s]);
   EXPECT_TRUE(std::isfinite(lo) && std::isfinite(hi));
+}
+
+// ── The point mass's integrator A/B (train_config::point_mass; docs/NAV_TRAINING.md) ──────────
+// The coefficient policy trains on the point-mass surrogate (rollout_kind::surrogate), whose
+// integrator is semi-implicit Euler, as GRL-SNAM's sdf_rollout that trained the shipped weights.
+// This trains it on the city under each arm, semi-implicit, explicit Euler and the Strang split
+// (velocity Verlet, damping and clamp split out), with the same training seeds, and drives every
+// policy and the untrained seed on Jolt RoboRacers over the same 20 seeds: reach, building hits,
+// seconds touching another vehicle, path length and the closest any chassis came to a building.
+// Each arm's differences from semi-implicit come with a paired 95% CI that resamples both the
+// training seeds and the evaluation seeds. It also books the point mass's own steps under each arm,
+// driven by its trained policy, where U is exactly the goal spring (outside every barrier) and the
+// step moves enough energy to resolve in float (a cheap bound above 1e-5): the
+// sharp check's ratio (r_E - r_hat_E) / bound, r_hat_E the semi-implicit step's prediction (zero
+// for Strang, whose residual is third order), and how often a step gains energy beyond its books.
+// A heavy run: CVC_NAV_INTEGRATOR_AB=1 runs it. AB_LR, AB_STEPS, AB_TRAIN_SEEDS and AB_ARMS
+// (e.g. "semi,explicit,strang") override it; AB_OUT names a CSV of every (arm, training seed,
+// evaluation seed) row.
+
+namespace {
+
+using cvc::nav::point_mass_integrator;
+
+const char *arm_name(point_mass_integrator pm) {
+  return pm == point_mass_integrator::explicit_euler
+             ? "explicit"
+             : (pm == point_mass_integrator::strang ? "strang" : "semi");
+}
+
+// The books of the point mass's steps under `pm`, driven by `tr`'s coefficients from n starts of
+// `seed` for `steps` steps, on the steps outside every barrier (where U is the goal spring).
+struct pm_books {
+  long steps = 0, booked = 0, alarms = 0, gains = 0;
+  double sharp_sum = 0.0, sharp_abs_max = 0.0, cheap_max = 0.0;
+  std::vector<double> sharp; // per booked step
+};
+
+pm_books point_mass_books(const cvc::nav::coef_trainer &tr, point_mass_integrator pm,
+                          const cvc::nav::training_scene &sc, unsigned seed, int n, int steps) {
+  namespace diff = cvc::nav::diff;
+  const cvc::nav::field_stack fs = sc.field();
+  diff::field F;
+  F.data = fs.data;
+  F.H = fs.H;
+  F.W = fs.W;
+  F.S = static_cast<float>(fs.S);
+  F.cx = static_cast<float>(fs.cx);
+  F.cy = static_cast<float>(fs.cy);
+  F.mnx = static_cast<float>(fs.mnx);
+  F.mny = static_cast<float>(fs.mny);
+  F.mxx = static_cast<float>(fs.mxx);
+  F.mxy = static_cast<float>(fs.mxy);
+  const float rr = sc.rr, d_hat = sc.d_hat, vmax = sc.vmax, hdt = sc.dt;
+  std::vector<float> o(2 * n), goal(2 * n), v(2 * n, 0.0f), feat(5 * n), coef(3 * n);
+  sc.sample_starts_goals(n, seed, o.data(), goal.data());
+  pm_books bk;
+  const auto ke = [](double x, double y) { return 0.5 * (x * x + y * y); };
+  for (int t = 0; t < steps; ++t) {
+    for (int i = 0; i < n; ++i) { // the trainer's features (coef_train.cpp policy_forward)
+      const diff::sample s = diff::sample_fwd(F, o[2 * i], o[2 * i + 1]);
+      const float dx = goal[2 * i] - o[2 * i], dy = goal[2 * i + 1] - o[2 * i + 1];
+      const float gd = std::sqrt(dx * dx + dy * dy), inv = 1.0f / (gd + 1e-6f);
+      float *f = &feat[5 * static_cast<std::size_t>(i)];
+      f[0] = s.phi;
+      f[1] = gd;
+      f[2] = dx * inv;
+      f[3] = dy * inv;
+      f[4] = dx * inv * s.nx + dy * inv * s.ny;
+    }
+    tr.coeffs(feat.data(), n, coef.data());
+    for (int i = 0; i < n; ++i) {
+      const float al = coef[3 * i], be = coef[3 * i + 1], ga = coef[3 * i + 2];
+      const float ox = o[2 * i], oy = o[2 * i + 1], vx = v[2 * i], vy = v[2 * i + 1];
+      const float gx = goal[2 * i], gy = goal[2 * i + 1];
+      float ox1, oy1, vx1, vy1;
+      if (pm == point_mass_integrator::explicit_euler)
+        diff::surr_step_explicit(F, ox, oy, vx, vy, gx, gy, al, be, ga, rr, d_hat, vmax, hdt, ox1,
+                                 oy1, vx1, vy1);
+      else if (pm == point_mass_integrator::strang)
+        diff::surr_step_strang(F, ox, oy, vx, vy, gx, gy, al, be, ga, rr, d_hat, vmax, hdt, ox1,
+                               oy1, vx1, vy1);
+      else
+        diff::surr_step(F, ox, oy, vx, vy, gx, gy, al, be, ga, rr, d_hat, vmax, hdt, ox1, oy1, vx1,
+                        vy1);
+      ++bk.steps;
+      const bool free0 = diff::sample_fwd(F, ox, oy).phi - rr >= d_hat;
+      const bool free1 = diff::sample_fwd(F, ox1, oy1).phi - rr >= d_hat;
+      if (free0 && free1) { // U = be/2 |o - goal|^2 over the whole step
+        const double g0[2] = {be * (static_cast<double>(ox) - gx),
+                              be * (static_cast<double>(oy) - gy)};
+        const double g1[2] = {be * (static_cast<double>(ox1) - gx),
+                              be * (static_cast<double>(oy1) - gy)};
+        const double U0 = 0.5 * (g0[0] * g0[0] + g0[1] * g0[1]) / be,
+                     U1 = 0.5 * (g1[0] * g1[0] + g1[1] * g1[1]) / be;
+        double rE, rhat;
+        cvc::nav::book_step_args a;
+        a.dt = hdt;
+        a.gamma = ga;
+        a.v[0] = vx;
+        a.v[1] = vy;
+        a.vt[0] = vx1;
+        a.vt[1] = vy1;
+        a.dx[0] = static_cast<double>(ox1) - ox;
+        a.dx[1] = static_cast<double>(oy1) - oy;
+        for (int c = 0; c < 2; ++c) {
+          a.g[c] = g0[c];
+          a.g1[c] = g1[c];
+        }
+        a.U0 = U0;
+        a.U1 = U1;
+        a.vHv = be * (static_cast<double>(vx1) * vx1 + static_cast<double>(vy1) * vy1);
+        if (pm == point_mass_integrator::strang) {
+          // Its own books: the damping halves' and the two clamps' kinetic energy, exactly, and
+          // the first clamp's cross term: the drift moves with v_b, not the kicked v_k, which
+          // changes U by hdt/2 g.(v_b - v_k) more than the kicks pay for (semi-implicit's W_cross).
+          const double e = std::exp(-0.5 * ga * hdt), hh = 0.5 * hdt;
+          const double vk[2] = {e * vx - hh * g0[0], e * vy - hh * g0[1]};
+          const double sk = std::hypot(vk[0], vk[1]), ck = sk > vmax ? vmax / sk : 1.0;
+          const double vb[2] = {ck * vk[0], ck * vk[1]};
+          const double vc[2] = {vb[0] - hh * g1[0], vb[1] - hh * g1[1]};
+          const double w_damp = ke(vx, vy) * (1.0 - e * e) + ke(vc[0], vc[1]) * (1.0 - e * e);
+          const double w_clamp =
+              ke(vk[0], vk[1]) - ke(vb[0], vb[1]) + ke(e * vc[0], e * vc[1]) - ke(vx1, vy1);
+          const double w_cross = hh * (g0[0] * (vb[0] - vk[0]) + g0[1] * (vb[1] - vk[1]));
+          rE = ke(vx1, vy1) - ke(vx, vy) + (U1 - U0) + w_damp + w_clamp - w_cross;
+          rhat = 0.0;
+        } else {
+          // v' before the clamp: the step's own velocity update.
+          float Fx, Fy;
+          diff::surr_force(F, ox, oy, gx, gy, al, be, rr, d_hat, Fx, Fy);
+          a.vp[0] = vx + hdt * (Fx - ga * vx);
+          a.vp[1] = vy + hdt * (Fy - ga * vy);
+          const cvc::nav::step_books k = cvc::nav::book_step(a);
+          rE = k.residual;
+          rhat = k.residual_sharp;
+        }
+        const double bound = cvc::nav::energy_residual_bound(
+            hdt, std::hypot(g0[0], g0[1]), ga, std::hypot(vx, vy), 0.0, be, std::hypot(vx1, vy1));
+        // A step that moves almost no energy (an agent parked at its goal) has a bound at the
+        // float states' round-off: it is not booked.
+        if (bound > 1e-5) {
+          const double q = (rE - rhat) / bound;
+          ++bk.booked;
+          bk.sharp.push_back(q);
+          bk.sharp_sum += q;
+          bk.sharp_abs_max = std::max(bk.sharp_abs_max, std::fabs(q));
+          bk.cheap_max = std::max(bk.cheap_max, std::fabs(rE) / bound);
+          bk.alarms += std::fabs(q) > 0.1;
+          bk.gains += rE > 0.0 && std::fabs(q) > 0.1;
+        }
+      }
+      o[2 * i] = ox1;
+      o[2 * i + 1] = oy1;
+      v[2 * i] = vx1;
+      v[2 * i + 1] = vy1;
+    }
+  }
+  return bk;
+}
+
+// The closest each agent's chassis came to a building, m, over its run: the boxes drive_once puts
+// in the physics world (one per occupied row run), against the log's centre of mass.
+std::vector<double> closest_approach(const cvc::nav::training_scene &sc, double mpw,
+                                     const std::vector<std::vector<planar_sample>> &runs) {
+  struct aabb {
+    double x0, y0, x1, y1;
+  };
+  std::vector<aabb> boxes;
+  const double dx = (sc.max_x - sc.min_x) / (sc.cols - 1),
+               dy = (sc.max_y - sc.min_y) / (sc.rows - 1);
+  for (int r = 0; r < sc.rows; ++r)
+    for (int c = 0; c < sc.cols;) {
+      if (!sc.occ[static_cast<std::size_t>(r) * sc.cols + c]) {
+        ++c;
+        continue;
+      }
+      int e = c;
+      while (e + 1 < sc.cols && sc.occ[static_cast<std::size_t>(r) * sc.cols + e + 1])
+        ++e;
+      const double cx = (sc.min_x + 0.5 * (c + e) * dx) * mpw, cy = (sc.min_y + r * dy) * mpw;
+      const double hx = 0.5 * (e - c + 1) * dx * mpw, hy = 0.5 * dy * mpw;
+      boxes.push_back({cx - hx, cy - hy, cx + hx, cy + hy});
+      c = e + 1;
+    }
+  std::vector<double> out;
+  for (const std::vector<planar_sample> &run : runs) {
+    double best = 1e30;
+    for (const planar_sample &p : run)
+      for (const aabb &b : boxes) {
+        const double ex = std::max({b.x0 - p.x, 0.0, p.x - b.x1});
+        const double ey = std::max({b.y0 - p.y, 0.0, p.y - b.y1});
+        best = std::min(best, std::hypot(ex, ey));
+      }
+    out.push_back(best);
+  }
+  return out;
+}
+
+// A paired 95% CI of the mean of d[k][s] (training seed k, evaluation seed s): a bootstrap that
+// resamples the training seeds and, within each, the evaluation seeds.
+void paired_ci2(const std::vector<std::vector<double>> &d, double &lo, double &hi) {
+  std::mt19937 rng(0);
+  const int K = static_cast<int>(d.size()), S = static_cast<int>(d[0].size());
+  std::uniform_int_distribution<int> pk(0, K - 1), ps(0, S - 1);
+  std::vector<double> boot(4000);
+  for (double &x : boot) {
+    double sum = 0.0;
+    for (int k = 0; k < K; ++k) {
+      const std::vector<double> &row = d[static_cast<std::size_t>(pk(rng))];
+      for (int s = 0; s < S; ++s)
+        sum += row[static_cast<std::size_t>(ps(rng))];
+    }
+    x = sum / (static_cast<double>(K) * S);
+  }
+  std::sort(boot.begin(), boot.end());
+  lo = boot[static_cast<std::size_t>(0.025 * boot.size())];
+  hi = boot[static_cast<std::size_t>(0.975 * boot.size()) - 1];
+}
+
+} // namespace
+
+TEST(NavPlantConvergence, PointMassIntegratorAB) {
+  REQUIRE_JOLT();
+  if (!std::getenv("CVC_NAV_INTEGRATOR_AB") ||
+      std::string(std::getenv("CVC_NAV_INTEGRATOR_AB")) != "1")
+    GTEST_SKIP() << "a heavy A/B: set CVC_NAV_INTEGRATOR_AB=1 to run it";
+  const auto env_i = [](const char *k, int d) {
+    return std::getenv(k) ? std::atoi(std::getenv(k)) : d;
+  };
+  const cvc::nav::training_scene sc = cvc::nav::city_scene(96);
+  cvc::nav::train_config base;
+  base.n = 128;
+  base.hidden = 64;
+  base.horizon = 28;
+  base.window = 7;
+  base.steps = env_i("AB_STEPS", 150);
+  base.lr = std::getenv("AB_LR") ? static_cast<float>(std::atof(std::getenv("AB_LR"))) : 5e-5f;
+  const int K = env_i("AB_TRAIN_SEEDS", 3);
+  std::vector<point_mass_integrator> arms;
+  {
+    const std::string spec =
+        std::getenv("AB_ARMS") ? std::getenv("AB_ARMS") : "semi,explicit,strang";
+    std::stringstream ss(spec);
+    for (std::string a; std::getline(ss, a, ',');)
+      arms.push_back(a == "explicit" ? point_mass_integrator::explicit_euler
+                     : a == "strang" ? point_mass_integrator::strang
+                                     : point_mass_integrator::semi_implicit);
+  }
+  ASSERT_FALSE(arms.empty());
+  ASSERT_EQ(arms[0], point_mass_integrator::semi_implicit) << "the first arm is the reference";
+
+  // Train every (arm, training seed); book each arm's point mass under its trained policies.
+  std::vector<cvc::nav::coef_mlp> policies;
+  std::vector<pm_books> books(arms.size());
+  for (std::size_t a = 0; a < arms.size(); ++a)
+    for (int k = 0; k < K; ++k) {
+      cvc::nav::train_config cfg = base;
+      cfg.seed = static_cast<unsigned>(k);
+      cfg.point_mass = arms[a];
+      cvc::nav::coef_trainer tr(cfg, 1);
+      const auto t0 = std::chrono::steady_clock::now();
+      tr.train(sc);
+      const double secs =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      policies.push_back(tr.to_coef_mlp());
+      const pm_books b = point_mass_books(tr, arms[a], sc, 500u + static_cast<unsigned>(k), 96, 60);
+      books[a].steps += b.steps;
+      books[a].booked += b.booked;
+      books[a].alarms += b.alarms;
+      books[a].gains += b.gains;
+      books[a].sharp_sum += b.sharp_sum;
+      books[a].sharp_abs_max = std::max(books[a].sharp_abs_max, b.sharp_abs_max);
+      books[a].cheap_max = std::max(books[a].cheap_max, b.cheap_max);
+      books[a].sharp.insert(books[a].sharp.end(), b.sharp.begin(), b.sharp.end());
+      std::printf("  trained %s, seed %d: %d steps at lr %.0e in %.0f s\n", arm_name(arms[a]), k,
+                  base.steps, base.lr, secs);
+    }
+  policies.push_back(cvc::nav::coef_mlp::default_biased());
+
+  // Drive them all on the same seeds, one policy at a time (each keeps its logs for clearance).
+  const plant_reach_options eval; // 20 seeds (100..119) x 48 agents x 400 ticks
+  const vehicle_desc rrc = vehicle_desc::roboracer();
+  const double mpw = sc.scale / (kCityL / rrc.wheelbase());
+  const int S = static_cast<int>(eval.seeds.size()), na = eval.agents;
+  // score[p][s] = {reach, building hits, contact s, path m per agent, closest approach m}
+  std::vector<std::vector<std::array<double, 5>>> score(policies.size());
+  for (std::size_t p = 0; p < policies.size(); ++p) {
+    std::vector<std::vector<plant_drive_score>> per;
+    std::vector<std::vector<planar_sample>> logs;
+    score_on_plant({policies[p]}, sc, rrc, kCityL, eval, &per, &logs);
+    const std::vector<double> close = closest_approach(sc, mpw, logs);
+    ASSERT_EQ(static_cast<int>(close.size()), S * na);
+    for (int s = 0; s < S; ++s) {
+      double c = 0.0;
+      for (int i = 0; i < na; ++i)
+        c += close[static_cast<std::size_t>(s) * na + i];
+      const plant_drive_score &x = per[0][s];
+      score[p].push_back(
+          {x.reach, x.building_hits, x.vehicle_contact_s, x.distance_m / na, c / na});
+    }
+  }
+
+  const char *names[5] = {"reach (points)", "building hits per agent", "contact s per agent",
+                          "path m per agent", "closest approach m"};
+  const double unit[5] = {100.0, 1.0, 1.0, 1.0, 1.0};
+  std::printf("  point-mass integrator A/B: lr %.0e, %d steps, %d training seeds; Jolt RoboRacers, "
+              "city, %d seeds x %d agents x %d ticks\n",
+              base.lr, base.steps, K, S, na, eval.ticks);
+  const std::size_t untrained = policies.size() - 1;
+  for (int m = 0; m < 5; ++m) {
+    std::printf(
+        "  %s: untrained %.3f", names[m], unit[m] * [&] {
+          double t = 0.0;
+          for (int s = 0; s < S; ++s)
+            t += score[untrained][s][m];
+          return t / S;
+        }());
+    for (std::size_t a = 0; a < arms.size(); ++a) {
+      std::vector<std::vector<double>> d(static_cast<std::size_t>(K), std::vector<double>(S));
+      double mean = 0.0;
+      for (int k = 0; k < K; ++k)
+        for (int s = 0; s < S; ++s) {
+          const double x = score[a * K + k][s][m];
+          mean += x / (K * S);
+          d[k][s] = unit[m] * (x - score[k][s][m]); // minus semi-implicit, same seeds
+        }
+      std::printf("; %s %.3f", arm_name(arms[a]), unit[m] * mean);
+      if (a > 0) {
+        double lo, hi, dm = 0.0;
+        for (const auto &row : d)
+          for (double x : row)
+            dm += x / (K * S);
+        paired_ci2(d, lo, hi);
+        std::printf(" (%+.3f [%+.3f, %+.3f])", dm, lo, hi);
+      }
+    }
+    std::printf("\n");
+  }
+  for (std::size_t a = 0; a < arms.size(); ++a) {
+    pm_books &b = books[a];
+    std::sort(b.sharp.begin(), b.sharp.end());
+    const double med = b.sharp.empty() ? 0.0 : b.sharp[b.sharp.size() / 2];
+    std::printf("  books, %s: %ld of %ld steps outside the barriers booked; (r_E - r_hat_E)/bound "
+                "median %+.3e, mean %+.3e, |.| max %.3e; alarms (|.| > 0.1) %.1f%%, of them gains "
+                "%.1f%%; |r_E|/bound max %.3f\n",
+                arm_name(arms[a]), b.booked, b.steps, med, b.sharp_sum / std::max(1L, b.booked),
+                b.sharp_abs_max, 100.0 * b.alarms / std::max(1L, b.booked),
+                100.0 * b.gains / std::max(1L, b.alarms), b.cheap_max);
+  }
+  if (const char *out = std::getenv("AB_OUT")) {
+    std::ofstream f(out);
+    f << "arm,train_seed,eval_seed,reach,building_hits,contact_s,path_m,closest_m\n";
+    for (std::size_t p = 0; p < policies.size(); ++p)
+      for (int s = 0; s < S; ++s) {
+        const std::array<double, 5> &x = score[p][s];
+        f << (p == untrained ? "untrained" : arm_name(arms[p / K])) << ','
+          << (p == untrained ? -1 : static_cast<int>(p % K)) << ',' << eval.seeds[s] << ',' << x[0]
+          << ',' << x[1] << ',' << x[2] << ',' << x[3] << ',' << x[4] << '\n';
+      }
+  }
 }
 
 // Checkpoint selection on Jolt reach (P8b): the same two trainings, each scoring its checkpoints

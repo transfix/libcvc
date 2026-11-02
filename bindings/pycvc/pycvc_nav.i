@@ -4025,9 +4025,10 @@ PyObject *nav_material_trainer_create(const char *cvcnm_path, double grad_clip =
                                       double ms_dt_mult = 4.0, int use_cuda = 0,
                                       int ms_count = 1, double frac_lo = 0.9,
                                       double frac_hi = 0.9, unsigned long long seed = 0,
-                                      int ms_semi_implicit = 0) {
+                                      int ms_semi_implicit = 1) {
   // L_multi start sampling (multi_start_params): the defaults are the legacy single
-  // start. Validated here, before any step releases the GIL — a throw from inside
+  // start, integrated with semi-implicit Euler (ms_semi_implicit = 0: explicit, the
+  // material fork's order). Validated here, before any step releases the GIL — a throw from inside
   // the GIL-free step would leave it unrestored. Only the low 32 bits of `seed`
   // matter, as for torch.Generator.manual_seed.
   cvc::nav::multi_start_params ms;

@@ -18,14 +18,16 @@
 // detail/material_rollout.h). Validated by nav_geom_rollout_grad_test
 // (finite-difference gradchecks + goldens from the Python references).
 //
-// Two Python references exist and they disagree on the integrator:
-//   - the material fork (SetasAditya/material-aware-grl-snam,
-//     full_code/surrogate_robust.py), which train_material.py — this trainer's
-//     normative source — imports: EXPLICIT Euler (position steps with the OLD
-//     velocity, then the velocity updates). The default here.
-//   - GRL-SNAM's grl_snam/surrogate_robust.py (semi-implicit since f5a015f):
-//     the velocity updates first and the position steps with v_{n+1}. Selected
-//     by semi_implicit = true.
+// The integrator is semi-implicit (symplectic) Euler by default: the velocity
+// updates first and the position steps with v_{n+1}, as in GRL-SNAM's
+// grl_snam/surrogate_robust.py (semi-implicit since f5a015f) and in every other
+// point-mass rollout here (integrate_surrogate_material, the coefficient
+// trainer's surr_step). semi_implicit = false selects EXPLICIT Euler (the
+// position steps with the OLD velocity, then the velocity updates), the order of
+// the material fork's surrogate_robust.py (SetasAditya/material-aware-grl-snam),
+// which this port first followed. Explicit Euler gains energy at every step of a
+// conservative orbit, by w^2 dt^2 on a harmonic mode; the energy books' sharp
+// check raises the alarm on it (NavPotential.ExplicitEulerRaisesTheAlarm).
 
 #ifndef CVC_NAV_GEOM_ROLLOUT_H
 #define CVC_NAV_GEOM_ROLLOUT_H
@@ -39,7 +41,7 @@ namespace nav {
 struct geom_rollout_params {
   float margin_factor = 0.5f; // R_eff = R + margin_factor * robot_radius
   float mass = 1.0f;
-  bool semi_implicit = false; // false: explicit Euler (the fork); true: GRL-SNAM's v2
+  bool semi_implicit = true; // true: semi-implicit Euler (GRL-SNAM's v2); false: explicit
 };
 
 // Geometry rollout (integrate_surrogate_v2). B agents, N padded obstacles (mask
@@ -74,15 +76,16 @@ struct multi_start_params {
   // Start sampling (GRL-SNAM #113). Each of the ms_count starts moves every agent
   // frac ~ U(frac_lo, frac_hi) of its clearance toward its nearest obstacle,
   // drawn per start and per agent from `seed`. The defaults are the legacy
-  // deterministic single start (frac = 0.9, one rollout), byte-identical to the
-  // pre-sampling port; GRL-SNAM's sampled default is ms_count = 10 (the fork's
+  // deterministic single start (frac = 0.9, one rollout); with semi_implicit =
+  // false it is byte-identical to the pre-sampling port. GRL-SNAM's sampled
+  // default is ms_count = 10 (the fork's
   // TrainCfgMaterial), frac (0.8, 0.98). The bounds are double because the
   // Python takes them as Python floats: (hi - lo) is formed in double and only
   // then rounded to float, which is what makes the draws bit-identical.
   int ms_count = 1;
   double frac_lo = 0.9, frac_hi = 0.9; // 0 <= frac_lo <= frac_hi < 1
   std::uint32_t seed = 0;
-  bool semi_implicit = false; // the rollout's integrator (see geom_rollout_params)
+  bool semi_implicit = true; // the rollout's integrator (see geom_rollout_params)
 };
 
 // The ms_count*B start fractions multi_start_penalty uses, start-major

@@ -197,7 +197,14 @@ material_loss_config sampled_multi(bool semi_implicit) {
 }
 
 TEST(NavMaterialTrain, FullChainGradcheck) {
-  full_chain_gradcheck(material_loss_config{}, "legacy"); // train_material.py defaults
+  // train_material.py's defaults, but for L_multi's integrator: semi-implicit here, explicit there
+  full_chain_gradcheck(material_loss_config{}, "legacy");
+}
+
+TEST(NavMaterialTrain, FullChainGradcheckExplicitMultiStart) {
+  material_loss_config cfg;
+  cfg.multi.semi_implicit = false; // train_material.py's defaults exactly
+  full_chain_gradcheck(cfg, "legacy explicit");
 }
 
 TEST(NavMaterialTrain, FullChainGradcheckSampledMultiStart) {
@@ -477,7 +484,9 @@ static void run_trainer_golden(const trainer_golden_case &gc) {
   ext.steps = steps;
   mb.ext = &ext;
 
-  const material_loss_config cfg; // the defaults: surrogate, w_multi 0.5, the legacy start
+  // The defaults: surrogate, w_multi 0.5, the legacy start, semi-implicit L_multi (the JSON's
+  // config records the integrator, and GRL-SNAM's torch twin reads it from there).
+  const material_loss_config cfg;
   const float lr = 1e-3f, grad_clip = 5.0f;
   const char *dir = std::getenv("CVC_MATERIAL_TRAIN_GOLDEN_DIR");
   namespace fs = std::filesystem;

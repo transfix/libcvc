@@ -244,6 +244,148 @@ CVC_HD inline void surr_step_bwd(const field &f, float ox, float oy, float vx, f
   goy += sdoy;
 }
 
+// ── The surrogate's other integrators (train_config::point_mass) ─────────────────────────────
+// surr_step is semi-implicit Euler: the default, and coef_train.py's sdf_rollout. These are the
+// integrator A/B's other arms (docs/NAV_TRAINING.md):
+//   * EXPLICIT Euler: the velocity updates as surr_step's, the position steps with the OLD one.
+//   * STRANG: velocity Verlet on the conservative force F = F_bar + F_goal, with the damping
+//   (exact)
+//     and the speed clamp split out:
+//       v <- e v;  v <- clamp(v + hdt/2 F(o));  o <- o + hdt v;  v <- v + hdt/2 F(o');
+//       v <- clamp(e v),   e = exp(-ga hdt / 2), clamp = clamp_vmax.
+//     The drift's velocity is clamped as surr_step's is: a barrier's kick would otherwise carry the
+//     point mass any distance in one step. Second order, symplectic on the conservative part away
+//     from the clamp; two force evaluations a step.
+
+// The conservative force at o, F_bar + F_goal: surr_step's acceleration without its damping.
+CVC_HD inline void surr_force(const field &f, float ox, float oy, float gx, float gy, float al,
+                              float be, float rr, float d_hat, float &Fx, float &Fy) {
+  const sample s = sample_fwd(f, ox, oy);
+  const float ipc = ipc_(s.phi - rr, d_hat);
+  Fx = -(al * ipc) * s.nx - be * (ox - gx);
+  Fy = -(al * ipc) * s.ny - be * (oy - gy);
+}
+
+// surr_force's VJP: a grad on (Fx, Fy), ADDED into the grads on o, al and be.
+CVC_HD inline void surr_force_bwd(const field &f, float ox, float oy, float gx, float gy, float al,
+                                  float be, float rr, float d_hat, float gFx, float gFy, float &gox,
+                                  float &goy, float &gal, float &gbe) {
+  const sample s = sample_fwd(f, ox, oy);
+  const float d = s.phi - rr;
+  const float ipc = ipc_(d, d_hat);
+  gbe += -(gFx * (ox - gx) + gFy * (oy - gy));
+  gox += -be * gFx;
+  goy += -be * gFy;
+  gal += -ipc * (gFx * s.nx + gFy * s.ny);
+  const float g_ipc = -al * (gFx * s.nx + gFy * s.ny);
+  const float gnx = -(al * ipc) * gFx, gny = -(al * ipc) * gFy;
+  float sdox, sdoy;
+  sample_bwd(s, g_ipc * ipc_grad_(d, d_hat), gnx, gny, sdox, sdoy);
+  gox += sdox;
+  goy += sdoy;
+}
+
+// The speed clamp |v| <= vmax and its VJP.
+CVC_HD inline void surr_clamp(float vx, float vy, float vmax, float &cx, float &cy) {
+  const float sp = sqrtf(vx * vx + vy * vy);
+  const float sc = sp > vmax ? vmax / sp : 1.0f;
+  cx = vx * sc;
+  cy = vy * sc;
+}
+CVC_HD inline void surr_clamp_bwd(float vx, float vy, float vmax, float gcx, float gcy, float &gvx,
+                                  float &gvy) {
+  const float sp = sqrtf(vx * vx + vy * vy);
+  if (sp > vmax) {
+    const float sp3 = sp * sp * sp, dot = gcx * vx + gcy * vy;
+    gvx = vmax / sp * gcx - vmax / sp3 * vx * dot;
+    gvy = vmax / sp * gcy - vmax / sp3 * vy * dot;
+  } else {
+    gvx = gcx;
+    gvy = gcy;
+  }
+}
+
+CVC_HD inline void surr_step_explicit(const field &f, float ox, float oy, float vx, float vy,
+                                      float gx, float gy, float al, float be, float ga, float rr,
+                                      float d_hat, float vmax, float hdt, float &ox1, float &oy1,
+                                      float &vx1, float &vy1) {
+  float Fx, Fy;
+  surr_force(f, ox, oy, gx, gy, al, be, rr, d_hat, Fx, Fy);
+  surr_clamp(vx + hdt * (Fx - ga * vx), vy + hdt * (Fy - ga * vy), vmax, vx1, vy1);
+  ox1 = ox + hdt * vx;
+  oy1 = oy + hdt * vy;
+}
+
+// Backward of surr_step_explicit, as surr_step_bwd's.
+CVC_HD inline void surr_step_explicit_bwd(const field &f, float ox, float oy, float vx, float vy,
+                                          float gx, float gy, float al, float be, float ga,
+                                          float rr, float d_hat, float vmax, float hdt, float go1x,
+                                          float go1y, float gv1x, float gv1y, float &gox,
+                                          float &goy, float &gvx, float &gvy, float &gal,
+                                          float &gbe, float &gga) {
+  float Fx, Fy;
+  surr_force(f, ox, oy, gx, gy, al, be, rr, d_hat, Fx, Fy);
+  float gvpx, gvpy;
+  surr_clamp_bwd(vx + hdt * (Fx - ga * vx), vy + hdt * (Fy - ga * vy), vmax, gv1x, gv1y, gvpx,
+                 gvpy);
+  const float gFx = hdt * gvpx, gFy = hdt * gvpy;
+  gvx = gvpx - ga * gFx + hdt * go1x; // v' = v + hdt (F - ga v); o' = o + hdt v
+  gvy = gvpy - ga * gFy + hdt * go1y;
+  gga = -(gFx * vx + gFy * vy);
+  gox = go1x;
+  goy = go1y;
+  gal = 0.0f;
+  gbe = 0.0f;
+  surr_force_bwd(f, ox, oy, gx, gy, al, be, rr, d_hat, gFx, gFy, gox, goy, gal, gbe);
+}
+
+CVC_HD inline void surr_step_strang(const field &f, float ox, float oy, float vx, float vy,
+                                    float gx, float gy, float al, float be, float ga, float rr,
+                                    float d_hat, float vmax, float hdt, float &ox1, float &oy1,
+                                    float &vx1, float &vy1) {
+  const float e = expf(-0.5f * ga * hdt), hh = 0.5f * hdt;
+  float F0x, F0y, F1x, F1y, vbx, vby;
+  surr_force(f, ox, oy, gx, gy, al, be, rr, d_hat, F0x, F0y);
+  surr_clamp(e * vx + hh * F0x, e * vy + hh * F0y, vmax, vbx, vby);
+  ox1 = ox + hdt * vbx;
+  oy1 = oy + hdt * vby;
+  surr_force(f, ox1, oy1, gx, gy, al, be, rr, d_hat, F1x, F1y);
+  surr_clamp(e * (vbx + hh * F1x), e * (vby + hh * F1y), vmax, vx1, vy1);
+}
+
+// Backward of surr_step_strang, as surr_step_bwd's.
+CVC_HD inline void surr_step_strang_bwd(const field &f, float ox, float oy, float vx, float vy,
+                                        float gx, float gy, float al, float be, float ga, float rr,
+                                        float d_hat, float vmax, float hdt, float go1x, float go1y,
+                                        float gv1x, float gv1y, float &gox, float &goy, float &gvx,
+                                        float &gvy, float &gal, float &gbe, float &gga) {
+  const float e = expf(-0.5f * ga * hdt), hh = 0.5f * hdt;
+  float F0x, F0y, F1x, F1y, vbx, vby;
+  surr_force(f, ox, oy, gx, gy, al, be, rr, d_hat, F0x, F0y);
+  const float vkx = e * vx + hh * F0x, vky = e * vy + hh * F0y; // before the first clamp
+  surr_clamp(vkx, vky, vmax, vbx, vby);
+  const float ox1 = ox + hdt * vbx, oy1 = oy + hdt * vby;
+  surr_force(f, ox1, oy1, gx, gy, al, be, rr, d_hat, F1x, F1y);
+  const float vcx = vbx + hh * F1x, vcy = vby + hh * F1y;
+  float gvdx, gvdy;
+  surr_clamp_bwd(e * vcx, e * vcy, vmax, gv1x, gv1y, gvdx, gvdy);
+  float ge = gvdx * vcx + gvdy * vcy; // v_d = e v_c
+  const float gvcx = e * gvdx, gvcy = e * gvdy;
+  gal = 0.0f;
+  gbe = 0.0f;
+  float g1x = go1x, g1y = go1y; // the total grad on o' = o + hdt v_b, through F(o') too
+  surr_force_bwd(f, ox1, oy1, gx, gy, al, be, rr, d_hat, hh * gvcx, hh * gvcy, g1x, g1y, gal, gbe);
+  float gvkx, gvky; // v_b = clamp(v_k), v_k = e v + hdt/2 F(o)
+  surr_clamp_bwd(vkx, vky, vmax, gvcx + hdt * g1x, gvcy + hdt * g1y, gvkx, gvky);
+  gox = g1x;
+  goy = g1y;
+  surr_force_bwd(f, ox, oy, gx, gy, al, be, rr, d_hat, hh * gvkx, hh * gvky, gox, goy, gal, gbe);
+  ge += gvkx * vx + gvky * vy;
+  gvx = e * gvkx;
+  gvy = e * gvky;
+  gga = ge * (-0.5f * hdt) * e;
+}
+
 // U_nav at o for the force surr_step and bike_control apply (detail/nav_potential.h): the goal
 // spring and the SDF barrier, with the coefficients held fixed. Damping is not part of it.
 CVC_HD inline potential_terms surr_potential(const field &f, float ox, float oy, float gx, float gy,

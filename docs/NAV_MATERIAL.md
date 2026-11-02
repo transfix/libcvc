@@ -361,15 +361,20 @@ guard.
 
 `L_multi`'s start sampling rides on five trailing `nav_material_trainer_create`
 args — `ms_count`, `frac_lo`, `frac_hi`, `seed`, `ms_semi_implicit` — whose
-defaults (one start at `frac = 0.9`, explicit Euler) are the pre-sampling port,
-byte for byte. GRL-SNAM #113 made its own `multi_start_penalty` draw
+defaults are one start at `frac = 0.9`, integrated with semi-implicit Euler. With
+`ms_semi_implicit = 0` they are the pre-sampling port, byte for byte. GRL-SNAM #113 made its own `multi_start_penalty` draw
 `frac ~ U(0.8, 0.98)` per start and per sample (the old fixed `0.9` made all
 `ms_count` rollouts identical); passing that range turns the same draw on here.
 `multi_start_fracs` reproduces `torch.rand(B, generator=manual_seed(seed))` bit
 for bit, and the trainer's step `k` draws with `seed + k` while `_loss` scores the
-base seed. `ms_semi_implicit` selects GRL-SNAM's integrator (velocity first);
-the default explicit order is the material fork's, which `train_material.py`
-imports. These are trailing args on an existing symbol, so an older pycvc rejects
+base seed. `ms_semi_implicit` selects the integrator: 1 (the default) is
+GRL-SNAM's semi-implicit Euler (velocity first, then the position steps with the
+new velocity), as in every other point-mass rollout here; 0 is explicit Euler, the
+material fork's order, which `train_material.py` imports. Explicit Euler gains
+energy at every step of a conservative orbit, and the energy books' sharp check
+alarms on it (`NavPotential.ExplicitEulerRaisesTheAlarm`). Through libcvc 3.7.8 the
+default was explicit: a caller that relied on it passes `ms_semi_implicit = 0`.
+These are trailing args on an existing symbol, so an older pycvc rejects
 them with a `TypeError` rather than through a capability flag.
 
 The external force in training (`material_ext`) is optional trailing arguments on
