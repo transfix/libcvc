@@ -11,11 +11,16 @@
 */
 
 #include <atomic>
+#include <boost/algorithm/string/join.hpp>
+#include <boost/algorithm/string/split.hpp>
+#include <boost/algorithm/string/trim.hpp>
 #include <boost/chrono.hpp>
 #include <boost/lexical_cast.hpp>
 #include <boost/make_shared.hpp>
 #include <boost/shared_ptr.hpp>
 #include <boost/thread.hpp>
+#include <chrono>
+#include <cstdio>
 #include <cvc/geometry/geometry.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_object.h>
@@ -28,6 +33,8 @@
 #include <future>
 #include <gtest/gtest.h>
 #include <memory>
+#include <random>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -5354,6 +5361,284 @@ TEST_F(StateAtomicMembers, ReadOnlyNodeThrows) {
   EXPECT_THROW(n.updateValue([](const std::string &) { return std::string("6"); }),
                read_only_error);
   EXPECT_EQ(n.value(), "5");
+}
+
+// ===========================
+// Path Walk Semantics
+// ===========================
+// The path walks (findDescendant, findDescendantShared, findThroughLinks, operator(), sharedChild,
+// childThroughLinks) and linkTo() all read a path as its SEPARATOR-split segments, each trimmed,
+// empty ones dropped. A canonical path is now walked in place; these pin that every other
+// spelling still means what the old split/trim/join made of it.
+
+namespace {
+
+// The normalization state.cpp applied to every path before the canonical fast path, kept
+// verbatim as the reference: trim, split on SEPARATOR, trim each segment, drop empties, join.
+std::string legacy_normalize_state_path(const std::string &p) {
+  using namespace boost::algorithm;
+  std::string s = p;
+  trim(s);
+  std::vector<std::string> keys;
+  split(keys, s, is_any_of(state::SEPARATOR));
+  std::vector<std::string> kept;
+  for (auto &k : keys) {
+    trim(k);
+    if (!k.empty())
+      kept.push_back(k);
+  }
+  return join(kept, state::SEPARATOR);
+}
+
+// Every prefix of `canonical` ("a.b.c" -> "a", "a.b", "a.b.c").
+std::vector<std::string> canonical_prefixes(const std::string &canonical) {
+  std::vector<std::string> out;
+  if (canonical.empty())
+    return out;
+  for (std::size_t dot = canonical.find(state::SEPARATOR[0]); dot != std::string::npos;
+       dot = canonical.find(state::SEPARATOR[0], dot + 1))
+    out.push_back(canonical.substr(0, dot));
+  out.push_back(canonical);
+  return out;
+}
+
+const std::vector<std::string> &odd_state_paths() {
+  static const std::vector<std::string> paths = {
+      // canonical
+      "a", "a.b", "a.b.c", "conf.rooms.room.participants.A.avatar.color", "x y", "x y.z", "a.b.c.d",
+      "missing", "a.missing", "a.b.missing", "missing.b",
+      // the root: empty, whitespace-only, separator-only
+      "", " ", "\t", " \t\r\n\v\f ", ".", "..", "...", "  .  ", " . . ", "\t.\t",
+      // empty segments
+      ".a", "a.", ".a.", "a..b", "a...b.c", "..a..b..", ".missing", "a..missing",
+      // whitespace around segments
+      " a", "a ", " a.b ", "a . b", " a . b . c ", "\ta\t.\tb\t", "a.\nb\r", "\va.b\f", " x y . z ",
+      "x y .z", "a. .b", "a.\t.b", " . a . . b . ",
+      // interior whitespace is part of the name
+      "a b", "a b.c", " a b . c ", "x  y", "x\ty",
+      // bytes outside printable ASCII at a segment edge
+      "\xc3\xa9", "a.\xc3\xa9", " \xc3\xa9 ", "\xc3\xa9.a", "a.\x7f", "\x01.a",
+      // NUL inside and at the edge of a segment
+      std::string("a\0b", 3), std::string("a.\0", 3), std::string("\0.a", 3)};
+  return paths;
+}
+
+// The tree the read walks run against; operator() on canonical names only.
+void seed_odd_path_tree(state &root) {
+  for (const char *p : {"a.b.c", "a.b.d", "conf.rooms.room.participants.A.avatar.color", "x y.z",
+                        "a.\xc3\xa9", "a b.c"})
+    root(p).value(p);
+}
+
+// The node `canonical` names in a tree seeded from `existing` (each with every prefix), or
+// nullptr; the root for "".
+state *expected_node(state &root, const std::set<std::string> &existing,
+                     const std::string &canonical) {
+  if (canonical.empty())
+    return &root;
+  if (!existing.count(canonical))
+    return nullptr;
+  state *n = root.findDescendant(canonical);
+  EXPECT_NE(n, nullptr) << canonical;
+  if (n)
+    EXPECT_EQ(n->fullName(), canonical);
+  return n;
+}
+
+std::string printable(const std::string &p) {
+  std::string out = "\"";
+  for (unsigned char c : p) {
+    if (c >= 0x20 && c < 0x7f && c != '"' && c != '\\') {
+      out += static_cast<char>(c);
+    } else {
+      char buf[8];
+      std::snprintf(buf, sizeof buf, "\\x%02x", c);
+      out += buf;
+    }
+  }
+  return out + "\"";
+}
+
+} // namespace
+
+TEST(StatePathWalk, NormalizePathMatchesLegacy) {
+  for (const std::string &p : odd_state_paths())
+    EXPECT_EQ(state::normalize_path(p), legacy_normalize_state_path(p)) << printable(p);
+}
+
+TEST(StatePathWalk, ReadWalksMatchLegacy) {
+  cvc::app ctx;
+  state &root = ctx.root();
+  seed_odd_path_tree(root);
+  std::set<std::string> existing;
+  for (const char *p : {"a.b.c", "a.b.d", "conf.rooms.room.participants.A.avatar.color", "x y.z",
+                        "a.\xc3\xa9", "a b.c"})
+    for (const std::string &q : canonical_prefixes(p))
+      existing.insert(q);
+
+  for (const std::string &p : odd_state_paths()) {
+    SCOPED_TRACE(printable(p));
+    const std::string canonical = legacy_normalize_state_path(p);
+    state *want = expected_node(root, existing, canonical);
+
+    EXPECT_EQ(root.findDescendant(p), want);
+    EXPECT_EQ(root.findThroughLinks(p), want); // no links in this tree
+
+    // findDescendantShared pins every hop it took, the ones before a miss included.
+    std::vector<state::state_ptr> want_pins;
+    for (const std::string &q : canonical_prefixes(canonical)) {
+      if (!existing.count(q))
+        break;
+      want_pins.push_back(root.findDescendantShared(q));
+    }
+    std::vector<state::state_ptr> pins;
+    state::state_ptr got = root.findDescendantShared(p, &pins);
+    EXPECT_EQ(got.get(), want);
+    ASSERT_EQ(pins.size(), want_pins.size());
+    for (std::size_t i = 0; i < pins.size(); ++i)
+      EXPECT_EQ(pins[i], want_pins[i]) << "pin " << i;
+  }
+  // Nothing above created a node.
+  EXPECT_EQ(root.findDescendant("missing"), nullptr);
+  EXPECT_EQ(root.findDescendant("a.b.missing"), nullptr);
+}
+
+TEST(StatePathWalk, CreateWalksMatchLegacy) {
+  for (const std::string &p : odd_state_paths()) {
+    SCOPED_TRACE(printable(p));
+    const std::string canonical = legacy_normalize_state_path(p);
+    const std::size_t hops = canonical_prefixes(canonical).size();
+
+    cvc::app ctx;
+    state &root = ctx.root();
+    auto count_nodes = [&root] {
+      std::size_t n = 0;
+      root.traverse([&n](std::string) { ++n; });
+      return n;
+    };
+    const std::size_t before = count_nodes();
+    state &made = root(p);
+    if (canonical.empty()) {
+      EXPECT_EQ(&made, &root);
+    } else {
+      EXPECT_EQ(made.fullName(), canonical);
+      EXPECT_EQ(root.findDescendant(canonical), &made);
+    }
+    // Only the canonical chain was created: one node per hop.
+    EXPECT_EQ(count_nodes() - before, hops);
+
+    std::vector<state::state_ptr> pins;
+    state::state_ptr shared = root.sharedChild(p, &pins);
+    EXPECT_EQ(shared.get(), &made);
+    EXPECT_EQ(pins.size(), hops);
+    if (!pins.empty())
+      EXPECT_EQ(pins.back().get(), &made);
+    EXPECT_EQ(&root.childThroughLinks(p), &made); // no links in this tree
+
+    // A second app, reached through sharedChild and childThroughLinks first.
+    cvc::app other;
+    state &other_root = other.root();
+    state::state_ptr first = other_root.sharedChild(p);
+    EXPECT_EQ(first.get(), canonical.empty() ? &other_root : other_root.findDescendant(canonical));
+    EXPECT_EQ(&other_root.childThroughLinks(p), first.get());
+    EXPECT_EQ(&other_root(p), first.get());
+  }
+}
+
+// Random spellings over an alphabet of names, separators, whitespace and edge-case bytes, read
+// against a tree holding every canonical path of up to three one-letter names.
+TEST(StatePathWalk, RandomPathsMatchLegacy) {
+  cvc::app ctx;
+  state &root = ctx.root();
+  std::set<std::string> existing;
+  for (const char *a : {"a", "b"})
+    for (const char *b : {"", "a", "b"})
+      for (const char *c : {"", "a", "b"}) {
+        std::string p = a;
+        if (*b) {
+          p = p + "." + b;
+          if (*c)
+            p = p + "." + c;
+        }
+        root(p);
+        for (const std::string &q : canonical_prefixes(p))
+          existing.insert(q);
+      }
+
+  const char alphabet[] = {'a', 'b', '.', '.', ' ', '\t', '\n', '\xc3', '\x7f', '\0'};
+  std::mt19937 rng(20261101);
+  for (int i = 0; i < 5000; ++i) {
+    std::string p(rng() % 13, ' ');
+    for (char &c : p)
+      c = alphabet[rng() % sizeof alphabet];
+    SCOPED_TRACE(printable(p));
+    const std::string canonical = legacy_normalize_state_path(p);
+    ASSERT_EQ(state::normalize_path(p), canonical);
+    state *want = expected_node(root, existing, canonical);
+    ASSERT_EQ(root.findDescendant(p), want);
+    ASSERT_EQ(root.findDescendantShared(p).get(), want);
+    if (want)
+      ASSERT_EQ(&root(p), want); // create-or-get on a node that exists creates nothing
+  }
+}
+
+TEST(StatePathWalk, LinkTargetMatchesLegacy) {
+  cvc::app ctx;
+  state &link = ctx.root()("links.l");
+  for (const std::string &p : odd_state_paths()) {
+    SCOPED_TRACE(printable(p));
+    std::string want = legacy_normalize_state_path(p);
+    // A separator-only target links to the root, stored as ".".
+    if (want.empty() && !boost::algorithm::trim_copy(p).empty())
+      want = state::SEPARATOR;
+    link.linkTo(p);
+    EXPECT_EQ(link.linkTarget(), want);
+    link.clearLink();
+    link.linkTo(p, state::link_mode::transparent);
+    EXPECT_EQ(link.linkTarget(), want);
+    EXPECT_EQ(link.isLink(), !want.empty());
+    link.clearLink();
+  }
+}
+
+// Per-lookup cost of the walks on the path that motivated the fast path: a 7-segment leaf of a
+// room tree, as the conference client and the avatar panel read it every frame. Prints only; the
+// suite name keeps it out of PR CI (it runs on Release pushes to master).
+TEST(StatePathWalkBenchmark, LookupCost) {
+  cvc::app ctx;
+  state &root = ctx.root();
+  const std::string leaf = "conf.rooms.room.participants.A.avatar.color";
+  root(leaf).value("teal");
+  for (int i = 0; i < 8; ++i) {
+    const std::string pid = "conf.rooms.room.participants.peer" + std::to_string(i);
+    for (const char *k : {"avatar.color", "avatar.accessory", "pose.x", "pose.y", "pose.yaw"})
+      root(pid + "." + k).value("1");
+  }
+  const std::string messy = " conf . rooms..room.participants .A.avatar.color. ";
+  state *const want = root.findDescendant(leaf);
+  ASSERT_NE(want, nullptr);
+
+  constexpr int kWarm = 1000, kN = 20000;
+  auto time_us = [&](const char *what, auto &&op) {
+    for (int i = 0; i < kWarm; ++i)
+      op();
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < kN; ++i)
+      op();
+    const auto t1 = std::chrono::steady_clock::now();
+    const double us = std::chrono::duration<double, std::micro>(t1 - t0).count() / kN;
+    std::printf("[bench] %-46s %8.3f us/lookup\n", what, us);
+  };
+  std::size_t hits = 0;
+  time_us("findDescendant (7 segments)", [&] { hits += root.findDescendant(leaf) == want; });
+  time_us("findDescendantShared (7 segments)",
+          [&] { hits += root.findDescendantShared(leaf).get() == want; });
+  time_us("findThroughLinks (7 segments)", [&] { hits += root.findThroughLinks(leaf) == want; });
+  time_us("operator() existing (7 segments)", [&] { hits += &root(leaf) == want; });
+  time_us("normalize_path (7 segments)", [&] { hits += state::normalize_path(leaf).size() > 0; });
+  time_us("findDescendant (7 segments, messy spelling)",
+          [&] { hits += root.findDescendant(messy) == want; });
+  EXPECT_EQ(hits, static_cast<std::size_t>(6 * (kWarm + kN)));
 }
 
 // Main function to handle custom flags
