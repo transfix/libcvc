@@ -107,7 +107,7 @@ units:
       - separator
       - type: group
         id: "{id}_head"
-        layout: { kind: grid, col_widths: [16, 96, 52, 52, 52, 30, 30, 72, 76] }
+        layout: { kind: grid, col_widths: [16, 96, 52, 46, 46, 30, 30, 72, 88] }
         children:
           - text: ""
           - text: "name"
@@ -123,7 +123,7 @@ units:
       # one cell, even on a frame where neither check runs.
       - type: group
         id: "{id}_you"
-        layout: { kind: grid, col_widths: [16, 96, 52, 52, 52, 30, 30, 72, 76] }
+        layout: { kind: grid, col_widths: [16, 96, 52, 46, 46, 30, 30, 72, 88] }
         children:
           - type: status_dot
             bind: self.dot
@@ -149,7 +149,7 @@ units:
       # Everyone else: one row per person ({rows}.<i>), filled by room-users-step.
       - type: group
         repeat: (state-get "{rows}.count")
-        layout: { kind: grid, col_widths: [16, 96, 52, 52, 52, 30, 30, 72, 76] }
+        layout: { kind: grid, col_widths: [16, 96, 52, 46, 46, 30, 30, 72, 88] }
         children:
           - type: status_dot
             bind: "{rows}.{i}.dot"

@@ -365,11 +365,12 @@ windows:
   # ── Chat: the room's chat and direct messages (components/chat.ari) ──
   # The relay keeps the history and pushes each client what it may read: the room's messages to
   # everyone in the room, a direct message to its two participants only. Scrolled to the top, the
-  # log asks for older messages a page at a time. chat-ui-step keeps it current.
+  # log asks for older messages a page at a time. chat-ui-step keeps it current. 320 tall, so its
+  # message field is still on screen in cyprty in a 1600x900 browser window.
   - include: chat
     args: { id: chat, title: Chat, room: room.token }
     pos: [390, 310]
-    size: [570, 420]
+    size: [570, 320]
 
   # ── One camera window per OTHER participant, titled by their name ──
   - window: Peer
