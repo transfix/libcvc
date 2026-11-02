@@ -9,8 +9,9 @@ Python reads the same values as C++. The checks:
   3. a vehicle's state, the snapshot JSON (C++'s own serializer) and the state tree
      (physics_binding) carry the same numbers;
   4. save and restore reproduce a run;
-  5. plant selection: a sim_world drives nav's kinematic bicycle or the Jolt plant, and the plant
-     outlives the Python names for it while it is set;
+  5. plant selection: a sim_world drives nav's kinematic bicycle, the Jolt plant or the dynamic
+     single-track vehicle (whose books close), and the plant outlives the Python names for it
+     while it is set;
   6. the sim_world's and the plant's settings in the state tree, with their metadata;
   7. terrain (P5): a vehicle's limits, the infeasible cells and the entries counted.
 On Windows, CVC_DLL_DIRS (os.pathsep-separated) names the directories pycvc's DLLs load from
@@ -257,6 +258,66 @@ def test_plant_selection():
     expect_raises(lambda: pycvc.nav_sim_world_set_plant(sim, 42), "a plant that is not one")
 
 
+def books_gap(plant, i):
+    """kinetic now - kinetic at attach - the books: zero to rounding, by construction."""
+    b = plant.books(i)
+    return b["kinetic"] - plant.kinetic_at_attach(i) - (
+        b["drive"] - b["brake"] - b["dissipated"] + b["floor"] + b["grade"] + b["limiter"]
+        + b["contact"] + b["residual"])
+
+
+def test_the_dynamic_plant():
+    """A sim_world drives the dynamic single-track vehicle (dyn_bike_plant): the agent moves, its
+    books close, the plant outlives its Python names while it is set, and with a world its chassis
+    hits a wall the navigator does not know about."""
+    sim = make_sim()
+    plant = pycvc.dyn_bike_plant([pycvc.vehicle_desc.humvee()], mu=0.7)
+    check(plant.kind() == "dynamic" and plant.size() == 0 and not plant.collides(),
+          "a dynamic plant without a world, not yet attached")
+    check(plant.options()["mu"] == 0.7, "the plant's options")
+    pycvc.nav_sim_world_set_plant(sim, plant)
+    check(pycvc.nav_sim_world_plant_kind(sim) == "dynamic", "the dynamic plant once set")
+    check(plant.size() == 1 and plant.chassis(0) is None, "one agent, no chassis without a world")
+    for _ in range(150):
+        pycvc.nav_sim_world_step(sim)
+    s, body, b = plant.state(0), plant.body(0), plant.books(0)
+    check(s["x"] > 0.8 and abs(body["x"] / 20.0 - s["x"]) < 0.1,
+          "the agent drove east to its goal (x %.3f; the model's rear axle at %.1f m)"
+          % (s["x"], body["x"]))
+    check(b["drive"] > 0.0 and b["dissipated"] > 0.0, "it drew drive energy and dissipated some")
+    check(abs(books_gap(plant, 0)) <= 1e-9 * b["flow"], "the books close")
+    check(abs(b["residual"]) / b["flow"] < 5e-3, "the integrator's residual is small")
+    tick = plant.last_tick(0)
+    check(set(tick) == set(b) and tick["flow"] <= b["flow"], "the last tick's books")
+    expect_raises(lambda: plant.books(1), "an agent the plant does not have")
+    del plant
+    gc.collect()
+    pycvc.nav_sim_world_step(sim)  # the handle keeps the plant alive
+    pycvc.nav_sim_world_set_plant(sim, None)
+    check(pycvc.nav_sim_world_plant_kind(sim) == "kinematic", "and back to the bicycle")
+
+    # With a world: a wall across the road at x = -5 m that nav's (empty) map lacks.
+    sim = make_sim()
+    w = pycvc.physics_world()
+    m = w.add_material("ground", friction=0.9, restitution=0.0, rolling_resistance=0.015)
+    g = w.add_box((150.0, 150.0, 0.5), position=(0.0, 0.0, -0.5), motion="static", material=m)
+    w.add_box((0.5, 20.0, 3.0), position=(-4.5, 0.0, 3.0), motion="static")
+    plant = pycvc.dyn_bike_plant([pycvc.vehicle_desc.humvee()], world=w, ground_bodies=[g])
+    pycvc.nav_sim_world_set_plant(sim, plant)
+    check(plant.collides() and plant.chassis(0) is not None, "a chassis in the world")
+    del w
+    gc.collect()  # the plant keeps its world alive
+    for _ in range(200):
+        pycvc.nav_sim_world_step(sim)
+    b = plant.books(0)
+    check(plant.collisions(0) > 0 and b["contact"] != 0.0,
+          "the chassis hit the wall (%d substeps, %.1f J)" % (plant.collisions(0), b["contact"]))
+    check(plant.state(0)["x"] < -0.2, "and stopped short of it")
+    check(abs(books_gap(plant, 0)) <= 1e-9 * b["flow"], "the books close with contact")
+    expect_raises(lambda: pycvc.dyn_bike_plant([pycvc.vehicle_desc.humvee()], ground_bodies=[g]),
+                  "ground bodies without a world")
+
+
 def test_private_belief_planes():
     """nav_sim_world_create's map_id puts each agent in its own belief plane (the fog-of-war
     twin), as sim_world's constructor does."""
@@ -365,7 +426,8 @@ def test_terrain():
 
 def main():
     for t in (test_golden_and_reference, test_the_same_numbers_three_ways, test_save_restore,
-              test_plant_selection, test_private_belief_planes, test_settings_in_the_tree,
+              test_plant_selection, test_the_dynamic_plant, test_private_belief_planes,
+              test_settings_in_the_tree,
               test_terrain, test_the_terrain_planes):
         t()
         print("ok  " + t.__name__)
