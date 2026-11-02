@@ -77,11 +77,9 @@ list(APPEND CVCGL_SOURCES ${CVCGL_ARIADNE_SOURCES})
 # the sources compile to graceful no-ops (open_camera returns an empty result).
 file(GLOB CVCGL_CAPTURE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/capture/*.cpp")
 list(APPEND CVCGL_SOURCES ${CVCGL_CAPTURE_SOURCES})
-# Phase-3 peripheral playback (SDL3 audio-output sink, cvc::gl::playback). Lives in a subdirectory,
-# so the non-recursive top-level glob does not pick it up. SDL-gated internally; with no SDL the
-# sink compiles to a graceful no-op (open_audio_output returns an empty result).
-file(GLOB CVCGL_PLAYBACK_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/playback/*.cpp")
-list(APPEND CVCGL_SOURCES ${CVCGL_PLAYBACK_SOURCES})
+# Phase-3 peripheral playback (the SDL3 audio-output sink) moved to cvcMedia, the GL-free media
+# library (src/cvcMedia), so a terminal program plays sound without GL; cvcGL links it (below) and
+# keeps the cvc::gl::playback names as aliases (cvc/gl/playback/*.h).
 # Header root is <repo>/inc  (headers under inc/cvc/gl/).
 get_filename_component(_CVCGL_INC "${CMAKE_CURRENT_SOURCE_DIR}/../../inc" ABSOLUTE)
 
@@ -257,6 +255,13 @@ if(CVC_ENABLE_SDL)
     message(STATUS "cvcGL: SDL3 not found -- input seam falls back to the VTK interactor")
   endif()
 endif()
+
+# cvcMedia: in-tree it exists already (src/CMakeLists.txt); a standalone cvcGL build (the cvcgl
+# recipe) builds it here and installs it with cvcGL, its package beside cvcGL's.
+if(NOT TARGET cvcMedia)
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../cvcMedia" "${CMAKE_CURRENT_BINARY_DIR}/cvcMedia")
+endif()
+target_link_libraries(cvcGL PUBLIC cvcMedia)
 
 vtk_module_autoinit(TARGETS cvcGL MODULES ${VTK_LIBRARIES})
 

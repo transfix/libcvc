@@ -8,9 +8,9 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include <cvc/gl/playback/audio_output.h>
+#include <cvc/media/playback/audio_output.h>
 
-#if CVC_ENABLE_SDL
+#if CVC_MEDIA_SDL
 #include <SDL3/SDL_audio.h>
 #include <SDL3/SDL_init.h>
 #include <SDL3/SDL_stdinc.h> // SDL_free
@@ -19,10 +19,10 @@
 #endif
 
 namespace cvc {
-namespace gl {
+namespace media {
 namespace playback {
 
-#if CVC_ENABLE_SDL
+#if CVC_MEDIA_SDL
 namespace {
 
 // An SDL3 playback device as an audio_output sink. Owns the SDL_AudioStream (which, created via
@@ -79,11 +79,11 @@ private:
   int ch_;
 };
 } // namespace
-#endif // CVC_ENABLE_SDL
+#endif // CVC_MEDIA_SDL
 
 audio_output_open open_audio_output(const audio_output_spec &spec) {
   audio_output_open result;
-#if CVC_ENABLE_SDL
+#if CVC_MEDIA_SDL
   if (spec.sample_rate <= 0 || spec.channels <= 0)
     return result; // a misconfigured request produces no sink rather than a dead device
   if (!SDL_InitSubSystem(SDL_INIT_AUDIO))
@@ -143,9 +143,17 @@ audio_output_open open_audio_output(const audio_output_spec &spec) {
   return result;
 }
 
+bool have_audio_output() {
+#if CVC_MEDIA_SDL
+  return true;
+#else
+  return false;
+#endif
+}
+
 std::vector<std::string> list_audio_playback_devices() {
   std::vector<std::string> names;
-#if CVC_ENABLE_SDL
+#if CVC_MEDIA_SDL
   if (!SDL_InitSubSystem(SDL_INIT_AUDIO))
     return names;
   int count = 0;
@@ -163,5 +171,5 @@ std::vector<std::string> list_audio_playback_devices() {
 }
 
 } // namespace playback
-} // namespace gl
+} // namespace media
 } // namespace cvc

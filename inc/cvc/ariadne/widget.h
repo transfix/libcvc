@@ -51,6 +51,8 @@ enum class Kind {
                   // or, outside one, the document's setting for it (bdef false: no such menu)
   Radio,          // bound enum-as-text state, every option shown (a combo's fields; radio_row)
   Spinner,        // an activity indicator: a glyph the host turns by its frame clock, and a label
+  Video,          // a video player (§5.13): src URI, picture box, controls; bind = its state keys
+  Audio,          // an audio player (§5.13): the same without a picture
 };
 
 // How a Kind::Image fills its box (`fit:`) and the box's shape (`shape:`); media.h fits a picture
@@ -327,6 +329,15 @@ struct Widget {
 
   // §5.12 a Window / Group's background picture (any() false: none).
   Background background;
+
+  // §5.13 Kind::Video / Kind::Audio: `src` (a URI, or a computed expression giving one) and
+  // `media_auth` name the source; img_size / img_h / img_fit the picture's box; `bind` the state
+  // prefix its player reports to and takes playing / seek / muted from; `poster` a picture (a URI)
+  // shown until the first frame.
+  std::string poster;
+  bool autoplay = false;
+  bool loop = false;
+  bool muted = false;
 
   // Kind::Progress: the bar is the number at `bind` placed in [lo, hi] (clamped); `overlay` is a
   // state path (or a computed expression) whose text is drawn over the bar, else the percent.

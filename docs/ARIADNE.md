@@ -1153,7 +1153,7 @@ the Windows menu (§5.9), takes its place in the column again. A new document
 
 How each backend does it:
 
-- **ImGui** measures in logical pixels at the UI size (§5.13): a document's `px` (a window's
+- **ImGui** measures in logical pixels at the UI size (§5.14): a document's `px` (a window's
   `pos:` and `size:`, a column's width, a picture's or a plot's size, the area a group's
   `background:` takes) is multiplied by the UI size
   and the display's pixel ratio, as the UI's text and widgets are, and the geometry it persists
@@ -1258,8 +1258,7 @@ windows:
 ### 5.11 Pictures by URL: `image:` with a URI
 
 An `image:` whose `src` (or the value at its `bind:`) is a URI shows that picture. Design and
-the work still to come (video, audio, a card component):
-[ARIADNE_MEDIA.md](roadmap/ARIADNE_MEDIA.md).
+the work still to come: [ARIADNE_MEDIA.md](roadmap/ARIADNE_MEDIA.md).
 
 ```yaml
 windows:
@@ -1377,7 +1376,79 @@ has loaded, or when it failed, nothing is drawn behind the content.
   - **`none`** draws nothing in a terminal.
   - A terminal with no colour (`--graphics mono`) draws no background.
 
-### 5.13 On a phone: UI size, hiding windows, the system keyboard
+### 5.13 Video and audio: `video:` and `audio:`
+
+```yaml
+- video: clip                           # the label: the caption its messages use
+  src: https://media.example/p/9.webm   # a URI (§5.11), or a computed expression giving one
+  auth: example                         # optional: the host's credential, as image: takes it
+  poster: https://media.example/p/9.jpg # optional: shown until the first frame
+  size: [480, 270]                      # the picture's box; fit: as image: takes it
+  bind: feed.items.{i}.player           # the player's state keys (below)
+  autoplay: false
+  loop: false
+  muted: false
+- audio: voice note                     # the same, with no picture
+  src: https://media.example/p/10.opus
+  bind: feed.items.{i}.voice
+```
+
+- **The controls** are drawn with the widgets every backend has: Play / Pause, a seek slider
+  with `m:ss / m:ss` as its value, and Mute. "Open" is added where the media can't play here.
+  They look and work the same in ImGui, FTXUI and tvision.
+- **The picture.** The newest frame is published as an image and drawn like one: an ImGui
+  texture, or Kitty, Sixel, iTerm or half-block cells. A terminal gets at most 8 frames a
+  second. Before the first frame the poster shows, else a placeholder of the box.
+- **The state keys** live under `bind:`, or `ariadne.media.players.p<n>` without one:
+
+  | key | |
+  |---|---|
+  | `state` | `idle`, `loading`, `ready`, `playing`, `paused`, `ended`, `failed`, `remote` or `unsupported` |
+  | `playing` | `1` / `0`; write it to play or pause |
+  | `position`, `duration` | seconds (position at most 4 times a second while playing) |
+  | `seek` | write seconds to seek; it is emptied once done |
+  | `muted` | `1` / `0`; write it to mute |
+  | `error` | why it failed, or why it plays elsewhere |
+
+- **A host plays them only if it has a player.**
+  - `ari-media` (§9.2) and `arigl` have cvcMedia's FFmpeg + SDL3 player. FFmpeg decodes,
+    frames are scaled to the box, and the sound plays through SDL3's audio subsystem, which is
+    the clock (the wall clock without sound). The source is fetched whole first (the host's
+    network policy and `auth:`, as for `image:`, at most 64 MiB) and read from memory.
+  - FFmpeg is cvcpkg's `ffmpeg-lgpl`, linked shared, so the LGPL's terms are kept.
+  - The lean `ari`, or any build without FFmpeg, has no player. Its media widgets say
+    `unsupported` and offer "Open".
+  - **The browser pages** (ari.html, arigl-web) play through the browser's own `<video>` and
+    `<audio>`. FFmpeg is never compiled to wasm.
+    - Each player is a hidden element. It plays the sound itself, and a video's new frames are
+      drawn into a canvas the size of the box and copied into the widget's picture. That is one
+      copy per frame shown, and it works the same in both pages, under windows and menus.
+    - The policy and credentials are decided in C++ before the element sees anything:
+      - an http(s) URL with no `auth:` is given to the element (it streams and seeks with range
+        requests), once the host allows its origin;
+      - one with `auth:` is fetched with the bearer token alone (no cookies, no redirect) into a
+        blob;
+      - `file://`, `cvc://` and `state://` sources are read from the page's files into a blob.
+        A page lists its media in the config's `preload` to have them there.
+    - A picture from another origin needs CORS to be read back. Without it the sound still
+      plays and the error says so.
+    - A browser plays sound only after the user has clicked or typed on the page. A muted
+      `autoplay` starts by itself.
+    - A site serving the pages under a Content-Security-Policy adds `media-src 'self' blob:`
+      (and the media's origin when it is another).
+- **Over SSH** the sound would come out of the remote machine's speakers. So in an SSH session
+  (`SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY` set), players say `remote` and nothing is opened.
+  - "Open" runs `(open-url URL)` where the host has it, else it warns with the URL.
+  - An `auth:` source opened in a browser carries no token, so the browser needs its own
+    sign-in. The tooltip says so.
+  - `--media-play always` plays anyway, and `--media-play never` never plays.
+- **Capability tokens** (§5.7): `media` means the media plays here, and `media.player` means
+  the host has a player at all.
+- A player whose widget a frame did not draw (its window closed, its item scrolled out of a
+  `repeat:`) is paused at once and closed 5 s later. `ari snapshot` waits while a player is
+  still loading, as it waits for pictures.
+
+### 5.14 On a phone: UI size, hiding windows, the system keyboard
 
 A document needs nothing of its own to work on a phone: the ImGui host (arigl, cyprty) does
 this for every one.
@@ -1452,6 +1523,30 @@ Any widget may carry an `id:` (not only windows): it names the instance a backen
 per-instance state on and that the core persists view state under (`tree.<id>.*`). An include
 site may override the unit's `id:`, so two instances of one unit stay distinct.
 
+Args are strings. A unit takes whole widget lists through **slots**: a `- slot: NAME` item in
+any of its widget lists marks where they go. The include site's `slots: {NAME: [...]}` puts its
+widgets there, in place of the item; a single widget map works too, and a slot left unfilled is
+dropped. The include site's widgets are its own: the unit's args are not substituted into them,
+though a `repeat:` around the include still substitutes `{i}`.
+
+```yaml
+units:
+  framed:
+    args: { title: Untitled }
+    type: group
+    children:
+      - text: "{title}"
+      - slot: body
+      - slot: footer
+windows:
+  - window: W
+    children:
+      - include: framed
+        args: { title: Hello }
+        slots:
+          body: [ { text: first }, { button: Go, on: go } ]
+```
+
 ### 6.2 `import:` — shared-scope library merge
 
 `process_imports` ([`loader.cpp:761`](../src/cvc/ariadne/loader.cpp)) resolves a URI (or
@@ -1461,6 +1556,17 @@ and cycle-guards on the resolved `canonical` identity
 ([`loader.cpp:789`](../src/cvc/ariadne/loader.cpp)), capped at `kMaxImportDepth = 32` /
 `kMaxImports = 4096` ([`loader.cpp:758`](../src/cvc/ariadne/loader.cpp)). Local units
 override imported ones. This is how a document composes a library of shipped panels.
+
+An entry may be `{uri: URI, optional: true}`: a library the host may not have (a component
+newer than it), whose absence is no warning, so `ari test` does not fail on it. A document's
+own unit marked `fallback: true` stands in for a unit of that name only where no import defines
+it, so a document adopts a shipped component and still runs on hosts without it:
+
+```yaml
+import: [{uri: cvc://components/card.ari, optional: true}]
+units:
+  card: {fallback: true, type: group, children: [...]}   # used where card.ari is not there
+```
 
 ### 6.3 `load:` — isolated sub-module mount
 
@@ -1528,7 +1634,39 @@ includes. Each binds state keys a C++ object owns, so it needs no host code;
 | `world_controls` | a `generated_world` node (§5.4) |
 | `mesh_tools` | a `mesh_lab` node named `mesh` (§5.4) |
 | `fe_controls` | an `fe_lab` node named `domain` (§5.4) |
+| `card` | a card in a list: avatar / title / subtitle / timestamp header, body, `media` and `actions` slots; its args are state keys, so a `repeat:` includes one per item (not a window: embed it) |
 | `transfer_function`, `transfer_function_editor` | any node's `transfer_function` model (args `node`, `id`): the ColorTable2 editor with histogram / contour spectrum / contour tree layers — see [`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) |
+
+The `card` is a generic social or inbox card (§5.11 pictures, slots in §6.1):
+
+```yaml
+import: cvc://components/card.ari
+windows:
+  - window: Feed
+    children:
+      - type: group
+        repeat: (state-get "feed.items")
+        children:
+          - include: card
+            args: {id: post_{i}, avatar: feed.items.{i}.author.avatar,
+                   title: feed.items.{i}.author.name, subtitle: feed.items.{i}.author.handle,
+                   time: feed.items.{i}.when, body: feed.items.{i}.text}
+            slots:
+              media:
+                - image: ""
+                  bind: feed.items.{i}.media.0.url
+                  visible_when: (!= (state-get "feed.items.{i}.media.0.url") "")
+                  size: [440, 248]
+                  fit: cover
+              actions:
+                - { button: Reply, on: (state-set "compose.reply_to" "{i}") }
+```
+
+Slots `note` (a row above the header), `extra` (lines under the byline, in the header's text
+column) and `body` (widgets after the body text) take more of a post's parts. A part whose key
+is empty is not drawn. The avatar is a circle `avatar_size` px across (40),
+loading through `avatar_auth`'s credential where its URL needs one. A one-column grid with an
+outer border frames the card: an ImGui table, a box in a terminal.
 
 Most components that address one node use a fixed node id; copy the file and change the id to
 drive another node. `transfer_function` instead takes the node as an include arg (§6.1).
@@ -1867,6 +2005,19 @@ for the document's `image:` widgets with `src: NAME` (an `image:` can also name 
 ([`terminal_images.ari`](../examples/ariadne/terminal/terminal_images.ari) is an example).
 With `--ansi` and `--graphics kitty`, `sixel` or `iterm`, `snapshot` also prints the images, after
 clearing the screen, at the terminal's cell size (`--cell-size WxH` where it can't be asked).
+
+**`ari-media`** is the same program with sound: cvcMedia, libcvc's GL-free media library
+([`src/cvcMedia`](../src/cvcMedia/CMakeLists.txt)), is linked in. It brings up SDL3's audio
+subsystem alone, with no window, display or SDL video, and still no GL, VTK or ImGui, so it
+plays sound in a terminal; `ari-media info` lists the playback devices. The lean `ari` links
+libcvc only, with no SDL. `ari-media` is its own package
+([`cvcpkg/recipes/ari-media`](../cvcpkg/recipes/ari-media/recipe.yaml), depending on `sdl3`),
+a separate binary name, so the two never install the same file and a launcher can prefer
+`ari-media` where it is installed. In a libcvc build it is built with cvcGL or with
+`-DCVC_BUILD_ARI_MEDIA=ON`. cvcMedia holds the SDL3 audio output that used to be cvcGL's
+(`cvc::media::playback`; cvcGL links cvcMedia and keeps the `cvc::gl::playback` names), and
+its FFmpeg player plays the `video:` and `audio:` widgets (§5.13). The `ari-media` package also
+depends on `ffmpeg-lgpl`, linked shared.
 
 `ari` is its own cvcpkg package (`cvcpkg install ari`, linux for now), built from
 [`cvcpkg/recipes/ari`](../cvcpkg/recipes/ari/recipe.yaml) against the installed libcvc,
