@@ -133,12 +133,10 @@ training_scene occupancy_scene(const std::uint8_t *occ, int rows, int cols, doub
 enum class rollout_kind { surrogate, bicycle, dynamic, jolt };
 
 // The point-mass surrogate's integrator (rollout_kind::surrogate). Semi-implicit Euler, the
-// default, is coef_train.py's sdf_rollout (diff::surr_step). explicit_euler and strang are the
-// integrator A/B's other arms (docs/NAV_TRAINING.md, "The point mass's integrator"): explicit
-// Euler steps the position with the old velocity; strang is velocity Verlet on the conservative
-// force with the damping (exact) and the speed clamp split out, two force evaluations a step.
-// CPU only: the CUDA trainer refuses the other two.
-enum class point_mass_integrator { semi_implicit, explicit_euler, strang };
+// default, is coef_train.py's sdf_rollout (diff::surr_step). explicit_euler, which steps the
+// position with the old velocity, is the integrator A/B's other arm (docs/NAV_TRAINING.md, "The
+// point mass's integrator"); trained on, it costs reach. CPU only: the CUDA trainer refuses it.
+enum class point_mass_integrator { semi_implicit, explicit_euler };
 
 // Self-supervised training hyperparameters (mirror coef_train.py train()).
 struct train_config {

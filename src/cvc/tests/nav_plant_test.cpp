@@ -1311,28 +1311,26 @@ TEST(NavPlantConvergence, DynamicTrainedPolicyAgainstPointMassOnJolt) {
 // ── The point mass's integrator A/B (train_config::point_mass; docs/NAV_TRAINING.md) ──────────
 // The coefficient policy trains on the point-mass surrogate (rollout_kind::surrogate), whose
 // integrator is semi-implicit Euler, as GRL-SNAM's sdf_rollout that trained the shipped weights.
-// This trains it on the city under each arm, semi-implicit, explicit Euler and the Strang split
-// (velocity Verlet, damping and clamp split out), with the same training seeds, and drives every
-// policy and the untrained seed on Jolt RoboRacers over the same 20 seeds: reach, building hits,
-// seconds touching another vehicle, path length and the closest any chassis came to a building.
-// Each arm's differences from semi-implicit come with a paired 95% CI that resamples both the
-// training seeds and the evaluation seeds. It also books the point mass's own steps under each arm,
-// driven by its trained policy, where U is exactly the goal spring (outside every barrier) and the
-// step moves enough energy to resolve in float (a cheap bound above 1e-5): the
-// sharp check's ratio (r_E - r_hat_E) / bound, r_hat_E the semi-implicit step's prediction (zero
-// for Strang, whose residual is third order), and how often a step gains energy beyond its books.
-// A heavy run: CVC_NAV_INTEGRATOR_AB=1 runs it. AB_LR, AB_STEPS, AB_TRAIN_SEEDS and AB_ARMS
-// (e.g. "semi,explicit,strang") override it; AB_OUT names a CSV of every (arm, training seed,
-// evaluation seed) row.
+// This trains it on the city under each arm, semi-implicit and explicit Euler, with the same
+// training seeds, and drives every policy and the untrained seed on Jolt RoboRacers over the same
+// 20 seeds: reach, building hits, seconds touching another vehicle, path length and the closest any
+// chassis came to a building. Each arm's differences from semi-implicit come with a paired 95% CI
+// that resamples both the training seeds and the evaluation seeds. It also books the point mass's
+// own steps under each arm, driven by its trained policy, where U is exactly the goal spring
+// (outside every barrier) and the step moves enough energy to resolve in float (a cheap bound above
+// 1e-5): the sharp check's ratio (r_E - r_hat_E) / bound, r_hat_E the semi-implicit step's
+// prediction, and how often a step gains energy beyond its books. A heavy run:
+// CVC_NAV_INTEGRATOR_AB=1 runs it. AB_LR, AB_STEPS, AB_TRAIN_SEEDS and AB_ARMS (e.g.
+// "semi,explicit") override it; AB_OUT names a CSV of every (arm, training seed, evaluation seed)
+// row. (A third arm, a Strang split, ran in this harness at the commit that added it and was
+// dropped: docs/NAV_TRAINING.md has its numbers.)
 
 namespace {
 
 using cvc::nav::point_mass_integrator;
 
 const char *arm_name(point_mass_integrator pm) {
-  return pm == point_mass_integrator::explicit_euler
-             ? "explicit"
-             : (pm == point_mass_integrator::strang ? "strang" : "semi");
+  return pm == point_mass_integrator::explicit_euler ? "explicit" : "semi";
 }
 
 // The books of the point mass's steps under `pm`, driven by `tr`'s coefficients from n starts of
@@ -1362,7 +1360,6 @@ pm_books point_mass_books(const cvc::nav::coef_trainer &tr, point_mass_integrato
   std::vector<float> o(2 * n), goal(2 * n), v(2 * n, 0.0f), feat(5 * n), coef(3 * n);
   sc.sample_starts_goals(n, seed, o.data(), goal.data());
   pm_books bk;
-  const auto ke = [](double x, double y) { return 0.5 * (x * x + y * y); };
   for (int t = 0; t < steps; ++t) {
     for (int i = 0; i < n; ++i) { // the trainer's features (coef_train.cpp policy_forward)
       const diff::sample s = diff::sample_fwd(F, o[2 * i], o[2 * i + 1]);
@@ -1384,9 +1381,6 @@ pm_books point_mass_books(const cvc::nav::coef_trainer &tr, point_mass_integrato
       if (pm == point_mass_integrator::explicit_euler)
         diff::surr_step_explicit(F, ox, oy, vx, vy, gx, gy, al, be, ga, rr, d_hat, vmax, hdt, ox1,
                                  oy1, vx1, vy1);
-      else if (pm == point_mass_integrator::strang)
-        diff::surr_step_strang(F, ox, oy, vx, vy, gx, gy, al, be, ga, rr, d_hat, vmax, hdt, ox1,
-                               oy1, vx1, vy1);
       else
         diff::surr_step(F, ox, oy, vx, vy, gx, gy, al, be, ga, rr, d_hat, vmax, hdt, ox1, oy1, vx1,
                         vy1);
@@ -1400,7 +1394,6 @@ pm_books point_mass_books(const cvc::nav::coef_trainer &tr, point_mass_integrato
                               be * (static_cast<double>(oy1) - gy)};
         const double U0 = 0.5 * (g0[0] * g0[0] + g0[1] * g0[1]) / be,
                      U1 = 0.5 * (g1[0] * g1[0] + g1[1] * g1[1]) / be;
-        double rE, rhat;
         cvc::nav::book_step_args a;
         a.dt = hdt;
         a.gamma = ga;
@@ -1417,31 +1410,13 @@ pm_books point_mass_books(const cvc::nav::coef_trainer &tr, point_mass_integrato
         a.U0 = U0;
         a.U1 = U1;
         a.vHv = be * (static_cast<double>(vx1) * vx1 + static_cast<double>(vy1) * vy1);
-        if (pm == point_mass_integrator::strang) {
-          // Its own books: the damping halves' and the two clamps' kinetic energy, exactly, and
-          // the first clamp's cross term: the drift moves with v_b, not the kicked v_k, which
-          // changes U by hdt/2 g.(v_b - v_k) more than the kicks pay for (semi-implicit's W_cross).
-          const double e = std::exp(-0.5 * ga * hdt), hh = 0.5 * hdt;
-          const double vk[2] = {e * vx - hh * g0[0], e * vy - hh * g0[1]};
-          const double sk = std::hypot(vk[0], vk[1]), ck = sk > vmax ? vmax / sk : 1.0;
-          const double vb[2] = {ck * vk[0], ck * vk[1]};
-          const double vc[2] = {vb[0] - hh * g1[0], vb[1] - hh * g1[1]};
-          const double w_damp = ke(vx, vy) * (1.0 - e * e) + ke(vc[0], vc[1]) * (1.0 - e * e);
-          const double w_clamp =
-              ke(vk[0], vk[1]) - ke(vb[0], vb[1]) + ke(e * vc[0], e * vc[1]) - ke(vx1, vy1);
-          const double w_cross = hh * (g0[0] * (vb[0] - vk[0]) + g0[1] * (vb[1] - vk[1]));
-          rE = ke(vx1, vy1) - ke(vx, vy) + (U1 - U0) + w_damp + w_clamp - w_cross;
-          rhat = 0.0;
-        } else {
-          // v' before the clamp: the step's own velocity update.
-          float Fx, Fy;
-          diff::surr_force(F, ox, oy, gx, gy, al, be, rr, d_hat, Fx, Fy);
-          a.vp[0] = vx + hdt * (Fx - ga * vx);
-          a.vp[1] = vy + hdt * (Fy - ga * vy);
-          const cvc::nav::step_books k = cvc::nav::book_step(a);
-          rE = k.residual;
-          rhat = k.residual_sharp;
-        }
+        // v' before the clamp: the step's own velocity update.
+        float Fx, Fy;
+        diff::surr_force(F, ox, oy, gx, gy, al, be, rr, d_hat, Fx, Fy);
+        a.vp[0] = vx + hdt * (Fx - ga * vx);
+        a.vp[1] = vy + hdt * (Fy - ga * vy);
+        const cvc::nav::step_books k = cvc::nav::book_step(a);
+        const double rE = k.residual, rhat = k.residual_sharp;
         const double bound = cvc::nav::energy_residual_bound(
             hdt, std::hypot(g0[0], g0[1]), ga, std::hypot(vx, vy), 0.0, be, std::hypot(vx1, vy1));
         // A step that moves almost no energy (an agent parked at its goal) has a bound at the
@@ -1543,15 +1518,13 @@ TEST(NavPlantConvergence, PointMassIntegratorAB) {
   base.window = 7;
   base.steps = env_i("AB_STEPS", 150);
   base.lr = std::getenv("AB_LR") ? static_cast<float>(std::atof(std::getenv("AB_LR"))) : 5e-5f;
-  const int K = env_i("AB_TRAIN_SEEDS", 3);
+  const int K = env_i("AB_TRAIN_SEEDS", 10);
   std::vector<point_mass_integrator> arms;
   {
-    const std::string spec =
-        std::getenv("AB_ARMS") ? std::getenv("AB_ARMS") : "semi,explicit,strang";
+    const std::string spec = std::getenv("AB_ARMS") ? std::getenv("AB_ARMS") : "semi,explicit";
     std::stringstream ss(spec);
     for (std::string a; std::getline(ss, a, ',');)
       arms.push_back(a == "explicit" ? point_mass_integrator::explicit_euler
-                     : a == "strang" ? point_mass_integrator::strang
                                      : point_mass_integrator::semi_implicit);
   }
   ASSERT_FALSE(arms.empty());

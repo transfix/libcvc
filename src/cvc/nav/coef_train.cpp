@@ -111,9 +111,6 @@ void surr_step_with(point_mass_integrator pm, const diff::field &F, float ox, fl
   if (pm == point_mass_integrator::explicit_euler)
     diff::surr_step_explicit(F, ox, oy, vx, vy, gx, gy, al, be, ga, rr, d_hat, vmax, hdt, ox1, oy1,
                              vx1, vy1);
-  else if (pm == point_mass_integrator::strang)
-    diff::surr_step_strang(F, ox, oy, vx, vy, gx, gy, al, be, ga, rr, d_hat, vmax, hdt, ox1, oy1,
-                           vx1, vy1);
   else
     diff::surr_step(F, ox, oy, vx, vy, gx, gy, al, be, ga, rr, d_hat, vmax, hdt, ox1, oy1, vx1,
                     vy1);
@@ -127,9 +124,6 @@ void surr_step_bwd_with(point_mass_integrator pm, const diff::field &F, float ox
   if (pm == point_mass_integrator::explicit_euler)
     diff::surr_step_explicit_bwd(F, ox, oy, vx, vy, gx, gy, al, be, ga, rr, d_hat, vmax, hdt, go1x,
                                  go1y, gv1x, gv1y, gox, goy, gvx, gvy, gal, gbe, gga);
-  else if (pm == point_mass_integrator::strang)
-    diff::surr_step_strang_bwd(F, ox, oy, vx, vy, gx, gy, al, be, ga, rr, d_hat, vmax, hdt, go1x,
-                               go1y, gv1x, gv1y, gox, goy, gvx, gvy, gal, gbe, gga);
   else
     diff::surr_step_bwd(F, ox, oy, vx, vy, gx, gy, al, be, ga, rr, d_hat, vmax, hdt, go1x, go1y,
                         gv1x, gv1y, gox, goy, gvx, gvy, gal, gbe, gga);

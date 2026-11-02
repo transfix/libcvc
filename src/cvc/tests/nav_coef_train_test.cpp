@@ -144,17 +144,12 @@ TEST(NavCoefTrain, GradcheckMatchesFiniteDifference) {
   surrogate_gradcheck(cvc::nav::point_mass_integrator::semi_implicit, "");
 }
 
-// The integrator A/B's other arms (train_config::point_mass): explicit Euler and the Strang
-// splitting, each with its own backward.
+// The integrator A/B's other arm (train_config::point_mass): explicit Euler, with its own backward.
 TEST(NavCoefTrain, ExplicitEulerGradcheckMatchesFiniteDifference) {
   surrogate_gradcheck(cvc::nav::point_mass_integrator::explicit_euler, " explicit");
 }
 
-TEST(NavCoefTrain, StrangGradcheckMatchesFiniteDifference) {
-  surrogate_gradcheck(cvc::nav::point_mass_integrator::strang, " strang");
-}
-
-// The three integrators are three rollouts, and the default is semi-implicit, bit for bit.
+// The two integrators are two rollouts, and the default is semi-implicit, bit for bit.
 TEST(NavCoefTrain, PointMassIntegratorsDiffer) {
   const training_scene sc = cvc::nav::city_scene(48);
   train_config cfg = small_cfg();
@@ -172,14 +167,10 @@ TEST(NavCoefTrain, PointMassIntegratorsDiffer) {
   const double def = loss(train_config{}.point_mass, &g_def);
   const double semi = loss(cvc::nav::point_mass_integrator::semi_implicit, &g_semi);
   const double expl = loss(cvc::nav::point_mass_integrator::explicit_euler, nullptr);
-  const double strang = loss(cvc::nav::point_mass_integrator::strang, nullptr);
   EXPECT_EQ(def, semi);
   EXPECT_EQ(g_def, g_semi);
   EXPECT_NE(semi, expl);
-  EXPECT_NE(semi, strang);
-  EXPECT_NE(expl, strang);
-  std::printf("  window loss: semi-implicit %.6f, explicit %.6f, strang %.6f\n", semi, expl,
-              strang);
+  std::printf("  window loss: semi-implicit %.6f, explicit %.6f\n", semi, expl);
 }
 
 namespace {
