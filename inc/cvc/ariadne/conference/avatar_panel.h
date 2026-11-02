@@ -17,7 +17,9 @@
 #define __CVC_ARIADNE_CONFERENCE_AVATAR_PANEL_H__
 
 #include <cstddef>
+#include <cstdint>
 #include <cvc/ariadne/avatar_physics.h>
+#include <cvc/ariadne/conference/room_avatar.h> // avatar_catalog, avatar_choice
 #include <deque>
 #include <string>
 
@@ -54,7 +56,9 @@ public:
   // History: a sample every PERIOD seconds of wall time, the last CAPACITY kept (60 s by default).
   explicit avatar_panel(double period = 0.25, std::size_t capacity = 240);
 
-  // Once a frame, after client_pump: H is the client holon and PID our avatar in ROOM.
+  // Once a frame, after client_pump: H is the client holon and PID our avatar in ROOM. The room's
+  // catalog is read again only when its revision moves (or ROOM changes); our choice, two leaves,
+  // is checked every frame.
   void update(const holon &h, cvc::app &app, const std::string &room, const std::string &pid,
               double wall_dt);
 
@@ -70,8 +74,14 @@ public:
   const avatar_energy &energy() const { return _energy; }
   const std::deque<double> &reserve_history() const { return _reserve; }
   const std::deque<double> &power_history() const { return _power; }
+  // How many updates read the room's catalog: the first, then only those after its revision or
+  // the room changed (tests).
+  std::size_t catalog_reads() const { return _catalog_reads; }
 
 private:
+  // Re-resolve the look when the catalog or our choice changed since the last update.
+  void refresh_look(cvc::app &app, const std::string &room, const std::string &pid);
+
   double _period;
   std::size_t _capacity;
   double _since = 0.0; // wall seconds since the last history sample
@@ -83,6 +93,14 @@ private:
   double _speed = 0.0;
   std::string _color, _accessory;
   std::deque<double> _reserve, _power;
+  // What the look was resolved from: the catalog as of revision _catalog_rev in _look_room, and
+  // _look_pid's choice.
+  bool _have_catalog = false;
+  std::uint64_t _catalog_rev = 0;
+  std::size_t _catalog_reads = 0;
+  std::string _look_room, _look_pid;
+  avatar_catalog _catalog;
+  avatar_choice _choice;
 };
 
 } // namespace conference
