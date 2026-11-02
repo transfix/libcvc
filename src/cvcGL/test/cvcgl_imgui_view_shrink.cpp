@@ -1,9 +1,11 @@
-// ImGuiBackend when the view gets smaller after its windows opened (a browser window made smaller,
-// a phone turned on its side, fullscreen left), on a bare ImGui context (no window, no GL):
+// ImGuiBackend when the view changes size after its windows opened (a browser window resized, a
+// phone turned on its side, fullscreen left), on a bare ImGui context (no window, no GL):
 //  - a window that showed in full moves back in until all of it shows, no larger than the view;
 //  - a window that fits its content moves in too;
-//  - one the user left partly outside the view stays where it is;
-//  - the view growing again moves nothing.
+//  - when the view grows again, each goes back as far as the view allows, to where it was;
+//  - a page opened in a short view: the windows moved in where they opened go back the same way;
+//  - one the user left partly outside the view stays where it is, and so does one the user moved
+//    after it was moved in.
 #include <cmath>
 #include <cstdio>
 #include <cvc/ariadne/ariadne.h>
@@ -47,6 +49,14 @@ std::string rect(const ImGuiWindow *w) {
 bool inside(const ImGuiWindow *w, ImVec2 view) {
   return w->Pos.x >= -0.5f && w->Pos.y >= -0.5f && w->Pos.x + w->Size.x <= view.x + 0.5f &&
          w->Pos.y + w->Size.y <= view.y + 0.5f;
+}
+
+// Each window where conference() puts it, at the size it gives it.
+bool at_home(const ImGuiWindow *cam, const ImGuiWindow *card, const ImGuiWindow *users) {
+  return near(cam->Pos.x, 20.0f) && near(cam->Pos.y, 40.0f) && near(cam->Size.x, 360.0f) &&
+         near(cam->Size.y, 560.0f) && near(card->Pos.x, 20.0f) && near(card->Pos.y, 620.0f) &&
+         near(card->Size.x, 300.0f) && near(card->Size.y, 200.0f) && near(users->Pos.x, 1300.0f) &&
+         near(users->Pos.y, 40.0f);
 }
 
 // The conference's layout, cut down: My Camera with a pos: and a size:, Users with a pos: and
@@ -155,11 +165,42 @@ int main() {
         "at 500 x 450 Users, which fits its content, moves in from the right (" + rect(users) +
             ")");
 
-    const ImVec2 cam_was = cam->Pos, card_was = card->Pos, users_was = users->Pos;
     s.resize(ImVec2(1600.0f, 900.0f));
-    chk(cam->Pos.x == cam_was.x && cam->Pos.y == cam_was.y && card->Pos.x == card_was.x &&
-            card->Pos.y == card_was.y && users->Pos.x == users_was.x && users->Pos.y == users_was.y,
-        "back at 1600 x 900 nothing moves");
+    chk(at_home(cam, card, users),
+        "back at 1600 x 900 every window is where its pos: says, at its size (cam " + rect(cam) +
+            ", card " + rect(card) + ", users " + rect(users) + ")");
+  }
+
+  std::printf("== opened in a short view, then the view grows ==\n");
+  {
+    Session s(ImVec2(1350.0f, 579.0f));
+    ImGuiWindow *cam = find("cam"), *users = find("users"), *card = find("card");
+    if (!cam || !users || !card)
+      return 1;
+    chk(near(cam->Pos.y, 19.0f) && near(card->Pos.y, 379.0f) && near(users->Pos.x, 1236.0f),
+        "at 1350 x 579 the windows open moved in (cam " + rect(cam) + ", card " + rect(card) +
+            ", users " + rect(users) + ")");
+    s.resize(ImVec2(1450.0f, 700.0f));
+    chk(near(cam->Pos.y, 40.0f) && near(card->Pos.y, 500.0f) && near(users->Pos.x, 1300.0f),
+        "at 1450 x 700 they go back as far as the view allows (cam " + rect(cam) + ", card " +
+            rect(card) + ", users " + rect(users) + ")");
+    s.resize(ImVec2(1600.0f, 900.0f));
+    chk(at_home(cam, card, users), "at 1600 x 900 every window is where its pos: says (cam " +
+                                       rect(cam) + ", card " + rect(card) + ")");
+  }
+
+  std::printf("== a window the user moves after it was moved in ==\n");
+  {
+    Session s(ImVec2(1350.0f, 579.0f));
+    s.frame([] { ImGui::SetWindowPos("Card###card", ImVec2(600.0f, 300.0f)); });
+    s.frames(2);
+    ImGuiWindow *card = find("card"), *cam = find("cam");
+    if (!card || !cam)
+      return 1;
+    s.resize(ImVec2(1600.0f, 900.0f));
+    chk(near(card->Pos.x, 600.0f) && near(card->Pos.y, 300.0f),
+        "Card, which the user moved, stays where they put it (" + rect(card) + ")");
+    chk(near(cam->Pos.y, 40.0f), "My Camera goes back to its pos: (" + rect(cam) + ")");
   }
 
   std::printf("== a window the user left partly outside the view ==\n");

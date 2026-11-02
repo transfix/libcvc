@@ -206,6 +206,15 @@ private:
   // The work area each window was last drawn in: when the view gets smaller, a window that showed
   // in full there moves back in (§5.8).
   std::unordered_map<std::string, FlowRect> m_lastView;
+  // A window moved in to fit the view (where it opened, or when the view got smaller) keeps its
+  // home, the place and size it had without the move, and heads back to it as far as the view
+  // allows, until it is there or the user moves or resizes it (§5.8).
+  struct Home {
+    float x = 0.0f, y = 0.0f; // its place
+    float w = 0.0f, h = 0.0f; // its size; 0: it fits its content
+    float placedX = 0.0f, placedY = 0.0f, placedW = 0.0f, placedH = 0.0f; // where it was last put
+  };
+  std::unordered_map<std::string, Home> m_home;
 
   // reset_layout(): the windows drawn since, by id. A window's first draw after it takes its
   // authored place and size (or rejoins the flow) though ImGui still holds the last document's.

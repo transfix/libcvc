@@ -1189,8 +1189,10 @@ How each backend does it:
   reach. In a browser the view is the canvas from the first frame, as the page has laid it out.
   When the view gets smaller later (a browser window made smaller, a phone turned on its side,
   fullscreen left), a window that showed in full moves back in the same way, no larger than the
-  work area; one the user left partly outside the view stays where it is, and a view that grows
-  again moves nothing. ImGui gives a window with no size ImGui's always-auto-resize: it measures
+  work area. A window moved in, where it opened or since, goes back toward its place and size as
+  the view grows again, as far as the view allows, until it is there. One the user moves or
+  resizes meanwhile stays where they put it, and so does one the user left partly outside the
+  view. ImGui gives a window with no size ImGui's always-auto-resize: it measures
   the window's widgets each frame, its labeled widgets at the width ImGui gives an auto-resizing
   window's items (16 font sizes), and a row-split pane as wide as its own widgets. A window with
   a size gets a horizontal scroll bar as well as ImGui's vertical one, and a long label shrinks
