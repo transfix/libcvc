@@ -445,6 +445,9 @@ bool detectTouchDevice() {
 // wants 40 or so), on a phone too.
 constexpr float kTouchUiScale = 1.25f;
 
+// A phone's view: under this many logical pixels on its short side, the panels start hidden.
+constexpr float kPhoneShortSide = 500.0f;
+
 float clampUiScale(float scale) { return scale < 0.25f ? 0.25f : scale > 4.0f ? 4.0f : scale; }
 
 // Device pixels per logical pixel (see setPixelRatio).
@@ -638,12 +641,14 @@ struct ImGuiOverlay::Impl {
     // toggle button is always there to bring it back. Decided once, on the
     // first frame that has a real size, so a later resize does not fight the
     // user's own choice. In logical pixels: a phone's canvas is ~1200 device
-    // pixels across.
+    // pixels across. Under 500 on the short side, either way up: phones are
+    // 360-430, and a laptop's browser canvas can be under 600 (577 on a
+    // 1366 x 768 screen), whose panels should start open.
     if (!sizedOnce && io.DisplaySize.x > 1.0f && io.DisplaySize.y > 1.0f) {
       sizedOnce = true;
       const float shortSide =
           io.DisplaySize.x < io.DisplaySize.y ? io.DisplaySize.x : io.DisplaySize.y;
-      if (shortSide / pixelRatio < 700.0f)
+      if (shortSide / pixelRatio < kPhoneShortSide)
         panelsOpen = false;
     }
     if (sceneDraw) // scene annotations: under the UI, and shown with the panels hidden too

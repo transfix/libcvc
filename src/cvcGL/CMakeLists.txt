@@ -911,6 +911,11 @@ add_test(NAME cvcgl_imgui_window_fit COMMAND cvcgl_imgui_window_fit)
 add_executable(cvcgl_imgui_ui_size test/cvcgl_imgui_ui_size.cpp)
 target_link_libraries(cvcgl_imgui_ui_size PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_ui_size COMMAND cvcgl_imgui_ui_size)
+# The overlay's panels start hidden on a phone's view and open on a laptop's browser canvas,
+# offscreen windows of each size and pixel ratio.
+add_executable(cvcgl_imgui_panels_start test/cvcgl_imgui_panels_start.cpp)
+target_link_libraries(cvcgl_imgui_panels_start PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_panels_start COMMAND cvcgl_imgui_panels_start)
 
 # Golden images of the Ariadne ImGui/VTK backend (roadmap §16.6 phase 1): each .ari in
 # test/golden runs through AriRuntime + ImGuiBackend offscreen and its frame is compared with the
