@@ -38,7 +38,7 @@ windows:
   - window: Hello from Python
     id: hello
     pos: [40, 40]
-    size: [420, 240]
+    size: [480, 240]
     children:
       - text: "The buttons call into the Python program that runs this document."
       - separator

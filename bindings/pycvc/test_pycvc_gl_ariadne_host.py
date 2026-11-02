@@ -236,6 +236,78 @@ def headless(tmp):
     check(h2.should_close(), "the context manager closes")
 
 
+def run_example(name, argv):
+    """Run examples/ariadne/python/<name>.py's main(argv); the document's state at close, and rc."""
+    from pycvc_gl.ariadne import Host
+
+    spec = importlib.util.spec_from_file_location(f"ex_{name}",
+                                                  os.path.join(EXAMPLES, f"{name}.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    captured = {}
+    real_close = Host.close
+
+    def keep(self, _real=real_close):  # read the document's state before it closes
+        if not self._closed:
+            captured.update({k: self.get(k) for k in ("clicks", "stats", "spread.n",
+                                                       "stats.trips", "stats.time",
+                                                       "stats.plant", "stats.world")})
+        _real(self)
+
+    Host.close = keep
+    try:
+        captured["rc"] = mod.main(argv)
+    finally:
+        Host.close = real_close
+    return captured
+
+
+def vehicles(tmp):
+    """pycvc_gl.vehicle: VehicleModel's normalization, seat_transform and body_transform."""
+    import math
+
+    from pycvc_gl.vehicle import VehicleModel, body_transform, seat_transform
+
+    m = seat_transform(3.0, 4.0, math.pi / 2)
+    check(abs(m[0]) < 1e-12 and abs(m[4] - 1.0) < 1e-12 and m[3] == 3.0 and m[7] == 4.0,
+          "seat_transform: heading 90 degrees turns +X to +Y, on flat ground at z 0")
+    m = seat_transform(0.0, 0.0, 0.0, lambda x, y: 0.5 * x, lift=0.0)
+    check(m[8] > 0.4 and abs(m[11]) < 1e-12, "seat_transform: pitched up a 0.5 slope")
+    q = (math.cos(math.pi / 4), 0.0, 0.0, math.sin(math.pi / 4))  # yaw 90 degrees
+    m = body_transform((1.0, 2.0, 3.0), q, ground_z=0.25)
+    check(abs(m[0]) < 1e-12 and abs(m[4] - 1.0) < 1e-12 and m[11] == 0.25,
+          "body_transform: the quaternion's yaw, the ground's z")
+
+    # A 10 m long box along y: a tall cabin at -y (more vertices), a low hood at +y.
+    verts = []
+    for y0, y1, h in ((-5, 0, 3.0), (0, 5, 1.5)):
+        for z in (0.0, h):
+            verts += [(-2, y0, z), (2, y0, z), (2, y1, z), (-2, y1, z)]
+    verts += [(-2, -2.5, 3.0), (2, -2.5, 3.0), (-2, -2.5, 0.0), (2, -2.5, 0.0)]
+    tris = []
+    for b in (0, 8):
+        for f in ((4, 5, 6), (4, 6, 7), (0, 1, 5), (0, 5, 4), (1, 2, 6), (1, 6, 5), (2, 3, 7),
+                  (2, 7, 6), (3, 0, 4), (3, 4, 7)):
+            tris.append(tuple(b + k for k in f))
+    tris += [(16, 17, 4), (18, 19, 0)]
+    obj = os.path.join(tmp, "car.obj")
+    with open(obj, "w") as f:
+        f.writelines(f"v {x} {y} {z}\n" for x, y, z in verts)
+        f.writelines(f"f {a + 1} {b + 1} {c + 1}\n" for a, b, c in tris)
+    try:
+        car = VehicleModel(obj, 4.72)
+    except Exception as e:  # noqa: BLE001 - a pycvc built without its model loader
+        print("  skip VehicleModel:", e)
+        return
+    import numpy as np
+
+    v = np.asarray(car.geometry.vertices())
+    check(abs(v[:, 0].max() - v[:, 0].min() - 4.72) < 1e-6, "scaled to 4.72 m along +X")
+    check(abs(v[:, 2].min()) < 1e-9 and abs(v[:, 1].mean()) < 1.0, "base at z 0, centred")
+    check(v[v[:, 0] > 0.5, 2].max() < v[v[:, 0] < -0.5, 2].max(), "the low hood is the nose (+X)")
+    check(abs(car.size[0] - 4.72) < 1e-6 and car.size[2] < car.size[1], "size: length, width, height")
+
+
 def gl_child(tmp):
     """Runs in the child: everything that needs a GL context."""
     import numpy as np
@@ -270,34 +342,18 @@ def gl_child(tmp):
         check(host.scene.hasGraphics("tri"), "host.lab adds to the document's scene")
         host.close()
 
-        # The examples, offscreen, as a user runs them.
-        for name, frames, expect in (("hello", 10, ("clicks", "2")),
-                                     ("data_feed", 20, ("stats", "2")),
-                                     ("form", 10, ("spread.n", "400")),
-                                     ("nav", 120, None)):
-            spec = importlib.util.spec_from_file_location(
-                f"ex_{name}", os.path.join(EXAMPLES, f"{name}.py"))
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            captured = {}
-            real_close = Host.close
-
-            def keep(self, _real=real_close):  # read the document's state before it closes
-                captured.update({k: self.get(k) for k in ("clicks", "stats", "spread.n",
-                                                           "stats.trips", "stats.tick")})
-                _real(self)
-
-            Host.close = keep
-            try:
-                png = os.path.join(tmp, f"{name}.png")
-                rc = mod.main(["--offscreen", "--frames", str(frames), "--png", png])
-            finally:
-                Host.close = real_close
-            check(rc == 0 and os.path.getsize(png) > 0, f"example {name} ran offscreen")
-            if expect:
-                check(captured[expect[0]] == expect[1], f"example {name}: {expect} ({captured})")
-            else:
-                check(int(captured["stats.tick"]) > 0, f"example nav stepped ({captured})")
+        # The examples, offscreen, as a user runs them (nav on its block city: no bundle here).
+        for name, frames, extra, expect in (
+                ("hello", 10, [], ("clicks", "2")),
+                ("data_feed", 20, [], ("stats", "2")),
+                ("form", 10, [], ("spread.n", "400")),
+                ("nav", 60, ["--no-bundle", "--plant", "kinematic"], ("stats.plant", "kinematic"))):
+            captured = run_example(name, ["--offscreen", "--frames", str(frames), "--png",
+                                          os.path.join(tmp, f"{name}.png")] + extra)
+            check(captured["rc"] == 0 and os.path.getsize(os.path.join(tmp, f"{name}.png")) > 0,
+                  f"example {name} ran offscreen")
+            check(captured[expect[0]] == expect[1], f"example {name}: {expect} ({captured})")
+        check(float(captured["stats.time"]) > 0, f"example nav stepped ({captured})")
     except AssertionError as e:
         print("RENDER_FAIL:", e, flush=True)
         sys.exit(_ASSERT_RC)
@@ -310,6 +366,11 @@ def main():
         gl_child(tmp)
         return
     headless(tmp)
+    vehicles(tmp)
+    for plant in ("kinematic", "jolt"):  # nav.py headless: the fleet, the routes, the readouts
+        got = run_example("nav", ["--headless", "--frames", "30", "--no-bundle", "--plant", plant])
+        check(got["rc"] == 0 and float(got["stats.time"]) > 0, f"nav.py headless ({got})")
+        check(got["stats.plant"] in (plant, "kinematic"), f"nav.py's plant ({got})")
     print(f"  ok: headless, {checks} checks")
     env = dict(os.environ, _CVC_ARI_HOST_CHILD="1")
     p = subprocess.run([sys.executable, os.path.abspath(__file__)], env=env, capture_output=True,

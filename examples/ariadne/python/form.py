@@ -91,7 +91,8 @@ def main(argv=None):
     host.run(frames=args.frames or None)
     if args.png:
         host.snapshot(args.png)
-    print("result:", host.get_tree("result"))
+    result = host.get_tree("result") or {}
+    print("result:", {k: v for k, v in result.items() if k != "heights"})
     print("spread:", host.get_tree("spread"))
     print("preview:", host.get("preview"))
     code = host.exit_code()

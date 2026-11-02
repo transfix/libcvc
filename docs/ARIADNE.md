@@ -2177,10 +2177,26 @@ and the two pass data both ways. `pycvc_gl.ariadne.Host`
 | [`hello.py`](../examples/ariadne/python/hello.py) | `ariadne_hello` | a button calls a Python function, another raises an event Python handles; Python writes the document every frame |
 | [`data_feed.py`](../examples/ariadne/python/data_feed.py) | `ariadne_stream` | Python pushes two plotted series, a table, a numpy picture and a live video stream, and reads the document's controls |
 | [`form.py`](../examples/ariadne/python/form.py) | `nav_compute` | a two-way form: a function returns a dict the document writes with `state-set-tree`, an async function runs a Monte Carlo while the UI keeps drawing, a watch recomputes a preview |
-| [`nav.py`](../examples/ariadne/python/nav.py) | `nav_convoy` | a Python loop steps a `cvc::nav` sim_world (pycvc) and draws its agents, tracks and belief in the document |
+| [`nav.py`](../examples/ariadne/python/nav.py) | `nav_convoy`, `nav_city_drive` | a Python loop drives Humvees on a `cvc::nav` sim_world (pycvc) through Austin, or a block city when its bundle is not installed: true-scale models, routes planned for their turning radius, Jolt physics or nav's kinematic bicycle (the Plant combo), a chase or overview camera, readouts and a map picture |
 
 Each takes `--offscreen` (GL with no window), `--headless` (no GL), `--frames N` and
 `--png PATH`; off a window it presses its own buttons and prints what the document shows.
+
+`nav.py` finds Austin with `pycvc_gl.scenes.find_scene()` (`$CVC_NAV_BUNDLE`, else
+`<prefix>/share/cvc-scenes/austin_south`: `cvcpkg install scene-austin-south-small
+vehicle-humvee`) and the Humvee with `find_vehicle_model()`. `pycvc_gl.vehicle.VehicleModel`
+makes a glTF vehicle +X forward, +Z up and true to scale (as the C++ demos'
+`load_vehicle_template` does), and `seat_transform` / `body_transform` place it from a heading or
+a physics body's pose. Its planning grid is `pycvc.nav_world_rasterize(city.world(), rows, cols,
+...)`, cvc::nav's rasterizer (no VTK). The Jolt plant drives on flat ground with the buildings as
+boxes, as the C++ city demos do; `--relief` puts it on the city's own terrain and building mesh
+(`pycvc.nav_plant(..., ground=field)` starts each vehicle on the ground under it), where a Humvee
+that takes a steep embankment at speed rolls over.
+
+Its `scene:` block is `terrain_lab.ari`'s soft afternoon look (§5.4): a pale sky gradient, a
+low warm `three_point` sun with a cool fill, and shadows that follow the camera with soft edges
+(`shadows.softness`, the shadow filter's radius in texels). The city's materials are matte (low
+specular), set from Python on the nodes it adds.
 
 ```python
 from pycvc_gl.ariadne import Host
