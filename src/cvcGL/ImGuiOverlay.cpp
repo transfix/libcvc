@@ -648,8 +648,10 @@ struct ImGuiOverlay::Impl {
       sizedOnce = true;
       const float shortSide =
           io.DisplaySize.x < io.DisplaySize.y ? io.DisplaySize.x : io.DisplaySize.y;
-      if (shortSide / pixelRatio < kPhoneShortSide)
+      if (shortSide / pixelRatio < kPhoneShortSide) {
         panelsOpen = false;
+        syncSettings(); // as the button's change is: ui.panels_open says what shows
+      }
     }
     if (sceneDraw) // scene annotations: under the UI, and shown with the panels hidden too
       sceneDraw();

@@ -1,7 +1,7 @@
 // The overlay's panels start hidden on a phone's view and open on anything larger, a laptop's
 // browser canvas included. The rule is decided at the overlay's first frame, so each case is a new
-// offscreen window of the size and pixel ratio it names, rendered once. Skips (rc 0) where the
-// overlay has no GL to draw with, unless CVC_REQUIRE_RENDER=1.
+// offscreen window of the size and pixel ratio it names, rendered a few times. Skips (rc 0) where
+// the overlay has no GL to draw with, unless CVC_REQUIRE_RENDER=1.
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/core/app.h>
@@ -26,16 +26,18 @@ struct View {
   bool open; // the panels after the first frame
 };
 
-// The panels after the first frame of a w x h window at this pixel ratio: 1 open, 0 hidden, -1
-// where the overlay could not draw.
-int panels_after_first_frame(int w, int h, float ratio) {
+// The panels after the first frames of a w x h window at this pixel ratio: 1 open, 0 hidden, -1
+// where the overlay could not draw. A few renders, as a host makes: the overlay's GL backend starts
+// at the first, so ImGui's first frame is the second.
+int panels_after_first_frames(int w, int h, float ratio) {
   cvc::app app;
   cvc::gl::SceneGraph sg(app, "panels");
   cvc::gl::SceneRenderer view(sg, w, h, /*offscreen=*/true, "panels");
   cvc::gl::ImGuiOverlay ui(view);
   ui.setPixelRatio(ratio);
   ui.setVisible(true);
-  view.render();
+  for (int frame = 0; frame < 3; ++frame)
+    view.render();
   if (!ui.enabled())
     return -1;
   return ui.panelsOpen() ? 1 : 0;
@@ -53,7 +55,7 @@ int main() {
       {2532, 1050, 3.0f, "a phone on its side (844 x 350 CSS px)", false},
   };
   for (const View &v : views) {
-    const int open = panels_after_first_frame(v.w, v.h, v.ratio);
+    const int open = panels_after_first_frames(v.w, v.h, v.ratio);
     if (open < 0) {
       const char *require = std::getenv("CVC_REQUIRE_RENDER");
       if (require && *require && std::string(require) != "0") {
