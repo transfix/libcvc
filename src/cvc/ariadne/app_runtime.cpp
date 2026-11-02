@@ -48,6 +48,8 @@ AppRuntime::~AppRuntime() {
   verbs_->sync.clear(); // the provider outlives us in the registry: it must bind nothing of ours
   verbs_->async.clear();
   verbs_->quit = nullptr;
+  verbs_->functions.clear();
+  verbs_->async_functions.clear();
   if (netEnabled_)
     disable_net(); // its provider holds app_ by reference
 }
@@ -328,6 +330,24 @@ void AppRuntime::register_async_verb(const std::string &name, const std::string 
   rt_.refresh_program_names();
 }
 
+void AppRuntime::register_function(const std::string &name, cvc::state_exec::native_fn fn) {
+  verbs_->functions[name] = std::move(fn);
+  ensure_intrinsics();
+  rt_.refresh_program_names();
+}
+
+void AppRuntime::register_async_function(const std::string &name,
+                                         cvc::state_exec::async_marshal marshal,
+                                         const std::string &done_channel) {
+  verbs_->async_functions[name] = {done_channel, std::move(marshal)};
+  ensure_intrinsics();
+  rt_.refresh_program_names();
+}
+
+void AppRuntime::run_program(std::string script, std::function<void(const std::string &)> done) {
+  rt_.run_program(std::move(script), done ? std::move(done) : [](const std::string &) {});
+}
+
 void AppRuntime::register_quit() {
   on("quit", [this] { request_close(0); });
   verbs_->quit = [this](int code) { request_close(code); };
@@ -393,6 +413,26 @@ void AppRuntime::ensure_intrinsics() {
                                 return se::value_t(std::move(result));
                               };
                             });
+    }
+    for (const auto &[name, fn] : verbs->functions)
+      se::builtins::register_fn(env, name, fn); // inline on the drain thread, like a sync verb
+    for (const auto &[name, entry] : verbs->async_functions) {
+      const se::async_marshal &marshal = entry.second;
+      if (entry.first.empty()) {
+        se::register_async_fn(env, app->exec_async_host(), name, marshal);
+        continue;
+      }
+      // With a done channel, the kernel's value is posted there too (resolved here, as above).
+      const std::string chan = se::resolve_channel_key(root, entry.first);
+      se::async_marshal posting = [app, chan, marshal](std::span<const se::value_t> args) {
+        se::async_kernel kernel = marshal(args);
+        return se::async_kernel([app, chan, kernel](se::async_call &call) -> se::value_t {
+          se::value_t result = kernel(call);
+          app->exec_scheduler().post_message(chan, result);
+          return result;
+        });
+      };
+      se::register_async_fn(env, app->exec_async_host(), name, std::move(posting));
     }
   });
 }

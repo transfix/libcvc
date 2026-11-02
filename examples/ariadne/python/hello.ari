@@ -1,0 +1,57 @@
+# hello.ari — the first Python-hosted Ariadne document. hello.py runs it:
+#
+#   python hello.py                 # a window
+#   python hello.py --offscreen --png hello.png
+#
+# Both buttons call into the Python program around the document:
+# - Greet's on: is a program. It calls (greet NAME), a function hello.py registers with
+#   @host.function("greet"), and writes the string it returns.
+# - Count's on: is a bare event name, which hello.py handles with @host.on("count").
+# hello.py also writes `python.frame` every frame: Python feeding the document.
+#
+# The keys are relative to the document's state prefix, as hello.py's host.set / host.get are.
+
+meta:
+  name: Ariadne hello (Python host)
+  author: cvc
+  min_libcvc: 3.4.0
+
+requires:
+  - greet                          # the function hello.py registers; without it the load fails
+
+init: |
+  (begin
+    (state-set "name" "world")
+    (state-set "clicks" "0")
+    (state-set "message" "press Greet"))
+
+menubar:
+  - menu: App
+    items:
+      - menu_item: Count
+        on: count
+      - separator
+      - menu_item: Quit
+        on: quit                   # the host's quit: host.run() returns
+
+windows:
+  - window: Hello from Python
+    id: hello
+    pos: [40, 40]
+    size: [420, 240]
+    children:
+      - text: "The buttons call into the Python program that runs this document."
+      - separator
+      - input_text: Name
+        bind: name
+      - button: Greet
+        on: (state-set "message" (greet (state-get "name")))
+      - button: Count
+        on: count
+      - separator
+      - text: "message"
+        bind: message
+      - text: "clicks"
+        bind: clicks
+      - text: "python"
+        bind: python.frame

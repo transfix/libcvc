@@ -1,0 +1,101 @@
+# nav.ari — a Python loop steps a cvc::nav sim_world and draws it in this document. nav.py runs it:
+#
+#   python nav.py                          # a window
+#   python nav.py --offscreen --png nav.png
+#
+# The document declares the ground, the light and every panel. nav.py does the rest:
+# - every frame it steps the world (pycvc.nav_sim_world_step) and draws the agents, their tracks
+#   and the pillars next to the ground (host.lab, over this document's scene);
+# - it publishes the readouts (`stats.*`, the `speeds` plot) and agent 0's belief as the picture
+#   `belief`, the pillars it has seen so far;
+# - it reads the Sim window's controls (`sim.*`) and handles its buttons (`restart`, `shuffle`).
+# The world is 80 m across; the agents shuttle between goals in the west and the east through a
+# field of pillars, sensing them as they go (they start knowing none). `stats.trips` counts arrivals.
+
+meta:
+  name: Python nav (sim_world)
+  author: cvc
+  min_libcvc: 3.4.0
+
+init: |
+  (begin
+    (state-set "sim.agents" "12")
+    (state-set "sim.ticks" "2")
+    (state-set "sim.paused" "0")
+    (state-set "show.tracks" "1"))
+
+menubar:
+  - menu: Sim
+    items:
+      - menu_item: Paused
+        bind: sim.paused
+      - menu_item: Tracks
+        bind: show.tracks
+      - menu_item: Restart
+        on: restart
+      - separator
+      - menu_item: Quit
+        on: quit
+
+windows:
+  - window: Sim
+    id: sim
+    pos: [20, 30]
+    size: [300, 190]
+    children:
+      - slider_int: Agents
+        bind: sim.agents
+        lo: 1
+        hi: 32
+      - slider_int: Ticks per frame
+        bind: sim.ticks
+        lo: 1
+        hi: 10
+      - checkbox: Paused
+        bind: sim.paused
+      - checkbox: Tracks
+        bind: show.tracks
+      - button: Restart
+        on: restart
+      - button: New goals
+        on: shuffle
+
+  - window: Readout
+    id: readout
+    pos: [20, 235]
+    size: [300, 210]
+    children:
+      - text: "tick"
+        bind: stats.tick
+      - text: "trips"
+        bind: stats.trips
+      - text: "mean speed (m/s)"
+        bind: stats.speed
+      - plot: Mean speed
+        bind: speeds
+        height: 60
+
+  - window: Belief (agent 0)
+    id: belief
+    pos: [20, 460]
+    size: [230, 250]
+    children:
+      - image: Seen pillars
+        src: belief
+        size: 200
+
+scene:
+  chrome: false
+  background: { top: [0.10, 0.13, 0.18], bottom: [0.02, 0.03, 0.05] }
+  nodes:
+    - node: ground
+      type: geometry
+      source: { plane: { size: 84 } }
+      material: { color: [0.20, 0.22, 0.26], ambient: 0.4, diffuse: 0.8 }
+  lights:
+    - light: sun
+      rig: three_point
+      stage: { center: [0, 0, 5], radius: 60 }
+      key: { intensity: 1.0, azimuth: -40, elevation: 55, cone: 60 }
+      fill: 0.6
+      ambient: 0.4

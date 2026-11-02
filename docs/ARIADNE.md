@@ -2165,39 +2165,131 @@ deletes the image tiles under them, and the addon decodes each image asynchronou
 moment the half-block underlay can show through: the picture flickers between its real pixels
 and the half-block version, never to blank.
 
-### 9.3 From Python (a full app via `AriRuntime`)
+### 9.3 Writing a Python host
 
-`AriRuntime` ([`AriRuntime.h`](../inc/cvc/gl/ariadne/AriRuntime.h)) collapses all of the
-above into one object, exposed through the `pycvc_gl` bindings. Python never sees SDL or
-VTK directly — cvcGL's onscreen window is SDL's (VTK renders into it) and SDL is the internal
-input backend:
+A Python program can be a document's host: it opens the document, the document calls into it,
+and the two pass data both ways. `pycvc_gl.ariadne.Host`
+([`pymod_gl/ariadne.py`](../bindings/pycvc/pymod_gl/ariadne.py)) is that host; the programs in
+[`examples/ariadne/python`](../examples/ariadne/python) are the place to start:
+
+| Example | The C++ host it mirrors | What it shows |
+|---|---|---|
+| [`hello.py`](../examples/ariadne/python/hello.py) | `ariadne_hello` | a button calls a Python function, another raises an event Python handles; Python writes the document every frame |
+| [`data_feed.py`](../examples/ariadne/python/data_feed.py) | `ariadne_stream` | Python pushes two plotted series, a table, a numpy picture and a live video stream, and reads the document's controls |
+| [`form.py`](../examples/ariadne/python/form.py) | `nav_compute` | a two-way form: a function returns a dict the document writes with `state-set-tree`, an async function runs a Monte Carlo while the UI keeps drawing, a watch recomputes a preview |
+| [`nav.py`](../examples/ariadne/python/nav.py) | `nav_convoy` | a Python loop steps a `cvc::nav` sim_world (pycvc) and draws its agents, tracks and belief in the document |
+
+Each takes `--offscreen` (GL with no window), `--headless` (no GL), `--frames N` and
+`--png PATH`; off a window it presses its own buttons and prints what the document shows.
 
 ```python
-import pycvc, pycvc_gl
+from pycvc_gl.ariadne import Host
 
-app  = pycvc.App()
-view = pycvc_gl.SceneRenderer(...)      # owns the GL window
-rt   = pycvc_gl.AriRuntime(view.scene(), view.camera(), view.overlay())
+host = Host(mode="window")       # "window", "offscreen" (GL, no window) or "headless" (no GL)
 
-rt.load("demo.ari")
-# Register a Python function as a DSL verb (host intrinsic on the app-wide scheduler):
-rt.register_verb("greet", lambda name: f"hello {name}")
-rt.register_async_verb("fetch_rows", slow_query)   # an async function: (fetch_rows) parks
+@host.function("greet")          # (greet NAME) in any of the document's programs
+def greet(name):
+    return f"Hello, {name}!"     # numbers, str, list, dict, None (and numpy) go back
 
-while not rt.should_close():
-    rt.frame(dt)     # processUIEvents → cam.update → drain → visibility → tick
-    rt.render()      # NEVER call the underlying rt.render() directly; go through view
+@host.async_function("solve")    # (solve ...) parks its program; this runs on a pool thread
+def solve(a, b):
+    return heavy(a, b)
+
+@host.on("reset")                # a button or menu item with `on: reset`
+def reset():
+    host.set("count", 0)
+
+@host.on_frame                   # every frame, after the document's programs, before the draw
+def tick(dt):
+    host.set_series("signal", samples)   # a plot: draws it
+
+host.load("doc.ari")             # register first: requires: is checked here
+host.run()                       # until the window closes or the document quits
+host.close()
 ```
 
-`register_verb` / `register_async_verb` install exactly one `register_action_intrinsics`
-provider onto the app-wide scheduler, so the verbs are reachable from the document's
-action lane. An async verb is an async function on the app's async host
-([STATE_EXEC_EXCEPTIONS.md](STATE_EXEC_EXCEPTIONS.md) section 3): `(fetch_rows)` parks the
-action while `slow_query` runs on the app's background task pool, then returns `str()` of its
-result. If it raises, the call raises a `PythonError`, which a `try` can catch. The call is
-charged to the action's caps (§2.2). `register_async_verb(name, done_channel, fn)` also posts
-the result to `done_channel`, for documents that wait with `(msg-recv "done_channel")`. `AriRuntime` also exposes `step`, `run`, `on`, `post_key`, `post_pointer`,
-and `reload_if_changed`.
+**Keys.** A key is relative to the document's state prefix, as a `bind:` is (§7): `host.set("a.b",
+1)` writes what `bind: a.b` shows. A key starting with `/` is app-root absolute. The prefix is
+the host's `name` (`Host(name=...)`, `"ari"` by default).
+
+**Python to the document.**
+
+| Call | What the document sees |
+|---|---|
+| `host.set(key, value)` (also `host[key] = value`) | the value's text: an int, a float (shortest round trip), `"1"`/`"0"` for a bool, `""` for None |
+| `host.set_tree(key, value)` | a subtree, as `(state-set-tree)` writes one: dict keys and list indices name children, a list's node holds its length |
+| `host.set_table(key, rows, columns=None)` | rows at `key.<i>.<column>` and the row count at `key`, for `repeat: (state-get "key")` (column names at `key_columns`) |
+| `host.set_series(key, values, limit=None)` | the comma-separated numbers a `plot:` draws |
+| `host.publish_image(name, array)` | the picture `image:` widgets with `src: name` show: (H, W), (H, W, 3) or (H, W, 4), uint8 or float in [0, 1], row 0 at the top |
+| `host.open_stream(id, w, h)` | a live video stream at `streams.<id>` for a `stream_view` widget or a `type: stream` node; `stream.publish(frame)` sends one |
+| `host.run_program(script, done=None)` | a program queued as one of its actions (`done(how)` gets `""` or why it did not finish) |
+| `host.emit(event)` | the event a button raises: its `on()` handler runs in the next frame |
+
+**The document to Python.** `host.on(event)` handles a bare `on: event`.
+`host.function(name)` and `host.async_function(name)` make a Python callable a function the
+document's programs call with arguments (`pycvc.host_function` builds it; values convert as
+`pycvc.Exec`'s do, §10.1). A synchronous function runs inline in the frame. An async one is an
+async function on the app's async host
+([STATE_EXEC_EXCEPTIONS.md](STATE_EXEC_EXCEPTIONS.md) section 3): its program parks while it
+runs on the app's background task pool, `(name-async ...)` returns a future,
+`with_call=True` passes the call first (`call.cancelled()`, `call.post(value)`), and
+`done_channel` also posts its value there. Their exceptions are the document's: the call raises
+a `PythonError` (its `python_type` names the Python exception), which a `try` catches.
+
+**Reading back.** `host.get(key, default)`, `get_float`, `get_int`, `get_bool` (which reads
+`"1"`/`"true"`/`"yes"`...), `get_series` (a numpy array), `get_tree` (the inverse of `set_tree`),
+`host.watch(key)` (a callback with the new value after a frame that changed it; `tree=True`
+for a subtree), `host.warnings`, and the frame: `host.snapshot(path)` (PNG) and
+`host.frame_rgb()` (an (H, W, 3) array).
+
+**The scene.** In a GL mode `host.scene` is the document's `SceneGraph`, so Python can add its
+own nodes beside the ones the `scene:` block realizes: `host.lab` is a `pycvc_gl.lab.Lab` over
+it (meshes, markers, paths, fields), and `host.frame_bounds(lo, hi)` aims the camera.
+`nav.py` draws its agents and tracks that way.
+
+**Modes.** `"window"` needs a display. `"offscreen"` renders into an offscreen window: a capture,
+or CI on a software GL (VTK picks GLX, EGL or OSMesa at run time; the ImGui overlay needs GLX, so
+CI runs it under Xvfb, see `pycvc-linux` in ci.yml). Its scene and UI clocks step by each frame's
+`dt`, so its frames are reproducible. A view whose shorter side is under 700 logical pixels
+starts with the windows hidden, as on a phone (§5.14), so captures use 1024 x 768 or more. `"headless"` has no GL at all: a `pycvc.AriApp`, an
+`AppRuntime` with no backend and no scene. The document's `init:`, residents, actions, host calls
+and state all run, but nothing is drawn, so a computed `bind:` is never evaluated, a `scene:` is
+dropped with a warning, and a document that `requires: gl.scene` does not load. Tests and CI use
+it.
+
+**Threads and the GIL.** Handlers, functions, `on_frame` hooks and `watch` callbacks run on the
+thread that calls `step()`/`run()`; an async function runs on a pool thread. A frame releases the
+GIL while C++ runs (so do `load()`, `wait_idle()` and the destructors of the runtime and the
+app), and each Python call takes it back, so an async function or another Python thread runs
+while the frame does. A callback may read and write state and queue programs, but not run a
+frame: `step()`, `run()`, `frame()` or `render()` from inside one raises `RuntimeError`
+(`AriRuntime` refuses it too), and `load()` from inside one waits for the frame to end.
+`close()` waits for the async functions still running, so a long one should watch
+`call.cancelled()`.
+
+**Errors.** An exception in an `on()` handler, an `on_frame` hook or a `watch` callback is raised
+from the `step()`/`run()` that ran it. A function's is the document's (above); one it does not
+catch stops that program with a warning, logged through `logging` (`pycvc_gl.ariadne`), and with
+`Host(strict=True)` raised from `step()` as an `AriadneError` whose cause is the Python
+exception: what a test wants.
+
+**The caps.** Ariadne caps each action at 0.1 s and 5000 steps (§2.2), sized for a document's
+own code, and a Python function's run time counts against the time cap (an async one's CPU time
+as steps too). A Python host raises them: `Host` sets `ariadne.limits.action_max_time` to 30 s
+and `action_max_steps` to 0 (no limit) unless `limits=` says otherwise (`limits={}` keeps
+Ariadne's). An async call parks its program, so a long one costs the UI nothing.
+
+**Underneath.** `Host` composes the bindings, which a program can use directly:
+`pycvc_gl.AriRuntime(view, cam, ui)` ([`AriRuntime.h`](../inc/cvc/gl/ariadne/AriRuntime.h)) in a
+GL mode and `pycvc.AriApp(app, prefix)` headless, both with `load`, `frame`, `render`, `step`,
+`run`, `on`, `register_host_function(pycvc.host_function(name, fn, is_async=False,
+with_call=False, done_channel=""))`, `register_quit`, `run_program`, `take_warnings`,
+`wait_idle`, `has_function`, `prefix`; `AriRuntime` adds `publish_image`, `enable_streaming`,
+`set_fixed_clock`, `post_key`, `post_pointer` and `reload_if_changed`. The older
+`register_verb(name, fn)` (no arguments, no value) and `register_async_verb(name, fn)` (no
+arguments, `str()` of the value) still work. In C++ the same functions are
+`AppRuntime::register_function(name, native_fn)` and `register_async_function(name, marshal,
+done_channel)`.
 
 ### 9.4 A document set, installed or served
 

@@ -138,6 +138,18 @@ namespace std {
 // %{ %} block; this body is only for SWIG's parser. %nodefaultctor: Python
 // never constructs an app directly — it comes from make_app()/the host.
 %nodefaultctor cvc::app;
+// Letting go of the last handle destroys the app, which waits for the async calls still running on
+// its task pools. One may be a Python function (an Ariadne host's async function), which needs the
+// GIL to finish, so the destructor releases it (pycvc::gil_release is pycvc_lod.i's); holding it,
+// `del app` with a Python call in flight deadlocked.
+%exception cvc::app::~app {
+  try {
+    pycvc::gil_release pycvc_nogil;
+    $action
+  } catch (const std::exception &e) {
+    SWIG_exception(SWIG_RuntimeError, e.what());
+  }
+}
 namespace cvc { class app {}; }
 
 namespace pycvc {
@@ -4431,5 +4443,9 @@ def register_intrinsics(env, ctx):
 // SWIG's raw-passthrough type (the callable crosses uninspected; the .cpp
 // INCREFs and manages its lifetime).
 %include "pycvc_exec.h"
+
+// The GL-free half of a Python Ariadne host: pycvc.host_function (a Python callable as a host
+// function with arguments and a value) and pycvc.AriApp (a document's programs with no window).
+%include "pycvc_ariadne.i"
 
 PYCVC_DEFAULT_EXCEPTION
