@@ -1259,6 +1259,15 @@ void GeometryNode::installShaderReplacement(const ShaderReplKey &key) {
     sp->AddFragmentShaderReplacement(anchor, true, text, false);
 }
 
+void GeometryNode::setForceOpaque(bool on) {
+  runOnMainThread([this, on]() {
+    if (m_actor)
+      m_actor->SetForceOpaque(on);
+    if (SceneGraph *sg = getSceneGraph())
+      sg->requestRender();
+  });
+}
+
 void GeometryNode::disableCoordinateShiftScale() {
   runOnMainThread([this]() {
     // SetVBOShiftScaleMethod is virtual on vtkPolyDataMapper, so dispatch straight to

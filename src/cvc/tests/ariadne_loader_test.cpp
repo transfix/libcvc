@@ -1915,6 +1915,89 @@ scene:
   EXPECT_EQ(r.scene.shadow_resolution, 2048);
   ASSERT_TRUE(r.scene.has_shadow_interval);
   EXPECT_EQ(r.scene.shadow_interval, 1);
+  EXPECT_FALSE(l.has_wash);
+  EXPECT_FALSE(r.scene.has_shadow_softness);
+  EXPECT_FALSE(r.scene.shadow_focus.present);
+}
+
+// The fast render path's keys (demo3-csma's discipline): a rig without its wash, shadow softness
+// and a shadow focus (fixed, or following the camera), a ground that casts no shadow, an opaque
+// texture. casts_shadow is a built-in key, not a custom node's prop.
+TEST(AriadneScene, FastPathShadowKeys) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  lights:
+    - light: sun
+      rig: three_point
+      wash: 0
+    - light: hall
+      rig: overhead
+      wash: { intensity: 0.6, count: 6, height: 2.5 }
+  shadows:
+    enabled: true
+    softness: 3.5
+    focus: { follow: camera, min_radius: 100, max_radius: 900, per_distance: 2, lead: 0.25,
+             lift: 10, ground: world }
+  nodes:
+    - node: world
+      type: generated_world
+      seed: 3
+      casts_shadow: false
+      material: { opaque: true }
+    - node: g
+      source: { plane: { size: 4 } }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.lights.size(), 2u);
+  ASSERT_TRUE(r.scene.lights[0].has_wash);
+  EXPECT_FLOAT_EQ(r.scene.lights[0].wash, 0.0f);
+  ASSERT_TRUE(r.scene.lights[1].has_wash);
+  EXPECT_FLOAT_EQ(r.scene.lights[1].wash, 0.6f);
+  EXPECT_EQ(r.scene.lights[1].wash_count, 6);
+  EXPECT_FLOAT_EQ(r.scene.lights[1].wash_height, 2.5f);
+  ASSERT_TRUE(r.scene.has_shadow_softness);
+  EXPECT_DOUBLE_EQ(r.scene.shadow_softness, 3.5);
+  const SceneShadowFocus &f = r.scene.shadow_focus;
+  ASSERT_TRUE(f.present);
+  EXPECT_TRUE(f.follow_camera);
+  EXPECT_DOUBLE_EQ(f.min_radius, 100.0);
+  EXPECT_DOUBLE_EQ(f.max_radius, 900.0);
+  EXPECT_DOUBLE_EQ(f.per_distance, 2.0);
+  EXPECT_DOUBLE_EQ(f.lead, 0.25);
+  EXPECT_DOUBLE_EQ(f.lift, 10.0);
+  EXPECT_EQ(f.ground, "world");
+  ASSERT_EQ(r.scene.nodes.size(), 2u);
+  const SceneNode &w = r.scene.nodes[0];
+  ASSERT_TRUE(w.has_casts_shadow);
+  EXPECT_FALSE(w.casts_shadow);
+  EXPECT_TRUE(w.material_opaque);
+  EXPECT_EQ(w.props.find("casts_shadow"), nullptr); // consumed, not left for the custom type
+  EXPECT_EQ(w.props.num("seed", 0.0), 3.0);
+  EXPECT_FALSE(r.scene.nodes[1].has_casts_shadow);
+  EXPECT_FALSE(r.scene.nodes[1].material_opaque);
+
+  LoadResult fixed = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  shadows: { enabled: true, focus: { center: [1, 2, 3], radius: 40 } }
+)");
+  ASSERT_TRUE(fixed.ok) << fixed.error;
+  ASSERT_TRUE(fixed.scene.shadow_focus.present);
+  EXPECT_FALSE(fixed.scene.shadow_focus.follow_camera);
+  EXPECT_DOUBLE_EQ(fixed.scene.shadow_focus.center[1], 2.0);
+  EXPECT_DOUBLE_EQ(fixed.scene.shadow_focus.radius, 40.0);
+
+  LoadResult cam = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  shadows: { enabled: true, focus: camera }
+)");
+  ASSERT_TRUE(cam.ok) << cam.error;
+  EXPECT_TRUE(cam.scene.shadow_focus.follow_camera);
+  EXPECT_DOUBLE_EQ(cam.scene.shadow_focus.min_radius, 150.0); // demo3's defaults
+  EXPECT_DOUBLE_EQ(cam.scene.shadow_focus.max_radius, 600.0);
 }
 
 // §9 background: a solid colour or a top→bottom gradient (a view property the host applies).
