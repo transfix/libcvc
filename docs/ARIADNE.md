@@ -687,8 +687,9 @@ A `scene:` node's `type:` is a built-in (`geometry`, `volume`, `volren`, `volsli
 ([`scene_realize.h`](../inc/cvc/gl/ariadne/scene_realize.h)). cvcGL bundles its custom
 types behind one call, `register_cvcgl_extensions`
 ([`extensions.h`](../inc/cvc/gl/ariadne/extensions.h)), which both `ariadne_hello` and
-`AriRuntime` (so pycvc hosts) make: `forest_trees`, `wave_sea`, `cloud_sky`, and — on a
-libcvc built with `CVC_ENABLE_LIBIGL` — `mesh_lab` and `fe_lab`. Keys the built-in parser
+`AriRuntime` (so pycvc hosts) make: `forest_trees`, `wave_sea`, `cloud_sky`,
+`generated_world` (terrain_lab's world, [`world_nodes.h`](../inc/cvc/gl/ariadne/world_nodes.h)),
+and — on a libcvc built with `CVC_ENABLE_LIBIGL` — `mesh_lab` and `fe_lab`. Keys the built-in parser
 does not know land in the node's `props`, which a custom realizer reads; most realizers
 **seed** state keys from them (`forest.*` for `forest_trees`, the node's own subtree for
 `mesh_lab` / `fe_lab`), so a document's prop is the starting value a bound component then
@@ -704,6 +705,36 @@ A heightfield is the world's own `cvc::height_field`: the node draws its mesh (e
 south-west to north-east), a body on it collides with the same triangles, and a custom node
 standing on it (`ground:` in `forest_trees`, `wave_sea`, `cloud_sky`) samples the triangle under
 each point.
+
+**The fast render path.** A big static world draws fast when it is a few merged meshes and its
+shadow maps are re-baked rarely and spent where the camera looks. These keys say so
+(`examples/ariadne/documents/terrain_lab.ari` uses all of them):
+
+```yaml
+scene:
+  shadows:
+    enabled: true
+    resolution: 4096
+    update_interval: 4
+    softness: 2                 # the edge filter's radius in map texels (0: one hard tap)
+    focus: camera               # or { follow: camera, min_radius: 150, max_radius: 600,
+                                #      per_distance: 3, lead: 0.5, lift: 20, ground: <node> }
+                                # or { center: [x, y, z], radius: r }: a fixed sphere
+  lights:
+    - light: sun
+      rig: three_point
+      back: 0
+      wash: 0                   # or { intensity, count, height }; 0 drops the downlight ring
+  nodes:
+    - node: ground
+      casts_shadow: false       # receives shadows, casts none, never forces a re-bake
+      material: { opaque: true }  # drawn opaque: no per-texel alpha scan of its texture
+```
+
+A camera focus spends the maps on a sphere `lead` radii ahead of the focal point, of radius
+`min_radius + per_distance × (eye-to-focal distance)` clamped to `max_radius`, `lift` over the
+`ground` node's heightfield; `tick_scene` re-aims it every frame, and the maps re-bake once it has
+moved a fiftieth of its radius. Past it the scene is lit unshadowed.
 
 **Physics.** A scene-level `physics:` block declares a rigid-body world
 (`cvc::physics::world`), and a geometry node's `body:` gives it a body there:
@@ -1558,6 +1589,7 @@ includes. Each binds state keys a C++ object owns, so it needs no host code;
 | `display_toggles`, `sim_transport`, `raster_view` | `show.*` layer keys, `sim.*` + host verbs, a host-published image |
 | `volren_controls`, `volslice_controls` | a `volren` / `volslice` node named `bunny_volume` |
 | `forest_controls`, `sea_controls`, `sky_controls` | `forest_trees` / `wave_sea` / `cloud_sky` nodes |
+| `world_controls` | a `generated_world` node (§5.4) |
 | `mesh_tools` | a `mesh_lab` node named `mesh` (§5.4) |
 | `fe_controls` | an `fe_lab` node named `domain` (§5.4) |
 | `card` | a card in a list: avatar / title / subtitle / timestamp header, body, `media` and `actions` slots; its args are state keys, so a `repeat:` includes one per item (not a window: embed it) |
