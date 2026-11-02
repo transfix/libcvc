@@ -1277,12 +1277,23 @@ struct Runtime::Impl {
     bool merged = false;
     // The windows no menu item of the document already toggles: title, resolved open-state path.
     std::vector<std::pair<std::string, std::string>> items;
+    // The windows a `repeat:` makes (conference_roster's per-peer cameras): their template in
+    // `root` and the scope it resolves in. How many there are changes, so each frame's menu lists
+    // that frame's instances, each under its own title.
+    std::vector<std::pair<const Widget *, std::string>> repeated;
+    std::set<std::string> toggled; // the open-state paths a menu item of the document toggles
   };
   WindowsMenuPlan windows_menu;
   int menubar_depth = 0;           // > 0 while a menubar's items are being drawn
   int menu_depth = 0;              // > 0 while a menu's items are being drawn
   bool windows_menu_drawn = false; // this frame
   void plan_windows_menu();
+  // One instance of a repeated window, as the Windows menu lists it: its title and open state.
+  struct RepeatedWindow {
+    std::string id, title, open_path, raise_path;
+  };
+  std::vector<RepeatedWindow> repeated_windows(); // this frame's instances
+  bool windows_menu_has_items();                  // anything to list this frame
   void emit_windows_menu(const std::string &title);
   void emit_windows_menu_items();
 
@@ -1654,7 +1665,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
       ++menu_depth;
       emit_children(w);
       --menu_depth;
-      if (merge && windows_menu.on && !windows_menu.items.empty() && !windows_menu_drawn) {
+      if (merge && windows_menu.on && !windows_menu_drawn && windows_menu_has_items()) {
         b.separator();
         emit_windows_menu_items();
       }
@@ -2178,7 +2189,7 @@ void Runtime::Impl::render() {
   // §5.9: a document with no menubar but a closable window gets a menubar holding just the
   // Windows menu, so a window closed with its X can be opened again.
   if (!windows_menu.has_menubar && windows_menu.any_closable && windows_menu.on &&
-      !windows_menu.items.empty() && backend->begin_main_menu_bar()) {
+      windows_menu_has_items() && backend->begin_main_menu_bar()) {
     ++menubar_depth;
     emit_windows_menu(windows_menu.title);
     --menubar_depth;
@@ -2196,11 +2207,17 @@ void Runtime::Impl::plan_windows_menu() {
   std::set<std::string> bar_menus; // the titles of the menus straight in a menubar
   std::vector<std::pair<std::string, std::string>> windows;
   // Walk the tree with the scope each node resolves its binds in (a load: mount scopes its
-  // children, §12). A repeated widget is made per frame, so a repeated window is not listed.
+  // children, §12). A repeated widget is made per frame: a repeated window's instances are listed
+  // as the menu is drawn (repeated_windows).
   std::function<void(const Widget &, const std::string &, bool)> walk =
       [&](const Widget &w, const std::string &scope, bool in_menubar) {
-        if (!w.repeat.empty())
+        if (!w.repeat.empty()) {
+          if (w.kind == Kind::Window) {
+            p.repeated.emplace_back(&w, scope);
+            p.any_closable = p.any_closable || w.closable;
+          }
           return;
+        }
         const std::string inner = w.scope.empty() ? scope : resolve_bind(scope, w.scope);
         switch (w.kind) {
         case Kind::Menubar:
@@ -2241,11 +2258,45 @@ void Runtime::Impl::plan_windows_menu() {
     if (!toggled.count(win.second))
       p.items.push_back(std::move(win));
   p.merged = !p.placed && bar_menus.count(p.title) != 0;
+  p.toggled = std::move(toggled);
   windows_menu = std::move(p);
 }
 
+std::vector<Runtime::Impl::RepeatedWindow> Runtime::Impl::repeated_windows() {
+  std::vector<RepeatedWindow> out;
+  static const std::string kTok = "{i}";
+  for (const auto &[tmpl, scope] : windows_menu.repeated) {
+    const int n = eval_count(tmpl->repeat); // the count its windows are drawn with this frame
+    for (int i = 0; i < n; ++i) {
+      const std::string idx = std::to_string(i);
+      RepeatedWindow r;
+      r.id = replace_all(tmpl->id.empty() ? tmpl->label : tmpl->id, kTok, idx);
+      r.open_path = resolve_bind(scope, "tree." + r.id + ".open");
+      r.raise_path = resolve_bind(scope, "tree." + r.id + ".raise");
+      if (windows_menu.toggled.count(r.open_path))
+        continue;
+      // Its title as the window shows it: the bound one (a peer's name), else its label.
+      r.title = replace_all(tmpl->label, kTok, idx);
+      if (!tmpl->bind.empty()) {
+        const std::string bind = replace_all(tmpl->bind, kTok, idx);
+        const std::string t =
+            is_expr(bind) ? eval_text(bind) : read_string(app, resolve_bind(scope, bind));
+        if (!t.empty())
+          r.title = t;
+      }
+      out.push_back(std::move(r));
+    }
+  }
+  return out;
+}
+
+bool Runtime::Impl::windows_menu_has_items() {
+  return !windows_menu.items.empty() ||
+         (!windows_menu.repeated.empty() && !repeated_windows().empty());
+}
+
 void Runtime::Impl::emit_windows_menu(const std::string &title) {
-  if (!windows_menu.on || windows_menu.items.empty() || windows_menu_drawn)
+  if (!windows_menu.on || windows_menu_drawn || !windows_menu_has_items())
     return;
   windows_menu_drawn = true;
   Backend &b = *backend;
@@ -2262,6 +2313,17 @@ void Runtime::Impl::emit_windows_menu_items() {
     const BoolEdit e = b.menu_item_toggle(item.first.c_str(), cur);
     if (e.committed)
       write<int>(app, item.second, e.value ? 1 : 0);
+  }
+  for (const RepeatedWindow &r : repeated_windows()) {
+    b.push_id(r.id.c_str()); // two instances may share a title (the label, before their names)
+    const bool cur = read_bool_or_seed(app, r.open_path, 1) != 0;
+    const BoolEdit e = b.menu_item_toggle(r.title.c_str(), cur);
+    if (e.committed) {
+      write<int>(app, r.open_path, e.value ? 1 : 0);
+      if (e.value) // reopened: in front, where it can be seen
+        write<std::string>(app, r.raise_path, "1");
+    }
+    b.pop_id();
   }
 }
 
