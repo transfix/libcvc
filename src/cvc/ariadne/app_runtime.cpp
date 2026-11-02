@@ -182,6 +182,11 @@ void add_host_menus(Widget &root, const std::vector<Widget> &menus) {
 
 } // namespace
 
+void AppRuntime::set_host_ui_size(UiSizeControl ui) {
+  hostUiSize_ = std::move(ui);
+  keysWindow_ = true;
+}
+
 void AppRuntime::set_host_keys(std::vector<KeyBinding> keys) {
   hostKeys_ = std::move(keys);
   keysWindow_ = true;
@@ -279,6 +284,27 @@ void AppRuntime::add_keys(Widget &root, std::vector<KeyBinding> keys) {
     root.children.push_back(keys_window(keys, hostMouse_));
   }
   rt_.set_key_bindings(std::move(keys));
+  add_ui_size(root);
+}
+
+void AppRuntime::add_ui_size(Widget &root) const {
+  if (hostUiSize_.path.empty())
+    return;
+  for (Widget &w : root.children) {
+    if (w.kind != Kind::Window || w.id != kKeysWindow)
+      continue;
+    // A list rather than a slider: each size bakes the UI's font again, so it changes once, on
+    // the pick, never at every step of a drag.
+    std::vector<std::string> labels, values;
+    for (const auto &[label, value] : hostUiSize_.sizes) {
+      labels.push_back(label);
+      values.push_back(value);
+    }
+    Widget size = combo("UI size", hostUiSize_.path, std::move(labels));
+    size.values = std::move(values);
+    w.children.insert(w.children.begin(), {text("Display"), std::move(size), separator()});
+    return;
+  }
 }
 
 bool AppRuntime::have_yaml() { return cvc::ariadne::have_yaml(); }

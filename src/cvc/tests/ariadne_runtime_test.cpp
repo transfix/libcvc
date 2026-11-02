@@ -6879,6 +6879,57 @@ TEST(AriadneAppRuntime, InitCanSetAKeyOverItsDefault) {
   EXPECT_EQ(cvc::state::instance(app)("ui.docs.i.keys.next").value(), "Space");
 }
 
+// The Controls window offers the host's UI size first (set_host_ui_size), bound where the host
+// keeps it: the list shows the size the host has, and a pick writes a number the host reads back.
+TEST(AriadneAppRuntime, ControlsWindowOffersTheHostsUiSize) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  MockBackend mb;
+  AppRuntime art(app, "ui.docs.d");
+  art.set_backend(mb);
+  art.set_host_ui_size({"/view.ui.scale"});
+  auto &st = cvc::state::instance(app);
+  st("view.ui.scale").value(1.25); // the overlay's own, written as it writes it: a touch device's
+  art.load(write_doc("controls_ui_size.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                             "root:\n"
+                                             "  - text: no keys here\n"));
+  st("ui.docs.d.tree.ariadne_keys.open").value(1);
+  art.runtime().render();
+  ASSERT_TRUE(mb.saw("begin_window:Controls(closable)"))
+      << "set_host_ui_size alone gives the window";
+  EXPECT_TRUE(mb.saw("combo:UI size=2")) << "125%, the size the host has";
+  const auto at = [&](const std::string &line) {
+    return std::find(mb.log.begin(), mb.log.end(), line) - mb.log.begin();
+  };
+  EXPECT_LT(at("text_line:Display"), at("text_line:No keys to change here."))
+      << "the UI size first, then the keys";
+
+  mb.combo_ret = IndexEdit{true, true, 3}; // 150%
+  art.runtime().render();
+  mb.combo_ret = IndexEdit{};
+  EXPECT_EQ(st("view.ui.scale").value(), "1.5");
+  EXPECT_DOUBLE_EQ(st("view.ui.scale").value<double>(), 1.5);
+  mb.log.clear();
+  art.runtime().render();
+  EXPECT_TRUE(mb.saw("combo:UI size=3"));
+
+  // A host without one: no Display rows.
+  cvc::app app2;
+  MockBackend mb2;
+  AppRuntime plain(app2, "ui.docs.d");
+  plain.set_backend(mb2);
+  plain.set_host_keys({});
+  plain.load(write_doc("controls_ui_size.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                               "root:\n"
+                                               "  - text: no keys here\n"));
+  cvc::state::instance(app2)("ui.docs.d.tree.ariadne_keys.open").value(1);
+  plain.runtime().render();
+  ASSERT_TRUE(mb2.saw("begin_window:Controls(closable)"));
+  EXPECT_FALSE(mb2.saw("text_line:Display"));
+  EXPECT_FALSE(mb2.saw_prefix("combo:UI size"));
+}
+
 // Every load clears the last document's scene before anything is realized -- a host switching
 // documents, or a reload -- and does so even when the new document declares no scene.
 TEST(AriadneAppRuntime, EachLoadClearsTheLastScene) {

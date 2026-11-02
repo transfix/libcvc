@@ -1179,7 +1179,14 @@ the Windows menu (§5.9), takes its place in the column again. A new document
 
 How each backend does it:
 
-- **ImGui** gives a window with no size ImGui's always-auto-resize: it measures the window's
+- **ImGui** measures in logical pixels at the UI size (§5.14): a document's `px` (a window's
+  `pos:` and `size:`, a column's width, a picture's or a plot's size, the area a group's
+  `background:` takes) is multiplied by the UI size
+  and the display's pixel ratio, as the UI's text and widgets are, and the geometry it persists
+  is divided back, so a layout looks the same at any UI size and on a phone's dense screen. A
+  window opens inside the view: no larger than the work area, and moved in from its `pos:` (or
+  its persisted place) until all of it shows, so a layout made for a laptop opens on a phone in
+  reach. ImGui gives a window with no size ImGui's always-auto-resize: it measures the window's
   widgets each frame, its labeled widgets at the width ImGui gives an auto-resizing window's items
   (16 font sizes), and a row-split pane as wide as its own widgets. A window with a size gets a
   horizontal scroll bar as well as ImGui's vertical one, and a long label shrinks its slider,
@@ -1481,6 +1488,38 @@ has loaded, or when it failed, nothing is drawn behind the content.
 - A player whose widget a frame did not draw (its window closed, its item scrolled out of a
   `repeat:`) is paused at once and closed 5 s later. `ari snapshot` waits while a player is
   still loading, as it waits for pictures.
+
+### 5.14 On a phone: UI size, hiding windows, the system keyboard
+
+A document needs nothing of its own to work on a phone: the ImGui host (arigl, cyprty) does
+this for every one.
+
+- **UI size.** The UI is sized in logical pixels (CSS pixels in a browser) times the UI size,
+  times the display's pixel ratio. A phone's canvas is about three device pixels to the CSS
+  pixel, so without the ratio its UI would come out a third of its size. The UI size starts at
+  1.25 on a touch device and 1 with a mouse, and is the state key
+  `<scene>.viewers.<viewer>.ui.scale` (arigl's: `ui.docs.ari.viewers.main.ui.scale`). The
+  Controls window offers it as **UI size** (75% to 200%), under *Display* above the keys, for any
+  host that calls `AppRuntime::set_host_ui_size`. A new size takes effect at the next frame, and
+  the open windows grow or shrink with it. It holds for the run.
+- **Hiding windows.** On a view whose short side is under 700 logical pixels the panels start
+  hidden, and a round button in the bottom-right corner shows and hides them all (the menu bar
+  too), so the scene is never buried. The button stays above every window, even one dragged over
+  its corner. A window collapses to its title bar with the arrow at the title's left (or a double
+  tap on the title), closes with its X when it is `closable:`, and comes back from the View or
+  Windows menu (§5.9). On a touch screen a window moves by its title bar only, so a finger that
+  slips off a widget does not carry its window away.
+- **The system keyboard.** A browser raises a phone's keyboard only for a focused text field,
+  which the canvas is not. When a finger (or a pen) activates an `input_text`, the page focuses a
+  hidden `<input>` placed at the field's caret, so the keyboard comes up and the browser keeps
+  the field in view above it; what the keyboard types goes to the field, autocorrect and
+  composed words included, and the field's deactivation puts the keyboard away. iOS raises its
+  keyboard only for a focus made while the finger lifts, which is when the page makes it; a field
+  that becomes active with no finger down (an `autofocus:` one) raises it on Android, and on iOS
+  at the first tap on it. While the hidden input has the keys the canvas does not, so typing never
+  reaches `on_key` or walks an avatar. A mouse click on a field types through the canvas as
+  before. A native build has no phone yet; SDL3's `SDL_StartTextInput` is how one would raise the
+  keyboard on iOS and Android.
 
 ## 6. Composition: include / import / load
 

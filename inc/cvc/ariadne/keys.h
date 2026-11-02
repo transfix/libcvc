@@ -13,6 +13,7 @@
 
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace cvc {
@@ -82,6 +83,17 @@ std::string stored_key_name(std::string_view pressed);
 
 // True when `key` is one of the keys stored at a binding (`stored`, as join_keys writes it).
 bool key_matches(std::string_view stored, std::string_view key);
+
+// The host's UI size, for the Controls window to change beside the keys (AppRuntime::
+// set_host_ui_size): the state path holding it, a number (1 = the UI at its own size; a leading
+// '/' is absolute, as KeyBinding::path is), and the sizes offered, each its label and the value
+// written, spelled as the host writes the number back. arigl's is cvc::gl::ImGuiOverlay's
+// <scene>.viewers.main.ui.scale, which the overlay applies at the next frame.
+struct UiSizeControl {
+  std::string path; // "" = no UI size row
+  std::vector<std::pair<std::string, std::string>> sizes = {
+      {"75%", "0.75"}, {"100%", "1"}, {"125%", "1.25"}, {"150%", "1.5"}, {"200%", "2"}};
+};
 
 } // namespace ariadne
 } // namespace cvc

@@ -200,6 +200,9 @@ private:
   std::vector<FlowRect> m_flowObstacles;
   int m_flowFrame = -1;
   float m_flowX = 0.0f, m_flowY = 0.0f, m_flowColumnW = 0.0f;
+  // Windows that fit their content and opened at a place of their own before ImGui had measured
+  // them: the next frame moves each in again, measured, until all of it shows (§5.8).
+  std::unordered_set<std::string> m_placedUnmeasured;
 
   // reset_layout(): the windows drawn since, by id. A window's first draw after it takes its
   // authored place and size (or rejoins the flow) though ImGui still holds the last document's.
