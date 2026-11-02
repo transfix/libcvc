@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/loader.h>
+#include <cvc/ariadne/uri.h>
 #include <cvc/core/app.h>
 #include <cvc/gl/ariadne/ImGuiBackend.h>
 #include <cvc/image/image.h>
@@ -208,6 +209,45 @@ int main() {
       chk(win && win->DrawList->_Splitter._Count <= 1 && win->DrawList->CmdBuffer.Size > 0,
           "the split draw list merged back into one");
     }
+  }
+  { // the card component (§6.5) in ImGui: its avatar, at its 40 px, beside the title
+    const std::filesystem::path src_ariadne =
+        std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() / "cvc" /
+        "ariadne";
+    ari::register_cvc_uri_handler({src_ariadne.string()});
+    cvc::app app;
+    ari::Runtime rt(app, "ui");
+    rt.set_media_base(dir.string());
+    RecordingBackend be;
+    rt.set_backend(&be);
+    cvc::state::instance(app)("ui.post.name").value(std::string("Grace Hopper"));
+    cvc::state::instance(app)("ui.post.avatar").value(std::string("file://pic.png"));
+    ari::LoadResult lr = ari::load_string("import: cvc://components/card.ari\n"
+                                          "windows:\n"
+                                          "  - window: Feed\n"
+                                          "    children:\n"
+                                          "      - include: card\n"
+                                          "        args: {id: post, avatar: post.avatar,"
+                                          " title: post.name}\n");
+    chk(lr.ok && !lr.root.children.empty(), "a document with a card loads");
+    rt.set_root(std::move(lr.root));
+    const auto frame = [&] {
+      be.drawn.clear();
+      io.DeltaTime = 1.0f / 60.0f;
+      ImGui::NewFrame();
+      rt.render();
+      ImGui::Render();
+    };
+    bool avatar = false;
+    const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!avatar && std::chrono::steady_clock::now() < end) {
+      frame();
+      for (const auto &kv : be.drawn)
+        avatar = avatar || (kv.first.rfind("media:placeholder:", 0) != 0 &&
+                            kv.first.rfind("media:", 0) == 0 && kv.second == 40.0f);
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    chk(avatar, "the card's avatar is drawn at 40 px");
   }
   cvc::gl::ImGuiBackend::setImGuiContext(nullptr);
   ImGui::DestroyContext(ctx);

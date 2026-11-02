@@ -1077,9 +1077,21 @@ void merge_units(Ctx &ctx, const YAML::Node &unitsNode, bool warn_collision) {
     if (!kv.first.IsScalar())
       continue;
     const std::string name = kv.first.Scalar();
+    // §6.2 a document's own unit marked `fallback: true` stands in only where no import defines
+    // the name (a component the host's library may not have yet).
+    const bool fallback = kv.second.IsMap() && kv.second["fallback"] &&
+                          kv.second["fallback"].IsScalar() &&
+                          kv.second["fallback"].as<std::string>("") == "true";
+    if (fallback && ctx.units.count(name))
+      continue;
     if (warn_collision && ctx.units.count(name))
       ctx.warn("ari: import: unit '" + name + "' is defined by more than one library — last wins");
-    ctx.units[name] = kv.second;
+    YAML::Node unit = kv.second;
+    if (fallback) {
+      unit = YAML::Clone(kv.second);
+      unit.remove("fallback");
+    }
+    ctx.units[name] = unit;
   }
 }
 
@@ -1275,14 +1287,22 @@ void process_imports(Ctx &ctx, const YAML::Node &doc, const std::string &base_di
     return;
   }
   const YAML::Node imp = doc["import"];
-  std::vector<std::string> uris;
-  if (imp && imp.IsScalar())
-    uris.push_back(imp.Scalar());
-  else if (imp && imp.IsSequence())
+  // Each entry is a URI, or {uri: URI, optional: true}: a library the host may not have (a newer
+  // component), whose absence is no warning.
+  std::vector<std::pair<std::string, bool>> uris;
+  const auto entry = [&](const YAML::Node &p) {
+    if (p.IsScalar())
+      uris.emplace_back(p.Scalar(), false);
+    else if (p.IsMap() && p["uri"] && p["uri"].IsScalar())
+      uris.emplace_back(p["uri"].Scalar(),
+                        p["optional"] && p["optional"].as<std::string>("") == "true");
+  };
+  if (imp && imp.IsSequence())
     for (const auto &p : imp)
-      if (p.IsScalar())
-        uris.push_back(p.Scalar());
-  for (const std::string &uri : uris) {
+      entry(p);
+  else if (imp)
+    entry(imp);
+  for (const auto &[uri, optional] : uris) {
     if (ctx.imported.size() >= kMaxImports) {
       ctx.warn("ari: import limit reached (" + std::to_string(kMaxImports) +
                " libraries) — remaining imports skipped");
@@ -1290,7 +1310,8 @@ void process_imports(Ctx &ctx, const YAML::Node &doc, const std::string &base_di
     }
     const UriResult res = resolve(uri, base_dir);
     if (!res.ok) {
-      ctx.warn("ari: import '" + uri + "' could not be resolved: " + res.error);
+      if (!optional)
+        ctx.warn("ari: import '" + uri + "' could not be resolved: " + res.error);
       continue;
     }
     note_source(ctx, res.canonical); // §12.5 watch this imported file for hot-reload
@@ -1366,6 +1387,49 @@ void substitute_node(YAML::Node node, const std::map<std::string, std::string> &
   }
 }
 
+// §6.1 slots: a unit marks where an include site's widgets go with a `- slot: NAME` item in any of
+// its widget lists, and the include's `slots: {NAME: [widget, ...]}` puts those widgets there, in
+// place of the item (a single widget map works too). A slot the include leaves empty is dropped.
+// So a component takes whole widget lists (a card's media, its action row) where args take only
+// strings. The include site's widgets are its own: args are not substituted into them.
+void fill_slots(Ctx &ctx, YAML::Node node, const YAML::Node &slots, const std::string &unit) {
+  if (node.IsMap()) {
+    for (auto it = node.begin(); it != node.end(); ++it)
+      fill_slots(ctx, it->second, slots, unit);
+    return;
+  }
+  if (!node.IsSequence())
+    return;
+  bool any = false;
+  for (const YAML::Node &item : node)
+    any = any || (item.IsMap() && item["slot"] && item.size() == 1);
+  if (!any) {
+    for (std::size_t i = 0; i < node.size(); ++i)
+      fill_slots(ctx, node[i], slots, unit);
+    return;
+  }
+  YAML::Node out(YAML::NodeType::Sequence);
+  for (const YAML::Node &item : node) {
+    if (item.IsMap() && item["slot"] && item.size() == 1) {
+      const std::string name = item["slot"].as<std::string>("");
+      const YAML::Node given = slots && slots.IsMap() ? slots[name] : YAML::Node();
+      if (given && given.IsSequence()) {
+        for (const YAML::Node &g : given)
+          out.push_back(YAML::Clone(g));
+      } else if (given && given.IsMap()) {
+        out.push_back(YAML::Clone(given));
+      } else if (given && !given.IsNull()) {
+        ctx.warn("ari: include " + unit + ": slots." + name + " must be a widget list — ignored");
+      }
+      continue;
+    }
+    YAML::Node copy = item;
+    fill_slots(ctx, copy, slots, unit);
+    out.push_back(copy);
+  }
+  node = out;
+}
+
 // §12: expand `include: <unit>` — instantiate a units: template with its `args:` substituted.
 Widget expand_include(Ctx &ctx, const YAML::Node &n) {
   const std::string name = str(n, "include");
@@ -1400,6 +1464,7 @@ Widget expand_include(Ctx &ctx, const YAML::Node &n) {
   if (declares && inst["args"])
     inst.remove("args"); // the declaration, not a widget key
   substitute_node(inst, args);
+  fill_slots(ctx, inst, n["slots"], name); // after args: the include site's widgets are its own
   Widget w = parse_widget(ctx, inst);
   ctx.expanding.erase(name);
   // §12/§3.0.3b geometry override at the include site: a window `include:` may carry its own

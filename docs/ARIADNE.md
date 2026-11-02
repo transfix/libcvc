@@ -1251,7 +1251,7 @@ windows:
 ### 5.11 Pictures by URL: `image:` with a URI
 
 An `image:` whose `src` (or the value at its `bind:`) is a URI shows that picture. Design and
-the work still to come (video, audio, a card component):
+the work still to come (video and audio):
 [ARIADNE_MEDIA.md](roadmap/ARIADNE_MEDIA.md).
 
 ```yaml
@@ -1413,6 +1413,30 @@ Any widget may carry an `id:` (not only windows): it names the instance a backen
 per-instance state on and that the core persists view state under (`tree.<id>.*`). An include
 site may override the unit's `id:`, so two instances of one unit stay distinct.
 
+Args are strings. A unit takes whole widget lists through **slots**: a `- slot: NAME` item in
+any of its widget lists marks where they go. The include site's `slots: {NAME: [...]}` puts its
+widgets there, in place of the item; a single widget map works too, and a slot left unfilled is
+dropped. The include site's widgets are its own: the unit's args are not substituted into them,
+though a `repeat:` around the include still substitutes `{i}`.
+
+```yaml
+units:
+  framed:
+    args: { title: Untitled }
+    type: group
+    children:
+      - text: "{title}"
+      - slot: body
+      - slot: footer
+windows:
+  - window: W
+    children:
+      - include: framed
+        args: { title: Hello }
+        slots:
+          body: [ { text: first }, { button: Go, on: go } ]
+```
+
 ### 6.2 `import:` — shared-scope library merge
 
 `process_imports` ([`loader.cpp:761`](../src/cvc/ariadne/loader.cpp)) resolves a URI (or
@@ -1422,6 +1446,17 @@ and cycle-guards on the resolved `canonical` identity
 ([`loader.cpp:789`](../src/cvc/ariadne/loader.cpp)), capped at `kMaxImportDepth = 32` /
 `kMaxImports = 4096` ([`loader.cpp:758`](../src/cvc/ariadne/loader.cpp)). Local units
 override imported ones. This is how a document composes a library of shipped panels.
+
+An entry may be `{uri: URI, optional: true}`: a library the host may not have (a component
+newer than it), whose absence is no warning, so `ari test` does not fail on it. A document's
+own unit marked `fallback: true` stands in for a unit of that name only where no import defines
+it, so a document adopts a shipped component and still runs on hosts without it:
+
+```yaml
+import: [{uri: cvc://components/card.ari, optional: true}]
+units:
+  card: {fallback: true, type: group, children: [...]}   # used where card.ari is not there
+```
 
 ### 6.3 `load:` — isolated sub-module mount
 
@@ -1489,7 +1524,39 @@ includes. Each binds state keys a C++ object owns, so it needs no host code;
 | `world_controls` | a `generated_world` node (§5.4) |
 | `mesh_tools` | a `mesh_lab` node named `mesh` (§5.4) |
 | `fe_controls` | an `fe_lab` node named `domain` (§5.4) |
+| `card` | a card in a list: avatar / title / subtitle / timestamp header, body, `media` and `actions` slots; its args are state keys, so a `repeat:` includes one per item (not a window: embed it) |
 | `transfer_function`, `transfer_function_editor` | any node's `transfer_function` model (args `node`, `id`): the ColorTable2 editor with histogram / contour spectrum / contour tree layers — see [`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) |
+
+The `card` is a generic social or inbox card (§5.11 pictures, slots in §6.1):
+
+```yaml
+import: cvc://components/card.ari
+windows:
+  - window: Feed
+    children:
+      - type: group
+        repeat: (state-get "feed.items")
+        children:
+          - include: card
+            args: {id: post_{i}, avatar: feed.items.{i}.author.avatar,
+                   title: feed.items.{i}.author.name, subtitle: feed.items.{i}.author.handle,
+                   time: feed.items.{i}.when, body: feed.items.{i}.text}
+            slots:
+              media:
+                - image: ""
+                  bind: feed.items.{i}.media.0.url
+                  visible_when: (!= (state-get "feed.items.{i}.media.0.url") "")
+                  size: [440, 248]
+                  fit: cover
+              actions:
+                - { button: Reply, on: (state-set "compose.reply_to" "{i}") }
+```
+
+Slots `note` (a row above the header), `extra` (lines under the byline, in the header's text
+column) and `body` (widgets after the body text) take more of a post's parts. A part whose key
+is empty is not drawn. The avatar is a circle `avatar_size` px across (40),
+loading through `avatar_auth`'s credential where its URL needs one. A one-column grid with an
+outer border frames the card: an ImGui table, a box in a terminal.
 
 Most components that address one node use a fixed node id; copy the file and change the id to
 drive another node. `transfer_function` instead takes the node as an include arg (§6.1).

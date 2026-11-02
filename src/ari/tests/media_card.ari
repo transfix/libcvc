@@ -1,0 +1,48 @@
+# media_card.ari -- two cards from the component library (cvc://components/card.ari, docs/ARIADNE.md
+# §6.5) for media_in_tmux_test.sh: one with an avatar, a byline, a picture that loads and one that
+# never does (its failed placeholder keeps its box), and actions; one with only a title and a body.
+meta: {min_libcvc: 3.7.0}
+import: cvc://components/card.ari
+init: |
+  (state-set-tree "feed" (dict "items" (list
+    (dict "author" (dict "name" "Grace Hopper" "handle" "@grace" "avatar" "file://media/checker.png")
+          "when" "2h" "text" "Nanoseconds are this long."
+          "pic" "file://media/checker.png" "clip" "file://media/gone.png")
+    (dict "author" (dict "name" "Ada" "handle" "" "avatar" "")
+          "when" "" "text" "Only a title and a body." "pic" "" "clip" ""))))
+windows:
+  - window: Feed
+    id: feed
+    size: [480, auto]
+    children:
+      - type: group
+        repeat: (state-get "feed.items")
+        children:
+          - include: card
+            args:
+              id: post_{i}
+              avatar: feed.items.{i}.author.avatar
+              title: feed.items.{i}.author.name
+              subtitle: feed.items.{i}.author.handle
+              time: feed.items.{i}.when
+              body: feed.items.{i}.text
+            slots:
+              media:
+                - image: ""
+                  bind: feed.items.{i}.pic
+                  visible_when: (!= (state-get "feed.items.{i}.pic") "")
+                  size: [320, 32]
+                  fit: cover
+                  status: s.pic{i}
+                - image: ""
+                  bind: feed.items.{i}.clip
+                  visible_when: (!= (state-get "feed.items.{i}.clip") "")
+                  size: [160, 32]
+                  status: s.clip{i}
+              actions:
+                - button: Reply
+                  on: (state-set "s.reply" "{i}")
+                - button: Like
+                  on: (state-set "s.like" "{i}")
+      - text: ""
+        bind: (string.join (list "pic" (state-get "s.pic0") "clip" (state-get "s.clip0")) " ")
