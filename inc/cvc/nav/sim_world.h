@@ -331,6 +331,13 @@ public:
   // false.
   bool set_pose(int i, float x_n, float y_n, float heading, float speed = 0.0f);
   void add_obstacle(int r0, int r1, int c0, int c1);
+  // Replace the world as it is: `truth` is rows*cols uint8, row-major, as the constructor's (a
+  // wall raised or taken down, or a moving vehicle's footprint each tick). truth() reads it back
+  // at once; the agents learn it as the constructor's truth, by sensing: from the next sense tick,
+  // where a ray reaches it, and under freeze_sense never. What was derived from the truth before
+  // keeps it: the material gate surface (set_material again to refresh it). A physics plant's
+  // colliders are its own world's, which the caller changes with it.
+  void set_truth(const std::uint8_t *truth);
 
   // ── yielding: agents that get out of each other's way (nav/yield.h, nav/intent.h) ──
   // Off by default (yield_config::horizon_s 0): runs are byte-unchanged. On, every step()
