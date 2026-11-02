@@ -1193,8 +1193,11 @@ Every document gets a **Windows** menu to open such a window again, with no menu
   "Settings" or "View" menu bound to `tree.<id>.open` (`lsystem_forest.ari`,
   `conference_roster.ari`) keeps it, and the Windows menu lists only the windows that menu leaves
   out. When it leaves none out there is no Windows menu.
-- A window made by `repeat:` is not listed, since there can be any number of them. The document
-  opens those itself (`conference_roster.ari`'s camera windows open from the Users list).
+- A window made by `repeat:` is listed once per instance, under the title that instance shows
+  (its `bind:`, else its label with `{i}` filled in), after the other windows. The list follows the
+  repeat's count each frame. Opening one from the menu also brings it to the front.
+  `conference_roster.ari` sets `windows_menu: View`, so its per-peer camera windows are listed by
+  name at the end of its View menu.
 - A host's menus (`AppRuntime::set_host_menus`) count as the document's: arigl's
   *Settings > Keys...* opens the Keys window, so arigl's Windows menu leaves it out. Under a host
   without one, the Windows menu is how the Keys window opens.
