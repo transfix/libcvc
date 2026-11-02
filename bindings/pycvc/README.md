@@ -140,7 +140,10 @@ Contract tests: `test_pycvc_world_units.py`, `test_pycvc_gl_world.py`, and the
 `step`, `state_hash`, `save` / `restore` and `snapshot_json`. `vehicle_desc` has the
 `humvee()` and `roboracer()` presets, and `physics_binding` is the world's state-tree
 binding. `nav_plant` makes a world's vehicles a sim_world's plant
-(`nav_sim_world_set_plant(sim, plant)`; `None` selects nav's bicycle). Terrain and the
+(`nav_sim_world_set_plant(sim, plant)`; `None` selects nav's bicycle). `dyn_bike_plant` is the
+dynamic single-track vehicle as one (tires, load transfer, actuator lag), with its energy books
+(`books(i)`, `last_tick(i)`, `kinetic_at_attach(i)`) and model state (`body(i)`); given a
+`physics_world` and its ground bodies, each chassis is a box that collides in it. Terrain and the
 sim_world's settings are reached through `nav_sim_world_set_terrain` and
 `nav_sim_world_pull` / `publish`. `state_comment` / `state_property` read what a key says it
 is.
