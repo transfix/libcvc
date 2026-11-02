@@ -45,7 +45,9 @@
 #include <cvc/world/surface.h>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <set>
+#include <stdexcept>
 #include <utility>
 
 namespace cvc {
@@ -325,7 +327,7 @@ struct Districts {
   }
 };
 
-double slopeDeg(const heightfield &hf, double x, double y) {
+double slopeDeg(const terrain_source &hf, double x, double y) {
   const double e = 4.0;
   const double gx = (hf.sample(x + e, y) - hf.sample(x - e, y)) / (2.0 * e);
   const double gy = (hf.sample(x, y + e) - hf.sample(x, y - e)) / (2.0 * e);
@@ -336,7 +338,8 @@ double slopeDeg(const heightfield &hf, double x, double y) {
 // candidates: dry, flat (scored by exp(-(slope / 9 deg)^2)), with dry, gentle ground around it,
 // off the edges and away from the centres already placed, with a slight pull to the middle of the
 // world.
-Districts pickDistricts(const heightfield &hf, double half, double water, std::uint64_t seed) {
+Districts pickDistricts(const terrain_source &hf, double half, double water, std::uint64_t seed,
+                        const road_mask_fn &blocked) {
   using lsys::stream;
   using lsys::uni;
   Districts out;
@@ -348,7 +351,7 @@ Districts pickDistricts(const heightfield &hf, double half, double water, std::u
       const std::uint64_t el = 0xD157u + std::uint64_t(k) * 1000u + i;
       const double x = uni(seed, stream::terrain, el, 0, -half + edge, half - edge);
       const double y = uni(seed, stream::terrain, el, 1, -half + edge, half - edge);
-      if (hf.sample(x, y) < water + 3.0)
+      if (hf.sample(x, y) < water + 3.0 || (blocked && blocked(x, y)))
         continue;
       // How much of the ground around it a town could use: dry, and gentle enough for streets
       // (a flat flood plain by the shore scores low).
@@ -361,7 +364,10 @@ Districts pickDistricts(const heightfield &hf, double half, double water, std::u
           const double qx = x + rr * ring * std::cos(a * M_PI / 4.0);
           const double qy = y + rr * ring * std::sin(a * M_PI / 4.0);
           ++total;
-          usable += hf.sample(qx, qy) > water + 2.0 && slopeDeg(hf, qx, qy) < 16.0 ? 1 : 0;
+          usable += hf.sample(qx, qy) > water + 2.0 && slopeDeg(hf, qx, qy) < 16.0 &&
+                            !(blocked && blocked(qx, qy))
+                        ? 1
+                        : 0;
         }
       const double slope = slopeDeg(hf, x, y);
       double sep = 1.0;
@@ -425,6 +431,24 @@ road_params cityRoadParams(std::uint64_t seed, double half, const Districts &dis
   return rp;
 }
 
+// The "districts" city: district cores on dry, gentle ground, and a street network grown from them
+// (graded, kept off blocked ground, dead-end stubs trimmed).
+city_streets districtStreets(const city_context &c) {
+  const generated_world_params &p = c.params;
+  const terrain_source &ground = c.terrain;
+  auto dist = std::make_shared<const Districts>(
+      pickDistricts(ground, p.half_m, p.water_level_m, p.seed, c.blocked));
+  city_streets out;
+  out.roads = generate_roads(
+      cityRoadParams(p.seed, p.half_m, *dist),
+      [&ground](double x, double y) { return ground.sample(x, y); }, c.blocked,
+      [dist](double x, double y) { return (*dist)(x, y); });
+  prune_roads(out.roads, 30.0);
+  out.urbanity = [dist](double x, double y) { return (*dist)(x, y); };
+  out.districts = dist->d.size();
+  return out;
+}
+
 // A building's footprint, for keeping trees out of it: centre, axes (c, s) and half extents.
 struct Footprint {
   double x, y, c, s, hx, hy;
@@ -432,7 +456,9 @@ struct Footprint {
 struct FootprintIndex {
   double cell = 32.0;
   std::map<std::pair<int, int>, std::vector<Footprint>> cells;
+  std::vector<Footprint> all; // in the order added
   void add(const Footprint &f) {
+    all.push_back(f);
     const double r = std::hypot(f.hx, f.hy);
     for (int i = int(std::floor((f.x - r) / cell)); i <= int(std::floor((f.x + r) / cell)); ++i)
       for (int j = int(std::floor((f.y - r) / cell)); j <= int(std::floor((f.y + r) / cell)); ++j)
@@ -450,6 +476,43 @@ struct FootprintIndex {
     return false;
   }
 };
+
+// The buildings into the raster: every cell whose sample point is under a footprint (the
+// footprints carry a 1 m tree margin, taken off here), and the cell under each centre, so a
+// building smaller than a cell on a coarse raster still blocks it. They take the concrete wall
+// class, occupied and hard.
+void stampBuildings(const FootprintIndex &fps, const grid_spec &g, const surface_registry &reg,
+                    raster_out &out) {
+  const std::uint16_t wall = reg.class_for_role(lsys::role::wall_concrete);
+  const surface_class &sc = reg[wall];
+  const double cw = g.cell_w(), ch = g.cell_h();
+  auto mark = [&](int r, int c) {
+    const std::size_t i = std::size_t(r) * g.cols + c;
+    out.klass[i] = wall;
+    out.layer_owner[i] = 1;
+    out.risk_raw[i] = sc.rho;
+    out.hard[i] = sc.hard ? 1 : 0;
+    out.occupancy[i] = 1;
+  };
+  for (const Footprint &f : fps.all) {
+    const double hx = std::max(0.0, f.hx - 1.0), hy = std::max(0.0, f.hy - 1.0);
+    const double rad = std::hypot(hx, hy);
+    const int c0 = std::max(0, int(std::floor((f.x - rad - g.min_x) / cw)));
+    const int c1 = std::min(g.cols - 1, int(std::ceil((f.x + rad - g.min_x) / cw)));
+    const int r0 = std::max(0, int(std::floor((f.y - rad - g.min_y) / ch)));
+    const int r1 = std::min(g.rows - 1, int(std::ceil((f.y + rad - g.min_y) / ch)));
+    for (int r = r0; r <= r1; ++r)
+      for (int c = c0; c <= c1; ++c) {
+        const double dx = g.world_x(c) - f.x, dy = g.world_y(r) - f.y;
+        if (std::fabs(dx * f.c + dy * f.s) <= hx && std::fabs(-dx * f.s + dy * f.c) <= hy)
+          mark(r, c);
+      }
+    const int cc = int(std::lround((f.x - g.min_x) / cw)),
+              rc = int(std::lround((f.y - g.min_y) / ch));
+    if (cc >= 0 && cc < g.cols && rc >= 0 && rc < g.rows)
+      mark(rc, cc);
+  }
+}
 
 // A flat-shaded convex polygon (its own vertices, so the faces keep crisp edges).
 void appendFace(cvc::geometry &g, std::initializer_list<Vec3d> poly,
@@ -549,10 +612,11 @@ Footprint massLot(const lot &L, std::uint64_t seed, const surface_registry &reg,
 // plus noise shared by a whole street side, so a side is built out or not), up to `cap`
 // buildings. With a library the lots take the archetypes at their real size; without, procedural
 // massing. Core lots get a paved forecourt to the kerb. Returns how many buildings.
-std::size_t buildCity(const building_library *lib, const road_network &net, const heightfield &hf,
-                      const Districts &dist, const surface_registry &reg, std::uint64_t seed,
-                      double waterLevel, int cap, cvc::geometry &out,
-                      std::vector<generated_world::apron> &aprons, FootprintIndex &fps) {
+std::size_t buildCity(const building_library *lib, const road_network &net,
+                      const terrain_source &hf, const road_density_fn &urbanity,
+                      const surface_registry &reg, std::uint64_t seed, double waterLevel, int cap,
+                      cvc::geometry &out, std::vector<generated_world::apron> &aprons,
+                      FootprintIndex &fps) {
   using lsys::stream;
   site_params sp;
   sp.seed = seed;
@@ -571,7 +635,20 @@ std::size_t buildCity(const building_library *lib, const road_network &net, cons
   sp.core_spacing = 1.0;
   sp.sparse_fill = 0.35;
   const auto h = [&hf](double x, double y) { return hf.sample(x, y); };
-  std::vector<lot> lots = layout_lots(net, sp, h, std::cref(dist));
+  std::vector<lot> lots = layout_lots(net, sp, h, urbanity);
+  // A generator's own masks overrule the slope and water checks: no lot off its buildable ground
+  // or on a channel or cliff.
+  const bool buildable = hf.has_mask(terrain_mask::buildable),
+             channel = hf.has_mask(terrain_mask::channel), cliff = hf.has_mask(terrain_mask::cliff);
+  if (buildable || channel || cliff)
+    lots.erase(
+        std::remove_if(lots.begin(), lots.end(),
+                       [&](const lot &L) {
+                         return (buildable && hf.mask(terrain_mask::buildable, L.x, L.y) < 0.5) ||
+                                (channel && hf.mask(terrain_mask::channel, L.x, L.y) > 0.5) ||
+                                (cliff && hf.mask(terrain_mask::cliff, L.x, L.y) > 0.5);
+                       }),
+        lots.end());
 
   auto gumbel = [&](std::uint64_t el, std::uint32_t d) {
     return -std::log(-std::log(std::max(1e-12, lsys::uni(seed, stream::floorplan, el, d))));
@@ -742,6 +819,109 @@ void apply_world_preset(generated_world_params &p) {
   }
 }
 
+heightfield_params fbm_terrain_params(const generated_world_params &gp) {
+  const double half = std::max(50.0, gp.half_m);
+  // Relief scaled for a large world: long base wavelength, deep enough that low ground drops below
+  // the water to carve streams and ponds. A shorter base wavelength, more octaves and a higher
+  // gain give steeper, more broken relief, so the slopes classify as gravel / scree / bare rock
+  // rather than an all-grass plain.
+  heightfield_params hp;
+  hp.seed = gp.seed;
+  hp.amp_m = gp.amp_m;
+  hp.sea_level_m = 0.0; // terrain floor at 0; water floods above it (water_level_m)
+  hp.base_wavelength_m = std::max(50.0, half * 0.30);
+  hp.octaves = 8;
+  hp.gain = 0.55;
+  hp.lacunarity = 2.1;
+  hp.warp_m = 22.0;
+  hp.warp_wavelength_m = half * 0.6;
+  // The island preset shapes the relief (a central dome dropping below the water line at the rim);
+  // every preset's object mix is in the counts (apply_world_preset).
+  if (gp.preset == int(world_preset::island)) {
+    hp.island = true;
+    hp.island_peak_m = std::max(gp.amp_m, 40.0);
+    hp.island_radius_m = half * 0.72;
+    hp.shelf_m = -std::max(6.0, gp.water_level_m + 4.0);
+  }
+  return hp;
+}
+
+namespace {
+
+template <class G> struct Registry {
+  explicit Registry(std::vector<std::pair<std::string, G>> builtins)
+      : entries(std::move(builtins)) {}
+  std::mutex m;
+  std::vector<std::pair<std::string, G>> entries; // the built-ins first, then registration order
+  void put(const std::string &name, G g) {
+    std::lock_guard<std::mutex> lk(m);
+    for (auto &e : entries)
+      if (e.first == name) {
+        e.second = std::move(g);
+        return;
+      }
+    entries.emplace_back(name, std::move(g));
+  }
+  G get(const std::string &name, const char *what) {
+    std::lock_guard<std::mutex> lk(m);
+    for (const auto &e : entries)
+      if (e.first == name)
+        return e.second;
+    std::string known;
+    for (const auto &e : entries)
+      known += (known.empty() ? "" : ", ") + e.first;
+    throw std::invalid_argument(std::string("generate_world: no ") + what + " generator '" + name +
+                                "' (known: " + known + ")");
+  }
+  std::vector<std::string> names() {
+    std::lock_guard<std::mutex> lk(m);
+    std::vector<std::string> out;
+    for (const auto &e : entries)
+      out.push_back(e.first);
+    return out;
+  }
+};
+
+Registry<terrain_generator> &terrainRegistry() {
+  const terrain_generator fbm = [](const generated_world_params &p) {
+    return std::shared_ptr<const terrain_source>(
+        std::make_shared<const heightfield>(fbm_terrain_params(p)));
+  };
+  const terrain_generator dem = [](const generated_world_params &p) {
+    if (p.terrain_file.empty())
+      throw std::invalid_argument("generate_world: the dem terrain needs a terrain_file (.npy)");
+    return std::shared_ptr<const terrain_source>(std::make_shared<const raster_heightfield>(
+        load_dem(p.terrain_file, std::max(50.0, p.half_m), p.amp_m)));
+  };
+  static Registry<terrain_generator> r({{"fbm", fbm}, {"dem", dem}});
+  return r;
+}
+
+Registry<city_generator> &cityRegistry() {
+  static Registry<city_generator> r(
+      {{"districts", city_generator(districtStreets)},
+       {"none", [](const city_context &) { return city_streets{}; }}});
+  return r;
+}
+
+} // namespace
+
+void register_terrain_generator(const std::string &name, terrain_generator g) {
+  terrainRegistry().put(name, std::move(g));
+}
+std::vector<std::string> terrain_generator_names() { return terrainRegistry().names(); }
+std::shared_ptr<const terrain_source> make_terrain(const generated_world_params &p) {
+  std::shared_ptr<const terrain_source> t = terrainRegistry().get(p.terrain, "terrain")(p);
+  if (!t)
+    throw std::invalid_argument("generate_world: terrain generator '" + p.terrain +
+                                "' made no terrain");
+  return t;
+}
+void register_city_generator(const std::string &name, city_generator g) {
+  cityRegistry().put(name, std::move(g));
+}
+std::vector<std::string> city_generator_names() { return cityRegistry().names(); }
+
 world_params to_world_params(const generated_world_params &gp) {
   const double half = std::max(50.0, gp.half_m);
   world_params wp;
@@ -749,27 +929,8 @@ world_params to_world_params(const generated_world_params &gp) {
   wp.max_x = wp.max_y = half;
   wp.seed = gp.seed;
   wp.ontology = world_ontology_name(gp.ontology);
-  // Relief scaled for a large world: long base wavelength, deep enough that low ground drops below
-  // the water to carve streams and ponds. A shorter base wavelength, more octaves and a higher
-  // gain give steeper, more broken relief, so the slopes classify as gravel / scree / bare rock
-  // rather than an all-grass plain.
-  wp.hf.seed = gp.seed;
-  wp.hf.amp_m = gp.amp_m;
-  wp.hf.sea_level_m = 0.0; // terrain floor at 0; water floods above it (water_level_m)
-  wp.hf.base_wavelength_m = std::max(50.0, half * 0.30);
-  wp.hf.octaves = 8;
-  wp.hf.gain = 0.55;
-  wp.hf.lacunarity = 2.1;
-  wp.hf.warp_m = 22.0;
-  wp.hf.warp_wavelength_m = half * 0.6;
-  // The island preset shapes the relief (a central dome dropping below the water line at the rim);
-  // every preset's object mix is in the counts (apply_world_preset).
-  if (gp.preset == int(world_preset::island)) {
-    wp.hf.island = true;
-    wp.hf.island_peak_m = std::max(gp.amp_m, 40.0);
-    wp.hf.island_radius_m = half * 0.72;
-    wp.hf.shelf_m = -std::max(6.0, gp.water_level_m + 4.0);
-  }
+  wp.hf = fbm_terrain_params(gp);
+  wp.terrain = make_terrain(gp);
   scatter_params &s = wp.sc;
   // Trees are the two PRESERVED demo generators (reserved recipe names, see growNativeTree), an
   // even mix: the conical pine and the recursive broadleaf, the exact look from lsystem_forest.
@@ -827,10 +988,12 @@ generated_world generate_world(const generated_world_params &p, const building_l
   w.params = p;
   const double half = std::max(50.0, p.half_m);
   w.params.half_m = half;
+  // Both generators are looked up first, so an unknown name fails before any work.
+  const city_generator city = cityRegistry().get(p.city, "city");
   const world_params wp = to_world_params(w.params);
   w.model = std::make_shared<const world_model>(world_model::generate(wp));
   const world_model &wm = *w.model;
-  const heightfield &hf = wm.hf();
+  const terrain_source &hf = wm.terrain();
   const surface_registry &reg = wm.registry();
   const double water = p.water_level_m;
 
@@ -854,6 +1017,10 @@ generated_world generate_world(const generated_world_params &p, const building_l
 
   std::vector<float> heights(std::size_t(terrainN) * terrainN);
   const double step = 2.0 * half / (terrainN - 1);
+  // Each sample is a pure function of its position: the rows fill in parallel.
+#ifdef CVC_USING_OPENMP
+#pragma omp parallel for schedule(static)
+#endif
   for (int r = 0; r < terrainN; ++r)
     for (int c = 0; c < terrainN; ++c)
       heights[std::size_t(r) * terrainN + c] = float(hf.sample(-half + c * step, -half + r * step));
@@ -865,34 +1032,39 @@ generated_world generate_world(const generated_world_params &p, const building_l
     for (int r = 0; r + 1 < terrainN; ++r)
       for (int c = 0; c + 1 < terrainN; ++c) {
         const double u = (c + 0.5) / (terrainN - 1), v = (r + 0.5) / (terrainN - 1);
-        const int rc = std::min(rasterN - 1, int(u * rasterN));
-        const int rr = std::min(rasterN - 1, int(v * rasterN));
+        // The raster's samples are corner-inclusive: the nearest is at u x (rasterN - 1).
+        const int rc = std::min(rasterN - 1, int(std::lround(u * (rasterN - 1))));
+        const int rr = std::min(rasterN - 1, int(std::lround(v * (rasterN - 1))));
         mats[std::size_t(r) * (terrainN - 1) + c] =
             cvc::geometry::face_material_t(w.raster.klass[std::size_t(rr) * rasterN + rc]);
       }
     w.terrain->set_cell_materials(std::move(mats));
   }
 
-  // The city, roads FIRST: district cores on dry, gentle ground; a street network grown from them
-  // (graded, kept out of the water, dead-end stubs trimmed); lots along the streets, filled from
-  // the cores out with the library's archetypes or procedural massing; asphalt burned into the
-  // raster and the extruded road surface. Then the trees and rocks, off the roads and buildings.
+  // The city, roads FIRST: the city generator's streets (by default district cores on dry, gentle
+  // ground and a graded network grown from them); lots along the streets, filled from the most
+  // urban out with the library's archetypes or procedural massing; asphalt burned into the raster
+  // and the extruded road surface. Then the trees and rocks, off the roads and buildings.
   const auto road_h = [&hf](double x, double y) { return hf.sample(x, y); };
-  const Districts dist = pickDistricts(hf, half, water, p.seed);
-  road_network net = generate_roads(
-      cityRoadParams(p.seed, half, dist), road_h,
-      [&hf, water](double x, double y) { return hf.sample(x, y) < water + 1.5; }, std::cref(dist));
-  prune_roads(net, 30.0);
+  const bool channel = hf.has_mask(terrain_mask::channel), cliff = hf.has_mask(terrain_mask::cliff);
+  const city_context ctx{w.params, hf, [&hf, water, channel, cliff](double x, double y) {
+                           return hf.sample(x, y) < water + 1.5 ||
+                                  (channel && hf.mask(terrain_mask::channel, x, y) > 0.5) ||
+                                  (cliff && hf.mask(terrain_mask::cliff, x, y) > 0.5);
+                         }};
+  city_streets streets = city(ctx);
+  const road_network &net = streets.roads;
   FootprintIndex fps;
-  w.building_count = buildCity(library, net, hf, dist, reg, p.seed, water, p.buildings, w.buildings,
-                               w.aprons, fps);
+  w.building_count = buildCity(library, net, hf, streets.urbanity, reg, p.seed, water, p.buildings,
+                               w.buildings, w.aprons, fps);
   w.archetypes = library && !library->empty();
   w.road_length = 0.0;
   for (const road_segment &s : net.segments)
     w.road_length +=
         std::hypot(net.nodes[s.b].x - net.nodes[s.a].x, net.nodes[s.b].y - net.nodes[s.a].y);
-  w.districts = dist.d.size();
+  w.districts = streets.districts;
   rasterize_roads(net, w.grid, reg, w.raster, 1.0);
+  stampBuildings(fps, w.grid, reg, w.raster); // after the asphalt: a building always wins
   road_mesh_params rmp;
   rmp.lift = 0.35; // clearly above the terrain mesh, so the ribbons don't z-fight it
   w.roads = extrude_roads(net, rmp, road_h);
@@ -1049,7 +1221,7 @@ std::vector<float> water_field(const generated_world &w, double t, int n, int nz
   nz = std::max(2, nz);
   const double half = w.params.half_m, level = w.params.water_level_m;
   const double z0 = water_floor(w), z1 = water_top(w);
-  const heightfield *hf = w.model ? &w.model->hf() : nullptr;
+  const terrain_source *hf = w.model ? &w.model->terrain() : nullptr;
   // The ground and the wave's surface per column, then the depth down each column.
   std::vector<float> f(std::size_t(n) * n * nz, 0.0f);
   std::vector<double> ground(std::size_t(n) * n), surf(std::size_t(n) * n);

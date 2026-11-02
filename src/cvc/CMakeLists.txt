@@ -209,6 +209,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/lsys/cloud.h
   ../../inc/cvc/lsys/water.h
   ../../inc/cvc/world/surface.h
+  ../../inc/cvc/world/terrain_source.h
   ../../inc/cvc/world/world_geometry.h
   ../../inc/cvc/world/city_bundle.h
   ../../inc/cvc/world/grid.h
@@ -431,6 +432,7 @@ set(SOURCE_FILES
   lsys/cloud.cpp
   lsys/water.cpp
   world/surface.cpp
+  world/terrain_source.cpp
   world/world_geometry.cpp
   world/city_bundle.cpp
   world/heightfield.cpp
@@ -525,11 +527,11 @@ endif()
 # byte-goldens are therefore intentionally NOT asserted. Same discipline as nav.
 if(NOT MSVC)
   set_source_files_properties(lsys/expr.cpp lsys/derive.cpp lsys/interp.cpp
-                              world/heightfield.cpp world/scatter.cpp world/roads.cpp world/sites.cpp world/road_mesh.cpp world/road_raster.cpp world/raster.cpp world/bundle.cpp
+                              world/heightfield.cpp world/scatter.cpp world/roads.cpp world/sites.cpp world/road_mesh.cpp world/road_raster.cpp world/raster.cpp world/bundle.cpp world/terrain_source.cpp
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 else()
   set_source_files_properties(lsys/expr.cpp lsys/derive.cpp lsys/interp.cpp
-                              world/heightfield.cpp world/scatter.cpp world/roads.cpp world/sites.cpp world/road_mesh.cpp world/road_raster.cpp world/raster.cpp world/bundle.cpp
+                              world/heightfield.cpp world/scatter.cpp world/roads.cpp world/sites.cpp world/road_mesh.cpp world/road_raster.cpp world/raster.cpp world/bundle.cpp world/terrain_source.cpp
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 

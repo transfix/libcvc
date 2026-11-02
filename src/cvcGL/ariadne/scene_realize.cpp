@@ -30,6 +30,7 @@
 #include <cvc/volslice/settings.h>
 #include <cvc/volume/bounding_box.h>
 #include <cvc/volume/volume.h>
+#include <cvc/world/generated_world.h> // source.heightfield.generator: a cvc::world terrain
 #include <exception>
 #include <functional>
 #include <map>
@@ -142,16 +143,30 @@ cvc::geometry make_sphere(float radius) {
 // displaced in Z by the sum of the dome/wave layers. The field's mesh is what the node draws, so
 // the renderer, a body resting on it and a forest planted on it see one surface: each cell split
 // south-west to north-east, normals from the grid. World->[0,1]^2 UVs and optional per-vertex
-// band colours ride on the mesh. All CPU, no asset. Throws cvc::geometry_error for a size that is
-// not > 0.
-std::shared_ptr<cvc::height_field> make_height_field(const cvc::ariadne::SceneHeightfield &hf) {
+// band colours ride on the mesh. All CPU, no asset. With a generator the ground starts as that
+// cvc::world terrain (`dem_path`: its resolved .npy) and the layers add on top. Throws
+// cvc::geometry_error for a size that is not > 0, std::invalid_argument for an unknown generator.
+std::shared_ptr<cvc::height_field> make_height_field(const cvc::ariadne::SceneHeightfield &hf,
+                                                     const std::string &dem_path = std::string()) {
   constexpr double kTwoPi = 6.283185307179586;
   const int res = std::max(2, hf.resolution);
   const double half = 0.5 * static_cast<double>(hf.size);
   const double step = static_cast<double>(hf.size) / (res - 1);
+  std::shared_ptr<const cvc::world::terrain_source> ground;
+  if (!hf.generator.empty()) {
+    cvc::world::generated_world_params p;
+    p.half_m = half;
+    p.seed = static_cast<std::uint64_t>(std::max(0.0, hf.seed));
+    p.amp_m = hf.amp;
+    p.water_level_m = hf.water_level;
+    p.preset = cvc::world::world_preset_from_name(hf.preset);
+    p.terrain = hf.generator;
+    p.terrain_file = dem_path;
+    ground = cvc::world::make_terrain(p);
+  }
 
   const auto height_at = [&](double x, double y) {
-    double h = 0.0;
+    double h = ground ? ground->sample(x, y) : 0.0;
     for (const cvc::ariadne::SceneHeightLayer &L : hf.layers) {
       if (L.kind == "dome") {
         const double r = std::sqrt(x * x + y * y);
@@ -183,6 +198,11 @@ std::shared_ptr<cvc::height_field> make_height_field(const cvc::ariadne::SceneHe
   };
 
   std::vector<float> heights(static_cast<std::size_t>(res) * res);
+  // Each sample is a pure function of its position (a generated ground is a few million fBm
+  // samples at a 2049 grid): the rows fill in parallel.
+#ifdef CVC_USING_OPENMP
+#pragma omp parallel for schedule(static)
+#endif
   for (int j = 0; j < res; ++j)
     for (int i = 0; i < res; ++i)
       heights[static_cast<std::size_t>(j) * res + i] =
@@ -1126,7 +1146,13 @@ bool read_node_geometry_and_field(SceneGraph &, const cvc::ariadne::SceneNode &n
   if (n.has_heightfield) {
     // A procedural displaced grid, no asset: the world's own height field, drawn as its mesh.
     try {
-      std::shared_ptr<cvc::height_field> f = make_height_field(n.heightfield);
+      cvc::ariadne::ResolvedFile dem; // alive while the field is made (a fetched URI's temp file)
+      if (!n.heightfield.file.empty()) {
+        dem = cvc::ariadne::resolve_to_file(n.heightfield.file, n.base_dir);
+        if (!dem.ok)
+          throw std::runtime_error("file " + dem.error);
+      }
+      std::shared_ptr<cvc::height_field> f = make_height_field(n.heightfield, dem.path);
       geom = *f;
       field = f;
     } catch (const std::exception &e) {

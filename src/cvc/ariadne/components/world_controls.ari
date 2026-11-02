@@ -33,6 +33,19 @@ units:
         bind: world.ontology
         options: [merged_default, soft_vegetation, strict_water_mud]
         values: [0, 1, 2]
+      # The generators, by name: the realizer publishes the ones registered (a host may add its own).
+      - combo: Terrain
+        bind: world.terrain
+        options: (string.split (state-get "world.generators.terrain") "\n")
+        tooltip: "fbm: the analytic relief; dem: an elevation .npy, anchored at 0 and stretched to the relief"
+      - input_text: Elevation file
+        bind: world.terrain_file
+        visible_when: (= (state-get "world.terrain") "dem")
+        tooltip: "a 2-D .npy of heights (row 0 = south); a relative path is read from the document's directory"
+      - combo: City
+        bind: world.city
+        options: (string.split (state-get "world.generators.city") "\n")
+        tooltip: "districts: the roads-first city; none: no streets or buildings"
       - slider_float: World half (m)
         bind: world.half
         commit: release

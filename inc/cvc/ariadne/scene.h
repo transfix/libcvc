@@ -122,11 +122,23 @@ struct SceneHeightColorBand {
 // centered on the origin, displaced in Z by the sum of `layers`, with world→[0,1]² UVs and (if
 // `colors` is non-empty) per-vertex band colours. Normals are computed from the height gradient.
 // The reusable terrain primitive: no asset, authored entirely in the document.
+//
+// With a `generator` the ground comes from a cvc::world terrain generator first (the layers add
+// on top): `fbm` (the analytic relief), `dem` (an elevation .npy at `file`, anchored at 0 and
+// stretched to `amp`), or one a host registered (cvc::world::register_terrain_generator).
+// source: { terrain: {...} } is the same source with the generator defaulting to fbm, the size to
+// 1200 and the resolution to one vertex per 5 m (at most 2049).
 struct SceneHeightfield {
   float size = 1.0f;   // world edge length (the grid spans [-size/2, size/2]² in XY)
   int resolution = 64; // grid vertices per edge (resolution² points, clamped ≥ 2)
   std::vector<SceneHeightLayer> layers;
   std::vector<SceneHeightColorBand> colors;
+  std::string generator;           // a cvc::world terrain generator; empty = the layers alone
+  std::string file;                // dem: the .npy (a URI, or a path relative to the document)
+  double seed = 7.0;               // the generator's seed
+  double amp = 90.0;               // its relief (metres)
+  double water_level = 34.0;       // the water line (fbm's island preset sinks its rim below it)
+  std::string preset = "standard"; // fbm: standard | island (the dome) | ...
 };
 
 // A node's rigid body (`body:`), in the scene's physics world (ScenePhysics). The node's realized

@@ -27,10 +27,15 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cvc/world/generated_world.h>
+#include <cvc/world/npy.h>
+#include <filesystem>
 #include <gtest/gtest.h>
 #include <map>
 #include <set>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 using namespace cvc::world;
@@ -64,7 +69,7 @@ TEST(WorldGenerated, DeterministicAndTerrainIsTheRelief) {
   for (std::size_t i = 0; i < a.terrain->const_points().size(); i += 97)
     EXPECT_EQ(a.terrain->const_points()[i][2], b.terrain->const_points()[i][2]);
   // The mesh samples are the model's relief, and height() is the mesh.
-  const heightfield &hf = a.model->hf();
+  const terrain_source &hf = a.model->terrain();
   for (double x : {-150.0, -37.5, 0.0, 62.5, 150.0})
     for (double y : {-125.0, 0.0, 100.0}) {
       const double step = 400.0 / 128.0;
@@ -113,7 +118,7 @@ TEST(WorldGenerated, BuildingsAreBuildingSized) {
   double tallest = 0.0, lowest = 1e30;
   std::vector<double> tops; // the walls' and roofs' upper corners, over the ground
   for (const auto &q : w.buildings.const_points()) {
-    const double above = q[2] - w.model->hf().sample(q[0], q[1]);
+    const double above = q[2] - w.model->terrain().sample(q[0], q[1]);
     tallest = std::max(tallest, above);
     lowest = std::min(lowest, double(q[2]));
     if (above > 1.0)
@@ -141,7 +146,7 @@ TEST(WorldGenerated, WaterFillsBelowTheLevel) {
   for (int j = 0; j < n; ++j)
     for (int i = 0; i < n; ++i) {
       const double x = -half + 2.0 * half * i / (n - 1), y = -half + 2.0 * half * j / (n - 1);
-      const double g = w.model->hf().sample(x, y);
+      const double g = w.model->terrain().sample(x, y);
       double column = 0.0;
       for (int k = 0; k < nz; ++k)
         column += f[std::size_t(k) * n * n + std::size_t(j) * n + i];
@@ -201,7 +206,7 @@ TEST(WorldGenerated, TreesAreTreeSized) {
   double tallest = 0.0;
   for (const cvc::geometry *g : {&w.props, &w.needles, &w.foliage})
     for (const auto &q : g->const_points())
-      tallest = std::max(tallest, q[2] - w.model->hf().sample(q[0], q[1]));
+      tallest = std::max(tallest, q[2] - w.model->terrain().sample(q[0], q[1]));
   EXPECT_GT(tallest, 5.0);
   EXPECT_LT(tallest, 35.0);
 }
@@ -249,4 +254,139 @@ TEST(WorldGenerated, SurfaceIsInterpolatedNotCells) {
     }
   EXPECT_GT(multi, 0u);
   EXPECT_GT(multi, 4 * flat);
+}
+
+// The seed shapes the relief. (The fBm seed used to be XORed with the world seed, which was the
+// same number, so every seed stood on the same ground.)
+TEST(WorldGenerated, TheSeedChangesTheTerrain) {
+  generated_world_params p = small_world();
+  const std::shared_ptr<const terrain_source> a = make_terrain(p);
+  p.seed = 12;
+  const std::shared_ptr<const terrain_source> b = make_terrain(p);
+  double diff = 0.0;
+  for (double x = -180.0; x <= 180.0; x += 30.0)
+    for (double y = -180.0; y <= 180.0; y += 30.0)
+      diff = std::max(diff, std::fabs(a->sample(x, y) - b->sample(x, y)));
+  EXPECT_GT(diff, 5.0);
+}
+
+// The generators are chosen by name: the built-ins, a host's own, and an unknown name refused.
+TEST(WorldGenerated, GeneratorsByName) {
+  const std::vector<std::string> t = terrain_generator_names(), c = city_generator_names();
+  ASSERT_GE(t.size(), 2u);
+  EXPECT_EQ(t[0], "fbm");
+  EXPECT_EQ(t[1], "dem");
+  ASSERT_GE(c.size(), 2u);
+  EXPECT_EQ(c[0], "districts");
+  EXPECT_EQ(c[1], "none");
+
+  generated_world_params p = small_world();
+  p.terrain = "no_such_terrain";
+  EXPECT_THROW(generate_world(p), std::invalid_argument);
+  p.terrain = "fbm";
+  p.city = "no_such_city";
+  EXPECT_THROW(generate_world(p), std::invalid_argument);
+  p.terrain = "dem"; // without a file
+  p.city = "districts";
+  EXPECT_THROW(generate_world(p), std::invalid_argument);
+
+  // No city: no streets, no buildings, the props still scattered.
+  p = small_world();
+  p.city = "none";
+  const generated_world bare = generate_world(p);
+  EXPECT_EQ(bare.building_count, 0u);
+  EXPECT_EQ(bare.road_length, 0.0);
+  EXPECT_EQ(bare.districts, 0u);
+  EXPECT_FALSE(bare.props.const_points().empty());
+
+  // A host's terrain: a tilted plane, flat enough to build on, under the water at its low edge.
+  register_terrain_generator("test_tilt", [](const generated_world_params &q) {
+    const int n = 33;
+    std::vector<float> h;
+    for (int r = 0; r < n; ++r)
+      for (int col = 0; col < n; ++col)
+        h.push_back(float(10.0 + 20.0 * col / (n - 1)));
+    return std::make_shared<const raster_heightfield>(n, n, -q.half_m, -q.half_m, q.half_m,
+                                                      q.half_m, std::move(h), 0.0, 30.0);
+  });
+  p = small_world();
+  p.terrain = "test_tilt";
+  const generated_world tilt = generate_world(p);
+  EXPECT_NEAR(tilt.height(-200.0, 0.0), 10.0, 1e-3);
+  EXPECT_NEAR(tilt.height(200.0, 0.0), 30.0, 1e-3);
+  EXPECT_GT(tilt.road_length, 100.0);
+  EXPECT_GT(tilt.building_count, 0u);
+}
+
+// A DEM file through the "dem" generator: the world's ground is the file's relief, anchored at 0
+// and stretched to amp_m.
+TEST(WorldGenerated, DemTerrainFromAFile) {
+  const std::string f =
+      (std::filesystem::temp_directory_path() / "cvc_world_generated_test_dem.npy").string();
+  const int n = 65;
+  std::vector<float> h;
+  for (int r = 0; r < n; ++r)
+    for (int c = 0; c < n; ++c)
+      h.push_back(float(500.0 + 0.5 * c + 0.25 * r)); // a gentle slope, 500 m above the datum
+  write_npy(f, h, n, n);
+  generated_world_params p = small_world();
+  p.terrain = "dem";
+  p.terrain_file = f;
+  p.amp_m = 24.0;
+  p.water_level_m = 4.0;
+  const generated_world w = generate_world(p);
+  std::remove(f.c_str());
+  EXPECT_NEAR(w.height(-200.0, -200.0), 0.0, 1e-3);
+  EXPECT_NEAR(w.height(200.0, 200.0), 24.0, 1e-3);
+  EXPECT_NEAR(w.height(200.0, -200.0), 16.0, 1e-3);
+  EXPECT_GT(w.road_length, 100.0);
+}
+
+// A generator's channel mask keeps the streets and lots off it, though the ground there is flat
+// and dry.
+TEST(WorldGenerated, ChannelMaskKeepsTheCityOff) {
+  register_terrain_generator("test_channel", [](const generated_world_params &q) {
+    const int n = 41;
+    std::vector<float> h(std::size_t(n) * n, 20.0f), m(std::size_t(n) * n, 0.0f);
+    for (int r = 0; r < n; ++r)
+      for (int c = n / 2; c < n; ++c)
+        m[std::size_t(r) * n + c] = 1.0f; // the whole east half (x > 0)
+    auto t = std::make_shared<raster_heightfield>(n, n, -q.half_m, -q.half_m, q.half_m, q.half_m,
+                                                  std::move(h), 0.0, 40.0);
+    t->set_mask(terrain_mask::channel, std::move(m));
+    return std::shared_ptr<const terrain_source>(t);
+  });
+  generated_world_params p = small_world();
+  p.terrain = "test_channel";
+  p.buildings = 200;
+  const generated_world w = generate_world(p);
+  EXPECT_GT(w.building_count, 0u);
+  // Every building vertex is west of the mask's 50 % line (x = -5 m: the mask ramps over a cell),
+  // give or take a footprint's half-width.
+  double east = -1e9;
+  for (const auto &q : w.buildings.const_points())
+    east = std::max(east, double(q[0]));
+  EXPECT_LT(east, 25.0);
+  for (const auto &q : w.roads.const_points())
+    EXPECT_LT(q[0], 15.0);
+}
+
+// The city's buildings are in the raster: occupied, hard, concrete-wall cells, at least one per
+// building (they used to be left out, so the occupancy raster showed open ground under them).
+TEST(WorldGenerated, BuildingsAreInTheRaster) {
+  generated_world_params p = small_world();
+  p.buildings = 40;
+  const generated_world w = generate_world(p);
+  ASSERT_GT(w.building_count, 0u);
+  const std::uint16_t wall = w.model->registry().class_for_role(cvc::lsys::role::wall_concrete);
+  std::size_t walls = 0;
+  for (std::size_t i = 0; i < w.raster.klass.size(); ++i)
+    if (w.raster.klass[i] == wall) {
+      ++walls;
+      EXPECT_EQ(w.raster.occupancy[i], 1);
+      EXPECT_EQ(w.raster.hard[i], w.model->registry()[wall].hard ? 1 : 0);
+    }
+  EXPECT_GE(walls, w.building_count);
+  p.city = "none";
+  EXPECT_LT(generate_world(p).raster.occupied_count(), w.raster.occupied_count());
 }

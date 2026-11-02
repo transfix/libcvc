@@ -10,14 +10,15 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cvc/ariadne/ariadne.h> // has_widget_type (custom-widget load-time check)
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/media.h>    // §5.11 image: fit / shape / URI src
 #include <cvc/ariadne/requires.h> // free_heads: a granted function brings the ones it calls
-#include <cvc/ariadne/uri.h> // §12/§13 import: resolve library URIs (file/state/http)
-#include <cvc/core/config.h> // CVC_VERSION_STRING (generated from project(VERSION))
+#include <cvc/ariadne/uri.h>      // §12/§13 import: resolve library URIs (file/state/http)
+#include <cvc/core/config.h>      // CVC_VERSION_STRING (generated from project(VERSION))
 // §12 channel lint: parse a script (parser.h) and walk its value_t / symbol / list_ptr AST
 // (types.h) for the static msg-* channel references.
 #include <cvc/state/state_exec/parser.h>
@@ -442,8 +443,8 @@ std::string action(const YAML::Node &n) {
 }
 
 Widget parse_widget(Ctx &ctx, const YAML::Node &n);
-Widget expand_include(Ctx &ctx, const YAML::Node &n);   // §12 include: expand a units: template
-Widget expand_load(Ctx &ctx, const YAML::Node &n);      // §12 load: mount an isolated fragment
+Widget expand_include(Ctx &ctx, const YAML::Node &n); // §12 include: expand a units: template
+Widget expand_load(Ctx &ctx, const YAML::Node &n);    // §12 load: mount an isolated fragment
 std::vector<HostRequirement> parse_requires(Ctx &ctx, const YAML::Node &n,
                                             const std::string &where = ""); // §7.6
 Widget parse_document(Ctx &ctx, const YAML::Node &doc); // §12 load: parses a mounted fragment
@@ -2378,11 +2379,26 @@ SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
         sn.sdf_algorithm = str(sdf, "algorithm", sn.sdf_algorithm);
         std::transform(sn.sdf_algorithm.begin(), sn.sdf_algorithm.end(), sn.sdf_algorithm.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-      } else if (const YAML::Node hf = src["heightfield"]; hf && hf.IsMap()) {
+      } else if (const YAML::Node hf = src["heightfield"] ? src["heightfield"] : src["terrain"];
+                 hf && hf.IsMap()) {
         // source: { heightfield: { size, resolution, layers: [...], colors: [...] } } — a
-        // procedural displaced grid mesh (the reusable terrain primitive; no asset).
+        // procedural displaced grid mesh (the reusable terrain primitive; no asset). With a
+        // generator (or as source: { terrain: {...} }), a cvc::world terrain generator's ground.
         sn.has_heightfield = true;
+        if (!src["heightfield"]) { // terrain: a generated world's ground, at its scale
+          sn.heightfield.generator = "fbm";
+          sn.heightfield.size = 1200.0f;
+        }
+        sn.heightfield.generator = str(hf, "generator", sn.heightfield.generator);
+        sn.heightfield.file = str(hf, "file", sn.heightfield.file);
+        sn.heightfield.seed = num(hf, "seed", sn.heightfield.seed);
+        sn.heightfield.amp = num(hf, "amp", sn.heightfield.amp);
+        sn.heightfield.water_level = num(hf, "water_level", sn.heightfield.water_level);
+        sn.heightfield.preset = str(hf, "preset", sn.heightfield.preset);
         sn.heightfield.size = static_cast<float>(num(hf, "size", sn.heightfield.size));
+        if (!sn.heightfield.generator.empty() && !hf["resolution"]) // one vertex per 5 m
+          sn.heightfield.resolution =
+              std::max(2, std::min(2049, int(std::lround(sn.heightfield.size / 5.0)) + 1));
         sn.heightfield.resolution =
             static_cast<int>(num(hf, "resolution", sn.heightfield.resolution));
         if (const YAML::Node layers = hf["layers"]; layers && layers.IsSequence())

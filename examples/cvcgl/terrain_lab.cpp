@@ -435,7 +435,7 @@ int main(int argc, char **argv) {
   bool offscreen = false, noShadows = false, verbose = false, no_ui = false, show_ui = false;
   int frames = 0, width = 1280, height = 800;
   double fps = 30.0, half = 600.0;
-  unsigned long seed = 7;
+  unsigned long seed = 5;
   std::string png, captureStr = "none", outDir = "frames", preset = "standard";
   po::options_description desc("terrain_lab — a pure-C++ cvcGL viewer for cvc::world\nOptions");
   desc.add_options()("help,h", "show this help and exit")                                     //
@@ -453,7 +453,7 @@ int main(int argc, char **argv) {
       ("fps", po::value<double>(&fps)->default_value(30.0), "capture fps (synthetic clock)")  //
       ("out", po::value<std::string>(&outDir)->default_value("frames"), "capture output dir") //
       ("half", po::value<double>(&half)->default_value(600.0), "world half-extent (metres)")  //
-      ("seed", po::value<unsigned long>(&seed)->default_value(7), "generation seed")          //
+      ("seed", po::value<unsigned long>(&seed)->default_value(5), "generation seed")          //
       ("preset", po::value<std::string>(&preset)->default_value("standard"),
        "standard | forest | urban | sparse | island");
   po::variables_map vm;
