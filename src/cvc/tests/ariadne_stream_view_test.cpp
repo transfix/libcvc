@@ -3,6 +3,7 @@
 // hand (publish_external), so every case is deterministic; no producer thread, no GL.
 
 #include <cstdint>
+#include <cstdlib>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/ftxui_backend.h>
 #include <cvc/ariadne/loader.h>
@@ -23,6 +24,19 @@ using namespace cvc::ariadne;
 namespace sx = cvc::ariadne::stream;
 
 namespace {
+
+// TheTerminalWidgetDrawsLiveFramesAndAPlaceholder tells two frames apart by the colours printed,
+// so the colour depth must not come from the environment. FTXUI reads NO_COLOR once, on first use,
+// and then prints every cell in the default colours, the red frame and the blue one alike. Drop
+// it before any case runs.
+[[maybe_unused]] const bool kNoColorDropped = [] {
+#ifdef _WIN32
+  _putenv_s("NO_COLOR", ""); // "" removes it on Windows
+#else
+  unsetenv("NO_COLOR");
+#endif
+  return true;
+}();
 
 // An open w x h rgba8 video stream.
 std::unique_ptr<sx::stream> open_video(cvc::app &app, const std::string &id, int w = 4, int h = 4,
