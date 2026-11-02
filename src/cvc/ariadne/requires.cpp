@@ -58,6 +58,20 @@ const std::vector<TokenRule> &rules() {
       {{"image.url", "image: shows a picture by URI (§5.11): http(s) where the network is on, "
                      "file://, cvc://, state://"},
        [](const HostFacts &) { return true; }},
+      {{"image.background", "a window, overlay or group draws a background: picture (§5.12)"},
+       [](const HostFacts &) { return true; }},
+      {{"image.animated", "image: and background: animate a GIF or WebP (APNG: its first frame)"},
+       [](const HostFacts &) { return true; }},
+      {{"video.decorative", "video: takes controls: false, and a video URL in image: or "
+                            "background: plays as a decorative video (with a player; else its "
+                            "poster or placeholder)"},
+       [](const HostFacts &) { return true; }},
+      {{"media", "video: and audio: play here (a player, and not an SSH session it would play "
+                 "remotely from, unless --media-play always)"},
+       [](const HostFacts &f) { return f.media; }},
+      {{"media.player",
+        "the host has a player for video: and audio: (ari-media, arigl, a browser)"},
+       [](const HostFacts &f) { return f.media_player; }},
       {{"oidc", "the host signs in with OAuth 2.0 / OpenID Connect providers (oidc-sign-in)"},
        [](const HostFacts &f) { return f.oidc; }},
       {{"oidc.loopback", "sign-in through the system browser and a loopback redirect (RFC 8252)"},

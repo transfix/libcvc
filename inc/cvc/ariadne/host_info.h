@@ -36,6 +36,9 @@ struct HostInfo {
   bool gl = false;     // a GL renderer is available to this runtime (the runtime sets it)
   std::string gl_info; // what it is: vendor, renderer and version (the runtime sets it)
   bool http = false;   // an HTTP backend (cvc::net: libcurl, or the browser's fetch)
+  bool audio = false; // sound output (cvcMedia's SDL3 audio: ari-media, arigl; the runtime sets it)
+  std::string audio_info;    // its playback devices, one a line (the runtime sets it)
+  bool media_player = false; // a player for video: / audio: (§5.13; ari-media, arigl)
 
   // The network the host gave its documents (net_host.h).
   bool net = false;
