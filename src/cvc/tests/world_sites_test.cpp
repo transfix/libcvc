@@ -242,6 +242,40 @@ TEST(WorldSites, FitUsesHeightAndIsDeterministic) {
   }
 }
 
+// true_scale keeps the buildings their real size: only archetypes that fit the lot at 0.85..1 of
+// their size are placed (never enlarged), so the heights stay true; a lot nothing fits stays empty.
+TEST(WorldSites, TrueScaleFitsArchetypesAtTheirOwnSize) {
+  const std::vector<lot> lots = layout_lots(straight_road(), site_params{}); // 14 x 20 lots
+  ASSERT_GT(lots.size(), 2u);
+  building_library lib = two_archetypes(); // 8 x 5 and 6 x 6: both fit as they are
+  building_archetype big;                  // 40 x 30: fits no lot but at a third of its size
+  big.footprint_x = 20.0;
+  big.footprint_y = 15.0;
+  big.height = 60.0;
+  big.name = "big";
+  for (int i = 0; i < 4; ++i)
+    lib.archetypes.push_back(big);
+  fit_params fp;
+  fp.true_scale = true;
+  const std::vector<building_instance> inst = fit_buildings(lib, lots, fp);
+  ASSERT_EQ(inst.size(), lots.size()); // 32 draws always find one of the two that fit
+  for (const building_instance &bi : inst) {
+    EXPECT_LT(bi.archetype, 2) << "the big archetype is never squeezed into a lot";
+    EXPECT_GE(bi.scale, fp.min_true);
+    EXPECT_LE(bi.scale, 1.0);
+  }
+  // Without true_scale the same lots take the big one shrunk (the old behaviour).
+  const std::vector<building_instance> old = fit_buildings(lib, lots, fit_params{});
+  bool squeezed = false;
+  for (const building_instance &bi : old)
+    squeezed = squeezed || (bi.archetype >= 2 && bi.scale < 0.5);
+  EXPECT_TRUE(squeezed);
+
+  building_library only_big;
+  only_big.archetypes.push_back(big);
+  EXPECT_TRUE(fit_buildings(only_big, lots, fp).empty()); // nothing fits: no miniatures
+}
+
 TEST(WorldSites, EmptyLibraryGivesNoBuildings) {
   const std::vector<lot> lots = layout_lots(straight_road(), site_params{});
   EXPECT_TRUE(fit_buildings(building_library{}, lots, fit_params{}).empty());

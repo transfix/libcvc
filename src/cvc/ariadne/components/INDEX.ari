@@ -81,6 +81,13 @@ catalog:
     for: "a `type: forest_trees` node (count / seed / species / span / branching / wind)"
     args: []
     note: "the realizer seeds forest.* from the node props; structural edits re-grow the mesh"
+  - component: world_controls
+    file: world_controls.ari
+    unit: world_controls
+    binds: "<prefix>.world.*"              # read every frame by the cvcGL generated_world realizer
+    for: "a `type: generated_world` node (seed / preset / size / counts / relief / water / colour)"
+    args: []
+    note: "the realizer seeds world.* from the node props; structural edits regenerate the world"
   - component: sea_controls
     file: sea_controls.ari
     unit: sea_controls
