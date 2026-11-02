@@ -323,6 +323,35 @@ private:
 };
 
 } // namespace
+
+namespace detail {
+
+// For decode_image (image_decode.cpp): decode `size` bytes as `format` ("TIFF", "AVIF", ...),
+// named rather than guessed, so bytes from the network never pick a coder of their own.
+image magick_decode_memory(const void *data, std::size_t size, const std::string &format,
+                           std::string *why) {
+  init_magick_once();
+  try {
+    Magick::Blob blob(data, size);
+    Magick::Image mi;
+    mi.magick(format);
+    mi.read(blob);
+    if (mi.colorSpace() != Magick::sRGBColorspace && mi.colorSpace() != Magick::RGBColorspace)
+      mi.colorSpace(Magick::sRGBColorspace);
+    const int w = static_cast<int>(mi.columns());
+    const int h = static_cast<int>(mi.rows());
+    image out(w, h, image::pixel_format::RGBA, image::data_type::u8);
+    if (w > 0 && h > 0)
+      mi.write(0, 0, w, h, "RGBA", Magick::CharPixel, out.data());
+    return out;
+  } catch (const std::exception &e) {
+    if (why)
+      *why = e.what();
+    return image();
+  }
+}
+
+} // namespace detail
 } // namespace cvc
 #endif // CVC_ENABLE_IMAGEMAGICK
 
