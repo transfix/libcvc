@@ -2138,6 +2138,106 @@ TEST(StateTransportGrpcTest, InboundGateBindsANodeIdToOneStream) {
   tR.stop();
 }
 
+// push_snapshot_to_holder writes only to the stream that HOLDS the node id under the inbound gate
+// (as StateTransportWsTest.PushToHolderSkipsAConnectionClaimingTheId).
+TEST(StateTransportGrpcTest, PushToHolderSkipsAStreamClaimingTheId) {
+  cvc::app aR, aB, aB2;
+  cvc::state_transport_grpc tR, tB, tB2;
+  auto gate = std::make_shared<own_prefix_gate>();
+  tR.set_inbound_gate(gate);
+  tR.start("127.0.0.1:0", "R", "C");
+  tR.set_relay(true);
+  tB.start("127.0.0.1:0", "B", "C");
+  tB2.start("127.0.0.1:0", "B", "C");
+  cvc::state_cluster_shard sR(aR, "C", "R");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  cvc::state_cluster_shard sB2(aB2, "C", "B");
+  for (cvc::state_cluster_shard *s : {&sR, &sB, &sB2})
+    s->attach();
+  tR.register_shard(&sR);
+  tB.register_shard(&sB);
+  tB2.register_shard(&sB2);
+  ASSERT_TRUE(tB.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_until([&] { return gate->holder("B") != nullptr; }, std::chrono::seconds(3)));
+  ASSERT_TRUE(tB2.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_until(
+      [&] {
+        const auto links = tR.link_reports();
+        return std::count_if(links.begin(), links.end(), [](const cvc::state_link_report &l) {
+                 return l.remote_node_id == "B";
+               }) == 2;
+      },
+      std::chrono::seconds(3)))
+      << "both streams have read their Hello";
+
+  EXPECT_EQ(tR.push_snapshot_to_holder("B", {leaf_entry("dm.k", "private")}), 1u);
+  EXPECT_EQ(tR.push_snapshot_to("B", {leaf_entry("all.k", "both")}), 2u);
+  ASSERT_TRUE(wait_until([&] { return leaf(aB2, "all.k") == "both"; }, std::chrono::seconds(3)));
+  EXPECT_EQ(leaf(aB, "dm.k"), "private");
+  EXPECT_EQ(leaf(aB2, "dm.k"), "<absent>") << "the holder's push came first on the same thread";
+
+  tB.stop();
+  tB2.stop();
+  tR.stop();
+}
+
+// A message with ttl_hops 0 stays at the relay (as StateTransportWsTest.
+// MessageWithTtlZeroStaysAtTheRelay).
+TEST(StateTransportGrpcTest, MessageWithTtlZeroStaysAtTheRelay) {
+  cvc::app aR, aB, aD;
+  cvc::state_transport_grpc tR, tB, tD;
+  tR.start("127.0.0.1:0", "R", "C");
+  tR.set_relay(true);
+  tB.start("127.0.0.1:0", "B", "C");
+  tD.start("127.0.0.1:0", "D", "C");
+  cvc::state_cluster_shard sR(aR, "C", "R");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  cvc::state_cluster_shard sD(aD, "C", "D");
+  for (cvc::state_cluster_shard *s : {&sR, &sB, &sD})
+    s->attach();
+  tR.register_shard(&sR);
+  tB.register_shard(&sB);
+  tD.register_shard(&sD);
+  std::mutex mu;
+  std::vector<std::string> at_relay, at_d;
+  sR.message_bus().subscribe("x", [&](const cvc::state_message &m) {
+    std::lock_guard<std::mutex> lk(mu);
+    at_relay.push_back(m.string_value);
+  });
+  sD.message_bus().subscribe("x", [&](const cvc::state_message &m) {
+    std::lock_guard<std::mutex> lk(mu);
+    at_d.push_back(m.string_value);
+  });
+  const auto seen = [&](const std::vector<std::string> &v) {
+    std::lock_guard<std::mutex> lk(mu);
+    return v;
+  };
+  ASSERT_TRUE(tB.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tD.connect_to_peer(tR.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_identified(tR, {"B", "D"}, std::chrono::seconds(3)));
+
+  cvc::state_message m;
+  m.cluster_id = "C";
+  m.origin_node_id = "B";
+  m.path = "x.B.req";
+  m.content_type = cvc::state_message::MIME_TEXT;
+  m.message_id = "B:1";
+  m.string_value = "to the relay";
+  m.ttl_hops = 0;
+  tB.publish_message(m);
+  m.message_id = "B:2";
+  m.string_value = "to everyone";
+  m.ttl_hops = 8;
+  tB.publish_message(m);
+  ASSERT_TRUE(wait_until([&] { return seen(at_d).size() == 1; }, std::chrono::seconds(3)));
+  EXPECT_EQ(seen(at_d), std::vector<std::string>{"to everyone"});
+  EXPECT_EQ(seen(at_relay), (std::vector<std::string>{"to the relay", "to everyone"}));
+
+  tB.stop();
+  tD.stop();
+  tR.stop();
+}
+
 // A client naming the relay's own node id in its Hello never speaks: as "R" its writes would pass
 // the relay's own-origin skip unapplied yet still be forwarded, and with sequences just ahead of
 // the relay's journal they would make every client drop the relay's real writes as duplicates.

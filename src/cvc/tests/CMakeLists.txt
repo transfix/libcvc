@@ -138,6 +138,7 @@ add_executable(holon_sync_test holon_sync_test.cpp)
 add_executable(state_link_stats_test state_link_stats_test.cpp)
 add_executable(room_scene_test room_scene_test.cpp)
 add_executable(room_avatar_test room_avatar_test.cpp)
+add_executable(room_chat_test room_chat_test.cpp)
 add_executable(room_aoi_test room_aoi_test.cpp)
 add_executable(room_aoi_relay_test room_aoi_relay_test.cpp)
 add_executable(physics_codec_test physics_codec_test.cpp)
@@ -384,6 +385,7 @@ set(TEST_TARGETS
   state_link_stats_test
   room_scene_test
   room_avatar_test
+  room_chat_test
   room_aoi_test
   room_aoi_relay_test
   physics_codec_test
@@ -1960,6 +1962,13 @@ target_link_libraries(room_avatar_test
     GTest::gtest_main
 )
 
+target_link_libraries(room_chat_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(room_aoi_test
   PRIVATE
     cvc
@@ -2431,6 +2440,7 @@ target_compile_features(holon_sync_test PRIVATE cxx_std_17)
 target_compile_features(state_link_stats_test PRIVATE cxx_std_17)
 target_compile_features(room_scene_test PRIVATE cxx_std_17)
 target_compile_features(room_avatar_test PRIVATE cxx_std_17)
+target_compile_features(room_chat_test PRIVATE cxx_std_20)
 target_compile_features(room_aoi_test PRIVATE cxx_std_17)
 target_compile_features(room_aoi_relay_test PRIVATE cxx_std_17)
 target_compile_features(physics_codec_test PRIVATE cxx_std_17)
@@ -2941,6 +2951,7 @@ cvc_discover_tests(holon_sync_test)
 cvc_discover_tests(state_link_stats_test)
 cvc_discover_tests(room_scene_test)
 cvc_discover_tests(room_avatar_test)
+cvc_discover_tests(room_chat_test)
 cvc_discover_tests(room_aoi_test)
 cvc_discover_tests(room_aoi_relay_test)
 cvc_discover_tests(physics_codec_test)

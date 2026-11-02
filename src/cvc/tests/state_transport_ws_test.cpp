@@ -1778,6 +1778,97 @@ TEST(StateTransportWsTest, InboundGateBindsANodeIdToOneConnection) {
   S.stop();
 }
 
+// push_snapshot_to_holder writes only to the connection that HOLDS the node id under the inbound
+// gate: a second connection claiming B gets nothing, where push_snapshot_to writes to both.
+TEST(StateTransportWsTest, PushToHolderSkipsAConnectionClaimingTheId) {
+  cvc::app aS, aB, aB2;
+  cvc::state_transport_ws S, tB, tB2;
+  auto gate = std::make_shared<own_prefix_gate>();
+  S.set_inbound_gate(gate);
+  S.start("127.0.0.1:0", "S", "C");
+  S.set_relay(true);
+  cvc::state_cluster_shard sS(aS, "C", "S");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  cvc::state_cluster_shard sB2(aB2, "C", "B");
+  for (cvc::state_cluster_shard *s : {&sS, &sB, &sB2})
+    s->attach();
+  S.register_shard(&sS);
+  tB.register_shard(&sB);
+  tB2.register_shard(&sB2);
+  ASSERT_TRUE(tB.connect_to_peer(ws(S.listen_address()), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(
+      wait_until([&] { return gate->holder("B") != nullptr; }, std::chrono::milliseconds(3000)));
+  ASSERT_TRUE(tB2.connect_to_peer(ws(S.listen_address()), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_identified(S, 2, std::chrono::milliseconds(3000)));
+
+  EXPECT_EQ(S.push_snapshot_to_holder("B", {entry("dm.k", "private")}), 1u);
+  EXPECT_EQ(S.push_snapshot_to("B", {entry("all.k", "both")}), 2u);
+  ASSERT_TRUE(wait_until([&] { return value_at(aB2, "all.k") == "both"; },
+                         std::chrono::milliseconds(3000)));
+  EXPECT_EQ(value_at(aB, "dm.k"), "private");
+  EXPECT_EQ(value_at(aB2, "dm.k"), "") << "the holder's push came first on the same thread";
+
+  tB.stop();
+  tB2.stop();
+  S.stop();
+}
+
+// A message with ttl_hops 0 is for the relay: its shards take it, and no other connection is sent
+// it. One with any other ttl_hops is relayed as before.
+TEST(StateTransportWsTest, MessageWithTtlZeroStaysAtTheRelay) {
+  cvc::app aS, aB, aD;
+  cvc::state_transport_ws S, tB, tD;
+  S.start("127.0.0.1:0", "S", "C");
+  S.set_relay(true);
+  cvc::state_cluster_shard sS(aS, "C", "S");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  cvc::state_cluster_shard sD(aD, "C", "D");
+  for (cvc::state_cluster_shard *s : {&sS, &sB, &sD})
+    s->attach();
+  S.register_shard(&sS);
+  tB.register_shard(&sB);
+  tD.register_shard(&sD);
+  std::mutex mu;
+  std::vector<std::string> at_relay, at_d;
+  sS.message_bus().subscribe("x", [&](const cvc::state_message &m) {
+    std::lock_guard<std::mutex> lk(mu);
+    at_relay.push_back(m.string_value);
+  });
+  sD.message_bus().subscribe("x", [&](const cvc::state_message &m) {
+    std::lock_guard<std::mutex> lk(mu);
+    at_d.push_back(m.string_value);
+  });
+  const auto seen = [&](const std::vector<std::string> &v) {
+    std::lock_guard<std::mutex> lk(mu);
+    return v;
+  };
+  ASSERT_TRUE(tB.connect_to_peer(ws(S.listen_address()), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(tD.connect_to_peer(ws(S.listen_address()), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_identified(S, 2, std::chrono::milliseconds(2000)));
+
+  cvc::state_message m;
+  m.cluster_id = "C";
+  m.origin_node_id = "B";
+  m.path = "x.B.req";
+  m.content_type = cvc::state_message::MIME_TEXT;
+  m.message_id = "B:1";
+  m.string_value = "to the relay";
+  m.ttl_hops = 0;
+  tB.publish_message(m);
+  m.message_id = "B:2";
+  m.string_value = "to everyone";
+  m.ttl_hops = 8;
+  tB.publish_message(m);
+  ASSERT_TRUE(wait_until([&] { return seen(at_d).size() == 1; }, std::chrono::milliseconds(3000)));
+  EXPECT_EQ(seen(at_d), std::vector<std::string>{"to everyone"})
+      << "frames from B arrive in order, so the first would have come first";
+  EXPECT_EQ(seen(at_relay), (std::vector<std::string>{"to the relay", "to everyone"}));
+
+  tB.stop();
+  tD.stop();
+  S.stop();
+}
+
 // A client naming the relay's own node id never speaks (as StateTransportGrpcTest.
 // InboundGateRefusesTheRelaysOwnId).
 TEST(StateTransportWsTest, InboundGateRefusesTheRelaysOwnId) {

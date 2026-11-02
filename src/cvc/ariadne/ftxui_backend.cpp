@@ -556,6 +556,17 @@ struct FtxuiBackend::Impl {
     std::string text;
     std::size_t cursor = 0; // byte offset, on a UTF-8 boundary
   };
+  // A text_view's wrapped rows and scroll.
+  struct TextView {
+    std::string text;
+    std::vector<std::string> rows; // the text's lines, word-wrapped to `width` cells
+    std::size_t lines = 0;         // logical lines in the text
+    int width = 0;
+    int top = 0;           // the first row in view
+    bool at_bottom = true; // the last row is in view
+    bool fresh = true;     // never drawn, or another text altogether: start at the bottom
+    bool reported = false; // a text that fits has reported the room above it
+  };
   // A pixel-mode image's resampled pixels, kept while the picture and its cells stay the same.
   struct PixCache {
     cvc::image raster; // at the size image_raster gives
@@ -597,6 +608,9 @@ struct FtxuiBackend::Impl {
   std::string drag_win;
   int drag_dx = 0, drag_dy = 0;
   std::map<std::string, Edit> edits;
+  std::map<std::string, TextView> text_views;
+  std::string wheel_id; // the item the wheel last turned over (a text_view takes it) ...
+  int wheel_dir = 0;    // ... and which way: -1 up, +1 down
   std::set<std::string> blur_commit;      // fields that lost focus with an edit pending
   std::map<std::string, double> inflight; // slider value while the mouse holds it
   std::map<std::string, int> color_chan;
@@ -1222,6 +1236,10 @@ struct FtxuiBackend::Impl {
         const int n = std::max(1, last.combo_n);
         combo_hi = std::clamp(combo_hi + (e.mouse == TermEvent::Mouse::WheelUp ? -1 : 1), 0, n - 1);
         consumed = true;
+      } else if (const Item *it =
+                     item_at(e.x, e.y, opt.hosted ? host_window : window_at(e.x, e.y), "")) {
+        wheel_id = it->id; // a text_view under the pointer scrolls in the walk
+        wheel_dir = e.mouse == TermEvent::Mouse::WheelUp ? -1 : 1;
       }
       return;
     case TermEvent::Mouse::Press:
@@ -2410,6 +2428,277 @@ StringEdit FtxuiBackend::input_text(const char *label, const char *key, const st
   return e;
 }
 
+namespace {
+// LINE word-wrapped to W cells (a word longer than W is cut), at least one row.
+std::vector<std::string> wrap_cells(const std::string &line, int w) {
+  w = std::max(1, w);
+  std::vector<std::string> out;
+  std::string cur;
+  int cw = 0;
+  std::size_t space = std::string::npos; // the last space in cur
+  for (std::size_t i = 0; i < line.size();) {
+    const std::size_t j = utf8_next(line, i);
+    const std::string cp = line.substr(i, j - i);
+    const int cpw = std::max(0, fx::string_width(cp));
+    if (cw + cpw > w && !cur.empty()) {
+      if (space != std::string::npos && space > 0) {
+        out.push_back(cur.substr(0, space));
+        cur.erase(0, space + 1);
+      } else {
+        out.push_back(cur);
+        cur.clear();
+      }
+      cw = fx::string_width(cur);
+      space = std::string::npos;
+    }
+    if (cp == " ")
+      space = cur.size();
+    cur += cp;
+    cw += cpw;
+    i = j;
+  }
+  out.push_back(cur);
+  return out;
+}
+} // namespace
+
+MessageEdit FtxuiBackend::message_input(const char *label, const char *key,
+                                        const std::string &current,
+                                        const MessageInputOptions &opts) {
+  Impl &m = *m_;
+  const std::string id = m.uid(std::string("msg|") + (key ? key : label));
+  MessageEdit e;
+  e.value = current;
+  auto it = m.edits.find(id);
+  auto edit = [&]() -> Impl::Edit & {
+    if (it == m.edits.end())
+      it = m.edits.emplace(id, Impl::Edit{current, current.size()}).first;
+    return it->second;
+  };
+  const auto fits = [&](const std::string &t, std::size_t add) {
+    return opts.max_length <= 0 || t.size() + add <= static_cast<std::size_t>(opts.max_length);
+  };
+  if (m.blur_commit.erase(id)) {
+    if (it != m.edits.end()) { // focus left with a draft: keep it
+      e.value = it->second.text;
+      e.changed = e.value != current;
+      e.committed = true;
+      m.edits.erase(it);
+      it = m.edits.end();
+    }
+  } else if (m.ev_live && m.has_focus(id) && m.ev.kind != TermEvent::Kind::Mouse) {
+    const TermEvent &ev = m.ev;
+    const bool newline = (ev.key == "Return" && (ev.alt || ev.shift)) || (ev.key == "J" && ev.ctrl);
+    bool used = true;
+    if (ev.kind == TermEvent::Kind::Text && !ev.ctrl && !ev.alt) {
+      Impl::Edit &ed = edit();
+      if (fits(ed.text, ev.text.size())) {
+        ed.text.insert(ed.cursor, ev.text);
+        ed.cursor += ev.text.size();
+      }
+    } else if (newline) {
+      Impl::Edit &ed = edit();
+      if (opts.multiline && fits(ed.text, 1)) {
+        ed.text.insert(ed.cursor, "\n");
+        ++ed.cursor;
+      }
+    } else if (ev.key == "Return") {
+      // Sent, unless there is nothing but blanks. The field stays focused for the next one.
+      const std::string t = it != m.edits.end() ? it->second.text : current;
+      if (t.find_first_not_of(" \t\r\n") != std::string::npos) {
+        e.value = t;
+        e.submitted = true;
+        e.changed = true;
+      }
+      if (it != m.edits.end()) {
+        m.edits.erase(it);
+        it = m.edits.end();
+      }
+      if (e.submitted)
+        it = m.edits.emplace(id, Impl::Edit{std::string(), 0}).first;
+    } else if (ev.key == "Backspace") {
+      Impl::Edit &ed = edit();
+      if (ed.cursor > 0) {
+        const std::size_t p = utf8_prev(ed.text, ed.cursor);
+        ed.text.erase(p, ed.cursor - p);
+        ed.cursor = p;
+      }
+    } else if (ev.key == "Delete") {
+      Impl::Edit &ed = edit();
+      ed.text.erase(ed.cursor, utf8_next(ed.text, ed.cursor) - ed.cursor);
+    } else if (ev.key == "Left") {
+      Impl::Edit &ed = edit();
+      ed.cursor = utf8_prev(ed.text, ed.cursor);
+    } else if (ev.key == "Right") {
+      Impl::Edit &ed = edit();
+      ed.cursor = utf8_next(ed.text, ed.cursor);
+    } else if (ev.key == "Home") {
+      edit().cursor = 0;
+    } else if (ev.key == "End") {
+      Impl::Edit &ed = edit();
+      ed.cursor = ed.text.size();
+    } else if (ev.key == "Escape" && it != m.edits.end()) {
+      m.edits.erase(it); // back to the draft in state
+      it = m.edits.end();
+    } else {
+      used = false;
+    }
+    if (used)
+      m.use();
+  }
+  if (it != m.edits.end() && !e.submitted && !e.committed) {
+    e.value = it->second.text;
+    e.changed = e.value != current;
+  }
+  // "label: [text]", a line per line of the text, the cursor an inverted cell while focused; the
+  // hint, dimmed, while it is empty and not focused.
+  const bool focused = m.has_focus(id);
+  const std::string &t = it != m.edits.end() ? it->second.text : (e.submitted ? "" : e.value);
+  const std::size_t cursor = it != m.edits.end() ? it->second.cursor : t.size();
+  fx::Elements lines;
+  std::size_t start = 0;
+  for (;;) {
+    const std::size_t nl = t.find('\n', start);
+    const std::size_t stop = nl == std::string::npos ? t.size() : nl;
+    const std::string line = t.substr(start, stop - start);
+    fx::Element row;
+    if (focused && cursor >= start && cursor <= stop) {
+      const std::size_t c = cursor - start, c2 = utf8_next(line, c);
+      row = fx::hbox({fx::text(line.substr(0, c)),
+                      fx::text(c < line.size() ? line.substr(c, c2 - c) : std::string(" ")) |
+                          fx::inverted,
+                      fx::text(c2 < line.size() ? line.substr(c2) : std::string())});
+    } else {
+      row = fx::text(line);
+    }
+    lines.push_back(row);
+    if (nl == std::string::npos)
+      break;
+    start = nl + 1;
+  }
+  if (t.empty() && !focused && !opts.hint.empty())
+    lines.back() = fx::text(opts.hint) | fx::dim;
+  const std::string caption = std::string(label) + ": [";
+  fx::Elements right(lines.size(), fx::text(" "));
+  right.back() = fx::text("]");
+  fx::Elements rows;
+  for (std::size_t i = 0; i < lines.size(); ++i)
+    rows.push_back(fx::hbox({fx::text(i == 0 ? caption : std::string(caption.size(), ' ')),
+                             lines[i] | fx::flex, right[i]}));
+  m.leaf(id, true, fx::vbox(std::move(rows)));
+  return e;
+}
+
+TextViewEvent FtxuiBackend::text_view(const char *label, const char *key, const std::string &text,
+                                      const TextViewOptions &opts) {
+  Impl &m = *m_;
+  const std::string id = m.uid(std::string("tv|") + (key ? key : label));
+  Impl::TextView &v = m.text_views[id];
+  TextViewEvent ev;
+  const int rows = opts.height > 0.0f ? std::max(2, m.px_to_rows(opts.height)) : 8;
+  // The width it was laid out at last walk, less the gutter; before that, the screen's.
+  int width = m.term_w > 4 ? m.term_w - 4 : 76;
+  if (const auto b = m.boxes.find(id); b != m.boxes.end() && b->second.x_max > b->second.x_min)
+    width = b->second.x_max - b->second.x_min; // the box is inclusive; one column is the gutter
+  const auto wrap = [&](const std::string &all, std::vector<std::string> &out) {
+    out.clear();
+    std::size_t lines = 0;
+    for (std::size_t i = 0; i <= all.size();) {
+      const std::size_t j = std::min(all.find('\n', i), all.size());
+      if (j == all.size() && i == j && lines > 0)
+        break; // the text's last newline ends the last line
+      const std::string line = all.substr(i, j - i);
+      if (opts.wrap) {
+        for (std::string &r : wrap_cells(line, width))
+          out.push_back(std::move(r));
+      } else {
+        out.push_back(line);
+      }
+      ++lines;
+      i = j + 1;
+    }
+    return lines;
+  };
+  if (text != v.text) {
+    const bool grew = !v.text.empty() && text.size() > v.text.size();
+    const bool prepended =
+        grew && text.compare(text.size() - v.text.size(), v.text.size(), v.text) == 0;
+    const bool appended = grew && !prepended && text.compare(0, v.text.size(), v.text) == 0;
+    const int before = static_cast<int>(v.rows.size());
+    v.text = text;
+    v.width = width;
+    v.lines = wrap(v.text, v.rows);
+    v.reported = false;
+    if (prepended)
+      v.top += static_cast<int>(v.rows.size()) - before; // what was in view stays in view
+    else if (!appended)
+      v.fresh = true;
+    else if (opts.follow && v.at_bottom)
+      v.top = static_cast<int>(v.rows.size());
+  } else if (width != v.width) {
+    v.width = width;
+    v.lines = wrap(v.text, v.rows);
+    if (v.at_bottom)
+      v.top = static_cast<int>(v.rows.size());
+  }
+  const int n = static_cast<int>(v.rows.size());
+  if (v.fresh)
+    v.top = n;
+  bool up = false; // the user moved up this walk
+  int step = 0;
+  if (m.ev_live && m.has_focus(id) && m.ev.kind == TermEvent::Kind::Key) {
+    const std::string &k = m.ev.key;
+    if (k == "Up")
+      step = -1;
+    else if (k == "Down")
+      step = 1;
+    else if (k == "PageUp")
+      step = -(rows - 1);
+    else if (k == "PageDown")
+      step = rows - 1;
+    else if (k == "Home")
+      step = -n;
+    else if (k == "End")
+      step = n;
+    if (step != 0)
+      m.use();
+  }
+  if (m.wheel_id == id) {
+    step += 3 * m.wheel_dir;
+    m.wheel_id.clear();
+  }
+  up = step < 0;
+  const int was = std::clamp(v.top, 0, std::max(0, n - rows));
+  v.top = std::clamp(v.top + step, 0, std::max(0, n - rows));
+  v.at_bottom = v.top >= n - rows;
+  if (n <= rows) {
+    if (!v.reported) { // all of it fits: there is room above for more
+      ev.at_top = true;
+      v.reported = true;
+    }
+  } else if (up && v.top == 0 && !v.fresh) {
+    ev.at_top = was > 0 || step < 0; // reached the top, or pushed against it again
+  }
+  v.fresh = false;
+  // `rows` rows of text and a gutter showing which way there is more.
+  const bool uni = unicode_glyphs();
+  fx::Elements shown;
+  for (int r = 0; r < rows; ++r) {
+    const int i = v.top + r;
+    const std::string gutter = r == 0 && v.top > 0                 ? (uni ? "\xe2\x96\xb2" : "^")
+                               : r == rows - 1 && v.top + rows < n ? (uni ? "\xe2\x96\xbc" : "v")
+                                                                   : " ";
+    shown.push_back(fx::hbox({fx::text(i < n ? v.rows[static_cast<std::size_t>(i)] : std::string()) |
+                                  fx::flex,
+                              fx::text(gutter) | fx::dim}));
+  }
+  fx::Element body = fx::vbox(std::move(shown)) | fx::flex;
+  if (label && *label && std::string(label).rfind("##", 0) != 0)
+    body = fx::vbox({fx::text(label) | (m.has_focus(id) ? fx::inverted : fx::nothing), body});
+  m.leaf(id, true, body);
+  return ev;
+}
+
 ColorEdit FtxuiBackend::color(const char *label, const float rgb[3]) {
   Impl &m = *m_;
   const std::string id = m.uid(std::string("cl|") + label);
@@ -2857,6 +3146,16 @@ bool translate(fx::Event e, TermEvent &out) {
     out = TermEvent::key_event(std::string(1, static_cast<char>('A' + in[0] - 1)), false, true);
     return true;
   }
+  if (in == "\x1b\r" || in == "\x1b\n") { // Alt-Return
+    out = TermEvent::key_event("Return", false, false, true);
+    return true;
+  }
+  // Shift-Return, where the terminal tells it apart: the kitty keyboard protocol, xterm's
+  // modifyOtherKeys.
+  if (in == "\x1b[13;2u" || in == "\x1b[27;2;13~") {
+    out = TermEvent::key_event("Return", true);
+    return true;
+  }
   if (in.size() == 2 && in[0] == 27 && in[1] > 32 && in[1] < 127) { // Alt-<key>
     char c = in[1];
     if (c >= 'a' && c <= 'z')
@@ -3128,6 +3427,14 @@ IndexEdit FtxuiBackend::radio(const char *, int, const std::vector<std::string> 
   return {};
 }
 StringEdit FtxuiBackend::input_text(const char *, const char *, const std::string &, bool) {
+  return {};
+}
+MessageEdit FtxuiBackend::message_input(const char *, const char *, const std::string &,
+                                        const MessageInputOptions &) {
+  return {};
+}
+TextViewEvent FtxuiBackend::text_view(const char *, const char *, const std::string &,
+                                      const TextViewOptions &) {
   return {};
 }
 void FtxuiBackend::focus_next_widget() {}
