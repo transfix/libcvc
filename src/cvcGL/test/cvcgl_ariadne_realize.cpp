@@ -14,7 +14,7 @@
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
-#include <cvc/core/async_lane.h>  // field colours: pump the scheduler their overlay tasks run on
+#include <cvc/core/async_lane.h> // field colours: pump the scheduler their overlay tasks run on
 #include <cvc/core/world_clock.h> // clock test: app.world_clock() drive via tick_scene
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
