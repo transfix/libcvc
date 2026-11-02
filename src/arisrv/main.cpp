@@ -26,6 +26,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
@@ -753,9 +754,13 @@ int main(int argc, char **argv) {
         cvc::ariadne::avatar_intent in;
         const bool has_pose = cvc::ariadne::read_pose(app, room, p.pid, s, t);
         const bool has_intent = cvc::ariadne::read_intent(app, room, p.pid, in);
-        std::printf("[arisrv]   %-16s pos %s (%.2f, %.2f) intent %s (%.2f, %.2f)\n", p.pid.c_str(),
-                    has_pose ? "" : "none", s.position.x, s.position.y, has_intent ? "" : "none",
-                    in.move.x, in.move.y);
+        // Facings in degrees about +Z: the pose's (from its orientation) and the one asked for.
+        constexpr double kDeg = 180.0 / 3.14159265358979323846;
+        std::printf("[arisrv]   %-16s pos %s (%.2f, %.2f) facing %.1f intent %s (%.2f, %.2f) "
+                    "yaw %.1f\n",
+                    p.pid.c_str(), has_pose ? "" : "none", s.position.x, s.position.y,
+                    2.0 * std::atan2(s.rotation.z, s.rotation.w) * kDeg, has_intent ? "" : "none",
+                    in.move.x, in.move.y, in.yaw * kDeg);
       }
       // The AOI over the same ~5 s: the pairs in each tier now, the pose pushes and the media
       // frames the gate passed whole, as thumbnails or not at all, and the room-tree deliveries

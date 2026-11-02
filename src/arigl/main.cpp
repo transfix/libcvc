@@ -454,7 +454,8 @@ struct ConferenceSession {
   static constexpr double kEyeHeight = 1.2; // orbit centre above the avatar's feet (m)
   // Mouse look (the Controls window; CameraController::setMouseLookEnabled): the camera aims, we
   // face where it does and walk that way. Turning proposes at most kTurnHz intents a second (a
-  // key still proposes at once), and the camera pivots over our right shoulder.
+  // key still proposes at once; our own avatar turns every frame), and the camera pivots over our
+  // right shoulder.
   std::string walk_keys_;    // where our walk keys are bound (avatar_keys_path)
   unsigned last_keys_ = 0;   // the movement keys held at the last proposal (a bit each)
   double next_turn_s_ = 0.0; // steady_s() before which a turn alone proposes nothing
@@ -990,8 +991,14 @@ struct ConferenceSession {
       last_intent_ = tree;
     }
     // Re-assert it locally every frame: our avatar joins the holon only once our room-join is in
-    // the tree, so an intent proposed before then must still reach the prediction.
-    holon_->set_intent(pid_, last_intent_);
+    // the tree, so an intent proposed before then must still reach the prediction. Under mouse look
+    // our own avatar also turns with the camera every frame, between the proposals that tell the
+    // relay: only its facing, so the walk we predict stays the one the relay runs. (Not while the
+    // document drives us: the tree's intent is not the one we last proposed then.)
+    cvc::ariadne::avatar_intent local = last_intent_;
+    if (look && !differs(last_intent_, last_user_))
+      local.yaw = facing_yaw_;
+    holon_->set_intent(pid_, local);
     cvc::ariadne::client_pump(*holon_, *app_, room_, pid_, f.wall_dt);
     avatar_panel_.update(*holon_, *app_, room_, pid_, f.wall_dt);
     if (avatar_panel_.sampled())

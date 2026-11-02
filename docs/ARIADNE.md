@@ -636,7 +636,9 @@ the loader only *captures*. The host wires them:
   *Camera distance*, the camera's `orbit.distance` (the wheel changes it too). Under mouse look
   a click on the scene captures the pointer and the mouse turns the view with no button held,
   until *Free the mouse* (Escape; in a browser, Escape always ends its pointer lock). In
-  conference mode the avatar faces where the camera aims and walks that way, and in either look
+  conference mode the avatar faces where the camera aims, standing or walking, and walks that
+  way: it turns with the camera every frame on your screen, and the relay hears each turn (at
+  most 20 intents a second, a key at once) and shows it to everyone else. In either look
   the ground is the camera's floor (`orbit.floor.*`): looking up slides the eye in along its line
   of sight rather than under the ground, and an eye that comes inside the avatar hides it.
   `$CVC_ARIGL_LOOK=mouse` (the browser page's `?look=mouse`) starts in mouse look. A touch
