@@ -90,6 +90,32 @@ void validate_jolt(const train_config &c) {
         "), and ground_mu > 0: cvc::physics::nav_plant::dyn4_params_at(desc, veh_L)");
 }
 
+// A collision body (coll_offsets) needs the Jolt rollout and a disc radius.
+void validate_body(const train_config &c) {
+  if (c.coll_offsets.empty())
+    return;
+  if (c.rollout != rollout_kind::jolt)
+    throw std::invalid_argument("cvc::nav::coef_trainer: coll_offsets needs rollout_kind::jolt");
+  if (!(std::isfinite(c.coll_rr) && c.coll_rr > 0.0f) ||
+      !std::all_of(c.coll_offsets.begin(), c.coll_offsets.end(),
+                   [](float o) { return std::isfinite(o); }))
+    throw std::invalid_argument(
+        "cvc::nav::coef_trainer: coll_offsets needs coll_rr > 0 and finite offsets");
+}
+
+// w_progress != 0 needs the Jolt rollout and a speed to keep.
+void validate_progress(const train_config &c) {
+  if (c.w_progress == 0.0f)
+    return;
+  if (c.rollout != rollout_kind::jolt)
+    throw std::invalid_argument("cvc::nav::coef_trainer: w_progress needs rollout_kind::jolt");
+  if (!(std::isfinite(c.w_progress) && c.w_progress > 0.0f && std::isfinite(c.progress_speed) &&
+        c.progress_speed > 0.0f && std::isfinite(c.progress_tol) && c.progress_tol >= 0.0f &&
+        std::isfinite(c.progress_decel) && c.progress_decel >= 0.0f))
+    throw std::invalid_argument("cvc::nav::coef_trainer: w_progress needs w_progress > 0, "
+                                "progress_speed > 0, progress_tol >= 0 and progress_decel >= 0");
+}
+
 // w_energy > 0 needs the dynamic rollout and a power model of the same vehicle, or the Jolt
 // rollout and its model's price.
 void validate_energy(const train_config &c) {
@@ -273,6 +299,8 @@ double plant_window(const training_scene &scene, const train_config &cfg, const 
                     float *v_out, float *potential, long *dropped) {
   validate_jolt(cfg);
   validate_energy(cfg);
+  validate_progress(cfg);
+  validate_body(cfg);
   rollout_plant &plant = *cfg.plant;
   if (plant.size() != n)
     throw std::invalid_argument("cvc::nav::coef_trainer: train_config::plant holds " +
@@ -298,6 +326,56 @@ double plant_window(const training_scene &scene, const train_config &cfg, const 
   const float d_safe = cfg.d_safe > 0.0f ? cfg.d_safe : d_hat;
   const float inv_d_safe = 1.0f / d_safe;
   const auto at = [n](int t, int ag) { return static_cast<std::size_t>(t) * n + ag; };
+  // The collision penalty's discs (train_config::coll_offsets): their offsets along the heading
+  // from the rear axle and their radius; by default one disc of the scene's rr on the axle.
+  const std::vector<float> axle_only{0.0f};
+  const std::vector<float> &disc_off = cfg.coll_offsets.empty() ? axle_only : cfg.coll_offsets;
+  const float disc_r = cfg.coll_offsets.empty() ? rr : cfg.coll_rr;
+  // The time pressure (train_config::w_progress): a step's shortfall from the progress
+  // progress_speed makes, as a fraction of it. p* is the least of a step's worth, the distance
+  // left to progress_tol and (progress_decel) a step at the stopping speed v_stop; `dp` is its
+  // derivative in |o_t - goal| for the backward (0, 1, or hdt v_stop'). With progress_decel, a
+  // step also pays for its speed over v_stop at its end, as a fraction of progress_speed.
+  const bool progress = cfg.w_progress != 0.0f;
+  const bool stopping = progress && cfg.progress_decel > 0.0f;
+  const float p_step = cfg.progress_speed * hdt;
+  const float prog_w = progress ? cfg.w_progress / (static_cast<float>(window) * p_step) : 0.0f;
+  const float speed_w =
+      stopping ? cfg.w_progress / (static_cast<float>(window) * cfg.progress_speed) : 0.0f;
+  // v_stop(d) and its derivative (held finite as it goes to 0 at the tolerance).
+  const auto v_stop = [&](float d, float &dv) {
+    const float room = std::max(0.0f, d - cfg.progress_tol);
+    const float v = std::sqrt(2.0f * cfg.progress_decel * room);
+    dv = room > 0.0f ? cfg.progress_decel / std::max(v, 1e-3f * cfg.progress_speed) : 0.0f;
+    return v;
+  };
+  struct shortfall {
+    float value;
+    float dp;
+  };
+  const auto progress_shortfall = [&](const diff::dyn4_state<float> &s0,
+                                      const diff::dyn4_state<float> &s1, float gx, float gy) {
+    const float d0 = std::hypot(s0.x - gx, s0.y - gy), d1 = std::hypot(s1.x - gx, s1.y - gy);
+    float want = p_step, dp = 0.0f;
+    const float left = std::max(0.0f, d0 - cfg.progress_tol);
+    if (left < want) {
+      want = left;
+      dp = 1.0f;
+    }
+    if (stopping) {
+      float dv;
+      const float stop_step = v_stop(d0, dv) * hdt;
+      if (stop_step < want) {
+        want = stop_step;
+        dp = dv * hdt;
+      }
+    }
+    return shortfall{want - (d0 - d1), dp};
+  };
+  // Speed over v_stop at a step's end, and its derivative in |o - goal| (dv, through v_stop).
+  const auto overspeed = [&](const diff::dyn4_state<float> &s1, float gx, float gy, float &dv) {
+    return std::fabs(s1.vx) - v_stop(std::hypot(s1.x - gx, s1.y - gy), dv);
+  };
 
   std::vector<policy_step> st(static_cast<std::size_t>(n) * window);
   for (policy_step &S : st)
@@ -333,10 +411,25 @@ double plant_window(const training_scene &scene, const train_config &cfg, const 
     for (int ag = 0; ag < n; ++ag) {
       const diff::dyn4_state<float> s1 = plant.state(ag);
       tape[at(t + 1, ag)] = s1;
-      const diff::sample cs = diff::sample_fwd(F, s1.x, s1.y);
-      const float pen = d_safe - (cs.phi - rr);
-      if (pen > 0.0f)
-        total_loss += static_cast<double>(coll_w) * pen * inv_d_safe * inv_n;
+      const float ch = std::cos(s1.psi), sh = std::sin(s1.psi);
+      for (const float off : disc_off) {
+        const diff::sample cs = diff::sample_fwd(F, s1.x + off * ch, s1.y + off * sh);
+        const float pen = d_safe - (cs.phi - disc_r);
+        if (pen > 0.0f)
+          total_loss += static_cast<double>(coll_w) * pen * inv_d_safe * inv_n;
+      }
+      if (progress) {
+        const shortfall sf =
+            progress_shortfall(tape[at(t, ag)], s1, goal[2 * ag], goal[2 * ag + 1]);
+        if (sf.value > 0.0f)
+          total_loss += static_cast<double>(prog_w) * sf.value * inv_n;
+        if (stopping) {
+          float dv;
+          const float over = overspeed(s1, goal[2 * ag], goal[2 * ag + 1], dv);
+          if (over > 0.0f)
+            total_loss += static_cast<double>(speed_w) * over * inv_n;
+        }
+      }
       if (energy) {
         const float E = static_cast<float>(plant.lines(ag).drawn);
         drawn[static_cast<std::size_t>(ag) * window + t] = E;
@@ -394,13 +487,45 @@ double plant_window(const training_scene &scene, const train_config &cfg, const 
       const diff::dyn4_state<float> &s0 = tape[at(t, ag)], &s1 = tape[at(t + 1, ag)];
       const float al = S.coef[0], be = S.coef[1], ga = S.coef[2];
       float e_prog_t = 0.0f;
-      const diff::sample cs = diff::sample_fwd(F, s1.x, s1.y);
-      if (d_safe - (cs.phi - rr) > 0.0f) {
-        float dox, doy;
-        diff::sample_bwd(cs, -static_cast<float>(coll_w) * inv_d_safe * static_cast<float>(inv_n),
-                         0.0f, 0.0f, dox, doy);
-        g1.x += dox;
-        g1.y += doy;
+      // Each disc's centre is the axle plus off along the heading, so its gradient reaches psi too.
+      const float ch = std::cos(s1.psi), sh = std::sin(s1.psi);
+      for (const float off : disc_off) {
+        const diff::sample cs = diff::sample_fwd(F, s1.x + off * ch, s1.y + off * sh);
+        if (d_safe - (cs.phi - disc_r) > 0.0f) {
+          float dox, doy;
+          diff::sample_bwd(cs, -static_cast<float>(coll_w) * inv_d_safe * static_cast<float>(inv_n),
+                           0.0f, 0.0f, dox, doy);
+          g1.x += dox;
+          g1.y += doy;
+          if (off != 0.0f)
+            g1.psi += off * (ch * doy - sh * dox);
+        }
+      }
+      // The shortfall rises with |o_{t+1} - goal| and moves with |o_t - goal| as p* does, less 1:
+      // that part goes on o_t's gradient below. The overspeed rises with |vx_{t+1}| and falls as
+      // v_stop does with |o_{t+1} - goal|.
+      float prog_g0 = 0.0f;
+      if (progress) {
+        const float d1 = std::hypot(s1.x - gx, s1.y - gy);
+        float g_d1 = 0.0f;
+        const shortfall sf = progress_shortfall(s0, s1, gx, gy);
+        if (sf.value > 0.0f) {
+          const float c = prog_w * static_cast<float>(inv_n);
+          g_d1 += c;
+          prog_g0 = c * (sf.dp - 1.0f);
+        }
+        if (stopping) {
+          float dv;
+          if (overspeed(s1, gx, gy, dv) > 0.0f) {
+            const float c = speed_w * static_cast<float>(inv_n);
+            g1.vx += s1.vx >= 0.0f ? c : -c;
+            g_d1 -= c * dv;
+          }
+        }
+        if (g_d1 != 0.0f && d1 > 1e-9f) {
+          g1.x += g_d1 * (s1.x - gx) / d1;
+          g1.y += g_d1 * (s1.y - gy) / d1;
+        }
       }
       if (energy) {
         float gE[diff::dyn4_state<float>::size];
@@ -429,6 +554,13 @@ double plant_window(const training_scene &scene, const train_config &cfg, const 
                                g_ga);
       float god_x = gs.x, god_y = gs.y;
       policy_backward(net, S, g_al, g_be, g_ga, e_prog_t, gagent.data(), god_x, god_y);
+      if (prog_g0 != 0.0f) {
+        const float d0 = std::hypot(s0.x - gx, s0.y - gy);
+        if (d0 > 1e-9f) {
+          god_x += prog_g0 * (s0.x - gx) / d0;
+          god_y += prog_g0 * (s0.y - gy) / d0;
+        }
+      }
       gs.x = god_x;
       gs.y = god_y;
       g1 = gs;
@@ -796,6 +928,8 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
   if (dyn)
     validate_dynamic(cfg_);
   validate_energy(cfg_);
+  validate_progress(cfg_);
+  validate_body(cfg_);
   const float rr = scene.rr, d_hat = scene.d_hat, vmax = scene.vmax, hdt = scene.dt;
   // The energy term (P8c): each step's energy as a fraction of what full power draws over it;
   // with energy_ref, only what the step's progress does not pay for (`priced`).
@@ -1046,6 +1180,7 @@ void coef_trainer::adam_step(const std::vector<float> &grad) {
     const float t = std::min(1.0f, static_cast<float>(adam_t_) / static_cast<float>(adam_total_));
     lr = cfg_.lr_min + (cfg_.lr - cfg_.lr_min) * 0.5f * (1.0f + std::cos(3.14159265358979f * t));
   }
+  lr *= lr_scale_; // smaller after each rollback (train_config::rollback_drop)
   double sq = 0.0;
   for (float g : grad)
     sq += static_cast<double>(g) * g;
@@ -1074,6 +1209,18 @@ void coef_trainer::train(const training_scene &scene, bool verbose,
     validate_dynamic(cfg_);
   if (jolt)
     validate_jolt(cfg_);
+  if (cfg_.episode_steps < 0 || (cfg_.episode_steps > 0 && !jolt) ||
+      !(std::isfinite(cfg_.episode_tol) && cfg_.episode_tol >= 0.0f))
+    throw std::invalid_argument(
+        "cvc::nav::coef_trainer: episode_steps > 0 needs rollout_kind::jolt "
+        "(and episode_steps >= 0, episode_tol >= 0)");
+  // Continuing episodes (train_config::episode_steps): the batch drives on across outer steps
+  // until every agent is within episode_tol of its goal or it has driven episode_steps steps.
+  const bool episodes = cfg_.episode_steps > 0;
+  int driven = 0;    // steps the current batch has driven
+  bool fresh = true; // the next outer step starts a fresh batch
+  episodes_ = 0;
+  episodes_arrived_ = 0;
   // Total adam steps = outer steps * windows-per-horizon, so the cosine anneal spans the run.
   const int nwin = (horizon + window - 1) / window;
   adam_total_ = static_cast<long>(cfg_.steps) * nwin;
@@ -1083,42 +1230,63 @@ void coef_trainer::train(const training_scene &scene, bool verbose,
   // Checkpoint selection: score the untrained policy, then every `every` steps.
   checkpoints_.clear();
   selected_step_ = -1;
+  rollbacks_.clear();
+  lr_scale_ = 1.0f;
   const int every = cfg_.checkpoint_every > 0 ? cfg_.checkpoint_every : 25;
-  std::vector<float> best;
-  double best_fit = 0.0;
+  std::vector<float> best, best_m, best_u;
+  double best_fit = 0.0, start_fit = 0.0;
   const auto score = [&](int step) {
     const double f = fitness(to_coef_mlp(), step);
     checkpoints_.push_back({step, f});
     if (verbose)
       std::printf("  checkpoint at step %4d: fitness %.4f\n", step, f);
+    if (best.empty())
+      start_fit = f;
     if (best.empty() || f > best_fit) {
       best = p_;
+      best_m = m_;
+      best_u = u_;
       best_fit = f;
       selected_step_ = step;
+    } else if (cfg_.rollback_drop > 0.0f && best_fit > start_fit + cfg_.rollback_drop &&
+               f < best_fit - cfg_.rollback_drop) {
+      // Fallen past the margin: back to the best checkpoint, and on with smaller steps.
+      p_ = best;
+      m_ = best_m;
+      u_ = best_u;
+      lr_scale_ *= cfg_.rollback_lr_scale;
+      rollbacks_.push_back(step);
+      if (verbose)
+        std::printf("  rollback at step %4d to step %d's policy, lr x%.3g\n", step, selected_step_,
+                    lr_scale_);
     }
   };
   if (fitness)
     score(0);
   for (int step = 0; step < cfg_.steps; ++step) {
-    scene.sample_starts_goals(n, cfg_.seed + static_cast<unsigned>(step), o.data(), goal.data(),
-                              cfg_.goal_min, cfg_.goal_max, start_clearance_of(cfg_));
-    // Initial aux: surrogate v=0; bicycle and dynamic (th aimed at the goal, sp=0), the
-    // dynamic vehicle at rest with its wheel straight.
-    std::fill(x.begin(), x.end(), 0.0f);
-    for (int i = 0; i < n; ++i) {
-      if (bike || dyn || jolt) {
-        aux[2 * i] = std::atan2(goal[2 * i + 1] - o[2 * i + 1], goal[2 * i] - o[2 * i]);
-        aux[2 * i + 1] = 0.0f;
-      } else {
-        aux[2 * i] = 0.0f;
-        aux[2 * i + 1] = 0.0f;
+    if (fresh) {
+      scene.sample_starts_goals(n, cfg_.seed + static_cast<unsigned>(step), o.data(), goal.data(),
+                                cfg_.goal_min, cfg_.goal_max, start_clearance_of(cfg_));
+      // Initial aux: surrogate v=0; bicycle and dynamic (th aimed at the goal, sp=0), the
+      // dynamic vehicle at rest with its wheel straight.
+      std::fill(x.begin(), x.end(), 0.0f);
+      for (int i = 0; i < n; ++i) {
+        if (bike || dyn || jolt) {
+          aux[2 * i] = std::atan2(goal[2 * i + 1] - o[2 * i + 1], goal[2 * i] - o[2 * i]);
+          aux[2 * i + 1] = 0.0f;
+        } else {
+          aux[2 * i] = 0.0f;
+          aux[2 * i + 1] = 0.0f;
+        }
       }
-    }
-    if (jolt) { // the simulation's vehicles at rest on the batch's starts, aimed at their goals
-      std::vector<float> psi(n);
-      for (int i = 0; i < n; ++i)
-        psi[i] = aux[2 * i];
-      cfg_.plant->reset(batch_of(scene, cfg_, n, o.data(), psi.data()));
+      if (jolt) { // the simulation's vehicles at rest on the batch's starts, aimed at their goals
+        std::vector<float> psi(n);
+        for (int i = 0; i < n; ++i)
+          psi[i] = aux[2 * i];
+        cfg_.plant->reset(batch_of(scene, cfg_, n, o.data(), psi.data()));
+      }
+      driven = 0;
+      ++episodes_;
     }
     double last = 0.0;
     for (int w0 = 0; w0 < horizon; w0 += window) {
@@ -1129,6 +1297,18 @@ void coef_trainer::train(const training_scene &scene, bool verbose,
       o.swap(o2);
       aux.swap(a2);
       x.swap(x2);
+    }
+    // o now holds where the batch's agents are (the last window's o_out).
+    fresh = !episodes;
+    if (episodes) {
+      driven += horizon;
+      bool all_there = true;
+      for (int i = 0; i < n && all_there; ++i)
+        all_there =
+            std::hypot(o[2 * i] - goal[2 * i], o[2 * i + 1] - goal[2 * i + 1]) <= cfg_.episode_tol;
+      if (all_there)
+        ++episodes_arrived_;
+      fresh = all_there || driven >= cfg_.episode_steps;
     }
     if (verbose && (step % 50 == 0 || step == cfg_.steps - 1))
       std::printf("  step %4d: window_loss %.4f\n", step, last);

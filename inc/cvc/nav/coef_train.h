@@ -230,6 +230,56 @@ struct train_config {
   // scored before training and every `checkpoint_every` outer steps (and after the last), and
   // train() ends on the best-scoring parameters. 0 = every 25 steps when a fitness is given.
   int checkpoint_every = 0;
+  // Rollback (with a fitness): a checkpoint that scores more than rollback_drop under the best so
+  // far sends training back to the best checkpoint -- its parameters and Adam moments -- and
+  // scales the learning rate by rollback_lr_scale from there on. On the Jolt Humvee every run
+  // climbs to its best reach within a few hundred steps and then falls back toward the seed,
+  // the loss pulling past the policy reach likes (docs/NAV_TRAINING.md); going back and taking
+  // smaller steps keeps training at the peak instead of leaving it to selection. Armed only once
+  // the best is more than rollback_drop over the first checkpoint: before the climb validation
+  // wanders around the seed's level, and a rollback there (to the seed, at a smaller learning
+  // rate) kept w_coll 10 runs from ever making it (0.40 -> 0.36 at step 150; held out 41-43%
+  // against 70% without). 0 = off.
+  float rollback_drop = 0.0f;
+  float rollback_lr_scale = 0.5f;
+  // Time pressure (rollout == jolt). Each step adds
+  //   w_progress / window * relu(p* - p_t) / (progress_speed * hdt)
+  // per agent, with p_t = |o_t - goal| - |o_{t+1} - goal| the step's progress toward the goal and
+  // p* = min(progress_speed * hdt, |o_t - goal| - progress_tol), at least 0, the progress a vehicle
+  // keeping progress_speed (normalized units per second) makes: the shortfall as a fraction of a
+  // step's worth, 1 for a step stood still, 0 once it keeps up or is within progress_tol of its
+  // goal. The window-end distance alone hardly prices time (it is over the world's half-extent,
+  // and a sum of the steps' progress would telescope back to it), so at w_coll 10-20 the policy
+  // traded its speed for clearance: about 2 m/s on the Jolt Humvee against the untrained 6.5.
+  // 0 (the default) leaves the loss and its gradient as without it.
+  //
+  // progress_decel > 0 (normalized units / s^2) brings the vehicle in to stop: p* is also capped
+  // at a step of v_stop(|o_t - goal|), v_stop(d) = sqrt(2 progress_decel max(0, d - progress_tol))
+  // the speed it can still stop from at the tolerance, and each step adds
+  //   w_progress / window * max(0, |vx_{t+1}| - v_stop(|o_{t+1} - goal|)) / progress_speed
+  // for arriving faster than that (at the goal, any speed). Without it the term asked for full
+  // speed up to the tolerance, and trained Humvees came in at 6-7 m/s and stopped 7-10 m past.
+  float w_progress = 0.0f;
+  float progress_speed = 0.0f;
+  float progress_tol = 0.0f;
+  float progress_decel = 0.0f;
+  // Episodes (rollout == jolt). 0 (the default): each outer step drives a fresh batch from rest
+  // for `horizon` steps -- 3.6 s at 60, while the goals are 25-100 m away, so training never sees
+  // a vehicle cruise or arrive. > 0: a batch keeps driving across outer steps, `horizon` more
+  // steps each from where it was, until every agent is within episode_tol of its goal or the batch
+  // has driven episode_steps steps; the next outer step then starts a fresh one. w_progress then
+  // prices a vehicle's lateness over its whole trip.
+  int episode_steps = 0;
+  float episode_tol = 0.15f;
+  // The collision penalty's body (rollout == jolt): discs of radius coll_rr centred coll_offsets
+  // along the heading from the rear axle (normalized), each paying w_coll / window * (d_safe -
+  // its clearance) / d_safe while it is within d_safe of an obstacle. Empty (the default): one
+  // disc of the scene's rr on the rear axle. For the Humvee at demo3's metric that is a 3 m disc,
+  // and with the scene's d_hat (7 m) as d_safe it charged a vehicle within ~10 m of any wall:
+  // the collision term then outweighed the goal's 13 to 1, and training bought clearance with
+  // speed.
+  std::vector<float> coll_offsets;
+  float coll_rr = 0.0f;
 };
 
 // The trainable CoefMLP: its dense layers as flat params + Adam state. Distinct
@@ -258,10 +308,16 @@ public:
              const checkpoint_fitness &fitness = checkpoint_fitness());
   const std::vector<checkpoint_score> &checkpoints() const { return checkpoints_; }
   int selected_step() const { return selected_step_; }
+  // The last train()'s rollbacks (train_config::rollback_drop), and the steps they came at.
+  const std::vector<int> &rollbacks() const { return rollbacks_; }
   // rollout == jolt: the agents whose gradient was not finite and was left out of a window's
   // (the model's reverse at a state outside its domain, such as a vehicle the simulation rolled
   // over), counted over this trainer's loss_and_grad calls.
   long dropped_agents() const { return dropped_agents_; }
+  // The last train()'s batches (train_config::episode_steps): how many it drew, and how many of
+  // those ended with every agent at its goal rather than at the time limit.
+  int episodes() const { return episodes_; }
+  int episodes_arrived() const { return episodes_arrived_; }
 
   // Bake the frozen inference policy: softplus(net + log(expm1(bias))), the same
   // topology and semantics a loaded .cvcnav has. Persist with its save().
@@ -309,10 +365,13 @@ private:
   std::vector<float> p_;     // flat params: [L0.w(h*5) L0.b(h) L1.w(h*h) L1.b(h) L2.w(3*h) L2.b(3)]
   std::vector<float> m_, u_; // Adam first/second moments (u_ = "v", renamed to avoid the vel v)
   long adam_t_ = 0;
-  long adam_total_ = 0; // total adam steps this train() run, for the cosine LR anneal (0 = off)
+  long adam_total_ = 0;   // total adam steps this train() run, for the cosine LR anneal (0 = off)
+  float lr_scale_ = 1.0f; // the learning rate's factor after rollbacks (1 before any)
+  std::vector<int> rollbacks_; // rollbacks(): the steps the last train() rolled back at
   std::vector<checkpoint_score> checkpoints_; // the last train()'s checkpoint scores
   int selected_step_ = -1;                    // and the one it ended on (-1 = no selection)
   mutable long dropped_agents_ = 0;           // dropped_agents()
+  int episodes_ = 0, episodes_arrived_ = 0;   // episodes(), episodes_arrived()
   // Per-layer flat offsets into p_ (w then b), plus (rows, cols).
   int off_w_[3] = {0, 0, 0}, off_b_[3] = {0, 0, 0};
   int lrows_[3] = {0, 0, 0}, lcols_[3] = {0, 0, 0};

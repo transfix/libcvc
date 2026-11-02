@@ -539,9 +539,12 @@ TEST(StateTransportWsTest, QuietClientAnsweringPingsIsNotReaped) {
   ASSERT_TRUE(tA.connect_to_peer(ws(S.listen_address()), std::chrono::milliseconds(2000)));
   ASSERT_TRUE(
       wait_until([&] { return S.connection_count() >= 1; }, std::chrono::milliseconds(2000)));
-  for (int i = 0; i < 20; ++i) { // ~600 ms of reaping with a 150 ms idle limit
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
-    S.reap_idle(std::chrono::milliseconds(150));
+  // ~2 s of reaping with a 750 ms idle limit. The probe thread pings on a 50 ms tick, and a loaded
+  // CI runner (macOS) can leave a couple of hundred ms between Pongs, so the limit needs the
+  // margin; 2 s is still well past it, so a client that did not answer would be reaped.
+  for (int i = 0; i < 40; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    S.reap_idle(std::chrono::milliseconds(750));
   }
   EXPECT_EQ(reaped.load(), 0) << "a client answering Pings is not a ghost";
   EXPECT_EQ(S.connection_count(), 1u);

@@ -18,6 +18,7 @@
 #include <cvc/core/world_clock.h> // clock test: app.world_clock() drive via tick_scene
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
+#include <cvc/geometry/height_field.h> // generated_world test: the published ground
 #include <cvc/geometry/mesh_ops.h> // field colours: the colormap a seeded ramp follows
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/GraphicsNode.h>
@@ -1127,6 +1128,72 @@ int main() {
                    .value<double>(),
                2.4),
         "wave_sea seeded sea.wave_amp from its props");
+  }
+
+  // ── generated_world + the fast render path's keys (casts_shadow, opaque, shadow focus) ──────
+  {
+    printf("== generated_world node type + fast-path keys ==\n");
+    chk(cvc::gl::ariadne::has_scene_node_type("generated_world"),
+        "register_cvcgl_extensions installed the generated_world node type");
+    SceneGraph sg(app, "gw");
+    SceneRenderer view(sg, 64, 64, /*offscreen=*/true, "main");
+    Scene scene;
+    SceneNode w;
+    w.id = "world";
+    w.type = "generated_world";
+    w.props.kind = Value::Kind::Map;
+    auto prop = [&](const char *k, const std::string &v) {
+      Value val;
+      val.kind = Value::Kind::Scalar;
+      val.scalar = v;
+      w.props.entries.emplace_back(k, val);
+    };
+    prop("seed", "5");
+    prop("half", "200");
+    prop("trees", "20");
+    prop("rocks", "4");
+    prop("buildings", "8");
+    prop("tree_gen", "3");
+    prop("amp", "40");
+    prop("water_level", "14");
+    prop("texture", "256");
+    w.has_casts_shadow = true;
+    w.casts_shadow = false;
+    w.material_opaque = true;
+    scene.nodes.push_back(w);
+    scene.has_shadows = true;
+    scene.shadows_enabled = true;
+    scene.shadow_focus.present = true;
+    scene.shadow_focus.follow_camera = true;
+    scene.shadow_focus.ground = "world";
+    std::vector<std::string> warnings;
+    auto realized = cvc::gl::ariadne::realize_scene(sg, scene, "gw", &warnings);
+    auto terrain = std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("world"));
+    chk(terrain != nullptr, "generated_world realized its terrain as the node itself");
+    chk(terrain && !terrain->castsShadow(), "casts_shadow: false -> the terrain casts no shadow");
+    chk(sg.getGraphics("world_props") != nullptr && sg.getGraphics("world_buildings") != nullptr &&
+            sg.getGraphics("world_foliage") != nullptr,
+        "generated_world added its merged props / buildings / foliage meshes beside it");
+    chk(std::dynamic_pointer_cast<cvc::gl::VolumeNode>(sg.getGraphics("world_water")) != nullptr,
+        "generated_world added the water volume");
+    chk(realized.height_fields.count("world") == 1,
+        "generated_world published its ground (ground: world stands on it)");
+    auto &st = cvc::state::instance(app);
+    chk(approx(st(cvc::ariadne::resolve_bind("gw", "world.seed")).value<double>(), 5.0),
+        "generated_world seeded world.seed from its props");
+    chk(realized.shadow_focus.follow_camera, "shadows.focus: camera is kept for tick_scene");
+    view.setCamera(0, -300, 200, 0, 0, 0, 0, 0, 1, 40.0);
+    cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+    chk(sg.shadowFocused(), "tick_scene aimed the shadow maps at the camera's focal point");
+    // A live edit regenerates the world in place: a bigger world, a bigger ground.
+    const auto pts0 = terrain ? terrain->getGeometry()->const_points().size() : 0;
+    st(cvc::ariadne::resolve_bind("gw", "world.half")).value(700.0);
+    cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+    const auto pts1 = terrain ? terrain->getGeometry()->const_points().size() : 0;
+    chk(pts1 > pts0, "a world.half edit regenerated the world in place");
+    chk(realized.height_fields["world"]->rows() * realized.height_fields["world"]->cols() ==
+            int(pts1),
+        "the published ground follows the regenerated world");
   }
 
   // ── two top-level volren nodes share an id -> last wins, no leaked orphan ────

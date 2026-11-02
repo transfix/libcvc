@@ -328,7 +328,8 @@ TestOutcome run_test_document(const cvc::ariadne::HostOptions &o, const std::str
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
-  if (by_frames && o.net.enabled) { // as snapshot: what the document asked for comes back first
+  // As snapshot: what the document asked for comes back first, and its pictures.
+  if (by_frames && (o.net.enabled || rt.runtime().media_stale())) {
     rt.settle([&] { rt.drain(); }, o.settle > 0 ? o.settle : ari::kDefaultSettleSeconds);
     for (const std::string &w : rt.take_warnings())
       fail(trim_ari(w));
@@ -549,10 +550,12 @@ int main(int argc, char **argv) {
       if (rt.should_close()) // (quit code): the frame it quit on
         break;
     }
-    if (o.net.enabled && !rt.should_close()) { // the frame shows what the requests brought back
-      rt.settle([&] { rt.drain(); }, o.settle > 0 ? o.settle : ari::kDefaultSettleSeconds);
-      frame = backend->render_to_string(rt.runtime(), width, o.height, o.ansi);
-    }
+    // The frame shows what the requests brought back, and the pictures it draws.
+    if ((o.net.enabled || rt.runtime().media_stale()) && !rt.should_close())
+      rt.settle_and_render(
+          [&] { rt.drain(); },
+          [&] { frame = backend->render_to_string(rt.runtime(), width, o.height, o.ansi); },
+          o.settle > 0 ? o.settle : ari::kDefaultSettleSeconds);
     if (pixels) { // Sixel draws at screen positions, so the frame starts at the top-left
       const int rows = static_cast<int>(std::count(frame.begin(), frame.end(), '\n')) + 1;
       frame = "\x1b[H\x1b[2J" + frame + backend->take_graphics() + "\x1b[" +

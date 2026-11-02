@@ -951,6 +951,17 @@ void ImGuiBackend::set_image(const std::string &name, const cvc::image &img) {
   p.dirty = true;
 }
 
+void ImGuiBackend::drop_image(const std::string &name) {
+  const auto it = m_images.find(name);
+  if (it == m_images.end())
+    return;
+#ifdef CVC_ENABLE_IMGUI
+  if (it->second.tex != 0)
+    glDeleteTextures(1, &it->second.tex);
+#endif
+  m_images.erase(it);
+}
+
 #ifdef CVC_ENABLE_IMGUI
 unsigned int ImGuiBackend::image_texture(const char *name, int &W, int &H) {
   const auto it = m_images.find(name ? name : "");

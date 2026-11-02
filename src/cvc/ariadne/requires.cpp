@@ -55,6 +55,9 @@ const std::vector<TokenRule> &rules() {
        [](const HostFacts &f) { return f.net_auth; }},
       {{"net.auth.persist", "the host keeps credentials across runs"},
        [](const HostFacts &f) { return f.net_auth_persist; }},
+      {{"image.url", "image: shows a picture by URI (§5.11): http(s) where the network is on, "
+                     "file://, cvc://, state://"},
+       [](const HostFacts &) { return true; }},
       {{"oidc", "the host signs in with OAuth 2.0 / OpenID Connect providers (oidc-sign-in)"},
        [](const HostFacts &f) { return f.oidc; }},
       {{"oidc.loopback", "sign-in through the system browser and a loopback redirect (RFC 8252)"},
