@@ -1195,7 +1195,10 @@ status.
 
 `LocksThreads` also takes per-case sizes (`CVC_LOCKS_FUZZ_SEEDS`, `CVC_LOCKS_FUZZ_OPS`,
 `CVC_LOCKS_THREAD_OPS`, `CVC_LOCKS_LT03B_RUNS`), and the pycvc script `CVC_PYCVC_LOCKS_RUNS` (PR-8's
-stress runs, 500 by default).
+stress runs, 500 by default). Unless `CVC_LOCKS_LT03B_RUNS` sets its count, LT-3b stops at 90 s
+and fails below a twentieth of its runs: on a loaded macOS runner each `sched_yield` in its spins
+and barrier can give up the core for a 10 ms quantum, and a run takes 20-30 ms there against about
+1 ms on Linux.
 
 ### The Sanitizer Jobs
 

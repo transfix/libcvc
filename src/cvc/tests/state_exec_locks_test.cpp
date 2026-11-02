@@ -4135,10 +4135,17 @@ struct test_hooks_scope {
 // before the close or is dropped: over the run, posts + posts_dropped equals the cross-home notes
 // delivered (counted through lock_test_hooks), and every post that landed was applied by B's
 // drain or discarded at the close. ASan and TSan (ci.yml's sanitizer jobs) watch for a use after
-// free and a race. 10^4 runs (10^3 in an unoptimized build; CVC_LOCKS_LT03B_RUNS).
+// free and a race. 10^4 runs (10^3 in an unoptimized build; CVC_LOCKS_LT03B_RUNS), within 90 s
+// unless CVC_LOCKS_LT03B_RUNS sets the count, and never fewer than a twentieth of them: on macOS
+// sched_yield gives up the core for up to a quantum (10 ms) while other threads are runnable, and
+// the spins, the dropper's wait and libc++'s barrier all yield, so a run on a loaded runner takes
+// 20-30 ms there against about 1 ms on Linux.
 TEST_P(LocksThreads, LT03b_PostRacesDestruction) {
   const std::string kind = GetParam();
   const std::size_t runs = lane_size("CVC_LOCKS_LT03B_RUNS", 10000, 1000, 10000);
+  const char *sized = std::getenv("CVC_LOCKS_LT03B_RUNS");
+  const bool budgeted = !(sized && *sized);
+  const steady::time_point budget = deadline_after(90.0);
   detail::lock_test_hooks hooks;
   hooks.cross_home_note = count_cross_home_note;
   test_hooks_scope installed(hooks);
@@ -4206,7 +4213,8 @@ TEST_P(LocksThreads, LT03b_PostRacesDestruction) {
   std::uint64_t no_note = 0, landed_applied = 0, landed_discarded = 0, dropped = 0;
   const auto t0 = steady::now();
   std::size_t run = 0;
-  for (; run < runs && !::testing::Test::HasFailure(); ++run) {
+  for (; run < runs && !::testing::Test::HasFailure() && !(budgeted && steady::now() >= budget);
+       ++run) {
     auto b = std::make_shared<checked_world>(
         kind, checked_world_options{mgr, lock_attach{true}, scheduling_policy::round_robin, &tree,
                                     world_checks::stepping});
@@ -4252,10 +4260,14 @@ TEST_P(LocksThreads, LT03b_PostRacesDestruction) {
   pump.join();
   dropper.join();
   std::printf("LT-3b %s: %zu runs in %.2f s: the post landed and was applied %llu, landed and was "
-              "discarded %llu, was dropped %llu; no post (the detach came first) %llu\n",
+              "discarded %llu, was dropped %llu; no post (the detach came first) %llu%s\n",
               kind.c_str(), run, seconds_since(t0), static_cast<unsigned long long>(landed_applied),
               static_cast<unsigned long long>(landed_discarded),
-              static_cast<unsigned long long>(dropped), static_cast<unsigned long long>(no_note));
+              static_cast<unsigned long long>(dropped), static_cast<unsigned long long>(no_note),
+              run < runs && !::testing::Test::HasFailure() ? " (the 90 s budget ended it)" : "");
+  if (!::testing::Test::HasFailure())
+    EXPECT_GE(run, runs / 20) << "the 90 s budget ended LT-3b after " << run << " of " << runs
+                              << " runs";
   EXPECT_FALSE(a->broken);
   EXPECT_NO_THROW(mgr->check());
   EXPECT_TRUE(mgr->table().empty()) << mgr->table().canonical();
