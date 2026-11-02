@@ -572,6 +572,16 @@ void write_plant_log(const plant_log_options &o, const plant_log_drive &d) {
     std::snprintf(b, sizeof b, "%.9g", x);
     return std::string(b);
   };
+  // A string's JSON escapes (a Windows bundle path's backslashes).
+  const auto esc = [](const std::string &s) {
+    std::string out;
+    for (const char ch : s) {
+      if (ch == '"' || ch == '\\')
+        out += '\\';
+      out += ch;
+    }
+    return out;
+  };
   const auto bins_json = [&](const std::vector<residual_bin> &bins) {
     std::string s = "[";
     for (std::size_t k = 0; k < bins.size(); ++k) {
@@ -622,8 +632,8 @@ void write_plant_log(const plant_log_options &o, const plant_log_drive &d) {
   }
   {
     std::ofstream js(std::filesystem::path(o.out) / "meta.json");
-    js << "{\n \"format\": \"cvc-plant-log-1\",\n \"vehicle\": \"" << o.vehicle
-       << "\", \"scene\": \"" << o.scene << "\", \"bundle\": \"" << o.bundle
+    js << "{\n \"format\": \"cvc-plant-log-1\",\n \"vehicle\": \"" << esc(o.vehicle)
+       << "\", \"scene\": \"" << esc(o.scene) << "\", \"bundle\": \"" << esc(o.bundle)
        << "\",\n \"dt\": " << num(o.dt) << ", \"rate_hz\": " << num(1.0 / o.dt)
        << ", \"physics_dt\": 0.01, \"mu\": " << num(o.mu) << ", \"lateral_g\": " << num(o.lateral_g)
        << ", \"seconds\": " << num(o.seconds) << ", \"accel_margin\": " << num(d.accel_margin)

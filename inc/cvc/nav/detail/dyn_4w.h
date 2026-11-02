@@ -62,7 +62,9 @@
 // longitudinal load transfer from the pitch springs rather than quasi-statically (the gates
 // check the two agree).
 //
-// Left out: wheel spin, the unsprung masses, camber and the anti-roll bars.
+// Left out: the unsprung masses, camber and the anti-roll bars. Wheel spin is opt-in:
+// dyn4_spin_plant (below) gives each wheel its own speed and its tire a longitudinal force from its
+// slip; dyn4_plant has none.
 //
 // The plant in port-Hamiltonian form, and each step's energy books: dyn4_ph_* and
 // dyn4_plant_books, below.
@@ -688,8 +690,8 @@ template <class S> struct dyn4_spin_slip {
   S g[4], sig[4], K[4];
 };
 
-// With om (the wheels' speeds) and sl, the wheels spin: each Fx is the tire's longitudinal force
-// from its slip (filled into sl), not the drive's.
+// With om (the wheels' speeds), the wheels spin: each Fx is the tire's longitudinal force from its
+// slip, not the drive's, and sl (when given) gets the slips.
 template <class S, class G>
 CVC_HD inline void dyn4_ph_parts_at(const dyn4_params &p, const bike_veh &v, const G &ground,
                                     const dyn4_state<S> &s, dyn4_ph_parts<S> &q,
@@ -720,9 +722,11 @@ CVC_HD inline void dyn4_ph_parts_at(const dyn4_params &p, const bike_veh &v, con
         gi = gi + t[k] * twist[k];
       const S ug = s_sqrt(gi * gi + eps2), sig = S(p.r_w) * om[i] - gi;
       q.Fx[i] = dyn_longitudinal(sig, ug, S(p.B_x), S(p.C_x), cap);
-      sl->g[i] = gi;
-      sl->sig[i] = sig;
-      sl->K[i] = dyn_spin_ph_secant(q.Fx[i], sig, S(p.B_x), S(p.C_x), cap, ug);
+      if (sl) {
+        sl->g[i] = gi;
+        sl->sig[i] = sig;
+        sl->K[i] = dyn_spin_ph_secant(q.Fx[i], sig, S(p.B_x), S(p.C_x), cap, ug);
+      }
     }
     const S Dy = dyn_lateral_cap(q.Fx[i], cap);
     const S vxi = s.vx - s.r * yi, vyi = s.vy + s.r * xi;
