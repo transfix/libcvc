@@ -328,11 +328,11 @@ namespace {
 // so tf_editor precedes color — a tf_editor's own config may carry a `color:` node list — and
 // progress and plot precede overlay, their caption.
 constexpr const char *kBuiltinWidgetTypes[] = {
-    "group",   "menubar",   "menu",         "menu_item", "window",     "progress",     "plot",
-    "overlay", "panel",     "text",         "checkbox",  "slider_int", "slider_float", "combo",
-    "radio",   "radio_row", "input_text",   "input_int", "tf_editor",  "color",        "image",
-    "button",  "separator", "windows_menu", "spinner",   "video",      "audio",
-    "text_view", "message_input"};
+    "group",        "menubar", "menu",  "menu_item", "window",       "progress",
+    "plot",         "overlay", "panel", "text",      "checkbox",     "slider_int",
+    "slider_float", "combo",   "radio", "radio_row", "input_text",   "input_int",
+    "tf_editor",    "color",   "image", "button",    "separator",    "windows_menu",
+    "spinner",      "video",   "audio", "text_view", "message_input"};
 } // namespace
 
 bool is_builtin_widget_type(const std::string &type) {

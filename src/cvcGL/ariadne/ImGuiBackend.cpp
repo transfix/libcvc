@@ -1128,9 +1128,9 @@ ariadne::TextViewEvent ImGuiBackend::text_view(const char *label, const char *ke
     v.layout(wrap_w);
     v.reported = false;
     if (prepended) // still on its way to the bottom: it goes on there
-      v.target = v.target == FLT_MAX ? FLT_MAX
-                                     : (v.target >= 0.0f ? v.target : v.scroll) +
-                                           (v.tops.back() - old_total);
+      v.target = v.target == FLT_MAX
+                     ? FLT_MAX
+                     : (v.target >= 0.0f ? v.target : v.scroll) + (v.tops.back() - old_total);
     else if (!appended || (o.follow && v.at_bottom))
       v.target = FLT_MAX;
     v.target_frames = 0;
