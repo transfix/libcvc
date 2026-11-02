@@ -694,6 +694,8 @@ struct ConferenceSession {
     }
     std::fprintf(stderr, "arigl: conference: %s %s as '%s' (room '%s')\n",
                  ok ? "connected to" : "could NOT reach relay", relay, self.c_str(), room.c_str());
+    // Messages to the relay (the chat verbs' requests, room_chat.h) leave through the shard.
+    shard->set_transport(tp_);
     // ?synthetic=1 (the host page sets CVC_ARIADNE_SYNTHETIC_CAM) drives the self-cam from a
     // hardware-free MJPEG test pattern instead of the real camera, so the conference — peer video
     // included — can be exercised in a browser with no camera.
@@ -1164,6 +1166,8 @@ struct ConferenceSession {
     mix_out_.reset();
     for (publisher &p : pubs_)
       p.sub.reset();
+    if (shard)
+      shard->set_transport(nullptr); // a chat request after this stays local
     if (stop_)
       stop_(); // joins the transport reader thread (idempotent: _running.exchange(false))
   }

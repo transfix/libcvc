@@ -1696,6 +1696,9 @@ void state_transport_ws::on_inbound_message(const state_message &m, connection *
   }
   for (auto *peer : peers)
     (void)peer->ingest_remote_message(m);
+  // ttl_hops 0: for this end only (state_message.h), so neither relayed nor bridged.
+  if (m.ttl_hops == 0)
+    return;
   const bool relay = _relay.load(std::memory_order_relaxed);
   if (!relay && _bridge == nullptr)
     return;
@@ -2228,6 +2231,17 @@ std::size_t state_transport_ws::request_full_refresh() {
 
 std::size_t state_transport_ws::push_snapshot_to(const std::string &node_id,
                                                  const std::vector<snapshot_entry> &entries) {
+  return push_to(node_id, entries, false);
+}
+
+std::size_t state_transport_ws::push_snapshot_to_holder(const std::string &node_id,
+                                                        const std::vector<snapshot_entry> &entries) {
+  return push_to(node_id, entries, true);
+}
+
+std::size_t state_transport_ws::push_to(const std::string &node_id,
+                                        const std::vector<snapshot_entry> &entries,
+                                        bool holder_only) {
   if (node_id.empty() || entries.empty())
     return 0;
   std::vector<std::shared_ptr<connection>> targets;
@@ -2236,8 +2250,12 @@ std::size_t state_transport_ws::push_snapshot_to(const std::string &node_id,
     for (const auto &c : _conns) {
       if (!c || !c->alive.load() || !c->can_write())
         continue;
-      if (const std::string *pid = c->peer_id(); pid && *pid == node_id)
-        targets.push_back(c);
+      const std::string *pid = c->peer_id();
+      if (!pid || *pid != node_id)
+        continue;
+      if (holder_only && c->gate && c->gate->holder(node_id) != c.get())
+        continue; // claims the id without holding it
+      targets.push_back(c);
     }
   }
   if (targets.empty())

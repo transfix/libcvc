@@ -257,6 +257,9 @@ public:
   // to a peer that stopped reading is bounded by the write watchdog.
   std::size_t push_snapshot_to(const std::string &node_id,
                                const std::vector<snapshot_entry> &entries) override;
+  // As push_snapshot_to, but under an inbound gate only to the stream holding `node_id`.
+  std::size_t push_snapshot_to_holder(const std::string &node_id,
+                                      const std::vector<snapshot_entry> &entries) override;
   // See state_transport::set_admission_hold. Applies to the streams this relay accepts.
   void set_admission_hold(std::chrono::milliseconds max_hold) override;
   std::size_t release_admissions() override;
@@ -359,6 +362,10 @@ private:
   // nullptr = all), consulting the media gate when `gated`. Returns the number written. Backs
   // publish_media_frame (ungated) and fan_media (gated).
   std::size_t write_media(const media_frame &m, const void *exclude, bool gated);
+  // push_snapshot_to's body; with `holder_only`, a connection held to an inbound gate is written
+  // only while it holds `node_id`.
+  std::size_t push_to(const std::string &node_id, const std::vector<snapshot_entry> &entries,
+                      bool holder_only);
   // The relay interest gate for one received frame, given the local same-cluster shards that just
   // ingested it (see set_relay_requires_interest).
   bool relay_admits(const state_mutation &m,

@@ -200,6 +200,13 @@ const char *const kAriSchema = R"ARISCHEMA({
         "commit": {"enum": ["live", "release"]},
         "autofocus": {"$ref": "#/$defs/flag"},
         "password": {"$ref": "#/$defs/flag"},
+        "on_top": {"type": "string"},
+        "follow": {"$ref": "#/$defs/flag"},
+        "wrap": {"$ref": "#/$defs/flag"},
+        "hint": {"type": "string"},
+        "multiline": {"$ref": "#/$defs/flag"},
+        "max_lines": {"type": "number"},
+        "max_length": {"type": "number"},
         "options": {"type": ["array", "string"], "items": {"type": "string"}},
         "pos": {"type": "array", "items": {"type": "number"}},
         "size": {"type": ["array", "number"], "items": {"type": ["number", "string"]}},
@@ -318,7 +325,7 @@ constexpr const char *kBuiltinWidgetTypes[] = {
     "group",   "menubar",   "menu",         "menu_item", "window",     "progress",     "plot",
     "overlay", "panel",     "text",         "checkbox",  "slider_int", "slider_float", "combo",
     "radio",   "radio_row", "input_text",   "input_int", "tf_editor",  "color",        "image",
-    "button",  "separator", "windows_menu", "spinner"};
+    "button",  "separator", "windows_menu", "spinner",    "text_view",  "message_input"};
 } // namespace
 
 bool is_builtin_widget_type(const std::string &type) {
@@ -844,6 +851,36 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     // on: is optional (send-on-commit), so unlike button we do not warn when it is absent.
     Widget w = input_text(label, bind, action(n), str(n, "default", str(n, "def")));
     w.password = flag(n, "password", false); // shown masked
+    return w;
+  }
+  if (type == "text_view") { // a scrollable text buffer: bind's text, its lines split on '\n'
+    const std::string bind = str(n, "bind");
+    check_bind(ctx, "text_view", label, bind);
+    Widget w = text_view(label, bind, str(n, "on_top"));
+    w.view_height = num(n, "height", 0.0);
+    if (!(w.view_height >= 0.0)) {
+      ctx.warn("ari: text_view '" + label + "' height must be >= 0 — 0 (the rest of the window)");
+      w.view_height = 0.0;
+    }
+    w.follow = flag(n, "follow", true);
+    w.wrap = flag(n, "wrap", true);
+    return w;
+  }
+  if (type == "message_input") { // a field to post a message: Enter sends it to on:
+    const std::string bind = str(n, "bind");
+    check_bind(ctx, "message_input", label, bind);
+    Widget w = message_input(label, bind, action(n));
+    if (w.on.empty())
+      ctx.warn("ari: message_input '" + label + "' has no on: — what is sent goes nowhere");
+    w.hint = str(n, "hint");
+    w.multiline = flag(n, "multiline", true);
+    const double lines = num(n, "max_lines", 4.0), length = num(n, "max_length", 0.0);
+    if (!(lines >= 1.0))
+      ctx.warn("ari: message_input '" + label + "' max_lines must be >= 1 — 4");
+    if (!(length >= 0.0))
+      ctx.warn("ari: message_input '" + label + "' max_length must be >= 0 — no cap");
+    w.max_lines = lines >= 1.0 ? static_cast<int>(lines) : 4;
+    w.max_length = length >= 0.0 ? static_cast<int>(length) : 0;
     return w;
   }
   if (type == "input_int") {

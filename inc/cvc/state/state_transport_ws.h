@@ -249,6 +249,9 @@ public:
   // encoded, when none matches or `entries` is empty.
   std::size_t push_snapshot_to(const std::string &node_id,
                                const std::vector<snapshot_entry> &entries) override;
+  // As push_snapshot_to, but under an inbound gate only to the connection holding `node_id`.
+  std::size_t push_snapshot_to_holder(const std::string &node_id,
+                                      const std::vector<snapshot_entry> &entries) override;
   // See state_transport::set_admission_hold. Applies to the connections this relay accepts.
   void set_admission_hold(std::chrono::milliseconds max_hold) override;
   std::size_t release_admissions() override;
@@ -326,6 +329,10 @@ private:
   // nullptr = all). With `gated`, the media gate (when one is set) is asked per identified receiver
   // first. Returns the number written. Backs publish_media_frame (ungated) and fan_media (gated).
   std::size_t write_media(const media_frame &m, const void *exclude, bool gated);
+  // push_snapshot_to's body; with `holder_only`, a connection held to an inbound gate is written
+  // only while it holds `node_id`.
+  std::size_t push_to(const std::string &node_id, const std::vector<snapshot_entry> &entries,
+                      bool holder_only);
   void send_hello_locked(connection &c);
   // Whether `id` is this transport's own node id or a registered shard's (state_inbound_gate: a
   // client never speaks as the relay).

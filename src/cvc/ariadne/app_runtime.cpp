@@ -411,7 +411,7 @@ void collect_programs(const Widget &w, const FunctionScope *functions,
   }
   const std::string where = "widget '" + (w.id.empty() ? w.label : w.id) + "'";
   for (const std::string *p :
-       {&w.on, &w.on_click, &w.on_hover, &w.on_drag, &w.on_drag_start, &w.on_drag_end})
+       {&w.on, &w.on_click, &w.on_hover, &w.on_drag, &w.on_drag_start, &w.on_drag_end, &w.on_top})
     if (!p->empty())
       out.push_back({where, *p, functions, declared});
   for (const Widget &c : w.children)

@@ -38,7 +38,11 @@ namespace cvc {
 //   `path` is the tree path the message is associated with;
 //   subscribers register a path prefix.
 //   `ttl_hops` is a future cross-peer hop count (decremented on
-//   each forward); 0 means "do not forward across peers".
+//   each forward); 0 means "do not forward across peers". The
+//   relaying transports (gRPC, WebSocket) already honour 0: the
+//   relay's own shards take the message, and it is neither
+//   relayed to other connections nor bridged (a request to the
+//   relay itself, such as a conference chat post).
 //
 // Payload:
 //   `content_type` is a media type chosen by the sender. Use

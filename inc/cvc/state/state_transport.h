@@ -241,6 +241,14 @@ public:
     (void)entries;
     return 0;
   }
+  // The same push for what only that peer may read (a relay's direct messages): on a transport
+  // that holds its connections to an inbound gate (set_inbound_gate), only the connection holding
+  // `node_id` there is written, never a second connection that claims the same id. Default: a
+  // transport with no gate, where push_snapshot_to is that already.
+  virtual std::size_t push_snapshot_to_holder(const std::string &node_id,
+                                              const std::vector<snapshot_entry> &entries) {
+    return push_snapshot_to(node_id, entries);
+  }
 
   // Admission hold (a relay; off, 0, by default). With `max_hold` > 0, a connection the relay
   // ACCEPTS gets its Hello at once but no bootstrap (backfill or admit snapshot) and no live

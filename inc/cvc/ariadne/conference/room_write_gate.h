@@ -42,7 +42,8 @@ namespace conference {
 // Everything else is the relay's to write: the scene, the area of interest, the server's own
 // leaves, and every other participant. A message is admitted on the same paths. What the rule
 // refuses is dropped and counted (state_transport::total_inbound_rejected), and the relay's own
-// writes are unaffected.
+// writes are unaffected. A chat request (room_chat.h, a message on participants.<pid>.chat) is
+// admitted only with ttl_hops 0, which the relay takes without forwarding it to anyone.
 class room_write_gate final : public cvc::state_inbound_gate {
 public:
   explicit room_write_gate(std::string room);
