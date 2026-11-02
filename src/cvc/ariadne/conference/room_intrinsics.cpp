@@ -119,6 +119,12 @@ struct room_table {
   std::mutex mu;
   cvc::app *app = nullptr; // set on first (room-join); needed to retract subtrees at teardown
   std::unordered_map<std::string, std::unique_ptr<room_handle>> by_token;
+  // Each room's avatar catalog as last read, with the revision it was read at.
+  struct catalog_entry {
+    std::uint64_t rev = 0;
+    std::shared_ptr<const avatar_catalog> catalog;
+  };
+  std::unordered_map<std::string, catalog_entry> catalogs;
 
   void own(std::unique_ptr<room_handle> h) {
     std::lock_guard<std::mutex> lk(mu);
@@ -132,6 +138,26 @@ struct room_table {
   void erase(const std::string &token) {
     std::lock_guard<std::mutex> lk(mu);
     by_token.erase(token);
+  }
+  // ROOM's avatar catalog, for the avatar verbs a document calls every tick (conference_roster.ari
+  // calls room-avatar-options twice and room-avatar once). A whole read walks every option's nodes
+  // (a few hundred), so it reads one leaf, the catalog's revision, and the catalog again only when
+  // that moved: write_avatar_catalog bumps it last, so a new revision means the options it covers
+  // are here.
+  std::shared_ptr<const avatar_catalog> catalog(cvc::app &app, const std::string &room) {
+    const std::uint64_t rev = avatar_catalog_revision(app, room);
+    {
+      std::lock_guard<std::mutex> lk(mu);
+      auto it = catalogs.find(room);
+      if (it != catalogs.end() && it->second.rev == rev)
+        return it->second.catalog;
+    }
+    // Read outside the lock. The revision was read first, so a write landing meanwhile leaves a
+    // newer revision for the next call to see.
+    auto cat = std::make_shared<const avatar_catalog>(read_avatar_catalog(app, room));
+    std::lock_guard<std::mutex> lk(mu);
+    catalogs[room] = catalog_entry{rev, cat};
+    return cat;
   }
   ~room_table() {
     // Document teardown: retract any room the author left joined. Single-threaded (the Runtime
@@ -363,13 +389,13 @@ void register_room_intrinsics(cvc::app &app) {
           const std::string kind = get_str(&args[1]);
           if (kind != "color" && kind != "accessory")
             return err("room-avatar-options: KIND must be \"color\" or \"accessory\"");
-          const avatar_catalog cat = read_avatar_catalog(app, room_id);
+          const std::shared_ptr<const avatar_catalog> cat = tbl->catalog(app, room_id);
           std::vector<se::value_t> list;
           if (kind == "color")
-            for (const avatar_color_option &o : cat.colors)
+            for (const avatar_color_option &o : cat->colors)
               list.push_back(se::value_t(o.label));
           else
-            for (const avatar_accessory_option &o : cat.accessories)
+            for (const avatar_accessory_option &o : cat->accessories)
               list.push_back(se::value_t(o.label));
           return se::make_list(std::move(list));
         });
@@ -390,11 +416,11 @@ void register_room_intrinsics(cvc::app &app) {
           room_handle *rh = tbl->find(handle_token(args[0]));
           if (!rh)
             return err("room-avatar: HANDLE must be a room-join handle (needs the caller's pid)");
-          const avatar_catalog cat = read_avatar_catalog(app, rh->room_id);
+          const std::shared_ptr<const avatar_catalog> cat = tbl->catalog(app, rh->room_id);
           const avatar_look look = resolve_avatar_look(
-              cat, read_avatar_choice(app, rh->room_id, rh->self_pid), rh->self_pid);
-          const avatar_color_option *c = cat.find_color(look.color_id);
-          const avatar_accessory_option *a = cat.find_accessory(look.accessory_id);
+              *cat, read_avatar_choice(app, rh->room_id, rh->self_pid), rh->self_pid);
+          const avatar_color_option *c = cat->find_color(look.color_id);
+          const avatar_accessory_option *a = cat->find_accessory(look.accessory_id);
           std::string stamina;
           avatar_energy_policy policy;
           double reserve = 0.0;
@@ -428,12 +454,12 @@ void register_room_intrinsics(cvc::app &app) {
           if (!rh)
             return err(
                 "room-set-avatar: HANDLE must be a room-join handle (needs the caller's pid)");
-          const avatar_catalog cat = read_avatar_catalog(app, rh->room_id);
+          const std::shared_ptr<const avatar_catalog> cat = tbl->catalog(app, rh->room_id);
           const std::string color = get_str(&args[1]), accessory = get_str(&args[2]);
-          const avatar_color_option *c = cat.find_color(color);
+          const avatar_color_option *c = cat->find_color(color);
           if (!c)
             return err("room-set-avatar: the room offers no colour '" + color + "'");
-          const avatar_accessory_option *a = cat.find_accessory(accessory);
+          const avatar_accessory_option *a = cat->find_accessory(accessory);
           if (!a)
             return err("room-set-avatar: the room offers no accessory '" + accessory + "'");
           write_avatar_choice(app, rh->room_id, rh->self_pid, avatar_choice{c->id, a->id});
