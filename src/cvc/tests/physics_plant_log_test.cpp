@@ -294,6 +294,36 @@ TEST(PlantLog, CutsWideFlights) {
   EXPECT_NEAR(row[17], b.braked / 0.02, 1e-9 * b.braked / 0.02);
 }
 
+// keep_contact keeps the windows with a contact (not those with a wheel off the ground) and adds
+// the contact feature last: the contacts each interval began, plus one for another vehicle.
+TEST(PlantLog, KeepsContactWindowsWithAFeature) {
+  const vehicle_desc d = vehicle_desc::humvee();
+  std::vector<std::vector<planar_sample>> runs = {kinematic_run(d, 0.02, 2, 120),
+                                                  kinematic_run(d, 0.02, 2, 60)};
+  runs[1][30].contacts = 2;
+  runs[1][31].vehicle_contact = 3;
+  runs[0][60].grounded = false;
+  const flight_set dropped = cut_flights(runs, 26, 25);
+  const flight_set kept =
+      cut_flights(runs, 26, 25, 1.0, steer_input::actual, flight_layout::planar, true);
+  EXPECT_EQ(dropped.flights, 4u);
+  EXPECT_EQ(kept.flights, 5u); // the contact window stays; the airborne one still goes
+  EXPECT_EQ(kept.dropped, 1u);
+  EXPECT_EQ(kept.in_contact, 1u);
+  ASSERT_EQ(kept.width, kPlanarWidth + 1);
+  const std::vector<std::string> cols = flight_columns(flight_layout::planar, true);
+  EXPECT_EQ(cols.back(), "contact");
+  // Run 1's window from sample 25 is the last flight; its rows 5 and 6 are samples 30 and 31.
+  const double *flight = &kept.data[(kept.flights - 1) * kept.rows * kept.width];
+  EXPECT_EQ(flight[5 * kept.width + kPlanarWidth], 2.0);
+  EXPECT_EQ(flight[6 * kept.width + kPlanarWidth], 1.0);
+  EXPECT_EQ(flight[7 * kept.width + kPlanarWidth], 0.0);
+  // The other columns are the planar row's.
+  EXPECT_EQ(flight[3 * kept.width + 0], runs[1][28].x);
+  EXPECT_EQ(flight[3 * kept.width + 3], runs[1][28].vx);
+  EXPECT_EQ(flight[3 * kept.width + 6], runs[1][28].drive);
+}
+
 // A Humvee slaloming on flat ground through nav and Jolt, logged at the tick.
 TEST(PlantLog, LogsAHumveeSwervingOnJolt) {
   REQUIRE_JOLT();

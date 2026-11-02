@@ -2117,6 +2117,10 @@ static int cmd_plant_log(int argc, char **argv) {
       "policy", po::value<std::string>(&policy), "a .cvcnav policy (default: the built-in one)")(
       "verbose", po::bool_switch(&o.verbose), "every agent's state every 5 s")(
       "samples", po::bool_switch(&o.samples), "also write samples.csv, every tick of every run")(
+      "keep-contact", po::bool_switch(&o.keep_contact),
+      "keep the flights with a contact or an impact, with a last column, the contact feature "
+      "(the contacts the interval began; cut_flights says what a learned plant can learn from "
+      "it)")(
       "wide", po::bool_switch(&o.wide),
       "flights.npy in the wide layout: also the attitude, the wheels' speeds, the pedals and the "
       "ledger's shaft and brake power (18 columns; meta.json's layout names them)")(

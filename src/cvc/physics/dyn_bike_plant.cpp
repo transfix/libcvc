@@ -14,6 +14,7 @@
 #include <array>
 #include <cmath>
 #include <cvc/core/exception.h>
+#include <cvc/nav/drive.h>
 #include <cvc/nav/dyn_bike.h>
 #include <cvc/physics/dyn_bike_plant.h>
 
@@ -47,6 +48,9 @@ void add(dyn_bike_books &to, const dyn_bike_books &d) {
   to.grade += d.grade;
   to.limiter += d.limiter;
   to.contact += d.contact;
+  to.contact_stored += d.contact_stored;
+  to.contact_dissipated += d.contact_dissipated;
+  to.contact_exchange += d.contact_exchange;
   to.residual += d.residual;
 }
 
@@ -54,7 +58,8 @@ void add(dyn_bike_books &to, const dyn_bike_books &d) {
 
 double dyn_bike_books::flow() const {
   return std::fabs(drive) + std::fabs(brake) + std::fabs(dissipated) + std::fabs(slip) +
-         std::fabs(floor) + std::fabs(grade) + std::fabs(limiter) + std::fabs(contact);
+         std::fabs(floor) + std::fabs(grade) + std::fabs(limiter) + std::fabs(contact) +
+         std::fabs(contact_stored) + std::fabs(contact_dissipated) + std::fabs(contact_exchange);
 }
 
 dyn_bike_plant::dyn_bike_plant(std::vector<vehicle_desc> descs, dyn_bike_plant_options options)
@@ -75,6 +80,70 @@ dyn_bike_plant::dyn_bike_plant(std::vector<vehicle_desc> descs, dyn_bike_plant_o
 dyn_bike_plant::~dyn_bike_plant() = default;
 
 bool dyn_bike_plant::collides() const { return _chassis->on(); }
+
+std::function<void(double, double, double &, double &, double &)>
+dyn_bike_plant::sdf_field(const cvc::nav::field_stack &fs, int plane,
+                          double metres_per_world_unit) {
+  if (!fs.data || fs.H < 2 || fs.W < 2 || plane < 0 || plane >= fs.M ||
+      !(fs.mxx > fs.mnx && fs.mxy > fs.mny) || !(fs.S > 0.0) || !(metres_per_world_unit > 0.0))
+    throw cvc::physics_error("dyn_bike_plant::sdf_field: not a signed-distance grid");
+  const float *ph = fs.data + static_cast<long>(plane) * 3 * fs.H * fs.W;
+  const int H = fs.H, W = fs.W;
+  const double mpw = metres_per_world_unit, mnx = fs.mnx, mny = fs.mny;
+  const double sx = (W - 1) / (fs.mxx - fs.mnx), sy = (H - 1) / (fs.mxy - fs.mny);
+  const double to_m = mpw / fs.S; // phi is in nav's normalized units
+  return [=](double x, double y, double &phi, double &gx, double &gy) {
+    const double fx = (x / mpw - mnx) * sx, fy = (y / mpw - mny) * sy;
+    const int c = std::max(0, std::min(W - 2, static_cast<int>(std::floor(fx))));
+    const int r = std::max(0, std::min(H - 2, static_cast<int>(std::floor(fy))));
+    const double ax = std::min(1.0, std::max(0.0, fx - c)),
+                 ay = std::min(1.0, std::max(0.0, fy - r));
+    const double p00 = ph[r * W + c], p01 = ph[r * W + c + 1];
+    const double p10 = ph[(r + 1) * W + c], p11 = ph[(r + 1) * W + c + 1];
+    phi = to_m * ((1.0 - ay) * ((1.0 - ax) * p00 + ax * p01) + ay * ((1.0 - ax) * p10 + ax * p11));
+    // The bilinear's own gradient (zero across the clamp, off the grid).
+    gx = fx > 0.0 && fx < W - 1 ? to_m * sx / mpw * ((1.0 - ay) * (p01 - p00) + ay * (p11 - p10))
+                                : 0.0;
+    gy = fy > 0.0 && fy < H - 1 ? to_m * sy / mpw * ((1.0 - ax) * (p10 - p00) + ax * (p11 - p01))
+                                : 0.0;
+  };
+}
+
+void dyn_bike_plant::contacts(const std::vector<diff::dyn_state<double>> &s,
+                              std::vector<diff::dyn_contact> &field,
+                              std::vector<diff::dyn_contact> &pair) const {
+  const std::size_t n = _agents.size();
+  field.assign(n, diff::dyn_contact{});
+  pair.assign(n, diff::dyn_contact{});
+  // Each agent's centre of gravity, heading and twist.
+  std::vector<diff::dyn_body> b(n);
+  for (std::size_t i = 0; i < n; ++i) {
+    const double lr = _agents[i].p.lr, c = std::cos(s[i].psi), sn = std::sin(s[i].psi);
+    b[i] = {s[i].x + lr * c, s[i].y + lr * sn, s[i].psi, s[i].vx, s[i].vy, s[i].r};
+  }
+  const diff::dyn_contact_params &cp = _o.contact_params;
+  if (_o.contact_field) {
+    struct sampler {
+      const std::function<void(double, double, double &, double &, double &)> *f;
+      void at(double x, double y, double &phi, double &gx, double &gy) const {
+        (*f)(x, y, phi, gx, gy);
+      }
+    } smp{&_o.contact_field};
+    for (std::size_t i = 0; i < n; ++i)
+      diff::dyn_contact_field(cp, _agents[i].points, smp, b[i], field[i]);
+  }
+  if (!_o.contact_vehicles)
+    return;
+  const auto reach = [&](std::size_t i) {
+    const diff::dyn_footprint &f = _agents[i].fp;
+    return std::hypot(std::max(f.front, f.rear), f.half_width);
+  };
+  for (std::size_t i = 0; i < n; ++i)
+    for (std::size_t j = i + 1; j < n; ++j)
+      if (std::hypot(b[i].x - b[j].x, b[i].y - b[j].y) < reach(i) + reach(j) + cp.skin)
+        diff::dyn_contact_pair(cp, _agents[i].points, _agents[i].fp, b[i], _agents[j].points,
+                               _agents[j].fp, b[j], pair[i], pair[j]);
+}
 
 double dyn_bike_plant::wheel_speed(int i, int axle) const {
   const agent &a = _agents.at(static_cast<std::size_t>(i));
@@ -125,6 +194,22 @@ void dyn_bike_plant::attach(int n, const cvc::nav::plant_state *start,
     a.lim.hdt = static_cast<float>(h);
     a.lim.vmax = static_cast<float>(a.desc.max_speed > 0.0 ? a.desc.max_speed : 1e3);
     a.lim.allow_reverse = 1;
+    // The outline about the model's centre of gravity (body x rear_x + lr): the chassis box and
+    // the wheels where they stand out of it, as limits() reads them.
+    {
+      double ahead = a.desc.half_extents.x, behind = -a.desc.half_extents.x;
+      double half_width = a.desc.half_extents.y;
+      for (const axle_desc &ax : a.desc.axles) {
+        ahead = std::max(ahead, ax.x + ax.wheel_radius);
+        behind = std::min(behind, ax.x - ax.wheel_radius);
+        half_width = std::max(half_width, ax.half_track + 0.5 * ax.wheel_width);
+      }
+      const double cg = a.rear_x + a.p.lr;
+      a.fp.front = ahead - cg;
+      a.fp.rear = cg - behind;
+      a.fp.half_width = half_width;
+      a.points = diff::dyn_footprint_points(a.fp, _o.contact_params);
+    }
     const cvc::world_units::xyz p =
         _units.normalized_point_to_si(start[i].x, start[i].y, 0.0, frame);
     a.s.x = p.x;
@@ -141,6 +226,16 @@ void dyn_bike_plant::attach(int n, const cvc::nav::plant_state *start,
       _chassis->add(a.desc, pos, rot);
     }
     _agents.push_back(a);
+  }
+  if (_o.contact) {
+    // The barrier's energy at attach (an agent started overlapping something holds some).
+    std::vector<diff::dyn_state<double>> now(_agents.size());
+    for (std::size_t i = 0; i < _agents.size(); ++i)
+      now[i] = _agents[i].s;
+    std::vector<diff::dyn_contact> f, p;
+    contacts(now, f, p);
+    for (std::size_t i = 0; i < _agents.size(); ++i)
+      _agents[i].tick.contact_energy = _agents[i].total.contact_energy = f[i].energy + p[i].energy;
   }
 }
 
@@ -257,9 +352,34 @@ void dyn_bike_plant::advance() {
   }
   const bool world = _chassis->on();
   const double h = _dt / _nsub;
+  std::vector<double> port(n, 0.0);
+  std::vector<diff::dyn_step_free<double>> free(n);
+  std::vector<diff::dyn_contact> cf0, cp0, cf1, cp1; // the contact at a substep's start and end
   for (int k = 0; k < _nsub; ++k) {
+    if (_o.contact) {
+      std::vector<diff::dyn_state<double>> now(n);
+      for (std::size_t i = 0; i < n; ++i)
+        now[i] = _agents[i].s;
+      contacts(now, cf0, cp0);
+    }
     for (std::size_t i = 0; i < n; ++i) {
       agent &a = _agents[i];
+      // The contact's wrench, held over the step through the external port.
+      double W[3] = {0.0, 0.0, 0.0};
+      const double *wrench = nullptr;
+      if (_o.contact) {
+        diff::dyn_contact &c = a.cnow;
+        c = cf0[i];
+        for (int j = 0; j < 3; ++j) {
+          c.Wc[j] += cp0[i].Wc[j];
+          c.Wd[j] += cp0[i].Wd[j];
+        }
+        c.energy += cp0[i].energy;
+        c.damping += cp0[i].damping;
+        c.touching += cp0[i].touching;
+        c.wrench(W);
+        wrench = W;
+      }
       // The slope along the heading under the centre of gravity, over a wheelbase.
       const double c = std::cos(a.s.psi), sn = std::sin(a.s.psi);
       const double grade = dyn::grade_at(_o.plant, a.s.x + a.p.lr * c, a.s.y + a.p.lr * sn, a.s.psi,
@@ -274,12 +394,12 @@ void dyn_bike_plant::advance() {
         ss.om_f = a.om[0];
         ss.om_r = a.om[1];
         diff::dyn_spin_plant_books<double>(a.p, a.lim, ss, a.steer_cmd, accel, grade, so,
-                                           spin_books[i]);
+                                           spin_books[i], wrench, &port[i], &free[i]);
         next[i] = so.b;
         om_next[i] = {so.om_f, so.om_r};
       } else {
-        diff::dyn_plant_books<double>(a.p, a.lim, a.s, a.steer_cmd, accel, grade, next[i],
-                                      books[i]);
+        diff::dyn_plant_books<double>(a.p, a.lim, a.s, a.steer_cmd, accel, grade, next[i], books[i],
+                                      wrench, &port[i], &free[i]);
       }
       if (world) {
         // The box where this substep starts, moving as the model moved: its centre's velocity is
@@ -297,6 +417,9 @@ void dyn_bike_plant::advance() {
     }
     if (world)
       _chassis->step();
+    // The barrier's energy where the step left the agents.
+    if (_o.contact)
+      contacts(next, cf1, cp1);
     for (std::size_t i = 0; i < n; ++i) {
       agent &a = _agents[i];
       dyn_bike_books d;
@@ -320,6 +443,27 @@ void dyn_bike_plant::advance() {
         d.grade = b.grade;
         d.limiter = b.limiter;
         d.residual = b.residual;
+      }
+      if (_o.contact) {
+        // The port's energy, split: the field barrier's work, the vehicles' barrier's work, the
+        // dampers'. Over the step the barriers' work is minus their energy's change, to second
+        // order: the field's difference joins the residual, the pairs' is what the vehicles
+        // passed each other (contact_exchange; over a pair, second order too).
+        const diff::dyn_step_free<double> &e = free[i];
+        const auto work = [&](const double Wv[3]) {
+          return diff::dyn_ph_port_work(h, a.s.vx, a.s.vy, a.s.r, e.vx, e.vy, e.r, Wv);
+        };
+        double Wd[3];
+        for (int j = 0; j < 3; ++j)
+          Wd[j] = cf0[i].Wd[j] + cp0[i].Wd[j];
+        const double work_field = work(cf0[i].Wc), work_pair = work(cp0[i].Wc), work_d = work(Wd);
+        const double d_field = cf1[i].energy - cf0[i].energy;
+        const double d_pair = cp1[i].energy - cp0[i].energy;
+        d.contact_stored = d_field + d_pair;
+        d.contact_dissipated = -work_d;
+        d.contact_exchange = work_pair + d_pair;
+        d.residual += work_field + d_field;
+        a.tick.contact_energy = cf1[i].energy + cp1[i].energy;
       }
       diff::dyn_state<double> o = next[i];
       if (world && _chassis->touched(static_cast<int>(i))) {
@@ -355,6 +499,8 @@ void dyn_bike_plant::advance() {
       a.tick.kinetic += 0.5 * (a.p.J_f * a.om[0] * a.om[0] + a.p.J_r * a.om[1] * a.om[1]);
     add(a.total, a.tick);
     a.total.kinetic = a.tick.kinetic;
+    if (_o.contact)
+      a.total.contact_energy = a.tick.contact_energy;
     measure(a, vx0[i], vy0[i], psi0[i], true);
   }
 }
