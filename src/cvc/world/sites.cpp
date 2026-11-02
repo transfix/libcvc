@@ -296,29 +296,48 @@ std::vector<building_instance> fit_buildings(const building_library &lib,
 
   for (const lot &L : lots) {
     const std::uint64_t id = lot_id(L.x, L.y);
-    const int idx = irand(fp.seed, stream::building, id, 0, 0, int(lib.size()) - 1);
-    const building_archetype &a = lib.archetypes[idx];
-
-    const double fw = 2.0 * a.footprint_x; // archetype footprint extents (full), local X / Y
-    const double fd = 2.0 * a.footprint_y;
-    if (fw <= 1e-6 || fd <= 1e-6)
-      continue;
-    const double longd = std::max(fw, fd), shortd = std::min(fw, fd);
+    const double usable_front = std::max(1e-3, L.frontage - 2.0 * fp.margin);
+    const double usable_depth = std::max(1e-3, L.depth - 2.0 * fp.margin);
+    // The scale at which archetype `i`'s footprint fits the lot (longer axis along the frontage),
+    // or 0 for a degenerate one.
+    auto fit_of = [&](int i) {
+      const building_archetype &a = lib.archetypes[i];
+      const double fw = 2.0 * a.footprint_x, fd = 2.0 * a.footprint_y;
+      if (fw <= 1e-6 || fd <= 1e-6)
+        return 0.0;
+      return std::min(usable_front / std::max(fw, fd), usable_depth / std::min(fw, fd));
+    };
+    int idx = irand(fp.seed, stream::building, id, 0, 0, int(lib.size()) - 1);
+    double scale = fit_of(idx);
+    if (fp.true_scale) {
+      // The first draw that fits near its own size, at most its own size.
+      int found = -1;
+      for (int k = 0; k < std::max(1, fp.candidates) && found < 0; ++k) {
+        const int i =
+            k == 0 ? idx : irand(fp.seed, stream::building, id, k, 0, int(lib.size()) - 1);
+        if (fit_of(i) >= fp.min_true)
+          found = i;
+      }
+      if (found < 0)
+        continue; // nothing fits this lot at its real size: leave it empty
+      idx = found;
+      scale = std::min(1.0, fit_of(idx));
+    } else {
+      if (scale <= 0.0)
+        continue;
+      if (scale < fp.min_scale)
+        scale = fp.min_scale;
+      if (scale > fp.max_scale)
+        scale = fp.max_scale;
+    }
 
     // Orient the longer footprint axis ALONG the frontage. lot.yaw already aligns local +X with the
     // frontage, so if the archetype's long axis is its local X we keep yaw; otherwise turn 90
     // degrees.
+    const building_archetype &a = lib.archetypes[idx];
     double yaw = L.yaw;
-    if (fd > fw)
+    if (a.footprint_y > a.footprint_x)
       yaw += M_PI / 2.0;
-
-    const double usable_front = std::max(1e-3, L.frontage - 2.0 * fp.margin);
-    const double usable_depth = std::max(1e-3, L.depth - 2.0 * fp.margin);
-    double scale = std::min(usable_front / longd, usable_depth / shortd);
-    if (scale < fp.min_scale)
-      scale = fp.min_scale;
-    if (scale > fp.max_scale)
-      scale = fp.max_scale;
 
     const double z = height ? height(L.x, L.y) : 0.0;
     building_instance bi;

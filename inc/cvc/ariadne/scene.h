@@ -270,6 +270,16 @@ struct SceneNode {
   // setTexture). Empty = untextured. Meaningful only for a geometry node whose mesh carries UVs
   // (e.g. a heightfield, or a loaded mesh with texcoords); a mesh with no UVs is unaffected.
   std::string material_texture;
+  // material: { opaque: true } — draw the node as opaque whatever its texture or colours hold
+  // (vtkActor::SetForceOpaque). VTK otherwise scans a texture's every texel for alpha to decide
+  // the pass, which on a large ground texture is a measurable share of a browser frame.
+  bool material_opaque = false;
+
+  // casts_shadow: false — the node (and everything below it) receives shadows but casts none, so
+  // it never forces a shadow re-bake (GraphicsNode::setCastsShadow). For the ground under a city
+  // (as a caster the terrain shadows itself everywhere), and for what moves every frame.
+  bool has_casts_shadow = false;
+  bool casts_shadow = true;
 
   // fit: bake a "stand this mesh on the ground" normalization INTO the loaded geometry — center it
   // in XY, sit its base on z=0, and scale its tallest extent to fit_height; optionally first rotate
@@ -349,6 +359,12 @@ struct SceneLight {
   float environment = 0.0f; // environment: <intensity> (lifts what the cones miss)
   bool has_rig_ambient = false;
   float rig_ambient = 0.2f; // ambient: <0..1> (shadowed sides readable)
+  // wash: <intensity> | { intensity, count, height } — the overhead downlight ring. 0 (or count 0)
+  // removes it, and with it its shadow-map samplers: a rig over a whole city wants key + fill only.
+  bool has_wash = false;
+  float wash = 0.3f;
+  int wash_count = 4;
+  float wash_height = 1.8f; // multiples of the stage radius
 };
 
 // A simulation clock for the scene (§9 — time). Declares how the authoritative
@@ -374,6 +390,28 @@ struct SceneClock {
   std::string tick_key;                  // optional: published tick count (empty ⇒ not published)
 };
 
+// Where the shadow maps are spent (cvc::gl::SceneGraph::setShadowFocus). Unfocused, each light's
+// map covers the whole scene: over a city a 4096 map is several metres a texel. Focused, it covers
+// a sphere and the scene past it is lit unshadowed.
+//   focus: { center: [x, y, z], radius: <r> }  — a fixed sphere
+//   focus: camera                               — follow what the camera looks at, with the
+//   focus: { follow: camera, min_radius, max_radius, per_distance, lead, lift, ground }
+// Following, each frame the radius is min_radius + per_distance x (eye-to-focal distance), clamped
+// to [min_radius, max_radius]; the centre is `lead` radii ahead of the focal point along the view's
+// heading, `lift` above the `ground` node's heightfield there (or above the focal point's z).
+struct SceneShadowFocus {
+  bool present = false;
+  bool follow_camera = false;
+  double center[3] = {0.0, 0.0, 0.0};
+  double radius = 0.0;
+  double min_radius = 150.0;
+  double max_radius = 600.0;
+  double per_distance = 3.0;
+  double lead = 0.5;
+  double lift = 20.0;
+  std::string ground; // a node id whose heightfield the centre sits on (empty: the focal z)
+};
+
 struct Scene {
   std::vector<SceneNode> nodes;
   std::vector<SceneLight> lights;
@@ -385,6 +423,9 @@ struct Scene {
   int shadow_resolution = 1024;
   bool has_shadow_interval = false; // shadows: { update_interval: <frames> } — 1 = bake every frame
   int shadow_interval = 1;
+  bool has_shadow_softness = false; // shadows: { softness: <texels> } — the edge filter's radius
+  double shadow_softness = 2.0;
+  SceneShadowFocus shadow_focus; // shadows: { focus: ... } — where the shadow maps are spent
   bool has_chrome = false;    // chrome: <bool> — the SceneGraph diagnostic grid/axis/bbox chrome
   bool chrome_visible = true; // default on (the SceneGraph default); `chrome: false` strips it
   // background: [r,g,b] (a solid colour) OR { top: [r,g,b], bottom: [r,g,b] } (a vertical
