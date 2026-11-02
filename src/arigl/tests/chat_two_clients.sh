@@ -41,9 +41,11 @@ client() { # NAME ROLE PEER
 
 client alice poster bob &
 a=$!
-# bob and carol join once alice has posted everything: bob is a late joiner.
+# bob and carol join once the relay has taken all of alice's posts (its room-debug chat lines count
+# them every ~5 s; a client's own prints reach its log only when it exits): bob is a late joiner.
 for _ in $(seq 240); do
-  grep -q "step wait_peer" "$out/alice.log" 2>/dev/null && break
+  taken=$(grep -h '^\[arisrv\] chat:' "$out/arisrv.log" 2>/dev/null | awk '{n += $3} END {print n + 0}')
+  [ "$taken" -ge "$posts" ] && break
   kill -0 $a 2>/dev/null || break
   sleep 0.5
 done

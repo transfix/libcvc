@@ -65,9 +65,9 @@ windows:
 
 on_tick: |
   (begin
-    (set t (+ 1 (if (is-null (state-get "drv.t")) 0 (int (state-get "drv.t")))))
-    (state-set "drv.t" (str t))
-    (if (= t 1)
+    (set tick (+ 1 (if (is-null (state-get "drv.tick")) 0 (int (state-get "drv.tick")))))
+    (state-set "drv.tick" (str tick))
+    (if (= tick 1)
       (begin
         (state-set "room.token"
           (get-attr (room-join "" (state-get "conf.room") (dict "name" (state-get "conf.self"))) "token"))
@@ -87,7 +87,7 @@ on_tick: |
           (if (get-attr room "available") (drv-step "posting") #f)
           (if (= step "posting")
             (if (< (int (state-get "drv.sent")) (int (state-get "args.posts")))
-              (if (= (% t 15) 0)
+              (if (= (% tick 15) 0)
                 (begin
                   (set n (+ 1 (int (state-get "drv.sent"))))
                   (if (get-attr (chat-post tok (str-concat "message " (str n))) "ok")
@@ -152,10 +152,10 @@ on_tick: |
                           (drv-say (str-concat "the direct message: " (get-attr last "text")))
                           (chat-post tok "hi from the reader" pid)
                           (chat-post tok "done")
-                          (state-set "drv.linger" (str t))
+                          (state-set "drv.linger" (str tick))
                           (drv-step "linger"))))))
                 (if (= step "linger")
-                  (if (> t (+ 90 (int (state-get "drv.linger"))))
+                  (if (> tick (+ 90 (int (state-get "drv.linger"))))
                     (drv-done 0 "OK paged back, answered the direct message, posted done")
                     #f)
                   #f))))
@@ -172,4 +172,4 @@ on_tick: |
                     #f))
                 #f))
             (drv-done 2 (str-concat "unknown role " role))))))
-    (if (> t 5400) (drv-done 3 (str-concat "TIMEOUT at step " (state-get "drv.step"))) #f))
+    (if (> tick 5400) (drv-done 3 (str-concat "TIMEOUT at step " (state-get "drv.step"))) #f))

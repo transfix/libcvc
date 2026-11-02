@@ -107,6 +107,48 @@ bool row_splitter(float thickness, float *a, float *b, float min_a, float min_b,
 } // namespace
 #endif
 
+#ifdef CVC_ENABLE_IMGUI
+// A text view's layout and scroll, per key.
+struct ImGuiBackend::TextViewState {
+  std::string text;                                       // what the layout is of
+  std::vector<std::pair<std::size_t, std::size_t>> lines; // each line's [begin, end) in text
+  std::vector<float> tops;                                // each line's top; back() = the total
+  float wrap_w = -2.0f;                                   // the layout's wrap width (<0: none)
+  float scroll = 0.0f;
+  bool at_bottom = true;
+  // Where the view is being taken (FLT_MAX: the bottom; < 0: nowhere), asked of ImGui each frame
+  // until the scroll gets there: ImGui clamps a scroll to the content it measured the frame
+  // before, so a text that just grew needs a frame or two. Starts at the bottom.
+  float target = FLT_MAX;
+  int target_frames = 0;
+  bool armed = true;     // reaching the top reports it (re-armed once it leaves the top)
+  bool reported = false; // a view whose text fits has reported the room above it
+  double fired_at = -1.0;
+  float below = 0.0f; // what the window drew after the view last frame
+  float end_y = 0.0f; // the window's cursor right after the view
+
+  // Split the text into lines and measure each, wrapped at WRAP_W (<0: one row each).
+  void layout(float wrap) {
+    wrap_w = wrap;
+    lines.clear();
+    tops.assign(1, 0.0f);
+    const float lh = ImGui::GetTextLineHeightWithSpacing();
+    const float gap = lh - ImGui::GetTextLineHeight();
+    for (std::size_t i = 0; i <= text.size();) {
+      const std::size_t j = std::min(text.find('\n', i), text.size());
+      if (j == text.size() && i == j && !lines.empty())
+        break; // the text's last newline ends the last line
+      lines.emplace_back(i, j);
+      float h = lh;
+      if (wrap > 0.0f && j > i)
+        h = ImGui::CalcTextSize(text.data() + i, text.data() + j, false, wrap).y + gap;
+      tops.push_back(tops.back() + h);
+      i = j + 1;
+    }
+  }
+};
+#endif
+
 ariadne::Capabilities ImGuiBackend::capabilities() const {
   ariadne::Capabilities c;
   c.windows = true;
@@ -935,41 +977,6 @@ void truncate_utf8(std::string &s, std::size_t max) {
 }
 } // namespace
 
-// A text view's layout and scroll, per key.
-struct ImGuiBackend::TextViewState {
-  std::string text;                                       // what the layout is of
-  std::vector<std::pair<std::size_t, std::size_t>> lines; // each line's [begin, end) in text
-  std::vector<float> tops;                                // each line's top; back() = the total
-  float wrap_w = -2.0f;                                   // the layout's wrap width (<0: none)
-  float scroll = 0.0f, scroll_max = 0.0f;
-  bool at_bottom = true;
-  bool fresh = true;     // never drawn, or its text replaced: start at the bottom
-  bool armed = true;     // reaching the top reports it (re-armed once it leaves the top)
-  bool reported = false; // a view whose text fits has reported the room above it
-  double fired_at = -1.0;
-  float below = 0.0f; // what the window drew after the view last frame
-  float end_y = 0.0f; // the window's cursor right after the view
-
-  // Split the text into lines and measure each, wrapped at WRAP_W (<0: one row each).
-  void layout(float wrap) {
-    wrap_w = wrap;
-    lines.clear();
-    tops.assign(1, 0.0f);
-    const float lh = ImGui::GetTextLineHeightWithSpacing();
-    const float gap = lh - ImGui::GetTextLineHeight();
-    for (std::size_t i = 0; i <= text.size();) {
-      const std::size_t j = std::min(text.find('\n', i), text.size());
-      if (j == text.size() && i == j && !lines.empty())
-        break; // the text's last newline ends the last line
-      lines.emplace_back(i, j);
-      float h = lh;
-      if (wrap > 0.0f && j > i)
-        h = ImGui::CalcTextSize(text.data() + i, text.data() + j, false, wrap).y + gap;
-      tops.push_back(tops.back() + h);
-      i = j + 1;
-    }
-  }
-};
 #endif
 
 ariadne::MessageEdit ImGuiBackend::message_input(const char *label, const char *key,
@@ -1073,34 +1080,34 @@ ariadne::TextViewEvent ImGuiBackend::text_view(const char *label, const char *ke
       o.wrap ? ImMax(w - 2.0f * st.WindowPadding.x - st.ScrollbarSize, 16.0f) : -1.0f;
 
   // The layout, redone when the text or the width changes. Lines added above (an older page)
-  // move the scroll by their height, so what is in view stays put.
-  float want = -1.0f;
+  // move the scroll by their height, so what is in view stays put; another text altogether (a
+  // channel switch) starts at its bottom.
   if (text != v.text) {
     const float old_total = v.tops.empty() ? 0.0f : v.tops.back();
     const bool grew = !v.text.empty() && text.size() > v.text.size();
     const bool prepended =
         grew && text.compare(text.size() - v.text.size(), v.text.size(), v.text) == 0;
     const bool appended = grew && !prepended && text.compare(0, v.text.size(), v.text) == 0;
-    if (!prepended && !appended)
-      v.fresh = true; // another text altogether (a channel switch): start at its bottom
     v.text = text;
     v.layout(wrap_w);
     v.reported = false;
-    if (prepended)
-      want = v.scroll + (v.tops.back() - old_total);
-    else if (appended && o.follow && v.at_bottom)
-      want = FLT_MAX;
+    if (prepended) // still on its way to the bottom: it goes on there
+      v.target = v.target == FLT_MAX ? FLT_MAX
+                                     : (v.target >= 0.0f ? v.target : v.scroll) +
+                                           (v.tops.back() - old_total);
+    else if (!appended || (o.follow && v.at_bottom))
+      v.target = FLT_MAX;
+    v.target_frames = 0;
   } else if (wrap_w != v.wrap_w) {
     v.layout(wrap_w);
     if (v.at_bottom)
-      want = FLT_MAX;
+      v.target = FLT_MAX;
   }
-  if (v.fresh)
-    want = FLT_MAX;
   const float total = v.tops.back();
   const float view_h = h - 2.0f * st.WindowPadding.y;
-  if (want >= 0.0f)
-    ImGui::SetNextWindowScroll(ImVec2(-1.0f, ImMin(want, ImMax(0.0f, total - view_h))));
+  const float max_scroll = ImMax(0.0f, total - view_h);
+  if (v.target >= 0.0f)
+    ImGui::SetNextWindowScroll(ImVec2(-1.0f, ImMin(v.target, max_scroll)));
 
   bool wheel_up_at_top = false;
   ImGui::BeginChild(label && *label ? label : "##text_view", ImVec2(fit ? w : 0.0f, h),
@@ -1125,8 +1132,11 @@ ariadne::TextViewEvent ImGuiBackend::text_view(const char *label, const char *ke
     ImGui::SetCursorPos(ImVec2(st.WindowPadding.x, st.WindowPadding.y + total));
     ImGui::Dummy(ImVec2(0.0f, 0.0f)); // the content's height, so the scroll range is the text's
     v.scroll = ImGui::GetScrollY();
-    v.scroll_max = ImGui::GetScrollMaxY();
-    v.at_bottom = v.scroll >= v.scroll_max - 1.0f;
+    v.at_bottom = v.scroll >= max_scroll - 1.0f;
+    // The target is reached (or given up on, so the user's scroll is never fought for long).
+    if (v.target >= 0.0f &&
+        (std::fabs(v.scroll - ImMin(v.target, max_scroll)) < 1.0f || ++v.target_frames > 8))
+      v.target = -1.0f;
     wheel_up_at_top =
         ImGui::IsWindowHovered() && ImGui::GetIO().MouseWheel > 0.0f && v.scroll <= 0.5f;
     if (ImGui::BeginPopupContextWindow("##text_view_menu")) {
@@ -1143,24 +1153,26 @@ ariadne::TextViewEvent ImGuiBackend::text_view(const char *label, const char *ke
   // The top: reached by scrolling (once, until the view leaves it), the wheel turned up there
   // (at most twice a second), or a text that does not fill the view (once per text, an empty one
   // aside: there is room above it for more).
+  // Nothing is reported while the view is still being taken somewhere.
   const double now = ImGui::GetTime();
   const bool at_top = v.scroll <= 0.5f;
-  if (v.scroll_max <= 0.5f) {
+  if (total <= view_h + 0.5f) {
     if (!v.reported && !v.text.empty()) {
       ev.at_top = true;
       v.reported = true;
     }
-  } else if (at_top && v.armed && !v.fresh) {
+  } else if (v.target >= 0.0f) {
+    v.armed = !at_top;
+  } else if (at_top && v.armed) {
     ev.at_top = true;
     v.armed = false;
   } else if (!at_top) {
     v.armed = true;
   }
-  if (wheel_up_at_top && now - v.fired_at >= 0.5)
+  if (wheel_up_at_top && v.target < 0.0f && now - v.fired_at >= 0.5)
     ev.at_top = true;
   if (ev.at_top)
     v.fired_at = now;
-  v.fresh = false;
 #else
   (void)label;
   (void)key;

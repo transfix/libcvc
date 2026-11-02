@@ -51,7 +51,7 @@ struct RecordingBackend : cvc::gl::ImGuiBackend {
 struct Session {
   ImGuiContext *ctx = ImGui::CreateContext();
   cvc::app app;
-  ari::Runtime rt{app, "ui"};
+  ari::Runtime rt{app, ""};
   RecordingBackend be;
   explicit Session(ari::Widget root) {
     cvc::gl::ImGuiBackend::setImGuiContext(ctx);
