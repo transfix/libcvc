@@ -101,6 +101,14 @@ struct raster_out {
 // THE single entry point.
 void raster(const world_model &wm, const grid_spec &g, raster_out &out);
 
+// raster() in three parts, for a caller that steps it a few rows at a time (generated_world's
+// world_builder): raster_begin sizes `out`; raster_rows classifies rows [r0, r1) from the terrain
+// (the costly part; each cell is independent); raster_finish paints the props' footprints and
+// derives risk and hardness. raster() is the three in turn, so the result is the same.
+void raster_begin(const grid_spec &g, raster_out &out);
+void raster_rows(const world_model &wm, const grid_spec &g, raster_out &out, int r0, int r1);
+void raster_finish(const world_model &wm, const grid_spec &g, raster_out &out);
+
 } // namespace world
 } // namespace cvc
 

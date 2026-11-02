@@ -98,28 +98,36 @@ void aabb(const footprint &f, double &x0, double &y0, double &x1, double &y1) {
 } // namespace
 
 void raster(const world_model &wm, const grid_spec &g, raster_out &out) {
-  const int rows = g.rows, cols = g.cols;
-  const std::size_t n = std::size_t(rows) * std::size_t(cols);
-  const surface_registry &reg = wm.registry();
-  const terrain_source &ground = wm.terrain();
+  raster_begin(g, out);
+  raster_rows(wm, g, out, 0, g.rows);
+  raster_finish(wm, g, out);
+}
 
-  out.rows = rows;
-  out.cols = cols;
+void raster_begin(const grid_spec &g, raster_out &out) {
+  const std::size_t n = std::size_t(g.rows) * std::size_t(g.cols);
+  out.rows = g.rows;
+  out.cols = g.cols;
   out.klass.assign(n, 0);
   out.risk_raw.assign(n, 0.0f);
   out.hard.assign(n, 0);
   out.occupancy.assign(n, 0);
   out.height.assign(n, 0.0f);
   out.layer_owner.assign(n, 0);
+}
 
+void raster_rows(const world_model &wm, const grid_spec &g, raster_out &out, int r0, int r1) {
+  const int cols = g.cols;
+  const terrain_source &ground = wm.terrain();
   const double sea = ground.sea_level_m();
   const double amp = ground.relief_m();
+  r0 = std::max(0, r0);
+  r1 = std::min(g.rows, r1);
 
   // ── Layer 0: derived predicates (each cell independent -> thread-invariant) ──
 #ifdef CVC_USING_OPENMP
 #pragma omp parallel for schedule(static)
 #endif
-  for (int r = 0; r < rows; ++r) {
+  for (int r = r0; r < r1; ++r) {
     const double y = g.world_y(r); // row 0 == min_y
     for (int c = 0; c < cols; ++c) {
       const double x = g.world_x(c);
@@ -130,6 +138,12 @@ void raster(const world_model &wm, const grid_spec &g, raster_out &out) {
       out.klass[i] = derived_class(h, sl, sea, amp);
     }
   }
+}
+
+void raster_finish(const world_model &wm, const grid_spec &g, raster_out &out) {
+  const int rows = g.rows, cols = g.cols;
+  const std::size_t n = std::size_t(rows) * std::size_t(cols);
+  const surface_registry &reg = wm.registry();
 
   // ── Layer 1: grammar paint (prop footprints). Two passes so occupied
   //    footprints (trunks, walls, rock) win over soft ones (canopy, ground). ──

@@ -165,6 +165,14 @@ namespace gla = cvc::gl::ariadne;
 
 const char *const kDefaultPrefix = "ui.docs.ari"; // the same root ari uses, in both modes
 
+// Errors, warnings and info only (level L prints when L < log_verbosity), as the native examples
+// do; $CVC_LOG_VERBOSITY overrides it (6 = every debug line). The debug lines cost: on wasm each is
+// a console call, and the water's transfer function alone logs a dozen every few frames.
+void set_log_verbosity(cvc::app &app) {
+  const char *v = std::getenv("CVC_LOG_VERBOSITY");
+  app.properties("system.log_verbosity", v && *v ? v : "2");
+}
+
 int usage(int code) {
   std::fprintf(code ? stderr : stdout,
                "usage: arigl run|snapshot|check [flags] doc.ari [document args...]\n"
@@ -1792,6 +1800,7 @@ int run_window(const ari::HostOptions &o) {
   const int width = o.width ? o.width : 1024, height = o.height ? o.height : 768;
 
   cvc::app app;
+  set_log_verbosity(app);
   cvc::gl::SceneGraph sg(app, o.prefix.empty() ? kDefaultPrefix : o.prefix);
   // The viewer is "main", as the shared components expect: camera_controls binds
   // viewers.main.camera.settings.*.
@@ -2043,6 +2052,7 @@ int run_terminal(const ari::HostOptions &o) {
   }
 
   cvc::app app;
+  set_log_verbosity(app);
   // Lifetime order: the backend outlives the scene adapter, which outlives the AppRuntime.
   ari::FtxuiBackend::Options look;
   look.image_color = image_mode(o.graphics);
