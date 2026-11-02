@@ -198,6 +198,11 @@ public:
   // far from the origin trades a little float precision (jitter) for it.
   void disableCoordinateShiftScale();
 
+  // Draw this mesh in the opaque pass whatever its texture or colours hold (vtkActor::
+  // SetForceOpaque). Without it VTK scans a texture's every texel for alpha to choose the pass,
+  // which on a large ground texture is a measurable share of a browser frame.
+  void setForceOpaque(bool on);
+
   // Apply a texture (a cvc::image) to this mesh — sampled through the geometry's
   // UVs (SetTCoords). Meaningful only when the geometry carries uvs.
   //

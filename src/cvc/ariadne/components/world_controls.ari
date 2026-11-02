@@ -1,0 +1,93 @@
+# world_controls.ari — a REUSABLE Ariadne component: live controls for a `generated_world` node.
+# The controls bind the world.* state keys the cvcGL generated_world realizer reads each frame; the
+# realizer SEEDS them from the node's authored .ari props, so the panel starts at the document's
+# world and then regenerates it live. Every structural change rebuilds the whole world (a second or
+# so at 1.2 km), so the sliders write when they are let go (`commit: release`). A new preset
+# quick-sets the counts and the relief; Colour by only repaints the ground. Regenerate and Randomize
+# go through a request key (world.request) the realizer consumes.
+#
+# Use it:
+#     import: cvc://components/world_controls.ari
+#     windows:
+#       - include: world_controls
+
+units:
+  world_controls:
+    window: Terrain Lab
+    id: world_controls
+    children:
+      - text: "Live view of cvc::world: the L-system terrain source."
+      - text: "status"
+        bind: world.status
+      - separator
+      - slider_int: Seed
+        bind: world.seed
+        commit: release
+        lo: 0
+        hi: 99999
+      - combo: Preset
+        bind: world.preset
+        options: [Standard, Forest, Urban, Sparse, Island]
+        values: [0, 1, 2, 3, 4]
+      - combo: Ontology
+        bind: world.ontology
+        options: [merged_default, soft_vegetation, strict_water_mud]
+        values: [0, 1, 2]
+      - slider_float: World half (m)
+        bind: world.half
+        commit: release
+        lo: 150.0
+        hi: 10000.0
+        fmt: "%.0f"
+        tooltip: "the terrain spans twice this per side; the mesh keeps ~5 m cells (capped at 2049)"
+      - text: "terrain"
+        bind: world.stats.terrain
+      - slider_int: Trees
+        bind: world.trees
+        commit: release
+        lo: 0
+        hi: 3000
+      - slider_int: Rocks
+        bind: world.rocks
+        commit: release
+        lo: 0
+        hi: 600
+      - slider_int: Buildings
+        bind: world.buildings
+        commit: release
+        lo: 0
+        hi: 600
+        tooltip: "box massing's sites; the roads-first city fills its lots instead"
+      - slider_int: Tree generations
+        bind: world.tree_gen
+        commit: release
+        lo: 2
+        hi: 8
+      - slider_float: Relief (m)
+        bind: world.amp
+        commit: release
+        lo: 2.0
+        hi: 400.0
+        fmt: "%.0f"
+      - slider_float: Water level (m)
+        bind: world.water_level
+        commit: release
+        lo: 0.0
+        hi: 200.0
+        fmt: "%.1f"
+      - button: Regenerate
+        on: (state-set "world.request" "regenerate")
+      - button: Randomize
+        on: (state-set "world.request" "randomize")
+        tooltip: "a new seed"
+      - separator
+      - combo: Colour by
+        bind: world.color
+        options: [Material, Risk, Occupancy, Height]
+        values: [0, 1, 2, 3]
+      - text: "props"
+        bind: world.stats.props
+      - text: "buildings"
+        bind: world.stats.buildings
+      - text: "occupied"
+        bind: world.stats.occupied

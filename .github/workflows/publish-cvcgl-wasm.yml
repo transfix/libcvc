@@ -255,7 +255,7 @@ jobs:
           # The _ari demos are documents (demos.json "app" + "doc"), not binaries: each is arigl's
           # page opened on its .ari, and its own directory only redirects there (build-pages.py).
           # Since #820 they have no .wasm, so this checks the redirect (v3.7.1's tag run failed here).
-          for d in lsystem_forest_ari volren_bunny_ari volslice_bunny_ari fem_gallery_ari; do
+          for d in terrain_lab_ari lsystem_forest_ari volren_bunny_ari volslice_bunny_ari fem_gallery_ari; do
             grep -q "url=../arigl/?doc=" "$WEB/$d/index.html" 2>/dev/null \
               || { echo "::error::gallery has no $d (arigl document page)"; exit 1; }
           done
