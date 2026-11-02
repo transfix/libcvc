@@ -58,6 +58,27 @@ void stream_view_puller::set_decoder(const std::string &codec, frame_decoder dec
     decoders_.erase(codec);
 }
 
+bool stream_view_size(const Value &props, float &w, float &h) {
+  w = 256.0f;
+  h = 0.0f;
+  const Value *v = props.find("size");
+  if (v && v->is_seq()) {
+    if (v->items.size() == 2) {
+      const double bw = v->items[0].as_double(0.0), bh = v->items[1].as_double(0.0);
+      if (bw > 0.0 && bh > 0.0) { // (NaN fails these too)
+        w = static_cast<float>(bw);
+        h = static_cast<float>(bh);
+        return true;
+      }
+    }
+    return false;
+  }
+  const double d = v ? v->as_double(256.0) : 256.0;
+  if (d > 0.0)
+    w = static_cast<float>(d);
+  return false;
+}
+
 bool stream_view_puller::pull(const std::string &key, const std::string &token, cvc::image &out) {
   slot &s = slots_[key];
   // Reconcile to the CURRENT channel for `token`: the lookup is cheap, and it is what lets the view
@@ -102,16 +123,16 @@ std::shared_ptr<stream::stream_view_puller> register_stream_view_widget(FtxuiBac
       "stream_view", [&backend, puller](const std::string &current, const Widget &w) -> CustomEdit {
         // A bound value (a switchable token in state) wins over the static `stream:` prop.
         const std::string token = !current.empty() ? current : w.props.str("stream");
-        float width = static_cast<float>(w.props.num("size", 256.0));
-        if (!(width > 0.0f))
-          width = 256.0f; // size: 0, negative or NaN -> the default width
+        float bw = 0.0f, bh = 0.0f;
+        const bool box = stream::stream_view_size(w.props, bw, bh);
         if (token.empty())
           return {}; // nothing addressed: draw nothing
         cvc::image frame;
         if (puller->pull(!w.id.empty() ? w.id : token, token, frame))
           backend.set_image(token, frame); // the newest frame, under the token's name
         // The live frame published above, or a still image the host set under the same name.
-        if (!backend.draw_image(token.c_str(), width))
+        if (!(box ? backend.draw_image_fit(token.c_str(), bw, bh)
+                  : backend.draw_image(token.c_str(), bw)))
           backend.text_line(("[stream_view: " + token + " - no frame]").c_str());
         return {};
       });

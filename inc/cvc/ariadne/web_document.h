@@ -32,6 +32,11 @@ int stage_url_document(HostOptions &o, const std::string &runtime);
 // (Module.ariadneRunning). A no-op natively, and on a page that does not listen.
 void report_running();
 
+// Tell the page about a warning while the document runs (Module.ariadneWarning(text)), e.g. a
+// resident that stopped, so it can show it then rather than only in the console. A no-op natively,
+// and on a page that does not listen.
+void report_warning(const std::string &text);
+
 // Tell the page the runtime stopped with exit `status` (Module.ariadneExit); its stderr says why.
 // A no-op natively, and on a page that does not listen.
 void report_exit(int status);

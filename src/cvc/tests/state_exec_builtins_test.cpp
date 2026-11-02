@@ -805,3 +805,71 @@ TEST_F(JsonBuiltinsTest, MangledTextParsesOrIsAValueErrorAndWhatParsesRoundTrips
   }
   EXPECT_GT(parsed, 100); // the mangling leaves some valid documents too
 }
+
+// ── sha256, sha256-hex, random-token ──────────────────────────────────────────────────────────
+
+namespace {
+// The DSL class an expression's native call raises, or "" when it returns.
+template <class F> std::string raised_class(F f) {
+  try {
+    f();
+  } catch (const dsl_error &e) { // what a builtin throws; the evaluator makes it an exception
+    return e.class_name();
+  }
+  return "";
+}
+} // namespace
+
+// FIPS 180-4 / NIST known answers.
+TEST_F(BuiltinsTest, Sha256HexKnownAnswers) {
+  EXPECT_EQ(std::get<std::string>(call("sha256-hex", {std::string("")}).v),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+  EXPECT_EQ(std::get<std::string>(call("sha256-hex", {std::string("abc")}).v),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+  EXPECT_EQ(std::get<std::string>(
+                call("sha256-hex",
+                     {std::string("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")})
+                    .v),
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+  // A string hashes its UTF-8 bytes, the same as those bytes as a bytes value.
+  EXPECT_EQ(std::get<std::string>(call("sha256-hex", {std::string("caf\xc3\xa9")}).v),
+            std::get<std::string>(call("sha256-hex", {make_bytes("caf\xc3\xa9")}).v));
+}
+
+TEST_F(BuiltinsTest, Sha256ReturnsTheRawDigest) {
+  const value_t d = call("sha256", {std::string("abc")});
+  const auto *b = std::get_if<bytes_value>(&d.v);
+  ASSERT_NE(b, nullptr);
+  ASSERT_EQ(b->data.size(), 32u);
+  EXPECT_EQ(static_cast<unsigned char>(b->data[0]), 0xba);
+  EXPECT_EQ(static_cast<unsigned char>(b->data[31]), 0xad);
+  EXPECT_EQ(raised_class([&] { call("sha256", {int64_t{1}}); }), "TypeError");
+  EXPECT_EQ(raised_class([&] { call("sha256-hex", {}); }), "TypeError");
+}
+
+TEST_F(BuiltinsTest, RandomTokenLengthAndAlphabet) {
+  for (int64_t n : {1, 2, 3, 31, 32, 33, 256}) {
+    SCOPED_TRACE(n);
+    const std::string b64 = std::get<std::string>(call("random-token", {n}).v);
+    EXPECT_EQ(b64.size(), static_cast<std::size_t>((4 * n + 2) / 3)); // unpadded base64url
+    EXPECT_EQ(b64.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                                    "0123456789-_"),
+              std::string::npos)
+        << b64;
+    const std::string hex = std::get<std::string>(call("random-token", {n, std::string("hex")}).v);
+    EXPECT_EQ(hex.size(), static_cast<std::size_t>(2 * n));
+    EXPECT_EQ(hex.find_first_not_of("0123456789abcdef"), std::string::npos) << hex;
+  }
+  // 32 random bytes twice over are never the same (a 2^-256 chance).
+  EXPECT_NE(std::get<std::string>(call("random-token", {int64_t{32}}).v),
+            std::get<std::string>(call("random-token", {int64_t{32}}).v));
+}
+
+TEST_F(BuiltinsTest, RandomTokenRejectsBadArguments) {
+  EXPECT_EQ(raised_class([&] { call("random-token", {int64_t{0}}); }), "ValueError");
+  EXPECT_EQ(raised_class([&] { call("random-token", {int64_t{257}}); }), "ValueError");
+  EXPECT_EQ(raised_class([&] { call("random-token", {1.5}); }), "TypeError");
+  EXPECT_EQ(raised_class([&] { call("random-token", {}); }), "TypeError");
+  EXPECT_EQ(raised_class([&] { call("random-token", {int64_t{8}, std::string("b32")}); }),
+            "ValueError");
+}

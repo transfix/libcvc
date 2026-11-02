@@ -29,7 +29,11 @@
 //
 // One step of hdt, given (delta_cmd, a_cmd) and a ground sampler G (G.at(wx, wy, mu, height) at a
 // world point; the plant is templated on it, so its height's gradient flows through the duals):
-//   1. Actuators, as P8a.
+//   1. Actuators, as P8a. The drive's target is drive_gain x the commanded acceleration
+//      (brake_gain x a braking one) plus resist_comp x the drag and rolling resistance per unit
+//      mass at the step's start: how a simulation's driver turns a command into force, fitted to
+//      its ledger by calibrate_dyn4 (dyn4_ledger.h). The defaults (1, 1, 0) are the command as it
+//      is.
 //   2. Loads. Each corner's spring-damper: F_i = Fz0_i + k_i (height_i - c_i . q) - c_i' (c_i .
 //   qd),
 //      Fz0_i the static share of m g, floored smoothly at zero (softplus of width fz_min m g): a
@@ -95,6 +99,9 @@ struct dyn4_params {
   float fz_min = 0.02f; // the load floor's width, as a fraction of m g
   int iters = 3;
   int grade_force = 0; // 1: gravity along the ground's slope acts on the body (opt-in; see step 3)
+  // The drive's answer to the command (step 1): its gain driving and braking, and the share of
+  // the drag and rolling resistance it makes up.
+  float drive_gain = 1.0f, brake_gain = 1.0f, resist_comp = 0.0f;
 };
 
 template <class S> struct dyn4_state {
@@ -209,6 +216,30 @@ CVC_HD inline void dyn4_grade(const dyn4_params &p, const G &ground, const dyn4_
   }
 }
 
+// The drive's target for a command (step 1): the command at drive_gain (brake_gain braking), and
+// resist_comp of the drag and rolling resistance per unit mass at s. The defaults return a_cmd.
+template <class S>
+CVC_HD inline S dyn4_drive_target(const dyn4_params &p, const dyn4_state<S> &s, S a_cmd) {
+  const float gain = s_val(a_cmd) >= 0.0 ? p.drive_gain : p.brake_gain;
+  S target = gain == 1.0f ? a_cmd : S(gain) * a_cmd;
+  if (p.resist_comp != 0.0f) {
+    const S u0 = s_sqrt(s.vx * s.vx + S(p.eps) * S(p.eps));
+    target = target +
+             S(p.resist_comp) * (S(p.drag) * s.vx * u0 / S(p.m) + S(p.c_rr) * S(p.g) * (s.vx / u0));
+  }
+  return target;
+}
+
+// The drive actuator's output after one step under a_cmd (step 1): toward dyn4_drive_target with
+// the lag tau_drive.
+template <class S>
+CVC_HD inline S dyn4_drive_actuator(const dyn4_params &p, const bike_veh &v, const dyn4_state<S> &s,
+                                    S a_cmd) {
+  const S one = S(1);
+  const S k_drive = p.tau_drive > 0.0f ? one - s_exp(-S(v.hdt) / S(p.tau_drive)) : one;
+  return s.a + (dyn4_drive_target(p, s, a_cmd) - s.a) * k_drive;
+}
+
 // One step of the plant; see the header comment. `seen`, when given, gets the twist the step
 // reached before its limiters (dyn_step_free, for dyn4_plant_books).
 template <class S, class G>
@@ -227,8 +258,7 @@ CVC_HD inline void dyn4_plant(const dyn4_params &p, const bike_veh &v, const G &
     step = R * s_tanh(step / R);
   }
   const S delta1 = s.delta + step;
-  const S k_drive = p.tau_drive > 0.0f ? one - s_exp(-hdt / S(p.tau_drive)) : one;
-  const S a1 = s.a + (a_cmd - s.a) * k_drive;
+  const S a1 = dyn4_drive_actuator(p, v, s, a_cmd);
 
   // 2. The wheels, the ground under them and their loads.
   dyn4_wheels<S> W;
@@ -742,6 +772,41 @@ CVC_HD inline dyn4_ph_rates<S> dyn4_ph_rates_at(const dyn4_params &p, const bike
     out.grade = out.grade + e[a] * fg[a];
   }
   return out;
+}
+
+// The same power split as a vehicle simulation's ledger splits it (cvc::nav::plant_energy_lines):
+// port = y^T u, the wheels' forces at their patches' speeds (dyn4_ph_rates' supplied; < 0
+// braking); the dissipation dH/dx^T R dH/dx by its parts, the tires' slip sum_i S_i w_i^2, drag
+// and rolling resistance (c_x's two terms times vx^2) and the dampers sum_i c'_i (c_i . qd)^2. So
+// port - tire - drag - rolling - damper is supplied - dissipated, to rounding.
+template <class S> struct dyn4_ph_lines {
+  S port, tire, drag, rolling, damper;
+};
+
+template <class S, class G>
+CVC_HD inline dyn4_ph_lines<S> dyn4_ph_lines_at(const dyn4_params &p, const bike_veh &v,
+                                                const G &ground, const dyn4_state<S> &s) {
+  dyn4_ph_parts<S> q;
+  dyn4_ph_parts_at(p, v, ground, s, q);
+  const S u0 = s_sqrt(s.vx * s.vx + S(p.eps) * S(p.eps));
+  dyn4_ph_lines<S> l;
+  l.port = S(0);
+  l.tire = S(0);
+  l.damper = S(0);
+  const S xi[6] = {s.vx, s.vy, s.r, s.zd, s.phid, s.thd};
+  for (int i = 0; i < 4; ++i) {
+    S speed = S(0);
+    for (int k = 0; k < 6; ++k)
+      speed = speed + q.T[i][k] * xi[k];
+    l.port = l.port + q.Fx[i] * speed;
+    const S wi = q.N[i][0] * s.vx + q.N[i][1] * s.vy + q.N[i][2] * s.r;
+    l.tire = l.tire + q.Sw[i] * wi * wi;
+    const S rate = s.zd + q.W.yi[i] * s.phid - q.W.xi[i] * s.thd;
+    l.damper = l.damper + q.W.c[i] * rate * rate;
+  }
+  l.drag = S(p.drag) * u0 * s.vx * s.vx;
+  l.rolling = S(p.c_rr) * S(p.m) * S(p.g) / u0 * s.vx * s.vx;
+  return l;
 }
 
 // One step's energy books, in J: dH = supplied - dissipated + lever + grade + ground + limiter +

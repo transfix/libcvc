@@ -4,9 +4,12 @@
 #include <cstdlib>
 #include <cvc/ariadne/net_host.h>
 #include <cvc/ariadne/net_intrinsics.h>
+#include <cvc/ariadne/oidc_host.h>
 #include <cvc/ariadne/uri.h>
 #include <cvc/ariadne/uri_http.h>
+#include <cvc/net/browser.h>
 #include <cvc/net/credentials.h>
+#include <cvc/net/http_client.h>
 #include <cvc/net/net_policy.h>
 #include <memory>
 #include <mutex>
@@ -49,6 +52,14 @@ std::string enable_net(cvc::app &app, const NetHostConfig &config) {
   for (const std::string &file : config.policy_files)
     if (!cvc::net::load_net_policy_file(file, *policy, &why))
       return "--net-policy: " + why;
+  for (const std::string &issuer : config.oidc.issuers)
+    if (const std::string bad = policy->add_oidc_issuer(issuer); !bad.empty())
+      return "--oidc-issuer: " + bad;
+  for (const auto &[issuer, client] : config.oidc.clients)
+    if (const std::string bad = policy->set_oidc_client(issuer, client); !bad.empty())
+      return "--oidc-client " + issuer + "=" + client + ": " + bad;
+  if (!config.oidc.redirect_uri.empty() && !cvc::net::parse_origin(config.oidc.redirect_uri, &why))
+    return "--oidc-redirect-uri: " + why;
   // A browser page can always reach the origin it came from; that is where its documents and
   // their API usually live.
   if (const std::string page = cvc::net::page_origin(); !page.empty())
@@ -105,10 +116,18 @@ std::string enable_net(cvc::app &app, const NetHostConfig &config) {
   status.env_credentials = std::move(from_env);
   for (const cvc::net::Origin &o : policy->allowed())
     status.allowed.push_back(o.str());
+  status.oidc = cvc::net::have_http_backend();
+  for (const cvc::net::OidcIssuer &i : policy->oidc_issuers())
+    status.oidc_issuers.push_back(i.issuer);
 
   disable_net(); // a second enable replaces the first
   register_net_intrinsics(app, NetAccess{policy, store, live});
   register_http_uri_handler(policy);
+  if (status.oidc) {
+    enable_oidc(app, policy, store, config.oidc, live);
+    status.oidc_flows = oidc_flows();
+  }
+  status.browser = cvc::net::browser_available();
   std::lock_guard<std::mutex> lock(host_mutex());
   host_cell() = NetHost{std::move(live), std::move(status)};
   return std::string();
@@ -120,6 +139,7 @@ void disable_net() {
   if (!h.live)
     return;
   h.live->store(false);
+  disable_oidc();
   unregister_uri_handler("http");
   unregister_uri_handler("https");
   unregister_uri_store_handler("http");
@@ -129,7 +149,10 @@ void disable_net() {
 
 NetHostStatus net_host_status() {
   std::lock_guard<std::mutex> lock(host_mutex());
-  return host_cell().status;
+  NetHostStatus s = host_cell().status;
+  if (s.enabled)
+    s.browser = cvc::net::browser_available(); // a test's opener, --no-browser
+  return s;
 }
 
 } // namespace ariadne

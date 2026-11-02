@@ -1,0 +1,22 @@
+# The spinner check (tests/spinner_test.sh): a spinner the host turns by its frame clock while
+# the document's only program is parked for good, one with ASCII glyphs, and one visible_when
+# hides. `ari snapshot --frames 3` shows each one step on from `--frames 1`; `ari run` in tmux
+# shows them turning.
+meta:
+  name: Ariadne spinner check
+  min_libcvc: 3.7.5
+windows:
+  - window: Spinner
+    children:
+      - spinner: Loading
+        visible_when: (= (state-get "busy") "1")
+      - spinner: Plain
+        glyphs: ascii
+      - spinner: Hidden
+        visible_when: (= (state-get "busy") "0")
+      - text: "parked"
+        bind: (state-get "parked")
+init: (begin (state-set "busy" "1") (state-set "parked" "no"))
+on_tick: |
+  (state-set "parked" "yes")
+  (msg-recv "nothing.comes")

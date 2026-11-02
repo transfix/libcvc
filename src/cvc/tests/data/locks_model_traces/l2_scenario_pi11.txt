@@ -1,0 +1,31 @@
+# scenarios.py scenario_pi11, its homes merged into one home of prio true
+config inheritance=1 coalesce=0 one_home=1 mutations=-
+attach_home 1 -> 0 |
+try_acquire 0 1 o 5 X a.b - - -> granted 1 1 0 |
+query - 0 o -> held a.b/X/1/1/1/0 waiting |
+try_acquire 0 2 o 5 S a.c - - -> granted 2 1 0 |
+query - 0 o -> held a.b/X/1/1/1/0 a.c/S/2/1/-/0 waiting |
+try_acquire 0 1 o 5 X a - - -> busy |
+block 0 1 o 5 X a - - -> 1 queued | relevel(0,2)
+read_inh 0 2 -> 5 |
+query - 0 o -> held a.b/X/1/1/1/0 a.c/S/2/1/-/0 waiting a/X/1 |
+try_acquire 0 3 o -10 X a - - -> busy |
+block 0 3 o -10 X a - - -> 2 queued | relevel(0,1) relevel(0,2)
+read_inh 0 1 -> -10 |
+read_inh 0 2 -> -10 |
+query - 0 o -> held a.b/X/1/1/1/0 a.c/S/2/1/-/0 waiting a/X/1 a/X/3 |
+cancel 0 3 2 -> cancelled | relevel(0,1) relevel(0,2)
+read_inh 0 1 -> INF |
+read_inh 0 2 -> 5 |
+resume 0 3 2 -> timeout |
+query - 0 o -> held a.b/X/1/1/1/0 a.c/S/2/1/-/0 waiting a/X/1 |
+release 0 2 2 -> ok | wake(0,1,1) relevel(0,2)
+resume 0 1 1 -> granted 3 2 0 |
+read_inh 0 2 -> INF |
+query - 0 o -> held a/X/1/1/2/0 a.b/X/1/1/1/0 waiting |
+start_body 0 1 3 -> ok |
+query - 0 o -> held a/X/1/1/2/0 a.b/X/1/1/1/0 waiting |
+release 0 1 3 -> ok |
+query - 0 o -> held a.b/X/1/1/1/0 waiting |
+release 0 1 1 -> ok |
+query - 0 o -> held waiting |

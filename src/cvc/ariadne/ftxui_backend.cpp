@@ -31,6 +31,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib> // getenv: TERM
 #include <cstring>
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/ariadne.h>
@@ -526,8 +527,8 @@ struct FtxuiBackend::Impl {
   struct Win {
     int x = 0, y = 0; // top-left cell, as placed (by the document, the persisted geometry, a drag)
     int sx = 0, sy = 0; // where it is drawn this frame: x / y kept on the current screen
-    int w = 0, h = 0;   // outer size in cells when `sized`
-    bool sized = false;
+    int w = 0, h = 0;   // outer size in cells: the authored size, or the user's when `sized`
+    bool sized = false; // w x h is the user's: persisted (seeded) or a host's user resize
     bool placed = false;
     bool seeded = false;
     long z = 0;
@@ -1415,7 +1416,8 @@ Capabilities FtxuiBackend::capabilities() const {
   c.mouse = true;
   c.keyboard = true;
   c.color = true;
-  c.glsl = false; // no GLSL on a terminal: a shader widget degrades (§16.3)
+  c.glsl = false; // the cells draw no GLSL: a shader widget degrades (§16.3); a GL scene adapter
+                  // behind them still runs the scene's (gl.scene.shaders)
   c.view_embed = false;
   c.owns_loop = true; // run() owns the terminal's event loop (§16.2)
   c.terminal = true;
@@ -2499,6 +2501,17 @@ bool FtxuiBackend::draw_image(const char *name, float width) {
   return true;
 }
 
+bool FtxuiBackend::draw_image_fit(const char *name, float box_w, float box_h) {
+  // The width whose aspect-following height fits the box: no bars in a terminal, but the same
+  // bound on the picture.
+  const auto it = m_->images.find(name ? name : "");
+  if (it == m_->images.end() || it->second.rgb.empty() || !(box_w > 0.0f) || !(box_h > 0.0f))
+    return draw_image(name, box_w);
+  const auto &img = it->second.rgb;
+  const float fit_w = box_h * static_cast<float>(img.width()) / static_cast<float>(img.height());
+  return draw_image(name, std::min(box_w, fit_w));
+}
+
 // ---- headless driving
 // ----------------------------------------------------------------------------
 
@@ -2594,6 +2607,7 @@ std::vector<FtxuiBackend::HostedWindow> FtxuiBackend::hosted_windows() const {
       hw.y = w->second.y;
       hw.w = w->second.w;
       hw.h = w->second.h;
+      hw.user_sized = w->second.sized;
     }
     if (b->second.body) {
       b->second.body->ComputeRequirement();
@@ -2673,13 +2687,18 @@ void FtxuiBackend::close_window(Runtime &rt, const std::string &id) {
   m.end_event();
 }
 
-void FtxuiBackend::set_window_geometry(const std::string &id, int x, int y, int w, int h) {
+void FtxuiBackend::set_window_geometry(const std::string &id, int x, int y, int w, int h,
+                                       bool user_sized) {
   Impl::Win &win = m_->windows[id];
   win.x = x;
   win.y = y;
-  win.w = w;
-  win.h = h;
-  win.placed = win.seeded = win.sized = true;
+  win.placed = win.seeded = true;
+  // A size the host computed to fit the content is not the window's: keeping it would hold the
+  // window at that size when it next opens, whatever it shows by then. The next walk takes the
+  // authored size again (begin_window), or none.
+  win.sized = user_sized;
+  win.w = user_sized ? w : 0;
+  win.h = user_sized ? h : 0;
 }
 
 void FtxuiBackend::set_screen_size(int width, int height) {
@@ -2864,7 +2883,13 @@ FtxuiBackend::run_loop(Runtime &rt, const RunOptions &opts, const std::function<
     m.shown = m.last; // FTXUI lays this frame out next, which fills the boxes
     m.gfx_shown = m.gfx_last;
     m.drew = true;
-    return m.root;
+    const std::string notice = opts.notice ? opts.notice() : std::string();
+    if (notice.empty())
+      return m.root;
+    // Wrapped, so a narrow terminal still shows what failed.
+    fx::Element bar = fx::paragraph(notice) | fx::bold | fx::color(fx::Color::Black) |
+                      fx::bgcolor(fx::Color::Yellow);
+    return fx::dbox({m.root, fx::vbox({fx::filler(), std::move(bar)})});
   });
   fx::Component app = fx::CatchEvent(renderer, [&](fx::Event e) {
     if (e == fx::Event::CtrlC || e.input() == "\x1c") {
@@ -3054,6 +3079,7 @@ StringEdit FtxuiBackend::input_text(const char *, const char *, const std::strin
 }
 void FtxuiBackend::focus_next_widget() {}
 bool FtxuiBackend::draw_image(const char *, float) { return false; }
+bool FtxuiBackend::draw_image_fit(const char *, float, float) { return false; }
 ColorEdit FtxuiBackend::color(const char *, const float[3]) { return {}; }
 void FtxuiBackend::set_image(const std::string &, const cvc::image &) {}
 void FtxuiBackend::clear_image(const std::string &) {}
@@ -3085,7 +3111,7 @@ TermRows FtxuiBackend::render_window(const std::string &, int, int) { return {};
 bool FtxuiBackend::feed_window(Runtime &, const std::string &, const TermEvent &) { return false; }
 void FtxuiBackend::activate_menu_item(Runtime &, const std::string &) {}
 void FtxuiBackend::close_window(Runtime &, const std::string &) {}
-void FtxuiBackend::set_window_geometry(const std::string &, int, int, int, int) {}
+void FtxuiBackend::set_window_geometry(const std::string &, int, int, int, int, bool) {}
 void FtxuiBackend::set_screen_size(int, int) {}
 FtxuiBackend::RunExit FtxuiBackend::run_loop(Runtime &, const RunOptions &,
                                              const std::function<void()> &,
@@ -3113,13 +3139,27 @@ void FtxuiBackend::route(Runtime &rt, const TermEvent &ev,
     unhandled(ev);
 }
 
+// A spinner's braille dots need a terminal that shows them: not the Linux console (its font has
+// none), a dumb terminal or a VT-series one. Read once; a browser's xterm.js sets no TERM.
+bool FtxuiBackend::unicode_glyphs() const {
+  static const bool unicode = [] {
+    const char *t = std::getenv("TERM");
+    const std::string term = t ? t : "";
+    return !(term == "linux" || term == "dumb" || term.rfind("vt", 0) == 0);
+  }();
+  return unicode;
+}
+
 // ── custom widgets: the same in both builds (a host's draw fn calls the primitives above)
 // ─────────
 
 void FtxuiBackend::register_widget(std::string custom_type, CustomDrawFn draw) {
-  if (draw)
+  if (draw) {
+    // As ImGuiBackend::register_widget does: the loader then knows the type, and has_widget_type()
+    // (so requires: and (has? ...)) reports it present.
+    register_known_widget_type(custom_type);
     customWidgets_[std::move(custom_type)] = std::move(draw);
-  else
+  } else
     customWidgets_.erase(custom_type);
 }
 
