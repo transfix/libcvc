@@ -345,8 +345,8 @@ TEST(RoomChat, RequestsAreTakenOnlyFromTheSendersOwnPath) {
   EXPECT_FALSE(gate.admit("bob", ok));
   ok.ttl_hops = 1;
   EXPECT_FALSE(gate.admit("alice", ok));
-  cvc::state_message other = cvc::state_message::make_text(
-      conf::room_participant_path(kRoom, "alice") + ".note", "x");
+  cvc::state_message other =
+      cvc::state_message::make_text(conf::room_participant_path(kRoom, "alice") + ".note", "x");
   EXPECT_TRUE(gate.admit("alice", other)) << "other messages on its own path are as before";
 }
 
@@ -581,9 +581,11 @@ TEST(RoomChat, TheVerbsPostReadAndPage) {
                 " (set ms (chat-messages (state-get \"tok\") \"\"))"
                 " (state-set \"last\" (get-attr (nth ms (- (length ms) 1)) \"text\"))"
                 " (state-set \"mine\" (str (get-attr (nth ms (- (length ms) 1)) \"mine\")))"
-                " (state-set \"page\" (str (get-attr (chat-more (state-get \"tok\") \"\") \"loading\"))))"),
+                " (state-set \"page\" (str (get-attr (chat-more (state-get \"tok\") \"\") "
+                "\"loading\"))))"),
             "");
-  EXPECT_EQ(leaf(bob.app, "count"), "33") << "the newest page (asked before the post arrived) and the post";
+  EXPECT_EQ(leaf(bob.app, "count"), "33")
+      << "the newest page (asked before the post arrived) and the post";
   EXPECT_EQ(leaf(bob.app, "more"), "#t");
   EXPECT_EQ(leaf(bob.app, "last"), "from the DSL");
   EXPECT_EQ(leaf(bob.app, "mine"), "#t");

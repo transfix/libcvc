@@ -9,24 +9,24 @@
 */
 
 #include <algorithm> // max
-#include <chrono> // the chat verbs' steady clock
-#include <cmath>  // atan2 (room-set-intent facing)
-#include <ctime>  // a chat message's local clock time
+#include <chrono>    // the chat verbs' steady clock
+#include <cmath>     // atan2 (room-set-intent facing)
 #include <cstdint>
-#include <cstdlib>               // strtod (room-set-intent numeric args)
-#include <cvc/ariadne/ariadne.h> // register_action_intrinsics
+#include <cstdio>                               // snprintf
+#include <cstdlib>                              // strtod (room-set-intent numeric args)
+#include <ctime>                                // a chat message's local clock time
+#include <cvc/ariadne/ariadne.h>                // register_action_intrinsics
 #include <cvc/ariadne/conference/room_avatar.h> // room-avatar-options / room-set-avatar
 #include <cvc/ariadne/conference/room_chat.h>   // the chat-* verbs
 #include <cvc/ariadne/conference/room_intrinsics.h>
 #include <cvc/ariadne/conference/room_net.h> // the roster entries carry each link's quality
-#include <cvc/ariadne/holon_sync.h>        // write_intent (room-set-intent verb)
-#include <cvc/core/app.h>                  // app.root()
+#include <cvc/ariadne/holon_sync.h>          // write_intent (room-set-intent verb)
+#include <cvc/core/app.h>                    // app.root()
 #include <cvc/state/state.h>               // cvc::state, SEPARATOR, findDescendant, children, value
 #include <cvc/state/state_cluster_shard.h> // default_for / local_node_id (the trust-all pid)
 #include <cvc/state/state_exec/builtins.h> // register_fn
 #include <cvc/state/state_exec/intrinsics.h> // intrinsics_context, document_scope
 #include <cvc/state/state_exec/types.h>      // value_t, make_dict, make_list
-#include <cstdio> // snprintf
 #include <initializer_list>
 #include <map>
 #include <memory>
@@ -160,8 +160,7 @@ room_table *doc_rooms(se::document_scope *doc) {
 }
 
 double steady_seconds() {
-  return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch())
-      .count();
+  return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
 // "14:05", the local time of a message's relay timestamp.
@@ -496,24 +495,24 @@ void register_room_intrinsics(cvc::app &app) {
     // (chat-post ROOM TEXT [TO]) -> { ok #t } or { ok #f error }. Posts TEXT to the room, or to
     // participant TO as a direct message. The relay may still refuse it (the room's rate limit, TO
     // having left): chat-info's error says so.
-    se::builtins::register_fn(
-        env, "chat-post", [chat_of](std::span<const se::value_t> args) -> se::value_t {
-          std::string error;
-          room_chat_client *c = chat_of(args, "chat-post", error);
-          if (!c)
-            return err(error);
-          if (args.size() < 2)
-            return err("chat-post: (chat-post ROOM TEXT [TO])");
-          if (!c->post(get_str(&args[1]), channel_arg(args, 2), error))
-            return err(error);
-          return se::make_dict({{"ok", se::value_t(true)}});
-        });
+    se::builtins::register_fn(env, "chat-post",
+                              [chat_of](std::span<const se::value_t> args) -> se::value_t {
+                                std::string error;
+                                room_chat_client *c = chat_of(args, "chat-post", error);
+                                if (!c)
+                                  return err(error);
+                                if (args.size() < 2)
+                                  return err("chat-post: (chat-post ROOM TEXT [TO])");
+                                if (!c->post(get_str(&args[1]), channel_arg(args, 2), error))
+                                  return err(error);
+                                return se::make_dict({{"ok", se::value_t(true)}});
+                              });
 
     // (chat-info ROOM [CHANNEL]) -> { available rev count oldest newest head first more loading
-    // error }. `oldest` and `newest` are the seqs that begin and end the run (when count > 0). Reads
-    // what this participant holds of CHANNEL and asks the relay for what keeps it complete (the
-    // newest page the first time, a lost push). `rev` changes whenever the messages change, so a
-    // tick re-reads chat-messages only then.
+    // error }. `oldest` and `newest` are the seqs that begin and end the run (when count > 0).
+    // Reads what this participant holds of CHANNEL and asks the relay for what keeps it complete
+    // (the newest page the first time, a lost push). `rev` changes whenever the messages change, so
+    // a tick re-reads chat-messages only then.
     se::builtins::register_fn(
         env, "chat-info", [chat_of](std::span<const se::value_t> args) -> se::value_t {
           std::string error;
@@ -547,9 +546,10 @@ void register_room_intrinsics(cvc::app &app) {
             return err(error);
           std::vector<se::value_t> list;
           const std::vector<chat_message> run =
-              args.size() > 2 ? c->messages(channel_arg(args, 1),
-                                            static_cast<std::uint64_t>(std::max(0.0, get_num(&args[2]))))
-                              : c->messages(channel_arg(args, 1));
+              args.size() > 2
+                  ? c->messages(channel_arg(args, 1),
+                                static_cast<std::uint64_t>(std::max(0.0, get_num(&args[2]))))
+                  : c->messages(channel_arg(args, 1));
           for (const chat_message &m : run)
             list.push_back(se::make_dict({
                 {"seq", se::value_t(static_cast<std::int64_t>(m.seq))},
@@ -565,32 +565,32 @@ void register_room_intrinsics(cvc::app &app) {
 
     // (chat-rev ROOM) -> a number that changes with every push the relay makes to the caller (a
     // message, a page, a conversation's heads): a tick re-reads chat-conversations only then.
-    se::builtins::register_fn(
-        env, "chat-rev", [chat_of](std::span<const se::value_t> args) -> se::value_t {
-          std::string error;
-          room_chat_client *c = chat_of(args, "chat-rev", error);
-          if (!c)
-            return err(error);
-          return se::value_t(static_cast<std::int64_t>(c->pushes()));
-        });
+    se::builtins::register_fn(env, "chat-rev",
+                              [chat_of](std::span<const se::value_t> args) -> se::value_t {
+                                std::string error;
+                                room_chat_client *c = chat_of(args, "chat-rev", error);
+                                if (!c)
+                                  return err(error);
+                                return se::value_t(static_cast<std::int64_t>(c->pushes()));
+                              });
 
     // (chat-more ROOM [CHANNEL]) -> { ok loading more }: asks the relay for the page before the
     // oldest message held. `loading` is #t while a request is in flight (one per channel); `more`
     // is #f once the run reaches the oldest message the relay keeps.
-    se::builtins::register_fn(
-        env, "chat-more", [chat_of](std::span<const se::value_t> args) -> se::value_t {
-          std::string error;
-          room_chat_client *c = chat_of(args, "chat-more", error);
-          if (!c)
-            return err(error);
-          const std::string channel = channel_arg(args, 1);
-          const double now = steady_seconds();
-          const bool loading = c->more(channel, now);
-          const room_chat_client::info i = c->refresh(channel, now);
-          return se::make_dict({{"ok", se::value_t(true)},
-                                {"loading", se::value_t(loading)},
-                                {"more", se::value_t(i.more)}});
-        });
+    se::builtins::register_fn(env, "chat-more",
+                              [chat_of](std::span<const se::value_t> args) -> se::value_t {
+                                std::string error;
+                                room_chat_client *c = chat_of(args, "chat-more", error);
+                                if (!c)
+                                  return err(error);
+                                const std::string channel = channel_arg(args, 1);
+                                const double now = steady_seconds();
+                                const bool loading = c->more(channel, now);
+                                const room_chat_client::info i = c->refresh(channel, now);
+                                return se::make_dict({{"ok", se::value_t(true)},
+                                                      {"loading", se::value_t(loading)},
+                                                      {"more", se::value_t(i.more)}});
+                              });
 
     // (chat-conversations ROOM) -> list of { peer name head present }: the participants the
     // caller has direct messages with, in the order they started. `name` is the peer's current

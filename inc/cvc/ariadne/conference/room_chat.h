@@ -49,8 +49,9 @@ namespace conference {
 //                                       with, comma-separated
 //   dm.<peer>.{head,first,m.<seq>}      pushed to the two participants of a conversation only, each
 //                                       holding it under the OTHER's pid
-//   error                               pushed to a poster: {"cseq","to","error"} for a refused post
-//   rev                                 pushed last in every push: changes each time, so a client
+//   error                               pushed to a poster: {"cseq","to","error"} for a refused
+//   post rev                                 pushed last in every push: changes each time, so a
+//   client
 //                                       reads this leaf and the room head per tick and looks
 //                                       further only when one of them moved
 //
@@ -85,7 +86,8 @@ struct chat_message {
   std::string epoch; // the relay process's epoch
 };
 
-// conf.rooms.<room>.chat, and a participant's request path, conf.rooms.<room>.participants.<pid>.chat.
+// conf.rooms.<room>.chat, and a participant's request path,
+// conf.rooms.<room>.participants.<pid>.chat.
 std::string chat_root_path(const std::string &room);
 std::string chat_request_path(const std::string &room, const std::string &pid);
 // Where a client holds CHANNEL ("" the room, else the peer's pid): <chat root>.room or .dm.<peer>.
@@ -174,15 +176,15 @@ public:
   using sender_fn = std::function<bool(const cvc::state_message &)>;
 
   struct info {
-    bool available = false;  // the relay keeps chat (it published chat.epoch)
-    std::uint64_t rev = 0;   // changes whenever the messages held for the channel change
-    std::size_t count = 0;   // messages in the contiguous run
+    bool available = false; // the relay keeps chat (it published chat.epoch)
+    std::uint64_t rev = 0;  // changes whenever the messages held for the channel change
+    std::size_t count = 0;  // messages in the contiguous run
     std::uint64_t oldest = 0, newest = 0; // its first and last seq (when count > 0)
-    std::uint64_t head = 0;  // the channel's next seq, as last heard
-    std::uint64_t first = 0; // the oldest seq the relay keeps
-    bool more = false;       // older messages the relay keeps than the run holds
-    bool loading = false;    // a page request is in flight
-    std::string error;       // why the last post to this channel was refused ("" since a send)
+    std::uint64_t head = 0;               // the channel's next seq, as last heard
+    std::uint64_t first = 0;              // the oldest seq the relay keeps
+    bool more = false;                    // older messages the relay keeps than the run holds
+    bool loading = false;                 // a page request is in flight
+    std::string error; // why the last post to this channel was refused ("" since a send)
   };
   struct conversation {
     std::string peer;

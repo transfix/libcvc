@@ -244,9 +244,9 @@ struct MockBackend : Backend {
     rec(std::string("input_text:") + l + "=" + current);
     return string_ret;
   }
-  MessageEdit message_ret{};              // programmable return for the next message_input()
-  std::string last_message_current;       // the draft the core handed message_input()
-  MessageInputOptions last_message_opts;  // and the options
+  MessageEdit message_ret{};             // programmable return for the next message_input()
+  std::string last_message_current;      // the draft the core handed message_input()
+  MessageInputOptions last_message_opts; // and the options
   MessageEdit message_input(const char *l, const char *, const std::string &current,
                             const MessageInputOptions &o) override {
     last_message_current = current;
@@ -254,7 +254,7 @@ struct MockBackend : Backend {
     rec(std::string("message_input:") + l + "=" + current);
     return message_ret;
   }
-  TextViewEvent text_view_ret{};          // programmable return for the next text_view()
+  TextViewEvent text_view_ret{};                  // programmable return for the next text_view()
   std::string last_text_view, last_text_view_key; // the text and key the core handed text_view()
   TextViewOptions last_text_view_opts;
   TextViewEvent text_view(const char *l, const char *key, const std::string &text,
@@ -440,8 +440,8 @@ TEST(AriadneRuntime, MessageInputSendsToItsProgramAndClearsTheDraft) {
   Runtime rt(app, "");
   MockBackend mb;
   rt.set_backend(&mb);
-  Widget w = message_input("Message", "chat.draft",
-                           "(state-set \"chat.sent\" (get-attr event \"text\"))");
+  Widget w =
+      message_input("Message", "chat.draft", "(state-set \"chat.sent\" (get-attr event \"text\"))");
   w.hint = "Say something";
   w.multiline = false;
   w.max_lines = 3;
@@ -483,7 +483,8 @@ TEST(AriadneRuntime, TextViewShowsItsTextAndRunsOnTopAtTheTop) {
   root("chat.text").value(std::string("a\nb\nc"));
   root("tops").value(std::string("0"));
   root("off").value(std::string("0"));
-  Widget w = text_view("Log", "chat.text", "(state-set \"tops\" (str (+ (int (state-get \"tops\")) 1)))");
+  Widget w =
+      text_view("Log", "chat.text", "(state-set \"tops\" (str (+ (int (state-get \"tops\")) 1)))");
   w.view_height = 120.0;
   w.follow = false;
   w.wrap = false;

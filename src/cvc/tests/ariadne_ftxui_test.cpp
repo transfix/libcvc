@@ -506,7 +506,8 @@ TEST(AriadneFtxui, TextViewScrollsKeepsItsPlaceAndReportsTheTop) {
   std::string text;
   for (int i = 0; i < 20; ++i)
     text += (i ? "\n" : "") + std::string("line ") + std::to_string(i);
-  Widget tv = text_view("##log", "log", "(state-set \"tops\" (str (+ (int (state-get \"tops\")) 1)))");
+  Widget tv =
+      text_view("##log", "log", "(state-set \"tops\" (str (+ (int (state-get \"tops\")) 1)))");
   tv.view_height = 5 * 16; // five rows
   Term t(group({tv}));
   cvc::state::instance(t.app)("log").value(text);

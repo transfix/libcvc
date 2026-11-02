@@ -1316,6 +1316,114 @@ windows:
   decoded when the browser hands it over, between frames. A `file://`, `cvc://` or `state://`
   picture is read and decoded between two frames, one at a time.
 
+### 5.12 Text buffers and message fields: `text_view:` and `message_input:`
+
+Two widgets for a log and the field under it (a chat window, a console):
+
+```yaml
+- text_view: "##log"
+  bind: chat.view.text          # the text, lines split on \n (a state path or a computed expression)
+  height: 240                   # px (rows of 16 px in a terminal); 0 or left out: see below
+  follow: true                  # stay at the bottom while lines arrive, if it is there (default)
+  wrap: true                    # wrap long lines to the view's width (default)
+  on_top: (chat-ui-more "chat" (state-get "room.token"))   # runs when the view reaches its top
+- message_input: "##say"
+  bind: chat.draft              # the draft: kept when the field loses focus, cleared when sent
+  hint: Write a message         # shown while it is empty and not focused
+  multiline: true               # Shift+Enter adds a line (default); false: one line only
+  max_lines: 4                  # it grows to this many lines, then scrolls (default 4)
+  max_length: 2000              # bytes (default 0: no cap)
+  on: (chat-ui-send "chat" (state-get "room.token") (get-attr event "text"))
+```
+
+**`text_view:`** is read-only. Its text is a state path, or a computed expression (read-lane
+rules, §2.1). The backend keeps its scroll position under the bound path, so a view that comes
+back (a window reopened) keeps its place.
+
+- **Following.** At the bottom, new lines keep it at the bottom. Scrolled up, it stays where it
+  is.
+- **Older lines.** When lines are added above (an older page), it moves by their height, so the
+  lines in view stay put. Any other change of text (another channel) starts at the bottom.
+- **`on_top:`** runs when the user scrolls the view to its top, once each time it gets there, and
+  again when the wheel turns up there (ImGui) or the user presses Up against it (terminal). It
+  also runs once for each text that does not fill the view, so a log with only a few lines asks
+  for more until it fills or there is nothing older. An empty text does not run it. A disabled
+  view runs nothing.
+- **ImGui.** A bordered child window. Only the lines in view are drawn: their wrapped layout is
+  kept and redone only when the text or the width changes, so a long log costs what is on
+  screen. `height: 0` fills the window less what the window draws after the view (measured the
+  frame before), which is how a log sits above its message field in a sized window. In a window
+  that fits its content, it is 12 lines tall. Right-click copies the text.
+- **Terminal backends** (FTXUI, and tvision, which draws FTXUI's widgets). The lines are
+  word-wrapped to the width the view was laid out at last frame. It is `height` px tall in rows
+  of `cell_px_h`, or 8 rows. With focus, Up and Down, PageUp and PageDown, and Home and End scroll
+  it, and the wheel scrolls it from under the pointer. A gutter shows ▲ or ▼ (`^` or `v` without
+  Unicode) where there is more.
+- **A backend without one** draws the last lines as text lines (`Backend::text_view`'s default).
+
+**`message_input:`** sends what is typed to its `on:` program.
+
+- **Enter** sends it. The program reads it as `(get-attr event "text")`, and the draft at
+  `bind:` is cleared. A message of blanks only is not sent. The field keeps the keyboard focus, so
+  the next message can be typed at once.
+- **Shift+Enter** adds a line (`multiline: true`, the default). In ImGui Ctrl+Enter does too. In
+  a terminal, Shift+Enter usually reaches the program as a plain Enter, so Alt+Enter and Ctrl+J
+  add a line there. Shift+Enter works where the terminal reports it (the kitty keyboard
+  protocol, xterm's modifyOtherKeys).
+- **Losing focus** keeps the draft at `bind:`. A draft written to `bind:` by a program shows in
+  the field while it is not being edited.
+- **ImGui** draws one line that grows with its wrapped text up to `max_lines`, then scrolls. The
+  hint is drawn over it while it is empty. A bare-name `on:` (a host handler) gets no `event`;
+  give it a program.
+
+### 5.13 Conference chat: the chat verbs and the chat component
+
+In a conference, the relay (arisrv) keeps the chat. Each client is pushed what it may read:
+
+- the room's messages, to everyone in the room;
+- a direct message, only to the connections holding its two participants' pids.
+
+A client asks for an older page when its log reaches the top. The state layout, the pagination
+and the permissions are in [ARIADNE_CHAT.md](roadmap/ARIADNE_CHAT.md). `register_room_intrinsics`
+adds the verbs to the action lanes. `ROOM` is the `room-join` handle (or its token), and
+`CHANNEL` is `""` for the room or a peer's pid:
+
+| verb | returns |
+|---|---|
+| `(chat-post ROOM TEXT [TO])` | `{ok}`, or `{ok #f error}`: TEXT is empty or longer than 2000 bytes once cleaned, or there is no relay to send it to. TO `""` posts to the room, a pid is a direct message. The relay may still refuse it (its rate limit, TO not in the room): `chat-info`'s `error` says so. |
+| `(chat-info ROOM [CHANNEL])` | `{available rev count oldest newest head first more loading error}`. `rev` changes whenever the messages held change; `oldest`..`newest` is the contiguous run held (`count` of them); `head` is the next seq and `first` the oldest the relay keeps; `more` says older ones are kept; `loading` says a page is on its way. It also asks for the newest page the first time a channel is read, and again when a push was lost. |
+| `(chat-messages ROOM [CHANNEL [AFTER]])` | the run, oldest first, as `{seq from name text t clock mine}` (`clock` is the local "HH:MM", `mine` is #t for your own), or with AFTER only those after that seq. |
+| `(chat-more ROOM [CHANNEL])` | `{ok loading more}`: asks for the page before the oldest message held. One request per channel is in flight; one unanswered for 3 s is sent again. |
+| `(chat-conversations ROOM)` | the direct-message conversations: `{peer name head present}`. |
+| `(chat-rev ROOM)` | a number that changes with every push the relay makes to you. |
+
+The shipped component `chat.ari` (§6.5) builds a chat window from these verbs, in the DSL:
+- a channel picker, the room and each conversation, with what came since you last looked;
+- a `text_view` that pages back when scrolled to the top;
+- a `message_input`.
+
+`room_users.ari` is the conference's users list. Its message button opens a conversation in the
+chat window. `conference_roster.ari` (the document cyprty runs) is built from both:
+
+```yaml
+import: [cvc://components/room_users.ari, cvc://components/chat.ari]
+windows:
+  - include: room_users
+    args: { id: users, rows: peer, chat: chat }
+  - include: chat
+    args: { id: chat, room: room.token }
+on_tick: |
+  (begin
+    ...                                     ; join, media, avatar
+    (room-users-step "peer" (state-get "conf.room") "chat")
+    (chat-ui-step "chat" (state-get "room.token")))
+```
+
+`src/ari/tests/chat_component.ari` tests the components' logic under `ari test`. It stands in for
+the room verbs with functions. `src/arigl/tests/chat_driver.ari` and `chat_two_clients.sh` run
+scripted arigl clients through a local arisrv: one posts, a late joiner pages back through
+everything, the two exchange direct messages, and a third checks it was pushed none of them.
+
 ## 6. Composition: include / import / load
 
 Three mechanisms compose documents. They differ in **isolation**, not in how they
@@ -1436,9 +1544,13 @@ includes. Each binds state keys a C++ object owns, so it needs no host code;
 | `mesh_tools` | a `mesh_lab` node named `mesh` (§5.4) |
 | `fe_controls` | an `fe_lab` node named `domain` (§5.4) |
 | `transfer_function`, `transfer_function_editor` | any node's `transfer_function` model (args `node`, `id`): the ColorTable2 editor with histogram / contour spectrum / contour tree layers — see [`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) |
+| `chat`, `chat_panel` | a room's chat and direct messages through the chat verbs (args `id`, `title`, `room`); its functions come with the import: call `(chat-ui-step ID ROOM)` from `on_tick` (§5.13) |
+| `room_users`, `room_users_compact` | everyone in a room from `room-roster`, with local cam / mic / volume and a message button (args `id`, `title`, `rows`, `chat`, `self`); call `(room-users-step ROWS ROOM CHAT)` from `on_tick` |
 
 Most components that address one node use a fixed node id; copy the file and change the id to
-drive another node. `transfer_function` instead takes the node as an include arg (§6.1).
+drive another node. `transfer_function` instead takes the node as an include arg (§6.1). A
+component may also carry `functions:` (§6.6), which the import brings with its units: `chat` and
+`room_users` keep their windows current that way, from the document's `on_tick`.
 `examples/ariadne/documents/mesh_lab.ari` uses the last two, and so does
 `examples/ariadne/documents/fem_gallery.ari`, which steps one `fe_lab` and one `mesh_lab`
 through the twenty items of [FEM_GALLERY.md](FEM_GALLERY.md). Run them from the repository

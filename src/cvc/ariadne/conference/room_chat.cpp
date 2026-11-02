@@ -194,8 +194,7 @@ void set_replicated(cvc::app &app, const std::string &path, const std::string &v
 }
 
 double wall_seconds() {
-  return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch())
-      .count();
+  return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
 // -------- the relay's books --------
@@ -273,9 +272,8 @@ cvc::state_message make_chat_post(const std::string &room, const std::string &pi
   json += ",\"text\":";
   put_json_string(json, text);
   json += '}';
-  cvc::state_message m = cvc::state_message::make_text(chat_request_path(room, pid),
-                                                       std::move(json),
-                                                       cvc::state_message::MIME_JSON);
+  cvc::state_message m = cvc::state_message::make_text(
+      chat_request_path(room, pid), std::move(json), cvc::state_message::MIME_JSON);
   m.ttl_hops = 0; // to the relay only: never forwarded (room_write_gate refuses anything else)
   return m;
 }
@@ -285,9 +283,8 @@ cvc::state_message make_chat_page(const std::string &room, const std::string &pi
   std::string json = "{\"op\":\"page\",\"channel\":";
   put_json_string(json, channel);
   json += ",\"before\":" + std::to_string(before) + '}';
-  cvc::state_message m = cvc::state_message::make_text(chat_request_path(room, pid),
-                                                       std::move(json),
-                                                       cvc::state_message::MIME_JSON);
+  cvc::state_message m = cvc::state_message::make_text(
+      chat_request_path(room, pid), std::move(json), cvc::state_message::MIME_JSON);
   m.ttl_hops = 0;
   return m;
 }
@@ -342,7 +339,7 @@ struct room_chat_relay::impl {
   std::uint64_t dropped_unread = 0;
 
   channel_log room_log;
-  std::map<std::string, channel_log> dms;               // by pair_key
+  std::map<std::string, channel_log> dms;                // by pair_key
   std::map<std::string, std::vector<std::string>> peers; // pid -> its conversations' peers
   std::map<std::string, bucket> buckets;
   std::uint64_t rev = 0; // every push carries the next one, so a client's chat.rev always moves
@@ -357,8 +354,8 @@ struct room_chat_relay::impl {
 
   // Bus callback (reader threads): queue a request made on the sender's own path.
   void on_message(const cvc::state_message &m) {
-    if (m.path.size() <= request_prefix.size() || m.path.compare(0, request_prefix.size(),
-                                                                 request_prefix) != 0)
+    if (m.path.size() <= request_prefix.size() ||
+        m.path.compare(0, request_prefix.size(), request_prefix) != 0)
       return;
     const std::string rest = m.path.substr(request_prefix.size()); // <pid>.chat
     const std::string suffix = std::string(cvc::state::SEPARATOR) + "chat";
@@ -574,9 +571,9 @@ room_chat_relay::room_chat_relay(cvc::app &app, cvc::state_cluster_shard &shard,
                                  chat_limits limits)
     : _impl(std::make_unique<impl>(app, shard, std::move(room), limits)) {
   impl *self = _impl.get();
-  _impl->sub = shard.message_bus().subscribe(
-      self->request_prefix.substr(0, self->request_prefix.size() - 1),
-      [self](const cvc::state_message &m) { self->on_message(m); });
+  _impl->sub =
+      shard.message_bus().subscribe(self->request_prefix.substr(0, self->request_prefix.size() - 1),
+                                    [self](const cvc::state_message &m) { self->on_message(m); });
   set_replicated(app, join2(chat_root_path(_impl->room), "epoch"), _impl->epoch);
   _impl->publish_room_counters();
 }
@@ -584,8 +581,8 @@ room_chat_relay::room_chat_relay(cvc::app &app, cvc::state_cluster_shard &shard,
 room_chat_relay::~room_chat_relay() { _impl->shard.message_bus().unsubscribe(_impl->sub); }
 
 void room_chat_relay::add_transport(cvc::state_transport *tp) {
-  if (tp && std::find(_impl->transports.begin(), _impl->transports.end(), tp) ==
-                _impl->transports.end())
+  if (tp &&
+      std::find(_impl->transports.begin(), _impl->transports.end(), tp) == _impl->transports.end())
     _impl->transports.push_back(tp);
 }
 
@@ -834,8 +831,7 @@ struct room_chat_client::impl {
   }
 };
 
-room_chat_client::room_chat_client(cvc::app &app, std::string room, std::string pid,
-                                   sender_fn send)
+room_chat_client::room_chat_client(cvc::app &app, std::string room, std::string pid, sender_fn send)
     : _impl(std::make_unique<impl>(app, std::move(room), std::move(pid), std::move(send))) {}
 
 room_chat_client::~room_chat_client() = default;
@@ -870,7 +866,7 @@ std::vector<chat_message> room_chat_client::messages(const std::string &channel)
 }
 
 std::vector<chat_message> room_chat_client::messages(const std::string &channel,
-                                                    std::uint64_t after) const {
+                                                     std::uint64_t after) const {
   std::vector<chat_message> out;
   auto it = _impl->channels.find(channel);
   if (it == _impl->channels.end() || it->second.count == 0 || after >= it->second.newest)

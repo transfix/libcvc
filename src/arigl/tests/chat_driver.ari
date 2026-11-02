@@ -1,0 +1,175 @@
+# chat_driver.ari — a scripted conference client for testing chat end to end through a relay:
+# arigl joined to arisrv (CVC_ARIADNE_RELAY), driven by on_tick, with the shipped Chat and Users
+# windows on screen. Each role prints "DRIVER <role> OK ..." and quits 0, or prints why and quits
+# non-zero. chat_two_clients.sh runs them against a local arisrv:
+#
+#   poster    posts --posts room messages ("message 1".. at two a second, the relay's rate), waits
+#             for --peer to join, sends it a direct message and waits for its reply
+#   reader    a late joiner: waits until the room holds --posts messages, pages back through all of
+#             them (the first view, then chat-more until the relay keeps no older), checks the
+#             oldest, then answers --peer's direct message and posts "done" to the room
+#   outsider  waits for "done", then checks it was never pushed a direct message (it holds no
+#             conversation)
+#
+#   CVC_ARIADNE_RELAY=grpc://127.0.0.1:27760 CVC_ARIADNE_NAME=alice \
+#     arigl snapshot --component-path src/cvc/ariadne --png alice.png --frames 3000 \
+#       src/arigl/tests/chat_driver.ari --role poster --peer bob
+
+meta: { name: chat driver, min_libcvc: 3.7.5 }
+
+requires:
+  - room-join
+  - room-roster
+  - chat-post
+
+args:
+  role: { type: string, default: poster, help: "poster | reader | outsider" }
+  posts: { type: int, default: 40, help: "room messages the poster posts and the reader expects" }
+  peer: { type: string, default: bob, help: "the name of the participant to message" }
+
+import: [cvc://components/chat.ari, cvc://components/room_users.ari]
+
+functions: |
+  (defun drv-say (s) (print (str-concat "DRIVER " (state-get "args.role") " " s)))
+  (defun drv-step (s) (state-set "drv.step" s) (drv-say (str-concat "step " s)))
+  (defun drv-done (code s) (drv-say s) (state-set "drv.step" "done") (quit code))
+  ; The pid of the participant named NAME, or "".
+  (defun drv-pid (name)
+    (set found "")
+    (for p (room-roster (state-get "conf.room"))
+      (if (= (get-attr p "name") name) (set found (get-attr p "pid")) #f))
+    found)
+  ; The last message of CHANNEL's run, or nil.
+  (defun drv-last (tok ch)
+    (set ms (chat-messages tok ch))
+    (if (= (length ms) 0) nil (nth ms (- (length ms) 1))))
+
+windows:
+  - include: chat
+    args: { id: chat, title: Chat, room: room.token }
+    pos: [10, 10]
+    size: [560, 560]
+  - include: room_users_compact
+    args: { id: users, title: Users, rows: peer, chat: chat, self: conf.self }
+    pos: [580, 10]
+    size: [320, 220]
+  - window: Driver
+    id: driver
+    pos: [580, 240]
+    size: [320, 140]
+    children:
+      - text: "role"
+        bind: args.role
+      - text: "step"
+        bind: drv.step
+
+on_tick: |
+  (begin
+    (set t (+ 1 (if (is-null (state-get "drv.t")) 0 (int (state-get "drv.t")))))
+    (state-set "drv.t" (str t))
+    (if (= t 1)
+      (begin
+        (state-set "room.token"
+          (get-attr (room-join "" (state-get "conf.room") (dict "name" (state-get "conf.self"))) "token"))
+        (state-set "drv.sent" "0")
+        (state-set "drv.pages" "0")
+        (drv-step "start"))
+      #f)
+    (set tok (state-get "room.token"))
+    (room-users-step "peer" (state-get "conf.room") "chat")
+    (chat-ui-step "chat" tok)
+    (set role (state-get "args.role"))
+    (set step (state-get "drv.step"))
+    (set room (chat-info tok ""))
+    (if (= step "done") #f
+      (if (= role "poster")
+        (if (= step "start")
+          (if (get-attr room "available") (drv-step "posting") #f)
+          (if (= step "posting")
+            (if (< (int (state-get "drv.sent")) (int (state-get "args.posts")))
+              (if (= (% t 15) 0)
+                (begin
+                  (set n (+ 1 (int (state-get "drv.sent"))))
+                  (if (get-attr (chat-post tok (str-concat "message " (str n))) "ok")
+                    (state-set "drv.sent" (str n))
+                    #f))
+                #f)
+              (if (>= (get-attr room "head") (int (state-get "args.posts")))
+                (begin (drv-say (str-concat "posted " (str (get-attr room "head")))) (drv-step "wait_peer"))
+                #f))
+            (if (= step "wait_peer")
+              (begin
+                (set pid (drv-pid (state-get "args.peer")))
+                (if (= pid "") #f
+                  (begin
+                    (state-set "drv.peer" pid)
+                    (chat-post tok (str-concat "hi " (state-get "args.peer") ", only you can read this") pid)
+                    (drv-step "wait_reply"))))
+              (if (= step "wait_reply")
+                (begin
+                  (set pid (state-get "drv.peer"))
+                  (set dm (chat-info tok pid))
+                  (set last (drv-last tok pid))
+                  (if (and (>= (get-attr dm "count") 2) (not (is-null last)))
+                    (if (= (get-attr last "text") "hi from the reader")
+                      (drv-done 0 (str-concat "OK the reply came back in the conversation with " pid))
+                      (drv-done 1 (str-concat "FAIL the conversation's last message is: " (get-attr last "text"))))
+                    #f))
+                #f))))
+        (if (= role "reader")
+          (if (= step "start")
+            (if (and (get-attr room "available") (>= (get-attr room "head") (int (state-get "args.posts"))))
+              (drv-step "paging")
+              #f)
+            (if (= step "paging")
+              (if (get-attr room "loading") #f
+                (if (get-attr room "more")
+                  (begin
+                    (chat-more tok "")
+                    (state-set "drv.pages" (str (+ 1 (int (state-get "drv.pages"))))))
+                  (if (> (get-attr room "count") 0)
+                    (begin
+                      (set first (nth (chat-messages tok "") 0))
+                      (if (and (= (get-attr room "count") (get-attr room "head"))
+                               (= (get-attr first "text") "message 1"))
+                        (begin
+                          (drv-say (str-concat "paged back through " (str (get-attr room "count"))
+                                               " messages with " (state-get "drv.pages") " request(s)"))
+                          (drv-step "wait_dm"))
+                        (drv-done 1 (str-concat "FAIL held " (str (get-attr room "count")) " of "
+                                                (str (get-attr room "head")) ", oldest: "
+                                                (get-attr first "text")))))
+                    #f)))
+              (if (= step "wait_dm")
+                (begin
+                  (set pid (drv-pid (state-get "args.peer")))
+                  (if (= pid "") #f
+                    (begin
+                      (set dm (chat-info tok pid))
+                      (set last (drv-last tok pid))
+                      (if (is-null last) #f
+                        (begin
+                          (drv-say (str-concat "the direct message: " (get-attr last "text")))
+                          (chat-post tok "hi from the reader" pid)
+                          (chat-post tok "done")
+                          (state-set "drv.linger" (str t))
+                          (drv-step "linger"))))))
+                (if (= step "linger")
+                  (if (> t (+ 90 (int (state-get "drv.linger"))))
+                    (drv-done 0 "OK paged back, answered the direct message, posted done")
+                    #f)
+                  #f))))
+          (if (= role "outsider")
+            (if (= step "start")
+              (if (get-attr room "available") (drv-step "wait_done") #f)
+              (if (= step "wait_done")
+                (begin
+                  (set last (drv-last tok ""))
+                  (if (and (not (is-null last)) (= (get-attr last "text") "done"))
+                    (if (= (length (chat-conversations tok)) 0)
+                      (drv-done 0 "OK saw done, and was pushed no direct message")
+                      (drv-done 1 "FAIL an outsider holds a conversation"))
+                    #f))
+                #f))
+            (drv-done 2 (str-concat "unknown role " role))))))
+    (if (> t 5400) (drv-done 3 (str-concat "TIMEOUT at step " (state-get "drv.step"))) #f))

@@ -1941,7 +1941,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
     const MessageEdit e = b.message_input(label, path.c_str(), cur, o);
     if (e.submitted) {
       write<std::string>(app, path, std::string()); // sent: the draft is done with
-      enqueue_fields(w.on, {{"text", e.value}});      // a program reads (get-attr event "text")
+      enqueue_fields(w.on, {{"text", e.value}});    // a program reads (get-attr event "text")
     } else if (e.committed) {
       write<std::string>(app, path, e.value); // focus left: keep the draft
     }

@@ -2564,10 +2564,10 @@ MessageEdit FtxuiBackend::message_input(const char *label, const char *key,
     fx::Element row;
     if (focused && cursor >= start && cursor <= stop) {
       const std::size_t c = cursor - start, c2 = utf8_next(line, c);
-      row = fx::hbox({fx::text(line.substr(0, c)),
-                      fx::text(c < line.size() ? line.substr(c, c2 - c) : std::string(" ")) |
-                          fx::inverted,
-                      fx::text(c2 < line.size() ? line.substr(c2) : std::string())});
+      row = fx::hbox(
+          {fx::text(line.substr(0, c)),
+           fx::text(c < line.size() ? line.substr(c, c2 - c) : std::string(" ")) | fx::inverted,
+           fx::text(c2 < line.size() ? line.substr(c2) : std::string())});
     } else {
       row = fx::text(line);
     }
@@ -2688,9 +2688,9 @@ TextViewEvent FtxuiBackend::text_view(const char *label, const char *key, const 
     const std::string gutter = r == 0 && v.top > 0                 ? (uni ? "\xe2\x96\xb2" : "^")
                                : r == rows - 1 && v.top + rows < n ? (uni ? "\xe2\x96\xbc" : "v")
                                                                    : " ";
-    shown.push_back(fx::hbox({fx::text(i < n ? v.rows[static_cast<std::size_t>(i)] : std::string()) |
-                                  fx::flex,
-                              fx::text(gutter) | fx::dim}));
+    shown.push_back(
+        fx::hbox({fx::text(i < n ? v.rows[static_cast<std::size_t>(i)] : std::string()) | fx::flex,
+                  fx::text(gutter) | fx::dim}));
   }
   fx::Element body = fx::vbox(std::move(shown)) | fx::flex;
   if (label && *label && std::string(label).rfind("##", 0) != 0)

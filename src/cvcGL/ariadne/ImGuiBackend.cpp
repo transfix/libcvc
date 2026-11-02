@@ -1010,18 +1010,17 @@ ariadne::MessageEdit ImGuiBackend::message_input(const char *label, const char *
         input_text_resize, &ud);
   } else {
     ImGui::SetNextItemWidth(width);
-    entered = ImGui::InputText("##message", f.text.data(), f.text.capacity() + 1,
-                               ImGuiInputTextFlags_EnterReturnsTrue |
-                                   ImGuiInputTextFlags_CallbackResize,
-                               input_text_resize, &ud);
+    entered =
+        ImGui::InputText("##message", f.text.data(), f.text.capacity() + 1,
+                         ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackResize,
+                         input_text_resize, &ud);
   }
   const bool active = ImGui::IsItemActive();
   const bool left = ImGui::IsItemDeactivatedAfterEdit();
   if (f.text.empty() && !active && !o.hint.empty())
-    ImGui::GetWindowDrawList()->AddText(
-        ImVec2(ImGui::GetItemRectMin().x + st.FramePadding.x,
-               ImGui::GetItemRectMin().y + st.FramePadding.y),
-        ImGui::GetColorU32(ImGuiCol_TextDisabled), o.hint.c_str());
+    ImGui::GetWindowDrawList()->AddText(ImVec2(ImGui::GetItemRectMin().x + st.FramePadding.x,
+                                               ImGui::GetItemRectMin().y + st.FramePadding.y),
+                                        ImGui::GetColorU32(ImGuiCol_TextDisabled), o.hint.c_str());
   ImGui::PopID();
   if (labelled) {
     ImGui::SameLine(0.f, st.ItemInnerSpacing.x);
@@ -1070,8 +1069,8 @@ ariadne::TextViewEvent ImGuiBackend::text_view(const char *label, const char *ke
             : fit           ? 12.0f * lh + 2.0f * st.WindowPadding.y
                             : ImGui::GetContentRegionAvail().y - v.below;
   h = ImMax(h, 3.0f * lh + 2.0f * st.WindowPadding.y);
-  const float wrap_w = o.wrap ? ImMax(w - 2.0f * st.WindowPadding.x - st.ScrollbarSize, 16.0f)
-                              : -1.0f;
+  const float wrap_w =
+      o.wrap ? ImMax(w - 2.0f * st.WindowPadding.x - st.ScrollbarSize, 16.0f) : -1.0f;
 
   // The layout, redone when the text or the width changes. Lines added above (an older page)
   // move the scroll by their height, so what is in view stays put.
@@ -1128,8 +1127,8 @@ ariadne::TextViewEvent ImGuiBackend::text_view(const char *label, const char *ke
     v.scroll = ImGui::GetScrollY();
     v.scroll_max = ImGui::GetScrollMaxY();
     v.at_bottom = v.scroll >= v.scroll_max - 1.0f;
-    wheel_up_at_top = ImGui::IsWindowHovered() && ImGui::GetIO().MouseWheel > 0.0f &&
-                      v.scroll <= 0.5f;
+    wheel_up_at_top =
+        ImGui::IsWindowHovered() && ImGui::GetIO().MouseWheel > 0.0f && v.scroll <= 0.5f;
     if (ImGui::BeginPopupContextWindow("##text_view_menu")) {
       if (ImGui::MenuItem("Copy"))
         ImGui::SetClipboardText(v.text.c_str());

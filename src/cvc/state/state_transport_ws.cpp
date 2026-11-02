@@ -2234,8 +2234,9 @@ std::size_t state_transport_ws::push_snapshot_to(const std::string &node_id,
   return push_to(node_id, entries, false);
 }
 
-std::size_t state_transport_ws::push_snapshot_to_holder(const std::string &node_id,
-                                                        const std::vector<snapshot_entry> &entries) {
+std::size_t
+state_transport_ws::push_snapshot_to_holder(const std::string &node_id,
+                                            const std::vector<snapshot_entry> &entries) {
   return push_to(node_id, entries, true);
 }
 

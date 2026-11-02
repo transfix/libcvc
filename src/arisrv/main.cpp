@@ -447,8 +447,8 @@ int main(int argc, char **argv) {
   // bound writes: without them any connection could claim a pid and read its DMs, so they are off.
   cvc::ariadne::conference::chat_limits chatLimits;
   chatLimits.dms = bindGate != nullptr;
-  auto chat = std::make_unique<cvc::ariadne::conference::room_chat_relay>(app, shard, room,
-                                                                          chatLimits);
+  auto chat =
+      std::make_unique<cvc::ariadne::conference::room_chat_relay>(app, shard, room, chatLimits);
   chat->add_transport(&state_tp);
 #if CVC_ENABLE_WS
   chat->add_transport(&ws_tp);
@@ -813,13 +813,12 @@ int main(int argc, char **argv) {
           static_cast<unsigned long long>(state_tp.total_media_stall_dropped()), ws_backlog, held,
           held_timeouts, shard.journal().size());
       const auto cs = chat->take_stats();
-      std::printf("[arisrv] chat: %llu post(s) (%llu direct) | %llu page(s) | %llu refused | %llu "
-                  "dropped | %llu push(es)\n",
-                  static_cast<unsigned long long>(cs.posts), static_cast<unsigned long long>(cs.dms),
-                  static_cast<unsigned long long>(cs.pages),
-                  static_cast<unsigned long long>(cs.refused),
-                  static_cast<unsigned long long>(cs.dropped),
-                  static_cast<unsigned long long>(cs.pushes));
+      std::printf(
+          "[arisrv] chat: %llu post(s) (%llu direct) | %llu page(s) | %llu refused | %llu "
+          "dropped | %llu push(es)\n",
+          static_cast<unsigned long long>(cs.posts), static_cast<unsigned long long>(cs.dms),
+          static_cast<unsigned long long>(cs.pages), static_cast<unsigned long long>(cs.refused),
+          static_cast<unsigned long long>(cs.dropped), static_cast<unsigned long long>(cs.pushes));
       std::fflush(stdout);
     }
     const std::size_t n = relay.stream_count();

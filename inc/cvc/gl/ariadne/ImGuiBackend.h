@@ -103,8 +103,7 @@ public:
   // at the bottom while lines arrive (follow), and lines added above keep what is in view where it
   // is. Height 0 fills the window less what the window draws after it, as measured last frame.
   // Right-click copies the text.
-  cvc::ariadne::TextViewEvent text_view(const char *label, const char *key,
-                                        const std::string &text,
+  cvc::ariadne::TextViewEvent text_view(const char *label, const char *key, const std::string &text,
                                         const cvc::ariadne::TextViewOptions &opts) override;
   cvc::ariadne::ColorEdit color(const char *label, const float rgb[3]) override; // §G7 RGB picker
   // §10 transfer-function editor: the ColorTable2 port drawn with the ImGui draw list (zoom strip,

@@ -873,6 +873,12 @@ add_test(NAME cvcgl_imgui_media COMMAND cvcgl_imgui_media)
 add_executable(cvcgl_imgui_spinner test/cvcgl_imgui_spinner.cpp)
 target_link_libraries(cvcgl_imgui_spinner PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_spinner COMMAND cvcgl_imgui_spinner)
+# text_view and message_input (§5.12) driven by synthesized keys and the wheel: Enter sends and keeps
+# the focus, Shift+Enter adds a line, the log's top asks for older lines and lines added above keep
+# it in place. No window, no GL.
+add_executable(cvcgl_imgui_chat_widgets test/cvcgl_imgui_chat_widgets.cpp)
+target_link_libraries(cvcgl_imgui_chat_widgets PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_chat_widgets COMMAND cvcgl_imgui_chat_widgets)
 
 # The tf_editor transfer-function widget (ImGuiBackend::tf_editor) on a bare ImGui context, driven
 # by synthesized mouse input: drags, adds, deletes, the zoom strip, the context menu, commits.

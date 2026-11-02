@@ -1685,13 +1685,18 @@ int run_window(const ari::HostOptions &o) {
       conf.pump(); // publish this frame's room-tree + media to the relay (run mode does this via
                    // the input pump, set below; a snapshot of a live conference must pump too)
       rt.frame(1.0 / 30.0);
+      // (quit code) ends the snapshot at the frame it quit on, as ari's does.
+      const bool last = f + 1 == frames || rt.app_runtime().should_close();
       // The last frame waits for the document's requests and pictures (§5.11), if it has any out.
-      if (f + 1 == frames)
-        settle = o.net.enabled || rt.app_runtime().runtime().media_stale();
-      if (f + 1 == frames && !settle)
+      if (last)
+        settle = !rt.app_runtime().should_close() &&
+                 (o.net.enabled || rt.app_runtime().runtime().media_stale());
+      if (last && !settle)
         view.writePNG(o.png.c_str()); // renders and writes the last frame
       else
         rt.render();
+      if (last)
+        break;
       std::this_thread::sleep_until(start + period);
     }
     if (settle) { // the frame shows what the document's requests brought back
