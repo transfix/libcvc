@@ -440,6 +440,7 @@ inline std::size_t skyIdx(int z, int y, int x) { return cvc::lsys::cloud_index(S
 struct SkyModel {
   std::vector<std::vector<float>> maps;
   double norm = 1.0;
+  double half = SKY_HALF, base = SKY_BASE, top = SKY_TOP; // the slab: [-half, half]^2 x [base, top]
   std::vector<float> raw(double shift, double morph) const {
     const int N = SKY_N, NZ = SKY_NZ;
     long mi = static_cast<long>(std::floor(morph));
@@ -473,17 +474,20 @@ struct SkyModel {
     return r;
   }
 };
-SkyModel buildSky() {
+SkyModel buildSky(double half, double base, double top) {
   SkyModel sky;
+  sky.half = half;
+  sky.base = base;
+  sky.top = top;
   for (int m = 0; m < CLOUD_MAPS; ++m) {
     cvc::lsys::cloud_params cp;
     cp.seed = 20;
     cp.variant = static_cast<std::uint32_t>(m);
     cp.n = SKY_N;
     cp.nz = SKY_NZ;
-    cp.half = SKY_HALF;
-    cp.base = SKY_BASE;
-    cp.top = SKY_TOP;
+    cp.half = half;
+    cp.base = base;
+    cp.top = top;
     cp.sun_az = SUN_AZ;
     cp.sun_el = SUN_EL;
     cp.depth = CLOUD_DEPTH;
@@ -512,12 +516,13 @@ Vec3 sunDir(double azDeg, double elDeg) {
   const double az = azDeg * kPi / 180.0, el = elDeg * kPi / 180.0;
   return {std::cos(el) * std::sin(az), -std::cos(el) * std::cos(az), std::sin(el)};
 }
-float sampleSky(const std::vector<float> &field, double wx, double wy, double wz, double skyHalf) {
-  if (wz < SKY_BASE || wz > SKY_TOP)
+float sampleSky(const std::vector<float> &field, double wx, double wy, double wz, double skyHalf,
+                double base, double top) {
+  if (wz < base || wz > top)
     return 0.0f;
   double fx = (wx + skyHalf) / (2.0 * skyHalf) * (SKY_N - 1);
   double fy = (wy + skyHalf) / (2.0 * skyHalf) * (SKY_N - 1);
-  double fz = (wz - SKY_BASE) / (SKY_TOP - SKY_BASE) * (SKY_NZ - 1);
+  double fz = (wz - base) / (top - base) * (SKY_NZ - 1);
   if (fx < 0 || fx > SKY_N - 1 || fy < 0 || fy > SKY_N - 1)
     return 0.0f;
   int x0 = (int)fx, y0 = (int)fy, z0 = (int)fz;
@@ -533,7 +538,7 @@ float sampleSky(const std::vector<float> &field, double wx, double wy, double wz
   return (float)(c0 * (1 - tz) + c1 * tz);
 }
 // Bake the grey cloud shadow × terrain albedo over the footprint [-half,half]² into an RGB buffer.
-void bakeCloudShadow(const std::vector<float> &field, Vec3 sun, double half,
+void bakeCloudShadow(const std::vector<float> &field, Vec3 sun, double half, const SkyModel &sky,
                      const TerrainHeights &terr, std::vector<unsigned char> &rgb) {
   const double L = std::sqrt(sun.x * sun.x + sun.y * sun.y + sun.z * sun.z);
   Vec3 Ln{sun.x / L, sun.y / L, sun.z / L};
@@ -544,11 +549,13 @@ void bakeCloudShadow(const std::vector<float> &field, Vec3 sun, double half,
     for (int tx = 0; tx < SHADOW_RES; ++tx) {
       double x = -half + 2.0 * half * tx / (SHADOW_RES - 1);
       double z0 = terr.ok() ? terr.at(x, y) : 0.0;
-      double tEntry = (SKY_BASE - z0) / Ln.z, tExit = (SKY_TOP - z0) / Ln.z;
+      double tEntry = (sky.base - z0) / Ln.z, tExit = (sky.top - z0) / Ln.z;
       double ds = (tExit - tEntry) / STEPS, tau = 0.0;
       for (int i = 0; i < STEPS; ++i) {
         double t = tEntry + (i + 0.5) * ds;
-        tau += sampleSky(field, x + t * Ln.x, y + t * Ln.y, z0 + t * Ln.z, half) * ds;
+        tau +=
+            sampleSky(field, x + t * Ln.x, y + t * Ln.y, z0 + t * Ln.z, half, sky.base, sky.top) *
+            ds;
       }
       double s = SHADOW_FLOOR + (1.0 - SHADOW_FLOOR) * std::exp(-SHADOW_K * tau);
       double ar, ag, ab;
@@ -563,15 +570,20 @@ void bakeCloudShadow(const std::vector<float> &field, Vec3 sun, double half,
 
 // type: cloud_sky — a drifting cloud VolumeNode (two cvc::lsys::cloud_field maps crossfaded +
 // scrolled) over the island, plus a baked cloud→ground shadow textured onto the terrain.
-// props: ground, half, shadow (0 disables the ground shadow).
+// props: ground, half, shadow (0 disables the ground shadow), and the slab's extent (its
+// half-width), base and top (heights) — the island's 150 / 74 / 122 m by default.
 std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::SceneNode &n,
                                                 GraphicsNode *parent, RealizedScene &out,
                                                 std::vector<std::string> *warnings) {
-  auto sky = std::make_shared<SkyModel>(buildSky());
-  cvc::volume vol(sg.appContext(),
-                  reinterpret_cast<const unsigned char *>(sky->field(0.0, 0.0).data()),
-                  cvc::dimension(SKY_N, SKY_N, SKY_NZ), cvc::Float,
-                  cvc::bounding_box(-SKY_HALF, -SKY_HALF, SKY_BASE, SKY_HALF, SKY_HALF, SKY_TOP));
+  // The slab: `extent` its half-width, `base`..`top` its heights (the island's by default).
+  const double skyBase = n.props.num("base", SKY_BASE);
+  auto sky =
+      std::make_shared<SkyModel>(buildSky(n.props.num("extent", SKY_HALF), skyBase,
+                                          std::max(skyBase + 1.0, n.props.num("top", SKY_TOP))));
+  cvc::volume vol(
+      sg.appContext(), reinterpret_cast<const unsigned char *>(sky->field(0.0, 0.0).data()),
+      cvc::dimension(SKY_N, SKY_N, SKY_NZ), cvc::Float,
+      cvc::bounding_box(-sky->half, -sky->half, sky->base, sky->half, sky->half, sky->top));
   std::shared_ptr<GraphicsNode> gn =
       parent ? parent->createChild<VolumeNode>(n.id, vol) : sg.addGraphics(n.id, vol);
   auto vnode = std::dynamic_pointer_cast<VolumeNode>(gn);
@@ -624,18 +636,19 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
     const double t = app->world_clock().t();
     const double drift = read_key(*app, driftKey, 1.0), morphRate = read_key(*app, morphKey, 1.0);
     const bool shadowOn = read_key(*app, shadowKey, 1.0) != 0.0;
-    const double shift = t * CLOUD_DRIFT * drift * SKY_N / (2.0 * SKY_HALF);
+    const double shift = t * CLOUD_DRIFT * drift * SKY_N / (2.0 * sky->half);
     const double morph = t / CLOUD_MORPH_S * morphRate * CLOUD_MAPS;
     std::vector<float> field = sky->field(shift, morph);
     v->updateScalars(field);
     if (auto tn = wterrain.lock(); tn && terr->ok()) {
       if (shadowOn) { // re-bake the drifting shadow × terrain albedo each stride
-        bakeCloudShadow(field, sunDir(SUN_AZ, SHADOW_PROJ_EL), half, *terr, *rgb);
+        bakeCloudShadow(field, sunDir(SUN_AZ, SHADOW_PROJ_EL), half, *sky, *terr, *rgb);
         tn->setTexture(cvc::image(SHADOW_RES, SHADOW_RES, cvc::image::pixel_format::RGB,
                                   cvc::image::data_type::u8, rgb->data()));
-      } else if (*lastShadow != 0) { // just turned off -> restore the plain band albedo once
+      } else if (*lastShadow == 1) { // just turned off -> restore the plain band albedo once
+        // (only after a shadow was drawn: a ground that starts unshadowed keeps its own texture)
         std::vector<float> none(field.size(), 0.0f);
-        bakeCloudShadow(none, sunDir(SUN_AZ, SHADOW_PROJ_EL), half, *terr, *rgb);
+        bakeCloudShadow(none, sunDir(SUN_AZ, SHADOW_PROJ_EL), half, *sky, *terr, *rgb);
         tn->setTexture(cvc::image(SHADOW_RES, SHADOW_RES, cvc::image::pixel_format::RGB,
                                   cvc::image::data_type::u8, rgb->data()));
       }

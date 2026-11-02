@@ -85,11 +85,20 @@ struct fit_params {
   double margin = 1.0;    // leave this gap inside the lot on each side (metres)
   double min_scale = 0.3; // clamp the fit scale so a huge archetype is not shrunk to nothing
   double max_scale = 2.5; // ... and a tiny one is not blown up past this
+  // true_scale: keep the buildings their real size. A uniform fit scales the height with the
+  // footprint, so a 30 m-wide archetype squeezed into a 10 m lot stands a third of its height,
+  // shorter than the trees. Instead draw up to `candidates` archetypes for the lot and take the
+  // first that fits at a scale of at least min_true (never more than 1); with none, the lot is
+  // left empty rather than holding a miniature.
+  bool true_scale = false;
+  double min_true = 0.85;
+  int candidates = 32;
 };
 
 // Pick + fit one archetype per lot and return the placed instances (ground height from `height`,
 // which may be empty → z = 0). Each archetype is scaled so its footprint fits the lot (longer axis
-// along the frontage) and yawed to the lot. Deterministic in fp.seed. Empty if the library is
+// along the frontage) and yawed to the lot; with true_scale, an archetype that fits near its own
+// size is chosen instead (see fit_params). Deterministic in fp.seed. Empty if the library is
 // empty.
 std::vector<building_instance> fit_buildings(const building_library &lib,
                                              const std::vector<lot> &lots, const fit_params &fp,
