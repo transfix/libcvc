@@ -106,6 +106,7 @@ struct MockBackend : Backend {
     return true;
   }
   void end_window() override { rec("end_window"); }
+  void focus_next_window() override { rec("focus_next_window"); }
   std::vector<std::string> grid_ids; // the id the core gave each begin_grid, in walk order
   bool begin_grid(const Layout &L, const char *id) override {
     rec(std::string("begin_grid:cols=") + std::to_string(L.col_widths.size()));
@@ -5272,13 +5273,86 @@ TEST(AriadneRuntime, WindowsMenuWithoutADocumentMenubar) {
     MockBackend mb;
     Runtime rt(app, "");
     rt.set_backend(&mb);
-    Widget repeated = window_with_id("Cam {i}", "cam_{i}", true);
-    repeated.repeat = "2"; // made per frame: not listed (the document opens these itself)
+    Widget repeated = window_with_id("Cam {i}", "cam_{i}", false);
+    repeated.repeat = "2";
     rt.set_root(group({window_with_id("Alpha", "a", false), repeated}));
     rt.render();
     EXPECT_FALSE(mb.saw("begin_menubar"));
     EXPECT_FALSE(mb.saw("begin_menu:Windows"));
   }
+  {
+    // A closable window made by a repeat counts: its instances could not come back otherwise.
+    MockBackend mb;
+    Runtime rt(app, "");
+    rt.set_backend(&mb);
+    Widget repeated = window_with_id("Cam {i}", "cam_{i}", true);
+    repeated.repeat = "2";
+    rt.set_root(group({repeated}));
+    rt.render();
+    EXPECT_TRUE(mb.saw("begin_menubar"));
+    EXPECT_TRUE(mb.saw("toggle:Cam 0"));
+    EXPECT_TRUE(mb.saw("toggle:Cam 1"));
+  }
+}
+
+// §5.9: the windows a repeat makes are listed per instance, under the title each one shows,
+// following the count. conference_roster's per-peer cameras: closed with their X, they come back
+// from its View menu (the Windows menu's title, so its items join that menu).
+TEST(AriadneRuntime, WindowsMenuListsEachRepeatedWindowUnderItsTitle) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  ASSERT_TRUE(run_init(app, "",
+                       "(begin (state-set \"n\" \"2\") (state-set \"peer.0.name\" \"ann\")"
+                       " (state-set \"peer.1.name\" \"\"))",
+                       nullptr));
+  Widget cam = window_with_id("Peer", "cam_{i}", true);
+  cam.bind = "peer.{i}.name"; // titled by the peer's name, once it has one
+  cam.repeat = "(int (state-get \"n\"))";
+  rt.set_root(group({menubar({menu("View", {menu_toggle("Users", "tree.users.open", true)})}),
+                     window_with_id("Users", "users", true), cam, windows_menu("View")}));
+  rt.render();
+  // In the View menu, after its own items: ann's camera by her name, the other by the label.
+  EXPECT_EQ(std::count(mb.log.begin(), mb.log.end(), "begin_menu:View"), 1);
+  const std::ptrdiff_t users = log_index(mb, "toggle:Users"), sep = log_index(mb, "separator"),
+                       ann = log_index(mb, "toggle:ann"), peer = log_index(mb, "toggle:Peer");
+  ASSERT_GE(ann, 0);
+  ASSERT_GE(peer, 0);
+  EXPECT_LT(users, sep);
+  EXPECT_LT(sep, ann);
+  EXPECT_LT(ann, peer);
+  EXPECT_TRUE(mb.saw("push_id:cam_0"));
+
+  // Closed with its X, ann's camera loses its tick; the item opens it again, in front.
+  cvc::state &st = cvc::state::instance(app);
+  st("tree.cam_0.open").value(std::string("0"));
+  mb.log.clear();
+  rt.render();
+  EXPECT_FALSE(mb.saw("begin_window:ann(closable)"));
+  EXPECT_FALSE(mb.toggle_shown["ann"]);
+  // The menu is drawn before the windows, so it is back, and raised, the same frame.
+  mb.click_toggle = "ann";
+  mb.log.clear();
+  rt.render();
+  mb.click_toggle.clear();
+  EXPECT_EQ(st("tree.cam_0.open").value(), "1");
+  const std::ptrdiff_t raised = log_index(mb, "focus_next_window");
+  ASSERT_GE(raised, 0);
+  EXPECT_EQ(raised + 1, log_index(mb, "begin_window:ann(closable)"));
+  EXPECT_EQ(st("tree.cam_0.raise").value(), ""); // consumed: in front once
+
+  // The list follows the count: a third peer gets an item, and none are left when all go.
+  ASSERT_TRUE(run_init(app, "", "(state-set \"peer.2.name\" \"cy\")", nullptr));
+  st("n").value(3);
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("toggle:cy"));
+  st("n").value(0);
+  mb.log.clear();
+  rt.render();
+  EXPECT_FALSE(mb.saw_prefix("toggle:ann"));
+  EXPECT_FALSE(mb.saw("separator")) << "no separator over an empty list";
 }
 
 // ── Phase-2 PR6: cvc::ariadne::stream DSL surface (stream-open/stream-info/stream-close) ──
@@ -6526,8 +6600,9 @@ TEST(AriadneAppRuntime, HostMenusBesideTheDocumentsOwn) {
   EXPECT_FALSE(mb.saw("separator"));
 }
 
-// §5.9: a host's menus count as the document's for the Windows menu. arigl's Settings > Keys...
-// opens the Keys window, so the Windows menu, after the host's menus, lists only the document's.
+// §5.9: a host's menus count as the document's for the Windows menu. arigl's Settings >
+// Controls... opens the Controls window, so the Windows menu, after the host's menus, lists only
+// the document's.
 TEST(AriadneAppRuntime, TheWindowsMenuLeavesOutWhatTheHostsMenusOpen) {
   if (!have_yaml())
     GTEST_SKIP() << "libcvc built without yaml-cpp";
@@ -6535,8 +6610,9 @@ TEST(AriadneAppRuntime, TheWindowsMenuLeavesOutWhatTheHostsMenusOpen) {
   MockBackend mb;
   AppRuntime art(app, "ui.docs.d");
   art.set_backend(mb);
-  art.set_host_menus({AppRuntime::document_menus(),
-                      menu("Settings", {menu_toggle("Keys...", "tree.ariadne_keys.open", false)})});
+  art.set_host_menus(
+      {AppRuntime::document_menus(),
+       menu("Settings", {menu_toggle("Controls...", "tree.ariadne_keys.open", false)})});
   art.set_host_keys({});
   art.load(write_doc("host_windows_menu.ari", "meta: {min_libcvc: 3.4.0}\n"
                                               "windows:\n"
@@ -6549,9 +6625,9 @@ TEST(AriadneAppRuntime, TheWindowsMenuLeavesOutWhatTheHostsMenusOpen) {
   EXPECT_LT(menu_at(mb, "Settings"), menu_at(mb, "Windows"));
   EXPECT_EQ(std::count(mb.log.begin(), mb.log.end(), "begin_menubar"), 1); // one bar, the host's
   EXPECT_TRUE(mb.saw("toggle:Panel"));
-  EXPECT_FALSE(mb.saw("toggle:Keys")) << "Settings > Keys... opens it";
+  EXPECT_FALSE(mb.saw("toggle:Controls")) << "Settings > Controls... opens it";
 
-  // Without such a menu the Keys window is listed: the one way to open it.
+  // Without such a menu the Controls window is listed: the one way to open it.
   cvc::app app2;
   MockBackend mb2;
   AppRuntime plain(app2, "ui.docs.d");
@@ -6565,11 +6641,11 @@ TEST(AriadneAppRuntime, TheWindowsMenuLeavesOutWhatTheHostsMenusOpen) {
                                                 "      - text: body\n"));
   plain.runtime().render();
   EXPECT_TRUE(mb2.saw("toggle:Panel"));
-  EXPECT_TRUE(mb2.saw("toggle:Keys"));
-  EXPECT_FALSE(mb2.saw("begin_window:Keys(closable)")) << "listed, but still closed";
+  EXPECT_TRUE(mb2.saw("toggle:Controls"));
+  EXPECT_FALSE(mb2.saw("begin_window:Controls(closable)")) << "listed, but still closed";
 }
 
-// Every document a host mounts after set_host_keys gets a Keys window: closed until
+// Every document a host mounts after set_host_keys gets a Controls window: closed until
 // tree.ariadne_keys.open is set, a row per binding (the document's keys:, then the host's) whose
 // Change button names it in tree.ariadne_keys.capture, and each binding's default keys seeded.
 // With no keys at all it says so.
@@ -6591,12 +6667,12 @@ TEST(AriadneAppRuntime, KeysWindowListsTheDocumentsAndTheHostsKeys) {
   auto &st = cvc::state::instance(app);
   EXPECT_EQ(st("ui.docs.d.keys.next").value(), "Right, PageDown");
   art.runtime().render();
-  EXPECT_FALSE(mb.saw("begin_window:Keys(closable)")) << "closed until asked for";
+  EXPECT_FALSE(mb.saw("begin_window:Controls(closable)")) << "closed until asked for";
 
   st("ui.docs.d.tree.ariadne_keys.open").value(1);
   mb.log.clear();
   art.runtime().render();
-  ASSERT_TRUE(mb.saw("begin_window:Keys(closable)"));
+  ASSERT_TRUE(mb.saw("begin_window:Controls(closable)"));
   EXPECT_TRUE(mb.saw("text_line:Next item"));
   EXPECT_TRUE(mb.saw("text_value:=Right, PageDown"));
   EXPECT_TRUE(mb.saw("text_line:Camera"));
@@ -6636,8 +6712,75 @@ TEST(AriadneAppRuntime, KeysWindowListsTheDocumentsAndTheHostsKeys) {
                                           "root:\n"
                                           "  - text: no keys here\n"));
   art.runtime().render();
-  EXPECT_TRUE(mb.saw("begin_window:Keys(closable)")) << "still open, and still there";
+  EXPECT_TRUE(mb.saw("begin_window:Controls(closable)")) << "still open, and still there";
   EXPECT_TRUE(mb.saw("text_line:No keys to change here."));
+}
+
+// The Controls window shows the host's mouse settings above the keys (set_host_mouse), bound where
+// its camera reads them: the look (drag to look, or mouse look), the sensitivity, the inverted
+// axes, and a note on what the look does there.
+TEST(AriadneAppRuntime, ControlsWindowShowsTheHostsMouseSettings) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  MockBackend mb;
+  AppRuntime art(app, "ui.docs.d");
+  art.set_backend(mb);
+  MouseControls m;
+  m.look = "/cam.settings.mouse_look";
+  m.sensitivity = "/cam.settings.mouse_sensitivity";
+  m.invert_y = "/cam.settings.invert_pitch";
+  m.invert_x = "/cam.settings.invert_yaw";
+  m.distance = "/cam.orbit.distance";
+  m.note = "Click the scene to start.";
+  art.set_host_mouse(m);
+  auto &st = cvc::state::instance(app);
+  st("cam.settings.mouse_look").value(0); // the camera's own seeds
+  st("cam.settings.mouse_sensitivity").value(0.25);
+  st("cam.settings.invert_pitch").value(0);
+  art.load(write_doc("controls_mouse.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                           "root:\n"
+                                           "  - text: no keys here\n"));
+  st("ui.docs.d.tree.ariadne_keys.open").value(1);
+  art.runtime().render();
+  ASSERT_TRUE(mb.saw("begin_window:Controls(closable)")) << "set_host_mouse alone gives the window";
+  EXPECT_TRUE(mb.saw("combo:Look=0")) << "drag to look, as the camera has it";
+  EXPECT_TRUE(mb.saw("slider_double:Sensitivity"));
+  EXPECT_TRUE(mb.saw("checkbox:Invert up/down"));
+  EXPECT_TRUE(mb.saw("checkbox:Invert left/right"));
+  EXPECT_TRUE(mb.saw("slider_double:Camera distance"));
+  EXPECT_TRUE(mb.saw("text_line:Click the scene to start."));
+  const std::ptrdiff_t mouse = log_index(mb, "text_line:Mouse and camera"),
+                       keys = log_index(mb, "text_line:No keys to change here.");
+  ASSERT_GE(mouse, 0);
+  EXPECT_LT(mouse, keys) << "the mouse first, then the keys";
+
+  // Picking Mouse look, and inverting up/down, write where the camera reads them.
+  mb.combo_ret = IndexEdit{true, true, 1};
+  mb.checkbox_by_label["Invert up/down"] = BoolEdit{true, true, true};
+  art.runtime().render();
+  mb.combo_ret = IndexEdit{};
+  mb.checkbox_by_label.clear();
+  EXPECT_EQ(st("cam.settings.mouse_look").value(), "1");
+  EXPECT_EQ(st("cam.settings.invert_pitch").value(), "1");
+  mb.log.clear();
+  art.runtime().render();
+  EXPECT_TRUE(mb.saw("combo:Look=1"));
+
+  // A host without them: no Mouse rows.
+  cvc::app app2;
+  MockBackend mb2;
+  AppRuntime plain(app2, "ui.docs.d");
+  plain.set_backend(mb2);
+  plain.set_host_keys({});
+  plain.load(write_doc("controls_mouse.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                             "root:\n"
+                                             "  - text: no keys here\n"));
+  cvc::state::instance(app2)("ui.docs.d.tree.ariadne_keys.open").value(1);
+  plain.runtime().render();
+  ASSERT_TRUE(mb2.saw("begin_window:Controls(closable)"));
+  EXPECT_FALSE(mb2.saw("text_line:Mouse and camera"));
+  EXPECT_FALSE(mb2.saw_prefix("combo:Look"));
 }
 
 // Documents a host loads in turn share the prefix, so each new document's key defaults replace an
@@ -6734,6 +6877,57 @@ TEST(AriadneAppRuntime, InitCanSetAKeyOverItsDefault) {
                                      "    key: Right\n"
                                      "    on: (state-set \"n\" 1)\n"));
   EXPECT_EQ(cvc::state::instance(app)("ui.docs.i.keys.next").value(), "Space");
+}
+
+// The Controls window offers the host's UI size first (set_host_ui_size), bound where the host
+// keeps it: the list shows the size the host has, and a pick writes a number the host reads back.
+TEST(AriadneAppRuntime, ControlsWindowOffersTheHostsUiSize) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  MockBackend mb;
+  AppRuntime art(app, "ui.docs.d");
+  art.set_backend(mb);
+  art.set_host_ui_size({"/view.ui.scale"});
+  auto &st = cvc::state::instance(app);
+  st("view.ui.scale").value(1.25); // the overlay's own, written as it writes it: a touch device's
+  art.load(write_doc("controls_ui_size.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                             "root:\n"
+                                             "  - text: no keys here\n"));
+  st("ui.docs.d.tree.ariadne_keys.open").value(1);
+  art.runtime().render();
+  ASSERT_TRUE(mb.saw("begin_window:Controls(closable)"))
+      << "set_host_ui_size alone gives the window";
+  EXPECT_TRUE(mb.saw("combo:UI size=2")) << "125%, the size the host has";
+  const auto at = [&](const std::string &line) {
+    return std::find(mb.log.begin(), mb.log.end(), line) - mb.log.begin();
+  };
+  EXPECT_LT(at("text_line:Display"), at("text_line:No keys to change here."))
+      << "the UI size first, then the keys";
+
+  mb.combo_ret = IndexEdit{true, true, 3}; // 150%
+  art.runtime().render();
+  mb.combo_ret = IndexEdit{};
+  EXPECT_EQ(st("view.ui.scale").value(), "1.5");
+  EXPECT_DOUBLE_EQ(st("view.ui.scale").value<double>(), 1.5);
+  mb.log.clear();
+  art.runtime().render();
+  EXPECT_TRUE(mb.saw("combo:UI size=3"));
+
+  // A host without one: no Display rows.
+  cvc::app app2;
+  MockBackend mb2;
+  AppRuntime plain(app2, "ui.docs.d");
+  plain.set_backend(mb2);
+  plain.set_host_keys({});
+  plain.load(write_doc("controls_ui_size.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                               "root:\n"
+                                               "  - text: no keys here\n"));
+  cvc::state::instance(app2)("ui.docs.d.tree.ariadne_keys.open").value(1);
+  plain.runtime().render();
+  ASSERT_TRUE(mb2.saw("begin_window:Controls(closable)"));
+  EXPECT_FALSE(mb2.saw("text_line:Display"));
+  EXPECT_FALSE(mb2.saw_prefix("combo:UI size"));
 }
 
 // Every load clears the last document's scene before anything is realized -- a host switching

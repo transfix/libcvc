@@ -336,6 +336,45 @@ TEST(HolonSyncTest, TheEnergyPolicyAndEachReserveReachTheClient) {
   }
 }
 
+// A relay that streams the poses (room_pose_relay) skips the tree's copy on most steps
+// (write_poses false); the reserve still goes out on those steps, since no snapshot carries it.
+TEST(HolonSyncTest, TheReserveIsWrittenOnStepsThatSkipThePoses) {
+  cvc::app server_app;
+  const std::string room = "r";
+  cvc::ariadne::holon_config cfg;
+  cfg.physics = true;
+  holon server(holon_role::server, cfg);
+  if (!server.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  cvc::ariadne::conference::seed_default_scene(server_app, room);
+  cvc::ariadne::avatar_energy_policy policy;
+  policy.reserve_max = 2000.0;
+  cvc::ariadne::conference::write_avatar_policy(server_app, room, policy);
+  cvc::ariadne::conference::room_join(server_app, room, "A");
+  cvc::ariadne::write_intent(server_app, room, "A", avatar_intent{vec3{4.0, 0.0, 0.0}});
+  const double dt = server.clock().fixed_dt();
+  cvc::ariadne::server_pump(server, server_app, room, dt); // registers A and writes its pose
+  body_state pose;
+  std::uint64_t pose_tick = 0;
+  ASSERT_TRUE(cvc::ariadne::read_pose(server_app, room, "A", pose, pose_tick));
+
+  for (int step = 0; step < 120; ++step) // a second's walk, no pose write-back
+    cvc::ariadne::server_pump(server, server_app, room, dt, /*write_poses=*/false);
+  body_state later;
+  std::uint64_t later_tick = 0;
+  ASSERT_TRUE(cvc::ariadne::read_pose(server_app, room, "A", later, later_tick));
+  EXPECT_EQ(later_tick, pose_tick) << "no pose was written on those steps";
+  cvc::ariadne::avatar_energy e;
+  ASSERT_TRUE(server.energy("A", e));
+  EXPECT_LT(e.reserve, 1900.0) << "the walk spent";
+  double published = 0.0;
+  std::uint64_t reserve_tick = 0;
+  ASSERT_TRUE(cvc::ariadne::conference::read_avatar_reserve(server_app, room, "A", published,
+                                                            reserve_tick));
+  EXPECT_GT(reserve_tick, pose_tick) << "but the reserve was";
+  EXPECT_NEAR(published, e.reserve, 0.005 * 2000.0 + 1.0);
+}
+
 // client_pump registers whoever the roster lists, but one whose pose has not replicated yet is
 // pose-less: a member with nothing to draw and, with physics, no peer body at the placeholder
 // origin. Its first replicated pose makes it known, where the server put it.
@@ -692,6 +731,69 @@ TEST(HolonSyncTest, ServerPumpAppliesAStampedIntentAtItsTick) {
   EXPECT_DOUBLE_EQ(server.state("A").position.x, start.x) << "not before its tick";
   cvc::ariadne::server_pump(server, app, room, dt); // tick 6: the stamp
   EXPECT_DOUBLE_EQ(server.state("A").position.x, start.x + 2.0 * dt);
+}
+
+// A turn in place (mouse look while standing) is a yaw-only intent: the live room's holons, Jolt
+// and all, turn A at once in its own prediction, at the relay, and in what B shows of A.
+TEST(HolonSyncTest, ATurnInPlaceReachesTheRelayAndThePeer) {
+  cvc::app server_app, a_app, b_app;
+  cvc::state_transport_inproc tp;
+  cvc::state_cluster_shard ss(server_app, "conf", "server");
+  cvc::state_cluster_shard as(a_app, "conf", "A");
+  cvc::state_cluster_shard bs(b_app, "conf", "B");
+  for (cvc::state_cluster_shard *s : {&ss, &as, &bs}) {
+    s->attach();
+    tp.register_shard(s);
+  }
+  const std::string room = "r";
+  const cvc::ariadne::holon_config cfg = cvc::ariadne::room_holon_config();
+  holon server(holon_role::server, cfg), a(holon_role::client, cfg), b(holon_role::client, cfg);
+  if (!server.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  cvc::ariadne::conference::seed_default_scene(server_app, room); // something to stand on
+  cvc::ariadne::conference::room_join(a_app, room, "A");
+  cvc::ariadne::conference::room_join(b_app, room, "B");
+  tp.pump_all();
+  const double dt = server.clock().fixed_dt();
+  constexpr int kServerEvery = 6;
+  const auto yaw_of = [](const cvc::physics::quat &q) { return 2.0 * std::atan2(q.z, q.w); };
+  const auto run = [&](int frames) {
+    for (int frame = 1; frame <= frames; ++frame) {
+      if (frame % kServerEvery == 0)
+        cvc::ariadne::server_pump(server, server_app, room, kServerEvery * dt);
+      tp.pump_all();
+      cvc::ariadne::client_pump(a, a_app, room, "A", dt);
+      cvc::ariadne::client_pump(b, b_app, room, "B", dt);
+    }
+  };
+  run(120); // joined, posed and settled on the floor
+  ASSERT_TRUE(b.has_participant("A"));
+  const vec3 start = server.state("A").position;
+  // A quarter turn in 0.1 rad steps, one proposal every 6 quanta (20 Hz), never walking.
+  double yaw = 0.0;
+  for (int step = 0; step < 16; ++step) {
+    yaw += 0.1;
+    avatar_intent turn;
+    turn.yaw = yaw;
+    cvc::ariadne::propose_intent(a, a_app, room, "A", turn);
+    run(6);
+    EXPECT_NEAR(yaw_of(a.display_pose("A").rotation), yaw, 1e-6)
+        << "A turns at once, step " << step;
+  }
+  run(120); // the relay's next poses, and B's playout delay
+  EXPECT_NEAR(yaw_of(server.state("A").rotation), yaw, 1e-6) << "the relay turned A";
+  body_state tree;
+  std::uint64_t tick = 0;
+  ASSERT_TRUE(cvc::ariadne::read_pose(b_app, room, "A", tree, tick));
+  EXPECT_NEAR(yaw_of(tree.rotation), yaw, 1e-6) << "its pose reached B";
+  EXPECT_NEAR(yaw_of(b.display_pose("A").rotation), yaw, 1e-3) << "and B shows A turned";
+  const vec3 end = server.state("A").position;
+  EXPECT_LT(std::hypot(end.x - start.x, end.y - start.y), 0.01) << "turning is not walking";
+
+  for (cvc::state_cluster_shard *s : {&ss, &as, &bs}) {
+    tp.unregister_shard(s);
+    s->detach();
+  }
 }
 
 // The room scene's objects become physics statics: the floor as a slab under z = 0, the cube as

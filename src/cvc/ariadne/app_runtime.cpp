@@ -57,7 +57,7 @@ bool AppRuntime::idle() const {
   // answers, docs/ARIADNE.md 10.2), which the host's count of running kernels leaves out.
   return app_.exec_async_host().in_flight() == 0 &&
          app_.exec_scheduler().async_calls_in_flight() == 0 &&
-         !app_.exec_scheduler().has_runnable() && !oidc_busy();
+         !app_.exec_scheduler().has_runnable() && !rt_.media_busy() && !oidc_busy();
 }
 
 void AppRuntime::settle(const std::function<void()> &step, double max_seconds) {
@@ -74,6 +74,16 @@ void AppRuntime::settle(const std::function<void()> &step, double max_seconds) {
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
 #endif
   }
+}
+
+void AppRuntime::settle_and_render(const std::function<void()> &step,
+                                   const std::function<void()> &render, double max_seconds) {
+  using clock = std::chrono::steady_clock;
+  const auto deadline = clock::now() + std::chrono::duration<double>(max_seconds);
+  do {
+    settle(step, std::max(0.0, std::chrono::duration<double>(deadline - clock::now()).count()));
+    render();
+  } while (rt_.media_stale() && clock::now() < deadline);
 }
 
 std::string AppRuntime::enable_net(const NetHostConfig &config) {
@@ -172,17 +182,53 @@ void add_host_menus(Widget &root, const std::vector<Widget> &menus) {
 
 } // namespace
 
+void AppRuntime::set_host_ui_size(UiSizeControl ui) {
+  hostUiSize_ = std::move(ui);
+  keysWindow_ = true;
+}
+
 void AppRuntime::set_host_keys(std::vector<KeyBinding> keys) {
   hostKeys_ = std::move(keys);
   keysWindow_ = true;
 }
 
+void AppRuntime::set_host_mouse(MouseControls mouse) {
+  hostMouse_ = std::move(mouse);
+  keysWindow_ = true;
+}
+
 namespace {
 
-// The Keys window: every binding, with its keys and a Change button that makes the next key down
-// its new one (Runtime::set_key_bindings).
-Widget keys_window(const std::vector<KeyBinding> &bindings) {
+bool any_mouse_rows(const MouseControls &m) {
+  return !m.look.empty() || !m.sensitivity.empty() || !m.invert_y.empty() || !m.invert_x.empty() ||
+         !m.distance.empty();
+}
+
+// The Controls window: the host's pointer settings, then every key binding, with its keys and a
+// Change button that makes the next key down its new one (Runtime::set_key_bindings).
+Widget keys_window(const std::vector<KeyBinding> &bindings, const MouseControls &mouse) {
   std::vector<Widget> kids;
+  if (any_mouse_rows(mouse)) {
+    kids.push_back(text("Mouse and camera"));
+    if (!mouse.look.empty()) {
+      Widget look = radio("Look", mouse.look, {"Drag to look", "Mouse look"}, "0", true);
+      look.values = {"0", "1"};
+      kids.push_back(std::move(look));
+    }
+    if (!mouse.sensitivity.empty())
+      kids.push_back(slider_float("Sensitivity", mouse.sensitivity, mouse.sensitivity_lo,
+                                  mouse.sensitivity_hi, 0.25, "%.2f deg/px"));
+    if (!mouse.invert_y.empty())
+      kids.push_back(checkbox("Invert up/down", mouse.invert_y));
+    if (!mouse.invert_x.empty())
+      kids.push_back(checkbox("Invert left/right", mouse.invert_x));
+    if (!mouse.distance.empty())
+      kids.push_back(slider_float("Camera distance", mouse.distance, mouse.distance_lo,
+                                  mouse.distance_hi, 10.0, "%.1f m"));
+    if (!mouse.note.empty())
+      kids.push_back(text(mouse.note));
+    kids.push_back(separator());
+  }
   kids.push_back(text(bindings.empty()
                           ? "No keys to change here."
                           : "Change, then press the new key. Escape keeps the old one."));
@@ -205,7 +251,7 @@ Widget keys_window(const std::vector<KeyBinding> &bindings) {
     row.layout.col_widths = {Track{Unit::Px, 150.0f}, Track{Unit::Px, 130.0f}, Track{}};
     kids.push_back(std::move(row));
   }
-  Widget w = window("Keys", std::move(kids));
+  Widget w = window("Controls", std::move(kids));
   w.id = kKeysWindow;
   w.closable = true;
   return w;
@@ -235,9 +281,30 @@ void AppRuntime::add_keys(Widget &root, std::vector<KeyBinding> keys) {
                        read_or<std::string>(app_, resolve_bind(prefix_, key_binding_path(b)), ""));
   if (keysWindow_ || !keys.empty()) {
     read_or_seed<int>(app_, resolve_bind(prefix_, kKeysWindowOpen), 0); // closed until asked for
-    root.children.push_back(keys_window(keys));
+    root.children.push_back(keys_window(keys, hostMouse_));
   }
   rt_.set_key_bindings(std::move(keys));
+  add_ui_size(root);
+}
+
+void AppRuntime::add_ui_size(Widget &root) const {
+  if (hostUiSize_.path.empty())
+    return;
+  for (Widget &w : root.children) {
+    if (w.kind != Kind::Window || w.id != kKeysWindow)
+      continue;
+    // A list rather than a slider: each size bakes the UI's font again, so it changes once, on
+    // the pick, never at every step of a drag.
+    std::vector<std::string> labels, values;
+    for (const auto &[label, value] : hostUiSize_.sizes) {
+      labels.push_back(label);
+      values.push_back(value);
+    }
+    Widget size = combo("UI size", hostUiSize_.path, std::move(labels));
+    size.values = std::move(values);
+    w.children.insert(w.children.begin(), {text("Display"), std::move(size), separator()});
+    return;
+  }
 }
 
 bool AppRuntime::have_yaml() { return cvc::ariadne::have_yaml(); }
@@ -596,6 +663,11 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   if (new_document && !docPath_.empty())
     rt_.forget_layout();
   docPath_ = path;
+  { // §5.11: a picture's relative file:// URI is the document's neighbour
+    std::error_code ec;
+    const std::filesystem::path abs = std::filesystem::absolute(path, ec);
+    rt_.set_media_base(ec ? std::string() : abs.parent_path().string());
+  }
   add_host_menus(lr.root, hostMenus_);
   add_keys(lr.root, std::move(lr.keys));
   rt_.set_root(std::move(lr.root)); // applied at the next frame boundary

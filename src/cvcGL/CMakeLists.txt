@@ -77,11 +77,9 @@ list(APPEND CVCGL_SOURCES ${CVCGL_ARIADNE_SOURCES})
 # the sources compile to graceful no-ops (open_camera returns an empty result).
 file(GLOB CVCGL_CAPTURE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/capture/*.cpp")
 list(APPEND CVCGL_SOURCES ${CVCGL_CAPTURE_SOURCES})
-# Phase-3 peripheral playback (SDL3 audio-output sink, cvc::gl::playback). Lives in a subdirectory,
-# so the non-recursive top-level glob does not pick it up. SDL-gated internally; with no SDL the
-# sink compiles to a graceful no-op (open_audio_output returns an empty result).
-file(GLOB CVCGL_PLAYBACK_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/playback/*.cpp")
-list(APPEND CVCGL_SOURCES ${CVCGL_PLAYBACK_SOURCES})
+# Phase-3 peripheral playback (the SDL3 audio-output sink) moved to cvcMedia, the GL-free media
+# library (src/cvcMedia), so a terminal program plays sound without GL; cvcGL links it (below) and
+# keeps the cvc::gl::playback names as aliases (cvc/gl/playback/*.h).
 # Header root is <repo>/inc  (headers under inc/cvc/gl/).
 get_filename_component(_CVCGL_INC "${CMAKE_CURRENT_SOURCE_DIR}/../../inc" ABSOLUTE)
 
@@ -257,6 +255,13 @@ if(CVC_ENABLE_SDL)
     message(STATUS "cvcGL: SDL3 not found -- input seam falls back to the VTK interactor")
   endif()
 endif()
+
+# cvcMedia: in-tree it exists already (src/CMakeLists.txt); a standalone cvcGL build (the cvcgl
+# recipe) builds it here and installs it with cvcGL, its package beside cvcGL's.
+if(NOT TARGET cvcMedia)
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../cvcMedia" "${CMAKE_CURRENT_BINARY_DIR}/cvcMedia")
+endif()
+target_link_libraries(cvcGL PUBLIC cvcMedia)
 
 vtk_module_autoinit(TARGETS cvcGL MODULES ${VTK_LIBRARIES})
 
@@ -863,6 +868,11 @@ add_test(NAME cvcgl_imgui_windows_menu COMMAND cvcgl_imgui_windows_menu)
 add_executable(cvcgl_imgui_radio test/cvcgl_imgui_radio.cpp)
 target_link_libraries(cvcgl_imgui_radio PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_radio COMMAND cvcgl_imgui_radio)
+# Pictures by URI (§5.11): an image: widget's file:// picture reaches ImGuiBackend as an RGBA
+# raster fitted to its box, with placeholders before and on failure. No window, no GL.
+add_executable(cvcgl_imgui_media test/cvcgl_imgui_media.cpp)
+target_link_libraries(cvcgl_imgui_media PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_media COMMAND cvcgl_imgui_media)
 # A spinner's arc turns with the frame clock and comes round after a second; disabled, it stands
 # still; visible_when hides it. No window, no GL.
 add_executable(cvcgl_imgui_spinner test/cvcgl_imgui_spinner.cpp)
@@ -895,6 +905,12 @@ add_test(NAME cvcgl_fe_interval COMMAND cvcgl_fe_interval)
 add_executable(cvcgl_imgui_window_fit test/cvcgl_imgui_window_fit.cpp)
 target_link_libraries(cvcgl_imgui_window_fit PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_window_fit COMMAND cvcgl_imgui_window_fit)
+# ImGuiBackend at a phone's UI size: a document's px scale with the UI (its windows, columns and
+# persisted geometry), and a window laid out for a laptop opens inside a phone's view. No window,
+# no GL.
+add_executable(cvcgl_imgui_ui_size test/cvcgl_imgui_ui_size.cpp)
+target_link_libraries(cvcgl_imgui_ui_size PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_ui_size COMMAND cvcgl_imgui_ui_size)
 
 # Golden images of the Ariadne ImGui/VTK backend (roadmap §16.6 phase 1): each .ari in
 # test/golden runs through AriRuntime + ImGuiBackend offscreen and its frame is compared with the

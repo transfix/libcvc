@@ -351,7 +351,11 @@ TEST(RoomAvatar, ThePanelPublishesTheBudgetLedgerAndHistory) {
   EXPECT_EQ(get("controller"), "walker");
   EXPECT_EQ(get("body"), "0.50 x 0.50 x 1.70 m box, 70 kg");
   EXPECT_EQ(get("policy.reserve"), "30.0 kJ");
-  EXPECT_EQ(get("policy.sustains"), "2.2 m/s on resting power");
+  EXPECT_EQ(get("policy.sustains"), "2.2 m/s");
+  EXPECT_EQ(get("policy.sustains_tip"),
+            "The speed resting power keeps up for as long as you like.");
+  EXPECT_EQ(get("policy.push"), "840 N") << "a short value; what it means is its tip";
+  EXPECT_EQ(get("policy.push_tip"), "The most you push with: 12.0 m/s^2 at this mass.");
   EXPECT_EQ(get("energy.state"), "spending");
   EXPECT_LT(std::stod(get("energy.fraction")), 1.0);
   EXPECT_EQ(get("ledger.start"), "30.0 kJ");
@@ -361,6 +365,76 @@ TEST(RoomAvatar, ThePanelPublishesTheBudgetLedgerAndHistory) {
   const std::string reserve = get("history.reserve");
   EXPECT_EQ(std::count(reserve.begin(), reserve.end(), ','), 7) << "eight samples";
   EXPECT_EQ(get("history.window"), "the last 2 s");
+}
+
+// The panel's look follows the room tree without re-reading the catalog every frame: it reads the
+// catalog once, then again only when its revision moves, so frames that change nothing read none of
+// it, while the catalog's arrival, a new choice and a rewritten catalog each reach the published
+// look on the next update -- the same labels a fresh read of the tree resolves.
+TEST(RoomAvatar, ThePanelRereadsTheCatalogOnlyWhenItChanges) {
+  cvc::app app;
+  conf::write_avatar_choice(app, "room", "A", {"teal", "cap"});
+  cvc::ariadne::holon client(cvc::ariadne::holon_role::client);
+  client.add_participant("A", /*local=*/true);
+  conf::avatar_panel panel;
+  const auto shown = [&] {
+    panel.publish(app, "ui.docs.conf");
+    const auto get = [&](const std::string &k) {
+      cvc::state *n = app.root().findDescendant("ui.docs.conf.self.avatar.look." + k);
+      return n ? n->value() : std::string("<missing>");
+    };
+    return get("color") + " / " + get("accessory");
+  };
+  const auto fresh = [&] { // what update() resolved every frame before it kept the catalog
+    const conf::avatar_catalog cat = conf::read_avatar_catalog(app, "room");
+    const conf::avatar_look look =
+        conf::resolve_avatar_look(cat, conf::read_avatar_choice(app, "room", "A"), "A");
+    const conf::avatar_color_option *c = cat.find_color(look.color_id);
+    const conf::avatar_accessory_option *a = cat.find_accessory(look.accessory_id);
+    return (c ? c->label : std::string()) + " / " + (a ? a->label : std::string());
+  };
+  const auto frames = [&](int n) {
+    for (int i = 0; i < n; ++i)
+      panel.update(client, app, "room", "A", 1.0 / 60.0);
+  };
+
+  frames(5); // joined before the relay's catalog arrived: no labels yet
+  EXPECT_EQ(shown(), " / ");
+  EXPECT_EQ(panel.catalog_reads(), 1u) << "five frames of nothing, one read";
+
+  conf::seed_avatar_catalog(app, "room"); // the catalog arrives
+  frames(1);
+  EXPECT_EQ(shown(), "Teal / Cap");
+  EXPECT_EQ(shown(), fresh());
+  frames(60);
+  EXPECT_EQ(panel.catalog_reads(), 2u) << "a second of unchanged frames reads no catalog";
+
+  conf::write_avatar_choice(app, "room", "A", {"gold", "halo"}); // our pick
+  frames(1);
+  EXPECT_EQ(shown(), "Gold / Halo");
+  EXPECT_EQ(shown(), fresh());
+  EXPECT_EQ(panel.catalog_reads(), 2u) << "a choice needs no catalog read";
+
+  // The relay rewrites the catalog: gold relabelled, the halo withdrawn (so the first accessory).
+  conf::avatar_catalog cat = conf::default_avatar_catalog();
+  for (conf::avatar_color_option &c : cat.colors)
+    if (c.id == "gold")
+      c.label = "Sunflower";
+  cat.accessories.erase(
+      std::remove_if(cat.accessories.begin(), cat.accessories.end(),
+                     [](const conf::avatar_accessory_option &a) { return a.id == "halo"; }),
+      cat.accessories.end());
+  conf::write_avatar_catalog(app, "room", cat);
+  frames(1);
+  EXPECT_EQ(shown(), "Sunflower / None");
+  EXPECT_EQ(shown(), fresh());
+  frames(60);
+  EXPECT_EQ(panel.catalog_reads(), 3u);
+
+  // Another room is another catalog (none written there yet).
+  panel.update(client, app, "elsewhere", "A", 1.0 / 60.0);
+  EXPECT_EQ(shown(), " / ");
+  EXPECT_EQ(panel.catalog_reads(), 4u);
 }
 
 // The avatar verbs a document calls every tick (conference_roster.ari's on_tick:

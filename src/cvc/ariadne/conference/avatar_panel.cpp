@@ -22,6 +22,7 @@
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <string>
+#include <utility>
 
 namespace cvc {
 namespace ariadne {
@@ -82,13 +83,7 @@ void avatar_panel::update(const holon &h, cvc::app &app, const std::string &room
                           const std::string &pid, double wall_dt) {
   _policy = h.energy_policy();
   _body = h.body();
-  // The look everyone draws: our choice through the room's catalog.
-  const avatar_catalog cat = read_avatar_catalog(app, room);
-  const avatar_look look = resolve_avatar_look(cat, read_avatar_choice(app, room, pid), pid);
-  const avatar_color_option *c = cat.find_color(look.color_id);
-  const avatar_accessory_option *a = cat.find_accessory(look.accessory_id);
-  _color = c ? c->label : std::string();
-  _accessory = a ? a->label : std::string();
+  refresh_look(app, room, pid);
 
   _sampled = false;
   _ready = h.energy(pid, _energy);
@@ -112,6 +107,32 @@ void avatar_panel::update(const holon &h, cvc::app &app, const std::string &room
   }
 }
 
+// The look everyone draws: our choice through the room's catalog. Reading the catalog walks every
+// option's nodes (a few hundred), which every frame was most of a browser client's room step, so
+// it is read again only when its revision moves: write_avatar_catalog bumps that last, so a new
+// revision means the options it covers are here. The look is resolved again only when the catalog
+// or our choice changed.
+void avatar_panel::refresh_look(cvc::app &app, const std::string &room, const std::string &pid) {
+  const std::uint64_t rev = avatar_catalog_revision(app, room);
+  const bool reread = !_have_catalog || rev != _catalog_rev || room != _look_room;
+  if (reread) {
+    _catalog = read_avatar_catalog(app, room);
+    _have_catalog = true;
+    _catalog_rev = rev;
+    ++_catalog_reads;
+  }
+  avatar_choice choice = read_avatar_choice(app, room, pid);
+  if (!reread && pid == _look_pid && choice.color == _choice.color &&
+      choice.accessory == _choice.accessory)
+    return;
+  _look_room = room, _look_pid = pid, _choice = std::move(choice);
+  const avatar_look look = resolve_avatar_look(_catalog, _choice, pid);
+  const avatar_color_option *c = _catalog.find_color(look.color_id);
+  const avatar_accessory_option *a = _catalog.find_accessory(look.accessory_id);
+  _color = c ? c->label : std::string();
+  _accessory = a ? a->label : std::string();
+}
+
 void avatar_panel::publish(cvc::app &app, const std::string &prefix) const {
   auto &st = cvc::state::instance(app);
   const std::string base = prefix + ".self.avatar.";
@@ -128,18 +149,30 @@ void avatar_panel::publish(cvc::app &app, const std::string &prefix) const {
   constexpr double kG = 9.81;
   const double carry =
       p.transport_cost * _body.mass * kG; // N: what carrying the body costs per m/s
-  put("policy.budget", p.enabled ? "on, the same for everyone (the relay's)" : "off (the relay's)");
-  put("policy.push", printf_str("%.0f N at most, ", p.force_max) +
-                         printf_str("%.1f m/s^2 at this mass", p.force_max / _body.mass));
-  put("policy.power", watts(p.power_max) + " at most, " + watts(p.power_rest) + " resting");
+  // Each policy line is a short value, and what it means as its tip (`policy.<line>_tip`): the
+  // window shows the tip on hover, where a sentence beside the value would be cut off.
+  const bool stop = p.empty == avatar_energy_policy::when_empty::stop;
+  put("policy.budget", p.enabled ? "on" : "off");
+  put("policy.budget_tip", p.enabled ? "The relay's, the same for everyone."
+                                     : "The relay sets none: moving costs nothing.");
+  put("policy.push", printf_str("%.0f N", p.force_max));
+  put("policy.push_tip",
+      printf_str("The most you push with: %.1f m/s^2 at this mass.", p.force_max / _body.mass));
+  put("policy.power", watts(p.power_max));
+  put("policy.power_tip", "The most power you spend. Resting power, " + watts(p.power_rest) +
+                              ", refills the reserve all the time.");
   put("policy.reserve", joules(p.reserve_max));
-  put("policy.carrying",
-      printf_str("%.2f x m g |v|: ", p.transport_cost) + watts(carry * 1.0) + " per m/s");
-  put("policy.empty", p.empty == avatar_energy_policy::when_empty::stop
-                          ? printf_str("stop until %.0f%% refills", 100.0 * p.recover_fraction)
-                          : "slow to what resting power sustains");
-  put("policy.sustains",
-      carry > 0.0 ? printf_str("%.1f m/s on resting power", p.power_rest / carry) : "any speed");
+  put("policy.reserve_tip", "What you can spend beyond resting power before you run out.");
+  put("policy.carrying", watts(carry * 1.0) + " per m/s");
+  put("policy.carrying_tip",
+      printf_str("Carrying your weight along costs %.2f x m g |v|.", p.transport_cost));
+  put("policy.empty", stop ? "stop" : "slow down");
+  put("policy.empty_tip",
+      stop ? printf_str("When the reserve runs out you stop until %.0f%% of it refills.",
+                        100.0 * p.recover_fraction)
+           : "When the reserve runs out you slow to what resting power sustains.");
+  put("policy.sustains", carry > 0.0 ? printf_str("%.1f m/s", p.power_rest / carry) : "any speed");
+  put("policy.sustains_tip", "The speed resting power keeps up for as long as you like.");
 
   put("ready", _ready ? "1" : "0");
   if (!_ready)

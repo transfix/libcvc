@@ -309,10 +309,11 @@ state_sync_adapter::connection_set state_sync_adapter::connect_node(state &node,
 }
 
 void state_sync_adapter::dispatch_local(const state_mutation &m) {
-  // Notify subscribers via the router, expanding through any
-  // transparent-link aliases so target-side mutations also match
-  // subscriptions registered at link-side paths (Phase 8 slice 4d).
-  std::vector<state_subscription> subs = subscriptions_for_path(m.path);
+  // No router lookup here until the router is dispatched to (phase 3): subscriptions_for_path
+  // expands the path through every transparent link, which walks the whole app tree, and that was
+  // milliseconds per mutation in a large app (a browser client's avatar turn, ten writes, took
+  // 80 ms) for an answer nothing used.
+  //
   // Fire the callback if set. Pull the function under lock then
   // invoke outside to avoid holding the mutex during user code.
   on_local_mutation_func cb;
@@ -322,8 +323,6 @@ void state_sync_adapter::dispatch_local(const state_mutation &m) {
   }
   if (cb)
     cb(m);
-  (void)subs; // Phase 1: router lookup is exercised; dispatch to
-              // transport happens in phase 3.
 }
 
 bool state_sync_adapter::apply_remote(const state_mutation &m) {

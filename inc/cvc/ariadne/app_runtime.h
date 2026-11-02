@@ -73,12 +73,21 @@ public:
   // stand in the bar as written, and a host menu named like one of them adds its items to it.
   static Widget document_menus(std::string label = std::string());
 
+  // The host's UI size (keys.h), offered at the top of the Controls window as "UI size": arigl's
+  // ImGuiOverlay scale, which a phone may want larger or smaller. A host that calls this gets the
+  // window. Applied by the next load() or set_root().
+  void set_host_ui_size(UiSizeControl ui);
+
   // Key bindings of the host's own (keys.h), beside each document's `keys:`: arigl's camera keys.
   // Once a host has called this (even with none), or for a document with keys, the document gets
-  // a Keys window (id ariadne_keys, closed until tree.ariadne_keys.open is set -- a host's
+  // a Controls window (id ariadne_keys, closed until tree.ariadne_keys.open is set -- a host's
   // menu_toggle on that key opens it) listing them all, each with a Change button: click it, then
   // press the new key (Escape keeps the old one). Applied by the next load() or set_root().
   void set_host_keys(std::vector<KeyBinding> keys);
+  // The pointer settings of the host's camera (keys.h), shown above the keys in the Controls
+  // window: the look (drag or mouse look), its sensitivity and the inverted axes. A host that
+  // calls this gets the window too. Applied by the next load() or set_root().
+  void set_host_mouse(MouseControls mouse);
 
   // Register a host verb the .ari program can call. register_verb is SYNCHRONOUS (fn runs
   // inline on the drain thread, no args/return).
@@ -149,13 +158,19 @@ public:
   // The status a (quit code) asked for; 0 until something asks to close.
   int exit_code() const;
 
-  // Whether the document is idle: no async call (a request) in flight and no program step waiting
-  // to run (a resident still parsing a reply between two requests is not idle).
+  // Whether the document is idle: no async call (a request) in flight, no program step waiting
+  // to run (a resident still parsing a reply between two requests is not idle) and no picture it
+  // draws still loading (§5.11).
   bool idle() const;
   // For a snapshot of a document that uses the network: run `step` (a drain, or a host's whole
   // frame) until the document has been idle for three steps running, or `max_seconds` pass, so
   // the frame shows what its requests brought back. ari and arigl call it when the network is on.
   void settle(const std::function<void()> &step, double max_seconds = 10.0);
+  // settle(), then draw a frame with `render`; while that frame drew a picture still loading (one
+  // whose URL a reply has just put in state, so no frame had asked for it yet), settle and draw
+  // again. All within `max_seconds`. A snapshot's last frame, with its requests and pictures in.
+  void settle_and_render(const std::function<void()> &step, const std::function<void()> &render,
+                         double max_seconds = 10.0);
 
   // --- input seam (document-level on_key/on_pointer residents) ---
   void post_key(bool down, const std::string &key, int mods = 0, bool repeat = false);
@@ -202,13 +217,17 @@ private:
   std::function<void(const std::string &)> warningListener_; // set_warning_listener
   void collect_warnings(); // the Runtime's new warnings -> pendingWarnings_, each to the listener
   std::vector<Widget> hostMenus_;            // set_host_menus: put in every mounted tree
+  UiSizeControl hostUiSize_;                 // set_host_ui_size: the Controls window's first row
+  // The Controls window's Display rows (hostUiSize_), ahead of everything else in it.
+  void add_ui_size(Widget &root) const;
   std::vector<KeyBinding> hostKeys_;         // set_host_keys: bound, and listed, in every one
   bool keysWindow_ = false;                  // set_host_keys was called: always a Keys window
+  MouseControls hostMouse_;                  // set_host_mouse: the window's Mouse rows
   // The keys' defaults at keys.<id>, before init: (which may set its own). A new document's own
   // replace whatever an earlier document left at the same keys.<id> (they share the prefix), ""
   // for one with no key; a reload keeps the user's keys, and the host's are only seeded.
   void seed_keys(const std::vector<KeyBinding> &own, bool new_document);
-  // Bind them, and the host's, and add the Keys window.
+  // Bind them, and the host's, and add the Controls window.
   void add_keys(Widget &root, std::vector<KeyBinding> keys);
   std::string docPath_; // the document load() last loaded, to tell a reload from a new one
   std::vector<std::string> docArgv_;         // the document's command line (set_document_args)

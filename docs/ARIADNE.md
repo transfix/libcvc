@@ -620,10 +620,36 @@ the loader only *captures*. The host wires them:
       on: (state-set "item" (+ (int (state-get "item")) 1))
   ```
 
-  `AppRuntime` lists every binding, the document's and the host's
-  (`set_host_keys`: `arigl` adds its camera's fly keys), in a **Keys** window it puts in the
-  document: closed until `tree.ariadne_keys.open` is set (arigl's *Settings > Keys...*), a row
-  per binding with its keys and a **Change** button. Change writes the binding's id to
+  `AppRuntime` lists every binding, the document's and the host's (`set_host_keys`), in a
+  **Controls** window it puts in the document: closed until `tree.ariadne_keys.open` is set
+  (arigl's *Settings > Controls...*), a row per binding with its keys and a **Change** button.
+  Every key a host acts on is such a binding, in the state tree beside what reads it. arigl's:
+
+  | binding | state key (under the scene prefix) | default |
+  |---|---|---|
+  | the camera's fly keys, Orbit / fly, Free the mouse | `viewers.main.camera.keys.<action>` | W A S D, Space, Left Ctrl, Left Shift, Tab, Escape |
+  | the avatar's walk keys (conference mode) | `viewers.main.avatar.keys.<action>` | W or Up, S or Down, A or Left, D or Right |
+
+  A host's pointer and camera settings (`set_host_mouse`, a `MouseControls`) go above the keys,
+  bound where its camera reads them: arigl's are `viewers.main.camera.settings.mouse_look`
+  (*Drag to look* or *Mouse look*), `mouse_sensitivity`, `invert_pitch` and `invert_yaw`, and
+  *Camera distance*, the camera's `orbit.distance` (the wheel changes it too). Under mouse look
+  a click on the scene captures the pointer and the mouse turns the view with no button held,
+  until *Free the mouse* (Escape; in a browser, Escape always ends its pointer lock). In a
+  browser the page takes its pointer lock inside that press itself (the cursor goes, and the
+  view keeps turning past the screen's edge): a press over a window is the UI's
+  (`CameraController::setPointerOverUi`, which the overlay sets each frame). In conference mode
+  the avatar faces where the camera aims, standing or walking, and walks that way: it turns
+  with the camera every frame on your screen, and the relay hears each turn (at most 20 intents
+  a second, a key at once) and shows it to everyone else. The camera looks past the avatar's
+  right shoulder at a point 4 m ahead of it (at most a third of the camera's distance), so the
+  crosshair marks where you aim, downrange. In either look
+  the ground is the camera's floor (`orbit.floor.*`): looking up slides the eye in along its line
+  of sight rather than under the ground, and an eye that comes inside the avatar hides it.
+  `$CVC_ARIGL_LOOK=mouse` (the browser page's `?look=mouse`) starts in mouse look. A touch
+  screen keeps dragging.
+
+  A row's Change writes the binding's id to
   `tree.ariadne_keys.capture`; while the window is open the next key down becomes its key
   (Escape keeps the old one; the comma key is stored as `Comma`), and no handler sees that key.
   Closing the window drops a capture still waiting. In the terminal every key goes to the
@@ -1153,7 +1179,14 @@ the Windows menu (§5.9), takes its place in the column again. A new document
 
 How each backend does it:
 
-- **ImGui** gives a window with no size ImGui's always-auto-resize: it measures the window's
+- **ImGui** measures in logical pixels at the UI size (§5.14): a document's `px` (a window's
+  `pos:` and `size:`, a column's width, a picture's or a plot's size, the area a group's
+  `background:` takes) is multiplied by the UI size
+  and the display's pixel ratio, as the UI's text and widgets are, and the geometry it persists
+  is divided back, so a layout looks the same at any UI size and on a phone's dense screen. A
+  window opens inside the view: no larger than the work area, and moved in from its `pos:` (or
+  its persisted place) until all of it shows, so a layout made for a laptop opens on a phone in
+  reach. ImGui gives a window with no size ImGui's always-auto-resize: it measures the window's
   widgets each frame, its labeled widgets at the width ImGui gives an auto-resizing window's items
   (16 font sizes), and a row-split pane as wide as its own widgets. A window with a size gets a
   horizontal scroll bar as well as ImGui's vertical one, and a long label shrinks its slider,
@@ -1193,11 +1226,14 @@ Every document gets a **Windows** menu to open such a window again, with no menu
   "Settings" or "View" menu bound to `tree.<id>.open` (`lsystem_forest.ari`,
   `conference_roster.ari`) keeps it, and the Windows menu lists only the windows that menu leaves
   out. When it leaves none out there is no Windows menu.
-- A window made by `repeat:` is not listed, since there can be any number of them. The document
-  opens those itself (`conference_roster.ari`'s camera windows open from the Users list).
+- A window made by `repeat:` is listed once per instance, under the title that instance shows
+  (its `bind:`, else its label with `{i}` filled in), after the other windows. The list follows the
+  repeat's count each frame. Opening one from the menu also brings it to the front.
+  `conference_roster.ari` sets `windows_menu: View`, so its per-peer camera windows are listed by
+  name at the end of its View menu.
 - A host's menus (`AppRuntime::set_host_menus`) count as the document's: arigl's
-  *Settings > Keys...* opens the Keys window, so arigl's Windows menu leaves it out. Under a host
-  without one, the Windows menu is how the Keys window opens.
+  *Settings > Controls...* opens the Controls window, so arigl's Windows menu leaves it out. Under
+  a host without one, the Windows menu is how the Controls window opens.
 - It goes after the document's own menus (and a host's). When the menu bar already has a menu of
   the same title (`fem_gallery.ari`'s own Windows menu), the items go at the end of that menu,
   after a separator, instead of a second menu of that name. A document with no `menubar:` gets a
@@ -1245,6 +1281,246 @@ windows:
   to scripts, `state://`, replication and the persisted tree as any other key; a document keeps a
   secret out of shared state by clearing the key once it has used it.
 
+### 5.11 Pictures by URL: `image:` with a URI
+
+An `image:` whose `src` (or the value at its `bind:`) is a URI shows that picture. Design and
+the work still to come: [ARIADNE_MEDIA.md](roadmap/ARIADNE_MEDIA.md).
+
+```yaml
+windows:
+  - window: Profile
+    children:
+      - image: avatar                        # the label: the caption a failure shows
+        src: https://media.example/u/42.webp
+        auth: example                        # optional: the host sends credential `example`
+        size: [48, 48]                       # a box in px; one number is a width
+        fit: cover                           # contain (default) | cover | fill
+        shape: circle                        # rect (default) | circle
+        status: profile.avatar_status        # optional: loading | ready | failed
+      - type: group
+        repeat: (state-get "feed.items")
+        children:
+          - image: ""
+            bind: feed.items.{i}.picture     # a key, or a computed expression, naming a URL
+            size: [480, 270]
+```
+
+- **What counts as a URI.** A value that starts with `http://`, `https://`, `file://`, `cvc://` or
+  `state://`. Anything else is the name of an image the host published (`set_image`,
+  `--image NAME=FILE`), as before. `src:` may be a computed expression too.
+- **http(s)** goes through the host's network (§10.3). The host must turn it on and allow the
+  picture's origin (`ari --net-allow https://media.example`). `auth: NAME` sends credential
+  `NAME` as `Authorization: Bearer`, on the same terms as `http-get`'s `auth`: only to an origin
+  the credential is bound to, never following a redirect. The token never reaches state, an
+  error, a tooltip or a published name. Without the network, an http(s) picture fails ("the host
+  has the network off").
+- **`file://`** paths resolve against the document's directory (`file://img/logo.png`), or are
+  absolute (`file:///usr/share/...`). `cvc://` and `state://` resolve as `import:` does (§6.4).
+- **Formats:** PNG, JPEG, GIF, BMP and, where libcvc has libwebp, WebP. Where it
+  has ImageMagick, also TIFF, AVIF and HEIC. The format comes from the bytes, not the name or the
+  Content-Type. A file over 64 MiB, or one wider or taller than 8192 px, is refused before it is
+  decoded. A decoded picture is downscaled to 2048 px on its long side.
+- **Off the frame.** The first frame that draws the widget starts the load, and the widget shows a
+  neutral placeholder of the same box until the picture arrives, so nothing moves. The fetch, the
+  decode and the fit run on the app's background pool. A failure shows a darker placeholder, says
+  why in its tooltip, and is tried again after 30 s. Pictures are kept in memory per runtime, up to
+  64 MiB, and dropped 30 s after the last frame that drew them. Two widgets that show the same URL
+  share one fetch. `ari snapshot` and `arigl snapshot` wait for the pictures they draw, those
+  whose URL a reply puts in state included: they draw again until no picture is still loading
+  (at most 10 s, as for requests).
+- **The box.** `size: [w, h]` is a box; `fit` says how the picture fills it: `contain` (all of it,
+  transparent bars), `cover` (all of the box, the middle of the picture) or `fill` (stretched).
+  `shape: circle` makes the outside of the inscribed circle transparent. `size: w` keeps the
+  picture's own shape at width `w`, and its placeholder is 16:9 (1:1 for a circle) until it loads.
+  The fitted picture is made at twice the box's size, where the source has the pixels, so it stays
+  sharp on a HiDPI screen.
+- **Every backend draws them**, since the core publishes the fitted picture as any other image:
+  ImGui as a texture, and the terminal backends as Kitty, Sixel or iTerm pixels, or half-blocks
+  (§4). Hosted tvision always draws half-blocks. In half-blocks, a transparent pixel leaves its
+  half of the cell to the terminal's own background, so a round avatar has no corners on a light
+  or a dark terminal. Kitty, Sixel and iTerm draw transparent pixels black.
+- **Animated GIF and WebP pictures move**, every frame fitted to the box like a still, on a
+  loop the widgets showing one picture share. A terminal gets at most 8 new frames a second.
+  An animated WebP needs libwebp's demux library (cvcpkg's libwebp has it). An APNG, or an
+  animation over 512 frames or 128 MiB decoded, shows its first frame.
+- **A video URL** (`.mp4`, `.webm`, `.mov` or `.m4v`, a query or fragment after it allowed, the
+  rule web clients use for avatars) in an `image:` plays as a decorative video (§5.13): looping,
+  silent, fitted and shaped like the picture would be. Without a player it is the placeholder,
+  and `status:` says `unsupported` (or `remote`, `failed`) where a picture would say `ready`.
+- **The capability token `image.url`** (§5.7) holds in every host that does this, so a document
+  for older hosts too gates its pictures with `(has? "image.url")` or
+  `requires: [{name: image.url, optional: true}]` and draws its own placeholder elsewhere (an
+  older host shows an unknown URI as text).
+- **`status:`** names a state key the widget keeps `loading`, `ready` or `failed` in, with the
+  reason under `<key>.error`. A document reads it to show something else when a picture is
+  missing, and a test asserts on it.
+- **In a browser build without threads** (ari.html, arigl-web) a picture's http(s) request is
+  started, not sent in place (§10.2), so the frame loop goes on while it is out. The reply is
+  decoded when the browser hands it over, between frames. A `file://`, `cvc://` or `state://`
+  picture is read and decoded between two frames, one at a time.
+
+### 5.12 Backgrounds: `background:` on a window or group
+
+A window, an overlay or a group can have a picture behind its content: a profile's background,
+a banner behind a name.
+
+```yaml
+windows:
+  - window: Profile
+    background: {src: https://media.example/bg/42.jpg, opacity: 0.4}
+    children:
+      - type: group
+        id: banner
+        size: [auto, 120]                    # a group's background area is at least this
+        background:
+          bind: profile.banner_url           # or src:; a URI (§5.11) or a published image name
+          auth: example
+          fit: cover                         # cover (default) | contain | fill
+          opacity: 1.0                       # 0..1
+          terminal: banner                   # behind (default) | banner | none
+          banner_rows: 6
+          status: profile.banner_status      # loading | ready | failed, as image:'s
+        children:
+          - image: avatar
+            bind: profile.avatar_url
+            size: [64, 64]
+            shape: circle
+          - text: ""
+            bind: profile.name
+```
+
+`background: URL` is short for `background: {src: URL}`. A video URL (as `image:` takes it,
+§5.11) plays as a silent looping video behind the content, where the host has a player; an
+animated GIF or WebP moves. The picture loads as an `image:`'s does
+(§5.11), at its own shape, and each backend fits it to the area the content takes. Until it
+has loaded, or when it failed, nothing is drawn behind the content.
+
+- **ImGui** draws it behind the content: a window's fills the window's inner area, and a group's
+  fills the group's area. That area is the full width available unless `size:` says otherwise,
+  and at least `size:`'s height. `fit` decides which part of the picture shows, and `opacity` is
+  how strongly it shows over the window's own background.
+- **The terminal backends** (FTXUI, and tvision's window bodies):
+  - **`behind`** draws half-blocks under the content, dimmed toward black by `opacity`. A cell
+    the content writes text into keeps the picture's colour as its background, dimmed to at most
+    40%, and the text is drawn in the terminal's own foreground unless the document coloured it.
+    So text stays readable on any picture. Pixel protocols can't put text over pixels (Kitty's
+    pictures are themselves cells, and Sixel and iTerm draw over the cells), so `behind` is
+    half-blocks whatever `--graphics` says.
+  - **`banner`** draws the picture as a row `banner_rows` tall above the content instead, at full
+    strength, and in Kitty, Sixel or iTerm pixels where the terminal has them (from the second
+    frame, once the row's width is known).
+  - **`none`** draws nothing in a terminal.
+  - A terminal with no colour (`--graphics mono`) draws no background.
+
+### 5.13 Video and audio: `video:` and `audio:`
+
+```yaml
+- video: clip                           # the label: the caption its messages use
+  src: https://media.example/p/9.webm   # a URI (§5.11), or a computed expression giving one
+  auth: example                         # optional: the host's credential, as image: takes it
+  poster: https://media.example/p/9.jpg # optional: shown until the first frame
+  size: [480, 270]                      # the picture's box; fit: as image: takes it
+  bind: feed.items.{i}.player           # the player's state keys (below)
+  autoplay: false
+  loop: false
+  muted: false
+- audio: voice note                     # the same, with no picture
+  src: https://media.example/p/10.opus
+  bind: feed.items.{i}.voice
+```
+
+- **`controls: false`** makes a decorative picture: no controls, and `autoplay`, `loop` and
+  `muted` default to true. A muted one opens no sound device, so it plays in an SSH session too
+  (it makes no sound there). `shape: circle` and `fit:` apply to its frames, and `status:` (as
+  `image:` takes it) holds its state. A video URL in `image:` or `background:` is one of these.
+- **The controls** are drawn with the widgets every backend has: Play / Pause, a seek slider
+  with `m:ss / m:ss` as its value, and Mute. "Open" is added where the media can't play here.
+  They look and work the same in ImGui, FTXUI and tvision.
+- **The picture.** The newest frame is published as an image and drawn like one: an ImGui
+  texture, or Kitty, Sixel, iTerm or half-block cells. A terminal gets at most 8 frames a
+  second. Before the first frame the poster shows, else a placeholder of the box.
+- **The state keys** live under `bind:`, or `ariadne.media.players.p<n>` without one:
+
+  | key | |
+  |---|---|
+  | `state` | `idle`, `loading`, `ready`, `playing`, `paused`, `ended`, `failed`, `remote` or `unsupported` |
+  | `playing` | `1` / `0`; write it to play or pause |
+  | `position`, `duration` | seconds (position at most 4 times a second while playing) |
+  | `seek` | write seconds to seek; it is emptied once done |
+  | `muted` | `1` / `0`; write it to mute |
+  | `error` | why it failed, or why it plays elsewhere |
+
+- **A host plays them only if it has a player.**
+  - `ari-media` (§9.2) and `arigl` have cvcMedia's FFmpeg + SDL3 player. FFmpeg decodes,
+    frames are scaled to the box, and the sound plays through SDL3's audio subsystem, which is
+    the clock (the wall clock without sound). The source is fetched whole first (the host's
+    network policy and `auth:`, as for `image:`, at most 64 MiB) and read from memory.
+  - FFmpeg is cvcpkg's `ffmpeg-lgpl`, linked shared, so the LGPL's terms are kept.
+  - The lean `ari`, or any build without FFmpeg, has no player. Its media widgets say
+    `unsupported` and offer "Open".
+  - **The browser pages** (ari.html, arigl-web) play through the browser's own `<video>` and
+    `<audio>`. FFmpeg is never compiled to wasm.
+    - Each player is a hidden element. It plays the sound itself, and a video's new frames are
+      drawn into a canvas the size of the box and copied into the widget's picture. That is one
+      copy per frame shown, and it works the same in both pages, under windows and menus.
+    - The policy and credentials are decided in C++ before the element sees anything:
+      - an http(s) URL with no `auth:` is given to the element (it streams and seeks with range
+        requests), once the host allows its origin;
+      - one with `auth:` is fetched with the bearer token alone (no cookies, no redirect) into a
+        blob;
+      - `file://`, `cvc://` and `state://` sources are read from the page's files into a blob.
+        A page lists its media in the config's `preload` to have them there.
+    - A picture from another origin needs CORS to be read back. Without it the sound still
+      plays and the error says so.
+    - A browser plays sound only after the user has clicked or typed on the page. A muted
+      `autoplay` starts by itself.
+    - A site serving the pages under a Content-Security-Policy adds `media-src 'self' blob:`
+      (and the media's origin when it is another).
+- **Over SSH** the sound would come out of the remote machine's speakers. So in an SSH session
+  (`SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY` set), players say `remote` and nothing is opened.
+  - "Open" runs `(open-url URL)` where the host has it, else it warns with the URL.
+  - An `auth:` source opened in a browser carries no token, so the browser needs its own
+    sign-in. The tooltip says so.
+  - `--media-play always` plays anyway, and `--media-play never` never plays.
+- **Capability tokens** (§5.7): `media` means the media plays here, and `media.player` means
+  the host has a player at all. `video.decorative` means `controls: false` and video URLs in
+  `image:` and `background:` are understood, and `image.animated` means GIF and WebP animate.
+- A player whose widget a frame did not draw (its window closed, its item scrolled out of a
+  `repeat:`) is paused at once and closed 5 s later. `ari snapshot` waits while a player is
+  still loading, as it waits for pictures.
+
+### 5.14 On a phone: UI size, hiding windows, the system keyboard
+
+A document needs nothing of its own to work on a phone: the ImGui host (arigl, cyprty) does
+this for every one.
+
+- **UI size.** The UI is sized in logical pixels (CSS pixels in a browser) times the UI size,
+  times the display's pixel ratio. A phone's canvas is about three device pixels to the CSS
+  pixel, so without the ratio its UI would come out a third of its size. The UI size starts at
+  1.25 on a touch device and 1 with a mouse, and is the state key
+  `<scene>.viewers.<viewer>.ui.scale` (arigl's: `ui.docs.ari.viewers.main.ui.scale`). The
+  Controls window offers it as **UI size** (75% to 200%), under *Display* above the keys, for any
+  host that calls `AppRuntime::set_host_ui_size`. A new size takes effect at the next frame, and
+  the open windows grow or shrink with it. It holds for the run.
+- **Hiding windows.** On a view whose short side is under 700 logical pixels the panels start
+  hidden, and a round button in the bottom-right corner shows and hides them all (the menu bar
+  too), so the scene is never buried. The button stays above every window, even one dragged over
+  its corner. A window collapses to its title bar with the arrow at the title's left (or a double
+  tap on the title), closes with its X when it is `closable:`, and comes back from the View or
+  Windows menu (§5.9). On a touch screen a window moves by its title bar only, so a finger that
+  slips off a widget does not carry its window away.
+- **The system keyboard.** A browser raises a phone's keyboard only for a focused text field,
+  which the canvas is not. When a finger (or a pen) activates an `input_text`, the page focuses a
+  hidden `<input>` placed at the field's caret, so the keyboard comes up and the browser keeps
+  the field in view above it; what the keyboard types goes to the field, autocorrect and
+  composed words included, and the field's deactivation puts the keyboard away. iOS raises its
+  keyboard only for a focus made while the finger lifts, which is when the page makes it; a field
+  that becomes active with no finger down (an `autofocus:` one) raises it on Android, and on iOS
+  at the first tap on it. While the hidden input has the keys the canvas does not, so typing never
+  reaches `on_key` or walks an avatar. A mouse click on a field types through the canvas as
+  before. A native build has no phone yet; SDL3's `SDL_StartTextInput` is how one would raise the
+  keyboard on iOS and Android.
+
 ## 6. Composition: include / import / load
 
 Three mechanisms compose documents. They differ in **isolation**, not in how they
@@ -1288,6 +1564,30 @@ Any widget may carry an `id:` (not only windows): it names the instance a backen
 per-instance state on and that the core persists view state under (`tree.<id>.*`). An include
 site may override the unit's `id:`, so two instances of one unit stay distinct.
 
+Args are strings. A unit takes whole widget lists through **slots**: a `- slot: NAME` item in
+any of its widget lists marks where they go. The include site's `slots: {NAME: [...]}` puts its
+widgets there, in place of the item; a single widget map works too, and a slot left unfilled is
+dropped. The include site's widgets are its own: the unit's args are not substituted into them,
+though a `repeat:` around the include still substitutes `{i}`.
+
+```yaml
+units:
+  framed:
+    args: { title: Untitled }
+    type: group
+    children:
+      - text: "{title}"
+      - slot: body
+      - slot: footer
+windows:
+  - window: W
+    children:
+      - include: framed
+        args: { title: Hello }
+        slots:
+          body: [ { text: first }, { button: Go, on: go } ]
+```
+
 ### 6.2 `import:` — shared-scope library merge
 
 `process_imports` ([`loader.cpp:761`](../src/cvc/ariadne/loader.cpp)) resolves a URI (or
@@ -1297,6 +1597,17 @@ and cycle-guards on the resolved `canonical` identity
 ([`loader.cpp:789`](../src/cvc/ariadne/loader.cpp)), capped at `kMaxImportDepth = 32` /
 `kMaxImports = 4096` ([`loader.cpp:758`](../src/cvc/ariadne/loader.cpp)). Local units
 override imported ones. This is how a document composes a library of shipped panels.
+
+An entry may be `{uri: URI, optional: true}`: a library the host may not have (a component
+newer than it), whose absence is no warning, so `ari test` does not fail on it. A document's
+own unit marked `fallback: true` stands in for a unit of that name only where no import defines
+it, so a document adopts a shipped component and still runs on hosts without it:
+
+```yaml
+import: [{uri: cvc://components/card.ari, optional: true}]
+units:
+  card: {fallback: true, type: group, children: [...]}   # used where card.ari is not there
+```
 
 ### 6.3 `load:` — isolated sub-module mount
 
@@ -1364,7 +1675,39 @@ includes. Each binds state keys a C++ object owns, so it needs no host code;
 | `world_controls` | a `generated_world` node (§5.4) |
 | `mesh_tools` | a `mesh_lab` node named `mesh` (§5.4) |
 | `fe_controls` | an `fe_lab` node named `domain` (§5.4) |
+| `card` | a card in a list: avatar / title / subtitle / timestamp header, body, `media` and `actions` slots; its args are state keys, so a `repeat:` includes one per item (not a window: embed it) |
 | `transfer_function`, `transfer_function_editor` | any node's `transfer_function` model (args `node`, `id`): the ColorTable2 editor with histogram / contour spectrum / contour tree layers — see [`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) |
+
+The `card` is a generic social or inbox card (§5.11 pictures, slots in §6.1):
+
+```yaml
+import: cvc://components/card.ari
+windows:
+  - window: Feed
+    children:
+      - type: group
+        repeat: (state-get "feed.items")
+        children:
+          - include: card
+            args: {id: post_{i}, avatar: feed.items.{i}.author.avatar,
+                   title: feed.items.{i}.author.name, subtitle: feed.items.{i}.author.handle,
+                   time: feed.items.{i}.when, body: feed.items.{i}.text}
+            slots:
+              media:
+                - image: ""
+                  bind: feed.items.{i}.media.0.url
+                  visible_when: (!= (state-get "feed.items.{i}.media.0.url") "")
+                  size: [440, 248]
+                  fit: cover
+              actions:
+                - { button: Reply, on: (state-set "compose.reply_to" "{i}") }
+```
+
+Slots `note` (a row above the header), `extra` (lines under the byline, in the header's text
+column) and `body` (widgets after the body text) take more of a post's parts. A part whose key
+is empty is not drawn. The avatar is a circle `avatar_size` px across (40),
+loading through `avatar_auth`'s credential where its URL needs one. A one-column grid with an
+outer border frames the card: an ImGui table, a box in a terminal.
 
 Most components that address one node use a fixed node id; copy the file and change the id to
 drive another node. `transfer_function` instead takes the node as an include arg (§6.1).
@@ -1645,7 +1988,8 @@ Two `AppRuntime` pieces make that possible for any host:
   host menu named like one of them adds its items to it. With no `document_menus()`, the host's
   menus go first.
 - `set_host_keys(keys)` adds the host's key bindings to every document's, and gives each
-  document the Keys window (§5.3), even one with no keys of its own.
+  document the Controls window (§5.3), even one with no keys of its own. `set_host_mouse(m)`
+  adds the host camera's pointer settings to that window, above the keys.
 - `load()` clears the last document's scene first (`SceneAdapter::clear()`: its nodes, free
   lights, rigs, physics, and the background, shadows and chrome it set), whether it is a hot
   reload or a switch to another document. A document without `channels:` also drops the last
@@ -1698,10 +2042,24 @@ flag written after the document goes to the document, and `ari` points that out.
 
 Three of the general flags are for pictures. `--graphics auto|kitty|sixel|iterm|color|mono` sets
 how images draw (see *Pixel graphics* in §4), and `--image NAME=FILE` publishes a picture
-for the document's `image:` widgets with `src: NAME`
+for the document's `image:` widgets with `src: NAME` (an `image:` can also name a URL itself,
+§5.11)
 ([`terminal_images.ari`](../examples/ariadne/terminal/terminal_images.ari) is an example).
 With `--ansi` and `--graphics kitty`, `sixel` or `iterm`, `snapshot` also prints the images, after
 clearing the screen, at the terminal's cell size (`--cell-size WxH` where it can't be asked).
+
+**`ari-media`** is the same program with sound: cvcMedia, libcvc's GL-free media library
+([`src/cvcMedia`](../src/cvcMedia/CMakeLists.txt)), is linked in. It brings up SDL3's audio
+subsystem alone, with no window, display or SDL video, and still no GL, VTK or ImGui, so it
+plays sound in a terminal; `ari-media info` lists the playback devices. The lean `ari` links
+libcvc only, with no SDL. `ari-media` is its own package
+([`cvcpkg/recipes/ari-media`](../cvcpkg/recipes/ari-media/recipe.yaml), depending on `sdl3`),
+a separate binary name, so the two never install the same file and a launcher can prefer
+`ari-media` where it is installed. In a libcvc build it is built with cvcGL or with
+`-DCVC_BUILD_ARI_MEDIA=ON`. cvcMedia holds the SDL3 audio output that used to be cvcGL's
+(`cvc::media::playback`; cvcGL links cvcMedia and keeps the `cvc::gl::playback` names), and
+its FFmpeg player plays the `video:` and `audio:` widgets (§5.13). The `ari-media` package also
+depends on `ffmpeg-lgpl`, linked shared.
 
 `ari` is its own cvcpkg package (`cvcpkg install ari`, linux for now), built from
 [`cvcpkg/recipes/ari`](../cvcpkg/recipes/ari/recipe.yaml) against the installed libcvc,

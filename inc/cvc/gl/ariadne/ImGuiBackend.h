@@ -117,6 +117,12 @@ public:
   // host loop; draw_image references it by the name a `- image:` widget's src/bind resolves to.
   void set_image(const std::string &name, const cvc::image &img) override;
   bool draw_image(const char *name, float width) override; // §raster viewer (ImGui::Image over GL)
+  // Free the texture and pixels published as `name` (Runtime::render calls it, GL current).
+  void drop_image(const std::string &name) override;
+  // §5.12 a container's background: the content between the two goes on a draw-list channel above
+  // the picture, which is drawn once the content's area is known (a window's inner area).
+  void begin_backdrop(const cvc::ariadne::Backdrop &bd) override;
+  void end_backdrop() override;
   bool draw_image_fit(const char *name, float box_w, float box_h) override;
 
   // Convenience: install `rt`'s per-frame walk as `overlay`'s draw callback, so
@@ -194,6 +200,9 @@ private:
   std::vector<FlowRect> m_flowObstacles;
   int m_flowFrame = -1;
   float m_flowX = 0.0f, m_flowY = 0.0f, m_flowColumnW = 0.0f;
+  // Windows that fit their content and opened at a place of their own before ImGui had measured
+  // them: the next frame moves each in again, measured, until all of it shows (§5.8).
+  std::unordered_set<std::string> m_placedUnmeasured;
 
   // reset_layout(): the windows drawn since, by id. A window's first draw after it takes its
   // authored place and size (or rejoins the flow) though ImGui still holds the last document's.
@@ -217,6 +226,10 @@ private:
   // The GL texture image `name` is published under, uploaded first if it changed, and its size in
   // W x H; 0 when nothing is published under it. Render thread (the GL context current).
   unsigned int image_texture(const char *name, int &W, int &H);
+
+  // §5.12 backdrops open in this frame, innermost last (a splitter each, so they nest).
+  struct BackdropFrame;
+  std::vector<std::shared_ptr<BackdropFrame>> m_backdrops;
 
   // Per-key in-progress InputText / InputInt text. Follows the value in state while no field is
   // active and holds the edit while one is — the string counterpart of cache_int/cache_float.
