@@ -131,8 +131,11 @@ generated_world generate_world(const generated_world_params &p,
                                const building_library *library = nullptr);
 
 // The ground's colour as a size x size RGB texture over the extent (row 0 = min y, matching the
-// terrain's UVs). In material mode grass is broken up with dirt and dry grass and box massing's
-// streets and plazas are painted on; the other modes show the raw raster.
+// terrain's UVs). The raster is far coarser than the texture, so no texel shows its cell's square:
+// material mode blends the cells around each texel at a noise-warped position, so classes meet
+// along frayed, organic edges (asphalt excepted, which stays straight); grass is broken up with
+// dirt and dry grass, and box massing's streets and plazas are painted on. Risk and height are
+// interpolated; occupancy shows its cells.
 std::vector<unsigned char> paint_surface(const generated_world &w,
                                          surface_color mode = surface_color::material,
                                          int size = 2048);
