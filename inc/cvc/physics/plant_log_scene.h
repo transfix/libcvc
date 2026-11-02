@@ -39,8 +39,8 @@
 //                 [x, y, psi, vx, vy, r, drive, steer] (kPlanarWidth): the centre of mass on
 //                 SE(2), its body twist, nav's acceleration command and the steering (steer
 //                 actual or command). Row k's inputs acted from t_k-1 to t_k. With `wide`,
-//                 (F, T, 18) (kPlanarWideWidth): also the attitude, the wheels' speeds, the pedals
-//                 and the ledger's shaft and brake power.
+//                 (F, T, 20) (kPlanarWideWidth): also the attitude, the wheels' speeds, the pedals,
+//                 the ledger's shaft and brake power, and the ground's slope under the wheels.
 //   meta.json     the rate, the layout, the run's settings and each flight's seed and agent.
 //   residual.json the one-tick residuals of diff::dyn_plant and the kinematic bicycle against
 //                 the plant, binned by lateral g (also reported).

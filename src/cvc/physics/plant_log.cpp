@@ -157,6 +157,36 @@ planar_sample plant_log::sample(int i) const {
   axle_speed(rear_axle, s.om_rear, s.rim_rear);
   s.throttle = vs.throttle;
   s.brake = vs.brake;
+  // The ground's slope from the wheels' contact points: the two axles' mean contact points along
+  // the heading, the left and right wheels' across it.
+  s.ground_grade = s.grade;
+  s.ground_roll = s.roll;
+  const auto mean_contact = [&](const std::vector<int> &wheels, vec3 &at) {
+    int n = 0;
+    at = {};
+    for (const int w : wheels)
+      if (w >= 0 && w < static_cast<int>(vs.wheels.size()) && vs.wheels[w].contact) {
+        at = at + vs.wheels[w].contact_point;
+        ++n;
+      }
+    if (n)
+      at = at * (1.0 / n);
+    return n > 0;
+  };
+  const auto slope = [](const vec3 &from, const vec3 &to, double ux, double uy) {
+    const double run = (to.x - from.x) * ux + (to.y - from.y) * uy, rise = to.z - from.z;
+    const double len = std::sqrt(run * run + rise * rise);
+    return len > 1e-6 ? rise / len : 0.0;
+  };
+  vec3 pf, pr, pl, prt;
+  if (front_axle >= 0 && rear_axle >= 0) {
+    if (mean_contact({2 * front_axle, 2 * front_axle + 1}, pf) &&
+        mean_contact({2 * rear_axle, 2 * rear_axle + 1}, pr))
+      s.ground_grade = slope(pr, pf, c, sn);
+    if (mean_contact({2 * front_axle, 2 * rear_axle}, pl) &&
+        mean_contact({2 * front_axle + 1, 2 * rear_axle + 1}, prt))
+      s.ground_roll = slope(prt, pl, -sn, c);
+  }
   if (i < static_cast<int>(_vmax.size()))
     s.vmax = _vmax[i];
   return s;
@@ -707,8 +737,9 @@ const std::vector<std::string> &flight_columns(flight_layout layout) {
                                                   "vy", "r", "drive", "steer"};
   static const std::vector<std::string> wide = [] {
     std::vector<std::string> c = planar;
-    for (const char *k : {"grade", "roll", "om_front", "om_rear", "rim_front", "rim_rear",
-                          "throttle", "brake", "shaft_power", "brake_power"})
+    for (const char *k :
+         {"grade", "roll", "om_front", "om_rear", "rim_front", "rim_rear", "throttle", "brake",
+          "shaft_power", "brake_power", "ground_grade", "ground_roll"})
       c.push_back(k);
     return c;
   }();
@@ -753,16 +784,19 @@ flight_set cut_flights(const std::vector<std::vector<planar_sample>> &runs, std:
           const planar_sample &p = k > 0 ? run[k - 1] : q;
           const auto mean = [](double a, double b) { return 0.5 * (a + b); };
           const double dt = k > 0 ? q.t - p.t : 0.0;
-          const double extra[kPlanarWideWidth - kPlanarWidth] = {mean(p.grade, q.grade),
-                                                                 mean(p.roll, q.roll),
-                                                                 mean(p.om_front, q.om_front),
-                                                                 mean(p.om_rear, q.om_rear),
-                                                                 mean(p.rim_front, q.rim_front),
-                                                                 mean(p.rim_rear, q.rim_rear),
-                                                                 q.throttle,
-                                                                 q.brake,
-                                                                 dt > 0.0 ? q.shaft / dt : 0.0,
-                                                                 dt > 0.0 ? q.braked / dt : 0.0};
+          const double extra[kPlanarWideWidth - kPlanarWidth] = {
+              mean(p.grade, q.grade),
+              mean(p.roll, q.roll),
+              mean(p.om_front, q.om_front),
+              mean(p.om_rear, q.om_rear),
+              mean(p.rim_front, q.rim_front),
+              mean(p.rim_rear, q.rim_rear),
+              q.throttle,
+              q.brake,
+              dt > 0.0 ? q.shaft / dt : 0.0,
+              dt > 0.0 ? q.braked / dt : 0.0,
+              mean(p.ground_grade, q.ground_grade),
+              mean(p.ground_roll, q.ground_roll)};
           f.data.insert(f.data.end(), extra, extra + (kPlanarWideWidth - kPlanarWidth));
         }
       }

@@ -645,10 +645,11 @@ void write_plant_log(const plant_log_options &o, const plant_log_drive &d) {
         js << (k ? ", " : "") << "\"" << cols[k] << "\"";
       js << "],\n \"units\": [\"m\", \"m\", \"rad\", \"m/s\", \"m/s\", \"rad/s\", \"m/s^2\", "
             "\"rad\", \"1\", \"1\", \"rad/s\", \"rad/s\", \"m/s\", \"m/s\", \"1\", \"1\", \"W\", "
-            "\"W\"],"
-         << "\n \"wide\": \"grade, roll, the wheels' speeds (the frontmost steered and the "
-            "rearmost unsteered axle's) and their rims' are the interval's means; the pedals its "
-            "end's; the powers the ledger's shaft work and brake energy over it\",";
+            "\"W\", \"1\", \"1\"],"
+         << "\n \"wide\": \"grade and roll (the body's attitude), the wheels' speeds (the "
+            "frontmost steered and the rearmost unsteered axle's), their rims' and the ground's "
+            "slope under the wheels are the interval's means; the pedals its end's; the powers the "
+            "ledger's shaft work and brake energy over it\",";
     } else {
       js << ",\n \"layout\": [\"x\", \"y\", \"psi\", \"vx\", \"vy\", \"r\", \"drive\", \"steer\"],"
          << "\n \"units\": [\"m\", \"m\", \"rad\", \"m/s\", \"m/s\", \"rad/s\", \"m/s^2\", "

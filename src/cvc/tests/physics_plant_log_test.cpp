@@ -279,6 +279,7 @@ TEST(PlantLog, CutsWideFlights) {
   ASSERT_EQ(cols.size(), static_cast<std::size_t>(kPlanarWideWidth));
   EXPECT_EQ(cols[10], "om_front");
   EXPECT_EQ(cols[17], "brake_power");
+  EXPECT_EQ(cols[19], "ground_roll");
   for (std::size_t r = 0; r < wide.flights * wide.rows; ++r)
     for (int c = 0; c < kPlanarWidth; ++c)
       ASSERT_EQ(wide.data[r * kPlanarWideWidth + c], planar.data[r * kPlanarWidth + c]);
@@ -415,6 +416,17 @@ TEST(PlantLog, LogsAHumveeSwervingOnJolt) {
   EXPECT_GT(moving, 500);
   EXPECT_LT(slip_sum / moving, 0.05);
   EXPECT_LT(sliding, moving / 5);
+  // On flat ground the body pitches and rolls on its springs; the ground under the wheels does
+  // not.
+  double body_tilt = 0.0, ground_tilt = 0.0;
+  for (const planar_sample &b : run) {
+    body_tilt = std::max({body_tilt, std::fabs(b.grade), std::fabs(b.roll)});
+    ground_tilt = std::max({ground_tilt, std::fabs(b.ground_grade), std::fabs(b.ground_roll)});
+  }
+  std::printf("  flat ground: the body tilts up to %.4f, the ground under the wheels %.5f\n",
+              body_tilt, ground_tilt);
+  EXPECT_LT(ground_tilt, 0.005);
+  EXPECT_GT(body_tilt, 4.0 * ground_tilt);
   EXPECT_GT(shaft, 0.0);
   EXPECT_LE(shaft, e.supplied * (1.0 + 1e-9));
   const flight_set wide =

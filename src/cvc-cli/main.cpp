@@ -2172,8 +2172,9 @@ static int cmd_ph_train(int argc, char **argv) {
      "the steering last (e.g. drive,steer or rim_front,rim_rear,steer from plant-log --wide); "
      "default: every input column")
     ("potential", po::value<std::string>()->default_value("world"),
-     "world: V(x, y), learned on world position; none: no potential; terrain: the logged "
-     "attitude's (grade, roll) times two learned coefficients (needs plant-log --wide runs)")
+     "world: V(x, y), learned on world position; none: no potential; terrain: the ground's logged "
+     "slope under the wheels (ground_grade, ground_roll; else the body's grade, roll) times two "
+     "learned coefficients (needs plant-log --wide runs)")
     ("eval-runs", po::value<std::vector<std::string>>()->multitoken(),
      "after training, report the mean model's rollout loss on these runs' windows (every seed, "
      "no noise): another environment's, held out")
@@ -2238,8 +2239,12 @@ static int cmd_ph_train(int argc, char **argv) {
       cols.assign(f.columns.begin() + 6, f.columns.end());
     }
     if (potential == "terrain") {
-      cols.push_back("grade");
-      cols.push_back("roll");
+      // The ground's slope under the wheels where the runs have it; else the body's attitude,
+      // which also carries the suspension's pitch and roll.
+      const bool ground =
+          std::find(f.columns.begin(), f.columns.end(), "ground_grade") != f.columns.end();
+      cols.push_back(ground ? "ground_grade" : "grade");
+      cols.push_back(ground ? "ground_roll" : "roll");
     }
     return ph::select_inputs(f, cols);
   };

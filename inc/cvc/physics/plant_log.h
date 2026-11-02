@@ -89,6 +89,12 @@ struct planar_sample {
   // engine's, `supplied`) and the brakes' energy over the tick that ended here (J; 0 at start()).
   double throttle = 0.0, brake = 0.0;
   double shaft = 0.0, braked = 0.0;
+  // The ground's slope under the wheels, from their contact points: along the heading (sin, +
+  // uphill: the single track's two axles' mean contact heights over the distance between them)
+  // and across it (+ left side up, the left wheels' over the right's). Unlike grade and roll, the
+  // body's attitude, it leaves out the suspension's pitch and roll. Without a wheel down on each
+  // end (each side) it is the body's.
+  double ground_grade = 0.0, ground_roll = 0.0;
 };
 
 // Records every agent of `sim`, which drives `plant`. Both must outlive the log.
@@ -246,7 +252,8 @@ constexpr int kPlanarWidth = 8;
 //   14 throttle, 15 brake     the pedals at the interval's end
 //   16 shaft_power            the engine's shaft work over the interval / its length (W)
 //   17 brake_power            the brakes' energy over the interval / its length (W)
-constexpr int kPlanarWideWidth = 18;
+//   18 ground_grade, 19 ground_roll  the ground's slope under the wheels, the interval's mean
+constexpr int kPlanarWideWidth = 20;
 
 // The column names of each layout, in order (meta.json's "layout").
 enum class flight_layout {

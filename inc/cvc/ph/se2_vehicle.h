@@ -59,9 +59,11 @@
 // carries nothing from one map to another, and on flat ground it can only fit what the other terms
 // miss. Two options replace it:
 //   none     no potential: H is the kinetic energy and the body term is zero.
-//   terrain  the terrain under the vehicle, from its logged attitude: the last two inputs (after
-//            the ports and the modulations) are the sines of its pitch and roll (plant_log's
-//            grade and roll), and the body term is (k_x grade, k_y roll), k = V's two levels. It
+//   terrain  the terrain under the vehicle, from its logs: the last two inputs (after the ports
+//            and the modulations) are the sines of the ground's slope along and across the
+//            heading (plant_log's ground_grade and ground_roll, from the wheels' contacts; the
+//            body's grade and roll would carry the suspension's pitch under acceleration too), and
+//            the body term is (k_x grade, k_y roll), k = V's two levels. It
 //            is the gradient along the body's axes of the potential m g z of a vehicle on that
 //            slope (k -> m g, up to M's scale), read where the vehicle is rather than learned
 //            where it was; its power, -(k_x grade v_x + k_y roll v_y), is the climb's. H cannot
