@@ -22,6 +22,7 @@
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <string>
+#include <utility>
 
 namespace cvc {
 namespace ariadne {
@@ -82,13 +83,7 @@ void avatar_panel::update(const holon &h, cvc::app &app, const std::string &room
                           const std::string &pid, double wall_dt) {
   _policy = h.energy_policy();
   _body = h.body();
-  // The look everyone draws: our choice through the room's catalog.
-  const avatar_catalog cat = read_avatar_catalog(app, room);
-  const avatar_look look = resolve_avatar_look(cat, read_avatar_choice(app, room, pid), pid);
-  const avatar_color_option *c = cat.find_color(look.color_id);
-  const avatar_accessory_option *a = cat.find_accessory(look.accessory_id);
-  _color = c ? c->label : std::string();
-  _accessory = a ? a->label : std::string();
+  refresh_look(app, room, pid);
 
   _sampled = false;
   _ready = h.energy(pid, _energy);
@@ -110,6 +105,32 @@ void avatar_panel::update(const holon &h, cvc::app &app, const std::string &room
     while (_power.size() > _capacity)
       _power.pop_front();
   }
+}
+
+// The look everyone draws: our choice through the room's catalog. Reading the catalog walks every
+// option's nodes (a few hundred), which every frame was most of a browser client's room step, so
+// it is read again only when its revision moves: write_avatar_catalog bumps that last, so a new
+// revision means the options it covers are here. The look is resolved again only when the catalog
+// or our choice changed.
+void avatar_panel::refresh_look(cvc::app &app, const std::string &room, const std::string &pid) {
+  const std::uint64_t rev = avatar_catalog_revision(app, room);
+  const bool reread = !_have_catalog || rev != _catalog_rev || room != _look_room;
+  if (reread) {
+    _catalog = read_avatar_catalog(app, room);
+    _have_catalog = true;
+    _catalog_rev = rev;
+    ++_catalog_reads;
+  }
+  avatar_choice choice = read_avatar_choice(app, room, pid);
+  if (!reread && pid == _look_pid && choice.color == _choice.color &&
+      choice.accessory == _choice.accessory)
+    return;
+  _look_room = room, _look_pid = pid, _choice = std::move(choice);
+  const avatar_look look = resolve_avatar_look(_catalog, _choice, pid);
+  const avatar_color_option *c = _catalog.find_color(look.color_id);
+  const avatar_accessory_option *a = _catalog.find_accessory(look.accessory_id);
+  _color = c ? c->label : std::string();
+  _accessory = a ? a->label : std::string();
 }
 
 void avatar_panel::publish(cvc::app &app, const std::string &prefix) const {
