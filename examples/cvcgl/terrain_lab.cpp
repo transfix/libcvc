@@ -111,7 +111,7 @@ constexpr int TEX = 2048; // the terrain surface texture (material + roads + sho
 
 // The Austin building archetype library, loaded once. Discovery: $CVC_NAV_BUNDLE (a buildings.glb
 // file, or a directory / scene dir containing one), else a buildings.glb beside the working dir.
-// Empty without one: the city is then box massing.
+// Empty without one: the city's buildings are then procedural massing.
 const world::building_library &cityLibrary() {
   static const world::building_library lib = [] {
     std::vector<std::string> paths;
@@ -128,8 +128,9 @@ const world::building_library &cityLibrary() {
         return L;
       }
     }
-    std::fprintf(stderr,
-                 "terrain_lab: no Austin building bundle (set CVC_NAV_BUNDLE) — box massing\n");
+    std::fprintf(
+        stderr,
+        "terrain_lab: no Austin building bundle (set CVC_NAV_BUNDLE) — procedural buildings\n");
     return world::building_library{};
   }();
   return lib;

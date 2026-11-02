@@ -57,7 +57,7 @@ units:
         commit: release
         lo: 0
         hi: 600
-        tooltip: "box massing's sites; the roads-first city fills its lots instead"
+        tooltip: "the most buildings the city builds, filled from the district cores out"
       - slider_int: Tree generations
         bind: world.tree_gen
         commit: release

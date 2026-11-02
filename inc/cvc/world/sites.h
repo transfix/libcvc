@@ -34,6 +34,19 @@
 // lot deterministically, and scales + orients it to FIT the lot (longer footprint axis along the
 // frontage, front toward the road), producing building_instances ready for stamp_buildings().
 //
+// Optional, all off by default (the lots are then exactly the classic fixed slots):
+//
+//   * BLOCK DEPTH: a lot reaches back only to the middle of its block (a ray cast to the next road
+//     behind it), so the lots of two parallel streets back onto each other instead of one street's
+//     overlap test starving the other.
+//   * A GROUND CHECK (with a height sampler): a lot whose footprint drops more than max_relief, or
+//     dips below min_ground (the water), is left empty; a kept lot records its ground range, so a
+//     building can stand on the low side with its base hidden in the slope.
+//   * DISTRICTS (with an urbanity field in [0, 1]): a core narrows the setbacks and side gaps (down
+//     to shared walls) and builds out every street side, while sparse ground leaves whole street
+//     sides empty (sparse_fill), so a town reads as streets that are built up or not rather than
+//     an even sprinkle. frontage_jitter varies the lot widths.
+//
 // GL-free (plain geometry + math). Deterministic: every random choice is a hashed function of a
 // stable lot id (its quantized position), never a loop counter — adding or removing a road cannot
 // reshuffle the buildings on an untouched street [see cvc/lsys/rng.h].
@@ -44,6 +57,7 @@
 #include <cstdint>
 #include <cvc/world/building_archetypes.h> // building_library, building_instance
 #include <cvc/world/roads.h>               // road_network, road_height_fn
+#include <functional>
 #include <vector>
 
 namespace cvc {
@@ -58,6 +72,10 @@ struct lot {
   double depth = 0.0;      // usable depth AWAY from the road (metres)
   int seg = -1;            // index of the road (traced polyline) this lot fronts
   bool arterial = false;   // fronts a major road
+  int side = 1;            // which side of that road (+1 the left of its direction, -1 the right)
+  double urbanity = 1.0;   // the district field at the lot (1 without one)
+  bool has_ground = false; // ground_min/max were sampled (layout_lots had a height sampler)
+  double ground_min = 0.0, ground_max = 0.0; // the ground's range over the footprint (metres)
 };
 
 struct site_params {
@@ -71,14 +89,33 @@ struct site_params {
   double road_margin = 1.5;     // a lot footprint must clear every road by this much (metres)
   bool both_sides = true;       // place on both sides of each road (false = +normal side only)
   double min_segment = 10.0;    // skip a road (traced polyline) shorter than this (metres)
+
+  // Block depth (see the header): lot_depth caps it, and a lot shallower than min_depth is
+  // dropped. The ray looks up to max_block metres behind the setback line.
+  bool block_depth = false;
+  double min_depth = 8.0;
+  double max_block = 120.0;
+  // The ground check (needs a height sampler; 0 / -inf = off).
+  double max_relief = 0.0;
+  double min_ground = -1e30;
+  // Districts (need an urbanity field): at urbanity 1 the setback and spacing shrink by these
+  // fractions; a street side is built with probability sparse_fill at urbanity 0, rising to 1.
+  double core_setback = 0.0;
+  double core_spacing = 0.0;
+  double sparse_fill = 1.0;
 };
+
+// The district field layout_lots reads: urbanity at world (x, y), in [0, 1].
+using lot_density_fn = std::function<double(double x, double y)>;
 
 // Lay out building lots along the roads. Deterministic and order-stable in the network. Streets are
 // traced into polylines (through degree-2 nodes, breaking at junctions), so lots flow continuously
 // along a curved road and junctions stay open. NOTE: this needs streets that run BETWEEN junctions
 // — a road network generated with a very high road_params::branch_chance is a dense every-segment
 // crosshatch with no block interiors, and almost no lots will fit; feed a network with real blocks.
-std::vector<lot> layout_lots(const road_network &net, const site_params &sp);
+// `height` (the ground check) and `density` (districts) are optional.
+std::vector<lot> layout_lots(const road_network &net, const site_params &sp,
+                             const road_height_fn &height = {}, const lot_density_fn &density = {});
 
 struct fit_params {
   std::uint64_t seed = 1;
@@ -96,7 +133,8 @@ struct fit_params {
 };
 
 // Pick + fit one archetype per lot and return the placed instances (ground height from `height`,
-// which may be empty → z = 0). Each archetype is scaled so its footprint fits the lot (longer axis
+// which may be empty → z = 0; a lot with a sampled ground range stands at its ground_min, so no
+// corner floats above a slope). Each archetype is scaled so its footprint fits the lot (longer axis
 // along the frontage) and yawed to the lot; with true_scale, an archetype that fits near its own
 // size is chosen instead (see fit_params). Deterministic in fp.seed. Empty if the library is
 // empty.

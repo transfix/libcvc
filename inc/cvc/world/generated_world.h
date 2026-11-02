@@ -30,14 +30,25 @@
 //   water_field(w, t, ...)                                    // the water, as a volume of depth
 //   w.geometry()     // the world as cvc::world::world_geometry, for physics and nav
 //
-// The pieces: world_model::generate (the relief and the L-system prop scatter), the props
-// tessellated into merged meshes, and the city. With a building library (the Austin archetypes,
-// load_building_library) the city is roads first: a terrain-following street network
-// (generate_roads), lots along it (layout_lots), the archetypes fitted into the lots, the roads
-// extruded into a surface and burned into the raster as asphalt. Without one it is box massing on
-// the scatter's building sites, with streets painted between their plazas. Water is everything
-// below water_level_m: roads and lots stop at the shore, and water_field fills it with a gently
-// travelling wave.
+// The pieces: world_model::generate (the relief and the L-system prop scatter), the city, and the
+// props tessellated into merged meshes. The city is roads first:
+//
+//   * district cores, about one per 600 m of world side, on dry, gentle ground: an urbanity field
+//     that is 1 at a core and fades out over a few hundred metres;
+//   * a street network grown from them (generate_roads): arterials crossing at each core,
+//     collectors a block apart, local streets packed tighter in the cores and thinning outside,
+//     steered along the contours to stay under a 35 % grade, kept out of the water, and trimmed of
+//     dead-end stubs;
+//   * lots along every street (layout_lots), reaching back to the middle of the block, left empty
+//     on ground too steep or wet to build, with narrower setbacks and shared walls in the cores;
+//   * a building per lot, filled from the cores out (whole street sides at a time) up to
+//     `buildings`: the library's archetypes at their real size (the Austin archetypes,
+//     load_building_library), or without one procedural massing whose heights rise with urbanity
+//     (houses with gable roofs outside the cores, a rare tower in them).
+//
+// The roads are extruded into a surface and burned into the raster as asphalt, and trees and rocks
+// keep off the roads and buildings. Water is everything below water_level_m, and water_field fills
+// it with a gently travelling wave.
 //
 // GL-free and deterministic: a pure function of the params and the library. Every mesh is one
 // merged cvc::geometry, so a renderer draws the world in a handful of nodes.
@@ -72,7 +83,7 @@ struct generated_world_params {
   double half_m = 600.0; // the world spans [-half_m, half_m]^2 metres
   int trees = 500;
   int rocks = 90;
-  int buildings = 110; // building sites for box massing (the roads-first city ignores it)
+  int buildings = 110; // the most buildings the city builds, filled from the district cores out
   int tree_gen = 5;
   double amp_m = 90.0;
   // The water surface. The terrain floor sits at 0 and rises to about amp_m; below this line is
@@ -103,19 +114,18 @@ struct generated_world {
   cvc::geometry foliage;                      // leaves: per-vertex colour
   cvc::geometry needles;                      // the pines' needles: line segments, one colour
   cvc::geometry buildings; // per-vertex colour (the archetypes' concrete, or the massing's)
-  cvc::geometry roads;     // the extruded street surface (empty for box massing)
+  cvc::geometry roads;     // the extruded street surface
   std::size_t building_count = 0;
-  bool archetypes = false; // the city came from a building library (roads first)
+  bool archetypes = false;   // the buildings came from a building library
+  double road_length = 0.0;  // the street network's total length (metres)
+  std::size_t districts = 0; // how many district cores the city grew from
 
-  // Box massing's plazas and the streets between them, painted into the surface texture.
+  // The core lots' paved forecourts (lot centre, half extents along the frontage and depth, yaw),
+  // painted into the surface texture.
   struct apron {
     double x = 0, y = 0, z = 0, hx = 0, hy = 0, yaw = 0;
   };
-  struct street {
-    double x0, y0, x1, y1;
-  };
   std::vector<apron> aprons;
-  std::vector<street> streets;
 
   double height_min = 0, height_max = 0; // the relief's range over the raster
 
@@ -126,7 +136,7 @@ struct generated_world {
   world_geometry geometry() const;
 };
 
-// Generate. `library` may be null or empty: the city is then box massing.
+// Generate. `library` may be null or empty: the city's buildings are then procedural massing.
 generated_world generate_world(const generated_world_params &p,
                                const building_library *library = nullptr);
 
@@ -134,7 +144,7 @@ generated_world generate_world(const generated_world_params &p,
 // terrain's UVs). The raster is far coarser than the texture, so no texel shows its cell's square:
 // material mode blends the cells around each texel at a noise-warped position, so classes meet
 // along frayed, organic edges (asphalt excepted, which stays straight); grass is broken up with
-// dirt and dry grass, and box massing's streets and plazas are painted on. Risk and height are
+// dirt and dry grass, and the core lots' forecourts are paved. Risk and height are
 // interpolated; occupancy shows its cells.
 std::vector<unsigned char> paint_surface(const generated_world &w,
                                          surface_color mode = surface_color::material,

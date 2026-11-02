@@ -40,7 +40,7 @@
 // `look: soft` is demo3's daylight materials (matte ground and concrete); `classic` is
 // terrain_lab's. The building library is the Austin archetypes (cvc::world::load_building_library):
 // the prop's URI, else $CVC_NAV_BUNDLE, else /bundle/buildings.glb (a wasm mount); without one the
-// city is box massing.
+// city's buildings are procedural massing.
 
 #ifndef CVC_GL_ARIADNE_WORLD_NODES_H
 #define CVC_GL_ARIADNE_WORLD_NODES_H

@@ -2,9 +2,10 @@
 # generated world on libcvc's fastest render path.
 #
 # The world is one `generated_world` node (cvcGL, cvc::world::generate_world): the relief and the
-# L-system prop scatter of cvc::world, the roads-first city (a terrain-following street network with
-# the Austin building archetypes in its lots, or box massing without them) and the water below
-# water_level, drawn as a handful of merged meshes: the terrain with its baked surface texture, the
+# L-system prop scatter of cvc::world, the roads-first city (district cores, a graded street
+# network grown from them, lots along it holding the Austin building archetypes or procedural
+# buildings) and the water below water_level, drawn as a handful of merged meshes: the terrain with
+# its baked surface texture, the
 # props, the buildings, the roads, the foliage and the needles, plus the water volume. Its
 # world_controls panel regenerates it live; nothing here is host C++.
 #
@@ -138,7 +139,7 @@ scene:
       preset: standard     # standard | forest | urban | sparse | island (counts and relief)
       trees: 500
       rocks: 90
-      buildings: 110       # box massing's sites (the roads-first city fills its lots instead)
+      buildings: 110       # the most buildings, filled from the district cores out
       tree_gen: 5
       amp: 90              # relief, metres
       water_level: 34      # metres; everything below is water
