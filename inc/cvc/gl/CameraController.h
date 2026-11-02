@@ -153,6 +153,8 @@ public:
 
   // Orbit center (state "orbit.center").
   void setOrbitCenter(double x, double y, double z);
+  // The orbit's distance from its centre (state "orbit.distance"; the wheel changes it).
+  double orbitDistance() const;
   // How far the orbit's elevation may go, in degrees (state "orbit.min_elevation" and
   // "orbit.max_elevation"; -89 and 89 by default). A third-person camera over a floor keeps it
   // above the floor this way: looking up past the lower limit would put the eye under it.
@@ -252,6 +254,10 @@ public:
   bool mouseLookEnabled() const;
   // Mouse look is on and the pointer is captured: the view follows the mouse.
   bool mouseLooking() const;
+  // Whether the pointer is over a UI window (an overlay sets this every frame). In the browser a
+  // press on the canvas takes the pointer lock in the press itself -- the browser may refuse a
+  // request made later from the frame -- unless the press is the UI's.
+  void setPointerOverUi(bool over);
 
   // Drop every currently-held movement key. Call when input focus leaves the
   // viewport (e.g. a UI overlay takes the keyboard): a key pressed before the

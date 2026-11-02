@@ -635,10 +635,15 @@ the loader only *captures*. The host wires them:
   (*Drag to look* or *Mouse look*), `mouse_sensitivity`, `invert_pitch` and `invert_yaw`, and
   *Camera distance*, the camera's `orbit.distance` (the wheel changes it too). Under mouse look
   a click on the scene captures the pointer and the mouse turns the view with no button held,
-  until *Free the mouse* (Escape; in a browser, Escape always ends its pointer lock). In
-  conference mode the avatar faces where the camera aims, standing or walking, and walks that
-  way: it turns with the camera every frame on your screen, and the relay hears each turn (at
-  most 20 intents a second, a key at once) and shows it to everyone else. In either look
+  until *Free the mouse* (Escape; in a browser, Escape always ends its pointer lock). In a
+  browser the page takes its pointer lock inside that press itself (the cursor goes, and the
+  view keeps turning past the screen's edge): a press over a window is the UI's
+  (`CameraController::setPointerOverUi`, which the overlay sets each frame). In conference mode
+  the avatar faces where the camera aims, standing or walking, and walks that way: it turns
+  with the camera every frame on your screen, and the relay hears each turn (at most 20 intents
+  a second, a key at once) and shows it to everyone else. The camera looks past the avatar's
+  right shoulder at a point 4 m ahead of it (at most a third of the camera's distance), so the
+  crosshair marks where you aim, downrange. In either look
   the ground is the camera's floor (`orbit.floor.*`): looking up slides the eye in along its line
   of sight rather than under the ground, and an eye that comes inside the avatar hides it.
   `$CVC_ARIGL_LOOK=mouse` (the browser page's `?look=mouse`) starts in mouse look. A touch

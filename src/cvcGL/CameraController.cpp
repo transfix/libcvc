@@ -52,21 +52,27 @@
 // camera asked for itself is not counted.
 // A refusal comes as pointerlockerror, as the request's rejected promise, or both (Chromium
 // rejects a page that can never lock, an embedded one, with WrongDocumentError and no event): it
-// counts once. The camera asks from the frame, just after the click (VTK's events are queued), and
-// a browser that grants the lock only inside the click's own handler refuses that: it is asked
-// again inside the next click on the canvas. A second refusal, or one that can never be granted,
-// counts as lost.
+// counts once, and the console says why. The lock is taken inside the press on the canvas itself
+// while mouse look waits for one (`armed`: on, in Orbit, the pointer not over the UI): a browser
+// grants it there, where a request from the frame -- after the click, VTK's events being queued --
+// can be refused. That request from the frame is still made (a host that captures in code); when
+// it is refused it is asked again inside the next click on the canvas. A second refusal, or one
+// that can never be granted, counts as lost.
 // clang-format off: JavaScript bodies (only == and != in them: the preprocessor reads them as C++
 // tokens, and a === would come out split)
-EM_JS(void, cvcgl_pointer_lock, (int on, const char *selector), {
+// on: 1 wants the lock, 0 lets it go, -1 leaves it as it is (only `armed` changes).
+EM_JS(void, cvcgl_pointer_lock, (int on, int armed, const char *selector), {
   var st = Module.cvcglPointerLock;
   if (!st) {
     st = Module.cvcglPointerLock = {dx: 0, dy: 0, locked: false, exiting: false, lost: 0,
-                                    canvas: null, want: false, pending: false, retried: false};
+                                    canvas: null, want: false, pending: false, retried: false,
+                                    armed: false};
     st.refused = function(name) {
       if (!st.pending)
         return; // the same refusal's other report
       st.pending = false;
+      console.warn('cvcGL: the browser refused the pointer lock (' + (name || 'pointerlockerror') +
+                   ')');
       if (st.want && !st.retried && name != 'WrongDocumentError' && name != 'NotSupportedError') {
         st.retried = true; // again in the next click
         return;
@@ -95,6 +101,14 @@ EM_JS(void, cvcgl_pointer_lock, (int on, const char *selector), {
       }
     });
     document.addEventListener('pointerlockerror', function() { st.refused(''); });
+    // Before VTK's own handlers (capture), so the press is still the user's gesture.
+    document.addEventListener('mousedown', function(e) {
+      if (e.button == 0 && st.armed && !st.locked && e.target == st.canvas) {
+        st.want = true;
+        st.retried = false;
+        st.request();
+      }
+    }, true);
     document.addEventListener('mouseup', function(e) {
       if (st.want && st.retried && !st.locked && e.target == st.canvas)
         st.request();
@@ -107,10 +121,12 @@ EM_JS(void, cvcgl_pointer_lock, (int on, const char *selector), {
     });
   }
   st.canvas = document.querySelector(UTF8ToString(selector)) || Module.canvas || null;
-  if (on) {
+  st.armed = armed != 0;
+  if (on > 0) {
     st.want = true;
-    st.request();
-  } else {
+    if (!st.pending) // the press already asked
+      st.request();
+  } else if (on == 0) {
     st.want = false;
     st.pending = false;
     st.retried = false;
@@ -131,6 +147,11 @@ EM_JS(double, cvcgl_pointer_lock_motion, (int axis), {
   else
     st.dx = 0;
   return v;
+});
+// Whether the page holds the lock now.
+EM_JS(int, cvcgl_pointer_locked, (), {
+  var st = Module.cvcglPointerLock;
+  return st && st.locked ? 1 : 0;
 });
 // How many times the browser ended the lock since the last call.
 EM_JS(int, cvcgl_pointer_lock_lost, (), {
@@ -377,6 +398,8 @@ struct CameraController::Impl {
   bool primaryDragPans = false;
   bool captureApplied = false;           // what the window / the browser was last told (capture)
   bool browserLock = false;              // the browser was asked for its pointer lock (ever)
+  bool pointerOverUi = false;            // setPointerOverUi: a press there is the UI's
+  int armedSent = -1;                    // what the page was last told of `armed` (-1: nothing)
   double lockRemX = 0.0, lockRemY = 0.0; // the pointer lock's fractions of a pixel, carried
   double poseMirrorAccum = 0.0;
   // Map-mode fit: the rect frameMap() was asked to show, the aspect it was last
@@ -1331,6 +1354,9 @@ bool CameraController::mouseLooking() const {
   const Impl &s = *m_impl;
   return s.mouseLook && s.mode == Mode::Orbit && s.pointerCapture;
 }
+void CameraController::setPointerOverUi(bool over) { m_impl->pointerOverUi = over; }
+
+double CameraController::orbitDistance() const { return m_impl->orbitDistance; }
 
 void CameraController::setInvertYaw(bool invert) {
   m_impl->invertYaw = invert;
@@ -1363,16 +1389,27 @@ void CameraController::clearOrbitFloor() {
 
 void CameraController::applyPointerCapture() {
   Impl &s = *m_impl;
-  if (s.captureApplied == s.pointerCapture)
-    return;
 #ifdef __EMSCRIPTEN__
   const char *selector = "#canvas";
   if (auto *wi = vtkWebAssemblyRenderWindowInteractor::SafeDownCast(s.interactor))
     if (wi->GetCanvasSelector())
       selector = wi->GetCanvasSelector();
+  // A press on the canvas takes the lock itself while mouse look waits for one: tell the page.
+  const int armed = s.mouseLook && s.mode == Mode::Orbit && !s.pointerOverUi ? 1 : 0;
+  if (s.captureApplied == s.pointerCapture) {
+    if (armed != s.armedSent && (armed || s.browserLock)) {
+      s.browserLock = true;
+      cvcgl_pointer_lock(-1, armed, selector);
+      s.armedSent = armed;
+    }
+    return;
+  }
   s.browserLock = s.browserLock || s.pointerCapture;
-  cvcgl_pointer_lock(s.pointerCapture ? 1 : 0, selector); // the browser hides the cursor
+  cvcgl_pointer_lock(s.pointerCapture ? 1 : 0, armed, selector); // the browser hides the cursor
+  s.armedSent = armed;
 #else
+  if (s.captureApplied == s.pointerCapture)
+    return;
   if (!s.window)
     return; // no window yet: update() tries again
 #ifdef CVC_ENABLE_SDL
@@ -1403,6 +1440,14 @@ void CameraController::pollPointerLock() {
     s.lockRemX = s.lockRemY = 0.0;
     syncConfigToState();
     return;
+  }
+  // The page took the lock in a press on the canvas (mouse look, armed): the pointer is captured.
+  if (!s.pointerCapture && s.mouseLook && s.mode == Mode::Orbit && cvcgl_pointer_locked()) {
+    s.pointerCapture = true;
+    s.captureApplied = true;
+    s.lockRemX = s.lockRemY = 0.0;
+    syncConfigToState();
+    return; // the press's own motion is not a turn
   }
   if (!s.pointerCapture)
     return;

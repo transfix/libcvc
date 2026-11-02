@@ -454,13 +454,16 @@ struct ConferenceSession {
   static constexpr double kEyeHeight = 1.2; // orbit centre above the avatar's feet (m)
   // Mouse look (the Controls window; CameraController::setMouseLookEnabled): the camera aims, we
   // face where it does and walk that way. Turning proposes at most kTurnHz intents a second (a
-  // key still proposes at once; our own avatar turns every frame), and the camera pivots over our
-  // right shoulder.
+  // key still proposes at once; our own avatar turns every frame), and the camera looks past our
+  // right shoulder at a point ahead of us.
   std::string walk_keys_;    // where our walk keys are bound (avatar_keys_path)
   unsigned last_keys_ = 0;   // the movement keys held at the last proposal (a bit each)
   double next_turn_s_ = 0.0; // steady_s() before which a turn alone proposes nothing
   static constexpr double kTurnHz = 20.0;
   static constexpr double kShoulder = 0.45; // the pivot's offset to the right (m)
+  static constexpr double kAimAhead = 4.0;  // and ahead of us: the crosshair's point (m)
+  static constexpr double kAimEaseS = 0.2;  // the pivot's easing as mouse look turns on and off
+  double aim_blend_ = 0.0;                  // 0 = the pivot on us, 1 = over the shoulder, ahead
   // Either look: the ground under us is the camera's floor (an eye that would go under it, looking
   // up, slides in instead), and an eye inside our own avatar hides it.
   double floor_z_ = -1e300;                       // the floor last given to the camera
@@ -1032,11 +1035,20 @@ struct ConferenceSession {
         cam_->frameBounds(p[0] - 8.0, p[1] - 8.0, p[2], p[0] + 8.0, p[1] + 8.0, p[2] + 2.0);
         framed_ = true;
       }
-      double c[3] = {p[0], p[1], p[2] + kEyeHeight};
-      if (look) { // over the right shoulder: the crosshair clears our own head
-        c[0] += kShoulder * std::sin(facing_yaw_);
-        c[1] -= kShoulder * std::cos(facing_yaw_);
-      }
+      // Under mouse look the camera looks past us: at a point over our right shoulder and
+      // kAimAhead down the way we face, so the crosshair marks where we aim, ahead of us, and
+      // clears our own head. We face where the camera looks, so that point turns with us and the
+      // camera still turns about us. Never more than a third of the orbit's distance ahead, so the
+      // camera stays behind us; eased in and out as mouse look turns on and off.
+      aim_blend_ += ((look ? 1.0 : 0.0) - aim_blend_) *
+                    (1.0 - std::exp(-std::max(0.0, f.wall_dt) / kAimEaseS));
+      if (std::fabs(aim_blend_ - (look ? 1.0 : 0.0)) < 1e-3)
+        aim_blend_ = look ? 1.0 : 0.0;
+      const double ahead = aim_blend_ * std::min(kAimAhead, cam_->orbitDistance() / 3.0);
+      const double side = aim_blend_ * kShoulder;
+      const double fx = std::cos(facing_yaw_), fy = std::sin(facing_yaw_); // right is (fy, -fx)
+      double c[3] = {p[0] + ahead * fx + side * fy, p[1] + ahead * fy - side * fx,
+                     p[2] + kEyeHeight};
       if (std::fabs(c[0] - orbit_center_[0]) + std::fabs(c[1] - orbit_center_[1]) +
               std::fabs(c[2] - orbit_center_[2]) >
           1e-4) {

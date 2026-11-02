@@ -404,6 +404,8 @@ struct ImGuiOverlay::Impl {
     }
     if (sceneDraw) // scene annotations: under the UI, and shown with the panels hidden too
       sceneDraw();
+    if (cam) // a press over a window is the UI's, not the camera's (a browser's pointer lock)
+      cam->setPointerOverUi(io.WantCaptureMouse);
     if (cam && cam->mouseLookEnabled() && cam->mode() == CameraController::Mode::Orbit)
       drawLookCue(cam->pointerCapture());
     // The toggle is drawn FIRST so it is always reachable, even when the panels
