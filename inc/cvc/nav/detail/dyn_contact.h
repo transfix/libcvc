@@ -174,10 +174,11 @@ inline void dyn_contact_field(const dyn_contact_params &p, const std::vector<dyn
 }
 
 // A rounded rectangle's signed distance at (lx, ly) in its body's axes (from the centre of gravity:
-// the footprint's outline with corners of radius rho, rho at most the half width), and its gradient
-// there (gx, gy, body axes).
+// the footprint's outline with corners of radius rho, held to the half width and half length), and
+// its gradient there (gx, gy, body axes).
 inline double dyn_rounded_box_sdf(const dyn_footprint &f, double rho, double lx, double ly,
                                   double &gx, double &gy) {
+  rho = std::max(0.0, std::min(rho, std::min(f.half_width, 0.5 * (f.front + f.rear))));
   const double cx0 = 0.5 * (f.front - f.rear);
   const double a = 0.5 * (f.front + f.rear) - rho, bb = f.half_width - rho;
   const double qx0 = lx - cx0, qy0 = ly;

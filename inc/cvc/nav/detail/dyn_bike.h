@@ -849,7 +849,8 @@ CVC_HD inline dyn_ph_rates<S> dyn_ph_rates_at(const dyn_bike_params &p, const dy
 // The powers are the trapezoid between the step's start (with the inputs it applied, the
 // actuators' outputs) and the twist it reached before its limiters; limiter is the kinetic energy
 // the speed clamp and the low-speed blend then added (< 0: removed); residual is the integrator's
-// error, second order in hdt per step.
+// error, second order in hdt per step. With an external wrench (dyn_plant_books' `wrench`), the
+// port's energy is its own line, returned through `port`: the residual is then net of it.
 template <class S> struct dyn_ph_books {
   S dH, dissipated, supplied, floor, grade, limiter, residual;
 };

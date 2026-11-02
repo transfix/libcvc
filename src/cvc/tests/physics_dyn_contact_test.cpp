@@ -622,11 +622,13 @@ TEST(DynContact, Golden) {
     now.push_back(pts[k].x);
     now.push_back(pts[k].y);
   }
-  // The bodies: (x, y, psi, vx, vy, r) at the centre of gravity.
-  const double bodies[][6] = {{22.4, 0.3, 0.0, 4.0, 0.1, 0.05},
-                              {22.0, 1.0, 0.52, 3.5, -0.4, 0.3},
-                              {21.8, -2.0, -0.4, -1.0, 0.8, -0.6},
-                              {-1.5, 3.1, 1.2, 2.0, 0.5, 0.2},
+  // The bodies: (x, y, psi, vx, vy, r) at the centre of gravity, each with points in the skin: the
+  // front end 2 cm into the wall, a corner 2 cm in at an angle, a corner 3 cm off it, a side over
+  // the pillar, a corner past it.
+  const double bodies[][6] = {{22.72, 0.3, 0.0, 4.0, 0.1, 0.05},
+                              {22.48, 1.0, 0.52, 3.5, -0.4, 0.3},
+                              {22.42, -2.0, -0.4, -1.0, 0.8, -0.6},
+                              {0.0, 2.25, 0.0, 2.0, 0.5, 0.2},
                               {2.6, -2.2, 2.4, 1.5, -1.0, 0.7}};
   const wall_field wall{25.0};
   const pillar_field pillar{0.0, 0.0, 1.2};
@@ -641,6 +643,7 @@ TEST(DynContact, Golden) {
       diff::dyn_contact_field(p, pts, wall, b, c);
     else
       diff::dyn_contact_field(p, pts, pillar, b, c);
+    EXPECT_GT(c.touching, 0) << "field case " << k << " pins nothing";
     js << "  {\"field\": \"" << (at_wall ? "wall" : "pillar")
        << "\", \"body\": " << arr(bodies[k], 6) << ", \"contact\": " << contact_json(c) << "}"
        << (k < 4 ? "," : "") << "\n";
@@ -689,7 +692,32 @@ TEST(DynContact, Golden) {
   now.insert(now.end(), next, next + 8);
   now.insert(now.end(), books, books + 8);
   now.insert(now.end(), twist, twist + 3);
-  js << " ],\n \"step\": {\"state\": " << arr(state, 8)
+  // The step's vehicle, so the twin needs no other file.
+  js << " ],\n \"step\": {\"params\": {";
+  const std::pair<const char *, float> hpar[] = {{"m", hp.m},
+                                                 {"Iz", hp.Iz},
+                                                 {"lf", hp.lf},
+                                                 {"lr", hp.lr},
+                                                 {"h", hp.h},
+                                                 {"g", hp.g},
+                                                 {"mu", hp.mu},
+                                                 {"B_f", hp.B_f},
+                                                 {"B_r", hp.B_r},
+                                                 {"C", hp.C},
+                                                 {"front_drive", hp.front_drive},
+                                                 {"front_brake", hp.front_brake},
+                                                 {"drag", hp.drag},
+                                                 {"c_rr", hp.c_rr},
+                                                 {"tau_steer", hp.tau_steer},
+                                                 {"steer_rate", hp.steer_rate},
+                                                 {"tau_drive", hp.tau_drive},
+                                                 {"v_blend", hp.v_blend},
+                                                 {"v_width", hp.v_width},
+                                                 {"eps", hp.eps},
+                                                 {"fz_min", hp.fz_min}};
+  for (std::size_t k = 0; k < sizeof hpar / sizeof hpar[0]; ++k)
+    js << (k ? ", " : "") << "\"" << hpar[k].first << "\": " << num(hpar[k].second);
+  js << ", \"iters\": " << hp.iters << "},\n  \"state\": " << arr(state, 8)
      << ", \"delta_cmd\": 0.12, \"a_cmd\": -2, \"grade\": 0.01, \"wrench\": " << arr(W, 3)
      << ",\n  \"limits\": {\"L\": " << num(lim.L) << ", \"vmax\": " << num(lim.vmax)
      << ", \"hdt\": " << num(lim.hdt) << ", \"allow_reverse\": 0}"
