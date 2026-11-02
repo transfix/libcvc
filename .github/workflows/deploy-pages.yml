@@ -92,6 +92,20 @@ jobs:
               --platform wasm --arch wasm32 --config release --link static \
               --no-fallback-to-source
           done
+          # vtk: the catalog's (9.5.0+cvc.4 or later), linked against the libtiff, libxml2, liblzma
+          # and freetype installed above. The VTK this prefix held before was installed by hand and
+          # bundles its own copies, which VTK renames only in part: once a demo also linked the
+          # catalog's libtiff (through ImageMagick), wasm-ld stopped on duplicate _TIFF* symbols
+          # between libvtktiff-9.5.a and libtiff.a, and every deploy failed from the media stack
+          # (60d9a52a) on. Not skippable: the gallery is VTK through and through.
+          echo "=== vtk ==="
+          cvcpkg install vtk --prefix "$CVC_WASM_DEPS" \
+            --platform wasm --arch wasm32 --config release --link static \
+            --no-fallback-to-source
+          # The old VTK's bundled archives stay behind in the prefix (an install does not remove
+          # another version's files). The new VTK's targets do not name them, but a link that globs
+          # the prefix would, so they go.
+          rm -f "$CVC_WASM_DEPS"/lib/libvtk{tiff,libxml2,lzma,freetype}-9.5.a
           # ftxui: the Ariadne terminal backend. build-wasm-demo.sh builds the `ari` page (an
           # .ari document in an xterm.js terminal) into the gallery only when it is here, and the
           # live check below expects ari, so it may not be skipped either.
