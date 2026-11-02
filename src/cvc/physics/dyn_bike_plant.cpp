@@ -11,6 +11,7 @@
 #include "dyn_world.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cvc/core/exception.h>
 #include <cvc/nav/dyn_bike.h>
@@ -41,6 +42,7 @@ void add(dyn_bike_books &to, const dyn_bike_books &d) {
   to.drive += d.drive;
   to.brake += d.brake;
   to.dissipated += d.dissipated;
+  to.slip += d.slip;
   to.floor += d.floor;
   to.grade += d.grade;
   to.limiter += d.limiter;
@@ -51,8 +53,8 @@ void add(dyn_bike_books &to, const dyn_bike_books &d) {
 } // namespace
 
 double dyn_bike_books::flow() const {
-  return std::fabs(drive) + std::fabs(brake) + std::fabs(dissipated) + std::fabs(floor) +
-         std::fabs(grade) + std::fabs(limiter) + std::fabs(contact);
+  return std::fabs(drive) + std::fabs(brake) + std::fabs(dissipated) + std::fabs(slip) +
+         std::fabs(floor) + std::fabs(grade) + std::fabs(limiter) + std::fabs(contact);
 }
 
 dyn_bike_plant::dyn_bike_plant(std::vector<vehicle_desc> descs, dyn_bike_plant_options options)
@@ -73,6 +75,13 @@ dyn_bike_plant::dyn_bike_plant(std::vector<vehicle_desc> descs, dyn_bike_plant_o
 dyn_bike_plant::~dyn_bike_plant() = default;
 
 bool dyn_bike_plant::collides() const { return _chassis->on(); }
+
+double dyn_bike_plant::wheel_speed(int i, int axle) const {
+  const agent &a = _agents.at(static_cast<std::size_t>(i));
+  if (axle < 0 || axle > 1)
+    throw cvc::physics_error("dyn_bike_plant::wheel_speed: the axle is 0 (front) or 1 (rear)");
+  return _o.wheel_spin ? a.om[axle] : a.s.vx / a.p.r_w;
+}
 
 body_id dyn_bike_plant::chassis(int i) const {
   return _chassis->on() ? _chassis->box(i) : body_id{};
@@ -121,6 +130,7 @@ void dyn_bike_plant::attach(int n, const cvc::nav::plant_state *start,
     a.s.x = p.x;
     a.s.y = p.y;
     a.s.psi = start[i].heading;
+    a.om[0] = a.om[1] = 0.0;
     a.kinetic0 = 0.0;
     a.total = a.tick = dyn_bike_books{};
     measure(a, 0.0, 0.0, a.s.psi, false);
@@ -159,13 +169,28 @@ cvc::nav::plant_state dyn_bike_plant::state(int i) const {
   s.heading = static_cast<float>(dyn::wrap(a.s.psi));
   s.speed = static_cast<float>(_units.to_normalized(a.s.vx, dim::velocity, _frame));
   s.steer = static_cast<float>(a.s.delta);
-  // The most used tire: its slip angle over the Pacejka peak's, tan(pi / 2C) / B.
+  // The most used tire: its slip angle over the Pacejka peak's, tan(pi / 2C) / B; with wheel spin
+  // as nav_plant reads Jolt's, the slip ratio and angle over theirs together.
   if (std::fabs(a.s.vx) >= 2.0) {
     double Dt[2][2], kf, kr, af, ar;
     diff::dyn_ph_tangent_D(a.p, a.s, Dt, kf, kr, af, ar);
     const double C = a.p.C, peak_f = std::tan(kPi / (2.0 * C)) / a.p.B_f,
                  peak_r = std::tan(kPi / (2.0 * C)) / a.p.B_r;
-    s.tire_use = static_cast<float>(std::max(std::fabs(af) / peak_f, std::fabs(ar) / peak_r));
+    double use_f = std::fabs(af) / peak_f, use_r = std::fabs(ar) / peak_r;
+    if (_o.wheel_spin) {
+      diff::dyn_spin_state<double> ss;
+      ss.b = a.s;
+      ss.om_f = a.om[0];
+      ss.om_r = a.om[1];
+      diff::dyn_spin_ph_parts<double> q;
+      diff::dyn_spin_ph_parts_at(a.p, ss, q);
+      const double peak_x = std::tan(kPi / (2.0 * a.p.C_x)) / a.p.B_x, e2 = a.p.eps * a.p.eps;
+      const double kx_f = q.sf / std::sqrt(q.gf * q.gf + e2) / peak_x;
+      const double kx_r = q.sr / std::sqrt(q.gr * q.gr + e2) / peak_x;
+      use_f = std::hypot(use_f, kx_f);
+      use_r = std::hypot(use_r, kx_r);
+    }
+    s.tire_use = static_cast<float>(std::max(use_f, use_r));
   }
   return s;
 }
@@ -217,6 +242,8 @@ void dyn_bike_plant::advance() {
   std::vector<double> vx0(n), vy0(n), psi0(n);
   std::vector<diff::dyn_state<double>> next(n);
   std::vector<diff::dyn_ph_books<double>> books(n);
+  std::vector<diff::dyn_spin_ph_books<double>> spin_books(n);
+  std::vector<std::array<double, 2>> om_next(n);
   for (std::size_t i = 0; i < n; ++i) {
     agent &a = _agents[i];
     vx0[i] = a.s.vx;
@@ -241,7 +268,19 @@ void dyn_bike_plant::advance() {
       const double accel = _o.driver ? dyn::drive(a.driver, a.desc, a.accel_cmd, a.s.vx, grade,
                                                   _o.gravity, a.p.tau_drive, h)
                                      : a.accel_cmd;
-      diff::dyn_plant_books<double>(a.p, a.lim, a.s, a.steer_cmd, accel, grade, next[i], books[i]);
+      if (_o.wheel_spin) {
+        diff::dyn_spin_state<double> ss, so;
+        ss.b = a.s;
+        ss.om_f = a.om[0];
+        ss.om_r = a.om[1];
+        diff::dyn_spin_plant_books<double>(a.p, a.lim, ss, a.steer_cmd, accel, grade, so,
+                                           spin_books[i]);
+        next[i] = so.b;
+        om_next[i] = {so.om_f, so.om_r};
+      } else {
+        diff::dyn_plant_books<double>(a.p, a.lim, a.s, a.steer_cmd, accel, grade, next[i],
+                                      books[i]);
+      }
       if (world) {
         // The box where this substep starts, moving as the model moved: its centre's velocity is
         // the centre of gravity's plus the yaw rate's sweep of the offset along the heading.
@@ -260,14 +299,28 @@ void dyn_bike_plant::advance() {
       _chassis->step();
     for (std::size_t i = 0; i < n; ++i) {
       agent &a = _agents[i];
-      const diff::dyn_ph_books<double> &b = books[i];
       dyn_bike_books d;
-      (b.supplied >= 0.0 ? d.drive : d.brake) = std::fabs(b.supplied);
-      d.dissipated = b.dissipated;
-      d.floor = b.floor;
-      d.grade = b.grade;
-      d.limiter = b.limiter;
-      d.residual = b.residual;
+      if (_o.wheel_spin) {
+        const diff::dyn_spin_ph_books<double> &b = spin_books[i];
+        (b.supplied >= 0.0 ? d.drive : d.brake) = std::fabs(b.supplied);
+        d.brake += b.braked;
+        d.dissipated = b.dissipated;
+        d.slip = b.slip;
+        d.floor = b.floor;
+        d.grade = b.grade;
+        d.limiter = b.limiter;
+        d.residual = b.residual;
+        a.om[0] = om_next[i][0];
+        a.om[1] = om_next[i][1];
+      } else {
+        const diff::dyn_ph_books<double> &b = books[i];
+        (b.supplied >= 0.0 ? d.drive : d.brake) = std::fabs(b.supplied);
+        d.dissipated = b.dissipated;
+        d.floor = b.floor;
+        d.grade = b.grade;
+        d.limiter = b.limiter;
+        d.residual = b.residual;
+      }
       diff::dyn_state<double> o = next[i];
       if (world && _chassis->touched(static_cast<int>(i))) {
         // The world's pose and twist, back into the model; the energy they changed is the
@@ -298,6 +351,8 @@ void dyn_bike_plant::advance() {
     agent &a = _agents[i];
     a.hits += a.hits_tick;
     a.tick.kinetic = diff::dyn_ph_hamiltonian(a.p, a.s);
+    if (_o.wheel_spin)
+      a.tick.kinetic += 0.5 * (a.p.J_f * a.om[0] * a.om[0] + a.p.J_r * a.om[1] * a.om[1]);
     add(a.total, a.tick);
     a.total.kinetic = a.tick.kinetic;
     measure(a, vx0[i], vy0[i], psi0[i], true);
