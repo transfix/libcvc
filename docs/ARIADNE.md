@@ -2188,10 +2188,14 @@ vehicle-humvee`) and the Humvee with `find_vehicle_model()`. `pycvc_gl.vehicle.V
 makes a glTF vehicle +X forward, +Z up and true to scale (as the C++ demos'
 `load_vehicle_template` does), and `seat_transform` / `body_transform` place it from a heading or
 a physics body's pose. Its planning grid is `pycvc.nav_world_rasterize(city.world(), rows, cols,
-...)`, cvc::nav's rasterizer (no VTK). The Jolt plant drives on flat ground with the buildings as
-boxes, as the C++ city demos do; `--relief` puts it on the city's own terrain and building mesh
-(`pycvc.nav_plant(..., ground=field)` starts each vehicle on the ground under it), where a Humvee
-that takes a steep embankment at speed rolls over.
+...)`, cvc::nav's rasterizer (no VTK), which also gives the terrain's height at each sample: the
+navigator gets the grade (`nav_sim_world_set_terrain` with the Humvee's
+`nav_plant.terrain_config_of`), and the routes keep off the slopes `nav_terrain_build` marks
+infeasible for it. The Jolt plant drives on flat ground with the buildings as boxes, as the C++
+city demos do; `--relief` puts it on the city's own terrain and building mesh
+(`pycvc.nav_plant(..., ground=field)` starts each vehicle on the ground under it). There the grade
+term halves the rollovers but does not end them: the limit it applies is the climb, and a Humvee
+cornering on a 10-25 degree side slope at 5-9 m/s can still roll (4 of 16 in 96 s of Austin).
 
 Its `scene:` block is `terrain_lab.ari`'s soft afternoon look (§5.4): a pale sky gradient, a
 low warm `three_point` sun with a cool fill, and shadows that follow the camera with soft edges

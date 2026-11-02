@@ -60,8 +60,9 @@ class World:
             cx, cy = 0.5 * (mnx + mxx), 0.5 * (mny + mxy)
             self.bounds = (cx - half, cy - half, cx + half, cy + half)
             self.n = int(round(2 * half / CELL_M)) + 1
-            self.occ = pycvc.nav_world_rasterize(city.world(), self.n, self.n, *self.bounds)[
-                "occupancy"]
+            planes = pycvc.nav_world_rasterize(city.world(), self.n, self.n, *self.bounds)
+            self.occ = planes["occupancy"]
+            self.heights = planes["height"]  # the terrain at each grid sample (m)
             self.field = city.terrain()
             self.buildings = city.world().item_geometry("buildings") if city.buildings_loaded \
                 else None
@@ -72,14 +73,27 @@ class World:
             self.bounds = (-half, -half, half, half)
             self.n = int(round(2 * half / CELL_M)) + 1
             self.occ, self.blocks = block_city(self.n, self.bounds)
+            self.heights = None
             self.field = None
             self.buildings = None
             self.name = "block city"
         border(self.occ)
         self.cx = 0.5 * (self.bounds[0] + self.bounds[2])
         self.cy = 0.5 * (self.bounds[1] + self.bounds[3])
-        # Where a Humvee fits: the free cells at least 2 cells (6 m) from a building.
-        self.roomy = ~dilate(self.occ.astype(bool), 2)
+        # The grade, for the Humvee: its steepest climb on mu 0.9 and its static stability
+        # (nav_plant.terrain_config_of). The navigator takes the terrain into its energy
+        # (Fleet: nav_sim_world_set_terrain), and the routes keep off the slopes past its limit.
+        self.terrain_config = None
+        self.steep = np.zeros(self.occ.shape, bool)
+        if self.heights is not None and hasattr(pycvc, "nav_terrain_build"):
+            self.terrain_config = pycvc.nav_plant.terrain_config_of(pycvc.vehicle_desc.humvee(),
+                                                                    0.9)
+            cell = (self.bounds[2] - self.bounds[0]) / (self.n - 1)
+            self.steep = pycvc.nav_terrain_build(self.heights, cell, self.terrain_config)[
+                "infeasible"].astype(bool)
+        self.plan_occ = (self.occ.astype(bool) | self.steep).astype(np.uint8)
+        # Where a Humvee fits: the free, drivable cells at least 2 cells (6 m) from a building.
+        self.roomy = ~dilate(self.plan_occ.astype(bool), 2)
 
     def height(self, x, y):
         if self.field is None:
@@ -211,6 +225,8 @@ class Fleet:
             1.2 * SCALE, 3.0 * SCALE, 0.06, 9.0 * SCALE, 3.3 * SCALE, float(desc.max_steer),
             2.4 * SCALE, 3.0 * SCALE, 0.8, 1, 1, 6.0 * SCALE, 4, 1, 2.2, -1.4, 8.0, 1, 0.5, 0.15,
             4.0)
+        if world.terrain_config is not None:  # the grade, in the navigator's energy
+            pycvc.nav_sim_world_set_terrain(self.sim, world.heights, world.terrain_config)
         self.plant_kind = "kinematic"
         self.physics = self.plant = None
         if plant == "jolt":
@@ -233,7 +249,10 @@ class Fleet:
         """The Jolt world the Humvees drive in. By default its ground is flat and the buildings are
         boxes over their footprints (as the C++ city demos run it); the scene still draws each
         Humvee seated on the terrain. With `relief`, the physics has the city's own terrain and
-        building mesh: honest, and a Humvee taking a steep embankment at speed rolls over."""
+        building mesh. The navigator has the grade either way (World.terrain_config) and the routes
+        keep off slopes past the Humvee's limit, but that is its climb, not its cornering: on
+        Austin's relief some Humvees still roll over taking a 10-25 degree side slope at 5-9 m/s
+        (4 of 16 in 96 s here), so the flat ground is the default."""
         w = pycvc.physics_world(backend="jolt", fixed_dt=0.01)
         ground = w.add_material("ground", friction=0.9, rolling_resistance=0.015)
         wall = w.add_material("building", friction=0.6)
@@ -264,7 +283,7 @@ class Fleet:
         x, y, h = float(pos[i, 0]), float(pos[i, 1]), float(head[i])
         for _ in range(6):
             g = goal or self.world.random_free(self.rng, (x, y), 150.0)
-            r = pycvc.nav_plan_vehicle_route(self.world.occ, *self.world.bounds, x, y, h, *g,
+            r = pycvc.nav_plan_vehicle_route(self.world.plan_occ, *self.world.bounds, x, y, h, *g,
                                              self.route_vehicle)
             if r["reached"] and len(r["poses"]) >= 2:
                 pycvc.nav_route_follower_set(self.follower, i, r["poses"])
@@ -349,7 +368,7 @@ def main(argv=None):
     p.add_argument("--half", type=float, default=600.0, help="Austin's crop half-size (m)")
     p.add_argument("--seed", type=int, default=7)
     p.add_argument("--relief", action="store_true",
-                   help="Jolt on the city's terrain and building mesh (Humvees can roll over)")
+                   help="Jolt on the city's terrain and building mesh (some Humvees roll over)")
     extra = p.parse_args(args.rest)
 
     from pycvc_gl.scenes import find_scene
