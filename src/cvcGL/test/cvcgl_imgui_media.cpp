@@ -3,14 +3,18 @@
 // RGBA raster fitted to its box, under the cache's name, and drawn at the box's width; until then
 // (and on failure) a placeholder of the same box is. GL texture upload is draw_image's existing
 // path (cvcgl_stream_texture covers it), so this backend records draw_image instead of calling GL.
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/loader.h>
+#include <cvc/ariadne/media_player.h>
 #include <cvc/ariadne/uri.h>
 #include <cvc/core/app.h>
 #include <cvc/gl/ariadne/ImGuiBackend.h>
 #include <cvc/image/image.h>
+#include <cvc/media/player.h>
 #include <cvc/state/state.h>
 #include <filesystem>
 #include <map>
@@ -57,6 +61,11 @@ struct RecordingBackend : cvc::gl::ImGuiBackend {
     const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
     backdrop_size.push_back(ImVec2(mx.x - mn.x, mx.y - mn.y));
   }
+  std::vector<std::string> buttons; // labels drawn this frame
+  bool button(const char *label) override {
+    buttons.push_back(label);
+    return ImGuiBackend::button(label);
+  }
   bool draw_image(const char *name, float width) override {
     const auto it = published.find(name);
     if (it == published.end())
@@ -75,6 +84,9 @@ int main() {
   std::printf("skip: cvcGL built without ImGui\n");
   return 0;
 #else
+#ifndef _WIN32
+  setenv("SDL_AUDIO_DRIVER", "dummy", 0); // the player's sound, with no sound card
+#endif
   const std::filesystem::path dir =
       std::filesystem::temp_directory_path() / "cvcgl_imgui_media_test";
   std::filesystem::create_directories(dir);
@@ -248,6 +260,67 @@ int main() {
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     chk(avatar, "the card's avatar is drawn at 40 px");
+  }
+  if (cvc::media::register_ariadne_player()) { // §5.13 a video: playing, its frames drawn
+    const std::filesystem::path clip =
+        std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() / "ari" /
+        "tests" / "media" / "clip.webm";
+    cvc::app app;
+    ari::Runtime rt(app, "ui");
+    RecordingBackend be;
+    rt.set_backend(&be);
+    ari::LoadResult lr = ari::load_string("windows:\n"
+                                          "  - window: Player\n"
+                                          "    children:\n"
+                                          "      - video: clip\n"
+                                          "        src: file://" +
+                                          clip.string() +
+                                          "\n"
+                                          "        size: [192, 108]\n"
+                                          "        bind: p.clip\n"
+                                          "        autoplay: true\n");
+    chk(lr.ok, "a document with a video loads");
+    rt.set_root(std::move(lr.root));
+    const auto frame = [&] {
+      be.drawn.clear();
+      be.buttons.clear();
+      io.DeltaTime = 1.0f / 60.0f;
+      ImGui::NewFrame();
+      rt.render();
+      ImGui::Render();
+    };
+    const auto val = [&](const std::string &k) {
+      try {
+        return cvc::state::instance(app)("ui." + k).value();
+      } catch (...) {
+        return std::string();
+      }
+    };
+    long frames = 0;
+    std::string last;
+    const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+    while (std::chrono::steady_clock::now() < end && frames < 5 && val("p.clip.state") != "ended") {
+      frame();
+      for (const auto &kv : be.drawn)
+        if (kv.first.rfind("media:player:", 0) == 0 && be.published[kv.first].width() > 0) {
+          const cvc::image &img = be.published[kv.first];
+          const std::string sig(reinterpret_cast<const char *>(img.data()), img.size_bytes());
+          if (sig != last) {
+            ++frames;
+            last = sig;
+          }
+        }
+      std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    }
+    const std::string st = val("p.clip.state");
+    chk(st == "playing", "it autoplays (" + st + ")");
+    chk(frames >= 5, "and new frames reach ImGui as it plays (" + std::to_string(frames) + ")");
+    chk(st != "playing" ||
+            std::find(be.buttons.begin(), be.buttons.end(), "Pause") != be.buttons.end(),
+        "with a Pause button");
+    ari::media::register_player_factory(nullptr);
+  } else {
+    std::printf("skip: no FFmpeg player in this cvcMedia\n");
   }
   cvc::gl::ImGuiBackend::setImGuiContext(nullptr);
   ImGui::DestroyContext(ctx);

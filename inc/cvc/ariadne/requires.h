@@ -32,6 +32,8 @@ struct HostFacts {
   bool net = false;              // the host turned the network on (net_host.h)
   bool net_auth = false;         // ... with a credential store
   bool net_auth_persist = false; // ... that keeps credentials across runs
+  bool media = false;            // video: / audio: play here (a player, the policy allows it)
+  bool media_player = false;     // ... a player is there at all (it may not play over SSH)
   bool oidc = false;             // ... and signs in with OpenID providers (oidc_host.h)
   bool oidc_loopback = false;    // ... through the system browser and a loopback redirect
   bool oidc_device = false;      // ... with a device code (RFC 8628)

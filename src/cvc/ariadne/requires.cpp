@@ -60,6 +60,12 @@ const std::vector<TokenRule> &rules() {
        [](const HostFacts &) { return true; }},
       {{"image.background", "a window, overlay or group draws a background: picture (§5.12)"},
        [](const HostFacts &) { return true; }},
+      {{"media", "video: and audio: play here (a player, and not an SSH session it would play "
+                 "remotely from, unless --media-play always)"},
+       [](const HostFacts &f) { return f.media; }},
+      {{"media.player",
+        "the host has a player for video: and audio: (ari-media, arigl, a browser)"},
+       [](const HostFacts &f) { return f.media_player; }},
       {{"oidc", "the host signs in with OAuth 2.0 / OpenID Connect providers (oidc-sign-in)"},
        [](const HostFacts &f) { return f.oidc; }},
       {{"oidc.loopback", "sign-in through the system browser and a loopback redirect (RFC 8252)"},

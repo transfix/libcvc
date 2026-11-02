@@ -101,6 +101,9 @@ if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL 
   add_executable(ari_media_test ari_media_test.cpp)
   target_link_libraries(ari_media_test PRIVATE cvc GTest::gtest GTest::gtest_main)
   add_dependencies(ari_media_test ari)
+  if(TARGET ari-media) # the video:/audio: tests run ari-media, built beside ari
+    add_dependencies(ari_media_test ari-media)
+  endif()
   gtest_discover_tests(ari_media_test PROPERTIES ENVIRONMENT "ARI_BINARY=$<TARGET_FILE:ari>")
   # (quit code), assert and `ari test` end to end (ari_test_command_test.cpp).
   add_executable(ari_test_command_test ari_test_command_test.cpp)
@@ -159,6 +162,15 @@ if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
                 "pic ready clip failed" 60 "@grace · 2h")
       set_tests_properties(ari_run_media_card_${_backend} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60
         ENVIRONMENT "ARI_FLAGS=--component-path ${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne")
+      # ari-media plays a video: (and opens an audio:) on SDL's dummy sound driver (§5.13).
+      if(TARGET ari-media AND CVC_MEDIA_HAVE_FFMPEG)
+        add_test(NAME ari_run_media_player_${_backend}
+          COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/media_in_tmux_test.sh"
+                  $<TARGET_FILE:ari-media> "${CMAKE_CURRENT_SOURCE_DIR}/tests/media_player.ari"
+                  ${_backend} "video playing audio ready" 60)
+        set_tests_properties(ari_run_media_player_${_backend} PROPERTIES SKIP_RETURN_CODE 77
+          TIMEOUT 60 ENVIRONMENT "SDL_AUDIO_DRIVER=dummy")
+      endif()
       # Windows that close and open again in one run (tests/reopen_refit.ari, driven by its keys):
       # each fits the rows it gained while closed, and on tvision one the user resized (Ctrl-F5)
       # comes back at their size.
