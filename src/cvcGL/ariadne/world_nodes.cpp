@@ -91,7 +91,7 @@ const world::building_library &library_at(const std::string &path) {
 
 // Where the archetypes come from: the node's `building_library` (a URI or a path relative to the
 // document), else $CVC_NAV_BUNDLE (a buildings.glb, or a directory holding one), else the wasm
-// mount /bundle/buildings.glb. The first that loads wins; none is box massing.
+// mount /bundle/buildings.glb. The first that loads wins; with none the buildings are procedural.
 const world::building_library &find_library(const ari::SceneNode &n,
                                             std::vector<std::string> *warnings) {
   std::vector<std::string> paths;
@@ -195,7 +195,7 @@ void publish_stats(WorldRT &rt) {
   ari::write<std::string>(app, rt.k.terrain, std::to_string(n) + " x " + std::to_string(n));
   ari::write<std::string>(app, rt.k.status,
                           w.archetypes ? "city: roads first, Austin archetypes"
-                                       : "city: box massing (no building library)");
+                                       : "city: roads first, procedural buildings");
 }
 
 // Style each mesh node the first time it exists. soft = demo3's daylight look (matte ground and

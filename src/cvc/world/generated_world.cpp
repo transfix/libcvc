@@ -43,6 +43,7 @@
 #include <cvc/world/scatter.h>
 #include <cvc/world/sites.h>
 #include <cvc/world/surface.h>
+#include <functional>
 #include <map>
 #include <set>
 #include <utility>
@@ -266,16 +267,18 @@ bool growNativeTree(const std::string &recipe, const placed_prop &pp, std::uint6
   return false;
 }
 
-// Tessellate the scattered TREES and ROCKS into merged meshes (buildings are the city's).
+// Tessellate the scattered TREES and ROCKS into merged meshes (buildings are the city's), leaving
+// out any the city has taken the ground of (`keep` false: a road, a building).
 void buildProps(const world_model &wm, const surface_registry &reg, PropLib &lib,
-                cvc::geometry &solid, cvc::geometry &foliage, cvc::geometry &needle) {
+                const std::function<bool(double, double)> &keep, cvc::geometry &solid,
+                cvc::geometry &foliage, cvc::geometry &needle) {
   const double kStem = 1.7, kLeaf = 2.2;
   std::set<std::string> buildingRecipes;
   for (const auto &sw : wm.params().sc.buildings)
     buildingRecipes.insert(sw.recipe);
   std::size_t i = 0;
   for (const placed_prop &pp : wm.props()) {
-    if (buildingRecipes.count(pp.recipe) ||
+    if (buildingRecipes.count(pp.recipe) || (keep && !keep(pp.x, pp.y)) ||
         growNativeTree(pp.recipe, pp, wm.params().seed, solid, needle)) {
       ++i;
       continue;
@@ -302,236 +305,346 @@ void buildProps(const world_model &wm, const surface_registry &reg, PropLib &lib
   }
 }
 
-// ── box massing: a per-building "sub-grammar" of SOLID full-height blocks in a varied footprint
-// (tower / slab / L / T / podium+tower), on the scatter's building sites, greedily de-conflicted
-// so they never intersect ─────────────────────────────────────────────────────────────────────
-std::uint64_t splitmix(std::uint64_t x) {
-  x += 0x9E3779B97F4A7C15ull;
-  x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
-  x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
-  return x ^ (x >> 31);
-}
-struct BRng {
-  std::uint64_t s;
-  double next() {
-    s = splitmix(s);
-    return double(s >> 11) * (1.0 / 9007199254740992.0);
-  }
-  double range(double a, double b) { return a + (b - a) * next(); }
-  int pick(int n) { return int(next() * n) % n; }
+// ── the city: districts, roads first, lots along them, a building per lot ────
+// A district core: an elliptical bump of urbanity (1 at its centre) on dry, gentle ground.
+struct District {
+  double x = 0, y = 0, r_major = 1, r_minor = 1, c = 1, s = 0, strength = 1;
 };
-lsys::obox groundBox(double cx, double cy, double w, double d, double h, lsys::role rl) {
-  lsys::obox b;
-  b.center = {cx, cy, 0.5 * h};
-  b.half = {0.5 * w, 0.5 * d, 0.5 * h};
-  b.axis[0] = {1, 0, 0};
-  b.axis[1] = {0, 1, 0};
-  b.axis[2] = {0, 0, 1};
-  b.rl = rl;
-  return b;
-}
-struct Massing {
-  std::vector<lsys::obox> boxes;
-  double radius = 0; // XY bounding radius (de-overlap + apron)
+
+// The urbanity field, in [0, 1]: overlapping districts reinforce without passing 1.
+struct Districts {
+  std::vector<District> d;
+  double operator()(double x, double y) const {
+    double keep = 1.0;
+    for (const District &k : d) {
+      const double dx = x - k.x, dy = y - k.y;
+      const double a = (dx * k.c + dy * k.s) / k.r_major, b = (-dx * k.s + dy * k.c) / k.r_minor;
+      keep *= 1.0 - k.strength * std::exp(-0.5 * (a * a + b * b));
+    }
+    return 1.0 - keep;
+  }
 };
-Massing genMassing(BRng &r) {
-  Massing m;
-  const lsys::role mats[4] = {lsys::role::wall_concrete, lsys::role::wall_brick, lsys::role::glass,
-                              lsys::role::metal};
-  lsys::role rl = mats[r.pick(4)];
-  int shape = r.pick(5);
-  double w = r.range(12, 22), d = r.range(10, 18);
-  auto add = [&](double cx, double cy, double bw, double bd, double bh) {
-    m.boxes.push_back(groundBox(cx, cy, bw, bd, bh, rl));
-  };
-  switch (shape) {
-  case 0:
-    add(0, 0, w, d, r.range(40, 78));
-    break; // tower
-  case 1:
-    add(0, 0, r.range(30, 46), r.range(11, 16), r.range(22, 40));
-    break;  // slab
-  case 2: { // L
-    double h = r.range(20, 40);
-    add(-0.25 * w, 0, 0.5 * w, d, h);
-    add(0.25 * w, -0.25 * d, 0.5 * w, 0.5 * d, h);
-    break;
-  }
-  case 3: { // T
-    double h = r.range(20, 42);
-    add(0, 0.2 * d, w * 1.3, 0.45 * d, h);
-    add(0, -0.25 * d, 0.4 * w, d, h);
-    break;
-  }
-  default: { // podium + tower
-    double pw = r.range(26, 40), pd = r.range(18, 28);
-    add(0, 0, pw, pd, r.range(10, 16));
-    add(r.range(-0.15, 0.15) * pw, r.range(-0.15, 0.15) * pd, r.range(12, 18), r.range(10, 16),
-        r.range(38, 66));
-    break;
-  }
-  }
-  for (const lsys::obox &b : m.boxes) {
-    double ex = std::fabs(b.center.x) + b.half.x, ey = std::fabs(b.center.y) + b.half.y;
-    m.radius = std::max(m.radius, std::sqrt(ex * ex + ey * ey));
-  }
-  return m;
-}
-void buildBoxBuildings(const world_model &wm, const surface_registry &reg, std::uint64_t seed,
-                       cvc::geometry &solid, std::vector<generated_world::apron> &aprons,
-                       std::size_t &count) {
-  std::set<std::string> buildingRecipes;
-  for (const auto &sw : wm.params().sc.buildings)
-    buildingRecipes.insert(sw.recipe);
-  std::vector<const placed_prop *> sites;
-  for (const placed_prop &pp : wm.props())
-    if (buildingRecipes.count(pp.recipe))
-      sites.push_back(&pp);
-  std::vector<Vec3d> placed; // accepted (x, y, radius) for de-overlap
-  std::size_t idx = 0;
-  for (const placed_prop *pp : sites) {
-    BRng r{splitmix(seed ^ (std::uint64_t(idx + 1) * 0x100000001B3ull))};
-    ++idx;
-    Massing m = genMassing(r);
-    bool ok = true;
-    for (const Vec3d &q : placed) {
-      double dx = pp->x - q.x, dy = pp->y - q.y, gap = m.radius + q.z + 8.0;
-      if (dx * dx + dy * dy < gap * gap) {
-        ok = false;
-        break;
-      }
-    }
-    if (!ok)
-      continue;
-    placed.push_back({pp->x, pp->y, m.radius});
-    ++count;
-    double yaw = pp->yaw_deg * M_PI / 180.0, yc = std::cos(yaw), ys = std::sin(yaw);
-    Vec3d org{pp->x, pp->y, pp->z};
-    for (const lsys::obox &b : m.boxes)
-      appendBox(solid, b, roleColor(reg, b.rl), yc, ys, 1.0, 1.0, 1.0, org);
-    // The plaza hugs the building's footprint AABB (+ a sidewalk margin), CENTRED on it:
-    // asymmetric shapes (L/T/podium) sit off the massing origin.
-    double minX = 1e30, maxX = -1e30, minY = 1e30, maxY = -1e30;
-    for (const lsys::obox &b : m.boxes) {
-      minX = std::min(minX, b.center.x - b.half.x);
-      maxX = std::max(maxX, b.center.x + b.half.x);
-      minY = std::min(minY, b.center.y - b.half.y);
-      maxY = std::max(maxY, b.center.y + b.half.y);
-    }
-    double lcx = 0.5 * (minX + maxX), lcy = 0.5 * (minY + maxY);
-    double hx = 0.5 * (maxX - minX) + 6.0, hy = 0.5 * (maxY - minY) + 6.0;
-    aprons.push_back(
-        {pp->x + lcx * yc - lcy * ys, pp->y + lcx * ys + lcy * yc, pp->z, hx, hy, yaw});
-  }
+
+double slopeDeg(const heightfield &hf, double x, double y) {
+  const double e = 4.0;
+  const double gx = (hf.sample(x + e, y) - hf.sample(x - e, y)) / (2.0 * e);
+  const double gy = (hf.sample(x, y + e) - hf.sample(x, y - e)) / (2.0 * e);
+  return std::atan(std::hypot(gx, gy)) * 180.0 / M_PI;
 }
 
-// Connect each building plaza to its two nearest neighbours, skipping any span whose midpoint
-// terrain would sit underwater.
-std::vector<generated_world::street>
-computeStreets(const std::vector<generated_world::apron> &aprons, const heightfield &hf,
-               double half, double waterLevel) {
-  std::vector<generated_world::street> out;
-  const int n = int(aprons.size());
-  const double maxLen = half * 0.7;
-  std::set<std::pair<int, int>> edges;
-  for (int i = 0; i < n; ++i) {
-    int best[2] = {-1, -1};
-    double bd[2] = {1e30, 1e30};
-    for (int j = 0; j < n; ++j) {
-      if (j == i)
+// About one district per 600 m of world side. Each centre is the best of a few dozen hashed
+// candidates: dry, flat (scored by exp(-(slope / 9 deg)^2)), with dry, gentle ground around it,
+// off the edges and away from the centres already placed, with a slight pull to the middle of the
+// world.
+Districts pickDistricts(const heightfield &hf, double half, double water, std::uint64_t seed) {
+  using lsys::stream;
+  using lsys::uni;
+  Districts out;
+  const int n = std::max(1, std::min(6, int(std::lround(2.0 * half / 600.0))));
+  const double edge = 0.15 * half, apart = 0.9 * half / std::sqrt(double(n));
+  for (int k = 0; k < n; ++k) {
+    double best = 0.0, bx = 0.0, by = 0.0;
+    for (std::uint32_t i = 0; i < 48; ++i) {
+      const std::uint64_t el = 0xD157u + std::uint64_t(k) * 1000u + i;
+      const double x = uni(seed, stream::terrain, el, 0, -half + edge, half - edge);
+      const double y = uni(seed, stream::terrain, el, 1, -half + edge, half - edge);
+      if (hf.sample(x, y) < water + 3.0)
         continue;
-      double dx = aprons[j].x - aprons[i].x, dy = aprons[j].y - aprons[i].y, d = dx * dx + dy * dy;
-      if (d < bd[0]) {
-        bd[1] = bd[0];
-        best[1] = best[0];
-        bd[0] = d;
-        best[0] = j;
-      } else if (d < bd[1]) {
-        bd[1] = d;
-        best[1] = j;
+      // How much of the ground around it a town could use: dry, and gentle enough for streets
+      // (a flat flood plain by the shore scores low).
+      const double ring = 0.2 * half;
+      int usable = 0, total = 0;
+      for (int a = 0; a < 8; ++a)
+        for (double rr : {0.0, 0.5, 1.0}) {
+          if (rr == 0.0 && a > 0)
+            continue;
+          const double qx = x + rr * ring * std::cos(a * M_PI / 4.0);
+          const double qy = y + rr * ring * std::sin(a * M_PI / 4.0);
+          ++total;
+          usable += hf.sample(qx, qy) > water + 2.0 && slopeDeg(hf, qx, qy) < 16.0 ? 1 : 0;
+        }
+      const double slope = slopeDeg(hf, x, y);
+      double sep = 1.0;
+      for (const District &o : out.d) {
+        const double f = std::min(1.0, std::hypot(x - o.x, y - o.y) / apart);
+        sep *= f * f;
+      }
+      const double score = std::exp(-(slope / 9.0) * (slope / 9.0)) * (double(usable) / total) *
+                           sep * (1.0 - 0.3 * std::hypot(x, y) / half);
+      if (score > best) {
+        best = score;
+        bx = x;
+        by = y;
       }
     }
-    for (int k = 0; k < 2; ++k)
-      if (best[k] >= 0)
-        edges.insert({std::min(i, best[k]), std::max(i, best[k])});
-  }
-  for (const auto &e : edges) {
-    const generated_world::apron &A = aprons[e.first], &B = aprons[e.second];
-    double dx = B.x - A.x, dy = B.y - A.y, L = std::sqrt(dx * dx + dy * dy);
-    if (L < 1.0 || L > maxLen)
-      continue;
-    if (hf.sample(0.5 * (A.x + B.x), 0.5 * (A.y + B.y)) < waterLevel)
-      continue;
-    out.push_back({A.x, A.y, B.x, B.y});
+    if (best <= 0.0)
+      continue; // no dry ground left for another core
+    District D;
+    D.x = bx;
+    D.y = by;
+    const std::uint64_t el = 0xD15Cu + std::uint64_t(k);
+    D.r_major = half * uni(seed, stream::terrain, el, 0, 0.28, 0.42);
+    D.r_minor = D.r_major * uni(seed, stream::terrain, el, 1, 0.55, 0.95);
+    const double ang = uni(seed, stream::terrain, el, 2, 0.0, M_PI);
+    D.c = std::cos(ang);
+    D.s = std::sin(ang);
+    D.strength = k == 0 ? 1.0 : uni(seed, stream::terrain, el, 3, 0.7, 1.0);
+    out.d.push_back(D);
   }
   return out;
 }
 
-// ── the roads-first city ─────────────────────────────────────────────────────
-// Road-generation parameters scaled to the world size. Moderate branching and roomy blocks make a
-// readable street grid; short segment steps keep each ribbon on the terrain.
-road_params cityRoadParams(std::uint64_t seed, double half) {
+// Road-generation parameters scaled to the world size: arterials crossing at each district
+// centre, collectors a block apart off them, local streets packed tighter in the cores and fading
+// out at the districts' edges; grades held to 35 % (steered along the contours: the
+// relief is hilly, its median slope about 33 %) and no road into the water.
+road_params cityRoadParams(std::uint64_t seed, double half, const Districts &dist) {
   road_params rp;
   rp.half = half;
   rp.seed = seed;
-  rp.branch_chance = 0.14;
+  rp.branch_chance = 0.6;   // once a block is run: a little irregularity in the blocks
   rp.terrain_weight = 0.35; // bend toward contours, but keep a readable grid
   rp.block_size = std::max(110.0, half * 0.20);
-  rp.local_block = std::max(48.0, half * 0.08);
+  rp.local_block = std::max(56.0, half * 0.09); // room for two lots back to back
   rp.segment_len = std::max(6.0, half * 0.012);
-  rp.core_radius = half * 0.6;
-  rp.arterial_width = 8.0; // thin carriageways
-  rp.local_width = 4.5;
+  // Snap within less than a step, so the arms leaving a centre (a step apart) stay separate roads.
+  rp.snap_dist = std::min(10.0, 0.8 * rp.segment_len);
+  rp.min_segment = 0.5 * rp.segment_len;
+  rp.core_radius = half * 0.35;
+  rp.arterial_width = 9.0;
+  rp.collector_width = 6.5;
+  rp.local_width = 5.0;
+  rp.max_grade = 0.35;
+  rp.steer_max_deg = 80.0;
+  rp.sparse_spacing = 0.55;
+  rp.sparse_branch = 0.45;
+  rp.local_min_urbanity = 0.06;
+  rp.parallel_gap = 0.5;
+  for (const District &d : dist.d)
+    rp.centres.push_back(road_centre{d.x, d.y});
   return rp;
 }
 
-// Drop road segments whose midpoint is under the water line, so streets stay on dry land.
-void pruneUnderwaterRoads(road_network &net, const heightfield &hf, double waterLevel) {
-  std::vector<road_segment> keep;
-  keep.reserve(net.segments.size());
-  for (const road_segment &s : net.segments) {
-    if (s.a < 0 || s.b < 0 || s.a >= int(net.nodes.size()) || s.b >= int(net.nodes.size()))
-      continue;
-    const double mx = 0.5 * (net.nodes[s.a].x + net.nodes[s.b].x);
-    const double my = 0.5 * (net.nodes[s.a].y + net.nodes[s.b].y);
-    if (hf.sample(mx, my) > waterLevel + 0.5)
-      keep.push_back(s);
+// A building's footprint, for keeping trees out of it: centre, axes (c, s) and half extents.
+struct Footprint {
+  double x, y, c, s, hx, hy;
+};
+struct FootprintIndex {
+  double cell = 32.0;
+  std::map<std::pair<int, int>, std::vector<Footprint>> cells;
+  void add(const Footprint &f) {
+    const double r = std::hypot(f.hx, f.hy);
+    for (int i = int(std::floor((f.x - r) / cell)); i <= int(std::floor((f.x + r) / cell)); ++i)
+      for (int j = int(std::floor((f.y - r) / cell)); j <= int(std::floor((f.y + r) / cell)); ++j)
+        cells[{i, j}].push_back(f);
   }
-  net.segments.swap(keep);
+  bool contains(double x, double y) const {
+    auto it = cells.find({int(std::floor(x / cell)), int(std::floor(y / cell))});
+    if (it == cells.end())
+      return false;
+    for (const Footprint &f : it->second) {
+      const double dx = x - f.x, dy = y - f.y;
+      if (std::fabs(dx * f.c + dy * f.s) <= f.hx && std::fabs(-dx * f.s + dy * f.c) <= f.hy)
+        return true;
+    }
+    return false;
+  }
+};
+
+// A flat-shaded convex polygon (its own vertices, so the faces keep crisp edges).
+void appendFace(cvc::geometry &g, std::initializer_list<Vec3d> poly,
+                const cvc::geometry::color_t &col) {
+  const idx_t b = idx_t(g.points().size());
+  for (const Vec3d &p : poly) {
+    g.points().push_back({p.x, p.y, p.z});
+    g.colors().push_back(col);
+  }
+  for (idx_t i = 1; i + 1 < idx_t(poly.size()); ++i)
+    g.tris().push_back({b, b + i, b + i + 1});
 }
 
-// Stamp the library's archetypes along the roads, on dry-land lots. Returns how many.
-std::size_t buildCityBuildings(const building_library &lib, const road_network &net,
-                               const heightfield &hf, std::uint64_t seed, double waterLevel,
-                               cvc::geometry &out) {
-  // Lots the size of a city's (16 m of frontage, 28 m deep): the archetypes keep their real size
-  // (true_scale), so a lot takes a building that fits it rather than a shrunken one, and the
-  // buildings stand at their own heights beside the trees.
+// A building piece in a lot's frame: a box over [cx +- hx] x [cy +- hy] x [z0, z1], with an
+// optional gable roof (ridge along x, `rise` high) instead of a flat top. `to` maps lot-frame
+// points to the world.
+template <class To>
+void appendMass(cvc::geometry &g, const To &to, double cx, double cy, double hx, double hy,
+                double z0, double z1, double rise, const cvc::geometry::color_t &wall,
+                const cvc::geometry::color_t &roof) {
+  const Vec3d a0 = to(cx - hx, cy - hy, z0), b0 = to(cx + hx, cy - hy, z0),
+              c0 = to(cx + hx, cy + hy, z0), d0 = to(cx - hx, cy + hy, z0);
+  const Vec3d a1 = to(cx - hx, cy - hy, z1), b1 = to(cx + hx, cy - hy, z1),
+              c1 = to(cx + hx, cy + hy, z1), d1 = to(cx - hx, cy + hy, z1);
+  appendFace(g, {a0, b0, b1, a1}, wall); // -y
+  appendFace(g, {c0, d0, d1, c1}, wall); // +y
+  appendFace(g, {b0, c0, c1, b1}, wall); // +x
+  appendFace(g, {d0, a0, a1, d1}, wall); // -x
+  if (rise <= 0.0) {
+    appendFace(g, {a1, b1, c1, d1}, roof);
+    return;
+  }
+  const Vec3d r0 = to(cx - hx, cy, z1 + rise), r1 = to(cx + hx, cy, z1 + rise);
+  appendFace(g, {a1, b1, r1, r0}, roof); // the -y slope
+  appendFace(g, {c1, d1, r0, r1}, roof); // the +y slope
+  appendFace(g, {b1, c1, r1}, wall);     // the gable ends
+  appendFace(g, {d1, a1, r0}, wall);
+}
+
+// Procedural massing for one lot. The footprint fills the frontage (to shared walls in a core,
+// with side yards outside one) and sits at the front of the lot; its height is lognormal around a
+// storey count that rises with urbanity, a little taller for a bigger footprint, with a rare tall
+// tail (a podium and a tower) in the cores. Low houses outside the cores get a gable roof. The
+// walls go down to the lot's lowest ground, so no corner floats on a slope. Returns the footprint.
+Footprint massLot(const lot &L, std::uint64_t seed, const surface_registry &reg,
+                  cvc::geometry &out) {
+  using lsys::stream;
+  const std::uint64_t el =
+      lsys::cell_id(std::int32_t(std::lround(L.x)), std::int32_t(std::lround(L.y)));
+  auto U = [&](std::uint32_t d) { return lsys::uni(seed, stream::floorplan, el, d); };
+  const double u = L.urbanity;
+  const double side_gap = 1.6 * (1.0 - u);
+  double w = std::max(5.0, L.frontage - 2.0 * side_gap);
+  if (u < 0.6)
+    w *= 0.72 + 0.28 * U(0);
+  const double ratio = std::exp(std::log(0.6) + std::log(1.6 / 0.6) * U(1));
+  const double d = std::max(5.0, std::min(L.depth - 2.0 - 5.0 * (1.0 - u), w * ratio));
+  const double area = w * d;
+  double h = (4.5 + 8.0 * u) * std::exp(0.15 * std::log(area / 150.0) +
+                                        lsys::nrand(seed, stream::floorplan, el, 3, 0.0, 0.28));
+  const bool tall = U(8) < 0.08 * u * u && area > 200.0;
+  if (tall)
+    h = std::max(h, std::min(90.0, 18.0 / std::sqrt(std::max(1e-3, U(9)))));
+  h = std::max(3.0, std::min(90.0, h));
+
+  // Materials: glass, metal and concrete in the cores; concrete, brick and plaster outside.
+  const lsys::role core[3] = {lsys::role::glass, lsys::role::wall_concrete, lsys::role::metal};
+  const lsys::role town[3] = {lsys::role::wall_brick, lsys::role::wall_concrete,
+                              lsys::role::wall_brick};
+  const lsys::role rl = (U(4) < u ? core : town)[int(U(5) * 3.0) % 3];
+  cvc::geometry::color_t wall = roleColor(reg, rl);
+  const double tint = 0.9 + 0.2 * U(6);
+  for (double &ch : wall)
+    ch = std::min(1.0, ch * tint);
+  const cvc::geometry::color_t roofFlat = {0.36, 0.36, 0.37}, roofTile = {0.46, 0.24, 0.18};
+
+  const double yc = std::cos(L.yaw), ys = std::sin(L.yaw);
+  auto to = [&](double lx, double ly, double z) {
+    return Vec3d{L.x + lx * yc - ly * ys, L.y + lx * ys + ly * yc, z};
+  };
+  const double cy = 0.5 * L.depth - 0.5 * d; // the front wall on the setback line
+  const double z0 = L.ground_min - 0.5, top = L.ground_max + h;
+  if (tall) {
+    const double podium = L.ground_max + 5.0 + 4.0 * U(10);
+    appendMass(out, to, 0.0, cy, 0.5 * w, 0.5 * d, z0, podium, 0.0, wall, roofFlat);
+    appendMass(out, to, 0.0, cy, 0.34 * w, 0.34 * d, podium, top, 0.0, wall, roofFlat);
+  } else {
+    const bool gable = h < 9.0 && u < 0.5;
+    appendMass(out, to, 0.0, cy, 0.5 * w, 0.5 * d, z0, top, gable ? 0.35 * std::min(w, d) : 0.0,
+               wall, gable ? roofTile : roofFlat);
+  }
+  const Vec3d c = to(0.0, cy, 0.0);
+  return Footprint{c.x, c.y, yc, ys, 0.5 * w + 1.0, 0.5 * d + 1.0};
+}
+
+// Build the city on the network's lots: the most built-up streets first (the urbanity at the lot,
+// plus noise shared by a whole street side, so a side is built out or not), up to `cap`
+// buildings. With a library the lots take the archetypes at their real size; without, procedural
+// massing. Core lots get a paved forecourt to the kerb. Returns how many buildings.
+std::size_t buildCity(const building_library *lib, const road_network &net, const heightfield &hf,
+                      const Districts &dist, const surface_registry &reg, std::uint64_t seed,
+                      double waterLevel, int cap, cvc::geometry &out,
+                      std::vector<generated_world::apron> &aprons, FootprintIndex &fps) {
+  using lsys::stream;
   site_params sp;
   sp.seed = seed;
-  sp.frontage = 16.0;
+  sp.frontage = 15.0;
+  sp.frontage_jitter = 0.35;
   sp.spacing = 3.0;
-  sp.lot_depth = 28.0;
-  sp.setback = 4.0;
+  sp.lot_depth = 30.0;
+  sp.setback = 5.0;
   sp.junction_clear = 10.0;
-  std::vector<lot> lots = layout_lots(net, sp);
-  lots.erase(std::remove_if(lots.begin(), lots.end(),
-                            [&](const lot &L) { return hf.sample(L.x, L.y) <= waterLevel + 1.0; }),
-             lots.end());
-  fit_params fp;
-  fp.seed = seed;
-  fp.true_scale = true;
-  const std::vector<building_instance> inst =
-      fit_buildings(lib, lots, fp, [&hf](double x, double y) { return hf.sample(x, y); });
-  cvc::geometry b = stamp_buildings(lib, inst);
-  if (b.const_points().empty())
-    return 0;
-  if (b.const_normals().size() != b.const_points().size())
-    b.compute_normals();
-  // The archetypes carry no material colour: one concrete tone, per vertex.
-  b.colors().assign(b.const_points().size(), cvc::geometry::color_t{{0.64, 0.62, 0.59}});
-  out.merge(b);
-  return inst.size();
+  sp.block_depth = true;
+  sp.min_depth = 9.0;
+  sp.max_relief = 10.0;
+  sp.min_ground = waterLevel + 1.0;
+  sp.core_setback = 0.7;
+  sp.road_margin = 0.5; // under the cores' 1.5 m setback
+  sp.core_spacing = 1.0;
+  sp.sparse_fill = 0.35;
+  const auto h = [&hf](double x, double y) { return hf.sample(x, y); };
+  std::vector<lot> lots = layout_lots(net, sp, h, std::cref(dist));
+
+  auto gumbel = [&](std::uint64_t el, std::uint32_t d) {
+    return -std::log(-std::log(std::max(1e-12, lsys::uni(seed, stream::floorplan, el, d))));
+  };
+  std::vector<std::pair<double, std::size_t>> order;
+  order.reserve(lots.size());
+  for (std::size_t i = 0; i < lots.size(); ++i) {
+    const lot &L = lots[i];
+    const std::uint64_t sideEl = 0x51DEu + std::uint64_t(L.seg) * 2u + (L.side > 0 ? 1u : 0u);
+    const std::uint64_t lotEl =
+        lsys::cell_id(std::int32_t(std::lround(L.x)), std::int32_t(std::lround(L.y)));
+    order.push_back({L.urbanity + 0.25 * gumbel(sideEl, 0) + 0.05 * gumbel(lotEl, 1), i});
+  }
+  std::stable_sort(order.begin(), order.end(),
+                   [](const auto &a, const auto &b) { return a.first > b.first; });
+  std::vector<lot> ordered;
+  ordered.reserve(order.size());
+  for (const auto &o : order)
+    ordered.push_back(lots[o.second]);
+
+  const std::size_t limit = std::size_t(std::max(0, cap));
+  auto setbackOf = [&](const lot &L) { return sp.setback * (1.0 - sp.core_setback * L.urbanity); };
+  auto forecourt = [&](const lot &L) {
+    if (L.urbanity < 0.55)
+      return;
+    const double sb = setbackOf(L), yc = std::cos(L.yaw), ys = std::sin(L.yaw);
+    const double ly = 0.5 * sb; // reach the kerb: the lot shifted toward the road by half a setback
+    aprons.push_back({L.x - ly * ys, L.y + ly * yc, L.ground_min, 0.5 * L.frontage,
+                      0.5 * L.depth + 0.5 * sb, L.yaw});
+  };
+
+  std::size_t count = 0;
+  if (lib && !lib->empty()) {
+    fit_params fp;
+    fp.seed = seed;
+    fp.true_scale = true;
+    std::vector<building_instance> inst = fit_buildings(*lib, ordered, fp, h);
+    if (inst.size() > limit)
+      inst.resize(limit);
+    cvc::geometry b = stamp_buildings(*lib, inst);
+    if (b.const_points().empty())
+      return 0;
+    if (b.const_normals().size() != b.const_points().size())
+      b.compute_normals();
+    // The archetypes carry no material colour: one concrete tone, per vertex.
+    b.colors().assign(b.const_points().size(), cvc::geometry::color_t{{0.64, 0.62, 0.59}});
+    out.merge(b);
+    for (const building_instance &bi : inst) {
+      const building_archetype &a = lib->archetypes[bi.archetype];
+      fps.add(Footprint{bi.x, bi.y, std::cos(bi.yaw), std::sin(bi.yaw),
+                        a.footprint_x * bi.scale + 1.0, a.footprint_y * bi.scale + 1.0});
+    }
+    // fit_buildings keeps the lots' order, skipping a lot nothing fits: match them up by position.
+    std::size_t j = 0;
+    for (const lot &L : ordered) {
+      if (j >= inst.size())
+        break;
+      if (std::fabs(inst[j].x - L.x) < 1e-9 && std::fabs(inst[j].y - L.y) < 1e-9) {
+        forecourt(L);
+        ++j;
+      }
+    }
+    count = inst.size();
+  } else {
+    for (const lot &L : ordered) {
+      if (count >= limit)
+        break;
+      fps.add(massLot(L, seed, reg, out));
+      forecourt(L);
+      ++count;
+    }
+  }
+  return count;
 }
 
 // A cheap self-contained 2-D value-noise fBm (the ground's dirt / dry-grass breakup).
@@ -665,7 +778,7 @@ world_params to_world_params(const generated_world_params &gp) {
   s.buildings = {{"office_block", 0.5}, {"brick_house", 0.5}};
   s.tree_count = gp.trees;
   s.rock_count = gp.rocks;
-  s.building_count = gp.buildings;
+  s.building_count = 0; // the city lays out its own buildings, along its roads
   s.tree_gen = gp.tree_gen;
   s.min_ground_m = gp.water_level_m + 1.0; // props on dry land, above the waterline
   return wp;
@@ -760,27 +873,36 @@ generated_world generate_world(const generated_world_params &p, const building_l
     w.terrain->set_cell_materials(std::move(mats));
   }
 
+  // The city, roads FIRST: district cores on dry, gentle ground; a street network grown from them
+  // (graded, kept out of the water, dead-end stubs trimmed); lots along the streets, filled from
+  // the cores out with the library's archetypes or procedural massing; asphalt burned into the
+  // raster and the extruded road surface. Then the trees and rocks, off the roads and buildings.
+  const auto road_h = [&hf](double x, double y) { return hf.sample(x, y); };
+  const Districts dist = pickDistricts(hf, half, water, p.seed);
+  road_network net = generate_roads(
+      cityRoadParams(p.seed, half, dist), road_h,
+      [&hf, water](double x, double y) { return hf.sample(x, y) < water + 1.5; }, std::cref(dist));
+  prune_roads(net, 30.0);
+  FootprintIndex fps;
+  w.building_count = buildCity(library, net, hf, dist, reg, p.seed, water, p.buildings, w.buildings,
+                               w.aprons, fps);
+  w.archetypes = library && !library->empty();
+  w.road_length = 0.0;
+  for (const road_segment &s : net.segments)
+    w.road_length +=
+        std::hypot(net.nodes[s.b].x - net.nodes[s.a].x, net.nodes[s.b].y - net.nodes[s.a].y);
+  w.districts = dist.d.size();
+  rasterize_roads(net, w.grid, reg, w.raster, 1.0);
+  road_mesh_params rmp;
+  rmp.lift = 0.35; // clearly above the terrain mesh, so the ribbons don't z-fight it
+  w.roads = extrude_roads(net, rmp, road_h);
+
   PropLib lib;
   lib.build(wp);
-  buildProps(wm, reg, lib, w.props, w.foliage, w.needles);
-
-  // The city. With a library: roads FIRST (a terrain-following street network), the archetypes
-  // stamped along the road-side lots, asphalt burned into the raster, and the extruded road
-  // surface. Without: box massing on the scatter's sites, with streets painted between plazas.
-  const auto road_h = [&hf](double x, double y) { return hf.sample(x, y); };
-  if (library && !library->empty()) {
-    road_network net = generate_roads(cityRoadParams(p.seed, half), road_h);
-    pruneUnderwaterRoads(net, hf, water);
-    w.building_count = buildCityBuildings(*library, net, hf, p.seed, water, w.buildings);
-    w.archetypes = true;
-    rasterize_roads(net, w.grid, reg, w.raster, 1.0);
-    road_mesh_params rmp;
-    rmp.lift = 0.35; // clearly above the terrain mesh, so the ribbons don't z-fight it
-    w.roads = extrude_roads(net, rmp, road_h);
-  } else {
-    buildBoxBuildings(wm, reg, p.seed, w.buildings, w.aprons, w.building_count);
-    w.streets = computeStreets(w.aprons, hf, half, water);
-  }
+  buildProps(
+      wm, reg, lib,
+      [&](double x, double y) { return !net.on_or_near_road(x, y, 1.5) && !fps.contains(x, y); },
+      w.props, w.foliage, w.needles);
   return w;
 }
 
@@ -893,32 +1015,10 @@ std::vector<unsigned char> paint_surface(const generated_world &w, surface_color
   }
   if (m != 0)
     return img; // QA modes: raw raster only
-  const cvc::geometry::color_t road = {0.20, 0.20, 0.23}, curb = {0.31, 0.31, 0.34};
-  const double roadW = 8.0;
   double sx = (T - 1) / spanx, sy = (T - 1) / spany;
   auto W2Tx = [&](double x) { return (x - g.min_x) * sx; };
   auto W2Ty = [&](double y) { return (y - g.min_y) * sy; };
-  double rTexX = 0.5 * roadW * sx;
-  for (const generated_world::street &s : w.streets) {
-    double ax = W2Tx(s.x0), ay = W2Ty(s.y0), bx = W2Tx(s.x1), by = W2Ty(s.y1);
-    double dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy;
-    int x0 = std::max(0, int(std::floor(std::min(ax, bx) - rTexX - 2)));
-    int x1 = std::min(T - 1, int(std::ceil(std::max(ax, bx) + rTexX + 2)));
-    int y0 = std::max(0, int(std::floor(std::min(ay, by) - rTexX - 2)));
-    int y1 = std::min(T - 1, int(std::ceil(std::max(ay, by) + rTexX + 2)));
-    for (int ty = y0; ty <= y1; ++ty)
-      for (int tx = x0; tx <= x1; ++tx) {
-        double t = L2 > 1e-9 ? ((tx - ax) * dx + (ty - ay) * dy) / L2 : 0.0;
-        t = std::min(1.0, std::max(0.0, t));
-        double px = ax + t * dx, py = ay + t * dy;
-        double dd = std::sqrt((tx - px) * (tx - px) + (ty - py) * (ty - py));
-        if (dd <= rTexX)
-          put(tx, ty, road);
-        else if (dd <= rTexX + 1.5)
-          put(tx, ty, curb);
-      }
-  }
-  const cvc::geometry::color_t pave = {0.44, 0.44, 0.46};
+  const cvc::geometry::color_t pave = {0.52, 0.51, 0.49};
   for (const generated_world::apron &a : w.aprons) {
     double cx = W2Tx(a.x), cy = W2Ty(a.y);
     double hxT = a.hx * sx, hyT = a.hy * sy, R = std::sqrt(hxT * hxT + hyT * hyT);

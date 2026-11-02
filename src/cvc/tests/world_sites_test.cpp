@@ -13,6 +13,7 @@
 #include <cvc/world/roads.h>
 #include <cvc/world/sites.h>
 #include <gtest/gtest.h>
+#include <map>
 #include <vector>
 
 using namespace cvc::world;
@@ -279,4 +280,147 @@ TEST(WorldSites, TrueScaleFitsArchetypesAtTheirOwnSize) {
 TEST(WorldSites, EmptyLibraryGivesNoBuildings) {
   const std::vector<lot> lots = layout_lots(straight_road(), site_params{});
   EXPECT_TRUE(fit_buildings(building_library{}, lots, fit_params{}).empty());
+}
+
+namespace {
+
+// Two parallel east-west streets 60 m apart (y = 0 and y = 60), 6 m wide: one block between them.
+road_network parallel_roads() {
+  road_network net;
+  net.half = 256.0;
+  net.nodes.push_back(road_node{-150.0, 0.0, 1});
+  net.nodes.push_back(road_node{150.0, 0.0, 1});
+  net.nodes.push_back(road_node{-150.0, 60.0, 1});
+  net.nodes.push_back(road_node{150.0, 60.0, 1});
+  for (int a : {0, 2}) {
+    road_segment s;
+    s.a = a;
+    s.b = a + 1;
+    s.width = 6.0;
+    net.segments.push_back(s);
+  }
+  return net;
+}
+
+// The lots fronting the inside of the block (between the two streets), per street.
+void inner_lots(const std::vector<lot> &lots, int &south, int &north) {
+  south = north = 0;
+  for (const lot &L : lots) {
+    if (L.y > 0.0 && L.y < 30.0)
+      ++south;
+    else if (L.y >= 30.0 && L.y < 60.0)
+      ++north;
+  }
+}
+
+} // namespace
+
+// Block depth: deep lots on one street overlap the next street's and starve its inner side; with
+// block_depth each street's lots reach back only to the middle of the block, so both sides of the
+// block fill and every lot keeps clear of both roads.
+TEST(WorldSites, BlockDepthBacksOntoTheStreetBehind) {
+  const road_network net = parallel_roads();
+  site_params sp;
+  sp.lot_depth = 40.0;
+  sp.setback = 4.0;
+  int s0, n0;
+  inner_lots(layout_lots(net, sp), s0, n0);
+  EXPECT_TRUE(s0 == 0 || n0 == 0) << s0 << " / " << n0; // one street's deep lots take the block
+
+  sp.block_depth = true;
+  const std::vector<lot> lots = layout_lots(net, sp);
+  int s1, n1;
+  inner_lots(lots, s1, n1);
+  EXPECT_GT(s1, 10);
+  EXPECT_EQ(s1, n1);
+  for (const lot &L : lots) {
+    if (L.y > 0.0 && L.y < 60.0) // inside the block; the outer sides have no road behind
+      EXPECT_LE(L.depth, 0.5 * (54.0 - 4.0 - 4.0) + 1e-6); // half the block, less the setbacks
+    else
+      EXPECT_EQ(L.depth, sp.lot_depth);
+    double c[4][2];
+    lot_corners(L, c);
+    for (auto &p : c)
+      EXPECT_FALSE(net.on_or_near_road(p[0], p[1], 0.5)) << L.x << "," << L.y;
+  }
+  for (std::size_t i = 0; i < lots.size(); ++i)
+    for (std::size_t j = i + 1; j < lots.size(); ++j)
+      EXPECT_FALSE(obb_overlap(lots[i], lots[j])) << i << " vs " << j;
+}
+
+// The ground check leaves a lot empty that would stand in the water or straddle a steep drop, and
+// a kept lot records the ground range under it, which fit_buildings stands the building on.
+TEST(WorldSites, GroundCheckLeavesWetAndSteepLotsEmpty) {
+  const road_network net = straight_road(6.0);
+  // Wet west of x = -40, a 1-in-1 bank east of x = 40, a gentle slope between.
+  const road_height_fn h = [](double x, double y) {
+    return x < -40.0 ? 0.0 : x > 40.0 ? 5.0 + (x - 40.0) : 5.0 + 0.05 * y;
+  };
+  site_params sp;
+  sp.max_relief = 3.0;
+  sp.min_ground = 1.0;
+  const std::vector<lot> lots = layout_lots(net, sp, h);
+  ASSERT_FALSE(lots.empty());
+  for (const lot &L : lots) {
+    EXPECT_TRUE(L.has_ground);
+    EXPECT_GE(L.ground_min, 1.0);
+    EXPECT_LE(L.ground_max - L.ground_min, 3.0 + 1e-9);
+    EXPECT_GT(L.x, -40.0);
+    EXPECT_LT(L.x, 40.0);
+  }
+  const std::vector<lot> unchecked = layout_lots(net, site_params{});
+  EXPECT_GT(unchecked.size(), lots.size());
+  EXPECT_FALSE(unchecked.front().has_ground);
+
+  building_library lib = two_archetypes();
+  const std::vector<building_instance> inst = fit_buildings(lib, lots, fit_params{}, h);
+  ASSERT_EQ(inst.size(), lots.size());
+  for (std::size_t i = 0; i < inst.size(); ++i)
+    EXPECT_EQ(inst[i].z, lots[i].ground_min); // the low side: no corner floats
+}
+
+// Districts: on sparse ground (urbanity 0) a street side is built as a whole or not at all, at
+// sparse_fill; in a core every side is built, the setbacks narrow and the lots close up.
+TEST(WorldSites, DistrictsBuildOutTheCores) {
+  const road_network net = cross_roads(6.0);
+  site_params sp;
+  sp.frontage_jitter = 0.3;
+  sp.core_setback = 0.5;
+  sp.core_spacing = 1.0;
+  sp.sparse_fill = 0.0;
+  EXPECT_TRUE(layout_lots(net, sp, {}, [](double, double) { return 0.0; }).empty());
+
+  const std::vector<lot> core = layout_lots(net, sp, {}, [](double, double) { return 1.0; });
+  const std::vector<lot> plain = layout_lots(net, sp);
+  ASSERT_FALSE(core.empty());
+  EXPECT_EQ(core.size(), plain.size()); // no field = urbanity 1
+  double widths = 0.0, lo = 1e30, hi = 0.0;
+  for (const lot &L : core) {
+    EXPECT_EQ(L.urbanity, 1.0);
+    widths += L.frontage;
+    lo = std::min(lo, L.frontage);
+    hi = std::max(hi, L.frontage);
+    // A core lot's front sits 3 m (half the setback) off the 6 m road. The lot faces
+    // the road: an east-west road's lots face +-y (yaw 0 or pi).
+    const double off = std::fabs(std::cos(L.yaw)) > 0.5 ? std::fabs(L.y) : std::fabs(L.x);
+    EXPECT_NEAR(off, 3.0 + 3.0 + 0.5 * L.depth, 1e-6);
+  }
+  EXPECT_LT(lo, hi); // jittered widths
+  EXPECT_NEAR(widths / core.size(), sp.frontage, 0.2 * sp.frontage);
+
+  // Half-built sparse ground (two streets, four sides that never compete for room): each street
+  // side is all or nothing.
+  const road_network two = parallel_roads();
+  sp.sparse_fill = 1.0;
+  const auto sparse = [](double, double) { return 0.0; };
+  std::map<std::pair<int, int>, int> all;
+  for (const lot &L : layout_lots(two, sp, {}, sparse))
+    ++all[{L.seg, L.side}];
+  ASSERT_EQ(all.size(), 4u);
+  sp.sparse_fill = 0.5;
+  std::map<std::pair<int, int>, int> some;
+  for (const lot &L : layout_lots(two, sp, {}, sparse))
+    ++some[{L.seg, L.side}];
+  for (const auto &kv : some)
+    EXPECT_EQ(kv.second, all[kv.first]);
 }

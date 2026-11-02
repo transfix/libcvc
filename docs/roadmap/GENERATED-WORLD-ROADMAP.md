@@ -1,6 +1,7 @@
 # Generated worlds: one template, switchable generators, the conference's world
 
-**Status:** plan, revision 1 (2026-11-01). G0 landed with this document; G1 onward is the plan.
+**Status:** plan, revision 2 (2026-11-02). G0 landed with this document; first passes of G2 (the
+street model) and G3 (building placement) landed in revision 2; G1 and the rest are the plan.
 
 **Goal.** One generated world that every app builds on: the terrain lab, the Ariadne conference's
 rooms (arisrv + arigl, the cyprty browser client), and the next demo. It is a document template
@@ -11,8 +12,8 @@ switches between generators at run time, and libcvc's water whatever the generat
 
 - **`cvc::world::generate_world`** (`inc/cvc/world/generated_world.h`): terrain_lab's world, GL-free
   and deterministic. The relief and L-system prop scatter (`world_model::generate`), the props as
-  merged meshes, the roads-first city (`generate_roads`, `layout_lots`, the Austin archetypes) or
-  box massing without a building library, the surface texture (`paint_surface`), the water below
+  merged meshes, the roads-first city (`generate_roads`, `layout_lots`, the Austin archetypes or,
+  since G3, procedural buildings), the surface texture (`paint_surface`), the water below
   `water_level_m` (`water_field`), and the world as a `world_geometry` for physics and nav.
   `examples/cvcgl/terrain_lab.cpp` now draws it (the same frame as before the move).
 - **The `generated_world` scene node type** (`src/cvcGL/ariadne/world_nodes.cpp`), in the cvcGL
@@ -37,8 +38,8 @@ The terrain lab's world is three choices, each switchable in the panel:
 | choice | today | adds |
 |---|---|---|
 | terrain | `world::heightfield` (fBm + warp + island dome) | an eroded, drainage-aware relief (G4) |
-| streets | `generate_roads` (tensor-field tracing) | a district / hierarchy street model (G2) |
-| buildings | fixed-frontage lots + archetype by hash | frontage lots + calibrated heights (G3) |
+| streets | `generate_roads`: tensor-field tracing, districts, kinds, graded (G2) | A* routing, district modes |
+| buildings | block-deep lots, core-first fill, procedural or archetype (G3) | archetype by area, sheds |
 
 - **A terrain source interface**: `sample(x, y)`, `slope_deg`, `bounds()`, and masks
   (buildable, channel, cliff). `world::heightfield` implements it. A new `raster_heightfield` (a
@@ -52,29 +53,68 @@ The terrain lab's world is three choices, each switchable in the panel:
   That level's mask joins the excluded mask a generator's lots and roads avoid. A generator's own
   water (river channels) is dropped, or kept as land-cover only. A generator whose relief is
   relative (not referenced to 0) is anchored, so the water level means the same thing.
-- **Roads carry a kind**: `road_segment` gains arterial / collector / local / service, each with
-  its width. A converter turns any generator's polylines with shared junction vertices into a
-  `road_network`, so `extrude_roads`, `rasterize_roads` and `layout_lots` keep working.
+- **Roads carry a kind**: `road_segment::kind` (local / collector / arterial, each with its width)
+  landed with G2; a service kind is still to come. A converter turns any generator's polylines with
+  shared junction vertices into a `road_network`, so `extrude_roads`, `rasterize_roads` and
+  `layout_lots` keep working.
 
 ## G2 — the street model
 
-A district-structured network. District centres are placed by slope-weighted, separation-repelled
-sampling, each with a mode (urban, suburban, industrial, rural, mixed). Arterials cross the
-domain, collectors link each centre to them, and each district's own grid is clipped to the area
-it owns. Urban cores get service alleys. A street runs straight where the grade allows and is
-otherwise routed by a grade-limited A* over the relief, then smoothed. Crossings become shared
-junction vertices (4-way and T). The output is a `road_network` with kinds (G1).
+**First pass landed (revision 2).** `generate_roads` keeps its tensor-field tracing and gains, all
+opt-in through `road_params` (the defaults are the classic network):
+
+- **District centres** (`centres`): each seeds an arterial cross. `generate_world` places about one
+  per 600 m of world side, on dry, gentle ground, scored by slope and kept apart.
+- **A hierarchy** (`collector_width`, `road_segment::kind`): an arterial's branches are collectors
+  a block apart, and the collectors and locals sprout the local streets.
+- **An urbanity field** (`generate_roads`' `density`): local streets pack tighter and branch more
+  often in a core (`sparse_spacing`, `sparse_branch`), so the outskirts thin out.
+- **A grade limit** (`max_grade`): a segment that is too steep turns toward the contour in 15°
+  steps either way, up to 75° (80° in the lab), and is dropped if no turn fits. Hill roads wind
+  instead of climbing the fall line. The lab allows 35 % (San Francisco's steepest streets are
+  about 31 %): its relief is hilly, with a median slope of about 33 % and only a tenth of the land
+  under 13 %. Measured on the lab's default world (seed 7): at 25 % and 6 m of lot relief its two
+  districts grew 2.3 km of road and 31 buildings; at 35 % and 10 m, 5.8 km and the 110 asked for.
+- **Fading local grids** (`local_min_urbanity`): local streets stop where the urbanity drops off,
+  while the arterials and collectors run on between the districts.
+- **A continuation fix**: a road continues along whichever field direction it is already on.
+  Before, a road on the minor direction (each centre's cross arm, every branch) turned onto the
+  major direction after one step, which striped the classic network with parallel streets about a
+  step apart.
+- **A no-go mask** (`generate_roads`' `blocked`): the water. Streets are steered away from the
+  shore or stop at it, instead of being cut off after tracing.
+- **`prune_roads`**: dead-end stubs shorter than 30 m are trimmed, and node degrees recomputed.
+
+Still to do: routing a long street over the relief by a grade-limited A* (where steering only
+winds), smoothing the traced polylines, service alleys in the cores, and district modes
+(industrial, rural) with their own spacing and widths.
 
 ## G3 — building placement
 
-Lots are cut along each side of each street, frontage-first, filled core-first. Each lot's depth
-is capped at half the clear distance to the street behind. Setbacks and spacing shrink toward the
-cores, giving party walls downtown. Lots end at corners, a half-shifted second pass fills the
-holes, and back-yard sheds are added. A lot is rejected for slope, pad relief, the excluded mask
-(water included), the road corridor and overlap. Footprint area, aspect and height come from
-calibrated distributions: height grows with area, plus a heavy tail of towers. libcvc keeps
-stamping the Austin archetypes, chosen by footprint area and aspect and scaled to the sampled
-height, with an extruded box as the fallback.
+**First pass landed (revision 2).** `layout_lots` gains, again opt-in through `site_params`:
+
+- **Block depth**: a lot reaches back to the middle of its block (a ray cast to the next road
+  behind), so the lots of two parallel streets back onto each other.
+- **A ground check** (with a height sampler): no lot with more than `max_relief` of fall under it
+  (10 m in the lab: a 30 m lot on a 33 % slope falls about that much), or below `min_ground` (the
+  water). A kept lot records its ground range, and its building stands on the low side with its
+  walls down into the slope.
+- **Districts** (with the urbanity field): narrower setbacks and side gaps toward a core, down to
+  shared walls; whole street sides built or left empty on sparse ground (`sparse_fill`); jittered
+  frontages.
+
+`generate_world` builds the city roads-first with or without a building library. Lots fill from
+the cores out, a street side at a time, up to `buildings`. Without the Austin archetypes, each lot
+gets procedural massing: a footprint filling the frontage, and a lognormal height that rises with
+urbanity and a little with footprint area. The cores add a rare podium and tower; outside them,
+low houses get gable roofs. The cores' lots get paved forecourts in the ground texture. Trees and
+rocks keep off the roads and buildings.
+
+Still to do: a second fill pass for the holes, back-yard sheds, and choosing the Austin archetypes
+by footprint area and the lot's urbanity rather than only by fit. The town also depends on how
+steep the world is: the relief keeps its amplitude as the world shrinks, so at half 400 m (90 m of
+relief) only 7 buildings fit where half 600 m fits the 110 asked for. Flatter buildable ground
+where the districts sit belongs to G4.
 
 ## G4 — terrain synthesis
 
@@ -85,12 +125,10 @@ incision), thermal relaxation, and cliff / channel / buildable masks. Every rand
 through `cvc::lsys` hashed streams (the configure-time determinism guard on `world/`). The output
 is a `raster_heightfield` with masks.
 
-**Owner gate for G2–G4.** The street, lot and terrain models above are those of the DBG project's
-scene generator: private, grant-funded, a single author, no licence file. libcvc is public (LGPL
-2.1). Before code is ported, or its algorithms and calibrated constants are transcribed, its author
-and the project's PI must agree in writing. The DBG engagement documents expect the generic terrain
-generator to live in open libcvc core, but that is not a licence. Without the OK, G2–G4 are written
-from the published literature, with no transcription.
+**Our own code, no port.** The DBG project's scene generator showed what reads well: district
+cores, a street hierarchy, grade-limited streets, lots backing onto each other, and core-first
+fill. G2 and G3 take those ideas into libcvc's own generators, written here. No code and no
+fitted constants are carried over, and G4 is written the same way.
 
 ## G5 — the conference's world
 

@@ -33,9 +33,9 @@
 //   slope),
 //
 // weighted by the local slope, so the city is a clean grid on the flats that bends organically over
-// hills. Roads are traced as short straight segments stepped along the major field (Euler
-// streamlines), so a road curves as a chain of segments and an intersection is simply a graph node
-// of degree > 2.
+// hills. Roads are traced as short straight segments stepped along the field (Euler streamlines,
+// of the major or the minor direction, whichever the road is on), so a road curves as a chain of
+// segments and an intersection is simply a graph node of degree > 2.
 //
 // The LOCAL CONSTRAINTS are what make the intersections correct: a candidate segment's free end is
 // snapped to a nearby node (junction), or to a nearby segment which is split to form a T-junction,
@@ -45,6 +45,19 @@
 // Deterministic (hashed RNG, stream::road; no <random>, per the §5.2 world rule) and GL-free. The
 // output is a plain graph (nodes + width-tagged segments) plus a nearest-road query; a consumer
 // extrudes it to geometry, stamps it into the surface raster, and places buildings along its edges.
+//
+// Optional, all off by default (the network is then exactly the classic one):
+//
+//   * A HIERARCHY: with collector_width set, the branches off an arterial are collectors spaced a
+//     block apart, and only the collectors (and the locals) sprout local streets.
+//   * A GRADE LIMIT: a segment steeper than max_grade is steered toward the contour (turned in
+//     growing steps either way) and dropped if no turn fits, so hill roads wind instead of climbing
+//     the fall line.
+//   * A NO-GO MASK (generate_roads' `blocked`, e.g. water): a segment that would cross it is
+//     steered the same way, so streets stop at the shore instead of being cut off afterwards.
+//   * DISTRICTS: several centres (each seeds an arterial cross), and an urbanity field in [0, 1]
+//     that packs the local streets tighter and branches more often in a district's core.
+//   * PRUNE_ROADS afterwards trims short dead-end stubs and recomputes the node degrees.
 
 #ifndef CVC_WORLD_ROADS_H
 #define CVC_WORLD_ROADS_H
@@ -62,6 +75,15 @@ namespace world {
 // Ground height at world (x, y) — the terrain field reads its gradient from this. A null/empty
 // sampler (always 0) degenerates the terrain field to flat, giving a pure grid.
 using road_height_fn = std::function<double(double x, double y)>;
+// True where no road may go (water, a cliff). Empty = nowhere blocked.
+using road_mask_fn = std::function<bool(double x, double y)>;
+// A district's urbanity at world (x, y), in [0, 1] (1 = a core). Empty = uniform.
+using road_density_fn = std::function<double(double x, double y)>;
+
+// A district centre: the network grows an arterial cross out of each.
+struct road_centre {
+  double x = 0.0, y = 0.0;
+};
 
 struct road_params {
   std::uint64_t seed = 1;
@@ -83,8 +105,34 @@ struct road_params {
   double arterial_width = 11.0; // major-road width (metres)
   double local_width = 6.5;     // minor-road width
   double core_radius = 70.0;    // roads within this radius of the centre are traced first (denser)
-  double branch_chance = 0.9;   // probability a segment spawns a perpendicular branch
+  double branch_chance = 0.9;   // probability a road branches (perpendicular, both sides) at a
+                                // step once it has run a block since its last branch
+
+  // The hierarchy: > 0 makes an arterial's branches collectors of this width (see the header).
+  double collector_width = 0.0;
+  // The grade limit (rise over run; 0 = none) and the steering tried before a segment is dropped:
+  // turns of steer_step_deg, 2 x, ... up to steer_max_deg, alternating sides.
+  double max_grade = 0.0;
+  double steer_step_deg = 15.0;
+  double steer_max_deg = 75.0;
+  // District centres (empty = one, at the origin). The urbanity field (generate_roads' `density`)
+  // scales the local spacing from local_block / sparse_spacing (urbanity 0) down to local_block
+  // (urbanity 1), and the branch chance from branch_chance x sparse_branch up to branch_chance.
+  std::vector<road_centre> centres;
+  double sparse_spacing = 1.0;
+  double sparse_branch = 1.0;
+  // A local street is not continued, or branched, where the urbanity is below this (0 = never
+  // stops): the local grids fade out at the districts' edges while the arterials and collectors
+  // run on between them.
+  double local_min_urbanity = 0.0;
+  // A collector or local street stops rather than run alongside another road (within 25 degrees
+  // of parallel) closer than this fraction of the local spacing there, so two streets branched
+  // from different roads cannot end up a few metres apart (0 = off).
+  double parallel_gap = 0.0;
 };
+
+// A road's class, widest first.
+enum class road_class : int { local = 0, collector = 1, arterial = 2 };
 
 // An intersection or road endpoint.
 struct road_node {
@@ -97,6 +145,7 @@ struct road_segment {
   int a = -1, b = -1;    // endpoint node indices into road_network::nodes
   double width = 6.5;    // metres
   bool arterial = false; // major road (vs local street)
+  road_class kind = road_class::local;
 };
 
 struct road_network {
@@ -126,8 +175,15 @@ private:
   mutable std::size_t idx_nseg_ = static_cast<std::size_t>(-1);
 };
 
-// Generate the street network. Deterministic in p.seed. GL-free.
-road_network generate_roads(const road_params &p, const road_height_fn &height = {});
+// Generate the street network. Deterministic in p.seed. GL-free. `blocked` and `density` are
+// optional (see road_params' grade limit and districts).
+road_network generate_roads(const road_params &p, const road_height_fn &height = {},
+                            const road_mask_fn &blocked = {}, const road_density_fn &density = {});
+
+// Trim dead ends: repeatedly drop a dead-end chain (from a degree-1 node back to the first
+// junction) shorter than min_stub metres, then recompute every node's degree. Segments are
+// removed, nodes are kept (an orphan has degree 0). Returns how many segments went.
+std::size_t prune_roads(road_network &net, double min_stub);
 
 // The tensor field's MAJOR road direction (unit vector) at world (x, y), for the given params +
 // terrain — exposed for tests and for a consumer that wants to orient something to the local grid.

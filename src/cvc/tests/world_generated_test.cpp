@@ -37,7 +37,7 @@ using namespace cvc::world;
 
 namespace {
 
-// A small box-massing world (no building library), quick to generate.
+// A small world (no building library: procedural buildings), quick to generate.
 generated_world_params small_world() {
   generated_world_params p;
   p.seed = 11;
@@ -74,19 +74,60 @@ TEST(WorldGenerated, DeterministicAndTerrainIsTheRelief) {
     }
 }
 
-TEST(WorldGenerated, BoxMassingCityOnDryLand) {
+// The city is roads first with or without a building library: district cores, an extruded street
+// network, procedural buildings along it (no more than asked for), and props on dry land, none of
+// them on a road or in a building.
+TEST(WorldGenerated, RoadsFirstCityWithoutALibrary) {
   const generated_world w = generate_world(small_world());
   EXPECT_FALSE(w.archetypes);
-  EXPECT_TRUE(w.roads.const_points().empty()); // box massing paints its streets, extrudes none
+  EXPECT_FALSE(w.roads.const_points().empty());
+  EXPECT_GE(w.districts, 1u);
+  EXPECT_GT(w.road_length, 200.0);
   EXPECT_GT(w.building_count, 0u);
-  EXPECT_EQ(w.aprons.size(), w.building_count);
+  EXPECT_LE(w.building_count, std::size_t(small_world().buildings));
   EXPECT_FALSE(w.props.const_points().empty());
   const double dry = small_world().water_level_m + 1.0;
   for (const placed_prop &pp : w.model->props())
     EXPECT_GE(pp.z, dry - 1e-6) << pp.recipe << " at " << pp.x << "," << pp.y;
-  for (const generated_world::street &s : w.streets)
-    EXPECT_GE(w.model->hf().sample(0.5 * (s.x0 + s.x1), 0.5 * (s.y0 + s.y1)),
-              small_world().water_level_m);
+
+  generated_world_params none = small_world();
+  none.buildings = 0;
+  const generated_world bare = generate_world(none);
+  EXPECT_EQ(bare.building_count, 0u);
+  EXPECT_TRUE(bare.buildings.const_points().empty());
+  EXPECT_EQ(bare.road_length, w.road_length); // the roads do not depend on the buildings
+  // The trees the city displaced: the bare world keeps more of them.
+  EXPECT_GE(bare.props.const_points().size(), w.props.const_points().size());
+}
+
+// Buildings are building-sized: town houses and low blocks (a few storeys, the odd tower in a
+// core), standing on the ground (their base at or below the ground under them), and none deep in
+// the water.
+TEST(WorldGenerated, BuildingsAreBuildingSized) {
+  generated_world_params p; // the lab's default world (fewer trees)
+  p.trees = 60;
+  p.tree_gen = 3;
+  p.buildings = 400;
+  const generated_world w = generate_world(p);
+  ASSERT_GT(w.building_count, 40u);
+  double tallest = 0.0, lowest = 1e30;
+  std::vector<double> tops; // the walls' and roofs' upper corners, over the ground
+  for (const auto &q : w.buildings.const_points()) {
+    const double above = q[2] - w.model->hf().sample(q[0], q[1]);
+    tallest = std::max(tallest, above);
+    lowest = std::min(lowest, double(q[2]));
+    if (above > 1.0)
+      tops.push_back(above);
+  }
+  EXPECT_LE(tallest, 95.0);
+  EXPECT_GT(tallest, 6.0);
+  EXPECT_GE(lowest, p.water_level_m + 0.5 - 1e-6); // the base, half a metre into dry ground
+  // Most roofs are low: the median top over the ground is a few storeys.
+  ASSERT_FALSE(tops.empty());
+  std::nth_element(tops.begin(), tops.begin() + tops.size() / 2, tops.end());
+  const double median = tops[tops.size() / 2];
+  EXPECT_GT(median, 3.0);
+  EXPECT_LT(median, 20.0);
 }
 
 TEST(WorldGenerated, WaterFillsBelowTheLevel) {
@@ -134,7 +175,8 @@ TEST(WorldGenerated, SurfaceTextureAndGeometry) {
   const geometry_item *p = g.find("props");
   ASSERT_NE(p, nullptr);
   EXPECT_FALSE(p->has(role_collide));
-  EXPECT_EQ(g.find("roads"), nullptr); // box massing: no road surface
+  ASSERT_NE(g.find("roads"), nullptr);
+  EXPECT_FALSE(g.find("roads")->has(role_collide));
 }
 
 TEST(WorldGenerated, PresetsQuickSetCounts) {
