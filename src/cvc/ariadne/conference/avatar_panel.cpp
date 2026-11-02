@@ -128,18 +128,30 @@ void avatar_panel::publish(cvc::app &app, const std::string &prefix) const {
   constexpr double kG = 9.81;
   const double carry =
       p.transport_cost * _body.mass * kG; // N: what carrying the body costs per m/s
-  put("policy.budget", p.enabled ? "on, the same for everyone (the relay's)" : "off (the relay's)");
-  put("policy.push", printf_str("%.0f N at most, ", p.force_max) +
-                         printf_str("%.1f m/s^2 at this mass", p.force_max / _body.mass));
-  put("policy.power", watts(p.power_max) + " at most, " + watts(p.power_rest) + " resting");
+  // Each policy line is a short value, and what it means as its tip (`policy.<line>_tip`): the
+  // window shows the tip on hover, where a sentence beside the value would be cut off.
+  const bool stop = p.empty == avatar_energy_policy::when_empty::stop;
+  put("policy.budget", p.enabled ? "on" : "off");
+  put("policy.budget_tip", p.enabled ? "The relay's, the same for everyone."
+                                     : "The relay sets none: moving costs nothing.");
+  put("policy.push", printf_str("%.0f N", p.force_max));
+  put("policy.push_tip",
+      printf_str("The most you push with: %.1f m/s^2 at this mass.", p.force_max / _body.mass));
+  put("policy.power", watts(p.power_max));
+  put("policy.power_tip", "The most power you spend. Resting power, " + watts(p.power_rest) +
+                              ", refills the reserve all the time.");
   put("policy.reserve", joules(p.reserve_max));
-  put("policy.carrying",
-      printf_str("%.2f x m g |v|: ", p.transport_cost) + watts(carry * 1.0) + " per m/s");
-  put("policy.empty", p.empty == avatar_energy_policy::when_empty::stop
-                          ? printf_str("stop until %.0f%% refills", 100.0 * p.recover_fraction)
-                          : "slow to what resting power sustains");
-  put("policy.sustains",
-      carry > 0.0 ? printf_str("%.1f m/s on resting power", p.power_rest / carry) : "any speed");
+  put("policy.reserve_tip", "What you can spend beyond resting power before you run out.");
+  put("policy.carrying", watts(carry * 1.0) + " per m/s");
+  put("policy.carrying_tip",
+      printf_str("Carrying your weight along costs %.2f x m g |v|.", p.transport_cost));
+  put("policy.empty", stop ? "stop" : "slow down");
+  put("policy.empty_tip",
+      stop ? printf_str("When the reserve runs out you stop until %.0f%% of it refills.",
+                        100.0 * p.recover_fraction)
+           : "When the reserve runs out you slow to what resting power sustains.");
+  put("policy.sustains", carry > 0.0 ? printf_str("%.1f m/s", p.power_rest / carry) : "any speed");
+  put("policy.sustains_tip", "The speed resting power keeps up for as long as you like.");
 
   put("ready", _ready ? "1" : "0");
   if (!_ready)

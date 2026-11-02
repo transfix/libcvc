@@ -312,6 +312,130 @@ int main() {
     check("widenTau() reads back", std::fabs(tc.widenTau() - 1.5) < 1e-9);
   }
 
+  printf(
+      "M. third-person mouse look: a click captures, the mouse turns the orbit, a key frees it\n");
+  {
+    vtkNew<vtkCamera> mcam;
+    CameraController mc(ctx, "ml.camera");
+    mc.setCamera(mcam);
+    mc.frameBounds(-5, -5, 0, 5, 5, 2);
+    double e0[3], e1[3], ff[3], uu[3];
+    mc.getPose(e0, ff, uu);
+    // Off: the mouse turns nothing without a drag, and a click is the host's.
+    mc.mouseLook(50, 0);
+    mc.getPose(e1, ff, uu);
+    check("off: a move without a drag turns nothing", dist(e0, e1) < 1e-9);
+    int cx = 0, cy = 0;
+    mc.notePointerDown(10, 10);
+    mc.notePointerUp(10, 10);
+    check("off: a click is reported", mc.takeClick(cx, cy) && !mc.pointerCapture());
+
+    mc.setMouseLookEnabled(true);
+    check("settings.mouse_look mirrored", root("ml.camera.settings.mouse_look").value<int>() == 1);
+    check("the release key is in the state tree",
+          root("ml.camera.keys.release_pointer").value() == "Escape");
+    mc.notePointerDown(10, 10);
+    mc.notePointerUp(10, 10);
+    check("on: a click on the scene captures the pointer",
+          mc.pointerCapture() && mc.mouseLooking());
+    check("on: that click is not the host's", !mc.takeClick(cx, cy));
+    mc.mouseLook(50, 0);
+    mc.getPose(e1, ff, uu);
+    check("on: the mouse turns the orbit with no button held", dist(e0, e1) > 1e-3);
+    mc.setInvertYaw(true);
+    check("settings.invert_yaw mirrored", root("ml.camera.settings.invert_yaw").value<int>() == 1);
+    mc.mouseLook(50, 0);
+    double e2[3];
+    mc.getPose(e2, ff, uu);
+    check("invert_yaw turns it back the other way", dist(e0, e2) < 1e-6);
+    mc.setInvertYaw(false);
+    // The elevation range holds the eye off a floor however far the mouse goes.
+    const auto elevation = [&] {
+      double e[3], f[3], v[3];
+      mc.getPose(e, f, v);
+      return std::asin((e[2] - f[2]) / dist(e, f)) * 180.0 / 3.14159265358979323846;
+    };
+    mc.setOrbitElevationRange(-10.0, 70.0);
+    mc.mouseLook(0, 100000); // up: the eye goes down
+    check("looking up stops at the range's lower elevation", std::fabs(elevation() + 10.0) < 1e-6);
+    mc.mouseLook(0, -100000);
+    check("looking down stops at its upper one", std::fabs(elevation() - 70.0) < 1e-6);
+    check("the range is in the state tree",
+          std::fabs(root("ml.camera.orbit.min_elevation").value<double>() + 10.0) < 1e-9);
+
+    mc.keyDown("Escape");
+    check("Escape frees the pointer", !mc.pointerCapture() && !mc.keyHeld("Escape"));
+    mc.getPose(e1, ff, uu);
+    mc.mouseLook(50, 0);
+    mc.getPose(e2, ff, uu);
+    check("freed: no turn without a drag", dist(e1, e2) < 1e-9);
+    // The release key is a binding like the others: rebound, Escape stops doing it.
+    mc.setKeyBinding("release_pointer", "Q");
+    check("a rebound release key is in the state tree",
+          root("ml.camera.keys.release_pointer").value() == "Q");
+    mc.notePointerDown(10, 10);
+    mc.notePointerUp(10, 10);
+    mc.keyDown("Escape");
+    mc.keyUp("Escape");
+    check("rebound: Escape keeps the pointer", mc.pointerCapture());
+    mc.keyDown("q");
+    check("rebound: its key frees it", !mc.pointerCapture());
+    mc.keyUp("q");
+    // Mouse look turned off where a settings window writes it: update() frees the pointer, and
+    // clicks are the host's again.
+    mc.notePointerDown(10, 10);
+    mc.notePointerUp(10, 10);
+    root("ml.camera.settings.mouse_look").value(0);
+    mc.update(1.0 / 60.0);
+    check("turned off from state: the pointer is freed",
+          !mc.pointerCapture() && !mc.mouseLookEnabled());
+    mc.notePointerDown(10, 10);
+    mc.notePointerUp(10, 10);
+    check("turned off: clicks are reported again", mc.takeClick(cx, cy));
+  }
+
+  printf("N. the orbit floor: looking up slides the eye in, never under the floor\n");
+  {
+    vtkNew<vtkCamera> fcam;
+    CameraController fc(ctx, "fl.camera");
+    fc.setCamera(fcam);
+    fc.frameBounds(-5, -5, 0, 5, 5, 2);
+    fc.setOrbitCenter(0.0, 0.0, 1.2); // a head 1.2 m above the floor
+    root("fl.camera.orbit.distance").value(6.0);
+    fc.setOrbitFloor(0.0, 0.25);
+    check("the floor is in the state tree",
+          root("fl.camera.orbit.floor.on").value<int>() == 1 &&
+              std::fabs(root("fl.camera.orbit.floor.clearance").value<double>() - 0.25) < 1e-9);
+    double e[3], f[3], v[3];
+    const auto pose = [&] { fc.getPose(e, f, v); };
+    // Level: 6 m out, well above the floor.
+    root("fl.camera.orbit.elevation").value(0.0);
+    pose();
+    check("level: the full distance", std::fabs(dist(e, f) - 6.0) < 1e-6);
+    // Looking up (the eye below the head) far enough to go under the floor: slid in instead.
+    root("fl.camera.orbit.elevation").value(-45.0);
+    pose();
+    check("looking up: the eye stays just above the floor", std::fabs(e[2] - 0.25) < 1e-6);
+    check("looking up: slid in along its line of sight",
+          dist(e, f) < 6.0 && std::fabs((f[2] - e[2]) / dist(e, f) -
+                                        std::sin(45.0 * 3.14159265358979323846 / 180.0)) < 1e-6);
+    // Straight up: just above the floor, under the head.
+    root("fl.camera.orbit.elevation").value(-89.0);
+    pose();
+    check("straight up: still above the floor", e[2] >= 0.25 - 1e-9 && dist(e, f) < 1.0);
+    // Back down: the distance is kept, so the eye goes back out.
+    root("fl.camera.orbit.elevation").value(20.0);
+    pose();
+    check("back down: the eye goes back out", std::fabs(dist(e, f) - 6.0) < 1e-6);
+    check("the orbit's distance was never changed",
+          std::fabs(root("fl.camera.orbit.distance").value<double>() - 6.0) < 1e-9);
+    // Without the floor the eye goes under it.
+    fc.clearOrbitFloor();
+    root("fl.camera.orbit.elevation").value(-45.0);
+    pose();
+    check("no floor: the eye goes under", e[2] < 0.0);
+  }
+
   printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
   // cvcGL's state_object / handler-thread teardown races at process exit (a known,
   // harmless issue, independent of the checks above). Hard-exit with the real

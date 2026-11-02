@@ -153,6 +153,19 @@ public:
 
   // Orbit center (state "orbit.center").
   void setOrbitCenter(double x, double y, double z);
+  // The orbit's distance from its centre (state "orbit.distance"; the wheel changes it).
+  double orbitDistance() const;
+  // How far the orbit's elevation may go, in degrees (state "orbit.min_elevation" and
+  // "orbit.max_elevation"; -89 and 89 by default). A third-person camera over a floor keeps it
+  // above the floor this way: looking up past the lower limit would put the eye under it.
+  void setOrbitElevationRange(double minDeg, double maxDeg);
+  // A floor the orbit's eye stays above, `height` along the up axis plus `clearance` (state
+  // "orbit.floor.on", "orbit.floor.height", "orbit.floor.clearance"; off by default). An eye
+  // that would go under it -- a third-person view looking up -- slides in along its line of sight
+  // toward the centre instead, so the view can look straight up from just above the floor. The
+  // orbit's distance is kept: the eye goes back out as the view comes down.
+  void setOrbitFloor(double height, double clearance = 0.25);
+  void clearOrbitFloor();
 
   // Cinematic TRACK mode (the third mode) — follow a named actor in the scene
   // with two-stage smoothing (position -> heading) and a critically-damped pose,
@@ -214,6 +227,7 @@ public:
   void setSprintMultiplier(double factor);
   void setMouseSensitivity(double degPerPixel);
   void setInvertPitch(bool invert);
+  void setInvertYaw(bool invert);  // horizontal look + drag, any mode ("settings.invert_yaw")
   void setPoseMirrorHz(double hz); // rate the live pose is written to state (0=off)
   // Vertical field of view in degrees for this controller's camera (each viewport
   // carries its own lens). 0 (default) leaves the VTK default untouched; a value
@@ -221,12 +235,29 @@ public:
   void setFieldOfView(double degrees);
   double fieldOfView() const;
 
-  // Quake pointer capture: hide the cursor and recenter it each frame so mouse-
-  // look is continuous (no window-edge stop). Auto-enabled in fly mode; Escape
-  // releases it. State "settings.pointer_capture". Recentering is X11 today; on
-  // other platforms it degrades to cursor-delta look.
+  // Pointer capture: the cursor is hidden and the pointer's motion keeps coming at the window's
+  // edge, so mouse-look is continuous. Auto-enabled in fly mode; Escape releases it. State
+  // "settings.pointer_capture". cvcGL's SDL window uses SDL's relative mouse mode (released while
+  // the window has no focus); in the browser it is the page's pointer lock, which the browser
+  // ends on Escape or when the tab loses focus (pointerCapture() then reads false); VTK's own
+  // windows hide the cursor and warp it back to the centre after each move.
   void setPointerCapture(bool on);
   bool pointerCapture() const;
+
+  // Third-person MOUSE LOOK, in Orbit: with the pointer captured, its motion turns the orbit as a
+  // drag does, with no button held -- the game camera, where a host walks its avatar the way the
+  // camera faces. A click on the scene captures the pointer and is not reported (takeClick);
+  // Escape releases it, and the pointer is the UI's again until the next click on the scene,
+  // drags orbiting as before. Turning it off releases the pointer. State "settings.mouse_look";
+  // off by default.
+  void setMouseLookEnabled(bool on);
+  bool mouseLookEnabled() const;
+  // Mouse look is on and the pointer is captured: the view follows the mouse.
+  bool mouseLooking() const;
+  // Whether the pointer is over a UI window (an overlay sets this every frame). In the browser a
+  // press on the canvas takes the pointer lock in the press itself -- the browser may refuse a
+  // request made later from the frame -- unless the press is the UI's.
+  void setPointerOverUi(bool over);
 
   // Drop every currently-held movement key. Call when input focus leaves the
   // viewport (e.g. a UI overlay takes the keyboard): a key pressed before the
@@ -242,9 +273,9 @@ public:
 
   // Rebind a movement key (also settable via state "keys.<action>"). Actions:
   // "forward","backward","strafe_left","strafe_right","up","down","toggle_mode",
-  // "sprint". Values are key names, SDL's ("W","Space","Left Ctrl","Tab","Left Shift", the
-  // defaults) or VTK's keysyms ("w","space","Control_L","Shift_L"): cvc::ariadne::canonical_key
-  // matches either spelling.
+  // "sprint", and "release_pointer" (Escape: lets a captured pointer go). Values are key names,
+  // SDL's ("W","Space","Left Ctrl","Tab","Left Shift", the defaults) or VTK's keysyms
+  // ("w","space","Control_L","Shift_L"): cvc::ariadne::canonical_key matches either spelling.
   void setKeyBinding(const std::string &action, const std::string &keySym);
   std::string keyBinding(const std::string &action) const;
 
@@ -270,7 +301,9 @@ private:
   void readAllFromState();             // pull every setting/pose from state into members
   void syncConfigToState();            // write config back (guarded against echo)
   void syncPoseToState();              // write the live pose back (guarded against echo)
-  void recenterPointer();              // X11 pointer warp for continuous captured look
+  void recenterPointer();              // warp the pointer back to the centre (VTK's windows)
+  void applyPointerCapture();          // tell the window / the browser what pointerCapture() is
+  void pollPointerLock();              // the browser's pointer-lock motion and release
   void resetTrack();                   // reset cinematic smoothing (ease in from current view)
   bool trackedWorldPos(double out[3]); // world pos of the tracked actor, or false
   double viewportAspect() const;       // renderer width/height, or 0 if unknown

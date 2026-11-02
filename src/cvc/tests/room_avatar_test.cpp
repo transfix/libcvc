@@ -325,7 +325,11 @@ TEST(RoomAvatar, ThePanelPublishesTheBudgetLedgerAndHistory) {
   EXPECT_EQ(get("controller"), "walker");
   EXPECT_EQ(get("body"), "0.50 x 0.50 x 1.70 m box, 70 kg");
   EXPECT_EQ(get("policy.reserve"), "30.0 kJ");
-  EXPECT_EQ(get("policy.sustains"), "2.2 m/s on resting power");
+  EXPECT_EQ(get("policy.sustains"), "2.2 m/s");
+  EXPECT_EQ(get("policy.sustains_tip"),
+            "The speed resting power keeps up for as long as you like.");
+  EXPECT_EQ(get("policy.push"), "840 N") << "a short value; what it means is its tip";
+  EXPECT_EQ(get("policy.push_tip"), "The most you push with: 12.0 m/s^2 at this mass.");
   EXPECT_EQ(get("energy.state"), "spending");
   EXPECT_LT(std::stod(get("energy.fraction")), 1.0);
   EXPECT_EQ(get("ledger.start"), "30.0 kJ");

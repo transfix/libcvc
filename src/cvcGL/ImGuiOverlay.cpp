@@ -38,6 +38,7 @@ EM_JS(int, cvcgl_is_touch_device, (), {
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <utility> // std::pair: the look cue's two strokes
 #include <vtkCallbackCommand.h>
 #include <vtkCommand.h>
 #include <vtkNew.h>
@@ -403,6 +404,10 @@ struct ImGuiOverlay::Impl {
     }
     if (sceneDraw) // scene annotations: under the UI, and shown with the panels hidden too
       sceneDraw();
+    if (cam) // a press over a window is the UI's, not the camera's (a browser's pointer lock)
+      cam->setPointerOverUi(io.WantCaptureMouse);
+    if (cam && cam->mouseLookEnabled() && cam->mode() == CameraController::Mode::Orbit)
+      drawLookCue(cam->pointerCapture());
     // The toggle is drawn FIRST so it is always reachable, even when the panels
     // it hides would have covered this corner.
     if (showToggle) {
@@ -476,6 +481,37 @@ struct ImGuiOverlay::Impl {
     style.FontScaleMain = scale;
     // Fingers wobble; the 6px default drag threshold turns a tap into a drag.
     ImGui::GetIO().MouseDragThreshold = scale > 1.0f ? 10.0f : 6.0f;
+  }
+
+  // Mouse look's cue, under the UI's windows: a small cross at the centre while the mouse turns
+  // the view, and below the centre how to have it do that while it does not.
+  void drawLookCue(bool looking) {
+    ImDrawList *dl = ImGui::GetBackgroundDrawList();
+    const ImVec2 size = ImGui::GetIO().DisplaySize;
+    const float k = appliedScale > 0.0f ? appliedScale : 1.0f;
+    const ImVec2 c(size.x * 0.5f, size.y * 0.5f);
+    if (looking) {
+      const float out = 8.0f * k, in = 3.0f * k;
+      // A dark line under a light one, so it shows on any background.
+      for (const auto &[col, width] :
+           {std::pair<ImU32, float>{IM_COL32(0, 0, 0, 150), 3.5f * k},
+            std::pair<ImU32, float>{IM_COL32(255, 255, 255, 230), 1.5f * k}}) {
+        dl->AddLine(ImVec2(c.x - out, c.y), ImVec2(c.x - in, c.y), col, width);
+        dl->AddLine(ImVec2(c.x + in, c.y), ImVec2(c.x + out, c.y), col, width);
+        dl->AddLine(ImVec2(c.x, c.y - out), ImVec2(c.x, c.y - in), col, width);
+        dl->AddLine(ImVec2(c.x, c.y + in), ImVec2(c.x, c.y + out), col, width);
+      }
+      return;
+    }
+    // Just under the middle, where the click goes (a corner is where the windows are).
+    const char *hint = "Click the scene to look around with the mouse. Esc gives the mouse back.";
+    const ImVec2 ts = ImGui::CalcTextSize(hint);
+    const ImVec2 p(c.x - 0.5f * ts.x, c.y + 40.0f * k);
+    const float pad = 8.0f * k;
+    dl->AddRectFilled(ImVec2(p.x - pad, p.y - 0.5f * pad),
+                      ImVec2(p.x + ts.x + pad, p.y + ts.y + 0.5f * pad), IM_COL32(0, 0, 0, 130),
+                      4.0f * k);
+    dl->AddText(p, IM_COL32(235, 235, 235, 235), hint);
   }
 
   // ---- input --------------------------------------------------------------

@@ -135,7 +135,8 @@ public:
 
   // Count of subscriptions that were matched only via a
   // transparent-link alias (i.e., not by direct router lookup).
-  // Cumulative across all dispatch_local / subscriptions_for_path calls.
+  // Cumulative across all subscriptions_for_path calls (a local mutation does not look its
+  // subscriptions up yet: that walks the whole tree, and nothing dispatches to them).
   std::uint64_t forwarded_through_link_count() const noexcept;
 
   // Suppression guard: while held on a given thread, local state
