@@ -14,6 +14,7 @@
 // an inproc transport).
 
 #include <algorithm>
+#include <cvc/ariadne/ariadne.h> // Runtime, clear_action_intrinsics: the avatar verbs' test
 #include <cvc/ariadne/conference/avatar_panel.h>
 #include <cvc/ariadne/conference/room_avatar.h>
 #include <cvc/ariadne/conference/room_intrinsics.h>
@@ -33,6 +34,31 @@ namespace {
 
 bool same_rgb(const float a[3], const float b[3]) {
   return a[0] == b[0] && a[1] == b[1] && a[2] == b[2];
+}
+
+// The catalog's labels as a fresh read of the tree gives them, KIND "color" or "accessory",
+// comma-joined (what the roster document makes of room-avatar-options).
+std::string fresh_labels(cvc::app &app, const std::string &room, const std::string &kind) {
+  const conf::avatar_catalog cat = conf::read_avatar_catalog(app, room);
+  std::string s;
+  const auto add = [&s](const std::string &label) { s += (s.empty() ? "" : ",") + label; };
+  if (kind == "color")
+    for (const conf::avatar_color_option &o : cat.colors)
+      add(o.label);
+  else
+    for (const conf::avatar_accessory_option &o : cat.accessories)
+      add(o.label);
+  return s;
+}
+
+// Run SCRIPT as one of RT's action programs, draining until it ends: "" when it finished.
+std::string run_to_end(cvc::ariadne::Runtime &rt, const std::string &script) {
+  std::string how = "<still running>";
+  bool ended = false;
+  rt.run_program(script, [&](const std::string &h) { how = h, ended = true; });
+  for (int i = 0; i < 1000 && !ended; ++i)
+    rt.drain();
+  return how;
 }
 
 } // namespace
@@ -409,4 +435,84 @@ TEST(RoomAvatar, ThePanelRereadsTheCatalogOnlyWhenItChanges) {
   panel.update(client, app, "elsewhere", "A", 1.0 / 60.0);
   EXPECT_EQ(shown(), " / ");
   EXPECT_EQ(panel.catalog_reads(), 4u);
+}
+
+// The avatar verbs a document calls every tick (conference_roster.ari's on_tick:
+// room-avatar-options twice and room-avatar) read the room's catalog again only when its revision
+// moves. The revision is the catalog's change signal (write_avatar_catalog bumps it last; nothing
+// else writes the catalog), so a label changed behind its back stays unseen until the revision
+// moves: that is how this test sees that an unchanged catalog is not re-read. A catalog that does
+// move, and a new choice, reach the verbs on the next call, as a fresh read of the tree gives them.
+TEST(RoomAvatar, TheAvatarVerbsRereadTheCatalogOnlyWhenItsRevisionMoves) {
+  cvc::app app;
+  struct registry_guard { // the providers capture APP: drop them before it goes
+    ~registry_guard() { cvc::ariadne::clear_action_intrinsics(); }
+  } guard;
+  conf::register_room_intrinsics(app);
+  cvc::ariadne::Runtime rt(app, "");
+  const auto get = [&](const std::string &path) {
+    cvc::state *n = app.root().findDescendant(path);
+    return n ? n->value() : std::string("<missing>");
+  };
+  // What the roster's tick reads: both option lists and our resolved look.
+  const std::string observe =
+      "(begin"
+      "  (state-set \"out.colors\""
+      "    (string.join (room-avatar-options \"room\" \"color\") \",\"))"
+      "  (state-set \"out.wear\""
+      "    (string.join (room-avatar-options \"room\" \"accessory\") \",\"))"
+      "  (set look (room-avatar (state-get \"tok\")))"
+      "  (state-set \"out.look\" (string.join"
+      "    (list (get-attr look \"color\") (get-attr look \"accessory\"))"
+      "    \" / \")))";
+  const auto pick = [&](const std::string &color, const std::string &accessory) {
+    EXPECT_EQ(run_to_end(rt, "(state-set \"out.pick\" (get-attr (room-set-avatar (state-get "
+                             "\"tok\") \"" +
+                                 color + "\" \"" + accessory + "\") \"ok\"))"),
+              "");
+    return get("out.pick");
+  };
+
+  conf::seed_avatar_catalog(app, "room");
+  ASSERT_EQ(run_to_end(rt, "(state-set \"tok\" (get-attr (room-join \"ep\" \"room\") \"token\"))"),
+            "");
+  ASSERT_NE(get("tok"), "");
+  EXPECT_EQ(pick("teal", "cap"), "true");
+  ASSERT_EQ(run_to_end(rt, observe), "");
+  EXPECT_EQ(get("out.colors"), fresh_labels(app, "room", "color"));
+  EXPECT_EQ(get("out.wear"), fresh_labels(app, "room", "accessory"));
+  EXPECT_EQ(get("out.look"), "Teal / Cap");
+
+  EXPECT_EQ(pick("gold", "halo"), "true"); // a new choice: no catalog change needed to see it
+  ASSERT_EQ(run_to_end(rt, observe), "");
+  EXPECT_EQ(get("out.look"), "Gold / Halo");
+
+  // Behind the revision's back: the verbs keep the catalog they read.
+  app.root()(conf::room_avatars_path("room") + ".colors.teal.label").value("Turquoise");
+  ASSERT_EQ(run_to_end(rt, observe), "");
+  EXPECT_NE(get("out.colors"), fresh_labels(app, "room", "color"));
+  EXPECT_NE(get("out.colors").find("Teal"), std::string::npos) << "not re-read";
+
+  // The relay rewrites the catalog: gold relabelled, the halo withdrawn (so the first accessory).
+  conf::avatar_catalog cat = conf::default_avatar_catalog();
+  for (conf::avatar_color_option &c : cat.colors)
+    if (c.id == "gold")
+      c.label = "Sunflower";
+  cat.accessories.erase(
+      std::remove_if(cat.accessories.begin(), cat.accessories.end(),
+                     [](const conf::avatar_accessory_option &a) { return a.id == "halo"; }),
+      cat.accessories.end());
+  conf::write_avatar_catalog(app, "room", cat);
+  ASSERT_EQ(run_to_end(rt, observe), "");
+  EXPECT_EQ(get("out.colors"), fresh_labels(app, "room", "color"));
+  EXPECT_EQ(get("out.wear"), fresh_labels(app, "room", "accessory"));
+  EXPECT_EQ(get("out.wear").find("Halo"), std::string::npos);
+  EXPECT_EQ(get("out.look"), "Sunflower / None");
+  EXPECT_EQ(pick("gold", "halo"), "false") << "room-set-avatar checks the catalog it re-read";
+
+  // Another room is another catalog (none written there yet).
+  ASSERT_EQ(run_to_end(rt, "(state-set \"out.elsewhere\""
+                           "  (string.join (room-avatar-options \"elsewhere\" \"color\") \",\"))"),
+            "");
+  EXPECT_EQ(get("out.elsewhere"), "");
 }
