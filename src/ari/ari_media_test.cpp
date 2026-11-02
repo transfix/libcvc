@@ -344,3 +344,15 @@ TEST(AriMedia, OverSshAriMediaDoesNotPlayUnlessTold) {
   r = run_with(ari_media(), "snapshot --media-play sometimes " + quoted(kPlayerDoc));
   EXPECT_EQ(r.status, 2) << r.output;
 }
+
+// Moving pictures in the lean ari: animated pictures animate; a video avatar has no player here,
+// so it is a placeholder its status: names.
+TEST(AriMedia, TheLeanAriAnimatesPicturesAndNamesTheVideosItCannotPlay) {
+  REQUIRE_ARI();
+  const fs::path doc = fs::path(__FILE__).parent_path() / "tests" / "media_animated.ari";
+  const AriRun r = ari("snapshot --width 90 " + quoted(doc));
+  EXPECT_EQ(r.status, 0) << r.output;
+  EXPECT_NE(r.output.find("gif ready webp ready vav unsupported decor unsupported bg unsupported"),
+            std::string::npos)
+      << r.output;
+}

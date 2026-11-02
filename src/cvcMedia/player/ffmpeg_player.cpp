@@ -317,7 +317,10 @@ private:
     }
     if (src_.video)
       vidx_ = av_find_best_stream(fmt_, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-    aidx_ = av_find_best_stream(fmt_, AVMEDIA_TYPE_AUDIO, -1, vidx_ >= 0 ? vidx_ : -1, nullptr, 0);
+    // A silent picture (a decorative video) takes no sound: no audio stream, no device.
+    aidx_ = src_.audio ? av_find_best_stream(fmt_, AVMEDIA_TYPE_AUDIO, -1, vidx_ >= 0 ? vidx_ : -1,
+                                             nullptr, 0)
+                       : -1;
     if (vidx_ < 0 && aidx_ < 0) {
       fail(src_.video ? "the file has no video or audio stream" : "the file has no audio stream");
       return false;

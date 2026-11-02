@@ -49,6 +49,7 @@ struct PlayerSource {
   int frame_h = 0;
   bool loop = false;
   bool muted = false;
+  bool audio = true; // false: a silent picture (a decorative video): open no sound device at all
 };
 
 // One source being played. Created by a PlayerFactory, driven from the frame thread: every method

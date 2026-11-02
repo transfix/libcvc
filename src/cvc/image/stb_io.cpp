@@ -25,6 +25,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_STATIC
@@ -135,6 +136,31 @@ image stb_decode_memory(const void *data, std::size_t size, std::string *why) {
     std::memcpy(out.data(), px, static_cast<std::size_t>(w) * h * 4);
   stbi_image_free(px);
   return out;
+}
+
+// Every frame of a GIF (stb composes each onto the canvas), with its delay in ms.
+bool stb_decode_gif_memory(const void *data, std::size_t size, std::vector<image> &frames,
+                           std::vector<int> &delays, std::string *why) {
+  int w = 0, h = 0, z = 0, comp = 0;
+  int *ds = nullptr;
+  unsigned char *px =
+      size <= static_cast<std::size_t>(INT_MAX)
+          ? stbi_load_gif_from_memory(static_cast<const stbi_uc *>(data), static_cast<int>(size),
+                                      &ds, &w, &h, &z, &comp, 4)
+          : nullptr;
+  if (!px) {
+    if (why)
+      *why = stbi_failure_reason() ? stbi_failure_reason() : "corrupt GIF";
+    return false;
+  }
+  const std::size_t one = static_cast<std::size_t>(w) * h * 4;
+  for (int i = 0; i < z; ++i) {
+    frames.emplace_back(w, h, image::pixel_format::RGBA, image::data_type::u8, px + one * i);
+    delays.push_back(ds ? ds[i] : 100);
+  }
+  stbi_image_free(px);
+  STBI_FREE(ds);
+  return true;
 }
 
 } // namespace detail

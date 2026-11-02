@@ -277,8 +277,8 @@ public:
     open_ = cvc_media_open(id_, video_ ? 1 : 0, src.uri.c_str(),
                            token.empty() ? nullptr : token.c_str(),
                            reinterpret_cast<const unsigned char *>(bytes.data()),
-                           static_cast<int>(bytes.size()), mime.c_str(), src.muted ? 1 : 0,
-                           src.loop ? 1 : 0) != 0;
+                           static_cast<int>(bytes.size()), mime.c_str(),
+                           src.muted || !src.audio ? 1 : 0, src.loop ? 1 : 0) != 0;
   }
   ~BrowserPlayer() override { cvc_media_close(id_); }
   void play() override { cvc_media_play(id_); }
