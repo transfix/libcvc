@@ -62,6 +62,16 @@ float ui_px(float v) {
   return v * s.FontScaleMain * s.FontScaleDpi;
 }
 
+// A phone's view: under 500 CSS px on its short side, either way up (today's phones are 360-430; a
+// tablet or a laptop's window is well over). CSS px are the display's pixels over its pixel ratio.
+constexpr float kPhoneView = 500.0f;
+
+bool phone_view() {
+  const ImVec2 d = ImGui::GetIO().DisplaySize;
+  const float css = ImMin(d.x, d.y) / ImMax(ImGui::GetStyle().FontScaleDpi, 0.01f);
+  return css > 1.0f && css < kPhoneView;
+}
+
 float *cache_float(const char *key, float seed, bool active) {
   ImGuiStorage *store = ImGui::GetStateStorage();
   const ImGuiID id = ImHashStr(key, 0, kCacheSalt);
@@ -197,6 +207,7 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
     openSize = ImVec2(ui_px(m_pendingSeed.w), ui_px(m_pendingSeed.h));
   else if (!fits)
     openSize = ImVec2(px(size.w, avail.x), px(size.h, avail.y));
+  const bool tooBig = openSize.x > avail.x || openSize.y > avail.y;
   openSize = ImMin(openSize, avail);
   if (m_haveSeed) {
     if (m_pendingSeed.has_pos) {
@@ -204,8 +215,25 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
       const ImVec2 shows(openSize.x > 0.0f ? openSize.x : ImMin(fitFloor, avail.x),
                          openSize.y > 0.0f ? openSize.y : ImMin(fitFloor, avail.y));
       const ImVec2 at = origin + ImVec2(ui_px(m_pendingSeed.x), ui_px(m_pendingSeed.y));
-      ImGui::SetNextWindowPos(ImMax(work.Min, ImMin(at, work.Max - shows)), once);
-      if (fits && !existing)
+      ImVec2 in = ImMax(work.Min, ImMin(at, work.Max - shows));
+      // On a phone, a document laid out for a wider screen would have all its windows moved in
+      // onto the same few hundred pixels, one over another. There a window whose authored place or
+      // size does not fit opens collapsed instead, its title bar under those of the others that
+      // did, from the top of the view: a list to open one at a time. Expanded, it opens from its
+      // title down, as wide as the view and no taller than the room below.
+      const bool stack = !existing && m_pendingSeed.authored && phone_view() &&
+                         (tooBig || in.x != at.x || in.y != at.y);
+      if (stack) {
+        const float title = ImGui::GetFrameHeight();
+        in = ImVec2(work.Min.x,
+                    ImMin(work.Min.y + static_cast<float>(m_stacked) * title, work.Max.y - title));
+        ++m_stacked;
+        ImGui::SetNextWindowCollapsed(true, once);
+        if (!fits)
+          openSize = ImVec2(avail.x, ImMin(openSize.y, work.Max.y - in.y));
+      }
+      ImGui::SetNextWindowPos(in, once);
+      if (fits && !existing && !stack)
         m_placedUnmeasured.insert(id);
     }
     m_haveSeed = false;
@@ -346,6 +374,7 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
 void ImGuiBackend::reset_layout() {
   m_flow.clear();
   m_placedUnmeasured.clear();
+  m_stacked = 0;
   m_relaid.clear();
   m_relaidGrids.clear();
   m_relayout = true;
@@ -806,13 +835,28 @@ ariadne::BoolEdit ImGuiBackend::checkbox(const char *label, bool current) {
 // to 65% of itself every frame until the 48 px floor snapped it back, so the slider never held a
 // width long enough to be dragged.
 void reserve_label_width(const char *label) {
-  // A window that fits its widgets grows to the label instead -- and shrinking the frame to the
-  // window's width there would only shrink the window with it, frame after frame.
-  if (ImGui::GetCurrentWindow()->Flags & ImGuiWindowFlags_AlwaysAutoResize)
-    return;
-  const float avail = ImGui::GetContentRegionAvail().x;
+  const ImGuiStyle &style = ImGui::GetStyle();
   const float labelW = ImGui::CalcTextSize(label, nullptr, /*hide_text_after_double_hash=*/true).x;
-  const float fit = avail - ImGui::GetStyle().ItemInnerSpacing.x - labelW;
+  const ImGuiWindow *win = ImGui::GetCurrentWindow();
+  // A window that fits its widgets grows to the label instead -- and shrinking the frame to the
+  // window's width there would only shrink the window with it, frame after frame. It grows only as
+  // far as the view's edge, though, which on a phone is near: ImGui gives such a window's widgets
+  // 16 lines' width, most of a phone's at its UI size. There the frame leaves the label room up to
+  // the widest the window can be -- bounded by the view, not the window, so it stays put frame
+  // after frame. ImGui fits a window no wider than the view less its safe-area padding each side.
+  if (win->Flags & ImGuiWindowFlags_AlwaysAutoResize) {
+    const ImGuiViewport *vp = ImGui::GetMainViewport();
+    const float widest = ImMin(vp->WorkPos.x + vp->WorkSize.x - win->Pos.x,
+                               vp->WorkSize.x - 2.0f * style.DisplaySafeAreaPadding.x);
+    const float most = widest - (win->DC.CursorPos.x - win->Pos.x) - style.WindowPadding.x -
+                       (win->ScrollbarY ? style.ScrollbarSize : 0.0f);
+    const float fit = most - style.ItemInnerSpacing.x - labelW;
+    if (fit < ImGui::CalcItemWidth())
+      ImGui::SetNextItemWidth(ImMax(fit, 48.0f));
+    return;
+  }
+  const float avail = ImGui::GetContentRegionAvail().x;
+  const float fit = avail - style.ItemInnerSpacing.x - labelW;
   if (ImGui::GetCurrentTable() != nullptr || fit < ImGui::CalcItemWidth())
     ImGui::SetNextItemWidth(ImMax(fit, 48.0f)); // floor: a still-usable slider/drag handle
 }

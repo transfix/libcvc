@@ -51,8 +51,8 @@ public:
   bool begin_grid(const cvc::ariadne::Layout &layout, const char *id) override;
   void grid_next_cell() override;
   void end_grid() override;
-  void seed_grid_tracks(const std::vector<float> &sizes) override; // §11.4 (pre begin_grid)
-  std::vector<float> grid_tracks() const override;                 // §11.4 (post end_grid)
+  void seed_grid_tracks(const std::vector<float> &sizes) override;   // §11.4 (pre begin_grid)
+  std::vector<float> grid_tracks() const override;                   // §11.4 (post end_grid)
   void seed_grid_columns(const std::vector<float> &widths) override; // §11.4 (pre begin_grid)
   std::vector<float> grid_columns() const override;                  // §11.4 (post end_grid)
   void begin_disabled() override; // §4: ImGui::BeginDisabled (greyed, non-interactive)
@@ -203,6 +203,10 @@ private:
   // Windows that fit their content and opened at a place of their own before ImGui had measured
   // them: the next frame moves each in again, measured, until all of it shows (§5.8).
   std::unordered_set<std::string> m_placedUnmeasured;
+  // On a phone, the windows whose authored place did not fit the view open collapsed instead, their
+  // title bars one under another from the top of the view (§5.14): how many have, since the
+  // document was laid out.
+  int m_stacked = 0;
 
   // reset_layout(): the windows drawn since, by id. A window's first draw after it takes its
   // authored place and size (or rejoins the flow) though ImGui still holds the last document's.
