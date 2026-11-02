@@ -11,7 +11,10 @@
 #                               that peer's camera window. These controls are LOCAL — they change only
 #                               what THIS client sees/hears, never the other person's capture.
 #   • cam_<i>    (per peer)    — one window per OTHER participant, titled by their name, showing their
-#                               camera. Repeated over peer.count; opened automatically, closable.
+#                               camera. Repeated over peer.count; opened automatically, closable, and
+#                               listed by name at the end of the View menu to open again (or click
+#                               the name in Users). Closed or open, it stays with the person when
+#                               the list reorders.
 #
 # The host (arigl ConferenceSession) drives the media: it forwards our camera+mic, mixes every peer's
 # audio into one output (per-peer volume + mute from the Users window), measures voice activity
@@ -57,6 +60,10 @@ scene:
     enabled: true
     resolution: 2048
     update_interval: 1
+
+# The peers' camera windows (cam_<i>, made by a repeat) are listed by name at the end of View: the
+# built-in Windows menu under that title joins it (ARIADNE.md §5.9).
+windows_menu: View
 
 menubar:
   - menu: Room
@@ -384,11 +391,13 @@ windows:
               - text: ""
                 bind: peer.{i}.name
                 on_click: (begin (state-set "tree.cam_{i}.open" "1") (state-set "tree.cam_{i}.raise" "1"))
+                tooltip: "Show their camera"
                 visible_when: (not (= (state-get "peer.{i}.talking") "1"))
               - text: ""
                 bind: peer.{i}.name
                 color: [0.30, 1.0, 0.40]
                 on_click: (begin (state-set "tree.cam_{i}.open" "1") (state-set "tree.cam_{i}.raise" "1"))
+                tooltip: "Show their camera"
                 visible_when: (= (state-get "peer.{i}.talking") "1")
           - text: ""
             bind: peer.{i}.ping
@@ -561,8 +570,9 @@ on_tick: |
     ; ── mirror self voice-activity for the (you) row ──
     (state-set "self.talking" (state-get (str-concat "media." (state-get "self.pid") ".talking")))
     ; ── per-peer controls follow the PERSON, not the row: rows are sorted by pid, so they shift when
-    ;    someone joins or leaves. Park each row's cam/mic/vol under its pid (ctl.<pid>.*) before the
-    ;    rebuild; the rebuild gives each row its own pid's back ("" lets the widget seed its default) ──
+    ;    someone joins or leaves. Park each row's cam/mic/vol, and whether its camera window is open,
+    ;    under its pid (ctl.<pid>.*) before the rebuild; the rebuild gives each row its own pid's back
+    ;    ("" lets the widget seed its default: a newcomer's window opens) ──
     (for i (range (if (= (state-get "peer.count") "") 0 (int (state-get "peer.count"))))
       (begin
         (set opid (state-get (str-concat "peer." i ".pid")))
@@ -570,7 +580,8 @@ on_tick: |
           (begin
             (state-set (str-concat "ctl." opid ".vol") (state-get (str-concat "peer." i ".vol")))
             (state-set (str-concat "ctl." opid ".von") (state-get (str-concat "peer." i ".von")))
-            (state-set (str-concat "ctl." opid ".aon") (state-get (str-concat "peer." i ".aon")))))))
+            (state-set (str-concat "ctl." opid ".aon") (state-get (str-concat "peer." i ".aon")))
+            (state-set (str-concat "ctl." opid ".win") (state-get (str-concat "tree.cam_" i ".open")))))))
     ; ── rebuild the OTHER-participant slots each tick (self excluded: it has My Camera + the you row) ──
     (set idx 0)
     (set total 1)
@@ -594,6 +605,7 @@ on_tick: |
             (state-set (str-concat "peer." idx ".vol") (state-get (str-concat "ctl." pid ".vol")))
             (state-set (str-concat "peer." idx ".von") (state-get (str-concat "ctl." pid ".von")))
             (state-set (str-concat "peer." idx ".aon") (state-get (str-concat "ctl." pid ".aon")))
+            (state-set (str-concat "tree.cam_" idx ".open") (state-get (str-concat "ctl." pid ".win")))
             (state-set (str-concat "peer." idx ".name") (get-attr p "name"))
             (state-set (str-concat "peer." idx ".cam")
               (state-get (str-concat "media." pid ".camera")))
