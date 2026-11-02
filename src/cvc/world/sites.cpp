@@ -219,10 +219,16 @@ std::vector<lot> layout_lots(const road_network &net, const site_params &sp,
 
   // How far behind the setback line (at q, looking along (dx, dy)) the next OTHER road's edge is,
   // or max_block when none is that close.
+  // Only a road whose edge the probe reaches counts, so each probe looks no further than the
+  // widest road's half-width (a probe deep inside a big block would otherwise search far).
+  double widest = 0.0;
+  for (const road_segment &s : net.segments)
+    widest = std::max(widest, s.width);
+  const double reach = 0.5 * widest + 0.5;
   auto clear_behind = [&](double qx, double qy, double dx, double dy, int ri) {
     for (double s = 2.0; s <= sp.max_block; s += 2.0) {
       int si = -1;
-      const double d = net.distance_to_road(qx + dx * s, qy + dy * s, &si);
+      const double d = net.distance_within(qx + dx * s, qy + dy * s, reach, &si);
       if (si >= 0 && seg_road[std::size_t(si)] != ri && d <= 0.5 * net.segments[si].width + 0.5)
         return s;
     }

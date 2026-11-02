@@ -20,9 +20,9 @@
   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
-// npy.h — a minimal NumPy .npy v1.0 writer (little-endian, C order). Just enough
-// for the world bundle: uint8, uint16 and float32 2-D arrays that np.load reads
-// natively. No .npy reader in libcvc, so this is the whole dependency.
+// npy.h — a minimal NumPy .npy v1.0 writer (little-endian, C order), and a reader
+// for 2-D arrays. Just enough for the world bundle (uint8, uint16 and float32 2-D
+// arrays that np.load reads natively) and an elevation raster (load_dem).
 
 #ifndef CVC_WORLD_NPY_H
 #define CVC_WORLD_NPY_H
@@ -40,6 +40,10 @@ void write_npy(const std::string &path, const std::vector<float> &data, int rows
 
 // Serialize to a byte buffer (for tests / in-memory checks).
 std::vector<std::uint8_t> npy_bytes(const std::vector<std::uint16_t> &data, int rows, int cols);
+
+// Read a 2-D .npy (v1 or v2, C order; f4, f8, i1, u1, i2, u2, i4 or u4, little-endian) as float32.
+// Throws std::runtime_error on a missing file, another layout or dtype, or a short body.
+std::vector<float> read_npy(const std::string &path, int &rows, int &cols);
 
 } // namespace world
 } // namespace cvc

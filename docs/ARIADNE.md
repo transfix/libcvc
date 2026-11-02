@@ -732,6 +732,15 @@ south-west to north-east), a body on it collides with the same triangles, and a 
 standing on it (`ground:` in `forest_trees`, `wave_sea`, `cloud_sky`) samples the triangle under
 each point.
 
+**Generated terrain.** `source: { terrain: { generator, size, resolution, seed, amp, file,
+preset } }` draws a `cvc::world` terrain generator's ground as such a heightfield: `fbm` (the
+analytic relief the terrain lab stands on; the default), `dem` (an elevation `.npy` at `file`, a URI
+or a path relative to the document, anchored at 0 and stretched to `amp`), or one a host
+registered (`cvc::world::register_terrain_generator`). The size defaults to 1200 and the resolution
+to one vertex per 5 m (at most 2049). A `heightfield:` source takes the same `generator:` keys, its
+layers adding on top. The `generated_world` node type uses the same generators (its `terrain:`,
+`city:` and `terrain_file:` props; `world_controls.ari` switches them live).
+
 **The fast render path.** A big static world draws fast when it is a few merged meshes and its
 shadow maps are re-baked rarely and spent where the camera looks. These keys say so
 (`examples/ariadne/documents/terrain_lab.ari` uses all of them):
@@ -1190,13 +1199,14 @@ How each backend does it:
   When the view gets smaller later (a browser window made smaller, a phone turned on its side,
   fullscreen left), a window that showed in full moves back in the same way, no larger than the
   work area. A window moved in, where it opened or since, goes back toward its place and size as
-  the view grows again, as far as the view allows, until it is there. One the user moves or
-  resizes meanwhile stays where they put it, and so does one the user left partly outside the
-  view. ImGui gives a window with no size ImGui's always-auto-resize: it measures
-  the window's widgets each frame, its labeled widgets at the width ImGui gives an auto-resizing
-  window's items (16 font sizes), and a row-split pane as wide as its own widgets. A window with
-  a size gets a horizontal scroll bar as well as ImGui's vertical one, and a long label shrinks
-  its slider, input, combo or colour widget rather than run past the window's edge. A
+  the view grows again, as far as the view allows, until it is there (not one that opened in a
+  phone's list of titles, §5.14: its place is the list's). One the user moves or resizes
+  meanwhile stays where they put it, and so does one the user left partly outside the view.
+  ImGui gives a window with no size ImGui's always-auto-resize: it measures the window's widgets
+  each frame, its labeled widgets at the width ImGui gives an auto-resizing window's items (16
+  font sizes), and a row-split pane as wide as its own widgets. A window with a size gets a
+  horizontal scroll bar as well as ImGui's vertical one, and a long label shrinks its slider,
+  input, combo or colour widget rather than run past the window's edge. A
   `layout: {kind: horizontal}` row with no `col_widths` puts its cells side by side on one line,
   each at its natural width, as the terminal backends do. One with `col_widths` is an ImGui table
   with a column per entry. `borders` and `resizable` need that table, so a row using them needs
@@ -1515,6 +1525,16 @@ this for every one.
   tap on the title), closes with its X when it is `closable:`, and comes back from the View or
   Windows menu (§5.9). On a touch screen a window moves by its title bar only, so a finger that
   slips off a widget does not carry its window away.
+- **A list of windows.** A document laid out for a wider screen would have its windows moved
+  into the phone's view all onto the same spot, one over another. So on a phone (a view under
+  500 CSS pixels on its short side, either way up) a window whose `pos:` or `size:` does not fit
+  opens collapsed instead: its title bar goes under those of the others that did, from the top of
+  the view, and the panels show a list of titles over the scene. The arrow (or a double tap)
+  opens one: it unfolds from its title, as wide as the view and no taller than the room below,
+  over the titles after it. Windows that fit where they were put, and those with no `pos:` (the
+  flow, §5.8), open as anywhere else.
+- **Labels.** A slider's, combo's or field's label stays in view: in a window that fits its
+  widgets, a widget that would push its label past the view's edge is narrowed to leave it room.
 - **The system keyboard.** A browser raises a phone's keyboard only for a focused text field,
   which the canvas is not. When a finger (or a pen) activates an `input_text`, the page focuses a
   hidden `<input>` placed at the field's caret, so the keyboard comes up and the browser keeps

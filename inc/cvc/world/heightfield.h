@@ -34,6 +34,7 @@
 #define CVC_WORLD_HEIGHTFIELD_H
 
 #include <cstdint>
+#include <cvc/world/terrain_source.h>
 
 namespace cvc {
 namespace world {
@@ -55,14 +56,20 @@ struct heightfield_params {
   double shelf_m = -9.0;          // depth outside the island mask
 };
 
-class heightfield {
+// A terrain_source defined everywhere; its datum is the params' sea level, and its relief the
+// island's peak (with the dome) or the fBm amplitude.
+class heightfield : public terrain_source {
 public:
   explicit heightfield(const heightfield_params &p) : p_(p) {}
 
-  double sample(double x, double y) const;
+  double sample(double x, double y) const override;
 
   // Slope in degrees, from a centred metre-scale finite difference.
-  double slope_deg(double x, double y, double h_m = 1.0) const;
+  double slope_deg(double x, double y, double h_m = 1.0) const override;
+
+  terrain_bounds bounds() const override { return terrain_bounds{}; }
+  double sea_level_m() const override { return p_.sea_level_m; }
+  double relief_m() const override { return p_.island ? p_.island_peak_m : p_.amp_m; }
 
   const heightfield_params &params() const noexcept { return p_; }
 

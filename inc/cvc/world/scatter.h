@@ -35,8 +35,8 @@
 #define CVC_WORLD_SCATTER_H
 
 #include <cstdint>
-#include <cvc/world/heightfield.h>
 #include <cvc/world/surface.h>
+#include <cvc/world/terrain_source.h>
 #include <string>
 #include <vector>
 
@@ -88,7 +88,7 @@ struct scatter_params {
 
 // Place props over [min_x,max_x] x [min_y,max_y]. Deterministic in `seed`.
 std::vector<placed_prop> scatter(double min_x, double min_y, double max_x, double max_y,
-                                 const scatter_params &sp, const heightfield &hf,
+                                 const scatter_params &sp, const terrain_source &hf,
                                  const surface_registry &reg, std::uint64_t seed);
 
 } // namespace world

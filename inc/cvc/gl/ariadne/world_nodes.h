@@ -25,10 +25,17 @@
 //
 //   - node: world
 //     type: generated_world
-//     seed: 7            # half, trees, rocks, buildings, tree_gen, amp, water_level, preset,
-//     preset: standard   # ontology, color (material | risk | occupancy | height): each seeds a
-//     look: soft         # world.* state key that world_controls.ari's panel drives live
+//     seed: 5            # half, trees, rocks, buildings, tree_gen, amp, water_level, preset,
+//     preset: standard   # ontology, color (material | risk | occupancy | height), terrain,
+//     terrain: fbm       # city, terrain_file: each seeds a world.* state key that
+//     city: districts    # world_controls.ari's panel drives live
+//     look: soft
 //     building_library: cvc://data/austin_south/buildings.glb   # optional: roads-first city
+//
+// `terrain:` and `city:` name cvc::world generators (fbm | dem | a host's; districts | none | a
+// host's); `terrain_file:` is the dem generator's .npy, a URI or a path relative to the document.
+// The node publishes the registered names (world.generators.terrain / .city, one per line) for the
+// panel's combos. A generator that fails keeps the current world and says why in world.status.
 //
 // The node itself is the terrain: a GeometryNode with the surface texture (material, roads,
 // plazas), its cvc::height_field published to RealizedScene::height_fields under the node's id, so

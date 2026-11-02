@@ -215,6 +215,10 @@ private:
     float placedX = 0.0f, placedY = 0.0f, placedW = 0.0f, placedH = 0.0f; // where it was last put
   };
   std::unordered_map<std::string, Home> m_home;
+  // On a phone, the windows whose authored place did not fit the view open collapsed instead, their
+  // title bars one under another from the top of the view (§5.14): how many have, since the
+  // document was laid out.
+  int m_stacked = 0;
 
   // reset_layout(): the windows drawn since, by id. A window's first draw after it takes its
   // authored place and size (or rejoins the flow) though ImGui still holds the last document's.

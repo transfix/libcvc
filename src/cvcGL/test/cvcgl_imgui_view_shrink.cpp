@@ -5,7 +5,8 @@
 //  - when the view grows again, each goes back as far as the view allows, to where it was;
 //  - a page opened in a short view: the windows moved in where they opened go back the same way;
 //  - one the user left partly outside the view stays where it is, and so does one the user moved
-//    after it was moved in.
+//    after it was moved in;
+//  - one that opened in a phone's list of titles (its pos: off the view) stays in the list.
 #include <cmath>
 #include <cstdio>
 #include <cvc/ariadne/ariadne.h>
@@ -220,6 +221,21 @@ int main() {
     chk(near(card->Pos.x, 20.0f) && near(card->Pos.y, 800.0f),
         "at 1350 x 830 Card stays where the user put it (" + rect(card) + ")");
     chk(inside(users, view), "Users, which showed in full, moves in (" + rect(users) + ")");
+  }
+
+  std::printf("== opened on a phone, then the view grows ==\n");
+  {
+    Session s(ImVec2(390.0f, 844.0f)); // a phone's view: under 500 px on its short side
+    ImGuiWindow *users = find("users");
+    if (!users)
+      return 1;
+    const ImVec2 listed = users->Pos;
+    chk(users->Collapsed, "on a phone Users, its pos: off the view, opens in the list of titles (" +
+                              rect(users) + ")");
+    s.resize(ImVec2(1600.0f, 900.0f));
+    chk(users->Collapsed && near(users->Pos.x, listed.x) && near(users->Pos.y, listed.y),
+        "at 1600 x 900 it stays in the list, with no place of its own to go back to (" +
+            rect(users) + ")");
   }
 
   std::printf("cvcgl_imgui_view_shrink: %s\n", failures ? "FAILED" : "PASSED");

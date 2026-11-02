@@ -7,7 +7,10 @@ recipe:
   # Bumped 1 -> 2: the gallery now links ImageMagick (CVC_ENABLE_IMAGEMAGICK=ON, was OFF
   # because the demo link could not resolve MagickCore's static codec libraries).
   # Reset to 1 for the 3.7.1 upstream version: a version bump restarts cvc_revision.
-  cvc_revision: 1
+  # 2: the same files with no runtime deps (depends.runtime below), so an install stops pulling
+  # the static build closure. publish-cvcgl-wasm packs at this revision and skips one the catalog
+  # already has, so the bump is what lets it republish 3.7.8.
+  cvc_revision: 2
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
@@ -85,6 +88,12 @@ depends:
     - name: scene-austin-south-small
     - name: grl-snam-weights
     - name: vehicle-humvee
+  # Nothing at run time: the bundle is finished page files (share/libcvc-examples-web/web/), the
+  # libraries above all linked into the demos' .wasm and the scene, policy and vehicle preloaded
+  # into their .data. Without this list cvcpkg records the build list as the bundle's required
+  # deps, and `cvcpkg install libcvc-examples-web` lays the whole static closure (vtk, boost,
+  # imagemagick, the Austin scene, ...) down beside the gallery.
+  runtime: []
   host_tools:
     - cmake
     - ninja

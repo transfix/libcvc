@@ -30,13 +30,15 @@ namespace world {
 world_model world_model::generate(const world_params &wp) {
   world_model wm(wp);
   wm.reg_ = &surface_registry::variant(wp.ontology);
-  // The heightfield takes the world seed.
-  wm.hf_ = heightfield([&] {
+  if (wp.terrain) {
+    wm.terrain_ = wp.terrain;
+  } else { // the fBm relief takes the world seed
     heightfield_params hp = wp.hf;
     hp.seed = wp.seed ^ hp.seed;
-    return hp;
-  }());
-  wm.props_ = scatter(wp.min_x, wp.min_y, wp.max_x, wp.max_y, wp.sc, wm.hf_, *wm.reg_, wp.seed);
+    wm.terrain_ = std::make_shared<const heightfield>(hp);
+  }
+  wm.props_ =
+      scatter(wp.min_x, wp.min_y, wp.max_x, wp.max_y, wp.sc, *wm.terrain_, *wm.reg_, wp.seed);
   return wm;
 }
 
@@ -99,7 +101,7 @@ void raster(const world_model &wm, const grid_spec &g, raster_out &out) {
   const int rows = g.rows, cols = g.cols;
   const std::size_t n = std::size_t(rows) * std::size_t(cols);
   const surface_registry &reg = wm.registry();
-  const heightfield &hf = wm.hf();
+  const terrain_source &ground = wm.terrain();
 
   out.rows = rows;
   out.cols = cols;
@@ -110,16 +112,19 @@ void raster(const world_model &wm, const grid_spec &g, raster_out &out) {
   out.height.assign(n, 0.0f);
   out.layer_owner.assign(n, 0);
 
-  const double sea = hf.params().sea_level_m;
-  const double amp = hf.params().island ? hf.params().island_peak_m : hf.params().amp_m;
+  const double sea = ground.sea_level_m();
+  const double amp = ground.relief_m();
 
   // ── Layer 0: derived predicates (each cell independent -> thread-invariant) ──
+#ifdef CVC_USING_OPENMP
+#pragma omp parallel for schedule(static)
+#endif
   for (int r = 0; r < rows; ++r) {
     const double y = g.world_y(r); // row 0 == min_y
     for (int c = 0; c < cols; ++c) {
       const double x = g.world_x(c);
-      const double h = hf.sample(x, y);
-      const double sl = hf.slope_deg(x, y);
+      const double h = ground.sample(x, y);
+      const double sl = ground.slope_deg(x, y);
       const std::size_t i = std::size_t(r) * cols + c;
       out.height[i] = float(h);
       out.klass[i] = derived_class(h, sl, sea, amp);
