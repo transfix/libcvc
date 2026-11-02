@@ -1,7 +1,8 @@
 // ImGuiBackend at a phone's UI size, on a bare ImGui context (no window, no GL). ImGuiOverlay
 // scales the style by the UI size (style.FontScaleMain) and the display's pixel ratio
 // (FontScaleDpi); this sets them as it does:
-//  - a document's px scale with them: a window's size: and pos:, a column's width;
+//  - a document's px scale with them: a window's size: and pos:, a column's width, the area a
+//    group's background: takes;
 //  - a window opens inside the view: an authored size larger than the view stops at its edge, and
 //    an authored pos past the edge moves in until all of the window shows (a window that fits its
 //    content: its smallest fit at first, then all of it once measured);
@@ -19,6 +20,7 @@
 #include <cvc/gl/ariadne/ImGuiBackend.h>
 #include <cvc/state/state.h>
 #include <string>
+#include <vector>
 
 #ifdef CVC_ENABLE_IMGUI
 #include <imgui.h>
@@ -50,6 +52,8 @@ std::string vec(ImVec2 v) {
 
 // The conference's layout, cut down: My Camera has a pos: and a size:, Users a pos: past a
 // phone's width and no size, and a row of px columns as AppRuntime's Controls window lays out.
+// Card holds a group with a background: 120 px tall (its picture a name no host published, so
+// only the area is drawn).
 ari::Widget conference() {
   ari::Widget cam = ari::window("My Camera", {ari::text("self view")});
   cam.id = "cam";
@@ -68,14 +72,34 @@ ari::Widget conference() {
   users.has_pos = true;
   users.pos_x = 390.0f;
   users.pos_y = 40.0f;
-  return ari::group({cam, users});
+  ari::Widget banner = ari::group({ari::text("Grace Hopper")});
+  banner.size.h = ari::Extent{ari::Unit::Px, 120.0f};
+  banner.background.src = "no-such-picture";
+  ari::Widget card = ari::window("Card", {banner});
+  card.id = "card";
+  card.has_pos = true;
+  card.pos_x = 20.0f;
+  card.pos_y = 620.0f;
+  card.size.w = ari::Extent{ari::Unit::Px, 300.0f};
+  card.size.h = ari::Extent{ari::Unit::Px, 200.0f};
+  return ari::group({cam, users, card});
 }
+
+// Each group background's area, as the base lays it out.
+struct Backend : cvc::gl::ImGuiBackend {
+  std::vector<ImVec2> backdrop_size;
+  void end_backdrop() override {
+    ImGuiBackend::end_backdrop();
+    const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+    backdrop_size.push_back(ImVec2(mx.x - mn.x, mx.y - mn.y));
+  }
+};
 
 struct Session {
   ImGuiContext *ctx = ImGui::CreateContext();
   cvc::app app;
   ari::Runtime rt{app, "ui"};
-  cvc::gl::ImGuiBackend be;
+  Backend be;
   Session(ImVec2 display, float uiSize, float pixelRatio) {
     // libcvcGL may carry its own copy of imgui (a static imgui, as on Windows): hand it this one.
     cvc::gl::ImGuiBackend::setImGuiContext(ctx);
@@ -99,6 +123,7 @@ struct Session {
     ImGui::DestroyContext(ctx);
   }
   void frame() {
+    be.backdrop_size.clear();
     ImGui::GetIO().DeltaTime = 1.0f / 60.0f;
     ImGui::NewFrame();
     rt.render();
@@ -154,6 +179,9 @@ int main() {
                      std::to_string(t->Columns[1].WidthGiven)
                : std::string("no table")) +
             ")");
+    chk(s.be.backdrop_size.size() == 1 && s.be.backdrop_size[0].y >= 120.0f * k - 0.5f,
+        "the group's background: takes its 120 px at the UI's scale (" +
+            (s.be.backdrop_size.empty() ? std::string("none") : vec(s.be.backdrop_size[0])) + ")");
     chk(s.geometry("cam") == "0,40,312,560",
         "the persisted geometry is in the document's px (" + s.geometry("cam") + ")");
   }
@@ -168,6 +196,9 @@ int main() {
     const ImGuiTable *t = row_table();
     chk(t && near(t->Columns[0].WidthGiven, 100.0f) && near(t->Columns[1].WidthGiven, 80.0f),
         "the columns at their px");
+    chk(s.be.backdrop_size.size() == 1 && near(s.be.backdrop_size[0].y, 120.0f),
+        "the background's area at its 120 px (" +
+            (s.be.backdrop_size.empty() ? std::string("none") : vec(s.be.backdrop_size[0])) + ")");
     chk(s.geometry("cam") == "20,40,360,560", "persisted as authored (" + s.geometry("cam") + ")");
   }
   {

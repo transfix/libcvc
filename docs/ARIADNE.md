@@ -1153,8 +1153,9 @@ the Windows menu (§5.9), takes its place in the column again. A new document
 
 How each backend does it:
 
-- **ImGui** measures in logical pixels at the UI size (§5.12): a document's `px` (a window's
-  `pos:` and `size:`, a column's width, a picture's or a plot's size) is multiplied by the UI size
+- **ImGui** measures in logical pixels at the UI size (§5.13): a document's `px` (a window's
+  `pos:` and `size:`, a column's width, a picture's or a plot's size, the area a group's
+  `background:` takes) is multiplied by the UI size
   and the display's pixel ratio, as the UI's text and widgets are, and the geometry it persists
   is divided back, so a layout looks the same at any UI size and on a phone's dense screen. A
   window opens inside the view: no larger than the work area, and moved in from its `pos:` (or
@@ -1199,8 +1200,11 @@ Every document gets a **Windows** menu to open such a window again, with no menu
   "Settings" or "View" menu bound to `tree.<id>.open` (`lsystem_forest.ari`,
   `conference_roster.ari`) keeps it, and the Windows menu lists only the windows that menu leaves
   out. When it leaves none out there is no Windows menu.
-- A window made by `repeat:` is not listed, since there can be any number of them. The document
-  opens those itself (`conference_roster.ari`'s camera windows open from the Users list).
+- A window made by `repeat:` is listed once per instance, under the title that instance shows
+  (its `bind:`, else its label with `{i}` filled in), after the other windows. The list follows the
+  repeat's count each frame. Opening one from the menu also brings it to the front.
+  `conference_roster.ari` sets `windows_menu: View`, so its per-peer camera windows are listed by
+  name at the end of its View menu.
 - A host's menus (`AppRuntime::set_host_menus`) count as the document's: arigl's
   *Settings > Controls...* opens the Controls window, so arigl's Windows menu leaves it out. Under
   a host without one, the Windows menu is how the Controls window opens.
@@ -1254,7 +1258,7 @@ windows:
 ### 5.11 Pictures by URL: `image:` with a URI
 
 An `image:` whose `src` (or the value at its `bind:`) is a URI shows that picture. Design and
-the work still to come (backgrounds, video, audio, a card component):
+the work still to come (video, audio, a card component):
 [ARIADNE_MEDIA.md](roadmap/ARIADNE_MEDIA.md).
 
 ```yaml
@@ -1322,7 +1326,58 @@ windows:
   decoded when the browser hands it over, between frames. A `file://`, `cvc://` or `state://`
   picture is read and decoded between two frames, one at a time.
 
-### 5.12 On a phone: UI size, hiding windows, the system keyboard
+### 5.12 Backgrounds: `background:` on a window or group
+
+A window, an overlay or a group can have a picture behind its content: a profile's background,
+a banner behind a name.
+
+```yaml
+windows:
+  - window: Profile
+    background: {src: https://media.example/bg/42.jpg, opacity: 0.4}
+    children:
+      - type: group
+        id: banner
+        size: [auto, 120]                    # a group's background area is at least this
+        background:
+          bind: profile.banner_url           # or src:; a URI (§5.11) or a published image name
+          auth: example
+          fit: cover                         # cover (default) | contain | fill
+          opacity: 1.0                       # 0..1
+          terminal: banner                   # behind (default) | banner | none
+          banner_rows: 6
+          status: profile.banner_status      # loading | ready | failed, as image:'s
+        children:
+          - image: avatar
+            bind: profile.avatar_url
+            size: [64, 64]
+            shape: circle
+          - text: ""
+            bind: profile.name
+```
+
+`background: URL` is short for `background: {src: URL}`. The picture loads as an `image:`'s does
+(§5.11), at its own shape, and each backend fits it to the area the content takes. Until it
+has loaded, or when it failed, nothing is drawn behind the content.
+
+- **ImGui** draws it behind the content: a window's fills the window's inner area, and a group's
+  fills the group's area. That area is the full width available unless `size:` says otherwise,
+  and at least `size:`'s height. `fit` decides which part of the picture shows, and `opacity` is
+  how strongly it shows over the window's own background.
+- **The terminal backends** (FTXUI, and tvision's window bodies):
+  - **`behind`** draws half-blocks under the content, dimmed toward black by `opacity`. A cell
+    the content writes text into keeps the picture's colour as its background, dimmed to at most
+    40%, and the text is drawn in the terminal's own foreground unless the document coloured it.
+    So text stays readable on any picture. Pixel protocols can't put text over pixels (Kitty's
+    pictures are themselves cells, and Sixel and iTerm draw over the cells), so `behind` is
+    half-blocks whatever `--graphics` says.
+  - **`banner`** draws the picture as a row `banner_rows` tall above the content instead, at full
+    strength, and in Kitty, Sixel or iTerm pixels where the terminal has them (from the second
+    frame, once the row's width is known).
+  - **`none`** draws nothing in a terminal.
+  - A terminal with no colour (`--graphics mono`) draws no background.
+
+### 5.13 On a phone: UI size, hiding windows, the system keyboard
 
 A document needs nothing of its own to work on a phone: the ImGui host (arigl, cyprty) does
 this for every one.
