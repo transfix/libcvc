@@ -336,6 +336,45 @@ TEST(HolonSyncTest, TheEnergyPolicyAndEachReserveReachTheClient) {
   }
 }
 
+// A relay that streams the poses (room_pose_relay) skips the tree's copy on most steps
+// (write_poses false); the reserve still goes out on those steps, since no snapshot carries it.
+TEST(HolonSyncTest, TheReserveIsWrittenOnStepsThatSkipThePoses) {
+  cvc::app server_app;
+  const std::string room = "r";
+  cvc::ariadne::holon_config cfg;
+  cfg.physics = true;
+  holon server(holon_role::server, cfg);
+  if (!server.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  cvc::ariadne::conference::seed_default_scene(server_app, room);
+  cvc::ariadne::avatar_energy_policy policy;
+  policy.reserve_max = 2000.0;
+  cvc::ariadne::conference::write_avatar_policy(server_app, room, policy);
+  cvc::ariadne::conference::room_join(server_app, room, "A");
+  cvc::ariadne::write_intent(server_app, room, "A", avatar_intent{vec3{4.0, 0.0, 0.0}});
+  const double dt = server.clock().fixed_dt();
+  cvc::ariadne::server_pump(server, server_app, room, dt); // registers A and writes its pose
+  body_state pose;
+  std::uint64_t pose_tick = 0;
+  ASSERT_TRUE(cvc::ariadne::read_pose(server_app, room, "A", pose, pose_tick));
+
+  for (int step = 0; step < 120; ++step) // a second's walk, no pose write-back
+    cvc::ariadne::server_pump(server, server_app, room, dt, /*write_poses=*/false);
+  body_state later;
+  std::uint64_t later_tick = 0;
+  ASSERT_TRUE(cvc::ariadne::read_pose(server_app, room, "A", later, later_tick));
+  EXPECT_EQ(later_tick, pose_tick) << "no pose was written on those steps";
+  cvc::ariadne::avatar_energy e;
+  ASSERT_TRUE(server.energy("A", e));
+  EXPECT_LT(e.reserve, 1900.0) << "the walk spent";
+  double published = 0.0;
+  std::uint64_t reserve_tick = 0;
+  ASSERT_TRUE(cvc::ariadne::conference::read_avatar_reserve(server_app, room, "A", published,
+                                                            reserve_tick));
+  EXPECT_GT(reserve_tick, pose_tick) << "but the reserve was";
+  EXPECT_NEAR(published, e.reserve, 0.005 * 2000.0 + 1.0);
+}
+
 // client_pump registers whoever the roster lists, but one whose pose has not replicated yet is
 // pose-less: a member with nothing to draw and, with physics, no peer body at the placeholder
 // origin. Its first replicated pose makes it known, where the server put it.

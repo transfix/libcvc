@@ -97,6 +97,10 @@
   // ?look=mouse starts in mouse look (click the scene, then the mouse aims and W walks where you
   // aim; Esc gives the mouse back), ?look=drag in drag to look. Settings > Controls switches.
   const LOOK = PARAMS.get('look');
+  // ?lane=1 offers the relay a fast lane: poses and media on an unreliable WebRTC data channel
+  // beside the WebSocket (docs/roadmap/CONFERENCE_UNRELIABLE_TRANSPORT.md). A relay without one, or
+  // a network that blocks UDP, leaves everything on the WebSocket.
+  const LANE = PARAMS.get('lane');
   // A private room's token, when the invite link carries one: in the URL FRAGMENT (#token=...),
   // which the browser never sends to a server, so it stays out of proxy and access logs. The
   // relay refuses a connection without it (arisrv --room-token-file).
@@ -158,6 +162,7 @@
         ENV.CVC_ARIADNE_NAME = NAME;
         if (SYNTH && SYNTH !== '0') ENV.CVC_ARIADNE_SYNTHETIC_CAM = '1';
         if (LOOK === 'mouse' || LOOK === 'drag') ENV.CVC_ARIGL_LOOK = LOOK;
+        if (LANE && LANE !== '0') ENV.CVC_ARIADNE_LANE = '1';
         if (TOKEN) ENV.CVC_ARIADNE_ROOM_TOKEN = TOKEN;
         if (DEVICE) ENV.CVC_DEVICE_ID = DEVICE;
         if (DEVICE_KEY) ENV.CVC_DEVICE_KEY = DEVICE_KEY;

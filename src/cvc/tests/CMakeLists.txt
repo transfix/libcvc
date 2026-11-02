@@ -15,6 +15,7 @@ add_executable(ariadne_runtime_test ariadne_runtime_test.cpp)
 add_executable(ariadne_bind_test ariadne_bind_test.cpp)
 add_executable(ariadne_ftxui_test ariadne_ftxui_test.cpp)
 add_executable(ariadne_term_graphics_test ariadne_term_graphics_test.cpp)
+add_executable(ariadne_media_test ariadne_media_test.cpp)
 add_executable(ariadne_host_test ariadne_host_test.cpp)
 add_executable(ariadne_requires_test ariadne_requires_test.cpp)
 add_executable(ariadne_stream_view_test ariadne_stream_view_test.cpp)
@@ -42,6 +43,7 @@ add_executable(state_write_policy_test state_write_policy_test.cpp)
 add_executable(state_identity_test state_identity_test.cpp)
 add_executable(state_device_key_test state_device_key_test.cpp)
 add_executable(media_rungs_test media_rungs_test.cpp)
+add_executable(fast_lane_test fast_lane_test.cpp)
 add_executable(state_distributed_metrics_test state_distributed_metrics_test.cpp)
 add_executable(state_delegation_manager_test state_delegation_manager_test.cpp)
 add_executable(state_distributed_admin_test state_distributed_admin_test.cpp)
@@ -134,6 +136,7 @@ add_executable(physics_world_test physics_world_test.cpp)
 add_executable(avatar_sim_test avatar_sim_test.cpp)
 add_executable(holon_test holon_test.cpp)
 add_executable(holon_sync_test holon_sync_test.cpp)
+add_executable(pose_stream_test pose_stream_test.cpp)
 add_executable(state_link_stats_test state_link_stats_test.cpp)
 add_executable(room_scene_test room_scene_test.cpp)
 add_executable(room_avatar_test room_avatar_test.cpp)
@@ -298,6 +301,7 @@ add_executable(world_sites_test world_sites_test.cpp)
 add_executable(world_road_mesh_test world_road_mesh_test.cpp)
 add_executable(world_road_raster_test world_road_raster_test.cpp)
 add_executable(world_raster_test world_raster_test.cpp)
+add_executable(world_generated_test world_generated_test.cpp)
 add_executable(world_bundle_test world_bundle_test.cpp)
 
 # Every test target `check` should build. Keep this in the same order as the
@@ -315,6 +319,7 @@ set(TEST_TARGETS
   ariadne_bind_test
   ariadne_ftxui_test
   ariadne_term_graphics_test
+  ariadne_media_test
   ariadne_host_test
   ariadne_requires_test
   ariadne_stream_view_test
@@ -342,6 +347,7 @@ set(TEST_TARGETS
   state_identity_test
   state_device_key_test
   media_rungs_test
+  fast_lane_test
   state_distributed_metrics_test
   state_delegation_manager_test
   state_distributed_admin_test
@@ -378,6 +384,7 @@ set(TEST_TARGETS
   avatar_sim_test
   holon_test
   holon_sync_test
+  pose_stream_test
   state_link_stats_test
   room_scene_test
   room_avatar_test
@@ -492,6 +499,7 @@ set(TEST_TARGETS
   world_road_mesh_test
   world_road_raster_test
   world_raster_test
+  world_generated_test
   world_bundle_test
   volren_math_test
   volren_camera_test
@@ -679,6 +687,13 @@ target_link_libraries(ariadne_ftxui_test
 # Three tests load GL-free documents from the repo's examples/ tree.
 target_compile_definitions(ariadne_ftxui_test PRIVATE
   CVC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../examples")
+
+target_link_libraries(ariadne_media_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 
 target_link_libraries(ariadne_term_graphics_test
   PRIVATE
@@ -1302,7 +1317,7 @@ target_link_libraries(vis_tiler_test
 foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
                    lsys_interp_test lsys_recipes_test lsys_svg_test lsys_forest_test
                    lsys_fields_test world_surface_test world_heightfield_test world_scatter_test world_roads_test world_buildings_test world_sites_test world_road_mesh_test world_road_raster_test
-                   world_raster_test world_bundle_test)
+                   world_raster_test world_bundle_test world_generated_test)
   target_link_libraries(${_lsys_test} PRIVATE cvc GTest::gtest GTest::gtest_main)
   target_compile_features(${_lsys_test} PRIVATE cxx_std_17)
 endforeach()
@@ -1410,6 +1425,12 @@ target_link_libraries(state_device_key_test
     GTest::gtest_main
 )
 target_link_libraries(media_rungs_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_link_libraries(fast_lane_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1928,6 +1949,13 @@ target_link_libraries(holon_sync_test
     GTest::gtest_main
 )
 
+target_link_libraries(pose_stream_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(state_link_stats_test
   PRIVATE
     cvc
@@ -2332,6 +2360,7 @@ target_compile_features(state_write_policy_test PRIVATE cxx_std_17)
 target_compile_features(state_identity_test PRIVATE cxx_std_17)
 target_compile_features(state_device_key_test PRIVATE cxx_std_17)
 target_compile_features(media_rungs_test PRIVATE cxx_std_17)
+target_compile_features(fast_lane_test PRIVATE cxx_std_17)
 target_compile_features(state_distributed_metrics_test PRIVATE cxx_std_17)
 target_compile_features(state_delegation_manager_test PRIVATE cxx_std_17)
 target_compile_features(state_distributed_admin_test PRIVATE cxx_std_17)
@@ -2417,6 +2446,7 @@ target_compile_features(physics_world_test PRIVATE cxx_std_17)
 target_compile_features(avatar_sim_test PRIVATE cxx_std_17)
 target_compile_features(holon_test PRIVATE cxx_std_17)
 target_compile_features(holon_sync_test PRIVATE cxx_std_17)
+target_compile_features(pose_stream_test PRIVATE cxx_std_17)
 target_compile_features(state_link_stats_test PRIVATE cxx_std_17)
 target_compile_features(room_scene_test PRIVATE cxx_std_17)
 target_compile_features(room_avatar_test PRIVATE cxx_std_17)
@@ -2588,6 +2618,7 @@ cvc_discover_tests(ariadne_scene_tf_test)
 cvc_discover_tests(ariadne_runtime_test)
 cvc_discover_tests(ariadne_ftxui_test)
 cvc_discover_tests(ariadne_term_graphics_test)
+cvc_discover_tests(ariadne_media_test)
 cvc_discover_tests(ariadne_host_test)
 cvc_discover_tests(ariadne_requires_test)
 cvc_discover_tests(ariadne_stream_view_test)
@@ -2670,7 +2701,7 @@ cvc_discover_tests(vis_tiler_test)
 foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
                    lsys_interp_test lsys_recipes_test lsys_svg_test lsys_forest_test
                    lsys_fields_test world_surface_test world_heightfield_test world_scatter_test world_roads_test world_buildings_test world_sites_test world_road_mesh_test world_road_raster_test
-                   world_raster_test world_bundle_test)
+                   world_raster_test world_bundle_test world_generated_test)
   cvc_discover_tests(${_lsys_test})
 endforeach()
 cvc_discover_tests(volume_io_extra_test)
@@ -2836,6 +2867,7 @@ cvc_discover_tests(state_write_policy_test)
 cvc_discover_tests(state_identity_test)
 cvc_discover_tests(state_device_key_test)
 cvc_discover_tests(media_rungs_test)
+cvc_discover_tests(fast_lane_test)
 cvc_discover_tests(state_distributed_metrics_test)
 cvc_discover_tests(state_delegation_manager_test)
 cvc_discover_tests(state_distributed_admin_test)
@@ -2926,6 +2958,7 @@ cvc_discover_tests(physics_world_test)
 cvc_discover_tests(avatar_sim_test)
 cvc_discover_tests(holon_test)
 cvc_discover_tests(holon_sync_test)
+cvc_discover_tests(pose_stream_test)
 cvc_discover_tests(state_link_stats_test)
 cvc_discover_tests(room_scene_test)
 cvc_discover_tests(room_avatar_test)

@@ -1,0 +1,10 @@
+@PACKAGE_INIT@
+
+# cvcMedia: libcvc's GL-free media library (cvc::cvcMedia). It links cvc and, when it was built
+# with it, SDL3 (the audio subsystem).
+include(CMakeFindDependencyMacro)
+find_dependency(cvc CONFIG)
+@CVCMEDIA_SDL_DEP@
+
+include("${CMAKE_CURRENT_LIST_DIR}/cvcMediaTargets.cmake")
+check_required_components(cvcMedia)

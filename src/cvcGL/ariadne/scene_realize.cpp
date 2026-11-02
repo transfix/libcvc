@@ -37,6 +37,7 @@
 #include <mutex>
 #include <set>
 #include <stdexcept>
+#include <vtkCamera.h>
 #include <vtkMatrix4x4.h>
 #include <vtkRenderer.h>
 #include <vtkSmartPointer.h>
@@ -912,6 +913,8 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
     return;
   apply_transform(*node, n); // the node's LOCAL transform (composed with the parent's)
   apply_visibility(*node, n, sg.appContext(), bind_prefix, out.visibility);
+  if (n.has_casts_shadow) // receives shadows either way; a non-caster never forces a re-bake
+    node->setCastsShadow(n.casts_shadow);
   // shader: { preset | vertex | fragment } — the declarative GLSL surface. Applied in the shared
   // tail (not just the built-in geometry branch) so a CUSTOM node type whose realizer returns a
   // GeometryNode (e.g. an L-system forest wanting `shader: { preset: bark }`) is shaded too. A
@@ -919,6 +922,9 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
   if (n.shader.present)
     if (auto *g = dynamic_cast<GeometryNode *>(node.get()))
       apply_shader(*g, n, warnings);
+  if (n.material_opaque) // no per-texel alpha scan to pick the pass (built-in or custom mesh)
+    if (auto *g = dynamic_cast<GeometryNode *>(node.get()))
+      g->setForceOpaque(true);
   apply_clip(*node, n, sg.appContext(), bind_prefix, out.clip, warnings); // own coordinates
   warn_clip_capability(*node, n, warnings);
   if (n.body.present)
@@ -980,9 +986,11 @@ void realize_light(SceneGraph &sg, const cvc::ariadne::SceneLight &l, RealizedSc
       rig->setEnvironment(l.environment);
     if (l.has_rig_ambient)
       rig->setAmbient(l.rig_ambient);
+    if (l.has_wash)
+      rig->setWash(l.wash, l.wash > 0.0f ? l.wash_count : 0, l.wash_height);
     // applyPreset commits its baseline; the setters above need an explicit apply() to take effect.
     if (l.has_key || l.has_fill || l.has_back || l.has_warmth || l.has_environment ||
-        l.has_rig_ambient || l.has_stage)
+        l.has_rig_ambient || l.has_wash || l.has_stage)
       rig->apply();
     out.rigs.push_back(std::move(rig));
     return;
@@ -1554,6 +1562,7 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
   // §9 time: carry the app + the scene's clock declaration so tick_scene can drive
   // app.world_clock() each frame (a no-op unless the scene declared a `clock:` block).
   out.app = &sg.appContext();
+  out.sg = &sg;
   out.clock = scene.clock;
   // Resolve the clock's key paths to absolute state paths now, with the host bind prefix — the SAME
   // rule widget binds use (resolve_bind) — so the clock and a sim_transport slider on `sim.speed`
@@ -1611,6 +1620,14 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
           sg.setShadowResolution(scene.shadow_resolution);
         if (scene.has_shadow_interval)
           sg.setShadowUpdateInterval(scene.shadow_interval);
+        if (scene.has_shadow_softness)
+          sg.setShadowSoftness(scene.shadow_softness);
+        // A fixed focus is set once; a camera-following one each frame by tick_scene.
+        const cvc::ariadne::SceneShadowFocus &f = scene.shadow_focus;
+        if (f.present && f.follow_camera)
+          out.shadow_focus = f;
+        else if (f.present && f.radius > 0.0)
+          sg.setShadowFocus(f.center[0], f.center[1], f.center[2], f.radius);
       }
     }
   }
@@ -1700,6 +1717,34 @@ cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *r
   // reads its planes in tick()).
   if (realized.app)
     cvc::ariadne::sync_scene_clip(*realized.app, realized.clip);
+
+  // shadows: { focus: camera }: the maps on a sphere `lead` radii ahead of the focal point, the
+  // radius growing with the camera's distance from it (tight behind a chase camera, wide over an
+  // overview). SceneGraph re-bakes only once the sphere has moved a fiftieth of its radius.
+  if (realized.shadow_focus.follow_camera && realized.sg && renderer)
+    if (vtkCamera *cam = renderer->GetActiveCamera()) {
+      const cvc::ariadne::SceneShadowFocus &f = realized.shadow_focus;
+      double e[3], c[3];
+      cam->GetPosition(e);
+      cam->GetFocalPoint(c);
+      const double dx = c[0] - e[0], dy = c[1] - e[1], dz = c[2] - e[2];
+      const double r =
+          std::clamp(f.min_radius + f.per_distance * std::sqrt(dx * dx + dy * dy + dz * dz),
+                     f.min_radius, std::max(f.min_radius, f.max_radius));
+      const double h = std::hypot(dx, dy);
+      const double cx = c[0] + (h > 1e-9 ? f.lead * r * dx / h : 0.0);
+      const double cy = c[1] + (h > 1e-9 ? f.lead * r * dy / h : 0.0);
+      double cz = c[2];
+      if (const auto it = realized.height_fields.find(f.ground);
+          !f.ground.empty() && it != realized.height_fields.end() && it->second) {
+        const cvc::height_field &hf = *it->second;
+        const double gz =
+            hf.height(std::clamp(cx, hf.x0(), hf.max_x()), std::clamp(cy, hf.y0(), hf.max_y()));
+        if (!std::isnan(gz))
+          cz = gz;
+      }
+      realized.sg->setShadowFocus(cx, cy, cz + f.lift, r);
+    }
 
   for (const std::weak_ptr<VolRenNode> &w : realized.volren_ticks)
     if (std::shared_ptr<VolRenNode> n = w.lock())

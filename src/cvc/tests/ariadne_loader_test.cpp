@@ -1915,6 +1915,89 @@ scene:
   EXPECT_EQ(r.scene.shadow_resolution, 2048);
   ASSERT_TRUE(r.scene.has_shadow_interval);
   EXPECT_EQ(r.scene.shadow_interval, 1);
+  EXPECT_FALSE(l.has_wash);
+  EXPECT_FALSE(r.scene.has_shadow_softness);
+  EXPECT_FALSE(r.scene.shadow_focus.present);
+}
+
+// The fast render path's keys (demo3-csma's discipline): a rig without its wash, shadow softness
+// and a shadow focus (fixed, or following the camera), a ground that casts no shadow, an opaque
+// texture. casts_shadow is a built-in key, not a custom node's prop.
+TEST(AriadneScene, FastPathShadowKeys) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  lights:
+    - light: sun
+      rig: three_point
+      wash: 0
+    - light: hall
+      rig: overhead
+      wash: { intensity: 0.6, count: 6, height: 2.5 }
+  shadows:
+    enabled: true
+    softness: 3.5
+    focus: { follow: camera, min_radius: 100, max_radius: 900, per_distance: 2, lead: 0.25,
+             lift: 10, ground: world }
+  nodes:
+    - node: world
+      type: generated_world
+      seed: 3
+      casts_shadow: false
+      material: { opaque: true }
+    - node: g
+      source: { plane: { size: 4 } }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.lights.size(), 2u);
+  ASSERT_TRUE(r.scene.lights[0].has_wash);
+  EXPECT_FLOAT_EQ(r.scene.lights[0].wash, 0.0f);
+  ASSERT_TRUE(r.scene.lights[1].has_wash);
+  EXPECT_FLOAT_EQ(r.scene.lights[1].wash, 0.6f);
+  EXPECT_EQ(r.scene.lights[1].wash_count, 6);
+  EXPECT_FLOAT_EQ(r.scene.lights[1].wash_height, 2.5f);
+  ASSERT_TRUE(r.scene.has_shadow_softness);
+  EXPECT_DOUBLE_EQ(r.scene.shadow_softness, 3.5);
+  const SceneShadowFocus &f = r.scene.shadow_focus;
+  ASSERT_TRUE(f.present);
+  EXPECT_TRUE(f.follow_camera);
+  EXPECT_DOUBLE_EQ(f.min_radius, 100.0);
+  EXPECT_DOUBLE_EQ(f.max_radius, 900.0);
+  EXPECT_DOUBLE_EQ(f.per_distance, 2.0);
+  EXPECT_DOUBLE_EQ(f.lead, 0.25);
+  EXPECT_DOUBLE_EQ(f.lift, 10.0);
+  EXPECT_EQ(f.ground, "world");
+  ASSERT_EQ(r.scene.nodes.size(), 2u);
+  const SceneNode &w = r.scene.nodes[0];
+  ASSERT_TRUE(w.has_casts_shadow);
+  EXPECT_FALSE(w.casts_shadow);
+  EXPECT_TRUE(w.material_opaque);
+  EXPECT_EQ(w.props.find("casts_shadow"), nullptr); // consumed, not left for the custom type
+  EXPECT_EQ(w.props.num("seed", 0.0), 3.0);
+  EXPECT_FALSE(r.scene.nodes[1].has_casts_shadow);
+  EXPECT_FALSE(r.scene.nodes[1].material_opaque);
+
+  LoadResult fixed = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  shadows: { enabled: true, focus: { center: [1, 2, 3], radius: 40 } }
+)");
+  ASSERT_TRUE(fixed.ok) << fixed.error;
+  ASSERT_TRUE(fixed.scene.shadow_focus.present);
+  EXPECT_FALSE(fixed.scene.shadow_focus.follow_camera);
+  EXPECT_DOUBLE_EQ(fixed.scene.shadow_focus.center[1], 2.0);
+  EXPECT_DOUBLE_EQ(fixed.scene.shadow_focus.radius, 40.0);
+
+  LoadResult cam = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  shadows: { enabled: true, focus: camera }
+)");
+  ASSERT_TRUE(cam.ok) << cam.error;
+  EXPECT_TRUE(cam.scene.shadow_focus.follow_camera);
+  EXPECT_DOUBLE_EQ(cam.scene.shadow_focus.min_radius, 150.0); // demo3's defaults
+  EXPECT_DOUBLE_EQ(cam.scene.shadow_focus.max_radius, 600.0);
 }
 
 // §9 background: a solid colour or a top→bottom gradient (a view property the host applies).
@@ -2858,6 +2941,86 @@ windows:
   EXPECT_EQ(s->bind, "demo.speed");
 }
 
+// §6.1 slots: a unit's `- slot: NAME` items take the include site's widget lists, in place; an
+// unfilled slot is dropped, and args are not substituted into the include site's own widgets.
+TEST(AriadneModularity, SlotsTakeTheIncludeSitesWidgets) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+units:
+  framed:
+    args: { title: Untitled }
+    type: group
+    id: framed
+    children:
+      - text: "{title}"
+      - slot: body
+      - text: "--"
+      - slot: footer
+      - slot: unused
+windows:
+  - window: W
+    children:
+      - include: framed
+        args: { title: Hello }
+        slots:
+          body:
+            - text: "body one {title}"
+            - button: Two
+              on: (state-set "x" "{title}")
+          footer: { text: footer }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  for (const std::string &w : r.warnings)
+    EXPECT_EQ(w.find("unrecognized widget key"), std::string::npos) << w;
+  const Widget *win = find(r.root, Kind::Window);
+  ASSERT_TRUE(win && !win->children.empty());
+  const Widget *g = &win->children.front();
+  ASSERT_EQ(g->id, "framed");
+  ASSERT_EQ(g->children.size(), 5u); // title, two body widgets, "--", footer; unused dropped
+  EXPECT_EQ(g->children[0].label, "Hello");
+  EXPECT_EQ(g->children[1].label, "body one {title}"); // the include site's own text
+  EXPECT_EQ(g->children[2].kind, Kind::Button);
+  EXPECT_EQ(g->children[2].on, "(state-set \"x\" \"{title}\")");
+  EXPECT_EQ(g->children[3].label, "--");
+  EXPECT_EQ(g->children[4].label, "footer");
+}
+
+// §6.2: an optional import that is not there is no warning; a fallback unit stands in for it,
+// and yields to an import that defines the name.
+TEST(AriadneModularity, OptionalImportsAndFallbackUnits) {
+  SKIP_WITHOUT_YAML();
+  LoadResult missing = load_string(R"(
+import: [{uri: /nowhere/lib.ari, optional: true}]
+units:
+  card: {fallback: true, text: mine}
+windows:
+  - window: W
+    children:
+      - include: card
+)");
+  ASSERT_TRUE(missing.ok) << missing.error;
+  for (const std::string &w : missing.warnings)
+    EXPECT_EQ(w.find("could not be resolved"), std::string::npos) << w;
+  EXPECT_NE(find(missing.root, Kind::Text, "mine"), nullptr);
+
+  const std::filesystem::path lib = std::filesystem::temp_directory_path() / "ari_fallback_lib.ari";
+  std::ofstream(lib) << "units:\n  card: {text: theirs}\n";
+  LoadResult present = load_string("import: [{uri: " + lib.string() +
+                                   ", optional: true}]\n"
+                                   "units:\n  card: {fallback: true, text: mine}\n"
+                                   "windows:\n  - window: W\n    children:\n"
+                                   "      - include: card\n");
+  ASSERT_TRUE(present.ok) << present.error;
+  EXPECT_NE(find(present.root, Kind::Text, "theirs"), nullptr);
+  EXPECT_EQ(find(present.root, Kind::Text, "mine"), nullptr);
+  LoadResult required = load_string("import: /nowhere/lib.ari\nwindows: []\n");
+  bool warned = false;
+  for (const std::string &w : required.warnings)
+    warned = warned || w.find("could not be resolved") != std::string::npos;
+  EXPECT_TRUE(warned); // a plain import still says so
+  std::filesystem::remove(lib);
+}
+
 TEST(AriadneModularity, IncludeUnknownUnitWarns) {
   SKIP_WITHOUT_YAML();
   LoadResult r = load_string(R"(
@@ -3153,7 +3316,14 @@ TEST(AriadneComponents, ShippedComponentsLoadClean) {
     LoadResult r = load_string("meta: { min_libcvc: \"0.0.0\" }\nimport: cvc://components/" + file +
                                "\nwindows:\n  - include: " + unit + "\n");
     ASSERT_TRUE(r.ok) << r.error;
-    EXPECT_NE(find(r.root, Kind::Window), nullptr) << "unit '" << unit << "' is not a window";
+    // A window, or a widget to embed in a document's own window (card.ari's card).
+    const bool embeddable = index.find("file: " + file) != std::string::npos &&
+                            index.find("not a window: include it") != std::string::npos &&
+                            unit == "card";
+    EXPECT_TRUE(
+        find(r.root, Kind::Window) != nullptr ||
+        (embeddable && !r.root.children.empty() && r.root.children.front().kind == Kind::Group))
+        << "unit '" << unit << "' is not a window";
     for (const std::string &w : r.warnings) {
       EXPECT_EQ(w.find("unrecognized widget key"), std::string::npos) << w;
       EXPECT_EQ(w.find("has no bind"), std::string::npos) << w;
@@ -3164,7 +3334,7 @@ TEST(AriadneComponents, ShippedComponentsLoadClean) {
     EXPECT_NE(index.find("file: " + file), std::string::npos) << "INDEX.ari does not list " << file;
     ++checked;
   }
-  EXPECT_GE(checked, 14); // the 14 components shipped with transfer_function
+  EXPECT_GE(checked, 15); // the 14 components shipped with transfer_function, and card
   std::error_code ec;
   fs::remove_all(decoy, ec);
 }

@@ -106,6 +106,12 @@ struct RealizedScene {
   std::chrono::steady_clock::time_point clock_last{}; // last tick_scene time (real-elapsed lane)
   bool clock_primed = false;                          // false until the first tick seeds clock_last
 
+  // shadows: { focus: camera | { follow: camera, ... } }: tick_scene re-aims the shadow maps at
+  // what the renderer's camera looks at, every frame, on `sg` (set by realize_scene; the host keeps
+  // the SceneGraph alive as long as this, as it does the app). Unused unless follow_camera.
+  cvc::ariadne::SceneShadowFocus shadow_focus;
+  SceneGraph *sg = nullptr;
+
   // The heightfield nodes' own cvc::height_field, by node id: the grid the node draws, the terrain
   // its body collides with, and what a custom node standing on it (forest_trees, wave_sea,
   // cloud_sky: their `ground:`) samples. The node's GeometryNode holds a plain copy of the mesh.

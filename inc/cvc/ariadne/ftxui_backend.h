@@ -184,6 +184,10 @@ public:
                         bool masked) override;
   void focus_next_widget() override;
   bool draw_image(const char *name, float width) override;
+  // §5.12 a container's background: half-blocks behind the content (dimmed, text kept readable),
+  // or the picture as a banner row above it (pixels where the terminal has them).
+  void begin_backdrop(const Backdrop &bd) override;
+  void end_backdrop() override;
   bool draw_image_fit(const char *name, float box_w, float box_h) override;
   ColorEdit color(const char *label, const float rgb[3]) override;
 
@@ -204,6 +208,7 @@ public:
   // to 8-bit RGB once here and box-filtered to the cell grid at draw time.
   void set_image(const std::string &name, const cvc::image &img) override;
   void clear_image(const std::string &name);
+  void drop_image(const std::string &name) override { clear_image(name); }
 
   // Draw the published image `name` behind everything, stretched over the whole screen: the
   // terminal counterpart of the GL canvas the ImGui backend draws over. Widgets, menus and windows

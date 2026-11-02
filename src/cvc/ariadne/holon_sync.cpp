@@ -314,7 +314,8 @@ void write_reserve(holon &h, cvc::app &app, const std::string &room, const std::
 
 } // namespace
 
-void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_dt) {
+void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_dt,
+                 bool write_poses) {
   sync_statics(h, app, room);
   sync_energy_policy(h, app, room);
   // The present participants, straight from the replicated room tree.
@@ -352,13 +353,17 @@ void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_d
   h.advance(wall_dt);
   // Publish each participant's authoritative pose (these are local writes on the
   // relay's shard; the caller fans them to the clients): what changed, and a
-  // heartbeat of about a second for an avatar standing still.
+  // heartbeat of about a second for an avatar standing still -- unless the caller
+  // streams the poses this step (WRITE_POSES false).
   const std::uint64_t heartbeat =
       std::max<std::uint64_t>(1, static_cast<std::uint64_t>(1.0 / h.clock().fixed_dt()));
-  for (const conference::room_participant &p : roster) {
-    write_pose(app, room, p.pid, h.state(p.pid), h.tick(), heartbeat);
+  if (write_poses)
+    for (const conference::room_participant &p : roster)
+      write_pose(app, room, p.pid, h.state(p.pid), h.tick(), heartbeat);
+  // And each one's reserve, every step: no snapshot carries it, and write_reserve thins it by its
+  // own rule, not the poses'.
+  for (const conference::room_participant &p : roster)
     write_reserve(h, app, room, p.pid, 5 * heartbeat);
-  }
 }
 
 void client_pump(holon &h, cvc::app &app, const std::string &room, const std::string &self_pid,
@@ -402,6 +407,25 @@ void client_pump(holon &h, cvc::app &app, const std::string &room, const std::st
     if (!present.count(pid))
       h.remove_participant(pid);
   h.advance(wall_dt);
+}
+
+std::size_t apply_pose_snapshot(holon &h, pose_stream_decoder &decoder,
+                                const cvc::pose_snapshot &snap) {
+  std::vector<pose_sample> samples;
+  if (!decoder.decode(snap, samples))
+    return 0;
+  return apply_pose_samples(h, samples, snap.server_tick);
+}
+
+std::size_t apply_pose_samples(holon &h, const std::vector<pose_sample> &samples,
+                               std::uint64_t server_tick) {
+  std::size_t applied = 0;
+  for (const pose_sample &s : samples)
+    if (h.has_participant(s.pid)) {
+      h.apply_authoritative(s.pid, s.state, server_tick);
+      ++applied;
+    }
+  return applied;
 }
 
 std::uint64_t propose_intent(holon &h, cvc::app &app, const std::string &room,

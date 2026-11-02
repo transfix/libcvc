@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cvc/ariadne/ariadne.h> // has_widget_type (custom-widget load-time check)
 #include <cvc/ariadne/loader.h>
+#include <cvc/ariadne/media.h>    // §5.11 image: fit / shape / URI src
 #include <cvc/ariadne/requires.h> // free_heads: a granted function brings the ones it calls
 #include <cvc/ariadne/uri.h> // §12/§13 import: resolve library URIs (file/state/http)
 #include <cvc/core/config.h> // CVC_VERSION_STRING (generated from project(VERSION))
@@ -201,7 +202,18 @@ const char *const kAriSchema = R"ARISCHEMA({
         "password": {"$ref": "#/$defs/flag"},
         "options": {"type": ["array", "string"], "items": {"type": "string"}},
         "pos": {"type": "array", "items": {"type": "number"}},
-        "size": {"type": ["array", "number"], "items": {"type": "number"}},
+        "size": {"type": ["array", "number"], "items": {"type": ["number", "string"]}},
+        "src": {"type": "string"},
+        "auth": {"type": "string"},
+        "status": {"type": "string"},
+        "fit": {"enum": ["contain", "cover", "fill"]},
+        "shape": {"enum": ["rect", "circle"]},
+        "background": {"type": ["string", "object"]},
+        "poster": {"type": "string"},
+        "controls": {"$ref": "#/$defs/flag"},
+        "autoplay": {"$ref": "#/$defs/flag"},
+        "loop": {"$ref": "#/$defs/flag"},
+        "muted": {"$ref": "#/$defs/flag"},
         "items": {"type": "array", "items": {"$ref": "#/$defs/widget"}},
         "children": {"type": "array", "items": {"$ref": "#/$defs/widget"}}
       },
@@ -312,7 +324,7 @@ constexpr const char *kBuiltinWidgetTypes[] = {
     "group",   "menubar",   "menu",         "menu_item", "window",     "progress",     "plot",
     "overlay", "panel",     "text",         "checkbox",  "slider_int", "slider_float", "combo",
     "radio",   "radio_row", "input_text",   "input_int", "tf_editor",  "color",        "image",
-    "button",  "separator", "windows_menu", "spinner"};
+    "button",  "separator", "windows_menu", "spinner",   "video",      "audio"};
 } // namespace
 
 bool is_builtin_widget_type(const std::string &type) {
@@ -883,9 +895,64 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     w.on = action(n);
     return w;
   }
-  if (type == "image") { // a host-published image viewer (a live raster)
-    Widget w = image_widget(label, str(n, "src"), num(n, "size", 256.0));
-    w.bind = str(n, "bind"); // optional: the image name comes from this key instead of src
+  if (type == "image") { // a host-published image, or a picture by URI (§5.11)
+    // size: W (a width; the height follows the picture) or [W, H] (a box the picture is fitted to).
+    const YAML::Node sz = n["size"];
+    double w_px = 256.0, h_px = 0.0;
+    if (sz && sz.IsSequence() && sz.size() >= 2) {
+      w_px = sz[0].as<double>(256.0);
+      h_px = sz[1].IsScalar() && sz[1].Scalar() != "auto" ? sz[1].as<double>(0.0) : 0.0;
+    } else if (sz && sz.IsScalar()) {
+      w_px = sz.as<double>(256.0);
+    }
+    Widget w = image_widget(label, str(n, "src"), w_px);
+    w.img_h = h_px;
+    w.bind = str(n, "bind"); // optional: the image name or URI comes from this key instead of src
+    w.media_auth = str(n, "auth");
+    w.media_status = str(n, "status");
+    if (has(n, "fit") && !media::parse_fit(str(n, "fit"), w.img_fit))
+      ctx.warn("ari: image '" + label + "': fit: '" + str(n, "fit") +
+               "' is not contain, cover or fill — using contain");
+    if (has(n, "shape") && !media::parse_shape(str(n, "shape"), w.img_shape))
+      ctx.warn("ari: image '" + label + "': shape: '" + str(n, "shape") +
+               "' is not rect or circle — using rect");
+    if (!w.media_auth.empty() && !w.src.empty() && w.src[0] != '(' && !media::is_uri(w.src))
+      ctx.warn("ari: image '" + label + "': auth: is for a picture by URL (src: https://...)");
+    return w;
+  }
+  if (type == "video" || type == "audio") { // §5.13 a player: a source, controls, state keys
+    Widget w;
+    w.kind = type == "video" ? Kind::Video : Kind::Audio;
+    w.label = label;
+    w.src = str(n, "src");
+    w.media_auth = str(n, "auth");
+    w.poster = str(n, "poster");
+    w.bind = str(n, "bind");
+    w.img_size = type == "video" ? 480.0 : 320.0;
+    w.img_h = type == "video" ? 270.0 : 0.0;
+    const YAML::Node sz = n["size"];
+    if (sz && sz.IsSequence() && sz.size() >= 2) {
+      w.img_size = sz[0].as<double>(w.img_size);
+      w.img_h = sz[1].IsScalar() && sz[1].Scalar() != "auto" ? sz[1].as<double>(0.0) : 0.0;
+    } else if (sz && sz.IsScalar()) {
+      w.img_size = sz.as<double>(w.img_size);
+      w.img_h = 0.0;
+    }
+    if (has(n, "fit") && !media::parse_fit(str(n, "fit"), w.img_fit))
+      ctx.warn("ari: " + type + " '" + label + "': fit: '" + str(n, "fit") +
+               "' is not contain, cover or fill — using contain");
+    // controls: false is a decorative picture (an avatar, a banner): it plays by itself, looping,
+    // silent, unless the document says otherwise.
+    w.controls = flag(n, "controls", true);
+    w.autoplay = flag(n, "autoplay", !w.controls);
+    w.loop = flag(n, "loop", !w.controls);
+    w.muted = flag(n, "muted", !w.controls);
+    if (has(n, "shape") && !media::parse_shape(str(n, "shape"), w.img_shape))
+      ctx.warn("ari: " + type + " '" + label + "': shape: '" + str(n, "shape") +
+               "' is not rect or circle — using rect");
+    w.media_status = str(n, "status");
+    if (w.src.empty())
+      ctx.warn("ari: " + type + " '" + label + "' has no src: — it plays nothing");
     return w;
   }
   if (type == "button") {
@@ -958,6 +1025,42 @@ bool any_descendant_repeats(const Widget &w) {
   return false;
 }
 
+// §5.12 background: on a window / overlay / group — a map (src | bind, auth, fit, opacity,
+// terminal, banner_rows, status), or a bare URI or image name for src.
+void parse_background(Ctx &ctx, const YAML::Node &n, Widget &w) {
+  if (w.kind != Kind::Window && w.kind != Kind::Group) {
+    ctx.warn("ari: background: is for a window, overlay or group — ignored");
+    return;
+  }
+  Background &bg = w.background;
+  if (n.IsScalar()) {
+    bg.src = n.Scalar();
+    return;
+  }
+  if (!n.IsMap()) {
+    ctx.warn("ari: background: must be a map (src, fit, opacity, ...) or a URL — ignored");
+    return;
+  }
+  bg.src = str(n, "src");
+  bg.bind = str(n, "bind");
+  bg.auth = str(n, "auth");
+  bg.status = str(n, "status");
+  if (has(n, "fit") && !media::parse_fit(str(n, "fit"), bg.fit))
+    ctx.warn("ari: background fit: '" + str(n, "fit") +
+             "' is not contain, cover or fill — using cover");
+  bg.opacity = static_cast<float>(std::clamp(num(n, "opacity", 1.0), 0.0, 1.0));
+  const std::string term = str(n, "terminal", "behind");
+  if (term == "banner")
+    bg.terminal = BackdropTerminal::Banner;
+  else if (term == "none")
+    bg.terminal = BackdropTerminal::Off;
+  else if (term != "behind")
+    ctx.warn("ari: background terminal: '" + term + "' is not behind, banner or none");
+  bg.banner_rows = std::clamp(static_cast<int>(num(n, "banner_rows", 6.0)), 1, 60);
+  if (!bg.any())
+    ctx.warn("ari: background: has neither src: nor bind: — nothing to draw");
+}
+
 Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
   Widget w = parse_widget_impl(ctx, n);
   // Assign each common field only when the node actually carries it. For a plain widget the
@@ -984,6 +1087,8 @@ Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
       w.autofocus = flag(n, "autofocus", false);
     if (has(n, "repeat"))
       w.repeat = str(n, "repeat"); // §3: a count expression -> emit this template N times
+    if (has(n, "background"))
+      parse_background(ctx, n["background"], w);
     if (has(n, "on_click"))
       w.on_click = str(n, "on_click"); // §4.6 widget-level click handler (any kind); like `on`
     if (has(n, "on_hover"))
@@ -1012,9 +1117,21 @@ void merge_units(Ctx &ctx, const YAML::Node &unitsNode, bool warn_collision) {
     if (!kv.first.IsScalar())
       continue;
     const std::string name = kv.first.Scalar();
+    // §6.2 a document's own unit marked `fallback: true` stands in only where no import defines
+    // the name (a component the host's library may not have yet).
+    const bool fallback = kv.second.IsMap() && kv.second["fallback"] &&
+                          kv.second["fallback"].IsScalar() &&
+                          kv.second["fallback"].as<std::string>("") == "true";
+    if (fallback && ctx.units.count(name))
+      continue;
     if (warn_collision && ctx.units.count(name))
       ctx.warn("ari: import: unit '" + name + "' is defined by more than one library — last wins");
-    ctx.units[name] = kv.second;
+    YAML::Node unit = kv.second;
+    if (fallback) {
+      unit = YAML::Clone(kv.second);
+      unit.remove("fallback");
+    }
+    ctx.units[name] = unit;
   }
 }
 
@@ -1210,14 +1327,22 @@ void process_imports(Ctx &ctx, const YAML::Node &doc, const std::string &base_di
     return;
   }
   const YAML::Node imp = doc["import"];
-  std::vector<std::string> uris;
-  if (imp && imp.IsScalar())
-    uris.push_back(imp.Scalar());
-  else if (imp && imp.IsSequence())
+  // Each entry is a URI, or {uri: URI, optional: true}: a library the host may not have (a newer
+  // component), whose absence is no warning.
+  std::vector<std::pair<std::string, bool>> uris;
+  const auto entry = [&](const YAML::Node &p) {
+    if (p.IsScalar())
+      uris.emplace_back(p.Scalar(), false);
+    else if (p.IsMap() && p["uri"] && p["uri"].IsScalar())
+      uris.emplace_back(p["uri"].Scalar(),
+                        p["optional"] && p["optional"].as<std::string>("") == "true");
+  };
+  if (imp && imp.IsSequence())
     for (const auto &p : imp)
-      if (p.IsScalar())
-        uris.push_back(p.Scalar());
-  for (const std::string &uri : uris) {
+      entry(p);
+  else if (imp)
+    entry(imp);
+  for (const auto &[uri, optional] : uris) {
     if (ctx.imported.size() >= kMaxImports) {
       ctx.warn("ari: import limit reached (" + std::to_string(kMaxImports) +
                " libraries) — remaining imports skipped");
@@ -1225,7 +1350,8 @@ void process_imports(Ctx &ctx, const YAML::Node &doc, const std::string &base_di
     }
     const UriResult res = resolve(uri, base_dir);
     if (!res.ok) {
-      ctx.warn("ari: import '" + uri + "' could not be resolved: " + res.error);
+      if (!optional)
+        ctx.warn("ari: import '" + uri + "' could not be resolved: " + res.error);
       continue;
     }
     note_source(ctx, res.canonical); // §12.5 watch this imported file for hot-reload
@@ -1301,6 +1427,49 @@ void substitute_node(YAML::Node node, const std::map<std::string, std::string> &
   }
 }
 
+// §6.1 slots: a unit marks where an include site's widgets go with a `- slot: NAME` item in any of
+// its widget lists, and the include's `slots: {NAME: [widget, ...]}` puts those widgets there, in
+// place of the item (a single widget map works too). A slot the include leaves empty is dropped.
+// So a component takes whole widget lists (a card's media, its action row) where args take only
+// strings. The include site's widgets are its own: args are not substituted into them.
+void fill_slots(Ctx &ctx, YAML::Node node, const YAML::Node &slots, const std::string &unit) {
+  if (node.IsMap()) {
+    for (auto it = node.begin(); it != node.end(); ++it)
+      fill_slots(ctx, it->second, slots, unit);
+    return;
+  }
+  if (!node.IsSequence())
+    return;
+  bool any = false;
+  for (const YAML::Node &item : node)
+    any = any || (item.IsMap() && item["slot"] && item.size() == 1);
+  if (!any) {
+    for (std::size_t i = 0; i < node.size(); ++i)
+      fill_slots(ctx, node[i], slots, unit);
+    return;
+  }
+  YAML::Node out(YAML::NodeType::Sequence);
+  for (const YAML::Node &item : node) {
+    if (item.IsMap() && item["slot"] && item.size() == 1) {
+      const std::string name = item["slot"].as<std::string>("");
+      const YAML::Node given = slots && slots.IsMap() ? slots[name] : YAML::Node();
+      if (given && given.IsSequence()) {
+        for (const YAML::Node &g : given)
+          out.push_back(YAML::Clone(g));
+      } else if (given && given.IsMap()) {
+        out.push_back(YAML::Clone(given));
+      } else if (given && !given.IsNull()) {
+        ctx.warn("ari: include " + unit + ": slots." + name + " must be a widget list — ignored");
+      }
+      continue;
+    }
+    YAML::Node copy = item;
+    fill_slots(ctx, copy, slots, unit);
+    out.push_back(copy);
+  }
+  node = out;
+}
+
 // §12: expand `include: <unit>` — instantiate a units: template with its `args:` substituted.
 Widget expand_include(Ctx &ctx, const YAML::Node &n) {
   const std::string name = str(n, "include");
@@ -1335,6 +1504,7 @@ Widget expand_include(Ctx &ctx, const YAML::Node &n) {
   if (declares && inst["args"])
     inst.remove("args"); // the declaration, not a widget key
   substitute_node(inst, args);
+  fill_slots(ctx, inst, n["slots"], name); // after args: the include site's widgets are its own
   Widget w = parse_widget(ctx, inst);
   ctx.expanding.erase(name);
   // §12/§3.0.3b geometry override at the include site: a window `include:` may carry its own
@@ -1706,7 +1876,8 @@ Value to_value(const YAML::Node &n) {
 bool known_scene_node_key(const std::string &k) {
   return k == "node" || k == "id" || k == "type" || k == "source" || k == "material" ||
          k == "transform" || k == "fit" || k == "visible" || k == "volren" || k == "volslice" ||
-         k == "volume" || k == "shader" || k == "clip" || k == "body" || k == "children";
+         k == "volume" || k == "shader" || k == "clip" || k == "body" || k == "children" ||
+         k == "casts_shadow";
 }
 
 std::string lowered(std::string s) {
@@ -2263,6 +2434,11 @@ SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
       else if (tex.IsMap())
         sn.material_texture = str(tex, "uri", str(tex, "file"));
     }
+    sn.material_opaque = flag(mat, "opaque", false);
+  }
+  if (n["casts_shadow"]) {
+    sn.has_casts_shadow = true;
+    sn.casts_shadow = flag(n, "casts_shadow", true);
   }
   const YAML::Node tf = n["transform"];
   if (tf && tf.IsMap()) {
@@ -2421,6 +2597,16 @@ SceneLight parse_scene_light(const YAML::Node &n) {
     sl.has_rig_ambient = true;
     sl.rig_ambient = static_cast<float>(num(n, "ambient", sl.rig_ambient));
   }
+  if (const YAML::Node wash = n["wash"]) { // wash: <intensity> | { intensity, count, height }
+    sl.has_wash = true;
+    if (wash.IsMap()) {
+      sl.wash = static_cast<float>(num(wash, "intensity", sl.wash));
+      sl.wash_count = static_cast<int>(num(wash, "count", sl.wash_count));
+      sl.wash_height = static_cast<float>(num(wash, "height", sl.wash_height));
+    } else {
+      sl.wash = static_cast<float>(num(n, "wash", sl.wash));
+    }
+  }
   return sl;
 }
 
@@ -2455,6 +2641,29 @@ Scene parse_scene(Ctx &ctx, const YAML::Node &s) {
     if (sh["update_interval"]) {
       sc.has_shadow_interval = true;
       sc.shadow_interval = static_cast<int>(num(sh, "update_interval", sc.shadow_interval));
+    }
+    if (sh["softness"]) {
+      sc.has_shadow_softness = true;
+      sc.shadow_softness = num(sh, "softness", sc.shadow_softness);
+    }
+    if (const YAML::Node fo = sh["focus"]) {
+      SceneShadowFocus &f = sc.shadow_focus;
+      if (fo.IsScalar() && fo.Scalar() == "camera") {
+        f.present = f.follow_camera = true;
+      } else if (fo.IsMap()) {
+        f.present = true;
+        f.follow_camera = str(fo, "follow") == "camera";
+        if (const YAML::Node c = fo["center"]; c && c.IsSequence() && c.size() >= 3)
+          for (int i = 0; i < 3; ++i)
+            f.center[i] = c[i].as<double>();
+        f.radius = num(fo, "radius", f.radius);
+        f.min_radius = num(fo, "min_radius", f.min_radius);
+        f.max_radius = num(fo, "max_radius", f.max_radius);
+        f.per_distance = num(fo, "per_distance", f.per_distance);
+        f.lead = num(fo, "lead", f.lead);
+        f.lift = num(fo, "lift", f.lift);
+        f.ground = str(fo, "ground");
+      }
     }
   }
   if (s["chrome"]) { // scene-level: the diagnostic grid/axis/bounding-box chrome
