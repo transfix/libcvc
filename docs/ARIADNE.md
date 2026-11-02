@@ -1518,6 +1518,16 @@ this for every one.
   tap on the title), closes with its X when it is `closable:`, and comes back from the View or
   Windows menu (§5.9). On a touch screen a window moves by its title bar only, so a finger that
   slips off a widget does not carry its window away.
+- **A list of windows.** A document laid out for a wider screen would have its windows moved
+  into the phone's view all onto the same spot, one over another. So on a phone (a view under
+  500 CSS pixels on its short side, either way up) a window whose `pos:` or `size:` does not fit
+  opens collapsed instead: its title bar goes under those of the others that did, from the top of
+  the view, and the panels show a list of titles over the scene. The arrow (or a double tap)
+  opens one: it unfolds from its title, as wide as the view and no taller than the room below,
+  over the titles after it. Windows that fit where they were put, and those with no `pos:` (the
+  flow, §5.8), open as anywhere else.
+- **Labels.** A slider's, combo's or field's label stays in view: in a window that fits its
+  widgets, a widget that would push its label past the view's edge is narrowed to leave it room.
 - **The system keyboard.** A browser raises a phone's keyboard only for a focused text field,
   which the canvas is not. When a finger (or a pen) activates an `input_text`, the page focuses a
   hidden `<input>` placed at the field's caret, so the keyboard comes up and the browser keeps
