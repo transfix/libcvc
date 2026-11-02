@@ -77,6 +77,11 @@ bool have_player_factory();
 // A new player for `src` from the registered factory; null when there is none.
 std::unique_ptr<Player> make_player(const PlayerSource &src);
 
+// In a browser build (ari.html, arigl-web): register the page's own <video> / <audio> elements as
+// the player (media_browser.cpp), the policy and credentials decided in C++ before the element sees
+// a URL, a token or bytes. Returns false, registering nothing, off the browser.
+bool register_browser_player();
+
 // Whether players may play here. Auto: yes, except in an SSH session (the sound would play on the
 // remote machine); Always: yes; Never: no. Process-global.
 enum class PlayPolicy { Auto, Always, Never };
