@@ -2257,7 +2257,13 @@ static int cmd_ph_train(int argc, char **argv) {
   if (train_f.count == 0)
     throw std::runtime_error("every flight is held out");
   const std::array<double, 3> twist = ph::twist_rms(train_f);
-  const std::vector<double> control = ph::control_rms(train_f);
+  std::vector<double> control = ph::control_rms(train_f);
+  // An input that never moved in training (the ground's slope on flat ground, round-off of order
+  // 1e-8) keeps a unit scale: dividing by an RMS of about zero would blow up every run where it
+  // does move.
+  for (double &c : control)
+    if (!(c > 1e-6))
+      c = 1.0;
   if (vm.count("dump-dataset")) {
     const fs::path dir(vm["dump-dataset"].as<std::string>());
     fs::create_directories(dir);
@@ -2360,23 +2366,32 @@ static int cmd_ph_train(int argc, char **argv) {
       });
   // The mean model's rollout loss on clean windows: the training seeds', the held-out seeds' and,
   // with --eval-runs, another environment's.
+  // The rollout loss averages the windows that stayed finite: each is reported with how many did.
+  std::size_t finite = 0, windows = 0;
   const auto loss_on = [&](const ph::se2_flights &f) {
+    finite = windows = 0;
     if (f.count == 0)
       return std::numeric_limits<double>::quiet_NaN();
     const ph::se2_windows w =
         ph::cut_windows(ph::scale_controls(f, model.control_scale), points, stride);
-    return ph::se2_rollout_objective(model, w, nullptr, nullptr, 0.0).rollout;
+    const ph::se2_objective o = ph::se2_rollout_objective(model, w, nullptr, nullptr, 0.0);
+    finite = o.healthy;
+    windows = w.count;
+    return o.healthy ? o.rollout : std::numeric_limits<double>::quiet_NaN();
+  };
+  const auto count = [&]() {
+    return " (" + std::to_string(finite) + " of " + std::to_string(windows) + " windows finite)";
   };
   const double final_train = loss_on(ph::select_seeds(all, test_seeds, false));
+  std::cout << "final, the mean model on clean windows: train " << final_train << count();
   const double final_test = loss_on(ph::select_seeds(all, test_seeds, true));
+  std::cout << ", held-out seeds " << final_test << count();
   double final_eval = std::numeric_limits<double>::quiet_NaN();
-  if (vm.count("eval-runs"))
+  if (vm.count("eval-runs")) {
     final_eval =
         loss_on(pick(ph::load_plant_log_runs(vm["eval-runs"].as<std::vector<std::string>>())));
-  std::cout << "final, the mean model on clean windows: train " << final_train
-            << ", held-out seeds " << final_test;
-  if (vm.count("eval-runs"))
-    std::cout << ", eval runs " << final_eval;
+    std::cout << ", eval runs " << final_eval << count();
+  }
   std::cout << "\n";
   std::string run_list;
   for (const auto &r : runs)
