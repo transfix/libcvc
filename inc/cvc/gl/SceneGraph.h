@@ -251,6 +251,12 @@ public:
   // softness: when shadowReceiverKey() changes (shadows switched off and on, a new renderer, a new
   // softness), make a new one.
   vtkSmartPointer<vtkRenderPass> makeShadowReceiverPass() const;
+  // A whole shadow chain of its own for another renderer, as installShadowPasses builds for this
+  // scene's: a baker of its own (this scene's resolution, interval, softness and focus when made)
+  // that bakes the casters THAT renderer draws. For a view that leaves some of the scene out and
+  // must not show their shadows. Null while shadows are off; remake it when shadowReceiverKey()
+  // changes, as for a receiver.
+  vtkSmartPointer<vtkRenderPass> makeShadowPasses() const;
   // What a receiver pass was made from; a pass made under another key is stale. Null while off.
   std::pair<const void *, double> shadowReceiverKey() const;
   void update();
@@ -506,6 +512,10 @@ private:
   };
   void syncShadowState();     // mirror the shadow setters into cvc::state
   void installShadowPasses(); // build the pass chain on m_renderer
+  // The chain installShadowPasses puts on m_renderer (and makeShadowPasses on another), and its
+  // baker.
+  vtkSmartPointer<vtkRenderPass>
+  buildShadowPasses(vtkSmartPointer<vtkShadowMapBakerPass> &bakerOut) const;
   void removeShadowPasses();  // free its GL objects, then take it off m_renderer
   std::unique_ptr<cvc::gl::ShadowSettings> m_shadowSettings;
   bool m_applyingShadowState = false; // re-entry guard: state -> setter -> state

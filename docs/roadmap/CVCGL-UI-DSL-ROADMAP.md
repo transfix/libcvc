@@ -2038,7 +2038,11 @@ subject of the still-open streamed-source contract (§9.8).
 > top-level `views:` block of full-window views, and the mask as a state_exec expression (a bound
 > tag list does that job). Named cameras (`scene: cameras:`, a viewport's `camera: <id>` or
 > `camera: main`) let several viewports draw from one camera, and every view receives the scene's
-> shadows from the main renderer's maps (SceneGraph::makeShadowReceiverPass).
+> shadows from the main renderer's maps (SceneGraph::makeShadowReceiverPass), or bakes its own
+> (`shadows: own`). Several scenes per document: `scenes:` (each a SceneGraph of its own, shown by
+> the viewports that name it), `assets:` read once and shared by every scene's nodes, and
+> `main_view:` for tagged groups in one scene. This is a simpler cousin of the §12.2 sub-scene
+> mounts: no separate .ari file, no own chroot.
 
 One render window hosts **N layered viewports**, each its own camera — this is
 `ViewportManager` (`SceneRenderer` is its single-viewport facade and exposes

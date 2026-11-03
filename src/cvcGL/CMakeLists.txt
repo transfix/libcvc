@@ -956,6 +956,15 @@ if(NOT EMSCRIPTEN)
   add_test(NAME cvcgl_ariadne_views COMMAND cvcgl_ariadne_views)
 endif()
 
+# A document's assets (read once, shared buffers) and its scenes: of their own (each a SceneGraph
+# with its own viewport, mirrored by the viewports that name it), and main_view: show. Offscreen;
+# the AriRuntime part skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_scenes test/cvcgl_ariadne_scenes.cpp)
+  target_link_libraries(cvcgl_ariadne_scenes PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_scenes COMMAND cvcgl_ariadne_scenes)
+endif()
+
 # Ariadne physics: / body: (WORLD-GEOMETRY-ROADMAP.md, G5): a spec's crate lands where the
 # heightfield node draws the ground. Headless; the dynamics need Jolt.
 add_executable(cvcgl_ariadne_physics test/cvcgl_ariadne_physics.cpp)

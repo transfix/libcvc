@@ -1947,6 +1947,22 @@ bool SceneGraph::setShadowsEnabled(bool enabled) {
 }
 
 void SceneGraph::installShadowPasses() {
+  vtkSmartPointer<vtkShadowMapBakerPass> baker;
+  vtkSmartPointer<vtkRenderPass> cam = buildShadowPasses(baker);
+  m_renderer->SetPass(cam);
+  m_shadowPass = cam;
+  m_shadowBaker = baker;
+}
+
+vtkSmartPointer<vtkRenderPass> SceneGraph::makeShadowPasses() const {
+  if (!m_shadowsEnabled)
+    return nullptr;
+  vtkSmartPointer<vtkShadowMapBakerPass> baker;
+  return buildShadowPasses(baker);
+}
+
+vtkSmartPointer<vtkRenderPass>
+SceneGraph::buildShadowPasses(vtkSmartPointer<vtkShadowMapBakerPass> &bakerOut) const {
   // VTK's shadow maps are render PASSES, not a renderer flag: the baker renders
   // the scene once per light into a depth map, and the shadow pass consumes
   // those while drawing. They have to sit inside a camera pass, or the light's
@@ -1988,10 +2004,8 @@ void SceneGraph::installShadowPasses() {
   seq->SetPasses(passes);
   vtkSmartPointer<vtkCameraPass> cam = vtkSmartPointer<vtkCameraPass>::New();
   cam->SetDelegatePass(seq);
-
-  m_renderer->SetPass(cam);
-  m_shadowPass = cam;
-  m_shadowBaker = baker;
+  bakerOut = baker;
+  return cam;
 }
 
 std::pair<const void *, double> SceneGraph::shadowReceiverKey() const {

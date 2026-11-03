@@ -14,6 +14,8 @@
 #include <cvc/gl/ImGuiOverlay.h>                // overlay draw callback
 #include <cvc/gl/SceneGraph.h>    // scene().computeGraphicsBounds()/appContext()/prefix
 #include <cvc/gl/SceneRenderer.h> // view.render()/processUIEvents()/renderer()/windowClosed()
+#include <cvc/gl/Viewport.h>      // a scenes: entry's own viewport
+#include <cvc/gl/ViewportManager.h> // ... added beside the main one
 #include <cvc/gl/ariadne/AriRuntime.h>
 #include <cvc/gl/ariadne/extensions.h>             // register_cvcgl_extensions
 #include <cvc/gl/ariadne/scene_realize.h>          // realize_scene / RealizedScene / tick_scene
@@ -42,9 +44,42 @@ namespace {
 // Also a StreamBindingSink (stream_verbs.h): the (gl-bind-stream) verb, resolved to THIS document
 // via its document_scope, calls bind_stream() here on the render thread, and this adapter owns +
 // ticks the resulting StreamTextureBinding alongside the declarative ones.
+// A scene's background (a view property) on renderer r: a solid colour, or a top-to-bottom
+// gradient. False when the scene sets none.
+bool apply_background(vtkRenderer *r, const ari::Scene &scene) {
+  if (!scene.has_background || !r)
+    return false;
+  const auto &t = scene.background_top;
+  const auto &b = scene.background_bottom;
+  r->SetGradientBackground(scene.background_gradient);
+  if (scene.background_gradient) {
+    r->SetBackground(b[0], b[1], b[2]);  // bottom
+    r->SetBackground2(t[0], t[1], t[2]); // top
+  } else {
+    r->SetBackground(t[0], t[1], t[2]);
+  }
+  return true;
+}
+
 class GlSceneAdapter : public ari::SceneAdapter, public StreamBindingSink {
 public:
   GlSceneAdapter(SceneRenderer &view, CameraController &cam) : view_(&view), cam_(&cam) {}
+  ~GlSceneAdapter() override { clear_scenes(); }
+
+  // A `scenes:` entry: a SceneGraph of its own (its nodes, lights, shadows, background) attached
+  // to a viewport of its own, `anchor`, which the views of it mirror. The anchor is not shown; the
+  // views draw a pixel of it under one of them when its shadows need baking (scene_views.cpp).
+  struct OtherScene {
+    std::string id, anchor;
+    std::unique_ptr<SceneGraph> sg;
+    RealizedScene realized;
+  };
+  const OtherScene *other_scene(const std::string &id) const {
+    for (const auto &s : scenes_)
+      if (s->id == id)
+        return s.get();
+    return nullptr;
+  }
 
   // Required scene-node customs (cvcGL's registry) before realizing; a missing one skips the scene.
   bool verify(const ari::LoadResult &loaded, std::vector<std::string> *errors) override {
@@ -63,7 +98,9 @@ public:
     verb_bindings_.clear();
     SceneGraph &sg = view_->scene();
     save_view(sg);
-    realized_ = realize_scene(sg, scene, prefix, warns);
+    RealizeOptions options;
+    options.assets = &assets_; // each asset read once, for this scene and the document's scenes:
+    realized_ = realize_scene(sg, scene, prefix, warns, options);
     haveScene_ = true;
     for (const ari::SceneLight &l : scene.lights)
       if (l.rig.empty()) // a rig's lights belong to (and leave with) its StageLighting
@@ -73,19 +110,46 @@ public:
       cam_->frameBounds(bb.minx, bb.miny, bb.minz, bb.maxx, bb.maxy, bb.maxz);
     // The scene's background (a view property): a solid colour, or a top-to-bottom gradient set on
     // the renderer (SceneRenderer exposes only a flat setBackground).
-    if (scene.has_background) {
-      const auto &t = scene.background_top;
-      const auto &b = scene.background_bottom;
-      vtkRenderer *r = view_->renderer();
-      if (scene.background_gradient && r) {
-        r->SetGradientBackground(true);
-        r->SetBackground(b[0], b[1], b[2]);  // bottom
-        r->SetBackground2(t[0], t[1], t[2]); // top
-      } else {
-        if (r)
-          r->SetGradientBackground(false);
-        view_->setBackground(t[0], t[1], t[2]);
+    apply_background(view_->renderer(), scene);
+  }
+
+  // The document's other scenes: each realized into a SceneGraph of its own, under state
+  // <prefix>.scenes.<id> (its nodes at <prefix>.scenes.<id>.graphics...), while its widgets and its
+  // nodes' binds share the document's prefix. Its own viewport carries its lights, shadows and
+  // background; viewports that name the scene mirror it.
+  void realize_scenes(const std::vector<ari::Scene> &scenes, const std::string &prefix,
+                      std::vector<std::string> *warns) override {
+    ViewportManager &vm = view_->viewportManager();
+    for (const ari::Scene &scene : scenes) {
+      auto s = std::make_unique<OtherScene>();
+      s->id = scene.id;
+      s->anchor = "scene." + scene.id;
+      if (other_scene(scene.id) || vm.hasViewport(s->anchor)) {
+        if (warns)
+          warns->push_back("ari: scenes: '" + scene.id + "' is declared twice; the first is used");
+        continue;
       }
+      s->sg =
+          std::make_unique<SceneGraph>(view_->scene().appContext(), prefix + ".scenes." + s->id);
+      s->sg->setDiagnosticChromeVisible(false); // its grid and axes only when it asks (chrome:)
+      const double none[4] = {0.0, 0.0, 0.0, 0.0};
+      Viewport &vp = vm.addSceneViewport(s->anchor, *s->sg, none, 1);
+      vp.setVisible(false);
+      vp.setInputEnabled(false);
+      // The main view's background unless the scene sets its own.
+      if (!apply_background(vp.renderer(), scene))
+        if (vtkRenderer *main = view_->renderer()) {
+          double bg[3], bg2[3];
+          main->GetBackground(bg);
+          main->GetBackground2(bg2);
+          vp.renderer()->SetBackground(bg);
+          vp.renderer()->SetBackground2(bg2);
+          vp.renderer()->SetGradientBackground(main->GetGradientBackground());
+        }
+      RealizeOptions options;
+      options.assets = &assets_;
+      s->realized = realize_scene(*s->sg, scene, prefix, warns, options);
+      scenes_.push_back(std::move(s));
     }
   }
 
@@ -94,6 +158,8 @@ public:
   // physics world with its bodies). The view goes back to how the host set it up.
   void clear() override {
     verb_bindings_.clear();
+    clear_scenes();
+    assets_ = SceneAssetCache{};
     if (chromeHidden_) { // no_scene() hid the host's chrome: the next document starts with it again
       view_->scene().setDiagnosticChromeVisible(chrome_);
       chromeHidden_ = false;
@@ -132,11 +198,19 @@ public:
   void sync_visibility(cvc::app &app) override {
     if (haveScene_)
       ari::sync_scene_visibility(app, realized_.visibility); // bound visible: -> node .visible
+    for (auto &s : scenes_)
+      ari::sync_scene_visibility(app, s->realized.visibility);
   }
 
   void tick() override {
     if (haveScene_) // declarative stream / volren / volslice service, and the scene clock
       tick_scene(realized_, view_->renderer(), tick_dt_);
+    if (!scenes_.empty() && !view_->isClosed()) {
+      ViewportManager &vm = view_->viewportManager();
+      for (auto &s : scenes_)
+        if (vm.hasViewport(s->anchor))
+          tick_scene(s->realized, vm.viewport(s->anchor).renderer(), tick_dt_);
+    }
     // Service the imperative (gl-bind-stream) bindings here, on the render thread, right after the
     // declarative ones. They are NOT in realized_.custom_ticks (that vector is rebuilt wholesale on
     // every realize()); this adapter owns them so they survive across frames and are torn down with
@@ -186,6 +260,18 @@ public:
   }
 
 private:
+  // The document's other scenes come down: their viewports (the views of them are gone first:
+  // AriRuntime::load clears its SceneViews before the load), then their graphs.
+  void clear_scenes() {
+    if (!view_->isClosed()) {
+      ViewportManager &vm = view_->viewportManager();
+      for (auto &s : scenes_)
+        if (vm.hasViewport(s->anchor))
+          vm.removeViewport(s->anchor);
+    }
+    scenes_.clear();
+  }
+
   // The view as the host set it up, once, for clear() to go back to.
   void save_view(SceneGraph &sg) {
     if (viewSaved_)
@@ -205,6 +291,8 @@ private:
   bool chromeHidden_ = false; // no_scene() hid the chrome; clear() puts the host's back
   double tick_dt_ = -1.0;
   std::vector<std::string> lights_; // the realized free (non-rig) lights, which clear() removes
+  SceneAssetCache assets_;          // the document's assets, read once for all its scenes
+  std::vector<std::unique_ptr<OtherScene>> scenes_; // the document's scenes: entries
   // The view before the first realize(): what clear() restores.
   bool viewSaved_ = false;
   double background_[3] = {0.0, 0.0, 0.0};
@@ -231,7 +319,26 @@ AriRuntime::AriRuntime(SceneRenderer &view, CameraController &cam, ImGuiOverlay 
 
   // `type: viewport`: a view of the scene in a window. The draw callback hides, once the walk is
   // done, any view whose widget was not drawn this frame.
-  views_ = std::make_unique<SceneViews>(view, backend_, [this] { return realized(); }, &cam);
+  // A viewport's scene: the document's scene: ("") in the main view, or a scenes: entry in its own.
+  auto scenes = [this](const std::string &id, SceneSlot &out) {
+    auto *adapter = static_cast<GlSceneAdapter *>(scene_.get());
+    if (id.empty()) {
+      out.sg = &view_->scene();
+      out.realized = adapter->realized();
+      out.source = view_->viewportManager().primary().name();
+      out.anchor = false;
+      return true;
+    }
+    const GlSceneAdapter::OtherScene *s = adapter->other_scene(id);
+    if (!s)
+      return false;
+    out.sg = s->sg.get();
+    out.realized = &s->realized;
+    out.source = s->anchor;
+    out.anchor = true;
+    return true;
+  };
+  views_ = std::make_unique<SceneViews>(view, backend_, scenes, &cam);
   views_->register_widget();
   {
     cvc::ariadne::Runtime *r = &app_rt_.runtime();

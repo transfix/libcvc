@@ -33,6 +33,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -95,6 +96,9 @@ struct RealizedScene {
   std::vector<TaggedNode> nodes;
   // The scene's named cameras (`cameras:`), which viewport widgets bind by id.
   std::vector<cvc::ariadne::SceneCamera> cameras;
+  // main_view: { show, hide }: the tags the main view draws (SceneViews applies it).
+  bool has_main_view = false;
+  std::vector<std::string> main_show, main_hide;
   // Per-frame closures a CUSTOM node type registered (register_scene_node_type) that
   // needs servicing — run by tick_scene after the built-in tickers. A closure should
   // capture a weak_ptr to its node (not the node), matching the volren/volslice
@@ -187,6 +191,16 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
                             std::vector<std::string> *warnings = nullptr);
 
 // Opt-in realize behaviour. The defaults are the four-argument realize_scene, exactly.
+// The geometry of a document's assets (`assets:`), each read and fitted once: what every node whose
+// source is { asset: <id> } draws, in every scene that shares the cache. cvc::geometry is
+// copy-on-write, so those nodes share its buffers; each node's GeometryNode still builds its own
+// VTK arrays from them. Keep one per document, across its scenes (AriRuntime's scene adapter does).
+struct SceneAssetCache {
+  std::map<std::string, cvc::geometry> geometry;
+  std::set<std::string> failed; // read once and failed: not read again, nor warned again
+  std::size_t reads = 0;        // how many assets have been read (for tests)
+};
+
 struct RealizeOptions {
   // Realize a mesh-file geometry node as a LodGraphicsNode whose ladder comes from this cache
   // (LodPyramidCache::attach: full detail at once, the coarser rungs once their build lands on a
@@ -201,6 +215,9 @@ struct RealizeOptions {
   LodPyramidCache *lod = nullptr;
   // Below this a ladder saves little and costs about 1.5x the resident buffers.
   std::uint64_t lod_min_tris = 4096;
+  // Where `source: { asset: <id> }` nodes get their geometry. Null: realize_scene keeps a cache of
+  // its own for that one scene (each asset still read once there).
+  SceneAssetCache *assets = nullptr;
 };
 
 // realize_scene with options; the LOD nodes it creates are listed in RealizedScene::lod_nodes.

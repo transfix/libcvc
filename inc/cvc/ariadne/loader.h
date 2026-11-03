@@ -102,6 +102,7 @@ struct LintConfig {
 struct LoadResult {
   bool ok = false;                        // false if the load failed (see `error`)
   Widget root;                            // a Group of the document's widgets (empty on failure)
+  std::vector<Scene> scenes; // the `scenes:` entries, each with its id (viewports name them)
   Scene scene;                            // the parsed `scene:` block (§9; empty if none)
   Meta meta;                              // parsed provenance (may be empty)
   std::vector<CustomRequirement> customs; // declared `customs:` (widget/node/block)

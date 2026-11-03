@@ -650,8 +650,11 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   if (lr.scene.any()) {
     if (scene_) {
       std::vector<std::string> warns;
-      if (scene_->verify(lr, &warns)) // a missing required node custom: no half-built scene
+      if (scene_->verify(lr, &warns)) { // a missing required node custom: no half-built scene
         scene_->realize(lr.scene, prefix_, &warns);
+        if (!lr.scenes.empty())
+          scene_->realize_scenes(lr.scenes, prefix_, &warns);
+      }
       for (std::string &w : warns)
         lr.warnings.push_back(std::move(w));
     } else {
@@ -660,6 +663,13 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
     }
   } else if (scene_) {
     scene_->no_scene();
+    if (!lr.scenes.empty()) { // scenes: alone, each drawn in the viewports that name it
+      std::vector<std::string> warns;
+      if (scene_->verify(lr, &warns))
+        scene_->realize_scenes(lr.scenes, prefix_, &warns);
+      for (std::string &w : warns)
+        lr.warnings.push_back(std::move(w));
+    }
   }
 
   if (new_document && !docPath_.empty())

@@ -29,6 +29,7 @@
 #include <vector>
 #include <vtkActor.h>
 #include <vtkCamera.h>
+#include <vtkCommand.h>
 #include <vtkMapper.h>
 #include <vtkPropCollection.h>
 #include <vtkProperty.h>
@@ -94,15 +95,19 @@ struct Twin {
 } // namespace
 
 struct SceneViews::View {
-  std::string name; // the viewport's, and its camera's viewer: <prefix>.viewers.<name>.camera
+  std::string name;  // the viewport's, and its camera's viewer: <prefix>.viewers.<name>.camera
+  std::string scene; // the scene it shows: "" the main one, or a scenes: entry
   Viewport *vp = nullptr;
   std::vector<std::string> show, hide; // tags; show empty = every tag
   bool chrome = true;                  // the scene's grid, axes and bounding box
   ari::SceneCamera start;              // its own camera: mode, track, where its orbit starts
   std::string camera;                  // the camera it draws from: "" its own, "main", or a name
   vtkSmartPointer<vtkCamera> own;      // its own vtkCamera, kept while it draws from another
-  bool shadows = true;                 // it receives the scene's shadows
+  // Its shadows: "shared" (the maps its scene's renderer bakes), "own" (a baker of its own, for the
+  // casters it draws), or "off".
+  std::string shadow_mode = "shared";
   std::pair<const void *, double> shadow_key{nullptr, -1.0}; // what shadow_pass was made from
+  std::string shadow_built;                                  // ... and in which mode
   vtkSmartPointer<vtkRenderPass> shadow_pass;
   bool input = true;   // drags and the wheel move its camera
   bool drawn = false;  // a widget drew it this frame
@@ -287,12 +292,56 @@ void frame_camera(CameraController &cam, const double b[6], const ari::SceneCame
 
 bool valid_bounds(const double b[6]) { return b[0] <= b[1] && b[2] <= b[3] && b[4] <= b[5]; }
 
+// The bounds of the visible 3-D props among `props`; false when none has any.
+bool props_bounds(const std::unordered_set<vtkProp *> &props, double out[6]) {
+  bool any = false;
+  for (vtkProp *p : props) {
+    if (!p || !p->GetVisibility())
+      continue;
+    const double *b = p->GetBounds();
+    if (!b || !valid_bounds(b))
+      continue;
+    for (int i = 0; i < 3; ++i) {
+      out[2 * i] = any ? std::min(out[2 * i], b[2 * i]) : b[2 * i];
+      out[2 * i + 1] = any ? std::max(out[2 * i + 1], b[2 * i + 1]) : b[2 * i + 1];
+    }
+    any = true;
+  }
+  return any;
+}
+
+// The world bounds of the tagged nodes `show` / `hide` let in, with their subtrees (the untagged
+// left out): what a view, or the main view, that names tags to show is framed on. False when
+// none has any.
+bool shown_bounds(const RealizedScene &rs, const std::vector<std::string> &show,
+                  const std::vector<std::string> &hide, double out[6]) {
+  bool any = false;
+  for (const RealizedScene::TaggedNode &t : rs.nodes) {
+    if (t.tags.empty() || !in_view(t.tags, show, hide))
+      continue;
+    std::shared_ptr<GraphicsNode> n = t.node.lock();
+    if (!n)
+      continue;
+    const cvc::bounding_box bb = n->getCombinedWorldBoundingBox();
+    if (bb.isNull())
+      continue;
+    const double b[6] = {bb.minx, bb.maxx, bb.miny, bb.maxy, bb.minz, bb.maxz};
+    for (int i = 0; i < 3; ++i) {
+      out[2 * i] = any ? std::min(out[2 * i], b[2 * i]) : b[2 * i];
+      out[2 * i + 1] = any ? std::max(out[2 * i + 1], b[2 * i + 1]) : b[2 * i + 1];
+    }
+    any = true;
+  }
+  return any;
+}
+
 } // namespace
 
 // A named camera: its own vtkCamera, which every viewport bound to it draws from, and the
 // controller a drag in any of them moves. The controller reads its aspect from the first viewport
 // bound to it (`driver`).
 struct SceneViews::Camera {
+  std::string scene; // the scene that declares it
   ari::SceneCamera spec;
   vtkSmartPointer<vtkCamera> cam;
   std::unique_ptr<CameraController> ctl;
@@ -302,18 +351,58 @@ struct SceneViews::Camera {
 };
 
 SceneViews::SceneViews(SceneRenderer &view, ImGuiBackend &backend,
-                       std::function<const RealizedScene *()> realized, CameraController *main)
-    : view_(&view), backend_(&backend), realized_(std::move(realized)), main_(main) {}
+                       std::function<bool(const std::string &, SceneSlot &)> scenes,
+                       CameraController *main)
+    : view_(&view), backend_(&backend), scenes_(std::move(scenes)), main_(main) {}
 
-SceneViews::~SceneViews() { clear(); }
+SceneViews::~SceneViews() {
+  clear();
+  if (!view_->isClosed())
+    if (vtkRenderer *r = view_->renderer()) {
+      if (main_start_tag_)
+        r->RemoveObserver(main_start_tag_);
+      if (main_end_tag_)
+        r->RemoveObserver(main_end_tag_);
+    }
+}
+
+void SceneViews::main_view_begin() {
+  vtkRenderer *r = view_->renderer();
+  for (void *q : main_hidden_) {
+    vtkProp *p = static_cast<vtkProp *>(q);
+    if (r && r->GetViewProps()->IsItemPresent(p)) {
+      p->Register(nullptr); // alive until it is back
+      r->RemoveViewProp(p);
+      main_removed_.push_back(p);
+    }
+  }
+}
+
+void SceneViews::main_view_end() {
+  vtkRenderer *r = view_->renderer();
+  for (void *q : main_removed_) {
+    vtkProp *p = static_cast<vtkProp *>(q);
+    if (r)
+      r->AddViewProp(p);
+    p->UnRegister(nullptr);
+  }
+  main_removed_.clear();
+}
 
 void SceneViews::clear() {
+  main_hidden_.clear();
+  main_framed_ = nullptr;
   if (view_->isClosed()) { // the viewports went with the view's manager
     views_.clear();
     cameras_.clear();
+    anchors_on_.clear();
     return;
   }
   ViewportManager &vm = view_->viewportManager();
+  for (const std::string &a : anchors_on_)
+    if (vm.hasViewport(a))
+      vm.viewport(a).setVisible(false);
+  anchors_on_.clear();
   for (auto &kv : views_) {
     View &v = *kv.second;
     if (v.shadow_pass) { // its shadow pass's GL objects, while the window is still there
@@ -327,18 +416,20 @@ void SceneViews::clear() {
   cameras_.clear();
 }
 
-SceneViews::Camera *SceneViews::named_camera(const std::string &name) {
-  auto it = cameras_.find(name);
+SceneViews::Camera *SceneViews::named_camera(const std::string &scene, const std::string &name) {
+  const std::string key = scene + "|" + name;
+  auto it = cameras_.find(key);
   if (it != cameras_.end())
     return it->second.get();
-  const RealizedScene *rs = realized_ ? realized_() : nullptr;
-  if (!rs)
+  SceneSlot slot;
+  if (!scenes_ || !scenes_(scene, slot) || !slot.realized || !slot.sg)
     return nullptr;
-  for (const ari::SceneCamera &s : rs->cameras) {
+  for (const ari::SceneCamera &s : slot.realized->cameras) {
     if (s.id != name)
       continue;
-    SceneGraph &sg = view_->scene();
+    SceneGraph &sg = *slot.sg;
     auto c = std::make_unique<Camera>();
+    c->scene = scene;
     c->spec = s;
     c->cam = vtkSmartPointer<vtkCamera>::New();
     c->ctl = std::make_unique<CameraController>(
@@ -346,7 +437,7 @@ SceneViews::Camera *SceneViews::named_camera(const std::string &name) {
     c->ctl->setCamera(c->cam);
     c->ctl->setScene(&sg);
     Camera *raw = c.get();
-    cameras_[name] = std::move(c);
+    cameras_[key] = std::move(c);
     return raw;
   }
   return nullptr;
@@ -363,7 +454,7 @@ void SceneViews::bind_camera(View &v, const std::string &name) {
   if (name == "main" && main_) {
     target = view_->renderer() ? view_->renderer()->GetActiveCamera() : nullptr;
   } else if (!name.empty()) {
-    if (Camera *c = named_camera(name)) {
+    if (Camera *c = named_camera(v.scene, name)) {
       target = c->cam;
       if (!c->driver) {
         c->ctl->setRenderer(r);
@@ -386,28 +477,44 @@ CameraController &SceneViews::controller(View &v) {
   if (v.camera == "main" && main_)
     return *main_;
   if (!v.camera.empty()) {
-    auto it = cameras_.find(v.camera);
+    auto it = cameras_.find(v.scene + "|" + v.camera);
     if (it != cameras_.end())
       return *it->second->ctl;
   }
   return v.vp->camera();
 }
 
-SceneViews::View *SceneViews::view_for(const std::string &name) {
-  auto it = views_.find(name);
-  if (it != views_.end())
-    return it->second.get();
+SceneViews::View *SceneViews::view_for(const std::string &name, const std::string &scene) {
   ViewportManager &vm = view_->viewportManager();
+  auto it = views_.find(name);
+  if (it != views_.end()) {
+    if (it->second->scene == scene)
+      return it->second.get();
+    // It shows another scene now: a new mirror of that one.
+    View &old = *it->second;
+    if (old.shadow_pass)
+      old.shadow_pass->ReleaseGraphicsResources(vm.renderWindow());
+    if (vm.hasViewport(name))
+      vm.removeViewport(name);
+    views_.erase(it);
+  }
   if (vm.hasViewport(name)) // the host's own viewport of that name: not the widget's to drive
+    return nullptr;
+  SceneSlot slot;
+  if (!scenes_ || !scenes_(scene, slot) || slot.source.empty() || !vm.hasViewport(slot.source))
     return nullptr;
   auto v = std::make_unique<View>();
   v->name = name;
+  v->scene = scene;
   const double hidden_region[4] = {0.0, 0.0, 0.0, 0.0};
-  Viewport &vp = vm.addMirrorViewport(name, vm.primary().name(), hidden_region, 1, true);
+  // Over the main view (layer 1), and over a scene's own viewport (layer 1, a pixel of it drawn
+  // under one of its views): layer 2.
+  Viewport &vp =
+      vm.addMirrorViewport(name, slot.source, hidden_region, scene.empty() ? 1 : 2, true);
   vp.setVisible(false);
   vp.setInputEnabled(false); // the widget feeds its camera; the manager's router never does
-  // The main view's background, until the widget says otherwise.
-  if (vtkRenderer *main = view_->renderer()) {
+  // Its scene's background, until the widget says otherwise.
+  if (vtkRenderer *main = vm.viewport(slot.source).renderer()) {
     double bg[3];
     main->GetBackground(bg);
     vp.setBackground(bg[0], bg[1], bg[2], true);
@@ -427,6 +534,36 @@ SceneViews::View *SceneViews::view_for(const std::string &name) {
 
 void SceneViews::end_walk() {
   walked_ = true;
+  // A scenes: entry's own viewport bakes its shadow maps when it draws, so while one of its views
+  // shows and it casts shadows, draw one pixel of it in a corner of that view, which draws over it.
+  std::vector<std::string> anchors;
+  ViewportManager &vm = view_->viewportManager();
+  int W = 0, H = 0;
+  if (vtkRenderWindow *win = vm.renderWindow()) {
+    const int *sz = win->GetSize();
+    W = sz[0];
+    H = sz[1];
+  }
+  for (auto &kv : views_) {
+    View &v = *kv.second;
+    if (!v.drawn || v.scene.empty() || W <= 0 || H <= 0)
+      continue;
+    SceneSlot slot;
+    if (!scenes_ || !scenes_(v.scene, slot) || !slot.anchor || !slot.sg ||
+        !slot.sg->shadowsEnabled() || !vm.hasViewport(slot.source))
+      continue;
+    if (std::find(anchors.begin(), anchors.end(), slot.source) != anchors.end())
+      continue;
+    Viewport &a = vm.viewport(slot.source);
+    a.setRegion(v.region[0], v.region[1], v.region[0] + 1.0 / W, v.region[1] + 1.0 / H);
+    if (!a.visible())
+      a.setVisible(true);
+    anchors.push_back(slot.source);
+  }
+  for (const std::string &old : anchors_on_)
+    if (std::find(anchors.begin(), anchors.end(), old) == anchors.end() && vm.hasViewport(old))
+      vm.viewport(old).setVisible(false);
+  anchors_on_ = std::move(anchors);
   for (auto &kv : views_) {
     View &v = *kv.second;
     if (!v.drawn && v.vp->visible())
@@ -446,17 +583,61 @@ void SceneViews::update(double dt) {
   if (view_->isClosed()) {
     views_.clear();
     cameras_.clear();
+    anchors_on_.clear();
     return;
   }
-  SceneGraph &sg = view_->scene();
   // No widget walk last frame (the host hid the UI): no widget drew a view, so none shows.
   const bool walked = walked_;
   walked_ = false;
-  const RealizedScene *rs = realized_ ? realized_() : nullptr;
+  // main_view: { show, hide }: what the main view leaves out, taken out of the main renderer for
+  // the length of its draw (main_view_begin / _end), so the views, which mirror it, keep it.
+  main_hidden_.clear();
+  SceneSlot mainSlot;
+  if (scenes_ && scenes_("", mainSlot) && mainSlot.realized && mainSlot.realized->has_main_view) {
+    std::unordered_set<vtkProp *> out;
+    for (const RealizedScene::TaggedNode &t : mainSlot.realized->nodes)
+      if (!in_view(t.tags, mainSlot.realized->main_show, mainSlot.realized->main_hide))
+        collect(t.node.lock(), out);
+    main_hidden_.assign(out.begin(), out.end());
+    if (!main_start_tag_)
+      if (vtkRenderer *r = view_->renderer()) {
+        main_start_tag_ =
+            r->AddObserver(vtkCommand::StartEvent, this, &SceneViews::main_view_begin);
+        main_end_tag_ = r->AddObserver(vtkCommand::EndEvent, this, &SceneViews::main_view_end);
+      }
+    // The host framed the main camera on the whole scene; once per document, frame it on what the
+    // main view draws: the tagged nodes it shows (or all it draws, when it names none to show).
+    if (main_ && main_framed_ != mainSlot.realized) {
+      double b[6];
+      bool ok = false;
+      if (!mainSlot.realized->main_show.empty())
+        ok = shown_bounds(*mainSlot.realized, mainSlot.realized->main_show,
+                          mainSlot.realized->main_hide, b);
+      if (!ok)
+        if (vtkRenderer *r = view_->renderer()) {
+          std::unordered_set<vtkProp *> drawn;
+          vtkPropCollection *props = r->GetViewProps();
+          vtkCollectionSimpleIterator it;
+          props->InitTraversal(it);
+          while (vtkProp *p = props->GetNextProp(it))
+            if (!out.count(p))
+              drawn.insert(p);
+          ok = props_bounds(drawn, b);
+        }
+      if (ok)
+        main_->frameBounds(b[0], b[2], b[4], b[1], b[3], b[5]);
+      main_framed_ = mainSlot.realized;
+    }
+  }
   for (auto &kv : views_) {
     View &v = *kv.second;
     if (!walked && v.vp->visible())
       v.vp->setVisible(false);
+    SceneSlot slot;
+    if (!scenes_ || !scenes_(v.scene, slot) || !slot.sg)
+      continue;
+    SceneGraph &sg = *slot.sg;
+    const RealizedScene *rs = slot.realized;
     // What it leaves out: the tagged nodes its show: / hide: rule out, and the chrome.
     v.hidden.clear();
     if (rs && (!v.show.empty() || !v.hide.empty()))
@@ -490,16 +671,21 @@ void SceneViews::update(double dt) {
       else
         (it++)->second.seen = false;
     }
-    // The scene's shadows: a pass reading the main renderer's maps, remade when they change.
-    const std::pair<const void *, double> key =
-        v.shadows ? sg.shadowReceiverKey() : std::pair<const void *, double>(nullptr, 0.0);
-    if (key != v.shadow_key) {
+    // The scene's shadows: a pass reading the maps its scene's renderer bakes, or a chain of its
+    // own that bakes what this view draws, remade when the scene's shadows change.
+    const std::pair<const void *, double> key = v.shadow_mode != "off"
+                                                    ? sg.shadowReceiverKey()
+                                                    : std::pair<const void *, double>(nullptr, 0.0);
+    if (key != v.shadow_key || v.shadow_mode != v.shadow_built) {
       vtkRenderer *r = v.vp->renderer();
       if (v.shadow_pass)
         v.shadow_pass->ReleaseGraphicsResources(view_->viewportManager().renderWindow());
-      v.shadow_pass = key.first ? sg.makeShadowReceiverPass() : nullptr;
+      v.shadow_pass = !key.first               ? nullptr
+                      : v.shadow_mode == "own" ? sg.makeShadowPasses()
+                                               : sg.makeShadowReceiverPass();
       r->SetPass(v.shadow_pass);
       v.shadow_key = key;
+      v.shadow_built = v.shadow_mode;
     }
     if (!v.chrome) {
       if (std::shared_ptr<GraphicsNode> root = sg.getGraphicsRoot()) {
@@ -509,18 +695,20 @@ void SceneViews::update(double dt) {
       }
     }
     if (!v.camera.empty()) { // a named camera, moved below (or the main one, by its host)
-      auto it = cameras_.find(v.camera);
+      auto it = cameras_.find(v.scene + "|" + v.camera);
       if (it != cameras_.end() && v.vp->visible())
         it->second->used = true;
       continue;
     }
     CameraController &cam = v.vp->camera();
-    // Framed once it has drawn something: the bounds of what this view shows.
+    // Framed once it has drawn something: the bounds of what this view shows (the tagged nodes it
+    // names, when it names some to show).
     if (!v.framed && v.vp->visible()) {
       double b[6];
       vtkRenderer *r = v.vp->renderer();
       if (r && r->GetViewProps()->GetNumberOfItems() > 0) {
-        r->ComputeVisiblePropBounds(b);
+        if (v.show.empty() || !rs || !shown_bounds(*rs, v.show, v.hide, b))
+          r->ComputeVisiblePropBounds(b);
         if (valid_bounds(b)) {
           frame_camera(cam, b, v.start, sg);
           v.framed = true;
@@ -530,16 +718,19 @@ void SceneViews::update(double dt) {
     cam.update(dt);
   }
 
-  // The named cameras: each framed on the whole scene the first time a view shows it, then moved
+  // The named cameras: each framed on its whole scene the first time a view shows it, then moved
   // once a frame however many views draw from it. Its near / far planes span the whole scene, so
   // no view that draws from it clips what it shows.
-  double whole[6] = {1.0, -1.0, 1.0, -1.0, 1.0, -1.0};
-  if (vtkRenderer *main = view_->renderer())
-    main->ComputeVisiblePropBounds(whole);
+  ViewportManager &vm = view_->viewportManager();
   for (auto &kv : cameras_) {
     Camera &c = *kv.second;
-    if (!c.framed && c.used && c.driver && valid_bounds(whole)) {
-      frame_camera(*c.ctl, whole, c.spec, sg);
+    double whole[6] = {1.0, -1.0, 1.0, -1.0, 1.0, -1.0};
+    SceneSlot slot;
+    if (scenes_ && scenes_(c.scene, slot) && vm.hasViewport(slot.source))
+      if (vtkRenderer *src = vm.viewport(slot.source).renderer())
+        src->ComputeVisiblePropBounds(whole);
+    if (!c.framed && c.used && c.driver && valid_bounds(whole) && slot.sg) {
+      frame_camera(*c.ctl, whole, c.spec, *slot.sg);
       c.framed = true;
     }
     c.ctl->update(dt);
@@ -556,9 +747,14 @@ void SceneViews::register_widget() {
         std::string name = w.props.str("view");
         if (name.empty())
           name = w.id.empty() ? std::string("view") : w.id;
-        View *v = view_for(name);
+        const std::string scene = w.props.str("scene"); // "" the document's scene: block
+        View *v = view_for(name, scene);
         if (!v) {
-          ImGui::TextDisabled("[viewport %s: the host has a viewport of that name]", name.c_str());
+          if (!scene.empty())
+            ImGui::TextDisabled("[viewport %s: no scene '%s']", name.c_str(), scene.c_str());
+          else
+            ImGui::TextDisabled("[viewport %s: the host has a viewport of that name]",
+                                name.c_str());
           return {};
         }
         v->show = tag_list(w.props.find("show"));
@@ -592,7 +788,13 @@ void SceneViews::register_widget() {
           v->framed = false;
         }
         bind_camera(*v, camera);
-        v->shadows = w.props.flag("shadows", true);
+        // shadows: true (the scene's maps) | own (a bake of what it draws) | false
+        const std::string shadows = w.props.str("shadows", "true");
+        v->shadow_mode =
+            shadows == "own" ? "own"
+            : (shadows == "false" || shadows == "0" || shadows == "off" || shadows == "no")
+                ? "off"
+                : "shared";
         // override: { <node id | tag | "*">: { drawstyle, opacity, color, line_width,
         // point_size }, ... }, in order.
         v->overrides.clear();

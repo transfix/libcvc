@@ -1753,7 +1753,8 @@ windows:
 | `bind` | A state key whose value is the tag list to show (space- or comma-separated), read every frame. Use it for a layers menu: a widget writes the key, and the view follows. |
 | `mode` | Its own camera's mode: `orbit` (the default), `fly`, `map` (top-down, framed on what the view shows), or `track` with `track: <node id>`. (`camera: map` and the other three mode names still mean the mode.) |
 | `camera` | Draw from a named camera instead of its own: one the scene declares (`scene: cameras:`, below), or `main`, the main view's. |
-| `shadows` | `false` leaves the scene's shadows out of this view. Otherwise it draws them when the scene casts them. |
+| `scene` | The scene it shows: a `scenes:` entry's name (below). Unset: the document's `scene:`. |
+| `shadows` | `true` (the default) draws the scene's shadows from the maps the scene's own renderer bakes. `own` bakes maps of its own from what this view draws, so a node it leaves out casts nothing there and a node the main view leaves out still casts; it costs one more bake. `false` draws none. |
 | `chrome` | `false` leaves out the scene's grid, axes and bounding box. Defaults to `true`. |
 | `clear_color` | `[r, g, b]` in 0..1, what the view clears to (one colour, never the scene's gradient). Defaults to the main view's background. (`background:` on a widget is the §5.12 backdrop key.) |
 | `azimuth`, `elevation`, `zoom` | Where its own orbit camera starts once the view is framed: the orbit's azimuth and elevation in degrees, and a zoom factor on the framed distance (2 is twice as close). |
@@ -1814,7 +1815,45 @@ different ones.
 
 **Shadows.** When the scene casts shadows (`shadows: { enabled: true }`), every view draws them. A
 view does not bake shadow maps of its own: it reads the ones the main view bakes
-(`SceneGraph::makeShadowReceiverPass`). They are in light space, so they hold from any camera.
+(`SceneGraph::makeShadowReceiverPass`). They are in light space, so they hold from any camera. A
+view that leaves part of the scene out can bake its own instead (`shadows: own`,
+`SceneGraph::makeShadowPasses`).
+
+**Assets.** `assets:` names meshes, each a node's `source:` and `fit:`, that any node in any of the
+document's scenes draws with `source: { asset: <id> }`. Each asset is read and fitted once. Every
+node on it shares its geometry's buffers (`cvc::geometry` is copy-on-write); each node keeps its own
+transform, material, tags and VTK actor.
+
+```yaml
+assets:
+  bunny: { source: { file: stanford.bunny }, fit: { height: 4, up: y } }
+  pillar: { source: { box: { size: [1.2, 1.2, 6] } } }
+scene:
+  nodes:
+    - { node: statue, type: geometry, source: { asset: bunny } }
+    - { node: post, type: geometry, source: { asset: pillar }, transform: { position: [7, 7, 3] } }
+```
+
+**Scenes.** `scenes:` declares scenes of their own beside the document's `scene:`. Each entry takes
+the keys `scene:` does: nodes, lights, shadows, background, chrome, cameras. A viewport shows one
+with `scene: <id>`, from its own camera or a named camera that scene declares. Each scene is a
+SceneGraph of its own, under state `<prefix>.scenes.<id>`, so its nodes are at
+`scenes.<id>.graphics.root.children.<node>`. Its nodes' `visible:` binds and the widgets share the
+document's prefix. It gets a viewport of its own (`scene.<id>`), never shown, which holds its
+lights, background and shadow chain; the views of it mirror that viewport. While its shadows are on
+and one of its views shows, that viewport draws one pixel in a corner of the view, under it, so its
+maps are baked. A document may have only `scenes:`, and then the main view is empty.
+`examples/ariadne/documents/viewer_scenes.ari` has three scenes (day, night, a studio) built from
+the same assets.
+
+**Groups in one scene.** Where the "scenes" should share the lights and the shadows, make them
+tagged groups of one scene. `main_view: { show: [...], hide: [...] }` in `scene:` picks the groups
+the main view draws, as a viewport's `show:` / `hide:` do, and the main camera is framed on them.
+The props of the groups the main view leaves out come out of the main renderer for the length of
+its draw, so the views, which mirror it, still have them. They cast no shadow in the main view's
+maps either, so a view that shows them uses `shadows: own`.
+`examples/ariadne/documents/viewer_groups.ari` shows a courtyard in the main view and a gallery in
+a viewport.
 
 **How it draws.** Each view is a mirror viewport of the main one
 (`ViewportManager::addMirrorViewport`). It draws the same props, the same geometry, from its own
@@ -1830,9 +1869,11 @@ Limits:
 - An override restyles actors. A volume (`volren`, `volslice`) draws as it is.
 - The view lies under the whole UI. Another window behind the viewport's window still draws over
   the view.
-- A view's shadows come from the main view's maps. A node a view leaves out still casts its
-  shadow there, and with `shadows: { focus: camera }` the maps follow the main camera, not the
-  view's.
+- A view's shadows come from the main view's maps, unless it bakes its own. A node a view leaves
+  out still casts its shadow there, and with `shadows: { focus: camera }` the maps follow the main
+  camera, not the view's.
+- An asset's nodes share its geometry's buffers, but each builds its own VTK arrays to draw from.
+- A `scenes:` entry's shadows are baked only while one of its views shows.
 - A view's first frame is opaque: the window's background is cut from the frame after the widget
   first draws.
 
