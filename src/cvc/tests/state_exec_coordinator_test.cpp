@@ -414,6 +414,9 @@ TEST_F(CoordinatorTest, SubmitViaMessage) {
   msg.origin_node_id = "node-C";
 
   coord.on_message(msg);
+  // The submission is posted: it runs at the scheduler's next step, not on the bus's thread.
+  EXPECT_EQ(sched.process_count(), 0);
+  sched.step();
 
   auto s = coord.stats();
   EXPECT_EQ(s.submissions_received, 1u);
@@ -421,6 +424,33 @@ TEST_F(CoordinatorTest, SubmitViaMessage) {
 
   // Verify process was created
   EXPECT_EQ(sched.process_count(), 1);
+}
+
+// A posted entry must not throw (post_control): a script that doesn't parse is a rejected
+// submission, answered as one, and the step that ran it goes on.
+TEST_F(CoordinatorTest, SubmitViaMessageThatDoesNotParseIsRejected) {
+  coord.start();
+  coord.on_message(state_message::make_text(
+      "__state_exec.cluster-1.election", "{\"type\":\"election-victory\",\"node_id\":\"node-A\"}",
+      MIME_EXEC_ELECTION));
+  std::vector<state_message> replies;
+  bus.subscribe("__state_exec.cluster-1.submit.reply.node-C",
+                [&](const state_message &m) { replies.push_back(m); });
+
+  auto msg = state_message::make_text("__state_exec.cluster-1.submit",
+                                      "{\"action\":\"submit\",\"script\":\"(+ 1\","
+                                      "\"reply_node\":\"node-C\"}",
+                                      MIME_EXEC_SUBMIT);
+  msg.cluster_id = "cluster-1";
+  coord.on_message(msg);
+  EXPECT_NO_THROW(sched.step());
+
+  auto s = coord.stats();
+  EXPECT_EQ(s.submissions_received, 1u);
+  EXPECT_EQ(s.submissions_rejected, 1u);
+  EXPECT_EQ(s.submissions_accepted, 0u);
+  ASSERT_EQ(replies.size(), 1u);
+  EXPECT_NE(replies[0].string_value.find("\"accepted\":false"), std::string::npos);
 }
 
 TEST_F(CoordinatorTest, SubmitStats) {
@@ -470,11 +500,20 @@ TEST_F(CoordinatorTest, MigrateToSelfFails) {
   EXPECT_EQ(result.error, "cannot migrate to self");
 }
 
+// migrate() only requests the migration: the pause fails on the scheduler's thread, at its next
+// step, and the failure shows in the stats.
 TEST_F(CoordinatorTest, MigrateNonexistentProcess) {
   coord.start();
   auto result = coord.migrate(999, "node-B");
-  EXPECT_FALSE(result.success);
-  EXPECT_EQ(result.error, "failed to pause process");
+  EXPECT_TRUE(result.success);
+  EXPECT_EQ(result.new_pid, -1);
+  EXPECT_EQ(result.target_node, "node-B");
+  EXPECT_EQ(result.error, "");
+  EXPECT_EQ(coord.stats().migrations_failed, 0u);
+  sched.step();
+  auto s = coord.stats();
+  EXPECT_EQ(s.migrations_failed, 1u);
+  EXPECT_EQ(s.migrations_initiated, 0u);
 }
 
 TEST_F(CoordinatorTest, MigrateNoScheduler) {
@@ -506,6 +545,7 @@ TEST_F(CoordinatorTest, MigrateRunningProcess) {
   auto result = coord.migrate(pid, "node-B");
   EXPECT_TRUE(result.success);
   EXPECT_EQ(result.target_node, "node-B");
+  sched.step(); // the migration runs on the scheduler's thread
 
   auto s = coord.stats();
   EXPECT_EQ(s.migrations_initiated, 1u);
@@ -531,6 +571,7 @@ TEST_F(CoordinatorTest, MigrateReceiveOnTarget) {
   msg.origin_node_id = "node-B";
 
   coord.on_message(msg);
+  sched.step(); // the ingest is posted: it runs at the scheduler's next step
 
   // A new process should have been created
   EXPECT_GE(sched.process_count(), 1);
@@ -682,6 +723,9 @@ TEST_F(CoordinatorTest, AdminPauseLocal) {
   int pid = sr.pid;
 
   EXPECT_TRUE(coord.admin_pause(pid));
+  // Posted: applied at the scheduler's next step.
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::ready);
+  sched.step();
 
   auto pi = sched.get_process_info(pid);
   ASSERT_TRUE(pi.has_value());
@@ -700,6 +744,7 @@ TEST_F(CoordinatorTest, AdminResumeLocal) {
 
   EXPECT_TRUE(coord.admin_pause(pid));
   EXPECT_TRUE(coord.admin_resume(pid));
+  sched.step(); // both applied, in order; then the process takes a step
 
   auto pi = sched.get_process_info(pid);
   ASSERT_TRUE(pi.has_value());
@@ -717,6 +762,7 @@ TEST_F(CoordinatorTest, AdminKillLocal) {
   int pid = sr.pid;
 
   EXPECT_TRUE(coord.admin_kill(pid));
+  sched.step();
 
   auto pi = sched.get_process_info(pid);
   ASSERT_TRUE(pi.has_value());
@@ -776,6 +822,7 @@ TEST_F(CoordinatorTest, ReceiveControlMessage) {
   msg.cluster_id = "cluster-1";
   msg.origin_node_id = "node-B";
   coord.on_message(msg);
+  sched.step(); // the command is posted: applied at the scheduler's next step
 
   auto pi = sched.get_process_info(pid);
   ASSERT_TRUE(pi.has_value());
@@ -815,6 +862,7 @@ TEST_F(CoordinatorTest, ReceiveKillCommand) {
   msg.cluster_id = "cluster-1";
   msg.origin_node_id = "node-B";
   coord.on_message(msg);
+  sched.step();
 
   auto pi = sched.get_process_info(sr.pid);
   ASSERT_TRUE(pi.has_value());
@@ -830,6 +878,38 @@ TEST_F(CoordinatorTest, AdminCommandStats) {
 
   auto s = coord.stats();
   EXPECT_EQ(s.admin_commands, 3u);
+}
+
+// What the coordinator posts can outlive it (the tests and the CLI destroy it before its
+// scheduler): each entry holds the coordinator's token weakly, so a submission, an ingest or a
+// migration still queued once it is gone does nothing when the scheduler applies it.
+TEST_F(CoordinatorTest, PostedEntriesOutliveTheCoordinator) {
+  const int pid = sched.execute(std::string("(begin (+ 1 2) (+ 3 4))"));
+  {
+    exec_coordinator c;
+    c.set_node_id("node-C");
+    c.set_cluster_id("cluster-1");
+    c.attach_scheduler(&sched);
+    c.attach_message_bus(&bus);
+    c.start();
+    c.on_message(state_message::make_text("__state_exec.cluster-1.election",
+                                          "{\"type\":\"election-victory\",\"node_id\":\"node-C\"}",
+                                          MIME_EXEC_ELECTION));
+    c.on_message(state_message::make_text(
+        "__state_exec.cluster-1.submit",
+        "{\"action\":\"submit\",\"script\":\"(+ 10 20)\",\"reply_node\":\"node-D\"}",
+        MIME_EXEC_SUBMIT));
+    c.on_message(state_message::make_text(
+        "__state_exec.cluster-1.migrate.node-C",
+        "{\"action\":\"migrate-request\",\"source_node\":\"node-B\",\"source_pid\":42,"
+        "\"process_data\":\"{\\\"name\\\":\\\"migrated-proc\\\"}\"}",
+        MIME_EXEC_MIGRATE));
+    EXPECT_TRUE(c.migrate(pid, "node-B").success);
+  }
+  EXPECT_TRUE(sched.has_pending_control());
+  EXPECT_EQ(sched.step(), 1); // the entries, then a step of `pid`
+  EXPECT_EQ(sched.process_count(), 1);
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::ready);
 }
 
 // ===========================================================================
@@ -922,18 +1002,22 @@ TEST_F(CoordinatorTest, E2E_PauseResumeKill) {
   auto r = coord.submit("(begin (+ 1 2) (+ 3 4) (+ 5 6))");
   int pid = r.pid;
 
+  // Each command is posted, and applied at the scheduler's next step.
   // Pause
   EXPECT_TRUE(coord.admin_pause(pid));
+  sched.step();
   auto pi = sched.get_process_info(pid);
   EXPECT_EQ(pi->status, process_status::paused);
 
-  // Resume
+  // Resume (the step then runs the process)
   EXPECT_TRUE(coord.admin_resume(pid));
+  sched.step();
   pi = sched.get_process_info(pid);
   EXPECT_EQ(pi->status, process_status::ready);
 
   // Kill
   EXPECT_TRUE(coord.admin_kill(pid));
+  sched.step();
   pi = sched.get_process_info(pid);
   EXPECT_EQ(pi->status, process_status::killed);
 }
@@ -1294,6 +1378,7 @@ TEST_F(TwoCoordinatorTest, CrossNodeControlCommands) {
   ctrl.cluster_id = "cluster-1";
   ctrl.origin_node_id = "node-B";
   coord1.on_message(ctrl);
+  sched1.step(); // the kill is posted: applied at node-A's next step
 
   auto pi = sched1.get_process_info(r.pid);
   ASSERT_TRUE(pi.has_value());
@@ -1380,6 +1465,7 @@ TEST_F(CoordinatorTest, LW08_MetadataMigrateReleases) {
 
   const auto r = coord.migrate(pid, "node-B");
   EXPECT_TRUE(r.success) << r.error;
+  sched.step(); // the migration runs on the scheduler's thread
   const auto info = sched.get_process_info(pid);
   EXPECT_EQ(info->status, process_status::killed);
   EXPECT_EQ(info->locks_held, 0u);
@@ -1436,7 +1522,8 @@ protected:
   }
 
   // A migration request from node-B, as migrate() sends it: process_data is the metadata JSON.
-  // Without `floor_explicit`, as a source older than the flag sends it.
+  // Without `floor_explicit`, as a source older than the flag sends it. The ingest is posted, so
+  // a step follows.
   void receive_migration(const std::string &name, int priority, int floor,
                          std::optional<bool> floor_explicit = std::nullopt) {
     std::string data = "{\\\"name\\\":\\\"" + name +
@@ -1455,6 +1542,7 @@ protected:
     msg.cluster_id = "cluster-1";
     msg.origin_node_id = "node-B";
     coord.on_message(msg);
+    sched.step();
   }
 };
 
@@ -1555,6 +1643,8 @@ TEST_F(Priority, PR11_FloorInMetadata) {
   bus.subscribe("__state_exec.cluster-1.migrate.node-B",
                 [&](const state_message &m) { sent.push_back(m); });
   ASSERT_TRUE(coord.migrate(src, "node-B").success);
+  EXPECT_TRUE(sent.empty()); // requested: it runs at the scheduler's next step
+  sched.step();
   ASSERT_EQ(sent.size(), 1u);
   EXPECT_NE(sent[0].string_value.find("\\\"priority\\\":4"), std::string::npos)
       << sent[0].string_value;
@@ -1567,6 +1657,7 @@ TEST_F(Priority, PR11_FloorInMetadata) {
   ASSERT_TRUE(sched.set_priority(own, 6));
   sent.clear();
   ASSERT_TRUE(coord.migrate(own, "node-B").success);
+  sched.step();
   ASSERT_EQ(sent.size(), 1u);
   EXPECT_NE(sent[0].string_value.find("\\\"priority_floor\\\":0"), std::string::npos)
       << sent[0].string_value;
