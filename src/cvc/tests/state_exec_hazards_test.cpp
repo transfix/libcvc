@@ -242,3 +242,81 @@ TEST(Hazards, HZ03b_StateDataSetChargesTheWriter) {
     EXPECT_EQ(o.data_steps, 0u);
   }
 }
+
+// HZ-12 (td 8.1, 4.11; S0.10): print writes whole lines. 8 threads, each with its own scheduler,
+// print 1000 lines each with a 512-character payload. Every other line has a list argument, so
+// the line is built by the concat job, and half the threads slice deep data a node a step. The
+// captured output is exactly 8000 lines, each of them whole, and each thread's in its own order.
+TEST(Hazards, HZ12_PrintWritesWholeLines) {
+  constexpr int kThreads = 8;
+  constexpr int kLines = 1000;
+  cvc::app app;
+  cvc::state &tree = cvc::state::instance(app);
+  const auto payload = [](int t) { return std::string(512, static_cast<char>('a' + t)); };
+  const auto expected = [&](int t, int i) {
+    const std::string p = "\"" + payload(t) + "\"";
+    return std::to_string(t) + " " + std::to_string(i) + " " + (i % 2 == 0 ? p : "(" + p + ")");
+  };
+  std::vector<std::string> outcomes(kThreads);
+  std::atomic<int> ready{0};
+  std::vector<std::thread> threads;
+  testing::internal::CaptureStdout();
+  const auto t0 = clock_type::now();
+  for (int t = 0; t < kThreads; ++t)
+    threads.emplace_back([&, t] {
+      tree_program prog(tree, t % 2 == 0 ? 0 : 1);
+      const std::string script =
+          "(begin (set p \"" + payload(t) + "\") " +
+          loop(kLines, "(if (= (% i 2) 0) (print " + std::to_string(t) + " i p) (print " +
+                           std::to_string(t) + " i (list p)))");
+      ready.fetch_add(1);
+      while (ready.load() < kThreads)
+        std::this_thread::yield();
+      outcomes[t] = prog.run(script + ")");
+    });
+  for (std::thread &th : threads)
+    th.join();
+  const double took = seconds_since(t0);
+  const std::string out = testing::internal::GetCapturedStdout();
+  std::printf("HZ-12: %d threads x %d lines took %.3f s, %zu bytes\n", kThreads, kLines, took,
+              out.size());
+  for (int t = 0; t < kThreads; ++t)
+    EXPECT_EQ(outcomes[t], std::to_string(kLines)) << "thread " << t;
+
+  std::vector<int> next(kThreads, 0);
+  std::size_t lines = 0, broken = 0;
+  std::size_t start = 0;
+  while (start < out.size()) {
+    std::size_t end = out.find('\n', start);
+    if (end == std::string::npos)
+      end = out.size();
+    std::string line = out.substr(start, end - start);
+    start = end + 1;
+    if (!line.empty() && line.back() == '\r')
+      line.pop_back();
+    ++lines;
+    // "<t> <i> ...": the thread's next line, whole.
+    const std::size_t s1 = line.find(' '),
+                      s2 = s1 == std::string::npos ? s1 : line.find(' ', s1 + 1);
+    int t = -1, i = -1;
+    if (s2 != std::string::npos) {
+      try {
+        t = std::stoi(line.substr(0, s1));
+        i = std::stoi(line.substr(s1 + 1, s2 - s1 - 1));
+      } catch (const std::exception &) {
+        t = -1;
+      }
+    }
+    if (t < 0 || t >= kThreads || i != next[t] || line != expected(t, i)) {
+      if (++broken <= 3)
+        ADD_FAILURE() << "line " << lines << " is not whole or out of order: " << line.substr(0, 80)
+                      << (line.size() > 80 ? "..." : "");
+      continue;
+    }
+    ++next[t];
+  }
+  EXPECT_EQ(lines, static_cast<std::size_t>(kThreads * kLines));
+  EXPECT_EQ(broken, 0u);
+  for (int t = 0; t < kThreads; ++t)
+    EXPECT_EQ(next[t], kLines) << "thread " << t;
+}
