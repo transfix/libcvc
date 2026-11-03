@@ -57,12 +57,14 @@ namespace {
 namespace ari = cvc::ariadne;
 
 // Live node params (§9 — control panels). Each node type reads its procedural settings from state
-// keys under a fixed per-type prefix (forest.* / sea.* / sky.*), SEEDED from the authored .ari prop
-// so the document's value is the starting point and a reusable control panel (bound to the same
-// keys) then drives it live. seed_key() runs once at realize (before any widget renders, so the
-// prop default wins over a widget's def:); read_key() is the per-frame follower the tick uses.
-std::string seed_key(cvc::app &app, const std::string &prefix, const char *key, double def) {
-  const std::string path = ari::resolve_bind(prefix, key);
+// keys under a per-type prefix (forest.* / sea.* / sky.*, or the node's `keys:` prop: node_key),
+// SEEDED from the authored .ari prop so the document's value is the starting point and a reusable
+// control panel (bound to the same keys) then drives it live. seed_key() runs once at realize
+// (before any widget renders, so the prop default wins over a widget's def:); read_key() is the
+// per-frame follower the tick uses.
+std::string seed_key(cvc::app &app, const std::string &prefix, const ari::SceneNode &n,
+                     const char *key, double def) {
+  const std::string path = ari::resolve_bind(prefix, ari::node_key(n, key));
   ari::read_or_seed<double>(app, path, def); // seed the key from the prop default
   return path;                               // hand back the resolved absolute path for the tick
 }
@@ -248,18 +250,18 @@ std::shared_ptr<GraphicsNode> realize_forest_trees(SceneGraph &sg, const ari::Sc
 
   cvc::app &app = sg.appContext();
   const std::string pref = sg.getStatePrefix();
-  rt->k.seed = seed_key(app, pref, "forest.seed", double(rt->base.seed));
-  rt->k.count = seed_key(app, pref, "forest.count", rt->base.count);
-  rt->k.span = seed_key(app, pref, "forest.span", rt->base.span);
-  rt->k.sea_level = seed_key(app, pref, "forest.sea_level", rt->base.sea_level);
-  rt->k.species = seed_key(app, pref, "forest.species", double(int(rt->base.species)));
-  rt->k.scale = seed_key(app, pref, "forest.scale", rt->base.scale);
-  rt->k.length = seed_key(app, pref, "forest.length", rt->base.length);
-  rt->k.radius = seed_key(app, pref, "forest.radius", rt->base.radius);
-  rt->k.levels = seed_key(app, pref, "forest.levels", rt->base.levels);
-  rt->k.branches = seed_key(app, pref, "forest.branches", rt->base.branches);
-  rt->k.pine_scale = seed_key(app, pref, "forest.pine_scale", rt->base.pine_scale);
-  rt->k.wind = seed_key(app, pref, "forest.wind", windDef);
+  rt->k.seed = seed_key(app, pref, n, "forest.seed", double(rt->base.seed));
+  rt->k.count = seed_key(app, pref, n, "forest.count", rt->base.count);
+  rt->k.span = seed_key(app, pref, n, "forest.span", rt->base.span);
+  rt->k.sea_level = seed_key(app, pref, n, "forest.sea_level", rt->base.sea_level);
+  rt->k.species = seed_key(app, pref, n, "forest.species", double(int(rt->base.species)));
+  rt->k.scale = seed_key(app, pref, n, "forest.scale", rt->base.scale);
+  rt->k.length = seed_key(app, pref, n, "forest.length", rt->base.length);
+  rt->k.radius = seed_key(app, pref, n, "forest.radius", rt->base.radius);
+  rt->k.levels = seed_key(app, pref, n, "forest.levels", rt->base.levels);
+  rt->k.branches = seed_key(app, pref, n, "forest.branches", rt->base.branches);
+  rt->k.pine_scale = seed_key(app, pref, n, "forest.pine_scale", rt->base.pine_scale);
+  rt->k.wind = seed_key(app, pref, n, "forest.wind", windDef);
 
   // Grow the initial forest — ALWAYS with wind records, so enabling wind live later works.
   const cvc::lsys::forest_params fp0 = read_live_fp(*rt);
@@ -353,8 +355,8 @@ std::shared_ptr<GraphicsNode> realize_wave_sea(SceneGraph &sg, const ari::SceneN
   // these each frame, so the amplitude/level are tweakable live (the field is re-filled anyway, no
   // regen).
   const std::string pref = sg.getStatePrefix();
-  const std::string ampKey = seed_key(sg.appContext(), pref, "sea.wave_amp", sp->wave_amp);
-  const std::string lvlKey = seed_key(sg.appContext(), pref, "sea.sea_level", sp->sea_level);
+  const std::string ampKey = seed_key(sg.appContext(), pref, n, "sea.wave_amp", sp->wave_amp);
+  const std::string lvlKey = seed_key(sg.appContext(), pref, n, "sea.sea_level", sp->sea_level);
 
   // Terrain height at each sea-grid column (constant), sampled from the realized heightfield.
   TerrainHeights heights;
@@ -610,9 +612,9 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
   // slider.
   cvc::app &app0 = sg.appContext();
   const std::string pref = sg.getStatePrefix();
-  const std::string driftKey = seed_key(app0, pref, "sky.drift", 1.0);
-  const std::string morphKey = seed_key(app0, pref, "sky.morph", 1.0);
-  const std::string shadowKey = seed_key(app0, pref, "sky.shadow", n.props.num("shadow", 1.0));
+  const std::string driftKey = seed_key(app0, pref, n, "sky.drift", 1.0);
+  const std::string morphKey = seed_key(app0, pref, n, "sky.morph", 1.0);
+  const std::string shadowKey = seed_key(app0, pref, n, "sky.shadow", n.props.num("shadow", 1.0));
   // Always wire the terrain (if any) so the shadow can be toggled live; the tick decides per frame.
   auto terr = std::make_shared<TerrainHeights>();
   std::weak_ptr<GeometryNode> wterrain;

@@ -2561,6 +2561,29 @@ scene:
   EXPECT_DOUBLE_EQ(color->items[1].as_double(), 0.4);
 }
 
+// A node's `keys:` prop moves its type's scene-wide live keys under a root of its own, so two
+// forests (say) keep two panels; without it they stay where the type always put them.
+TEST(AriadneScene, NodeKeysPropRootsATypesLiveKeys) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: south
+      type: forest_trees
+    - node: north
+      type: forest_trees
+      keys: north_forest
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.nodes.size(), 2u);
+  const SceneNode &south = r.scene.nodes[0], &north = r.scene.nodes[1];
+  EXPECT_EQ(node_key(south, "forest.seed"), "forest.seed");
+  EXPECT_EQ(node_key(north, "forest.seed"), "north_forest.seed");
+  EXPECT_EQ(node_key(north, "world.stats.props"), "north_forest.stats.props"); // only the root
+  EXPECT_EQ(node_key(north, "seed"), "seed");                                  // no root to move
+}
+
 TEST(AriadneScene, PropsAccessorsMatchBuiltinSemantics) {
   SKIP_WITHOUT_YAML();
   LoadResult r = load_string(R"(
@@ -5285,6 +5308,106 @@ windows:
     EXPECT_EQ(layers->items[0].scalar, "histogram");
     EXPECT_GT(e->props.num("height"), 0.0);
     EXPECT_FALSE(e->props.has("args"));
+  }
+}
+
+// Every string a widget subtree carries that names a state key or runs a program.
+static void collect_key_strings(const Widget &w, std::vector<std::string> &out) {
+  for (const std::string *s : {&w.bind, &w.on, &w.visible_when, &w.enabled_when, &w.disabled_when,
+                               &w.options_expr, &w.overlay, &w.id})
+    if (!s->empty())
+      out.push_back(*s);
+  for (const Widget &c : w.children)
+    collect_key_strings(c, out);
+}
+
+// The components that drive one node (or one viewer, or one host grid) take it as an arg whose
+// default is the name they always bound, so a document can show a panel per node.
+TEST(AriadneComponents, NodeComponentsTakeTheirNodeAsAnArg) {
+  SKIP_WITHOUT_YAML();
+  if (!register_source_components())
+    GTEST_SKIP() << "component sources not found";
+  SchemeGuard g{"cvc"};
+  struct Case {
+    const char *unit, *args, *bare, *given;
+  };
+  const Case cases[] = {
+      {"volren_controls", "{ node: skull }", "children.bunny_volume.volren.",
+       "children.skull.volren."},
+      {"volslice_controls", "{ node: skull }", "children.bunny_volume.volslice.",
+       "children.skull.volslice."},
+      {"mesh_tools", "{ node: part }", "children.mesh.mesh_ops.", "children.part.mesh_ops."},
+      {"fe_controls", "{ node: part }", "children.domain.fe.", "children.part.fe."},
+      {"forest_controls", "{ keys: north }", "forest.", "north."},
+      {"sea_controls", "{ keys: bay }", "sea.", "bay."},
+      {"sky_controls", "{ keys: storm }", "sky.", "storm."},
+      {"world_controls", "{ keys: island }", "world.", "island."},
+      {"raster_view", "{ keys: risk }", "raster.", "risk."},
+      {"camera_controls", "{ viewer: inset }", "viewers.main.", "viewers.inset."},
+  };
+  for (const Case &c : cases) {
+    SCOPED_TRACE(c.unit);
+    const std::string unit = c.unit;
+    LoadResult r = load_string("meta: { min_libcvc: \"0.0.0\" }\nimport: cvc://components/" + unit +
+                               ".ari\nwindows:\n  - include: " + unit + "\n  - include: " + unit +
+                               "\n    args: " + c.args + "\n    id: second\n");
+    ASSERT_TRUE(r.ok) << r.error;
+    std::vector<const Widget *> windows;
+    collect(r.root, Kind::Window, windows);
+    ASSERT_EQ(windows.size(), 2u);
+    EXPECT_EQ(windows[0]->id, unit);
+    EXPECT_EQ(windows[1]->id, "second");
+    for (int i = 0; i < 2; ++i) {
+      std::vector<std::string> keys;
+      collect_key_strings(*windows[i], keys);
+      const std::string want = i == 0 ? c.bare : c.given;
+      bool named = false;
+      for (const std::string &k : keys) {
+        EXPECT_EQ(k.find('{'), std::string::npos) << "an arg left unsubstituted: " << k;
+        named = named || k.find(want) != std::string::npos;
+        if (i == 1)
+          EXPECT_EQ(k.find(c.bare), std::string::npos) << "still names the default: " << k;
+      }
+      EXPECT_TRUE(named) << "no key under " << want;
+    }
+  }
+}
+
+// viewer_settings gathers a viewer's settings in one window, reusing camera_controls' and
+// scene_controls' widgets.
+TEST(AriadneComponents, ViewerSettingsBindsTheViewersKeys) {
+  SKIP_WITHOUT_YAML();
+  if (!register_source_components())
+    GTEST_SKIP() << "component sources not found";
+  SchemeGuard g{"cvc"};
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+import: cvc://components/viewer_settings.ari
+windows:
+  - include: viewer_settings
+  - include: viewer_settings
+    args: { viewer: inset, title: Inset, id: inset_settings }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(r.warnings.empty()) << r.warnings.front();
+  std::vector<const Widget *> windows;
+  collect(r.root, Kind::Window, windows);
+  ASSERT_EQ(windows.size(), 2u);
+  EXPECT_EQ(windows[0]->label, "Viewer");
+  EXPECT_EQ(windows[1]->label, "Inset");
+  EXPECT_EQ(windows[1]->id, "inset_settings");
+  for (int i = 0; i < 2; ++i) {
+    const std::string v = i == 0 ? "viewers.main." : "viewers.inset.";
+    std::vector<std::string> keys;
+    collect_key_strings(*windows[i], keys);
+    for (const std::string &want :
+         {v + "hud.enabled", v + "hud.fps", v + "ui.scale", v + "camera.settings.move_speed",
+          std::string("graphics.root.children.grid.visible"),
+          std::string("graphics.root.children.axis.visible"),
+          std::string("graphics.root.show_bbox"), std::string("shadows.enabled")})
+      EXPECT_NE(std::find(keys.begin(), keys.end(), want), keys.end()) << want;
+    for (const std::string &k : keys)
+      EXPECT_EQ(k.find('{'), std::string::npos) << k;
   }
 }
 

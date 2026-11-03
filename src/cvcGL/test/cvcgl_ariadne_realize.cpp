@@ -1099,6 +1099,8 @@ int main() {
       v.kind = Value::Kind::Scalar;
       v.scalar = "0";
       sky.props.entries.emplace_back("shadow", v); // skip the shadow bake to keep the test quick
+      v.scalar = "storm";
+      sky.props.entries.emplace_back("keys", v); // its live keys under storm.*, not sky.*
     }
     scene.nodes.push_back(terrain);
     scene.nodes.push_back(trees);
@@ -1129,6 +1131,15 @@ int main() {
                    .value<double>(),
                2.4),
         "wave_sea seeded sea.wave_amp from its props");
+    // A node's `keys:` prop roots its type's keys: sky_controls with args { keys: storm } binds
+    // these, so a second cloud_sky gets a panel of its own.
+    chk(approx(cvc::state::instance(app)(cvc::ariadne::resolve_bind("forest", "storm.shadow"))
+                   .value<double>(),
+               0.0) &&
+            approx(cvc::state::instance(app)(cvc::ariadne::resolve_bind("forest", "storm.drift"))
+                       .value<double>(),
+                   1.0),
+        "cloud_sky with keys: storm seeded storm.* from its props");
   }
 
   // ── generated_world + the fast render path's keys (casts_shadow, opaque, shadow focus) ──────
