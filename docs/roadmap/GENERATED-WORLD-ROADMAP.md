@@ -192,6 +192,19 @@ The conference is the world's second consumer. Peers must see the same world and
     frames, and arigl logs at info level, not debug. Still one call each, so still a hitch on
     single-threaded wasm: the scatter, the streets, the city, the roads, the props, and handing
     the new 2049² mesh to VTK.
+  - Landed: tree and rock LOD. On the deployed terrain lab the props were one merged mesh,
+    771,994 triangles of branch tubes for 403 trees (~1,900 each, a maturity-4 pine 7,600) plus
+    149,481 needle lines, and the GPU's largest single cost (skipping it: 29 -> 51 fps, Intel Arc,
+    2026-11-03). The props are now laid down a 128 m ground cell at a time (`prop_cells`), and the
+    node draws each cell as a `LodGraphicsNode` ladder chosen every frame by `cvc::lod` screen
+    error, on the section 8.4 vegetation bands (rung 1 from 260 m, rung 2 from 700 m, scaled by the
+    quality preset). Every rung is the same full-maturity tree: rung 1 tessellates it coarser
+    (`cvc::lsys::tree_detail`: three-sided tubes, none under 5 cm, each pine leaf a solid cone
+    of its needles' shape, a broadleaf's leaf twigs one blob per fork; 36% of the triangles, no
+    lines), rung 2 is its trunk and a crown over its full canopy (1.1%). The crowns take the full
+    tree's area-weighted colour and cover what its limbs do side-on, so the look holds as cells
+    switch. Still to do: the terrain itself (chunks with skirts, section 8.4's T0–T4), and
+    cards past 1.6 km.
 - **Dynamic props, demo3's way**, for vehicles and avatars on the world: unregistered slot nodes,
   a pose gate, out of the bounds fit, non-casting. demo3 does this by hand. A libcvc node type
   would make it a scene key.

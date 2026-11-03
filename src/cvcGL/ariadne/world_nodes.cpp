@@ -42,6 +42,7 @@
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/height_field.h>
 #include <cvc/gl/GeometryNode.h>
+#include <cvc/gl/LodGraphicsNode.h> // the props' per-cell ladders, make_view_params
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/VolumeNode.h>
 #include <cvc/gl/ariadne/scene_realize.h>
@@ -58,6 +59,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <vtkRenderer.h>
 
 namespace cvc {
 namespace gl {
@@ -68,6 +70,12 @@ namespace ari = cvc::ariadne;
 namespace world = cvc::world;
 
 constexpr int WATER_NZ = 22;
+// The props' LOD budget, as the room view's: the wasm profile coarsens sooner.
+#ifdef __EMSCRIPTEN__
+constexpr cvc::lod::quality_preset kPropLodPreset = cvc::lod::quality_preset::aggressive;
+#else
+constexpr cvc::lod::quality_preset kPropLodPreset = cvc::lod::quality_preset::balanced;
+#endif
 const char *const kColorNames[] = {"material", "risk", "occupancy", "height"};
 
 int color_from(const std::string &s, int def) {
@@ -157,7 +165,14 @@ struct WorldRT {
   int water_stride = 4; // refill the water every this many frames
   long frame = 0;
   std::shared_ptr<cvc::height_field> field; // published in RealizedScene::height_fields
-  std::weak_ptr<GeometryNode> terrain, props, buildings, roads, foliage, needles;
+  std::weak_ptr<GeometryNode> terrain, buildings, roads;
+  // The props, a LOD ladder per ground cell (world::generated_world::prop_cells) under the groups
+  // <id>_props, <id>_foliage and <id>_needles. The wood ladder chooses; the cell's leaves and
+  // needles follow it.
+  struct PropCell {
+    std::weak_ptr<LodGraphicsNode> wood, leaves, needles;
+  };
+  std::vector<PropCell> cells;
   std::weak_ptr<VolumeNode> water;
   int water_n = 0;
   std::shared_ptr<WorldJob> job; // the running job, or null
@@ -323,6 +338,95 @@ std::weak_ptr<GeometryNode> put_mesh(SceneGraph &sg, const std::string &name,
   return n;
 }
 
+// The props' ladder: rung 0 the full trees, rung 1 from world::prop_rung_radius_m[0] and rung 2
+// from [1] -- radii authored against the reference view, so the preset scales them.
+cvc::lod::mesh_pyramid prop_ladder(std::vector<cvc::geometry> rungs) {
+  const cvc::lod::view_params ref = cvc::lod::preset_view(cvc::lod::quality_preset::balanced);
+  cvc::lod::mesh_pyramid pyr;
+  pyr.rungs = std::move(rungs);
+  pyr.world_error_m = {0.0,
+                       cvc::lod::world_error_for_switch_radius(world::prop_rung_radius_m[0], ref),
+                       cvc::lod::world_error_for_switch_radius(world::prop_rung_radius_m[1], ref)};
+  return pyr;
+}
+
+// Replace the last world's prop cells with rt.w's: a ladder per cell and layer, under a group per
+// layer (made the first time).
+void put_prop_cells(SceneGraph &sg, const std::string &id, WorldRT &rt) {
+  const world::generated_world &w = *rt.w;
+  auto group = [&sg](const std::string &name) {
+    std::shared_ptr<GraphicsNode> g = sg.getGraphics(name);
+    return g ? g : sg.addGraphics(name);
+  };
+  std::shared_ptr<GraphicsNode> wood = group(id + "_props"), leaves = group(id + "_foliage"),
+                                needles = group(id + "_needles");
+  for (const WorldRT::PropCell &c : rt.cells) {
+    if (auto n = c.wood.lock(); n && wood)
+      wood->removeGraphicsChild(n);
+    if (auto n = c.leaves.lock(); n && leaves)
+      leaves->removeGraphicsChild(n);
+    if (auto n = c.needles.lock(); n && needles)
+      needles->removeGraphicsChild(n);
+  }
+  rt.cells.clear();
+  if (!wood || !leaves || !needles)
+    return;
+  const bool soft = rt.soft;
+  auto ladder = [](GraphicsNode &parent, const std::string &name, std::vector<cvc::geometry> rungs,
+                   LodGraphicsNode::RungStyle style) {
+    auto n = parent.addGraphicsChild<LodGraphicsNode>(name);
+    n->setRungStyle(std::move(style)); // before the rungs exist, so none draws unstyled
+    n->setPyramid(prop_ladder(std::move(rungs)));
+    return n;
+  };
+  for (std::size_t i = 0; i < w.prop_cells.size(); ++i) {
+    const world::generated_world::prop_cell &pc = w.prop_cells[i];
+    const std::string name = "cell" + std::to_string(i);
+    WorldRT::PropCell c;
+    c.wood = ladder(*wood, name,
+                    {world::prop_span_mesh(w.props, pc.props),
+                     world::prop_span_mesh(w.props_r1, pc.props_r1),
+                     world::prop_span_mesh(w.props_r2, pc.props_r2)},
+                    [soft](GeometryNode &g) { style_solid(g, soft); });
+    // The leaves and needles are rung 0's only: the coarser rungs carry them as solids.
+    if (!pc.foliage.empty())
+      c.leaves =
+          ladder(*leaves, name,
+                 {world::prop_span_mesh(w.foliage, pc.foliage), cvc::geometry(), cvc::geometry()},
+                 [soft](GeometryNode &g) { style_foliage(g, soft); });
+    if (!pc.needles.empty())
+      c.needles =
+          ladder(*needles, name,
+                 {world::prop_span_mesh(w.needles, pc.needles), cvc::geometry(), cvc::geometry()},
+                 [](GeometryNode &g) { style_needles(g); });
+    rt.cells.push_back(c);
+  }
+}
+
+// Each prop cell's rung for the camera `ren` shows: its wood ladder chooses, its leaves and needles
+// follow. Returns how many cells changed rung.
+int select_prop_lod(WorldRT &rt, vtkRenderer *ren) {
+  if (rt.cells.empty() || !ren || !ren->IsActiveCameraCreated())
+    return 0;
+  const cvc::lod::view_params view = make_view_params(ren, cvc::lod::preset_view(kPropLodPreset));
+  int changes = 0;
+  for (const WorldRT::PropCell &c : rt.cells) {
+    auto wood = c.wood.lock();
+    if (!wood)
+      continue;
+    const int before = wood->activeRung();
+    const int k = wood->select(view);
+    if (k == before)
+      continue;
+    ++changes;
+    if (auto n = c.leaves.lock())
+      n->setRung(k);
+    if (auto n = c.needles.lock())
+      n->setRung(k);
+  }
+  return changes;
+}
+
 // Push rt.w (and its texture, painted in rt.color) into the nodes, creating the beside-nodes the
 // first time.
 void apply_world(SceneGraph &sg, const std::string &id, WorldRT &rt,
@@ -335,16 +439,11 @@ void apply_world(SceneGraph &sg, const std::string &id, WorldRT &rt,
   }
   *rt.field = *w.terrain; // the published ground follows the world
   const bool soft = rt.soft, arch = w.archetypes;
-  rt.props = put_mesh(sg, id + "_props", w.props, rt.props,
-                      [soft](GeometryNode &g) { style_solid(g, soft); });
+  put_prop_cells(sg, id, rt);
   rt.buildings = put_mesh(sg, id + "_buildings", w.buildings, rt.buildings,
                           [soft, arch](GeometryNode &g) { style_buildings(g, soft, arch); });
   rt.roads = put_mesh(sg, id + "_roads", w.roads, rt.roads,
                       [soft](GeometryNode &g) { style_roads(g, soft); });
-  rt.foliage = put_mesh(sg, id + "_foliage", w.foliage, rt.foliage,
-                        [soft](GeometryNode &g) { style_foliage(g, soft); });
-  rt.needles = put_mesh(sg, id + "_needles", w.needles, rt.needles,
-                        [](GeometryNode &g) { style_needles(g); });
   rt.water_n = world::water_resolution(w);
   if (auto v = rt.water.lock())
     v->setVolume(water_volume(sg.appContext(), rt, rt.app->world_clock().t()));
@@ -634,9 +733,12 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
 
   SceneGraph *sgp = &sg;
   const std::string id = n.id;
-  out.custom_ticks.push_back([rt, sgp, id](vtkRenderer *) {
+  out.custom_ticks.push_back([rt, sgp, id](vtkRenderer *ren) {
     if (rt->terrain.expired())
       return;
+    // The props' LOD for this frame's camera; a cell that changed rung casts a different shadow.
+    if (select_prop_lod(*rt, ren) > 0)
+      sgp->invalidateShadowBake();
     cvc::app &app = *rt->app;
     const long f = rt->frame++;
     // Commands: Regenerate forces a rebuild, Randomize steps the seed, Stop ends the running job

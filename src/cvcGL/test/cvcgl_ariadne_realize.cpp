@@ -1186,6 +1186,36 @@ int main() {
     view.setCamera(0, -300, 200, 0, 0, 0, 0, 0, 1, 40.0);
     cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
     chk(sg.shadowFocused(), "tick_scene aimed the shadow maps at the camera's focal point");
+    // The trees and rocks are a LOD ladder per ground cell: close by, rung 0 (the full trees);
+    // from far off, a coarser rung -- the same trees, fewer triangles.
+    {
+      auto ladders = sg.getAllGraphicsOfType<cvc::gl::LodGraphicsNode>();
+      chk(!ladders.empty(), "generated_world drew its props as per-cell LOD ladders");
+      bool three = !ladders.empty();
+      for (const auto &l : ladders)
+        three = three && l->rungCount() == 3;
+      chk(three, "every prop ladder has three rungs");
+      auto rungs = [&]() {
+        int lo = 99, hi = -1;
+        for (const auto &l : ladders)
+          if (l->rungTriangles(0) > 0) { // a wood ladder (a needle ladder's rung 0 is lines)
+            lo = std::min(lo, l->activeRung());
+            hi = std::max(hi, l->activeRung());
+          }
+        return std::make_pair(lo, hi);
+      };
+      view.setCamera(0, -60, 40, 0, 0, 0, 0, 0, 1, 40.0);
+      view.render();
+      cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+      chk(rungs().first == 0, "close by, the nearest cells draw the full trees");
+      view.setCamera(0, -4000, 3000, 0, 0, 0, 0, 0, 1, 40.0);
+      view.render();
+      cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+      chk(rungs().first > 0, "5 km off, every cell draws a coarser rung");
+      view.setCamera(0, -300, 200, 0, 0, 0, 0, 0, 1, 40.0);
+      view.render();
+      cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+    }
     // A live edit regenerates the world in place, as a task on the app's scheduler: the old world
     // stays until the new one is made, then a bigger world, a bigger ground.
     const std::string busy_key = cvc::ariadne::resolve_bind("gw", "world.busy");

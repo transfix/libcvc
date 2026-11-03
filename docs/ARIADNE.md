@@ -754,7 +754,12 @@ Randomize) and every repaint (`world.color`) is a sliced task on the app's sched
 and `surface_painter` step it a few rows at a time, on the background pool natively and a few
 milliseconds a frame on single-threaded wasm, so the old world stays on screen until the new one is
 swapped in. `world.busy`, `world.progress` (0–100) and `world.phase` (the stage and its percent)
-follow it, and `world.request: stop` ends it, keeping the world shown.
+follow it, and `world.request: stop` ends it, keeping the world shown. Its trees and rocks draw
+with level of detail: a `LodGraphicsNode` ladder per 128 m ground cell (under `<id>_props`,
+`<id>_foliage` and `<id>_needles`), chosen each frame by screen error. Every rung is the same
+full-maturity tree, coarser further off: rung 1 from 260 m (three-sided tubes, none under 5 cm, the
+leaves as solids), rung 2 from 700 m (a trunk and a crown with the tree's colour and coverage), the
+radii scaled by the quality preset (the wasm build coarsens sooner).
 
 **The fast render path.** A big static world draws fast when it is a few merged meshes and its
 shadow maps are re-baked rarely and spent where the camera looks. These keys say so

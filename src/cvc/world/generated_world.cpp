@@ -250,8 +250,15 @@ private:
 // branchy broadleafs (about 8..28 m) and buildings at their own heights.
 constexpr double kPineSize = 0.35;
 
+// The pines' needle colour: style_needles' in the generated_world node, so a coarser rung's solid
+// needles and crowns match the needles they stand in for.
+const cvc::geometry::color_t kNeedleColor{0.12, 0.34, 0.14};
+
+// Grow a native tree, the full one, at full detail or (`detail` non-null) at a coarser
+// tessellation of the same tree (cvc::lsys::tree_detail).
 bool growNativeTree(const std::string &recipe, const placed_prop &pp, std::uint64_t seed,
-                    cvc::geometry &solid, cvc::geometry &needle) {
+                    cvc::geometry &solid, cvc::geometry &needle,
+                    const lsys::tree_detail *detail = nullptr) {
   using namespace cvc::lsys;
   static const int MATURITY[7] = {1, 2, 2, 3, 3, 3, 4};
   const std::uint64_t el =
@@ -259,54 +266,279 @@ bool growNativeTree(const std::string &recipe, const placed_prop &pp, std::uint6
   if (recipe == "native_pine") {
     const double size = (0.55 + 0.4 * uni(seed, stream::size, el, 0)) * kPineSize * pp.scale;
     const int maturity = MATURITY[irand(seed, stream::maturity, el, 0, 0, 6)];
-    grow_pine(solid, needle, pp.x, pp.y, pp.z, size, maturity);
+    if (detail) {
+      tree_detail d = *detail;
+      std::copy(kNeedleColor.begin(), kNeedleColor.end(), d.leaf_color);
+      grow_pine(solid, needle, pp.x, pp.y, pp.z, size, maturity, d);
+    } else {
+      grow_pine(solid, needle, pp.x, pp.y, pp.z, size, maturity);
+    }
     return true;
   }
   if (recipe == "native_branchy") {
     const double lenJitter = uni(seed, stream::size, el, 1, 0.8, 1.25);
     const std::uint64_t treeSeed = detail::splitmix(seed ^ path_id(el, 0xB2A4u));
-    grow_branchy(solid, treeSeed, pp.x, pp.y, pp.z, 6.0 * pp.scale * lenJitter, 0.7 * pp.scale, 4,
-                 3);
+    if (detail)
+      grow_branchy(solid, treeSeed, pp.x, pp.y, pp.z, 6.0 * pp.scale * lenJitter, 0.7 * pp.scale, 4,
+                   3, *detail);
+    else
+      grow_branchy(solid, treeSeed, pp.x, pp.y, pp.z, 6.0 * pp.scale * lenJitter, 0.7 * pp.scale, 4,
+                   3);
     return true;
   }
   return false;
 }
 
+// Rung 1's tessellation of a tree (its leaves always solids): three-sided tubes, and none thinner
+// than 5 cm, a third of a pixel at rung 1's nearest (260 m in the reference view).
+lsys::tree_detail rung1Detail() {
+  lsys::tree_detail d;
+  d.ring = 3;
+  d.min_radius = 0.05;
+  return d;
+}
+
+// The bounds of g's points [p0, p1), grown into lo / hi.
+void growBounds(const cvc::geometry &g, std::size_t p0, std::size_t p1, double lo[3],
+                double hi[3]) {
+  const auto &P = g.const_points();
+  for (std::size_t k = p0; k < p1; ++k)
+    for (int a = 0; a < 3; ++a) {
+      lo[a] = std::min(lo[a], P[k][a]);
+      hi[a] = std::max(hi[a], P[k][a]);
+    }
+}
+
+// A crown proxy over the box [lo, hi]: a six-sided bipyramid, its waist at `waist` of the height
+// (a broadleaf's round crown at about half, a pine's spindle low). 12 triangles.
+void appendCrown(cvc::geometry &g, const double lo[3], const double hi[3], double waist,
+                 const cvc::geometry::color_t &col) {
+  const double cx = 0.5 * (lo[0] + hi[0]), cy = 0.5 * (lo[1] + hi[1]);
+  const double rx = 0.5 * (hi[0] - lo[0]), ry = 0.5 * (hi[1] - lo[1]);
+  const double zw = lo[2] + waist * (hi[2] - lo[2]);
+  const idx_t b = idx_t(g.points().size());
+  g.points().push_back({cx, cy, lo[2]});
+  g.points().push_back({cx, cy, hi[2]});
+  for (int s = 0; s < 6; ++s) {
+    const double th = s * M_PI / 3.0;
+    g.points().push_back({cx + rx * std::cos(th), cy + ry * std::sin(th), zw});
+  }
+  for (int k = 0; k < 8; ++k)
+    g.colors().push_back(col);
+  for (int s = 0; s < 6; ++s) {
+    const idx_t r0 = b + 2 + idx_t(s), r1 = b + 2 + idx_t((s + 1) % 6);
+    g.tris().push_back({b + 1, r0, r1}); // upper cone, outward
+    g.tris().push_back({b, r1, r0});     // lower cone
+  }
+}
+
+// A box over [lo, hi] in one colour: 12 triangles (a rock's rung-2 stand-in).
+void appendBounds(cvc::geometry &g, const double lo[3], const double hi[3],
+                  const cvc::geometry::color_t &col) {
+  const idx_t b = idx_t(g.points().size());
+  for (int ix = 0; ix < 2; ++ix) // corner index = ix << 2 | iy << 1 | iz
+    for (int iy = 0; iy < 2; ++iy)
+      for (int iz = 0; iz < 2; ++iz) {
+        g.points().push_back({ix ? hi[0] : lo[0], iy ? hi[1] : lo[1], iz ? hi[2] : lo[2]});
+        g.colors().push_back(col);
+      }
+  auto co = [&](int ix, int iy, int iz) { return b + idx_t(ix << 2 | iy << 1 | iz); };
+  auto quad = [&](idx_t a, idx_t q, idx_t c, idx_t d) {
+    g.tris().push_back({a, q, c});
+    g.tris().push_back({a, c, d});
+  };
+  quad(co(0, 0, 0), co(0, 1, 0), co(0, 1, 1), co(0, 0, 1)); // -x
+  quad(co(1, 0, 0), co(1, 0, 1), co(1, 1, 1), co(1, 1, 0)); // +x
+  quad(co(0, 0, 0), co(0, 0, 1), co(1, 0, 1), co(1, 0, 0)); // -y
+  quad(co(0, 1, 0), co(1, 1, 0), co(1, 1, 1), co(0, 1, 1)); // +y
+  quad(co(0, 0, 0), co(1, 0, 0), co(1, 1, 0), co(0, 1, 0)); // -z
+  quad(co(0, 0, 1), co(0, 1, 1), co(1, 1, 1), co(1, 0, 1)); // +z
+}
+
+// What g's triangles [t0, t1) with a corner at or above `zc` show from afar: their area-weighted
+// mean colour, and the area they cover seen side-on (a tube's lateral area / pi).
+void crownLook(const cvc::geometry &g, std::size_t t0, std::size_t t1, double zc,
+               cvc::geometry::color_t &col, double &projected) {
+  const auto &P = g.const_points();
+  const auto &C = g.const_colors();
+  const auto &T = g.const_tris();
+  double c[3] = {0, 0, 0}, area = 0.0;
+  for (std::size_t k = t0; k < t1 && k < T.size(); ++k) {
+    const auto &a = P[T[k][0]], &b = P[T[k][1]], &d = P[T[k][2]];
+    if (std::max({a[2], b[2], d[2]}) < zc)
+      continue;
+    const double u[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+    const double v[3] = {d[0] - a[0], d[1] - a[1], d[2] - a[2]};
+    const double x = u[1] * v[2] - u[2] * v[1], y = u[2] * v[0] - u[0] * v[2],
+                 z = u[0] * v[1] - u[1] * v[0];
+    const double ar = 0.5 * std::sqrt(x * x + y * y + z * z);
+    area += ar;
+    for (int i = 0; i < 3; ++i)
+      c[i] += ar * (C[T[k][0]][i] + C[T[k][1]][i] + C[T[k][2]][i]) / 3.0;
+  }
+  if (area > 0.0)
+    col = {c[0] / area, c[1] / area, c[2] / area};
+  projected = area / M_PI;
+}
+
+// The mean colour of g's points [p0, p1).
+cvc::geometry::color_t meanColor(const cvc::geometry &g, std::size_t p0, std::size_t p1) {
+  double c[3] = {0, 0, 0};
+  const auto &C = g.const_colors();
+  for (std::size_t k = p0; k < p1 && k < C.size(); ++k)
+    for (int a = 0; a < 3; ++a)
+      c[a] += C[k][a];
+  const double n = double(std::max<std::size_t>(1, std::min(p1, C.size()) - std::min(p0, p1)));
+  return {c[0] / n, c[1] / n, c[2] / n};
+}
+
 // Tessellate the scattered TREES and ROCKS into merged meshes (buildings are the city's), leaving
-// out any the city has taken the ground of (`keep` false: a road, a building).
+// out any the city has taken the ground of (`keep` false: a road, a building). They go down a
+// ground cell at a time, each at three details: w.props + w.foliage + w.needles (rung 0),
+// w.props_r1 and w.props_r2, with w.prop_cells recording each cell's run of every mesh.
 void buildProps(const world_model &wm, const surface_registry &reg, PropLib &lib,
-                const std::function<bool(double, double)> &keep, cvc::geometry &solid,
-                cvc::geometry &foliage, cvc::geometry &needle) {
+                const std::function<bool(double, double)> &keep, double half, generated_world &w) {
   const double kStem = 1.7, kLeaf = 2.2;
+  constexpr double kInf = std::numeric_limits<double>::infinity();
   std::set<std::string> buildingRecipes;
   for (const auto &sw : wm.params().sc.buildings)
     buildingRecipes.insert(sw.recipe);
-  std::size_t i = 0;
-  for (const placed_prop &pp : wm.props()) {
-    if (buildingRecipes.count(pp.recipe) || (keep && !keep(pp.x, pp.y)) ||
-        growNativeTree(pp.recipe, pp, wm.params().seed, solid, needle)) {
-      ++i;
-      continue;
+  cvc::geometry &solid = w.props, &foliage = w.foliage, &needle = w.needles;
+  cvc::geometry &r1 = w.props_r1, &r2 = w.props_r2;
+  const std::uint64_t seed = wm.params().seed;
+  const std::vector<placed_prop> &props = wm.props();
+
+  // Cells of at least 128 m and at most 12 to a side: a big world is still ~144 draw groups.
+  const double cell = std::max(128.0, 2.0 * half / 12.0);
+  const int n = std::max(1, int(std::ceil(2.0 * half / cell)));
+  w.prop_cell_m = cell;
+  auto cellOf = [&](const placed_prop &pp) {
+    const int cx = std::clamp(int((pp.x + half) / cell), 0, n - 1);
+    const int cy = std::clamp(int((pp.y + half) / cell), 0, n - 1);
+    return cy * n + cx;
+  };
+  std::vector<std::size_t> order(props.size());
+  for (std::size_t k = 0; k < order.size(); ++k)
+    order[k] = k;
+  std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+    return cellOf(props[a]) < cellOf(props[b]);
+  });
+
+  // One prop at all three details. `i` is its index in wm.props(), which picks its variant.
+  auto emit = [&](std::size_t i) {
+    const placed_prop &pp = props[i];
+    if (buildingRecipes.count(pp.recipe) || (keep && !keep(pp.x, pp.y)))
+      return;
+    const std::size_t s0 = solid.points().size(), n0 = needle.points().size();
+    const std::size_t t0 = solid.tris().size();
+    if (growNativeTree(pp.recipe, pp, seed, solid, needle)) {
+      const std::size_t s1 = solid.points().size(), n1 = needle.points().size();
+      double lo[3] = {kInf, kInf, kInf}, hi[3] = {-kInf, -kInf, -kInf};
+      growBounds(solid, s0, s1, lo, hi);
+      const double top = hi[2];
+      const bool pine = pp.recipe == "native_pine";
+      // The crown: a pine's needles; a broadleaf's wood above a third of its height.
+      double clo[3] = {kInf, kInf, kInf}, chi[3] = {-kInf, -kInf, -kInf};
+      if (pine && n1 > n0) {
+        growBounds(needle, n0, n1, clo, chi);
+      } else {
+        const double zc = pp.z + (top - pp.z) / 3.0;
+        const auto &P = solid.const_points();
+        for (std::size_t k = s0; k < s1; ++k)
+          if (P[k][2] >= zc)
+            growBounds(solid, k, k + 1, clo, chi);
+      }
+      if (!(chi[2] > clo[2]))
+        std::copy(lo, lo + 3, clo), std::copy(hi, hi + 3, chi);
+      // The crown looks as the full tree does from afar. A pine's needles fill it (a line draws a
+      // pixel wide however far off), in the needles' colour. A broadleaf's limbs and twigs cover
+      // only part of it: the crown takes their mean colour and narrows until it covers what they
+      // do, side-on.
+      cvc::geometry::color_t crownCol = kNeedleColor;
+      if (!pine) {
+        double covered = 0.0;
+        crownLook(solid, t0, solid.tris().size(), clo[2], crownCol, covered);
+        const double width = 0.5 * ((chi[0] - clo[0]) + (chi[1] - clo[1]));
+        const double side = 0.5 * width * (chi[2] - clo[2]); // the bipyramid's side-on area
+        const double s = side > 0.0 ? std::clamp(covered / side, 0.3, 1.0) : 1.0;
+        for (int a = 0; a < 2; ++a) {
+          const double c = 0.5 * (clo[a] + chi[a]), h = 0.5 * s * (chi[a] - clo[a]);
+          clo[a] = c - h;
+          chi[a] = c + h;
+        }
+      }
+      const lsys::tree_detail d1 = rung1Detail();
+      cvc::geometry none; // rung 1's leaves are solids in r1: no needle lines
+      growNativeTree(pp.recipe, pp, seed, r1, none, &d1);
+      const double rTrunk = std::max(0.15, 0.03 * (top - pp.z));
+      appendCylinder(r2, Vec3d{pp.x, pp.y, pp.z},
+                     Vec3d{pp.x, pp.y, clo[2] + 0.3 * (chi[2] - clo[2])}, rTrunk, 0.7 * rTrunk,
+                     solid.colors()[s0], 5); // the trunk is grown first
+      appendCrown(r2, clo, chi, pine ? 0.3 : 0.5, crownCol);
+      return;
     }
     const std::vector<lsys::structure> &vs = lib.get(pp.recipe);
-    if (vs.empty()) {
-      ++i;
-      continue;
-    }
+    if (vs.empty())
+      return;
     const lsys::structure &st = vs[i % vs.size()];
     double yaw = pp.yaw_deg * M_PI / 180.0, yc = std::cos(yaw), ys = std::sin(yaw);
     double sc = pp.scale;
     Vec3d org{pp.x, pp.y, pp.z};
     auto place = [&](const lsys::vec3 &p) { return rotZ(fromLsys(p) * sc, yc, ys) + org; };
-    for (const lsys::segment &s : st.segments)
-      appendCylinder(solid, place(s.a), place(s.b), std::max(0.06, s.r0 * sc * kStem),
-                     std::max(0.04, s.r1 * sc * kStem), roleColor(reg, s.rl), s.level >= 2 ? 5 : 6);
-    for (const lsys::obox &o : st.boxes)
-      appendBox(solid, o, roleColor(reg, o.rl), yc, ys, sc, sc, sc, org);
-    for (const lsys::leaf &lf : st.leaves)
-      appendLeaf(foliage, place(lf.pos), std::max(1.2, lf.size * sc * kLeaf),
-                 roleColor(reg, lf.rl));
-    ++i;
+    // Rung 0 splits the leaves out (w.foliage); rung 1 is the same prop with its leaves in it.
+    auto structure = [&](cvc::geometry &wood, cvc::geometry &leaves) {
+      for (const lsys::segment &s : st.segments)
+        appendCylinder(wood, place(s.a), place(s.b), std::max(0.06, s.r0 * sc * kStem),
+                       std::max(0.04, s.r1 * sc * kStem), roleColor(reg, s.rl),
+                       s.level >= 2 ? 5 : 6);
+      for (const lsys::obox &o : st.boxes)
+        appendBox(wood, o, roleColor(reg, o.rl), yc, ys, sc, sc, sc, org);
+      for (const lsys::leaf &lf : st.leaves)
+        appendLeaf(leaves, place(lf.pos), std::max(1.2, lf.size * sc * kLeaf),
+                   roleColor(reg, lf.rl));
+    };
+    const std::size_t f0 = foliage.points().size();
+    structure(solid, foliage);
+    structure(r1, r1);
+    double lo[3] = {kInf, kInf, kInf}, hi[3] = {-kInf, -kInf, -kInf};
+    growBounds(solid, s0, solid.points().size(), lo, hi);
+    growBounds(foliage, f0, foliage.points().size(), lo, hi);
+    if (hi[2] >= lo[2])
+      appendBounds(r2, lo, hi, meanColor(solid, s0, solid.points().size()));
+  };
+
+  auto open = [](generated_world::prop_span &s, const cvc::geometry &g, bool lines) {
+    s.p0 = g.const_points().size();
+    s.c0 = lines ? g.const_lines().size() : g.const_tris().size();
+  };
+  auto close = [](generated_world::prop_span &s, const cvc::geometry &g, bool lines) {
+    s.p1 = g.const_points().size();
+    s.c1 = lines ? g.const_lines().size() : g.const_tris().size();
+  };
+  for (std::size_t k = 0; k < order.size();) {
+    const int c = cellOf(props[order[k]]);
+    generated_world::prop_cell pc;
+    open(pc.props, solid, false);
+    open(pc.foliage, foliage, false);
+    open(pc.needles, needle, true);
+    open(pc.props_r1, r1, false);
+    open(pc.props_r2, r2, false);
+    for (; k < order.size() && cellOf(props[order[k]]) == c; ++k)
+      emit(order[k]);
+    close(pc.props, solid, false);
+    close(pc.foliage, foliage, false);
+    close(pc.needles, needle, true);
+    close(pc.props_r1, r1, false);
+    close(pc.props_r2, r2, false);
+    if (pc.props.empty() && pc.foliage.empty() && pc.needles.empty())
+      continue;
+    double lo[3] = {kInf, kInf, kInf}, hi[3] = {-kInf, -kInf, -kInf};
+    growBounds(solid, pc.props.p0, pc.props.p1, lo, hi);
+    growBounds(foliage, pc.foliage.p0, pc.foliage.p1, lo, hi);
+    growBounds(needle, pc.needles.p0, pc.needles.p1, lo, hi);
+    std::copy(lo, lo + 3, pc.min);
+    std::copy(hi, hi + 3, pc.max);
+    w.prop_cells.push_back(pc);
   }
 }
 
@@ -957,6 +1189,26 @@ double generated_world::height(double x, double y) const {
   return std::isnan(h) ? 0.0 : h;
 }
 
+cvc::geometry prop_span_mesh(const cvc::geometry &g, const generated_world::prop_span &s) {
+  cvc::geometry out;
+  const auto &P = g.const_points();
+  const auto &C = g.const_colors();
+  if (s.p1 > P.size() || s.p1 <= s.p0)
+    return out;
+  out.points().assign(P.begin() + s.p0, P.begin() + s.p1);
+  if (C.size() >= s.p1)
+    out.colors().assign(C.begin() + s.p0, C.begin() + s.p1);
+  const auto p0 = static_cast<cvc::geometry::tri_t::value_type>(s.p0);
+  const auto &T = g.const_tris();
+  for (std::size_t k = s.c0; k < s.c1 && k < T.size(); ++k)
+    out.tris().push_back({T[k][0] - p0, T[k][1] - p0, T[k][2] - p0});
+  const auto &L = g.const_lines();
+  if (T.empty())
+    for (std::size_t k = s.c0; k < s.c1 && k < L.size(); ++k)
+      out.lines().push_back({L[k][0] - p0, L[k][1] - p0});
+  return out;
+}
+
 world_geometry generated_world::geometry() const {
   world_geometry g(model ? model->registry() : surface_registry::builtin());
   if (terrain) {
@@ -1190,7 +1442,7 @@ struct world_builder::impl {
           [&](double x, double y) {
             return !net.on_or_near_road(x, y, 1.5) && !fps.contains(x, y);
           },
-          w.props, w.foliage, w.needles);
+          w.params.half_m, w);
       waterN = water_resolution(w);
       w.water_ground.assign(std::size_t(waterN) * waterN, 0.0f);
       advance(build_stage::water);
