@@ -1,11 +1,9 @@
 schema_version: 1
 recipe:
   name: arigl-web
-  upstream_version: "3.7.8"
-  # 2: the same files with no runtime deps (depends.runtime below), so a site's install stops
-  # pulling the static build closure. publish-cvcgl-wasm packs at this revision and skips one the
-  # catalog already has, so the bump is what lets it republish 3.7.8.
-  cvc_revision: 2
+  upstream_version: "3.7.9"
+  # Reset to 1 for the 3.7.9 upstream version: a version bump restarts cvc_revision.
+  cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
