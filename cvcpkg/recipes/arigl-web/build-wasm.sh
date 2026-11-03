@@ -33,10 +33,11 @@ set -euo pipefail
 : "${CVC_EMSDK_DIR:?CVC_EMSDK_DIR must point to the activated emsdk bundle}"
 : "${CVC_PLATFORM:?CVC_PLATFORM must be wasm or wasm-mt}"
 
-# ari's pages are single-threaded only, as in the gallery.
+# ari's pages are single-threaded only, as in the gallery, and so is an Ariadne conference client
+# (WS: the WebSocket transport, whose protobuf, like libopus, has no -pthread wasm build).
 case "$CVC_PLATFORM" in
-  wasm) PTHREADS=OFF; ARI=ON ;;
-  wasm-mt) PTHREADS=ON; ARI=OFF ;;
+  wasm) PTHREADS=OFF; ARI=ON; WS=ON ;;
+  wasm-mt) PTHREADS=ON; ARI=OFF; WS=OFF ;;
   *) echo "arigl-web: CVC_PLATFORM is wasm or wasm-mt, not '${CVC_PLATFORM}'" >&2; exit 1 ;;
 esac
 FULL=ON
@@ -70,15 +71,27 @@ emcmake cmake -G Ninja -S "$CVC_SOURCE_DIR" -B "$CVC_BUILD_DIR" \
     -DCVC_BUILD_CVCGL=ON \
     -DCVC_BUILD_EXAMPLES=OFF \
     -DCVC_WASM_PTHREADS="$PTHREADS" \
+    -DCVC_ENABLE_WS="$WS" \
+    -DCVC_ENABLE_GRPC=OFF \
     | tee "$CVC_BUILD_DIR/configure.log"
 
 # A configure that misses one of these turns it off and carries on, and the shell would ship
 # unable to load a document (yaml-cpp), with inert widgets (imgui) or without keys (sdl3).
-# Nor without the terminal backend, for ari's page.
-for want in "Ariadne: .ari YAML loader ENABLED" \
-            "Ariadne: FTXUI terminal backend ENABLED" \
-            "cvcGL: Dear ImGui overlay ENABLED" \
-            "cvcGL: SDL3 input/peripheral seam ENABLED"; do
+# Nor without the terminal backend, for ari's page. Nor, single-threaded, can it ship without what
+# an Ariadne conference client needs (arigl's conference mode, which a page config sets up with
+# CVC_ARIADNE_RELAY): the WebSocket transport (protobuf), the avatars' physics (joltphysics), Opus
+# mics (libopus) and device keys (openssl).
+WANT=("Ariadne: .ari YAML loader ENABLED"
+      "Ariadne: FTXUI terminal backend ENABLED"
+      "cvcGL: Dear ImGui overlay ENABLED"
+      "cvcGL: SDL3 input/peripheral seam ENABLED")
+if [[ "$PTHREADS" == "OFF" ]]; then
+  WANT+=("cvc::state: WebSocket transport ENABLED"
+         "cvc::physics Jolt backend ENABLED"
+         "cvc::media: Opus mics with"
+         "cvc::state: device keys ENABLED")
+fi
+for want in "${WANT[@]}"; do
   grep -qF "$want" "$CVC_BUILD_DIR/configure.log" \
     || { echo "arigl-web: the configure did not report '$want' (deps in $CVC_DEPS_PREFIX)" >&2; exit 1; }
 done

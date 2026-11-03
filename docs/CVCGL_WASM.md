@@ -507,13 +507,44 @@ in the config's `preload`.
 | `src` | `main.ari` | the document when the URL names none |
 | `src_param` | `true` | `false` ignores `?src=` and always runs `src` |
 | `src_origins` | `[]` | other origins `src` may name (`"*"` for any); their server must allow CORS |
-| `flags` | `[]` | arigl's host flags, before the document, e.g. the network flags: `["--net"]` lets the document reach the page's origin, `["--net-allow", "https://api.example"]` another; `{origin}` in a flag becomes the page's origin. A `--net-policy` file must be in MEMFS: list it in `preload` and pass its URL path. `--credential-store` is refused in a browser |
-| `args` | `[]` | the document's arguments (§5.6 of ARIADNE.md); `{origin}` in one becomes the page's origin, e.g. `["--instance", "{origin}"]` for an app that talks to the server it is served from. The URL adds more with `?arg=`, taken as given |
+| `flags` | `[]` | arigl's host flags, before the document, e.g. the network flags: `["--net"]` lets the document reach the page's origin, `["--net-allow", "https://api.example"]` another. A `--net-policy` file must be in MEMFS: list it in `preload` and pass its URL path. `--credential-store` is refused in a browser |
+| `args` | `[]` | the document's arguments (§5.6 of ARIADNE.md), e.g. `["--instance", "{origin}"]` for an app that talks to the server it is served from. The URL adds more with `?arg=`, taken as given |
 | `preload` | `[]` | more files to fetch with the document, relative to it |
 | `env` | `{}` | the module's environment (e.g. `CVC_ARIADNE_RELAY`) |
+| `url_env` | `{}` | which `?param=` of the page's URL may set which env variable (below) |
+| `fragment_env` | `{}` | the same from the URL's `#fragment`, which the browser never sends to a server (a room token, say) |
+| `device_identity` | `false` | `true`: a random device id and key for this browser, made once and kept in localStorage (`cvc.device_id`, `cvc.device_key`), as `CVC_DEVICE_ID` and `CVC_DEVICE_KEY` (a conference relay shows the device and pins its key) |
+| `fullscreen_button` | `false` | `true`: a small Fullscreen button in the bottom-right corner |
+
+**Placeholders**, in a flag, a config argument or an env value: `{origin}` is the page's origin,
+`{ws_origin}` the same host as a WebSocket origin (`wss://` on an https page, `ws://` on http),
+and `{random}` five random characters, the same everywhere in one page load.
+
+**URL rules.** A `url_env` or `fragment_env` rule is the variable's name, or
+`{"env", "match", "value", "max"}`. The parameter's value is trimmed and cut to `max` characters
+(256). It must match the regular expression `match` when one is given, and `value`, when given, is
+set instead (a switch). Parameters the config does not name are ignored. An Ariadne conference
+client's config, for example:
+
+```json
+{
+  "src_param": false,
+  "env": {"CVC_ARIADNE_RELAY": "{ws_origin}/conference-ws",
+          "CVC_ARIADNE_NAME": "guest-{random}"},
+  "url_env": {"name": {"env": "CVC_ARIADNE_NAME", "max": 32},
+              "look": {"env": "CVC_ARIGL_LOOK", "match": "^(mouse|drag)$"},
+              "synthetic": {"env": "CVC_ARIADNE_SYNTHETIC_CAM", "match": "^[^0]", "value": "1"}},
+  "fragment_env": {"token": "CVC_ARIADNE_ROOM_TOKEN"},
+  "device_identity": true,
+  "fullscreen_button": true
+}
+```
+
+The page also resumes the module's audio contexts on the first click, key or touch (browsers
+start them suspended), so a document's sound and a conference peer's voice play.
 
 Host flags come only from the config, never from the URL, so a link cannot widen what the
-page lets a document do. The page's origin is always allowed, and a site that also serves
+page lets a document do, and a link sets only the env variables the config names. The page's origin is always allowed, and a site that also serves
 untrusted files from it (user uploads, say) should pin the document with
 `"src_param": false`.
 
