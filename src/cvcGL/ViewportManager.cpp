@@ -41,7 +41,9 @@
 #include <vtkVersionMacros.h> // VTK 9.6 dropped the in-render yield FrameYield::App removes
 #include <vtkWindowToImageFilter.h>
 #ifdef __EMSCRIPTEN__
+#include <cstdlib> // free: VTK's container-size helper mallocs its answer
 #include <emscripten.h>
+#include <vtkWebAssemblyRenderWindowInteractor.h> // the canvas's container, sized before frame 1
 #endif
 
 // FrameYield (see cvc/gl/FrameYield.h). VTK 9.5's vtkWebAssemblyOpenGLRenderWindow::Frame() --
@@ -485,6 +487,21 @@ ViewportManager::ViewportManager(SceneGraph &mainScene, int width, int height, b
       m_impl->interactor->SetRenderWindow(m_impl->window);
       m_impl->interactor->Initialize();
     }
+#ifdef __EMSCRIPTEN__
+    // In a browser the canvas fills its container (VTK's ExpandCanvasToContainer), but VTK sizes
+    // it only when it handles a window resize event: the first is the one Initialize() dispatches,
+    // handled by the next processUIEvents(), after the first frame has drawn at width x height.
+    // Take the container's size now, as that event would: the first frame is where ImGui places
+    // its windows, and a window placed inside a 1024 x 768 view stays where it was put when the
+    // canvas turns out shorter.
+    if (auto *wi = vtkWebAssemblyRenderWindowInteractor::SafeDownCast(m_impl->interactor))
+      if (wi->GetExpandCanvasToContainer())
+        if (int *fit = vtkGetParentElementBoundingRectSize(wi->GetCanvasSelector())) {
+          if (fit[0] > 0 && fit[1] > 0)
+            wi->UpdateSize(fit[0], fit[1]); // the window too; mouse y flips by the new height
+          std::free(fit);
+        }
+#endif
     // The multi-viewport input router: one style on the one interactor, feeding
     // per-viewport cameras via route*(). Never SetDefaultRenderer on it (that
     // would pin routing to one renderer) and never attach() the per-viewport

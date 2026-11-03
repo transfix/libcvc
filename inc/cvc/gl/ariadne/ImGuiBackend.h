@@ -216,6 +216,18 @@ private:
   // Windows that fit their content and opened at a place of their own before ImGui had measured
   // them: the next frame moves each in again, measured, until all of it shows (§5.8).
   std::unordered_set<std::string> m_placedUnmeasured;
+  // The work area each window was last drawn in: when the view gets smaller, a window that showed
+  // in full there moves back in (§5.8).
+  std::unordered_map<std::string, FlowRect> m_lastView;
+  // A window moved in to fit the view (where it opened, or when the view got smaller) keeps its
+  // home, the place and size it had without the move, and heads back to it as far as the view
+  // allows, until it is there or the user moves or resizes it (§5.8).
+  struct Home {
+    float x = 0.0f, y = 0.0f; // its place
+    float w = 0.0f, h = 0.0f; // its size; 0: it fits its content
+    float placedX = 0.0f, placedY = 0.0f, placedW = 0.0f, placedH = 0.0f; // where it was last put
+  };
+  std::unordered_map<std::string, Home> m_home;
   // On a phone, the windows whose authored place did not fit the view open collapsed instead, their
   // title bars one under another from the top of the view (§5.14): how many have, since the
   // document was laid out.

@@ -243,12 +243,15 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
   // A window opens inside the view, which on a phone is narrower than most documents were laid out
   // for: no larger than the work area, and placed so that all of it shows (a window that fits its
   // content, not yet measured, so that its smallest fit does, and again the next frame, measured).
-  // Only where it opens: the user may drag it anywhere after.
+  // The user may drag it anywhere after. One moved in keeps heading for where it would have been
+  // (m_home), so a view that grows again returns it; a window that showed in full when the view
+  // gets smaller moves in too (below).
   ImVec2 openSize(0.0f, 0.0f); // 0 on an axis: fit it
   if (seededSize)
     openSize = ImVec2(ui_px(m_pendingSeed.w), ui_px(m_pendingSeed.h));
   else if (!fits)
     openSize = ImVec2(px(size.w, avail.x), px(size.h, avail.y));
+  const ImVec2 homeSize = openSize.x > 0.0f && openSize.y > 0.0f ? openSize : ImVec2(0.0f, 0.0f);
   const bool tooBig = openSize.x > avail.x || openSize.y > avail.y;
   openSize = ImMin(openSize, avail);
   if (m_haveSeed) {
@@ -277,6 +280,14 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
       ImGui::SetNextWindowPos(in, once);
       if (fits && !existing && !stack)
         m_placedUnmeasured.insert(id);
+      // Where it opens: moved in or cut down to fit, or not yet measured, it keeps its home. One
+      // stacked on a phone does not: its place is in the list, and a home would draw it back out.
+      if (!existing) {
+        m_home.erase(id);
+        if (!stack && (fits || in.x != at.x || in.y != at.y || homeSize.x > openSize.x ||
+                       homeSize.y > openSize.y))
+          m_home[id] = Home{at.x, at.y, homeSize.x, homeSize.y, in.x, in.y, openSize.x, openSize.y};
+      }
     }
     m_haveSeed = false;
   }
@@ -329,6 +340,59 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
       at = in;
     }
   }
+  // A window in the flow is placed again every frame anyway; the others keep inside the view.
+  if (existing && spot == m_flow.end()) {
+    auto home = m_home.find(id);
+    // The view got smaller since this window was last drawn (a browser window made smaller, a
+    // phone turned on its side, fullscreen left): a window that showed in full there makes where
+    // it stands its home, and moves in. One the user left partly outside stays where it is.
+    if (auto last = m_lastView.find(id); home == m_home.end() && last != m_lastView.end()) {
+      const ImRect was(last->second.x0, last->second.y0, last->second.x1, last->second.y1);
+      const ImRect shown(existing->Pos, existing->Pos + existing->Size); // collapsed: title bar
+      ImRect wasRoom = was;
+      wasRoom.Expand(1.0f); // a window moved in to the very edge
+      if ((work.Min.x > was.Min.x || work.Min.y > was.Min.y || work.Max.x < was.Max.x ||
+           work.Max.y < was.Max.y) &&
+          wasRoom.Contains(shown) && !work.Contains(shown)) {
+        const ImVec2 sz = fits ? ImVec2(0.0f, 0.0f) : existing->SizeFull;
+        home = m_home
+                   .emplace(id, Home{existing->Pos.x, existing->Pos.y, sz.x, sz.y, existing->Pos.x,
+                                     existing->Pos.y, existing->SizeFull.x, existing->SizeFull.y})
+                   .first;
+      }
+    }
+    // A window with a home heads for it, as far as the view allows: in when the view gets
+    // smaller, back out when it grows, until it is home. Moved or resized by the user since it
+    // was put there, it stays where they put it.
+    if (home != m_home.end()) {
+      Home &h = home->second;
+      const bool sized = h.w > 0.0f && h.h > 0.0f;
+      const auto off = [](float a, float b) { return std::fabs(a - b) > 0.5f; };
+      if (off(existing->Pos.x, h.placedX) || off(existing->Pos.y, h.placedY) ||
+          (sized &&
+           (off(existing->SizeFull.x, h.placedW) || off(existing->SizeFull.y, h.placedH)))) {
+        m_home.erase(home);
+      } else {
+        const ImVec2 full = sized ? ImMin(ImVec2(h.w, h.h), avail) : existing->SizeFull;
+        const ImVec2 want = existing->Collapsed ? ImMin(existing->Size, avail)
+                            : sized             ? full
+                                    : ImMin(ImGui::CalcWindowNextAutoFitSize(existing), avail);
+        const ImVec2 to = ImMax(work.Min, ImMin(ImVec2(h.x, h.y), work.Max - want));
+        if (sized && (full.x != existing->SizeFull.x || full.y != existing->SizeFull.y))
+          ImGui::SetNextWindowSize(full, ImGuiCond_Always);
+        if (to.x != existing->Pos.x || to.y != existing->Pos.y)
+          ImGui::SetNextWindowPos(to, ImGuiCond_Always);
+        at = to;
+        h.placedX = to.x;
+        h.placedY = to.y;
+        h.placedW = full.x;
+        h.placedH = full.y;
+        if (to.x == h.x && to.y == h.y && (!sized || (full.x == h.w && full.y == h.h)))
+          m_home.erase(home); // home again
+      }
+    }
+  }
+  m_lastView[id] = FlowRect{work.Min.x, work.Min.y, work.Max.x, work.Max.y};
   if (spot != m_flow.end()) {
     // The room it wants: all its widgets, for a window that fits them; else its size. (Nothing
     // yet for a window not drawn before -- the next frame places it again, measured.)
@@ -416,6 +480,8 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
 void ImGuiBackend::reset_layout() {
   m_flow.clear();
   m_placedUnmeasured.clear();
+  m_lastView.clear();
+  m_home.clear();
   m_stacked = 0;
   m_relaid.clear();
   m_relaidGrids.clear();
