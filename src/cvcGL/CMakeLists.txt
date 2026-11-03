@@ -868,6 +868,12 @@ add_test(NAME cvcgl_imgui_windows_menu COMMAND cvcgl_imgui_windows_menu)
 add_executable(cvcgl_imgui_radio test/cvcgl_imgui_radio.cpp)
 target_link_libraries(cvcgl_imgui_radio PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_radio COMMAND cvcgl_imgui_radio)
+# Scrolling with a finger (TouchScroll): a drag scrolls the window under it and a fling glides
+# against ui.scroll_friction, while sliders, fields being edited and title bars keep their drags.
+# Touches fed through ImGui's own input. No window, no GL.
+add_executable(cvcgl_imgui_touch_scroll test/cvcgl_imgui_touch_scroll.cpp)
+target_link_libraries(cvcgl_imgui_touch_scroll PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_touch_scroll COMMAND cvcgl_imgui_touch_scroll)
 # Pictures by URI (§5.11): an image: widget's file:// picture reaches ImGuiBackend as an RGBA
 # raster fitted to its box, with placeholders before and on failure. No window, no GL.
 add_executable(cvcgl_imgui_media test/cvcgl_imgui_media.cpp)

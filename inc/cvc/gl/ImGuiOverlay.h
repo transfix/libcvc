@@ -192,6 +192,22 @@ public:
   void setTouchMode(bool on);
   bool touchMode() const;
 
+  // ---- scrolling with a finger ------------------------------------------------
+  // In touch mode a finger's drag across a window's content scrolls it, and a
+  // fling leaves it gliding until friction stops it, as a phone's lists do
+  // (cvc::gl::TouchScroll says which drags count: a slider, a field being
+  // edited, a title bar or a scene view keeps its own). On by default; the
+  // state key "<scene>.viewers.<viewer>.ui.touch_scroll". The friction is per
+  // second: a glide's speed falls as exp(-friction * t), so a fling covers its
+  // speed / friction. 2 (the default) is iOS's normal deceleration, 10 its fast
+  // one, 0 glides on to the end. The state key ".ui.scroll_friction", which a
+  // document may set or bind a slider to, and AppRuntime's Controls window
+  // offers in touch mode (arigl).
+  void setTouchScrollEnabled(bool on);
+  bool touchScrollEnabled() const;
+  void setScrollFriction(float perSecond);
+  float scrollFriction() const;
+
   // ---- frame clock ----------------------------------------------------------
   // ImGui's per-frame delta (io.DeltaTime: hover delays, the text cursor blink,
   // modal dimming) comes from the wall clock by default. A positive value pins it
