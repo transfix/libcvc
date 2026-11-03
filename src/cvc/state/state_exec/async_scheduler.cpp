@@ -28,6 +28,12 @@ void refuse_control(control_cmd &cmd) noexcept {
   if (cmd.done && cmd.what != control_cmd::kind::query)
     cmd.done(false);
 }
+
+// The start-pinned lookups' hold on a node its host keeps alive (the watch root): a non-owning
+// alias, so a lookup takes no reference on it (td 4.8).
+boost::shared_ptr<cvc::state> host_held(cvc::state *node) {
+  return boost::shared_ptr<cvc::state>(boost::shared_ptr<cvc::state>(), node);
+}
 } // namespace
 
 async_scheduler::~async_scheduler() {
@@ -1134,8 +1140,9 @@ void async_scheduler::register_watch_handler(int pid, int watch_id, value_t hand
   // The path resolves under the watch's own root when it has one (td 4.8), else under the watch
   // root.
   std::string initial;
-  if (cvc::state *const under = root ? root.get() : watch_root_)
-    if (const boost::shared_ptr<cvc::state> node = under->findDescendantShared(path))
+  // Start-pinned: the entry holds its root, the host the watch root.
+  if (const boost::shared_ptr<cvc::state> under = root ? root : host_held(watch_root_))
+    if (const boost::shared_ptr<cvc::state> node = under->findDescendantShared(under, path))
       initial = node->value();
   it->second->watch_handlers[watch_id] = {std::move(handler), path, initial, std::move(root)};
   procs_.update(*it->second);
@@ -1219,14 +1226,18 @@ void async_scheduler::poll_watches() {
   if (!main_moved && !roots_moved)
     return;
   chain_valid_ = false; // the reads below are no step's time
+  const boost::shared_ptr<cvc::state> held_root = host_held(watch_root_);
   for (process *proc : watchers) {
     for (auto &[wid, entry] : proc->watch_handlers) {
       cvc::state *const root = entry.root ? entry.root.get() : watch_root_;
       if (!root || !(root == watch_root_ ? main_moved : watch_roots_.moved(root)))
         continue;
       ++watch_polls_;
-      // Pinned while it is read: another thread may delete it meanwhile (td 4.8).
-      const boost::shared_ptr<cvc::state> node = root->findDescendantShared(entry.path);
+      // Pinned while it is read: another thread may delete it meanwhile (td 4.8). The lookup is
+      // start-pinned: the entry holds its own root, the host the watch root, so it takes no
+      // reference on the root.
+      const boost::shared_ptr<cvc::state> &start = entry.root ? entry.root : held_root;
+      const boost::shared_ptr<cvc::state> node = start->findDescendantShared(start, entry.path);
       if (!node)
         continue;
       std::string cur = node->value();

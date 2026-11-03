@@ -298,6 +298,8 @@ public:
   /// Set the state-tree root for watch polling and settings. A host call (app, pycvc, the CLI),
   /// never made from a step: a chrooted state-watch keeps its own root instead (td 4.8).
   void set_watch_root(cvc::state *root);
+  /// The root set_watch_root() gave, or null.
+  cvc::state *watch_root() const override { return watch_root_; }
 
   /// The watched nodes poll_watches() has read so far, one for each watch it reads. A watch is
   /// read only after a write under the root it resolves under (td 4.8: per-root gating).
