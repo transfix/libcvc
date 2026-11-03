@@ -6717,8 +6717,8 @@ TEST(AriadneAppRuntime, KeysWindowListsTheDocumentsAndTheHostsKeys) {
 }
 
 // The Controls window shows the host's mouse settings above the keys (set_host_mouse), bound where
-// its camera reads them: the look (drag to look, or mouse look), the sensitivity, the inverted
-// axes, and a note on what the look does there.
+// its camera reads them: the look (drag to look, or mouse look), whether a drag steers, the
+// sensitivity, the inverted axes, and a note on what the look does there.
 TEST(AriadneAppRuntime, ControlsWindowShowsTheHostsMouseSettings) {
   if (!have_yaml())
     GTEST_SKIP() << "libcvc built without yaml-cpp";
@@ -6728,6 +6728,8 @@ TEST(AriadneAppRuntime, ControlsWindowShowsTheHostsMouseSettings) {
   art.set_backend(mb);
   MouseControls m;
   m.look = "/cam.settings.mouse_look";
+  m.steer = "/cam.settings.primary_drag_steers";
+  m.steer_label = "Drag the floor to face it";
   m.sensitivity = "/cam.settings.mouse_sensitivity";
   m.invert_y = "/cam.settings.invert_pitch";
   m.invert_x = "/cam.settings.invert_yaw";
@@ -6745,6 +6747,7 @@ TEST(AriadneAppRuntime, ControlsWindowShowsTheHostsMouseSettings) {
   art.runtime().render();
   ASSERT_TRUE(mb.saw("begin_window:Controls(closable)")) << "set_host_mouse alone gives the window";
   EXPECT_TRUE(mb.saw("combo:Look=0")) << "drag to look, as the camera has it";
+  EXPECT_TRUE(mb.saw("checkbox:Drag the floor to face it")) << "in the host's words";
   EXPECT_TRUE(mb.saw("slider_double:Sensitivity"));
   EXPECT_TRUE(mb.saw("checkbox:Invert up/down"));
   EXPECT_TRUE(mb.saw("checkbox:Invert left/right"));
@@ -6758,11 +6761,13 @@ TEST(AriadneAppRuntime, ControlsWindowShowsTheHostsMouseSettings) {
   // Picking Mouse look, and inverting up/down, write where the camera reads them.
   mb.combo_ret = IndexEdit{true, true, 1};
   mb.checkbox_by_label["Invert up/down"] = BoolEdit{true, true, true};
+  mb.checkbox_by_label["Drag the floor to face it"] = BoolEdit{true, true, true};
   art.runtime().render();
   mb.combo_ret = IndexEdit{};
   mb.checkbox_by_label.clear();
   EXPECT_EQ(st("cam.settings.mouse_look").value(), "1");
   EXPECT_EQ(st("cam.settings.invert_pitch").value(), "1");
+  EXPECT_EQ(st("cam.settings.primary_drag_steers").value(), "1");
   mb.log.clear();
   art.runtime().render();
   EXPECT_TRUE(mb.saw("combo:Look=1"));

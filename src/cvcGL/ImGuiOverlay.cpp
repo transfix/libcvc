@@ -216,6 +216,7 @@ EM_JS(int, cvcgl_ime_take, (const char *sel, int *out, int cap), {
 #include <cstring>
 #include <string>
 #include <utility> // std::pair: the look cue's two strokes
+#include <vector>
 #include <vtkCallbackCommand.h>
 #include <vtkCommand.h>
 #include <vtkNew.h>
@@ -555,6 +556,9 @@ struct ImGuiOverlay::Impl {
   bool visible = true;  // caller intent
   CameraController *cam = nullptr;
   bool hadKeyboard = false; // for the rising edge of WantCaptureKeyboard
+  // Where the windows drawn last frame are (x0 y0 x1 y1 each, ImGui's pixels): a press there is
+  // the UI's, though ImGui hears of the pointer only in its next frame.
+  std::vector<float> uiRegions;
   ImGuiStyle pristineStyle; // the unscaled style, captured once
   bool haveStyle = false;
   float appliedScale = -1.0f; // the style's scale (uiScale x pixelRatio); applyScale's guard
@@ -604,8 +608,13 @@ struct ImGuiOverlay::Impl {
 
   // StartEvent: begin an ImGui frame and run the user's UI code.
   void beginFrame() {
-    if (!ready || !visible || !window || !ensureBackend())
+    if (!ready || !visible || !window || !ensureBackend()) {
+      if (cam && !uiRegions.empty()) { // no UI drawn: no window takes a press
+        uiRegions.clear();
+        cam->setUiRegions(uiRegions);
+      }
       return;
+    }
     int *sz = window->GetSize();
     ImGuiIO &io = ImGui::GetIO();
     io.DisplaySize = ImVec2(static_cast<float>(sz[0]), static_cast<float>(sz[1]));
@@ -648,8 +657,6 @@ struct ImGuiOverlay::Impl {
     }
     if (sceneDraw) // scene annotations: under the UI, and shown with the panels hidden too
       sceneDraw();
-    if (cam) // a press over a window is the UI's, not the camera's (a browser's pointer lock)
-      cam->setPointerOverUi(io.WantCaptureMouse);
     if (cam && cam->mouseLookEnabled() && cam->mode() == CameraController::Mode::Orbit)
       drawLookCue(cam->pointerCapture());
     // The toggle is drawn FIRST so it is always reachable, even when the panels
@@ -670,6 +677,9 @@ struct ImGuiOverlay::Impl {
   void renderFrame() {
     if (!frameOpen)
       return;
+    findUiRegions();
+    if (cam) // a press over a window is the UI's, not the camera's (a browser's pointer lock)
+      cam->setUiRegions(uiRegions);
     ImGui::Render();
     // Draw into VTK's OWN render framebuffer: at RenderEvent the scene has been
     // drawn there but not yet resolved/blitted out, so compositing here lands on
@@ -687,6 +697,29 @@ struct ImGuiOverlay::Impl {
     if (ostate)
       ostate->PopFramebufferBindings();
     frameOpen = false;
+  }
+
+  // Every window drawn this frame, grown by the margin around a window that counts as on it (its
+  // resize border). Child windows are inside theirs; a tooltip takes no input.
+  void findUiRegions() {
+    uiRegions.clear();
+    ImGuiContext &g = *ImGui::GetCurrentContext();
+    const float pad = g.WindowsBorderHoverPadding;
+    for (const ImGuiWindow *w : g.Windows) {
+      if (!w->Active || w->Hidden ||
+          (w->Flags & (ImGuiWindowFlags_ChildWindow | ImGuiWindowFlags_NoMouseInputs)))
+        continue;
+      uiRegions.insert(uiRegions.end(), {w->Pos.x - pad, w->Pos.y - pad, w->Pos.x + w->Size.x + pad,
+                                         w->Pos.y + w->Size.y + pad});
+    }
+  }
+
+  bool overUiRegion(float x, float y) const {
+    for (std::size_t i = 0; i + 3 < uiRegions.size(); i += 4)
+      if (x >= uiRegions[i] && y >= uiRegions[i + 1] && x < uiRegions[i + 2] &&
+          y < uiRegions[i + 3])
+        return true;
+    return false;
   }
 
   // Mirror every UI setting into cvc::state, and let a state write drive us.
@@ -880,8 +913,16 @@ struct ImGuiOverlay::Impl {
       cam->releaseHeldKeys();
     hadKeyboard = wantsKeys;
     // Swallow the event only when ImGui actually wants it — otherwise the
-    // CameraController must keep receiving everything it always did.
-    return keyEvent ? io.WantCaptureKeyboard : io.WantCaptureMouse;
+    // CameraController must keep receiving everything it always did. A press
+    // on a window is ImGui's even before its next frame has seen the pointer
+    // get there (a quick move and click): it is where ImGui will take it.
+    if (keyEvent)
+      return io.WantCaptureKeyboard;
+    const bool press = eid == vtkCommand::LeftButtonPressEvent ||
+                       eid == vtkCommand::RightButtonPressEvent ||
+                       eid == vtkCommand::MiddleButtonPressEvent;
+    return io.WantCaptureMouse ||
+           (press && overUiRegion(static_cast<float>(x), static_cast<float>(sz[1] - y)));
   }
 
   static void onBegin(vtkObject *, unsigned long, void *cd, void *) {

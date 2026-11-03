@@ -52,9 +52,9 @@
 <header>
   <h1>cyberpcangel &middot; cyprty</h1>
   <span class="keys">Ariadne conference — the browser joins the room and shows who is present,
-    live with native clients &middot; <b>WASD</b> walk/strafe &middot; <b>click</b> the floor to
-    face it &middot; <b>drag</b> to orbit &middot; <b>Settings &rsaquo; Controls</b> for mouse
-    look &middot;
+    live with native clients &middot; <b>WASD</b> walk/strafe &middot; <b>click</b> or
+    <b>drag</b> the floor to face it &middot; <b>right-drag</b> to look around &middot;
+    <b>Settings &rsaquo; Controls</b> for mouse look &middot;
     <a href="https://github.com/transfix/libcvc">libcvc</a></span>
   <button id="fs" title="Fullscreen (best on a phone)">⛶ Fullscreen</button>
 </header>
@@ -85,6 +85,8 @@
   const stderrEl = document.getElementById('stderr');
   const canvas = document.getElementById('canvas');
   canvas.addEventListener('click', () => canvas.focus());
+  // The right button turns the view: keep the browser's menu off the canvas.
+  canvas.addEventListener('contextmenu', e => e.preventDefault());
 
   // The relay URL is derived from the PAGE ORIGIN — a wss:// upgrade of this https page's host, at
   // /cyprty-ws (Apache reverse-proxies that to the relay). So the deployed client connects to its
@@ -103,6 +105,9 @@
   // ?look=mouse starts in mouse look (click the scene, then the mouse aims and W walks where you
   // aim; Esc gives the mouse back), ?look=drag in drag to look. Settings > Controls switches.
   const LOOK = PARAMS.get('look');
+  // ?yield=timeout runs arigl's frame loop on a 0 ms timer instead of the display's animation
+  // frames: the A/B for its frame pacing.
+  const YIELD = PARAMS.get('yield');
   // ?lane=1 offers the relay a fast lane: poses and media on an unreliable WebRTC data channel
   // beside the WebSocket (docs/roadmap/CONFERENCE_UNRELIABLE_TRANSPORT.md). A relay without one, or
   // a network that blocks UDP, leaves everything on the WebSocket.
@@ -168,6 +173,7 @@
         ENV.CVC_ARIADNE_NAME = NAME;
         if (SYNTH && SYNTH !== '0') ENV.CVC_ARIADNE_SYNTHETIC_CAM = '1';
         if (LOOK === 'mouse' || LOOK === 'drag') ENV.CVC_ARIGL_LOOK = LOOK;
+        if (YIELD === 'timeout') ENV.CVC_ARIGL_YIELD = 'timeout';
         if (LANE && LANE !== '0') ENV.CVC_ARIADNE_LANE = '1';
         if (TOKEN) ENV.CVC_ARIADNE_ROOM_TOKEN = TOKEN;
         if (DEVICE) ENV.CVC_DEVICE_ID = DEVICE;
