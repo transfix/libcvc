@@ -111,11 +111,13 @@ public:
   uint64_t run_steps(std::optional<uint64_t> max_steps = std::nullopt,
                      std::optional<double> max_time = std::nullopt);
 
-  /// Stop the run loop.
+  /// Any thread: end the run loop at its next check, an idle wait included (td 4.12). Not
+  /// async-signal-safe: it notifies the idle wait, which takes a lock on POSIX. A stop() with no
+  /// run active is discarded by the next run, which starts by clearing it.
   void stop();
 
-  /// Is the run loop active?
-  bool is_running() const { return running_; }
+  /// Any thread: is the run loop active? Once this is true, a stop() ends that run.
+  bool is_running() const { return running_.load(std::memory_order_acquire); }
 
   /// Erase a finished (terminated, killed or failed) process, freeing what it kept (its
   /// result, error and statistics). False for an unknown pid or a live one. Until then a
@@ -319,8 +321,12 @@ private:
   uint32_t cycle_check_ = 0; // steps, for checking every 64th whether a cycle collection is due
   int next_pid_ = 1;
   int rr_index_ = 0;
-  bool running_ = false;
-  bool stop_requested_ = false;
+  /// run()'s flags, which stop() and is_running() touch from any thread (td B17). A run clears
+  /// stop_requested_ before it publishes running_, so a stop() made once is_running() is true is
+  /// never lost. No data rides on them: the loop reads stop_requested_ relaxed.
+  std::atomic<bool> running_{false};
+  std::atomic<bool> stop_requested_{false};
+  static_assert(std::atomic<bool>::is_always_lock_free, "stop() must not take a lock");
   uint64_t total_steps_ = 0;
   uint64_t priority_clamped_ = 0; // spawns clamped to the spawner's floor (note_priority_clamped)
   int current_pid_ = -1;
@@ -351,8 +357,8 @@ private:
   uint64_t rate_seen_ = 0;
   bool rate_valid_ = false;
   double rate_ = kDefaultAsyncStepsPerCpuMs;
-  /// run()'s idle wait: made with the lock home, which shares it with its port so a post ends the
-  /// wait (protocol 2.3), else on the first idle wait.
+  /// run()'s idle wait, made at construction (td 4.12). The lock home shares it with its port, so
+  /// a post ends the wait (protocol 2.3), and stop() notifies it.
   std::shared_ptr<detail::wakeup> idle_;
   std::vector<process *> woken_; // reused by deliver_to_receivers
 

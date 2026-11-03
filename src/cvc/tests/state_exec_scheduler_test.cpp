@@ -663,6 +663,23 @@ TEST_F(SchedulerTest, StopRunLoop) {
   // Should return quickly because stop was requested
 }
 
+// A run that a step's exception ends (an on_complete that throws, which propagates from run()) is
+// over: is_running() reads false after it, on both schedulers (td B17: the flag is released on
+// every exit). Before S0.6 it stayed true.
+TEST(SchedulerRunFlags, ARunEndedByAnExceptionIsNoLongerRunning) {
+  execute_options opts;
+  opts.on_complete = [](value_t) { throw std::runtime_error("on_complete"); };
+  scheduler sync;
+  sync.execute(std::string("(+ 1 2)"), opts);
+  EXPECT_FALSE(sync.is_running());
+  EXPECT_THROW(sync.run(), std::runtime_error);
+  EXPECT_FALSE(sync.is_running());
+  async_scheduler async;
+  async.execute(std::string("(+ 1 2)"), opts);
+  EXPECT_THROW(async.sync_run(), std::runtime_error);
+  EXPECT_FALSE(async.is_running());
+}
+
 // ===========================================================================
 // SchedulerTest — Signal handling
 // ===========================================================================

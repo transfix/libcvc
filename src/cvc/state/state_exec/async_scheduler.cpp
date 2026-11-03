@@ -508,9 +508,20 @@ task<int> async_scheduler::step() {
 
 uint64_t async_scheduler::run_loop(std::optional<uint64_t> max_steps,
                                    std::optional<double> max_time) {
-  running_ = true;
-  stop_requested_ = false;
+  // As the sync scheduler's run (td B17): a stop() from before this run is discarded, and one
+  // made once is_running() reads true is seen.
+  stop_requested_.store(false, std::memory_order_relaxed);
+  running_.store(true, std::memory_order_release);
   chain_valid_ = false;
+  // However the run ends (a step's exception too: a throwing on_complete), it is over.
+  struct run_end {
+    std::atomic<bool> &running;
+    bool &chain_valid;
+    ~run_end() {
+      running.store(false, std::memory_order_release);
+      chain_valid = false;
+    }
+  } end_of_run{running_, chain_valid_};
   uint64_t steps = 0;
   // max_time is a time_budget: the run's own time, not time its thread spent descheduled (a
   // per-frame pump on a loaded machine still finishes a quick action within its frame).
@@ -521,7 +532,7 @@ uint64_t async_scheduler::run_loop(std::optional<uint64_t> max_steps,
   }
 
   uint64_t taken = 0;
-  while (!stop_requested_ && has_runnable()) {
+  while (!stop_requested_.load(std::memory_order_relaxed) && has_runnable()) {
     if (max_steps && steps >= *max_steps)
       break;
     if (budget && budget->spent(now_for_step()))
@@ -529,9 +540,6 @@ uint64_t async_scheduler::run_loop(std::optional<uint64_t> max_steps,
     taken += static_cast<uint64_t>(step_once());
     ++steps;
   }
-
-  running_ = false;
-  chain_valid_ = false;
   return taken;
 }
 
@@ -557,7 +565,10 @@ uint64_t async_scheduler::sync_run_steps(std::optional<uint64_t> max_steps,
   return run_loop(max_steps, max_time);
 }
 
-void async_scheduler::stop() { stop_requested_ = true; }
+void async_scheduler::stop() {
+  // Any thread. No notify: the run loop never waits (wait_for_work is the driver's).
+  stop_requested_.store(true, std::memory_order_release);
+}
 
 bool async_scheduler::has_runnable() const { return procs_.runnable_count() > 0; }
 

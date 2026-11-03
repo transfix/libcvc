@@ -17,7 +17,7 @@ namespace cvc::state_exec {
 
 scheduler::scheduler(scheduling_policy policy)
     : policy_(policy), evaluator_(builtins::make_default_environment()),
-      procs_(policy != scheduling_policy::round_robin) {}
+      procs_(policy != scheduling_policy::round_robin), idle_(std::make_shared<detail::wakeup>()) {}
 
 scheduler::~scheduler() { home_.reset(); }
 
@@ -27,10 +27,8 @@ void scheduler::set_lock_manager(std::shared_ptr<lock_manager> mgr, lock_attach 
       if (p->locks && (!p->locks->holds.empty() || p->locks->ticket))
         throw std::logic_error("set_lock_manager: process " + std::to_string(pid) +
                                " holds or waits for a lock");
-  // The port shares run()'s idle wakeup, made with the first home (protocol 2.3), so a post ends
-  // an idle wait; a replacing home gets the same one.
-  if (!idle_)
-    idle_ = std::make_shared<detail::wakeup>();
+  // The port shares run()'s idle wakeup (protocol 2.3), so a post ends an idle wait; a replacing
+  // home gets the same one.
   // The new home is attached before the old one goes, so a refused attach (lock_attach) leaves
   // the scheduler its home and manager. Both are attached meanwhile, which a manager allows; the
   // old one is destroyed here, before any other member (protocol 5.7).
@@ -41,12 +39,9 @@ void scheduler::set_lock_manager(std::shared_ptr<lock_manager> mgr, lock_attach 
 }
 
 detail::lock_home *scheduler::locks() {
-  if (!home_) {
-    if (!idle_)
-      idle_ = std::make_shared<detail::wakeup>();
+  if (!home_)
     home_ = std::make_unique<detail::lock_home>(std::make_shared<lock_manager>(), lock_ops_,
                                                 policy_, idle_);
-  }
   return home_.get();
 }
 
@@ -633,9 +628,20 @@ std::unordered_map<int, value_t> scheduler::run(std::optional<uint64_t> max_step
 }
 
 uint64_t scheduler::run_steps(std::optional<uint64_t> max_steps, std::optional<double> max_time) {
-  running_ = true;
-  stop_requested_ = false;
+  // A stop() from before this run is discarded. The clear comes before the release that
+  // publishes the run, so a stop() made once is_running() reads true is seen (td B17).
+  stop_requested_.store(false, std::memory_order_relaxed);
+  running_.store(true, std::memory_order_release);
   chain_valid_ = false;
+  // However the run ends (a step's exception too: a throwing on_complete), it is over.
+  struct run_end {
+    std::atomic<bool> &running;
+    bool &chain_valid;
+    ~run_end() {
+      running.store(false, std::memory_order_release);
+      chain_valid = false;
+    }
+  } end_of_run{running_, chain_valid_};
   uint64_t steps = 0; // the loop's iterations, idle ones included (max_steps counts them)
   uint64_t taken = 0; // the process steps among them
   // max_time is a time_budget: the run's own time, not time its thread spent descheduled.
@@ -645,7 +651,7 @@ uint64_t scheduler::run_steps(std::optional<uint64_t> max_steps, std::optional<d
     budget->start();
   }
 
-  while (!stop_requested_ && has_runnable()) {
+  while (!stop_requested_.load(std::memory_order_relaxed) && has_runnable()) {
     if (max_steps && steps >= *max_steps)
       break;
     if (budget && budget->spent(now_for_step()))
@@ -659,9 +665,6 @@ uint64_t scheduler::run_steps(std::optional<uint64_t> max_steps, std::optional<d
     if (!idle_wait(max_steps, steps, budget ? &*budget : nullptr))
       break;
   }
-
-  running_ = false;
-  chain_valid_ = false;
   return taken;
 }
 
@@ -694,16 +697,17 @@ bool scheduler::idle_wait(std::optional<uint64_t> max_steps, uint64_t &steps, ti
       budget->start(now);
     return false;
   }
-  if (!idle_)
-    idle_ = std::make_shared<detail::wakeup>();
-  // stop() may come meanwhile (from another thread, a signal handler): checked every 10 ms. A
-  // sleeper's or a timed wait's deadline is waited for precisely, the budget's end need not be.
-  // A post to the lock port (another home's wake or relevel) ends the wait: it is tested before
-  // each slice, and its notify() ends the slice it lands in (protocol 2.3, 5.9).
+  // stop() may come meanwhile, from another thread: it notifies the wait, and the flag is also
+  // checked every 10 ms. A sleeper's or a timed wait's deadline is waited for precisely, the
+  // budget's end need not be. A post to the lock port (another home's wake or relevel) ends the
+  // wait: it is tested before each slice, and its notify() ends the slice it lands in (protocol
+  // 2.3, 5.9).
   constexpr auto kStopCheck = std::chrono::milliseconds(10);
   const bool for_timer = next && *next == until;
   const auto posted = [this] { return home_ && home_->port_pending(); };
-  for (clock::time_point t = now; !stop_requested_ && t < until && !posted(); t = clock::now()) {
+  for (clock::time_point t = now;
+       !stop_requested_.load(std::memory_order_relaxed) && t < until && !posted();
+       t = clock::now()) {
     const clock::time_point slice = until - t > kStopCheck ? t + kStopCheck : until;
     idle_->wait_until(slice, for_timer && slice == until);
   }
@@ -720,7 +724,12 @@ bool scheduler::idle_wait(std::optional<uint64_t> max_steps, uint64_t &steps, ti
   return next.has_value() || posted();
 }
 
-void scheduler::stop() { stop_requested_ = true; }
+void scheduler::stop() {
+  // Any thread. The notify ends an idle wait at once (td 4.12); the wait's 10 ms slices are left
+  // as a fallback.
+  stop_requested_.store(true, std::memory_order_release);
+  idle_->notify();
+}
 
 bool scheduler::has_runnable() const {
   // Ready or running, or waiting with a wake_time (a sleeper becomes runnable at its deadline),

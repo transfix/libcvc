@@ -98,8 +98,11 @@ public:
   uint64_t sync_run_steps(std::optional<uint64_t> max_steps = std::nullopt,
                           std::optional<double> max_time = std::nullopt);
 
+  /// Any thread: end the run loop at its next step boundary (td 4.12). A stop() with no run
+  /// active is discarded by the next run, which starts by clearing it.
   void stop();
-  bool is_running() const { return running_; }
+  /// Any thread: is the run loop active? Once this is true, a stop() ends that run.
+  bool is_running() const { return running_.load(std::memory_order_acquire); }
 
   // --- Process control ---
 
@@ -369,8 +372,11 @@ private:
   double published_rate_ = -1.0; // the effective.async_steps_per_cpu_ms last published
   int next_pid_ = 1;
   int rr_index_ = 0;
-  bool running_ = false;
-  bool stop_requested_ = false;
+  /// The run loop's flags, which stop() and is_running() touch from any thread (td B17), as the
+  /// sync scheduler's: a run clears stop_requested_ before it publishes running_.
+  std::atomic<bool> running_{false};
+  std::atomic<bool> stop_requested_{false};
+  static_assert(std::atomic<bool>::is_always_lock_free, "stop() must not take a lock");
   uint64_t total_steps_ = 0;
   uint64_t priority_clamped_ = 0; // spawns clamped to the spawner's floor (note_priority_clamped)
 
