@@ -5,7 +5,10 @@
 #     keeps them off the PR lanes too, and under TSan LocksStress alone outlasts run_one's hour);
 #   - every pycvc script named in SAN_PY_TESTS, with the sanitizer runtime the build linked
 #     preloaded into the interpreter, which was not built with it, except those py_skip (below)
-#     names for the sanitizer.
+#     names for the sanitizer;
+#   - every state_exec_bench run in SAN_BENCH, one a line: a scenario and its --size options. It
+#     runs once (--reps 1 --warmup 0, --timeout 900 a rep), named after the scenario, with its
+#     JSON records in san-logs/<scenario>.jsonl. The bench takes no --gtest_filter.
 # Each run's output goes to san-logs/<name>.log, and a table of the runs to the job summary.
 # SAN_REQUIRED (ci.yml's matrix `required`) names, one per line as `<run>: <text>`, lines a run's
 # log must contain: the cases the job is there for, which must not drop out unseen.
@@ -81,6 +84,15 @@ run_one() { # name command...
 for t in $SAN_CXX_TESTS; do
   run_one "$t" "$bin/$t" --gtest_filter='-*Stress*'
 done
+
+# A run whose points were all skipped exits 0: SAN_REQUIRED names the points' lines. The list is
+# read on fd 3, so nothing the runs read from stdin takes its lines.
+while read -r scenario sizes <&3; do
+  [ -n "$scenario" ] || continue
+  # shellcheck disable=SC2086 # the --size options, split
+  run_one "$scenario" "$bin/state_exec_bench" --scenario "$scenario" $sizes --reps 1 \
+    --warmup 0 --timeout 900 --json "san-logs/$scenario.jsonl"
+done 3<<< "${SAN_BENCH:-}"
 
 # CPython frees little at exit, so the leak check is off under the interpreter (the C++ suites
 # keep it), and PYTHONMALLOC=malloc lets ASan see the interpreter's own allocations.

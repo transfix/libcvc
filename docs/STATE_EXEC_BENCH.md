@@ -22,6 +22,8 @@ The pieces:
   Emscripten). CTest runs it as `state_exec_bench_smoke` (`--smoke`).
 - `tools/bench/state_exec_bench.py`: runs the executable once per scenario, collects JSON lines,
   prints a table, and compares two runs. Standard library only.
+- `tools/bench/mt_pycvc_threads.py`: `mt.pycvc_threads`, the one scenario that runs through pycvc
+  rather than the executable; it writes the executable's JSON records.
 - `src/cvc/tests/state_exec_bench_test.cpp`: the older gtest micro-benchmarks (gated on
   `CVC_STATE_EXEC_BENCH=1`). They stay as they are.
 
@@ -114,9 +116,12 @@ a failed candidate point or a missing one.
 More `compare` rules, for gates:
 
 - **Implicit defaults.** Some sweep keys were added after records existed: `policy` and `locks`
-  (on `sched.single.*`, `flood.small` and `msg.*`). Every point ran at `policy=rr`, `locks=none`
-  before them. A param at its implicit default is left out of the match, so a record from an older
-  binary (no such param) and one at the default are the same point.
+  (on `sched.single.*`, `flood.small` and `msg.*`), and with threaded execution's Stage 0 `chroot`
+  (on `native.state_get`, `native.state_set` and `sched.watch_poll`; `lock.uncontended` always had
+  it) and `writes` (on `sched.watch_poll`). Every point ran at `policy=rr`, `locks=none`,
+  `chroot=0` and `writes=none` before them. A param at its implicit default is left out of the
+  match, so a record from an older binary (no such param) and one at the default are the same
+  point.
 - **`--pair KEY=A:B`** compares the base's points whose `KEY` is `A` with the candidate's whose
   `KEY` is `B`, matched without `KEY`. Both files may be the same run: `compare run.jsonl run.jsonl
   --pair op=set:incr` compares two points of one sweep. A point at neither value is left out.
@@ -236,7 +241,7 @@ failure are recorded as rep -1). Fields that don't apply are left out.
 | `steps_total`, `ns_per_step` | evaluator steps in the region: the scheduler's `total_steps`, or the evaluator's own count; `wall_ns / steps_total` |
 | `steps_by_kind` | `eval`, `read` (script read a slice per step), `data` (deep-data slices), `async` (CPU time of async calls charged as steps), summed from `process_info` / `evaluation_stats` |
 | `iterations`, `ns_per_iter` | the scenario's unit of work (a loop iteration, a call, a round trip, a parse) and `wall_ns` per unit |
-| `allocs_driver`, `allocs_per_step`, `allocs_per_iter` | allocations the driver thread made in the region. POSIX: `operator new` calls (this executable replaces it, and every shared library's resolves to it). Windows: `malloc`/`calloc`/`realloc` calls from every module outside the Windows directory (`cvc.dll` included), counted through their import tables, since each DLL links its own `operator new`. The two counts differ in kind, so compare them within a platform |
+| `allocs_driver`, `allocs_per_step`, `allocs_per_iter` | allocations the driver thread made in the region. POSIX: `operator new` calls (this executable replaces it, and every shared library's resolves to it; it replaces the nothrow form and `operator delete` too, all over `malloc` and `free`, so the executable runs under ASan, whose own new and delete would see blocks from the wrong allocator). Windows: `malloc`/`calloc`/`realloc` calls from every module outside the Windows directory (`cvc.dll` included), counted through their import tables, since each DLL links its own `operator new`. The two counts differ in kind, so compare them within a platform |
 | `programs`, `programs_per_s` | programs submitted, and throughput |
 | `latency_ns` | `p50`, `p90`, `p99`, `max`, `n` (nearest rank) of submit-to-finish per program, from `execute_options::on_complete` |
 | `async_calls`, `async_latency_ns` | async calls made; from each kernel's end to its caller's end (the resume path) |
@@ -558,7 +563,23 @@ Steady-state cost per step, with nothing submitted or finishing in the region:
   `extra.loop_share_of_steps` is the loop's share of the steps (below 1 means parked processes were
   stepped).
 - `sched.watch_poll`: the same with `w` parked processes (0 to 1000) that each registered a
-  `state-watch` (`watch=1`) or not (`watch=0`, the control): every step polls every watch.
+  `state-watch` on a path of its own (`watch=1`) or not (`watch=0`, the control). A scheduler polls
+  its watches only once something under their root changed (a change counter on the root node), so
+  with nothing written no step polls. Two keys write, and move the root:
+  - `chroot`: 1 registers the watches from a context of their own, chrooted at `bench.doc` on the
+    same scheduler, as a document's processes are; the loop's context stays unchrooted. A
+    `watch=0` point has nothing to chroot and is skipped at `chroot=1`.
+  - `writes`: `elsewhere` makes the loop `state-set` the node `bench.elsewhere` every iteration:
+    under the app root, outside every watched path and outside `bench.doc`. Unchrooted, each write
+    changes the watches' root, so the next step polls all `w` watches. A chrooted watch's root is
+    its chroot (Stage 0, td 4.8, a counter per root; before Stage 0 a chrooted `state-watch` moved
+    the whole scheduler's watch root there), which those writes never change, so they poll
+    nothing: `chroot=1 writes=elsewhere` should cost what `watch=0 writes=elsewhere` does.
+
+  Stage 0's gates: `chroot=0 writes=none` within 3 % of the base (the implicit defaults match the
+  base's points, which have neither key); `chroot=1` and `writes=elsewhere` recorded, `chroot=1`
+  paired with `chroot=0` in the candidate over two runs in reverse order (`--size chroot=0,1`, then
+  `--size chroot=1,0`, and `compare --pair chroot=0:1`).
 
 ### sched.sleepers (sync, async)
 
@@ -673,11 +694,29 @@ loop's without it; `extra.ns_per_call` is the difference over `n`; `extra.steps_
 evaluator steps the call form adds; `extra.native_ns_per_call` the difference less those steps at
 the baseline's ns/step, the call itself. `plain` is `(bench-inc i)`; `apply` is
 `(apply bench-inc (list i))`, the list included; `state_get` and `state_set` read and write a node
-`depth` levels down (1, 4, 8); `state_delete` is a `state-set` and a `state-delete` with `nodes`
-(100, 10000) other nodes under the root, which `state-delete`'s expiry sweep walks; `msg_send`
-sends to a channel nobody receives on, so messages queue up to `max_pending_messages` (1024) and
-are then dropped. These are differences of two timed loops: use 5 reps or more before reading a
-change in them.
+`depth` levels down (1, 4, 8), from an unchrooted context (`chroot=0`) or one chrooted at
+`bench.doc` (`chroot=1`, `apply_chroot`, as `lock.uncontended` does; the node is then at
+`bench.doc.<path>`, the same walk under the chroot); `state_delete` is a `state-set` and a
+`state-delete` with `nodes` (100, 10000) other nodes under the root; `state_data_set` is
+`(state-data-set "bench.data" (list i 1 2 3 4 5 6 7))`, the list included; `msg_send` sends to a
+channel nobody receives on, so messages queue up to `max_pending_messages` (1024) and are then
+dropped. These are differences of two timed loops: use 5 reps or more before reading a change in
+them.
+
+What threaded execution's Stage 0 (docs/STATE_EXEC_THREADED.md 4.3, 4.8) changed here:
+
+- `state_get` and `state_set` take pinned walks, and a chrooted context holds its chroot's chain
+  pinned. Gate: `chroot=0` within 3 % of the base (the base's points, which have no `chroot`,
+  match it through the implicit defaults). `chroot=1` is recorded, and paired with `chroot=0` in
+  the candidate over two runs in reverse order (`--size chroot=0,1`, then `--size chroot=1,0`).
+- `state-delete` unlinks its one node. Before, it marked the node expired and swept the whole tree
+  for expired nodes, so `state_delete` cost grew with `nodes`; now it follows the path's depth.
+  Recorded; expected far better at `nodes=10000`.
+- `state-data-set` stores an isolating copy of a list or dict. `extra.data_nodes_per_call` is the
+  deep-data nodes the process was charged per call (its `data_nodes` with the call, less without,
+  over `n`): the copy's nodes, plus, on the async scheduler, whose host data defaults release a
+  dropped value through the step's budget, the release of the list each call replaces. Before Stage
+  0 it was that release alone: about 9 on `async`, 0 on `sync`.
 
 `native.state_atomic` times the atomic updates against `state-set`, on a node `depth` levels down
 (1, 4). The node starts at 0 before each timed loop and must end at `n`. `op` picks the loop body:
@@ -739,13 +778,108 @@ schedulers `deadline=1` arms `max_time`, which adds a clock read per node in the
 
 ### mt.independent (stackless)
 
-`t` threads (1, 2, 4, 8), each with its own stackless evaluator and default environment, running
-`fib 18` or 2000 caught raises `runs` (5) times; `ast=private` parses per thread, `ast=shared` runs
-one parsed AST on every thread. `ns_per_iter` is aggregate; `extra.speedup` is t x the single-thread
-time (measured in the same rep) over the wall time; `extra.thread_ns_per_iter` is per thread;
-`extra.allocs_per_iter_all_threads`; `extra.threads_on_lower_efficiency_class` (Windows) counts the
-threads that ended on a slower core class. These are the "before" numbers for threaded execution:
-refcounts on a shared AST, the global exception class tables and the allocator under contention.
+`t` threads (1, 2, 4, 8, and 12, 16, 20 for threaded execution's ceiling, td 6.3), each with its
+own stackless evaluator and default environment, running `fib 18` or 2000 caught raises `runs` (5)
+times; `ast=private` parses per thread, `ast=shared` runs one parsed AST on every thread.
+`ns_per_iter` is aggregate; `extra.speedup` is t x the single-thread time (measured in the same
+rep) over the wall time, from the barrier to the last join; `extra.thread_ns_per_iter` is per
+thread; `extra.allocs_per_iter_all_threads`; `extra.threads_on_lower_efficiency_class` (Windows)
+counts the threads that ended on a slower core class. These are the "before" numbers for threaded
+execution: refcounts on a shared AST, the global exception class tables and the allocator under
+contention. Each thread collects the reference cycles its runs left (`collect_cycles`; fib's
+`defun` makes one a run) before it ends, a few microseconds inside the region: the collector tracks
+them per thread, so nothing else could free them, and LeakSanitizer would report them.
+
+### mt.multi_exec (async)
+
+Threaded execution's Stage 0 (td 6.3): a scheduler per thread, sharing only the runtime and one app
+tree. `t` threads (1, 2, 4, 8) each pump an `async_scheduler` of their own, in a world of their own
+over the point's one app: the app tree's intrinsics, the hosts' parser and data defaults, the app
+tree as its watch root (so every submit reads the scheduler's settings from that one tree, on every
+thread), and an async host on the app's background pool (`make_host("background")`). Each thread
+is pumped as pycvc's `Exec::run` pumps its scheduler (as `lock.cross_thread`'s are):
+`drain_ingress()`, `wake_awaiting()`, a `sync_run_steps(2000000, 0.05)` slice while anything is
+runnable, else `wait_for_work(now + 50 ms)`. It runs its program, a parsed AST of its own,
+`runs` (5) times, one run at a time to its end, reaping each, as `Exec::run` runs one program at a
+time. The threads start from a barrier, and the region runs from its release to the last thread's
+end.
+
+`prog`:
+
+- `fib` and `exceptions`: mt.independent's programs (fib 18, 2000 caught raises). They touch
+  neither the tree nor another thread, so the gate measures how a scheduler per thread scales.
+- `tree`: Stage 0's code on every thread, for the sanitizer jobs; recorded, never gated. World j's
+  intrinsics are chrooted at `bench.mt.t<j>` (`apply_chroot`), and a bystander is parked in it
+  (`msg-recv` on a channel nobody sends to). The program registers a `state-watch` on `w` whose
+  handler `state-incr`s `events`, then runs 2000 rounds (50 with `--smoke`) of `state-set` of `x`,
+  `state-get` of `x` and `state-data-set` of `k` (a two-item list); every 16th round writes `w`
+  and calls `(bench-post i)`, a native that posts to world j+1's scheduler (`post_control`, from
+  thread j): a pause and then a resume of its running program (first in, first out, so it is never
+  left paused), a signal it has no handler for (dropped at its next step), a `set_priority` of its
+  bystander, and a query that reads its stats between its steps. Once its runs are done, thread j
+  posts a kill of world j+1's bystander. At t = 1 the thread posts to its own scheduler. The result
+  checks the reads: the sum of the `x`s read, plus the last `k`'s first item.
+
+A rep runs, in order: mt.independent's `ast=private` worker on one thread and then on t (not for
+`prog=tree`), this scenario on one thread, then on t, the region. `steps_total` is the region's
+steps on every thread. Extras:
+
+- `speedup`: t x the one-thread run's time over the region's;
+- `ceiling_speedup`: mt.independent's speedup in the same rep, and `of_ceiling`, `speedup` over it
+  (not for `prog=tree`, which mt.independent can't run);
+- `thread_ns_per_iter` (the median thread), `single_thread_ns_per_iter` (the one-thread run) and
+  `independent_ns_per_iter` (mt.independent's one thread): the last two differ by what the scheduler
+  and its host cost a program;
+- `threads_on_lower_efficiency_class` (Windows);
+- `prog=tree`: `watch_events` (the handler's runs in each thread's last run, summed),
+  `controls_posted` and `queries_posted` (the commands bench-post and the threads' last posts sent),
+  `controls_done` (their `done` callbacks: once each, on the target's thread when a drain applied
+  it, or with false from the target's destructor), `controls_applied` (those that ran with true) and
+  `queries_run`. They depend on when each command landed, so nothing checks them; with Stage 0's
+  `post_control`, `controls_done` equals `controls_posted`.
+
+Gate (Stage 0; td 6.3): at t = 8, `of_ceiling` at least 0.9, for `prog=fib` and for
+`prog=exceptions`, on Windows, from one run (`compare --pair` cannot pair two scenarios, which is
+why the ceiling is measured in the same rep):
+
+```sh
+for prog in fib exceptions; do
+  python3 tools/bench/state_exec_bench.py gate run.jsonl --scenario mt.multi_exec --where t=8 \
+      --where prog=$prog --metric extra.of_ceiling --min 0.9 --max-noise 10
+done
+```
+
+A gate that names no `prog` fails, since `prog=tree` has no `of_ceiling`.
+
+The sanitizer jobs (ci.yml's `sanitizers`, `.github/sanitizers/run.sh`; HZ-10) run it at t = 8,
+one run of each program, under TSan and under ASan with UBSan and LeakSanitizer:
+`state_exec_bench --scenario mt.multi_exec --size t=8 --size runs=1 --reps 1 --warmup 0
+--timeout 900 --json san-logs/mt.multi_exec.jsonl`. Each point's line (`t=8 prog=fib runs=1`, and
+`exceptions` and `tree`) is required in the log: a run whose points were all skipped would exit 0.
+The worker threads collect the cycles their runs left before they end, as mt.independent's do.
+
+### mt.pycvc_threads (pycvc)
+
+td 6.3's other Stage 0 scenario: `t` Python threads (1, 2, 4, 8), each with a `pycvc.Exec` of its
+own over one app, calling `Exec.run` on mt.independent's programs `runs` (5) times from a barrier.
+`Exec.run` releases the GIL around its slices, so the programs overlap; the GIL around each call
+and the interpreter's threads are what it adds to mt.multi_exec. It is a script,
+`tools/bench/mt_pycvc_threads.py` (standard library only, besides pycvc), not a scenario of the
+executable. It writes the executable's records (scenario `mt.pycvc_threads`, executor `pycvc`), so
+`table` and `compare` read them:
+
+```sh
+python3 tools/bench/mt_pycvc_threads.py --pycvc-dir build/bindings/pycvc --json run.jsonl
+python3 tools/bench/mt_pycvc_threads.py --smoke --pycvc-dir build/bindings/pycvc
+```
+
+On Windows, add a `--dll-dir` for each directory of DLLs pycvc needs (the deps' `bin`, the build's
+`bin`), or name them in `CVC_DLL_DIRS` as for pycvc's tests. `--t`, `--prog`, `--runs`, `--reps`
+and `--warmup` take the sizes; `--smoke` is t 1 and 2,
+one run, one rep, no warmup, fib 10 and 50 raises. Extras: `speedup` (t x one thread's time,
+measured in the same rep, over the wall time from the barrier to the last join),
+`single_thread_ns_per_iter`, `thread_ns_per_iter`. Recorded, not gated: td's Stage 0 gates don't
+include it.
 
 ### parse.small, parse.large
 

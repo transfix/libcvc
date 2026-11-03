@@ -285,6 +285,7 @@ set(SOURCE_FILES
   state/state_exec/native_stack.h
   state/state_exec/heap.cpp
   state/state_exec/closure_natives.h
+  state/state_exec/builtin_class.h
   state/state_exec/process.cpp
   state/state_exec/memory_tracker.cpp
   state/state_exec/scheduler.cpp
