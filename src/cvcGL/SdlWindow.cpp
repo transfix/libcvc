@@ -56,6 +56,26 @@ EM_JS(void, cvcgl_sdl_fill_container, (const char *selector), {
   c.style.width = '100%';
   c.style.height = '100%';
 });
+// A touch on the canvas makes no mouse events or click of its own, as in VTK's canvas window,
+// whose touch handlers cancelled them: the mouse SDL makes of the first finger is the only one. A
+// touch's mousedown would focus the canvas, taking the focus from ImGuiOverlay's system-keyboard
+// field (which is focused at touchend), and would press for CameraController's pointer lock.
+EM_JS(void, cvcgl_sdl_touch_quiet, (const char *selector, int on), {
+  var c = document.querySelector(UTF8ToString(selector));
+  if (!c)
+    return;
+  var kinds = ['touchstart', 'touchmove', 'touchend', 'touchcancel'];
+  if (on && !c.__cvcglSdlTouch) {
+    c.__cvcglSdlTouch = function(e) {
+      if (e.cancelable)
+        e.preventDefault();
+    };
+    kinds.forEach(function(k) { c.addEventListener(k, c.__cvcglSdlTouch, {passive: false}); });
+  } else if (!on && c.__cvcglSdlTouch) {
+    kinds.forEach(function(k) { c.removeEventListener(k, c.__cvcglSdlTouch, {passive: false}); });
+    c.__cvcglSdlTouch = undefined;
+  }
+});
 EM_JS(int, cvcgl_sdl_pointer_locked, (const char *selector), {
   var e = document.pointerLockElement;
   return e && e == document.querySelector(UTF8ToString(selector)) ? 1 : 0;
@@ -194,6 +214,9 @@ void SdlGLRenderWindow::CreateAWindow() {
     return;
   }
   ++g_openWindows;
+#ifdef __EMSCRIPTEN__
+  cvcgl_sdl_touch_quiet(canvas_.c_str(), 1);
+#endif
   if (relative_) // asked for before the window was made
     SDL_SetWindowRelativeMouseMode(window_, true);
   SDL_GL_MakeCurrent(window_, context_);
@@ -230,6 +253,9 @@ void SdlGLRenderWindow::DestroyWindow() {
     context_ = nullptr;
   }
   if (window_) {
+#ifdef __EMSCRIPTEN__
+    cvcgl_sdl_touch_quiet(canvas_.c_str(), 0);
+#endif
     SDL_StopTextInput(window_);
     SDL_DestroyWindow(window_);
     window_ = nullptr;

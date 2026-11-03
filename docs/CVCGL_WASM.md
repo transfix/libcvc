@@ -193,10 +193,12 @@ key names, as on the desktop.
   `tabindex` and the focus (the stock pages focus it on a click). The page's own fields and
   ImGuiOverlay's system-keyboard field keep their keys.
 - **Pointer and touch.** SDL reads the canvas's pointer events and makes the first finger the
-  mouse. CameraController still takes the pointer lock inside the press and reads the raw
-  motion itself; under the lock the interactor's position stands still. TouchGestures still
-  reads two-finger gestures from the page's touch events, and while two fingers are down the
-  mouse SDL makes of the first one stays still.
+  mouse. The canvas cancels its touch events, as VTK's canvas window did, so a touch makes no
+  mouse events or click of its own: the browser's mousedown would focus the canvas and take the
+  focus from ImGuiOverlay's system-keyboard field. CameraController still takes the pointer lock
+  inside the press and reads the raw motion itself; under the lock the interactor's position
+  stands still. TouchGestures still reads two-finger gestures from the page's touch events, and
+  while two fingers are down the mouse SDL makes of the first one stays still.
 - **Frames.** There is no swap: WebGL shows the frame when the page yields. The window yields
   in `Frame()` where VTK 9.5's canvas window does, so [FrameYield](#frameyield-who-yields-to-the-browser)
   means the same with either window.
