@@ -370,7 +370,8 @@ int main() {
     cvc::gl::Viewport &pa = vm.viewport("pair_a"), &pb = vm.viewport("pair_b");
     cvc::gl::Viewport &follow = vm.viewport("follow");
     vtkCamera *shared = pa.renderer()->GetActiveCamera();
-    check(shared == pb.renderer()->GetActiveCamera(), "camera: pair: both views draw from one camera");
+    check(shared == pb.renderer()->GetActiveCamera(),
+          "camera: pair: both views draw from one camera");
     check(shared != view.renderer()->GetActiveCamera() &&
               shared != sim.renderer()->GetActiveCamera(),
           "camera: pair: not the main view's, nor another view's");

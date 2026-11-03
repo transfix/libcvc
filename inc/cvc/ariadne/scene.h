@@ -238,7 +238,7 @@ struct SceneNode {
   std::string id;                // node name → <prefix>.graphics.root.children.<id>
   std::string type = "geometry"; // node kind
   std::string source_file;       // source: { file: ... } (geometry/volume load path)
-  std::string source_asset;      // source: { asset: <id> } — a document asset (assets:), loaded once
+  std::string source_asset; // source: { asset: <id> } — a document asset (assets:), loaded once
 
   // A built-in PROCEDURAL primitive as a geometry node's source, instead of source: { file }.
   // Empty = use source_file. "plane" = a flat quad with UP normals, spanning
@@ -455,9 +455,9 @@ struct SceneCamera {
   double zoom = 1.0;                     // on the framed distance (2: twice as close)
 };
 
-// A document asset (`assets:`): a mesh loaded once and drawn by every node, in any of the document's
-// scenes, whose source is `{ asset: <id> }`. `source` holds what a node would: its source: and
-// fit: (a file, a URI or a primitive), read and fitted the first time a node uses it.
+// A document asset (`assets:`): a mesh loaded once and drawn by every node, in any of the
+// document's scenes, whose source is `{ asset: <id> }`. `source` holds what a node would: its
+// source: and fit: (a file, a URI or a primitive), read and fitted the first time a node uses it.
 struct SceneAsset {
   std::string id;
   SceneNode source;
@@ -466,7 +466,8 @@ struct SceneAsset {
 struct Scene {
   std::string id; // a `scenes:` entry's name ("" for the document's `scene:`)
   std::vector<SceneNode> nodes;
-  // The document's assets (`assets:`), the same list in every scene: what `source: { asset }` names.
+  // The document's assets (`assets:`), the same list in every scene: what `source: { asset }`
+  // names.
   std::vector<SceneAsset> assets;
   // main_view: { show, hide } — the tags the MAIN view draws (the untagged nodes always), as a
   // viewport's show: / hide: do. For a document whose "scenes" are tagged groups in one scene.
