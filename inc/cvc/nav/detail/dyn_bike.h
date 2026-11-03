@@ -51,7 +51,9 @@
 //      kinematic limit the step is bike_step's.
 // Left out on purpose (doc 19): suspension, lateral load transfer, contact loss. Wheel spin is
 // opt-in: dyn_spin_plant (below) gives each axle's wheels their own speed, driven and braked by
-// torques, and its tires a longitudinal force from their slip; dyn_plant has none.
+// torques, and its tires a longitudinal force from their slip; dyn_plant has none. So is the slope
+// across the heading: dyn_plant_ground samples a ground under the centre of gravity and applies
+// gravity along and across the heading, a potential in the full (q, p) form (dyn_ph_rhs_full).
 //
 // dyn_plant is written once over a scalar type: float in training, double in the tests, and a
 // forward-mode dual for its adjoint (doc 19: "a dual-number template for the plant is cheap and
@@ -363,12 +365,13 @@ CVC_HD inline void dyn_spin_long_step(const dyn_bike_params &p, S hdt, const dyn
 // when given, is an external wrench on the body (F_x, F_y, M_z: body axes, at the centre of
 // gravity) held over the step: the external port of the pH form (dyn_ph_books' port), such as the
 // contact's (dyn_contact.h). It joins the resistances along the body and the lateral solve's force
-// and moment.
+// and moment. `side`, when given, is the ground's slope across the heading (+ rising to the left):
+// gravity's body-y component, - m g side, joins the lateral solve's force (dyn_plant_ground).
 template <class S>
 CVC_HD inline void dyn_plant_core(const dyn_bike_params &p, const bike_veh &v,
                                   const dyn_state<S> &s, const S *om0, S delta_cmd, S a_cmd,
                                   S grade, dyn_state<S> &o, S *om1, dyn_step_free<S> *seen,
-                                  const S *wrench = nullptr) {
+                                  const S *wrench = nullptr, const S *side = nullptr) {
   const S hdt = S(v.hdt), zero = S(0), one = S(1);
   const S m = S(p.m), Iz = S(p.Iz), lf = S(p.lf), lr = S(p.lr), h = S(p.h), g = S(p.g);
   const S mu = S(p.mu), Cp = S(p.C), L = lf + lr;
@@ -449,6 +452,8 @@ CVC_HD inline void dyn_plant_core(const dyn_bike_params &p, const bike_veh &v,
       FY = FY + wrench[1];
       MZ = MZ + wrench[2];
     }
+    if (side)
+      FY = FY - m * g * *side;
     const S f_vy = FY / m - r1 * vx_p, f_r = MZ / Iz;
     const S Sf_t = dyn_secant_w(Fyf, af, wf, S(0), Bf, Cp, Dyf, uf);
     const S Sr = dyn_secant_w(Fyr, ar, wr, S(0), Br, Cp, Dyr, u);
@@ -505,12 +510,14 @@ CVC_HD inline void dyn_plant_core(const dyn_bike_params &p, const bike_veh &v,
 
 // One step of the plant; see the header comment. grade is data (its gradient is not taken).
 // `seen`, when given, gets the twist the step reached before its limiters (dyn_plant_books);
-// `wrench`, an external wrench held over the step (dyn_plant_core).
+// `wrench`, an external wrench held over the step, and `side`, the slope across the heading
+// (dyn_plant_core).
 template <class S>
 CVC_HD inline void dyn_plant(const dyn_bike_params &p, const bike_veh &v, const dyn_state<S> &s,
                              S delta_cmd, S a_cmd, S grade, dyn_state<S> &o,
-                             dyn_step_free<S> *seen = nullptr, const S *wrench = nullptr) {
-  dyn_plant_core<S>(p, v, s, nullptr, delta_cmd, a_cmd, grade, o, nullptr, seen, wrench);
+                             dyn_step_free<S> *seen = nullptr, const S *wrench = nullptr,
+                             const S *side = nullptr) {
+  dyn_plant_core<S>(p, v, s, nullptr, delta_cmd, a_cmd, grade, o, nullptr, seen, wrench, side);
 }
 
 // One step of the wheel-spin plant: dyn_plant's with the wheels spinning (see "Wheel spin" above),
@@ -520,10 +527,10 @@ template <class S>
 CVC_HD inline void dyn_spin_plant(const dyn_bike_params &p, const bike_veh &v,
                                   const dyn_spin_state<S> &s, S delta_cmd, S a_cmd, S grade,
                                   dyn_spin_state<S> &o, dyn_step_free<S> *seen = nullptr,
-                                  const S *wrench = nullptr) {
+                                  const S *wrench = nullptr, const S *side = nullptr) {
   const S om0[2] = {s.om_f, s.om_r};
   S om1[2];
-  dyn_plant_core<S>(p, v, s.b, om0, delta_cmd, a_cmd, grade, o.b, om1, seen, wrench);
+  dyn_plant_core<S>(p, v, s.b, om0, delta_cmd, a_cmd, grade, o.b, om1, seen, wrench, side);
   o.om_f = om1[0];
   o.om_r = om1[1];
 }
@@ -609,8 +616,9 @@ CVC_HD inline void dyn_spin_plant_vjp(const dyn_bike_params &p, const bike_veh &
 //         the secants' rounding (at zero slip, where dyn_secant_w takes the slope): round-off. The
 //         speed floor eps enters the slips' forward speeds alone, which the force's sign does not
 //         read. It is booked on its own line all the same.
-//   grade gravity along the heading, booked as the power - m g grade vx (the plant has no side
-//         slope, so H carries no potential).
+//   grade gravity along the heading, given as data, booked as the power - m g grade vx. On a
+//         ground the full form (below) puts the pose in the state and gravity in H as a
+//         potential, with the slope across the heading.
 //
 // So dH/dt = -v^T R v + y^T u + v^T f_eps - m g grade vx, with v^T f_eps at round-off: passive
 // with respect to the axle forces, at every slip. The inputs are the actuators' outputs (the
@@ -866,13 +874,15 @@ CVC_HD inline S dyn_ph_port_work(S hdt, S vx0, S vy0, S r0, S vx1, S vy1, S r1, 
 // external port, held over the step) the books gain its energy, y_e^T u_e = v^T W over the step
 // (dyn_ph_port_work, into *port when given): dH = supplied - dissipated + floor + grade + limiter
 // + port + residual. `free_out`, when given, gets the twist the step reached before its limiters.
+// `side` is dyn_plant's; the grade line books only the slope along the heading (gravity across it
+// is booked as a potential by dyn_plant_books_ground).
 template <class S>
-CVC_HD inline void dyn_plant_books(const dyn_bike_params &p, const bike_veh &v,
-                                   const dyn_state<S> &s, S delta_cmd, S a_cmd, S grade,
-                                   dyn_state<S> &o, dyn_ph_books<S> &b, const S *wrench = nullptr,
-                                   S *port = nullptr, dyn_step_free<S> *free_out = nullptr) {
+CVC_HD inline void
+dyn_plant_books(const dyn_bike_params &p, const bike_veh &v, const dyn_state<S> &s, S delta_cmd,
+                S a_cmd, S grade, dyn_state<S> &o, dyn_ph_books<S> &b, const S *wrench = nullptr,
+                S *port = nullptr, dyn_step_free<S> *free_out = nullptr, const S *side = nullptr) {
   dyn_step_free<S> seen;
-  dyn_plant<S>(p, v, s, delta_cmd, a_cmd, grade, o, &seen, wrench);
+  dyn_plant<S>(p, v, s, delta_cmd, a_cmd, grade, o, &seen, wrench, side);
   if (free_out)
     *free_out = seen;
   dyn_state<S> s0 = s, e = o;
@@ -1105,15 +1115,15 @@ template <class S> struct dyn_spin_ph_books {
 };
 
 // dyn_spin_plant's step with its books. The step is dyn_spin_plant's, to the last bit. `wrench`,
-// `port` and `free_out` as dyn_plant_books'.
+// `port`, `free_out` and `side` as dyn_plant_books'.
 template <class S>
-CVC_HD inline void dyn_spin_plant_books(const dyn_bike_params &p, const bike_veh &v,
-                                        const dyn_spin_state<S> &s, S delta_cmd, S a_cmd, S grade,
-                                        dyn_spin_state<S> &o, dyn_spin_ph_books<S> &b,
-                                        const S *wrench = nullptr, S *port = nullptr,
-                                        dyn_step_free<S> *free_out = nullptr) {
+CVC_HD inline void
+dyn_spin_plant_books(const dyn_bike_params &p, const bike_veh &v, const dyn_spin_state<S> &s,
+                     S delta_cmd, S a_cmd, S grade, dyn_spin_state<S> &o, dyn_spin_ph_books<S> &b,
+                     const S *wrench = nullptr, S *port = nullptr,
+                     dyn_step_free<S> *free_out = nullptr, const S *side = nullptr) {
   dyn_step_free<S> seen;
-  dyn_spin_plant<S>(p, v, s, delta_cmd, a_cmd, grade, o, &seen, wrench);
+  dyn_spin_plant<S>(p, v, s, delta_cmd, a_cmd, grade, o, &seen, wrench, side);
   if (free_out)
     *free_out = seen;
   dyn_spin_state<S> s0 = s, e = o;
@@ -1143,6 +1153,224 @@ CVC_HD inline void dyn_spin_plant_books(const dyn_bike_params &p, const bike_veh
     if (port)
       *port = pw;
   }
+}
+
+// ── The full (q, p) form: the pose, and gravity as a potential ────────────────────────────
+// dyn_ph_* above is the form's momentum part: the pose q = (x, y, psi) (the rear axle, as the
+// state's) is left out, and gravity enters as the power of a grade given as data. With the pose in
+// the state, x = (q, p), six coordinates, and the ground's height h under the centre of gravity in
+// H, dyn_plant's vector field on a ground (dyn_plant_ground) is exactly
+//
+//   H(q, p) = 1/2 p^T M^-1 p + V(q),   V(q) = m g h(x + lr cos psi, y + lr sin psi)
+//   q' = T(q) v,   p' = -T(q)^T dV/dq + (J(p) - R) v + G u + f_eps + f_g,   v = dH/dp
+//
+//   T(q)  [[c, -s, lr s], [s, c, -lr c], [0, 0, 1]], c, s = cos psi, sin psi (dyn_ph_T): the twist
+//         at the centre of gravity moves the rear axle at (vx, vy - lr r) in the body's frame.
+//         dyn_plant's pose update is q1 = q0 + hdt T(q1) v1, with the step's new heading and twist.
+//   The structure  [[0, T(q)], [-T(q)^T, J(p)]] on (dH/dq, dH/dp) (dyn_ph_J_full): skew, and
+//         Poisson (T*SE(2)'s canonical structure in body momenta, J(p) its coadjoint block).
+//         -T^T dV/dq = - m g (along, across, 0), the ground's slopes at the centre of gravity
+//         along and across the heading (dyn_ph_slope): no moment, V being the centre of gravity's.
+//   f_g   gravity as data, without a ground: - m g (grade, side, 0) (dyn_ph_rhs_full's first
+//         overload; dyn_ph_rhs is its p part with side = 0). On a ground f_g = 0: gravity is in H.
+//
+// So on a ground dH/dt = -v^T R v + y^T u + v^T f_eps, with V in H: dyn_ph_rates' grade line
+// becomes the potential's rate, - dV/dt = - m g (along vx + across vy), and a step's grade line is
+// - dV, the potential's change (dyn_plant_books_ground). Without the slope across the heading the
+// plant's work against gravity is not - dV once the body slides across a slope, and the books
+// drift by the missing lateral component's work, first order per step.
+//
+// The slopes are the gradient (dh/dx, dh/dy) at the centre of gravity, along and across the
+// heading: the tangents of the slope angles, not their sines. The pose and the twist are planar,
+// the projection of the vehicle's, so the force whose work is - dV is - m g grad h at any slope
+// angle. The sine is gravity's component along the surface for a speed measured along it; over
+// the projected pose it leaves m g (tan - sin) ~ m g theta^3 / 2 of force unbooked, which no
+// smaller step removes (dyn_plant's grade from nav's grade_at is that sine; the two differ by 0.5 %
+// at a 10 % grade). The gradient is central differences over 1e-3 (lf + lr), as dyn4_grade's, so
+// any ground sampler serves (dyn_4w.h's at(x, y, mu, height); mu is not read). The wheel-spin
+// plant takes the same slopes and books (dyn_spin_plant_ground, dyn_spin_plant_books_ground).
+
+// T(q) for a rear axle lr behind the centre of gravity at heading psi.
+template <class S> CVC_HD inline void dyn_pose_T(S lr, S psi, S T[3][3]) {
+  const S c = s_cos(psi), sn = s_sin(psi), z = S(0);
+  T[0][0] = c;
+  T[0][1] = -sn;
+  T[0][2] = lr * sn;
+  T[1][0] = sn;
+  T[1][1] = c;
+  T[1][2] = -lr * c;
+  T[2][0] = z;
+  T[2][1] = z;
+  T[2][2] = S(1);
+}
+
+// T(q): the twist at the centre of gravity to the rear axle's pose rates, q' = T(q) v.
+template <class S> CVC_HD inline void dyn_ph_T(const dyn_bike_params &p, S psi, S T[3][3]) {
+  dyn_pose_T(S(p.lr), psi, T);
+}
+
+// The ground's height at the centre of gravity, and its gradient there by central differences.
+template <class S, class G>
+CVC_HD inline void dyn_ph_ground(const dyn_bike_params &p, const G &ground, const dyn_state<S> &s,
+                                 S &h, S &gx, S &gy) {
+  const S lr = S(p.lr), e = S(1e-3) * (S(p.lf) + lr);
+  const S cx = s.x + lr * s_cos(s.psi), cy = s.y + lr * s_sin(s.psi);
+  S mu, h_xp, h_xm, h_yp, h_ym;
+  ground.at(cx, cy, mu, h);
+  ground.at(cx + e, cy, mu, h_xp);
+  ground.at(cx - e, cy, mu, h_xm);
+  ground.at(cx, cy + e, mu, h_yp);
+  ground.at(cx, cy - e, mu, h_ym);
+  gx = (h_xp - h_xm) / (S(2) * e);
+  gy = (h_yp - h_ym) / (S(2) * e);
+}
+
+// The ground's slopes at the centre of gravity: along the heading (+ rising ahead) and across it
+// (+ rising to the left).
+template <class S, class G>
+CVC_HD inline void dyn_ph_slope(const dyn_bike_params &p, const G &ground, const dyn_state<S> &s,
+                                S &along, S &across) {
+  S h, gx, gy;
+  dyn_ph_ground(p, ground, s, h, gx, gy);
+  const S c = s_cos(s.psi), sn = s_sin(s.psi);
+  along = c * gx + sn * gy;
+  across = c * gy - sn * gx;
+}
+
+// V(q) = m g h at the centre of gravity.
+template <class S, class G>
+CVC_HD inline S dyn_ph_potential(const dyn_bike_params &p, const G &ground, const dyn_state<S> &s) {
+  const S lr = S(p.lr);
+  S mu, h;
+  ground.at(s.x + lr * s_cos(s.psi), s.y + lr * s_sin(s.psi), mu, h);
+  return S(p.m) * S(p.g) * h;
+}
+
+// H(q, p) = 1/2 p^T M^-1 p + V(q).
+template <class S, class G>
+CVC_HD inline S dyn_ph_hamiltonian(const dyn_bike_params &p, const G &ground,
+                                   const dyn_state<S> &s) {
+  return dyn_ph_hamiltonian(p, s) + dyn_ph_potential(p, ground, s);
+}
+
+// dV/dq = m g (dh/dx, dh/dy, lr (dh/dy cos psi - dh/dx sin psi)) at the centre of gravity.
+template <class S, class G>
+CVC_HD inline void dyn_ph_grad_q(const dyn_bike_params &p, const G &ground, const dyn_state<S> &s,
+                                 S dV[3]) {
+  S h, gx, gy;
+  dyn_ph_ground(p, ground, s, h, gx, gy);
+  const S mg = S(p.m) * S(p.g);
+  dV[0] = mg * gx;
+  dV[1] = mg * gy;
+  dV[2] = mg * S(p.lr) * (s_cos(s.psi) * gy - s_sin(s.psi) * gx);
+}
+
+// The structure on x = (q, p): [[0, T(q)], [-T(q)^T, J(p)]].
+template <class S>
+CVC_HD inline void dyn_ph_J_full(const dyn_bike_params &p, const dyn_state<S> &s, S J[6][6]) {
+  S T[3][3], pm[3], Jp[3][3];
+  dyn_ph_T(p, s.psi, T);
+  dyn_ph_momentum(p, s, pm);
+  dyn_ph_J(pm, Jp);
+  for (int a = 0; a < 3; ++a)
+    for (int b = 0; b < 3; ++b) {
+      J[a][b] = S(0);
+      J[a][3 + b] = T[a][b];
+      J[3 + a][b] = -T[b][a];
+      J[3 + a][3 + b] = Jp[a][b];
+    }
+}
+
+// The full form's vector field with gravity as data, f_g = - m g (grade, side, 0): q' = T(q) v,
+// and dyn_ph_rhs's p' with the slope across the heading on p_y.
+template <class S>
+CVC_HD inline void dyn_ph_rhs_full(const dyn_bike_params &p, const dyn_state<S> &s, S grade, S side,
+                                   S qdot[3], S pdot[3]) {
+  S T[3][3];
+  dyn_ph_T(p, s.psi, T);
+  const S v[3] = {s.vx, s.vy, s.r};
+  for (int i = 0; i < 3; ++i)
+    qdot[i] = T[i][0] * v[0] + T[i][1] * v[1] + T[i][2] * v[2];
+  dyn_ph_rhs(p, s, grade, pdot);
+  pdot[1] = pdot[1] - S(p.m) * S(p.g) * side;
+}
+
+// On a ground, gravity in H: q' = T(q) v, p' = -T(q)^T dV/dq + (J(p) - R) v + G u + f_eps.
+template <class S, class G>
+CVC_HD inline void dyn_ph_rhs_full(const dyn_bike_params &p, const G &ground, const dyn_state<S> &s,
+                                   S qdot[3], S pdot[3]) {
+  dyn_ph_rhs_full(p, s, S(0), S(0), qdot, pdot);
+  S T[3][3], dV[3];
+  dyn_ph_T(p, s.psi, T);
+  dyn_ph_grad_q(p, ground, s, dV);
+  for (int i = 0; i < 3; ++i)
+    pdot[i] = pdot[i] - (T[0][i] * dV[0] + T[1][i] * dV[1] + T[2][i] * dV[2]);
+}
+
+// The power balance on a ground: dyn_ph_rates_at's, with the grade line gravity's power along and
+// across the heading, - m g (along vx + across vy) = - dV/dt.
+template <class S, class G>
+CVC_HD inline dyn_ph_rates<S> dyn_ph_rates_at(const dyn_bike_params &p, const G &ground,
+                                              const dyn_state<S> &s) {
+  S along, across;
+  dyn_ph_slope(p, ground, s, along, across);
+  dyn_ph_rates<S> out = dyn_ph_rates_at(p, s, along);
+  out.grade = -S(p.m) * S(p.g) * (along * s.vx + across * s.vy);
+  return out;
+}
+
+// One step of dyn_plant on a ground: gravity along and across the heading, from the slopes under
+// the centre of gravity at the step's start (dyn_ph_slope).
+template <class S, class G>
+CVC_HD inline void dyn_plant_ground(const dyn_bike_params &p, const bike_veh &v, const G &ground,
+                                    const dyn_state<S> &s, S delta_cmd, S a_cmd, dyn_state<S> &o,
+                                    dyn_step_free<S> *seen = nullptr, const S *wrench = nullptr) {
+  S along, across;
+  dyn_ph_slope(p, ground, s, along, across);
+  dyn_plant<S>(p, v, s, delta_cmd, a_cmd, along, o, seen, wrench, &across);
+}
+
+// dyn_plant_ground's step with its books: dyn_plant_books', with gravity in H, so the grade line is
+// - dV, the potential's change over the step (dH stays the kinetic energy's: dH - grade is the
+// change of dyn_ph_hamiltonian(p, ground, .)). `wrench`, `port` and `free_out` as dyn_plant_books'.
+template <class S, class G>
+CVC_HD inline void dyn_plant_books_ground(const dyn_bike_params &p, const bike_veh &v,
+                                          const G &ground, const dyn_state<S> &s, S delta_cmd,
+                                          S a_cmd, dyn_state<S> &o, dyn_ph_books<S> &b,
+                                          const S *wrench = nullptr, S *port = nullptr,
+                                          dyn_step_free<S> *free_out = nullptr) {
+  S along, across;
+  dyn_ph_slope(p, ground, s, along, across);
+  dyn_plant_books<S>(p, v, s, delta_cmd, a_cmd, along, o, b, wrench, port, free_out, &across);
+  const S dV = dyn_ph_potential(p, ground, o) - dyn_ph_potential(p, ground, s);
+  b.residual = b.residual + b.grade + dV;
+  b.grade = -dV;
+}
+
+// The wheel-spin plant on a ground, as dyn_plant_ground.
+template <class S, class G>
+CVC_HD inline void
+dyn_spin_plant_ground(const dyn_bike_params &p, const bike_veh &v, const G &ground,
+                      const dyn_spin_state<S> &s, S delta_cmd, S a_cmd, dyn_spin_state<S> &o,
+                      dyn_step_free<S> *seen = nullptr, const S *wrench = nullptr) {
+  S along, across;
+  dyn_ph_slope(p, ground, s.b, along, across);
+  dyn_spin_plant<S>(p, v, s, delta_cmd, a_cmd, along, o, seen, wrench, &across);
+}
+
+// Its books, as dyn_plant_books_ground: the grade line is - dV.
+template <class S, class G>
+CVC_HD inline void
+dyn_spin_plant_books_ground(const dyn_bike_params &p, const bike_veh &v, const G &ground,
+                            const dyn_spin_state<S> &s, S delta_cmd, S a_cmd, dyn_spin_state<S> &o,
+                            dyn_spin_ph_books<S> &b, const S *wrench = nullptr, S *port = nullptr,
+                            dyn_step_free<S> *free_out = nullptr) {
+  S along, across;
+  dyn_ph_slope(p, ground, s.b, along, across);
+  dyn_spin_plant_books<S>(p, v, s, delta_cmd, a_cmd, along, o, b, wrench, port, free_out, &across);
+  const S dV = dyn_ph_potential(p, ground, o.b) - dyn_ph_potential(p, ground, s.b);
+  b.residual = b.residual + b.grade + dV;
+  b.grade = -dV;
 }
 
 // The tangent dissipation of dyn_plant's Pacejka tires at the state: Dt = -d(Q_y, Q_r)/d(vy, r)
