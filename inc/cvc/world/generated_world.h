@@ -28,6 +28,7 @@
 //   paint_surface(w) // its colour: material, roads and plazas baked into an RGB texture
 //   w.props / w.foliage / w.needles / w.buildings / w.roads   // merged meshes, one per look
 //   w.prop_cells, w.props_r1, w.props_r2                      // the props' render LOD, by cell
+//   w.terrain_chunks                                          // the ground's render LOD, by chunk
 //   water_field(w, t, ...)                                    // the water, as a volume of depth
 //   w.geometry()     // the world as cvc::world::world_geometry, for physics and nav
 //
@@ -68,6 +69,7 @@
 #include <cvc/world/grid.h>
 #include <cvc/world/raster.h>
 #include <cvc/world/roads.h>
+#include <cvc/world/terrain_lod.h>
 #include <cvc/world/terrain_source.h>
 #include <cvc/world/world_geometry.h>
 #include <functional>
@@ -189,6 +191,12 @@ struct generated_world {
   };
   std::vector<prop_cell> prop_cells; // the cells with props in them
   double prop_cell_m = 0.0;
+
+  // Render LOD for the ground (cvc/world/terrain_lod.h): the terrain cut into chunks, each a
+  // ladder of the same surface at coarser sample strides, skirted where chunks meet. Row-major,
+  // terrain_layout.chunk_rows x chunk_cols. A render proxy too: everything else reads terrain.
+  terrain_chunk_layout terrain_layout;
+  std::vector<terrain_chunk> terrain_chunks;
   cvc::geometry buildings; // per-vertex colour (the archetypes' concrete, or the massing's)
   cvc::geometry roads;     // the extruded street surface
   std::size_t building_count = 0;
@@ -235,11 +243,11 @@ generated_world generate_world(const generated_world_params &p,
 // steps one on the app's scheduler (cvc/core/sliced_task.h), a few milliseconds a frame on
 // single-threaded wasm. step(budget) does about `budget` units of work and returns true once the
 // world is made; budget 0 runs to the end. A unit is one terrain sample (a raster cell, a terrain
-// mesh or water sample); the stages that are one call (the scatter, the streets, the city, the
-// roads, the props) take a step each, whatever the budget. phase() names the stage the next step
-// works on ("terrain", "scatter", "raster", "mesh", "materials", "streets", "city", "roads",
-// "props", "water"),
-// a static string. A throw (an unknown generator, a missing DEM) comes out of the step that hit it
+// mesh or water sample, a terrain LOD chunk's sample, those a whole chunk at a time); the stages
+// that are one call (the scatter, the streets, the city, the roads, the props) take a step each,
+// whatever the budget. phase() names the stage the next step works on ("terrain", "scatter",
+// "raster", "mesh", "materials", "streets", "city", "roads", "props", "water", "lod"), a static
+// string. A throw (an unknown generator, a missing DEM) comes out of the step that hit it
 // and every later one. The library must outlive the builder.
 class world_builder {
 public:
