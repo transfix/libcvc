@@ -35,6 +35,7 @@ class app;
 namespace ariadne {
 
 class Backend;
+struct LoadResult; // the loaded document (loader.h)
 
 class AppRuntime {
 public:
@@ -55,6 +56,8 @@ public:
   // The underlying Runtime — an escape hatch for backend attachment (a backend's own
   // install/wire step) and advanced hosts. Do not call rt.render() directly.
   Runtime &runtime();
+  // The state prefix the document binds under.
+  const std::string &prefix() const { return prefix_; }
 
   // A search dir for cvc:// component imports; forwarded to register_cvc_uri_handler on load().
   void add_component_path(const std::string &dir);
@@ -119,6 +122,20 @@ public:
   void register_function(const std::string &name, cvc::state_exec::native_fn fn);
   void register_async_function(const std::string &name, cvc::state_exec::async_marshal marshal,
                                const std::string &done_channel = std::string());
+
+  // A host extension's part in loading a document. `hook` runs in every load() (a reload too),
+  // after the document is parsed and before its requires: is checked and its init: runs, with the
+  // parsed document (a custom block a host registered is in lr.extras) and its path. A scripting
+  // host runs the document's python: block here and registers the functions it exports, so
+  // requires: and the load's scan of what the programs call both see them. Throw to fail the load;
+  // push onto lr.warnings to warn. Hooks run in the order added.
+  using LoadHook = std::function<void(LoadResult &lr, const std::string &path)>;
+  void add_load_hook(LoadHook hook);
+  // Work a host extension does every frame: `hook` runs at the end of every drain(), on its
+  // thread, after the document's programs and the scene service. A scripting host runs a Python
+  // program's per-frame work here (pycvc_gl.ariadne.Host's events, on_frame hooks and watches), so
+  // it runs whichever loop drives the frames. Hooks run in the order added.
+  void add_frame_hook(std::function<void()> hook);
 
   // Run `script` as one of the document's action programs (Runtime::run_program): submitted in the
   // next drain(), and `done` (may be null) is called from a later drain() with "" when it finished,
@@ -256,6 +273,8 @@ private:
   bool validateArgs_ = true;
   bool hasArgsBlock_ = false;
   std::vector<std::pair<std::string, std::string>> tests_; // the document's tests: block
+  std::vector<LoadHook> loadHooks_;                        // add_load_hook, in order
+  std::vector<std::function<void()>> frameHooks_;          // add_frame_hook, in order
 };
 
 } // namespace ariadne

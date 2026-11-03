@@ -19,6 +19,16 @@ Python program around it:
 A key is relative to the document's state prefix, as a ``bind:`` is: ``host.set("form.a", 1)``
 writes what ``bind: form.a`` shows. A key starting with ``/`` is app-root absolute.
 
+Inside a scripting host. Under ``ariglx run app.py`` (or ``arix run app.py``) the program runs in
+the host's own interpreter, and ``Host()`` adopts the host instead of opening a window of its own
+(mode ``"embedded"``, the default there): the same window, document runtime and state, and the same
+program runs under plain ``python`` too. ``host.run()`` runs the host's own loop; a program may
+instead load its document and return, and the host runs it. ``current_host()`` returns that Host
+(None under plain ``python``), and ``export`` marks the functions a document's ``python:`` block
+exports (ARIADNE.md §9.6). Embedded, the host reports the document's warnings itself (``warnings``
+stays empty), an exception in an ``on`` handler, ``on_frame`` hook or ``watch`` callback is printed
+and closes the document with status 1, and ``load()`` from inside a frame raises.
+
 The loop is yours (``host.step()``) or the host's (``host.run()``)::
 
     from pycvc_gl.ariadne import Host
@@ -68,7 +78,47 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 log = logging.getLogger("pycvc_gl.ariadne")
 
-MODES = ("window", "offscreen", "headless")
+MODES = ("window", "offscreen", "headless", "embedded")
+
+_current = None  # the Host adopting the scripting host this program runs in (current_host)
+
+
+def _arihost():
+    """The scripting host this interpreter runs in (arix, ariglx) once it has lent its document,
+    else None (plain ``python``, or ``ariglx python``)."""
+    try:
+        import _arihost
+    except ImportError:
+        return None
+    return _arihost if _arihost.attached() else None
+
+
+def current_host():
+    """The ``Host`` over the scripting host this program runs in, made on first use; None under
+    plain ``python``."""
+    if _current is None and _arihost() is not None:
+        Host()
+    return _current
+
+
+def export(fn=None, *, name=None, is_async=False, with_call=False, done_channel=""):
+    """Export ``fn`` from a document's ``python:`` block (or a module it names): the document's
+    programs call it as ``(name a b ...)``. ``name`` defaults to the function's own; ``is_async``,
+    ``with_call`` and ``done_channel`` are ``async_function``'s. It only marks the function, so a
+    module that uses it also imports under plain ``python``."""
+
+    def mark(f):
+        if not callable(f):
+            raise TypeError(f"export: {f!r} is not callable")
+        f.__ari_export__ = {
+            "name": name or f.__name__,
+            "is_async": is_async,
+            "with_call": with_call,
+            "done_channel": done_channel,
+        }
+        return f
+
+    return mark(fn) if fn is not None else mark
 
 # Ariadne caps each action (docs/ARIADNE.md §2.2) at 0.1 s and 5000 steps, sized for a document's own
 # code. A Python function's run time counts against the time cap, and an async one's CPU time as
@@ -143,7 +193,7 @@ class Host:
         self,
         document: str | None = None,
         *,
-        mode: str = "window",
+        mode: str | None = None,
         width: int = 1024,
         height: int = 768,
         name: str = "ari",
@@ -160,18 +210,29 @@ class Host:
         first, then ``load()`` it (a document's ``requires:`` is checked at load).
 
         ``mode``: ``"window"`` (a real window), ``"offscreen"`` (GL with no window: captures, and
-        CI on a software GL), or ``"headless"`` (no GL at all: the document's programs, state and
-        host calls run, nothing is drawn, and a document that requires ``gl.scene`` doesn't load).
+        CI on a software GL), ``"headless"`` (no GL at all: the document's programs, state and
+        host calls run, nothing is drawn, and a document that requires ``gl.scene`` doesn't load),
+        or ``"embedded"`` (adopt the scripting host this program runs in: see the module
+        docstring). The default is ``"embedded"`` inside a scripting host, else ``"window"``;
+        another mode there opens a Host of its own beside the host's.
         ``name`` is the scene's name and the document's state prefix. ``fixed_clock`` steps the
         scene and UI clocks by each frame's dt instead of wall time (default: on offscreen, for
         reproducible frames). ``streaming`` registers the stream verbs and widgets before the
         document loads (``open_stream`` does too). ``limits`` sets the app's per-action caps,
         ``ariadne.limits.<name>`` (default ``DEFAULT_LIMITS``: a Python function may take its time).
         """
+        if mode is None:
+            mode = "embedded" if _arihost() is not None else "window"
         if mode not in MODES:
             raise ValueError(f"Host: mode must be one of {MODES}, not {mode!r}")
         self._pycvc = pycvc = _modules()
         self.mode = mode
+        self.embedded = mode == "embedded"
+        if self.embedded:
+            self._embed(name, width, height, args, strict, limits, component_paths, streaming)
+            if document is not None:
+                self.load(document)
+            return
         self.app = app if app is not None else pycvc.make_app()
         for k, v in (DEFAULT_LIMITS if limits is None else limits).items():
             pycvc.state_set(self.app, f"ariadne.limits.{k}", _format(v))
@@ -225,6 +286,86 @@ class Host:
             self.enable_streaming()
         if document is not None:
             self.load(document)
+
+    def _embed(self, name, width, height, args, strict, limits, component_paths, streaming):
+        """Adopt the scripting host this program runs in: its app, its document runtime and (in a
+        GL host) its window, none of which this Host owns."""
+        global _current
+        host = _arihost()
+        if host is None:
+            raise RuntimeError("Host(mode='embedded'): this program does not run in a scripting "
+                               "host (arix, ariglx)")
+        if _current is not None and not _current._closed:
+            raise RuntimeError("Host(): this program's host is already adopted; use "
+                               "pycvc_gl.ariadne.current_host()")
+        pycvc = self._pycvc
+        self._host = host
+        self.app = pycvc.app_from_capsule(host.app())
+        for k, v in (limits or {}).items():  # the host has raised the caps as DEFAULT_LIMITS
+            pycvc.state_set(self.app, f"ariadne.limits.{k}", _format(v))
+        self.width, self.height = int(width), int(height)
+        self.strict = strict
+        self.warnings = []
+        self.images, self.streams = {}, {}
+        self.frame_count = 0
+        self.document = None
+        self._handlers, self._frame_hooks, self._watches = {}, [], []
+        self._errors, self._function_errors, self._program_failures = [], [], []
+        self._emitted = []
+        self._pending_load = None
+        self._in_frame = False
+        self._closed = False
+        self._lab = None
+        self._args = list(args) if args is not None else None
+        self._thread = threading.get_ident()
+        self._last_frame = None
+        self.scene = self.view = self.camera = self.overlay = None
+        gl = host.gl()
+        if gl is None:  # arix: no GL, the document runtime alone
+            self.mode = "headless"
+            self.runtime = pycvc.ari_app_attach(self.app, host.runtime())
+        else:
+            import pycvc_gl
+
+            self.mode = host.mode()
+            rt, view, camera, overlay = gl
+            self.runtime = pycvc_gl.ari_runtime_from_capsule(rt)
+            self.view = pycvc_gl.scene_renderer_from_capsule(view)
+            self.camera = pycvc_gl.camera_controller_from_capsule(camera)
+            self.overlay = pycvc_gl.imgui_overlay_from_capsule(overlay)
+            self.scene = self.view.scene()
+        self.prefix = self.runtime.prefix()
+        for d in component_paths:
+            self.runtime.add_component_path(str(d))
+        self._streaming = False
+        if streaming:
+            self.enable_streaming()
+        host.add_frame_hook(self._embedded_frame)
+        _current = self
+
+    def _embedded_frame(self):
+        """This Host's part of each of the scripting host's frames (AppRuntime::add_frame_hook):
+        what ``step()`` does around the frame when the Host runs the loop itself."""
+        if self._closed:
+            return
+        now = time.perf_counter()
+        dt = now - self._last_frame if self._last_frame is not None else 0.0
+        self._last_frame = now
+        self._in_frame = True
+        try:
+            emitted, self._emitted = self._emitted, []
+            for event in emitted:
+                self._handlers[event]()
+            failures, self._program_failures = self._program_failures, []
+            for w in failures:
+                log.warning("%s", w)
+            self._raise_errors()
+            for hook in list(self._frame_hooks):
+                hook(dt)
+            self._poll_watches()
+            self.frame_count += 1
+        finally:
+            self._in_frame = False
 
     # ── registration: what the document calls ────────────────────────────────────────────────────
 
@@ -314,6 +455,9 @@ class Host:
         frame's end (and returns ``[]``). Raises ``RuntimeError`` when the document doesn't load."""
         self._check_open()
         if self._in_frame:
+            if self.embedded:
+                raise RuntimeError("Host.load: from inside a frame of a scripting host; load "
+                                   "before run(), or from another program")
             self._pending_load = (path, args)
             return []
         a = args if args is not None else self._args
@@ -578,6 +722,9 @@ class Host:
         ``until()`` is true). ``realtime`` paces them at ``fps`` (default: in a window). Ctrl-C goes
         to the document's ``on_signal:`` as SIGINT, and closes it when it has none. Returns the
         document's exit code."""
+        if self.embedded and frames is None and until is None and realtime is None:
+            self._check_open()
+            return int(self._host.run())  # the scripting host's own loop
         dt = 1.0 / fps if fps > 0 else 1.0 / 60.0
         if realtime is None:
             realtime = self.mode == "window"
@@ -607,6 +754,10 @@ class Host:
         if self._in_frame:
             raise RuntimeError("Host.step: called from inside a frame (a handler, function or "
                                "hook)")
+        if self.embedded:  # _embedded_frame runs this Host's part, inside the frame
+            self.runtime.frame(dt)
+            self.runtime.render()
+            return
         self._in_frame = True
         try:
             self.runtime.frame(dt)
@@ -727,6 +878,10 @@ class Host:
         self._closed = True
         rt = self.runtime
         rt.request_close()
+        if self.embedded:  # the host owns all of it, and tears it down itself
+            self._exit_code = int(rt.exit_code())
+            self._lab = None
+            return
         try:
             rt.wait_idle()  # without the GIL: an async function still running finishes
         finally:

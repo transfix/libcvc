@@ -44,7 +44,8 @@ constexpr const char *kValueFlags[] = {"--prefix",
                                        "--oidc-issuer",
                                        "--oidc-client",
                                        "--oidc-redirect-uri",
-                                       "--media-play"};
+                                       "--media-play",
+                                       "--python-path"};
 constexpr const char *kBoolFlags[] = {"--no-mouse", "--ansi", "--net", "--no-browser"};
 
 bool is_general_flag(const std::string &a) {
@@ -159,6 +160,8 @@ bool apply(const po::option &opt, HostOptions &o) {
       return false;
     }
     o.media_play = value;
+  } else if (a == "--python-path") {
+    o.python_path.push_back(value);
   } else if (a == "--image") {
     const std::size_t at = value.find('=');
     if (at == std::string::npos || at == 0 || at + 1 == value.size()) {
@@ -336,7 +339,9 @@ std::string host_flags_help() {
          "                         (repeatable; pins I like --oidc-issuer)\n"
          "  --oidc-redirect-uri U  a browser page's redirect URI (default: the page's own URL)\n"
          "  --no-browser           never open a browser: sign-in uses a device code, and\n"
-         "                         open-url shows the URL instead\n";
+         "                         open-url shows the URL instead\n"
+         "  --python-path DIR      a scripting host (arix, ariglx): put DIR on the embedded\n"
+         "                         Python's sys.path (repeatable)\n";
 }
 
 std::string misplaced_flag_note(const std::string &runtime,

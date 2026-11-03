@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# cvcpkg/recipes/ariglx/build.sh — build `ariglx`, arigl with an embedded Python, standalone against
+# the installed libcvc and cvcGL SDKs, VTK, and the deps prefix's python312. Compiles src/arigl with
+# -DARIGL_WITH_PYTHON=ON (main.cpp and gallery.cpp plus src/ariadne_python's engine) and links the
+# pre-installed cvc::cvcGL, VTK and libpython, so neither SDK is rebuilt. Installs just bin/ariglx:
+# arigl, built beside it, is not installed.
+set -euo pipefail
+
+: "${CVC_SOURCE_DIR:?CVC_SOURCE_DIR must be set}"   # libcvc repo root (vendored)
+: "${CVC_BUILD_DIR:?CVC_BUILD_DIR must be set}"
+: "${CVC_INSTALL_DIR:?CVC_INSTALL_DIR must be set}"
+
+CVC_BUILD_TYPE="${CVC_BUILD_TYPE:-Release}"
+CVC_JOBS="${CVC_JOBS:-$(nproc 2>/dev/null || echo 4)}"
+
+case "$(echo "$CVC_BUILD_TYPE" | tr '[:upper:]' '[:lower:]')" in
+  debug) CMAKE_BUILD_TYPE=Debug ;;
+  *) CMAKE_BUILD_TYPE=Release ;;
+esac
+
+CMAKE_ARGS=(
+  -G Ninja
+  -S "$CVC_SOURCE_DIR/src/arigl"
+  -B "$CVC_BUILD_DIR"
+  -DCMAKE_INSTALL_PREFIX="$CVC_INSTALL_DIR"
+  -DCMAKE_BUILD_TYPE="$CMAKE_BUILD_TYPE"
+  -DARIGL_WITH_PYTHON=ON
+)
+
+# The deps prefix carries the installed libcvc and cvcGL SDKs, VTK, imgui, SDL3 and python312. It
+# may be several prefixes, ;-separated. The interpreter is named outright: FindPython3 left to
+# itself would take a system python3 first, and ariglx must embed the one it runs beside.
+if [[ -n "${CVC_DEPS_PREFIX:-}" ]]; then
+  CMAKE_ARGS+=("-DCMAKE_PREFIX_PATH=$CVC_DEPS_PREFIX")
+  IFS=';' read -r -a _prefixes <<<"$CVC_DEPS_PREFIX"
+  for _p in "${_prefixes[@]}"; do
+    if [[ -x "$_p/bin/python3.12" ]]; then
+      CMAKE_ARGS+=("-DPython3_EXECUTABLE=$_p/bin/python3.12")
+      break
+    fi
+  done
+fi
+
+cmake "${CMAKE_ARGS[@]}"
+cmake --build "$CVC_BUILD_DIR" -j "$CVC_JOBS" --target ariglx
+cmake --install "$CVC_BUILD_DIR" --component ariglx

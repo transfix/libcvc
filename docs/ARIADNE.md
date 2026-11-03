@@ -2104,6 +2104,7 @@ document path is the document's (§5.6):
 | `ari` | libcvc only (FTXUI, optionally tvision) | in the terminal; a `scene:` is dropped | [`src/ari`](../src/ari/main.cpp) |
 | `arigl` | libcvc + cvcGL (VTK, ImGui) | in a real window, or `--terminal` with its scene rendered behind the widgets | [`src/arigl`](../src/arigl/main.cpp) |
 | `arisrv` | libcvc + gRPC + WebSocket | headless, as a server (the conference relay + WS↔gRPC bridge) | [`src/arisrv`](../src/arisrv/main.cpp) |
+| `arix`, `ariglx` | `ari`, `arigl` + an embedded CPython (pycvc, pycvc_gl, numpy) | as `ari` and `arigl`, plus a document's `python:` block and a Python program in place of the document (§9.6) | [`src/ariadne_python`](../src/ariadne_python/python_engine.h) |
 
 ```
 arigl run      [--terminal] [flags] doc.ari [document args...]
@@ -2504,6 +2505,107 @@ scene), `pycvc.Exec` ([`bindings/pycvc/pycvc_exec.h`](../bindings/pycvc/pycvc_ex
 is the lighter handle. It owns a **private** async scheduler and lets you register Python
 callables as DSL functions (§10). One `Exec` is driven by one thread — use a separate
 `Exec` per thread.
+
+### 9.6 The scripting hosts: `arix` and `ariglx`
+
+`arix` and `ariglx` are `ari` and `arigl` with an embedded CPython
+([`src/ariadne_python`](../src/ariadne_python/python_engine.h); the plan for the rest, the browser
+and `arisrv`, is [roadmap/ARIADNE_SCRIPTING_HOSTS.md](roadmap/ARIADNE_SCRIPTING_HOSTS.md)). They
+take the same commands and flags, and add:
+
+- a document's `python:` block, run at load;
+- a Python program in place of the document: `ariglx run app.py`;
+- `<host> python [args]`, the interpreter as a plain `python3`;
+- `--python-path DIR` (repeatable): DIR on the interpreter's `sys.path`, as `PYTHONPATH` puts it.
+
+The interpreter is the prefix's when the host is installed beside a `python312` (with what is in
+its site-packages: pycvc, pycvc_gl, numpy, ...), else the one the host was built against.
+`PYTHONHOME` and `PYTHONPATH` work as for `python3`. There is one interpreter per process: numpy
+and the SWIG modules are not sub-interpreter safe.
+
+Each is a cvcpkg package of its own (Linux), so the stock hosts stay Python-free:
+`cvcpkg install ariglx` brings `python312`, `numpy-cp312`, `pycvc-cp312` and `pycvc-gl-cp312` into
+the same prefix, and `ariglx` finds them there. `arix` brings pycvc but not pycvc_gl; install
+`pycvc-gl-cp312` too for a Python program, whose `Host` is pycvc_gl's.
+
+**A document's `python:` block.**
+
+```yaml
+requires: [python, python.numpy]
+python:
+  path: [py]              # sys.path entries, relative to the document (its directory is always one)
+  modules: [sim]          # imported at load
+  export:                 # functions to export by name
+    - sim.step_world
+    - {name: sim.reset, as: reset-world, async: true}
+  source: |
+    import numpy as np
+
+    @export
+    def histogram(values, bins=16):
+        counts, edges = np.histogram(values, bins)
+        return {"counts": counts.tolist(), "edges": edges.tolist()}
+init: (state-set-tree "hist" (histogram (list 1 2 2 3)))
+```
+
+- The block is its source alone (`python: |`), or a map of `source:`, `modules:`, `path:` and
+  `export:`.
+- **When.** It runs on every load (a reload too), after the document parses and before its
+  `requires:` is checked and `init:` runs, in a module of its own, fresh each load. A reload also
+  reloads the modules it imports from the document's own directories.
+- **Exports.** They become the document's host functions, as `Host.function` makes them (§9.3):
+  `(histogram xs)` passes the call's arguments as Python values and returns the function's value.
+  - `@export` marks a function in the source, where `export` is already defined. A module marks its
+    own with `from _arihost import export` (or `pycvc_gl.ariadne.export`, which also imports
+    under plain `python`).
+  - `export:` names functions too; `as:` gives one another name, and `async: true` makes it an
+    async function (§10.1).
+  - Exporting goes through pycvc, so pycvc must be importable.
+- **Errors.** A Python exception in a call is a `PythonError` the document can catch
+  ([STATE_EXEC_EXCEPTIONS.md](STATE_EXEC_EXCEPTIONS.md)). One at load fails the load, with the
+  traceback from the document's code.
+- **Caps.** As `Host` does, the host raises the per-action caps (§2.2) to 30 s and no step cap, so a
+  Python call can take its time, unless the app's tree already sets them.
+- **Tokens.** `python` holds where an embedded Python runs the block, and `python.<module>` where
+  `<module>` is importable (`python.numpy`): list them in `requires:`, or ask with
+  `(has? "python.numpy")`. A stock host fails a document that requires `python` with an error that
+  names the scripting hosts, and ignores a `python:` block with a warning.
+- **Trust.** Natively the block runs with the user's authority, like any program they start (it
+  can `import os`), so run a document with Python only when you would run the program.
+
+**A Python program in place of the document.** `ariglx run app.py [args]` (or `snapshot`, `check`;
+`arix` too) runs `app.py` as `__main__`, with `sys.argv` = `[app.py, args...]` and its directory
+first on `sys.path`. Its `pycvc_gl.ariadne.Host()` adopts the host (mode `"embedded"`, the default
+inside a scripting host) instead of opening a window of its own: the same window, runtime and
+state, with the rest of `Host`'s API (§9.3).
+
+```python
+from pycvc_gl.ariadne import Host
+
+host = Host()  # this ariglx's window and document runtime
+
+
+@host.function("twice")
+def twice(x):
+    return 2 * x
+
+
+host.load("app.ari")
+host.run()  # the host's own loop: run's window, snapshot's frames
+```
+
+- `host.run()` runs the host's loop, once, and returns the document's exit status. A program that
+  loads a document and returns has the host run it then. The host exits with the program's status,
+  or the document's when the program's is 0.
+- `on_frame` hooks, `watch` callbacks and `on` handlers run in each of the host's frames, whichever
+  loop drives them. An exception in one is printed and closes the document with status 1.
+- `pycvc_gl.ariadne.current_host()` is that Host (None under plain `python`), and the same program
+  runs under plain `python`, where `Host()` opens a window.
+- In `arix` the Host has no GL (its mode is `"headless"`).
+
+**`<host> python`.** The embedded interpreter as `python3`, with the host's packages:
+`ariglx python -m pytest`, or `ariglx python -m grl_snam.ariadne live austin-freedrive`. That
+interpreter has no document attached, so `Host()` there opens a window of its own.
 
 ---
 
@@ -3021,6 +3123,14 @@ without either has no `ws-*` verbs, so a document asks `(has? "ws-open")` and po
 
 State plainly so authors are not misled. Each item cites the code; the roadmap items
 below (G17–G21 in the internal gap report) are tracked for reconciliation.
+
+- **The scripting hosts are native and partial** (§9.6,
+  [roadmap](roadmap/ARIADNE_SCRIPTING_HOSTS.md)). Only the top document's `python:` block runs: a
+  `load:`ed module's is not run yet. A Python program runs in a window, offscreen or in `arix`, not
+  under `ariglx --terminal`, and its embedded `Host.load()` from inside a frame raises (load before
+  `run()`). There is no `ariglx-web` (the browser) and no `arisrvx` yet. The `arix` and `ariglx`
+  packages are Linux-only, where `pycvc-cp312` and `pycvc-gl-cp312` are; elsewhere build them
+  in-tree with the bindings (`-DCVC_BUILD_PYCVC=ON`).
 
 - **Sign-in checks an ID token's claims, not its signature** (§10.5): the token comes straight from
   the token endpoint over TLS. A sign-in kept in a `--credential-store` file is picked up only when
