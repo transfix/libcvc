@@ -759,7 +759,14 @@ with level of detail: a `LodGraphicsNode` ladder per 128 m ground cell (under `<
 `<id>_foliage` and `<id>_needles`), chosen each frame by screen error. Every rung is the same
 full-maturity tree, coarser further off: rung 1 from 260 m (three-sided tubes, none under 5 cm, the
 leaves as solids), rung 2 from 700 m (a trunk and a crown with the tree's colour and coverage), the
-radii scaled by the quality preset (the wasm build coarsens sooner).
+radii scaled by the quality preset (the wasm build coarsens sooner). The ground does too: the node
+draws nothing itself but holds the texture, and its children are a ladder per chunk of 64 terrain
+cells (doubled until at most 16 chunks span the world). Rung k keeps every 2^k-th sample, down to 4
+cells a chunk, so every rung is the terrain's own surface, points, normals and UVs, with fewer
+triangles. A chunk coarsens once its largest height error falls under the preset's pixel budget,
+and stays within one rung of each neighbour; skirts hung from the edges two chunks share hide the
+seam. The chunks share the node's one texture and take its `casts_shadow`, `shader:` and
+`material:` keys. Physics, nav and `ground:` read the full terrain.
 
 **The fast render path.** A big static world draws fast when it is a few merged meshes and its
 shadow maps are re-baked rarely and spent where the camera looks. These keys say so

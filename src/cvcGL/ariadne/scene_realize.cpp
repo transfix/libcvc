@@ -935,16 +935,12 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
   apply_visibility(*node, n, sg.appContext(), bind_prefix, out.visibility);
   if (n.has_casts_shadow) // receives shadows either way; a non-caster never forces a re-bake
     node->setCastsShadow(n.casts_shadow);
-  // shader: { preset | vertex | fragment } — the declarative GLSL surface. Applied in the shared
-  // tail (not just the built-in geometry branch) so a CUSTOM node type whose realizer returns a
-  // GeometryNode (e.g. an L-system forest wanting `shader: { preset: bark }`) is shaded too. A
-  // non-geometry node (volume/group) silently ignores a shader block.
-  if (n.shader.present)
-    if (auto *g = dynamic_cast<GeometryNode *>(node.get()))
-      apply_shader(*g, n, warnings);
-  if (n.material_opaque) // no per-texel alpha scan to pick the pass (built-in or custom mesh)
-    if (auto *g = dynamic_cast<GeometryNode *>(node.get()))
-      g->setForceOpaque(true);
+  // shader: { preset | vertex | fragment } — the declarative GLSL surface — and material.opaque.
+  // Applied in the shared tail (not just the built-in geometry branch) so a CUSTOM node type whose
+  // realizer returns a GeometryNode (e.g. an L-system forest wanting `shader: { preset: bark }`)
+  // is shaded too. A non-geometry node (volume/group) silently ignores them.
+  if (auto *g = dynamic_cast<GeometryNode *>(node.get()))
+    apply_mesh_keys(*g, n, warnings);
   apply_clip(*node, n, sg.appContext(), bind_prefix, out.clip, warnings); // own coordinates
   warn_clip_capability(*node, n, warnings);
   if (n.body.present)
@@ -1807,6 +1803,16 @@ void register_scene_node_type(const std::string &type, NodeRealizer realizer) {
 bool has_scene_node_type(const std::string &type) {
   std::lock_guard<std::mutex> lock(node_registry_mutex());
   return node_registry().find(type) != node_registry().end();
+}
+
+void apply_mesh_keys(GeometryNode &g, const cvc::ariadne::SceneNode &n,
+                     std::vector<std::string> *warnings) {
+  if (n.has_casts_shadow)
+    g.setCastsShadow(n.casts_shadow);
+  if (n.shader.present)
+    apply_shader(g, n, warnings);
+  if (n.material_opaque) // no per-texel alpha scan to pick the pass
+    g.setForceOpaque(true);
 }
 
 void register_shader_preset(const std::string &name, ShaderPreset preset) {

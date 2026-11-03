@@ -1254,14 +1254,16 @@ enum class build_stage {
   roads,
   props,
   water,
+  lod,
   done
 };
 
-const char *const kStageNames[] = {"terrain", "scatter", "raster", "raster", "mesh",  "materials",
-                                   "streets", "city",    "roads",  "props",  "water", "done"};
+const char *const kStageNames[] = {"terrain",   "scatter", "raster", "raster", "mesh",
+                                   "materials", "streets", "city",   "roads",  "props",
+                                   "water",     "lod",     "done"};
 // Each stage's share of the progress, about its share of a 5 km world's time natively.
-const double kStageWeight[] = {0.02, 0.06, 0.22, 0.02, 0.30, 0.03,
-                               0.08, 0.08, 0.05, 0.06, 0.08, 0.0};
+const double kStageWeight[] = {0.02, 0.06, 0.19, 0.02, 0.27, 0.03, 0.08,
+                               0.08, 0.05, 0.06, 0.08, 0.06, 0.0};
 
 // Rows of `cols` samples, `per` units each, that fit in `budget` (at least one).
 int rowsFor(std::size_t budget, int cols, int per) {
@@ -1462,8 +1464,35 @@ struct world_builder::impl {
       if (next >= waterN) {
         streets = city_streets();
         fps = FootprintIndex();
-        advance(build_stage::done);
+        w.terrain_layout = plan_terrain_chunks(*w.terrain);
+        w.terrain_chunks.reserve(std::size_t(w.terrain_layout.chunk_rows) *
+                                 w.terrain_layout.chunk_cols);
+        advance(build_stage::lod);
       }
+      return;
+    }
+    case build_stage::lod: {
+      // The ground's LOD chunks, whole chunks at a time: a chunk's samples, once per rung.
+      const terrain_chunk_layout &L = w.terrain_layout;
+      const int n = L.chunk_rows * L.chunk_cols;
+      if (next >= n) {
+        advance(build_stage::done);
+        return;
+      }
+      const std::size_t per = std::size_t(L.cells + 1) * (L.cells + 1) * std::max(1, L.rungs);
+      const int m = int(std::max<std::size_t>(1, std::min<std::size_t>(n - next, budget / per)));
+      w.terrain_chunks.resize(std::size_t(next + m));
+      // Each chunk reads only the terrain: they build in parallel.
+#ifdef CVC_USING_OPENMP
+#pragma omp parallel for schedule(dynamic)
+#endif
+      for (int i = next; i < next + m; ++i)
+        w.terrain_chunks[std::size_t(i)] =
+            make_terrain_chunk(*w.terrain, L, i / L.chunk_cols, i % L.chunk_cols);
+      next += m;
+      frac = n > 0 ? double(next) / n : 1.0;
+      if (next >= n)
+        advance(build_stage::done);
       return;
     }
     case build_stage::done:

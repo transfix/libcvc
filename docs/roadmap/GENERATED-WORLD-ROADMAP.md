@@ -203,8 +203,17 @@ The conference is the world's second consumer. Peers must see the same world and
     of its needles' shape, a broadleaf's leaf twigs one blob per fork; 36% of the triangles, no
     lines), rung 2 is its trunk and a crown over its full canopy (1.1%). The crowns take the full
     tree's area-weighted colour and cover what its limbs do side-on, so the look holds as cells
-    switch. Still to do: the terrain itself (chunks with skirts, section 8.4's T0–T4), and
-    cards past 1.6 km.
+    switch. Still to do: cards past 1.6 km.
+  - Landed: terrain LOD (section 8.4's chunks with skirts). `cvc::world::terrain_lod` cuts the
+    terrain into chunks of 64 cells (128 on a world over 16 chunks across), each a ladder of
+    strides 1, 2, 4, ... down to 4 cells a side, every rung the terrain's own samples (rung 0 is
+    its mesh exactly) with its largest height error measured. The node chooses each chunk's rung
+    by screen error and holds neighbours within one rung, which is what the skirts are deep
+    enough for. The rungs follow the error, not fixed radii: flat ground coarsens at once, a
+    channel's banks stay fine. The 2049^2 ground of an 11.2 km world, 8.4 M triangles drawn
+    whole, is 0.26 M from its middle and 16 k from the overview (natively, balanced preset); a
+    1.2 km world's 5 m relief stays at rung 0 in the balanced preset. The rungs hold 1.42x the
+    terrain's vertices as well as the terrain.
 - **Dynamic props, demo3's way**, for vehicles and avatars on the world: unregistered slot nodes,
   a pose gate, out of the bounds fit, non-casting. demo3 does this by hand. A libcvc node type
   would make it a scene key.

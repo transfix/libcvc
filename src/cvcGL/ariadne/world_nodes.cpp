@@ -42,7 +42,7 @@
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/height_field.h>
 #include <cvc/gl/GeometryNode.h>
-#include <cvc/gl/LodGraphicsNode.h> // the props' per-cell ladders, make_view_params
+#include <cvc/gl/LodGraphicsNode.h> // the props' and the ground's ladders, make_view_params
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/VolumeNode.h>
 #include <cvc/gl/ariadne/scene_realize.h>
@@ -70,11 +70,11 @@ namespace ari = cvc::ariadne;
 namespace world = cvc::world;
 
 constexpr int WATER_NZ = 22;
-// The props' LOD budget, as the room view's: the wasm profile coarsens sooner.
+// The props' and the ground's LOD budget, as the room view's: the wasm profile coarsens sooner.
 #ifdef __EMSCRIPTEN__
-constexpr cvc::lod::quality_preset kPropLodPreset = cvc::lod::quality_preset::aggressive;
+constexpr cvc::lod::quality_preset kLodPreset = cvc::lod::quality_preset::aggressive;
 #else
-constexpr cvc::lod::quality_preset kPropLodPreset = cvc::lod::quality_preset::balanced;
+constexpr cvc::lod::quality_preset kLodPreset = cvc::lod::quality_preset::balanced;
 #endif
 const char *const kColorNames[] = {"material", "risk", "occupancy", "height"};
 
@@ -173,6 +173,12 @@ struct WorldRT {
     std::weak_ptr<LodGraphicsNode> wood, leaves, needles;
   };
   std::vector<PropCell> cells;
+  // The ground, a LOD ladder per chunk (world::generated_world::terrain_chunks) under the terrain
+  // node, which holds the texture they all share and draws nothing itself. Each frame every chunk
+  // chooses its rung, then is held within one of its neighbours' (what the skirts cover).
+  std::vector<std::weak_ptr<LodGraphicsNode>> chunks;
+  std::vector<int> chunk_want; // each chunk's own choice last frame: its hysteresis history
+  std::shared_ptr<const ari::SceneNode> keys; // the authored node, for its mesh keys
   std::weak_ptr<VolumeNode> water;
   int water_n = 0;
   std::shared_ptr<WorldJob> job; // the running job, or null
@@ -403,12 +409,90 @@ void put_prop_cells(SceneGraph &sg, const std::string &id, WorldRT &rt) {
   }
 }
 
-// Each prop cell's rung for the camera `ren` shows: its wood ladder chooses, its leaves and needles
-// follow. Returns how many cells changed rung.
-int select_prop_lod(WorldRT &rt, vtkRenderer *ren) {
-  if (rt.cells.empty() || !ren || !ren->IsActiveCameraCreated())
+// Give every rung of the ground's chunks the terrain node's texture as it is now.
+void share_ground_texture(WorldRT &rt) {
+  auto t = rt.terrain.lock();
+  if (!t)
+    return;
+  for (const std::weak_ptr<LodGraphicsNode> &c : rt.chunks)
+    if (auto n = c.lock())
+      for (int k = 0; k < n->rungCount(); ++k)
+        if (auto g = n->rung(k))
+          g->shareTexture(t);
+}
+
+// Replace the last world's ground chunks with rt.w's: a ladder per chunk under the terrain node,
+// each rung styled as the terrain, with the node's mesh keys and its texture.
+void put_terrain_chunks(WorldRT &rt) {
+  auto t = rt.terrain.lock();
+  for (const std::weak_ptr<LodGraphicsNode> &c : rt.chunks)
+    if (auto n = c.lock(); n && t)
+      t->removeGraphicsChild(n);
+  rt.chunks.clear();
+  rt.chunk_want.clear();
+  if (!t)
+    return;
+  const world::generated_world &w = *rt.w;
+  const bool soft = rt.soft;
+  const std::weak_ptr<GeometryNode> ground = t; // weak: the node owns its chunks
+  const std::shared_ptr<const ari::SceneNode> keys = rt.keys;
+  for (std::size_t i = 0; i < w.terrain_chunks.size(); ++i) {
+    const world::terrain_chunk &ch = w.terrain_chunks[i];
+    auto n = t->addGraphicsChild<LodGraphicsNode>("chunk" + std::to_string(i));
+    n->setRungStyle([soft, ground, keys](GeometryNode &g) {
+      style_terrain(g, soft);
+      if (keys)
+        apply_mesh_keys(g, *keys);
+      if (auto from = ground.lock())
+        g.shareTexture(from);
+    });
+    cvc::lod::mesh_pyramid pyr;
+    pyr.rungs = ch.rungs;
+    pyr.world_error_m = ch.error_m;
+    n->setPyramid(pyr);
+    rt.chunks.push_back(n);
+  }
+  rt.chunk_want.assign(rt.chunks.size(), -1);
+}
+
+// Each ground chunk's rung for `view`: its own choice from its error, then refined until no
+// neighbour is more than one rung off. Returns how many chunks changed rung.
+int select_terrain_lod(WorldRT &rt, const cvc::lod::view_params &view) {
+  const world::generated_world &w = *rt.w;
+  const world::terrain_chunk_layout &L = w.terrain_layout;
+  const std::size_t n = rt.chunks.size();
+  if (n == 0 || n != w.terrain_chunks.size())
     return 0;
-  const cvc::lod::view_params view = make_view_params(ren, cvc::lod::preset_view(kPropLodPreset));
+  std::vector<int> rung(n, 0);
+  for (std::size_t i = 0; i < n; ++i) {
+    auto c = rt.chunks[i].lock();
+    if (!c)
+      continue;
+    const cvc::bounding_box bb = c->getWorldBoundingBox();
+    const double centre[3] = {0.5 * (bb.minx + bb.maxx), 0.5 * (bb.miny + bb.maxy),
+                              0.5 * (bb.minz + bb.maxz)};
+    const double dx = bb.maxx - bb.minx, dy = bb.maxy - bb.miny, dz = bb.maxz - bb.minz;
+    const double dist =
+        cvc::lod::bound_distance_m(centre, 0.5 * std::sqrt(dx * dx + dy * dy + dz * dz), view);
+    const std::vector<double> &err = w.terrain_chunks[i].error_m;
+    rung[i] = rt.chunk_want[i] =
+        cvc::lod::select_rung(dist, err.data(), int(err.size()), rt.chunk_want[i], view);
+  }
+  world::constrain_terrain_rungs(rung, L.chunk_rows, L.chunk_cols);
+  int changes = 0;
+  for (std::size_t i = 0; i < n; ++i)
+    if (auto c = rt.chunks[i].lock(); c && c->selectedRung() != rung[i]) {
+      c->setRung(rung[i]);
+      ++changes;
+    }
+  return changes;
+}
+
+// Each prop cell's rung for `view`: its wood ladder chooses, its leaves and needles follow.
+// Returns how many cells changed rung.
+int select_prop_lod(WorldRT &rt, const cvc::lod::view_params &view) {
+  if (rt.cells.empty())
+    return 0;
   int changes = 0;
   for (const WorldRT::PropCell &c : rt.cells) {
     auto wood = c.wood.lock();
@@ -433,10 +517,10 @@ void apply_world(SceneGraph &sg, const std::string &id, WorldRT &rt,
                  const std::vector<unsigned char> &texture) {
   const world::generated_world &w = *rt.w;
   if (auto t = rt.terrain.lock()) {
-    t->setGeometry(cvc::geometry(*w.terrain));
     style_terrain(*t, rt.soft);
     t->setTexture(surface_image(rt.texture_size, texture), false);
   }
+  put_terrain_chunks(rt);
   *rt.field = *w.terrain; // the published ground follows the world
   const bool soft = rt.soft, arch = w.archetypes;
   put_prop_cells(sg, id, rt);
@@ -599,6 +683,7 @@ void apply_world_job(SceneGraph &sg, const std::string &id, WorldRT &rt) {
   } else {
     if (auto t = rt.terrain.lock())
       t->setTexture(surface_image(rt.texture_size, j->texture), false);
+    share_ground_texture(rt);
     publish_stats(rt);
   }
 }
@@ -700,12 +785,16 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
   }
   rt->sig = params_sig(p0);
 
-  // The node is the terrain; its height_field is what `ground: <id>` and a body stand on.
+  // The node is the terrain; its height_field is what `ground: <id>` and a body stand on. It draws
+  // through its chunks (put_terrain_chunks): its own mesh stays empty, and it holds their texture.
   rt->field = std::make_shared<cvc::height_field>(*rt->w->terrain);
   out.height_fields[n.id] = rt->field;
-  const cvc::geometry ground(*rt->w->terrain);
+  auto keys = std::make_shared<ari::SceneNode>(n);
+  keys->children.clear(); // realize_scene realizes those itself
+  rt->keys = keys;
+  const cvc::geometry none;
   std::shared_ptr<GraphicsNode> gn =
-      parent ? parent->createChild<GeometryNode>(n.id, ground) : sg.addGraphics(n.id, ground);
+      parent ? parent->createChild<GeometryNode>(n.id, none) : sg.addGraphics(n.id, none);
   auto tnode = std::dynamic_pointer_cast<GeometryNode>(gn);
   if (!tnode) {
     if (warnings)
@@ -736,9 +825,17 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
   out.custom_ticks.push_back([rt, sgp, id](vtkRenderer *ren) {
     if (rt->terrain.expired())
       return;
-    // The props' LOD for this frame's camera; a cell that changed rung casts a different shadow.
-    if (select_prop_lod(*rt, ren) > 0)
-      sgp->invalidateShadowBake();
+    // The props' and the ground's LOD for this frame's camera; a caster that changed rung casts a
+    // different shadow.
+    if (ren && ren->IsActiveCameraCreated()) {
+      const cvc::lod::view_params view = make_view_params(ren, cvc::lod::preset_view(kLodPreset));
+      int recast = select_prop_lod(*rt, view);
+      const int ground = select_terrain_lod(*rt, view);
+      if (auto t = rt->terrain.lock(); t && t->castsShadow())
+        recast += ground;
+      if (recast > 0)
+        sgp->invalidateShadowBake();
+    }
     cvc::app &app = *rt->app;
     const long f = rt->frame++;
     // Commands: Regenerate forces a rebuild, Randomize steps the seed, Stop ends the running job
