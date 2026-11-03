@@ -294,7 +294,9 @@ void sync_energy_policy(holon &h, cvc::app &app, const std::string &room) {
 }
 
 // Publish PID's reserve when it has moved by half a percent of the most it can hold, when it
-// first empties or fills, and otherwise every HEARTBEAT ticks.
+// first empties or fills, and otherwise every HEARTBEAT ticks while it still differs from the
+// published one. A reserve that has stopped moving (full, at rest) needs no re-stamp: the client's
+// prediction refills to the same value, and it was corrected on the way there.
 void write_reserve(holon &h, cvc::app &app, const std::string &room, const std::string &pid,
                    std::uint64_t heartbeat) {
   avatar_energy e;
@@ -307,15 +309,15 @@ void write_reserve(holon &h, cvc::app &app, const std::string &room, const std::
   const double now = std::floor(e.reserve + 0.5); // published in whole joules
   const bool moved = !have || std::fabs(now - last) >= 0.005 * full ||
                      ((now == 0.0 || now == std::floor(full + 0.5)) && now != last);
-  const bool beat = h.tick() < last_tick || h.tick() - last_tick >= heartbeat;
+  const bool beat = h.tick() < last_tick || (now != last && h.tick() - last_tick >= heartbeat);
   if (moved || beat)
     conference::write_avatar_reserve(app, room, pid, e.reserve, h.tick());
 }
 
 } // namespace
 
-void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_dt,
-                 bool write_poses) {
+void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_dt, bool write_poses,
+                 double pose_heartbeat_s) {
   sync_statics(h, app, room);
   sync_energy_policy(h, app, room);
   // The present participants, straight from the replicated room tree.
@@ -353,13 +355,15 @@ void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_d
   h.advance(wall_dt);
   // Publish each participant's authoritative pose (these are local writes on the
   // relay's shard; the caller fans them to the clients): what changed, and a
-  // heartbeat of about a second for an avatar standing still -- unless the caller
+  // heartbeat of POSE_HEARTBEAT_S for an avatar standing still -- unless the caller
   // streams the poses this step (WRITE_POSES false).
   const std::uint64_t heartbeat =
       std::max<std::uint64_t>(1, static_cast<std::uint64_t>(1.0 / h.clock().fixed_dt()));
+  const auto pose_heartbeat = std::max<std::uint64_t>(
+      1, static_cast<std::uint64_t>(std::llround(pose_heartbeat_s / h.clock().fixed_dt())));
   if (write_poses)
     for (const conference::room_participant &p : roster)
-      write_pose(app, room, p.pid, h.state(p.pid), h.tick(), heartbeat);
+      write_pose(app, room, p.pid, h.state(p.pid), h.tick(), pose_heartbeat);
   // And each one's reserve, every step: no snapshot carries it, and write_reserve thins it by its
   // own rule, not the poses'.
   for (const conference::room_participant &p : roster)

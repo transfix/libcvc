@@ -1199,6 +1199,9 @@ other `on:tick`/`on:key` cadence questions.
   > verbs. Tests: `AriadneAction.ProgramOn*`, `AriadneLoader.ProgramOnCapturedVerbatim`.
   > *Deferred:* the LONG-LIVED cross-frame async scheduler (a heavy action spreading over frames);
   > today each action runs to completion within its per-activation cap in one drain (like `init:`).
+  > *Since landed:* actions and residents now run on the app's long-lived `app.exec_scheduler()`,
+  > pumped by every `Runtime::drain()` across frames; only `init:` keeps a private synchronous
+  > run-to-completion runner (`run_scoped_program`). See `docs/ARIADNE.md` §2.
   > **Host intrinsics in a program LANDED** (`register_action_intrinsics`): a host binds native fns —
   > e.g. nav verbs `(nav-step)` / `(nav-arrived)` — that a program `on:` (and `init:`) may call, so a
   > program can invoke a host capability AND compute over live host state inline. Applied when each
@@ -1227,7 +1230,9 @@ other `on:tick`/`on:key` cadence questions.
   there is **one** long-lived `async_stackless_evaluator` + `async_scheduler` for the whole
   host (owned by `cvc::app`, or a small service hung off it), **not one per `.ari` document**.
   Every document's program lanes (`init:` / action `on:` / `on:tick`·`on:key` residents /
-  spawned processes) schedule on that single cooperative timeline, so cross-document
+  spawned processes) schedule on that single cooperative timeline (*as built:* all but `init:`,
+  which runs each script to completion on a private synchronous scheduler that shares only the
+  app's lock manager; `docs/ARIADNE.md` §2), so cross-document
   coordination (a shared sim world, `spawn`/`msg` between documents) is intrinsic and the
   whole-host state_exec time budget is enforced at **one** per-frame pump — not N pumps that
   each independently claim a full slice. Isolation is preserved by **namespacing on the shared
@@ -2021,6 +2026,14 @@ subject of the still-open streamed-source contract (§9.8).
 > Tracked alongside the §13 URI resource model (§7.8.6a).
 
 ### 9.5 Views render a masked, modified subset of the one authored scene
+
+> **Status (2026-11):** node `tags:` and the `viewport` widget are implemented (ARIADNE.md §5.18).
+> The widget does the job of the `view_embed` below. Each view is a mirror viewport: its own
+> camera, its rect cut out of its window's background, and the props of the nodes its `show:` /
+> `hide:` rule out filtered from the mirror (`Viewport::setMirrorFilter`). That is masking without
+> the traversal tree or bit allocation (no 32-tag limit). Not done: `override:` (restyling a
+> subset), a top-level `views:` block of full-window views, and the mask as a state_exec
+> expression (a bound tag list does that job).
 
 One render window hosts **N layered viewports**, each its own camera — this is
 `ViewportManager` (`SceneRenderer` is its single-viewport facade and exposes

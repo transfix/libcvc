@@ -18,6 +18,7 @@
 #include <cvc/gl/ariadne/bundles.h>                // register_streaming / register_window_widgets
 #include <cvc/gl/ariadne/extensions.h>             // register_cvcgl_extensions
 #include <cvc/gl/ariadne/scene_realize.h>          // realize_scene / RealizedScene / tick_scene
+#include <cvc/gl/ariadne/scene_views.h>            // the viewport widget
 #include <cvc/gl/ariadne/stream_texture_binding.h> // StreamTextureBinding (gl-bind-stream sink)
 #include <cvc/gl/ariadne/stream_verbs.h>     // StreamBindingSink / register_gl_stream_intrinsics
 #include <cvc/state/state_exec/async_host.h> // wait_idle
@@ -231,6 +232,19 @@ AriRuntime::AriRuntime(SceneRenderer &view, CameraController &cam, ImGuiOverlay 
   app_rt_.set_backend(backend_);
   backend_.install(app_rt_.runtime(), *overlay_);
 
+  // `type: viewport`: a view of the scene in a window. The draw callback hides, once the walk is
+  // done, any view whose widget was not drawn this frame.
+  views_ = std::make_unique<SceneViews>(view, backend_, [this] { return realized(); });
+  views_->register_widget();
+  {
+    cvc::ariadne::Runtime *r = &app_rt_.runtime();
+    SceneViews *v = views_.get();
+    overlay_->setDrawCallback([r, v] {
+      r->render();
+      v->end_walk();
+    });
+  }
+
   // cvcGL's custom scene node types and shader presets (forest_trees, mesh_lab, ...), so a
   // Python-hosted document realizes the same node types ariadne_hello does. Idempotent.
   register_cvcgl_extensions(app_);
@@ -255,6 +269,7 @@ AriRuntime::~AriRuntime() {
   // so a stray render during Python GC can't call rt.render() on a half-torn-down Runtime.
   if (overlay_)
     overlay_->setDrawCallback([] {});
+  views_->clear(); // the viewports, while the view they are in is still the host's
 }
 
 // ── setup / document (forward to AppRuntime) ─────────────────────────────────────────────────────
@@ -300,7 +315,10 @@ void AriRuntime::enable_streaming() {
   register_window_widgets(backend_, app_);
 }
 
-std::vector<std::string> AriRuntime::load(const std::string &path) { return app_rt_.load(path); }
+std::vector<std::string> AriRuntime::load(const std::string &path) {
+  views_->clear(); // the last document's views; the new one's widgets make their own
+  return app_rt_.load(path);
+}
 
 void AriRuntime::set_root(ari::Widget root) { app_rt_.set_root(std::move(root)); }
 
@@ -358,6 +376,7 @@ void AriRuntime::frame(double dt_seconds) {
     fixedSeconds_ += dt_seconds;
   }
   app_rt_.drain(); // queued Ariadne actions + scheduler slice + (via the adapter) scene sync/tick
+  views_->update(dt_seconds); // what each viewport widget's view leaves out, and its camera
 }
 
 void AriRuntime::render() {
@@ -411,6 +430,7 @@ void AriRuntime::set_fixed_clock(bool fixed) { fixedClock_ = fixed; }
 
 ari::AppRuntime &AriRuntime::app_runtime() { return app_rt_; }
 cvc::gl::ImGuiBackend &AriRuntime::backend() { return backend_; }
+SceneViews &AriRuntime::views() { return *views_; }
 
 const RealizedScene *AriRuntime::realized() const {
   return static_cast<const GlSceneAdapter *>(scene_.get())->realized();

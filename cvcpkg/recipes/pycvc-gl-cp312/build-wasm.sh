@@ -148,6 +148,6 @@ if DEPS="${CVC_DEPS_PREFIX}" INST="${CVC_INSTALL_DIR}" SRC="${CVC_SOURCE_DIR}" \
      bash "${CVC_SOURCE_DIR}/bindings/pycvc/wasm/link-host.sh"; then
     echo "pycvc-gl(wasm): host binary pycvc_host.wasm linked"
 else
-    echo "pycvc-gl(wasm): host link failed — archives installed; link-host.sh is standalone-runnable" >&2
+    echo "pycvc-gl(wasm): host link or its node smoke failed — archives installed; link-host.sh is standalone-runnable" >&2
 fi
 echo "pycvc-gl(wasm) build complete"

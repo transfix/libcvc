@@ -44,6 +44,17 @@ namespace conference {
 //       the relay's totals over all of its links
 //
 // Values are kilobits/second and milliseconds; negative = not measured yet.
+//
+// A reading is published only when it has moved off the one in the tree by a tenth of it, or by
+// 2 kb/s or 5 ms if that is more (or between measured and not): a steady or idle link writes
+// nothing. A published reading has two significant figures, never finer than a tenth ("1200",
+// "48", "0.4"), and each change journals ONE mutation (no touch that first re-sends the old
+// value). links is written when it changes.
+//
+// The writers publish rates measured over net_publish_period_s. A meter's own write, and the
+// relay's re-broadcast of it, is a few kilobits in one window: over a second that alone would move
+// the next reading past its band and back, a write every few seconds on an idle link.
+constexpr double net_publish_period_s = 5.0;
 
 struct net_sample {
   double rtt_ms = -1.0;
@@ -51,9 +62,10 @@ struct net_sample {
   double out_kbps = -1.0;
 };
 
-// A participant's own measurement (client side).
+// A participant's own measurement (client side). FORCE re-sends readings inside the band as they
+// stand (one touch each), for a client back on a relay that may have lost them (a reconnect).
 void write_participant_net(cvc::app &app, const std::string &room, const std::string &pid,
-                           const net_sample &s);
+                           const net_sample &s, bool force = false);
 bool read_participant_net(cvc::app &app, const std::string &room, const std::string &pid,
                           net_sample &out);
 

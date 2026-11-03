@@ -54,11 +54,11 @@ EM_JS(double, cvcgl_device_pixel_ratio, (), {
 // The field starts as two spaces so a Backspace always has something to delete (a keyboard sends
 // nothing for a Backspace in an empty field), and is reset to them when it runs short or long.
 //
-// iOS raises the keyboard only for a focus made inside a user gesture. VTK turns a touchstart into
-// a press that ImGui takes at the next frame, so by the time the finger lifts the field has become
-// active: the touchend handler focuses the input then. A field that becomes active with no finger
-// down (one that took the text by itself, or a very quick tap) is focused at once, which raises the
-// keyboard on Android; on iOS the next tap on it does.
+// iOS raises the keyboard only for a focus made inside a user gesture. The interactor turns a
+// touch into a press that ImGui takes at the next frame, so by the time the finger lifts the field
+// has become active: the touchend handler focuses the input then. A field that becomes active with
+// no finger down (one that took the text by itself, or a very quick tap) is focused at once, which
+// raises the keyboard on Android; on iOS the next tap on it does.
 EM_JS(void, cvcgl_ime_install, (const char *sel), {
   var el = document.querySelector(UTF8ToString(sel)) || document.getElementById('canvas') ||
            document.querySelector('canvas');
@@ -370,7 +370,7 @@ float detectPixelRatio() {
 }
 
 #ifdef __EMSCRIPTEN__
-// VTK's canvas, which TouchGestures listens on as well.
+// The canvas (SDL's window, or VTK's canvas window), which TouchGestures listens on as well.
 constexpr const char *kCanvas = "#canvas";
 
 // The system keyboard's keys (cvcgl_ime_install's KEYS), by minus their code.

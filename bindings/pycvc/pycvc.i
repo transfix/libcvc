@@ -2587,6 +2587,10 @@ PYCVC_STATE_EXEC_ENUM(cvc::state_exec::scheduling_policy, pycvc_enum_scheduling_
        {"priority_rr", static_cast<int>(cvc::state_exec::scheduling_policy::priority_rr)}});
   if (pycvc_enum_scheduling_policy != NULL)
     PyDict_SetItemString(d, "scheduling_policy", pycvc_enum_scheduling_policy);
+  // pycvc pumps schedulers on threads of its own (an Exec's run() on any Python thread), so from
+  // its import an app's lock manager is made shared where the build has threads
+  // (state_exec.locks.threading auto; docs/STATE_EXEC_LOCKS.md 8.3, gap G-24).
+  cvc::state_exec::detail::note_threaded_host();
 %}
 %pythoncode %{
 process_status = _pycvc.process_status
@@ -3929,6 +3933,22 @@ class scheduler_base {};
       return *m;
     throw pycvc::no_value{path};
   }
+  // set_lock_manager(app): the scheduler's with-lock table becomes app's (app::lock_manager(), as
+  // for any host scheduler over an app's tree, docs/STATE_EXEC_LOCKS.md 8.4), shared with the
+  // app's Execs. It may then be pumped on any Python thread: its home attaches as an Exec's does,
+  // so state_exec.locks.threading single refuses it (RuntimeError naming the setting). It attaches
+  // only a scheduler's first lock home, so call it before the scheduler's first with-lock: a home
+  // replaced would be freed under what uses it (an Exec's run() and lock_query use their
+  // scheduler's), so a scheduler that has one (an Exec's always does) raises RuntimeError.
+  void set_lock_manager(const std::shared_ptr<cvc::app> &app) {
+    if (!app)
+      throw std::invalid_argument("set_lock_manager: app is None");
+    if ($self->has_lock_home())
+      throw std::logic_error("set_lock_manager: the scheduler already has its lock home (an "
+                             "Exec's scheduler, or one that has run a with-lock); only its first "
+                             "can be attached");
+    $self->set_lock_manager(app->lock_manager(), cvc::state_exec::threaded_host_attach());
+  }
 }
 %enddef
 
@@ -4428,6 +4448,8 @@ def register_intrinsics(env, ctx):
 // module enables none, and SWIG takes them only on a function that isn't overloaded, so the
 // constructor is one declaration. A policy or idle_timeout it can't take raises ValueError.
 %feature("kwargs") pycvc::Exec::Exec;
+// Exec.lock_query(prefix="") too.
+%feature("kwargs") pycvc::Exec::lock_query;
 %exception pycvc::Exec::Exec {
   try {
     $action

@@ -31,6 +31,7 @@ class ImGuiOverlay;
 namespace ariadne {
 
 struct RealizedScene; // scene_realize.h
+class SceneViews;     // scene_views.h
 
 class AriRuntime {
 public:
@@ -126,6 +127,8 @@ public:
   cvc::gl::ImGuiBackend &backend();        // e.g. register_widget for a custom ImGui widget
   // The last load()'s realized scene (its lighting rigs, ...), or null when it had none.
   const RealizedScene *realized() const;
+  // The document's `viewport` widgets' views of the scene (scene_views.h).
+  SceneViews &views();
 
   // --- diagnostics / capabilities ---
   std::vector<std::string> take_warnings();
@@ -138,6 +141,7 @@ private:
   ImGuiOverlay *overlay_;
   cvc::app &app_;
   cvc::gl::ImGuiBackend backend_; // DECLARED BEFORE app_rt_ => the Runtime it points at dies first
+  std::unique_ptr<SceneViews> views_; // the viewport widgets' views (they draw in backend_)
   std::unique_ptr<cvc::ariadne::SceneAdapter> scene_; // the GL scene seam; before app_rt_
   cvc::ariadne::AppRuntime app_rt_; // owns the neutral bundling; holds scene_.get()
   std::function<void()> inputPump_;

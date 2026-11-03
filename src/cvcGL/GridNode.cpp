@@ -170,6 +170,12 @@ void GridNode::addToRenderer(vtkRenderer *renderer) {
   }
 }
 
+void GridNode::appendViewProps(std::vector<vtkProp *> &out) {
+  out.push_back(m_yzActor);
+  out.push_back(m_xzActor);
+  out.push_back(m_xyActor);
+}
+
 void GridNode::removeFromRenderer(vtkRenderer *renderer) {
   if (renderer) {
     renderer->RemoveActor(m_yzActor);
