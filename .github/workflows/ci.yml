@@ -1402,6 +1402,14 @@ jobs:
   # its scheduler's destruction) under ASan, the model check's two- and three-home configurations
   # at bound 2 (LocksModel.Homes*, LocksModel.TwoHomes*), and pycvc's cross-thread tests under
   # TSan.
+  #
+  # Threaded execution's Stage 0 (docs/STATE_EXEC_THREADED.md 7 and 8.1: the process-global
+  # hazards a second thread would hit) adds its own binaries (hazards, the state tree's lifetime,
+  # intrinsics, exceptions, async calls, data steps) and test_pycvc_state.py, and SAN_BENCH runs
+  # state_exec_bench's mt.multi_exec at t=8 (HZ-10): eight threads, each pumping a scheduler of its
+  # own over one app tree, through fib, raises, and the state tree's natives with controls posted
+  # across threads. Every HZ case's line is required in both legs, and so are mt.multi_exec's
+  # three points.
   sanitizers:
     name: sanitizers / ${{ matrix.name }}
     runs-on: ubuntu-24.04
@@ -1412,7 +1420,10 @@ jobs:
         include:
           # required: one per line, `<run>: <text>`, where <run> is a name in SAN_CXX_TESTS or
           # SAN_PY_TESTS and <text> a line its log must contain (run.sh): gtest's "OK ]" line of a
-          # case, or the pycvc script's "ok:" line.
+          # case, or the pycvc script's "ok:" line. <run> may also be a scenario in SAN_BENCH, whose
+          # line for a point is its params ("t=8 prog=fib runs=1"). Stage 0's lines, the same in
+          # both legs, follow the locks phases'; "(" after a name keeps it from matching a longer
+          # one.
           - name: tsan
             flags: -fsanitize=thread
             required: |
@@ -1436,6 +1447,49 @@ jobs:
               test_pycvc_state_exec_locks.py: ok: test_lt08_idle_limit
               test_pycvc_state_exec_locks.py: ok: test_lt10_eight_execs_smoke
               test_pycvc_state_exec_locks.py: ok: test_ld05_cycle_across_execs
+              state_exec_exceptions_test: OK ] BuiltinClasses.HZ01_BuiltinClassDictsAreReadOnly
+              state_exec_exceptions_test: OK ] BuiltinClasses.HZ01c_RaisingAClassDictIsUnchanged
+              state_exec_exceptions_test: OK ] BuiltinClasses.HZ02_DerivedClassesStayMutable
+              test_pycvc_state_exec_exceptions.py: ok: test_hz01_builtin_classes_read_only
+              state_exec_intrinsics_test: OK ] StateTreeIntrinsicsTest.HZ03_StateDataSetStoresACopy
+              state_exec_hazards_test: OK ] Hazards.HZ03_StateDataSetStoresACopy
+              test_pycvc_state_exec_data.py: ok: test_hz03_state_data_set_copies
+              state_exec_hazards_test: OK ] Hazards.HZ03b_StateDataSetChargesTheWriter
+              state_exec_intrinsics_test: OK ] StateTreeIntrinsicsTest.HZ04_StateDataSetRefusesNestedCallables
+              state_exec_data_steps_test: OK ] DataJob.IsolatingCopyRefusesAtAnyDepth
+              state_exec_data_steps_test: OK ] DataJob.IsolatingCopyRefusesInALaterSlice
+              state_exec_data_steps_test: OK ] DataJob.IsolatingCopySharesDataObjectsAndBuiltinClasses
+              state_exec_data_steps_test: OK ] DataJob.IsolatingCopyKeepsSharingAndCycles
+              state_exec_data_steps_test: OK ] DataJob.ShareModeStillSharesClosures
+              test_pycvc_state_exec_data.py: ok: test_hz04_state_data_set_refuses_nested_callables
+              state_exec_intrinsics_test: OK ] StateTreeIntrinsicsTest.HZ05_StateDeleteRemovesOnlyItsNode (
+              state_exec_intrinsics_test: OK ] StateTreeIntrinsicsTest.HZ05_StateDeleteRemovesOnlyItsNodeChrooted
+              state_lifetime_stress_test: OK ] StateLifetime.RemoveChildUnlinksOnlyThatChild
+              state_lifetime_stress_test: OK ] StateLifetime.RemoveChildDefersDestructionWhilePinned
+              state_lifetime_stress_test: OK ] StateLifetime.RemoveChildEmitsChildChangedNotExpiring
+              state_exec_hazards_test: OK ] Hazards.HZ06_DeleteRecreateWhileReading
+              state_exec_hazards_test: OK ] Hazards.HZ06b_SetTreeSurvivesAncestorDelete
+              state_exec_scheduler_test: OK ] HazardsWatchRoot/0.HZ07_AChrootedWatchKeepsTheHostsSettings
+              state_exec_scheduler_test: OK ] HazardsWatchRoot/1.HZ07_AChrootedWatchKeepsTheHostsSettings
+              state_exec_scheduler_test: OK ] HazardsWatchRoot/0.HZ07b_EachDocumentsWatchFiresForItsOwnTree
+              state_exec_scheduler_test: OK ] HazardsWatchRoot/1.HZ07b_EachDocumentsWatchFiresForItsOwnTree
+              state_exec_scheduler_test: OK ] HazardsWatchRoot/0.HZ07c_AnUnchrootedWatchSetsTheRootAndPollsAreGatedPerRoot
+              state_exec_scheduler_test: OK ] HazardsWatchRoot/1.HZ07c_AnUnchrootedWatchSetsTheRootAndPollsAreGatedPerRoot
+              test_pycvc_state_exec_locks.py: ok: test_hz08_fork_in_exec_run
+              ariadne_runtime_test: OK ] AriadneHazards.HZ08_ForkedChildKeepsOwnerAndTeardownReapsIt
+              state_exec_coordinator_test: OK ] Priority.HZ09_BusThreadControlAppliesBetweenSteps
+              mt.multi_exec: t=8 prog=fib runs=1
+              mt.multi_exec: t=8 prog=exceptions runs=1
+              mt.multi_exec: t=8 prog=tree runs=1
+              test_pycvc_state_exec_exceptions.py: ok: test_hz11_two_execs_exceptions_and_data
+              state_exec_hazards_test: OK ] Hazards.HZ12_PrintWritesWholeLines
+              state_exec_async_calls_test: OK ] AsyncCalls.HZ13_AFutureAwaitedTwiceIsChargedOnce
+              state_exec_async_calls_test: OK ] AsyncCalls.HZ13_AnOutcomeTakenBeforeTheDrainIsNotChargedAgain
+              state_exec_async_calls_test: OK ] AsyncCalls.HZ13_ACancelledCallWakesEveryWaiter
+              ariadne_runtime_test: OK ] AriadneHazards.HZ13_InitLaneAwaitsAnAppHostFuture
+              state_exec_scheduler_test: OK ] SchedulerStop.HZ14_StopFromAnotherThreadEndsRun
+              state_exec_async_test: OK ] AsyncSchedulerStop.HZ14_StopFromAnotherThreadEndsSyncRun
+              test_pycvc_state_exec_sched.py: ok: test_hz14_stop_from_another_thread
           # No vptr check: it references the typeinfo of every polymorphic class it checks.
           # Jolt is built without RTTI, as are the two libcvc files that subclass its classes
           # (src/cvc/CMakeLists.txt), so that typeinfo exists nowhere and libcvc.so fails to
@@ -1450,6 +1504,49 @@ jobs:
               state_exec_locks_test: OK ] LocksThreads.LT10_EightSchedulersRandom
               state_exec_locks_model_test: OK ] LocksModel.Homes
               state_exec_locks_model_test: OK ] LocksModel.TwoHomes
+              state_exec_exceptions_test: OK ] BuiltinClasses.HZ01_BuiltinClassDictsAreReadOnly
+              state_exec_exceptions_test: OK ] BuiltinClasses.HZ01c_RaisingAClassDictIsUnchanged
+              state_exec_exceptions_test: OK ] BuiltinClasses.HZ02_DerivedClassesStayMutable
+              test_pycvc_state_exec_exceptions.py: ok: test_hz01_builtin_classes_read_only
+              state_exec_intrinsics_test: OK ] StateTreeIntrinsicsTest.HZ03_StateDataSetStoresACopy
+              state_exec_hazards_test: OK ] Hazards.HZ03_StateDataSetStoresACopy
+              test_pycvc_state_exec_data.py: ok: test_hz03_state_data_set_copies
+              state_exec_hazards_test: OK ] Hazards.HZ03b_StateDataSetChargesTheWriter
+              state_exec_intrinsics_test: OK ] StateTreeIntrinsicsTest.HZ04_StateDataSetRefusesNestedCallables
+              state_exec_data_steps_test: OK ] DataJob.IsolatingCopyRefusesAtAnyDepth
+              state_exec_data_steps_test: OK ] DataJob.IsolatingCopyRefusesInALaterSlice
+              state_exec_data_steps_test: OK ] DataJob.IsolatingCopySharesDataObjectsAndBuiltinClasses
+              state_exec_data_steps_test: OK ] DataJob.IsolatingCopyKeepsSharingAndCycles
+              state_exec_data_steps_test: OK ] DataJob.ShareModeStillSharesClosures
+              test_pycvc_state_exec_data.py: ok: test_hz04_state_data_set_refuses_nested_callables
+              state_exec_intrinsics_test: OK ] StateTreeIntrinsicsTest.HZ05_StateDeleteRemovesOnlyItsNode (
+              state_exec_intrinsics_test: OK ] StateTreeIntrinsicsTest.HZ05_StateDeleteRemovesOnlyItsNodeChrooted
+              state_lifetime_stress_test: OK ] StateLifetime.RemoveChildUnlinksOnlyThatChild
+              state_lifetime_stress_test: OK ] StateLifetime.RemoveChildDefersDestructionWhilePinned
+              state_lifetime_stress_test: OK ] StateLifetime.RemoveChildEmitsChildChangedNotExpiring
+              state_exec_hazards_test: OK ] Hazards.HZ06_DeleteRecreateWhileReading
+              state_exec_hazards_test: OK ] Hazards.HZ06b_SetTreeSurvivesAncestorDelete
+              state_exec_scheduler_test: OK ] HazardsWatchRoot/0.HZ07_AChrootedWatchKeepsTheHostsSettings
+              state_exec_scheduler_test: OK ] HazardsWatchRoot/1.HZ07_AChrootedWatchKeepsTheHostsSettings
+              state_exec_scheduler_test: OK ] HazardsWatchRoot/0.HZ07b_EachDocumentsWatchFiresForItsOwnTree
+              state_exec_scheduler_test: OK ] HazardsWatchRoot/1.HZ07b_EachDocumentsWatchFiresForItsOwnTree
+              state_exec_scheduler_test: OK ] HazardsWatchRoot/0.HZ07c_AnUnchrootedWatchSetsTheRootAndPollsAreGatedPerRoot
+              state_exec_scheduler_test: OK ] HazardsWatchRoot/1.HZ07c_AnUnchrootedWatchSetsTheRootAndPollsAreGatedPerRoot
+              test_pycvc_state_exec_locks.py: ok: test_hz08_fork_in_exec_run
+              ariadne_runtime_test: OK ] AriadneHazards.HZ08_ForkedChildKeepsOwnerAndTeardownReapsIt
+              state_exec_coordinator_test: OK ] Priority.HZ09_BusThreadControlAppliesBetweenSteps
+              mt.multi_exec: t=8 prog=fib runs=1
+              mt.multi_exec: t=8 prog=exceptions runs=1
+              mt.multi_exec: t=8 prog=tree runs=1
+              test_pycvc_state_exec_exceptions.py: ok: test_hz11_two_execs_exceptions_and_data
+              state_exec_hazards_test: OK ] Hazards.HZ12_PrintWritesWholeLines
+              state_exec_async_calls_test: OK ] AsyncCalls.HZ13_AFutureAwaitedTwiceIsChargedOnce
+              state_exec_async_calls_test: OK ] AsyncCalls.HZ13_AnOutcomeTakenBeforeTheDrainIsNotChargedAgain
+              state_exec_async_calls_test: OK ] AsyncCalls.HZ13_ACancelledCallWakesEveryWaiter
+              ariadne_runtime_test: OK ] AriadneHazards.HZ13_InitLaneAwaitsAnAppHostFuture
+              state_exec_scheduler_test: OK ] SchedulerStop.HZ14_StopFromAnotherThreadEndsRun
+              state_exec_async_test: OK ] AsyncSchedulerStop.HZ14_StopFromAnotherThreadEndsSyncRun
+              test_pycvc_state_exec_sched.py: ok: test_hz14_stop_from_another_thread
     concurrency:
       group: ci-${{ github.ref }}-sanitizers-${{ matrix.name }}
       cancel-in-progress: true
@@ -1459,13 +1556,18 @@ jobs:
         state_exec_scheduler_test state_exec_async_test state_exec_integration_test
         state_exec_coordinator_test ariadne_runtime_test thread_pool_test async_lane_test
         state_exec_locks_test state_exec_locks_model_test state_exec_priority_test
-        state_exec_hazards_test
+        state_exec_hazards_test state_lifetime_stress_test state_exec_intrinsics_test
+        state_exec_exceptions_test state_exec_async_calls_test state_exec_data_steps_test
       # pycvc test scripts (bindings/pycvc/<name>).
       SAN_PY_TESTS: >-
         test_pycvc_exec.py test_pycvc_exec_async.py test_pycvc_exec_coro.py
         test_pycvc_state_exec.py test_pycvc_state_exec_async.py test_pycvc_state_exec_data.py
         test_pycvc_state_exec_eval.py test_pycvc_state_exec_exceptions.py
-        test_pycvc_state_exec_sched.py test_pycvc_state_exec_locks.py
+        test_pycvc_state_exec_sched.py test_pycvc_state_exec_locks.py test_pycvc_state.py
+      # state_exec_bench runs (build/bin/state_exec_bench), one a line: a scenario and its --size
+      # options; run.sh adds --reps 1 --warmup 0 --timeout 900 and the JSON file.
+      SAN_BENCH: |
+        mt.multi_exec --size t=8 --size runs=1
       # The lock tests read this and run their smaller sanitizer sizes.
       CVC_LOCKS_SANITIZER: '1'
     steps:
@@ -1529,7 +1631,7 @@ jobs:
             -DSWIG_EXECUTABLE="$PY_PREFIX/bin/swig"
 
       - name: Build
-        run: cmake --build build --parallel --target $SAN_CXX_TESTS pycvc
+        run: cmake --build build --parallel --target $SAN_CXX_TESTS state_exec_bench pycvc
 
       - name: Run the suites under ${{ matrix.name }}
         shell: bash
