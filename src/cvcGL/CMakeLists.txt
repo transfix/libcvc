@@ -938,6 +938,12 @@ add_executable(cvcgl_ariadne_physics test/cvcgl_ariadne_physics.cpp)
 target_link_libraries(cvcgl_ariadne_physics PRIVATE cvcGL)
 add_test(NAME cvcgl_ariadne_physics COMMAND cvcgl_ariadne_physics)
 
+# Ariadne data in the scene (docs/roadmap/ARIADNE_DATA_ROADMAP.md): a source: { data } node draws its
+# dataset once it loads, and again when the dataset is replaced. Headless.
+add_executable(cvcgl_ariadne_data test/cvcgl_ariadne_data.cpp)
+target_link_libraries(cvcgl_ariadne_data PRIVATE cvcGL)
+add_test(NAME cvcgl_ariadne_data COMMAND cvcgl_ariadne_data)
+
 # Every cvcGL setting must be IN the state tree and bound BOTH ways. This caught
 # cvc::state::SEPARATOR initialising to "" outside libcvc, which had been
 # silently flattening every state_object key in cvcGL — so it stays a gate.
@@ -1193,7 +1199,7 @@ list(REMOVE_ITEM _cvcgl_gl_tests
   cvcgl_grid_bounds cvcgl_bounds_walk cvcgl_scene_chrome cvcgl_remove
   cvcgl_teardown cvcgl_light_state_thread cvcgl_unattached_node_thread cvcgl_pose_echo
   cvcgl_physics_scene_binding
-  cvcgl_world_geometry_nodes cvcgl_ariadne_physics
+  cvcgl_world_geometry_nodes cvcgl_ariadne_physics cvcgl_ariadne_data
   cvcgl_node_outlives_scene cvcgl_texture cvcgl_texture_zerocopy
   cvcgl_stream_texture cvcgl_state_publisher cvcgl_nav_stats_publish
   cvcgl_camera cvcgl_track_parity cvcgl_fps_hud cvcgl_stage_setters

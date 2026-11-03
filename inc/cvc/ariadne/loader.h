@@ -36,6 +36,7 @@
 // its P0 subset.
 
 #include <cstdint>
+#include <cvc/ariadne/data.h> // DataSpec
 #include <cvc/ariadne/doc_args.h>
 #include <cvc/ariadne/keys.h>
 #include <cvc/ariadne/scene.h>
@@ -146,6 +147,9 @@ struct LoadResult {
   // document reads its raw argv. Only the outermost document's block counts.
   std::vector<ArgSpec> args;
   bool has_args_block = false;
+  // The `data:` block (data.h): the document's datasets, in document order, each with the
+  // document's directory as its base. The host binds and loads them (DataStore::bind).
+  std::vector<DataSpec> data;
   // Custom top-level blocks (register_ari_block), keyed by block name — whatever the
   // registered parser stored. Empty unless a document uses a registered custom block.
   std::vector<std::pair<std::string, Value>> extras;

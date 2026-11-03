@@ -18,6 +18,7 @@
 
 #include <cstdint>
 #include <cvc/ariadne/ariadne.h>       // cvc::ariadne::Runtime, Widget, run_init, ...
+#include <cvc/ariadne/data.h>          // DataStore
 #include <cvc/ariadne/net_host.h>      // NetHostConfig
 #include <cvc/ariadne/scene_adapter.h> // cvc::ariadne::SceneAdapter (optional)
 #include <functional>
@@ -118,6 +119,11 @@ public:
   // nothing is turned on. Off unless called; this AppRuntime turns it off again when it dies.
   std::string enable_net(const NetHostConfig &config);
 
+  // The app's data store (data.h), which load() binds the document's data: block in (each entry a
+  // link at <prefix>.data.<name>) and the (data-*) verbs reach. A host reads the same datasets
+  // through it: wait("<prefix>.data.city"), then the objects on the nodes.
+  std::shared_ptr<DataStore> data_store() const { return data_; }
+
   // The document's own command line: everything after its path (doc_args.h). load() publishes
   // it as the read-only <prefix>.argv before init: runs and, when the document declares an args:
   // block, parses it into <prefix>.args.<name>. `invocation` starts the usage text (e.g. "ari run
@@ -211,8 +217,14 @@ private:
     std::vector<std::pair<std::string, std::function<void()>>> sync;
     std::vector<std::tuple<std::string, std::string, std::function<std::string()>>> async;
     std::function<void(int)> quit; // register_quit: (quit [code])
+    // The (data-*) verbs: the store, and the document's prefix and directory (a relative URI's
+    // base), as the last load() set them.
+    std::weak_ptr<DataStore> data;
+    std::string prefix;
+    std::string doc_dir;
   };
   std::shared_ptr<Verbs> verbs_;
+  std::shared_ptr<DataStore> data_; // DataStore::of(app_): kept alive while this runtime is
   std::vector<std::string> pendingWarnings_; // read-lane diagnostics drain() collected
   std::function<void(const std::string &)> warningListener_; // set_warning_listener
   void collect_warnings(); // the Runtime's new warnings -> pendingWarnings_, each to the listener

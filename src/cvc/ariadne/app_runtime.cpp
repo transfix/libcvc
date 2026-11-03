@@ -39,15 +39,18 @@ namespace ariadne {
 
 AppRuntime::AppRuntime(cvc::app &app, std::string prefix, SceneAdapter *scene)
     : app_(app), prefix_(std::move(prefix)), scene_(scene), rt_(app, prefix_),
-      verbs_(std::make_shared<Verbs>()) {
+      verbs_(std::make_shared<Verbs>()), data_(DataStore::of(app)) {
   rt_.set_scene_capable(scene_ != nullptr); // the gl.scene capability (requires:, has?)
   rt_.set_scene_shaders(scene_ && scene_->runs_shaders()); // gl.scene.shaders
+  verbs_->data = data_;
+  verbs_->prefix = prefix_;
 }
 
 AppRuntime::~AppRuntime() {
   verbs_->sync.clear(); // the provider outlives us in the registry: it must bind nothing of ours
   verbs_->async.clear();
   verbs_->quit = nullptr;
+  verbs_->data.reset();
   if (netEnabled_)
     disable_net(); // its provider holds app_ by reference
 }
@@ -394,6 +397,86 @@ void AppRuntime::ensure_intrinsics() {
                               };
                             });
     }
+    // The (data-*) verbs (data.h), for programs in this runtime's app: (data-load NAME URI [AS
+    // [PATH]]) points the document's data.NAME at a request and starts it (the scene's nodes bound
+    // to NAME follow when it is ready), (data-reload NAME), (data-status NAME), (data-files NAME)
+    // and (data-file NAME PATH) (its bytes, or nil).
+    // The store first: it is reset when this runtime dies, and only then is `app` still ours.
+    std::shared_ptr<DataStore> store = verbs->data.lock();
+    const auto own_program = [&] { // the program's chroot (se::apply_chroot) is in our app
+      cvc::state &tree = cvc::state::instance(*app);
+      return ictx.root &&
+             ictx.root == (ictx.root_path.empty() ? &tree : tree.findDescendant(ictx.root_path));
+    };
+    if (store && own_program()) {
+      const std::weak_ptr<DataStore> weak = store;
+      const std::string prefix = verbs->prefix, doc_dir = verbs->doc_dir;
+      const auto text = [](std::span<const se::value_t> a, std::size_t i, const char *fn) {
+        const auto *s = i < a.size() ? std::get_if<std::string>(&a[i].v) : nullptr;
+        if (!s)
+          throw se::dsl_error("TypeError", std::string(fn) + ": argument " + std::to_string(i + 1) +
+                                               " is a string" +
+                                               (i < a.size() ? ", not " + a[i].type_name() : ""));
+        return *s;
+      };
+      // The first argument: a dataset's name, one state key.
+      const auto name = [text](std::span<const se::value_t> a, const char *fn) {
+        const std::string s = text(a, 0, fn);
+        if (s.empty() || s.find(cvc::state::SEPARATOR) != std::string::npos)
+          throw se::dsl_error("ValueError", std::string(fn) + ": '" + s +
+                                                "' is not a dataset name (one word, no '.')");
+        return s;
+      };
+      const auto entry = [prefix](const std::string &n) {
+        return resolve_bind(prefix, std::string(kDataRoot) + cvc::state::SEPARATOR + n);
+      };
+      const auto live = [weak](const char *fn) {
+        std::shared_ptr<DataStore> s = weak.lock();
+        if (!s)
+          throw se::dsl_error("RuntimeError", std::string(fn) + ": the document has stopped");
+        return s;
+      };
+      se::builtins::register_fn(
+          env, "data-load",
+          [live, text, name, prefix, doc_dir](std::span<const se::value_t> a) -> se::value_t {
+            if (a.size() < 2 || a.size() > 4)
+              throw se::dsl_error("TypeError", "data-load: expected NAME URI [AS [PATH]], got " +
+                                                   std::to_string(a.size()) + " args");
+            DataSpec spec;
+            spec.name = name(a, "data-load");
+            spec.uri = text(a, 1, "data-load");
+            if (a.size() > 2)
+              spec.as = text(a, 2, "data-load");
+            if (a.size() > 3)
+              spec.path = text(a, 3, "data-load");
+            spec.base = doc_dir;
+            return se::value_t(live("data-load")->bind(prefix, spec));
+          });
+      se::builtins::register_fn(
+          env, "data-reload", [live, name, entry](std::span<const se::value_t> a) -> se::value_t {
+            return se::value_t(live("data-reload")->reload(entry(name(a, "data-reload"))));
+          });
+      se::builtins::register_fn(
+          env, "data-status", [app, name, entry](std::span<const se::value_t> a) -> se::value_t {
+            return se::value_t(data_status(*app, entry(name(a, "data-status"))));
+          });
+      se::builtins::register_fn(
+          env, "data-files", [app, name, entry](std::span<const se::value_t> a) -> se::value_t {
+            auto out = std::make_shared<std::vector<se::value_t>>();
+            for (std::string &p : data_files(*app, entry(name(a, "data-files"))))
+              out->push_back(se::value_t(std::move(p)));
+            return se::value_t(out);
+          });
+      se::builtins::register_fn(
+          env, "data-file",
+          [app, text, name, entry](std::span<const se::value_t> a) -> se::value_t {
+            const DataBytes b =
+                data_file(*app, entry(name(a, "data-file")), text(a, 1, "data-file"));
+            if (!b)
+              return se::value_t(std::monostate{});
+            return se::value_t(se::bytes_value{*b});
+          });
+    }
   });
 }
 
@@ -586,6 +669,8 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   if (!lr.ok)
     throw std::runtime_error(lr.error.empty() ? ("AppRuntime.load: failed to load " + path)
                                               : lr.error);
+  ensure_intrinsics(); // the (data-*) verbs are every document's
+  rt_.refresh_program_names();
   check_host_requirements(rt_, lr); // requires: and the calls programs make (§7.6)
 
   // The document's command line goes on the tree before init: runs, so init can read it.
@@ -608,6 +693,16 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   }
   publish_document_args(app_, prefix_, docArgv_, lr.has_args_block ? &lr.args : nullptr,
                         lr.has_args_block ? &parsed : nullptr);
+
+  // data: (data.h) — each dataset a link at <prefix>.data.<name> to its load, which starts now
+  // (load: lazy ones when something asks), before init: runs, so init: can read their status.
+  {
+    std::error_code ec;
+    const std::filesystem::path abs = std::filesystem::absolute(path, ec);
+    verbs_->doc_dir = ec ? std::string() : abs.parent_path().string();
+  }
+  for (const DataSpec &d : lr.data)
+    data_->bind(prefix_, d);
 
   // A different document from the last one (a reload is the same file under any spelling): its
   // windows and key defaults start afresh. The defaults go in before init:, which may set its own.

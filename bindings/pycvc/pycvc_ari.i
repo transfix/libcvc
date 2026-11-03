@@ -4,7 +4,9 @@
 // their proxy types resolve, and after the file-scope std::function<void()> typemap (reused by on()
 // and register_verb()). NOTE: this is a SWIG interface file — do NOT run clang-format on it.
 %{
+#include <cvc/ariadne/net_host.h> // NetHostConfig (enable_net_allow)
 #include <cvc/gl/ariadne/AriRuntime.h>
+#include <stdexcept>
 
 #include "pycvc_value.h" // pycvc::python_exception
 
@@ -104,3 +106,29 @@ static pycvc::python_exception pycvc_ari_take_exception(const char *what) {
 %}
 
 %include "cvc/gl/ariadne/AriRuntime.h"
+
+// enable_net takes a NetHostConfig, which Python has no form of: this is its common case, what a
+// host's --net-allow flags do. Origins like "https://cvcpkg.org": the document's https:// and
+// cvcpkg:// data (data:), its http verbs and its https imports may reach them. "" or what is wrong.
+%extend cvc::gl::ariadne::AriRuntime {
+  std::string enable_net_allow(PyObject *origins) {
+    cvc::ariadne::NetHostConfig config;
+    config.enabled = true;
+    PyObject *seq = PySequence_Fast(origins, "enable_net_allow: expected a list of origins");
+    if (!seq)
+      throw std::invalid_argument("enable_net_allow: expected a list of origins");
+    const Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
+    for (Py_ssize_t i = 0; i < n; ++i) {
+      PyObject *o = PySequence_Fast_GET_ITEM(seq, i);
+      const char *s = PyUnicode_Check(o) ? PyUnicode_AsUTF8(o) : nullptr;
+      if (!s) {
+        Py_DECREF(seq);
+        PyErr_Clear();
+        throw std::invalid_argument("enable_net_allow: each origin is a string");
+      }
+      config.allow.emplace_back(s);
+    }
+    Py_DECREF(seq);
+    return $self->enable_net(config);
+  }
+}

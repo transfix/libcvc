@@ -1,7 +1,9 @@
 #include <algorithm>
+#include <boost/any.hpp>
 #include <cmath>
 #include <cstddef>
 #include <cvc/ariadne/bind.h>
+#include <cvc/ariadne/data.h> // source: { data } — a dataset of the document's data: block
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/uri.h> // §13.4 resolve a node source: URI to a local path (temp-file bridge)
 #include <cvc/core/app.h>
@@ -23,8 +25,11 @@
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/tf_binding.h>    // every volume node's editable transfer-function model
 #include <cvc/gl/physics_scene_binding.h> // body: the nodes physics moves
+#include <cvc/gl/world_geometry_nodes.h>  // a dataset's world_geometry, drawn
 #include <cvc/image/image.h>              // cvc::read_image — material: { texture: <uri> }
 #include <cvc/physics/world.h>            // physics: the scene's rigid-body world
+#include <cvc/physics/world_geometry.h>   // ... and its bodies (a data node's body:)
+#include <cvc/state/state.h>
 #include <cvc/utility/algorithm.h> // cvc::sdf — source: { sdf: { mesh:, dim: } } volume source
 #include <cvc/volren/settings.h>
 #include <cvc/volslice/settings.h>
@@ -762,7 +767,22 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
                   const RealizeOptions &options, std::vector<std::string> *warnings) {
   std::shared_ptr<GraphicsNode> node;
 
-  if (n.type == "geometry") {
+  if (!n.source_data.empty()) {
+    // source: { data: <name> } — an empty group now; sync_scene_data draws the dataset into it
+    // once it is loaded, and again each time it changes.
+    node = parent ? parent->createChild(n.id) : sg.addGraphics(n.id);
+    if (node) {
+      SceneDataBinding b;
+      b.spec = n;
+      b.path = cvc::ariadne::resolve_bind(bind_prefix, n.source_data[0] == '/'
+                                                           ? n.source_data
+                                                           : std::string(cvc::ariadne::kDataRoot) +
+                                                                 "." + n.source_data);
+      b.group = node;
+      cvc::ariadne::DataStore::of(sg.appContext())->touch(b.path); // a lazy dataset loads now
+      out.data_nodes.push_back(std::move(b));
+    }
+  } else if (n.type == "geometry") {
     cvc::geometry geom;
     std::shared_ptr<const cvc::height_field> field;
     if (!read_node_geometry_and_field(sg, n, geom, field, warnings))
@@ -947,7 +967,7 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
       g->setForceOpaque(true);
   apply_clip(*node, n, sg.appContext(), bind_prefix, out.clip, warnings); // own coordinates
   warn_clip_capability(*node, n, warnings);
-  if (n.body.present)
+  if (n.body.present && n.source_data.empty()) // a data node's come with its dataset
     bodies.push_back({&n, node}); // added once every node exists (realize_physics)
 
   // Children nest UNDER this node, so each child's transform is local to it.
@@ -1683,8 +1703,134 @@ cvc::world_clock_keys scene_clock_keys(const cvc::ariadne::SceneClock &clock) {
   return k;
 }
 
+namespace {
+
+// What a data node draws: its source: { item }, else the first of the dataset's world, geometry,
+// terrain and volume it has.
+boost::any dataset_object(cvc::state &root, const std::string &store, const std::string &item,
+                          std::string *found) {
+  const std::vector<std::string> keys =
+      item.empty() ? std::vector<std::string>{"world", "geometry", "terrain", "volume"}
+                   : std::vector<std::string>{item};
+  for (const std::string &k : keys)
+    if (cvc::state *s = root.findDescendant(store + cvc::state::SEPARATOR + k)) {
+      boost::any a = s->data();
+      if (!a.empty()) {
+        *found = k;
+        return a;
+      }
+    }
+  return boost::any();
+}
+
+// The children of a data node's group, from the dataset `store`: replaces what it drew before.
+void draw_dataset(RealizedScene &r, SceneDataBinding &b, const std::string &store,
+                  std::vector<std::string> *warnings) {
+  std::shared_ptr<GraphicsNode> group = b.group.lock();
+  if (!group || !r.sg || !r.app)
+    return;
+  for (const std::shared_ptr<GraphicsNode> &c : b.drawn)
+    group->removeGraphicsChild(c);
+  b.drawn.clear();
+  if (r.physics)
+    for (cvc::physics::body_id id : b.bodies)
+      r.physics->remove_body(id);
+  b.bodies.clear();
+  r.height_fields.erase(b.spec.id);
+
+  const cvc::ariadne::SceneNode &n = b.spec;
+  std::string key;
+  const boost::any obj = dataset_object(cvc::state::instance(*r.app), store, n.source_item, &key);
+  using world_ptr = std::shared_ptr<const cvc::world::world_geometry>;
+  using geometry_ptr = std::shared_ptr<const cvc::geometry>;
+  using field_ptr = std::shared_ptr<const cvc::height_field>;
+  using volume_ptr = std::shared_ptr<const cvc::volume>;
+  cvc::world::world_geometry bodies_of; // what body: puts in the physics world
+  if (const world_ptr *w = boost::any_cast<world_ptr>(&obj)) {
+    b.drawn = cvc::gl::add_world_geometry(*r.sg, **w, n.id + "_", group);
+    if (std::shared_ptr<const cvc::height_field> t = (*w)->terrain())
+      r.height_fields[n.id] = t;
+    if (n.body.present && r.physics)
+      for (const auto &body : cvc::physics::add_world_geometry(*r.physics, **w).bodies)
+        b.bodies.push_back(body.second);
+  } else if (const field_ptr *f = boost::any_cast<field_ptr>(&obj)) {
+    b.drawn.push_back(group->createChild<GeometryNode>(n.id + "_" + key,
+                                                       static_cast<const cvc::geometry &>(**f)));
+    r.height_fields[n.id] = *f;
+    if (n.body.present && r.physics) {
+      cvc::world::geometry_item item;
+      item.name = n.id;
+      item.geometry = *f;
+      bodies_of.add(item);
+    }
+  } else if (const geometry_ptr *g = boost::any_cast<geometry_ptr>(&obj)) {
+    b.drawn.push_back(group->createChild<GeometryNode>(n.id + "_" + key, **g));
+    if (n.body.present && r.physics) {
+      cvc::world::geometry_item item;
+      item.name = n.id;
+      item.geometry = *g;
+      bodies_of.add(item);
+    }
+  } else if (const volume_ptr *v = boost::any_cast<volume_ptr>(&obj)) {
+    b.drawn.push_back(group->createChild<VolumeNode>(n.id + "_" + key, **v));
+  } else {
+    warn(warnings,
+         "ari: scene node '" + n.id + "': the dataset " + store + " has " +
+             (n.source_item.empty() ? "nothing to draw (a world, geometry, terrain or volume)"
+                                    : "no " + n.source_item + " to draw"));
+    return;
+  }
+  if (!bodies_of.items().empty())
+    for (const auto &body : cvc::physics::add_world_geometry(*r.physics, bodies_of).bodies)
+      b.bodies.push_back(body.second);
+  if (n.body.present && !r.physics)
+    warn(warnings, "ari: scene node '" + n.id +
+                       "': body: needs the scene's physics: block for a "
+                       "dataset's bodies");
+  // The node's look, on what it drew: a material when the document gives one (else a world keeps
+  // its surfaces' colours), shadows, an opaque pass.
+  for (const std::shared_ptr<GraphicsNode> &c : b.drawn) {
+    if (n.has_casts_shadow)
+      c->setCastsShadow(n.casts_shadow);
+    if (auto *gn = dynamic_cast<GeometryNode *>(c.get())) {
+      if (n.has_material)
+        apply_node_material(*gn, n);
+      if (n.material_opaque)
+        gn->setForceOpaque(true);
+    }
+  }
+}
+
+} // namespace
+
+int sync_scene_data(RealizedScene &realized, std::vector<std::string> *warnings) {
+  if (!realized.app || realized.data_nodes.empty())
+    return 0;
+  cvc::state &root = cvc::state::instance(*realized.app);
+  int rebuilt = 0;
+  for (SceneDataBinding &b : realized.data_nodes) {
+    cvc::state *node = root.findThroughLinks(b.path);
+    if (!node)
+      continue;
+    const std::string store = node->fullName();
+    cvc::state *status = root.findDescendant(store + cvc::state::SEPARATOR + "status");
+    if (!status || status->value() != "ready")
+      continue;
+    cvc::state *rev = root.findDescendant(store + cvc::state::SEPARATOR + "rev");
+    const std::string r = rev ? rev->value() : std::string();
+    if (store == b.drawn_target && r == b.drawn_rev)
+      continue;
+    b.drawn_target = store; // first: a dataset that cannot be drawn is not retried every frame
+    b.drawn_rev = r;
+    draw_dataset(realized, b, store, warnings);
+    ++rebuilt;
+  }
+  return rebuilt;
+}
+
 cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *renderer,
                                          double wall_dt) {
+  sync_scene_data(realized); // a data node whose dataset (re)loaded draws it this frame
   cvc::world_clock::step_result clock_step;
   // §9 time — drive the authoritative simulation clock FIRST, so every ticker below (and any
   // custom_tick reading app.world_clock().t()) sees ONE coherent world time for this frame. Opt-in:

@@ -238,6 +238,12 @@ struct SceneNode {
   std::string id;                // node name → <prefix>.graphics.root.children.<id>
   std::string type = "geometry"; // node kind
   std::string source_file;       // source: { file: ... } (geometry/volume load path)
+  // source: { data: <name>, item: <output> } — a dataset of the document's data: block (data.h):
+  // the node draws what it decoded and is rebuilt each time it loads again. `source_data` is the
+  // bind path of its entry ("city" -> <prefix>.data.city; a leading '/' is the root's), and
+  // `source_item` one output of it ("buildings"), empty for the whole (a world, a mesh, ...).
+  std::string source_data;
+  std::string source_item;
 
   // A built-in PROCEDURAL primitive as a geometry node's source, instead of source: { file }.
   // Empty = use source_file. "plane" = a flat quad with UP normals, spanning
