@@ -229,6 +229,23 @@ public:
   static bool media_write_stalled(std::uint64_t write_started_ns, std::uint64_t now_ns,
                                   std::uint64_t stall_ns) noexcept;
 
+  // Delay drop (default 100 ms; 0 = off): skip a receiver whose stream has queued more than `ms`
+  // beyond its base round trip, video at once, pose snapshots past twice that and audio past four
+  // times. A Write returns as soon as HTTP/2 flow control and the socket take the bytes, and gRPC
+  // grows the window to megabytes, so during a TCP loss burst nothing blocks (the stall drop never
+  // fires) and seconds of stale media queue up. The queue is measured in band instead: each stream
+  // carrying media or poses follows them with a Ping at most every 50 ms, and since the stream is
+  // in order, its Pong means the peer has read everything written before it. The oldest Ping still
+  // unanswered dates the oldest byte that may still be queued. A peer that has never answered one
+  // is never held back. Applies to every media write and pose snapshot, own uplink included (the
+  // counterpart of the WS transport's backlog drop).
+  void set_media_delay_drop(std::chrono::milliseconds ms) noexcept;
+  // How long past the base round trip `base_rtt_ns` the oldest unanswered probe, sent at
+  // `oldest_probe_ns`, has waited by `now_ns`: 0 when none is out (`oldest_probe_ns` 0) or before
+  // any round trip is known (`base_rtt_ns` < 0). Steady-clock nanoseconds.
+  static std::int64_t probe_queue_delay_ns(std::int64_t oldest_probe_ns, std::int64_t base_rtt_ns,
+                                           std::int64_t now_ns) noexcept;
+
   std::uint64_t total_media_sent() const noexcept { return _media_sent.load(); }
   std::uint64_t total_media_received() const noexcept { return _media_recv.load(); }
   std::uint64_t total_media_forwarded() const noexcept { return _media_fwd.load(); }
@@ -237,6 +254,7 @@ public:
   std::uint64_t total_media_shaped() const noexcept { return _media_shaped.load(); }
   std::uint64_t total_media_shape_dropped() const noexcept { return _media_shape_dropped.load(); }
   std::uint64_t total_media_stall_dropped() const noexcept { return _media_stall_dropped.load(); }
+  std::uint64_t total_media_delay_dropped() const noexcept { return _media_delay_dropped.load(); }
 
   // state_transport interface.
   void register_shard(state_cluster_shard *shard) override;
@@ -262,11 +280,14 @@ public:
   // As push_snapshot_to, but under an inbound gate only to the stream holding `node_id`.
   std::size_t push_snapshot_to_holder(const std::string &node_id,
                                       const std::vector<snapshot_entry> &entries) override;
-  // See state_transport::push_pose_snapshot_to / set_on_pose_snapshot. Set the callback before
-  // connecting.
+  // See state_transport::push_pose_snapshot_to / set_on_pose_snapshot. A connection whose stream is
+  // busy (the lock is not free within a millisecond) or has queued past the delay drop's pose limit
+  // is skipped: the next snapshot supersedes this one, and stale poses must not queue up. Set the
+  // callback before connecting.
   std::size_t push_pose_snapshot_to(const std::string &node_id, const pose_snapshot &snap) override;
   void set_on_pose_snapshot(pose_snapshot_fn fn) override;
   std::uint64_t total_pose_snapshots_sent() const noexcept { return _poses_sent.load(); }
+  std::uint64_t total_pose_snapshots_skipped() const noexcept { return _poses_skipped.load(); }
   std::uint64_t total_pose_snapshots_received() const noexcept { return _poses_recv.load(); }
   // See state_transport::set_admission_hold. Applies to the streams this relay accepts.
   void set_admission_hold(std::chrono::milliseconds max_hold) override;
@@ -429,6 +450,7 @@ private:
   media_sink_fn _media_sink; // media_router ingress (relay) OR set_on_media leaf sugar
   pose_snapshot_fn _on_pose_snapshot;
   std::atomic<std::uint64_t> _poses_sent{0};
+  std::atomic<std::uint64_t> _poses_skipped{0};
   std::atomic<std::uint64_t> _poses_recv{0};
   std::atomic<std::uint64_t> _media_sent{0};
   std::atomic<std::uint64_t> _media_recv{0};
@@ -442,6 +464,8 @@ private:
   std::atomic<std::uint64_t> _media_gated{0};
   std::atomic<std::uint64_t> _media_stall_ns{0};
   std::atomic<std::uint64_t> _media_stall_dropped{0};
+  std::atomic<std::int64_t> _media_delay_ns{100'000'000};
+  std::atomic<std::uint64_t> _media_delay_dropped{0};
   std::atomic<std::int64_t> _admission_hold_ns{0}; // 0 = admit at once
   std::atomic<std::uint64_t> _admissions_held{0};
   std::atomic<std::uint64_t> _admission_timeouts{0};
