@@ -1070,7 +1070,13 @@ ariadne::MessageEdit ImGuiBackend::message_input(const char *label, const char *
   const ImGuiStyle &st = ImGui::GetStyle();
   const char *end = label ? ImGui::FindRenderedTextEnd(label) : label;
   const bool labelled = label && end != label;
-  const float width = labelled ? ImGui::CalcItemWidth() : -FLT_MIN;
+  // A send button sits on the field's right, so the field leaves it room.
+  const float send_w = o.send.empty() ? 0.0f
+                                      : ImGui::CalcTextSize(o.send.c_str()).x +
+                                            2.0f * st.FramePadding.x + st.ItemInnerSpacing.x;
+  const float width = labelled        ? ImGui::CalcItemWidth() - send_w
+                      : send_w > 0.0f ? ImMax(ImGui::GetContentRegionAvail().x - send_w, 1.0f)
+                                      : -FLT_MIN;
   ImGui::PushID(label ? label : "message");
   if (f.refocus) {
     ImGui::SetKeyboardFocusHere();
@@ -1108,6 +1114,11 @@ ariadne::MessageEdit ImGuiBackend::message_input(const char *label, const char *
     ImGui::GetWindowDrawList()->AddText(ImVec2(ImGui::GetItemRectMin().x + st.FramePadding.x,
                                                ImGui::GetItemRectMin().y + st.FramePadding.y),
                                         ImGui::GetColorU32(ImGuiCol_TextDisabled), o.hint.c_str());
+  if (!o.send.empty()) { // as Enter: it sends, and the focus goes back to the field
+    ImGui::SameLine(0.0f, st.ItemInnerSpacing.x);
+    if (ImGui::Button(o.send.c_str()))
+      entered = true;
+  }
   ImGui::PopID();
   if (labelled) {
     ImGui::SameLine(0.f, st.ItemInnerSpacing.x);

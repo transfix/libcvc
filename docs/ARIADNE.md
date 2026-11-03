@@ -1564,6 +1564,7 @@ Two widgets for a log and the field under it (a chat window, a console):
   multiline: true               # Shift+Enter adds a line (default); false: one line only
   max_lines: 4                  # it grows to this many lines, then scrolls (default 4)
   max_length: 2000              # bytes (default 0: no cap)
+  send: Send                    # a button beside it that sends it (ImGui; default: none)
   on: (chat-ui-send "chat" (state-get "room.token") (get-attr event "text"))
 ```
 
@@ -1596,7 +1597,8 @@ back (a window reopened) keeps its place.
 
 - **Enter** sends it. The program reads it as `(get-attr event "text")`, and the draft at
   `bind:` is cleared. A message of blanks only is not sent. The field keeps the keyboard focus, so
-  the next message can be typed at once.
+  the next message can be typed at once. **`send:`** puts a button with that label on the field's
+  right (ImGui), which sends it as Enter does; a terminal backend has Enter only.
 - **Shift+Enter** adds a line (`multiline: true`, the default). In ImGui Ctrl+Enter does too. In
   a terminal, Shift+Enter usually reaches the program as a plain Enter, so Alt+Enter and Ctrl+J
   add a line there. Shift+Enter works where the terminal reports it (the kitty keyboard

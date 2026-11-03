@@ -2,7 +2,7 @@
 // GL), driven by synthesized keys and the mouse wheel: Enter sends and keeps the focus, Shift+Enter
 // adds a line and the field grows; the log starts at its bottom, the wheel takes it to the top
 // (on_top), lines added above keep it in place, a text that fits asks once, and a log of height 0
-// leaves room for the field under it.
+// leaves room for the field under it. With `send:` a button on the field's right sends it too.
 #include <cstdio>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/widget.h>
@@ -31,6 +31,7 @@ void chk(bool ok, const std::string &what) {
 // scroll to fit them.
 struct RecordingBackend : cvc::gl::ImGuiBackend {
   ImVec2 log_min, log_max, field_size;
+  ImVec2 last_min, last_max; // the message_input's last item: its field, or its send button
   float window_overflow = 0.0f;
   ari::TextViewEvent text_view(const char *label, const char *key, const std::string &text,
                                const ari::TextViewOptions &o) override {
@@ -43,6 +44,8 @@ struct RecordingBackend : cvc::gl::ImGuiBackend {
                                  const ari::MessageInputOptions &o) override {
     const ari::MessageEdit e = ImGuiBackend::message_input(label, key, current, o);
     field_size = ImGui::GetItemRectSize();
+    last_min = ImGui::GetItemRectMin();
+    last_max = ImGui::GetItemRectMax();
     window_overflow = ImGui::GetScrollMaxY();
     return e;
   }
@@ -54,6 +57,8 @@ struct Session {
   ari::Runtime rt{app, ""};
   RecordingBackend be;
   explicit Session(ari::Widget root) {
+    // CreateContext keeps an earlier context current: this session's must be, for its frames.
+    ImGui::SetCurrentContext(ctx);
     cvc::gl::ImGuiBackend::setImGuiContext(ctx);
     ImGuiIO &io = ImGui::GetIO();
     io.DisplaySize = ImVec2(800.0f, 600.0f);
@@ -187,6 +192,49 @@ int main() {
   s.set("tops", "0");
   s.frames(4);
   chk(s.val("tops") == "0", "an empty log does not");
+
+  // send: a button on the field's right, in the window, that sends what is typed as Enter does.
+  {
+    ari::Widget say2 = ari::message_input(
+        "##say2", "draft2",
+        "(state-set \"sent2\" (str-concat (state-get \"sent2\") \"|\" (get-attr event \"text\")))");
+    say2.autofocus = true;
+    say2.send = "Send";
+    ari::Widget win2 = ari::window("Chat2", {say2});
+    win2.size.w = {ari::Unit::Px, 360.0f};
+    win2.size.h = {ari::Unit::Px, 120.0f};
+    win2.has_pos = true;
+    win2.pos_x = win2.pos_y = 30.0f;
+    Session t(win2);
+    t.set("sent2", "");
+    t.frames(3);
+    const ImVec2 b0 = t.be.last_min, b1 = t.be.last_max;
+    chk(b1.x <= 30.0f + 360.0f + 0.5f && b1.x - b0.x > 10.0f && b1.x - b0.x < 120.0f,
+        "the button sits inside the window, at the field's right (x " + std::to_string(b0.x) +
+            ".." + std::to_string(b1.x) + ")");
+    t.type("via the button");
+    ImGuiIO &tio = ImGui::GetIO();
+    tio.AddMousePosEvent((b0.x + b1.x) * 0.5f, (b0.y + b1.y) * 0.5f);
+    t.frame();
+    tio.AddMouseButtonEvent(0, true);
+    t.frame();
+    tio.AddMouseButtonEvent(0, false);
+    t.frames(3);
+    chk(t.val("sent2") == "|via the button", "Send sends what was typed: " + t.val("sent2"));
+    chk(t.val("draft2").empty(), "and clears the draft");
+    t.type("then Enter");
+    t.key(ImGuiKey_Enter);
+    t.frames(2);
+    chk(t.val("sent2") == "|via the button|then Enter",
+        "the focus went back to the field, and Enter still sends: " + t.val("sent2"));
+    tio.AddMousePosEvent((b0.x + b1.x) * 0.5f, (b0.y + b1.y) * 0.5f);
+    t.frame();
+    tio.AddMouseButtonEvent(0, true);
+    t.frame();
+    tio.AddMouseButtonEvent(0, false);
+    t.frames(3);
+    chk(t.val("sent2") == "|via the button|then Enter", "an empty field sends nothing");
+  }
 
   std::printf("%s\n", failures ? "FAILED" : "PASSED");
   return failures ? 1 : 0;

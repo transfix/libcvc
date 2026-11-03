@@ -359,11 +359,12 @@ struct Widget {
   std::string on_top;
   // Kind::MessageInput: `hint` is shown while it is empty; with `multiline` Shift+Enter adds a line
   // (else the message is one line); it grows to `max_lines` lines and then scrolls; `max_length`
-  // caps it in bytes (0: no cap).
+  // caps it in bytes (0: no cap); `send` labels a button beside it that sends it ("" none).
   std::string hint;
   bool multiline = true;
   int max_lines = 4;
   int max_length = 0;
+  std::string send;
 
   // §12 module mount (load:): when non-empty, this widget is a MOUNT POINT — a relative
   // state-path segment (e.g. "includes.stats") appended to the enclosing scope, so its whole
