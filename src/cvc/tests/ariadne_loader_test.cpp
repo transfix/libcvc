@@ -647,8 +647,8 @@ windows:
 }
 
 // text_view: a scrollable text buffer (height, follow, wrap, on_top); message_input: a field to
-// post a message (hint, multiline, max_lines, max_length, on). Both are built-in types, and the
-// loader says what it fixed.
+// post a message (hint, multiline, max_lines, max_length, send, on). Both are built-in types, and
+// the loader says what it fixed.
 TEST(AriadneLoader, TextViewAndMessageInput) {
   SKIP_WITHOUT_YAML();
   const char *doc = R"(
@@ -670,6 +670,7 @@ windows:
         multiline: false
         max_lines: 6
         max_length: 280
+        send: Post
         on: (chat-ui-send "chat" (get-attr event "text"))
       - message_input: Odd
         bind: other.draft
@@ -700,11 +701,13 @@ windows:
   EXPECT_FALSE(say->multiline);
   EXPECT_EQ(say->max_lines, 6);
   EXPECT_EQ(say->max_length, 280);
+  EXPECT_EQ(say->send, "Post");
   EXPECT_EQ(say->on, "(chat-ui-send \"chat\" (get-attr event \"text\"))");
   const Widget *odd = find(r.root, Kind::MessageInput, "Odd");
   ASSERT_NE(odd, nullptr);
   EXPECT_TRUE(odd->multiline) << "multi-line by default";
   EXPECT_EQ(odd->max_lines, 4);
+  EXPECT_EQ(odd->send, "") << "no send button by default";
   ASSERT_EQ(r.warnings.size(), 2u);
   EXPECT_NE(r.warnings[0].find("message_input 'Odd' has no on:"), std::string::npos)
       << r.warnings[0];

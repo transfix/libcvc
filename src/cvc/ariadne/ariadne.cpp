@@ -2009,6 +2009,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
     o.multiline = w.multiline;
     o.max_lines = w.max_lines;
     o.max_length = w.max_length;
+    o.send = w.send;
     const MessageEdit e = b.message_input(label, path.c_str(), cur, o);
     if (e.submitted) {
       write<std::string>(app, path, std::string()); // sent: the draft is done with

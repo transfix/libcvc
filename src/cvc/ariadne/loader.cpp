@@ -208,6 +208,7 @@ const char *const kAriSchema = R"ARISCHEMA({
         "multiline": {"$ref": "#/$defs/flag"},
         "max_lines": {"type": "number"},
         "max_length": {"type": "number"},
+        "send": {"type": "string"},
         "options": {"type": ["array", "string"], "items": {"type": "string"}},
         "pos": {"type": "array", "items": {"type": "number"}},
         "size": {"type": ["array", "number"], "items": {"type": ["number", "string"]}},
@@ -889,6 +890,7 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
       ctx.warn("ari: message_input '" + label + "' max_length must be >= 0 — no cap");
     w.max_lines = lines >= 1.0 ? static_cast<int>(lines) : 4;
     w.max_length = length >= 0.0 ? static_cast<int>(length) : 0;
+    w.send = str(n, "send");
     return w;
   }
   if (type == "input_int") {
