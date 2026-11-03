@@ -553,6 +553,15 @@ The pose rows here are the lane's first payload: whole float poses, with a book 
      batches and rates, so 3 clean runs is a hint, not a proof.
    - The first spike's one bursty gRPC run (20 Hz room steps, 30 Hz client frames) did not stall
      either (§7.3). With odds like these, one run says nothing.
+   - Fixed by the gRPC delay drop (§9 item 3). Two findings from that work:
+     - The bench's clients shared one TCP connection, because gRPC carries every channel in a
+       process to the same target on one HTTP/2 connection. A dial now gets its own connection.
+     - Once the drop thins a stream, a tail loss is recovered by a retransmission timeout, not by
+       fast retransmit. Netem's Gilbert-Elliott chain moves one step per packet, so a quiet link
+       keeps it in its loss state, and each retransmission can die in turn. With the RTO doubling,
+       that is several seconds. `ss -tin` showed backoff 6 (RTO 15.6 s, cwnd 1). A real burst
+       ends in time, which this model cannot show. `net.ipv4.tcp_thin_linear_timeouts=1` (per
+       network namespace) stops the doubling for thin streams.
 4. **One association was not enough.** With poses and video on one SCTP association, the poses
    waited for the video's congestion window at 3 % loss: p95 97 ms, worse than gRPC's 80 (§7.3).
    Splitting them is what makes the lane work.
