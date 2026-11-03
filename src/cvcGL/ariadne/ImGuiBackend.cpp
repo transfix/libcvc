@@ -195,6 +195,18 @@ void ImGuiBackend::focus_next_window() {
 #endif
 }
 
+#ifdef CVC_ENABLE_IMGUI
+struct ImGuiBackend::WindowCuts {
+  std::string name;    // the ImGui window's name ("title###id")
+  bool paints = false; // ImGui's background is clear this frame and end_window paints it
+  ImDrawList *dl = nullptr;
+  ImDrawListSplitter split; // channel 0 the background, 1 the window's content
+  std::vector<ImRect> holes;
+};
+#else
+struct ImGuiBackend::WindowCuts {};
+#endif
+
 bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne::Size &size,
                                 float border, bool *p_open) {
   int pushes = 0;
@@ -447,7 +459,22 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
   }
   const ImGuiWindowFlags flags =
       ImGuiWindowFlags_HorizontalScrollbar | (fits ? ImGuiWindowFlags_AlwaysAutoResize : 0);
+  // A window that cut a hole in its background last frame (a viewport widget) paints its own in
+  // end_window, around this frame's cuts: ImGui's is made clear, and the content goes on a channel
+  // above the one that background is drawn on.
+  auto cuts = std::make_shared<WindowCuts>();
+  cuts->name = name;
+  cuts->paints = m_cutWindows.count(name) != 0;
+  if (cuts->paints)
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
   vis = ImGui::Begin(name.c_str(), p_open, flags);
+  if (cuts->paints) {
+    ImGui::PopStyleColor();
+    cuts->dl = ImGui::GetWindowDrawList();
+    cuts->split.Split(cuts->dl, 2);
+    cuts->split.SetCurrentChannel(cuts->dl, 1);
+  }
+  m_windowCuts.push_back(std::move(cuts));
 #else
   (void)size;
   (void)border;
@@ -504,6 +531,18 @@ void ImGuiBackend::end_window() {
 #endif
   m_lastTextView.reset();
   m_lastTextViewWindow = nullptr;
+#ifdef CVC_ENABLE_IMGUI
+  if (!m_windowCuts.empty()) {
+    std::shared_ptr<WindowCuts> cuts = std::move(m_windowCuts.back());
+    m_windowCuts.pop_back();
+    if (cuts->paints)
+      paint_window_background(*cuts);
+    if (cuts->holes.empty())
+      m_cutWindows.erase(cuts->name);
+    else
+      m_cutWindows.insert(cuts->name);
+  }
+#endif
   ui::End(); // unconditional per ImGui's contract
   if (!m_windowStylePushes.empty()) {
     const int n = m_windowStylePushes.back();
@@ -1438,6 +1477,56 @@ bool ImGuiBackend::draw_image(const char *name, float width) {
 }
 
 #ifdef CVC_ENABLE_IMGUI
+void ImGuiBackend::cut_window_background(float x0, float y0, float x1, float y1) {
+  if (m_windowCuts.empty() || !(x1 > x0) || !(y1 > y0))
+    return;
+  m_windowCuts.back()->holes.emplace_back(x0, y0, x1, y1);
+}
+
+// The window's background below its title bar, less its holes: for each band between the holes'
+// top and bottom edges, the stretches of it no hole covers.
+void ImGuiBackend::paint_window_background(WindowCuts &cuts) {
+  ImGuiWindow *win = ImGui::GetCurrentWindow();
+  ImDrawList *dl = cuts.dl;
+  cuts.split.SetCurrentChannel(dl, 0);
+  const ImRect bg(win->Pos.x, win->InnerRect.Min.y, win->Pos.x + win->Size.x,
+                  win->Pos.y + win->Size.y);
+  if (bg.Max.y > bg.Min.y && !win->Collapsed) {
+    const ImU32 col = ImGui::GetColorU32(ImGuiCol_WindowBg);
+    std::vector<ImRect> holes;
+    std::vector<float> ys{bg.Min.y, bg.Max.y};
+    for (ImRect h : cuts.holes) {
+      h.ClipWithFull(bg);
+      if (h.Max.x > h.Min.x && h.Max.y > h.Min.y) {
+        holes.push_back(h);
+        ys.push_back(h.Min.y);
+        ys.push_back(h.Max.y);
+      }
+    }
+    std::sort(ys.begin(), ys.end());
+    ys.erase(std::unique(ys.begin(), ys.end()), ys.end());
+    dl->PushClipRect(bg.Min, bg.Max, false);
+    for (std::size_t i = 0; i + 1 < ys.size(); ++i) {
+      const float ya = ys[i], yb = ys[i + 1];
+      std::vector<std::pair<float, float>> covered;
+      for (const ImRect &h : holes)
+        if (h.Min.y < yb && h.Max.y > ya)
+          covered.emplace_back(h.Min.x, h.Max.x);
+      std::sort(covered.begin(), covered.end());
+      float x = bg.Min.x;
+      for (const auto &c : covered) {
+        if (c.first > x)
+          dl->AddRectFilled(ImVec2(x, ya), ImVec2(c.first, yb), col);
+        x = std::max(x, c.second);
+      }
+      if (bg.Max.x > x)
+        dl->AddRectFilled(ImVec2(x, ya), ImVec2(bg.Max.x, yb), col);
+    }
+    dl->PopClipRect();
+  }
+  cuts.split.Merge(dl);
+}
+
 struct ImGuiBackend::BackdropFrame {
   cvc::ariadne::Backdrop bd;
   ImDrawList *dl = nullptr;
@@ -1446,6 +1535,7 @@ struct ImGuiBackend::BackdropFrame {
   float avail_w = 0.0f, avail_h = 0.0f;
 };
 #else
+void ImGuiBackend::cut_window_background(float, float, float, float) {}
 struct ImGuiBackend::BackdropFrame {};
 #endif
 

@@ -969,6 +969,8 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
   warn_clip_capability(*node, n, warnings);
   if (n.body.present && n.source_data.empty()) // a data node's come with its dataset
     bodies.push_back({&n, node}); // added once every node exists (realize_physics)
+  if (!n.tags.empty())
+    out.tagged.push_back({n.id, n.tags, node});
 
   // Children nest UNDER this node, so each child's transform is local to it.
   for (const auto &c : n.children)

@@ -100,6 +100,14 @@ struct RealizedScene {
   // tickers. Empty without the option, so a host runs a SceneGraph::selectLOD pass per frame only
   // when this is not.
   std::vector<std::weak_ptr<LodGraphicsNode>> lod_nodes;
+  // The nodes that carry view tags (`tags:`, §9.5.1), at any depth: what a viewport widget leaves
+  // out when its show: / hide: rule out a node's tags. Held weakly, like the tickers.
+  struct TaggedNode {
+    std::string id;
+    std::vector<std::string> tags;
+    std::weak_ptr<GraphicsNode> node;
+  };
+  std::vector<TaggedNode> tagged;
   // Per-frame closures a CUSTOM node type registered (register_scene_node_type) that
   // needs servicing — run by tick_scene after the built-in tickers. A closure should
   // capture a weak_ptr to its node (not the node), matching the volren/volslice

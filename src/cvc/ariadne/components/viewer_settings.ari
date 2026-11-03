@@ -1,0 +1,67 @@
+# viewer_settings.ari — a REUSABLE Ariadne component: one settings window for a scene viewer: the
+# frame-rate readout, the UI size, the grid / origin axis / scene bounds, the camera and the
+# shadows. Every control binds a two-way state key a cvcGL object owns, so it works in any
+# document with a scene and NO host C++:
+#
+#   viewers.<viewer>.hud.enabled, .hud.fps  cvc::gl::FpsHud (the on-screen readout; "f" toggles it)
+#   viewers.<viewer>.ui.scale               cvc::gl::UiSettings (the overlay's UI size)
+#   graphics.root.children.grid.visible     the scene's grid (cvc::gl::GridNode)
+#   graphics.root.children.axis.visible     the origin axis (cvc::gl::AxisNode)
+#   graphics.root.show_bbox                 the box around the whole scene
+#   viewers.<viewer>.camera.settings.*      cvc::gl::CameraController (camera_controls.ari)
+#   shadows.*                               cvc::gl::ShadowSettings (scene_controls.ari); these act
+#                                           once the scene has shadows (a `shadows:` block)
+#
+# Args (every one has a default, so a bare include works):
+#   viewer  the viewer it sets up (default main)
+#   title   the window's title (default Viewer)
+#   id      the instance id: the window's geometry persists under tree.<id> (default
+#           viewer_settings)
+#
+# Use it:
+#     import: cvc://components/viewer_settings.ari
+#     windows:
+#       - include: viewer_settings
+#
+# A document that imports this does not need camera_controls.ari or scene_controls.ari for the same
+# viewer: the Camera and Shadows sections are theirs (their camera_settings and shadow_settings
+# units).
+
+import:
+  - cvc://components/camera_controls.ari
+  - cvc://components/scene_controls.ari
+
+units:
+  viewer_settings:
+    args: { viewer: main, title: Viewer, id: viewer_settings }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - text: "Display"
+      - checkbox: Frame rate
+        bind: viewers.{viewer}.hud.enabled
+        tooltip: "the frames-per-second readout over the scene (the f key toggles it too)"
+      - text: "fps"
+        bind: viewers.{viewer}.hud.fps
+        visible_when: (= (state-get "viewers.{viewer}.hud.enabled") "1")
+      - slider_float: UI size
+        bind: viewers.{viewer}.ui.scale
+        lo: 0.5
+        hi: 3.0
+        fmt: "%.2f"
+        commit: release
+        tooltip: "the size of the windows and their text, in logical pixels per point"
+      - checkbox: Grid
+        bind: graphics.root.children.grid.visible
+      - checkbox: Origin axis
+        bind: graphics.root.children.axis.visible
+      - checkbox: Scene bounds
+        bind: graphics.root.show_bbox
+        tooltip: "the box around everything in the scene"
+      - separator
+      - text: "Camera"
+      - include: camera_settings
+        args: { viewer: "{viewer}" }
+      - separator
+      - text: "Shadows"
+      - include: shadow_settings

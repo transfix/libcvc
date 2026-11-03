@@ -1,0 +1,30 @@
+# scene_view.ari — a REUSABLE Ariadne component: a window holding a view of the document's scene, from
+# a camera of its own, drawing all of the scene or only the nodes whose `tags:` it shows (the
+# `viewport` widget, docs/ARIADNE.md §5.18). Drag in it to turn its camera; the wheel zooms it.
+#
+# Args (defaults in the unit): `view` names the view, so its camera is <prefix>.viewers.<view>.camera
+# (include camera_settings with `viewer: <view>` to tune it); `show` and `hide` are tag lists as one
+# string ("sim debug"; show "" draws every tag); `camera` is orbit, fly or map; `chrome: false` leaves
+# out the grid, axes and bounding box; `width` and `height` are the view's size in logical px.
+#
+# Use it:
+#     import: cvc://components/scene_view.ari
+#     windows:
+#       - include: scene_view
+#         args: { view: overview, title: Overview, id: overview, show: sim, camera: map, chrome: false }
+
+units:
+  scene_view:
+    args: { view: scene_view, title: View, id: scene_view, show: "", hide: "", camera: orbit,
+            chrome: true, width: 360, height: 270 }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - type: viewport
+        view: "{view}"
+        show: "{show}"
+        hide: "{hide}"
+        camera: "{camera}"
+        chrome: "{chrome}"
+        width: "{width}"
+        height: "{height}"

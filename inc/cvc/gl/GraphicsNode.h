@@ -357,6 +357,7 @@ public:
   void removeFromRenderer(vtkRenderer *renderer) override;
 
 protected:
+  void appendViewProps(std::vector<vtkProp *> &out) override; // + the bounding box's outline
   // isRoot=true (the default, used by the public setters + state handlers) fires
   // transformChanged after the subtree is updated; the child recursion passes
   // false so the signal fires once per user move, not once per node.

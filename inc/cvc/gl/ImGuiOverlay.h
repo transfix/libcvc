@@ -58,9 +58,9 @@ class SceneRenderer;
 // IMGUI_IMPL_OPENGL_ES3 under Emscripten (WebGL2). Mouse and rendering work.
 // KEYBOARD events from the VTK interactor are now translated to ImGui (text
 // entry, editing keys, Ctrl-shortcuts — see the intercept() key handling), so
-// text entry works natively. In the BROWSER this additionally needs the VTK
-// wasm interactor (vtkWebAssemblyRenderWindowInteractor) to receive DOM key
-// events, which requires the canvas to hold focus (tabindex).
+// text entry works natively. In the BROWSER the canvas's interactor (SDL's, or
+// VTK's canvas window's) takes the DOM key events typed into the canvas, which
+// therefore has to hold the focus (tabindex).
 //
 // A PHONE has no keyboard to send them, and a browser raises its own only for
 // a focused text field, which a canvas is not. So when a text field is tapped

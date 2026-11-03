@@ -314,6 +314,12 @@ struct SceneNode {
   // reload, a replacement). Empty: the camera is left alone.
   std::string frame;
 
+  // tags: [sim, debug] — the node's view tags (§9.5.1). A `viewport` widget that names tags in its
+  // show: / hide: draws a tagged node only where they allow it; an untagged node is in every view.
+  // Tags hold for the node's whole subtree, so a tagged child under a tagged parent is drawn only
+  // where both are. The main view draws every node.
+  std::vector<std::string> tags;
+
   // fit: bake a "stand this mesh on the ground" normalization INTO the loaded geometry — center it
   // in XY, sit its base on z=0, and scale its tallest extent to fit_height; optionally first rotate
   // a canonical Y-up mesh to Z-up. Geometry-only (a node transform composes on top). For placing a
@@ -357,6 +363,18 @@ struct SceneNode {
 
   std::vector<SceneNode> children; // nested nodes (…children.<id>.children.<child>)
 };
+
+// The state key a custom node's live controls bind. A node type whose keys are scene-wide
+// (forest_trees' forest.*, wave_sea's sea.*, cloud_sky's sky.*, generated_world's world.*) moves
+// them under its `keys:` prop when it has one, so a document can hold two of a type, each with
+// its own panel: node_key(n, "forest.seed") is "forest.seed", or "north.seed" for `keys: north`.
+inline std::string node_key(const SceneNode &n, const std::string &key) {
+  const std::size_t dot = key.find('.');
+  const std::string root = n.props.str("keys");
+  if (dot == std::string::npos || root.empty())
+    return key;
+  return root + key.substr(dot);
+}
 
 // A scene light (§9.2). Either an explicit light (kind/pos/target/cone/intensity/
 // color, or azimuth/elevation for a directional sun) or a named StageLighting preset

@@ -421,6 +421,13 @@ cvc state delete scene.camera.x
 that can read and write the CVC state tree. Useful for scripting batch
 operations, automating pipelines, and extending CVC at runtime.
 
+It runs them on a synchronous scheduler of its own, with the
+`round_robin` policy (`state_exec.policy` is not read), on one thread, so
+`(await)` returns at once instead of waiting a frame. `cvc serve
+--enable-exec` does the same for submitted programs. Which scheduler each
+host uses is in
+[STATE_EXEC_DEVELOPER_GUIDE.md](STATE_EXEC_DEVELOPER_GUIDE.md#which-scheduler-runs-a-program).
+
 ### Inline Expressions
 
 ```bash

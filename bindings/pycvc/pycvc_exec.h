@@ -36,8 +36,14 @@ public:
   // value is logged and round_robin used, as app::exec_scheduler() does); otherwise a
   // pycvc.scheduling_policy member or its name ("round_robin", "priority", "priority_rr").
   // `idle_timeout` is how long, in seconds, run() waits while its program is parked with nothing
-  // pending before it kills it. Anything else, or a negative or NaN idle_timeout, raises
-  // ValueError (std::invalid_argument).
+  // pending before it kills it. A lock wait is pending while the process it waits for is another
+  // Exec's (or scheduler's) that made progress within idle_timeout (docs/STATE_EXEC_LOCKS.md
+  // 9.2). Anything else, or a negative or NaN idle_timeout, raises ValueError
+  // (std::invalid_argument).
+  //
+  // Its with-lock keys are the app's (app::lock_manager()): every Exec of an app, and the app's
+  // exec scheduler, share one lock namespace. With state_exec.locks.threading set to single it
+  // raises RuntimeError naming that setting, since an Exec may run() on any Python thread.
   explicit Exec(const std::shared_ptr<cvc::app> &app, PyObject *policy = nullptr,
                 double idle_timeout = 60.0);
   ~Exec();
@@ -106,9 +112,10 @@ public:
   //
   // NOT thread-safe: one Exec is driven by ONE thread. Do not call run() (or
   // register*) concurrently on the same Exec; use a separate Exec per thread
-  // (each owns its own scheduler, so they do not interfere). A second run() of the
-  // same Exec, from any thread, raises RuntimeError until the first has returned.
-  // set_priority and get_priority are the exceptions: any thread may call them.
+  // (each owns its own scheduler; their with-lock keys are the app's, shared). A
+  // second run() of the same Exec, from any thread, raises RuntimeError until the
+  // first has returned. set_priority, get_priority and lock_query are the
+  // exceptions: any thread may call them.
   std::string run(const std::string &src);
 
   // A process's priorities (docs/STATE_EXEC_LOCKS.md 7.4). set_priority(pid, p)
@@ -127,6 +134,16 @@ public:
   // Execs whose functions call each other can't wait for each other.
   bool set_priority(int pid, int priority);
   PyObject *get_priority(int pid);
+
+  // The app's locks under `prefix`, as (lock-query prefix) in this Exec's programs returns them
+  // (docs/STATE_EXEC_LOCKS.md 4.1, 7.4): {"held": [{"key", "mode", "pids", "count", "generation",
+  // "abandoned"}], "waiting": [{"key", "mode", "pid"}]}. "" is every key. Counts include every
+  // Exec's holds; pids are shown only for this Exec's processes (its owner "" ones), since pids
+  // repeat across Execs.
+  //
+  // THREADS: any thread may call it, and it never waits for run(): it reads the app's lock
+  // manager directly, under the manager's own mutex, with the GIL released.
+  PyObject *lock_query(const std::string &prefix = "");
 
   // The parser settings this Exec's scheduler parses programs with when the app tree's
   // state_exec.defaults.parser.* keys don't say otherwise; the same calls as
