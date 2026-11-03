@@ -30,7 +30,8 @@ switches between generators at run time, and libcvc's water whatever the generat
   - `material: { opaque: true }`: `GeometryNode::setForceOpaque`, new (no per-texel alpha scan);
   - a rig's `wash:`: removes the downlight ring and its shadow-map samplers.
 - **`terrain_lab.ari`**: the lab as a document on those keys, with demo3's soft afternoon look.
-  `cloud_sky` takes `extent` / `base` / `top`, so its slab fits a world of any size.
+  `cloud_sky` takes `extent` / `base` / `top`, so its slab fits a world of any size (since G6 a
+  deck of clouds over the whole world, below).
 
 ## G1 — a generator interface and the switch
 
@@ -220,6 +221,54 @@ The conference is the world's second consumer. Peers must see the same world and
     whole, is 0.26 M from its middle and 16 k from the overview (natively, balanced preset); a
     1.2 km world's 5 m relief stays at rung 0 in the balanced preset. The rungs hold 1.42x the
     terrain's vertices as well as the terrain.
+  - Landed: the cloud deck and its shade (section 8.4's cloud ladder, a first part). `cloud_sky`
+    was one fixed 60x60x28 slab (1.28 km across in the terrain lab) whose ground shadow was a
+    96^2 bake of shade x band albedo that replaced the ground's texture, so the terrain lab turned
+    it off, and an 11.2 km world had clouds over its middle 1.28 km only. Now:
+    - `cvc::world::cloud_layer` (GL-free, `world_cloud_test`) scatters a few L-system cumulus
+      maps over a periodic grid of cells: which cells hold a cloud (`coverage`), its offset in the
+      cell, and a per-cell sequence of maps it morphs through. The period is wider than the
+      drawn area, so each cloud has one copy drawn and every texture wraps; the wind is a
+      translation of the whole pattern. Each map is scaled to its own peak (the grammar grows some
+      variants nearly empty: the old slab spent half its morph on a faint one). Morphs are linear
+      crossfades, so the shadow's optical depth is the crossfade of the maps' and follows the
+      morph exactly. The shadow and the far slices integrate the volume's transfer-function
+      opacity, not the raw density, so they show the cloud the volume shows.
+    - The shade is drawn in the receivers' shaders: the ground (every LOD rung), the buildings,
+      the roads, the props. A periodic mask is read at the fragment's base-plane point along the
+      sun and scales the direct light only; the ground's texture is untouched. `GeometryNode` gained
+      shared shader inputs (one set that many meshes read at draw time; the deck updates it each
+      frame) and fragment replacements applied after VTK's own: a receiver rewrites the lighting
+      sum VTK generates, the one place both mappers keep the direct terms apart (the WebGL2 mapper
+      scopes them to its lighting block). Checked on that mapper natively
+      (`CVCGL_LOWMEM_MAPPER=force`): it applies the replacement and compiles the deck's shaders.
+    - Coverage: a pool of near `VolumeNode`s (6 in the terrain lab, at most 8) on the clouds nearest
+      the camera, and one mesh of 10 translucent shells for the rest, sampling a coarse opacity
+      texture as the optical depth along the view ray. A cloud passing between the two
+      crossfades: the shells cut out the near volumes' squares by uniform, so a fade never
+      re-composites. The deck follows the ground's extent live.
+    - The terrain lab's fill, environment and ambient went from 0.3 / 0.5 / 0.32 to 0.15 / 0.2 /
+      0.2: with more light from the sky than the sun, building and cloud shadows washed out.
+    - Cost, measured natively (this box, 1280x720 offscreen): the sky's tick averages 0.4 ms a
+      frame on both the 1.2 km and the 11.2 km world. The shade (512^2 at most) and far (256^2 x 10
+      at most) composites are spread over 8 frames once a second; their uploads take about 0.4 ms
+      and 1 ms, into double-buffered textures; walking the receivers for new meshes about 1.5 ms
+      once a second. The old slab cost about the same: a 60x60x28 crossfade and a 96^2 bake every
+      third frame. In the browser, expect 2-3x the CPU on single-threaded wasm (about 1 ms a frame,
+      4 ms once a second) and, on the GPU, up to 6 small volume ray casts plus 10 shell layers'
+      fill. Not yet measured in a browser.
+  - Still to do for the clouds: measure in Edge and Firefox (the GLSL ES compile is unchecked; the
+    forced WebGL2 mapper natively compiles GLSL 150). With `CVCGL_LOWMEM_MAPPER=force` natively the
+    ground itself fails to compile: `terrain_bump` picks the mapper's normal by `__EMSCRIPTEN__`,
+    not by the mapper (in the browser it is right). The shells streak at grazing angles near the horizon: fade them by
+    view angle, or add the billboard rung. The near volumes are flat white beside the shells' height
+    shading: give the volumes the shells' top light. Clouds past the world's edge are kept short of
+    the horizon, because the deck is in the scene's bounds, which the camera fits and clips to; a
+    clipping range that ignores the deck would let them reach it. Wiring new meshes is a periodic
+    walk; an LOD rung or a regenerated world could announce its meshes instead. One top-down view
+    showed a cloud with a straight edge, likely where two near volumes' boxes overlap; not seen
+    elsewhere. Then LSYSTEM-LABORATORY-ROADMAP section 4.7's evolving coverage (a cellular
+    automaton) and orographic clouds.
 - **Dynamic props, demo3's way**, for vehicles and avatars on the world: unregistered slot nodes,
   a pose gate, out of the bounds fit, non-casting. demo3 does this by hand. A libcvc node type
   would make it a scene key.

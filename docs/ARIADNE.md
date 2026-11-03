@@ -766,6 +766,15 @@ south-west to north-east), a body on it collides with the same triangles, and a 
 standing on it (`ground:` in `forest_trees`, `wave_sea`, `cloud_sky`) samples the triangle under
 each point.
 
+**Clouds.** `cloud_sky` draws a deck of drifting, slowly changing L-system cumulus over its
+`ground:` node's extent (followed live): the clouds nearest the camera as volumes (`near:`), the
+rest as far shells. Their shade falls on the ground and on the nodes in `receivers:` (and their
+children, LOD rungs included) through those meshes' shaders: it dims the sun's light and leaves
+their textures and colours alone. Its other keys: `extent` (a cloud's half-width), `base` / `top`,
+`coverage`, `spacing`, `seed`, `variants`, `sun_az` / `sun_el` (the key light's, which the shade
+is cast along), `shade_k` / `shade_floor`, `horizon` and `shadow` (0 starts the shade off;
+`sky_controls.ari` toggles it, with the drift and morph speeds).
+
 **Generated terrain.** `source: { terrain: { generator, size, resolution, seed, amp, file,
 preset } }` draws a `cvc::world` terrain generator's ground as such a heightfield: `fbm` (the
 analytic relief the terrain lab stands on; the default), `dem` (an elevation `.npy` at `file`, a URI

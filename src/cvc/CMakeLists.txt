@@ -225,6 +225,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/world/bundle.h
   ../../inc/cvc/world/generated_world.h
   ../../inc/cvc/world/terrain_lod.h
+  ../../inc/cvc/world/cloud_layer.h
 )
 
 # Source files
@@ -448,6 +449,7 @@ set(SOURCE_FILES
   world/bundle.cpp
   world/generated_world.cpp
   world/terrain_lod.cpp
+  world/cloud_layer.cpp
 )
 
 # Architectural rule (roadmap §14.4): the cvc::world generator library is a FILE
