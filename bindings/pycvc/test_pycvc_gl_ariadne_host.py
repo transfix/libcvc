@@ -346,14 +346,19 @@ def gl_child(tmp):
         for name, frames, extra, expect in (
                 ("hello", 10, [], ("clicks", "2")),
                 ("data_feed", 20, [], ("stats", "2")),
-                ("form", 10, [], ("spread.n", "400")),
-                ("nav", 60, ["--no-bundle", "--plant", "kinematic"], ("stats.plant", "kinematic"))):
+                ("form", 10, [], ("spread.n", "400"))):
             captured = run_example(name, ["--offscreen", "--frames", str(frames), "--png",
                                           os.path.join(tmp, f"{name}.png")] + extra)
             check(captured["rc"] == 0 and os.path.getsize(os.path.join(tmp, f"{name}.png")) > 0,
                   f"example {name} ran offscreen")
             check(captured[expect[0]] == expect[1], f"example {name}: {expect} ({captured})")
-        check(float(captured["stats.time"]) > 0, f"example nav stepped ({captured})")
+        for plant in ("kinematic", "jolt"):  # nav: the fleet, the routes, the readouts, drawn
+            png = os.path.join(tmp, f"nav_{plant}.png")
+            got = run_example("nav", ["--offscreen", "--frames", "60", "--png", png, "--no-bundle",
+                                      "--plant", plant])
+            check(got["rc"] == 0 and os.path.getsize(png) > 0, f"nav ({plant}) ran offscreen")
+            check(float(got["stats.time"]) > 0, f"example nav ({plant}) stepped ({got})")
+            check(got["stats.plant"] in (plant, "kinematic"), f"example nav's plant ({got})")
     except AssertionError as e:
         print("RENDER_FAIL:", e, flush=True)
         sys.exit(_ASSERT_RC)
@@ -367,10 +372,11 @@ def main():
         return
     headless(tmp)
     vehicles(tmp)
-    for plant in ("kinematic", "jolt"):  # nav.py headless: the fleet, the routes, the readouts
-        got = run_example("nav", ["--headless", "--frames", "30", "--no-bundle", "--plant", plant])
-        check(got["rc"] == 0 and float(got["stats.time"]) > 0, f"nav.py headless ({got})")
-        check(got["stats.plant"] in (plant, "kinematic"), f"nav.py's plant ({got})")
+    try:  # nav.ari requires gl.scene, so nav.py says so instead of running headless
+        run_example("nav", ["--headless", "--frames", "1", "--no-bundle"])
+        check(False, "nav.py --headless should refuse")
+    except SystemExit as e:
+        check("gl.scene" in str(e.code), f"nav.py --headless names gl.scene ({e.code!r})")
     print(f"  ok: headless, {checks} checks")
     env = dict(os.environ, _CVC_ARI_HOST_CHILD="1")
     p = subprocess.run([sys.executable, os.path.abspath(__file__)], env=env, capture_output=True,

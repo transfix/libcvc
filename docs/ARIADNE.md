@@ -2181,6 +2181,7 @@ and the two pass data both ways. `pycvc_gl.ariadne.Host`
 
 Each takes `--offscreen` (GL with no window), `--headless` (no GL), `--frames N` and
 `--png PATH`; off a window it presses its own buttons and prints what the document shows.
+`nav.ari` has a `scene:`, so it requires `gl.scene` (§5.7) and `nav.py` has no headless run.
 
 `nav.py` finds Austin with `pycvc_gl.scenes.find_scene()` (`$CVC_NAV_BUNDLE`, else
 `<prefix>/share/cvc-scenes/austin_south`: `cvcpkg install scene-austin-south-small

@@ -16,6 +16,11 @@ meta:
   author: cvc
   min_libcvc: 3.4.0
 
+requires:
+  - quit                                   # the Feed menu's Quit
+  - {name: stream_view, optional: true}    # host.open_stream registers it (GL); else text
+  - {name: raster.bitmap, optional: true}  # the heat picture in real pixels
+
 customs:
   - widget: stream_view            # registered by host.open_stream (GL); headless shows text
 

@@ -5,7 +5,9 @@ and draws it in nav.ari.
     python nav.py --plant kinematic --agents 12
     python nav.py --bundle DIR                      # a scene bundle (terrain.json + buildings.glb)
     python nav.py --offscreen --png nav.png --frames 300
-    python nav.py --headless --frames 200           # the sim, routes and readouts, nothing drawn
+
+nav.ari draws a scene, so it requires ``gl.scene``: there is no ``--headless`` run (``--offscreen``
+draws without a window).
 
 The world is Austin when its scene bundle is installed (``cvcpkg install scene-austin-south-small
 vehicle-humvee``; found by pycvc_gl.scenes.find_scene, or ``--bundle`` / ``$CVC_NAV_BUNDLE``),
@@ -370,6 +372,9 @@ def main(argv=None):
     p.add_argument("--relief", action="store_true",
                    help="Jolt on the city's terrain and building mesh (some Humvees roll over)")
     extra = p.parse_args(args.rest)
+    if args.mode == "headless":
+        sys.exit("nav.py: nav.ari draws a scene (requires: gl.scene); run it in a window or "
+                 "--offscreen")
 
     from pycvc_gl.scenes import find_scene
 
@@ -380,8 +385,7 @@ def main(argv=None):
     host.set_many({"agents": extra.agents, "plant": plant, "camera": extra.camera}, prefix="sim")
     rng = np.random.default_rng(extra.seed)
     world = World(bundle, extra.half)
-    drawn = host.mode != "headless"
-    model = humvee_model(world) if drawn else None
+    model = humvee_model(world)
     st = {"fleet": None, "speeds": [], "nodes": 0}
 
     def restart():
@@ -391,16 +395,15 @@ def main(argv=None):
             kind = "kinematic"
         st["fleet"] = Fleet(world, n, kind, rng, relief=extra.relief)
         st["speeds"] = []
-        if drawn:
-            for i in range(n, st["nodes"]):
-                host.scene.removeGraphics(f"humvee_{i}")
-            for i in range(st["nodes"], n):
-                if model is not None:
-                    model.add(host.scene, f"humvee_{i}")
-                else:
-                    host.lab.add_mesh(f"humvee_{i}", *boxes_mesh([(-2.42, -1.09, 2.42, 1.09, 1.9)]),
-                                      color=(0.42, 0.45, 0.33))
-            st["nodes"] = n
+        for i in range(n, st["nodes"]):
+            host.scene.removeGraphics(f"humvee_{i}")
+        for i in range(st["nodes"], n):
+            if model is not None:
+                model.add(host.scene, f"humvee_{i}")
+            else:
+                host.lab.add_mesh(f"humvee_{i}", *boxes_mesh([(-2.42, -1.09, 2.42, 1.09, 1.9)]),
+                                  color=(0.42, 0.45, 0.33))
+        st["nodes"] = n
 
     host.on("restart", restart)
     host.on("shuffle", lambda: st["fleet"].shuffle())
@@ -411,27 +414,27 @@ def main(argv=None):
         if st["fleet"] is not None:
             restart()
 
-    if drawn:  # the city, under the document's lights
-        if world.bundle:
-            from pycvc_gl.scenes import load_geometry_bundle
+    # the city, under the document's lights
+    if world.bundle:
+        from pycvc_gl.scenes import load_geometry_bundle
 
-            load_geometry_bundle(host.lab, world.bundle, terrain_color=(0.42, 0.46, 0.36),
-                                 building_color=(0.80, 0.78, 0.74))
-            for name, (amb, dif, spec) in (("terrain", (0.4, 0.85, 0.0)),
-                                           ("buildings", (0.3, 0.8, 0.04))):
-                gn = host.scene.geometry_node(name)
-                gn.setAmbient(amb)
-                gn.setDiffuse(dif)
-                gn.setSpecular(spec)
-        else:
-            mnx, mny, mxx, mxy = world.bounds
-            host.lab.add_mesh("ground", [mnx, mny, 0, mxx, mny, 0, mxx, mxy, 0, mnx, mxy, 0],
-                              [0, 1, 2, 0, 2, 3], color=(0.42, 0.46, 0.36))
-            host.lab.add_mesh("buildings", *boxes_mesh(world.blocks), color=(0.80, 0.78, 0.74))
-        host.scene.addGraphics("routes", pycvc.geometry(host.app))
-        host.set_many({"back": 2.5 * HUMVEE_LEN, "height": 1.2 * HUMVEE_LEN,
-                       "look_ahead": 1.2 * HUMVEE_LEN, "look_up": 0.4 * HUMVEE_LEN,
-                       "cam_tau": 0.15, "pos_tau": 0.1}, prefix="viewers.main.camera.track")
+        load_geometry_bundle(host.lab, world.bundle, terrain_color=(0.42, 0.46, 0.36),
+                             building_color=(0.80, 0.78, 0.74))
+        for name, (amb, dif, spec) in (("terrain", (0.4, 0.85, 0.0)),
+                                       ("buildings", (0.3, 0.8, 0.04))):
+            gn = host.scene.geometry_node(name)
+            gn.setAmbient(amb)
+            gn.setDiffuse(dif)
+            gn.setSpecular(spec)
+    else:
+        mnx, mny, mxx, mxy = world.bounds
+        host.lab.add_mesh("ground", [mnx, mny, 0, mxx, mny, 0, mxx, mxy, 0, mnx, mxy, 0],
+                          [0, 1, 2, 0, 2, 3], color=(0.42, 0.46, 0.36))
+        host.lab.add_mesh("buildings", *boxes_mesh(world.blocks), color=(0.80, 0.78, 0.74))
+    host.scene.addGraphics("routes", pycvc.geometry(host.app))
+    host.set_many({"back": 2.5 * HUMVEE_LEN, "height": 1.2 * HUMVEE_LEN,
+                   "look_ahead": 1.2 * HUMVEE_LEN, "look_up": 0.4 * HUMVEE_LEN,
+                   "cam_tau": 0.15, "pos_tau": 0.1}, prefix="viewers.main.camera.track")
     restart()
 
     @host.on_frame
@@ -452,8 +455,6 @@ def main(argv=None):
         host.set("agent.summary", summary)
         if host.frame_count % 5 == 0:
             host.publish_image("map", map_picture(world, fleet, host.get_bool("show.routes")))
-        if not drawn:
-            return
         from pycvc_gl.vehicle import body_transform, seat_transform
 
         for i in range(fleet.n):

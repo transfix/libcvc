@@ -22,6 +22,10 @@ meta:
   author: cvc
   min_libcvc: 3.4.0
 
+requires:
+  - gl.scene                       # the city and the Humvees are the point: no headless run
+  - quit                           # the Sim menu's Quit
+
 init: |
   (begin
     (state-set "sim.agents" "8")
