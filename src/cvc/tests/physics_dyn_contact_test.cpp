@@ -256,9 +256,10 @@ TEST(DynContact, APairKeepsItsMomentum) {
 
 // The dampers and the friction read implicitly (dyn_contact_implicit), against a wall and between
 // two Humvees at random touching poses: the rows sum to R_c (minus R_c v is dyn_contact's Wd); the
-// solve holds, M (v_d - v) = hdt (W_c + W_d); W_d only dissipates at v_d; between the vehicles it
-// is equal and opposite, so the pair keeps its momentum; and with no barrier, however stiff the
-// dampers are against the step (hdt to 1 s), the kinetic energy at v_d is no more than at v.
+// solve holds, M (v_d - v) = hdt (W_c + W_d), to its backward error; W_d only dissipates at v_d;
+// between the vehicles it is equal and opposite, so the pair keeps its momentum; and with no
+// barrier, however stiff the dampers are against the step (hdt to 1 s), the kinetic energy at v_d
+// is no more than at v.
 TEST(DynContact, TheImplicitDamperOnlyDissipates) {
   diff::dyn_contact_params p;
   const diff::dyn_footprint f = humvee_footprint();
@@ -332,15 +333,36 @@ TEST(DynContact, TheImplicitDamperOnlyDissipates) {
             q[j].Wc[i] = barrier ? on[j]->Wc[i] : 0.0;
         }
         diff::dyn_contact_implicit(hdt, rows, q);
+        // The solve's componentwise backward error, |A v_d - b| over |A| |v_d| + |b| (A = M +
+        // hdt R_c, b = M v + hdt W_c): stiff dampers leave v_d nearly across their directions, so
+        // R_c v_d (W_d) is far smaller than the terms the solve summed. R_c's entries are bounded
+        // by each row's largest coefficient (a friction secant is at most coulomb / slide).
+        double scale[2][3];
+        for (std::size_t j = 0; j < q.size(); ++j) {
+          const double M[3] = {q[j].m, q[j].m, q[j].Iz};
+          for (int i = 0; i < 3; ++i)
+            scale[j][i] =
+                M[i] * (std::fabs(q[j].vd[i]) + std::fabs(q[j].v[i])) + hdt * std::fabs(q[j].Wc[i]);
+        }
+        for (const diff::dyn_contact_row &w : rows) {
+          const double most = w.coulomb > 0.0 ? w.coulomb / w.slide : w.coef;
+          double spread = 0.0;
+          for (int i = 0; i < 3; ++i)
+            spread += std::fabs(w.ja[i] * q[w.a].vd[i]) +
+                      (w.b >= 0 ? std::fabs(w.jb[i] * q[w.b].vd[i]) : 0.0);
+          for (int i = 0; i < 3; ++i) {
+            scale[w.a][i] += hdt * most * std::fabs(w.ja[i]) * spread;
+            if (w.b >= 0)
+              scale[w.b][i] += hdt * most * std::fabs(w.jb[i]) * spread;
+          }
+        }
         double power = 0.0;
-        for (const diff::dyn_contact_inertia &e : q) {
+        for (std::size_t j = 0; j < q.size(); ++j) {
+          const diff::dyn_contact_inertia &e = q[j];
           const double M[3] = {e.m, e.m, e.Iz};
           for (int i = 0; i < 3; ++i) {
             const double lhs = M[i] * (e.vd[i] - e.v[i]), rhs = hdt * (e.Wc[i] + e.Wd[i]);
-            worst_solve =
-                std::max(worst_solve,
-                         std::fabs(lhs - rhs) / (1.0 + M[i] * std::fabs(e.v[i]) +
-                                                 hdt * (std::fabs(e.Wc[i]) + std::fabs(e.Wd[i]))));
+            worst_solve = std::max(worst_solve, std::fabs(lhs - rhs) / (1.0 + scale[j][i]));
             power += e.vd[i] * e.Wd[i];
             kinetic0 += 0.5 * M[i] * e.v[i] * e.v[i];
             kinetic1 += 0.5 * M[i] * e.vd[i] * e.vd[i];
@@ -370,7 +392,7 @@ TEST(DynContact, TheImplicitDamperOnlyDissipates) {
   EXPECT_GT(field_cases, 50);
   EXPECT_GT(pair_cases, 50);
   EXPECT_LT(worst_rows, 1e-12);
-  EXPECT_LT(worst_solve, 1e-9);
+  EXPECT_LT(worst_solve, 1e-12);
   EXPECT_LT(worst_balance, 1e-9);
 }
 
