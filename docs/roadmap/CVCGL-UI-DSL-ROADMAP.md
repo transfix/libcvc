@@ -2036,7 +2036,9 @@ subject of the still-open streamed-source contract (§9.8).
 > width, point size). It is lowered not to duplicated traversal branches but to a twin vtkActor per
 > restyled actor over the node's own mapper. Not done: `transform:` overrides, `mode: replace`, a
 > top-level `views:` block of full-window views, and the mask as a state_exec expression (a bound
-> tag list does that job).
+> tag list does that job). Named cameras (`scene: cameras:`, a viewport's `camera: <id>` or
+> `camera: main`) let several viewports draw from one camera, and every view receives the scene's
+> shadows from the main renderer's maps (SceneGraph::makeShadowReceiverPass).
 
 One render window hosts **N layered viewports**, each its own camera — this is
 `ViewportManager` (`SceneRenderer` is its single-viewport facade and exposes

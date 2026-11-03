@@ -1994,6 +1994,31 @@ void SceneGraph::installShadowPasses() {
   m_shadowBaker = baker;
 }
 
+std::pair<const void *, double> SceneGraph::shadowReceiverKey() const {
+  return {m_shadowsEnabled ? static_cast<const void *>(m_shadowBaker.GetPointer()) : nullptr,
+          m_shadowSoftness};
+}
+
+vtkSmartPointer<vtkRenderPass> SceneGraph::makeShadowReceiverPass() const {
+  if (!m_shadowsEnabled || !m_shadowBaker)
+    return nullptr;
+  // installShadowPasses' chain without the baker: the shadowed opaque layer reads this scene's
+  // maps, then the rest of VTK's layers.
+  vtkSmartPointer<FilteredShadowMapPass> shadows = vtkSmartPointer<FilteredShadowMapPass>::New();
+  shadows->Softness = m_shadowSoftness;
+  shadows->SetShadowMapBakerPass(m_shadowBaker);
+  vtkSmartPointer<vtkRenderPassCollection> passes = vtkSmartPointer<vtkRenderPassCollection>::New();
+  passes->AddItem(shadows);
+  passes->AddItem(vtkSmartPointer<vtkTranslucentPass>::New());
+  passes->AddItem(vtkSmartPointer<vtkVolumetricPass>::New());
+  passes->AddItem(vtkSmartPointer<vtkOverlayPass>::New());
+  vtkSmartPointer<vtkSequencePass> seq = vtkSmartPointer<vtkSequencePass>::New();
+  seq->SetPasses(passes);
+  vtkSmartPointer<vtkCameraPass> cam = vtkSmartPointer<vtkCameraPass>::New();
+  cam->SetDelegatePass(seq);
+  return cam;
+}
+
 void SceneGraph::removeShadowPasses() {
   auto *baker = StridedShadowBaker::SafeDownCast(m_shadowBaker);
   if (m_renderer && m_shadowPass) {

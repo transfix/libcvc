@@ -1740,7 +1740,7 @@ windows:
       - type: viewport
         view: overview            # its camera: <prefix>.viewers.overview.camera
         show: [sim]               # the untagged nodes, and those tagged sim
-        camera: map               # orbit (the default) | fly | map | track
+        mode: map                 # orbit (the default) | fly | map | track
         width: 360                # logical px; the window's width when unset
         height: 270               # 3/4 of the width when unset
 ```
@@ -1751,10 +1751,12 @@ windows:
 | `show` | Tags, as a list or one string (`show: "sim debug"`). The view draws the untagged nodes and the nodes that carry one of these tags. When unset, it draws every tag. |
 | `hide` | Tags the view leaves out, whatever `show` says. |
 | `bind` | A state key whose value is the tag list to show (space- or comma-separated), read every frame. Use it for a layers menu: a widget writes the key, and the view follows. |
-| `camera` | `orbit` (the default), `fly`, `map` (top-down, framed on what the view shows), or `track` with `track: <node id>`. |
+| `mode` | Its own camera's mode: `orbit` (the default), `fly`, `map` (top-down, framed on what the view shows), or `track` with `track: <node id>`. (`camera: map` and the other three mode names still mean the mode.) |
+| `camera` | Draw from a named camera instead of its own: one the scene declares (`scene: cameras:`, below), or `main`, the main view's. |
+| `shadows` | `false` leaves the scene's shadows out of this view. Otherwise it draws them when the scene casts them. |
 | `chrome` | `false` leaves out the scene's grid, axes and bounding box. Defaults to `true`. |
 | `clear_color` | `[r, g, b]` in 0..1, what the view clears to (one colour, never the scene's gradient). Defaults to the main view's background. (`background:` on a widget is the §5.12 backdrop key.) |
-| `azimuth`, `elevation`, `zoom` | Where an orbit camera starts once the view is framed: the orbit's azimuth and elevation in degrees, and a zoom factor on the framed distance (2 is twice as close). |
+| `azimuth`, `elevation`, `zoom` | Where its own orbit camera starts once the view is framed: the orbit's azimuth and elevation in degrees, and a zoom factor on the framed distance (2 is twice as close). |
 | `override` | Per-view restyling, below. |
 | `caption` | A label in the view's top-left corner. |
 | `input` | `false` makes the view ignore the mouse. Otherwise a drag orbits its camera (the middle or right button pans), the wheel zooms, and a double-click puts the camera back where it started. The view is outlined while the pointer is over it. |
@@ -1786,6 +1788,34 @@ moves, changes colour or swaps LOD rung keeps its override.
 `examples/ariadne/documents/viewer_looks.ari` draws one scene four ways: wireframe, X-ray, a plan of
 one layer, and a clay model. `viewer_grid.ari` is four independent cameras on one scene.
 
+**Cameras.** A view's camera is its own unless it names one. `scene: cameras:` declares named
+cameras, each at `<prefix>.viewers.<id>.camera`, with the same `mode`, `track`, `azimuth`,
+`elevation` and `zoom` keys. Every viewport with `camera: <id>` draws from that camera, so a drag,
+the wheel or a double-click in any of them moves all of them, whatever each one shows or restyles.
+`camera: main` follows the main view's camera, and moves it.
+
+```yaml
+scene:
+  cameras:
+    - camera: plaza
+      azimuth: -60
+      elevation: 30
+      zoom: 1.3
+windows:
+  - window: Looks
+    children:
+      - { type: viewport, view: wire, camera: plaza, override: { "*": { drawstyle: wireframe } } }
+      - { type: viewport, view: xray, camera: plaza, override: { buildings: { opacity: 0.2 } } }
+```
+
+A named camera is framed on the whole scene the first time a view shows it, and its near and far
+planes span the whole scene. Named cameras and views share the `viewers.*` names, so give them
+different ones.
+
+**Shadows.** When the scene casts shadows (`shadows: { enabled: true }`), every view draws them. A
+view does not bake shadow maps of its own: it reads the ones the main view bakes
+(`SceneGraph::makeShadowReceiverPass`). They are in light space, so they hold from any camera.
+
 **How it draws.** Each view is a mirror viewport of the main one
 (`ViewportManager::addMirrorViewport`). It draws the same props, the same geometry, from its own
 camera, less the props of the nodes it leaves out and with its twins in place of the props it restyles
@@ -1800,7 +1830,9 @@ Limits:
 - An override restyles actors. A volume (`volren`, `volslice`) draws as it is.
 - The view lies under the whole UI. Another window behind the viewport's window still draws over
   the view.
-- A view has no shadows of its own.
+- A view's shadows come from the main view's maps. A node a view leaves out still casts its
+  shadow there, and with `shadows: { focus: camera }` the maps follow the main camera, not the
+  view's.
 - A view's first frame is opaque: the window's background is cut from the frame after the widget
   first draws.
 
@@ -1959,7 +1991,7 @@ includes. Each binds state keys a C++ object owns, so it needs no host code;
 | `world_controls` | a `generated_world` node (§5.4; arg `keys`) |
 | `mesh_tools` | a `mesh_lab` node (§5.4; arg `node`, default `mesh`) |
 | `fe_controls` | an `fe_lab` node (§5.4; arg `node`, default `domain`) |
-| `scene_view` | a window holding a view of the scene (the `viewport` widget, §5.18), from a camera of its own (args `view`, `show`, `hide`, `camera`, `chrome`, `width`, `height`, `title`, `id`) |
+| `scene_view` | a window holding a view of the scene (the `viewport` widget, §5.18), from a camera of its own or a named one (args `view`, `show`, `hide`, `mode`, `camera`, `chrome`, `width`, `height`, `title`, `id`) |
 | `card` | a card in a list: avatar / title / subtitle / timestamp header, body, `media` and `actions` slots; its args are state keys, so a `repeat:` includes one per item (not a window: embed it) |
 | `transfer_function`, `transfer_function_editor` | any node's `transfer_function` model (args `node`, `id`): the ColorTable2 editor with histogram / contour spectrum / contour tree layers — see [`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) |
 | `chat`, `chat_panel` | a room's chat and direct messages through the chat verbs (args `id`, `title`, `room`); its functions come with the import: call `(chat-ui-step ID ROOM)` from `on_tick` (§5.16) |

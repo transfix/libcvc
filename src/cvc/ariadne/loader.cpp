@@ -2695,6 +2695,25 @@ Scene parse_scene(Ctx &ctx, const YAML::Node &s) {
   if (lights && lights.IsSequence())
     for (const YAML::Node &l : lights)
       sc.lights.push_back(parse_scene_light(l));
+  // cameras: [{ camera: <id>, mode, azimuth, elevation, zoom, track }]
+  const YAML::Node cameras = s["cameras"];
+  if (cameras && cameras.IsSequence())
+    for (const YAML::Node &c : cameras) {
+      if (!c.IsMap())
+        continue;
+      SceneCamera cam;
+      cam.id = str(c, "camera", str(c, "id"));
+      if (cam.id.empty())
+        continue;
+      cam.mode = str(c, "mode", "orbit");
+      cam.track = str(c, "track");
+      cam.has_azimuth = static_cast<bool>(c["azimuth"]);
+      cam.azimuth = num(c, "azimuth", 0.0);
+      cam.has_elevation = static_cast<bool>(c["elevation"]);
+      cam.elevation = num(c, "elevation", 0.0);
+      cam.zoom = num(c, "zoom", 1.0);
+      sc.cameras.push_back(cam);
+    }
   const YAML::Node sh = s["shadows"];
   if (sh && sh.IsMap()) {
     sc.has_shadows = true;

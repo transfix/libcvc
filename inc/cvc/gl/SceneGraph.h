@@ -16,6 +16,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 #include <vtkSmartPointer.h>
 
@@ -241,6 +242,17 @@ public:
   // over (16 taps; 0 = one hard tap). Default 2.
   void setShadowSoftness(double texels);
   double shadowSoftness() const { return m_shadowSoftness; }
+
+  // Shadows in a second renderer that draws this scene's props (a mirror viewport, from its own
+  // camera): a pass chain that RECEIVES the maps this scene's renderer bakes and bakes none of its
+  // own. The maps are in light space, so any camera reads them. The other renderer must hold the
+  // same lights in the same order (a mirror copies them) and draw after this scene's renderer in
+  // the frame (a higher layer). Null while shadows are off. The pass reads the current baker and
+  // softness: when shadowReceiverKey() changes (shadows switched off and on, a new renderer, a new
+  // softness), make a new one.
+  vtkSmartPointer<vtkRenderPass> makeShadowReceiverPass() const;
+  // What a receiver pass was made from; a pass made under another key is stale. Null while off.
+  std::pair<const void *, double> shadowReceiverKey() const;
   void update();
 
   // Process pending events on the main thread

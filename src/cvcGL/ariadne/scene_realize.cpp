@@ -1587,6 +1587,7 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
   out.app = &sg.appContext();
   out.sg = &sg;
   out.clock = scene.clock;
+  out.cameras = scene.cameras; // what viewport widgets bind by id (scene_views.cpp)
   // Resolve the clock's key paths to absolute state paths now, with the host bind prefix — the SAME
   // rule widget binds use (resolve_bind) — so the clock and a sim_transport slider on `sim.speed`
   // land on one key. Resolved once here (like the visibility bindings), so tick_scene stays prefix-

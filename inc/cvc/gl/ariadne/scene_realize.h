@@ -93,6 +93,8 @@ struct RealizedScene {
     std::weak_ptr<GraphicsNode> node;
   };
   std::vector<TaggedNode> nodes;
+  // The scene's named cameras (`cameras:`), which viewport widgets bind by id.
+  std::vector<cvc::ariadne::SceneCamera> cameras;
   // Per-frame closures a CUSTOM node type registered (register_scene_node_type) that
   // needs servicing — run by tick_scene after the built-in tickers. A closure should
   // capture a weak_ptr to its node (not the node), matching the volren/volslice

@@ -231,7 +231,7 @@ AriRuntime::AriRuntime(SceneRenderer &view, CameraController &cam, ImGuiOverlay 
 
   // `type: viewport`: a view of the scene in a window. The draw callback hides, once the walk is
   // done, any view whose widget was not drawn this frame.
-  views_ = std::make_unique<SceneViews>(view, backend_, [this] { return realized(); });
+  views_ = std::make_unique<SceneViews>(view, backend_, [this] { return realized(); }, &cam);
   views_->register_widget();
   {
     cvc::ariadne::Runtime *r = &app_rt_.runtime();

@@ -45,7 +45,7 @@ windows:
           - type: viewport
             view: top
             caption: Top
-            camera: map
+            mode: map
             width: 300
             height: 225
           - type: viewport
@@ -101,6 +101,10 @@ scene:
       source: { sphere: 0.9 }
       transform: { position: [0, 10, 0.9] }
       material: { color: [0.55, 0.30, 0.85] }
+  shadows:                         # soft shadows, in the main view and in every viewport
+    enabled: true
+    resolution: 2048
+    softness: 3
   lights:
     - light: sun
       kind: directional

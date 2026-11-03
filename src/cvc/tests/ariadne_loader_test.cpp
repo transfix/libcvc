@@ -3507,7 +3507,8 @@ TEST(AriadneComponents, ShippedComponentsLoadClean) {
 }
 
 // scene_view.ari: a window around one `viewport` widget. Its args reach the widget's props (the
-// cvcGL widget reads view / show / hide / camera / chrome / width / height), bare and overridden.
+// cvcGL widget reads view / show / hide / mode / camera / chrome / width / height), bare and
+// overridden.
 TEST(AriadneComponents, SceneViewPassesItsArgsToTheViewport) {
   SKIP_WITHOUT_YAML();
   namespace fs = std::filesystem;
@@ -3525,7 +3526,7 @@ windows:
   - include: scene_view
   - include: scene_view
     args: { view: overview, title: Overview, id: overview, show: "sim debug", hide: hud,
-            camera: map, chrome: false, width: 280 }
+            mode: map, camera: plaza, chrome: false, width: 280 }
 )");
   ASSERT_TRUE(r.ok) << r.error;
   std::vector<const Widget *> views;
@@ -3537,14 +3538,16 @@ windows:
   const Value &bare = views[0]->props, &over = views[1]->props;
   EXPECT_EQ(bare.str("view"), "scene_view");
   EXPECT_EQ(bare.str("show"), "");
-  EXPECT_EQ(bare.str("camera"), "orbit");
+  EXPECT_EQ(bare.str("mode"), "orbit");
+  EXPECT_EQ(bare.str("camera"), "");
   EXPECT_TRUE(bare.flag("chrome", false));
   EXPECT_EQ(bare.num("width", 0.0), 360.0);
   EXPECT_EQ(bare.num("height", 0.0), 270.0);
   EXPECT_EQ(over.str("view"), "overview");
   EXPECT_EQ(over.str("show"), "sim debug");
   EXPECT_EQ(over.str("hide"), "hud");
-  EXPECT_EQ(over.str("camera"), "map");
+  EXPECT_EQ(over.str("mode"), "map");
+  EXPECT_EQ(over.str("camera"), "plaza");
   EXPECT_FALSE(over.flag("chrome", true));
   EXPECT_EQ(over.num("width", 0.0), 280.0);
   EXPECT_EQ(r.root.children[1].label, "Overview");

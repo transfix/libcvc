@@ -442,9 +442,22 @@ struct SceneShadowFocus {
   std::string ground; // a node id whose heightfield the centre sits on (empty: the focal z)
 };
 
+// A named camera (§9.5, `scene: cameras:`): a camera of its own at <prefix>.viewers.<id>.camera
+// that `viewport` widgets bind with `camera: <id>`. Every viewport bound to it draws from it, so a
+// drag in any of them moves them all. Framed on the scene the first time a viewport draws it.
+struct SceneCamera {
+  std::string id;
+  std::string mode = "orbit"; // orbit | fly | map | track
+  std::string track;          // the node a track camera follows
+  bool has_azimuth = false, has_elevation = false;
+  double azimuth = 0.0, elevation = 0.0; // where an orbit starts, degrees
+  double zoom = 1.0;                     // on the framed distance (2: twice as close)
+};
+
 struct Scene {
   std::vector<SceneNode> nodes;
   std::vector<SceneLight> lights;
+  std::vector<SceneCamera> cameras; // cameras: [...] — named cameras viewports bind
   SceneClock clock; // §9 time: the simulation clock (clock.present gates it) — see SceneClock
   ScenePhysics physics; // physics: {...} — the world the nodes' bodies live in (see SceneBody)
   bool has_shadows = false;

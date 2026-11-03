@@ -28,8 +28,12 @@
 #include <utility>
 #include <vector>
 #include <vtkActor.h>
+#include <vtkCamera.h>
 #include <vtkMapper.h>
+#include <vtkPropCollection.h>
 #include <vtkProperty.h>
+#include <vtkRenderPass.h>
+#include <vtkRenderWindow.h>
 #include <vtkRenderer.h>
 #include <vtkShaderProperty.h>
 #include <vtkSmartPointer.h>
@@ -94,11 +98,15 @@ struct SceneViews::View {
   Viewport *vp = nullptr;
   std::vector<std::string> show, hide; // tags; show empty = every tag
   bool chrome = true;                  // the scene's grid, axes and bounding box
-  std::string camera = "orbit";        // orbit | fly | map | track
-  std::string track;                   // the node a track camera follows
-  bool input = true;                   // drags and the wheel move its camera
-  bool drawn = false;                  // a widget drew it this frame
-  bool framed = false;                 // its camera has been framed on what it shows
+  ari::SceneCamera start;              // its own camera: mode, track, where its orbit starts
+  std::string camera;                  // the camera it draws from: "" its own, "main", or a name
+  vtkSmartPointer<vtkCamera> own;      // its own vtkCamera, kept while it draws from another
+  bool shadows = true;                 // it receives the scene's shadows
+  std::pair<const void *, double> shadow_key{nullptr, -1.0}; // what shadow_pass was made from
+  vtkSmartPointer<vtkRenderPass> shadow_pass;
+  bool input = true;   // drags and the wheel move its camera
+  bool drawn = false;  // a widget drew it this frame
+  bool framed = false; // its camera has been framed on what it shows
   double region[4] = {-1.0, -1.0, -1.0, -1.0};
   std::unordered_set<vtkProp *> hidden; // the main view's props this one leaves out
   // override: entries in order: a node id, a tag, or "*" (everything), and its look.
@@ -106,8 +114,6 @@ struct SceneViews::View {
   std::unordered_map<vtkProp *, Look> looks; // each restyled prop's merged look, this frame
   Look all;                                  // the "*" entry's look
   std::unordered_map<vtkProp *, Twin> twins;
-  double azimuth = 0.0, elevation = 0.0, zoom = 1.0; // where its orbit starts
-  bool has_azimuth = false, has_elevation = false;
   bool dragging = false, panning = false;
 
   // What the mirror draws for the main view's prop p (Viewport::setMirrorFilter).
@@ -245,24 +251,146 @@ Look look_of(const ari::Value &v) {
   return l;
 }
 
+bool same_start(const ari::SceneCamera &a, const ari::SceneCamera &b) {
+  return a.mode == b.mode && a.track == b.track && a.has_azimuth == b.has_azimuth &&
+         a.azimuth == b.azimuth && a.has_elevation == b.has_elevation &&
+         a.elevation == b.elevation && a.zoom == b.zoom;
+}
+
+// Frame `cam` on the bounds b as `s` says: a top-down map, or an orbit (then fly or track) that
+// starts at s's azimuth / elevation / zoom, set through the camera's own state keys (what a drag
+// changes).
+void frame_camera(CameraController &cam, const double b[6], const ari::SceneCamera &s,
+                  SceneGraph &sg) {
+  if (s.mode == "map") {
+    const double hw = std::max(0.5 * (b[1] - b[0]), 1e-6);
+    const double hh = std::max(0.5 * (b[3] - b[2]), 1e-6);
+    cam.frameMap(0.5 * (b[0] + b[1]), 0.5 * (b[2] + b[3]), hh, hw);
+    return;
+  }
+  cam.frameBounds(b[0], b[2], b[4], b[1], b[3], b[5]);
+  cam.setMode(CameraController::Mode::Orbit); // from a map, say
+  if (s.has_azimuth)
+    cam.getState("orbit.azimuth").value(s.azimuth);
+  if (s.has_elevation)
+    cam.getState("orbit.elevation").value(s.elevation);
+  if (s.zoom > 0.0 && s.zoom != 1.0)
+    cam.getState("orbit.distance").value(cam.orbitDistance() / s.zoom);
+  if (s.mode == "fly") {
+    cam.setMode(CameraController::Mode::Fly);
+  } else if (s.mode == "track" && !s.track.empty()) {
+    cam.setScene(&sg);
+    cam.setTrackTarget(s.track);
+    cam.setMode(CameraController::Mode::Track);
+  }
+}
+
+bool valid_bounds(const double b[6]) { return b[0] <= b[1] && b[2] <= b[3] && b[4] <= b[5]; }
+
 } // namespace
 
+// A named camera: its own vtkCamera, which every viewport bound to it draws from, and the
+// controller a drag in any of them moves. The controller reads its aspect from the first viewport
+// bound to it (`driver`).
+struct SceneViews::Camera {
+  ari::SceneCamera spec;
+  vtkSmartPointer<vtkCamera> cam;
+  std::unique_ptr<CameraController> ctl;
+  vtkRenderer *driver = nullptr;
+  bool framed = false;
+  bool used = false; // a shown view drew from it this frame
+};
+
 SceneViews::SceneViews(SceneRenderer &view, ImGuiBackend &backend,
-                       std::function<const RealizedScene *()> realized)
-    : view_(&view), backend_(&backend), realized_(std::move(realized)) {}
+                       std::function<const RealizedScene *()> realized, CameraController *main)
+    : view_(&view), backend_(&backend), realized_(std::move(realized)), main_(main) {}
 
 SceneViews::~SceneViews() { clear(); }
 
 void SceneViews::clear() {
   if (view_->isClosed()) { // the viewports went with the view's manager
     views_.clear();
+    cameras_.clear();
     return;
   }
   ViewportManager &vm = view_->viewportManager();
-  for (auto &kv : views_)
+  for (auto &kv : views_) {
+    View &v = *kv.second;
+    if (v.shadow_pass) { // its shadow pass's GL objects, while the window is still there
+      v.shadow_pass->ReleaseGraphicsResources(vm.renderWindow());
+      v.vp->renderer()->SetPass(nullptr);
+    }
     if (vm.hasViewport(kv.first))
       vm.removeViewport(kv.first);
+  }
   views_.clear();
+  cameras_.clear();
+}
+
+SceneViews::Camera *SceneViews::named_camera(const std::string &name) {
+  auto it = cameras_.find(name);
+  if (it != cameras_.end())
+    return it->second.get();
+  const RealizedScene *rs = realized_ ? realized_() : nullptr;
+  if (!rs)
+    return nullptr;
+  for (const ari::SceneCamera &s : rs->cameras) {
+    if (s.id != name)
+      continue;
+    SceneGraph &sg = view_->scene();
+    auto c = std::make_unique<Camera>();
+    c->spec = s;
+    c->cam = vtkSmartPointer<vtkCamera>::New();
+    c->ctl = std::make_unique<CameraController>(
+        sg.appContext(), CameraController::viewerStatePath(sg.getStatePrefix(), name));
+    c->ctl->setCamera(c->cam);
+    c->ctl->setScene(&sg);
+    Camera *raw = c.get();
+    cameras_[name] = std::move(c);
+    return raw;
+  }
+  return nullptr;
+}
+
+void SceneViews::bind_camera(View &v, const std::string &name) {
+  if (name == v.camera)
+    return;
+  vtkRenderer *r = v.vp->renderer();
+  if (!r)
+    return;
+  vtkCamera *target = nullptr;
+  std::string bound = name;
+  if (name == "main" && main_) {
+    target = view_->renderer() ? view_->renderer()->GetActiveCamera() : nullptr;
+  } else if (!name.empty()) {
+    if (Camera *c = named_camera(name)) {
+      target = c->cam;
+      if (!c->driver) {
+        c->ctl->setRenderer(r);
+        c->driver = r;
+      }
+    }
+  }
+  if (!target) { // its own camera: "", or a name the scene does not declare
+    bound.clear();
+    target = v.own;
+  }
+  if (!v.own)
+    v.own = r->GetActiveCamera(); // kept: its own controller still points at it
+  if (target && target != r->GetActiveCamera())
+    r->SetActiveCamera(target);
+  v.camera = bound;
+}
+
+CameraController &SceneViews::controller(View &v) {
+  if (v.camera == "main" && main_)
+    return *main_;
+  if (!v.camera.empty()) {
+    auto it = cameras_.find(v.camera);
+    if (it != cameras_.end())
+      return *it->second->ctl;
+  }
+  return v.vp->camera();
 }
 
 SceneViews::View *SceneViews::view_for(const std::string &name) {
@@ -305,9 +433,9 @@ void SceneViews::end_walk() {
       v.vp->setVisible(false);
     if (!v.drawn && (v.dragging || v.panning)) { // its window went away mid-drag
       if (v.panning)
-        v.vp->camera().endPan();
+        controller(v).endPan();
       else
-        v.vp->camera().endDrag();
+        controller(v).endDrag();
       v.dragging = v.panning = false;
     }
     v.drawn = false;
@@ -317,8 +445,10 @@ void SceneViews::end_walk() {
 void SceneViews::update(double dt) {
   if (view_->isClosed()) {
     views_.clear();
+    cameras_.clear();
     return;
   }
+  SceneGraph &sg = view_->scene();
   // No widget walk last frame (the host hid the UI): no widget drew a view, so none shows.
   const bool walked = walked_;
   walked_ = false;
@@ -360,13 +490,29 @@ void SceneViews::update(double dt) {
       else
         (it++)->second.seen = false;
     }
+    // The scene's shadows: a pass reading the main renderer's maps, remade when they change.
+    const std::pair<const void *, double> key =
+        v.shadows ? sg.shadowReceiverKey() : std::pair<const void *, double>(nullptr, 0.0);
+    if (key != v.shadow_key) {
+      vtkRenderer *r = v.vp->renderer();
+      if (v.shadow_pass)
+        v.shadow_pass->ReleaseGraphicsResources(view_->viewportManager().renderWindow());
+      v.shadow_pass = key.first ? sg.makeShadowReceiverPass() : nullptr;
+      r->SetPass(v.shadow_pass);
+      v.shadow_key = key;
+    }
     if (!v.chrome) {
-      SceneGraph &sg = view_->scene();
       if (std::shared_ptr<GraphicsNode> root = sg.getGraphicsRoot()) {
         collect(root->findChildByName("grid"), v.hidden);
         collect(root->findChildByName("axis"), v.hidden);
         collect(root, v.hidden, false); // the root's own bounding box, not the scene under it
       }
+    }
+    if (!v.camera.empty()) { // a named camera, moved below (or the main one, by its host)
+      auto it = cameras_.find(v.camera);
+      if (it != cameras_.end() && v.vp->visible())
+        it->second->used = true;
+      continue;
     }
     CameraController &cam = v.vp->camera();
     // Framed once it has drawn something: the bounds of what this view shows.
@@ -375,35 +521,31 @@ void SceneViews::update(double dt) {
       vtkRenderer *r = v.vp->renderer();
       if (r && r->GetViewProps()->GetNumberOfItems() > 0) {
         r->ComputeVisiblePropBounds(b);
-        if (b[0] <= b[1] && b[2] <= b[3] && b[4] <= b[5]) {
-          if (v.camera == "map") {
-            const double hw = std::max(0.5 * (b[1] - b[0]), 1e-6);
-            const double hh = std::max(0.5 * (b[3] - b[2]), 1e-6);
-            cam.frameMap(0.5 * (b[0] + b[1]), 0.5 * (b[2] + b[3]), hh, hw);
-          } else {
-            cam.frameBounds(b[0], b[2], b[4], b[1], b[3], b[5]);
-            cam.setMode(CameraController::Mode::Orbit); // from a map, say
-            // Where its orbit starts: the widget's azimuth / elevation / zoom, through the
-            // camera's own state keys (what a drag changes).
-            if (v.has_azimuth)
-              cam.getState("orbit.azimuth").value(v.azimuth);
-            if (v.has_elevation)
-              cam.getState("orbit.elevation").value(v.elevation);
-            if (v.zoom > 0.0 && v.zoom != 1.0)
-              cam.getState("orbit.distance").value(cam.orbitDistance() / v.zoom);
-            if (v.camera == "fly")
-              cam.setMode(CameraController::Mode::Fly);
-            else if (v.camera == "track" && !v.track.empty()) {
-              cam.setScene(&view_->scene());
-              cam.setTrackTarget(v.track);
-              cam.setMode(CameraController::Mode::Track);
-            }
-          }
+        if (valid_bounds(b)) {
+          frame_camera(cam, b, v.start, sg);
           v.framed = true;
         }
       }
     }
     cam.update(dt);
+  }
+
+  // The named cameras: each framed on the whole scene the first time a view shows it, then moved
+  // once a frame however many views draw from it. Its near / far planes span the whole scene, so
+  // no view that draws from it clips what it shows.
+  double whole[6] = {1.0, -1.0, 1.0, -1.0, 1.0, -1.0};
+  if (vtkRenderer *main = view_->renderer())
+    main->ComputeVisiblePropBounds(whole);
+  for (auto &kv : cameras_) {
+    Camera &c = *kv.second;
+    if (!c.framed && c.used && c.driver && valid_bounds(whole)) {
+      frame_camera(*c.ctl, whole, c.spec, sg);
+      c.framed = true;
+    }
+    c.ctl->update(dt);
+    if (c.driver && c.driver->GetActiveCamera() == c.cam && valid_bounds(whole))
+      c.driver->ResetCameraClippingRange(whole);
+    c.used = false;
   }
 }
 
@@ -428,13 +570,29 @@ void SceneViews::register_widget() {
         }
         v->chrome = w.props.flag("chrome", true);
         v->input = w.props.flag("input", true);
-        const std::string camera = w.props.str("camera", "orbit");
-        const std::string track = w.props.str("track");
-        if (camera != v->camera || track != v->track) {
-          v->camera = camera;
-          v->track = track;
+        // Its camera: `camera: <id>` draws from a named camera (or `main`); otherwise its own,
+        // which `mode:` (orbit | fly | map | track), `track:`, `azimuth:`, `elevation:` and `zoom:`
+        // start. `camera: orbit` and the like name a mode, as #1005 spelled it.
+        std::string camera = w.props.str("camera");
+        ari::SceneCamera start;
+        start.mode = w.props.str("mode", "orbit");
+        if (camera == "orbit" || camera == "fly" || camera == "map" || camera == "track") {
+          if (!w.props.has("mode"))
+            start.mode = camera;
+          camera.clear();
+        }
+        start.track = w.props.str("track");
+        start.has_azimuth = w.props.has("azimuth");
+        start.azimuth = w.props.num("azimuth", 0.0);
+        start.has_elevation = w.props.has("elevation");
+        start.elevation = w.props.num("elevation", 0.0);
+        start.zoom = w.props.num("zoom", 1.0);
+        if (!same_start(start, v->start)) {
+          v->start = start;
           v->framed = false;
         }
+        bind_camera(*v, camera);
+        v->shadows = w.props.flag("shadows", true);
         // override: { <node id | tag | "*">: { drawstyle, opacity, color, line_width,
         // point_size }, ... }, in order.
         v->overrides.clear();
@@ -442,12 +600,6 @@ void SceneViews::register_widget() {
           if (ov->is_map())
             for (const auto &e : ov->entries)
               v->overrides.emplace_back(e.first, look_of(e.second));
-        // Where its orbit starts, when it is framed (and re-framed by a double-click).
-        v->has_azimuth = w.props.has("azimuth");
-        v->azimuth = w.props.num("azimuth", 0.0);
-        v->has_elevation = w.props.has("elevation");
-        v->elevation = w.props.num("elevation", 0.0);
-        v->zoom = w.props.num("zoom", 1.0);
         if (const ari::Value *bg = w.props.find("clear_color"))
           if (bg->is_seq() && bg->items.size() >= 3) {
             v->vp->setBackground(bg->items[0].as_double(), bg->items[1].as_double(),
@@ -510,12 +662,16 @@ void SceneViews::register_widget() {
 
         // Its camera: a drag orbits (the middle or right button pans), the wheel zooms.
         if (v->input) {
-          CameraController &cam = v->vp->camera();
+          CameraController &cam = controller(*v);
           const ImGuiIO &io = ImGui::GetIO();
           if (ImGui::IsItemHovered() && io.MouseWheel != 0.0f)
             cam.mouseWheel(io.MouseWheel);
-          if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
-            v->framed = false; // back to where it started
+          if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            v->framed = false; // back to where it started (a named camera, for all its views)
+            auto it = cameras_.find(v->camera);
+            if (it != cameras_.end())
+              it->second->framed = false;
+          }
           if (ImGui::IsItemActivated()) {
             if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
               cam.beginDrag();

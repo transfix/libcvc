@@ -30,6 +30,11 @@
 // Dragging in it orbits its camera (the middle or right button pans), the wheel zooms, and a
 // double-click puts the camera back where azimuth: / elevation: / zoom: start it.
 //
+// A view's camera is its own unless it names one: `camera: <id>` draws from a camera the scene
+// declares (`scene: cameras:`), so every viewport bound to it moves together, and `camera: main`
+// draws from the main view's. A view receives the scene's shadows (the main renderer's maps,
+// SceneGraph::makeShadowReceiverPass) unless `shadows: false`.
+//
 // AriRuntime owns one and registers the widget, so every AriRuntime host (arigl, pycvc_gl) has it.
 #pragma once
 
@@ -42,16 +47,18 @@ namespace cvc {
 namespace gl {
 class SceneRenderer;
 class ImGuiBackend;
+class CameraController;
 namespace ariadne {
 
 struct RealizedScene; // scene_realize.h
 
 class SceneViews {
 public:
-  // `realized` is the document's realized scene now (null without one): its tagged nodes. `view`
-  // and `backend` must outlive this.
+  // `realized` is the document's realized scene now (null without one): its nodes and its named
+  // cameras. `main` drives the main view's camera, for a viewport bound to `camera: main` (null:
+  // such a viewport keeps a camera of its own). `view`, `backend` and `main` must outlive this.
   SceneViews(SceneRenderer &view, ImGuiBackend &backend,
-             std::function<const RealizedScene *()> realized);
+             std::function<const RealizedScene *()> realized, CameraController *main = nullptr);
   ~SceneViews(); // removes its viewports
   SceneViews(const SceneViews &) = delete;
   SceneViews &operator=(const SceneViews &) = delete;
@@ -68,7 +75,7 @@ public:
   // since the last call (the host hid the UI), every view is hidden.
   void update(double dt);
 
-  // Remove every view (a new document).
+  // Remove every view and named camera (a new document).
   void clear();
 
   // The views that exist, by name, for tests and hosts.
@@ -77,12 +84,18 @@ public:
 
 private:
   struct View;
+  struct Camera; // a named camera (scene: cameras:) and its controller
   View *view_for(const std::string &name);
+  Camera *named_camera(const std::string &name);
+  void bind_camera(View &v, const std::string &name); // "" its own, "main", or a named camera
+  CameraController &controller(View &v);              // what a drag in v moves
 
   SceneRenderer *view_;
   ImGuiBackend *backend_;
   std::function<const RealizedScene *()> realized_;
+  CameraController *main_;
   std::map<std::string, std::unique_ptr<View>> views_;
+  std::map<std::string, std::unique_ptr<Camera>> cameras_;
   bool walked_ = false; // end_walk() ran since the last update()
 };
 
