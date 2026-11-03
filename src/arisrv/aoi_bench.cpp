@@ -573,7 +573,10 @@ public:
         lane_relay->forget(nid);
     }
     const bool write_poses = !stream || steps % kTreePoseSteps == 0;
-    cvc::ariadne::server_pump(server, app, kRoom, -1.0, write_poses);
+    // As arisrv: with the pose stream carrying the heartbeat, the tree's copy re-stamps a still
+    // avatar every 5 s.
+    const double pose_heartbeat_s = stream ? 5.0 : 1.0;
+    cvc::ariadne::server_pump(server, app, kRoom, -1.0, write_poses, pose_heartbeat_s);
     // Joins land on transport threads, so a pump can add a newcomer the pass before it never saw:
     // place newcomers and re-pump until a pass finds none.
     for (int pass = 0; pass < 8; ++pass) {
@@ -592,7 +595,7 @@ public:
       }
       if (!moved)
         break;
-      cvc::ariadne::server_pump(server, app, kRoom, -1.0, write_poses);
+      cvc::ariadne::server_pump(server, app, kRoom, -1.0, write_poses, pose_heartbeat_s);
     }
     const double t0 = now_s();
     ticks().stamp(server.tick(), t0); // this step's poses are written at this tick
@@ -1596,13 +1599,22 @@ int main(int argc, char **argv) {
     }
     return ra::scene_revision(late.app, kRoom) == ra::scene_revision(relay.app, kRoom);
   };
-  joined = joined && run_room(relay, cs, 10.0, cfg.move, false, nullptr, converged);
+  // A joiner frames as a client does from its first moment (its holon against the room and its
+  // pose stream), and a few seconds past converging, so its clock's re-alignments are counted: the
+  // join is one, and each more is a seek the tree's or the stream's samples caused.
+  std::vector<bench_client *> joining = cs;
+  if (joined && cfg.late_joiner == "join")
+    joining.push_back(&late);
+  joined = joined && run_room(relay, joining, 10.0, cfg.move, false, nullptr, converged);
   const double join_s = now_s() - tj;
   const std::uint64_t join_bytes = late.link().bytes_in;
   const std::uint64_t join_backfilled = relay.backfilled() - backfilled0;
   const std::uint64_t join_foreign_intents = late.tap.counts().foreign_intent;
   const std::uint64_t join_held = relay.admissions_held() - held0;
   const std::uint64_t join_timeouts = relay.admission_timeouts() - timeouts0;
+  if (joined && cfg.late_joiner == "join")
+    run_room(relay, joining, 3.0, cfg.move, false, nullptr);
+  const std::uint64_t join_realigns = late.h.clock_realigns();
 
   // The report.
   std::uint64_t realigns = 0, ghosts = 0;
@@ -1695,11 +1707,13 @@ int main(int argc, char **argv) {
               static_cast<unsigned long long>(relay.stall_dropped() - stalled0));
   std::printf(
       "[bench] late join (%s): %s in %.2f s, %llu bytes, %llu backfilled, %llu other "
-      "participants' intent leaves | admission held %llu (timed out %llu)\n",
+      "participants' intent leaves | admission held %llu (timed out %llu) | its clock re-aligned "
+      "%llu time(s)\n",
       cfg.late_joiner.c_str(), joined ? "converged" : "did NOT converge", join_s,
       static_cast<unsigned long long>(join_bytes), static_cast<unsigned long long>(join_backfilled),
       static_cast<unsigned long long>(join_foreign_intents),
-      static_cast<unsigned long long>(join_held), static_cast<unsigned long long>(join_timeouts));
+      static_cast<unsigned long long>(join_held), static_cast<unsigned long long>(join_timeouts),
+      static_cast<unsigned long long>(join_realigns));
   std::printf("[bench] probes: realigns %llu | origin ghost frames %llu | outer-peer error m max "
               "%.3f p95 %.3f (%zu samples) | inner entry ms p50 %.1f p95 %.1f (%zu, %zu "
               "unresolved) | reconcile corrections %.3f m | peer lag ms p50 %.1f p95 %.1f (%zu)\n",
@@ -1815,12 +1829,13 @@ int main(int argc, char **argv) {
     std::fprintf(f,
                  "  \"late_join\": {\"converged\": %s, \"seconds\": %.3f, \"bytes\": %llu, "
                  "\"backfilled\": %llu, \"foreign_intents\": %llu, \"held\": %llu, "
-                 "\"timeouts\": %llu},\n",
+                 "\"timeouts\": %llu, \"realigns\": %llu},\n",
                  joined ? "true" : "false", join_s, static_cast<unsigned long long>(join_bytes),
                  static_cast<unsigned long long>(join_backfilled),
                  static_cast<unsigned long long>(join_foreign_intents),
                  static_cast<unsigned long long>(join_held),
-                 static_cast<unsigned long long>(join_timeouts));
+                 static_cast<unsigned long long>(join_timeouts),
+                 static_cast<unsigned long long>(join_realigns));
     std::fprintf(f,
                  "  \"probes\": {\"realigns\": %llu, \"origin_ghost_frames\": %llu, "
                  "\"outer_error_m\": {\"max\": %.4f, \"p95\": %.4f, \"samples\": %zu}, "

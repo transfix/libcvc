@@ -584,7 +584,10 @@ cannot) is filtered as a subject but never registered as a receiver — no conne
 **Pose pushes.** A non-inner subject's pose reaches the receiver as a targeted snapshot
 (`state_transport::push_snapshot_to`) carrying its whole pose subtree, with `server_tick` re-stamped to
 the relay holon's *current* tick and written last: the tree's heartbeat tick for a still subject can be
-~120 ticks old, and a client re-aligns its whole clock (and rubber-bands) on more than 24 ticks of skew.
+~600 ticks old (arisrv re-stamps it every 5 s; the pose stream carries the 1 s heartbeat), and a client
+re-aligns its whole clock (and rubber-bands) on more than 24 ticks of skew. A client takes no clock
+reading from a tick older than one it has already applied (`holon::apply_authoritative`), so a stale
+heartbeat in the tree no longer seeks a joiner's clock back and forth.
 A pair entering inner, and a new pair that starts middle or outer, is pushed at once. `relay_room_step`
 sends every push **before** the step's `drain_local` + publish, so on each connection a push precedes
 that tick's live writes.

@@ -291,19 +291,7 @@ void holon::queue_intent(const std::string &pid, const avatar_intent &in, std::u
   p.queued.emplace_back(at, ok);
 }
 
-void holon::apply_authoritative(const std::string &pid, const cvc::physics::body_state &auth,
-                                std::uint64_t server_tick) {
-  if (_role != holon_role::client)
-    return; // the server IS the authority; nothing to apply
-  auto it = _participants.find(pid);
-  if (it == _participants.end())
-    return;
-  if (it->second.have_seen && server_tick <= it->second.last_seen)
-    return; // seen already (an unchanged pose re-read), or older
-  it->second.have_seen = true;
-  it->second.last_seen = server_tick;
-  it->second.pose_known = true;
-  _left.erase(pid); // a real sample: whatever it left behind before is superseded
+void holon::read_clock(std::uint64_t server_tick) {
   // Count the server's ticks (see the header): re-align whenever the replica is more
   // than max_skew_ticks away -- on the first sample when the client joined a running
   // server, and after a stall. A replica already within the skew is left alone, so its
@@ -344,6 +332,29 @@ void holon::apply_authoritative(const std::string &pid, const cvc::physics::body
         q.acked = false;
       }
     }
+  }
+}
+
+void holon::apply_authoritative(const std::string &pid, const cvc::physics::body_state &auth,
+                                std::uint64_t server_tick) {
+  if (_role != holon_role::client)
+    return; // the server IS the authority; nothing to apply
+  auto it = _participants.find(pid);
+  if (it == _participants.end())
+    return;
+  if (it->second.have_seen && server_tick <= it->second.last_seen)
+    return; // seen already (an unchanged pose re-read), or older
+  it->second.have_seen = true;
+  it->second.last_seen = server_tick;
+  it->second.pose_known = true;
+  _left.erase(pid); // a real sample: whatever it left behind before is superseded
+  // A clock reading only when no newer tick has been applied, from anyone (see the header): far
+  // older is a restarted relay, whose ticks start again near zero.
+  if (!_have_reading || server_tick >= _newest_reading ||
+      _newest_reading - server_tick > _cfg.stale_reading_ticks) {
+    _newest_reading = server_tick;
+    _have_reading = true;
+    read_clock(server_tick);
   }
 
   participant &p = it->second;

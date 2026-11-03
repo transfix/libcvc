@@ -561,7 +561,8 @@ int main(int argc, char **argv) {
   // at most ~17 ms before the server integrates it. Each step the pose relay sends every
   // viewer that is due its snapshot of the poses it sees (room_pose_relay: 60, 30 or 20 Hz
   // by its round trip); the tree's copy of the poses is written every kTreePoseSteps steps
-  // (1 Hz), for late joiners and the log.
+  // (1 Hz), for late joiners and the log -- and an avatar standing still is re-stamped there only
+  // every kTreePoseHeartbeatS, since the stream's own heartbeat is what keeps clients' clocks.
   cvc::ariadne::holon server_holon(cvc::ariadne::holon_role::server,
                                    cvc::ariadne::room_holon_config());
   std::printf("[arisrv] avatar physics: %s\n",
@@ -569,6 +570,7 @@ int main(int argc, char **argv) {
   constexpr int kRoomSubsteps = 12;
   constexpr auto kRoomStep = std::chrono::microseconds(16667); // x kRoomSubsteps = the 200 ms pass
   constexpr std::uint64_t kTreePoseSteps = 60;
+  constexpr double kTreePoseHeartbeatS = 5.0;
   cvc::ariadne::conference::room_pose_relay::config pose_cfg;
   pose_cfg.heartbeat_ticks =
       static_cast<std::uint64_t>(std::llround(1.0 / server_holon.clock().fixed_dt()));
@@ -582,7 +584,8 @@ int main(int argc, char **argv) {
 #endif
   std::uint64_t room_steps = 0;
   const auto pump_room = [&] {
-    cvc::ariadne::server_pump(server_holon, app, room, -1.0, room_steps % kTreePoseSteps == 0);
+    cvc::ariadne::server_pump(server_holon, app, room, -1.0, room_steps % kTreePoseSteps == 0,
+                              kTreePoseHeartbeatS);
   };
   // Fan the relay's OWN room-tree writes -- the room_leave retractions, room_relay_tick's
   // per-stream "ready" markers, the holon's poses -- out to EVERY client on BOTH transports.
