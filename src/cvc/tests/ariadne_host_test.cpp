@@ -1009,11 +1009,19 @@ TEST(AriadneHostVerbs, AnAsyncFunctionTakesArgumentsAndPostsToItsChannel) {
       },
       "add.done");
   art.load(doc.string());
+  // The call's wait is charged to the action (ariadne.limits.action_max_time, 0.1 s by default):
+  // on a loaded runner (macOS CI) starting the kernel and its 20 ms took longer, and the program
+  // was stopped (time_limit_exceeded) before it set anything. This tests the arguments and the
+  // channel, not the budget, so it gets the room a host gives (pycvc_gl.ariadne.Host: 30 s).
+  cvc::state::instance(app)("ariadne.limits.action_max_time").value(30.0);
+  std::string how = "running";
   art.run_program(
-      "(begin (state-set \"got\" (slow-add 2 3)) (state-set \"chan\" (msg-recv \"add.done\")))");
+      "(begin (state-set \"got\" (slow-add 2 3)) (state-set \"chan\" (msg-recv \"add.done\")))",
+      [&](const std::string &h) { how = h; });
   EXPECT_TRUE(drain_until(art, [&] { return val(app, "ui.docs.af.chan") == "5"; }))
-      << val(app, "ui.docs.af.chan");
+      << val(app, "ui.docs.af.chan") << " (the program: " << how << ")";
   EXPECT_EQ(val(app, "ui.docs.af.got"), "5");
+  EXPECT_EQ(how, ""); // it finished
   EXPECT_TRUE(off_thread.load());
 }
 
