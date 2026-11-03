@@ -942,6 +942,15 @@ if(NOT EMSCRIPTEN)
                    ${CMAKE_CURRENT_BINARY_DIR}/ari_golden)
 endif()
 
+# Ariadne `viewport` widgets and node `tags:` (scene_views.h): each widget's mirror viewport, the
+# props a view's show: / hide: leave out, its pixels, and its hiding with its window. Offscreen;
+# skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_views test/cvcgl_ariadne_views.cpp)
+  target_link_libraries(cvcgl_ariadne_views PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_views COMMAND cvcgl_ariadne_views)
+endif()
+
 # Ariadne physics: / body: (WORLD-GEOMETRY-ROADMAP.md, G5): a spec's crate lands where the
 # heightfield node draws the ground. Headless; the dynamics need Jolt.
 add_executable(cvcgl_ariadne_physics test/cvcgl_ariadne_physics.cpp)

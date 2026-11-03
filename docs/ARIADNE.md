@@ -1662,6 +1662,75 @@ the room verbs with functions. `src/arigl/tests/chat_driver.ari` and `chat_two_c
 scripted arigl clients through a local arisrv: one posts, a late joiner pages back through
 everything, the two exchange direct messages, and a third checks it was pushed none of them.
 
+### 5.18 Views of the scene: `type: viewport` and node `tags:`
+
+A `viewport` widget shows the document's scene inside one of its windows, from a camera of its
+own. It can show the whole scene, or only some of it, chosen by the scene nodes' `tags:`
+(roadmap §9.5). An overview map, a second angle on the same scene, or a debug view of one layer
+needs no host code.
+
+```yaml
+scene:
+  nodes:
+    - node: city                  # untagged: drawn in every view
+      type: geometry
+      source: { file: city.glb }
+    - node: agents
+      type: geometry
+      tags: [sim]
+      source: { stream: { handler: agent_glyphs } }
+    - node: nav_field
+      type: geometry
+      tags: [sim, debug]          # in a view that shows sim OR debug
+      source: { file: field.vtk }
+windows:
+  - window: Overview
+    id: overview
+    pos: [16, 16]
+    size: [380, 330]
+    children:
+      - type: viewport
+        view: overview            # its camera: <prefix>.viewers.overview.camera
+        show: [sim]               # the untagged nodes, and those tagged sim
+        camera: map               # orbit (the default) | fly | map | track
+        width: 360                # logical px; the window's width when unset
+        height: 270               # 3/4 of the width when unset
+```
+
+| Key | Meaning |
+|---|---|
+| `view` | The view's name. Its camera is `<prefix>.viewers.<view>.camera`, so `camera_settings` (`args: { viewer: <view> }`) and actions drive it as they do the main one. Defaults to the widget's `id`. |
+| `show` | Tags, as a list or one string (`show: "sim debug"`). The view draws the untagged nodes and the nodes that carry one of these tags. When unset, it draws every tag. |
+| `hide` | Tags the view leaves out, whatever `show` says. |
+| `bind` | A state key whose value is the tag list to show (space- or comma-separated), read every frame. Use it for a layers menu: a widget writes the key, and the view follows. |
+| `camera` | `orbit` (the default), `fly`, `map` (top-down, framed on what the view shows), or `track` with `track: <node id>`. |
+| `chrome` | `false` leaves out the scene's grid, axes and bounding box. Defaults to `true`. |
+| `clear_color` | `[r, g, b]` in 0..1, what the view clears to. Defaults to the main view's background. (`background:` on a widget is the §5.12 backdrop key.) |
+| `input` | `false` makes the view ignore the mouse. Otherwise a drag orbits its camera (the middle or right button pans) and the wheel zooms. |
+
+**Tags.** A node's `tags:` hold for its whole subtree, so a tagged child under a tagged parent is
+drawn only where both are allowed: the parent's tags take the child out of a view that rules them
+out. An untagged node is in every view, so content meant for the main view only needs a tag of its
+own that the other views leave out (`hide: [main_only]`). The main view always draws every node. A
+node hidden with `visible:` is gone from every view.
+
+**How it draws.** Each view is a mirror viewport of the main one
+(`ViewportManager::addMirrorViewport`). It draws the same props, the same geometry, from its own
+camera, less the props of the nodes it leaves out (`Viewport::setMirrorFilter`). The widget
+reserves its rect in the window and cuts that rect out of the window's background
+(`ImGuiBackend::cut_window_background`); the view is drawn there. So the view moves and scrolls with
+its window, is clipped where the window clips it, and is hidden on any frame its widget is not
+drawn: a closed or collapsed window, another tab. Every AriRuntime host (arigl, pycvc_gl) has the
+widget. A terminal backend shows its placeholder. A new document removes the last one's views.
+
+Limits:
+- A view leaves nodes out. It does not yet restyle them (the roadmap's per-view `override:`).
+- The view lies under the whole UI. Another window behind the viewport's window still draws over
+  the view.
+- A view has no shadows of its own.
+- A view's first frame is opaque: the window's background is cut from the frame after the widget
+  first draws.
+
 ## 6. Composition: include / import / load
 
 Three mechanisms compose documents. They differ in **isolation**, not in how they
@@ -1816,6 +1885,7 @@ includes. Each binds state keys a C++ object owns, so it needs no host code;
 | `world_controls` | a `generated_world` node (§5.4) |
 | `mesh_tools` | a `mesh_lab` node named `mesh` (§5.4) |
 | `fe_controls` | an `fe_lab` node named `domain` (§5.4) |
+| `scene_view` | a window holding a view of the scene (the `viewport` widget, §5.18), from a camera of its own (args `view`, `show`, `hide`, `camera`, `chrome`, `width`, `height`, `title`, `id`) |
 | `card` | a card in a list: avatar / title / subtitle / timestamp header, body, `media` and `actions` slots; its args are state keys, so a `repeat:` includes one per item (not a window: embed it) |
 | `transfer_function`, `transfer_function_editor` | any node's `transfer_function` model (args `node`, `id`): the ColorTable2 editor with histogram / contour spectrum / contour tree layers — see [`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) |
 | `chat`, `chat_panel` | a room's chat and direct messages through the chat verbs (args `id`, `title`, `room`); its functions come with the import: call `(chat-ui-step ID ROOM)` from `on_tick` (§5.16) |
