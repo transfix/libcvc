@@ -84,6 +84,7 @@ struct plant_log_options {
   steer_input steer = steer_input::actual;
   bool wide = false; // flights.npy in the wide layout (kPlanarWideWidth: the wheels, attitude and
                      // pedals too); off, the planar eight columns
+  bool keep_contact = false; // keep the windows with contacts, a contact feature last (cut_flights)
   int nsub = 0;      // residual substeps; 0: the physics steps a tick
   bool samples = false;
   bool fit_dyn = false;

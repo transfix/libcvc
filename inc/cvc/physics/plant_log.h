@@ -255,12 +255,13 @@ constexpr int kPlanarWidth = 8;
 //   18 ground_grade, 19 ground_roll  the ground's slope under the wheels, the interval's mean
 constexpr int kPlanarWideWidth = 20;
 
-// The column names of each layout, in order (meta.json's "layout").
+// The column names of each layout, in order (meta.json's "layout"); with `contact`, one more:
+// "contact", cut_flights' contact feature.
 enum class flight_layout {
   planar, // kPlanarWidth columns
   wide    // kPlanarWideWidth columns
 };
-const std::vector<std::string> &flight_columns(flight_layout layout);
+std::vector<std::string> flight_columns(flight_layout layout, bool contact = false);
 
 enum class steer_input {
   actual, // the mean of the road-wheel angle at the interval's two ends
@@ -269,8 +270,10 @@ enum class steer_input {
 
 struct flight_set {
   std::vector<double> data; // [flights * rows * width], row-major
-  int width = kPlanarWidth; // kPlanarWidth, or kPlanarWideWidth for the wide layout
+  int width = kPlanarWidth; // kPlanarWidth, or kPlanarWideWidth for the wide layout; + 1 with
+                            // keep_contact's feature
   std::size_t flights = 0, rows = 0;
+  std::size_t in_contact = 0;    // keep_contact: the kept windows that touched something
   std::vector<int> agent, first; // each flight's agent and first sample
   std::size_t dropped = 0;       // windows left out: a contact, an impact, a wheel off the
                                  // ground, or barely moving
@@ -282,10 +285,19 @@ struct flight_set {
 // `min_speed` (m/s) somewhere in it. The drive input is planar_sample::drive. `layout` picks the
 // row: the planar eight columns (the default) or the wide row with the wheels, the attitude and
 // the pedals.
+//
+// With keep_contact the windows with a contact or an impact are kept too (a wheel off the ground
+// still drops one), and each row gains a last column, the contact feature: the static contacts
+// that interval began, plus one when it touched another vehicle or its horizontal acceleration
+// passed kImpactG. A learned plant can read it as an input (a port, or a modulation of D and G)
+// and so fit the mean response of the intervals in contact: the extra deceleration and damping
+// they show. It cannot learn where or when a contact happens, nor its direction: the rows carry no
+// obstacle, only that the interval touched one, and the response it fits is Jolt's rigid contact
+// averaged over the logs' approach speeds and angles.
 flight_set cut_flights(const std::vector<std::vector<planar_sample>> &runs, std::size_t rows,
                        std::size_t stride, double min_speed = 1.0,
                        steer_input steer = steer_input::actual,
-                       flight_layout layout = flight_layout::planar);
+                       flight_layout layout = flight_layout::planar, bool keep_contact = false);
 
 // A little-endian float64 .npy file (format 1.0, C order). Throws std::runtime_error.
 void write_npy(const std::string &path, const std::vector<double> &data,

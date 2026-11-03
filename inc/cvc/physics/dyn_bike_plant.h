@@ -42,7 +42,7 @@
 // Each tick runs dyn_plant's substeps under the held command (the bicycle angle, and the drive
 // force per unit mass the driver asks for), in SI, and books every step (dyn_plant_books):
 //   kinetic now = kinetic at attach + drive - brake - dissipated - slip + floor + grade + limiter
-//                 + contact + residual
+//                 + contact - contact_stored - contact_dissipated + contact_exchange + residual
 // drive and brake are the axles' forces where they push and where they hold back, dissipated the
 // tires' slip, drag and rolling resistance, slip (with options.wheel_spin, diff::dyn_spin_plant's
 // spinning wheels; else 0) the tires' longitudinal slip, floor what the tires' secants leave,
@@ -56,15 +56,20 @@
 
 #include <cvc/core/world_units.h>
 #include <cvc/nav/detail/dyn_bike.h>
+#include <cvc/nav/detail/dyn_contact.h>
 #include <cvc/nav/vehicle_plant.h>
 #include <cvc/physics/dyn_driver.h>
 #include <cvc/physics/nav_plant.h>
 #include <cvc/physics/vehicle.h>
 #include <cvc/physics/world.h>
+#include <functional>
 #include <memory>
 #include <vector>
 
 namespace cvc {
+namespace nav {
+struct field_stack;
+}
 namespace physics {
 
 namespace dyn {
@@ -98,6 +103,17 @@ struct dyn_bike_plant_options {
   // kinetic energy the wheels' spin. Off (the default), diff::dyn_plant: each axle's force is the
   // drive's within its grip.
   bool wheel_spin = false;
+  // Compliant contact (cvc/nav/detail/dyn_contact.h): each vehicle's footprint against
+  // contact_field and, with contact_vehicles, the vehicles against each other, as a barrier energy
+  // and a damper through the plant's external port. The books gain the contact lines. Off by
+  // default; it does not need a world (options.physics, which collides the chassis in Jolt
+  // instead: use one or the other).
+  bool contact = false;
+  cvc::nav::diff::dyn_contact_params contact_params;
+  // The field, world metres: the signed distance at (x, y) (> 0 free) and its gradient. Empty:
+  // none (the vehicles still meet each other). dyn_bike_plant::sdf_field builds one from nav's.
+  std::function<void(double x, double y, double &phi, double &gx, double &gy)> contact_field;
+  bool contact_vehicles = true;
 };
 
 // One agent's energy, in J: over the last tick, or since attach().
@@ -112,7 +128,12 @@ struct dyn_bike_books {
   double grade = 0.0;      // gravity along the heading (0 on flat ground)
   double limiter = 0.0;    // the speed clamp's and the low-speed blend's (<= 0 as a rule)
   double contact = 0.0;    // what the collisions changed (0 without a world)
-  double residual = 0.0;   // the integrator's
+  // With options.contact: the barrier's energy at the end (a level, J), its change (stored), the
+  // damper's work (dissipated, >= 0 as a rule) and what the vehicles passed each other through
+  // their contacts (exchange: summed over a pair it is the integrator's error alone).
+  double contact_energy = 0.0;
+  double contact_stored = 0.0, contact_dissipated = 0.0, contact_exchange = 0.0;
+  double residual = 0.0; // the integrator's
   // Everything that moved, for the residual's scale.
   double flow() const;
 };
@@ -183,6 +204,18 @@ public:
   // contact's; -1 none), as nav_plant::vehicle_contact_step.
   int vehicle_contact_step(int i) const { return _agents.at(i).touched; }
 
+  // ── compliant contact (options.contact) ──
+  // Agent i's outline about its centre of gravity: its chassis box and its wheels, as limits()
+  // reads them.
+  const cvc::nav::diff::dyn_footprint &footprint(int i) const { return _agents.at(i).fp; }
+  // The contact on agent i at the start of its last substep: wrench, energy, touching points.
+  const cvc::nav::diff::dyn_contact &contact_now(int i) const { return _agents.at(i).cnow; }
+  // A contact field from nav's signed-distance grid (sim_world's; plane `plane`), in world metres
+  // through `metres_per_world_unit`: phi bilinear between the grid's samples and its own gradient,
+  // so the barrier's force is its energy's. Borrows fs.data: the grid must outlive the field.
+  static std::function<void(double, double, double &, double &, double &)>
+  sdf_field(const cvc::nav::field_stack &fs, int plane = 0, double metres_per_world_unit = 1.0);
+
   const dyn_bike_plant_options &options() const { return _o; }
 
 private:
@@ -192,6 +225,9 @@ private:
     cvc::nav::diff::bike_veh lim{};
     cvc::nav::diff::dyn_state<double> s{};
     double om[2] = {0.0, 0.0}; // wheel_spin: the front and rear wheels' speeds (rad/s)
+    cvc::nav::diff::dyn_footprint fp;              // the outline about the centre of gravity
+    std::vector<cvc::nav::diff::dyn_point> points; // its contact points
+    cvc::nav::diff::dyn_contact cnow;              // options.contact: at the last substep's start
     double rear_x = 0.0;       // the rear axle, body x (m)
     double half_track = 0.0;   // the widest axle's (m)
     double steer_cmd = 0.0;    // rad
@@ -209,6 +245,11 @@ private:
 
   // Agent a's plant_sample; `tick`: over a tick of _dt from (vx0, vy0) at heading psi0.
   void measure(agent &a, double vx0, double vy0, double psi0, bool tick) const;
+  // options.contact: every agent's contact at the model states `s`, against the field (field[i])
+  // and against the other agents (pair[i], its half of each pair's energy and dissipation).
+  void contacts(const std::vector<cvc::nav::diff::dyn_state<double>> &s,
+                std::vector<cvc::nav::diff::dyn_contact> &field,
+                std::vector<cvc::nav::diff::dyn_contact> &pair) const;
   // Agent a's chassis box at state s: its origin, on the ground under it, and its attitude.
   void chassis_pose(const agent &a, const cvc::nav::diff::dyn_state<double> &s, vec3 &position,
                     quat &rotation) const;

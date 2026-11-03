@@ -359,11 +359,16 @@ CVC_HD inline void dyn_spin_long_step(const dyn_bike_params &p, S hdt, const dyn
 }
 
 // One step of the plant (om0 null), or of the wheel-spin plant (om0 and om1 its wheels' speeds
-// before and after); see the header comment. grade is data (its gradient is not taken).
+// before and after); see the header comment. grade is data (its gradient is not taken). `wrench`,
+// when given, is an external wrench on the body (F_x, F_y, M_z: body axes, at the centre of
+// gravity) held over the step: the external port of the pH form (dyn_ph_books' port), such as the
+// contact's (dyn_contact.h). It joins the resistances along the body and the lateral solve's force
+// and moment.
 template <class S>
 CVC_HD inline void dyn_plant_core(const dyn_bike_params &p, const bike_veh &v,
                                   const dyn_state<S> &s, const S *om0, S delta_cmd, S a_cmd,
-                                  S grade, dyn_state<S> &o, S *om1, dyn_step_free<S> *seen) {
+                                  S grade, dyn_state<S> &o, S *om1, dyn_step_free<S> *seen,
+                                  const S *wrench = nullptr) {
   const S hdt = S(v.hdt), zero = S(0), one = S(1);
   const S m = S(p.m), Iz = S(p.Iz), lf = S(p.lf), lr = S(p.lr), h = S(p.h), g = S(p.g);
   const S mu = S(p.mu), Cp = S(p.C), L = lf + lr;
@@ -400,7 +405,10 @@ CVC_HD inline void dyn_plant_core(const dyn_bike_params &p, const bike_veh &v,
   // forces, which a slip times a stiffness gets badly wrong. For the same reason nothing
   // longitudinal reads a lateral force before the solve.
   const S u0 = s_sqrt(s.vx * s.vx + eps2), sg0 = s.vx / u0;
-  const S F_res = -S(p.drag) * s.vx * u0 - S(p.c_rr) * m * g * sg0 - m * g * grade;
+  S F_res = -S(p.drag) * s.vx * u0 - S(p.c_rr) * m * g * sg0 - m * g * grade;
+  // An external wrench's force along the body (the external port), held over the step.
+  if (wrench)
+    F_res = F_res + wrench[0];
   // Each axle's drive or brake force within its grip. With the wheels spinning, the tires'
   // longitudinal forces from their slip, solved with the speed and the wheels'
   // (dyn_spin_long_step).
@@ -435,8 +443,12 @@ CVC_HD inline void dyn_plant_core(const dyn_bike_params &p, const bike_veh &v,
     const S uf = s_sqrt((vx_p * cd + vf * sd) * (vx_p * cd + vf * sd) + eps2);
     const S af = -s_atan2(wf, uf), ar = -s_atan2(wr, u);
     const S Fyf = dyn_lateral(af, Bf, Cp, Dyf), Fyr = dyn_lateral(ar, Br, Cp, Dyr);
-    const S FY = Fxf * sd + Fyf * cd + Fyr;
-    const S MZ = lf * (Fxf * sd + Fyf * cd) - lr * Fyr;
+    S FY = Fxf * sd + Fyf * cd + Fyr;
+    S MZ = lf * (Fxf * sd + Fyf * cd) - lr * Fyr;
+    if (wrench) {
+      FY = FY + wrench[1];
+      MZ = MZ + wrench[2];
+    }
     const S f_vy = FY / m - r1 * vx_p, f_r = MZ / Iz;
     const S Sf_t = dyn_secant_w(Fyf, af, wf, S(0), Bf, Cp, Dyf, uf);
     const S Sr = dyn_secant_w(Fyr, ar, wr, S(0), Br, Cp, Dyr, u);
@@ -492,12 +504,13 @@ CVC_HD inline void dyn_plant_core(const dyn_bike_params &p, const bike_veh &v,
 }
 
 // One step of the plant; see the header comment. grade is data (its gradient is not taken).
-// `seen`, when given, gets the twist the step reached before its limiters (dyn_plant_books).
+// `seen`, when given, gets the twist the step reached before its limiters (dyn_plant_books);
+// `wrench`, an external wrench held over the step (dyn_plant_core).
 template <class S>
 CVC_HD inline void dyn_plant(const dyn_bike_params &p, const bike_veh &v, const dyn_state<S> &s,
                              S delta_cmd, S a_cmd, S grade, dyn_state<S> &o,
-                             dyn_step_free<S> *seen = nullptr) {
-  dyn_plant_core<S>(p, v, s, nullptr, delta_cmd, a_cmd, grade, o, nullptr, seen);
+                             dyn_step_free<S> *seen = nullptr, const S *wrench = nullptr) {
+  dyn_plant_core<S>(p, v, s, nullptr, delta_cmd, a_cmd, grade, o, nullptr, seen, wrench);
 }
 
 // One step of the wheel-spin plant: dyn_plant's with the wheels spinning (see "Wheel spin" above),
@@ -506,10 +519,11 @@ CVC_HD inline void dyn_plant(const dyn_bike_params &p, const bike_veh &v, const 
 template <class S>
 CVC_HD inline void dyn_spin_plant(const dyn_bike_params &p, const bike_veh &v,
                                   const dyn_spin_state<S> &s, S delta_cmd, S a_cmd, S grade,
-                                  dyn_spin_state<S> &o, dyn_step_free<S> *seen = nullptr) {
+                                  dyn_spin_state<S> &o, dyn_step_free<S> *seen = nullptr,
+                                  const S *wrench = nullptr) {
   const S om0[2] = {s.om_f, s.om_r};
   S om1[2];
-  dyn_plant_core<S>(p, v, s.b, om0, delta_cmd, a_cmd, grade, o.b, om1, seen);
+  dyn_plant_core<S>(p, v, s.b, om0, delta_cmd, a_cmd, grade, o.b, om1, seen, wrench);
   o.om_f = om1[0];
   o.om_r = om1[1];
 }
@@ -835,18 +849,32 @@ CVC_HD inline dyn_ph_rates<S> dyn_ph_rates_at(const dyn_bike_params &p, const dy
 // The powers are the trapezoid between the step's start (with the inputs it applied, the
 // actuators' outputs) and the twist it reached before its limiters; limiter is the kinetic energy
 // the speed clamp and the low-speed blend then added (< 0: removed); residual is the integrator's
-// error, second order in hdt per step.
+// error, second order in hdt per step. With an external wrench (dyn_plant_books' `wrench`), the
+// port's energy is its own line, returned through `port`: the residual is then net of it.
 template <class S> struct dyn_ph_books {
   S dH, dissipated, supplied, floor, grade, limiter, residual;
 };
 
-// dyn_plant's step with its books. The step is dyn_plant's, to the last bit.
+// The external port's energy over a step, W held: the trapezoid of its power v^T W between the
+// step's start and the twist it reached before its limiters.
+template <class S>
+CVC_HD inline S dyn_ph_port_work(S hdt, S vx0, S vy0, S r0, S vx1, S vy1, S r1, const S W[3]) {
+  return S(0.5) * hdt * ((vx0 + vx1) * W[0] + (vy0 + vy1) * W[1] + (r0 + r1) * W[2]);
+}
+
+// dyn_plant's step with its books. The step is dyn_plant's, to the last bit. With `wrench` (the
+// external port, held over the step) the books gain its energy, y_e^T u_e = v^T W over the step
+// (dyn_ph_port_work, into *port when given): dH = supplied - dissipated + floor + grade + limiter
+// + port + residual. `free_out`, when given, gets the twist the step reached before its limiters.
 template <class S>
 CVC_HD inline void dyn_plant_books(const dyn_bike_params &p, const bike_veh &v,
                                    const dyn_state<S> &s, S delta_cmd, S a_cmd, S grade,
-                                   dyn_state<S> &o, dyn_ph_books<S> &b) {
+                                   dyn_state<S> &o, dyn_ph_books<S> &b, const S *wrench = nullptr,
+                                   S *port = nullptr, dyn_step_free<S> *free_out = nullptr) {
   dyn_step_free<S> seen;
-  dyn_plant<S>(p, v, s, delta_cmd, a_cmd, grade, o, &seen);
+  dyn_plant<S>(p, v, s, delta_cmd, a_cmd, grade, o, &seen, wrench);
+  if (free_out)
+    *free_out = seen;
   dyn_state<S> s0 = s, e = o;
   s0.delta = o.delta;
   s0.a = o.a;
@@ -864,6 +892,12 @@ CVC_HD inline void dyn_plant_books(const dyn_bike_params &p, const bike_veh &v,
   b.dH = h1 - h0;
   b.limiter = h1 - he;
   b.residual = b.dH - (b.supplied - b.dissipated + b.floor + b.grade + b.limiter);
+  if (wrench) {
+    const S pw = dyn_ph_port_work(S(v.hdt), s.vx, s.vy, s.r, e.vx, e.vy, e.r, wrench);
+    b.residual = b.residual - pw;
+    if (port)
+      *port = pw;
+  }
 }
 
 // ── The wheel-spin plant in port-Hamiltonian form ─────────────────────────────────────────
@@ -1037,10 +1071,12 @@ CVC_HD inline void dyn_spin_ph_rhs(const dyn_bike_params &p, const dyn_spin_stat
 // Q, every force on x but the structure's, at the state: -R dH/dx + G u + f_eps - m g grade e_x
 // on (vx, vy, r, om_f, om_r)'s momenta, so dyn_spin_ph_rhs is J dH/dx + Q. A discrete-gradient
 // step takes J and Q at its midpoint; dH/dx^T Q there is dyn_spin_ph_rates_at's balance, supplied -
-// braked - dissipated - slip + floor + grade, so its books close with those rates.
+// braked - dissipated - slip + floor + grade, so its books close with those rates. `wrench`, when
+// given, is the external port's (F_x, F_y, M_z) on the body, as dyn_plant_core's: Q gains it on
+// the body's momenta, and dH/dx^T Q its power v^T W (the books' port).
 template <class S>
 CVC_HD inline void dyn_spin_ph_forces_at(const dyn_bike_params &p, const dyn_spin_state<S> &s,
-                                         S grade, S Q[5]) {
+                                         S grade, S Q[5], const S *wrench = nullptr) {
   S R[5][5], G[5][2], u[2], f[5];
   dyn_spin_ph_R(p, s, R);
   dyn_spin_ph_G(G);
@@ -1054,6 +1090,9 @@ CVC_HD inline void dyn_spin_ph_forces_at(const dyn_bike_params &p, const dyn_spi
     Q[i] = acc;
   }
   Q[0] = Q[0] - S(p.m) * S(p.g) * grade;
+  if (wrench)
+    for (int i = 0; i < 3; ++i)
+      Q[i] = Q[i] + wrench[i];
 }
 
 // The power balance at a state: dH/dt = supplied - braked - dissipated - slip + floor + grade.
@@ -1092,13 +1131,18 @@ template <class S> struct dyn_spin_ph_books {
   S dH, dissipated, slip, supplied, braked, floor, grade, limiter, residual;
 };
 
-// dyn_spin_plant's step with its books. The step is dyn_spin_plant's, to the last bit.
+// dyn_spin_plant's step with its books. The step is dyn_spin_plant's, to the last bit. `wrench`,
+// `port` and `free_out` as dyn_plant_books'.
 template <class S>
 CVC_HD inline void dyn_spin_plant_books(const dyn_bike_params &p, const bike_veh &v,
                                         const dyn_spin_state<S> &s, S delta_cmd, S a_cmd, S grade,
-                                        dyn_spin_state<S> &o, dyn_spin_ph_books<S> &b) {
+                                        dyn_spin_state<S> &o, dyn_spin_ph_books<S> &b,
+                                        const S *wrench = nullptr, S *port = nullptr,
+                                        dyn_step_free<S> *free_out = nullptr) {
   dyn_step_free<S> seen;
-  dyn_spin_plant<S>(p, v, s, delta_cmd, a_cmd, grade, o, &seen);
+  dyn_spin_plant<S>(p, v, s, delta_cmd, a_cmd, grade, o, &seen, wrench);
+  if (free_out)
+    *free_out = seen;
   dyn_spin_state<S> s0 = s, e = o;
   s0.b.delta = o.b.delta;
   s0.b.a = o.b.a;
@@ -1120,6 +1164,12 @@ CVC_HD inline void dyn_spin_plant_books(const dyn_bike_params &p, const bike_veh
   b.limiter = h1 - he;
   b.residual =
       b.dH - (b.supplied - b.braked - b.dissipated - b.slip + b.floor + b.grade + b.limiter);
+  if (wrench) {
+    const S pw = dyn_ph_port_work(S(v.hdt), s.b.vx, s.b.vy, s.b.r, e.b.vx, e.b.vy, e.b.r, wrench);
+    b.residual = b.residual - pw;
+    if (port)
+      *port = pw;
+  }
 }
 
 // The tangent dissipation of dyn_plant's Pacejka tires at the state: Dt = -d(Q_y, Q_r)/d(vy, r)

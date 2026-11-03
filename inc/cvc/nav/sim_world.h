@@ -208,6 +208,10 @@ public:
   // and therefore its SDF field — changed (and once at construction). A belief flip
   // that leaves every plane's occupancy unchanged does not bump it.
   int field_version() const { return field_ver_; }
+  // The signed-distance field the drive reads, every plane's phi and normals (phi in the normalized
+  // frame), borrowed: valid until the next rebuild (field_version). A dynamic plant's compliant
+  // contact reads it (physics::dyn_bike_plant::sdf_field).
+  field_stack field() const { return field_view(); }
   // Per-belief-plane BELIEF-FLIP counter: on a sense tick it bumps once per agent sensing into
   // plane m whose update flips some cell's log-odds sign (p crossing 0.5). It is NOT a raster
   // version. belief_occ(m) can change with no bump: a planning-threshold crossing that is not a
