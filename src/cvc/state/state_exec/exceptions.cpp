@@ -204,9 +204,9 @@ dict_ptr class_of_constructor(const value_t &ctor) {
 bool is_instance(const value_t &v, const dict_ptr &cls) {
   if (!cls)
     return false;
-  // A snapshot writes a class dict once for each value holding it, so after a restore an
-  // instance's class can be a copy of the one a program names: the same class by its chain of
-  // names. Built lazily: most matches are by identity.
+  // A snapshot writes a class dict once for each value holding it, so after a restore a user
+  // class can be a copy of the one a program names (a built-in class is relinked to itself): the
+  // same class by its chain of names. Built lazily: most matches are by identity.
   std::optional<std::vector<std::string>> wanted;
   dict_ptr at = class_of_instance(v);
   for (int hop = 0; at && hop < 4096; ++hop) { // bounded: a class dict could be made to loop

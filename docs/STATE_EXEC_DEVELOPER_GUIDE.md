@@ -1257,14 +1257,17 @@ what is stored, so a program never shares a list or dict with the tree (docs/STA
   sharing and cycles, so a list changed after it was stored no longer changes what
   `state-data-get` returns. An ordinary `data_object` (a volume, a mesh) is shared, under its
   read-only contract. A built-in exception's instance is copied, and its class dict shared, since
-  it is read-only (above): an exception read back with `state-data-get` can be stored again. The
-  node is written once, when the whole copy is made.
+  it is read-only (above): an exception read back with `state-data-get` can be stored again, and
+  so can one restored from a snapshot (the restore relinks a built-in class to itself). The node
+  is written once, when the whole copy is made.
 - **Refused, at any depth:** what runs code or holds a process's state. The `RuntimeError` names
   it: `state-data-set: cannot store a closure`, `... a native function`, `... a generator`,
   `... a future`, `... a lock form` (`with-lock` itself), `... a lock wait`, and
   `state-data-set: cannot store an object instance` (an instance of a user class: its methods are
-  closures over the environment `defclass` ran in, the writing program's live one). Below the
-  top level the text ends with ` (nested in a list)` or ` (nested in a dict)`, as in
+  closures over the environment `defclass` ran in, the writing program's live one). An instance
+  is a dict whose first key is `__class__`, holding a class dict whose first key is `__name__`, as
+  `defclass` and the exception constructors build them; any other dict, such as a JSON object
+  with a `__class__` key, is copied as data. Below the top level the text ends with ` (nested in a list)` or ` (nested in a dict)`, as in
   `state-data-set: cannot store a closure (nested in a list)`. A refused value leaves the node as
   it was.
 - **Instances inside other values** are refused as well. An exception raised while a handler

@@ -3966,7 +3966,7 @@ unsigned long long max_alloc_bytes_from_state(cvc::state &root, const std::strin
 
 // The scheduler libcvc's hosts use (app::exec_scheduler(), Exec). The coroutine step()/run() aren't
 // wrapped; Python drives it with sync_step()/sync_run(), which release the GIL while programs run.
-// post_message() is the one thread-safe call.
+// post_message(), stop() and is_running() are the thread-safe calls (bindings/pycvc/README.md).
 class async_scheduler : public scheduler_base {
 public:
   async_scheduler();

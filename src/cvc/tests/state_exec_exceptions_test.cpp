@@ -607,8 +607,8 @@ TEST(ExceptionsLeaving, FailedAndKilledAreCountedApart) {
 }
 
 TEST(ExceptionsLeaving, AnExceptionFromBeforeASnapshotKeepsItsClass) {
-  // A snapshot writes a class dict once for each value holding it, so a restored exception's
-  // class is a copy: catch matches it by its chain of names. A handler is running when the
+  // A snapshot writes a class dict once for each value holding it, so a restored user class is a
+  // copy (a built-in class is relinked to itself): catch matches it by its chain of names. A handler is running when the
   // snapshot is taken; after the restore it re-raises its exception to an outer catch by class.
   cvc::app app;
   stackless_evaluator ev(builtins::make_default_environment());
