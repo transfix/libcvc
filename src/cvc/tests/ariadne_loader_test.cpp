@@ -5478,8 +5478,8 @@ windows:
     std::vector<std::string> keys;
     collect_key_strings(*windows[i], keys);
     for (const std::string &want :
-         {v + "hud.enabled", v + "hud.fps", v + "ui.scale", v + "camera.settings.move_speed",
-          std::string("graphics.root.children.grid.visible"),
+         {v + "hud.enabled", v + "hud.fps", v + "ui.scale", v + "ui.scroll_friction",
+          v + "camera.settings.move_speed", std::string("graphics.root.children.grid.visible"),
           std::string("graphics.root.children.axis.visible"),
           std::string("graphics.root.show_bbox"), std::string("shadows.enabled")})
       EXPECT_NE(std::find(keys.begin(), keys.end(), want), keys.end()) << want;

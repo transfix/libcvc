@@ -1588,6 +1588,40 @@ this for every one.
   flow, §5.8), open as anywhere else.
 - **Labels.** A slider's, combo's or field's label stays in view: in a window that fits its
   widgets, a widget that would push its label past the view's edge is narrowed to leave it room.
+- **Scrolling with a finger.** On a touch screen a finger drags a window's content along, its
+  scroll bar untouched, and a finger that lifts while moving leaves the content gliding at its
+  speed until friction stops it or it meets an end. This works in every window, child pane,
+  `text_view:` and drop-down list that scrolls, and a press on content that is still gliding
+  stops it (that press is not a tap). A drag scrolls when it starts on empty space, text, or a
+  widget worked by a tap (a button, a checkbox, a selectable, a text field not yet being edited):
+  past the drag threshold the widget's press is let go and it does not fire. A drag keeps its
+  old meaning on a slider or a drag widget, a field being edited, a title or menu bar, a resize
+  grip or border, a scroll bar, a table's column border, a scene view (§5.18), the transfer
+  function editor, and any widget whose document handles `on_drag:`, `on_drag_start:` or
+  `on_drag_end:` (§4.6). The window scrolled is the innermost one under the finger that scrolls
+  along the drag's main axis, as the mouse wheel's is.
+
+  The glide's speed falls as `v0 * exp(-friction * t)`, so a fling covers `v0 / friction`
+  before it stops. Both are state keys beside the UI size, and a document reaches them under
+  its own prefix in arigl (`viewers.main.ui.*`):
+
+  | key | default | |
+  |---|---|---|
+  | `<scene>.viewers.<viewer>.ui.touch_scroll` | `1` | `0`: a finger's drag scrolls nothing (the scroll bars still do) |
+  | `<scene>.viewers.<viewer>.ui.scroll_friction` | `2` | per second: 2 is iOS's normal deceleration, 10 its fast one; higher stops sooner, `0` glides to the end |
+
+  ```yaml
+  - slider_float: Scroll friction
+    bind: viewers.main.ui.scroll_friction   # arigl: under the document's own prefix
+    lo: 0.5
+    hi: 20
+  - button: Short flings
+    on: (state-set "viewers.main.ui.scroll_friction" 8)
+  ```
+
+  On a touch screen arigl's Controls window offers it as **Scroll friction** under *Display*,
+  for any host that sets `UiSizeControl::scroll_friction`. A mouse has the wheel and the scroll
+  bars, so none of this applies to one.
 - **The system keyboard.** A browser raises a phone's keyboard only for a focused text field,
   which the canvas is not. When a finger (or a pen) activates an `input_text`, the page focuses a
   hidden `<input>` placed at the field's caret, so the keyboard comes up and the browser keeps
