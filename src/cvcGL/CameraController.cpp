@@ -20,6 +20,7 @@
 #include <cvc/gl/SceneRenderer.h>
 #include <iterator>
 #include <set>
+#include <sstream> // a frame request's bounds
 #include <string>
 #include <vtkCamera.h>
 #include <vtkInteractorStyle.h>
@@ -764,9 +765,21 @@ bool CameraController::poseMirrorStale() const {
 }
 
 void CameraController::handleStateChanged(const std::string &childState) {
-  (void)childState;
   if (m_impl->selfWrite.load())
     return; // our own write echoing back
+  // A frame request: "min_x min_y min_z max_x max_y max_z" written to <camera>.frame (a scene's
+  // data node, when its dataset draws: scene_realize's `frame:`) frames those bounds as
+  // frameBounds does. Anything else in it is ignored.
+  const std::string key = "frame";
+  if (childState == key ||
+      (childState.size() > key.size() &&
+       childState.compare(childState.size() - key.size() - 1, std::string::npos, "." + key) == 0)) {
+    std::istringstream in(getState(key).value());
+    double b[6];
+    if (in >> b[0] >> b[1] >> b[2] >> b[3] >> b[4] >> b[5])
+      frameBounds(b[0], b[1], b[2], b[3], b[4], b[5]);
+    return;
+  }
   readAllFromState();
   applyToCamera();
 }

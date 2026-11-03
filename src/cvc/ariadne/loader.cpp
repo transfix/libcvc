@@ -2536,6 +2536,20 @@ SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
     sn.has_casts_shadow = true;
     sn.casts_shadow = flag(n, "casts_shadow", true);
   }
+  if (const YAML::Node fr = n["frame"]; fr && fr.IsScalar()) {
+    // frame: true | first | always (false / none: the camera is left alone)
+    const std::string v = fr.Scalar();
+    if (v == "always" || v == "first")
+      sn.frame = v;
+    else if (flag(n, "frame", false))
+      sn.frame = "first";
+    else if (v != "none" && v != "false" && v != "no" && v != "off")
+      ctx.warn("ari: scene node '" + sn.id + "': frame: is true, first, always or none, not '" + v +
+               "'");
+    if (!sn.frame.empty() && sn.source_data.empty())
+      ctx.warn("ari: scene node '" + sn.id +
+               "': frame: frames a source: { data } node's dataset; this node has none");
+  }
   const YAML::Node tf = n["transform"];
   if (tf && tf.IsMap()) {
     sn.has_transform = true;

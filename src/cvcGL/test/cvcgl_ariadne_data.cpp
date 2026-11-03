@@ -9,7 +9,8 @@
 //   3. re-pointing the document's link at another dataset ((data-load) does) redraws the node from
 //      it, and what it drew before is gone, its bodies too;
 //   4. a dataset with nothing to draw warns, never throws;
-//   5. material: { uv } orients a texture in texture space.
+//   5. material: { uv } orients a texture in texture space;
+//   6. frame: asks the main view's camera to frame what the dataset drew, once (frame: true).
 //
 // NOT assert(): built Release, where NDEBUG makes assert() a no-op.
 #include <boost/any.hpp>
@@ -29,6 +30,7 @@
 #include <filesystem>
 #include <fstream>
 #include <random>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -131,6 +133,7 @@ scene:
     - node: city
       source: { data: city }
       body: static
+      frame: true
     - node: tri
       source: { data: tri }
     - node: nothing
@@ -171,6 +174,16 @@ scene:
     CHECK(out.height_fields.at("city")->rows() == 3);
   CHECK(out.physics != nullptr);
   CHECK(out.data_nodes[0].bodies.size() == 1); // the terrain, static
+  // frame: true — the main view's camera was asked to frame the city's bounds.
+  const std::string frame_key = prefix + ".viewers.main.camera.frame";
+  const std::string framed = cvc::state::instance(app)(frame_key).value();
+  {
+    std::istringstream in(framed);
+    double b[6] = {0, 0, 0, 0, 0, 0};
+    CHECK(static_cast<bool>(in >> b[0] >> b[1] >> b[2] >> b[3] >> b[4] >> b[5]));
+    CHECK(b[0] == -10.0 && b[1] == -10.0 && b[3] == 10.0 && b[4] == 10.0);
+    CHECK(b[2] == 0.0 && b[5] == 2.0); // the terrain's lowest and highest
+  }
   // The aerial image, decoded with the bundle, drapes the terrain north up (UV (0, 0) is the
   // image's bottom-left, so the north-west corner is (0, 1)).
   const auto *sat = cvc::state::instance(app).findThroughLinks(city_path + ".satellite");
@@ -231,6 +244,7 @@ scene:
   if (out.height_fields.count("city"))
     CHECK(out.height_fields.at("city")->rows() == 5);
   CHECK(out.data_nodes[0].bodies.size() == 1); // the old terrain's body went with it
+  CHECK(cvc::state::instance(app)(frame_key).value() == framed); // frame: true frames only once
   if (auto terrain =
           std::dynamic_pointer_cast<cvc::gl::GeometryNode>(city->findChildByName("city_terrain")))
     CHECK(!terrain->hasTexture()); // the big city's package has no aerial image

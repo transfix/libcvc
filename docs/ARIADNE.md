@@ -1757,6 +1757,11 @@ the document's link points at another dataset. What it drew before goes, and so 
 - a mesh or a height field becomes one mesh node;
 - a volume becomes a volume node.
 
+`frame: true` (or `first`) frames the main view's camera on what the node drew, the first time it
+draws, and `frame: always` does so each time. It writes the bounds to the camera's `frame` request
+(`<prefix>.viewers.main.camera.frame`, "min_x min_y min_z max_x max_y max_z"), which any program
+or host can write as well.
+
 **Document logic.**
 - `(data-load NAME URI [AS [PATH]])` points `data.NAME` at a new request and starts it. The
   nodes bound to `NAME` keep drawing the old dataset until the new one is ready.

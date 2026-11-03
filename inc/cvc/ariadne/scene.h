@@ -305,10 +305,14 @@ struct SceneNode {
   bool material_opaque = false;
 
   // casts_shadow: false — the node (and everything below it) receives shadows but casts none, so
-  // it never forces a shadow re-bake (GraphicsNode::setCastsShadow). For the ground under a city
-  // (as a caster the terrain shadows itself everywhere), and for what moves every frame.
+  // it never forces a shadow re-bake (GraphicsNode::setCastsShadow). For a ground too big to
+  // re-bake often, and for what moves every frame.
   bool has_casts_shadow = false;
   bool casts_shadow = true;
+  // frame: true | first | always — a source: { data } node frames the main view's camera on what
+  // its dataset drew: once, the first time it draws (true, first), or each time it draws again (a
+  // reload, a replacement). Empty: the camera is left alone.
+  std::string frame;
 
   // fit: bake a "stand this mesh on the ground" normalization INTO the loaded geometry — center it
   // in XY, sit its base on z=0, and scale its tallest extent to fit_height; optionally first rotate

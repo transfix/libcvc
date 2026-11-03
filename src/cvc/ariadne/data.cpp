@@ -26,6 +26,8 @@
 #include <cvc/geometry/height_field.h>
 #include <cvc/image/image.h>
 #include <cvc/image/image_decode.h> // a city's satellite.png, from its bytes
+#include <cvc/model/model.h>
+#include <cvc/model/model_file_io.h> // read_model_from_memory
 #include <cvc/net/http_client.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_blob_store.h> // sha256_hex
@@ -229,9 +231,15 @@ void decode_json(DataDecode &d) {
 
 void decode_mesh(DataDecode &d) {
   const auto &f = only_file(d);
-  temp_dir tmp;
-  auto geom =
-      std::make_shared<cvc::geometry>(cvc::read_geometry(tmp.put(basename(f.path), *f.bytes)));
+  const std::string ext = extension(f.path);
+  std::shared_ptr<cvc::geometry> geom;
+  if (ext != ".off" && cvc::can_read_model_from_memory(ext)) { // .off: libcvc's own reader
+    geom = std::make_shared<cvc::geometry>(
+        cvc::read_model_from_memory(f.bytes->data(), f.bytes->size(), ext).merged());
+  } else { // a format only a path-based reader reads (.off, .raw*): the file, briefly
+    temp_dir tmp;
+    geom = std::make_shared<cvc::geometry>(cvc::read_geometry(tmp.put(basename(f.path), *f.bytes)));
+  }
   d.out("geometry").data(boost::any(std::shared_ptr<const cvc::geometry>(std::move(geom))));
   d.out("geometry").value(std::string("geometry"));
 }
@@ -261,6 +269,14 @@ void publish_terrain(DataDecode &d, std::shared_ptr<const cvc::height_field> fie
   t.value(std::string("height_field"));
 }
 
+// A city bundle's files as load_city_bundle reads them, straight from the store: no file on disk.
+cvc::world::city_bundle_reader bundle_files(const DataDecode &d) {
+  return [&d](const std::string &name) {
+    const cvc::archive::file *f = d.find(name);
+    return f ? f->bytes : DataBytes();
+  };
+}
+
 // A city bundle (city_bundle.h) from its files: terrain.json, and buildings.glb (or
 // buildings_flat.glb) when it has them.
 void decode_city_bundle(DataDecode &d) {
@@ -268,12 +284,7 @@ void decode_city_bundle(DataDecode &d) {
   if (!terrain)
     fail("as: city_bundle needs a terrain.json, and " + d.spec.uri + " has none" +
          (d.spec.path.empty() ? " (name its directory with path:)" : " under " + d.spec.path));
-  temp_dir tmp;
-  tmp.put("terrain.json", *terrain->bytes);
-  for (const char *name : {"buildings.glb", "buildings_flat.glb"})
-    if (const cvc::archive::file *f = d.find(name))
-      tmp.put(name, *f->bytes);
-  cvc::world::city_bundle city = cvc::world::load_city_bundle(tmp.path());
+  cvc::world::city_bundle city = cvc::world::load_city_bundle(bundle_files(d), d.spec.uri);
   auto world = std::make_shared<const cvc::world::world_geometry>(std::move(city.geometry));
   d.out("world").data(boost::any(world));
   d.out("world").value(std::string("world_geometry"));
@@ -308,11 +319,12 @@ void decode_heightfield(DataDecode &d) {
       d.files.size() == 1 ? &d.files.front() : d.find("terrain.json");
   if (!terrain)
     fail("as: heightfield reads a terrain.json, and " + d.spec.uri + " has none");
-  temp_dir tmp;
-  tmp.put("terrain.json", *terrain->bytes);
   cvc::world::city_bundle_options opt;
   opt.buildings = false;
-  cvc::world::city_bundle city = cvc::world::load_city_bundle(tmp.path(), opt);
+  const DataBytes text = terrain->bytes;
+  cvc::world::city_bundle city = cvc::world::load_city_bundle(
+      [text](const std::string &name) { return name == "terrain.json" ? text : DataBytes(); },
+      d.spec.uri, opt);
   publish_terrain(d, city.geometry.terrain());
   publish_bounds(d, city);
 }

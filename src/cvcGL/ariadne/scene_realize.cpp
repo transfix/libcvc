@@ -42,6 +42,7 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <sstream> // a frame request
 #include <stdexcept>
 #include <vtkCamera.h>
 #include <vtkMatrix4x4.h>
@@ -779,6 +780,8 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
                                                            : std::string(cvc::ariadne::kDataRoot) +
                                                                  "." + n.source_data);
       b.group = node;
+      if (!n.frame.empty()) // the main view's camera (CameraController::viewerStatePath)
+        b.frame_key = cvc::ariadne::resolve_bind(bind_prefix, "viewers.main.camera.frame");
       cvc::ariadne::DataStore::of(sg.appContext())->touch(b.path); // a lazy dataset loads now
       out.data_nodes.push_back(std::move(b));
     }
@@ -1784,12 +1787,24 @@ bool drape_satellite(cvc::state &root, const std::string &store, GeometryNode &g
   return true;
 }
 
+// A mesh's axis-aligned bounds, min then max, into `out`.
+void mesh_bounds(const cvc::geometry &g, double out[6]) {
+  const auto lo = g.min_point(), hi = g.max_point();
+  for (int k = 0; k < 3; ++k) {
+    out[k] = lo[k];
+    out[3 + k] = hi[k];
+  }
+}
+
 // The children of a data node's group, from the dataset `store`: replaces what it drew before.
-void draw_dataset(RealizedScene &r, SceneDataBinding &b, const std::string &store,
-                  std::vector<std::string> *warnings) {
+// `bounds` (min then max) gets what it drew, and the return says whether it drew anything with
+// bounds (a volume does not frame).
+bool draw_dataset(RealizedScene &r, SceneDataBinding &b, const std::string &store,
+                  std::vector<std::string> *warnings, double bounds[6]) {
   std::shared_ptr<GraphicsNode> group = b.group.lock();
   if (!group || !r.sg || !r.app)
-    return;
+    return false;
+  bool has_bounds = false;
   for (const std::shared_ptr<GraphicsNode> &c : b.drawn)
     group->removeGraphicsChild(c);
   b.drawn.clear();
@@ -1809,6 +1824,14 @@ void draw_dataset(RealizedScene &r, SceneDataBinding &b, const std::string &stor
   cvc::world::world_geometry bodies_of; // what body: puts in the physics world
   if (const world_ptr *w = boost::any_cast<world_ptr>(&obj)) {
     b.drawn = cvc::gl::add_world_geometry(*r.sg, **w, n.id + "_", group);
+    const cvc::world::world_bounds wb = (*w)->bounds();
+    if (!wb.empty()) {
+      for (int k = 0; k < 3; ++k) {
+        bounds[k] = wb.min[k];
+        bounds[3 + k] = wb.max[k];
+      }
+      has_bounds = true;
+    }
     if (std::shared_ptr<const cvc::height_field> t = (*w)->terrain()) {
       r.height_fields[n.id] = t;
       for (const std::shared_ptr<GraphicsNode> &c : b.drawn) // the terrain wears the aerial image
@@ -1824,6 +1847,8 @@ void draw_dataset(RealizedScene &r, SceneDataBinding &b, const std::string &stor
         group->createChild<GeometryNode>(n.id + "_" + key, static_cast<const cvc::geometry &>(**f));
     b.drawn.push_back(terrain);
     r.height_fields[n.id] = *f;
+    mesh_bounds(**f, bounds);
+    has_bounds = true;
     if (terrain)
       drape_satellite(cvc::state::instance(*r.app), store, *terrain, **f, n);
     if (n.body.present && r.physics) {
@@ -1834,6 +1859,8 @@ void draw_dataset(RealizedScene &r, SceneDataBinding &b, const std::string &stor
     }
   } else if (const geometry_ptr *g = boost::any_cast<geometry_ptr>(&obj)) {
     b.drawn.push_back(group->createChild<GeometryNode>(n.id + "_" + key, **g));
+    mesh_bounds(**g, bounds);
+    has_bounds = true;
     if (n.body.present && r.physics) {
       cvc::world::geometry_item item;
       item.name = n.id;
@@ -1847,7 +1874,7 @@ void draw_dataset(RealizedScene &r, SceneDataBinding &b, const std::string &stor
          "ari: scene node '" + n.id + "': the dataset " + store + " has " +
              (n.source_item.empty() ? "nothing to draw (a world, geometry, terrain or volume)"
                                     : "no " + n.source_item + " to draw"));
-    return;
+    return false;
   }
   if (!bodies_of.items().empty())
     for (const auto &body : cvc::physics::add_world_geometry(*r.physics, bodies_of).bodies)
@@ -1870,6 +1897,7 @@ void draw_dataset(RealizedScene &r, SceneDataBinding &b, const std::string &stor
         gn->setForceOpaque(true);
     }
   }
+  return has_bounds;
 }
 
 } // namespace
@@ -1893,8 +1921,18 @@ int sync_scene_data(RealizedScene &realized, std::vector<std::string> *warnings)
       continue;
     b.drawn_target = store; // first: a dataset that cannot be drawn is not retried every frame
     b.drawn_rev = r;
-    draw_dataset(realized, b, store, warnings);
+    double bounds[6];
+    const bool drew = draw_dataset(realized, b, store, warnings, bounds);
     ++rebuilt;
+    // frame: the main view's camera on what it drew (CameraController's frame request)
+    if (drew && !b.frame_key.empty() && (b.spec.frame == "always" || !b.framed)) {
+      std::ostringstream req;
+      req.precision(17);
+      for (int k = 0; k < 6; ++k)
+        req << (k ? " " : "") << bounds[k];
+      root(b.frame_key).value(req.str());
+      b.framed = true;
+    }
   }
   return rebuilt;
 }

@@ -74,6 +74,8 @@ struct SceneDataBinding {
   std::vector<cvc::physics::body_id> bodies;        // the bodies the dataset added (body:)
   std::string drawn_target;                         // the store node last drawn
   std::string drawn_rev;                            // and its rev then
+  std::string frame_key; // frame: the main view camera's frame request (<prefix>.viewers.main...)
+  bool framed = false;   // frame: first — done
 };
 
 // The result of realizing a Scene: the top-level node ids created (the scene's nodes, and any a

@@ -16,6 +16,8 @@
 #include <cvc/ariadne/loader.h>
 #include <cvc/core/app.h>
 #include <cvc/geometry/height_field.h>
+#include <cvc/model/model.h>
+#include <cvc/model/model_file_io.h>
 #include <cvc/net/http_client.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_blob_store.h> // sha256_hex
@@ -320,6 +322,29 @@ TEST(AriadneData, AnArchiveFilesPathKeepsOneDirectoryAndDecodesIt) {
   EXPECT_EQ(cvc::state::instance(app)(jnode + ".json.a_b.1").value(), "2.5");
   EXPECT_EQ(cvc::state::instance(app)(jnode + ".json.a_b.2").value(), "1");
   EXPECT_EQ(cvc::state::instance(app)(jnode + ".json.s").value(), "x");
+}
+
+TEST(AriadneData, AMeshDecodesFromItsBytesInMemory) {
+  if (!cvc::can_read_model_from_memory(".obj"))
+    GTEST_SKIP() << "libcvc built without Assimp";
+  cvc::app app;
+  TempDir t;
+  const std::string file = t.put(
+      "mesh.tgz", ar::gzip(ar::pack_tar({{"m/tri.obj", "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n"}})));
+  auto store = DataStore::of(app);
+  DataSpec spec;
+  spec.uri = file;
+  spec.path = "m/tri.obj"; // one file: as: mesh, from its extension
+  const std::string node = store->load(spec);
+  ASSERT_TRUE(store->wait(node, 30)) << cvc::state::instance(app)(node + ".error").value();
+  EXPECT_EQ(cvc::state::instance(app)(node + ".as").value(), "mesh");
+  auto g = boost::any_cast<std::shared_ptr<const cvc::geometry>>(
+      cvc::state::instance(app)(node + ".geometry").data());
+  ASSERT_TRUE(g);
+  EXPECT_EQ(g->num_points(), 3u);
+  const std::string obj = "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+  EXPECT_EQ(cvc::read_model_from_memory(obj.data(), obj.size(), "obj").merged().num_points(), 3u);
+  EXPECT_THROW(cvc::read_model_from_memory("x", 1, ".nope"), std::exception);
 }
 
 TEST(AriadneData, AFailedLoadSaysWhy) {

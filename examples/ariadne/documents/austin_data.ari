@@ -77,4 +77,5 @@ scene:
       ambient: 0.32
   nodes:
     - node: city
-      source: { data: city }       # data.city's world: its terrain and its buildings
+      source: { data: city }       # data.city's world: its terrain (the aerial image on it) and buildings
+      frame: true                  # the camera frames the city when it first draws

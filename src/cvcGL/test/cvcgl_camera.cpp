@@ -436,6 +436,23 @@ int main() {
     check("no floor: the eye goes under", e[2] < 0.0);
   }
 
+  printf("H. a frame request through the state tree (a scene's data node: frame:)\n");
+  {
+    CameraController rc(ctx, "fr.camera");
+    vtkNew<vtkCamera> rcam;
+    rc.setCamera(rcam);
+    root("fr.camera.frame").value(std::string("-50 -50 0 50 50 20"));
+    const double want = std::sqrt(100.0 * 100.0 + 100.0 * 100.0 + 20.0 * 20.0) * 1.1;
+    check("frame: the orbit centres on the bounds",
+          std::fabs(root("fr.camera.orbit.center.z").value<double>() - 10.0) < 1e-9 &&
+              std::fabs(root("fr.camera.orbit.center.x").value<double>()) < 1e-9);
+    check("frame: the orbit backs off as frameBounds does",
+          std::fabs(root("fr.camera.orbit.distance").value<double>() - want) < 1e-6);
+    root("fr.camera.frame").value(std::string("not bounds")); // ignored
+    check("a malformed frame request is ignored",
+          std::fabs(root("fr.camera.orbit.distance").value<double>() - want) < 1e-6);
+  }
+
   printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
   // cvcGL's state_object / handler-thread teardown races at process exit (a known,
   // harmless issue, independent of the checks above). Hard-exit with the real

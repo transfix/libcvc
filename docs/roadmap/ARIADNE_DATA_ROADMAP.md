@@ -137,10 +137,11 @@ unpacked size are capped (`sys.data.max_entries`, default 100,000; `sys.data.max
 | `city_bundle` | a city bundle's files (`terrain.json`, `buildings.glb`, ...) | `world` (`world_geometry`), `terrain` (`height_field`), `buildings` (`geometry`), `buildings_error`, `bounds.min_x` ... `max_y`, `satellite` (`satellite.png`, decoded) |
 
 A host or library adds its own with `register_data_decoder(name, fn)`. A decoder reads files from
-the store, so it works the same for a directory, a download and an archive. The path-based readers
-under the mesh, volume and city decoders (Assimp, `load_city_bundle`) still open files: D1 hands
-them the files they need in a temporary directory, removed after the read. In-memory readers are a
-later step.
+the store, so it works the same for a directory, a download and an archive. A city bundle and any
+mesh Assimp reads are decoded from the store's bytes: `load_city_bundle(reader, label)` and
+`read_model_from_memory`, with no file on disk. Only libcvc's own path-based formats (`.off`,
+`.raw*` meshes, and volumes) are still handed their file in a temporary directory, removed after
+the read.
 
 ## Scene nodes take a dataset
 
@@ -162,7 +163,10 @@ thread, from the decoded object:
   with `body:`, its bodies in the scene's physics world (`cvc::physics::add_world_geometry`);
 - a `geometry`: a mesh node; a `height_field`: its mesh; a `volume`: a volume node.
 
-Until then the node is empty, and the first frame never waits for a download.
+Until then the node is empty, and the first frame never waits for a download. `frame: true` on the
+node frames the main view's camera on what it drew the first time it draws, and `frame: always`
+does so each time. Through the camera's state (a `frame` request at
+`<prefix>.viewers.main.camera`), so the document needs no host code to show the city it named.
 
 ## Document logic
 
