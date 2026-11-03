@@ -2278,7 +2278,9 @@ dropped with a warning, and a document that `requires: gl.scene` does not load. 
 it.
 
 **Threads and the GIL.** Handlers, functions, `on_frame` hooks and `watch` callbacks run on the
-thread that calls `step()`/`run()`; an async function runs on a pool thread. A frame releases the
+thread that calls `step()`/`run()`; an async function runs on a pool thread. An async function
+may compute and write state, but the scene and the pictures (`publish_image`, `host.lab`,
+`host.scene`) belong to the frame's thread: hand its result to an `on_frame` hook. A frame releases the
 GIL while C++ runs (so do `load()`, `wait_idle()` and the destructors of the runtime and the
 app), and each Python call takes it back, so an async function or another Python thread runs
 while the frame does. A callback may read and write state and queue programs, but not run a

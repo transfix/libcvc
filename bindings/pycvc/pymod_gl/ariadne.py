@@ -38,7 +38,9 @@ The loop is yours (``host.step()``) or the host's (``host.run()``)::
     host.close()
 
 Threads and the GIL. Every handler, function and watch callback runs on the thread that calls
-``step()`` / ``run()``, except an async function, which runs on a pool thread. A frame releases the
+``step()`` / ``run()``, except an async function, which runs on a pool thread: it may compute and
+write state, but leave the scene and the pictures (``publish_image``, ``host.lab``, ``host.scene``)
+to the frame's thread, say by handing its result to an ``on_frame`` hook. A frame releases the
 GIL while C++ runs and each callback takes it back for its call, so an async function, or another
 Python thread, runs while the frame does. A callback may read and write state and queue programs
 (``host.run``), but it may not run a frame: ``step()`` or ``run()`` from inside one raises
