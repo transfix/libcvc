@@ -792,7 +792,7 @@ value_t intrinsic_state_watch(intrinsics_context *ctx, std::span<const value_t> 
   value_t handler = args[1];
 
   // Navigate to the node (create if needed so we can watch it)
-  (void)(*ctx->root)(path);
+  const state_ptr node = make_node(ctx, path, nullptr);
 
   // Allocate a watch ID, on the process the handler belongs to
   process *self = running_process(ctx);
@@ -802,16 +802,20 @@ value_t intrinsic_state_watch(intrinsics_context *ctx, std::span<const value_t> 
 
   // Register the handler.  The scheduler polls watched paths each step
   // instead of using boost::signals2 (which segfaults on macOS).
+  //
+  // The watch keeps its own root, this context's (td 4.8, B13): `path` resolves under it, and the
+  // scheduler's watch root, where it reads its settings and the async charge rate, stays the
+  // host's (td 5 item 4). A chrooted context never moves it. An unchrooted one sets it as today
+  // (S0.md section 0, item 20): on a scheduler no host gave a root, that makes it read its
+  // settings there and gate its watches; the hosts' roots are the app root such a context has.
+  const state_ptr root = ctx->root_pins.back(); // make_node pinned it
   if (ctx->sched) {
-    ctx->sched->set_watch_root(ctx->root);
-    ctx->sched->register_watch_handler(running_pid(ctx), watch_id, handler, path);
+    if (ctx->root_path.empty())
+      ctx->sched->set_watch_root(ctx->root);
+    ctx->sched->register_watch_handler(running_pid(ctx), watch_id, handler, path, root);
   } else {
-    // No-scheduler path (unit tests): record handler + initial value.
-    std::string initial;
-    auto *node = ctx->root->findDescendant(path);
-    if (node)
-      initial = node->value();
-    self->watch_handlers[watch_id] = {handler, path, initial, nullptr};
+    // No-scheduler path (unit tests): record handler, initial value and root.
+    self->watch_handlers[watch_id] = {handler, path, node->value(), root};
   }
 
   // Keep a local registry for unwatch; no signal connection needed.
