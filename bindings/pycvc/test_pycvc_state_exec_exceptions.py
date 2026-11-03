@@ -7,6 +7,10 @@ with the dsl_error as its __cause__. A process ended by an exception it didn't c
 The exceptions.h helpers, stackless_evaluator.raise_ and evaluator_state.uncaught are wrapped too.
 """
 
+import os
+import threading
+import time
+
 import pycvc
 from pycvc import process_status
 
@@ -245,6 +249,76 @@ def test_hz01_builtin_classes_read_only():
         assert ex.run('(try (raise (ValueError "v")) (catch (ValueError e) "caught"))') == "caught"
     finally:
         ex.run('(try (set-attr ValueError.__cls_dict__ "init" saved) (catch (TypeError e) nil))')
+
+
+# For the case on two threads, as test_pycvc_state_exec_locks.py has them: the sanitizer jobs'
+# sizes, a wait's ceiling and a whole run's.
+SANITIZER = os.environ.get("CVC_LOCKS_SANITIZER") == "1"
+WAIT = 10.0
+LONG = 600.0
+
+
+def _in_thread(name, fn, *args, start=None):
+    """Start fn(*args) on a thread, once every party has reached `start` (a threading.Barrier), if
+    given. The dict it returns gets "value" or "error", and "t" (the time it ended). (A copy of
+    test_pycvc_state_exec_locks.py's.)"""
+    out = {}
+
+    def body():
+        try:
+            if start is not None:
+                start.wait(WAIT)
+            out["value"] = fn(*args)
+        except BaseException as e:  # noqa: BLE001 - the case reads it
+            out["error"] = e
+        out["t"] = time.monotonic()
+
+    t = threading.Thread(target=body, name=name)
+    t.start()
+    return t, out
+
+
+def test_hz11_two_execs_exceptions_and_data():
+    # HZ-11 (S0.1, S0.2; Linux TSan): two Execs on one app, run on two Python threads at once.
+    # A changes a list, stores it, raises and catches ValueError, and tries to set-attr the
+    # class, which is refused; B reads the stored list (always two long) and raises KeyError,
+    # caught as an Exception. Each counts its good rounds. The built-in classes and the stored
+    # value are shared by both, and neither run disturbs the other.
+    n = 300 if SANITIZER else 3000
+    app = pycvc.make_app()
+    a, b = pycvc.Exec(app), pycvc.Exec(app)
+    a.run('(state-data-set "hz11.k" (list 0 0))')
+    prog_a = (f'(begin (set l (list 0 0)) (set ok 0) (set i 0) (while (< i {n}) (begin '
+              '(set-nth l 0 i) (state-data-set "hz11.k" l) '
+              '(set got (try (raise (ValueError "v")) '
+              '(catch (ValueError e) (get-attr e "message")))) '
+              '(set ro (try (begin (set-attr ValueError.__cls_dict__ "x" 1) "changed") '
+              '(catch (TypeError e) "refused"))) '
+              '(if (and (= got "v") (= ro "refused")) (set ok (+ ok 1))) '
+              '(set i (+ i 1)))) ok)')
+    prog_b = (f'(begin (set ok 0) (set i 0) (while (< i {n}) (begin '
+              '(set len (length (state-data-get "hz11.k"))) '
+              '(set got (try (raise (KeyError "k")) '
+              '(catch (Exception e) (get-attr (get-attr e "__class__") "__name__")))) '
+              '(if (and (= len 2) (= got "KeyError")) (set ok (+ ok 1))) '
+              '(set i (+ i 1)))) ok)')
+    start = threading.Barrier(2)
+    t0 = time.monotonic()
+    try:
+        runs = [_in_thread("hz11-a", a.run, prog_a, start=start),
+                _in_thread("hz11-b", b.run, prog_b, start=start)]
+        for t, out in runs:
+            t.join(LONG)
+            assert not t.is_alive(), f"{t.name} did not finish within {LONG} s"
+            assert "error" not in out, out["error"]
+        print(f"  2 x {n} rounds: {time.monotonic() - t0:.2f} s")
+        got = [out["value"] for _, out in runs]
+        assert got == [str(n), str(n)], got
+        assert a.run('(try (begin (get-attr ValueError.__cls_dict__ "x") "has x") '
+                     '(catch (KeyError e) "no x"))') == "no x"
+        assert b.run('(length (state-data-get "hz11.k"))') == "2"
+    finally:  # where a build lets set-attr through, don't leave "x" to the tests after this one
+        a.run('(try (del-attr ValueError.__cls_dict__ "x") (catch (Exception e) nil))')
 
 
 if __name__ == "__main__":
