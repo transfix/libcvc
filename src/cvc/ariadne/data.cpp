@@ -24,6 +24,8 @@
 #include <cvc/core/app.h>
 #include <cvc/geometry/geometry_file_io.h>
 #include <cvc/geometry/height_field.h>
+#include <cvc/image/image.h>
+#include <cvc/image/image_decode.h> // a city's satellite.png, from its bytes
 #include <cvc/net/http_client.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_blob_store.h> // sha256_hex
@@ -282,8 +284,22 @@ void decode_city_bundle(DataDecode &d) {
   }
   d.out("buildings_error").value(city.buildings_error);
   publish_bounds(d, city);
-  const cvc::archive::file *sat = d.find("satellite.png");
-  d.out("satellite").value(sat ? sat->path : std::string());
+  // The aerial image, decoded here off the frame thread: the scene drapes it over the terrain.
+  cvc::state &satellite = d.out("satellite");
+  satellite.value(std::string());
+  if (const cvc::archive::file *sat = d.find("satellite.png")) {
+    cvc::image_decode_limits lim; // a city's aerial image may be as big as a texture can be
+    lim.max_side = 16384;
+    lim.max_pixels = std::size_t(16384) * 16384;
+    lim.max_bytes = std::size_t(1) << 30;
+    std::string why;
+    cvc::image img = cvc::decode_image(sat->bytes->data(), sat->bytes->size(), lim, &why);
+    if (img.empty())
+      d.out("satellite_error").value(sat->path + ": " + why);
+    else
+      satellite.data(boost::any(std::make_shared<const cvc::image>(std::move(img))));
+    satellite.value(sat->path);
+  }
 }
 
 // A terrain.json alone: the bundle's height field.

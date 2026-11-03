@@ -288,6 +288,17 @@ struct SceneNode {
   // setTexture). Empty = untextured. Meaningful only for a geometry node whose mesh carries UVs
   // (e.g. a heightfield, or a loaded mesh with texcoords); a mesh with no UVs is unaffected.
   std::string material_texture;
+  // material: { uv: { rotate, flip_u, flip_v, scale, offset } } — how the node's image texture
+  // (material: texture, or a dataset's draped satellite image) sits in texture space. Applied to
+  // the mesh's UVs in this order: flip_u / flip_v mirror the image (u -> 1 - u, v -> 1 - v);
+  // rotate turns it that many degrees counter-clockwise on the surface (0, 90, 180 or 270, about
+  // the image's centre); then uv * scale + offset. UV (0, 0) is the image's bottom-left corner.
+  bool has_uv_transform = false;
+  int uv_rotate = 0;
+  bool uv_flip_u = false;
+  bool uv_flip_v = false;
+  float uv_scale[2] = {1.0f, 1.0f};
+  float uv_offset[2] = {0.0f, 0.0f};
   // material: { opaque: true } — draw the node as opaque whatever its texture or colours hold
   // (vtkActor::SetForceOpaque). VTK otherwise scans a texture's every texel for alpha to decide
   // the pass, which on a large ground texture is a measurable share of a browser frame.

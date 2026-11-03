@@ -732,6 +732,19 @@ south-west to north-east), a body on it collides with the same triangles, and a 
 standing on it (`ground:` in `forest_trees`, `wave_sea`, `cloud_sky`) samples the triangle under
 each point.
 
+**Textures.** `material: { texture: <uri> }` drapes an image over a geometry node through its
+mesh's UVs. UV (0, 0) is the image's bottom-left corner. A `source: { data }` city's terrain wears
+its bundle's `satellite.png` this way, north up (§5.17).
+
+`material: { uv: { rotate, flip_u, flip_v, scale, offset } }` orients the image in texture space,
+for an image that sits otherwise. The steps apply in this order:
+1. `flip_u` and `flip_v` mirror it.
+2. `rotate` turns it 0, 90, 180 or 270 degrees counter-clockwise on the surface.
+3. `scale` and `offset` (a number, or `[u, v]`) map the result: `uv * scale + offset`.
+
+A textured node casts its shadow by its shape. Its image's alpha still cuts a cut-out's shadow,
+but its colours do not.
+
 **Generated terrain.** `source: { terrain: { generator, size, resolution, seed, amp, file,
 preset } }` draws a `cvc::world` terrain generator's ground as such a heightfield: `fbm` (the
 analytic relief the terrain lab stands on; the default), `dem` (an elevation `.npy` at `file`, a URI
@@ -1730,7 +1743,7 @@ for an archive or a directory, and otherwise one picked by the file's extension:
 | `mesh` | `geometry`: a `cvc::geometry`, from any format `read_geometry` reads |
 | `volume` | `volume`: a `cvc::volume` |
 | `heightfield` | `terrain` (a `cvc::height_field`) and `bounds.*`, from a `terrain.json` |
-| `city_bundle` | `world` (a `world_geometry`), `terrain`, `buildings` (a `cvc::geometry`), `buildings_error`, `bounds.min_x` ... `max_y`, `satellite` (the image's file path) |
+| `city_bundle` | `world` (a `world_geometry`), `terrain`, `buildings` (a `cvc::geometry`), `buildings_error`, `bounds.min_x` ... `max_y`, `satellite` (`satellite.png` decoded: the image on `data()`, its file path as the value) |
 
 A host adds its own with `register_data_decoder`.
 
@@ -1739,7 +1752,8 @@ ready, the scene draws into it the first of the dataset's `world`, `geometry`, `
 `volume` that it has (`item:` picks one). It draws again whenever the dataset's `rev` changes, or
 the document's link points at another dataset. What it drew before goes, and so do its bodies:
 - a world's items become the node's children, its terrain becomes the node's height field (for
-  `ground:`), and with `body:` its items are static bodies in the scene's `physics:` world;
+  `ground:`) and wears the dataset's `satellite` image (north at the image's top), and with
+  `body:` its items are static bodies in the scene's `physics:` world;
 - a mesh or a height field becomes one mesh node;
 - a volume becomes a volume node.
 

@@ -820,6 +820,7 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
                                "': " + e.what());
           }
         }
+        apply_uv_transform(*g, n); // material: { uv: ... } orients the image
       }
       node = g;
     }
@@ -1226,6 +1227,32 @@ bool read_node_geometry(SceneGraph &sg, const cvc::ariadne::SceneNode &n, cvc::g
                         std::vector<std::string> *warnings) {
   std::shared_ptr<const cvc::height_field> field;
   return read_node_geometry_and_field(sg, n, geom, field, warnings);
+}
+
+namespace {
+// The node's uv block on `uvs`: flips, quarter turns (the image counter-clockwise on the surface,
+// so the coordinates clockwise about the centre), then scale and offset.
+void transform_uvs(cvc::geometry::uvs_t &uvs, const cvc::ariadne::SceneNode &n) {
+  for (auto &uv : uvs) {
+    double u = n.uv_flip_u ? 1.0 - uv[0] : uv[0];
+    double v = n.uv_flip_v ? 1.0 - uv[1] : uv[1];
+    for (int turn = 0; turn < n.uv_rotate / 90; ++turn) {
+      const double du = u - 0.5, dv = v - 0.5;
+      u = 0.5 + dv;
+      v = 0.5 - du;
+    }
+    uv[0] = u * n.uv_scale[0] + n.uv_offset[0];
+    uv[1] = v * n.uv_scale[1] + n.uv_offset[1];
+  }
+}
+} // namespace
+
+void apply_uv_transform(GeometryNode &g, const cvc::ariadne::SceneNode &n) {
+  if (!n.has_uv_transform || !g.getGeometry() || g.getGeometry()->const_uvs().empty())
+    return;
+  cvc::geometry mesh = *g.getGeometry(); // copy-on-write: only its UVs are new
+  transform_uvs(mesh.uvs(), n);
+  g.setGeometry(mesh);
 }
 
 void apply_node_material(GeometryNode &g, const cvc::ariadne::SceneNode &n) {
@@ -1723,6 +1750,40 @@ boost::any dataset_object(cvc::state &root, const std::string &store, const std:
   return boost::any();
 }
 
+// Drape the dataset's aerial image (a city bundle's satellite.png, decoded at <store>.satellite)
+// over `g`, the node drawing the terrain `field`: each vertex's UV is its place in the field's
+// extent, the image north up (UV (0, 0), its bottom-left, at the field's south-west corner), then
+// turned as the node's material: { uv } says. False when the dataset has no image.
+bool drape_satellite(cvc::state &root, const std::string &store, GeometryNode &g,
+                     const cvc::height_field &field, const cvc::ariadne::SceneNode &n) {
+  cvc::state *s = root.findDescendant(store + cvc::state::SEPARATOR + "satellite");
+  std::shared_ptr<const cvc::image> img;
+  if (s) {
+    try {
+      img = boost::any_cast<std::shared_ptr<const cvc::image>>(s->data());
+    } catch (const boost::bad_any_cast &) {
+    }
+  }
+  if (!img || img->empty() || !g.getGeometry())
+    return false;
+  cvc::geometry mesh = *g.getGeometry(); // copy-on-write: only its UVs are new
+  const double x0 = field.x0(), y0 = field.y0();
+  const double w = field.max_x() - x0, h = field.max_y() - y0;
+  if (w <= 0.0 || h <= 0.0)
+    return false;
+  const auto &p = mesh.const_points();
+  cvc::geometry::uvs_t uvs(p.size());
+  for (std::size_t i = 0; i < p.size(); ++i) {
+    uvs[i][0] = (p[i][0] - x0) / w;
+    uvs[i][1] = (p[i][1] - y0) / h; // v = 1: north, the image's top row
+  }
+  transform_uvs(uvs, n);
+  mesh.uvs() = std::move(uvs);
+  g.setGeometry(mesh);
+  g.setTexture(*img);
+  return true;
+}
+
 // The children of a data node's group, from the dataset `store`: replaces what it drew before.
 void draw_dataset(RealizedScene &r, SceneDataBinding &b, const std::string &store,
                   std::vector<std::string> *warnings) {
@@ -1748,15 +1809,23 @@ void draw_dataset(RealizedScene &r, SceneDataBinding &b, const std::string &stor
   cvc::world::world_geometry bodies_of; // what body: puts in the physics world
   if (const world_ptr *w = boost::any_cast<world_ptr>(&obj)) {
     b.drawn = cvc::gl::add_world_geometry(*r.sg, **w, n.id + "_", group);
-    if (std::shared_ptr<const cvc::height_field> t = (*w)->terrain())
+    if (std::shared_ptr<const cvc::height_field> t = (*w)->terrain()) {
       r.height_fields[n.id] = t;
+      for (const std::shared_ptr<GraphicsNode> &c : b.drawn) // the terrain wears the aerial image
+        if (auto *gn = dynamic_cast<GeometryNode *>(c.get());
+            gn && c->getName() == n.id + "_terrain")
+          drape_satellite(cvc::state::instance(*r.app), store, *gn, *t, n);
+    }
     if (n.body.present && r.physics)
       for (const auto &body : cvc::physics::add_world_geometry(*r.physics, **w).bodies)
         b.bodies.push_back(body.second);
   } else if (const field_ptr *f = boost::any_cast<field_ptr>(&obj)) {
-    b.drawn.push_back(group->createChild<GeometryNode>(n.id + "_" + key,
-                                                       static_cast<const cvc::geometry &>(**f)));
+    auto terrain =
+        group->createChild<GeometryNode>(n.id + "_" + key, static_cast<const cvc::geometry &>(**f));
+    b.drawn.push_back(terrain);
     r.height_fields[n.id] = *f;
+    if (terrain)
+      drape_satellite(cvc::state::instance(*r.app), store, *terrain, **f, n);
     if (n.body.present && r.physics) {
       cvc::world::geometry_item item;
       item.name = n.id;
@@ -1788,14 +1857,16 @@ void draw_dataset(RealizedScene &r, SceneDataBinding &b, const std::string &stor
                        "': body: needs the scene's physics: block for a "
                        "dataset's bodies");
   // The node's look, on what it drew: a material when the document gives one (else a world keeps
-  // its surfaces' colours), shadows, an opaque pass.
+  // its surfaces' colours), shadows, an opaque pass. The terrain is drawn opaque, its aerial image
+  // included: no per-texel alpha scan.
   for (const std::shared_ptr<GraphicsNode> &c : b.drawn) {
+    const bool ground = c->getName() == n.id + "_terrain";
     if (n.has_casts_shadow)
       c->setCastsShadow(n.casts_shadow);
     if (auto *gn = dynamic_cast<GeometryNode *>(c.get())) {
       if (n.has_material)
         apply_node_material(*gn, n);
-      if (n.material_opaque)
+      if (n.material_opaque || ground)
         gn->setForceOpaque(true);
     }
   }

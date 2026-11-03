@@ -3,13 +3,16 @@
 // pin that:
 //   1. at realize the node is an empty group: nothing waits for a load;
 //   2. once the dataset is ready, sync_scene_data draws it: a city bundle's world as its items'
-//      nodes, the terrain kept as the node's height field and, with body:, in the physics world;
+//      nodes, the terrain wearing the bundle's satellite.png (north at the image's top), kept as
+//      the node's height field and, with body:, in the physics world;
 //      a mesh dataset as one mesh node;
 //   3. re-pointing the document's link at another dataset ((data-load) does) redraws the node from
 //      it, and what it drew before is gone, its bodies too;
-//   4. a dataset with nothing to draw warns, never throws.
+//   4. a dataset with nothing to draw warns, never throws;
+//   5. material: { uv } orients a texture in texture space.
 //
 // NOT assert(): built Release, where NDEBUG makes assert() a no-op.
+#include <boost/any.hpp>
 #include <chrono>
 #include <cstdio>
 #include <cvc/ariadne/data.h>
@@ -20,6 +23,8 @@
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/ariadne/scene_realize.h>
+#include <cvc/image/image.h>
+#include <cvc/state/state.h>
 #include <cvc/utility/archive.h>
 #include <filesystem>
 #include <fstream>
@@ -72,11 +77,25 @@ struct TempDir {
   }
 };
 
-// A city bundle as a cvcpkg package holds it: a gzip tar, the bundle under share/cvc-scenes/.
-std::string package(int n) {
-  return cvc::archive::gzip(
-      cvc::archive::pack_tar({{"share/libcvc-deps/scene-test/manifest.yaml", "m"},
-                              {"share/cvc-scenes/test/terrain.json", terrain_json(n)}}));
+// A 2 x 2 RGB PNG (red, green / blue, white), standing in for a bundle's satellite.png.
+const unsigned char kSatellitePng[] = {
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+    0x52, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x08, 0x02, 0x00, 0x00, 0x00, 0xfd,
+    0xd4, 0x9a, 0x73, 0x00, 0x00, 0x00, 0x12, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8,
+    0xcf, 0xc0, 0xc0, 0x00, 0xc2, 0x0c, 0xff, 0x81, 0x00, 0x00, 0x1f, 0xee, 0x05, 0xfb, 0x0b,
+    0xd9, 0x68, 0x8b, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82};
+
+// A city bundle as a cvcpkg package holds it: a gzip tar, the bundle under share/cvc-scenes/, with
+// an aerial image when `satellite`.
+std::string package(int n, bool satellite) {
+  std::vector<std::pair<std::string, std::string>> files = {
+      {"share/libcvc-deps/scene-test/manifest.yaml", "m"},
+      {"share/cvc-scenes/test/terrain.json", terrain_json(n)}};
+  if (satellite)
+    files.push_back(
+        {"share/cvc-scenes/test/satellite.png",
+         std::string(reinterpret_cast<const char *>(kSatellitePng), sizeof kSatellitePng)});
+  return cvc::archive::gzip(cvc::archive::pack_tar(files));
 }
 
 bool wait_ready(cvc::app &app, const std::string &path) {
@@ -97,8 +116,8 @@ void test_a_dataset_draws_into_its_node_and_redraws_when_replaced() {
     return;
   }
   TempDir t;
-  const std::string small = t.put("small.tar.zst", package(3));
-  const std::string big = t.put("big.tgz", package(5));
+  const std::string small = t.put("small.tar.zst", package(3, true));
+  const std::string big = t.put("big.tgz", package(5, false));
   t.put("tri.off", "OFF\n3 1 0\n0 0 0\n1 0 0\n0 1 0\n3 0 1 2\n");
   const std::string doc = R"(
 meta: { min_libcvc: "0.0.0" }
@@ -152,6 +171,39 @@ scene:
     CHECK(out.height_fields.at("city")->rows() == 3);
   CHECK(out.physics != nullptr);
   CHECK(out.data_nodes[0].bodies.size() == 1); // the terrain, static
+  // The aerial image, decoded with the bundle, drapes the terrain north up (UV (0, 0) is the
+  // image's bottom-left, so the north-west corner is (0, 1)).
+  const auto *sat = cvc::state::instance(app).findThroughLinks(city_path + ".satellite");
+  CHECK(sat != nullptr);
+  if (sat) {
+    std::shared_ptr<const cvc::image> img;
+    try {
+      img =
+          boost::any_cast<std::shared_ptr<const cvc::image>>(const_cast<cvc::state *>(sat)->data());
+    } catch (const boost::bad_any_cast &) {
+    }
+    CHECK(img && img->width() == 2 && img->height() == 2);
+  }
+  if (auto terrain =
+          std::dynamic_pointer_cast<cvc::gl::GeometryNode>(city->findChildByName("city_terrain"));
+      terrain && terrain->getGeometry()) {
+    CHECK(terrain->hasTexture()); // the 2 x 2 image, draped
+    CHECK(terrain->textureWidth() == 2 && terrain->textureHeight() == 2);
+    const cvc::geometry &g = *terrain->getGeometry();
+    CHECK(g.const_uvs().size() == g.const_points().size());
+    int corners = 0;
+    for (std::size_t i = 0; i < g.const_points().size() && i < g.const_uvs().size(); ++i) {
+      const auto &p = g.const_points()[i];
+      const auto &uv = g.const_uvs()[i];
+      if (p[0] == -10.0 && p[1] == 10.0)
+        corners += (uv[0] == 0.0 && uv[1] == 1.0) ? 1 : 100; // north-west: the image's top-left
+      if (p[0] == 10.0 && p[1] == -10.0)
+        corners += (uv[0] == 1.0 && uv[1] == 0.0) ? 1 : 100; // south-east: its bottom-right
+    }
+    CHECK(corners == 2);
+  } else {
+    CHECK(false);
+  }
   if (auto tri = sg.getGraphics("tri")) {
     const std::vector<std::string> mesh = child_names(*tri);
     CHECK(mesh.size() == 1 && mesh[0] == "tri_geometry");
@@ -179,12 +231,51 @@ scene:
   if (out.height_fields.count("city"))
     CHECK(out.height_fields.at("city")->rows() == 5);
   CHECK(out.data_nodes[0].bodies.size() == 1); // the old terrain's body went with it
+  if (auto terrain =
+          std::dynamic_pointer_cast<cvc::gl::GeometryNode>(city->findChildByName("city_terrain")))
+    CHECK(!terrain->hasTexture()); // the big city's package has no aerial image
+}
+
+// material: { uv: ... } turns a texture's UVs: flips, then quarter turns (the image
+// counter-clockwise), then scale and offset.
+void test_a_uv_block_orients_the_texture() {
+  std::printf("test_a_uv_block_orients_the_texture\n");
+  cvc::app app;
+  SceneGraph sg(app);
+  cvc::geometry quad;
+  quad.points() = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}};
+  quad.tris() = {{0, 1, 2}};
+  quad.uvs() = {{0.0, 0.0}, {1.0, 0.0}, {0.0, 1.0}};
+  auto g = std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.addGraphics("quad", quad));
+  CHECK(g != nullptr);
+  if (!g)
+    return;
+  cvc::ariadne::SceneNode n;
+  ari::apply_uv_transform(*g, n); // no uv block: nothing changes
+  CHECK(g->getGeometry()->const_uvs()[1][0] == 1.0);
+  n.has_uv_transform = true;
+  n.uv_rotate = 90; // the image's top-left now shows at the surface's bottom-left
+  ari::apply_uv_transform(*g, n);
+  const auto &a = g->getGeometry()->const_uvs();
+  CHECK(a[0][0] == 0.0 && a[0][1] == 1.0);
+  CHECK(a[1][0] == 0.0 && a[1][1] == 0.0);
+  CHECK(a[2][0] == 1.0 && a[2][1] == 1.0);
+  cvc::ariadne::SceneNode m;
+  m.has_uv_transform = true;
+  m.uv_flip_v = true;
+  m.uv_scale[0] = 2.0f;
+  m.uv_offset[1] = 0.5f;
+  ari::apply_uv_transform(*g, m); // (0, 1) -> flip (0, 0) -> (0, 0.5)
+  const auto &b = g->getGeometry()->const_uvs();
+  CHECK(b[0][0] == 0.0 && b[0][1] == 0.5);
+  CHECK(b[2][0] == 2.0 && b[2][1] == 0.5);
 }
 
 } // namespace
 
 int main() {
   test_a_dataset_draws_into_its_node_and_redraws_when_replaced();
+  test_a_uv_block_orients_the_texture();
   if (g_failures) {
     std::printf("cvcgl_ariadne_data: %d FAILED\n", g_failures);
     return 1;

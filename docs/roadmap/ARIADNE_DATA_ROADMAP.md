@@ -134,7 +134,7 @@ unpacked size are capped (`sys.data.max_entries`, default 100,000; `sys.data.max
 | `mesh` | any format `read_geometry` reads (obj, ply, off, glb, gltf, ...) | `geometry`: a `cvc::geometry` |
 | `volume` | any format `cvc::volume` reads (rawiv, mrc, ...) | `volume`: a `cvc::volume` |
 | `heightfield` | a `terrain.json` | `terrain`: a `cvc::height_field`, and `bounds.*` |
-| `city_bundle` | a city bundle's files (`terrain.json`, `buildings.glb`, ...) | `world` (`world_geometry`), `terrain` (`height_field`), `buildings` (`geometry`), `buildings_error`, `bounds.min_x` ... `max_y`, `satellite` (the image's file path) |
+| `city_bundle` | a city bundle's files (`terrain.json`, `buildings.glb`, ...) | `world` (`world_geometry`), `terrain` (`height_field`), `buildings` (`geometry`), `buildings_error`, `bounds.min_x` ... `max_y`, `satellite` (`satellite.png`, decoded) |
 
 A host or library adds its own with `register_data_decoder(name, fn)`. A decoder reads files from
 the store, so it works the same for a directory, a download and an archive. The path-based readers
@@ -156,7 +156,8 @@ The node is created at load as an empty group with its transform. When its datas
 changes (the first load, or a replacement) the scene rebuilds the node's children on the frame
 thread, from the decoded object:
 
-- a `world_geometry`: its items as nodes (`cvc::gl::add_world_geometry`), its terrain published
+- a `world_geometry`: its items as nodes (`cvc::gl::add_world_geometry`), the terrain wearing the
+  dataset's satellite image (UVs over the terrain's extent, north at the image's top), published
   as the node's height field (so `ground: city` works for `forest_trees`, `wave_sea`, ...), and,
   with `body:`, its bodies in the scene's physics world (`cvc::physics::add_world_geometry`);
 - a `geometry`: a mesh node; a `height_field`: its mesh; a `volume`: a volume node.

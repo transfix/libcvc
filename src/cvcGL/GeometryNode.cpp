@@ -461,6 +461,22 @@ void GeometryNode::setTexture(const cvc::image &img, bool zeroCopy) {
   });
 }
 
+bool GeometryNode::hasTexture() const { return m_texture.Get() != nullptr; }
+
+int GeometryNode::textureWidth() const {
+  int d[3] = {0, 0, 0};
+  if (m_texture.Get() && m_textureImageData.Get())
+    m_textureImageData->GetDimensions(d);
+  return d[0];
+}
+
+int GeometryNode::textureHeight() const {
+  int d[3] = {0, 0, 0};
+  if (m_texture.Get() && m_textureImageData.Get())
+    m_textureImageData->GetDimensions(d);
+  return d[1];
+}
+
 void GeometryNode::clearTexture() {
   // Marshaled to the owner thread: mutates shared VTK state (m_actor's texture and,
   // via updatePolyData, the shared m_polyData) that the renderer reads.

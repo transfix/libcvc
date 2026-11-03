@@ -273,6 +273,11 @@ bool read_node_geometry(SceneGraph &sg, const cvc::ariadne::SceneNode &node, cvc
 // material block is left as it is.
 void apply_node_material(GeometryNode &g, const cvc::ariadne::SceneNode &node);
 
+// The UVs of the mesh `g` draws (UV (0, 0) the image's bottom-left) turned by the node's
+// `material: { uv: ... }` block: the flips, then the quarter turns, then scale and offset
+// (SceneNode::uv_*), in place. A node with no uv block, or a mesh with no UVs, is left as it is.
+void apply_uv_transform(GeometryNode &g, const cvc::ariadne::SceneNode &node);
+
 // A dim³ signed distance field of the mesh at `mesh_uri` (fit applied first when `apply_fit`),
 // framed to the mesh extents padded 10% and cubic. Negative inside. Throws on a build without
 // CVC_ENABLE_SDF or on an unreadable mesh.

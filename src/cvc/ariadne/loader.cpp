@@ -2507,6 +2507,29 @@ SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
       else if (tex.IsMap())
         sn.material_texture = str(tex, "uri", str(tex, "file"));
     }
+    if (const YAML::Node uv = mat["uv"]; uv && uv.IsMap()) {
+      // material: { uv: { rotate, flip_u, flip_v, scale, offset } } — the texture's orientation
+      sn.has_uv_transform = true;
+      const int rot = static_cast<int>(num(uv, "rotate", 0.0));
+      sn.uv_rotate = ((rot % 360) + 360) % 360;
+      if (sn.uv_rotate % 90 != 0) {
+        ctx.warn("ari: scene node '" + sn.id + "': material.uv.rotate is 0, 90, 180 or 270, not " +
+                 std::to_string(rot) + " — not rotated");
+        sn.uv_rotate = 0;
+      }
+      sn.uv_flip_u = flag(uv, "flip_u", false);
+      sn.uv_flip_v = flag(uv, "flip_v", false);
+      for (const char *key : {"scale", "offset"}) {
+        float *out = std::string(key) == "scale" ? sn.uv_scale : sn.uv_offset;
+        const YAML::Node v = uv[key];
+        if (v && v.IsSequence() && v.size() >= 2) {
+          out[0] = static_cast<float>(v[0].as<double>());
+          out[1] = static_cast<float>(v[1].as<double>());
+        } else if (v && v.IsScalar()) {
+          out[0] = out[1] = static_cast<float>(v.as<double>());
+        }
+      }
+    }
     sn.material_opaque = flag(mat, "opaque", false);
   }
   if (n["casts_shadow"]) {
