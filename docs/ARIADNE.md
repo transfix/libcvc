@@ -769,13 +769,18 @@ each point.
 **Generated terrain.** `source: { terrain: { generator, size, resolution, seed, amp, file,
 preset } }` draws a `cvc::world` terrain generator's ground as such a heightfield: `fbm` (the
 analytic relief the terrain lab stands on; the default), `dem` (an elevation `.npy` at `file`, a URI
-or a path relative to the document, anchored at 0 and stretched to `amp`), or one a host
-registered (`cvc::world::register_terrain_generator`). The size defaults to 1200 and the resolution
-to one vertex per 5 m (at most 2049). A `heightfield:` source takes the same `generator:` keys, its
+or a path relative to the document, stretched to `amp`), or one a host registered
+(`cvc::world::register_terrain_generator`). Sea level is 0 m: every generator lays its ground with
+0 m as the shoreline, its floor `world_sea_share` (34/90) of the relief below it (the island preset
+stands its dome in the sea), so `water_level` raises or lowers the sea from there and a lower or
+higher relief never floods or drains the world. The size defaults to 1200 and the resolution to one
+vertex per 5 m (at most 2049). A `heightfield:` source takes the same `generator:` keys, its
 layers adding on top. The `generated_world` node type uses the same generators (its `terrain:`,
 `city:` and `terrain_file:` props; `world_controls.ari` switches them live). Its first world is
-made while the document loads; every later rebuild (a changed `world.*` key, Regenerate,
-Randomize) and every repaint (`world.color`) is a sliced task on the app's scheduler
+made while the document loads. An edit to a `world.*` key then waits (`world.pending` is 1) until
+Regenerate (`world.request: regenerate`) or Randomize, so several settings change in one rebuild;
+`world.auto` (the node's `auto_regenerate`) rebuilds after every edit instead. Every rebuild and
+every repaint (`world.color`, at once) is a sliced task on the app's scheduler
 ([`sliced_task.h`](../inc/cvc/core/sliced_task.h), as `fe_lab`'s jobs are): `cvc::world::world_builder`
 and `surface_painter` step it a few rows at a time, on the background pool natively and a few
 milliseconds a frame on single-threaded wasm, so the old world stays on screen until the new one is

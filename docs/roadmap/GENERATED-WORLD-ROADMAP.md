@@ -63,9 +63,15 @@ in the panel:
   amp, file, preset } }` in any document (or `heightfield: { generator: ... }`, whose layers add on
   top) draws a generator's ground as a `cvc::height_field`, so `ground:`, bodies and band colours
   work on it as on any heightfield.
-- **Water stays libcvc's**: everything under `water_level_m` is water, whatever made the relief. A
-  DEM is anchored (its floor at 0) and stretched to `amp_m`, so the water level means the same
-  thing. The roads' no-go mask is the water plus the terrain's channel and cliff masks; lots also
+- **Water stays libcvc's**: everything under `water_level_m` is water, whatever made the relief.
+  Sea level is 0 m: every generator lays its ground with 0 m as the shoreline, its floor
+  `world_sea_share` (34/90) of `amp_m` below it (a DEM is stretched to `amp_m` and anchored there
+  too; the island stands its dome in the sea), so the water level means the same thing on any
+  relief, and a preset's lower relief no longer drowns the world under a water level set for a
+  higher one (the urban preset's 10 m under the old 34 m: a world of sea). The raster classes the
+  ground under it as water and the 0.6 m above it as sand, and the ground texture shades it from a
+  light shore green-blue to deep blue over 8 m, since the water volume all but vanishes over the
+  shallows. The roads' no-go mask is the water plus the terrain's channel and cliff masks; lots also
   stay on its buildable mask; district centres keep off it.
 - **Fixed on the way** (bugs, not kept): the fBm seed was XORed with the world seed, which was the
   same number, so every seed stood on the same ground (the default document is now seed 5, whose
