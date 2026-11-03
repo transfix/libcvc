@@ -76,8 +76,10 @@ depends:
     # its config: CVC_ARIADNE_RELAY and friends): the WebSocket state transport's messages
     # (protobuf, built with CVC_ENABLE_WS), the avatars' rigid bodies (joltphysics), Opus mics
     # (libopus) and the device key that signs the join (openssl). The single-threaded package only
-    # (the one a site serves without special headers; libopus has no -pthread archive), and
-    # build-wasm.sh fails that build without any of them.
+    # (the one a site serves without special headers; libopus has no -pthread archive).
+    # build-wasm.sh builds the conference in when the deps prefix has protobuf, and then fails the
+    # build without any of the others; until cvcpkg.org publishes a wasm protobuf, the package is
+    # built without it and cannot run a conference.
     - name: protobuf
       platforms: [wasm]
     - name: joltphysics

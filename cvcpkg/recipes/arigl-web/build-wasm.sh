@@ -33,15 +33,27 @@ set -euo pipefail
 : "${CVC_EMSDK_DIR:?CVC_EMSDK_DIR must point to the activated emsdk bundle}"
 : "${CVC_PLATFORM:?CVC_PLATFORM must be wasm or wasm-mt}"
 
-# ari's pages are single-threaded only, as in the gallery, and so is an Ariadne conference client
-# (WS: the WebSocket transport, whose protobuf, like libopus, has no -pthread wasm build).
+# ari's pages are single-threaded only, as in the gallery.
 case "$CVC_PLATFORM" in
-  wasm) PTHREADS=OFF; ARI=ON; WS=ON ;;
-  wasm-mt) PTHREADS=ON; ARI=OFF; WS=OFF ;;
+  wasm) PTHREADS=OFF; ARI=ON ;;
+  wasm-mt) PTHREADS=ON; ARI=OFF ;;
   *) echo "arigl-web: CVC_PLATFORM is wasm or wasm-mt, not '${CVC_PLATFORM}'" >&2; exit 1 ;;
 esac
 FULL=ON
 [[ "${CVC_ARIGL_WEB_LEAN:-0}" == "1" ]] && FULL=OFF
+
+# An Ariadne conference client, single-threaded only (protobuf and libopus have no -pthread wasm
+# builds): the WebSocket transport, built when the deps prefix has protobuf's wasm build, and then
+# the rest of what a conference needs is required below. A prefix without it (cvcpkg.org has
+# published no wasm protobuf yet) builds a package that cannot run a conference, and says so.
+WS=OFF
+if [[ "$PTHREADS" == "OFF" ]]; then
+  if [[ -d "$CVC_DEPS_PREFIX/lib/cmake/protobuf" || -f "$CVC_DEPS_PREFIX/lib/libprotobuf.a" ]]; then
+    WS=ON
+  else
+    echo "arigl-web: no protobuf in $CVC_DEPS_PREFIX: no WebSocket transport, so this package cannot run an Ariadne conference" >&2
+  fi
+fi
 
 # shellcheck disable=SC1091
 source "${CVC_EMSDK_DIR}/emsdk_env.sh"
@@ -77,15 +89,15 @@ emcmake cmake -G Ninja -S "$CVC_SOURCE_DIR" -B "$CVC_BUILD_DIR" \
 
 # A configure that misses one of these turns it off and carries on, and the shell would ship
 # unable to load a document (yaml-cpp), with inert widgets (imgui) or without keys (sdl3).
-# Nor without the terminal backend, for ari's page. Nor, single-threaded, can it ship without what
-# an Ariadne conference client needs (arigl's conference mode, which a page config sets up with
-# CVC_ARIADNE_RELAY): the WebSocket transport (protobuf), the avatars' physics (joltphysics), Opus
-# mics (libopus) and device keys (openssl).
+# Nor without the terminal backend, for ari's page. Nor, with the WebSocket transport, can it ship
+# without the rest of what an Ariadne conference client needs (arigl's conference mode, which a
+# page config sets up with CVC_ARIADNE_RELAY): the avatars' physics (joltphysics), Opus mics
+# (libopus) and device keys (openssl).
 WANT=("Ariadne: .ari YAML loader ENABLED"
       "Ariadne: FTXUI terminal backend ENABLED"
       "cvcGL: Dear ImGui overlay ENABLED"
       "cvcGL: SDL3 input/peripheral seam ENABLED")
-if [[ "$PTHREADS" == "OFF" ]]; then
+if [[ "$WS" == "ON" ]]; then
   WANT+=("cvc::state: WebSocket transport ENABLED"
          "cvc::physics Jolt backend ENABLED"
          "cvc::media: Opus mics with"
