@@ -265,8 +265,9 @@ public:
   virtual void register_watch_handler(int pid, int watch_id, value_t handler,
                                       const std::string &path) = 0;
   /// A watch that resolves `path` under its own `root` (a chrooted context's: td 4.8), pinned by
-  /// the entry; null resolves under the scheduler's watch root. A scheduler without per-watch
-  /// roots ignores `root`.
+  /// the entry; null resolves under the scheduler's watch root. This default ignores `root`, and
+  /// state-watch no longer moves the watch root for a chrooted context, so a scheduler that keeps
+  /// it resolves a chrooted watch under its own watch root: override it.
   virtual void register_watch_handler(int pid, int watch_id, value_t handler,
                                       const std::string &path, boost::shared_ptr<cvc::state> root) {
     (void)root;
