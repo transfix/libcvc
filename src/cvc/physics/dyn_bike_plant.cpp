@@ -121,10 +121,16 @@ dyn_bike_plant::sdf_field(const cvc::nav::field_stack &fs, int plane,
 
 void dyn_bike_plant::contacts(const std::vector<diff::dyn_state<double>> &s,
                               std::vector<diff::dyn_contact> &field,
-                              std::vector<diff::dyn_contact> &pair) const {
+                              std::vector<diff::dyn_contact> &pair,
+                              std::vector<diff::dyn_contact_row> *rows, double *closing,
+                              double hdt) const {
   const std::size_t n = _agents.size();
   field.assign(n, diff::dyn_contact{});
   pair.assign(n, diff::dyn_contact{});
+  if (rows)
+    rows->clear();
+  if (closing)
+    *closing = 0.0;
   // Each agent's centre of gravity, heading and twist.
   std::vector<diff::dyn_body> b(n);
   for (std::size_t i = 0; i < n; ++i) {
@@ -139,8 +145,13 @@ void dyn_bike_plant::contacts(const std::vector<diff::dyn_state<double>> &s,
         (*f)(x, y, phi, gx, gy);
       }
     } smp{&_o.contact_field};
-    for (std::size_t i = 0; i < n; ++i)
-      diff::dyn_contact_field(cp, _agents[i].points, smp, b[i], field[i]);
+    for (std::size_t i = 0; i < n; ++i) {
+      diff::dyn_contact_field(cp, _agents[i].points, smp, b[i], field[i], rows,
+                              static_cast<int>(i));
+      if (closing)
+        *closing =
+            std::max(*closing, diff::dyn_contact_closing(cp, _agents[i].points, smp, b[i], hdt));
+    }
   }
   if (!_o.contact_vehicles)
     return;
@@ -148,11 +159,23 @@ void dyn_bike_plant::contacts(const std::vector<diff::dyn_state<double>> &s,
     const diff::dyn_footprint &f = _agents[i].fp;
     return std::hypot(std::max(f.front, f.rear), f.half_width);
   };
+  // How far an agent's outline can sweep in hdt.
+  const auto sweep = [&](std::size_t i) {
+    return closing ? hdt * (std::hypot(b[i].vx, b[i].vy) + std::fabs(b[i].r) * reach(i)) : 0.0;
+  };
   for (std::size_t i = 0; i < n; ++i)
-    for (std::size_t j = i + 1; j < n; ++j)
-      if (std::hypot(b[i].x - b[j].x, b[i].y - b[j].y) < reach(i) + reach(j) + cp.skin)
+    for (std::size_t j = i + 1; j < n; ++j) {
+      const double apart = std::hypot(b[i].x - b[j].x, b[i].y - b[j].y),
+                   meet = reach(i) + reach(j) + cp.skin;
+      if (apart < meet)
         diff::dyn_contact_pair(cp, _agents[i].points, _agents[i].fp, b[i], _agents[j].points,
-                               _agents[j].fp, b[j], pair[i], pair[j]);
+                               _agents[j].fp, b[j], pair[i], pair[j], rows, static_cast<int>(i),
+                               static_cast<int>(j));
+      if (closing && apart < meet + sweep(i) + sweep(j))
+        *closing = std::max(
+            *closing, diff::dyn_contact_pair_closing(cp, _agents[i].points, _agents[i].fp, b[i],
+                                                     _agents[j].points, _agents[j].fp, b[j], hdt));
+    }
 }
 
 double dyn_bike_plant::wheel_speed(int i, int axle) const {
@@ -184,6 +207,7 @@ void dyn_bike_plant::attach(int n, const cvc::nav::plant_state *start,
     _nsub = std::max(1, static_cast<int>(std::ceil(dt / _o.substep - 1e-9)));
   }
   _frame = frame;
+  _pieces = 1;
   _dt = dt;
   const double h = dt / _nsub;
   cvc::world_units::normalized_frame si;
@@ -364,13 +388,49 @@ void dyn_bike_plant::advance() {
   const double h = _dt / _nsub;
   std::vector<double> port(n, 0.0);
   std::vector<diff::dyn_step_free<double>> free(n);
-  std::vector<diff::dyn_contact> cf0, cp0, cf1, cp1; // the contact at a substep's start and end
-  for (int k = 0; k < _nsub; ++k) {
+  std::vector<diff::dyn_contact> cf0, cp0, cf1, cp1; // the contact at a step's start and end
+  std::vector<diff::dyn_contact_row> rows;           // its damped directions at the start
+  std::vector<diff::dyn_contact_inertia> bodies(n);
+  // Each substep is one step of h or, with the contact, `pieces` equal steps of hs, so that no
+  // point closes more than contact_step_depth on what it meets in one (decided at its start).
+  int k = 0, piece = 0, pieces = 1;
+  double hs = h;
+  while (k < _nsub) {
     if (_o.contact) {
       std::vector<diff::dyn_state<double>> now(n);
       for (std::size_t i = 0; i < n; ++i)
         now[i] = _agents[i].s;
-      contacts(now, cf0, cp0);
+      const bool split = piece == 0 && !world && _o.contact_step_depth > 0.0;
+      double closing = 0.0;
+      contacts(now, cf0, cp0, &rows, split ? &closing : nullptr, h);
+      if (split) {
+        // The pieces hold through a contact, growing with the fastest closing, until nothing
+        // touches or closes: a bounce runs at one step, so its steps' errors cancel over it as
+        // they do at a fixed substep (finer pieces for the approach alone leave the rebound's).
+        bool touching = closing > 0.0;
+        for (std::size_t i = 0; i < n && !touching; ++i)
+          touching = cf0[i].touching + cp0[i].touching > 0;
+        const double need = std::ceil(closing * h / _o.contact_step_depth - 1e-9);
+        _pieces = touching ? std::max(_pieces, static_cast<int>(std::min(64.0, need))) : 1;
+        pieces = std::max(1, _pieces);
+        hs = h / pieces;
+        for (agent &a : _agents)
+          a.lim.hdt = static_cast<float>(hs);
+      }
+      // The dampers and the friction, implicit over the step (dyn_contact_implicit): read at the
+      // twist the step reaches under the agents' inertia, the barriers' push and themselves.
+      for (std::size_t i = 0; i < n; ++i) {
+        const agent &a = _agents[i];
+        diff::dyn_contact_inertia &q = bodies[i];
+        q.m = a.p.m;
+        q.Iz = a.p.Iz;
+        q.v[0] = a.s.vx;
+        q.v[1] = a.s.vy;
+        q.v[2] = a.s.r;
+        for (int j = 0; j < 3; ++j)
+          q.Wc[j] = cf0[i].Wc[j] + cp0[i].Wc[j];
+      }
+      diff::dyn_contact_implicit(hs, rows, bodies);
     }
     for (std::size_t i = 0; i < n; ++i) {
       agent &a = _agents[i];
@@ -382,7 +442,7 @@ void dyn_bike_plant::advance() {
         c = cf0[i];
         for (int j = 0; j < 3; ++j) {
           c.Wc[j] += cp0[i].Wc[j];
-          c.Wd[j] += cp0[i].Wd[j];
+          c.Wd[j] = bodies[i].Wd[j];
         }
         c.energy += cp0[i].energy;
         c.damping += cp0[i].damping;
@@ -396,7 +456,7 @@ void dyn_bike_plant::advance() {
                                          static_cast<double>(a.p.lf + a.p.lr));
       // Nav's command as the Jolt plant's driver takes it (dyn_driver).
       const double accel = _o.driver ? dyn::drive(a.driver, a.desc, a.accel_cmd, a.s.vx, grade,
-                                                  _o.gravity, a.p.tau_drive, h)
+                                                  _o.gravity, a.p.tau_drive, hs)
                                      : a.accel_cmd;
       // With side_slope, gravity along and across the heading from the ground's gradient, a
       // potential in the books (the driver still reads the sine along the heading).
@@ -471,12 +531,11 @@ void dyn_bike_plant::advance() {
         // passed each other (contact_exchange; over a pair, second order too).
         const diff::dyn_step_free<double> &e = free[i];
         const auto work = [&](const double Wv[3]) {
-          return diff::dyn_ph_port_work(h, a.s.vx, a.s.vy, a.s.r, e.vx, e.vy, e.r, Wv);
+          return diff::dyn_ph_port_work(static_cast<double>(a.lim.hdt), a.s.vx, a.s.vy, a.s.r, e.vx,
+                                        e.vy, e.r, Wv);
         };
-        double Wd[3];
-        for (int j = 0; j < 3; ++j)
-          Wd[j] = cf0[i].Wd[j] + cp0[i].Wd[j];
-        const double work_field = work(cf0[i].Wc), work_pair = work(cp0[i].Wc), work_d = work(Wd);
+        const double work_field = work(cf0[i].Wc), work_pair = work(cp0[i].Wc),
+                     work_d = work(a.cnow.Wd);
         const double d_field = cf1[i].energy - cf0[i].energy;
         const double d_pair = cp1[i].energy - cp0[i].energy;
         d.contact_stored = d_field + d_pair;
@@ -507,9 +566,18 @@ void dyn_bike_plant::advance() {
                             a.touch_depth);
       }
       add(a.tick, d);
-      dyn::measured(a.driver, a.s.vx, o.vx, h);
+      dyn::measured(a.driver, a.s.vx, o.vx, hs);
       a.s = o;
     }
+    if (++piece < pieces)
+      continue;
+    if (pieces > 1)
+      for (agent &a : _agents)
+        a.lim.hdt = static_cast<float>(h);
+    piece = 0;
+    pieces = 1;
+    hs = h;
+    ++k;
   }
   for (std::size_t i = 0; i < n; ++i) {
     agent &a = _agents[i];

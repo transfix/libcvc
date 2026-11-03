@@ -13,8 +13,13 @@
 // form:
 //   - the barrier's wrench is minus its energy's gradient in the pose, the damper only dissipates,
 //     and a pair of vehicles keeps its momentum;
+//   - the damper and the friction read implicitly (dyn_contact_implicit) only dissipate, keep a
+//     pair's momentum and never add kinetic energy however stiff against the step;
 //   - the live plant's books close with the contact lines, to second order per step, for a wall
 //     impact and a vehicle-to-vehicle bump (the pair's exchange cancelling);
+//   - fast impacts (pycvc's navigator into sim_world's walls, 8 to 12 m/s into its field) at the
+//     default 0.01 s substep: the contact only dissipates, the speed clamp takes nothing, the
+//     books close, and each impact is the one a 0.00125 s substep gives;
 //   - against the Jolt plant: a Humvee into a wall, head on and at 30 degrees, and into another
 //     parked Humvee, with the speed lost, the rebound and the heading change reported;
 //   - nav's signed-distance grid as the field (dyn_bike_plant::sdf_field).
@@ -36,6 +41,7 @@
 #include <cvc/physics/world.h>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <gtest/gtest.h>
 #include <random>
 #include <sstream>
@@ -248,6 +254,126 @@ TEST(DynContact, APairKeepsItsMomentum) {
   EXPECT_GT(touching, 50);
 }
 
+// The dampers and the friction read implicitly (dyn_contact_implicit), against a wall and between
+// two Humvees at random touching poses: the rows sum to R_c (minus R_c v is dyn_contact's Wd); the
+// solve holds, M (v_d - v) = hdt (W_c + W_d); W_d only dissipates at v_d; between the vehicles it
+// is equal and opposite, so the pair keeps its momentum; and with no barrier, however stiff the
+// dampers are against the step (hdt to 1 s), the kinetic energy at v_d is no more than at v.
+TEST(DynContact, TheImplicitDamperOnlyDissipates) {
+  diff::dyn_contact_params p;
+  const diff::dyn_footprint f = humvee_footprint();
+  const std::vector<diff::dyn_point> pts = diff::dyn_footprint_points(f, p);
+  const wall_field wall{0.0};
+  cvc::world_units::normalized_frame si;
+  si.scale = 1.0;
+  const diff::dyn_bike_params hp =
+      cvc::nav::dyn_bike_params_of(nav_plant::dyn_bike_si_of(vehicle_desc::humvee()), si);
+  std::mt19937 rng(7);
+  std::uniform_real_distribution<double> u(-1.0, 1.0);
+  int field_cases = 0, pair_cases = 0;
+  double worst_rows = 0.0, worst_solve = 0.0, worst_balance = 0.0;
+  for (int k = 0; k < 2000; ++k) {
+    const bool pair = k % 2 == 1;
+    diff::dyn_body a, b;
+    a.psi = kPi * u(rng);
+    a.vx = 8.0 * u(rng);
+    a.vy = u(rng);
+    a.r = 0.5 * u(rng);
+    if (pair) {
+      b.psi = kPi * u(rng);
+      b.x = 4.5 * u(rng);
+      b.y = 4.5 * u(rng);
+      b.vx = 8.0 * u(rng);
+      b.vy = u(rng);
+    } else {
+      a.x = -(1.6 + 1.0 * u(rng));
+      a.y = 3.0 * u(rng);
+    }
+    diff::dyn_contact ca, cb;
+    std::vector<diff::dyn_contact_row> rows;
+    if (pair)
+      diff::dyn_contact_pair(p, pts, f, a, pts, f, b, ca, cb, &rows, 0, 1);
+    else
+      diff::dyn_contact_field(p, pts, wall, a, ca, &rows, 0);
+    if (!ca.touching)
+      continue;
+    ++(pair ? pair_cases : field_cases);
+    // R_c v from the rows (each on its bodies a and b): minus dyn_contact's Wd on each body.
+    const diff::dyn_body *body[2] = {&a, &b};
+    const diff::dyn_contact *on[2] = {&ca, &cb};
+    double R[2][3] = {{0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}};
+    const auto dot = [](const double j[3], const diff::dyn_body &q) {
+      return j[0] * q.vx + j[1] * q.vy + j[2] * q.r;
+    };
+    for (const diff::dyn_contact_row &w : rows) {
+      const double vel = dot(w.ja, *body[w.a]) + (w.b >= 0 ? dot(w.jb, *body[w.b]) : 0.0);
+      for (int i = 0; i < 3; ++i) {
+        R[w.a][i] += w.coef * vel * w.ja[i];
+        if (w.b >= 0)
+          R[w.b][i] += w.coef * vel * w.jb[i];
+      }
+    }
+    const double wscale = 1.0 + std::fabs(ca.Wd[0]) + std::fabs(ca.Wd[1]) + std::fabs(ca.Wd[2]) +
+                          std::fabs(cb.Wd[0]) + std::fabs(cb.Wd[1]) + std::fabs(cb.Wd[2]);
+    for (int j = 0; j < (pair ? 2 : 1); ++j)
+      for (int i = 0; i < 3; ++i)
+        worst_rows = std::max(worst_rows, std::fabs(R[j][i] + on[j]->Wd[i]) / wscale);
+    for (const bool barrier : {true, false})
+      for (const double hdt : {0.01, 0.1, 1.0}) {
+        std::vector<diff::dyn_contact_inertia> q(pair ? 2 : 1);
+        double kinetic0 = 0.0, kinetic1 = 0.0;
+        for (std::size_t j = 0; j < q.size(); ++j) {
+          q[j].m = hp.m;
+          q[j].Iz = hp.Iz;
+          q[j].v[0] = body[j]->vx;
+          q[j].v[1] = body[j]->vy;
+          q[j].v[2] = body[j]->r;
+          for (int i = 0; i < 3; ++i)
+            q[j].Wc[i] = barrier ? on[j]->Wc[i] : 0.0;
+        }
+        diff::dyn_contact_implicit(hdt, rows, q);
+        double power = 0.0;
+        for (const diff::dyn_contact_inertia &e : q) {
+          const double M[3] = {e.m, e.m, e.Iz};
+          for (int i = 0; i < 3; ++i) {
+            const double lhs = M[i] * (e.vd[i] - e.v[i]), rhs = hdt * (e.Wc[i] + e.Wd[i]);
+            worst_solve =
+                std::max(worst_solve,
+                         std::fabs(lhs - rhs) / (1.0 + M[i] * std::fabs(e.v[i]) +
+                                                 hdt * (std::fabs(e.Wc[i]) + std::fabs(e.Wd[i]))));
+            power += e.vd[i] * e.Wd[i];
+            kinetic0 += 0.5 * M[i] * e.v[i] * e.v[i];
+            kinetic1 += 0.5 * M[i] * e.vd[i] * e.vd[i];
+          }
+        }
+        EXPECT_LE(power, 1e-9 * (1.0 + wscale)) << (pair ? "pair" : "wall") << ", hdt " << hdt;
+        if (!barrier)
+          EXPECT_LE(kinetic1, kinetic0 * (1.0 + 1e-12)) << (pair ? "pair" : "wall");
+        if (pair) {
+          // World forces, and moments about the origin.
+          double F[2][3];
+          for (int j = 0; j < 2; ++j) {
+            const double c = std::cos(body[j]->psi), s = std::sin(body[j]->psi);
+            F[j][0] = c * q[j].Wd[0] - s * q[j].Wd[1];
+            F[j][1] = s * q[j].Wd[0] + c * q[j].Wd[1];
+            F[j][2] = q[j].Wd[2] + body[j]->x * F[j][1] - body[j]->y * F[j][0];
+          }
+          const double scale = 1.0 + std::hypot(F[0][0], F[0][1]) * (1.0 + std::hypot(b.x, b.y));
+          for (int i = 0; i < 3; ++i)
+            worst_balance = std::max(worst_balance, std::fabs(F[0][i] + F[1][i]) / scale);
+        }
+      }
+  }
+  std::printf("  %d wall and %d pair poses: the rows' R_c v within %.2e of -Wd; the solve within "
+              "%.2e; the pair's forces and moments balance within %.2e\n",
+              field_cases, pair_cases, worst_rows, worst_solve, worst_balance);
+  EXPECT_GT(field_cases, 50);
+  EXPECT_GT(pair_cases, 50);
+  EXPECT_LT(worst_rows, 1e-12);
+  EXPECT_LT(worst_solve, 1e-9);
+  EXPECT_LT(worst_balance, 1e-9);
+}
+
 namespace {
 
 #define REQUIRE_JOLT()                                                                             \
@@ -276,14 +402,18 @@ struct impact {
   double other_after = 0.0;               // the struck vehicle's speed after (a pair)
   double mean_abs_residual = 0.0;         // per substep, J
   double flow = 0.0, residual = 0.0, gap = 0.0, exchange = 0.0, stored = 0.0, dissipated = 0.0;
+  double limiter = 0.0;
 };
 
+using contact_field_fn = std::function<void(double, double, double &, double &, double &)>;
+
 // The Humvee at rest heading `heading`, its rear axle at the origin (and, with `pair`, a second
-// one parked 18 m ahead along x), driven raw (no driver model) at 2 m/s^2 until it reaches
-// `speed`, then coasting: into a wall 25 m ahead along x, or into the parked one. Measured 1 m
-// before the contact and 1 s after that.
+// one parked `park_x` ahead along x), driven raw (no driver model) at 2 m/s^2 until it reaches
+// `speed`, then coasting: into a wall `wall_x` ahead along x (`field`'s, when given: its face at
+// wall_x), or into the parked one. Measured 1 m before the contact and 1 s after that.
 impact drive_into(double speed, double heading, bool pair, double substep, double wall_x = 25.0,
-                  double friction = -1.0) {
+                  double friction = -1.0, double park_x = 18.0,
+                  const contact_field_fn &field = {}) {
   dyn_bike_plant_options o;
   o.driver = false;
   o.substep = substep;
@@ -291,7 +421,9 @@ impact drive_into(double speed, double heading, bool pair, double substep, doubl
   if (friction >= 0.0)
     o.contact_params.friction = friction;
   o.contact_vehicles = pair;
-  if (!pair) {
+  if (field) {
+    o.contact_field = field;
+  } else if (!pair) {
     const wall_field w{wall_x};
     o.contact_field = [w](double x, double y, double &phi, double &gx, double &gy) {
       w.at(x, y, phi, gx, gy);
@@ -300,7 +432,7 @@ impact drive_into(double speed, double heading, bool pair, double substep, doubl
   dyn_bike_plant plant({vehicle_desc::humvee()}, o);
   cvc::nav::plant_state starts[2];
   starts[0].heading = static_cast<float>(heading);
-  starts[1].x = 18.0f;
+  starts[1].x = static_cast<float>(park_x);
   plant.attach(pair ? 2 : 1, starts, metres(), 0.02);
   impact m;
   bool coasting = false, measured = false;
@@ -358,6 +490,7 @@ impact drive_into(double speed, double heading, bool pair, double substep, doubl
     m.exchange += b.contact_exchange;
     m.stored += b.contact_stored;
     m.dissipated += b.contact_dissipated;
+    m.limiter += b.limiter;
   }
   return m;
 }
@@ -401,6 +534,174 @@ TEST(DynContactPlant, TheBooksCloseToSecondOrder) {
       }
       prev = m.mean_abs_residual;
     }
+  }
+}
+
+namespace {
+
+// pycvc's reference sim_world (test_pycvc_physics.py's make_sim): 81 x 81 one-metre cells, scale
+// 0.05, the built-in policy, on occupancy `occ`; one agent from x = 20 start m to (20, 0) m.
+cvc::nav::sim_world make_reference_sim(const std::vector<std::uint8_t> &occ, float start = -1.0f) {
+  cvc::nav::sim_world::config c;
+  c.rows = c.cols = 81;
+  c.min_x = c.min_y = -40.0;
+  c.max_x = c.max_y = 40.0;
+  c.cx = c.cy = 0.0;
+  c.scale = 0.05;
+  c.range_m = 60.0;
+  c.n_rays = 240;
+  c.fov_rad = 2.0 * kPi;
+  c.veh.rr = 0.15f;
+  c.veh.d_hat = 0.35f;
+  c.veh.dt = 0.06f;
+  c.veh.vmax = 0.4f;
+  c.veh.L = 0.165f;
+  c.veh.delta_max = 0.6f;
+  c.veh.a_max = 0.12f;
+  c.veh.a_lat_max = 0.12f;
+  c.veh.k_steer = 0.8f;
+  c.veh.nsub = 6;
+  c.veh.allow_reverse = true;
+  c.reach_tol = 0.2f;
+  c.sense_every = 4;
+  c.freeze_sense = true;
+  c.l_occ = 2.2;
+  c.l_free = -1.4;
+  c.l_clamp = 8.0;
+  c.optimistic = true;
+  c.p_thresh = 0.5;
+  c.band = 0.15;
+  c.ttl_s = 4.0;
+  const float on[2] = {start, 0.0f}, goal[2] = {1.0f, 0.0f}, color[3] = {1.0f, 1.0f, 1.0f};
+  return cvc::nav::sim_world(c, occ.data(), occ.data(), cvc::nav::coef_mlp::default_biased(), on,
+                             goal, color, 1);
+}
+
+// A sim_world whose occupancy holds x > wall_x (one-metre cells centred on whole metres, from -100
+// m to 100 m, as StopsAtAWallInSimWorldsField's), so its field's face is at wall_x for a wall_x
+// halfway between cells.
+cvc::nav::sim_world walled_sim(double wall_x) {
+  cvc::nav::sim_world::config c;
+  c.rows = c.cols = 201;
+  c.min_x = c.min_y = -100.0;
+  c.max_x = c.max_y = 100.0;
+  c.scale = 0.05;
+  c.veh.rr = 0.15f;
+  c.veh.d_hat = 0.35f;
+  c.veh.dt = 0.02f;
+  c.freeze_sense = true;
+  std::vector<std::uint8_t> occ(static_cast<std::size_t>(c.rows) * c.cols, 0);
+  for (int r = 0; r < c.rows; ++r)
+    for (int k = 0; k < c.cols; ++k)
+      if (c.min_x + k * (c.max_x - c.min_x) / (c.cols - 1) > wall_x)
+        occ[static_cast<std::size_t>(r) * c.cols + k] = 1;
+  const float o[2] = {-1.0f, 0.0f}, g[2] = {-0.5f, 0.0f}, col[3] = {1, 1, 1};
+  return cvc::nav::sim_world(c, occ.data(), occ.data(), cvc::nav::coef_mlp::default_biased(), o, g,
+                             col, 1);
+}
+
+// pycvc's navigator (make_sim's world, the driver model on) from x = 20 start m toward (20, 0) m,
+// its plant's contact field `walled`'s (a wall nav does not see): 250 ticks of 0.06 s.
+struct nav_run {
+  double hit = 0.0;     // the speed the tick before a point first touched (m/s)
+  double slowest = 0.0; // the most negative vx (m/s)
+  double gap = 0.0;     // the books' identity, to rounding
+  dyn_bike_books books;
+};
+
+nav_run drive_nav(float start, double substep, const cvc::nav::sim_world &walled) {
+  dyn_bike_plant_options o;
+  o.contact = true;
+  o.substep = substep;
+  o.plant.latency = 0.1;
+  o.plant.brake_margin = 0.8;
+  o.contact_field = dyn_bike_plant::sdf_field(walled.field(), 0, 1.0);
+  dyn_bike_plant plant({vehicle_desc::humvee()}, o);
+  cvc::nav::sim_world sim = make_reference_sim(std::vector<std::uint8_t>(81 * 81, 0), start);
+  sim.set_plant(&plant);
+  nav_run m;
+  for (int k = 0; k < 250; ++k) {
+    const double vx = plant.body(0).vx;
+    sim.step();
+    if (m.hit == 0.0 && plant.contact_now(0).touching > 0)
+      m.hit = vx;
+    m.slowest = std::min(m.slowest, plant.body(0).vx);
+  }
+  m.books = plant.books(0);
+  m.gap = identity_gap(plant, 0);
+  return m;
+}
+
+} // namespace
+
+// Fast impacts at the live plant's default substep (0.01 s). nav's grid SDF runs from +1 cell to -1
+// cell across the cell at an obstacle's face, so against sim_world's field a barrier is 4x and a
+// damper 8x as stiff per metre of approach as against an exact wall's distance, and at 0.01 s
+// hdt R_c / m passes 2 at depth by 7.8 m/s. Held from the step's start, the damper then reversed
+// the vehicle within a step (pycvc's navigator into a wall: to -3.24 m/s, the reverse clamp), did
+// work on it (contact_dissipated -1.5e5 J) and left the speed clamp the rest (limiter -2.4e5 J).
+// Read implicitly (diff::dyn_contact_implicit), with a substep that would carry a point past
+// contact_step_depth cut into pieces, the contact only dissipates, the clamp takes nothing, the
+// books close, and each impact at 0.01 s is the one 0.00125 s gives: the navigator's (at 7.8 and
+// 8.0 m/s), and driven raw at 8 to 12 m/s into sim_world's field head on, into an exact wall at 30
+// degrees and into a parked Humvee.
+TEST(DynContactPlant, AFastImpactAtTheDefaultSubstep) {
+  // pycvc's probe: a wall two cells thick across x = 0..1 m.
+  std::vector<std::uint8_t> walls(81 * 81, 0);
+  for (int r = 0; r < 81; ++r)
+    walls[r * 81 + 40] = walls[r * 81 + 41] = 1;
+  const cvc::nav::sim_world walled = make_reference_sim(walls);
+  for (const float start : {-1.0f, -1.5f}) {
+    const nav_run fine = drive_nav(start, 0.00125, walled), m = drive_nav(start, 0.01, walled);
+    const dyn_bike_books &b = m.books;
+    std::printf("  the navigator from %.0f m, at %.2f m/s: slowest %.2f m/s (%.2f at 0.00125 s); "
+                "contact_dissipated %.4g J (%.4g), limiter %.3g J, |residual| / flow %.2e (%.2e)\n",
+                20.0 * start, m.hit, m.slowest, fine.slowest, b.contact_dissipated,
+                fine.books.contact_dissipated, b.limiter, std::fabs(b.residual) / b.flow(),
+                std::fabs(fine.books.residual) / fine.books.flow());
+    EXPECT_GT(m.hit, 7.5);
+    EXPECT_NEAR(m.gap, 0.0, 1e-8 * b.flow());
+    EXPECT_GT(b.contact_dissipated, 0.0);
+    EXPECT_LE(std::fabs(b.limiter), 1e-6 * b.flow());
+    EXPECT_LT(std::fabs(b.residual) / b.flow(), 5e-3);
+    EXPECT_NEAR(m.slowest, fine.slowest, 0.05);
+    EXPECT_NEAR(b.contact_dissipated, fine.books.contact_dissipated,
+                0.02 * fine.books.contact_dissipated);
+  }
+  struct scenario {
+    const char *name;
+    double speed, heading;
+    bool pair, grid;
+  };
+  for (const scenario &sc : {scenario{"sim_world's wall, head on", 8.3, 0.0, false, true},
+                             scenario{"sim_world's wall, head on", 10.3, 0.0, false, true},
+                             scenario{"sim_world's wall, head on", 12.3, 0.0, false, true},
+                             scenario{"a wall, 30 degrees", 10.3, kPi / 6.0, false, false},
+                             scenario{"a parked Humvee", 10.3, 0.0, true, false}}) {
+    // 3 m of coasting or more before the contact; the face halfway between sim_world's cells.
+    const double wall_x = std::ceil(sc.speed * sc.speed / 4.0 + 7.0) + 0.5;
+    const cvc::nav::sim_world sim = walled_sim(wall_x);
+    const contact_field_fn field =
+        sc.grid ? dyn_bike_plant::sdf_field(sim.field(), 0, 1.0) : contact_field_fn{};
+    const impact fine =
+        drive_into(sc.speed, sc.heading, sc.pair, 0.00125, wall_x, -1.0, wall_x + 1.0, field);
+    const impact m =
+        drive_into(sc.speed, sc.heading, sc.pair, 0.01, wall_x, -1.0, wall_x + 1.0, field);
+    const double rebound = -m.vn_after / m.vn_before,
+                 rebound_fine = -fine.vn_after / fine.vn_before;
+    std::printf("  %s at %.2f m/s: rebound %.3f (%.3f at 0.00125 s), dissipated %.4g J (%.4g), "
+                "limiter %.3g J (%.3g); |residual| / flow %.2e (%.2e)\n",
+                sc.name, m.v_before, rebound, rebound_fine, m.dissipated, fine.dissipated,
+                m.limiter, fine.limiter, std::fabs(m.residual) / m.flow,
+                std::fabs(fine.residual) / fine.flow);
+    EXPECT_GE(m.v_before, 8.0) << sc.name;
+    EXPECT_NEAR(m.gap, 0.0, 1e-8 * m.flow) << sc.name;
+    EXPECT_GT(m.dissipated, 0.0) << sc.name;
+    // The speed clamp takes no more than at 0.00125 s (at 30 degrees the low-speed blend takes the
+    // slide along the wall at the end).
+    EXPECT_LE(std::fabs(m.limiter), std::fabs(fine.limiter) + 1e-3 * m.flow) << sc.name;
+    EXPECT_LT(std::fabs(m.residual) / m.flow, 5e-3) << sc.name;
+    EXPECT_NEAR(rebound, rebound_fine, 0.02) << sc.name;
   }
 }
 
