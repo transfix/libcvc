@@ -1071,10 +1071,12 @@ CVC_HD inline void dyn_spin_ph_rhs(const dyn_bike_params &p, const dyn_spin_stat
 // Q, every force on x but the structure's, at the state: -R dH/dx + G u + f_eps - m g grade e_x
 // on (vx, vy, r, om_f, om_r)'s momenta, so dyn_spin_ph_rhs is J dH/dx + Q. A discrete-gradient
 // step takes J and Q at its midpoint; dH/dx^T Q there is dyn_spin_ph_rates_at's balance, supplied -
-// braked - dissipated - slip + floor + grade, so its books close with those rates.
+// braked - dissipated - slip + floor + grade, so its books close with those rates. `wrench`, when
+// given, is the external port's (F_x, F_y, M_z) on the body, as dyn_plant_core's: Q gains it on
+// the body's momenta, and dH/dx^T Q its power v^T W (the books' port).
 template <class S>
 CVC_HD inline void dyn_spin_ph_forces_at(const dyn_bike_params &p, const dyn_spin_state<S> &s,
-                                         S grade, S Q[5]) {
+                                         S grade, S Q[5], const S *wrench = nullptr) {
   S R[5][5], G[5][2], u[2], f[5];
   dyn_spin_ph_R(p, s, R);
   dyn_spin_ph_G(G);
@@ -1088,6 +1090,9 @@ CVC_HD inline void dyn_spin_ph_forces_at(const dyn_bike_params &p, const dyn_spi
     Q[i] = acc;
   }
   Q[0] = Q[0] - S(p.m) * S(p.g) * grade;
+  if (wrench)
+    for (int i = 0; i < 3; ++i)
+      Q[i] = Q[i] + wrench[i];
 }
 
 // The power balance at a state: dH/dt = supplied - braked - dissipated - slip + floor + grade.
