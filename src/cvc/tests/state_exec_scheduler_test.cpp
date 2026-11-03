@@ -3294,6 +3294,94 @@ TEST(SchedulerWatchRoots, AWatchWithItsOwnRootNeedsNoWatchRoot) {
   }
 }
 
+namespace {
+
+// R0-mid's scenario: an unchrooted context whose root a host assigns directly (no apply_chroot,
+// root_path empty) to a subtree `sub` of the scheduler's root R. Its state-watch sets a watch root
+// only on a scheduler without one (S0.md section 0, item 20), which the scheduler tells through
+// watch_root(): without that override the watch moved the scheduler to `sub`, whose own
+// state_exec subtree then gave its settings and received the scheduler's.
+template <class S> void an_unchrooted_watch_keeps_the_schedulers_own_root() {
+  cvc::app app;
+  cvc::state &tree = cvc::state::instance(app);
+  tree("state_exec.defaults.limits.async_steps_per_cpu_ms").value(std::string("1000"));
+  tree("sub.state_exec.defaults.parser.max_depth").value(std::string("100"));
+  tree("sub.state_exec.defaults.limits.async_steps_per_cpu_ms").value(std::string("0"));
+  S sched;
+  sched.set_watch_root(&tree);
+  sched.set_id("unchrooted");
+  const auto step = [&sched] {
+    if constexpr (std::is_same_v<S, async_scheduler>)
+      sched.drain_ingress();
+    step_of(sched);
+  };
+  const auto value = [&tree](const std::string &path) { // never makes the node
+    cvc::state *node = tree.findDescendant(path);
+    return node ? node->value() : std::string();
+  };
+
+  process_ptr proc = make_process();
+  intrinsics_context ictx;
+  ictx.sched = &sched;
+  ictx.proc = proc;
+  ictx.root = &tree("sub"); // assigned directly: root_path stays empty
+  environment_ptr env = builtins::make_default_environment();
+  register_intrinsics(env, &ictx);
+  execute_options opts;
+  opts.env = env;
+  opts.max_time = 60.0;
+  const int pid = sched.execute(std::string(R"((begin
+      (state-watch "x" (lambda (path val) (state-incr "fired")))
+      (state-set "ready" "1")
+      (while (not (state-exists "stop")) nil)
+      "stopped"))"),
+                                opts);
+  ictx.pid = pid;
+  proc->pid = pid;
+  for (int i = 0; i < 100000 && value("sub.ready") != "1"; ++i)
+    step();
+  ASSERT_EQ(value("sub.ready"), "1");
+  tree("state_exec.defaults.parser.max_depth").value(std::string("3")); // after the watcher's read
+
+  EXPECT_EQ(static_cast<scheduler_base &>(sched).watch_root(), &tree) << "the watch moved it";
+  const process_ptr probe = make_process();
+  EXPECT_EQ(sched.async_steps_per_cpu_ms(*probe), 1000.0);
+  if constexpr (std::is_same_v<S, async_scheduler>) {
+    EXPECT_THROW(sched.execute(std::string("(+ 1 (+ 2 (+ 3 (+ 4 (+ 5 6)))))")), std::exception);
+  } else {
+    sched.load_settings();
+    EXPECT_EQ(value("state_exec.schedulers.unchrooted.parser.max_depth"), "3");
+  }
+  EXPECT_EQ(value("state_exec.schedulers.unchrooted.effective.async_steps_per_cpu_ms"), "1000");
+  EXPECT_EQ(tree.findDescendant("sub.state_exec.schedulers"), nullptr) << "published under sub";
+
+  // The watch itself resolves under the context's root.
+  tree("sub.x").value(std::string("v"));
+  for (int i = 0; i < 100000 && value("sub.fired") != "1"; ++i)
+    step();
+  EXPECT_EQ(value("sub.fired"), "1");
+  tree("sub.stop").value(std::string("1"));
+  for (int i = 0; i < 100000 && !sched.get_result(pid); ++i)
+    step();
+  EXPECT_TRUE(sched.get_result(pid).has_value());
+  EXPECT_TRUE(sched.check_tables());
+}
+
+} // namespace
+
+// R0-mid: an unchrooted context's state-watch keeps the scheduler's own root when the scheduler
+// has one (a regression test for watch_root()'s override).
+TEST(SchedulerWatchRoots, AnUnchrootedWatchKeepsTheSchedulersOwnRoot) {
+  {
+    SCOPED_TRACE("sync");
+    an_unchrooted_watch_keeps_the_schedulers_own_root<scheduler>();
+  }
+  {
+    SCOPED_TRACE("async");
+    an_unchrooted_watch_keeps_the_schedulers_own_root<async_scheduler>();
+  }
+}
+
 // --- Stage 0 hazards (td 8.1) ---
 
 namespace {
