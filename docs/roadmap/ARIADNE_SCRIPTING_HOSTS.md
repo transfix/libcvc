@@ -13,7 +13,7 @@ and the science packages, natively and in one WebAssembly module:
 
 - A document can carry Python (a `python:` block, or modules beside it) and call it from its
   programs.
-- A Python script can be the entry point (`arigl-py run app.py`). It is the same script that
+- A Python script can be the entry point (`ariglx run app.py`). It is the same script that
   runs under `python app.py` with #985 today.
 - The same documents and scripts run natively and in the browser. That is what puts the Python
   Ariadne demos and GRL-SNAM's demos in an `arigl` page.
@@ -56,34 +56,34 @@ The risks are in §9.
 
 ## 2. Names
 
-**Recommendation: `ari-py`, `arigl-py`, `arisrv-py`, and the browser package `arigl-py-web`.**
+**`arix`, `ariglx`, `arisrvx`, and the browser package `ariglx-web`** (chosen in review).
 
-- This is the pattern `arigl-web` already set: the base name says which runtime, and the suffix
-  says what the variant adds.
+- The `x` marks the extended host: the stock runtime plus the scripting engines. Python comes
+  first. Lua or another language joins the same binaries (§8), so the name doesn't go stale.
+- The base name says which runtime, as `arigl-web` already does: `ariglx` is arigl plus the
+  engines, and `ariglx-web` is its browser build.
 - The binary name, the cvcpkg package name and the CMake target are the same.
-- The suffix names what forces a separate binary: a pinned CPython. That means an ABI, tens of
-  MB of stdlib and packages natively, and a browser module several times arigl-web's size. The
-  stock hosts must not carry any of it.
+- What forces separate binaries is a pinned CPython: an ABI, tens of MB of stdlib and packages
+  natively, and a browser module several times arigl-web's size. The stock hosts must not carry
+  any of it.
 - There is no `-cp312` in the name. The host is an application that bundles its interpreter, so
   it pins one CPython (3.12 now), as VolRover3 does. Nobody imports it into their own Python.
-- Documents never name a binary. They ask for `python` in `requires:` (§4.1), so a rename costs
-  nothing until the recipes are published.
-- Lua doesn't get `-lua` variants (§8). It's ~300 KB of ANSI C with no ABI to pin, so once it has
-  bindings it goes into the stock hosts.
+- Documents never name a binary. They ask for `python` (later `lua`) in `requires:` (§4.1), so a
+  rename costs nothing until the recipes are published.
 
 Considered and dropped:
 
-- `aripy`, `ariglpy`, `arisrvpy`: `ariglpy` is hard to read.
+- `ari-py`, `arigl-py`, `arisrv-py`: they say Python, so a Lua engine would make them wrong.
+- `aripy`, `ariglpy`, `arisrvpy`: the same problem, and `ariglpy` is hard to read.
 - `pyari`, `pyarigl`: these read as Python packages for ari, which is what `pycvc_gl.ariadne`
   already is.
-- A neutral suffix (`arix`): it says nothing about the one thing that makes the variant
-  different.
+- `daedalus`, `daedalus-gl`, `daedalus-srv`: a brand of its own, but long and far from `ari`.
 
-`arisrv-py` links pycvc core, not pycvc_gl: the relay has no GL.
+`arisrvx` links pycvc core, not pycvc_gl: the relay has no GL.
 
 ## 3. Architecture
 
-### 3.1 One engine, linked into each `-py` host
+### 3.1 One engine, linked into each `x` host
 
 A new library, `cvc_ari_python` (`src/cvc/ariadne/python/`), is built when
 `CVC_ARIADNE_PYTHON=ON`:
@@ -113,9 +113,9 @@ defined:
 
 | Host | Is | Adds |
 |---|---|---|
-| `arigl-py` | `arigl` | the engine, pycvc, pycvc_gl |
-| `ari-py` | `ari` | the engine, pycvc |
-| `arisrv-py` | `arisrv` | the engine, pycvc, and the script service (§6) |
+| `ariglx` | `arigl` | the engine, pycvc, pycvc_gl |
+| `arix` | `ari` | the engine, pycvc |
+| `arisrvx` | `arisrv` | the engine, pycvc, and the script service (§6) |
 
 Natively they link the prefix's shared `libcvc`, `libcvcGL` and `libpython3.12`. So the
 `_pycvc_gl` extension that Python imports binds to the **same** cvcGL as the host: one app, one
@@ -130,7 +130,7 @@ packages' install closure, so the variants are separate binaries everywhere.
 
 #985's `pycvc_gl.ariadne.Host` gets a fourth mode, `embedded`:
 
-- `Host()` inside a `-py` host returns a Host over the host's own runtime (from `_arihost`), not
+- `Host()` inside an `x` host returns a Host over the host's own runtime (from `_arihost`), not
   a new window. An explicit `mode=` that contradicts it (`"headless"` in a window) raises with a
   message that says why.
 - `pycvc_gl.ariadne.current_host()` returns that Host, or `None` under plain `python`.
@@ -140,7 +140,7 @@ packages' install closure, so the variants are separate binaries everywhere.
   browser the page owns the loop (§5.3), so `run()` returns at once and the work goes in
   `on_frame` and in functions.
 
-So one script runs both ways: `python app.py` (#985) and `arigl-py run app.py`. GRL-SNAM's
+So one script runs both ways: `python app.py` (#985) and `ariglx run app.py`. GRL-SNAM's
 Ariadne ports already have the right shape: `setup()` builds the scene and `step(dt)` drives
 it.
 
@@ -170,7 +170,7 @@ modules aren't sub-interpreter safe. VolRover3 reached the same conclusion
 | `python.console` | the console widget (§4.5) |
 
 `(has? "python")` works as for any token, and `ari check` lists them. On a stock host a document
-that requires `python` fails with one error that names the `-py` host to use.
+that requires `python` fails with one error that names the `x` host to use.
 
 ### 4.2 The `python:` block
 
@@ -225,14 +225,14 @@ the DSL it has no chroot. So:
 
 ### 4.4 A script as the entry point
 
-- `arigl-py run app.py [args]` runs `app.py` as `__main__`, with `sys.argv` set to
+- `ariglx run app.py [args]` runs `app.py` as `__main__`, with `sys.argv` set to
   `[app.py, args...]`. Typically the script does `host = Host()`, registers functions, then
   `host.load("app.ari")` and `host.run()`.
-- `arigl-py run -m package.module [args]` does the same for a module, e.g.
-  `arigl-py run -m grl_snam.ariadne live austin-freedrive`.
-- `arigl-py run main.ari` loads a document as usual.
-- `arigl-py python [args]` is the embedded interpreter as a plain `python3` (a REPL, `-c`, `-m`),
-  so scripts and tests use exactly the host's packages, e.g. `arigl-py python -m pytest`.
+- `ariglx run -m package.module [args]` does the same for a module, e.g.
+  `ariglx run -m grl_snam.ariadne live austin-freedrive`.
+- `ariglx run main.ari` loads a document as usual.
+- `ariglx python [args]` is the embedded interpreter as a plain `python3` (a REPL, `-c`, `-m`),
+  so scripts and tests use exactly the host's packages, e.g. `ariglx python -m pytest`.
 
 ### 4.5 The console widget
 
@@ -244,11 +244,11 @@ the DSL it has no chroot. So:
 These replace VolRover3's `PyConsoleDock`. A console runs full Python, so only a trusted
 document (§4.3) can mount one.
 
-## 5. The browser: `arigl-py-web`
+## 5. The browser: `ariglx-web`
 
 ### 5.1 One module
 
-A recipe `arigl-py-web` (`cvcpkg/recipes/arigl-py-web/build-wasm.sh`) does:
+A recipe `ariglx-web` (`cvcpkg/recipes/ariglx-web/build-wasm.sh`) does:
 
 - arigl-web's closure compile from the repo root, with `-DCVC_ARIADNE_PYTHON=ON`;
 - the Python link from [`link-host.sh`](../../bindings/pycvc/wasm/link-host.sh):
@@ -294,7 +294,7 @@ arigl's browser loop yields with `emscripten_sleep(0)` under Asyncify (the
   the module and slow the interpreter a lot.
 - Phase W1 measures it. The fallbacks, in order:
   1. `ASYNCIFY_REMOVE` for CPython's eval, which is safe because Python never sleeps;
-  2. drive the `-py` page from `emscripten_set_main_loop` instead of Asyncify;
+  2. drive the `ariglx-web` page from `emscripten_set_main_loop` instead of Asyncify;
   3. JSPI, where the browser has it.
 
   `-sASYNCIFY_IGNORE_INDIRECT` stays a checklist, never a default (CVCGL_WASM.md).
@@ -307,7 +307,7 @@ arigl's browser loop yields with `emscripten_sleep(0)` under Asyncify (the
     interpreter executable (cy-pca/cvcpkg#109) needs a republish.
   - pycvc-gl-cp312 has no wasm-mt build. The lean tier needs only this one.
 
-## 6. `arisrv-py`
+## 6. `arisrvx`
 
 ### 6.1 Server documents first, in stock arisrv
 
@@ -320,7 +320,7 @@ chroot, and bound writes.
 
 ### 6.2 Python on the server
 
-`arisrv-py` adds the engine with pycvc core.
+`arisrvx` adds the engine with pycvc core.
 
 - **Never on the relay loop.** The relay steps rooms in fixed substeps and fans out poses and
   media, so a slow call there is everyone's lag.
@@ -328,7 +328,7 @@ chroot, and bound writes.
   paths and gates as everything else (`room_write_gate`, bound writes), and results land on a
   later relay tick.
 - **Operator code is trusted**, as the operator's own process: the server document's `python:`
-  block, or `arisrv-py --python main.py`.
+  block, or `arisrvx --python main.py`.
 
 ### 6.3 Code from clients, three tiers
 
@@ -389,7 +389,7 @@ Clients are untrusted. In order of preference:
   - caps on result and print size;
   - plain values only, in and out.
 - **The hard stop, outside the worker:**
-  - every job runs in a pool of `arisrv-py worker` processes with `RLIMIT_AS` and `RLIMIT_CPU`;
+  - every job runs in a pool of `arisrvx worker` processes with `RLIMIT_AS` and `RLIMIT_CPU`;
   - the workers have no network (unshare or seccomp on Linux, a Job Object on Windows);
   - a worker is recycled after N jobs;
   - a job that overruns its deadline gets its worker killed, and the client gets an error. That
@@ -408,7 +408,7 @@ RestrictedPython stays for clients that need Python's libraries.
 ## 7. The demos and VolRover
 
 - **GRL-SNAM's Ariadne ports** (`grl_snam/ariadne/`: `live`, `fleet`, ...) run on #985 under
-  `python`. Natively they run on `arigl-py` unchanged (`arigl-py run -m grl_snam.ariadne ...`).
+  `python`. Natively they run on `ariglx` unchanged (`ariglx run -m grl_snam.ariadne ...`).
 - **In the browser they need:**
   - **no torch at run time.** `austin_freedrive`, `austin_learned` and `austin_planner` import
     torch to load a checkpoint and run inference. Route that through libcvc's native nav (the
@@ -434,8 +434,10 @@ RestrictedPython stays for clients that need Python's libraries.
   Python-specific typemaps (callables, numpy, PyCapsule) need Lua twins. sol2 isn't on cvcpkg.
 - **Engine.** A `lua` `script_engine`, with `requires: [lua]`, a `lua:` block, and exports as
   host functions: the same shape as Python.
-- **Hosting.** Compiled into the stock ari, arigl, arisrv and arigl-web once bound. `lua` 5.4.9
-  is on cvcpkg for every platform, wasm included.
+- **Hosting.** Compiled into `arix`, `ariglx`, `arisrvx` and `ariglx-web` beside Python once
+  bound. `lua` 5.4.9 is on cvcpkg for every platform, wasm included. Lua is ~300 KB of ANSI C
+  with no ABI to pin, so it could also go into the stock hosts later, for documents that want
+  Lua without Python. That is a separate decision.
 - **Sandbox:**
   - `lua_newstate` with an allocator that enforces a byte cap;
   - a `lua_sethook` count hook for an instruction budget;
@@ -453,13 +455,12 @@ RestrictedPython stays for clients that need Python's libraries.
    headless. W1's first milestone is a browser page with a window, checked in headless Chrome
    with the CDP driver from the conference work.
 4. **Native packages are Linux-only.** `pycvc-cp312` and `pycvc-gl-cp312` are Linux-only on
-   cvcpkg.org, so `arigl-py` on Windows and macOS waits on those packages. The Windows pycvc
+   cvcpkg.org, so `ariglx` on Windows and macOS waits on those packages. The Windows pycvc
    rebuild has known blockers.
 5. **Startup time.** CPython init, then importing numpy and pycvc_gl, in the browser. Measure,
    then precompile `.pyc` into the zip or freeze the hot modules.
 6. **Native trust UX** (§4.3). Is `--python-allow` enough, or do documents need signing?
-7. **Names** (§2). Decide before the first recipe is published.
-8. **RestrictedPython 8.4 on wasm.** It's noarch on cvcpkg; confirm it imports in the browser
+7. **RestrictedPython 8.4 on wasm.** It's noarch on cvcpkg; confirm it imports in the browser
    build (it matters there only for §4.3's untrusted snippets).
 
 ## 10. Phases
@@ -467,17 +468,17 @@ RestrictedPython stays for clients that need Python's libraries.
 | Phase | What | Needs | Size |
 |---|---|---|---|
 | P0 | #985 merged and released, so `Host`, functions with values and `AriApp` are on cvcpkg.org | review | S |
-| P1 | The engine, `_arihost`, `Host` embedded mode, the `python:` block, the `python` tokens, `--python-allow`, `run app.py` / `run -m` / `python`; `arigl-py` and `ari-py`, native Linux, with recipes. Tests: `ari test` documents that call Python, pycvc's tests through the embedded interpreter, GRL-SNAM's ports on `arigl-py` | P0 | L |
+| P1 | The engine, `_arihost`, `Host` embedded mode, the `python:` block, the `python` tokens, `--python-allow`, `run app.py` / `run -m` / `python`; `ariglx` and `arix`, native Linux, with recipes. Tests: `ari test` documents that call Python, pycvc's tests through the embedded interpreter, GRL-SNAM's ports on `ariglx` | P0 | L |
 | P2 | `py_console`, then `py_editor` with jedi | P1 | M |
-| W1 | `arigl-py-web` wasm: the combined link, a browser smoke in headless Chrome, size and Asyncify numbers, lean vs full | P1 | L |
+| W1 | `ariglx-web` wasm: the combined link, a browser smoke in headless Chrome, size and Asyncify numbers, lean vs full | P1 | L |
 | W2 | The wasm C-extension manifest convention in cvcpkg; then pillow and matplotlib for wasm | W1 | M each |
 | W3 | wasm-mt: vtk-python wasm-mt republished, pycvc-gl wasm-mt | W1, cy-pca/cvcpkg#109 | M |
-| N1 | `arigl-py` on Windows and macOS | pycvc packages for those platforms | M |
+| N1 | `ariglx` on Windows and macOS | pycvc packages for those platforms | M |
 | D1 | GRL-SNAM in the browser: torch-free inference, a demo page | W1 | M |
 | D2 | VolRover gap audit, then VolRover as an Ariadne app | P2 | L |
 | S0 | Server documents in stock arisrv (`--doc`) | — | M |
-| S1 | `arisrv-py`: the engine on a script thread, operator Python | S0, P1 | M |
+| S1 | `arisrvx`: the engine on a script thread, operator Python | S0, P1 | M |
 | S2 | `room-call`: functions clients may call | S1 | M |
 | S3 | Client DSL programs | S0 | S |
 | S4 | Restricted client Python in worker processes | S2 | L |
-| L1 | Lua bindings (SWIG), the Lua engine in the stock hosts, Lua for client code on arisrv | the `script_engine` seam from P1 | L |
+| L1 | Lua bindings (SWIG), the Lua engine in the `x` hosts, Lua for client code on `arisrvx` | the `script_engine` seam from P1 | L |
