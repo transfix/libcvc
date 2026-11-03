@@ -1034,6 +1034,28 @@ CVC_HD inline void dyn_spin_ph_rhs(const dyn_bike_params &p, const dyn_spin_stat
   xdot[0] = xdot[0] - S(p.m) * S(p.g) * grade;
 }
 
+// Q, every force on x but the structure's, at the state: -R dH/dx + G u + f_eps - m g grade e_x
+// on (vx, vy, r, om_f, om_r)'s momenta, so dyn_spin_ph_rhs is J dH/dx + Q. A discrete-gradient
+// step takes J and Q at its midpoint; dH/dx^T Q there is dyn_spin_ph_rates_at's balance, supplied -
+// braked - dissipated - slip + floor + grade, so its books close with those rates.
+template <class S>
+CVC_HD inline void dyn_spin_ph_forces_at(const dyn_bike_params &p, const dyn_spin_state<S> &s,
+                                         S grade, S Q[5]) {
+  S R[5][5], G[5][2], u[2], f[5];
+  dyn_spin_ph_R(p, s, R);
+  dyn_spin_ph_G(G);
+  dyn_spin_ph_input(p, s, u);
+  dyn_spin_ph_floor(p, s, f);
+  const S e[5] = {s.b.vx, s.b.vy, s.b.r, s.om_f, s.om_r};
+  for (int i = 0; i < 5; ++i) {
+    S acc = G[i][0] * u[0] + G[i][1] * u[1] + f[i];
+    for (int j = 0; j < 5; ++j)
+      acc = acc - R[i][j] * e[j];
+    Q[i] = acc;
+  }
+  Q[0] = Q[0] - S(p.m) * S(p.g) * grade;
+}
+
 // The power balance at a state: dH/dt = supplied - braked - dissipated - slip + floor + grade.
 template <class S> struct dyn_spin_ph_rates {
   S dissipated; // v^T R_body v >= 0: the tires' lateral slip, drag and rolling resistance
