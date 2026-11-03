@@ -3189,7 +3189,10 @@ template <class S> void a_watch_resolves_under_its_own_root() {
   tree("x").value("0");
   const boost::shared_ptr<cvc::state> doc = tree.sharedChild("wroot.doc");
   S sched;
+  EXPECT_EQ(static_cast<scheduler_base &>(sched).watch_root(), nullptr);
   sched.set_watch_root(&tree);
+  // What state-watch asks before it sets a watch root (S0.md section 0, item 20).
+  EXPECT_EQ(static_cast<scheduler_base &>(sched).watch_root(), &tree);
   environment_ptr env = builtins::make_default_environment();
   env->set("box", make_dict({{"doc", value_t{int64_t{0}}}, {"top", value_t{int64_t{0}}}}));
   execute_options opts;
