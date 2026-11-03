@@ -358,6 +358,31 @@ TEST(DataJob, IsolatingCopyKeepsSharingAndCycles) {
   cyclic->clear();
 }
 
+TEST(DataJob, IsolatingCopyRefusesOnlyAnInstancesShape) {
+  // An object instance has the shape defclass and make_exception give it: "__class__" first, and
+  // its class's "__name__" first, a class of any size. Any other dict holding a "__class__" key is
+  // data, and is copied (R0-mid semantics 4).
+  const value_t box = make_dict({{"__name__", value_t{std::string("Box")}}});
+  // JSON's {"__class__": {"a": 1}}; "__class__" not first; an empty "class".
+  for (const value_t &plain : {make_dict({{"__class__", make_dict({{"a", value_t{1}}})}}),
+                               make_dict({{"a", value_t{1}}, {"__class__", box}}),
+                               make_dict({{"__class__", make_dict()}})}) {
+    SCOPED_TRACE(to_string(plain));
+    const value_t c = isolate(plain);
+    EXPECT_NE(std::get<dict_ptr>(c.v), std::get<dict_ptr>(plain.v));
+    EXPECT_TRUE(values_equal(c, plain));
+  }
+  // A user class with many methods is still a class.
+  const value_t big = make_dict({{"__name__", value_t{std::string("Big")}},
+                                 {"a", value_t{1}},
+                                 {"b", value_t{2}},
+                                 {"c", value_t{3}},
+                                 {"d", value_t{4}}});
+  EXPECT_EQ(isolate_refusal(make_dict({{"__class__", big}})), refusal_text("object instance"));
+  EXPECT_EQ(isolate_refusal(make_list({make_dict({{"__class__", box}, {"x", value_t{1}}})})),
+            refusal_text("object instance") + " (nested in a list)");
+}
+
 TEST(DataJob, ShareModeStillSharesClosures) {
   // Share mode (state-data-get's copy, async arguments) is as before, but for the built-in class
   // dicts: it refuses nothing, shares everything that is not a list or dict, copies every other
@@ -414,6 +439,175 @@ TEST(DataJob, CopyNamesItsCallerAtTheDeadline) {
   EXPECT_EQ(timeout_of(*make_copy_job(v)), "state-data-get: evaluation exceeded timeout");
   EXPECT_EQ(timeout_of(*make_copy_job(v, copy_mode::isolate, "state-data-set")),
             "state-data-set: evaluation exceeded timeout");
+}
+
+// ---- values restored from a snapshot ---------------------------------------------------
+
+namespace {
+
+// An async scheduler with the state intrinsics on the app tree, as a host has one.
+struct intrinsics_world {
+  async_scheduler sched;
+  process_ptr proc = make_process();
+  intrinsics_context ictx;
+  environment_ptr env = builtins::make_default_environment();
+
+  explicit intrinsics_world(cvc::state &tree) {
+    ictx.sched = &sched;
+    ictx.proc = proc;
+    apply_chroot(ictx, tree, "");
+    register_intrinsics(env, &ictx);
+  }
+  int submit(const std::string &script) {
+    execute_options opts;
+    opts.env = environment::extend(env);
+    opts.max_time = 60.0;
+    const int pid = sched.execute(script, opts);
+    adopt(pid);
+    return pid;
+  }
+  void adopt(int pid) {
+    ictx.pid = pid;
+    proc->pid = pid;
+  }
+  // Step until `done`, at most `max` steps.
+  template <class Done> bool step_until(Done done, int max = 100000) {
+    for (int i = 0; i < max && !done(); ++i) {
+      sched.drain_ingress();
+      sched.sync_step();
+    }
+    return done();
+  }
+  bool finished(int pid) const {
+    const auto info = sched.get_process_info(pid);
+    return !info || is_finished(info->status);
+  }
+  std::string outcome(int pid) const {
+    if (const auto r = sched.get_result(pid))
+      return to_string(*r);
+    return "<" + sched.get_exit_error(pid).value_or("no result") + ">";
+  }
+};
+
+std::string value_at(cvc::state &root, const std::string &path) {
+  cvc::state *node = root.findDescendant(path);
+  return node ? node->value() : std::string();
+}
+
+} // namespace
+
+TEST(DataJob, ARestoredBuiltinClassIsTheBuiltinOne) {
+  // A snapshot writes a built-in class dict as data, its init as a native that decodes as nil.
+  // Decoded, it is that class again: read-only, and shared by the isolating copy, so a restored
+  // exception is stored as one made here would be (R0-mid semantics 3).
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  for (const std::string &name : exception_class_names()) {
+    SCOPED_TRACE(name);
+    const value_t exc = make_exception(exception_class(name), "m");
+    encode_value(root("snap.each." + name), exc);
+    const value_t restored = decode_value(root("snap.each." + name));
+    EXPECT_NE(std::get<dict_ptr>(restored.v), std::get<dict_ptr>(exc.v));
+    EXPECT_EQ(class_of_instance(restored), exception_class(name));
+    const value_t stored = isolate(make_list({restored}));
+    EXPECT_EQ(class_of_instance((*std::get<list_ptr>(stored.v))[0]), exception_class(name));
+  }
+  // A class dict alone (an environment's ValueError.__cls_dict__), and one deep enough to be
+  // written into the spill table.
+  encode_value(root("snap.cls"), value_t{exception_class("DeadlockError")});
+  EXPECT_EQ(std::get<dict_ptr>(decode_value(root("snap.cls")).v), exception_class("DeadlockError"));
+  encode_value(root("snap.deep"), nested_list(20, value_t{exception_class("KeyError")}));
+  value_t at = decode_value(root("snap.deep"));
+  for (int i = 0; i < 20; ++i)
+    at = value_t{(*std::get<list_ptr>(at.v))[0]};
+  EXPECT_EQ(std::get<dict_ptr>(at.v), exception_class("KeyError"));
+}
+
+TEST(DataJob, ARestoredUserClassNamedLikeABuiltinStaysAUserClass) {
+  // Only the built-in shape is relinked: a class with an init or finalize of its own, or whose
+  // superclass is not the built-in one, stays the user class it was, and its instance is refused.
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  const value_t own_init{std::make_shared<closure>()};
+  const value_t native{native_fn{[](std::span<const value_t>) -> value_t { return nil_value; }}};
+  const value_t exception{exception_class("Exception")};
+  const value_t named{std::string("ValueError")};
+  const std::vector<value_t> classes = {
+      // (defclass ValueError Exception (init (self m) ...))
+      make_dict({{"__name__", named}, {"__super__", exception}, {"init", own_init}}),
+      // (defclass ValueError Exception): inherited init and finalize
+      make_dict(
+          {{"__name__", named}, {"__super__", exception}, {"init", native}, {"finalize", native}}),
+      // Exception's keys, but not its name
+      make_dict({{"__name__", named}, {"init", native}}),
+      // its superclass a user class named Exception
+      make_dict({{"__name__", named},
+                 {"__super__",
+                  make_dict({{"__name__", value_t{std::string("Exception")}}, {"init", own_init}})},
+                 {"init", native}}),
+      // Exception's shape, but an init that is no native's nil
+      make_dict({{"__name__", value_t{std::string("Exception")}}, {"init", value_t{1}}}),
+  };
+  for (std::size_t i = 0; i < classes.size(); ++i) {
+    SCOPED_TRACE(i);
+    const std::string path = "snap.user." + std::to_string(i);
+    encode_value(root(path), make_dict({{"__class__", classes[i]}, {"message", value_t{"m"}}}));
+    const value_t restored = decode_value(root(path));
+    const dict_ptr cls = class_of_instance(restored);
+    ASSERT_NE(cls, nullptr);
+    EXPECT_FALSE(is_builtin_class_dict(cls.get()));
+    EXPECT_EQ(isolate_refusal(restored), refusal_text("object instance"));
+  }
+}
+
+TEST(DataStepsStateDataSet, ARestoredProcessStoresItsCaughtException) {
+  // A process holding a caught ValueError is snapshotted on one scheduler and restored on another
+  // (a migration's path). It still catches it by class, and state-data-set stores it. A user class
+  // named ValueError comes back as that user class, and its instance is still refused.
+  const struct {
+    const char *define;
+    const char *expected;
+  } programs[] = {
+      {"", R"(("caught" "ValueError" "read-only" "stored"))"},
+      {R"((defclass ValueError Exception (init (self m) (set-attr self "message" m) self)))",
+       R"(("caught" "ValueError" "changed" "state-data-set: cannot store an object instance"))"},
+  };
+  for (const auto &p : programs) {
+    SCOPED_TRACE(p.define);
+    cvc::app app;
+    cvc::state &root = cvc::state::instance(app);
+    intrinsics_world a(root), b(root);
+    const int pid = a.submit("(begin " + std::string(p.define) + R"(
+        (set e (try (raise (ValueError "v")) (catch (x) x)))
+        (state-set "ready" "1")
+        (while (not (state-exists "go")) nil)
+        (list (try (raise e) (catch (ValueError y) "caught"))
+              (get-attr (get-attr e "__class__") "__name__")
+              (try (begin (set-attr (get-attr e "__class__") "x" 1) "changed")
+                   (catch (TypeError t) "read-only"))
+              (try (begin (state-data-set "k" e) "stored") (catch (z) (get-attr z "message"))))))");
+    ASSERT_TRUE(a.step_until([&] { return value_at(root, "ready") == "1"; }));
+    ASSERT_TRUE(a.sched.snapshot(pid, root("snap")));
+    a.sched.kill(pid);
+    const int moved = b.sched.restore(root("snap"), b.env);
+    b.adopt(moved);
+    root("go").value(std::string("1"));
+    ASSERT_TRUE(b.step_until([&] { return b.finished(moved); }));
+    EXPECT_EQ(b.outcome(moved), p.expected);
+  }
+}
+
+TEST(DataStepsStateDataSet, AJsonDictWithAClassKeyIsStored) {
+  // Parsed JSON with a "__class__" key is data, whatever that key holds (R0-mid semantics 4).
+  cvc::app app;
+  intrinsics_world w(cvc::state::instance(app));
+  const int pid = w.submit(R"((begin
+      (state-data-set "a" (json-parse "{\"__class__\": {\"a\": 1}}"))
+      (state-data-set "b" (json-parse "{\"x\": 1, \"__class__\": {\"__name__\": \"Box\"}}"))
+      (list (state-data-get "a") (state-data-get "b"))))");
+  ASSERT_TRUE(w.step_until([&] { return w.finished(pid); }));
+  EXPECT_EQ(w.outcome(pid),
+            R"(({"__class__": {"a": 1}} {"x": 1, "__class__": {"__name__": "Box"}}))");
 }
 
 // ---- the evaluator ------------------------------------------------------------

@@ -5,6 +5,8 @@
                       cvc::state subtrees.
 */
 
+#include "builtin_class.h"
+
 #include <algorithm>
 #include <charconv>
 #include <chrono>
@@ -12,6 +14,7 @@
 #include <cstdlib>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/detail/lock_home.h>
+#include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/state_value_codec.h>
@@ -169,6 +172,37 @@ std::optional<std::size_t> ref_index(const std::string &ref, std::size_t size) {
   if (ec != std::errc{} || end != ref.data() + ref.size() || i >= size)
     return std::nullopt;
   return i;
+}
+
+// A decoded dict with exactly the shape of a built-in exception class dict is that class. The
+// writer writes the shared, read-only dict as data and its init native decodes as nil, so a
+// restored exception's class would otherwise be a copy: still caught by its chain of names, but
+// not read-only, and refused by state-data-set as an object instance (S0.1, S0.2). The match is
+// exact: the built-in's keys in its order, its __super__ the parent's dict (relinked already, as
+// it is decoded first), and init nil. A user class has an init or a finalize of its own, so one
+// named ValueError is never taken for the built-in.
+void relink_builtin_class(value_t &v) {
+  const auto *d = std::get_if<dict_ptr>(&v.v);
+  if (!d || !*d || !detail::is_class_dict_shape(**d))
+    return;
+  const auto *name = std::get_if<std::string>(&(*d)->front().second.v);
+  dict_ptr builtin = name ? exception_class(*name) : nullptr;
+  if (!builtin || builtin->size() != (*d)->size())
+    return;
+  for (std::size_t i = 1; i < builtin->size(); ++i) {
+    const auto &[key, val] = (**d)[i];
+    const auto &[want_key, want] = (*builtin)[i];
+    if (key != want_key)
+      return;
+    if (key == "__super__") {
+      const auto *super = std::get_if<dict_ptr>(&val.v);
+      if (!super || *super != std::get<dict_ptr>(want.v))
+        return;
+    } else if (!val.is_nil()) { // init: a native function decodes as nil
+      return;
+    }
+  }
+  v = value_t(std::move(builtin));
 }
 
 // One encode walk, from the node encode_value or encode_environment was called on.
@@ -384,6 +418,7 @@ private:
     environment *env;           // scope
     cvc::state *root;
     bool own_roots;
+    value_t *out = nullptr; // dict: the value holding it, relinked when it is done
   };
 
   struct spill_table {
@@ -398,14 +433,15 @@ private:
     cvc::state *root;
   };
 
+  // Every element slot is reserved up front, so a slot (a frame's `out`) stays where it is.
   void push(kind what, cvc::state &items, std::vector<value_t> *list, ordered_map *dict,
-            environment *env, cvc::state *root, bool own_roots) {
+            environment *env, cvc::state *root, bool own_roots, value_t *out = nullptr) {
     const std::size_t n = state_list(items).size();
     if (list)
       list->reserve(n);
     else if (dict)
       dict->reserve(n);
-    stack_.push_back({what, &items, 0, n, list, dict, env, root, own_roots});
+    stack_.push_back({what, &items, 0, n, list, dict, env, root, own_roots, out});
   }
 
   // Read the value at `node` into `out`: a leaf now, anything with elements as an empty value
@@ -440,7 +476,7 @@ private:
       auto entries = std::make_shared<ordered_map>();
       out = value_t(entries);
       if (has_child(*src, "__entries__"))
-        push(kind::dict, (*src)("__entries__"), nullptr, entries.get(), nullptr, root, false);
+        push(kind::dict, (*src)("__entries__"), nullptr, entries.get(), nullptr, root, false, &out);
     } else if (type == "closure") {
       begin_closure(*src, out, root);
     } else {
@@ -517,6 +553,8 @@ private:
       while (!stack_.empty()) {
         frame &f = stack_.back();
         if (f.next == f.size) {
+          if (f.out)
+            relink_builtin_class(*f.out);
           stack_.pop_back();
           continue;
         }
