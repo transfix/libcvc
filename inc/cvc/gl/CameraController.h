@@ -14,6 +14,7 @@
 #include <cvc/state/state_object.h>
 #include <memory>
 #include <string>
+#include <vector>
 
 class vtkCamera;                 // VTK (global namespace)
 class vtkRenderer;               // VTK (global namespace)
@@ -122,6 +123,22 @@ public:
   void setPrimaryDragPans(bool on);
   bool primaryDragPans() const;
 
+  // Make the PRIMARY drag STEER instead of orbit, in Orbit without mouse look: a press on the
+  // scene and the drag that follows turn nothing here, and steerPoint() says where the pointer is
+  // while the button is held, so a host can turn what it walks toward the point under it. The
+  // RIGHT button (two fingers, through TouchGestures) turns the view instead; it does in any case.
+  // A release near its press is still a click (takeClick). State "settings.primary_drag_steers";
+  // off by default.
+  void setPrimaryDragSteers(bool on);
+  bool primaryDragSteers() const;
+  // The primary button is down in a press that steers, from the press on: the interactor begins
+  // no drag (no turn of the view) for it.
+  bool steering() const;
+  // While a steering drag is held, once it has gone further than a click's slop (4 px) from its
+  // press: true, and where the pointer is (VTK display coordinates, origin bottom-left, as
+  // takeClick's).
+  bool steerPoint(int &x, int &y) const;
+
   // Move the eye along its own view direction by `steps` (positive = forward).
   // This is what "zoom" has to mean in FLY mode, where there is no orbit centre
   // to pull toward and mouseWheel() adjusts movement SPEED instead. Step size
@@ -206,15 +223,22 @@ public:
   void mouseLook(int dxPixels, int dyPixels);
   void mouseWheel(double steps);
   void beginDrag();
+  // The right button's drag: it turns the view (Orbit), whatever the primary drag does.
+  void beginSecondaryDrag();
+  void endSecondaryDrag();
   // Primary-button press / release positions (VTK display coordinates: origin bottom-left), from
   // the attached interactor or fed by a host. A release within 4 px of its press is a CLICK -- the
   // drag it also began barely moved the camera -- and takeClick() returns the latest click's
   // position once (then clears it), so a host can act on clicks in the scene (e.g. "face there")
   // while drags keep orbiting. A click the UI overlay swallowed never reaches here.
   void notePointerDown(int x, int y);
+  void notePointerMove(int x, int y); // where a steering drag's pointer is now
   void notePointerUp(int x, int y);
   bool takeClick(int &x, int &y);
   void endDrag();
+  // A gesture took over the press (a second finger landed, TouchGestures): it is no click when it
+  // comes up, and its drag, turning or steering, ends here.
+  void cancelPointer();
 
   // The app context this controller was built with. Together with the inherited
   // stateName() it lets a UI bind widgets to "settings.*" without the caller
@@ -254,10 +278,13 @@ public:
   bool mouseLookEnabled() const;
   // Mouse look is on and the pointer is captured: the view follows the mouse.
   bool mouseLooking() const;
-  // Whether the pointer is over a UI window (an overlay sets this every frame). In the browser a
-  // press on the canvas takes the pointer lock in the press itself -- the browser may refuse a
-  // request made later from the frame -- unless the press is the UI's.
-  void setPointerOverUi(bool over);
+  // Where the UI's windows are: rectangles {x0, y0, x1, y1, ...} in the window's pixels, origin
+  // top-left (an overlay sets them every frame). In the browser a press on the canvas takes the
+  // pointer lock in the press itself -- the browser may refuse a request made later from the
+  // frame -- unless it lands in one of them. The page tests the press's own position, so a
+  // press that comes before the frame has seen the pointer arrive over a window is still the
+  // UI's.
+  void setUiRegions(std::vector<float> rects);
 
   // Drop every currently-held movement key. Call when input focus leaves the
   // viewport (e.g. a UI overlay takes the keyboard): a key pressed before the
