@@ -1186,6 +1186,82 @@ int main() {
     view.setCamera(0, -300, 200, 0, 0, 0, 0, 0, 1, 40.0);
     cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
     chk(sg.shadowFocused(), "tick_scene aimed the shadow maps at the camera's focal point");
+    // The LOD ladders under a node.
+    auto ladders_under = [&](const char *name) {
+      std::vector<std::shared_ptr<cvc::gl::LodGraphicsNode>> v;
+      if (auto g = sg.getGraphics(name))
+        for (const auto &c : g->getGraphicsChildren())
+          if (auto l = std::dynamic_pointer_cast<cvc::gl::LodGraphicsNode>(c))
+            v.push_back(l);
+      return v;
+    };
+    // The ground draws as a LOD ladder per chunk under the terrain node, each rung the terrain's
+    // own surface at a coarser stride: close by the chunk underfoot draws every sample, from far
+    // off every chunk draws a coarser rung, and no chunk is ever more than a rung off a neighbour.
+    {
+      const auto chunks = ladders_under("world");
+      chk(chunks.size() == 4, "generated_world drew its 400 m ground as 2 x 2 LOD chunks");
+      bool styled = !chunks.empty();
+      for (const auto &c : chunks)
+        for (int k = 0; k < c->rungCount(); ++k)
+          styled = styled && c->rungCount() == 5 && !c->rung(k)->castsShadow();
+      chk(styled, "every chunk has five rungs, each with the node's casts_shadow: false");
+      chk(terrain && (!terrain->getGeometry() || terrain->getGeometry()->const_points().empty()),
+          "the terrain node itself draws nothing: its chunks do");
+      auto rungs = [&]() {
+        int lo = 99, hi = -1;
+        for (const auto &c : chunks) {
+          lo = std::min(lo, c->activeRung());
+          hi = std::max(hi, c->activeRung());
+        }
+        return std::make_pair(lo, hi);
+      };
+      view.setCamera(0, -60, 40, 0, 0, 0, 0, 0, 1, 40.0);
+      view.render();
+      cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+      chk(rungs().first == 0 && rungs().second <= 1,
+          "close by, the chunks underfoot draw every sample and the rest are within a rung");
+      view.setCamera(0, -4000, 3000, 0, 0, 0, 0, 0, 1, 40.0);
+      view.render();
+      cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+      chk(rungs().first > 0, "5 km off, every chunk draws a coarser rung");
+      view.setCamera(0, -300, 200, 0, 0, 0, 0, 0, 1, 40.0);
+      view.render();
+      cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+    }
+    // The trees and rocks are a LOD ladder per ground cell: close by, rung 0 (the full trees);
+    // from far off, a coarser rung -- the same trees, fewer triangles.
+    {
+      auto ladders = ladders_under("world_props");
+      for (const char *layer : {"world_foliage", "world_needles"})
+        for (const auto &l : ladders_under(layer))
+          ladders.push_back(l);
+      chk(!ladders.empty(), "generated_world drew its props as per-cell LOD ladders");
+      bool three = !ladders.empty();
+      for (const auto &l : ladders)
+        three = three && l->rungCount() == 3;
+      chk(three, "every prop ladder has three rungs");
+      auto rungs = [&]() {
+        int lo = 99, hi = -1;
+        for (const auto &l : ladders)
+          if (l->rungTriangles(0) > 0) { // a wood ladder (a needle ladder's rung 0 is lines)
+            lo = std::min(lo, l->activeRung());
+            hi = std::max(hi, l->activeRung());
+          }
+        return std::make_pair(lo, hi);
+      };
+      view.setCamera(0, -60, 40, 0, 0, 0, 0, 0, 1, 40.0);
+      view.render();
+      cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+      chk(rungs().first == 0, "close by, the nearest cells draw the full trees");
+      view.setCamera(0, -4000, 3000, 0, 0, 0, 0, 0, 1, 40.0);
+      view.render();
+      cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+      chk(rungs().first > 0, "5 km off, every cell draws a coarser rung");
+      view.setCamera(0, -300, 200, 0, 0, 0, 0, 0, 1, 40.0);
+      view.render();
+      cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+    }
     // A live edit regenerates the world in place, as a task on the app's scheduler: the old world
     // stays until the new one is made, then a bigger world, a bigger ground.
     const std::string busy_key = cvc::ariadne::resolve_bind("gw", "world.busy");
@@ -1200,13 +1276,17 @@ int main() {
       }
       return !busy();
     };
-    const auto pts0 = terrain ? terrain->getGeometry()->const_points().size() : 0;
+    auto ground_n = [&]() {
+      const auto &f = realized.height_fields["world"];
+      return f ? std::size_t(f->rows()) * std::size_t(f->cols()) : std::size_t(0);
+    };
+    const auto pts0 = ground_n();
     st(cvc::ariadne::resolve_bind("gw", "world.half")).value(700.0);
     cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
-    chk(busy() && terrain->getGeometry()->const_points().size() == pts0,
+    chk(busy() && ground_n() == pts0,
         "a world.half edit starts a rebuild task and keeps the old world meanwhile");
     chk(settle_world(), "the rebuild finished");
-    const auto pts1 = terrain ? terrain->getGeometry()->const_points().size() : 0;
+    const auto pts1 = ground_n();
     chk(pts1 > pts0, "a world.half edit regenerated the world in place");
     chk(st(cvc::ariadne::resolve_bind("gw", "world.progress")).value() == "100",
         "world.progress reached 100");
@@ -1216,18 +1296,20 @@ int main() {
     st(cvc::ariadne::resolve_bind("gw", "world.request")).value(std::string("stop"));
     cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
     cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
-    chk(!busy() && terrain->getGeometry()->const_points().size() == pts1 &&
+    chk(!busy() && ground_n() == pts1 &&
             st(cvc::ariadne::resolve_bind("gw", "world.status"))
                     .value<std::string>()
                     .rfind("stopped", 0) == 0,
         "stop ended the rebuild and kept the world shown");
     // A new colour repaints the shown world only.
     st(cvc::ariadne::resolve_bind("gw", "world.color")).value(3.0);
-    chk(settle_world() && terrain->getGeometry()->const_points().size() == pts1,
+    chk(settle_world() && ground_n() == pts1,
         "world.color repainted the ground as a task, the mesh untouched");
-    chk(realized.height_fields["world"]->rows() * realized.height_fields["world"]->cols() ==
-            int(pts1),
-        "the published ground follows the regenerated world");
+    {
+      const int cells = realized.height_fields["world"]->rows() - 1, per = (cells + 63) / 64;
+      chk(ladders_under("world").size() == std::size_t(per * per),
+          "the ground's chunks follow the regenerated world");
+    }
     // The generators, by name: the realizer publishes what a panel can offer, and a switch
     // regenerates; an unknown one keeps the world and says why.
     const std::string terrains =
@@ -1244,7 +1326,7 @@ int main() {
     settle_world();
     const std::string status =
         st(cvc::ariadne::resolve_bind("gw", "world.status")).value<std::string>();
-    chk(status.rfind("error:", 0) == 0 && terrain->getGeometry()->const_points().size() == pts1,
+    chk(status.rfind("error:", 0) == 0 && ground_n() == pts1,
         "an unknown terrain generator keeps the world and reports the error");
   }
 

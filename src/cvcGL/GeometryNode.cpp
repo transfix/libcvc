@@ -477,6 +477,32 @@ int GeometryNode::textureHeight() const {
   return d[1];
 }
 
+void GeometryNode::shareTexture(std::shared_ptr<const GeometryNode> source) {
+  // Owner thread, like setTexture: and `source`'s own setTexture, marshaled before this, has run
+  // by the time this reads its texture.
+  if (!source)
+    return;
+  runOnMainThread([this, source]() {
+    const GeometryNode &from = *source;
+    if (!from.m_texture) {
+      clearTexture();
+      return;
+    }
+    m_texture = from.m_texture; // the same vtkTexture: one GL texture for every mesh sharing it
+    m_textureImageData = from.m_textureImageData;
+    m_textureStorage = from.m_textureStorage;
+    const bool reflip = m_textureFlipV != from.m_textureFlipV;
+    m_textureFlipV = from.m_textureFlipV;
+    if (reflip && m_hasGeometry && m_geometry)
+      updatePolyData(*m_geometry);
+    m_actor->SetTexture(m_texture);
+    // As setTexture: the texture is the colour, unless a scalar field asks otherwise.
+    m_mapper->SetScalarVisibility(m_scalarActive && !m_useSingleColor && m_polyData &&
+                                  m_polyData->GetPointData()->GetScalars() != nullptr);
+    m_actor->Modified();
+  });
+}
+
 void GeometryNode::clearTexture() {
   // Marshaled to the owner thread: mutates shared VTK state (m_actor's texture and,
   // via updatePolyData, the shared m_polyData) that the renderer reads.
