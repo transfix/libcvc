@@ -250,6 +250,50 @@ TEST(DynSpinPH, TheVectorFieldIsThePlantsAtEverySlip) {
   }
 }
 
+// dyn_spin_ph_forces_at is the field less the structure: J dH/dx + Q is dyn_spin_ph_rhs, and
+// dH/dx^T Q is the rates' balance (the structure moves no energy), at every slip, on a grade. A
+// discrete-gradient step builds on exactly these two.
+TEST(DynSpinPH, TheForcesAreTheFieldLessTheStructure) {
+  const dyn_bike_params p = humvee(0.3);
+  std::mt19937 rng(9);
+  double worst_field = 0.0, worst_power = 0.0;
+  for (int k = 0; k < 500; ++k) {
+    const dyn_spin_state<double> s = spin_state(p, rng);
+    const double grade = (k % 3) * 0.04;
+    double Q[5], f[5], x[5], J[5][5];
+    diff::dyn_spin_ph_forces_at(p, s, grade, Q);
+    diff::dyn_spin_ph_rhs(p, s, grade, f);
+    diff::dyn_spin_ph_momentum(p, s, x);
+    diff::dyn_spin_ph_J(x, J);
+    const double e[5] = {s.b.vx, s.b.vy, s.b.r, s.om_f, s.om_r};
+    const double mg = p.m * p.g;
+    const double scale[5] = {mg, mg, mg * (p.lf + p.lr), mg * p.r_w, mg * p.r_w};
+    double eQ = 0.0, eQ_abs = 0.0;
+    for (int i = 0; i < 5; ++i) {
+      double Je = 0.0;
+      for (int j = 0; j < 5; ++j)
+        Je += J[i][j] * e[j];
+      worst_field = std::max(worst_field, std::fabs(Je + Q[i] - f[i]) / scale[i]);
+      eQ += e[i] * Q[i];
+      eQ_abs += std::fabs(e[i] * Q[i]);
+    }
+    const diff::dyn_spin_ph_rates<double> r = diff::dyn_spin_ph_rates_at(p, s, grade);
+    const double balance = r.supplied - r.braked - r.dissipated - r.slip + r.floor + r.grade;
+    worst_power = std::max(worst_power, std::fabs(eQ - balance) / (eQ_abs + 1.0));
+    // With the external port's wrench, Q gains it on the body and nothing on the wheels.
+    const double W[3] = {0.3 * mg, -0.2 * mg, 0.1 * mg * p.lf};
+    double QW[5];
+    diff::dyn_spin_ph_forces_at(p, s, grade, QW, W);
+    for (int i = 0; i < 5; ++i)
+      EXPECT_EQ(QW[i], i < 3 ? Q[i] + W[i] : Q[i]) << "momentum " << i;
+  }
+  std::printf("  J dH/dx + Q vs the field: worst %.1e of m g; dH/dx^T Q vs the rates: %.1e of "
+              "its terms\n",
+              worst_field, worst_power);
+  EXPECT_LT(worst_field, 1e-12);
+  EXPECT_LT(worst_power, 1e-12);
+}
+
 namespace {
 
 struct run_books {
