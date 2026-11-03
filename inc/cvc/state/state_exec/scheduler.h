@@ -22,6 +22,7 @@
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <cvc/state/state_exec/types.h>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <queue>
@@ -37,6 +38,47 @@ namespace cvc::state_exec {
 
 // scheduling_policy, execute_options, process_info, scheduler_stats now live in
 // scheduler_base.h (shared by the sync scheduler and async_scheduler).
+
+namespace detail {
+
+/// The roots a scheduler's watches resolve under, other than its watch root: a chrooted
+/// context's (watch_handler_entry::root; td 4.8, S0.5). Each distinct root gets its own change
+/// counter on that node's signals, shared by the entries with that root and dropped with the last
+/// of them, so a watch is read only after a write under its own root. Scheduler thread only.
+class watch_roots {
+public:
+  /// The entries may have changed: a watch registered or removed, or the watch root moved.
+  void invalidate() noexcept { stale_ = true; }
+  /// Bring the counters in line with the entries of `watchers` when they may have changed (after
+  /// invalidate(), or once the number of watching processes changed: one ended). `watch_root` is
+  /// the scheduler's watch root: an entry without a root of its own, or with that one, counts
+  /// toward uses_main() instead. True when it connected or dropped a counter.
+  bool sync(const std::vector<process *> &watchers, const cvc::state *watch_root);
+  /// Whether an entry resolves under the scheduler's watch root (as of the last sync()).
+  bool uses_main() const noexcept { return uses_main_; }
+  bool empty() const noexcept { return slots_.empty(); }
+  /// Read every counter: true when any moved since the last poll() (a new counter has).
+  bool poll();
+  /// Whether `root`'s counter moved at the last poll().
+  bool moved(const cvc::state *root) const;
+  /// Drop every counter (nothing watches).
+  void clear();
+
+private:
+  struct slot {
+    boost::shared_ptr<cvc::state> root; // the entries pin it too; this keeps its signals
+    tree_changes changes;
+    uint64_t seen = 0;
+    bool moved = false;
+    bool used = false;
+  };
+  std::unordered_map<const cvc::state *, std::unique_ptr<slot>> slots_;
+  bool stale_ = true;
+  bool uses_main_ = false;
+  std::size_t watchers_ = 0;
+};
+
+} // namespace detail
 
 /// Synchronous process scheduler.
 ///
@@ -245,15 +287,21 @@ public:
   /// Register a watch handler with its watched path on the scheduler's process: the 5-argument
   /// form with a null root (the scheduler's watch root).
   void register_watch_handler(int pid, int watch_id, value_t handler, const std::string &path);
-  /// The same, resolving `path` under `root` when it is non-null (td 4.8).
+  /// The same, resolving `path` under `root` when it is non-null (a chrooted context's root, which
+  /// the entry pins; td 4.8). The watch is read only after a write under its own root.
   void register_watch_handler(int pid, int watch_id, value_t handler, const std::string &path,
                               boost::shared_ptr<cvc::state> root) override;
 
   /// Remove a watch handler from the scheduler's process object.
   void unregister_watch_handler(int pid, int watch_id);
 
-  /// Set the state-tree root for watch polling.
+  /// Set the state-tree root for watch polling and settings. A host call (app, pycvc, the CLI),
+  /// never made from a step: a chrooted state-watch keeps its own root instead (td 4.8).
   void set_watch_root(cvc::state *root);
+
+  /// The watched nodes poll_watches() has read so far, one for each watch it reads. A watch is
+  /// read only after a write under the root it resolves under (td 4.8: per-root gating).
+  uint64_t watch_polls() const noexcept { return watch_polls_; }
 
   /// Set a unique identifier for this scheduler instance.
   /// Used as the key under `state_exec.schedulers.<id>` in the state tree.
@@ -354,10 +402,13 @@ private:
   double chain_cpu_ = -1.0; // the thread's CPU time then, when it was read (else < 0)
   clock::time_point now_for_step();
 
-  /// Counts tree changes under watch_root_ while processes have watches: poll_watches() reads
-  /// the watched nodes only when the count moved.
+  /// Counts tree changes under watch_root_ while a watch resolves under it: poll_watches() reads
+  /// those watched nodes only when the count moved. A watch with a root of its own is counted in
+  /// watch_roots_ instead (td 4.8).
   detail::tree_changes tree_changes_;
   uint64_t watch_seen_ = 0;
+  detail::watch_roots watch_roots_;
+  uint64_t watch_polls_ = 0; // watched nodes read (watch_polls())
   /// limits.async_steps_per_cpu_ms as last read from the tree, and the settings version then.
   detail::settings_changes settings_changes_;
   uint64_t rate_seen_ = 0;

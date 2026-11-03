@@ -1193,3 +1193,22 @@ TEST(AsyncCallOutcome, AKernelRaisingABuiltinClassDictRaisesItUnchanged) {
   EXPECT_EQ(field(value_t(cls), "origin"), nullptr);
   EXPECT_EQ(field(value_t(cls), "function"), nullptr);
 }
+
+// --- a future is finished once (td 4.9, S0.9) ---
+
+// A call cancelled before it settled (the process that made it was killed or reaped) raises
+// RuntimeError to whoever reads its outcome since: a fork child awaiting the same future, whom
+// the cancel wakes. It used to read nil. Once settled, the outcome is the settlement.
+TEST(AsyncCallOutcome, ACallCancelledBeforeItSettledRaisesRuntimeError) {
+  auto call = std::make_shared<async_call>("probe", 1);
+  call->cancel();
+  try {
+    call->outcome();
+    ADD_FAILURE() << "a cancelled call's outcome returned";
+  } catch (const dsl_error &e) {
+    EXPECT_EQ(e.class_name(), "RuntimeError");
+    EXPECT_NE(std::string(e.what()).find("probe: cancelled"), std::string::npos) << e.what();
+  }
+  ASSERT_TRUE(call->settle(value_t(int64_t(7)), nullptr));
+  EXPECT_EQ(std::get<int64_t>(call->outcome().v), 7);
+}

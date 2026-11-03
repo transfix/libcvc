@@ -859,9 +859,19 @@ void async_scheduler::wake_async_waiters(const std::string &channel) {
 }
 
 void async_scheduler::finish_async_call(const std::shared_ptr<async_call> &call) {
+  // Finished once (td 4.9, S0.9): the first finish or cancel claims the call, and a later one (its
+  // completion after a cancel or a timeout, or after an outcome() that finished it first) charges
+  // nothing more. The processes waiting on its channel are woken either way: one that awaited
+  // the call since (a fork child, once its parent was killed) would otherwise wait for good.
+  if (call->closed_.exchange(true, std::memory_order_acq_rel)) {
+    wake_async_waiters(call->channel());
+    return;
+  }
   const auto it = std::find(async_calls_.begin(), async_calls_.end(), call);
-  if (it == async_calls_.end())
-    return; // dropped already: its process was killed or reaped, or it was finished
+  if (it == async_calls_.end()) {
+    wake_async_waiters(call->channel()); // not tracked here: nothing to charge
+    return;
+  }
   async_calls_.erase(it);
   process *proc = procs_.find(call->pid());
   double rate = 0.0;
@@ -982,25 +992,33 @@ void async_scheduler::cancel_async_calls(int pid) {
   // Out of the list first, then the rate: reading it may publish it, a write to the tree whose
   // slots may do anything, kill this process too (that kill finds no calls left to cancel, so it
   // doesn't read the rate again and recurse), and none of them runs mid-walk.
+  // Each is claimed as it leaves the list (td 4.9, S0.9), so its completion, when it comes,
+  // charges nothing more.
   std::vector<std::shared_ptr<async_call>> calls;
   for (auto it = async_calls_.begin(); it != async_calls_.end();) {
     if ((*it)->pid() != pid) {
       ++it;
       continue;
     }
-    calls.push_back(std::move(*it));
+    std::shared_ptr<async_call> call = std::move(*it);
     it = async_calls_.erase(it);
-    calls.back()->cancel();
+    if (!call->closed_.exchange(true, std::memory_order_acq_rel))
+      calls.push_back(call);
+    call->cancel();
   }
   process *proc = procs_.find(pid);
   const double rate = proc ? async_steps_per_cpu_ms(*proc) : 0.0;
   proc = procs_.find(pid);
-  if (!proc)
-    return;
-  // What they ran so far stays charged; their results, when they come, are dropped.
-  const auto now = std::chrono::steady_clock::now();
+  if (proc) {
+    // What they ran so far stays charged; their results, when they come, are dropped.
+    const auto now = std::chrono::steady_clock::now();
+    for (const std::shared_ptr<async_call> &call : calls)
+      detail::charge_async_call(*proc, *call, rate, true, now);
+  }
+  // Another process may be waiting for one of them: a fork child awaiting the same future. It is
+  // woken, and reads the call's outcome (S0.9).
   for (const std::shared_ptr<async_call> &call : calls)
-    detail::charge_async_call(*proc, *call, rate, true, now);
+    wake_async_waiters(call->channel());
 }
 
 void async_scheduler::cancel_async_calls_of(int pid) {
@@ -1039,9 +1057,11 @@ double async_scheduler::tree_rate() {
 }
 
 void async_scheduler::track_tree_changes() {
-  // Counted while something reads the tree at every step: watches, or the rate of the calls in
+  // Counted while something reads the tree at every step: watches that resolve under the watch
+  // root (one with a root of its own is counted in watch_roots_), or the rate of the calls in
   // flight. Otherwise nothing is connected, and a write under the root pays nothing for it.
-  const bool needed = watch_root_ && (!procs_.watchers().empty() || !async_calls_.empty());
+  const bool needed = watch_root_ && ((!procs_.watchers().empty() && watch_roots_.uses_main()) ||
+                                      !async_calls_.empty());
   cvc::state *const want = needed ? watch_root_ : nullptr;
   if (tree_changes_.root() == want)
     return;
@@ -1055,6 +1075,7 @@ void async_scheduler::set_watch_root(cvc::state *root) {
   if (root != watch_root_) {
     rate_valid_ = false;
     submit_valid_ = false;
+    watch_roots_.invalidate(); // an entry whose root this is now counts under it
   }
   watch_root_ = root;
   track_tree_changes();
@@ -1107,18 +1128,18 @@ void async_scheduler::register_watch_handler(int pid, int watch_id, value_t hand
 void async_scheduler::register_watch_handler(int pid, int watch_id, value_t handler,
                                              const std::string &path,
                                              boost::shared_ptr<cvc::state> root) {
-  // S0.5 resolves `path` under `root` when it is set; until then it is only recorded.
   auto it = procs_.all().find(pid);
   if (it == procs_.all().end())
     return;
+  // The path resolves under the watch's own root when it has one (td 4.8), else under the watch
+  // root.
   std::string initial;
-  if (watch_root_) {
-    auto *node = watch_root_->findDescendant(path);
-    if (node)
+  if (cvc::state *const under = root ? root.get() : watch_root_)
+    if (const boost::shared_ptr<cvc::state> node = under->findDescendantShared(path))
       initial = node->value();
-  }
   it->second->watch_handlers[watch_id] = {std::move(handler), path, initial, std::move(root)};
   procs_.update(*it->second);
+  watch_roots_.invalidate();
 }
 
 void async_scheduler::unregister_watch_handler(int pid, int watch_id) {
@@ -1127,6 +1148,7 @@ void async_scheduler::unregister_watch_handler(int pid, int watch_id) {
     return;
   it->second->watch_handlers.erase(watch_id);
   procs_.update(*it->second);
+  watch_roots_.invalidate();
 }
 
 // ---------------------------------------------------------------------------
@@ -1170,21 +1192,41 @@ void async_scheduler::restore_from_signal(process &proc) {
 }
 
 void async_scheduler::poll_watches() {
-  // Only the processes with watches, and only when the tree under the watch root changed since
-  // the last poll (tree_changes). A value the poll finds changed queues a watch event.
-  if (!watch_root_)
+  // Only the processes with watches, and only the watches under a root whose tree changed since
+  // the last poll (tree_changes). A watch resolves under its own root (a chrooted context's) or
+  // the watch root, and each root is counted on its own (td 4.8, S0.5). A value the poll finds
+  // changed queues a watch event.
+  const std::vector<process *> &watchers = procs_.watchers();
+  if (watchers.empty()) {
+    if (!watch_roots_.empty()) {
+      watch_roots_.clear(); // no slot on the tree while nothing watches it
+      chain_valid_ = false;
+    }
+  } else if (watch_roots_.sync(watchers, watch_root_)) {
+    chain_valid_ = false; // connecting is no step's time
+  }
+  if (watch_root_)
+    track_tree_changes();
+  if (watchers.empty())
     return;
-  track_tree_changes();
-  if (procs_.watchers().empty())
+  bool main_moved = false;
+  if (watch_root_ && watch_roots_.uses_main()) {
+    const uint64_t seen = tree_changes_.count();
+    main_moved = seen != watch_seen_;
+    watch_seen_ = seen;
+  }
+  const bool roots_moved = watch_roots_.poll();
+  if (!main_moved && !roots_moved)
     return;
-  const uint64_t seen = tree_changes_.count();
-  if (seen == watch_seen_)
-    return;
-  watch_seen_ = seen;
   chain_valid_ = false; // the reads below are no step's time
-  for (process *proc : procs_.watchers()) {
+  for (process *proc : watchers) {
     for (auto &[wid, entry] : proc->watch_handlers) {
-      auto *node = watch_root_->findDescendant(entry.path);
+      cvc::state *const root = entry.root ? entry.root.get() : watch_root_;
+      if (!root || !(root == watch_root_ ? main_moved : watch_roots_.moved(root)))
+        continue;
+      ++watch_polls_;
+      // Pinned while it is read: another thread may delete it meanwhile (td 4.8).
+      const boost::shared_ptr<cvc::state> node = root->findDescendantShared(entry.path);
       if (!node)
         continue;
       std::string cur = node->value();

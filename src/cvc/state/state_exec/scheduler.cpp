@@ -783,19 +783,18 @@ void scheduler::register_watch_handler(int pid, int watch_id, value_t handler,
 void scheduler::register_watch_handler(int pid, int watch_id, value_t handler,
                                        const std::string &path,
                                        boost::shared_ptr<cvc::state> root) {
-  // S0.5 resolves `path` under `root` when it is set; until then it is only recorded.
   auto it = procs_.all().find(pid);
   if (it == procs_.all().end())
     return;
-  // Capture current value so the first change can be detected by polling.
+  // Capture current value so the first change can be detected by polling. The path resolves
+  // under the watch's own root when it has one (td 4.8), else under the watch root.
   std::string initial;
-  if (watch_root_) {
-    auto *node = watch_root_->findDescendant(path);
-    if (node)
+  if (cvc::state *const under = root ? root.get() : watch_root_)
+    if (const boost::shared_ptr<cvc::state> node = under->findDescendantShared(path))
       initial = node->value();
-  }
   it->second->watch_handlers[watch_id] = {std::move(handler), path, initial, std::move(root)};
   procs_.update(*it->second);
+  watch_roots_.invalidate();
 }
 
 void scheduler::unregister_watch_handler(int pid, int watch_id) {
@@ -804,13 +803,16 @@ void scheduler::unregister_watch_handler(int pid, int watch_id) {
     return;
   it->second->watch_handlers.erase(watch_id);
   procs_.update(*it->second);
+  watch_roots_.invalidate();
 }
 
 void scheduler::set_watch_root(cvc::state *root) {
   if (root != watch_root_ && tree_changes_.root())
     tree_changes_.watch(root); // counted afresh (a new root counts as a change)
-  if (root != watch_root_)
+  if (root != watch_root_) {
     rate_valid_ = false;
+    watch_roots_.invalidate(); // an entry whose root this is now counts under it
+  }
   watch_root_ = root;
 }
 
@@ -819,31 +821,45 @@ void scheduler::set_watch_root(cvc::state *root) {
 // ---------------------------------------------------------------------------
 
 void scheduler::poll_watches() {
-  // Only the processes with watches, and only when the tree under the watch root changed since
-  // the last poll (a write anywhere under it counts: tree_changes). A value the poll finds
-  // changed queues a watch event, as it always did.
-  if (!watch_root_)
-    return;
-  if (procs_.watchers().empty()) {
-    if (tree_changes_.root()) {
+  // Only the processes with watches, and only the watches under a root whose tree changed since
+  // the last poll (a write anywhere under it counts: tree_changes). A watch resolves under its
+  // own root (a chrooted context's) or the watch root, and each root is counted on its own
+  // (td 4.8, S0.5). A value the poll finds changed queues a watch event, as it always did.
+  const std::vector<process *> &watchers = procs_.watchers();
+  if (watchers.empty()) {
+    if (tree_changes_.root() || !watch_roots_.empty()) {
       tree_changes_.watch(nullptr); // no slot on the tree while nothing watches it
+      watch_roots_.clear();
       chain_valid_ = false;
     }
     return;
   }
-  if (tree_changes_.root() != watch_root_) {
-    tree_changes_.watch(watch_root_);
+  if (watch_roots_.sync(watchers, watch_root_))
+    chain_valid_ = false; // connecting is no step's time
+  cvc::state *const counted = watch_roots_.uses_main() ? watch_root_ : nullptr;
+  if (tree_changes_.root() != counted) {
+    tree_changes_.watch(counted);
     watch_seen_ = tree_changes_.count() - 1; // poll once now: changes before it weren't counted
     chain_valid_ = false;                    // connecting is no step's time
   }
-  const uint64_t seen = tree_changes_.count();
-  if (seen == watch_seen_)
+  bool main_moved = false;
+  if (counted) {
+    const uint64_t seen = tree_changes_.count();
+    main_moved = seen != watch_seen_;
+    watch_seen_ = seen;
+  }
+  const bool roots_moved = watch_roots_.poll();
+  if (!main_moved && !roots_moved)
     return;
-  watch_seen_ = seen;
   chain_valid_ = false; // the reads below are no step's time
-  for (process *proc : procs_.watchers()) {
+  for (process *proc : watchers) {
     for (auto &[wid, entry] : proc->watch_handlers) {
-      auto *node = watch_root_->findDescendant(entry.path);
+      cvc::state *const root = entry.root ? entry.root.get() : watch_root_;
+      if (!root || !(root == watch_root_ ? main_moved : watch_roots_.moved(root)))
+        continue;
+      ++watch_polls_;
+      // Pinned while it is read: another thread may delete it meanwhile (td 4.8).
+      const boost::shared_ptr<cvc::state> node = root->findDescendantShared(entry.path);
       if (!node)
         continue;
       std::string cur = node->value();
@@ -854,6 +870,76 @@ void scheduler::poll_watches() {
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// detail::watch_roots
+// ---------------------------------------------------------------------------
+
+namespace detail {
+
+bool watch_roots::sync(const std::vector<process *> &watchers, const cvc::state *watch_root) {
+  // The entries change only through register/unregister (invalidate()) or a watching process
+  // ending, which leaves the watchers: anything else finds nothing to do here.
+  if (!stale_ && watchers.size() == watchers_)
+    return false;
+  stale_ = false;
+  watchers_ = watchers.size();
+  uses_main_ = false;
+  bool changed = false;
+  for (auto &[node, s] : slots_)
+    s->used = false;
+  for (const process *proc : watchers) {
+    for (const auto &[wid, entry] : proc->watch_handlers) {
+      if (!entry.root || entry.root.get() == watch_root) {
+        uses_main_ = true;
+        continue;
+      }
+      std::unique_ptr<slot> &s = slots_[entry.root.get()];
+      if (!s) {
+        s = std::make_unique<slot>();
+        s->root = entry.root;
+        s->changes.watch(entry.root.get());
+        s->seen = s->changes.count() - 1; // read once now: changes before it weren't counted
+        changed = true;
+      }
+      s->used = true;
+    }
+  }
+  for (auto it = slots_.begin(); it != slots_.end();) {
+    if (it->second->used) {
+      ++it;
+    } else {
+      it = slots_.erase(it); // the last entry under it went: so does its counter
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+bool watch_roots::poll() {
+  bool any = false;
+  for (auto &[node, s] : slots_) {
+    const uint64_t seen = s->changes.count();
+    s->moved = seen != s->seen;
+    s->seen = seen;
+    any = any || s->moved;
+  }
+  return any;
+}
+
+bool watch_roots::moved(const cvc::state *root) const {
+  const auto it = slots_.find(root);
+  return it != slots_.end() && it->second->moved;
+}
+
+void watch_roots::clear() {
+  slots_.clear();
+  stale_ = true;
+  uses_main_ = false;
+  watchers_ = 0;
+}
+
+} // namespace detail
 
 // ---------------------------------------------------------------------------
 // Signal handling
