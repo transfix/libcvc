@@ -53,10 +53,13 @@
 // below water_level_m, and water_field fills it with a gently travelling wave.
 //
 // GL-free and deterministic: a pure function of the params and the library. Every mesh is one
-// merged cvc::geometry, so a renderer draws the world in a handful of nodes.
+// merged cvc::geometry, so a renderer draws the world in a handful of nodes. world_builder and
+// surface_painter make the same world and texture a step at a time, for a caller that must not
+// block (a big world takes seconds on single-threaded wasm).
 #ifndef CVC_WORLD_GENERATED_WORLD_H
 #define CVC_WORLD_GENERATED_WORLD_H
 
+#include <cstddef>
 #include <cstdint>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/height_field.h>
@@ -145,6 +148,8 @@ struct city_context {
   // cliff masks where it has them.
   road_mask_fn blocked;
 };
+// The context lives only for the call (world_builder lays the city out a stage later): the
+// streets it returns, their urbanity included, must not refer to it.
 using city_generator = std::function<city_streets(const city_context &c)>;
 void register_city_generator(const std::string &name, city_generator g);
 // The names: the built-ins first ("districts", "none"), then in registration order.
@@ -176,6 +181,10 @@ struct generated_world {
 
   double height_min = 0, height_max = 0; // the relief's range over the raster
 
+  // The ground under each water column (water_resolution(w)^2 samples, row-major, x fastest), so
+  // water_field, called every few frames, need not sample the terrain again.
+  std::vector<float> water_ground;
+
   // The ground height at (x, y): the terrain mesh's own surface.
   double height(double x, double y) const;
   // The world for physics and nav: the terrain (collide + navigate), the buildings (collide),
@@ -184,9 +193,59 @@ struct generated_world {
 };
 
 // Generate. `library` may be null or empty: the city's buildings are then procedural massing.
-// Throws std::invalid_argument on an unknown generator name.
+// Throws std::invalid_argument on an unknown generator name. world_builder stepped to its end.
 generated_world generate_world(const generated_world_params &p,
                                const building_library *library = nullptr);
+
+// generate_world as a resumable job, for a caller that must not block: the generated_world node
+// steps one on the app's scheduler (cvc/core/sliced_task.h), a few milliseconds a frame on
+// single-threaded wasm. step(budget) does about `budget` units of work and returns true once the
+// world is made; budget 0 runs to the end. A unit is one terrain sample (a raster cell, a terrain
+// mesh or water sample); the stages that are one call (the scatter, the streets, the city, the
+// roads, the props) take a step each, whatever the budget. phase() names the stage the next step
+// works on ("terrain", "scatter", "raster", "mesh", "materials", "streets", "city", "roads",
+// "props", "water"),
+// a static string. A throw (an unknown generator, a missing DEM) comes out of the step that hit it
+// and every later one. The library must outlive the builder.
+class world_builder {
+public:
+  explicit world_builder(const generated_world_params &p,
+                         const building_library *library = nullptr);
+  ~world_builder();
+  world_builder(const world_builder &) = delete;
+  world_builder &operator=(const world_builder &) = delete;
+
+  bool step(std::size_t budget);
+  bool done() const;
+  const char *phase() const;
+  double progress() const; // in [0, 1], monotone; 1 once done
+  generated_world take();  // the world, once done (moved out; call once)
+
+private:
+  struct impl;
+  std::unique_ptr<impl> d_;
+};
+
+// paint_surface as a resumable job: step(budget) paints about `budget` texels (whole rows) and
+// returns true once the texture is done; budget 0 paints the rest. `w` must outlive the painter.
+class surface_painter {
+public:
+  surface_painter(const generated_world &w, surface_color mode = surface_color::material,
+                  int size = 2048);
+  bool step(std::size_t budget);
+  bool done() const { return next_ >= size_ && finished_; }
+  double progress() const { return size_ > 0 ? double(next_) / size_ : 1.0; }
+  int size() const { return size_; }
+  std::vector<unsigned char> take(); // the RGB texels, once done (moved out)
+
+private:
+  const generated_world &w_;
+  surface_color mode_;
+  int size_;
+  int next_ = 0;
+  bool finished_ = false;
+  std::vector<unsigned char> img_;
+};
 
 // The ground's colour as a size x size RGB texture over the extent (row 0 = min y, matching the
 // terrain's UVs). The raster is far coarser than the texture, so no texel shows its cell's square:

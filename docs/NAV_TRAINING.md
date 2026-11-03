@@ -1206,9 +1206,40 @@ the dynamic vehicle's: dir_rel 7.1e-4, worst 5.5e-3 over 64 weights.
 
 **From Python** (pycvc):
 
-- `nav_train_coef_mlp_jolt(occ, ..., vehicle, veh_L, veh_a_max, veh_a_lat_max, calib_agents,
-  calib_steps, out_path)` trains the coefficient policy on Jolt and returns the calibration as a
-  dict. `vehicle` is "humvee" or "roboracer".
+- `nav_train_coef_mlp_jolt` trains the coefficient policy on Jolt (`use_jolt_rollout`, then
+  `coef_trainer::train`), writes the `.cvcnav` and returns the calibration as a dict
+  (`drive_gain`, `brake_gain`, `resist_comp`, `tau_drive`; the `tire`, `drag`, `rolling` and
+  `damper` factors; `price_drive`, `price_idle`; and on the fitted ticks `dissipated_error`,
+  `drawn_error`, `twist_rms` and `ticks`). Its arguments are positional, in this order: the
+  scene (`occupancy_scene`'s), `train_config`'s, then the vehicle and the calibration.
+
+  ```python
+  import numpy as np
+  import pycvc
+
+  occ = np.zeros((96, 96), np.uint8)  # 1 m cells, row 0 at min y; 1 = obstacle
+  for r0 in (20, 56):
+      for c0 in (20, 56):
+          occ[r0 : r0 + 20, c0 : c0 + 20] = 1  # four 20 m blocks, 16 m streets
+  cal = pycvc.nav_train_coef_mlp_jolt(
+      occ, -48.0, -48.0, 48.0, 48.0,  # the grid's bounds (m)
+      0.106,                          # scale: normalized units per metre
+      0.15, 0.35, 0.06, 0.9,          # rr, d_hat, dt, vmax (normalized)
+      300, 28, 192, 7, 64,            # steps, horizon, n, window, hidden
+      5e-5, 3.0, 0.0, 5.0, 1,         # lr, w_coll, w_energy, grad_clip, seed
+      "humvee", 0.35, 0.3, 0.5,       # vehicle, veh_L (3.30 m), veh_a_max, veh_a_lat_max
+      16, 200,                        # calib_agents, calib_steps
+      "coef_jolt.cvcnav",
+  )
+  ```
+
+  `vehicle` is "humvee" or "roboracer". `veh_L` should be the vehicle's wheelbase at `scale`,
+  and `veh_a_max` and `veh_a_lat_max` its limits in normalized units: the Humvee's 2.8 m/s^2
+  and 4.7 m/s^2 here. Each agent drives its own copy of the scene, the copies' obstacles as
+  static boxes in one world, so keep `n` and the grid modest. CPU only; the GIL is released.
+  GRL-SNAM wraps it with keywords and those defaults from a `vehicle_desc`
+  (`grl_snam.nav_native.train_coef_mlp_jolt`) and as `grl-snam coef-train --backend native
+  --rollout jolt` (its `docs/PLANTS.md`).
 - `nav_material_trainer_set_jolt(handle, 1, vehicle, L, dt, ...)` turns a material trainer's
   loss onto Jolt, calibrating first, and returns the calibration.
   `nav_material_trainer_integrator` then reads "jolt".

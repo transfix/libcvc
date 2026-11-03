@@ -447,6 +447,140 @@ TEST(AriadneFtxui, TextFieldEditsAtTheCursor) {
   EXPECT_EQ(val(t.app, "name"), "b\xc3\xa9");
 }
 
+// A message field: Enter sends it (its on: program reads event.text), the field left empty and
+// focused; Alt+Enter and Ctrl+J add a line; the hint shows while it is empty and unfocused; losing
+// focus keeps the draft, which Enter then sends. A blank message is not sent.
+TEST(AriadneFtxui, MessageFieldSendsOnEnterAndTakesNewLines) {
+  REQUIRE_FTXUI();
+  Widget msg = message_input("Say", "draft",
+                             "(state-set \"sent\" (str-concat (state-get \"sent\") \"|\" "
+                             "(get-attr event \"text\")))");
+  msg.hint = "type here";
+  Term t(group({msg, checkbox("X", "x")}));
+  cvc::state::instance(t.app)("sent").value(std::string());
+  const auto sent = [&] {
+    for (int i = 0; i < 50; ++i)
+      t.rt.drain();
+    return val(t.app, "sent");
+  };
+  EXPECT_TRUE(t.shows("Say: [type here")) << t.screen;
+  t.key("Tab");
+  t.type("hi");
+  EXPECT_TRUE(t.be.feed(t.rt, TermEvent::key_event("Return", false, false, /*alt=*/true)));
+  t.type("there");
+  t.draw();
+  EXPECT_TRUE(t.shows("Say: [hi")) << t.screen;
+  EXPECT_TRUE(t.shows("      there")) << "the second line under the first:\n" << t.screen;
+  t.key("Return");
+  EXPECT_EQ(val(t.app, "draft"), "");
+  EXPECT_EQ(sent(), "|hi\nthere");
+
+  t.type("ok"); // still focused
+  EXPECT_TRUE(t.be.feed(t.rt, TermEvent::key_event("J", false, /*ctrl=*/true)));
+  t.type("go");
+  t.key("Tab"); // focus leaves: the draft is kept
+  EXPECT_EQ(val(t.app, "draft"), "ok\ngo");
+  t.key("Tab", /*shift=*/true);
+  t.key("Return");
+  EXPECT_EQ(sent(), "|hi\nthere|ok\ngo");
+  t.type("   ");
+  t.key("Return");
+  EXPECT_EQ(sent(), "|hi\nthere|ok\ngo") << "blanks are not a message";
+
+  Widget one = message_input("One", "one", "(state-set \"x\" 1)");
+  one.multiline = false;
+  Term u(group({one, checkbox("Y", "y")})); // somewhere for the focus to go
+  u.key("Tab");
+  u.type("a");
+  u.be.feed(u.rt, TermEvent::key_event("Return", false, false, true));
+  u.type("b");
+  u.key("Tab");
+  EXPECT_EQ(val(u.app, "one"), "ab") << "multiline: false takes no new line";
+}
+
+// A text view shows the last rows of its text, scrolls with the keys and the wheel, keeps what is
+// in view when lines are added above it, and reports the top (on_top) once the user gets there. A
+// long line wraps at the view's width; the gutter shows which way there is more.
+TEST(AriadneFtxui, TextViewScrollsKeepsItsPlaceAndReportsTheTop) {
+  REQUIRE_FTXUI();
+  std::string text;
+  for (int i = 0; i < 20; ++i)
+    text += (i ? "\n" : "") + std::string("line ") + std::to_string(i);
+  Widget tv =
+      text_view("##log", "log", "(state-set \"tops\" (str (+ (int (state-get \"tops\")) 1)))");
+  tv.view_height = 5 * 16; // five rows
+  Term t(group({tv}));
+  cvc::state::instance(t.app)("log").value(text);
+  cvc::state::instance(t.app)("tops").value(std::string("0"));
+  const auto tops = [&] {
+    for (int i = 0; i < 50; ++i)
+      t.rt.drain();
+    return val(t.app, "tops");
+  };
+  t.draw();
+  EXPECT_TRUE(t.shows("line 19")) << t.screen;
+  EXPECT_TRUE(t.shows("line 15")) << t.screen;
+  EXPECT_FALSE(t.shows("line 14")) << t.screen;
+  EXPECT_TRUE(t.shows("\xe2\x96\xb2")) << "more above:\n" << t.screen;
+
+  t.key("Tab");
+  t.key("Up");
+  t.draw();
+  EXPECT_TRUE(t.shows("line 14")) << t.screen;
+  EXPECT_FALSE(t.shows("line 19")) << t.screen;
+  EXPECT_EQ(tops(), "0");
+  for (int i = 0; i < 4; ++i)
+    t.key("PageUp"); // four rows a page: 14, 10, 6, 2, then 0
+  t.draw();
+  EXPECT_TRUE(t.shows("line 0")) << t.screen;
+  EXPECT_EQ(tops(), "1") << "reached the top";
+  t.key("Up");
+  t.draw();
+  EXPECT_EQ(tops(), "2") << "pushed against it again";
+
+  // Older lines arrive above: what is in view stays in view.
+  cvc::state::instance(t.app)("log").value("older 1\nolder 0\n" + text);
+  t.draw();
+  EXPECT_TRUE(t.shows("line 0")) << t.screen;
+  EXPECT_FALSE(t.shows("older 0")) << t.screen;
+
+  t.key("End");
+  t.draw();
+  EXPECT_TRUE(t.shows("line 19")) << t.screen;
+  int x = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, "line 19", x, y));
+  t.mouse(TermEvent::Mouse::WheelUp, x, y);
+  t.draw();
+  EXPECT_TRUE(t.shows("line 13")) << "three rows up:\n" << t.screen;
+  EXPECT_FALSE(t.shows("line 19")) << t.screen;
+
+  // A new line arrives while it is not at the bottom: it stays where it is.
+  cvc::state::instance(t.app)("log").value("older 1\nolder 0\n" + text + "\nline 20");
+  t.draw();
+  EXPECT_FALSE(t.shows("line 20")) << t.screen;
+  t.key("End");
+  cvc::state::instance(t.app)("log").value("older 1\nolder 0\n" + text + "\nline 20\nline 21");
+  t.draw();
+  EXPECT_TRUE(t.shows("line 21")) << "at the bottom it follows:\n" << t.screen;
+
+  // A long line wraps; a text that fits reports the room above it at once.
+  std::string longline;
+  for (int i = 0; i < 30; ++i)
+    longline += "word" + std::to_string(i) + " ";
+  Widget wrap = text_view("##wrap", "wrap", "(state-set \"fits\" 1)");
+  wrap.view_height = 6 * 16;
+  Term w(group({wrap}));
+  cvc::state::instance(w.app)("wrap").value(longline);
+  w.draw();
+  int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+  ASSERT_TRUE(find_cell(w.screen, "word0 ", x0, y0)) << w.screen;
+  ASSERT_TRUE(find_cell(w.screen, "word29", x1, y1)) << w.screen;
+  EXPECT_GT(y1, y0) << "wrapped onto more rows:\n" << w.screen;
+  for (int i = 0; i < 50; ++i)
+    w.rt.drain();
+  EXPECT_EQ(val(w.app, "fits"), "1");
+}
+
 TEST(AriadneFtxui, MenuByKeyboard) {
   REQUIRE_FTXUI();
   Term t(group({menubar({menu("File", {menu_toggle("Wire", "wire"), menu_action("Quit", "quit")})}),
