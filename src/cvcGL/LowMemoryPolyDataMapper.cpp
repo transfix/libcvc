@@ -67,6 +67,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <cvc/gl/LowMemoryPolyDataMapper.h>
+#include <iterator>
+#include <mutex>
+#include <unordered_map>
 #include <vtkActor.h>
 #include <vtkCellType.h>
 #include <vtkCollection.h>
@@ -256,6 +259,33 @@ void LowMemoryPolyDataMapper::setStageObserver(StageObserver observer) {
   g_stageObserver.store(observer, std::memory_order_relaxed);
 }
 
+struct LowMemoryPolyDataMapper::ShaderSources {
+  std::string vertex, fragment, geometry;
+};
+
+// The one copy of the sources PROGRAM was looked up from: SHADERS' (the mapper's this->Shaders,
+// which still hold them) the first time, the copy every holder shares after that. Keyed by the
+// program, which every holder keeps alive, so its address is not reused while an entry for it can
+// be found.
+std::shared_ptr<const LowMemoryPolyDataMapper::ShaderSources>
+LowMemoryPolyDataMapper::sharedSources(vtkShaderProgram *program, ShaderMap &shaders) {
+  static std::mutex mu; // mappers on different windows' threads
+  static std::unordered_map<const vtkShaderProgram *, std::weak_ptr<const ShaderSources>> byProgram;
+  std::lock_guard<std::mutex> lk(mu);
+  std::weak_ptr<const ShaderSources> &slot = byProgram[program];
+  if (std::shared_ptr<const ShaderSources> s = slot.lock())
+    return s;
+  auto s = std::make_shared<ShaderSources>();
+  s->vertex = shaders[vtkShader::Vertex]->GetSource();
+  s->fragment = shaders[vtkShader::Fragment]->GetSource();
+  s->geometry = shaders[vtkShader::Geometry]->GetSource();
+  slot = s;
+  if (byProgram.size() > 1024) // forget the programs no kept shader holds any more
+    for (auto it = byProgram.begin(); it != byProgram.end();)
+      it = it->second.expired() ? byProgram.erase(it) : std::next(it);
+  return s;
+}
+
 void LowMemoryPolyDataMapper::invalidateProgramCache() {
   m_cache = nullptr;
   m_builtStamp = 0;
@@ -349,9 +379,7 @@ void LowMemoryPolyDataMapper::swapPassProgram(vtkActor *act) {
     kept.passes = m_activePasses;
     kept.alive = m_activeAlive;
     kept.program = this->ShaderProgram;
-    kept.vertex = this->Shaders[vtkShader::Vertex]->GetSource();
-    kept.fragment = this->Shaders[vtkShader::Fragment]->GetSource();
-    kept.geometry = this->Shaders[vtkShader::Geometry]->GetSource();
+    kept.sources = sharedSources(this->ShaderProgram, this->Shaders);
     this->GLSLMods->InitTraversal();
     while (vtkObject *mod = this->GLSLMods->GetNextItemAsObject())
       kept.mods.emplace_back(mod);
@@ -391,9 +419,9 @@ void LowMemoryPolyDataMapper::swapPassProgram(vtkActor *act) {
       actorTextures(act) != found.textures)
     return;
   this->ShaderProgram = found.program;
-  this->Shaders[vtkShader::Vertex]->SetSource(found.vertex);
-  this->Shaders[vtkShader::Fragment]->SetSource(found.fragment);
-  this->Shaders[vtkShader::Geometry]->SetSource(found.geometry);
+  this->Shaders[vtkShader::Vertex]->SetSource(found.sources->vertex);
+  this->Shaders[vtkShader::Fragment]->SetSource(found.sources->fragment);
+  this->Shaders[vtkShader::Geometry]->SetSource(found.sources->geometry);
   this->GLSLMods->RemoveAllItems();
   for (const vtkSmartPointer<vtkObject> &mod : found.mods)
     this->GLSLMods->AddItem(mod);

@@ -120,6 +120,7 @@
 #define CVC_GL_LOW_MEMORY_POLY_DATA_MAPPER_H
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 #include <vtkOpenGLLowMemoryPolyDataMapper.h>
@@ -223,19 +224,26 @@ protected:
   void agentPreDraw(int t, vtkRenderer *ren, vtkActor *act);
   void agentDraw(int t, vtkRenderer *ren, vtkActor *act);
 
+  // The sources a program was looked up from (this->Shaders'), one copy per
+  // program however many kept shaders hold it: the shader cache has one program
+  // per distinct source, so a thousand casters drawn alike keep one copy, not a
+  // thousand (~16 KB each).
+  struct ShaderSources;
   // Pass programs: the shader built for one set of render passes, kept while
   // the mapper draws under another.
   struct PassProgram {
     std::vector<const vtkObjectBase *> passes;        // the set, in the actor's order
     std::vector<vtkWeakPointer<vtkObjectBase>> alive; // the same passes: null once one is gone
     vtkSmartPointer<vtkShaderProgram> program;
-    std::string vertex, fragment, geometry;       // this->Shaders' sources
+    std::shared_ptr<const ShaderSources> sources; // what `program` was looked up from
     std::vector<vtkSmartPointer<vtkObject>> mods; // this->GLSLMods' items
     vtkTimeStamp built;                           // ShaderBuildTimeStamp
     vtkWeakPointer<vtkOpenGLShaderCache> cache;   // readyProgram's m_cache ...
     vtkMTimeType lookupStamp = 0;                 // ... and m_builtStamp
     std::vector<const vtkTexture *> textures;     // the actor's, when built
   };
+  static std::shared_ptr<const ShaderSources> sharedSources(vtkShaderProgram *program,
+                                                            ShaderMap &shaders);
   // Before VTK's RenderPieceStart: keep the current shader if this draw's pass
   // set is another, and put back the one kept for this draw's set if it is
   // still good.
