@@ -77,8 +77,8 @@ float east_of(const sim_world &sim, int i) {
 double identity_gap(const dyn_bike_plant &plant, int i) {
   const dyn_bike_books &b = plant.books(i);
   return b.kinetic - plant.kinetic_at_attach(i) -
-         (b.drive - b.brake - b.dissipated - b.slip + b.floor + b.grade + b.limiter + b.contact +
-          b.residual);
+         (b.drive - b.brake - b.dissipated - b.slip + b.floor + b.grade + b.limiter + b.contact -
+          b.contact_stored - b.contact_dissipated + b.contact_exchange + b.residual);
 }
 
 // A ramp rising `slope` per metre eastward.

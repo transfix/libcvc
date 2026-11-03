@@ -453,8 +453,9 @@ void write_plant_log(const plant_log_options &o, const plant_log_drive &d) {
   const std::size_t rows = static_cast<std::size_t>(std::lround(o.flight_seconds / o.dt)) + 1;
   const std::size_t stride =
       std::max<std::size_t>(1, static_cast<std::size_t>(std::lround(o.stride_seconds / o.dt)));
-  const flight_set f = cut_flights(runs, rows, stride, 1.0, o.steer,
-                                   o.wide ? flight_layout::wide : flight_layout::planar);
+  const flight_set f =
+      cut_flights(runs, rows, stride, 1.0, o.steer,
+                  o.wide ? flight_layout::wide : flight_layout::planar, o.keep_contact);
   std::filesystem::create_directories(o.out);
   write_npy((std::filesystem::path(o.out) / "flights.npy").string(), f.data,
             {f.flights, f.rows, static_cast<std::size_t>(f.width)});
@@ -638,18 +639,40 @@ void write_plant_log(const plant_log_options &o, const plant_log_drive &d) {
        << ", \"physics_dt\": 0.01, \"mu\": " << num(o.mu) << ", \"lateral_g\": " << num(o.lateral_g)
        << ", \"seconds\": " << num(o.seconds) << ", \"accel_margin\": " << num(d.accel_margin)
        << ", \"brake_margin\": " << num(d.brake_margin);
-    if (o.wide) {
+    if (o.wide || o.keep_contact) {
+      const std::vector<std::string> cols =
+          flight_columns(o.wide ? flight_layout::wide : flight_layout::planar, o.keep_contact);
+      const auto unit = [](const std::string &c) -> const char * {
+        if (c == "x" || c == "y")
+          return "m";
+        if (c == "psi" || c == "steer")
+          return "rad";
+        if (c == "vx" || c == "vy" || c.rfind("rim_", 0) == 0)
+          return "m/s";
+        if (c == "r" || c.rfind("om_", 0) == 0)
+          return "rad/s";
+        if (c == "drive")
+          return "m/s^2";
+        if (c.size() > 6 && c.compare(c.size() - 6, 6, "_power") == 0)
+          return "W";
+        return "1";
+      };
       js << ",\n \"layout\": [";
-      const std::vector<std::string> &cols = flight_columns(flight_layout::wide);
       for (std::size_t k = 0; k < cols.size(); ++k)
         js << (k ? ", " : "") << "\"" << cols[k] << "\"";
-      js << "],\n \"units\": [\"m\", \"m\", \"rad\", \"m/s\", \"m/s\", \"rad/s\", \"m/s^2\", "
-            "\"rad\", \"1\", \"1\", \"rad/s\", \"rad/s\", \"m/s\", \"m/s\", \"1\", \"1\", \"W\", "
-            "\"W\", \"1\", \"1\"],"
-         << "\n \"wide\": \"grade and roll (the body's attitude), the wheels' speeds (the "
-            "frontmost steered and the rearmost unsteered axle's), their rims' and the ground's "
-            "slope under the wheels are the interval's means; the pedals its end's; the powers the "
-            "ledger's shaft work and brake energy over it\",";
+      js << "],\n \"units\": [";
+      for (std::size_t k = 0; k < cols.size(); ++k)
+        js << (k ? ", " : "") << "\"" << unit(cols[k]) << "\"";
+      js << "],";
+      if (o.wide)
+        js << "\n \"wide\": \"grade and roll (the body's attitude), the wheels' speeds (the "
+              "frontmost steered and the rearmost unsteered axle's), their rims' and the ground's "
+              "slope under the wheels are the interval's means; the pedals its end's; the powers "
+              "the ledger's shaft work and brake energy over it\",";
+      if (o.keep_contact)
+        js << "\n \"contact\": \"the windows with a contact or an impact are kept (" << f.in_contact
+           << " of the flights); the last column is the static contacts the interval began, plus "
+              "one when it touched another vehicle or passed the impact acceleration\",";
     } else {
       js << ",\n \"layout\": [\"x\", \"y\", \"psi\", \"vx\", \"vy\", \"r\", \"drive\", \"steer\"],"
          << "\n \"units\": [\"m\", \"m\", \"rad\", \"m/s\", \"m/s\", \"rad/s\", \"m/s^2\", "

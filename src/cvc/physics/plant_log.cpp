@@ -732,45 +732,52 @@ power_fit evaluate_power(const std::vector<std::vector<planar_sample>> &runs, do
   return f;
 }
 
-const std::vector<std::string> &flight_columns(flight_layout layout) {
-  static const std::vector<std::string> planar = {"x",  "y", "psi",   "vx",
-                                                  "vy", "r", "drive", "steer"};
-  static const std::vector<std::string> wide = [] {
-    std::vector<std::string> c = planar;
+std::vector<std::string> flight_columns(flight_layout layout, bool contact) {
+  std::vector<std::string> c = {"x", "y", "psi", "vx", "vy", "r", "drive", "steer"};
+  if (layout == flight_layout::wide)
     for (const char *k :
          {"grade", "roll", "om_front", "om_rear", "rim_front", "rim_rear", "throttle", "brake",
           "shaft_power", "brake_power", "ground_grade", "ground_roll"})
       c.push_back(k);
-    return c;
-  }();
-  return layout == flight_layout::wide ? wide : planar;
+  if (contact)
+    c.push_back("contact");
+  return c;
 }
 
 flight_set cut_flights(const std::vector<std::vector<planar_sample>> &runs, std::size_t rows,
                        std::size_t stride, double min_speed, steer_input steer,
-                       flight_layout layout) {
+                       flight_layout layout, bool keep_contact) {
   if (rows < 2 || stride < 1)
     throw std::invalid_argument("cvc::physics::cut_flights: needs rows >= 2 and stride >= 1");
   flight_set f;
   f.rows = rows;
-  f.width = layout == flight_layout::wide ? kPlanarWideWidth : kPlanarWidth;
+  f.width = (layout == flight_layout::wide ? kPlanarWideWidth : kPlanarWidth) + keep_contact;
+  // An interval's contact feature: the static contacts it began, plus one for another vehicle or
+  // an impact.
+  const auto touched = [](const planar_sample &q) {
+    return q.contacts +
+           ((q.vehicle_contact >= 0 || std::hypot(q.a_lat, q.a_lon) > kImpactG * kG) ? 1 : 0);
+  };
   for (std::size_t a = 0; a < runs.size(); ++a) {
     const std::vector<planar_sample> &run = runs[a];
     for (std::size_t s = 0; s + rows <= run.size(); s += stride) {
-      bool contact = false, moving = false;
+      bool contact = false, airborne = false, touching = false, moving = false;
       double peak = 0.0;
       for (std::size_t k = s; k < s + rows; ++k) {
-        contact = contact || !run[k].grounded ||
-                  (k > s &&
-                   (run[k].contacts > 0 || std::hypot(run[k].a_lat, run[k].a_lon) > kImpactG * kG));
+        airborne = airborne || !run[k].grounded;
+        contact = contact || (k > s && (run[k].contacts > 0 ||
+                                        std::hypot(run[k].a_lat, run[k].a_lon) > kImpactG * kG));
+        touching = touching || (k > s && touched(run[k]) > 0);
         moving = moving || std::hypot(run[k].vx, run[k].vy) > min_speed;
         if (k > s)
           peak = std::max(peak, std::fabs(run[k].a_lat) / kG);
       }
-      if (contact || !moving) {
+      if (airborne || (contact && !keep_contact) || !moving) {
         ++f.dropped;
         continue;
       }
+      if (keep_contact && touching)
+        ++f.in_contact;
       f.peak_lateral_g = std::max(f.peak_lateral_g, peak);
       for (std::size_t k = s; k < s + rows; ++k) {
         const planar_sample &q = run[k];
@@ -799,6 +806,8 @@ flight_set cut_flights(const std::vector<std::vector<planar_sample>> &runs, std:
               mean(p.ground_roll, q.ground_roll)};
           f.data.insert(f.data.end(), extra, extra + (kPlanarWideWidth - kPlanarWidth));
         }
+        if (keep_contact)
+          f.data.push_back(k > s ? static_cast<double>(touched(q)) : 0.0);
       }
       f.agent.push_back(static_cast<int>(a));
       f.first.push_back(static_cast<int>(s));

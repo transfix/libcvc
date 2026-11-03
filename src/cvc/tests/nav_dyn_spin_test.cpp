@@ -280,6 +280,12 @@ TEST(DynSpinPH, TheForcesAreTheFieldLessTheStructure) {
     const diff::dyn_spin_ph_rates<double> r = diff::dyn_spin_ph_rates_at(p, s, grade);
     const double balance = r.supplied - r.braked - r.dissipated - r.slip + r.floor + r.grade;
     worst_power = std::max(worst_power, std::fabs(eQ - balance) / (eQ_abs + 1.0));
+    // With the external port's wrench, Q gains it on the body and nothing on the wheels.
+    const double W[3] = {0.3 * mg, -0.2 * mg, 0.1 * mg * p.lf};
+    double QW[5];
+    diff::dyn_spin_ph_forces_at(p, s, grade, QW, W);
+    for (int i = 0; i < 5; ++i)
+      EXPECT_EQ(QW[i], i < 3 ? Q[i] + W[i] : Q[i]) << "momentum " << i;
   }
   std::printf("  J dH/dx + Q vs the field: worst %.1e of m g; dH/dx^T Q vs the rates: %.1e of "
               "its terms\n",
