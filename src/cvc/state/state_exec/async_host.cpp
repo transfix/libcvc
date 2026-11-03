@@ -173,8 +173,13 @@ value_t async_call::outcome() {
     } catch (...) {
       exc = make_exception(exception_class("NativeError"), name_ + ": unknown error", {}, "async");
     }
-    set_field(exc, "origin", value_t(std::string("async")));
-    set_field(exc, "function", value_t(name_));
+    // A built-in class dict raised as it is (a kernel's dsl_exception can hold one) is read-only
+    // (td 5 item 1): it stays as it is, as the evaluators' raise leaves it.
+    const dict_ptr *d = std::get_if<dict_ptr>(&exc.v);
+    if (!d || !is_builtin_class_dict(d->get())) {
+      set_field(exc, "origin", value_t(std::string("async")));
+      set_field(exc, "function", value_t(name_));
+    }
     exception_ = std::move(exc);
   }
   throw dsl_exception(*exception_, error_);
@@ -840,7 +845,8 @@ void register_async_natives(const environment_ptr &env, const std::string &name,
         return start(std::move(argv));
       // The program may change a list or dict it passed while the kernel runs: the kernel gets
       // copies, made as deep-data work, counted against the process's budget.
-      return run_data_job(make_copy_job(std::move(argv)), std::move(start));
+      return run_data_job(make_copy_job(std::move(argv), copy_mode::share, "async arguments"),
+                          std::move(start));
     };
   };
   builtins::register_fn(env, name, make(false));

@@ -50,7 +50,8 @@ class async_call;
 class async_scheduler : public scheduler_base {
 public:
   explicit async_scheduler(scheduling_policy policy = scheduling_policy::round_robin);
-  /// Destroys the lock home first (protocol 5.7), before any other member goes.
+  /// Destroys the lock home first (protocol 5.7), before any other member goes; then a posted
+  /// command never applied gets done(false).
   ~async_scheduler() override;
 
   // --- Locks (docs/STATE_EXEC_LOCKS.md) ---
@@ -98,8 +99,11 @@ public:
   uint64_t sync_run_steps(std::optional<uint64_t> max_steps = std::nullopt,
                           std::optional<double> max_time = std::nullopt);
 
+  /// Any thread: end the run loop at its next step boundary (td 4.12). A stop() with no run
+  /// active is discarded by the next run, which starts by clearing it.
   void stop();
-  bool is_running() const { return running_; }
+  /// Any thread: is the run loop active? Once this is true, a stop() ends that run.
+  bool is_running() const { return running_.load(std::memory_order_acquire); }
 
   // --- Process control ---
 
@@ -223,13 +227,19 @@ public:
   std::optional<priority_info> get_priority_as(int caller_pid, int pid) const override;
   bool set_priority_floor(int pid, int floor) override;
   void note_priority_clamped() override;
-  /// Thread-safe: `cmd` for process `pid`, applied between steps by the next drain (a step's, or
-  /// drain_ingress()'s), as post_message's posts are; a driver blocked in wait_for_work() wakes.
-  /// set_priority applies through the host path (unchecked); an unknown pid is found, and ignored,
-  /// then. A query runs its function on the scheduler thread, and must not throw. True once queued.
+  /// Thread-safe: `cmd` for process `pid`, applied between steps on the scheduler's thread by the
+  /// next drain (a step's, or drain_ingress()'s), as post_message's posts are; a driver blocked
+  /// in wait_for_work() wakes. Commands are applied one at a time, first in, first out, after the
+  /// drain's messages and completions, whatever the order they were all posted in (S0.7). kill,
+  /// pause, resume, signal and set_priority are the direct calls' host paths, unchecked (kill's
+  /// reason is killed_by_user; signal "SIGKILL" kills); an unknown pid is found, and refused,
+  /// then. Each one's `done`, when set, gets what its call returned; one never applied gets false
+  /// from the destructor. A query runs its function, and must not throw. True once queued.
   bool post_control(int pid, control_cmd cmd);
-  /// Thread-safe: whether a posted command waits for a drain.
-  bool has_pending_control() const noexcept;
+  /// Thread-safe: whether a posted command waits for a drain (a posted message is no command).
+  bool has_pending_control() const noexcept {
+    return control_pending_.load(std::memory_order_acquire);
+  }
   bool set_max_steps(int pid, uint64_t max_steps);
   bool set_max_time(int pid, double seconds);
   bool set_max_memory(int pid, uint64_t bytes);
@@ -369,8 +379,11 @@ private:
   double published_rate_ = -1.0; // the effective.async_steps_per_cpu_ms last published
   int next_pid_ = 1;
   int rr_index_ = 0;
-  bool running_ = false;
-  bool stop_requested_ = false;
+  /// The run loop's flags, which stop() and is_running() touch from any thread (td B17), as the
+  /// sync scheduler's: a run clears stop_requested_ before it publishes running_.
+  std::atomic<bool> running_{false};
+  std::atomic<bool> stop_requested_{false};
+  static_assert(std::atomic<bool>::is_always_lock_free, "stop() must not take a lock");
   uint64_t total_steps_ = 0;
   uint64_t priority_clamped_ = 0; // spawns clamped to the spawner's floor (note_priority_clamped)
 
@@ -447,6 +460,8 @@ private:
   /// Set (under ingress_mutex_) while ingress_, completions_ or controls_ holds something, so a
   /// drain finds an empty ingress without the lock.
   std::atomic<bool> ingress_pending_{false};
+  /// Set (under ingress_mutex_) while controls_ holds something: has_pending_control().
+  std::atomic<bool> control_pending_{false};
   /// A wait_for_work() is (about to be) blocked: a post notifies wakeup_.
   std::atomic<bool> idle_waiting_{false};
   /// What wait_for_work() blocks on. Made at construction and shared with the lock home's port,
@@ -486,8 +501,13 @@ private:
   // What a step does before picking a process: the lock port's posts, the ingress, the calls,
   // the due timers.
   void drain(bool in_step);
-  // Apply one post_control command (scheduler thread).
+  // Apply one post_control command (scheduler thread), then tell its done what the call returned.
   void apply_control(int pid, control_cmd &cmd);
+  // A drain that threw: what it had not applied (batch[m..], finished[f..], controls[c..]) goes
+  // back to the front of the ingress, ahead of what was posted since (S0.7).
+  void requeue_ingress(std::vector<std::pair<std::string, value_t>> &batch, std::size_t m,
+                       std::vector<std::shared_ptr<async_call>> &finished, std::size_t f,
+                       std::vector<std::pair<int, control_cmd>> &controls, std::size_t c) noexcept;
   uint64_t run_loop(std::optional<uint64_t> max_steps, std::optional<double> max_time);
   void execute_process_step(const process_ptr &pp);
   void handle_signal(process &proc);

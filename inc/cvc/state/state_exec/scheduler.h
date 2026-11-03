@@ -50,7 +50,8 @@ namespace cvc::state_exec {
 class scheduler : public scheduler_base {
 public:
   explicit scheduler(scheduling_policy policy = scheduling_policy::round_robin);
-  /// Destroys the lock home first (protocol 5.7), before any other member goes.
+  /// Destroys the lock home first (protocol 5.7), before any other member goes; then a posted
+  /// command never applied gets done(false).
   ~scheduler() override;
 
   // --- Locks (docs/STATE_EXEC_LOCKS.md) ---
@@ -100,8 +101,8 @@ public:
   /// returns when the time budget runs out first. While only processes waiting for a message
   /// with no time limit are left, nothing can wake them in a synchronous run: run() returns at
   /// once when `max_steps` bounds it, else waits out `max_time`, else waits until stop(). A post
-  /// to the scheduler's lock port (a grant for a lock waiter, made on another home's thread) ends
-  /// any such wait, and run() steps again (design 8.7).
+  /// to the scheduler's lock port (a grant for a lock waiter, made on another home's thread) or a
+  /// post_control ends any such wait, and run() steps again (design 8.7; td 4.12).
   std::unordered_map<int, value_t> run(std::optional<uint64_t> max_steps = std::nullopt,
                                        std::optional<double> max_time = std::nullopt);
 
@@ -111,11 +112,13 @@ public:
   uint64_t run_steps(std::optional<uint64_t> max_steps = std::nullopt,
                      std::optional<double> max_time = std::nullopt);
 
-  /// Stop the run loop.
+  /// Any thread: end the run loop at its next check, an idle wait included (td 4.12). Not
+  /// async-signal-safe: it notifies the idle wait, which takes a lock on POSIX. A stop() with no
+  /// run active is discarded by the next run, which starts by clearing it.
   void stop();
 
-  /// Is the run loop active?
-  bool is_running() const { return running_; }
+  /// Any thread: is the run loop active? Once this is true, a stop() ends that run.
+  bool is_running() const { return running_.load(std::memory_order_acquire); }
 
   /// Erase a finished (terminated, killed or failed) process, freeing what it kept (its
   /// result, error and statistics). False for an unknown pid or a live one. Until then a
@@ -177,10 +180,15 @@ public:
   std::optional<priority_info> get_priority_as(int caller_pid, int pid) const override;
   bool set_priority_floor(int pid, int floor) override;
   void note_priority_clamped() override;
-  /// Thread-safe: `cmd` for process `pid`, applied between steps, at the top of the next step
-  /// (step(), or run()'s next iteration: an idle run() applies it once its wait ends).
-  /// set_priority applies through the host path (unchecked); an unknown pid is found, and ignored,
-  /// then. A query runs its function on the scheduler thread, and must not throw. True once queued.
+  /// Thread-safe: `cmd` for process `pid`, applied between steps on the scheduler's thread, at
+  /// the top of the next step (step(), or run()'s next iteration). A post ends an idle run()'s
+  /// wait, and run() applies what is posted before it tests has_runnable(), so a resume of the
+  /// only process, or a kill of the last one, takes effect in a run with nothing else to do.
+  /// Commands are applied one at a time, first in, first out. kill, pause, resume, signal and
+  /// set_priority are the direct calls' host paths, unchecked (kill's reason is killed_by_user;
+  /// signal "SIGKILL" kills); an unknown pid is found, and refused, then. Each one's `done`, when
+  /// set, gets what its call returned; one never applied gets false from the destructor. A query
+  /// runs its function, and must not throw. True once queued.
   bool post_control(int pid, control_cmd cmd);
   /// Thread-safe: whether a posted command waits to be applied (the CLI's serve loop steps for
   /// one even with nothing runnable).
@@ -319,8 +327,12 @@ private:
   uint32_t cycle_check_ = 0; // steps, for checking every 64th whether a cycle collection is due
   int next_pid_ = 1;
   int rr_index_ = 0;
-  bool running_ = false;
-  bool stop_requested_ = false;
+  /// run()'s flags, which stop() and is_running() touch from any thread (td B17). A run clears
+  /// stop_requested_ before it publishes running_, so a stop() made once is_running() is true is
+  /// never lost. No data rides on them: the loop reads stop_requested_ relaxed.
+  std::atomic<bool> running_{false};
+  std::atomic<bool> stop_requested_{false};
+  static_assert(std::atomic<bool>::is_always_lock_free, "stop() must not take a lock");
   uint64_t total_steps_ = 0;
   uint64_t priority_clamped_ = 0; // spawns clamped to the spawner's floor (note_priority_clamped)
   int current_pid_ = -1;
@@ -351,8 +363,8 @@ private:
   uint64_t rate_seen_ = 0;
   bool rate_valid_ = false;
   double rate_ = kDefaultAsyncStepsPerCpuMs;
-  /// run()'s idle wait: made with the lock home, which shares it with its port so a post ends the
-  /// wait (protocol 2.3), else on the first idle wait.
+  /// run()'s idle wait, made at construction (td 4.12). The lock home shares it with its port, so
+  /// a post ends the wait (protocol 2.3), and stop() notifies it.
   std::shared_ptr<detail::wakeup> idle_;
   std::vector<process *> woken_; // reused by deliver_to_receivers
 
@@ -368,8 +380,8 @@ private:
   /// port's posts, when there are any (protocol 5.9).
   int step_once();
   /// run()'s wait while nothing is ready, charged to its budgets (`steps`, the loop's
-  /// iterations so far, and `budget`, running): false to end the run. A post to the lock port
-  /// ends it (true: the next step_once applies the post).
+  /// iterations so far, and `budget`, running): false to end the run. A post to the lock port or
+  /// to post_control ends it (true: the run's loop applies the post).
   bool idle_wait(std::optional<uint64_t> max_steps, uint64_t &steps, time_budget *budget);
 
   /// Execute one step on a specific process and check resource limits.
@@ -429,12 +441,15 @@ private:
   void keep_lock_expiries(clock::time_point now);
 
   /// post_control's commands, from any thread: guarded by control_mutex_, applied at the top of
-  /// step_once. control_pending_ is set (under the mutex) while there are any, so a step finds
-  /// none without the lock.
+  /// step_once and of run()'s loop. control_pending_ is set (under the mutex) while there are
+  /// any, so a step finds none without the lock.
   std::mutex control_mutex_;
   std::vector<std::pair<int, control_cmd>> controls_;
   std::atomic<bool> control_pending_{false};
+  /// Apply the queued commands in order. One that throws gets done(false), and the rest go back
+  /// to the front of the queue before the exception propagates.
   void apply_controls();
+  void apply_control(int pid, control_cmd &cmd);
 };
 
 /// limits.max_alloc_bytes from the state tree under `root`:

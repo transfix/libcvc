@@ -8,6 +8,7 @@
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/scheduler.h>         // max_alloc_bytes_from_state
 #include <cvc/state/state_exec/state_value_codec.h> // snapshot / restore
+#include <iterator>
 
 namespace cvc::state_exec {
 
@@ -20,7 +21,27 @@ async_scheduler::async_scheduler(scheduling_policy policy)
       procs_(policy != scheduling_policy::round_robin),
       wakeup_(std::make_shared<detail::wakeup>()) {}
 
-async_scheduler::~async_scheduler() { home_.reset(); }
+namespace {
+// What a posted command never applied, or whose call threw, tells its done: false (S0.0's
+// contract; a query has no done). done must not throw.
+void refuse_control(control_cmd &cmd) noexcept {
+  if (cmd.done && cmd.what != control_cmd::kind::query)
+    cmd.done(false);
+}
+} // namespace
+
+async_scheduler::~async_scheduler() {
+  home_.reset();
+  // Commands posted and never applied: their done gets false. Taken under the lock, so a post
+  // that returned before the destruction began is seen.
+  std::vector<std::pair<int, control_cmd>> left;
+  {
+    std::lock_guard<std::mutex> lock(ingress_mutex_);
+    left.swap(controls_);
+  }
+  for (auto &entry : left)
+    refuse_control(entry.second);
+}
 
 void async_scheduler::set_lock_manager(std::shared_ptr<lock_manager> mgr, lock_attach attach) {
   if (home_)
@@ -437,18 +458,33 @@ void async_scheduler::drain(bool in_step) {
       finished.swap(completions_);
       controls.swap(controls_);
       ingress_pending_.store(false, std::memory_order_relaxed);
+      control_pending_.store(false, std::memory_order_relaxed);
     }
+    chain_valid_ = false;
     // On the scheduler thread now: deliver_to_receivers mutates process state, which is safe
     // here (no other thread touches the scheduler). A message with no waiter falls into the
-    // per-path pending FIFO, exactly as an on-thread msg-send would.
-    for (auto &[path, msg] : batch)
-      deliver_to_receivers(path, msg);
-    for (const std::shared_ptr<async_call> &call : finished)
-      finish_async_call(call);
-    // Commands posted from other threads (post_control), in the order they came.
-    for (auto &[pid, cmd] : controls)
-      apply_control(pid, cmd);
-    chain_valid_ = false;
+    // per-path pending FIFO, exactly as an on-thread msg-send would. Then the settled calls, then
+    // the commands posted from other threads (post_control), each in the order they came. One at
+    // a time: a call's finish or a kill can throw (a tree write's slots), and what was not yet
+    // applied then goes back to the ingress before the exception propagates (S0.7).
+    std::size_t m = 0, f = 0, c = 0;
+    try {
+      while (m < batch.size()) {
+        auto &[path, msg] = batch[m++];
+        deliver_to_receivers(path, msg);
+      }
+      while (f < finished.size())
+        finish_async_call(finished[f++]);
+      while (c < controls.size()) {
+        auto &[pid, cmd] = controls[c++];
+        apply_control(pid, cmd);
+      }
+    } catch (...) {
+      if (c > 0) // a command threw: it is refused
+        refuse_control(controls[c - 1].second);
+      requeue_ingress(batch, m, finished, f, controls, c);
+      throw;
+    }
   }
   if (!async_calls_.empty()) {
     charge_async_calls(in_step ? now_for_step() : clock::now());
@@ -508,9 +544,20 @@ task<int> async_scheduler::step() {
 
 uint64_t async_scheduler::run_loop(std::optional<uint64_t> max_steps,
                                    std::optional<double> max_time) {
-  running_ = true;
-  stop_requested_ = false;
+  // As the sync scheduler's run (td B17): a stop() from before this run is discarded, and one
+  // made once is_running() reads true is seen.
+  stop_requested_.store(false, std::memory_order_relaxed);
+  running_.store(true, std::memory_order_release);
   chain_valid_ = false;
+  // However the run ends (a step's exception too: a throwing on_complete), it is over.
+  struct run_end {
+    std::atomic<bool> &running;
+    bool &chain_valid;
+    ~run_end() {
+      running.store(false, std::memory_order_release);
+      chain_valid = false;
+    }
+  } end_of_run{running_, chain_valid_};
   uint64_t steps = 0;
   // max_time is a time_budget: the run's own time, not time its thread spent descheduled (a
   // per-frame pump on a loaded machine still finishes a quick action within its frame).
@@ -521,7 +568,7 @@ uint64_t async_scheduler::run_loop(std::optional<uint64_t> max_steps,
   }
 
   uint64_t taken = 0;
-  while (!stop_requested_ && has_runnable()) {
+  while (!stop_requested_.load(std::memory_order_relaxed) && has_runnable()) {
     if (max_steps && steps >= *max_steps)
       break;
     if (budget && budget->spent(now_for_step()))
@@ -529,9 +576,6 @@ uint64_t async_scheduler::run_loop(std::optional<uint64_t> max_steps,
     taken += static_cast<uint64_t>(step_once());
     ++steps;
   }
-
-  running_ = false;
-  chain_valid_ = false;
   return taken;
 }
 
@@ -557,7 +601,10 @@ uint64_t async_scheduler::sync_run_steps(std::optional<uint64_t> max_steps,
   return run_loop(max_steps, max_time);
 }
 
-void async_scheduler::stop() { stop_requested_ = true; }
+void async_scheduler::stop() {
+  // Any thread. No notify: the run loop never waits (wait_for_work is the driver's).
+  stop_requested_.store(true, std::memory_order_release);
+}
 
 bool async_scheduler::has_runnable() const { return procs_.runnable_count() > 0; }
 
@@ -1518,34 +1565,69 @@ void async_scheduler::note_priority_clamped() {
 bool async_scheduler::post_control(int pid, control_cmd cmd) {
   // Any thread. Queued with the ingress and applied by the next drain, on the scheduler thread
   // (apply_control): the posting thread may not read procs_, so an unknown pid is found, and
-  // ignored, there. Notified under the lock, as post_message is.
+  // refused, there. Notified under the lock, as post_message is.
   std::lock_guard<std::mutex> lock(ingress_mutex_);
   controls_.emplace_back(pid, std::move(cmd));
+  control_pending_.store(true, std::memory_order_release);
   ingress_pending_.store(true, std::memory_order_seq_cst);
   notify_work();
   return true;
 }
 
 void async_scheduler::apply_control(int pid, control_cmd &cmd) {
+  bool applied = false;
   switch (cmd.what) {
-  case control_cmd::kind::set_priority:
-    set_priority(pid, cmd.value); // the host path, unchecked (design 7.4); false for a gone pid
-    break;
   case control_cmd::kind::query:
     if (cmd.query)
       cmd.query(*this);
+    return; // a query has no done
+  case control_cmd::kind::set_priority:
+    applied = set_priority(pid, cmd.value); // the host path, unchecked (design 7.4)
     break;
   case control_cmd::kind::kill:
+    applied = kill(pid); // killed_by_user
+    break;
   case control_cmd::kind::pause:
+    applied = pause(pid);
+    break;
   case control_cmd::kind::resume:
+    applied = resume(pid);
+    break;
   case control_cmd::kind::signal:
-    break; // S0.7 applies these
+    applied = send_signal(pid, cmd.signal); // "SIGKILL" kills
+    break;
   }
+  if (cmd.done)
+    cmd.done(applied);
 }
 
-bool async_scheduler::has_pending_control() const noexcept {
-  // S0.7 narrows this to controls_; for now any ingress counts.
-  return ingress_pending_.load(std::memory_order_acquire);
+void async_scheduler::requeue_ingress(std::vector<std::pair<std::string, value_t>> &batch,
+                                      std::size_t m,
+                                      std::vector<std::shared_ptr<async_call>> &finished,
+                                      std::size_t f,
+                                      std::vector<std::pair<int, control_cmd>> &controls,
+                                      std::size_t c) noexcept {
+  // The entry that threw is not put back: a delivery or a finish may have half happened, and the
+  // command was refused.
+  try {
+    std::lock_guard<std::mutex> lock(ingress_mutex_);
+    ingress_pending_.store(true, std::memory_order_seq_cst); // the next drain looks again
+    // An insert that fails (no memory) leaves its queue as it was.
+    ingress_.insert(ingress_.begin(), std::make_move_iterator(batch.begin() + m),
+                    std::make_move_iterator(batch.end()));
+    completions_.insert(completions_.begin(), std::make_move_iterator(finished.begin() + f),
+                        std::make_move_iterator(finished.end()));
+    if (c < controls.size()) {
+      controls_.insert(controls_.begin(), std::make_move_iterator(controls.begin() + c),
+                       std::make_move_iterator(controls.end()));
+      c = controls.size();
+      control_pending_.store(true, std::memory_order_release);
+    }
+  } catch (...) {
+    // No memory to queue them again: the commands left are refused rather than lost.
+    for (; c < controls.size(); ++c)
+      refuse_control(controls[c].second);
+  }
 }
 
 bool async_scheduler::set_max_steps(int pid, uint64_t max_steps) {
