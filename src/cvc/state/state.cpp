@@ -1576,6 +1576,21 @@ state &state::childThroughLinks(const std::string &path, bool refuse_read_only,
   return *cur;
 }
 
+state::state_ptr state::findThroughLinksShared(const std::string &path,
+                                               std::vector<state_ptr> *pins,
+                                               std::size_t hop_budget) {
+  (void)pins; // S0.3 pins every hop
+  state *found = findThroughLinks(path, hop_budget);
+  return found ? found->shared_from_this() : state_ptr();
+}
+
+state::state_ptr state::childThroughLinksShared(const std::string &path, bool refuse_read_only,
+                                                std::vector<state_ptr> *pins,
+                                                std::size_t hop_budget) {
+  (void)pins; // S0.3 pins every hop
+  return childThroughLinks(path, refuse_read_only, hop_budget).shared_from_this();
+}
+
 // static
 std::string state::normalize_path(const std::string &path) { return normalize_state_path(path); }
 
@@ -1934,6 +1949,11 @@ size_t state::numChildren() {
 }
 
 // -------- Expiring state --------
+
+bool state::removeChild(const std::string &name) {
+  (void)name; // S0.3 unlinks it
+  return false;
+}
 
 state &state::expireAt(boost::posix_time::ptime when) {
   // Root cannot be expired \u2014 there is nobody to detach it from.

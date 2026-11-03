@@ -739,6 +739,13 @@ void scheduler::queue_watch_event(int pid, process::watch_event evt) {
 
 void scheduler::register_watch_handler(int pid, int watch_id, value_t handler,
                                        const std::string &path) {
+  register_watch_handler(pid, watch_id, std::move(handler), path, nullptr);
+}
+
+void scheduler::register_watch_handler(int pid, int watch_id, value_t handler,
+                                       const std::string &path,
+                                       boost::shared_ptr<cvc::state> root) {
+  // S0.5 resolves `path` under `root` when it is set; until then it is only recorded.
   auto it = procs_.all().find(pid);
   if (it == procs_.all().end())
     return;
@@ -749,7 +756,7 @@ void scheduler::register_watch_handler(int pid, int watch_id, value_t handler,
     if (node)
       initial = node->value();
   }
-  it->second->watch_handlers[watch_id] = {std::move(handler), path, initial};
+  it->second->watch_handlers[watch_id] = {std::move(handler), path, initial, std::move(root)};
   procs_.update(*it->second);
 }
 
@@ -1373,6 +1380,11 @@ void scheduler::apply_controls() {
       if (cmd.query)
         cmd.query(*this);
       break;
+    case control_cmd::kind::kill:
+    case control_cmd::kind::pause:
+    case control_cmd::kind::resume:
+    case control_cmd::kind::signal:
+      break; // S0.7 applies these
     }
   }
 }

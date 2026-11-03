@@ -713,6 +713,17 @@ public:
   state &childThroughLinks(const std::string &path, bool refuse_read_only = false,
                            std::size_t hop_budget = 64);
 
+  // Pinned forms of the two (td 4.8): the walk holds every hop as it goes, and returns the node a
+  // read (or write) lands on as a state_ptr. `pins`, when given, gets every node the caller must
+  // keep to mutate the result safely: the hops from this node's child down to the result, and on
+  // a link hop that link's target_pins. The start node itself is not pinned (except for an empty
+  // path, which returns it): a caller holds the start, as the intrinsics do through root_pins.
+  state_ptr findThroughLinksShared(const std::string &path, std::vector<state_ptr> *pins = nullptr,
+                                   std::size_t hop_budget = 64);
+  state_ptr childThroughLinksShared(const std::string &path, bool refuse_read_only = false,
+                                    std::vector<state_ptr> *pins = nullptr,
+                                    std::size_t hop_budget = 64);
+
   // Normalize a state path to its canonical dot-separated form (trim; drop
   // leading/trailing/duplicate separators). A pure STRING operation — unlike fullName(), it never
   // walks the _parent chain, so it is the safe way to obtain a node's canonical absolute path when
@@ -845,6 +856,12 @@ public:
   // The root state cannot be expired; calling expireAt on a
   // node with no parent is a no-op and returns *this.
   state &expireAt(boost::posix_time::ptime when);
+
+  // Unlink the direct child `name` now (state-delete, td 4.8): erase it from this node's
+  // children, emit childChanged(name) once, and never `expiring`. The subtree is freed when the
+  // last pin on it goes, on that thread. The caller keeps this node's ancestor chain pinned. False
+  // when there is no such child.
+  bool removeChild(const std::string &name);
 
   // Convenience: expireAt(microsec_clock::universal_time() + d).
   state &expireAfter(boost::posix_time::time_duration d);

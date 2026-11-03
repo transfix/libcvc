@@ -72,8 +72,13 @@ private:
 
 /// The built-in exception class named `name` (Exception, RuntimeError, TypeError, ValueError,
 /// NameError, KeyError, IndexError, ArithmeticError, MemoryError, ParseError, TimeoutError,
-/// NativeError, PythonError, LockError, DeadlockError, PermissionError), or null.
+/// NativeError, PythonError, LockError, DeadlockError, PermissionError, AssertionError), or null.
+/// The 17 class dicts are one per OS process, shared by every environment, and read-only
+/// (td 5 item 1): set-attr, del-attr and set_field refuse them.
 dict_ptr exception_class(std::string_view name);
+
+/// Whether `dict` (a dict_ptr's get()) is one of the built-in class dicts.
+bool is_builtin_class_dict(const void *dict) noexcept;
 
 /// The built-in exception class names, parents before children.
 const std::vector<std::string> &exception_class_names();

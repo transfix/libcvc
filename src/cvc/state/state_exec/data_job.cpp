@@ -673,7 +673,9 @@ std::unique_ptr<data_job> make_print_job(value_t v) {
   return std::make_unique<print_walk>(std::move(v));
 }
 
-std::unique_ptr<data_job> make_copy_job(value_t v) {
+std::unique_ptr<data_job> make_copy_job(value_t v, copy_mode mode, const char *who) {
+  (void)mode; // S0.2 refuses in isolate mode
+  (void)who;
   return std::make_unique<copy_walk>(std::move(v));
 }
 

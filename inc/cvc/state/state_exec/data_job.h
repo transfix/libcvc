@@ -110,9 +110,18 @@ std::unique_ptr<data_job> make_print_job(value_t v);
 std::unique_ptr<data_job> make_concat_job(std::vector<value_t> parts, std::string sep,
                                           const char *who);
 
+/// How make_copy_job treats what it does not copy: `share` shares it; `isolate` (state-data-set,
+/// td 4.3) refuses, at any depth, a closure, native function, generator, future, lock form, lock
+/// wait or user-class instance, with std::runtime_error "<who>: cannot store a <kind>", plus
+/// " (nested in a list)" or " (nested in a dict)" below the root. Built-in exception class dicts
+/// and ordinary data_objects are shared in both modes.
+enum class copy_mode { share, isolate };
+
 /// A private copy of v's lists and dicts, keeping their sharing (a node reached twice is copied
-/// once; a cycle is copied as a cycle). Anything else is shared, not copied.
-std::unique_ptr<data_job> make_copy_job(value_t v);
+/// once; a cycle is copied as a cycle). Anything else is shared, not copied, or refused (`mode`).
+/// `who` names the copy in its deadline and refusal messages (a string literal).
+std::unique_ptr<data_job> make_copy_job(value_t v, copy_mode mode = copy_mode::share,
+                                        const char *who = "state-data-get");
 
 /// A macro template with its parameters replaced: each symbol named in `subst` becomes its
 /// value; lists are copied, everything else is kept.

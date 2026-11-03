@@ -228,6 +228,8 @@ public:
   /// set_priority applies through the host path (unchecked); an unknown pid is found, and ignored,
   /// then. A query runs its function on the scheduler thread, and must not throw. True once queued.
   bool post_control(int pid, control_cmd cmd);
+  /// Thread-safe: whether a posted command waits for a drain.
+  bool has_pending_control() const noexcept;
   bool set_max_steps(int pid, uint64_t max_steps);
   bool set_max_time(int pid, double seconds);
   bool set_max_memory(int pid, uint64_t bytes);
@@ -287,8 +289,12 @@ public:
 
   void queue_watch_event(int pid, process::watch_event evt);
 
+  /// The 5-argument form with a null root (the scheduler's watch root).
   void register_watch_handler(int pid, int watch_id, value_t handler,
                               const std::string &path) override;
+  /// Resolves `path` under `root` when it is non-null (td 4.8).
+  void register_watch_handler(int pid, int watch_id, value_t handler, const std::string &path,
+                              boost::shared_ptr<cvc::state> root) override;
   void unregister_watch_handler(int pid, int watch_id) override;
 
   void set_watch_root(cvc::state *root) override;

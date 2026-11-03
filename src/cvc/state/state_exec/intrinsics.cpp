@@ -690,7 +690,7 @@ value_t intrinsic_state_watch(intrinsics_context *ctx, std::span<const value_t> 
     auto *node = ctx->root->findDescendant(path);
     if (node)
       initial = node->value();
-    self->watch_handlers[watch_id] = {handler, path, initial};
+    self->watch_handlers[watch_id] = {handler, path, initial, nullptr};
   }
 
   // Keep a local registry for unwatch; no signal connection needed.
@@ -1639,6 +1639,10 @@ void apply_chroot(intrinsics_context &ctx, cvc::state &tree_root, const std::str
   // Navigate or create the subtree node
   ctx.root = &tree_root(root_path);
   ctx.root_path = root_path;
+}
+
+cvc::state &pinned_root(intrinsics_context *ctx) {
+  return *ctx->root; // S0.4 pins it and its ancestors in ctx->root_pins
 }
 
 std::string resolve_channel_key(const std::string &root_path, const std::string &channel) {

@@ -22,6 +22,7 @@
 #ifndef CVC_STATE_EXEC_SCHEDULER_BASE_H
 #define CVC_STATE_EXEC_SCHEDULER_BASE_H
 
+#include <boost/shared_ptr.hpp>
 #include <cstdint>
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/types.h>
@@ -186,12 +187,17 @@ class scheduler_base;
 
 /// A command posted to a scheduler from another thread, applied between its steps (td Stage 0's
 /// post_control; gap G-20). L2 has set_priority, and a query (pycvc's between-steps reads); Stage
-/// 0 adds kill, pause, resume and signal.
+/// 0 adds kill, pause, resume and signal, each the direct call's host path, unchecked.
 struct control_cmd {
-  enum class kind { set_priority, query };
+  enum class kind { set_priority, query, kill, pause, resume, signal };
   kind what = kind::set_priority;
   int value = 0;
   std::function<void(scheduler_base &)> query;
+  std::string signal; // kind::signal: the name send_signal takes ("SIGKILL" kills)
+  /// Optional, not used for a query: called once, on the scheduler's thread, with what the direct
+  /// call returned, or with false from the scheduler's destructor when the command was never
+  /// applied. It must not throw, block or take the GIL.
+  std::function<void(bool)> done;
 };
 
 /// state_exec.policy under `root` (round_robin, priority, priority_rr), else `fallback`; an
@@ -255,6 +261,14 @@ public:
   virtual void set_watch_root(cvc::state *root) = 0;
   virtual void register_watch_handler(int pid, int watch_id, value_t handler,
                                       const std::string &path) = 0;
+  /// A watch that resolves `path` under its own `root` (a chrooted context's: td 4.8), pinned by
+  /// the entry; null resolves under the scheduler's watch root. A scheduler without per-watch
+  /// roots ignores `root`.
+  virtual void register_watch_handler(int pid, int watch_id, value_t handler,
+                                      const std::string &path, boost::shared_ptr<cvc::state> root) {
+    (void)root;
+    register_watch_handler(pid, watch_id, std::move(handler), path);
+  }
   virtual void unregister_watch_handler(int pid, int watch_id) = 0;
 
   // --- Async calls (await, and the async host: docs/STATE_EXEC_EXCEPTIONS.md 3) ---

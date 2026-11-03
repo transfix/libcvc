@@ -124,6 +124,13 @@ dict_ptr exception_class(std::string_view name) {
 
 const std::vector<std::string> &exception_class_names() { return classes().names; }
 
+bool is_builtin_class_dict(const void *dict) noexcept {
+  for (const auto &[name, cls] : classes().by_name) // S0.1 makes this a binary search
+    if (cls.get() == dict)
+      return true;
+  return false;
+}
+
 void register_exception_classes(const environment_ptr &env) {
   for (const auto &name : exception_class_names()) {
     const dict_ptr cls = exception_class(name);
