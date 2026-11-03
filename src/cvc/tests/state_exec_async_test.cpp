@@ -1168,3 +1168,28 @@ TEST(SyncPostControl, AThrowingCommandRequeuesTheRest) {
 TEST(SyncPostControl, TheDestructorRefusesWhatWasNeverApplied) {
   the_destructor_refuses_what_was_never_applied<scheduler>();
 }
+
+// --- an async call's outcome (docs/STATE_EXEC_EXCEPTIONS.md 3) ---
+
+// A kernel that throws a dsl_exception holding a built-in class dict itself is raised as it is:
+// the class is read-only (td 5 item 1), so outcome() adds no origin or function to it, as before
+// S0.1, rather than raising a TypeError from the read-only class.
+TEST(AsyncCallOutcome, AKernelRaisingABuiltinClassDictRaisesItUnchanged) {
+  const dict_ptr cls = exception_class("ValueError");
+  const std::size_t size = cls->size();
+  auto call = std::make_shared<async_call>("probe", 1);
+  ASSERT_TRUE(call->settle({}, std::make_exception_ptr(dsl_exception(value_t(cls)))));
+  try {
+    call->outcome();
+    ADD_FAILURE() << "the call's outcome returned";
+  } catch (const dsl_exception &e) {
+    const dict_ptr *raised = std::get_if<dict_ptr>(&e.value().v);
+    ASSERT_NE(raised, nullptr);
+    EXPECT_EQ(raised->get(), cls.get());
+  } catch (const std::exception &e) {
+    ADD_FAILURE() << "raised " << e.what() << " instead of the class";
+  }
+  EXPECT_EQ(cls->size(), size);
+  EXPECT_EQ(field(value_t(cls), "origin"), nullptr);
+  EXPECT_EQ(field(value_t(cls), "function"), nullptr);
+}
