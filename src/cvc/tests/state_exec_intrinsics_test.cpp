@@ -2068,3 +2068,67 @@ TEST_F(SpawnContext, AfterRegisterRuns) {
   EXPECT_EQ(std::get<int64_t>((**l)[0].v), 5);
   EXPECT_EQ(std::get<std::string>((**l)[1].v), "host");
 }
+
+// --- Stage 0 hazards (td 8.1) ---
+
+// HZ-5 (td 8.1, S0.4): state-delete unlinks its one node from its parent. It no longer expires the
+// node and sweeps the context's root, which removed every other expired node there too: those stay
+// until a sweep. The parent's childChanged fires once; `expiring` never does.
+TEST_F(StateTreeIntrinsicsTest, HZ05_StateDeleteRemovesOnlyItsNode) {
+  cvc::state &root = cvc::state::instance(app_ctx);
+  call("state-set", {std::string("a.del.leaf"), std::string("x")});
+  call("state-set", {std::string("a.sib"), std::string("s")});
+  call("state-set", {std::string("b.other"), std::string("o")});
+  call("state-expire", {std::string("a.sib"), -1.0});   // expired, not swept: a sibling
+  call("state-expire", {std::string("b.other"), -1.0}); // and a node elsewhere
+  ASSERT_TRUE(root("a.sib").isExpired());
+  std::vector<std::string> changed;
+  int expiring = 0;
+  boost::signals2::scoped_connection on_parent =
+      root("a").childChanged.connect([&](const std::string &p) { changed.push_back(p); });
+  boost::signals2::scoped_connection on_node = root("a.del").expiring.connect([&] { ++expiring; });
+  boost::signals2::scoped_connection on_leaf =
+      root("a.del.leaf").expiring.connect([&] { ++expiring; });
+
+  call("state-delete", {std::string("a.del")});
+  EXPECT_EQ(root.findDescendant("a.del"), nullptr);
+  EXPECT_NE(root.findDescendant("a.sib"), nullptr);
+  EXPECT_NE(root.findDescendant("b.other"), nullptr);
+  EXPECT_EQ(changed, std::vector<std::string>{"del"});
+  EXPECT_EQ(expiring, 0);
+  // The expired nodes go with the next sweep.
+  EXPECT_EQ(std::get<int64_t>(call("state-sweep-expired", {}).v), 2);
+  EXPECT_EQ(root.findDescendant("a.sib"), nullptr);
+  EXPECT_EQ(root.findDescendant("b.other"), nullptr);
+}
+
+// HZ-5 in a chroot: the same, and state-delete "" (the chroot itself) does nothing. It used to
+// leave the chroot expired, which its own sweep cannot remove, so a later sweep above it deleted
+// the whole document.
+TEST_F(StateTreeIntrinsicsTest, HZ05_StateDeleteRemovesOnlyItsNodeChrooted) {
+  cvc::state &root = cvc::state::instance(app_ctx);
+  apply_chroot(ictx, root, "doc");
+  call("state-set", {std::string("a.del"), std::string("x")});
+  call("state-set", {std::string("a.sib"), std::string("s")});
+  call("state-expire", {std::string("a.sib"), -1.0});
+  root("other.x").value(std::string("o")); // outside the chroot, expired
+  root("other.x").expireAt(boost::posix_time::microsec_clock::universal_time() -
+                           boost::posix_time::seconds(1));
+  std::vector<std::string> changed;
+  boost::signals2::scoped_connection on_parent =
+      root("doc.a").childChanged.connect([&](const std::string &p) { changed.push_back(p); });
+
+  call("state-delete", {std::string("a.del")});
+  EXPECT_EQ(root.findDescendant("doc.a.del"), nullptr);
+  EXPECT_NE(root.findDescendant("doc.a.sib"), nullptr);
+  EXPECT_NE(root.findDescendant("other.x"), nullptr);
+  EXPECT_EQ(changed, std::vector<std::string>{"del"});
+
+  call("state-delete", {std::string("")});
+  ASSERT_NE(root.findDescendant("doc"), nullptr);
+  EXPECT_FALSE(root("doc").hasExpiry());
+  EXPECT_NE(root.findDescendant("doc.a.sib"), nullptr);
+  EXPECT_EQ(std::get<int64_t>(call("state-sweep-expired", {}).v), 1); // doc.a.sib
+  EXPECT_EQ(root.sweepExpired(), 1u);                                 // other.x
+  EXPECT_NE(root.findDescendant("doc.a"), nullptr);
+}
