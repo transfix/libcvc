@@ -8,9 +8,10 @@
 # License version 2.1 as published by the Free Software Foundation.
 """Self-test of state_exec_bench.py's compare and gate rules, on synthetic records.
 
-The lock phases' gates (docs/STATE_EXEC_BENCH.md) are decided by these rules: the implicit
-defaults that keep old records matching, --pair, the noise rule (INCONCLUSIVE, exit 2), the change
-rule (a steps_total drop fails) and gate's absolute bounds. Standard library only; CTest runs it as
+The lock phases' and threaded execution's gates (docs/STATE_EXEC_BENCH.md) are decided by these
+rules: the implicit defaults that keep old records matching, --pair, the noise rule (INCONCLUSIVE,
+exit 2), the change rule (a steps_total drop fails) and gate's absolute bounds. The records of
+mt_pycvc_threads.py are checked here too, without pycvc. Standard library only; CTest runs it as
 state_exec_bench_tool_test.
 """
 
@@ -25,6 +26,7 @@ from contextlib import redirect_stdout
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+import mt_pycvc_threads as mpt  # noqa: E402
 import state_exec_bench as seb  # noqa: E402
 
 
@@ -84,6 +86,30 @@ class KeyOf(unittest.TestCase):
         self.assertEqual(seb.param(r, "r"), "2000")
         self.assertIsNone(seb.param(r, "missing"))
 
+    def test_stage0_keys_match_records_without_them(self):
+        # Threaded Stage 0 gave native.state_get/state_set and sched.watch_poll a chroot key, and
+        # sched.watch_poll a writes key: a base binary's points match the candidate's at chroot=0
+        # and writes=none, so compare doesn't count them "only in base".
+        for scenario, old in [("native.state_get", {"n": 20000, "depth": 4, "rounds": 3}),
+                              ("native.state_set", {"n": 20000, "depth": 1, "rounds": 3}),
+                              ("sched.watch_poll", {"w": 100, "watch": 1, "steps": 50000})]:
+            new = dict(old, chroot=0)
+            if scenario == "sched.watch_poll":
+                new["writes"] = "none"
+            self.assertEqual(seb.key_of(rec(scenario, old)), seb.key_of(rec(scenario, new)))
+        # lock.uncontended always had chroot: both sides drop chroot=0 and still match.
+        a = rec("lock.uncontended", {"n": 10000, "chroot": 0})
+        b = rec("lock.uncontended", {"n": 10000, "chroot": 0})
+        self.assertEqual(seb.key_of(a), seb.key_of(b))
+
+    def test_stage0_points_off_the_defaults_are_their_own(self):
+        base = rec("sched.watch_poll", {"w": 100, "watch": 1, "steps": 50000})
+        for extra in [{"chroot": 1}, {"writes": "elsewhere"}, {"chroot": 1, "writes": "elsewhere"}]:
+            other = rec("sched.watch_poll", dict(base["params"], **extra))
+            self.assertNotEqual(seb.key_of(base), seb.key_of(other), extra)
+        self.assertIn("chroot=1", seb.key_of(rec("native.state_get", {"n": 1, "chroot": 1}))[2])
+        self.assertEqual(seb.param(base, "writes"), "none")
+
 
 class ParsePair(unittest.TestCase):
     def test_parses(self):
@@ -128,6 +154,24 @@ class Compare(unittest.TestCase):
         cand = reps("eval.fib", {"n": 1}, [5, 5], metric="steps_total")
         res = quiet(seb.compare, base, cand, ["steps_total"], 0.0)
         self.assertEqual(res["changed"], 1)
+
+    def test_pair_chroot_in_one_run(self):
+        # Stage 0's chroot=1 points are paired with chroot=0 in the candidate's own run.
+        run = (reps("native.state_get", {"n": 100, "depth": 4}, [100, 101, 99]) +  # chroot 0
+               reps("native.state_get", {"n": 100, "depth": 4, "chroot": 1}, [130, 131, 129]))
+        res = quiet(seb.compare, run, run, ["wall_ns"], 3.0, pair=("chroot", "0", "1"))
+        self.assertEqual(res, {"worse": 1, "changed": 1, "inconclusive": 0, "failed": 0})
+
+    def test_of_ceiling_is_better_higher(self):
+        def point(value):
+            recs = reps("mt.multi_exec", {"t": 8, "prog": "fib", "runs": 5}, [1, 1, 1])
+            for r in recs:
+                r["extra"] = {"of_ceiling": value}
+            return recs
+        res = quiet(seb.compare, point(0.95), point(0.80), ["extra.of_ceiling"], 3.0)
+        self.assertEqual(res["worse"], 1)
+        res = quiet(seb.compare, point(0.80), point(0.95), ["extra.of_ceiling"], 3.0)
+        self.assertEqual((res["worse"], res["changed"]), (0, 1))
 
 
 class CompareExit(unittest.TestCase):
@@ -226,6 +270,65 @@ class Gate(unittest.TestCase):
     def test_needs_a_bound(self):
         recs = reps("lock.x", {"n": 1}, [1])
         self.assertEqual(self.gate(recs, "--scenario", "lock.x", "--metric", "wall_ns")[0], 2)
+
+    def test_multi_exec_gate_names_its_prog(self):
+        # Stage 0's gate: mt.multi_exec at t=8 at least 0.9 of mt.independent's speedup, per prog.
+        # prog=tree has no ceiling, so a gate that didn't name prog would fail on it.
+        def point(prog, t, values):
+            out = []
+            for i, v in enumerate(values):
+                r = rec("mt.multi_exec", {"t": t, "prog": prog, "runs": 5}, rep=i, wall_ns=1)
+                r["extra"] = {"speedup": 7.0} if v is None else {"speedup": 7.0, "of_ceiling": v}
+                out.append(r)
+            return out
+        recs = (point("fib", 8, [0.95, 0.96, 0.94]) + point("exceptions", 8, [0.85, 0.86, 0.84]) +
+                point("tree", 8, [None, None, None]) + point("fib", 4, [0.5, 0.5, 0.5]))
+        gate = ["--scenario", "mt.multi_exec", "--where", "t=8", "--metric", "extra.of_ceiling",
+                "--min", "0.9", "--max-noise", "10"]
+        code, out = self.gate(recs, *gate, "--where", "prog=fib")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.gate(recs, *gate, "--where", "prog=exceptions")[0], 1)
+        code, out = self.gate(recs, *gate)
+        self.assertEqual(code, 1, out)
+        self.assertIn("no extra.of_ceiling", out)
+
+
+class MtPycvcThreads(unittest.TestCase):
+    """mt_pycvc_threads.py's programs and records, without pycvc."""
+
+    def test_programs_are_mt_independents(self):
+        src, expect, iters = mpt.program("fib", smoke=False)
+        self.assertIn("(fib 18)", src)
+        self.assertEqual((expect, iters), ("2584", 2 * 4181 - 1))
+        src, expect, iters = mpt.program("exceptions", smoke=False)
+        self.assertIn("(while (< i 2000)", src)
+        self.assertEqual((expect, iters), ("2000", 2000))
+        self.assertEqual(mpt.program("fib", smoke=True)[1], "55")
+        with self.assertRaises(ValueError):
+            mpt.program("tree", smoke=False)
+
+    def test_an_unknown_prog_fails_before_pycvc_loads(self):
+        with self.assertRaises(ValueError):
+            mpt.main(["--prog", "fib,tree"])
+        self.assertNotIn("pycvc", sys.modules)
+
+    def test_records_are_the_runners(self):
+        ok = mpt.record(4, "fib", 5, 0, 100, wall=1000, one=2000, spans=[900, 950, 1000, 990],
+                        errors=[], smoke=True)
+        self.assertEqual(seb.key_of(ok), ("mt.pycvc_threads", "pycvc", "prog=fib runs=5 t=4"))
+        self.assertTrue(ok["ok"])
+        self.assertEqual(seb.metric(ok, "extra.speedup"), 4 * 2000 / 1000)
+        self.assertEqual(seb.metric(ok, "ns_per_iter"), 1000 / (4 * 5 * 100))
+        self.assertEqual(seb.metric(ok, "extra.thread_ns_per_iter"), 970 / (5 * 100))
+        bad = mpt.record(4, "fib", 5, 1, 100, wall=1000, one=2000, spans=[900, 0, 0, 0],
+                         errors=["thread 1: RuntimeError: returned 1, expected 2584"], smoke=True)
+        self.assertFalse(bad["ok"])
+        self.assertIn("thread 1", bad["error"])
+        buf = io.StringIO()
+        seb.table([ok, bad], out=buf)
+        self.assertIn("mt.pycvc_threads", buf.getvalue())
+        self.assertIn("error: thread 1", buf.getvalue())
+        self.assertEqual(json.loads(json.dumps(ok)), ok)  # a JSON line
 
 
 if __name__ == "__main__":

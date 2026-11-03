@@ -78,6 +78,7 @@
 #include <cvc/state/state_exec/detail/lock_home.h>
 #include <cvc/state/state_exec/evaluator.h>
 #include <cvc/state/state_exec/exceptions.h>
+#include <cvc/state/state_exec/heap.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/lock_manager.h>
 #include <cvc/state/state_exec/parser.h>
@@ -231,14 +232,24 @@ void install() {
 } // namespace bench_alloc
 
 #if !defined(_WIN32)
-// The replacement every module's operator new resolves to (see above). The array and nothrow
-// forms call this one by default.
+// The replacement every module's operator new resolves to (see above). The array forms call this
+// one by default. The nothrow form and the deletes are replaced with it, so every block it hands
+// out goes back through std::free: under ASan, whose own operator new and delete replace the
+// library's, a block from std::malloc freed by its operator delete (or one from its nothrow new
+// freed by std::free) is an alloc-dealloc mismatch.
 void *operator new(std::size_t n) {
   ++bench_alloc::count;
   if (void *p = std::malloc(n ? n : 1))
     return p;
   throw std::bad_alloc();
 }
+void *operator new(std::size_t n, const std::nothrow_t &) noexcept {
+  ++bench_alloc::count;
+  return std::malloc(n ? n : 1);
+}
+void operator delete(void *p) noexcept { std::free(p); }
+void operator delete(void *p, std::size_t) noexcept { std::free(p); }
+void operator delete(void *p, const std::nothrow_t &) noexcept { std::free(p); }
 #endif
 
 // Threads the process has started, counted as they attach (Windows: a TLS callback in this
@@ -3510,15 +3521,16 @@ std::string wait_parked(world &w, int64_t want, double timeout) {
   }
 }
 
-// Submit b bystander processes, each `body(i)`, and park them all.
+// Submit b bystander processes, each `body(i)`, and park them all. Each runs in its own scope over
+// `env` when given (an environment with intrinsics of its own), else over the world's.
 std::string park_bystanders(world &w, int64_t b, const std::function<std::string(int64_t)> &body,
-                            double timeout) {
+                            double timeout, const se::environment_ptr &env = nullptr) {
   if (b <= 0)
     return "";
   const int64_t before = waiting_count(w);
   for (int64_t i = 0; i < b; ++i) {
     se::execute_options opts;
-    opts.env = w.process_env("extend");
+    opts.env = env ? se::environment::extend(env) : w.process_env("extend");
     w.submit(body(i), opts);
   }
   return wait_parked(w, before + b, timeout);
@@ -3874,6 +3886,324 @@ std::optional<std::pair<int64_t, int64_t>> mutex_wait_between(const S &s0, const
                                        int64_t(s1.mutex_wait_ns - s0.mutex_wait_ns)};
   else
     return std::nullopt;
+}
+
+// ---------------------------------------------------------------------------------------------
+// mt.*: DSL on several threads at once (docs/STATE_EXEC_THREADED.md 6.3).
+// ---------------------------------------------------------------------------------------------
+
+// A program of the mt.* scenarios: its source, what it returns, and its iterations per run.
+struct mt_prog {
+  std::string src, expect;
+  int64_t iters = 0;
+};
+
+// prog=fib: fib 18 (smoke 10), iterations its calls; prog=exceptions: 2000 caught raises (smoke
+// 50). prog=tree (mt.multi_exec only): `n` rounds (2000, smoke 50) of state-set, state-get and
+// state-data-set under the context's chroot, after a state-watch on "w"; every 16th round writes
+// "w" (the watch's handler counts in "events") and calls bench-post, which posts controls to the
+// next thread's scheduler (run_multi_exec).
+mt_prog mt_program(const std::string &prog, bool smoke) {
+  mt_prog p;
+  if (prog == "fib") {
+    const int64_t size = smoke ? 10 : 18;
+    p.src = "(begin (defun fib (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))) (fib " +
+            istr(size) + "))";
+    p.expect = istr(fib(size));
+    p.iters = 2 * fib(size + 1) - 1;
+  } else if (prog == "exceptions") {
+    const int64_t size = smoke ? 50 : 2000;
+    p.src =
+        loop_src(size, "(set c 0)",
+                 "(set c (+ c (try (raise (ValueError \"boom\")) (catch (ValueError e) 1))))", "c");
+    p.expect = istr(size);
+    p.iters = size;
+  } else if (prog == "tree") {
+    const int64_t n = smoke ? 50 : 2000;
+    p.src = loop_src(n,
+                     "(state-set \"events\" 0) (state-watch \"w\" (lambda (p) (state-incr "
+                     "\"events\"))) (set s 0)",
+                     "(state-set \"x\" i) (set s (+ s (int (state-get \"x\")))) (state-data-set "
+                     "\"k\" (list i s)) (if (= (% i 16) 0) (begin (state-set \"w\" i) "
+                     "(bench-post i)))",
+                     "(+ s (nth (state-data-get \"k\") 0))");
+    p.expect = istr(n * (n - 1) / 2 + (n - 1));
+    p.iters = n;
+  } else {
+    throw std::invalid_argument("prog=" + prog + ": not fib, exceptions or tree");
+  }
+  return p;
+}
+
+// mt.independent's worker: a thread with its own stackless evaluator and default environment,
+// running the program `runs` times from the barrier.
+struct ind_worker {
+  std::thread th;
+  int64_t start = 0, end = 0;
+  uint64_t allocs = 0; // the thread's own, over its runs (bench_alloc)
+  int eff = -1;
+  std::string error;
+};
+
+// Run `count` of them from a barrier: each parses its own AST, or runs `shared` when given
+// (ast=shared). Returns the wall time from the barrier to the last join, and fills ws.
+int64_t run_independent(int64_t count, const mt_prog &p, int64_t runs, const se::value_t *shared,
+                        std::vector<ind_worker> &ws, meter *m) {
+  const auto work = [&](std::atomic<bool> &go, std::atomic<int64_t> &ready, ind_worker &me) {
+    try {
+      auto env = se::builtins::make_default_environment();
+      const se::value_t ast = shared ? *shared : se::parse(p.src);
+      se::stackless_evaluator ev(env);
+      ready.fetch_add(1);
+      while (!go.load(std::memory_order_acquire))
+        std::this_thread::yield();
+      const uint64_t a0 = bench_alloc::count;
+      me.start = now_ns();
+      for (int64_t r = 0; r < runs; ++r) {
+        se::evaluator_state st = ev.create_state(ast);
+        while (!ev.step(st)) {
+        }
+        if (se::to_string(st.result) != p.expect && me.error.empty())
+          me.error = "returned " + se::to_string(st.result) + ", expected " + p.expect;
+      }
+      me.end = now_ns();
+      me.allocs = bench_alloc::count - a0;
+      me.eff = current_cpu_efficiency();
+    } catch (const std::exception &e) {
+      me.error = std::string("exception: ") + e.what();
+      ready.fetch_add(1);
+    }
+    // The cycles the runs left (fib's defun binds a closure in the scope it captured): only this
+    // thread's collector tracks them (heap.h), and a leak checker would report them.
+    se::collect_cycles();
+  };
+  ws.clear();
+  ws.resize(std::size_t(count));
+  std::atomic<bool> go{false};
+  std::atomic<int64_t> ready{0};
+  {
+    unpinned_scope u;
+    for (auto &w : ws)
+      w.th = std::thread([&, wp = &w] { work(go, ready, *wp); });
+  }
+  while (ready.load() < count)
+    std::this_thread::yield();
+  if (m)
+    m->begin();
+  const int64_t t0 = now_ns();
+  go.store(true, std::memory_order_release);
+  for (auto &w : ws)
+    w.th.join();
+  const int64_t wall = now_ns() - t0;
+  if (m)
+    m->end();
+  return wall;
+}
+
+// mt.multi_exec's thread: it pumps a world of its own and runs the program `runs` times.
+struct mx_worker {
+  std::thread th;
+  int64_t start = 0, end = 0;
+  uint64_t steps = 0;
+  int eff = -1;
+  std::string error;
+  std::vector<char> done;          // run r's on_complete ran, with its result
+  std::vector<se::value_t> result; // (both outlive the worlds, whose teardown may complete one)
+  std::atomic<int> pid{-1};        // the run's process: prog=tree's neighbour pauses it
+  int bystander = -1;              // prog=tree: parked; the neighbour re-levels and kills it
+};
+
+// prog=tree's posted controls, counted. A command's done runs once, on its target's scheduler
+// thread, or with false from that scheduler's destructor (S0.7), so this outlives the worlds. A
+// query has no done.
+struct mx_controls {
+  std::atomic<int64_t> posted{0}, done{0}, applied{0}, queries_posted{0}, queries_run{0};
+};
+
+// Run ws.size() threads from a barrier, each driving a world("async", app) of its own with a
+// background-pool host, every world over the one app tree (its watch root), pumped as pycvc's
+// Exec::run pumps: drain_ingress(), wake_awaiting(), a sync_run_steps(2000000, 0.05) slice while
+// anything is runnable, else wait_for_work(now + 50 ms). Each thread submits its own pre-parsed
+// AST `runs` times, one run at a time, and reaps each. prog=tree chroots world j at
+// bench.mt.t<j>, parks a bystander in it, and gives it bench-post, which posts to world j+1's
+// scheduler. Returns the driver's time from the barrier's release to the last thread's end (the
+// meter, when given, brackets it); the worlds are gone when it returns.
+int64_t run_multi_exec(cvc::app *app, const std::string &prog, const mt_prog &p, int64_t runs,
+                       double timeout, std::vector<mx_worker> &ws, mx_controls &ctl, meter *m) {
+  static constexpr uint64_t kSliceSteps = 2000000; // Exec::run's slice (pycvc_exec.cpp)
+  static constexpr double kSliceSeconds = 0.05;
+  static constexpr auto kMaxIdleWait = std::chrono::milliseconds(50);
+  const bool tree = prog == "tree";
+  const std::size_t n = ws.size();
+  for (mx_worker &w : ws) {
+    w.done.assign(std::size_t(runs), 0);
+    w.result.assign(std::size_t(runs), se::value_t());
+  }
+  std::vector<se::value_t> asts; // one a thread, so no AST is shared between threads
+  for (std::size_t j = 0; j < n; ++j)
+    asts.push_back(se::parse(p.src));
+  std::vector<std::unique_ptr<world>> worlds;
+  for (std::size_t j = 0; j < n; ++j) {
+    worlds.push_back(std::make_unique<world>("async", app));
+    worlds.back()->make_host("background");
+  }
+  // A command for world j's neighbour, counted, its done counting what it returned.
+  const auto post = [&ctl](se::async_scheduler &to, int pid, se::control_cmd cmd) {
+    const bool query = cmd.what == se::control_cmd::kind::query;
+    if (!query)
+      cmd.done = [&ctl](bool applied) {
+        ctl.done.fetch_add(1, std::memory_order_relaxed);
+        if (applied)
+          ctl.applied.fetch_add(1, std::memory_order_relaxed);
+      };
+    to.post_control(pid, std::move(cmd));
+    (query ? ctl.queries_posted : ctl.posted).fetch_add(1, std::memory_order_relaxed);
+  };
+  if (tree) {
+    const se::value_t parked = se::parse("(begin (msg-recv \"bench.never\") 1)");
+    for (std::size_t j = 0; j < n; ++j) {
+      world &w = *worlds[j];
+      se::apply_chroot(w.ictx, *w.tree, "bench.mt.t" + istr(int64_t(j)));
+      se::execute_options opts;
+      opts.env = w.process_env("extend");
+      ws[j].bystander = w.submit(parked, opts);
+      const std::string why = wait_parked(w, 1, timeout);
+      if (!why.empty())
+        throw std::runtime_error("parking the bystander: " + why);
+      // (bench-post i), on thread j: the neighbour's program is paused then resumed (first in,
+      // first out, so it is never left paused) and sent a signal it has no handler for (dropped
+      // at its next step); its bystander is re-levelled between 0 and 1; and a query reads its
+      // stats between its steps.
+      se::async_scheduler &to = *worlds[(j + 1) % n]->async;
+      mx_worker &nb = ws[(j + 1) % n];
+      se::builtins::register_fn(w.env, "bench-post",
+                                [&ctl, &to, &nb, post](std::span<const se::value_t> a) {
+                                  const int target = nb.pid.load(std::memory_order_acquire);
+                                  se::control_cmd c;
+                                  c.what = se::control_cmd::kind::pause;
+                                  post(to, target, c);
+                                  c.what = se::control_cmd::kind::resume;
+                                  post(to, target, c);
+                                  c.what = se::control_cmd::kind::signal;
+                                  c.signal = "bench.sig";
+                                  post(to, target, c);
+                                  se::control_cmd prio;
+                                  prio.what = se::control_cmd::kind::set_priority;
+                                  prio.value = int(int_arg(a, 0, 0) & 1);
+                                  post(to, nb.bystander, prio);
+                                  se::control_cmd q;
+                                  q.what = se::control_cmd::kind::query;
+                                  q.query = [&ctl](se::scheduler_base &s) {
+                                    (void)s.get_stats();
+                                    ctl.queries_run.fetch_add(1, std::memory_order_relaxed);
+                                  };
+                                  post(to, 0, std::move(q));
+                                  return se::value_t(int64_t(0));
+                                });
+    }
+  }
+  std::atomic<int64_t> ready{0};
+  std::atomic<bool> go{false}, stop{false};
+  std::mutex mu;
+  std::condition_variable cv;
+  int64_t finished = 0; // guarded by mu
+  const auto work = [&](std::size_t j) {
+    mx_worker &me = ws[j];
+    world &w = *worlds[j];
+    se::async_scheduler &a = *w.async;
+    ready.fetch_add(1);
+    while (!go.load(std::memory_order_acquire) && !stop.load())
+      std::this_thread::yield();
+    const auto deadline = clk::now() + std::chrono::duration<double>(timeout);
+    me.start = now_ns();
+    try {
+      for (int64_t r = 0; r < runs && me.error.empty() && !stop.load(); ++r) {
+        char &done = me.done[std::size_t(r)];
+        se::value_t &result = me.result[std::size_t(r)];
+        se::execute_options opts;
+        opts.env = w.process_env("extend");
+        opts.on_complete = [&done, &result](se::value_t v) {
+          result = std::move(v);
+          done = 1;
+        };
+        const uint64_t steps0 = a.get_stats().total_steps;
+        const int pid = a.execute(asts[j], opts);
+        me.pid.store(pid, std::memory_order_release);
+        while (!done && me.error.empty() && !stop.load()) {
+          a.drain_ingress();
+          a.wake_awaiting();
+          if (a.has_runnable())
+            a.sync_run_steps(kSliceSteps, kSliceSeconds);
+          if (done)
+            break;
+          if (clk::now() > deadline) {
+            me.error = "timeout: " + end_reason(w, pid);
+            break;
+          }
+          if (!a.has_runnable())
+            a.wait_for_work(clk::now() + kMaxIdleWait);
+        }
+        me.steps += a.get_stats().total_steps - steps0;
+        if (done) {
+          if (me.error.empty() && se::to_string(result) != p.expect)
+            me.error = "returned " + se::to_string(result) + ", expected " + p.expect;
+          a.reap(pid);
+        } else if (me.error.empty() && !stop.load()) {
+          me.error = end_reason(w, pid);
+        }
+      }
+    } catch (const std::exception &e) {
+      me.error = std::string("exception: ") + e.what();
+    }
+    me.end = now_ns();
+    me.eff = current_cpu_efficiency();
+    if (!me.error.empty())
+      stop.store(true);
+    {
+      std::lock_guard<std::mutex> lk(mu);
+      ++finished;
+    }
+    cv.notify_one();
+    // Outside the span: the neighbour's bystander is killed, and the cycles the runs left (each
+    // fib run's defun) are collected by the only collector that tracks them, this thread's.
+    if (tree)
+      post(*worlds[(j + 1) % n]->async, ws[(j + 1) % n].bystander,
+           se::control_cmd{se::control_cmd::kind::kill});
+    se::collect_cycles();
+  };
+  // Joins the threads before the worlds go, whatever ends the run.
+  struct joiner {
+    std::vector<mx_worker> &ws;
+    std::atomic<bool> &stop;
+    ~joiner() {
+      stop.store(true);
+      for (mx_worker &w : ws)
+        if (w.th.joinable())
+          w.th.join();
+    }
+  } join_all{ws, stop};
+  {
+    unpinned_scope u;
+    for (std::size_t j = 0; j < n; ++j)
+      ws[j].th = std::thread(work, j);
+  }
+  while (ready.load() < int64_t(n))
+    std::this_thread::yield();
+  if (m)
+    m->begin();
+  const int64_t t0 = now_ns();
+  go.store(true, std::memory_order_release);
+  {
+    std::unique_lock<std::mutex> lk(mu);
+    cv.wait(lk, [&] { return finished >= int64_t(n); });
+  }
+  const int64_t span = now_ns() - t0;
+  if (m)
+    m->end();
+  for (mx_worker &w : ws)
+    w.th.join();
+  worlds.clear(); // their schedulers answer the commands no drain applied: done(false)
+  return span;
 }
 
 std::vector<scenario> make_scenarios() {
@@ -4272,14 +4602,35 @@ std::vector<scenario> make_scenarios() {
     sc.name = watch ? "sched.watch_poll" : "sched.bystanders";
     sc.what = watch ? "one endless loop beside w parked processes that each registered a "
                       "state-watch (watch=1) or not (watch=0, the control): the loop's ns/step "
-                      "against w, every step polling every watch"
+                      "against w, every step polling every watch once the tree under the watches' "
+                      "root changed; chroot=1 registers the watches from a context chrooted at "
+                      "bench.doc (the loop's stays unchrooted), and writes=elsewhere makes the "
+                      "loop write a node under the app root outside the watched paths and the "
+                      "chroot every iteration (a watch root of its own keeps those writes from "
+                      "polling a chrooted watch)"
                     : "one endless loop beside b processes parked on msg-recv: the loop's ns/step "
                       "against b (the scans walk parked processes too)";
     sc.executors = both_sched;
     const std::string key = watch ? "w" : "b";
     if (watch) {
-      sc.sizes = {{"w", {"0", "10", "100", "1000"}}, {"watch", {"1", "0"}}, {"steps", {"50000"}}};
-      sc.smoke = {{"w", {"0", "5"}}, {"watch", {"1", "0"}}, {"steps", {"2000"}}};
+      sc.sizes = {{"w", {"0", "10", "100", "1000"}},
+                  {"watch", {"1", "0"}},
+                  {"chroot", {"0", "1"}},
+                  {"writes", {"none", "elsewhere"}},
+                  {"steps", {"50000"}}};
+      sc.smoke = {{"w", {"0", "5"}},
+                  {"watch", {"1", "0"}},
+                  {"chroot", {"0", "1"}},
+                  {"writes", {"none", "elsewhere"}},
+                  {"steps", {"2000"}}};
+      // Without watches the chroot changes nothing: chroot=0 is that point.
+      sc.accept = [](const std::string &exec, const point_ctx &pc) {
+        if (pc.i("watch") != 0 || pc.i("chroot") == 0)
+          return true;
+        std::printf("  %-28s %-9s %-34s skipped: chroot=1 is chroot=0 without watches\n",
+                    pc.sc.name.c_str(), exec.c_str(), params_text(pc.params).c_str());
+        return false;
+      };
     } else {
       sc.sizes = {{"b", {"0", "100", "1000", "3000"}}, {"steps", {"50000"}}};
       sc.smoke = {{"b", {"0", "10"}}, {"steps", {"2000"}}};
@@ -4287,10 +4638,34 @@ std::vector<scenario> make_scenarios() {
     sc.run = [key](point_ctx &pc) {
       const int64_t b = pc.i(key);
       const bool watches = pc.i("watch", 0) != 0;
+      const bool chroot = pc.i("chroot", 0) != 0;
+      const bool elsewhere = pc.s("writes", "none") == "elsewhere";
       const uint64_t steps = static_cast<uint64_t>(pc.i("steps"));
+      // writes=elsewhere: forever_ast's loop with a tree write in its body.
+      const se::value_t writer =
+          se::parse("(begin (set i 0) (while (< i 1000000000) (begin (state-set "
+                    "\"bench.elsewhere\" i) (set i (+ i 1)))) i)");
       auto app = make_app();
       pc.reps([&](meter &m, rep_out &o) {
+        // chroot=1: the watchers' own context, chrooted at bench.doc as a document's processes
+        // are, on the world's scheduler, and an environment with its intrinsics. Declared before
+        // the world, which goes first.
+        se::intrinsics_context wctx;
+        se::environment_ptr wenv;
         world w(pc.executor, app.get());
+        if (chroot) {
+          wctx.sched = w.ictx.sched;
+          wctx.root = w.tree;
+          wctx.proc = w.ictx.proc;
+          wctx.pid = w.ictx.pid;
+          wctx.uid = w.ictx.uid;
+          wctx.cluster_id = w.ictx.cluster_id;
+          wctx.node_id = w.ictx.node_id;
+          se::apply_chroot(wctx, *w.tree, "bench.doc");
+          wenv = se::builtins::make_default_environment();
+          add_bench_natives(wenv);
+          se::register_intrinsics(wenv, &wctx);
+        }
         const std::string why = park_bystanders(
             w, b,
             [watches](int64_t i) {
@@ -4298,14 +4673,14 @@ std::vector<scenario> make_scenarios() {
                                    "\" (lambda (v) v)) (msg-recv \"bench.never\") 1)"
                              : parked_on_never(i);
             },
-            pc.cfg.timeout);
+            pc.cfg.timeout, wenv);
         if (!why.empty()) {
           o.fail("parking: " + why);
           return;
         }
         se::execute_options opts;
         opts.env = w.process_env("extend");
-        const int loop = w.submit(forever_ast(), opts);
+        const int loop = w.submit(elsewhere ? writer : forever_ast(), opts);
         run_steps(w, 1000);
         const uint64_t loop0 = w.info(loop) ? w.info(loop)->eval_steps : 0;
         const uint64_t steps0 = w.total_steps();
@@ -5133,18 +5508,26 @@ std::vector<scenario> make_scenarios() {
             {{"n", {"20000"}}},
             {{"n", {"300"}}}},
            {"state_get",
-            "state-get of a tree node `depth` levels down",
-            {{"n", {"20000"}}, {"depth", {"1", "4", "8"}}},
-            {{"n", {"300"}}, {"depth", {"1", "4"}}}},
+            "state-get of a tree node `depth` levels down, under the chroot bench.doc "
+            "(chroot=1) or not",
+            {{"n", {"20000"}}, {"depth", {"1", "4", "8"}}, {"chroot", {"0", "1"}}},
+            {{"n", {"300"}}, {"depth", {"1", "4"}}, {"chroot", {"0", "1"}}}},
            {"state_set",
-            "state-set of a tree node `depth` levels down (watch root set)",
-            {{"n", {"20000"}}, {"depth", {"1", "4", "8"}}},
-            {{"n", {"300"}}, {"depth", {"1", "4"}}}},
+            "state-set of a tree node `depth` levels down (watch root set), under the chroot "
+            "bench.doc (chroot=1) or not",
+            {{"n", {"20000"}}, {"depth", {"1", "4", "8"}}, {"chroot", {"0", "1"}}},
+            {{"n", {"300"}}, {"depth", {"1", "4"}}, {"chroot", {"0", "1"}}}},
            {"state_delete",
             "state-set then state-delete of a node, with `nodes` other nodes under the root "
-            "(state-delete sweeps the whole tree for expired nodes)",
+            "(state-delete unlinks its one node, whatever else the tree holds)",
             {{"n", {"2000"}}, {"nodes", {"100", "10000"}}},
             {{"n", {"100"}}, {"nodes", {"100"}}}},
+           {"state_data_set",
+            "state-data-set of an 8-element list made in the call, the list included "
+            "(extra.data_nodes_per_call: the deep-data nodes charged a call, the isolating copy's "
+            "among them)",
+            {{"n", {"20000"}}},
+            {{"n", {"300"}}}},
            {"msg_send",
             "msg-send with no receiver (queued, then dropped past max_pending_messages)",
             {{"n", {"20000"}}},
@@ -5185,6 +5568,8 @@ std::vector<scenario> make_scenarios() {
         call = "(state-set \"" + path + "\" i)";
       else if (kind == "state_delete")
         call = "(state-set \"bench.k\" i) (state-delete \"bench.k\")";
+      else if (kind == "state_data_set")
+        call = "(state-data-set \"bench.data\" (list i 1 2 3 4 5 6 7))";
       else if (kind == "state_atomic" && pc.s("op") == "incr")
         call = "(state-incr \"" + path + "\")";
       else if (kind == "state_atomic" && pc.s("op") == "cas")
@@ -5195,34 +5580,50 @@ std::vector<scenario> make_scenarios() {
         call = "(msg-send \"bench.sink\" \"x\")";
       const se::value_t with = se::parse(loop_src(n, "", call, "i"));
       const se::value_t without = se::parse(loop_src(n, "", "", "i"));
+      // chroot=1: each world's intrinsics are chrooted at bench.doc (as lock.uncontended's are),
+      // where the node is.
+      const bool chroot = pc.i("chroot", 0) != 0;
+      const auto make_world = [&pc, chroot](cvc::app *a) {
+        auto w = std::make_unique<world>(pc.executor, a);
+        if (chroot)
+          se::apply_chroot(w->ictx, *w->tree, "bench.doc");
+        return w;
+      };
       auto app = make_app();
       cvc::state &root = cvc::state::instance(*app);
-      root(path).value("7");
+      root(chroot ? "bench.doc." + path : path).value("7");
       for (int64_t j = 0; j < pc.i("nodes", 0); ++j)
         root("pop" + istr(j)).value("1");
+      // The deep-data nodes a run's process was charged (state-data-set's copy).
+      const auto data_nodes = [](world &w, int pid) -> uint64_t {
+        const auto info = w.info(pid);
+        return info ? info->data_nodes : 0;
+      };
       pc.reps([&](meter &m, rep_out &o) {
         int64_t best_base = INT64_MAX, best_with = INT64_MAX;
-        uint64_t base_steps = 0, with_steps = 0;
+        uint64_t base_steps = 0, with_steps = 0, base_nodes = 0, with_nodes = 0;
         for (int64_t r = 0; r < rounds && o.ok; ++r) {
           {
-            world w(pc.executor, app.get());
+            const auto w = make_world(app.get());
             meter bm;
             rep_out bo;
-            run_single(w, pc, bm, bo, without, istr(n));
+            const int pid = run_single(*w, pc, bm, bo, without, istr(n));
             if (!bo.ok)
               o.fail("baseline loop: " + bo.error);
             if (bm.wall() < best_base) {
               best_base = bm.wall();
               base_steps = bo.steps_total.value_or(0);
+              base_nodes = data_nodes(*w, pid);
             }
           }
           if (kind == "state_atomic")
             root(path).value("0"); // each op takes the node from 0 to n
-          world w(pc.executor, app.get());
+          const auto wp = make_world(app.get());
+          world &w = *wp;
           meter wm;
           wm.want_heap = m.want_heap;
           rep_out wo;
-          run_single(w, pc, wm, wo, with, istr(n));
+          const int pid = run_single(w, pc, wm, wo, with, istr(n));
           if (!wo.ok)
             o.fail(wo.error);
           if (kind == "state_atomic" && root(path).value() != istr(n))
@@ -5230,6 +5631,7 @@ std::vector<scenario> make_scenarios() {
           if (wm.wall() < best_with) {
             best_with = wm.wall();
             with_steps = wo.steps_total.value_or(0);
+            with_nodes = data_nodes(w, pid);
             m = wm; // the record is the fastest run with the call
             o.steps_total = wo.steps_total;
             o.kinds = wo.kinds;
@@ -5247,6 +5649,8 @@ std::vector<scenario> make_scenarios() {
             .d("ns_per_call", ns_per_call)
             .d("native_ns_per_call", ns_per_call - steps_per_call * base_ns_per_step)
             .i("rounds", rounds);
+        if (kind == "state_data_set")
+          o.extra.d("data_nodes_per_call", (double(with_nodes) - double(base_nodes)) / double(n));
       });
     };
     all.push_back(std::move(sc));
@@ -5559,7 +5963,7 @@ std::vector<scenario> make_scenarios() {
               "and the CPUs' efficiency classes (refcounts, global tables and the allocator "
               "under contention: the before numbers for threaded execution)";
     sc.executors = {"stackless"};
-    sc.sizes = {{"t", {"1", "2", "4", "8"}},
+    sc.sizes = {{"t", {"1", "2", "4", "8", "12", "16", "20"}},
                 {"prog", {"fib", "exceptions"}},
                 {"ast", {"private", "shared"}},
                 {"runs", {"5"}}};
@@ -5568,86 +5972,26 @@ std::vector<scenario> make_scenarios() {
                 {"ast", {"private", "shared"}},
                 {"runs", {"1"}}};
     sc.spawns_threads = true;
+    sc.accept = [](const std::string &exec, const point_ctx &pc) {
+      const std::string prog = pc.s("prog");
+      if (prog == "fib" || prog == "exceptions")
+        return true;
+      std::printf("  %-28s %-9s %-34s skipped: prog=%s is not fib or exceptions\n",
+                  pc.sc.name.c_str(), exec.c_str(), params_text(pc.params).c_str(), prog.c_str());
+      return false;
+    };
     sc.run = [](point_ctx &pc) {
       const int64_t nt = std::max<int64_t>(1, pc.i("t")), runs = std::max<int64_t>(1, pc.i("runs"));
-      const bool is_fib = pc.s("prog") == "fib";
-      const int64_t size = is_fib ? (pc.cfg.smoke ? 10 : 18) : (pc.cfg.smoke ? 50 : 2000);
-      const std::string src =
-          is_fib ? "(begin (defun fib (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))) (fib " +
-                       istr(size) + "))"
-                 : loop_src(size, "(set c 0)",
-                            "(set c (+ c (try (raise (ValueError \"boom\")) (catch (ValueError e) "
-                            "1))))",
-                            "c");
-      const std::string expect = is_fib ? istr(fib(size)) : istr(size);
-      const int64_t iters_per_run = is_fib ? 2 * fib(size + 1) - 1 : size;
+      const mt_prog p = mt_program(pc.s("prog"), pc.cfg.smoke);
       const bool shared = pc.s("ast") == "shared";
-      const se::value_t shared_ast = se::parse(src);
-
-      struct worker {
-        std::thread th;
-        int64_t start = 0, end = 0;
-        uint64_t allocs = 0; // the thread's own, over its runs (bench_alloc)
-        int eff = -1;
-        std::string error;
-      };
-      // One thread's work: `runs` runs, timed from the barrier. Returns "" or what went wrong.
-      const auto work = [&](std::atomic<bool> &go, std::atomic<int64_t> &ready, worker &me) {
-        try {
-          auto env = se::builtins::make_default_environment();
-          const se::value_t ast = shared ? shared_ast : se::parse(src);
-          se::stackless_evaluator ev(env);
-          ready.fetch_add(1);
-          while (!go.load(std::memory_order_acquire))
-            std::this_thread::yield();
-          const uint64_t a0 = bench_alloc::count;
-          me.start = now_ns();
-          for (int64_t r = 0; r < runs; ++r) {
-            se::evaluator_state st = ev.create_state(ast);
-            while (!ev.step(st)) {
-            }
-            if (se::to_string(st.result) != expect && me.error.empty())
-              me.error = "returned " + se::to_string(st.result) + ", expected " + expect;
-          }
-          me.end = now_ns();
-          me.allocs = bench_alloc::count - a0;
-          me.eff = current_cpu_efficiency();
-        } catch (const std::exception &e) {
-          me.error = std::string("exception: ") + e.what();
-          ready.fetch_add(1);
-        }
-      };
-      // Run `count` workers from a barrier; returns the wall time from the barrier to the last
-      // join, and fills `ws`.
-      const auto run_workers = [&](int64_t count, std::vector<worker> &ws, meter *m) {
-        ws.clear();
-        ws.resize(std::size_t(count));
-        std::atomic<bool> go{false};
-        std::atomic<int64_t> ready{0};
-        {
-          unpinned_scope u;
-          for (auto &w : ws)
-            w.th = std::thread([&, wp = &w] { work(go, ready, *wp); });
-        }
-        while (ready.load() < count)
-          std::this_thread::yield();
-        if (m)
-          m->begin();
-        const int64_t t0 = now_ns();
-        go.store(true, std::memory_order_release);
-        for (auto &w : ws)
-          w.th.join();
-        const int64_t wall = now_ns() - t0;
-        if (m)
-          m->end();
-        return wall;
-      };
+      const se::value_t shared_ast = se::parse(p.src);
+      const se::value_t *ast = shared ? &shared_ast : nullptr;
       pc.reps([&](meter &m, rep_out &o) {
-        std::vector<worker> ws;
-        const int64_t one = run_workers(1, ws, nullptr); // the single-thread reference
+        std::vector<ind_worker> ws;
+        const int64_t one = run_independent(1, p, runs, ast, ws, nullptr); // the reference
         if (!ws[0].error.empty())
           o.fail("one thread: " + ws[0].error);
-        run_workers(nt, ws, &m);
+        run_independent(nt, p, runs, ast, ws, &m);
         std::vector<int64_t> per;
         uint64_t allocs = 0;
         int on_low = 0, top = -1;
@@ -5661,15 +6005,105 @@ std::vector<scenario> make_scenarios() {
           if (w.eff >= 0 && w.eff < top)
             ++on_low;
         }
-        o.iterations = nt * runs * iters_per_run;
+        o.iterations = nt * runs * p.iters;
         o.programs = nt * runs;
         const double wall = double(m.wall());
         o.extra.d("speedup", wall > 0 ? double(nt) * double(one) / wall : 0.0)
-            .d("thread_ns_per_iter", double(median_of(per)) / double(runs * iters_per_run))
-            .d("single_thread_ns_per_iter", double(one) / double(runs * iters_per_run))
+            .d("thread_ns_per_iter", double(median_of(per)) / double(runs * p.iters))
+            .d("single_thread_ns_per_iter", double(one) / double(runs * p.iters))
             .i("threads_on_lower_efficiency_class", on_low);
         if (bench_alloc::active)
           o.extra.d("allocs_per_iter_all_threads", double(allocs) / double(*o.iterations));
+      });
+    };
+    all.push_back(std::move(sc));
+  }
+
+  // mt.multi_exec: a scheduler per thread, each a whole host's (td 6.3, Stage 0).
+  {
+    scenario sc;
+    sc.name = "mt.multi_exec";
+    sc.what = "t threads, each pumping an async scheduler of its own (the app tree's intrinsics, a "
+              "background-pool host) as pycvc's Exec::run pumps it, all over one app tree, their "
+              "watch root: fib 18 or 2000 caught raises `runs` times a thread; extra.speedup over "
+              "one such thread and extra.of_ceiling, that over mt.independent's ast=private "
+              "speedup, both measured in the same rep (Stage 0's gate: at least 0.9 at t=8); "
+              "prog=tree runs chrooted state-get, state-set and state-data-set, a state-watch, "
+              "and controls posted to the next thread's scheduler (td 6.3; the sanitizer jobs' "
+              "HZ-10)";
+    sc.executors = {"async"};
+    sc.sizes = {
+        {"t", {"1", "2", "4", "8"}}, {"prog", {"fib", "exceptions", "tree"}}, {"runs", {"5"}}};
+    sc.smoke = {{"t", {"1", "2"}}, {"prog", {"fib", "exceptions", "tree"}}, {"runs", {"1"}}};
+    sc.spawns_threads = true;
+    sc.run = [](point_ctx &pc) {
+      const int64_t nt = std::max<int64_t>(1, pc.i("t")), runs = std::max<int64_t>(1, pc.i("runs"));
+      const std::string prog = pc.s("prog");
+      const mt_prog p = mt_program(prog, pc.cfg.smoke);
+      const double per_thread = double(runs * p.iters);
+      auto app = make_app();
+      pc.reps([&](meter &m, rep_out &o) {
+        // The ceiling, from this rep: mt.independent's ast=private speedup (tree has none).
+        double ceiling = 0.0, independent_one = 0.0;
+        if (prog != "tree") {
+          std::vector<ind_worker> iw;
+          const int64_t one = run_independent(1, p, runs, nullptr, iw, nullptr);
+          const int64_t wall = run_independent(nt, p, runs, nullptr, iw, nullptr);
+          for (const ind_worker &w : iw)
+            if (!w.error.empty())
+              o.fail("mt.independent: " + w.error);
+          ceiling = wall > 0 ? double(nt) * double(one) / double(wall) : 0.0;
+          independent_one = double(one);
+        }
+        // One thread of this scenario, the reference, then t of them, measured.
+        mx_controls ctl_one, ctl;
+        std::vector<mx_worker> ref(1);
+        const int64_t one =
+            run_multi_exec(app.get(), prog, p, runs, pc.cfg.timeout, ref, ctl_one, nullptr);
+        if (!ref[0].error.empty())
+          o.fail("one thread: " + ref[0].error);
+        std::vector<mx_worker> ws(static_cast<std::size_t>(nt));
+        run_multi_exec(app.get(), prog, p, runs, pc.cfg.timeout, ws, ctl, &m);
+        std::vector<int64_t> per;
+        uint64_t steps = 0;
+        int on_low = 0, top = -1;
+        for (const mx_worker &w : ws)
+          top = std::max(top, w.eff);
+        for (const mx_worker &w : ws) {
+          if (!w.error.empty())
+            o.fail(w.error);
+          per.push_back(w.end - w.start);
+          steps += w.steps;
+          if (w.eff >= 0 && w.eff < top)
+            ++on_low;
+        }
+        o.iterations = nt * runs * p.iters;
+        o.programs = nt * runs;
+        o.steps_total = steps;
+        const double wall = double(m.wall());
+        const double speedup = wall > 0 ? double(nt) * double(one) / wall : 0.0;
+        o.extra.d("speedup", speedup)
+            .d("thread_ns_per_iter", double(median_of(per)) / per_thread)
+            .d("single_thread_ns_per_iter", double(one) / per_thread)
+            .i("threads_on_lower_efficiency_class", on_low);
+        if (ceiling > 0)
+          o.extra.d("ceiling_speedup", ceiling)
+              .d("of_ceiling", speedup / ceiling)
+              .d("independent_ns_per_iter", independent_one / per_thread);
+        if (prog == "tree") {
+          // Recorded, never checked: what the controls did depends on when each was applied.
+          int64_t events = 0;
+          cvc::state &root = cvc::state::instance(*app);
+          for (int64_t j = 0; j < nt; ++j)
+            if (cvc::state *e = root.findDescendant("bench.mt.t" + istr(j) + ".events"))
+              events += std::strtoll(e->value().c_str(), nullptr, 10);
+          o.extra.i("watch_events", events)
+              .i("controls_posted", ctl.posted.load())
+              .i("controls_done", ctl.done.load())
+              .i("controls_applied", ctl.applied.load())
+              .i("queries_posted", ctl.queries_posted.load())
+              .i("queries_run", ctl.queries_run.load());
+        }
       });
     };
     all.push_back(std::move(sc));

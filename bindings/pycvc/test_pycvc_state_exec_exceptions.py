@@ -216,6 +216,37 @@ def test_raise_into_a_state():
     _raises(RuntimeError, ev.raise_, st, 5)  # not an exception (std::invalid_argument)
 
 
+# --- Stage 0 hazards (td 8.1) ---
+
+
+def test_hz01_builtin_classes_read_only():
+    # HZ-1 (S0.1): the built-in exception classes are one per process and read-only, so a program
+    # can't change them for every other. Where a build still lets it, the original init is put
+    # back, so the failure doesn't spread to the tests after this one.
+    ex = pycvc.Exec(pycvc.make_app())
+    ex.run('(set saved (get-attr ValueError.__cls_dict__ "init"))')
+    try:
+        for prog, msg in (
+            ('(set-attr ValueError.__cls_dict__ "init" (lambda (self m) self))',
+             "set-attr: built-in class is read-only: ValueError"),
+            ('(del-attr ValueError.__cls_dict__ "init")',
+             "del-attr: built-in class is read-only: ValueError"),
+            ('(try (raise (KeyError "k")) (catch (e) (set-attr (get-attr e "__class__") "x" 1)))',
+             "set-attr: built-in class is read-only: KeyError"),
+            ('(set-attr (get-attr ValueError.__cls_dict__ "__super__") "x" 1)',
+             "set-attr: built-in class is read-only: Exception"),
+            ('(begin (set init (get-attr ValueError.__cls_dict__ "init")) '
+             '(init ValueError.__cls_dict__ "m"))',
+             "built-in class is read-only: ValueError"),
+        ):
+            e = _raises(pycvc.dsl_class("TypeError"), ex.run, prog)
+            assert str(e) == "TypeError: " + msg, str(e)
+        assert ex.run('(get-attr (ValueError "v") "message")') == "v"
+        assert ex.run('(try (raise (ValueError "v")) (catch (ValueError e) "caught"))') == "caught"
+    finally:
+        ex.run('(try (set-attr ValueError.__cls_dict__ "init" saved) (catch (TypeError e) nil))')
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

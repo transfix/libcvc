@@ -663,6 +663,23 @@ TEST_F(SchedulerTest, StopRunLoop) {
   // Should return quickly because stop was requested
 }
 
+// A run that a step's exception ends (an on_complete that throws, which propagates from run()) is
+// over: is_running() reads false after it, on both schedulers (td B17: the flag is released on
+// every exit). Before S0.6 it stayed true.
+TEST(SchedulerRunFlags, ARunEndedByAnExceptionIsNoLongerRunning) {
+  execute_options opts;
+  opts.on_complete = [](value_t) { throw std::runtime_error("on_complete"); };
+  scheduler sync;
+  sync.execute(std::string("(+ 1 2)"), opts);
+  EXPECT_FALSE(sync.is_running());
+  EXPECT_THROW(sync.run(), std::runtime_error);
+  EXPECT_FALSE(sync.is_running());
+  async_scheduler async;
+  async.execute(std::string("(+ 1 2)"), opts);
+  EXPECT_THROW(async.sync_run(), std::runtime_error);
+  EXPECT_FALSE(async.is_running());
+}
+
 // ===========================================================================
 // SchedulerTest — Signal handling
 // ===========================================================================
@@ -2888,9 +2905,11 @@ TEST(SchedulerLockPort, APostEndsAnAsyncWaitForWork) {
 }
 
 // A sync run() idle beside a 5 s sleeper returns to its loop when another thread posts to its
-// home's port: the loop's next step drains the port, and applies a stop queued with
-// post_control before the post (a queued command alone wakes no idle run). The sleeper is still
-// asleep when run() returns, so the post, not the sleeper's deadline, ended the wait.
+// home's port: the loop's next step drains the port. The poster then queues a stop with
+// post_control, which ends the run's next wait (a post ends an idle wait too, S0.7). The stop is
+// queued only once the port post has returned, so whichever post the run sees first, a step
+// drains the port before the stop ends the run. The sleeper is still asleep when run() returns,
+// so the posts, not the sleeper's deadline, ended the wait.
 TEST(SchedulerLockPort, APostEndsTheSyncIdleWait) {
   scheduler sched;
   const int pid = sched.execute(std::string("(begin 1 2 3)"));
@@ -2902,11 +2921,11 @@ TEST(SchedulerLockPort, APostEndsTheSyncIdleWait) {
   std::atomic<bool> posted{false};
   std::thread poster([&sched, port, &posted, pid] {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    posted = port->post(unknown_relevel());
     control_cmd stop;
     stop.what = control_cmd::kind::query;
     stop.query = [&sched](scheduler_base &) { sched.stop(); }; // on the scheduler's thread
     sched.post_control(pid, std::move(stop));
-    posted = port->post(unknown_relevel());
   });
   const auto t0 = std::chrono::steady_clock::now();
   sched.run();

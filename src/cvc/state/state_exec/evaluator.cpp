@@ -1,3 +1,4 @@
+#include "builtin_class.h"
 #include "closure_natives.h" // detail::class_constructor
 #include "special_forms.h"
 
@@ -222,6 +223,8 @@ std::optional<value_t> evaluator::caught(const std::exception &e) {
 }
 
 void evaluator::annotate(value_t &exc) {
+  if (detail::is_builtin_class(exc)) // read-only: raised as it is (S0.1)
+    return;
   if (const value_t *tb = field(exc, "traceback"); !tb || tb->is_nil()) {
     std::vector<value_t> lines;
     lines.reserve(raise_trail_.size());

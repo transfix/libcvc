@@ -1418,8 +1418,9 @@ static int cmd_serve(int argc, char **argv) {
   std::cout << "Press Ctrl+C to stop." << std::endl;
   while (g_serve_running.load()) {
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    // If exec enabled, step the scheduler
-    if (sched && sched->has_runnable())
+    // If exec enabled, step the scheduler: for a runnable process, or for a command posted to it
+    // (the coordinator's bus threads post_control), which only a step applies.
+    if (sched && (sched->has_runnable() || sched->has_pending_control()))
       sched->step();
   }
 

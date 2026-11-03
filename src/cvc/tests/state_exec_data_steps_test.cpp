@@ -6,9 +6,13 @@
 
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_exec/async_host.h>
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/data_job.h>
+#include <cvc/state/state_exec/detail/lock_home.h>
+#include <cvc/state/state_exec/exceptions.h>
+#include <cvc/state/state_exec/generator.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/memory_tracker.h>
 #include <cvc/state/state_exec/parser.h>
@@ -180,6 +184,236 @@ TEST(DataJob, RunDataJobOutsideAStepRunsToCompletion) {
   r = run_data_job(make_print_job(nested_list(3)),
                    [](value_t s) { return value_t{std::get<std::string>(s.v) + "!"}; });
   EXPECT_EQ(std::get<std::string>(r.v), "(((1)))!");
+}
+
+// ---- the isolating copy (state-data-set's, td 4.3) -----------------------------------
+
+namespace {
+
+// One value of each kind the isolating copy refuses (S0.2, S0-Q4), with the kind its message
+// names.
+std::vector<std::pair<std::string, value_t>> refused_kinds() {
+  const auto call = std::make_shared<async_call>("f", 1);
+  auto wait = std::make_shared<data_object>();
+  wait->type_name = detail::kLockWaitType;
+  const value_t box = make_dict({{"__name__", value_t{std::string("Box")}}});
+  // A user class derived from a built-in one is still a user class.
+  const value_t derived = make_dict({{"__name__", value_t{std::string("V")}},
+                                     {"__super__", value_t{exception_class("ValueError")}}});
+  return {
+      {"closure", value_t{std::make_shared<closure>()}},
+      {"native function",
+       value_t{native_fn{[](std::span<const value_t>) -> value_t { return nil_value; }}}},
+      {"generator", value_t{std::make_shared<generator>(std::make_shared<environment>())}},
+      {"future", make_async_future(call)},
+      {"future", detail::make_awaitable_handle(call)},
+      {"lock form", detail::make_lock_ops(nullptr)},
+      {"lock wait", value_t{wait}},
+      {"object instance", make_dict({{"__class__", box}, {"n", value_t{int64_t{1}}}})},
+      {"object instance", make_dict({{"__class__", derived}, {"message", value_t{"m"}}})},
+  };
+}
+
+// state-data-set's refusal of `kind`, at the root.
+std::string refusal_text(const std::string &kind) {
+  return "state-data-set: cannot store " + std::string(kind[0] == 'o' ? "an " : "a ") + kind;
+}
+
+// The isolating copy of `v`, made in slices of `slice` nodes.
+value_t isolate(const value_t &v, std::size_t slice = 0) {
+  auto job = make_copy_job(v, copy_mode::isolate, "state-data-set");
+  return run_sliced(*job, slice).first;
+}
+
+// What the isolating copy of `v` throws, or "" when it copies it.
+std::string isolate_refusal(const value_t &v, std::size_t slice = 0) {
+  try {
+    isolate(v, slice);
+  } catch (const std::runtime_error &e) {
+    return e.what();
+  }
+  return "";
+}
+
+} // namespace
+
+TEST(DataJob, IsolatingCopyRefusesAtAnyDepth) {
+  // Each kind at the root, in a list and in a dict, and deep: the message names the kind and the
+  // container it was found in.
+  for (const auto &[kind, v] : refused_kinds()) {
+    SCOPED_TRACE(kind);
+    const std::string refused = refusal_text(kind);
+    for (std::size_t slice : {0u, 1u}) {
+      EXPECT_EQ(isolate_refusal(v, slice), refused);
+      EXPECT_EQ(isolate_refusal(make_list({value_t{int64_t{1}}, v}), slice),
+                refused + " (nested in a list)");
+      EXPECT_EQ(isolate_refusal(make_dict({{"a", value_t{int64_t{1}}}, {"k", v}}), slice),
+                refused + " (nested in a dict)");
+      EXPECT_EQ(isolate_refusal(nested_list(40, v), slice), refused + " (nested in a list)");
+      EXPECT_EQ(isolate_refusal(nested_list(40, make_dict({{"k", v}})), slice),
+                refused + " (nested in a dict)");
+    }
+  }
+}
+
+TEST(DataJob, IsolatingCopyRefusesInALaterSlice) {
+  // The slice that reaches the value refuses it; the slices before it built only the job's own
+  // copy, and a refused job gives no result, so state-data-set's write (its job's `then`) never
+  // runs.
+  for (const auto &[kind, v] : refused_kinds()) {
+    SCOPED_TRACE(kind);
+    std::vector<value_t> elems(100, value_t{int64_t{7}});
+    elems.push_back(make_dict({{"k", v}}));
+    auto job = make_copy_job(make_list(std::move(elems)), copy_mode::isolate, "state-data-set");
+    for (int i = 0; i < 10; ++i)
+      ASSERT_FALSE(job->step(5));
+    EXPECT_EQ(job->nodes(), 50u);
+    try {
+      run_sliced(*job, 5);
+      ADD_FAILURE() << "not refused";
+    } catch (const std::runtime_error &e) {
+      EXPECT_EQ(std::string(e.what()), refusal_text(kind) + " (nested in a dict)");
+    }
+    EXPECT_EQ(job->nodes(), 102u); // the 101 elements and the dict's "k"
+
+    bool written = false;
+    EXPECT_THROW(run_data_job(make_copy_job(make_list({value_t{int64_t{1}}, v}), copy_mode::isolate,
+                                            "state-data-set"),
+                              [&](value_t) {
+                                written = true;
+                                return nil_value;
+                              }),
+                 std::runtime_error);
+    EXPECT_FALSE(written);
+  }
+}
+
+TEST(DataJob, IsolatingCopySharesDataObjectsAndBuiltinClasses) {
+  // An ordinary data_object is shared under its read-only contract, at the root and nested.
+  auto thing = std::make_shared<data_object>();
+  thing->type_name = "thing";
+  thing->payload = 42;
+  EXPECT_EQ(std::get<data_object_ptr>(isolate(value_t{thing}).v), thing);
+  const value_t holder = make_list({value_t{thing}, make_dict({{"t", value_t{thing}}})});
+  const value_t held = isolate(holder, 1);
+  const auto &hl = *std::get<list_ptr>(held.v);
+  EXPECT_NE(std::get<list_ptr>(held.v), std::get<list_ptr>(holder.v));
+  EXPECT_EQ(std::get<data_object_ptr>(hl[0].v), thing);
+  EXPECT_EQ(std::get<data_object_ptr>(field(hl[1], "t")->v), thing);
+
+  // Every built-in class dict is shared as it is: they are read-only (S0.1).
+  ASSERT_EQ(exception_class_names().size(), 17u);
+  for (const std::string &name : exception_class_names()) {
+    const dict_ptr cls = exception_class(name);
+    EXPECT_EQ(std::get<dict_ptr>(isolate(value_t{cls}).v), cls) << name;
+  }
+
+  // A built-in exception's instance is copied with its class shared: still a ValueError, its
+  // own fields copied.
+  const value_t exc =
+      make_exception(exception_class("ValueError"), "bad", make_list({value_t{int64_t{1}}}), "dsl");
+  const value_t copied = isolate(make_list({exc, exc}), 1);
+  const auto &cl = *std::get<list_ptr>(copied.v);
+  EXPECT_EQ(std::get<dict_ptr>(cl[0].v), std::get<dict_ptr>(cl[1].v)); // reached twice, one copy
+  EXPECT_NE(std::get<dict_ptr>(cl[0].v), std::get<dict_ptr>(exc.v));
+  EXPECT_EQ(class_of_instance(cl[0]), exception_class("ValueError"));
+  EXPECT_NE(std::get<list_ptr>(field(cl[0], "data")->v), std::get<list_ptr>(field(exc, "data")->v));
+  EXPECT_TRUE(is_instance(cl[0], exception_class("ValueError")));
+  EXPECT_TRUE(values_equal(cl[0], exc));
+
+  // Plain data that only looks like an instance or a future is copied: a `__class__` that is no
+  // dict, a channel's future (a one-key dict naming the channel).
+  for (const value_t &plain :
+       {make_dict({{"__class__", value_t{std::string("Box")}}}), make_future("reply.1")}) {
+    const value_t c = isolate(plain);
+    EXPECT_NE(std::get<dict_ptr>(c.v), std::get<dict_ptr>(plain.v));
+    EXPECT_TRUE(values_equal(c, plain)) << to_string(plain);
+  }
+}
+
+TEST(DataJob, IsolatingCopyKeepsSharingAndCycles) {
+  const value_t inner = make_list({value_t{int64_t{3}}});
+  const value_t shared = make_dict({{"x", value_t{int64_t{1}}}});
+  value_t c = isolate(make_list({inner, inner, shared, shared}));
+  const auto &l = *std::get<list_ptr>(c.v);
+  EXPECT_EQ(std::get<list_ptr>(l[0].v), std::get<list_ptr>(l[1].v));
+  EXPECT_NE(std::get<list_ptr>(l[0].v), std::get<list_ptr>(inner.v));
+  EXPECT_EQ(std::get<dict_ptr>(l[2].v), std::get<dict_ptr>(l[3].v));
+  EXPECT_NE(std::get<dict_ptr>(l[2].v), std::get<dict_ptr>(shared.v));
+
+  // A cycle through a list and a dict is copied as a cycle, each node once.
+  auto cyclic = std::make_shared<std::vector<value_t>>();
+  auto back = std::make_shared<ordered_map>();
+  back->emplace_back("back", value_t{cyclic});
+  cyclic->push_back(value_t{back});
+  auto job = make_copy_job(value_t{cyclic}, copy_mode::isolate, "state-data-set");
+  const value_t cy = run_sliced(*job, 1).first;
+  EXPECT_EQ(job->nodes(), 2u);
+  const list_ptr copied = std::get<list_ptr>(cy.v);
+  const dict_ptr copied_back = std::get<dict_ptr>((*copied)[0].v);
+  EXPECT_NE(copied, cyclic);
+  EXPECT_NE(copied_back, back);
+  EXPECT_EQ(std::get<list_ptr>((*copied_back)[0].second.v), copied);
+  copied->clear(); // break both cycles
+  cyclic->clear();
+}
+
+TEST(DataJob, ShareModeStillSharesClosures) {
+  // Share mode (state-data-get's copy, async arguments) is as before, but for the built-in class
+  // dicts: it refuses nothing, shares everything that is not a list or dict, copies every other
+  // dict, and shares a built-in class's (read-only since S0.1), so a read-back exception can be
+  // stored again.
+  const auto clo = std::make_shared<closure>();
+  const auto gen = std::make_shared<generator>(std::make_shared<environment>());
+  const auto call = std::make_shared<async_call>("f", 1);
+  const value_t future = make_async_future(call);
+  const value_t lock = detail::make_lock_ops(nullptr);
+  const value_t box = make_dict(
+      {{"__class__", make_dict({{"__name__", value_t{std::string("Box")}}})}, {"n", value_t{1}}});
+  const value_t exc = make_exception(exception_class("KeyError"), "k", nil_value, "dsl");
+  const value_t source =
+      make_list({value_t{clo}, value_t{gen},
+                 value_t{native_fn{[](std::span<const value_t>) -> value_t { return nil_value; }}},
+                 future, lock, box, exc});
+  for (bool explicit_mode : {false, true}) {
+    SCOPED_TRACE(explicit_mode ? "copy_mode::share" : "the defaults");
+    auto job = explicit_mode ? make_copy_job(source, copy_mode::share, "state-data-get")
+                             : make_copy_job(source);
+    const value_t c = run_sliced(*job, 1).first;
+    const auto &l = *std::get<list_ptr>(c.v);
+    ASSERT_EQ(l.size(), 7u);
+    EXPECT_EQ(std::get<closure_ptr>(l[0].v), clo);
+    EXPECT_EQ(std::get<generator_ptr>(l[1].v), gen);
+    EXPECT_TRUE(std::holds_alternative<native_fn>(l[2].v));
+    EXPECT_NE(std::get<dict_ptr>(l[3].v), std::get<dict_ptr>(future.v)); // the dict is copied,
+    EXPECT_TRUE(is_async_future(l[3]));                                  // its handle shared
+    EXPECT_EQ(std::get<data_object_ptr>(field(l[3], "__async_call__")->v),
+              std::get<data_object_ptr>(field(future, "__async_call__")->v));
+    EXPECT_EQ(std::get<data_object_ptr>(l[4].v), std::get<data_object_ptr>(lock.v));
+    EXPECT_NE(std::get<dict_ptr>(l[5].v), std::get<dict_ptr>(box.v)); // an instance and its class
+    EXPECT_NE(class_of_instance(l[5]), class_of_instance(box));       // are copied
+    EXPECT_EQ(class_of_instance(l[6]), exception_class("KeyError"));  // a built-in one is shared
+    EXPECT_TRUE(is_instance(l[6], exception_class("KeyError")));
+    EXPECT_EQ(isolate_refusal(c), "state-data-set: cannot store a closure (nested in a list)");
+    EXPECT_EQ(isolate_refusal(l[6]), ""); // the read-back exception is stored again
+  }
+}
+
+TEST(DataJob, CopyNamesItsCallerAtTheDeadline) {
+  // The copy's deadline names its caller: state-data-get by default, as before.
+  eval_deadline_guard spent(0.0);
+  const value_t v = make_list({value_t{int64_t{1}}});
+  const auto timeout_of = [](data_job &job) -> std::string {
+    try {
+      job.step(0);
+    } catch (const evaluation_timeout &e) {
+      return e.what();
+    }
+    return "";
+  };
+  EXPECT_EQ(timeout_of(*make_copy_job(v)), "state-data-get: evaluation exceeded timeout");
+  EXPECT_EQ(timeout_of(*make_copy_job(v, copy_mode::isolate, "state-data-set")),
+            "state-data-set: evaluation exceeded timeout");
 }
 
 // ---- the evaluator ------------------------------------------------------------
