@@ -1,0 +1,15 @@
+# The document app.py loads (ctest arix_python_program, ariglx_python_program): it calls the Python
+# program's function at init and shows what came back.
+
+meta:
+  name: python program
+  min_libcvc: 3.7.8
+
+requires: [twice]
+
+init: |
+  (state-set "result" (str (twice 7)))
+
+root:
+  - text: result
+    bind: result

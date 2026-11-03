@@ -1,0 +1,17 @@
+# A python: block that raises at load: the load fails with the traceback (ctest arix_python_error),
+# and the stock hosts, which have no Python, say which hosts do (ctest ari_python_needs_arix).
+
+meta:
+  name: python error
+  min_libcvc: 3.7.8
+
+requires: [python]
+
+python: |
+  def broken():
+      return 1 / 0
+
+  broken()
+
+root:
+  - text: never shown

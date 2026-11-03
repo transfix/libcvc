@@ -348,6 +348,16 @@ void AppRuntime::run_program(std::string script, std::function<void(const std::s
   rt_.run_program(std::move(script), done ? std::move(done) : [](const std::string &) {});
 }
 
+void AppRuntime::add_load_hook(LoadHook hook) {
+  if (hook)
+    loadHooks_.push_back(std::move(hook));
+}
+
+void AppRuntime::add_frame_hook(std::function<void()> hook) {
+  if (hook)
+    frameHooks_.push_back(std::move(hook));
+}
+
 void AppRuntime::register_quit() {
   on("quit", [this] { request_close(0); });
   verbs_->quit = [this](int code) { request_close(code); };
@@ -556,10 +566,15 @@ void check_host_requirements(const Runtime &rt, LoadResult &lr) {
   for (std::string &w : reqs.warnings)
     lr.warnings.push_back(std::move(w));
   if (!reqs.missing.empty()) {
-    std::string list;
-    for (const std::string &m : reqs.missing)
+    std::string list, hints;
+    for (const std::string &m : reqs.missing) {
       list += (list.empty() ? "" : ", ") + m;
-    throw std::runtime_error("this host does not provide what the document requires: " + list);
+      const std::string hint = capability_hint(m.substr(0, m.find(' '))); // m may add its meaning
+      if (!hint.empty() && hints.find(hint) == std::string::npos)
+        hints += (hints.empty() ? "" : "; ") + hint;
+    }
+    throw std::runtime_error("this host does not provide what the document requires: " + list +
+                             (hints.empty() ? "" : "; " + hints));
   }
 
   // Without a scene adapter the whole scene is ignored, and load says so; only a scene that does
@@ -626,6 +641,8 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   if (!lr.ok)
     throw std::runtime_error(lr.error.empty() ? ("AppRuntime.load: failed to load " + path)
                                               : lr.error);
+  for (const LoadHook &hook : loadHooks_) // a scripting host's python: block, before requires:
+    hook(lr, path);
   check_host_requirements(rt_, lr); // requires: and the calls programs make (§7.6)
 
   // The document's command line goes on the tree before init: runs, so init can read it.
@@ -733,6 +750,10 @@ void AppRuntime::drain() {
     scene_->tick();                // volren/volslice per-frame service
   }
   collect_warnings();
+  for (std::size_t i = 0; i < frameHooks_.size(); ++i) {
+    const std::function<void()> hook = frameHooks_[i]; // a copy: a hook may add another
+    hook();
+  }
 }
 
 // Keep the read-lane diagnostics for take_warnings(); the Runtime reports each one only once.
