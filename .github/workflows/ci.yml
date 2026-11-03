@@ -592,13 +592,15 @@ jobs:
           echo "run=$run" >> "$GITHUB_OUTPUT"
           echo "arigl-web changed: $run"
 
-      - name: Install cvcpkg, cmake/ninja and the Emscripten SDK from the catalog
+      - name: Install cvcpkg, cmake/ninja, protoc and the Emscripten SDK from the catalog
         if: steps.paths.outputs.run == 'true'
         run: |
           curl -fsSL https://cvcpkg.org/install.sh | sh
           export PATH="$HOME/.local/bin:$PATH"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          cvcpkg install cmake ninja --prefix "$RUNNER_TEMP/tools" --config release --link shared
+          # protobuf: the native protoc the conference's messages are generated with (the recipe's
+          # host tool; the wasm protobuf ships none).
+          cvcpkg install cmake ninja protobuf --prefix "$RUNNER_TEMP/tools" --config release --link shared
           echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
           cvcpkg install emsdk --platform linux --prefix "$RUNNER_TEMP/emsdk" \
             --config release --link shared --no-fallback-to-source

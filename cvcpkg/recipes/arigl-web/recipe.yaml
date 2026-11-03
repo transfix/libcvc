@@ -111,6 +111,9 @@ depends:
   host_tools:
     - cmake
     - ninja
+    # A native protoc for the WebSocket transport's messages: the wasm protobuf ships none, and the
+    # generated code must match its libprotobuf (28.3) exactly.
+    - protobuf
 
 build:
   matrix:
