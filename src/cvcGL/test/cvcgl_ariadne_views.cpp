@@ -306,5 +306,12 @@ int main() {
   check(rt.views().size() == 0 && !vm.hasViewport("sim") && !vm.hasViewport("nosim"),
         "a new document removes the last one's views");
 
+  // A host that closes the view before the runtime goes (cvcgl_ari_switch, arigl at exit): the
+  // views went with the view's viewport manager, and the runtime's teardown must not reach for it.
+  rt.load(doc.string());
+  for (int f = 0; f < 3; ++f)
+    rt.step(kDt);
+  check(rt.views().size() == 2, "the views are back with the document");
+  view.close(); // ~AriRuntime runs after the return below, with the view closed
   return cvcgl_test::finish("cvcgl_ariadne_views");
 }

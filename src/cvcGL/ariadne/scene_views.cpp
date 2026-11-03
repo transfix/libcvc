@@ -116,6 +116,10 @@ SceneViews::SceneViews(SceneRenderer &view, ImGuiBackend &backend,
 SceneViews::~SceneViews() { clear(); }
 
 void SceneViews::clear() {
+  if (view_->isClosed()) { // the viewports went with the view's manager
+    views_.clear();
+    return;
+  }
   ViewportManager &vm = view_->viewportManager();
   for (auto &kv : views_)
     if (vm.hasViewport(kv.first))
@@ -173,6 +177,10 @@ void SceneViews::end_walk() {
 }
 
 void SceneViews::update(double dt) {
+  if (view_->isClosed()) {
+    views_.clear();
+    return;
+  }
   // No widget walk last frame (the host hid the UI): no widget drew a view, so none shows.
   const bool walked = walked_;
   walked_ = false;
