@@ -435,7 +435,8 @@ ViewportManager::ViewportManager(SceneGraph &mainScene, int width, int height, b
   // across the manager). Matches the existing ".viewers.<name>" scheme.
   m_impl->activeStatePath = mainScene.getStatePrefix() + ".active_viewport";
   // An onscreen window is SDL3's where cvcGL has SDL (SdlWindow.h): SDL makes the window and its GL
-  // context and its events drive the interactor, the same on every platform. Offscreen, without
+  // context and its events drive the interactor, the same on every platform, the browser too (the
+  // page's canvas, sized to its container from the first frame, and WebGL2). Offscreen, without
   // SDL, with $CVCGL_SDL_WINDOW=0, or where SDL can open no window, VTK's own window.
 #ifdef CVC_ENABLE_SDL
   if (!offscreen && sdl_window_enabled()) {
@@ -488,12 +489,12 @@ ViewportManager::ViewportManager(SceneGraph &mainScene, int width, int height, b
       m_impl->interactor->Initialize();
     }
 #ifdef __EMSCRIPTEN__
-    // In a browser the canvas fills its container (VTK's ExpandCanvasToContainer), but VTK sizes
-    // it only when it handles a window resize event: the first is the one Initialize() dispatches,
-    // handled by the next processUIEvents(), after the first frame has drawn at width x height.
-    // Take the container's size now, as that event would: the first frame is where ImGui places
-    // its windows, and a window placed inside a 1024 x 768 view stays where it was put when the
-    // canvas turns out shorter.
+    // VTK's canvas window fills its container (VTK's ExpandCanvasToContainer), but VTK sizes the
+    // canvas only when it handles a window resize event: the first is the one Initialize()
+    // dispatches, handled by the next processUIEvents(), after the first frame has drawn at
+    // width x height. Take the container's size now, as that event would: the first frame is where
+    // ImGui places its windows, and a window placed inside a 1024 x 768 view stays where it was put
+    // when the canvas turns out shorter. (SDL's window has the container's size once it is made.)
     if (auto *wi = vtkWebAssemblyRenderWindowInteractor::SafeDownCast(m_impl->interactor))
       if (wi->GetExpandCanvasToContainer())
         if (int *fit = vtkGetParentElementBoundingRectSize(wi->GetCanvasSelector())) {

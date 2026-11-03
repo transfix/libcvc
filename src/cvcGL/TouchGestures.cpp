@@ -203,8 +203,8 @@ void TouchGestures::update() {
   double g[4] = {1.0, 0.0, 0.0, 0.0};
   cvcgl_touch_take(s.canvas.c_str(), g);
   const double scale = g[0], panX = g[1], panY = g[2];
-  // A second finger landed: the first one's press (VTK's, a frame or so ago) is the gesture's now,
-  // not a tap on the scene when it lifts, nor a drag that turns or steers.
+  // A second finger landed: the first one's press (the interactor's, a frame or so ago) is the
+  // gesture's now, not a tap on the scene when it lifts, nor a drag that turns or steers.
   if (g[3] != 0.0)
     s.cam->cancelPointer();
 

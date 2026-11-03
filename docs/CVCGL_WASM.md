@@ -11,6 +11,7 @@ and what it promises in return. Reference for `cvcgl_wasm_app()`
 - [Overview](#overview)
 - [Quick start](#quick-start)
 - [cvcgl_wasm_app()](#cvcgl_wasm_app)
+- [The window: SDL's canvas](#the-window-sdls-canvas)
 - [The WebGL state shim](#the-webgl-state-shim)
 - [FrameYield: who yields to the browser](#frameyield-who-yields-to-the-browser)
 - [mimalloc](#mimalloc)
@@ -174,6 +175,33 @@ wasm-mt (`-pthread`) build.
 so it links neither speedup. When it gets a browser page, its link must add the shim
 `--pre-js "$INST/share/cvcGL/wasm/webgl_state_shadow.js"` and, on wasm-mt,
 `-sMALLOC=mimalloc`. A TODO in the script says the same.
+
+## The window: SDL's canvas
+
+With SDL3 built in (`CVC_ENABLE_SDL`), an onscreen window in the browser is SDL's, as it is
+natively (`src/cvcGL/SdlWindow.h`): the page's `#canvas` and its WebGL2 context. SDL's events
+drive VTK's interactor, so the camera, ImGui and `SdlInput` read the same events, with the same
+key names, as on the desktop.
+
+- **Size.** The canvas fills its parent element, styled as VTK's canvas window styled it, and
+  the window takes the canvas's CSS size (times `devicePixelRatio`) when it is made and at every
+  browser resize. A size the app asks for is ignored.
+- **Context.** WebGL2 with the attributes VTK's canvas window asks for: no antialiasing (VTK
+  resolves its own multisampled framebuffers into it), opaque unless the window is translucent,
+  depth and stencil.
+- **Keys.** SDL listens for the keys typed into the canvas only, so the canvas needs
+  `tabindex` and the focus (the stock pages focus it on a click). The page's own fields and
+  ImGuiOverlay's system-keyboard field keep their keys.
+- **Pointer and touch.** SDL reads the canvas's pointer events and makes the first finger the
+  mouse. CameraController still takes the pointer lock inside the press and reads the raw
+  motion itself; under the lock the interactor's position stands still. TouchGestures still
+  reads two-finger gestures from the page's touch events, and while two fingers are down the
+  mouse SDL makes of the first one stays still.
+- **Frames.** There is no swap: WebGL shows the frame when the page yields. The window yields
+  in `Frame()` where VTK 9.5's canvas window does, so [FrameYield](#frameyield-who-yields-to-the-browser)
+  means the same with either window.
+- **Fallback.** `ENV.CVCGL_SDL_WINDOW = '0'` in the page's `preRun` keeps VTK's canvas window
+  (`vtkWebAssemblyRenderWindowInteractor`).
 
 ## The WebGL state shim
 
