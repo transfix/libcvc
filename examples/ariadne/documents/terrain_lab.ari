@@ -44,16 +44,14 @@ customs:
 import:
   - cvc://components/world_controls.ari
   - cvc://components/stage_lighting.ari
-  - cvc://components/camera_controls.ari
-  - cvc://components/scene_controls.ari
+  - cvc://components/viewer_settings.ari     # frame rate, UI size, grid / axis, camera, shadows
   - cvc://components/sim_transport.ari
   - cvc://components/sky_controls.ari
 
 # Only the Terrain Lab panel opens at first, so the world fills the view; Settings opens the rest.
 init: |
   (state-set "tree.stage_lighting.open" "0")
-  (state-set "tree.camera_controls.open" "0")
-  (state-set "tree.scene_controls.open" "0")
+  (state-set "tree.viewer_settings.open" "0")
   (state-set "tree.sim_transport.open" "0")
   (state-set "tree.sky_controls.open" "0")
 
@@ -69,10 +67,8 @@ menubar:
       - separator
       - menu_item: Stage lighting
         bind: tree.stage_lighting.open
-      - menu_item: Camera
-        bind: tree.camera_controls.open
-      - menu_item: Scene
-        bind: tree.scene_controls.open
+      - menu_item: Viewer
+        bind: tree.viewer_settings.open
       - menu_item: Simulation
         bind: tree.sim_transport.open
       - menu_item: Sky
@@ -87,20 +83,16 @@ windows:
     pos: [370, 16]
     size: [370, 210]
     closable: true
-  - include: camera_controls
+  - include: viewer_settings
     pos: [370, 234]
-    size: [370, 132]
-    closable: true
-  - include: scene_controls
-    pos: [370, 374]
-    size: [370, 120]
+    size: [370, 440]
     closable: true
   - include: sim_transport   # Paused / Speed: the water and the clouds run on the clock below
-    pos: [370, 502]
+    pos: [370, 682]
     size: [370, 150]
     closable: true
   - include: sky_controls
-    pos: [370, 660]
+    pos: [754, 16]
     size: [370, 116]
     closable: true
 
