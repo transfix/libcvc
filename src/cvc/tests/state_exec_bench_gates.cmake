@@ -3,8 +3,9 @@
 # so they hold on any machine and under any load:
 #
 #   - lock.uncontended, form=single: an uncontended with-lock adds 0 evaluator steps and 0
-#     allocations over (begin ...), at every depth, mode, chroot and owner, on both schedulers
-#     (design 8.8);
+#     allocations over (begin ...), at every depth, mode, chroot and owner, on both schedulers,
+#     and on both kinds of manager: threading=single and threading=shared, whose mutex (phase L3)
+#     adds neither (design 8.8, 11.2);
 #   - sched.single.arith_loop and sched.single.tail_rec: steps_total pinned, so a change to the
 #     evaluator's or a scheduler's step counts shows here.
 #
@@ -41,8 +42,8 @@ endfunction()
 # The runs. If one fails, its gates have nothing to read and fail too. One rep, no warmup and one
 # timing round: the counts are the same in every rep and round, so more only costs time.
 gate_step("state_exec_bench lock.uncontended"
-  "${BENCH}" --scenario lock.uncontended --size n=2000 --size rounds=1 --reps 1 --warmup 0
-  --json "${LOCKS_RUN}")
+  "${BENCH}" --scenario lock.uncontended --size n=2000 --size rounds=1
+  --size threading=single,shared --reps 1 --warmup 0 --json "${LOCKS_RUN}")
 gate_step("state_exec_bench sched.single.*"
   "${BENCH}" --scenario "sched.single.*" --reps 1 --warmup 0 --json "${SCHED_RUN}")
 

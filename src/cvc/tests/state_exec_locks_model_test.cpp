@@ -17,21 +17,27 @@
 ///   4. explore() (explore.py): 0-1 BFS over fingerprints of the world's state, each state kept as
 ///      (parent, action) and rebuilt by replaying its path into a fresh world; a fair drain at
 ///      the bound; the shortest trace per violation.
-///   5. Random runs (random_runs.py on one home), scenarios.py's scenarios on one home (the
-///      stale-wake ones on two), the L1 and L2 mutations, and the replay of the Python model's
-///      traces (tools/locks_model/export_traces.py, src/cvc/tests/data/locks_model_traces/).
+///   5. Random runs (random_runs.py: on one home, and over one to three homes), scenarios.py's
+///      scenarios (on one home, and as written on two), the L1, L2 and L3 mutations, and the
+///      replay of the Python model's traces (tools/locks_model/export_traces.py,
+///      src/cvc/tests/data/locks_model_traces/).
 ///
 /// The configurations: 'l1' and 'l1x' (phase L1, one round_robin home), 'l2' and 'noinh1' (phase
-/// L2, one priority_rr home with set-priority, inheritance on and off), and explore.py's 'core'
-/// on the oracle alone. Sizes come from CVC_LOCKS_MODEL_BOUND, CVC_LOCKS_MODEL_STEPS and
+/// L2, one priority_rr home with set-priority, inheritance on and off), and explore.py's two- and
+/// three-home configurations of phase L3 (locks plan L3.4): ports and posts between homes (split
+/// into the closed test and the append in 'splitpost'), destruction as the port's close and then
+/// detach_home, a home attached late, progress cells as logical clocks, and blocking_sinks at
+/// quiescence. Sizes come from CVC_LOCKS_MODEL_BOUND, CVC_LOCKS_MODEL_STEPS and
 /// CVC_LOCKS_SANITIZER; see tools/locks_model/README.md.
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cvc/state/state_exec/detail/lock_home.h>
 #include <cvc/state/state_exec/detail/lock_table.h>
 #include <deque>
 #include <filesystem>
@@ -43,6 +49,7 @@
 #include <optional>
 #include <random>
 #include <set>
+#include <span>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -77,6 +84,12 @@ constexpr int INF = dt::lock_inf;
 constexpr std::uint64_t SEQ_INF = UINT64_MAX;
 constexpr lock_mode S = lock_mode::shared;
 constexpr lock_mode X = lock_mode::exclusive;
+
+/// A home's progress cell (protocol 2.1's Home.progress): shared by the home, the oracle's
+/// M.homes entry and the table's. The world keeps a logical clock in it (protocol 7).
+using cell_ptr = std::shared_ptr<std::atomic<std::int64_t>>;
+using port_ptr = std::shared_ptr<dt::lock_port>;
+cell_ptr new_cell(std::int64_t v = 0) { return std::make_shared<std::atomic<std::int64_t>>(v); }
 
 // =============================================================================================
 // 0. Basics: violations, keys, formatting
@@ -296,9 +309,14 @@ public:
     bool coalesce = false;
     bool one_home = true;
     std::uint32_t mutations = 0;
+    /// explore.py's 'grantseeds' ('no-granted-seeds'): 4.3's implementation note checked with
+    /// seeds that leave out the processes granted, an equivalent reading (the oracle's check only;
+    /// no state or notification changes).
+    bool no_granted_seeds = false;
   };
   struct home_rec {
     bool prio = false;
+    cell_ptr progress; // 2.1's Home.progress, shared with the home (null reads as 0)
   };
 
   explicit spec_manager(options o) : opts(o) {}
@@ -697,7 +715,8 @@ public:
     all.insert(G.begin(), G.end());
     for (auto P : all)
       maybe_drop_rec(P);
-    seeds_.insert(G.begin(), G.end()); // 4.3's note: the processes granted are seeds too
+    if (!opts.no_granted_seeds)
+      seeds_.insert(G.begin(), G.end()); // 4.3's note: the processes granted are seeds too
     relevel_all(skip);
   }
   /// 4.3's reference loop, then lockmodel.py's check of the implementation note against it.
@@ -791,12 +810,12 @@ public:
 
   // -- 4.4
   // -----------------------------------------------------------------------------------------------
-  home_id attach_home(bool prio, spec_notes &out) {
+  home_id attach_home(bool prio, cell_ptr progress, spec_notes &out) {
     begin();
     require(!(opts.one_home && !homes.empty()),
             "attach_home: before L3 a manager accepts one home");
     home_id H = next_home++;
-    homes[H] = home_rec{prio};
+    homes[H] = home_rec{prio, std::move(progress)};
     cache_refs[H]; // empty; detach_home deletes it
     relevel_all({});
     out = N_;
@@ -1221,6 +1240,20 @@ public:
     }
     return res;
   }
+  /// 4.13: { (Q, M.homes[Q.home].progress.load()) : Q in reach({P}), Q != P, succ(Q) == {} },
+  /// sorted by (home, pid).
+  std::vector<std::pair<lock_pid, std::int64_t>> blocking_sinks(lock_pid P) const {
+    std::vector<std::pair<lock_pid, std::int64_t>> out;
+    for (auto Q : reach_in(graph(), {P})) {
+      if (Q == P || !succ_of(Q).empty())
+        continue;
+      auto h = homes.find(Q.home);
+      if (h == homes.end())
+        fail("4.13", "blocking_sinks: sink " + pid_str(Q) + " of a home that is not attached");
+      out.push_back({Q, h->second.progress ? h->second.progress->load() : 0});
+    }
+    return out;
+  }
 
   void ref_nodes(home_id H, const key_list &keys) {
     begin();
@@ -1520,6 +1553,15 @@ std::string fmt_notes(const dt::lock_notes &N) {
   }
   return o;
 }
+/// blocking_sinks' result as the trace files write it: HOME:PID:TIME per sink, by (home, pid).
+std::string fmt_sinks(std::vector<std::pair<lock_pid, std::int64_t>> s) {
+  std::sort(s.begin(), s.end());
+  std::string o;
+  for (const auto &[Q, t] : s)
+    o += (o.empty() ? "" : " ") + std::to_string(Q.home) + ":" + std::to_string(Q.pid) + ":" +
+         std::to_string(t);
+  return o;
+}
 /// lock-query's result; `normalized` sorts held by key and each pid list (the protocol fixes the
 /// waiting order, seq, but not those two orders), which is how the table is compared.
 std::string fmt_query(lock_query_result r, bool normalized) {
@@ -1560,11 +1602,12 @@ public:
     std::uint32_t mutations = 0;      // both sides (lockmodel.py's single Manager takes them)
     std::uint32_t real_mutations = 0; // the real table only (plant_divergence)
     std::uint32_t spec_mutations = 0; // the oracle only
+    bool no_granted_seeds = false;    // the oracle's check of 4.3's note ('grantseeds')
   };
 
   explicit lockstep(const options &o)
       : opts(o), spec(spec_manager::options{o.inheritance, o.coalesce, o.one_home,
-                                            o.mutations | o.spec_mutations}) {
+                                            o.mutations | o.spec_mutations, o.no_granted_seeds}) {
     if (o.real) {
       dt::lock_table::options t;
       t.inheritance = o.inheritance;
@@ -1578,7 +1621,8 @@ public:
   /// A world with no real table is copied (the explorer's clone mode); one with the real table is
   /// never copied: its states are rebuilt by replay.
   lockstep(const lockstep &o)
-      : opts(o.opts), spec(o.spec), checked(o.checked), canon_(o.canon_), dirty_(o.dirty_) {
+      : opts(o.opts), spec(o.spec), checked(o.checked), ports_(o.ports_), canon_(o.canon_),
+        dirty_(o.dirty_) {
     if (o.real)
       throw std::logic_error("lockstep: a world over the real table is replayed, never copied");
   }
@@ -1594,17 +1638,20 @@ public:
   bool checked = true;
 
   // -- operations ---------------------------------------------------------------------------------
-  home_id attach_home(bool prio, spec_notes &N) {
+  /// 4.4 with the home's port and progress cell: the oracle keeps the cell (blocking_sinks loads
+  /// it), the table both; the port is the table's only, which captures it in each notification
+  /// for the home (compare_notes checks it).
+  home_id attach_home(bool prio, port_ptr port, cell_ptr progress, spec_notes &N) {
     const std::string desc = std::string("attach_home prio=") + (prio ? "1" : "0");
     home_id h = 0;
     try {
-      h = spec.attach_home(prio, N);
+      h = spec.attach_home(prio, progress, N);
     } catch (const lock_violation &v) {
       if (v.invariant() == "require" && real) {
         bool refused = false; // protocol 4.4: the table refuses too, with a std::logic_error
         try {
           dt::lock_notes rn;
-          real->attach_home(prio, nullptr, nullptr, rn);
+          real->attach_home(prio, port, progress, rn);
         } catch (const std::logic_error &e) {
           if (is_stub(e))
             throw not_built(e.what());
@@ -1615,9 +1662,10 @@ public:
       }
       throw;
     }
+    ports_[h] = port;
     if (real) {
       dt::lock_notes rn;
-      home_id rh = real_call(desc, [&] { return real->attach_home(prio, nullptr, nullptr, rn); });
+      home_id rh = real_call(desc, [&] { return real->attach_home(prio, port, progress, rn); });
       if (rh != h)
         mismatch(desc, "home id", std::to_string(h), std::to_string(rh));
       compare_notes(desc, N, rn);
@@ -1805,6 +1853,20 @@ public:
     return r;
   }
 
+  /// 4.13's blocking_sinks: the oracle's, compared with the table's.
+  std::vector<std::pair<lock_pid, std::int64_t>> blocking_sinks(lock_pid P) {
+    const std::string desc = "blocking_sinks " + pid_str(P);
+    std::vector<std::pair<lock_pid, std::int64_t>> r;
+    wrap_spec(desc, [&] { r = spec.blocking_sinks(P); });
+    if (real && checked) {
+      auto rr = real_call(desc, [&] { return real->blocking_sinks(P); });
+      auto a = fmt_sinks(r), b = fmt_sinks(rr);
+      if (a != b)
+        mismatch(desc, "result", "[" + a + "]", "[" + b + "]");
+    }
+    return r;
+  }
+
   void ref_nodes(home_id H, const key_list &keys) {
     const std::string desc = "ref_nodes H" + std::to_string(H) + " " + keys_br(keys);
     spec_call(
@@ -1949,6 +2011,7 @@ public:
   }
 
 private:
+  std::map<home_id, port_ptr> ports_; // each home's port, as attach_home passed it
   struct node_ref {
     dt::lock_node *node = nullptr;
     int count = 0;
@@ -2030,10 +2093,19 @@ private:
                                     const std::string &oracle, const std::string &table) {
     fail("lockstep", desc + ": " + what + " differs\n  oracle: " + oracle + "\n  table:  " + table);
   }
-  static void compare_notes(const std::string &desc, const spec_notes &a, const dt::lock_notes &b) {
+  /// The two notification lists are equal, and each of the table's carries its home's port,
+  /// captured under M.mu (2.3's Notification, 4.14).
+  void compare_notes(const std::string &desc, const spec_notes &a, const dt::lock_notes &b) const {
     auto x = fmt_notes(a), y = fmt_notes(b);
     if (x != y)
       mismatch(desc, "notification list", "[" + x + "]", "[" + y + "]");
+    for (const auto &n : b) {
+      auto it = ports_.find(n.home);
+      if (it == ports_.end() || n.port != it->second)
+        fail("lockstep", desc + ": the notification " + fmt_post(n.home, n.post) +
+                             " does not carry the port H" + std::to_string(n.home) +
+                             " attached with");
+    }
   }
   static void compare_canonical(const std::string &desc, const std::string &a,
                                 const std::string &b) {
@@ -2194,6 +2266,8 @@ enum world_mutation : std::uint32_t {
   wake_carries_outcome = 1u << 0,    // ('wake-no-tid-check') a wake resumes whatever waits now
   cache_miss_unreferenced = 1u << 1, // ('cache-miss-unreferenced') a miss cached with no reference
   no_set_base = 1u << 2,             // ('no-set-base') set-priority skips the home's set_base
+  wait_unwind_drops_grant = 1u << 3, // 5.4 before the L3 review fix: the defensive path's resume
+                                     // drops a grant another home made (its hold left unmirrored)
 };
 
 struct proc_cfg {
@@ -2203,11 +2277,14 @@ struct proc_cfg {
   int base = 0;
 };
 
-/// world.py's Config, without the parts of other phases (late homes, split posts, group
-/// teardown, scripted processes).
+/// world.py's Config, without the parts of other phases (group teardown, L4's) and of
+/// explore_scripts.py (scripted processes).
 struct config {
   std::string name;
   std::vector<bool> homes; // prio of each home; its id is its index (attach order)
+  /// world.py's late_homes: the prio of each home attached by an action, after the others; their
+  /// indices follow `homes`, and each is attached in index order, so its id is its index too.
+  std::vector<bool> late_homes;
   std::vector<proc_cfg> procs;
   std::vector<std::pair<key_list, lock_mode>> requests;
   std::vector<rkind> kinds{rkind::wait};
@@ -2225,6 +2302,10 @@ struct config {
   int prio_changes = 0;
   int req_per_proc = 2;
   bool coalesce = false;
+  /// world.py's split_post (2.3 read literally): a post's critical section under the port's mutex
+  /// is an action of the posting thread after the one that captured its notification.
+  bool split_post = false;
+  bool grantseeds = false; // explore.py's 'grantseeds': the oracle's no_granted_seeds
   bool foreign = false;
   std::vector<int> cache{0}; // the key-cache capacity, or a choice made by the first action
   bool cache_choice = false;
@@ -2258,7 +2339,9 @@ enum class ak : std::uint8_t {
   kill,
   deadline,
   frelease,
-  fcancel
+  fcancel,
+  attach,
+  wraise // scenarios only, never enabled: a raise into a parked waiter (5.4's defensive path)
 };
 /// One action: a = pid or home (or the capacity), b = request index, value or abandon, c = the
 /// request kind or a foreign id.
@@ -2274,6 +2357,12 @@ action act(ak k, int a = 0, int b = 0, std::uint64_t c = 0) {
                 static_cast<std::uint32_t>(c)};
 }
 bool costs_event(ak k) { return k != ak::hstep && k != ak::post && k != ak::cachecap; }
+/// world.py's STEPS: the actions that run a step of a process, which advance its home's progress
+/// cell (a logical clock).
+bool steps_process(ak k) {
+  return k == ak::req || k == ak::enter_step || k == ak::finish || k == ak::raise ||
+         k == ak::hraise || k == ak::signal || k == ak::hend || k == ak::wraise;
+}
 
 struct post_t {
   bool wake = true;
@@ -2295,7 +2384,8 @@ enum class pk : std::uint8_t {
   end_clear,
   destroy_clear,
   defensive_resume,
-  detach
+  detach,
+  dlv_append // split_post: the post's critical section under the target port's mutex
 };
 struct pending_op {
   pk k = pk::block;
@@ -2333,6 +2423,8 @@ std::string pending_str(const pending_op &o) {
     return "defensive_resume p" + std::to_string(o.pid) + " t" + std::to_string(o.tid);
   case pk::detach:
     return "detach";
+  case pk::dlv_append:
+    return "dlv_append to H" + std::to_string(o.tgt) + " " + post_str(o.post);
   }
   return "?";
 }
@@ -2408,12 +2500,16 @@ struct proc {
 struct home_t {
   int hid = 0;
   bool prio = false;
-  std::deque<post_t> port;
+  std::deque<post_t> port; // 2.3's Port: its queue and its closed flag (world.py's Port)
   bool closed = false;
   std::deque<pending_op> pending;
   bool destroyed = false;
   bool attached = true;
-  key_list cache; // FIFO, at most the capacity
+  key_list cache;    // FIFO, at most the capacity
+  cell_ptr progress; // 2.1's Home.progress: a logical clock (world.py's Cell; not in the state)
+  /// With the real table: a lock_port the table captures in each notification for this home (the
+  /// world's port above stands for it: the table only carries it, 4.14).
+  port_ptr table_port;
 };
 
 /// Whether the real table accepts `n` homes with one_home off (the stale-wake scenarios need two
@@ -2430,7 +2526,7 @@ bool table_accepts_homes(std::size_t n) {
     dt::lock_table t(o);
     dt::lock_notes N;
     for (std::size_t i = 0; i < n; ++i)
-      t.attach_home(false, nullptr, nullptr, N);
+      t.attach_home(false, nullptr, new_cell(), N);
   } catch (const std::logic_error &e) {
     if (is_stub(e))
       throw not_built(e.what());
@@ -2443,16 +2539,22 @@ bool table_accepts_homes(std::size_t n) {
 class world {
 public:
   explicit world(config c) : cfg(std::move(c)), M(lockstep_options(cfg)) {
-    for (std::size_t i = 0; i < cfg.homes.size(); ++i) {
+    for (std::size_t i = 0; i < cfg.homes.size() + cfg.late_homes.size(); ++i) {
       home_t h;
       h.hid = int(i);
-      h.prio = cfg.homes[i];
+      h.prio = i < cfg.homes.size() ? cfg.homes[i] : cfg.late_homes[i - cfg.homes.size()];
+      h.attached = i < cfg.homes.size();
+      h.progress = new_cell();
+      if (cfg.real)
+        h.table_port = std::make_shared<dt::lock_port>(nullptr);
       homes.push_back(h);
-      spec_notes N;
-      home_id id = M.attach_home(cfg.homes[i], N);
-      if (id != home_id(i))
-        fail("model", "attach_home gave H" + std::to_string(id) + " to the home of index " +
-                          std::to_string(i));
+      if (h.attached) {
+        spec_notes N;
+        home_id id = M.attach_home(h.prio, h.table_port, h.progress, N);
+        if (id != home_id(i))
+          fail("model", "attach_home gave H" + std::to_string(id) + " to the home of index " +
+                            std::to_string(i));
+      }
     }
     for (const auto &pc : cfg.procs) {
       proc p;
@@ -2468,6 +2570,19 @@ public:
     if (!cfg.cache_choice)
       cache_cap = cfg.cache.at(0);
   }
+  /// A copy (the oracle alone) has progress cells of its own, linked into its oracle's homes as
+  /// the original's are into its own (world.py's clone(ports, cells)).
+  world(const world &o)
+      : cfg(o.cfg), M(o.M), homes(o.homes), procs(o.procs), soft(o.soft), events(o.events),
+        cache_cap(o.cache_cap), need_mcheck(o.need_mcheck) {
+    for (auto &h : homes) {
+      h.progress = new_cell(h.progress->load());
+      auto it = M.spec.homes.find(home_id(h.hid));
+      if (it != M.spec.homes.end())
+        it->second.progress = h.progress;
+    }
+  }
+  world(world &&) = default;
 
   config cfg;
   lockstep M;
@@ -2505,9 +2620,16 @@ public:
         acts.push_back(act(ak::cachecap, c));
       return acts;
     }
+    bool attaching = false; // the late homes attach in index order (their ids are their indices)
     for (const auto &h : homes) {
       if (h.destroyed)
         continue;
+      if (!h.attached) {
+        if (!attaching)
+          acts.push_back(act(ak::attach, h.hid));
+        attaching = true;
+        continue;
+      }
       if (!h.pending.empty()) {
         acts.push_back(act(ak::hstep, h.hid));
         continue;
@@ -2598,6 +2720,11 @@ public:
                   : post_str(homes.at(std::size_t(a.a)).port.front()));
     case ak::destroy:
       return "destroy H" + std::to_string(a.a);
+    case ak::wraise:
+      return "raise into parked p" + std::to_string(a.a);
+    case ak::attach:
+      return "attach H" + std::to_string(a.a) + " (prio " +
+             (homes.at(std::size_t(a.a)).prio ? "1" : "0") + ")";
     case ak::enter_step:
       return "enter_step p" + std::to_string(a.a);
     case ak::finish:
@@ -2629,6 +2756,8 @@ public:
   void do_(const action &a) {
     if (costs_event(a.k))
       ++events;
+    if (steps_process(a.k))
+      homes.at(std::size_t(procs.at(a.a).hid)).progress->fetch_add(1);
     switch (a.k) {
     case ak::cachecap:
       cache_cap = a.a;
@@ -2676,6 +2805,12 @@ public:
     case ak::frelease:
     case ak::fcancel:
       a_foreign(a.a, a.k == ak::frelease, a.c);
+      return;
+    case ak::attach:
+      a_attach(a.a);
+      return;
+    case ak::wraise:
+      a_wraise(a.a);
       return;
     }
   }
@@ -2903,8 +3038,8 @@ public:
         return true;
     for (const auto &oh : homes)
       for (const auto &op : oh.pending)
-        if (op.k == pk::dlv && op.tgt == hid && op.post.wake && op.post.pid == pid &&
-            op.post.tid == tid)
+        if ((op.k == pk::dlv || op.k == pk::dlv_append) && op.tgt == hid && op.post.wake &&
+            op.post.pid == pid && op.post.tid == tid)
           return true;
     return false;
   }
@@ -2932,9 +3067,28 @@ public:
                        " on a home without applies has inherited_priority " + inh_str(p.inherited));
       }
     }
-    // stuck: every sink a waiter ultimately waits for can run (4.13's blocking_sinks, whose
-    // progress cells are L3's, is this set)
+    // 4.13's blocking_sinks: every process a waiter ultimately waits for can run, and comes with
+    // its home's progress cell, loaded under M.mu (the oracle's, compared with the table's)
     auto g = sp.graph();
+    for (const auto &kv : g) {
+      for (const auto &[Q, t] : M.blocking_sinks(kv.first)) {
+        auto q = procs.find(Q.pid);
+        if (q == procs.end() || q->second.hid != int(Q.home) || Q.home >= homes.size())
+          fail("4.13", "blocking_sinks(" + pid_str(kv.first) + ") has " + pid_str(Q) +
+                           ", no process of the world");
+        const auto &hq = homes.at(Q.home);
+        if (q->second.status != pstatus::run || hq.destroyed || !hq.attached ||
+            !sp.homes.count(Q.home))
+          fail("stuck", "quiescent: blocking_sinks(" + pid_str(kv.first) + ") has " + pid_str(Q) +
+                            ", which cannot run");
+        if (t != hq.progress->load())
+          fail("4.13", "blocking_sinks(" + pid_str(kv.first) + ") gives " + pid_str(Q) + " time " +
+                           std::to_string(t) + ", not its home's cell " +
+                           std::to_string(hq.progress->load()));
+      }
+    }
+    // stuck: every sink a waiter leads to must be able to run (by the graph, as world.py also
+    // checks it)
     for (const auto &kv : g) {
       for (auto Q : spec_manager::reach_in(g, {kv.first})) {
         auto it = g.find(Q);
@@ -3081,7 +3235,8 @@ public:
 
 private:
   static lockstep::options lockstep_options(config &c) {
-    if (c.real && c.homes.size() > 1 && !table_accepts_homes(c.homes.size())) {
+    const std::size_t n = c.homes.size() + c.late_homes.size();
+    if (c.real && n > 1 && !table_accepts_homes(n)) {
       c.real = false;
       c.real_dropped = true;
     }
@@ -3093,7 +3248,16 @@ private:
     o.mutations = c.mutations;
     o.real_mutations = c.real_mutations;
     o.spec_mutations = c.spec_mutations;
+    o.no_granted_seeds = c.grantseeds;
     return o;
+  }
+
+  /// lock_table::closed_outside_mu ('post-test-outside-mu', explore.py's 'splitpost_mut'): the
+  /// world's posts test `closed` outside the port's mutex, in the action that captured the
+  /// notification, and append later without testing it again (the reading 2.3 rules out).
+  bool closed_outside_mu() const {
+    return ((cfg.mutations | cfg.real_mutations | cfg.spec_mutations) &
+            dt::lock_table::closed_outside_mu) != 0;
   }
 
   // -- mcall: a manager operation, then the transition checks (I2, I10)
@@ -3281,17 +3445,31 @@ private:
       return;
     }
     case pk::defensive_resume: {
+      // 5.4's defensive path, after its cancel and that cancel's delivery: resume; a grant
+      // another home made meanwhile is released, as any lock_enter frame's grant is, and the
+      // release's notes delivered
       auto &p = procs.at(op.pid);
       auto b = snap();
-      M.resume(p.P(), op.tid);
+      auto out = M.resume(p.P(), op.tid);
       transitions("resume", b);
       p.lock_ticket.reset();
       p.lock_waiting = false;
       p.lock_deadline = false;
+      if (out.what == dt::lock_outcome::kind::granted && !wmut(wait_unwind_drops_grant)) {
+        soft.push_back({"defensive-grant", "an unwound wait's grant from another home released"});
+        spec_notes N;
+        auto b2 = snap();
+        M.release(p.P(), out.g.hold, N);
+        transitions("release", b2);
+        push_front(hid, dlv_ops(N));
+      }
       return;
     }
     case pk::detach:
       op_detach(hid);
+      return;
+    case pk::dlv_append:
+      op_dlv_append(hid, op.tgt, op.post);
       return;
     }
   }
@@ -3308,18 +3486,52 @@ private:
   }
 
   void op_dlv(int hid, int tgt, const post_t &post) {
-    // 4.14: to the caller's own home, applied at once; else port.post (one critical section)
+    // 4.14: to the caller's own home, applied at once; else n.port.post(n.post)
     if (tgt == hid) {
       apply(hid, post);
       return;
     }
+    if (cfg.split_post) {
+      // N was captured under M.mu; the post's critical section under the port's mutex (2.3) is
+      // a later action of the posting thread (protocol 7)
+      if (closed_outside_mu() && homes.at(std::size_t(tgt)).closed)
+        return; // the closed test outside the mutex: dropped
+      pending_op ap;
+      ap.k = pk::dlv_append;
+      ap.tgt = tgt;
+      ap.post = post;
+      push_front(hid, {ap});
+      return;
+    }
+    port_post(hid, tgt, post);
+  }
+
+  void op_dlv_append(int hid, int tgt, const post_t &post) {
+    if (closed_outside_mu()) {
+      // closed was tested in op_dlv, outside any lock: the append runs whatever happened since
+      auto &h = homes.at(std::size_t(tgt));
+      if (h.closed)
+        fail("port-race", "H" + std::to_string(hid) + " appends " + post_str(post) + " to H" +
+                              std::to_string(tgt) +
+                              "'s port and signals its scheduler after it was closed" +
+                              (h.destroyed ? " and the scheduler was destroyed" : ""));
+      h.port.push_back(post);
+      return;
+    }
+    port_post(hid, tgt, post);
+  }
+
+  /// 2.3's port.post(x): lock mu; if closed: unlock, return false; append x; pending = true;
+  /// wake->notify(); unlock; return true. One action: one critical section.
+  bool port_post(int hid, int tgt, const post_t &post) {
     auto &h = homes.at(std::size_t(tgt));
     if (h.closed)
-      return; // dropped: a closed port refuses posts (2.3)
+      return false; // dropped: a closed port refuses posts (2.3)
     if (h.destroyed)
       fail("port-race", "H" + std::to_string(hid) + " posts to H" + std::to_string(tgt) +
                             " after its scheduler was destroyed with the port open");
     h.port.push_back(post);
+    return true;
   }
 
   void op_block(int hid, int pid) {
@@ -3494,6 +3706,8 @@ private:
       }
     }
     if (f.enter && p.lock_ticket) {
+      // the defensive path (5.4): withdraw the ticket and deliver the cancel's notes; then the
+      // resume, which releases a grant the cancel found (defensive_resume)
       soft.push_back({"defensive-path", "release_lock_frame withdrew a ticket still pending"});
       std::uint64_t tid = *p.lock_ticket;
       spec_notes N2;
@@ -3775,11 +3989,40 @@ private:
   }
 
   void a_destroy(int hid) {
-    // 5.7: ~lock_home first closes the port; detach_home is a later action of the same thread
+    // 5.7: ~lock_home first closes the port under port.mu; detach_home is a later action of the
+    // same thread, so other homes may act (and post) in between
     homes.at(std::size_t(hid)).closed = true;
     pending_op d;
     d.k = pk::detach;
     push_front(hid, {d});
+  }
+
+  void a_wraise(int pid) {
+    // the lock_enter frame of a parked waiter unwinds with its ticket still set (5.4's defensive
+    // path; 5.3's unreachable "woken without a grant" is one way): the process runs again, its
+    // wait left (its deadline leaves the heap), and the frame's unwind withdraws the ticket
+    auto &p = procs.at(pid);
+    if (p.status != pstatus::parked || p.frames.empty() || !p.frames.back().enter)
+      fail("model", "raise into p" + std::to_string(pid) + ", which is not parked on a lock");
+    p.status = pstatus::run;
+    p.lock_waiting = false;
+    p.lock_deadline = false;
+    a_finish(pid);
+  }
+
+  void a_attach(int hid) {
+    // 4.4 after other homes' processes lock: lending may become true (relevels, delivered by the
+    // attaching home as any other notes)
+    auto &h = homes.at(std::size_t(hid));
+    spec_notes N;
+    auto b = snap();
+    home_id id = M.attach_home(h.prio, h.table_port, h.progress, N);
+    transitions("attach_home", b);
+    if (id != home_id(hid))
+      fail("model", "attach_home gave H" + std::to_string(id) + " to the late home of index " +
+                        std::to_string(hid));
+    homes.at(std::size_t(hid)).attached = true;
+    push_front(hid, dlv_ops(N));
   }
 };
 
@@ -4133,6 +4376,20 @@ int regular_steps() {
 }
 int stress_bound() { return env_int("CVC_LOCKS_MODEL_BOUND", 4); }
 int stress_steps() { return env_int("CVC_LOCKS_MODEL_STEPS", 200000); }
+/// The L3 configurations' bounds (locks plan L3.4, by L1 section 3's rule): the regular suite
+/// runs each at the bound its lane allows, LocksModelStress every one at 3 (CVC_LOCKS_MODEL_BOUND
+/// overrides both: 4 and 5 in locks-deep.yml). Measured in L3.4 (tools/locks_model/README.md):
+/// at bound 3 a Debug lane with coverage takes about 30 times this test's Release time, so only
+/// 'attach', 'splitpost' and 'splitpost2' finish within 60 s there; in Release every one but
+/// 'wide' (129 s) does. Sanitizer lanes run bound 2.
+int homes_regular_bound(const std::string &name) {
+  if (sanitizer_lane())
+    return env_int("CVC_LOCKS_MODEL_BOUND", 2);
+  const bool three =
+      kRelease ? name != "wide" : name == "attach" || name == "splitpost" || name == "splitpost2";
+  return env_int("CVC_LOCKS_MODEL_BOUND", three ? 3 : 2);
+}
+int homes_stress_bound() { return env_int("CVC_LOCKS_MODEL_BOUND", 3); }
 
 const std::string kA = "a", kAB = "a.b", kAC = "a.c", kB = "b";
 
@@ -4204,8 +4461,14 @@ config noinh1_config() {
   return c;
 }
 
-/// explore.py's 'core' (L3's: two homes, one of them priority_rr), for the measurement test's
-/// cross-check of the parts 'l1' never runs: posts between homes, inheritance and relevels.
+// -- phase L3 (locks plan L3.4): explore.py's configurations of two and three homes ------------
+// Each is explore.py's exactly (its homes 1, 2, 3 are 0, 1, 2 here), over the real table, with
+// the implementation's pinned key cache; with cfg.pin off and on the oracle alone each has
+// explore.py's state counts (PortMatchesPythonStateCounts). Coalescing is on only in 'coalesce',
+// as explore.py sets it (G-39); CVC_LOCKS_MODEL_COALESCE=1 turns it on in every one (the '+c'
+// variants of locks-deep.yml).
+
+/// explore.py's 'core': multi-key requests and nesting, a priority_rr and a round_robin home.
 config core_config() {
   config c;
   c.name = "core";
@@ -4216,10 +4479,178 @@ config core_config() {
   c.kinds = {rkind::wait_dl};
   c.kills = {true};
   c.req_per_proc = 2;
-  c.pin = false;
-  c.real = false;
+  c.real = use_real();
   return c;
 }
+
+/// explore.py's ALL_REQ: the 13 request shapes over a, a.b, a.c and b.
+std::vector<std::pair<key_list, lock_mode>> all_req13() {
+  return {{{kA}, S},      {{kA}, X},      {{kAB}, S},   {{kAB}, X},      {{kAC}, S},
+          {{kAC}, X},     {{kB}, S},      {{kB}, X},    {{kAB, kAC}, S}, {{kAB, kAC}, X},
+          {{kAB, kB}, X}, {{kAC, kB}, S}, {{kA, kB}, X}};
+}
+
+/// The parts every L3 configuration shares: waits with deadlines, kills with abandon, two
+/// requests per process.
+config homes_base(const char *name, std::vector<bool> homes, std::vector<proc_cfg> procs,
+                  std::vector<std::pair<key_list, lock_mode>> requests) {
+  config c;
+  c.name = name;
+  c.homes = std::move(homes);
+  c.procs = std::move(procs);
+  c.requests = std::move(requests);
+  c.kinds = {rkind::wait_dl};
+  c.kills = {true};
+  c.req_per_proc = 2;
+  c.real = use_real();
+  return c;
+}
+
+const std::vector<std::pair<key_list, lock_mode>> kPrioReqs = {
+    {{kA}, X}, {{kAB}, X}, {{kAC}, S}, {{kB}, X}, {{kAB, kB}, X}};
+const std::vector<std::pair<key_list, lock_mode>> kFiveReqs = {
+    {{kA}, X}, {{kAB}, S}, {{kAC}, X}, {{kB}, X}, {{kAB, kB}, X}};
+
+/// explore.py's configurations by name (and 'l1', 'l1x', 'l2', 'noinh1'); a '+c' suffix turns
+/// coalescing on (the variants of locks-deep.yml).
+config config_named(const std::string &full) {
+  const bool plus_c = full.size() > 2 && full.compare(full.size() - 2, 2, "+c") == 0;
+  const std::string name = plus_c ? full.substr(0, full.size() - 2) : full;
+  config c;
+  if (name == "core") {
+    c = core_config();
+  } else if (name == "wide") {
+    // the full request set, one request per process, no nesting, no kills
+    c = homes_base("wide", {true, true}, {{0, 1, "o1", 0}, {1, 2, "o1", 1}, {1, 3, "o2", -1}},
+                   all_req13());
+    c.kills = {};
+    c.req_per_proc = 1;
+    c.max_depth = 1;
+  } else if (name == "handlers") {
+    // signals and handlers, timeouts, :if-available, terminate
+    c = homes_base("handlers", {true, true}, {{0, 1, "o1", 0}, {1, 2, "o1", 1}, {0, 3, "o2", -1}},
+                   {{{kA}, X}, {{kAB}, S}, {{kAC}, X}, {{kB}, X}});
+    c.kinds = {rkind::wait_dl, rkind::ifavail};
+    c.kills = {true, false};
+    c.signals = 1;
+    c.max_hdepth = 1;
+  } else if (name == "priority") {
+    // priorities and inheritance under priority_rr on both homes
+    c = homes_base("priority", {true, true}, {{0, 1, "o1", 0}, {1, 2, "o1", 2}, {0, 3, "o2", -2}},
+                   kPrioReqs);
+    c.prio_values = {-2, -1, 0, 1, 2};
+    c.prio_changes = 1;
+  } else if (name == "destroy") {
+    // a scheduler destroyed with holders and waiters; a priority and a round-robin home
+    c = homes_base("destroy", {true, false}, {{0, 1, "o1", 0}, {1, 2, "o1", 1}, {0, 3, "o2", -2}},
+                   {{{kA}, X}, {{kAB}, S}, {{kAC}, X}, {{kB}, X}});
+    c.destroy = true;
+    c.cache = {1};
+  } else if (name == "coalesce") {
+    // priorities with relevel coalescing (4.3)
+    c = homes_base("coalesce", {true, true}, {{0, 1, "o1", 0}, {1, 2, "o1", 2}, {0, 3, "o2", -2}},
+                   kPrioReqs);
+    c.prio_values = {-2, 0, 2};
+    c.prio_changes = 1;
+    c.coalesce = true;
+    c.destroy = true;
+  } else if (name == "attach") {
+    // a priority home attached after a round-robin home's processes lock (lending false ->
+    // true), then destroyed (true -> false)
+    c = homes_base("attach", {false}, {{0, 1, "o1", 0}, {1, 2, "o1", -2}, {0, 3, "o2", 1}},
+                   kFiveReqs);
+    c.late_homes = {true};
+    c.destroy = true;
+    c.cache = {1};
+  } else if (name == "noinh") {
+    // M.options.inheritance false, priorities changing
+    c = homes_base("noinh", {true, true}, {{0, 1, "o1", 0}, {1, 2, "o1", 2}, {0, 3, "o2", -2}},
+                   kPrioReqs);
+    c.prio_values = {-2, 0, 2};
+    c.prio_changes = 1;
+    c.inheritance = false;
+    c.destroy = true;
+  } else if (name == "foreign") {
+    // owner checks (I12): release and cancel naming another process's hold or ticket
+    c = homes_base("foreign", {true, false}, {{0, 1, "o1", 0}, {0, 2, "o1", 1}, {1, 3, "o2", -1}},
+                   kFiveReqs);
+    c.foreign = true;
+  } else if (name == "splitpost" || name == "splitpost_mut") {
+    // the post as a separate action of the posting thread after the operation (4.14), one
+    // critical section under the port's mutex (2.3); ~lock_home closes the port before
+    // detach_home (5.7). 'splitpost_mut' tests closed outside the mutex: port-race
+    c = homes_base(name == "splitpost" ? "splitpost" : "splitpost_mut", {true, true},
+                   {{0, 1, "o1", 0}, {1, 2, "o1", 1}}, {{{kA}, X}});
+    c.kinds = {rkind::wait};
+    c.kills = {};
+    c.destroy = true;
+    c.req_per_proc = 1;
+    c.max_depth = 1;
+    c.split_post = true;
+    if (name == "splitpost_mut")
+      c.mutations = dt::lock_table::closed_outside_mu;
+  } else if (name == "splitpost2") {
+    // the split post with more requests, kills, a timeout and a key cache
+    c = homes_base("splitpost2", {true, false},
+                   {{0, 1, "o1", 0}, {1, 2, "o1", 1}, {1, 3, "o2", -1}},
+                   {{{kA}, X}, {{kAB}, S}, {{kB}, X}});
+    c.destroy = true;
+    c.split_post = true;
+    c.cache = {1};
+  } else if (name == "cache") {
+    // key-cache references (2.4, 4.15) under every request shape, kills and destruction
+    c = homes_base("cache", {true, false}, {{0, 1, "o1", 0}, {0, 2, "o1", 1}, {1, 3, "o2", -1}},
+                   {{{kA}, X}, {{kAB}, S}, {{kAC}, X}, {{kB}, X}, {{kAB, kB}, X}, {{kAB, kAC}, S}});
+    c.kinds = {rkind::wait_dl, rkind::ifavail};
+    c.destroy = true;
+    c.cache = {2};
+  } else if (name == "two2") {
+    // two homes of two processes each, one request each, a cache of 3 entries
+    c = homes_base("two2", {true, false},
+                   {{0, 1, "o1", 0}, {0, 2, "o2", 1}, {1, 3, "o1", -1}, {1, 4, "o2", 2}},
+                   kFiveReqs);
+    c.destroy = true;
+    c.req_per_proc = 1;
+    c.cache = {3};
+  } else if (name == "grantseeds") {
+    // 4.3's seeds without the granted processes, an equivalent reading: must pass
+    c = homes_base("grantseeds", {true, true}, {{0, 1, "o1", 0}, {1, 2, "o1", 2}, {0, 3, "o2", -2}},
+                   kPrioReqs);
+    c.prio_values = {-2, 0, 2};
+    c.prio_changes = 1;
+    c.grantseeds = true;
+  } else if (name == "three") {
+    // three homes, one process each
+    c = homes_base("three", {true, true, false},
+                   {{0, 1, "o1", 0}, {1, 2, "o1", 1}, {2, 3, "o2", -2}},
+                   {{{kA}, X}, {{kAB}, S}, {{kAB}, X}, {{kAC}, X}, {{kB}, X}, {{kAB, kB}, X}});
+    c.destroy = true;
+    c.cache = {1};
+  } else if (name == "l1") {
+    c = l1_config();
+  } else if (name == "l1x") {
+    c = l1x_config();
+  } else if (name == "l2") {
+    c = l2_config();
+  } else if (name == "noinh1") {
+    c = noinh1_config();
+  } else {
+    fail("model", "no configuration named " + full);
+  }
+  if (plus_c && !c.coalesce) {
+    c.coalesce = true;
+    c.name += "+c";
+  }
+  return c;
+}
+
+/// explore.py's two- and three-home configurations, in its order.
+const std::vector<std::string> kHomesConfigs = {
+    "core",    "wide",      "handlers",   "priority", "destroy", "coalesce",   "attach", "noinh",
+    "foreign", "splitpost", "splitpost2", "cache",    "two2",    "grantseeds", "three"};
+
+/// CVC_LOCKS_MODEL_COALESCE=1: the '+c' variant of each (coalescing on, the production setting).
+bool coalesce_variants() { return env_int("CVC_LOCKS_MODEL_COALESCE", 0) == 1; }
 
 // =============================================================================================
 // 7. Scenarios (scenarios.py), on one home unless they need posts between two homes
@@ -4236,8 +4667,10 @@ thread_local mutation_side g_mutation_side = mutation_side::both;
 /// scenarios.py's mk: every request kind, nesting 3 (2 in a handler), two signals, kills and
 /// terminations, priorities, five requests per process.
 world mk(std::vector<bool> homes, std::vector<proc_cfg> procs, std::uint32_t mut = 0,
-         std::uint32_t wmut = 0, int cache = 0, bool cache_clear = false, bool coalesce = false) {
+         std::uint32_t wmut = 0, int cache = 0, bool cache_clear = false, bool coalesce = false,
+         bool split_post = false) {
   config c;
+  c.split_post = split_post;
   c.name = "scenario";
   c.homes = std::move(homes);
   c.procs = std::move(procs);
@@ -4260,6 +4693,27 @@ world mk(std::vector<bool> homes, std::vector<proc_cfg> procs, std::uint32_t mut
   c.one_home = c.homes.size() == 1;
   c.real = use_real() && g_mutation_side != mutation_side::oracle;
   return world(std::move(c));
+}
+
+/// The scenarios' layout: false merges scenarios.py's homes into one home (phases L1 and L2; its
+/// prio as the scenario says), true keeps them as written, two priority_rr homes (protocol 7's
+/// L3 layout, L3.4), the processes on the homes scenarios.py puts them on.
+thread_local bool g_two_homes = false;
+struct two_homes_scope {
+  two_homes_scope() { g_two_homes = true; }
+  ~two_homes_scope() { g_two_homes = false; }
+  two_homes_scope(const two_homes_scope &) = delete;
+  two_homes_scope &operator=(const two_homes_scope &) = delete;
+};
+
+/// mk in the scenarios' layout: `prio` is the one home's when the homes are merged.
+world mks(bool prio, std::vector<proc_cfg> procs, std::uint32_t mut = 0, std::uint32_t wmut = 0,
+          int cache = 0, bool cache_clear = false, bool coalesce = false) {
+  if (g_two_homes)
+    return mk({true, true}, std::move(procs), mut, wmut, cache, cache_clear, coalesce);
+  for (auto &p : procs)
+    p.hid = 0;
+  return mk({prio}, std::move(procs), mut, wmut, cache, cache_clear, coalesce);
 }
 
 action R(world &w, int pid, key_list keys, lock_mode mode, rkind kind = rkind::wait) {
@@ -4306,7 +4760,7 @@ const frame &top(world &w, int pid) { return w.procs.at(pid).frames.back(); }
 
 std::string scenario_lk27(std::uint32_t mut = 0) {
   // P holds S a.x; Q's X on a queues; P nests X a.y: granted at once (the conversion rule)
-  auto w = mk({false}, {{0, 1, "o", 0}, {0, 2, "o", 0}}, mut);
+  auto w = mks(false, {{0, 1, "o", 0}, {1, 2, "o", 0}}, mut);
   run(w, {R(w, 1, {"a.x"}, S), R(w, 2, {"a"}, X), R(w, 1, {"a.y"}, X)});
   auto &p1 = w.procs.at(1);
   if (mut & dt::lock_table::no_exemption) {
@@ -4326,7 +4780,7 @@ std::string scenario_lk27(std::uint32_t mut = 0) {
 
 std::string scenario_lk25(std::uint32_t mut = 0) {
   // H holds S k; W queues X k; R queues S k; W times out: R granted at once
-  auto w = mk({false}, {{0, 1, "o", 0}, {0, 2, "o", 0}, {0, 3, "o", 0}}, mut);
+  auto w = mks(false, {{0, 1, "o", 0}, {1, 2, "o", 0}, {0, 3, "o", 0}}, mut);
   run(w, {R(w, 1, {"k"}, S), R(w, 2, {"k"}, X, rkind::wait_dl), R(w, 3, {"k"}, S)});
   MODEL_ASSERT(w.procs.at(3).status == pstatus::parked, "");
   run(w, {act(ak::deadline, 2)});
@@ -4338,7 +4792,7 @@ std::string scenario_lk25(std::uint32_t mut = 0) {
 
 std::string scenario_lk21() {
   auto w =
-      mk({false}, {{0, 1, "o", 0}, {0, 2, "o", 0}, {0, 3, "o", 0}, {0, 4, "o", 0}, {0, 5, "o", 0}});
+      mks(false, {{0, 1, "o", 0}, {1, 2, "o", 0}, {0, 3, "o", 0}, {1, 4, "o", 0}, {0, 5, "o", 0}});
   run(w, {R(w, 1, {"a"}, X), R(w, 2, {"a"}, S), R(w, 3, {"a"}, S), R(w, 4, {"a"}, X),
           R(w, 5, {"a"}, S)});
   run(w, {act(ak::finish, 1)});
@@ -4354,7 +4808,7 @@ std::string scenario_lk21() {
 
 std::string scenario_ld10() {
   // P holds S a.x; R queues X a; Q queues S a.q; P requests X a.q.w: DeadlockError (P, Q, R)
-  auto w = mk({false}, {{0, 1, "o", 0}, {0, 2, "o", 0}, {0, 3, "o", 0}});
+  auto w = mks(false, {{0, 1, "o", 0}, {1, 2, "o", 0}, {0, 3, "o", 0}});
   run(w, {R(w, 1, {"a.x"}, S), R(w, 2, {"a"}, X), R(w, 3, {"a.q"}, S), R(w, 1, {"a.q.w"}, X)});
   const frame &f = top(w, 1);
   MODEL_ASSERT(f.outcome.k == outcome_t::deadlock, outcome_str(f.outcome));
@@ -4365,7 +4819,7 @@ std::string scenario_ld10() {
 
 std::string scenario_ld9() {
   // H holds X a.b; V queues S a; W holds X z and queues X a.c; H requests X z: DeadlockError
-  auto w = mk({false}, {{0, 1, "o", 0}, {0, 2, "o", 0}, {0, 3, "o", 0}});
+  auto w = mks(false, {{0, 1, "o", 0}, {1, 2, "o", 0}, {0, 3, "o", 0}});
   run(w, {R(w, 1, {"a.b"}, X), R(w, 2, {"a"}, S), R(w, 3, {"z"}, X), R(w, 3, {"a.c"}, X),
           R(w, 1, {"z"}, X)});
   const frame &f = top(w, 1);
@@ -4377,7 +4831,7 @@ std::string scenario_ld9() {
 
 std::string scenario_lx4() {
   // grant, then a signal handler that raises before the lock_enter step (LX-4)
-  auto w = mk({false}, {{0, 1, "o", 0}, {0, 2, "o", 0}, {0, 3, "o", 0}});
+  auto w = mks(false, {{0, 1, "o", 0}, {1, 2, "o", 0}, {0, 3, "o", 0}});
   run(w, {R(w, 1, {"k"}, X), R(w, 2, {"k"}, X)});
   run(w, {act(ak::finish, 1)});
   run(w, {act(ak::signal, 2), R(w, 2, {"k"}, S)}); // in the handler: refused ("handler")
@@ -4388,9 +4842,10 @@ std::string scenario_lx4() {
   return "ok";
 }
 
-/// Two homes, posts between them (LX-10, LX-11): one_home off on both sides.
+/// Two homes, posts between them (LX-10, LX-11): one_home off on both sides; round_robin homes
+/// (phase L1), or scenarios.py's two priority_rr homes in the L3 layout.
 world mk2(std::vector<proc_cfg> procs, std::uint32_t wmut = 0) {
-  return mk({false, false}, std::move(procs), 0, wmut);
+  return mk({g_two_homes, g_two_homes}, std::move(procs), 0, wmut);
 }
 std::string two_home_result(const world &w) {
   return w.cfg.real_dropped ? "ok, on the oracle alone: the table refuses a second home even with "
@@ -4545,10 +5000,10 @@ std::string scenario_one_home_refusal() {
   o.real = use_real();
   lockstep M(o);
   spec_notes N;
-  MODEL_ASSERT(M.attach_home(false, N) == 0, "");
+  MODEL_ASSERT(M.attach_home(false, nullptr, new_cell(), N) == 0, "");
   MODEL_ASSERT(M.try_acquire(lock_pid{0, 1}, "o", 0, {"a"}, X, {}, {}).has_value(), "");
   try {
-    M.attach_home(false, N);
+    M.attach_home(false, nullptr, new_cell(), N);
   } catch (const lock_violation &v) {
     MODEL_ASSERT(v.invariant() == "require", v.what());
     return std::string("refused: ") + v.what();
@@ -4564,7 +5019,7 @@ std::string scenario_ref_nodes() {
   o.real = use_real();
   lockstep M(o);
   spec_notes N;
-  M.attach_home(false, N);
+  M.attach_home(false, nullptr, new_cell(), N);
   M.ref_nodes(0, {"a.b"});
   MODEL_ASSERT(M.spec.cache_refs.at(0).at("a.b") == 1 && M.spec.expected_trie_nodes() == 3, "");
   M.unref_nodes(0, {"a.b"});
@@ -4607,7 +5062,7 @@ std::string scenario_l2_one_home() {
 std::string scenario_pi9() {
   // PI-9: H (10) holds X a.b; V (10) queues X a; W (-10) queues S a.c: H and V boosted to -10, H
   // through W's waiter edge to V; V granted within H's section, W after V's
-  auto w = mk({true}, {{0, 1, "o", 10}, {0, 2, "o", 10}, {0, 3, "o", -10}});
+  auto w = mks(true, {{0, 1, "o", 10}, {1, 2, "o", 10}, {0, 3, "o", -10}});
   run(w, {R(w, 1, {"a.b"}, X), R(w, 2, {"a"}, X), R(w, 3, {"a.c"}, S)});
   MODEL_ASSERT(inh_of(w, 1) == -10 && inh_of(w, 2) == -10,
                inh_str(inh_of(w, 1)) + " " + inh_str(inh_of(w, 2)));
@@ -4620,7 +5075,7 @@ std::string scenario_pi9() {
 std::string scenario_pi11(std::uint32_t mut = 0) {
   // PI-11: P (5) holds X a.b, R (5) holds S a.c; P queues X a; W (-10) queues X a, then times
   // out: P and R boosted to -10, then both back to 5
-  auto w = mk({true}, {{0, 1, "o", 5}, {0, 2, "o", 5}, {0, 3, "o", -10}}, mut);
+  auto w = mks(true, {{0, 1, "o", 5}, {1, 2, "o", 5}, {0, 3, "o", -10}}, mut);
   run(w, {R(w, 1, {"a.b"}, X), R(w, 2, {"a.c"}, S), R(w, 1, {"a"}, X),
           R(w, 3, {"a"}, X, rkind::wait_dl)});
   MODEL_ASSERT(inh_of(w, 1) == -10 && inh_of(w, 2) == -10,
@@ -4637,9 +5092,9 @@ std::string scenario_chain_cap8() {
   // not p10 (9 edges), which inherits 3 from p2..p9; p1's kill withdraws its share down the chain
   const int n = 10;
   std::vector<proc_cfg> procs;
-  for (int i = 1; i <= n; ++i)
-    procs.push_back({0, i, "o", i == 1 ? -5 : 3});
-  auto w = mk({true}, procs);
+  for (int i = 1; i <= n; ++i) // scenarios.py alternates the homes; p1 is on the second
+    procs.push_back({i % 2, i, "o", i == 1 ? -5 : 3});
+  auto w = mks(true, procs);
   for (int i = n; i >= 1; --i)
     run(w, {R(w, i, {"k" + std::to_string(i)}, X)});
   for (int i = n - 1; i >= 1; --i)
@@ -4665,7 +5120,7 @@ std::string scenario_chain_cap8() {
 std::string scenario_coalesce(std::uint32_t mut = 0) {
   // P1 (5) holds X a; P2 (-1) queues X a: P1 boosted by a relevel; P2 times out: P1's boost must
   // go, through a second relevel that coalescing must not swallow
-  auto w = mk({true}, {{0, 1, "o", 5}, {0, 2, "o", -1}}, mut, 0, 0, false, true);
+  auto w = mks(true, {{0, 1, "o", 5}, {1, 2, "o", -1}}, mut, 0, 0, false, true);
   run(w, {R(w, 1, {"a"}, X), R(w, 2, {"a"}, X, rkind::wait_dl)});
   MODEL_ASSERT(inh_of(w, 1) == -1, inh_str(inh_of(w, 1)));
   run(w, {act(ak::deadline, 2)});
@@ -4677,7 +5132,7 @@ std::string scenario_coalesce(std::uint32_t mut = 0) {
 std::string scenario_impl_note(std::uint32_t mut = 0) {
   // Q holds X a; P (10) queues X a; W (-5) queues X a, then times out: P's inh changes, and P is
   // downstream of the seed W only in the graph before the cancel
-  auto w = mk({true}, {{0, 1, "o", 0}, {0, 2, "o", 10}, {0, 3, "o", -5}}, mut);
+  auto w = mks(true, {{0, 1, "o", 0}, {1, 2, "o", 10}, {0, 3, "o", -5}}, mut);
   run(w, {R(w, 1, {"a"}, X), R(w, 2, {"a"}, X), R(w, 3, {"a"}, X, rkind::wait_dl)});
   MODEL_ASSERT(inh_of(w, 2) == -5, inh_str(inh_of(w, 2)));
   run(w, {act(ak::deadline, 3)});
@@ -4689,7 +5144,7 @@ std::string scenario_impl_note(std::uint32_t mut = 0) {
 std::string scenario_set_base_l2(std::uint32_t wmut = 0) {
   // I8's base clause on a priority_rr home: a holder's set-priority reaches its rec (5.8), and the
   // waiter's boost of it stays
-  auto w = mk({true}, {{0, 1, "o", 5}, {0, 2, "o", 0}}, 0, wmut);
+  auto w = mks(true, {{0, 1, "o", 5}, {1, 2, "o", 0}}, 0, wmut);
   run(w, {R(w, 1, {"a"}, X), R(w, 2, {"a"}, X), act(ak::prio, 1, -2)});
   MODEL_ASSERT(w.M.spec.recs.at(lock_pid{0, 1}).base == -2, "");
   MODEL_ASSERT(inh_of(w, 1) == 0, inh_str(inh_of(w, 1)));
@@ -4697,8 +5152,148 @@ std::string scenario_set_base_l2(std::uint32_t wmut = 0) {
   return "ok";
 }
 
+// -- phase L3: scenarios.py's scenarios whose assertions name the homes, as written (two
+// priority_rr homes; its homes 1 and 2 are 0 and 1 here) ----------------------------------------
+
+std::string scenario_cache_detach2(std::uint32_t mut = 0, std::uint32_t wmut = 0) {
+  // a home's key-cache references keep its nodes while it is attached, and detach_home drops
+  // them (2.4, 4.11): H0's keys leave the trie, H1's stay
+  auto w = mk({true, true}, {{0, 1, "o", 0}, {1, 2, "o", 0}}, mut, wmut, 2);
+  run(w, {R(w, 1, {"a.b"}, X), act(ak::finish, 1), R(w, 2, {"b"}, S), act(ak::finish, 2)});
+  MODEL_ASSERT(refs_of(w, 0, "a.b") == 1 && w.M.spec.cache_refs.at(0).size() == 1, "");
+  run(w, {act(ak::destroy, 0)});
+  MODEL_ASSERT(!w.M.spec.cache_refs.count(0), "");
+  MODEL_ASSERT(refs_of(w, 1, "b") == 1 && w.M.spec.expected_trie_nodes() == 2,
+               "H1 still caches b, and nothing else is left");
+  w.drain();
+  return "ok";
+}
+
+std::string scenario_cache_clear2(std::uint32_t mut = 0) {
+  // attach makes an empty entry per home; a host's clear (unref_nodes) empties it and frees the
+  // nodes, and the entry stays until detach_home deletes it (4.4, 4.15, I9)
+  auto w = mk({true, true}, {{0, 1, "o", 0}, {1, 2, "o", 0}}, mut, 0, 2, true);
+  MODEL_ASSERT(w.M.spec.cache_refs.size() == 2 && w.M.spec.cache_refs.at(0).empty() &&
+                   w.M.spec.cache_refs.at(1).empty(),
+               "");
+  run(w, {R(w, 1, {"a.b"}, X), act(ak::finish, 1), R(w, 1, {"b"}, S), act(ak::finish, 1)});
+  MODEL_ASSERT(refs_of(w, 0, "a.b") == 1 && refs_of(w, 0, "b") == 1, "");
+  run(w, {act(ak::cclear, 0)});
+  MODEL_ASSERT(w.M.spec.cache_refs.size() == 2 && w.M.spec.cache_refs.at(0).empty() &&
+                   w.M.spec.expected_trie_nodes() == 1,
+               "");
+  run(w, {R(w, 1, {"a"}, X), act(ak::finish, 1)}); // the entry takes references again
+  MODEL_ASSERT(refs_of(w, 0, "a") == 1 && w.M.spec.cache_refs.at(0).size() == 1, "");
+  run(w, {act(ak::destroy, 0)});
+  MODEL_ASSERT(w.M.spec.cache_refs.size() == 1 && w.M.spec.cache_refs.count(1), "");
+  w.drain();
+  return "ok";
+}
+
+std::string scenario_cycle_other_home_pid() {
+  // 4.6: a cycle across two homes, one owner: the other home's pids show as nil
+  auto w = mk({true, true}, {{0, 1, "o", 0}, {1, 2, "o", 0}, {0, 3, "o", 0}});
+  run(w, {R(w, 1, {"a"}, X), R(w, 3, {"c"}, X), R(w, 2, {"b"}, X), R(w, 1, {"b"}, X),
+          R(w, 3, {"a"}, X), R(w, 2, {"c"}, X)});
+  const frame &f = top(w, 2);
+  MODEL_ASSERT(f.outcome.k == outcome_t::deadlock, outcome_str(f.outcome));
+  std::vector<std::optional<int>> pids;
+  for (const auto &e : f.outcome.cycle)
+    pids.push_back(e.pid);
+  MODEL_ASSERT(!pids.empty() && pids[0] == 2 &&
+                   std::find(pids.begin(), pids.end(), std::nullopt) != pids.end(),
+               outcome_str(f.outcome)); // H0's p1 and p3 are nil for H1's p2
+  std::string r = outcome_str(f.outcome);
+  w.drain();
+  return "DeadlockError " + r;
+}
+
+std::string scenario_query_visibility2(std::uint32_t mut = 0) {
+  // 4.13: lock-query counts every hold, shows pids only for the viewer's home and owner; one
+  // process may hold two X holds with the same key, and the generation shown is the latest X
+  // grant's (the world checks it at quiescence)
+  auto w = mk({true, true}, {{0, 1, "o", 0}, {1, 2, "o", 0}, {0, 3, "p", 0}}, mut);
+  run(w, {R(w, 1, {"a.b"}, X), R(w, 1, {"a.b", "b"}, X), R(w, 2, {"a"}, X), R(w, 3, {"b"}, S)});
+  auto q1 = w.M.query("", 0, "o");
+  auto q2 = w.M.query("", 1, "o");
+  auto q3 = w.M.query("", 0, "p");
+  const lock_info *ab = nullptr;
+  for (const auto &e : q1.held)
+    if (e.key == "a.b")
+      ab = &e;
+  MODEL_ASSERT(ab && ab->count == 2 && ab->pids == (std::vector<int>{1, 1}) && ab->generation == 2u,
+               fmt_query(q1, false));
+  for (const auto &e : q2.held)
+    MODEL_ASSERT(e.pids.empty(), fmt_query(q2, false));
+  MODEL_ASSERT(!q2.waiting.empty() && q2.waiting[0].pid == 2, fmt_query(q2, false));
+  MODEL_ASSERT(q3.waiting.size() == 2 && !q3.waiting[0].pid && q3.waiting[1].pid == 3,
+               fmt_query(q3, false));
+  w.drain();
+  return "ok: two X holds of p1 with a.b (generations 1 and 2)";
+}
+
+std::string scenario_splitpost(std::uint32_t mut = 0) {
+  // 2.3, 5.7: H1 captures a relevel for H0 under M.mu; H0 is destroyed (its port closed under
+  // port.mu, then detach_home); then H1's post runs: it sees closed and is dropped (no port-race)
+  auto w = mk({true, true}, {{0, 1, "o", 0}, {1, 2, "o", -1}}, mut, 0, 0, false, false, true);
+  run(w, {R(w, 1, {"a"}, X)});
+  step(w, R(w, 2, {"a"}, X));
+  step(w, act(ak::hstep, 1)); // block: N = [relevel p1 -> H0]
+  MODEL_ASSERT(!w.homes[1].pending.empty() && w.homes[1].pending.front().k == pk::dlv, "");
+  step(w, act(ak::hstep, 1)); // dlv: the post is now in flight (dlv_append)
+  MODEL_ASSERT(!w.homes[1].pending.empty() && w.homes[1].pending.front().k == pk::dlv_append, "");
+  step(w, act(ak::destroy, 0)); // ~lock_home: the port closed under port.mu
+  while (!w.homes[1].pending.empty())
+    step(w, act(ak::hstep, 1)); // the post in flight sees closed: dropped
+  settle(w);
+  MODEL_ASSERT(w.procs.at(2).status == pstatus::run, "p2 granted when H0's holder ended");
+  w.drain();
+  return "ok";
+}
+
+std::string scenario_sinks_progress() {
+  // 4.13: blocking_sinks returns (Pid, time) pairs, the time loaded from the sink's home's
+  // progress cell, which the home shares with the manager (a logical clock of its steps here)
+  auto w = mk({true, true}, {{0, 1, "o", 0}, {1, 2, "o", 0}, {0, 3, "o", 0}});
+  run(w, {R(w, 1, {"a"}, X), R(w, 3, {"b"}, X), act(ak::finish, 3), R(w, 2, {"a"}, X)});
+  auto s = w.M.blocking_sinks(lock_pid{1, 2});
+  MODEL_ASSERT(fmt_sinks(s) == "0:1:3" && w.homes[0].progress->load() == 3, fmt_sinks(s));
+  run(w, {R(w, 3, {"c"}, S)}); // H0 makes progress: the cell, not a copy
+  s = w.M.blocking_sinks(lock_pid{1, 2});
+  MODEL_ASSERT(fmt_sinks(s) == "0:1:4", fmt_sinks(s));
+  w.drain();
+  return "ok " + fmt_sinks(s);
+}
+
+std::string scenario_unwound_wait_granted(std::uint32_t wmut = 0) {
+  // 5.4's defensive path across homes (L3 review fix): p2's ticket is granted by H0's release,
+  // its wake still in H1's port, when its lock_enter frame unwinds. The cancel finds the ticket
+  // granted; the resume returns the grant, which is released, so p3 is granted next and the late
+  // wake is ignored
+  auto w = mk({true, true}, {{0, 1, "o", 0}, {1, 2, "o", 0}, {0, 3, "o", 0}}, 0, wmut);
+  run(w, {R(w, 1, {"k"}, X), R(w, 2, {"k"}, X), R(w, 3, {"k"}, X)});
+  step(w, act(ak::finish, 1)); // H0 releases k: p2 granted, its wake for H1's port
+  while (!w.homes[0].pending.empty())
+    step(w, act(ak::hstep, 0));
+  MODEL_ASSERT(!w.homes[1].port.empty() && w.procs.at(2).status == pstatus::parked,
+               "p2's wake should be in flight");
+  step(w, act(ak::wraise, 2)); // p2's lock_enter frame unwinds, its ticket still set
+  while (!w.homes[1].pending.empty())
+    step(w, act(ak::hstep, 1));
+  const auto &p2 = w.procs.at(2);
+  MODEL_ASSERT(p2.locks.empty() && !p2.lock_ticket && !w.M.spec.recs.count(lock_pid{1, 2}),
+               "p2 left with a hold or a ticket");
+  settle(w); // the late wake is ignored; p3's wake is applied
+  MODEL_ASSERT(w.procs.at(2).frames.empty() && w.procs.at(3).status == pstatus::run &&
+                   w.procs.at(3).locks.size() == 1,
+               "p3 not granted k");
+  w.drain();
+  return "ok";
+}
+
 // =============================================================================================
-// 8. Random runs (random_runs.py on one home: of prio false, phase L1, or prio true, phase L2)
+// 8. Random runs (random_runs.py: on one home of prio false, phase L1, or prio true, phase L2;
+//    over one to three homes, phase L3)
 // =============================================================================================
 
 const std::vector<std::string> kRandomKeys = {"a", "a.b", "a.c", "a.b.d", "b", "b.e", "c"};
@@ -4756,6 +5351,7 @@ double weight(ak k) {
   case ak::fcancel:
     return 0.15;
   case ak::cclear:
+  case ak::attach:
     return 0.05;
   case ak::cachecap:
     return 1;
@@ -4794,6 +5390,61 @@ config random_config(std::mt19937_64 &rnd, std::uint64_t seed, bool prio) {
   return c;
 }
 
+/// random_runs.py's make_world over one to three homes (phase L3; its group teardown is L4's and
+/// left out): every home priority_rr, or (variant 1) a mix with round_robin; some managers without
+/// inheritance; in 30% of the worlds of several homes the last one attached late; coalescing per
+/// seed (coalesce_of).
+config random_homes_config(std::mt19937_64 &rnd, std::uint64_t seed) {
+  auto randint = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rnd); };
+  auto random01 = [&] { return std::uniform_real_distribution<double>(0, 1)(rnd); };
+  int variant = int(seed % 3);
+  config c;
+  c.name = "random seed " + std::to_string(seed) + " (homes)";
+  const int nh = std::vector<int>{1, 2, 3, 3}[std::size_t(randint(0, 3))];
+  std::vector<bool> prios;
+  if (variant != 1) {
+    prios.assign(std::size_t(nh), true);
+  } else {
+    prios.push_back(nh > 1);
+    for (int h = 1; h < nh; ++h)
+      prios.push_back(random01() < 0.5);
+  }
+  c.homes = prios;
+  int np = variant < 2 ? randint(3, 8) : randint(10, 14);
+  for (int i = 0; i < np; ++i) {
+    int hid = randint(0, nh - 1);
+    c.procs.push_back({hid, i + 1, randint(0, 1) ? "o2" : "o1", randint(-2, 2)});
+  }
+  c.inheritance = random01() >= 0.15;
+  if (random01() < 0.3 && nh > 1) {
+    c.late_homes = {c.homes.back()};
+    c.homes.pop_back();
+  }
+  const bool l1 = nh == 1 && !prios[0];
+  c.cache = {randint(0, 3)};
+  c.requests = all_requests();
+  c.kinds = {rkind::wait, rkind::wait_dl, rkind::wait_dl, rkind::ifavail, rkind::t0};
+  c.max_depth = 3;
+  c.max_hdepth = 2;
+  c.signals = 1000000000;
+  c.kills = {true, false};
+  c.destroy = true;
+  if (!l1)
+    c.prio_values = {-2, -1, 0, 1, 2};
+  c.prio_changes = 1000000000;
+  c.req_per_proc = 1000000000;
+  c.coalesce = (seed / 3) % 2 == 1;
+  c.foreign = true;
+  c.cache_clear = true;
+  c.one_home = nh == 1;
+  c.real = use_real();
+  return c;
+}
+
+/// Which worlds the random runs make: one home of prio false (phase L1), of prio true (L2), or
+/// one to three homes (L3).
+enum class random_kind { l1, l2, homes };
+
 action pick(std::mt19937_64 &rnd, const std::vector<action> &acts, std::size_t nreq) {
   std::vector<double> ws;
   for (const auto &a : acts) {
@@ -4820,14 +5471,14 @@ struct random_failure {
 
 /// Episodes of up to 400 random steps from seeds seed0, seed0 + 1000003, ..., each checked after
 /// every step and ended by the fair drain, until `total` steps ran. The first failure stops it.
-/// `prio`: the one home applies priorities (phase L2) or not (phase L1).
-std::optional<random_failure> random_runs(std::uint64_t seed0, long total, bool prio,
+std::optional<random_failure> random_runs(std::uint64_t seed0, long total, random_kind kind,
                                           long *steps_out, long *episodes_out) {
   long steps = 0, eps = 0;
   std::uint64_t seed = seed0;
   while (steps < total) {
     std::mt19937_64 rnd(seed);
-    config cfg = random_config(rnd, seed, prio);
+    config cfg = kind == random_kind::homes ? random_homes_config(rnd, seed)
+                                            : random_config(rnd, seed, kind == random_kind::l2);
     std::vector<action> trace;
     bool draining = false;
     try {
@@ -4906,6 +5557,7 @@ std::size_t replay_trace(const std::filesystem::path &file, bool real) {
   if (!in)
     fail("trace", "cannot open " + file.string());
   std::optional<lockstep> M;
+  std::vector<cell_ptr> cells; // each home's progress cell, by home id (attach order)
   std::string line;
   int lineno = 0;
   std::size_t ops = 0;
@@ -4962,7 +5614,27 @@ std::size_t replay_trace(const std::filesystem::path &file, bool real) {
     try {
       if (op == "attach_home") {
         need(1);
-        got_result = std::to_string(M->attach_home(I(0) != 0, N));
+        auto cell = new_cell();
+        port_ptr port;
+        if (real)
+          port = std::make_shared<dt::lock_port>(nullptr);
+        home_id h = M->attach_home(I(0) != 0, port, cell, N);
+        if (h != cells.size())
+          fail("trace", where + "attach_home gave H" + std::to_string(h));
+        cells.push_back(cell);
+        got_result = std::to_string(h);
+      } else if (op == "blocking_sinks") {
+        // blocking_sinks HOME PID CELLS: CELLS the progress values the Python model's cells held,
+        // HOME:VALUE,... (protocol 4.13 loads them under M.mu)
+        need(3);
+        if (args[2] != "-")
+          for (const auto &hv : split(args[2], ',')) {
+            auto p = split(hv, ':');
+            if (p.size() != 2 || std::size_t(std::stoll(p[0])) >= cells.size())
+              fail("trace", where + "bad progress cell " + hv);
+            cells[std::size_t(std::stoll(p[0]))]->store(std::stoll(p[1]));
+          }
+        got_result = fmt_sinks(M->blocking_sinks(Pid(0)));
       } else if (op == "try_acquire" || op == "block") {
         need(8);
         auto keys = parse_keys_tok(args[5]), add = parse_keys_tok(args[6]),
@@ -5097,12 +5769,36 @@ void run_bounded(config cfg, int bound) {
   EXPECT_TRUE(r.violations.empty()) << report(cfg, r.violations);
 }
 
-void run_random(long total, bool prio) {
+/// An exploration that must report the violation `want` and no other (its drain's, `want(drain)`,
+/// included): stopped at the first state with a violation, which the BFS finds at the fewest
+/// events.
+void expect_explored_violation(const std::string &want, config cfg, int bound) {
+  explore_options eo;
+  eo.bound = bound;
+  eo.stop_on_violation = true;
+  explore_result r;
+  try {
+    r = explore(cfg, eo);
+  } catch (const not_built &e) {
+    GTEST_SKIP() << kStubSkip << " (" << e.what() << ")";
+  }
+  print_result("explored", cfg, bound, r);
+  ASSERT_FALSE(r.violations.empty()) << "no violation (wanted " << want << ")";
+  for (const auto &[name, f] : r.violations)
+    EXPECT_TRUE(name == want || name == want + "(drain)") << "wanted " << want << "\n"
+                                                          << report(cfg, r.violations);
+  std::printf("  caught as expected (%s):\n%s", want.c_str(), report(cfg, r.violations).c_str());
+}
+
+void run_random(long total, random_kind kind) {
   long steps = 0, eps = 0;
   auto t0 = std::chrono::steady_clock::now();
   std::optional<random_failure> f;
   try {
-    f = random_runs(prio ? 11 : 7, total, prio, &steps, &eps);
+    f = random_runs(kind == random_kind::homes ? 13
+                    : kind == random_kind::l2  ? 11
+                                               : 7,
+                    total, kind, &steps, &eps);
   } catch (const not_built &e) {
     GTEST_SKIP() << kStubSkip << " (" << e.what() << ")";
   }
@@ -5147,13 +5843,61 @@ TEST(LocksModelStress, L2Bound4) {
   run_bounded(l2_config(), stress_bound());
 }
 
+// Phase L3 (locks plan L3.4): explore.py's configurations of two and three homes, each in the
+// regular suite at its lane's bound and in LocksModelStress at 3 (CVC_LOCKS_MODEL_COALESCE=1 runs
+// the stress cases' '+c' variants, coalescing on).
+#define LT5_HOMES_CASES(Name, cfgname)                                                             \
+  TEST(LocksModel, Homes##Name) {                                                                  \
+    LT5_NEEDS_TABLE();                                                                             \
+    run_bounded(config_named(cfgname), homes_regular_bound(cfgname));                              \
+  }                                                                                                \
+  TEST(LocksModelStress, Homes##Name) {                                                            \
+    LT5_NEEDS_TABLE();                                                                             \
+    run_bounded(config_named(std::string(cfgname) + (coalesce_variants() ? "+c" : "")),            \
+                homes_stress_bound());                                                             \
+  }
+LT5_HOMES_CASES(Core, "core")
+LT5_HOMES_CASES(Wide, "wide")
+LT5_HOMES_CASES(Handlers, "handlers")
+LT5_HOMES_CASES(Priority, "priority")
+LT5_HOMES_CASES(Destroy, "destroy")
+LT5_HOMES_CASES(Coalesce, "coalesce")
+LT5_HOMES_CASES(Attach, "attach")
+LT5_HOMES_CASES(Noinh, "noinh")
+LT5_HOMES_CASES(Foreign, "foreign")
+LT5_HOMES_CASES(Splitpost, "splitpost")
+LT5_HOMES_CASES(Splitpost2, "splitpost2")
+LT5_HOMES_CASES(Cache, "cache")
+LT5_HOMES_CASES(Two2, "two2")
+LT5_HOMES_CASES(Grantseeds, "grantseeds")
+LT5_HOMES_CASES(Three, "three")
+#undef LT5_HOMES_CASES
+
+TEST(LocksModel, HomesSplitpostMut) {
+  LT5_NEEDS_TABLE();
+  // closed_outside_mu ('post-test-outside-mu', 2.3's closed test outside the port's mutex): a post
+  // in flight across the close lands after it (port-race); it takes three events (two requests
+  // and the destroy)
+  expect_explored_violation("port-race", config_named("splitpost_mut"), 3);
+}
+
+TEST(LocksModel, HomesCoalesceNoClear) {
+  LT5_NEEDS_TABLE();
+  // coalesce_no_clear (L2.3) on two homes: a relevel flag never cleared swallows the relevel that
+  // would withdraw a boost posted to another home (I8's quiescent clause); it takes three events
+  // (two requests and a set-priority)
+  config cfg = config_named("coalesce");
+  cfg.mutations |= dt::lock_table::coalesce_no_clear;
+  expect_explored_violation("I8", cfg, 3);
+}
+
 namespace {
 
 /// explore.py's counts (revision 5b of the model) of distinct states and of transitions. 'l1x' is
 /// explore.py's 'l1' with signals=1 and foreign=True (tools/locks_model/README.md, "The C++ model
-/// check"); 'core' is explore.py's own, two homes with posts between them and inheritance; 'l2' is
-/// explore.py's (the same with coalesce=True, as here); 'noinh1' is explore.py's 'l2' with
-/// inheritance=False. explore.py deduplicates states on hash(World.key()), and CPython's
+/// check"); 'core' and the other configurations of two and three homes (L3.4) are explore.py's
+/// own; 'l2' is explore.py's (the same with coalesce=True, as here); 'noinh1' is explore.py's 'l2'
+/// with inheritance=False. explore.py deduplicates states on hash(World.key()), and CPython's
 /// hash(-1) == hash(-2), so two states that differ only in a priority of -1 against -2 collide
 /// and one of them is never explored: the counts of 'l2' and 'noinh1', whose set-priority values
 /// include both, are explore.py's run with states deduplicated on World.key() itself
@@ -5170,35 +5914,39 @@ constexpr python_count kPythonCounts[] = {
     {"l2", 1, 121, 120},     {"l2", 2, 2587, 3624},     {"l2", 3, 42075, 63798},
     {"noinh1", 1, 121, 120}, {"noinh1", 2, 2323, 3360}, {"noinh1", 3, 33297, 55020},
 };
-
-/// A configuration by name: l1, l1x, l2, noinh1 or core.
-config config_named(const std::string &name) {
-  if (name == "core")
-    return core_config();
-  if (name == "l1x")
-    return l1x_config();
-  if (name == "l2")
-    return l2_config();
-  if (name == "noinh1")
-    return noinh1_config();
-  if (name == "l1")
-    return l1_config();
-  fail("model", "no configuration named " + name);
-}
+/// L3.4's: explore.py's configurations of two and three homes ('core' is above).
+constexpr python_count kPythonCountsHomes[] = {
+    {"wide", 1, 40, 39},       {"wide", 2, 2612, 2683},     {"wide", 3, 97523, 145729},
+    {"handlers", 1, 19, 33},   {"handlers", 2, 449, 754},   {"handlers", 3, 9857, 18248},
+    {"priority", 1, 31, 30},   {"priority", 2, 813, 1121},  {"priority", 3, 20610, 34143},
+    {"destroy", 1, 20, 19},    {"destroy", 2, 344, 419},    {"destroy", 3, 4855, 7132},
+    {"coalesce", 1, 29, 28},   {"coalesce", 2, 764, 989},   {"coalesce", 3, 17414, 28209},
+    {"attach", 1, 16, 15},     {"attach", 2, 227, 265},     {"attach", 3, 2210, 3067},
+    {"noinh", 1, 29, 28},      {"noinh", 2, 624, 849},      {"noinh", 3, 10438, 17485},
+    {"foreign", 1, 19, 24},    {"foreign", 2, 425, 619},    {"foreign", 3, 6751, 12801},
+    {"splitpost", 1, 7, 6},    {"splitpost", 2, 31, 40},    {"splitpost", 3, 159, 252},
+    {"splitpost2", 1, 17, 16}, {"splitpost2", 2, 219, 279}, {"splitpost2", 3, 2419, 3655},
+    {"cache", 1, 26, 43},      {"cache", 2, 802, 1207},     {"cache", 3, 19932, 34312},
+    {"two2", 1, 29, 28},       {"two2", 2, 747, 888},       {"two2", 3, 13959, 20516},
+    {"grantseeds", 1, 25, 24}, {"grantseeds", 2, 663, 833}, {"grantseeds", 3, 15920, 25129},
+    {"three", 1, 28, 27},      {"three", 2, 784, 945},      {"three", 3, 18382, 29205},
+};
 
 /// The world and the oracle against the Python model: on the oracle alone and with explore.py's
 /// FIFO cache (no pinning), each configuration must have exactly the states and transitions
 /// explore.py counts, whether each state is copied or rebuilt by replaying its path (the way the
 /// explorer runs over the real table).
-void expect_python_counts(int min_bound, int max_bound, bool replay_too) {
-  for (const auto &pc : kPythonCounts) {
+void expect_python_counts(int min_bound, int max_bound, bool replay_too, bool l3) {
+  for (const auto &pc : l3 ? std::span<const python_count>(kPythonCountsHomes)
+                           : std::span<const python_count>(kPythonCounts)) {
     if (pc.bound < min_bound || pc.bound > max_bound)
       continue;
     config cfg = config_named(pc.config);
     cfg.pin = false;
     cfg.real = false;
     for (bool replay : {false, true}) {
-      if (replay && !replay_too)
+      // L3.4's rows replay only in an optimized build: a Debug lane would take about a minute
+      if (replay && (!replay_too || (l3 && !kRelease)))
         continue;
       explore_options eo;
       eo.bound = pc.bound;
@@ -5215,19 +5963,29 @@ void expect_python_counts(int min_bound, int max_bound, bool replay_too) {
 
 } // namespace
 
-TEST(LocksModel, PortMatchesPythonStateCounts) { expect_python_counts(1, 2, true); }
+TEST(LocksModel, PortMatchesPythonStateCounts) { expect_python_counts(1, 2, true, false); }
 
-TEST(LocksModelStress, PortMatchesPythonStateCountsBound3) { expect_python_counts(3, 3, false); }
+TEST(LocksModelStress, PortMatchesPythonStateCountsBound3) {
+  expect_python_counts(3, 3, false, false);
+}
+
+/// The same for L3.4's configurations of two and three homes ('core' is above).
+TEST(LocksModel, PortMatchesPythonStateCountsHomes) { expect_python_counts(1, 2, true, true); }
+
+TEST(LocksModelStress, PortMatchesPythonStateCountsHomesBound3) {
+  expect_python_counts(3, 3, false, true);
+}
 
 /// The explorer's cost, for fixing the sizes (locks plan L1.3: states, seconds and peak memory on
 /// l1 at bounds 3, 4 and 5; L2.3 the same on l2). Disabled: run it with
 /// --gtest_also_run_disabled_tests, one configuration per process so the peak is that run's, e.g.
-/// CVC_LOCKS_MODEL_MEASURE=l1x:4. The form is CONFIG:BOUND[:replay]: CONFIG is l1, l1x, l2 or
-/// noinh1, the same with 'py' appended for explore.py's cache (their states are explore.py's for
-/// 'l1', 'l1' with signals=1 and foreign=True, 'l2', and 'l2' with inheritance=False), or core
-/// (explore.py's, on the oracle alone); ':replay' rebuilds every state by replay even on the
-/// oracle alone, which is what the explorer does over the real table. CVC_LOCKS_MODEL_REAL=0
-/// measures the oracle alone.
+/// CVC_LOCKS_MODEL_MEASURE=l1x:4. The form is CONFIG:BOUND[:replay]: CONFIG is l1, l1x, l2,
+/// noinh1 or one of explore.py's configurations of two and three homes (L3.4; '+c' appended for
+/// coalescing on), the same with 'py' appended for explore.py's cache (their states are
+/// explore.py's for 'l1', 'l1' with signals=1 and foreign=True, 'l2', 'l2' with
+/// inheritance=False, and its own); ':replay' rebuilds every state by replay even on the oracle
+/// alone, which is what the explorer does over the real table. CVC_LOCKS_MODEL_REAL=0 measures the
+/// oracle alone.
 TEST(LocksModelStress, DISABLED_Measure) {
   LT5_NEEDS_TABLE();
   const char *e = std::getenv("CVC_LOCKS_MODEL_MEASURE");
@@ -5254,22 +6012,32 @@ TEST(LocksModelStress, DISABLED_Measure) {
 
 TEST(LocksModel, RandomL1) {
   LT5_NEEDS_TABLE();
-  run_random(regular_steps(), false);
+  run_random(regular_steps(), random_kind::l1);
 }
 
 TEST(LocksModelStress, RandomL1) {
   LT5_NEEDS_TABLE();
-  run_random(stress_steps(), false);
+  run_random(stress_steps(), random_kind::l1);
 }
 
 TEST(LocksModel, RandomL2) {
   LT5_NEEDS_TABLE();
-  run_random(regular_steps(), true);
+  run_random(regular_steps(), random_kind::l2);
 }
 
 TEST(LocksModelStress, RandomL2) {
   LT5_NEEDS_TABLE();
-  run_random(stress_steps(), true);
+  run_random(stress_steps(), random_kind::l2);
+}
+
+TEST(LocksModel, RandomHomes) {
+  LT5_NEEDS_TABLE();
+  run_random(regular_steps(), random_kind::homes);
+}
+
+TEST(LocksModelStress, RandomHomes) {
+  LT5_NEEDS_TABLE();
+  run_random(stress_steps(), random_kind::homes);
 }
 
 // -- the Python model's traces
@@ -5541,4 +6309,180 @@ TEST(LocksModel, Mutation_NoSetBase) {
   LT5_NEEDS_TABLE();
   // set-priority skips the home's set_base: the rec's base is stale (I8's base clause)
   expect_violation("I8", [] { return scenario_set_base_l2(no_set_base); });
+}
+
+// -- phase L3 (locks plan L3.4): scenarios.py's scenarios as written, on two priority_rr homes, and
+// every mutation of protocol 7 there, each required to report its own violation
+// ----------------------------------------------------------------------------------------------
+
+namespace {
+/// A scenario in the L3 layout (two_homes_scope).
+std::function<std::string()> on_two_homes(std::function<std::string()> fn) {
+  return [fn] {
+    two_homes_scope two;
+    return fn();
+  };
+}
+} // namespace
+
+TEST(LocksModel, TwoHomesLK27ConversionRule) {
+  LT5_NEEDS_TABLE();
+  expect_ok(on_two_homes([] { return scenario_lk27(); }));
+}
+TEST(LocksModel, TwoHomesLK25CancelLetsReaderIn) {
+  LT5_NEEDS_TABLE();
+  expect_ok(on_two_homes([] { return scenario_lk25(); }));
+}
+TEST(LocksModel, TwoHomesLK21Fifo) {
+  LT5_NEEDS_TABLE();
+  expect_ok(on_two_homes([] { return scenario_lk21(); }));
+}
+TEST(LocksModel, TwoHomesLD10ChainDeadlock) {
+  LT5_NEEDS_TABLE();
+  expect_ok(on_two_homes([] { return scenario_ld10(); }));
+}
+TEST(LocksModel, TwoHomesLD9Deadlock) {
+  LT5_NEEDS_TABLE();
+  expect_ok(on_two_homes([] { return scenario_ld9(); }));
+}
+TEST(LocksModel, TwoHomesLX4HandlerRaisesBeforeBody) {
+  LT5_NEEDS_TABLE();
+  expect_ok(on_two_homes([] { return scenario_lx4(); }));
+}
+TEST(LocksModel, TwoHomesLX10KilledBeforeWake) {
+  LT5_NEEDS_TABLE();
+  expect_ok(on_two_homes([] { return scenario_lx10(); }));
+}
+TEST(LocksModel, TwoHomesLX11StaleWake) {
+  LT5_NEEDS_TABLE();
+  expect_ok(on_two_homes([] { return scenario_lx11(); }));
+}
+TEST(LocksModel, TwoHomesPI09BoostThroughWaiterEdge) {
+  LT5_NEEDS_TABLE();
+  expect_ok(on_two_homes([] { return scenario_pi9(); }));
+}
+TEST(LocksModel, TwoHomesPI11MultiHolderBoostAndWithdraw) {
+  LT5_NEEDS_TABLE();
+  expect_ok(on_two_homes([] { return scenario_pi11(); }));
+}
+TEST(LocksModel, TwoHomesPIChainCappedAt8) {
+  LT5_NEEDS_TABLE();
+  expect_ok(on_two_homes([] { return scenario_chain_cap8(); }));
+}
+TEST(LocksModel, TwoHomesPICoalesce) {
+  LT5_NEEDS_TABLE();
+  expect_ok(on_two_homes([] { return scenario_coalesce(); }));
+}
+TEST(LocksModel, TwoHomesPIImplNote) {
+  LT5_NEEDS_TABLE();
+  expect_ok(on_two_homes([] { return scenario_impl_note(); }));
+}
+TEST(LocksModel, TwoHomesSetBase) {
+  LT5_NEEDS_TABLE();
+  expect_ok(on_two_homes([] { return scenario_set_base_l2(); }));
+}
+TEST(LocksModel, TwoHomesCacheDetach) {
+  LT5_NEEDS_TABLE();
+  expect_ok([] { return scenario_cache_detach2(); });
+}
+TEST(LocksModel, TwoHomesCacheClear) {
+  LT5_NEEDS_TABLE();
+  expect_ok([] { return scenario_cache_clear2(); });
+}
+TEST(LocksModel, TwoHomesCycleOtherHomePid) {
+  LT5_NEEDS_TABLE();
+  expect_ok([] { return scenario_cycle_other_home_pid(); });
+}
+TEST(LocksModel, TwoHomesQueryVisibility) {
+  LT5_NEEDS_TABLE();
+  expect_ok([] { return scenario_query_visibility2(); });
+}
+TEST(LocksModel, TwoHomesSplitPost) {
+  LT5_NEEDS_TABLE();
+  expect_ok([] { return scenario_splitpost(); });
+}
+TEST(LocksModel, TwoHomesSinksProgress) {
+  LT5_NEEDS_TABLE();
+  expect_ok([] { return scenario_sinks_progress(); });
+}
+
+// The mutations of protocol 7 (scenarios.py's 13) on two homes: the L3 one, closed_outside_mu,
+// then the L1 and L2 ones re-run (each on the table and the oracle together, or in the world).
+
+TEST(LocksModel, TwoHomesMutationClosedOutsideMu) {
+  LT5_NEEDS_TABLE();
+  // 2.3's closed tested outside the port's mutex: the post in flight lands after the close
+  expect_violation("port-race",
+                   [] { return scenario_splitpost(dt::lock_table::closed_outside_mu); });
+}
+TEST(LocksModel, TwoHomesMutationNoExemption) {
+  LT5_NEEDS_TABLE();
+  expect_ok(on_two_homes([] {
+    auto r = scenario_lk27(dt::lock_table::no_exemption);
+    MODEL_ASSERT(r.rfind("DeadlockError as expected", 0) == 0, r);
+    return r;
+  }));
+}
+TEST(LocksModel, TwoHomesMutationCancelReexaminesHoldsOnly) {
+  LT5_NEEDS_TABLE();
+  expect_violation("I6", on_two_homes([] {
+                     return scenario_lk25(dt::lock_table::cancel_reexamines_holds_only);
+                   }));
+}
+TEST(LocksModel, TwoHomesMutationCancelMarksFailed) {
+  LT5_NEEDS_TABLE();
+  expect_violation("I2",
+                   on_two_homes([] { return scenario_lk25(dt::lock_table::cancel_marks_failed); }));
+}
+TEST(LocksModel, TwoHomesMutationKeepDetachedRefs) {
+  LT5_NEEDS_TABLE();
+  expect_violation("I9", [] { return scenario_cache_detach2(dt::lock_table::keep_detached_refs); });
+}
+TEST(LocksModel, TwoHomesMutationCacheMissUnreferenced) {
+  LT5_NEEDS_TABLE();
+  expect_violation("I4", [] { return scenario_cache_detach2(0, cache_miss_unreferenced); });
+}
+TEST(LocksModel, TwoHomesMutationUnrefPopsEntry) {
+  LT5_NEEDS_TABLE();
+  expect_violation("I9", [] { return scenario_cache_clear2(dt::lock_table::unref_pops_entry); });
+}
+TEST(LocksModel, TwoHomesMutationQueryFirstGen) {
+  LT5_NEEDS_TABLE();
+  expect_violation("4.13",
+                   [] { return scenario_query_visibility2(dt::lock_table::query_first_gen); });
+}
+TEST(LocksModel, TwoHomesMutationWakeCarriesOutcome) {
+  LT5_NEEDS_TABLE();
+  expect_violation("I2", on_two_homes([] { return scenario_lx11(wake_carries_outcome); }));
+}
+TEST(LocksModel, TwoHomesMutationCancelSkipsRelevel) {
+  LT5_NEEDS_TABLE();
+  expect_violation(
+      "I8", on_two_homes([] { return scenario_pi11(dt::lock_table::cancel_skips_relevel); }));
+}
+TEST(LocksModel, TwoHomesMutationCoalesceNoClear) {
+  LT5_NEEDS_TABLE();
+  expect_violation(
+      "I8", on_two_homes([] { return scenario_coalesce(dt::lock_table::coalesce_no_clear); }));
+}
+TEST(LocksModel, TwoHomesMutationImplNoteAfterOnly) {
+  LT5_NEEDS_TABLE();
+  expect_violation("impl-note", on_two_homes([] {
+                     return scenario_impl_note(dt::lock_table::impl_note_after_only);
+                   }));
+}
+TEST(LocksModel, TwoHomesMutationNoSetBase) {
+  LT5_NEEDS_TABLE();
+  expect_violation("I8", on_two_homes([] { return scenario_set_base_l2(no_set_base); }));
+}
+
+// 5.4's defensive path on two homes (L3 review fix, R3a F2): an unwound wait's grant from another
+// home is released; the reading before the fix, which dropped it, leaves a hold no mirror has.
+TEST(LocksModel, TwoHomesUnwoundWaitGrantedByAnotherHome) {
+  LT5_NEEDS_TABLE();
+  expect_ok([] { return scenario_unwound_wait_granted(); });
+}
+TEST(LocksModel, TwoHomesMutationUnwoundWaitDropsGrant) {
+  LT5_NEEDS_TABLE();
+  expect_violation("I3", [] { return scenario_unwound_wait_granted(wait_unwind_drops_grant); });
 }

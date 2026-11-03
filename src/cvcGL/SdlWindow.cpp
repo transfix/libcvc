@@ -15,17 +15,80 @@
 #include <vtkRenderWindow.h>
 #include <vtkRenderer.h>
 #include <vtkRendererCollection.h>
+#ifdef __EMSCRIPTEN__
+#include <emscripten/emscripten.h>
+#include <emscripten/html5.h>
+#include <emscripten/html5_webgl.h>
+#include <vtkVersionMacros.h>
+#include <webgl/webgl2.h> // GL_RED_BITS ...
+
+// VTK 9.5's canvas window yields to the browser in every Frame() (emscripten_sleep(0), under
+// Asyncify, with DoubleBuffer on); VTK 9.6 dropped that. This window yields where VTK's would, so
+// FrameYield (ViewportManager) means the same with either.
+#if VTK_VERSION_NUMBER < VTK_VERSION_CHECK(9, 6, 0)
+#define CVCGL_SDL_FRAME_SLEEPS 1
+#else
+#define CVCGL_SDL_FRAME_SLEEPS 0
+#endif
+
+// clang-format off: JavaScript bodies (only == and != in them, as in CameraController.cpp)
+// The canvas fills its container, as VTK's canvas window made it (VTK's interactor styles it so
+// unless told not to): the container takes the page's space and the canvas covers it. SDL then
+// finds the canvas sized by CSS and takes its window's size from it, at the first frame and at
+// every resize after.
+EM_JS(void, cvcgl_sdl_fill_container, (const char *selector), {
+  var c = document.querySelector(UTF8ToString(selector));
+  if (!c)
+    return;
+  var p = c.parentElement;
+  if (p == document.body) {
+    p.style.margin = 0;
+    p.style.width = '100vw';
+    p.style.height = '100vh';
+  } else if (p) {
+    p.style.position = 'relative';
+    p.style.width = '100%';
+    p.style.height = '100%';
+  }
+  c.style.position = 'absolute';
+  c.style.top = 0;
+  c.style.left = 0;
+  c.style.width = '100%';
+  c.style.height = '100%';
+});
+// A touch on the canvas makes no mouse events or click of its own, as in VTK's canvas window,
+// whose touch handlers cancelled them: the mouse SDL makes of the first finger is the only one. A
+// touch's mousedown would focus the canvas, taking the focus from ImGuiOverlay's system-keyboard
+// field (which is focused at touchend), and would press for CameraController's pointer lock.
+EM_JS(void, cvcgl_sdl_touch_quiet, (const char *selector, int on), {
+  var c = document.querySelector(UTF8ToString(selector));
+  if (!c)
+    return;
+  var kinds = ['touchstart', 'touchmove', 'touchend', 'touchcancel'];
+  if (on && !c.__cvcglSdlTouch) {
+    c.__cvcglSdlTouch = function(e) {
+      if (e.cancelable)
+        e.preventDefault();
+    };
+    kinds.forEach(function(k) { c.addEventListener(k, c.__cvcglSdlTouch, {passive: false}); });
+  } else if (!on && c.__cvcglSdlTouch) {
+    kinds.forEach(function(k) { c.removeEventListener(k, c.__cvcglSdlTouch, {passive: false}); });
+    c.__cvcglSdlTouch = undefined;
+  }
+});
+EM_JS(int, cvcgl_sdl_pointer_locked, (const char *selector), {
+  var e = document.pointerLockElement;
+  return e && e == document.querySelector(UTF8ToString(selector)) ? 1 : 0;
+});
+// clang-format on
+#endif
 
 namespace cvc {
 namespace gl {
 
 bool sdl_window_enabled() {
-#ifdef __EMSCRIPTEN__
-  return false; // the browser keeps VTK's canvas window for now
-#else
   const char *v = std::getenv("CVCGL_SDL_WINDOW");
   return !(v && std::string(v) == "0");
-#endif
 }
 
 namespace {
@@ -50,6 +113,11 @@ SdlGLRenderWindow::SdlGLRenderWindow() {
   this->SetWindowName("cvcGL");
   this->SetStencilCapable(1);
   this->Position[0] = this->Position[1] = -1; // SDL places it
+#ifdef __EMSCRIPTEN__
+  // WebGL's default framebuffer has no GL_BACK_LEFT to name: blit to the bound one, as VTK's canvas
+  // window does.
+  this->FrameBlitMode = BlitToCurrent;
+#endif
 }
 
 SdlGLRenderWindow::~SdlGLRenderWindow() {
@@ -82,12 +150,20 @@ void SdlGLRenderWindow::CreateAWindow() {
     }
     video_ = true;
   }
+#ifdef __EMSCRIPTEN__
+  cvcgl_sdl_fill_container(canvas_.c_str());
+#endif
   // VTK's OpenGL2 backend: a 3.2 core context (ES 3.0 in the browser).
   SDL_GL_ResetAttributes();
+  int alpha = 8;
 #ifdef __EMSCRIPTEN__
+  // WebGL2 (SDL's for ES 3.0), made as VTK's canvas window makes it: opaque unless the window is
+  // translucent, and single-sampled (VTK resolves its own multisampled framebuffers into it).
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+  SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 0);
+  alpha = this->EnableTranslucentSurface ? 8 : 0;
 #else
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
@@ -100,7 +176,7 @@ void SdlGLRenderWindow::CreateAWindow() {
   SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 8);
   SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 8);
   SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 8);
-  SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 8);
+  SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, alpha);
   SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
   SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, this->StencilCapable ? 8 : 0);
 
@@ -109,7 +185,23 @@ void SdlGLRenderWindow::CreateAWindow() {
   const int h = this->Size[1] > 0 ? this->Size[1] : 300;
   const SDL_WindowFlags flags =
       SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_HIDDEN;
-  window_ = SDL_CreateWindow(this->WindowName ? this->WindowName : "cvcGL", w, h, flags);
+  const SDL_PropertiesID props = SDL_CreateProperties();
+  SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, w);
+  SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, h);
+  SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER, flags);
+#ifdef __EMSCRIPTEN__
+  // The canvas, and the keys typed into it: not those of the page's own fields or of the system
+  // keyboard's input (ImGuiOverlay), which SDL would take on the browser window, its default. No
+  // title: SDL would make it the page's.
+  SDL_SetStringProperty(props, SDL_PROP_WINDOW_CREATE_EMSCRIPTEN_CANVAS_ID_STRING, canvas_.c_str());
+  SDL_SetStringProperty(props, SDL_PROP_WINDOW_CREATE_EMSCRIPTEN_KEYBOARD_ELEMENT_STRING,
+                        canvas_.c_str());
+#else
+  SDL_SetStringProperty(props, SDL_PROP_WINDOW_CREATE_TITLE_STRING,
+                        this->WindowName ? this->WindowName : "cvcGL");
+#endif
+  window_ = SDL_CreateWindowWithProperties(props);
+  SDL_DestroyProperties(props);
   if (!window_) {
     error_ = std::string("SDL_CreateWindow: ") + SDL_GetError();
     return;
@@ -122,6 +214,9 @@ void SdlGLRenderWindow::CreateAWindow() {
     return;
   }
   ++g_openWindows;
+#ifdef __EMSCRIPTEN__
+  cvcgl_sdl_touch_quiet(canvas_.c_str(), 1);
+#endif
   if (relative_) // asked for before the window was made
     SDL_SetWindowRelativeMouseMode(window_, true);
   SDL_GL_MakeCurrent(window_, context_);
@@ -130,12 +225,14 @@ void SdlGLRenderWindow::CreateAWindow() {
         return reinterpret_cast<VTKOpenGLAPIProc>(SDL_GL_GetProcAddress(name));
       },
       nullptr);
+#ifndef __EMSCRIPTEN__ // in the browser the page sizes the canvas (cvcgl_sdl_fill_container)
   // VTK's size is in pixels; SDL's window size is in points, several pixels each on macOS and
   // Wayland's scaled outputs.
   const float d = SDL_GetWindowPixelDensity(window_);
   if (d > 1.0f)
     SDL_SetWindowSize(window_, std::max(1, static_cast<int>(std::lround(w / d))),
                       std::max(1, static_cast<int>(std::lround(h / d))));
+#endif
   if (this->Position[0] >= 0 && this->Position[1] >= 0)
     SDL_SetWindowPosition(window_, this->Position[0], this->Position[1]);
   if (this->FullScreen)
@@ -156,6 +253,9 @@ void SdlGLRenderWindow::DestroyWindow() {
     context_ = nullptr;
   }
   if (window_) {
+#ifdef __EMSCRIPTEN__
+    cvcgl_sdl_touch_quiet(canvas_.c_str(), 0);
+#endif
     SDL_StopTextInput(window_);
     SDL_DestroyWindow(window_);
     window_ = nullptr;
@@ -217,24 +317,65 @@ void SdlGLRenderWindow::Frame() {
     return;
   this->MakeCurrent();
   this->Superclass::Frame();
+#ifdef __EMSCRIPTEN__
+  // WebGL shows the frame when the page next yields to the browser: there is nothing to swap, and
+  // SDL's swap would only yield. The yield is here instead, as VTK 9.5's canvas window makes it.
+#if CVCGL_SDL_FRAME_SLEEPS
+  if (!this->AbortRender && this->DoubleBuffer && this->SwapBuffers && emscripten_has_asyncify())
+    emscripten_sleep(0);
+#endif
+#else
   if (!this->AbortRender && this->DoubleBuffer && this->SwapBuffers)
     SDL_GL_SwapWindow(window_);
+#endif
 }
 
+#ifdef __EMSCRIPTEN__
+namespace {
+// The context WebGL has current. SDL's idea of it can be stale: a VTK canvas window (an offscreen
+// one) makes its own context current without SDL, and SDL_GL_MakeCurrent skips the one it thinks
+// current. An SDL context in the browser is a WebGL context handle.
+EMSCRIPTEN_WEBGL_CONTEXT_HANDLE webgl_handle(SDL_GLContext c) {
+  return reinterpret_cast<EMSCRIPTEN_WEBGL_CONTEXT_HANDLE>(c);
+}
+} // namespace
+#endif
+
 void SdlGLRenderWindow::MakeCurrent() {
-  if (window_ && context_)
-    SDL_GL_MakeCurrent(window_, context_);
+  if (!window_ || !context_)
+    return;
+  SDL_GL_MakeCurrent(window_, context_);
+#ifdef __EMSCRIPTEN__
+  if (emscripten_webgl_get_current_context() != webgl_handle(context_))
+    emscripten_webgl_make_context_current(webgl_handle(context_));
+#endif
 }
 
 void SdlGLRenderWindow::ReleaseCurrent() {
-  if (window_ && context_)
-    SDL_GL_MakeCurrent(window_, nullptr);
+  if (!window_ || !context_)
+    return;
+  SDL_GL_MakeCurrent(window_, nullptr);
+#ifdef __EMSCRIPTEN__
+  if (emscripten_webgl_get_current_context() == webgl_handle(context_))
+    emscripten_webgl_make_context_current(0);
+#endif
 }
 
-bool SdlGLRenderWindow::IsCurrent() { return context_ && SDL_GL_GetCurrentContext() == context_; }
+bool SdlGLRenderWindow::IsCurrent() {
+#ifdef __EMSCRIPTEN__
+  return context_ && emscripten_webgl_get_current_context() == webgl_handle(context_);
+#else
+  return context_ && SDL_GL_GetCurrentContext() == context_;
+#endif
+}
 
 void SdlGLRenderWindow::PushContext() {
-  SDL_GLContext current = SDL_GL_GetCurrentContext();
+#ifdef __EMSCRIPTEN__
+  const SDL_GLContext current =
+      reinterpret_cast<SDL_GLContext>(emscripten_webgl_get_current_context());
+#else
+  const SDL_GLContext current = SDL_GL_GetCurrentContext();
+#endif
   contexts_.emplace(SDL_GL_GetCurrentWindow(), current);
   if (current != context_)
     this->MakeCurrent();
@@ -245,8 +386,14 @@ void SdlGLRenderWindow::PopContext() {
     return;
   const auto prior = contexts_.top();
   contexts_.pop();
+#ifdef __EMSCRIPTEN__
+  // The prior context can be another window's, which SDL will not make current on this one.
+  if (webgl_handle(prior.second) != emscripten_webgl_get_current_context())
+    emscripten_webgl_make_context_current(webgl_handle(prior.second));
+#else
   if (prior.second != SDL_GL_GetCurrentContext())
     SDL_GL_MakeCurrent(prior.first, prior.second);
+#endif
 }
 
 bool SdlGLRenderWindow::SetSwapControl(int interval) {
@@ -254,6 +401,14 @@ bool SdlGLRenderWindow::SetSwapControl(int interval) {
 }
 
 void SdlGLRenderWindow::SetSize(int width, int height) {
+#ifdef __EMSCRIPTEN__
+  // The page sizes the canvas (it fills its container): once the window is made its size is the
+  // canvas's, whatever is asked, as VTK's canvas window's was once it had fitted its container.
+  if (window_ && !resizing_) {
+    this->syncSizeFromWindow();
+    return;
+  }
+#endif
   if (this->Size[0] == width && this->Size[1] == height)
     return;
   this->Superclass::SetSize(width, height);
@@ -317,9 +472,31 @@ int *SdlGLRenderWindow::GetScreenSize() {
 
 void SdlGLRenderWindow::SetWindowName(const char *name) {
   this->Superclass::SetWindowName(name);
+#ifndef __EMSCRIPTEN__ // SDL's title in a browser is the page's
   if (window_ && name)
     SDL_SetWindowTitle(window_, name);
+#endif
 }
+
+#ifdef __EMSCRIPTEN__
+int SdlGLRenderWindow::GetColorBufferSizes(int *rgba) {
+  if (!rgba)
+    return 0;
+  rgba[0] = rgba[1] = rgba[2] = rgba[3] = 0;
+  if (!context_)
+    return 0;
+  this->MakeCurrent();
+  rgba[0] = static_cast<int>(emscripten_webgl_get_parameter_d(GL_RED_BITS));
+  rgba[1] = static_cast<int>(emscripten_webgl_get_parameter_d(GL_GREEN_BITS));
+  rgba[2] = static_cast<int>(emscripten_webgl_get_parameter_d(GL_BLUE_BITS));
+  rgba[3] = static_cast<int>(emscripten_webgl_get_parameter_d(GL_ALPHA_BITS));
+  return rgba[0] > 0 && rgba[1] > 0 && rgba[2] > 0 && rgba[3] > 0;
+}
+
+bool SdlGLRenderWindow::pagePointerLocked() const {
+  return window_ && cvcgl_sdl_pointer_locked(canvas_.c_str()) != 0;
+}
+#endif
 
 void SdlGLRenderWindow::SetFullScreen(vtkTypeBool on) {
   if (this->FullScreen == on)
@@ -702,6 +879,28 @@ void SdlRenderWindowInteractor::deliver(const SDL_Event &e) {
 }
 
 void SdlRenderWindowInteractor::dispatch(const SDL_Event &e) {
+#ifdef __EMSCRIPTEN__
+  // Two fingers on the canvas are TouchGestures' (pinch, two-finger pan), which reads the page's
+  // touches itself: the mouse SDL makes of the first finger stays where it was until they lift, as
+  // the first finger did in VTK's canvas window, whose touch events TouchGestures stopped.
+  switch (e.type) {
+  case SDL_EVENT_FINGER_DOWN:
+    fingers_.insert(e.tfinger.fingerID);
+    fingerGesture_ = fingerGesture_ || fingers_.size() > 1;
+    break;
+  case SDL_EVENT_FINGER_UP:
+  case SDL_EVENT_FINGER_CANCELED:
+    fingers_.erase(e.tfinger.fingerID);
+    fingerGesture_ = fingerGesture_ && !fingers_.empty();
+    break;
+  case SDL_EVENT_MOUSE_MOTION:
+    if (fingerGesture_ && e.motion.which == SDL_TOUCH_MOUSEID)
+      return;
+    break;
+  default:
+    break;
+  }
+#endif
   for (const auto &kv : sinks_)
     kv.second(e);
   if (!this->Enabled)
@@ -712,6 +911,16 @@ void SdlRenderWindowInteractor::dispatch(const SDL_Event &e) {
   const int ctrl = (mods & SDL_KMOD_CTRL) ? 1 : 0, shift = (mods & SDL_KMOD_SHIFT) ? 1 : 0;
   this->SetAltKey((mods & SDL_KMOD_ALT) ? 1 : 0);
   const bool relative = win && win->relativeMouse(); // positions follow the motion (pointerX_)
+  // Whether the pointer's position stands still: in a browser, while the page holds the pointer
+  // lock on the canvas (the camera's mouse look, which reads the lock's motion itself), as it did
+  // in VTK's canvas window.
+  const auto still = [&] {
+#ifdef __EMSCRIPTEN__
+    return !relative && win && win->pagePointerLocked();
+#else
+    return false;
+#endif
+  };
   const auto pointer = [&](float x, float y, int repeat = 0) {
     int px = 0, py = 0;
     if (win)
@@ -746,7 +955,7 @@ void SdlRenderWindowInteractor::dispatch(const SDL_Event &e) {
     if (relative) {
       pointerX_ += e.motion.xrel;
       pointerY_ += e.motion.yrel;
-    } else {
+    } else if (!still()) {
       pointerX_ = e.motion.x;
       pointerY_ = e.motion.y;
     }
@@ -756,7 +965,7 @@ void SdlRenderWindowInteractor::dispatch(const SDL_Event &e) {
   case SDL_EVENT_MOUSE_BUTTON_DOWN:
   case SDL_EVENT_MOUSE_BUTTON_UP: {
     const bool down = e.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
-    if (!relative) {
+    if (!relative && !still()) {
       pointerX_ = e.button.x;
       pointerY_ = e.button.y;
     }
@@ -790,7 +999,7 @@ void SdlRenderWindowInteractor::dispatch(const SDL_Event &e) {
     const float flip = e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -1.0f : 1.0f;
     wheelY_ += flip * e.wheel.y;
     wheelX_ += flip * e.wheel.x;
-    if (!relative) {
+    if (!relative && !still()) {
       pointerX_ = e.wheel.mouse_x;
       pointerY_ = e.wheel.mouse_y;
     }
@@ -817,10 +1026,11 @@ void SdlRenderWindowInteractor::dispatch(const SDL_Event &e) {
   }
   case SDL_EVENT_TEXT_INPUT: {
     // The typed text, a character at a time, as VTK's CharEvent: its KeyCode is a char, so Latin-1
-    // (what ImGuiOverlay feeds ImGui as a code point); the keysym stays the key's, as in VTK.
+    // (what ImGuiOverlay feeds ImGui as a code point); the keysym stays the key's, as in VTK. No
+    // control characters: a browser's keypress types Enter as "\r", a key its KeyPressEvent has.
     const char *p = e.text.text ? e.text.text : "";
     for (std::uint32_t cp = next_codepoint(p); cp; cp = next_codepoint(p)) {
-      if (cp > 0xFF)
+      if (cp > 0xFF || cp < 0x20 || cp == 0x7F)
         continue;
       this->SetKeyEventInformation(ctrl, shift, static_cast<char>(cp), 0, nullptr);
       this->InvokeEvent(vtkCommand::CharEvent, nullptr);

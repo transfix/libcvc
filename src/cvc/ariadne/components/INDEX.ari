@@ -136,6 +136,13 @@ catalog:
     binds: "<prefix>.graphics.root.children.{node}.transfer_function (+ the layers beside it) and <prefix>.tree.{id}.view.*"
     for: "the same editor without a window, to embed in a document's own window (several in one document: give each its own id)"
     args: { node: volume, label: Transfer function, id: transfer_function_editor }   # defaults
+  - component: scene_view
+    file: scene_view.ari
+    unit: scene_view
+    binds: "<prefix>.viewers.{view}.camera.*"   # the view's own CameraController
+    for: "a second view of the scene in a window: an overview map, another angle, one layer (the nodes whose tags: it shows)"
+    args: { view: scene_view, title: View, id: scene_view, show: "", hide: "", camera: orbit, chrome: true, width: 360, height: 270 }   # defaults
+    note: "the cvcGL `viewport` widget (AriRuntime hosts: arigl, pycvc_gl); a terminal backend shows a placeholder"
   - component: card
     file: card.ari
     unit: card

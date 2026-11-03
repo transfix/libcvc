@@ -1,0 +1,28 @@
+# scenarios.py scenario_set_base, its homes as written
+config inheritance=1 coalesce=0 one_home=0 mutations=-
+attach_home 1 -> 0 |
+attach_home 1 -> 1 |
+try_acquire 0 1 o 5 X a - - -> granted 1 1 0 |
+query - 0 o -> held a/X/1/1/1/0 waiting |
+query - 1 o -> held a/X/-/1/1/0 waiting |
+try_acquire 1 2 o 0 X a - - -> busy |
+block 1 2 o 0 X a - - -> 1 queued | relevel(0,1)
+read_inh 0 1 -> 0 |
+blocking_sinks 1 2 0:1,1:1 -> 0:1:1 |
+query - 0 o -> held a/X/1/1/1/0 waiting a/X/- |
+query - 1 o -> held a/X/-/1/1/0 waiting a/X/2 |
+set_base 0 1 -2 -> ok |
+blocking_sinks 1 2 0:1,1:1 -> 0:1:1 |
+query - 0 o -> held a/X/1/1/1/0 waiting a/X/- |
+query - 1 o -> held a/X/-/1/1/0 waiting a/X/2 |
+release 0 1 1 -> ok | wake(1,2,1) relevel(0,1)
+read_inh 0 1 -> INF |
+resume 1 2 1 -> granted 2 2 0 |
+query - 0 o -> held a/X/-/1/2/0 waiting |
+query - 1 o -> held a/X/2/1/2/0 waiting |
+start_body 1 2 2 -> ok |
+query - 0 o -> held a/X/-/1/2/0 waiting |
+query - 1 o -> held a/X/2/1/2/0 waiting |
+release 1 2 2 -> ok |
+query - 0 o -> held waiting |
+query - 1 o -> held waiting |

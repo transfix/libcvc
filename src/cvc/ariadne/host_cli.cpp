@@ -10,7 +10,8 @@
 #include <boost/program_options.hpp>
 #include <cctype>
 #include <charconv>
-#include <cstdlib> // strtod (--settle, --timeout)
+#include <cmath>              // isfinite (--action-time)
+#include <cstdlib>            // strtod (--settle, --timeout, --action-time)
 #include <cvc/ariadne/bind.h> // resolve_bind, write (--set)
 #include <cvc/ariadne/host_cli.h>
 #include <cvc/net/credentials.h>
@@ -42,6 +43,7 @@ constexpr const char *kValueFlags[] = {"--prefix",
                                        "--credential-env",
                                        "--settle",
                                        "--timeout",
+                                       "--action-time",
                                        "--log",
                                        "--oidc-issuer",
                                        "--oidc-client",
@@ -138,6 +140,14 @@ bool apply(const po::option &opt, HostOptions &o) {
       return false;
     }
     o.timeout = t;
+  } else if (a == "--action-time") {
+    char *end = nullptr;
+    const double t = std::strtod(value.c_str(), &end);
+    if (value.empty() || end != value.c_str() + value.size() || !(t >= 0) || !std::isfinite(t)) {
+      o.error = "--action-time needs a number of seconds, 0 or more, not '" + value + "'";
+      return false;
+    }
+    o.action_time = t;
   } else if (a == "--prefix") {
     o.prefix = value;
   } else if (a == "--component-path") {
@@ -319,6 +329,8 @@ std::string host_flags_help() {
          "  --frames N             snapshot: frames to run before the capture; test: stop\n"
          "                         after N frames\n"
          "  --timeout S            test: fail a document still running after S seconds\n"
+         "  --action-time S        test: how long one program may run (default: the --timeout;\n"
+         "                         0.1 is a running app's, 0 no limit)\n"
          "  --ansi                 snapshot: keep colour escapes\n"
          "  --png FILE             snapshot: also write a PNG\n"
          "  --log FILE             run: append each warning to FILE as it happens (or set\n"

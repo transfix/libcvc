@@ -122,17 +122,22 @@ std::vector<avatar_static> room_statics(cvc::app &app, const std::string &room);
 // read its proposed .intent, feed it to the holon (a stamped one queued for its tick,
 // holon::queue_intent; an untimed one at once); advance the holon one frame; then
 // write every participant's authoritative .pose + .server_tick back to the tree
-// (which replicates to the clients) -- what changed, plus a heartbeat of about a
-// second while nothing does (write_pose). The caller supplies the server holon
+// (which replicates to the clients) -- what changed, plus a heartbeat every
+// POSE_HEARTBEAT_S while nothing does (write_pose). The caller supplies the server holon
 // and calls this once per relay tick. A participant who left (room_leave) is dropped
 // from the holon, so a rejoin respawns on the spawn ring. wall_dt
 // is forwarded to holon::advance: the default (-1) measures real elapsed wall time
 // (what the relay wants); a test injects a fixed dt for a deterministic step count.
 // WRITE_POSES false skips the pose write-back: a relay that streams poses to its clients
 // (room_pose_relay) writes the tree's copy only now and then, for late joiners and the log.
+// Clients that read their poses from the tree keep their clocks by the heartbeat, so a second
+// suits them; a relay whose pose stream carries its own heartbeat can stretch the tree's, since a
+// client takes no stale tick as a clock reading (holon::apply_authoritative). Keep it under
+// client_pump's 10 s leftover window: a returning peer's leftover pose is told from a new one by
+// its tick being at most that far below the newest one seen before it left.
 // Each participant's reserve (room_avatar.h) is written either way: no snapshot carries it.
 void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_dt = -1.0,
-                 bool write_poses = true);
+                 bool write_poses = true, double pose_heartbeat_s = 1.0);
 
 // Drive one frame of a CLIENT holon against the replicated room tree (H1 slice 6), the mirror of
 // server_pump: register every present participant (room_roster) -- SELF_PID as the local,

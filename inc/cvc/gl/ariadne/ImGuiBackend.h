@@ -143,6 +143,12 @@ public:
   // rt.set_backend(this). `rt` must outlive the overlay's callback.
   void install(cvc::ariadne::Runtime &rt, ImGuiOverlay &overlay);
 
+  // Leave the screen-pixel rect (x0, y0)-(x1, y1) of the current window's background undrawn, so
+  // what the renderers drew under the UI shows through it: a `viewport` widget's view of the
+  // scene. A window that cut its background last frame paints its own (ImGui's is made clear),
+  // around the cuts it makes this frame; so the first frame a window cuts one it is still opaque.
+  void cut_window_background(float x0, float y0, float x1, float y1);
+
   // Make `ctx` the current Dear ImGui context of the module this backend runs in (libcvcGL), for a
   // host that created the context itself rather than through ImGuiOverlay. Where imgui is a static
   // library linked into both the host and libcvcGL (the cvcpkg Windows imgui), each copy keeps its
@@ -255,6 +261,13 @@ private:
   // The GL texture image `name` is published under, uploaded first if it changed, and its size in
   // W x H; 0 when nothing is published under it. Render thread (the GL context current).
   unsigned int image_texture(const char *name, int &W, int &H);
+
+  // cut_window_background(): each open window's cuts, innermost last, and the windows (by ImGui
+  // name) that made cuts the last time they were drawn, which draw their own background.
+  struct WindowCuts;
+  std::vector<std::shared_ptr<WindowCuts>> m_windowCuts;
+  void paint_window_background(WindowCuts &cuts); // end_window, ImGui builds only
+  std::unordered_set<std::string> m_cutWindows;
 
   // §5.12 backdrops open in this frame, innermost last (a splitter each, so they nest).
   struct BackdropFrame;

@@ -18,25 +18,64 @@ namespace cvc::state_exec {
 async_scheduler::async_scheduler(scheduling_policy policy)
     : policy_(policy), evaluator_(builtins::make_default_environment()),
       procs_(policy != scheduling_policy::round_robin),
-      wakeup_(std::make_unique<detail::wakeup>()) {}
+      wakeup_(std::make_shared<detail::wakeup>()) {}
 
 async_scheduler::~async_scheduler() { home_.reset(); }
 
-void async_scheduler::set_lock_manager(std::shared_ptr<lock_manager> mgr) {
+void async_scheduler::set_lock_manager(std::shared_ptr<lock_manager> mgr, lock_attach attach) {
   if (home_)
     for (const auto &[pid, p] : procs_.all())
       if (p->locks && (!p->locks->holds.empty() || p->locks->ticket))
         throw std::logic_error("set_lock_manager: process " + std::to_string(pid) +
                                " holds or waits for a lock");
-  home_.reset();
-  home_ = std::make_unique<detail::lock_home>(std::move(mgr), lock_ops_, policy_);
+  // The port shares wakeup_, so a post ends a wait_for_work() (protocol 2.3). The new home is
+  // attached before the old one goes, so a refused attach (lock_attach) leaves the scheduler its
+  // home and manager. Both are attached meanwhile, which a manager allows; the old one is
+  // destroyed here, before any other member (protocol 5.7).
+  auto home =
+      std::make_unique<detail::lock_home>(std::move(mgr), lock_ops_, policy_, wakeup_, attach);
+  home_.swap(home);
+  home.reset();
 }
 
 detail::lock_home *async_scheduler::locks() {
   if (!home_)
-    home_ =
-        std::make_unique<detail::lock_home>(std::make_shared<lock_manager>(), lock_ops_, policy_);
+    home_ = std::make_unique<detail::lock_home>(std::make_shared<lock_manager>(), lock_ops_,
+                                                policy_, wakeup_);
   return home_.get();
+}
+
+void async_scheduler::keep_lock_expiries(clock::time_point now) {
+  // As scheduler::keep_lock_expiries: no raw pointer outlives a pass that threw; each lock waiter
+  // it had not yet timed out gets a deadline due `now`, back on the timer heap, so the next timer
+  // pass expires it.
+  for (process *p : lock_expired_) {
+    if (p->status != process_status::waiting || !p->lock_waiting || p->lock_deadline)
+      continue;
+    p->lock_deadline = now;
+    try {
+      procs_.update(*p);
+    } catch (...) { // the pass's own exception is the one to report
+    }
+  }
+  lock_expired_.clear();
+}
+
+void async_scheduler::lock_waiting_pids(std::vector<int> &out) const {
+  out.clear();
+  std::size_t left = procs_.lock_waiting_count();
+  if (left == 0)
+    return;
+  // The table counts the waiters (its entry's lock_waiting) but keeps no list of them: the walk
+  // stops once it has found them all.
+  for (const auto &[pid, p] : procs_.all()) {
+    if (!p->table.lock_waiting)
+      continue;
+    out.push_back(pid);
+    if (--left == 0)
+      break;
+  }
+  std::sort(out.begin(), out.end());
 }
 
 bool async_scheduler::lock_ops_impl::park_lock(process &p) {
@@ -330,6 +369,8 @@ void async_scheduler::execute_process_step(const process_ptr &pp) {
   }
 
   const clock::time_point now = clock::now();
+  if (home_)
+    home_->store_progress(now); // the home's last_progress, read by blocking_sinks (design 8.4)
   // A parking intrinsic (sleep / yield-frame / receive_message) already closed out this running
   // slice into accumulated_time and flipped status to `waiting`; accrue here only while still
   // running, so a parking step's slice is not double-counted (mirrors process::elapsed_time()'s own
@@ -378,6 +419,12 @@ void async_scheduler::execute_process_step(const process_ptr &pp) {
 // ---------------------------------------------------------------------------
 
 void async_scheduler::drain(bool in_step) {
+  // Posts from other homes' threads (wakes, relevels), first (protocol 5.9). The drain clears
+  // the port's pending flag, so wait_for_work, which returns while it is set, never spins.
+  if (home_ && home_->port_pending()) {
+    home_->drain_port();
+    chain_valid_ = false; // the posts are no step's time
+  }
   // Cross-thread posts and settled calls, when there are any: the flag spares an empty ingress
   // the lock.
   if (ingress_pending_.load(std::memory_order_acquire)) {
@@ -411,10 +458,17 @@ void async_scheduler::drain(bool in_step) {
   // waits whose deadline passed time out.
   if (procs_.timed_count() > 0) {
     const clock::time_point now = in_step ? now_for_step() : clock::now();
-    if (procs_.timer_due(now) && procs_.wake_due(now, &lock_expired_) > 0) {
-      chain_valid_ = false; // the wakes are no step's time
-      if (!lock_expired_.empty() && home_)
-        home_->wait_expired(lock_expired_);
+    if (procs_.timer_due(now)) {
+      try {
+        if (procs_.wake_due(now, &lock_expired_) > 0) {
+          chain_valid_ = false; // the wakes are no step's time
+          if (!lock_expired_.empty() && home_)
+            home_->wait_expired(lock_expired_);
+        }
+      } catch (...) {
+        keep_lock_expiries(now);
+        throw;
+      }
       lock_expired_.clear();
     }
   }
@@ -541,7 +595,8 @@ bool async_scheduler::wait_for_work(clock::time_point deadline) {
   const std::optional<clock::time_point> charge =
       async_calls_.empty() ? std::nullopt : next_call_charge(clock::now());
   for (;;) {
-    if (procs_.runnable_count() > 0 || ingress_pending_.load(std::memory_order_acquire))
+    if (procs_.runnable_count() > 0 || ingress_pending_.load(std::memory_order_acquire) ||
+        (home_ && home_->port_pending()))
       return true;
     const std::optional<clock::time_point> timer = procs_.next_timer();
     const clock::time_point now = clock::now();
@@ -557,9 +612,10 @@ bool async_scheduler::wait_for_work(clock::time_point deadline) {
     // A sleeper's or timed wait's deadline is kept precisely; the others need not be.
     const bool precise = timer && *timer == until;
     // Announce the wait, then look at the ingress once more: a post either lands before this
-    // look (seen here) or sees idle_waiting_ and notifies (both sides are seq_cst).
+    // look (seen here) or sees idle_waiting_ and notifies (both sides are seq_cst). A lock post
+    // notifies whatever idle_waiting_ says (protocol 2.3): one this look misses ends the wait.
     idle_waiting_.store(true, std::memory_order_seq_cst);
-    if (!ingress_pending_.load(std::memory_order_seq_cst))
+    if (!ingress_pending_.load(std::memory_order_seq_cst) && !(home_ && home_->port_pending()))
       wakeup_->wait_until(until, precise);
     idle_waiting_.store(false, std::memory_order_relaxed);
   }

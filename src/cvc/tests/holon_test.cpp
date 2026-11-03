@@ -659,12 +659,52 @@ TEST(HolonTest, RealignCounterCountsSeeks) {
   EXPECT_EQ(client.tick(), 144u);
   EXPECT_EQ(client.clock_realigns(), 1u) << "an in-tolerance sample is not a re-alignment";
 
-  // A sample stamped more than lead_slack_ahead_ticks (24) behind -- a peer whose tick a
-  // heartbeat left old -- seeks the clock back, and counts.
-  client.apply_authoritative("B", s, 105); // target 119, 25 behind
-  EXPECT_EQ(client.tick(), 119u);
+  // A sample from far ahead -- the replica's frame loop stalled -- seeks forward, and counts.
+  client.apply_authoritative("B", s, 300); // target 314, 170 ahead of the replica
+  EXPECT_EQ(client.tick(), 314u);
   EXPECT_EQ(client.clock_realigns(), 2u);
-  client.apply_authoritative("B", s, 105); // already seen: not a sample, not a seek
+  client.apply_authoritative("B", s, 300); // already seen: not a sample, not a seek
+  EXPECT_EQ(client.clock_realigns(), 2u);
+}
+
+// Only the newest tick applied, from any participant, is a clock reading: a still peer's pose in
+// the room tree is stamped at its last heartbeat while the pose stream's samples are current, and
+// taking it would seek the clock back and then forward again, dropping the local avatar's logged
+// inputs twice. Far older is a restarted relay, whose ticks start again near zero: a reading.
+TEST(HolonTest, AStaleSampleIsNoClockReading) {
+  holon_config cfg;
+  cfg.lead_slew = 0.0; // every drift past the slack seeks
+  holon client(holon_role::client, cfg);
+  client.add_participant("A", /*local=*/true);
+  client.add_participant("B", /*local=*/false, body_state{}, /*pose_known=*/false);
+  client.set_lead_ticks(14);
+  body_state s;
+  client.apply_authoritative("A", s, 5000); // joining: the clock seeks to 5014
+  ASSERT_EQ(client.tick(), 5014u);
+  ASSERT_EQ(client.clock_realigns(), 1u);
+
+  // B's first sample, 600 ticks (5 s) older than A's: B's pose, not the clock's.
+  body_state b;
+  b.position = vec3{2.0, 0.0, 0.0};
+  client.apply_authoritative("B", b, 4400);
+  EXPECT_TRUE(client.pose_known("B")) << "the sample still places B";
+  EXPECT_EQ(client.tick(), 5014u) << "no seek back to 4414";
+  EXPECT_EQ(client.clock_realigns(), 1u);
+  // B's next, current one is a reading as usual (in step: no seek).
+  client.apply_authoritative("B", b, 5001);
+  EXPECT_EQ(client.tick(), 5014u);
+  EXPECT_EQ(client.clock_realigns(), 1u);
+
+  // A restarted relay: a newcomer's sample far below everything seen (more than
+  // stale_reading_ticks) is a reading, and the clock follows it.
+  client.add_participant("C", /*local=*/false, body_state{}, /*pose_known=*/false);
+  client.apply_authoritative("C", s, 20);
+  EXPECT_EQ(client.tick(), 34u);
+  EXPECT_EQ(client.clock_realigns(), 2u);
+  // ...and from there the new relay's ticks are the newest.
+  client.add_participant("D", /*local=*/false, body_state{}, /*pose_known=*/false);
+  client.apply_authoritative("D", s, 25);
+  EXPECT_EQ(client.tick(), 34u) << "in step with the new relay";
   EXPECT_EQ(client.clock_realigns(), 2u);
 }
 

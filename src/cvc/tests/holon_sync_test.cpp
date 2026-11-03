@@ -375,6 +375,129 @@ TEST(HolonSyncTest, TheReserveIsWrittenOnStepsThatSkipThePoses) {
   EXPECT_NEAR(published, e.reserve, 0.005 * 2000.0 + 1.0);
 }
 
+// An avatar standing still with a full reserve: once its reserve is published the relay writes no
+// more of it -- the re-stamp is for a reserve still drifting from the published one -- and a walk
+// publishes again. Each reserve write journals one mutation per leaf that changed.
+TEST(HolonSyncTest, AFullReserveAtRestIsNotRestamped) {
+  cvc::app server_app;
+  cvc::state_cluster_shard ss(server_app, "conf", "server");
+  ss.attach();
+  const std::string room = "r";
+  cvc::ariadne::holon_config cfg;
+  cfg.physics = true;
+  holon server(holon_role::server, cfg);
+  if (!server.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  cvc::ariadne::conference::seed_default_scene(server_app, room);
+  cvc::ariadne::avatar_energy_policy policy;
+  policy.reserve_max = 2000.0;
+  cvc::ariadne::conference::write_avatar_policy(server_app, room, policy);
+  cvc::ariadne::conference::room_join(server_app, room, "A");
+  const auto energy_writes = [&] {
+    std::size_t n = 0;
+    for (const cvc::state_mutation &m : ss.drain_local())
+      n += m.path.find(".energy.") != std::string::npos;
+    return n;
+  };
+  ss.drain_local(); // the policy's own leaves
+  const double dt = server.clock().fixed_dt();
+  cvc::ariadne::server_pump(server, server_app, room, dt);
+  double published = 0.0;
+  std::uint64_t at_tick = 0;
+  ASSERT_TRUE(
+      cvc::ariadne::conference::read_avatar_reserve(server_app, room, "A", published, at_tick));
+  EXPECT_DOUBLE_EQ(published, 2000.0) << "published full";
+  EXPECT_EQ(energy_writes(), 2u) << "the reserve and its tick, once each";
+
+  for (int step = 0; step < 1200; ++step) // 10 s at rest: two of the old 5 s re-stamps
+    cvc::ariadne::server_pump(server, server_app, room, dt, /*write_poses=*/step % 120 == 0);
+  EXPECT_EQ(energy_writes(), 0u) << "a full reserve at rest is not re-stamped";
+  std::uint64_t still_tick = 0;
+  ASSERT_TRUE(
+      cvc::ariadne::conference::read_avatar_reserve(server_app, room, "A", published, still_tick));
+  EXPECT_EQ(still_tick, at_tick);
+
+  cvc::ariadne::write_intent(server_app, room, "A", avatar_intent{vec3{4.0, 0.0, 0.0}});
+  for (int step = 0; step < 120; ++step)
+    cvc::ariadne::server_pump(server, server_app, room, dt, /*write_poses=*/false);
+  EXPECT_GT(energy_writes(), 0u) << "a walk spends, and that is published";
+  ASSERT_TRUE(
+      cvc::ariadne::conference::read_avatar_reserve(server_app, room, "A", published, still_tick));
+  EXPECT_LT(published, 2000.0);
+  EXPECT_GT(still_tick, at_tick);
+
+  // The writer itself: an unchanged reserve re-stamped is its tick alone; nothing new, nothing.
+  cvc::ariadne::conference::write_avatar_reserve(server_app, room, "A", published, 900000);
+  EXPECT_EQ(energy_writes(), 1u);
+  cvc::ariadne::conference::write_avatar_reserve(server_app, room, "A", published, 900000);
+  EXPECT_EQ(energy_writes(), 0u);
+  cvc::ariadne::conference::write_avatar_reserve(server_app, room, "A", published - 50.0, 900100);
+  EXPECT_EQ(energy_writes(), 2u);
+  ss.detach();
+}
+
+// POSE_HEARTBEAT_S paces the tree's re-stamp of an avatar standing still: about a second by
+// default, for clients that keep their clocks by it, and longer for a relay whose pose stream
+// carries that heartbeat (arisrv writes the tree's copy each second and re-stamps it every 5 s).
+TEST(HolonSyncTest, ThePoseHeartbeatPacesTheTreesRestamp) {
+  for (const double heartbeat_s : {1.0, 5.0}) {
+    cvc::app server_app;
+    cvc::state_cluster_shard ss(server_app, "conf", "server");
+    ss.attach();
+    const std::string room = "r";
+    holon server(holon_role::server, cvc::ariadne::holon_config{}); // kinematic: exactly still
+    cvc::ariadne::conference::room_join(server_app, room, "A");
+    const double dt = server.clock().fixed_dt();
+    cvc::ariadne::server_pump(server, server_app, room, dt, true, heartbeat_s);
+    ss.drain_local();
+    std::size_t ticks = 0, others = 0;
+    for (int step = 1; step <= 1200; ++step) { // 10 s, the tree's copy written every second
+      cvc::ariadne::server_pump(server, server_app, room, dt, step % 120 == 0, heartbeat_s);
+      for (const cvc::state_mutation &m : ss.drain_local()) {
+        const std::size_t at = m.path.find(".pose.");
+        if (at == std::string::npos)
+          continue;
+        if (m.path.compare(at, std::string::npos, ".pose.server_tick") == 0)
+          ++ticks;
+        else
+          ++others;
+      }
+    }
+    EXPECT_EQ(ticks, heartbeat_s == 1.0 ? 10u : 2u) << "heartbeat " << heartbeat_s << " s";
+    EXPECT_EQ(others, 0u) << "an avatar standing still writes only its tick";
+    ss.detach();
+  }
+}
+
+// A client joining a room where a peer stands still: the pose stream brings current samples, the
+// room tree a pose stamped at the peer's last heartbeat. The stale stamp is no clock reading, so
+// the join re-aligns the clock once, however old the tree's tick is.
+TEST(HolonSyncTest, AJoinerTakesNoClockReadingFromAStaleTreeTick) {
+  cvc::app app;
+  const std::string room = "r";
+  holon client(holon_role::client, cvc::ariadne::holon_config{}); // kinematic: the clock alone
+  client.set_lead_ticks(14);
+  cvc::ariadne::conference::room_join(app, room, "A");
+  cvc::ariadne::conference::room_join(app, room, "B");
+  // The tree as the relay last wrote it: B still since tick 4400 (a 5 s heartbeat ago), A new.
+  body_state a, b;
+  a.position = vec3{0.0, 0.0, 0.0};
+  b.position = vec3{4.0, 0.0, 0.0};
+  cvc::ariadne::write_pose(app, room, "B", b, 4400);
+  cvc::ariadne::write_pose(app, room, "A", a, 5000);
+  // The stream's sample of A lands first (a frame applies the snapshots before client_pump).
+  client.add_participant("A", /*local=*/true);
+  cvc::ariadne::apply_pose_samples(client, {cvc::ariadne::pose_sample{"A", a}}, 5000);
+  ASSERT_EQ(client.clock_realigns(), 1u) << "the join";
+  const double dt = client.clock().fixed_dt();
+  cvc::ariadne::client_pump(client, app, room, "A", dt); // takes B's pose from the tree
+  EXPECT_TRUE(client.pose_known("B")) << "B is placed from the tree";
+  // Then B's current sample on the stream.
+  cvc::ariadne::apply_pose_samples(client, {cvc::ariadne::pose_sample{"B", b}}, 5002);
+  cvc::ariadne::client_pump(client, app, room, "A", dt);
+  EXPECT_EQ(client.clock_realigns(), 1u) << "no seek back to B's tree tick, nor forward again";
+}
+
 // client_pump registers whoever the roster lists, but one whose pose has not replicated yet is
 // pose-less: a member with nothing to draw and, with physics, no peer body at the placeholder
 // origin. Its first replicated pose makes it known, where the server put it.

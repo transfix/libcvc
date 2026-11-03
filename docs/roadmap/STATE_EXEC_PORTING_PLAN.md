@@ -467,6 +467,15 @@ duplication present in the Python version.
 > across nodes, and state-tree persistence impossible.  Only
 > `async_stackless_evaluator` satisfies both constraints.
 
+> **As built:** both tiers' stackless evaluators are scheduled. The sync
+> `scheduler` steps a `stackless_evaluator` one step at a time, so it never
+> blocks other processes; it is what `cvc exec`, `exec_coordinator` and
+> Ariadne's `init:` lane run. `async_scheduler` steps an
+> `async_stackless_evaluator`, which wraps a `stackless_evaluator`; only it
+> parks a process on `(await)` or an async call. The recursive `evaluator`
+> and `async_evaluator` are not scheduled. Which host runs which is in
+> [`docs/STATE_EXEC_DEVELOPER_GUIDE.md`](../STATE_EXEC_DEVELOPER_GUIDE.md#which-scheduler-runs-a-program).
+
 ##### 4.4.1 `evaluator` (sync recursive)
 
 - `value_t evaluate(const value_t& expr, environment_ptr env)`

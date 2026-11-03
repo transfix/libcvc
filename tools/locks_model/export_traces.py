@@ -1,8 +1,9 @@
 """Export the Python model's manager operations as traces for the C++ model check (LT-5).
 
-Runs scenarios.py's scenarios on one home and random_runs.py's one-home episodes on fixed seeds
-(coalescing off and on) through lockmodel.Manager, and writes every manager operation the world
-makes, with its result and its notification list, one operation per line, to OUTDIR/<name>.txt.
+Runs scenarios.py's scenarios and random_runs.py's episodes on fixed seeds (coalescing off and
+on), on one home and on several, through lockmodel.Manager, and writes every manager operation
+the world makes, with its result and its notification list, one operation per line, to
+OUTDIR/<name>.txt.
 state_exec_locks_model_test (LocksModel.PythonTraces) replays every file into its spec oracle and
 into the real detail::lock_table, operation by operation, and requires each result and each
 notification list to equal the one recorded here.
@@ -14,6 +15,10 @@ inheritance, are left out and listed on stderr), and the random episodes are the
 world is one home of prio false. Phase L2 adds the same on one home of prio true (a scheduler
 under priority_rr), files named l2_*: the inheritance scenarios (L2_SCENARIOS) with their homes
 merged into that home, and the random episodes of the seeds whose world is one home of prio true.
+Phase L3 adds the scenarios of two or more homes as scenarios.py writes them and the random
+episodes of the seeds whose world has two or three homes, files named l3_* (L4's group teardown
+left out): posts between homes, destruction, a home attached late, and blocking_sinks (4.13),
+recorded with the progress cells it loaded.
 
 usage: python -I export_traces.py OUTDIR
 
@@ -43,6 +48,7 @@ joined by '.'), '-' when empty. An owner has no spaces. The operations:
     set_base HOME PID BASE   -> ok
     read_inh HOME PID        -> INH (an integer, or INF)
     query PREFIX VHOME VOWNER -> held ENTRY... waiting ENTRY...
+    blocking_sinks HOME PID CELLS -> SINK...  (l3_* files only)
     ref_nodes HOME KEYS      -> ok | refused
     unref_nodes HOME KEYS    -> ok | refused
 
@@ -55,9 +61,15 @@ violation of a 'require' of the protocol (the Manager raised Violation('require'
 
 A NOTE is wake(HOME,PID,TID) or relevel(HOME,PID).
 
-query is recorded at most once per viewer between two operations that change the lock state
-(everything but the key-cache references; the world's check runs it after every action), so the
-files stay small; the queries kept are those that see a changed state.
+CELLS is the value of every attached home's progress cell when blocking_sinks ran, HOME:VALUE
+comma-separated (a logical clock: world.py's steps advance it); the replay stores them in its own
+cells first. A SINK is HOME:PID:TIME, sorted by home then pid; none when the process waits for
+nothing.
+
+query is recorded at most once per viewer, and blocking_sinks at most once per process, between
+two operations that change the lock state (everything but the key-cache references; the world's
+check runs both after every action), so the files stay small; the calls kept are those that see a
+changed state.
 
 stdlib only.
 """
@@ -99,6 +111,8 @@ def cycle_tok(cycle):
 class LoggingManager(lockmodel.Manager):
     """lockmodel.Manager, recording every public operation the world calls."""
 
+    log_sinks = False       # phase L3's files record blocking_sinks too
+
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
         self.lines = ['config inheritance=%d coalesce=%d one_home=%d mutations=%s'
@@ -107,6 +121,7 @@ class LoggingManager(lockmodel.Manager):
         self.hmap = {}
         self.version = 0
         self.queried = {}
+        self.sunk = {}
 
     def emit(self, op, args, result, notes=()):
         self.lines.append(' '.join([op] + [str(a) for a in args] + ['->'] + list(result) + ['|']
@@ -223,6 +238,17 @@ class LoggingManager(lockmodel.Manager):
         self.emit('query', [kstr(pre) or '-', self.hmap[viewer[0]], viewer[1]], res)
         return r
 
+    def blocking_sinks(self, P):
+        r = super().blocking_sinks(P)
+        if not self.log_sinks or self.sunk.get(P) == self.version:
+            return r
+        self.sunk[P] = self.version
+        cells = sorted((self.hmap[h], v[2].load()) for h, v in self.homes.items())
+        sinks = sorted((self.hmap[Q[0]], Q[1], t) for Q, t in r)
+        self.emit('blocking_sinks', self.P(P) + [','.join('%d:%d' % c for c in cells) or '-'],
+                  ['%d:%d:%d' % s for s in sinks])
+        return r
+
     def ref_nodes(self, H, keys):
         a = [self.hmap.get(H, H), keys_tok(keys)]
         N = self._call('ref_nodes', super().ref_nodes, (H, keys), a)
@@ -325,6 +351,66 @@ def run_random(out, steps, prio=False):
 REAL_MK = scenarios.mk
 
 
+# -- phase L3: several homes ------------------------------------------------------------------------
+
+def several_homes(cfg):
+    """A world of two or three homes, as phase L3 runs them (L4's group teardown left out)."""
+    return (len(cfg.homes) + len(cfg.late_homes) >= 2 and not cfg.one_home
+            and not cfg.group_teardown)
+
+
+def run_scenarios_l3(out):
+    """scenarios.py's scenarios with their homes as written; those of two or more homes."""
+    skipped = []
+    for name in sorted(n for n in dir(scenarios) if n.startswith('scenario_')):
+        created = []
+
+        def mk(*a, **kw):
+            w = REAL_MK(*a, **kw)
+            created.append(w)
+            return w
+        scenarios.mk = mk
+        try:
+            getattr(scenarios, name)()
+        except Exception as e:
+            skipped.append('%s (%s: %s)' % (name, type(e).__name__, str(e)[:60]))
+            continue
+        finally:
+            scenarios.mk = REAL_MK
+        if len(created) != 1 or not several_homes(created[0].cfg):
+            continue
+        out['l3_scenario_' + name[len('scenario_'):]] = (
+            ['# scenarios.py %s, its homes as written' % name] + created[0].M.lines)
+    return skipped
+
+
+def several_homes_seeds(coalesce, count, start=1):
+    """The first `count` seeds from `start` whose random_runs world has two or three homes (a late
+    one included) and no group teardown, with the given coalescing."""
+    seeds = []
+    seed = start
+    while len(seeds) < count:
+        if random_runs.coalesce_of(seed) == coalesce:
+            rnd = random.Random(seed)
+            w = random_runs.make_world(rnd, seed % 3, coalesce)
+            if several_homes(w.cfg):
+                seeds.append(seed)
+        seed += 1
+    return seeds
+
+
+def run_random_l3(out, steps):
+    for coalesce in (False, True):
+        for seed in several_homes_seeds(coalesce, 4):
+            n, w = random_runs.run_episode(seed, steps)
+            out['l3_random_seed%d' % seed] = (
+                ['# random_runs.py seed %d (coalescing %s): %d steps then the fair drain; homes %r, '
+                 'late %r, procs %r, cache %r, inheritance %r'
+                 % (seed, 'on' if coalesce else 'off', n, w.cfg.homes, w.cfg.late_homes, w.cfg.procs,
+                    w.cfg.cache, w.cfg.inheritance)]
+                + w.M.lines)
+
+
 def main():
     if len(sys.argv) != 2:
         print(__doc__.split('\n\n')[3], file=sys.stderr)
@@ -336,6 +422,10 @@ def main():
     run_random(out, 200)
     skipped += ['%s (prio true)' % s for s in run_scenarios(out, prio=True)]
     run_random(out, 200, prio=True)
+    LoggingManager.log_sinks = True
+    failed_l3 = run_scenarios_l3(out)
+    run_random_l3(out, 200)
+    LoggingManager.log_sinks = False
     _os.makedirs(outdir, exist_ok=True)
     total = 0
     for name in sorted(out):
@@ -347,6 +437,10 @@ def main():
     print('%d files, %d bytes' % (len(out), total))
     for s in skipped:
         print('not on one home: %s' % s, file=sys.stderr)
+    for s in failed_l3:
+        print('failed as written (not exported): %s' % s, file=sys.stderr)
+    if failed_l3:
+        sys.exit(1)
 
 
 if __name__ == '__main__':

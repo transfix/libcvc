@@ -128,5 +128,5 @@ if ($nodeExe) { $bashEnv += " NODE='$(ConvertTo-MsysPath $nodeExe)'" }
 $linkScript = ConvertTo-MsysPath (Join-Path $env:CVC_SOURCE_DIR 'bindings\pycvc\wasm\link-host.sh')
 & $script:gitBash -lc "$bashEnv bash '$linkScript'"
 if ($LASTEXITCODE -eq 0) { Write-Host "pycvc-gl(wasm): host binary pycvc_host.wasm linked" }
-else { Write-Host "pycvc-gl(wasm): host link failed — archives installed; link-host.sh is standalone-runnable" }
+else { Write-Host "pycvc-gl(wasm): host link or its node smoke failed — archives installed; link-host.sh is standalone-runnable" }
 Write-Host "pycvc-gl(wasm) build complete"
