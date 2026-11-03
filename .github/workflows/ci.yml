@@ -21,29 +21,30 @@ on:
 env:
   COVERAGE_MIN: '80'
 
-# Concurrency: split into two pools.
-#  * Cheap jobs (format-check, test) cancel in-progress on new pushes for
-#    fast feedback.
-#  * Heavy package jobs use job-level concurrency that does NOT cancel
-#    in-progress, so a long VTK build always finishes and seeds
-#    its cache. Without this, a push during a 22-min VTK build cancels
-#    the run before the post-job cache save can fire, which traps the
-#    workflow in a permanent cold-cache state.
+# Concurrency, workflow level:
+#  * Pull requests: one run per PR (the group names its number). A newer
+#    push cancels the PR's older run, queued or running, so a PR with several
+#    pushes never has more than its latest run on the account's shared
+#    runners. ci-cancel-closed.yml joins the same group when a PR merges or
+#    closes, which cancels the run it leaves behind. (Until 2026-11-03 each PR
+#    run had a group of its own and every push's run ran to the end: on that
+#    day 9 of 28 queued runs were for merged PRs or replaced commits.)
+#  * Pushes (master, tags, ci/full/**): one run per ref at a time, and a newer
+#    push replaces that ref's run still waiting to start. A running run is
+#    not cancelled: merges land faster than a 20-job run clears the shared
+#    runners, so cancelling would leave master with no finished run at all.
+#    Without the group every intermediate master commit's run queued behind
+#    the last (2026-10-30: seven full runs at once, with every other repo's
+#    jobs waiting behind them).
 #
-# (Defined per-job below.)
-#
-# Workflow level, pushes only (master, tags, ci/full/**): one run per ref at
-# a time, and a newer push replaces that ref's run still waiting to start.
-# cancel-in-progress stays false, so a running run finishes and its package
-# jobs seed their caches. Merges land faster than a 20-job run clears the
-# account's shared runners, so without this every intermediate master
-# commit's run queued behind the last (2026-10-30: seven full runs at once,
-# with every other repo's jobs waiting behind them). Pull requests get a group
-# of their own per run (github.run_id), so they behave as before: their cheap
-# jobs cancel per job, their heavy jobs finish.
+# Job level (defined per job below): cheap jobs cancel in-progress per ref;
+# the heavy package jobs don't. That rule once kept a VTK build from being
+# cancelled before its cache was saved. Nothing has been cached since VTK and
+# the other deps came from cvcpkg (2026-07, b640d5ed), so cancelling a heavy
+# job now loses only the minutes it has run.
 concurrency:
-  group: ci-${{ github.event_name == 'pull_request' && format('run-{0}', github.run_id) || format('push-{0}', github.ref) }}
-  cancel-in-progress: false
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('push-{0}', github.ref) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # ───────────────────────────────────────────────────────────────────
 # Per-PR / per-commit artifact set
@@ -683,10 +684,8 @@ jobs:
             enable_grpc: true
             grpc_link: static
     name: package-linux / ${{ matrix.name }}
-    # Heavy job (VTK from-source build): do NOT cancel in-progress runs.
-    # Cancellation strands the cache and forces every subsequent run
-    # back through a 22-min cold rebuild. Once a run completes, the
-    # cache is warm and future runs are fast.
+    # Heavy job: a newer push does not cancel it at the job level (see the
+    # workflow-level concurrency note for PRs and why no cache is at stake).
     concurrency:
       group: ci-${{ github.ref }}-package-linux-${{ matrix.name }}
       cancel-in-progress: false
@@ -1533,7 +1532,7 @@ jobs:
             grpc_link: static
             experimental: true
     name: package-macos / ${{ matrix.name }}
-    # Heavy job: do not cancel in-progress runs (mirrors package-linux).
+    # Heavy job; see package-linux.
     concurrency:
       group: ci-${{ github.ref }}-package-macos-${{ matrix.name }}
       cancel-in-progress: false
@@ -1818,7 +1817,7 @@ jobs:
             enable_grpc: true
             grpc_link: static
     name: package-windows / ${{ matrix.name }}
-    # Do NOT cancel in-progress runs; see package-linux for rationale.
+    # Heavy job; see package-linux.
     concurrency:
       group: ci-${{ github.ref }}-package-windows-${{ matrix.name }}
       cancel-in-progress: false

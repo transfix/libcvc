@@ -646,6 +646,74 @@ windows:
       << r.warnings[0];
 }
 
+// text_view: a scrollable text buffer (height, follow, wrap, on_top); message_input: a field to
+// post a message (hint, multiline, max_lines, max_length, send, on). Both are built-in types, and
+// the loader says what it fixed.
+TEST(AriadneLoader, TextViewAndMessageInput) {
+  SKIP_WITHOUT_YAML();
+  const char *doc = R"(
+meta: { name: T, min_libcvc: "3.4.0" }
+windows:
+  - window: Chat
+    children:
+      - text_view: Log
+        bind: chat.view.text
+        height: 200
+        follow: false
+        wrap: false
+        on_top: (chat-ui-more "chat")
+      - text_view: Plain
+        bind: (state-get "log")
+      - message_input: Say
+        bind: chat.draft
+        hint: Type here
+        multiline: false
+        max_lines: 6
+        max_length: 280
+        send: Post
+        on: (chat-ui-send "chat" (get-attr event "text"))
+      - message_input: Odd
+        bind: other.draft
+        max_lines: 0
+        height: -3
+)";
+  LoadResult r = load_string(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(is_builtin_widget_type("text_view"));
+  EXPECT_TRUE(is_builtin_widget_type("message_input"));
+  const Widget *log = find(r.root, Kind::TextView, "Log");
+  ASSERT_NE(log, nullptr);
+  EXPECT_EQ(log->bind, "chat.view.text");
+  EXPECT_DOUBLE_EQ(log->view_height, 200.0);
+  EXPECT_FALSE(log->follow);
+  EXPECT_FALSE(log->wrap);
+  EXPECT_EQ(log->on_top, "(chat-ui-more \"chat\")");
+  const Widget *plain = find(r.root, Kind::TextView, "Plain");
+  ASSERT_NE(plain, nullptr);
+  EXPECT_DOUBLE_EQ(plain->view_height, 0.0) << "0: the rest of the window";
+  EXPECT_TRUE(plain->follow);
+  EXPECT_TRUE(plain->wrap);
+  EXPECT_EQ(plain->on_top, "");
+  const Widget *say = find(r.root, Kind::MessageInput, "Say");
+  ASSERT_NE(say, nullptr);
+  EXPECT_EQ(say->bind, "chat.draft");
+  EXPECT_EQ(say->hint, "Type here");
+  EXPECT_FALSE(say->multiline);
+  EXPECT_EQ(say->max_lines, 6);
+  EXPECT_EQ(say->max_length, 280);
+  EXPECT_EQ(say->send, "Post");
+  EXPECT_EQ(say->on, "(chat-ui-send \"chat\" (get-attr event \"text\"))");
+  const Widget *odd = find(r.root, Kind::MessageInput, "Odd");
+  ASSERT_NE(odd, nullptr);
+  EXPECT_TRUE(odd->multiline) << "multi-line by default";
+  EXPECT_EQ(odd->max_lines, 4);
+  EXPECT_EQ(odd->send, "") << "no send button by default";
+  ASSERT_EQ(r.warnings.size(), 2u);
+  EXPECT_NE(r.warnings[0].find("message_input 'Odd' has no on:"), std::string::npos)
+      << r.warnings[0];
+  EXPECT_NE(r.warnings[1].find("max_lines must be >= 1"), std::string::npos) << r.warnings[1];
+}
+
 // radio: and radio_row: take a combo's keys (options, values, def, on) and build Kind::Radio,
 // stacked or side by side.
 TEST(AriadneLoader, RadioAndRadioRow) {

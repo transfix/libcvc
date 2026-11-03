@@ -202,8 +202,8 @@ void AppRuntime::set_host_mouse(MouseControls mouse) {
 namespace {
 
 bool any_mouse_rows(const MouseControls &m) {
-  return !m.look.empty() || !m.sensitivity.empty() || !m.invert_y.empty() || !m.invert_x.empty() ||
-         !m.distance.empty();
+  return !m.look.empty() || !m.steer.empty() || !m.sensitivity.empty() || !m.invert_y.empty() ||
+         !m.invert_x.empty() || !m.distance.empty();
 }
 
 // The Controls window: the host's pointer settings, then every key binding, with its keys and a
@@ -217,6 +217,8 @@ Widget keys_window(const std::vector<KeyBinding> &bindings, const MouseControls 
       look.values = {"0", "1"};
       kids.push_back(std::move(look));
     }
+    if (!mouse.steer.empty())
+      kids.push_back(checkbox(mouse.steer_label, mouse.steer));
     if (!mouse.sensitivity.empty())
       kids.push_back(slider_float("Sensitivity", mouse.sensitivity, mouse.sensitivity_lo,
                                   mouse.sensitivity_hi, 0.25, "%.2f deg/px"));
@@ -508,7 +510,7 @@ void collect_programs(const Widget &w, const FunctionScope *functions,
   }
   const std::string where = "widget '" + (w.id.empty() ? w.label : w.id) + "'";
   for (const std::string *p :
-       {&w.on, &w.on_click, &w.on_hover, &w.on_drag, &w.on_drag_start, &w.on_drag_end})
+       {&w.on, &w.on_click, &w.on_hover, &w.on_drag, &w.on_drag_start, &w.on_drag_end, &w.on_top})
     if (!p->empty())
       out.push_back({where, *p, functions, declared});
   for (const Widget &c : w.children)

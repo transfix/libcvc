@@ -161,7 +161,10 @@ void check_gradient(const se2_model &m0, const se2_windows &w, const char *what)
       const double an = g[offsets[leaf] + i];
       const double err = std::fabs(an - fd) / (1e-6 + std::fabs(fd) + std::fabs(an));
       worst = std::max(worst, err);
-      EXPECT_LT(err, 2e-5) << name << "[" << i << "]: analytic " << an << ", central " << fd;
+      // Or within central differences' own rounding at h = 1e-6, for an entry whose gradient is
+      // itself of that order.
+      EXPECT_TRUE(err < 2e-5 || std::fabs(an - fd) < 1e-9)
+          << name << "[" << i << "]: analytic " << an << ", central " << fd;
       ++checked;
     }
     ++leaf;
@@ -178,6 +181,99 @@ TEST(PhSe2Train, GradientMatchesFiniteDifferences) {
 TEST(PhSe2Train, ModulatedGradientMatchesFiniteDifferences) {
   check_gradient(small_modulated_model(3),
                  synthetic_windows(small_modulated_model(4), 3, 16, 0.02, 5), "modulated");
+}
+
+namespace {
+
+// small_modulated_model's shape with the potential `pot`: with terrain, two more inputs (the
+// attitude's grade and roll), and V's levels the terrain's coefficients.
+se2_model small_potential_model(std::uint64_t seed, se2_potential pot) {
+  se2_init init;
+  init.control_dim = 1;
+  init.modulation_dim = 1;
+  init.potential = pot;
+  init.features = 8;
+  init.initial_randomness = 0.3;
+  init.initial_control_gp_mean_scale = 1.0;
+  init.initial_log_std = -2.0;
+  const std::vector<double> scale(pot == se2_potential::terrain ? 4 : 2, 1.0);
+  se2_model m = se2_model::initialize(init, seed, {6.0, 0.5, 0.3}, scale, 0.02);
+  rng r(seed + 99);
+  for (se2_gp *g : {&m.params.D, &m.params.G, &m.params.V})
+    for (auto &x : g->mean)
+      x = 0.3 * r.normal();
+  for (auto &x : m.params.V.level)
+    x = 2.0 * r.normal();
+  return m;
+}
+
+// synthetic_windows for any input count: smooth inputs (a rolling grade and roll last, when the
+// truth reads the terrain).
+se2_windows synthetic_windows_n(const se2_model &truth, int flights, int rows, double noise,
+                                std::uint64_t seed) {
+  const se2_vehicle<double> veh(truth.setup, se2_draw<double>(truth), truth.twist_scale);
+  const int ni = truth.setup.input_dim(), width = 6 + ni;
+  se2_flights f;
+  f.count = flights;
+  f.rows = rows;
+  f.width = width;
+  f.data.resize(static_cast<std::size_t>(flights) * rows * width);
+  rng r(seed);
+  for (int fl = 0; fl < flights; ++fl) {
+    double s[6] = {r.normal(),       r.normal(),       r.normal(),
+                   4.0 + r.normal(), 0.1 * r.normal(), 0.1 * r.normal()};
+    std::vector<double> amp(ni), w(ni);
+    for (int j = 0; j < ni; ++j) {
+      amp[j] = 0.5 * r.normal();
+      w[j] = 1.0 + r.uniform();
+    }
+    for (int k = 0; k < rows; ++k) {
+      double *row = f.data.data() + (static_cast<std::size_t>(fl) * rows + k) * width;
+      std::vector<double> u(ni);
+      for (int j = 0; j < ni; ++j)
+        u[j] = amp[j] * std::sin(w[j] * 0.02 * k + j);
+      if (k > 0) {
+        double next[6];
+        veh.interval_step(s, u.data(), truth.interval, truth.substeps, nullptr, next);
+        std::copy(next, next + 6, s);
+      }
+      std::copy(s, s + 6, row);
+      for (int j = 0; j < ni; ++j)
+        row[6 + j] = k ? u[j] : 0.0;
+    }
+  }
+  return cut_windows(noise > 0 ? add_observation_noise(f, noise, seed + 1) : f, rows, rows);
+}
+
+} // namespace
+
+// The reverse pass without a potential, and with the terrain's in its place: the terrain's two
+// coefficients read the attitude inputs, V's GP and position get no gradient.
+TEST(PhSe2Train, PotentialOptionsGradientsMatchFiniteDifferences) {
+  for (const se2_potential pot : {se2_potential::none, se2_potential::terrain}) {
+    const char *what = pot == se2_potential::none ? "no potential" : "terrain potential";
+    check_gradient(small_potential_model(3, pot),
+                   synthetic_windows_n(small_potential_model(4, pot), 3, 16, 0.02, 5), what);
+  }
+}
+
+// A model without V(x, y) is a cvc-ph-se2/3 file: it round-trips exactly, and its objective is
+// the same after loading.
+TEST(PhSe2Train, PotentialOptionsRoundTrip) {
+  for (const se2_potential pot : {se2_potential::none, se2_potential::terrain}) {
+    const se2_model m = small_potential_model(7, pot);
+    const std::string js = m.to_json();
+    EXPECT_NE(js.find("\"format\":\"cvc-ph-se2/3\""), std::string::npos);
+    const se2_model back = se2_model::from_json(js);
+    EXPECT_EQ(back.setup.potential, pot);
+    EXPECT_EQ(back.setup.input_dim(), m.setup.input_dim());
+    EXPECT_EQ(back.to_json(), js);
+    const se2_windows w = synthetic_windows_n(m, 2, 12, 0.0, 9);
+    EXPECT_EQ(se2_rollout_objective(m, w, nullptr, nullptr, 0.0).value,
+              se2_rollout_objective(back, w, nullptr, nullptr, 0.0).value);
+  }
+  // A world model is still /1 (no modulations) or /2.
+  EXPECT_NE(small_model(1).to_json().find("cvc-ph-se2/1"), std::string::npos);
 }
 
 // JAX's autodiff of the same objective, on the Humvee fit and two held-out windows.

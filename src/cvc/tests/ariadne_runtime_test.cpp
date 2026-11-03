@@ -245,6 +245,27 @@ struct MockBackend : Backend {
     rec(std::string("input_text:") + l + "=" + current);
     return string_ret;
   }
+  MessageEdit message_ret{};             // programmable return for the next message_input()
+  std::string last_message_current;      // the draft the core handed message_input()
+  MessageInputOptions last_message_opts; // and the options
+  MessageEdit message_input(const char *l, const char *, const std::string &current,
+                            const MessageInputOptions &o) override {
+    last_message_current = current;
+    last_message_opts = o;
+    rec(std::string("message_input:") + l + "=" + current);
+    return message_ret;
+  }
+  TextViewEvent text_view_ret{};                  // programmable return for the next text_view()
+  std::string last_text_view, last_text_view_key; // the text and key the core handed text_view()
+  TextViewOptions last_text_view_opts;
+  TextViewEvent text_view(const char *l, const char *key, const std::string &text,
+                          const TextViewOptions &o) override {
+    last_text_view = text;
+    last_text_view_key = key ? key : "";
+    last_text_view_opts = o;
+    rec(std::string("text_view:") + l);
+    return text_view_ret;
+  }
   int focus_requests = 0; // focus_next_widget() calls (autofocus:)
   void focus_next_widget() override {
     ++focus_requests;
@@ -411,6 +432,96 @@ TEST(AriadneRuntime, InputTextCommitsValueAndFiresOn) {
   EXPECT_EQ(sent, 0);
   rt.drain();
   EXPECT_EQ(sent, 1);
+}
+
+// A message_input sends on Enter: its on: program reads the message as (get-attr event "text"),
+// and the draft at its bind is cleared. Losing focus keeps the draft there.
+TEST(AriadneRuntime, MessageInputSendsToItsProgramAndClearsTheDraft) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget w =
+      message_input("Message", "chat.draft", "(state-set \"chat.sent\" (get-attr event \"text\"))");
+  w.hint = "Say something";
+  w.multiline = false;
+  w.max_lines = 3;
+  w.max_length = 500;
+  rt.set_root(group({w}));
+  cvc::state &root = cvc::state::instance(app);
+
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(mb.last_message_opts.hint, "Say something");
+  EXPECT_FALSE(mb.last_message_opts.multiline);
+  EXPECT_EQ(mb.last_message_opts.max_lines, 3);
+  EXPECT_EQ(mb.last_message_opts.max_length, 500);
+
+  mb.message_ret = {true, true, false, std::string("half a")}; // focus left mid-message
+  rt.render();
+  EXPECT_EQ(root("chat.draft").value(), "half a");
+  mb.message_ret = {};
+  rt.render();
+  EXPECT_EQ(mb.last_message_current, "half a") << "the draft comes back to the field";
+
+  mb.message_ret = {true, false, true, std::string("line one\nline two")}; // Enter
+  rt.render();
+  mb.message_ret = {};
+  EXPECT_EQ(root("chat.draft").value(), "") << "sent: the draft is done with";
+  for (int i = 0; i < 100 && root("chat.sent").value().empty(); ++i)
+    rt.drain(); // the program runs on the app scheduler, a drain at a time
+  EXPECT_EQ(root("chat.sent").value(), "line one\nline two");
+}
+
+// A text_view hands the backend the text at its bind (or a computed one) and its options, keyed by
+// the bound path; when the backend reports the top, on_top runs (not while disabled).
+TEST(AriadneRuntime, TextViewShowsItsTextAndRunsOnTopAtTheTop) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state &root = cvc::state::instance(app);
+  root("chat.text").value(std::string("a\nb\nc"));
+  root("tops").value(std::string("0"));
+  root("off").value(std::string("0"));
+  Widget w =
+      text_view("Log", "chat.text", "(state-set \"tops\" (str (+ (int (state-get \"tops\")) 1)))");
+  w.view_height = 120.0;
+  w.follow = false;
+  w.wrap = false;
+  w.disabled_when = "(= (state-get \"off\") \"1\")";
+  Widget calc = text_view("Calc", "(string.join (list \"x\" \"y\") \" \")");
+  rt.set_root(group({w}));
+
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(mb.last_text_view, "a\nb\nc");
+  EXPECT_EQ(mb.last_text_view_key, "chat.text");
+  EXPECT_FLOAT_EQ(mb.last_text_view_opts.height, 120.0f);
+  EXPECT_FALSE(mb.last_text_view_opts.follow);
+  EXPECT_FALSE(mb.last_text_view_opts.wrap);
+
+  mb.text_view_ret.at_top = true;
+  rt.render();
+  mb.text_view_ret.at_top = false;
+  for (int i = 0; i < 100 && root("tops").value() != "1"; ++i)
+    rt.drain();
+  EXPECT_EQ(root("tops").value(), "1");
+
+  root("off").value(std::string("1"));
+  mb.text_view_ret.at_top = true;
+  rt.render();
+  rt.drain();
+  mb.text_view_ret.at_top = false;
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(root("tops").value(), "1") << "a disabled view runs nothing";
+
+  rt.set_root(group({calc}));
+  rt.render();
+  EXPECT_EQ(mb.last_text_view, "x y");
+  EXPECT_NE(mb.last_text_view_key.find("#text_view"), std::string::npos)
+      << "a computed text is keyed by its place: " << mb.last_text_view_key;
 }
 
 // Phase 0a: Kind::InputInt reuses the text primitive — the core seeds + stringifies the int on the
@@ -6717,8 +6828,8 @@ TEST(AriadneAppRuntime, KeysWindowListsTheDocumentsAndTheHostsKeys) {
 }
 
 // The Controls window shows the host's mouse settings above the keys (set_host_mouse), bound where
-// its camera reads them: the look (drag to look, or mouse look), the sensitivity, the inverted
-// axes, and a note on what the look does there.
+// its camera reads them: the look (drag to look, or mouse look), whether a drag steers, the
+// sensitivity, the inverted axes, and a note on what the look does there.
 TEST(AriadneAppRuntime, ControlsWindowShowsTheHostsMouseSettings) {
   if (!have_yaml())
     GTEST_SKIP() << "libcvc built without yaml-cpp";
@@ -6728,6 +6839,8 @@ TEST(AriadneAppRuntime, ControlsWindowShowsTheHostsMouseSettings) {
   art.set_backend(mb);
   MouseControls m;
   m.look = "/cam.settings.mouse_look";
+  m.steer = "/cam.settings.primary_drag_steers";
+  m.steer_label = "Drag the floor to face it";
   m.sensitivity = "/cam.settings.mouse_sensitivity";
   m.invert_y = "/cam.settings.invert_pitch";
   m.invert_x = "/cam.settings.invert_yaw";
@@ -6745,6 +6858,7 @@ TEST(AriadneAppRuntime, ControlsWindowShowsTheHostsMouseSettings) {
   art.runtime().render();
   ASSERT_TRUE(mb.saw("begin_window:Controls(closable)")) << "set_host_mouse alone gives the window";
   EXPECT_TRUE(mb.saw("combo:Look=0")) << "drag to look, as the camera has it";
+  EXPECT_TRUE(mb.saw("checkbox:Drag the floor to face it")) << "in the host's words";
   EXPECT_TRUE(mb.saw("slider_double:Sensitivity"));
   EXPECT_TRUE(mb.saw("checkbox:Invert up/down"));
   EXPECT_TRUE(mb.saw("checkbox:Invert left/right"));
@@ -6758,11 +6872,13 @@ TEST(AriadneAppRuntime, ControlsWindowShowsTheHostsMouseSettings) {
   // Picking Mouse look, and inverting up/down, write where the camera reads them.
   mb.combo_ret = IndexEdit{true, true, 1};
   mb.checkbox_by_label["Invert up/down"] = BoolEdit{true, true, true};
+  mb.checkbox_by_label["Drag the floor to face it"] = BoolEdit{true, true, true};
   art.runtime().render();
   mb.combo_ret = IndexEdit{};
   mb.checkbox_by_label.clear();
   EXPECT_EQ(st("cam.settings.mouse_look").value(), "1");
   EXPECT_EQ(st("cam.settings.invert_pitch").value(), "1");
+  EXPECT_EQ(st("cam.settings.primary_drag_steers").value(), "1");
   mb.log.clear();
   art.runtime().render();
   EXPECT_TRUE(mb.saw("combo:Look=1"));

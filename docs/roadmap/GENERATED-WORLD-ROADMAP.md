@@ -185,6 +185,13 @@ The conference is the world's second consumer. Peers must see the same world and
   the bundle at `/bundle`; arigl's needs the same, or `building_library:` as a fetched URI.
 - **Large worlds**: terrain tiles and building LOD (`VISIBILITY-AND-LOD-ROADMAP.md`) for worlds
   past a few km, where one 2049² ground mesh stops being cheap.
+  - Landed: a rebuild no longer blocks the page. Generating in one call froze the browser on a
+    10.5 km world (a 14.8 s stall on the deployed gallery, 2026-11-02), so `world_builder` and
+    `surface_painter` step the world and its texture as a sliced task (`world.progress`,
+    `world.phase`, Stop); the water's ground is sampled once with the world instead of every few
+    frames, and arigl logs at info level, not debug. Still one call each, so still a hitch on
+    single-threaded wasm: the scatter, the streets, the city, the roads, the props, and handing
+    the new 2049² mesh to VTK.
 - **Dynamic props, demo3's way**, for vehicles and avatars on the world: unregistered slot nodes,
   a pose gate, out of the bounds fit, non-casting. demo3 does this by hand. A libcvc node type
   would make it a scene key.

@@ -3,9 +3,11 @@
 // (FontScaleDpi); this sets them as it does:
 //  - a document's px scale with them: a window's size: and pos:, a column's width, the area a
 //    group's background: takes;
-//  - a window opens inside the view: an authored size larger than the view stops at its edge, and
-//    an authored pos past the edge moves in until all of the window shows (a window that fits its
-//    content: its smallest fit at first, then all of it once measured);
+//  - on a phone, a window whose authored place or size does not fit opens collapsed, its title
+//    under the others' from the top of the view (§5.14); opened, it unfolds from its title, as
+//    wide as the view and no taller than the room below;
+//  - a slider's label stays in view in a window that fits its widgets: ImGui's 16 lines' width
+//    for such a widget is most of a phone's, and the window stops at the view's edge;
 //  - the geometry persisted at tree.<id>.geometry is in the document's px, not the device's;
 //  - at UI size 1 and pixel ratio 1 nothing changes: the same document on a laptop opens where it
 //    says, at the size it says.
@@ -53,7 +55,8 @@ std::string vec(ImVec2 v) {
 // The conference's layout, cut down: My Camera has a pos: and a size:, Users a pos: past a
 // phone's width and no size, and a row of px columns as AppRuntime's Controls window lays out.
 // Card holds a group with a background: 120 px tall (its picture a name no host published, so
-// only the area is drawn).
+// only the area is drawn). Prefs fits its widgets: a slider with a long label, placed below a
+// phone's view.
 ari::Widget conference() {
   ari::Widget cam = ari::window("My Camera", {ari::text("self view")});
   cam.id = "cam";
@@ -82,7 +85,13 @@ ari::Widget conference() {
   card.pos_y = 620.0f;
   card.size.w = ari::Extent{ari::Unit::Px, 300.0f};
   card.size.h = ari::Extent{ari::Unit::Px, 200.0f};
-  return ari::group({cam, users, card});
+  ari::Widget prefs = ari::window(
+      "Prefs", {ari::slider_float("Camera distance", "prefs.distance", 1.0, 30.0, 10.0)});
+  prefs.id = "prefs";
+  prefs.has_pos = true;
+  prefs.pos_x = 20.0f;
+  prefs.pos_y = 700.0f;
+  return ari::group({cam, users, card, prefs});
 }
 
 // Each group background's area, as the base lays it out.
@@ -129,6 +138,17 @@ struct Session {
     rt.render();
     ImGui::Render();
   }
+  // Open the windows that opened collapsed, as a tap on each one's arrow does.
+  void open(std::initializer_list<const char *> ids) {
+    ImGui::GetIO().DeltaTime = 1.0f / 60.0f;
+    ImGui::NewFrame();
+    for (const char *id : ids)
+      ImGui::SetWindowCollapsed((std::string("###") + id).c_str(), false);
+    rt.render();
+    ImGui::Render();
+    for (int f = 0; f < 3; ++f)
+      frame();
+  }
   std::string geometry(const std::string &id) {
     return cvc::state::instance(app)("ui.tree." + id + ".geometry").value();
   }
@@ -153,24 +173,41 @@ int main() {
   return 0;
 #else
   {
-    // A phone: 390 x 844 CSS px at a pixel ratio of 3, with a touch device's UI size, 1.25.
+    // A phone: 390 x 844 CSS px at a pixel ratio of 3, with a touch device's UI size, 1.25. None
+    // of the laptop layout's windows fits where it was put: My Camera's 360 x 560 px are 1350 x
+    // 2100 device px, Users' and Prefs' pos: are past the view's edges, and Card's 300 x 200 at
+    // (20, 620) would run off its bottom.
     const float k = 1.25f * 3.0f;
     const ImVec2 view(1170.0f, 2532.0f);
     Session s(view, 1.25f, 3.0f);
-    const ImGuiWindow *cam = find("cam"), *users = find("users");
-    chk(cam && users, "both windows are drawn");
-    if (cam && users) {
-      chk(near(cam->Size.x, view.x) && near(cam->Size.y, 560.0f * k),
-          "My Camera's 360 x 560 px are 1350 x 2100 device px, stopped at the view's 1170 (" +
-              vec(cam->Size) + ")");
-      chk(cam->Pos.x >= 0.0f && cam->Pos.x + cam->Size.x <= view.x + 0.5f &&
-              near(cam->Pos.y, 40.0f * k),
-          "and it opens all in view, at its pos:'s height (" + vec(cam->Pos) + ")");
-      chk(users->Pos.x >= 0.0f && users->Pos.x + users->Size.x <= view.x + 0.5f &&
-              users->Pos.x < 390.0f * k && near(users->Pos.y, 40.0f * k),
-          "Users' pos: is past the phone's edge: it moves in until all of it shows (" +
-              vec(users->Pos) + " + " + vec(users->Size) + ")");
-    }
+    const ImGuiWindow *cam = find("cam"), *users = find("users"), *card = find("card"),
+                      *prefs = find("prefs");
+    chk(cam && users && card && prefs, "the windows are drawn");
+    if (!(cam && users && card && prefs))
+      return 1;
+    const float title = cam->TitleBarHeight;
+    chk(cam->Collapsed && users->Collapsed && card->Collapsed && prefs->Collapsed,
+        "each opens collapsed");
+    chk(cam->Pos.x == 0.0f && users->Pos.x == 0.0f && card->Pos.x == 0.0f && prefs->Pos.x == 0.0f &&
+            near(cam->Pos.y, 0.0f) && near(users->Pos.y, title) &&
+            near(card->Pos.y, 2.0f * title) && near(prefs->Pos.y, 3.0f * title),
+        "their titles one under another from the top of the view (" + vec(cam->Pos) + ", " +
+            vec(users->Pos) + ", " + vec(card->Pos) + ", " + vec(prefs->Pos) + ")");
+    s.open({"cam", "users", "card", "prefs"});
+    chk(!cam->Collapsed && near(cam->Pos.y, 0.0f) && near(cam->Size.x, view.x) &&
+            near(cam->Size.y, 560.0f * k),
+        "opened, My Camera unfolds from its title, as wide as the view, its 560 px tall (" +
+            vec(cam->Pos) + " + " + vec(cam->Size) + ")");
+    chk(near(card->Pos.y, 2.0f * title) && near(card->Size.x, view.x) &&
+            near(card->Size.y, 200.0f * k),
+        "and Card from its own (" + vec(card->Pos) + " + " + vec(card->Size) + ")");
+    chk(users->Pos.x + users->Size.x <= view.x + 0.5f &&
+            prefs->Pos.x + prefs->Size.x <= view.x + 0.5f,
+        "the windows that fit their widgets stop at the view's edge (" + vec(users->Size) + ", " +
+            vec(prefs->Size) + ")");
+    chk(prefs->ScrollMax.x == 0.0f,
+        "the slider leaves its label room inside the view: nothing to scroll to (" +
+            std::to_string(prefs->ScrollMax.x) + ")");
     const ImGuiTable *t = row_table();
     chk(t && near(t->Columns[0].WidthGiven, 100.0f * k) &&
             near(t->Columns[1].WidthGiven, 80.0f * k),
@@ -182,7 +219,7 @@ int main() {
     chk(s.be.backdrop_size.size() == 1 && s.be.backdrop_size[0].y >= 120.0f * k - 0.5f,
         "the group's background: takes its 120 px at the UI's scale (" +
             (s.be.backdrop_size.empty() ? std::string("none") : vec(s.be.backdrop_size[0])) + ")");
-    chk(s.geometry("cam") == "0,40,312,560",
+    chk(s.geometry("cam") == "0,0,312,560",
         "the persisted geometry is in the document's px (" + s.geometry("cam") + ")");
   }
   {
@@ -192,6 +229,9 @@ int main() {
     chk(cam && near(cam->Pos.x, 20.0f) && near(cam->Pos.y, 40.0f) && near(cam->Size.x, 360.0f) &&
             near(cam->Size.y, 560.0f),
         "on a laptop My Camera opens at its pos: and size:");
+    chk(cam && !cam->Collapsed && find("card") && !find("card")->Collapsed && find("prefs") &&
+            !find("prefs")->Collapsed,
+        "and nothing opens collapsed");
     chk(users && near(users->Pos.x, 390.0f) && near(users->Pos.y, 40.0f), "and Users at its pos:");
     const ImGuiTable *t = row_table();
     chk(t && near(t->Columns[0].WidthGiven, 100.0f) && near(t->Columns[1].WidthGiven, 80.0f),

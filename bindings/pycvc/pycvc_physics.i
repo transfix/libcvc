@@ -25,8 +25,8 @@
 //  * Handles (bodies, vehicles) cross as ints, the id's value; a stale id raises, as in C++.
 //  * Vectors go in as any 3-sequence, quaternions as (w, x, y, z); state comes back as dicts of
 //    tuples and floats, the same numbers C++ reads (snapshot_json() is C++'s own serializer).
-//  * Lifetimes: a nav_plant keeps its physics_world alive, a physics_binding its world and app,
-//    and a sim_world handle the plant set on it.
+//  * Lifetimes: a nav_plant (and a dyn_bike_plant given a world) keeps its physics_world alive, a
+//    physics_binding its world and app, and a sim_world handle the plant set on it.
 
 %{
 #include <cvc/geometry/geometry.h>
@@ -35,6 +35,7 @@
 #include <cvc/nav/sim_world.h>
 #include <cvc/nav/terrain.h>
 #include <cvc/physics/backend.h>
+#include <cvc/physics/dyn_bike_plant.h>
 #include <cvc/physics/nav_plant.h>
 #include <cvc/physics/snapshot_json.h>
 #include <cvc/physics/vehicle.h>
@@ -380,6 +381,20 @@ PyObject *plant_state_dict(const cvc::nav::plant_state &s) {
   put(d, "load_transfer", PyFloat_FromDouble(s.load_transfer));
   put(d, "pitch", PyFloat_FromDouble(s.pitch));
   put(d, "roll", PyFloat_FromDouble(s.roll));
+  return d;
+}
+
+// A dyn_bike_plant's books (J), with flow() as "flow".
+PyObject *dyn_books_dict(const ph::dyn_bike_books &b) {
+  PyObject *d = PyDict_New();
+  const std::pair<const char *, double> v[] = {
+      {"kinetic", b.kinetic},       {"drive", b.drive},     {"brake", b.brake},
+      {"dissipated", b.dissipated}, {"floor", b.floor},     {"grade", b.grade},
+      {"limiter", b.limiter},       {"contact", b.contact}, {"residual", b.residual},
+      {"flow", b.flow()},
+  };
+  for (const auto &kv : v)
+    put(d, kv.first, PyFloat_FromDouble(kv.second));
   return d;
 }
 
@@ -977,6 +992,146 @@ public:
   }
 }
 
+// ── cvc::physics::dyn_bike_plant ──────────────────────────────────────────────
+
+%feature("kwargs") cvc::physics::dyn_bike_plant::dyn_bike_plant;
+// With a world the plant borrows it: keep it alive with the plant.
+%pythonappend cvc::physics::dyn_bike_plant::dyn_bike_plant %{
+  self._world = world
+%}
+
+namespace cvc {
+namespace physics {
+class dyn_bike_plant {
+public:
+  ~dyn_bike_plant();
+  int size() const;
+  int substeps() const;
+  bool collides() const;
+};
+} // namespace physics
+} // namespace cvc
+
+%extend cvc::physics::dyn_bike_plant {
+  // The dynamic single-track vehicle as a sim_world's plant (dyn_bike_plant.h): tires, load
+  // transfer, actuator lag and the port-Hamiltonian energy books, no Jolt in the loop. Agent i
+  // drives descs[i % len(descs)] on a flat ground of grip `mu` at ground_z. With `world` (a
+  // physics_world, kept alive by the plant) each chassis is a box in it that collides with its
+  // bodies, except `ground_bodies` (ids), the ground the wheels drive on.
+  dyn_bike_plant(const std::vector<cvc::physics::vehicle_desc> &descs,
+                 cvc::physics::world *world = nullptr, PyObject *ground_bodies = nullptr,
+                 double mu = 0.9, double substep = 0.01, double drive_lag = -1.0,
+                 bool driver = true, double latency = 0.1, double brake_margin = 0.8,
+                 double metres_per_world_unit = 1.0, double ground_z = 0.0,
+                 double chassis_friction = 0.3) {
+    cvc::physics::dyn_bike_plant_options o;
+    o.plant.latency = latency;
+    o.plant.brake_margin = brake_margin;
+    o.plant.metres_per_world_unit = metres_per_world_unit;
+    o.plant.ground_z = ground_z;
+    o.mu = mu;
+    o.substep = substep;
+    o.drive_lag = drive_lag;
+    o.driver = driver;
+    o.physics = world;
+    o.chassis_friction = chassis_friction;
+    if (ground_bodies && ground_bodies != Py_None) {
+      PyObject *seq = PySequence_Fast(ground_bodies, "dyn_bike_plant: ground_bodies");
+      if (!seq) {
+        PyErr_Clear();
+        throw std::invalid_argument("dyn_bike_plant: ground_bodies is a sequence of body ids");
+      }
+      const Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
+      for (Py_ssize_t k = 0; k < n; ++k) {
+        const long id = PyLong_AsLong(PySequence_Fast_GET_ITEM(seq, k));
+        if (PyErr_Occurred()) {
+          PyErr_Clear();
+          Py_DECREF(seq);
+          throw std::invalid_argument("dyn_bike_plant: ground_bodies is a sequence of body ids");
+        }
+        o.ground_bodies.push_back(pycvc_physics::body_of(id));
+      }
+      Py_DECREF(seq);
+    }
+    if (!world && !o.ground_bodies.empty())
+      throw std::invalid_argument("dyn_bike_plant: ground_bodies needs a world");
+    return new cvc::physics::dyn_bike_plant(descs, o);
+  }
+  std::string kind() const { return "dynamic"; }
+  // Agent i as nav reads it (normalized frame): x, y, heading, speed, steer, and tire_use (the
+  // most used tire's slip angle over its peak); the single track has no load transfer, pitch or
+  // roll of its own.
+  PyObject *state(int i) const {
+    if (i < 0 || i >= $self->size())
+      throw std::invalid_argument("dyn_bike_plant.state: no agent " + std::to_string(i));
+    return pycvc_physics::plant_state_dict($self->state(i));
+  }
+  // Agent i's model state, in SI: the rear axle (x, y, m), the heading psi, the body's forward
+  // and lateral speed at the centre of gravity (vx, vy, m/s), the yaw rate r (rad/s), the
+  // steering angle delta (rad) and the drive actuator a (m/s^2).
+  PyObject *body(int i) const {
+    if (i < 0 || i >= $self->size())
+      throw std::invalid_argument("dyn_bike_plant.body: no agent " + std::to_string(i));
+    const auto &s = $self->body(i);
+    return Py_BuildValue("{s:d,s:d,s:d,s:d,s:d,s:d,s:d,s:d}", "x", s.x, "y", s.y, "psi", s.psi,
+                         "vx", s.vx, "vy", s.vy, "r", s.r, "delta", s.delta, "a", s.a);
+  }
+  // Agent i's energy books (J) since attach, and over the last tick: kinetic, drive, brake,
+  // dissipated, floor, grade, limiter, contact, residual, and flow (everything that moved).
+  PyObject *books(int i) const {
+    if (i < 0 || i >= $self->size())
+      throw std::invalid_argument("dyn_bike_plant.books: no agent " + std::to_string(i));
+    return pycvc_physics::dyn_books_dict($self->books(i));
+  }
+  PyObject *last_tick(int i) const {
+    if (i < 0 || i >= $self->size())
+      throw std::invalid_argument("dyn_bike_plant.last_tick: no agent " + std::to_string(i));
+    return pycvc_physics::dyn_books_dict($self->last_tick(i));
+  }
+  // Agent i's kinetic energy at attach (J), the books' start.
+  double kinetic_at_attach(int i) const {
+    if (i < 0 || i >= $self->size())
+      throw std::invalid_argument("dyn_bike_plant.kinetic_at_attach: no agent " +
+                                  std::to_string(i));
+    return $self->kinetic_at_attach(i);
+  }
+  // With a world: agent i's chassis box (None without one), the substeps of its last tick in
+  // which it collided and all since attach, and the agent it touched deepest last tick (-1 none).
+  PyObject *chassis(int i) const {
+    if (i < 0 || i >= $self->size())
+      throw std::invalid_argument("dyn_bike_plant.chassis: no agent " + std::to_string(i));
+    if (!$self->collides())
+      Py_RETURN_NONE;
+    return PyLong_FromUnsignedLong($self->chassis(i).value);
+  }
+  int collisions_tick(int i) const {
+    if (i < 0 || i >= $self->size())
+      throw std::invalid_argument("dyn_bike_plant.collisions_tick: no agent " + std::to_string(i));
+    return $self->collisions_tick(i);
+  }
+  long collisions(int i) const {
+    if (i < 0 || i >= $self->size())
+      throw std::invalid_argument("dyn_bike_plant.collisions: no agent " + std::to_string(i));
+    return $self->collisions(i);
+  }
+  int vehicle_contact_step(int i) const {
+    if (i < 0 || i >= $self->size())
+      throw std::invalid_argument("dyn_bike_plant.vehicle_contact_step: no agent " +
+                                  std::to_string(i));
+    return $self->vehicle_contact_step(i);
+  }
+  // The plant's settings as a dict.
+  PyObject *options() const {
+    const cvc::physics::dyn_bike_plant_options &o = $self->options();
+    return Py_BuildValue("{s:d,s:d,s:d,s:O,s:d,s:d,s:d,s:d,s:d}", "mu", o.mu, "substep",
+                         o.substep, "drive_lag", o.drive_lag, "driver",
+                         o.driver ? Py_True : Py_False, "latency", o.plant.latency,
+                         "brake_margin", o.plant.brake_margin, "metres_per_world_unit",
+                         o.plant.metres_per_world_unit, "ground_z", o.plant.ground_z,
+                         "chassis_friction", o.chassis_friction);
+  }
+}
+
 // ── plant selection and terrain on a sim_world (pycvc_nav.i's handles) ────────
 
 %inline %{
@@ -995,8 +1150,8 @@ void sim_world_hold(PyObject *handle, PyObject *plant) {
 } // namespace
 
 // Select a sim_world's plant: a pycvc.nav_plant (its agents drive the physics world's
-// vehicles), or None for nav's own kinematic bicycle (sim_world::set_plant). The handle keeps
-// the plant alive while it is set.
+// vehicles), a pycvc.dyn_bike_plant (the dynamic single-track vehicle), or None for nav's own
+// kinematic bicycle (sim_world::set_plant). The handle keeps the plant alive while it is set.
 PyObject *nav_sim_world_set_plant(PyObject *handle, PyObject *plant) {
   cvc::nav::sim_world *sw = sim_world_from(handle);
   if (!plant || plant == Py_None) {
@@ -1005,9 +1160,15 @@ PyObject *nav_sim_world_set_plant(PyObject *handle, PyObject *plant) {
     Py_RETURN_NONE;
   }
   void *p = nullptr;
-  if (!SWIG_IsOK(SWIG_ConvertPtr(plant, &p, SWIGTYPE_p_cvc__physics__nav_plant, 0)) || !p)
-    throw std::invalid_argument("nav_sim_world_set_plant: expected a pycvc.nav_plant or None");
-  sw->set_plant(static_cast<cvc::physics::nav_plant *>(p));
+  cvc::nav::vehicle_plant *vp = nullptr;
+  if (SWIG_IsOK(SWIG_ConvertPtr(plant, &p, SWIGTYPE_p_cvc__physics__nav_plant, 0)) && p)
+    vp = static_cast<cvc::physics::nav_plant *>(p);
+  else if (SWIG_IsOK(SWIG_ConvertPtr(plant, &p, SWIGTYPE_p_cvc__physics__dyn_bike_plant, 0)) && p)
+    vp = static_cast<cvc::physics::dyn_bike_plant *>(p);
+  if (!vp)
+    throw std::invalid_argument(
+        "nav_sim_world_set_plant: expected a pycvc.nav_plant, a pycvc.dyn_bike_plant or None");
+  sw->set_plant(vp);
   sim_world_hold(handle, plant);
   Py_RETURN_NONE;
 }

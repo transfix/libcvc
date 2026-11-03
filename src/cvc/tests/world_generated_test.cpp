@@ -390,3 +390,61 @@ TEST(WorldGenerated, BuildingsAreInTheRaster) {
   p.city = "none";
   EXPECT_LT(generate_world(p).raster.occupied_count(), w.raster.occupied_count());
 }
+
+// world_builder steps generate_world a stage at a time: stepped in small budgets it makes the same
+// world, through every stage, its progress rising to 1; surface_painter paints the same texture a
+// few rows a step; and the ground under the water is cached with the world.
+TEST(WorldGenerated, SteppedBuildIsTheSameWorld) {
+  const generated_world_params p = small_world();
+  const generated_world a = generate_world(p);
+  world_builder b(p);
+  std::set<std::string> phases;
+  double last = -1.0;
+  int steps = 0;
+  while (!b.done()) {
+    phases.insert(b.phase());
+    b.step(2000);
+    EXPECT_GE(b.progress(), last);
+    last = b.progress();
+    ASSERT_LT(++steps, 100000);
+  }
+  EXPECT_DOUBLE_EQ(b.progress(), 1.0);
+  EXPECT_GT(steps, 20); // the row stages took many steps
+  for (const char *s : {"terrain", "scatter", "raster", "mesh", "materials", "streets", "city",
+                        "roads", "props", "water"})
+    EXPECT_EQ(phases.count(s), 1u) << s;
+  const generated_world w = b.take();
+  ASSERT_TRUE(w.terrain);
+  ASSERT_EQ(w.terrain->const_points().size(), a.terrain->const_points().size());
+  for (std::size_t i = 0; i < a.terrain->const_points().size(); ++i)
+    ASSERT_EQ(w.terrain->const_points()[i][2], a.terrain->const_points()[i][2]) << i;
+  EXPECT_EQ(w.raster.klass, a.raster.klass);
+  EXPECT_EQ(w.raster.height, a.raster.height);
+  EXPECT_EQ(w.building_count, a.building_count);
+  EXPECT_EQ(w.buildings.const_points().size(), a.buildings.const_points().size());
+  EXPECT_EQ(w.roads.const_points().size(), a.roads.const_points().size());
+  EXPECT_EQ(w.props.const_points().size(), a.props.const_points().size());
+  EXPECT_EQ(w.water_ground, a.water_ground);
+  const int n = water_resolution(w);
+  ASSERT_EQ(w.water_ground.size(), std::size_t(n) * n);
+  EXPECT_NEAR(w.water_ground[std::size_t(n) * n - 1], w.model->terrain().sample(200.0, 200.0),
+              1e-3);
+
+  const std::vector<unsigned char> whole = paint_surface(w, surface_color::material, 256);
+  surface_painter sp(w, surface_color::material, 256);
+  int rows = 0;
+  while (!sp.step(256 * 3)) // three rows a step
+    ASSERT_LT(++rows, 1000);
+  EXPECT_GT(rows, 50);
+  EXPECT_EQ(sp.take(), whole);
+}
+
+// A stepped build fails where generate_world would, and keeps failing.
+TEST(WorldGenerated, SteppedBuildRethrows) {
+  generated_world_params p = small_world();
+  p.terrain = "no_such";
+  world_builder b(p);
+  EXPECT_THROW(b.step(1000), std::invalid_argument);
+  EXPECT_THROW(b.step(1000), std::invalid_argument);
+  EXPECT_FALSE(b.done());
+}

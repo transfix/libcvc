@@ -206,7 +206,7 @@ public:
   // just want to look at it. On by default, and on a device with no keyboard it
   // is the only practical way to get the UI back, so it stays above the windows
   // even when one is dragged over its corner. The panels start hidden when the
-  // view's short side is under 700 logical pixels (a phone).
+  // view's short side is under 500 logical pixels (a phone).
   void setToggleButtonEnabled(bool on);
   bool toggleButtonEnabled() const;
   // Whether the panels (your draw callback) are currently shown. The button

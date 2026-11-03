@@ -1,0 +1,197 @@
+# chat.ari — a REUSABLE chat window: a room's chat and its direct messages, over the room verbs
+# (room_chat.h, docs/roadmap/ARIADNE_CHAT.md). It needs a host that provides them (arigl joined to
+# a relay registers them) and a joined room: the state key that holds the room-join handle's token.
+#
+# Import the file for its units and the functions behind them:
+#   chat          a window holding the panel
+#       args: id (chat), title (Chat), room (room.token)
+#   chat_panel    just the widgets, to embed in a document's own window
+#       args: id (chat), room (room.token)
+# `id` names the instance: its state lives under <id>.*, and the chat window's under tree.<id>.*.
+# `room` is the state key holding the room-join handle's token (room-join's "token").
+#
+# Use it:
+#     import: cvc://components/chat.ari
+#     windows:
+#       - include: chat
+#         args: { id: chat, room: room.token }
+#         pos: [20, 40]
+#         size: [420, 380]
+#     on_tick: (chat-ui-step "chat" (state-get "room.token"))   # every tick; nothing until joined
+#
+# The functions (any program of the document may call them):
+#   (chat-ui-step ID ROOM)            each tick: the shown channel's text (rebuilt only when its
+#                                     messages change, the new lines appended when only those came),
+#                                     the channel picker with unread counts, the status line
+#   (chat-ui-send ID ROOM TEXT)       post TEXT to the shown channel (the message_input's on:)
+#   (chat-ui-more ID ROOM)            ask for older messages (the text_view's on_top:)
+#   (chat-ui-open ID PEER NAME)       show the direct messages with PEER ("" the room), named NAME
+#                                     until its first message, and open and raise the window
+#
+# State, with C = the include's id:
+#   C.channel            "" (the room) or the peer's pid: the channel shown
+#   C.pick               the picker's label; C.channels the labels and C.channel_ids their
+#                        channels, newline-joined, rewritten only when they change
+#   C.view.text          the channel's lines, "[HH:MM] name: text" (the text_view's bind)
+#   C.view.status        "loading older messages...", "the start of ...", or ""
+#   C.view.error         why the last post was refused (shown in red under the log)
+#   C.draft              the message being written (the message_input's bind)
+#   C.read.<slot>        the channel's head when it was last shown (slot: the peer, or _room)
+#   C.unread.<slot>      head - read: what came since (a users list shows it, room_users.ari)
+
+functions: |
+  (defun chat-ui-key (c k) (str-concat c "." k))
+  (defun chat-ui-get (c k) (if (is-null (state-get (chat-ui-key c k))) "" (state-get (chat-ui-key c k))))
+  (defun chat-ui-put (c k v) (if (= (state-get (chat-ui-key c k)) v) #f (state-set (chat-ui-key c k) v)))
+  (defun chat-ui-slot (ch) (if (= ch "") "_room" ch))
+  (defun chat-ui-line (m) (str-concat "[" (get-attr m "clock") "] " (get-attr m "name") ": " (string.replace (get-attr m "text") "\n" "\n        ")))
+  (defun chat-ui-label (name unread) (if (> unread 0) (str-concat name " (" (str unread) ")") name))
+  (defun chat-ui-count (c ch head)
+    (if (= ch (chat-ui-get c "channel")) 0
+      (- head (if (= (chat-ui-get c (str-concat "read." (chat-ui-slot ch))) "") 0 (int (chat-ui-get c (str-concat "read." (chat-ui-slot ch))))))))
+  (defun chat-ui-open (c peer name)
+    (state-set (chat-ui-key c "channel") peer)
+    (state-set (chat-ui-key c "open_name") name)
+    (state-set (chat-ui-key c "picker_rev") "")
+    (state-set (str-concat "tree." c ".open") "1")
+    (state-set (str-concat "tree." c ".raise") "1"))
+  (defun chat-ui-send (c room text)
+    (set r (chat-post room text (chat-ui-get c "channel")))
+    (state-set (chat-ui-key c "send_error") (if (get-attr r "ok") "" (get-attr r "error"))))
+  (defun chat-ui-more (c room) (chat-more room (chat-ui-get c "channel")))
+  (defun chat-ui-picker (c room)
+    ; A pick of the user's: a label other than the one written last. Its channel is at the same
+    ; place in the ids.
+    (set pick (chat-ui-get c "pick"))
+    (if (= pick (chat-ui-get c "pick_sent")) #f
+      (begin
+        (set ids (string.split (chat-ui-get c "channel_ids") "\n"))
+        (set i 0)
+        (for l (string.split (chat-ui-get c "channels") "\n")
+          (begin
+            (if (and (= l pick) (< i (length ids))) (state-set (chat-ui-key c "channel") (nth ids i)) #f)
+            (set i (+ i 1))))
+        (state-set (chat-ui-key c "picker_rev") "")))
+    ; The labels, again when the relay pushed something, the channel changed, or every 30 ticks (a
+    ; peer renamed): the room, then each conversation, with what came since it was last shown.
+    (set ch (chat-ui-get c "channel"))
+    (set ticks (if (= (chat-ui-get c "picker_ticks") "") 0 (int (chat-ui-get c "picker_ticks"))))
+    (state-set (chat-ui-key c "picker_ticks") (str (+ ticks 1)))
+    (set rev (str-concat (str (chat-rev room)) "|" ch))
+    (if (and (= rev (chat-ui-get c "picker_rev")) (< ticks 30)) #f
+      (begin
+        (state-set (chat-ui-key c "picker_rev") rev)
+        (state-set (chat-ui-key c "picker_ticks") "0")
+        (set room-unread (chat-ui-count c "" (get-attr (chat-info room "") "head")))
+        (chat-ui-put c "unread._room" (str room-unread))
+        (set labels (list (chat-ui-label "Room" room-unread)))
+        (set ids (list ""))
+        (set have (= ch ""))
+        (for v (chat-conversations room)
+          (begin
+            (set peer (get-attr v "peer"))
+            (set u (chat-ui-count c peer (get-attr v "head")))
+            (chat-ui-put c (str-concat "unread." peer) (str u))
+            (append labels (chat-ui-label (if (get-attr v "present") (get-attr v "name") (str-concat (get-attr v "name") " (left)")) u))
+            (append ids peer)
+            (if (= peer ch) (set have #t) #f)))
+        ; a conversation opened before its first message
+        (if have #f
+          (begin
+            (append labels (if (= (chat-ui-get c "open_name") "") ch (chat-ui-get c "open_name")))
+            (append ids ch)))
+        (chat-ui-put c "channels" (string.join labels "\n"))
+        (chat-ui-put c "channel_ids" (string.join ids "\n"))
+        (set i 0)
+        (for id ids
+          (begin
+            (if (= id ch) (begin (chat-ui-put c "pick" (nth labels i)) (chat-ui-put c "pick_sent" (nth labels i))) #f)
+            (set i (+ i 1)))))))
+  (defun chat-ui-render (c room ch info)
+    (set rev (str (get-attr info "rev")))
+    (if (and (= rev (chat-ui-get c "view.rev")) (= ch (chat-ui-get c "view.channel"))) #f
+      (begin
+        (set lines (list))
+        (if (and (= ch (chat-ui-get c "view.channel"))
+                 (= (str (get-attr info "oldest")) (chat-ui-get c "view.oldest"))
+                 (not (= (chat-ui-get c "view.text") "")))
+          ; only newer messages came: add their lines to what is shown
+          (begin
+            (append lines (chat-ui-get c "view.text"))
+            (for m (chat-messages room ch (int (chat-ui-get c "view.newest")))
+              (append lines (chat-ui-line m))))
+          (for m (chat-messages room ch)
+            (append lines (chat-ui-line m))))
+        (state-set (chat-ui-key c "view.text") (string.join lines "\n"))
+        (state-set (chat-ui-key c "view.oldest") (str (get-attr info "oldest")))
+        (state-set (chat-ui-key c "view.newest") (str (get-attr info "newest")))
+        (state-set (chat-ui-key c "view.rev") rev)
+        (state-set (chat-ui-key c "view.channel") ch))))
+  (defun chat-ui-step (c room)
+    (if (or (is-null room) (= room "")) #f
+      (begin
+        (if (is-null (state-get (chat-ui-key c "channel")))
+          (begin
+            ; seed what the widgets read (an unset key reads as nil)
+            (state-set (chat-ui-key c "channel") "")
+            (for k (list "pick" "pick_sent" "channels" "channel_ids" "view.text" "view.status" "view.error" "draft" "send_error" "open_name")
+              (state-set (chat-ui-key c k) "")))
+          #f)
+        (chat-ui-picker c room)
+        (set ch (chat-ui-get c "channel"))
+        (set info (chat-info room ch))
+        (if (get-attr info "available")
+          (begin
+            (chat-ui-render c room ch info)
+            (chat-ui-put c (str-concat "read." (chat-ui-slot ch)) (str (get-attr info "head")))
+            (chat-ui-put c (str-concat "unread." (chat-ui-slot ch)) "0")
+            (chat-ui-put c "view.status"
+              (if (get-attr info "loading") "loading older messages..."
+                (if (and (> (get-attr info "count") 0) (not (get-attr info "more")))
+                  (if (= ch "") "the start of the room's chat" "the start of your messages")
+                  "")))
+            (chat-ui-put c "view.error"
+              (if (= (get-attr info "error") "") (chat-ui-get c "send_error") (get-attr info "error"))))
+          (chat-ui-put c "view.status" "this relay has no chat")))))
+
+units:
+  chat:
+    args: { id: chat, title: Chat, room: room.token }
+    window: "{title}"
+    id: "{id}"
+    closable: true
+    children:
+      - include: chat_panel
+        args: { id: "{id}", room: "{room}" }
+
+  chat_panel:
+    args: { id: chat, room: room.token }
+    type: group
+    id: "{id}_panel"
+    children:
+      # The channel: the room, or a conversation (a users list's message button opens one).
+      - type: combo
+        label: "Channel"
+        bind: "{id}.pick"
+        options: (string.split (or (state-get "{id}.channels") "") "\n")
+        visible_when: (not (= (or (state-get "{id}.channels") "") ""))
+      - text: ""
+        bind: "{id}.view.status"
+        color: [0.6, 0.65, 0.7]
+        visible_when: (not (= (state-get "{id}.view.status") ""))
+      # The log fills the window less what is under it; scrolled to the top, it asks for older
+      # messages, a page at a time.
+      - text_view: "##{id}_log"
+        bind: "{id}.view.text"
+        on_top: (chat-ui-more "{id}" (state-get "{room}"))
+      - text: ""
+        bind: "{id}.view.error"
+        color: [1.0, 0.45, 0.45]
+        visible_when: (not (= (state-get "{id}.view.error") ""))
+      # Enter or Send sends; Shift+Enter (Alt+Enter or Ctrl+J in a terminal) adds a line.
+      - message_input: "##{id}_say"
+        bind: "{id}.draft"
+        hint: "Write a message"
+        max_length: 2000
+        send: Send
+        on: (chat-ui-send "{id}" (state-get "{room}") (get-attr event "text"))

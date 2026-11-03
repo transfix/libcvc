@@ -1,10 +1,12 @@
 # world_controls.ari — a REUSABLE Ariadne component: live controls for a `generated_world` node.
 # The controls bind the world.* state keys the cvcGL generated_world realizer reads each frame; the
 # realizer SEEDS them from the node's authored .ari props, so the panel starts at the document's
-# world and then regenerates it live. Every structural change rebuilds the whole world (a second or
-# so at 1.2 km), so the sliders write when they are let go (`commit: release`). A new preset
-# quick-sets the counts and the relief; Colour by only repaints the ground. Regenerate and Randomize
-# go through a request key (world.request) the realizer consumes.
+# world and then regenerates it live. Every structural change rebuilds the whole world, so the
+# sliders write when they are let go (`commit: release`). The rebuild is a task on the app's
+# scheduler, a few milliseconds a frame (on single-threaded wasm too): the old world stays on screen
+# and the progress bar names the stage until the new one is swapped in; Stop ends it. A new preset
+# quick-sets the counts and the relief; Colour by only repaints the ground. Regenerate, Randomize
+# and Stop go through a request key (world.request) the realizer consumes.
 #
 # Use it:
 #     import: cvc://components/world_controls.ari
@@ -19,6 +21,11 @@ units:
       - text: "Live view of cvc::world: the L-system terrain source."
       - text: "status"
         bind: world.status
+      # The running rebuild or repaint: the bar moves while it steps, and the overlay names the stage.
+      - progress: progress
+        bind: world.progress
+        hi: 100
+        overlay: world.phase
       - separator
       - slider_int: Seed
         bind: world.seed
@@ -93,6 +100,10 @@ units:
       - button: Randomize
         on: (state-set "world.request" "randomize")
         tooltip: "a new seed"
+      - button: Stop
+        on: (state-set "world.request" "stop")
+        enabled_when: (= (state-get "world.busy") "1")
+        tooltip: "ends the rebuild under way; the world shown stays"
       - separator
       - combo: Colour by
         bind: world.color

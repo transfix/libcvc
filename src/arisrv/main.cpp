@@ -35,6 +35,7 @@
 #include <cvc/ariadne/conference/room_aoi.h>        // aoi_params, the presets, write_aoi_params
 #include <cvc/ariadne/conference/room_aoi_relay.h>  // room_aoi_relay, relay_room_step
 #include <cvc/ariadne/conference/room_avatar.h>     // seed_avatar_catalog (what avatars may wear)
+#include <cvc/ariadne/conference/room_chat.h>       // room chat and direct messages
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_leave (retract a departed peer)
 #include <cvc/ariadne/conference/room_lane.h>       // the pose lane + lane signaling
 #include <cvc/ariadne/conference/room_media_intrinsics.h> // room_relay_tick
@@ -497,6 +498,18 @@ int main(int argc, char **argv) {
 #endif
   }
 
+  // Room chat and direct messages (room_chat.h): the relay keeps the history and pushes each client
+  // what it may read. A DM is pushed only to the connections holding its two pids, which takes
+  // bound writes: without them any connection could claim a pid and read its DMs, so they are off.
+  cvc::ariadne::conference::chat_limits chatLimits;
+  chatLimits.dms = bindGate != nullptr;
+  auto chat =
+      std::make_unique<cvc::ariadne::conference::room_chat_relay>(app, shard, room, chatLimits);
+  chat->add_transport(&state_tp);
+#if CVC_ENABLE_WS
+  chat->add_transport(&ws_tp);
+#endif
+
   install_crash_trace();
   std::signal(SIGINT, on_signal);
   std::signal(SIGTERM, on_signal);
@@ -512,6 +525,10 @@ int main(int argc, char **argv) {
               relayGate ? "on" : "off", trimJournal ? "trim (no backfill)" : "keep (backfill)",
               stallMs, scene.c_str(), bindGate ? "on" : "off (any client's writes are taken)",
               roomToken.empty() ? "off (an open room)" : "on");
+  std::printf("[arisrv] chat: room%s | history in memory: %zu room messages, %zu per "
+              "conversation\n",
+              chatLimits.dms ? " and direct messages" : " only (direct messages need bound writes)",
+              chatLimits.room_keep, chatLimits.dm_keep);
   if (!cvc::device_keys_available())
     std::printf("[arisrv] device keys: unavailable (no OpenSSL in this build): no device tags\n");
   else if (devicePins->path().empty())
@@ -619,6 +636,9 @@ int main(int argc, char **argv) {
   const auto room_step = [&] {
     const double now_s =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - room_start).count();
+    // Chat first: its pushes go out now, and the room head it writes rides this step's drain, so
+    // a client never sees the head before the message.
+    chat->step(now_s);
     cvc::ariadne::conference::relay_room_step(shard, planes, aoi_relay.get(), server_holon, now_s,
                                               trimJournal);
     const std::shared_ptr<const cvc::ariadne::conference::aoi_snapshot> tiers =
@@ -726,6 +746,7 @@ int main(int argc, char **argv) {
       }
       for (const std::string &nid : gone) {
         cvc::ariadne::conference::room_leave(app, room, nid);
+        chat->participant_left(nid);
         cvc::ariadne::write_intent(app, room, nid, cvc::ariadne::avatar_intent{});
         shaper.forget_viewer(nid);
         shaper.forget_publisher(nid);
@@ -947,6 +968,13 @@ int main(int argc, char **argv) {
           static_cast<unsigned long long>(state_tp.total_media_gated()), ws_gated,
           static_cast<unsigned long long>(state_tp.total_media_stall_dropped()), ws_backlog, held,
           held_timeouts, shard.journal().size());
+      const auto cs = chat->take_stats();
+      std::printf(
+          "[arisrv] chat: %llu post(s) (%llu direct) | %llu page(s) | %llu refused | %llu "
+          "dropped | %llu push(es)\n",
+          static_cast<unsigned long long>(cs.posts), static_cast<unsigned long long>(cs.dms),
+          static_cast<unsigned long long>(cs.pages), static_cast<unsigned long long>(cs.refused),
+          static_cast<unsigned long long>(cs.dropped), static_cast<unsigned long long>(cs.pushes));
       const auto ps = pose_relay.take_stats();
       std::printf(
           "[arisrv] poses: %llu snapshot(s) (%llu on pose lanes, %llu acks), %llu entries, "
@@ -1009,8 +1037,9 @@ int main(int argc, char **argv) {
   std::printf("[arisrv] shutting down (relayed %zu stream(s), %llu frames forwarded)\n",
               relay.stream_count(), static_cast<unsigned long long>(relay.frames_forwarded()));
   // The AOI first, while the transports still run: it clears the media gates and the registry
-  // filters it installed.
+  // filters it installed. Chat too: it unsubscribes from the shard's message bus.
   aoi_relay.reset();
+  chat.reset();
   relay.stop();
   media_tp.stop();
 #if CVC_ENABLE_WS
