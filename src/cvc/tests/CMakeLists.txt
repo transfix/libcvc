@@ -140,6 +140,7 @@ add_executable(pose_stream_test pose_stream_test.cpp)
 add_executable(state_link_stats_test state_link_stats_test.cpp)
 add_executable(room_scene_test room_scene_test.cpp)
 add_executable(room_avatar_test room_avatar_test.cpp)
+add_executable(room_chat_test room_chat_test.cpp)
 add_executable(room_aoi_test room_aoi_test.cpp)
 add_executable(room_aoi_relay_test room_aoi_relay_test.cpp)
 add_executable(physics_codec_test physics_codec_test.cpp)
@@ -151,6 +152,7 @@ add_executable(physics_plant_log_test physics_plant_log_test.cpp)
 add_executable(physics_jolt_rollout_test physics_jolt_rollout_test.cpp)
 add_executable(nav_dyn_bike_test nav_dyn_bike_test.cpp)
 add_executable(nav_dyn_4w_test nav_dyn_4w_test.cpp)
+add_executable(nav_dyn_spin_test nav_dyn_spin_test.cpp)
 add_executable(nav_dyn_bike_dg_test nav_dyn_bike_dg_test.cpp)
 add_executable(nav_potential_test nav_potential_test.cpp)
 # nav_potential_test compares U logged by the material rollouts (built with -ffp-contract=off)
@@ -390,6 +392,7 @@ set(TEST_TARGETS
   state_link_stats_test
   room_scene_test
   room_avatar_test
+  room_chat_test
   room_aoi_test
   room_aoi_relay_test
   physics_codec_test
@@ -401,6 +404,7 @@ set(TEST_TARGETS
   physics_jolt_rollout_test
   nav_dyn_bike_test
   nav_dyn_4w_test
+  nav_dyn_spin_test
   nav_dyn_bike_dg_test
   nav_potential_test
   ph_se2_test
@@ -1981,6 +1985,13 @@ target_link_libraries(room_avatar_test
     GTest::gtest_main
 )
 
+target_link_libraries(room_chat_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(room_aoi_test
   PRIVATE
     cvc
@@ -2038,6 +2049,13 @@ target_link_libraries(physics_jolt_rollout_test
 )
 
 target_link_libraries(nav_dyn_bike_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_dyn_spin_test
   PRIVATE
     cvc
     GTest::gtest
@@ -2461,6 +2479,7 @@ target_compile_features(pose_stream_test PRIVATE cxx_std_17)
 target_compile_features(state_link_stats_test PRIVATE cxx_std_17)
 target_compile_features(room_scene_test PRIVATE cxx_std_17)
 target_compile_features(room_avatar_test PRIVATE cxx_std_17)
+target_compile_features(room_chat_test PRIVATE cxx_std_20)
 target_compile_features(room_aoi_test PRIVATE cxx_std_17)
 target_compile_features(room_aoi_relay_test PRIVATE cxx_std_17)
 target_compile_features(physics_codec_test PRIVATE cxx_std_17)
@@ -2472,6 +2491,7 @@ target_compile_features(physics_plant_log_test PRIVATE cxx_std_17)
 target_compile_features(physics_jolt_rollout_test PRIVATE cxx_std_17)
 target_compile_features(nav_dyn_bike_test PRIVATE cxx_std_17)
 target_compile_features(nav_dyn_4w_test PRIVATE cxx_std_17)
+target_compile_features(nav_dyn_spin_test PRIVATE cxx_std_17)
 target_compile_features(nav_dyn_bike_dg_test PRIVATE cxx_std_17)
 target_compile_features(nav_potential_test PRIVATE cxx_std_17)
 target_compile_features(ph_se2_test PRIVATE cxx_std_17)
@@ -2974,6 +2994,7 @@ cvc_discover_tests(pose_stream_test)
 cvc_discover_tests(state_link_stats_test)
 cvc_discover_tests(room_scene_test)
 cvc_discover_tests(room_avatar_test)
+cvc_discover_tests(room_chat_test)
 cvc_discover_tests(room_aoi_test)
 cvc_discover_tests(room_aoi_relay_test)
 cvc_discover_tests(physics_codec_test)
@@ -2985,6 +3006,7 @@ cvc_discover_tests(physics_plant_log_test)
 cvc_discover_tests(physics_jolt_rollout_test)
 cvc_discover_tests(nav_dyn_bike_test)
 cvc_discover_tests(nav_dyn_4w_test)
+cvc_discover_tests(nav_dyn_spin_test)
 cvc_discover_tests(nav_dyn_bike_dg_test)
 cvc_discover_tests(nav_potential_test)
 cvc_discover_tests(ph_se2_test)

@@ -53,6 +53,14 @@ struct dyn_bike_si {
   double slip_speed_floor = 0.5; // m/s: the slip angles' speed floor
   double gravity = 9.81;         // m/s^2
   double min_axle_load = 0.05;   // of m g
+  // The wheels, for diff::dyn_spin_plant (wheel spin; diff::dyn_plant has none).
+  double wheel_radius = 0.4;        // m
+  double wheel_inertia_front = 2.0; // kg m^2: the front axle's wheels together
+  double wheel_inertia_rear = 2.0;  // the rear axle's
+  // Pacejka longitudinal tire, of the slip ratio: B per unit slip, C in (1, 2). Its peak is at
+  // tan(pi / 2C) / B.
+  double tire_B_long = 12.0;
+  double tire_C_long = 1.2;
 };
 
 inline diff::dyn_bike_params dyn_bike_params_of(const dyn_bike_si &si,
@@ -87,6 +95,11 @@ inline diff::dyn_bike_params dyn_bike_params_of(const dyn_bike_si &si,
   p.v_width = by(si.blend_width, 1);
   p.eps = by(si.slip_speed_floor, 1);
   p.fz_min = static_cast<float>(si.min_axle_load);
+  p.r_w = by(si.wheel_radius, 1);
+  p.J_f = by(si.wheel_inertia_front, 2);
+  p.J_r = by(si.wheel_inertia_rear, 2);
+  p.B_x = static_cast<float>(si.tire_B_long);
+  p.C_x = static_cast<float>(si.tire_C_long);
   return p;
 }
 

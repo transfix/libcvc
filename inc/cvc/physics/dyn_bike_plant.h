@@ -41,10 +41,11 @@
 //
 // Each tick runs dyn_plant's substeps under the held command (the bicycle angle, and the drive
 // force per unit mass the driver asks for), in SI, and books every step (dyn_plant_books):
-//   kinetic now = kinetic at attach + drive - brake - dissipated + floor + grade + limiter
+//   kinetic now = kinetic at attach + drive - brake - dissipated - slip + floor + grade + limiter
 //                 + contact + residual
 // drive and brake are the axles' forces where they push and where they hold back, dissipated the
-// tires' slip, drag and rolling resistance, floor what the tires' secants leave (round-off),
+// tires' slip, drag and rolling resistance, slip (with options.wheel_spin, diff::dyn_spin_plant's
+// spinning wheels; else 0) the tires' longitudinal slip, floor what the tires' secants leave,
 // grade gravity along the slope, limiter the kinetic energy the speed clamp and the low-speed
 // blend took, contact what the collisions changed, and residual the integrator's error (second
 // order per step). Positions, speeds and accelerations cross into nav's normalized frame through
@@ -91,14 +92,22 @@ struct dyn_bike_plant_options {
   // not a tire's grip. At 1, the default material's, a vehicle pressed against a wall by its own
   // tires grips it like a tire and crawls along it.
   double chassis_friction = 0.3;
+  // Wheel spin (diff::dyn_spin_plant): each axle's wheels spin at their own speed, driven and
+  // braked by torques, and the tires push with their longitudinal slip, so the vehicle spins its
+  // wheels on low grip and locks them braking past it. The books gain a slip line, and the
+  // kinetic energy the wheels' spin. Off (the default), diff::dyn_plant: each axle's force is the
+  // drive's within its grip.
+  bool wheel_spin = false;
 };
 
 // One agent's energy, in J: over the last tick, or since attach().
 struct dyn_bike_books {
-  double kinetic = 0.0;    // 1/2 v^T M v at the end
-  double drive = 0.0;      // the axles' forces where they push (>= 0)
-  double brake = 0.0;      // where they hold back (>= 0)
+  double kinetic = 0.0;    // 1/2 v^T M v at the end (wheel_spin: and the wheels' spin)
+  double drive = 0.0;      // the axles' forces where they push (>= 0); wheel_spin: the drive's
+                           // torques at the wheels' speeds
+  double brake = 0.0;      // where they hold back (>= 0); wheel_spin: the brakes' torques
   double dissipated = 0.0; // the tires' slip, drag and rolling resistance (>= 0)
+  double slip = 0.0;       // wheel_spin: the tires' longitudinal slip (>= 0; 0 without)
   double floor = 0.0;      // what the tires' secants leave: round-off
   double grade = 0.0;      // gravity along the heading (0 on flat ground)
   double limiter = 0.0;    // the speed clamp's and the low-speed blend's (<= 0 as a rule)
@@ -151,6 +160,9 @@ public:
   const cvc::nav::diff::dyn_bike_params &params(int i) const { return _agents.at(i).p; }
   const cvc::nav::diff::bike_veh &step_limits(int i) const { return _agents.at(i).lim; }
   const cvc::nav::diff::dyn_state<double> &body(int i) const { return _agents.at(i).s; }
+  // Agent i's wheels' speeds (rad/s, + rolling forward; axle 0 the front, 1 the rear): with
+  // wheel_spin their own, else the speed's at the rolling radius (they do not slip).
+  double wheel_speed(int i, int axle) const;
   int substeps() const { return _nsub; }
 
   // ── the books ──
@@ -179,12 +191,13 @@ private:
     cvc::nav::diff::dyn_bike_params p;
     cvc::nav::diff::bike_veh lim{};
     cvc::nav::diff::dyn_state<double> s{};
-    double rear_x = 0.0;     // the rear axle, body x (m)
-    double half_track = 0.0; // the widest axle's (m)
-    double steer_cmd = 0.0;  // rad
-    double accel_cmd = 0.0;  // m/s^2 along the heading
-    dyn_driver driver;       // how the vehicle takes accel_cmd (dyn_driver)
-    double kinetic0 = 0.0;   // J
+    double om[2] = {0.0, 0.0}; // wheel_spin: the front and rear wheels' speeds (rad/s)
+    double rear_x = 0.0;       // the rear axle, body x (m)
+    double half_track = 0.0;   // the widest axle's (m)
+    double steer_cmd = 0.0;    // rad
+    double accel_cmd = 0.0;    // m/s^2 along the heading
+    dyn_driver driver;         // how the vehicle takes accel_cmd (dyn_driver)
+    double kinetic0 = 0.0;     // J
     int hits_tick = 0;
     long hits = 0;
     int statics_tick = 0;     // contacts begun with static geometry over the last tick

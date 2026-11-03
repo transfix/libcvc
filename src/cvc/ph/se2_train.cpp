@@ -62,8 +62,8 @@ using M3 = mat3<double>;
 // ── data helpers ───────────────────────────────────────────────────────────────────────────────
 
 void check_flights(const se2_flights &f) {
-  if (f.width < 7 || f.width > 6 + kSe2MaxControls)
-    throw std::invalid_argument("se2_flights: rows must be 6 + 1-4 inputs wide");
+  if (f.width < 7 || f.width > 6 + kSe2MaxInputs)
+    throw std::invalid_argument("se2_flights: rows must be 6 + 1-6 inputs wide (select_inputs)");
   if (f.data.size() != f.count * f.rows * static_cast<std::size_t>(f.width))
     throw std::invalid_argument("se2_flights: data is not count x rows x width");
 }
@@ -154,22 +154,28 @@ void stage_vjp(const se2_vehicle<double> &veh, const se2_stage<double> &st,
   for (int i = 0; i < 3; ++i)
     dv[i] += y[i];
   add_outer(g.minv, y, p, -1.0);
-  // body = R^T grad V
-  const double dg0 = st.c * dbody[0] - st.s * dbody[1];
-  const double dg1 = st.s * dbody[0] + st.c * dbody[1];
-  dpsi += dbody[0] * st.body[1] - dbody[1] * st.body[0];
-  // grad V = level + sum_k f_k omega_k / ell_V
-  g.v_level[0] += dg0;
-  g.v_level[1] += dg1;
-  if (s.v_gp) {
-    const double inv = 1.0 / s.v_length, a = s.V.amplitude();
-    for (int k = 0; k < s.V.count; ++k) {
-      const double *om = &s.V.frequency[2 * static_cast<std::size_t>(k)];
-      const double sk = (om[0] * dg0 + om[1] * dg1) * inv;
-      g.wV[k] += -a * std::sin(st.theta_V[k]) * sk;
-      const double dtheta = -a * std::cos(st.theta_V[k]) * w.wV[k] * sk;
-      dpos[0] += dtheta * om[0] * inv;
-      dpos[1] += dtheta * om[1] * inv;
+  if (s.potential == se2_potential::terrain) {
+    // body = (k_x grade, k_y roll), the attitude an input (data).
+    g.v_level[0] += dbody[0] * st.terrain[0];
+    g.v_level[1] += dbody[1] * st.terrain[1];
+  } else if (s.potential == se2_potential::world) {
+    // body = R^T grad V
+    const double dg0 = st.c * dbody[0] - st.s * dbody[1];
+    const double dg1 = st.s * dbody[0] + st.c * dbody[1];
+    dpsi += dbody[0] * st.body[1] - dbody[1] * st.body[0];
+    // grad V = level + sum_k f_k omega_k / ell_V
+    g.v_level[0] += dg0;
+    g.v_level[1] += dg1;
+    if (s.v_gp) {
+      const double inv = 1.0 / s.v_length, a = s.V.amplitude();
+      for (int k = 0; k < s.V.count; ++k) {
+        const double *om = &s.V.frequency[2 * static_cast<std::size_t>(k)];
+        const double sk = (om[0] * dg0 + om[1] * dg1) * inv;
+        g.wV[k] += -a * std::sin(st.theta_V[k]) * sk;
+        const double dtheta = -a * std::cos(st.theta_V[k]) * w.wV[k] * sk;
+        dpos[0] += dtheta * om[0] * inv;
+        dpos[1] += dtheta * om[1] * inv;
+      }
     }
   }
   // dxy = R (v_x, v_y)
