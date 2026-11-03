@@ -755,6 +755,15 @@ public:
   state_ptr sharedChild(const std::string &childname = std::string(),
                         std::vector<state_ptr> *pins = nullptr);
 
+  // The same two walks for a caller that already holds this node (td 4.8: an intrinsics context's
+  // root_pins, a watch's root). `self` is that hold, and what an empty path returns; the walk takes
+  // no reference on this node, so a lookup leaves its count alone. `self` may be a non-owning alias
+  // of a node no shared_ptr owns (a host's own root), which the host keeps alive.
+  state_ptr findDescendantShared(const state_ptr &self, const std::string &path,
+                                 std::vector<state_ptr> *pins = nullptr);
+  state_ptr sharedChild(const state_ptr &self, const std::string &childname,
+                        std::vector<state_ptr> *pins = nullptr);
+
   // RAII sugar: a movable handle that reads like a node (operator-> / operator*) while pinning it
   // alive. `handle h = node.sharedChild("a.b"); h->value("x");` keeps a.b alive for h's lifetime.
   class handle {
