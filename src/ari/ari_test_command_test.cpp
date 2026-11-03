@@ -148,6 +148,32 @@ TEST(AriTest, FramesAndTimeout) {
   EXPECT_TRUE(has(hung, "timed out after 1 s in test 'waits'")) << hung.output;
 }
 
+// A program's time backstop under `ari test` is the run's --timeout, not a running app's 0.1 s:
+// a Debug build or a slow runner must not kill a program that is merely slow (a few thousand
+// steps of the chat component's took longer than that on one). --action-time S sets it, which is
+// how this shows the run's own setting is the one a program gets: a millionth of a second kills
+// the same program, whatever the machine.
+TEST(AriTest, AProgramMayRunAsLongAsTheTimeout) {
+  REQUIRE_ARI();
+  TempDir dir;
+  const fs::path work = dir.write("work.ari", doc("tests:\n"
+                                                  "  sums: |\n"
+                                                  "    (set n 0)\n"
+                                                  "    (for i (range 200) (set n (+ n i)))\n"
+                                                  "    (assert (= n 19900))\n"));
+  const AriRun by_default = ari("test " + quoted(work));
+  EXPECT_EQ(by_default.status, 0) << by_default.output;
+  const AriRun unlimited = ari("test --action-time 0 " + quoted(work));
+  EXPECT_EQ(unlimited.status, 0) << unlimited.output;
+  const AriRun tiny = ari("test --action-time 0.000001 " + quoted(work));
+  EXPECT_EQ(tiny.status, 1) << tiny.output;
+  EXPECT_TRUE(has(tiny, "test 'sums' did not complete: time_limit_exceeded")) << tiny.output;
+  const AriRun bad = ari("test --action-time soon " + quoted(work));
+  EXPECT_NE(bad.status, 0) << bad.output;
+  EXPECT_TRUE(has(bad, "--action-time needs a number of seconds, 0 or more, not 'soon'"))
+      << bad.output;
+}
+
 TEST(AriTest, TapAndUsage) {
   REQUIRE_ARI();
   TempDir dir;

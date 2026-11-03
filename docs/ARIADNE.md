@@ -3246,7 +3246,11 @@ tests:
 ```
 
 Each test runs as an `on:` action program would, chrooted to the document's prefix, with the
-document's host verbs, functions (§6.6) and limits. The tests run one at a time, in document order, starting
+document's host verbs, functions (§6.6) and limits, save time. A running app gives a program 0.1 s
+(`ariadne.limits.action_max_time`). Under `ari test` every program may run as long as the run's
+`--timeout`, so a Debug build or a slow CI runner doesn't kill one that is merely slow, while the
+step cap still stops a runaway. `--action-time S` sets it: `0.1` holds a document to what an app
+allows, and `0` lifts it. The tests run one at a time, in document order, starting
 after `init:` and the first frame, and each starts once the one before has ended. A test fails
 when it raises an exception it doesn't catch, or is killed (a step or time cap, a syntax error).
 The rest still run. The loader's free-head check (§5.7) covers test programs too.
