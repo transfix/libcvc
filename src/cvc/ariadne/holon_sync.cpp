@@ -294,7 +294,9 @@ void sync_energy_policy(holon &h, cvc::app &app, const std::string &room) {
 }
 
 // Publish PID's reserve when it has moved by half a percent of the most it can hold, when it
-// first empties or fills, and otherwise every HEARTBEAT ticks.
+// first empties or fills, and otherwise every HEARTBEAT ticks while it still differs from the
+// published one. A reserve that has stopped moving (full, at rest) needs no re-stamp: the client's
+// prediction refills to the same value, and it was corrected on the way there.
 void write_reserve(holon &h, cvc::app &app, const std::string &room, const std::string &pid,
                    std::uint64_t heartbeat) {
   avatar_energy e;
@@ -307,7 +309,7 @@ void write_reserve(holon &h, cvc::app &app, const std::string &room, const std::
   const double now = std::floor(e.reserve + 0.5); // published in whole joules
   const bool moved = !have || std::fabs(now - last) >= 0.005 * full ||
                      ((now == 0.0 || now == std::floor(full + 0.5)) && now != last);
-  const bool beat = h.tick() < last_tick || h.tick() - last_tick >= heartbeat;
+  const bool beat = h.tick() < last_tick || (now != last && h.tick() - last_tick >= heartbeat);
   if (moved || beat)
     conference::write_avatar_reserve(app, room, pid, e.reserve, h.tick());
 }

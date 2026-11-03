@@ -375,6 +375,67 @@ TEST(HolonSyncTest, TheReserveIsWrittenOnStepsThatSkipThePoses) {
   EXPECT_NEAR(published, e.reserve, 0.005 * 2000.0 + 1.0);
 }
 
+// An avatar standing still with a full reserve: once its reserve is published the relay writes no
+// more of it -- the re-stamp is for a reserve still drifting from the published one -- and a walk
+// publishes again. Each reserve write journals one mutation per leaf that changed.
+TEST(HolonSyncTest, AFullReserveAtRestIsNotRestamped) {
+  cvc::app server_app;
+  cvc::state_cluster_shard ss(server_app, "conf", "server");
+  ss.attach();
+  const std::string room = "r";
+  cvc::ariadne::holon_config cfg;
+  cfg.physics = true;
+  holon server(holon_role::server, cfg);
+  if (!server.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  cvc::ariadne::conference::seed_default_scene(server_app, room);
+  cvc::ariadne::avatar_energy_policy policy;
+  policy.reserve_max = 2000.0;
+  cvc::ariadne::conference::write_avatar_policy(server_app, room, policy);
+  cvc::ariadne::conference::room_join(server_app, room, "A");
+  const auto energy_writes = [&] {
+    std::size_t n = 0;
+    for (const cvc::state_mutation &m : ss.drain_local())
+      n += m.path.find(".energy.") != std::string::npos;
+    return n;
+  };
+  ss.drain_local(); // the policy's own leaves
+  const double dt = server.clock().fixed_dt();
+  cvc::ariadne::server_pump(server, server_app, room, dt);
+  double published = 0.0;
+  std::uint64_t at_tick = 0;
+  ASSERT_TRUE(
+      cvc::ariadne::conference::read_avatar_reserve(server_app, room, "A", published, at_tick));
+  EXPECT_DOUBLE_EQ(published, 2000.0) << "published full";
+  EXPECT_EQ(energy_writes(), 2u) << "the reserve and its tick, once each";
+
+  for (int step = 0; step < 1200; ++step) // 10 s at rest: two of the old 5 s re-stamps
+    cvc::ariadne::server_pump(server, server_app, room, dt, /*write_poses=*/step % 120 == 0);
+  EXPECT_EQ(energy_writes(), 0u) << "a full reserve at rest is not re-stamped";
+  std::uint64_t still_tick = 0;
+  ASSERT_TRUE(
+      cvc::ariadne::conference::read_avatar_reserve(server_app, room, "A", published, still_tick));
+  EXPECT_EQ(still_tick, at_tick);
+
+  cvc::ariadne::write_intent(server_app, room, "A", avatar_intent{vec3{4.0, 0.0, 0.0}});
+  for (int step = 0; step < 120; ++step)
+    cvc::ariadne::server_pump(server, server_app, room, dt, /*write_poses=*/false);
+  EXPECT_GT(energy_writes(), 0u) << "a walk spends, and that is published";
+  ASSERT_TRUE(
+      cvc::ariadne::conference::read_avatar_reserve(server_app, room, "A", published, still_tick));
+  EXPECT_LT(published, 2000.0);
+  EXPECT_GT(still_tick, at_tick);
+
+  // The writer itself: an unchanged reserve re-stamped is its tick alone; nothing new, nothing.
+  cvc::ariadne::conference::write_avatar_reserve(server_app, room, "A", published, 900000);
+  EXPECT_EQ(energy_writes(), 1u);
+  cvc::ariadne::conference::write_avatar_reserve(server_app, room, "A", published, 900000);
+  EXPECT_EQ(energy_writes(), 0u);
+  cvc::ariadne::conference::write_avatar_reserve(server_app, room, "A", published - 50.0, 900100);
+  EXPECT_EQ(energy_writes(), 2u);
+  ss.detach();
+}
+
 // POSE_HEARTBEAT_S paces the tree's re-stamp of an avatar standing still: about a second by
 // default, for clients that keep their clocks by it, and longer for a relay whose pose stream
 // carries that heartbeat (arisrv writes the tree's copy each second and re-stamps it every 5 s).

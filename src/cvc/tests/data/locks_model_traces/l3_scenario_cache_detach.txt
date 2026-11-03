@@ -1,0 +1,18 @@
+# scenarios.py scenario_cache_detach, its homes as written
+config inheritance=1 coalesce=0 one_home=0 mutations=-
+attach_home 1 -> 0 |
+attach_home 1 -> 1 |
+try_acquire 0 1 o 0 X a.b a.b - -> granted 1 1 0 |
+query - 0 o -> held a.b/X/1/1/1/0 waiting |
+query - 1 o -> held a.b/X/-/1/1/0 waiting |
+release 0 1 1 -> ok |
+query - 0 o -> held waiting |
+query - 1 o -> held waiting |
+try_acquire 1 2 o 0 S b b - -> granted 2 1 0 |
+query - 0 o -> held b/S/-/1/-/0 waiting |
+query - 1 o -> held b/S/2/1/-/0 waiting |
+release 1 2 2 -> ok |
+query - 0 o -> held waiting |
+query - 1 o -> held waiting |
+detach_home 0 -> ok |
+query - 1 o -> held waiting |

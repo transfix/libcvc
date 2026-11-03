@@ -84,6 +84,14 @@ struct RealizedScene {
   // tickers. Empty without the option, so a host runs a SceneGraph::selectLOD pass per frame only
   // when this is not.
   std::vector<std::weak_ptr<LodGraphicsNode>> lod_nodes;
+  // The nodes that carry view tags (`tags:`, §9.5.1), at any depth: what a viewport widget leaves
+  // out when its show: / hide: rule out a node's tags. Held weakly, like the tickers.
+  struct TaggedNode {
+    std::string id;
+    std::vector<std::string> tags;
+    std::weak_ptr<GraphicsNode> node;
+  };
+  std::vector<TaggedNode> tagged;
   // Per-frame closures a CUSTOM node type registered (register_scene_node_type) that
   // needs servicing — run by tick_scene after the built-in tickers. A closure should
   // capture a weak_ptr to its node (not the node), matching the volren/volslice
@@ -283,6 +291,12 @@ using ShaderPreset = std::function<void(GeometryNode &)>;
 void register_shader_preset(const std::string &name, ShaderPreset preset);
 bool has_shader_preset(const std::string &name);
 void register_default_shader_presets();
+
+// The keys realize_scene applies to a node's mesh once its realizer has returned it: casts_shadow,
+// the `shader:` block and material.opaque. A realizer that draws its node's surface with meshes of
+// its own as well (a ground cut into LOD chunks) applies them to each of those.
+void apply_mesh_keys(GeometryNode &g, const cvc::ariadne::SceneNode &n,
+                     std::vector<std::string> *warnings = nullptr);
 
 // Verify the NODE customs a document declared (`loaded.customs`, from the `customs:`
 // block) against the registered scene node types. The loader already fail-fast-checked

@@ -208,6 +208,7 @@ const char *const kAriSchema = R"ARISCHEMA({
         "multiline": {"$ref": "#/$defs/flag"},
         "max_lines": {"type": "number"},
         "max_length": {"type": "number"},
+        "send": {"type": "string"},
         "options": {"type": ["array", "string"], "items": {"type": "string"}},
         "pos": {"type": "array", "items": {"type": "number"}},
         "size": {"type": ["array", "number"], "items": {"type": ["number", "string"]}},
@@ -889,6 +890,7 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
       ctx.warn("ari: message_input '" + label + "' max_length must be >= 0 — no cap");
     w.max_lines = lines >= 1.0 ? static_cast<int>(lines) : 4;
     w.max_length = length >= 0.0 ? static_cast<int>(length) : 0;
+    w.send = str(n, "send");
     return w;
   }
   if (type == "input_int") {
@@ -1916,7 +1918,7 @@ bool known_scene_node_key(const std::string &k) {
   return k == "node" || k == "id" || k == "type" || k == "source" || k == "material" ||
          k == "transform" || k == "fit" || k == "visible" || k == "volren" || k == "volslice" ||
          k == "volume" || k == "shader" || k == "clip" || k == "body" || k == "children" ||
-         k == "casts_shadow";
+         k == "casts_shadow" || k == "tags";
 }
 
 std::string lowered(std::string s) {
@@ -2493,6 +2495,15 @@ SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
   if (n["casts_shadow"]) {
     sn.has_casts_shadow = true;
     sn.casts_shadow = flag(n, "casts_shadow", true);
+  }
+  // tags: [a, b] or tags: a
+  if (const YAML::Node tags = n["tags"]) {
+    if (tags.IsScalar())
+      sn.tags.push_back(tags.Scalar());
+    else if (tags.IsSequence())
+      for (const auto &t : tags)
+        if (t.IsScalar() && !t.Scalar().empty())
+          sn.tags.push_back(t.Scalar());
   }
   const YAML::Node tf = n["transform"];
   if (tf && tf.IsMap()) {

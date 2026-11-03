@@ -610,6 +610,17 @@ and the media gate is asked only once the stream is held, so a dropped frame spe
 write that starts and then blocks still holds its own thread until the 3 s watchdog; only an
 asynchronous write path would avoid that.)
 
+**gRPC delay drop.** `--media-delay-ms 100`: the stall drop rarely fires, because a gRPC `Write`
+returns once HTTP/2 flow control and the socket take the bytes, and gRPC grows the window to
+megabytes, so during a TCP loss burst seconds of media queued without a write ever blocking. Each
+stream that carries media or pose snapshots now follows them with a Ping (its seq's top bit set) at
+most every 50 ms. The stream is in order, so the Pong means the peer has read everything written
+before it, and the oldest unanswered probe dates the oldest byte that may still be queued. Past its
+base round trip (the least probe round trip over 10 s) by more than 100 ms, video to that receiver is
+dropped, pose snapshots past 200 ms and audio past 400 ms. A peer that never answers a probe is never
+held back. It applies on both ends, so a client's uplink is bounded too (the bench and arigl use
+the transport's default). Pose snapshots also never wait more than 1 ms for a busy stream.
+
 **Media defaults and the uplink.**
 - **Camera:** `conference_roster.ari` captures it at 320x240, 15 fps and JPEG q60
   (`stream-capture-camera`'s `quality`). That is about 0.6 Mbit/s per receiver, against about 5 for the
@@ -675,6 +686,7 @@ false)` is the old drain-and-publish exactly); arisrv and arigl turn them on.
 | `--relay-gate on\|off` | on | off: forward every client frame |
 | `--relay-journal trim\|keep` | trim | keep: journal backfill on connect, no trim |
 | `--media-stall-ms N` | 40 | gRPC stall drop; 0 = off |
+| `--media-delay-ms N` | 100 | gRPC delay drop (video past N ms of queue, poses 2N, audio 4N); 0 = off. Not an S7 switch |
 | `--admission-hold-ms N` | 2000 (only with an AOI) | hold a joiner's bootstrap for its filter, at most N ms; 0 = off (the admit snapshot goes out unfiltered, before Hello) |
 | `--scene default\|large` | default | the seeded scene; not an S7 switch (honoured under `--s7 off`) |
 | `--bind-writes on\|off` | on | bound writes (below): each client writes only its own participant, as itself; off takes any client's writes. Not an S7 switch |

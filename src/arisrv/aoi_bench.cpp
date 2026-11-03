@@ -404,6 +404,7 @@ struct bench_config {
   bool move = true;
   std::string poses = "stream"; // stream: 60 Hz room steps, pose snapshots; tree: 20 Hz tree poses
   long media_stall_ms = 40;
+  long media_delay_ms = 100;        // gRPC's delay drop, relay and clients (0: off)
   long admission_hold_ms = 2000;    // arisrv's --admission-hold-ms (with an area of interest)
   std::string late_joiner = "join"; // join: as a client does; observe: connect and only listen
   std::string bind_writes = "on";   // arisrv's --bind-writes (not an S7 switch)
@@ -446,6 +447,7 @@ public:
     grpc.set_relay_requires_interest(gate);
     grpc.set_backfill_on_connect(!trim);
     grpc.set_media_stall_drop(std::chrono::milliseconds(cfg.s7 ? cfg.media_stall_ms : 0));
+    grpc.set_media_delay_drop(std::chrono::milliseconds(cfg.media_delay_ms));
     grpc.set_admission_hold(hold);
     grpc.set_inbound_gate(bind_gate);
     grpc.start("127.0.0.1:0", kRelayId, "conf");
@@ -616,7 +618,10 @@ public:
 #endif
     if (t >= _next_net) {
       _next_net = t + 1.0;
-      write_net(t);
+      const bool publish = t >= _next_publish;
+      if (publish)
+        _next_publish = t + ra::net_publish_period_s;
+      write_net(t, publish);
     }
   }
 
@@ -654,6 +659,21 @@ public:
   std::uint64_t stall_dropped() const {
 #if defined(CVC_ENABLE_GRPC)
     return grpc.total_media_stall_dropped();
+#else
+    return 0;
+#endif
+  }
+  // Media the gRPC delay drop skipped on the fan, and pose snapshots it (or a busy stream) skipped.
+  std::uint64_t delay_dropped() const {
+#if defined(CVC_ENABLE_GRPC)
+    return grpc.total_media_delay_dropped();
+#else
+    return 0;
+#endif
+  }
+  std::uint64_t poses_skipped() const {
+#if defined(CVC_ENABLE_GRPC)
+    return grpc.total_pose_snapshots_skipped();
 #else
     return 0;
 #endif
@@ -718,10 +738,13 @@ public:
   std::size_t journal_max = 0;
 
 private:
-  // arisrv's ~1 s link stats: each participant's link as the relay sees it, and the totals.
-  void write_net(double t) {
+  // arisrv's ~1 s link stats: each participant's round trip to its pose stream, and on PUBLISH
+  // (every net_publish_period_s) its link as the relay sees it and the totals, over that window.
+  void write_net(double t, bool publish) {
     const std::vector<cvc::state_link_report> ls = links();
-    const auto rates = _meter.update(ls, t);
+    std::map<std::string, cvc::state_link_rate_meter::rate> rates;
+    if (publish)
+      rates = _meter.update(ls, t);
     std::set<std::string> present;
     for (const auto &p : ra::room_roster(app, kRoom))
       present.insert(p.pid);
@@ -734,7 +757,8 @@ private:
       total.out_kbps += out_kbps;
       ++total.links;
       if (present.count(r.remote_node_id)) {
-        ra::write_relay_net(app, kRoom, r.remote_node_id, {r.stats.rtt_ms, in_kbps, out_kbps});
+        if (publish)
+          ra::write_relay_net(app, kRoom, r.remote_node_id, {r.stats.rtt_ms, in_kbps, out_kbps});
         if (r.stats.rtt_ms >= 0.0)
           poses->set_rtt(r.remote_node_id, r.stats.rtt_ms);
       }
@@ -744,14 +768,15 @@ private:
       for (const cvc::state_link_report &r : lanes->link_reports())
         if (present.count(r.remote_node_id) && r.stats.rtt_ms >= 0.0)
           poses->set_rtt(r.remote_node_id, r.stats.rtt_ms);
-    ra::write_server_net(app, kRoom, total);
+    if (publish)
+      ra::write_server_net(app, kRoom, total);
   }
 
   std::mutex _mu;
   std::vector<std::string> _departed;
   std::set<std::string> _known;
   cvc::state_link_rate_meter _meter;
-  double _next_broadcast = 0.0, _next_net = 1.0;
+  double _next_broadcast = 0.0, _next_net = 1.0, _next_publish = 1.0;
 };
 
 // A synthetic participant, as arigl runs one.
@@ -790,6 +815,7 @@ public:
       _grpc->register_shard(shard.get());
       _grpc->set_on_media(on_media);
       _grpc->set_on_pose_snapshot(on_poses);
+      _grpc->set_media_delay_drop(std::chrono::milliseconds(_cfg.media_delay_ms));
       tp = _grpc.get();
       return _grpc->connect_to_peer(r.grpc.listen_address(), std::chrono::milliseconds(8000)) &&
              open_lane();
@@ -811,6 +837,15 @@ public:
     (void)on_media;
     (void)on_poses;
     return false;
+  }
+
+  // Its own uplink media the gRPC delay drop skipped.
+  std::uint64_t uplink_delay_dropped() const {
+#if defined(CVC_ENABLE_GRPC)
+    if (_grpc)
+      return _grpc->total_media_delay_dropped();
+#endif
+    return 0;
   }
 
   void disconnect() {
@@ -1300,7 +1335,7 @@ void usage() {
       "         [--seconds S] [--warmup W] [--video-bytes B] [--transport ws|grpc|mixed]\n"
       "         [--s7 on|off] [--media on|off] [--move on|off] [--poses stream|tree] [--client-hz "
       "N]\n"
-      "         [--media-stall-ms N]\n"
+      "         [--media-stall-ms N] [--media-delay-ms N]\n"
       "         [--admission-hold-ms N] [--late-joiner join|observe] [--bind-writes on|off]\n"
       "         [--lane off|rtc] [--lane-port P] [--lane-lifetime-ms N] [--lane-sctp-kb K]\n"
       "         [--lane-buffer-kb K] [--lane-sack-ms N] [--lane-cc 0..3] [--lane-media on|off]\n"
@@ -1372,6 +1407,8 @@ int main(int argc, char **argv) {
       g_frame_s = 1.0 / (std::max)(1.0, std::atof(next()));
     else if (!std::strcmp(a, "--media-stall-ms"))
       cfg.media_stall_ms = (std::max)(0L, std::atol(next()));
+    else if (!std::strcmp(a, "--media-delay-ms"))
+      cfg.media_delay_ms = (std::max)(0L, std::atol(next()));
     else if (!std::strcmp(a, "--admission-hold-ms"))
       cfg.admission_hold_ms = (std::max)(0L, std::atol(next()));
     else if (!std::strcmp(a, "--late-joiner"))
@@ -1542,6 +1579,10 @@ int main(int argc, char **argv) {
   }
   const std::uint64_t withheld0 = relay.withheld(), gated0 = relay.media_gated();
   const std::uint64_t stalled0 = relay.stall_dropped();
+  const std::uint64_t delayed0 = relay.delay_dropped(), poses_skipped0 = relay.poses_skipped();
+  std::uint64_t uplink_delayed0 = 0;
+  for (bench_client *c : cs)
+    uplink_delayed0 += c->uplink_delay_dropped();
   if (relay.aoi)
     relay.aoi->take_stats();
   relay.step_ms.clear();
@@ -1558,6 +1599,9 @@ int main(int argc, char **argv) {
   const double secs = now_s() - t0;
   // Media still in flight is let in, then the probes stop.
   run_room(relay, cs, 0.5, cfg.move, false, nullptr);
+  std::uint64_t uplink_delayed = 0;
+  for (bench_client *c : cs)
+    uplink_delayed += c->uplink_delay_dropped();
   latency_samples lat;
   std::uint64_t cam_sent = 0, mic_sent = 0, cam_got = 0, mic_got = 0;
   for (std::size_t i = 0; i < cs.size(); ++i) {
@@ -1693,18 +1737,22 @@ int main(int argc, char **argv) {
               "p50 %.3f p99 %.3f max %.3f\n",
               out_total / 1000.0, in_total / 1000.0, journal_end, relay.journal_max, step_p50,
               step_p99, step_max);
-  std::printf("[bench] aoi pairs inner %zu middle %zu outer %zu | pushes %llu (%llu entries) | "
-              "media full %llu thumb %llu dropped %llu | state filtered %llu | relay withheld %llu "
-              "| media gated %llu, stalled %llu\n",
-              st.inner, st.middle, st.outer, static_cast<unsigned long long>(st.pushes),
-              static_cast<unsigned long long>(st.push_entries),
-              static_cast<unsigned long long>(st.media_full),
-              static_cast<unsigned long long>(st.media_thumb),
-              static_cast<unsigned long long>(st.media_dropped),
-              static_cast<unsigned long long>(st.state_filtered),
-              static_cast<unsigned long long>(relay.withheld() - withheld0),
-              static_cast<unsigned long long>(relay.media_gated() - gated0),
-              static_cast<unsigned long long>(relay.stall_dropped() - stalled0));
+  std::printf(
+      "[bench] aoi pairs inner %zu middle %zu outer %zu | pushes %llu (%llu entries) | "
+      "media full %llu thumb %llu dropped %llu | state filtered %llu | relay withheld %llu "
+      "| media gated %llu, stalled %llu, delayed %llu (uplinks %llu) | poses skipped %llu\n",
+      st.inner, st.middle, st.outer, static_cast<unsigned long long>(st.pushes),
+      static_cast<unsigned long long>(st.push_entries),
+      static_cast<unsigned long long>(st.media_full),
+      static_cast<unsigned long long>(st.media_thumb),
+      static_cast<unsigned long long>(st.media_dropped),
+      static_cast<unsigned long long>(st.state_filtered),
+      static_cast<unsigned long long>(relay.withheld() - withheld0),
+      static_cast<unsigned long long>(relay.media_gated() - gated0),
+      static_cast<unsigned long long>(relay.stall_dropped() - stalled0),
+      static_cast<unsigned long long>(relay.delay_dropped() - delayed0),
+      static_cast<unsigned long long>(uplink_delayed - uplink_delayed0),
+      static_cast<unsigned long long>(relay.poses_skipped() - poses_skipped0));
   std::printf(
       "[bench] late join (%s): %s in %.2f s, %llu bytes, %llu backfilled, %llu other "
       "participants' intent leaves | admission held %llu (timed out %llu) | its clock re-aligned "
@@ -1788,13 +1836,14 @@ int main(int argc, char **argv) {
                  "{\n  \"config\": {\"clients\": %d, \"layout\": %s, \"scene\": %s, \"aoi\": %s, "
                  "\"video_max\": %d, \"seconds\": %.2f, \"warmup\": %.2f, \"video_bytes\": %zu, "
                  "\"transport\": %s, \"s7\": %s, \"media\": %s, \"move\": %s, "
-                 "\"media_stall_ms\": %ld, \"admission_hold_ms\": %ld, \"late_joiner\": %s, "
+                 "\"media_stall_ms\": %ld, \"media_delay_ms\": %ld, \"admission_hold_ms\": %ld, "
+                 "\"late_joiner\": %s, "
                  "\"bind_writes\": %s},\n",
                  cfg.clients, json_str(cfg.layout).c_str(), json_str(cfg.scene).c_str(),
                  json_str(cfg.aoi).c_str(), cfg.video_max, cfg.seconds, cfg.warmup, cfg.video_bytes,
                  json_str(cfg.transport).c_str(), cfg.s7 ? "true" : "false",
                  cfg.media ? "true" : "false", cfg.move ? "true" : "false",
-                 cfg.s7 ? cfg.media_stall_ms : 0L,
+                 cfg.s7 ? cfg.media_stall_ms : 0L, cfg.media_delay_ms,
                  cfg.s7 && cfg.aoi != "off" ? cfg.admission_hold_ms : 0L,
                  json_str(cfg.late_joiner).c_str(), cfg.bind_writes == "on" ? "true" : "false");
     std::fprintf(f,
@@ -1822,10 +1871,16 @@ int main(int argc, char **argv) {
                  static_cast<unsigned long long>(st.state_filtered));
     std::fprintf(f,
                  "    \"relay_withheld\": %llu, \"media_gated\": %llu, "
-                 "\"media_stall_dropped\": %llu,\n    \"links\": [\n%s    ]},\n",
+                 "\"media_stall_dropped\": %llu, \"media_delay_dropped\": %llu, "
+                 "\"uplink_delay_dropped\": %llu, \"pose_snapshots_skipped\": %llu,\n"
+                 "    \"links\": [\n%s    ]},\n",
                  static_cast<unsigned long long>(relay.withheld() - withheld0),
                  static_cast<unsigned long long>(relay.media_gated() - gated0),
-                 static_cast<unsigned long long>(relay.stall_dropped() - stalled0), jl.c_str());
+                 static_cast<unsigned long long>(relay.stall_dropped() - stalled0),
+                 static_cast<unsigned long long>(relay.delay_dropped() - delayed0),
+                 static_cast<unsigned long long>(uplink_delayed - uplink_delayed0),
+                 static_cast<unsigned long long>(relay.poses_skipped() - poses_skipped0),
+                 jl.c_str());
     std::fprintf(f,
                  "  \"late_join\": {\"converged\": %s, \"seconds\": %.3f, \"bytes\": %llu, "
                  "\"backfilled\": %llu, \"foreign_intents\": %llu, \"held\": %llu, "
