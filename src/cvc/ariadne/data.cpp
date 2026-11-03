@@ -13,7 +13,6 @@
 #include <atomic>
 #include <boost/any.hpp>
 #include <cctype>
-#include <charconv>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -31,6 +30,7 @@
 #include <cvc/net/http_client.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_blob_store.h> // sha256_hex
+#include <cvc/state/state_exec/types.h>   // format_number_shortest
 #include <cvc/volume/volume.h>
 #include <cvc/world/city_bundle.h>
 #include <cvc/world/world_geometry.h>
@@ -196,10 +196,9 @@ void json_to_state(const cvc::net::json_lite::Value &v, cvc::state &n) {
   case K::number: {
     if (v.integral) {
       n.value(std::to_string(v.i));
-    } else {
-      char buf[64];
-      const auto r = std::to_chars(buf, buf + sizeof buf, v.num);
-      n.value(std::string(buf, r.ptr));
+    } else { // the shortest text that reads back as it, on every platform (not std::to_chars:
+             // libc++ lacks it for doubles before macOS 13.3)
+      n.value(cvc::state_exec::format_number_shortest(v.num));
     }
     break;
   }
