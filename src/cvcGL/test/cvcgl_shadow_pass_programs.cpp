@@ -20,8 +20,14 @@
 //      (FilteredShadowMapPass's shader-stage MTime), and the frames match pass programs off;
 //   D. edge visibility switched on (a property that changes the shader): frames match pass
 //      programs off;
-//   E. shadows off and on again (new passes, perhaps at old addresses): frames match.
-// Renders for real and skips where nothing rasterises (fatal under CVC_REQUIRE_RENDER=1).
+//   E. shadows off and on again (new passes, perhaps at old addresses): frames match;
+//   F. a bake asks the driver whether its framebuffer is complete only for a light's map it has
+//      not asked about: frames that bake issue no more glCheckFramebufferStatus than frames that
+//      do not (on WebGL each one waits on the GPU process).
+// Renders for real and skips where nothing rasterises (fatal under CVC_REQUIRE_RENDER=1). Desktop
+// GL only (the GL counter swaps glad pointers).
+#include "gl_call_counter.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -34,6 +40,7 @@
 #include <cvc/gl/SceneRenderer.h>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 #include <vtkActor.h>
 #include <vtkCollection.h>
@@ -316,6 +323,29 @@ int main() {
   frame();
   sg.setShadowsEnabled(true);
   same("after shadows off and on");
+
+  // ── F. the bake's framebuffer status ────────────────────────────────────────
+  std::printf("F. the bake's framebuffer\n");
+  LowMemoryPolyDataMapper::setPassProgramsEnabled(true);
+  cvcgl_test::glcallsInstall(); // the context exists, so glad is loaded
+  settled(true);
+  const auto checks = [&](bool bake, int n) {
+    const std::uint64_t b0 = sg.shadowBakes();
+    const double c0 = cvcgl_test::glcallsRead().count("CheckFramebufferStatus");
+    for (int i = 0; i < n; ++i) {
+      if (bake)
+        lights[1]->Modified();
+      frame();
+    }
+    return std::make_pair(sg.shadowBakes() - b0,
+                          cvcgl_test::glcallsRead().count("CheckFramebufferStatus") - c0);
+  };
+  const auto baking = checks(true, 8), idle = checks(false, 8);
+  chk(baking.first == 8 && idle.first == 0 && baking.second == idle.second,
+      "8 frames that bake: " + std::to_string(baking.second) +
+          " glCheckFramebufferStatus, 8 that do not: " + std::to_string(idle.second) + " (bakes " +
+          std::to_string(baking.first) + ", " + std::to_string(idle.first) + ")");
+  cvcgl_test::glcallsUninstall();
 
   LowMemoryPolyDataMapper::setPassProgramsEnabled(true);
   std::printf(fails ? "FAILED (%d)\n" : "OK\n", fails);
