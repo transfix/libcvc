@@ -2905,9 +2905,11 @@ TEST(SchedulerLockPort, APostEndsAnAsyncWaitForWork) {
 }
 
 // A sync run() idle beside a 5 s sleeper returns to its loop when another thread posts to its
-// home's port: the loop's next step drains the port, and applies a stop queued with
-// post_control before the post (a queued command alone wakes no idle run). The sleeper is still
-// asleep when run() returns, so the post, not the sleeper's deadline, ended the wait.
+// home's port: the loop's next step drains the port. The poster then queues a stop with
+// post_control, which ends the run's next wait (a post ends an idle wait too, S0.7). The stop is
+// queued only once the port post has returned, so whichever post the run sees first, a step
+// drains the port before the stop ends the run. The sleeper is still asleep when run() returns,
+// so the posts, not the sleeper's deadline, ended the wait.
 TEST(SchedulerLockPort, APostEndsTheSyncIdleWait) {
   scheduler sched;
   const int pid = sched.execute(std::string("(begin 1 2 3)"));
@@ -2919,11 +2921,11 @@ TEST(SchedulerLockPort, APostEndsTheSyncIdleWait) {
   std::atomic<bool> posted{false};
   std::thread poster([&sched, port, &posted, pid] {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    posted = port->post(unknown_relevel());
     control_cmd stop;
     stop.what = control_cmd::kind::query;
     stop.query = [&sched](scheduler_base &) { sched.stop(); }; // on the scheduler's thread
     sched.post_control(pid, std::move(stop));
-    posted = port->post(unknown_relevel());
   });
   const auto t0 = std::chrono::steady_clock::now();
   sched.run();

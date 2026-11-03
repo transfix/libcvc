@@ -7,6 +7,7 @@
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/scheduler.h>
 #include <cvc/state/state_exec/state_value_codec.h> // snapshot / restore
+#include <iterator>
 #include <stdexcept>
 
 namespace cvc::state_exec {
@@ -19,7 +20,27 @@ scheduler::scheduler(scheduling_policy policy)
     : policy_(policy), evaluator_(builtins::make_default_environment()),
       procs_(policy != scheduling_policy::round_robin), idle_(std::make_shared<detail::wakeup>()) {}
 
-scheduler::~scheduler() { home_.reset(); }
+namespace {
+// What a posted command never applied, or whose call threw, tells its done: false (S0.0's
+// contract; a query has no done). done must not throw.
+void refuse_control(control_cmd &cmd) noexcept {
+  if (cmd.done && cmd.what != control_cmd::kind::query)
+    cmd.done(false);
+}
+} // namespace
+
+scheduler::~scheduler() {
+  home_.reset();
+  // Commands posted and never applied: their done gets false. Taken under the lock, so a post
+  // that returned before the destruction began is seen.
+  std::vector<std::pair<int, control_cmd>> left;
+  {
+    std::lock_guard<std::mutex> lock(control_mutex_);
+    left.swap(controls_);
+  }
+  for (auto &entry : left)
+    refuse_control(entry.second);
+}
 
 void scheduler::set_lock_manager(std::shared_ptr<lock_manager> mgr, lock_attach attach) {
   if (home_)
@@ -651,7 +672,13 @@ uint64_t scheduler::run_steps(std::optional<uint64_t> max_steps, std::optional<d
     budget->start();
   }
 
-  while (!stop_requested_.load(std::memory_order_relaxed) && has_runnable()) {
+  while (!stop_requested_.load(std::memory_order_relaxed)) {
+    // Commands posted from other threads first (S0.7): a resume may make the only process
+    // runnable, and a kill may end the last one.
+    if (control_pending_.load(std::memory_order_acquire))
+      apply_controls();
+    if (!has_runnable())
+      break;
     if (max_steps && steps >= *max_steps)
       break;
     if (budget && budget->spent(now_for_step()))
@@ -699,12 +726,14 @@ bool scheduler::idle_wait(std::optional<uint64_t> max_steps, uint64_t &steps, ti
   }
   // stop() may come meanwhile, from another thread: it notifies the wait, and the flag is also
   // checked every 10 ms. A sleeper's or a timed wait's deadline is waited for precisely, the
-  // budget's end need not be. A post to the lock port (another home's wake or relevel) ends the
-  // wait: it is tested before each slice, and its notify() ends the slice it lands in (protocol
-  // 2.3, 5.9).
+  // budget's end need not be. A post to the lock port (another home's wake or relevel) or to
+  // post_control ends the wait: each is tested before each slice, and its notify() ends the slice
+  // it lands in (protocol 2.3, 5.9; td 4.12).
   constexpr auto kStopCheck = std::chrono::milliseconds(10);
   const bool for_timer = next && *next == until;
-  const auto posted = [this] { return home_ && home_->port_pending(); };
+  const auto posted = [this] {
+    return control_pending_.load(std::memory_order_acquire) || (home_ && home_->port_pending());
+  };
   for (clock::time_point t = now;
        !stop_requested_.load(std::memory_order_relaxed) && t < until && !posted();
        t = clock::now()) {
@@ -720,7 +749,7 @@ bool scheduler::idle_wait(std::optional<uint64_t> max_steps, uint64_t &steps, ti
   if (max_steps && steps_left > 1)
     steps += std::min(static_cast<uint64_t>(waited / kIdleStepSeconds), steps_left - 1);
   // Only message or lock waiters: the budget ran out or stop() came, unless a post ended the wait
-  // (run() then steps again, and step_once applies it).
+  // (run()'s loop then applies it).
   return next.has_value() || posted();
 }
 
@@ -1363,12 +1392,15 @@ void scheduler::note_priority_clamped() {
 }
 
 bool scheduler::post_control(int pid, control_cmd cmd) {
-  // Any thread: queued, and applied at the top of the next step (apply_controls), on the
-  // scheduler's thread. The posting thread may not read procs_, so an unknown pid is found, and
-  // ignored, there. An idle run() is not woken: it applies the command once its wait ends.
+  // Any thread: queued, and applied at the top of the next step or run() iteration
+  // (apply_controls), on the scheduler's thread. The posting thread may not read procs_, so an
+  // unknown pid is found, and refused, there. An idle run() wakes (td 4.12). The wait is notified
+  // under the lock: once the poster lets go of it, it touches the scheduler no more, so a
+  // scheduler thread that applies this post may destroy the scheduler.
   std::lock_guard<std::mutex> lock(control_mutex_);
   controls_.emplace_back(pid, std::move(cmd));
   control_pending_.store(true, std::memory_order_release);
+  idle_->notify();
   return true;
 }
 
@@ -1380,22 +1412,57 @@ void scheduler::apply_controls() {
     control_pending_.store(false, std::memory_order_relaxed);
   }
   chain_valid_ = false; // a query's time is no step's
-  for (auto &[pid, cmd] : controls) {
-    switch (cmd.what) {
-    case control_cmd::kind::set_priority:
-      set_priority(pid, cmd.value); // the host path, unchecked (design 7.4); false for a gone pid
-      break;
-    case control_cmd::kind::query:
-      if (cmd.query)
-        cmd.query(*this);
-      break;
-    case control_cmd::kind::kill:
-    case control_cmd::kind::pause:
-    case control_cmd::kind::resume:
-    case control_cmd::kind::signal:
-      break; // S0.7 applies these
+  // One at a time, in the order posted (S0.7). A kill can throw (its locks' release, a tree
+  // write's slots): the command that threw is refused, and the rest go back to the front of the
+  // queue, ahead of what was posted since, before the exception propagates. None is lost.
+  std::size_t next = 0;
+  try {
+    while (next < controls.size()) {
+      auto &[pid, cmd] = controls[next++];
+      apply_control(pid, cmd);
     }
+  } catch (...) {
+    refuse_control(controls[next - 1].second);
+    if (next < controls.size()) {
+      try {
+        std::lock_guard<std::mutex> lock(control_mutex_);
+        controls_.insert(controls_.begin(), std::make_move_iterator(controls.begin() + next),
+                         std::make_move_iterator(controls.end()));
+        control_pending_.store(true, std::memory_order_release);
+      } catch (...) { // no memory to queue them again: refused rather than lost
+        for (std::size_t i = next; i < controls.size(); ++i)
+          refuse_control(controls[i].second);
+      }
+    }
+    throw;
   }
+}
+
+void scheduler::apply_control(int pid, control_cmd &cmd) {
+  bool applied = false;
+  switch (cmd.what) {
+  case control_cmd::kind::query:
+    if (cmd.query)
+      cmd.query(*this);
+    return; // a query has no done
+  case control_cmd::kind::set_priority:
+    applied = set_priority(pid, cmd.value); // the host path, unchecked (design 7.4)
+    break;
+  case control_cmd::kind::kill:
+    applied = kill(pid); // killed_by_user
+    break;
+  case control_cmd::kind::pause:
+    applied = pause(pid);
+    break;
+  case control_cmd::kind::resume:
+    applied = resume(pid);
+    break;
+  case control_cmd::kind::signal:
+    applied = send_signal(pid, cmd.signal); // "SIGKILL" kills
+    break;
+  }
+  if (cmd.done)
+    cmd.done(applied);
 }
 
 bool scheduler::set_max_steps(int pid, uint64_t max_steps) {
