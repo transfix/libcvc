@@ -27,6 +27,7 @@
 #include <cvc/state/state_exec/evaluator.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/memory_tracker.h>
+#include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/process_table.h>
 #include <cvc/state/state_exec/scheduler.h>
@@ -3158,5 +3159,134 @@ TEST(SchedulerLockPort, ARefusedAttachKeepsTheHomeAndManager) {
   {
     SCOPED_TRACE("async");
     a_refused_attach_keeps_the_home<async_scheduler>();
+  }
+}
+
+// ===========================================================================
+// A root per watch (td 4.8; S0.5): register_watch_handler's root
+// ===========================================================================
+
+namespace {
+
+// A counter in the `box` dict the watch handlers bump.
+int64_t box_count(const environment_ptr &env, const std::string &key) {
+  const value_t *box = env->lookup("box");
+  if (!box)
+    return -1;
+  for (const auto &[k, v] : *std::get<dict_ptr>(box->v))
+    if (k == key)
+      return std::get<int64_t>(v.v);
+  return -1;
+}
+
+// A watch registered with a root of its own resolves its path there, and is read only after a
+// write under that root: its own change counter, beside the watch root's. The counter goes with
+// the last watch under it.
+template <class S> void a_watch_resolves_under_its_own_root() {
+  cvc::app app;
+  cvc::state &tree = cvc::state::instance(app);
+  tree("wroot.doc.x").value("0");
+  tree("x").value("0");
+  const boost::shared_ptr<cvc::state> doc = tree.sharedChild("wroot.doc");
+  S sched;
+  sched.set_watch_root(&tree);
+  environment_ptr env = builtins::make_default_environment();
+  env->set("box", make_dict({{"doc", value_t{int64_t{0}}}, {"top", value_t{int64_t{0}}}}));
+  execute_options opts;
+  opts.env = env;
+  const int pid =
+      sched.execute(std::string("(begin (set i 0) (while (< i 1000000) (set i (+ i 1))))"), opts);
+  const auto bump = [&env](const std::string &key) {
+    auto cls = std::make_shared<closure>();
+    cls->body = {parse("(set-attr box \"" + key + "\" (+ (get-attr box \"" + key + "\") 1))")};
+    cls->env_snapshot = env;
+    return value_t{cls};
+  };
+  sched.register_watch_handler(pid, 1, bump("doc"), "x", doc); // wroot.doc.x
+  sched.register_watch_handler(pid, 2, bump("top"), "x");      // the watch root's x
+  const auto steps = [&sched] {
+    for (int i = 0; i < 64; ++i)
+      step_of(sched);
+  };
+  steps();
+  ASSERT_EQ(box_count(env, "doc"), 0);
+  ASSERT_EQ(box_count(env, "top"), 0);
+
+  // A write under the watch root, outside doc: only the watch root's watch is read.
+  uint64_t polls = sched.watch_polls();
+  tree("x").value("1");
+  steps();
+  EXPECT_EQ(box_count(env, "top"), 1);
+  EXPECT_EQ(box_count(env, "doc"), 0);
+  EXPECT_EQ(sched.watch_polls() - polls, 1u) << "a write outside doc read its watch";
+
+  // A write under doc (and so under the watch root too): both are read; the one under doc fires.
+  polls = sched.watch_polls();
+  tree("wroot.doc.x").value("1");
+  steps();
+  EXPECT_EQ(box_count(env, "doc"), 1);
+  EXPECT_EQ(box_count(env, "top"), 1);
+  EXPECT_EQ(sched.watch_polls() - polls, 2u);
+
+  // The watch under doc removed: its counter goes too, and a write under doc reads only the
+  // watch root's watch.
+  sched.unregister_watch_handler(pid, 1);
+  steps();
+  polls = sched.watch_polls();
+  tree("wroot.doc.x").value("2");
+  steps();
+  EXPECT_EQ(sched.watch_polls() - polls, 1u);
+  EXPECT_EQ(box_count(env, "doc"), 1);
+  EXPECT_TRUE(sched.check_tables());
+}
+
+// With no watch root at all, a watch with a root of its own is still read (the scheduler used to
+// skip every watch then).
+template <class S> void a_watch_with_its_own_root_needs_no_watch_root() {
+  cvc::app app;
+  cvc::state &tree = cvc::state::instance(app);
+  tree("wroot2.doc.x").value("0");
+  const boost::shared_ptr<cvc::state> doc = tree.sharedChild("wroot2.doc");
+  S sched;
+  environment_ptr env = builtins::make_default_environment();
+  env->set("box", make_dict({{"doc", value_t{int64_t{0}}}}));
+  execute_options opts;
+  opts.env = env;
+  const int pid =
+      sched.execute(std::string("(begin (set i 0) (while (< i 1000000) (set i (+ i 1))))"), opts);
+  auto cls = std::make_shared<closure>();
+  cls->body = {parse("(set-attr box \"doc\" (+ (get-attr box \"doc\") 1))")};
+  cls->env_snapshot = env;
+  sched.register_watch_handler(pid, 1, value_t{cls}, "x", doc);
+  for (int i = 0; i < 16; ++i)
+    step_of(sched);
+  tree("wroot2.doc.x").value("1");
+  for (int i = 0; i < 64; ++i)
+    step_of(sched);
+  EXPECT_EQ(box_count(env, "doc"), 1);
+  EXPECT_TRUE(sched.check_tables());
+}
+
+} // namespace
+
+TEST(SchedulerWatchRoots, AWatchResolvesUnderItsOwnRoot) {
+  {
+    SCOPED_TRACE("sync");
+    a_watch_resolves_under_its_own_root<scheduler>();
+  }
+  {
+    SCOPED_TRACE("async");
+    a_watch_resolves_under_its_own_root<async_scheduler>();
+  }
+}
+
+TEST(SchedulerWatchRoots, AWatchWithItsOwnRootNeedsNoWatchRoot) {
+  {
+    SCOPED_TRACE("sync");
+    a_watch_with_its_own_root_needs_no_watch_root<scheduler>();
+  }
+  {
+    SCOPED_TRACE("async");
+    a_watch_with_its_own_root_needs_no_watch_root<async_scheduler>();
   }
 }

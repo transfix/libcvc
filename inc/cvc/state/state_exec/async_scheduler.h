@@ -302,12 +302,19 @@ public:
   /// The 5-argument form with a null root (the scheduler's watch root).
   void register_watch_handler(int pid, int watch_id, value_t handler,
                               const std::string &path) override;
-  /// Resolves `path` under `root` when it is non-null (td 4.8).
+  /// Resolves `path` under `root` when it is non-null (a chrooted context's root, which the entry
+  /// pins; td 4.8). The watch is read only after a write under its own root.
   void register_watch_handler(int pid, int watch_id, value_t handler, const std::string &path,
                               boost::shared_ptr<cvc::state> root) override;
   void unregister_watch_handler(int pid, int watch_id) override;
 
+  /// The root for watch polling, settings and the async step rate. A host call (app, pycvc),
+  /// never made from a step: a chrooted state-watch keeps its own root instead (td 4.8).
   void set_watch_root(cvc::state *root) override;
+
+  /// The watched nodes poll_watches() has read so far, one for each watch it reads. A watch is
+  /// read only after a write under the root it resolves under (td 4.8: per-root gating).
+  uint64_t watch_polls() const noexcept { return watch_polls_; }
 
   /// This scheduler's built-in parser settings: what a submitted script is parsed with when the
   /// watch root's `state_exec.defaults.parser.*` keys don't say otherwise. parse_options{} (parse
@@ -418,11 +425,14 @@ private:
   double chain_cpu_ = -1.0;
   clock::time_point now_for_step();
 
-  /// Counts tree changes under watch_root_ while processes have watches or async calls are in
-  /// flight: poll_watches() reads the watched nodes, and async_steps_per_cpu_ms() the rate, only
-  /// once the count moved.
+  /// Counts tree changes under watch_root_ while a watch resolves under it or async calls are in
+  /// flight: poll_watches() reads those watched nodes, and async_steps_per_cpu_ms() the rate,
+  /// only once the count moved. A watch with a root of its own is counted in watch_roots_
+  /// instead (td 4.8).
   detail::tree_changes tree_changes_;
   uint64_t watch_seen_ = 0;
+  detail::watch_roots watch_roots_;
+  uint64_t watch_polls_ = 0; // watched nodes read (watch_polls())
   uint64_t rate_seen_ = 0;
   bool rate_valid_ = false;
   double rate_ = kDefaultAsyncStepsPerCpuMs;
