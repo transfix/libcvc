@@ -55,10 +55,22 @@ public:
 
   // --- Locks (docs/STATE_EXEC_LOCKS.md) ---
 
-  /// Use `mgr` for this scheduler's locks: the home is made and attached now. Throws
-  /// std::logic_error when a process of this scheduler holds or waits for a lock.
-  void set_lock_manager(std::shared_ptr<lock_manager> mgr);
+  /// Use `mgr` for this scheduler's locks: the home is made and attached now, with `attach`
+  /// (lock_attach::cross_thread when this scheduler may be pumped on another thread than the
+  /// manager's other homes; a single-mode manager refuses it). Throws std::logic_error when a
+  /// process of this scheduler holds or waits for a lock, or when `mgr` refuses the attach; the
+  /// scheduler then keeps the home and manager it had.
+  void set_lock_manager(std::shared_ptr<lock_manager> mgr, lock_attach attach = {});
   detail::lock_home *locks() override;
+  /// Whether the scheduler has its lock home yet (made by set_lock_manager, or by locks() on first
+  /// use); locks() makes one when it doesn't.
+  bool has_lock_home() const noexcept { return home_ != nullptr; }
+  /// The processes parked on a with-lock request: the process table's count (0: none, and
+  /// nothing to look for).
+  std::size_t lock_waiting_count() const noexcept { return procs_.lock_waiting_count(); }
+  /// Clear `out`, then append the pid of every process parked on a with-lock request, in pid
+  /// order. Walks the processes only while lock_waiting_count() is not zero.
+  void lock_waiting_pids(std::vector<int> &out) const;
   bool check_tables() const override { return procs_.check(); }
 
   // --- Process submission ---
@@ -134,7 +146,8 @@ public:
   void post_message(const std::string &path, const value_t &msg);
 
   /// Block the calling (scheduler) thread until there is work for the next drain_ingress() and
-  /// run: a post_message() or a settled async call (from any thread), a sleeper's or a timed
+  /// run: a post_message() or a settled async call (from any thread), a post to the lock port
+  /// (another home's wake or relevel for one of its processes), a sleeper's or a timed
   /// wait's deadline, an async call's registration timeout, the next charge of a call whose
   /// process has a step or time limit (every millisecond while one runs: the charge may find
   /// the limit reached, docs/STATE_EXEC_EXCEPTIONS.md 3.8), or `deadline`, whichever comes
@@ -161,6 +174,8 @@ public:
   /// It also takes the async calls that finished, and charges the ones still running
   /// (docs/STATE_EXEC_EXCEPTIONS.md 3.8): a driver that calls it often (every frame) keeps
   /// their processes' budgets current. And it wakes the sleepers and timed waits that are due.
+  /// Before all of it, it applies the lock port's posts (protocol 5.9): a lock waiter granted on
+  /// another thread becomes ready here.
   void drain_ingress();
 
   // --- Async calls (docs/STATE_EXEC_EXCEPTIONS.md 3; for async_host) ---
@@ -373,6 +388,9 @@ private:
   /// Made by locks() or set_lock_manager(); null until a with-lock needs it.
   std::unique_ptr<detail::lock_home> home_;
   std::vector<process *> lock_expired_; // reused by drain's lock expiries
+  /// An expiry pass (at `now`) threw: the lock waiters it had not timed out get a deadline due
+  /// `now`, back on the timer heap, and lock_expired_ is emptied.
+  void keep_lock_expiries(std::chrono::steady_clock::time_point now);
 
   /// A steady_clock reading the next step may start from (see scheduler.h).
   using clock = std::chrono::steady_clock;
@@ -425,7 +443,9 @@ private:
   std::atomic<bool> ingress_pending_{false};
   /// A wait_for_work() is (about to be) blocked: a post notifies wakeup_.
   std::atomic<bool> idle_waiting_{false};
-  std::unique_ptr<detail::wakeup> wakeup_;
+  /// What wait_for_work() blocks on. Made at construction and shared with the lock home's port,
+  /// whose posts notify it whatever idle_waiting_ says (protocol 2.3).
+  std::shared_ptr<detail::wakeup> wakeup_;
   // Notify a wait_for_work() in progress (any thread, after ingress_pending_ is set).
   void notify_work();
 
@@ -457,7 +477,8 @@ private:
   const process_ptr *select_process();
   // One step of the run loop (sync_step() and step() start a fresh clock chain).
   int step_once();
-  // What a step does before picking a process: the ingress, the calls, the due timers.
+  // What a step does before picking a process: the lock port's posts, the ingress, the calls,
+  // the due timers.
   void drain(bool in_step);
   // Apply one post_control command (scheduler thread).
   void apply_control(int pid, control_cmd &cmd);

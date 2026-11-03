@@ -220,6 +220,10 @@ public:
   // shown over it (they come back on clearTexture()). A scalar field -- from
   // setScalarField or color_by -- is an explicit request and still shows.
   void setTexture(const cvc::image &img, bool zeroCopy = true);
+  // Draw `from`'s texture on this mesh too: the same vtkTexture, so the GPU holds one copy however
+  // many meshes sample it (a ground cut into LOD chunks, all on one texture over its extent). It
+  // is the texture `from` has now: after a new setTexture on `from`, share it again.
+  void shareTexture(std::shared_ptr<const GeometryNode> from);
   void clearTexture();
   // Signal that the texture's pixels were edited in place (through an aliased
   // zero-copy buffer): marks the vtkTexture + its input image data Modified() so

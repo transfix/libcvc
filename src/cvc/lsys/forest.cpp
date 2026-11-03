@@ -237,9 +237,47 @@ inline void push_color(cvc::geometry &g, vec3 c) {
 
 // Grow one pine into the shared wood (tris + per-vertex colour) + needle (lines) meshes, recording
 // per-module re-pose data into `out_tree` when non-null. Verbatim topology from the demo.
+// An uncapped `ring`-sided tube along a module-frame segment (local +Y, length s.len, radius
+// s.rad), placed by `M`: 2*ring triangles in the dark wood colour.
+void push_tube(cvc::geometry &wood, const Mat4 &M, const Seg &s, int ring) {
+  const std::uint64_t base = static_cast<std::uint64_t>(wood.points().size());
+  for (int r = 0; r < ring; ++r) {
+    const double a = r * 2.0 * M_PI / ring;
+    const double x = std::cos(a) * s.rad, z = std::sin(a) * s.rad;
+    push_point(wood, xform(M, xform(s.m, {x, 0.0, z})));
+    push_point(wood, xform(M, xform(s.m, {x, s.len, z})));
+    push_color(wood, C_WOOD_DARK);
+    push_color(wood, C_WOOD_DARK);
+  }
+  for (int r = 0; r < ring; ++r) {
+    const std::uint64_t a0 = base + 2u * static_cast<std::uint64_t>(r), a1 = a0 + 1u;
+    const std::uint64_t b0 = base + 2u * static_cast<std::uint64_t>((r + 1) % ring), b1 = b0 + 1u;
+    wood.tris().push_back(cvc::geometry::tri_t{{a0, b0, b1}});
+    wood.tris().push_back(cvc::geometry::tri_t{{a0, b1, a1}});
+  }
+}
+
+// A pine leaf (NEEDLES needles fanned in a cone from its root) as a solid 3-sided cone of the same
+// length and spread: 4 triangles.
+void push_leaf_cone(cvc::geometry &wood, const Mat4 &M, const Leaf &lf, vec3 col) {
+  const std::uint64_t base = static_cast<std::uint64_t>(wood.points().size());
+  push_point(wood, xform(M, xform(lf.m, {0, 0, 0})));
+  push_color(wood, col);
+  for (int t = 0; t < 3; ++t) {
+    const double a = t * 2.0 * M_PI / 3.0;
+    push_point(wood, xform(M, xform(lf.m, {std::cos(a) * LEAF_RAD * lf.sc, LEAF_LEN * lf.sc,
+                                           std::sin(a) * LEAF_RAD * lf.sc})));
+    push_color(wood, col);
+  }
+  for (std::uint64_t t = 0; t < 3; ++t)
+    wood.tris().push_back(cvc::geometry::tri_t{{base, base + 1 + t, base + 1 + (t + 1) % 3}});
+  wood.tris().push_back(cvc::geometry::tri_t{{base + 1, base + 3, base + 2}});
+}
+
 void grow_pine_impl(cvc::geometry &wood, cvc::geometry &needle, double px, double py, double pz,
                     double size, int maturity, const CylTopo &cyl, const std::vector<vec3> &nring,
-                    const TurtleRot &rot, forest_wind::tree *out_tree) {
+                    const TurtleRot &rot, forest_wind::tree *out_tree,
+                    const tree_detail *detail = nullptr) {
   std::vector<Module> mods;
   expandTree(TREE_RULES[0], maturity, size, size, -1, 1, mods, rot.micro, rot.tilt, rot.roll);
   const Mat4 tUp = mRot(M_PI / 2.0, 1.0, 0.0, 0.0); // turtle +Y -> world Z-up
@@ -248,6 +286,28 @@ void grow_pine_impl(cvc::geometry &wood, cvc::geometry &needle, double px, doubl
     const Module &mod = mods[i];
     const Mat4 hang = (mod.parent < 0) ? mMul(mTrans(px, py, pz), tUp) : mod.hang;
     world[i] = (mod.parent < 0) ? hang : mMul(world[mod.parent], hang);
+    if (detail) { // the same module, coarser: thin tubes left out, the leaves as solid cones
+      for (const Seg &s : mod.segs)
+        if (s.rad >= detail->min_radius)
+          push_tube(wood, world[i], s, std::max(3, detail->ring));
+      const vec3 lc{detail->leaf_color[0], detail->leaf_color[1], detail->leaf_color[2]};
+      for (const Leaf &lf : mod.leaves) {
+        if (detail->leaf_solids) {
+          push_leaf_cone(wood, world[i], lf, lc);
+          continue;
+        }
+        const std::uint64_t base = static_cast<std::uint64_t>(needle.points().size());
+        push_point(needle, xform(world[i], xform(lf.m, {0, 0, 0})));
+        for (int t = 0; t < NEEDLES; ++t) {
+          push_point(needle,
+                     xform(world[i], xform(lf.m, {nring[t].x * LEAF_RAD * lf.sc, LEAF_LEN * lf.sc,
+                                                  nring[t].z * LEAF_RAD * lf.sc})));
+          needle.lines().push_back(
+              cvc::geometry::line_t{{base, base + 1 + static_cast<std::uint64_t>(t)}});
+        }
+      }
+      continue;
+    }
     forest_wind::mod_rec rec;
     rec.parent = mod.parent;
     rec.hang = to_array(hang);
@@ -323,21 +383,45 @@ void add_cylinder(cvc::geometry &g, vec3 p0, vec3 p1, double r0, double r1, int 
 
 // Grow one recursive branchy limb. `node` is a stable derivation id (NOT a loop counter); children
 // get path_id(node, b), so a sub-branch's jitter is independent of its siblings and reproducible.
+// An 8-triangle blob (an octahedron) over the box [lo, hi], in one colour.
+void add_blob(cvc::geometry &g, vec3 lo, vec3 hi, vec3 col) {
+  const vec3 c = (lo + hi) * 0.5, h = (hi - lo) * 0.5;
+  const std::uint64_t b = static_cast<std::uint64_t>(g.points().size());
+  const vec3 v[6] = {{c.x + h.x, c.y, c.z}, {c.x - h.x, c.y, c.z}, {c.x, c.y + h.y, c.z},
+                     {c.x, c.y - h.y, c.z}, {c.x, c.y, c.z + h.z}, {c.x, c.y, c.z - h.z}};
+  for (const vec3 &p : v) {
+    push_point(g, p);
+    push_color(g, col);
+  }
+  const int f[8][3] = {{0, 2, 4}, {2, 1, 4}, {1, 3, 4}, {3, 0, 4},
+                       {2, 0, 5}, {1, 2, 5}, {3, 1, 5}, {0, 3, 5}};
+  for (const auto &t : f)
+    g.tris().push_back(cvc::geometry::tri_t{{b + t[0], b + t[1], b + t[2]}});
+}
+
 void grow_branchy_rec(cvc::geometry &g, std::uint64_t seed, std::uint64_t node, vec3 basePt,
-                      vec3 dir, double length, double radius, int level, int levels, int branches) {
+                      vec3 dir, double length, double radius, int level, int levels, int branches,
+                      const tree_detail *detail = nullptr) {
   const vec3 tip = basePt + dir * length;
   const double tipR = radius * 0.62;
   const bool leaf = (level >= levels);
   const vec3 col =
       leaf ? C_NEEDLE
            : C_WOOD_DARK + (C_WOOD_LIGHT - C_WOOD_DARK) * (double(level) / std::max(1, levels));
-  add_cylinder(g, basePt, tip, radius, tipR, level == 0 ? 7 : 5, col);
+  if (!detail)
+    add_cylinder(g, basePt, tip, radius, tipR, level == 0 ? 7 : 5, col);
+  else if (radius >= detail->min_radius)
+    add_cylinder(g, basePt, tip, radius, tipR, std::max(3, detail->ring), col);
   if (leaf)
     return;
   const vec3 ref = std::fabs(dir.z) < 0.9 ? vec3{0, 0, 1} : vec3{1, 0, 0};
   const vec3 u = normalize3(cross(dir, ref));
   const vec3 v = normalize3(cross(dir, u));
   const int n = branches + (uni(seed, stream::param_jitter, node, 0) < 0.4 ? 1 : 0);
+  // The leaf twigs off this fork, drawn as one blob over their spread (a coarse detail's leaves).
+  const bool blob = detail && detail->leaf_solids && level + 1 >= levels;
+  vec3 lo = tip, hi = tip;
+  double covered = 0.0; // the twigs' side-on area: 2 x mean radius x length each
   for (int b = 0; b < n; ++b) {
     const std::uint32_t d = 1u + 3u * static_cast<std::uint32_t>(b);
     const double az = 2.0 * M_PI * (b + uni(seed, stream::param_jitter, node, d, -0.2, 0.2)) / n;
@@ -345,8 +429,24 @@ void grow_branchy_rec(cvc::geometry &g, std::uint64_t seed, std::uint64_t node, 
     const double lenFactor = uni(seed, stream::param_jitter, node, d + 2, 0.62, 0.78);
     const vec3 out = u * std::cos(az) + v * std::sin(az);
     const vec3 cdir = normalize3(dir * std::cos(tilt) + out * std::sin(tilt));
+    if (blob) {
+      const vec3 t = tip + cdir * (length * lenFactor);
+      lo = {std::min(lo.x, t.x), std::min(lo.y, t.y), std::min(lo.z, t.z)};
+      hi = {std::max(hi.x, t.x), std::max(hi.y, t.y), std::max(hi.z, t.z)};
+      covered += 2.0 * (radius * 0.58 * 0.81) * length * lenFactor; // a twig tapers to 0.62
+      continue;
+    }
     grow_branchy_rec(g, seed, path_id(node, static_cast<std::uint32_t>(b)), tip, cdir,
-                     length * lenFactor, radius * 0.58, level + 1, levels, branches);
+                     length * lenFactor, radius * 0.58, level + 1, levels, branches, detail);
+  }
+  if (blob) {
+    // The blob covers what the twigs did, side-on: narrowed about its centre to their area.
+    const double w = 0.5 * ((hi.x - lo.x) + (hi.y - lo.y)), side = 0.5 * w * (hi.z - lo.z);
+    const double s = side > 0.0 ? std::clamp(covered / side, 0.3, 1.0) : 1.0;
+    const vec3 c = (lo + hi) * 0.5;
+    lo = {c.x - s * (c.x - lo.x), c.y - s * (c.y - lo.y), lo.z};
+    hi = {c.x + s * (hi.x - c.x), c.y + s * (hi.y - c.y), hi.z};
+    add_blob(g, lo, hi, vec3{detail->leaf_color[0], detail->leaf_color[1], detail->leaf_color[2]});
   }
 }
 
@@ -368,6 +468,19 @@ void grow_branchy(cvc::geometry &wood, std::uint64_t seed, double bx, double by,
                   double length, double radius, int levels, int branches) {
   grow_branchy_rec(wood, seed, /*node=*/seed, vec3{bx, by, bz}, vec3{0, 0, 1}, length, radius, 0,
                    levels, branches);
+}
+
+void grow_pine(cvc::geometry &wood, cvc::geometry &needle, double bx, double by, double bz,
+               double size, int maturity, const tree_detail &detail) {
+  grow_pine_impl(wood, needle, bx, by, bz, size, maturity, cyl_topo(), needle_ring(), turtle_rot(),
+                 nullptr, &detail);
+}
+
+void grow_branchy(cvc::geometry &wood, std::uint64_t seed, double bx, double by, double bz,
+                  double length, double radius, int levels, int branches,
+                  const tree_detail &detail) {
+  grow_branchy_rec(wood, seed, /*node=*/seed, vec3{bx, by, bz}, vec3{0, 0, 1}, length, radius, 0,
+                   levels, branches, &detail);
 }
 
 forest_result grow_forest(const forest_params &p, const height_fn &height_at, cvc::geometry &wood,

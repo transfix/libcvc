@@ -2780,3 +2780,364 @@ TEST(SchedulerLocks, RunServicesALockDeadline) {
   EXPECT_TRUE(sched.check_tables());
   sched.kill(h);
 }
+
+// ===========================================================================
+// The lock port: posts between homes, drained between steps, ending the schedulers' waits
+// (protocol 2.3, 5.9; design 8.7; locks plan L3.2)
+// ===========================================================================
+
+namespace {
+
+int step_of(scheduler &s) { return s.step(); }
+int step_of(async_scheduler &s) { return s.sync_step(); }
+
+detail::lock_post unknown_relevel() {
+  detail::lock_post post;
+  post.what = detail::lock_post::kind::relevel;
+  post.pid = 999999; // no such process: ignored when applied (protocol 5.9)
+  return post;
+}
+
+// Two schedulers on one manager, stepped by this thread: A's holder releases, the grant for B's
+// waiter is a wake posted to B's port, and B's next step drains it and runs the waiter.
+template <class A, class B> void a_release_wakes_a_waiter_on_another_home() {
+  lock_run_world w;
+  const auto mgr = std::make_shared<lock_manager>();
+  A a;
+  B b;
+  a.set_lock_manager(mgr);
+  b.set_lock_manager(mgr);
+  const int h = w.submit(a, R"((with-lock "k" (msg-recv "go")))");
+  const int q = w.submit(b, R"((with-lock "k" 1))");
+  for (int i = 0; i < 1000 && (waiting_on(a, h) != "msg go" || waiting_on(b, q) != "lock /k");
+       ++i) {
+    step_of(a);
+    step_of(b);
+  }
+  ASSERT_EQ(waiting_on(a, h), "msg go");
+  ASSERT_EQ(waiting_on(b, q), "lock /k");
+  const std::shared_ptr<detail::lock_port> port = b.locks()->port();
+  EXPECT_FALSE(port->pending());
+
+  ASSERT_EQ(a.deliver_to_receivers("go", value_t(std::string("go"))), 1);
+  for (int i = 0; i < 1000 && !is_finished(a.get_process_info(h)->status); ++i)
+    step_of(a);
+  ASSERT_TRUE(is_finished(a.get_process_info(h)->status));
+  EXPECT_TRUE(port->pending()) << "A's release posted no wake to B's port";
+  EXPECT_EQ(waiting_on(b, q), "lock /k") << "the waiter moved before B drained its port";
+
+  // B's next step drains the port first, readies the waiter and steps it.
+  EXPECT_EQ(step_of(b), 1);
+  EXPECT_FALSE(port->pending());
+  EXPECT_NE(waiting_on(b, q), "lock /k");
+  for (int i = 0; i < 1000 && !is_finished(b.get_process_info(q)->status); ++i)
+    step_of(b);
+  ASSERT_TRUE(is_finished(b.get_process_info(q)->status));
+  EXPECT_EQ(std::get<int64_t>(b.get_result(q)->v), 1);
+  EXPECT_FALSE(port->pending());
+  EXPECT_TRUE(a.check_tables());
+  EXPECT_TRUE(b.check_tables());
+}
+
+} // namespace
+
+TEST(SchedulerLockPort, AReleaseOnOneHomeWakesAWaiterOnAnotherThroughItsPort) {
+  {
+    SCOPED_TRACE("sync and sync");
+    a_release_wakes_a_waiter_on_another_home<scheduler, scheduler>();
+  }
+  {
+    SCOPED_TRACE("async and async");
+    a_release_wakes_a_waiter_on_another_home<async_scheduler, async_scheduler>();
+  }
+  {
+    SCOPED_TRACE("sync holder, async waiter");
+    a_release_wakes_a_waiter_on_another_home<scheduler, async_scheduler>();
+  }
+  {
+    SCOPED_TRACE("async holder, sync waiter");
+    a_release_wakes_a_waiter_on_another_home<async_scheduler, scheduler>();
+  }
+}
+
+// An async_scheduler blocked in wait_for_work with a long deadline returns when another thread
+// posts to its home's port: the port shares the wakeup it blocks on. The drain clears the
+// pending flag, so the next wait blocks again rather than returning at once.
+TEST(SchedulerLockPort, APostEndsAnAsyncWaitForWork) {
+  async_scheduler sched;
+  sched.set_lock_manager(std::make_shared<lock_manager>());
+  const std::shared_ptr<detail::lock_port> port = sched.locks()->port();
+  std::atomic<bool> posted{false};
+  std::thread poster([port, &posted] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    posted = port->post(unknown_relevel());
+  });
+  const auto t0 = std::chrono::steady_clock::now();
+  const bool work = sched.wait_for_work(30.0);
+  const double waited =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  poster.join();
+  std::printf("wait_for_work(30 s), posted to after 50 ms, returned after %.3f s\n", waited);
+  EXPECT_TRUE(posted.load());
+  EXPECT_TRUE(work);
+  EXPECT_LT(waited, 10.0);
+  EXPECT_TRUE(port->pending()); // the wait reports the post; the drain applies it
+  sched.drain_ingress();
+  EXPECT_FALSE(port->pending());
+  EXPECT_FALSE(sched.wait_for_work(0.05)) << "a drained port still ended the wait";
+}
+
+// A sync run() idle beside a 5 s sleeper returns to its loop when another thread posts to its
+// home's port: the loop's next step drains the port, and applies a stop queued with
+// post_control before the post (a queued command alone wakes no idle run). The sleeper is still
+// asleep when run() returns, so the post, not the sleeper's deadline, ended the wait.
+TEST(SchedulerLockPort, APostEndsTheSyncIdleWait) {
+  scheduler sched;
+  const int pid = sched.execute(std::string("(begin 1 2 3)"));
+  sched.step();
+  ASSERT_TRUE(sched.sleep(pid, 5.0));
+  sched.locks(); // a private home first; the replacing one shares the same wakeup
+  sched.set_lock_manager(std::make_shared<lock_manager>());
+  const std::shared_ptr<detail::lock_port> port = sched.locks()->port();
+  std::atomic<bool> posted{false};
+  std::thread poster([&sched, port, &posted, pid] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    control_cmd stop;
+    stop.what = control_cmd::kind::query;
+    stop.query = [&sched](scheduler_base &) { sched.stop(); }; // on the scheduler's thread
+    sched.post_control(pid, std::move(stop));
+    posted = port->post(unknown_relevel());
+  });
+  const auto t0 = std::chrono::steady_clock::now();
+  sched.run();
+  const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  poster.join();
+  std::printf("run() beside a 5 s sleeper, posted to after 50 ms, returned after %.3f s\n", took);
+  EXPECT_TRUE(posted.load());
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::waiting) << "the sleeper woke";
+  EXPECT_FALSE(port->pending()); // the run's step drained it
+  EXPECT_TRUE(sched.check_tables());
+  sched.kill(pid);
+}
+
+namespace {
+
+// set_lock_manager makes the new home before the old one goes, so a refused attach (a
+// cross-thread home on a single-mode manager, design 8.3) throws with the old home still in place:
+// locks() is the same home on the same manager, and makes no private manager, after the throw.
+template <class S> void a_refused_attach_keeps_the_home() {
+  lock_run_world w;
+  const auto mgr = std::make_shared<lock_manager>(); // single mode
+  const auto other = std::make_shared<lock_manager>();
+  S sched;
+  sched.set_lock_manager(mgr);
+  detail::lock_home *const home = sched.locks();
+  ASSERT_EQ(home->manager_ptr().get(), mgr.get());
+  for (const std::shared_ptr<lock_manager> &target : {mgr, other}) {
+    EXPECT_THROW(sched.set_lock_manager(target, lock_attach{true}), std::logic_error);
+    EXPECT_EQ(sched.locks(), home);
+    EXPECT_EQ(sched.locks()->manager_ptr().get(), mgr.get());
+  }
+  const std::uint64_t grants = mgr->stats().grants;
+  const int pid = w.submit(sched, R"((with-lock "k" 7))");
+  for (int i = 0; i < 1000 && !is_finished(sched.get_process_info(pid)->status); ++i)
+    step_of(sched);
+  ASSERT_TRUE(is_finished(sched.get_process_info(pid)->status));
+  EXPECT_EQ(std::get<int64_t>(sched.get_result(pid)->v), 7);
+  EXPECT_GT(mgr->stats().grants, grants) << "the with-lock was not granted by the kept manager";
+  EXPECT_EQ(other->stats().grants, 0u);
+  EXPECT_TRUE(sched.check_tables());
+}
+
+} // namespace
+
+// A fresh scheduler has no lock home (design 8.4); locks() or set_lock_manager makes one.
+TEST(SchedulerLockPort, HasLockHomeOnceLocksOrSetLockManagerMadeIt) {
+  scheduler s1, s2;
+  async_scheduler a1, a2;
+  EXPECT_FALSE(s1.has_lock_home() || s2.has_lock_home() || a1.has_lock_home() ||
+               a2.has_lock_home());
+  s1.locks();
+  a1.locks();
+  s2.set_lock_manager(std::make_shared<lock_manager>());
+  a2.set_lock_manager(std::make_shared<lock_manager>());
+  EXPECT_TRUE(s1.has_lock_home() && s2.has_lock_home() && a1.has_lock_home() && a2.has_lock_home());
+}
+
+namespace {
+
+// lock_waiting_count() and lock_waiting_pids() before, during and after two waits behind one
+// holder.
+template <class S> void lists_its_lock_waiters() {
+  lock_run_world w;
+  S sched;
+  std::vector<int> pids{-1};
+  EXPECT_EQ(sched.lock_waiting_count(), 0u);
+  sched.lock_waiting_pids(pids);
+  EXPECT_TRUE(pids.empty()); // cleared, though nothing waits
+  const int h = w.submit(sched, R"((with-lock "k" (msg-recv "go")))");
+  const int q1 = w.submit(sched, R"((with-lock "k" 1))");
+  const int q2 = w.submit(sched, R"((with-lock "k" 2))");
+  for (int i = 0; i < 1000 && (sched.lock_waiting_count() < 2 || waiting_on(sched, h) != "msg go");
+       ++i)
+    step_of(sched);
+  ASSERT_EQ(waiting_on(sched, h), "msg go");
+  EXPECT_EQ(sched.lock_waiting_count(), 2u);
+  sched.lock_waiting_pids(pids);
+  EXPECT_EQ(pids, (std::vector<int>{q1, q2}));
+
+  ASSERT_EQ(sched.deliver_to_receivers("go", value_t(std::string("go"))), 1);
+  for (int i = 0; i < 1000 && !is_finished(sched.get_process_info(q2)->status); ++i)
+    step_of(sched);
+  ASSERT_TRUE(is_finished(sched.get_process_info(q1)->status));
+  ASSERT_TRUE(is_finished(sched.get_process_info(q2)->status));
+  EXPECT_EQ(sched.lock_waiting_count(), 0u);
+  sched.lock_waiting_pids(pids);
+  EXPECT_TRUE(pids.empty());
+  EXPECT_TRUE(sched.check_tables());
+}
+
+} // namespace
+
+TEST(SchedulerLockPort, ListsItsLockWaiters) {
+  {
+    SCOPED_TRACE("sync");
+    lists_its_lock_waiters<scheduler>();
+  }
+  {
+    SCOPED_TRACE("async");
+    lists_its_lock_waiters<async_scheduler>();
+  }
+}
+
+namespace {
+
+void throw_on_cross_home_note(const detail::lock_note &) {
+  throw std::runtime_error("injected: cross_home_note");
+}
+
+double seconds_since(std::chrono::steady_clock::time_point t0) {
+  return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+}
+
+// What follows the throw on B.
+enum class after_throw {
+  b2_times_out,       // b1 kept; then b2 waits and times out
+  b1_reaped,          // b1 killed and reaped; then b2 waits and times out
+  only_a_sleeper_due, // b1 kept, and the only other timer is a sleeper's, set before the throw
+};
+
+// Two homes on one manager, stepped by this thread. A's a1 holds "k" shared, parked on a message;
+// B's b1 asks for it exclusive with a 0.1 s timeout and queues; A's a2 asks for it shared and
+// queues behind b1 (FIFO, protocol 3.1). b1's expiry cancels its ticket, which grants a2: a note
+// for A, whose delivery the hook makes throw, so B's wait_expired throws in the middle of its
+// pass, b1 not yet timed out. The pass gives b1 a deadline due at once, back on the timer heap:
+// - b2_times_out: B's next pass times b1 out, and b2 times out on its own deadline;
+// - b1_reaped: b1 is killed and reaped first, so an expiry list still holding it would be read
+//   after the free (ASan reports it); b2 times out;
+// - only_a_sleeper_due: no other lock waiter ever expires on B, only a 0.5 s sleeper's timer
+//   follows; b1 is still timed out by the next pass, not left parked.
+template <class S> void a_throwing_wait_expired_keeps_no_stale_expiry(after_throw then) {
+  const bool reap = then == after_throw::b1_reaped;
+  lock_run_world w;
+  const auto mgr = std::make_shared<lock_manager>();
+  S a;
+  S b;
+  a.set_lock_manager(mgr);
+  b.set_lock_manager(mgr);
+  const std::string timed =
+      R"((try (with-lock "k" :timeout 0.1 "granted") (catch (TimeoutError e) "timeout")))";
+  const int a1 = w.submit(a, R"((with-lock "k" :shared (msg-recv "go")))");
+  for (int i = 0; i < 1000 && waiting_on(a, a1) != "msg go"; ++i)
+    step_of(a);
+  ASSERT_EQ(waiting_on(a, a1), "msg go");
+  const int b1 = w.submit(b, timed);
+  for (int i = 0; i < 1000 && waiting_on(b, b1) != "lock /k"; ++i)
+    step_of(b);
+  ASSERT_EQ(waiting_on(b, b1), "lock /k");
+  const int a2 = w.submit(a, R"((with-lock "k" :shared 2))");
+  for (int i = 0; i < 1000 && waiting_on(a, a2) != "lock /k"; ++i)
+    step_of(a);
+  ASSERT_EQ(waiting_on(a, a2), "lock /k");
+  int s = -1;
+  if (then == after_throw::only_a_sleeper_due) {
+    s = w.submit(b, R"((begin (sleep 0.5) "slept"))");
+    for (int i = 0; i < 1000 && b.get_process_info(s)->status != process_status::waiting; ++i)
+      step_of(b);
+    ASSERT_EQ(b.get_process_info(s)->status, process_status::waiting);
+  }
+
+  {
+    static const detail::lock_test_hooks hooks{.cross_home_note = throw_on_cross_home_note};
+    struct hooks_guard {
+      hooks_guard() { detail::set_lock_test_hooks(&hooks); }
+      ~hooks_guard() { detail::set_lock_test_hooks(nullptr); }
+    } guard;
+    bool threw = false;
+    for (const auto t0 = std::chrono::steady_clock::now(); !threw && seconds_since(t0) < 10.0;) {
+      try {
+        step_of(b);
+      } catch (const std::runtime_error &) {
+        threw = true;
+      }
+    }
+    ASSERT_TRUE(threw) << "b1's expiry never reached the throwing delivery";
+  }
+  EXPECT_EQ(waiting_on(b, b1), "lock /k"); // the throw cut its timeout short
+  EXPECT_TRUE(b.check_tables());
+  if (reap) {
+    ASSERT_TRUE(b.kill(b1));
+    ASSERT_TRUE(b.reap(b1));
+  }
+  // The process that closes the run: b2, a second timed wait, or the sleeper.
+  const int last = then == after_throw::only_a_sleeper_due ? s : w.submit(b, timed);
+  const auto done = [&] {
+    return is_finished(b.get_process_info(last)->status) &&
+           (reap || is_finished(b.get_process_info(b1)->status));
+  };
+  for (const auto t0 = std::chrono::steady_clock::now(); !done() && seconds_since(t0) < 10.0;)
+    step_of(b);
+  ASSERT_TRUE(is_finished(b.get_process_info(last)->status));
+  EXPECT_EQ(std::get<std::string>(b.get_result(last)->v),
+            then == after_throw::only_a_sleeper_due ? "slept" : "timeout");
+  if (!reap) {
+    ASSERT_TRUE(is_finished(b.get_process_info(b1)->status)) << "b1's expiry was lost";
+    EXPECT_EQ(std::get<std::string>(b.get_result(b1)->v), "timeout");
+  }
+  EXPECT_TRUE(b.check_tables());
+  // a2's grant was made, but its wake was the note the hook threw on: a kill ends both.
+  EXPECT_TRUE(a.kill(a2));
+  EXPECT_TRUE(a.kill(a1));
+  EXPECT_TRUE(a.check_tables());
+  EXPECT_NO_THROW(mgr->check());
+}
+
+} // namespace
+
+TEST(SchedulerLockPort, AThrowingWaitExpiredKeepsNoStaleExpiry) {
+  for (const after_throw then :
+       {after_throw::b2_times_out, after_throw::b1_reaped, after_throw::only_a_sleeper_due}) {
+    SCOPED_TRACE(then == after_throw::b2_times_out ? "b1 kept, b2 times out"
+                 : then == after_throw::b1_reaped  ? "b1 reaped, b2 times out"
+                                                   : "b1 kept, only a sleeper's timer follows");
+    {
+      SCOPED_TRACE("sync");
+      a_throwing_wait_expired_keeps_no_stale_expiry<scheduler>(then);
+    }
+    {
+      SCOPED_TRACE("async");
+      a_throwing_wait_expired_keeps_no_stale_expiry<async_scheduler>(then);
+    }
+  }
+}
+
+TEST(SchedulerLockPort, ARefusedAttachKeepsTheHomeAndManager) {
+  {
+    SCOPED_TRACE("sync");
+    a_refused_attach_keeps_the_home<scheduler>();
+  }
+  {
+    SCOPED_TRACE("async");
+    a_refused_attach_keeps_the_home<async_scheduler>();
+  }
+}

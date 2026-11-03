@@ -26,6 +26,30 @@
   let warningTimer = 0;
   warningEl.addEventListener('click', () => { warningEl.hidden = true; });
 
+  // Browsers suspend an AudioContext made before the user has touched the page (autoplay policy),
+  // and SDL's audio output (a document's sound, a conference peer's mic) is one: wrap the
+  // constructor before arigl.js makes any, keep every context, and resume them on the first click,
+  // key or touch. Harmless where SDL resumes its own.
+  (function () {
+    const Orig = window.AudioContext || window.webkitAudioContext;
+    if (!Orig) return;
+    const live = [];
+    function Tracked() {
+      const c = new Orig(...arguments);
+      live.push(c);
+      return c;
+    }
+    Tracked.prototype = Orig.prototype;
+    try { window.AudioContext = Tracked; } catch (e) {}
+    try { if (window.webkitAudioContext) window.webkitAudioContext = Tracked; } catch (e) {}
+    const resume = () => {
+      for (const c of live)
+        try { if (c.state === 'suspended') c.resume(); } catch (e) {}
+    };
+    for (const ev of ['pointerdown', 'keydown', 'touchend'])
+      window.addEventListener(ev, resume, {capture: true, passive: true});
+  })();
+
   function status(text) { statusEl.textContent = text; }
 
   // The error page: what went wrong in one line, then everything arigl printed. Text only.
@@ -64,6 +88,100 @@
     if (!Array.isArray(v) || v.some(x => typeof x !== 'string'))
       throw new Error('config "' + name + '" must be a list of strings');
     return v;
+  }
+
+  // The config's placeholders, in flags, config arguments and env values: {origin} is this page's
+  // origin (https://host), {ws_origin} the same host as a WebSocket origin (wss:// on an https
+  // page, ws:// on http), {random} five random characters, the same everywhere in one page load.
+  const random = Math.random().toString(36).slice(2, 7).padEnd(5, '0');
+  const wsOrigin = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host;
+  function fill(s) {
+    return s.split('{origin}').join(location.origin).split('{ws_origin}').join(wsOrigin)
+        .split('{random}').join(random);
+  }
+
+  // url_env / fragment_env: which parameters of the page's URL (its query, or its #fragment, which
+  // the browser never sends to a server) may set which variable of the module's environment, and
+  // how. A rule is the variable's name, or {env, match, value, max}: the value is trimmed and cut
+  // to `max` characters (256), must match the regular expression `match` when one is given, and
+  // `value`, when given, is what is set instead (a switch: ?synthetic=1 sets "1"). Anything the
+  // config does not name is ignored, so a link can only set what the config allows.
+  function envRules(spec, name) {
+    if (spec === undefined || spec === null) return [];
+    if (typeof spec !== 'object' || Array.isArray(spec))
+      throw new Error('config "' + name + '" must be an object');
+    return Object.entries(spec).map(([param, rule]) => {
+      if (typeof rule === 'string') rule = {env: rule};
+      if (!rule || typeof rule !== 'object' || typeof rule.env !== 'string' || !rule.env)
+        throw new Error('config "' + name + '.' + param + '" must name an env variable');
+      let re = null;
+      if (rule.match !== undefined) {
+        try {
+          re = new RegExp(String(rule.match));
+        } catch (e) {
+          throw new Error('config "' + name + '.' + param + '.match": ' + e.message);
+        }
+      }
+      const max = Number(rule.max) > 0 ? Number(rule.max) : 256;
+      const value = rule.value === undefined ? undefined : String(rule.value);
+      return {param, env: rule.env, re, max, value};
+    });
+  }
+  function applyEnvRules(rules, from, where, env) {
+    for (const r of rules) {
+      const raw = from.get(r.param);
+      if (raw === null) continue;
+      const v = raw.trim().slice(0, r.max);
+      if (!v) continue;
+      if (r.re && !r.re.test(v)) {
+        console.warn('arigl-web: ' + where + r.param + '= ignored: it does not match ' + r.re);
+        continue;
+      }
+      env[r.env] = r.value === undefined ? v : r.value;
+    }
+  }
+
+  // device_identity: a random id and key for this browser, made once and kept in localStorage
+  // (per site, cleared with the site's data); arigl reads them as CVC_DEVICE_ID / CVC_DEVICE_KEY
+  // (a conference relay shows the device and pins its key). Where storage is unavailable (blocked,
+  // a sandboxed frame) they last this page load only.
+  function kept(name, bytes) {
+    const fresh = () => {
+      const b = new Uint8Array(bytes);
+      crypto.getRandomValues(b);
+      return Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
+    };
+    try {
+      let v = localStorage.getItem(name);
+      if (!new RegExp('^[0-9a-f]{' + 2 * bytes + '}$').test(v || '')) {
+        v = fresh();
+        localStorage.setItem(name, v);
+      }
+      return v;
+    } catch (e) {
+      try { return fresh(); } catch (e2) { return ''; }
+    }
+  }
+
+  // fullscreen_button: a small button in the corner that puts the page in and out of fullscreen
+  // (best on a phone).
+  function addFullscreenButton() {
+    const b = document.createElement('button');
+    b.id = 'fullscreen';
+    b.type = 'button';
+    b.title = 'Fullscreen';
+    b.textContent = '\u26f6'; // a fullscreen symbol
+    b.addEventListener('click', () => {
+      const el = document.documentElement;
+      if (!document.fullscreenElement)
+        (el.requestFullscreen || el.webkitRequestFullscreen).call(el);
+      else
+        document.exitFullscreen();
+      canvas.focus();
+    });
+    document.body.appendChild(b);
+    document.addEventListener('fullscreenchange',
+                              () => setTimeout(() => window.dispatchEvent(new Event('resize')), 60));
   }
 
   // Download arigl.wasm with a progress line, then start arigl.js on it.
@@ -110,14 +228,30 @@
     }
     srcUrl.hash = '';
     srcShown = state.src = srcUrl.href;
-    // {origin} in a flag or a config argument is this page's origin (e.g. an app's own server,
-    // --instance {origin}). Not in the URL's ?arg=: those are taken as given.
-    const here = s => s.split('{origin}').join(location.origin);
-    const flags = list(config.flags, 'flags').map(here);
-    const args = list(config.args, 'args').map(here).concat(params.getAll('arg'));
-    const env = Object.assign({}, config.env || {});
+    // The placeholders (fill) in a flag, a config argument or an env value, e.g. an app's own
+    // server: --instance {origin}, or a relay at {ws_origin}/ws. Not in the URL's ?arg=: those
+    // are taken as given.
+    const flags = list(config.flags, 'flags').map(fill);
+    const args = list(config.args, 'args').map(fill).concat(params.getAll('arg'));
+    const env = {};
+    if (config.env !== undefined && config.env !== null) {
+      if (typeof config.env !== 'object' || Array.isArray(config.env))
+        throw new Error('config "env" must be an object');
+      for (const [k, v] of Object.entries(config.env)) env[k] = fill(String(v));
+    }
+    // What the URL may set (url_env, fragment_env), then the device; the page's own keys last, so
+    // no rule can set those.
+    applyEnvRules(envRules(config.url_env, 'url_env'), params, '?', env);
+    applyEnvRules(envRules(config.fragment_env, 'fragment_env'),
+                  new URLSearchParams(location.hash.replace(/^#/, '')), '#', env);
+    if (config.device_identity === true) {
+      const id = kept('cvc.device_id', 16), key = kept('cvc.device_key', 32);
+      if (id) env.CVC_DEVICE_ID = id;
+      if (key) env.CVC_DEVICE_KEY = key;
+    }
     env.CVC_ARIADNE_SRC_ORIGINS = list(config.src_origins, 'src_origins').join(' ');
     env.CVC_ARIADNE_PRELOAD = list(config.preload, 'preload').join('\n');
+    if (config.fullscreen_button === true) addFullscreenButton();
 
     const Module = {
       canvas,

@@ -50,7 +50,10 @@ class CameraController;
 // completely alone: VTK already synthesizes them into mouse events, so taps on
 // ImGui widgets and one-finger drag keep working exactly as they do today. Dear
 // ImGui is single-touch by design, so it can never claim a pinch — the two
-// layers cannot fight over the same gesture.
+// layers cannot fight over the same gesture. cvcGL's SDL window (SdlWindow.h)
+// reads the canvas's pointer events, which stopping touch events cannot stop:
+// SDL makes the first finger into the mouse, and its interactor holds that
+// mouse still from a second finger until the last lifts.
 //
 // Gestures are accumulated by the DOM listeners and applied in update(), which
 // you call once per frame: VTK drains its own event queue inside

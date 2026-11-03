@@ -170,7 +170,8 @@ std::uint64_t avatar_policy_revision(cvc::app &app, const std::string &room_id);
 // Read the policy into OUT; false (OUT untouched) when none was written.
 bool read_avatar_policy(cvc::app &app, const std::string &room_id, avatar_energy_policy &out);
 
-// PID's reserve (J) as of SERVER_TICK, written by the relay.
+// PID's reserve (J) as of SERVER_TICK, written by the relay. Each leaf journals one mutation when
+// it changes and none when it does not.
 void write_avatar_reserve(cvc::app &app, const std::string &room_id, const std::string &pid,
                           double joules, std::uint64_t server_tick);
 // False when the relay has published none for PID.
