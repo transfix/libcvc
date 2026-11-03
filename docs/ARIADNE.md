@@ -632,22 +632,30 @@ the loader only *captures*. The host wires them:
 
   A host's pointer and camera settings (`set_host_mouse`, a `MouseControls`) go above the keys,
   bound where its camera reads them: arigl's are `viewers.main.camera.settings.mouse_look`
-  (*Drag to look* or *Mouse look*), `mouse_sensitivity`, `invert_pitch` and `invert_yaw`, and
-  *Camera distance*, the camera's `orbit.distance` (the wheel changes it too). Under mouse look
-  a click on the scene captures the pointer and the mouse turns the view with no button held,
-  until *Free the mouse* (Escape; in a browser, Escape always ends its pointer lock). In a
-  browser the page takes its pointer lock inside that press itself (the cursor goes, and the
-  view keeps turning past the screen's edge): a press over a window is the UI's
-  (`CameraController::setPointerOverUi`, which the overlay sets each frame). In conference mode
-  the avatar faces where the camera aims, standing or walking, and walks that way: it turns
-  with the camera every frame on your screen, and the relay hears each turn (at most 20 intents
-  a second, a key at once) and shows it to everyone else. The camera looks past the avatar's
+  (*Drag to look* or *Mouse look*), `primary_drag_steers` (in a room: *Drag the floor to face
+  it*), `mouse_sensitivity`, `invert_pitch` and `invert_yaw`, and *Camera distance*, the
+  camera's `orbit.distance` (the wheel changes it too). Under mouse look a click on the scene
+  captures the pointer and the mouse turns the view with no button held, until *Free the mouse*
+  (Escape; in a browser, Escape always ends its pointer lock). In a browser the page takes its
+  pointer lock inside that press itself (the cursor goes, and the view keeps turning past the
+  screen's edge), asking for the mouse's raw motion where the browser has it: a press on a
+  window is the UI's, judged by where the press lands against the windows the overlay drew
+  last frame (`CameraController::setUiRegions`), so a quick move onto a window and a click
+  there never takes the pointer. In drag to look, a click on the floor turns your avatar to
+  face it and a drag on the floor keeps it facing the point under the pointer, a mouse's or a
+  finger's (`CameraController::setPrimaryDragSteers`); the right button, or two fingers, turns
+  the view. In conference mode under mouse look the avatar faces where the camera aims,
+  standing or walking, and walks that way. Either way it turns every frame on your screen, and
+  the relay hears each turn (at most 20 intents a second, a key at once) and shows it to
+  everyone else. The camera looks past the avatar's
   right shoulder at a point 4 m ahead of it (at most a third of the camera's distance), so the
   crosshair marks where you aim, downrange. In either look
   the ground is the camera's floor (`orbit.floor.*`): looking up slides the eye in along its line
   of sight rather than under the ground, and an eye that comes inside the avatar hides it.
   `$CVC_ARIGL_LOOK=mouse` (the browser page's `?look=mouse`) starts in mouse look. A touch
-  screen keeps dragging.
+  screen keeps dragging. In a browser arigl draws a frame per display refresh (it yields to the
+  page until the next animation frame; `$CVC_ARIGL_YIELD=timeout`, the page's `?yield=timeout`,
+  yields on a 0 ms timer instead, which judders on a fast screen).
 
   A row's Change writes the binding's id to
   `tree.ariadne_keys.capture`; while the window is open the next key down becomes its key
@@ -746,7 +754,19 @@ Randomize) and every repaint (`world.color`) is a sliced task on the app's sched
 and `surface_painter` step it a few rows at a time, on the background pool natively and a few
 milliseconds a frame on single-threaded wasm, so the old world stays on screen until the new one is
 swapped in. `world.busy`, `world.progress` (0–100) and `world.phase` (the stage and its percent)
-follow it, and `world.request: stop` ends it, keeping the world shown.
+follow it, and `world.request: stop` ends it, keeping the world shown. Its trees and rocks draw
+with level of detail: a `LodGraphicsNode` ladder per 128 m ground cell (under `<id>_props`,
+`<id>_foliage` and `<id>_needles`), chosen each frame by screen error. Every rung is the same
+full-maturity tree, coarser further off: rung 1 from 260 m (three-sided tubes, none under 5 cm, the
+leaves as solids), rung 2 from 700 m (a trunk and a crown with the tree's colour and coverage), the
+radii scaled by the quality preset (the wasm build coarsens sooner). The ground does too: the node
+draws nothing itself but holds the texture, and its children are a ladder per chunk of 64 terrain
+cells (doubled until at most 16 chunks span the world). Rung k keeps every 2^k-th sample, down to 4
+cells a chunk, so every rung is the terrain's own surface, points, normals and UVs, with fewer
+triangles. A chunk coarsens once its largest height error falls under the preset's pixel budget,
+and stays within one rung of each neighbour; skirts hung from the edges two chunks share hide the
+seam. The chunks share the node's one texture and take its `casts_shadow`, `shader:` and
+`material:` keys. Physics, nav and `ground:` read the full terrain.
 
 **The fast render path.** A big static world draws fast when it is a few merged meshes and its
 shadow maps are re-baked rarely and spent where the camera looks. These keys say so
@@ -1571,6 +1591,7 @@ Two widgets for a log and the field under it (a chat window, a console):
   multiline: true               # Shift+Enter adds a line (default); false: one line only
   max_lines: 4                  # it grows to this many lines, then scrolls (default 4)
   max_length: 2000              # bytes (default 0: no cap)
+  send: Send                    # a button beside it that sends it (ImGui; default: none)
   on: (chat-ui-send "chat" (state-get "room.token") (get-attr event "text"))
 ```
 
@@ -1603,7 +1624,8 @@ back (a window reopened) keeps its place.
 
 - **Enter** sends it. The program reads it as `(get-attr event "text")`, and the draft at
   `bind:` is cleared. A message of blanks only is not sent. The field keeps the keyboard focus, so
-  the next message can be typed at once.
+  the next message can be typed at once. **`send:`** puts a button with that label on the field's
+  right (ImGui), which sends it as Enter does; a terminal backend has Enter only.
 - **Shift+Enter** adds a line (`multiline: true`, the default). In ImGui Ctrl+Enter does too. In
   a terminal, Shift+Enter usually reaches the program as a plain Enter, so Alt+Enter and Ctrl+J
   add a line there. Shift+Enter works where the terminal reports it (the kitty keyboard
@@ -1878,18 +1900,41 @@ includes. Each binds state keys a C++ object owns, so it needs no host code;
 
 | component | drives |
 |---|---|
-| `stage_lighting`, `scene_controls`, `camera_controls` | a `rig:` light, `shadows:`, the main camera |
-| `display_toggles`, `sim_transport`, `raster_view` | `show.*` layer keys, `sim.*` + host verbs, a host-published image |
-| `volren_controls`, `volslice_controls` | a `volren` / `volslice` node named `bunny_volume` |
-| `forest_controls`, `sea_controls`, `sky_controls` | `forest_trees` / `wave_sea` / `cloud_sky` nodes |
-| `world_controls` | a `generated_world` node (§5.4) |
-| `mesh_tools` | a `mesh_lab` node named `mesh` (§5.4) |
-| `fe_controls` | an `fe_lab` node named `domain` (§5.4) |
+| `viewer_settings` | a viewer (arg `viewer`, default `main`): the frame-rate readout, UI size, grid / origin axis / scene bounds, camera and shadows in one window |
+| `stage_lighting`, `scene_controls`, `camera_controls` | a `rig:` light, `shadows:`, a viewer's camera (arg `viewer`) |
+| `display_toggles`, `sim_transport`, `raster_view` | `show.*` layer keys, `sim.*` + host verbs, a host-published image (arg `keys`, default `raster`) |
+| `volren_controls`, `volslice_controls` | a `volren` / `volslice` node (arg `node`, default `bunny_volume`) |
+| `forest_controls`, `sea_controls`, `sky_controls` | a `forest_trees` / `wave_sea` / `cloud_sky` node (arg `keys`, below) |
+| `world_controls` | a `generated_world` node (§5.4; arg `keys`) |
+| `mesh_tools` | a `mesh_lab` node (§5.4; arg `node`, default `mesh`) |
+| `fe_controls` | an `fe_lab` node (§5.4; arg `node`, default `domain`) |
 | `scene_view` | a window holding a view of the scene (the `viewport` widget, §5.18), from a camera of its own (args `view`, `show`, `hide`, `camera`, `chrome`, `width`, `height`, `title`, `id`) |
 | `card` | a card in a list: avatar / title / subtitle / timestamp header, body, `media` and `actions` slots; its args are state keys, so a `repeat:` includes one per item (not a window: embed it) |
 | `transfer_function`, `transfer_function_editor` | any node's `transfer_function` model (args `node`, `id`): the ColorTable2 editor with histogram / contour spectrum / contour tree layers — see [`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) |
 | `chat`, `chat_panel` | a room's chat and direct messages through the chat verbs (args `id`, `title`, `room`); its functions come with the import: call `(chat-ui-step ID ROOM)` from `on_tick` (§5.16) |
 | `room_users`, `room_users_compact` | everyone in a room from `room-roster`, with local cam / mic / volume and a message button (args `id`, `title`, `rows`, `chat`, `self`); call `(room-users-step ROWS ROOM CHAT)` from `on_tick` |
+
+Each window component also takes `title` and `id` args, and every arg has a default, so a bare
+`include:` works. A document with two nodes of a kind includes the panel twice, each with its
+own `node` (or `keys`) and `id`; the window's geometry persists under `tree.<id>`. The forest,
+sea, sky and world realizers keep their live keys scene-wide (`forest.*`, `sea.*`, `sky.*`,
+`world.*`). A node's `keys:` prop moves them under a root of its own, and the panel's `keys` arg
+names the same root:
+
+```yaml
+import: cvc://components/forest_controls.ari
+windows:
+  - include: forest_controls                           # forest.*: the south wood
+  - include: forest_controls
+    args: { keys: north, title: North wood, id: north_forest }
+scene:
+  nodes:
+    - { node: south, type: forest_trees, count: 40 }
+    - { node: north, type: forest_trees, count: 80, keys: north }   # north.count, north.seed, ...
+```
+
+`camera_controls` and `scene_controls` also ship their widgets without the window
+(`camera_settings`, `shadow_settings`); `viewer_settings` is built from them.
 
 The `card` is a generic social or inbox card (§5.11 pictures, slots in §6.1):
 

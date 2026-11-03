@@ -884,6 +884,11 @@ add_test(NAME cvcgl_imgui_spinner COMMAND cvcgl_imgui_spinner)
 add_executable(cvcgl_imgui_chat_widgets test/cvcgl_imgui_chat_widgets.cpp)
 target_link_libraries(cvcgl_imgui_chat_widgets PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_chat_widgets COMMAND cvcgl_imgui_chat_widgets)
+# The keys ImGuiOverlay hands ImGui under both of VTK's names for them: X11's (its own windows)
+# and a browser's (KeyboardEvent.key: Enter, Backspace, ArrowLeft). No window, no GL.
+add_executable(cvcgl_imgui_key_names test/cvcgl_imgui_key_names.cpp)
+target_link_libraries(cvcgl_imgui_key_names PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_key_names COMMAND cvcgl_imgui_key_names)
 
 # The tf_editor transfer-function widget (ImGuiBackend::tf_editor) on a bare ImGui context, driven
 # by synthesized mouse input: drags, adds, deletes, the zoom strip, the context menu, commits.

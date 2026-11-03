@@ -79,6 +79,7 @@ struct MessageInputOptions {
   bool multiline = true; // Shift+Enter adds a line (a terminal: Alt+Enter or Ctrl+J)
   int max_lines = 4;     // the field grows to this many lines, then scrolls
   int max_length = 0;    // bytes; 0: no cap
+  std::string send;      // a button beside the field that sends it, so labelled ("" none)
 };
 
 // What the core hands a backend to draw a text buffer (Kind::TextView).

@@ -343,6 +343,18 @@ struct SceneNode {
   std::vector<SceneNode> children; // nested nodes (…children.<id>.children.<child>)
 };
 
+// The state key a custom node's live controls bind. A node type whose keys are scene-wide
+// (forest_trees' forest.*, wave_sea's sea.*, cloud_sky's sky.*, generated_world's world.*) moves
+// them under its `keys:` prop when it has one, so a document can hold two of a type, each with
+// its own panel: node_key(n, "forest.seed") is "forest.seed", or "north.seed" for `keys: north`.
+inline std::string node_key(const SceneNode &n, const std::string &key) {
+  const std::size_t dot = key.find('.');
+  const std::string root = n.props.str("keys");
+  if (dot == std::string::npos || root.empty())
+    return key;
+  return root + key.substr(dot);
+}
+
 // A scene light (§9.2). Either an explicit light (kind/pos/target/cone/intensity/
 // color, or azimuth/elevation for a directional sun) or a named StageLighting preset
 // rig. Realized by cvc::gl::ariadne::realize_scene into a cvc::gl::LightNode (or a

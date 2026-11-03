@@ -292,6 +292,12 @@ void register_shader_preset(const std::string &name, ShaderPreset preset);
 bool has_shader_preset(const std::string &name);
 void register_default_shader_presets();
 
+// The keys realize_scene applies to a node's mesh once its realizer has returned it: casts_shadow,
+// the `shader:` block and material.opaque. A realizer that draws its node's surface with meshes of
+// its own as well (a ground cut into LOD chunks) applies them to each of those.
+void apply_mesh_keys(GeometryNode &g, const cvc::ariadne::SceneNode &n,
+                     std::vector<std::string> *warnings = nullptr);
+
 // Verify the NODE customs a document declared (`loaded.customs`, from the `customs:`
 // block) against the registered scene node types. The loader already fail-fast-checked
 // widget/block customs at LOAD; node types register on THIS (cvcGL) side, so the host
