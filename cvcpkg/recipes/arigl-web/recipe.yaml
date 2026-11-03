@@ -72,6 +72,21 @@ depends:
     # packages.
     # cvcGL's conference video (mjpeg).
     - name: libjpeg-turbo
+    # The rest of an Ariadne conference client (arigl's conference mode, which a page sets up from
+    # its config: CVC_ARIADNE_RELAY and friends): the WebSocket state transport's messages
+    # (protobuf, built with CVC_ENABLE_WS), the avatars' rigid bodies (joltphysics), Opus mics
+    # (libopus) and the device key that signs the join (openssl). The single-threaded package only
+    # (the one a site serves without special headers; libopus has no -pthread archive).
+    # build-wasm.sh builds the conference in when the deps prefix has protobuf (28.3+cvc.2, wasm
+    # since cy-pca/cvcpkg#541), and then fails the build without any of the others.
+    - name: protobuf
+      platforms: [wasm]
+    - name: joltphysics
+      platforms: [wasm]
+    - name: libopus
+      platforms: [wasm]
+    - name: openssl
+      platforms: [wasm]
     # Scene sources: meshes through assimp (.glb), and cvc's mesh_ops / fem (header-only).
     - name: assimp
     - name: eigen
@@ -96,6 +111,9 @@ depends:
   host_tools:
     - cmake
     - ninja
+    # A native protoc for the WebSocket transport's messages: the wasm protobuf ships none, and the
+    # generated code must match its libprotobuf (28.3) exactly.
+    - protobuf
 
 build:
   matrix:
