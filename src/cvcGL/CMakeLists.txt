@@ -985,6 +985,20 @@ add_executable(cvcgl_shadow_casters test/cvcgl_shadow_casters.cpp)
 target_link_libraries(cvcgl_shadow_casters PRIVATE cvcGL)
 add_test(NAME cvcgl_shadow_casters COMMAND cvcgl_shadow_casters)
 
+# Under shadows each caster is drawn by the bake and by the shadow pass, and VTK rebuilt its shader
+# at every switch; LowMemoryPolyDataMapper now keeps one per pass set. Pins no shader builds while
+# a caster moves (two a caster a frame without), and frames identical to pass programs off --
+# across a change of casting light, a shader-changing property and shadows off and on. The
+# low-memory mapper forced, as on WebGL. And that a bake checks its framebuffer's status once per
+# light's map, not every bake (counted at the driver, so desktop GL only). Renders; skips without
+# GL.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_shadow_pass_programs test/cvcgl_shadow_pass_programs.cpp
+                                            test/gl_call_counter.cpp)
+  target_link_libraries(cvcgl_shadow_pass_programs PRIVATE cvcGL)
+  add_test(NAME cvcgl_shadow_pass_programs COMMAND cvcgl_shadow_pass_programs)
+endif()
+
 # A low sun's shadows at a city's scale (a 3 km ground, the key 2.2 stage radii out, as cvcdbg's
 # demo3 lights Austin): a building's and a 2 m vehicle's shadows read on the ground. Renders;
 # skips without GL.
