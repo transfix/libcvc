@@ -84,6 +84,11 @@
 #include <cvc/ariadne/stream/stream_view.h>
 #include <cvc/ariadne/tvision_backend.h>
 #include <cvc/ariadne/web_document.h> // the browser page's document, named by URL
+#ifdef CVC_ARIADNE_PYTHON
+#include "python_engine.h" // arix: the embedded Python (src/ariadne_python)
+
+#include <functional>
+#endif
 #include <cvc/core/app.h>
 #include <cvc/image/image.h>
 #include <cvc/net/browser.h>
@@ -100,8 +105,34 @@ namespace {
 // What `ari info` and the like call this runtime: ari-media is ari with cvcMedia's sound.
 #ifdef ARI_MEDIA
 constexpr const char *kRuntimeName = "ari-media";
+#elif defined(CVC_ARIADNE_PYTHON)
+constexpr const char *kRuntimeName = "arix"; // ari with an embedded Python
 #else
 constexpr const char *kRuntimeName = "ari";
+#endif
+
+#ifdef CVC_ARIADNE_PYTHON
+// arix's Python, booted in main() before any app or runtime, so it outlives them.
+cvc::ariadne::python::Engine *g_python = nullptr;
+
+// Lend a document's app and runtime to the Python (_arihost), for the life of the loan: its
+// python: block runs at load, and a Python program's Host() adopts them. `loop` is what the
+// program's host.run() runs.
+cvc::ariadne::python::Attachment lend_python(cvc::app &app, cvc::ariadne::AppRuntime &rt,
+                                             const char *mode,
+                                             std::function<int()> loop = nullptr) {
+  cvc::ariadne::python::HostHandles h;
+  h.app = &app;
+  h.runtime = &rt;
+  h.mode = mode;
+  h.run_loop = std::move(loop);
+  return g_python->attach(h);
+}
+
+// A Python program in place of the document: arix run app.py.
+bool is_python_program(const std::string &doc) {
+  return doc.size() > 3 && doc.compare(doc.size() - 3, 3, ".py") == 0;
+}
 #endif
 
 int usage(int code) {
@@ -150,6 +181,18 @@ int usage(int code) {
                "another device (over SSH). --oidc-issuer and --oidc-client pin the provider\n"
                "and the client; the tokens stay with ari like any other credential.\n",
                cvc::ariadne::host_flags_help().c_str());
+#ifdef CVC_ARIADNE_PYTHON
+  std::fputs("\n"
+             "arix is ari with an embedded Python (with pycvc, numpy and the packages beside it):\n"
+             "  arix run|snapshot|check [flags] app.py [program args...]\n"
+             "      runs a Python program in place of the document: pycvc_gl.ariadne.Host()\n"
+             "      adopts this host, loads a document, and runs it (host.run(), or by returning)\n"
+             "  arix python [python args...]\n"
+             "      the embedded interpreter as a plain python3 (a REPL, -c, -m, a script)\n"
+             "A document's python: block runs at load, and the functions it exports are the\n"
+             "document's to call; requires: python (or python.numpy, ...) says it needs them.\n",
+             code ? stderr : stdout);
+#endif
   return code;
 }
 
@@ -301,6 +344,9 @@ TestOutcome run_test_document(const cvc::ariadne::HostOptions &o, const std::str
   rt.register_quit();
   // No command line of its own: declared arguments take their defaults, as in a check.
   rt.set_document_args({}, "ari test " + path, /*validate=*/false);
+#ifdef CVC_ARIADNE_PYTHON
+  const cvc::ariadne::python::Attachment lent = lend_python(app, rt, "headless");
+#endif
   try {
     for (const std::string &w : rt.load(path))
       fail("load warning: " + trim_ari(w));
@@ -430,6 +476,11 @@ int main(int argc, char **argv) {
     argv = const_cast<char **>(baked);
   }
 #endif
+#ifdef CVC_ARIADNE_PYTHON
+  if (argc >= 2 && std::string(argv[1]) == "python") // arix python [args]: a plain python3
+    return ari::python::Engine::python_main({kRuntimeName, {}},
+                                            std::vector<std::string>(argv + 2, argv + argc));
+#endif
   ari::HostOptions o = ari::parse_host_args(argc, argv, {"--json", "--functions", "--tap"});
 #ifdef CVC_ARI_WASM_BACKEND // ari_tvision: its documents run on the tvision desktop
   if (o.backend.empty())
@@ -475,6 +526,22 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "ari: --timeout is for ari test\n");
     return usage(2);
   }
+#ifdef CVC_ARIADNE_PYTHON
+  // Before any app or runtime: the interpreter outlives every runtime it is lent.
+  ari::python::Engine python({kRuntimeName, o.python_path});
+  if (!python.ok()) {
+    std::fprintf(stderr, "%s: %s\n", kRuntimeName, python.error().c_str());
+    return 1;
+  }
+  g_python = &python;
+#else
+  if (!o.python_path.empty()) {
+    std::fprintf(stderr,
+                 "%s: --python-path is for the scripting hosts (arix, ariglx); %s has no Python\n",
+                 kRuntimeName, kRuntimeName);
+    return 2;
+  }
+#endif
   if (cmd == "info")
     return print_info(o);
   if (!o.png.empty()) {
@@ -528,7 +595,13 @@ int main(int argc, char **argv) {
   for (const std::string &d : o.component_paths)
     rt.add_component_path(d);
   rt.register_quit(); // on: quit and (quit [code]), e.g. from an on_signal: program
-  rt.set_document_args(o.doc_args, "ari " + cmd + " " + o.doc, /*validate=*/cmd != "check");
+#ifdef CVC_ARIADNE_PYTHON
+  if (is_python_program(
+          o.doc)) // its args are the program's (sys.argv); Host.load(args=) passes some
+    rt.set_document_args({}, "ari " + cmd + " " + o.doc, /*validate=*/cmd != "check");
+  else
+#endif
+    rt.set_document_args(o.doc_args, "ari " + cmd + " " + o.doc, /*validate=*/cmd != "check");
   if (cmd == "run" && !tvision)
     probe_terminal(*backend, o); // before the load, so requires: / has? see the terminal
 
@@ -539,6 +612,95 @@ int main(int argc, char **argv) {
     return 2;
   }
 
+  // What follows the load: check's status, snapshot's frames, or run's loop. A Python
+  // program's host.run() runs it too.
+  const auto after_load = [&]() -> int {
+    if (cmd == "check")
+      return rt.exit_code(); // an init: that called (quit code)
+    ari::report_running();   // the browser page: the document is loaded
+
+    if (cmd == "snapshot") {
+      using Mode = ari::FtxuiBackend::Options::ImageColor;
+      const bool pixels =
+          o.ansi && (look.image_color == Mode::Kitty || look.image_color == Mode::Sixel ||
+                     look.image_color == Mode::Iterm);
+      if (pixels) { // the cell size the images are drawn at: the terminal's, or --cell-size
+        ari::TermGraphics g = ari::gfx::probe_terminal();
+        if (o.cell_w > 0) {
+          g.cell_w = o.cell_w;
+          g.cell_h = o.cell_h;
+        }
+        backend->set_terminal_graphics(g);
+      }
+      std::string frame;
+      const int width = std::max(10, o.width ? o.width : 100);
+      // The frames are drawn back to back, so the frame clock (a spinner's) reads frame / fps, as
+      // if `ari run` had drawn them: reproducible, and it moves from one frame to the next.
+      const double fps = o.fps > 0 ? o.fps : 20.0;
+      for (int f = 0; f < std::max(1, o.frames); ++f) {
+        rt.runtime().set_frame_clock(f / fps);
+        rt.drain();
+        frame = backend->render_to_string(rt.runtime(), width, o.height, o.ansi);
+        if (rt.should_close()) // (quit code): the frame it quit on
+          break;
+      }
+      // The frame shows what the requests brought back, and the pictures it draws.
+      if ((o.net.enabled || rt.runtime().media_stale()) && !rt.should_close())
+        rt.settle_and_render(
+            [&] { rt.drain(); },
+            [&] { frame = backend->render_to_string(rt.runtime(), width, o.height, o.ansi); },
+            o.settle > 0 ? o.settle : ari::kDefaultSettleSeconds);
+      if (pixels) { // Sixel draws at screen positions, so the frame starts at the top-left
+        const int rows = static_cast<int>(std::count(frame.begin(), frame.end(), '\n')) + 1;
+        frame = "\x1b[H\x1b[2J" + frame + backend->take_graphics() + "\x1b[" +
+                std::to_string(rows + 1) + ";1H";
+      }
+      std::fputs(frame.c_str(), stdout);
+      std::fflush(stdout);
+      live.summarize(rt.take_warnings()); // what the programs complained about
+      return rt.exit_code();
+    }
+
+    rt.set_warning_listener([&live](const std::string &w) { live(w); });
+    ari::FtxuiBackend::RunOptions run;
+    if (o.fps > 0)
+      run.fps = o.fps;
+    run.mouse = o.mouse;
+    run.on_start = ari::install_signal_traps;
+    run.on_stop = ari::restore_signal_traps;
+    run.take_signal = ari::take_trapped_signal;
+    run.notice = [&live] { return live.notice(); }; // the latest warning, for a few seconds
+    // The screen is the document's: a URL the host cannot open in a browser (open-url, a sign-in)
+    // is the document's to show, not printed over the frame.
+    cvc::net::set_url_notice([](const std::string &) {});
+    ari::FtxuiBackend::RunExit how;
+    if (tvision) {
+      how = static_cast<ari::TvisionBackend &>(*backend).run(rt, run);
+    } else {
+      how = backend->run(rt, run);
+    }
+    // The fullscreen screen is gone: every warning of the run, or how many went to stderr live.
+    live.summarize(rt.take_warnings());
+    if (how.from_os) // an OS signal the document didn't handle: report it the way a shell expects
+      return 128 + ari::signal_number(how.signal);
+    return rt.exit_code();
+  };
+
+#ifdef CVC_ARIADNE_PYTHON
+  // The runtime is lent to the Python: the document's python: block runs at its load. A Python
+  // program in place of the document has its Host() adopt this runtime and load a document; its
+  // host.run() runs after_load, and when it returns without, this host does.
+  const ari::python::Attachment lent =
+      lend_python(app, rt, cmd == "run" ? "terminal" : "headless", after_load);
+  if (is_python_program(o.doc)) {
+    bool loaded = false;
+    rt.add_load_hook([&loaded](ari::LoadResult &, const std::string &) { loaded = true; });
+    const int status = python.run_script(o.doc, o.doc_args);
+    if (python.loop_ran())
+      return status ? status : python.loop_status();
+    return status != 0 || !loaded ? status : after_load();
+  }
+#endif
   std::vector<std::string> warnings;
   try {
     warnings = rt.load(o.doc);
@@ -566,73 +728,5 @@ int main(int argc, char **argv) {
     if (!note.empty())
       std::fprintf(stderr, "%s\n", note.c_str());
   }
-  if (cmd == "check")
-    return rt.exit_code(); // an init: that called (quit code)
-  ari::report_running(); // the browser page: the document is loaded
-
-  if (cmd == "snapshot") {
-    using Mode = ari::FtxuiBackend::Options::ImageColor;
-    const bool pixels =
-        o.ansi && (look.image_color == Mode::Kitty || look.image_color == Mode::Sixel ||
-                   look.image_color == Mode::Iterm);
-    if (pixels) { // the cell size the images are drawn at: the terminal's, or --cell-size
-      ari::TermGraphics g = ari::gfx::probe_terminal();
-      if (o.cell_w > 0) {
-        g.cell_w = o.cell_w;
-        g.cell_h = o.cell_h;
-      }
-      backend->set_terminal_graphics(g);
-    }
-    std::string frame;
-    const int width = std::max(10, o.width ? o.width : 100);
-    // The frames are drawn back to back, so the frame clock (a spinner's) reads frame / fps, as if
-    // `ari run` had drawn them: reproducible, and it moves from one frame to the next.
-    const double fps = o.fps > 0 ? o.fps : 20.0;
-    for (int f = 0; f < std::max(1, o.frames); ++f) {
-      rt.runtime().set_frame_clock(f / fps);
-      rt.drain();
-      frame = backend->render_to_string(rt.runtime(), width, o.height, o.ansi);
-      if (rt.should_close()) // (quit code): the frame it quit on
-        break;
-    }
-    // The frame shows what the requests brought back, and the pictures it draws.
-    if ((o.net.enabled || rt.runtime().media_stale()) && !rt.should_close())
-      rt.settle_and_render(
-          [&] { rt.drain(); },
-          [&] { frame = backend->render_to_string(rt.runtime(), width, o.height, o.ansi); },
-          o.settle > 0 ? o.settle : ari::kDefaultSettleSeconds);
-    if (pixels) { // Sixel draws at screen positions, so the frame starts at the top-left
-      const int rows = static_cast<int>(std::count(frame.begin(), frame.end(), '\n')) + 1;
-      frame = "\x1b[H\x1b[2J" + frame + backend->take_graphics() + "\x1b[" +
-              std::to_string(rows + 1) + ";1H";
-    }
-    std::fputs(frame.c_str(), stdout);
-    std::fflush(stdout);
-    live.summarize(rt.take_warnings()); // what the programs complained about
-    return rt.exit_code();
-  }
-
-  rt.set_warning_listener([&live](const std::string &w) { live(w); });
-  ari::FtxuiBackend::RunOptions run;
-  if (o.fps > 0)
-    run.fps = o.fps;
-  run.mouse = o.mouse;
-  run.on_start = ari::install_signal_traps;
-  run.on_stop = ari::restore_signal_traps;
-  run.take_signal = ari::take_trapped_signal;
-  run.notice = [&live] { return live.notice(); }; // the latest warning, for a few seconds
-  // The screen is the document's: a URL the host cannot open in a browser (open-url, a sign-in)
-  // is the document's to show, not printed over the frame.
-  cvc::net::set_url_notice([](const std::string &) {});
-  ari::FtxuiBackend::RunExit how;
-  if (tvision) {
-    how = static_cast<ari::TvisionBackend &>(*backend).run(rt, run);
-  } else {
-    how = backend->run(rt, run);
-  }
-  // The fullscreen screen is gone: every warning of the run, or how many went to stderr live.
-  live.summarize(rt.take_warnings());
-  if (how.from_os) // an OS signal the document didn't handle: report it the way a shell expects
-    return 128 + ari::signal_number(how.signal);
-  return rt.exit_code();
+  return after_load();
 }

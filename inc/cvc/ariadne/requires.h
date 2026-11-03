@@ -5,7 +5,8 @@
 // A document lists what it needs in a top-level `requires:`. AppRuntime::load checks every entry
 // against the host before anything runs: a missing one fails the load with one error that names
 // them all, or, for an entry marked `optional: true`, warns. An entry is one of:
-//   - a capability token (capability_tokens()): something the backend or host can do;
+//   - a capability token (capability_tokens()): something the backend or host can do, including a
+//     script language (`python`) and an importable module of one (`python.numpy`);
 //   - a function a program can call: a name that resolves in the env the document's programs run
 //     in (a builtin, a stdlib function, a host verb or intrinsic), or a special form;
 //   - a registered widget type.
@@ -18,6 +19,7 @@
 //
 // A program can ask the same question at run time with (has? "name").
 #include <cvc/ariadne/backend.h>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -55,6 +57,20 @@ bool is_capability_token(const std::string &name);
 
 // Does this host have capability `name`? False for a name that is not a token.
 bool capability_holds(const std::string &name, const HostFacts &facts);
+
+// The script engine a scripting host embeds (arix and ariglx embed Python: src/ariadne_python).
+// `language` is its token (`python`), and `has_module(m)` answers `<language>.<m>`: whether module
+// m is importable. Process-wide, like the interpreter: a host sets it once the interpreter is up
+// and clears it (has_module = nullptr) before the interpreter goes. Every other host answers false
+// for both tokens.
+void set_script_engine(const std::string &language,
+                       std::function<bool(const std::string &module)> has_module);
+bool has_script_engine(const std::string &language);
+
+// What to tell the author when this host lacks `name`, beyond its name: for a script language's
+// token on a host without that language, which hosts run it ("a document's python runs in the
+// scripting hosts, arix or ariglx"). "" when there is nothing to add.
+std::string capability_hint(const std::string &name);
 
 // The names a program applies as functions but does not define itself, in first-appearance order,
 // each once: the heads of its calls, minus special forms, quoted data, and the names it binds

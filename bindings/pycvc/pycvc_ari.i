@@ -193,3 +193,37 @@ PYCVC_ARI_NOGIL(cvc::gl::ariadne::AriRuntime::~AriRuntime)
 %}
 
 %include "cvc/gl/ariadne/AriRuntime.h"
+
+// A scripting host's window objects (ariglx lends them as capsules, _arihost.gl()), as proxies that
+// do not own them: pycvc_gl.ariadne.Host() adopts them in its embedded mode. The host owns each,
+// and takes them back before they go.
+%{
+static void *pycvc_gl_lent(PyObject *capsule, const char *name) {
+  if (!capsule || !PyCapsule_CheckExact(capsule))
+    throw std::invalid_argument(std::string("pycvc_gl: not a capsule (expected \"") + name + "\")");
+  void *p = PyCapsule_GetPointer(capsule, name);
+  if (!p) {
+    PyErr_Clear();
+    throw std::invalid_argument(std::string("pycvc_gl: the capsule is not a \"") + name + "\"");
+  }
+  return p;
+}
+%}
+%inline %{
+namespace pycvc {
+cvc::gl::ariadne::AriRuntime *ari_runtime_from_capsule(PyObject *capsule) {
+  return static_cast<cvc::gl::ariadne::AriRuntime *>(
+      pycvc_gl_lent(capsule, "cvc.gl.ariadne.AriRuntime"));
+}
+cvc::gl::SceneRenderer *scene_renderer_from_capsule(PyObject *capsule) {
+  return static_cast<cvc::gl::SceneRenderer *>(pycvc_gl_lent(capsule, "cvc.gl.SceneRenderer"));
+}
+cvc::gl::CameraController *camera_controller_from_capsule(PyObject *capsule) {
+  return static_cast<cvc::gl::CameraController *>(
+      pycvc_gl_lent(capsule, "cvc.gl.CameraController"));
+}
+cvc::gl::ImGuiOverlay *imgui_overlay_from_capsule(PyObject *capsule) {
+  return static_cast<cvc::gl::ImGuiOverlay *>(pycvc_gl_lent(capsule, "cvc.gl.ImGuiOverlay"));
+}
+} // namespace pycvc
+%}

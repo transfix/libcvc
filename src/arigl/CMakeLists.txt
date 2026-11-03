@@ -35,6 +35,45 @@ include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcInstallRpath.cmake")
 cvc_set_install_rpath(arigl bin)
 install(TARGETS arigl RUNTIME DESTINATION bin COMPONENT arigl)
 
+# ariglx: the scripting host, the same arigl with an embedded Python (src/ariadne_python): a
+# document's python: block, a Python program in place of the document (ariglx run app.py, whose
+# pycvc_gl.ariadne.Host() adopts the window), and ariglx python
+# (docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md). Its Python drives the window through pycvc_gl, so
+# in-tree it is built with the bindings (CVC_BUILD_PYCVC); standalone (the ariglx cvcpkg recipe),
+# with -DARIGL_WITH_PYTHON=ON. The stock `arigl` above stays Python-free.
+option(ARIGL_WITH_PYTHON "Also build ariglx, arigl with an embedded Python" OFF)
+if(NOT EMSCRIPTEN AND (CVC_BUILD_PYCVC OR ARIGL_WITH_PYTHON))
+  include("${CMAKE_CURRENT_LIST_DIR}/../ariadne_python/ariadne_python.cmake")
+  cvc_find_ariadne_python(ARIGL_WITH_PYTHON)
+  if(CVC_ARIADNE_PYTHON_FOUND)
+    add_executable(ariglx main.cpp gallery.cpp)
+    target_link_libraries(ariglx PRIVATE cvc::cvcGL ${VTK_LIBRARIES})
+    vtk_module_autoinit(TARGETS ariglx MODULES ${VTK_LIBRARIES})
+    cvc_ariadne_python_host(ariglx)
+    cvc_set_install_rpath(ariglx bin)
+    install(TARGETS ariglx RUNTIME DESTINATION bin COMPONENT ariglx)
+
+    # ctest, in-tree: a document's python: block loads in a window (offscreen), and a Python program
+    # in place of the document adopts the window, gives its document a function and renders it.
+    if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
+      set(_pyt "${CVC_ARIADNE_PYTHON_TESTS}")
+      add_test(NAME ariglx_python_check
+               COMMAND ariglx check ${CVC_ARIADNE_PYTHON_TEST_PATH} "${_pyt}/python_block.ari")
+      add_test(NAME ariglx_python_program
+               COMMAND ariglx snapshot --frames 3 --png "${CMAKE_CURRENT_BINARY_DIR}/ariglx_app.png"
+                       ${CVC_ARIADNE_PYTHON_TEST_PATH} "${_pyt}/app.py")
+      set_tests_properties(ariglx_python_program PROPERTIES
+                           PASS_REGULAR_EXPRESSION "app.py: result 14, frames [1-9]")
+      cvc_ariadne_python_test_properties(ariglx_python_check ariglx_python_program)
+      set_tests_properties(ariglx_python_check ariglx_python_program PROPERTIES
+                           RESOURCE_LOCK cvcgl_gl_context
+                           SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
+    endif()
+  else()
+    message(STATUS "ariglx: not built (no Python embedding files: Python3 Development.Embed)")
+  endif()
+endif()
+
 # ctest coverage of the binary itself, in-tree only (it runs the shipped example documents). Each
 # renders offscreen, so it takes the GL-context lock the cvcGL tests share; a libcvc without FTXUI
 # (the terminal tests) or yaml-cpp skips rather than fails.

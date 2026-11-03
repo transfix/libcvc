@@ -9,6 +9,10 @@
 //   residents, actions, host functions and state behave as under arigl; nothing is drawn, so a
 //   computed bind: or text: is never evaluated, and a document that requires gl.scene does not
 //   load. pycvc_gl.ariadne.Host(mode="headless") drives it.
+// - pycvc.ari_app_attach(app, runtime): an AriApp over a scripting host's own AppRuntime (arix,
+//   ariglx lend it as a "cvc.ariadne.AppRuntime" capsule, _arihost.runtime()), which it does not
+//   own: the host's python: blocks register their functions through it, and
+//   pycvc_gl.ariadne.Host() drives it in arix.
 //
 // The GIL: frame()/step()/load()/run_program's drain and wait_idle() release it, so a Python
 // function the document calls (which takes it back) and an async function on a pool thread run.
@@ -86,9 +90,16 @@ public:
     // Build the app's lazily made singletons on this thread before a pool thread needs them.
     app_->exec_scheduler();
     app_->exec_async_host();
-    rt_ = std::make_unique<cvc::ariadne::AppRuntime>(*app_, prefix_);
+    owned_ = std::make_unique<cvc::ariadne::AppRuntime>(*app_, prefix_);
+    rt_ = owned_.get();
   }
-  ~AriApp() { rt_.reset(); }
+  // Over a runtime someone else owns (ari_app_attach): `rt` outlives this AriApp.
+  AriApp(std::shared_ptr<cvc::app> app, cvc::ariadne::AppRuntime *rt)
+      : app_(std::move(app)), prefix_(rt ? rt->prefix() : std::string()), rt_(rt) {
+    if (!app_ || !rt_)
+      throw std::invalid_argument("pycvc.ari_app_attach: no app or no runtime");
+  }
+  ~AriApp() { owned_.reset(); }
 
   void add_component_path(const std::string &dir) { rt_->add_component_path(dir); }
   void on(const std::string &event, PyObject *handler) {
@@ -146,9 +157,24 @@ public:
 private:
   std::shared_ptr<cvc::app> app_;
   std::string prefix_;
-  std::unique_ptr<cvc::ariadne::AppRuntime> rt_;
+  std::unique_ptr<cvc::ariadne::AppRuntime> owned_; // null when attached
+  cvc::ariadne::AppRuntime *rt_ = nullptr;
   bool inFrame_ = false;
 };
+
+// An AriApp over the AppRuntime in a "cvc.ariadne.AppRuntime" capsule (a scripting host's,
+// _arihost.runtime()), not owning it.
+AriApp *ari_app_attach(std::shared_ptr<cvc::app> app, PyObject *runtime) {
+  if (!runtime || !PyCapsule_CheckExact(runtime))
+    throw std::invalid_argument("pycvc.ari_app_attach: runtime is not a PyCapsule");
+  void *p = PyCapsule_GetPointer(runtime, "cvc.ariadne.AppRuntime");
+  if (!p) {
+    PyErr_Clear();
+    throw std::invalid_argument(
+        "pycvc.ari_app_attach: the capsule is not a \"cvc.ariadne.AppRuntime\"");
+  }
+  return new AriApp(std::move(app), static_cast<cvc::ariadne::AppRuntime *>(p));
+}
 
 } // namespace pycvc
 %}
@@ -176,6 +202,7 @@ PYCVC_ARIADNE_NOGIL(pycvc::AriApp::~AriApp)
 %rename(HostFunction) pycvc::host_function;
 %nodefaultctor pycvc::host_function;
 %feature("kwargs") pycvc::AriApp::AriApp;
+%newobject pycvc::ari_app_attach;
 %feature("kwargs") pycvc::AriApp::run_program;
 %feature("kwargs") pycvc::AriApp::post_signal;
 %feature("kwargs") pycvc::AriApp::set_document_args;
@@ -219,4 +246,5 @@ public:
   void wait_idle();
   static bool have_yaml();
 };
+AriApp *ari_app_attach(std::shared_ptr<cvc::app> app, PyObject *runtime);
 } // namespace pycvc

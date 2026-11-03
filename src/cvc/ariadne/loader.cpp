@@ -3372,6 +3372,9 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
       }
       if (parser)
         parser(to_value(kv.second), r);
+      else if (key == "python")
+        r.warnings.push_back("ari: this document's python: block needs a scripting host (arix or "
+                             "ariglx); this host has no Python, so it was ignored");
     }
 
   r.ok = true;

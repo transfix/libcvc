@@ -1307,9 +1307,13 @@ jobs:
 
       # The modules, the pycvc_gl package layout its tests import from, and the
       # C++ reference test_pycvc_physics.py compares against (physics_parity_test,
-      # which ctest hands it in CVC_PHYSICS_PARITY_EXE).
+      # which ctest hands it in CVC_PHYSICS_PARITY_EXE). Then the scripting hosts
+      # (arix, ariglx: ari and arigl with this Python embedded), and stock ari, which
+      # their tests compare against.
       - name: Build
-        run: cmake --build build --parallel --target pycvc pycvc_gl pycvc_gl_pkg physics_parity_test
+        run: |
+          cmake --build build --parallel --target pycvc pycvc_gl pycvc_gl_pkg physics_parity_test
+          cmake --build build --parallel --target ari arix ariglx
 
       # ── a software GL for the pycvc_gl tests ──
       # cvcpkg's mesa (llvmpipe) and xvfb, as in package-linux: libGLX.so.0 from
@@ -1367,6 +1371,22 @@ jobs:
           # A crash dumps the Python stack (a segfaulting test prints nothing else:
           # its buffered stdout dies with it).
           PYTHONFAULTHANDLER=1 ctest --test-dir build -R '^pycvc_' --output-on-failure --timeout 1200
+
+      # arix and ariglx with this job's Python embedded: a document's python: block,
+      # a Python program in place of the document (ariglx renders it under Xvfb),
+      # <host> python, and stock ari naming them for a document that needs Python.
+      - name: Run the scripting-host tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          n=$(ctest --test-dir build -N -R '^(arix_|ariglx_|ari_python_)' | grep -c 'Test *#' || true)
+          echo "scripting-host tests registered with ctest: $n"
+          if [ "$n" -lt 7 ]; then
+            echo "::error::arix and ariglx were built, but their tests did not all reach CTestTestfile.cmake."
+            exit 1
+          fi
+          PYTHONFAULTHANDLER=1 ctest --test-dir build -R '^(arix_|ariglx_|ari_python_)' \
+            --output-on-failure --timeout 600
 
       # --output-on-failure hides a passing test's output, and with it whatever it
       # skipped. Print every skip line from LastTest.log, so what is left skipping
