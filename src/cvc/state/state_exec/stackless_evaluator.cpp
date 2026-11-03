@@ -1,3 +1,4 @@
+#include "builtin_class.h"
 #include "closure_body.h"
 #include "closure_natives.h"
 #include "scope_mark.h"
@@ -404,8 +405,11 @@ const value_t *handled_exception(const evaluator_state &state, bool in_finally) 
 
 // Record where an exception raised at the top frame was raised: its traceback, the exception
 // being handled there as its cause, and the function that failed, for one from C++. What a
-// re-raised exception already has is kept.
+// re-raised exception already has is kept. A built-in class dict, which is read-only, is raised
+// as it is (S0.1).
 void annotate(const evaluator_state &state, value_t &exc) {
+  if (detail::is_builtin_class(exc))
+    return;
   if (const value_t *tb = field(exc, "traceback"); !tb || tb->is_nil())
     set_field(exc, "traceback", traceback_of(state));
   if (const value_t *cause = field(exc, "cause"); !cause || cause->is_nil())
