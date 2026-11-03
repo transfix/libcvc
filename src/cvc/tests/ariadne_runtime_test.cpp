@@ -8368,3 +8368,36 @@ TEST(AriadneNetL4, AnOidcSessionRenewsWithoutBlockingAFrame) {
   std::error_code ec;
   fs::remove_all(dir, ec);
 }
+
+// --- Stage 0 hazards (td 8.1) ---
+
+// HZ-13 (td 8.1, S0.9, S0-Q6): Ariadne's init lane runs on a private sync scheduler, while its
+// host verbs are async functions on the app's async host, so their futures belong to the app's
+// scheduler. An init script awaiting one still gets its value, twice, as today: Stage 0 makes a
+// call's finish a one-time claim, and adds no foreign-future check (that is Stage 1's).
+TEST(AriadneHazards, HZ13_InitLaneAwaitsAnAppHostFuture) {
+  namespace se = cvc::state_exec;
+  cvc::app app;
+  NetIntrinsicsGuard guard; // clears the action intrinsics at the end
+  app.exec_async_host();    // warm it on this thread
+  register_action_intrinsics(
+      [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+        se::register_async_fn(env, app.exec_async_host(), "hz13-triple",
+                              [](std::span<const se::value_t> args) -> se::async_kernel {
+                                const std::int64_t n =
+                                    args.empty() ? 0 : std::get<std::int64_t>(args[0].v);
+                                return [n](se::async_call &) -> se::value_t {
+                                  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                                  return se::value_t(n * 3);
+                                };
+                              });
+      });
+  std::vector<std::string> errs;
+  const auto t0 = std::chrono::steady_clock::now();
+  const bool ok = run_init(app, "doc", R"S((begin (set f (hz13-triple-async 7))
+      (state-set "r" (str (list (await f) (await f) (hz13-triple 2))))))S",
+                           &errs);
+  std::printf("HZ-13: the init script took %.3f s\n", seconds_since(t0));
+  EXPECT_TRUE(ok) << ::testing::PrintToString(errs);
+  EXPECT_EQ(node_value(app, "doc.r"), "(21 21 6)");
+}

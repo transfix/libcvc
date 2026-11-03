@@ -1770,3 +1770,103 @@ TEST(AsyncCalls, WhereAStartedCallCantParkItsKernelRuns) {
     EXPECT_EQ(sp.kernels, 1);
   });
 }
+
+// --- Stage 0 hazards (td 8.1) ---
+
+namespace {
+
+// A process rate of 0 leaves a call only its minimum charge, one step (3.8): a process's
+// async_steps then counts the calls it was charged for.
+execute_options one_step_a_call() {
+  execute_options o;
+  o.async_steps_per_cpu_ms = 0.0;
+  return o;
+}
+
+// The processes `parent` forked.
+std::vector<int> children_of(const world &w, int parent) {
+  std::vector<int> out;
+  for (const process_info &i : w.sync ? w.sync->list_processes() : w.async->list_processes())
+    if (i.parent_pid == parent)
+      out.push_back(i.pid);
+  return out;
+}
+
+} // namespace
+
+// HZ-13 (td 8.1, S0.9): a future awaited twice is finished, and charged, once: both awaits get its
+// one result, and the process is charged what one await costs. The same for a call that fails
+// (both awaits raise its error), and for a future a fork child awaits beside its parent: both get
+// the value, and the child, which made no call, is charged nothing.
+TEST(AsyncCalls, HZ13_AFutureAwaitedTwiceIsChargedOnce) {
+  for_engines(kSchedulers, [](unsigned e) {
+    world w(e);
+    const int once = w.run_to_end(w.submit("(await (slow-op-async 5))", one_step_a_call()));
+    const int twice = w.run_to_end(w.submit(
+        "(begin (set f (slow-op-async 5)) (list (await f) (await f)))", one_step_a_call()));
+    EXPECT_EQ(show(*w.result(once)), "10");
+    EXPECT_EQ(show(*w.result(twice)), "(10 10)");
+    EXPECT_EQ(w.info(once).async_steps, 1u);
+    EXPECT_EQ(w.info(twice).async_steps, 1u);
+    EXPECT_EQ(w.p.ended, 2);
+
+    const int failed = w.run_to_end(w.submit(R"((begin (set f (b-async))
+        (list (try (await f) (catch (ValueError e) (get-attr e "message")))
+              (try (await f) (catch (ValueError e) (get-attr e "message"))))))",
+                                             one_step_a_call()));
+    EXPECT_EQ(show(*w.result(failed)), R"(("b failed" "b failed"))");
+    EXPECT_EQ(w.info(failed).async_steps, 1u);
+
+    const int parent = w.submit(
+        "(begin (set f (slow-op-async 5)) (set c (fork)) (list c (await f)))", one_step_a_call());
+    ASSERT_TRUE(w.pump([&] { return w.finished(parent) && children_of(w, parent).size() == 1; }));
+    const int child = children_of(w, parent)[0];
+    w.run_to_end(child);
+    EXPECT_EQ(show(*w.result(parent)), "(" + std::to_string(child) + " 10)");
+    EXPECT_EQ(show(*w.result(child)), "(0 10)");
+    EXPECT_EQ(w.info(parent).async_steps, 1u);
+    EXPECT_EQ(w.info(child).async_steps, 0u);
+    EXPECT_EQ(w.p.ended, 3);
+  });
+}
+
+// HZ-13: a future's outcome taken before the scheduler drains the call's completion is not charged
+// again by the drain. An await in a generator's body can't park, so it waits for the call there
+// and takes the outcome at once; the completion the kernel posted is drained after.
+TEST(AsyncCalls, HZ13_AnOutcomeTakenBeforeTheDrainIsNotChargedAgain) {
+  world w(async_sched);
+  const int pid = w.submit(R"((begin (set f (slow-op-async 5 20))
+                                    (set g (generator (lambda () (yield (await f)))))
+                                    (list (next g) (await f))))",
+                           one_step_a_call());
+  w.run_to_end(pid);
+  w.host->wait_idle();
+  w.async->drain_ingress(); // whatever the kernel posted is drained now, if it wasn't
+  EXPECT_EQ(show(*w.result(pid)), "(10 10)");
+  EXPECT_EQ(w.info(pid).async_steps, 1u);
+  EXPECT_EQ(w.async->async_calls_in_flight(), 0u);
+}
+
+// HZ-13: killing the process that made a call wakes every process awaiting its future. Here a fork
+// child awaits the same future as its parent; the kill cancels the call and drops it from the
+// list, which used to wake nobody, so the child waited for ever.
+TEST(AsyncCalls, HZ13_ACancelledCallWakesEveryWaiter) {
+  world w(async_sched);
+  const int parent = w.submit("(begin (set f (slow-op-async 1 5000)) (set c (fork)) (await f))");
+  ASSERT_TRUE(w.pump([&] {
+    const std::vector<int> kids = children_of(w, parent);
+    return w.p.started && w.waiting(parent) && kids.size() == 1 && w.waiting(kids[0]);
+  }));
+  const int child = children_of(w, parent)[0];
+  const auto t0 = clock_type::now();
+  ASSERT_TRUE(w.async->kill(parent));
+  const bool woken = w.pump([&] { return w.finished(child); }, 10.0);
+  std::printf("HZ-13: the child %s %.3f s after the kill (%s)\n", woken ? "ended" : "still waited",
+              seconds_since(t0), to_string(w.info(child).status));
+  EXPECT_TRUE(woken);
+  EXPECT_EQ(w.info(parent).status, process_status::killed);
+  EXPECT_EQ(w.info(parent).exit_error.value_or(""), "killed_by_user");
+  EXPECT_TRUE(w.pump([&] { return w.p.cancelled_seen.load(); }, 10.0));
+  if (!woken)
+    w.async->kill(child);
+}
