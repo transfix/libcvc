@@ -146,7 +146,7 @@ be named in messages and across boundaries.
 
 ### 2.3 The built-in classes
 
-All are bound in every default environment.
+All 17 are bound in every default environment, and all are read-only (below).
 
 | Class | Parent | Raised by |
 |---|---|---|
@@ -167,6 +167,26 @@ All are bound in every default environment.
 | `DeadlockError` | `LockError` | a `with-lock` whose wait would close a cycle; `cycle` lists its edges, `{pid key}` each |
 | `PermissionError` | `Exception` | a `/` lock key (app-global) where the channel policy doesn't allow it; `set-priority` raising a process past its floor or the caller's; `pid` and `priority` name the request (docs/STATE_EXEC_LOCKS.md 7.2) |
 | `AssertionError` | `Exception` | `(assert cond [message [data]])` when `cond` is false |
+
+**The class rules.** Each built-in class dict is made once per OS process and shared by every
+environment, so since threaded execution's Stage 0 (docs/STATE_EXEC_THREADED.md 5 item 1) no
+program may change one:
+
+- `set-attr` and `del-attr` on a built-in class dict raise `TypeError` `set-attr: built-in class
+  is read-only: ValueError` (`del-attr: ...` likewise), whether it is reached as
+  `ValueError.__cls_dict__`, as a caught exception's `__class__`, or as a class's `__super__`.
+- The C++ `set_field` raises `TypeError` `built-in class is read-only: ValueError` on one. So
+  does a class's `init` called on the class dict itself (`init` sets the instance's fields with
+  `set_field`).
+- A user class, including one derived from a built-in class, has its own dict and stays mutable.
+  `(defclass ValueError ...)` binds a new class to the name in the program's environment and
+  leaves the built-in one alone.
+- Raising a class dict is unchanged: `(raise ValueError.__cls_dict__)` raises `TypeError`
+  `raise: expected an exception, got dict`, and the class dict gains no traceback, cause or
+  origin.
+- A built-in exception's instance is an ordinary dict, so it is mutable, and its fields are set
+  as before. `state-data-set` copies one and shares its class dict, and `state-data-get` returns
+  a copy with the same shared class (docs/STATE_EXEC_DEVELOPER_GUIDE.md, "The data channel").
 
 Mapping a C++ exception thrown by a native function:
 - `cvc::state_exec::dsl_exception` carries a class already;
@@ -359,6 +379,9 @@ The callable runs on an executor thread and takes the GIL for its call, as now.
   - `(await-all (list f1 f2 ...))` waits for every one and returns their values in order. If any
     failed, it raises the first failure in list order once all have finished.
   - A future that is never awaited still finishes; its result is dropped.
+  - A future is finished, and charged, once (docs/STATE_EXEC_THREADED.md 4.9): awaited twice, or
+    by a fork child beside its parent, every await gets the same value or exception, and the
+    child is charged nothing.
 - **Where it can't park:** a context that forbids parking raises `RuntimeError` naming the
   function. Ariadne's reactive and render lane is one; registering through the action seam
   only, as today, keeps async functions out of it.
@@ -420,8 +443,11 @@ Other places a kernel can run:
 - the host is torn down.
 
 A kernel checks it at convenient points and may stop early by throwing. A cancelled call's
-result is dropped. Host teardown (an `Exec`, an Ariadne document, the app's scheduler) cancels
-every in-flight kernel and waits for them before the scheduler goes, as `Exec` does today.
+result is dropped. Another process awaiting the same future (a fork child, when the parent that
+made the call is killed) is woken, and if the call was cancelled before it settled, its await
+raises `RuntimeError` "`name`: cancelled: the process that made the call ended". Host teardown
+(an `Exec`, an Ariadne document, the app's scheduler) cancels every in-flight kernel and waits
+for them before the scheduler goes, as `Exec` does today.
 
 A kernel its executor never runs still ends its call. Once `~app` has stopped the app's
 background pool, a kernel submitted to it (`app::submitPooled` returns false), or one still in
@@ -454,7 +480,8 @@ same case, and `compute_async`'s `on_error` form calls `on_error`.
 
 - **Arguments:** the marshal step copies what the kernel needs. DSL lists and dicts are copied,
   because the kernel must never touch a value the program can still change. A large copy runs
-  as a deep-data job, so it counts against the process's budget like other deep-data work.
+  as a deep-data job, so it counts against the process's budget like other deep-data work. A
+  built-in class dict (an exception's `__class__`) is shared, not copied: it is read-only (2.3).
 - **Large data:** a volume or mesh crosses as a `data_object` holding a `shared_ptr` the kernel
   treats as read-only. A kernel that modifies data works on its own copy.
 - **The kernel must not touch:** the state tree, the evaluator, or any DSL value. The evaluators

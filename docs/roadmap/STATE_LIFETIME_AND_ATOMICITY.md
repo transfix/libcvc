@@ -5,6 +5,7 @@ callers a general path to multi-node-atomic reads/writes — without every subsy
 reinventing its own mutex.*
 
 Status: **design / not yet implemented.** This doc is for review before any code lands.
+(Since then Phase 1's API has landed; §3.4 records where it is used.)
 Every `file:line` below was verified against the tree at merge of PRs #481/#482
 (`inc/cvc/state/state.h`, `src/cvc/state/state.cpp`, and the cited call sites).
 
@@ -203,6 +204,33 @@ Adding the API is inert. Migration is opt-in per subsystem; the verified census
 
 No flag-day: land API → migrate `uri_state` (closes the SEGFAULT) → migrate the rest
 opportunistically.
+
+**Since threaded execution's Stage 0** (`docs/STATE_EXEC_THREADED.md` 4.8). The API above has
+landed, and `uri_state.cpp`, `uri_http_cache.cpp` and `stream.cpp` use it. Stage 0 moved two rows
+of the census, because the single-thread-per-root premise no longer holds: several pycvc `Exec`s
+step programs over one app tree on several Python threads, and any of them may delete a node.
+
+- **The state_exec intrinsics** (`intrinsics.cpp`) now walk pinned. A read goes through
+  `findThroughLinksShared` and holds the node it returns. A write goes through
+  `childThroughLinksShared` and holds the chain below the context's root to the end of the call;
+  a sliced writer (`state-set` of a list, `state-data-set`'s copy, `state-from-json`,
+  `state-set-tree`) holds the root's chain, its target's and any link's for its whole life. The
+  physical walks (`state-delete`, the expiry natives, `state-watch`, `msg-send` and the channel
+  lookups) use `findDescendantShared(self, path, pins)` and `sharedChild(self, path, pins)`,
+  overloads for a caller that already holds the start node, which take no reference on it. The
+  context holds its root and every ancestor (`intrinsics_context::root_pins`), which is what makes
+  `fullName()` and a write's `childChanged` up the `_parent` chain safe: fix (a) of §3.3.
+- **`poll_watches`** in both schedulers holds each watched node while it reads it.
+- **pycvc's accessors** (`pycvc_state.cpp`) moved from "defensive" to done: all of them walk
+  pinned, and the ones that walk up the chain (`state_children`, `state_set`) hold it.
+- **`removeChild(name)`** is new: it unlinks one child, emits `childChanged` once and never
+  `expiring`, and the subtree is freed wherever its last pin drops. `state-delete`, pycvc's
+  `state_remove` and `state-set-tree`'s stale children use it, so no state_exec path sweeps a
+  whole tree to delete a node any more: the tree-wide `sweepExpired()` on the scheduler thread
+  and the pycvc thread that §1 names is gone.
+- **Still raw:** `state_distributed_admin.cpp`, and the host natives outside `intrinsics.cpp`
+  (`room_intrinsics.cpp`, `room_media_intrinsics.cpp`, `oidc_host.cpp`), left for threaded
+  execution's Stage 1, which classifies host natives by thread.
 
 ### 3.5 What Phase 1 explicitly does NOT do
 
