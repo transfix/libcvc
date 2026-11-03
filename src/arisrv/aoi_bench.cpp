@@ -615,7 +615,10 @@ public:
 #endif
     if (t >= _next_net) {
       _next_net = t + 1.0;
-      write_net(t);
+      const bool publish = t >= _next_publish;
+      if (publish)
+        _next_publish = t + ra::net_publish_period_s;
+      write_net(t, publish);
     }
   }
 
@@ -732,10 +735,13 @@ public:
   std::size_t journal_max = 0;
 
 private:
-  // arisrv's ~1 s link stats: each participant's link as the relay sees it, and the totals.
-  void write_net(double t) {
+  // arisrv's ~1 s link stats: each participant's round trip to its pose stream, and on PUBLISH
+  // (every net_publish_period_s) its link as the relay sees it and the totals, over that window.
+  void write_net(double t, bool publish) {
     const std::vector<cvc::state_link_report> ls = links();
-    const auto rates = _meter.update(ls, t);
+    std::map<std::string, cvc::state_link_rate_meter::rate> rates;
+    if (publish)
+      rates = _meter.update(ls, t);
     std::set<std::string> present;
     for (const auto &p : ra::room_roster(app, kRoom))
       present.insert(p.pid);
@@ -748,7 +754,8 @@ private:
       total.out_kbps += out_kbps;
       ++total.links;
       if (present.count(r.remote_node_id)) {
-        ra::write_relay_net(app, kRoom, r.remote_node_id, {r.stats.rtt_ms, in_kbps, out_kbps});
+        if (publish)
+          ra::write_relay_net(app, kRoom, r.remote_node_id, {r.stats.rtt_ms, in_kbps, out_kbps});
         if (r.stats.rtt_ms >= 0.0)
           poses->set_rtt(r.remote_node_id, r.stats.rtt_ms);
       }
@@ -758,14 +765,15 @@ private:
       for (const cvc::state_link_report &r : lanes->link_reports())
         if (present.count(r.remote_node_id) && r.stats.rtt_ms >= 0.0)
           poses->set_rtt(r.remote_node_id, r.stats.rtt_ms);
-    ra::write_server_net(app, kRoom, total);
+    if (publish)
+      ra::write_server_net(app, kRoom, total);
   }
 
   std::mutex _mu;
   std::vector<std::string> _departed;
   std::set<std::string> _known;
   cvc::state_link_rate_meter _meter;
-  double _next_broadcast = 0.0, _next_net = 1.0;
+  double _next_broadcast = 0.0, _next_net = 1.0, _next_publish = 1.0;
 };
 
 // A synthetic participant, as arigl runs one.

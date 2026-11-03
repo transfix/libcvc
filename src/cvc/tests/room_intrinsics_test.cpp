@@ -227,6 +227,106 @@ TEST(RoomIntrinsics, VoiceLeafRoundTripsChangedOnly) {
   sB.detach();
 }
 
+// The traffic meters (room_net.h) are measured every second but published only when a reading
+// moves past its band -- a tenth of the published value, or 2 kb/s or 5 ms if that is more -- as
+// two significant figures, with one mutation per change. An idle link writes nothing, so its own
+// meters stop adding to what they measure. A is a client rooted at the room tree, B the relay.
+TEST(RoomIntrinsics, NetReadingsReplicateOnlyWhenTheyMove) {
+  cvc::app aA, aB;
+  cvc::state_transport_inproc tp;
+  cvc::state_cluster_shard sA(aA, "C", "A", "conf");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  tp.register_shard(&sA);
+  tp.register_shard(&sB);
+  const std::string net = conf::room_participant_path("standup", "A") + ".net";
+  const auto leaf = [&](cvc::app &app, const std::string &path) {
+    cvc::state *n = app.root().findDescendant(path);
+    return n ? n->value() : std::string("(absent)");
+  };
+
+  // The first readings: one mutation each, rounded to two significant figures.
+  conf::write_participant_net(aA, "standup", "A", {42.3, 12.34, 3.21});
+  std::vector<cvc::state_mutation> sent;
+  ASSERT_EQ(publish_drained(tp, sA, &sent), 3u);
+  EXPECT_EQ(leaf(aB, net + ".rtt_ms"), "42");
+  EXPECT_EQ(leaf(aB, net + ".in_kbps"), "12");
+  EXPECT_EQ(leaf(aB, net + ".out_kbps"), "3.2");
+  conf::net_sample got;
+  ASSERT_TRUE(conf::read_participant_net(aB, "standup", "A", got)) << "replicated to B";
+  EXPECT_DOUBLE_EQ(got.rtt_ms, 42.0);
+  EXPECT_DOUBLE_EQ(got.in_kbps, 12.0);
+  EXPECT_DOUBLE_EQ(got.out_kbps, 3.2);
+
+  // Next second's readings, each inside its band: nothing to send.
+  conf::write_participant_net(aA, "standup", "A", {45.9, 13.9, 5.1});
+  conf::write_participant_net(aA, "standup", "A", {38.0, 10.1, 1.3});
+  EXPECT_EQ(publish_drained(tp, sA), 0u);
+
+  // One moves: that one, once.
+  conf::write_participant_net(aA, "standup", "A", {44.0, 30.4, 4.0});
+  ASSERT_EQ(publish_drained(tp, sA, &sent), 1u);
+  EXPECT_EQ(sent[0].path, net + ".in_kbps");
+  EXPECT_EQ(sent[0].string_value, "30");
+
+  // A busy link: the band grows with the reading, a tenth of it.
+  conf::write_participant_net(aA, "standup", "A", {44.0, 1234.5, 4.0});
+  ASSERT_EQ(publish_drained(tp, sA, &sent), 1u);
+  EXPECT_EQ(sent[0].string_value, "1200");
+  conf::write_participant_net(aA, "standup", "A", {44.0, 1310.0, 4.0}); // 110 < 120
+  EXPECT_EQ(publish_drained(tp, sA), 0u);
+  conf::write_participant_net(aA, "standup", "A", {44.0, 1360.0, 4.0});
+  ASSERT_EQ(publish_drained(tp, sA, &sent), 1u);
+  EXPECT_EQ(sent[0].string_value, "1400");
+  conf::write_participant_net(aA, "standup", "A", {44.0, 0.43, 4.0}); // and back to idle
+  ASSERT_EQ(publish_drained(tp, sA, &sent), 1u);
+  EXPECT_EQ(sent[0].string_value, "0.4");
+
+  // Unmeasured is a change, both ways, and staying unmeasured is not.
+  conf::write_participant_net(aA, "standup", "A", {-1.0, 0.43, 4.0});
+  ASSERT_EQ(publish_drained(tp, sA, &sent), 1u);
+  EXPECT_EQ(sent[0].string_value, "-1");
+  conf::write_participant_net(aA, "standup", "A", {-1.0, 0.43, 4.0});
+  EXPECT_EQ(publish_drained(tp, sA), 0u);
+  conf::write_participant_net(aA, "standup", "A", {1.5, 0.43, 4.0});
+  ASSERT_EQ(publish_drained(tp, sA, &sent), 1u);
+  EXPECT_EQ(sent[0].string_value, "1.5");
+  ASSERT_TRUE(conf::read_participant_net(aB, "standup", "A", got));
+  EXPECT_DOUBLE_EQ(got.rtt_ms, 1.5);
+  EXPECT_DOUBLE_EQ(got.in_kbps, 0.4);
+
+  // A forced write re-sends the readings as published, for a relay that lost them (a client back
+  // after a reconnect): one touch each, the values unchanged.
+  cvc::state::instance(aB)(net + ".in_kbps").value(std::string("")); // B lost them
+  sB.drain_local();
+  conf::write_participant_net(aA, "standup", "A", {1.6, 0.5, 4.1}, /*force=*/true);
+  ASSERT_EQ(publish_drained(tp, sA, &sent), 3u);
+  EXPECT_EQ(leaf(aB, net + ".in_kbps"), "0.4") << "the forced re-send heals B";
+  EXPECT_EQ(leaf(aA, net + ".rtt_ms"), "1.5") << "and leaves the published readings alone";
+
+  // The relay's meters work the same way: its view of A's link, and its totals.
+  conf::write_relay_net(aB, "standup", "A", {2.0, 8.0, 16.0});
+  conf::write_server_net(aB, "standup", {8.0, 16.0, 1});
+  EXPECT_EQ(sB.drain_local().size(), 6u);
+  conf::write_relay_net(aB, "standup", "A", {2.4, 9.1, 17.0});
+  conf::write_server_net(aB, "standup", {9.1, 17.0, 1});
+  EXPECT_TRUE(sB.drain_local().empty()) << "an idle relay writes nothing";
+  conf::write_server_net(aB, "standup", {9.1, 17.0, 2});
+  const std::vector<cvc::state_mutation> links = sB.drain_local();
+  ASSERT_EQ(links.size(), 1u) << "a link count that changes is one mutation";
+  EXPECT_EQ(links[0].string_value, "2");
+  conf::server_net totals;
+  ASSERT_TRUE(conf::read_server_net(aB, "standup", totals));
+  EXPECT_DOUBLE_EQ(totals.out_kbps, 16.0);
+  EXPECT_EQ(totals.links, 2);
+
+  tp.unregister_shard(&sA);
+  tp.unregister_shard(&sB);
+  sA.detach();
+  sB.detach();
+}
+
 // The bound-writes rule (room_write_gate): a participant writes only its own subtree, minus the
 // keys the relay owns there, with value, touch and data ops; every other path is the relay's.
 TEST(RoomWriteGate, AParticipantWritesOnlyItsOwnSubtree) {
