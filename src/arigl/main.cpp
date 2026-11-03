@@ -132,6 +132,28 @@
 #ifdef __EMSCRIPTEN__
 #include <cvc/gl/state_publisher.h> // single-thread wasm: flush the publisher at frame cadence
 #include <emscripten.h>             // emscripten_sleep — yield the asyncify loop to the browser
+// The frame loop's yield to the browser (Asyncify): until its next animation frame, so each frame
+// is drawn just after a display refresh and stays up for whole refreshes. A 0 ms timer runs the
+// loop out of step with the display: on a 144 Hz screen frames stay up for one, two or three
+// refreshes unevenly, and the view judders as the mouse turns it. A hidden tab draws no animation
+// frames; there the timer (100 ms, which the browser stretches to about a second) keeps the loop,
+// and the room's link, going.
+// clang-format off: a JavaScript body
+EM_ASYNC_JS(void, arigl_wait_frame, (), {
+  await new Promise(function(resolve) {
+    var done = false, timer = 0;
+    var go = function() {
+      if (done)
+        return;
+      done = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    timer = setTimeout(go, 100);
+    requestAnimationFrame(go);
+  });
+});
+// clang-format on
 #endif
 #include "gallery.h" // the Demos menu over $CVC_ARIGL_GALLERY
 
@@ -295,10 +317,14 @@ ari::MouseControls camera_mouse(const cvc::gl::CameraController &cam, bool touch
   if (!touch) {
     m.look = at + "mouse_look";
     m.note = room ? "Mouse look: the mouse aims and W walks where you aim. Click the scene to\n"
-                    "start, Esc to get the mouse back. Drag to look: drag to look around, and\n"
-                    "click the floor to face it."
+                    "start, Esc to get the mouse back. Drag to look: click the floor to face it."
                   : "Mouse look: the mouse turns the view. Click the scene to start, Esc to get\n"
                     "the mouse back.";
+  }
+  if (room) { // in drag to look (a touch screen's only look)
+    m.steer = at + "primary_drag_steers";
+    m.steer_label = touch ? "Drag the floor to face it (two fingers look around)"
+                          : "Drag the floor to face it (right drag looks around)";
   }
   m.sensitivity = at + "mouse_sensitivity";
   m.invert_y = at + "invert_pitch";
@@ -489,6 +515,12 @@ struct ConferenceSession {
   static constexpr double kAimAhead = 4.0;  // and ahead of us: the crosshair's point (m)
   static constexpr double kAimEaseS = 0.2;  // the pivot's easing as mouse look turns on and off
   double aim_blend_ = 0.0;                  // 0 = the pivot on us, 1 = over the shoulder, ahead
+  // Drag to look: a drag on the floor steers us (CameraController::setPrimaryDragSteers). We face
+  // the point under the pointer each time it moves; not nearer our feet than kSteerDeadZone, where
+  // the direction swings wildly.
+  bool steer_held_ = false;                     // a steering drag was held last frame
+  int steer_x_ = 0, steer_y_ = 0;               // and where its pointer was
+  static constexpr double kSteerDeadZone = 0.3; // m
   // Either look: the ground under us is the camera's floor (an eye that would go under it, looking
   // up, slides in instead), and an eye inside our own avatar hides it.
   double floor_z_ = -1e300;                       // the floor last given to the camera
@@ -1001,6 +1033,7 @@ struct ConferenceSession {
       std::fprintf(stderr, "arigl: room: LOD off (CVC_ARIGL_LOD=0): meshes at full detail\n");
     }
     cam_ = &cam;
+    cam.setPrimaryDragSteers(true); // the right button, or two fingers, turns the view
     walk_keys_ = avatar_keys_path(view);
     // Peers' names over their markers: a scene annotation, so it shows with the panels hidden too
     // and sits under the document's windows.
@@ -1017,19 +1050,31 @@ struct ConferenceSession {
       return;
     const bool look =
         cam_->mouseLookEnabled() && cam_->mode() == cvc::gl::CameraController::Mode::Orbit;
-    // A click on the scene (not a drag, and not one the UI took) turns us to face the ground point
-    // under it. Only once we are in the room: the pick needs our position. (Under mouse look the
-    // camera takes the clicks: one captures the pointer.)
+    // A click on the scene (not one the UI took) turns us to face the ground point under it, and
+    // so does a drag (in drag to look): we face the point under the pointer as it moves, until the
+    // button comes up. Only once we are in the room: the pick needs our position. (Under mouse look
+    // the camera takes the clicks: one captures the pointer.)
     int cx = 0, cy = 0;
     double self[3];
-    if (cam_->takeClick(cx, cy) && room_view_->self_position(self)) {
+    const bool placed = room_view_->self_position(self);
+    const auto face = [&](int x, int y, double dead_zone) {
       double g[3];
-      if (room_view_->pick_ground(cx, cy, self[2], g) &&
-          std::hypot(g[0] - self[0], g[1] - self[1]) > 0.05) { // a click on our own feet: no turn
+      if (room_view_->pick_ground(x, y, self[2], g) &&
+          std::hypot(g[0] - self[0], g[1] - self[1]) > dead_zone) { // on our own feet: no turn
         facing_yaw_ = std::atan2(g[1] - self[1], g[0] - self[0]);
         facing_chosen_ = true;
       }
-    }
+    };
+    if (cam_->takeClick(cx, cy) && placed)
+      face(cx, cy, 0.05);
+    // Only as the pointer moves: two fingers turning the view (the press's finger held) leave us
+    // as we were.
+    const bool steering = cam_->steerPoint(cx, cy);
+    if (steering && placed && (!steer_held_ || cx != steer_x_ || cy != steer_y_))
+      face(cx, cy, kSteerDeadZone);
+    steer_held_ = steering;
+    steer_x_ = cx;
+    steer_y_ = cy;
     // Keys -> intent, only in Orbit: in Fly the same keys move the camera instead. The camera's
     // held set is dropped while the UI has the keyboard, so typing a name never walks.
     cvc::ariadne::avatar_intent in;
@@ -1076,11 +1121,12 @@ struct ConferenceSession {
     };
     // An intent in the tree stamped before our last proposal is an echo of an earlier one (the
     // relay's re-broadcast can carry it back after the newer write left): not ours any more.
-    // Under mouse look the facing moves with every frame's turn, the walk's direction with it:
-    // what only turned waits until kTurnHz allows, a key at once.
+    // Under mouse look, or while a drag steers, the facing moves every frame, the walk's direction
+    // with it: what only turned waits until kTurnHz allows, a key at once.
     const double now = steady_s();
+    const bool turning = look || steering;
     bool ask = differs(in, last_user_);
-    if (ask && look && keys == last_keys_ && now < next_turn_s_)
+    if (ask && turning && keys == last_keys_ && now < next_turn_s_)
       ask = false;
     if (ask) {
       proposed_tick_ = cvc::ariadne::propose_intent(*holon_, *app_, room_, pid_, in);
@@ -1095,11 +1141,11 @@ struct ConferenceSession {
     }
     // Re-assert it locally every frame: our avatar joins the holon only once our room-join is in
     // the tree, so an intent proposed before then must still reach the prediction. Under mouse look
-    // our own avatar also turns with the camera every frame, between the proposals that tell the
-    // relay: only its facing, so the walk we predict stays the one the relay runs. (Not while the
-    // document drives us: the tree's intent is not the one we last proposed then.)
+    // (or a steering drag) our own avatar also turns every frame, between the proposals that tell
+    // the relay: only its facing, so the walk we predict stays the one the relay runs. (Not while
+    // the document drives us: the tree's intent is not the one we last proposed then.)
     cvc::ariadne::avatar_intent local = last_intent_;
-    if (look && !differs(last_intent_, last_user_))
+    if (turning && !differs(last_intent_, last_user_))
       local.yaw = facing_yaw_;
     holon_->set_intent(pid_, local);
     // The relay's pose snapshots since the last frame, in order, then the tree (roster, statics)
@@ -2009,18 +2055,27 @@ int run_window(const ari::HostOptions &o) {
   const double fps = o.fps > 0 ? o.fps : 120.0;
 #ifndef __EMSCRIPTEN__
   const auto period = std::chrono::duration<double>(1.0 / fps);
+#else
+  // $CVC_ARIGL_YIELD=timeout (the page's ?yield=timeout) yields on a 0 ms timer instead of the
+  // next animation frame: the pacing's A/B.
+  const char *yield_env = std::getenv("CVC_ARIGL_YIELD");
+  const bool yield_timer = yield_env && std::string(yield_env) == "timeout";
 #endif
   while (!rt.should_close()) {
 #ifdef __EMSCRIPTEN__
-    // Browser: one frame, then yield to the event loop (Asyncify). No wall-clock pacing — the
-    // browser throttles requestAnimationFrame; FrameYield::App above keeps VTK from yielding twice.
+    // Browser: one frame, then yield to the event loop (Asyncify) until the next animation frame
+    // (arigl_wait_frame): the display paces the loop. FrameYield::App above keeps VTK from
+    // yielding twice.
     rt.step(1.0 / fps);
     print_warnings(rt.take_warnings());
     switch_document();
 #ifndef __EMSCRIPTEN_PTHREADS__
     sg.publisher().flush(); // single-thread wasm: no worker drains publishes, so do it per frame
 #endif
-    emscripten_sleep(0);
+    if (yield_timer)
+      emscripten_sleep(0);
+    else
+      arigl_wait_frame();
 #else
     const auto start = std::chrono::steady_clock::now();
     rt.step(1.0 / fps);
