@@ -148,6 +148,8 @@ int main(int argc, char **argv) {
   //                              journal backfill, and the journal is erased as it is published
   //   --media-stall-ms N         gRPC: skip a receiver whose media write has been stuck N ms
   //                              (default 40; 0 = off)
+  //   --media-delay-ms N         gRPC: skip a receiver whose stream has queued N ms past its base
+  //                              round trip (video; poses at 2N, audio at 4N; default 100; 0 = off)
   //   --admission-hold-ms N      hold a joiner's bootstrap until the area of interest has its
   //                              filter, so its admit snapshot is filtered too; at most N ms, then
   //                              unfiltered (default 2000; 0 = off; only with an area of interest)
@@ -214,7 +216,8 @@ int main(int argc, char **argv) {
   std::string devicePinsFile;
   bool devicePinsFlag = false; // --device-pins was given (even with no path)
   std::string adaptArg = "on", videoMaxArg = "full", videoFloorArg = "thumb", viewerKbpsArg = "0";
-  std::string aoiVideoMaxArg = "0", mediaStallArg = "40", admissionHoldArg = "2000";
+  std::string aoiVideoMaxArg = "0", mediaStallArg = "40", mediaDelayArg = "100",
+              admissionHoldArg = "2000";
   std::string laneListen, laneAdvertise, laneMediaArg = "off";
   std::string avatarEnergyArg = "on", avatarEmptyArg = "rest";
   for (int i = 1; i < argc; ++i) {
@@ -244,6 +247,8 @@ int main(int argc, char **argv) {
       relayJournal = next("trim");
     else if (!std::strcmp(a, "--media-stall-ms"))
       mediaStallArg = next("");
+    else if (!std::strcmp(a, "--media-delay-ms"))
+      mediaDelayArg = next("");
     else if (!std::strcmp(a, "--admission-hold-ms"))
       admissionHoldArg = next("");
     else if (!std::strcmp(a, "--scene"))
@@ -290,9 +295,10 @@ int main(int argc, char **argv) {
       !check_choice("--avatar-energy", avatarEnergyArg, {"on", "off"}) ||
       !check_choice("--avatar-empty", avatarEmptyArg, {"rest", "stop"}))
     return 2;
-  long aoiVideoMaxN = 0, mediaStallMs = 40, admissionHoldMs = 2000;
+  long aoiVideoMaxN = 0, mediaStallMs = 40, mediaDelayMs = 100, admissionHoldMs = 2000;
   if (!check_count("--aoi-video-max", aoiVideoMaxArg, aoiVideoMaxN) ||
       !check_count("--media-stall-ms", mediaStallArg, mediaStallMs) ||
+      !check_count("--media-delay-ms", mediaDelayArg, mediaDelayMs) ||
       !check_count("--admission-hold-ms", admissionHoldArg, admissionHoldMs))
     return 2;
   long viewerKbps = 0;
@@ -417,6 +423,7 @@ int main(int argc, char **argv) {
   state_tp.set_relay_requires_interest(relayGate);
   state_tp.set_backfill_on_connect(!trimJournal);
   state_tp.set_media_stall_drop(std::chrono::milliseconds(stallMs));
+  state_tp.set_media_delay_drop(std::chrono::milliseconds(mediaDelayMs));
   state_tp.set_admission_hold(std::chrono::milliseconds(holdMs));
   state_tp.set_inbound_gate(bindGate);
   state_tp.set_auth_config({roomToken, std::string()});
@@ -520,10 +527,12 @@ int main(int argc, char **argv) {
               ws_tp.listen_address().c_str());
 #endif
   std::printf("[arisrv] S7 %s | aoi %s (full-rate cameras: %d, 0 = all) | relay gate %s | journal "
-              "%s | grpc media stall drop %ld ms | scene %s | bound writes %s | room token %s\n",
+              "%s | grpc media stall drop %ld ms, delay drop %ld ms | scene %s | bound writes %s | "
+              "room token %s\n",
               s7 ? "on" : "off (the pre-S7 relay)", aoiMode.c_str(), aoiVideoMax,
               relayGate ? "on" : "off", trimJournal ? "trim (no backfill)" : "keep (backfill)",
-              stallMs, scene.c_str(), bindGate ? "on" : "off (any client's writes are taken)",
+              stallMs, mediaDelayMs, scene.c_str(),
+              bindGate ? "on" : "off (any client's writes are taken)",
               roomToken.empty() ? "off (an open room)" : "on");
   std::printf("[arisrv] chat: room%s | history in memory: %zu room messages, %zu per "
               "conversation\n",

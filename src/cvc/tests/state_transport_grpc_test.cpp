@@ -1780,6 +1780,7 @@ TEST(StateTransportGrpcTest, MediaGateOnGrpc) {
   EXPECT_EQ(tA.total_media_sent(), 2u) << "the uplink is never gated";
   EXPECT_EQ(tR.total_media_gated(), 1u);
   EXPECT_EQ(tR.total_media_stall_dropped(), 0u);
+  EXPECT_EQ(tR.total_media_delay_dropped(), 0u);
   EXPECT_EQ(gotA.load(), 0) << "the origin is still skipped";
 
   tA.stop();
@@ -1796,6 +1797,83 @@ TEST(StateTransportGrpcTest, MediaWriteStalled) {
   EXPECT_FALSE(T::media_write_stalled(now - 39 * kMs, now, 40 * kMs));
   EXPECT_TRUE(T::media_write_stalled(now - 41 * kMs, now, 40 * kMs));
   EXPECT_FALSE(T::media_write_stalled(now - 41 * kMs, now, 0)) << "0 turns the drop off";
+}
+
+TEST(StateTransportGrpcTest, ProbeQueueDelay) {
+  using T = cvc::state_transport_grpc;
+  constexpr std::int64_t kMs = 1'000'000;
+  constexpr std::int64_t now = 10'000 * kMs;
+  EXPECT_EQ(T::probe_queue_delay_ns(0, 40 * kMs, now), 0) << "no probe out";
+  EXPECT_EQ(T::probe_queue_delay_ns(now - 500 * kMs, -1, now), 0) << "the peer never answered";
+  EXPECT_EQ(T::probe_queue_delay_ns(now - 30 * kMs, 40 * kMs, now), 0) << "within a round trip";
+  EXPECT_EQ(T::probe_queue_delay_ns(now - 190 * kMs, 40 * kMs, now), 150 * kMs);
+  EXPECT_EQ(T::probe_queue_delay_ns(now - 5 * kMs, 0, now), 5 * kMs);
+}
+
+// A receiver that stops reading (its media callback blocks the reader thread) leaves the sender's
+// queue probe unanswered. Once that has waited past the delay drop, the sender skips its media and
+// pose snapshots instead of queueing them behind the stall, and sends again once the receiver
+// catches up.
+TEST(StateTransportGrpcTest, DelayDropSkipsAStalledReceiver) {
+  cvc::state_transport_grpc tA, tB;
+  // Twice the default, so a slow machine's scheduling never trips it on the healthy stream.
+  tA.set_media_delay_drop(std::chrono::milliseconds(200));
+  tA.start("127.0.0.1:0", "A", "C");
+  tB.start("127.0.0.1:0", "B", "C");
+
+  std::atomic<bool> stall{false};
+  std::atomic<std::int64_t> last_seq{0};
+  std::atomic<int> got{0};
+  tB.set_on_media([&](const cvc::media_frame &f) {
+    got.fetch_add(1);
+    last_seq.store(f.seq);
+    if (stall.exchange(false))
+      std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+  });
+  tB.set_on_pose_snapshot([](const cvc::pose_snapshot &) {});
+  ASSERT_TRUE(tB.connect_to_peer(tA.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_identified(tA, {"B"}, std::chrono::seconds(3)));
+
+  cvc::media_frame m;
+  m.origin_node_id = "A";
+  m.stream_id = "camera";
+  m.codec = "mjpeg";
+  m.payload.assign(2048, 0x5a); // past the probe's byte threshold every frame
+  std::int64_t seq = 0;
+  const cvc::pose_snapshot snap = sample_poses();
+  const auto send_for = [&](std::chrono::milliseconds span) {
+    const auto end = std::chrono::steady_clock::now() + span;
+    while (std::chrono::steady_clock::now() < end) {
+      m.seq = ++seq;
+      tA.publish_media_frame(m);
+      tA.push_pose_snapshot_to("B", snap);
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+  };
+
+  // A healthy stream: the probes come back at once, and nothing is dropped.
+  send_for(std::chrono::milliseconds(200));
+  ASSERT_TRUE(wait_until([&] { return last_seq.load() == seq; }, std::chrono::seconds(3)));
+  EXPECT_EQ(tA.total_media_delay_dropped(), 0u);
+  EXPECT_EQ(tA.total_pose_snapshots_skipped(), 0u);
+
+  // The receiver stalls for 1.2 s on the next frame: video is dropped past 200 ms, poses past 400.
+  stall.store(true);
+  send_for(std::chrono::milliseconds(1000));
+  EXPECT_GT(tA.total_media_delay_dropped(), 0u);
+  EXPECT_GT(tA.total_pose_snapshots_skipped(), 0u);
+
+  // Once it reads again, the probes return and frames flow: the newest one arrives.
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (last_seq.load() != seq && std::chrono::steady_clock::now() < deadline)
+    send_for(std::chrono::milliseconds(20));
+  EXPECT_EQ(last_seq.load(), seq) << "the drop let go once the receiver caught up";
+  EXPECT_EQ(static_cast<std::uint64_t>(got.load()) + tA.total_media_delay_dropped(),
+            static_cast<std::uint64_t>(seq))
+      << "each frame either arrived or was dropped";
+
+  tB.stop();
+  tA.stop();
 }
 
 // A client shard that enforces interest takes from an unsolicited (relay admit) snapshot only what

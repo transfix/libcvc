@@ -648,7 +648,9 @@ this spike did not have.
    the newest by stamp. That takes the last latency-critical stream off the reliable connection,
    where it can still wait behind media, and it is the test of §7.4 item 7.
 3. **gRPC under bursty loss** (§7.4 item 3): drop stale media at the gRPC writer instead of
-   letting the library queue it for seconds. This holds whatever carries the poses.
+   letting the library queue it for seconds. This holds whatever carries the poses. Done: the
+   gRPC delay drop (`--media-delay-ms`, ARIADNE_CONFERENCE_ROADMAP §5h.1) dates the queue with
+   in-band probes and drops video past 100 ms of it, poses past 200 ms and audio past 400 ms.
 4. **A real-time congestion control for media** before the media lane becomes the default:
    - QUIC datagrams with BBR (WebTransport, once iOS ≥ 26.4 is the floor; the lane envelope
      carries over unchanged);
