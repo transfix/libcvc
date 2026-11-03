@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <charconv>
 #include <cstdint>
+#include <cstring>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_host.h> // is_async_future
 #include <cvc/state/state_exec/data_job.h>
@@ -413,8 +414,12 @@ private:
   // The copy of `v`, the root (`in` null) or an element of a list or dict (`in`): a list or dict
   // is a new empty one, filled by step() through its cursor.
   value_t copy(const value_t &v, const char *in) {
-    if (mode_ == copy_mode::isolate && isolate_shares(v, in))
+    // A built-in class dict is read-only (S0.1), so both modes share it: an exception read back
+    // with state-data-get can be stored again.
+    if (const auto *d = std::get_if<dict_ptr>(&v.v); d && *d && detail::is_builtin_class(**d))
       return v;
+    if (mode_ == copy_mode::isolate)
+      isolate_refuse(v, in);
     std::optional<cursor> c = open_cursor(v);
     if (!c) {
       // empty or null lists and dicts still get their own (empty) copy
@@ -448,17 +453,16 @@ private:
   }
 
   [[noreturn]] void refuse(const char *kind, const char *in) const {
-    std::string what = std::string(who_) + ": cannot store a " + kind;
+    std::string what = std::string(who_) + ": cannot store " +
+                       (std::strchr("aeiou", kind[0]) ? "an " : "a ") + kind;
     if (in)
       what += std::string(" (nested in a ") + in + ")";
     throw std::runtime_error(what);
   }
 
-  // Isolate mode, before `v` is copied: true for a built-in class dict, shared as it is; throws
-  // for a callable, a generator or an internal object (refused_object).
-  bool isolate_shares(const value_t &v, const char *in) const {
-    if (const auto *d = std::get_if<dict_ptr>(&v.v))
-      return *d && detail::is_builtin_class(**d);
+  // Isolate mode, before `v` is copied: throws for a callable, a generator or an internal object
+  // (refused_object).
+  void isolate_refuse(const value_t &v, const char *in) const {
     if (std::holds_alternative<closure_ptr>(v.v))
       refuse("closure", in);
     if (std::holds_alternative<native_fn>(v.v))
@@ -468,7 +472,6 @@ private:
     if (const auto *obj = std::get_if<data_object_ptr>(&v.v); obj && *obj)
       if (const char *kind = refused_object(**obj))
         refuse(kind, in);
-    return false;
   }
 
   // Isolate mode, a dict seen for the first time: an async call's future is refused, and so is

@@ -112,9 +112,9 @@ std::unique_ptr<data_job> make_concat_job(std::vector<value_t> parts, std::strin
 
 /// How make_copy_job treats what it does not copy: `share` shares it; `isolate` (state-data-set,
 /// td 4.3) refuses, at any depth, a closure, native function, generator, future, lock form, lock
-/// wait or user-class instance, with std::runtime_error "<who>: cannot store a <kind>", plus
-/// " (nested in a list)" or " (nested in a dict)" below the root. Built-in exception class dicts
-/// and ordinary data_objects are shared in both modes.
+/// wait or user-class instance, with std::runtime_error "<who>: cannot store a <kind>" ("an
+/// object instance"), plus " (nested in a list)" or " (nested in a dict)" below the root.
+/// Built-in exception class dicts (read-only) and ordinary data_objects are shared in both modes.
 enum class copy_mode { share, isolate };
 
 /// A private copy of v's lists and dicts, keeping their sharing (a node reached twice is copied

@@ -214,6 +214,11 @@ std::vector<std::pair<std::string, value_t>> refused_kinds() {
   };
 }
 
+// state-data-set's refusal of `kind`, at the root.
+std::string refusal_text(const std::string &kind) {
+  return "state-data-set: cannot store " + std::string(kind[0] == 'o' ? "an " : "a ") + kind;
+}
+
 // The isolating copy of `v`, made in slices of `slice` nodes.
 value_t isolate(const value_t &v, std::size_t slice = 0) {
   auto job = make_copy_job(v, copy_mode::isolate, "state-data-set");
@@ -237,7 +242,7 @@ TEST(DataJob, IsolatingCopyRefusesAtAnyDepth) {
   // container it was found in.
   for (const auto &[kind, v] : refused_kinds()) {
     SCOPED_TRACE(kind);
-    const std::string refused = "state-data-set: cannot store a " + kind;
+    const std::string refused = refusal_text(kind);
     for (std::size_t slice : {0u, 1u}) {
       EXPECT_EQ(isolate_refusal(v, slice), refused);
       EXPECT_EQ(isolate_refusal(make_list({value_t{int64_t{1}}, v}), slice),
@@ -267,8 +272,7 @@ TEST(DataJob, IsolatingCopyRefusesInALaterSlice) {
       run_sliced(*job, 5);
       ADD_FAILURE() << "not refused";
     } catch (const std::runtime_error &e) {
-      EXPECT_EQ(std::string(e.what()),
-                "state-data-set: cannot store a " + kind + " (nested in a dict)");
+      EXPECT_EQ(std::string(e.what()), refusal_text(kind) + " (nested in a dict)");
     }
     EXPECT_EQ(job->nodes(), 102u); // the 101 elements and the dict's "k"
 
@@ -355,8 +359,10 @@ TEST(DataJob, IsolatingCopyKeepsSharingAndCycles) {
 }
 
 TEST(DataJob, ShareModeStillSharesClosures) {
-  // Share mode (state-data-get's copy, async arguments) is as before: it refuses nothing, shares
-  // everything that is not a list or dict, and copies every dict, a built-in class's included.
+  // Share mode (state-data-get's copy, async arguments) is as before, but for the built-in class
+  // dicts: it refuses nothing, shares everything that is not a list or dict, copies every other
+  // dict, and shares a built-in class's (read-only since S0.1), so a read-back exception can be
+  // stored again.
   const auto clo = std::make_shared<closure>();
   const auto gen = std::make_shared<generator>(std::make_shared<environment>());
   const auto call = std::make_shared<async_call>("f", 1);
@@ -386,8 +392,10 @@ TEST(DataJob, ShareModeStillSharesClosures) {
     EXPECT_EQ(std::get<data_object_ptr>(l[4].v), std::get<data_object_ptr>(lock.v));
     EXPECT_NE(std::get<dict_ptr>(l[5].v), std::get<dict_ptr>(box.v)); // an instance and its class
     EXPECT_NE(class_of_instance(l[5]), class_of_instance(box));       // are copied
-    EXPECT_NE(class_of_instance(l[6]), exception_class("KeyError"));  // so is a built-in class,
-    EXPECT_TRUE(is_instance(l[6], exception_class("KeyError")));      // the same by its names
+    EXPECT_EQ(class_of_instance(l[6]), exception_class("KeyError"));  // a built-in one is shared
+    EXPECT_TRUE(is_instance(l[6], exception_class("KeyError")));
+    EXPECT_EQ(isolate_refusal(c), "state-data-set: cannot store a closure (nested in a list)");
+    EXPECT_EQ(isolate_refusal(l[6]), ""); // the read-back exception is stored again
   }
 }
 

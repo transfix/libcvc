@@ -872,7 +872,9 @@ void Exec::register_async_coro(const std::string &name, PyObject *coro_fn) {
                             if (std::none_of(args.begin(), args.end(),
                                              [](const value_t &a) { return is_compound(a); }))
                               return then(std::move(argv));
-                            return run_data_job(make_copy_job(std::move(argv)), std::move(then));
+                            return run_data_job(
+                                make_copy_job(std::move(argv), copy_mode::share, "async arguments"),
+                                std::move(then));
                           });
 }
 
