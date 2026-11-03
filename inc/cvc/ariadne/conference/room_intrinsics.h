@@ -30,6 +30,11 @@
 //   (room-leave ROOM)                       Mark me left (presence.joined = 0, a soft leave) + drop
 //                                           the handle. Returns { "ok" #t/#f }.
 //
+// and the chat verbs (room_chat.h; CHANNEL is "" for the room or a peer's pid): (chat-post ROOM
+// TEXT [TO]), (chat-info ROOM [CHANNEL]), (chat-messages ROOM [CHANNEL [AFTER]]), (chat-more ROOM
+// [CHANNEL]), (chat-conversations ROOM) and (chat-rev ROOM). docs/ARIADNE.md §5.16 has what each
+// returns; the handle keeps the caller's room_chat_client.
+//
 // THE ROOM TREE (roadmap §5a) is SHARED, not document-scoped: it lives at the absolute path
 //   conf.rooms.<room-id>.participants.<pid>.{ profile.name, presence.joined }
 // off the app root (cvc::state::SEPARATOR between segments), so every participant — each a

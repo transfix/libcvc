@@ -72,7 +72,13 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR AND NOT EMSCRIPTEN)
   add_test(NAME ari_url_document COMMAND ari check https://example.invalid/app/main.ari)
   set_tests_properties(ari_url_document PROPERTIES
                        PASS_REGULAR_EXPRESSION "ari runs a document from a path")
-  set_tests_properties(ari_docset ari_url_document PROPERTIES
+  # The chat and users components' DSL (components/chat.ari, room_users.ari), with the room verbs
+  # they call played by the test document's functions: ari has no relay.
+  add_test(NAME ari_chat_component
+           COMMAND ari test --component-path "${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne"
+                   "${CMAKE_CURRENT_SOURCE_DIR}/tests/chat_component.ari"
+           WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+  set_tests_properties(ari_docset ari_url_document ari_chat_component PROPERTIES
                        SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
 endif()
 
