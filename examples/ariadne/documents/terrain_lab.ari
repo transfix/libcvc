@@ -12,8 +12,8 @@
 # The look and the render discipline are demo3-csma's (CVC-DBG's Austin convoy demo, our fastest
 # cvcGL scene), all declared below:
 #   - one merged mesh per layer, so the city is a few draw calls whatever its size;
-#   - the ground receives shadows but casts none (`casts_shadow: false`): as a caster the terrain
-#     shadows itself everywhere and forces every re-bake;
+#   - the ground casts shadows as well as receiving them, so its ridges shade its own valleys (a
+#     textured caster's shadow comes from its shape, never its texture's colours);
 #   - the ground's texture is drawn opaque (`material: { opaque: true }`): no per-texel alpha scan;
 #   - the sun's shadow map follows what the camera looks at (`shadows: { focus: camera }`), so a
 #     4096 map is ~0.2 m a texel close in and still covers an overview;
@@ -147,7 +147,6 @@ scene:
       water_level: 34      # metres; everything below is water
       color: material      # material | risk | occupancy | height
       look: soft           # soft (demo3's matte daylight) | classic (the C++ lab's)
-      casts_shadow: false
       material: { opaque: true }
       shader: { preset: terrain_bump }   # value-noise fBm ground detail
     # The clouds: a drifting L-system slab high over the world (no ground shadow: the world's

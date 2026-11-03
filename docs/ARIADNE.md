@@ -763,7 +763,8 @@ follow it, and `world.request: stop` ends it, keeping the world shown.
 
 **The fast render path.** A big static world draws fast when it is a few merged meshes and its
 shadow maps are re-baked rarely and spent where the camera looks. These keys say so
-(`examples/ariadne/documents/terrain_lab.ari` uses all of them):
+(`examples/ariadne/documents/terrain_lab.ari` uses all of them but `casts_shadow: false`: its
+ground casts, so its ridges shade its valleys):
 
 ```yaml
 scene:
@@ -782,7 +783,8 @@ scene:
       wash: 0                   # or { intensity, count, height }; 0 drops the downlight ring
   nodes:
     - node: ground
-      casts_shadow: false       # receives shadows, casts none, never forces a re-bake
+      casts_shadow: false       # receives shadows, casts none, never forces a re-bake (no
+                                #   self-shading: a valley is not shaded by its ridge)
       material: { opaque: true }  # drawn opaque: no per-texel alpha scan of its texture
 ```
 
