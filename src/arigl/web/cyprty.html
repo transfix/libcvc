@@ -37,9 +37,12 @@
              animation: spin 1s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
   #status { color: #8b98a5; }
+  /* One line tall, printed in or not: the canvas is sized to the stage before the program first
+     prints, and the windows are placed in it then. */
   footer { flex: none; padding: 4px 14px; border-top: 1px solid #232a33;
            display: flex; justify-content: space-between; color: #8b98a5;
-           font-variant-numeric: tabular-nums; white-space: pre; }
+           font-variant-numeric: tabular-nums; white-space: pre;
+           height: 1.5em; overflow: hidden; }
   /* A phone: the keyboard hints (there is no keyboard) and the log line give their rows to the
      scene; the title and Fullscreen stay. */
   @media (max-width: 600px) {
