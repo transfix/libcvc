@@ -24,7 +24,10 @@
 //
 // The ground. With options.plant.ground_height the vehicle climbs and descends it: dyn_plant
 // takes the sine of the slope along the heading under the centre of gravity (over a wheelbase),
-// and the books gain a grade line. Without it the ground is flat.
+// and the books gain a grade line. Without it the ground is flat. With options.side_slope the
+// slope across the heading acts too, and gravity is a potential (diff::dyn_plant_ground): the
+// slopes are the ground's gradient at the centre of gravity, and the grade line is minus the
+// potential's change, m g times the centre of gravity's rise.
 //
 // The world. With options.physics (plant_host gives it a Jolt world holding the scene's terrain
 // and buildings) each vehicle's chassis box is a body in that world, and the vehicles collide with
@@ -114,6 +117,12 @@ struct dyn_bike_plant_options {
   // none (the vehicles still meet each other). dyn_bike_plant::sdf_field builds one from nav's.
   std::function<void(double x, double y, double &phi, double &gx, double &gy)> contact_field;
   bool contact_vehicles = true;
+  // The slope across the heading (diff::dyn_plant_ground, dyn_plant_books_ground): gravity acts
+  // along and across the heading, from the ground's gradient under the centre of gravity (its
+  // tangents, so m g h is the potential of the planar model), and the grade line is - dV, the
+  // potential's change over the step. Off (the default), the sine along the heading alone, as
+  // data. It reads options.plant.ground_height (flat without one) and takes wheel_spin too.
+  bool side_slope = false;
 };
 
 // One agent's energy, in J: over the last tick, or since attach().
@@ -125,7 +134,7 @@ struct dyn_bike_books {
   double dissipated = 0.0; // the tires' slip, drag and rolling resistance (>= 0)
   double slip = 0.0;       // wheel_spin: the tires' longitudinal slip (>= 0; 0 without)
   double floor = 0.0;      // what the tires' secants leave: round-off
-  double grade = 0.0;      // gravity along the heading (0 on flat ground)
+  double grade = 0.0;      // gravity along the heading (0 on flat ground); side_slope: - dV
   double limiter = 0.0;    // the speed clamp's and the low-speed blend's (<= 0 as a rule)
   double contact = 0.0;    // what the collisions changed (0 without a world)
   // With options.contact: the barrier's energy at the end (a level, J), its change (stored), the

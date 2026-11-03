@@ -1020,6 +1020,106 @@ CVC_HD inline void dyn4_plant_books(const dyn4_params &p, const bike_veh &v, con
   b.residual = b.dH - (b.supplied - b.dissipated + b.lever + b.grade + b.ground + b.limiter);
 }
 
+// ── The full (q, p) form: the pose in the state ───────────────────────────────────────────
+// dyn4_ph_* leave the pose g = (x, y, psi) out of the state: it enters H only through the ground
+// under the wheels, and f_grade books what the pose's gradient would put in the structure. With g
+// in the state, x = (g, q, p_h, p_v), twelve coordinates, dyn4_plant's vector field with
+// grade_force on is exactly
+//
+//   g' = T(g) xi_h,   p_h' = -T(g)^T dH/dg + (J_h(p_h) - R_h) xi_h + G_h u + f_lever,h
+//   (q, p_v)' as dyn4_ph_rhs's,
+//
+// T(g) dyn_bike.h's (dyn4_ph_T, the rear axle lr behind the centre of gravity) and H dyn4_ph_
+// hamiltonian's, which already holds the terrain: dH/dg = sum_i k_i l_i grad_g hg_i, the springs'
+// load times each wheel's ground height's gradient in the pose (dyn4_ph_grad_full). Its image
+// -T^T dH/dg is dyn4_grade's force and moment (to round-off: the same central differences), so
+// f_grade moves into the structure, [[0, 0, T, 0], [0, 0, 0, I], [-T^T, 0, J_h, 0], [0, -I, 0, 0]]
+// (dyn4_ph_J_full): skew and Poisson. dyn4_plant without grade_force has this field less
+// -T^T dH/dg: the hill for free. The single track had no such gap but the slope across its
+// heading (dyn_plant_ground); here dyn4_grade already acts across it. dyn4_plant_books' grade and
+// ground lines are the full form's pose terms split in two; their sum is second order per step.
+
+// T(g): the twist at the centre of gravity to the rear axle's pose rates.
+template <class S> CVC_HD inline void dyn4_ph_T(const dyn4_params &p, S psi, S T[3][3]) {
+  dyn_pose_T(S(p.lr), psi, T);
+}
+
+// x = (g, q, p): the pose, then dyn4_ph_coords'.
+template <class S>
+CVC_HD inline void dyn4_ph_coords_full(const dyn4_params &p, const dyn4_state<S> &s, S x[12]) {
+  x[0] = s.x;
+  x[1] = s.y;
+  x[2] = s.psi;
+  dyn4_ph_coords(p, s, x + 3);
+}
+
+// dH/dx = (dH/dg, dyn4_ph_grad's): each wheel's spring load k_i l_i times its ground height's
+// gradient in the pose, by dyn4_grade's central differences.
+template <class S, class G>
+CVC_HD inline void dyn4_ph_grad_full(const dyn4_params &p, const bike_veh &v, const G &ground,
+                                     const dyn4_state<S> &s, S e[12]) {
+  dyn4_wheels<S> W;
+  dyn4_wheel_state(p, v, ground, s, W);
+  const S lr = S(p.lr), d = S(1e-3) * (S(p.lf) + lr);
+  const S cps = s_cos(s.psi), sps = s_sin(s.psi);
+  const S cgx = s.x + lr * cps, cgy = s.y + lr * sps;
+  e[0] = e[1] = e[2] = S(0);
+  for (int i = 0; i < 4; ++i) {
+    const S wx = cgx + W.xi[i] * cps - W.yi[i] * sps, wy = cgy + W.xi[i] * sps + W.yi[i] * cps;
+    S mu, h_xp, h_xm, h_yp, h_ym;
+    ground.at(wx + d, wy, mu, h_xp);
+    ground.at(wx - d, wy, mu, h_xm);
+    ground.at(wx, wy + d, mu, h_yp);
+    ground.at(wx, wy - d, mu, h_ym);
+    const S gx = (h_xp - h_xm) / (S(2) * d), gy = (h_yp - h_ym) / (S(2) * d);
+    const S kl = W.Fz0[i] + W.k[i] * (W.hg[i] - (s.z + W.yi[i] * s.phi - W.xi[i] * s.th));
+    // The wheel's ground point moves with psi as d/dpsi of R(psi) (lr + x_i, y_i).
+    const S px = -(lr + W.xi[i]) * sps - W.yi[i] * cps, py = (lr + W.xi[i]) * cps - W.yi[i] * sps;
+    e[0] = e[0] + kl * gx;
+    e[1] = e[1] + kl * gy;
+    e[2] = e[2] + kl * (gx * px + gy * py);
+  }
+  dyn4_ph_grad(p, v, ground, s, e + 3);
+}
+
+// The structure on x = (g, q, p_h, p_v): dyn4_ph_J's, with T(g) coupling the pose to p_h.
+template <class S>
+CVC_HD inline void dyn4_ph_J_full(const dyn4_params &p, const dyn4_state<S> &s, S J[12][12]) {
+  S x[9], J9[9][9], T[3][3];
+  dyn4_ph_coords(p, s, x);
+  dyn4_ph_J(x, J9);
+  dyn4_ph_T(p, s.psi, T);
+  for (int a = 0; a < 12; ++a)
+    for (int b = 0; b < 12; ++b)
+      J[a][b] = S(0);
+  for (int a = 0; a < 9; ++a)
+    for (int b = 0; b < 9; ++b)
+      J[3 + a][3 + b] = J9[a][b];
+  for (int a = 0; a < 3; ++a)
+    for (int b = 0; b < 3; ++b) {
+      J[a][6 + b] = T[a][b];
+      J[6 + b][a] = -T[a][b];
+    }
+}
+
+// x' = (J_full - R) dH/dx + G u + f_lever at the state: dyn4_plant's vector field with grade_force
+// on, the slope's force from the structure rather than f_grade.
+template <class S, class G>
+CVC_HD inline void dyn4_ph_rhs_full(const dyn4_params &p, const bike_veh &v, const G &ground,
+                                    const dyn4_state<S> &s, S xdot[12]) {
+  dyn4_params pn = p;
+  pn.grade_force = 0;
+  dyn4_ph_rhs(pn, v, ground, s, xdot + 3);
+  S T[3][3], e[12];
+  dyn4_ph_T(p, s.psi, T);
+  dyn4_ph_grad_full(p, v, ground, s, e);
+  const S xi[3] = {s.vx, s.vy, s.r};
+  for (int a = 0; a < 3; ++a) {
+    xdot[a] = T[a][0] * xi[0] + T[a][1] * xi[1] + T[a][2] * xi[2];
+    xdot[6 + a] = xdot[6 + a] - (T[0][a] * e[0] + T[1][a] * e[1] + T[2][a] * e[2]);
+  }
+}
+
 // ── The wheel-spin plant in port-Hamiltonian form ─────────────────────────────────────────
 // dyn4_spin_plant's vector field, as dyn4_ph_*'s is dyn4_plant's, with the wheels' angular momenta
 // in the state: x = (q, p, L), L_i = J_i om_i, thirteen coordinates, and
