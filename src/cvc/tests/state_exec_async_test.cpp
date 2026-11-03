@@ -874,3 +874,45 @@ TEST(SyncPostControl, AppliedAtTheTopOfTheNextStep) {
   EXPECT_EQ(sched.get_priority(pid)->base, -3);
   EXPECT_EQ(query_thread, std::this_thread::get_id());
 }
+
+// --- Stage 0 hazards (td 8.1) ---
+
+// HZ-14 (td 8.1, S0.6; TSan), the async scheduler: stop() from another thread ends a
+// sync_run_steps() stepping a busy loop. The process is left as it was and runs on in the next
+// run, and the tables hold.
+TEST(AsyncSchedulerStop, HZ14_StopFromAnotherThreadEndsSyncRun) {
+  async_scheduler sched;
+  execute_options opts;
+  opts.max_time = 60.0; // a stop that is lost ends the run here instead, and fails the case
+  const int pid = sched.execute(std::string("(while #t nil)"), opts);
+  bool saw_running = false;
+  std::chrono::steady_clock::time_point stopped_at{};
+  std::thread stopper([&] {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!sched.is_running() && std::chrono::steady_clock::now() < deadline)
+      std::this_thread::yield();
+    saw_running = sched.is_running();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    stopped_at = std::chrono::steady_clock::now();
+    sched.stop();
+  });
+  const auto t0 = std::chrono::steady_clock::now();
+  const uint64_t taken = sched.sync_run_steps();
+  const auto t1 = std::chrono::steady_clock::now();
+  stopper.join();
+  std::printf(
+      "HZ-14 async busy loop: %llu steps; run returned %.4f s after stop(), %.3f s in all\n",
+      static_cast<unsigned long long>(taken),
+      std::chrono::duration<double>(t1 - stopped_at).count(),
+      std::chrono::duration<double>(t1 - t0).count());
+  EXPECT_TRUE(saw_running);
+  EXPECT_FALSE(sched.is_running());
+  EXPECT_GT(taken, 0u);
+  const auto info = sched.get_process_info(pid);
+  ASSERT_TRUE(info);
+  EXPECT_EQ(info->status, process_status::ready);
+  EXPECT_TRUE(sched.check_tables());
+  EXPECT_LT(std::chrono::duration<double>(t1 - t0).count(), 30.0);
+  EXPECT_EQ(sched.sync_run_steps(100), 100u); // it runs on
+  EXPECT_TRUE(sched.kill(pid));
+}

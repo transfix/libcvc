@@ -3141,3 +3141,101 @@ TEST(SchedulerLockPort, ARefusedAttachKeepsTheHomeAndManager) {
     a_refused_attach_keeps_the_home<async_scheduler>();
   }
 }
+
+// --- Stage 0 hazards (td 8.1) ---
+
+namespace {
+
+double seconds_between(std::chrono::steady_clock::time_point a,
+                       std::chrono::steady_clock::time_point b) {
+  return std::chrono::duration<double>(b - a).count();
+}
+
+// A thread that calls sched.stop() once run() has been running for `after`, and records when.
+template <class Sched> struct stopper {
+  Sched &sched;
+  std::chrono::steady_clock::time_point stopped_at{};
+  bool saw_running = false;
+  std::thread thread;
+
+  stopper(Sched &s, std::chrono::milliseconds after) : sched(s) {
+    thread = std::thread([this, after] {
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+      while (!sched.is_running() && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::yield();
+      saw_running = sched.is_running();
+      std::this_thread::sleep_for(after);
+      stopped_at = std::chrono::steady_clock::now();
+      sched.stop();
+    });
+  }
+  ~stopper() {
+    if (thread.joinable())
+      thread.join();
+  }
+  void join() { thread.join(); }
+};
+
+} // namespace
+
+// HZ-14 (td 8.1, S0.6; TSan): stop() from another thread ends a run(). A busy loop: run() sees the
+// flag at its next step. A lone (sleep 5): run() waits in idle_wait, and stop() ends the wait (it
+// notifies it) instead of leaving it to its 10 ms poll. Either way run() returns, the process is
+// left as it was and runs on in the next run(), and the tables hold.
+TEST(SchedulerStop, HZ14_StopFromAnotherThreadEndsRun) {
+  {
+    SCOPED_TRACE("busy loop");
+    scheduler sched;
+    execute_options opts;
+    opts.max_time = 60.0; // a stop that is lost ends the run here instead, and fails the case
+    const int pid = sched.execute(std::string("(while #t nil)"), opts);
+    stopper<scheduler> s(sched, std::chrono::milliseconds(20));
+    const auto t0 = std::chrono::steady_clock::now();
+    sched.run();
+    const auto t1 = std::chrono::steady_clock::now();
+    s.join();
+    std::printf("HZ-14 sync busy loop: run() returned %.4f s after stop(), %.3f s in all\n",
+                seconds_between(s.stopped_at, t1), seconds_between(t0, t1));
+    EXPECT_TRUE(s.saw_running);
+    EXPECT_FALSE(sched.is_running());
+    const auto info = sched.get_process_info(pid);
+    ASSERT_TRUE(info);
+    EXPECT_EQ(info->status, process_status::ready);
+    EXPECT_GT(info->step_count, 0u);
+    EXPECT_TRUE(sched.check_tables());
+    EXPECT_LT(seconds_between(t0, t1), 30.0);
+    sched.run(100); // it runs on
+    EXPECT_GT(sched.get_process_info(pid)->step_count, info->step_count);
+    EXPECT_TRUE(sched.kill(pid));
+  }
+  {
+    SCOPED_TRACE("lone sleeper");
+    cvc::app app;
+    scheduler sched;
+    intrinsics_context ictx; // sleep is an intrinsic
+    ictx.sched = &sched;
+    ictx.root = &cvc::state::instance(app);
+    ictx.proc = make_process();
+    execute_options opts;
+    opts.env = builtins::make_default_environment();
+    register_intrinsics(opts.env, &ictx);
+    const int pid = sched.execute(std::string("(begin (sleep 5) 1)"), opts);
+    stopper<scheduler> s(sched, std::chrono::milliseconds(50)); // run() is in idle_wait by then
+    const auto t0 = std::chrono::steady_clock::now();
+    sched.run();
+    const auto t1 = std::chrono::steady_clock::now();
+    s.join();
+    const double after_stop = seconds_between(s.stopped_at, t1);
+    std::printf("HZ-14 sync lone sleeper: run() returned %.4f s after stop(), %.3f s in all\n",
+                after_stop, seconds_between(t0, t1));
+    EXPECT_TRUE(s.saw_running);
+    EXPECT_FALSE(sched.is_running());
+    EXPECT_LT(after_stop, 0.2); // not the sleeper's 5 s
+    const auto info = sched.get_process_info(pid);
+    ASSERT_TRUE(info);
+    EXPECT_EQ(info->status, process_status::waiting); // still asleep
+    EXPECT_FALSE(sched.get_result(pid).has_value());
+    EXPECT_TRUE(sched.check_tables());
+    EXPECT_TRUE(sched.kill(pid));
+  }
+}
