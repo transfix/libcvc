@@ -372,6 +372,7 @@ jobs:
                    src/ari examples/ariadne/terminal CMakeLists.txt src/cvc/CMakeLists.txt CMake \
                    src/cvc/image inc/cvc/image src/cvc/tests/image_magick_roundtrip.cpp \
                    src/cvc/state inc/cvc/state src/cvc/tests/state_exec_wasm_smoke.cpp \
+                   src/cvc/core/app.cpp inc/cvc/core/app.h \
                    cvcpkg/recipes/libcvc \
                    .github/workflows/ci.yml | grep -q .; then
               run=false
@@ -519,7 +520,9 @@ jobs:
 
       - name: with-lock without threads under node
         # The state_exec locks on a build with no pthreads (CVC_WASM_PTHREADS=OFF): a section, a
-        # waiter granted once its holder lets go, an empty lock-query, on both schedulers.
+        # waiter granted once its holder lets go, an empty lock-query, on both schedulers; then
+        # app::lock_manager()'s auto mode (single), the attach pycvc's Exec makes
+        # (lock_attach{ threads_compiled_in }) accepted, and a section with a waiter on it.
         if: steps.paths.outputs.run == 'true'
         run: |
           node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
@@ -1389,6 +1392,14 @@ jobs:
   # the tree is fixed or suppressed before lock code lands. Suppressions go in
   # .github/sanitizers/*.supp, each with a comment naming what it hides. Each lock phase appends
   # its suites to the two lists below.
+  #
+  # The cases a lock phase most needs under a sanitizer are also named in the matrix's
+  # `required`, so a run that leaves one out (renamed, skipped, filtered) fails rather than
+  # passing without it. L3 (locks plan L3.8): the cross-thread cases of LocksThreads (LT-2..LT-4,
+  # LT-10, LD-6, PI-7, PI-10 and the posted LX cases) at the sanitizer sizes, LT-3b (a post racing
+  # its scheduler's destruction) under ASan, the model check's two- and three-home configurations
+  # at bound 2 (LocksModel.Homes*, LocksModel.TwoHomes*), and pycvc's cross-thread tests under
+  # TSan.
   sanitizers:
     name: sanitizers / ${{ matrix.name }}
     runs-on: ubuntu-24.04
@@ -1397,14 +1408,46 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # required: one per line, `<run>: <text>`, where <run> is a name in SAN_CXX_TESTS or
+          # SAN_PY_TESTS and <text> a line its log must contain (run.sh): gtest's "OK ]" line of a
+          # case, or the pycvc script's "ok:" line.
           - name: tsan
             flags: -fsanitize=thread
+            required: |
+              state_exec_locks_test: OK ] LocksThreads.LT02_CrossThreadGrantWakes
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.LT03_HolderKilledAndSchedulerDestroyed/
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.LT03b_PostRacesDestruction/
+              state_exec_locks_test: OK ] LocksThreads.LT04_FuzzedProtocolPoints
+              state_exec_locks_test: OK ] LocksThreads.LT10_EightSchedulersRandom
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.LD06_CrossHomeCycleDeterministic/
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.PI07_LateRelevelRereads/
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.PI10_RoundRobinChildLendsNothing/
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.LX05_TimeoutAndKillRaceAnotherHomesGrant/
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.LX07_DestroyedWithAWakeInItsPort/
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.LX10_GrantThenWaiterKilledBeforeWake/
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.LX11_StalePostedWake/
+              state_exec_locks_model_test: OK ] LocksModel.Homes
+              state_exec_locks_model_test: OK ] LocksModel.TwoHomes
+              test_pycvc_state_exec_locks.py: ok: test_lt01_two_execs_hot_key
+              test_pycvc_state_exec_locks.py: ok: test_lt03_exec_destroyed
+              test_pycvc_state_exec_locks.py: ok: test_lt07_progress_keeps_waiter_alive
+              test_pycvc_state_exec_locks.py: ok: test_lt08_idle_limit
+              test_pycvc_state_exec_locks.py: ok: test_lt10_eight_execs_smoke
+              test_pycvc_state_exec_locks.py: ok: test_ld05_cycle_across_execs
           # No vptr check: it references the typeinfo of every polymorphic class it checks.
           # Jolt is built without RTTI, as are the two libcvc files that subclass its classes
           # (src/cvc/CMakeLists.txt), so that typeinfo exists nowhere and libcvc.so fails to
           # link ("undefined reference to `typeinfo for JPH::GroupFilter'").
           - name: asan-ubsan
             flags: -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-sanitize=vptr
+            required: |
+              state_exec_locks_test: OK ] LocksThreads.LT02_CrossThreadGrantWakes
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.LT03b_PostRacesDestruction/sync
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.LT03b_PostRacesDestruction/async
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.LX07_DestroyedWithAWakeInItsPort/
+              state_exec_locks_test: OK ] LocksThreads.LT10_EightSchedulersRandom
+              state_exec_locks_model_test: OK ] LocksModel.Homes
+              state_exec_locks_model_test: OK ] LocksModel.TwoHomes
     concurrency:
       group: ci-${{ github.ref }}-sanitizers-${{ matrix.name }}
       cancel-in-progress: true
@@ -1487,6 +1530,8 @@ jobs:
 
       - name: Run the suites under ${{ matrix.name }}
         shell: bash
+        env:
+          SAN_REQUIRED: ${{ matrix.required }}
         run: bash .github/sanitizers/run.sh "${{ matrix.name }}"
 
       - name: Upload the sanitizer logs

@@ -76,6 +76,21 @@ Every executable field in a document runs in one of two lanes. **The lane is cho
 by the slot the program sits in, not by what the program does** — this is the central
 safety property. You cannot make a "read" slot perform an action, or vice versa.
 
+What steps each kind of program is fixed in code; no setting or flag changes it:
+
+- the read lane: a long-lived stackless evaluator (`ReactiveEngine`) during the render walk, never
+  a scheduler (§2.1);
+- actions, residents and the children they spawn: the app-wide `async_scheduler`,
+  `app.exec_scheduler()`, shared by every document the app hosts and pumped by `Runtime::drain()`
+  (§2.2);
+- `init:`: a private synchronous scheduler, run to completion on the loading thread (at most 10
+  million steps and 5 s), always `round_robin`, locking on the app's lock manager without ever
+  waiting ("Locks in the other lanes" below).
+
+The developer guide's "Which Scheduler Runs a Program"
+([STATE_EXEC_DEVELOPER_GUIDE.md](STATE_EXEC_DEVELOPER_GUIDE.md#which-scheduler-runs-a-program))
+has the same table for every host, with the settings that apply and when they are read.
+
 ### 2.1 The reactive READ lane
 
 Reactive slots — `visible_when`, `enabled_when` / `disabled_when`, computed `bind` /
@@ -107,7 +122,11 @@ no build option to drop it), so the engine is always present.
 after `ariadne.exec.lock_timeout` seconds (default 1.0, a tree setting beside the
 `ariadne.limits.action_max_*` keys, read at each submission): a document never hangs on another's
 lock. A resident's request has no such default: it waits as long as it takes. The `init:` lane
-never waits for a lock: a busy request there is as `:timeout 0` (`TimeoutError`, or `:else` with
+locks on the app's lock manager (`app::lock_manager()`), the one the residents and actions use, so
+an init script's request meets their holds: its scheduler's lock home attaches when the script
+starts and detaches when it ends. The lane never waits for a lock (docs/STATE_EXEC_LOCKS.md 5.5,
+LW-9): the host thread that runs the script also steps the residents, so a holder could not
+release meanwhile, and a busy request there is as `:timeout 0` (`TimeoutError`, or `:else` with
 `:if-available`). An action's `(fork)` forks the action's process, and the child is reaped with
 the document.
 
@@ -126,7 +145,7 @@ stepped on the host thread with the script, so a busy request is as `:timeout 0`
 |-------|----------|-------|
 | per-eval step cap | `kMaxSteps` | `100000` |
 | per-eval wall-time cap | `kMaxSeconds` | `5 ms` |
-| per-frame aggregate | `kFrameBudgetSeconds` | `10 ms` |
+| per-frame aggregate | `kFrameBudgetSeconds` | `30 ms` |
 
 The frame budget resets at the top of each frame, so *N* widgets cannot jointly stall a
 frame — once the aggregate is spent, remaining predicates degrade fail-safe for that
@@ -149,6 +168,13 @@ That scheduler's policy is the app tree's `state_exec.policy` (`round_robin`, `p
 unknown value is logged and `round_robin` used. Ariadne sets none, so its default stays
 `round_robin`: a program's `set-priority` is stored and reported but changes no pick (developer
 guide, "Priorities").
+
+`ari` and `arigl` build this scheduler while they set up, before any document loads, and have no
+option that sets `state_exec.*`. A document cannot set those keys either, since its programs'
+writes are chrooted under its own prefix. So under `ari` the policy is `round_robin`, and the
+app's lock manager is `single` unless pycvc is loaded in the same process (developer guide,
+"Single and shared mode"). A host that embeds Ariadne sets them on the app tree before its first
+`AppRuntime::register_quit`, `register_verb` or `enable_net`, each of which builds the scheduler.
 
 A fire-once handler is *submitted* (`submit_action`,
 [`ariadne.cpp:1375`](../src/cvc/ariadne/ariadne.cpp)) with the full default environment

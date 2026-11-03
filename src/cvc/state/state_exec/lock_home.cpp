@@ -1,11 +1,14 @@
 // A scheduler's lock home: the home actions of docs/STATE_EXEC_LOCKS_PROTOCOL.md section 5.
 
 #include <algorithm>
+#include <cassert>
+#include <cstdlib>
 #include <cvc/state/state_exec/detail/lock_home.h>
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/process_table.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
+#include <exception>
 #include <sstream>
 #include <unordered_set>
 
@@ -121,14 +124,178 @@ std::optional<frame_outcome> outcome_of(const value_t &slot) {
 // The home
 // ---------------------------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------------------------
+// The port (protocol 2.3)
+// ---------------------------------------------------------------------------------------------
+
+lock_port::lock_port(std::shared_ptr<wakeup> wake) : wake_(std::move(wake)) {}
+lock_port::~lock_port() = default;
+
+bool lock_port::post(const lock_post &x) {
+  lock_fuzz_point(lock_fuzz_at::post_enter);
+  bool landed = false;
+  {
+    std::lock_guard<std::mutex> g(mu_);
+    if (!closed_) {
+      queue_.push_back(x);
+      pending_.store(true, std::memory_order_relaxed);
+      if (wake_)
+        wake_->notify();
+      landed = true;
+    }
+  }
+  lock_fuzz_point(lock_fuzz_at::post_exit);
+  return landed;
+}
+
+void lock_port::close() {
+  std::lock_guard<std::mutex> g(mu_);
+  closed_ = true;
+}
+
+bool lock_port::closed() const {
+  std::lock_guard<std::mutex> g(mu_);
+  return closed_;
+}
+
+void lock_port::drain(std::vector<lock_post> &out) {
+  out.clear();
+  std::lock_guard<std::mutex> g(mu_);
+  out.swap(queue_);
+  pending_.store(false, std::memory_order_relaxed);
+}
+
+// ---------------------------------------------------------------------------------------------
+// CVC_EXEC_FUZZ (L3.7; LT-4, gap G-27)
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+std::uint64_t fuzz_mix(std::uint64_t x) { // splitmix64's finalizer
+  x += 0x9e3779b97f4a7c15ull;
+  x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull;
+  x = (x ^ (x >> 27)) * 0x94d049bb133111ebull;
+  return x ^ (x >> 31);
+}
+
+// CVC_EXEC_FUZZ=<seed>, read once as the library loads: decimal or 0x hex; any other non-empty
+// value is hashed, so it turns the yields on too. Unset, empty or 0: off.
+std::uint64_t fuzz_seed_from_environment() {
+  const char *v = std::getenv("CVC_EXEC_FUZZ");
+  if (!v || !*v)
+    return 0;
+  char *end = nullptr;
+  const unsigned long long n = std::strtoull(v, &end, 0);
+  if (end && *end == '\0')
+    return n;
+  std::uint64_t h = 1469598103934665603ull; // FNV-1a
+  for (const char *c = v; *c; ++c)
+    h = (h ^ static_cast<unsigned char>(*c)) * 1099511628211ull;
+  return h ? h : 1;
+}
+
+std::atomic<std::uint64_t> g_fuzz_seed{fuzz_seed_from_environment()};
+std::atomic<std::uint64_t> g_fuzz_hits{0};
+std::atomic<std::uint64_t> g_fuzz_threads{0}; // numbers each thread's PRNG stream
+
+struct fuzz_prng {
+  std::uint64_t seed = 0; // the seed the stream was made from
+  std::uint64_t state = 0;
+};
+thread_local fuzz_prng t_fuzz;
+
+// The fuzzed point itself, out of the off path: run on, yield, or pause 0-50 us. The pause yields
+// until it has passed, rather than sleeping: a sleep rounds up to the OS tick (up to ~16 ms on
+// Windows), far longer than the windows LT-4 means to widen.
+void fuzz_yield(std::uint64_t seed, lock_fuzz_at where) noexcept {
+  fuzz_prng &r = t_fuzz;
+  if (r.seed != seed) {
+    r.seed = seed;
+    r.state = fuzz_mix(seed ^ fuzz_mix(g_fuzz_threads.fetch_add(1, std::memory_order_relaxed)));
+  }
+  g_fuzz_hits.fetch_add(1, std::memory_order_relaxed);
+  r.state = fuzz_mix(r.state + static_cast<std::uint64_t>(where));
+  const std::uint64_t x = r.state;
+  switch (x & 7) {
+  case 0:
+  case 1:
+    return; // run on
+  case 7: {
+    const auto until = lock_clock::now() + std::chrono::microseconds((x >> 8) % 51);
+    do
+      std::this_thread::yield();
+    while (lock_clock::now() < until);
+    return;
+  }
+  default:
+    std::this_thread::yield();
+  }
+}
+
+} // namespace
+
+void lock_fuzz_point(lock_fuzz_at where) noexcept {
+  const std::uint64_t seed = g_fuzz_seed.load(std::memory_order_relaxed);
+  if (seed != 0)
+    fuzz_yield(seed, where);
+}
+
+void set_lock_fuzz_seed(std::uint64_t seed) noexcept {
+  g_fuzz_seed.store(seed, std::memory_order_relaxed);
+}
+std::uint64_t lock_fuzz_seed() noexcept { return g_fuzz_seed.load(std::memory_order_relaxed); }
+std::uint64_t lock_fuzz_hits() noexcept { return g_fuzz_hits.load(std::memory_order_relaxed); }
+
+// ---------------------------------------------------------------------------------------------
+// The home
+// ---------------------------------------------------------------------------------------------
+
 std::size_t lock_home::cache_hash::operator()(const cache_key &k) const noexcept {
   return std::hash<std::string_view>{}(k.written) ^ (std::size_t(k.scope) * 0x9E3779B97F4A7C15ull);
 }
 
+#ifdef NDEBUG
+constexpr bool kHomeToken = false;
+#else
+constexpr bool kHomeToken = true;
+#endif
+
+// The home token (protocol 0, design 9.1): only one thread runs a home's actions at a time, its
+// pumping thread, or for a pycvc Exec with no run() active whichever thread holds its control
+// mutex. Taken at an action's entry and released at its exit; the holder may re-enter (an action
+// delivers, the delivery applies a post, the post calls the table and delivers again). Release
+// builds compile it to nothing.
+class lock_home::action {
+public:
+  explicit action(const lock_home &h) noexcept : h_(h) {
+    if constexpr (kHomeToken) {
+      const std::thread::id me = std::this_thread::get_id();
+      std::thread::id none{};
+      const bool mine = h_.token_.compare_exchange_strong(none, me) || none == me;
+      assert(mine && "lock_home: two threads run one home's actions at once");
+      (void)mine;
+      ++h_.token_depth_;
+    }
+  }
+  ~action() {
+    if constexpr (kHomeToken)
+      if (--h_.token_depth_ == 0)
+        h_.token_.store(std::thread::id{});
+  }
+  action(const action &) = delete;
+  action &operator=(const action &) = delete;
+
+private:
+  const lock_home &h_;
+};
+
 lock_home::lock_home(std::shared_ptr<lock_manager> mgr, lock_sched_ops &ops,
-                     scheduling_policy policy)
+                     scheduling_policy policy, std::shared_ptr<wakeup> wake, lock_attach attach)
     : mgr_(std::move(mgr)), table_(mgr_->table()), ops_(ops),
-      prio_(policy != scheduling_policy::round_robin) {
+      prio_(policy != scheduling_policy::round_robin),
+      port_(std::make_shared<lock_port>(std::move(wake))),
+      progress_(std::make_shared<std::atomic<std::int64_t>>(
+          lock_clock::now().time_since_epoch().count())) {
   const lock_test_hooks *hooks = lock_test_hooks_get();
   const std::size_t capacity =
       hooks && hooks->home_cache_capacity ? hooks->home_cache_capacity : kDefaultCacheCapacity;
@@ -138,27 +305,83 @@ lock_home::lock_home(std::shared_ptr<lock_manager> mgr, lock_sched_ops &ops,
     free_.push_back(i);
   index_.reserve(capacity);
   lock_notes notes;
-  id_ = table_.attach_home(prio_, nullptr, nullptr, notes); // no port before phase L3
-  deliver(notes); // none: an attach changes no edge and no base
+  id_ = table_.attach_home(prio_, port_, progress_, notes, attach);
+  deliver_op(notes); // none: an attach changes no edge and no base
+}
+
+void lock_home::drain_port() {
+  action a(*this);
+  port_->drain(drained_);
+  // Every post taken is applied even when one throws (as deliver does), then the first error is
+  // rethrown.
+  std::exception_ptr first;
+  for (std::size_t i = 0; i < drained_.size(); ++i) {
+    if (i > 0)
+      lock_fuzz_point(lock_fuzz_at::drain_between);
+    try {
+      apply_post(drained_[i]);
+    } catch (...) {
+      if (!first)
+        first = std::current_exception();
+    }
+  }
+  drained_.clear();
+  if (first)
+    std::rethrow_exception(first);
+}
+
+std::vector<std::pair<lock_pid, std::int64_t>> lock_home::blocking_sinks(int pid) const {
+  return table_.blocking_sinks(lock_pid{id_, pid});
+}
+
+std::vector<std::pair<lock_pid, std::int64_t>>
+lock_home::blocking_sinks(std::span<const int> pids) const {
+  small_vector<lock_pid, 8> from;
+  for (int pid : pids)
+    from.push_back(lock_pid{id_, pid});
+  return table_.blocking_sinks(std::span<const lock_pid>(from.data(), from.size()));
 }
 
 lock_home::~lock_home() {
-  // 5.7. No port to close before phase L3. The detach ends every process of the home with
-  // abandon and drops the cache's references; nothing it notifies targets this home.
+  // 5.7, in its order. Nothing here throws out: a destructor can't report a failure, and the
+  // table's own check() finds whatever a failed step leaves.
+  action a(*this);
   try {
+    // The port closes first, under its own mutex: a post racing it lands before (and is
+    // discarded below) or is dropped (2.3). detach_home's precondition, asserted outside M.mu.
+    port_->close();
+    assert(port_->closed());
+  } catch (...) {
+  }
+  lock_fuzz_point(lock_fuzz_at::close_then_detach);
+  try {
+    // Every process of the home ended with abandon, the cache's references dropped. No note
+    // targets this home; the others' wakes and relevels go to their ports.
     lock_notes notes;
     table_.detach_home(id_, notes);
+    deliver_op(notes);
   } catch (...) {
-    // A destructor can't report it; the table's own check() finds what is left.
   }
-  ops_.for_each_process([](process &p) {
-    if (p.locks) {
-      p.locks->holds.clear();
-      p.locks->ticket.reset();
-    }
-    clear_wait_fields(p);
-    p.inherited_priority = INT_MAX;
-  });
+  try {
+    // The posts that landed before the close: their processes have just ended.
+    port_->drain(drained_);
+    if (!drained_.empty())
+      mgr_->posts_discarded_.fetch_add(drained_.size(), std::memory_order_relaxed);
+    drained_.clear();
+  } catch (...) {
+  }
+  port_.reset();
+  try {
+    ops_.for_each_process([](process &p) {
+      if (p.locks) {
+        p.locks->holds.clear();
+        p.locks->ticket.reset();
+      }
+      clear_wait_fields(p);
+      p.inherited_priority = INT_MAX;
+    });
+  } catch (...) {
+  }
 }
 
 lock_pid lock_home::pid_of(const process &p) const { return {id_, p.pid}; }
@@ -172,11 +395,13 @@ process_locks &lock_home::locks_of(process &p) {
 }
 
 void lock_home::begin_request() {
+  action a(*this);
   ++pin_epoch_;
   misses_.clear();
 }
 
 std::uint32_t lock_home::scope_id(std::string_view root_path) {
+  action a(*this);
   const auto it = scopes_.find(root_path);
   if (it != scopes_.end())
     return it->second;
@@ -186,6 +411,7 @@ std::uint32_t lock_home::scope_id(std::string_view root_path) {
 }
 
 lock_node *lock_home::lookup(std::uint32_t scope, std::string_view written) {
+  action a(*this);
   const auto it = index_.find(cache_key{scope, written});
   if (it == index_.end())
     return nullptr;
@@ -297,6 +523,7 @@ void lock_home::abandon_misses() noexcept {
 }
 
 enter_result lock_home::try_enter(process &p, home_request &req, std::string_view root) {
+  action a(*this);
   const bool in_handler = p.in_signal_handler || p.in_watch_handler;
   if (p.locks && !p.locks->holds.empty()) {
     std::vector<mhold> &holds = p.locks->holds;
@@ -389,6 +616,7 @@ enter_result lock_home::try_enter(process &p, home_request &req, std::string_vie
 
 std::optional<frame_outcome> lock_home::wait(process &p, home_request &req,
                                              std::optional<double> timeout, std::string_view root) {
+  action a(*this);
   // The busy path's one clock read (protocol 5.2).
   std::optional<lock_clock::time_point> deadline;
   if (timeout)
@@ -415,7 +643,7 @@ std::optional<frame_outcome> lock_home::wait(process &p, home_request &req,
   pl.ticket_in_handler = p.in_signal_handler || p.in_watch_handler;
   pl.ticket_root.assign(root);
   pl.ticket_timeout = timeout;
-  deliver(notes); // relevels only: the processes P now blocks, downstream
+  deliver_op(notes); // relevels only: the processes P now blocks, downstream
   if (br.state == ticket_state::queued) {
     p.lock_waiting = true;
     p.lock_deadline = deadline;
@@ -474,10 +702,14 @@ value_t lock_home::outcome_error(const lock_outcome &out, const process_locks &p
       dsl_error("TimeoutError", msg.str(), "dsl", {{"key", std::move(key)}, {"mode", mode}}));
 }
 
-void lock_home::start_body(process &p, std::uint64_t hold) { table_.start_body(pid_of(p), hold); }
+void lock_home::start_body(process &p, std::uint64_t hold) {
+  action a(*this);
+  table_.start_body(pid_of(p), hold);
+}
 
 void lock_home::release_frame(process &p, std::optional<std::uint64_t> hold,
                               bool lock_enter) noexcept {
+  action a(*this);
   try {
     if (!p.locks)
       return;
@@ -492,18 +724,30 @@ void lock_home::release_frame(process &p, std::optional<std::uint64_t> hold,
         pl.holds.erase(it); // the vector keeps its capacity
         lock_notes notes;
         table_.release(pid_of(p), id, notes);
-        deliver(notes);
+        deliver_op(notes);
       }
     }
     if (lock_enter && pl.ticket) {
-      // Defensive (protocol 5.4): a lock_enter frame unwound with its ticket still queued.
+      // Defensive (protocol 5.4): a lock_enter frame unwound with its ticket still set, as when
+      // the step that queued it throws. Another home may have granted the ticket meanwhile: the
+      // cancel then finds it granted, and that grant, which never reached the mirror, is given
+      // back as any lock_enter frame's grant is. Each operation's notes go right after it.
       const std::uint64_t tid = *pl.ticket;
       lock_notes notes;
       table_.cancel(pid_of(p), tid, notes);
-      deliver(notes);
-      table_.resume(pid_of(p), tid);
+      try {
+        deliver_op(notes); // the cancel's own, now: they don't wait on the resume or a release
+      } catch (...) {
+        // delivered in full all the same (deliver); the resume must still happen
+      }
+      const lock_outcome out = table_.resume(pid_of(p), tid);
       pl.ticket.reset();
       clear_wait_fields(p);
+      if (out.what == lock_outcome::kind::granted) {
+        lock_notes freed;
+        table_.release(pid_of(p), out.g.hold, freed);
+        deliver_op(freed);
+      }
     }
   } catch (...) {
     // noexcept: a release can't fail on a consistent table; check() reports an inconsistent one.
@@ -511,7 +755,11 @@ void lock_home::release_frame(process &p, std::optional<std::uint64_t> hold,
 }
 
 void lock_home::process_ended(process &p, bool abandon) {
-  if (!p.locks || (p.locks->holds.empty() && !p.locks->ticket))
+  action a(*this);
+  // A process that never reached the manager has nothing there. One that did is ended there
+  // whatever its mirror says (an end that finds no record changes nothing), so a record the
+  // mirror missed can't outlive the process: a grant whose collect failed after the resume.
+  if (!p.locks)
     return;
   if (!abandon && !p.locks->holds.empty())
     table_.note_leaked_at_exit();
@@ -521,10 +769,11 @@ void lock_home::process_ended(process &p, bool abandon) {
   p.locks->ticket.reset();
   clear_wait_fields(p);
   p.inherited_priority = INT_MAX;
-  deliver(notes);
+  deliver_op(notes);
 }
 
 void lock_home::wait_expired(std::vector<process *> &expired) {
+  action a(*this);
   // A waiter flagged by a wake_due with no vector is collected here too (design 8.7).
   if (ops_.lock_expired_count() > 0)
     ops_.take_lock_expired(expired);
@@ -534,29 +783,57 @@ void lock_home::wait_expired(std::vector<process *> &expired) {
     const std::uint64_t tid = *p->locks->ticket;
     lock_notes notes;
     table_.cancel(pid_of(*p), tid, notes); // cancelled, or granted already: adopted
-    deliver(notes);
+    deliver_op(notes);
     apply_wake(p->pid, tid);
   }
   expired.clear();
 }
 
 void lock_home::set_base(process &p) {
+  action a(*this);
   if (!p.locks || (p.locks->holds.empty() && !p.locks->ticket))
     return;
   lock_notes notes;
   table_.set_base(pid_of(p), p.priority, notes);
-  deliver(notes);
+  deliver_op(notes);
 }
 
 void lock_home::deliver(const lock_notes &notes) {
+  action a(*this);
+  // Every note is delivered even when one throws (a scheduler's callback, an allocation): the
+  // note after it may be a granted waiter's only wake. The first error is rethrown after.
+  std::exception_ptr first;
   for (const lock_note &n : notes) {
-    if (n.home != id_)
-      continue;         // another home's: phase L3 posts it to that home's port
-    apply_post(n.post); // this home's: at once (4.14)
+    try {
+      if (n.home == id_) {
+        apply_post(n.post); // this home's: at once (4.14)
+      } else if (n.port) {
+        // Another home's: to its port, or dropped when the port is closed (2.3). The counters
+        // are the manager's, bumped outside M.mu.
+        if (const lock_test_hooks *hooks = lock_test_hooks_get(); hooks && hooks->cross_home_note)
+          hooks->cross_home_note(n);
+        std::atomic<std::uint64_t> &count =
+            n.port->post(n.post) ? mgr_->posts_ : mgr_->posts_dropped_;
+        count.fetch_add(1, std::memory_order_relaxed);
+      }
+    } catch (...) {
+      if (!first)
+        first = std::current_exception();
+    }
   }
+  if (first)
+    std::rethrow_exception(first);
+}
+
+void lock_home::deliver_op(const lock_notes &notes) {
+  if (notes.empty())
+    return;
+  lock_fuzz_point(lock_fuzz_at::after_op); // another home may act between the two (protocol 7)
+  deliver(notes);
 }
 
 void lock_home::apply_post(const lock_post &post) {
+  action a(*this);
   if (post.what == lock_post::kind::wake)
     apply_wake(post.pid, post.tid);
   else
@@ -628,6 +905,7 @@ std::string lock_home::waiting_key(const process &p) {
 // ---------------------------------------------------------------------------------------------
 
 void lock_home::check_quiescent() const {
+  action a(*this);
   const auto fail = [](const char *inv, const std::string &what) {
     throw lock_violation(inv, what);
   };

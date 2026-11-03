@@ -4,11 +4,12 @@
  *        member function per manager operation.
  *
  * Internal: a lock home (detail/lock_home.h) and the lock tests call it; programs and hosts use
- * lock_manager.h. Each operation is atomic (single mode: one thread calls the table; shared mode,
- * phase L3, adds the manager's mutex around each). Each returns its result and appends its
- * notifications (protocol 2.3) to the `out` list it is given; the caller delivers them after the
- * operation returns (protocol 4.14). No operation calls into a scheduler, a port, a process or the
- * state tree.
+ * lock_manager.h. Each public member is atomic (protocol 0): in single mode one thread calls the
+ * table (debug builds assert it); in shared mode (options::shared, phase L3.1) each runs under the
+ * manager's mutex M.mu, from any thread. Each returns its result and appends its notifications
+ * (protocol 2.3) to the `out` list it is given; the caller delivers them after the operation
+ * returns, with M.mu released (protocol 4.14). No operation calls into a scheduler, a port, a
+ * process or the state tree.
  *
  * Keys are absolute and canonical (protocol 1): segments joined by '.', each non-empty with no '.'
  * and no '#'; a request's keys are sorted by their segment tuples and none is a prefix of another.
@@ -30,6 +31,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace cvc::state_exec {
@@ -173,7 +175,7 @@ struct lock_outcome {
   std::vector<deadlock_edge> cycle; // when deadlock
 };
 
-/// Ports are phase L3's (protocol 2.3); declared so a notification can carry one.
+/// A home's port (protocol 2.3; detail/lock_home.h). The table only carries it in notifications.
 class lock_port;
 
 /// A post: wake { pid, tid } or relevel { pid } (protocol 2.3).
@@ -184,8 +186,8 @@ struct lock_post {
   std::uint64_t tid = 0; // wake only
 };
 
-/// A notification: a post for a home, with that home's port captured in the operation (null
-/// before phase L3).
+/// A notification: a post for a home, with that home's port captured in the operation (null for
+/// a home attached without one).
 struct lock_note {
   home_id home = 0;
   std::shared_ptr<lock_port> port;
@@ -203,6 +205,8 @@ struct lock_test_hooks {
   void (*in_step_lock_enter)(int pid) = nullptr; // inside the lock_enter step, before start_body
   void (*before_terminate_end)(process &) = nullptr; // terminate_process, before the end hook
   std::size_t home_cache_capacity = 0;               // 0: the default (1024); read once per home
+  void (*cross_home_note)(const lock_note &) = nullptr; // deliver, for each note it hands to
+                                                        // another home's port (LT-3b's count)
 };
 void set_lock_test_hooks(const lock_test_hooks *hooks);
 const lock_test_hooks *lock_test_hooks_get();
@@ -227,6 +231,8 @@ public:
     coalesce_no_clear = 1u << 8,    // 'coalesce-no-clear': read_inh leaves relevel_pending set
     impl_note_after_only = 1u << 9, // 'impl-note-after-only': 4.3's set A from the graph after
                                     // the operation only
+    closed_outside_mu = 1u << 10,   // 'splitpost_mut': a post tests `closed` outside the port's
+                                    // mutex (must report port-race; protocol 2.3, L3.4)
   };
 
   struct options {
@@ -234,7 +240,9 @@ public:
     bool self_check = false;
     bool coalesce_relevels = true;
     bool one_home = true; // before phase L3 a manager accepts one home (protocol 4.4)
+    bool shared = false;  // shared mode: every operation under M.mu, from any thread (L3.1)
     std::uint32_t mutations = 0;
+    std::uint64_t first_home = 0; // test-only: the first home id attach_home hands out
   };
 
   explicit lock_table(options opts);
@@ -247,10 +255,16 @@ public:
   // -- 4.4 ----------------------------------------------------------------------------------
   /// Attach a home. `prio`: the home applies priorities (its scheduler uses priority or
   /// priority_rr), taken as given; the first such home makes `lending` true and recomputes every
-  /// record's inherited priority (4.3). `port` and `progress` are phase L3's (null before).
-  /// Before phase L3 a second home is refused (std::logic_error; protocol 4.4).
+  /// record's inherited priority (4.3). `port` receives the posts for the home's processes (null
+  /// for a caller with no port: notes for it are then the caller's to apply); `progress` is the
+  /// home's last-progress cell (steady_clock ticks; null reads as never). With options::one_home
+  /// a second home is refused, and with `attach.cross_thread` a manager not in shared mode refuses
+  /// the home (std::logic_error naming state_exec.locks.threading; protocol 4.4, design 8.3).
+  /// Ids are never reused: once all 2^32 are handed out, every attach is refused
+  /// (std::logic_error).
   home_id attach_home(bool prio, std::shared_ptr<lock_port> port,
-                      std::shared_ptr<std::atomic<std::int64_t>> progress, lock_notes &out);
+                      std::shared_ptr<std::atomic<std::int64_t>> progress, lock_notes &out,
+                      lock_attach attach = {});
 
   // -- 4.5 - 4.12 ------------------------------------------------------------------------------
   /// The fast path: a hold for `p` when the request is grantable now, else nullopt (busy, which
@@ -284,6 +298,15 @@ public:
   int read_inh(lock_pid p);
   lock_query_result query(std::string_view abs_prefix, std::optional<home_id> viewer_home,
                           std::string_view viewer_owner) const;
+  /// pycvc's idle test (design 9.2): every process reachable from `p` in the wait-for graph with
+  /// no edge out, other than `p`, each with its home's progress cell loaded under M.mu (0 for a
+  /// home with none). Sorted by pid; empty when `p` waits for nothing.
+  std::vector<std::pair<lock_pid, std::int64_t>> blocking_sinks(lock_pid p) const;
+  /// The same from every process of `from` at once (pycvc's idle pass over all its lock waits):
+  /// one search under one M.mu hold, each process's successors computed once; every sink
+  /// reachable from one of them that is not itself one of them. Sorted by pid.
+  std::vector<std::pair<lock_pid, std::int64_t>>
+  blocking_sinks(std::span<const lock_pid> from) const;
 
   // -- 4.15 -----------------------------------------------------------------------------------
   /// Take one key-cache reference of home `h` on each key (filling each key_ref's node).
@@ -295,8 +318,9 @@ public:
   /// A hold's keys (its trie nodes, canonical order), mode and generation; empty keys when the
   /// hold is gone.
   std::span<lock_node *const> hold_keys(std::uint64_t hold) const;
-  /// Count a hold left at a normal termination (protocol 5.6; lock_stats::leaked_at_exit).
-  void note_leaked_at_exit() { ++leaked_at_exit_; }
+  /// Count a hold left at a normal termination (protocol 5.6; lock_stats::leaked_at_exit). Any
+  /// thread: a relaxed add, outside M.mu.
+  void note_leaked_at_exit() { leaked_at_exit_.fetch_add(1, std::memory_order_relaxed); }
 
   // -- reads for checks (lock_home::check_quiescent's home-side clauses) -----------------------
   struct rec_view {
@@ -327,6 +351,8 @@ public:
   std::size_t home_cache_refs(home_id h, const lock_node *n) const;
   /// Every key-cache reference home h holds.
   std::size_t home_cache_refs(home_id h) const;
+  /// The manager's home entries (tests): one per attached home, none left by a detached one.
+  std::size_t home_entries() const;
 
   // -- checks ---------------------------------------------------------------------------------
   lock_stats stats() const;
@@ -369,7 +395,7 @@ private:
   struct impl;
   options opts_;
   std::unique_ptr<impl> impl_;
-  std::uint64_t leaked_at_exit_ = 0;
+  std::atomic<std::uint64_t> leaked_at_exit_{0};
 };
 
 /// Sorts canonical keys by their segment tuples: '.' orders before every other character.

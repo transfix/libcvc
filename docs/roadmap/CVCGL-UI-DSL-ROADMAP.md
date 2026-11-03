@@ -1199,6 +1199,9 @@ other `on:tick`/`on:key` cadence questions.
   > verbs. Tests: `AriadneAction.ProgramOn*`, `AriadneLoader.ProgramOnCapturedVerbatim`.
   > *Deferred:* the LONG-LIVED cross-frame async scheduler (a heavy action spreading over frames);
   > today each action runs to completion within its per-activation cap in one drain (like `init:`).
+  > *Since landed:* actions and residents now run on the app's long-lived `app.exec_scheduler()`,
+  > pumped by every `Runtime::drain()` across frames; only `init:` keeps a private synchronous
+  > run-to-completion runner (`run_scoped_program`). See `docs/ARIADNE.md` §2.
   > **Host intrinsics in a program LANDED** (`register_action_intrinsics`): a host binds native fns —
   > e.g. nav verbs `(nav-step)` / `(nav-arrived)` — that a program `on:` (and `init:`) may call, so a
   > program can invoke a host capability AND compute over live host state inline. Applied when each
@@ -1227,7 +1230,9 @@ other `on:tick`/`on:key` cadence questions.
   there is **one** long-lived `async_stackless_evaluator` + `async_scheduler` for the whole
   host (owned by `cvc::app`, or a small service hung off it), **not one per `.ari` document**.
   Every document's program lanes (`init:` / action `on:` / `on:tick`·`on:key` residents /
-  spawned processes) schedule on that single cooperative timeline, so cross-document
+  spawned processes) schedule on that single cooperative timeline (*as built:* all but `init:`,
+  which runs each script to completion on a private synchronous scheduler that shares only the
+  app's lock manager; `docs/ARIADNE.md` §2), so cross-document
   coordination (a shared sim world, `spawn`/`msg` between documents) is intrinsic and the
   whole-host state_exec time budget is enforced at **one** per-frame pump — not N pumps that
   each independently claim a full slice. Isolation is preserved by **namespacing on the shared
