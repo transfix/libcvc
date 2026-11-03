@@ -17,7 +17,6 @@
 #include <cvc/state/state_exec/data_job.h>
 #include <cvc/state/state_exec/detail/lock_home.h> // lock_ops, the lock objects' type names
 #include <cvc/state/state_exec/evaluator.h>        // evaluation_stats
-#include <cvc/state/state_exec/exceptions.h>       // field
 #include <cvc/state/state_exec/generator.h>
 #include <cvc/state/state_exec/scheduler.h>           // the settings' key prefixes
 #include <cvc/state/state_exec/stackless_evaluator.h> // detail::awaitable, kAwaitableType
@@ -476,13 +475,18 @@ private:
 
   // Isolate mode, a dict seen for the first time: an async call's future is refused, and so is
   // an instance of a user class, whose methods hold the defining program's live environment
-  // (S0-Q4). A built-in exception's instance is copied, its class shared.
+  // (S0-Q4). An instance has the shape defclass and make_exception give it: "__class__" first,
+  // holding a class dict whose "__name__" is first (a class of any size). A built-in exception's
+  // instance is copied, its class shared, and any other dict is data.
   void isolate_dict(const value_t &v, const char *in) const {
     if (is_async_future(v))
       refuse("future", in);
-    const value_t *cls = field(v, "__class__");
-    const auto *d = cls ? std::get_if<dict_ptr>(&cls->v) : nullptr;
-    if (d && *d && !detail::is_builtin_class(**d))
+    const ordered_map &d = *std::get<dict_ptr>(v.v); // not empty: it has a cursor
+    if (d.front().first != "__class__")
+      return;
+    const auto *cls = std::get_if<dict_ptr>(&d.front().second.v);
+    if (cls && *cls && !(*cls)->empty() && (*cls)->front().first == "__name__" &&
+        !detail::is_builtin_class(**cls))
       refuse("object instance", in);
   }
 

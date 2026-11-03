@@ -358,6 +358,31 @@ TEST(DataJob, IsolatingCopyKeepsSharingAndCycles) {
   cyclic->clear();
 }
 
+TEST(DataJob, IsolatingCopyRefusesOnlyAnInstancesShape) {
+  // An object instance has the shape defclass and make_exception give it: "__class__" first, and
+  // its class's "__name__" first, a class of any size. Any other dict holding a "__class__" key is
+  // data, and is copied (R0-mid semantics 4).
+  const value_t box = make_dict({{"__name__", value_t{std::string("Box")}}});
+  // JSON's {"__class__": {"a": 1}}; "__class__" not first; an empty "class".
+  for (const value_t &plain : {make_dict({{"__class__", make_dict({{"a", value_t{1}}})}}),
+                               make_dict({{"a", value_t{1}}, {"__class__", box}}),
+                               make_dict({{"__class__", make_dict()}})}) {
+    SCOPED_TRACE(to_string(plain));
+    const value_t c = isolate(plain);
+    EXPECT_NE(std::get<dict_ptr>(c.v), std::get<dict_ptr>(plain.v));
+    EXPECT_TRUE(values_equal(c, plain));
+  }
+  // A user class with many methods is still a class.
+  const value_t big = make_dict({{"__name__", value_t{std::string("Big")}},
+                                 {"a", value_t{1}},
+                                 {"b", value_t{2}},
+                                 {"c", value_t{3}},
+                                 {"d", value_t{4}}});
+  EXPECT_EQ(isolate_refusal(make_dict({{"__class__", big}})), refusal_text("object instance"));
+  EXPECT_EQ(isolate_refusal(make_list({make_dict({{"__class__", box}, {"x", value_t{1}}})})),
+            refusal_text("object instance") + " (nested in a list)");
+}
+
 TEST(DataJob, ShareModeStillSharesClosures) {
   // Share mode (state-data-get's copy, async arguments) is as before, but for the built-in class
   // dicts: it refuses nothing, shares everything that is not a list or dict, copies every other
@@ -570,6 +595,19 @@ TEST(DataStepsStateDataSet, ARestoredProcessStoresItsCaughtException) {
     ASSERT_TRUE(b.step_until([&] { return b.finished(moved); }));
     EXPECT_EQ(b.outcome(moved), p.expected);
   }
+}
+
+TEST(DataStepsStateDataSet, AJsonDictWithAClassKeyIsStored) {
+  // Parsed JSON with a "__class__" key is data, whatever that key holds (R0-mid semantics 4).
+  cvc::app app;
+  intrinsics_world w(cvc::state::instance(app));
+  const int pid = w.submit(R"((begin
+      (state-data-set "a" (json-parse "{\"__class__\": {\"a\": 1}}"))
+      (state-data-set "b" (json-parse "{\"x\": 1, \"__class__\": {\"__name__\": \"Box\"}}"))
+      (list (state-data-get "a") (state-data-get "b"))))");
+  ASSERT_TRUE(w.step_until([&] { return w.finished(pid); }));
+  EXPECT_EQ(w.outcome(pid),
+            R"(({"__class__": {"a": 1}} {"x": 1, "__class__": {"__name__": "Box"}}))");
 }
 
 // ---- the evaluator ------------------------------------------------------------
