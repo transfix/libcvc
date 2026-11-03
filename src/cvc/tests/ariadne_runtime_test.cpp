@@ -40,6 +40,7 @@
 #include <cvc/state/state_exec/heap.h>            // collect_cycles / tracked_objects
 #include <cvc/state/state_exec/intrinsics.h>      // intrinsics_context.root_path (pool-task test)
 #include <cvc/state/state_exec/lock_manager.h>    // the app lock manager (Locks.*)
+#include <cvc/state/state_exec/state_value_codec.h>
 #include <cvc/state/state_exec/types.h>           // value_t
 #include <cvc/tf/model.h>                         // §10 tf_editor: the model the widget edits
 #include <cvc/tf/overlays.h>                      // §10 tf_editor: the layers published beside it
@@ -8400,4 +8401,52 @@ TEST(AriadneHazards, HZ13_InitLaneAwaitsAnAppHostFuture) {
   std::printf("HZ-13: the init script took %.3f s\n", seconds_since(t0));
   EXPECT_TRUE(ok) << ::testing::PrintToString(errs);
   EXPECT_EQ(node_value(app, "doc.r"), "(21 21 6)");
+}
+
+// HZ-8 (td 8.1, S0.11): an action's (fork) forks the running process, and both park. The child
+// has the action as its parent and the action's owner (the Runtime's), read back from snapshots.
+// Tearing the Runtime down stops both: ~Impl's kill_owner kills them, then it reaps the action's
+// children, so the forked child leaves the table, while the action's own process stays in it,
+// killed with reason owner_reaped. (Whether teardown should reap it too is Stage 1's question.)
+TEST(AriadneHazards, HZ08_ForkedChildKeepsOwnerAndTeardownReapsIt) {
+  namespace se = cvc::state_exec;
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  int action = -1, child = -1;
+  {
+    Runtime rt(app, "doc");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    rt.set_root(group({button("Go", R"S((begin (set c (fork))
+        (if (= c 0) (msg-recv "never") (begin (state-set "child" (str c)) (msg-recv "never")))))S")}));
+    click_once(rt, mb);
+    const auto parked = [&](int pid) {
+      const auto i = app.exec_scheduler().get_process_info(pid);
+      return i && i->status == se::process_status::waiting;
+    };
+    ASSERT_TRUE(pump_until(rt, [&] {
+      const std::string c = node_value(app, "doc.child");
+      if (c.empty())
+        return false;
+      child = std::stoi(c);
+      const auto ci = app.exec_scheduler().get_process_info(child);
+      action = ci ? ci->parent_pid : -1;
+      return action >= 0 && parked(child) && parked(action);
+    }));
+    ASSERT_NE(action, child);
+    // Both have the Runtime's owner: the same, and not empty.
+    cvc::state &snap_a = root("hz08.snap.action");
+    cvc::state &snap_c = root("hz08.snap.child");
+    ASSERT_TRUE(app.exec_scheduler().snapshot(action, snap_a));
+    ASSERT_TRUE(app.exec_scheduler().snapshot(child, snap_c));
+    const std::string owner = se::decode_process(snap_a)->owner;
+    EXPECT_FALSE(owner.empty());
+    EXPECT_EQ(se::decode_process(snap_c)->owner, owner);
+    EXPECT_TRUE(rt.take_reactive_warnings().empty());
+  }
+  EXPECT_FALSE(app.exec_scheduler().get_process_info(child).has_value()); // reaped
+  const auto a = app.exec_scheduler().get_process_info(action);
+  ASSERT_TRUE(a.has_value());
+  EXPECT_EQ(a->status, se::process_status::killed);
+  EXPECT_EQ(a->exit_error.value_or(""), "owner_reaped");
 }

@@ -184,9 +184,8 @@ def test_lw06_fork_from_exec():
     # process even though the context's pid is pycvc's placeholder (0), and the child keeps the
     # parent's owner, so kill_owner reaps it.
     #
-    # Known (not a lock bug): the child of a DSL (fork) applies (fork) again at its first step
-    # (its copied stack still applies the call), so the child is checked and reaped before it
-    # ever steps.
+    # The child's own (fork) returns 0 and it goes on from there (td B28; test_hz08_fork_in_exec_run
+    # runs one to its park under Exec.run). Here the child is checked and reaped before it steps.
     w = World()
     pid = w.submit('(with-lock "k" (try (fork) (catch (LockError e) (get-attr e "reason"))))',
                    ctx_pid=0)
@@ -204,6 +203,25 @@ def test_lw06_fork_from_exec():
     assert decoded.owner == "docA"
     assert w.sched.kill_owner("docA") == 2
     assert w.info(child.pid).status == process_status.killed
+
+
+def test_hz08_fork_in_exec_run():
+    # HZ-8 (td 8.1, S0.11): a (fork) in a program Exec.run runs forks the running process. The
+    # parent's call returns the child's pid, which run() returns; the child's returns 0 and it
+    # goes on to park, with the parent's pid as its parent. The child keeps the parent's owner
+    # (an Exec's processes have none), so kill_owner("") reaps it.
+    app = pycvc.make_app()
+    ex = pycvc.Exec(app)
+    child = int(ex.run('(begin (set c (fork)) (if (= c 0) (msg-recv "never") '
+                       '(begin (state-set "hz08.parent" (str (self-pid))) c)))'))
+    parent = int(pycvc.state_get(app, "hz08.parent"))
+    assert child != parent
+    sched = ex.scheduler()
+    info = sched.get_process_info(child)
+    assert info.status == process_status.waiting, info.status
+    assert info.parent_pid == parent
+    assert sched.kill_owner("") == 1
+    assert sched.get_process_info(child).status == process_status.killed
 
 
 def test_lw11_recursive_evaluator_refuses():
