@@ -1,6 +1,7 @@
 #if defined(_WIN32) && !defined(_CRT_RAND_S)
 #define _CRT_RAND_S // rand_s: the CRT's CSPRNG (RtlGenRandom), for random-token
 #endif
+#include "builtin_class.h"
 #include "closure_body.h"
 
 #include <algorithm>
@@ -99,6 +100,14 @@ dict_type &as_dict_mut(const value_t &v, const char *name) {
 }
 
 const dict_type &as_dict(const value_t &v, const char *name) { return as_dict_mut(v, name); }
+
+/// The built-in exception classes are read-only (td 5 item 1): `who` may not change `d`, the
+/// dict `v` holds, when it is one.
+void refuse_builtin_class(const value_t &v, const dict_type &d, const char *who) {
+  if (detail::is_builtin_class(d))
+    throw dsl_error("TypeError", std::string(who) + ": built-in class is read-only: " +
+                                     class_name(std::get<dict_ptr>(v.v)));
+}
 
 const std::string &as_string(const value_t &v, const char *name) {
   if (auto *s = std::get_if<std::string>(&v.v))
@@ -598,6 +607,8 @@ value_t builtin_get_attr(std::span<const value_t> args) {
 value_t builtin_set_attr(std::span<const value_t> args) {
   expect_exact(args, 3, "set-attr");
   auto &d = as_dict_mut(args[0], "set-attr");
+  // Refused before track_mutated, so a built-in class never enters a cycle registry.
+  refuse_builtin_class(args[0], d, "set-attr");
   const std::string &key = as_string(args[1], "set-attr");
   if (can_close_cycle(args[2]))
     track_mutated(std::get<dict_ptr>(args[0].v));
@@ -614,6 +625,7 @@ value_t builtin_set_attr(std::span<const value_t> args) {
 value_t builtin_del_attr(std::span<const value_t> args) {
   expect_exact(args, 2, "del-attr");
   auto &d = as_dict_mut(args[0], "del-attr");
+  refuse_builtin_class(args[0], d, "del-attr");
   const std::string &key = as_string(args[1], "del-attr");
   for (auto it = d.begin(); it != d.end(); ++it) {
     if (it->first == key) {
