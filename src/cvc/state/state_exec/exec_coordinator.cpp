@@ -203,6 +203,12 @@ std::string make_path(const std::string &cluster_id, const std::string &suffix) 
   return std::string(PATH_EXEC_PREFIX) + "." + cluster_id + "." + suffix;
 }
 
+control_cmd control_of(control_cmd::kind what) {
+  control_cmd cmd;
+  cmd.what = what;
+  return cmd;
+}
+
 } // anonymous namespace
 
 // ===========================================================================
@@ -214,6 +220,7 @@ exec_coordinator::exec_coordinator() = default;
 exec_coordinator::~exec_coordinator() {
   if (running_)
     stop();
+  alive_.reset(); // what is still queued on the scheduler finds the coordinator gone
 }
 
 // ===========================================================================
@@ -231,6 +238,32 @@ void exec_coordinator::attach_message_bus(cvc::state_message_bus *bus) { bus_ = 
 void exec_coordinator::set_resource_policy(const resource_policy &p) {
   std::lock_guard lk(remote_mu_);
   policy_ = p;
+}
+
+resource_policy exec_coordinator::policy_snapshot() const {
+  std::lock_guard lk(remote_mu_);
+  return policy_;
+}
+
+bool exec_coordinator::post_entry(std::function<void(exec_coordinator &, scheduler &)> body) {
+  if (!sched_)
+    return false;
+  // Applied on the scheduler's thread between its steps. The entry holds the token weakly, never
+  // a bare this: the scheduler may apply it, or drop it, after the coordinator is gone.
+  control_cmd cmd = control_of(control_cmd::kind::query);
+  cmd.query = [alive = std::weak_ptr<exec_coordinator *>(alive_), s = sched_,
+               body = std::move(body)](scheduler_base &) {
+    const std::shared_ptr<exec_coordinator *> self = alive.lock();
+    if (!self)
+      return;
+    try {
+      body(**self, *s);
+    } catch (...) {
+      // An entry must not throw (post_control): what a body lets escape (a send that failed) is
+      // dropped, as the bus drops what a subscriber throws.
+    }
+  };
+  return sched_->post_control(-1, std::move(cmd));
 }
 
 void exec_coordinator::set_config(const config &cfg) { cfg_ = cfg; }
@@ -546,7 +579,7 @@ submit_result exec_coordinator::submit(const std::string &script, const execute_
   // If we're the leader (or no leader known), submit locally
   bool local = is_leader_ || leader_node_id().empty();
   if (local) {
-    return submit_local(script, opts);
+    return submit_local(*sched_, script, opts);
   }
 
   // Forward to leader via message
@@ -580,7 +613,7 @@ submit_result exec_coordinator::submit(const value_t &expr, const execute_option
 
   bool local = is_leader_ || leader_node_id().empty();
   if (local) {
-    return submit_local(expr, opts);
+    return submit_local(*sched_, expr, opts);
   }
 
   // For remote submission of expressions, we'd need to serialize the
@@ -588,28 +621,29 @@ submit_result exec_coordinator::submit(const value_t &expr, const execute_option
   return {-1, false, "expression submission requires local leader", ""};
 }
 
-submit_result exec_coordinator::submit_local(const std::string &script,
+submit_result exec_coordinator::submit_local(scheduler &s, const std::string &script,
                                              const execute_options &opts) {
   // Validate against resource policy
+  const resource_policy policy = policy_snapshot();
   process_limits req{opts.max_steps, opts.max_time, opts.max_memory, opts.max_messages};
-  auto validated = validate_limits(policy_, req);
+  auto validated = validate_limits(policy, req);
 
   execute_options validated_opts = opts;
   validated_opts.max_steps = validated.max_steps;
   validated_opts.max_time = validated.max_time;
   validated_opts.max_memory = validated.max_memory;
   validated_opts.max_messages = validated.max_messages;
-  apply_priority_floor(validated_opts);
+  apply_priority_floor(policy, validated_opts);
 
   // Check process count limit
-  if (policy_.max_processes > 0 && sched_->process_count() >= policy_.max_processes) {
+  if (policy.max_processes > 0 && s.process_count() >= policy.max_processes) {
     std::lock_guard lk(stats_mu_);
     ++stats_.submissions_received;
     ++stats_.submissions_rejected;
     return {-1, false, "max_processes limit reached", node_id_};
   }
 
-  int pid = sched_->execute(script, validated_opts);
+  int pid = s.execute(script, validated_opts);
 
   {
     std::lock_guard lk(stats_mu_);
@@ -620,25 +654,27 @@ submit_result exec_coordinator::submit_local(const std::string &script,
   return {pid, true, "", node_id_};
 }
 
-submit_result exec_coordinator::submit_local(const value_t &expr, const execute_options &opts) {
+submit_result exec_coordinator::submit_local(scheduler &s, const value_t &expr,
+                                             const execute_options &opts) {
+  const resource_policy policy = policy_snapshot();
   process_limits req{opts.max_steps, opts.max_time, opts.max_memory, opts.max_messages};
-  auto validated = validate_limits(policy_, req);
+  auto validated = validate_limits(policy, req);
 
   execute_options validated_opts = opts;
   validated_opts.max_steps = validated.max_steps;
   validated_opts.max_time = validated.max_time;
   validated_opts.max_memory = validated.max_memory;
   validated_opts.max_messages = validated.max_messages;
-  apply_priority_floor(validated_opts);
+  apply_priority_floor(policy, validated_opts);
 
-  if (policy_.max_processes > 0 && sched_->process_count() >= policy_.max_processes) {
+  if (policy.max_processes > 0 && s.process_count() >= policy.max_processes) {
     std::lock_guard lk(stats_mu_);
     ++stats_.submissions_received;
     ++stats_.submissions_rejected;
     return {-1, false, "max_processes limit reached", node_id_};
   }
 
-  int pid = sched_->execute(expr, validated_opts);
+  int pid = s.execute(expr, validated_opts);
 
   {
     std::lock_guard lk(stats_mu_);
@@ -649,14 +685,14 @@ submit_result exec_coordinator::submit_local(const value_t &expr, const execute_
   return {pid, true, "", node_id_};
 }
 
-void exec_coordinator::apply_priority_floor(execute_options &opts) {
-  if (!policy_.priority_floor)
+void exec_coordinator::apply_priority_floor(const resource_policy &policy, execute_options &opts) {
+  if (!policy.priority_floor)
     return;
   // The policy's floor is a host's (docs/STATE_EXEC_LOCKS.md 7.2): the process gets it, or the
   // stricter floor it came with, and a better priority is clamped to it. The count is the record
   // (state_exec has no log of its own, gap G-5).
   const int floor =
-      std::max(*policy_.priority_floor, opts.priority_floor.value_or(*policy_.priority_floor));
+      std::max(*policy.priority_floor, opts.priority_floor.value_or(*policy.priority_floor));
   opts.priority_floor = floor;
   opts.priority_floor_explicit = true;
   if (opts.priority < floor) {
@@ -705,12 +741,26 @@ void exec_coordinator::handle_submit(const cvc::state_message &msg) {
     opts.max_memory = max_memory;
     opts.max_messages = max_messages;
 
-    auto result = submit_local(script, opts);
-
-    // Send response to the requesting node
-    if (!reply_node.empty()) {
-      send_submit_response(make_path(cluster_id_, "submit.reply." + reply_node), result);
-    }
+    // A bus thread is not the scheduler's: the submission runs in a posted entry, between the
+    // scheduler's steps, and answers the requesting node from there (td 4.12).
+    std::string reply_path;
+    if (!reply_node.empty())
+      reply_path = make_path(cluster_id_, "submit.reply." + reply_node);
+    post_entry([script = std::move(script), opts = std::move(opts),
+                reply_path = std::move(reply_path)](exec_coordinator &self, scheduler &s) {
+      submit_result result;
+      try {
+        result = self.submit_local(s, script, opts);
+      } catch (const std::exception &e) {
+        // An entry must not throw (post_control): a script execute refuses is a rejection.
+        result = {-1, false, e.what(), self.node_id_};
+        std::lock_guard lk(self.stats_mu_);
+        ++self.stats_.submissions_received;
+        ++self.stats_.submissions_rejected;
+      }
+      if (!reply_path.empty())
+        self.send_submit_response(reply_path, result);
+    });
   } else if (action == "submit-response") {
     // Response from leader — the requesting node can process this
     // (e.g., update a promise). Currently tracked via stats only.
@@ -742,41 +792,56 @@ migrate_result exec_coordinator::migrate(int pid, const std::string &target_node
   if (target_node_id == node_id_)
     return {false, -1, target_node_id, "cannot migrate to self"};
 
-  // Pause the process
-  if (!sched_->pause(pid)) {
-    return {false, -1, target_node_id, "failed to pause process"};
-  }
+  // The caller need not be the scheduler's thread: the rest runs there, in one posted entry, and
+  // the result says only that the migration was requested (td 4.12).
+  post_entry([pid, target_node_id](exec_coordinator &self, scheduler &s) {
+    self.migrate_posted(s, pid, target_node_id);
+  });
+  return {true, -1, target_node_id, ""};
+}
 
-  {
-    std::lock_guard lk(stats_mu_);
-    ++stats_.migrations_initiated;
-  }
-
-  // Serialize process state
-  std::string data = serialize_process_for_migration(pid);
-  if (data.empty()) {
-    sched_->resume(pid);
+void exec_coordinator::migrate_posted(scheduler &s, int pid, const std::string &target_node_id) {
+  const auto failed = [this] {
     std::lock_guard lk(stats_mu_);
     ++stats_.migrations_failed;
-    return {false, -1, target_node_id, "serialization failed"};
+  };
+  try {
+    // Pause the process: one that is gone, or neither ready nor running, fails the migration.
+    if (!s.pause(pid)) {
+      failed();
+      return;
+    }
+
+    {
+      std::lock_guard lk(stats_mu_);
+      ++stats_.migrations_initiated;
+    }
+
+    // Serialize process state
+    std::string data = serialize_process_for_migration(s, pid);
+    if (data.empty()) {
+      s.resume(pid);
+      failed();
+      return;
+    }
+
+    // Send migration message to target
+    std::ostringstream os;
+    os << '{';
+    bool f = true;
+    jkv(os, "action", std::string("migrate-request"), f);
+    jkv(os, "source_node", node_id_, f);
+    jkv(os, "source_pid", static_cast<int64_t>(pid), f);
+    jkv(os, "process_data", data, f);
+    os << '}';
+
+    send_message(make_path(cluster_id_, "migrate." + target_node_id), MIME_EXEC_MIGRATE, os.str());
+
+    // Kill the original process (migration is fire-and-forward)
+    s.kill(pid);
+  } catch (...) {
+    failed(); // an entry must not throw (post_control)
   }
-
-  // Send migration message to target
-  std::ostringstream os;
-  os << '{';
-  bool f = true;
-  jkv(os, "action", std::string("migrate-request"), f);
-  jkv(os, "source_node", node_id_, f);
-  jkv(os, "source_pid", static_cast<int64_t>(pid), f);
-  jkv(os, "process_data", data, f);
-  os << '}';
-
-  send_message(make_path(cluster_id_, "migrate." + target_node_id), MIME_EXEC_MIGRATE, os.str());
-
-  // Kill the original process (migration is fire-and-forward)
-  sched_->kill(pid);
-
-  return {true, -1, target_node_id, ""};
 }
 
 void exec_coordinator::handle_migrate(const cvc::state_message &msg) {
@@ -791,28 +856,13 @@ void exec_coordinator::handle_migrate(const cvc::state_message &msg) {
     xi64(json, "source_pid", source_pid);
     xstr(json, "process_data", process_data);
 
-    int new_pid = ingest_migrated_process(process_data);
-
-    // Send ack back to source
-    std::ostringstream os;
-    os << '{';
-    bool f = true;
-    jkv(os, "action", std::string("migrate-ack"), f);
-    jkv(os, "source_pid", source_pid, f);
-    jkv(os, "new_pid", static_cast<int64_t>(new_pid), f);
-    jkv(os, "target_node", node_id_, f);
-    jkv(os, "success", new_pid >= 0, f);
-    os << '}';
-
-    send_message(make_path(cluster_id_, "migrate." + source_node), MIME_EXEC_MIGRATE, os.str());
-
-    if (new_pid >= 0) {
-      std::lock_guard lk(stats_mu_);
-      ++stats_.migrations_completed;
-    } else {
-      std::lock_guard lk(stats_mu_);
-      ++stats_.migrations_failed;
-    }
+    // The ingest makes a process: it runs in a posted entry, on the scheduler's thread (td 4.12).
+    // This coordinator's own migrate-request comes back here too (it subscribes to the whole
+    // prefix), from its migrate entry on that thread; it is posted the same way.
+    post_entry([source_node = std::move(source_node), source_pid,
+                process_data = std::move(process_data)](exec_coordinator &self, scheduler &s) {
+      self.ingest_posted(s, source_node, source_pid, process_data);
+    });
   } else if (action == "migrate-ack") {
     // Source receives ack — update stats.
     // Skip if we sent this ack ourselves (target == self).
@@ -833,8 +883,39 @@ void exec_coordinator::handle_migrate(const cvc::state_message &msg) {
   }
 }
 
-std::string exec_coordinator::serialize_process_for_migration(int pid) {
-  auto pi = sched_->get_process_info(pid);
+void exec_coordinator::ingest_posted(scheduler &s, const std::string &source_node,
+                                     int64_t source_pid, const std::string &process_data) {
+  int new_pid = -1;
+  try {
+    new_pid = ingest_migrated_process(s, process_data);
+  } catch (...) {
+    new_pid = -1; // an entry must not throw (post_control): the source hears it failed
+  }
+
+  // Send ack back to source
+  std::ostringstream os;
+  os << '{';
+  bool f = true;
+  jkv(os, "action", std::string("migrate-ack"), f);
+  jkv(os, "source_pid", source_pid, f);
+  jkv(os, "new_pid", static_cast<int64_t>(new_pid), f);
+  jkv(os, "target_node", node_id_, f);
+  jkv(os, "success", new_pid >= 0, f);
+  os << '}';
+
+  send_message(make_path(cluster_id_, "migrate." + source_node), MIME_EXEC_MIGRATE, os.str());
+
+  if (new_pid >= 0) {
+    std::lock_guard lk(stats_mu_);
+    ++stats_.migrations_completed;
+  } else {
+    std::lock_guard lk(stats_mu_);
+    ++stats_.migrations_failed;
+  }
+}
+
+std::string exec_coordinator::serialize_process_for_migration(scheduler &s, int pid) {
+  auto pi = s.get_process_info(pid);
   if (!pi)
     return {};
 
@@ -845,7 +926,7 @@ std::string exec_coordinator::serialize_process_for_migration(int pid) {
   jkv(os, "priority", pi->priority, f);
   // The floor goes with the base (docs/STATE_EXEC_LOCKS.md 7.2), and whether a host gave it; the
   // target applies its own policy's floor over it.
-  if (const std::optional<priority_info> prio = sched_->get_priority(pid)) {
+  if (const std::optional<priority_info> prio = s.get_priority(pid)) {
     jkv(os, "priority_floor", prio->floor, f);
     jkv(os, "priority_floor_explicit", prio->floor_explicit, f);
   }
@@ -865,8 +946,8 @@ std::string exec_coordinator::serialize_process_for_migration(int pid) {
   return os.str();
 }
 
-int exec_coordinator::ingest_migrated_process(const std::string &data) {
-  if (!sched_ || data.empty())
+int exec_coordinator::ingest_migrated_process(scheduler &s, const std::string &data) {
+  if (data.empty())
     return -1;
 
   std::string name, uid, gid;
@@ -901,7 +982,7 @@ int exec_coordinator::ingest_migrated_process(const std::string &data) {
     opts.priority_floor_explicit = floor_explicit;
   }
   // The target re-applies its own floor: no better base or floor than its policy allows (PR-11).
-  apply_priority_floor(opts);
+  apply_priority_floor(policy_snapshot(), opts);
   opts.uid = uid;
   opts.gid = gid;
   opts.max_memory = max_memory;
@@ -910,7 +991,7 @@ int exec_coordinator::ingest_migrated_process(const std::string &data) {
 
   // Submit a minimal process — in production, restoring the full
   // evaluator_state involves decode_evaluator_state from the tree
-  int pid = sched_->execute(std::string("nil"), opts);
+  int pid = s.execute(std::string("nil"), opts);
   return pid;
 }
 
@@ -972,11 +1053,11 @@ bool exec_coordinator::admin_pause(int pid, const std::string &node_id) {
     ++stats_.admin_commands;
   }
 
-  // Local operation
+  // Local operation: posted, not applied here, as admin_set_priority is (td 4.12)
   if (node_id.empty() || node_id == node_id_) {
     if (!sched_)
       return false;
-    return sched_->pause(pid);
+    return sched_->post_control(pid, control_of(control_cmd::kind::pause));
   }
 
   // Remote: send control message
@@ -1001,7 +1082,7 @@ bool exec_coordinator::admin_resume(int pid, const std::string &node_id) {
   if (node_id.empty() || node_id == node_id_) {
     if (!sched_)
       return false;
-    return sched_->resume(pid);
+    return sched_->post_control(pid, control_of(control_cmd::kind::resume));
   }
 
   std::ostringstream os;
@@ -1025,7 +1106,7 @@ bool exec_coordinator::admin_kill(int pid, const std::string &node_id) {
   if (node_id.empty() || node_id == node_id_) {
     if (!sched_)
       return false;
-    return sched_->kill(pid);
+    return sched_->post_control(pid, control_of(control_cmd::kind::kill));
   }
 
   std::ostringstream os;
@@ -1050,8 +1131,7 @@ bool exec_coordinator::admin_set_priority(int pid, const std::string &node_id, i
     if (!sched_)
       return false;
     // Posted, not applied here: the caller need not be the scheduler's thread (td B17).
-    control_cmd cmd;
-    cmd.what = control_cmd::kind::set_priority;
+    control_cmd cmd = control_of(control_cmd::kind::set_priority);
     cmd.value = priority;
     return sched_->post_control(pid, std::move(cmd));
   }
@@ -1131,27 +1211,26 @@ void exec_coordinator::handle_control(const cvc::state_message &msg) {
   if (!sched_)
     return;
 
+  // A bus thread is not the scheduler's: every command is posted and applied between its steps
+  // (post_control, td 4.12), fire and forget.
+  control_cmd cmd;
   if (command == "pause") {
-    sched_->pause(pid);
+    cmd = control_of(control_cmd::kind::pause);
   } else if (command == "resume") {
-    sched_->resume(pid);
+    cmd = control_of(control_cmd::kind::resume);
   } else if (command == "kill") {
-    sched_->kill(pid);
+    cmd = control_of(control_cmd::kind::kill);
   } else if (command == "send_signal") {
-    std::string signal;
-    xstr(json, "signal", signal);
-    sched_->send_signal(pid, signal);
+    cmd = control_of(control_cmd::kind::signal);
+    xstr(json, "signal", cmd.signal);
   } else if (command == "set_priority") {
-    // A bus thread is not the scheduler's: the change is posted and applied between its steps
-    // (post_control). pause, resume, kill and send_signal stay direct calls until td Stage 0.
-    int priority = 0;
-    if (xint(json, "priority", priority)) {
-      control_cmd cmd;
-      cmd.what = control_cmd::kind::set_priority;
-      cmd.value = priority;
-      sched_->post_control(pid, std::move(cmd));
-    }
+    cmd = control_of(control_cmd::kind::set_priority);
+    if (!xint(json, "priority", cmd.value))
+      return; // no priority: ignored
+  } else {
+    return;
   }
+  sched_->post_control(pid, std::move(cmd));
 }
 
 void exec_coordinator::handle_policy(const cvc::state_message &msg) {
