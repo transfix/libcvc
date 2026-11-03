@@ -739,7 +739,14 @@ or a path relative to the document, anchored at 0 and stretched to `amp`), or on
 registered (`cvc::world::register_terrain_generator`). The size defaults to 1200 and the resolution
 to one vertex per 5 m (at most 2049). A `heightfield:` source takes the same `generator:` keys, its
 layers adding on top. The `generated_world` node type uses the same generators (its `terrain:`,
-`city:` and `terrain_file:` props; `world_controls.ari` switches them live).
+`city:` and `terrain_file:` props; `world_controls.ari` switches them live). Its first world is
+made while the document loads; every later rebuild (a changed `world.*` key, Regenerate,
+Randomize) and every repaint (`world.color`) is a sliced task on the app's scheduler
+([`sliced_task.h`](../inc/cvc/core/sliced_task.h), as `fe_lab`'s jobs are): `cvc::world::world_builder`
+and `surface_painter` step it a few rows at a time, on the background pool natively and a few
+milliseconds a frame on single-threaded wasm, so the old world stays on screen until the new one is
+swapped in. `world.busy`, `world.progress` (0–100) and `world.phase` (the stage and its percent)
+follow it, and `world.request: stop` ends it, keeping the world shown.
 
 **The fast render path.** A big static world draws fast when it is a few merged meshes and its
 shadow maps are re-baked rarely and spent where the camera looks. These keys say so
