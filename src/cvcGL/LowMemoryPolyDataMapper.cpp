@@ -69,14 +69,20 @@
 #include <cvc/gl/LowMemoryPolyDataMapper.h>
 #include <vtkActor.h>
 #include <vtkCellType.h>
+#include <vtkCollection.h>
+#include <vtkInformation.h>
+#include <vtkInformationObjectBaseVectorKey.h>
 #include <vtkMath.h>
 #include <vtkObjectFactory.h>
+#include <vtkOpenGLRenderPass.h>
 #include <vtkOpenGLRenderWindow.h>
+#include <vtkOpenGLTexture.h>
 #include <vtkPolyDataMapper.h>
 #include <vtkProperty.h>
 #include <vtkRenderer.h>
 #include <vtkShaderProgram.h>
 #include <vtkShaderProperty.h>
+#include <vtkTexture.h>
 #include <vtkVersionMacros.h>
 
 // The replica is VTK 9.5.0's own agent code, so it is on only for an UNPATCHED
@@ -125,6 +131,35 @@ int policyFromEnvironment() {
 std::atomic<int> &policyStore() {
   static std::atomic<int> policy{policyFromEnvironment()};
   return policy;
+}
+
+bool passProgramsFromEnvironment() {
+  const char *v = std::getenv("CVCGL_LOWMEM_PASS_PROGRAMS");
+  return !(v && std::strcmp(v, "0") == 0);
+}
+
+std::atomic<bool> &passProgramsStore() {
+  static std::atomic<bool> on{passProgramsFromEnvironment()};
+  return on;
+}
+
+// The most pass sets one mapper keeps a shader for beside its current one. Shadows make two (the
+// bake's and the shadow pass's); a frame before the first bake, or a pick, adds one.
+constexpr std::size_t kMaxPassPrograms = 4;
+
+// Whether the render passes on the actor are exactly `passes`, in order. Allocates nothing: it runs
+// on every draw.
+bool actorHasPasses(vtkActor *act, const std::vector<const vtkObjectBase *> &passes) {
+  vtkInformation *info = act->GetPropertyKeys();
+  if (!info || !info->Has(vtkOpenGLRenderPass::RenderPasses()))
+    return passes.empty();
+  const int n = info->Length(vtkOpenGLRenderPass::RenderPasses());
+  if (n != static_cast<int>(passes.size()))
+    return false;
+  for (int i = 0; i < n; ++i)
+    if (info->Get(vtkOpenGLRenderPass::RenderPasses(), i) != passes[static_cast<std::size_t>(i)])
+      return false;
+  return true;
 }
 
 // Constant-initialised: no guard on the per-stage load.
@@ -209,6 +244,14 @@ LowMemoryPolyDataMapper::DrawPath LowMemoryPolyDataMapper::drawPath() {
 
 bool LowMemoryPolyDataMapper::replicaActive() { return CVC_GL_LOWMEM_REPLICA != 0; }
 
+void LowMemoryPolyDataMapper::setPassProgramsEnabled(bool on) {
+  passProgramsStore().store(on, std::memory_order_relaxed);
+}
+
+bool LowMemoryPolyDataMapper::passProgramsEnabled() {
+  return passProgramsStore().load(std::memory_order_relaxed);
+}
+
 void LowMemoryPolyDataMapper::setStageObserver(StageObserver observer) {
   g_stageObserver.store(observer, std::memory_order_relaxed);
 }
@@ -225,6 +268,9 @@ vtkShader *LowMemoryPolyDataMapper::GetShader(vtkShader::Type shaderType) {
 }
 
 void LowMemoryPolyDataMapper::RenderPieceStart(vtkRenderer *ren, vtkActor *act) {
+  // First the shader for this draw's render passes (pass programs, in the class header), so the
+  // tests below and VTK's own judge that one.
+  swapPassProgram(act);
   // VTK's low-memory mapper (9.5 through 9.7) never looks at the actor's shader
   // property once its program is built: IsShaderUpToDate ignores it, where the
   // classic mapper compares GetShaderMTime(). A replacement added or cleared
@@ -237,12 +283,137 @@ void LowMemoryPolyDataMapper::RenderPieceStart(vtkRenderer *ren, vtkActor *act) 
   if (vtkShaderProperty *sp = act->GetShaderProperty())
     if (sp->GetShaderMTime() > this->ShaderBuildTimeStamp.GetMTime())
       this->ShaderProgram = nullptr;
+  const vtkMTimeType built = this->ShaderBuildTimeStamp.GetMTime();
   Superclass::RenderPieceStart(ren, act);
+  if (this->ShaderBuildTimeStamp.GetMTime() != built) {
+    ++m_stats.shaderBuilds;
+    m_activeTextures = actorTextures(act);
+  }
+  // VTK rebuilds the current shader when the color or normal source changes (and the array
+  // declarations come with the data); the kept ones were built for the old ones.
+  const int color = static_cast<int>(this->ShaderColorSource);
+  const int normal = static_cast<int>(this->ShaderNormalSource);
+  if (color != m_colorSource || normal != m_normalSource || !sameDeclarations()) {
+    m_passPrograms.clear();
+    m_colorSource = color;
+    m_normalSource = normal;
+    m_declarations = this->ShaderDecls;
+  }
+}
+
+std::vector<const vtkObjectBase *> LowMemoryPolyDataMapper::actorPasses(vtkActor *act) {
+  std::vector<const vtkObjectBase *> passes;
+  vtkInformation *info = act->GetPropertyKeys();
+  if (!info || !info->Has(vtkOpenGLRenderPass::RenderPasses()))
+    return passes;
+  const int n = info->Length(vtkOpenGLRenderPass::RenderPasses());
+  passes.reserve(static_cast<std::size_t>(n));
+  for (int i = 0; i < n; ++i)
+    passes.push_back(info->Get(vtkOpenGLRenderPass::RenderPasses(), i));
+  return passes;
+}
+
+std::vector<const vtkTexture *> LowMemoryPolyDataMapper::actorTextures(vtkActor *act) {
+  // GetTextures(act)'s list without its names (a string apiece): it runs at every pass switch.
+  std::vector<const vtkTexture *> textures;
+  if (this->ColorTextureMap)
+    textures.push_back(this->InternalColorTexture);
+  if (vtkTexture *t = act->GetTexture())
+    textures.push_back(t);
+  for (const auto &kv : act->GetProperty()->GetAllTextures())
+    textures.push_back(kv.second);
+  return textures;
+}
+
+bool LowMemoryPolyDataMapper::sameDeclarations() const {
+  if (m_declarations.size() != this->ShaderDecls.size())
+    return false;
+  for (std::size_t i = 0; i < m_declarations.size(); ++i) {
+    const vtkOpenGLShaderDeclaration &a = m_declarations[i], &b = this->ShaderDecls[i];
+    if (a.QualifierType != b.QualifierType || a.PrecisionType != b.PrecisionType ||
+        a.DataType != b.DataType || a.AttributeType != b.AttributeType ||
+        a.VariableName.GetId() != b.VariableName.GetId())
+      return false;
+  }
+  return true;
+}
+
+void LowMemoryPolyDataMapper::swapPassProgram(vtkActor *act) {
+  if (actorHasPasses(act, m_activePasses))
+    return; // the passes the current shader was built for: VTK's test alone
+  const bool keep = passProgramsEnabled();
+  if (!keep) {
+    m_passPrograms.clear();
+  } else if (this->ShaderProgram) {
+    PassProgram kept;
+    kept.passes = m_activePasses;
+    kept.alive = m_activeAlive;
+    kept.program = this->ShaderProgram;
+    kept.vertex = this->Shaders[vtkShader::Vertex]->GetSource();
+    kept.fragment = this->Shaders[vtkShader::Fragment]->GetSource();
+    kept.geometry = this->Shaders[vtkShader::Geometry]->GetSource();
+    this->GLSLMods->InitTraversal();
+    while (vtkObject *mod = this->GLSLMods->GetNextItemAsObject())
+      kept.mods.emplace_back(mod);
+    kept.built = this->ShaderBuildTimeStamp;
+    kept.cache = m_cache;
+    kept.lookupStamp = m_builtStamp;
+    kept.textures = m_activeTextures;
+    for (auto it = m_passPrograms.begin(); it != m_passPrograms.end(); ++it)
+      if (it->passes == kept.passes) {
+        m_passPrograms.erase(it);
+        break;
+      }
+    if (m_passPrograms.size() >= kMaxPassPrograms)
+      m_passPrograms.erase(m_passPrograms.begin());
+    m_passPrograms.push_back(std::move(kept));
+  }
+  // This draw's passes are the current shader's from here: put back below, or built by VTK.
+  m_activePasses = actorPasses(act);
+  m_activeAlive.clear();
+  for (const vtkObjectBase *p : m_activePasses)
+    m_activeAlive.emplace_back(const_cast<vtkObjectBase *>(p));
+  if (!keep)
+    return;
+  auto it = m_passPrograms.begin();
+  while (it != m_passPrograms.end() && it->passes != m_activePasses)
+    ++it;
+  if (it == m_passPrograms.end())
+    return;
+  PassProgram found = std::move(*it);
+  m_passPrograms.erase(it);
+  // Still the shader VTK would build here? Its passes all alive (an address can be reused), and
+  // the actor's property and textures as they were (VTK's test reads neither).
+  for (std::size_t i = 0; i < found.passes.size(); ++i)
+    if (found.alive[i].GetPointer() != found.passes[i])
+      return;
+  if (act->GetProperty()->GetMTime() > found.built.GetMTime() ||
+      actorTextures(act) != found.textures)
+    return;
+  this->ShaderProgram = found.program;
+  this->Shaders[vtkShader::Vertex]->SetSource(found.vertex);
+  this->Shaders[vtkShader::Fragment]->SetSource(found.fragment);
+  this->Shaders[vtkShader::Geometry]->SetSource(found.geometry);
+  this->GLSLMods->RemoveAllItems();
+  for (const vtkSmartPointer<vtkObject> &mod : found.mods)
+    this->GLSLMods->AddItem(mod);
+  this->ShaderBuildTimeStamp = found.built;
+  m_cache = found.cache;
+  m_builtStamp = found.lookupStamp;
+  m_activeTextures = std::move(found.textures);
+  // VTK's test compares this draw's passes with the last draw's (and rebuilds on any difference):
+  // make the last draw's these, so it judges the shader by the passes' shader-stage MTimes.
+  if (vtkInformation *info = act->GetPropertyKeys())
+    this->LastRenderPassInfo->CopyEntry(info, vtkOpenGLRenderPass::RenderPasses());
+  else
+    this->LastRenderPassInfo->Clear();
+  ++m_stats.passProgramsRestored;
 }
 
 void LowMemoryPolyDataMapper::ReleaseGraphicsResources(vtkWindow *win) {
   // The cached program belongs to that window's context; look it up afresh.
   invalidateProgramCache();
+  m_passPrograms.clear();
   Superclass::ReleaseGraphicsResources(win);
 }
 

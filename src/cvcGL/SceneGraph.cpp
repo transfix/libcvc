@@ -1120,6 +1120,8 @@ public:
   // SceneGraph::setShadowFocus: each light's map aimed at this sphere (FocusRadius > 0).
   double Focus[3] = {0.0, 0.0, 0.0};
   double FocusRadius = 0.0;
+  // Bakes made (SceneGraph::shadowBakes).
+  std::uint64_t Bakes = 0;
 
   // GL objects made by a bake: the FBO and the shadow maps. None before the
   // first bake (or after a release), when the window may have no context yet.
@@ -1174,6 +1176,7 @@ public:
       m_bakedCasters = casters;
       ForceNext = false;
       if (this->GetNeedUpdate()) {
+        ++Bakes;
         noteBake(s);
         std::copy(Focus, Focus + 3, m_bakedFocus);
         m_bakedFocusRadius = FocusRadius;
@@ -1691,6 +1694,27 @@ public:
     return true;
   }
 
+  // The shader this pass writes (PreReplaceShaderValues) changes with which of the renderer's
+  // lights cast -- ShadowTextureUnits, which Render sets before its draws -- and with nothing else
+  // from frame to frame: the units, transforms, ranges and softness are uniforms. VTK's pass
+  // reports 0 here, so nothing told a mapper to rebuild when a light started or stopped casting
+  // (with the light count unchanged, which VTK's light mod does check) other than the bake's
+  // alternation, which rebuilt every caster's shader every frame. Now that a mapper keeps its
+  // shader per pass set (LowMemoryPolyDataMapper), say when that pattern last changed.
+  vtkMTimeType GetShaderStageMTime() override {
+    const std::vector<int> &units = this->ShadowTextureUnits;
+    bool same = m_casting.size() == units.size();
+    for (std::size_t i = 0; same && i < units.size(); ++i)
+      same = m_casting[i] == (units[i] >= 0);
+    if (!same) {
+      m_casting.resize(units.size());
+      for (std::size_t i = 0; i < units.size(); ++i)
+        m_casting[i] = units[i] >= 0;
+      m_shaderStage.Modified();
+    }
+    return m_shaderStage.GetMTime();
+  }
+
 protected:
   FilteredShadowMapPass() = default;
 
@@ -1752,6 +1776,8 @@ protected:
   }
 
 private:
+  std::vector<bool> m_casting; // per light: casting, when GetShaderStageMTime last looked
+  vtkTimeStamp m_shaderStage;  // when that changed
   FilteredShadowMapPass(const FilteredShadowMapPass &) = delete;
   void operator=(const FilteredShadowMapPass &) = delete;
 };
@@ -1872,6 +1898,11 @@ void SceneGraph::invalidateShadowBake() {
     b->ForceNext = true;
     requestRender();
   }
+}
+
+std::uint64_t SceneGraph::shadowBakes() const {
+  const auto *b = StridedShadowBaker::SafeDownCast(m_shadowBaker);
+  return b ? b->Bakes : 0;
 }
 
 void SceneGraph::setShadowResolution(int pixels) {

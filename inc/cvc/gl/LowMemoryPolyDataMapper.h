@@ -98,15 +98,38 @@
 // uninitialised (with DISABLE_SHIFT_SCALE nothing ever assigns them, so a
 // garbage "in use" byte made the mapper upload a shift/scale copy of the
 // positions).
+//
+// And it keeps one built shader per set of render passes it is drawn under
+// (pass programs). VTK builds a mapper's shader for the render passes on its
+// actor (vtkOpenGLRenderPass::RenderPasses) and rebuilds it whenever that set
+// differs from the last draw's -- so under shadows, where every caster is drawn
+// once by the shadow baker and once by the shadow pass, each caster rebuilt its
+// shader source twice a frame (a dozen-odd Substitute calls over ~16 KB, then
+// the shader cache's copy and MD5), the program found being the one it had two
+// draws before. On leaving a pass set this class keeps that set's shader --
+// sources, GLSL mods, program and build stamp -- and on coming back to it puts
+// them back, so VTK's own up-to-date test (the passes' shader-stage MTimes, the
+// mods, selection, PBR and the shader property, all against that program's build
+// stamp) decides as if the mapper had never left. A kept shader is dropped when a
+// pass it was built for is deleted, when the actor's property changed after it
+// was built or its textures differ (VTK's low-memory mapper never looks at
+// either; the alternation used to rebuild them anyway), and with every other one
+// kept when the mapper's color or normal source or its array declarations change
+// (VTK's rebuild of the current one does not reach the others).
 #ifndef CVC_GL_LOW_MEMORY_POLY_DATA_MAPPER_H
 #define CVC_GL_LOW_MEMORY_POLY_DATA_MAPPER_H
 
 #include <cstdint>
+#include <string>
+#include <vector>
 #include <vtkOpenGLLowMemoryPolyDataMapper.h>
 #include <vtkOpenGLShaderCache.h>
 #include <vtkShader.h>
 #include <vtkSmartPointer.h>
+#include <vtkTimeStamp.h>
 #include <vtkWeakPointer.h>
+
+class vtkTexture;
 
 namespace cvc {
 namespace gl {
@@ -131,6 +154,14 @@ public:
   // above). False means every path is the stock draw.
   static bool replicaActive();
 
+  // Whether every LowMemoryPolyDataMapper keeps a shader per render-pass set
+  // (pass programs, above). The initial value comes from
+  // CVCGL_LOWMEM_PASS_PROGRAMS (0 turns it off; default on), for A/B
+  // measurement and the tests. Turning it off drops nothing already kept until
+  // the next draw that would use it.
+  static void setPassProgramsEnabled(bool on);
+  static bool passProgramsEnabled();
+
   // Per-mapper counters, read and reset on the render thread.
   struct Stats {
     std::uint64_t draws = 0;                 // RenderPieceDraw calls
@@ -139,6 +170,8 @@ public:
     std::uint64_t coincidentFallbacks = 0;   // draws that ran all four for the depth offset
     std::uint64_t programLookups = 0;        // full shader-cache lookups (copy + MD5)
     std::uint64_t programLookupsSkipped = 0; // cached program re-bound instead
+    std::uint64_t shaderBuilds = 0;          // UpdateShaders runs (new shader source)
+    std::uint64_t passProgramsRestored = 0;  // a kept pass set's shader put back instead
   };
   const Stats &stats() const { return m_stats; }
   void resetStats() { m_stats = Stats{}; }
@@ -190,9 +223,42 @@ protected:
   void agentPreDraw(int t, vtkRenderer *ren, vtkActor *act);
   void agentDraw(int t, vtkRenderer *ren, vtkActor *act);
 
+  // Pass programs: the shader built for one set of render passes, kept while
+  // the mapper draws under another.
+  struct PassProgram {
+    std::vector<const vtkObjectBase *> passes;        // the set, in the actor's order
+    std::vector<vtkWeakPointer<vtkObjectBase>> alive; // the same passes: null once one is gone
+    vtkSmartPointer<vtkShaderProgram> program;
+    std::string vertex, fragment, geometry;       // this->Shaders' sources
+    std::vector<vtkSmartPointer<vtkObject>> mods; // this->GLSLMods' items
+    vtkTimeStamp built;                           // ShaderBuildTimeStamp
+    vtkWeakPointer<vtkOpenGLShaderCache> cache;   // readyProgram's m_cache ...
+    vtkMTimeType lookupStamp = 0;                 // ... and m_builtStamp
+    std::vector<const vtkTexture *> textures;     // the actor's, when built
+  };
+  // Before VTK's RenderPieceStart: keep the current shader if this draw's pass
+  // set is another, and put back the one kept for this draw's set if it is
+  // still good.
+  void swapPassProgram(vtkActor *act);
+  // The render passes on the actor (vtkOpenGLRenderPass::RenderPasses), in order.
+  static std::vector<const vtkObjectBase *> actorPasses(vtkActor *act);
+  std::vector<const vtkTexture *> actorTextures(vtkActor *act);
+  bool sameDeclarations() const;
+
   vtkWeakPointer<vtkOpenGLShaderCache> m_cache; // cache the program was last resolved from
   vtkMTimeType m_builtStamp = 0;                // ShaderBuildTimeStamp at that lookup
   Stats m_stats;
+  // The pass set the current shader was built for (and, weakly, its passes, taken
+  // while they were alive), the actor's textures when it was built, and the
+  // shaders kept for other sets.
+  std::vector<const vtkObjectBase *> m_activePasses;
+  std::vector<vtkWeakPointer<vtkObjectBase>> m_activeAlive;
+  std::vector<const vtkTexture *> m_activeTextures;
+  std::vector<PassProgram> m_passPrograms;
+  // What every shader depends on beside the passes, as the last draw left it: a
+  // change rebuilds the current shader (VTK) and makes the kept ones stale.
+  std::vector<vtkOpenGLShaderDeclaration> m_declarations;
+  int m_colorSource = -1, m_normalSource = -1;
 
 private:
   LowMemoryPolyDataMapper(const LowMemoryPolyDataMapper &) = delete;
