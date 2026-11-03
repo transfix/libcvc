@@ -7,9 +7,11 @@
 #include <cstdlib>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_exec/async_host.h> // HZ-4: a future
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/data_job.h>
+#include <cvc/state/state_exec/detail/lock_home.h> // HZ-4: a lock wait's type name
 #include <cvc/state/state_exec/evaluator.h>
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/intrinsics.h>
@@ -2131,4 +2133,85 @@ TEST_F(StateTreeIntrinsicsTest, HZ05_StateDeleteRemovesOnlyItsNodeChrooted) {
   EXPECT_EQ(std::get<int64_t>(call("state-sweep-expired", {}).v), 1); // doc.a.sib
   EXPECT_EQ(root.sweepExpired(), 1u);                                 // other.x
   EXPECT_NE(root.findDescendant("doc.a"), nullptr);
+}
+
+// HZ-3 (td 8.1, S0.2): state-data-set stores a copy. A list changed after it was stored, at any
+// depth, no longer changes what state-data-get returns.
+TEST_F(StateTreeIntrinsicsTest, HZ03_StateDataSetStoresACopy) {
+  const value_t l = make_list({value_t{int64_t{1}}, value_t{int64_t{2}}});
+  call("state-data-set", {std::string("k"), l});
+  (*std::get<list_ptr>(l.v))[0] = value_t{int64_t{9}};
+  EXPECT_EQ(to_string(call("state-data-get", {std::string("k")})), "(1 2)");
+
+  const value_t inner = make_list({value_t{int64_t{1}}});
+  call("state-data-set", {std::string("k2"), make_dict({{"in", inner}})});
+  std::get<list_ptr>(inner.v)->push_back(value_t{int64_t{2}});
+  const value_t got = call("state-data-get", {std::string("k2")});
+  const value_t *in = field(got, "in");
+  ASSERT_NE(in, nullptr);
+  EXPECT_EQ(to_string(*in), "(1)");
+}
+
+// HZ-4 (td 8.1, S0.2, S0-Q4): what state-data-set can't copy it refuses, at any depth: a closure,
+// a native function, a generator, a future, a lock form, a lock wait and a user-class instance, at
+// the root, in a list and in a dict. The error names the kind and the container it was found in,
+// and the node keeps what it had. An ordinary data_object and a built-in exception's class are
+// shared, not copied, and an exception read back is stored again.
+TEST_F(StateTreeIntrinsicsTest, HZ04_StateDataSetRefusesNestedCallables) {
+  stackless_evaluator ev(env);
+  value_t lock_wait;
+  {
+    auto obj = std::make_shared<data_object>();
+    obj->type_name = detail::kLockWaitType;
+    lock_wait = value_t(std::move(obj));
+  }
+  const value_t future = make_async_future(std::make_shared<async_call>("hz04", 1));
+  const std::pair<const char *, value_t> kinds[] = {
+      {"a closure", ev.evaluate_script("(lambda (x) x)")},
+      {"a native function", *env->lookup("state-get")},
+      {"a generator", ev.evaluate_script("(generator (lambda () (yield 1)))")},
+      {"a future", future},
+      {"a future", (*std::get<dict_ptr>(future.v))[1].second}, // the async_call handle by itself
+      {"a lock form", *env->lookup("with-lock")},
+      {"a lock wait", lock_wait},
+      {"an object instance", ev.evaluate_script("(begin (defclass Box) (Box))")},
+  };
+  call("state-data-set", {std::string("k"), make_list({value_t{int64_t{7}}})});
+  for (const auto &[kind, v] : kinds) {
+    const std::pair<value_t, const char *> placed[] = {
+        {v, ""},
+        {make_list({value_t{int64_t{1}}, v}), " (nested in a list)"},
+        {make_dict({{"a", value_t{int64_t{1}}}, {"f", v}}), " (nested in a dict)"},
+        {make_list({make_dict({{"f", v}})}), " (nested in a dict)"}, // the container it is in
+    };
+    for (const auto &[stored, where] : placed) {
+      const std::string expected = std::string("state-data-set: cannot store ") + kind + where;
+      SCOPED_TRACE(expected);
+      try {
+        call("state-data-set", {std::string("k"), stored});
+        ADD_FAILURE() << "stored";
+      } catch (const std::runtime_error &e) {
+        EXPECT_EQ(std::string(e.what()), expected);
+      }
+      EXPECT_EQ(to_string(call("state-data-get", {std::string("k")})), "(7)");
+    }
+  }
+
+  // Shared, in both directions: the stored list is a copy, but the data_object in it and the
+  // exception's class are the very ones the program has. Read back, the exception stores again.
+  auto host = std::make_shared<data_object>();
+  host->type_name = "hz04.host";
+  call("state-data-set",
+       {std::string("ok"),
+        make_list({value_t(host), make_exception(exception_class("ValueError"), "v")})});
+  const value_t got = call("state-data-get", {std::string("ok")});
+  const auto &gl = *std::get<list_ptr>(got.v);
+  ASSERT_EQ(gl.size(), 2u);
+  EXPECT_EQ(std::get<data_object_ptr>(gl[0].v).get(), host.get());
+  EXPECT_EQ(class_of_instance(gl[1]).get(), exception_class("ValueError").get());
+  EXPECT_EQ(exception_message(gl[1]), "v");
+  EXPECT_NO_THROW(call("state-data-set", {std::string("again"), gl[1]}));
+  const value_t again = call("state-data-get", {std::string("again")});
+  EXPECT_EQ(class_of_instance(again).get(), exception_class("ValueError").get());
+  EXPECT_EQ(exception_message(again), "v");
 }

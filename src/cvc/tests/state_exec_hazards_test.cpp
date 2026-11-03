@@ -62,9 +62,11 @@ struct tree_program {
   tree_program(const tree_program &) = delete;
   tree_program &operator=(const tree_program &) = delete;
 
+  // Each process gets a scope of its own over the world's environment, so two programs' top-level
+  // variables don't meet.
   int submit(const std::string &script) {
     execute_options opts;
-    opts.env = env;
+    opts.env = environment::extend(env);
     opts.max_time = kProcessCeiling;
     const int pid = sched.execute(script, opts);
     ictx.pid = pid;
@@ -187,4 +189,56 @@ TEST(Hazards, HZ06b_SetTreeSurvivesAncestorDelete) {
   ASSERT_TRUE(prog.step_until([&] { return prog.finished(writer); }));
   EXPECT_EQ(prog.outcome(writer), "done");
   std::printf("HZ-6b: after the job, p is %s\n", tree.findDescendant("p") ? "there" : "gone");
+}
+
+// HZ-3 (td 8.1, S0.2), in a program: a list changed after state-data-set stored it doesn't change
+// what state-data-get returns, whether the copy is made whole in the step (data.step_nodes 0) or a
+// node a step (1).
+TEST(Hazards, HZ03_StateDataSetStoresACopy) {
+  for (const std::size_t step_nodes : {std::size_t{0}, std::size_t{1}}) {
+    SCOPED_TRACE("data.step_nodes " + std::to_string(step_nodes));
+    cvc::app app;
+    tree_program prog(cvc::state::instance(app), step_nodes);
+    EXPECT_EQ(prog.run(R"((begin (set l (list 1 2)) (state-data-set "k" l) (set-nth l 0 9)
+                                 (state-data-get "k")))"),
+              "(1 2)");
+    EXPECT_EQ(prog.run(R"((begin (set l (list 1 (list 2))) (state-data-set "k" l)
+                                 (append (nth l 1) 3) (state-data-get "k")))"),
+              "(1 (2))");
+  }
+}
+
+// HZ-3b (S0.2): the copy is the writer's deep-data work. Storing a 1000-element list adds at least
+// 1000 data nodes to the writer's count; at data.step_nodes 1 it adds at least 900 data steps (a
+// slice a node, the last ones possibly merged), and at 0 none. A process stepped beside the writer
+// is charged nothing for it. The writer is compared with the same program storing nothing.
+TEST(Hazards, HZ03b_StateDataSetChargesTheWriter) {
+  const std::string build = loop(1000, "(append l i)", "(length l)");
+  for (const std::size_t step_nodes : {std::size_t{0}, std::size_t{1}}) {
+    SCOPED_TRACE("data.step_nodes " + std::to_string(step_nodes));
+    cvc::app app;
+    tree_program prog(cvc::state::instance(app), step_nodes);
+    const int plain = prog.submit("(begin (set l (list)) " + build + ")");
+    prog.sched.sync_run();
+    const int writer =
+        prog.submit("(begin (set l (list)) " + build + R"( (state-data-set "k" l) (length l)))");
+    const int other = prog.submit(loop(2000, "(set x (+ i 1))"));
+    prog.sched.sync_run();
+    ASSERT_EQ(prog.outcome(plain), "1000");
+    ASSERT_EQ(prog.outcome(writer), "1000");
+    ASSERT_EQ(prog.outcome(other), "2000");
+    const process_info p = prog.info(plain), w = prog.info(writer), o = prog.info(other);
+    std::printf("HZ-3b at step_nodes %zu: data_nodes %llu -> %llu, data_steps %llu -> %llu\n",
+                step_nodes, static_cast<unsigned long long>(p.data_nodes),
+                static_cast<unsigned long long>(w.data_nodes),
+                static_cast<unsigned long long>(p.data_steps),
+                static_cast<unsigned long long>(w.data_steps));
+    EXPECT_GE(w.data_nodes, p.data_nodes + 1000);
+    if (step_nodes == 1)
+      EXPECT_GE(w.data_steps, p.data_steps + 900);
+    else
+      EXPECT_EQ(w.data_steps, p.data_steps);
+    EXPECT_EQ(o.data_nodes, 0u);
+    EXPECT_EQ(o.data_steps, 0u);
+  }
 }
