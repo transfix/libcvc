@@ -25,6 +25,12 @@
 #                      own script against the libcvc (and cvcGL) built here, and
 #                      must render a document before it packs. (Their browser
 #                      host, arigl-web, is publish-cvcgl-wasm.yml's.)
+#   * arix / ariglx  — the scripting hosts: ari and arigl with CPython 3.12
+#                      embedded (src/ariadne_python). Built in the cp312 column's
+#                      job (Linux x86_64), by their recipes' own scripts against
+#                      that job's libcvc, cvcGL and python312, and each must run a
+#                      document's python: block through that job's pycvc before
+#                      it packs.
 # The interpreter column is a matrix dimension (`pyver`): every job carries
 # the base "311", and extra linux-x86_64 release jobs (matrix include) build
 # the cp312/cp313 columns. Those column jobs rebuild libcvc + cvcgl locally
@@ -193,6 +199,8 @@ jobs:
       libcvc_examples: ${{ steps.rev.outputs.libcvc_examples }}
       ari: ${{ steps.rev.outputs.ari }}
       arigl: ${{ steps.rev.outputs.arigl }}
+      arix: ${{ steps.rev.outputs.arix }}
+      ariglx: ${{ steps.rev.outputs.ariglx }}
       # One output per pycvc interpreter column; the build matrix selects the
       # right one via outputs[format('pycvc_cp{0}', matrix.pyver)].
       pycvc_cp311: ${{ steps.rev.outputs.pycvc_cp311 }}
@@ -235,6 +243,8 @@ jobs:
           emit libcvc-examples libcvc_examples
           emit ari            ari
           emit arigl          arigl
+          emit arix           arix
+          emit ariglx         ariglx
           emit pycvc-cp311    pycvc_cp311
           emit pycvc-cp312    pycvc_cp312
           emit pycvc-cp313    pycvc_cp313
@@ -981,6 +991,7 @@ jobs:
           fi
 
       - name: Build, pack & publish pycvc-cp${{ matrix.pyver }} [Linux]
+        id: pycvc-linux
         if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && steps.swig.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' }}
         shell: bash
         env:
@@ -1034,6 +1045,7 @@ jobs:
           fi
 
       - name: Build, pack & publish pycvc-gl-cp${{ matrix.pyver }} [Linux]
+        id: pycvcgl-linux
         if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && steps.swig.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' }}
         shell: bash
         env:
@@ -1189,6 +1201,142 @@ jobs:
               --token "$CVCPKG_TOKEN"
           else
             echo "dry-run: skipping arigl publish"
+          fi
+
+      - name: Build, pack & publish arix [Linux]
+        # `arix`, ari with an embedded Python (src/ari built with -DARI_WITH_PYTHON=ON and
+        # src/ariadne_python's engine), packaged apart from ari so ari stays Python-free. It embeds
+        # CPython 3.12, so it is built in the cp312 column's job: the recipe's own build.sh, against
+        # this job's libcvc ($STAGE) and python312 ($PY). Before it packs it must boot that Python,
+        # import numpy and pycvc, and run a document's python: block (its exports, an async one, a
+        # caught Python exception, the python tokens) through the pycvc this job just built.
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && steps.pycvc-linux.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' && matrix.pyver == '312' }}
+        shell: bash
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+          DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/stage"
+          DEPS="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
+          export CVC_SOURCE_DIR="$GITHUB_WORKSPACE"
+          export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-arix"
+          export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-arix"
+          export CVC_DEPS_PREFIX="$STAGE;$PY;$DEPS"
+          export CVC_BUILD_TYPE=Release
+          export CVC_JOBS="$(nproc)"
+          bash cvcpkg/recipes/arix/build.sh
+          test -x stage-arix/bin/arix
+          # Installed, arix finds its Python beside it (<prefix>/lib/python3.12); here the prefix is
+          # split, so PYTHONHOME names $PY, --python-path the pycvc just staged, and LD_LIBRARY_PATH
+          # libcvc's stage (the job's already has $PY/lib and numpy.libs).
+          export PYTHONHOME="$PY"
+          export LD_LIBRARY_PATH="$STAGE/lib:$DEPS/lib:${LD_LIBRARY_PATH:-}"
+          SITE="$GITHUB_WORKSPACE/stage-pycvc/lib/python3.12/site-packages"
+          arix=stage-arix/bin/arix
+          "$arix" python -c "import sys, numpy, _arihost; print(_arihost.host(), sys.version.split()[0], numpy.__version__)" \
+            | tee arix-python.txt
+          grep -qF "arix 3.12" arix-python.txt \
+            || { echo "::error::arix's embedded interpreter is not the python312 it was built with"; exit 1; }
+          "$arix" test --python-path "$SITE" src/ariadne_python/tests/python_block.ari | tee arix-test.txt
+          grep -qE '^ok +src/ariadne_python/tests/python_block.ari \(5 tests' arix-test.txt \
+            || { echo "::error::arix did not run the python: block test document"; exit 1; }
+          mkdir -p dist
+          cvcpkg pack cvcpkg/recipes/arix \
+            --from-prefix stage-arix \
+            --platform "${{ matrix.target.platform }}" \
+            --config release --link shared --local \
+            --cvc-revision ${{ needs.compute-revisions.outputs.arix }} \
+            --output-dir dist
+          if [ "$DO_PUBLISH" = "1" ]; then
+            if [ -z "${CVCPKG_TOKEN:-}" ]; then
+              echo "CVCPKG_TOKEN secret is required to publish"; exit 1
+            fi
+            cvcpkg publish arix \
+              --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
+              --platform "${{ matrix.target.platform }}" \
+              --config release --link shared --output-dir dist \
+              --token "$CVCPKG_TOKEN"
+          else
+            echo "dry-run: skipping arix publish"
+          fi
+
+      - name: Build, pack & publish ariglx [Linux]
+        # `ariglx`, arigl with an embedded Python (src/arigl built with -DARIGL_WITH_PYTHON=ON),
+        # packaged apart from arigl. Built in the cp312 column's job like arix, against this job's
+        # libcvc, the shared cvcGL (stage-cvcgl) and the VTK, imgui and SDL3 the cvcgl step linked,
+        # and python312. Last among this job's Linux steps: like arigl's (the cp311 job's), its smoke
+        # installs Mesa and Xvfb beside VTK's libglvnd in $PY, which nothing else may link. It must
+        # load a document with a python: block in a window, and run a Python program in place of
+        # the document: pycvc_gl.ariadne.Host() adopts the window, gives the document a function,
+        # and the host renders it (under Xvfb on llvmpipe).
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && steps.cvcgl-linux.outcome == 'success' && steps.pycvc-linux.outcome == 'success' && steps.pycvcgl-linux.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' && matrix.pyver == '312' }}
+        shell: bash
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+          DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/stage"
+          DEPS="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
+          CVCGL="$GITHUB_WORKSPACE/stage-cvcgl"
+          IMGUI="$GITHUB_WORKSPACE/prefix-imgui-cvcgl"
+          SDL3="$GITHUB_WORKSPACE/prefix-sdl3-cvcgl"
+          export CVC_SOURCE_DIR="$GITHUB_WORKSPACE"
+          export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-ariglx"
+          export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-ariglx"
+          export CVC_DEPS_PREFIX="$STAGE;$CVCGL;$PY;$IMGUI;$SDL3;$DEPS"
+          export CVC_BUILD_TYPE=Release
+          export CVC_JOBS="$(nproc)"
+          bash cvcpkg/recipes/ariglx/build.sh
+          test -x stage-ariglx/bin/ariglx
+          # cvcpkg's Mesa and Xvfb, as in the arigl step (and, as there, installed without the
+          # job's LD_LIBRARY_PATH: cvcpkg's own Python must not load $PY/lib's libz).
+          env -u LD_LIBRARY_PATH cvcpkg install xvfb mesa --prefix "$PY" --config release --link shared
+          "$PY/bin/Xvfb" :99 -screen 0 1280x1024x24 >xvfb.log 2>&1 &
+          xvfb=$!
+          trap 'kill "$xvfb" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 50); do
+            [ -e /tmp/.X11-unix/X99 ] && break
+            sleep 0.2
+          done
+          [ -e /tmp/.X11-unix/X99 ] \
+            || { echo "::error::cvcpkg's Xvfb did not come up on :99"; cat xvfb.log; exit 1; }
+          export DISPLAY=:99 LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe
+          # The prefix is split here (installed, it is one): PYTHONHOME names $PY, --python-path
+          # the pycvc and pycvc_gl just staged, LD_LIBRARY_PATH the libraries' six prefixes.
+          export PYTHONHOME="$PY"
+          export LD_LIBRARY_PATH="$STAGE/lib:$CVCGL/lib:$PY/lib:$IMGUI/lib:$SDL3/lib:$DEPS/lib:${LD_LIBRARY_PATH:-}"
+          PYPATH=(--python-path "$GITHUB_WORKSPACE/stage-pycvcgl/lib/python3.12/site-packages"
+                  --python-path "$GITHUB_WORKSPACE/stage-pycvc/lib/python3.12/site-packages")
+          ariglx=stage-ariglx/bin/ariglx
+          "$ariglx" check "${PYPATH[@]}" src/ariadne_python/tests/python_block.ari
+          "$ariglx" snapshot --frames 3 --png ariglx-app.png "${PYPATH[@]}" \
+            src/ariadne_python/tests/app.py | tee ariglx-app.txt
+          grep -qF "app.py: result 14" ariglx-app.txt \
+            || { echo "::error::ariglx did not run the Python program's document"; exit 1; }
+          test -s ariglx-app.png \
+            || { echo "::error::ariglx rendered no snapshot of the Python program's document"; exit 1; }
+          mkdir -p dist
+          cvcpkg pack cvcpkg/recipes/ariglx \
+            --from-prefix stage-ariglx \
+            --platform "${{ matrix.target.platform }}" \
+            --config release --link shared --local \
+            --cvc-revision ${{ needs.compute-revisions.outputs.ariglx }} \
+            --output-dir dist
+          if [ "$DO_PUBLISH" = "1" ]; then
+            if [ -z "${CVCPKG_TOKEN:-}" ]; then
+              echo "CVCPKG_TOKEN secret is required to publish"; exit 1
+            fi
+            cvcpkg publish ariglx \
+              --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
+              --platform "${{ matrix.target.platform }}" \
+              --config release --link shared --output-dir dist \
+              --token "$CVCPKG_TOKEN"
+          else
+            echo "dry-run: skipping ariglx publish"
           fi
 
       - name: Build, pack & publish cvcgl [Windows]

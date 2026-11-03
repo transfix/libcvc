@@ -5,8 +5,9 @@
 # compiles the engine (python_engine.cpp, with ariadne_python.py built in) into an executable that
 # already links cvc, links libpython (Python3 Development.Embed) and defines CVC_ARIADNE_PYTHON, so
 # the host's main.cpp turns on its Python. src/ari and src/arigl include this file, in-tree and in a
-# standalone recipe build alike. The engine finds the Python it runs: PYTHONHOME; an installed
-# prefix beside the executable; else the one found here, compiled in as CVC_ARIADNE_PYTHON_HOME.
+# standalone recipe build alike (the arix and ariglx cvcpkg recipes). The engine finds the Python it
+# runs: PYTHONHOME; an installed prefix beside the executable; else, in-tree, the one found here,
+# compiled in as CVC_ARIADNE_PYTHON_HOME.
 set(_CVC_ARIADNE_PYTHON_DIR "${CMAKE_CURRENT_LIST_DIR}")
 
 #   cvc_find_ariadne_python(<required>)
@@ -37,7 +38,9 @@ function(cvc_ariadne_python_host target)
   target_include_directories(${target} PRIVATE "${_CVC_ARIADNE_PYTHON_DIR}" "${_gen}")
   target_link_libraries(${target} PRIVATE Python3::Python)
   target_compile_definitions(${target} PRIVATE CVC_ARIADNE_PYTHON)
-  if(_rc EQUAL 0 AND _home)
+  # In-tree only: a recipe's build prefix is gone once it packs, and the installed host finds the
+  # prefix's Python beside it instead (python_engine.cpp, python_home).
+  if(_rc EQUAL 0 AND _home AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
     file(TO_CMAKE_PATH "${_home}" _home)
     target_compile_definitions(${target} PRIVATE "CVC_ARIADNE_PYTHON_HOME=\"${_home}\"")
   endif()

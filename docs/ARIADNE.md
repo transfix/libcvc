@@ -2377,6 +2377,11 @@ its site-packages: pycvc, pycvc_gl, numpy, ...), else the one the host was built
 `PYTHONHOME` and `PYTHONPATH` work as for `python3`. There is one interpreter per process: numpy
 and the SWIG modules are not sub-interpreter safe.
 
+Each is a cvcpkg package of its own (Linux), so the stock hosts stay Python-free:
+`cvcpkg install ariglx` brings `python312`, `numpy-cp312`, `pycvc-cp312` and `pycvc-gl-cp312` into
+the same prefix, and `ariglx` finds them there. `arix` brings pycvc but not pycvc_gl; install
+`pycvc-gl-cp312` too for a Python program, whose `Host` is pycvc_gl's.
+
 **A document's `python:` block.**
 
 ```yaml
@@ -2977,8 +2982,9 @@ below (G17–G21 in the internal gap report) are tracked for reconciliation.
   [roadmap](roadmap/ARIADNE_SCRIPTING_HOSTS.md)). Only the top document's `python:` block runs: a
   `load:`ed module's is not run yet. A Python program runs in a window, offscreen or in `arix`, not
   under `ariglx --terminal`, and its embedded `Host.load()` from inside a frame raises (load before
-  `run()`). There is no `ariglx-web` (the browser) and no `arisrvx` yet, and no cvcpkg packages for
-  `arix` / `ariglx`: build them in-tree with the bindings (`-DCVC_BUILD_PYCVC=ON`).
+  `run()`). There is no `ariglx-web` (the browser) and no `arisrvx` yet. The `arix` and `ariglx`
+  packages are Linux-only, where `pycvc-cp312` and `pycvc-gl-cp312` are; elsewhere build them
+  in-tree with the bindings (`-DCVC_BUILD_PYCVC=ON`).
 
 - **Sign-in checks an ID token's claims, not its signature** (§10.5): the token comes straight from
   the token endpoint over TLS. A sign-in kept in a `--credential-store` file is picked up only when
