@@ -802,6 +802,8 @@ struct ConferenceSession {
     }
     std::fprintf(stderr, "arigl: conference: %s %s as '%s' (room '%s')\n",
                  ok ? "connected to" : "could NOT reach relay", relay, self.c_str(), room.c_str());
+    // Messages to the relay (the chat verbs' requests, room_chat.h) leave through the shard.
+    shard->set_transport(tp_);
     if (const char *laneEnv = std::getenv("CVC_ARIADNE_LANE");
         laneEnv && *laneEnv && std::string(laneEnv) != "0") {
       if (!cvc::fast_lane_rtc_available()) {
@@ -1400,6 +1402,8 @@ struct ConferenceSession {
     for (publisher &p : pubs_)
       p.sub.reset();
     lane_.reset(); // its callbacks feed inbox_ and the shard: gone before either
+    if (shard)
+      shard->set_transport(nullptr); // a chat request after this stays local
     if (stop_)
       stop_(); // joins the transport reader thread (idempotent: _running.exchange(false))
   }
@@ -1935,13 +1939,18 @@ int run_window(const ari::HostOptions &o) {
       conf.pump(); // publish this frame's room-tree + media to the relay (run mode does this via
                    // the input pump, set below; a snapshot of a live conference must pump too)
       rt.frame(1.0 / 30.0);
+      // (quit code) ends the snapshot at the frame it quit on, as ari's does.
+      const bool last = f + 1 == frames || rt.app_runtime().should_close();
       // The last frame waits for the document's requests and pictures (§5.11), if it has any out.
-      if (f + 1 == frames)
-        settle = o.net.enabled || rt.app_runtime().runtime().media_stale();
-      if (f + 1 == frames && !settle)
+      if (last)
+        settle = !rt.app_runtime().should_close() &&
+                 (o.net.enabled || rt.app_runtime().runtime().media_stale());
+      if (last && !settle)
         view.writePNG(o.png.c_str()); // renders and writes the last frame
       else
         rt.render();
+      if (last)
+        break;
       std::this_thread::sleep_until(start + period);
     }
     if (settle) { // the frame shows what the document's requests brought back
