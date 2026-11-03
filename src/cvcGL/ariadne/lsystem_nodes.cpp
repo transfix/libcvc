@@ -444,15 +444,15 @@ constexpr int AREA_STRIDE = 60;    // frames between looks at the ground's exten
 constexpr int FADE_FRAMES = 45;    // a cloud's near <-> far crossfade
 const char *CLOUD_INPUTS = "cloud_sky"; // the shared shader inputs' key on a mesh
 
-// Where the deck's code goes in a lit mesh's fragment shader (vertexVC, diffuse and specular are
-// there whenever a mesh is lit by the scene's lights). After VTK's lighting: a replacement of
-// //VTK::Light::Impl is applied before VTK fills the anchor in, and VTK's lighting code ends with
-// the anchor again, so the text after it runs once the lighting sum is written. That is not so in
-// a shadow caster's depth pass, where the depth VTK writes there follows the anchor too; a caster
-// rewrites VTK's lighting sum itself instead (cvc::gl::GeometryNode::
-// addFragmentShaderPostReplacement).
-const char *LIGHT_IMPL = "//VTK::Light::Impl";
-const char *LIGHT_SUM = "gl_FragData[0] = vec4(ambientColor + diffuse + specular, opacity);";
+// Where the deck's code goes in a lit mesh's fragment shader (vertexVC is there whenever a mesh
+// is lit by the scene's lights). A receiver rewrites VTK's lighting sum, which both its mappers
+// write (as gl_FragData[0] or fragOutput0), after VTK has generated it
+// (cvc::gl::GeometryNode::addFragmentShaderPostReplacement): only there are the direct terms,
+// diffuse and specular, apart (the WebGL2 mapper scopes them to its lighting block). The shells
+// overwrite the colour after the lighting: a replacement of //VTK::Light::Impl is applied before
+// VTK fills the anchor in, and VTK's lighting code ends with the anchor again, so the text after
+// it runs once the colour is written.
+const char *LIGHT_SUM = "vec4(ambientColor + diffuse + specular, opacity)";
 
 // A receiver: the deck's shade at the base-plane point of the fragment's sun ray, on the direct
 // light. cloudVCWC = view -> world, cloudXf = (wind x, wind y, 1 / period, deck base),
@@ -470,12 +470,8 @@ float cloudShade(vec3 pVC) {
   return mix(1.0, texture(cloudShadeTex, b * cloudXf.z).r, cloudShadeOn);
 }
 )";
-const char *SHADE_AFTER = R"(//VTK::Light::Impl
-  gl_FragData[0].rgb -= (1.0 - cloudShade(vertexVC.xyz)) * (diffuse + specular);
-)";
 const char *SHADE_SUM =
-    "gl_FragData[0] = vec4(ambientColor + cloudShade(vertexVC.xyz) * (diffuse + specular), "
-    "opacity);";
+    "vec4(ambientColor + cloudShade(vertexVC.xyz) * (diffuse + specular), opacity)";
 
 // The far shells: each fragment reads its slice of the coarse opacity and turns it into the
 // slice's optical depth along the view ray (as the volume would integrate it), lightens with
@@ -625,10 +621,7 @@ void layDeck(SkyRT &r) {
 void wireReceivers(SkyRT &r, GraphicsNode &g) {
   if (auto *m = dynamic_cast<GeometryNode *>(&g); m && !m->hasSharedShaderInputs(CLOUD_INPUTS)) {
     m->addFragmentShaderReplacement("//VTK::Light::Dec", SHADE_DEC);
-    if (m->castsShadow())
-      m->addFragmentShaderPostReplacement(LIGHT_SUM, SHADE_SUM);
-    else
-      m->addFragmentShaderReplacement(LIGHT_IMPL, SHADE_AFTER);
+    m->addFragmentShaderPostReplacement(LIGHT_SUM, SHADE_SUM);
     m->setSharedShaderInputs(CLOUD_INPUTS, r.inputs);
   }
   for (const std::shared_ptr<GraphicsNode> &c : g.getGraphicsChildren())
@@ -837,7 +830,7 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
       shells->setOpacity(0.99); // the translucent pass; the shader writes the real alpha
       shells->setSpecular(0.0);
       shells->addFragmentShaderReplacement("//VTK::Light::Dec", shellDec());
-      shells->addFragmentShaderReplacement(LIGHT_IMPL, SHELL_AFTER);
+      shells->addFragmentShaderReplacement("//VTK::Light::Impl", SHELL_AFTER);
       shells->setSharedShaderInputs(CLOUD_INPUTS, rt->inputs);
       shells->setVisible(false); // until its opacity is on the GPU
       rt->shells = shells;

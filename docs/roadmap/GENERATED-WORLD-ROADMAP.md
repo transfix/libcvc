@@ -232,8 +232,10 @@ The conference is the world's second consumer. Peers must see the same world and
       the roads, the props. A periodic mask is read at the fragment's base-plane point along the
       sun and scales the direct light only; the ground's texture is untouched. `GeometryNode` gained
       shared shader inputs (one set that many meshes read at draw time; the deck updates it each
-      frame) and fragment replacements applied after VTK's own (a shadow caster rewrites VTK's
-      lighting sum, where code after `//VTK::Light::Impl` would follow its depth pass's write).
+      frame) and fragment replacements applied after VTK's own: a receiver rewrites the lighting
+      sum VTK generates, the one place both mappers keep the direct terms apart (the WebGL2 mapper
+      scopes them to its lighting block). Checked on that mapper natively
+      (`CVCGL_LOWMEM_MAPPER=force`): it applies the replacement and compiles the deck's shaders.
     - Coverage: a pool of near `VolumeNode`s (6 in the terrain lab, at most 8) on the clouds nearest
       the camera, and one mesh of 10 translucent shells for the rest, sampling a coarse opacity
       texture as the optical depth along the view ray. A cloud passing between the two
@@ -249,9 +251,10 @@ The conference is the world's second consumer. Peers must see the same world and
       third frame. In the browser, expect 2-3x the CPU on single-threaded wasm (about 1 ms a frame,
       4 ms once a second) and, on the GPU, up to 6 small volume ray casts plus 10 shell layers'
       fill. Not yet measured in a browser.
-  - Still to do for the clouds: measure in Edge and Firefox, and confirm the WebGL2 mapper takes
-    the post-VTK replacement (a shadow-casting receiver uses it; if it does not, those meshes go
-    unshaded, nothing breaks). The shells streak at grazing angles near the horizon: fade them by
+  - Still to do for the clouds: measure in Edge and Firefox (the GLSL ES compile is unchecked; the
+    forced WebGL2 mapper natively compiles GLSL 150). With `CVCGL_LOWMEM_MAPPER=force` natively the
+    ground itself fails to compile: `terrain_bump` picks the mapper's normal by `__EMSCRIPTEN__`,
+    not by the mapper (in the browser it is right). The shells streak at grazing angles near the horizon: fade them by
     view angle, or add the billboard rung. The near volumes are flat white beside the shells' height
     shading: give the volumes the shells' top light. Clouds past the world's edge are kept short of
     the horizon, because the deck is in the scene's bounds, which the camera fits and clips to; a
