@@ -46,6 +46,7 @@
 #include <cvc/ariadne/conference/room_write_gate.h> // bound writes: a client writes only itself
 #include <cvc/ariadne/holon.h>                      // server-authoritative avatar holon (H1)
 #include <cvc/ariadne/holon_sync.h> // server_pump: intent -> holon -> authoritative pose
+#include <cvc/ariadne/host_cli.h>   // --set KEY=VALUE, as ari and arigl take it
 #include <cvc/ariadne/stream/stream_relay.h>
 #include <cvc/core/app.h>
 #include <cvc/media/media_router.h> // protocol-agnostic media hub (WS + gRPC + future protocols)
@@ -60,6 +61,7 @@
 #endif
 #include <fstream>
 #include <initializer_list>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -154,6 +156,10 @@ int main(int argc, char **argv) {
   //                              filter, so its admit snapshot is filtered too; at most N ms, then
   //                              unfiltered (default 2000; 0 = off; only with an area of interest)
   //   --scene default|large      the seeded scene (large: a 100 m plane of LOD meshes)
+  // Debugging (repeatable, in order):
+  //   --set KEY=VALUE            write VALUE to the state key KEY (from the app's root, e.g.
+  //                              conf.rooms.main.topic) once the room tree is up, before any
+  //                              client connects; a conf.* key reaches every client
   // Bound writes (not an S7 switch, so --s7 off leaves it on):
   //   --bind-writes on|off       each client connection speaks only as the pid of its Hello, held
   //                              by one live connection at a time, and writes only its own
@@ -220,6 +226,7 @@ int main(int argc, char **argv) {
               admissionHoldArg = "2000";
   std::string laneListen, laneAdvertise, laneMediaArg = "off";
   std::string avatarEnergyArg = "on", avatarEmptyArg = "rest";
+  std::vector<std::pair<std::string, std::string>> stateSets; // --set KEY=VALUE
   for (int i = 1; i < argc; ++i) {
     const char *a = argv[i];
     auto next = [&](const char *d) { return (i + 1 < argc) ? argv[++i] : d; };
@@ -279,6 +286,15 @@ int main(int argc, char **argv) {
       avatarEnergyArg = next("on");
     else if (!std::strcmp(a, "--avatar-empty"))
       avatarEmptyArg = next("rest");
+    else if (!std::strcmp(a, "--set")) {
+      std::pair<std::string, std::string> kv;
+      const char *v = next("");
+      if (!cvc::ariadne::parse_state_set(v, kv)) {
+        std::fprintf(stderr, "[arisrv] --set expects KEY=VALUE, got '%s'\n", v);
+        return 2;
+      }
+      stateSets.push_back(std::move(kv));
+    }
   }
   if (aoiMode.empty())
     aoiMode = scene == "large" ? "hall" : "conference";
@@ -442,6 +458,7 @@ int main(int argc, char **argv) {
   shard.attach();
   shard.install_as_default();
   state_tp.register_shard(&shard);
+  cvc::ariadne::apply_state_sets(app, "", stateSets); // --set, before any client connects
 
 #if CVC_ENABLE_WS
   // WebSocket control plane + the WS<->gRPC bridge, so BROWSER (wasm) clients join the SAME room as
@@ -570,7 +587,8 @@ int main(int argc, char **argv) {
   // at most ~17 ms before the server integrates it. Each step the pose relay sends every
   // viewer that is due its snapshot of the poses it sees (room_pose_relay: 60, 30 or 20 Hz
   // by its round trip); the tree's copy of the poses is written every kTreePoseSteps steps
-  // (1 Hz), for late joiners and the log.
+  // (1 Hz), for late joiners and the log -- and an avatar standing still is re-stamped there only
+  // every kTreePoseHeartbeatS, since the stream's own heartbeat is what keeps clients' clocks.
   cvc::ariadne::holon server_holon(cvc::ariadne::holon_role::server,
                                    cvc::ariadne::room_holon_config());
   std::printf("[arisrv] avatar physics: %s\n",
@@ -578,6 +596,7 @@ int main(int argc, char **argv) {
   constexpr int kRoomSubsteps = 12;
   constexpr auto kRoomStep = std::chrono::microseconds(16667); // x kRoomSubsteps = the 200 ms pass
   constexpr std::uint64_t kTreePoseSteps = 60;
+  constexpr double kTreePoseHeartbeatS = 5.0;
   cvc::ariadne::conference::room_pose_relay::config pose_cfg;
   pose_cfg.heartbeat_ticks =
       static_cast<std::uint64_t>(std::llround(1.0 / server_holon.clock().fixed_dt()));
@@ -591,7 +610,8 @@ int main(int argc, char **argv) {
 #endif
   std::uint64_t room_steps = 0;
   const auto pump_room = [&] {
-    cvc::ariadne::server_pump(server_holon, app, room, -1.0, room_steps % kTreePoseSteps == 0);
+    cvc::ariadne::server_pump(server_holon, app, room, -1.0, room_steps % kTreePoseSteps == 0,
+                              kTreePoseHeartbeatS);
   };
   // Fan the relay's OWN room-tree writes -- the room_leave retractions, room_relay_tick's
   // per-stream "ready" markers, the holon's poses -- out to EVERY client on BOTH transports.
@@ -662,12 +682,16 @@ int main(int argc, char **argv) {
   std::uint64_t lastUnauthorized = 0;  // connections refused for the room token, at the last log
   std::uint64_t lastProofsRefused = 0; // device proofs refused (another key, a bad signature)
   // Link stats (~1 s): every connection on both planes reports its traffic and Ping/Pong round
-  // trip (state_transport::link_reports); the rate meter turns the counters into rates. The relay
-  // publishes its view of each participant (net.relay.*) and its totals (server.net.*) into the
-  // room tree, and logs them: every link each ~5 s with CVC_ARISRV_ROOM_DEBUG, a totals line each
-  // minute otherwise. Links that are not participants (peer servers, delegation) are logged too.
+  // trip (state_transport::link_reports). Every net_publish_period_s (room_net.h) the rate meter
+  // turns the counters into rates over that window; the relay publishes its view of each
+  // participant (net.relay.*) and its totals (server.net.*) into the room tree, and logs them:
+  // every link each time with CVC_ARISRV_ROOM_DEBUG, a totals line each minute otherwise. Links
+  // that are not participants (peer servers, delegation) are logged too.
   cvc::state_link_rate_meter link_meter;
   int net_ticks = 0;
+  // The meters' window in 200 ms passes: a whole number of the ~1 s link-stat steps.
+  const long netPublishSteps = std::lround(cvc::ariadne::conference::net_publish_period_s);
+  const int netPublishTicks = 5 * static_cast<int>(std::max(1L, netPublishSteps));
   const auto net_start = std::chrono::steady_clock::now();
   // The shared 3D scene (H1 slice 5, roadmap §5g): the relay is its sole writer and seeds the MVP
   // environment (ground + a reference box under a sun) once -- or, with --scene large, a 100 m
@@ -783,7 +807,10 @@ int main(int argc, char **argv) {
 #endif
       const double now_s =
           std::chrono::duration<double>(std::chrono::steady_clock::now() - net_start).count();
-      const auto rates = link_meter.update(links, now_s);
+      const bool publish = net_ticks % netPublishTicks == 0;
+      std::map<std::string, cvc::state_link_rate_meter::rate> rates;
+      if (publish)
+        rates = link_meter.update(links, now_s);
       cvc::ariadne::conference::server_net total;
       std::set<std::string> present;
       for (const auto &p : cvc::ariadne::conference::room_roster(app, room))
@@ -799,8 +826,9 @@ int main(int argc, char **argv) {
         // another connection claiming it is not that participant.
         if (!r.holds_id || !present.count(r.remote_node_id))
           continue;
-        cvc::ariadne::conference::write_relay_net(app, room, r.remote_node_id,
-                                                  {r.stats.rtt_ms, in_kbps, out_kbps});
+        if (publish)
+          cvc::ariadne::conference::write_relay_net(app, room, r.remote_node_id,
+                                                    {r.stats.rtt_ms, in_kbps, out_kbps});
         if (r.stats.rtt_ms >= 0.0) // its pose snapshot rate
           pose_relay.set_rtt(r.remote_node_id, r.stats.rtt_ms);
       }
@@ -829,7 +857,8 @@ int main(int argc, char **argv) {
           std::fflush(stdout);
         }
       }
-      cvc::ariadne::conference::write_server_net(app, room, total);
+      if (publish)
+        cvc::ariadne::conference::write_server_net(app, room, total);
       // A client writing outside its own participant, or as another peer, is refused: say so (at
       // most every ~5 s) whenever the count has grown.
       if (net_ticks % 25 == 0) {
@@ -871,8 +900,8 @@ int main(int argc, char **argv) {
           lastProofsRefused = proofsRefused;
         }
       }
-      const bool detail = room_debug && net_ticks % 25 == 0;
-      if (detail || net_ticks % 300 == 0) {
+      const bool detail = room_debug && publish;
+      if (detail || (publish && net_ticks % 300 < netPublishTicks)) {
         std::printf("[arisrv] net: %d link(s) | in %.1f kb/s | out %.1f kb/s\n", total.links,
                     total.in_kbps, total.out_kbps);
         if (detail)

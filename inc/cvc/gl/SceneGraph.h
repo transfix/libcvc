@@ -217,6 +217,12 @@ public:
   // when selectLOD() reports rung changes; a no-op with shadows off.
   void invalidateShadowBake();
 
+  // How many times the shadow maps have been baked since shadows were last turned
+  // on (0 with them off). A bake re-renders every caster from every casting
+  // light, so a scene where nothing moves should add none per frame: for the
+  // tests, and for telling a frame's cost apart.
+  std::uint64_t shadowBakes() const;
+
   // Shadow-map texture resolution (pixels per side). VTK defaults to a low 256,
   // which aliases thin casters (a forest of trunks/needles shows torn, "inverted"
   // shadows) and speckles broad surfaces with self-shadow acne. Larger is crisper

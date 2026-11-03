@@ -769,13 +769,18 @@ each point.
 **Generated terrain.** `source: { terrain: { generator, size, resolution, seed, amp, file,
 preset } }` draws a `cvc::world` terrain generator's ground as such a heightfield: `fbm` (the
 analytic relief the terrain lab stands on; the default), `dem` (an elevation `.npy` at `file`, a URI
-or a path relative to the document, anchored at 0 and stretched to `amp`), or one a host
-registered (`cvc::world::register_terrain_generator`). The size defaults to 1200 and the resolution
-to one vertex per 5 m (at most 2049). A `heightfield:` source takes the same `generator:` keys, its
+or a path relative to the document, stretched to `amp`), or one a host registered
+(`cvc::world::register_terrain_generator`). Sea level is 0 m: every generator lays its ground with
+0 m as the shoreline, its floor `world_sea_share` (34/90) of the relief below it (the island preset
+stands its dome in the sea), so `water_level` raises or lowers the sea from there and a lower or
+higher relief never floods or drains the world. The size defaults to 1200 and the resolution to one
+vertex per 5 m (at most 2049). A `heightfield:` source takes the same `generator:` keys, its
 layers adding on top. The `generated_world` node type uses the same generators (its `terrain:`,
 `city:` and `terrain_file:` props; `world_controls.ari` switches them live). Its first world is
-made while the document loads; every later rebuild (a changed `world.*` key, Regenerate,
-Randomize) and every repaint (`world.color`) is a sliced task on the app's scheduler
+made while the document loads. An edit to a `world.*` key then waits (`world.pending` is 1) until
+Regenerate (`world.request: regenerate`) or Randomize, so several settings change in one rebuild;
+`world.auto` (the node's `auto_regenerate`) rebuilds after every edit instead. Every rebuild and
+every repaint (`world.color`, at once) is a sliced task on the app's scheduler
 ([`sliced_task.h`](../inc/cvc/core/sliced_task.h), as `fe_lab`'s jobs are): `cvc::world::world_builder`
 and `surface_painter` step it a few rows at a time, on the background pool natively and a few
 milliseconds a frame on single-threaded wasm, so the old world stays on screen until the new one is
@@ -1588,6 +1593,40 @@ this for every one.
   flow, §5.8), open as anywhere else.
 - **Labels.** A slider's, combo's or field's label stays in view: in a window that fits its
   widgets, a widget that would push its label past the view's edge is narrowed to leave it room.
+- **Scrolling with a finger.** On a touch screen a finger drags a window's content along, its
+  scroll bar untouched, and a finger that lifts while moving leaves the content gliding at its
+  speed until friction stops it or it meets an end. This works in every window, child pane,
+  `text_view:` and drop-down list that scrolls, and a press on content that is still gliding
+  stops it (that press is not a tap). A drag scrolls when it starts on empty space, text, or a
+  widget worked by a tap (a button, a checkbox, a selectable, a text field not yet being edited):
+  past the drag threshold the widget's press is let go and it does not fire. A drag keeps its
+  old meaning on a slider or a drag widget, a field being edited, a title or menu bar, a resize
+  grip or border, a scroll bar, a table's column border, a scene view (§5.18), the transfer
+  function editor, and any widget whose document handles `on_drag:`, `on_drag_start:` or
+  `on_drag_end:` (§4.6). The window scrolled is the innermost one under the finger that scrolls
+  along the drag's main axis, as the mouse wheel's is.
+
+  The glide's speed falls as `v0 * exp(-friction * t)`, so a fling covers `v0 / friction`
+  before it stops. Both are state keys beside the UI size, and a document reaches them under
+  its own prefix in arigl (`viewers.main.ui.*`):
+
+  | key | default | |
+  |---|---|---|
+  | `<scene>.viewers.<viewer>.ui.touch_scroll` | `1` | `0`: a finger's drag scrolls nothing (the scroll bars still do) |
+  | `<scene>.viewers.<viewer>.ui.scroll_friction` | `2` | per second: 2 is iOS's normal deceleration, 10 its fast one; higher stops sooner, `0` glides to the end |
+
+  ```yaml
+  - slider_float: Scroll friction
+    bind: viewers.main.ui.scroll_friction   # arigl: under the document's own prefix
+    lo: 0.5
+    hi: 20
+  - button: Short flings
+    on: (state-set "viewers.main.ui.scroll_friction" 8)
+  ```
+
+  On a touch screen arigl's Controls window offers it as **Scroll friction** under *Display*,
+  for any host that sets `UiSizeControl::scroll_friction`. A mouse has the wheel and the scroll
+  bars, so none of this applies to one.
 - **The system keyboard.** A browser raises a phone's keyboard only for a focused text field,
   which the canvas is not. When a finger (or a pen) activates an `input_text`, the page focuses a
   hidden `<input>` placed at the field's caret, so the keyboard comes up and the browser keeps
@@ -3344,7 +3383,11 @@ tests:
 ```
 
 Each test runs as an `on:` action program would, chrooted to the document's prefix, with the
-document's host verbs, functions (§6.6) and limits. The tests run one at a time, in document order, starting
+document's host verbs, functions (§6.6) and limits, save time. A running app gives a program 0.1 s
+(`ariadne.limits.action_max_time`). Under `ari test` every program may run as long as the run's
+`--timeout`, so a Debug build or a slow CI runner doesn't kill one that is merely slow, while the
+step cap still stops a runaway. `--action-time S` sets it: `0.1` holds a document to what an app
+allows, and `0` lifts it. The tests run one at a time, in document order, starting
 after `init:` and the first frame, and each starts once the one before has ended. A test fails
 when it raises an exception it doesn't catch, or is killed (a step or time cap, a syntax error).
 The rest still run. The loader's free-head check (§5.7) covers test programs too.

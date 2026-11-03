@@ -10,7 +10,9 @@
 #include <boost/program_options.hpp>
 #include <cctype>
 #include <charconv>
-#include <cstdlib> // strtod (--settle, --timeout)
+#include <cmath>              // isfinite (--action-time)
+#include <cstdlib>            // strtod (--settle, --timeout, --action-time)
+#include <cvc/ariadne/bind.h> // resolve_bind, write (--set)
 #include <cvc/ariadne/host_cli.h>
 #include <cvc/net/credentials.h>
 #include <cvc/net/net_policy.h>
@@ -33,6 +35,7 @@ constexpr const char *kValueFlags[] = {"--prefix",
                                        "--png",
                                        "--graphics",
                                        "--image",
+                                       "--set",
                                        "--cell-size",
                                        "--net-allow",
                                        "--net-policy",
@@ -40,6 +43,7 @@ constexpr const char *kValueFlags[] = {"--prefix",
                                        "--credential-env",
                                        "--settle",
                                        "--timeout",
+                                       "--action-time",
                                        "--log",
                                        "--oidc-issuer",
                                        "--oidc-client",
@@ -136,6 +140,14 @@ bool apply(const po::option &opt, HostOptions &o) {
       return false;
     }
     o.timeout = t;
+  } else if (a == "--action-time") {
+    char *end = nullptr;
+    const double t = std::strtod(value.c_str(), &end);
+    if (value.empty() || end != value.c_str() + value.size() || !(t >= 0) || !std::isfinite(t)) {
+      o.error = "--action-time needs a number of seconds, 0 or more, not '" + value + "'";
+      return false;
+    }
+    o.action_time = t;
   } else if (a == "--prefix") {
     o.prefix = value;
   } else if (a == "--component-path") {
@@ -166,6 +178,13 @@ bool apply(const po::option &opt, HostOptions &o) {
       return false;
     }
     o.images.emplace_back(value.substr(0, at), value.substr(at + 1));
+  } else if (a == "--set") {
+    std::pair<std::string, std::string> kv;
+    if (!parse_state_set(value, kv)) {
+      o.error = "--set is KEY=VALUE, not '" + value + "'";
+      return false;
+    }
+    o.sets.push_back(std::move(kv));
   } else if (a == "--cell-size") {
     const std::size_t x = value.find('x');
     int w = 0, h = 0;
@@ -310,6 +329,8 @@ std::string host_flags_help() {
          "  --frames N             snapshot: frames to run before the capture; test: stop\n"
          "                         after N frames\n"
          "  --timeout S            test: fail a document still running after S seconds\n"
+         "  --action-time S        test: how long one program may run (default: the --timeout;\n"
+         "                         0.1 is a running app's, 0 no limit)\n"
          "  --ansi                 snapshot: keep colour escapes\n"
          "  --png FILE             snapshot: also write a PNG\n"
          "  --log FILE             run: append each warning to FILE as it happens (or set\n"
@@ -318,6 +339,8 @@ std::string host_flags_help() {
          "                         for the document to go idle (default 10)\n"
          "  --graphics MODE        images in a terminal: auto, kitty, sixel, iterm, color or mono\n"
          "  --image NAME=FILE      publish FILE's picture as NAME, for image: widgets\n"
+         "  --set KEY=VALUE        set the state key KEY (under the document's root) before the\n"
+         "                         document loads (repeatable)\n"
          "  --media-play WHEN      video: / audio: play here: auto (not over SSH), always,\n"
          "                         never\n"
          "  --cell-size WxH        snapshot: a terminal cell's size in pixels\n"
@@ -350,6 +373,20 @@ std::string misplaced_flag_note(const std::string &runtime,
              runtime + "'s own flags before the document path";
   }
   return {};
+}
+
+bool parse_state_set(const std::string &arg, std::pair<std::string, std::string> &out) {
+  const std::size_t at = arg.find('=');
+  if (at == std::string::npos || at == 0)
+    return false;
+  out = {arg.substr(0, at), arg.substr(at + 1)};
+  return true;
+}
+
+void apply_state_sets(cvc::app &app, const std::string &prefix,
+                      const std::vector<std::pair<std::string, std::string>> &sets) {
+  for (const auto &[key, value] : sets)
+    write<std::string>(app, resolve_bind(prefix, key), value);
 }
 
 } // namespace ariadne

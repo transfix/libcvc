@@ -20,6 +20,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace cvc::ariadne;
@@ -139,6 +140,26 @@ TEST(AriadneHostCli, TimeoutIsSecondsAboveZero) {
   for (const char *bad : {"0", "-1", "soon", "2s"}) {
     const char *argv[] = {"ari", "test", "--timeout", bad, "a.ari"};
     EXPECT_NE(parse_host_args(5, argv).error.find("--timeout needs a number of seconds"),
+              std::string::npos)
+        << bad;
+  }
+}
+
+// ari test's --action-time: a program's time backstop in seconds, 0 for none; unset (below 0)
+// means the run's timeout.
+TEST(AriadneHostCli, ActionTimeIsSecondsFromZero) {
+  const char *none[] = {"ari", "test", "a.ari"};
+  EXPECT_LT(parse_host_args(3, none).action_time, 0.0); // the run's timeout
+  for (const auto &[text, seconds] : {std::pair<const char *, double>{"0.1", 0.1}, {"0", 0.0}}) {
+    const char *argv[] = {"ari", "test", "--action-time", text, "a.ari"};
+    const HostOptions o = parse_host_args(5, argv);
+    EXPECT_TRUE(o.error.empty()) << o.error;
+    EXPECT_DOUBLE_EQ(o.action_time, seconds) << text;
+    EXPECT_EQ(o.doc, "a.ari");
+  }
+  for (const char *bad : {"-1", "soon", "2s", "inf"}) {
+    const char *argv[] = {"ari", "test", "--action-time", bad, "a.ari"};
+    EXPECT_NE(parse_host_args(5, argv).error.find("--action-time needs a number of seconds"),
               std::string::npos)
         << bad;
   }
@@ -316,6 +337,31 @@ TEST(AriadneHostCli, GraphicsImageAndCellSizeFlags) {
   o = parse_host_args(5, after);
   EXPECT_TRUE(o.graphics.empty());
   EXPECT_NE(misplaced_flag_note("ari", o.doc_args).find("'--graphics'"), std::string::npos);
+}
+
+// --set KEY=VALUE collects in order (the value keeps any '=' of its own), and the runtime writes
+// each under the document's state root before the document loads, so its nodes seed from it.
+TEST(AriadneHostCli, SetWritesStateKeysBeforeTheDocument) {
+  const char *a[] = {"arigl", "snapshot", "--set",  "world.preset=2", "--set=/abs.key=a=b",
+                     "--set", "empty=",   "doc.ari"};
+  HostOptions o = parse_host_args(8, a);
+  ASSERT_TRUE(o.error.empty()) << o.error;
+  ASSERT_EQ(o.sets.size(), 3u);
+  EXPECT_EQ(o.sets[0], std::make_pair(std::string("world.preset"), std::string("2")));
+  EXPECT_EQ(o.sets[1], std::make_pair(std::string("/abs.key"), std::string("a=b")));
+  EXPECT_EQ(o.sets[2], std::make_pair(std::string("empty"), std::string()));
+  EXPECT_EQ(o.doc, "doc.ari");
+  const char *bad[] = {"ari", "run", "--set", "novalue", "d.ari"};
+  EXPECT_NE(parse_host_args(5, bad).error.find("--set is KEY=VALUE"), std::string::npos);
+  const char *nokey[] = {"ari", "run", "--set", "=1", "d.ari"};
+  EXPECT_FALSE(parse_host_args(5, nokey).error.empty());
+
+  cvc::app app;
+  apply_state_sets(app, "ui.docs.t", o.sets);
+  auto &st = cvc::state::instance(app);
+  EXPECT_EQ(st("ui.docs.t.world.preset").value(), "2");
+  EXPECT_EQ(st("abs.key").value(), "a=b") << "a leading '/' is from the app's root";
+  EXPECT_DOUBLE_EQ(st("ui.docs.t.world.preset").value<double>(), 2.0);
 }
 
 TEST(AriadneDocArgs, ParsesOptionsBoolsAndPositionals) {

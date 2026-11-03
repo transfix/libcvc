@@ -706,7 +706,7 @@ int main(int argc, char **argv) {
       float amp = float(gp.amp_m), sea = float(gp.water_level_m);
       if (ImGui::SliderFloat("relief amp m", &amp, 2.0f, 400.0f))
         gp.amp_m = amp;
-      if (ImGui::SliderFloat("water level m", &sea, 0.0f, 200.0f))
+      if (ImGui::SliderFloat("water level m", &sea, -100.0f, 100.0f)) // 0 m: sea level
         gp.water_level_m = sea;
     }
     if (ImGui::Button("Regenerate"))

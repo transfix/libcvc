@@ -13,6 +13,8 @@
   Lesser General Public License for more details.
 */
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_participant_path
@@ -39,30 +41,13 @@ std::string sub(const std::string &base, std::initializer_list<const char *> seg
   return s;
 }
 
-// One decimal is plenty for display, and an unchanged value writes nothing new to replicate.
-std::string fmt(double v) {
-  char buf[32];
-  std::snprintf(buf, sizeof(buf), "%.1f", v);
-  return std::string(buf);
-}
-
-// touch-before-value, so a just-created node's first write is not lost to the distributed-state
-// adapter's attach race (the room tree's set_replicated idiom). A value that has not changed is not
-// rewritten, so a steady link does not add replication traffic.
-void set_replicated(cvc::app &app, const std::string &path, const std::string &val) {
-  cvc::state &n = app.root()(path);
-  if (n.value() == val)
-    return;
-  n.touch();
-  n.value(val);
-}
-
-// Changed-only with ONE journaled mutation per change, for a leaf that flips often. touch() fires
-// valueChanged before value() fires it again, so set_replicated's touch would first re-send the
-// leaf's OLD value; it is only needed while the leaf is new or still empty (the attach race above).
-// A valued leaf is already observed: its first value was set after the touch that attached it, or
-// it arrived through replication (applying a remote node attaches it too).
-// FORCE re-sends an unchanged value (one touch) rather than writing nothing.
+// Changed-only with ONE journaled mutation per change, for a leaf that flips often. A new or still
+// empty leaf takes touch-before-value, so its first write is not lost to the distributed-state
+// adapter's attach race (the room tree's set_replicated idiom). touch() fires valueChanged before
+// value() fires it again, so a touch on every write would first re-send the leaf's OLD value: a
+// valued leaf is already observed (its first value was set after the touch that attached it, or it
+// arrived through replication, and applying a remote node attaches it too), so it takes the value
+// alone. FORCE re-sends an unchanged value (one touch) rather than writing nothing.
 void set_changed_once(cvc::app &app, const std::string &path, const std::string &val,
                       bool force = false) {
   cvc::state *n = app.root().findDescendant(path);
@@ -86,10 +71,43 @@ double read_double(cvc::app &app, const std::string &path, double def) {
   return n && !n->value().empty() ? std::strtod(n->value().c_str(), nullptr) : def;
 }
 
-void write_sample(cvc::app &app, const std::string &base, const net_sample &s) {
-  set_replicated(app, sub(base, {"rtt_ms"}), fmt(s.rtt_ms));
-  set_replicated(app, sub(base, {"in_kbps"}), fmt(s.in_kbps));
-  set_replicated(app, sub(base, {"out_kbps"}), fmt(s.out_kbps));
+// A meter reading as published: two significant figures, never finer than a tenth ("1200", "48",
+// "4.5", "0.4"), and "-1" for one not measured yet.
+std::string fmt_reading(double v) {
+  if (!(v >= 0.0))
+    return "-1";
+  const double scale = v >= 10.0 ? std::pow(10.0, std::floor(std::log10(v)) - 1.0) : 0.1;
+  const double q = std::round(v / scale) * scale;
+  char buf[32];
+  std::snprintf(buf, sizeof(buf), "%.*f", q < 10.0 ? 1 : 0, q);
+  return std::string(buf);
+}
+
+// Publish a meter reading only when it has moved off the published one by a tenth of it or by
+// FLOOR, whichever is more, or between measured and not. The readings change every second (and
+// the meters' own writes are part of what they measure), so writing each one would keep an idle
+// link busy; a reading inside the band is no news for a roster cell that shows whole kb/s and ms.
+// FORCE re-sends a reading inside the band as it was published (one touch).
+constexpr double kMeterBand = 0.1;
+constexpr double kRateFloorKbps = 2.0; // a couple of state messages a second
+constexpr double kRttFloorMs = 5.0;
+void set_reading(cvc::app &app, const std::string &path, double v, double floor, bool force) {
+  if (cvc::state *n = app.root().findDescendant(path); n && !n->value().empty()) {
+    const double cur = std::strtod(n->value().c_str(), nullptr);
+    if ((cur < 0.0) == (v < 0.0) &&
+        (v < 0.0 || std::fabs(v - cur) < std::max(floor, kMeterBand * cur))) {
+      if (force)
+        n->touch();
+      return;
+    }
+  }
+  set_changed_once(app, path, fmt_reading(v));
+}
+
+void write_sample(cvc::app &app, const std::string &base, const net_sample &s, bool force) {
+  set_reading(app, sub(base, {"rtt_ms"}), s.rtt_ms, kRttFloorMs, force);
+  set_reading(app, sub(base, {"in_kbps"}), s.in_kbps, kRateFloorKbps, force);
+  set_reading(app, sub(base, {"out_kbps"}), s.out_kbps, kRateFloorKbps, force);
 }
 
 bool read_sample(cvc::app &app, const std::string &base, net_sample &out) {
@@ -124,8 +142,8 @@ std::string relay_video_rung(const std::string &room, const std::string &pid) {
 } // namespace
 
 void write_participant_net(cvc::app &app, const std::string &room, const std::string &pid,
-                           const net_sample &s) {
-  write_sample(app, participant_net(room, pid), s);
+                           const net_sample &s, bool force) {
+  write_sample(app, participant_net(room, pid), s, force);
 }
 
 bool read_participant_net(cvc::app &app, const std::string &room, const std::string &pid,
@@ -135,7 +153,7 @@ bool read_participant_net(cvc::app &app, const std::string &room, const std::str
 
 void write_relay_net(cvc::app &app, const std::string &room, const std::string &pid,
                      const net_sample &s) {
-  write_sample(app, sub(participant_net(room, pid), {"relay"}), s);
+  write_sample(app, sub(participant_net(room, pid), {"relay"}), s, /*force=*/false);
 }
 
 bool read_relay_net(cvc::app &app, const std::string &room, const std::string &pid,
@@ -145,9 +163,9 @@ bool read_relay_net(cvc::app &app, const std::string &room, const std::string &p
 
 void write_server_net(cvc::app &app, const std::string &room, const server_net &s) {
   const std::string base = server_net_path(room);
-  set_replicated(app, sub(base, {"in_kbps"}), fmt(s.in_kbps));
-  set_replicated(app, sub(base, {"out_kbps"}), fmt(s.out_kbps));
-  set_replicated(app, sub(base, {"links"}), std::to_string(s.links));
+  set_reading(app, sub(base, {"in_kbps"}), s.in_kbps, kRateFloorKbps, /*force=*/false);
+  set_reading(app, sub(base, {"out_kbps"}), s.out_kbps, kRateFloorKbps, /*force=*/false);
+  set_changed_once(app, sub(base, {"links"}), std::to_string(s.links));
 }
 
 bool read_server_net(cvc::app &app, const std::string &room, server_net &out) {

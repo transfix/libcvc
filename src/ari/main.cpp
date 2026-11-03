@@ -87,6 +87,7 @@
 #include <cvc/core/app.h>
 #include <cvc/image/image.h>
 #include <cvc/net/browser.h>
+#include <cvc/state/state.h> // ari test: the run's action time backstop
 #include <exception>
 #include <memory>
 #include <string>
@@ -106,7 +107,8 @@ constexpr const char *kRuntimeName = "ari";
 int usage(int code) {
   std::fprintf(code ? stderr : stdout,
                "usage: ari run|snapshot|check [flags] doc.ari [document args...]\n"
-               "       ari test [flags] [--tap] [--timeout S] [--frames N] doc.ari...\n"
+               "       ari test [flags] [--tap] [--timeout S] [--frames N] [--action-time S]\n"
+               "                doc.ari...\n"
                "       ari info [--json] [--functions] [--backend B] [--graphics MODE]\n"
                "\n"
                "flags (before the document):\n"
@@ -125,6 +127,8 @@ int usage(int code) {
                "fails when it quits non-zero, a program raises an error nothing catches (an\n"
                "assert, say), its load fails or warns, or it times out. One line per document,\n"
                "with what failed and in which program; --tap prints TAP. Exits 1 if any failed.\n"
+               "A program may run as long as the timeout (a running app allows 0.1 s), or\n"
+               "--action-time S.\n"
                "run, snapshot and check exit with the code a document passed to (quit code).\n"
                "\n"
                "Warnings while a document runs (a program that failed, an on_tick: or on_key:\n"
@@ -268,6 +272,14 @@ TestOutcome run_test_document(const cvc::ariadne::HostOptions &o, const std::str
   };
 
   cvc::app app;
+  // A test checks what a document does, not how fast: a program's time backstop
+  // (ariadne.limits.action_max_time, 0.1 s in a running app) is the run's own timeout here, so a
+  // Debug build or a slow CI runner doesn't kill one that is merely slow. The step cap still stops
+  // a runaway. --action-time S sets it (0.1 holds a document to an app's).
+  char action_time[32];
+  std::snprintf(action_time, sizeof action_time, "%g",
+                o.action_time >= 0 ? o.action_time : timeout);
+  cvc::state::instance(app)("ariadne.limits.action_max_time").value(std::string(action_time));
   ari::FtxuiBackend backend{ari::FtxuiBackend::Options{}};
   for (const auto &[name, file] : o.images) {
     try {
@@ -289,6 +301,7 @@ TestOutcome run_test_document(const cvc::ariadne::HostOptions &o, const std::str
   rt.register_quit();
   // No command line of its own: declared arguments take their defaults, as in a check.
   rt.set_document_args({}, "ari test " + path, /*validate=*/false);
+  ari::apply_state_sets(app, o.prefix.empty() ? "ui.docs.ari" : o.prefix, o.sets);
   try {
     for (const std::string &w : rt.load(path))
       fail("load warning: " + trim_ari(w));
@@ -527,6 +540,7 @@ int main(int argc, char **argv) {
     return 2;
   }
 
+  ari::apply_state_sets(app, o.prefix.empty() ? "ui.docs.ari" : o.prefix, o.sets); // --set
   std::vector<std::string> warnings;
   try {
     warnings = rt.load(o.doc);

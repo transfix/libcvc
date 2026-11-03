@@ -17,6 +17,7 @@
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
+#include <cvc/gl/TouchScroll.h>
 #include <cvc/gl/Viewport.h>
 #include <cvc/gl/ViewportManager.h>
 #include <cvc/gl/ariadne/ImGuiBackend.h>
@@ -864,6 +865,7 @@ void SceneViews::register_widget() {
 
         // Its camera: a drag orbits (the middle or right button pans), the wheel zooms.
         if (v->input) {
+          cvc::gl::keepTouchDrag(); // a finger's drag here turns the camera, not the window
           CameraController &cam = controller(*v);
           const ImGuiIO &io = ImGui::GetIO();
           if (ImGui::IsItemHovered() && io.MouseWheel != 0.0f)

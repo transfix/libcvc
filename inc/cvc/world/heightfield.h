@@ -49,6 +49,9 @@ struct heightfield_params {
   double gain = 0.5;
   double warp_m = 6.0; // domain-warp distance (0 = off)
   double warp_wavelength_m = 130.0;
+  // Where the rolling land starts, from sea_level_m: it spans [base_m, base_m + amp_m] (without
+  // the island). A negative base puts the low ground under the sea, as streams, ponds and coast.
+  double base_m = 0.0;
   // Optional island dome (peaks in the middle, sea at the edges).
   bool island = false;
   double island_peak_m = 30.0;

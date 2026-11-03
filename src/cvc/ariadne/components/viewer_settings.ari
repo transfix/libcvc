@@ -5,6 +5,8 @@
 #
 #   viewers.<viewer>.hud.enabled, .hud.fps  cvc::gl::FpsHud (the on-screen readout; "f" toggles it)
 #   viewers.<viewer>.ui.scale               cvc::gl::UiSettings (the overlay's UI size)
+#   viewers.<viewer>.ui.scroll_friction     cvc::gl::UiSettings (how fast a finger's fling slows;
+#                                           shown on a touch screen, ui.touch_mode)
 #   graphics.root.children.grid.visible     the scene's grid (cvc::gl::GridNode)
 #   graphics.root.children.axis.visible     the origin axis (cvc::gl::AxisNode)
 #   graphics.root.show_bbox                 the box around the whole scene
@@ -51,6 +53,13 @@ units:
         fmt: "%.2f"
         commit: release
         tooltip: "the size of the windows and their text, in logical pixels per point"
+      - slider_float: Scroll friction
+        bind: viewers.{viewer}.ui.scroll_friction
+        lo: 0.5
+        hi: 20.0
+        fmt: "%.1f /s"
+        visible_when: (= (state-get "viewers.{viewer}.ui.touch_mode") "1")
+        tooltip: "how fast content a finger flings slows down: low glides far, high stops soon"
       - checkbox: Grid
         bind: graphics.root.children.grid.visible
       - checkbox: Origin axis
