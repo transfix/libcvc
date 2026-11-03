@@ -8,10 +8,13 @@
   Licensed under the GNU LGPL v2.1 (see cvc/lsys/forest.h for the full header).
 */
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cvc/geometry/geometry.h>
 #include <cvc/lsys/forest.h>
 #include <gtest/gtest.h>
+#include <initializer_list>
 
 using namespace cvc::lsys;
 
@@ -151,4 +154,48 @@ TEST(LsysForest, WindReposeMovesSwayerVerticesOverTime) {
       break;
     }
   EXPECT_TRUE(moved);
+}
+
+// The bounds of a tree's meshes, as {xmin, ymin, zmin, xmax, ymax, zmax}.
+static std::array<double, 6> treeBounds(std::initializer_list<const cvc::geometry *> gs) {
+  std::array<double, 6> b = {1e30, 1e30, 1e30, -1e30, -1e30, -1e30};
+  for (const cvc::geometry *g : gs)
+    for (const auto &p : g->const_points())
+      for (int a = 0; a < 3; ++a) {
+        b[a] = std::min(b[a], p[a]);
+        b[3 + a] = std::max(b[3 + a], p[a]);
+      }
+  return b;
+}
+
+// A coarser tree_detail draws the SAME tree, the full-maturity one: its extent is the full tree's
+// (the leaves as solids fill where the needles and leaf twigs were) at a fraction of the triangles,
+// and no needle lines.
+TEST(LsysForest, TreeDetailIsTheSameTreeCoarser) {
+  tree_detail d;
+  d.ring = 3;
+  d.min_radius = 0.05;
+  for (int maturity = 2; maturity <= 4; ++maturity) {
+    cvc::geometry wood, needle, cwood, cneedle;
+    grow_pine(wood, needle, 0.0, 0.0, 0.0, 0.26, maturity);
+    grow_pine(cwood, cneedle, 0.0, 0.0, 0.0, 0.26, maturity, d);
+    EXPECT_TRUE(cneedle.const_points().empty()) << maturity;
+    EXPECT_LT(cwood.const_tris().size(), wood.const_tris().size() / 2) << maturity;
+    const auto full = treeBounds({&wood, &needle}), coarse = treeBounds({&cwood});
+    for (int a = 0; a < 6; ++a)
+      EXPECT_NEAR(coarse[a], full[a], 0.15 * (full[5] - full[2])) << maturity << " axis " << a;
+    EXPECT_NEAR(coarse[5], full[5], 0.05 * full[5]) << "a pine keeps its full height";
+  }
+  cvc::geometry wood, cwood;
+  grow_branchy(wood, 7, 0.0, 0.0, 0.0, 6.0, 0.7, 4, 3);
+  grow_branchy(cwood, 7, 0.0, 0.0, 0.0, 6.0, 0.7, 4, 3, d);
+  EXPECT_LT(cwood.const_tris().size(), wood.const_tris().size() / 2);
+  const auto full = treeBounds({&wood}), coarse = treeBounds({&cwood});
+  for (int a = 0; a < 6; ++a)
+    EXPECT_NEAR(coarse[a], full[a], 0.1 * (full[5] - full[2])) << "branchy axis " << a;
+  // The leaves are the leaf colour.
+  bool green = false;
+  for (const auto &c : cwood.const_colors())
+    green = green || (c[1] > 0.5 && c[0] < 0.2);
+  EXPECT_TRUE(green);
 }

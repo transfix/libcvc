@@ -424,6 +424,9 @@ TEST(WorldGenerated, SteppedBuildIsTheSameWorld) {
   EXPECT_EQ(w.buildings.const_points().size(), a.buildings.const_points().size());
   EXPECT_EQ(w.roads.const_points().size(), a.roads.const_points().size());
   EXPECT_EQ(w.props.const_points().size(), a.props.const_points().size());
+  EXPECT_EQ(w.props_r1.const_points().size(), a.props_r1.const_points().size());
+  EXPECT_EQ(w.props_r2.const_points().size(), a.props_r2.const_points().size());
+  EXPECT_EQ(w.prop_cells.size(), a.prop_cells.size());
   EXPECT_EQ(w.water_ground, a.water_ground);
   const int n = water_resolution(w);
   ASSERT_EQ(w.water_ground.size(), std::size_t(n) * n);
@@ -437,6 +440,60 @@ TEST(WorldGenerated, SteppedBuildIsTheSameWorld) {
     ASSERT_LT(++rows, 1000);
   EXPECT_GT(rows, 50);
   EXPECT_EQ(sp.take(), whole);
+}
+
+// The prop cells cut rung 0 into contiguous runs that cover every mesh exactly, in order; each
+// cell's rung-0 mesh is inside its bounds, its coarser rungs stand where its full trees do (no
+// higher, no lower, nearly as tall) at a fraction of the triangles, and they carry no lines.
+TEST(WorldGenerated, PropCellsAreTheFullTreesCoarsened) {
+  generated_world_params p = small_world();
+  p.trees = 120;
+  const generated_world w = generate_world(p);
+  ASSERT_FALSE(w.prop_cells.empty());
+  EXPECT_GE(w.prop_cell_m, 128.0);
+  EXPECT_TRUE(w.props_r1.const_lines().empty());
+  EXPECT_LT(w.props_r1.const_tris().size(), w.props.const_tris().size() / 2);
+  EXPECT_LT(w.props_r2.const_tris().size(), w.props.const_tris().size() / 20);
+  auto covers = [&](const cvc::geometry &g, auto span, bool lines) {
+    std::size_t p = 0, c = 0;
+    for (const generated_world::prop_cell &pc : w.prop_cells) {
+      const generated_world::prop_span &s = span(pc);
+      EXPECT_EQ(s.p0, p);
+      EXPECT_EQ(s.c0, c);
+      p = s.p1;
+      c = s.c1;
+    }
+    EXPECT_EQ(p, g.const_points().size());
+    EXPECT_EQ(c, lines ? g.const_lines().size() : g.const_tris().size());
+  };
+  covers(w.props, [](const auto &c) -> const auto & { return c.props; }, false);
+  covers(w.needles, [](const auto &c) -> const auto & { return c.needles; }, true);
+  covers(w.props_r1, [](const auto &c) -> const auto & { return c.props_r1; }, false);
+  covers(w.props_r2, [](const auto &c) -> const auto & { return c.props_r2; }, false);
+  for (const generated_world::prop_cell &pc : w.prop_cells) {
+    const cvc::geometry r0 = prop_span_mesh(w.props, pc.props);
+    for (const auto &q : r0.const_points())
+      for (int a = 0; a < 3; ++a) {
+        EXPECT_GE(q[a], pc.min[a]);
+        EXPECT_LE(q[a], pc.max[a]);
+      }
+    for (const auto &t : r0.const_tris())
+      for (int k = 0; k < 3; ++k)
+        ASSERT_LT(t[k], r0.const_points().size());
+    const double h = pc.max[2] - pc.min[2];
+    for (const generated_world::prop_span *s : {&pc.props_r1, &pc.props_r2}) {
+      const cvc::geometry r = prop_span_mesh(s == &pc.props_r1 ? w.props_r1 : w.props_r2, *s);
+      ASSERT_FALSE(r.const_points().empty());
+      double zmin = 1e30, zmax = -1e30;
+      for (const auto &q : r.const_points()) {
+        zmin = std::min(zmin, q[2]);
+        zmax = std::max(zmax, q[2]);
+      }
+      EXPECT_GE(zmin, pc.min[2] - 0.5);
+      EXPECT_LE(zmax, pc.max[2] + 0.5);
+      EXPECT_GT(zmax, pc.max[2] - 0.15 * h) << "the coarse trees are as tall as the full ones";
+    }
+  }
 }
 
 // A stepped build fails where generate_world would, and keeps failing.

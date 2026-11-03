@@ -27,6 +27,7 @@
 //   w.terrain        // the ground as a cvc::height_field (UVs over the extent)
 //   paint_surface(w) // its colour: material, roads and plazas baked into an RGB texture
 //   w.props / w.foliage / w.needles / w.buildings / w.roads   // merged meshes, one per look
+//   w.prop_cells, w.props_r1, w.props_r2                      // the props' render LOD, by cell
 //   water_field(w, t, ...)                                    // the water, as a volume of depth
 //   w.geometry()     // the world as cvc::world::world_geometry, for physics and nav
 //
@@ -165,6 +166,29 @@ struct generated_world {
   cvc::geometry props;                        // trunks, branches, rocks: per-vertex colour
   cvc::geometry foliage;                      // leaves: per-vertex colour
   cvc::geometry needles;                      // the pines' needles: line segments, one colour
+
+  // Render LOD for the props (prop_cells below): coarser copies of props + foliage + needles, of
+  // the same full trees. Rung 1 draws each tree with three-sided tubes, none under 5 cm, and its
+  // leaves as solids (cvc::lsys::tree_detail); rung 2 is each tree's trunk and a crown over its
+  // full canopy, and a box per rock. Per-vertex colour.
+  cvc::geometry props_r1, props_r2;
+
+  // The props are laid down a ground cell at a time (prop_cell_m squares), so each cell is one
+  // contiguous run of points and of triangles (lines, for the needles) in every mesh above. A
+  // renderer draws a cell as a ladder: rung 0 = its props + foliage + needles, rung 1 = its
+  // props_r1, rung 2 = its props_r2 (prop_rung_radius_m says where each starts). LOD is a render
+  // proxy only: geometry() and every physics or nav path read rung 0.
+  struct prop_span {
+    std::size_t p0 = 0, p1 = 0; // points [p0, p1)
+    std::size_t c0 = 0, c1 = 0; // triangles (lines in needles) [c0, c1)
+    bool empty() const { return p1 == p0; }
+  };
+  struct prop_cell {
+    double min[3] = {0, 0, 0}, max[3] = {0, 0, 0}; // rung 0's bounds
+    prop_span props, foliage, needles, props_r1, props_r2;
+  };
+  std::vector<prop_cell> prop_cells; // the cells with props in them
+  double prop_cell_m = 0.0;
   cvc::geometry buildings; // per-vertex colour (the archetypes' concrete, or the massing's)
   cvc::geometry roads;     // the extruded street surface
   std::size_t building_count = 0;
@@ -191,6 +215,16 @@ struct generated_world {
   // and the props and roads (render only).
   world_geometry geometry() const;
 };
+
+// One cell's run of a prop mesh (generated_world::prop_cell) as a mesh of its own: its points,
+// colours and triangles or lines, the indices rebased.
+cvc::geometry prop_span_mesh(const cvc::geometry &g, const generated_world::prop_span &s);
+
+// Where a prop cell's coarser rungs start, for a renderer authoring its ladder: rung 1 at
+// prop_rung_radius_m[0] and rung 2 at [1], in metres from the camera, for the reference view of
+// cvc::lod::world_error_for_switch_radius (800 px at 2 px error). The vegetation bands of
+// LSYSTEM-LABORATORY-ROADMAP section 8.4: the full plant to 260 m, a reduced one to 700 m.
+constexpr double prop_rung_radius_m[2] = {260.0, 700.0};
 
 // Generate. `library` may be null or empty: the city's buildings are then procedural massing.
 // Throws std::invalid_argument on an unknown generator name. world_builder stepped to its end.
