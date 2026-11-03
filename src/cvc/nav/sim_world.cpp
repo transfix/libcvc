@@ -1145,6 +1145,23 @@ void sim_world::set_material(const float *risk_raw, const std::uint8_t *hard,
   mat_on_ = true;
 }
 
+void sim_world::set_risk_governor(bool on, float vmin, float onset, float lookahead, int probes) {
+  const char *who = "cvc::nav::sim_world::set_risk_governor: ";
+  if (!(std::isfinite(vmin) && vmin >= 0.0f))
+    throw std::invalid_argument(std::string(who) + "vmin must be finite and >= 0");
+  if (!(onset >= 0.0f && onset < 1.0f))
+    throw std::invalid_argument(std::string(who) + "onset must be in [0, 1)");
+  if (!(std::isfinite(lookahead) && lookahead >= 0.0f))
+    throw std::invalid_argument(std::string(who) + "lookahead must be finite and >= 0");
+  if (probes < 1)
+    throw std::invalid_argument(std::string(who) + "probes must be >= 1");
+  cfg_.veh.risk_governor = on;
+  cfg_.veh.risk_vmin = vmin;
+  cfg_.veh.risk_onset = onset;
+  cfg_.veh.risk_lookahead = lookahead;
+  cfg_.veh.risk_probes = probes;
+}
+
 void sim_world::set_material_belief(const float *risk_raw, const std::uint8_t *hard,
                                     const material_config &mc, const belief_material_params &bp,
                                     int material_every) {
