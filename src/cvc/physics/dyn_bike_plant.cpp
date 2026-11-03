@@ -54,6 +54,16 @@ void add(dyn_bike_books &to, const dyn_bike_books &d) {
   to.residual += d.residual;
 }
 
+// The ground as diff::dyn_plant_ground samples it (options.side_slope): the plant's heights. The
+// grip is the plant's own, so mu is not read.
+struct ground_sampler {
+  const nav_plant_options *o = nullptr;
+  void at(double x, double y, double &mu, double &h) const {
+    mu = 0.0;
+    h = dyn::ground_at(*o, x, y);
+  }
+};
+
 } // namespace
 
 double dyn_bike_books::flow() const {
@@ -388,15 +398,25 @@ void dyn_bike_plant::advance() {
       const double accel = _o.driver ? dyn::drive(a.driver, a.desc, a.accel_cmd, a.s.vx, grade,
                                                   _o.gravity, a.p.tau_drive, h)
                                      : a.accel_cmd;
+      // With side_slope, gravity along and across the heading from the ground's gradient, a
+      // potential in the books (the driver still reads the sine along the heading).
+      const ground_sampler ground{&_o.plant};
       if (_o.wheel_spin) {
         diff::dyn_spin_state<double> ss, so;
         ss.b = a.s;
         ss.om_f = a.om[0];
         ss.om_r = a.om[1];
-        diff::dyn_spin_plant_books<double>(a.p, a.lim, ss, a.steer_cmd, accel, grade, so,
-                                           spin_books[i], wrench, &port[i], &free[i]);
+        if (_o.side_slope)
+          diff::dyn_spin_plant_books_ground<double>(a.p, a.lim, ground, ss, a.steer_cmd, accel, so,
+                                                    spin_books[i], wrench, &port[i], &free[i]);
+        else
+          diff::dyn_spin_plant_books<double>(a.p, a.lim, ss, a.steer_cmd, accel, grade, so,
+                                             spin_books[i], wrench, &port[i], &free[i]);
         next[i] = so.b;
         om_next[i] = {so.om_f, so.om_r};
+      } else if (_o.side_slope) {
+        diff::dyn_plant_books_ground<double>(a.p, a.lim, ground, a.s, a.steer_cmd, accel, next[i],
+                                             books[i], wrench, &port[i], &free[i]);
       } else {
         diff::dyn_plant_books<double>(a.p, a.lim, a.s, a.steer_cmd, accel, grade, next[i], books[i],
                                       wrench, &port[i], &free[i]);

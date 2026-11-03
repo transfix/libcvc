@@ -268,6 +268,54 @@ TEST(DynBikePlant, ClimbsTheGround) {
   EXPECT_FALSE(up.collides());
 }
 
+// Across a 10% side slope (rising to the north) heading east with the wheel straight: with
+// side_slope the raw model slides downhill and its grade line is minus the potential's change,
+// m g times the centre of gravity's rise, to rounding (each step's - dV telescopes), with or
+// without its wheels spinning; the books close. Off, the slope along the heading is zero and the
+// model drives straight on, as before.
+TEST(DynBikePlant, SideSlopePullsDownhillAndBooksThePotential) {
+  const double slope = 0.1;
+  for (const bool spin : {false, true}) {
+    dyn_bike_plant_options on, off;
+    on.driver = off.driver = false;
+    on.wheel_spin = off.wheel_spin = spin;
+    on.side_slope = true;
+    on.plant.ground_height =
+        off.plant.ground_height = [slope](double, double y) { return slope * y; };
+    dyn_bike_plant across({vehicle_desc::humvee()}, on), straight({vehicle_desc::humvee()}, off);
+    cvc::nav::plant_state start; // at the origin, heading east
+    across.attach(1, &start, trained_frame(), 0.06);
+    straight.attach(1, &start, trained_frame(), 0.06);
+    const auto cg_y = [](const dyn_bike_plant &pl) {
+      const diff::dyn_state<double> &s = pl.body(0);
+      return s.y + pl.params(0).lr * std::sin(s.psi);
+    };
+    const double y0 = cg_y(across);
+    for (int t = 0; t < 100; ++t) { // 6 s
+      const float accel = static_cast<float>((t < 50 ? 1.5 : 0.3) * kS);
+      across.command(0, 0.0f, accel);
+      straight.command(0, 0.0f, accel);
+      across.advance();
+      straight.advance();
+    }
+    const dyn_bike_books &b = across.books(0);
+    const double mg = static_cast<double>(across.params(0).m) * across.params(0).g;
+    const double dV = mg * slope * (cg_y(across) - y0);
+    std::printf("  6 s across a 10%% side slope%s: the centre of gravity %.3f m downhill, heading "
+                "%.3f rad, body slip %.3f m/s; grade %.6g J against - m g dz = %.6g J; residual "
+                "%.2e of the flow; off: %.2e m\n",
+                spin ? ", wheels spinning" : "", y0 - cg_y(across), across.body(0).psi,
+                across.body(0).vy, b.grade, -dV, std::fabs(b.residual) / b.flow(),
+                straight.body(0).y);
+    EXPECT_LT(cg_y(across), y0 - 0.1) << "the side slope did not pull it downhill";
+    EXPECT_NEAR(b.grade, -dV, 1e-9 * b.flow());
+    EXPECT_NEAR(identity_gap(across, 0), 0.0, 1e-9 * b.flow());
+    EXPECT_LT(std::fabs(b.residual) / b.flow(), 5e-3);
+    EXPECT_EQ(straight.body(0).y, 0.0);
+    EXPECT_EQ(straight.books(0).grade, 0.0);
+  }
+}
+
 // Nav's acceleration through the Jolt plant's driver (dyn_driver.h). At a standstill on a 10% ramp
 // with nothing asked the vehicle holds on its brakes, where the raw model rolls back down; a
 // command inside the deadband does not creep it along the flat; and up the ramp it reaches the
