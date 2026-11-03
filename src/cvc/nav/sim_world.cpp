@@ -1983,5 +1983,11 @@ void sim_world::add_obstacle(int r0, int r1, int c0, int c1) {
         dyn_stamp_[static_cast<long>(m) * hw + static_cast<long>(r) * cols_ + c] = t_now;
 }
 
+void sim_world::set_truth(const std::uint8_t *truth) {
+  if (!truth)
+    throw std::invalid_argument("cvc::nav::sim_world::set_truth: truth is null");
+  truth_.assign(truth, truth + static_cast<std::size_t>(rows_) * cols_);
+}
+
 } // namespace nav
 } // namespace cvc

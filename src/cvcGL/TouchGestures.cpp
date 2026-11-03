@@ -28,7 +28,8 @@ EM_JS(void, cvcgl_touch_install, (const char *sel), {
            document.querySelector('canvas');
   if (!el || el.__cvcglTouch)
     return;
-  var st = {scale : 1.0, panX : 0.0, panY : 0.0, active : false, d0 : 0, cx : 0, cy : 0};
+  var st =
+      {scale : 1.0, panX : 0.0, panY : 0.0, active : false, d0 : 0, cx : 0, cy : 0, began : false};
   el.__cvcglTouch = st;
   var target = el.parentElement || el;
 
@@ -45,6 +46,8 @@ EM_JS(void, cvcgl_touch_install, (const char *sel), {
     e.stopPropagation();
     e.preventDefault();
     var m = mid(e.touches);
+    // The first finger usually lands alone, and VTK has had it as a press: update() cancels it.
+    st.began = true;
     st.active = true;
     st.d0 = dist(e.touches);
     st.cx = m[0];
@@ -85,8 +88,9 @@ EM_JS(void, cvcgl_touch_install, (const char *sel), {
   target.addEventListener('touchcancel', end, opt);
 });
 
-// Drain this canvas's accumulators into out[3] = {scale, panX, panY}, resetting
-// them. One call per frame keeps the JS/wasm boundary crossings at one.
+// Drain this canvas's accumulators into out[4] = {scale, panX, panY, began}, resetting
+// them (began: a gesture of two fingers or more started since the last call). One
+// call per frame keeps the JS/wasm boundary crossings at one.
 EM_JS(void, cvcgl_touch_take, (const char *sel, double *out), {
   var s = UTF8ToString(sel);
   var el = document.querySelector(s) || document.getElementById('canvas') ||
@@ -95,10 +99,12 @@ EM_JS(void, cvcgl_touch_take, (const char *sel, double *out), {
   setValue(out, st ? st.scale : 1.0, 'double');
   setValue(out + 8, st ? st.panX : 0.0, 'double');
   setValue(out + 16, st ? st.panY : 0.0, 'double');
+  setValue(out + 24, st && st.began ? 1.0 : 0.0, 'double');
   if (st) {
     st.scale = 1.0;
     st.panX = 0.0;
     st.panY = 0.0;
+    st.began = false;
   }
 });
 #endif // __EMSCRIPTEN__
@@ -194,9 +200,13 @@ void TouchGestures::update() {
   Impl &s = *m_impl;
   if (!s.enabled || !s.cam)
     return;
-  double g[3] = {1.0, 0.0, 0.0};
+  double g[4] = {1.0, 0.0, 0.0, 0.0};
   cvcgl_touch_take(s.canvas.c_str(), g);
   const double scale = g[0], panX = g[1], panY = g[2];
+  // A second finger landed: the first one's press (VTK's, a frame or so ago) is the gesture's now,
+  // not a tap on the scene when it lifts, nor a drag that turns or steers.
+  if (g[3] != 0.0)
+    s.cam->cancelPointer();
 
   // Pinch -> ZOOM, in every mode. mouseWheel() is the right call in Map
   // (parallel scale) and Orbit (orbit distance), but in FLY it changes movement
@@ -232,9 +242,18 @@ void TouchGestures::update() {
     // raw, a finger-drag up arrives as a negative dy and the scene translated
     // the wrong way — the axis conventions are opposite, so one of the two has
     // to be flipped and this is the boundary between them.
-    s.cam->beginPan();
-    s.cam->mouseLook(static_cast<int>(panX), -static_cast<int>(panY));
-    s.cam->endPan();
+    //
+    // Where one finger steers (CameraController::setPrimaryDragSteers), two
+    // TURN the view instead, as the right button does with a mouse.
+    if (s.cam->primaryDragSteers() && s.cam->mode() == CameraController::Mode::Orbit) {
+      s.cam->beginSecondaryDrag();
+      s.cam->mouseLook(static_cast<int>(panX), -static_cast<int>(panY));
+      s.cam->endSecondaryDrag();
+    } else {
+      s.cam->beginPan();
+      s.cam->mouseLook(static_cast<int>(panX), -static_cast<int>(panY));
+      s.cam->endPan();
+    }
   }
 #endif
 }

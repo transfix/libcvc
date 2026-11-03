@@ -188,9 +188,10 @@ units:
         bind: "{id}.view.error"
         color: [1.0, 0.45, 0.45]
         visible_when: (not (= (state-get "{id}.view.error") ""))
-      # Enter sends; Shift+Enter (Alt+Enter or Ctrl+J in a terminal) adds a line.
+      # Enter or Send sends; Shift+Enter (Alt+Enter or Ctrl+J in a terminal) adds a line.
       - message_input: "##{id}_say"
         bind: "{id}.draft"
         hint: "Write a message"
         max_length: 2000
+        send: Send
         on: (chat-ui-send "{id}" (state-get "{room}") (get-attr event "text"))

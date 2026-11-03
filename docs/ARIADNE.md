@@ -632,22 +632,30 @@ the loader only *captures*. The host wires them:
 
   A host's pointer and camera settings (`set_host_mouse`, a `MouseControls`) go above the keys,
   bound where its camera reads them: arigl's are `viewers.main.camera.settings.mouse_look`
-  (*Drag to look* or *Mouse look*), `mouse_sensitivity`, `invert_pitch` and `invert_yaw`, and
-  *Camera distance*, the camera's `orbit.distance` (the wheel changes it too). Under mouse look
-  a click on the scene captures the pointer and the mouse turns the view with no button held,
-  until *Free the mouse* (Escape; in a browser, Escape always ends its pointer lock). In a
-  browser the page takes its pointer lock inside that press itself (the cursor goes, and the
-  view keeps turning past the screen's edge): a press over a window is the UI's
-  (`CameraController::setPointerOverUi`, which the overlay sets each frame). In conference mode
-  the avatar faces where the camera aims, standing or walking, and walks that way: it turns
-  with the camera every frame on your screen, and the relay hears each turn (at most 20 intents
-  a second, a key at once) and shows it to everyone else. The camera looks past the avatar's
+  (*Drag to look* or *Mouse look*), `primary_drag_steers` (in a room: *Drag the floor to face
+  it*), `mouse_sensitivity`, `invert_pitch` and `invert_yaw`, and *Camera distance*, the
+  camera's `orbit.distance` (the wheel changes it too). Under mouse look a click on the scene
+  captures the pointer and the mouse turns the view with no button held, until *Free the mouse*
+  (Escape; in a browser, Escape always ends its pointer lock). In a browser the page takes its
+  pointer lock inside that press itself (the cursor goes, and the view keeps turning past the
+  screen's edge), asking for the mouse's raw motion where the browser has it: a press on a
+  window is the UI's, judged by where the press lands against the windows the overlay drew
+  last frame (`CameraController::setUiRegions`), so a quick move onto a window and a click
+  there never takes the pointer. In drag to look, a click on the floor turns your avatar to
+  face it and a drag on the floor keeps it facing the point under the pointer, a mouse's or a
+  finger's (`CameraController::setPrimaryDragSteers`); the right button, or two fingers, turns
+  the view. In conference mode under mouse look the avatar faces where the camera aims,
+  standing or walking, and walks that way. Either way it turns every frame on your screen, and
+  the relay hears each turn (at most 20 intents a second, a key at once) and shows it to
+  everyone else. The camera looks past the avatar's
   right shoulder at a point 4 m ahead of it (at most a third of the camera's distance), so the
   crosshair marks where you aim, downrange. In either look
   the ground is the camera's floor (`orbit.floor.*`): looking up slides the eye in along its line
   of sight rather than under the ground, and an eye that comes inside the avatar hides it.
   `$CVC_ARIGL_LOOK=mouse` (the browser page's `?look=mouse`) starts in mouse look. A touch
-  screen keeps dragging.
+  screen keeps dragging. In a browser arigl draws a frame per display refresh (it yields to the
+  page until the next animation frame; `$CVC_ARIGL_YIELD=timeout`, the page's `?yield=timeout`,
+  yields on a 0 ms timer instead, which judders on a fast screen).
 
   A row's Change writes the binding's id to
   `tree.ariadne_keys.capture`; while the window is open the next key down becomes its key
@@ -1217,9 +1225,16 @@ How each backend does it:
   is divided back, so a layout looks the same at any UI size and on a phone's dense screen. A
   window opens inside the view: no larger than the work area, and moved in from its `pos:` (or
   its persisted place) until all of it shows, so a layout made for a laptop opens on a phone in
-  reach. ImGui gives a window with no size ImGui's always-auto-resize: it measures the window's
-  widgets each frame, its labeled widgets at the width ImGui gives an auto-resizing window's items
-  (16 font sizes), and a row-split pane as wide as its own widgets. A window with a size gets a
+  reach. In a browser the view is the canvas from the first frame, as the page has laid it out.
+  When the view gets smaller later (a browser window made smaller, a phone turned on its side,
+  fullscreen left), a window that showed in full moves back in the same way, no larger than the
+  work area. A window moved in, where it opened or since, goes back toward its place and size as
+  the view grows again, as far as the view allows, until it is there (not one that opened in a
+  phone's list of titles, §5.14: its place is the list's). One the user moves or resizes
+  meanwhile stays where they put it, and so does one the user left partly outside the view.
+  ImGui gives a window with no size ImGui's always-auto-resize: it measures the window's widgets
+  each frame, its labeled widgets at the width ImGui gives an auto-resizing window's items (16
+  font sizes), and a row-split pane as wide as its own widgets. A window with a size gets a
   horizontal scroll bar as well as ImGui's vertical one, and a long label shrinks its slider,
   input, combo or colour widget rather than run past the window's edge. A
   `layout: {kind: horizontal}` row with no `col_widths` puts its cells side by side on one line,
@@ -1533,7 +1548,7 @@ this for every one.
   Controls window offers it as **UI size** (75% to 200%), under *Display* above the keys, for any
   host that calls `AppRuntime::set_host_ui_size`. A new size takes effect at the next frame, and
   the open windows grow or shrink with it. It holds for the run.
-- **Hiding windows.** On a view whose short side is under 700 logical pixels the panels start
+- **Hiding windows.** On a view whose short side is under 500 logical pixels the panels start
   hidden, and a round button in the bottom-right corner shows and hides them all (the menu bar
   too), so the scene is never buried. The button stays above every window, even one dragged over
   its corner. A window collapses to its title bar with the arrow at the title's left (or a double
@@ -1579,6 +1594,7 @@ Two widgets for a log and the field under it (a chat window, a console):
   multiline: true               # Shift+Enter adds a line (default); false: one line only
   max_lines: 4                  # it grows to this many lines, then scrolls (default 4)
   max_length: 2000              # bytes (default 0: no cap)
+  send: Send                    # a button beside it that sends it (ImGui; default: none)
   on: (chat-ui-send "chat" (state-get "room.token") (get-attr event "text"))
 ```
 
@@ -1611,7 +1627,8 @@ back (a window reopened) keeps its place.
 
 - **Enter** sends it. The program reads it as `(get-attr event "text")`, and the draft at
   `bind:` is cleared. A message of blanks only is not sent. The field keeps the keyboard focus, so
-  the next message can be typed at once.
+  the next message can be typed at once. **`send:`** puts a button with that label on the field's
+  right (ImGui), which sends it as Enter does; a terminal backend has Enter only.
 - **Shift+Enter** adds a line (`multiline: true`, the default). In ImGui Ctrl+Enter does too. In
   a terminal, Shift+Enter usually reaches the program as a plain Enter, so Alt+Enter and Ctrl+J
   add a line there. Shift+Enter works where the terminal reports it (the kitty keyboard
