@@ -1694,15 +1694,38 @@ includes. Each binds state keys a C++ object owns, so it needs no host code;
 
 | component | drives |
 |---|---|
-| `stage_lighting`, `scene_controls`, `camera_controls` | a `rig:` light, `shadows:`, the main camera |
-| `display_toggles`, `sim_transport`, `raster_view` | `show.*` layer keys, `sim.*` + host verbs, a host-published image |
-| `volren_controls`, `volslice_controls` | a `volren` / `volslice` node named `bunny_volume` |
-| `forest_controls`, `sea_controls`, `sky_controls` | `forest_trees` / `wave_sea` / `cloud_sky` nodes |
-| `world_controls` | a `generated_world` node (§5.4) |
-| `mesh_tools` | a `mesh_lab` node named `mesh` (§5.4) |
-| `fe_controls` | an `fe_lab` node named `domain` (§5.4) |
+| `viewer_settings` | a viewer (arg `viewer`, default `main`): the frame-rate readout, UI size, grid / origin axis / scene bounds, camera and shadows in one window |
+| `stage_lighting`, `scene_controls`, `camera_controls` | a `rig:` light, `shadows:`, a viewer's camera (arg `viewer`) |
+| `display_toggles`, `sim_transport`, `raster_view` | `show.*` layer keys, `sim.*` + host verbs, a host-published image (arg `keys`, default `raster`) |
+| `volren_controls`, `volslice_controls` | a `volren` / `volslice` node (arg `node`, default `bunny_volume`) |
+| `forest_controls`, `sea_controls`, `sky_controls` | a `forest_trees` / `wave_sea` / `cloud_sky` node (arg `keys`, below) |
+| `world_controls` | a `generated_world` node (§5.4; arg `keys`) |
+| `mesh_tools` | a `mesh_lab` node (§5.4; arg `node`, default `mesh`) |
+| `fe_controls` | an `fe_lab` node (§5.4; arg `node`, default `domain`) |
 | `card` | a card in a list: avatar / title / subtitle / timestamp header, body, `media` and `actions` slots; its args are state keys, so a `repeat:` includes one per item (not a window: embed it) |
 | `transfer_function`, `transfer_function_editor` | any node's `transfer_function` model (args `node`, `id`): the ColorTable2 editor with histogram / contour spectrum / contour tree layers — see [`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) |
+
+Each window component also takes `title` and `id` args, and every arg has a default, so a bare
+`include:` works. A document with two nodes of a kind includes the panel twice, each with its
+own `node` (or `keys`) and `id`; the window's geometry persists under `tree.<id>`. The forest,
+sea, sky and world realizers keep their live keys scene-wide (`forest.*`, `sea.*`, `sky.*`,
+`world.*`). A node's `keys:` prop moves them under a root of its own, and the panel's `keys` arg
+names the same root:
+
+```yaml
+import: cvc://components/forest_controls.ari
+windows:
+  - include: forest_controls                           # forest.*: the south wood
+  - include: forest_controls
+    args: { keys: north, title: North wood, id: north_forest }
+scene:
+  nodes:
+    - { node: south, type: forest_trees, count: 40 }
+    - { node: north, type: forest_trees, count: 80, keys: north }   # north.count, north.seed, ...
+```
+
+`camera_controls` and `scene_controls` also ship their widgets without the window
+(`camera_settings`, `shadow_settings`); `viewer_settings` is built from them.
 
 The `card` is a generic social or inbox card (§5.11 pictures, slots in §6.1):
 

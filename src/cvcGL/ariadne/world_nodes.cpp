@@ -538,7 +538,8 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
   rt->library = &find_library(n, warnings);
 
   const std::string pref = sg.getStatePrefix();
-  auto key = [&](const char *k) { return ari::resolve_bind(pref, k); };
+  // world.*, or under the node's `keys:` prop (node_key) so two worlds keep separate panels.
+  auto key = [&](const char *k) { return ari::resolve_bind(pref, ari::node_key(n, k)); };
   auto seed_key = [&](const char *k, double def) {
     const std::string path = key(k);
     ari::read_or_seed<double>(app, path, def);
