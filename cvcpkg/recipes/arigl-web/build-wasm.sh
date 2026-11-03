@@ -42,10 +42,10 @@ esac
 FULL=ON
 [[ "${CVC_ARIGL_WEB_LEAN:-0}" == "1" ]] && FULL=OFF
 
-# An Ariadne conference client, single-threaded only (protobuf and libopus have no -pthread wasm
-# builds): the WebSocket transport, built when the deps prefix has protobuf's wasm build, and then
-# the rest of what a conference needs is required below. A prefix without it (cvcpkg.org has
-# published no wasm protobuf yet) builds a package that cannot run a conference, and says so.
+# An Ariadne conference client, single-threaded only (libopus has no -pthread wasm build): the
+# WebSocket transport, built when the deps prefix has protobuf's wasm build, and then the rest of
+# what a conference needs is required below. A prefix without protobuf builds a package that
+# cannot run a conference, and says so.
 WS=OFF
 if [[ "$PTHREADS" == "OFF" ]]; then
   if [[ -d "$CVC_DEPS_PREFIX/lib/cmake/protobuf" || -f "$CVC_DEPS_PREFIX/lib/libprotobuf.a" ]]; then
