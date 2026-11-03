@@ -406,31 +406,51 @@ value_t intrinsic_state_data_get(intrinsics_context *ctx, std::span<const value_
   return value_t(std::move(obj));
 }
 
+namespace {
+// A value state-data-set stores as it is, needing no copy (td 4.3): nil, a scalar, a string or a
+// symbol. Keyed on the variant, so an empty list or dict is still copied, and so is every
+// data_object: the copy shares an ordinary one and refuses the internal ones (a with-lock binding,
+// a lock wait, an async call), at no cost beyond the check of its root.
+bool stores_as_is(const value_t &v) {
+  return v.is_nil() || std::holds_alternative<bool>(v.v) || std::holds_alternative<int64_t>(v.v) ||
+         std::holds_alternative<double>(v.v) || std::holds_alternative<std::string>(v.v) ||
+         std::holds_alternative<symbol>(v.v);
+}
+} // namespace
+
 value_t intrinsic_state_data_set(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 2, "state-data-set");
   require_root(ctx, "state-data-set");
   auto &path = as_string(args[0], "state-data-set");
-  // Refuse to store a callable. A native_fn/closure/generator captures an environment or
-  // intrinsics_context that may not outlive this (persistent) node — a use-after-free
-  // waiting to happen — and a stored callable is an invocation channel that would bypass
-  // any environment allowlist a later reader relies on. The data channel is for structured
-  // DATA (scalars/lists/dicts), not code.
-  if (std::holds_alternative<native_fn>(args[1].v) ||
-      std::holds_alternative<closure_ptr>(args[1].v) ||
-      std::holds_alternative<generator_ptr>(args[1].v))
-    throw std::runtime_error(
-        "state-data-set: cannot store a callable (function/closure/generator) as data");
   // A `bytes` value (opaque octets) is stored as a RAW std::string on the data channel — the SAME
   // representation the `?data` URI channel (uri_state.cpp) and the §13.9 HTTP cache use — so a byte
   // blob written from the DSL is readable via state://…?data and a blob parked by the cache reads
-  // back as `bytes` here (state-data-get, above). Every other value_t is stored as-is, so
-  // structured data (lists/dicts/scalars/text strings) round-trips via the value_t path.
-  chain_pins pins;
-  if (const bytes_value *b = std::get_if<bytes_value>(&args[1].v))
+  // back as `bytes` here (state-data-get, above).
+  if (const bytes_value *b = std::get_if<bytes_value>(&args[1].v)) {
+    chain_pins pins;
     write_node(pinned_root(ctx), path, pins.get())->data(boost::any(b->data));
-  else
+    return nil_value;
+  }
+  if (stores_as_is(args[1])) {
+    chain_pins pins;
     write_node(pinned_root(ctx), path, pins.get())->data(boost::any(args[1]));
-  return nil_value;
+    return nil_value;
+  }
+  // Anything else is stored as an isolating copy (td 4.3, 5 item 2): a list changed after it was
+  // stored no longer changes what state-data-get returns, and nothing that runs code or holds a
+  // process's state is stored, at any depth. A closure, native, generator, future, lock form, lock
+  // wait or object instance is refused ("state-data-set: cannot store a closure (nested in a
+  // list)"): a stored callable can outlive what it captures, and is an invocation channel around
+  // an allowlist. The copy is deep-data work charged to the writer, a slice per step on a host;
+  // the node is written once, when the whole copy is made, so a refusal leaves it as it was. The
+  // copy is the tree's and is never tracked by this thread's cycle registry.
+  return run_data_job(
+      make_copy_job(args[1], copy_mode::isolate, "state-data-set"),
+      [roots = root_chain(ctx), path = path](value_t copy) {
+        chain_pins pins;
+        write_node(*roots.back(), path, pins.get())->data(boost::any(std::move(copy)));
+        return nil_value;
+      });
 }
 
 // ---------------------------------------------------------------------------
