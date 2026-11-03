@@ -632,22 +632,30 @@ the loader only *captures*. The host wires them:
 
   A host's pointer and camera settings (`set_host_mouse`, a `MouseControls`) go above the keys,
   bound where its camera reads them: arigl's are `viewers.main.camera.settings.mouse_look`
-  (*Drag to look* or *Mouse look*), `mouse_sensitivity`, `invert_pitch` and `invert_yaw`, and
-  *Camera distance*, the camera's `orbit.distance` (the wheel changes it too). Under mouse look
-  a click on the scene captures the pointer and the mouse turns the view with no button held,
-  until *Free the mouse* (Escape; in a browser, Escape always ends its pointer lock). In a
-  browser the page takes its pointer lock inside that press itself (the cursor goes, and the
-  view keeps turning past the screen's edge): a press over a window is the UI's
-  (`CameraController::setPointerOverUi`, which the overlay sets each frame). In conference mode
-  the avatar faces where the camera aims, standing or walking, and walks that way: it turns
-  with the camera every frame on your screen, and the relay hears each turn (at most 20 intents
-  a second, a key at once) and shows it to everyone else. The camera looks past the avatar's
+  (*Drag to look* or *Mouse look*), `primary_drag_steers` (in a room: *Drag the floor to face
+  it*), `mouse_sensitivity`, `invert_pitch` and `invert_yaw`, and *Camera distance*, the
+  camera's `orbit.distance` (the wheel changes it too). Under mouse look a click on the scene
+  captures the pointer and the mouse turns the view with no button held, until *Free the mouse*
+  (Escape; in a browser, Escape always ends its pointer lock). In a browser the page takes its
+  pointer lock inside that press itself (the cursor goes, and the view keeps turning past the
+  screen's edge), asking for the mouse's raw motion where the browser has it: a press on a
+  window is the UI's, judged by where the press lands against the windows the overlay drew
+  last frame (`CameraController::setUiRegions`), so a quick move onto a window and a click
+  there never takes the pointer. In drag to look, a click on the floor turns your avatar to
+  face it and a drag on the floor keeps it facing the point under the pointer, a mouse's or a
+  finger's (`CameraController::setPrimaryDragSteers`); the right button, or two fingers, turns
+  the view. In conference mode under mouse look the avatar faces where the camera aims,
+  standing or walking, and walks that way. Either way it turns every frame on your screen, and
+  the relay hears each turn (at most 20 intents a second, a key at once) and shows it to
+  everyone else. The camera looks past the avatar's
   right shoulder at a point 4 m ahead of it (at most a third of the camera's distance), so the
   crosshair marks where you aim, downrange. In either look
   the ground is the camera's floor (`orbit.floor.*`): looking up slides the eye in along its line
   of sight rather than under the ground, and an eye that comes inside the avatar hides it.
   `$CVC_ARIGL_LOOK=mouse` (the browser page's `?look=mouse`) starts in mouse look. A touch
-  screen keeps dragging.
+  screen keeps dragging. In a browser arigl draws a frame per display refresh (it yields to the
+  page until the next animation frame; `$CVC_ARIGL_YIELD=timeout`, the page's `?yield=timeout`,
+  yields on a 0 ms timer instead, which judders on a fast screen).
 
   A row's Change writes the binding's id to
   `tree.ariadne_keys.capture`; while the window is open the next key down becomes its key
@@ -739,7 +747,14 @@ or a path relative to the document, anchored at 0 and stretched to `amp`), or on
 registered (`cvc::world::register_terrain_generator`). The size defaults to 1200 and the resolution
 to one vertex per 5 m (at most 2049). A `heightfield:` source takes the same `generator:` keys, its
 layers adding on top. The `generated_world` node type uses the same generators (its `terrain:`,
-`city:` and `terrain_file:` props; `world_controls.ari` switches them live).
+`city:` and `terrain_file:` props; `world_controls.ari` switches them live). Its first world is
+made while the document loads; every later rebuild (a changed `world.*` key, Regenerate,
+Randomize) and every repaint (`world.color`) is a sliced task on the app's scheduler
+([`sliced_task.h`](../inc/cvc/core/sliced_task.h), as `fe_lab`'s jobs are): `cvc::world::world_builder`
+and `surface_painter` step it a few rows at a time, on the background pool natively and a few
+milliseconds a frame on single-threaded wasm, so the old world stays on screen until the new one is
+swapped in. `world.busy`, `world.progress` (0–100) and `world.phase` (the stage and its percent)
+follow it, and `world.request: stop` ends it, keeping the world shown.
 
 **The fast render path.** A big static world draws fast when it is a few merged meshes and its
 shadow maps are re-baked rarely and spent where the camera looks. These keys say so
@@ -1195,9 +1210,16 @@ How each backend does it:
   is divided back, so a layout looks the same at any UI size and on a phone's dense screen. A
   window opens inside the view: no larger than the work area, and moved in from its `pos:` (or
   its persisted place) until all of it shows, so a layout made for a laptop opens on a phone in
-  reach. ImGui gives a window with no size ImGui's always-auto-resize: it measures the window's
-  widgets each frame, its labeled widgets at the width ImGui gives an auto-resizing window's items
-  (16 font sizes), and a row-split pane as wide as its own widgets. A window with a size gets a
+  reach. In a browser the view is the canvas from the first frame, as the page has laid it out.
+  When the view gets smaller later (a browser window made smaller, a phone turned on its side,
+  fullscreen left), a window that showed in full moves back in the same way, no larger than the
+  work area. A window moved in, where it opened or since, goes back toward its place and size as
+  the view grows again, as far as the view allows, until it is there (not one that opened in a
+  phone's list of titles, §5.14: its place is the list's). One the user moves or resizes
+  meanwhile stays where they put it, and so does one the user left partly outside the view.
+  ImGui gives a window with no size ImGui's always-auto-resize: it measures the window's widgets
+  each frame, its labeled widgets at the width ImGui gives an auto-resizing window's items (16
+  font sizes), and a row-split pane as wide as its own widgets. A window with a size gets a
   horizontal scroll bar as well as ImGui's vertical one, and a long label shrinks its slider,
   input, combo or colour widget rather than run past the window's edge. A
   `layout: {kind: horizontal}` row with no `col_widths` puts its cells side by side on one line,
@@ -1511,13 +1533,23 @@ this for every one.
   Controls window offers it as **UI size** (75% to 200%), under *Display* above the keys, for any
   host that calls `AppRuntime::set_host_ui_size`. A new size takes effect at the next frame, and
   the open windows grow or shrink with it. It holds for the run.
-- **Hiding windows.** On a view whose short side is under 700 logical pixels the panels start
+- **Hiding windows.** On a view whose short side is under 500 logical pixels the panels start
   hidden, and a round button in the bottom-right corner shows and hides them all (the menu bar
   too), so the scene is never buried. The button stays above every window, even one dragged over
   its corner. A window collapses to its title bar with the arrow at the title's left (or a double
   tap on the title), closes with its X when it is `closable:`, and comes back from the View or
   Windows menu (§5.9). On a touch screen a window moves by its title bar only, so a finger that
   slips off a widget does not carry its window away.
+- **A list of windows.** A document laid out for a wider screen would have its windows moved
+  into the phone's view all onto the same spot, one over another. So on a phone (a view under
+  500 CSS pixels on its short side, either way up) a window whose `pos:` or `size:` does not fit
+  opens collapsed instead: its title bar goes under those of the others that did, from the top of
+  the view, and the panels show a list of titles over the scene. The arrow (or a double tap)
+  opens one: it unfolds from its title, as wide as the view and no taller than the room below,
+  over the titles after it. Windows that fit where they were put, and those with no `pos:` (the
+  flow, §5.8), open as anywhere else.
+- **Labels.** A slider's, combo's or field's label stays in view: in a window that fits its
+  widgets, a widget that would push its label past the view's edge is narrowed to leave it room.
 - **The system keyboard.** A browser raises a phone's keyboard only for a focused text field,
   which the canvas is not. When a finger (or a pen) activates an `input_text`, the page focuses a
   hidden `<input>` placed at the field's caret, so the keyboard comes up and the browser keeps
@@ -1529,6 +1561,116 @@ this for every one.
   reaches `on_key` or walks an avatar. A mouse click on a field types through the canvas as
   before. A native build has no phone yet; SDL3's `SDL_StartTextInput` is how one would raise the
   keyboard on iOS and Android.
+
+### 5.15 Text buffers and message fields: `text_view:` and `message_input:`
+
+Two widgets for a log and the field under it (a chat window, a console):
+
+```yaml
+- text_view: "##log"
+  bind: chat.view.text          # the text, lines split on \n (a state path or a computed expression)
+  height: 240                   # px (rows of 16 px in a terminal); 0 or left out: see below
+  follow: true                  # stay at the bottom while lines arrive, if it is there (default)
+  wrap: true                    # wrap long lines to the view's width (default)
+  on_top: (chat-ui-more "chat" (state-get "room.token"))   # runs when the view reaches its top
+- message_input: "##say"
+  bind: chat.draft              # the draft: kept when the field loses focus, cleared when sent
+  hint: Write a message         # shown while it is empty and not focused
+  multiline: true               # Shift+Enter adds a line (default); false: one line only
+  max_lines: 4                  # it grows to this many lines, then scrolls (default 4)
+  max_length: 2000              # bytes (default 0: no cap)
+  send: Send                    # a button beside it that sends it (ImGui; default: none)
+  on: (chat-ui-send "chat" (state-get "room.token") (get-attr event "text"))
+```
+
+**`text_view:`** is read-only. Its text is a state path, or a computed expression (read-lane
+rules, §2.1). The backend keeps its scroll position under the bound path, so a view that comes
+back (a window reopened) keeps its place.
+
+- **Following.** At the bottom, new lines keep it at the bottom. Scrolled up, it stays where it
+  is.
+- **Older lines.** When lines are added above (an older page), it moves by their height, so the
+  lines in view stay put. Any other change of text (another channel) starts at the bottom.
+- **`on_top:`** runs when the user scrolls the view to its top, once each time it gets there, and
+  again when the wheel turns up there (ImGui) or the user presses Up against it (terminal). It
+  also runs once for each text that does not fill the view, so a log with only a few lines asks
+  for more until it fills or there is nothing older. An empty text does not run it. A disabled
+  view runs nothing.
+- **ImGui.** A bordered child window. Only the lines in view are drawn: their wrapped layout is
+  kept and redone only when the text or the width changes, so a long log costs what is on
+  screen. `height: 0` fills the window less what the window draws after the view (measured the
+  frame before), which is how a log sits above its message field in a sized window. In a window
+  that fits its content, it is 12 lines tall. Right-click copies the text.
+- **Terminal backends** (FTXUI, and tvision, which draws FTXUI's widgets). The lines are
+  word-wrapped to the width the view was laid out at last frame. It is `height` px tall in rows
+  of `cell_px_h`, or 8 rows. With focus, Up and Down, PageUp and PageDown, and Home and End scroll
+  it, and the wheel scrolls it from under the pointer. A gutter shows ▲ or ▼ (`^` or `v` without
+  Unicode) where there is more.
+- **A backend without one** draws the last lines as text lines (`Backend::text_view`'s default).
+
+**`message_input:`** sends what is typed to its `on:` program.
+
+- **Enter** sends it. The program reads it as `(get-attr event "text")`, and the draft at
+  `bind:` is cleared. A message of blanks only is not sent. The field keeps the keyboard focus, so
+  the next message can be typed at once. **`send:`** puts a button with that label on the field's
+  right (ImGui), which sends it as Enter does; a terminal backend has Enter only.
+- **Shift+Enter** adds a line (`multiline: true`, the default). In ImGui Ctrl+Enter does too. In
+  a terminal, Shift+Enter usually reaches the program as a plain Enter, so Alt+Enter and Ctrl+J
+  add a line there. Shift+Enter works where the terminal reports it (the kitty keyboard
+  protocol, xterm's modifyOtherKeys).
+- **Losing focus** keeps the draft at `bind:`. A draft written to `bind:` by a program shows in
+  the field while it is not being edited.
+- **ImGui** draws one line that grows with its wrapped text up to `max_lines`, then scrolls. The
+  hint is drawn over it while it is empty. A bare-name `on:` (a host handler) gets no `event`;
+  give it a program.
+
+### 5.16 Conference chat: the chat verbs and the chat component
+
+In a conference, the relay (arisrv) keeps the chat. Each client is pushed what it may read:
+
+- the room's messages, to everyone in the room;
+- a direct message, only to the connections holding its two participants' pids.
+
+A client asks for an older page when its log reaches the top. The state layout, the pagination
+and the permissions are in [ARIADNE_CHAT.md](roadmap/ARIADNE_CHAT.md). `register_room_intrinsics`
+adds the verbs to the action lanes. `ROOM` is the `room-join` handle (or its token), and
+`CHANNEL` is `""` for the room or a peer's pid:
+
+| verb | returns |
+|---|---|
+| `(chat-post ROOM TEXT [TO])` | `{ok}`, or `{ok #f error}`: TEXT is empty or longer than 2000 bytes once cleaned, or there is no relay to send it to. TO `""` posts to the room, a pid is a direct message. The relay may still refuse it (its rate limit, TO not in the room): `chat-info`'s `error` says so. |
+| `(chat-info ROOM [CHANNEL])` | `{available rev count oldest newest head first more loading error}`. `rev` changes whenever the messages held change; `oldest`..`newest` is the contiguous run held (`count` of them); `head` is the next seq and `first` the oldest the relay keeps; `more` says older ones are kept; `loading` says a page is on its way. It also asks for the newest page the first time a channel is read, and again when a push was lost. |
+| `(chat-messages ROOM [CHANNEL [AFTER]])` | the run, oldest first, as `{seq from name text t clock mine}` (`clock` is the local "HH:MM", `mine` is #t for your own), or with AFTER only those after that seq. |
+| `(chat-more ROOM [CHANNEL])` | `{ok loading more}`: asks for the page before the oldest message held. One request per channel is in flight; one unanswered for 3 s is sent again. |
+| `(chat-conversations ROOM)` | the direct-message conversations: `{peer name head present}`. |
+| `(chat-rev ROOM)` | a number that changes with every push the relay makes to you. |
+
+The shipped component `chat.ari` (§6.5) builds a chat window from these verbs, in the DSL:
+- a channel picker, the room and each conversation, with what came since you last looked;
+- a `text_view` that pages back when scrolled to the top;
+- a `message_input`.
+
+`room_users.ari` is the conference's users list. Its message button opens a conversation in the
+chat window. `conference_roster.ari` (the document cyprty runs) is built from both:
+
+```yaml
+import: [cvc://components/room_users.ari, cvc://components/chat.ari]
+windows:
+  - include: room_users
+    args: { id: users, rows: peer, chat: chat }
+  - include: chat
+    args: { id: chat, room: room.token }
+on_tick: |
+  (begin
+    ...                                     ; join, media, avatar
+    (room-users-step "peer" (state-get "conf.room") "chat")
+    (chat-ui-step "chat" (state-get "room.token")))
+```
+
+`src/ari/tests/chat_component.ari` tests the components' logic under `ari test`. It stands in for
+the room verbs with functions. `src/arigl/tests/chat_driver.ari` and `chat_two_clients.sh` run
+scripted arigl clients through a local arisrv: one posts, a late joiner pages back through
+everything, the two exchange direct messages, and a third checks it was pushed none of them.
 
 ## 6. Composition: include / import / load
 
@@ -1686,6 +1828,8 @@ includes. Each binds state keys a C++ object owns, so it needs no host code;
 | `fe_controls` | an `fe_lab` node named `domain` (§5.4) |
 | `card` | a card in a list: avatar / title / subtitle / timestamp header, body, `media` and `actions` slots; its args are state keys, so a `repeat:` includes one per item (not a window: embed it) |
 | `transfer_function`, `transfer_function_editor` | any node's `transfer_function` model (args `node`, `id`): the ColorTable2 editor with histogram / contour spectrum / contour tree layers — see [`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) |
+| `chat`, `chat_panel` | a room's chat and direct messages through the chat verbs (args `id`, `title`, `room`); its functions come with the import: call `(chat-ui-step ID ROOM)` from `on_tick` (§5.16) |
+| `room_users`, `room_users_compact` | everyone in a room from `room-roster`, with local cam / mic / volume and a message button (args `id`, `title`, `rows`, `chat`, `self`); call `(room-users-step ROWS ROOM CHAT)` from `on_tick` |
 
 The `card` is a generic social or inbox card (§5.11 pictures, slots in §6.1):
 
@@ -1719,7 +1863,9 @@ loading through `avatar_auth`'s credential where its URL needs one. A one-column
 outer border frames the card: an ImGui table, a box in a terminal.
 
 Most components that address one node use a fixed node id; copy the file and change the id to
-drive another node. `transfer_function` instead takes the node as an include arg (§6.1).
+drive another node. `transfer_function` instead takes the node as an include arg (§6.1). A
+component may also carry `functions:` (§6.6), which the import brings with its units: `chat` and
+`room_users` keep their windows current that way, from the document's `on_tick`.
 `examples/ariadne/documents/mesh_lab.ari` uses the last two, and so does
 `examples/ariadne/documents/fem_gallery.ari`, which steps one `fe_lab` and one `mesh_lab`
 through the twenty items of [FEM_GALLERY.md](FEM_GALLERY.md). Run them from the repository

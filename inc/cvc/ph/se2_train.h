@@ -56,6 +56,9 @@ struct se2_flights {
   std::vector<double> data; // [count x rows x width]
   std::vector<int> seed;    // each flight's seed, when known
   double dt = 0.02;         // s between rows
+  // Each column's name (the plant log's meta.json "layout"), when known: x, y, psi, vx, vy, r,
+  // then the inputs (drive, steer, and with plant_log's wide layout grade, roll, om_front, ...).
+  std::vector<std::string> columns;
 
   int control_dim() const { return width - 6; } // every input: a model's ports and modulations
   const double *flight(std::size_t f) const { return data.data() + f * rows * width; }
@@ -81,6 +84,12 @@ se2_flights load_plant_log_runs(const std::vector<std::string> &dirs);
 
 // The flights whose seed is (not) in `seeds`.
 se2_flights select_seeds(const se2_flights &f, const std::vector<int> &seeds, bool keep);
+
+// The flights with the inputs named in `inputs`, in that order, after the six state columns: a
+// model's ports, then its modulations, then (potential terrain) "grade" and "roll". Each name is
+// one of f.columns past the sixth. Throws std::invalid_argument for a name f does not have (or
+// when f carries no column names).
+se2_flights select_inputs(const se2_flights &f, const std::vector<std::string> &inputs);
 
 // A little-endian .npy array of float64 (or float32, widened), C order: its shape and values.
 // Throws std::runtime_error.

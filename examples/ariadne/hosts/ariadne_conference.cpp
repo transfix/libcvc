@@ -203,6 +203,7 @@ int main(int argc, char **argv) {
     shard->install_as_default(); // room-join/-publish derive the pid from the default shard's node
                                  // id
     state_tp->register_shard(shard.get());
+    shard->set_transport(state_tp.get()); // the chat verbs' requests to the relay
     if (!statePeer.empty()) {
       if (state_tp->connect_to_peer(statePeer, std::chrono::milliseconds(4000))) {
         // Bootstrap the CURRENT room tree from the server. The journal backfill on connect carries
@@ -406,8 +407,10 @@ int main(int argc, char **argv) {
   if (media_tp)
     media_tp->stop();
   if (state_tp) {
-    if (shard)
+    if (shard) {
+      shard->set_transport(nullptr);
       state_tp->unregister_shard(shard.get());
+    }
     state_tp->stop();
   }
   if (shard)

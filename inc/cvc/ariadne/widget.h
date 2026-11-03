@@ -51,6 +51,8 @@ enum class Kind {
                   // or, outside one, the document's setting for it (bdef false: no such menu)
   Radio,          // bound enum-as-text state, every option shown (a combo's fields; radio_row)
   Spinner,        // an activity indicator: a glyph the host turns by its frame clock, and a label
+  TextView,       // a read-only, scrollable multi-line text buffer (a chat log, a console)
+  MessageInput,   // a field to post a message: Enter sends it, Shift+Enter adds a line
   Video,          // a video player (§5.13): src URI, picture box, controls; bind = its state keys
   Audio,          // an audio player (§5.13): the same without a picture
 };
@@ -347,6 +349,23 @@ struct Widget {
   std::string overlay;
   double plot_height = 60.0; // Kind::Plot: pixels (a window backend's)
 
+  // Kind::TextView: its height in px (0: the rest of the window; rows of 16 px in a terminal);
+  // `follow` keeps it at the bottom while lines arrive, if it is already there; `wrap` wraps long
+  // lines; `on_top` (an event name or a program) runs when the view is scrolled to its top, once
+  // each time it gets there (ask for older lines there).
+  double view_height = 0.0;
+  bool follow = true;
+  bool wrap = true;
+  std::string on_top;
+  // Kind::MessageInput: `hint` is shown while it is empty; with `multiline` Shift+Enter adds a line
+  // (else the message is one line); it grows to `max_lines` lines and then scrolls; `max_length`
+  // caps it in bytes (0: no cap); `send` labels a button beside it that sends it ("" none).
+  std::string hint;
+  bool multiline = true;
+  int max_lines = 4;
+  int max_length = 0;
+  std::string send;
+
   // §12 module mount (load:): when non-empty, this widget is a MOUNT POINT — a relative
   // state-path segment (e.g. "includes.stats") appended to the enclosing scope, so its whole
   // SUBTREE resolves binds and evaluates reactive/read-lane expressions against that deeper
@@ -591,6 +610,30 @@ inline Widget input_text(std::string label, std::string bind, std::string on = s
   w.bind = std::move(bind);
   w.on = std::move(on);
   w.sdef = std::move(def);
+  return w;
+}
+
+// A read-only, scrollable multi-line text buffer: the text at `bind` (a state path or a computed
+// expression), its lines split on newlines. `on_top` (optional) runs when the view is scrolled to
+// its top, which is where a chat log asks for older messages.
+inline Widget text_view(std::string label, std::string bind, std::string on_top = std::string()) {
+  Widget w;
+  w.kind = Kind::TextView;
+  w.label = std::move(label);
+  w.bind = std::move(bind);
+  w.on_top = std::move(on_top);
+  return w;
+}
+
+// A field to post a message (a chat's input). One line until Shift+Enter adds another; Enter sends
+// it: `on` runs with `event.text` the message, and the draft at `bind` is cleared. The draft is
+// kept at `bind` while the field loses focus.
+inline Widget message_input(std::string label, std::string bind, std::string on = std::string()) {
+  Widget w;
+  w.kind = Kind::MessageInput;
+  w.label = std::move(label);
+  w.bind = std::move(bind);
+  w.on = std::move(on);
   return w;
 }
 

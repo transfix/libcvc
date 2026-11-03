@@ -37,6 +37,9 @@ struct KeyBinding {
 struct MouseControls {
   std::string look;        // 1: mouse look (once the scene is clicked the mouse turns the view,
                            // Escape gives the mouse back); 0: drag to look, click the scene
+  std::string steer; // 1: in drag to look, a drag on the scene steers (what the host walks faces
+                     // the point under the pointer) and the right button turns the view instead
+  std::string steer_label = "Drag to steer"; // its checkbox, in the host's words
   std::string sensitivity; // degrees of turn per pixel of motion
   double sensitivity_lo = 0.02, sensitivity_hi = 1.0;
   std::string invert_y; // 1: moving the mouse up looks down

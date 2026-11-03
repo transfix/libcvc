@@ -55,6 +55,21 @@
 // (control_scale has one entry per input, ports first). modulation_dim 0 is LieSPHGP's form,
 // unchanged, and the only one with JAX goldens.
 //
+// The potential (setup.potential; world by default). V(x, y) is learned on world position, so it
+// carries nothing from one map to another, and on flat ground it can only fit what the other terms
+// miss. Two options replace it:
+//   none     no potential: H is the kinetic energy and the body term is zero.
+//   terrain  the terrain under the vehicle, from its logs: the last two inputs (after the ports
+//            and the modulations) are the sines of the ground's slope along and across the
+//            heading (plant_log's ground_grade and ground_roll, from the wheels' contacts; the
+//            body's grade and roll would carry the suspension's pitch under acceleration too), and
+//            the body term is (k_x grade, k_y roll), k = V's two levels. It
+//            is the gradient along the body's axes of the potential m g z of a vehicle on that
+//            slope (k -> m g, up to M's scale), read where the vehicle is rather than learned
+//            where it was; its power, -(k_x grade v_x + k_y roll v_y), is the climb's. H cannot
+//            evaluate it from (x, y), so hamiltonian() leaves it out.
+// Either is a "cvc-ph-se2/3" model (se2_model.cpp).
+//
 // One step of size h (Lie-IMEX: the damping implicit, everything else explicit; SO(2) is abelian,
 // so the heading stays a continuous angle). With e = M^-1 (ad*_v p - body + G u) and K = M^-1 D(v)
 // at each stage, and the twist increment eta = sqrt(h) Sigma z:
@@ -91,6 +106,7 @@ namespace ph {
 
 constexpr int kSe2MaxControls = 4;    // inputs in all: ports and modulations
 constexpr int kSe2MaxModulations = 2; // of which modulations
+constexpr int kSe2MaxInputs = kSe2MaxControls + 2; // with the terrain's (potential terrain)
 constexpr int kSe2State = 6;          // x, y, psi, v_x, v_y, r
 
 // A Gaussian-process subnetwork's trainable values.
@@ -140,6 +156,13 @@ struct se2_params {
   se2_params zeros_like() const;
 };
 
+// The potential's form (see the top).
+enum class se2_potential {
+  world,  // V(x, y): a level and a GP on world position (LieSPHGP's)
+  none,   // no potential
+  terrain // the logged attitude's (grade, roll) times V's two levels
+};
+
 // The random features and the options that are not trained.
 struct se2_setup {
   int control_dim = 2;    // the ports: the inputs G maps to forces
@@ -148,11 +171,14 @@ struct se2_setup {
   double matern_nu = 2.5, matern_length = 1.0;
   bool v_gp = true;
   double v_length = 50.0; // V's GP reads (x, y) / v_length
-  rff D, G, V;            // inputs 3 + modulation_dim, 3 + modulation_dim, 2
+  se2_potential potential = se2_potential::world;
+  rff D, G, V; // inputs 3 + modulation_dim, 3 + modulation_dim, 2
 
   int g_outputs() const { return 3 * control_dim; }
-  int input_dim() const { return control_dim + modulation_dim; } // inputs per sample
-  int gp_inputs() const { return 3 + modulation_dim; }           // what D's and G's GPs read
+  // The terrain inputs after the modulations: (grade, roll) with potential terrain, else none.
+  int terrain_dim() const { return potential == se2_potential::terrain ? 2 : 0; }
+  int input_dim() const { return control_dim + modulation_dim + terrain_dim(); } // per sample
+  int gp_inputs() const { return 3 + modulation_dim; } // what D's and G's GPs read
 };
 
 // How a model is initialized (LieSPHGP's model.* keys; train.py's defaults for the Phase A fits).
@@ -163,6 +189,7 @@ struct se2_init {
   double matern_nu = 2.5, matern_length = 1.0;
   bool v_gp = true;
   double v_length = 50.0;
+  se2_potential potential = se2_potential::world; // terrain: two more inputs, last
   double initial_log_std = -5.0;
   double initial_inverse_mass = 1.0;          // M^-1's level starts at this times I
   double initial_dissipation = 1.0;           // and D's
@@ -251,6 +278,7 @@ template <class T> struct se2_stage {
   vec3<T> e{};                              // M^-1 q
   mat3<T> K{};                              // M^-1 D
   std::array<T, 3 + kSe2MaxModulations> z{}; // D's and G's GP input: v / twist_scale, modulations
+  std::array<T, 2> terrain{};                // potential terrain: the (grade, roll) inputs
   std::vector<T> theta_D, theta_G, theta_V;  // the features' angles
 };
 
@@ -316,7 +344,10 @@ public:
     control_matrix(gp_input_at(v, mod), out, theta.data());
   }
 
+  // V(x, y) with potential world; 0 otherwise (terrain's is not a function of position).
   T potential(T x, T y) const {
+    if (setup_->potential != se2_potential::world)
+      return T(0);
     T value = w_.v_level[0] * x + w_.v_level[1] * y;
     if (setup_->v_gp) {
       const T inv = static_cast<T>(1.0 / setup_->v_length);
@@ -329,8 +360,11 @@ public:
     return value;
   }
 
-  // grad V in the world frame; theta receives the V features' angles.
+  // grad V in the world frame (zero but with potential world); theta receives the V features'
+  // angles.
   std::array<T, 2> grad_potential(T x, T y, T *theta) const {
+    if (setup_->potential != se2_potential::world)
+      return {T(0), T(0)};
     std::array<T, 2> g{w_.v_level[0], w_.v_level[1]};
     if (setup_->v_gp) {
       const T inv = static_cast<T>(1.0 / setup_->v_length);
@@ -416,6 +450,11 @@ public:
     st.grad_v = grad_potential(state[0], state[1], st.theta_V.data());
     st.body = {st.c * st.grad_v[0] + st.s * st.grad_v[1],
                -st.s * st.grad_v[0] + st.c * st.grad_v[1]};
+    if (setup_->potential == se2_potential::terrain) {
+      const T *ter = u + nu + setup_->modulation_dim;
+      st.terrain = {ter[0], ter[1]};
+      st.body = {w_.v_level[0] * ter[0], w_.v_level[1] * ter[1]};
+    }
     st.coad = {st.p[1] * st.v[2], -st.p[0] * st.v[2], st.p[0] * st.v[1] - st.p[1] * st.v[0]};
     st.z = gp_input_at(st.v, u + nu);
     st.d_levels = dissipation_levels(st.z, st.theta_D.data());

@@ -156,9 +156,17 @@ if(EMSCRIPTEN)
   if(CVC_WASM_PTHREADS)
     target_link_options(cyprty PRIVATE -sPTHREAD_POOL_SIZE=4)
   endif()
-  # Relink (re-embed) whenever the baked document changes; otherwise a .ari-only edit leaves the
-  # stale document embedded.
-  set_property(TARGET cyprty APPEND PROPERTY LINK_DEPENDS "${CVC_ARIGL_WASM_DOC}")
+  # The component library the document imports (cvc://components/...: its Users and Chat windows),
+  # embedded where an install keeps it, as arigl-web does.
+  set(_cyprty_components "${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne/components")
+  file(GLOB _cyprty_component_files CONFIGURE_DEPENDS "${_cyprty_components}/*.ari")
+  target_link_options(cyprty PRIVATE
+                      "--embed-file=${_cyprty_components}@/usr/share/libcvc/ariadne/components")
+  target_compile_definitions(cyprty PRIVATE CVC_ARIGL_COMPONENT_DIR="/usr/share/libcvc/ariadne")
+  # Relink (re-embed) whenever the baked document or a component changes; otherwise a .ari-only
+  # edit leaves the stale document embedded.
+  set_property(TARGET cyprty APPEND PROPERTY LINK_DEPENDS "${CVC_ARIGL_WASM_DOC}"
+                                                          ${_cyprty_component_files})
   if(COMMAND cvcgl_wasm_app)
     cvcgl_wasm_app(cyprty)
   endif()
