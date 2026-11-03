@@ -23,9 +23,16 @@
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/scene_views.h>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
+#include <vtkActor.h>
+#include <vtkMapper.h>
+#include <vtkProperty.h>
 #include <vtkRenderer.h>
+#include <vtkShaderProperty.h>
+#include <vtkSmartPointer.h>
 
 #ifdef CVC_ENABLE_IMGUI
 #include <imgui.h>
@@ -37,6 +44,50 @@ namespace gl {
 namespace ariadne {
 
 namespace ari = cvc::ariadne;
+
+namespace {
+
+// An override:'s look: the fields it sets on a node's actors in one view, the rest as the node has
+// them. Later entries win field by field.
+struct Look {
+  int rep = -1; // VTK_POINTS / VTK_WIREFRAME / VTK_SURFACE, -1 unset
+  double opacity = -1.0, line_width = -1.0, point_size = -1.0;
+  bool has_color = false;
+  double color[3] = {1.0, 1.0, 1.0};
+  bool empty() const {
+    return rep < 0 && opacity < 0.0 && line_width < 0.0 && point_size < 0.0 && !has_color;
+  }
+  void merge(const Look &o) {
+    if (o.rep >= 0)
+      rep = o.rep;
+    if (o.opacity >= 0.0)
+      opacity = o.opacity;
+    if (o.line_width >= 0.0)
+      line_width = o.line_width;
+    if (o.point_size >= 0.0)
+      point_size = o.point_size;
+    if (o.has_color) {
+      has_color = true;
+      std::copy(o.color, o.color + 3, color);
+    }
+  }
+  bool operator==(const Look &o) const {
+    return rep == o.rep && opacity == o.opacity && line_width == o.line_width &&
+           point_size == o.point_size && has_color == o.has_color &&
+           (!has_color || std::equal(color, color + 3, o.color));
+  }
+};
+
+// A restyled stand-in for one of the main view's actors: its own vtkActor and vtkProperty over the
+// SAME mapper (the geometry is not copied), kept in step with the original each frame.
+struct Twin {
+  vtkSmartPointer<vtkActor> actor;
+  vtkMTimeType copied = 0; // the original's property MTime when it was last copied
+  Look look;               // the look last applied
+  bool seen = false;       // drawn this frame
+};
+
+} // namespace
 
 struct SceneViews::View {
   std::string name; // the viewport's, and its camera's viewer: <prefix>.viewers.<name>.camera
@@ -50,7 +101,66 @@ struct SceneViews::View {
   bool framed = false;                 // its camera has been framed on what it shows
   double region[4] = {-1.0, -1.0, -1.0, -1.0};
   std::unordered_set<vtkProp *> hidden; // the main view's props this one leaves out
+  // override: entries in order: a node id, a tag, or "*" (everything), and its look.
+  std::vector<std::pair<std::string, Look>> overrides;
+  std::unordered_map<vtkProp *, Look> looks; // each restyled prop's merged look, this frame
+  Look all;                                  // the "*" entry's look
+  std::unordered_map<vtkProp *, Twin> twins;
+  double azimuth = 0.0, elevation = 0.0, zoom = 1.0; // where its orbit starts
+  bool has_azimuth = false, has_elevation = false;
   bool dragging = false, panning = false;
+
+  // What the mirror draws for the main view's prop p (Viewport::setMirrorFilter).
+  vtkProp *draw(vtkProp *p) {
+    if (hidden.count(p))
+      return nullptr;
+    Look look = all;
+    auto it = looks.find(p);
+    if (it != looks.end())
+      look.merge(it->second);
+    vtkActor *a = vtkActor::SafeDownCast(p);
+    if (look.empty() || !a || !a->GetMapper())
+      return p;
+    Twin &t = twins[p];
+    if (!t.actor)
+      t.actor = vtkSmartPointer<vtkActor>::New();
+    vtkActor *b = t.actor;
+    if (b->GetMapper() != a->GetMapper())
+      b->SetMapper(a->GetMapper());
+    b->SetShaderProperty(a->GetShaderProperty()); // the node's shader: replacements, shared
+    b->SetTexture(a->GetTexture());
+    b->SetPosition(a->GetPosition());
+    b->SetOrientation(a->GetOrientation());
+    b->SetScale(a->GetScale());
+    b->SetOrigin(a->GetOrigin());
+    b->SetUserMatrix(a->GetUserMatrix());
+    b->SetUserTransform(a->GetUserTransform());
+    b->SetVisibility(a->GetVisibility()); // an LOD ladder shows one rung
+    b->SetPickable(false);
+    const vtkMTimeType m = a->GetProperty()->GetMTime();
+    if (m != t.copied || !(look == t.look)) {
+      vtkProperty *q = b->GetProperty();
+      q->DeepCopy(a->GetProperty());
+      if (look.rep >= 0)
+        q->SetRepresentation(look.rep);
+      if (look.opacity >= 0.0)
+        q->SetOpacity(look.opacity);
+      if (look.line_width >= 0.0)
+        q->SetLineWidth(look.line_width);
+      if (look.point_size >= 0.0)
+        q->SetPointSize(look.point_size);
+      if (look.has_color)
+        q->SetColor(look.color[0], look.color[1], look.color[2]);
+      t.copied = m;
+      t.look = look;
+    }
+    // A see-through override draws in the translucent pass even where the node is forced opaque.
+    const bool see_through = look.opacity >= 0.0 && look.opacity < 1.0;
+    b->SetForceOpaque(see_through ? false : a->GetForceOpaque());
+    b->SetForceTranslucent(see_through);
+    t.seen = true;
+    return b;
+  }
 };
 
 namespace {
@@ -90,9 +200,12 @@ bool has_any(const std::vector<std::string> &tags, const std::vector<std::string
 }
 
 // Whether a node with `tags` is in a view that shows `show` (every tag when empty) and hides
-// `hide`. A node's tags hold for its subtree, so a node out of the view takes its children along.
+// `hide`. A node's tags hold for its subtree, so a node out of the view takes its children along;
+// an untagged node is in every view.
 bool in_view(const std::vector<std::string> &tags, const std::vector<std::string> &show,
              const std::vector<std::string> &hide) {
+  if (tags.empty())
+    return true;
   if (has_any(tags, hide))
     return false;
   return show.empty() || has_any(tags, show);
@@ -105,6 +218,31 @@ void collect(const std::shared_ptr<GraphicsNode> &n, std::unordered_set<vtkProp 
   std::vector<vtkProp *> props;
   n->collectViewProps(props, subtree);
   out.insert(props.begin(), props.end());
+}
+
+// One override: entry's look: { drawstyle: surface | wireframe | points, opacity, color: [r, g, b],
+// line_width, point_size }.
+Look look_of(const ari::Value &v) {
+  Look l;
+  if (!v.is_map())
+    return l;
+  const std::string ds = v.str("drawstyle");
+  if (ds == "wireframe")
+    l.rep = VTK_WIREFRAME;
+  else if (ds == "points")
+    l.rep = VTK_POINTS;
+  else if (ds == "surface")
+    l.rep = VTK_SURFACE;
+  l.opacity = v.num("opacity", -1.0);
+  l.line_width = v.num("line_width", -1.0);
+  l.point_size = v.num("point_size", -1.0);
+  if (const ari::Value *c = v.find("color"))
+    if (c->is_seq() && c->items.size() >= 3) {
+      l.has_color = true;
+      for (int i = 0; i < 3; ++i)
+        l.color[i] = c->items[i].as_double();
+    }
+  return l;
 }
 
 } // namespace
@@ -153,7 +291,7 @@ SceneViews::View *SceneViews::view_for(const std::string &name) {
     }
   }
   View *raw = v.get();
-  vp.setMirrorFilter([raw](vtkProp *p) { return raw->hidden.count(p) == 0; });
+  vp.setMirrorFilter([raw](vtkProp *p) { return raw->draw(p); });
   v->vp = &vp;
   views_[name] = std::move(v);
   return raw;
@@ -192,9 +330,36 @@ void SceneViews::update(double dt) {
     // What it leaves out: the tagged nodes its show: / hide: rule out, and the chrome.
     v.hidden.clear();
     if (rs && (!v.show.empty() || !v.hide.empty()))
-      for (const RealizedScene::TaggedNode &t : rs->tagged)
+      for (const RealizedScene::TaggedNode &t : rs->nodes)
         if (!in_view(t.tags, v.show, v.hide))
           collect(t.node.lock(), v.hidden);
+    // How it restyles the rest: each override: entry's look on the props of the nodes it names (by
+    // id or tag, with their subtrees), later entries winning field by field.
+    v.looks.clear();
+    v.all = Look{};
+    for (const auto &o : v.overrides) {
+      if (o.first == "*") {
+        v.all.merge(o.second);
+        continue;
+      }
+      if (!rs)
+        continue;
+      for (const RealizedScene::TaggedNode &t : rs->nodes) {
+        if (t.id != o.first && std::find(t.tags.begin(), t.tags.end(), o.first) == t.tags.end())
+          continue;
+        std::unordered_set<vtkProp *> props;
+        collect(t.node.lock(), props);
+        for (vtkProp *p : props)
+          v.looks[p].merge(o.second);
+      }
+    }
+    // The twins of props no longer drawn (a node removed, an override dropped) go.
+    for (auto it = v.twins.begin(); it != v.twins.end();) {
+      if (!it->second.seen)
+        it = v.twins.erase(it);
+      else
+        (it++)->second.seen = false;
+    }
     if (!v.chrome) {
       SceneGraph &sg = view_->scene();
       if (std::shared_ptr<GraphicsNode> root = sg.getGraphicsRoot()) {
@@ -218,6 +383,14 @@ void SceneViews::update(double dt) {
           } else {
             cam.frameBounds(b[0], b[2], b[4], b[1], b[3], b[5]);
             cam.setMode(CameraController::Mode::Orbit); // from a map, say
+            // Where its orbit starts: the widget's azimuth / elevation / zoom, through the
+            // camera's own state keys (what a drag changes).
+            if (v.has_azimuth)
+              cam.getState("orbit.azimuth").value(v.azimuth);
+            if (v.has_elevation)
+              cam.getState("orbit.elevation").value(v.elevation);
+            if (v.zoom > 0.0 && v.zoom != 1.0)
+              cam.getState("orbit.distance").value(cam.orbitDistance() / v.zoom);
             if (v.camera == "fly")
               cam.setMode(CameraController::Mode::Fly);
             else if (v.camera == "track" && !v.track.empty()) {
@@ -262,10 +435,26 @@ void SceneViews::register_widget() {
           v->track = track;
           v->framed = false;
         }
+        // override: { <node id | tag | "*">: { drawstyle, opacity, color, line_width,
+        // point_size }, ... }, in order.
+        v->overrides.clear();
+        if (const ari::Value *ov = w.props.find("override"))
+          if (ov->is_map())
+            for (const auto &e : ov->entries)
+              v->overrides.emplace_back(e.first, look_of(e.second));
+        // Where its orbit starts, when it is framed (and re-framed by a double-click).
+        v->has_azimuth = w.props.has("azimuth");
+        v->azimuth = w.props.num("azimuth", 0.0);
+        v->has_elevation = w.props.has("elevation");
+        v->elevation = w.props.num("elevation", 0.0);
+        v->zoom = w.props.num("zoom", 1.0);
         if (const ari::Value *bg = w.props.find("clear_color"))
-          if (bg->is_seq() && bg->items.size() >= 3)
+          if (bg->is_seq() && bg->items.size() >= 3) {
             v->vp->setBackground(bg->items[0].as_double(), bg->items[1].as_double(),
                                  bg->items[2].as_double(), true);
+            if (vtkRenderer *vr = v->vp->renderer()) // one colour, not the main view's gradient
+              vr->SetGradientBackground(false);
+          }
 
         // Its rect: `width` (logical px; the window's width when unset) by `height` (3/4 of the
         // width when unset).
@@ -303,12 +492,30 @@ void SceneViews::register_widget() {
           v->vp->setVisible(true);
         v->drawn = true;
 
+        // Its caption in the corner, and an outline while the pointer is over it or drags it.
+        ImDrawList *dl = ImGui::GetWindowDrawList();
+        const std::string caption = w.props.str("caption");
+        if (!caption.empty()) {
+          const ImVec2 pad(4.0f * unit, 2.0f * unit);
+          const ImVec2 at(r.Min.x + pad.x, r.Min.y + pad.y);
+          const ImVec2 ts = ImGui::CalcTextSize(caption.c_str());
+          dl->AddRectFilled(ImVec2(at.x - pad.x * 0.5f, at.y - pad.y * 0.5f),
+                            ImVec2(at.x + ts.x + pad.x * 0.5f, at.y + ts.y + pad.y * 0.5f),
+                            IM_COL32(0, 0, 0, 150), 3.0f * unit);
+          dl->AddText(at, IM_COL32(235, 235, 235, 255), caption.c_str());
+        }
+        if (v->input && (ImGui::IsItemHovered() || ImGui::IsItemActive()))
+          dl->AddRect(r.Min, r.Max, ImGui::GetColorU32(ImGuiCol_NavHighlight), 0.0f, 0,
+                      ImGui::IsItemActive() ? 2.0f * unit : 1.0f * unit);
+
         // Its camera: a drag orbits (the middle or right button pans), the wheel zooms.
         if (v->input) {
           CameraController &cam = v->vp->camera();
           const ImGuiIO &io = ImGui::GetIO();
           if (ImGui::IsItemHovered() && io.MouseWheel != 0.0f)
             cam.mouseWheel(io.MouseWheel);
+          if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+            v->framed = false; // back to where it started
           if (ImGui::IsItemActivated()) {
             if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
               cam.beginDrag();

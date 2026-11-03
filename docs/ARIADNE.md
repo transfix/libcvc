@@ -1753,8 +1753,11 @@ windows:
 | `bind` | A state key whose value is the tag list to show (space- or comma-separated), read every frame. Use it for a layers menu: a widget writes the key, and the view follows. |
 | `camera` | `orbit` (the default), `fly`, `map` (top-down, framed on what the view shows), or `track` with `track: <node id>`. |
 | `chrome` | `false` leaves out the scene's grid, axes and bounding box. Defaults to `true`. |
-| `clear_color` | `[r, g, b]` in 0..1, what the view clears to. Defaults to the main view's background. (`background:` on a widget is the §5.12 backdrop key.) |
-| `input` | `false` makes the view ignore the mouse. Otherwise a drag orbits its camera (the middle or right button pans) and the wheel zooms. |
+| `clear_color` | `[r, g, b]` in 0..1, what the view clears to (one colour, never the scene's gradient). Defaults to the main view's background. (`background:` on a widget is the §5.12 backdrop key.) |
+| `azimuth`, `elevation`, `zoom` | Where an orbit camera starts once the view is framed: the orbit's azimuth and elevation in degrees, and a zoom factor on the framed distance (2 is twice as close). |
+| `override` | Per-view restyling, below. |
+| `caption` | A label in the view's top-left corner. |
+| `input` | `false` makes the view ignore the mouse. Otherwise a drag orbits its camera (the middle or right button pans), the wheel zooms, and a double-click puts the camera back where it started. The view is outlined while the pointer is over it. |
 
 **Tags.** A node's `tags:` hold for its whole subtree, so a tagged child under a tagged parent is
 drawn only where both are allowed: the parent's tags take the child out of a view that rules them
@@ -1762,9 +1765,31 @@ out. An untagged node is in every view, so content meant for the main view only 
 own that the other views leave out (`hide: [main_only]`). The main view always draws every node. A
 node hidden with `visible:` is gone from every view.
 
+**Overrides.** `override:` restyles nodes in one view only. Each entry names a node id, a tag, or
+`"*"` (everything), and sets any of `drawstyle` (`surface`, `wireframe`, `points`), `opacity`,
+`color`, `line_width` and `point_size`. What an entry does not set stays as the node has it. An
+entry covers the named node's subtree, and later entries add to earlier ones field by field:
+
+```yaml
+- type: viewport
+  view: xray
+  override:
+    "*": { opacity: 0.5 }                                  # everything half see-through,
+    buildings: { opacity: 0.15 }                           # the buildings more so,
+    sim: { color: [1.0, 0.9, 0.15], opacity: 1.0 }         # and the agents solid yellow
+```
+
+A restyled actor is drawn in that view by a twin: a second `vtkActor` with its own `vtkProperty`
+over the node's own mapper. The geometry, the shader replacements and the texture are shared, not
+copied. The twin follows the node's transform, visibility and material every frame, so a node that
+moves, changes colour or swaps LOD rung keeps its override.
+`examples/ariadne/documents/viewer_looks.ari` draws one scene four ways: wireframe, X-ray, a plan of
+one layer, and a clay model. `viewer_grid.ari` is four independent cameras on one scene.
+
 **How it draws.** Each view is a mirror viewport of the main one
 (`ViewportManager::addMirrorViewport`). It draws the same props, the same geometry, from its own
-camera, less the props of the nodes it leaves out (`Viewport::setMirrorFilter`). The widget
+camera, less the props of the nodes it leaves out and with its twins in place of the props it restyles
+(`Viewport::setMirrorFilter`). The widget
 reserves its rect in the window and cuts that rect out of the window's background
 (`ImGuiBackend::cut_window_background`); the view is drawn there. So the view moves and scrolls with
 its window, is clipped where the window clips it, and is hidden on any frame its widget is not
@@ -1772,7 +1797,7 @@ drawn: a closed or collapsed window, another tab. Every AriRuntime host (arigl, 
 widget. A terminal backend shows its placeholder. A new document removes the last one's views.
 
 Limits:
-- A view leaves nodes out. It does not yet restyle them (the roadmap's per-view `override:`).
+- An override restyles actors. A volume (`volren`, `volslice`) draws as it is.
 - The view lies under the whole UI. Another window behind the viewport's window still draws over
   the view.
 - A view has no shadows of its own.

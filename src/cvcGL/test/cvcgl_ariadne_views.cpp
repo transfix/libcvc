@@ -33,7 +33,11 @@
 #include <fstream>
 #include <string>
 #include <vector>
+#include <vtkActor.h>
+#include <vtkCollection.h>
+#include <vtkMapper.h>
 #include <vtkPropCollection.h>
+#include <vtkProperty.h>
 #include <vtkRenderer.h>
 #ifdef CVC_ENABLE_IMGUI
 #include <imgui.h>
@@ -70,6 +74,20 @@ windows:
       - type: viewport
         view: nosim
         hide: sim
+        width: 360
+        height: 270
+  - window: Restyled
+    id: restyled
+    pos: [520, 380]
+    size: [400, 320]
+    children:
+      - type: viewport
+        view: restyled
+        azimuth: 45
+        elevation: 20
+        override:
+          "*": { opacity: 0.5 }
+          debug: { color: [0.1, 0.1, 0.9], drawstyle: wireframe }
         width: 360
         height: 270
 
@@ -181,7 +199,7 @@ int main() {
   }
 
   cvc::gl::ViewportManager &vm = view.viewportManager();
-  check(rt.views().size() == 2, "each viewport widget made a view",
+  check(rt.views().size() == 3, "each viewport widget made a view",
         std::to_string(rt.views().size()));
   check(vm.hasViewport("sim") && vm.hasViewport("nosim"), "the views are the manager's viewports");
   if (!vm.hasViewport("sim") || !vm.hasViewport("nosim"))
@@ -222,6 +240,58 @@ int main() {
   // Each view's camera is its own, at <prefix>.viewers.<name>.camera.
   const std::string poseKey = cvc::ariadne::resolve_bind("views", "viewers.sim.camera");
   check(st(poseKey).children().size() > 0, "the sim view's camera is in the state tree", poseKey);
+
+  // override: the restyled view draws a twin of each actor (its own property, the SAME mapper, so
+  // no geometry is copied); "*" restyles everything and a later tag entry adds to it; the main
+  // view's actors keep their own look.
+  if (vm.hasViewport("restyled")) {
+    cvc::gl::Viewport &restyled = vm.viewport("restyled");
+    auto twin_of = [&](vtkProp *orig) -> vtkActor * {
+      vtkActor *a = vtkActor::SafeDownCast(orig);
+      vtkPropCollection *props = restyled.renderer()->GetViewProps();
+      vtkCollectionSimpleIterator it;
+      props->InitTraversal(it);
+      while (vtkProp *p = props->GetNextProp(it))
+        if (vtkActor *b = vtkActor::SafeDownCast(p))
+          if (a && b != a && b->GetMapper() == a->GetMapper())
+            return b;
+      return nullptr;
+    };
+    vtkActor *redA = vtkActor::SafeDownCast(prop("red"));
+    vtkActor *yellowA = vtkActor::SafeDownCast(prop("yellow"));
+    vtkActor *redTwin = twin_of(redA), *yellowTwin = twin_of(yellowA);
+    check(!has_prop(restyled.renderer(), redA) && !has_prop(restyled.renderer(), yellowA),
+          "override: the restyled view draws twins, not the main view's actors");
+    check(redTwin && yellowTwin, "override: each twin shares its original's mapper");
+    if (redTwin && yellowTwin && redA && yellowA) {
+      double c[3];
+      redTwin->GetProperty()->GetColor(c);
+      check(std::fabs(redTwin->GetProperty()->GetOpacity() - 0.5) < 1e-9 && c[0] > 0.8 &&
+                c[2] < 0.2,
+            "override \"*\": half opacity, the node's own colour kept");
+      yellowTwin->GetProperty()->GetColor(c);
+      check(std::fabs(yellowTwin->GetProperty()->GetOpacity() - 0.5) < 1e-9 && c[2] > 0.8 &&
+                c[0] < 0.2 && yellowTwin->GetProperty()->GetRepresentation() == VTK_WIREFRAME,
+            "override debug: blue wireframe, on top of \"*\"'s opacity");
+      yellowA->GetProperty()->GetColor(c);
+      check(yellowA->GetProperty()->GetOpacity() == 1.0 && c[0] > 0.8 && c[1] > 0.8 &&
+                yellowA->GetProperty()->GetRepresentation() == VTK_SURFACE,
+            "the main view's yellow ball keeps its own look");
+    }
+    // azimuth: / elevation: are where its orbit starts.
+    const std::string orbit = cvc::ariadne::resolve_bind("views", "viewers.restyled.camera.orbit");
+    double az = 0.0, el = 0.0;
+    try {
+      az = st(orbit + ".azimuth").value<double>();
+      el = st(orbit + ".elevation").value<double>();
+    } catch (...) {
+    }
+    check(std::fabs(az - 45.0) < 1e-6 && std::fabs(el - 20.0) < 1e-6,
+          "azimuth / elevation: the orbit starts where the widget says",
+          std::to_string(az) + " " + std::to_string(el));
+  } else {
+    check(false, "the restyled view exists");
+  }
 
   // The pixels: the sim view's rect shows red and blue and no yellow (the main view's yellow ball
   // would be under it otherwise; the window's background is cut away there).
@@ -311,7 +381,7 @@ int main() {
   rt.load(doc.string());
   for (int f = 0; f < 3; ++f)
     rt.step(kDt);
-  check(rt.views().size() == 2, "the views are back with the document");
+  check(rt.views().size() == 3, "the views are back with the document");
   view.close(); // ~AriRuntime runs after the return below, with the view closed
   return cvcgl_test::finish("cvcgl_ariadne_views");
 }

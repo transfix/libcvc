@@ -14,16 +14,21 @@
 //             view: overview          # its camera is <prefix>.viewers.overview.camera
 //             show: [sim]             # the untagged nodes and those tagged sim
 //             camera: map             # orbit (default) | fly | map | track (with track: NODE)
+//             override:               # restyled in this view only, by node id, tag or "*"
+//               city: { drawstyle: wireframe, opacity: 0.4 }
 //             width: 320
 //             height: 240
 //
 // Each view is a mirror viewport of the main one (ViewportManager::addMirrorViewport): it draws
 // the main renderer's props, the same geometry, from its own camera, less the props of the tagged
-// nodes it leaves out (Viewport::setMirrorFilter). The widget reserves its rect in the window,
+// nodes it leaves out, and with a twin in place of each actor it restyles: its own vtkActor and
+// vtkProperty over the original's mapper, so no geometry is copied (Viewport::setMirrorFilter).
+// The widget reserves its rect in the window,
 // cuts it out of the window's background (ImGuiBackend::cut_window_background) and puts the
 // viewport there, so the view sits where the widget is, scrolls and moves with its window, and is
 // hidden on any frame the widget is not drawn (a closed or collapsed window, another tab).
-// Dragging in it orbits its camera (the middle or right button pans) and the wheel zooms.
+// Dragging in it orbits its camera (the middle or right button pans), the wheel zooms, and a
+// double-click puts the camera back where azimuth: / elevation: / zoom: start it.
 //
 // AriRuntime owns one and registers the widget, so every AriRuntime host (arigl, pycvc_gl) has it.
 #pragma once
