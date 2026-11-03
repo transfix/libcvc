@@ -56,6 +56,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -2116,6 +2117,9 @@ static int cmd_plant_log(int argc, char **argv) {
       "policy", po::value<std::string>(&policy), "a .cvcnav policy (default: the built-in one)")(
       "verbose", po::bool_switch(&o.verbose), "every agent's state every 5 s")(
       "samples", po::bool_switch(&o.samples), "also write samples.csv, every tick of every run")(
+      "wide", po::bool_switch(&o.wide),
+      "flights.npy in the wide layout: also the attitude, the wheels' speeds, the pedals and the "
+      "ledger's shaft and brake power (18 columns; meta.json's layout names them)")(
       "fit-dyn", po::bool_switch(&o.fit_dyn),
       "fit dyn_bike to every seed but the last and report the last")(
       "fit-power", po::bool_switch(&o.fit_power),
@@ -2163,6 +2167,17 @@ static int cmd_ph_train(int argc, char **argv) {
     ("steer-modulates",
      "steering (the runs' last input) modulates D and G instead of being a port, so only the "
      "drive supplies power; fit it to runs logged with --steer actual")
+    ("inputs", po::value<std::string>(),
+     "the inputs, comma-separated column names of the runs' layout (meta.json), ports first and "
+     "the steering last (e.g. drive,steer or rim_front,rim_rear,steer from plant-log --wide); "
+     "default: every input column")
+    ("potential", po::value<std::string>()->default_value("world"),
+     "world: V(x, y), learned on world position; none: no potential; terrain: the ground's logged "
+     "slope under the wheels (ground_grade, ground_roll; else the body's grade, roll) times two "
+     "learned coefficients (needs plant-log --wide runs)")
+    ("eval-runs", po::value<std::vector<std::string>>()->multitoken(),
+     "after training, report the mean model's rollout loss on these runs' windows (every seed, "
+     "no noise): another environment's, held out")
     ("test-seeds", po::value<std::vector<int>>()->multitoken()->default_value({101}, "101"),
      "seeds held out: monitored, never trained on")
     ("noise", po::value<double>()->default_value(0.05, "0.05"), "observation noise sigma added to x, y, psi, v")
@@ -2203,7 +2218,38 @@ static int cmd_ph_train(int argc, char **argv) {
   const double noise = vm["noise"].as<double>();
   const std::uint64_t noise_seed = vm["noise-seed"].as<std::uint64_t>();
 
-  const ph::se2_flights all = ph::load_plant_log_runs(runs);
+  const std::string potential = vm["potential"].as<std::string>();
+  if (potential != "world" && potential != "none" && potential != "terrain")
+    throw std::invalid_argument("--potential is world, none or terrain");
+  // The inputs: the named columns (and the attitude's, last, for the terrain potential).
+  std::vector<std::string> inputs;
+  if (vm.count("inputs")) {
+    std::stringstream in(vm["inputs"].as<std::string>());
+    for (std::string t; std::getline(in, t, ',');)
+      if (!t.empty())
+        inputs.push_back(t);
+  }
+  const auto pick = [&](const ph::se2_flights &f) {
+    if (inputs.empty() && potential != "terrain")
+      return f;
+    std::vector<std::string> cols = inputs;
+    if (cols.empty()) {
+      if (f.columns.size() != static_cast<std::size_t>(f.width))
+        throw std::runtime_error("--potential terrain needs runs whose meta.json names columns");
+      cols.assign(f.columns.begin() + 6, f.columns.end());
+    }
+    if (potential == "terrain") {
+      // The ground's slope under the wheels where the runs have it; else the body's attitude,
+      // which also carries the suspension's pitch and roll.
+      const bool ground =
+          std::find(f.columns.begin(), f.columns.end(), "ground_grade") != f.columns.end();
+      cols.push_back(ground ? "ground_grade" : "grade");
+      cols.push_back(ground ? "ground_roll" : "roll");
+    }
+    return ph::select_inputs(f, cols);
+  };
+  const ph::se2_flights all = pick(ph::load_plant_log_runs(runs));
+  const int terrain_dim = potential == "terrain" ? 2 : 0;
   const ph::se2_flights noisy =
       noise > 0.0 ? ph::add_observation_noise(all, noise, noise_seed) : all;
   const ph::se2_flights train_f = ph::select_seeds(noisy, test_seeds, false);
@@ -2211,7 +2257,13 @@ static int cmd_ph_train(int argc, char **argv) {
   if (train_f.count == 0)
     throw std::runtime_error("every flight is held out");
   const std::array<double, 3> twist = ph::twist_rms(train_f);
-  const std::vector<double> control = ph::control_rms(train_f);
+  std::vector<double> control = ph::control_rms(train_f);
+  // An input that never moved in training (the ground's slope on flat ground, round-off of order
+  // 1e-8) keeps a unit scale: dividing by an RMS of about zero would blow up every run where it
+  // does move.
+  for (double &c : control)
+    if (!(c > 1e-6))
+      c = 1.0;
   if (vm.count("dump-dataset")) {
     const fs::path dir(vm["dump-dataset"].as<std::string>());
     fs::create_directories(dir);
@@ -2239,15 +2291,21 @@ static int cmd_ph_train(int argc, char **argv) {
                                " inputs; the runs have " + std::to_string(all.control_dim()));
     if ((model.setup.modulation_dim > 0) != (vm.count("steer-modulates") > 0))
       throw std::runtime_error("--init's model and --steer-modulates disagree on the steering");
+    if (model.setup.terrain_dim() != terrain_dim)
+      throw std::runtime_error("--init's model and --potential disagree");
   } else {
     ph::se2_init init;
-    init.control_dim = all.control_dim();
+    const int inputs_dim = all.control_dim() - terrain_dim; // the ports and the steering
+    init.control_dim = inputs_dim;
     if (vm.count("steer-modulates")) {
-      if (all.control_dim() < 2)
+      if (inputs_dim < 2)
         throw std::runtime_error("--steer-modulates needs a drive and a steering input");
-      init.control_dim = all.control_dim() - 1;
+      init.control_dim = inputs_dim - 1;
       init.modulation_dim = 1;
     }
+    init.potential = potential == "none" ? ph::se2_potential::none
+                                         : (potential == "terrain" ? ph::se2_potential::terrain
+                                                                   : ph::se2_potential::world);
     init.features = vm["features"].as<int>();
     init.v_gp = !vm.count("no-v-gp");
     init.v_length = vm["v-length"].as<double>();
@@ -2306,6 +2364,35 @@ static int cmd_ph_train(int argc, char **argv) {
                     << ev.prodigy_d[2] << " " << ev.prodigy_d[3];
         std::cout << "\n" << std::flush;
       });
+  // The mean model's rollout loss on clean windows: the training seeds', the held-out seeds' and,
+  // with --eval-runs, another environment's.
+  // The rollout loss averages the windows that stayed finite: each is reported with how many did.
+  std::size_t finite = 0, windows = 0;
+  const auto loss_on = [&](const ph::se2_flights &f) {
+    finite = windows = 0;
+    if (f.count == 0)
+      return std::numeric_limits<double>::quiet_NaN();
+    const ph::se2_windows w =
+        ph::cut_windows(ph::scale_controls(f, model.control_scale), points, stride);
+    const ph::se2_objective o = ph::se2_rollout_objective(model, w, nullptr, nullptr, 0.0);
+    finite = o.healthy;
+    windows = w.count;
+    return o.healthy ? o.rollout : std::numeric_limits<double>::quiet_NaN();
+  };
+  const auto count = [&]() {
+    return " (" + std::to_string(finite) + " of " + std::to_string(windows) + " windows finite)";
+  };
+  const double final_train = loss_on(ph::select_seeds(all, test_seeds, false));
+  std::cout << "final, the mean model on clean windows: train " << final_train << count();
+  const double final_test = loss_on(ph::select_seeds(all, test_seeds, true));
+  std::cout << ", held-out seeds " << final_test << count();
+  double final_eval = std::numeric_limits<double>::quiet_NaN();
+  if (vm.count("eval-runs")) {
+    final_eval =
+        loss_on(pick(ph::load_plant_log_runs(vm["eval-runs"].as<std::vector<std::string>>())));
+    std::cout << ", eval runs " << final_eval << count();
+  }
+  std::cout << "\n";
   std::string run_list;
   for (const auto &r : runs)
     run_list += (run_list.empty() ? "" : ";") + r;
@@ -2324,6 +2411,13 @@ static int cmd_ph_train(int argc, char **argv) {
                       {"window_stride", std::to_string(stride)}};
   model.provenance.emplace_back("diverged_windows", std::to_string(dropped));
   model.provenance.emplace_back("steering", model.setup.modulation_dim > 0 ? "modulation" : "port");
+  if (vm.count("inputs"))
+    model.provenance.emplace_back("inputs", vm["inputs"].as<std::string>());
+  model.provenance.emplace_back("potential", potential);
+  model.provenance.emplace_back("final_train_loss", std::to_string(final_train));
+  model.provenance.emplace_back("final_test_loss", std::to_string(final_test));
+  if (vm.count("eval-runs"))
+    model.provenance.emplace_back("final_eval_loss", std::to_string(final_eval));
   model.save(vm["out"].as<std::string>());
   std::cout << "wrote " << vm["out"].as<std::string>() << " (" << dropped
             << " diverged training windows left out)\n";
