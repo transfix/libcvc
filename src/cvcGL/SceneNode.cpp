@@ -178,6 +178,18 @@ void SceneNode::addToRenderer(vtkRenderer *renderer) {
   }
 }
 
+void SceneNode::appendViewProps(std::vector<vtkProp *> &out) {
+  if (vtkProp *p = getProp())
+    out.push_back(p);
+}
+
+void SceneNode::collectViewProps(std::vector<vtkProp *> &out, bool subtree) {
+  appendViewProps(out);
+  if (subtree)
+    for (auto &child : m_children)
+      child->collectViewProps(out);
+}
+
 void SceneNode::removeFromRenderer(vtkRenderer *renderer) {
   // Capture the prop pointer before queuing the lambda to avoid accessing 'this'
   // after the node might be deleted

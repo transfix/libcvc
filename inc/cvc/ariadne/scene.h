@@ -293,6 +293,12 @@ struct SceneNode {
   bool has_casts_shadow = false;
   bool casts_shadow = true;
 
+  // tags: [sim, debug] — the node's view tags (§9.5.1). A `viewport` widget that names tags in its
+  // show: / hide: draws a tagged node only where they allow it; an untagged node is in every view.
+  // Tags hold for the node's whole subtree, so a tagged child under a tagged parent is drawn only
+  // where both are. The main view draws every node.
+  std::vector<std::string> tags;
+
   // fit: bake a "stand this mesh on the ground" normalization INTO the loaded geometry — center it
   // in XY, sit its base on z=0, and scale its tallest extent to fit_height; optionally first rotate
   // a canonical Y-up mesh to Z-up. Geometry-only (a node transform composes on top). For placing a

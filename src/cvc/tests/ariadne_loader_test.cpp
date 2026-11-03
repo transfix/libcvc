@@ -2111,6 +2111,39 @@ scene:
   EXPECT_DOUBLE_EQ(cam.scene.shadow_focus.max_radius, 600.0);
 }
 
+// §9.5.1 tags: a list or one name, on any node at any depth; a built-in key, not a custom node's
+// prop. A node without tags has none (it is in every view).
+TEST(AriadneScene, NodeTags) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: agents
+      tags: [sim, debug]
+      source: { box: { size: 1 } }
+      children:
+        - node: label
+          tags: annotation
+          source: { sphere: 0.2 }
+    - node: forest
+      type: forest_trees
+      tags: [scenery]
+      count: 4
+    - node: ground
+      source: { plane: { size: 4 } }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.nodes.size(), 3u);
+  EXPECT_EQ(r.scene.nodes[0].tags, (std::vector<std::string>{"sim", "debug"}));
+  ASSERT_EQ(r.scene.nodes[0].children.size(), 1u);
+  EXPECT_EQ(r.scene.nodes[0].children[0].tags, (std::vector<std::string>{"annotation"}));
+  EXPECT_EQ(r.scene.nodes[1].tags, (std::vector<std::string>{"scenery"}));
+  EXPECT_EQ(r.scene.nodes[1].props.find("tags"), nullptr); // consumed, not left for the custom type
+  EXPECT_EQ(r.scene.nodes[1].props.num("count", 0.0), 4.0);
+  EXPECT_TRUE(r.scene.nodes[2].tags.empty());
+}
+
 // §9 background: a solid colour or a top→bottom gradient (a view property the host applies).
 TEST(AriadneScene, BackgroundSolidAndGradient) {
   SKIP_WITHOUT_YAML();
@@ -3471,6 +3504,50 @@ TEST(AriadneComponents, ShippedComponentsLoadClean) {
   EXPECT_GE(checked, 15); // the 14 components shipped with transfer_function, and card
   std::error_code ec;
   fs::remove_all(decoy, ec);
+}
+
+// scene_view.ari: a window around one `viewport` widget. Its args reach the widget's props (the
+// cvcGL widget reads view / show / hide / camera / chrome / width / height), bare and overridden.
+TEST(AriadneComponents, SceneViewPassesItsArgsToTheViewport) {
+  SKIP_WITHOUT_YAML();
+  namespace fs = std::filesystem;
+  const fs::path ariadne_dir = fs::path(__FILE__).parent_path().parent_path() / "ariadne";
+  if (!fs::is_regular_file(ariadne_dir / "components" / "scene_view.ari"))
+    GTEST_SKIP() << "component sources not found under " << ariadne_dir.string();
+  {
+    ScopedEnv hermetic("CVC_ARIADNE_PATH", nullptr);
+    register_cvc_uri_handler({ariadne_dir.string()});
+  }
+  SchemeGuard g{"cvc"};
+  LoadResult r = load_string(R"(meta: { min_libcvc: "0.0.0" }
+import: cvc://components/scene_view.ari
+windows:
+  - include: scene_view
+  - include: scene_view
+    args: { view: overview, title: Overview, id: overview, show: "sim debug", hide: hud,
+            camera: map, chrome: false, width: 280 }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  std::vector<const Widget *> views;
+  for (const Widget &win : r.root.children)
+    for (const Widget &c : win.children)
+      if (c.kind == Kind::Custom && c.custom_type == "viewport")
+        views.push_back(&c);
+  ASSERT_EQ(views.size(), 2u);
+  const Value &bare = views[0]->props, &over = views[1]->props;
+  EXPECT_EQ(bare.str("view"), "scene_view");
+  EXPECT_EQ(bare.str("show"), "");
+  EXPECT_EQ(bare.str("camera"), "orbit");
+  EXPECT_TRUE(bare.flag("chrome", false));
+  EXPECT_EQ(bare.num("width", 0.0), 360.0);
+  EXPECT_EQ(bare.num("height", 0.0), 270.0);
+  EXPECT_EQ(over.str("view"), "overview");
+  EXPECT_EQ(over.str("show"), "sim debug");
+  EXPECT_EQ(over.str("hide"), "hud");
+  EXPECT_EQ(over.str("camera"), "map");
+  EXPECT_FALSE(over.flag("chrome", true));
+  EXPECT_EQ(over.num("width", 0.0), 280.0);
+  EXPECT_EQ(r.root.children[1].label, "Overview");
 }
 
 TEST(AriadneUri, ResolveToFileFileSchemeIsInPlace) {

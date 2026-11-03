@@ -6,6 +6,7 @@
 #include <vtkSmartPointer.h>
 
 class vtkActor;
+class vtkProp;
 class vtkPolyDataMapper;
 class vtkActor2D;
 class vtkRenderer;
@@ -23,6 +24,7 @@ public:
 
   void addToRenderer(vtkRenderer *renderer);
   void removeFromRenderer(vtkRenderer *renderer);
+  vtkProp *actor() const; // the outline (GraphicsNode::appendViewProps)
 
   void setBoundingBox(const cvc::bounding_box &bbox);
   cvc::bounding_box getBoundingBox() const { return m_bbox; }

@@ -184,11 +184,14 @@ void syncMirrorProps(Viewport &mirror) {
   // overlay is positioned in the WINDOW, not the scene, so copying it would draw
   // the source's HUD a second time on top of the inset.
   dst->RemoveAllViewProps();
+  const Viewport::PropFilter &keep = mirror.mirrorFilter(); // a subset of the scene, if set
   vtkPropCollection *props = src->GetViewProps();
   vtkCollectionSimpleIterator it;
   props->InitTraversal(it);
   while (vtkProp *p = props->GetNextProp(it)) {
     if (vtkActor2D::SafeDownCast(p))
+      continue;
+    if (keep && !keep(p))
       continue;
     dst->AddViewProp(p);
   }

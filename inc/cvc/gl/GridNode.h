@@ -75,6 +75,7 @@ public:
 
 protected:
   vtkProp *getProp() override; // Returns first actor (for compatibility)
+  void appendViewProps(std::vector<vtkProp *> &out) override; // all three planes
   void handleStateChanged(const std::string &childState) override;
   void applyTransformToVTK() override; // Apply transform to all grid actors
   void
