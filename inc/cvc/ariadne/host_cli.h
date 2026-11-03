@@ -61,6 +61,9 @@ struct HostOptions {
   // after its frames; 0 = kDefaultSettleSeconds.
   double settle = 0;
   double timeout = 0; // --timeout SECONDS (ari test); 0 = the default
+  // --action-time SECONDS (ari test): how long one program may run
+  // (ariadne.limits.action_max_time); below 0 = the run's timeout, 0 = no limit.
+  double action_time = -1;
   bool ansi = false;
   std::string png;
   std::string log;      // --log FILE: the run's warnings, appended as they happen (host_warnings.h)
