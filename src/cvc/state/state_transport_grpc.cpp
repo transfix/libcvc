@@ -1957,6 +1957,18 @@ std::size_t state_transport_grpc::send_message_to(const std::string &node_id,
 
 std::size_t state_transport_grpc::push_snapshot_to(const std::string &node_id,
                                                    const std::vector<snapshot_entry> &entries) {
+  return push_to(node_id, entries, false);
+}
+
+std::size_t
+state_transport_grpc::push_snapshot_to_holder(const std::string &node_id,
+                                              const std::vector<snapshot_entry> &entries) {
+  return push_to(node_id, entries, true);
+}
+
+std::size_t state_transport_grpc::push_to(const std::string &node_id,
+                                          const std::vector<snapshot_entry> &entries,
+                                          bool holder_only) {
   if (entries.empty())
     return 0;
   std::vector<std::shared_ptr<connection>> targets;
@@ -1966,8 +1978,11 @@ std::size_t state_transport_grpc::push_snapshot_to(const std::string &node_id,
       if (!c || !c->alive.load() || !c->can_write())
         continue;
       const std::string *pid = c->peer_id();
-      if (pid && *pid == node_id)
-        targets.push_back(c);
+      if (!pid || *pid != node_id)
+        continue;
+      if (holder_only && c->gate && c->gate->holder(node_id) != c.get())
+        continue; // claims the id without holding it
+      targets.push_back(c);
     }
   }
   if (targets.empty())

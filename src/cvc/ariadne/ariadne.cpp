@@ -973,6 +973,8 @@ struct Runtime::Impl {
     bool has_event = false;
     float ex = 0.0f, ey = 0.0f, edx = 0.0f, edy = 0.0f;
     int ebutton = 0;
+    // Otherwise, an `event` dict of these strings (a message_input's sent text), when any.
+    std::vector<std::pair<std::string, std::string>> event_fields;
     // Runtime::run_program: told how the program ended instead of a warning.
     std::function<void(const std::string &)> done;
     // §6.6 the functions of the scope it was started in (a FunctionScope prelude), run first.
@@ -1302,6 +1304,15 @@ struct Runtime::Impl {
     if (!event.empty()) {
       queued_events.push_back({event, current_prefix(), true, x, y, dx, dy, button});
       queued_events.back().functions = current_functions();
+    }
+  }
+  // Enqueue a handler whose program gets an `event` dict of FIELDS (strings).
+  void enqueue_fields(const std::string &event,
+                      std::vector<std::pair<std::string, std::string>> fields) {
+    if (!event.empty()) {
+      queued_events.push_back({event, current_prefix()});
+      queued_events.back().functions = current_functions();
+      queued_events.back().event_fields = std::move(fields);
     }
   }
 
@@ -1987,6 +1998,45 @@ void Runtime::Impl::emit_node(const Widget &w) {
       if (!w.on.empty()) // send-on-commit (e.g. a chat box's Enter) — fire AFTER the write so the
         enqueue(w.on);   // handler sees the committed value in state
     }
+    break;
+  }
+
+  case Kind::MessageInput: {
+    const std::string path = resolve(w.bind);
+    const std::string cur = read_or_seed<std::string>(app, path, w.sdef);
+    MessageInputOptions o;
+    o.hint = w.hint;
+    o.multiline = w.multiline;
+    o.max_lines = w.max_lines;
+    o.max_length = w.max_length;
+    const MessageEdit e = b.message_input(label, path.c_str(), cur, o);
+    if (e.submitted) {
+      write<std::string>(app, path, std::string()); // sent: the draft is done with
+      enqueue_fields(w.on, {{"text", e.value}});    // a program reads (get-attr event "text")
+    } else if (e.committed) {
+      write<std::string>(app, path, e.value); // focus left: keep the draft
+    }
+    break;
+  }
+
+  case Kind::TextView: {
+    // Read-only: the text at a state path, or a computed expression's. The backend keeps its
+    // scroll position under the bound path, or the widget's place in the tree for an expression.
+    const bool computed = is_expr(w.bind);
+    std::string key = computed ? std::string() : resolve(w.bind);
+    const std::string text = computed ? eval_text(w.bind) : read_string(app, key);
+    if (computed) {
+      key = current_prefix() + "#text_view";
+      for (const std::size_t k : emit_path)
+        key += "." + std::to_string(k);
+    }
+    TextViewOptions o;
+    o.height = static_cast<float>(w.view_height);
+    o.follow = w.follow;
+    o.wrap = w.wrap;
+    const TextViewEvent e = b.text_view(label, key.c_str(), text, o);
+    if (e.at_top && !dis && !w.on_top.empty())
+      enqueue(w.on_top);
     break;
   }
 
@@ -2917,6 +2967,11 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
       f.emplace_back("dx", se::value_t(static_cast<double>(action.edx)));
       f.emplace_back("dy", se::value_t(static_cast<double>(action.edy)));
       f.emplace_back("button", se::value_t(static_cast<int64_t>(action.ebutton)));
+      ac->env->set("event", se::make_dict(std::move(f)));
+    } else if (!action.event_fields.empty()) {
+      std::vector<std::pair<std::string, se::value_t>> f;
+      for (const auto &kv : action.event_fields)
+        f.emplace_back(kv.first, se::value_t(kv.second));
       ac->env->set("event", se::make_dict(std::move(f)));
     }
     // A child the action forks shares this context: recorded, so the context stays until it ends.

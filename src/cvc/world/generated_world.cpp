@@ -43,8 +43,11 @@
 #include <cvc/world/scatter.h>
 #include <cvc/world/sites.h>
 #include <cvc/world/surface.h>
+#include <exception>
 #include <functional>
+#include <limits>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <stdexcept>
@@ -983,119 +986,309 @@ world_geometry generated_world::geometry() const {
   return g;
 }
 
-generated_world generate_world(const generated_world_params &p, const building_library *library) {
+// ── world_builder: generate_world a stage at a time ─────────────────────────────────────────────
+
+namespace {
+
+enum class build_stage {
+  terrain,
+  scatter,
+  raster,
+  raster_finish,
+  mesh,
+  materials,
+  streets,
+  city,
+  roads,
+  props,
+  water,
+  done
+};
+
+const char *const kStageNames[] = {"terrain", "scatter", "raster", "raster", "mesh",  "materials",
+                                   "streets", "city",    "roads",  "props",  "water", "done"};
+// Each stage's share of the progress, about its share of a 5 km world's time natively.
+const double kStageWeight[] = {0.02, 0.06, 0.22, 0.02, 0.30, 0.03,
+                               0.08, 0.08, 0.05, 0.06, 0.08, 0.0};
+
+// Rows of `cols` samples, `per` units each, that fit in `budget` (at least one).
+int rowsFor(std::size_t budget, int cols, int per) {
+  const std::size_t row = std::size_t(std::max(1, cols)) * std::size_t(std::max(1, per));
+  return int(std::max<std::size_t>(1, std::min<std::size_t>(budget / row, 1u << 20)));
+}
+
+} // namespace
+
+struct world_builder::impl {
   generated_world w;
-  w.params = p;
-  const double half = std::max(50.0, p.half_m);
-  w.params.half_m = half;
-  // Both generators are looked up first, so an unknown name fails before any work.
-  const city_generator city = cityRegistry().get(p.city, "city");
-  const world_params wp = to_world_params(w.params);
-  w.model = std::make_shared<const world_model>(world_model::generate(wp));
-  const world_model &wm = *w.model;
-  const terrain_source &hf = wm.terrain();
-  const surface_registry &reg = wm.registry();
-  const double water = p.water_level_m;
+  const building_library *library = nullptr;
+  build_stage st = build_stage::terrain;
+  std::exception_ptr failed;
+  double base = 0.0, frac = 0.0; // progress: the finished stages' share, and of this one
+  // Carried between the stages.
+  city_generator city;
+  world_params wp;
+  int terrainN = 0, rasterN = 0, waterN = 0, next = 0;
+  std::vector<float> heights;
+  std::vector<cvc::geometry::face_material_t> mats;
+  city_streets streets;
+  FootprintIndex fps;
 
-  // The terrain mesh: one sample per cell_m (capped), and a moderate raster decoupled from it, so a
-  // huge terrain does not blow up the per-cell raster work (which includes an O(cells x segments)
-  // asphalt stamp).
-  const int terrainN = std::max(
-      129, std::min(std::max(129, p.max_terrain_n), int(std::lround(2.0 * half / p.cell_m)) + 1));
-  const int rasterN = std::max(2, std::min(terrainN, p.raster_n));
-  w.grid.rows = w.grid.cols = rasterN;
-  w.grid.min_x = w.grid.min_y = -half;
-  w.grid.max_x = w.grid.max_y = half;
-  raster(wm, w.grid, w.raster);
-  float hmin = 1e30f, hmax = -1e30f;
-  for (float h : w.raster.height) {
-    hmin = std::min(hmin, h);
-    hmax = std::max(hmax, h);
+  void advance(build_stage s) {
+    base += kStageWeight[int(st)];
+    frac = 0.0;
+    st = s;
+    next = 0;
   }
-  w.height_min = hmin;
-  w.height_max = hmax;
 
-  std::vector<float> heights(std::size_t(terrainN) * terrainN);
-  const double step = 2.0 * half / (terrainN - 1);
-  // Each sample is a pure function of its position: the rows fill in parallel.
+  void run(std::size_t budget) {
+    const generated_world_params &p = w.params;
+    const double half = p.half_m;
+    switch (st) {
+    case build_stage::terrain:
+      // Both generators are looked up first, so an unknown name fails before any work.
+      city = cityRegistry().get(p.city, "city");
+      wp = to_world_params(p);
+      advance(build_stage::scatter);
+      return;
+    case build_stage::scatter: {
+      w.model = std::make_shared<const world_model>(world_model::generate(wp));
+      // The terrain mesh: one sample per cell_m (capped), and a moderate raster decoupled from it,
+      // so a huge terrain does not blow up the per-cell raster work (which includes an O(cells x
+      // segments) asphalt stamp).
+      terrainN = std::max(129, std::min(std::max(129, p.max_terrain_n),
+                                        int(std::lround(2.0 * half / p.cell_m)) + 1));
+      rasterN = std::max(2, std::min(terrainN, p.raster_n));
+      w.grid.rows = w.grid.cols = rasterN;
+      w.grid.min_x = w.grid.min_y = -half;
+      w.grid.max_x = w.grid.max_y = half;
+      raster_begin(w.grid, w.raster);
+      advance(build_stage::raster);
+      return;
+    }
+    case build_stage::raster: {
+      // A cell is a sample and its slope's four.
+      const int n = std::min(rasterN - next, rowsFor(budget, rasterN, 5));
+      raster_rows(*w.model, w.grid, w.raster, next, next + n);
+      next += n;
+      frac = double(next) / rasterN;
+      if (next >= rasterN)
+        advance(build_stage::raster_finish);
+      return;
+    }
+    case build_stage::raster_finish: {
+      raster_finish(*w.model, w.grid, w.raster);
+      float hmin = 1e30f, hmax = -1e30f;
+      for (float h : w.raster.height) {
+        hmin = std::min(hmin, h);
+        hmax = std::max(hmax, h);
+      }
+      w.height_min = hmin;
+      w.height_max = hmax;
+      heights.assign(std::size_t(terrainN) * terrainN, 0.0f);
+      advance(build_stage::mesh);
+      return;
+    }
+    case build_stage::mesh: {
+      const terrain_source &hf = w.model->terrain();
+      const double step = 2.0 * half / (terrainN - 1);
+      const int r0 = next, r1 = next + std::min(terrainN - next, rowsFor(budget, terrainN, 1));
+      // Each sample is a pure function of its position: the rows fill in parallel.
 #ifdef CVC_USING_OPENMP
 #pragma omp parallel for schedule(static)
 #endif
-  for (int r = 0; r < terrainN; ++r)
-    for (int c = 0; c < terrainN; ++c)
-      heights[std::size_t(r) * terrainN + c] = float(hf.sample(-half + c * step, -half + r * step));
-  w.terrain = std::make_shared<cvc::height_field>(cvc::height_field::from_bounds(
-      terrainN, terrainN, -half, -half, half, half, std::move(heights)));
-  // Each terrain cell takes the material of the raster cell under its centre.
-  {
-    std::vector<cvc::geometry::face_material_t> mats(std::size_t(terrainN - 1) * (terrainN - 1));
-    for (int r = 0; r + 1 < terrainN; ++r)
-      for (int c = 0; c + 1 < terrainN; ++c) {
-        const double u = (c + 0.5) / (terrainN - 1), v = (r + 0.5) / (terrainN - 1);
-        // The raster's samples are corner-inclusive: the nearest is at u x (rasterN - 1).
-        const int rc = std::min(rasterN - 1, int(std::lround(u * (rasterN - 1))));
-        const int rr = std::min(rasterN - 1, int(std::lround(v * (rasterN - 1))));
-        mats[std::size_t(r) * (terrainN - 1) + c] =
-            cvc::geometry::face_material_t(w.raster.klass[std::size_t(rr) * rasterN + rc]);
+      for (int r = r0; r < r1; ++r)
+        for (int c = 0; c < terrainN; ++c)
+          heights[std::size_t(r) * terrainN + c] =
+              float(hf.sample(-half + c * step, -half + r * step));
+      next = r1;
+      frac = double(next) / terrainN;
+      if (next < terrainN)
+        return;
+      w.terrain = std::make_shared<cvc::height_field>(cvc::height_field::from_bounds(
+          terrainN, terrainN, -half, -half, half, half, std::move(heights)));
+      heights = std::vector<float>();
+      advance(build_stage::materials);
+      return;
+    }
+    case build_stage::materials: {
+      // Each terrain cell takes the material of the raster cell under its centre.
+      const int cells = terrainN - 1;
+      if (next == 0)
+        mats.assign(std::size_t(cells) * cells, cvc::geometry::face_material_t(0));
+      // A cell costs far less than a sample: eight to a unit.
+      const int r1 = next + std::min(cells - next, rowsFor(budget * 8, cells, 1));
+      for (int r = next; r < r1; ++r)
+        for (int c = 0; c < cells; ++c) {
+          const double u = (c + 0.5) / cells, v = (r + 0.5) / cells;
+          // The raster's samples are corner-inclusive: the nearest is at u x (rasterN - 1).
+          const int rc = std::min(rasterN - 1, int(std::lround(u * (rasterN - 1))));
+          const int rr = std::min(rasterN - 1, int(std::lround(v * (rasterN - 1))));
+          mats[std::size_t(r) * cells + c] =
+              cvc::geometry::face_material_t(w.raster.klass[std::size_t(rr) * rasterN + rc]);
+        }
+      next = r1;
+      frac = double(next) / cells;
+      if (next < cells)
+        return;
+      w.terrain->set_cell_materials(std::move(mats));
+      mats = std::vector<cvc::geometry::face_material_t>();
+      advance(build_stage::streets);
+      return;
+    }
+    case build_stage::streets: {
+      // The city, roads FIRST: the city generator's streets (by default district cores on dry,
+      // gentle ground and a graded network grown from them); lots along the streets, filled from
+      // the most urban out with the library's archetypes or procedural massing; asphalt burned
+      // into the raster and the extruded road surface. Then the trees and rocks, off the roads and
+      // buildings.
+      const terrain_source &hf = w.model->terrain();
+      const double water = p.water_level_m;
+      const bool channel = hf.has_mask(terrain_mask::channel),
+                 cliff = hf.has_mask(terrain_mask::cliff);
+      const city_context ctx{p, hf, [&hf, water, channel, cliff](double x, double y) {
+                               return hf.sample(x, y) < water + 1.5 ||
+                                      (channel && hf.mask(terrain_mask::channel, x, y) > 0.5) ||
+                                      (cliff && hf.mask(terrain_mask::cliff, x, y) > 0.5);
+                             }};
+      streets = city(ctx);
+      advance(build_stage::city);
+      return;
+    }
+    case build_stage::city: {
+      const road_network &net = streets.roads;
+      w.building_count =
+          buildCity(library, net, w.model->terrain(), streets.urbanity, w.model->registry(), p.seed,
+                    p.water_level_m, p.buildings, w.buildings, w.aprons, fps);
+      w.archetypes = library && !library->empty();
+      w.road_length = 0.0;
+      for (const road_segment &s : net.segments)
+        w.road_length +=
+            std::hypot(net.nodes[s.b].x - net.nodes[s.a].x, net.nodes[s.b].y - net.nodes[s.a].y);
+      w.districts = streets.districts;
+      advance(build_stage::roads);
+      return;
+    }
+    case build_stage::roads: {
+      const road_network &net = streets.roads;
+      const terrain_source &hf = w.model->terrain();
+      const surface_registry &reg = w.model->registry();
+      rasterize_roads(net, w.grid, reg, w.raster, 1.0);
+      stampBuildings(fps, w.grid, reg, w.raster); // after the asphalt: a building always wins
+      road_mesh_params rmp;
+      rmp.lift = 0.35; // clearly above the terrain mesh, so the ribbons don't z-fight it
+      w.roads = extrude_roads(net, rmp, [&hf](double x, double y) { return hf.sample(x, y); });
+      advance(build_stage::props);
+      return;
+    }
+    case build_stage::props: {
+      const road_network &net = streets.roads;
+      PropLib lib;
+      lib.build(wp);
+      buildProps(
+          *w.model, w.model->registry(), lib,
+          [&](double x, double y) {
+            return !net.on_or_near_road(x, y, 1.5) && !fps.contains(x, y);
+          },
+          w.props, w.foliage, w.needles);
+      waterN = water_resolution(w);
+      w.water_ground.assign(std::size_t(waterN) * waterN, 0.0f);
+      advance(build_stage::water);
+      return;
+    }
+    case build_stage::water: {
+      const terrain_source &hf = w.model->terrain();
+      const int r1 = next + std::min(waterN - next, rowsFor(budget, waterN, 1));
+      for (int j = next; j < r1; ++j) {
+        const double y = -half + 2.0 * half * j / (waterN - 1);
+        for (int i = 0; i < waterN; ++i)
+          w.water_ground[std::size_t(j) * waterN + i] =
+              float(hf.sample(-half + 2.0 * half * i / (waterN - 1), y));
       }
-    w.terrain->set_cell_materials(std::move(mats));
+      next = r1;
+      frac = double(next) / waterN;
+      if (next >= waterN) {
+        streets = city_streets();
+        fps = FootprintIndex();
+        advance(build_stage::done);
+      }
+      return;
+    }
+    case build_stage::done:
+      return;
+    }
   }
+};
 
-  // The city, roads FIRST: the city generator's streets (by default district cores on dry, gentle
-  // ground and a graded network grown from them); lots along the streets, filled from the most
-  // urban out with the library's archetypes or procedural massing; asphalt burned into the raster
-  // and the extruded road surface. Then the trees and rocks, off the roads and buildings.
-  const auto road_h = [&hf](double x, double y) { return hf.sample(x, y); };
-  const bool channel = hf.has_mask(terrain_mask::channel), cliff = hf.has_mask(terrain_mask::cliff);
-  const city_context ctx{w.params, hf, [&hf, water, channel, cliff](double x, double y) {
-                           return hf.sample(x, y) < water + 1.5 ||
-                                  (channel && hf.mask(terrain_mask::channel, x, y) > 0.5) ||
-                                  (cliff && hf.mask(terrain_mask::cliff, x, y) > 0.5);
-                         }};
-  city_streets streets = city(ctx);
-  const road_network &net = streets.roads;
-  FootprintIndex fps;
-  w.building_count = buildCity(library, net, hf, streets.urbanity, reg, p.seed, water, p.buildings,
-                               w.buildings, w.aprons, fps);
-  w.archetypes = library && !library->empty();
-  w.road_length = 0.0;
-  for (const road_segment &s : net.segments)
-    w.road_length +=
-        std::hypot(net.nodes[s.b].x - net.nodes[s.a].x, net.nodes[s.b].y - net.nodes[s.a].y);
-  w.districts = streets.districts;
-  rasterize_roads(net, w.grid, reg, w.raster, 1.0);
-  stampBuildings(fps, w.grid, reg, w.raster); // after the asphalt: a building always wins
-  road_mesh_params rmp;
-  rmp.lift = 0.35; // clearly above the terrain mesh, so the ribbons don't z-fight it
-  w.roads = extrude_roads(net, rmp, road_h);
-
-  PropLib lib;
-  lib.build(wp);
-  buildProps(
-      wm, reg, lib,
-      [&](double x, double y) { return !net.on_or_near_road(x, y, 1.5) && !fps.contains(x, y); },
-      w.props, w.foliage, w.needles);
-  return w;
+world_builder::world_builder(const generated_world_params &p, const building_library *library)
+    : d_(std::make_unique<impl>()) {
+  d_->w.params = p;
+  d_->w.params.half_m = std::max(50.0, p.half_m);
+  d_->library = library;
 }
 
-std::vector<unsigned char> paint_surface(const generated_world &w, surface_color mode, int size) {
-  const int T = std::max(2, size);
+world_builder::~world_builder() = default;
+
+bool world_builder::step(std::size_t budget) {
+  if (d_->failed)
+    std::rethrow_exception(d_->failed);
+  try {
+    if (budget == 0)
+      while (d_->st != build_stage::done)
+        d_->run(std::numeric_limits<std::size_t>::max());
+    else
+      d_->run(budget);
+  } catch (...) {
+    d_->failed = std::current_exception();
+    throw;
+  }
+  return done();
+}
+
+bool world_builder::done() const { return d_->st == build_stage::done; }
+
+const char *world_builder::phase() const { return kStageNames[int(d_->st)]; }
+
+double world_builder::progress() const {
+  return done() ? 1.0
+                : std::min(0.999, d_->base + kStageWeight[int(d_->st)] * std::min(1.0, d_->frac));
+}
+
+generated_world world_builder::take() {
+  if (!done())
+    throw std::logic_error("world_builder::take: the world is not done");
+  return std::move(d_->w);
+}
+
+generated_world generate_world(const generated_world_params &p, const building_library *library) {
+  world_builder b(p, library);
+  b.step(0);
+  return b.take();
+}
+
+namespace {
+
+void putTexel(std::vector<unsigned char> &img, int T, int tx, int ty,
+              const cvc::geometry::color_t &c) {
+  std::size_t o = (std::size_t(ty) * T + tx) * 3;
+  img[o] = (unsigned char)std::min(255.0, std::max(0.0, c[0] * 255.0));
+  img[o + 1] = (unsigned char)std::min(255.0, std::max(0.0, c[1] * 255.0));
+  img[o + 2] = (unsigned char)std::min(255.0, std::max(0.0, c[2] * 255.0));
+}
+
+// Rows [ty0, ty1) of paint_surface's T x T texture, into img (T x T x 3 bytes).
+void paintRows(const generated_world &w, surface_color mode, int T, int ty0, int ty1,
+               std::vector<unsigned char> &img) {
   const raster_out &ro = w.raster;
   const grid_spec &g = w.grid;
   const surface_registry &reg = w.model ? w.model->registry() : surface_registry::builtin();
   const int m = int(mode);
-  std::vector<unsigned char> img(std::size_t(T) * T * 3, 0);
   if (ro.klass.empty())
-    return img;
+    return;
   const float hmin = float(w.height_min), hmax = float(w.height_max);
   const double spanx = g.max_x - g.min_x, spany = g.max_y - g.min_y;
   const cvc::geometry::color_t dirt = {0.42, 0.34, 0.23}, dryGrass = {0.45, 0.47, 0.24};
-  auto put = [&](int tx, int ty, const cvc::geometry::color_t &c) {
-    std::size_t o = (std::size_t(ty) * T + tx) * 3;
-    img[o] = (unsigned char)std::min(255.0, std::max(0.0, c[0] * 255.0));
-    img[o + 1] = (unsigned char)std::min(255.0, std::max(0.0, c[1] * 255.0));
-    img[o + 2] = (unsigned char)std::min(255.0, std::max(0.0, c[2] * 255.0));
-  };
+  auto put = [&](int tx, int ty, const cvc::geometry::color_t &c) { putTexel(img, T, tx, ty, c); };
   // The raster is coarse (a few metres a cell) and the texture fine, so a texel does not take its
   // nearest cell's colour, which paints the grid. Material mode blends the four cells around it,
   // at a position pushed about a cell by low-frequency noise (domain warping), with the blend's
@@ -1118,7 +1311,7 @@ std::vector<unsigned char> paint_surface(const generated_world &w, surface_color
 #ifdef CVC_USING_OPENMP
 #pragma omp parallel for schedule(static)
 #endif
-  for (int ty = 0; ty < T; ++ty) {
+  for (int ty = ty0; ty < ty1; ++ty) {
     double v = double(ty) / (T - 1), wy = g.min_y + v * spany;
     for (int tx = 0; tx < T; ++tx) {
       double u = double(tx) / (T - 1), wx = g.min_x + u * spanx;
@@ -1185,8 +1378,13 @@ std::vector<unsigned char> paint_surface(const generated_world &w, surface_color
       put(tx, ty, col);
     }
   }
-  if (m != 0)
-    return img; // QA modes: raw raster only
+}
+
+// The core lots' paved forecourts, over the material texture.
+void paintAprons(const generated_world &w, int T, std::vector<unsigned char> &img) {
+  const grid_spec &g = w.grid;
+  const double spanx = g.max_x - g.min_x, spany = g.max_y - g.min_y;
+  auto put = [&](int tx, int ty, const cvc::geometry::color_t &c) { putTexel(img, T, tx, ty, c); };
   double sx = (T - 1) / spanx, sy = (T - 1) / spany;
   auto W2Tx = [&](double x) { return (x - g.min_x) * sx; };
   auto W2Ty = [&](double y) { return (y - g.min_y) * sy; };
@@ -1205,7 +1403,40 @@ std::vector<unsigned char> paint_surface(const generated_world &w, surface_color
           put(tx, ty, pave);
       }
   }
-  return img;
+}
+
+} // namespace
+
+std::vector<unsigned char> paint_surface(const generated_world &w, surface_color mode, int size) {
+  surface_painter s(w, mode, size);
+  s.step(0);
+  return s.take();
+}
+
+surface_painter::surface_painter(const generated_world &w, surface_color mode, int size)
+    : w_(w), mode_(mode), size_(std::max(2, size)), img_(std::size_t(size_) * size_ * 3, 0) {}
+
+bool surface_painter::step(std::size_t budget) {
+  if (next_ < size_) {
+    const int n = budget == 0 ? size_ : rowsFor(budget, size_, 1);
+    const int r1 = std::min(size_, next_ + n);
+    paintRows(w_, mode_, size_, next_, r1, img_);
+    next_ = r1;
+    if (next_ < size_)
+      return false;
+  }
+  if (!finished_) {
+    if (mode_ == surface_color::material && !w_.raster.klass.empty())
+      paintAprons(w_, size_, img_); // QA modes: the raw raster only
+    finished_ = true;
+  }
+  return true;
+}
+
+std::vector<unsigned char> surface_painter::take() {
+  if (!done())
+    throw std::logic_error("surface_painter::take: the texture is not done");
+  return std::move(img_);
 }
 
 double water_floor(const generated_world &w) {
@@ -1222,6 +1453,8 @@ std::vector<float> water_field(const generated_world &w, double t, int n, int nz
   const double half = w.params.half_m, level = w.params.water_level_m;
   const double z0 = water_floor(w), z1 = water_top(w);
   const terrain_source *hf = w.model ? &w.model->terrain() : nullptr;
+  // The ground under the columns was sampled with the world when n is its water resolution.
+  const bool cached = w.water_ground.size() == std::size_t(n) * n;
   // The ground and the wave's surface per column, then the depth down each column.
   std::vector<float> f(std::size_t(n) * n * nz, 0.0f);
   std::vector<double> ground(std::size_t(n) * n), surf(std::size_t(n) * n);
@@ -1229,8 +1462,9 @@ std::vector<float> water_field(const generated_world &w, double t, int n, int nz
     const double y = -half + 2.0 * half * j / (n - 1);
     for (int i = 0; i < n; ++i) {
       const double x = -half + 2.0 * half * i / (n - 1);
-      ground[std::size_t(j) * n + i] = hf ? hf->sample(x, y) : 0.0;
-      surf[std::size_t(j) * n + i] = seaSurface(half, level, x, y, t);
+      const std::size_t c = std::size_t(j) * n + i;
+      ground[c] = cached ? w.water_ground[c] : hf ? hf->sample(x, y) : 0.0;
+      surf[c] = seaSurface(half, level, x, y, t);
     }
   }
   for (int k = 0; k < nz; ++k) {

@@ -1186,12 +1186,45 @@ int main() {
     view.setCamera(0, -300, 200, 0, 0, 0, 0, 0, 1, 40.0);
     cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
     chk(sg.shadowFocused(), "tick_scene aimed the shadow maps at the camera's focal point");
-    // A live edit regenerates the world in place: a bigger world, a bigger ground.
+    // A live edit regenerates the world in place, as a task on the app's scheduler: the old world
+    // stays until the new one is made, then a bigger world, a bigger ground.
+    const std::string busy_key = cvc::ariadne::resolve_bind("gw", "world.busy");
+    auto busy = [&]() { return st(busy_key).value() == "1"; };
+    auto settle_world = [&]() {
+      cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0); // sees the edit, starts it
+      for (int i = 0; i < 60000 && busy(); ++i) {
+        cvc::pump_exec_frame(app.exec_scheduler());
+        cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+        if (busy())
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      return !busy();
+    };
     const auto pts0 = terrain ? terrain->getGeometry()->const_points().size() : 0;
     st(cvc::ariadne::resolve_bind("gw", "world.half")).value(700.0);
     cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+    chk(busy() && terrain->getGeometry()->const_points().size() == pts0,
+        "a world.half edit starts a rebuild task and keeps the old world meanwhile");
+    chk(settle_world(), "the rebuild finished");
     const auto pts1 = terrain ? terrain->getGeometry()->const_points().size() : 0;
     chk(pts1 > pts0, "a world.half edit regenerated the world in place");
+    chk(st(cvc::ariadne::resolve_bind("gw", "world.progress")).value() == "100",
+        "world.progress reached 100");
+    // Stop ends a rebuild and keeps the world shown, and does not restart it by itself.
+    st(cvc::ariadne::resolve_bind("gw", "world.seed")).value(9.0);
+    cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+    st(cvc::ariadne::resolve_bind("gw", "world.request")).value(std::string("stop"));
+    cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+    cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+    chk(!busy() && terrain->getGeometry()->const_points().size() == pts1 &&
+            st(cvc::ariadne::resolve_bind("gw", "world.status"))
+                    .value<std::string>()
+                    .rfind("stopped", 0) == 0,
+        "stop ended the rebuild and kept the world shown");
+    // A new colour repaints the shown world only.
+    st(cvc::ariadne::resolve_bind("gw", "world.color")).value(3.0);
+    chk(settle_world() && terrain->getGeometry()->const_points().size() == pts1,
+        "world.color repainted the ground as a task, the mesh untouched");
     chk(realized.height_fields["world"]->rows() * realized.height_fields["world"]->cols() ==
             int(pts1),
         "the published ground follows the regenerated world");
@@ -1202,13 +1235,13 @@ int main() {
     chk(terrains.find("fbm") != std::string::npos && terrains.find("dem") != std::string::npos,
         "generated_world published its terrain generators");
     st(cvc::ariadne::resolve_bind("gw", "world.city")).value(std::string("none"));
-    cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+    settle_world();
     const auto bld =
         std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("world_buildings"));
     chk(bld && bld->getGeometry()->const_points().empty(),
         "world.city: none regenerated a world without buildings");
     st(cvc::ariadne::resolve_bind("gw", "world.terrain")).value(std::string("no_such"));
-    cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+    settle_world();
     const std::string status =
         st(cvc::ariadne::resolve_bind("gw", "world.status")).value<std::string>();
     chk(status.rfind("error:", 0) == 0 && terrain->getGeometry()->const_points().size() == pts1,

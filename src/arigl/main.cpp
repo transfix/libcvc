@@ -165,6 +165,14 @@ namespace gla = cvc::gl::ariadne;
 
 const char *const kDefaultPrefix = "ui.docs.ari"; // the same root ari uses, in both modes
 
+// Errors, warnings and info only (level L prints when L < log_verbosity), as the native examples
+// do; $CVC_LOG_VERBOSITY overrides it (6 = every debug line). The debug lines cost: on wasm each is
+// a console call, and the water's transfer function alone logs a dozen every few frames.
+void set_log_verbosity(cvc::app &app) {
+  const char *v = std::getenv("CVC_LOG_VERBOSITY");
+  app.properties("system.log_verbosity", v && *v ? v : "2");
+}
+
 int usage(int code) {
   std::fprintf(code ? stderr : stdout,
                "usage: arigl run|snapshot|check [flags] doc.ari [document args...]\n"
@@ -794,6 +802,8 @@ struct ConferenceSession {
     }
     std::fprintf(stderr, "arigl: conference: %s %s as '%s' (room '%s')\n",
                  ok ? "connected to" : "could NOT reach relay", relay, self.c_str(), room.c_str());
+    // Messages to the relay (the chat verbs' requests, room_chat.h) leave through the shard.
+    shard->set_transport(tp_);
     if (const char *laneEnv = std::getenv("CVC_ARIADNE_LANE");
         laneEnv && *laneEnv && std::string(laneEnv) != "0") {
       if (!cvc::fast_lane_rtc_available()) {
@@ -1392,6 +1402,8 @@ struct ConferenceSession {
     for (publisher &p : pubs_)
       p.sub.reset();
     lane_.reset(); // its callbacks feed inbox_ and the shard: gone before either
+    if (shard)
+      shard->set_transport(nullptr); // a chat request after this stays local
     if (stop_)
       stop_(); // joins the transport reader thread (idempotent: _running.exchange(false))
   }
@@ -1792,6 +1804,7 @@ int run_window(const ari::HostOptions &o) {
   const int width = o.width ? o.width : 1024, height = o.height ? o.height : 768;
 
   cvc::app app;
+  set_log_verbosity(app);
   cvc::gl::SceneGraph sg(app, o.prefix.empty() ? kDefaultPrefix : o.prefix);
   // The viewer is "main", as the shared components expect: camera_controls binds
   // viewers.main.camera.settings.*.
@@ -1926,13 +1939,18 @@ int run_window(const ari::HostOptions &o) {
       conf.pump(); // publish this frame's room-tree + media to the relay (run mode does this via
                    // the input pump, set below; a snapshot of a live conference must pump too)
       rt.frame(1.0 / 30.0);
+      // (quit code) ends the snapshot at the frame it quit on, as ari's does.
+      const bool last = f + 1 == frames || rt.app_runtime().should_close();
       // The last frame waits for the document's requests and pictures (§5.11), if it has any out.
-      if (f + 1 == frames)
-        settle = o.net.enabled || rt.app_runtime().runtime().media_stale();
-      if (f + 1 == frames && !settle)
+      if (last)
+        settle = !rt.app_runtime().should_close() &&
+                 (o.net.enabled || rt.app_runtime().runtime().media_stale());
+      if (last && !settle)
         view.writePNG(o.png.c_str()); // renders and writes the last frame
       else
         rt.render();
+      if (last)
+        break;
       std::this_thread::sleep_until(start + period);
     }
     if (settle) { // the frame shows what the document's requests brought back
@@ -2043,6 +2061,7 @@ int run_terminal(const ari::HostOptions &o) {
   }
 
   cvc::app app;
+  set_log_verbosity(app);
   // Lifetime order: the backend outlives the scene adapter, which outlives the AppRuntime.
   ari::FtxuiBackend::Options look;
   look.image_color = image_mode(o.graphics);

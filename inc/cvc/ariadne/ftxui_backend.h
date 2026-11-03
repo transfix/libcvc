@@ -182,6 +182,15 @@ public:
                   bool row) override;
   StringEdit input_text(const char *label, const char *key, const std::string &current,
                         bool masked) override;
+  // A message field: Enter sends it; Alt+Enter, Ctrl+J, or Shift+Enter where the terminal reports
+  // it (the kitty keyboard protocol, xterm's modifyOtherKeys) adds a line.
+  MessageEdit message_input(const char *label, const char *key, const std::string &current,
+                            const MessageInputOptions &opts) override;
+  // A scrolling text buffer, `opts.height` px tall in rows of cell_px_h (8 rows without one), its
+  // lines word-wrapped to the width it was laid out at last walk. While it has focus, Up / Down,
+  // PageUp / PageDown and Home / End scroll it; so does the wheel over it.
+  TextViewEvent text_view(const char *label, const char *key, const std::string &text,
+                          const TextViewOptions &opts) override;
   void focus_next_widget() override;
   bool draw_image(const char *name, float width) override;
   // §5.12 a container's background: half-blocks behind the content (dimmed, text kept readable),

@@ -51,8 +51,8 @@ public:
   bool begin_grid(const cvc::ariadne::Layout &layout, const char *id) override;
   void grid_next_cell() override;
   void end_grid() override;
-  void seed_grid_tracks(const std::vector<float> &sizes) override; // §11.4 (pre begin_grid)
-  std::vector<float> grid_tracks() const override;                 // §11.4 (post end_grid)
+  void seed_grid_tracks(const std::vector<float> &sizes) override;   // §11.4 (pre begin_grid)
+  std::vector<float> grid_tracks() const override;                   // §11.4 (post end_grid)
   void seed_grid_columns(const std::vector<float> &widths) override; // §11.4 (pre begin_grid)
   std::vector<float> grid_columns() const override;                  // §11.4 (post end_grid)
   void begin_disabled() override; // §4: ImGui::BeginDisabled (greyed, non-interactive)
@@ -92,6 +92,19 @@ public:
   void focus_next_widget() override;
   cvc::ariadne::StringEdit input_text(const char *label, const char *key,
                                       const std::string &current, bool masked) override;
+  // A message field: one line that grows to opts.max_lines as the text wraps or Shift+Enter adds
+  // lines (an InputTextMultiline with CtrlEnterForNewLine, under which Enter validates and
+  // Shift/Ctrl+Enter add a line); Enter sends and keeps the focus in the field.
+  cvc::ariadne::MessageEdit message_input(const char *label, const char *key,
+                                          const std::string &current,
+                                          const cvc::ariadne::MessageInputOptions &opts) override;
+  // A scrollable text buffer in a bordered child window. Only the lines in view are drawn: the
+  // wrapped layout is kept per key and redone only when the text or the width changes. It stays
+  // at the bottom while lines arrive (follow), and lines added above keep what is in view where it
+  // is. Height 0 fills the window less what the window draws after it, as measured last frame.
+  // Right-click copies the text.
+  cvc::ariadne::TextViewEvent text_view(const char *label, const char *key, const std::string &text,
+                                        const cvc::ariadne::TextViewOptions &opts) override;
   cvc::ariadne::ColorEdit color(const char *label, const float rgb[3]) override; // §G7 RGB picker
   // §10 transfer-function editor: the ColorTable2 port drawn with the ImGui draw list (zoom strip,
   // colour ramp, opacity curve, isocontour bars, histogram / contour spectrum / contour tree
@@ -203,6 +216,10 @@ private:
   // Windows that fit their content and opened at a place of their own before ImGui had measured
   // them: the next frame moves each in again, measured, until all of it shows (§5.8).
   std::unordered_set<std::string> m_placedUnmeasured;
+  // On a phone, the windows whose authored place did not fit the view open collapsed instead, their
+  // title bars one under another from the top of the view (§5.14): how many have, since the
+  // document was laid out.
+  int m_stacked = 0;
 
   // reset_layout(): the windows drawn since, by id. A window's first draw after it takes its
   // authored place and size (or rejoins the flow) though ImGui still holds the last document's.
@@ -234,6 +251,21 @@ private:
   // Per-key in-progress InputText / InputInt text. Follows the value in state while no field is
   // active and holds the edit while one is — the string counterpart of cache_int/cache_float.
   std::unordered_map<std::string, std::string> m_textEdits;
+
+  // Per-key message fields: the text being written, and whether to take the focus back next frame
+  // (sending a message ends ImGui's edit).
+  struct MessageField {
+    std::string text;
+    bool refocus = false;
+  };
+  std::unordered_map<std::string, MessageField> m_messageFields;
+  // Per-key text views (ImGuiBackend.cpp): the layout, the scroll and the top trigger.
+  struct TextViewState;
+  std::unordered_map<std::string, std::shared_ptr<TextViewState>> m_textViews;
+  // The last text view drawn in the current window and that window (an ImGuiWindow*):
+  // end_window measures what the window draws after it.
+  std::shared_ptr<TextViewState> m_lastTextView;
+  void *m_lastTextViewWindow = nullptr;
 };
 
 } // namespace gl

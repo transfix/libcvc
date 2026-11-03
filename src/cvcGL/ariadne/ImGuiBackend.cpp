@@ -62,6 +62,16 @@ float ui_px(float v) {
   return v * s.FontScaleMain * s.FontScaleDpi;
 }
 
+// A phone's view: under 500 CSS px on its short side, either way up (today's phones are 360-430; a
+// tablet or a laptop's window is well over). CSS px are the display's pixels over its pixel ratio.
+constexpr float kPhoneView = 500.0f;
+
+bool phone_view() {
+  const ImVec2 d = ImGui::GetIO().DisplaySize;
+  const float css = ImMin(d.x, d.y) / ImMax(ImGui::GetStyle().FontScaleDpi, 0.01f);
+  return css > 1.0f && css < kPhoneView;
+}
+
 float *cache_float(const char *key, float seed, bool active) {
   ImGuiStorage *store = ImGui::GetStateStorage();
   const ImGuiID id = ImHashStr(key, 0, kCacheSalt);
@@ -116,6 +126,48 @@ bool row_splitter(float thickness, float *a, float *b, float min_a, float min_b,
   return ImGui::SplitterBehavior(bb, id, ImGuiAxis_Y, a, b, min_a, min_b, 0.0f);
 }
 } // namespace
+#endif
+
+#ifdef CVC_ENABLE_IMGUI
+// A text view's layout and scroll, per key.
+struct ImGuiBackend::TextViewState {
+  std::string text;                                       // what the layout is of
+  std::vector<std::pair<std::size_t, std::size_t>> lines; // each line's [begin, end) in text
+  std::vector<float> tops;                                // each line's top; back() = the total
+  float wrap_w = -2.0f;                                   // the layout's wrap width (<0: none)
+  float scroll = 0.0f;
+  bool at_bottom = true;
+  // Where the view is being taken (FLT_MAX: the bottom; < 0: nowhere), asked of ImGui each frame
+  // until the scroll gets there: ImGui clamps a scroll to the content it measured the frame
+  // before, so a text that just grew needs a frame or two. Starts at the bottom.
+  float target = FLT_MAX;
+  int target_frames = 0;
+  bool armed = true;     // reaching the top reports it (re-armed once it leaves the top)
+  bool reported = false; // a view whose text fits has reported the room above it
+  double fired_at = -1.0;
+  float below = 0.0f; // what the window drew after the view last frame
+  float end_y = 0.0f; // the window's cursor right after the view
+
+  // Split the text into lines and measure each, wrapped at WRAP_W (<0: one row each).
+  void layout(float wrap) {
+    wrap_w = wrap;
+    lines.clear();
+    tops.assign(1, 0.0f);
+    const float lh = ImGui::GetTextLineHeightWithSpacing();
+    const float gap = lh - ImGui::GetTextLineHeight();
+    for (std::size_t i = 0; i <= text.size();) {
+      const std::size_t j = std::min(text.find('\n', i), text.size());
+      if (j == text.size() && i == j && !lines.empty())
+        break; // the text's last newline ends the last line
+      lines.emplace_back(i, j);
+      float h = lh;
+      if (wrap > 0.0f && j > i)
+        h = ImGui::CalcTextSize(text.data() + i, text.data() + j, false, wrap).y + gap;
+      tops.push_back(tops.back() + h);
+      i = j + 1;
+    }
+  }
+};
 #endif
 
 ariadne::Capabilities ImGuiBackend::capabilities() const {
@@ -197,6 +249,7 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
     openSize = ImVec2(ui_px(m_pendingSeed.w), ui_px(m_pendingSeed.h));
   else if (!fits)
     openSize = ImVec2(px(size.w, avail.x), px(size.h, avail.y));
+  const bool tooBig = openSize.x > avail.x || openSize.y > avail.y;
   openSize = ImMin(openSize, avail);
   if (m_haveSeed) {
     if (m_pendingSeed.has_pos) {
@@ -204,8 +257,25 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
       const ImVec2 shows(openSize.x > 0.0f ? openSize.x : ImMin(fitFloor, avail.x),
                          openSize.y > 0.0f ? openSize.y : ImMin(fitFloor, avail.y));
       const ImVec2 at = origin + ImVec2(ui_px(m_pendingSeed.x), ui_px(m_pendingSeed.y));
-      ImGui::SetNextWindowPos(ImMax(work.Min, ImMin(at, work.Max - shows)), once);
-      if (fits && !existing)
+      ImVec2 in = ImMax(work.Min, ImMin(at, work.Max - shows));
+      // On a phone, a document laid out for a wider screen would have all its windows moved in
+      // onto the same few hundred pixels, one over another. There a window whose authored place or
+      // size does not fit opens collapsed instead, its title bar under those of the others that
+      // did, from the top of the view: a list to open one at a time. Expanded, it opens from its
+      // title down, as wide as the view and no taller than the room below.
+      const bool stack = !existing && m_pendingSeed.authored && phone_view() &&
+                         (tooBig || in.x != at.x || in.y != at.y);
+      if (stack) {
+        const float title = ImGui::GetFrameHeight();
+        in = ImVec2(work.Min.x,
+                    ImMin(work.Min.y + static_cast<float>(m_stacked) * title, work.Max.y - title));
+        ++m_stacked;
+        ImGui::SetNextWindowCollapsed(true, once);
+        if (!fits)
+          openSize = ImVec2(avail.x, ImMin(openSize.y, work.Max.y - in.y));
+      }
+      ImGui::SetNextWindowPos(in, once);
+      if (fits && !existing && !stack)
         m_placedUnmeasured.insert(id);
     }
     m_haveSeed = false;
@@ -346,6 +416,7 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
 void ImGuiBackend::reset_layout() {
   m_flow.clear();
   m_placedUnmeasured.clear();
+  m_stacked = 0;
   m_relaid.clear();
   m_relaidGrids.clear();
   m_relayout = true;
@@ -360,6 +431,13 @@ void ImGuiBackend::seed_window_geometry(const ariadne::WindowGeom &g) {
 ariadne::WindowGeom ImGuiBackend::window_geometry() const { return m_lastWindowGeom; }
 
 void ImGuiBackend::end_window() {
+#ifdef CVC_ENABLE_IMGUI
+  // A text view of height 0 fills the window less what follows it: what that is, for next frame.
+  if (m_lastTextView && m_lastTextViewWindow == ImGui::GetCurrentWindow())
+    m_lastTextView->below = ImMax(0.0f, ImGui::GetCursorPosY() - m_lastTextView->end_y);
+#endif
+  m_lastTextView.reset();
+  m_lastTextViewWindow = nullptr;
   ui::End(); // unconditional per ImGui's contract
   if (!m_windowStylePushes.empty()) {
     const int n = m_windowStylePushes.back();
@@ -806,13 +884,28 @@ ariadne::BoolEdit ImGuiBackend::checkbox(const char *label, bool current) {
 // to 65% of itself every frame until the 48 px floor snapped it back, so the slider never held a
 // width long enough to be dragged.
 void reserve_label_width(const char *label) {
-  // A window that fits its widgets grows to the label instead -- and shrinking the frame to the
-  // window's width there would only shrink the window with it, frame after frame.
-  if (ImGui::GetCurrentWindow()->Flags & ImGuiWindowFlags_AlwaysAutoResize)
-    return;
-  const float avail = ImGui::GetContentRegionAvail().x;
+  const ImGuiStyle &style = ImGui::GetStyle();
   const float labelW = ImGui::CalcTextSize(label, nullptr, /*hide_text_after_double_hash=*/true).x;
-  const float fit = avail - ImGui::GetStyle().ItemInnerSpacing.x - labelW;
+  const ImGuiWindow *win = ImGui::GetCurrentWindow();
+  // A window that fits its widgets grows to the label instead -- and shrinking the frame to the
+  // window's width there would only shrink the window with it, frame after frame. It grows only as
+  // far as the view's edge, though, which on a phone is near: ImGui gives such a window's widgets
+  // 16 lines' width, most of a phone's at its UI size. There the frame leaves the label room up to
+  // the widest the window can be -- bounded by the view, not the window, so it stays put frame
+  // after frame. ImGui fits a window no wider than the view less its safe-area padding each side.
+  if (win->Flags & ImGuiWindowFlags_AlwaysAutoResize) {
+    const ImGuiViewport *vp = ImGui::GetMainViewport();
+    const float widest = ImMin(vp->WorkPos.x + vp->WorkSize.x - win->Pos.x,
+                               vp->WorkSize.x - 2.0f * style.DisplaySafeAreaPadding.x);
+    const float most = widest - (win->DC.CursorPos.x - win->Pos.x) - style.WindowPadding.x -
+                       (win->ScrollbarY ? style.ScrollbarSize : 0.0f);
+    const float fit = most - style.ItemInnerSpacing.x - labelW;
+    if (fit < ImGui::CalcItemWidth())
+      ImGui::SetNextItemWidth(ImMax(fit, 48.0f));
+    return;
+  }
+  const float avail = ImGui::GetContentRegionAvail().x;
+  const float fit = avail - style.ItemInnerSpacing.x - labelW;
   if (ImGui::GetCurrentTable() != nullptr || fit < ImGui::CalcItemWidth())
     ImGui::SetNextItemWidth(ImMax(fit, 48.0f)); // floor: a still-usable slider/drag handle
 }
@@ -949,6 +1042,224 @@ ariadne::StringEdit ImGuiBackend::input_text(const char *label, const char *key,
   (void)masked;
   return {false, false, current};
 #endif
+}
+
+#ifdef CVC_ENABLE_IMGUI
+namespace {
+// S cut to at most MAX bytes, at a UTF-8 character boundary.
+void truncate_utf8(std::string &s, std::size_t max) {
+  if (s.size() <= max)
+    return;
+  std::size_t n = max;
+  while (n > 0 && (static_cast<unsigned char>(s[n]) & 0xC0) == 0x80)
+    --n;
+  s.resize(n);
+}
+} // namespace
+
+#endif
+
+ariadne::MessageEdit ImGuiBackend::message_input(const char *label, const char *key,
+                                                 const std::string &current,
+                                                 const ariadne::MessageInputOptions &o) {
+  ariadne::MessageEdit out;
+#ifdef CVC_ENABLE_IMGUI
+  MessageField &f = m_messageFields[key];
+  if (!ImGui::IsAnyItemActive() && !f.refocus)
+    f.text = current; // follow the draft in state while nothing is being edited
+  const ImGuiStyle &st = ImGui::GetStyle();
+  const char *end = label ? ImGui::FindRenderedTextEnd(label) : label;
+  const bool labelled = label && end != label;
+  const float width = labelled ? ImGui::CalcItemWidth() : -FLT_MIN;
+  ImGui::PushID(label ? label : "message");
+  if (f.refocus) {
+    ImGui::SetKeyboardFocusHere();
+    f.refocus = false;
+  }
+  InputTextStr ud{&f.text};
+  bool entered = false;
+  if (o.multiline) {
+    // As tall as the wrapped text, from one line to max_lines, then it scrolls.
+    const float inner = (width > 0.0f ? width : ImGui::GetContentRegionAvail().x) -
+                        2.0f * st.FramePadding.x - st.ScrollbarSize;
+    const float lh = ImGui::GetTextLineHeight();
+    float th = f.text.empty() ? lh : ImGui::CalcTextSize(f.text.c_str(), nullptr, false, inner).y;
+    if (!f.text.empty() && f.text.back() == '\n')
+      th += lh; // the caret's line after a trailing newline
+    const float rows = ImClamp(std::floor(th / lh + 0.5f), 1.0f,
+                               static_cast<float>(o.max_lines < 1 ? 1 : o.max_lines));
+    entered = ImGui::InputTextMultiline(
+        "##message", f.text.data(), f.text.capacity() + 1,
+        ImVec2(width, rows * lh + 2.0f * st.FramePadding.y),
+        ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CtrlEnterForNewLine |
+            ImGuiInputTextFlags_WordWrap | ImGuiInputTextFlags_NoHorizontalScroll |
+            ImGuiInputTextFlags_CallbackResize,
+        input_text_resize, &ud);
+  } else {
+    ImGui::SetNextItemWidth(width);
+    entered =
+        ImGui::InputText("##message", f.text.data(), f.text.capacity() + 1,
+                         ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackResize,
+                         input_text_resize, &ud);
+  }
+  const bool active = ImGui::IsItemActive();
+  const bool left = ImGui::IsItemDeactivatedAfterEdit();
+  if (f.text.empty() && !active && !o.hint.empty())
+    ImGui::GetWindowDrawList()->AddText(ImVec2(ImGui::GetItemRectMin().x + st.FramePadding.x,
+                                               ImGui::GetItemRectMin().y + st.FramePadding.y),
+                                        ImGui::GetColorU32(ImGuiCol_TextDisabled), o.hint.c_str());
+  ImGui::PopID();
+  if (labelled) {
+    ImGui::SameLine(0.f, st.ItemInnerSpacing.x);
+    ImGui::TextUnformatted(label, end);
+  }
+  if (o.max_length > 0)
+    truncate_utf8(f.text, static_cast<std::size_t>(o.max_length));
+  if (entered) {
+    // Sent, unless there is nothing but blanks; either way the focus comes back next frame.
+    if (f.text.find_first_not_of(" \t\r\n") != std::string::npos) {
+      out.submitted = true;
+      out.value = f.text;
+      f.text.clear();
+    }
+    f.refocus = true;
+  } else {
+    out.committed = left;
+    out.value = f.text;
+  }
+  out.changed = f.text != current;
+#else
+  (void)label;
+  (void)key;
+  (void)o;
+  out.value = current;
+#endif
+  return out;
+}
+
+ariadne::TextViewEvent ImGuiBackend::text_view(const char *label, const char *key,
+                                               const std::string &text,
+                                               const ariadne::TextViewOptions &o) {
+  ariadne::TextViewEvent ev;
+#ifdef CVC_ENABLE_IMGUI
+  std::shared_ptr<TextViewState> &sp = m_textViews[key];
+  if (!sp)
+    sp = std::make_shared<TextViewState>();
+  TextViewState &v = *sp;
+  const ImGuiStyle &st = ImGui::GetStyle();
+  ImGuiWindow *host = ImGui::GetCurrentWindow();
+  const bool fit = (host->Flags & ImGuiWindowFlags_AlwaysAutoResize) != 0;
+  const float lh = ImGui::GetTextLineHeightWithSpacing();
+  // A window that fits its content has no space to fill: 12 lines, 28 font sizes wide.
+  const float w = fit ? 28.0f * ImGui::GetFontSize() : ImGui::GetContentRegionAvail().x;
+  float h = o.height > 0.0f ? o.height
+            : fit           ? 12.0f * lh + 2.0f * st.WindowPadding.y
+                            : ImGui::GetContentRegionAvail().y - v.below;
+  h = ImMax(h, 3.0f * lh + 2.0f * st.WindowPadding.y);
+  const float wrap_w =
+      o.wrap ? ImMax(w - 2.0f * st.WindowPadding.x - st.ScrollbarSize, 16.0f) : -1.0f;
+
+  // The layout, redone when the text or the width changes. Lines added above (an older page)
+  // move the scroll by their height, so what is in view stays put; another text altogether (a
+  // channel switch) starts at its bottom.
+  if (text != v.text) {
+    const float old_total = v.tops.empty() ? 0.0f : v.tops.back();
+    const bool grew = !v.text.empty() && text.size() > v.text.size();
+    const bool prepended =
+        grew && text.compare(text.size() - v.text.size(), v.text.size(), v.text) == 0;
+    const bool appended = grew && !prepended && text.compare(0, v.text.size(), v.text) == 0;
+    v.text = text;
+    v.layout(wrap_w);
+    v.reported = false;
+    if (prepended) // still on its way to the bottom: it goes on there
+      v.target = v.target == FLT_MAX
+                     ? FLT_MAX
+                     : (v.target >= 0.0f ? v.target : v.scroll) + (v.tops.back() - old_total);
+    else if (!appended || (o.follow && v.at_bottom))
+      v.target = FLT_MAX;
+    v.target_frames = 0;
+  } else if (wrap_w != v.wrap_w) {
+    v.layout(wrap_w);
+    if (v.at_bottom)
+      v.target = FLT_MAX;
+  }
+  const float total = v.tops.back();
+  const float view_h = h - 2.0f * st.WindowPadding.y;
+  const float max_scroll = ImMax(0.0f, total - view_h);
+  if (v.target >= 0.0f)
+    ImGui::SetNextWindowScroll(ImVec2(-1.0f, ImMin(v.target, max_scroll)));
+
+  bool wheel_up_at_top = false;
+  ImGui::BeginChild(label && *label ? label : "##text_view", ImVec2(fit ? w : 0.0f, h),
+                    ImGuiChildFlags_Borders);
+  {
+    const float scroll = ImGui::GetScrollY();
+    const std::size_t n = v.lines.size();
+    // The first line in view, then each one down to the bottom of the view.
+    std::size_t i = static_cast<std::size_t>(
+        std::upper_bound(v.tops.begin(), v.tops.begin() + static_cast<std::ptrdiff_t>(n), scroll) -
+        v.tops.begin());
+    i = i > 0 ? i - 1 : 0;
+    if (wrap_w > 0.0f)
+      ImGui::PushTextWrapPos(0.0f);
+    for (; i < n && v.tops[i] < scroll + view_h; ++i) {
+      ImGui::SetCursorPos(ImVec2(st.WindowPadding.x, st.WindowPadding.y + v.tops[i]));
+      const auto &ln = v.lines[i];
+      ImGui::TextUnformatted(v.text.data() + ln.first, v.text.data() + ln.second);
+    }
+    if (wrap_w > 0.0f)
+      ImGui::PopTextWrapPos();
+    ImGui::SetCursorPos(ImVec2(st.WindowPadding.x, st.WindowPadding.y + total));
+    ImGui::Dummy(ImVec2(0.0f, 0.0f)); // the content's height, so the scroll range is the text's
+    v.scroll = ImGui::GetScrollY();
+    v.at_bottom = v.scroll >= max_scroll - 1.0f;
+    // The target is reached (or given up on, so the user's scroll is never fought for long).
+    if (v.target >= 0.0f &&
+        (std::fabs(v.scroll - ImMin(v.target, max_scroll)) < 1.0f || ++v.target_frames > 8))
+      v.target = -1.0f;
+    wheel_up_at_top =
+        ImGui::IsWindowHovered() && ImGui::GetIO().MouseWheel > 0.0f && v.scroll <= 0.5f;
+    if (ImGui::BeginPopupContextWindow("##text_view_menu")) {
+      if (ImGui::MenuItem("Copy"))
+        ImGui::SetClipboardText(v.text.c_str());
+      ImGui::EndPopup();
+    }
+  }
+  ImGui::EndChild();
+  v.end_y = ImGui::GetCursorPosY();
+  m_lastTextView = sp;
+  m_lastTextViewWindow = host;
+
+  // The top: reached by scrolling (once, until the view leaves it), the wheel turned up there
+  // (at most twice a second), or a text that does not fill the view (once per text, an empty one
+  // aside: there is room above it for more).
+  // Nothing is reported while the view is still being taken somewhere.
+  const double now = ImGui::GetTime();
+  const bool at_top = v.scroll <= 0.5f;
+  if (total <= view_h + 0.5f) {
+    if (!v.reported && !v.text.empty()) {
+      ev.at_top = true;
+      v.reported = true;
+    }
+  } else if (v.target >= 0.0f) {
+    v.armed = !at_top;
+  } else if (at_top && v.armed) {
+    ev.at_top = true;
+    v.armed = false;
+  } else if (!at_top) {
+    v.armed = true;
+  }
+  if (wheel_up_at_top && v.target < 0.0f && now - v.fired_at >= 0.5)
+    ev.at_top = true;
+  if (ev.at_top)
+    v.fired_at = now;
+#else
+  (void)label;
+  (void)key;
+  (void)text;
+  (void)o;
+#endif
+  return ev;
 }
 
 ariadne::ColorEdit ImGuiBackend::color(const char *label, const float rgb[3]) {
