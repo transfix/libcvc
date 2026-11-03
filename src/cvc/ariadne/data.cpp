@@ -30,7 +30,7 @@
 #include <cvc/net/http_client.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_blob_store.h> // sha256_hex
-#include <cvc/state/state_exec/types.h>   // format_number_shortest
+#include <cvc/state/state_exec/types.h> // format_number_shortest
 #include <cvc/volume/volume.h>
 #include <cvc/world/city_bundle.h>
 #include <cvc/world/world_geometry.h>
