@@ -15,6 +15,7 @@
 #include <cvc/state/state_exec/stdlib.h>
 #include <cvc/state/state_exec/utf8.h> // SE-1: (length "...") counts codepoints for a string
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #if defined(_WIN32)
@@ -843,6 +844,18 @@ value_t builtin_random_token(std::span<const value_t> args) {
 // I/O
 // ---------------------------------------------------------------------------
 
+namespace {
+// print writes whole lines (td 4.11): the line is made first, outside the lock, then written with
+// its newline in one call. The lock is held for that write only, never across a data job or DSL
+// code, so lines printed from several threads never interleave.
+void write_print_line(std::string line) {
+  static std::mutex out;
+  line += '\n';
+  std::lock_guard<std::mutex> lock(out);
+  std::cout.write(line.data(), static_cast<std::streamsize>(line.size()));
+}
+} // namespace
+
 value_t builtin_print(std::span<const value_t> args) {
   if (std::any_of(args.begin(), args.end(), is_compound)) {
     // The line goes out once all of it is printed. A string prints quoted here, as to_string
@@ -852,16 +865,17 @@ value_t builtin_print(std::span<const value_t> args) {
     for (auto &a : args)
       parts.push_back(std::holds_alternative<std::string>(a.v) ? value_t{to_string(a)} : a);
     return run_data_job(make_concat_job(std::move(parts), " ", "print"), [](value_t line) {
-      std::cout << std::get<std::string>(line.v) << '\n';
+      write_print_line(std::move(std::get<std::string>(line.v)));
       return nil_value;
     });
   }
+  std::string line;
   for (size_t i = 0; i < args.size(); ++i) {
     if (i > 0)
-      std::cout << ' ';
-    std::cout << to_string(args[i]);
+      line += ' ';
+    line += to_string(args[i]);
   }
-  std::cout << '\n';
+  write_print_line(std::move(line));
   return nil_value;
 }
 
