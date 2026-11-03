@@ -137,7 +137,7 @@ struct SceneHeightfield {
   std::string file;                // dem: the .npy (a URI, or a path relative to the document)
   double seed = 7.0;               // the generator's seed
   double amp = 90.0;               // its relief (metres)
-  double water_level = 34.0;       // the water line (fbm's island preset sinks its rim below it)
+  double water_level = 0.0;        // the water line from sea level (the island's rim sits below)
   std::string preset = "standard"; // fbm: standard | island (the dome) | ...
 };
 

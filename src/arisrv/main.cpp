@@ -46,6 +46,7 @@
 #include <cvc/ariadne/conference/room_write_gate.h> // bound writes: a client writes only itself
 #include <cvc/ariadne/holon.h>                      // server-authoritative avatar holon (H1)
 #include <cvc/ariadne/holon_sync.h> // server_pump: intent -> holon -> authoritative pose
+#include <cvc/ariadne/host_cli.h>   // --set KEY=VALUE, as ari and arigl take it
 #include <cvc/ariadne/stream/stream_relay.h>
 #include <cvc/core/app.h>
 #include <cvc/media/media_router.h> // protocol-agnostic media hub (WS + gRPC + future protocols)
@@ -152,6 +153,10 @@ int main(int argc, char **argv) {
   //                              filter, so its admit snapshot is filtered too; at most N ms, then
   //                              unfiltered (default 2000; 0 = off; only with an area of interest)
   //   --scene default|large      the seeded scene (large: a 100 m plane of LOD meshes)
+  // Debugging (repeatable, in order):
+  //   --set KEY=VALUE            write VALUE to the state key KEY (from the app's root, e.g.
+  //                              conf.rooms.main.topic) once the room tree is up, before any
+  //                              client connects; a conf.* key reaches every client
   // Bound writes (not an S7 switch, so --s7 off leaves it on):
   //   --bind-writes on|off       each client connection speaks only as the pid of its Hello, held
   //                              by one live connection at a time, and writes only its own
@@ -217,6 +222,7 @@ int main(int argc, char **argv) {
   std::string aoiVideoMaxArg = "0", mediaStallArg = "40", admissionHoldArg = "2000";
   std::string laneListen, laneAdvertise, laneMediaArg = "off";
   std::string avatarEnergyArg = "on", avatarEmptyArg = "rest";
+  std::vector<std::pair<std::string, std::string>> stateSets; // --set KEY=VALUE
   for (int i = 1; i < argc; ++i) {
     const char *a = argv[i];
     auto next = [&](const char *d) { return (i + 1 < argc) ? argv[++i] : d; };
@@ -274,6 +280,15 @@ int main(int argc, char **argv) {
       avatarEnergyArg = next("on");
     else if (!std::strcmp(a, "--avatar-empty"))
       avatarEmptyArg = next("rest");
+    else if (!std::strcmp(a, "--set")) {
+      std::pair<std::string, std::string> kv;
+      const char *v = next("");
+      if (!cvc::ariadne::parse_state_set(v, kv)) {
+        std::fprintf(stderr, "[arisrv] --set expects KEY=VALUE, got '%s'\n", v);
+        return 2;
+      }
+      stateSets.push_back(std::move(kv));
+    }
   }
   if (aoiMode.empty())
     aoiMode = scene == "large" ? "hall" : "conference";
@@ -435,6 +450,7 @@ int main(int argc, char **argv) {
   shard.attach();
   shard.install_as_default();
   state_tp.register_shard(&shard);
+  cvc::ariadne::apply_state_sets(app, "", stateSets); // --set, before any client connects
 
 #if CVC_ENABLE_WS
   // WebSocket control plane + the WS<->gRPC bridge, so BROWSER (wasm) clients join the SAME room as

@@ -1940,6 +1940,7 @@ int run_window(const ari::HostOptions &o) {
   }
   if (!gallery.empty())
     gallery.install(rt.app_runtime(), &gallery_next, &gallery_left);
+  ari::apply_state_sets(app, sg.getStatePrefix(), o.sets); // --set: before the nodes seed theirs
   if (const int status = load_document(rt, o); status >= 0)
     return status;
   note_misplaced(rt.app_runtime(), o);
@@ -2180,6 +2181,7 @@ int run_terminal(const ari::HostOptions &o) {
     }
     return print_info(std::move(info), o);
   }
+  ari::apply_state_sets(app, prefix, o.sets); // --set: before the nodes seed theirs
   if (const int status = load_document(rt, o); status >= 0)
     return status;
   note_misplaced(rt, o);

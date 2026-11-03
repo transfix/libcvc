@@ -136,7 +136,7 @@ scene:
       buildings: 110       # the most buildings, filled from the district cores out
       tree_gen: 5
       amp: 90              # relief, metres
-      water_level: 34      # metres; everything below is water
+      water_level: 0       # metres from sea level (the shoreline); everything below is water
       color: material      # material | risk | occupancy | height
       look: soft           # soft (demo3's matte daylight) | classic (the C++ lab's)
       casts_shadow: false

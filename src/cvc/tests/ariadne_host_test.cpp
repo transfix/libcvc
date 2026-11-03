@@ -318,6 +318,31 @@ TEST(AriadneHostCli, GraphicsImageAndCellSizeFlags) {
   EXPECT_NE(misplaced_flag_note("ari", o.doc_args).find("'--graphics'"), std::string::npos);
 }
 
+// --set KEY=VALUE collects in order (the value keeps any '=' of its own), and the runtime writes
+// each under the document's state root before the document loads, so its nodes seed from it.
+TEST(AriadneHostCli, SetWritesStateKeysBeforeTheDocument) {
+  const char *a[] = {"arigl", "snapshot", "--set",  "world.preset=2", "--set=/abs.key=a=b",
+                     "--set", "empty=",   "doc.ari"};
+  HostOptions o = parse_host_args(8, a);
+  ASSERT_TRUE(o.error.empty()) << o.error;
+  ASSERT_EQ(o.sets.size(), 3u);
+  EXPECT_EQ(o.sets[0], std::make_pair(std::string("world.preset"), std::string("2")));
+  EXPECT_EQ(o.sets[1], std::make_pair(std::string("/abs.key"), std::string("a=b")));
+  EXPECT_EQ(o.sets[2], std::make_pair(std::string("empty"), std::string()));
+  EXPECT_EQ(o.doc, "doc.ari");
+  const char *bad[] = {"ari", "run", "--set", "novalue", "d.ari"};
+  EXPECT_NE(parse_host_args(5, bad).error.find("--set is KEY=VALUE"), std::string::npos);
+  const char *nokey[] = {"ari", "run", "--set", "=1", "d.ari"};
+  EXPECT_FALSE(parse_host_args(5, nokey).error.empty());
+
+  cvc::app app;
+  apply_state_sets(app, "ui.docs.t", o.sets);
+  auto &st = cvc::state::instance(app);
+  EXPECT_EQ(st("ui.docs.t.world.preset").value(), "2");
+  EXPECT_EQ(st("abs.key").value(), "a=b") << "a leading '/' is from the app's root";
+  EXPECT_DOUBLE_EQ(st("ui.docs.t.world.preset").value<double>(), 2.0);
+}
+
 TEST(AriadneDocArgs, ParsesOptionsBoolsAndPositionals) {
   const DocumentArgs a = parse_document_args(
       conf_spec(), {"--room", "standup", "--camera", "--peers=3", "--scale", "0.5", "notes.txt"});

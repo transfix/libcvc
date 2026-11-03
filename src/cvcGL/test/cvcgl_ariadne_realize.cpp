@@ -1167,7 +1167,7 @@ int main() {
     prop("buildings", "8");
     prop("tree_gen", "3");
     prop("amp", "40");
-    prop("water_level", "14");
+    prop("water_level", "0"); // sea level
     prop("texture", "256");
     w.has_casts_shadow = true;
     w.casts_shadow = false;
@@ -1273,10 +1273,17 @@ int main() {
       view.render();
       cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
     }
-    // A live edit regenerates the world in place, as a task on the app's scheduler: the old world
-    // stays until the new one is made, then a bigger world, a bigger ground.
+    // An edit waits for Regenerate, which rebuilds the world in place as a task on the app's
+    // scheduler: the old world stays until the new one is made, then a bigger world, a bigger
+    // ground.
     const std::string busy_key = cvc::ariadne::resolve_bind("gw", "world.busy");
     auto busy = [&]() { return st(busy_key).value() == "1"; };
+    auto pending = [&]() {
+      return st(cvc::ariadne::resolve_bind("gw", "world.pending")).value() == "1";
+    };
+    auto regenerate = [&]() {
+      st(cvc::ariadne::resolve_bind("gw", "world.request")).value(std::string("regenerate"));
+    };
     auto settle_world = [&]() {
       cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0); // sees the edit, starts it
       for (int i = 0; i < 60000 && busy(); ++i) {
@@ -1292,17 +1299,43 @@ int main() {
       return f ? std::size_t(f->rows()) * std::size_t(f->cols()) : std::size_t(0);
     };
     const auto pts0 = ground_n();
+    chk(!pending(), "the world shown is the one the settings describe");
     st(cvc::ariadne::resolve_bind("gw", "world.half")).value(700.0);
     cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
-    chk(busy() && ground_n() == pts0,
-        "a world.half edit starts a rebuild task and keeps the old world meanwhile");
+    chk(!busy() && pending() && ground_n() == pts0,
+        "a world.half edit waits for Regenerate and says the settings changed");
+    regenerate();
+    cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+    chk(busy() && !pending() && ground_n() == pts0,
+        "Regenerate starts a rebuild task and keeps the old world meanwhile");
     chk(settle_world(), "the rebuild finished");
     const auto pts1 = ground_n();
     chk(pts1 > pts0, "a world.half edit regenerated the world in place");
+    // And the regenerated world draws: every ground chunk's and prop cell's active rung is in the
+    // renderer and visible after the next frame.
+    {
+      view.render();
+      cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+      view.render();
+      vtkPropCollection *props = view.renderer()->GetViewProps();
+      auto drawn = [&](const std::vector<std::shared_ptr<cvc::gl::LodGraphicsNode>> &ladders) {
+        int ok = 0, bad = 0;
+        for (const auto &l : ladders) {
+          auto g = l->rung(l->activeRung());
+          vtkProp *a = g ? g->prop() : nullptr;
+          (a && props->IsItemPresent(a) && a->GetVisibility() ? ok : bad)++;
+        }
+        printf("    %d drawn, %d not\n", ok, bad);
+        return ok > 0 && bad == 0;
+      };
+      chk(drawn(ladders_under("world")), "the regenerated ground's chunks draw");
+      chk(drawn(ladders_under("world_props")), "the regenerated props draw");
+    }
     chk(st(cvc::ariadne::resolve_bind("gw", "world.progress")).value() == "100",
         "world.progress reached 100");
     // Stop ends a rebuild and keeps the world shown, and does not restart it by itself.
     st(cvc::ariadne::resolve_bind("gw", "world.seed")).value(9.0);
+    regenerate();
     cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
     st(cvc::ariadne::resolve_bind("gw", "world.request")).value(std::string("stop"));
     cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
@@ -1327,13 +1360,29 @@ int main() {
         st(cvc::ariadne::resolve_bind("gw", "world.generators.terrain")).value<std::string>();
     chk(terrains.find("fbm") != std::string::npos && terrains.find("dem") != std::string::npos,
         "generated_world published its terrain generators");
+    // A new preset quick-sets the counts, the relief and the water level: the sea at 0 m, which
+    // every relief is laid against (the urban preset's 10 m relief once sat under the document's
+    // 34 m water level: a world of sea).
+    st(cvc::ariadne::resolve_bind("gw", "world.water_level")).value(5.0);
+    st(cvc::ariadne::resolve_bind("gw", "world.preset")).value(2.0);
+    cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+    {
+      const double amp = st(cvc::ariadne::resolve_bind("gw", "world.amp")).value<double>();
+      const double sea = st(cvc::ariadne::resolve_bind("gw", "world.water_level")).value<double>();
+      chk(approx(amp, 10.0) && approx(sea, 0.0),
+          "the urban preset set its 10 m relief and the sea back to sea level");
+    }
+    // With world.auto on, an edit rebuilds by itself.
+    st(cvc::ariadne::resolve_bind("gw", "world.auto")).value(1.0);
     st(cvc::ariadne::resolve_bind("gw", "world.city")).value(std::string("none"));
     settle_world();
+    st(cvc::ariadne::resolve_bind("gw", "world.auto")).value(0.0);
     const auto bld =
         std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("world_buildings"));
     chk(bld && bld->getGeometry()->const_points().empty(),
         "world.city: none regenerated a world without buildings");
     st(cvc::ariadne::resolve_bind("gw", "world.terrain")).value(std::string("no_such"));
+    regenerate();
     settle_world();
     const std::string status =
         st(cvc::ariadne::resolve_bind("gw", "world.status")).value<std::string>();

@@ -289,6 +289,7 @@ TestOutcome run_test_document(const cvc::ariadne::HostOptions &o, const std::str
   rt.register_quit();
   // No command line of its own: declared arguments take their defaults, as in a check.
   rt.set_document_args({}, "ari test " + path, /*validate=*/false);
+  ari::apply_state_sets(app, o.prefix.empty() ? "ui.docs.ari" : o.prefix, o.sets);
   try {
     for (const std::string &w : rt.load(path))
       fail("load warning: " + trim_ari(w));
@@ -527,6 +528,7 @@ int main(int argc, char **argv) {
     return 2;
   }
 
+  ari::apply_state_sets(app, o.prefix.empty() ? "ui.docs.ari" : o.prefix, o.sets); // --set
   std::vector<std::string> warnings;
   try {
     warnings = rt.load(o.doc);
