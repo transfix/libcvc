@@ -100,7 +100,7 @@ plant_drive_score drive_once(const cvc::nav::coef_mlp &policy, const cvc::nav::t
   g.motion = motion_type::static_;
   g.position = {0.0, 0.0, -0.5};
   g.material = m;
-  phys.add_body(g);
+  const body_id ground = phys.add_body(g);
   const double dx = (sc.max_x - sc.min_x) / (sc.cols - 1),
                dy = (sc.max_y - sc.min_y) / (sc.rows - 1);
   const double hh = 0.5 * o.building_height;
@@ -124,6 +124,7 @@ plant_drive_score drive_once(const cvc::nav::coef_mlp &policy, const cvc::nav::t
   nav_plant_options po;
   po.plan_with_vehicle = o.plan_with_vehicle;
   po.metres_per_world_unit = mpw;
+  po.ground_bodies = {ground}; // the buildings are what building_hits counts
   nav_plant plant(phys, {d}, po);
   w.set_plant(&plant);
   plant_drive_score s;
