@@ -1216,6 +1216,54 @@ template <class Visit> bool for_each_state_key(const std::string &path, Visit &&
   return true;
 }
 
+// A hold on `n`: its owning pointer, or, for a node no shared_ptr owns (a host's own root, which
+// has no shared_from_this()), a non-owning alias, the host keeping it alive.
+state::state_ptr hold(state &n) {
+  if (state::state_ptr p = n.weak_from_this().lock())
+    return p;
+  return state::state_ptr(state::state_ptr(), &n);
+}
+
+// The hops a link-aware walk holds until it ends (td 4.8): a link hop's resolveLink() reads the
+// link node's fullName(), which walks the hops above it. They go to the caller's `pins` when it
+// wants them, else to a stack here. The last one pushed is always where the walk stands.
+class hop_holds {
+public:
+  explicit hop_holds(std::vector<state::state_ptr> *pins) : pins_(pins) {}
+
+  state *push(state::state_ptr p) {
+    state *n = p.get();
+    if (pins_)
+      pins_->push_back(std::move(p));
+    else
+      own_.push_back(std::move(p));
+    ++pushed_;
+    return n;
+  }
+
+  // A resolved link: its target's chain (the app root's child .. target), then the target itself
+  // unless the chain ends at it (a link to the root has no chain). Returns the target.
+  state *link(state::link_resolution &&r) {
+    const bool chain_ends_at_target =
+        !r.target_pins.empty() && r.target_pins.back().get() == r.target;
+    for (state::state_ptr &p : r.target_pins)
+      push(std::move(p));
+    return chain_ends_at_target ? r.target : push(std::move(r.target_owned));
+  }
+
+  // Where the walk stands, owned: the last hop, or `start` when it never left it.
+  state::state_ptr result(state &start) {
+    if (pushed_ == 0)
+      return hold(start);
+    return pins_ ? pins_->back() : std::move(own_.back());
+  }
+
+private:
+  std::vector<state::state_ptr> *pins_;
+  boost::container::small_vector<state::state_ptr, 16> own_;
+  std::size_t pushed_ = 0;
+};
+
 } // namespace
 
 // -----------------
@@ -1267,9 +1315,17 @@ state &state::operator()(const std::string &childname) {
 // return type — the caller gets an owning pointer that keeps the node alive across a concurrent
 // sweepExpired(), where operator()'s bare state& would dangle.
 state::state_ptr state::sharedChild(const std::string &childname, std::vector<state_ptr> *pins) {
+  return sharedChild(shared_from_this(), childname, pins);
+}
+
+// The start is the caller's (`self`): the first hop reads it through `this`, and every later hop
+// is held here, or in `pins` (every hop, so the caller can safely walk the result's _parent chain).
+state::state_ptr state::sharedChild(const state_ptr &self, const std::string &childname,
+                                    std::vector<state_ptr> *pins) {
   boost::this_thread::interruption_point();
 
-  state_ptr cur = shared_from_this();
+  state *cur = this;
+  state_ptr held;
   for_each_state_key(childname, [&](const std::string &key) {
     state_ptr next;
     {
@@ -1278,19 +1334,19 @@ state::state_ptr state::sharedChild(const std::string &childname, std::vector<st
       if (it != cur->_children.end() && it->second) {
         next = it->second;
       } else {
-        next.reset(new state(cur->_ctx, key, cur.get()));
+        next.reset(new state(cur->_ctx, key, cur));
         cur->_children[key] = next;
         cur->_lastMod = boost::posix_time::microsec_clock::universal_time();
         cur->_initialized = true;
       }
     }
-    cur = std::move(next);
     if (pins)
-      pins->push_back(
-          cur); // pin every hop so the caller can safely walk the result's _parent chain
+      pins->push_back(next);
+    held = std::move(next);
+    cur = held.get();
     return true;
   });
-  return cur;
+  return held ? held : self;
 }
 
 // ----------------
@@ -1472,7 +1528,14 @@ state *state::findDescendant(const std::string &path) {
 
 state::state_ptr state::findDescendantShared(const std::string &path,
                                              std::vector<state_ptr> *pins) {
-  state_ptr cur = shared_from_this();
+  return findDescendantShared(shared_from_this(), path, pins);
+}
+
+// As sharedChild(self, ...): the start is the caller's, every later hop is held here or in `pins`.
+state::state_ptr state::findDescendantShared(const state_ptr &self, const std::string &path,
+                                             std::vector<state_ptr> *pins) {
+  state *cur = this;
+  state_ptr held;
   const bool found = for_each_state_key(path, [&](const std::string &k) {
     state_ptr next;
     {
@@ -1482,20 +1545,33 @@ state::state_ptr state::findDescendantShared(const std::string &path,
         return false;
       next = it->second; // copy the OWNING shared_ptr — pins this hop past a concurrent sweep
     }
-    cur = std::move(next);
     if (pins)
-      pins->push_back(
-          cur); // pin every hop so the caller can safely walk the result's _parent chain
+      pins->push_back(next);
+    held = std::move(next);
+    cur = held.get();
     return true;
   });
-  return found ? cur : state_ptr();
+  if (!found)
+    return state_ptr();
+  return held ? held : self;
 }
 
 state *state::findThroughLinks(const std::string &path, std::size_t hop_budget) {
-  // Each hop is held as a state_ptr, as in operator(): a target reached through a link is pinned
-  // by the resolution, so a concurrent sweep cannot free it mid-walk.
+  return findThroughLinksShared(path, nullptr, hop_budget).get();
+}
+
+state &state::childThroughLinks(const std::string &path, bool refuse_read_only,
+                                std::size_t hop_budget) {
+  return *childThroughLinksShared(path, refuse_read_only, nullptr, hop_budget);
+}
+
+// The pinned walks (td 4.8). Every hop is held until the walk ends (hop_holds): the start is the
+// caller's, and a link hop holds its target's chain, from the resolution.
+state::state_ptr state::findThroughLinksShared(const std::string &path,
+                                               std::vector<state_ptr> *pins,
+                                               std::size_t hop_budget) {
+  hop_holds holds(pins);
   state *cur = this;
-  state_ptr held;
   // Continue at a resolvable transparent link's terminal; anything else stays put.
   auto through = [&]() {
     {
@@ -1504,10 +1580,8 @@ state *state::findThroughLinks(const std::string &path, std::size_t hop_budget) 
         return;
     }
     link_resolution r = cur->resolveLink(hop_budget);
-    if (r.kind == link_resolution_kind::resolved && r.target_owned) {
-      held = r.target_owned;
-      cur = held.get();
-    }
+    if (r.kind == link_resolution_kind::resolved && r.target_owned)
+      cur = holds.link(std::move(r));
   };
   through();
   const bool found = for_each_state_key(path, [&](const std::string &k) {
@@ -1519,20 +1593,20 @@ state *state::findThroughLinks(const std::string &path, std::size_t hop_budget) 
         return false;
       next = it->second;
     }
-    held = std::move(next);
-    cur = held.get();
+    cur = holds.push(std::move(next));
     through();
     return true;
   });
-  return found ? cur : nullptr;
+  return found ? holds.result(*this) : state_ptr();
 }
 
-state &state::childThroughLinks(const std::string &path, bool refuse_read_only,
-                                std::size_t hop_budget) {
+state::state_ptr state::childThroughLinksShared(const std::string &path, bool refuse_read_only,
+                                                std::vector<state_ptr> *pins,
+                                                std::size_t hop_budget) {
   boost::this_thread::interruption_point();
 
+  hop_holds holds(pins);
   state *cur = this;
-  state_ptr held;
   for_each_state_key(path, [&](const std::string &key) {
     boost::this_thread::interruption_point();
     // Descending into `cur`: a writable transparent link sends the walk to its target, a read-only
@@ -1550,8 +1624,7 @@ state &state::childThroughLinks(const std::string &path, bool refuse_read_only,
         throw read_only_error(
             boost::str(boost::format("Cannot write through unresolvable transparent link: %1%") %
                        cur->fullName()));
-      held = r.target_owned;
-      cur = held.get();
+      cur = holds.link(std::move(r));
     } else if (transparent && refuse_read_only) {
       throw read_only_error(boost::str(
           boost::format("Cannot write through read-only transparent link: %1%") % cur->fullName()));
@@ -1569,26 +1642,10 @@ state &state::childThroughLinks(const std::string &path, bool refuse_read_only,
         cur->_initialized = true;
       }
     }
-    held = std::move(child);
-    cur = held.get();
+    cur = holds.push(std::move(child));
     return true;
   });
-  return *cur;
-}
-
-state::state_ptr state::findThroughLinksShared(const std::string &path,
-                                               std::vector<state_ptr> *pins,
-                                               std::size_t hop_budget) {
-  (void)pins; // S0.3 pins every hop
-  state *found = findThroughLinks(path, hop_budget);
-  return found ? found->shared_from_this() : state_ptr();
-}
-
-state::state_ptr state::childThroughLinksShared(const std::string &path, bool refuse_read_only,
-                                                std::vector<state_ptr> *pins,
-                                                std::size_t hop_budget) {
-  (void)pins; // S0.3 pins every hop
-  return childThroughLinks(path, refuse_read_only, hop_budget).shared_from_this();
+  return holds.result(*this);
 }
 
 // static
@@ -1950,9 +2007,22 @@ size_t state::numChildren() {
 
 // -------- Expiring state --------
 
+// state-delete's unlink (td 4.8): one child, no sweep and no `expiring`. Its subtree goes with the
+// last pin on it, here unless the caller or another thread still holds it.
 bool state::removeChild(const std::string &name) {
-  (void)name; // S0.3 unlinks it
-  return false;
+  boost::this_thread::interruption_point();
+  state_ptr child;
+  {
+    boost::mutex::scoped_lock lock(_mutex);
+    auto it = _children.find(name);
+    if (it == _children.end() || !it->second)
+      return false;
+    child = std::move(it->second);
+    _children.erase(it);
+    _lastMod = boost::posix_time::microsec_clock::universal_time();
+  }
+  emitChildChanged(name);
+  return true;
 }
 
 state &state::expireAt(boost::posix_time::ptime when) {
