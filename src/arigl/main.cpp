@@ -446,7 +446,10 @@ struct ConferenceSession {
   bool relay_grpc_ = false;
   bool ever_linked_ = false;
   double next_net_s_ = 0.0, next_reconnect_s_ = 0.0, rejoin_until_s_ = 0.0;
-  cvc::state_link_rate_meter link_meter_;
+  cvc::state_link_rate_meter link_meter_; // our own row, each second
+  // What the room gets, over room_net's net_publish_period_s.
+  cvc::state_link_rate_meter publish_meter_;
+  double next_publish_s_ = 0.0;
 
   // ── the room in 3D (H1 slice 6): the shared scene + avatars, third-person controls ──
   // A client replica of the room holon, kept in step with the replicated room tree by client_pump
@@ -901,13 +904,24 @@ struct ConferenceSession {
       return;
     }
     ever_linked_ = true;
-    const auto rates = link_meter_.update(links, now);
-    const auto it = rates.find(cvc::state_link_rate_meter::key_of(*relay));
-    cvc::ariadne::conference::net_sample s;
-    s.rtt_ms = relay->stats.rtt_ms;
-    s.in_kbps = it == rates.end() ? 0.0 : it->second.in_bps * 8.0 / 1000.0;
-    s.out_kbps = it == rates.end() ? 0.0 : it->second.out_bps * 8.0 / 1000.0;
-    cvc::ariadne::conference::write_participant_net(*app_, room_, pid_, s);
+    const auto sample = [&](cvc::state_link_rate_meter &meter) {
+      const auto rates = meter.update(links, now);
+      const auto it = rates.find(cvc::state_link_rate_meter::key_of(*relay));
+      cvc::ariadne::conference::net_sample s;
+      s.rtt_ms = relay->stats.rtt_ms;
+      s.in_kbps = it == rates.end() ? 0.0 : it->second.in_bps * 8.0 / 1000.0;
+      s.out_kbps = it == rates.end() ? 0.0 : it->second.out_bps * 8.0 / 1000.0;
+      return s;
+    };
+    const cvc::ariadne::conference::net_sample s = sample(link_meter_);
+    // The room's copy, over net_publish_period_s and only when a reading moves (room_net.h);
+    // re-sent each second while re-joining after a reconnect, since the relay may have dropped it
+    // and a steady reading would never move.
+    if (now >= next_publish_s_ || now < rejoin_until_s_) {
+      next_publish_s_ = now + cvc::ariadne::conference::net_publish_period_s;
+      cvc::ariadne::conference::write_participant_net(*app_, room_, pid_, sample(publish_meter_),
+                                                      /*force=*/now < rejoin_until_s_);
+    }
     st(prefix_ + ".self.ping").value(cvc::ariadne::conference::format_rtt(s.rtt_ms));
     st(prefix_ + ".self.down").value(cvc::ariadne::conference::format_rate(s.in_kbps));
     st(prefix_ + ".self.up").value(cvc::ariadne::conference::format_rate(s.out_kbps));

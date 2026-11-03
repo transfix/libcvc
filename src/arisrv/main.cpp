@@ -60,6 +60,7 @@
 #endif
 #include <fstream>
 #include <initializer_list>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -653,12 +654,16 @@ int main(int argc, char **argv) {
   std::uint64_t lastUnauthorized = 0;  // connections refused for the room token, at the last log
   std::uint64_t lastProofsRefused = 0; // device proofs refused (another key, a bad signature)
   // Link stats (~1 s): every connection on both planes reports its traffic and Ping/Pong round
-  // trip (state_transport::link_reports); the rate meter turns the counters into rates. The relay
-  // publishes its view of each participant (net.relay.*) and its totals (server.net.*) into the
-  // room tree, and logs them: every link each ~5 s with CVC_ARISRV_ROOM_DEBUG, a totals line each
-  // minute otherwise. Links that are not participants (peer servers, delegation) are logged too.
+  // trip (state_transport::link_reports). Every net_publish_period_s (room_net.h) the rate meter
+  // turns the counters into rates over that window; the relay publishes its view of each
+  // participant (net.relay.*) and its totals (server.net.*) into the room tree, and logs them:
+  // every link each time with CVC_ARISRV_ROOM_DEBUG, a totals line each minute otherwise. Links
+  // that are not participants (peer servers, delegation) are logged too.
   cvc::state_link_rate_meter link_meter;
   int net_ticks = 0;
+  // The meters' window in 200 ms passes: a whole number of the ~1 s link-stat steps.
+  const long netPublishSteps = std::lround(cvc::ariadne::conference::net_publish_period_s);
+  const int netPublishTicks = 5 * static_cast<int>(std::max(1L, netPublishSteps));
   const auto net_start = std::chrono::steady_clock::now();
   // The shared 3D scene (H1 slice 5, roadmap §5g): the relay is its sole writer and seeds the MVP
   // environment (ground + a reference box under a sun) once -- or, with --scene large, a 100 m
@@ -774,7 +779,10 @@ int main(int argc, char **argv) {
 #endif
       const double now_s =
           std::chrono::duration<double>(std::chrono::steady_clock::now() - net_start).count();
-      const auto rates = link_meter.update(links, now_s);
+      const bool publish = net_ticks % netPublishTicks == 0;
+      std::map<std::string, cvc::state_link_rate_meter::rate> rates;
+      if (publish)
+        rates = link_meter.update(links, now_s);
       cvc::ariadne::conference::server_net total;
       std::set<std::string> present;
       for (const auto &p : cvc::ariadne::conference::room_roster(app, room))
@@ -790,8 +798,9 @@ int main(int argc, char **argv) {
         // another connection claiming it is not that participant.
         if (!r.holds_id || !present.count(r.remote_node_id))
           continue;
-        cvc::ariadne::conference::write_relay_net(app, room, r.remote_node_id,
-                                                  {r.stats.rtt_ms, in_kbps, out_kbps});
+        if (publish)
+          cvc::ariadne::conference::write_relay_net(app, room, r.remote_node_id,
+                                                    {r.stats.rtt_ms, in_kbps, out_kbps});
         if (r.stats.rtt_ms >= 0.0) // its pose snapshot rate
           pose_relay.set_rtt(r.remote_node_id, r.stats.rtt_ms);
       }
@@ -820,7 +829,8 @@ int main(int argc, char **argv) {
           std::fflush(stdout);
         }
       }
-      cvc::ariadne::conference::write_server_net(app, room, total);
+      if (publish)
+        cvc::ariadne::conference::write_server_net(app, room, total);
       // A client writing outside its own participant, or as another peer, is refused: say so (at
       // most every ~5 s) whenever the count has grown.
       if (net_ticks % 25 == 0) {
@@ -862,8 +872,8 @@ int main(int argc, char **argv) {
           lastProofsRefused = proofsRefused;
         }
       }
-      const bool detail = room_debug && net_ticks % 25 == 0;
-      if (detail || net_ticks % 300 == 0) {
+      const bool detail = room_debug && publish;
+      if (detail || (publish && net_ticks % 300 < netPublishTicks)) {
         std::printf("[arisrv] net: %d link(s) | in %.1f kb/s | out %.1f kb/s\n", total.links,
                     total.in_kbps, total.out_kbps);
         if (detail)
