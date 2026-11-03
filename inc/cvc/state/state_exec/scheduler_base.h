@@ -259,6 +259,9 @@ public:
 
   // --- State-watch registry (state-watch/state-unwatch) ---
   virtual void set_watch_root(cvc::state *root) = 0;
+  /// The root set_watch_root() gave, or null. state-watch sets one only on a scheduler that has
+  /// none (S0.md section 0, item 20).
+  virtual cvc::state *watch_root() const { return nullptr; }
   virtual void register_watch_handler(int pid, int watch_id, value_t handler,
                                       const std::string &path) = 0;
   /// A watch that resolves `path` under its own `root` (a chrooted context's: td 4.8), pinned by

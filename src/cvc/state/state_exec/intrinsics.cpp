@@ -805,12 +805,12 @@ value_t intrinsic_state_watch(intrinsics_context *ctx, std::span<const value_t> 
   //
   // The watch keeps its own root, this context's (td 4.8, B13): `path` resolves under it, and the
   // scheduler's watch root, where it reads its settings and the async charge rate, stays the
-  // host's (td 5 item 4). A chrooted context never moves it. An unchrooted one sets it as today
-  // (S0.md section 0, item 20): on a scheduler no host gave a root, that makes it read its
-  // settings there and gate its watches; the hosts' roots are the app root such a context has.
+  // host's (td 5 item 4). A chrooted context never moves it. An unchrooted one sets it only on a
+  // scheduler that has none, as today (S0.md section 0, item 20): that makes the scheduler read
+  // its settings there and gate its watches.
   const state_ptr root = ctx->root_pins.back(); // make_node pinned it
   if (ctx->sched) {
-    if (ctx->root_path.empty())
+    if (ctx->root_path.empty() && !ctx->sched->watch_root())
       ctx->sched->set_watch_root(ctx->root);
     ctx->sched->register_watch_handler(running_pid(ctx), watch_id, handler, path, root);
   } else {
