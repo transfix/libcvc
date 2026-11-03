@@ -147,10 +147,15 @@ bool async_call::wait(std::optional<double> seconds) {
 }
 
 value_t async_call::outcome() {
-  // The rest of the call is charged before the program sees its outcome (3.8): a call whose
-  // completion the scheduler hasn't taken yet is finished now.
-  if (async_sched_ && !charged.closed)
+  // The rest of the call is charged before the program sees its outcome (3.8): a call no finish
+  // or cancel has claimed yet is finished now (td 4.9, S0.9).
+  if (async_sched_ && !closed_.load(std::memory_order_acquire))
     async_sched_->finish_async_call(shared_from_this());
+  if (!finished() && cancel_requested())
+    // Cancelled before it settled: the process that made it was killed or reaped. Another process
+    // awaiting the same future (a fork child) is woken (S0.9) and raises here.
+    throw dsl_error("RuntimeError", name_ + ": cancelled: the process that made the call ended",
+                    "async", function_fields(name_));
   if (timed_out_) {
     std::string limit = "its timeout";
     if (timeout_) {

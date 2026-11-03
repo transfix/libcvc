@@ -859,9 +859,19 @@ void async_scheduler::wake_async_waiters(const std::string &channel) {
 }
 
 void async_scheduler::finish_async_call(const std::shared_ptr<async_call> &call) {
+  // Finished once (td 4.9, S0.9): the first finish or cancel claims the call, and a later one (its
+  // completion after a cancel or a timeout, or after an outcome() that finished it first) charges
+  // nothing more. The processes waiting on its channel are woken either way: one that awaited
+  // the call since (a fork child, once its parent was killed) would otherwise wait for good.
+  if (call->closed_.exchange(true, std::memory_order_acq_rel)) {
+    wake_async_waiters(call->channel());
+    return;
+  }
   const auto it = std::find(async_calls_.begin(), async_calls_.end(), call);
-  if (it == async_calls_.end())
-    return; // dropped already: its process was killed or reaped, or it was finished
+  if (it == async_calls_.end()) {
+    wake_async_waiters(call->channel()); // not tracked here: nothing to charge
+    return;
+  }
   async_calls_.erase(it);
   process *proc = procs_.find(call->pid());
   double rate = 0.0;
@@ -982,25 +992,33 @@ void async_scheduler::cancel_async_calls(int pid) {
   // Out of the list first, then the rate: reading it may publish it, a write to the tree whose
   // slots may do anything, kill this process too (that kill finds no calls left to cancel, so it
   // doesn't read the rate again and recurse), and none of them runs mid-walk.
+  // Each is claimed as it leaves the list (td 4.9, S0.9), so its completion, when it comes,
+  // charges nothing more.
   std::vector<std::shared_ptr<async_call>> calls;
   for (auto it = async_calls_.begin(); it != async_calls_.end();) {
     if ((*it)->pid() != pid) {
       ++it;
       continue;
     }
-    calls.push_back(std::move(*it));
+    std::shared_ptr<async_call> call = std::move(*it);
     it = async_calls_.erase(it);
-    calls.back()->cancel();
+    if (!call->closed_.exchange(true, std::memory_order_acq_rel))
+      calls.push_back(call);
+    call->cancel();
   }
   process *proc = procs_.find(pid);
   const double rate = proc ? async_steps_per_cpu_ms(*proc) : 0.0;
   proc = procs_.find(pid);
-  if (!proc)
-    return;
-  // What they ran so far stays charged; their results, when they come, are dropped.
-  const auto now = std::chrono::steady_clock::now();
+  if (proc) {
+    // What they ran so far stays charged; their results, when they come, are dropped.
+    const auto now = std::chrono::steady_clock::now();
+    for (const std::shared_ptr<async_call> &call : calls)
+      detail::charge_async_call(*proc, *call, rate, true, now);
+  }
+  // Another process may be waiting for one of them: a fork child awaiting the same future. It is
+  // woken, and reads the call's outcome (S0.9).
   for (const std::shared_ptr<async_call> &call : calls)
-    detail::charge_async_call(*proc, *call, rate, true, now);
+    wake_async_waiters(call->channel());
 }
 
 void async_scheduler::cancel_async_calls_of(int pid) {
