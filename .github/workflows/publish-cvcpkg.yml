@@ -1230,16 +1230,16 @@ jobs:
           test -x stage-arix/bin/arix
           # Installed, arix finds its Python beside it (<prefix>/lib/python3.12); here the prefix is
           # split, so PYTHONHOME names $PY, --python-path the pycvc just staged, and LD_LIBRARY_PATH
-          # libcvc's stage (the job's already has $PY/lib and numpy.libs).
-          export PYTHONHOME="$PY"
+          # libcvc's stage (the job's already has $PY/lib and numpy.libs). PYTHONHOME is arix's
+          # alone: exported, it would point cvcpkg's own Python (the pack below) at $PY's stdlib.
           export LD_LIBRARY_PATH="$STAGE/lib:$DEPS/lib:${LD_LIBRARY_PATH:-}"
           SITE="$GITHUB_WORKSPACE/stage-pycvc/lib/python3.12/site-packages"
-          arix=stage-arix/bin/arix
-          "$arix" python -c "import sys, numpy, _arihost; print(_arihost.host(), sys.version.split()[0], numpy.__version__)" \
+          arix=(env PYTHONHOME="$PY" stage-arix/bin/arix)
+          "${arix[@]}" python -c "import sys, numpy, _arihost; print(_arihost.host(), sys.version.split()[0], numpy.__version__)" \
             | tee arix-python.txt
           grep -qF "arix 3.12" arix-python.txt \
             || { echo "::error::arix's embedded interpreter is not the python312 it was built with"; exit 1; }
-          "$arix" test --python-path "$SITE" src/ariadne_python/tests/python_block.ari | tee arix-test.txt
+          "${arix[@]}" test --python-path "$SITE" src/ariadne_python/tests/python_block.ari | tee arix-test.txt
           grep -qE '^ok +src/ariadne_python/tests/python_block.ari \(5 tests' arix-test.txt \
             || { echo "::error::arix did not run the python: block test document"; exit 1; }
           mkdir -p dist
@@ -1307,13 +1307,13 @@ jobs:
           export DISPLAY=:99 LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe
           # The prefix is split here (installed, it is one): PYTHONHOME names $PY, --python-path
           # the pycvc and pycvc_gl just staged, LD_LIBRARY_PATH the libraries' six prefixes.
-          export PYTHONHOME="$PY"
+          # PYTHONHOME is ariglx's alone, as in the arix step (cvcpkg packs below).
           export LD_LIBRARY_PATH="$STAGE/lib:$CVCGL/lib:$PY/lib:$IMGUI/lib:$SDL3/lib:$DEPS/lib:${LD_LIBRARY_PATH:-}"
           PYPATH=(--python-path "$GITHUB_WORKSPACE/stage-pycvcgl/lib/python3.12/site-packages"
                   --python-path "$GITHUB_WORKSPACE/stage-pycvc/lib/python3.12/site-packages")
-          ariglx=stage-ariglx/bin/ariglx
-          "$ariglx" check "${PYPATH[@]}" src/ariadne_python/tests/python_block.ari
-          "$ariglx" snapshot --frames 3 --png ariglx-app.png "${PYPATH[@]}" \
+          ariglx=(env PYTHONHOME="$PY" stage-ariglx/bin/ariglx)
+          "${ariglx[@]}" check "${PYPATH[@]}" src/ariadne_python/tests/python_block.ari
+          "${ariglx[@]}" snapshot --frames 3 --png ariglx-app.png "${PYPATH[@]}" \
             src/ariadne_python/tests/app.py | tee ariglx-app.txt
           grep -qF "app.py: result 14" ariglx-app.txt \
             || { echo "::error::ariglx did not run the Python program's document"; exit 1; }
