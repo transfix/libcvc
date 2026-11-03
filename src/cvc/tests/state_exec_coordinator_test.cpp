@@ -4,6 +4,7 @@
   observation, admin controls, and end-to-end scenarios.
 */
 
+#include <atomic>
 #include <chrono>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
@@ -21,6 +22,7 @@
 #include <cvc/state/state_message_bus.h>
 #include <deque>
 #include <gtest/gtest.h>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -1643,4 +1645,118 @@ TEST_F(Priority, PR11_FloorInMetadata) {
   ASSERT_TRUE(exec_coordinator::deserialize_resource_policy(
       exec_coordinator::serialize_resource_policy(none), none_back));
   EXPECT_FALSE(none_back.priority_floor.has_value());
+}
+
+// --- Stage 0 hazards (td 8.1) ---
+
+namespace {
+
+// What a query posted between the controls saw, on the scheduler's thread.
+struct hz09_seen {
+  int current_pid = -2;
+  std::optional<process_info> p, q;
+};
+
+} // namespace
+
+// HZ-9 (td 8.1, S0.7, S0.8; TSan): the coordinator's control messages arrive on a bus thread while
+// a pump thread steps the scheduler. The bus thread sends, in order: pause P, a query, (once the
+// pump has stepped Q a while) a second query, resume P, a query, set P's priority to 7, SIGKILL to
+// Q, kill P, and a last query. Each is applied between steps, in that order: the queries see P
+// paused, then ready, with no process stepping; P takes no step while it is paused; at the end P
+// was killed by the user, Q by SIGKILL, P's priority is 7, and the tables hold.
+TEST_F(Priority, HZ09_BusThreadControlAppliesBetweenSteps) {
+  using clock_type = std::chrono::steady_clock;
+  lead();
+  const auto forever = [&] {
+    const submit_result r = coord.submit("(while #t nil)");
+    EXPECT_TRUE(r.accepted) << r.error;
+    return r.pid;
+  };
+  const int p = forever();
+  const int q = forever();
+  ASSERT_GE(p, 0);
+  ASSERT_GE(q, 0);
+
+  std::vector<hz09_seen> seen(4);
+  std::atomic<int> answered{0};
+  std::atomic<uint64_t> stepped{0};
+  const auto t0 = clock_type::now();
+  const auto deadline = t0 + std::chrono::seconds(30);
+  std::thread pump([&] {
+    while (answered.load(std::memory_order_acquire) < 4 && clock_type::now() < deadline)
+      if (sched.step() != 0)
+        stepped.fetch_add(1, std::memory_order_relaxed);
+  });
+
+  const auto control = [&](const std::string &command, int pid, const std::string &extra = "") {
+    auto msg =
+        state_message::make_text("__state_exec.cluster-1.control.node-A",
+                                 "{\"command\":\"" + command + "\",\"pid\":" + std::to_string(pid) +
+                                     extra + ",\"from\":\"node-B\"}",
+                                 MIME_EXEC_CONTROL);
+    msg.cluster_id = "cluster-1";
+    msg.origin_node_id = "node-B";
+    coord.on_message(msg);
+  };
+  const auto query = [&](std::size_t k) {
+    control_cmd cmd;
+    cmd.what = control_cmd::kind::query;
+    cmd.query = [&, k](scheduler_base &s) {
+      seen[k].current_pid = s.current_pid();
+      seen[k].p = s.get_process_info(p);
+      seen[k].q = s.get_process_info(q);
+      answered.fetch_add(1, std::memory_order_release);
+    };
+    EXPECT_TRUE(sched.post_control(-1, std::move(cmd)));
+  };
+  const auto wait_for = [&](const auto &done) {
+    while (!done() && clock_type::now() < deadline)
+      std::this_thread::yield();
+    return done();
+  };
+
+  std::thread bus([&] {
+    control("pause", p);
+    query(0);
+    // While P is paused the pump goes on stepping Q.
+    ASSERT_TRUE(wait_for([&] { return answered.load(std::memory_order_acquire) >= 1; }));
+    const uint64_t at_pause = stepped.load(std::memory_order_relaxed);
+    ASSERT_TRUE(
+        wait_for([&] { return stepped.load(std::memory_order_relaxed) >= at_pause + 200; }));
+    query(1);
+    control("resume", p);
+    query(2);
+    control("set_priority", p, ",\"priority\":7");
+    control("send_signal", q, ",\"signal\":\"SIGKILL\"");
+    control("kill", p);
+    query(3);
+  });
+  bus.join();
+  pump.join();
+  std::printf("HZ-9: %llu steps, %.3f s\n",
+              static_cast<unsigned long long>(stepped.load(std::memory_order_relaxed)),
+              std::chrono::duration<double>(clock_type::now() - t0).count());
+  ASSERT_EQ(answered.load(std::memory_order_acquire), 4) << "a query was never applied";
+
+  for (const hz09_seen &s : seen) {
+    EXPECT_EQ(s.current_pid, -1); // between steps
+    ASSERT_TRUE(s.p.has_value());
+    ASSERT_TRUE(s.q.has_value());
+  }
+  EXPECT_EQ(seen[0].p->status, process_status::paused);
+  EXPECT_EQ(seen[1].p->status, process_status::paused);
+  EXPECT_EQ(seen[1].p->step_count, seen[0].p->step_count); // no step while paused
+  EXPECT_GT(seen[1].q->step_count, seen[0].q->step_count); // while Q stepped on
+  EXPECT_EQ(seen[2].p->status, process_status::ready);
+  EXPECT_EQ(seen[3].p->status, process_status::killed);
+  EXPECT_EQ(seen[3].p->exit_error.value_or(""), "killed_by_user");
+  EXPECT_EQ(seen[3].p->priority, 7);
+  EXPECT_EQ(seen[3].q->status, process_status::killed);
+  EXPECT_EQ(seen[3].q->exit_error.value_or(""), "SIGKILL");
+
+  EXPECT_EQ(sched.get_process_info(p)->priority, 7);
+  EXPECT_EQ(sched.get_process_info(p)->status, process_status::killed);
+  EXPECT_EQ(sched.get_process_info(q)->exit_error.value_or(""), "SIGKILL");
+  EXPECT_TRUE(sched.check_tables());
 }
