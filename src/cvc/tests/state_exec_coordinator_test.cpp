@@ -871,6 +871,52 @@ TEST_F(CoordinatorTest, ReceiveKillCommand) {
   EXPECT_EQ(pi->status, process_status::killed);
 }
 
+// A bus thread's control waits for the scheduler's next step (td 8.1, 4.12): a pause, and a kill,
+// that a bus thread sends while the scheduler's thread is held between steps (inside a posted
+// query) leave the process as it is there, and the next step applies them. A coordinator that
+// applied them on the bus thread would show the process paused or killed inside the query.
+TEST_F(CoordinatorTest, ABusThreadsControlWaitsForTheSchedulersNextStep) {
+  using clock_type = std::chrono::steady_clock;
+  coord.start();
+  // Bounds a hang only: nothing is timed.
+  const auto deadline = clock_type::now() + std::chrono::seconds(30);
+  for (const std::string command : {"pause", "kill"}) {
+    SCOPED_TRACE(command);
+    const int p = sched.execute(std::string("(while #t nil)"));
+    std::atomic<bool> in_query{false}, bus_done{false};
+    process_status seen = process_status::terminated;
+    control_cmd hold;
+    hold.what = control_cmd::kind::query;
+    hold.query = [&](scheduler_base &s) {
+      in_query.store(true);
+      while (!bus_done.load() && clock_type::now() < deadline)
+        std::this_thread::yield();
+      seen = s.get_process_info(p)->status;
+    };
+    ASSERT_TRUE(sched.post_control(-1, std::move(hold)));
+    std::thread pump([&] { sched.step(); });
+    while (!in_query.load() && clock_type::now() < deadline)
+      std::this_thread::yield();
+    std::thread bus_thread([&] {
+      auto msg = state_message::make_text(
+          "__state_exec.cluster-1.control.node-A",
+          "{\"command\":\"" + command + "\",\"pid\":" + std::to_string(p) + ",\"from\":\"node-B\"}",
+          MIME_EXEC_CONTROL);
+      msg.cluster_id = "cluster-1";
+      msg.origin_node_id = "node-B";
+      coord.on_message(msg);
+      bus_done.store(true);
+    });
+    bus_thread.join();
+    pump.join();
+    ASSERT_TRUE(in_query.load()) << "the held query never ran";
+    EXPECT_EQ(seen, process_status::ready); // between steps, before the command applies
+    sched.step();
+    EXPECT_EQ(sched.get_process_info(p)->status,
+              command == "pause" ? process_status::paused : process_status::killed);
+  }
+}
+
 TEST_F(CoordinatorTest, AdminCommandStats) {
   coord.start();
 
