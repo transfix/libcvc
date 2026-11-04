@@ -105,6 +105,10 @@ struct coordinator_stats {
   uint64_t status_broadcasts = 0;
   /// Submitted or migrated processes whose priority was clamped to resource_policy::priority_floor.
   uint64_t priority_clamped = 0;
+  /// Migrations sent whose source process could not be killed (its kill threw twice before
+  /// killing it): the process is left paused on the source, never resumed, rather than run on
+  /// both nodes. A host decides what becomes of it (admin_kill, or resume to keep it here).
+  uint64_t migrations_kill_failed = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -180,7 +184,9 @@ public:
   /// Asynchronous: with no scheduler, or `target_node_id` this node, it fails here. Otherwise it
   /// posts one entry that pauses `pid`, serializes it, sends it and kills it on the scheduler's
   /// thread, and returns {true, -1, target_node_id, ""}: requested. A failure there (a pid that
-  /// is gone, or neither ready nor running) is counted in stats().migrations_failed.
+  /// is gone, or neither ready nor running, or a send that throws, after which the process is
+  /// resumed) is counted in stats().migrations_failed; a migration sent, in migrations_initiated.
+  /// A sent migration whose source can't be killed leaves it paused (migrations_kill_failed).
   migrate_result migrate(int pid, const std::string &target_node_id);
 
   // -- Cross-cluster observation (Step 31) --
