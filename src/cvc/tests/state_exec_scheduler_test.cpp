@@ -3382,6 +3382,85 @@ TEST(SchedulerWatchRoots, AnUnchrootedWatchKeepsTheSchedulersOwnRoot) {
   }
 }
 
+namespace {
+
+// Sets its flag when the node holding it as data is destroyed.
+struct gone_flag {
+  std::shared_ptr<bool> gone;
+  ~gone_flag() { *gone = true; }
+};
+
+std::shared_ptr<bool> flag_when_gone(cvc::state &node) {
+  auto flag = std::make_shared<bool>(false);
+  auto holder = std::make_shared<gone_flag>();
+  holder->gone = flag;
+  node.data(boost::any(holder));
+  return flag;
+}
+
+// R0m-memory-1 (R0-mid's probe M1c): a scheduler with no watch root takes an unchrooted context's
+// root from its state-watch (S0.md section 0, item 20). No host keeps that root alive, so the
+// scheduler does, with its ancestors, for as long as it is the watch root. Here the watch is
+// gone, the context with it, and the root's parent deleted: the scheduler still reads its
+// settings there, from nodes it holds, and lets go of them (leaf first) when a host gives another
+// root. Before, the root was freed by the delete and the next settings read walked freed memory.
+template <class S> void a_watch_root_a_step_gave_is_kept() {
+  cvc::app app;
+  cvc::state &tree = cvc::state::instance(app);
+  tree("a.sub.state_exec.defaults.limits.async_steps_per_cpu_ms").value(std::string("7"));
+  const std::shared_ptr<bool> a_gone = flag_when_gone(tree("a"));
+  const std::shared_ptr<bool> sub_gone = flag_when_gone(tree("a.sub"));
+  bool a_gone_when_sub_died = false;
+  tree("a.sub").destroyed.connect([&] { a_gone_when_sub_died = *a_gone; });
+  S sched; // no watch root
+  sched.set_id("kept");
+  {
+    process_ptr proc = make_process();
+    intrinsics_context ictx;
+    ictx.sched = &sched;
+    ictx.proc = proc;
+    ictx.root = &tree("a.sub"); // assigned directly: unchrooted
+    environment_ptr env = builtins::make_default_environment();
+    register_intrinsics(env, &ictx);
+    execute_options opts;
+    opts.env = env;
+    const int pid = sched.execute(
+        std::string(R"((begin (state-unwatch (state-watch "x" (lambda (p v) nil))) "ok"))"), opts);
+    ictx.pid = pid;
+    proc->pid = pid;
+    for (int i = 0; i < 10000 && !is_finished(sched.get_process_info(pid)->status); ++i) {
+      if constexpr (std::is_same_v<S, async_scheduler>)
+        sched.drain_ingress();
+      step_of(sched);
+    }
+    ASSERT_TRUE(sched.get_result(pid).has_value());
+    sched.reap(pid);
+  } // the context, its root's pins and the process go
+  ASSERT_EQ(sched.watch_root(), tree.findDescendant("a.sub"));
+  ASSERT_TRUE(tree.removeChild("a")); // nothing else holds a, or a.sub
+  ASSERT_FALSE(*sub_gone) << "the scheduler's watch root was freed under it";
+  EXPECT_FALSE(*a_gone) << "its parent, which a write there emits through, was freed";
+  const process_ptr probe = make_process();
+  EXPECT_EQ(sched.async_steps_per_cpu_ms(*probe), 7.0); // read where it was taken from
+  sched.set_watch_root(nullptr);                        // a host's call: the hold goes
+  EXPECT_TRUE(*sub_gone);
+  EXPECT_TRUE(*a_gone);
+  EXPECT_FALSE(a_gone_when_sub_died) << "a.sub died after its parent: its _parent dangled";
+}
+
+} // namespace
+
+TEST(SchedulerWatchRoots, AWatchRootAStepGaveIsKept) {
+  {
+    SCOPED_TRACE("sync");
+    a_watch_root_a_step_gave_is_kept<scheduler>();
+  }
+  {
+    SCOPED_TRACE("async");
+    a_watch_root_a_step_gave_is_kept<async_scheduler>();
+  }
+}
+
 // --- Stage 0 hazards (td 8.1) ---
 
 namespace {

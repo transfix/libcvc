@@ -298,6 +298,9 @@ public:
   /// Set the state-tree root for watch polling and settings. A host call (app, pycvc, the CLI),
   /// never made from a step: a chrooted state-watch keeps its own root instead (td 4.8).
   void set_watch_root(cvc::state *root);
+  /// The same for a root a program's step gives (state-watch's): kept by `pin` while it is the
+  /// watch root (scheduler_base).
+  void set_watch_root(cvc::state *root, boost::shared_ptr<cvc::state> pin) override;
   /// The root set_watch_root() gave, or null.
   cvc::state *watch_root() const override { return watch_root_; }
 
@@ -392,6 +395,9 @@ private:
   stackless_evaluator evaluator_;
   memory_tracker mem_tracker_;
   cvc::state *watch_root_ = nullptr;
+  /// What keeps watch_root_ alive when a step gave it (set_watch_root's pin); null for a host's.
+  /// Declared before what connects to the root, so it goes after them.
+  boost::shared_ptr<cvc::state> watch_root_pin_;
 
   /// Every process by pid (finished ones until reaped), its run queue, timers and waiters.
   detail::process_table procs_;

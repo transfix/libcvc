@@ -813,14 +813,19 @@ void scheduler::unregister_watch_handler(int pid, int watch_id) {
   watch_roots_.invalidate();
 }
 
-void scheduler::set_watch_root(cvc::state *root) {
-  if (root != watch_root_ && tree_changes_.root())
-    tree_changes_.watch(root); // counted afresh (a new root counts as a change)
+void scheduler::set_watch_root(cvc::state *root) { set_watch_root(root, nullptr); }
+
+void scheduler::set_watch_root(cvc::state *root, boost::shared_ptr<cvc::state> pin) {
   if (root != watch_root_) {
+    if (tree_changes_.root())
+      tree_changes_.watch(root); // counted afresh (a new root counts as a change)
     rate_valid_ = false;
     watch_roots_.invalidate(); // an entry whose root this is now counts under it
   }
   watch_root_ = root;
+  // A host keeps its root alive; one a step gave is kept here (R0-mid). The old hold goes last,
+  // once nothing is connected to what it held.
+  watch_root_pin_.swap(pin);
 }
 
 // ---------------------------------------------------------------------------
