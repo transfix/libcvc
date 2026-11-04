@@ -37,6 +37,7 @@
 #include <cvc/nav/sim_world.h>
 #include <gtest/gtest.h>
 #include <random>
+#include <stdexcept>
 #include <vector>
 
 using namespace cvc::nav;
@@ -868,6 +869,109 @@ TEST(NavMaterialSimWorld, MaterialLamLiveSetterEqualsConstructionAndHasEffect) {
   w.set_material_lam(1.75f, 0.25f);
   EXPECT_FLOAT_EQ(w.material_lam_soft(), 1.75f);
   EXPECT_FLOAT_EQ(w.material_lam_hard(), 0.25f);
+}
+
+// set_risk_governor: water (hard material, risk 1) square across an agent's path. The material's
+// forces push straight back along its heading, so they do not steer it, and they take less off its
+// acceleration than its goal pull has to spare over the speed cap: it crosses the water at its
+// top speed, as if there were no material (on a plant whose top speed is under nav's cruise, the
+// run is the same to the bit). The governor slows it there, to the speed the water's risk allows;
+// it does not stop it, since the goal lies beyond. Off again, the world steps as one that never
+// had it on.
+TEST(NavMaterialSimWorld, RiskGovernorSlowsAnAgentTheMaterialForcesDoNot) {
+  const int n = 48;
+  std::vector<std::uint8_t> occ(n * n, 0);
+  sim_world::config cfg;
+  cfg.rows = n;
+  cfg.cols = n;
+  cfg.min_x = -100;
+  cfg.min_y = -100;
+  cfg.max_x = 100;
+  cfg.max_y = 100;
+  cfg.scale = 0.05;
+  cfg.veh.rr = 0.15f;
+  cfg.veh.d_hat = 0.35f;
+  cfg.veh.dt = 0.06f;
+  cfg.veh.nsub = 1;
+  cfg.freeze_sense = true;
+  cfg.reach_tol = 0.1f;
+  // Water 17 m wide across the whole map at x = 0, the agent 45 m west of it and its goal 45 m
+  // east.
+  std::vector<float> risk(n * n, 0.0f);
+  std::vector<std::uint8_t> hard(n * n, 0);
+  for (int r = 0; r < n; ++r)
+    for (int c = 22; c <= 25; ++c) {
+      hard[r * n + c] = 1;
+      risk[r * n + c] = 1.0f;
+    }
+  const auto in_water = [&](const float *pos) { // snapshot() reads world metres
+    const int c =
+        static_cast<int>(std::lround((pos[0] - cfg.min_x) / (cfg.max_x - cfg.min_x) * (n - 1)));
+    const int r =
+        static_cast<int>(std::lround((pos[1] - cfg.min_y) / (cfg.max_y - cfg.min_y) * (n - 1)));
+    return r >= 0 && r < n && c >= 0 && c < n && hard[r * n + c] != 0;
+  };
+  struct out {
+    int wet = 0;          // ticks in the water
+    float wet_top = 0.0f; // the top speed there (m/s)
+    float wet_sum = 0.0f; // the speeds there, summed (m/s)
+    bool reached = false;
+    std::vector<float> trace;
+  };
+  // gov: 0 off, 1 on, 2 on for 20 ticks (well short of the water) and then off again.
+  const auto run = [&](int gov) {
+    const float o0[2] = {-2.25f, 0.0f}, g0[2] = {2.25f, 0.0f}, col[3] = {1, 1, 1};
+    sim_world w(cfg, occ.data(), occ.data(), coef_mlp::default_biased(), o0, g0, col, 1);
+    w.set_material(risk.data(), hard.data(), material_config{});
+    if (gov)
+      w.set_risk_governor(true, 0.0f, 0.3f, 0.5f, 3);
+    out o;
+    for (int t = 0; t < 600; ++t) {
+      if (gov == 2 && t == 20)
+        w.set_risk_governor(false);
+      w.step(1);
+      float pos[2], spd = 0.0f;
+      std::uint8_t reach = 0;
+      w.snapshot(pos, nullptr, &spd, nullptr, &reach);
+      o.trace.push_back(pos[0]);
+      o.trace.push_back(pos[1]);
+      if (in_water(pos)) {
+        ++o.wet;
+        o.wet_top = std::max(o.wet_top, std::fabs(spd));
+        o.wet_sum += std::fabs(spd);
+      }
+      if (reach) {
+        o.reached = true;
+        break;
+      }
+    }
+    return o;
+  };
+
+  const float vmax = cfg.veh.vmax / static_cast<float>(cfg.scale); // m/s
+  const out off = run(0), on = run(1), toggled = run(2);
+  const auto mean = [](const out &o) { return o.wet ? o.wet_sum / o.wet : 0.0f; };
+  std::printf("  through the water at %.1f m/s on average (top %.1f, %d ticks) without the "
+              "governor, %.1f m/s (top %.1f, %d ticks) with it; top speed %.1f m/s\n",
+              mean(off), off.wet_top, off.wet, mean(on), on.wet_top, on.wet, vmax);
+  ASSERT_TRUE(off.reached);
+  EXPECT_GT(mean(off), 0.8f * vmax) << "the material's forces alone barely slow it";
+  ASSERT_TRUE(on.reached) << "the governor slows it; the goal beyond the water still pulls it on";
+  EXPECT_LT(mean(on), 0.25f * vmax) << "the governor holds it near the water's v_risk";
+  EXPECT_GT(on.wet, 4 * off.wet);
+  ASSERT_EQ(toggled.trace.size(), off.trace.size());
+  EXPECT_EQ(std::memcmp(toggled.trace.data(), off.trace.data(), off.trace.size() * 4), 0)
+      << "switched off before the water, the run is the ungoverned one";
+
+  const float o0[2] = {0.0f, 0.0f}, g0[2] = {1.0f, 0.0f}, col[3] = {1, 1, 1};
+  sim_world w(cfg, occ.data(), occ.data(), coef_mlp::default_biased(), o0, g0, col, 1);
+  EXPECT_FALSE(w.risk_governor());
+  w.set_risk_governor(true);
+  EXPECT_TRUE(w.risk_governor());
+  EXPECT_THROW(w.set_risk_governor(true, -0.1f), std::invalid_argument);
+  EXPECT_THROW(w.set_risk_governor(true, 0.0f, 1.0f), std::invalid_argument);
+  EXPECT_THROW(w.set_risk_governor(true, 0.0f, 0.3f, std::nanf("")), std::invalid_argument);
+  EXPECT_THROW(w.set_risk_governor(true, 0.0f, 0.3f, 0.5f, 0), std::invalid_argument);
 }
 
 // P2a end-to-end: two agents, same start/goal. A private-belief (M=2) world with
