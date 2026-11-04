@@ -320,3 +320,23 @@ TEST(Hazards, HZ12_PrintWritesWholeLines) {
   for (int t = 0; t < kThreads; ++t)
     EXPECT_EQ(next[t], kLines) << "thread " << t;
 }
+
+// --- R0-mid: the tree's memory fixes ---
+
+// R0m-memory-2 (S0.4; ASan and TSan): state-from-json writes each value through a walk that holds
+// the node it writes, and a dotted key's nodes above it, until the write is done. One thread
+// loads a document naming a child and two dotted paths again and again while another deletes what
+// it writes, each in its own world on one tree. Handing the reader each node unpinned let the delete
+// free it before the write (a crash within seconds); here both loops finish.
+TEST(Hazards, FromJsonAgainstDeletingWhatItWrites) {
+  cvc::app app;
+  cvc::state &tree = cvc::state::instance(app);
+  const int n = under_sanitizer() ? 20000 : 100000;
+  const std::string writer =
+      loop(n, R"((state-from-json "p" "{\"k\": \"v\", \"a.b\": \"w\", \"a.c.d\": \"x\"}"))");
+  const std::string deleter = loop(n, R"((state-delete "p.k") (state-delete "p.a"))");
+  const std::vector<std::string> out =
+      run_on_threads(tree, {writer, deleter}, "state-from-json against delete");
+  EXPECT_EQ(out[0], std::to_string(n));
+  EXPECT_EQ(out[1], std::to_string(n));
+}
