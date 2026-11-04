@@ -189,9 +189,10 @@ program may change one:
 - A built-in exception's instance is an ordinary dict, so it is mutable, and its fields are set
   as before. `state-data-set` copies one and shares its class dict, and `state-data-get` returns
   a copy with the same shared class (docs/STATE_EXEC_DEVELOPER_GUIDE.md, "The data channel").
-  An exception keeps its built-in class across a snapshot (2.7: the restore relinks a decoded
-  dict of exactly a built-in class's shape to that class) and through pycvc (a Python function
-  that returns one, `pycvc.make_exception`), so it can be stored after either.
+  An exception keeps its built-in class across a snapshot (2.7) and through Python (a Python
+  function that returns one, alone or in a list, and `pycvc.make_exception`, given the class's
+  name or its dict), so it can be stored after either: both relink a copy of exactly a built-in
+  class's shape to the class itself (`builtin_class_of_copy`, `exceptions.h`).
 
 Mapping a C++ exception thrown by a native function:
 - `cvc::state_exec::dsl_exception` carries a class already;
@@ -303,9 +304,11 @@ The codec writes a dict once for each value that holds it, so after a restore an
 a copy by its chain of class names (P2). Without that, an exception made before the snapshot,
 re-raised after it, wouldn't be caught by its own class. A built-in class is the exception:
 since threaded execution's Stage 0 the restore relinks a decoded dict of exactly a built-in
-class's shape (its keys in order, its `__super__` the parent's built-in dict, `init` nil) to the
-built-in class itself, so a restored exception's built-in class is the shared, read-only one
-(2.3). A user class, which always has an `init` or `finalize` of its own, is never relinked.
+class's shape (its keys in order, `__name__` naming the class, its `__super__` the parent's
+built-in dict, `init` the built-in one or nil, as a snapshot restores it) to the built-in class
+itself, so a restored exception's built-in class is the shared, read-only one (2.3). A user
+class, which always has an `init` or `finalize` of its own, is never relinked. pycvc's
+converter applies the same rule (`builtin_class_of_copy`, `exceptions.h`).
 
 A process inside a `with-lock` section can't be snapshotted: the snapshot is refused, naming its
 keys (docs/STATE_EXEC_LOCKS.md 5.8). A process waiting for a lock can: restored, it asks again, at

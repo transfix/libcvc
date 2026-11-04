@@ -860,10 +860,12 @@ Besides the async scheduler's `post_message()`, four calls may come from any thr
 
 - **`stop()`** ends `run()` (and the async scheduler's `sync_run`) at its next check, between
   steps. On the sync scheduler it also ends an idle `run()`'s wait at once. Once `is_running()`
-  reads true, a `stop()` ends that run. A `stop()` made while no
-  run is active is discarded, since a run starts by clearing it. `stop()` is not
-  async-signal-safe (it notifies the idle wait, which takes a lock on POSIX): a signal handler
-  sets a flag of its own, as `cvc serve` does, and the loop acts on it.
+  reads true, a `stop()` ends that run. A `stop()` made while no run is active is discarded,
+  since a run starts by clearing it. The sync `stop()` holds its own reference to the wakeup it
+  notifies, so the scheduler may be destroyed as soon as `run()` returns, even while `stop()` is
+  still notifying. `stop()` is not async-signal-safe (it notifies the idle wait, which takes a
+  lock on POSIX): a signal handler sets a flag of its own, as `cvc serve` does, and the loop acts
+  on it.
 - **`post_control(pid, cmd)`** queues a command for process `pid`, and returns true once queued.
   The scheduler applies it between steps, on its own thread.
 
@@ -886,7 +888,10 @@ sched.post_control(pid, std::move(cmd));
   floor check. An unknown pid is found then, so its `done` gets false.
 - **`done`** is optional. It is called once, on the scheduler's thread, with what the direct call
   returned, or with false from the scheduler's destructor for a command never applied. It must
-  not throw, block or take the GIL.
+  not throw, block or take the GIL; one that throws anyway is not called again (it is taken from
+  the command before it is called). The destructor refuses what is queued until nothing is left,
+  so a command a `done(false)` posts while the scheduler is being destroyed gets `done(false)`
+  too, rather than being dropped.
 - **Order.** Commands are applied one at a time, first in, first out, at the next step boundary:
   the sync scheduler at the top of `step()` and of each iteration of `run()`'s loop, before it
   tests for a runnable process (so resuming the only process, or killing the last one, takes
@@ -897,9 +902,12 @@ sched.post_control(pid, std::move(cmd));
   tree, whose slots may throw) gets `done(false)`. The commands after it stay queued, in order,
   ahead of later posts, and the exception leaves the step.
 - **Wakes.** A post ends the sync scheduler's idle `run()` wait, and wakes a driver blocked in
-  the async scheduler's `wait_for_work()`. `has_pending_control()` (any thread) says whether a
-  command waits: a loop that steps only while something is runnable steps for one too, as
-  `cvc serve` does (`has_runnable() || has_pending_control()`).
+  the async scheduler's `wait_for_work()`. `has_pending_control()` (any thread) is true while a
+  posted command waits: from the post until the batch that took it has been applied, refused or
+  put back, and then for as long as anything is still queued. A loop that steps only while
+  something is runnable steps for one too, as `cvc serve` does (`has_runnable() ||
+  has_pending_control()`). There a step that throws (a posted command that throws) is logged on
+  stderr as `exec: <what>`, the server goes on, and the commands after it stay queued.
 
 pycvc's raw schedulers follow the same rule: of their calls only `stop()`, `is_running()` and
 the async scheduler's `post_message()` may come from another Python thread
@@ -1172,10 +1180,12 @@ the nodes it walks below the root, and a write holds that chain to its end, so a
 thread deletes meanwhile is freed only once nothing holds it. Of the writes that span several
 slices, `state-from-json` and `state-set-tree` hold their target's chain for their whole life;
 `state-set` of a list and `state-data-set` hold the root's chain while their data job runs, and
-walk to the target when they write. Chains are let go of leaf first, so a node never dies after
-its parent. A context keeps its chain for its
-whole life: if its chroot is deleted, the context's programs go on reading and writing the
-detached subtree, which nothing else sees, until the context goes.
+walk to the target when they write. A chain is let go of leaf first (`cvc::pin_vector`), so a
+node held in one dies while its ancestors live. A hold on a single node (a `state-get`'s read,
+`state-json`'s node, a watch's root) does not keep that rule: if another thread unlinks one of
+its ancestors meanwhile, the node can outlive it. A context keeps its chain for its whole life: if
+its chroot is deleted, the context's programs go on reading and writing the detached subtree,
+which nothing else sees, until the context goes.
 
 ### State Tree Operations (DSL)
 
@@ -1269,9 +1279,11 @@ what is stored, so a program never shares a list or dict with the tree (docs/STA
   `state-data-get` returns. An ordinary `data_object` (a volume, a mesh) is shared, under its
   read-only contract. A built-in exception's instance is copied, and its class dict shared, since
   it is read-only (above): an exception read back with `state-data-get` can be stored again, and
-  so can one restored from a snapshot (the restore relinks a built-in class to itself) and one
-  that came through pycvc (a Python function's return value, or `pycvc.make_exception`'s), which
-  keeps its built-in class. The node is written once, when the whole copy is made.
+  so can one restored from a snapshot and one that passed through Python (a Python function's
+  return value, an element of a list it returns, `pycvc.make_exception`'s result by class name or
+  class dict). Both relink a copy of exactly a built-in class's shape to the class itself, by the
+  same rule (`builtin_class_of_copy`, `exceptions.h`). The node is written once, when the whole
+  copy is made.
 - **Refused, at any depth:** what runs code or holds a process's state. The `RuntimeError` names
   it: `state-data-set: cannot store a closure`, `... a native function`, `... a generator`,
   `... a future`, `... a lock form` (`with-lock` itself), `... a lock wait`, and
@@ -2445,13 +2457,22 @@ auto result = coord.migrate(pid, "node-B");
 if (!result.success)
     std::cerr << "Migration refused: " << result.error << "\n";  // no scheduler, or this node
 
-// After the scheduler's next step: a pid that was gone, or neither ready nor running, counts in
-// migrations_failed; once the process is paused, the migration counts in migrations_initiated.
+// After the scheduler's next step, in coord.stats(): migrations_failed counts a pid that was
+// gone, or neither ready nor running, and a serialize or send that failed; migrations_initiated
+// counts a migration sent; migrations_kill_failed counts a sent one whose source survived its
+// kill.
 auto stats = coord.stats();
 ```
 
 `migrate()` posts one entry that pauses the process, serializes it, sends it and kills it, all
 on the scheduler's thread. The target ingests it in a posted entry of its own.
+
+- A serialize or send that fails resumes the process, which runs on here, and counts the
+  migration once, as failed.
+- A kill of the source that throws after the send is tried once more. If the process is still
+  alive then, it is left paused, never resumed, rather than run on both nodes, and counted in
+  `migrations_kill_failed`: the host decides what becomes of it, with `admin_kill`, or a resume
+  to keep it here.
 
 ### Self-Migration (from DSL)
 
