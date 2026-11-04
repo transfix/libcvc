@@ -1494,6 +1494,10 @@ jobs:
               test_pycvc_state.py: ok: test_hz06_accessors_against_deletes
               test_pycvc_state.py: ok: test_observer_dropped_mid_callback_is_never_called
               test_pycvc_state_exec_exceptions.py: ok: test_a_builtin_exception_through_python_keeps_its_class
+              state_exec_hazards_test: OK ] Hazards.ASchedulerStoppedFromAnotherThreadMayGoWhenItsRunReturns
+              state_exec_async_test: OK ] AsyncPostControl.HasPendingControlWhileABatchApplies
+              state_exec_async_test: OK ] SyncPostControl.HasPendingControlWhileABatchApplies
+              state_exec_async_calls_test: OK ] AsyncCalls.ACancelledCallRaisesForAnAwaitAllParkedBeforeTheKill
               state_exec_async_calls_test: OK ] AsyncCalls.HZ13_AFutureAwaitedTwiceIsChargedOnce
               state_exec_async_calls_test: OK ] AsyncCalls.HZ13_AnOutcomeTakenBeforeTheDrainIsNotChargedAgain
               state_exec_async_calls_test: OK ] AsyncCalls.HZ13_ACancelledCallWakesEveryWaiter
@@ -1562,6 +1566,10 @@ jobs:
               test_pycvc_state.py: ok: test_hz06_accessors_against_deletes
               test_pycvc_state.py: ok: test_observer_dropped_mid_callback_is_never_called
               test_pycvc_state_exec_exceptions.py: ok: test_a_builtin_exception_through_python_keeps_its_class
+              state_exec_hazards_test: OK ] Hazards.ASchedulerStoppedFromAnotherThreadMayGoWhenItsRunReturns
+              state_exec_async_test: OK ] AsyncPostControl.HasPendingControlWhileABatchApplies
+              state_exec_async_test: OK ] SyncPostControl.HasPendingControlWhileABatchApplies
+              state_exec_async_calls_test: OK ] AsyncCalls.ACancelledCallRaisesForAnAwaitAllParkedBeforeTheKill
               state_exec_async_calls_test: OK ] AsyncCalls.HZ13_AFutureAwaitedTwiceIsChargedOnce
               state_exec_async_calls_test: OK ] AsyncCalls.HZ13_AnOutcomeTakenBeforeTheDrainIsNotChargedAgain
               state_exec_async_calls_test: OK ] AsyncCalls.HZ13_ACancelledCallWakesEveryWaiter
