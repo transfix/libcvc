@@ -225,6 +225,30 @@ TEST(BuiltinClasses, AssertTracebackNamesTheForm) {
   }
 }
 
+// A native that throws a built-in class dict itself (a kernel's dsl_exception can hold one) has
+// it caught as it is, on both evaluators: annotate leaves the read-only dict alone (S0.1), where
+// its set_field would turn the raise into a TypeError. (raise ValueError.__cls_dict__) never gets
+// that far: raise refuses a value that is no instance first.
+TEST(BuiltinClasses, ANativeRaisingAClassDictIsCaughtUnchanged) {
+  const dict_ptr cls = exception_class("ValueError");
+  const std::size_t size = cls->size();
+  environment_ptr env = builtins::make_default_environment();
+  builtins::register_fn(env, "throw-cls", [cls](std::span<const value_t>) -> value_t {
+    throw dsl_exception(value_t(cls));
+  });
+  const std::string prog = R"((try (throw-cls) (catch (e) (get-attr e "__name__"))))";
+  const auto got = [&](auto &&ev) {
+    try {
+      return show(ev.evaluate_script(prog));
+    } catch (const std::exception &e) {
+      return std::string("threw ") + e.what();
+    }
+  };
+  EXPECT_EQ(got(evaluator(env)), "ValueError");
+  EXPECT_EQ(got(stackless_evaluator(env)), "ValueError");
+  EXPECT_EQ(cls->size(), size);
+}
+
 // ===========================================================================
 // 6.1 Raising and catching (EX)
 // ===========================================================================
