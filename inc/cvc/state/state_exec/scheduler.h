@@ -244,7 +244,7 @@ public:
   /// Thread-safe: whether a posted command waits to be applied (the CLI's serve loop steps for
   /// one even with nothing runnable).
   bool has_pending_control() const noexcept {
-    return control_pending_.load(std::memory_order_acquire);
+    return controls_waiting_.load(std::memory_order_acquire) != 0;
   }
   bool set_max_steps(int pid, uint64_t max_steps);
   bool set_max_time(int pid, double seconds);
@@ -510,11 +510,14 @@ private:
   void keep_lock_expiries(clock::time_point now);
 
   /// post_control's commands, from any thread: guarded by control_mutex_, applied at the top of
-  /// step_once and of run()'s loop. control_pending_ is set (under the mutex) while there are
-  /// any, so a step finds none without the lock.
+  /// step_once and of run()'s loop. controls_waiting_ counts the commands posted and not yet
+  /// applied or refused, queued or in a batch being applied: has_pending_control(), and a step
+  /// finds none without the lock. destroying_ (under the mutex): the destructor took the queue,
+  /// and a post is refused at once.
   std::mutex control_mutex_;
   std::vector<std::pair<int, control_cmd>> controls_;
-  std::atomic<bool> control_pending_{false};
+  std::atomic<std::size_t> controls_waiting_{0};
+  bool destroying_ = false;
   /// Apply the queued commands in order. One that throws gets done(false), and the rest go back
   /// to the front of the queue before the exception propagates.
   void apply_controls();

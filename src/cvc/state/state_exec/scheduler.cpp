@@ -38,19 +38,17 @@ boost::shared_ptr<cvc::state> host_held(cvc::state *node) {
 scheduler::~scheduler() {
   home_.reset();
   // Commands posted and never applied: their done gets false. Taken under the lock, so a post
-  // that returned before the destruction began is seen; and again until none is left, since a
-  // done may post another, which is refused too rather than dropped.
-  for (;;) {
-    std::vector<std::pair<int, control_cmd>> left;
-    {
-      std::lock_guard<std::mutex> lock(control_mutex_);
-      left.swap(controls_);
-    }
-    if (left.empty())
-      break;
-    for (auto &entry : left)
-      refuse_control(entry.second);
+  // that returned before the destruction began is seen. From then on a post is refused at once
+  // (post_control): a done that posts again is refused too, rather than dropped, and nothing is
+  // queued behind this.
+  std::vector<std::pair<int, control_cmd>> left;
+  {
+    std::lock_guard<std::mutex> lock(control_mutex_);
+    destroying_ = true;
+    left.swap(controls_);
   }
+  for (auto &entry : left)
+    refuse_control(entry.second);
 }
 
 void scheduler::set_lock_manager(std::shared_ptr<lock_manager> mgr, lock_attach attach) {
@@ -644,7 +642,7 @@ int scheduler::step_once() {
     chain_valid_ = false; // the posts are no step's time
   }
   // Commands posted from other threads (post_control), between steps.
-  if (control_pending_.load(std::memory_order_acquire))
+  if (controls_waiting_.load(std::memory_order_acquire) != 0)
     apply_controls();
   // Wake sleeping processes (and timed waits) whose deadline has passed; time out the lock waits
   // whose deadline passed (a program with no timer pays nothing for them).
@@ -720,7 +718,7 @@ uint64_t scheduler::run_steps(std::optional<uint64_t> max_steps, std::optional<d
   while (!stop_requested_.load(std::memory_order_relaxed)) {
     // Commands posted from other threads first (S0.7): a resume may make the only process
     // runnable, and a kill may end the last one.
-    if (control_pending_.load(std::memory_order_acquire))
+    if (controls_waiting_.load(std::memory_order_acquire) != 0)
       apply_controls();
     if (!has_runnable())
       break;
@@ -777,7 +775,8 @@ bool scheduler::idle_wait(std::optional<uint64_t> max_steps, uint64_t &steps, ti
   constexpr auto kStopCheck = std::chrono::milliseconds(10);
   const bool for_timer = next && *next == until;
   const auto posted = [this] {
-    return control_pending_.load(std::memory_order_acquire) || (home_ && home_->port_pending());
+    return controls_waiting_.load(std::memory_order_acquire) != 0 ||
+           (home_ && home_->port_pending());
   };
   for (clock::time_point t = now;
        !stop_requested_.load(std::memory_order_relaxed) && t < until && !posted();
@@ -1541,31 +1540,28 @@ bool scheduler::post_control(int pid, control_cmd cmd) {
   // unknown pid is found, and refused, there. An idle run() wakes (td 4.12). The wait is notified
   // under the lock: once the poster lets go of it, it touches the scheduler no more, so a
   // scheduler thread that applies this post may destroy the scheduler.
-  std::lock_guard<std::mutex> lock(control_mutex_);
-  controls_.emplace_back(pid, std::move(cmd));
-  control_pending_.store(true, std::memory_order_release);
-  idle_->notify();
-  return true;
+  {
+    std::lock_guard<std::mutex> lock(control_mutex_);
+    if (!destroying_) {
+      controls_.emplace_back(pid, std::move(cmd));
+      controls_waiting_.fetch_add(1, std::memory_order_release);
+      idle_->notify();
+      return true;
+    }
+  }
+  // The scheduler is being destroyed (a done its destructor calls posted this): refused at once,
+  // never queued, so the destructor's refusals end.
+  refuse_control(cmd);
+  return false;
 }
 
 void scheduler::apply_controls() {
   std::vector<std::pair<int, control_cmd>> controls;
   {
     std::lock_guard<std::mutex> lock(control_mutex_);
-    controls.swap(controls_);
-    // control_pending_ stays set until the batch is applied: a command waits until then, and
-    // has_pending_control() says so.
+    controls.swap(controls_); // still counted as waiting, each until it is applied or refused
   }
   chain_valid_ = false; // a query's time is no step's
-  // Once the batch is applied (or refused, or back in the queue), whatever is queued now says
-  // whether a command waits.
-  const auto settle_pending = [this]() noexcept {
-    try {
-      std::lock_guard<std::mutex> lock(control_mutex_);
-      control_pending_.store(!controls_.empty(), std::memory_order_release);
-    } catch (...) { // left set: the next step looks, and settles it
-    }
-  };
   // One at a time, in the order posted (S0.7). A kill can throw (its locks' release, a tree
   // write's slots): the command that threw is refused, and the rest go back to the front of the
   // queue, ahead of what was posted since, before the exception propagates. None is lost.
@@ -1574,24 +1570,25 @@ void scheduler::apply_controls() {
     while (next < controls.size()) {
       auto &[pid, cmd] = controls[next++];
       apply_control(pid, cmd);
+      controls_waiting_.fetch_sub(1, std::memory_order_release);
     }
   } catch (...) {
     refuse_control(controls[next - 1].second);
+    controls_waiting_.fetch_sub(1, std::memory_order_release);
     if (next < controls.size()) {
-      try {
+      try { // back in the queue: still waiting
         std::lock_guard<std::mutex> lock(control_mutex_);
         controls_.insert(controls_.begin(), std::make_move_iterator(controls.begin() + next),
                          std::make_move_iterator(controls.end()));
-        control_pending_.store(true, std::memory_order_release);
       } catch (...) { // no memory to queue them again: refused rather than lost
-        for (std::size_t i = next; i < controls.size(); ++i)
+        for (std::size_t i = next; i < controls.size(); ++i) {
           refuse_control(controls[i].second);
+          controls_waiting_.fetch_sub(1, std::memory_order_release);
+        }
       }
     }
-    settle_pending();
     throw;
   }
-  settle_pending();
 }
 
 void scheduler::apply_control(int pid, control_cmd &cmd) {
