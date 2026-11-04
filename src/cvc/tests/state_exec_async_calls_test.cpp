@@ -1944,6 +1944,154 @@ TEST(AsyncCalls, AFinishThatThrowsStillWakesItsWaiter) {
   EXPECT_EQ(std::get<int64_t>(r->v), 8);
 }
 
+// --- the skeptic pass: a cancel or a timeout that throws (R0-final) ---
+
+namespace {
+
+// Drive the scheduler until `done` (or `secs` pass), going on past a drain that throws: what the
+// cases below make happen. Whether `done` held.
+template <class Done> bool pump_through_throws(world &w, Done done, double secs) {
+  const auto start = clock_type::now();
+  while (seconds_since(start) < secs) {
+    try {
+      w.async->drain_ingress();
+      w.async->sync_run(100000, 0.02);
+    } catch (const std::exception &e) {
+      std::printf("  (a drain threw: %s)\n", e.what());
+    }
+    if (done())
+      return true;
+    std::this_thread::sleep_for(1ms);
+  }
+  return done();
+}
+
+// (blind-hook ms): as blind, but its kernel first sets a cancel hook that throws.
+void register_blind_hook(world &w, std::atomic<int> &started, async_options opts = {}) {
+  register_async_fn(
+      w.env, *w.host, "blind-hook",
+      [&started](std::span<const value_t> a) -> async_kernel {
+        const int64_t ms = int_arg(a, 0, 50);
+        return [&started, ms](async_call &call) -> value_t {
+          call.on_cancel([] { throw std::runtime_error("the cancel hook threw"); });
+          started.fetch_add(1);
+          std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+          return value_t(ms);
+        };
+      },
+      opts);
+}
+
+// (stuck): work started by itself that never settles; its cancel hook throws.
+void register_stuck(world &w, std::atomic<int> &started) {
+  register_async_fn(w.env, *w.host, "stuck", [&started](std::span<const value_t>) -> async_work {
+    async_work work;
+    work.start = [&started](const std::shared_ptr<async_call> &call) {
+      call->on_cancel([] { throw std::runtime_error("the cancel hook threw"); });
+      started.fetch_add(1);
+    };
+    return work;
+  });
+}
+
+// A process makes `future_expr`'s call and forks; the child awaits it with `child_wait` (catching
+// RuntimeError as (list "RuntimeError" message)), the parent with (await f). Once both wait and
+// `ready()` holds: {parent, child}.
+std::pair<int, int> fork_both_awaiting(world &w, const std::string &future_expr,
+                                       const std::string &child_wait,
+                                       const std::function<bool()> &ready) {
+  const int parent = w.submit(
+      "(begin (set f " + future_expr + ") (set c (fork)) (if (= c 0) (try " + child_wait +
+      " (catch (RuntimeError e) (list \"RuntimeError\" (get-attr e \"message\")))) (await f)))");
+  int child = -1;
+  EXPECT_TRUE(pump_through_throws(
+      w,
+      [&] {
+        for (const process_info &i : w.async->list_processes())
+          if (i.parent_pid == parent)
+            child = i.pid;
+        return child >= 0 && w.waiting(parent) && w.waiting(child) && ready();
+      },
+      10.0))
+      << "the parent and the child never both waited";
+  return {parent, child};
+}
+
+std::string outcome_of(world &w, int pid) {
+  const std::optional<value_t> r = w.result(pid);
+  return r ? show(*r) : "<" + std::string(to_string(w.info(pid).status)) + ">";
+}
+
+} // namespace
+
+// SK-1: the kill of the process that made the call cancels it, then reads the step rate to charge
+// it, and a slot on the tree throws when the new rate is published. The kill throws, and the fork
+// child awaiting the cancelled call, which was woken before that read, still ends with the
+// cancel's error; so does the parent. Before, both stayed parked: the call was claimed and off the
+// list, and nothing finished it again.
+TEST(AsyncCalls, AKillWhoseRateReadThrowsStillWakesTheForkChild) {
+  for (const char *const wait : {"(await f)", "(await-all (list f))"}) {
+    SCOPED_TRACE(wait);
+    std::atomic<int> started{0};
+    world w(async_sched);
+    w.async->set_id("kill_rate_throws");
+    register_blind(w, started);
+    const auto [parent, child] =
+        fork_both_awaiting(w, "(blind-async 300)", wait, [&] { return started > 0; });
+    ASSERT_GE(child, 0);
+    (*w.tree)("state_exec.defaults.limits.async_steps_per_cpu_ms").value(std::string("2000"));
+    std::atomic<bool> armed{true};
+    boost::signals2::scoped_connection slot =
+        (*w.tree)("state_exec.schedulers").childChanged.connect([&](const std::string &) {
+          if (armed.exchange(false))
+            throw std::runtime_error("a slot on the tree threw");
+        });
+    EXPECT_THROW(w.async->kill(parent), std::runtime_error);
+    slot.disconnect();
+    EXPECT_TRUE(pump_through_throws(
+        w, [&] { return w.finished(child); }, 3.0))
+        << "the fork child stayed parked";
+    EXPECT_NE(outcome_of(w, child).find(kCancelled), std::string::npos) << outcome_of(w, child);
+    EXPECT_TRUE(pump_through_throws(
+        w, [&] { return w.finished(parent); }, 3.0))
+        << "the parent stayed parked";
+  }
+}
+
+// SK-2: a cancel hook that throws (against its contract) skips neither the call's settling nor
+// its waiters' wake: the call is settled before the hook runs. The kill reports the hook's
+// exception, and the fork child gets the cancel's error, not the kernel's late value (blind-hook
+// ignores the cancel and returns 300); with started work that never settles, it doesn't wait for
+// good.
+TEST(AsyncCalls, AThrowingCancelHookSkipsNeitherTheSettleNorTheWake) {
+  {
+    SCOPED_TRACE("a kernel that ignores the cancel");
+    std::atomic<int> started{0};
+    world w(async_sched);
+    register_blind_hook(w, started);
+    const auto [parent, child] =
+        fork_both_awaiting(w, "(blind-hook-async 300)", "(await f)", [&] { return started > 0; });
+    ASSERT_GE(child, 0);
+    EXPECT_THROW(w.async->kill(parent), std::runtime_error);
+    EXPECT_TRUE(pump_through_throws(w, [&] { return w.finished(child); }, 3.0));
+    EXPECT_NE(outcome_of(w, child).find(kCancelled), std::string::npos) << outcome_of(w, child);
+  }
+  {
+    SCOPED_TRACE("started work that never settles");
+    std::atomic<int> started{0};
+    world w(async_sched);
+    register_stuck(w, started);
+    const auto [parent, child] =
+        fork_both_awaiting(w, "(stuck-async)", "(await f)", [&] { return started > 0; });
+    ASSERT_GE(child, 0);
+    EXPECT_THROW(w.async->kill(parent), std::runtime_error);
+    EXPECT_TRUE(pump_through_throws(
+        w, [&] { return w.finished(child); }, 3.0))
+        << "the child waited for good";
+    EXPECT_NE(outcome_of(w, child).find(kCancelled), std::string::npos) << outcome_of(w, child);
+  }
+}
+
 // --- Stage 0 hazards (td 8.1) ---
 
 namespace {

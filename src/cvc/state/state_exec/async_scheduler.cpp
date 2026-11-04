@@ -1019,8 +1019,10 @@ void async_scheduler::check_charged(clock::time_point now) {
 }
 
 void async_scheduler::cancel_async_calls(int pid) {
-  if (std::none_of(async_calls_.begin(), async_calls_.end(),
-                   [pid](const std::shared_ptr<async_call> &c) { return c->pid() == pid; }))
+  const auto of_pid = [pid](const std::shared_ptr<async_call> &c) { return c->pid() == pid; };
+  const std::size_t n =
+      static_cast<std::size_t>(std::count_if(async_calls_.begin(), async_calls_.end(), of_pid));
+  if (n == 0)
     return;
   // Out of the list first, then the rate: reading it may publish it, a write to the tree whose
   // slots may do anything, kill this process too (that kill finds no calls left to cancel, so it
@@ -1028,28 +1030,42 @@ void async_scheduler::cancel_async_calls(int pid) {
   // Each is claimed as it leaves the list (td 4.9, S0.9), so its completion, when it comes,
   // charges nothing more. And it is settled, with the error every await of it raises from now on
   // (another process's: a fork child's), however it awaits: parked in await or await-all, after
-  // the cancel, or blocked in a generator's body. The kernel's own settling, when it comes, is
-  // ignored, and work that never settles once cancelled (async_start) is finished all the same.
+  // the cancel, or blocked in a generator's body. Settled before its cancel hook runs, so the
+  // kernel's own settling, once told to stop, is ignored whenever it comes, work that never
+  // settles once cancelled (async_start) is finished all the same, and a hook that throws
+  // (against its contract) skips neither the settle nor the wake: it is reported once they are
+  // done.
   std::vector<std::shared_ptr<async_call>> calls;
+  calls.reserve(n); // so recording a claimed call can't fail
+  std::exception_ptr hook_error;
   for (auto it = async_calls_.begin(); it != async_calls_.end();) {
-    if ((*it)->pid() != pid) {
+    if (!of_pid(*it)) {
       ++it;
       continue;
     }
     std::shared_ptr<async_call> call = std::move(*it);
     it = async_calls_.erase(it);
-    const bool claimed = !call->closed_.exchange(true, std::memory_order_acq_rel);
-    if (claimed)
+    if (!call->closed_.exchange(true, std::memory_order_acq_rel)) {
       calls.push_back(call);
-    call->cancel();
-    if (claimed) {
       const std::string &name = call->function_name();
       call->settle({},
                    std::make_exception_ptr(dsl_error(
                        "RuntimeError", name + ": cancelled: the process that made the call ended",
                        "async", {{"function", value_t(name)}})));
     }
+    try {
+      call->cancel();
+    } catch (...) {
+      if (!hook_error)
+        hook_error = std::current_exception();
+    }
   }
+  // Another process may be waiting for one of them: a fork child awaiting the same future. It is
+  // woken, and reads the call's outcome, the error above (S0.9). Woken before the rate is read:
+  // a slot that throws when the rate is published must not leave it waiting for a call nothing
+  // finishes again.
+  for (const std::shared_ptr<async_call> &call : calls)
+    wake_async_waiters(call->channel());
   process *proc = procs_.find(pid);
   const double rate = proc ? async_steps_per_cpu_ms(*proc) : 0.0;
   proc = procs_.find(pid);
@@ -1059,10 +1075,8 @@ void async_scheduler::cancel_async_calls(int pid) {
     for (const std::shared_ptr<async_call> &call : calls)
       detail::charge_async_call(*proc, *call, rate, true, now);
   }
-  // Another process may be waiting for one of them: a fork child awaiting the same future. It is
-  // woken, and reads the call's outcome, the error above (S0.9).
-  for (const std::shared_ptr<async_call> &call : calls)
-    wake_async_waiters(call->channel());
+  if (hook_error)
+    std::rethrow_exception(hook_error);
 }
 
 void async_scheduler::cancel_async_calls_of(int pid) {
