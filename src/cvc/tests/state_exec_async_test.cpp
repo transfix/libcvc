@@ -1259,6 +1259,81 @@ TEST(SyncPostControl, ADoneThatThrowsIsCalledOnce) {
   EXPECT_EQ(done_calls_when_a_done_throws(sched, [&] { sched.step(); }), 1);
 }
 
+namespace {
+
+// The skeptic pass's SK-4: once the destructor has taken the queue, a post (here from the done it
+// refuses, which posts again each time, 1000 times) is refused at once, with done(false), and not
+// queued: post_control returns false, and the destructor's refusals end with the done's reposts.
+// They used to be queued and looped over, with no bound but the done's.
+template <class S> void the_destructor_refuses_every_repost() {
+  int refused = 0, queued = 0;
+  std::function<void(bool)> again;
+  S *target = nullptr;
+  again = [&](bool applied) {
+    EXPECT_FALSE(applied);
+    if (++refused < 1000)
+      queued += target->post_control(1, control(control_cmd::kind::kill, again)) ? 1 : 0;
+  };
+  {
+    S sched;
+    target = &sched;
+    EXPECT_TRUE(sched.post_control(1, control(control_cmd::kind::kill, again)));
+  }
+  EXPECT_EQ(refused, 1000);
+  EXPECT_EQ(queued, 0) << "a post made while the destructor ran was queued";
+}
+
+// has_pending_control() counts the commands posted and not yet applied or refused (the skeptic
+// pass's note on its flag): a query in a batch sees the command after it waiting; a command that
+// throws last in its batch is refused, and nothing waits; one that throws before another leaves
+// that one waiting, back in the queue, until the next drain or step applies it.
+template <class S> void has_pending_control_counts_what_waits(void (*apply)(S &)) {
+  done_log log; // before the scheduler: its destructor may call what was never applied
+  S sched;
+  const int pid =
+      sched.execute(std::string("(begin (set i 0) (while (< i 1000000) (set i (+ i 1))))"));
+  bool seen = false;
+  control_cmd look;
+  look.what = control_cmd::kind::query;
+  look.query = [&](scheduler_base &) { seen = sched.has_pending_control(); };
+  sched.post_control(-1, std::move(look));
+  sched.post_control(pid, control(control_cmd::kind::pause, log.done("pause")));
+  apply(sched);
+  EXPECT_TRUE(seen) << "the pause after the query didn't count";
+  EXPECT_FALSE(sched.has_pending_control());
+
+  sched.post_control(-1, throwing_query());
+  EXPECT_THROW(apply(sched), std::runtime_error);
+  EXPECT_FALSE(sched.has_pending_control()) << "the refused command still counted";
+
+  sched.post_control(-1, throwing_query());
+  sched.post_control(pid, control(control_cmd::kind::resume, log.done("resume")));
+  EXPECT_THROW(apply(sched), std::runtime_error);
+  EXPECT_TRUE(sched.has_pending_control()) << "the requeued resume didn't count";
+  apply(sched);
+  EXPECT_FALSE(sched.has_pending_control());
+  EXPECT_EQ(log.calls, (done_calls{{"pause", true}, {"resume", true}}));
+}
+
+} // namespace
+
+TEST(AsyncPostControl, TheDestructorRefusesEveryRepost) {
+  the_destructor_refuses_every_repost<async_scheduler>();
+}
+
+TEST(SyncPostControl, TheDestructorRefusesEveryRepost) {
+  the_destructor_refuses_every_repost<scheduler>();
+}
+
+TEST(AsyncPostControl, HasPendingControlCountsWhatWaits) {
+  has_pending_control_counts_what_waits<async_scheduler>(
+      [](async_scheduler &s) { s.drain_ingress(); });
+}
+
+TEST(SyncPostControl, HasPendingControlCountsWhatWaits) {
+  has_pending_control_counts_what_waits<scheduler>([](scheduler &s) { s.step(); });
+}
+
 // --- an async call's outcome (docs/STATE_EXEC_EXCEPTIONS.md 3) ---
 
 // A kernel that throws a dsl_exception holding a built-in class dict itself is raised as it is:

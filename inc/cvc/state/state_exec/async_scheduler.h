@@ -238,7 +238,7 @@ public:
   bool post_control(int pid, control_cmd cmd);
   /// Thread-safe: whether a posted command waits for a drain (a posted message is no command).
   bool has_pending_control() const noexcept {
-    return control_pending_.load(std::memory_order_acquire);
+    return controls_waiting_.load(std::memory_order_acquire) != 0;
   }
   bool set_max_steps(int pid, uint64_t max_steps);
   bool set_max_time(int pid, double seconds);
@@ -479,8 +479,11 @@ private:
   /// Set (under ingress_mutex_) while ingress_, completions_ or controls_ holds something, so a
   /// drain finds an empty ingress without the lock.
   std::atomic<bool> ingress_pending_{false};
-  /// Set (under ingress_mutex_) while controls_ holds something: has_pending_control().
-  std::atomic<bool> control_pending_{false};
+  /// The commands posted and not yet applied or refused, queued or in a batch a drain is
+  /// applying: has_pending_control(). destroying_ (under ingress_mutex_): the destructor took the
+  /// queue, and a post is refused at once.
+  std::atomic<std::size_t> controls_waiting_{0};
+  bool destroying_ = false;
   /// A wait_for_work() is (about to be) blocked: a post notifies wakeup_.
   std::atomic<bool> idle_waiting_{false};
   /// What wait_for_work() blocks on. Made at construction and shared with the lock home's port,

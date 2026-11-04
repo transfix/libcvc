@@ -40,19 +40,17 @@ boost::shared_ptr<cvc::state> host_held(cvc::state *node) {
 async_scheduler::~async_scheduler() {
   home_.reset();
   // Commands posted and never applied: their done gets false. Taken under the lock, so a post
-  // that returned before the destruction began is seen; and again until none is left, since a
-  // done may post another, which is refused too rather than dropped.
-  for (;;) {
-    std::vector<std::pair<int, control_cmd>> left;
-    {
-      std::lock_guard<std::mutex> lock(ingress_mutex_);
-      left.swap(controls_);
-    }
-    if (left.empty())
-      break;
-    for (auto &entry : left)
-      refuse_control(entry.second);
+  // that returned before the destruction began is seen. From then on a post is refused at once
+  // (post_control): a done that posts again is refused too, rather than dropped, and nothing is
+  // queued behind this.
+  std::vector<std::pair<int, control_cmd>> left;
+  {
+    std::lock_guard<std::mutex> lock(ingress_mutex_);
+    destroying_ = true;
+    left.swap(controls_);
   }
+  for (auto &entry : left)
+    refuse_control(entry.second);
 }
 
 void async_scheduler::set_lock_manager(std::shared_ptr<lock_manager> mgr, lock_attach attach) {
@@ -470,21 +468,9 @@ void async_scheduler::drain(bool in_step) {
       finished.swap(completions_);
       controls.swap(controls_);
       ingress_pending_.store(false, std::memory_order_relaxed);
-      // control_pending_ stays set until the batch's commands are applied: a command waits until
-      // then, and has_pending_control() says so.
+      // The batch's commands stay counted as waiting, each until it is applied or refused.
     }
     chain_valid_ = false;
-    // Once the batch's commands are applied (or refused, or back in the queue), whatever is
-    // queued now says whether a command waits.
-    const auto settle_pending = [this, had = !controls.empty()]() noexcept {
-      if (!had)
-        return;
-      try {
-        std::lock_guard<std::mutex> lock(ingress_mutex_);
-        control_pending_.store(!controls_.empty(), std::memory_order_release);
-      } catch (...) { // left set: the next drain looks, and settles it
-      }
-    };
     // On the scheduler thread now: deliver_to_receivers mutates process state, which is safe
     // here (no other thread touches the scheduler). A message with no waiter falls into the
     // per-path pending FIFO, exactly as an on-thread msg-send would. Then the settled calls, then
@@ -502,15 +488,16 @@ void async_scheduler::drain(bool in_step) {
       while (c < controls.size()) {
         auto &[pid, cmd] = controls[c++];
         apply_control(pid, cmd);
+        controls_waiting_.fetch_sub(1, std::memory_order_release);
       }
     } catch (...) {
-      if (c > 0) // a command threw: it is refused
+      if (c > 0) { // a command threw: it is refused
         refuse_control(controls[c - 1].second);
+        controls_waiting_.fetch_sub(1, std::memory_order_release);
+      }
       requeue_ingress(batch, m, finished, f, controls, c);
-      settle_pending();
       throw;
     }
-    settle_pending();
   }
   if (!async_calls_.empty()) {
     charge_async_calls(in_step ? now_for_step() : clock::now());
@@ -969,8 +956,15 @@ void async_scheduler::charge_async_calls_from(std::size_t first, clock::time_poi
     if (!proc || is_finished(proc->status))
       continue;
     if (!call->finished() && call->past_timeout(now) && call->settle_timeout()) {
-      // Its own timeout: it raises TimeoutError at the call, and its kernel is told to stop.
-      call->cancel();
+      // Its own timeout: it raises TimeoutError at the call, and its kernel is told to stop. It
+      // is finished, and its waiters woken, even when its cancel hook throws (against its
+      // contract), which is reported after.
+      try {
+        call->cancel();
+      } catch (...) {
+        finish_async_call(call);
+        throw;
+      }
       finish_async_call(call);
       continue;
     }
@@ -1019,8 +1013,10 @@ void async_scheduler::check_charged(clock::time_point now) {
 }
 
 void async_scheduler::cancel_async_calls(int pid) {
-  if (std::none_of(async_calls_.begin(), async_calls_.end(),
-                   [pid](const std::shared_ptr<async_call> &c) { return c->pid() == pid; }))
+  const auto of_pid = [pid](const std::shared_ptr<async_call> &c) { return c->pid() == pid; };
+  const std::size_t n =
+      static_cast<std::size_t>(std::count_if(async_calls_.begin(), async_calls_.end(), of_pid));
+  if (n == 0)
     return;
   // Out of the list first, then the rate: reading it may publish it, a write to the tree whose
   // slots may do anything, kill this process too (that kill finds no calls left to cancel, so it
@@ -1028,28 +1024,42 @@ void async_scheduler::cancel_async_calls(int pid) {
   // Each is claimed as it leaves the list (td 4.9, S0.9), so its completion, when it comes,
   // charges nothing more. And it is settled, with the error every await of it raises from now on
   // (another process's: a fork child's), however it awaits: parked in await or await-all, after
-  // the cancel, or blocked in a generator's body. The kernel's own settling, when it comes, is
-  // ignored, and work that never settles once cancelled (async_start) is finished all the same.
+  // the cancel, or blocked in a generator's body. Settled before its cancel hook runs, so the
+  // kernel's own settling, once told to stop, is ignored whenever it comes, work that never
+  // settles once cancelled (async_start) is finished all the same, and a hook that throws
+  // (against its contract) skips neither the settle nor the wake: it is reported once they are
+  // done.
   std::vector<std::shared_ptr<async_call>> calls;
+  calls.reserve(n); // so recording a claimed call can't fail
+  std::exception_ptr hook_error;
   for (auto it = async_calls_.begin(); it != async_calls_.end();) {
-    if ((*it)->pid() != pid) {
+    if (!of_pid(*it)) {
       ++it;
       continue;
     }
     std::shared_ptr<async_call> call = std::move(*it);
     it = async_calls_.erase(it);
-    const bool claimed = !call->closed_.exchange(true, std::memory_order_acq_rel);
-    if (claimed)
+    if (!call->closed_.exchange(true, std::memory_order_acq_rel)) {
       calls.push_back(call);
-    call->cancel();
-    if (claimed) {
       const std::string &name = call->function_name();
       call->settle({},
                    std::make_exception_ptr(dsl_error(
                        "RuntimeError", name + ": cancelled: the process that made the call ended",
                        "async", {{"function", value_t(name)}})));
     }
+    try {
+      call->cancel();
+    } catch (...) {
+      if (!hook_error)
+        hook_error = std::current_exception();
+    }
   }
+  // Another process may be waiting for one of them: a fork child awaiting the same future. It is
+  // woken, and reads the call's outcome, the error above (S0.9). Woken before the rate is read:
+  // a slot that throws when the rate is published must not leave it waiting for a call nothing
+  // finishes again.
+  for (const std::shared_ptr<async_call> &call : calls)
+    wake_async_waiters(call->channel());
   process *proc = procs_.find(pid);
   const double rate = proc ? async_steps_per_cpu_ms(*proc) : 0.0;
   proc = procs_.find(pid);
@@ -1059,10 +1069,8 @@ void async_scheduler::cancel_async_calls(int pid) {
     for (const std::shared_ptr<async_call> &call : calls)
       detail::charge_async_call(*proc, *call, rate, true, now);
   }
-  // Another process may be waiting for one of them: a fork child awaiting the same future. It is
-  // woken, and reads the call's outcome, the error above (S0.9).
-  for (const std::shared_ptr<async_call> &call : calls)
-    wake_async_waiters(call->channel());
+  if (hook_error)
+    std::rethrow_exception(hook_error);
 }
 
 void async_scheduler::cancel_async_calls_of(int pid) {
@@ -1663,12 +1671,20 @@ bool async_scheduler::post_control(int pid, control_cmd cmd) {
   // Any thread. Queued with the ingress and applied by the next drain, on the scheduler thread
   // (apply_control): the posting thread may not read procs_, so an unknown pid is found, and
   // refused, there. Notified under the lock, as post_message is.
-  std::lock_guard<std::mutex> lock(ingress_mutex_);
-  controls_.emplace_back(pid, std::move(cmd));
-  control_pending_.store(true, std::memory_order_release);
-  ingress_pending_.store(true, std::memory_order_seq_cst);
-  notify_work();
-  return true;
+  {
+    std::lock_guard<std::mutex> lock(ingress_mutex_);
+    if (!destroying_) {
+      controls_.emplace_back(pid, std::move(cmd));
+      controls_waiting_.fetch_add(1, std::memory_order_release);
+      ingress_pending_.store(true, std::memory_order_seq_cst);
+      notify_work();
+      return true;
+    }
+  }
+  // The scheduler is being destroyed (a done its destructor calls posted this): refused at once,
+  // never queued, so the destructor's refusals end.
+  refuse_control(cmd);
+  return false;
 }
 
 void async_scheduler::apply_control(int pid, control_cmd &cmd) {
@@ -1720,11 +1736,10 @@ void async_scheduler::requeue_ingress(std::vector<std::pair<std::string, value_t
     completions_.insert(completions_.begin(), std::make_move_iterator(finished.begin() + f),
                         std::make_move_iterator(finished.end()));
     f = finished.size();
-    if (c < controls.size()) {
+    if (c < controls.size()) { // back in the queue: still waiting
       controls_.insert(controls_.begin(), std::make_move_iterator(controls.begin() + c),
                        std::make_move_iterator(controls.end()));
       c = controls.size();
-      control_pending_.store(true, std::memory_order_release);
     }
   } catch (...) {
     // No memory to queue them again. A settled call left behind still wakes who waits for it: the
@@ -1735,8 +1750,10 @@ void async_scheduler::requeue_ingress(std::vector<std::pair<std::string, value_t
       } catch (...) {
       }
     }
-    for (; c < controls.size(); ++c)
+    for (; c < controls.size(); ++c) {
       refuse_control(controls[c].second);
+      controls_waiting_.fetch_sub(1, std::memory_order_release);
+    }
   }
 }
 
