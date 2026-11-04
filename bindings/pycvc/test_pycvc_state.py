@@ -8,6 +8,9 @@ of THAT app's tree, carrying the full dotted path (real push).
 """
 
 import gc
+import os
+import threading
+import time
 
 import pycvc
 
@@ -303,6 +306,74 @@ def test_update_value_not_wrapped():
     # Its std::function parameter has no Python form (pycvc.i ignores it).
     app = pycvc.make_app()
     assert not hasattr(pycvc.State.instance(app).child("u"), "updateValue")
+
+
+# ── the accessors against another thread's deletes (threaded execution, Stage 0) ──
+# The sanitizer jobs set CVC_LOCKS_SANITIZER=1 and run the smaller size, as
+# test_pycvc_state_exec_locks.py does; LONG is a whole run's ceiling.
+SANITIZER = os.environ.get("CVC_LOCKS_SANITIZER") == "1"
+LONG = 600.0
+
+
+def test_hz06_accessors_against_deletes():
+    # HZ-6's twin for the free accessors (td 4.8, 4.12; S0.4; Linux TSan and ASan). Exec A
+    # deletes p.x and makes p.x.y again, round after round, on a thread of its own (its run
+    # releases the GIL while it steps), while this thread reads p, its children and p.x.y and
+    # removes p.x.y and p.x. Each accessor holds the nodes it walks, so a read gives a value or
+    # "no node", p's sibling never changes, and nothing crashes.
+    n = 2000 if SANITIZER else 20000
+    app = pycvc.make_app()
+    pycvc.state_set(app, "p.s1", "one")
+    pycvc.state_set(app, "p.x.y", "0")
+    a = pycvc.Exec(app)
+    prog = (f'(begin (set i 0) (while (< i {n}) (begin (state-delete "p.x") '
+            '(state-set "p.x.y" (str i)) (set i (+ i 1)))) i)')
+    out = {}
+
+    def run_a():
+        try:
+            out["value"] = a.run(prog)
+        except BaseException as e:  # noqa: BLE001 - the case reads it
+            out["error"] = e
+
+    counts = {"values": 0, "misses": 0}
+
+    def read(fn, *args):
+        # A value, or None for a node another thread deleted first.
+        try:
+            v = fn(app, *args)
+        except RuntimeError as e:
+            assert "no node at path" in str(e), e
+            counts["misses"] += 1
+            return None
+        counts["values"] += 1
+        return v
+
+    t = threading.Thread(target=run_a, name="hz06-a")
+    t0 = time.monotonic()
+    t.start()
+    rounds = 0
+    while rounds < n and (t.is_alive() or rounds < 10):
+        rounds += 1
+        v = read(pycvc.state_get, "p.x.y")
+        assert v is None or isinstance(v, str), v
+        assert pycvc.state_has(app, "p.x.y") in (True, False)
+        assert "s1" in pycvc.state_children(app, "p")
+        assert read(pycvc.state_comment, "p.x.y") in (None, "")
+        assert read(pycvc.state_property, "p.x", "k") in (None, "")
+        read(pycvc.state_property_keys, "p.x.y")
+        if rounds % 3 == 0:
+            pycvc.state_remove(app, "p.x.y")
+        if rounds % 7 == 0:
+            pycvc.state_remove(app, "p.x")
+        assert pycvc.state_get(app, "p.s1") == "one"
+    t.join(LONG)
+    assert not t.is_alive(), f"Exec A did not finish within {LONG} s"
+    assert "error" not in out, out["error"]
+    assert out["value"] == str(n), out["value"]
+    print(f"  {rounds} rounds of reads ({counts['values']} values, {counts['misses']} misses) "
+          f"beside {n} deletes: {time.monotonic() - t0:.2f} s")
+    assert pycvc.state_get(app, "p.s1") == "one"
 
 
 if __name__ == "__main__":
