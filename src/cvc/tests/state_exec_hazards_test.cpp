@@ -320,3 +320,79 @@ TEST(Hazards, HZ12_PrintWritesWholeLines) {
   for (int t = 0; t < kThreads; ++t)
     EXPECT_EQ(next[t], kLines) << "thread " << t;
 }
+
+// --- R0-mid: the schedulers' settings walks (implementer S) ---
+
+// R0m-memory-3 (R0-mid's probe M5): a scheduler reads its settings from its watch root (each
+// submission re-reads them once something under state_exec changed: settings_changes) and
+// publishes them there (load_settings), on its own thread, while another thread's program deletes
+// and re-makes state_exec under the same root. Every read holds the nodes it walks, and the
+// version's connection the node it is connected to, so neither walks a node the delete frees.
+// Before, the readers stalled within 2 s on a freed node's mutex. HZ-6 missed it: its worlds have
+// no watch root, so they read no settings.
+TEST(Hazards, SettingsWalksSurviveADeleteOfStateExec) {
+  cvc::app app;
+  cvc::state &tree = cvc::state::instance(app);
+  tree("state_exec.defaults.data.step_nodes").value(std::string("0"));
+  const int n = under_sanitizer() ? 300 : 3000;
+  const std::string deleter = loop(n, R"((state-delete "state_exec")
+      (state-set "state_exec.defaults.limits.max_alloc_bytes" "0")
+      (state-set "state_exec.defaults.data.step_nodes" "0"))");
+  std::atomic<bool> deleting{true}, hung{false};
+  std::atomic<std::size_t> submits{0}, loads{0};
+  std::string deleted, wrong;
+  const auto t0 = clock_type::now();
+  std::thread reader([&] { // submissions: settings_for_submit's reads, per change
+    async_scheduler sched;
+    sched.set_watch_root(&tree);
+    while (deleting.load()) {
+      const int pid = sched.execute(std::string("1"));
+      sched.sync_run();
+      const auto r = sched.get_result(pid);
+      if (!r || to_string(*r) != "1")
+        wrong = r ? to_string(*r) : "<none>";
+      sched.reap(pid);
+      submits.fetch_add(1);
+    }
+  });
+  std::thread publisher([&] { // load_settings: reads, then publishes under state_exec.schedulers
+    scheduler sched;
+    sched.set_watch_root(&tree);
+    sched.set_id("hz_settings");
+    while (deleting.load()) {
+      sched.load_settings();
+      loads.fetch_add(1);
+    }
+  });
+  std::thread writer([&] {
+    tree_program prog(tree);
+    deleted = prog.run(deleter);
+    deleting.store(false);
+  });
+  // A hang is the failure this guards against: report it rather than wait for good.
+  std::thread watchdog([&] {
+    while (deleting.load()) {
+      if (seconds_since(t0) > kProcessCeiling) {
+        hung.store(true);
+        std::printf("Hazards.SettingsWalksSurviveADeleteOfStateExec: no end after %.0f s (%zu "
+                    "submissions, %zu loads)\n",
+                    kProcessCeiling, submits.load(), loads.load());
+        std::fflush(stdout);
+        std::_Exit(3);
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+  });
+  writer.join();
+  reader.join();
+  publisher.join();
+  watchdog.join();
+  std::printf("settings walks: %d deletes of state_exec, %zu submissions, %zu load_settings, "
+              "%.3f s\n",
+              n, submits.load(), loads.load(), seconds_since(t0));
+  EXPECT_FALSE(hung.load());
+  EXPECT_EQ(deleted, std::to_string(n));
+  EXPECT_EQ(wrong, "");
+  EXPECT_GT(submits.load(), 0u);
+  EXPECT_GT(loads.load(), 0u);
+}

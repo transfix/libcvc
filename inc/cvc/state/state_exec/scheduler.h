@@ -78,6 +78,15 @@ private:
   std::size_t watchers_ = 0;
 };
 
+/// The value at `path` under `root`, or nullopt when there is none: the schedulers' settings
+/// reads. The node is held while it is read, and each node of the walk while it is walked:
+/// another thread's program may delete them meanwhile (R0-mid). The walk starts at `root`, which
+/// the caller keeps alive, and takes no reference on it.
+std::optional<std::string> setting_value(cvc::state &root, const std::string &path);
+/// Write `value` at `path` under `root`, making the nodes that are missing: the schedulers'
+/// settings publication. The chain below `root` is held while the write emits through it.
+void publish_setting(cvc::state &root, const std::string &path, const std::string &value);
+
 } // namespace detail
 
 /// Synchronous process scheduler.

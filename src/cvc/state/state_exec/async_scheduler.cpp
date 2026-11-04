@@ -1083,6 +1083,7 @@ void async_scheduler::set_watch_root(cvc::state *root, boost::shared_ptr<cvc::st
   if (root != watch_root_) {
     rate_valid_ = false;
     submit_valid_ = false;
+    settings_changes_.clear(); // the node it holds is the old root's
     watch_roots_.invalidate(); // an entry whose root this is now counts under it
   }
   watch_root_ = root;

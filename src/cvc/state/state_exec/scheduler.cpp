@@ -148,12 +148,39 @@ const process_ptr &scheduler::no_process() {
 // Settings — state-tree-backed configuration
 // ---------------------------------------------------------------------------
 
-// Helper: read a size_t from a state node, returning nullopt on missing/bad.
-static std::optional<std::size_t> read_size_setting(cvc::state *root, const std::string &path) {
-  auto *node = root->findDescendant(path);
+namespace detail {
+
+std::optional<std::string> setting_value(cvc::state &root, const std::string &path) {
+  const cvc::state::state_ptr node =
+      root.findDescendantShared(cvc::state::state_ptr(cvc::state::state_ptr(), &root), path);
   if (!node)
     return std::nullopt;
-  std::string v = node->value();
+  return node->value();
+}
+
+void publish_setting(cvc::state &root, const std::string &path, const std::string &value) {
+  // The chain below `root`, which the write emits through, let go of leaf first: a node another
+  // thread unlinked meanwhile, whose last owner this is, goes after its descendants.
+  struct leaf_first {
+    std::vector<cvc::state::state_ptr> pins;
+    ~leaf_first() {
+      while (!pins.empty())
+        pins.pop_back();
+    }
+  } chain;
+  const cvc::state::state_ptr node =
+      root.sharedChild(cvc::state::state_ptr(cvc::state::state_ptr(), &root), path, &chain.pins);
+  node->value(value);
+}
+
+} // namespace detail
+
+// Helper: read a size_t from a state node, returning nullopt on missing/bad.
+static std::optional<std::size_t> read_size_setting(cvc::state *root, const std::string &path) {
+  const std::optional<std::string> value = detail::setting_value(*root, path);
+  if (!value)
+    return std::nullopt;
+  const std::string &v = *value;
   if (v.empty())
     return std::nullopt;
   try {
@@ -195,31 +222,37 @@ void scheduler::load_settings() {
   // Publish effective values to per-scheduler subtree
   if (!id_.empty()) {
     std::string base = std::string(sched_prefix) + "." + id_;
-    (*watch_root_)(base + ".max_pending_messages").value(std::to_string(max_pending_messages));
-    (*watch_root_)(base + ".parser.max_depth").value(std::to_string(parse_options_.max_depth));
-    (*watch_root_)(base + ".parser.step_tokens").value(std::to_string(parse_options_.step_tokens));
-    (*watch_root_)(base + ".data.step_nodes").value(std::to_string(data_options_.step_nodes));
-    (*watch_root_)(base + ".limits.max_alloc_bytes").value(std::to_string(max_alloc_bytes_));
-    (*watch_root_)(base + ".limits.heap_check_steps")
-        .value(std::to_string(heap_options_.check_steps));
+    cvc::state &root = *watch_root_;
+    detail::publish_setting(root, base + ".max_pending_messages",
+                            std::to_string(max_pending_messages));
+    detail::publish_setting(root, base + ".parser.max_depth",
+                            std::to_string(parse_options_.max_depth));
+    detail::publish_setting(root, base + ".parser.step_tokens",
+                            std::to_string(parse_options_.step_tokens));
+    detail::publish_setting(root, base + ".data.step_nodes",
+                            std::to_string(data_options_.step_nodes));
+    detail::publish_setting(root, base + ".limits.max_alloc_bytes",
+                            std::to_string(max_alloc_bytes_));
+    detail::publish_setting(root, base + ".limits.heap_check_steps",
+                            std::to_string(heap_options_.check_steps));
     // Read live at every charge; this publishes what it is now.
-    const double rate = async_steps_per_cpu_ms_from_state(*watch_root_, id_);
-    publish_async_steps_per_cpu_ms(*watch_root_, id_, rate);
+    const double rate = async_steps_per_cpu_ms_from_state(root, id_);
+    publish_async_steps_per_cpu_ms(root, id_, rate);
     published_rate_ = rate;
-    (*watch_root_)(base + ".policy")
-        .value(policy_ == scheduling_policy::round_robin ? "round_robin"
-               : policy_ == scheduling_policy::priority  ? "priority"
-                                                         : "priority_rr");
+    detail::publish_setting(root, base + ".policy",
+                            policy_ == scheduling_policy::round_robin ? "round_robin"
+                            : policy_ == scheduling_policy::priority  ? "priority"
+                                                                      : "priority_rr");
   }
 }
 
 // A non-negative decimal number ("1000", "0.5", ".25"), read without the C locale's help; nullopt
 // for anything else.
 static std::optional<double> read_rate_setting(cvc::state *root, const std::string &path) {
-  auto *node = root->findDescendant(path);
-  if (!node)
+  const std::optional<std::string> value = detail::setting_value(*root, path);
+  if (!value)
     return std::nullopt;
-  const std::string v = node->value();
+  const std::string &v = *value;
   double whole = 0.0, scale = 1.0;
   bool digits = false, point = false;
   for (const char c : v) {
@@ -243,10 +276,10 @@ static std::optional<double> read_rate_setting(cvc::state *root, const std::stri
 scheduling_policy policy_from_state(cvc::state &root, scheduling_policy fallback, bool *unknown) {
   if (unknown)
     *unknown = false;
-  const cvc::state *node = root.findDescendant("state_exec.policy");
-  if (!node)
+  const std::optional<std::string> value = detail::setting_value(root, "state_exec.policy");
+  if (!value)
     return fallback;
-  const std::string v = const_cast<cvc::state *>(node)->value();
+  const std::string &v = *value;
   if (v.empty())
     return fallback;
   if (v == "round_robin")
@@ -277,9 +310,10 @@ void publish_async_steps_per_cpu_ms(cvc::state &root, const std::string &schedul
     return;
   char buf[32];
   std::snprintf(buf, sizeof buf, "%.17g", rate);
-  root(std::string(scheduler::sched_prefix) + "." + scheduler_id +
-       ".effective.async_steps_per_cpu_ms")
-      .value(buf);
+  detail::publish_setting(root,
+                          std::string(scheduler::sched_prefix) + "." + scheduler_id +
+                              ".effective.async_steps_per_cpu_ms",
+                          buf);
 }
 
 double scheduler::async_steps_per_cpu_ms(const process &proc) {
@@ -819,6 +853,7 @@ void scheduler::set_watch_root(cvc::state *root, boost::shared_ptr<cvc::state> p
   if (root != watch_root_) {
     if (tree_changes_.root())
       tree_changes_.watch(root); // counted afresh (a new root counts as a change)
+    settings_changes_.clear();   // the node it holds is the old root's
     rate_valid_ = false;
     watch_roots_.invalidate(); // an entry whose root this is now counts under it
   }
