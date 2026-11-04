@@ -1884,6 +1884,53 @@ TEST(AsyncCalls, ACancelledStartedCallRaisesForAnAwaitAfterTheCancel) {
   EXPECT_EQ(sp.stopped, 1);
 }
 
+// R0-final's R0a-conc-1: a drain whose finish of a completed call throws (the step rate it reads
+// is published to the tree, and a slot there throws) has claimed the call and taken it off the
+// list; it still wakes the process awaiting it before the exception propagates, and that process
+// gets the call's value. It used to stay parked for good: nothing finishes a call twice.
+TEST(AsyncCalls, AFinishThatThrowsStillWakesItsWaiter) {
+  std::atomic<bool> release{false}, started{false};
+  world w(async_sched);
+  w.async->set_id("finish_throws");
+  register_async_fn(w.env, *w.host, "held", [&](std::span<const value_t>) -> async_kernel {
+    return [&](async_call &) -> value_t {
+      started = true;
+      const auto end = clock_type::now() + std::chrono::seconds(20);
+      while (!release.load() && clock_type::now() < end)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      return value_t(int64_t(7));
+    };
+  });
+  const int pid = w.submit("(+ 1 (held))");
+  ASSERT_TRUE(w.pump([&] { return started.load() && w.waiting(pid); }));
+  // A new rate, so the finish's read publishes it; then a slot under the published key that throws.
+  (*w.tree)("state_exec.defaults.limits.async_steps_per_cpu_ms").value(std::string("2000"));
+  std::atomic<bool> armed{true};
+  boost::signals2::scoped_connection slot =
+      (*w.tree)("state_exec.schedulers").childChanged.connect([&](const std::string &) {
+        if (armed.exchange(false))
+          throw std::runtime_error("a slot on the tree threw");
+      });
+  release = true;
+  ASSERT_TRUE(w.async->wait_for_work(clock_type::now() + std::chrono::seconds(10)));
+  bool threw = false;
+  for (int i = 0; i < 1000 && !threw; ++i) { // the completion may land a moment after the wake
+    try {
+      w.async->drain_ingress();
+    } catch (const std::runtime_error &) {
+      threw = true;
+    }
+    if (!threw)
+      w.async->wait_for_work(clock_type::now() + std::chrono::milliseconds(10));
+  }
+  slot.disconnect();
+  EXPECT_TRUE(threw) << "the finish never threw";
+  EXPECT_TRUE(w.pump([&] { return w.finished(pid); }, 5.0)) << "the awaiting process stayed parked";
+  const std::optional<value_t> r = w.result(pid);
+  ASSERT_TRUE(r.has_value());
+  EXPECT_EQ(std::get<int64_t>(r->v), 8);
+}
+
 // --- Stage 0 hazards (td 8.1) ---
 
 namespace {
