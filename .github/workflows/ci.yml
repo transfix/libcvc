@@ -1490,6 +1490,10 @@ jobs:
               state_exec_hazards_test: OK ] Hazards.SettingsWalksSurviveADeleteOfStateExec
               state_exec_async_test: OK ] AsyncPostControl.KillPauseResumeSignalFromAnyThread
               state_exec_async_test: OK ] SyncPostControl.KillPauseResumeSignalFromAnyThread
+              state_exec_hazards_test: OK ] Hazards.ContextAssignmentReleasesTheChrootFirst
+              test_pycvc_state.py: ok: test_hz06_accessors_against_deletes
+              test_pycvc_state.py: ok: test_observer_dropped_mid_callback_is_never_called
+              test_pycvc_state_exec_exceptions.py: ok: test_a_builtin_exception_through_python_keeps_its_class
               state_exec_async_calls_test: OK ] AsyncCalls.HZ13_AFutureAwaitedTwiceIsChargedOnce
               state_exec_async_calls_test: OK ] AsyncCalls.HZ13_AnOutcomeTakenBeforeTheDrainIsNotChargedAgain
               state_exec_async_calls_test: OK ] AsyncCalls.HZ13_ACancelledCallWakesEveryWaiter
@@ -1554,6 +1558,10 @@ jobs:
               state_exec_hazards_test: OK ] Hazards.SettingsWalksSurviveADeleteOfStateExec
               state_exec_async_test: OK ] AsyncPostControl.KillPauseResumeSignalFromAnyThread
               state_exec_async_test: OK ] SyncPostControl.KillPauseResumeSignalFromAnyThread
+              state_exec_hazards_test: OK ] Hazards.ContextAssignmentReleasesTheChrootFirst
+              test_pycvc_state.py: ok: test_hz06_accessors_against_deletes
+              test_pycvc_state.py: ok: test_observer_dropped_mid_callback_is_never_called
+              test_pycvc_state_exec_exceptions.py: ok: test_a_builtin_exception_through_python_keeps_its_class
               state_exec_async_calls_test: OK ] AsyncCalls.HZ13_AFutureAwaitedTwiceIsChargedOnce
               state_exec_async_calls_test: OK ] AsyncCalls.HZ13_AnOutcomeTakenBeforeTheDrainIsNotChargedAgain
               state_exec_async_calls_test: OK ] AsyncCalls.HZ13_ACancelledCallWakesEveryWaiter
