@@ -1,7 +1,7 @@
 # Ariadne conference: more streams, app and screen sharing, desktop audio
 
-> **Status: PROPOSED (2026-11-03).** Nothing here is built. This is the plan, and the decisions in
-> §12 are still open. Parent roadmap: [`ARIADNE_CONFERENCE_ROADMAP.md`](ARIADNE_CONFERENCE_ROADMAP.md)
+> **Status: PLANNED (2026-11-03).** Nothing here is built. The owner settled the decisions in §12 on
+> 2026-11-03. Parent roadmap: [`ARIADNE_CONFERENCE_ROADMAP.md`](ARIADNE_CONFERENCE_ROADMAP.md)
 > (§5l points here).
 
 ## 0. The ask
@@ -53,7 +53,9 @@ Six problems, each solved in a phase below.
    next keyframe and ask for one. Re-encoding rungs on the relay is no longer cheap, so rungs
    become temporal layers plus a publisher-made thumbnail. (SH1, §4)
 3. **One TCP connection.** A 200 KB keyframe written ahead of a pose snapshot delays it by the
-   keyframe's send time. The send queue needs priorities and big frames need chunking. (SH2, §5)
+   keyframe's send time. The WebSocket path needs a priority queue and chunking. Shares also get a
+   WebRTC media leg, and each client's capability record decides which path carries a stream.
+   (SH2a/SH2b, §5)
 4. **Audio.** The mixer must become stereo. Desktop audio wants Opus in music mode, with no voice
    gating. The capture must leave out the conference's own playback, or every other participant
    hears themselves. (SH5, §8)
@@ -103,6 +105,28 @@ conf.rooms.<room>.participants.<pid>.streams.<name>.
 | share video | `app*`, `screen*`, `window*` | no distance tier (a presentation is for the room); subscription-driven; keyframe-aware (§4) |
 | share audio | `*.audio` | follows its video's subscription; never spatial |
 | thumbnail | `*.thumb` | MJPEG, 1 fps, everyone; what the roster and grid show |
+
+**The capability record (D5).** At join, each client writes what it can do. The publisher, the
+relay and the UI choose from it.
+
+```
+conf.rooms.<room>.participants.<pid>.caps.
+    transports  ws, grpc, webrtc          what this build and platform can speak
+    encode      mjpeg, opus, h264, vp9    encoders it has, hardware or software
+    decode      mjpeg, opus, h264, vp9
+    capture     camera:2, mic:1, app, screen, window, system_audio, own_audio_excluded
+    platform    "windows 11 26300 / native", "chrome 141 / macos 14.5"
+```
+
+- **Who writes what.** The client writes `caps`; the write gate admits it, capped in size. The
+  relay writes what it chose for each stream at `net.relay.transport.<name>`: `ws` or `webrtc`,
+  with a reason (for example `ws: udp blocked`). That key is relay-only, like
+  `net.relay.video`.
+- **The relay keeps a record per device.** It is keyed by the device tag and kept beside the device
+  pins, and it holds the last transport that worked. A client whose UDP failed last time starts on
+  WS without waiting out an ICE timeout, and moves up when a probe succeeds.
+- **The UI reads `caps`** and offers only what works. For example, it shows no "share system audio"
+  in Firefox, and it says when a viewer cannot decode a share.
 
 **Subscriptions.** A viewer writes the streams it wants at `participants.<me>.want`. By default it
 gets every camera and mic (today's behaviour), and every share at `thumb`. It gets a share at full
@@ -182,14 +206,22 @@ to at most one per stream per second, and can ask on a viewer's behalf.
 - **The relay never transcodes.** It stays cheap, and it stays compatible with end-to-end
   encryption (SFrame, parent §6g).
 
-**Capabilities.** Each client publishes `participants.<pid>.caps.decode`, for example
-`mjpeg,opus,h264,vp9`. The publisher picks a codec that every current subscriber can decode. A
-viewer that can decode neither gets only the thumbnail, with a note saying why.
+**Codec choice (D1).** H.264 comes first, and VP9 is the native software fallback. The publisher
+picks a codec that every current subscriber lists in `caps.decode` (§3). A viewer that can decode
+neither gets only the thumbnail, with a note saying why.
 
 **Cameras stay MJPEG** in this plan. Their relay rungs work, and frames are small at camera sizes.
 Moving cameras to H.264 later is a bandwidth win, but it is not part of this work.
 
-## 5. SH2: transport for big frames
+## 5. SH2: two transports for big frames, chosen by the capability record
+
+**The owner's decision (D5):** "we want WebRTC but also want robust websocket support and some
+record of client capabilities to decide what to use". Both paths are first-class.
+- The WebSocket works through any proxy, and it is always there.
+- WebRTC gives shares UDP, congestion control and the browser's own encoders.
+- The capability record (§3) and the relay's per-device record pick the path for each stream.
+
+### SH2a: a robust WebSocket path
 
 - **A priority send queue** in the WS transport, and in the gRPC transport, which also queues every
   write. Priority order:
@@ -206,8 +238,47 @@ Moving cameras to H.264 later is a bandwidth win, but it is not part of this wor
 - **Measure before adding a socket.** If the queue is not enough under netem on catx-03 (the lane
   bench, parent §6 and `CONFERENCE_UNRELIABLE_TRANSPORT.md`), shares get a second, media-only
   WebSocket with the same room token and device proof.
-- **Later, WebRTC (parent §6d).** Shares are what RTP congestion control is for, and SFrame stays
-  possible because the relay never transcodes.
+
+### SH2b: a WebRTC media leg
+
+Share video and audio travel as RTP tracks between each client and the relay. Cameras and mics can
+follow later. The relay is an SFU: it forwards RTP and never decodes it.
+
+- **Browser publisher.** The `getDisplayMedia` or `canvas.captureStream` track goes straight into
+  `RTCPeerConnection.addTrack`.
+  - The browser encodes (H.264, or VP9), paces and runs congestion control. This path needs no
+    WebCodecs, which stays the WS path's encoder.
+  - Simulcast encodings (full and low) give the relay its layers.
+- **Browser receiver.** The track is drawn into the stream's GL texture, through a `<video>`
+  element or `MediaStreamTrackProcessor`.
+- **Native.** The SH1 encoder feeds libdatachannel's RTP packetizers (H.264, Opus); on receive the
+  depacketized frames go to the SH1 decoder.
+  - libdatachannel is already packaged for the lanes (`fast_lane_rtc.cpp`). It gives ICE, DTLS,
+    SRTP and RTCP (NACK, PLI).
+  - It has **no bandwidth estimator**, so a native sender's rate control has to come from RTCP
+    receiver reports or TWCC. That is real work.
+- **The relay as SFU:**
+  - forward RTP per subscriber, rewriting SSRC and sequence numbers;
+  - choose a simulcast layer per viewer (D3: the low layer, or full on stage);
+  - turn PLI into keyframe requests;
+  - answer NACKs from a short packet cache.
+- **Signalling.** SDP offers and answers go over the state message bus, as the lanes' do. The
+  answer must bypass the admission hold, a known trap from the lanes.
+- **Production.** The relay's UDP port must be forwarded. The lanes are off in production today,
+  and turning UDP on needs the owner's go-ahead.
+- **Why the lane results do not settle this.** The lanes carried media over SCTP data channels, and
+  their congestion control lost to TCP under loss. RTP tracks under the browser's congestion
+  control are a different path. Measure both on catx-03 netem.
+
+### Choosing the path for each stream
+
+- The relay picks `webrtc` when both the client's `caps.transports` and the device record allow it
+  and the peer connection is up. Otherwise it picks `ws`.
+- It publishes the choice at `net.relay.transport.<name>` (§3).
+- A stream can move between the two paths mid-share. It restarts with a keyframe on the new path,
+  and receivers switch over at that keyframe.
+- SFrame end-to-end encryption (parent §6g) stays possible on both paths, because the relay never
+  transcodes.
 
 ## 6. SH3: app share (the Ariadne GL frame)
 
@@ -351,31 +422,39 @@ other conferencing apps cannot offer.
 | **SH0** | Named streams, descriptors, gate, relay classes and subscriptions, stereo mixer; a second camera and mic on native | — | M | relay integration with 2+2 streams; bench `--streams` |
 | **SH0b** | Browser seam: device choice, an AudioWorklet; a second camera and mic in the browser | SH0 | M | headless Chrome, fake devices (`--use-fake-device-for-media-stream`) |
 | **SH1** | `video_encoder` / `video_decoder`: FFmpeg native, WebCodecs browser; `flags`; keyframe requests; keyframe-aware relay; caps; thumbnails | SH0 | L | codec round trip; relay drop-to-keyframe; browser ↔ native interop |
-| **SH2** | Priority queue and chunking (WS and gRPC); share rate control | SH1 | M | pose p99 with a share running, on catx-03 netem |
+| **SH2a** | Robust WS: priority queue and chunking (WS and gRPC); share rate control | SH1 | M | pose p99 with a share running, on catx-03 netem |
+| **SH2b** | WebRTC media leg: RTP tracks, relay SFU forwarding, simulcast layers, PLI/NACK, native rate control; the path picked from `caps` and the device record | SH0 (caps), SH1 (native) | L | share over WebRTC vs WS under netem; fallback to WS when UDP is blocked |
 | **SH3a/b** | App share: whole frame, cropped windows, then composed windows; privacy flags | SH0 (MJPEG at low fps), SH1 for full rate | M | golden frames; `share: never` never appears |
 | **SH4** | Screen and window capture: browser, then Windows, macOS, Linux | SH1, SH0b | browser S; Windows and macOS M each; Linux L | per-OS manual matrix; synthetic source in CI |
 | **SH5** | Desktop audio: browser, Windows, macOS, Linux v1 | SH4 (and the stereo mixer from SH0) | browser S; Windows M; macOS S; Linux S | sync skew test (§9); no own-playback echo |
 | **SH6** | Share menu, stage, in-world screen, roster badges, policy | SH3 or SH4 | M | CDP-driven UI run |
 
-**Three tracks that can run in parallel:**
-- **A, model and relay:** SH0 → SH2.
+**Five tracks that can run in parallel:**
+- **A, model and relay:** SH0 (with the capability record) → SH2a.
 - **B, codec:** SH1. Native FFmpeg and browser WebCodecs can be built side by side.
-- **C, capture front ends:** SH3a on MJPEG → browser SH4/SH5 → native SH4/SH5, one OS at a time.
+- **C1, browser capture:** SH3a on MJPEG → browser SH4/SH5.
+- **C2, native capture, at the same time as C1 (D2):** native SH3 → SH4/SH5 on Windows, then
+  macOS, then Linux.
+- **D, WebRTC media leg:** SH2b. It needs only SH0's capability record to start, and the browser
+  publisher needs no SH1 code.
 
-**First milestone: "browser screen + system audio".** SH0 + SH0b + the browser half of SH1 + the
-browser halves of SH4/SH5 + a minimal share button. A sharer on Chrome or Edge on Windows shows a
-screen with its audio to viewers on any browser. The deployed conference is browser-first, so this
-reaches users soonest.
+**Two first milestones, in parallel:**
+- **"Browser screen + system audio":** SH0 + SH0b + the browser half of SH1 + the browser halves of
+  SH4/SH5 + a minimal share button. A sharer on Chrome or Edge on Windows shows a screen with its
+  audio to viewers on any browser. It ships on the WS path first, and moves to WebRTC when SH2b
+  lands.
+- **"Windows native screen + desktop audio":** SH0 + the native half of SH1 + Windows SH4/SH5
+  (Windows.Graphics.Capture, WASAPI process loopback).
 
-## 12. Decisions for the owner
+## 12. Decisions (settled by the owner, 2026-11-03)
 
-| # | Question | Recommendation |
+| # | Question | Decision |
 |---|---|---|
-| D1 | Share codec: H.264 (hardware nearly everywhere, WebCodecs in every desktop browser) or royalty-free VP9/AV1 only | **H.264 first, VP9 as the native software fallback**, chosen per stream from the viewers' `caps.decode` |
-| D2 | Desktop capture order: browser first, or native first | **Browser first**: the deployed conference is a page; then Windows, macOS, Linux |
+| D1 | Share codec | **H.264 first, VP9 as the native software fallback**, chosen per stream from the viewers' `caps.decode` (§4) |
+| D2 | Capture order | **Browser and native in parallel** (tracks C1 and C2, §11). Native goes Windows, then macOS, then Linux |
 | D3 | What a viewer receives of a share by default | **The thumbnail for everyone, full rate once it is on that viewer's stage** |
 | D4 | Who may share | **Everyone now**, host-only once roles land |
-| D5 | Transport for shares | **The existing WS** with the priority queue and chunking; a second socket only if measured necessary; WebRTC later |
+| D5 | Transport for shares | **WebRTC and a robust WebSocket, both first-class.** A capability record per client, plus the relay's per-device record of what worked, decides which path carries each stream (§3, §5). Not the WS-only plan first proposed |
 | D6 | Desktop audio where we cannot leave out our own playback (endpoint loopback on old Windows, Linux v1) | **Allow it, with a warning**, and duck our playback while sharing |
 | D7 | "Live share" (replicate an `.ari` document instead of pixels) | **Later**, as its own roadmap item |
 
@@ -387,6 +466,9 @@ reaches users soonest.
   `MediaStreamTrackProcessor` is Chromium-first. Every browser path needs the `new VideoFrame(…)`
   fallback. Check minimum versions before writing the support table.
 - **cvc.dll exports** are near the 65,535 cap. New classes stay pimpl or file-local.
+- **WebRTC on native and in production.** libdatachannel brings no bandwidth estimator, so native
+  senders need their own rate control. Production needs the relay's UDP port forwarded and the
+  owner's go-ahead.
 - **Relay egress** is N viewers × share bitrate. There is no transcoding, so the CPU stays low, but
   the server's link must be checked for an 8-way room with one 2 Mbit/s share.
 - **Permission UX** differs on every platform: the macOS TCC prompt and its periodic re-prompts,
