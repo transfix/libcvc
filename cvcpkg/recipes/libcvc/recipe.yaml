@@ -476,6 +476,13 @@ package:
     - lib/cmake/cvc/
     - include/cvc/
     - include/xmlrpc/
+    # The Ariadne component library (cvc://components/*.ari: room_users, chat, ...).
+    # src/cvc installs it on every platform, and cvc:// looks for it beside the installed
+    # library (<bin or lib>/../share/libcvc/ariadne), so a native host resolves
+    # cvc://components/... with no CVC_ARIADNE_PATH. Up to 3.7.9 no bundle carried it: a
+    # document importing a component (the conference's Users and Chat windows) loaded
+    # without it everywhere but the browser pages, which embed the directory.
+    - share/libcvc/ariadne/
   cmake_packages:
     - name: cvc
       targets:

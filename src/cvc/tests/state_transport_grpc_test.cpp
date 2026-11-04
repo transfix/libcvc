@@ -88,6 +88,26 @@ TEST(StateTransportGrpcTest, ConnectFailsWhenPeerMissing) {
   t.stop();
 }
 
+// A peer named by host, not IP, through whichever resolver the transport leaves gRPC on. On Windows
+// that is the native one: gRPC's c-ares resolver aborted the process on its first real DNS lookup
+// (src/cvc/state/grpc_dns_resolver.h), so a transport sets GRPC_DNS_RESOLVER=native before gRPC
+// first reads it, unless it was already set. ("localhost" never reached that path: c-ares answers
+// it without a query, which is why the TLS test below dialing it passed all along.)
+TEST(StateTransportGrpcTest, ConnectsToAPeerNamedByHost) {
+  cvc::state_transport_grpc tA, tB;
+#ifdef _WIN32
+  const char *resolver = std::getenv("GRPC_DNS_RESOLVER");
+  ASSERT_NE(resolver, nullptr) << "a gRPC transport on Windows leaves GRPC_DNS_RESOLVER set";
+#endif
+  tA.start("127.0.0.1:0", "A", "C");
+  tB.start("127.0.0.1:0", "B", "C");
+  const std::string target = tA.listen_address();
+  const std::string port = target.substr(target.find_last_of(':') + 1);
+  EXPECT_TRUE(tB.connect_to_peer("localhost:" + port, std::chrono::seconds(5)));
+  tB.stop();
+  tA.stop();
+}
+
 // A writes and pumps while nobody is connected. pump_shard() drains
 // the journal and advances the publish cursor regardless of whether
 // there was anywhere to send, so without backfill-on-connect those
