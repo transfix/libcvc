@@ -1049,6 +1049,15 @@ chosen so each part can later come from the user without changing who decides.
 5. User controllers (sandboxed, deterministic, metered), or a user's body driven by a server
    controller of their choosing.
 
+### 5l. More streams, app and screen sharing, desktop audio (PROPOSED)
+
+A participant sends more than one camera and mic, shares the Ariadne GL frame (the whole window or
+chosen windows), shares the desktop or other applications' windows, and sends the desktop's stereo
+audio in sync with it. Today the wire knows only `"camera"` and `"mic"`, and video is MJPEG only.
+The plan (named streams, an inter-frame codec, a priority send queue, per-platform capture, sync
+groups, phases SH0–SH6 and the open decisions) is
+[`CONFERENCE_SHARING.md`](CONFERENCE_SHARING.md).
+
 ---
 
 ## 6. Data plane & transport
@@ -1299,6 +1308,8 @@ mesh works first, auth hardens later (§5, Phase 8); **WASI server committed** (
 * LOD — geometry (holon §5h; **doc stale — landed PR #249+**; what the room uses since S7 is in its
   §4.1 status note): [`VISIBILITY-AND-LOD-ROADMAP.md`](VISIBILITY-AND-LOD-ROADMAP.md).
 * Physics (holon §5h): [`NAV-VEHICLE-PHYSICS-ROADMAP.md`](NAV-VEHICLE-PHYSICS-ROADMAP.md).
+* More streams, app and screen sharing, desktop audio (§5l):
+  [`CONFERENCE_SHARING.md`](CONFERENCE_SHARING.md).
 
 ---
 
