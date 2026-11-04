@@ -376,6 +376,68 @@ def test_hz06_accessors_against_deletes():
     assert pycvc.state_get(app, "p.s1") == "one"
 
 
+class _CountingObserver(pycvc.state_observer):
+    """Counts its calls. A call on an observer that is not a whole, live one (a dropped one, or a
+    new object at a freed one's address before its __init__ ran) is counted in `stale`."""
+
+    stale = 0
+
+    def __init__(self):
+        super().__init__()
+        self.n = 0
+
+    def on_changed(self, path):
+        if "n" not in self.__dict__:
+            _CountingObserver.stale += 1
+            return
+        self.n += 1
+
+
+def test_observer_dropped_mid_callback_is_never_called():
+    # R0a-mem-1 (td 4.12; Linux TSan and ASan): an Exec writes the tree on a thread of its own
+    # (its run releases the GIL while it steps), so each write's slot waits for the GIL that this
+    # thread holds while it makes observers, watches the app with each and drops it. signals2 does
+    # not wait for a slot already called, so a dropped observer used to be called through a freed
+    # pointer; the slot now checks, once it has the GIL, that its observer was not dropped.
+    seconds = 2.0 if SANITIZER else 10.0
+    app = pycvc.make_app()
+    ex = pycvc.Exec(app)
+    prog = ('(begin (set i 0) (while (< i 2000) (begin (state-set "obs.x" (str i)) '
+            '(set i (+ i 1)))) 1)')
+    stop = threading.Event()
+    out = {"runs": 0}
+
+    def writer():
+        try:
+            while not stop.is_set():
+                ex.run(prog)
+                out["runs"] += 1
+        except BaseException as e:  # noqa: BLE001 - the case reads it
+            out["error"] = e
+
+    _CountingObserver.stale = 0
+    t = threading.Thread(target=writer, name="r0a-mem-1")
+    made = 0
+    t0 = time.monotonic()
+    t.start()
+    try:
+        while time.monotonic() - t0 < seconds:
+            o = _CountingObserver()
+            o.watch(app)
+            for _ in range(200):  # let the writer reach the slot
+                pass
+            del o
+            made += 1
+    finally:
+        stop.set()
+        t.join(LONG)
+    assert not t.is_alive(), f"the writer did not finish within {LONG} s"
+    assert "error" not in out, out["error"]
+    print(f"  {made} observers made and dropped beside {out['runs']} writer runs")
+    assert out["runs"] > 0
+    assert _CountingObserver.stale == 0, f"on_changed ran on {_CountingObserver.stale} dropped observers"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:
