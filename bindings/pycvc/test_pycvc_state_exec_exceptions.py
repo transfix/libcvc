@@ -220,6 +220,37 @@ def test_raise_into_a_state():
     _raises(RuntimeError, ev.raise_, st, 5)  # not an exception (std::invalid_argument)
 
 
+def test_a_builtin_exception_through_python_keeps_its_class():
+    # Python holds a class dict as a copy. Back in the DSL, a copy of a built-in class's dict is
+    # that class again: an exception that went through Python is stored by state-data-set
+    # (S0-Q4), and its class stays read-only (S0.1).
+    ex = pycvc.Exec(pycvc.make_app())
+    ex.register_fn("echo", lambda x: x)
+    made = pycvc.make_exception("ValueError", "m")
+    ex.register_fn("made", lambda: made)
+    # By class dict: the copy Python holds is the built-in class again.
+    by_dict = pycvc.make_exception(pycvc.exception_class("ValueError"), "m")
+    ex.register_fn("by-dict", lambda: by_dict)
+    store = ('(try (begin (state-data-set "k" {}) "stored") '
+             '(catch (RuntimeError e) (get-attr e "message")))')
+    read_only = ('(try (begin (set-attr (get-attr {} "__class__") "x" 1) "changed") '
+                 '(catch (TypeError e) "read-only"))')
+    for value in ('(echo (ValueError "v"))', "(made)", "(by-dict)",
+                  '(try (raise (KeyError "k")) (catch (e) (echo e)))'):
+        assert ex.run(store.format(value)) == "stored", value
+        assert ex.run(read_only.format(value)) == "read-only", value
+    assert ex.run(store.format('(echo (list 1 (ValueError "v")))')) == "stored"
+    assert ex.run(read_only.format('(nth (echo (list 1 (ValueError "v"))) 1)')) == "read-only"
+    assert ex.run('(get-attr (nth (state-data-get "k") 1) "message")') == "v"
+    # A user class named ValueError stays that user class: mutable, and refused as an instance.
+    ex = pycvc.Exec(pycvc.make_app())
+    ex.register_fn("echo", lambda x: x)
+    got = ex.run('(begin (defclass ValueError Exception (init (self m) (set-attr self "message" m) '
+                 'self)) (set e (echo (ValueError "u"))) (list (get-attr e "message") '
+                 + store.format("e") + " " + read_only.format("e") + "))")
+    assert got == '("u" "state-data-set: cannot store an object instance" "changed")', got
+
+
 # --- Stage 0 hazards (td 8.1) ---
 
 
