@@ -21,6 +21,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 using namespace cvc::state_exec;
@@ -403,6 +404,25 @@ TEST(Hazards, ContextRootPinsReleaseTheChrootFirst) {
   EXPECT_TRUE(b.died);
   EXPECT_FALSE(b.parent_gone) << "a.b died after its parent a was freed";
   EXPECT_TRUE(a_freed->load());
+}
+
+// R0a-mem-4 (S0.4): the same when a host assigns over its context (a context reused for the next
+// document), and the context stays an aggregate (R0b-compat-9): root_pins' assignment releases
+// the old chain leaf first.
+TEST(Hazards, ContextAssignmentReleasesTheChrootFirst) {
+  static_assert(std::is_aggregate_v<intrinsics_context>);
+  cvc::app app;
+  cvc::state &tree = cvc::state::instance(app);
+  intrinsics_context ctx{};
+  apply_chroot(ctx, tree, "a.b");
+  ASSERT_EQ(ctx.root_pins.size(), 3u);
+  const auto a_freed = flag_when_freed(tree("a"));
+  death_watch b(tree("a.b"), a_freed);
+  ASSERT_TRUE(tree.removeChild("a"));
+  ctx = intrinsics_context{};
+  EXPECT_TRUE(b.died);
+  EXPECT_FALSE(b.parent_gone) << "a.b died after its parent a was freed";
+  EXPECT_TRUE(ctx.root_pins.empty());
 }
 
 // R0m-memory-4 (S0.4): a data job's chain is released leaf first. A state-set-tree sliced a node a

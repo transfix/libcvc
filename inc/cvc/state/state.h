@@ -41,13 +41,45 @@
 #include <cvc/core/namespace.h>
 #include <cvc/core/types.h>
 #include <functional>
+#include <initializer_list>
 #include <map>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 namespace cvc {
 // Forward declaration for state_future
 class state;
+
+#ifndef SWIG
+// A chain of node pins, top first (the tree's root, or the first hop below a walk's start, down to
+// the leaf), as the pinned walks collect them (td 4.8). A std::vector of state pointers that drops
+// them leaf first when it goes, is cleared or is assigned over: a chain can be the last owner of
+// nodes unlinked meanwhile, and each node must die with its ancestors alive (~state: a destroyed()
+// slot may walk _parent). It stands where the vector would, so the structs that hold one
+// (state::link_resolution, state_exec::intrinsics_context) stay aggregates.
+class pin_vector : public std::vector<boost::shared_ptr<state>> {
+public:
+  using base_type = std::vector<boost::shared_ptr<state>>;
+  pin_vector() = default;
+  pin_vector(base_type pins) : base_type(std::move(pins)) {}
+  pin_vector(std::initializer_list<boost::shared_ptr<state>> pins) : base_type(pins) {}
+  pin_vector(const pin_vector &) = default;
+  pin_vector(pin_vector &&) noexcept = default;
+  // Copy and move: the old pins go first, leaf first, then this takes `other`'s.
+  pin_vector &operator=(pin_vector other) noexcept {
+    clear();
+    base_type::operator=(std::move(other));
+    return *this;
+  }
+  ~pin_vector() { clear(); }
+  // Drop every pin, leaf first.
+  void clear() noexcept {
+    while (!empty())
+      pop_back();
+  }
+};
+#endif
 
 // ----------------
 // cvc::state_future
@@ -592,24 +624,21 @@ public:
     state_ptr target_owned;
     // Owning pins of the resolved terminal's ancestor chain (root's child .. terminal), so a caller
     // that MUTATES `target` (writes walk its _parent chain) is safe against a concurrent sweep.
-    // Empty when the start node was itself the terminal (a non-link resolveLink caller).
-    std::vector<state_ptr> target_pins;
+    // Empty when the start node was itself the terminal (a non-link resolveLink caller). Released
+    // leaf first (pin_vector).
+    pin_vector target_pins;
     std::vector<std::string> visited; // ordered absolute paths
     std::size_t hops = 0;
 
-    link_resolution() = default;
-    link_resolution(const link_resolution &) = default;
-    link_resolution(link_resolution &&) = default;
-    link_resolution &operator=(const link_resolution &) = default;
-    link_resolution &operator=(link_resolution &&) = default;
-    // The target first, then its chain from the bottom up: a resolution can be the last owner of
-    // a chain unlinked meanwhile, and each node must die with its ancestors alive (~state).
-    ~link_resolution() {
-      target_owned.reset();
-      while (!target_pins.empty())
-        target_pins.pop_back();
-    }
+    // The target goes before its chain, as each node must die with its ancestors alive: an
+    // assignment takes the members in order (target_owned, then target_pins, leaf first), and the
+    // destructor lets the target go before the members go in reverse. A destructor keeps the
+    // struct an aggregate; it does make a moved resolution a copy.
+    ~link_resolution() { target_owned.reset(); }
   };
+#ifndef SWIG
+  static_assert(std::is_aggregate_v<link_resolution>);
+#endif
 
   // Mark this node as a link to `target_path`. `target_path` is
   // interpreted relative to the app root (leading SEPARATORs are
