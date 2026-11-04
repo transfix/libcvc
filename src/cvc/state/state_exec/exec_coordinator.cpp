@@ -801,47 +801,61 @@ migrate_result exec_coordinator::migrate(int pid, const std::string &target_node
 }
 
 void exec_coordinator::migrate_posted(scheduler &s, int pid, const std::string &target_node_id) {
-  const auto failed = [this] {
+  // Pause the process: one that is gone, or neither ready nor running, fails the migration.
+  if (!s.pause(pid)) {
     std::lock_guard lk(stats_mu_);
     ++stats_.migrations_failed;
-  };
-  try {
-    // Pause the process: one that is gone, or neither ready nor running, fails the migration.
-    if (!s.pause(pid)) {
-      failed();
-      return;
-    }
-
-    {
-      std::lock_guard lk(stats_mu_);
-      ++stats_.migrations_initiated;
-    }
-
-    // Serialize process state
-    std::string data = serialize_process_for_migration(s, pid);
-    if (data.empty()) {
-      s.resume(pid);
-      failed();
-      return;
-    }
-
-    // Send migration message to target
-    std::ostringstream os;
-    os << '{';
-    bool f = true;
-    jkv(os, "action", std::string("migrate-request"), f);
-    jkv(os, "source_node", node_id_, f);
-    jkv(os, "source_pid", static_cast<int64_t>(pid), f);
-    jkv(os, "process_data", data, f);
-    os << '}';
-
-    send_message(make_path(cluster_id_, "migrate." + target_node_id), MIME_EXEC_MIGRATE, os.str());
-
-    // Kill the original process (migration is fire-and-forward)
-    s.kill(pid);
-  } catch (...) {
-    failed(); // an entry must not throw (post_control)
+    return;
   }
+
+  // Serialize it and send it to the target.
+  bool sent = false;
+  try {
+    const std::string data = serialize_process_for_migration(s, pid);
+    if (!data.empty()) {
+      std::ostringstream os;
+      os << '{';
+      bool f = true;
+      jkv(os, "action", std::string("migrate-request"), f);
+      jkv(os, "source_node", node_id_, f);
+      jkv(os, "source_pid", static_cast<int64_t>(pid), f);
+      jkv(os, "process_data", data, f);
+      os << '}';
+      send_message(make_path(cluster_id_, "migrate." + target_node_id), MIME_EXEC_MIGRATE,
+                   os.str());
+      sent = true;
+    }
+  } catch (...) {
+    // A send that throws (a shard's transport) fails the migration; an entry must not throw
+    // (post_control).
+  }
+  if (!sent) {
+    s.resume(pid); // the pause is undone: the process runs on here
+    std::lock_guard lk(stats_mu_);
+    ++stats_.migrations_failed;
+    return;
+  }
+  {
+    std::lock_guard lk(stats_mu_);
+    ++stats_.migrations_initiated;
+  }
+
+  // Kill the original process (migration is fire-and-forward): it is the target's now. A kill
+  // that throws from its locks' release has killed it already. One that throws before killing it
+  // is tried once more, and a process still alive then is left paused, never resumed, and
+  // counted, rather than run here as well as on the target.
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    try {
+      s.kill(pid);
+    } catch (...) {
+      // an entry must not throw (post_control); whether it was killed is read below
+    }
+    const std::optional<process_info> pi = s.get_process_info(pid);
+    if (!pi || is_finished(pi->status))
+      return;
+  }
+  std::lock_guard lk(stats_mu_);
+  ++stats_.migrations_kill_failed;
 }
 
 void exec_coordinator::handle_migrate(const cvc::state_message &msg) {
