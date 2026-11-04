@@ -8,6 +8,7 @@
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/scheduler.h>         // max_alloc_bytes_from_state
 #include <cvc/state/state_exec/state_value_codec.h> // snapshot / restore
+#include <exception>
 #include <iterator>
 
 namespace cvc::state_exec {
@@ -999,7 +1000,10 @@ void async_scheduler::cancel_async_calls(int pid) {
   // slots may do anything, kill this process too (that kill finds no calls left to cancel, so it
   // doesn't read the rate again and recurse), and none of them runs mid-walk.
   // Each is claimed as it leaves the list (td 4.9, S0.9), so its completion, when it comes,
-  // charges nothing more.
+  // charges nothing more. And it is settled, with the error every await of it raises from now on
+  // (another process's: a fork child's), however it awaits: parked in await or await-all, after
+  // the cancel, or blocked in a generator's body. The kernel's own settling, when it comes, is
+  // ignored, and work that never settles once cancelled (async_start) is finished all the same.
   std::vector<std::shared_ptr<async_call>> calls;
   for (auto it = async_calls_.begin(); it != async_calls_.end();) {
     if ((*it)->pid() != pid) {
@@ -1008,9 +1012,17 @@ void async_scheduler::cancel_async_calls(int pid) {
     }
     std::shared_ptr<async_call> call = std::move(*it);
     it = async_calls_.erase(it);
-    if (!call->closed_.exchange(true, std::memory_order_acq_rel))
+    const bool claimed = !call->closed_.exchange(true, std::memory_order_acq_rel);
+    if (claimed)
       calls.push_back(call);
     call->cancel();
+    if (claimed) {
+      const std::string &name = call->function_name();
+      call->settle({},
+                   std::make_exception_ptr(dsl_error(
+                       "RuntimeError", name + ": cancelled: the process that made the call ended",
+                       "async", {{"function", value_t(name)}})));
+    }
   }
   process *proc = procs_.find(pid);
   const double rate = proc ? async_steps_per_cpu_ms(*proc) : 0.0;
@@ -1022,7 +1034,7 @@ void async_scheduler::cancel_async_calls(int pid) {
       detail::charge_async_call(*proc, *call, rate, true, now);
   }
   // Another process may be waiting for one of them: a fork child awaiting the same future. It is
-  // woken, and reads the call's outcome (S0.9).
+  // woken, and reads the call's outcome, the error above (S0.9).
   for (const std::shared_ptr<async_call> &call : calls)
     wake_async_waiters(call->channel());
 }

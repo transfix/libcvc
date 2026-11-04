@@ -1771,6 +1771,119 @@ TEST(AsyncCalls, WhereAStartedCallCantParkItsKernelRuns) {
   });
 }
 
+// --- a cancelled call, however it is awaited (td 4.9; R0-final's R0b-sem-1) ---
+
+namespace {
+
+// A process makes `future_expr`'s call and forks; the parent awaits it, the child (after a message
+// "go" when `after_kill`) awaits it with `child_wait`, catching RuntimeError as (list
+// "RuntimeError" message). Once both wait, the parent is killed, which cancels the call before it
+// settles, once `ready()` holds too. What the child came to: its result, or "<status>" when it
+// didn't end within `secs`.
+std::string fork_child_after_parent_kill(
+    world &w, const std::string &future_expr, const std::string &child_wait, bool after_kill,
+    double secs, const std::function<bool()> &ready = [] { return true; }) {
+  const std::string gate = after_kill ? R"((begin (msg-recv "go") )" : "(begin ";
+  const int parent = w.submit(
+      "(begin (set f " + future_expr + ") (set c (fork)) (if (= c 0) " + gate + "(try " +
+      child_wait +
+      " (catch (RuntimeError e) (list \"RuntimeError\" (get-attr e \"message\"))))) (await f)))");
+  int child = -1;
+  EXPECT_TRUE(w.pump([&] {
+    for (const process_info &i : w.async->list_processes())
+      if (i.parent_pid == parent)
+        child = i.pid;
+    return child >= 0 && w.waiting(parent) && w.waiting(child) && ready();
+  })) << "the parent and the child never both waited";
+  if (child < 0)
+    return "<no child>";
+  const auto t0 = clock_type::now();
+  EXPECT_TRUE(w.async->kill(parent));
+  if (after_kill) // the child awaits only now, after the call was cancelled
+    w.async->post_message("go", value_t(int64_t(1)));
+  const bool ended = w.pump([&] { return w.finished(child); }, secs);
+  std::printf("%s: the child %s %.3f s after the kill\n", child_wait.c_str(),
+              ended ? "ended" : "still waited", seconds_since(t0));
+  if (!ended) {
+    w.async->kill(child);
+    return "<waiting>";
+  }
+  const std::optional<value_t> r = w.result(child);
+  return r ? to_string(*r) : "<" + std::string(to_string(w.info(child).status)) + ">";
+}
+
+// What the error says, after the function's name.
+const char *const kCancelled = ": cancelled: the process that made the call ended";
+
+// (blind ms): sleeps ms ignoring cancelled(), then returns ms; `started` counts the kernels begun.
+void register_blind(world &w, std::atomic<int> &started) {
+  register_async_fn(w.env, *w.host, "blind",
+                    [&started](std::span<const value_t> a) -> async_kernel {
+                      const int64_t ms = int_arg(a, 0, 50);
+                      return [&started, ms](async_call &) -> value_t {
+                        started.fetch_add(1);
+                        std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+                        return value_t(ms);
+                      };
+                    });
+}
+
+} // namespace
+
+// A call cancelled before it settled (its process was killed) is settled then, with RuntimeError
+// "cancelled: the process that made the call ended", so another process awaiting the same future
+// raises that however it awaits. The kernel here ignores the cancel and returns 400 after 400 ms,
+// which used to be what await-all, a later await and a generator body's await got.
+TEST(AsyncCalls, ACancelledCallRaisesForAnAwaitAllParkedBeforeTheKill) {
+  std::atomic<int> started{0};
+  world w(async_sched);
+  register_blind(w, started);
+  const std::string got = fork_child_after_parent_kill(
+      w, "(blind-async 400)", "(await-all (list f))", false, 5.0, [&] { return started > 0; });
+  EXPECT_NE(got.find(kCancelled), std::string::npos) << got;
+}
+
+TEST(AsyncCalls, ACancelledCallRaisesForAnAwaitAfterTheCancel) {
+  std::atomic<int> started{0};
+  world w(async_sched);
+  register_blind(w, started);
+  const std::string got = fork_child_after_parent_kill(w, "(blind-async 400)", "(await f)", true,
+                                                       5.0, [&] { return started > 0; });
+  EXPECT_NE(got.find(kCancelled), std::string::npos) << got;
+}
+
+TEST(AsyncCalls, ACancelledCallRaisesForAGeneratorBodysAwaitAfterTheCancel) {
+  std::atomic<int> started{0};
+  world w(async_sched);
+  register_blind(w, started);
+  const std::string got = fork_child_after_parent_kill(
+      w, "(blind-async 400)", "(next (generator (lambda () (yield (await f)))))", true, 5.0,
+      [&] { return started > 0; });
+  EXPECT_NE(got.find(kCancelled), std::string::npos) << got;
+}
+
+// Work that starts by itself (async_start) and never settles once cancelled: the awaits that used
+// to wait for good raise the same error.
+TEST(AsyncCalls, ACancelledStartedCallRaisesForAnAwaitAllParkedBeforeTheKill) {
+  world w(async_sched);
+  started_probe sp;
+  register_started(w, sp);
+  const std::string got =
+      fork_child_after_parent_kill(w, "(self-op-async 1)", "(await-all (list f))", false, 3.0);
+  EXPECT_NE(got.find(kCancelled), std::string::npos) << got;
+  EXPECT_EQ(sp.stopped, 1);
+}
+
+TEST(AsyncCalls, ACancelledStartedCallRaisesForAnAwaitAfterTheCancel) {
+  world w(async_sched);
+  started_probe sp;
+  register_started(w, sp);
+  const std::string got =
+      fork_child_after_parent_kill(w, "(self-op-async 1)", "(await f)", true, 3.0);
+  EXPECT_NE(got.find(kCancelled), std::string::npos) << got;
+  EXPECT_EQ(sp.stopped, 1);
+}
+
 // --- Stage 0 hazards (td 8.1) ---
 
 namespace {
