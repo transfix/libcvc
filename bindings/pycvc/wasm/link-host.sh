@@ -23,6 +23,10 @@
 #   * pycvc core is a flat module (_pycvc); pycvc_gl is a package (pycvc_gl._pycvc_gl).
 #   * libpython's _sha2 has an un-archived HACL gap -> ERROR_ON_UNDEFINED_SYMBOLS=0
 #     (harmless: the missing symbols are only reached if hashlib.sha256 is called).
+#   * cvc, cvcGL and the wrappers compile with -fexceptions (the top-level CMakeLists.txt),
+#     so this link must say it too. Without it emscripten links with exception catching
+#     off and every throw aborts ("Aborted(undefined)" in ___cxa_throw), even one a catch
+#     would take: cvc::state::instance() on a new app catches its first lookup's bad_any_cast.
 set -euo pipefail
 : "${DEPS:?}"; : "${INST:?}"; : "${SRC:?}"; : "${EMSDK:?}"; : "${OUT:?}"
 EMCC="${EMSDK}/upstream/emscripten/emcc.bat"; [ -x "$EMCC" ] || EMCC="${EMSDK}/upstream/emscripten/emcc"
@@ -100,7 +104,7 @@ DEP_LIBS=("$DEPS"/lib/*.a)
 # -sASYNCIFY_IGNORE_INDIRECT do not apply until it does.
 
 "$EMCC" "$SRC/bindings/pycvc/wasm/pycvc_host.cpp" "$GEN" \
-    -std=c++17 -O1 -DPYCVC_EMBED_NUMPY ${VTK_DEF[@]+"${VTK_DEF[@]}"} -I "$PYINC" \
+    -std=c++17 -O1 -fexceptions -DPYCVC_EMBED_NUMPY ${VTK_DEF[@]+"${VTK_DEF[@]}"} -I "$PYINC" \
     -Wl,--allow-multiple-definition \
     -Wl,--whole-archive "$PXA" "$GLA" -Wl,--no-whole-archive \
     ${VTK_WHOLE[@]+"${VTK_WHOLE[@]}"} \
