@@ -182,11 +182,16 @@ program may change one:
   `(defclass ValueError ...)` binds a new class to the name in the program's environment and
   leaves the built-in one alone.
 - Raising a class dict is unchanged: `(raise ValueError.__cls_dict__)` raises `TypeError`
-  `raise: expected an exception, got dict`, and the class dict gains no traceback, cause or
-  origin.
+  `raise: expected an exception, got dict`, since `raise` refuses anything that isn't an
+  exception before it records where it was raised. A native function that throws a
+  `dsl_exception` holding a built-in class dict has it raised as it is: the evaluators'
+  `annotate` and `async_call::outcome()` add no traceback, cause, origin or function to it.
 - A built-in exception's instance is an ordinary dict, so it is mutable, and its fields are set
   as before. `state-data-set` copies one and shares its class dict, and `state-data-get` returns
   a copy with the same shared class (docs/STATE_EXEC_DEVELOPER_GUIDE.md, "The data channel").
+  An exception keeps its built-in class across a snapshot (2.7: the restore relinks a decoded
+  dict of exactly a built-in class's shape to that class) and through pycvc (a Python function
+  that returns one, `pycvc.make_exception`), so it can be stored after either.
 
 Mapping a C++ exception thrown by a native function:
 - `cvc::state_exec::dsl_exception` carries a class already;
@@ -296,7 +301,11 @@ mid-unwind resumes the unwinding.
 The codec writes a dict once for each value that holds it, so after a restore an exception's
 `__class__` is a copy of the class dict the program names. `catch` and `isinstance` match such
 a copy by its chain of class names (P2). Without that, an exception made before the snapshot,
-re-raised after it, wouldn't be caught by its own class.
+re-raised after it, wouldn't be caught by its own class. A built-in class is the exception:
+since threaded execution's Stage 0 the restore relinks a decoded dict of exactly a built-in
+class's shape (its keys in order, its `__super__` the parent's built-in dict, `init` nil) to the
+built-in class itself, so a restored exception's built-in class is the shared, read-only one
+(2.3). A user class, which always has an `init` or `finalize` of its own, is never relinked.
 
 A process inside a `with-lock` section can't be snapshotted: the snapshot is refused, naming its
 keys (docs/STATE_EXEC_LOCKS.md 5.8). A process waiting for a lock can: restored, it asks again, at
@@ -443,9 +452,12 @@ Other places a kernel can run:
 - the host is torn down.
 
 A kernel checks it at convenient points and may stop early by throwing. A cancelled call's
-result is dropped. Another process awaiting the same future (a fork child, when the parent that
-made the call is killed) is woken, and if the call was cancelled before it settled, its await
-raises `RuntimeError` "`name`: cancelled: the process that made the call ended". Host teardown
+result is dropped. A call cancelled before it settled is settled then, with `RuntimeError`
+"`name`: cancelled: the process that made the call ended", and a result its kernel posts later
+is dropped. Every way the future is awaited raises that error: an `await` by another process (a
+fork child, when the parent that made the call is killed, is woken for it), `await-all`, an
+`await` made after the cancel, and an await in a generator body, so nothing waits for such a call
+for ever. Host teardown
 (an `Exec`, an Ariadne document, the app's scheduler) cancels every in-flight kernel and waits
 for them before the scheduler goes, as `Exec` does today.
 

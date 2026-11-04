@@ -308,8 +308,8 @@ public:
                               boost::shared_ptr<cvc::state> root) override;
   void unregister_watch_handler(int pid, int watch_id) override;
 
-  /// The root for watch polling, settings and the async step rate. A host call (app, pycvc),
-  /// never made from a step: a chrooted state-watch keeps its own root instead (td 4.8).
+  /// The root for watch polling, settings and the async step rate: a host's call (app, pycvc),
+  /// which keeps the root alive. A step makes only the pinned form below (td 4.8).
   void set_watch_root(cvc::state *root) override;
   /// The same for a root a program's step gives (state-watch's): kept by `pin` while it is the
   /// watch root (scheduler_base).
@@ -317,8 +317,9 @@ public:
   /// The root set_watch_root() gave, or null.
   cvc::state *watch_root() const override { return watch_root_; }
 
-  /// The watched nodes poll_watches() has read so far, one for each watch it reads. A watch is
-  /// read only after a write under the root it resolves under (td 4.8: per-root gating).
+  /// The watch entries poll_watches() has looked up so far, one each time it polls a watch,
+  /// whether or not its node exists. A watch is polled only after a write under the root it
+  /// resolves under (td 4.8: per-root gating).
   uint64_t watch_polls() const noexcept { return watch_polls_; }
 
   /// This scheduler's built-in parser settings: what a submitted script is parsed with when the
@@ -440,7 +441,7 @@ private:
   detail::tree_changes tree_changes_;
   uint64_t watch_seen_ = 0;
   detail::watch_roots watch_roots_;
-  uint64_t watch_polls_ = 0; // watched nodes read (watch_polls())
+  uint64_t watch_polls_ = 0; // watch entries polled (watch_polls())
   uint64_t rate_seen_ = 0;
   bool rate_valid_ = false;
   double rate_ = kDefaultAsyncStepsPerCpuMs;
