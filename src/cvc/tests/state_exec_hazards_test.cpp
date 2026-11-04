@@ -372,8 +372,8 @@ std::string json_values(int n) {
 // R0m-memory-2 (S0.4; ASan and TSan): state-from-json writes each value through a walk that holds
 // the node it writes, and a dotted key's nodes above it, until the write is done. One thread
 // loads a document naming a child and two dotted paths again and again while another deletes what
-// it writes, each in its own world on one tree. Handing the reader each node unpinned let the delete
-// free it before the write (a crash within seconds); here both loops finish.
+// it writes, each in its own world on one tree. Handing the reader each node unpinned let the
+// delete free it before the write (a crash within seconds); here both loops finish.
 TEST(Hazards, FromJsonAgainstDeletingWhatItWrites) {
   cvc::app app;
   cvc::state &tree = cvc::state::instance(app);
