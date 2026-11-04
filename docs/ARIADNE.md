@@ -2284,6 +2284,12 @@ document path is the document's (§5.6):
 | `arigl` | libcvc + cvcGL (VTK, ImGui) | in a real window, or `--terminal` with its scene rendered behind the widgets | [`src/arigl`](../src/arigl/main.cpp) |
 | `arisrv` | libcvc + gRPC + WebSocket | headless, as a server (the conference relay + WS↔gRPC bridge) | [`src/arisrv`](../src/arisrv/main.cpp) |
 
+Each is its own cvcpkg package, built from its recipe in [`cvcpkg/recipes`](../cvcpkg/recipes)
+against the installed libcvc: `cvcpkg install ari`, `cvcpkg install arigl`, and for a room's
+server `cvcpkg install arisrv` (linux, macOS and windows). arisrv's transports, its Jolt avatars
+and its libjpeg-turbo video rungs are libcvc's, so it needs a libcvc built with them: every
+libcvc after 3.7.8 is, and arisrv's standalone configure refuses an SDK with neither transport.
+
 ```
 arigl run      [--terminal] [flags] doc.ari [document args...]
 arigl snapshot --png out.png [flags] doc.ari [document args...]       # offscreen window frame

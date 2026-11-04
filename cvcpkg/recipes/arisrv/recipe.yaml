@@ -1,0 +1,72 @@
+schema_version: 1
+recipe:
+  name: arisrv
+  upstream_version: "3.7.8"
+  cvc_revision: 1
+  maintainer: "cvcpkg group"
+  maintainer_email: "info@cvcpkg.org"
+  maintainer_url: "https://cvcpkg.org"
+  description: "arisrv — the headless Ariadne conference relay. `arisrv --room NAME --state-listen 0.0.0.0:7700 --media-listen 0.0.0.0:7701 --ws-listen 0.0.0.0:7702` hosts a room: native clients (arigl) join over gRPC and browser clients (arigl-web) over WebSocket, and every client connects only to the relay, so a room works across home NAT. It relays the room tree, the camera and microphone streams (each viewer's video sized to its link, re-encoded with libjpeg-turbo) and the room chat, and runs the room's avatars as Jolt rigid bodies on its own clock. No window, GL, VTK or cvcGL: it runs on a plain headless VM."
+  homepage: https://github.com/transfix/libcvc
+  license: LGPL-2.1-only
+  tags: [conference, server, relay, grpc, websocket, cli, tools]
+
+# `arisrv` is its OWN package, separate from the libcvc SDK (like ari and cvc-cli), so a relay
+# lands deliberately in a server's PATH (`cvcpkg install arisrv`) rather than riding along in the
+# SDK bundle. It builds src/arisrv standalone against the installed libcvc SDK
+# (find_package(cvc CONFIG)) and installs just bin/arisrv; libcvc is never rebuilt.
+#
+# Everything the relay is made of is libcvc's: the gRPC and WebSocket state transports
+# (CVC_ENABLE_GRPC, CVC_ENABLE_WS), the media hub and its libjpeg-turbo video rungs, the room
+# chat, and the server-authoritative avatar holon on cvc::physics' Jolt backend (CVC_WITH_JOLT).
+# Those are libcvc's build options and libcvc's runtime deps (grpc, protobuf, joltphysics,
+# libjpeg-turbo, ...), so arisrv needs nothing but libcvc. It needs a libcvc built with the
+# transports: the libcvc recipe and publish-cvcpkg.yml turn both on (#943), and src/arisrv's
+# standalone configure stops on an SDK that has neither. Jolt and libjpeg-turbo are PRIVATE to
+# cvc, so the binary reports them when it starts ("avatar physics: Jolt rigid bodies",
+# "transcode libjpeg-turbo"); publish-cvcpkg.yml checks both before it packs.
+#
+# arisrv is built against the libcvc of its own tree (the conference API moves with every
+# release), so publish it with that libcvc, as ari is.
+#
+# Platforms: wherever libcvc builds its transports: linux, macos and windows.
+
+source:
+  # Co-located with the libcvc source tree; build.sh points cmake at src/arisrv.
+  # `path` is counted from cvcpkg/recipes/_vendored/, where `cvcpkg build`
+  # looks first, so `../../..` is the libcvc repo root (CVC_SOURCE_DIR).
+  # `cvcpkg recipe push` does not bundle it: counted from cvcpkg/, its
+  # fallback base, the same path points outside the repo.
+  type: vendored
+  path: ../../..
+
+patches: []
+
+depends:
+  build:
+    - name: libcvc
+  runtime:
+    - name: libcvc
+  host_tools:
+    - cmake
+    - ninja
+
+build:
+  matrix:
+    - platform: linux
+      script: build.sh
+    - platform: macos
+      script: build.sh
+      env:
+        MACOSX_DEPLOYMENT_TARGET: "13.0"
+    - platform: windows
+      script: build.ps1
+
+package:
+  # Just the `arisrv` executable (bin/arisrv, bin/arisrv.exe on Windows). No cmake package
+  # config — arisrv is an application.
+  files:
+    - bin/arisrv*
+
+abi:
+  cxx_std: 20

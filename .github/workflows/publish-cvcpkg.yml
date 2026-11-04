@@ -25,6 +25,11 @@
 #                      own script against the libcvc (and cvcGL) built here, and
 #                      must render a document before it packs. (Their browser
 #                      host, arigl-web, is publish-cvcgl-wasm.yml's.)
+#   * arisrv         — the headless Ariadne conference relay, on Linux, macOS and
+#                      Windows. Built by its recipe's own script against the libcvc
+#                      built here (whose gRPC and WebSocket transports, Jolt avatars
+#                      and libjpeg-turbo video rungs it serves with); it must open a
+#                      room on loopback and report each of them before it packs.
 # The interpreter column is a matrix dimension (`pyver`): every job carries
 # the base "311", and extra linux-x86_64 release jobs (matrix include) build
 # the cp312/cp313 columns. Those column jobs rebuild libcvc + cvcgl locally
@@ -32,14 +37,14 @@
 # pair — libcvc/cvcgl publish exactly once, from the pyver-311 job (see the
 # `matrix.pyver == '311'` guards).
 # Platform coverage (see the guards on each step below):
-#   * Linux   — libcvc + cvcgl + libcvc-examples + ari + arigl + pycvc-cp311/312/313 +
+#   * Linux   — libcvc + cvcgl + libcvc-examples + ari + arisrv + arigl + pycvc-cp311/312/313 +
 #               pycvc-gl-cp311/312/313 (release config; the 312/313 columns on
-#               x86_64 only; libcvc-examples, ari and arigl from the pyver-311
+#               x86_64 only; libcvc-examples, ari, arisrv and arigl from the pyver-311
 #               column only).
-#   * Windows — libcvc + cvcgl + ari + arigl always; pycvc-cp311/pycvc-gl-cp311 only behind
+#   * Windows — libcvc + cvcgl + ari + arisrv + arigl always; pycvc-cp311/pycvc-gl-cp311 only behind
 #               the `windows_pycvc` dispatch input (still a TODO — unverified;
 #               Windows stays cp311-only for now).
-#   * macOS   — libcvc + ari only: there is no macOS VTK bundle on the catalog
+#   * macOS   — libcvc + ari + arisrv only: there is no macOS VTK bundle on the catalog
 #               yet, so the cvcgl/pycvc-gl-cp31X/arigl recipes cannot build and the
 #               pycvc-cp31X columns are skipped to keep the family consistent
 #               per-platform.
@@ -193,6 +198,7 @@ jobs:
       libcvc_examples: ${{ steps.rev.outputs.libcvc_examples }}
       ari: ${{ steps.rev.outputs.ari }}
       arigl: ${{ steps.rev.outputs.arigl }}
+      arisrv: ${{ steps.rev.outputs.arisrv }}
       # One output per pycvc interpreter column; the build matrix selects the
       # right one via outputs[format('pycvc_cp{0}', matrix.pyver)].
       pycvc_cp311: ${{ steps.rev.outputs.pycvc_cp311 }}
@@ -235,6 +241,7 @@ jobs:
           emit libcvc-examples libcvc_examples
           emit ari            ari
           emit arigl          arigl
+          emit arisrv         arisrv
           emit pycvc-cp311    pycvc_cp311
           emit pycvc-cp312    pycvc_cp312
           emit pycvc-cp313    pycvc_cp313
@@ -980,6 +987,74 @@ jobs:
             echo "dry-run: skipping ari publish"
           fi
 
+      - name: Build, pack & publish arisrv [Linux]
+        # `arisrv`, the headless Ariadne conference relay (src/arisrv), packaged apart from the libcvc
+        # SDK the way ari is, and built the same way: the recipe's own build.sh against the libcvc
+        # just installed into $STAGE. Everything it serves a room with is libcvc's, and each part
+        # turns into a stub when its dep is missing while everything still builds and packs: the
+        # gRPC and WebSocket transports (asserted at libcvc's configure above; arisrv's own configure
+        # stops on an SDK with neither), the Jolt avatar holon and the libjpeg-turbo video rungs
+        # (PRIVATE to cvc, so only the binary can say). So it must open a room on loopback and report
+        # each of them, then stop cleanly on SIGTERM, the way a service manager stops it. The macOS
+        # and Windows twins are at the end of this job.
+        id: arisrv-linux
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' && matrix.pyver == '311' }}
+        shell: bash
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+          DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/stage"
+          DEPS="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
+          export CVC_SOURCE_DIR="$GITHUB_WORKSPACE"
+          export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-arisrv"
+          export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-arisrv"
+          export CVC_DEPS_PREFIX="$STAGE;$DEPS"
+          export CVC_BUILD_TYPE=Release
+          export CVC_JOBS="$(nproc)"
+          bash cvcpkg/recipes/arisrv/build.sh
+          test -x stage-arisrv/bin/arisrv
+          # Its rpath is $ORIGIN/../lib, the flat prefix it is installed into; here the libraries
+          # are split across two. --preserve-status: the step fails unless arisrv exits 0 on SIGTERM.
+          LD_LIBRARY_PATH="$STAGE/lib:$DEPS/lib" timeout --preserve-status -k 30 -s TERM 8 \
+            stage-arisrv/bin/arisrv --room smoke --state-listen 127.0.0.1:18700 \
+            --media-listen 127.0.0.1:18701 --ws-listen 127.0.0.1:18702 >arisrv-smoke.log 2>&1 \
+            || { cat arisrv-smoke.log; echo "::error::arisrv did not run and stop cleanly"; exit 1; }
+          cat arisrv-smoke.log
+          grep -qE "relay up .*state=[^ ]*:18700 " arisrv-smoke.log \
+            || { echo "::error::arisrv did not open its gRPC room on 127.0.0.1:18700"; exit 1; }
+          grep -qE "websocket \(browser\) clients: ws=[^ ]*:18702" arisrv-smoke.log \
+            || { echo "::error::arisrv did not open its WebSocket on 127.0.0.1:18702"; exit 1; }
+          for want in "chat: room" "avatar physics: Jolt rigid bodies" "transcode libjpeg-turbo"; do
+            grep -qF "$want" arisrv-smoke.log \
+              || { echo "::error::arisrv did not log '$want': it would ship a stub"; exit 1; }
+          done
+          mkdir -p dist
+          cvcpkg pack cvcpkg/recipes/arisrv \
+            --from-prefix stage-arisrv \
+            --platform "${{ matrix.target.platform }}" \
+            --config release --link shared --local \
+            --cvc-revision ${{ needs.compute-revisions.outputs.arisrv }} \
+            --output-dir dist
+          if [ "$DO_PUBLISH" = "1" ]; then
+            if [ -z "${CVCPKG_TOKEN:-}" ]; then
+              echo "CVCPKG_TOKEN secret is required to publish"; exit 1
+            fi
+            cvcpkg publish arisrv \
+              --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
+              --platform "${{ matrix.target.platform }}" \
+              --config release --link shared --output-dir dist \
+              --token "$CVCPKG_TOKEN"
+          else
+            echo "dry-run: skipping arisrv publish"
+            # Kept as an artifact with the libcvc it was built against (the catalog's libcvc is
+            # the last release's), so the pair can be installed and run before a tag publishes it.
+            mkdir -p dry-run-arisrv
+            cp dist/arisrv-* dist/libcvc-[0-9]* dry-run-arisrv/
+          fi
+
       - name: Build, pack & publish pycvc-cp${{ matrix.pyver }} [Linux]
         if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && steps.swig.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' }}
         shell: bash
@@ -1361,11 +1436,11 @@ jobs:
             Write-Host 'dry-run: skipping pycvc-cp311/pycvc-gl-cp311 publish'
           }
 
-      # ── ari on macOS and Windows, arigl on Windows ──
-      # The twins of "Build, pack & publish ari [Linux]" and "... arigl [Linux]": the recipe's own
-      # build script against the libcvc just installed into $STAGE (and for arigl the cvcGL in
-      # stage-cvcgl). Last in the job because they take cmake and ninja from cvcpkg, which this
-      # action puts first on PATH for every later step.
+      # ── ari and arisrv on macOS and Windows, arigl on Windows ──
+      # The twins of "Build, pack & publish ari [Linux]", "... arisrv [Linux]" and "... arigl
+      # [Linux]": the recipe's own build script against the libcvc just installed into $STAGE (and
+      # for arigl the cvcGL in stage-cvcgl). Last in the job because they take cmake and ninja from
+      # cvcpkg, which this action puts first on PATH for every later step.
       - name: Install build tools (cvcpkg) for ari
         if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform != 'linux' && matrix.config == 'release' && matrix.pyver == '311' }}
         uses: ./.github/actions/cvcpkg-build-tools
@@ -1415,6 +1490,74 @@ jobs:
               --token "$CVCPKG_TOKEN"
           else
             echo "dry-run: skipping ari publish"
+          fi
+
+      - name: Build, pack & publish arisrv [macOS]
+        # The same checks as on Linux. macOS has no GNU timeout, so the relay runs in the background
+        # and gets its SIGTERM by pid, with a SIGKILL 30 s later if it has not stopped by then.
+        id: arisrv-macos
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'macos' && matrix.config == 'release' && matrix.pyver == '311' }}
+        shell: bash
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+          DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/stage"
+          DEPS="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
+          export CVC_SOURCE_DIR="$GITHUB_WORKSPACE"
+          export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-arisrv"
+          export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-arisrv"
+          export CVC_DEPS_PREFIX="$STAGE;$DEPS"
+          export CVC_BUILD_TYPE=Release
+          export CVC_JOBS="$(sysctl -n hw.ncpu)"
+          bash cvcpkg/recipes/arisrv/build.sh
+          test -x stage-arisrv/bin/arisrv
+          # Its rpath is @loader_path/../lib, the flat prefix it is installed into, so point dyld at
+          # the two prefixes it is split across here.
+          DYLD_LIBRARY_PATH="$STAGE/lib:$DEPS/lib" stage-arisrv/bin/arisrv --room smoke \
+            --state-listen 127.0.0.1:18700 --media-listen 127.0.0.1:18701 \
+            --ws-listen 127.0.0.1:18702 >arisrv-smoke.log 2>&1 &
+          relay=$!
+          sleep 8
+          kill -TERM "$relay" 2>/dev/null || true
+          ( sleep 30; kill -KILL "$relay" 2>/dev/null ) &
+          watchdog=$!
+          status=0
+          wait "$relay" || status=$?
+          kill "$watchdog" 2>/dev/null || true
+          cat arisrv-smoke.log
+          [ "$status" -eq 0 ] \
+            || { echo "::error::arisrv did not run and stop cleanly (exit $status)"; exit 1; }
+          grep -qE "relay up .*state=[^ ]*:18700 " arisrv-smoke.log \
+            || { echo "::error::arisrv did not open its gRPC room on 127.0.0.1:18700"; exit 1; }
+          grep -qE "websocket \(browser\) clients: ws=[^ ]*:18702" arisrv-smoke.log \
+            || { echo "::error::arisrv did not open its WebSocket on 127.0.0.1:18702"; exit 1; }
+          for want in "chat: room" "avatar physics: Jolt rigid bodies" "transcode libjpeg-turbo"; do
+            grep -qF "$want" arisrv-smoke.log \
+              || { echo "::error::arisrv did not log '$want': it would ship a stub"; exit 1; }
+          done
+          mkdir -p dist
+          cvcpkg pack cvcpkg/recipes/arisrv \
+            --from-prefix stage-arisrv \
+            --platform macos \
+            --config release --link shared --local \
+            --cvc-revision ${{ needs.compute-revisions.outputs.arisrv }} \
+            --output-dir dist
+          if [ "$DO_PUBLISH" = "1" ]; then
+            if [ -z "${CVCPKG_TOKEN:-}" ]; then
+              echo "CVCPKG_TOKEN secret is required to publish"; exit 1
+            fi
+            cvcpkg publish arisrv \
+              --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
+              --platform macos \
+              --config release --link shared --output-dir dist \
+              --token "$CVCPKG_TOKEN"
+          else
+            echo "dry-run: skipping arisrv publish"
+            mkdir -p dry-run-arisrv
+            cp dist/arisrv-* dist/libcvc-[0-9]* dry-run-arisrv/
           fi
 
       - name: Build, pack & publish ari [Windows]
@@ -1468,6 +1611,80 @@ jobs:
           } else {
             Write-Host 'dry-run: skipping ari publish'
           }
+
+      - name: Build, pack & publish arisrv [Windows]
+        # build.ps1 builds with cl and Ninja through _common/env-windows.ps1, as ari's does. The same
+        # checks as on Linux, except the stop: a console-less background process cannot be sent a
+        # Ctrl+C, so the relay is ended by its own pid once it has logged its start.
+        id: arisrv-windows
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'windows' && matrix.config == 'release' && matrix.pyver == '311' }}
+        shell: pwsh
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $depsPath = '${{ steps.libcvc-deps.outputs.path }}'
+          if (-not $depsPath) {
+            $depsPath = if ($env:LIBCVC_DEPS_PREFIX) { $env:LIBCVC_DEPS_PREFIX } else { 'D:\libcvc-deps' }
+          }
+          $stage = "$env:GITHUB_WORKSPACE/stage"
+          $env:CVC_SOURCE_DIR = "$env:GITHUB_WORKSPACE"
+          $env:CVC_BUILD_DIR = "$env:GITHUB_WORKSPACE/build-arisrv"
+          $env:CVC_INSTALL_DIR = "$env:GITHUB_WORKSPACE/stage-arisrv"
+          $env:CVC_DEPS_PREFIX = "$stage;$depsPath"
+          $env:CVC_BUILD_TYPE = 'Release'
+          $env:CVC_LINK = 'shared'
+          & ./cvcpkg/recipes/arisrv/build.ps1
+          if (-not (Test-Path 'stage-arisrv/bin/arisrv.exe')) { throw 'arisrv build installed no bin/arisrv.exe' }
+          # cvc.dll and every dependency DLL sit in the two prefixes' bin/ directories.
+          $savedPath = $env:PATH
+          $env:PATH = "$stage\bin;$depsPath\bin;$env:PATH"
+          $relay = Start-Process -FilePath ./stage-arisrv/bin/arisrv.exe -NoNewWindow -PassThru `
+            -ArgumentList '--room', 'smoke', '--state-listen', '127.0.0.1:18700', '--media-listen', '127.0.0.1:18701', '--ws-listen', '127.0.0.1:18702' `
+            -RedirectStandardOutput arisrv-smoke.log -RedirectStandardError arisrv-smoke.err
+          Start-Sleep -Seconds 10
+          $ran = -not $relay.HasExited
+          if ($ran) { Stop-Process -Id $relay.Id -Force }
+          $env:PATH = $savedPath
+          Get-Content arisrv-smoke.log, arisrv-smoke.err
+          if (-not $ran) { throw "arisrv exited before it was stopped ($($relay.ExitCode))" }
+          $log = Get-Content arisrv-smoke.log -Raw
+          if ($log -notmatch 'relay up .*state=\S*:18700 ') { throw 'arisrv did not open its gRPC room on 127.0.0.1:18700' }
+          if ($log -notmatch 'websocket \(browser\) clients: ws=\S*:18702') { throw 'arisrv did not open its WebSocket on 127.0.0.1:18702' }
+          foreach ($want in @('chat: room', 'avatar physics: Jolt rigid bodies', 'transcode libjpeg-turbo')) {
+            if (-not $log.Contains($want)) { throw "arisrv did not log '$want': it would ship a stub" }
+          }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          cvcpkg pack cvcpkg/recipes/arisrv `
+            --from-prefix stage-arisrv `
+            --platform windows --config release --link shared --local `
+            --cvc-revision ${{ needs.compute-revisions.outputs.arisrv }} `
+            --output-dir dist
+          if ($LASTEXITCODE -ne 0) { throw "arisrv pack failed ($LASTEXITCODE)" }
+          $doPublish = ($env:GITHUB_EVENT_NAME -eq 'push') -or ('${{ github.event.inputs.dry_run }}' -eq 'false')
+          if ($doPublish) {
+            if (-not $env:CVCPKG_TOKEN) { throw 'CVCPKG_TOKEN secret is required to publish' }
+            cvcpkg publish arisrv `
+              --server "$env:CVCPKG_SERVER" --org "$env:CVCPKG_ORG" `
+              --platform windows --config release --link shared --output-dir dist `
+              --token "$env:CVCPKG_TOKEN"
+            if ($LASTEXITCODE -ne 0) { throw "arisrv publish failed ($LASTEXITCODE)" }
+          } else {
+            Write-Host 'dry-run: skipping arisrv publish'
+            New-Item -ItemType Directory -Force -Path dry-run-arisrv | Out-Null
+            Copy-Item dist/arisrv-*, dist/libcvc-[0-9]* dry-run-arisrv/
+          }
+
+      # A dry run keeps each platform's arisrv with the libcvc it was built against (see the Linux
+      # step), for a week.
+      - name: Keep the dry run's arisrv and libcvc
+        if: ${{ !cancelled() && (steps.arisrv-linux.outcome == 'success' || steps.arisrv-macos.outcome == 'success' || steps.arisrv-windows.outcome == 'success') && github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run != 'false' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: arisrv-dry-run-${{ matrix.target.platform }}-${{ matrix.target.arch }}
+          path: dry-run-arisrv/
+          retention-days: 7
+          if-no-files-found: error
 
       - name: Build, pack & publish arigl [Windows]
         # build.ps1 builds with cl and Ninja through _common/env-windows.ps1, as ari's does, against
