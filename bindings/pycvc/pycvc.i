@@ -1785,6 +1785,29 @@ bool from_py(PyObject *root, value_t &out) {
     stack.push_back({o, v, 0});
     return true;
   };
+  // A dict just filled that is a copy of a built-in exception class's dict (Python holds class
+  // dicts as copies) is that class again, read-only and shared (S0.1): put in the slot holding the
+  // dict, which is the root or the element its parent took last, and in `made` for any later
+  // reference to the same Python dict. Its __super__ was filled, and relinked, before it.
+  auto relink = [&](size_t top) {
+    const dict_ptr &d = std::get<dict_ptr>(stack[top].v.v);
+    dict_ptr cls = builtin_class_of_copy(*d);
+    if (!cls)
+      return;
+    value_t *slot = &out;
+    if (top > 0) {
+      value_t &parent = stack[top - 1].v;
+      if (const auto *l = std::get_if<list_ptr>(&parent.v))
+        slot = &(*l)->back();
+      else
+        slot = &std::get<dict_ptr>(parent.v)->back().second;
+    }
+    const auto *held = std::get_if<dict_ptr>(&slot->v);
+    if (held == nullptr || *held != d)
+      return;
+    made[stack[top].o] = value_t(cls);
+    *slot = value_t(std::move(cls));
+  };
   // An element's value, into `v`.
   auto element = [&](PyObject *item, value_t &v) -> bool {
     Py_INCREF(item); // the container could drop it while a proxy lookup runs Python code
@@ -1803,6 +1826,7 @@ bool from_py(PyObject *root, value_t &out) {
       PyObject *item = nullptr;
       if (!PyDict_Next(o, &stack[top].pos, &k, &item)) {
         filling.erase(o);
+        relink(top);
         stack.pop_back();
         continue;
       }
@@ -2900,10 +2924,12 @@ _pycvc._set_dsl_error_factory(_make_dsl_error)
 %}
 
 // ── exceptions.h: classes and exception values (docs/STATE_EXEC_EXCEPTIONS.md 2.2, 2.3) ──
-// Class dicts and exceptions cross as Python dicts, which are copies. A class dict that came back
-// from Python still matches the one it was copied from: is_instance matches a class by its chain
-// of names when the dicts differ. Where C++ takes a class (a dict_ptr), Python passes a class dict,
-// a class constructor (a pycvc.value), or the name of a built-in class.
+// Class dicts and exceptions cross as Python dicts, which are copies. A built-in class's dict that
+// comes back from Python is that class again (from_py relinks it, so it stays read-only and is
+// shared). A user class's is a copy, which still matches the class it was copied from: is_instance
+// matches a class by its chain of names when the dicts differ. Where C++ takes a class (a
+// dict_ptr), Python passes a class dict, a class constructor (a pycvc.value), or the name of a
+// built-in class.
 %{
 namespace pycvc {
 // The class `o` names, or null with a Python error set.

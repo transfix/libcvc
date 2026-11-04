@@ -358,6 +358,28 @@ TEST(DataJob, IsolatingCopyKeepsSharingAndCycles) {
   cyclic->clear();
 }
 
+TEST(DataJob, IsolatingCopyKeepsWhatItMemoizedAlive) {
+  // The memo is keyed by each source list's address. A source another process drops between two
+  // slices stays allocated until the copy is done, or its address could come back as a new list
+  // that the copy would take for it (R0a-mem-2). Share mode too: async arguments use it.
+  for (copy_mode mode : {copy_mode::isolate, copy_mode::share}) {
+    SCOPED_TRACE(mode == copy_mode::isolate ? "isolate" : "share");
+    auto big = std::make_shared<std::vector<value_t>>();
+    for (int i = 0; i < 100; ++i)
+      big->push_back(make_list({value_t{int64_t{i}}}));
+    auto job = make_copy_job(value_t{big}, mode, "state-data-set");
+    for (int i = 0; i < 20; ++i)
+      ASSERT_FALSE(job->step(1));
+    const std::weak_ptr<std::vector<value_t>> first = std::get<list_ptr>((*big)[0].v);
+    (*big)[0] = nil_value; // copied, and in the memo
+    EXPECT_FALSE(first.expired()) << "a memoized source was freed mid-copy";
+    const value_t c = run_sliced(*job, 1).first;
+    EXPECT_EQ(to_string((*std::get<list_ptr>(c.v))[0]), "(0)");
+    job.reset();
+    EXPECT_TRUE(first.expired()); // and freed with the job
+  }
+}
+
 TEST(DataJob, IsolatingCopyRefusesOnlyAnInstancesShape) {
   // An object instance has the shape defclass and make_exception give it: "__class__" first, and
   // its class's "__name__" first, a class of any size. Any other dict holding a "__class__" key is
@@ -452,7 +474,10 @@ struct intrinsics_world {
   intrinsics_context ictx;
   environment_ptr env = builtins::make_default_environment();
 
-  explicit intrinsics_world(cvc::state &tree) {
+  explicit intrinsics_world(cvc::state &tree, std::size_t step_nodes = 0) {
+    data_options data;
+    data.step_nodes = step_nodes;
+    sched.set_data_defaults(data);
     ictx.sched = &sched;
     ictx.proc = proc;
     apply_chroot(ictx, tree, "");
@@ -595,6 +620,32 @@ TEST(DataStepsStateDataSet, ARestoredProcessStoresItsCaughtException) {
     ASSERT_TRUE(b.step_until([&] { return b.finished(moved); }));
     EXPECT_EQ(b.outcome(moved), p.expected);
   }
+}
+
+TEST(DataStepsStateDataSet, ASlicedStoreKeepsWhatItCopiedAlive) {
+  // state-data-set copying a slice a step (a host's data.step_nodes, here 1) while another process
+  // sharing the value (a common environment's binding) drops an element it copied already: that
+  // element stays allocated to the end of the copy, which stores what it copied (R0a-mem-2).
+  cvc::app app;
+  intrinsics_world w(cvc::state::instance(app), 1);
+  auto big = std::make_shared<std::vector<value_t>>();
+  for (int i = 0; i < 400; ++i)
+    big->push_back(make_list({value_t{std::string("old")}, value_t{int64_t{i}}}));
+  w.env->set("big", value_t{big});
+  const int pid = w.submit(R"((begin (state-data-set "k" big) (state-data-get "k")))");
+  for (int s = 0; s < 600 && !w.finished(pid); ++s) {
+    w.sched.drain_ingress();
+    w.sched.sync_step();
+  }
+  ASSERT_FALSE(w.finished(pid)) << "the copy ended before the drop";
+  const std::weak_ptr<std::vector<value_t>> first = std::get<list_ptr>((*big)[0].v);
+  (*big)[0] = nil_value; // the other process's set-nth
+  EXPECT_FALSE(first.expired()) << "a copied source was freed mid-copy";
+  ASSERT_TRUE(w.step_until([&] { return w.finished(pid); }));
+  const value_t got = w.sched.get_result(pid).value_or(nil_value);
+  ASSERT_TRUE(std::holds_alternative<list_ptr>(got.v)) << w.outcome(pid);
+  EXPECT_EQ(to_string((*std::get<list_ptr>(got.v))[0]), R"(("old" 0))");
+  EXPECT_EQ(std::get<list_ptr>(got.v)->size(), 400u);
 }
 
 TEST(DataStepsStateDataSet, AJsonDictWithAClassKeyIsStored) {

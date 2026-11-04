@@ -5,8 +5,6 @@
                       cvc::state subtrees.
 */
 
-#include "builtin_class.h"
-
 #include <algorithm>
 #include <charconv>
 #include <chrono>
@@ -174,35 +172,15 @@ std::optional<std::size_t> ref_index(const std::string &ref, std::size_t size) {
   return i;
 }
 
-// A decoded dict with exactly the shape of a built-in exception class dict is that class. The
-// writer writes the shared, read-only dict as data and its init native decodes as nil, so a
-// restored exception's class would otherwise be a copy: still caught by its chain of names, but
-// not read-only, and refused by state-data-set as an object instance (S0.1, S0.2). The match is
-// exact: the built-in's keys in its order, its __super__ the parent's dict (relinked already, as
-// it is decoded first), and init nil. A user class has an init or a finalize of its own, so one
-// named ValueError is never taken for the built-in.
+// A decoded dict with exactly the shape of a built-in exception class dict is that class
+// (builtin_class_of_copy). The writer writes the shared, read-only dict as data and its init
+// native decodes as nil, so a restored exception's class would otherwise be a copy: still caught
+// by its chain of names, but not read-only, and refused by state-data-set as an object instance
+// (S0.1, S0.2). A dict's __super__ is decoded, and relinked, before the dict is done.
 void relink_builtin_class(value_t &v) {
-  const auto *d = std::get_if<dict_ptr>(&v.v);
-  if (!d || !*d || !detail::is_class_dict_shape(**d))
-    return;
-  const auto *name = std::get_if<std::string>(&(*d)->front().second.v);
-  dict_ptr builtin = name ? exception_class(*name) : nullptr;
-  if (!builtin || builtin->size() != (*d)->size())
-    return;
-  for (std::size_t i = 1; i < builtin->size(); ++i) {
-    const auto &[key, val] = (**d)[i];
-    const auto &[want_key, want] = (*builtin)[i];
-    if (key != want_key)
-      return;
-    if (key == "__super__") {
-      const auto *super = std::get_if<dict_ptr>(&val.v);
-      if (!super || *super != std::get<dict_ptr>(want.v))
-        return;
-    } else if (!val.is_nil()) { // init: a native function decodes as nil
-      return;
-    }
-  }
-  v = value_t(std::move(builtin));
+  if (const auto *d = std::get_if<dict_ptr>(&v.v); d && *d)
+    if (dict_ptr cls = builtin_class_of_copy(**d))
+      v = value_t(std::move(cls));
 }
 
 // One encode walk, from the node encode_value or encode_environment was called on.

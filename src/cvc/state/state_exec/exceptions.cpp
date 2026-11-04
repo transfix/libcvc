@@ -141,6 +141,31 @@ bool is_builtin_class_dict(const void *dict) noexcept {
   return std::binary_search(sorted.begin(), sorted.end(), dict, std::less<const void *>());
 }
 
+dict_ptr builtin_class_of_copy(const ordered_map &dict) {
+  if (!detail::is_class_dict_shape(dict))
+    return nullptr;
+  const auto *name = std::get_if<std::string>(&dict.front().second.v);
+  dict_ptr cls = name ? exception_class(*name) : nullptr;
+  if (!cls || cls->size() != dict.size())
+    return nullptr;
+  for (std::size_t i = 1; i < cls->size(); ++i) {
+    const auto &[key, val] = dict[i];
+    const auto &[want_key, want] = (*cls)[i];
+    if (key != want_key)
+      return nullptr;
+    if (key == "__super__") {
+      const auto *super = std::get_if<dict_ptr>(&val.v);
+      if (!super || *super != std::get<dict_ptr>(want.v))
+        return nullptr;
+    } else if (!val.is_nil()) { // init
+      const auto *fn = std::get_if<native_fn>(&val.v);
+      if (!fn || !fn->target<exception_init>())
+        return nullptr;
+    }
+  }
+  return cls;
+}
+
 void register_exception_classes(const environment_ptr &env) {
   for (const auto &name : exception_class_names()) {
     const dict_ptr cls = exception_class(name);

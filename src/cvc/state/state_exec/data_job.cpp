@@ -433,7 +433,7 @@ private:
     const void *key = c->list ? static_cast<const void *>(c->list.get())
                               : static_cast<const void *>(c->dict.get());
     if (auto found = memo_.find(key); found != memo_.end())
-      return found->second; // shared node / cycle already copied -> reuse (bounds the walk)
+      return found->second.copy; // shared node / cycle already copied -> reuse (bounds the walk)
     if (mode_ == copy_mode::isolate && c->dict)
       isolate_dict(v, in); // once per dict: a dict reached again was checked
     value_t out;
@@ -446,7 +446,10 @@ private:
       d->reserve(c->dict->size());
       out = value_t{d};
     }
-    memo_.emplace(key, out); // registered before its elements are copied
+    // Registered before its elements are copied, with its source held (memo_entry).
+    memo_.emplace(key, memo_entry{c->list ? std::shared_ptr<const void>(c->list)
+                                          : std::shared_ptr<const void>(c->dict),
+                                  out});
     open_.emplace_back(std::move(*c), out);
     return out;
   }
@@ -495,7 +498,14 @@ private:
   const char *who_; // a string literal: the deadline's and the refusals' label
   bool started_ = false;
   value_t result_;
-  std::unordered_map<const void *, value_t> memo_;
+  // A source list or dict's copy, by the source's address. The entry holds the source as well:
+  // one another process drops between two slices stays allocated until the copy is done, so its
+  // address can't come back as a new list or dict that the walk would take for it (R0a-mem-2).
+  struct memo_entry {
+    std::shared_ptr<const void> source;
+    value_t copy;
+  };
+  std::unordered_map<const void *, memo_entry> memo_;
   std::vector<std::pair<cursor, value_t>> open_;
 };
 
