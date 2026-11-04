@@ -40,14 +40,19 @@ boost::shared_ptr<cvc::state> host_held(cvc::state *node) {
 async_scheduler::~async_scheduler() {
   home_.reset();
   // Commands posted and never applied: their done gets false. Taken under the lock, so a post
-  // that returned before the destruction began is seen.
-  std::vector<std::pair<int, control_cmd>> left;
-  {
-    std::lock_guard<std::mutex> lock(ingress_mutex_);
-    left.swap(controls_);
+  // that returned before the destruction began is seen; and again until none is left, since a
+  // done may post another, which is refused too rather than dropped.
+  for (;;) {
+    std::vector<std::pair<int, control_cmd>> left;
+    {
+      std::lock_guard<std::mutex> lock(ingress_mutex_);
+      left.swap(controls_);
+    }
+    if (left.empty())
+      break;
+    for (auto &entry : left)
+      refuse_control(entry.second);
   }
-  for (auto &entry : left)
-    refuse_control(entry.second);
 }
 
 void async_scheduler::set_lock_manager(std::shared_ptr<lock_manager> mgr, lock_attach attach) {
@@ -465,9 +470,21 @@ void async_scheduler::drain(bool in_step) {
       finished.swap(completions_);
       controls.swap(controls_);
       ingress_pending_.store(false, std::memory_order_relaxed);
-      control_pending_.store(false, std::memory_order_relaxed);
+      // control_pending_ stays set until the batch's commands are applied: a command waits until
+      // then, and has_pending_control() says so.
     }
     chain_valid_ = false;
+    // Once the batch's commands are applied (or refused, or back in the queue), whatever is
+    // queued now says whether a command waits.
+    const auto settle_pending = [this, had = !controls.empty()]() noexcept {
+      if (!had)
+        return;
+      try {
+        std::lock_guard<std::mutex> lock(ingress_mutex_);
+        control_pending_.store(!controls_.empty(), std::memory_order_release);
+      } catch (...) { // left set: the next drain looks, and settles it
+      }
+    };
     // On the scheduler thread now: deliver_to_receivers mutates process state, which is safe
     // here (no other thread touches the scheduler). A message with no waiter falls into the
     // per-path pending FIFO, exactly as an on-thread msg-send would. Then the settled calls, then
@@ -490,8 +507,10 @@ void async_scheduler::drain(bool in_step) {
       if (c > 0) // a command threw: it is refused
         refuse_control(controls[c - 1].second);
       requeue_ingress(batch, m, finished, f, controls, c);
+      settle_pending();
       throw;
     }
+    settle_pending();
   }
   if (!async_calls_.empty()) {
     charge_async_calls(in_step ? now_for_step() : clock::now());
@@ -1675,8 +1694,13 @@ void async_scheduler::apply_control(int pid, control_cmd &cmd) {
     applied = send_signal(pid, cmd.signal); // "SIGKILL" kills
     break;
   }
-  if (cmd.done)
-    cmd.done(applied);
+  if (cmd.done) {
+    // Taken from the command first: a done that throws (against its contract) is not called
+    // again by the refusal of the command that threw.
+    const std::function<void(bool)> done = std::move(cmd.done);
+    cmd.done = nullptr;
+    done(applied);
+  }
 }
 
 void async_scheduler::requeue_ingress(std::vector<std::pair<std::string, value_t>> &batch,

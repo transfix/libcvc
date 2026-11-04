@@ -38,14 +38,19 @@ boost::shared_ptr<cvc::state> host_held(cvc::state *node) {
 scheduler::~scheduler() {
   home_.reset();
   // Commands posted and never applied: their done gets false. Taken under the lock, so a post
-  // that returned before the destruction began is seen.
-  std::vector<std::pair<int, control_cmd>> left;
-  {
-    std::lock_guard<std::mutex> lock(control_mutex_);
-    left.swap(controls_);
+  // that returned before the destruction began is seen; and again until none is left, since a
+  // done may post another, which is refused too rather than dropped.
+  for (;;) {
+    std::vector<std::pair<int, control_cmd>> left;
+    {
+      std::lock_guard<std::mutex> lock(control_mutex_);
+      left.swap(controls_);
+    }
+    if (left.empty())
+      break;
+    for (auto &entry : left)
+      refuse_control(entry.second);
   }
-  for (auto &entry : left)
-    refuse_control(entry.second);
 }
 
 void scheduler::set_lock_manager(std::shared_ptr<lock_manager> mgr, lock_attach attach) {
@@ -1548,9 +1553,19 @@ void scheduler::apply_controls() {
   {
     std::lock_guard<std::mutex> lock(control_mutex_);
     controls.swap(controls_);
-    control_pending_.store(false, std::memory_order_relaxed);
+    // control_pending_ stays set until the batch is applied: a command waits until then, and
+    // has_pending_control() says so.
   }
   chain_valid_ = false; // a query's time is no step's
+  // Once the batch is applied (or refused, or back in the queue), whatever is queued now says
+  // whether a command waits.
+  const auto settle_pending = [this]() noexcept {
+    try {
+      std::lock_guard<std::mutex> lock(control_mutex_);
+      control_pending_.store(!controls_.empty(), std::memory_order_release);
+    } catch (...) { // left set: the next step looks, and settles it
+    }
+  };
   // One at a time, in the order posted (S0.7). A kill can throw (its locks' release, a tree
   // write's slots): the command that threw is refused, and the rest go back to the front of the
   // queue, ahead of what was posted since, before the exception propagates. None is lost.
@@ -1573,8 +1588,10 @@ void scheduler::apply_controls() {
           refuse_control(controls[i].second);
       }
     }
+    settle_pending();
     throw;
   }
+  settle_pending();
 }
 
 void scheduler::apply_control(int pid, control_cmd &cmd) {
@@ -1600,8 +1617,13 @@ void scheduler::apply_control(int pid, control_cmd &cmd) {
     applied = send_signal(pid, cmd.signal); // "SIGKILL" kills
     break;
   }
-  if (cmd.done)
-    cmd.done(applied);
+  if (cmd.done) {
+    // Taken from the command first: a done that throws (against its contract) is not called
+    // again by the refusal of the command that threw.
+    const std::function<void(bool)> done = std::move(cmd.done);
+    cmd.done = nullptr;
+    done(applied);
+  }
 }
 
 bool scheduler::set_max_steps(int pid, uint64_t max_steps) {
