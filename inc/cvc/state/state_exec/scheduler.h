@@ -304,8 +304,8 @@ public:
   /// Remove a watch handler from the scheduler's process object.
   void unregister_watch_handler(int pid, int watch_id);
 
-  /// Set the state-tree root for watch polling and settings. A host call (app, pycvc, the CLI),
-  /// never made from a step: a chrooted state-watch keeps its own root instead (td 4.8).
+  /// Set the state-tree root for watch polling and settings: a host's call (app, pycvc, the CLI),
+  /// which keeps the root alive. A step makes only the pinned form below (td 4.8).
   void set_watch_root(cvc::state *root);
   /// The same for a root a program's step gives (state-watch's): kept by `pin` while it is the
   /// watch root (scheduler_base).
@@ -313,8 +313,9 @@ public:
   /// The root set_watch_root() gave, or null.
   cvc::state *watch_root() const override { return watch_root_; }
 
-  /// The watched nodes poll_watches() has read so far, one for each watch it reads. A watch is
-  /// read only after a write under the root it resolves under (td 4.8: per-root gating).
+  /// The watch entries poll_watches() has looked up so far, one each time it polls a watch,
+  /// whether or not its node exists. A watch is polled only after a write under the root it
+  /// resolves under (td 4.8: per-root gating).
   uint64_t watch_polls() const noexcept { return watch_polls_; }
 
   /// Set a unique identifier for this scheduler instance.
@@ -425,7 +426,7 @@ private:
   detail::tree_changes tree_changes_;
   uint64_t watch_seen_ = 0;
   detail::watch_roots watch_roots_;
-  uint64_t watch_polls_ = 0; // watched nodes read (watch_polls())
+  uint64_t watch_polls_ = 0; // watch entries polled (watch_polls())
   /// limits.async_steps_per_cpu_ms as last read from the tree, and the settings version then.
   detail::settings_changes settings_changes_;
   uint64_t rate_seen_ = 0;

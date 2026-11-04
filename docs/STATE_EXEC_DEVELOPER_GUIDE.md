@@ -513,7 +513,9 @@ program in it. So no program may change one:
 - A class derived from a built-in one has a dict of its own, which stays mutable, and
   `(defclass ValueError ...)` only rebinds the name in the program's environment.
 - `(raise ValueError.__cls_dict__)` is still the `TypeError` `raise: expected an exception, got
-  dict`, and the class dict gains no traceback.
+  dict`: `raise` refuses anything that isn't an exception before it records where it was raised.
+  A native function that throws a `dsl_exception` holding a built-in class dict has it raised as
+  it is, with no traceback, cause or origin added to the shared dict.
 
 A signal or watch handler's uncaught exception is raised in the program where the handler
 interrupted it, so the program's own `try` can catch it.
@@ -793,16 +795,19 @@ it picks.)
   scheduler, reads the rate it charges async calls at, is the host's, and `state-watch` never
   moves it for a chrooted context. An unchrooted context's `state-watch` sets it only on a
   scheduler that has none yet (`watch_root()` is null), which from then on reads its settings
-  there, as before. A scheduler class of a host's own (a `scheduler_base` outside this repo)
-  that doesn't override the 5-argument `register_watch_handler` resolves a chrooted watch's path
-  under its own watch root instead, so such a scheduler overrides it.
-  A watch is read only when something under its own root changed since the last poll: the
-  scheduler counts each root's change signals while a watch resolves under it, so a quiet tree
-  costs a step nothing however many watches there are, and a write reads only the watches whose
-  root it is under: one under a document's chroot reads that document's watches (and those under
-  the watch root above it), not another document's. `watch_polls()` counts the watched nodes
-  read. This relies on writes firing the
-  tree's signals, as `value()` writes do. Two kinds don't: `state::reset(..., fireCallbacks =
+  there, as before; since no host keeps that root alive, the scheduler holds it (and its
+  ancestors) for as long as it is its watch root (`set_watch_root(root, pin)`). A scheduler class
+  of a host's own (a `scheduler_base` outside this repo) overrides the 5-argument
+  `register_watch_handler`, `watch_root()` and the 2-argument `set_watch_root`: the defaults drop
+  a chrooted watch's root (its path then resolves under the scheduler's own watch root), report
+  no watch root (so every unchrooted `state-watch` sets it again), and drop the pin. A watch is
+  read only when something under its own root changed since the last poll: the scheduler counts
+  each root's change signals while a watch resolves under it, so a quiet tree costs a step
+  nothing however many watches there are, and a write reads only the watches whose root it is
+  under: one under a document's chroot reads that document's watches (and those under the watch
+  root above it), not another document's. `watch_polls()` counts the watch entries polled, one
+  each time a watch is looked up, whether or not its node exists. This relies on writes firing
+  the tree's signals, as `value()` writes do. Two kinds don't: `state::reset(..., fireCallbacks =
   false)`, and a node `operator()` creates. `state_list`'s `pop_back`, `erase`, `insert` and
   `clear` reset elements that way, but each then writes the list's size, which fires, so a watch
   on an element still sees it change (`WatchSeesAStateListElementPoppedOff`). A host that resets
@@ -849,12 +854,13 @@ scheduler (or to a time when nothing steps it).
 
 ### From Another Thread: `stop()` and `post_control`
 
-Besides the async scheduler's `post_message()`, two calls may come from any thread
-(docs/STATE_EXEC_THREADED.md 4.12):
+Besides the async scheduler's `post_message()`, four calls may come from any thread
+(docs/STATE_EXEC_THREADED.md 4.12): `stop()` and `is_running()`, and `post_control()` and
+`has_pending_control()`.
 
 - **`stop()`** ends `run()` (and the async scheduler's `sync_run`) at its next check, between
-  steps. On the sync scheduler it also ends an idle `run()`'s wait at once. `is_running()` may be
-  read from any thread too: once it is true, a `stop()` ends that run. A `stop()` made while no
+  steps. On the sync scheduler it also ends an idle `run()`'s wait at once. Once `is_running()`
+  reads true, a `stop()` ends that run. A `stop()` made while no
   run is active is discarded, since a run starts by clearing it. `stop()` is not
   async-signal-safe (it notifies the idle wait, which takes a lock on POSIX): a signal handler
   sets a flag of its own, as `cvc serve` does, and the loop acts on it.
@@ -1163,7 +1169,11 @@ tree_root, path)` pins the chroot node and every ancestor up to the tree's root 
 the same on the context's first state intrinsic (`pinned_root`), so it assigns only a node it
 keeps alive at that moment, on the context's scheduler thread. Each state intrinsic then holds
 the nodes it walks below the root, and a write holds that chain to its end, so a node another
-thread deletes meanwhile is freed only once nothing holds it. A context keeps its chain for its
+thread deletes meanwhile is freed only once nothing holds it. Of the writes that span several
+slices, `state-from-json` and `state-set-tree` hold their target's chain for their whole life;
+`state-set` of a list and `state-data-set` hold the root's chain while their data job runs, and
+walk to the target when they write. Chains are let go of leaf first, so a node never dies after
+its parent. A context keeps its chain for its
 whole life: if its chroot is deleted, the context's programs go on reading and writing the
 detached subtree, which nothing else sees, until the context goes.
 
@@ -1234,8 +1244,9 @@ show it (docs/ARIADNE.md §10.4):
 - A list's node holds its length, so `repeat: (state-get "feed.items")` repeats a widget per
   element. A dict's node holds the empty string.
 - It replaces the subtree: a child the value doesn't name is removed with its subtree (unlinked
-  as `state-delete` unlinks a node, a unit of work apiece), and a node whose text doesn't change
-  isn't written, so its watchers don't fire.
+  as `state-delete` unlinks a node, a unit of work apiece, where the sweep it replaced counted
+  what it removed), and a node whose text doesn't change isn't written, so its watchers don't
+  fire.
 - It checks the whole value before it writes anything, so a value it can't write changes
   nothing, not even the node at its path. A key must name one node: not empty, no `.`, and no
   space at either end (paths are trimmed). Anything but nil, a bool, a number, a string, a list
@@ -1258,18 +1269,22 @@ what is stored, so a program never shares a list or dict with the tree (docs/STA
   `state-data-get` returns. An ordinary `data_object` (a volume, a mesh) is shared, under its
   read-only contract. A built-in exception's instance is copied, and its class dict shared, since
   it is read-only (above): an exception read back with `state-data-get` can be stored again, and
-  so can one restored from a snapshot (the restore relinks a built-in class to itself). The node
-  is written once, when the whole copy is made.
+  so can one restored from a snapshot (the restore relinks a built-in class to itself) and one
+  that came through pycvc (a Python function's return value, or `pycvc.make_exception`'s), which
+  keeps its built-in class. The node is written once, when the whole copy is made.
 - **Refused, at any depth:** what runs code or holds a process's state. The `RuntimeError` names
   it: `state-data-set: cannot store a closure`, `... a native function`, `... a generator`,
   `... a future`, `... a lock form` (`with-lock` itself), `... a lock wait`, and
   `state-data-set: cannot store an object instance` (an instance of a user class: its methods are
-  closures over the environment `defclass` ran in, the writing program's live one). An instance
-  is a dict whose first key is `__class__`, holding a class dict whose first key is `__name__`, as
-  `defclass` and the exception constructors build them; any other dict, such as a JSON object
-  with a `__class__` key, is copied as data. Below the top level the text ends with ` (nested in a list)` or ` (nested in a dict)`, as in
-  `state-data-set: cannot store a closure (nested in a list)`. A refused value leaves the node as
-  it was.
+  closures over the environment `defclass` ran in, the writing program's live one). The article
+  follows the kind: "a" before a consonant, "an" before a vowel. An instance is known by its
+  shape: a dict whose first key is `__class__`, holding a dict whose first key is `__name__` and
+  which is not a built-in class, as `defclass` and the exception constructors build them. Any
+  other dict, such as a JSON object with a `__class__` key elsewhere or holding something else,
+  is copied as data; but plain data of exactly that shape (`(json-parse "{\"__class__\":
+  {\"__name__\": \"P\"}}")`) is refused as an instance too. Below the top level the text ends
+  with ` (nested in a list)` or ` (nested in a dict)`, as in `state-data-set: cannot store a
+  closure (nested in a list)`. A refused value leaves the node as it was.
 - **Instances inside other values** are refused as well. An exception raised while a handler
   handles a user-class exception (a class derived from `ValueError`, say) has that instance as
   its `cause`, so storing it gives `state-data-set: cannot store an object instance (nested in a
@@ -1280,12 +1295,16 @@ what is stored, so a program never shares a list or dict with the tree (docs/STA
   ([Sliced work](#sliced-work)). With `data.step_nodes` at 0 (a bare scheduler's default) it runs
   in the call's step. On the hosts (1024: the app's scheduler, pycvc's `Exec`, Ariadne) it takes
   about one data step per 1024 nodes visited, a container's end counting as one, so a small value
-  takes none, but a deeply nested one (600 nested one-element lists) can take one. Freeing the
-  value the node held before is charged to the writer too.
+  takes none, but a deeply nested one (600 nested one-element lists) can take one. Where the
+  scheduler slices deep data (`data.step_nodes` above 0), freeing the value the node held before
+  goes through the release backlog and is charged to the writer too; a bare scheduler frees it
+  unmetered.
 
 `state-data-get`'s copy shares the built-in class dicts in the same way (so do the copies of an
 async function's arguments): a read-back exception's `__class__` is the shared, read-only class,
-and `set-attr` on it raises `TypeError`.
+and `set-attr` on it raises `TypeError`. Those copies no longer copy the class dicts, so they
+count fewer data nodes than before, and on the hosts can take a data step fewer where a copy
+crossed a 1024-node boundary.
 
 #### Atomic single-node updates
 
@@ -1714,10 +1733,13 @@ not an exception.
   (including by its budget running out while the call runs), the call times
   out, its owner group is reaped, or the host shuts down. A cancelled call's
   result is dropped.
-- Another process awaiting the same future (a fork child, when its parent is
-  killed) is woken. If the call was cancelled before it settled, its await
-  raises `RuntimeError` `<name>: cancelled: the process that made the call
-  ended`.
+- A call cancelled before it settled (its process killed or reaped) is
+  settled then, with `RuntimeError` `<name>: cancelled: the process that made
+  the call ended`, and its kernel's result, if it comes later, is dropped.
+  Every way the future is awaited raises it: another process's `await` (a
+  fork child, when its parent is killed, is woken to raise it), an
+  `await-all`, an `await` made after the cancel, and an await in a generator
+  body. Nothing waits for such a call for ever.
 - `call.post(value)` sends `value` to `<name>.progress` under the process's
   root, for `msg-recv` or a resident. Nothing waits for it; a full queue drops
   it.
@@ -2075,11 +2097,13 @@ sched.set_id("worker-1");      // scheduler identity
 sched.load_settings();         // read and apply settings
 ```
 
-`set_watch_root` is a host call, made before or between runs on the scheduler's thread, never
-from a step: the app (for `app::exec_scheduler()`), pycvc's `Exec` and the CLI make it.
-`watch_root()` returns it. A chrooted program's `state-watch` keeps its own root and leaves this
-one alone; an unchrooted one sets it only when the scheduler has none ([How the Schedulers Pick,
-Wait and Forget](#how-the-schedulers-pick-wait-and-forget), "State watches").
+`set_watch_root(root)` is a host call, made before or between runs on the scheduler's thread:
+the app (for `app::exec_scheduler()`), pycvc's `Exec` and the CLI make it, and keep the root
+alive. `watch_root()` returns it. A chrooted program's `state-watch` keeps its own root and
+leaves this one alone. An unchrooted one, from its step, sets it only when the scheduler has
+none, with `set_watch_root(root, pin)`: the scheduler keeps the pin, which holds the root and its
+ancestors, until the watch root changes again ([How the Schedulers Pick, Wait and
+Forget](#how-the-schedulers-pick-wait-and-forget), "State watches").
 
 **State tree paths:**
 
@@ -2171,7 +2195,10 @@ scheduler is posted (`post_control`) and applied between the scheduler's steps, 
 - control messages from other nodes (`pause`, `resume`, `kill`, `send_signal`, `set_priority`),
   fire and forget;
 - a submission from another node, which runs in a posted entry and answers the requesting node
-  from there;
+  from there. One whose script doesn't parse is answered `accepted: false` with the error, and
+  counted in `submissions_received` and `submissions_rejected` (before, the bus swallowed the
+  throw: no answer, no count). A local `submit()` of such a script still throws, and counts
+  nothing;
 - an incoming migration (the ingest);
 - `migrate()` and the local `admin_pause`, `admin_resume`, `admin_kill` and
   `admin_set_priority`, so any thread may call them.

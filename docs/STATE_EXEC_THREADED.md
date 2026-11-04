@@ -666,16 +666,20 @@ clone:
   does;
 - an ordinary `data_object` is shared, under its read-only contract;
 - a built-in exception class dict is shared, in both modes: it is read-only (5 item 1). So a
-  built-in exception's instance is copied and keeps its class;
+  built-in exception's instance is copied and keeps its class. A restored exception's built-in
+  class is the built-in dict again (the codec relinks it), so it is shared too;
 - anything that runs code or holds a process's state raises `runtime_error`, at any depth,
-  naming the crossing and the kind: "`who`: cannot store a `kind`", plus " (nested in a list)"
-  or " (nested in a dict)" below the root, for example "state-data-set: cannot store a closure
-  (nested in a list)". The kinds are `closure`, `native function`, `generator`, `future` (a
-  future's dict or its `async_call` handle), `lock form` (`with-lock`'s form, which holds its
-  context's raw pointer), `lock wait` (a lock wait's handle), and "an object instance" (a dict
-  whose `__class__` is a user class, S0-Q4). An environment is reachable only through a closure
-  or generator, so it needs no kind of its own. This replaced `state-data-set`'s check of a
-  top-level callable.
+  naming the crossing and the kind: "`who`: cannot store a `kind`" ("an" before a vowel), plus
+  " (nested in a list)" or " (nested in a dict)" below the root, for example "state-data-set:
+  cannot store a closure (nested in a list)". The kinds are `closure`, `native function`,
+  `generator`, `future` (a future's dict or its `async_call` handle), `lock form` (`with-lock`'s
+  form, which holds its context's raw pointer), `lock wait` (a lock wait's handle), and `object
+  instance` (S0-Q4). An object instance is known by its shape, the one `defclass` and
+  `make_exception` build: a dict whose first key is `__class__`, holding a dict whose first key
+  is `__name__` and which is not a built-in class. Any other dict is data, a `__class__` key or
+  not; plain data of exactly that shape (parsed JSON `{"__class__": {"__name__": "P"}}`) is
+  refused too. An environment is reachable only through a closure or generator, so it needs no
+  kind of its own. This replaced `state-data-set`'s check of a top-level callable.
 - The copy runs as a sliced data job, charged to the process that makes it, as async arguments
   are (3.7). A refusal in any slice throws before anything is written.
 
@@ -1032,16 +1036,29 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
     channel lookups) use `findDescendantShared(self, path, pins)` and `sharedChild(self, path,
     pins)`: overloads for a caller that already holds the start node, which take no reference on
     it, so a lookup does not touch the app root's or a chroot's count.
-  - A sliced writer (`state-set` of a list, `state-data-set`'s copy, `state-from-json`,
-    `state-set-tree`) holds the root's chain, its target's and any link's for its whole life.
+  - The sliced writers differ. `state-from-json` and `state-set-tree` hold the root's chain, their
+    target's and any link's for their whole life, and write through what they hold (the JSON
+    reader, `state_json.cpp`, walks each write from its held target and keeps that chain until
+    the write's signals are done). `state-set` of a list and `state-data-set`'s copy hold only the
+    root's chain while their data job runs, and walk to the target, holding its chain, when they
+    write.
+  - Chains are released leaf first (the context's `root_pins`, the jobs' chains, a link
+    resolution's pins), so a node never dies after its parent.
   - `msg-send` holds its node and that node's chain across `sendMessage`, whose link path reads
     the pinned walk's path and whose non-link path reads `fullName()` up the held chain.
     `sendMessage` itself is unchanged.
   - `poll_watches` holds each watched node while it reads it, through the start-pinned lookup.
+  - The schedulers' settings reads and publication hold what they walk: every `*_from_state`
+    reader goes through `detail::setting_value`, the publication (`load_settings`, the published
+    rate) through `detail::publish_setting`, and `settings_changes` holds the `state_exec` node it
+    counts until it connects elsewhere (`clear()` lets go of it).
   - pycvc's tree accessors (`pycvc_state.cpp`) walk pinned too, so `Exec`s on several threads and
     Python threads reading the tree are safe together (4.12).
-  - The host natives outside `intrinsics.cpp` (`room_intrinsics.cpp`, `room_media_intrinsics.cpp`,
-    `oidc_host.cpp`) still walk raw. They are left for Stage 1's provider classification (4.9).
+  - Host code outside `intrinsics.cpp` still walks raw: Ariadne's settings reads and holes
+    (`ariadne.cpp`), `doc_args.cpp`, `app.cpp`'s settings read, `state_value_codec.cpp`'s
+    snapshot walks, the conference natives (`room_intrinsics.cpp`, `room_media_intrinsics.cpp`),
+    `holon` replication and `oidc_host.cpp`. They are left for Stage 1's provider classification
+    (4.9).
 - **A pinned chroot** (D's graft). The context holds its root and every ancestor up to the tree's
   root (`intrinsics_context::root_pins`, `back()` is `root`). `apply_chroot` pins them once; a
   host that assigns `ictx.root` directly is pinned on the context's first state intrinsic
@@ -1064,16 +1081,23 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
   counter per distinct watch root (`detail::watch_roots`), shared by the entries with that root.
   - A chrooted context never calls `set_watch_root`. The scheduler's watch root stays the host's,
     for settings, the published settings and the async charge rate.
-  - One case is kept: an unchrooted context on a scheduler that has no
-    watch root (`scheduler_base::watch_root()` null) sets it, as before, and the scheduler then
-    reads and publishes its settings there and gates its watches. A bare scheduler's programs
-    rely on it.
-  - `set_watch_root` is a host call, never made from a step: the app (`app::exec_scheduler()`),
-    pycvc's `Exec` and the CLI make it.
-  - A `scheduler_base` subclass that does not override the 5-argument `register_watch_handler`
-    gets the default, which drops the root, so a chrooted watch's path resolves under that
-    scheduler's watch root. Both in-tree schedulers override it.
-  - `watch_polls()` counts the watched nodes read, so a test can see the gating.
+  - One case is kept: an unchrooted context on a scheduler that has no watch root
+    (`scheduler_base::watch_root()` null) sets it, as before, and the scheduler then reads and
+    publishes its settings there and gates its watches. A bare scheduler's programs rely on it.
+    That call comes from a step, so it passes a pin: `set_watch_root(root, pin)`, where the pin
+    holds the context's whole root chain. No host keeps such a root alive, so the scheduler keeps
+    the pin for as long as that root is its watch root, and a later `set_watch_root`, of either
+    form, replaces or drops it.
+  - Otherwise `set_watch_root` is a host call, made between steps: the app
+    (`app::exec_scheduler()`), pycvc's `Exec` and the CLI make it, with the one-argument form,
+    and keep the root alive.
+  - A `scheduler_base` subclass outside the tree gets defaults that ignore what it doesn't keep:
+    the 5-argument `register_watch_handler` drops the watch's root (so a chrooted watch's path
+    resolves under that scheduler's watch root), `watch_root()` returns null (so every unchrooted
+    `state-watch` sets the root again), and the 2-argument `set_watch_root` drops the pin. Such a
+    scheduler overrides all three. Both in-tree schedulers do.
+  - `watch_polls()` counts the watch entries polled, one each time a watch is looked up (whether
+    or not its node exists), so a test can see the gating.
 - **Contention.**
   - A lookup takes each path segment's `boost::mutex` from where it starts (`state.cpp:1334-1354`),
     and a write emits up the parent chain.
@@ -1122,9 +1146,11 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
     by a fork child beside its parent, is charged once and gives one result. Every process
     waiting on the call is woken, including on the paths that used to wake nobody: a call no
     longer listed, and the calls `cancel_async_calls` drops. So a fork child awaiting its
-    parent's future is woken when the parent is killed; if the call was cancelled before it
-    settled, its await raises `RuntimeError` "`name`: cancelled: the process that made the call
-    ended".
+    parent's future is woken when the parent is killed. A call cancelled before it settled is
+    settled with `RuntimeError` "`name`: cancelled: the process that made the call ended", for
+    every way it is awaited (`await`, `await-all`, an `await` made after the cancel, an await in
+    a generator body), and its kernel's late result is dropped, so nothing waits for it for
+    ever.
   - Awaiting a future whose `async_sched_` is not the current group raises `RuntimeError`: Stage
     1's, with the per-group host (B30; S0-Q6). Stage 0 adds no such check, because one scheduler
     legitimately awaits another's future on one thread today: Ariadne's `init:` lane runs on a
@@ -1387,7 +1413,9 @@ out first, and otherwise it waits for a timer, a lock post or the end of its tim
     a pool.
   - The raw schedulers' mutators (`Exec.scheduler()`'s, and `pycvc.scheduler`'s and
     `pycvc.async_scheduler`'s `kill`, `pause`, `resume`, `send_signal`, `execute` and the rest)
-    are the pump thread's (S0-Q5). Stage 0 documents the rule (`bindings/pycvc/README.md`) and
+    are the pump thread's (S0-Q5), and so are `Exec.set_parser_defaults`, `set_data_defaults`,
+    `register_fn`, `register_async_fn` and `register_async_coro`, which change the scheduler or
+    the natives its programs share. Stage 0 documents the rule (`bindings/pycvc/README.md`) and
     makes only `stop()` (with `is_running()`) safe from another thread. `Exec.kill`, `pause`,
     `resume` and `send_signal`, posted the way `set_priority` is, wait for a request.
   - `run()` already waits with `wait_for_work` instead of sleeping (`perf/sched`).
@@ -1428,7 +1456,9 @@ out first, and otherwise it waits for a timer, a lock post or the end of its tim
   - `handle_control`'s pause, resume, kill, send_signal and set_priority
     ([`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) 7.4), fire and forget;
   - a submission from another node (`handle_submit`): a posted `query` entry runs `submit_local`
-    and answers the requesting node from there;
+    and answers the requesting node from there. One that doesn't parse is answered
+    `accepted: false` and counted received and rejected (before, the bus swallowed the throw:
+    no answer, no count); a local `submit()` of such a script still throws and counts nothing;
   - the migrate ingest (`handle_migrate`), in a posted entry. The coordinator's own
     migrate-request comes back to it on the bus (it subscribes to the whole prefix), so that
     ingest runs on the scheduler's thread too;
@@ -1786,7 +1816,10 @@ Each item says when it applies. "Always" items land whether or not a host enable
    - User classes, including ones derived from the built-ins, are unaffected: each has its own
      dict.
    - `(raise ValueError.__cls_dict__)` is still the `TypeError` "raise: expected an exception, got
-     dict": the raise paths' `annotate` leaves a class dict as it is.
+     dict": `raise` refuses a non-exception before anything annotates it. The evaluators'
+     `annotate` (and `async_call::outcome()`) leave a built-in class dict as it is for another
+     case: a native function that throws a `dsl_exception` holding one, which is then raised
+     unchanged rather than turned into the read-only `TypeError`.
    - Before, one program could redefine `init` for every program in the OS process.
 2. **Always (Stage 0, built): `state-data-set` stores an isolating copy** (4.3).
    - A list changed after it was stored no longer changes what `state-data-get` returns.
@@ -1794,15 +1827,23 @@ Each item says when it applies. "Always" items land whether or not a host enable
      octets; everything else is copied (`data_object`s included, so the internal ones are
      refused). An ordinary `data_object` is shared.
    - Refused at any depth, with `runtime_error` (the DSL's `RuntimeError`) "state-data-set: cannot
-     store a `kind`", plus " (nested in a list)" or " (nested in a dict)": a closure, native
-     function, generator, future, lock form or lock wait, and "an object instance", an instance
-     of a user class (S0-Q4: its methods hold the writer's live environment). Before, only a
-     top-level callable was refused. A refused value leaves the node as it was.
+     store a `kind`" ("an" before a vowel), plus " (nested in a list)" or " (nested in a dict)":
+     a closure, native function, generator, future, lock form or lock wait, and an object
+     instance, an instance of a user class (S0-Q4: its methods hold the writer's live
+     environment). An instance is known by its shape: a dict whose first key is `__class__`,
+     holding a dict whose first key is `__name__` and which is not a built-in class. Before, only
+     a top-level callable was refused. A refused value leaves the node as it was.
+   - Any other dict is data, `__class__` key or not. Plain data of exactly an instance's shape is
+     refused, though: `(json-parse "{\"__class__\": {\"__name__\": \"P\"}}")` cannot be
+     stored.
    - A built-in exception's instance is copied, its class dict shared (item 1), so an exception
-     read back with `state-data-get` can be stored again. `state-data-get`'s share-mode copy, and
-     the copies of async arguments, share the built-in class dicts too: a read-back exception's
-     `__class__` is the shared read-only class, so `set-attr` on it raises `TypeError` (it changed
-     a private copy before), and the copy costs fewer data nodes.
+     read back with `state-data-get` can be stored again. So can one restored from a snapshot (the
+     codec relinks a built-in class to itself) and one that came through pycvc (a Python
+     function's return value, `pycvc.make_exception`), which keeps its built-in class.
+     `state-data-get`'s share-mode copy, and the copies of async arguments, share the built-in
+     class dicts too: a read-back exception's `__class__` is the shared read-only class, so
+     `set-attr` on it raises `TypeError` (it changed a private copy before), and the copy costs
+     fewer data nodes.
    - A built-in exception that holds an instance is refused too: one whose `cause`, set
      automatically, is a user-class exception gives "state-data-set: cannot store an object
      instance (nested in a dict)". A program stores the fields it needs instead.
@@ -1811,8 +1852,9 @@ Each item says when it applies. "Always" items land whether or not a host enable
      no step. On the hosts (`data.step_nodes` 1024: the app's scheduler, pycvc's `Exec`, Ariadne)
      the first slice runs in the call's step within what the step has left, and the rest takes
      about one data step per 1024 nodes visited, a container's end counting as one: none for a
-     small value, but a deeply nested one (600 nested one-element lists) can take one. Freeing the
-     node's previous value is charged to the writer too.
+     small value, but a deeply nested one (600 nested one-element lists) can take one. With
+     `data.step_nodes` above 0, freeing the node's previous value goes through the release backlog
+     and is charged to the writer too; a bare scheduler frees it unmetered.
 3. **Always (Stage 0, built): `state-delete` deletes only its node** (4.8). It no longer sweeps
    every other expired node under the context's root as a side effect: an expired node stays until
    a sweep. It unlinks the node from its parent (`childChanged` once, `expiring` never), and an
@@ -1828,9 +1870,12 @@ Each item says when it applies. "Always" items land whether or not a host enable
    and `load_settings`'s values) all moved into the document, and every other process's watches
    resolved under the new root. Now each watch resolves under its own context's root, gated per
    root, and the scheduler's root stays the host's. Kept: an unchrooted context on a scheduler
-   with no watch root still sets it (`ProducerConsumerTest` relies on it). A host's own
-   `scheduler_base` subclass must override the 5-argument `register_watch_handler`, or a
-   chrooted watch resolves under its watch root.
+   with no watch root still sets it (`ProducerConsumerTest` relies on it), and the scheduler
+   holds that root while it is its watch root (`set_watch_root(root, pin)`). A host's own
+   `scheduler_base` subclass must override the 5-argument `register_watch_handler` (or a
+   chrooted watch resolves under its watch root), `watch_root()` (or every unchrooted
+   `state-watch` sets its root again) and the 2-argument `set_watch_root` (or a root a step gave
+   it is not kept alive).
 5. **Always (landed with the locks track's L1, #862): `(fork)` forks the running process.** Under
    Ariadne and pycvc it used to fork pid -1 or 0, which fails. The child keeps `owner`, so
    `kill_owner` reaps it. Stage 0 added HZ-8's host tests (8.1).
@@ -1893,8 +1938,20 @@ Each item says when it applies. "Always" items land whether or not a host enable
 in `stats().migrations_failed` after the scheduler's next step instead of in the result. The local
 `admin_pause`, `admin_resume` and `admin_kill` return true once posted, an unknown pid included,
 and act at the next step. A submission or migration from another node, and a control message, are
-applied at the next step too. A host that steps only while something is runnable steps for a
-pending command as well (`has_pending_control()`).
+applied at the next step too. A submission from another node whose script doesn't parse is
+answered `accepted: false` and counted in `submissions_received` and `submissions_rejected`;
+before, the throw was lost on the bus thread, with no answer and no count. A local `submit()` of
+such a script still throws and counts nothing. A host that steps only while something is
+runnable steps for a pending command as well (`has_pending_control()`).
+
+**Step counts (Stage 0).** Every existing program takes the steps it took before, except:
+- `state-data-set` of a list or dict on the hosts, whose copy can add data steps (item 2);
+- the share-mode copies (`state-data-get`, async arguments) of a value holding built-in
+  exceptions: they now share the class dicts, so they count fewer data nodes, and on the hosts
+  can take a data step fewer at a 1024-node boundary;
+- `state-set-tree`, whose stale children cost one unit each, where the sweep counted what it
+  removed (item 3);
+- the coordinator's tests, which now step before they check what a posted command did (4.12).
 
 **Compatibility checks before Stage 0 merges.** Scan the corpus, the tests and the shipped
 documents for each of these, and list any hits in the PR:
@@ -2029,25 +2086,36 @@ the code, 2.5-3: pinned walks through links, chain pins for the writers that spa
 the coordinator's other bus-thread paths, and the sync scheduler's control wakeups.
 - **Files:**
   - `exceptions.h`/`.cpp` (`is_builtin_class_dict`), `builtin_class.h` (the shape prefilter),
-    `builtins.cpp` (`set-attr`, `del-attr`), and the raise paths' `annotate`
+    `builtins.cpp` (`set-attr`, `del-attr`), and the evaluators' `annotate`
     (`stackless_evaluator.cpp`, `evaluator.cpp`; `async_evaluator.cpp` has no raise path of its
-    own): read-only class dicts;
+    own), which leaves a built-in class dict a native function throws as it is: read-only class
+    dicts;
   - `data_job.h`/`.cpp`: `copy_mode::isolate`, its refusals, and built-in class dicts shared in
     both modes;
   - `state.h`/`state.cpp`: `findThroughLinksShared`, `childThroughLinksShared`, the start-pinned
-    `findDescendantShared(self, ...)` and `sharedChild(self, ...)`, and `removeChild`;
+    `findDescendantShared(self, ...)` and `sharedChild(self, ...)`, and `removeChild`; link
+    resolutions release their pins leaf first;
+  - `state_json.h`/`state_json.cpp`: the JSON reader writes through held nodes (`state-from-json`,
+    `state::json(j)`, `restore()`), and the subtree cursor releases its deepest level first;
   - `intrinsics.h`/`intrinsics.cpp`:
     - the isolating copy in `state-data-set`;
-    - pinned lookups, `root_pins` and `pinned_root`, and the pinned chroot;
-    - chain pins for the sliced writers (`state-set` of a list, `state-from-json`,
-      `state-set-tree`, whose stale children `removeChild` removes);
+    - pinned lookups, `root_pins` (released leaf first by `~intrinsics_context`) and
+      `pinned_root`, and the pinned chroot;
+    - chain pins for the sliced writers (`state-set` of a list, `state-data-set`,
+      `state-from-json`, `state-set-tree`, whose stale children `removeChild` removes);
     - a single-node `state-delete`;
-    - the per-watch root;
+    - the per-watch root, and the pinned root a `state-watch` gives a scheduler with none;
   - `process.h` (`watch_handler_entry::root`) and `scheduler_base.h` (`control_cmd`'s kinds,
-    `signal` and `done`; the 5-argument `register_watch_handler`; `watch_root()`);
+    `signal` and `done`; the 5-argument `register_watch_handler`; `watch_root()`; the 2-argument
+    `set_watch_root(root, pin)`);
+  - `process_table.h`, `process.cpp`: `settings_changes` holds the node it counts, and `clear()`
+    lets go of it;
   - `scheduler.h`/`.cpp`: atomic stop flags and a `stop()` that ends the idle wait; the idle
     wakeup made with the scheduler; `post_control`'s kinds, `done`, order and wakeups,
-    `has_pending_control()`; per-root watch gating (`detail::watch_roots`, `watch_polls()`);
+    `has_pending_control()`; per-root watch gating (`detail::watch_roots`, `watch_polls()`); the
+    watch root's pin; settings read and published through `detail::setting_value` and
+    `detail::publish_setting`, which `data_job.cpp`'s, `heap.cpp`'s and `parser.cpp`'s settings
+    readers use too;
   - `async_scheduler.h`/`.cpp`: the same atomics, `post_control` and gating; a drain that puts
     back what a throw left unapplied; an idempotent `finish_async_call` and
     `cancel_async_calls` that wake every waiter;
@@ -2057,7 +2125,10 @@ the coordinator's other bus-thread paths, and the sync scheduler's control wakeu
     `post_control`; `admin_pause/resume/kill` posted; `policy_` read under its lock; the lifetime
     token;
   - `src/cvc-cli/main.cpp`: the serve loop steps for a pending command;
+  - `state_value_codec.cpp`: a restore relinks a decoded dict of exactly a built-in class's shape
+    to that class, so a restored exception keeps its read-only class (and can be stored);
   - `bindings/pycvc/pycvc_state.cpp`: pinned accessors, and `state_remove` through `removeChild`;
+    `pycvc_exec.cpp`: the async-argument copy's label; `pycvc.i`: which calls are thread-safe;
   - `builtins.cpp`: line-atomic `print` (`write_print_line`);
   - not changed: `sendMessage` (`msg-send` holds its node's chain across it instead), and `(fork)`
     of `current_pid()` with the child's `owner`, which the locks track's L1 landed;
@@ -2078,9 +2149,9 @@ the coordinator's other bus-thread paths, and the sync scheduler's control wakeu
   join after a baseline run. A Linux clang TSan job stays Stage 1's (TS-1).
 - **Tests:** HZ-1 to HZ-14, and the `post_control` cases (`AsyncPostControl`, `SyncPostControl`).
 - **Exit:** HZ-1 to HZ-14 pass; every state_exec, Ariadne and pycvc suite passes on Windows,
-  Linux and macOS, with step counts unchanged except where the copy adds data steps on the hosts
-  and where coordinator tests now step before they check; both sanitizer legs are clean with every
-  required line found; the compatibility scan of section 5 is in the PR; no thread is added.
+  Linux and macOS, with step counts unchanged except as section 5's "Step counts" lists; both
+  sanitizer legs are clean with every required line found; the compatibility scan of section 5
+  is in the PR; no thread is added.
 - **Risk:** low. The behaviour changes are items 1-4 of section 5 and the coordinator's
   asynchronous contract (section 5, "Hosts"); item 5 landed with the locks track's L1.
 

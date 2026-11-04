@@ -320,7 +320,10 @@ thread (a kernel's included), raises `RuntimeError` until the first has returned
 belong on the thread that steps the scheduler: inside its `run()` (a registered function or
 callback), or while nothing steps it. Nothing enforces this: from another thread, while a run
 pumps, they race it. (`Exec.kill`, `pause`, `resume` and `send_signal`, posted the way
-`set_priority` is, are not built yet.) The exceptions:
+`set_priority` is, are not built yet.) Some `Exec` calls are the same: `set_parser_defaults` and
+`set_data_defaults` change its scheduler, and `register_fn`, `register_async_fn` and
+`register_async_coro` change the natives environment its programs share, so call them while no
+`run()` is pumping. The exceptions:
 
 - `stop()` and `is_running()` may come from any thread. `stop()` ends the scheduler's `run()`
   or `sync_run()` at its next step boundary, and an idle sync `run()` at once; under `Exec.run()`
