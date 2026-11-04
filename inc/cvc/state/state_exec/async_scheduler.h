@@ -234,7 +234,8 @@ public:
   /// pause, resume, signal and set_priority are the direct calls' host paths, unchecked (kill's
   /// reason is killed_by_user; signal "SIGKILL" kills); an unknown pid is found, and refused,
   /// then. Each one's `done`, when set, gets what its call returned; one never applied gets false
-  /// from the destructor. A query runs its function, and must not throw. True once queued.
+  /// from the destructor. A query runs its function, and must not throw. True once queued; false
+  /// once the scheduler is being destroyed, when `done` gets false at once.
   bool post_control(int pid, control_cmd cmd);
   /// Thread-safe: whether a posted command waits for a drain (a posted message is no command).
   bool has_pending_control() const noexcept {
