@@ -997,7 +997,6 @@ jobs:
         # (PRIVATE to cvc, so only the binary can say). So it must open a room on loopback and report
         # each of them, then stop cleanly on SIGTERM, the way a service manager stops it. The macOS
         # and Windows twins are at the end of this job.
-        id: arisrv-linux
         if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' && matrix.pyver == '311' }}
         shell: bash
         env:
@@ -1049,10 +1048,6 @@ jobs:
               --token "$CVCPKG_TOKEN"
           else
             echo "dry-run: skipping arisrv publish"
-            # Kept as an artifact with the libcvc it was built against (the catalog's libcvc is
-            # the last release's), so the pair can be installed and run before a tag publishes it.
-            mkdir -p dry-run-arisrv
-            cp dist/arisrv-* dist/libcvc-[0-9]* dry-run-arisrv/
           fi
 
       - name: Build, pack & publish pycvc-cp${{ matrix.pyver }} [Linux]
@@ -1495,7 +1490,6 @@ jobs:
       - name: Build, pack & publish arisrv [macOS]
         # The same checks as on Linux. macOS has no GNU timeout, so the relay runs in the background
         # and gets its SIGTERM by pid, with a SIGKILL 30 s later if it has not stopped by then.
-        id: arisrv-macos
         if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'macos' && matrix.config == 'release' && matrix.pyver == '311' }}
         shell: bash
         env:
@@ -1556,8 +1550,6 @@ jobs:
               --token "$CVCPKG_TOKEN"
           else
             echo "dry-run: skipping arisrv publish"
-            mkdir -p dry-run-arisrv
-            cp dist/arisrv-* dist/libcvc-[0-9]* dry-run-arisrv/
           fi
 
       - name: Build, pack & publish ari [Windows]
@@ -1616,7 +1608,6 @@ jobs:
         # build.ps1 builds with cl and Ninja through _common/env-windows.ps1, as ari's does. The same
         # checks as on Linux, except the stop: a console-less background process cannot be sent a
         # Ctrl+C, so the relay is ended by its own pid once it has logged its start.
-        id: arisrv-windows
         if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'windows' && matrix.config == 'release' && matrix.pyver == '311' }}
         shell: pwsh
         env:
@@ -1671,20 +1662,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "arisrv publish failed ($LASTEXITCODE)" }
           } else {
             Write-Host 'dry-run: skipping arisrv publish'
-            New-Item -ItemType Directory -Force -Path dry-run-arisrv | Out-Null
-            Copy-Item dist/arisrv-*, dist/libcvc-[0-9]* dry-run-arisrv/
           }
-
-      # A dry run keeps each platform's arisrv with the libcvc it was built against (see the Linux
-      # step), for a week.
-      - name: Keep the dry run's arisrv and libcvc
-        if: ${{ !cancelled() && (steps.arisrv-linux.outcome == 'success' || steps.arisrv-macos.outcome == 'success' || steps.arisrv-windows.outcome == 'success') && github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run != 'false' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: arisrv-dry-run-${{ matrix.target.platform }}-${{ matrix.target.arch }}
-          path: dry-run-arisrv/
-          retention-days: 7
-          if-no-files-found: error
 
       - name: Build, pack & publish arigl [Windows]
         # build.ps1 builds with cl and Ninja through _common/env-windows.ps1, as ari's does, against
