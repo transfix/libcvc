@@ -1969,7 +1969,9 @@ relative bases in nested composition.
 
 `src/cvc/ariadne/components/*.ari` (installed to `<prefix>/share/libcvc/ariadne/components`
 and embedded in the wasm demos) are reusable windows a document imports by `cvc://` and
-includes. Each binds state keys a C++ object owns, so it needs no host code;
+includes. The `libcvc` cvcpkg bundles and the release tarballs carry the directory from 3.7.10.
+Earlier native bundles left it out, so with those a host needs `CVC_ARIADNE_PATH` pointing at a
+copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object owns, so it needs no host code;
 [`INDEX.ari`](../src/cvc/ariadne/components/INDEX.ari) catalogs them:
 
 | component | drives |
