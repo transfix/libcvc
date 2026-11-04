@@ -847,9 +847,10 @@ value_t builtin_random_token(std::span<const value_t> args) {
 namespace {
 // print writes whole lines (td 4.11): the line is made first, outside the lock, then written with
 // its newline in one call. The lock is held for that write only, never across a data job or DSL
-// code, so lines printed from several threads never interleave.
+// code, so lines printed from several threads never interleave. The mutex is never destroyed: a
+// thread can still print during static destruction (a daemon Python thread inside Exec.run).
 void write_print_line(std::string line) {
-  static std::mutex out;
+  static std::mutex &out = *new std::mutex;
   line += '\n';
   std::lock_guard<std::mutex> lock(out);
   std::cout.write(line.data(), static_cast<std::streamsize>(line.size()));
