@@ -2092,6 +2092,22 @@ TEST(AsyncCalls, AThrowingCancelHookSkipsNeitherTheSettleNorTheWake) {
   }
 }
 
+// SK-3: a call past its timeout is settled TimeoutError and its kernel told to stop; a cancel
+// hook that throws there no longer skips the call's finish, so the process awaiting it resumes
+// (and catches the TimeoutError) instead of waiting until its own time limit.
+TEST(AsyncCalls, ATimeoutWhoseCancelHookThrowsStillResumesItsProcess) {
+  std::atomic<int> started{0};
+  world w(async_sched);
+  async_options opts;
+  opts.timeout = 0.05;
+  register_blind_hook(w, started, opts);
+  const int pid = w.submit(R"((try (blind-hook 300) (catch (TimeoutError e) "timed out")))");
+  EXPECT_TRUE(pump_through_throws(
+      w, [&] { return w.finished(pid); }, 3.0))
+      << "the process awaiting the timed-out call stayed parked";
+  EXPECT_EQ(outcome_of(w, pid), "timed out");
+}
+
 // --- Stage 0 hazards (td 8.1) ---
 
 namespace {

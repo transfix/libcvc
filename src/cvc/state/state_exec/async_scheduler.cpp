@@ -969,8 +969,15 @@ void async_scheduler::charge_async_calls_from(std::size_t first, clock::time_poi
     if (!proc || is_finished(proc->status))
       continue;
     if (!call->finished() && call->past_timeout(now) && call->settle_timeout()) {
-      // Its own timeout: it raises TimeoutError at the call, and its kernel is told to stop.
-      call->cancel();
+      // Its own timeout: it raises TimeoutError at the call, and its kernel is told to stop. It
+      // is finished, and its waiters woken, even when its cancel hook throws (against its
+      // contract), which is reported after.
+      try {
+        call->cancel();
+      } catch (...) {
+        finish_async_call(call);
+        throw;
+      }
       finish_async_call(call);
       continue;
     }
