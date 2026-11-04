@@ -1483,6 +1483,13 @@ jobs:
               mt.multi_exec: t=8 prog=tree runs=1
               test_pycvc_state_exec_exceptions.py: ok: test_hz11_two_execs_exceptions_and_data
               state_exec_hazards_test: OK ] Hazards.HZ12_PrintWritesWholeLines
+              state_exec_hazards_test: OK ] Hazards.FromJsonAgainstDeletingWhatItWrites
+              state_exec_hazards_test: OK ] Hazards.ContextRootPinsReleaseTheChrootFirst
+              state_exec_hazards_test: OK ] Hazards.SetTreeJobPinsReleaseTheTargetFirst
+              state_exec_hazards_test: OK ] Hazards.FromJsonJobPinsReleaseTheTargetFirst
+              state_exec_hazards_test: OK ] Hazards.SettingsWalksSurviveADeleteOfStateExec
+              state_exec_async_test: OK ] AsyncPostControl.KillPauseResumeSignalFromAnyThread
+              state_exec_async_test: OK ] SyncPostControl.KillPauseResumeSignalFromAnyThread
               state_exec_async_calls_test: OK ] AsyncCalls.HZ13_AFutureAwaitedTwiceIsChargedOnce
               state_exec_async_calls_test: OK ] AsyncCalls.HZ13_AnOutcomeTakenBeforeTheDrainIsNotChargedAgain
               state_exec_async_calls_test: OK ] AsyncCalls.HZ13_ACancelledCallWakesEveryWaiter
@@ -1540,6 +1547,13 @@ jobs:
               mt.multi_exec: t=8 prog=tree runs=1
               test_pycvc_state_exec_exceptions.py: ok: test_hz11_two_execs_exceptions_and_data
               state_exec_hazards_test: OK ] Hazards.HZ12_PrintWritesWholeLines
+              state_exec_hazards_test: OK ] Hazards.FromJsonAgainstDeletingWhatItWrites
+              state_exec_hazards_test: OK ] Hazards.ContextRootPinsReleaseTheChrootFirst
+              state_exec_hazards_test: OK ] Hazards.SetTreeJobPinsReleaseTheTargetFirst
+              state_exec_hazards_test: OK ] Hazards.FromJsonJobPinsReleaseTheTargetFirst
+              state_exec_hazards_test: OK ] Hazards.SettingsWalksSurviveADeleteOfStateExec
+              state_exec_async_test: OK ] AsyncPostControl.KillPauseResumeSignalFromAnyThread
+              state_exec_async_test: OK ] SyncPostControl.KillPauseResumeSignalFromAnyThread
               state_exec_async_calls_test: OK ] AsyncCalls.HZ13_AFutureAwaitedTwiceIsChargedOnce
               state_exec_async_calls_test: OK ] AsyncCalls.HZ13_AnOutcomeTakenBeforeTheDrainIsNotChargedAgain
               state_exec_async_calls_test: OK ] AsyncCalls.HZ13_ACancelledCallWakesEveryWaiter
