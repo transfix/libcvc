@@ -57,9 +57,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux is the verified, REQUIRED lane (both configs).
-          - { os: ubuntu-latest, build_type: Release, experimental: false }
-          - { os: ubuntu-latest, build_type: Debug, experimental: false }
+          # Linux is the verified, REQUIRED lane (both configs). It runs on the glibc floor,
+          # ubuntu-22.04 (glibc 2.35), where publish-cvcpkg.yml builds the libcvc recipe it checks;
+          # ubuntu-latest drifts (it became 26.04 with gcc 15.2).
+          - { os: ubuntu-22.04, build_type: Release, experimental: false }
+          - { os: ubuntu-22.04, build_type: Debug, experimental: false }
           # macOS: informative lane, not a merge blocker yet.
           - { os: macos-latest, build_type: Release, experimental: true }
           - { os: macos-latest, build_type: Debug, experimental: true }
