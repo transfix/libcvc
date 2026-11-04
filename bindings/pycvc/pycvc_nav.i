@@ -1390,6 +1390,24 @@ inline PyObject *to_dict(const cvc::nav::drive_telemetry *tel, int N) {
     return pycvc_telemetry::to_dict(tel, sw->size());
   }
 
+  // ── the risk governor (sim_world::set_risk_governor) ────────────────────────────
+  // From the next step: the material's (and the terrain's) risk caps each agent's speed, down to
+  // vmin at risk 1, with `probes` points out to `lookahead` ahead slowing it before it gets there
+  // (speeds and look-ahead normalized). The material's forces alone do not slow an agent at its top
+  // speed that drives square at a hazard; this does. A bad argument raises RuntimeError.
+  PyObject *nav_sim_world_set_risk_governor(PyObject *handle, int on, double vmin = 0.0,
+                                            double onset = 0.3, double lookahead = 0.0,
+                                            int probes = 3) {
+    sim_world_from(handle)->set_risk_governor(on != 0, static_cast<float>(vmin),
+                                              static_cast<float>(onset),
+                                              static_cast<float>(lookahead), probes);
+    Py_RETURN_NONE;
+  }
+
+  PyObject *nav_sim_world_risk_governor(PyObject *handle) {
+    return PyBool_FromLong(sim_world_from(handle)->risk_governor() ? 1 : 0);
+  }
+
   // ── base nav_stats on the sim_world (internal collector) ────────────────────
   // Arm the world's own base nav_stats_collector. Captures the CURRENT pose as the
   // episode start, so CALL RIGHT AFTER create (before the first step). contact_r is the

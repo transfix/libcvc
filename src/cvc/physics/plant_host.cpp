@@ -230,6 +230,7 @@ std::string plant_host::use(cvc::nav::sim_world &sim, const std::string &vehicle
   }
   std::vector<body_id> ground;
   auto w = build_world(_o.world, ground);
+  po.ground_bodies = ground;
   auto p = std::make_unique<nav_plant>(*w, std::move(descs), po);
   // Detach the old plant before its world goes; then attach the new one.
   drop(sim);
