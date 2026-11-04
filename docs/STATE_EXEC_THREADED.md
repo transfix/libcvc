@@ -681,7 +681,9 @@ clone:
   refused too. An environment is reachable only through a closure or generator, so it needs no
   kind of its own. This replaced `state-data-set`'s check of a top-level callable.
 - The copy runs as a sliced data job, charged to the process that makes it, as async arguments
-  are (3.7). A refusal in any slice throws before anything is written.
+  are (3.7). A refusal in any slice throws before anything is written. The memo of the lists and
+  dicts already copied holds each source until the copy ends, in both modes, so a list another
+  process drops between two slices cannot be taken for a new one allocated at its address.
 
 **Where values cross a group boundary, and what crosses.**
 
@@ -1042,8 +1044,12 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
     the write's signals are done). `state-set` of a list and `state-data-set`'s copy hold only the
     root's chain while their data job runs, and walk to the target, holding its chain, when they
     write.
-  - Chains are released leaf first (the context's `root_pins`, the jobs' chains, a link
-    resolution's pins), so a node never dies after its parent.
+  - Chains are released leaf first, so a node held in one dies while its ancestors live (a
+    dying node's `destroyed()` slot may walk `_parent`). The context's `root_pins`, the jobs'
+    chains and a link resolution's `target_pins` are `cvc::pin_vector`s (`state.h`), which drop
+    their pins from the back when they go, are cleared or are assigned over. A hold on a single
+    node does not keep that rule: a `state-get`'s read, `state-json`'s node or a watch entry's
+    root can outlive an ancestor that another thread unlinked meanwhile.
   - `msg-send` holds its node and that node's chain across `sendMessage`, whose link path reads
     the pinned walk's path and whose non-link path reads `fullName()` up the held chain.
     `sendMessage` itself is unchanged.
@@ -1053,7 +1059,11 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
     rate) through `detail::publish_setting`, and `settings_changes` holds the `state_exec` node it
     counts until it connects elsewhere (`clear()` lets go of it).
   - pycvc's tree accessors (`pycvc_state.cpp`) walk pinned too, so `Exec`s on several threads and
-    Python threads reading the tree are safe together (4.12).
+    Python threads reading the tree are safe together (4.12). A `state_observer` dropped while
+    another thread's write is firing its slot is never called: the slot checks a liveness flag
+    once it has the GIL. The pinned walks and `removeChild` themselves are not exposed to Python
+    (`pycvc.i` ignores them): a returned pin would leak, and `removeChild`'s caller must hold the
+    parent's chain.
   - Host code outside `intrinsics.cpp` still walks raw: Ariadne's settings reads and holes
     (`ariadne.cpp`), `doc_args.cpp`, `app.cpp`'s settings read, `state_value_codec.cpp`'s
     snapshot walks, the conference natives (`room_intrinsics.cpp`, `room_media_intrinsics.cpp`),
@@ -1146,11 +1156,17 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
     by a fork child beside its parent, is charged once and gives one result. Every process
     waiting on the call is woken, including on the paths that used to wake nobody: a call no
     longer listed, and the calls `cancel_async_calls` drops. So a fork child awaiting its
-    parent's future is woken when the parent is killed. A call cancelled before it settled is
-    settled with `RuntimeError` "`name`: cancelled: the process that made the call ended", for
-    every way it is awaited (`await`, `await-all`, an `await` made after the cancel, an await in
-    a generator body), and its kernel's late result is dropped, so nothing waits for it for
-    ever.
+    parent's future is woken when the parent is killed. `cancel_async_calls` settles each call
+    it claims with `RuntimeError` "`name`: cancelled: the process that made the call ended",
+    before it wakes the waiters, so every way the call is awaited raises it (`await`,
+    `await-all`, an `await` made after the cancel, an await in a generator body), and the
+    kernel's own late settling is ignored. Nothing waits for such a call for ever.
+    `async_call::outcome()`'s check of the cancel stays as a backstop, for a call cancelled some
+    other way and read before it settles.
+  - A finish that throws still wakes the call's waiters: the final charge reads the step rate,
+    which may publish it and run the tree's slots, and a kill at a limit can throw; the catch
+    wakes and rethrows. A completion `requeue_ingress` cannot queue again (no memory) wakes its
+    waiters instead, whose `outcome()` then finishes the call.
   - Awaiting a future whose `async_sched_` is not the current group raises `RuntimeError`: Stage
     1's, with the per-group host (B30; S0-Q6). Stage 0 adds no such check, because one scheduler
     legitimately awaits another's future on one thread today: Ariadne's `init:` lane runs on a
@@ -1339,14 +1355,19 @@ stop flags since Stage 0. The same queue carries `set_priority`. As built, on bo
   `std::atomic<bool>`s. A run clears `stop_requested_` before it publishes `running_`, so a
   `stop()` made once `is_running()` reads true is never lost, and one made with no run active is
   discarded by the next run. The sync `stop()` also notifies the idle wait, so it is no longer
-  async-signal-safe (the notify takes a lock on POSIX). The async run loop never waits, so its
-  `stop()` notifies nothing.
+  async-signal-safe (the notify takes a lock on POSIX). It takes its own reference to that
+  wakeup before it stores the flag, so the scheduler may be destroyed as soon as `run()` returns,
+  while `stop()` is still notifying. The async run loop never waits, so its `stop()` notifies
+  nothing.
 - **`post_control`'s kinds** are `kill` (reason `killed_by_user`), `pause`, `resume`, `signal`
   (`"SIGKILL"` kills) and `set_priority`, each the direct call's host path, unchecked, and
   `query`. An unknown pid is found, and refused, on the scheduler's thread.
 - **`done(bool)`**, optional, is called once on the scheduler's thread with what the direct call
   returned, or with false from the scheduler's destructor for a command never applied. A query
-  has none. It must not throw, block or take the GIL.
+  has none. It must not throw, block or take the GIL. It is moved out of the command before it is
+  called, so a `done` that throws anyway is not called again. Each destructor refuses what is
+  queued until nothing is left, so a command a `done(false)` posts during the destruction is
+  refused too (`done(false)`), never dropped.
 - **Order.** First in, first out, applied at the next step boundary: the sync scheduler at the
   top of `step()` and of each `run()` iteration, before its `has_runnable()` test (so a resume of
   the only process, or a kill of the last, takes effect in a run with nothing else to do); the
@@ -1358,8 +1379,13 @@ stop flags since Stage 0. The same queue carries `set_priority`. As built, on bo
   completions the same way.
 - **Wakes.** A post ends the sync scheduler's idle `run()` wait (it notifies the idle wakeup, now
   made with the scheduler), as a post wakes the async scheduler's `wait_for_work()`.
-  `has_pending_control()` lets a loop that steps only for runnable processes step for a command
-  too: the CLI's serve loop steps on `has_runnable() || has_pending_control()`.
+  `has_pending_control()` is true from a post until the batch that took the command has been
+  applied, refused or put back, and then for as long as anything is still queued: both
+  schedulers set it from what is queued only once a batch is done with. It lets a loop that
+  steps only for runnable processes step for a command too: the CLI's serve loop steps on
+  `has_runnable() || has_pending_control()`. A step there that throws (a posted command that
+  throws) is logged on stderr as `exec: <what>`, the server goes on serving, and the commands
+  after it stay queued.
 
 On the sync scheduler, lock wakes and relevels go to its lock port, which shares its wakeup
 (made when the scheduler is built, no longer lazily in `idle_wait`): `idle_wait` also ends as
@@ -1465,7 +1491,13 @@ out first, and otherwise it waits for a timer, a lock post or the end of its tim
   - `migrate()`, now asynchronous: one posted entry pauses the process, serializes it, sends it
     and kills it on the scheduler's thread, and `migrate()` returns `{true, -1, target, ""}`,
     meaning "requested". The no-scheduler and self checks stay synchronous; any other failure
-    shows in `stats().migrations_failed` after a step;
+    shows in the stats after a step. A pid that is gone, or neither ready nor running, counts in
+    `migrations_failed`; so does a serialize or send that fails, after which the process is
+    resumed and runs on here, counted once. `migrations_initiated` counts only a migration sent.
+    A kill of the source that throws after the send is tried once more; a process still alive
+    then is left paused, never resumed, rather than run on both nodes, and counted in
+    `migrations_kill_failed` (a field appended to `coordinator_stats`), for the host to
+    `admin_kill` or resume;
   - the local `admin_pause`, `admin_resume` and `admin_kill`, which return true once posted (an
     unknown pid included), as `admin_set_priority` does.
 
@@ -1473,11 +1505,11 @@ out first, and otherwise it waits for a timer, a lock post or the end of its tim
   `cluster_stats()`, `emit_heartbeat()` and `emit_status_broadcast()` stay scheduler-thread calls,
   not posted: they are synchronous, and tests call `ps_all()` and `cluster_stats()` with no pump
   thread. Posted entries hold the coordinator through a weak token it resets in its destructor,
-  never a bare `this`, so an entry applied, or dropped by `~scheduler`, after the coordinator is
-  gone does nothing. The token does not wait for an entry running on another thread, so a host
-  destroys the coordinator on its scheduler's thread or while nothing pumps the scheduler. Until
-  Stage M, `migrate`'s kill of the source releases its locks like any kill; Stage M adds the
-  refusal of lock holders (4.20).
+  never a bare `this`, so an entry still queued when the coordinator goes (applied later, or dropped
+  by `~scheduler`) does nothing. The token does not wait for an entry already running on another
+  thread, so a host destroys the coordinator on its scheduler's thread, or while nothing pumps the
+  scheduler. Until Stage M, `migrate`'s kill of the source releases its locks like any kill; Stage M
+  adds the refusal of lock holders (4.20).
 - **Stage 2.**
   - `attach_pool(exec_pool &)` generalizes `attach_scheduler` (`exec_coordinator.cpp:223`).
   - `submit_local` (`exec_coordinator.cpp:586-615`) places a job in its own job group, or in the
@@ -1837,9 +1869,11 @@ Each item says when it applies. "Always" items land whether or not a host enable
      refused, though: `(json-parse "{\"__class__\": {\"__name__\": \"P\"}}")` cannot be
      stored.
    - A built-in exception's instance is copied, its class dict shared (item 1), so an exception
-     read back with `state-data-get` can be stored again. So can one restored from a snapshot (the
-     codec relinks a built-in class to itself) and one that came through pycvc (a Python
-     function's return value, `pycvc.make_exception`), which keeps its built-in class.
+     read back with `state-data-get` can be stored again. So can one restored from a snapshot and
+     one that passed through Python (a Python function's return value, alone or in a list, and
+     `pycvc.make_exception`'s, by class name or class dict): the codec and pycvc's converter
+     relink a copy of exactly a built-in class's shape to the class itself, by one rule
+     (`builtin_class_of_copy`, `exceptions.h`).
      `state-data-get`'s share-mode copy, and the copies of async arguments, share the built-in
      class dicts too: a read-back exception's `__class__` is the shared read-only class, so
      `set-attr` on it raises `TypeError` (it changed a private copy before), and the copy costs
@@ -1935,14 +1969,15 @@ Each item says when it applies. "Always" items land whether or not a host enable
 
 **Hosts (Stage 0, built): `exec_coordinator`'s asynchronous contract** (4.12; S0-Q2, S0-Q3).
 `migrate()` returns `{true, -1, target, ""}` once it has posted the migration, and a failure shows
-in `stats().migrations_failed` after the scheduler's next step instead of in the result. The local
-`admin_pause`, `admin_resume` and `admin_kill` return true once posted, an unknown pid included,
-and act at the next step. A submission or migration from another node, and a control message, are
-applied at the next step too. A submission from another node whose script doesn't parse is
-answered `accepted: false` and counted in `submissions_received` and `submissions_rejected`;
-before, the throw was lost on the bus thread, with no answer and no count. A local `submit()` of
-such a script still throws and counts nothing. A host that steps only while something is
-runnable steps for a pending command as well (`has_pending_control()`).
+in `stats().migrations_failed` after the scheduler's next step instead of in the result; a sent
+migration whose source survived its kill, in the new `migrations_kill_failed`, with the source left
+paused for the host to decide. The local `admin_pause`, `admin_resume` and `admin_kill` return true
+once posted, an unknown pid included, and act at the next step. A submission or migration from
+another node, and a control message, are applied at the next step too. A submission from another
+node whose script doesn't parse is answered `accepted: false` and counted in `submissions_received`
+and `submissions_rejected`; before, the throw was lost on the bus thread, with no answer and no
+count. A local `submit()` of such a script still throws and counts nothing. A host that steps only
+while something is runnable steps for a pending command as well (`has_pending_control()`).
 
 **Step counts (Stage 0).** Every existing program takes the steps it took before, except:
 - `state-data-set` of a list or dict on the hosts, whose copy can add data steps (item 2);
@@ -2085,22 +2120,24 @@ Stage 0 has not landed (its L2). Stage M comes last.
 the code, 2.5-3: pinned walks through links, chain pins for the writers that span several slices,
 the coordinator's other bus-thread paths, and the sync scheduler's control wakeups.
 - **Files:**
-  - `exceptions.h`/`.cpp` (`is_builtin_class_dict`), `builtin_class.h` (the shape prefilter),
+  - `exceptions.h`/`.cpp` (`is_builtin_class_dict`, and `builtin_class_of_copy`, the exact-shape
+    rule that relinks a copy of a built-in class dict), `builtin_class.h` (the shape prefilter),
     `builtins.cpp` (`set-attr`, `del-attr`), and the evaluators' `annotate`
     (`stackless_evaluator.cpp`, `evaluator.cpp`; `async_evaluator.cpp` has no raise path of its
     own), which leaves a built-in class dict a native function throws as it is: read-only class
     dicts;
-  - `data_job.h`/`.cpp`: `copy_mode::isolate`, its refusals, and built-in class dicts shared in
-    both modes;
+  - `data_job.h`/`.cpp`: `copy_mode::isolate`, its refusals, built-in class dicts shared in both
+    modes, and a memo that holds what it memoized until the copy ends;
   - `state.h`/`state.cpp`: `findThroughLinksShared`, `childThroughLinksShared`, the start-pinned
-    `findDescendantShared(self, ...)` and `sharedChild(self, ...)`, and `removeChild`; link
-    resolutions release their pins leaf first;
+    `findDescendantShared(self, ...)` and `sharedChild(self, ...)`, and `removeChild`;
+    `cvc::pin_vector`, a vector of pins that drops them from the back when it goes, is cleared or
+    is assigned over, which `link_resolution::target_pins` and the pinned chains use;
   - `state_json.h`/`state_json.cpp`: the JSON reader writes through held nodes (`state-from-json`,
     `state::json(j)`, `restore()`), and the subtree cursor releases its deepest level first;
   - `intrinsics.h`/`intrinsics.cpp`:
     - the isolating copy in `state-data-set`;
-    - pinned lookups, `root_pins` (released leaf first by `~intrinsics_context`) and
-      `pinned_root`, and the pinned chroot;
+    - pinned lookups, `root_pins` (a `cvc::pin_vector`) and `pinned_root`, and the pinned
+      chroot;
     - chain pins for the sliced writers (`state-set` of a list, `state-data-set`,
       `state-from-json`, `state-set-tree`, whose stale children `removeChild` removes);
     - a single-node `state-delete`;
@@ -2110,26 +2147,33 @@ the coordinator's other bus-thread paths, and the sync scheduler's control wakeu
     `set_watch_root(root, pin)`);
   - `process_table.h`, `process.cpp`: `settings_changes` holds the node it counts, and `clear()`
     lets go of it;
-  - `scheduler.h`/`.cpp`: atomic stop flags and a `stop()` that ends the idle wait; the idle
-    wakeup made with the scheduler; `post_control`'s kinds, `done`, order and wakeups,
-    `has_pending_control()`; per-root watch gating (`detail::watch_roots`, `watch_polls()`); the
-    watch root's pin; settings read and published through `detail::setting_value` and
-    `detail::publish_setting`, which `data_job.cpp`'s, `heap.cpp`'s and `parser.cpp`'s settings
-    readers use too;
-  - `async_scheduler.h`/`.cpp`: the same atomics, `post_control` and gating; a drain that puts
-    back what a throw left unapplied; an idempotent `finish_async_call` and
-    `cancel_async_calls` that wake every waiter;
-  - `async_call.h`, `async_host.cpp`: the `closed_` claim; a cancelled call's other waiters raise
-    `RuntimeError`; `outcome()` leaves a built-in class dict as it is;
+  - `scheduler.h`/`.cpp`: atomic stop flags and a `stop()` that ends the idle wait, holding the
+    wakeup it notifies; the idle wakeup made with the scheduler; `post_control`'s kinds, `done`,
+    order and wakeups, `has_pending_control()`, and a destructor that refuses until nothing is
+    queued; per-root watch gating (`detail::watch_roots`, `watch_polls()`); the watch root's pin;
+    settings read and published through `detail::setting_value` and `detail::publish_setting`,
+    which `data_job.cpp`'s, `heap.cpp`'s and `parser.cpp`'s settings readers use too;
+  - `async_scheduler.h`/`.cpp`: the same atomics, `post_control`, destructor and gating; a drain
+    that puts back what a throw left unapplied; an idempotent `finish_async_call` that wakes the
+    call's waiters even when it throws; `cancel_async_calls` settling each call it claims with
+    the cancelled-call `RuntimeError` and waking every waiter;
+  - `async_call.h`, `async_host.cpp`: the `closed_` claim; `outcome()`'s backstop check of a
+    cancel, and a built-in class dict left as it is;
   - `exec_coordinator.h`/`.cpp`: control, submissions, `migrate()` and the migrate ingest through
     `post_control`; `admin_pause/resume/kill` posted; `policy_` read under its lock; the lifetime
-    token;
-  - `src/cvc-cli/main.cpp`: the serve loop steps for a pending command;
+    token; a failed migration resumes its process, and a source that survives its kill is left
+    paused (`coordinator_stats::migrations_kill_failed`);
+  - `src/cvc-cli/main.cpp`: the serve loop steps for a pending command, and logs a step that
+    throws (`exec: <what>`) and goes on serving;
   - `state_value_codec.cpp`: a restore relinks a decoded dict of exactly a built-in class's shape
     to that class, so a restored exception keeps its read-only class (and can be stored);
-  - `bindings/pycvc/pycvc_state.cpp`: pinned accessors, and `state_remove` through `removeChild`;
-    `pycvc_exec.cpp`: the async-argument copy's label; `pycvc.i`: which calls are thread-safe;
-  - `builtins.cpp`: line-atomic `print` (`write_print_line`);
+  - `bindings/pycvc`: `pycvc_state.cpp`'s pinned accessors, `state_remove` through `removeChild`,
+    and a `state_observer` that is never called once dropped; `pycvc.i`'s converter relinking a
+    built-in class (`builtin_class_of_copy`), the pinned walks and `removeChild` kept out of
+    Python, and which calls are thread-safe; `pycvc_exec.cpp`'s async-argument copy label and
+    its held read of `state_exec.policy`;
+  - `builtins.cpp`: line-atomic `print` (`write_print_line`, whose lock outlives static
+    destruction);
   - not changed: `sendMessage` (`msg-send` holds its node's chain across it instead), and `(fork)`
     of `current_pid()` with the child's `owner`, which the locks track's L1 landed;
   - the bench (`state_exec_bench.cpp`: `mt.multi_exec`, `chroot` sizes for `native.state_get`,

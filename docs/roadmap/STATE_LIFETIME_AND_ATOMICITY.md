@@ -223,16 +223,25 @@ is out of date, and Stage 0 moved most of it, with the "defensive" one, to done:
   `findDescendantShared(self, path, pins)` and `sharedChild(self, path, pins)`, overloads for a
   caller that already holds the start node, which take no reference on it. The context holds its
   root and every ancestor (`intrinsics_context::root_pins`), which is what makes `fullName()` and
-  a write's `childChanged` up the `_parent` chain safe: fix (a) of §3.3. Every chain is released
-  leaf first (`~intrinsics_context`, the jobs, `link_resolution`), so a node never dies after its
-  parent: `~state` may walk `_parent`.
+  a write's `childChanged` up the `_parent` chain safe: fix (a) of §3.3. A pinned chain is
+  released leaf first, so a node held in one dies while its ancestors live (a dying node's
+  `destroyed()` slot may walk `_parent`): `intrinsics_context::root_pins`, the jobs' chains and
+  `link_resolution::target_pins` are `cvc::pin_vector`s (`state.h`), which drop their pins from
+  the back when they go, are cleared or are assigned over. A hold on a single node does not keep
+  that rule: a `state-get`'s read, `state-json`'s node or a watch entry's root can outlive an
+  ancestor that another thread unlinked meanwhile, and a slot of that node's that walks `_parent`
+  as it dies would find the ancestor gone.
 - **The schedulers** (`scheduler.cpp`, `async_scheduler.cpp`): `poll_watches` holds each watched
   node while it reads it; the settings reads and publication go through
   `detail::setting_value` and `detail::publish_setting`, which hold what they walk (as do the
   settings readers in `data_job.cpp`, `heap.cpp` and `parser.cpp`); and a watch root a program's
   `state-watch` gave a scheduler is held by the scheduler while it is its watch root.
 - **pycvc's accessors** (`pycvc_state.cpp`) moved from "defensive" to done: all of them walk
-  pinned, and the ones that walk up the chain (`state_children`, `state_set`) hold it.
+  pinned, and the ones that walk up the chain (`state_children`, `state_set`) hold it. A
+  `state_observer` dropped while another thread's write fires its slot is never called (a
+  liveness flag, checked once the slot has the GIL). The pinned walks and `removeChild` are not
+  exposed to Python: a returned pin would leak, and `removeChild`'s caller must hold the parent's
+  chain.
 - **`removeChild(name)`** is new: it unlinks one child, emits `childChanged` once and never
   `expiring`, and the subtree is freed wherever its last pin drops. `state-delete`, pycvc's
   `state_remove` and `state-set-tree`'s stale children use it, so no state_exec path sweeps a

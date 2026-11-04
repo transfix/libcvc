@@ -338,7 +338,15 @@ thread while `Exec`s run: each holds the nodes it walks, so a node an `Exec` del
 freed only once the helper is done with it (`docs/STATE_EXEC_THREADED.md` 4.8).
 `state_remove(app, path)` removes its one node, with its subtree, as the DSL's `state-delete`
 does: it no longer sweeps the tree's other expired nodes, and an empty path does nothing. A
-program sweeps with `(state-sweep-expired)`.
+program sweeps with `(state-sweep-expired)`. A `pycvc.state_observer` dropped while another
+thread's write is firing its slot is never called. The C++ pinned walks
+(`findThroughLinksShared`, `childThroughLinksShared`, the start-pinned `findDescendantShared` and
+`sharedChild`) and `removeChild` are not wrapped: these helpers are Python's way in.
+
+A built-in exception that passes through Python (a registered function's return value, alone or
+in a list, or `pycvc.make_exception`'s, given the class's name or its dict) comes back with its
+built-in class, the shared read-only one, so a program can `state-data-set` it and its class
+refuses `set-attr` (`docs/STATE_EXEC_EXCEPTIONS.md` 2.3).
 
 `pycvc.set_thread_class(cls)` puts the calling thread in a `pycvc.thread_class`
 (`background`, `utility`, `normal`) as far as the OS allows, and returns whether it
