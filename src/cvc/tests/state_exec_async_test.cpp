@@ -918,7 +918,8 @@ using done_calls = std::vector<std::pair<std::string, bool>>;
 // drain or a step) runs on this thread; then each lands, in the order posted, and its done gets
 // what the direct call returns: true, or false for an unknown pid and for pausing a waiting
 // process.
-template <class S> void kill_pause_resume_signal(S &sched, const std::function<void()> &apply) {
+template <class S>
+void kill_pause_resume_signal(S &sched, done_log &log, const std::function<void()> &apply) {
   const std::string loop = "(begin (set i 0) (while (< i 1000000) (set i (+ i 1))))";
   const int a = sched.execute(loop); // paused, resumed, paused again
   const int b = sched.execute(loop); // paused already; resumed
@@ -928,7 +929,6 @@ template <class S> void kill_pause_resume_signal(S &sched, const std::function<v
   const int w = sched.execute(loop); // waiting for a message: a pause is refused
   ASSERT_TRUE(sched.pause(b));
   ASSERT_TRUE(sched.receive_message(w, "never"));
-  done_log log;
   using k = control_cmd::kind;
   std::thread poster([&] {
     EXPECT_TRUE(sched.post_control(a, control(k::pause, log.done("pause a"))));
@@ -979,13 +979,12 @@ template <class S> void kill_pause_resume_signal(S &sched, const std::function<v
 // slots) is refused, and the commands after it go back to the front of the queue: the next drain
 // or step applies them, in order, ahead of what was posted since.
 template <class S>
-void a_throwing_command_requeues_the_rest(S &sched, int thrower_pid, control_cmd thrower,
-                                          const done_calls &first,
+void a_throwing_command_requeues_the_rest(S &sched, done_log &log, int thrower_pid,
+                                          control_cmd thrower, const done_calls &first,
                                           const std::function<void()> &apply) {
   const std::string loop = "(begin (set i 0) (while (< i 1000000) (set i (+ i 1))))";
   const int a = sched.execute(loop);
   const int b = sched.execute(loop);
-  done_log log;
   using k = control_cmd::kind;
   sched.post_control(a, control(k::pause, log.done("pause a")));
   sched.post_control(thrower_pid, std::move(thrower));
@@ -1029,14 +1028,29 @@ template <class S> void the_destructor_refuses_what_was_never_applied() {
   EXPECT_FALSE(queried);
 }
 
+// R0-final's R0a-mem-6: a done the destructor calls (with false) may post another command; that
+// one is refused too, once, rather than destroyed with its done never called.
+template <class S> void a_post_from_a_refused_done_is_refused_too() {
+  done_log log;
+  {
+    S sched;
+    S *const raw = &sched;
+    sched.post_control(1, control(control_cmd::kind::kill, [raw, &log](bool applied) {
+                         log.calls.emplace_back("kill", applied);
+                         raw->post_control(2, control(control_cmd::kind::pause, log.done("pause")));
+                       }));
+  }
+  EXPECT_EQ(log.calls, (done_calls{{"kill", false}, {"pause", false}}));
+}
+
 } // namespace
 
 TEST(AsyncPostControl, KillPauseResumeSignalFromAnyThread) {
+  done_log first, log; // before the scheduler: its destructor may call what was never applied
   async_scheduler sched;
-  kill_pause_resume_signal(sched, [&] { sched.drain_ingress(); });
+  kill_pause_resume_signal(sched, first, [&] { sched.drain_ingress(); });
   // A step drains too.
   const int pid = sched.execute(std::string("(begin 1 2 3)"));
-  done_log log;
   sched.post_control(pid, control(control_cmd::kind::kill, log.done("kill")));
   sched.sync_step();
   EXPECT_EQ(sched.get_exit_error(pid), "killed_by_user");
@@ -1064,6 +1078,7 @@ TEST(AsyncPostControl, HasPendingControlCountsCommandsOnly) {
 }
 
 TEST(AsyncPostControl, AThrowingCommandRequeuesTheRest) {
+  done_log log, rest; // before the scheduler: its destructor may call what was never applied
   async_scheduler sched;
   // A kill whose async call's cancel hook throws: the process is not killed, and the kill's done
   // gets false.
@@ -1071,8 +1086,7 @@ TEST(AsyncPostControl, AThrowingCommandRequeuesTheRest) {
   auto call = std::make_shared<async_call>("probe", c);
   call->on_cancel([] { throw std::runtime_error("the cancel hook threw"); });
   sched.track_async_call(call);
-  done_log log;
-  a_throwing_command_requeues_the_rest(sched, c,
+  a_throwing_command_requeues_the_rest(sched, rest, c,
                                        control(control_cmd::kind::kill, log.done("kill c")),
                                        {{"pause a", true}}, [&] { sched.drain_ingress(); });
   EXPECT_EQ(log.calls, (done_calls{{"kill c", false}}));
@@ -1086,8 +1100,9 @@ TEST(AsyncPostControl, TheDestructorRefusesWhatWasNeverApplied) {
 
 TEST(SyncPostControl, KillPauseResumeSignalFromAnyThread) {
   {
+    done_log log; // before the scheduler: its destructor may call what was never applied
     scheduler sched;
-    kill_pause_resume_signal(sched, [&] { EXPECT_EQ(sched.step(), 1); });
+    kill_pause_resume_signal(sched, log, [&] { EXPECT_EQ(sched.step(), 1); });
   }
   // run() applies what was posted before it tests has_runnable(): a resume of the only process,
   // which is paused, runs it.
@@ -1104,11 +1119,11 @@ TEST(SyncPostControl, KillPauseResumeSignalFromAnyThread) {
   // (4 s) ends first otherwise, with the kill still queued: the kill is applied only if the post
   // ended the idle wait.
   {
+    done_log log; // before the scheduler: its destructor may call what was never applied
     scheduler sched;
     const int pid = sched.execute(std::string("(begin 1 2 3)"));
     sched.step();
     ASSERT_TRUE(sched.sleep(pid, 5.0));
-    done_log log;
     std::thread poster([&] {
       std::this_thread::sleep_for(std::chrono::milliseconds(50));
       sched.post_control(pid, control(control_cmd::kind::kill, log.done("kill")));
@@ -1160,13 +1175,88 @@ TEST(SyncPostControl, APostedControlEndsTheIdleWait) {
 }
 
 TEST(SyncPostControl, AThrowingCommandRequeuesTheRest) {
+  done_log log; // before the scheduler: its destructor may call what was never applied
   scheduler sched;
-  a_throwing_command_requeues_the_rest(sched, -1, throwing_query(), {{"pause a", true}},
+  a_throwing_command_requeues_the_rest(sched, log, -1, throwing_query(), {{"pause a", true}},
                                        [&] { sched.step(); });
 }
 
 TEST(SyncPostControl, TheDestructorRefusesWhatWasNeverApplied) {
   the_destructor_refuses_what_was_never_applied<scheduler>();
+}
+
+TEST(AsyncPostControl, APostFromARefusedDoneIsRefusedToo) {
+  a_post_from_a_refused_done_is_refused_too<async_scheduler>();
+}
+
+TEST(SyncPostControl, APostFromARefusedDoneIsRefusedToo) {
+  a_post_from_a_refused_done_is_refused_too<scheduler>();
+}
+
+namespace {
+
+// R0-final's R0a-conc-4: has_pending_control() from another thread while the scheduler's thread
+// applies a batch: a query that holds the batch, then a pause still to come. The pause waits to be
+// applied, so the flag reads true until the batch is done (it read false once the batch was taken).
+template <class S>
+void pending_while_a_batch_applies(S &sched, const std::function<void()> &apply) {
+  const int pid =
+      sched.execute(std::string("(begin (set i 0) (while (< i 1000000) (set i (+ i 1))))"));
+  std::atomic<bool> in_query{false}, gate{false}, paused{false};
+  control_cmd hold;
+  hold.what = control_cmd::kind::query;
+  hold.query = [&](scheduler_base &) {
+    in_query = true;
+    while (!gate.load())
+      std::this_thread::yield();
+  };
+  sched.post_control(-1, std::move(hold));
+  sched.post_control(pid, control(control_cmd::kind::pause, [&](bool ok) { paused = ok; }));
+  std::thread pump(apply);
+  while (!in_query.load())
+    std::this_thread::yield();
+  const bool pending = sched.has_pending_control(); // the pause is still to be applied
+  gate = true;
+  pump.join();
+  EXPECT_TRUE(pending) << "has_pending_control() read false with a pause waiting in the batch";
+  EXPECT_TRUE(paused.load());
+  EXPECT_FALSE(sched.has_pending_control());
+}
+
+// R0-final's R0a-conc-5: a done that throws (against its contract) is called once: the refusal of
+// the command that threw found its done still set and called it again, with false.
+template <class S> int done_calls_when_a_done_throws(S &sched, const std::function<void()> &apply) {
+  const int pid =
+      sched.execute(std::string("(begin (set i 0) (while (< i 1000000) (set i (+ i 1))))"));
+  int calls = 0;
+  sched.post_control(pid, control(control_cmd::kind::pause, [&calls](bool) {
+                       if (++calls == 1)
+                         throw std::runtime_error("the done threw");
+                     }));
+  EXPECT_THROW(apply(), std::runtime_error);
+  return calls;
+}
+
+} // namespace
+
+TEST(AsyncPostControl, HasPendingControlWhileABatchApplies) {
+  async_scheduler sched;
+  pending_while_a_batch_applies(sched, [&] { sched.drain_ingress(); });
+}
+
+TEST(SyncPostControl, HasPendingControlWhileABatchApplies) {
+  scheduler sched;
+  pending_while_a_batch_applies(sched, [&] { sched.step(); });
+}
+
+TEST(AsyncPostControl, ADoneThatThrowsIsCalledOnce) {
+  async_scheduler sched;
+  EXPECT_EQ(done_calls_when_a_done_throws(sched, [&] { sched.drain_ingress(); }), 1);
+}
+
+TEST(SyncPostControl, ADoneThatThrowsIsCalledOnce) {
+  scheduler sched;
+  EXPECT_EQ(done_calls_when_a_done_throws(sched, [&] { sched.step(); }), 1);
 }
 
 // --- an async call's outcome (docs/STATE_EXEC_EXCEPTIONS.md 3) ---

@@ -152,8 +152,9 @@ value_t async_call::outcome() {
   if (async_sched_ && !closed_.load(std::memory_order_acquire))
     async_sched_->finish_async_call(shared_from_this());
   if (!finished() && cancel_requested())
-    // Cancelled before it settled: the process that made it was killed or reaped. Another process
-    // awaiting the same future (a fork child) is woken (S0.9) and raises here.
+    // Cancelled before it settled. The scheduler that cancels a call for its process's end settles
+    // it with this same error (cancel_async_calls), so every await sees it; this is the backstop
+    // for a call cancelled otherwise and read before it settles.
     throw dsl_error("RuntimeError", name_ + ": cancelled: the process that made the call ended",
                     "async", function_fields(name_));
   if (timed_out_) {
