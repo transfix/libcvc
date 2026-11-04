@@ -25,18 +25,6 @@ cvc::state &root_of(const std::shared_ptr<cvc::app> &app) {
     throw std::invalid_argument("pycvc state op: null app handle");
   return cvc::state::instance(*app);
 }
-
-// The pins a pinned walk collects (top first), released leaf first: a node another thread
-// unlinked meanwhile then dies with its ancestors alive, as ~state needs.
-struct held_chain : std::vector<cvc::state::state_ptr> {
-  held_chain() = default;
-  held_chain(const held_chain &) = delete;
-  held_chain &operator=(const held_chain &) = delete;
-  ~held_chain() {
-    while (!empty())
-      pop_back();
-  }
-};
 } // namespace
 
 // These run on Python threads while an Exec's thread may delete nodes (td 4.12), so every node
@@ -47,7 +35,7 @@ void state_set(const std::shared_ptr<cvc::app> &app, const std::string &path,
                const std::string &value) {
   // sharedChild(path) creates child nodes as needed, as operator() does; value() fires
   // valueChanged only on an actual change.
-  held_chain chain;
+  cvc::pin_vector chain; // released leaf first
   root_of(app).sharedChild(path, &chain)->value(value);
 }
 
@@ -89,7 +77,7 @@ std::vector<std::string> state_property_keys(const std::shared_ptr<cvc::app> &ap
 std::vector<std::string> state_children(const std::shared_ptr<cvc::app> &app,
                                         const std::string &path) {
   // children() names them from fullName(), up the chain the walk holds.
-  held_chain chain;
+  cvc::pin_vector chain; // released leaf first
   const cvc::state::state_ptr node = root_of(app).findDescendantShared(path, &chain);
   if (!node)
     return {};
@@ -124,7 +112,7 @@ void state_remove(const std::shared_ptr<cvc::app> &app, const std::string &path)
     root.removeChild(key);
     return;
   }
-  held_chain chain; // removeChild emits up the parent's chain
+  cvc::pin_vector chain; // removeChild emits up the parent's chain; released leaf first
   if (const cvc::state::state_ptr parent = root.findDescendantShared(key.substr(0, dot), &chain))
     parent->removeChild(key.substr(dot + 1));
 }

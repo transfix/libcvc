@@ -32,6 +32,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 namespace {
@@ -396,6 +397,42 @@ TEST(StateLifetime, LinkResolutionReleasesTheTargetFirst) {
   EXPECT_TRUE(s_died) << "the resolution was the last owner of x.s";
   EXPECT_FALSE(x_freed_when_s_died) << "x.s died after its parent x was freed";
   EXPECT_TRUE(x_freed->load());
+}
+
+// The same when a resolution is assigned over (R0a-mem-4): the old target goes first, then its
+// chain from the bottom up, and the struct stays an aggregate (R0b-compat-9).
+TEST(StateLifetime, LinkResolutionAssignmentReleasesTheTargetFirst) {
+  static_assert(std::is_aggregate_v<state::link_resolution>);
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("t.u.v").value("target");
+  root("lnk").linkTo("t.u.v");
+  state::link_resolution lr = root("lnk").resolveLink();
+  ASSERT_EQ(lr.kind, state::link_resolution_kind::resolved);
+  ASSERT_EQ(lr.target_pins.size(), 3u);
+
+  struct gone_flag {
+    std::shared_ptr<std::atomic<bool>> gone;
+    ~gone_flag() {
+      if (gone)
+        gone->store(true);
+    }
+  };
+  const auto u_freed = std::make_shared<std::atomic<bool>>(false);
+  auto flag = std::make_shared<gone_flag>();
+  flag->gone = u_freed;
+  root("t.u").data(boost::any(std::move(flag)));
+  bool v_died = false, u_freed_when_v_died = false;
+  boost::signals2::scoped_connection died = root("t.u.v").destroyed.connect([&] {
+    v_died = true;
+    u_freed_when_v_died = u_freed->load();
+  });
+
+  ASSERT_TRUE(root.removeChild("t")); // the resolution is now the last owner of t, t.u and t.u.v
+  lr = state::link_resolution{};
+  EXPECT_TRUE(v_died);
+  EXPECT_FALSE(u_freed_when_v_died) << "t.u.v died after its parent t.u was freed";
+  EXPECT_TRUE(u_freed->load());
 }
 
 // A node reached by a pinned walk stays readable, and writable, after an ancestor is removed: its

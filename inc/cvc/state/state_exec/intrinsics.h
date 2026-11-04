@@ -14,12 +14,14 @@
 
 #include <boost/shared_ptr.hpp>
 #include <cstring> // std::strcmp — document_scope's cross-module-stable type tag compare
+#include <cvc/state/state.h> // cvc::pin_vector
 #include <cvc/state/state_exec/types.h>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -163,8 +165,9 @@ struct intrinsics_context {
   std::string root_path;             // Chroot path (empty = full tree)
   /// Owning pins of `root` and its ancestors (td 4.8): every node from the tree's root node down
   /// to `root` inclusive, so back() == root. Empty until first pinned (pinned_root), then never
-  /// empty; an unchrooted context holds just the root. Copied to spawned children.
-  std::vector<boost::shared_ptr<cvc::state>> root_pins;
+  /// empty; an unchrooted context holds just the root. Copied to spawned children. Released leaf
+  /// first (pin_vector): a context can outlive the document it is chrooted in.
+  cvc::pin_vector root_pins;
   const channel_policy *channels = nullptr; // §12 channel enforcement (non-owning; host-installed)
   document_scope *document = nullptr; // Per-document resource owner (non-owning; host-installed)
 
@@ -190,19 +193,8 @@ struct intrinsics_context {
   /// shares this context (its natives point at it), so a host that frees the context when its
   /// process ends (Ariadne's actions) keeps it while the children live. Unset: nothing is called.
   std::function<void(int pid)> on_child;
-
-  intrinsics_context() = default;
-  intrinsics_context(const intrinsics_context &) = default;
-  intrinsics_context(intrinsics_context &&) = default;
-  intrinsics_context &operator=(const intrinsics_context &) = default;
-  intrinsics_context &operator=(intrinsics_context &&) = default;
-  /// Releases root_pins leaf first (`root`, then its parent, ...): a context can outlive the
-  /// document it is chrooted in, and each node must die with its ancestors alive (~state).
-  ~intrinsics_context() {
-    while (!root_pins.empty())
-      root_pins.pop_back();
-  }
 };
+static_assert(std::is_aggregate_v<intrinsics_context>); // hosts may brace-initialise it
 
 /// Register all DSL intrinsics into an environment.
 ///

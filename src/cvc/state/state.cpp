@@ -1217,14 +1217,6 @@ template <class Visit> bool for_each_state_key(const std::string &path, Visit &&
   return true;
 }
 
-// Release a chain of pins (top first, as the walks collect them) from the bottom up: a chain can be
-// the last owner of nodes unlinked meanwhile, and each node must die with its ancestors alive
-// (~state; a destroyed() slot may walk _parent).
-void release_leaf_first(std::vector<state::state_ptr> &pins) {
-  while (!pins.empty())
-    pins.pop_back();
-}
-
 // The hops a link-aware walk holds until it ends (td 4.8): a link hop's resolveLink() reads the
 // link node's fullName(), which walks the hops above it. They go to the caller's `pins` when it
 // wants them, else to a stack here. The last one pushed is always where the walk stands.
@@ -1232,7 +1224,7 @@ class hop_holds {
 public:
   explicit hop_holds(std::vector<state::state_ptr> *pins) : pins_(pins) {}
   ~hop_holds() {
-    while (!own_.empty()) // leaf first, as release_leaf_first
+    while (!own_.empty()) // leaf first, as pin_vector
       own_.pop_back();
   }
   hop_holds(const hop_holds &) = delete;
@@ -1711,11 +1703,7 @@ state::link_resolution state::resolveLink(std::size_t hop_budget) {
       return result;
     }
 
-    std::vector<state_ptr> hop_pins; // released leaf first on a return below
-    struct leaf_first {
-      std::vector<state_ptr> &pins;
-      ~leaf_first() { release_leaf_first(pins); }
-    } release_hop_pins{hop_pins};
+    pin_vector hop_pins; // released leaf first on a return below
     state_ptr next_owned = root.findDescendantShared(target, &hop_pins);
     if (!next_owned) {
       result.kind = link_resolution_kind::broken;
@@ -1739,7 +1727,6 @@ state::link_resolution state::resolveLink(std::size_t hop_budget) {
     // first.
     cur_owned = std::move(next_owned);
     cur = cur_owned.get();
-    release_leaf_first(result.target_pins);
     result.target_pins = std::move(hop_pins);
   }
 }
