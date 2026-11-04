@@ -190,6 +190,18 @@ struct intrinsics_context {
   /// shares this context (its natives point at it), so a host that frees the context when its
   /// process ends (Ariadne's actions) keeps it while the children live. Unset: nothing is called.
   std::function<void(int pid)> on_child;
+
+  intrinsics_context() = default;
+  intrinsics_context(const intrinsics_context &) = default;
+  intrinsics_context(intrinsics_context &&) = default;
+  intrinsics_context &operator=(const intrinsics_context &) = default;
+  intrinsics_context &operator=(intrinsics_context &&) = default;
+  /// Releases root_pins leaf first (`root`, then its parent, ...): a context can outlive the
+  /// document it is chrooted in, and each node must die with its ancestors alive (~state).
+  ~intrinsics_context() {
+    while (!root_pins.empty())
+      root_pins.pop_back();
+  }
 };
 
 /// Register all DSL intrinsics into an environment.

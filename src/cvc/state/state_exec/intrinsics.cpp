@@ -3,6 +3,7 @@
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/lexical_cast.hpp>
 #include <boost/property_tree/json_parser/error.hpp>
+#include <cassert>
 #include <charconv>
 #include <chrono>
 #include <cmath>
@@ -131,21 +132,40 @@ void require_sched(const intrinsics_context *ctx, const char *name) {
 // pin); a write or a walk up the parents (fullName(), a write's childChanged) keeps the chain.
 using state_ptr = cvc::state::state_ptr;
 
-// A hold on `n`: its owning pointer, or, for a node no shared_ptr owns (a host's own root, with no
-// shared_from_this()), a non-owning alias: the host keeps that one alive for the context's life.
-state_ptr hold(cvc::state &n) {
-  if (state_ptr p = n.weak_from_this().lock())
-    return p;
-  return state_ptr(state_ptr(), &n);
+// Release a chain of pins (top first, as the walks collect them) from the bottom up: a chain can be
+// the last owner of nodes another thread unlinked, and each node must die with its ancestors alive
+// (~state; a destroyed() slot may walk _parent).
+void release_leaf_first(std::vector<state_ptr> &pins) {
+  while (!pins.empty())
+    pins.pop_back();
 }
 
+// A chain of pins kept past the call that made it (a data job's, a callback's), released leaf first
+// when it goes.
+struct pin_chain : std::vector<state_ptr> {
+  pin_chain() = default;
+  explicit pin_chain(const std::vector<state_ptr> &pins) : std::vector<state_ptr>(pins) {}
+  pin_chain(const pin_chain &) = default;
+  pin_chain(pin_chain &&) = default;
+  pin_chain &operator=(const pin_chain &) = delete;
+  pin_chain &operator=(pin_chain &&) = delete;
+  ~pin_chain() { release_leaf_first(*this); }
+};
+
 // root_pins for `ctx.root`: it and each ancestor, top first, walking parent() once. The host
-// promises the root is alive when it assigns it, and so its ancestors are.
+// promises the root is alive when it assigns it, and so its ancestors are. Every live node is
+// owned by a shared_ptr (the root by its app, a child by its parent), so each has
+// shared_from_this(). The old pins go after the new ones are taken, leaf first.
 void pin_root_chain(intrinsics_context &ctx) {
-  ctx.root_pins.clear();
-  for (const cvc::state *n = ctx.root; n; n = n->parent())
-    ctx.root_pins.push_back(hold(const_cast<cvc::state &>(*n)));
-  std::reverse(ctx.root_pins.begin(), ctx.root_pins.end());
+  std::vector<state_ptr> chain;
+  for (const cvc::state *n = ctx.root; n; n = n->parent()) {
+    cvc::state &node = const_cast<cvc::state &>(*n);
+    assert(!node.weak_from_this().expired() && "pinned_root: a node being destroyed");
+    chain.push_back(node.shared_from_this());
+  }
+  std::reverse(chain.begin(), chain.end());
+  ctx.root_pins.swap(chain);
+  release_leaf_first(chain);
 }
 
 // The chain pins one intrinsic call holds to its end. They sit on one stack per thread, popped
@@ -213,9 +233,9 @@ state_ptr make_node(intrinsics_context *ctx, const std::string &path,
 }
 
 // The context's root chain, for a data job that writes after the call (the job holds it, td 4.8).
-std::vector<state_ptr> root_chain(intrinsics_context *ctx) {
+pin_chain root_chain(intrinsics_context *ctx) {
   pinned_root(ctx);
-  return ctx->root_pins;
+  return pin_chain(ctx->root_pins);
 }
 } // namespace
 
@@ -518,7 +538,7 @@ private:
 // through any link, for its whole life (td 4.8): every value it sets emits up that chain.
 class state_from_json_job final : public data_job {
 public:
-  state_from_json_job(std::vector<state_ptr> pins, state_ptr node, std::string_view doc)
+  state_from_json_job(pin_chain pins, state_ptr node, std::string_view doc)
       : pins_(std::move(pins)), node_(std::move(node)), reader_(*node_, doc) {}
 
   bool step(std::size_t budget) override {
@@ -545,7 +565,9 @@ public:
   }
 
 private:
-  std::vector<state_ptr> pins_;
+  // Declared first, so released last: the reader's hold and node_ (the target) go first, then
+  // its chain, leaf first.
+  pin_chain pins_;
   state_ptr node_;
   std::string doc_;
   cvc::state_json_reader reader_;
@@ -587,8 +609,14 @@ class state_set_tree_job final : public data_job {
 public:
   // The node at `path` under the root (the back of `root_pins`, the context's root chain) is made
   // (or found, through a writable link) once the value has passed its check.
-  state_set_tree_job(std::vector<state_ptr> root_pins, std::string path, value_t v)
+  state_set_tree_job(pin_chain root_pins, std::string path, value_t v)
       : pins_(std::move(root_pins)), path_(std::move(path)), root_(std::move(v)) {}
+  // The open frames' nodes, deepest first, then the chain to the target, leaf first (pins_ is
+  // declared first, so released last).
+  ~state_set_tree_job() override {
+    while (!open_.empty())
+      open_.pop_back();
+  }
 
   bool step(std::size_t budget) override {
     const std::size_t start = nodes_;
@@ -718,7 +746,7 @@ private:
     }
   }
 
-  std::vector<state_ptr> pins_; // the root's chain, then the target's (target())
+  pin_chain pins_; // the root's chain, then the target's (target())
   std::string path_;
   value_t root_;
   bool started_ = false;
@@ -744,7 +772,7 @@ value_t intrinsic_state_from_json(intrinsics_context *ctx, std::span<const value
   require_root(ctx, "state-from-json");
   auto &path = as_string(args[0], "state-from-json");
   auto &doc = as_string(args[1], "state-from-json");
-  std::vector<state_ptr> pins = root_chain(ctx);
+  pin_chain pins = root_chain(ctx);
   cvc::state &root = *pins.back();
   state_ptr node = write_through_link(write_node(root, path, &pins), pins);
   return run_data_job(std::make_unique<state_from_json_job>(std::move(pins), std::move(node), doc));

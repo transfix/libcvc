@@ -596,6 +596,19 @@ public:
     std::vector<state_ptr> target_pins;
     std::vector<std::string> visited; // ordered absolute paths
     std::size_t hops = 0;
+
+    link_resolution() = default;
+    link_resolution(const link_resolution &) = default;
+    link_resolution(link_resolution &&) = default;
+    link_resolution &operator=(const link_resolution &) = default;
+    link_resolution &operator=(link_resolution &&) = default;
+    // The target first, then its chain from the bottom up: a resolution can be the last owner of
+    // a chain unlinked meanwhile, and each node must die with its ancestors alive (~state).
+    ~link_resolution() {
+      target_owned.reset();
+      while (!target_pins.empty())
+        target_pins.pop_back();
+    }
   };
 
   // Mark this node as a link to `target_path`. `target_path` is
@@ -757,8 +770,7 @@ public:
 
   // The same two walks for a caller that already holds this node (td 4.8: an intrinsics context's
   // root_pins, a watch's root). `self` is that hold, and what an empty path returns; the walk takes
-  // no reference on this node, so a lookup leaves its count alone. `self` may be a non-owning alias
-  // of a node no shared_ptr owns (a host's own root), which the host keeps alive.
+  // no reference on this node, so a lookup leaves its count alone.
   state_ptr findDescendantShared(const state_ptr &self, const std::string &path,
                                  std::vector<state_ptr> *pins = nullptr);
   state_ptr sharedChild(const state_ptr &self, const std::string &childname,

@@ -4,6 +4,8 @@
 // require each case's line. No case name contains "Stress": run.sh filters those out.
 
 #include <atomic>
+#include <boost/any.hpp>
+#include <boost/signals2/connection.hpp>
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
@@ -16,6 +18,7 @@
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/process.h>
 #include <gtest/gtest.h>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -319,4 +322,132 @@ TEST(Hazards, HZ12_PrintWritesWholeLines) {
   EXPECT_EQ(broken, 0u);
   for (int t = 0; t < kThreads; ++t)
     EXPECT_EQ(next[t], kLines) << "thread " << t;
+}
+
+// --- R0-mid: the tree's memory fixes ---
+
+namespace {
+
+// Set when the node holding it as data has had its members destroyed: its ~state() is done.
+struct gone_flag {
+  std::shared_ptr<std::atomic<bool>> gone;
+  ~gone_flag() {
+    if (gone)
+      gone->store(true);
+  }
+};
+
+std::shared_ptr<std::atomic<bool>> flag_when_freed(cvc::state &node) {
+  auto flag = std::make_shared<std::atomic<bool>>(false);
+  auto g = std::make_shared<gone_flag>();
+  g->gone = flag;
+  node.data(boost::any(g));
+  return flag;
+}
+
+// Whether `node` died, and whether its parent was already freed then: ~state() promises a node
+// its ancestors while it dies (a destroyed() slot may walk _parent).
+struct death_watch {
+  bool died = false, parent_gone = false;
+  boost::signals2::scoped_connection conn;
+  death_watch(cvc::state &node, std::shared_ptr<std::atomic<bool>> parent_freed) {
+    conn = node.destroyed.connect([this, parent_freed] {
+      died = true;
+      parent_gone = parent_freed->load();
+    });
+  }
+};
+
+// {"k0": "0", ...}: a document of `n` values, as the body of a DSL string literal.
+std::string json_values(int n) {
+  std::string doc = "{";
+  for (int i = 0; i < n; ++i)
+    doc += (i ? ", " : "") + std::string("\\\"k") + std::to_string(i) + "\\\": \\\"" +
+           std::to_string(i) + "\\\"";
+  return doc + "}";
+}
+
+} // namespace
+
+// R0m-memory-2 (S0.4; ASan and TSan): state-from-json writes each value through a walk that holds
+// the node it writes, and a dotted key's nodes above it, until the write is done. One thread
+// loads a document naming a child and two dotted paths again and again while another deletes what
+// it writes, each in its own world on one tree. Handing the reader each node unpinned let the delete
+// free it before the write (a crash within seconds); here both loops finish.
+TEST(Hazards, FromJsonAgainstDeletingWhatItWrites) {
+  cvc::app app;
+  cvc::state &tree = cvc::state::instance(app);
+  const int n = under_sanitizer() ? 20000 : 100000;
+  const std::string writer =
+      loop(n, R"((state-from-json "p" "{\"k\": \"v\", \"a.b\": \"w\", \"a.c.d\": \"x\"}"))");
+  const std::string deleter = loop(n, R"((state-delete "p.k") (state-delete "p.a"))");
+  const std::vector<std::string> out =
+      run_on_threads(tree, {writer, deleter}, "state-from-json against delete");
+  EXPECT_EQ(out[0], std::to_string(n));
+  EXPECT_EQ(out[1], std::to_string(n));
+}
+
+// R0m-memory-4 (S0.4): a context's root_pins are released leaf first. The context outlives the
+// document it is chrooted in; once both are gone, the chroot node dies before its parent.
+TEST(Hazards, ContextRootPinsReleaseTheChrootFirst) {
+  cvc::app app;
+  cvc::state &tree = cvc::state::instance(app);
+  auto ctx = std::make_unique<intrinsics_context>();
+  apply_chroot(*ctx, tree, "a.b");
+  const auto a_freed = flag_when_freed(tree("a"));
+  death_watch b(tree("a.b"), a_freed);
+  ASSERT_TRUE(tree.removeChild("a")); // the document goes; the context still holds it
+  EXPECT_FALSE(a_freed->load());
+  EXPECT_FALSE(b.died);
+  ctx.reset(); // root_pins [root, a, a.b] go
+  EXPECT_TRUE(b.died);
+  EXPECT_FALSE(b.parent_gone) << "a.b died after its parent a was freed";
+  EXPECT_TRUE(a_freed->load());
+}
+
+// R0m-memory-4 (S0.4): a data job's chain is released leaf first. A state-set-tree sliced a node a
+// step (HZ-6b) whose target's parent another process deletes between slices: when the job ends,
+// it is the last owner of the deleted p and its target p.t.
+TEST(Hazards, SetTreeJobPinsReleaseTheTargetFirst) {
+  cvc::app app;
+  cvc::state &tree = cvc::state::instance(app);
+  tree_program prog(tree, 1);
+  const int writer =
+      prog.submit("(begin (set d (dict)) " + loop(100, "(set-attr d (str i) i)", "d") +
+                  R"( (state-set-tree "p.t" d) "done"))");
+  ASSERT_TRUE(prog.step_until([&] { return tree.findDescendant("p.t.5") != nullptr; }));
+  ASSERT_FALSE(prog.finished(writer));
+  const auto p_freed = flag_when_freed(*tree.findDescendant("p"));
+  death_watch t(*tree.findDescendant("p.t"), p_freed);
+  const int deleter = prog.submit(R"((begin (state-delete "p") "deleted"))");
+  ASSERT_TRUE(prog.step_until([&] { return prog.finished(deleter); }));
+  ASSERT_FALSE(prog.finished(writer)) << "the delete didn't land between the job's slices";
+  ASSERT_TRUE(prog.step_until([&] { return prog.finished(writer); }));
+  EXPECT_EQ(prog.outcome(writer), "done");
+  prog.step_until([&] { return t.died; }, 10);
+  EXPECT_TRUE(t.died) << "the job's pins were not released";
+  EXPECT_FALSE(t.parent_gone) << "p.t died after its parent p was freed";
+}
+
+// The same for a state-from-json sliced a value a step: its job holds the target's chain, the
+// target and the reader's own hold on it.
+TEST(Hazards, FromJsonJobPinsReleaseTheTargetFirst) {
+  cvc::app app;
+  cvc::state &tree = cvc::state::instance(app);
+  tree_program prog(tree, 1);
+  const int writer =
+      prog.submit(R"((begin (state-from-json "p.t" ")" + json_values(100) + R"(") "done"))");
+  // The reader checks the whole document first, then sets it: wait for a value it has set.
+  ASSERT_TRUE(prog.step_until([&] { return tree.findDescendant("p.t.k5") != nullptr; }));
+  ASSERT_FALSE(prog.finished(writer));
+  const auto p_freed = flag_when_freed(*tree.findDescendant("p"));
+  death_watch t(*tree.findDescendant("p.t"), p_freed);
+  const int deleter = prog.submit(R"((begin (state-delete "p") "deleted"))");
+  ASSERT_TRUE(prog.step_until([&] { return prog.finished(deleter); }));
+  ASSERT_FALSE(prog.finished(writer)) << "the delete didn't land between the job's slices";
+  ASSERT_TRUE(prog.step_until([&] { return prog.finished(writer); }));
+  EXPECT_EQ(prog.outcome(writer), "done");
+  prog.step_until([&] { return t.died; }, 10);
+  EXPECT_TRUE(t.died) << "the job's pins were not released";
+  EXPECT_FALSE(t.parent_gone) << "p.t died after its parent p was freed";
 }
