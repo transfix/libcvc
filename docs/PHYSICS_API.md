@@ -594,7 +594,10 @@ and, on a knob, a recommended `min` and `max`. So do the `nav_stats` leaves that
 
 **nav_stats** gains `energy_J`, `energy_per_km` (J per km of path) and `building_contacts`
 per vehicle, and `total_energy_J` and `total_building_contacts` per episode. `energy_J` is
-what the vehicle drew from its source, net of regeneration.
+what the vehicle drew from its source, net of regeneration. `building_contacts` counts the
+contacts a chassis starts with static or kinematic geometry other than the ground: name the
+ground's bodies in `nav_plant_options::ground_bodies` (pycvc: `nav_plant(..., ground_bodies=[id])`;
+`plant_host`, `nav_eval` and the Jolt rollout name theirs), or a chassis scraping it counts.
 
 These fields, and their JSON, appear only when a plant measures energy. The kinematic record
 is unchanged, and `fuel_used` keeps its proxy meaning.

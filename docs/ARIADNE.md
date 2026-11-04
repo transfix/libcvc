@@ -1969,7 +1969,9 @@ relative bases in nested composition.
 
 `src/cvc/ariadne/components/*.ari` (installed to `<prefix>/share/libcvc/ariadne/components`
 and embedded in the wasm demos) are reusable windows a document imports by `cvc://` and
-includes. Each binds state keys a C++ object owns, so it needs no host code;
+includes. The `libcvc` cvcpkg bundles and the release tarballs carry the directory from 3.7.10.
+Earlier native bundles left it out, so with those a host needs `CVC_ARIADNE_PATH` pointing at a
+copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object owns, so it needs no host code;
 [`INDEX.ari`](../src/cvc/ariadne/components/INDEX.ari) catalogs them:
 
 | component | drives |
@@ -2283,6 +2285,12 @@ document path is the document's (§5.6):
 | `ari` | libcvc only (FTXUI, optionally tvision) | in the terminal; a `scene:` is dropped | [`src/ari`](../src/ari/main.cpp) |
 | `arigl` | libcvc + cvcGL (VTK, ImGui) | in a real window, or `--terminal` with its scene rendered behind the widgets | [`src/arigl`](../src/arigl/main.cpp) |
 | `arisrv` | libcvc + gRPC + WebSocket | headless, as a server (the conference relay + WS↔gRPC bridge) | [`src/arisrv`](../src/arisrv/main.cpp) |
+
+Each is its own cvcpkg package, built from its recipe in [`cvcpkg/recipes`](../cvcpkg/recipes)
+against the installed libcvc: `cvcpkg install ari`, `cvcpkg install arigl`, and for a room's
+server `cvcpkg install arisrv` (linux, macOS and windows). arisrv's transports, its Jolt avatars
+and its libjpeg-turbo video rungs are libcvc's, so it needs a libcvc built with them: every
+libcvc after 3.7.8 is, and arisrv's standalone configure refuses an SDK with neither transport.
 
 ```
 arigl run      [--terminal] [flags] doc.ari [document args...]

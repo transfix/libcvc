@@ -1184,6 +1184,11 @@ jobs:
           cpack -G TGZ -D CPACK_COMPONENTS_ALL=libcvc \
                        -D CPACK_PACKAGE_FILE_NAME="$STEM"
           mv "$STEM-libcvc.tar.gz" "$STEM.tar.gz"
+          # The Ariadne component library is part of the SDK: cvc:// finds it beside the library,
+          # and a native host has no other copy. Up to 3.7.9 its install rule named no component,
+          # so this tarball left it out.
+          tar -tzf "$STEM.tar.gz" | grep -q 'share/libcvc/ariadne/components/chat\.ari$' ||
+            { echo "::error::the libcvc tarball has no share/libcvc/ariadne/components"; exit 1; }
           cp "$STEM.tar.gz" "$GITHUB_WORKSPACE/"
           echo "STEM=$STEM" >> "$GITHUB_ENV"
 
