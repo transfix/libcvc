@@ -1596,8 +1596,11 @@ endif()
 # components (stage_lighting, scene_controls, …) that documents import via the location-independent
 # cvc:// scheme (import: cvc://components/foo.ari). Install it as data alongside libcvc, and compile
 # the install datadir into the resolver so register_cvc_uri_handler() finds it with no env var.
+# COMPONENT libcvc like the library itself, so the release tarballs (cpack's libcvc component)
+# carry it as well as the cvcpkg bundles (package.files: share/libcvc/ariadne/).
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ariadne/components
         DESTINATION ${CMAKE_INSTALL_DATADIR}/libcvc/ariadne
+        COMPONENT libcvc
         FILES_MATCHING PATTERN "*.ari")
 target_compile_definitions(
   cvc PRIVATE CVC_ARIADNE_DATA_DIR="${CMAKE_INSTALL_FULL_DATADIR}/libcvc/ariadne")

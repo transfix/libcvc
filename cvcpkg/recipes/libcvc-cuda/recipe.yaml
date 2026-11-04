@@ -162,6 +162,9 @@ package:
     - lib/cmake/cvc/
     - include/cvc/
     - include/xmlrpc/
+    # The Ariadne component library (cvc://components/*.ari), which cvc:// finds beside the
+    # installed library -- the same entry as the CPU libcvc recipe, for the same reason.
+    - share/libcvc/ariadne/
   cmake_packages:
     - name: cvc
       targets:

@@ -216,8 +216,8 @@ jolt_rollout::jolt_rollout(const vehicle_desc &desc, double wheelbase, jolt_roll
   g.shape = box{{50.0, 50.0, 0.5}};
   g.motion = motion_type::static_;
   g.position = {0.0, 0.0, -0.5};
-  w.add_body(g);
   nav_plant_options po = _o.plant;
+  po.ground_bodies = {w.add_body(g)};
   po.metres_per_world_unit = 1.0;
   po.spawn_height = -1.0;
   nav_plant p(w, {_desc}, po);
@@ -299,7 +299,7 @@ void jolt_rollout::reset(const cvc::nav::rollout_batch &b) {
   g.motion = motion_type::static_;
   g.position = {0.0, 0.0, -0.5};
   g.material = ground;
-  _w->add_body(g);
+  const body_id floor = _w->add_body(g);
   _agents.assign(static_cast<std::size_t>(b.n), agent{});
   for (int i = 0; i < b.n; ++i) {
     agent &a = _agents[static_cast<std::size_t>(i)];
@@ -331,6 +331,7 @@ void jolt_rollout::reset(const cvc::nav::rollout_batch &b) {
   }
 
   nav_plant_options po = _o.plant;
+  po.ground_bodies = {floor}; // a contact is a wall's, never the floor's
   po.metres_per_world_unit = 1.0;
   po.spawn_height = _spawn_height;
   po.ground_z = 0.0;
