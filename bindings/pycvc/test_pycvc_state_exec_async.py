@@ -577,6 +577,12 @@ def test_a_python_kernels_wait_for_the_gil_isnt_charged():
         w.close()
         if ran_at < window["from"]:
             continue  # the kernel took the GIL before `hold` did: no wait to leave out
+        if ran_at < window["to"] - 0.1:
+            # The kernel took the GIL between `hold`'s stamp and its C call: the interpreter can
+            # hand it over there, at an eval-breaker check (a preempted `hold`, on a busy machine,
+            # lets the waiting thread ask for it). The C call holds the GIL throughout, so a kernel
+            # that waited for it ran after the call, at about window["to"]. No wait to leave out.
+            continue
         if window["to"] - window["from"] > 0.45:
             # The machine stalled the threads (the hold took far longer than it runs): a stall
             # is run time, rightly charged, which would hide what this checks.
