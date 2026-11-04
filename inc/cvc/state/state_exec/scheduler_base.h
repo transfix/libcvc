@@ -259,6 +259,14 @@ public:
 
   // --- State-watch registry (state-watch/state-unwatch) ---
   virtual void set_watch_root(cvc::state *root) = 0;
+  /// The same for a root a program's step gives (state-watch's, S0.md section 0, item 20): the
+  /// scheduler keeps `pin` (a hold on `root`, and on its ancestors when the caller's pin holds
+  /// them) for as long as `root` is its watch root, since no host keeps it alive. A later
+  /// set_watch_root, of either form, replaces or drops it. This default ignores `pin`.
+  virtual void set_watch_root(cvc::state *root, boost::shared_ptr<cvc::state> pin) {
+    (void)pin;
+    set_watch_root(root);
+  }
   /// The root set_watch_root() gave, or null. state-watch sets one only on a scheduler that has
   /// none (S0.md section 0, item 20).
   virtual cvc::state *watch_root() const { return nullptr; }

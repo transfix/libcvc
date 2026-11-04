@@ -2,6 +2,7 @@
 #include <boost/algorithm/string/trim.hpp>
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/lexical_cast.hpp>
+#include <boost/make_shared.hpp>
 #include <boost/property_tree/json_parser/error.hpp>
 #include <cassert>
 #include <charconv>
@@ -166,6 +167,22 @@ void pin_root_chain(intrinsics_context &ctx) {
   std::reverse(chain.begin(), chain.end());
   ctx.root_pins.swap(chain);
   release_leaf_first(chain);
+}
+
+// One hold on `pins` (root_pins: the tree's root .. a context's root), pointing at their last: what
+// a scheduler keeps of a watch root a step gives it, which no host keeps alive (R0-mid). The whole
+// chain is held, as a write under the root emits through it, and let go of leaf first.
+state_ptr hold_chain(const std::vector<state_ptr> &pins) {
+  struct chain {
+    std::vector<state_ptr> pins;
+    ~chain() {
+      while (!pins.empty())
+        pins.pop_back();
+    }
+  };
+  const boost::shared_ptr<chain> held = boost::make_shared<chain>();
+  held->pins = pins;
+  return state_ptr(held, pins.back().get());
 }
 
 // The chain pins one intrinsic call holds to its end. They sit on one stack per thread, popped
@@ -839,7 +856,7 @@ value_t intrinsic_state_watch(intrinsics_context *ctx, std::span<const value_t> 
   const state_ptr root = ctx->root_pins.back(); // make_node pinned it
   if (ctx->sched) {
     if (ctx->root_path.empty() && !ctx->sched->watch_root())
-      ctx->sched->set_watch_root(ctx->root);
+      ctx->sched->set_watch_root(ctx->root, hold_chain(ctx->root_pins)); // kept (R0-mid)
     ctx->sched->register_watch_handler(running_pid(ctx), watch_id, handler, path, root);
   } else {
     // No-scheduler path (unit tests): record handler, initial value and root.

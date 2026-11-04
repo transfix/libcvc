@@ -928,10 +928,23 @@ std::uint64_t tree_changes::count() const { return impl_->count->load(std::memor
 
 std::uint64_t settings_changes::version(cvc::state *root) {
   // The node the settings live under (scheduler::settings_root); a different node than the one
-  // counted, or none, counts as a change (tree_changes::watch).
-  cvc::state *const node = root ? root->findDescendant("state_exec") : nullptr;
-  changes_.watch(node);
+  // counted, or none, counts as a change (tree_changes::watch). It is held from the lookup on,
+  // and while its signals are connected: another thread's program may delete it meanwhile
+  // (R0-mid). The walk starts at `root`, which the scheduler keeps alive, and takes no reference
+  // on it.
+  boost::shared_ptr<cvc::state> node;
+  if (root)
+    node = root->findDescendantShared(
+        boost::shared_ptr<cvc::state>(boost::shared_ptr<cvc::state>(), root), "state_exec");
+  changes_.watch(node.get());
+  if (node != node_)
+    node_.swap(node); // the old one goes once nothing is connected to it
   return changes_.count();
+}
+
+void settings_changes::clear() {
+  changes_.watch(nullptr);
+  node_.reset();
 }
 
 } // namespace detail

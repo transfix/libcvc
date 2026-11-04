@@ -471,10 +471,10 @@ void clear_garbage(node_kind k, void *p) {
 
 // A size_t setting from the tree; nullopt when missing, empty or not a plain decimal number.
 std::optional<std::size_t> read_setting(cvc::state &root, const std::string &path) {
-  cvc::state *node = root.findDescendant(path);
-  if (!node)
+  const std::optional<std::string> value = detail::setting_value(root, path); // held (R0-mid)
+  if (!value)
     return std::nullopt;
-  const std::string v = node->value();
+  const std::string &v = *value;
   std::size_t out = 0;
   const auto [end, ec] = std::from_chars(v.data(), v.data() + v.size(), out);
   if (v.empty() || ec != std::errc() || end != v.data() + v.size())

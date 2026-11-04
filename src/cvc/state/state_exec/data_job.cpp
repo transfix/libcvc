@@ -703,10 +703,10 @@ template <class Walk> Walk &finish_walk(Walk &walk) {
 }
 
 std::optional<std::size_t> read_size_setting(cvc::state &root, const std::string &path) {
-  cvc::state *node = root.findDescendant(path);
-  if (!node)
+  const std::optional<std::string> value = detail::setting_value(root, path); // held (R0-mid)
+  if (!value)
     return std::nullopt;
-  const std::string v = node->value();
+  const std::string &v = *value;
   std::size_t n = 0;
   const auto [end, ec] = std::from_chars(v.data(), v.data() + v.size(), n);
   if (ec != std::errc{} || end != v.data() + v.size() || v.empty())

@@ -1077,14 +1077,20 @@ void async_scheduler::track_tree_changes() {
   watch_seen_ = tree_changes_.count() - 1; // poll the watches once: changes before weren't counted
 }
 
-void async_scheduler::set_watch_root(cvc::state *root) {
+void async_scheduler::set_watch_root(cvc::state *root) { set_watch_root(root, nullptr); }
+
+void async_scheduler::set_watch_root(cvc::state *root, boost::shared_ptr<cvc::state> pin) {
   if (root != watch_root_) {
     rate_valid_ = false;
     submit_valid_ = false;
+    settings_changes_.clear(); // the node it holds is the old root's
     watch_roots_.invalidate(); // an entry whose root this is now counts under it
   }
   watch_root_ = root;
   track_tree_changes();
+  // A host keeps its root alive; one a step gave is kept here (R0-mid). The old hold goes last,
+  // once nothing is connected to what it held.
+  watch_root_pin_.swap(pin);
 }
 
 int async_scheduler::restore(process_ptr proc) {
