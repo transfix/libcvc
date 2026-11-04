@@ -554,16 +554,17 @@ def test_a_python_kernels_wait_for_the_gil_isnt_charged():
     #   first: there was no wait, and the scenario is tried again.
     # - perf_counter, not monotonic, which on Windows advances only at the ~15.6 ms tick.
     stalled = 0
+    ask = 0.3  # what the hold asks _hold_gil for; raised when a hold runs short of 0.3 s
     for _ in range(20):
         w = World()
         w.fn("stamp", time.perf_counter)
         go = threading.Event()
         window = {}
 
-        def hold(go=go, window=window):
+        def hold(go=go, window=window, ask=ask):
             go.wait()
             window["from"] = time.perf_counter()
-            _hold_gil(0.3)
+            _hold_gil(ask)
             window["to"] = time.perf_counter()
 
         t = threading.Thread(target=hold)
@@ -577,19 +578,25 @@ def test_a_python_kernels_wait_for_the_gil_isnt_charged():
         w.close()
         if ran_at < window["from"]:
             continue  # the kernel took the GIL before `hold` did: no wait to leave out
-        if ran_at < window["to"] - 0.1:
-            # The kernel took the GIL between `hold`'s stamp and its C call: the interpreter can
-            # hand it over there, at an eval-breaker check (a preempted `hold`, on a busy machine,
-            # lets the waiting thread ask for it). The C call holds the GIL throughout, so a kernel
-            # that waited for it ran after the call, at about window["to"]. No wait to leave out.
+        held = window["to"] - window["from"]
+        if held < 0.25:
+            # The hold ran short of 0.3 s: _PER_ITEM was measured slow (on a busy machine, or
+            # before a frequency step), so sum(range(n)) runs faster than it says. Too short to
+            # tell a charged wait from none; ask the next hold for more.
+            ask = min(ask * 0.3 / max(held, 0.03), 3.0)
             continue
-        if window["to"] - window["from"] > 0.45:
-            # The machine stalled the threads (the hold took far longer than it runs): a stall
-            # is run time, rightly charged, which would hide what this checks.
+        if ran_at < window["to"] - 0.05 or held > 0.45:
+            # A busy machine; each is a stall, not a failure:
+            # - The kernel took the GIL between `hold`'s stamp and its C call: the interpreter can
+            #   hand it over there, at an eval-breaker check, when `hold` is preempted. The C call
+            #   holds the GIL throughout, so a kernel that waited ran after it, at about
+            #   window["to"]. There was no wait to leave out.
+            # - The hold took far longer than it runs: a stall is run time, rightly charged, which
+            #   would hide what this checks.
             stalled += 1
             continue
         assert ran_at - window["from"] >= 0.2  # it waited out the hold
-        assert i.async_time < 0.1, i.async_time  # charged, the wait would be about 0.3 s
+        assert i.async_time < 0.1, (i.async_time, held)  # charged, the wait would be `held`
         return
     if stalled:
         print("  skipped: the machine stalled every try that waited for the GIL")
