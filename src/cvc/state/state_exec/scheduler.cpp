@@ -795,9 +795,11 @@ bool scheduler::idle_wait(std::optional<uint64_t> max_steps, uint64_t &steps, ti
 
 void scheduler::stop() {
   // Any thread. The notify ends an idle wait at once (td 4.12); the wait's 10 ms slices are left
-  // as a fallback.
+  // as a fallback. The wakeup is held here before the store: once a run sees the flag it may
+  // return, and its owner destroy the scheduler, while this call still notifies.
+  const std::shared_ptr<detail::wakeup> idle = idle_;
   stop_requested_.store(true, std::memory_order_release);
-  idle_->notify();
+  idle->notify();
 }
 
 bool scheduler::has_runnable() const {

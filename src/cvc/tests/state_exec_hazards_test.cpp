@@ -527,3 +527,30 @@ TEST(Hazards, SettingsWalksSurviveADeleteOfStateExec) {
   EXPECT_GT(submits.load(), 0u);
   EXPECT_GT(loads.load(), 0u);
 }
+
+// R0-final's R0a-conc-2 (ASan): a run that only stop() can end returns as soon as it sees the flag,
+// and its owner destroys the scheduler at once, while the thread that called stop() may still be
+// notifying the run's idle wakeup. stop() holds that wakeup itself, so nothing it touches goes
+// with the scheduler. Many runs, each destroyed the moment run() returns; the ASan leg is what
+// proves it (stop() used to reach the wakeup through the freed scheduler).
+TEST(Hazards, ASchedulerStoppedFromAnotherThreadMayGoWhenItsRunReturns) {
+  const int n = under_sanitizer() ? 200 : 2000;
+  int ended = 0;
+  for (int i = 0; i < n; ++i) {
+    auto sched = std::make_unique<scheduler>();
+    execute_options opts;
+    opts.max_time = kProcessCeiling;
+    sched->execute(std::string("(while #t nil)"), opts);
+    scheduler *const raw = sched.get();
+    std::thread stopper([raw] {
+      while (!raw->is_running())
+        std::this_thread::yield();
+      raw->stop(); // the last the stopper does with it
+    });
+    sched->run();
+    sched.reset(); // as an owner may, once run() returns
+    ++ended;
+    stopper.join();
+  }
+  EXPECT_EQ(ended, n);
+}
