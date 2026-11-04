@@ -1327,6 +1327,15 @@ struct pycvc_py_conversion {
 %ignore cvc::state::resolveLink;         // returns nested link_resolution struct
 %ignore cvc::state::link_resolution;     // (Python read-through uses resolvedValue/Data)
 %ignore cvc::state::link_resolution_kind;
+// Stage 0's pinned walks and removeChild (td 4.8) are C++-only: their state_ptr results would
+// leak a pin per call from Python, and removeChild's caller must hold the parent's chain.
+%ignore cvc::state::findThroughLinksShared;
+%ignore cvc::state::childThroughLinksShared;
+%ignore cvc::state::removeChild;
+%ignore cvc::state::findDescendantShared(const state_ptr &, const std::string &, std::vector<state_ptr> *);
+%ignore cvc::state::sharedChild(const state_ptr &, const std::string &, std::vector<state_ptr> *);
+%ignore cvc::state::findDescendantShared(const state_ptr &, const std::string &);
+%ignore cvc::state::sharedChild(const state_ptr &, const std::string &);
 %ignore cvc::state::resolveRemote;       // distributed shard / delegation layer
 %ignore cvc::state::remote_link_resolution;
 %ignore cvc::state::remote_resolution_kind;

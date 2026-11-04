@@ -3498,9 +3498,10 @@ template <class Sched> struct stopper {
 } // namespace
 
 // HZ-14 (td 8.1, S0.6; TSan): stop() from another thread ends a run(). A busy loop: run() sees the
-// flag at its next step. A lone (sleep 5): run() waits in idle_wait, and stop() ends the wait (it
-// notifies it) instead of leaving it to its 10 ms poll. Either way run() returns, the process is
-// left as it was and runs on in the next run(), and the tables hold.
+// flag at its next step. A lone (sleep 5): run() waits in idle_wait, and stop() ends the wait
+// (it notifies it; the 10 ms poll is the fallback, so the 0.2 s ceiling below proves the stop is
+// seen, not that the notify did it). Either way run() returns, the process is left as it was and
+// runs on in the next run(), and the tables hold.
 TEST(SchedulerStop, HZ14_StopFromAnotherThreadEndsRun) {
   {
     SCOPED_TRACE("busy loop");
