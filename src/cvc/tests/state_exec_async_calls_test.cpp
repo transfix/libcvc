@@ -20,6 +20,7 @@
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/evaluator.h>
 #include <cvc/state/state_exec/exceptions.h>
+#include <cvc/state/state_exec/heap.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/scheduler.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
@@ -37,6 +38,18 @@
 
 using namespace cvc::state_exec;
 using namespace std::chrono_literals;
+
+// A program's closure bound in the scope it captured (a defun, a lambda set at top level) and that
+// scope hold each other, and only the cycle collector frees them
+// (docs/STATE_EXEC_DEVELOPER_GUIDE.md, "Reference cycles"). Nothing here runs long enough for a
+// collection to be due, so once every test is done one collection leaves LeakSanitizer only real
+// leaks to report.
+class collect_cycles_at_exit : public ::testing::Environment {
+public:
+  void TearDown() override { collect_cycles(); }
+};
+[[maybe_unused]] ::testing::Environment *const g_collect_cycles =
+    ::testing::AddGlobalTestEnvironment(new collect_cycles_at_exit);
 
 namespace {
 
