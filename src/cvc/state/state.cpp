@@ -32,6 +32,7 @@
 #include <boost/function.hpp>
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/regex.hpp>
+#include <cassert>
 #include <cvc/core/app.h>
 #include <cvc/core/exception.h>
 #include <cvc/state/state.h>
@@ -1216,12 +1217,12 @@ template <class Visit> bool for_each_state_key(const std::string &path, Visit &&
   return true;
 }
 
-// A hold on `n`: its owning pointer, or, for a node no shared_ptr owns (a host's own root, which
-// has no shared_from_this()), a non-owning alias, the host keeping it alive.
-state::state_ptr hold(state &n) {
-  if (state::state_ptr p = n.weak_from_this().lock())
-    return p;
-  return state::state_ptr(state::state_ptr(), &n);
+// Release a chain of pins (top first, as the walks collect them) from the bottom up: a chain can be
+// the last owner of nodes unlinked meanwhile, and each node must die with its ancestors alive
+// (~state; a destroyed() slot may walk _parent).
+void release_leaf_first(std::vector<state::state_ptr> &pins) {
+  while (!pins.empty())
+    pins.pop_back();
 }
 
 // The hops a link-aware walk holds until it ends (td 4.8): a link hop's resolveLink() reads the
@@ -1230,6 +1231,12 @@ state::state_ptr hold(state &n) {
 class hop_holds {
 public:
   explicit hop_holds(std::vector<state::state_ptr> *pins) : pins_(pins) {}
+  ~hop_holds() {
+    while (!own_.empty()) // leaf first, as release_leaf_first
+      own_.pop_back();
+  }
+  hop_holds(const hop_holds &) = delete;
+  hop_holds &operator=(const hop_holds &) = delete;
 
   state *push(state::state_ptr p) {
     state *n = p.get();
@@ -1251,10 +1258,14 @@ public:
     return chain_ends_at_target ? r.target : push(std::move(r.target_owned));
   }
 
-  // Where the walk stands, owned: the last hop, or `start` when it never left it.
+  // Where the walk stands, owned: the last hop, or `start` when it never left it. Every live node
+  // is owned by a shared_ptr (the constructor is protected: the root is its app's, a child its
+  // parent's), so only a node already in its destructor has no shared_from_this().
   state::state_ptr result(state &start) {
-    if (pushed_ == 0)
-      return hold(start);
+    if (pushed_ == 0) {
+      assert(!start.weak_from_this().expired() && "a pinned walk from a node being destroyed");
+      return start.shared_from_this();
+    }
     return pins_ ? pins_->back() : std::move(own_.back());
   }
 
@@ -1700,7 +1711,11 @@ state::link_resolution state::resolveLink(std::size_t hop_budget) {
       return result;
     }
 
-    std::vector<state_ptr> hop_pins;
+    std::vector<state_ptr> hop_pins; // released leaf first on a return below
+    struct leaf_first {
+      std::vector<state_ptr> &pins;
+      ~leaf_first() { release_leaf_first(pins); }
+    } release_hop_pins{hop_pins};
     state_ptr next_owned = root.findDescendantShared(target, &hop_pins);
     if (!next_owned) {
       result.kind = link_resolution_kind::broken;
@@ -1720,9 +1735,12 @@ state::link_resolution state::resolveLink(std::size_t hop_budget) {
       return result;
     }
     result.visited.push_back(next_path);
-    result.target_pins = std::move(hop_pins); // this hop's chain; kept iff it becomes the terminal
-    cur_owned = next_owned;
+    // This hop's chain, kept iff it becomes the terminal's; the last hop and its chain go leaf
+    // first.
+    cur_owned = std::move(next_owned);
     cur = cur_owned.get();
+    release_leaf_first(result.target_pins);
+    result.target_pins = std::move(hop_pins);
   }
 }
 

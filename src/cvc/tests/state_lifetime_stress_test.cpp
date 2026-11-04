@@ -21,12 +21,15 @@
 // disable ASLR under TSan — see the TSan gotcha in the memory index).
 
 #include <atomic>
+#include <boost/any.hpp>
 #include <boost/date_time/posix_time/posix_time.hpp>
+#include <boost/signals2/connection.hpp>
 #include <chrono>
 #include <cstdio>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <gtest/gtest.h>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -321,8 +324,8 @@ TEST(StateLifetime, PinnedWriteWalkHoldsEveryHopAndLinkChain) {
 }
 
 // The start-pinned lookups take no hold on their start: an empty path returns the caller's own
-// hold (here a non-owning alias, as a host's root not owned by a shared_ptr would be), and
-// `pins` gets the hops below it.
+// hold (here a non-owning alias, whose use count of 0 shows it is that hold and no new reference),
+// and `pins` gets the hops below it.
 TEST(StateLifetime, StartPinnedWalksReturnTheCallersHold) {
   cvc::app a;
   auto &root = state::instance(a);
@@ -348,6 +351,51 @@ TEST(StateLifetime, StartPinnedWalksReturnTheCallersHold) {
   EXPECT_EQ(made.get(), root.findDescendant("p.r.s"));
   EXPECT_EQ(pins.size(), 3u);
   EXPECT_EQ(root.sharedChild(alias, "").use_count(), 0);
+}
+
+// A link resolution holds its target and the target's chain (target_owned, target_pins). When it is
+// the last owner of an unlinked chain it releases the target first, so each node dies with its
+// parent alive, as ~state promises (a destroyed() slot may walk _parent). Here an update through a
+// writable link fires a slot that removes the target's parent; the update's resolution is then the
+// last owner of both.
+TEST(StateLifetime, LinkResolutionReleasesTheTargetFirst) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("x.s").value("0");
+  root("hole").linkTo("x.s", state::link_mode::transparent);
+  root("hole").setLinkWritable(true);
+
+  // Set once x's members are destroyed: its ~state() is done.
+  struct gone_flag {
+    std::shared_ptr<std::atomic<bool>> gone;
+    ~gone_flag() {
+      if (gone)
+        gone->store(true);
+    }
+  };
+  const auto x_freed = std::make_shared<std::atomic<bool>>(false);
+  auto flag = std::make_shared<gone_flag>();
+  flag->gone = x_freed;
+  root("x").data(boost::any(std::move(flag)));
+  bool s_died = false, x_freed_when_s_died = false;
+  boost::signals2::scoped_connection died = root("x.s").destroyed.connect([&] {
+    s_died = true;
+    x_freed_when_s_died = x_freed->load();
+  });
+  bool removed = false;
+  boost::signals2::scoped_connection remover =
+      root.childChanged.connect([&](const std::string &path) {
+        if (path == "x.s" && !removed) {
+          removed = true;
+          root.removeChild("x");
+        }
+      });
+
+  EXPECT_TRUE(root("hole").compareAndSetValue("0", "1"));
+  EXPECT_TRUE(removed);
+  EXPECT_TRUE(s_died) << "the resolution was the last owner of x.s";
+  EXPECT_FALSE(x_freed_when_s_died) << "x.s died after its parent x was freed";
+  EXPECT_TRUE(x_freed->load());
 }
 
 // A node reached by a pinned walk stays readable, and writable, after an ancestor is removed: its
