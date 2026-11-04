@@ -47,9 +47,17 @@ public:
   }
   state_subtree_cursor(const state_subtree_cursor &) = default;
   state_subtree_cursor(state_subtree_cursor &&) = default;
-  // Assigning would drop the old levels shallowest first; nothing assigns a cursor.
-  state_subtree_cursor &operator=(const state_subtree_cursor &) = delete;
-  state_subtree_cursor &operator=(state_subtree_cursor &&) = delete;
+  // Assignment drops the old levels deepest first too, then the old start.
+  state_subtree_cursor &operator=(state_subtree_cursor other) {
+    while (!stack_.empty())
+      stack_.pop_back();
+    stack_ = std::move(other.stack_);
+    keep_ = std::move(other.keep_);
+    start_ = other.start_;
+    started_ = other.started_;
+    visited_ = other.visited_;
+    return *this;
+  }
 
   enum class visit {
     listed,   // the node belongs in the document: it has a value, or it is childless below start
