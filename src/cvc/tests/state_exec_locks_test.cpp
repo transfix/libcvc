@@ -2711,8 +2711,9 @@ TEST_P(Locks, LW05_PauseHolderAndWaiter) {
 // parent's owner, so kill_owner reaps it.
 //
 // The child's (fork) returns 0 and it goes on from there (td B28:
-// LocksReview.ForkInAStepReturnsZeroInTheChild); its frames share the parent's scopes, as a fork's
-// do (td 5 item 19). Here the child is checked and reaped before it steps.
+// LocksReview.ForkInAStepReturnsZeroInTheChild), with its own copies of the parent's scopes
+// (detail::fork_scopes: a set in the child never lands in the parent's). Here the child is checked
+// and reaped before it steps.
 TEST_P(Locks, LW06_Fork) {
   const std::size_t before = w.base().list_processes().size();
   EXPECT_EQ(
