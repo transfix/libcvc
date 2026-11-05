@@ -315,12 +315,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install cvcpkg + cmake/ninja from the catalog
+      - name: Install cvcpkg, cmake/ninja and protoc from the catalog
         run: |
           curl -fsSL https://cvcpkg.org/install.sh | sh
           export PATH="$HOME/.local/bin:$PATH"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          cvcpkg install cmake ninja --prefix "${{ github.workspace }}/tools" \
+          # protobuf: the native protoc the conference's messages are generated with (the recipe's
+          # host tool; the wasm protobuf ships none). build-wasm.sh refuses to start without it.
+          cvcpkg install cmake ninja protobuf --prefix "${{ github.workspace }}/tools" \
             --config release --link shared
           echo "${{ github.workspace }}/tools/bin" >> "$GITHUB_PATH"
 

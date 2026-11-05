@@ -36,6 +36,7 @@
 //
 // Owner/render thread, like the SceneGraph it draws into.
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cvc/ariadne/avatar_sim.h>             // avatar_intent
@@ -169,6 +170,8 @@ private:
   cvc::lod::quality_preset _lod_preset;
   std::map<std::string, cvc::ariadne::conference::avatar_look>
       _avatars; // pid -> look it was built with
+  // pid -> the pose matrix its marker shows (sync_avatars re-poses it only once it has moved).
+  std::map<std::string, std::array<double, 16>> _posed;
   // What each participant wears: the room's catalog (re-read when its revision moves) and each
   // pid's resolved look, re-read a few times a second like the names.
   cvc::ariadne::conference::avatar_catalog _catalog;

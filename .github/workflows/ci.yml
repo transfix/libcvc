@@ -652,8 +652,12 @@ jobs:
   # Mirrors release.yml's linux job exactly, but injects -<sha> into
   # the artifact filename stem and uploads each output file as its own
   # GitHub artifact so the format/extension is visible in the UI.
+  #
+  # Pinned to the glibc floor, ubuntu-22.04 (glibc 2.35, gcc 11.4), where publish-cvcpkg.yml and
+  # release.yml build every linux bundle; that file's `target` list says why. ubuntu-latest moved
+  # to 26.04 (gcc 15.2) under this job, so CI was compiling with a toolchain no release uses.
   package-linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     # Non-blocking for experimental matrix entries (the static-grpc probe below),
     # mirroring package-macos/package-windows: a new static-link grpc probe must
     # not fail the required Linux check while it is being proven out.
@@ -1043,7 +1047,7 @@ jobs:
           # That is not a test failure and not a cancellation -- it is the
           # hosted runner being killed. These suites allocate large trees and
           # meshes, a Debug build inflates all of it, --parallel runs several
-          # at once, and ubuntu-latest has 16 GB. The agent dies with the box,
+          # at once, and the hosted runner has 16 GB. The agent dies with the box,
           # so ctest never gets to report anything, and the error names the
           # runner rather than the cause.
           #
@@ -1180,6 +1184,11 @@ jobs:
           cpack -G TGZ -D CPACK_COMPONENTS_ALL=libcvc \
                        -D CPACK_PACKAGE_FILE_NAME="$STEM"
           mv "$STEM-libcvc.tar.gz" "$STEM.tar.gz"
+          # The Ariadne component library is part of the SDK: cvc:// finds it beside the library,
+          # and a native host has no other copy. Up to 3.7.9 its install rule named no component,
+          # so this tarball left it out.
+          tar -tzf "$STEM.tar.gz" | grep -q 'share/libcvc/ariadne/components/chat\.ari$' ||
+            { echo "::error::the libcvc tarball has no share/libcvc/ariadne/components"; exit 1; }
           cp "$STEM.tar.gz" "$GITHUB_WORKSPACE/"
           echo "STEM=$STEM" >> "$GITHUB_ENV"
 
@@ -1233,8 +1242,10 @@ jobs:
   # those tests ran only in local Windows builds. The module is built without the
   # VTK-Python bridge (CVC_PYCVCGL_VTK_BRIDGE=OFF), so pycvc_vtk skips its
   # vtkmodules round trip.
+  #
+  # On the glibc floor, ubuntu-22.04, like package-linux and every published pycvc.
   pycvc-linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     name: pycvc-linux / cp312
     concurrency:
       group: ci-${{ github.ref }}-pycvc-linux

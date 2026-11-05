@@ -92,10 +92,14 @@ bool key_matches(std::string_view stored, std::string_view key);
 // '/' is absolute, as KeyBinding::path is), and the sizes offered, each its label and the value
 // written, spelled as the host writes the number back. arigl's is cvc::gl::ImGuiOverlay's
 // <scene>.viewers.main.ui.scale, which the overlay applies at the next frame.
+// scroll_friction, when set, adds a slider under it for how fast a finger's fling slows (per
+// second; arigl's <scene>.viewers.main.ui.scroll_friction, offered on a touch screen).
 struct UiSizeControl {
   std::string path; // "" = no UI size row
   std::vector<std::pair<std::string, std::string>> sizes = {
       {"75%", "0.75"}, {"100%", "1"}, {"125%", "1.25"}, {"150%", "1.5"}, {"200%", "2"}};
+  std::string scroll_friction; // "" = no friction row
+  double friction_lo = 0.5, friction_hi = 20.0;
 };
 
 } // namespace ariadne

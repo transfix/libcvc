@@ -13,6 +13,7 @@
   Lesser General Public License for more details.
 */
 
+#include "grpc_dns_resolver.h"
 #include "proto/state_transport.grpc.pb.h"
 #include "proto/state_transport.pb.h"
 
@@ -248,7 +249,9 @@ struct stream_transport_grpc::impl {
   std::unique_ptr<grpc::Server> server;
 };
 
-stream_transport_grpc::stream_transport_grpc() : _impl(new impl()) {}
+stream_transport_grpc::stream_transport_grpc() : _impl(new impl()) {
+  cvc::grpc_dns::default_to_native_on_windows();
+}
 
 stream_transport_grpc::~stream_transport_grpc() { stop(); }
 

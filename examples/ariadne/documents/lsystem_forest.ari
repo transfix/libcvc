@@ -162,7 +162,8 @@ scene:
       half: 120            # world half-extent (matches the terrain size 240)
       sea_level: 0.0
       wave_amp: 2.4
-    # The sky: a drifting cloud slab (a custom VolumeNode) grown by a 3-D L-system + fBm noise, high
-    # above the island. Two cloud maps are crossfaded and scrolled each frame so the sky evolves.
+    # The sky: a deck of drifting clouds (custom VolumeNodes) grown by a 3-D L-system + fBm noise,
+    # high above the island, each slowly changing shape; their shade dims the sun on the island.
     - node: sky
       type: cloud_sky
+      horizon: 0           # the deck stays over the island, so the camera frames the island

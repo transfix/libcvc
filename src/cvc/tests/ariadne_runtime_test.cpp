@@ -7021,6 +7021,7 @@ TEST(AriadneAppRuntime, ControlsWindowOffersTheHostsUiSize) {
   };
   EXPECT_LT(at("text_line:Display"), at("text_line:No keys to change here."))
       << "the UI size first, then the keys";
+  EXPECT_FALSE(mb.saw("slider_double:Scroll friction")) << "no friction unless the host offers it";
 
   mb.combo_ret = IndexEdit{true, true, 3}; // 150%
   art.runtime().render();
@@ -7045,6 +7046,41 @@ TEST(AriadneAppRuntime, ControlsWindowOffersTheHostsUiSize) {
   ASSERT_TRUE(mb2.saw("begin_window:Controls(closable)"));
   EXPECT_FALSE(mb2.saw("text_line:Display"));
   EXPECT_FALSE(mb2.saw_prefix("combo:UI size"));
+}
+
+// On a touch screen the host offers how fast a finger's fling slows as well
+// (UiSizeControl::scroll_friction): a slider under the UI size, bound where the host keeps it.
+TEST(AriadneAppRuntime, ControlsWindowOffersTheScrollFriction) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  MockBackend mb;
+  AppRuntime art(app, "ui.docs.d");
+  art.set_backend(mb);
+  UiSizeControl ui;
+  ui.path = "/view.ui.scale";
+  ui.scroll_friction = "/view.ui.scroll_friction";
+  art.set_host_ui_size(ui);
+  auto &st = cvc::state::instance(app);
+  st("view.ui.scale").value(1.25);
+  st("view.ui.scroll_friction").value(2.0); // the overlay's own
+  art.load(write_doc("controls_friction.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                              "root:\n"
+                                              "  - text: no keys here\n"));
+  st("ui.docs.d.tree.ariadne_keys.open").value(1);
+  art.runtime().render();
+  ASSERT_TRUE(mb.saw("slider_double:Scroll friction"));
+  const auto at = [&](const std::string &line) {
+    return std::find(mb.log.begin(), mb.log.end(), line) - mb.log.begin();
+  };
+  EXPECT_LT(at("combo:UI size=2"), at("slider_double:Scroll friction")) << "under the UI size";
+  EXPECT_LT(at("slider_double:Scroll friction"), at("text_line:No keys to change here."))
+      << "and before the keys";
+
+  mb.slider_double_ret["view.ui.scroll_friction"] = DoubleEdit{true, true, 8.0};
+  art.runtime().render();
+  mb.slider_double_ret.clear();
+  EXPECT_DOUBLE_EQ(st("view.ui.scroll_friction").value<double>(), 8.0);
 }
 
 // Every load clears the last document's scene before anything is realized -- a host switching

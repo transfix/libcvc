@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: libcvc-cuda
-  upstream_version: "3.7.8"
+  upstream_version: "3.7.10"
   # Bumped 1 -> 2: this bundle no longer ships the `cvc` CLI (it moved to its own
   # cvc-cli / cvc-cli-cuda packages so it lands deliberately in a user's PATH).
   # Dropping the binary changes bundle contents, and +cvc.1 was already published
@@ -162,6 +162,9 @@ package:
     - lib/cmake/cvc/
     - include/cvc/
     - include/xmlrpc/
+    # The Ariadne component library (cvc://components/*.ari), which cvc:// finds beside the
+    # installed library -- the same entry as the CPU libcvc recipe, for the same reason.
+    - share/libcvc/ariadne/
   cmake_packages:
     - name: cvc
       targets:

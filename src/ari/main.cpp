@@ -347,6 +347,7 @@ TestOutcome run_test_document(const cvc::ariadne::HostOptions &o, const std::str
 #ifdef CVC_ARIADNE_PYTHON
   const cvc::ariadne::python::Attachment lent = lend_python(app, rt, "headless");
 #endif
+  ari::apply_state_sets(app, o.prefix.empty() ? "ui.docs.ari" : o.prefix, o.sets);
   try {
     for (const std::string &w : rt.load(path))
       fail("load warning: " + trim_ari(w));
@@ -685,6 +686,8 @@ int main(int argc, char **argv) {
       return 128 + ari::signal_number(how.signal);
     return rt.exit_code();
   };
+
+  ari::apply_state_sets(app, o.prefix.empty() ? "ui.docs.ari" : o.prefix, o.sets); // --set
 
 #ifdef CVC_ARIADNE_PYTHON
   // The runtime is lent to the Python: the document's python: block runs at its load. A Python

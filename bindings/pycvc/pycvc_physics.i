@@ -161,6 +161,32 @@ ph::body_id body_of(long id) {
   return b;
 }
 
+// A sequence of body ids (None: none), for a plant's ground_bodies; `who` names the caller in the
+// ValueError.
+std::vector<ph::body_id> body_ids(PyObject *ids, const std::string &who) {
+  std::vector<ph::body_id> out;
+  if (!ids || ids == Py_None)
+    return out;
+  const std::string bad = who + ": ground_bodies is a sequence of body ids";
+  PyObject *seq = PySequence_Fast(ids, bad.c_str());
+  if (!seq) {
+    PyErr_Clear();
+    throw std::invalid_argument(bad);
+  }
+  const Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
+  for (Py_ssize_t k = 0; k < n; ++k) {
+    const long id = PyLong_AsLong(PySequence_Fast_GET_ITEM(seq, k));
+    if (PyErr_Occurred()) {
+      PyErr_Clear();
+      Py_DECREF(seq);
+      throw std::invalid_argument(bad);
+    }
+    out.push_back(body_of(id));
+  }
+  Py_DECREF(seq);
+  return out;
+}
+
 ph::vehicle_id vehicle_of(long id) {
   ph::vehicle_id v;
   v.value = static_cast<std::uint32_t>(id);
@@ -958,14 +984,15 @@ public:
 
 %extend cvc::physics::nav_plant {
   // A physics world's vehicles as a sim_world's plant (nav_plant.h): agent i drives
-  // descs[i % len(descs)]. The plant keeps the world alive. `ground` (a pycvc.height_field, the
-  // terrain the world collides with) is the ground under each start, for terrain that is not
-  // flat (nav_plant_options::ground_height); None: ground_z everywhere.
+  // descs[i % len(descs)]. The plant keeps the world alive. `ground_bodies` (ids): the bodies the
+  // vehicles drive on, whose contacts with a chassis are not building contacts. `ground` (a
+  // pycvc.height_field, the terrain the world collides with) is the ground under each start, for
+  // terrain that is not flat (nav_plant_options::ground_height); None: ground_z everywhere.
   nav_plant(cvc::physics::world &world, const std::vector<cvc::physics::vehicle_desc> &descs,
             bool step_world = true, double latency = 0.1, double brake_margin = 0.8,
             double metres_per_world_unit = 1.0, double ground_z = 0.0,
             double spawn_height = -1.0, int drift_nsub = 0, PyObject *drift_bins_g = nullptr,
-            const cvc::height_field *ground = nullptr) {
+            PyObject *ground_bodies = nullptr, const cvc::height_field *ground = nullptr) {
     cvc::physics::nav_plant_options o;
     o.step_world = step_world;
     o.latency = latency;
@@ -986,6 +1013,7 @@ public:
       std::vector<long> shape;
       o.drift_bins_g = pycvc_world::doubles(drift_bins_g, "nav_plant: drift_bins_g", shape);
     }
+    o.ground_bodies = pycvc_physics::body_ids(ground_bodies, "nav_plant");
     return new cvc::physics::nav_plant(world, descs, o);
   }
   std::string kind() const { return "jolt"; }
@@ -1155,24 +1183,7 @@ public:
     o.driver = driver;
     o.physics = world;
     o.chassis_friction = chassis_friction;
-    if (ground_bodies && ground_bodies != Py_None) {
-      PyObject *seq = PySequence_Fast(ground_bodies, "dyn_bike_plant: ground_bodies");
-      if (!seq) {
-        PyErr_Clear();
-        throw std::invalid_argument("dyn_bike_plant: ground_bodies is a sequence of body ids");
-      }
-      const Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
-      for (Py_ssize_t k = 0; k < n; ++k) {
-        const long id = PyLong_AsLong(PySequence_Fast_GET_ITEM(seq, k));
-        if (PyErr_Occurred()) {
-          PyErr_Clear();
-          Py_DECREF(seq);
-          throw std::invalid_argument("dyn_bike_plant: ground_bodies is a sequence of body ids");
-        }
-        o.ground_bodies.push_back(pycvc_physics::body_of(id));
-      }
-      Py_DECREF(seq);
-    }
+    o.ground_bodies = pycvc_physics::body_ids(ground_bodies, "dyn_bike_plant");
     if (!world && !o.ground_bodies.empty())
       throw std::invalid_argument("dyn_bike_plant: ground_bodies needs a world");
     return new cvc::physics::dyn_bike_plant(descs, o);

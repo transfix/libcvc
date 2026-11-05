@@ -52,7 +52,7 @@ generated_world_params small_world() {
   p.buildings = 16;
   p.tree_gen = 3;
   p.amp_m = 40.0;
-  p.water_level_m = 14.0;
+  p.water_level_m = 0.0; // sea level
   return p;
 }
 
@@ -197,6 +197,30 @@ TEST(WorldGenerated, PresetsQuickSetCounts) {
   EXPECT_TRUE(to_world_params(p).hf.island);
 }
 
+// Sea level is 0 m whatever the relief, so no preset drowns its world or drains it: the urban
+// preset's 10 m relief under the document's old 34 m water level was a world of sea. The fbm
+// land's floor sits world_sea_share of the relief under the sea; the island stands in it.
+TEST(WorldGenerated, EveryPresetHasLandAndWater) {
+  for (int preset = 0; preset < 5; ++preset) {
+    generated_world_params p = small_world();
+    p.preset = preset;
+    apply_world_preset(p);
+    EXPECT_EQ(p.water_level_m, 0.0) << world_preset_name(preset);
+    const generated_world w = generate_world(p);
+    std::size_t dry = 0;
+    const auto &h = w.terrain->heights();
+    for (float z : h)
+      dry += z > p.water_level_m;
+    const double share = double(dry) / double(h.size());
+    const bool island = preset == int(world_preset::island);
+    EXPECT_GT(share, island ? 0.05 : 0.6) << world_preset_name(preset) << ": " << share << " dry";
+    EXPECT_LT(share, island ? 0.5 : 0.995) << world_preset_name(preset) << ": " << share << " dry";
+    if (!island) // the same land under every relief: its floor the same share of it below the sea
+      EXPECT_NEAR(*std::min_element(h.begin(), h.end()) / p.amp_m, 0.15 - world_sea_share, 0.05);
+    EXPECT_GT(w.building_count + w.prop_cells.size(), 0u) << world_preset_name(preset);
+  }
+}
+
 // Trees are tree-sized in metres (the island-scaled pine once stood 20..100 m over one- and
 // two-storey buildings): nothing in the props or needles rises 35 m over the ground under it.
 TEST(WorldGenerated, TreesAreTreeSized) {
@@ -318,8 +342,8 @@ TEST(WorldGenerated, GeneratorsByName) {
   EXPECT_GT(tilt.building_count, 0u);
 }
 
-// A DEM file through the "dem" generator: the world's ground is the file's relief, anchored at 0
-// and stretched to amp_m.
+// A DEM file through the "dem" generator: the world's ground is the file's relief, stretched to
+// amp_m and anchored as every generator's is, world_sea_share of it below sea level.
 TEST(WorldGenerated, DemTerrainFromAFile) {
   const std::string f =
       (std::filesystem::temp_directory_path() / "cvc_world_generated_test_dem.npy").string();
@@ -333,12 +357,12 @@ TEST(WorldGenerated, DemTerrainFromAFile) {
   p.terrain = "dem";
   p.terrain_file = f;
   p.amp_m = 24.0;
-  p.water_level_m = 4.0;
   const generated_world w = generate_world(p);
   std::remove(f.c_str());
-  EXPECT_NEAR(w.height(-200.0, -200.0), 0.0, 1e-3);
-  EXPECT_NEAR(w.height(200.0, 200.0), 24.0, 1e-3);
-  EXPECT_NEAR(w.height(200.0, -200.0), 16.0, 1e-3);
+  const double floor = -world_sea_share * 24.0;
+  EXPECT_NEAR(w.height(-200.0, -200.0), floor, 1e-3);
+  EXPECT_NEAR(w.height(200.0, 200.0), floor + 24.0, 1e-3);
+  EXPECT_NEAR(w.height(200.0, -200.0), floor + 16.0, 1e-3);
   EXPECT_GT(w.road_length, 100.0);
 }
 
