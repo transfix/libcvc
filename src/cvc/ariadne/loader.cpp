@@ -102,7 +102,7 @@ bool is_builtin_block(const std::string &k) {
          k == "children" || k == "scene" || k == "customs" || k == "init" || k == "on_tick" ||
          k == "on_key" || k == "on_pointer" || k == "on_signal" || k == "units" || k == "import" ||
          k == "channels" || k == "lint" || k == "args" || k == "requires" || k == "keys" ||
-         k == "windows_menu" || k == "tests" || k == "functions";
+         k == "windows_menu" || k == "tests" || k == "functions" || k == "data";
 }
 } // namespace
 
@@ -169,6 +169,19 @@ const char *const kAriSchema = R"ARISCHEMA({
         "type": ["string", "object"],
         "properties": {"name": {"type": "string"}, "optional": {"type": "boolean"}},
         "required": ["name"]
+      }
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": {
+        "type": ["string", "object"],
+        "properties": {
+          "uri": {"type": "string"},
+          "path": {"type": "string"},
+          "as": {"type": "string"},
+          "load": {"enum": ["eager", "lazy"]}
+        },
+        "required": ["uri"]
       }
     },
     "args": {
@@ -2463,6 +2476,12 @@ SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
                 band.color[i] = static_cast<float>(cc[i].as<double>());
             sn.heightfield.colors.push_back(band);
           }
+      } else if (src["data"]) {
+        // source: { data: <name>, item: <output> } — a dataset the document's data: block names.
+        sn.source_data = str(src, "data");
+        sn.source_item = str(src, "item");
+        if (sn.source_data.empty())
+          ctx.warn("ari: scene node '" + sn.id + "': source: { data: } names no dataset");
       } else {
         sn.source_file = str(src, "uri", str(src, "file"));
       }
@@ -2490,11 +2509,48 @@ SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
       else if (tex.IsMap())
         sn.material_texture = str(tex, "uri", str(tex, "file"));
     }
+    if (const YAML::Node uv = mat["uv"]; uv && uv.IsMap()) {
+      // material: { uv: { rotate, flip_u, flip_v, scale, offset } } — the texture's orientation
+      sn.has_uv_transform = true;
+      const int rot = static_cast<int>(num(uv, "rotate", 0.0));
+      sn.uv_rotate = ((rot % 360) + 360) % 360;
+      if (sn.uv_rotate % 90 != 0) {
+        ctx.warn("ari: scene node '" + sn.id + "': material.uv.rotate is 0, 90, 180 or 270, not " +
+                 std::to_string(rot) + " — not rotated");
+        sn.uv_rotate = 0;
+      }
+      sn.uv_flip_u = flag(uv, "flip_u", false);
+      sn.uv_flip_v = flag(uv, "flip_v", false);
+      for (const char *key : {"scale", "offset"}) {
+        float *out = std::string(key) == "scale" ? sn.uv_scale : sn.uv_offset;
+        const YAML::Node v = uv[key];
+        if (v && v.IsSequence() && v.size() >= 2) {
+          out[0] = static_cast<float>(v[0].as<double>());
+          out[1] = static_cast<float>(v[1].as<double>());
+        } else if (v && v.IsScalar()) {
+          out[0] = out[1] = static_cast<float>(v.as<double>());
+        }
+      }
+    }
     sn.material_opaque = flag(mat, "opaque", false);
   }
   if (n["casts_shadow"]) {
     sn.has_casts_shadow = true;
     sn.casts_shadow = flag(n, "casts_shadow", true);
+  }
+  if (const YAML::Node fr = n["frame"]; fr && fr.IsScalar()) {
+    // frame: true | first | always (false / none: the camera is left alone)
+    const std::string v = fr.Scalar();
+    if (v == "always" || v == "first")
+      sn.frame = v;
+    else if (flag(n, "frame", false))
+      sn.frame = "first";
+    else if (v != "none" && v != "false" && v != "no" && v != "off")
+      ctx.warn("ari: scene node '" + sn.id + "': frame: is true, first, always or none, not '" + v +
+               "'");
+    if (!sn.frame.empty() && sn.source_data.empty())
+      ctx.warn("ari: scene node '" + sn.id +
+               "': frame: frames a source: { data } node's dataset; this node has none");
   }
   // tags: [a, b] or tags: a
   if (const YAML::Node tags = n["tags"]) {
@@ -3190,6 +3246,48 @@ void lint_channels(Ctx &ctx, LoadResult &r) {
   }
 }
 
+// The data: block (data.h): a map of name -> URI, or name -> { uri, path, as, load }.
+std::vector<DataSpec> parse_data(Ctx &ctx, const YAML::Node &n) {
+  std::vector<DataSpec> out;
+  if (!n)
+    return out;
+  if (!n.IsMap()) {
+    ctx.warn("ari: data: must be a MAP of name -> URI or { uri, path, as, load } — ignored");
+    return out;
+  }
+  for (const auto &kv : n) {
+    DataSpec d;
+    d.name = kv.first.IsScalar() ? kv.first.Scalar() : std::string();
+    d.base = ctx.base_dir;
+    const YAML::Node e = kv.second;
+    if (e.IsScalar()) {
+      d.uri = e.Scalar();
+    } else if (e.IsMap()) {
+      d.uri = str(e, "uri");
+      d.path = str(e, "path");
+      d.as = str(e, "as");
+      const std::string load = str(e, "load", "eager");
+      d.lazy = load == "lazy";
+      if (load != "lazy" && load != "eager")
+        ctx.warn("ari: data." + d.name + ": load: is eager or lazy, not '" + load +
+                 "' — loading it eagerly");
+    }
+    if (d.name.empty() || d.name.find('.') != std::string::npos) { // one state key
+      ctx.warn("ari: data: '" + d.name + "' is not a name (one word, no '.') — ignored");
+      continue;
+    }
+    if (d.uri.empty()) {
+      ctx.warn("ari: data." + d.name + " names no uri — ignored");
+      continue;
+    }
+    if (!d.as.empty() && !has_data_decoder(d.as))
+      ctx.warn("ari: data." + d.name + ": as: " + d.as +
+               " is not a decoder this build has, so its load will fail");
+    out.push_back(std::move(d));
+  }
+  return out;
+}
+
 // Parse an already-loaded YAML node into a LoadResult, applying the meta gate. `base_dir` is
 // the document's directory (relative `import:`s resolve against it; empty = cwd for a string);
 // `self_path` is its canonical identity, seeded into the import cycle-guard so a library that
@@ -3287,6 +3385,7 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
   if (doc.IsMap()) {
     r.scene = parse_scene(ctx, doc["scene"]);    // §9: the scene graph, alongside the widgets
     stamp_base_dir(r.scene.nodes, ctx.base_dir); // relative paths in a node's keys resolve here
+    r.data = parse_data(ctx, doc["data"]);       // the datasets, relative to the document too
     // init: a state_exec script the host runs once at load (cvc::ariadne::run_init).
     // The loader only captures the text — it has no app and never runs the DSL.
     const YAML::Node in = doc["init"];

@@ -246,6 +246,11 @@ public:
   // is the texture `from` has now: after a new setTexture on `from`, share it again.
   void shareTexture(std::shared_ptr<const GeometryNode> from);
   void clearTexture();
+  // Whether a texture is set, and its size in pixels (0 x 0 when none). Read on the owner
+  // thread, where setTexture/clearTexture land.
+  bool hasTexture() const;
+  int textureWidth() const;
+  int textureHeight() const;
   // Signal that the texture's pixels were edited in place (through an aliased
   // zero-copy buffer): marks the vtkTexture + its input image data Modified() so
   // the next render re-samples the new bytes WITHOUT any re-copy.

@@ -576,7 +576,7 @@ The built-in top-level keys (`is_builtin_block`,
 ```
 meta  menubar  windows  overlays  root (alias: children)  scene  customs  requires
 init  on_tick  on_key  on_pointer  on_signal  keys  units  import  channels  lint  args
-windows_menu  tests  functions
+windows_menu  tests  functions  data
 ```
 
 `tests:` is read only by `ari test` (§13).
@@ -766,6 +766,19 @@ south-west to north-east), a body on it collides with the same triangles, and a 
 standing on it (`ground:` in `forest_trees`, `wave_sea`, `cloud_sky`) samples the triangle under
 each point.
 
+**Textures.** `material: { texture: <uri> }` drapes an image over a geometry node through its
+mesh's UVs. UV (0, 0) is the image's bottom-left corner. A `source: { data }` city's terrain wears
+its bundle's `satellite.png` this way, north up (§5.17).
+
+`material: { uv: { rotate, flip_u, flip_v, scale, offset } }` orients the image in texture space,
+for an image that sits otherwise. The steps apply in this order:
+1. `flip_u` and `flip_v` mirror it.
+2. `rotate` turns it 0, 90, 180 or 270 degrees counter-clockwise on the surface.
+3. `scale` and `offset` (a number, or `[u, v]`) map the result: `uv * scale + offset`.
+
+A textured node casts its shadow by its shape. Its image's alpha still cuts a cut-out's shadow,
+but its colours do not.
+
 **Clouds.** `cloud_sky` draws a deck of drifting, slowly changing L-system cumulus over its
 `ground:` node's extent (followed live): the clouds nearest the camera as volumes (`near:`), the
 rest as far shells. Their shade falls on the ground and on the nodes in `receivers:` (and their
@@ -810,7 +823,8 @@ seam. The chunks share the node's one texture and take its `casts_shadow`, `shad
 
 **The fast render path.** A big static world draws fast when it is a few merged meshes and its
 shadow maps are re-baked rarely and spent where the camera looks. These keys say so
-(`examples/ariadne/documents/terrain_lab.ari` uses all of them):
+(`examples/ariadne/documents/terrain_lab.ari` uses all of them but `casts_shadow: false`: its
+ground casts, so its ridges shade its valleys):
 
 ```yaml
 scene:
@@ -829,7 +843,8 @@ scene:
       wash: 0                   # or { intensity, count, height }; 0 drops the downlight ring
   nodes:
     - node: ground
-      casts_shadow: false       # receives shadows, casts none, never forces a re-bake
+      casts_shadow: false       # receives shadows, casts none, never forces a re-bake (no
+                                #   self-shading: a valley is not shaded by its ridge)
       material: { opaque: true }  # drawn opaque: no per-texel alpha scan of its texture
 ```
 
@@ -1757,6 +1772,116 @@ on_tick: |
 the room verbs with functions. `src/arigl/tests/chat_driver.ari` and `chat_two_clients.sh` run
 scripted arigl clients through a local arisrv: one posts, a late joiner pages back through
 everything, the two exchange direct messages, and a third checks it was pushed none of them.
+
+### 5.17 `data:`: datasets in the state tree
+
+A document names its datasets by URI. The host loads each one off the frame thread into one
+shared place in the state tree, and the scene draws from there. The design and its later phases
+are in [ARIADNE_DATA_ROADMAP.md](roadmap/ARIADNE_DATA_ROADMAP.md); the code is
+[`data.h`](../inc/cvc/ariadne/data.h).
+
+```yaml
+data:
+  city:                                             # the document's data.city
+    uri: cvcpkg://cy-pca/scene-austin-south-small   # where it comes from
+    path: share/cvc-scenes/austin_south             # the part of the package to keep
+    as: city_bundle                                 # how to decode it
+  notes: notes.json                                 # a bare URI: decoded by its extension
+  big: { uri: https://example.org/big.tar.gz, load: lazy }
+
+scene:
+  physics: {}
+  nodes:
+    - node: city
+      source: { data: city }          # the terrain and the buildings, drawn
+      body: static                    # and in the physics world
+```
+
+**Sources.** A source can be any of these:
+- a file or a directory, relative to the document;
+- an `https://` URL;
+- `cvcpkg://ORG/NAME[@VERSION]`, a cvcpkg data package;
+- `state://PATH?data`, where the host registered the `state` scheme (`register_state_uri_handler`);
+- any scheme a host registered (§6.4).
+
+`https` and `cvcpkg` need the host's network: `--net-allow https://cvcpkg.org` (or
+`AriRuntime.enable_net_allow([...])` in Python). A document that loads from the network lists
+`net` in `requires:`.
+
+**cvcpkg packages.** For a `cvcpkg://` source the host:
+1. asks the registry (`CVCPKG_URL`, else `https://cvcpkg.org`) for the package's newest
+   noarch build, or for `@VERSION`;
+2. downloads its archive;
+3. checks the archive against the registry's size and sha256;
+4. keeps it in a cache keyed by that hash (`CVC_DATA_CACHE`, else the user's cache directory).
+
+The next run reads the cache.
+
+**Archives.** An archive is recognized by its bytes, whatever its name: tar (plain, gzip or zstd)
+and zip (stored or deflate). It is unpacked in memory, and only its regular files are kept.
+- `path:` keeps one directory of the archive, stripped from the paths, or names one file.
+- A path that is absolute or climbs out with `..` fails the load.
+- So does going past `sys.data.max_entries` files (default 100,000) or `sys.data.max_bytes`
+  bytes (default 2 GiB).
+
+**Where it lands.** The store is the `data` subtree at the app root, one node per request, so the
+same request from two documents or a host is loaded once. The document's `data.<name>` is a
+transparent link to that node, so `bind: data.city.status` and `(state-get "data.city.rev")` read
+through it:
+
+| Under `data.city` | |
+|---|---|
+| `status` | `idle`, `fetching`, `unpacking`, `decoding`, `ready` or `error`; the node's value is the same |
+| `progress`, `error` | 0..1 while it loads; why it failed |
+| `rev` | 1, 2, ... each time a load completes: what a watcher polls |
+| `uri`, `canonical`, `sha256`, `size`, `as` | the request, what it resolved to (`cvcpkg://cy-pca/scene-austin-south-small@1.0.0+cvc.2`), the archive's hash and size, the decoder |
+| `files`, `files.<i>` | the file count; each file's path, with its bytes on the node's `data()` |
+
+**Decoders (`as:`).** Each decoder writes its outputs next to those keys. The default is `files`
+for an archive or a directory, and otherwise one picked by the file's extension:
+
+| `as:` | Writes |
+|---|---|
+| `files` | the files only |
+| `bytes`, `text` | `content` (the bytes on `data()`), `text` (the value) |
+| `json` | `json`: objects as children (a `.` in a key becomes `_`), arrays as `0`, `1`, ... with the count as the value |
+| `mesh` | `geometry`: a `cvc::geometry`, from any format `read_geometry` reads |
+| `volume` | `volume`: a `cvc::volume` |
+| `heightfield` | `terrain` (a `cvc::height_field`) and `bounds.*`, from a `terrain.json` |
+| `city_bundle` | `world` (a `world_geometry`), `terrain`, `buildings` (a `cvc::geometry`), `buildings_error`, `bounds.min_x` ... `max_y`, `satellite` (`satellite.png` decoded: the image on `data()`, its file path as the value) |
+
+A host adds its own with `register_data_decoder`.
+
+**Scene nodes.** A `source: { data: NAME }` node is an empty group at load. Once its dataset is
+ready, the scene draws into it the first of the dataset's `world`, `geometry`, `terrain` or
+`volume` that it has (`item:` picks one). It draws again whenever the dataset's `rev` changes, or
+the document's link points at another dataset. What it drew before goes, and so do its bodies:
+- a world's items become the node's children, its terrain becomes the node's height field (for
+  `ground:`) and wears the dataset's `satellite` image (north at the image's top), and with
+  `body:` its items are static bodies in the scene's `physics:` world;
+- a mesh or a height field becomes one mesh node;
+- a volume becomes a volume node.
+
+`frame: true` (or `first`) frames the main view's camera on what the node drew, the first time it
+draws, and `frame: always` does so each time. It writes the bounds to the camera's `frame` request
+(`<prefix>.viewers.main.camera.frame`, "min_x min_y min_z max_x max_y max_z"), which any program
+or host can write as well.
+
+**Document logic.**
+- `(data-load NAME URI [AS [PATH]])` points `data.NAME` at a new request and starts it. The
+  nodes bound to `NAME` keep drawing the old dataset until the new one is ready.
+- `(data-reload NAME)` loads it again.
+- `(data-status NAME)` returns its status.
+- `(data-files NAME)` lists its file paths.
+- `(data-file NAME PATH)` returns one file's bytes, or nil.
+
+**Hosts.** In C++, use `AppRuntime::data_store()`. In Python:
+- `pycvc.data_load` and `data_wait` start and wait for a load;
+- `data_files` and `data_file` read the files;
+- `data_world`, `data_height_field` and `data_geometry` return the objects the scene draws, which
+  share their arrays.
+
+So a host reads `"<prefix>.data.city"` and never opens the bundle a second time.
 
 ### 5.18 Views of the scene: `type: viewport` and node `tags:`
 

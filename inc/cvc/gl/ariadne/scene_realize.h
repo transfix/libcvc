@@ -62,6 +62,22 @@ class VolSliceNode;
 
 namespace ariadne {
 
+// A `source: { data: <name> }` node (cvc/ariadne/data.h): the node is an empty group at realize,
+// and tick_scene (sync_scene_data) rebuilds its children from the dataset whenever the dataset's
+// rev, or the store node its link points at, changes: its first load, a reload, a replacement.
+// Until then the node is empty, so a download never holds up a frame.
+struct SceneDataBinding {
+  cvc::ariadne::SceneNode spec;                     // the node as the document declared it
+  std::string path;                                 // the dataset: <prefix>.data.<name>
+  std::weak_ptr<GraphicsNode> group;                // the node; its children are the drawing
+  std::vector<std::shared_ptr<GraphicsNode>> drawn; // those children
+  std::vector<cvc::physics::body_id> bodies;        // the bodies the dataset added (body:)
+  std::string drawn_target;                         // the store node last drawn
+  std::string drawn_rev;                            // and its rev then
+  std::string frame_key; // frame: the main view camera's frame request (<prefix>.viewers.main...)
+  bool framed = false;   // frame: first — done
+};
+
 // The result of realizing a Scene: the top-level node ids created (the scene's nodes, and any a
 // custom node type added beside its own), the visibility
 // bindings the host must poll each frame (empty when no node uses `visible: <path>`),
@@ -132,6 +148,8 @@ struct RealizedScene {
   std::unique_ptr<cvc::physics::world> physics;
   std::unique_ptr<cvc::gl::physics_scene_binding> physics_binding;
   std::vector<std::pair<std::string, cvc::physics::body_id>> bodies;
+  // The source: { data } nodes (SceneDataBinding), rebuilt by tick_scene as their datasets load.
+  std::vector<SceneDataBinding> data_nodes;
   // The body of node `id`, or an invalid id.
   cvc::physics::body_id body(const std::string &id) const {
     for (const auto &b : bodies)
@@ -172,6 +190,11 @@ cvc::world_clock_keys scene_clock_keys(const cvc::ariadne::SceneClock &clock);
 // states (physics_scene_binding::follow + present).
 cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *renderer,
                                          double wall_dt = -1.0);
+
+// Rebuild each source: { data } node whose dataset is ready and has changed since it last drew
+// (SceneDataBinding): tick_scene calls it first every frame; a host that does not tick may call
+// it itself. Call it on the scene's owner thread. Returns how many nodes it rebuilt.
+int sync_scene_data(RealizedScene &realized, std::vector<std::string> *warnings = nullptr);
 
 // Create/configure SceneGraph nodes from `scene`. `bind_prefix` is the SAME
 // cvc::state prefix the widget Runtime was constructed with (typically
@@ -259,6 +282,11 @@ bool read_node_geometry(SceneGraph &sg, const cvc::ariadne::SceneNode &node, cvc
 // stated -- as the built-in geometry node applies it (and every rung of a LOD node). A node with no
 // material block is left as it is.
 void apply_node_material(GeometryNode &g, const cvc::ariadne::SceneNode &node);
+
+// The UVs of the mesh `g` draws (UV (0, 0) the image's bottom-left) turned by the node's
+// `material: { uv: ... }` block: the flips, then the quarter turns, then scale and offset
+// (SceneNode::uv_*), in place. A node with no uv block, or a mesh with no UVs, is left as it is.
+void apply_uv_transform(GeometryNode &g, const cvc::ariadne::SceneNode &node);
 
 // A dim³ signed distance field of the mesh at `mesh_uri` (fit applied first when `apply_fit`),
 // framed to the mesh extents padded 10% and cubic. Negative inside. Throws on a build without

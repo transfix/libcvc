@@ -463,6 +463,22 @@ void GeometryNode::setTexture(const cvc::image &img, bool zeroCopy) {
   });
 }
 
+bool GeometryNode::hasTexture() const { return m_texture.Get() != nullptr; }
+
+int GeometryNode::textureWidth() const {
+  int d[3] = {0, 0, 0};
+  if (m_texture.Get() && m_textureImageData.Get())
+    m_textureImageData->GetDimensions(d);
+  return d[0];
+}
+
+int GeometryNode::textureHeight() const {
+  int d[3] = {0, 0, 0};
+  if (m_texture.Get() && m_textureImageData.Get())
+    m_textureImageData->GetDimensions(d);
+  return d[1];
+}
+
 void GeometryNode::shareTexture(std::shared_ptr<const GeometryNode> source) {
   // Owner thread, like setTexture: and `source`'s own setTexture, marshaled before this, has run
   // by the time this reads its texture.
