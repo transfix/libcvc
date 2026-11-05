@@ -15,13 +15,16 @@
 #include <cvc/gl/SceneGraph.h>    // scene().computeGraphicsBounds()/appContext()/prefix
 #include <cvc/gl/SceneRenderer.h> // view.render()/processUIEvents()/renderer()/windowClosed()
 #include <cvc/gl/ariadne/AriRuntime.h>
+#include <cvc/gl/ariadne/bundles.h>                // register_streaming / register_window_widgets
 #include <cvc/gl/ariadne/extensions.h>             // register_cvcgl_extensions
 #include <cvc/gl/ariadne/scene_realize.h>          // realize_scene / RealizedScene / tick_scene
 #include <cvc/gl/ariadne/scene_views.h>            // the viewport widget
 #include <cvc/gl/ariadne/stream_texture_binding.h> // StreamTextureBinding (gl-bind-stream sink)
 #include <cvc/gl/ariadne/stream_verbs.h>     // StreamBindingSink / register_gl_stream_intrinsics
+#include <cvc/state/state_exec/async_host.h> // wait_idle
 #include <cvc/state/state_exec/intrinsics.h> // document_scope::slot
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -294,6 +297,24 @@ void AriRuntime::register_async_verb(const std::string &name, const std::string 
   app_rt_.register_async_verb(name, done_channel, std::move(work));
 }
 
+void AriRuntime::register_function(const std::string &name, cvc::state_exec::native_fn fn) {
+  app_rt_.register_function(name, std::move(fn));
+}
+
+void AriRuntime::register_async_function(const std::string &name,
+                                         cvc::state_exec::async_marshal marshal,
+                                         const std::string &done_channel) {
+  app_rt_.register_async_function(name, std::move(marshal), done_channel);
+}
+
+void AriRuntime::register_quit() { app_rt_.register_quit(); }
+int AriRuntime::exit_code() const { return app_rt_.exit_code(); }
+
+void AriRuntime::enable_streaming() {
+  register_streaming(app_);
+  register_window_widgets(backend_, app_);
+}
+
 std::vector<std::string> AriRuntime::load(const std::string &path) {
   views_->clear(); // the last document's views; the new one's widgets make their own
   return app_rt_.load(path);
@@ -301,9 +322,50 @@ std::vector<std::string> AriRuntime::load(const std::string &path) {
 
 void AriRuntime::set_root(ari::Widget root) { app_rt_.set_root(std::move(root)); }
 
+std::string AriRuntime::prefix() const { return view_->scene().getStatePrefix(); }
+
+void AriRuntime::run_program(const std::string &script) { app_rt_.run_program(script); }
+
+void AriRuntime::run_program(const std::string &script,
+                             std::function<void(const std::string &)> done) {
+  app_rt_.run_program(script, std::move(done));
+}
+
+void AriRuntime::publish_image(const std::string &name, const cvc::image &img) {
+  backend_.set_image(name, img);
+}
+
+void AriRuntime::drop_image(const std::string &name) { backend_.drop_image(name); }
+
+bool AriRuntime::has_function(const std::string &name) const {
+  return const_cast<ari::AppRuntime &>(app_rt_).runtime().has_function(name);
+}
+
 // ── per-frame (GL driving around the neutral drain) ──────────────────────────────────────────────
 
+namespace {
+// frame() and render() each mark the runtime busy for their call. A host handler, verb or function
+// runs inside one of them, so one that calls frame(), render(), step() or run() would re-enter the
+// drain or the draw mid-walk; it gets a std::logic_error instead.
+class FrameGuard {
+public:
+  FrameGuard(bool &busy, const char *what) : busy_(busy) {
+    if (busy_)
+      throw std::logic_error(std::string("AriRuntime::") + what +
+                             ": called from inside a frame (a host handler, verb or function)");
+    busy_ = true;
+  }
+  ~FrameGuard() { busy_ = false; }
+  FrameGuard(const FrameGuard &) = delete;
+  FrameGuard &operator=(const FrameGuard &) = delete;
+
+private:
+  bool &busy_;
+};
+} // namespace
+
 void AriRuntime::frame(double dt_seconds) {
+  FrameGuard guard(inFrame_, "frame");
   view_->processUIEvents(); // VTK interactor -> ImGui (widget input + camera nav)
   if (inputPump_)
     inputPump_(); // the host's own input, delivered this frame
@@ -317,7 +379,10 @@ void AriRuntime::frame(double dt_seconds) {
   views_->update(dt_seconds); // what each viewport widget's view leaves out, and its camera
 }
 
-void AriRuntime::render() { view_->render(); } // fires rt.render() via the overlay draw callback
+void AriRuntime::render() {
+  FrameGuard guard(inFrame_, "render");
+  view_->render(); // fires rt.render() via the overlay draw callback
+}
 
 void AriRuntime::step(double dt_seconds) {
   frame(dt_seconds);
@@ -328,7 +393,16 @@ bool AriRuntime::should_close() const { return app_rt_.should_close() || view_->
 
 void AriRuntime::request_close() { app_rt_.request_close(); }
 
+void AriRuntime::wait_idle() {
+  if (inFrame_)
+    throw std::logic_error("AriRuntime::wait_idle: called from inside a frame");
+  app_.exec_async_host().wait_idle();
+}
+
 void AriRuntime::run(double fps) {
+  if (inFrame_)
+    throw std::logic_error("AriRuntime::run: called from inside a frame (a host handler, verb or "
+                           "function)");
   const double dt = fps > 0.0 ? 1.0 / fps : 1.0 / 120.0;
   while (!should_close())
     step(dt);

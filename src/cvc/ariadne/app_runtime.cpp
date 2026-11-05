@@ -51,6 +51,8 @@ AppRuntime::~AppRuntime() {
   verbs_->async.clear();
   verbs_->quit = nullptr;
   verbs_->data.reset();
+  verbs_->functions.clear();
+  verbs_->async_functions.clear();
   if (netEnabled_)
     disable_net(); // its provider holds app_ by reference
 }
@@ -341,6 +343,34 @@ void AppRuntime::register_async_verb(const std::string &name, const std::string 
   rt_.refresh_program_names();
 }
 
+void AppRuntime::register_function(const std::string &name, cvc::state_exec::native_fn fn) {
+  verbs_->functions[name] = std::move(fn);
+  ensure_intrinsics();
+  rt_.refresh_program_names();
+}
+
+void AppRuntime::register_async_function(const std::string &name,
+                                         cvc::state_exec::async_marshal marshal,
+                                         const std::string &done_channel) {
+  verbs_->async_functions[name] = {done_channel, std::move(marshal)};
+  ensure_intrinsics();
+  rt_.refresh_program_names();
+}
+
+void AppRuntime::run_program(std::string script, std::function<void(const std::string &)> done) {
+  rt_.run_program(std::move(script), done ? std::move(done) : [](const std::string &) {});
+}
+
+void AppRuntime::add_load_hook(LoadHook hook) {
+  if (hook)
+    loadHooks_.push_back(std::move(hook));
+}
+
+void AppRuntime::add_frame_hook(std::function<void()> hook) {
+  if (hook)
+    frameHooks_.push_back(std::move(hook));
+}
+
 void AppRuntime::register_quit() {
   on("quit", [this] { request_close(0); });
   verbs_->quit = [this](int code) { request_close(code); };
@@ -487,6 +517,26 @@ void AppRuntime::ensure_intrinsics() {
             return se::value_t(se::bytes_value{*b});
           });
     }
+    for (const auto &[name, fn] : verbs->functions)
+      se::builtins::register_fn(env, name, fn); // inline on the drain thread, like a sync verb
+    for (const auto &[name, entry] : verbs->async_functions) {
+      const se::async_marshal &marshal = entry.second;
+      if (entry.first.empty()) {
+        se::register_async_fn(env, app->exec_async_host(), name, marshal);
+        continue;
+      }
+      // With a done channel, the kernel's value is posted there too (resolved here, as above).
+      const std::string chan = se::resolve_channel_key(root, entry.first);
+      se::async_marshal posting = [app, chan, marshal](std::span<const se::value_t> args) {
+        se::async_kernel kernel = marshal(args);
+        return se::async_kernel([app, chan, kernel](se::async_call &call) -> se::value_t {
+          se::value_t result = kernel(call);
+          app->exec_scheduler().post_message(chan, result);
+          return result;
+        });
+      };
+      se::register_async_fn(env, app->exec_async_host(), name, std::move(posting));
+    }
   });
 }
 
@@ -609,10 +659,15 @@ void check_host_requirements(const Runtime &rt, LoadResult &lr) {
   for (std::string &w : reqs.warnings)
     lr.warnings.push_back(std::move(w));
   if (!reqs.missing.empty()) {
-    std::string list;
-    for (const std::string &m : reqs.missing)
+    std::string list, hints;
+    for (const std::string &m : reqs.missing) {
       list += (list.empty() ? "" : ", ") + m;
-    throw std::runtime_error("this host does not provide what the document requires: " + list);
+      const std::string hint = capability_hint(m.substr(0, m.find(' '))); // m may add its meaning
+      if (!hint.empty() && hints.find(hint) == std::string::npos)
+        hints += (hints.empty() ? "" : "; ") + hint;
+    }
+    throw std::runtime_error("this host does not provide what the document requires: " + list +
+                             (hints.empty() ? "" : "; " + hints));
   }
 
   // Without a scene adapter the whole scene is ignored, and load says so; only a scene that does
@@ -681,6 +736,8 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
                                               : lr.error);
   ensure_intrinsics(); // the (data-*) verbs are every document's
   rt_.refresh_program_names();
+  for (const LoadHook &hook : loadHooks_) // a scripting host's python: block, before requires:
+    hook(lr, path);
   check_host_requirements(rt_, lr); // requires: and the calls programs make (§7.6)
 
   // The document's command line goes on the tree before init: runs, so init can read it.
@@ -798,6 +855,10 @@ void AppRuntime::drain() {
     scene_->tick();                // volren/volslice per-frame service
   }
   collect_warnings();
+  for (std::size_t i = 0; i < frameHooks_.size(); ++i) {
+    const std::function<void()> hook = frameHooks_[i]; // a copy: a hook may add another
+    hook();
+  }
 }
 
 // Keep the read-lane diagnostics for take_warnings(); the Runtime reports each one only once.

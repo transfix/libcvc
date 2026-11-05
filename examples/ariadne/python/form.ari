@@ -1,0 +1,99 @@
+# form.ari — a two-way form: the document's inputs go to a Python computation and the results
+# come back. form.py runs it:
+#
+#   python form.py                         # a window
+#   python form.py --offscreen --png form.png
+#
+# Three ways the two sides talk:
+# - Compute's on: calls (trajectory SPEED ANGLE DRAG), a Python function. It returns a dict, which
+#   the program writes as a subtree with state-set-tree; the widgets below read its fields.
+# - Estimate spread's on: calls (spread N SPEED ANGLE DRAG), an ASYNC Python function: the program
+#   parks while it runs on a pool thread, and the spinner turns, because the UI keeps drawing.
+# - form.py also watches the inputs (@host.watch) and writes a live `preview`, with no button.
+
+meta:
+  name: Python two-way form
+  author: cvc
+  min_libcvc: 3.4.0
+
+requires:
+  - trajectory                     # both are form.py's
+  - spread
+
+init: |
+  (begin
+    (state-set "speed" "30")
+    (state-set "angle" "40")
+    (state-set "drag" "0.1")
+    (state-set "samples" "2000")
+    (state-set "mc.status" "idle"))
+
+menubar:
+  - menu: Form
+    items:
+      - menu_item: Quit
+        on: quit
+
+windows:
+  - window: Projectile
+    id: projectile
+    pos: [30, 30]
+    size: [420, 330]
+    children:
+      - slider_float: Speed (m/s)
+        bind: speed
+        lo: 1
+        hi: 100
+        fmt: "%.1f"
+      - slider_float: Angle (deg)
+        bind: angle
+        lo: 1
+        hi: 89
+        fmt: "%.1f"
+      - slider_float: Drag (1/s)
+        bind: drag
+        lo: 0
+        hi: 1
+        fmt: "%.2f"
+      - text: "preview"
+        bind: preview
+      - separator
+      - button: Compute
+        on: |
+          (state-set-tree "result"
+            (trajectory (state-get "speed") (state-get "angle") (state-get "drag")))
+      - text: "range (m)"
+        bind: result.range
+      - text: "apex (m)"
+        bind: result.apex
+      - text: "flight (s)"
+        bind: result.flight
+      - plot: Height
+        bind: result.heights
+        height: 70
+
+  - window: Monte Carlo
+    id: mc
+    pos: [470, 30]
+    size: [360, 200]
+    children:
+      - input_int: Samples
+        bind: samples
+      - button: Estimate spread
+        on: |
+          (begin
+            (state-set "mc.status" "running")
+            (state-set-tree "spread"
+              (spread (state-get "samples") (state-get "speed") (state-get "angle")
+                      (state-get "drag")))
+            (state-set "mc.status" "done"))
+      - spinner: simulating
+        visible_when: (= (state-get "mc.status") "running")
+      - text: "status"
+        bind: mc.status
+      - text: "range mean (m)"
+        bind: spread.mean
+      - text: "range std (m)"
+        bind: spread.std
+      - text: "samples run"
+        bind: spread.n

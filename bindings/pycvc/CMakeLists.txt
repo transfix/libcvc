@@ -314,6 +314,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_exec:test_pycvc_exec.py
              pycvc_exec_async:test_pycvc_exec_async.py
              pycvc_exec_coro:test_pycvc_exec_coro.py
+             pycvc_ariadne:test_pycvc_ariadne.py
              pycvc_state_exec:test_pycvc_state_exec.py
              pycvc_state_exec_sched:test_pycvc_state_exec_sched.py
              pycvc_state_exec_eval:test_pycvc_state_exec_eval.py
@@ -500,6 +501,17 @@ if(CVC_BUILD_PYCVC_GL)
   add_test(NAME pycvc_ari
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_ari.py)
   set_tests_properties(pycvc_ari PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
+  # pycvc_gl.ariadne.Host, the Python host: data both ways, callbacks, errors and re-entrancy
+  # headless, then (in a child; skipped without GL unless CVC_REQUIRE_RENDER) a published picture and
+  # a stream in the frame, and the examples/ariadne/python programs offscreen.
+  add_test(NAME pycvc_gl_ariadne_host
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_ariadne_host.py)
+  set_tests_properties(pycvc_gl_ariadne_host PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
+  # The GIL both ways: AriRuntime.run() with an async Python function, re-entrant frames, other
+  # threads, and teardown with a call in flight; each case in its own process with a timeout.
+  add_test(NAME pycvc_gl_ariadne_gil
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_ariadne_gil.py)
+  set_tests_properties(pycvc_gl_ariadne_gil PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
   # VTK Python bridge test — skips gracefully unless the vtk-python wrappers
   # (vtkmodules) are importable; runs the vtkProp<->vtkActor round trip when they are.
   add_test(NAME pycvc_vtk
