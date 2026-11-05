@@ -33,6 +33,7 @@
 %{
 #include <cvc/geometry/height_field.h>
 #include <cvc/nav/land_cover.h>
+#include <cvc/nav/world_planes.h> // nav_world_rasterize
 #include <cvc/world/city_bundle.h>
 #include <cvc/world/world_geometry.h>
 #include <cmath>
@@ -468,6 +469,39 @@ PyObject *read_terrain_extent(const std::string &dir) {
   const cvc::world::terrain_extent e = cvc::world::read_terrain_extent(dir);
   return Py_BuildValue("{s:i,s:i,s:d,s:d,s:d,s:d}", "rows", e.rows, "cols", e.cols, "min_x",
                        e.min_x, "min_y", e.min_y, "max_x", e.max_x, "max_y", e.max_y);
+}
+
+// cvc::nav::rasterize: the grid a navigator plans on, from a world (a city_bundle's world(), say)
+// over (min_x, min_y)-(max_x, max_y) at rows x cols samples, row 0 at min y. A dict of (rows, cols)
+// arrays: occupancy (uint8 0/1, its obstacles dilated by `inflate` cells) and height (float32,
+// the terrain's). The C++ demos' occupancy; no VTK.
+PyObject *nav_world_rasterize(const cvc::world::world_geometry &world, int rows, int cols,
+                              double min_x, double min_y, double max_x, double max_y,
+                              int inflate = 0) {
+  cvc::nav::world_planes p;
+  {
+    pycvc::gil_release nogil; // pycvc_lod.i's; a throw takes the GIL back on the way out
+    p = cvc::nav::rasterize(world, rows, cols, min_x, min_y, max_x, max_y, inflate);
+  }
+  npy_intp dims[2] = {p.rows, p.cols};
+  PyObject *occ = PyArray_SimpleNew(2, dims, NPY_UINT8);
+  PyObject *height = PyArray_SimpleNew(2, dims, NPY_FLOAT32);
+  if (!occ || !height) {
+    Py_XDECREF(occ);
+    Py_XDECREF(height);
+    throw std::runtime_error("pycvc.nav_world_rasterize: alloc failed");
+  }
+  const std::size_t n = static_cast<std::size_t>(p.rows) * static_cast<std::size_t>(p.cols);
+  if (p.occupancy.size() == n)
+    std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(occ)), p.occupancy.data(), n);
+  else
+    std::memset(PyArray_DATA(reinterpret_cast<PyArrayObject *>(occ)), 0, n);
+  if (p.height.size() == n)
+    std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(height)), p.height.data(),
+                n * sizeof(float));
+  else
+    std::memset(PyArray_DATA(reinterpret_cast<PyArrayObject *>(height)), 0, n * sizeof(float));
+  return Py_BuildValue("{s:N,s:N}", "occupancy", occ, "height", height);
 }
 } // namespace pycvc
 %}

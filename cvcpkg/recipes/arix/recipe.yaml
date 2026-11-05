@@ -1,0 +1,65 @@
+schema_version: 1
+recipe:
+  name: arix
+  upstream_version: "3.7.10"
+  cvc_revision: 1
+  maintainer: "cvcpkg group"
+  maintainer_email: "info@cvcpkg.org"
+  maintainer_url: "https://cvcpkg.org"
+  description: "arix — ari with an embedded Python (CPython 3.12, with pycvc and numpy): the scripting host for Ariadne (.ari) documents in the terminal. A document's python: block runs at load and the functions it exports are the document's to call; `arix run app.py` runs a Python program in place of the document, its pycvc_gl.ariadne.Host() adopting this host; `arix python` is the embedded interpreter as a plain python3. Every ari command and flag works the same, plus --python-path DIR."
+  homepage: https://github.com/transfix/libcvc
+  license: LGPL-2.1-only
+  tags: [ui, terminal, tui, cli, tools, python, scripting]
+
+# `arix` is ari built with src/ariadne_python's engine (docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md),
+# its OWN package so that ari stays Python-free: it builds src/ari standalone with
+# -DARI_WITH_PYTHON=ON against the installed libcvc SDK and this prefix's python312, and installs
+# just bin/arix. ari's own recipe is unchanged.
+#
+# At run time it finds its Python beside it: <prefix>/lib/python3.12 (the python312 runtime dep),
+# with what that interpreter's site-packages holds, pycvc (the exports cross through it) and numpy
+# among it. pycvc_gl.ariadne.Host, which a Python program uses to adopt arix, is pycvc-gl-cp312's:
+# install it too for programs (a document's python: block needs only pycvc).
+#
+# Built against the libcvc of its own tree (AppRuntime's load and frame hooks are newer than the
+# last release), so publish it with that libcvc and that tree's pycvc-cp312, as ari is.
+#
+# Platforms: linux, where pycvc-cp312 is published. macOS and Windows join when pycvc-cp312 is
+# there (on Windows the python312 bundle keeps python312.dll beside python.exe at the prefix root,
+# not in bin/, so the Windows build must also place it where bin/arix.exe finds it).
+
+source:
+  # Co-located with the libcvc source tree; build.sh points cmake at src/ari.
+  # `path` is counted from cvcpkg/recipes/_vendored/, where `cvcpkg build`
+  # looks first, so `../../..` is the libcvc repo root (CVC_SOURCE_DIR).
+  type: vendored
+  path: ../../..
+
+patches: []
+
+depends:
+  build:
+    - name: libcvc
+    # libpython3.12 and its headers, the interpreter arix embeds.
+    - name: python312
+  runtime:
+    - name: libcvc
+    - name: python312
+    - name: pycvc-cp312
+    - name: numpy-cp312
+  host_tools:
+    - cmake
+    - ninja
+
+build:
+  matrix:
+    - platform: linux
+      script: build.sh
+
+package:
+  # Just the `arix` executable (bin/arix). No cmake package config: arix is an application.
+  files:
+    - bin/arix
+
+abi:
+  cxx_std: 20

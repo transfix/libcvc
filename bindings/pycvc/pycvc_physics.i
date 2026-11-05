@@ -985,12 +985,14 @@ public:
 %extend cvc::physics::nav_plant {
   // A physics world's vehicles as a sim_world's plant (nav_plant.h): agent i drives
   // descs[i % len(descs)]. The plant keeps the world alive. `ground_bodies` (ids): the bodies the
-  // vehicles drive on, whose contacts with a chassis are not building contacts.
+  // vehicles drive on, whose contacts with a chassis are not building contacts. `ground` (a
+  // pycvc.height_field, the terrain the world collides with) is the ground under each start, for
+  // terrain that is not flat (nav_plant_options::ground_height); None: ground_z everywhere.
   nav_plant(cvc::physics::world &world, const std::vector<cvc::physics::vehicle_desc> &descs,
             bool step_world = true, double latency = 0.1, double brake_margin = 0.8,
             double metres_per_world_unit = 1.0, double ground_z = 0.0,
             double spawn_height = -1.0, int drift_nsub = 0, PyObject *drift_bins_g = nullptr,
-            PyObject *ground_bodies = nullptr) {
+            PyObject *ground_bodies = nullptr, const cvc::height_field *ground = nullptr) {
     cvc::physics::nav_plant_options o;
     o.step_world = step_world;
     o.latency = latency;
@@ -999,6 +1001,14 @@ public:
     o.ground_z = ground_z;
     o.spawn_height = spawn_height;
     o.drift_nsub = drift_nsub;
+    if (ground) {
+      const cvc::height_field field = *ground; // a copy sharing its arrays
+      const double fallback = ground_z;
+      o.ground_height = [field, fallback](double x, double y) {
+        const double h = field.height(x, y);
+        return std::isnan(h) ? fallback : h;
+      };
+    }
     if (drift_bins_g && drift_bins_g != Py_None) {
       std::vector<long> shape;
       o.drift_bins_g = pycvc_world::doubles(drift_bins_g, "nav_plant: drift_bins_g", shape);

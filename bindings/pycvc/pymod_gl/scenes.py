@@ -31,6 +31,63 @@ def _bundle_dir(path: str) -> str:
     return os.path.dirname(path) if os.path.basename(path) == "terrain.json" else path
 
 
+def _prefixes():
+    """Install prefixes that may hold cvcpkg scene data, most specific first: the ones the
+    environment names, the interpreter's, and the ones above the installed pycvc."""
+    import sys
+
+    roots = [os.environ.get(v, "") for v in ("CVC_PREFIX", "CVCPKG_PREFIX", "CONDA_PREFIX",
+                                              "VIRTUAL_ENV")]
+    roots.append(sys.prefix)
+    try:
+        import pycvc
+
+        p = os.path.abspath(pycvc.__file__)
+        for _ in range(5):
+            p = os.path.dirname(p)
+            if os.path.isdir(os.path.join(p, "share")):
+                roots.append(p)
+                break
+    except ImportError:  # pragma: no cover - pycvc is what this package is for
+        pass
+    out = []
+    for r in roots:
+        if r and r not in out:
+            out.append(r)
+    return out
+
+
+def find_scene(name: str = "austin_south", env: str = "CVC_NAV_BUNDLE"):
+    """The directory of an installed scene bundle (``terrain.json`` + ``buildings.glb``):
+    ``$<env>`` when set (the C++ nav demos read ``CVC_NAV_BUNDLE`` too), else
+    ``<prefix>/share/cvc-scenes/<name>`` in the first prefix that has it (``cvcpkg install
+    scene-austin-south-small --prefix <prefix>``). None when there is none."""
+    v = os.environ.get(env, "") if env else ""
+    if v:
+        return _bundle_dir(v)
+    for root in _prefixes():
+        d = os.path.join(root, "share", "cvc-scenes", name)
+        if os.path.isfile(os.path.join(d, "terrain.json")):
+            return d
+    return None
+
+
+def find_vehicle_model(bundle: str | None = None, file: str = "Humvee.glb"):
+    """A vehicle model's path: in ``bundle``, beside it in ``../shared`` (the
+    ``vehicle-humvee`` package's place), or in a prefix's ``share/cvc-scenes/shared``. None
+    when there is none."""
+    dirs = []
+    if bundle:
+        b = _bundle_dir(bundle)
+        dirs += [b, os.path.join(os.path.dirname(os.path.abspath(b)), "shared")]
+    dirs += [os.path.join(r, "share", "cvc-scenes", "shared") for r in _prefixes()]
+    for d in dirs:
+        p = os.path.join(d, file)
+        if os.path.isfile(p):
+            return p
+    return None
+
+
 def load_terrain(path: str):
     """The bundle's terrain as a ``pycvc.height_field``, read by the C++ loader
     (``cvc::world::load_city_bundle``) that the renderer, the physics world and the
