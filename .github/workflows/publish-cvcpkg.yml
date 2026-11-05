@@ -1631,7 +1631,8 @@ jobs:
           test -x stage-ari-media/bin/ari-media
           test ! -e stage-ari-media/bin/ari || { echo "::error::ari-media's stage carries bin/ari, which is the ari package's"; exit 1; }
           otool -L stage-ari-media/bin/ari-media | tee ari-media-otool.txt
-          grep -qE 'libavformat\.[0-9]+\.dylib' ari-media-otool.txt \
+          # ffmpeg-lgpl's install names carry the full version: @rpath/libavformat.61.7.100.dylib.
+          grep -qE 'libavformat(\.[0-9]+)+\.dylib' ari-media-otool.txt \
             || { echo "::error::ari-media does not link ffmpeg-lgpl's libavformat"; exit 1; }
           # Its rpath is @loader_path/../lib, the flat prefix it is installed into; here the libraries
           # are split across three.
