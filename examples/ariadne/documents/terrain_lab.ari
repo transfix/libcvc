@@ -12,8 +12,8 @@
 # The look and the render discipline are demo3-csma's (CVC-DBG's Austin convoy demo, our fastest
 # cvcGL scene), all declared below:
 #   - one merged mesh per layer, so the city is a few draw calls whatever its size;
-#   - the ground receives shadows but casts none (`casts_shadow: false`): as a caster the terrain
-#     shadows itself everywhere and forces every re-bake;
+#   - the ground casts shadows as well as receiving them, so its ridges shade its own valleys (a
+#     textured caster's shadow comes from its shape, never its texture's colours);
 #   - the ground's texture is drawn opaque (`material: { opaque: true }`): no per-texel alpha scan;
 #   - the sun's shadow map follows what the camera looks at (`shadows: { focus: camera }`), so a
 #     4096 map is ~0.2 m a texel close in and still covers an overview;
@@ -111,17 +111,18 @@ scene:
              lift: 20, ground: world }
   lights:
     # The afternoon sun: low in the west-southwest and warm, the key and the one shadow caster; a
-    # cool fill keeps the shade from going black; no back light or wash.
+    # cool fill keeps the shade from going black; no back light or wash. The fill, the environment
+    # and the ambient are kept low so the sun carries the light: building and cloud shadows read.
     - light: sun
       rig: three_point
       stage: { center: [0, 0, 25], radius: 850 }
       key: { intensity: 1.3, azimuth: -60, elevation: 28, cone: 62 }
-      fill: 0.3
+      fill: 0.15
       back: 0
       wash: 0
       warmth: 0.5
-      environment: 0.5
-      ambient: 0.32
+      environment: 0.2
+      ambient: 0.2
   nodes:
     # The world. Every key below seeds a world.* state key the Terrain Lab panel drives.
     - node: world
@@ -139,16 +140,20 @@ scene:
       water_level: 0       # metres from sea level (the shoreline); everything below is water
       color: material      # material | risk | occupancy | height
       look: soft           # soft (demo3's matte daylight) | classic (the C++ lab's)
-      casts_shadow: false
       material: { opaque: true }
       shader: { preset: terrain_bump }   # value-noise fBm ground detail
-    # The clouds: a drifting L-system slab high over the world (no ground shadow: the world's
-    # texture is its own).
+    # The clouds: a deck of L-system cumulus scattered over the whole world, drifting and slowly
+    # changing shape. The ones near the camera are volumes, the rest far shells to the horizon.
+    # Their shade dims the sun on the ground, the buildings, the roads and the trees; it is drawn
+    # in the receivers' shaders, so the world's own texture is untouched.
     - node: sky
       type: cloud_sky
-      ground: world
-      half: 600
-      extent: 640
-      base: 350
-      top: 610
-      shadow: 0
+      ground: world        # the deck covers this node's extent, live, and shades its meshes
+      receivers: [world_buildings, world_roads, world_props, world_foliage]
+      extent: 250          # a cloud's half-width, metres: small fair-weather cumulus
+      base: 300
+      top: 520
+      coverage: 0.6        # the share of the sky's cells holding a cloud
+      near: 6              # the clouds nearest the camera drawn as volumes; the rest far shells
+      sun_az: -60          # the key light's: the clouds cast along it
+      sun_el: 28

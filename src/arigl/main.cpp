@@ -166,6 +166,11 @@ EM_ASYNC_JS(void, arigl_wait_frame, (), {
 #include <cvc/gl/StageLighting.h>
 #include <cvc/gl/TouchGestures.h>
 #include <cvc/gl/ariadne/AriRuntime.h>
+#ifdef CVC_ARIADNE_PYTHON
+#include "python_engine.h" // ariglx: the embedded Python (src/ariadne_python)
+
+#include <functional>
+#endif
 #include <cvc/gl/ariadne/TerminalScene.h>
 #include <cvc/gl/ariadne/bundles.h>
 #include <cvc/gl/ariadne/scene_panels.h>
@@ -186,6 +191,48 @@ namespace ari = cvc::ariadne;
 namespace gla = cvc::gl::ariadne;
 
 const char *const kDefaultPrefix = "ui.docs.ari"; // the same root ari uses, in both modes
+
+#ifdef CVC_ARIADNE_PYTHON
+constexpr const char *kRuntimeName = "ariglx"; // arigl with an embedded Python
+
+// ariglx's Python, booted in arigl_main() before any app or runtime, so it outlives them.
+ari::python::Engine *g_python = nullptr;
+
+// Lend a window's app, document runtime and GL objects to the Python (_arihost), for the life of
+// the loan: the document's python: block runs at load, and a Python program's Host() adopts them.
+// `loop` is what the program's host.run() runs.
+ari::python::Attachment lend_python(cvc::app &app, gla::AriRuntime &rt,
+                                    cvc::gl::SceneRenderer &view, cvc::gl::CameraController &cam,
+                                    cvc::gl::ImGuiOverlay &ui, const char *mode,
+                                    std::function<int()> loop) {
+  ari::python::HostHandles h;
+  h.app = &app;
+  h.runtime = &rt.app_runtime();
+  h.mode = mode;
+  h.ari_runtime = &rt;
+  h.view = &view;
+  h.camera = &cam;
+  h.overlay = &ui;
+  h.run_loop = std::move(loop);
+  return g_python->attach(h);
+}
+
+// ... and a terminal's (no GL objects: a Python program runs in a window).
+ari::python::Attachment lend_python(cvc::app &app, ari::AppRuntime &rt, const char *mode) {
+  ari::python::HostHandles h;
+  h.app = &app;
+  h.runtime = &rt;
+  h.mode = mode;
+  return g_python->attach(h);
+}
+
+// A Python program in place of the document: ariglx run app.py.
+bool is_python_program(const std::string &doc) {
+  return doc.size() > 3 && doc.compare(doc.size() - 3, 3, ".py") == 0;
+}
+#else
+constexpr const char *kRuntimeName = "arigl";
+#endif
 
 // Errors, warnings and info only (level L prints when L < log_verbosity), as the native examples
 // do; $CVC_LOG_VERBOSITY overrides it (6 = every debug line). The debug lines cost: on wasm each is
@@ -225,6 +272,20 @@ int usage(int code) {
                "With it on, snapshot waits after its frames until the document's requests are\n"
                "back and its programs idle (at most --settle S seconds, 10 by default).\n",
                ari::host_flags_help().c_str());
+#ifdef CVC_ARIADNE_PYTHON
+  std::fputs("\n"
+             "ariglx is arigl with an embedded Python (with pycvc, pycvc_gl, numpy and the\n"
+             "packages beside it):\n"
+             "  ariglx run|snapshot|check [flags] app.py [program args...]\n"
+             "      runs a Python program in place of the document, in a window (snapshot:\n"
+             "      offscreen): pycvc_gl.ariadne.Host() adopts this window, loads a document,\n"
+             "      and runs it (host.run(), or by returning)\n"
+             "  ariglx python [python args...]\n"
+             "      the embedded interpreter as a plain python3 (a REPL, -c, -m, a script)\n"
+             "A document's python: block runs at load, and the functions it exports are the\n"
+             "document's to call; requires: python (or python.numpy, ...) says it needs them.\n",
+             code ? stderr : stdout);
+#endif
   return code;
 }
 
@@ -1903,10 +1964,16 @@ int run_window(const ari::HostOptions &o) {
   for (const std::string &d : o.component_paths)
     rt.add_component_path(d);
   rt.app_runtime().register_quit(); // on: quit and (quit [code]): the exit status is the code
-  rt.app_runtime().set_document_args(o.doc_args, "arigl " + o.command + " " + o.doc,
-                                     /*validate=*/o.command != "check");
+#ifdef CVC_ARIADNE_PYTHON
+  if (is_python_program(o.doc)) // its args are the program's: sys.argv
+    rt.app_runtime().set_document_args({}, "arigl " + o.command + " " + o.doc,
+                                       /*validate=*/o.command != "check");
+  else
+#endif
+    rt.app_runtime().set_document_args(o.doc_args, "arigl " + o.command + " " + o.doc,
+                                       /*validate=*/o.command != "check");
   if (o.command == "info") {
-    ari::HostInfo info = ari::gather_host_info(rt.app_runtime().runtime(), "arigl");
+    ari::HostInfo info = ari::gather_host_info(rt.app_runtime().runtime(), kRuntimeName);
     info.backend = "imgui";
     info.gl = describe_gl(view, info.gl_info);
     return print_info(std::move(info), o);
@@ -1962,157 +2029,180 @@ int run_window(const ari::HostOptions &o) {
   }
   if (!gallery.empty())
     gallery.install(rt.app_runtime(), &gallery_next, &gallery_left);
+  // What follows the load: check's status, snapshot's frames, or run's loop. A Python
+  // program's host.run() runs it too.
+  const auto after_load = [&]() -> int {
+    ari::report_running(); // the browser shell takes its loading screen down
+    // The rich scene panels (scene_panel / stage_lighting_panel / scene_menu), for a document that
+    // uses them rather than the declarative components, and Settings' scene_settings. They need the
+    // realized lighting rig, so a document loaded later registers them again.
+    const auto register_panels = [&] {
+      const gla::RealizedScene *realized = rt.realized();
+      cvc::gl::StageLighting *rig =
+          realized && !realized->rigs.empty() ? realized->rigs.front().get() : nullptr;
+      gla::register_scene_panels(rt.backend(), sg, rig);
+    };
+    register_panels();
+    // Between frames: load the document the Demos menu picked, in place of this one. A document
+    // that fails to load leaves the current one running.
+    const auto switch_document = [&] {
+      if (gallery_left)
+        rt.request_close();
+      if (gallery_next.empty())
+        return;
+      const std::string next = std::exchange(gallery_next, std::string());
+      rt.app_runtime().set_host_menus(host_menus(next));
+      rt.app_runtime().set_document_args({}, "arigl run " + next);
+      try {
+        print_warnings(rt.load(next));
+        register_panels();
+        arigl::gallery::show_in_url(next);
+      } catch (const std::exception &e) {
+        std::fprintf(stderr, "arigl: %s\n", e.what());
+      }
+    };
+    if (o.command == "check")
+      return rt.app_runtime().exit_code(); // an init: that called (quit code)
+
+    if (o.command == "snapshot") {
+      rt.set_fixed_clock(true); // reproducible: the scene clock advances 1/30 s a frame
+      const int frames = std::max(1, o.frames);
+      bool settle = false;
+      const auto period = snapshot_period(o);
+      for (int f = 0; f < frames; ++f) {
+        const auto start = std::chrono::steady_clock::now();
+        conf.pump(); // publish this frame's room-tree + media to the relay (run mode does this via
+                     // the input pump, set below; a snapshot of a live conference must pump too)
+        rt.frame(1.0 / 30.0);
+        // (quit code) ends the snapshot at the frame it quit on, as ari's does.
+        const bool last = f + 1 == frames || rt.app_runtime().should_close();
+        // The last frame waits for the document's requests and pictures (§5.11), if it has any out.
+        if (last)
+          settle = !rt.app_runtime().should_close() &&
+                   (o.net.enabled || rt.app_runtime().runtime().media_stale());
+        if (last && !settle)
+          view.writePNG(o.png.c_str()); // renders and writes the last frame
+        else
+          rt.render();
+        if (last)
+          break;
+        std::this_thread::sleep_until(start + period);
+      }
+      if (settle) { // the frame shows what the document's requests brought back
+        rt.app_runtime().settle(
+            [&] {
+              rt.frame(1.0 / 30.0);
+              rt.render();
+            },
+            o.settle > 0 ? o.settle : ari::kDefaultSettleSeconds);
+        rt.frame(1.0 / 30.0);
+        view.writePNG(o.png.c_str());
+      }
+      print_warnings(rt.take_warnings());
+      return rt.app_runtime().exit_code();
+    }
+
+    // The frame loop prints each warning as it comes (print_warnings below); they also go to
+    // --log FILE and to the browser page (host_warnings.h).
+    ari::LiveWarnings live("arigl", o.log, /*stderr_when_not_a_terminal=*/false);
+    if (!live.error().empty()) {
+      std::fprintf(stderr, "arigl: %s\n", live.error().c_str());
+      return 2;
+    }
+    rt.app_runtime().set_warning_listener([&live](const std::string &w) { live(w); });
+
+    // Input the VTK interactor does not carry: touch navigation, SDL's keys and pointer (the
+    // documents' on_key / on_pointer), and the OS signals trapped below. Fed before the drain, so
+    // the document sees them this frame.
+    cvc::gl::SdlInput sdl;
+    sdl.init();
+    std::string exit_signal;
+    rt.set_input_pump([&] {
+      conf.pump(); // push this frame's room-tree writes (room-join + roster) to the relay
+      touch.update();
+      if (!sdl.attached())
+        sdl.attach(view.renderWindow()); // once VTK has made its window
+      // What ImGui takes -- the keys typed into a field, a click on a window -- is not the
+      // document's. A release always is, so nothing the document saw go down stays held.
+      for (const cvc::gl::InputEvent &e : sdl.poll()) {
+        using K = cvc::gl::InputEvent::Kind;
+        if ((e.kind == K::KeyDown && ui.wantsKeyboard()) ||
+            ((e.kind == K::MouseMove || e.kind == K::MouseButtonDown || e.kind == K::MouseWheel) &&
+             ui.wantsMouse()))
+          continue;
+        rt.post_input(to_ari(e));
+      }
+      for (std::string sig = ari::take_trapped_signal(); !sig.empty();
+           sig = ari::take_trapped_signal())
+        if (!rt.post_signal(sig, "os")) { // no on_signal: the host's default is to stop
+          exit_signal = sig;
+          rt.request_close();
+        }
+    });
+    ari::install_signal_traps();
+    view.setFrameYield(cvc::gl::SceneRenderer::FrameYield::App);
+    const double fps = o.fps > 0 ? o.fps : 120.0;
+#ifndef __EMSCRIPTEN__
+    const auto period = std::chrono::duration<double>(1.0 / fps);
+#else
+    // $CVC_ARIGL_YIELD=timeout (the page's ?yield=timeout) yields on a 0 ms timer instead of the
+    // next animation frame: the pacing's A/B.
+    const char *yield_env = std::getenv("CVC_ARIGL_YIELD");
+    const bool yield_timer = yield_env && std::string(yield_env) == "timeout";
+#endif
+    while (!rt.should_close()) {
+#ifdef __EMSCRIPTEN__
+      // Browser: one frame, then yield to the event loop (Asyncify) until the next animation
+      // frame (arigl_wait_frame): the display paces the loop. FrameYield::App above keeps VTK from
+      // yielding twice.
+      rt.step(1.0 / fps);
+      print_warnings(rt.take_warnings());
+      switch_document();
+#ifndef __EMSCRIPTEN_PTHREADS__
+      sg.publisher().flush(); // single-thread wasm: no worker drains publishes, so do it per frame
+#endif
+      if (yield_timer)
+        emscripten_sleep(0);
+      else
+        arigl_wait_frame();
+#else
+      const auto start = std::chrono::steady_clock::now();
+      rt.step(1.0 / fps);
+      print_warnings(rt.take_warnings());
+      switch_document();
+      std::this_thread::sleep_until(start + period);
+#endif
+    }
+    conf.stop(); // join the transport reader before the shard (owned by conf) is destroyed
+    ari::restore_signal_traps();
+    cam.detach();
+    if (!exit_signal.empty())
+      return 128 + ari::signal_number(exit_signal);
+    return rt.app_runtime().exit_code();
+  };
+
   ari::apply_state_sets(app, sg.getStatePrefix(), o.sets); // --set: before the nodes seed theirs
+
+#ifdef CVC_ARIADNE_PYTHON
+  // The window is lent to the Python: the document's python: block runs at its load. A Python
+  // program in place of the document has its Host() adopt this window and load a document; its
+  // host.run() runs after_load, and when it returns without, this host does.
+  const ari::python::Attachment lent =
+      lend_python(app, rt, view, cam, ui, offscreen ? "offscreen" : "window", after_load);
+  if (is_python_program(o.doc)) {
+    bool loaded = false;
+    rt.app_runtime().add_load_hook(
+        [&loaded](ari::LoadResult &, const std::string &) { loaded = true; });
+    const int status = g_python->run_script(o.doc, o.doc_args);
+    if (g_python->loop_ran())
+      return status ? status : g_python->loop_status();
+    return status != 0 || !loaded ? status : after_load();
+  }
+#endif
   if (const int status = load_document(rt, o); status >= 0)
     return status;
   note_misplaced(rt.app_runtime(), o);
-  ari::report_running(); // the browser shell takes its loading screen down
-  // The rich scene panels (scene_panel / stage_lighting_panel / scene_menu), for a document that
-  // uses them rather than the declarative components, and Settings' scene_settings. They need the
-  // realized lighting rig, so a document loaded later registers them again.
-  const auto register_panels = [&] {
-    const gla::RealizedScene *realized = rt.realized();
-    cvc::gl::StageLighting *rig =
-        realized && !realized->rigs.empty() ? realized->rigs.front().get() : nullptr;
-    gla::register_scene_panels(rt.backend(), sg, rig);
-  };
-  register_panels();
-  // Between frames: load the document the Demos menu picked, in place of this one. A document that
-  // fails to load leaves the current one running.
-  const auto switch_document = [&] {
-    if (gallery_left)
-      rt.request_close();
-    if (gallery_next.empty())
-      return;
-    const std::string next = std::exchange(gallery_next, std::string());
-    rt.app_runtime().set_host_menus(host_menus(next));
-    rt.app_runtime().set_document_args({}, "arigl run " + next);
-    try {
-      print_warnings(rt.load(next));
-      register_panels();
-      arigl::gallery::show_in_url(next);
-    } catch (const std::exception &e) {
-      std::fprintf(stderr, "arigl: %s\n", e.what());
-    }
-  };
-  if (o.command == "check")
-    return rt.app_runtime().exit_code(); // an init: that called (quit code)
-
-  if (o.command == "snapshot") {
-    rt.set_fixed_clock(true); // reproducible: the scene clock advances 1/30 s a frame
-    const int frames = std::max(1, o.frames);
-    bool settle = false;
-    const auto period = snapshot_period(o);
-    for (int f = 0; f < frames; ++f) {
-      const auto start = std::chrono::steady_clock::now();
-      conf.pump(); // publish this frame's room-tree + media to the relay (run mode does this via
-                   // the input pump, set below; a snapshot of a live conference must pump too)
-      rt.frame(1.0 / 30.0);
-      // (quit code) ends the snapshot at the frame it quit on, as ari's does.
-      const bool last = f + 1 == frames || rt.app_runtime().should_close();
-      // The last frame waits for the document's requests and pictures (§5.11), if it has any out.
-      if (last)
-        settle = !rt.app_runtime().should_close() &&
-                 (o.net.enabled || rt.app_runtime().runtime().media_stale());
-      if (last && !settle)
-        view.writePNG(o.png.c_str()); // renders and writes the last frame
-      else
-        rt.render();
-      if (last)
-        break;
-      std::this_thread::sleep_until(start + period);
-    }
-    if (settle) { // the frame shows what the document's requests brought back
-      rt.app_runtime().settle(
-          [&] {
-            rt.frame(1.0 / 30.0);
-            rt.render();
-          },
-          o.settle > 0 ? o.settle : ari::kDefaultSettleSeconds);
-      rt.frame(1.0 / 30.0);
-      view.writePNG(o.png.c_str());
-    }
-    print_warnings(rt.take_warnings());
-    return rt.app_runtime().exit_code();
-  }
-
-  // The frame loop prints each warning as it comes (print_warnings below); they also go to
-  // --log FILE and to the browser page (host_warnings.h).
-  ari::LiveWarnings live("arigl", o.log, /*stderr_when_not_a_terminal=*/false);
-  if (!live.error().empty()) {
-    std::fprintf(stderr, "arigl: %s\n", live.error().c_str());
-    return 2;
-  }
-  rt.app_runtime().set_warning_listener([&live](const std::string &w) { live(w); });
-
-  // Input the VTK interactor does not carry: touch navigation, SDL's keys and pointer (the
-  // documents' on_key / on_pointer), and the OS signals trapped below. Fed before the drain, so
-  // the document sees them this frame.
-  cvc::gl::SdlInput sdl;
-  sdl.init();
-  std::string exit_signal;
-  rt.set_input_pump([&] {
-    conf.pump(); // push this frame's room-tree writes (room-join + roster) to the relay
-    touch.update();
-    if (!sdl.attached())
-      sdl.attach(view.renderWindow()); // once VTK has made its window
-    // What ImGui takes -- the keys typed into a field, a click on a window -- is not the
-    // document's. A release always is, so nothing the document saw go down stays held.
-    for (const cvc::gl::InputEvent &e : sdl.poll()) {
-      using K = cvc::gl::InputEvent::Kind;
-      if ((e.kind == K::KeyDown && ui.wantsKeyboard()) ||
-          ((e.kind == K::MouseMove || e.kind == K::MouseButtonDown || e.kind == K::MouseWheel) &&
-           ui.wantsMouse()))
-        continue;
-      rt.post_input(to_ari(e));
-    }
-    for (std::string sig = ari::take_trapped_signal(); !sig.empty();
-         sig = ari::take_trapped_signal())
-      if (!rt.post_signal(sig, "os")) { // no on_signal: the host's default is to stop
-        exit_signal = sig;
-        rt.request_close();
-      }
-  });
-  ari::install_signal_traps();
-  view.setFrameYield(cvc::gl::SceneRenderer::FrameYield::App);
-  const double fps = o.fps > 0 ? o.fps : 120.0;
-#ifndef __EMSCRIPTEN__
-  const auto period = std::chrono::duration<double>(1.0 / fps);
-#else
-  // $CVC_ARIGL_YIELD=timeout (the page's ?yield=timeout) yields on a 0 ms timer instead of the
-  // next animation frame: the pacing's A/B.
-  const char *yield_env = std::getenv("CVC_ARIGL_YIELD");
-  const bool yield_timer = yield_env && std::string(yield_env) == "timeout";
-#endif
-  while (!rt.should_close()) {
-#ifdef __EMSCRIPTEN__
-    // Browser: one frame, then yield to the event loop (Asyncify) until the next animation frame
-    // (arigl_wait_frame): the display paces the loop. FrameYield::App above keeps VTK from
-    // yielding twice.
-    rt.step(1.0 / fps);
-    print_warnings(rt.take_warnings());
-    switch_document();
-#ifndef __EMSCRIPTEN_PTHREADS__
-    sg.publisher().flush(); // single-thread wasm: no worker drains publishes, so do it per frame
-#endif
-    if (yield_timer)
-      emscripten_sleep(0);
-    else
-      arigl_wait_frame();
-#else
-    const auto start = std::chrono::steady_clock::now();
-    rt.step(1.0 / fps);
-    print_warnings(rt.take_warnings());
-    switch_document();
-    std::this_thread::sleep_until(start + period);
-#endif
-  }
-  conf.stop(); // join the transport reader before the shard (owned by conf) is destroyed
-  ari::restore_signal_traps();
-  cam.detach();
-  if (!exit_signal.empty())
-    return 128 + ari::signal_number(exit_signal);
-  return rt.app_runtime().exit_code();
+  return after_load();
 }
 
 // ── the terminal (FTXUI / tvision widgets, the scene rendered behind them) ──────────────────────
@@ -2158,6 +2248,10 @@ int run_terminal(const ari::HostOptions &o) {
   CheckedTerminalScene scene(app, *backend, /*supersample=*/2, prefix);
   ari::AppRuntime rt(app, prefix, &scene);
   rt.set_backend(*backend);
+#ifdef CVC_ARIADNE_PYTHON
+  const ari::python::Attachment lent =
+      lend_python(app, rt, o.command == "run" ? "terminal" : "headless");
+#endif
   if (const std::string error = rt.enable_net(o.net); !error.empty()) {
     std::fprintf(stderr, "arigl: %s\n", error.c_str());
     return 2;
@@ -2298,6 +2392,11 @@ int arigl_main(int argc, char **argv) {
 #else
   constexpr bool kTerminalOnly = false;
 #endif
+#ifdef CVC_ARIADNE_PYTHON
+  if (argc >= 2 && std::string(argv[1]) == "python") // ariglx python [args]: a plain python3
+    return ari::python::Engine::python_main({kRuntimeName, {}},
+                                            std::vector<std::string>(argv + 2, argv + argc));
+#endif
   const ari::HostOptions o =
       ari::parse_host_args(argc, argv, {"--terminal", "--json", "--functions"});
   if (o.help)
@@ -2348,6 +2447,28 @@ int arigl_main(int argc, char **argv) {
       return status;
 #ifdef CVC_ARIGL_COMPONENT_DIR
   staged.component_paths.push_back(CVC_ARIGL_COMPONENT_DIR); // arigl-web's embedded library
+#endif
+#ifdef CVC_ARIADNE_PYTHON
+  if (terminal && is_python_program(staged.doc)) {
+    std::fprintf(stderr,
+                 "%s: a Python program runs in a window (or snapshot --png); "
+                 "--terminal takes a .ari document\n",
+                 kRuntimeName);
+    return 2;
+  }
+  // Before any app or runtime: the interpreter outlives every runtime it is lent.
+  ari::python::Engine python({kRuntimeName, o.python_path});
+  if (!python.ok()) {
+    std::fprintf(stderr, "%s: %s\n", kRuntimeName, python.error().c_str());
+    return 1;
+  }
+  g_python = &python;
+#else
+  if (!o.python_path.empty()) {
+    std::fprintf(stderr, "arigl: --python-path is for the scripting hosts (arix, ariglx); arigl "
+                         "has no Python\n");
+    return 2;
+  }
 #endif
   return terminal ? run_terminal(staged) : run_window(staged);
 }

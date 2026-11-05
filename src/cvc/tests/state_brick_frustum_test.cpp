@@ -8,6 +8,7 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include <algorithm>
 #include <cvc/state/state_brick_manifest.h>
 #include <gtest/gtest.h>
 

@@ -20,7 +20,10 @@
 // and read_model/read_geometry raise "no handler" (mirroring the ImageMagick
 // image handler).
 
+#include <algorithm> // read_model_from_memory: the extension, lowercased
+#include <cctype>
 #include <cvc/model/model_file_io.h>
+#include <string>
 
 #ifdef CVC_ENABLE_ASSIMP
 #include <assimp/Importer.hpp>
@@ -335,16 +338,8 @@ material build_material(const aiScene *scene, const aiMaterial *aim, const std::
   return mat;
 }
 
-// Shared read path for both handlers.
-model read_model_assimp(const std::string &path) {
-  Assimp::Importer imp;
-  const aiScene *s = imp.ReadFile(path, import_flags());
-  if (!s || (s->mFlags & AI_SCENE_FLAGS_INCOMPLETE) || !s->mRootNode)
-    throw std::runtime_error(std::string("cvc::model assimp read '") + path +
-                             "': " + imp.GetErrorString());
-
-  const std::string model_dir = dir_of(path);
-
+// A read scene as a model; `model_dir` resolves its external textures (empty: none resolve).
+model model_of_scene(const aiScene *s, const std::string &model_dir) {
   model m;
   m.materials.reserve(s->mNumMaterials);
   for (unsigned int i = 0; i < s->mNumMaterials; ++i)
@@ -361,6 +356,26 @@ model read_model_assimp(const std::string &path) {
   }
 
   return m;
+}
+
+// Shared read path for both handlers.
+model read_model_assimp(const std::string &path) {
+  Assimp::Importer imp;
+  const aiScene *s = imp.ReadFile(path, import_flags());
+  if (!s || (s->mFlags & AI_SCENE_FLAGS_INCOMPLETE) || !s->mRootNode)
+    throw std::runtime_error(std::string("cvc::model assimp read '") + path +
+                             "': " + imp.GetErrorString());
+  return model_of_scene(s, dir_of(path));
+}
+
+// The same from bytes in memory, the format by `hint` (an extension without its dot).
+model read_model_assimp_memory(const void *data, std::size_t size, const std::string &hint) {
+  Assimp::Importer imp;
+  const aiScene *s = imp.ReadFileFromMemory(data, size, import_flags(), hint.c_str());
+  if (!s || (s->mFlags & AI_SCENE_FLAGS_INCOMPLETE) || !s->mRootNode)
+    throw std::runtime_error("cvc::model assimp read of " + std::to_string(size) + " bytes of ." +
+                             hint + ": " + imp.GetErrorString());
+  return model_of_scene(s, std::string());
 }
 
 // -------------
@@ -421,6 +436,37 @@ private:
 #endif // CVC_ENABLE_ASSIMP
 
 namespace cvc {
+bool can_read_model_from_memory(const std::string &extension) {
+#ifdef CVC_ENABLE_ASSIMP
+  std::string ext = extension;
+  if (!ext.empty() && ext[0] != '.')
+    ext = "." + ext;
+  std::transform(ext.begin(), ext.end(), ext.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  const model_file_io::extension_list known = assimp_extensions();
+  return std::find(known.begin(), known.end(), ext) != known.end();
+#else
+  (void)extension;
+  return false;
+#endif
+}
+
+model read_model_from_memory(const void *data, std::size_t size, const std::string &extension) {
+  if (!can_read_model_from_memory(extension))
+    throw unsupported_model_file_type("cvc::read_model_from_memory: no reader for '" + extension +
+                                      "' from memory");
+#ifdef CVC_ENABLE_ASSIMP
+  std::string hint = extension[0] == '.' ? extension.substr(1) : extension;
+  std::transform(hint.begin(), hint.end(), hint.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return read_model_assimp_memory(data, size, hint);
+#else
+  (void)data;
+  (void)size;
+  return model();
+#endif
+}
+
 // Register the built-in model handlers. Called once (lazily) from
 // model_file_io::get_handlers(). When Assimp is disabled this registers nothing
 // — read_model then raises "no handler" until another backend is added.

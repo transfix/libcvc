@@ -240,6 +240,28 @@ def test_real_bundle_matches_terrain_json():
     )
 
 
+def test_nav_world_rasterize():
+    """pycvc.nav_world_rasterize: cvc::nav's planning grid from a world, without VTK."""
+    if not hasattr(pycvc, "nav_world_rasterize"):
+        print("  pycvc lacks nav_world_rasterize: skipped")
+        return
+    w = pycvc.world_geometry()
+    w.add_terrain("terrain", pycvc.height_field(21, 21, 0.0, 0.0, 1.0, 1.0, [2.0] * 441))
+    block = pycvc.geometry(pycvc.make_app())  # a roof over x, y in [4, 8]
+    block.add_vertices([4, 4, 6, 8, 4, 6, 8, 8, 6, 4, 8, 6])
+    block.add_triangles([0, 1, 2, 0, 2, 3])
+    w.add_mesh("block", block, surface=w.surface_id("building_concrete"))
+    p = pycvc.nav_world_rasterize(w, 21, 21, 0.0, 0.0, 20.0, 20.0)
+    occ, h = p["occupancy"], p["height"]
+    assert occ.shape == (21, 21) and occ.dtype == np.uint8 and h.dtype == np.float32
+    assert occ[6, 6] == 1 and occ[15, 15] == 0, "the block's samples, and only them"
+    assert occ.sum() == 25, f"x, y in 4..8: 5 x 5 samples ({occ.sum()})"
+    assert np.all(h == 2.0), "the terrain's height everywhere"
+    q = pycvc.nav_world_rasterize(w, 21, 21, 0.0, 0.0, 20.0, 20.0, inflate=1)
+    assert q["occupancy"].sum() > occ.sum() and q["occupancy"][3, 6] == 1, "inflate dilates"
+    expect_raises(lambda: pycvc.nav_world_rasterize(w, 1, 21, 0, 0, 20, 20), "one row")
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

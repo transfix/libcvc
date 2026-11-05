@@ -18,8 +18,11 @@
 
 #include <cstdint>
 #include <cvc/ariadne/ariadne.h>       // cvc::ariadne::Runtime, Widget, run_init, ...
+#include <cvc/ariadne/data.h>          // DataStore
 #include <cvc/ariadne/net_host.h>      // NetHostConfig
 #include <cvc/ariadne/scene_adapter.h> // cvc::ariadne::SceneAdapter (optional)
+#include <cvc/state/state_exec/async_call.h> // async_marshal (register_async_function)
+#include <cvc/state/state_exec/types.h>      // native_fn (register_function)
 #include <functional>
 #include <map>
 #include <memory>
@@ -33,6 +36,7 @@ class app;
 namespace ariadne {
 
 class Backend;
+struct LoadResult; // the loaded document (loader.h)
 
 class AppRuntime {
 public:
@@ -53,6 +57,8 @@ public:
   // The underlying Runtime — an escape hatch for backend attachment (a backend's own
   // install/wire step) and advanced hosts. Do not call rt.render() directly.
   Runtime &runtime();
+  // The state prefix the document binds under.
+  const std::string &prefix() const { return prefix_; }
 
   // A search dir for cvc:// component imports; forwarded to register_cvc_uri_handler on load().
   void add_component_path(const std::string &dir);
@@ -107,6 +113,36 @@ public:
   void register_async_verb(const std::string &name, const std::string &done_channel,
                            std::function<std::string()> work);
 
+  // Host functions with arguments and a value, the way a language binding registers its
+  // callables (pycvc: pycvc.host_function). register_function's `fn` runs inline on the drain
+  // thread: (name a b) passes the call's arguments and returns fn's value; an exception it throws
+  // raises at the call. register_async_function's `marshal` runs at the call, on the scheduler's
+  // thread, and returns the kernel the app's background task pool runs while the program parks,
+  // as register_async_verb's work does; (name-async ...) returns a future. With a `done_channel`,
+  // the result is also posted there. Re-registering a name replaces it.
+  void register_function(const std::string &name, cvc::state_exec::native_fn fn);
+  void register_async_function(const std::string &name, cvc::state_exec::async_marshal marshal,
+                               const std::string &done_channel = std::string());
+
+  // A host extension's part in loading a document. `hook` runs in every load() (a reload too),
+  // after the document is parsed and before its requires: is checked and its init: runs, with the
+  // parsed document (a custom block a host registered is in lr.extras) and its path. A scripting
+  // host runs the document's python: block here and registers the functions it exports, so
+  // requires: and the load's scan of what the programs call both see them. Throw to fail the load;
+  // push onto lr.warnings to warn. Hooks run in the order added.
+  using LoadHook = std::function<void(LoadResult &lr, const std::string &path)>;
+  void add_load_hook(LoadHook hook);
+  // Work a host extension does every frame: `hook` runs at the end of every drain(), on its
+  // thread, after the document's programs and the scene service. A scripting host runs a Python
+  // program's per-frame work here (pycvc_gl.ariadne.Host's events, on_frame hooks and watches), so
+  // it runs whichever loop drives the frames. Hooks run in the order added.
+  void add_frame_hook(std::function<void()> hook);
+
+  // Run `script` as one of the document's action programs (Runtime::run_program): submitted in the
+  // next drain(), and `done` (may be null) is called from a later drain() with "" when it finished,
+  // else why not.
+  void run_program(std::string script, std::function<void(const std::string &)> done = nullptr);
+
   // The standard way out: `on: quit` (a menu item's event) and the verb (quit [code]) both
   // request_close(code). code is an integer 0..255 (default 0); anything else raises in the
   // calling program (TypeError, ValueError) and nothing closes. The first request's code is the
@@ -117,6 +153,11 @@ public:
   // credential store, the http verbs and http(s) URIs). Returns "" or what is wrong, and then
   // nothing is turned on. Off unless called; this AppRuntime turns it off again when it dies.
   std::string enable_net(const NetHostConfig &config);
+
+  // The app's data store (data.h), which load() binds the document's data: block in (each entry a
+  // link at <prefix>.data.<name>) and the (data-*) verbs reach. A host reads the same datasets
+  // through it: wait("<prefix>.data.city"), then the objects on the nodes.
+  std::shared_ptr<DataStore> data_store() const { return data_; }
 
   // The document's own command line: everything after its path (doc_args.h). load() publishes
   // it as the read-only <prefix>.argv before init: runs and, when the document declares an args:
@@ -211,8 +252,17 @@ private:
     std::vector<std::pair<std::string, std::function<void()>>> sync;
     std::vector<std::tuple<std::string, std::string, std::function<std::string()>>> async;
     std::function<void(int)> quit; // register_quit: (quit [code])
+    // The (data-*) verbs: the store, and the document's prefix and directory (a relative URI's
+    // base), as the last load() set them.
+    std::weak_ptr<DataStore> data;
+    std::string prefix;
+    std::string doc_dir;
+    // register_function / register_async_function, by name (a later registration replaces).
+    std::map<std::string, cvc::state_exec::native_fn> functions;
+    std::map<std::string, std::pair<std::string, cvc::state_exec::async_marshal>> async_functions;
   };
   std::shared_ptr<Verbs> verbs_;
+  std::shared_ptr<DataStore> data_; // DataStore::of(app_): kept alive while this runtime is
   std::vector<std::string> pendingWarnings_; // read-lane diagnostics drain() collected
   std::function<void(const std::string &)> warningListener_; // set_warning_listener
   void collect_warnings(); // the Runtime's new warnings -> pendingWarnings_, each to the listener
@@ -235,6 +285,8 @@ private:
   bool validateArgs_ = true;
   bool hasArgsBlock_ = false;
   std::vector<std::pair<std::string, std::string>> tests_; // the document's tests: block
+  std::vector<LoadHook> loadHooks_;                        // add_load_hook, in order
+  std::vector<std::function<void()>> frameHooks_;          // add_frame_hook, in order
 };
 
 } // namespace ariadne

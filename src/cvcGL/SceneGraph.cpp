@@ -1248,6 +1248,22 @@ protected:
     return true;
   }
 
+  // A textured caster's bake: VTK's texture code runs after the depth is written and multiplies
+  // gl_FragData[0] by the texture's colour, so the stored 1 + exp(c * depth) was scaled by each
+  // texel's brightness and read back nearer the light than the surface: a textured ground (a
+  // city's aerial image) shadowed itself, darker where the image is darker, and a dark enough
+  // texel fell under the "nothing drawn" threshold and read lit. The bake keeps its depth; the
+  // texture only contributes its alpha, so a cut-out (a leaf's transparent texels) still casts
+  // nothing where it is clear.
+  bool PostReplaceShaderValues(std::string &vertexShader, std::string &geometryShader,
+                               std::string &fragmentShader, vtkAbstractMapper *mapper,
+                               vtkProp *prop) override {
+    vtkShaderProgram::Substitute(fragmentShader, "gl_FragData[0] = gl_FragData[0] * tcolor;",
+                                 "gl_FragData[0].a = gl_FragData[0].a * tcolor.a;", true);
+    return this->Superclass::PostReplaceShaderValues(vertexShader, geometryShader, fragmentShader,
+                                                     mapper, prop);
+  }
+
   bool focusChanged() const {
     if ((FocusRadius > 0.0) != (m_bakedFocusRadius > 0.0))
       return true;

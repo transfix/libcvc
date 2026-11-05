@@ -33,6 +33,8 @@
 //   --oidc-client I=ID    sign in to issuer I as client ID (repeatable; implies --net)
 //   --oidc-redirect-uri U a browser page's OAuth redirect URI
 //   --no-browser          never open the user's browser (sign-in shows a device code instead)
+//   --python-path DIR     a scripting host (arix, ariglx): DIR on its Python's sys.path
+//   (repeatable)
 //
 // boost::program_options reads them: --flag VALUE and --flag=VALUE both work, and an unknown flag
 // or one missing its value is an error.
@@ -76,6 +78,7 @@ struct HostOptions {
   int cell_w = 0, cell_h = 0;                              // --cell-size; 0 = ask the terminal
   NetHostConfig net;                    // --net, --net-allow, --net-policy, --credential-store
   std::string media_play;               // --media-play auto|always|never; "" = auto (§5.13)
+  std::vector<std::string> python_path; // --python-path DIR: a scripting host's sys.path entries
   std::vector<std::string> extra_flags; // the runtime's own flags that were given
   bool help = false;                    // -h / --help, or `help` as the command
   std::string error;                    // a usage error: print it with the usage and exit 2

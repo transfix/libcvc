@@ -1098,7 +1098,7 @@ int main() {
       Value v;
       v.kind = Value::Kind::Scalar;
       v.scalar = "0";
-      sky.props.entries.emplace_back("shadow", v); // skip the shadow bake to keep the test quick
+      sky.props.entries.emplace_back("shadow", v); // the shade starts off
       v.scalar = "storm";
       sky.props.entries.emplace_back("keys", v); // its live keys under storm.*, not sky.*
     }
@@ -1114,8 +1114,22 @@ int main() {
         "wave_sea realized a VolumeNode");
     chk(std::dynamic_pointer_cast<cvc::gl::VolumeNode>(sg.getGraphics("sky")) != nullptr,
         "cloud_sky realized a VolumeNode");
+    // The deck: a pool of near volumes (the node's id is the first) and one mesh of far shells.
+    chk(std::dynamic_pointer_cast<cvc::gl::VolumeNode>(sg.getGraphics("sky_near3")) != nullptr &&
+            std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("sky_far")) != nullptr,
+        "cloud_sky realized its near volumes and its far shells");
     // forest wind + sea refill + cloud drift each push a tick.
     chk(realized.custom_ticks.size() >= 3u, "forest/sea/sky each registered a per-frame tick");
+    // The sky's first tick gives the ground (its `ground:`, default terrain) the deck's shade: in
+    // its shader, not its texture.
+    {
+      auto ground = std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("terrain"));
+      chk(ground && !ground->hasSharedShaderInputs("cloud_sky"),
+          "the ground takes no shade before the sky's first tick");
+      realized.custom_ticks.back()(nullptr);
+      chk(ground && ground->hasSharedShaderInputs("cloud_sky"),
+          "the sky's first tick wired its shade into the ground's shader");
+    }
     bool emptyForest = false;
     for (const std::string &w : warnings)
       if (w.find("no trees planted") != std::string::npos)

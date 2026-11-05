@@ -576,7 +576,7 @@ The built-in top-level keys (`is_builtin_block`,
 ```
 meta  menubar  windows  overlays  root (alias: children)  scene  customs  requires
 init  on_tick  on_key  on_pointer  on_signal  keys  units  import  channels  lint  args
-windows_menu  tests  functions
+windows_menu  tests  functions  data
 ```
 
 `tests:` is read only by `ari test` (§13).
@@ -766,6 +766,28 @@ south-west to north-east), a body on it collides with the same triangles, and a 
 standing on it (`ground:` in `forest_trees`, `wave_sea`, `cloud_sky`) samples the triangle under
 each point.
 
+**Textures.** `material: { texture: <uri> }` drapes an image over a geometry node through its
+mesh's UVs. UV (0, 0) is the image's bottom-left corner. A `source: { data }` city's terrain wears
+its bundle's `satellite.png` this way, north up (§5.17).
+
+`material: { uv: { rotate, flip_u, flip_v, scale, offset } }` orients the image in texture space,
+for an image that sits otherwise. The steps apply in this order:
+1. `flip_u` and `flip_v` mirror it.
+2. `rotate` turns it 0, 90, 180 or 270 degrees counter-clockwise on the surface.
+3. `scale` and `offset` (a number, or `[u, v]`) map the result: `uv * scale + offset`.
+
+A textured node casts its shadow by its shape. Its image's alpha still cuts a cut-out's shadow,
+but its colours do not.
+
+**Clouds.** `cloud_sky` draws a deck of drifting, slowly changing L-system cumulus over its
+`ground:` node's extent (followed live): the clouds nearest the camera as volumes (`near:`), the
+rest as far shells. Their shade falls on the ground and on the nodes in `receivers:` (and their
+children, LOD rungs included) through those meshes' shaders: it dims the sun's light and leaves
+their textures and colours alone. Its other keys: `extent` (a cloud's half-width), `base` / `top`,
+`coverage`, `spacing`, `seed`, `variants`, `sun_az` / `sun_el` (the key light's, which the shade
+is cast along), `shade_k` / `shade_floor`, `horizon` and `shadow` (0 starts the shade off;
+`sky_controls.ari` toggles it, with the drift and morph speeds).
+
 **Generated terrain.** `source: { terrain: { generator, size, resolution, seed, amp, file,
 preset } }` draws a `cvc::world` terrain generator's ground as such a heightfield: `fbm` (the
 analytic relief the terrain lab stands on; the default), `dem` (an elevation `.npy` at `file`, a URI
@@ -801,7 +823,8 @@ seam. The chunks share the node's one texture and take its `casts_shadow`, `shad
 
 **The fast render path.** A big static world draws fast when it is a few merged meshes and its
 shadow maps are re-baked rarely and spent where the camera looks. These keys say so
-(`examples/ariadne/documents/terrain_lab.ari` uses all of them):
+(`examples/ariadne/documents/terrain_lab.ari` uses all of them but `casts_shadow: false`: its
+ground casts, so its ridges shade its valleys):
 
 ```yaml
 scene:
@@ -820,7 +843,8 @@ scene:
       wash: 0                   # or { intensity, count, height }; 0 drops the downlight ring
   nodes:
     - node: ground
-      casts_shadow: false       # receives shadows, casts none, never forces a re-bake
+      casts_shadow: false       # receives shadows, casts none, never forces a re-bake (no
+                                #   self-shading: a valley is not shaded by its ridge)
       material: { opaque: true }  # drawn opaque: no per-texel alpha scan of its texture
 ```
 
@@ -1749,6 +1773,116 @@ the room verbs with functions. `src/arigl/tests/chat_driver.ari` and `chat_two_c
 scripted arigl clients through a local arisrv: one posts, a late joiner pages back through
 everything, the two exchange direct messages, and a third checks it was pushed none of them.
 
+### 5.17 `data:`: datasets in the state tree
+
+A document names its datasets by URI. The host loads each one off the frame thread into one
+shared place in the state tree, and the scene draws from there. The design and its later phases
+are in [ARIADNE_DATA_ROADMAP.md](roadmap/ARIADNE_DATA_ROADMAP.md); the code is
+[`data.h`](../inc/cvc/ariadne/data.h).
+
+```yaml
+data:
+  city:                                             # the document's data.city
+    uri: cvcpkg://cy-pca/scene-austin-south-small   # where it comes from
+    path: share/cvc-scenes/austin_south             # the part of the package to keep
+    as: city_bundle                                 # how to decode it
+  notes: notes.json                                 # a bare URI: decoded by its extension
+  big: { uri: https://example.org/big.tar.gz, load: lazy }
+
+scene:
+  physics: {}
+  nodes:
+    - node: city
+      source: { data: city }          # the terrain and the buildings, drawn
+      body: static                    # and in the physics world
+```
+
+**Sources.** A source can be any of these:
+- a file or a directory, relative to the document;
+- an `https://` URL;
+- `cvcpkg://ORG/NAME[@VERSION]`, a cvcpkg data package;
+- `state://PATH?data`, where the host registered the `state` scheme (`register_state_uri_handler`);
+- any scheme a host registered (§6.4).
+
+`https` and `cvcpkg` need the host's network: `--net-allow https://cvcpkg.org` (or
+`AriRuntime.enable_net_allow([...])` in Python). A document that loads from the network lists
+`net` in `requires:`.
+
+**cvcpkg packages.** For a `cvcpkg://` source the host:
+1. asks the registry (`CVCPKG_URL`, else `https://cvcpkg.org`) for the package's newest
+   noarch build, or for `@VERSION`;
+2. downloads its archive;
+3. checks the archive against the registry's size and sha256;
+4. keeps it in a cache keyed by that hash (`CVC_DATA_CACHE`, else the user's cache directory).
+
+The next run reads the cache.
+
+**Archives.** An archive is recognized by its bytes, whatever its name: tar (plain, gzip or zstd)
+and zip (stored or deflate). It is unpacked in memory, and only its regular files are kept.
+- `path:` keeps one directory of the archive, stripped from the paths, or names one file.
+- A path that is absolute or climbs out with `..` fails the load.
+- So does going past `sys.data.max_entries` files (default 100,000) or `sys.data.max_bytes`
+  bytes (default 2 GiB).
+
+**Where it lands.** The store is the `data` subtree at the app root, one node per request, so the
+same request from two documents or a host is loaded once. The document's `data.<name>` is a
+transparent link to that node, so `bind: data.city.status` and `(state-get "data.city.rev")` read
+through it:
+
+| Under `data.city` | |
+|---|---|
+| `status` | `idle`, `fetching`, `unpacking`, `decoding`, `ready` or `error`; the node's value is the same |
+| `progress`, `error` | 0..1 while it loads; why it failed |
+| `rev` | 1, 2, ... each time a load completes: what a watcher polls |
+| `uri`, `canonical`, `sha256`, `size`, `as` | the request, what it resolved to (`cvcpkg://cy-pca/scene-austin-south-small@1.0.0+cvc.2`), the archive's hash and size, the decoder |
+| `files`, `files.<i>` | the file count; each file's path, with its bytes on the node's `data()` |
+
+**Decoders (`as:`).** Each decoder writes its outputs next to those keys. The default is `files`
+for an archive or a directory, and otherwise one picked by the file's extension:
+
+| `as:` | Writes |
+|---|---|
+| `files` | the files only |
+| `bytes`, `text` | `content` (the bytes on `data()`), `text` (the value) |
+| `json` | `json`: objects as children (a `.` in a key becomes `_`), arrays as `0`, `1`, ... with the count as the value |
+| `mesh` | `geometry`: a `cvc::geometry`, from any format `read_geometry` reads |
+| `volume` | `volume`: a `cvc::volume` |
+| `heightfield` | `terrain` (a `cvc::height_field`) and `bounds.*`, from a `terrain.json` |
+| `city_bundle` | `world` (a `world_geometry`), `terrain`, `buildings` (a `cvc::geometry`), `buildings_error`, `bounds.min_x` ... `max_y`, `satellite` (`satellite.png` decoded: the image on `data()`, its file path as the value) |
+
+A host adds its own with `register_data_decoder`.
+
+**Scene nodes.** A `source: { data: NAME }` node is an empty group at load. Once its dataset is
+ready, the scene draws into it the first of the dataset's `world`, `geometry`, `terrain` or
+`volume` that it has (`item:` picks one). It draws again whenever the dataset's `rev` changes, or
+the document's link points at another dataset. What it drew before goes, and so do its bodies:
+- a world's items become the node's children, its terrain becomes the node's height field (for
+  `ground:`) and wears the dataset's `satellite` image (north at the image's top), and with
+  `body:` its items are static bodies in the scene's `physics:` world;
+- a mesh or a height field becomes one mesh node;
+- a volume becomes a volume node.
+
+`frame: true` (or `first`) frames the main view's camera on what the node drew, the first time it
+draws, and `frame: always` does so each time. It writes the bounds to the camera's `frame` request
+(`<prefix>.viewers.main.camera.frame`, "min_x min_y min_z max_x max_y max_z"), which any program
+or host can write as well.
+
+**Document logic.**
+- `(data-load NAME URI [AS [PATH]])` points `data.NAME` at a new request and starts it. The
+  nodes bound to `NAME` keep drawing the old dataset until the new one is ready.
+- `(data-reload NAME)` loads it again.
+- `(data-status NAME)` returns its status.
+- `(data-files NAME)` lists its file paths.
+- `(data-file NAME PATH)` returns one file's bytes, or nil.
+
+**Hosts.** In C++, use `AppRuntime::data_store()`. In Python:
+- `pycvc.data_load` and `data_wait` start and wait for a load;
+- `data_files` and `data_file` read the files;
+- `data_world`, `data_height_field` and `data_geometry` return the objects the scene draws, which
+  share their arrays.
+
+So a host reads `"<prefix>.data.city"` and never opens the bundle a second time.
+
 ### 5.18 Views of the scene: `type: viewport` and node `tags:`
 
 A `viewport` widget shows the document's scene inside one of its windows, from a camera of its
@@ -2058,7 +2192,9 @@ relative bases in nested composition.
 
 `src/cvc/ariadne/components/*.ari` (installed to `<prefix>/share/libcvc/ariadne/components`
 and embedded in the wasm demos) are reusable windows a document imports by `cvc://` and
-includes. Each binds state keys a C++ object owns, so it needs no host code;
+includes. The `libcvc` cvcpkg bundles and the release tarballs carry the directory from 3.7.10.
+Earlier native bundles left it out, so with those a host needs `CVC_ARIADNE_PATH` pointing at a
+copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object owns, so it needs no host code;
 [`INDEX.ari`](../src/cvc/ariadne/components/INDEX.ari) catalogs them:
 
 | component | drives |
@@ -2372,6 +2508,13 @@ document path is the document's (§5.6):
 | `ari` | libcvc only (FTXUI, optionally tvision) | in the terminal; a `scene:` is dropped | [`src/ari`](../src/ari/main.cpp) |
 | `arigl` | libcvc + cvcGL (VTK, ImGui) | in a real window, or `--terminal` with its scene rendered behind the widgets | [`src/arigl`](../src/arigl/main.cpp) |
 | `arisrv` | libcvc + gRPC + WebSocket | headless, as a server (the conference relay + WS↔gRPC bridge) | [`src/arisrv`](../src/arisrv/main.cpp) |
+| `arix`, `ariglx` | `ari`, `arigl` + an embedded CPython (pycvc, pycvc_gl, numpy) | as `ari` and `arigl`, plus a document's `python:` block and a Python program in place of the document (§9.6) | [`src/ariadne_python`](../src/ariadne_python/python_engine.h) |
+
+Each is its own cvcpkg package, built from its recipe in [`cvcpkg/recipes`](../cvcpkg/recipes)
+against the installed libcvc: `cvcpkg install ari`, `cvcpkg install arigl`, and for a room's
+server `cvcpkg install arisrv` (linux, macOS and windows). arisrv's transports, its Jolt avatars
+and its libjpeg-turbo video rungs are libcvc's, so it needs a libcvc built with them: every
+libcvc after 3.7.8 is, and arisrv's standalone configure refuses an SDK with neither transport.
 
 ```
 arigl run      [--terminal] [flags] doc.ari [document args...]
@@ -2579,39 +2722,154 @@ deletes the image tiles under them, and the addon decodes each image asynchronou
 moment the half-block underlay can show through: the picture flickers between its real pixels
 and the half-block version, never to blank.
 
-### 9.3 From Python (a full app via `AriRuntime`)
+### 9.3 Writing a Python host
 
-`AriRuntime` ([`AriRuntime.h`](../inc/cvc/gl/ariadne/AriRuntime.h)) collapses all of the
-above into one object, exposed through the `pycvc_gl` bindings. Python never sees SDL or
-VTK directly — cvcGL's onscreen window is SDL's (VTK renders into it) and SDL is the internal
-input backend:
+A Python program can be a document's host: it opens the document, the document calls into it,
+and the two pass data both ways. `pycvc_gl.ariadne.Host`
+([`pymod_gl/ariadne.py`](../bindings/pycvc/pymod_gl/ariadne.py)) is that host; the programs in
+[`examples/ariadne/python`](../examples/ariadne/python) are the place to start:
+
+| Example | The C++ host it mirrors | What it shows |
+|---|---|---|
+| [`hello.py`](../examples/ariadne/python/hello.py) | `ariadne_hello` | a button calls a Python function, another raises an event Python handles; Python writes the document every frame |
+| [`data_feed.py`](../examples/ariadne/python/data_feed.py) | `ariadne_stream` | Python pushes two plotted series, a table, a numpy picture and a live video stream, and reads the document's controls |
+| [`form.py`](../examples/ariadne/python/form.py) | `nav_compute` | a two-way form: a function returns a dict the document writes with `state-set-tree`, an async function runs a Monte Carlo while the UI keeps drawing, a watch recomputes a preview |
+| [`nav.py`](../examples/ariadne/python/nav.py) | `nav_convoy`, `nav_city_drive` | a Python loop drives Humvees on a `cvc::nav` sim_world (pycvc) through Austin, or a block city when its bundle is not installed: true-scale models, routes planned for their turning radius, Jolt physics or nav's kinematic bicycle (the Plant combo), a chase or overview camera, readouts and a map picture |
+
+Each takes `--offscreen` (GL with no window), `--headless` (no GL), `--frames N` and
+`--png PATH`; off a window it presses its own buttons and prints what the document shows.
+`nav.ari` has a `scene:`, so it requires `gl.scene` (§5.7) and `nav.py` has no headless run.
+
+`nav.py` finds Austin with `pycvc_gl.scenes.find_scene()` (`$CVC_NAV_BUNDLE`, else
+`<prefix>/share/cvc-scenes/austin_south`: `cvcpkg install scene-austin-south-small
+vehicle-humvee`) and the Humvee with `find_vehicle_model()`. `pycvc_gl.vehicle.VehicleModel`
+makes a glTF vehicle +X forward, +Z up and true to scale (as the C++ demos'
+`load_vehicle_template` does), and `seat_transform` / `body_transform` place it from a heading or
+a physics body's pose. Its planning grid is `pycvc.nav_world_rasterize(city.world(), rows, cols,
+...)`, cvc::nav's rasterizer (no VTK), which also gives the terrain's height at each sample: the
+navigator gets the grade (`nav_sim_world_set_terrain` with the Humvee's
+`nav_plant.terrain_config_of`), and the routes keep off the slopes `nav_terrain_build` marks
+infeasible for it. The Jolt plant drives on flat ground with the buildings as boxes, as the C++
+city demos do; `--relief` puts it on the city's own terrain and building mesh
+(`pycvc.nav_plant(..., ground=field)` starts each vehicle on the ground under it). There the grade
+term halves the rollovers but does not end them: the limit it applies is the climb, and a Humvee
+cornering on a 10-25 degree side slope at 5-9 m/s can still roll (4 of 16 in 96 s of Austin).
+
+Its `scene:` block is `terrain_lab.ari`'s soft afternoon look (§5.4): a pale sky gradient, a
+low warm `three_point` sun with a cool fill, and shadows that follow the camera with soft edges
+(`shadows.softness`, the shadow filter's radius in texels). The city's materials are matte (low
+specular), set from Python on the nodes it adds.
 
 ```python
-import pycvc, pycvc_gl
+from pycvc_gl.ariadne import Host
 
-app  = pycvc.App()
-view = pycvc_gl.SceneRenderer(...)      # owns the GL window
-rt   = pycvc_gl.AriRuntime(view.scene(), view.camera(), view.overlay())
+host = Host(mode="window")       # "window", "offscreen" (GL, no window) or "headless" (no GL)
 
-rt.load("demo.ari")
-# Register a Python function as a DSL verb (host intrinsic on the app-wide scheduler):
-rt.register_verb("greet", lambda name: f"hello {name}")
-rt.register_async_verb("fetch_rows", slow_query)   # an async function: (fetch_rows) parks
+@host.function("greet")          # (greet NAME) in any of the document's programs
+def greet(name):
+    return f"Hello, {name}!"     # numbers, str, list, dict, None (and numpy) go back
 
-while not rt.should_close():
-    rt.frame(dt)     # processUIEvents → cam.update → drain → visibility → tick
-    rt.render()      # NEVER call the underlying rt.render() directly; go through view
+@host.async_function("solve")    # (solve ...) parks its program; this runs on a pool thread
+def solve(a, b):
+    return heavy(a, b)
+
+@host.on("reset")                # a button or menu item with `on: reset`
+def reset():
+    host.set("count", 0)
+
+@host.on_frame                   # every frame, after the document's programs, before the draw
+def tick(dt):
+    host.set_series("signal", samples)   # a plot: draws it
+
+host.load("doc.ari")             # register first: requires: is checked here
+host.run()                       # until the window closes or the document quits
+host.close()
 ```
 
-`register_verb` / `register_async_verb` install exactly one `register_action_intrinsics`
-provider onto the app-wide scheduler, so the verbs are reachable from the document's
-action lane. An async verb is an async function on the app's async host
-([STATE_EXEC_EXCEPTIONS.md](STATE_EXEC_EXCEPTIONS.md) section 3): `(fetch_rows)` parks the
-action while `slow_query` runs on the app's background task pool, then returns `str()` of its
-result. If it raises, the call raises a `PythonError`, which a `try` can catch. The call is
-charged to the action's caps (§2.2). `register_async_verb(name, done_channel, fn)` also posts
-the result to `done_channel`, for documents that wait with `(msg-recv "done_channel")`. `AriRuntime` also exposes `step`, `run`, `on`, `post_key`, `post_pointer`,
-and `reload_if_changed`.
+**Keys.** A key is relative to the document's state prefix, as a `bind:` is (§7): `host.set("a.b",
+1)` writes what `bind: a.b` shows. A key starting with `/` is app-root absolute. The prefix is
+the host's `name` (`Host(name=...)`, `"ari"` by default).
+
+**Python to the document.**
+
+| Call | What the document sees |
+|---|---|
+| `host.set(key, value)` (also `host[key] = value`) | the value's text: an int, a float (shortest round trip), `"1"`/`"0"` for a bool, `""` for None |
+| `host.set_tree(key, value)` | a subtree, as `(state-set-tree)` writes one: dict keys and list indices name children, a list's node holds its length |
+| `host.set_table(key, rows, columns=None)` | rows at `key.<i>.<column>` and the row count at `key`, for `repeat: (state-get "key")` (column names at `key_columns`) |
+| `host.set_series(key, values, limit=None)` | the comma-separated numbers a `plot:` draws |
+| `host.publish_image(name, array)` | the picture `image:` widgets with `src: name` show: (H, W), (H, W, 3) or (H, W, 4), uint8 or float in [0, 1], row 0 at the top |
+| `host.open_stream(id, w, h)` | a live video stream at `streams.<id>` for a `stream_view` widget or a `type: stream` node; `stream.publish(frame)` sends one |
+| `host.run_program(script, done=None)` | a program queued as one of its actions (`done(how)` gets `""` or why it did not finish) |
+| `host.emit(event)` | the event a button raises: its `on()` handler runs in the next frame |
+
+**The document to Python.** `host.on(event)` handles a bare `on: event`.
+`host.function(name)` and `host.async_function(name)` make a Python callable a function the
+document's programs call with arguments (`pycvc.host_function` builds it; values convert as
+`pycvc.Exec`'s do, §10.1). A synchronous function runs inline in the frame. An async one is an
+async function on the app's async host
+([STATE_EXEC_EXCEPTIONS.md](STATE_EXEC_EXCEPTIONS.md) section 3): its program parks while it
+runs on the app's background task pool, `(name-async ...)` returns a future,
+`with_call=True` passes the call first (`call.cancelled()`, `call.post(value)`), and
+`done_channel` also posts its value there. Their exceptions are the document's: the call raises
+a `PythonError` (its `python_type` names the Python exception), which a `try` catches.
+
+**Reading back.** `host.get(key, default)`, `get_float`, `get_int`, `get_bool` (which reads
+`"1"`/`"true"`/`"yes"`...), `get_series` (a numpy array), `get_tree` (the inverse of `set_tree`),
+`host.watch(key)` (a callback with the new value after a frame that changed it; `tree=True`
+for a subtree), `host.warnings`, and the frame: `host.snapshot(path)` (PNG) and
+`host.frame_rgb()` (an (H, W, 3) array).
+
+**The scene.** In a GL mode `host.scene` is the document's `SceneGraph`, so Python can add its
+own nodes beside the ones the `scene:` block realizes: `host.lab` is a `pycvc_gl.lab.Lab` over
+it (meshes, markers, paths, fields), and `host.frame_bounds(lo, hi)` aims the camera.
+`nav.py` draws its agents and tracks that way.
+
+**Modes.** `"window"` needs a display. `"offscreen"` renders into an offscreen window: a capture,
+or CI on a software GL (VTK picks GLX, EGL or OSMesa at run time; the ImGui overlay needs GLX, so
+CI runs it under Xvfb, see `pycvc-linux` in ci.yml). Its scene and UI clocks step by each frame's
+`dt`, so its frames are reproducible. A view whose shorter side is under 700 logical pixels
+starts with the windows hidden, as on a phone (§5.14), so captures use 1024 x 768 or more. `"headless"` has no GL at all: a `pycvc.AriApp`, an
+`AppRuntime` with no backend and no scene. The document's `init:`, residents, actions, host calls
+and state all run, but nothing is drawn, so a computed `bind:` is never evaluated, a `scene:` is
+dropped with a warning, and a document that `requires: gl.scene` does not load. Tests and CI use
+it.
+
+**Threads and the GIL.** Handlers, functions, `on_frame` hooks and `watch` callbacks run on the
+thread that calls `step()`/`run()`; an async function runs on a pool thread. An async function
+may compute and write state, but the scene and the pictures (`publish_image`, `host.lab`,
+`host.scene`) belong to the frame's thread: hand its result to an `on_frame` hook. A frame releases the
+GIL while C++ runs (so do `load()`, `wait_idle()` and the destructors of the runtime and the
+app), and each Python call takes it back, so an async function or another Python thread runs
+while the frame does. A callback may read and write state and queue programs, but not run a
+frame: `step()`, `run()`, `frame()` or `render()` from inside one raises `RuntimeError`
+(`AriRuntime` refuses it too), and `load()` from inside one waits for the frame to end.
+`close()` waits for the async functions still running, so a long one should watch
+`call.cancelled()`.
+
+**Errors.** An exception in an `on()` handler, an `on_frame` hook or a `watch` callback is raised
+from the `step()`/`run()` that ran it. A function's is the document's (above); one it does not
+catch stops that program with a warning, logged through `logging` (`pycvc_gl.ariadne`), and with
+`Host(strict=True)` raised from `step()` as an `AriadneError` whose cause is the Python
+exception: what a test wants.
+
+**The caps.** Ariadne caps each action at 0.1 s and 5000 steps (§2.2), sized for a document's
+own code, and a Python function's run time counts against the time cap (an async one's CPU time
+as steps too). A Python host raises them: `Host` sets `ariadne.limits.action_max_time` to 30 s
+and `action_max_steps` to 0 (no limit) unless `limits=` says otherwise (`limits={}` keeps
+Ariadne's). An async call parks its program, so a long one costs the UI nothing.
+
+**Underneath.** `Host` composes the bindings, which a program can use directly:
+`pycvc_gl.AriRuntime(view, cam, ui)` ([`AriRuntime.h`](../inc/cvc/gl/ariadne/AriRuntime.h)) in a
+GL mode and `pycvc.AriApp(app, prefix)` headless, both with `load`, `frame`, `render`, `step`,
+`run`, `on`, `register_host_function(pycvc.host_function(name, fn, is_async=False,
+with_call=False, done_channel=""))`, `register_quit`, `run_program`, `take_warnings`,
+`wait_idle`, `has_function`, `prefix`; `AriRuntime` adds `publish_image`, `enable_streaming`,
+`set_fixed_clock`, `post_key`, `post_pointer` and `reload_if_changed`. The older
+`register_verb(name, fn)` (no arguments, no value) and `register_async_verb(name, fn)` (no
+arguments, `str()` of the value) still work. In C++ the same functions are
+`AppRuntime::register_function(name, native_fn)` and `register_async_function(name, marshal,
+done_channel)`.
 
 ### 9.4 A document set, installed or served
 
@@ -2657,6 +2915,107 @@ scene), `pycvc.Exec` ([`bindings/pycvc/pycvc_exec.h`](../bindings/pycvc/pycvc_ex
 is the lighter handle. It owns a **private** async scheduler and lets you register Python
 callables as DSL functions (§10). One `Exec` is driven by one thread — use a separate
 `Exec` per thread.
+
+### 9.6 The scripting hosts: `arix` and `ariglx`
+
+`arix` and `ariglx` are `ari` and `arigl` with an embedded CPython
+([`src/ariadne_python`](../src/ariadne_python/python_engine.h); the plan for the rest, the browser
+and `arisrv`, is [roadmap/ARIADNE_SCRIPTING_HOSTS.md](roadmap/ARIADNE_SCRIPTING_HOSTS.md)). They
+take the same commands and flags, and add:
+
+- a document's `python:` block, run at load;
+- a Python program in place of the document: `ariglx run app.py`;
+- `<host> python [args]`, the interpreter as a plain `python3`;
+- `--python-path DIR` (repeatable): DIR on the interpreter's `sys.path`, as `PYTHONPATH` puts it.
+
+The interpreter is the prefix's when the host is installed beside a `python312` (with what is in
+its site-packages: pycvc, pycvc_gl, numpy, ...), else the one the host was built against.
+`PYTHONHOME` and `PYTHONPATH` work as for `python3`. There is one interpreter per process: numpy
+and the SWIG modules are not sub-interpreter safe.
+
+Each is a cvcpkg package of its own (Linux), so the stock hosts stay Python-free:
+`cvcpkg install ariglx` brings `python312`, `numpy-cp312`, `pycvc-cp312` and `pycvc-gl-cp312` into
+the same prefix, and `ariglx` finds them there. `arix` brings pycvc but not pycvc_gl; install
+`pycvc-gl-cp312` too for a Python program, whose `Host` is pycvc_gl's.
+
+**A document's `python:` block.**
+
+```yaml
+requires: [python, python.numpy]
+python:
+  path: [py]              # sys.path entries, relative to the document (its directory is always one)
+  modules: [sim]          # imported at load
+  export:                 # functions to export by name
+    - sim.step_world
+    - {name: sim.reset, as: reset-world, async: true}
+  source: |
+    import numpy as np
+
+    @export
+    def histogram(values, bins=16):
+        counts, edges = np.histogram(values, bins)
+        return {"counts": counts.tolist(), "edges": edges.tolist()}
+init: (state-set-tree "hist" (histogram (list 1 2 2 3)))
+```
+
+- The block is its source alone (`python: |`), or a map of `source:`, `modules:`, `path:` and
+  `export:`.
+- **When.** It runs on every load (a reload too), after the document parses and before its
+  `requires:` is checked and `init:` runs, in a module of its own, fresh each load. A reload also
+  reloads the modules it imports from the document's own directories.
+- **Exports.** They become the document's host functions, as `Host.function` makes them (§9.3):
+  `(histogram xs)` passes the call's arguments as Python values and returns the function's value.
+  - `@export` marks a function in the source, where `export` is already defined. A module marks its
+    own with `from _arihost import export` (or `pycvc_gl.ariadne.export`, which also imports
+    under plain `python`).
+  - `export:` names functions too; `as:` gives one another name, and `async: true` makes it an
+    async function (§10.1).
+  - Exporting goes through pycvc, so pycvc must be importable.
+- **Errors.** A Python exception in a call is a `PythonError` the document can catch
+  ([STATE_EXEC_EXCEPTIONS.md](STATE_EXEC_EXCEPTIONS.md)). One at load fails the load, with the
+  traceback from the document's code.
+- **Caps.** As `Host` does, the host raises the per-action caps (§2.2) to 30 s and no step cap, so a
+  Python call can take its time, unless the app's tree already sets them.
+- **Tokens.** `python` holds where an embedded Python runs the block, and `python.<module>` where
+  `<module>` is importable (`python.numpy`): list them in `requires:`, or ask with
+  `(has? "python.numpy")`. A stock host fails a document that requires `python` with an error that
+  names the scripting hosts, and ignores a `python:` block with a warning.
+- **Trust.** Natively the block runs with the user's authority, like any program they start (it
+  can `import os`), so run a document with Python only when you would run the program.
+
+**A Python program in place of the document.** `ariglx run app.py [args]` (or `snapshot`, `check`;
+`arix` too) runs `app.py` as `__main__`, with `sys.argv` = `[app.py, args...]` and its directory
+first on `sys.path`. Its `pycvc_gl.ariadne.Host()` adopts the host (mode `"embedded"`, the default
+inside a scripting host) instead of opening a window of its own: the same window, runtime and
+state, with the rest of `Host`'s API (§9.3).
+
+```python
+from pycvc_gl.ariadne import Host
+
+host = Host()  # this ariglx's window and document runtime
+
+
+@host.function("twice")
+def twice(x):
+    return 2 * x
+
+
+host.load("app.ari")
+host.run()  # the host's own loop: run's window, snapshot's frames
+```
+
+- `host.run()` runs the host's loop, once, and returns the document's exit status. A program that
+  loads a document and returns has the host run it then. The host exits with the program's status,
+  or the document's when the program's is 0.
+- `on_frame` hooks, `watch` callbacks and `on` handlers run in each of the host's frames, whichever
+  loop drives them. An exception in one is printed and closes the document with status 1.
+- `pycvc_gl.ariadne.current_host()` is that Host (None under plain `python`), and the same program
+  runs under plain `python`, where `Host()` opens a window.
+- In `arix` the Host has no GL (its mode is `"headless"`).
+
+**`<host> python`.** The embedded interpreter as `python3`, with the host's packages:
+`ariglx python -m pytest`, or `ariglx python -m grl_snam.ariadne live austin-freedrive`. That
+interpreter has no document attached, so `Host()` there opens a window of its own.
 
 ---
 
@@ -3174,6 +3533,14 @@ without either has no `ws-*` verbs, so a document asks `(has? "ws-open")` and po
 
 State plainly so authors are not misled. Each item cites the code; the roadmap items
 below (G17–G21 in the internal gap report) are tracked for reconciliation.
+
+- **The scripting hosts are native and partial** (§9.6,
+  [roadmap](roadmap/ARIADNE_SCRIPTING_HOSTS.md)). Only the top document's `python:` block runs: a
+  `load:`ed module's is not run yet. A Python program runs in a window, offscreen or in `arix`, not
+  under `ariglx --terminal`, and its embedded `Host.load()` from inside a frame raises (load before
+  `run()`). There is no `ariglx-web` (the browser) and no `arisrvx` yet. The `arix` and `ariglx`
+  packages are Linux-only, where `pycvc-cp312` and `pycvc-gl-cp312` are; elsewhere build them
+  in-tree with the bindings (`-DCVC_BUILD_PYCVC=ON`).
 
 - **Sign-in checks an ID token's claims, not its signature** (§10.5): the token comes straight from
   the token endpoint over TLS. A sign-in kept in a `--credential-store` file is picked up only when

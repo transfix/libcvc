@@ -1,7 +1,8 @@
 # Ariadne scripting hosts: Python inside ari, arigl and arisrv
 
-Status: design (2026-11-02). Nothing here is built yet. Each phase in §10 becomes one or more
-PRs, and the user-facing reference moves into [ARIADNE.md](../ARIADNE.md) as each one lands.
+Status: design (2026-11-02). §4.6, §5.5, §5.6 and §8.2–8.9 were added on 2026-11-03. Nothing
+here is built yet. Each phase in §10 becomes one or more PRs, and the user-facing reference moves
+into [ARIADNE.md](../ARIADNE.md) as each one lands.
 
 Python can already *host* a document. transfix/libcvc#985 (`pycvc_gl.ariadne.Host`) lets
 `python app.py` open a window, load a `.ari` document and give it Python functions to call. The
@@ -19,7 +20,10 @@ and the science packages, natively and in one WebAssembly module:
   Ariadne demos and GRL-SNAM's demos in an `arigl` page.
 - arisrv can run server-side Python. Clients can ask it to run code without being able to run
   arbitrary code or take the relay down (§6).
-- Lua can come later through the same seams, without another set of binaries (§8).
+- Python output shows up in documents: matplotlib figures as interactive images, and anything
+  that renders in Jupyter (§4.6).
+- Lua, and plugins compiled to WebAssembly, can come later through the same seams, without
+  another set of binaries (§8).
 
 VolRover3 is the precedent: an embedded interpreter, a host module that hands scripts the
 running app, a console. Going forward, VolRover should be as much a plain Ariadne app on these
@@ -42,6 +46,7 @@ Every item was checked against master `dded8e56` and cvcpkg.org on 2026-11-02.
 | Pure-Python packages (noarch, so usable in wasm) | cvcpkg | `restrictedpython-cp312` 8.4, `jedi`, `sympy`, `networkx`, `imageio`, `trimesh` |
 | Science packages not on wasm | cvcpkg | scipy (Fortran), pandas, matplotlib (+ contourpy, kiwisolver), pillow, h5py, torch |
 | Lua | `lua` 5.4.9 | every platform, wasm included. `luajit` native only. No libcvc or cvcGL bindings |
+| WebAssembly runtimes (checked 2026-11-03) | `wasmtime` 45.0.0, `wamr` 2.4.4, `wasmer` 7.1.0, `wasmedge` 0.17.0 | Linux, macOS and Windows. `wasmtime` and `wasmer` repackage upstream's prebuilt C API, so no Rust build; WAMR and WasmEdge build from source |
 
 **Verdict: feasible.** The parts that could have killed it are proven: CPython, numpy and
 vtk-python as static wasm, pycvc_gl in the same module, and a Python host for documents. What's
@@ -244,6 +249,76 @@ the DSL it has no chroot. So:
 These replace VolRover3's `PyConsoleDock`. A console runs full Python, so only a trusted
 document (§4.3) can mount one.
 
+### 4.6 Charts and rich output
+
+**What other environments do:**
+
+- **Jupyter.** An object offers formats through `_repr_png_`, `_repr_svg_`, `_repr_html_`, ...,
+  or all at once through `_repr_mimebundle_`. The kernel sends that bundle, and the front end
+  shows the richest type it can render. A `display_id` lets later output update it in place.
+- **matplotlib inline.** At the end of a cell, every open figure is rendered to PNG, displayed
+  and closed.
+- **Interactive matplotlib.** ipympl, Pyodide 0.28's default backend and marimo all use
+  matplotlib's WebAgg protocol:
+  - the Agg canvas goes out as full or diff PNG frames;
+  - mouse and key events come back as JSON, which becomes `MouseEvent(...)._process()`;
+  - `NavigationToolbar2` does pan and zoom.
+
+**In the `x` hosts:**
+
+- **A matplotlib backend, `pycvc_gl.ariadne.mpl`.** It is the default inside an `x` host, or
+  selected with `matplotlib.use("module://pycvc_gl.ariadne.mpl")`.
+  - It's a `FigureCanvasAgg`, and a draw publishes `buffer_rgba()` to an `image:` widget with
+    `Host.publish_image`.
+  - Python and the window share a process, so nothing is PNG-encoded: the pixels go straight to
+    the widget's texture.
+- **Figures.**
+  - `plt.show()` opens each figure as an Ariadne window holding that image, so an unmodified
+    matplotlib script works.
+  - A figure can instead be bound to a named image that the document's own `image:` widget shows.
+- **Interaction.**
+  - Any widget, `image:` included, already takes `on_click`, `on_hover` and `on_drag*`. The
+    handler's `event` has the pointer in the item's own pixels (ARIADNE.md §4.6).
+  - The backend turns those into matplotlib mouse events (y flipped, in physical pixels).
+    `NavigationToolbar2` then does pan, zoom and home with no toolbar widgets, and Ariadne buttons
+    call its `pan()`, `zoom()`, `home()` and `back()`.
+  - For parity Ariadne needs four small additions:
+    - a per-item wheel event;
+    - the item's size in the event, to fit the figure to the widget at the device pixel ratio;
+    - keys while the item is hovered;
+    - the cursor shape.
+- **Frames and threads.**
+  - `draw_idle` coalesces into the next frame (`on_frame`), and `new_timer` runs on the same hook.
+  - matplotlib isn't thread-safe. All of this runs on the runtime thread, which is where the
+    engine runs Python anyway.
+- **`display(obj)`.** It takes the object's MIME bundle and shows what Ariadne can render:
+  - `image/png` or an RGBA array as an image;
+  - `text/markdown` and `text/plain` as text;
+  - a VTK object or a mesh in the scene.
+
+  So pandas, PIL and sympy objects that already render in Jupyter show up with no Ariadne code.
+  `py_console` (§4.5) shows its results this way, which makes it notebook-like.
+
+**Not planned:**
+
+- **HTML and JavaScript outputs** (Plotly, Bokeh, Vega) need a browser engine. In `ariglx-web` a
+  DOM overlay could host them later.
+- **Considered:**
+  - ImPlot: GPU plots inside ImGui, fast for live data, and a candidate to back the `plot:`
+    widget;
+  - VTK's charts in the 3D scene (`vtkContextActor`), which lose tooltips and pan/zoom there.
+- **A chart shared with a conference room.** `publish_image` is local to its host. Sharing a
+  chart means sending frames, which is where WebAgg's diff PNGs pay off.
+
+**In the browser** matplotlib needs its C extensions for wasm (§5.5):
+
+- `_backend_agg`, `ft2font` (with FreeType, already on cvcpkg for wasm), `_image`, `_path`,
+  `_tri`, `_qhull` and `_c_internal_utils`;
+- kiwisolver, contourpy, Pillow and the fonts.
+
+That is about 12 MB compressed in Pyodide. Ship a prebuilt font list, as Pyodide does, so the
+first import doesn't scan for fonts.
+
 ## 5. The browser: `ariglx-web`
 
 ### 5.1 One module
@@ -262,15 +337,16 @@ fetched before start and imported through zipimport.
 
 ### 5.2 Packages in the browser
 
-- **C extensions are linked in**, so the browser's package set is fixed at build time.
-  Generalize `link-host.sh`'s numpy registrar into a cvcpkg convention: a wasm C-extension
-  package ships its relocatable objects plus `share/python-wasm/<pkg>.inittab` (dotted module
-  name → `PyInit_` symbol), and the host build links every manifest it finds in the deps prefix.
-  This is needed before the second C-extension package.
+- **C extensions are linked in**, so the browser's package set is fixed at build time. The
+  exception is plain wasm's runtime installs (§5.6).
+  - Each extension gets a namespace of its own.
+  - Each package ships an `inittab` manifest, and the host link reads every manifest it finds in
+    the deps prefix (§5.5).
+  - This is needed before the second C-extension package.
 - **Pure-Python packages** (noarch) go into the zip: restrictedpython, jedi, sympy, networkx,
   imageio, trimesh.
 - **Next C-extension wasm builds**, in order of demand: pillow, matplotlib (Agg; with contourpy
-  and kiwisolver), h5py (hdf5 is already published for wasm), pandas.
+  and kiwisolver; §4.6), h5py (hdf5 is already published for wasm), pandas.
 - **scipy** needs a Fortran answer for wasm, as it does on Windows. Not planned; the demos stay
   scipy-free, which GRL-SNAM already requires of itself.
 - **torch: no.** Learned policies run through libcvc's native nav via pycvc, or a numpy forward
@@ -306,6 +382,123 @@ arigl's browser loop yields with `emscripten_sleep(0)` under Asyncify (the
   - vtk-python-cp312 wasm-mt is stuck at `+cvc.2`. The fix that stops it building VTK's
     interpreter executable (cy-pca/cvcpkg#109) needs a republish.
   - pycvc-gl-cp312 has no wasm-mt build. The lean tier needs only this one.
+
+### 5.5 C extensions: one namespace each
+
+**The problem:**
+
+- **Native separation is lost.** Natively each extension is its own shared library, loaded
+  `RTLD_LOCAL`, so its init function and internals are private. Linked into one wasm module, all
+  the extensions share one namespace.
+- **Init names collide.** `PyInit_<leaf>` is named after the last component only, so `a._common`
+  and `b._common` both define `PyInit__common`.
+- **Duplicates are hidden today.**
+  - numpy's 14 extensions define 799 of the same global names: npymath and the random
+    distributions are copied into several of them.
+  - So [`link-host.sh`](../../bindings/pycvc/wasm/link-host.sh) links with
+    `--allow-multiple-definition`.
+  - That flag also hides real clashes. Two packages with different code under one name would link,
+    and one would silently run the other's.
+- **Binary tools can't fix it.**
+  - `llvm-objcopy` refuses every symbol option on wasm objects, in emsdk's LLVM 23 and on LLVM
+    main.
+  - `wasm-ld` has no version scripts and no `--exclude-libs`.
+  - Natively, Buck2 renames with `objcopy --redefine-syms`; kivy-ios rewrites Cython's output.
+
+**The fix, proven on 2026-11-03:**
+
+- **Where it edits.** Each extension is one relocatable object (emcc `-shared` without
+  `SIDE_MODULE`). Its symbol table lives in the `linking` custom section that
+  [tool-conventions/Linking.md](https://github.com/WebAssembly/tool-conventions/blob/main/Linking.md)
+  documents. A rewriter of about 150 lines of Python edits that table:
+  - `PyInit_<leaf>` becomes `PyInit__x_<dotted name>`, with `.` written as `__`;
+  - every other defined global becomes local, so it's private, as `RTLD_LOCAL` makes it natively;
+  - COMDAT groups get a per-extension prefix, so C++ inline and template code stays per extension.
+
+  References inside an object go by symbol index, so they survive the rename.
+- **The test.** A minimal CPython host linked numpy 2.4.6's 14 extensions with no
+  `--allow-multiple-definition` and ran them under node in both flavors:
+  - plain wasm: core, random, linalg and fft;
+  - wasm-mt: two Python threads doing linalg and random at once.
+
+  The rewrite covered 395 COMDAT groups. The unmodified objects fail that link with
+  duplicate-symbol errors.
+
+**The convention:**
+
+- **Recipes.** A wasm C-extension recipe runs the rewriter on each extension. It ships the objects
+  plus `share/python-wasm/<pkg>.inittab`, which maps each dotted module name to its renamed
+  `PyInit_` symbol.
+- **The host link.** It generates one registrar from every manifest in the deps prefix. A clash
+  between two extensions is then a link error.
+- **Debug names.** Strip each object's `name` section, or prefix the names in it. After the
+  rewrite several objects carry the same debug names, which `llvm-nm` rejects in a combined `-r`
+  link. The final link is fine either way.
+- **Limits.** An extension that relies on another extension's global symbols breaks here, as it
+  would natively under `RTLD_LOCAL`. Extensions share through capsules instead; numpy's C API is
+  one. A package's own C library is linked into each extension that uses it, or shipped as a
+  normal archive.
+- **Upstream doesn't make this unnecessary.** PEP 793's `PyModExport_<name>` (3.15) still names
+  the symbol after the module. 3.15's `PyImport_CreateModuleFromInitfunc` helps custom static
+  importers but keeps the same names.
+
+### 5.6 Installing packages at runtime
+
+**What Pyodide does:**
+
+- **Main and side modules.** The interpreter is the main module (`MAIN_MODULE`, everything
+  `-fPIC`). Each extension is a side module that exports only its `PyInit_`
+  (`pyodide build --exports pyinit`).
+- **Install.**
+  - micropip fetches a wheel, checks its sha256 and unpacks it into site-packages in MEMFS.
+  - It then `dlopen`s every `.so` in it with `_emscripten_dlopen_promise`, before Python imports
+    it. Python imports are synchronous, and Chrome won't compile a module over 8 MB synchronously
+    on the main thread.
+  - Each library is loaded `RTLD_LOCAL` and keeps its symbols in a scope of its own, so §5.5's
+    clash doesn't arise.
+- **ABI pin.** The ABI is pinned per Python version. Under PEP 783, `pyemscripten_2024_0_wasm32`
+  is Python 3.12 with Emscripten 3.1.58, and every package must be built with exactly that
+  Emscripten.
+- **No threads.** Pyodide, PEP 783 and CPython's own Emscripten build all rule out `-pthread` with
+  dynamic loading.
+  - Emscripten calls dynamic linking with pthreads experimental.
+  - A `dlopen` waits until every thread has caught up inside a futex wait, so a thread that
+    busy-waits deadlocks it.
+  - Each thread also starts slower.
+- **emscripten-forge** (conda packages for Emscripten, behind JupyterLite's xeus kernels) also
+  installs C-extension packages at runtime. Its kernel runs in a Worker, where the 8 MB limit
+  doesn't apply.
+
+**For `ariglx-web`:**
+
+- **Plain wasm only.** wasm-mt stays static (§5.5): a fixed set of C extensions, plus pure-Python
+  packages, which can always be added at runtime.
+- **The host.** A variant of `ariglx-web` linked `MAIN_MODULE=2`, rather than Pyodide's
+  `MAIN_MODULE=1`. That keeps dead-code elimination, and the C API and libc are exported
+  explicitly. CPython's configure puts the cost of a loadable interpreter at about 1.5–2 MB.
+- **Packages.** cvcpkg already has a `link` dimension. A `wasm` package with `link: shared` is the
+  side-module build, and `link: static` is §5.5's rewritten objects. One recipe makes both.
+- **The ABI key.** A side module must match the host's Emscripten version, exception mode and
+  Python minor version. cvcpkg's `emsdk` pin plus the Python version is that key, so bumping
+  emsdk republishes every side module.
+- **Installing.** `host.install("matplotlib")`:
+  1. queries the catalog for the `wasm` / `link: shared` build;
+  2. fetches the `.tar.zst` and checks the catalog's sha256;
+  3. decompresses with libzstd, which is already in the wasm deps;
+  4. unpacks into site-packages and caches it in OPFS;
+  5. `dlopen`s its extensions with `emscripten_dlopen_promise`;
+  6. imports.
+
+  A document that requires `python.matplotlib` gets an install hint when it's missing.
+- **cvcpkg.org** answers browser requests only from an allowlist of origins, so the pages'
+  origins have to be on it.
+- **Natively** the same call is `cvcpkg install` into the host's user prefix and a `sys.path`
+  entry. The extensions load as ordinary `.so` / `.pyd` files.
+- **Trust.** An install request from a document follows §4.3. Natively it's allowed only from a
+  local document or an allowed origin. In the browser, the page's config lists what it may
+  install.
+- **Pyodide's own wheels** would install only if we matched its Emscripten pin and exception mode
+  exactly. That would tie our toolchain to theirs, so cvcpkg builds its own.
 
 ## 6. `arisrvx`
 
@@ -401,9 +594,13 @@ Clients are untrusted. In order of preference:
 A client can then at worst spend its own quota and one worker's time. It can't reach the host,
 the relay's interpreter, or other clients' state.
 
-Lua (§8) can do tier 3 with hard in-process limits (an allocator cap, an instruction hook) at a
-fraction of the cost. Once Lua has bindings it is the better engine for client code, and
-RestrictedPython stays for clients that need Python's libraries.
+Lua (§8.1) and WebAssembly guests (§8.5) can both do tier 3 with hard in-process limits, at a
+fraction of the cost: Lua through an allocator cap and an instruction hook, guests through gas and
+a memory cap. A client's guest runs on the scheduler with the DSL's caps and the access of the
+client's program (§8.6). Even client Python can run this way, in a CPython or MicroPython compiled
+to WASI. Guests also take any language that compiles to wasm, and they run the same in
+the browser. Once either is in, it's the better engine for client code, and RestrictedPython stays
+for clients that need Python's libraries.
 
 ## 7. The demos and VolRover
 
@@ -428,7 +625,9 @@ RestrictedPython stays for clients that need Python's libraries.
   The Qt shell, `EmbeddedInterpreter` and `vrhost` then retire. The first step is a gap audit:
   which VolRover features have no Ariadne or pycvc equivalent.
 
-## 8. Lua, later
+## 8. Other engines: Lua and WebAssembly guests
+
+### 8.1 Lua, later
 
 - **Bindings.** SWIG has a Lua backend, so a `luacvc` can reuse pycvc's `.i` files. The
   Python-specific typemaps (callables, numpy, PyCapsule) need Lua twins. sol2 isn't on cvcpkg.
@@ -444,6 +643,326 @@ RestrictedPython stays for clients that need Python's libraries.
   - a fresh `_ENV` holding only the functions we hand it;
   - text-only `load` (no bytecode);
   - one `lua_State` per client job.
+
+### 8.2 WebAssembly guests
+
+**The goal** is plugins that:
+
+- can be written in any language that compiles to wasm (C, C++, Rust, Zig, Go);
+- run on the same scheduler, under the same limits and with the same access as the document's own
+  programs, so many can run at once without stalling a frame, natively or in a single-threaded
+  browser page (§8.5, §8.6);
+- hook the document's events as native code and Python do (§8.7);
+- behave the same natively and in the browser;
+- can be installed from cvcpkg while the host runs (§8.8).
+
+**Instances, not `dlopen`.**
+
+- A side module loaded with `dlopen` (§5.6) shares the host's memory and C ABI, and it exists only
+  inside an Emscripten build.
+- A guest is a separate instance with its own memory, and it sees only the functions the host
+  hands it. That works the same natively, through an embedded runtime, and in the browser,
+  through `WebAssembly.instantiate`.
+
+**An engine, like Python.** Guests come in through the `script_engine` seam (§3.1):
+`requires: [wasm]`, a `wasm:` block, and the guest's exports as host functions.
+
+```yaml
+requires: [wasm]
+wasm:
+  module: cvcpkg:route-scorer@^1     # or ./scorer.wasm, beside the document
+  export: [score_route]              # functions the document's programs may call
+  hooks: {on_tick: tick, on_key: key, on: {replan: replan}}
+  imports: [state.read, state.write, call]   # narrows the lane's surface (§8.6); never widens it
+  priority: 5                        # as a program's set-priority
+  limits: {memory_mb: 32}            # may lower the host's caps (§8.5), never raise them
+init: (state-set "score" (score_route (state-get "route")))
+```
+
+- **One registry.** The DSL, Python and guests share one function registry. A guest calls Python,
+  and Python calls a guest, both through `register_function`.
+- **Which hosts.** A guest brings no interpreter, so it doesn't need an `x` host. Which hosts
+  carry a runtime is an open question (§9).
+
+### 8.3 Runtimes, behind one interface
+
+A `cvc::ariadne::wasm_runtime` interface covers:
+
+- load, and instantiate with imports;
+- start a call, step it one slice, and suspend or resume it (§8.5);
+- limits.
+
+proxy-wasm's C++ host is the model: it puts V8, WAMR, WasmEdge and wasmtime behind one interface.
+
+- **wasmtime** on Linux, macOS and Windows.
+  - cvcpkg publishes 45 from upstream's prebuilt C API; upstream is at 50.0.1.
+  - It has fuel, epoch deadlines, a store limiter for memory, and an async C API that runs a guest
+    on its own stack and pauses it at a yield (§8.5), plus WASI preview 1 and 2.
+- **WAMR** for the BSDs, and as the small option.
+  - Pure C with CMake, and it has a FreeBSD port.
+  - Published at 2.4.4, with the interpreter, fast interpreter, AOT and WASI.
+  - It can't pause a running guest, so it runs the install-time transform's guests (§8.5). Its
+    WASI isn't supported on Windows, where wasmtime runs instead.
+- **The browser's own engine,** reached from the Emscripten module through `EM_JS`.
+  - The guest's imports call our module's exports, and bytes copy between the two memories
+    (`HEAPU8.set`).
+  - It runs the transformed guests too, in gas slices on the page's own thread (§8.5). So even an
+    untrusted guest can't hang the page.
+  - A Web Worker is an optional backstop for untrusted guests on a cross-origin-isolated page.
+    Synchronous host calls from a Worker need `SharedArrayBuffer` and `Atomics.wait`.
+  - Chrome compiles modules over 8 MB only asynchronously on the main thread.
+    `compileStreaming` caches compiled code for modules of 128 kB or more.
+- **The rest.**
+  - Wasmer (7.1) and WasmEdge (0.17) are on cvcpkg too, but neither adds a platform that
+    wasmtime and WAMR don't cover.
+  - wasm3 restarted development in 2026. It's a lighter interpreter if WAMR disappoints.
+
+### 8.4 The guest ABI
+
+- **Core wasm, in the style of Extism and proxy-wasm.**
+  - Values cross as a pointer and a length, encoded as CBOR that mirrors state-tree values.
+  - The guest exports `ari_alloc`, `ari_init` and `ari_dispatch`. `ari_dispatch` takes calls and
+    hook events (§8.7).
+- **Host imports** (module `ari`). Each is a program-lane native of the DSL, run in the guest
+  activation's own environment (§8.6):
+  - the state readers and writers: `state_get`, `state_set`, `state_children`, the
+    `state_data_*` calls and the atomics;
+  - `msg_send`, `msg_recv`, `sleep` and `await`, which park the activation (§8.5);
+  - `with_lock`;
+  - `call`, for any function the lane can call;
+  - `hook`, `set_priority` and `log`;
+  - `gas`, the check the install-time transform inserts (§8.5).
+- **No pointers into the host.** A guest reaches state only through those imports.
+- **Bulk data.** A volume or a mesh is copied between memories. That's fine for control logic. A
+  host-owned blob API that reads in chunks comes when a guest needs one.
+- **WIT later.** The interface is also written in WIT, so a component-model adapter can come later.
+  Not yet:
+  - wasmtime's C API still has gaps in the component model, including the async half
+    (bytecodealliance/wasmtime#13705);
+  - only wasmtime and jco implement it;
+  - the browser needs jco's generated JavaScript.
+
+  WASI 0.3 (async, streams) was ratified in 2026-06.
+
+### 8.5 Scheduling and limits
+
+**A guest activation is a process on the app's scheduler.** An activation is one export call, one
+hook delivery, or the guest's `ari_init`. It runs on the scheduler that runs the document's actions
+and residents (`app.exec_scheduler()`, ARIADNE.md §2.2), the way a sliced task does
+(`cvc/core/sliced_task.h`):
+
+- it's a small DSL loop around a native `(guest-step)`;
+- it has the document's owner tag, so it's reaped with the document;
+- `(ps)` shows it as `wasm/<module>:<export>`;
+- the drain pumps it with everything else, in the same `sync_run` slices (200,000 steps or 0.1 s a
+  frame).
+
+A guest function called from inside a program runs as that program's sliced native call: one slice
+per data step, charged to the calling program, as `collections.map` is (developer guide, "Sliced
+work").
+
+**Slices.** Each step of the process runs the guest for one slice of gas, then gives the thread
+back.
+
+- `ariadne.limits.wasm_slice_steps` sets the slice in DSL steps (64 by default).
+- `ariadne.limits.wasm_gas_per_step` converts steps to gas. It's calibrated as
+  `limits.async_steps_per_cpu_ms` is: a step's worth of gas costs about what a DSL step costs.
+- A slice is charged to the process as that many steps. The drain's pump budget counts those
+  steps, not one per pick, so guests can't stretch a drain. That's a small scheduler change, made
+  in G1.
+
+**Gas.**
+
+- Counters are injected into the guest's bytecode at install (paritytech/wasm-instrument). So the
+  count is the same in every runtime, native and browser.
+- The `gas` import they call ends the slice when it's spent, and kills the activation when its cap
+  is spent.
+- wasmtime's own fuel stays on as a backstop.
+
+**How a guest pauses mid-run.** A slice ends at a gas check, or at a host call that has to wait
+(`await`, `msg_recv`, `sleep`, an async host function). Then the guest pauses where it stopped,
+and the process's next step resumes it. Two mechanisms, one contract:
+
+- **wasmtime natively: its async C API.**
+  - `wasmtime_func_call_async` runs the guest on its own stack.
+  - Each scheduler step calls `wasmtime_call_future_poll` once. That runs the guest until an async
+    host function (`wasmtime_linker_define_async_func`, the `gas` import among them) yields, or the
+    call returns.
+- **WAMR and the browser: Binaryen's Asyncify.** The guest is transformed at install with
+  `wasm-opt --asyncify`, which emsdk already ships. The `gas` import and the waiting imports unwind
+  the guest's stack into its own memory and return to the host, and the next step rewinds it to the
+  same point.
+
+  Proven on 2026-11-03 under node:
+  - three transformed guests, stepped round robin in 8192-unit gas slices on one thread,
+    interleaved `ABCABC…`;
+  - one was killed at its gas limit mid-run while the other two went on;
+  - both survivors' results matched unsliced runs.
+
+  Asyncify doubled that tiny guest (444 → 893 bytes), so measure it on real ones.
+- **JSPI** (`WebAssembly.Suspending`) could replace Asyncify in the browser later. It resumes
+  through the event loop, so measure it against Asyncify first.
+
+**The DSL's limits, mapped.** The caps are the host's settings, read per activation as the DSL's
+are. A document can lower them for its guests, never raise them.
+
+| Limit | DSL program | Guest activation |
+|---|---|---|
+| steps (`ariadne.limits.action_max_steps`, 5000) | an `on:` action's evaluator steps | its gas, at `wasm_gas_per_step` |
+| time (`ariadne.limits.action_max_time`, 0.1 s) | an action's run time | its slices' run time, on the same `se::time_budget` |
+| memory (`ariadne.limits.action_max_memory`, 4 MiB) | state writes and held values | what it writes to state and hands back, measured the same way |
+| per step (`ariadne.limits.resident_max_step_time`, 0.05 s; 1 s in wasm) | one step of a resident | one slice of a hook's resident (§8.7), a backstop for a slow host call |
+| `init:` lane (10 million steps, 5 s) | the document's `init:` | `ari_init`, and calls from `init:` |
+| read lane (100,000 steps, 5 ms; 30 ms a frame) | a `visible_when` or computed `bind:` | a `pure` export called there (§8.6) |
+| instance memory | n/a | `ariadne.limits.wasm_max_memory`, lowered by `limits: {memory_mb}`, checked at `memory.grow` |
+
+- **Errors.**
+  - Running out of gas or time kills the activation, and the drain reports it as it reports a DSL
+    action's step limit (ARIADNE.md §2.4).
+  - A refused `memory.grow` is a `MemoryError`.
+  - A trap is a `WasmError`, which a calling program's `try` can catch.
+
+**Many guests at once, without choking a frame.**
+
+- **Slices interleave.** A guest gives the thread back after every slice, so the scheduler
+  interleaves it with every other process. One that waits on a host call parks and costs nothing.
+- **Quick calls finish in the drain.** An `on:` handler that needs a few slices completes in the
+  drain that fired it, as a quick DSL action does.
+- **Long runs yield the frame.** Guest activations together get at most
+  `ariadne.limits.wasm_frame_budget` of a frame (8 ms by default). Once it's spent, the rest yield
+  to the next frame, as cooperative sliced tasks do. So N long-running guests share the budget
+  instead of each taking a share of the frame.
+- **One thread, everywhere.** This works the same in a single-threaded native host, a
+  single-threaded wasm page and wasm-mt: the scheduler is stepped by one thread in all three.
+
+**Priorities.**
+
+- An activation's priority comes from the `wasm:` block, the hook's declaration, or the
+  `set_priority` import, as a program's `set-priority` does. Under the `priority` and `priority_rr`
+  policies the scheduler picks the best level first, and the frame budget goes to the better levels
+  first.
+- The stock hosts run `round_robin`, which stores a priority but picks by pid order (ARIADNE.md
+  §2.2), and they have no option to change it. G1 adds a host option for `state_exec.policy`.
+
+**One activation per instance.**
+
+- An instance's memory and stack belong to the activation in flight, and wasmtime allows one call
+  future per store. So an instance runs one activation at a time.
+- The others wait for it as a DSL program waits for a lock: through the app's lock manager, with
+  its timeouts (`ariadne.exec.lock_timeout` for an action, none for a resident) and its priority
+  inheritance.
+- A call back into the same instance from inside one of its own host calls is refused with a
+  `RecursionError`.
+
+**Threads, later.** Native and wasm-mt hosts have threads, but guests run on the scheduler's
+thread, because their imports touch state. An export marked `compute: true`, which makes no host
+calls between gas checks, could later run its slices on the pool as threaded sliced tasks do, and
+post back through the scheduler's ingress.
+
+### 8.6 Access: what a DSL program has, and no more
+
+A guest runs as a program of the document, or of the module, that declares it, in the lane that
+started it. It gets exactly what a DSL program there gets.
+
+- **The same natives.** The guest's state, message and lock imports are the program lane's own
+  natives, applied in the activation's environment. So all of this holds with no second
+  implementation:
+  - the chroot to the program's prefix;
+  - the `link:` holes (ARIADNE.md §7.4): read through, `ro` or `rw` over the whole subtree, and
+    torn down and re-planted at each reconcile;
+  - channel scoping (ARIADNE.md §8);
+  - the lock manager and the memory accounting.
+
+  A path starting with `/` escapes only where the DSL's would. `state_watch` acts on the physical
+  path and doesn't reach through a hole, as `state-watch` doesn't.
+- **The same functions.** `call` reaches what that lane's environment holds:
+  - the document's `functions:` (ARIADNE.md §6.6);
+  - the host functions, Python's exports included;
+  - the lane's host intrinsics, with the network verbs under the host's allowlist (ARIADNE.md
+    §10.3).
+
+  A function the DSL can't call there, a guest can't either.
+- **Modules are the fine-grained grant.**
+  - A guest declared in a `load:`ed module sees the module's sub-prefix, its `link:` holes, its
+    `channels:` grants and its `functions:` grant. It sees nothing of the parent beyond those.
+  - To give a guest a few named parts of a document, mount it in a module and link exactly those.
+- **Narrowing.**
+  - The block's `imports:` names the groups a guest gets: `state.read`, `state.write`, `msg`,
+    `lock`, `call` and `net`.
+  - An import outside them is linked to a stub that raises `PermissionError`, so a guest fails
+    closed, and the manifest check (§8.8) says which import it lacked.
+  - Narrowing never widens: a group the lane doesn't have stays out.
+- **The read lane.** An export marked `pure: true` can be called from a reactive slot. It's linked
+  with the read lane's allowlist (the state readers, no writes, no messages, no `call` beyond pure
+  functions) and runs under that lane's caps.
+- **Clients on `arisrvx`.** A client's guest runs as that client's program (§6.3, tier 2): chrooted
+  to its bound subtree, under the bound-writes gate.
+
+### 8.7 Hooks
+
+A guest hooks the document's events through the same lanes the DSL, Python and native code use. A
+hook is declared in the block's `hooks:`, or registered by `ari_init` through the `hook` import.
+
+| Event | DSL | Python (`Host`) | Native | Guest hook | Runs as |
+|---|---|---|---|---|---|
+| a button's or menu item's `on: event` | `on:` | `@host.on("event")` | `register_verb` | `on: {event: export}` | an action, under the action caps |
+| every frame | `on_tick:` | `@host.on_frame` | `add_frame_hook` | `on_tick` | a resident on the tick channel: one tick per drain, coalesced |
+| keys, pointer, signals | `on_key:`, `on_pointer:`, `on_signal:` | — | `post_input`, `post_signal` | `on_key`, `on_pointer`, `on_signal` | residents on the same channels, with the same event dicts |
+| a value changes | `state-watch` | `@host.watch(key)` | a `cvc::state` change signal | `state_watch` | a resident woken by the change |
+| a call from a program | `functions:` | `@host.function`, `@host.async_function` | `register_function` | `export:` | inside the calling program, as a sliced call |
+| a message | `msg-recv` | — | `post_message` | `msg_recv` | the activation parks until it comes |
+
+- **Same events.** Events reach the guest's `ari_dispatch` as the same dicts the DSL reads (as CBOR
+  maps), in the same order, after the same coalescing.
+- **Same restart rules.** A guest's resident restarts as a DSL resident does: after 1, 2, 4 … 64
+  drains while it keeps stopping soon after starting, and never again after 8 such stops in a row
+  (ARIADNE.md §2.3).
+- **Python and native code** can call a guest's exports, and a guest can call theirs. The registry
+  is one.
+
+### 8.8 Installing and entering programs
+
+- **The platform.** cvcpkg already has a `wasi` platform. A guest package is `platform: wasi`,
+  `arch: wasm32`. It's built once and runs on every host.
+- **The transform.** The package ships its module already transformed (§8.5): gas counters, plus
+  Asyncify for the runtimes that need it. It also ships the original, which wasmtime can run with
+  its own async support.
+- **Install.** Query the catalog, fetch, and check the sha256. Cache it (in the user prefix
+  natively, in OPFS in the browser), compile it, then enter it:
+  - **a command** (exports `_start`) runs like a program: `<host> run tool.wasm [args]`. The host
+    maps argv, the environment, preopened directories and stdio: `wasi_config_*` in wasmtime,
+    browser_wasi_shim in the browser. It runs as an activation like any other, under the `init:`
+    lane's caps unless the host gives it more.
+  - **a plugin** (a reactor: `_initialize` plus its functions) registers its exports and hooks, as
+    a `wasm:` block does.
+- **The import list.** A package's manifest lists the host imports it needs, as the CNCF Wasm OCI
+  layout lists imports and exports. The host checks them against what the lane grants (§8.6). It
+  asks before it runs anything the user didn't install.
+- **Prior art:**
+  - Wasmer's registry and `@wasmer/sdk`. It runs only WASI / WASIX commands, and it needs
+    cross-origin isolation.
+  - YoWASP: tools shipped as wasm on PyPI and npm.
+  - OCI artifacts through `wkg`.
+
+  The Bytecode Alliance's warg registry was archived in 2025-07.
+
+### 8.9 Building the runtimes from source
+
+- **Today** `wasmtime` and `wasmer` repackage upstream's prebuilt C API archives. WAMR and
+  WasmEdge build from source.
+- **To close the loop,** cvcpkg already has the pieces:
+  - the `rust` 1.90 recipe: the official prebuilt toolchain, including FreeBSD and NetBSD;
+  - `tools/make_crate_packages.py`, which turns a `Cargo.lock` into `crate-*` packages checked
+    against the lock's hashes;
+  - `cargo --offline` builds from those packages, which wezterm already uses.
+- **Size.**
+  - wasmtime v45's workspace lock lists 507 registry crates, 64 of them already packaged.
+  - Wasmer 7.1's lists 768, with 74 packaged.
+  - The C API needs only a subset of either.
+- **The payoff:** no network at build time, and wasmtime on FreeBSD and NetBSD, which upstream
+  doesn't ship.
+- **Order.** wasmtime first, and Wasmer only if something needs it. None of this blocks G1–G5
+  (§10).
 
 ## 9. Risks and open questions
 
@@ -462,6 +981,24 @@ RestrictedPython stays for clients that need Python's libraries.
 6. **Native trust UX** (§4.3). Is `--python-allow` enough, or do documents need signing?
 7. **RestrictedPython 8.4 on wasm.** It's noarch on cvcpkg; confirm it imports in the browser
    build (it matters there only for §4.3's untrusted snippets).
+8. **The extension rewriter tracks LLVM's object format** (version 2 of the `linking` section,
+   §5.5). Pin it to the `emsdk` recipe, and run it in the recipes' CI.
+9. **Runtime installs pin the ABI** (§5.6). Side modules match one Emscripten, so an emsdk bump
+   republishes every side-module package.
+10. **Dynamic loading with threads** is experimental in Emscripten, so wasm-mt gets no C-extension
+    installs. Revisit when Pyodide or CPython supports the combination.
+11. **Guest data copies** (§8.4). Every value crosses between memories. Measure with a volume-sized
+    payload before promising guests for data processing.
+12. **Where the wasm runtime lives** (§8.2). WAMR is small: cvcpkg's static build is a 355 KB
+    archive, so it could go into the stock hosts. wasmtime is far larger and belongs in the `x`
+    hosts. One runtime everywhere, or the choice per host?
+13. **Asyncify's cost** (§8.5). It doubled a tiny test guest. Measure size and speed on real
+    guests, and JSPI against it in the browser.
+14. **Gas calibration** (§8.5). `wasm_gas_per_step` has to be measured, as
+    `limits.async_steps_per_cpu_ms` was. A wrong rate makes guests too cheap or too dear against
+    DSL programs under the same caps.
+15. **Priorities need a policy** (§8.5). Under the stock hosts' `round_robin`, a guest's priority is
+    stored but changes no pick, until a host sets `state_exec.policy`.
 
 ## 10. Phases
 
@@ -471,8 +1008,12 @@ RestrictedPython stays for clients that need Python's libraries.
 | P1 | The engine, `_arihost`, `Host` embedded mode, the `python:` block, the `python` tokens, `--python-allow`, `run app.py` / `run -m` / `python`; `ariglx` and `arix`, native Linux, with recipes. Tests: `ari test` documents that call Python, pycvc's tests through the embedded interpreter, GRL-SNAM's ports on `ariglx` | P0 | L |
 | P2 | `py_console`, then `py_editor` with jedi | P1 | M |
 | W1 | `ariglx-web` wasm: the combined link, a browser smoke in headless Chrome, size and Asyncify numbers, lean vs full | P1 | L |
-| W2 | The wasm C-extension manifest convention in cvcpkg; then pillow and matplotlib for wasm | W1 | M each |
+| W2 | The wasm C-extension convention in cvcpkg (§5.5): the rewriter and `inittab` manifests, numpy republished with them, and a host link that no longer allows duplicate extension symbols | — | S |
 | W3 | wasm-mt: vtk-python wasm-mt republished, pycvc-gl wasm-mt | W1, cy-pca/cvcpkg#109 | M |
+| W4 | Runtime package installs, plain wasm (§5.6): a `MAIN_MODULE=2` `ariglx-web` variant, `link: shared` side-module packages, `host.install`, the cvcpkg.org origin allowlist | W1, W2 | L |
+| W5 | pillow, then matplotlib (kiwisolver, contourpy, fonts) for wasm | W2 | M each |
+| C1 | matplotlib in the `x` hosts (§4.6): the backend, `plt.show()` as windows, `display()`; native first | P1 | M |
+| C2 | Interactive figures: per-item wheel, item size, keys on hover, cursor in Ariadne; pan and zoom | C1 | S |
 | N1 | `ariglx` on Windows and macOS | pycvc packages for those platforms | M |
 | D1 | GRL-SNAM in the browser: torch-free inference, a demo page | W1 | M |
 | D2 | VolRover gap audit, then VolRover as an Ariadne app | P2 | L |
@@ -482,3 +1023,9 @@ RestrictedPython stays for clients that need Python's libraries.
 | S3 | Client DSL programs | S0 | S |
 | S4 | Restricted client Python in worker processes | S2 | L |
 | L1 | Lua bindings (SWIG), the Lua engine in the `x` hosts, Lua for client code on `arisrvx` | the `script_engine` seam from P1 | L |
+| G1 | WebAssembly guests natively on wasmtime (§8.2–8.7): the runtime interface; the guest ABI; activations as app-scheduler processes in slices from wasmtime's async C API (its fuel until G2's gas), under the DSL's limits; the frame budget; one activation per instance; the lane's access surface; hooks; the `wasm:` block; a host option for `state_exec.policy`; a pump budget that counts guest slices' steps | the `script_engine` seam from P1 | L |
+| G2 | The install-time transform (§8.5: gas injection, built through cvcpkg's Rust crates; Asyncify) and the browser backend: the same slices, limits, access and hooks in a single-threaded page | G1 | L |
+| G3 | The WAMR backend, on G2's transform: guests on the BSDs | G2 | S |
+| G4 | Client guests on `arisrvx` (§6.3, §8.6), with the optional Worker backstop in the browser | G1, S2 | M |
+| G5 | Guest packages on cvcpkg (§8.8): the `wasi` platform, install and enter, the import manifest and consent | G1, G2 | M |
+| H1 | wasmtime from source (§8.9): crate packages, `cargo --offline`, 50.x, FreeBSD and NetBSD. Later; blocks nothing | — | M |

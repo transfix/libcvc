@@ -1,0 +1,120 @@
+# data_feed.ari — Python streams data into a document. data_feed.py runs it:
+#
+#   python data_feed.py                          # a window
+#   python data_feed.py --offscreen --png feed.png
+#
+# Every frame data_feed.py pushes, under this document's prefix:
+# - `signal` and `walk`: the comma-separated numbers the two plot: widgets draw (host.set_series);
+# - `stats`: a table, one row per series (host.set_table), listed with repeat: below;
+# - the picture `heat` (host.publish_image), a numpy field the image: widget shows;
+# - the video stream `streams.feed` (host.open_stream), which the stream_view widget plays.
+# The Controls window's widgets go the other way: data_feed.py reads `freq`, `noise` and `paused`
+# each frame.
+
+meta:
+  name: Python data feed
+  author: cvc
+  min_libcvc: 3.4.0
+
+requires:
+  - quit                                   # the Feed menu's Quit
+  - {name: stream_view, optional: true}    # host.open_stream registers it (GL); else text
+  - {name: raster.bitmap, optional: true}  # the heat picture in real pixels
+
+customs:
+  - widget: stream_view            # registered by host.open_stream (GL); headless shows text
+
+init: |
+  (begin
+    (state-set "freq" "0.5")
+    (state-set "noise" "0.15")
+    (state-set "paused" "0"))
+
+menubar:
+  - menu: Feed
+    items:
+      - menu_item: Paused
+        bind: paused
+      - separator
+      - menu_item: Quit
+        on: quit
+
+windows:
+  - window: Controls
+    id: controls
+    pos: [20, 30]
+    size: [300, 150]
+    children:
+      - slider_float: Frequency (Hz)
+        bind: freq
+        lo: 0.05
+        hi: 3.0
+        fmt: "%.2f"
+      - slider_float: Noise
+        bind: noise
+        lo: 0.0
+        hi: 1.0
+        fmt: "%.2f"
+      - checkbox: Paused
+        bind: paused
+      - text: "t"
+        bind: t
+
+  - window: Series
+    id: series
+    pos: [20, 190]
+    size: [420, 230]
+    children:
+      - plot: Signal
+        bind: signal
+        lo: -2.5
+        hi: 2.5
+        height: 80
+        overlay: signal_caption
+      - plot: Random walk
+        bind: walk
+        height: 80
+
+  - window: Stats
+    id: stats
+    pos: [460, 30]
+    size: [360, 130]
+    children:
+      - type: group
+        layout: { kind: grid, col_widths: [90, 80, 80, 80] }
+        children:
+          - text: "series"
+          - text: "mean"
+          - text: "min"
+          - text: "max"
+      # One row per entry of the `stats` table: the node's value is its row count.
+      - type: group
+        repeat: (state-get "stats")
+        layout: { kind: grid, col_widths: [90, 80, 80, 80] }
+        children:
+          - text: ""
+            bind: stats.{i}.series
+          - text: ""
+            bind: stats.{i}.mean
+          - text: ""
+            bind: stats.{i}.min
+          - text: ""
+            bind: stats.{i}.max
+
+  - window: Heat
+    id: heat
+    pos: [460, 175]
+    size: [290, 310]
+    children:
+      - image: Field
+        src: heat
+        size: 256
+
+  - window: Stream
+    id: stream
+    pos: [20, 435]
+    size: [360, 300]
+    children:
+      - type: stream_view
+        stream: streams.feed
+        size: 320
