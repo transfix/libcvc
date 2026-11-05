@@ -16,7 +16,11 @@ recipe:
   # already auto-bumped to +cvc.2 on the catalog, and the wasm publish packs verbatim at
   # this revision, so 3 keeps every platform monotonic. Native builds are unchanged.
   # Reset to 1 for the 3.7.1 upstream version: a version bump restarts cvc_revision.
-  cvc_revision: 1
+  # 3.7.10 1 -> 2: republish the wasm column against vtk-python-cp312 cvc.8, whose
+  # vtkPythonUtil::AddModule no longer writes through NULL on `import vtkmodules` (the
+  # "Exception ignored in garbage collection" lines); the host links VTK statically, so
+  # +cvc.1 still carries cvc.6. Only the wasm column was republished.
+  cvc_revision: 2
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
