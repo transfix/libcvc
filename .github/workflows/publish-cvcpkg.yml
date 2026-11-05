@@ -25,6 +25,12 @@
 #                      own script against the libcvc (and cvcGL) built here, and
 #                      must render a document before it packs. (Their browser
 #                      host, arigl-web, is publish-cvcgl-wasm.yml's.)
+#   * ari-media      — ari with cvcMedia linked in: Ariadne's video: and audio:
+#                      players (FFmpeg, from ffmpeg-lgpl) and sound through SDL3, on
+#                      Linux, macOS and Windows. Its recipe's own script, against the
+#                      libcvc built here; it must report its player before it packs.
+#                      arigl's player is the shared cvcGL's cvcMedia, built here
+#                      against the same ffmpeg-lgpl, and asserted the same way.
 #   * arisrv         — the headless Ariadne conference relay, on Linux, macOS and
 #                      Windows. Built by its recipe's own script against the libcvc
 #                      built here (whose gRPC and WebSocket transports, Jolt avatars
@@ -37,14 +43,14 @@
 # pair — libcvc/cvcgl publish exactly once, from the pyver-311 job (see the
 # `matrix.pyver == '311'` guards).
 # Platform coverage (see the guards on each step below):
-#   * Linux   — libcvc + cvcgl + libcvc-examples + ari + arisrv + arigl + pycvc-cp311/312/313 +
-#               pycvc-gl-cp311/312/313 (release config; the 312/313 columns on
-#               x86_64 only; libcvc-examples, ari, arisrv and arigl from the pyver-311
-#               column only).
-#   * Windows — libcvc + cvcgl + ari + arisrv + arigl always; pycvc-cp311/pycvc-gl-cp311 only behind
+#   * Linux   — libcvc + cvcgl + libcvc-examples + ari + ari-media + arisrv + arigl +
+#               pycvc-cp311/312/313 + pycvc-gl-cp311/312/313 (release config; the 312/313
+#               columns on x86_64 only; libcvc-examples, ari, ari-media, arisrv and arigl
+#               from the pyver-311 column only).
+#   * Windows — libcvc + cvcgl + ari + ari-media + arisrv + arigl always; pycvc-cp311/pycvc-gl-cp311 only behind
 #               the `windows_pycvc` dispatch input (still a TODO — unverified;
 #               Windows stays cp311-only for now).
-#   * macOS   — libcvc + ari + arisrv only: there is no macOS VTK bundle on the catalog
+#   * macOS   — libcvc + ari + ari-media + arisrv only: there is no macOS VTK bundle on the catalog
 #               yet, so the cvcgl/pycvc-gl-cp31X/arigl recipes cannot build and the
 #               pycvc-cp31X columns are skipped to keep the family consistent
 #               per-platform.
@@ -197,6 +203,7 @@ jobs:
       cvcgl: ${{ steps.rev.outputs.cvcgl }}
       libcvc_examples: ${{ steps.rev.outputs.libcvc_examples }}
       ari: ${{ steps.rev.outputs.ari }}
+      ari_media: ${{ steps.rev.outputs.ari_media }}
       arigl: ${{ steps.rev.outputs.arigl }}
       arisrv: ${{ steps.rev.outputs.arisrv }}
       # One output per pycvc interpreter column; the build matrix selects the
@@ -240,6 +247,7 @@ jobs:
           emit cvcgl          cvcgl
           emit libcvc-examples libcvc_examples
           emit ari            ari
+          emit ari-media      ari_media
           emit arigl          arigl
           emit arisrv         arisrv
           emit pycvc-cp311    pycvc_cp311
@@ -809,26 +817,50 @@ jobs:
           # the imgui note above). Own prefix, joined only here.
           SDL3="$GITHUB_WORKSPACE/prefix-sdl3-cvcgl"
           cvcpkg install sdl3 --prefix "$SDL3"
+          # FFmpeg (ffmpeg-lgpl: LGPL-2.1, the decoders only, shared) for cvcMedia's player, the one
+          # the shared cvcGL carries and arigl plays video: and audio: with. Without it cvcMedia
+          # still builds and the player is silently absent (3.7.9 and 3.7.10 shipped that way). Into
+          # $PY, already on this job's CMAKE_PREFIX_PATH and LD_LIBRARY_PATH, so arigl's link finds
+          # the libavformat behind libcvcMedia.so; with LD_LIBRARY_PATH unset, as for xvfb and mesa
+          # below (cvcpkg's own Python would load $PY's libz and then overwrite it: SIGBUS). Named
+          # outright (src/cvcMedia/CMakeLists.txt), so no host FFmpeg can stand in for it.
+          env -u LD_LIBRARY_PATH cvcpkg install ffmpeg-lgpl --prefix "$PY" --config release --link shared
+          FFMPEG_ARGS=("-DCVC_FFMPEG_INCLUDE_DIR=$PY/include")
+          for lib in avformat avcodec swscale swresample avutil; do
+            FFMPEG_ARGS+=("-DCVC_FFMPEG_${lib}_LIBRARY=$PY/lib/lib$lib.so")
+          done
           # Two link variants. --link shared is libcvcGL.so.3 (one in-process copy
           # for every consumer, the build pycvc-gl links below); --link static is
           # the libcvcGL.a archive. Each is its own build and stage: cvcGL's type
           # follows BUILD_SHARED_LIBS. Every column builds the shared one (pycvc-gl
-          # links it); only the packing job builds the static one.
-          build_cvcgl() {  # build_cvcgl <build-dir> <stage-dir> <ON|OFF>
-            cmake -S src/cvcGL -B "$1" -G Ninja \
+          # links it); only the packing job builds the static one. Only the shared one
+          # has the player: a static cvcMedia exports what it links, and FFmpeg's paths
+          # here would not resolve in a consumer's prefix.
+          build_cvcgl() {  # build_cvcgl <build-dir> <stage-dir> <ON|OFF> [cmake args...]
+            local build=$1 stage=$2 shared=$3
+            shift 3
+            cmake -S src/cvcGL -B "$build" -G Ninja \
               -DCMAKE_BUILD_TYPE=Release \
-              -DBUILD_SHARED_LIBS="$3" \
-              -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/$2" \
-              -DCMAKE_PREFIX_PATH="$STAGE;$PY;$IMGUI;$SDL3;$DEPS"
-            cmake --build "$1" --parallel
-            cmake --install "$1"
+              -DBUILD_SHARED_LIBS="$shared" \
+              -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/$stage" \
+              -DCMAKE_PREFIX_PATH="$STAGE;$PY;$IMGUI;$SDL3;$DEPS" \
+              "$@" | tee "$build.configure.log"
+            cmake --build "$build" --parallel
+            cmake --install "$build"
           }
-          build_cvcgl build-cvcgl stage-cvcgl ON
+          build_cvcgl build-cvcgl stage-cvcgl ON "${FFMPEG_ARGS[@]}"
+          grep -qF "cvcMedia: FFmpeg player ENABLED" build-cvcgl.configure.log \
+            || { echo "::error::the shared cvcGL's cvcMedia was built without FFmpeg: arigl would have no player"; exit 1; }
+          # And it is ffmpeg-lgpl's FFmpeg it links (its soname), not some other.
+          avformat_soname=$(readelf -d "$PY/lib/libavformat.so" | sed -n 's/.*(SONAME).*\[\(.*\)\]/\1/p')
+          cvcmedia_so=$(ls stage-cvcgl/lib/libcvcMedia.so* | head -n 1)
+          readelf -d "$cvcmedia_so" | grep -qF "[$avformat_soname]" \
+            || { echo "::error::$cvcmedia_so does not link ffmpeg-lgpl's $avformat_soname"; exit 1; }
           if [ "$PACK_CVCGL" != "1" ]; then
             echo "pyver ${{ matrix.pyver }} column job: cvcgl built for linking only (packed/published by the 311 job)"
             exit 0
           fi
-          build_cvcgl build-cvcgl-static stage-cvcgl-static OFF
+          build_cvcgl build-cvcgl-static stage-cvcgl-static OFF -DCVC_MEDIA_WITH_FFMPEG=OFF
           # The variants have to differ in what they carry, or the link label is a lie.
           ls stage-cvcgl/lib/libcvcGL.so.* >/dev/null
           ls stage-cvcgl-static/lib/libcvcGL.a >/dev/null
@@ -985,6 +1017,76 @@ jobs:
               --token "$CVCPKG_TOKEN"
           else
             echo "dry-run: skipping ari publish"
+          fi
+
+      - name: Build, pack & publish ari-media [Linux]
+        # `ari-media`: ari with cvcMedia linked in (its video: and audio: players, and sound through
+        # SDL3's audio subsystem alone, no window), packaged apart so the lean ari links libcvc
+        # alone. The recipe's own build.sh against the libcvc in $STAGE, as for ari, with SDL3 and
+        # FFmpeg (ffmpeg-lgpl) in a prefix of their own, FFmpeg named outright (CVC_FFMPEG_PREFIX)
+        # so no host FFmpeg stands in for it. Without FFmpeg it would still build and pack, with no
+        # player, so it must say it has one, play the clip the player test plays, and link
+        # ffmpeg-lgpl's libavformat. The macOS and Windows twins are at the end of this job.
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' && matrix.pyver == '311' }}
+        shell: bash
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+          DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/stage"
+          DEPS="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
+          MEDIA="$GITHUB_WORKSPACE/prefix-ari-media"
+          env -u LD_LIBRARY_PATH cvcpkg install sdl3 ffmpeg-lgpl --prefix "$MEDIA" --config release --link shared
+          export CVC_SOURCE_DIR="$GITHUB_WORKSPACE"
+          export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-ari-media"
+          export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-ari-media"
+          export CVC_DEPS_PREFIX="$STAGE;$DEPS;$MEDIA"
+          export CVC_FFMPEG_PREFIX="$MEDIA"
+          export CVC_BUILD_TYPE=Release
+          export CVC_JOBS="$(nproc)"
+          bash cvcpkg/recipes/ari-media/build.sh
+          test -x stage-ari-media/bin/ari-media
+          test ! -e stage-ari-media/bin/ari || { echo "::error::ari-media's stage carries bin/ari, which is the ari package's"; exit 1; }
+          avformat_soname=$(readelf -d "$MEDIA/lib/libavformat.so" | sed -n 's/.*(SONAME).*\[\(.*\)\]/\1/p')
+          readelf -d stage-ari-media/bin/ari-media | grep -qF "[$avformat_soname]" \
+            || { echo "::error::ari-media does not link ffmpeg-lgpl's $avformat_soname"; exit 1; }
+          # Its rpath is $ORIGIN/../lib, the flat prefix it is installed into; here the libraries are
+          # split across three. Only for ari-media itself: cvcpkg (pack, publish) keeps the job's.
+          ari_media() {
+            LD_LIBRARY_PATH="$STAGE/lib:$DEPS/lib:$MEDIA/lib" "$GITHUB_WORKSPACE/stage-ari-media/bin/ari-media" "$@"
+          }
+          ari_media info --json | tee ari-media-info.json
+          for want in '"runtime": "ari-media"' '"ftxui": true' '"audio": true' '"media_player": true'; do
+            grep -qF "$want" ari-media-info.json \
+              || { echo "::error::ari-media info does not report $want: it would ship a stub"; exit 1; }
+          done
+          ari_media snapshot --width 100 --height 24 examples/ariadne/terminal/terminal_tour.ari | tee ari-media-tour.txt
+          grep -qF "agents: 64" ari-media-tour.txt
+          # The player test's clip and tone (src/ari/tests/media): both open, on SDL's dummy sound.
+          (cd src/ari/tests && SDL_AUDIO_DRIVER=dummy ari_media snapshot \
+            --media-play always --width 60 --height 14 media_player.ari) | tee ari-media-player.txt
+          grep -qE "video (ready|playing) audio (ready|playing)" ari-media-player.txt \
+            || { echo "::error::ari-media did not open the test clip and tone"; exit 1; }
+          mkdir -p dist
+          cvcpkg pack cvcpkg/recipes/ari-media \
+            --from-prefix stage-ari-media \
+            --platform "${{ matrix.target.platform }}" \
+            --config release --link shared --local \
+            --cvc-revision ${{ needs.compute-revisions.outputs.ari_media }} \
+            --output-dir dist
+          if [ "$DO_PUBLISH" = "1" ]; then
+            if [ -z "${CVCPKG_TOKEN:-}" ]; then
+              echo "CVCPKG_TOKEN secret is required to publish"; exit 1
+            fi
+            cvcpkg publish ari-media \
+              --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
+              --platform "${{ matrix.target.platform }}" \
+              --config release --link shared --output-dir dist \
+              --token "$CVCPKG_TOKEN"
+          else
+            echo "dry-run: skipping ari-media publish"
           fi
 
       - name: Build, pack & publish arisrv [Linux]
@@ -1226,7 +1328,8 @@ jobs:
           export LD_LIBRARY_PATH="$STAGE/lib:$CVCGL/lib:$PY/lib:$IMGUI/lib:$SDL3/lib:$DEPS/lib:${LD_LIBRARY_PATH:-}"
           arigl=stage-arigl/bin/arigl
           "$arigl" info --terminal --json | tee arigl-info.json
-          for want in '"yaml": true' '"ftxui": true' '"tvision": true'; do
+          # media_player: the shared cvcGL's cvcMedia has its FFmpeg player (the cvcgl step).
+          for want in '"yaml": true' '"ftxui": true' '"tvision": true' '"media_player": true'; do
             grep -qF "$want" arigl-info.json \
               || { echo "::error::arigl info does not report $want: it would ship a stub"; exit 1; }
           done
@@ -1290,23 +1393,39 @@ jobs:
           # SDL3::SDL3 link + find_dependency(SDL3) are relocatable (see Linux note).
           $sdl3 = "$env:GITHUB_WORKSPACE/prefix-sdl3-cvcgl"
           cvcpkg install sdl3 --prefix "$sdl3" --config release --link shared
+          # FFmpeg (ffmpeg-lgpl) for cvcMedia's player, the one arigl plays video: and audio: with
+          # (see the Linux step). In a prefix of its own, named outright and kept off
+          # CMAKE_PREFIX_PATH: it carries its own zlib, libpng and the like.
+          $ffmpeg = "$env:GITHUB_WORKSPACE/prefix-ffmpeg"
+          cvcpkg install ffmpeg-lgpl --prefix "$ffmpeg" --config release --link shared
+          $ffmpegFwd = $ffmpeg -replace '\\', '/'
+          $ffmpegArgs = @("-DCVC_FFMPEG_INCLUDE_DIR=$ffmpegFwd/include")
+          foreach ($lib in @('avformat', 'avcodec', 'swscale', 'swresample', 'avutil')) {
+            $ffmpegArgs += "-DCVC_FFMPEG_$($lib)_LIBRARY=$ffmpegFwd/lib/$lib.lib"
+          }
           # Two link variants, as on Linux: --link shared is cvcGL.dll (+ its
           # cvcGL.lib import library; WINDOWS_EXPORT_ALL_SYMBOLS gives it an export
           # table), --link static the cvcGL.lib archive. cvcGL's type follows
-          # BUILD_SHARED_LIBS, so each variant is its own build and stage.
+          # BUILD_SHARED_LIBS, so each variant is its own build and stage. Only the
+          # shared one has the player, as on Linux.
           $variants = @(
-            @{ link = 'shared'; build = 'build-cvcgl';        stageDir = 'stage-cvcgl';        bsl = 'ON'  },
-            @{ link = 'static'; build = 'build-cvcgl-static'; stageDir = 'stage-cvcgl-static'; bsl = 'OFF' }
+            @{ link = 'shared'; build = 'build-cvcgl';        stageDir = 'stage-cvcgl';        bsl = 'ON';  extra = $ffmpegArgs },
+            @{ link = 'static'; build = 'build-cvcgl-static'; stageDir = 'stage-cvcgl-static'; bsl = 'OFF'; extra = @('-DCVC_MEDIA_WITH_FFMPEG=OFF') }
           )
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           foreach ($v in $variants) {
+            $extra = $v.extra
             cmake -B $v.build -S src/cvcGL `
               -DCMAKE_BUILD_TYPE=Release `
               -DCMAKE_CONFIGURATION_TYPES=Release `
               -DBUILD_SHARED_LIBS="$($v.bsl)" `
               -DCMAKE_INSTALL_PREFIX="$env:GITHUB_WORKSPACE/$($v.stageDir)" `
-              -DCMAKE_PREFIX_PATH="$stage;$py;$imgui;$sdl3;$depsPath"
+              -DCMAKE_PREFIX_PATH="$stage;$py;$imgui;$sdl3;$depsPath" `
+              @extra | Tee-Object -FilePath "$($v.build).configure.log"
             if ($LASTEXITCODE -ne 0) { throw "cvcgl ($($v.link)) configure failed" }
+            if ($v.link -eq 'shared' -and -not (Select-String -Path "$($v.build).configure.log" -SimpleMatch 'cvcMedia: FFmpeg player ENABLED' -Quiet)) {
+              throw "the shared cvcGL's cvcMedia was built without FFmpeg: arigl would have no player"
+            }
             cmake --build $v.build --config Release
             if ($LASTEXITCODE -ne 0) { throw "cvcgl ($($v.link)) build failed" }
             cmake --install $v.build --config Release
@@ -1487,6 +1606,69 @@ jobs:
             echo "dry-run: skipping ari publish"
           fi
 
+      - name: Build, pack & publish ari-media [macOS]
+        # The twin of "... ari-media [Linux]", with otool in place of readelf.
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'macos' && matrix.config == 'release' && matrix.pyver == '311' }}
+        shell: bash
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+          DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          STAGE="$GITHUB_WORKSPACE/stage"
+          DEPS="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$DEPS" ]; then DEPS="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"; fi
+          MEDIA="$GITHUB_WORKSPACE/prefix-ari-media"
+          cvcpkg install sdl3 ffmpeg-lgpl --prefix "$MEDIA" --config release --link shared
+          export CVC_SOURCE_DIR="$GITHUB_WORKSPACE"
+          export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-ari-media"
+          export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-ari-media"
+          export CVC_DEPS_PREFIX="$STAGE;$DEPS;$MEDIA"
+          export CVC_FFMPEG_PREFIX="$MEDIA"
+          export CVC_BUILD_TYPE=Release
+          export CVC_JOBS="$(sysctl -n hw.ncpu)"
+          bash cvcpkg/recipes/ari-media/build.sh
+          test -x stage-ari-media/bin/ari-media
+          test ! -e stage-ari-media/bin/ari || { echo "::error::ari-media's stage carries bin/ari, which is the ari package's"; exit 1; }
+          otool -L stage-ari-media/bin/ari-media | tee ari-media-otool.txt
+          grep -qE 'libavformat\.[0-9]+\.dylib' ari-media-otool.txt \
+            || { echo "::error::ari-media does not link ffmpeg-lgpl's libavformat"; exit 1; }
+          # Its rpath is @loader_path/../lib, the flat prefix it is installed into; here the libraries
+          # are split across three.
+          ari_media() {
+            DYLD_LIBRARY_PATH="$STAGE/lib:$DEPS/lib:$MEDIA/lib" "$GITHUB_WORKSPACE/stage-ari-media/bin/ari-media" "$@"
+          }
+          ari_media info --json | tee ari-media-info.json
+          for want in '"runtime": "ari-media"' '"ftxui": true' '"audio": true' '"media_player": true'; do
+            grep -qF "$want" ari-media-info.json \
+              || { echo "::error::ari-media info does not report $want: it would ship a stub"; exit 1; }
+          done
+          ari_media snapshot --width 100 --height 24 examples/ariadne/terminal/terminal_tour.ari | tee ari-media-tour.txt
+          grep -qF "agents: 64" ari-media-tour.txt
+          (cd src/ari/tests && SDL_AUDIO_DRIVER=dummy ari_media snapshot \
+            --media-play always --width 60 --height 14 media_player.ari) | tee ari-media-player.txt
+          grep -qE "video (ready|playing) audio (ready|playing)" ari-media-player.txt \
+            || { echo "::error::ari-media did not open the test clip and tone"; exit 1; }
+          mkdir -p dist
+          cvcpkg pack cvcpkg/recipes/ari-media \
+            --from-prefix stage-ari-media \
+            --platform macos \
+            --config release --link shared --local \
+            --cvc-revision ${{ needs.compute-revisions.outputs.ari_media }} \
+            --output-dir dist
+          if [ "$DO_PUBLISH" = "1" ]; then
+            if [ -z "${CVCPKG_TOKEN:-}" ]; then
+              echo "CVCPKG_TOKEN secret is required to publish"; exit 1
+            fi
+            cvcpkg publish ari-media \
+              --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
+              --platform macos \
+              --config release --link shared --output-dir dist \
+              --token "$CVCPKG_TOKEN"
+          else
+            echo "dry-run: skipping ari-media publish"
+          fi
+
       - name: Build, pack & publish arisrv [macOS]
         # The same checks as on Linux. macOS has no GNU timeout, so the relay runs in the background
         # and gets its SIGTERM by pid, with a SIGKILL 30 s later if it has not stopped by then.
@@ -1604,6 +1786,84 @@ jobs:
             Write-Host 'dry-run: skipping ari publish'
           }
 
+      - name: Build, pack & publish ari-media [Windows]
+        # The twin of "... ari-media [Linux]": build.ps1 with cl and Ninja, SDL3 in a prefix of its
+        # own and FFmpeg (ffmpeg-lgpl) in another, named outright (CVC_FFMPEG_PREFIX) and kept off
+        # CMAKE_PREFIX_PATH, as in the cvcgl step.
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'windows' && matrix.config == 'release' && matrix.pyver == '311' }}
+        shell: pwsh
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $depsPath = '${{ steps.libcvc-deps.outputs.path }}'
+          if (-not $depsPath) {
+            $depsPath = if ($env:LIBCVC_DEPS_PREFIX) { $env:LIBCVC_DEPS_PREFIX } else { 'D:\libcvc-deps' }
+          }
+          $stage  = "$env:GITHUB_WORKSPACE/stage"
+          $sdl3   = "$env:GITHUB_WORKSPACE/prefix-ari-media-sdl3"
+          $ffmpeg = "$env:GITHUB_WORKSPACE/prefix-ffmpeg"
+          cvcpkg install sdl3 --prefix "$sdl3" --config release --link shared
+          cvcpkg install ffmpeg-lgpl --prefix "$ffmpeg" --config release --link shared
+          $env:CVC_SOURCE_DIR = "$env:GITHUB_WORKSPACE"
+          $env:CVC_BUILD_DIR = "$env:GITHUB_WORKSPACE/build-ari-media"
+          $env:CVC_INSTALL_DIR = "$env:GITHUB_WORKSPACE/stage-ari-media"
+          $env:CVC_DEPS_PREFIX = "$stage;$depsPath;$sdl3"
+          $env:CVC_FFMPEG_PREFIX = $ffmpeg
+          $env:CVC_BUILD_TYPE = 'Release'
+          $env:CVC_LINK = 'shared'
+          & ./cvcpkg/recipes/ari-media/build.ps1
+          if (-not (Test-Path 'stage-ari-media/bin/ari-media.exe')) { throw 'ari-media build installed no bin/ari-media.exe' }
+          if (Test-Path 'stage-ari-media/bin/ari.exe') { throw "ari-media's stage carries bin/ari.exe, which is the ari package's" }
+          # cvc.dll and every dependency DLL sit in the prefixes' bin/ directories; FFmpeg's last,
+          # after the deps' own zlib and the like.
+          $savedPath = $env:PATH
+          $env:PATH = "$stage\bin;$depsPath\bin;$sdl3\bin;$env:PATH;$ffmpeg\bin"
+          & ./stage-ari-media/bin/ari-media.exe info --json | Tee-Object -FilePath ari-media-info.json
+          if ($LASTEXITCODE -ne 0) { throw "ari-media info failed ($LASTEXITCODE)" }
+          & ./stage-ari-media/bin/ari-media.exe snapshot --width 100 --height 24 examples/ariadne/terminal/terminal_tour.ari |
+            Tee-Object -FilePath ari-media-tour.txt
+          if ($LASTEXITCODE -ne 0) { throw "ari-media snapshot failed ($LASTEXITCODE)" }
+          # The player test's clip and tone (src/ari/tests/media): both open, on SDL's dummy sound.
+          $env:SDL_AUDIO_DRIVER = 'dummy'
+          Push-Location src/ari/tests
+          & "$env:GITHUB_WORKSPACE/stage-ari-media/bin/ari-media.exe" snapshot --media-play always --width 60 --height 14 media_player.ari |
+            Tee-Object -FilePath "$env:GITHUB_WORKSPACE/ari-media-player.txt"
+          $played = $LASTEXITCODE
+          Pop-Location
+          Remove-Item Env:SDL_AUDIO_DRIVER
+          $env:PATH = $savedPath
+          if ($played -ne 0) { throw "ari-media player snapshot failed ($played)" }
+          foreach ($want in @('"runtime": "ari-media"', '"ftxui": true', '"audio": true', '"media_player": true')) {
+            if (-not (Select-String -Path ari-media-info.json -SimpleMatch $want -Quiet)) {
+              throw "ari-media info does not report $($want): it would ship a stub"
+            }
+          }
+          if (-not (Select-String -Path ari-media-tour.txt -SimpleMatch 'agents: 64' -Quiet)) {
+            throw 'the ari-media snapshot is missing the tour (agents: 64)'
+          }
+          if (-not (Select-String -Path ari-media-player.txt -Pattern 'video (ready|playing) audio (ready|playing)' -Quiet)) {
+            throw 'ari-media did not open the test clip and tone'
+          }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          cvcpkg pack cvcpkg/recipes/ari-media `
+            --from-prefix stage-ari-media `
+            --platform windows --config release --link shared --local `
+            --cvc-revision ${{ needs.compute-revisions.outputs.ari_media }} `
+            --output-dir dist
+          if ($LASTEXITCODE -ne 0) { throw "ari-media pack failed ($LASTEXITCODE)" }
+          $doPublish = ($env:GITHUB_EVENT_NAME -eq 'push') -or ('${{ github.event.inputs.dry_run }}' -eq 'false')
+          if ($doPublish) {
+            if (-not $env:CVCPKG_TOKEN) { throw 'CVCPKG_TOKEN secret is required to publish' }
+            cvcpkg publish ari-media `
+              --server "$env:CVCPKG_SERVER" --org "$env:CVCPKG_ORG" `
+              --platform windows --config release --link shared --output-dir dist `
+              --token "$env:CVCPKG_TOKEN"
+            if ($LASTEXITCODE -ne 0) { throw "ari-media publish failed ($LASTEXITCODE)" }
+          } else {
+            Write-Host 'dry-run: skipping ari-media publish'
+          }
+
       - name: Build, pack & publish arisrv [Windows]
         # build.ps1 builds with cl and Ninja through _common/env-windows.ps1, as ari's does. The same
         # checks as on Linux, except the stop: a console-less background process cannot be sent a
@@ -1685,6 +1945,7 @@ jobs:
           $py    = "$env:GITHUB_WORKSPACE/py"
           $imgui = "$env:GITHUB_WORKSPACE/prefix-imgui-cvcgl"
           $sdl3  = "$env:GITHUB_WORKSPACE/prefix-sdl3-cvcgl"
+          $ffmpeg = "$env:GITHUB_WORKSPACE/prefix-ffmpeg"
           if (-not (Select-String -Path "$cvcgl/lib/cmake/cvcGL/cvcGLTargets.cmake" -SimpleMatch 'CVC_ENABLE_IMGUI' -Quiet)) {
             throw "cvcGL was built without Dear ImGui: arigl's widgets would be inert"
           }
@@ -1699,15 +1960,17 @@ jobs:
           $env:CVC_LINK = 'shared'
           & ./cvcpkg/recipes/arigl/build.ps1
           if (-not (Test-Path 'stage-arigl/bin/arigl.exe')) { throw 'arigl build installed no bin/arigl.exe' }
-          # cvc.dll, cvcGL.dll and every dependency DLL sit in the prefixes' bin/ directories.
+          # cvc.dll, cvcGL.dll and every dependency DLL sit in the prefixes' bin/ directories;
+          # FFmpeg's last, after the deps' own zlib and the like.
           $savedPath = $env:PATH
-          $env:PATH = "$stage\bin;$cvcgl\bin;$py\bin;$imgui\bin;$sdl3\bin;$depsPath\bin;$env:PATH"
+          $env:PATH = "$stage\bin;$cvcgl\bin;$py\bin;$imgui\bin;$sdl3\bin;$depsPath\bin;$env:PATH;$ffmpeg\bin"
           & ./stage-arigl/bin/arigl.exe info --terminal --json | Tee-Object -FilePath arigl-info.json
           if ($LASTEXITCODE -ne 0) { throw "arigl info failed ($LASTEXITCODE)" }
           & ./stage-arigl/bin/arigl.exe check --terminal examples/ariadne/terminal/terminal_tour.ari
           if ($LASTEXITCODE -ne 0) { throw "arigl check failed ($LASTEXITCODE)" }
           $env:PATH = $savedPath
-          foreach ($want in @('"yaml": true', '"ftxui": true', '"tvision": true')) {
+          # media_player: the shared cvcGL's cvcMedia has its FFmpeg player (the cvcgl step).
+          foreach ($want in @('"yaml": true', '"ftxui": true', '"tvision": true', '"media_player": true')) {
             if (-not (Select-String -Path arigl-info.json -SimpleMatch $want -Quiet)) {
               throw "arigl info does not report $($want): it would ship a stub"
             }

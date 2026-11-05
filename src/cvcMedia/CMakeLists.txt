@@ -58,21 +58,27 @@ endif()
 # Linked as SHARED libraries only (cvcpkg's ffmpeg-lgpl: LGPL-2.1, decoders only), so the LGPL is
 # kept by dynamic linking. Found through pkg-config (FFmpeg's own .pc files), else by name. Without
 # it the player is absent and the widgets say `unsupported`.
+#
+# An FFmpeg named by CVC_FFMPEG_INCLUDE_DIR and the CVC_FFMPEG_<lib>_LIBRARY paths is used as given:
+# pkg-config is asked only when none is named, so a host FFmpeg's .pc cannot stand in for it.
+# CVC_MEDIA_WITH_FFMPEG=OFF builds no player at all: a STATIC cvcMedia exports what it links, and
+# FFmpeg's pkg-config target or library paths would not resolve in a consumer's prefix.
+option(CVC_MEDIA_WITH_FFMPEG "Build cvcMedia's FFmpeg player where FFmpeg is found" ON)
 set(CVCMEDIA_FFMPEG_DEP "")
 set(_ffmpeg_libs "")
 # Never in a browser build: the pages play through the browser's own <video> / <audio>
 # (media_browser.cpp), and a cross build's pkg-config could find the host's FFmpeg.
-if(NOT EMSCRIPTEN)
+if(NOT EMSCRIPTEN AND CVC_MEDIA_WITH_FFMPEG AND NOT CVC_FFMPEG_INCLUDE_DIR)
   find_package(PkgConfig QUIET)
 endif()
-if(PKG_CONFIG_FOUND AND NOT EMSCRIPTEN)
+if(PKG_CONFIG_FOUND AND NOT EMSCRIPTEN AND CVC_MEDIA_WITH_FFMPEG AND NOT CVC_FFMPEG_INCLUDE_DIR)
   pkg_check_modules(CVC_FFMPEG QUIET IMPORTED_TARGET libavformat libavcodec libswscale
                     libswresample libavutil)
   if(CVC_FFMPEG_FOUND)
     set(_ffmpeg_libs PkgConfig::CVC_FFMPEG)
   endif()
 endif()
-if(NOT _ffmpeg_libs AND NOT EMSCRIPTEN)
+if(NOT _ffmpeg_libs AND NOT EMSCRIPTEN AND CVC_MEDIA_WITH_FFMPEG)
   find_path(CVC_FFMPEG_INCLUDE_DIR libavformat/avformat.h)
   set(_ffmpeg_all TRUE)
   foreach(_lib avformat avcodec swscale swresample avutil)

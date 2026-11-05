@@ -25,9 +25,19 @@ CMAKE_ARGS=(
   -DARI_WITH_MEDIA=ON
 )
 
-# The deps prefix carries the installed libcvc SDK and SDL3 (find_package(cvc), find_package(SDL3)).
+# The deps prefix carries the installed libcvc SDK and SDL3 (find_package(cvc), find_package(SDL3)),
+# and FFmpeg (ffmpeg-lgpl) for the player.
 if [[ -n "${CVC_DEPS_PREFIX:-}" ]]; then
   CMAKE_ARGS+=("-DCMAKE_PREFIX_PATH=$CVC_DEPS_PREFIX")
+fi
+# Or FFmpeg in a prefix of its own (CVC_FFMPEG_PREFIX, as publish-cvcpkg.yml installs it), named
+# outright so that FFmpeg, and no other, is linked (src/cvcMedia/CMakeLists.txt).
+if [[ -n "${CVC_FFMPEG_PREFIX:-}" ]]; then
+  case "$(uname -s)" in Darwin) _so=dylib ;; *) _so=so ;; esac
+  CMAKE_ARGS+=("-DCVC_FFMPEG_INCLUDE_DIR=$CVC_FFMPEG_PREFIX/include")
+  for _lib in avformat avcodec swscale swresample avutil; do
+    CMAKE_ARGS+=("-DCVC_FFMPEG_${_lib}_LIBRARY=$CVC_FFMPEG_PREFIX/lib/lib$_lib.$_so")
+  done
 fi
 
 cmake "${CMAKE_ARGS[@]}"
