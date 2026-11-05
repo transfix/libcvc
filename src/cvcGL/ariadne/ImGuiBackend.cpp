@@ -17,6 +17,7 @@
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/gl/ImGuiBinding.h> // cvc::gl::ui::*
 #include <cvc/gl/ImGuiOverlay.h>
+#include <cvc/gl/TouchScroll.h> // keepTouchDrag: a widget with on_drag: keeps its drag
 #include <cvc/gl/ariadne/ImGuiBackend.h>
 #include <memory>
 #include <string>
@@ -914,9 +915,12 @@ bool ImGuiBackend::item_hovered() {
 // §4.6 widget on_drag: is the last item being actively dragged this frame? IsItemActive() is true
 // while the item holds the mouse capture (press-and-hold begun on it); gating on IsMouseDragging()
 // restricts firing to frames where the pointer is actually moving past the drag threshold, so a
-// plain press without motion does not fire on_drag (that is on_click's job).
+// plain press without motion does not fire on_drag (that is on_click's job). The core asks only
+// for a widget whose document handles its drag, so a finger's drag on it is never a scroll
+// (keepTouchDrag), here and for its on_drag_start / on_drag_end below.
 bool ImGuiBackend::item_dragged() {
 #ifdef CVC_ENABLE_IMGUI
+  cvc::gl::keepTouchDrag();
   return ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left);
 #else
   return false;
@@ -927,6 +931,7 @@ bool ImGuiBackend::item_dragged() {
 // releases.
 bool ImGuiBackend::item_drag_started() {
 #ifdef CVC_ENABLE_IMGUI
+  cvc::gl::keepTouchDrag();
   return ImGui::IsItemActivated();
 #else
   return false;
@@ -934,6 +939,7 @@ bool ImGuiBackend::item_drag_started() {
 }
 bool ImGuiBackend::item_drag_ended() {
 #ifdef CVC_ENABLE_IMGUI
+  cvc::gl::keepTouchDrag();
   return ImGui::IsItemDeactivated();
 #else
   return false;

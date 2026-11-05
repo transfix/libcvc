@@ -8,6 +8,7 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include "grpc_dns_resolver.h"
 #include "pose_snapshot_wire.h"
 #include "proto/state_transport.grpc.pb.h"
 #include "proto/state_transport.pb.h"
@@ -687,7 +688,9 @@ struct state_transport_grpc::impl {
   std::unique_ptr<grpc::Server> server;
 };
 
-state_transport_grpc::state_transport_grpc() : _impl(new impl()) {}
+state_transport_grpc::state_transport_grpc() : _impl(new impl()) {
+  cvc::grpc_dns::default_to_native_on_windows();
+}
 
 state_transport_grpc::~state_transport_grpc() { stop(); }
 

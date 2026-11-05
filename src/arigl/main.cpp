@@ -1934,9 +1934,17 @@ int run_window(const ari::HostOptions &o) {
     return menus;
   };
   // The Controls window's UI size: the overlay's own scale in the state tree, which it applies at
-  // the next frame (1.25 on a touch device, 1 with a mouse, until the user picks another).
-  rt.app_runtime().set_host_ui_size(
-      {"/" + cvc::gl::UiSettings::viewerStatePath(sg.getStatePrefix(), view.name()) + ".scale"});
+  // the next frame (1.25 on a touch device, 1 with a mouse, until the user picks another). On a
+  // touch screen, the friction a finger's fling glides against as well.
+  {
+    const std::string ui_path =
+        "/" + cvc::gl::UiSettings::viewerStatePath(sg.getStatePrefix(), view.name());
+    ari::UiSizeControl ui_size;
+    ui_size.path = ui_path + ".scale";
+    if (ui.touchMode())
+      ui_size.scroll_friction = ui_path + ".scroll_friction";
+    rt.app_runtime().set_host_ui_size(std::move(ui_size));
+  }
   rt.app_runtime().set_host_menus(host_menus(o.doc));
   std::vector<ari::KeyBinding> host_keys = camera_keys(cam);
   if (conf.active) // walking our avatar in the room
@@ -1954,6 +1962,7 @@ int run_window(const ari::HostOptions &o) {
   }
   if (!gallery.empty())
     gallery.install(rt.app_runtime(), &gallery_next, &gallery_left);
+  ari::apply_state_sets(app, sg.getStatePrefix(), o.sets); // --set: before the nodes seed theirs
   if (const int status = load_document(rt, o); status >= 0)
     return status;
   note_misplaced(rt.app_runtime(), o);
@@ -2194,6 +2203,7 @@ int run_terminal(const ari::HostOptions &o) {
     }
     return print_info(std::move(info), o);
   }
+  ari::apply_state_sets(app, prefix, o.sets); // --set: before the nodes seed theirs
   if (const int status = load_document(rt, o); status >= 0)
     return status;
   note_misplaced(rt, o);

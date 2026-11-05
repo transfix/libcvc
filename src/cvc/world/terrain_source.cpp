@@ -115,7 +115,8 @@ raster_heightfield sample_terrain(const terrain_source &t, const grid_spec &g) {
   return out;
 }
 
-raster_heightfield load_dem(const std::string &path, double half_m, double relief_m) {
+raster_heightfield load_dem(const std::string &path, double half_m, double relief_m,
+                            double floor_m) {
   int rows = 0, cols = 0;
   std::vector<float> h = read_npy(path, rows, cols);
   if (rows < 2 || cols < 2)
@@ -125,11 +126,11 @@ raster_heightfield load_dem(const std::string &path, double half_m, double relie
       throw std::runtime_error("a DEM's samples must be finite (no NaN no-data): " + path);
   const auto mm = std::minmax_element(h.begin(), h.end());
   const double lo = *mm.first, span = double(*mm.second) - lo;
-  // Anchored: the floor at 0, so the water level means the same thing on every generator; the
-  // relief stretched to relief_m when one is asked for (a flat DEM stays flat).
+  // Anchored: the floor at floor_m, so the water level means the same thing on every generator;
+  // the relief stretched to relief_m when one is asked for (a flat DEM stays flat).
   const double k = relief_m > 0.0 && span > 1e-9 ? relief_m / span : 1.0;
   for (float &v : h)
-    v = float((v - lo) * k);
+    v = float(floor_m + (v - lo) * k);
   const double half = std::max(1.0, half_m);
   return raster_heightfield(rows, cols, -half, -half, half, half, std::move(h), 0.0,
                             relief_m > 0.0 ? relief_m : 0.0);

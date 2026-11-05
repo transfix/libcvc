@@ -60,6 +60,14 @@ std::string part_node_id(const std::string &pid, std::size_t i) {
 // Frames between re-reads of the avatar catalog and everyone's choice (as for the names).
 constexpr int kLooksEvery = 15;
 
+// A marker is re-posed only once its pose matrix has moved this far (any element: metres, or a
+// rotation's cosines) from the one it shows: 0.1 mm, or under a hundredth of a degree. Less never
+// shows, but every pose applied moves a shadow caster, and a moved caster re-bakes the shadow maps.
+// A standing avatar's shown pose changes by rounding from frame to frame (under mouse look, held
+// at the camera's heading, its rotation by 2e-16 and its position by up to 3e-8 m), so the room
+// re-baked them -- and rebuilt every caster's shaders -- with nobody moving.
+constexpr double kPoseEpsilon = 1e-4;
+
 // Row-major 4x4 of a rotation quaternion and a translation.
 void pose_matrix(const cvc::physics::quat &q, double tx, double ty, double tz, double m[16]) {
   const double w = q.w, x = q.x, y = q.y, z = q.z;
@@ -265,25 +273,34 @@ void room_view::sync_avatars(cvc::ariadne::holon &h, double wall_dt) {
     double m[16];
     // The box is centred on its origin: lift it by half its height to stand on the pose.
     pose_matrix(p.rotation, p.position.x, p.position.y, p.position.z + 0.5 * kAvatarHeight, m);
-    if (std::shared_ptr<GraphicsNode> node = sg.getGraphics(id))
-      node->setPoseMatrix(m);
-    // The visor and what it wears: the same rotation, each centre moved by its offset in the
-    // avatar's frame (R * offset) -- the visor's from the box's centre, a part's from the feet.
-    const auto place = [&](const std::string &node_id, const double off[3]) {
-      if (std::shared_ptr<GraphicsNode> g = sg.getGraphics(node_id)) {
-        double pm[16];
-        std::copy(m, m + 16, pm);
-        for (int r = 0; r < 3; ++r)
-          pm[4 * r + 3] += m[4 * r] * off[0] + m[4 * r + 1] * off[1] + m[4 * r + 2] * off[2];
-        g->setPoseMatrix(pm);
-      }
-    };
-    place(visor_node_id(pid), kVisorOffset);
+    // The marker, visor and parts move together, or (within kPoseEpsilon of the pose they show)
+    // not at all.
+    const auto shown = _posed.find(pid);
+    bool moved = shown == _posed.end();
+    for (int i = 0; !moved && i < 16; ++i)
+      moved = std::fabs(m[i] - shown->second[i]) > kPoseEpsilon;
     const std::vector<rs::avatar_part> &parts = _avatars[pid].parts;
-    for (std::size_t i = 0; i < parts.size(); ++i) {
-      const double off[3] = {parts[i].pos[0], parts[i].pos[1],
-                             parts[i].pos[2] - 0.5 * kAvatarHeight};
-      place(part_node_id(pid, i), off);
+    if (moved) {
+      std::copy(m, m + 16, _posed[pid].begin());
+      if (std::shared_ptr<GraphicsNode> node = sg.getGraphics(id))
+        node->setPoseMatrix(m);
+      // The visor and what it wears: the same rotation, each centre moved by its offset in the
+      // avatar's frame (R * offset) -- the visor's from the box's centre, a part's from the feet.
+      const auto place = [&](const std::string &node_id, const double off[3]) {
+        if (std::shared_ptr<GraphicsNode> g = sg.getGraphics(node_id)) {
+          double pm[16];
+          std::copy(m, m + 16, pm);
+          for (int r = 0; r < 3; ++r)
+            pm[4 * r + 3] += m[4 * r] * off[0] + m[4 * r + 1] * off[1] + m[4 * r + 2] * off[2];
+          g->setPoseMatrix(pm);
+        }
+      };
+      place(visor_node_id(pid), kVisorOffset);
+      for (std::size_t i = 0; i < parts.size(); ++i) {
+        const double off[3] = {parts[i].pos[0], parts[i].pos[1],
+                               parts[i].pos[2] - 0.5 * kAvatarHeight};
+        place(part_node_id(pid, i), off);
+      }
     }
     if (self) { // shown or hidden (set_self_visible); a rebuilt marker starts shown
       const auto show = [&](const std::string &node_id) {
@@ -368,6 +385,7 @@ void room_view::remove_marker(const std::string &pid) {
   for (std::size_t i = 0; i < it->second.parts.size(); ++i)
     sg.removeGraphics(part_node_id(pid, i));
   _avatars.erase(it);
+  _posed.erase(pid); // a marker built again starts unposed
 }
 
 bool room_view::avatar_look(const std::string &pid, rs::avatar_look &out) const {

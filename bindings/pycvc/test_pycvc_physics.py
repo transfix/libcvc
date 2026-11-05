@@ -81,7 +81,7 @@ def exact_scene():
 
 def ground(w):
     m = w.add_material("ground", friction=0.9, restitution=0.0, rolling_resistance=0.015)
-    w.add_box((150.0, 150.0, 0.5), position=(0.0, 0.0, -0.5), motion="static", material=m)
+    return w.add_box((150.0, 150.0, 0.5), position=(0.0, 0.0, -0.5), motion="static", material=m)
 
 
 def vehicle_scene():
@@ -258,6 +258,32 @@ def test_plant_selection():
     check(pycvc.nav_sim_world_plant_kind(sim) == "kinematic", "and back to the bicycle")
     pycvc.nav_sim_world_step(sim)
     expect_raises(lambda: pycvc.nav_sim_world_set_plant(sim, 42), "a plant that is not one")
+
+
+def test_the_ground_is_not_a_building():
+    """nav_plant(ground_bodies=): a chassis set into the ground touches it, which nav_stats'
+    building_contacts leaves out once the plant knows the ground; a pole through the nose counts."""
+
+    def contacts(spawn_height, tell, pole=False):
+        sim = make_sim()
+        w = pycvc.physics_world()
+        g = ground(w)
+        if pole:  # 3 m ahead of the rear axle (the agent starts at x = -20 m), inside the body
+            w.add_box((0.3, 0.3, 1.5), position=(-17.0, 0.0, 1.5), motion="static")
+        plant = pycvc.nav_plant(w, [pycvc.vehicle_desc.humvee()], spawn_height=spawn_height,
+                                ground_bodies=[g] if tell else None)
+        pycvc.nav_sim_world_set_plant(sim, plant)
+        pycvc.nav_sim_world_begin_nav_stats(sim)
+        for _ in range(40):
+            pycvc.nav_sim_world_step(sim)
+        return json.loads(pycvc.nav_sim_world_nav_stats(sim))["per_vehicle"][0]["building_contacts"]
+
+    check(contacts(0.2, False) > 0, "without the ground's id the ground counts")
+    check(contacts(0.2, True) == 0, "the ground is not a building")
+    check(contacts(-1.0, True, pole=True) > 0, "a pole through the nose is one")
+    w = pycvc.physics_world()
+    expect_raises(lambda: pycvc.nav_plant(w, [pycvc.vehicle_desc.humvee()], ground_bodies=3),
+                  "ground_bodies is a sequence of ids")
 
 
 def books_gap(plant, i):
@@ -541,7 +567,8 @@ def test_terrain():
 
 def main():
     for t in (test_golden_and_reference, test_the_same_numbers_three_ways, test_save_restore,
-              test_plant_selection, test_the_dynamic_plant, test_the_dynamic_plant_options,
+              test_plant_selection, test_the_ground_is_not_a_building, test_the_dynamic_plant,
+              test_the_dynamic_plant_options,
               test_private_belief_planes,
               test_settings_in_the_tree,
               test_terrain, test_the_terrain_planes):

@@ -779,16 +779,30 @@ for an image that sits otherwise. The steps apply in this order:
 A textured node casts its shadow by its shape. Its image's alpha still cuts a cut-out's shadow,
 but its colours do not.
 
+**Clouds.** `cloud_sky` draws a deck of drifting, slowly changing L-system cumulus over its
+`ground:` node's extent (followed live): the clouds nearest the camera as volumes (`near:`), the
+rest as far shells. Their shade falls on the ground and on the nodes in `receivers:` (and their
+children, LOD rungs included) through those meshes' shaders: it dims the sun's light and leaves
+their textures and colours alone. Its other keys: `extent` (a cloud's half-width), `base` / `top`,
+`coverage`, `spacing`, `seed`, `variants`, `sun_az` / `sun_el` (the key light's, which the shade
+is cast along), `shade_k` / `shade_floor`, `horizon` and `shadow` (0 starts the shade off;
+`sky_controls.ari` toggles it, with the drift and morph speeds).
+
 **Generated terrain.** `source: { terrain: { generator, size, resolution, seed, amp, file,
 preset } }` draws a `cvc::world` terrain generator's ground as such a heightfield: `fbm` (the
 analytic relief the terrain lab stands on; the default), `dem` (an elevation `.npy` at `file`, a URI
-or a path relative to the document, anchored at 0 and stretched to `amp`), or one a host
-registered (`cvc::world::register_terrain_generator`). The size defaults to 1200 and the resolution
-to one vertex per 5 m (at most 2049). A `heightfield:` source takes the same `generator:` keys, its
+or a path relative to the document, stretched to `amp`), or one a host registered
+(`cvc::world::register_terrain_generator`). Sea level is 0 m: every generator lays its ground with
+0 m as the shoreline, its floor `world_sea_share` (34/90) of the relief below it (the island preset
+stands its dome in the sea), so `water_level` raises or lowers the sea from there and a lower or
+higher relief never floods or drains the world. The size defaults to 1200 and the resolution to one
+vertex per 5 m (at most 2049). A `heightfield:` source takes the same `generator:` keys, its
 layers adding on top. The `generated_world` node type uses the same generators (its `terrain:`,
 `city:` and `terrain_file:` props; `world_controls.ari` switches them live). Its first world is
-made while the document loads; every later rebuild (a changed `world.*` key, Regenerate,
-Randomize) and every repaint (`world.color`) is a sliced task on the app's scheduler
+made while the document loads. An edit to a `world.*` key then waits (`world.pending` is 1) until
+Regenerate (`world.request: regenerate`) or Randomize, so several settings change in one rebuild;
+`world.auto` (the node's `auto_regenerate`) rebuilds after every edit instead. Every rebuild and
+every repaint (`world.color`, at once) is a sliced task on the app's scheduler
 ([`sliced_task.h`](../inc/cvc/core/sliced_task.h), as `fe_lab`'s jobs are): `cvc::world::world_builder`
 and `surface_painter` step it a few rows at a time, on the background pool natively and a few
 milliseconds a frame on single-threaded wasm, so the old world stays on screen until the new one is
@@ -1603,6 +1617,40 @@ this for every one.
   flow, §5.8), open as anywhere else.
 - **Labels.** A slider's, combo's or field's label stays in view: in a window that fits its
   widgets, a widget that would push its label past the view's edge is narrowed to leave it room.
+- **Scrolling with a finger.** On a touch screen a finger drags a window's content along, its
+  scroll bar untouched, and a finger that lifts while moving leaves the content gliding at its
+  speed until friction stops it or it meets an end. This works in every window, child pane,
+  `text_view:` and drop-down list that scrolls, and a press on content that is still gliding
+  stops it (that press is not a tap). A drag scrolls when it starts on empty space, text, or a
+  widget worked by a tap (a button, a checkbox, a selectable, a text field not yet being edited):
+  past the drag threshold the widget's press is let go and it does not fire. A drag keeps its
+  old meaning on a slider or a drag widget, a field being edited, a title or menu bar, a resize
+  grip or border, a scroll bar, a table's column border, a scene view (§5.18), the transfer
+  function editor, and any widget whose document handles `on_drag:`, `on_drag_start:` or
+  `on_drag_end:` (§4.6). The window scrolled is the innermost one under the finger that scrolls
+  along the drag's main axis, as the mouse wheel's is.
+
+  The glide's speed falls as `v0 * exp(-friction * t)`, so a fling covers `v0 / friction`
+  before it stops. Both are state keys beside the UI size, and a document reaches them under
+  its own prefix in arigl (`viewers.main.ui.*`):
+
+  | key | default | |
+  |---|---|---|
+  | `<scene>.viewers.<viewer>.ui.touch_scroll` | `1` | `0`: a finger's drag scrolls nothing (the scroll bars still do) |
+  | `<scene>.viewers.<viewer>.ui.scroll_friction` | `2` | per second: 2 is iOS's normal deceleration, 10 its fast one; higher stops sooner, `0` glides to the end |
+
+  ```yaml
+  - slider_float: Scroll friction
+    bind: viewers.main.ui.scroll_friction   # arigl: under the document's own prefix
+    lo: 0.5
+    hi: 20
+  - button: Short flings
+    on: (state-set "viewers.main.ui.scroll_friction" 8)
+  ```
+
+  On a touch screen arigl's Controls window offers it as **Scroll friction** under *Display*,
+  for any host that sets `UiSizeControl::scroll_friction`. A mouse has the wheel and the scroll
+  bars, so none of this applies to one.
 - **The system keyboard.** A browser raises a phone's keyboard only for a focused text field,
   which the canvas is not. When a finger (or a pen) activates an `input_text`, the page focuses a
   hidden `<input>` placed at the field's caret, so the keyboard comes up and the browser keeps
@@ -2046,7 +2094,9 @@ relative bases in nested composition.
 
 `src/cvc/ariadne/components/*.ari` (installed to `<prefix>/share/libcvc/ariadne/components`
 and embedded in the wasm demos) are reusable windows a document imports by `cvc://` and
-includes. Each binds state keys a C++ object owns, so it needs no host code;
+includes. The `libcvc` cvcpkg bundles and the release tarballs carry the directory from 3.7.10.
+Earlier native bundles left it out, so with those a host needs `CVC_ARIADNE_PATH` pointing at a
+copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object owns, so it needs no host code;
 [`INDEX.ari`](../src/cvc/ariadne/components/INDEX.ari) catalogs them:
 
 | component | drives |
@@ -2360,6 +2410,12 @@ document path is the document's (§5.6):
 | `ari` | libcvc only (FTXUI, optionally tvision) | in the terminal; a `scene:` is dropped | [`src/ari`](../src/ari/main.cpp) |
 | `arigl` | libcvc + cvcGL (VTK, ImGui) | in a real window, or `--terminal` with its scene rendered behind the widgets | [`src/arigl`](../src/arigl/main.cpp) |
 | `arisrv` | libcvc + gRPC + WebSocket | headless, as a server (the conference relay + WS↔gRPC bridge) | [`src/arisrv`](../src/arisrv/main.cpp) |
+
+Each is its own cvcpkg package, built from its recipe in [`cvcpkg/recipes`](../cvcpkg/recipes)
+against the installed libcvc: `cvcpkg install ari`, `cvcpkg install arigl`, and for a room's
+server `cvcpkg install arisrv` (linux, macOS and windows). arisrv's transports, its Jolt avatars
+and its libjpeg-turbo video rungs are libcvc's, so it needs a libcvc built with them: every
+libcvc after 3.7.8 is, and arisrv's standalone configure refuses an SDK with neither transport.
 
 ```
 arigl run      [--terminal] [flags] doc.ari [document args...]

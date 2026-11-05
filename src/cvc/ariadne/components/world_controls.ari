@@ -1,12 +1,14 @@
 # world_controls.ari — a REUSABLE Ariadne component: live controls for a `generated_world` node.
 # The controls bind the world.* state keys the cvcGL generated_world realizer reads each frame; the
 # realizer SEEDS them from the node's authored .ari props, so the panel starts at the document's
-# world and then regenerates it live. Every structural change rebuilds the whole world, so the
-# sliders write when they are let go (`commit: release`). The rebuild is a task on the app's
-# scheduler, a few milliseconds a frame (on single-threaded wasm too): the old world stays on screen
-# and the progress bar names the stage until the new one is swapped in; Stop ends it. A new preset
-# quick-sets the counts and the relief; Colour by only repaints the ground. Regenerate, Randomize
-# and Stop go through a request key (world.request) the realizer consumes.
+# world. Edits wait: change as many settings as you like, then Regenerate rebuilds the whole world
+# from them (a note says when the settings differ from the world shown). "Regenerate on change"
+# (world.auto) rebuilds after every edit instead, and its sliders write when they are let go
+# (`commit: release`). The rebuild is a task on the app's scheduler, a few milliseconds a frame (on
+# single-threaded wasm too): the old world stays on screen and the progress bar names the stage
+# until the new one is swapped in; Stop ends it. A new preset quick-sets the counts, the relief and
+# the water level; Colour by only repaints the ground, at once. Regenerate, Randomize and Stop go
+# through a request key (world.request) the realizer consumes.
 #
 # Args (every one has a default, so a bare include works):
 #   keys   the generated_world node's state key root: its `keys:` prop, else world (the default).
@@ -52,7 +54,7 @@ units:
       - combo: Terrain
         bind: "{keys}.terrain"
         options: (string.split (state-get "{keys}.generators.terrain") "\n")
-        tooltip: "fbm: the analytic relief; dem: an elevation .npy, anchored at 0 and stretched to the relief"
+        tooltip: "fbm: the analytic relief; dem: an elevation .npy, stretched to the relief; either way 0 m is the shoreline"
       - input_text: Elevation file
         bind: "{keys}.terrain_file"
         visible_when: (= (state-get "{keys}.terrain") "dem")
@@ -100,14 +102,21 @@ units:
       - slider_float: Water level (m)
         bind: "{keys}.water_level"
         commit: release
-        lo: 0.0
-        hi: 200.0
+        lo: -100.0
+        hi: 100.0
         fmt: "%.1f"
+        tooltip: "0 m is sea level, the shoreline every relief is laid against; raise or lower the sea from it"
+      - text: "Settings changed: Regenerate to apply them."
+        visible_when: (= (state-get "{keys}.pending") "1")
       - button: Regenerate
         on: (state-set "{keys}.request" "regenerate")
+        tooltip: "rebuild the world from the settings above"
       - button: Randomize
         on: (state-set "{keys}.request" "randomize")
-        tooltip: "a new seed"
+        tooltip: "a new seed, and regenerate"
+      - checkbox: Regenerate on change
+        bind: "{keys}.auto"
+        tooltip: "rebuild after every edit instead of waiting for Regenerate"
       - button: Stop
         on: (state-set "{keys}.request" "stop")
         enabled_when: (= (state-get "{keys}.busy") "1")

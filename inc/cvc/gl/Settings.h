@@ -44,9 +44,12 @@ private:
 };
 
 // UI settings for an ImGuiOverlay: "<scene prefix>.viewers.<viewer>.ui".
-// Keys: visible, scale, touch_mode, panels_open, toggle_button. scale is the
-// UI size in logical pixels (ImGuiOverlay::setUiScale), which the overlay
-// multiplies by the display's pixel ratio.
+// Keys: visible, scale, touch_mode, panels_open, toggle_button, touch_scroll,
+// scroll_friction. scale is the UI size in logical pixels
+// (ImGuiOverlay::setUiScale), which the overlay multiplies by the display's
+// pixel ratio. touch_scroll (1 by default) has a finger's drag scroll the
+// content under it in touch mode, and scroll_friction (per second, 2 by
+// default) is how fast the glide after a fling slows (TouchScroll).
 class UiSettings : public cvc::state_object<UiSettings> {
 public:
   struct Values {
@@ -55,6 +58,8 @@ public:
     bool touchMode = false;
     bool panelsOpen = true;
     bool toggleButton = true;
+    bool touchScroll = true;
+    double scrollFriction = 2.0;
   };
   UiSettings(cvc::app &ctx, const std::string &statePath, std::function<void(Values)> apply);
 

@@ -594,7 +594,10 @@ and, on a knob, a recommended `min` and `max`. So do the `nav_stats` leaves that
 
 **nav_stats** gains `energy_J`, `energy_per_km` (J per km of path) and `building_contacts`
 per vehicle, and `total_energy_J` and `total_building_contacts` per episode. `energy_J` is
-what the vehicle drew from its source, net of regeneration.
+what the vehicle drew from its source, net of regeneration. `building_contacts` counts the
+contacts a chassis starts with static or kinematic geometry other than the ground: name the
+ground's bodies in `nav_plant_options::ground_bodies` (pycvc: `nav_plant(..., ground_bodies=[id])`;
+`plant_host`, `nav_eval` and the Jolt rollout name theirs), or a chassis scraping it counts.
 
 These fields, and their JSON, appear only when a plant measures energy. The kinematic record
 is unchanged, and `fuel_used` keeps its proxy meaning.
@@ -766,7 +769,12 @@ The five terms (doc 31 D9):
   stopping governor's braking (with the plant's latency) is down to that point's `v_risk` by the
   probe before it, so within one probe spacing of risky ground the vehicle is at its `v_risk`.
   `drive_telemetry.v_risk` reports the cap (0 when off). The CPU drive, both GPU drives and the
-  plant arm apply it; the persistent `sim_world_cuda` path has no material or terrain. A route
+  plant arm apply it; the persistent `sim_world_cuda` path has no material or terrain. A
+  `sim_world` switches it from its next step with `set_risk_governor(on, vmin, onset, lookahead,
+  probes)` (pycvc: `nav_sim_world_set_risk_governor`). On a plant the forces' braking is often
+  nothing at all: they slow an agent only by what they take from its goal pull's surplus over its
+  top speed, and a plant's top speed is usually under nav's cruise, so a vehicle driving square at
+  a hazard meets it at its top speed with its run unchanged. The governor slows it there. A route
   follower drives in the drive's place (`sim_world::override_command`) at its own route speed,
   so `sim_world` holds an overriding command to the speeds the drive's own command is held to:
   the agent's top speed (`vmax`; on a plant the lower of the plant's and nav's) and, with the

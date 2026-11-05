@@ -307,7 +307,15 @@ void AppRuntime::add_ui_size(Widget &root) const {
     }
     Widget size = combo("UI size", hostUiSize_.path, std::move(labels));
     size.values = std::move(values);
-    w.children.insert(w.children.begin(), {text("Display"), std::move(size), separator()});
+    std::vector<Widget> rows = {text("Display"), std::move(size)};
+    // How fast a fling slows: low glides far, high stops soon (cvc::gl::TouchScroll).
+    if (!hostUiSize_.scroll_friction.empty())
+      rows.push_back(slider_float("Scroll friction", hostUiSize_.scroll_friction,
+                                  hostUiSize_.friction_lo, hostUiSize_.friction_hi, 2.0,
+                                  "%.1f /s"));
+    rows.push_back(separator());
+    w.children.insert(w.children.begin(), std::make_move_iterator(rows.begin()),
+                      std::make_move_iterator(rows.end()));
     return;
   }
 }
