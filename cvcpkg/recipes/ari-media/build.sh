@@ -41,7 +41,9 @@ if [[ -n "${CVC_FFMPEG_PREFIX:-}" ]]; then
 fi
 
 cmake "${CMAKE_ARGS[@]}"
-cmake --build "$CVC_BUILD_DIR" -j "$CVC_JOBS" --target ari-media
+# Every target, as build.ps1 builds: the ari install component holds bin/ari too, and installing it
+# fails on a bin/ari that was never built.
+cmake --build "$CVC_BUILD_DIR" -j "$CVC_JOBS"
 cmake --install "$CVC_BUILD_DIR" --component ari
 # The ari component holds bin/ari too; this package is bin/ari-media alone.
 rm -f "$CVC_INSTALL_DIR/bin/ari" "$CVC_INSTALL_DIR/bin/ari.exe"
