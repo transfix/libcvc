@@ -117,6 +117,12 @@ struct dyn_bike_plant_options {
   // none (the vehicles still meet each other). dyn_bike_plant::sdf_field builds one from nav's.
   std::function<void(double x, double y, double &phi, double &gx, double &gy)> contact_field;
   bool contact_vehicles = true;
+  // m: the furthest a point may close on what it meets in one dyn_plant step. A substep in which
+  // one would close further (a fast impact, or a steep field such as nav's grid SDF at a face) is
+  // cut into as many equal pieces as that takes, each its own step in the books, and every agent
+  // keeps stepping in that many until nothing touches or closes (so a vehicle left resting against
+  // what it hit keeps them). Off (<= 0): never.
+  double contact_step_depth = 0.1;
   // The slope across the heading (diff::dyn_plant_ground, dyn_plant_books_ground): gravity acts
   // along and across the heading, from the ground's gradient under the centre of gravity (its
   // tangents, so m g h is the potential of the planar model), and the grade line is - dV, the
@@ -217,7 +223,10 @@ public:
   // Agent i's outline about its centre of gravity: its chassis box and its wheels, as limits()
   // reads them.
   const cvc::nav::diff::dyn_footprint &footprint(int i) const { return _agents.at(i).fp; }
-  // The contact on agent i at the start of its last substep: wrench, energy, touching points.
+  // The contact on agent i at the start of its last step (a substep, or its last piece:
+  // options.contact_step_depth): wrench, energy, touching points. Its Wd is the dampers' and the
+  // friction's wrench the step held, read at the twist it reached (diff::dyn_contact_implicit);
+  // damping is their power at the start's twist.
   const cvc::nav::diff::dyn_contact &contact_now(int i) const { return _agents.at(i).cnow; }
   // A contact field from nav's signed-distance grid (sim_world's; plane `plane`), in world metres
   // through `metres_per_world_unit`: phi bilinear between the grid's samples and its own gradient,
@@ -255,10 +264,14 @@ private:
   // Agent a's plant_sample; `tick`: over a tick of _dt from (vx0, vy0) at heading psi0.
   void measure(agent &a, double vx0, double vy0, double psi0, bool tick) const;
   // options.contact: every agent's contact at the model states `s`, against the field (field[i])
-  // and against the other agents (pair[i], its half of each pair's energy and dissipation).
+  // and against the other agents (pair[i], its half of each pair's energy and dissipation), and,
+  // with `rows`, its damped directions (the agents by index). With `closing`, the fastest any point
+  // closes on what it meets, of those in the skin or reaching it within hdt (m/s).
   void contacts(const std::vector<cvc::nav::diff::dyn_state<double>> &s,
                 std::vector<cvc::nav::diff::dyn_contact> &field,
-                std::vector<cvc::nav::diff::dyn_contact> &pair) const;
+                std::vector<cvc::nav::diff::dyn_contact> &pair,
+                std::vector<cvc::nav::diff::dyn_contact_row> *rows = nullptr,
+                double *closing = nullptr, double hdt = 0.0) const;
   // Agent a's chassis box at state s: its origin, on the ground under it, and its attitude.
   void chassis_pose(const agent &a, const cvc::nav::diff::dyn_state<double> &s, vec3 &position,
                     quat &rotation) const;
@@ -269,6 +282,7 @@ private:
   cvc::world_units::normalized_frame _frame;
   double _dt = 0.0;
   int _nsub = 1;
+  int _pieces = 1; // options.contact: the pieces each substep of the current contact takes
   std::vector<agent> _agents;
   std::unique_ptr<dyn::dyn_chassis> _chassis;
 };
