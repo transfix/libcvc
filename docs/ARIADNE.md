@@ -785,7 +785,9 @@ rest as far shells. Their shade falls on the ground and on the nodes in `receive
 children, LOD rungs included) through those meshes' shaders: it dims the sun's light and leaves
 their textures and colours alone. Its other keys: `extent` (a cloud's half-width), `base` / `top`,
 `coverage`, `spacing`, `seed`, `variants`, `sun_az` / `sun_el` (the key light's, which the shade
-is cast along), `shade_k` / `shade_floor`, `horizon` and `shadow` (0 starts the shade off;
+is cast along), `shade_k` / `shade_floor`, `horizon` (how far past the ground the volumes draw
+clouds), `far_reach` (how far the shells reach toward the horizon; out of the camera's bounds) and
+`shadow` (0 starts the shade off;
 `sky_controls.ari` toggles it, with the drift and morph speeds).
 
 **Generated terrain.** `source: { terrain: { generator, size, resolution, seed, amp, file,

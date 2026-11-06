@@ -2134,13 +2134,13 @@ bool has_shader_preset(const std::string &name) {
 }
 
 namespace {
-// The GLES fragment shader spells the view-space normal differently (the WebGL backend
-// renormalizes), so the normal-perturbing bump presets must target the right name per platform.
-#ifdef __EMSCRIPTEN__
-constexpr const char *FS_NORMAL = "normalizedNormalVCVSOutput";
-#else
-constexpr const char *FS_NORMAL = "normalVCVSOutput";
-#endif
+// The low-memory mapper (WebGL2's, or any build's under CVCGL_LOWMEM_MAPPER=force) spells the
+// view-space normal differently: its normalVCVSOutput is the varying, and the lighting reads the
+// renormalized normalizedNormalVCVSOutput. So the normal-perturbing bump presets target the name
+// the node's own mapper uses.
+std::string fsNormal(const GeometryNode &node) {
+  return node.usesLowMemoryMapper() ? "normalizedNormalVCVSOutput" : "normalVCVSOutput";
+}
 
 // Value-noise fBm ground detail; perturbs the fragment normal by the height gradient (Mikkelsen's
 // tangent-free method). Needs vertexMC in world space (disableCoordinateShiftScale).
@@ -2178,6 +2178,7 @@ void register_default_shader_presets() {
   // "terrain_bump": value-noise fBm ground detail (the demo's addTerrainBump).
   register_shader_preset("terrain_bump", [](GeometryNode &node) {
     node.disableCoordinateShiftScale(); // vertexMC in the shader becomes world xy
+    const std::string FS_NORMAL = fsNormal(node);
     node.addVertexShaderReplacement("//VTK::Normal::Dec", "//VTK::Normal::Dec\nout vec3 gCoord;");
     node.addVertexShaderReplacement("//VTK::PositionVC::Impl",
                                     "//VTK::PositionVC::Impl\n  gCoord = vertexMC.xyz;");
@@ -2201,6 +2202,7 @@ void register_default_shader_presets() {
   // "bark": vertical-furrow tree bark (the demo's addBark).
   register_shader_preset("bark", [](GeometryNode &node) {
     node.disableCoordinateShiftScale();
+    const std::string FS_NORMAL = fsNormal(node);
     node.addVertexShaderReplacement("//VTK::Normal::Dec",
                                     "//VTK::Normal::Dec\nout vec3 bNrm;\nout vec3 bPos;");
     node.addVertexShaderReplacement(

@@ -1323,6 +1323,22 @@ void GeometryNode::setForceOpaque(bool on) {
   });
 }
 
+void GeometryNode::setUseBounds(bool on) {
+  runOnMainThread([this, on]() {
+    m_contributesToSceneBounds = on;
+    if (m_actor)
+      m_actor->SetUseBounds(on);
+    if (SceneGraph *sg = getSceneGraph()) {
+      sg->markContentChanged(); // the camera's clipping range is derived from the bounds
+      sg->requestRender();
+    }
+  });
+}
+
+bool GeometryNode::usesLowMemoryMapper() const {
+  return m_mapper && m_mapper->IsA("vtkOpenGLLowMemoryPolyDataMapper");
+}
+
 void GeometryNode::disableCoordinateShiftScale() {
   runOnMainThread([this]() {
     // SetVBOShiftScaleMethod is virtual on vtkPolyDataMapper, so dispatch straight to

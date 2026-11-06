@@ -224,6 +224,17 @@ public:
   // which on a large ground texture is a measurable share of a browser frame.
   void setForceOpaque(bool on);
 
+  // Keep this mesh out of (or put it back in) the bounds the camera fits and clips to: VTK's
+  // (vtkProp UseBounds) and the scene's (contributesToSceneBounds, for a node at the scene's top
+  // level). For something that may reach far past the scene, such as a sky drawn to the horizon,
+  // that must neither zoom the view out nor push its near plane away. Set it before the mesh has
+  // its geometry: the scene's own box only grows until nodes are added or removed.
+  void setUseBounds(bool on);
+
+  // True when this mesh draws through the low-memory (WebGL2) mapper: its fragment shader names the
+  // view-space normal normalizedNormalVCVSOutput, not normalVCVSOutput.
+  bool usesLowMemoryMapper() const;
+
   // Apply a texture (a cvc::image) to this mesh — sampled through the geometry's
   // UVs (SetTCoords). Meaningful only when the geometry carries uvs.
   //

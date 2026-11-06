@@ -442,6 +442,7 @@ constexpr int REFRESH = 60;        // frames between shade and far composites (t
 constexpr int SLICES = 8;          // frames a composite's cells, then its rows, are spread over
 constexpr int AREA_STRIDE = 60;    // frames between looks at the ground's extent and receivers
 constexpr int FADE_FRAMES = 45;    // a cloud's near <-> far crossfade
+constexpr double FAR_REACH = 4000.0;    // how far past the ground the far shells reach, metres
 const char *CLOUD_INPUTS = "cloud_sky"; // the shared shader inputs' key on a mesh
 
 // Where the deck's code goes in a lit mesh's fragment shader (vertexVC is there whenever a mesh
@@ -474,8 +475,9 @@ const char *SHADE_SUM =
     "vec4(ambientColor + cloudShade(vertexVC.xyz) * (diffuse + specular), opacity)";
 
 // The far shells: each fragment reads its slice of the coarse opacity and turns it into the
-// slice's optical depth along the view ray (as the volume would integrate it), lightens with
-// height, thins out with distance from the camera (cloudFar = camera xy, fade start, fade end) and
+// slice's optical depth along the view ray (as the volume would integrate it), takes the volumes'
+// colour ramp (grey-blue thin, white dense; a little lighter with height), thins out toward the
+// horizon and with distance from the camera (cloudFar = camera xy, fade start, fade end) and
 // leaves out what a near volume draws (cloudCutK = its cloud's centre xy, half-width, weight).
 // cloudFarZ = (deck base, 1 / deck depth, a slice's vertical optical depth at full opacity,
 // camera z).
@@ -486,6 +488,9 @@ uniform mat4 cloudVCWC;
 uniform vec4 cloudXf;
 uniform vec4 cloudFar;
 uniform vec4 cloudFarZ;
+uniform float cloudFarL;
+const int CLOUD_SAMPLES = 6;
+const float CLOUD_SEG = 24.0;
 )";
   for (int k = 0; k < MAX_NEAR; ++k)
     s += "uniform vec4 cloudCut" + std::to_string(k) + ";\n";
@@ -496,26 +501,42 @@ uniform vec4 cloudFarZ;
 vec4 cloudShell(vec3 pVC) {
   vec3 w = (cloudVCWC * vec4(pVC, 1.0)).xyz;
   float h = clamp((w.z - cloudFarZ.x) * cloudFarZ.y, 0.0, 1.0);
-  float d = texture(cloudFarTex, vec3((w.xy - cloudXf.xy) * cloudXf.z, h)).r;
-  float mu = abs(normalize(w - vec3(cloudFar.xy, cloudFarZ.w)).z);
-  float a = 1.0 - exp(-cloudFarZ.z * d / max(mu, 0.08));
+  // A slice stands for the slab of deck around it: march the view ray across that slab (at most
+  // CLOUD_SEG slabs' depth of it) and sum its optical depth, so the slices join up into one cloud
+  // however edge-on they are seen, instead of parting into bands; the last degrees fade into haze.
+  vec3 v = normalize(w - vec3(cloudFar.xy, cloudFarZ.w));
+  float mu = abs(v.z);
+  float slab = 1.0 / (cloudFarZ.y * cloudFarL);
+  float seg = min(slab / max(mu, 1e-3), CLOUD_SEG * slab);
+  float d = 0.0;
+  for (int i = 0; i < CLOUD_SAMPLES; ++i) {
+    vec3 q = w + v * seg * ((float(i) + 0.5) / float(CLOUD_SAMPLES) - 0.5);
+    float hq = clamp((q.z - cloudFarZ.x) * cloudFarZ.y, 0.0, 1.0);
+    d += texture(cloudFarTex, vec3((q.xy - cloudXf.xy) * cloudXf.z, hq)).r;
+  }
+  d /= float(CLOUD_SAMPLES);
+  float a = (1.0 - exp(-cloudFarZ.z * d * seg / slab)) * smoothstep(0.0, 0.03, mu);
   a *= 1.0 - smoothstep(cloudFar.z, cloudFar.w, length(w.xy - cloudFar.xy));
 )";
   for (int k = 0; k < MAX_NEAR; ++k)
     s += "  a *= cloudCut(w.xy, cloudCut" + std::to_string(k) + ");\n";
   s +=
-      R"(  vec3 c = mix(vec3(0.80, 0.85, 0.93), vec3(1.0), clamp(0.3 + 0.7 * h + 0.4 * d, 0.0, 1.0));
+      R"(  vec3 c = mix(vec3(0.72, 0.78, 0.88), vec3(1.0), clamp(0.35 + 0.25 * h + 0.9 * d, 0.0, 1.0));
   return vec4(c, a);
 }
 )";
   return s;
 }
+const char *SHELL_CLAMP = R"(//VTK::PositionVC::Impl
+  if (gl_Position.w > 0.0) gl_Position.z = min(gl_Position.z, 0.999 * gl_Position.w);
+)";
 const char *SHELL_AFTER = R"(//VTK::Light::Impl
   gl_FragData[0] = cloudShell(vertexVC.xyz);
 )";
 
 void skyTransfer(double w, std::vector<double> &color, std::vector<double> &opacity) {
-  color = {0.0, 0.80, 0.85, 0.93, 0.45, 0.94, 0.96, 0.98, 1.0, 1.00, 1.00, 1.00};
+  // Thin cloud a soft grey-blue, dense cloud white: the shells' colour follows the same ramp.
+  color = {0.0, 0.72, 0.78, 0.88, 0.45, 0.90, 0.93, 0.97, 1.0, 1.00, 1.00, 1.00};
   opacity = {0.0, 0.0, CLOUD_EMPTY, 0.0, 0.55, 0.26 * w, 1.0, 0.54 * w};
 }
 
@@ -554,10 +575,12 @@ struct SkyRT {
   std::vector<std::string>
       receivers; // the nodes whose meshes (and their children's) take the shade
   std::shared_ptr<const cvc::height_field> ground; // its extent is the area, unless `area` is set
-  // The deck is drawn over `reach` around the ground's centre (ox, oy): the ground's half-width
-  // plus the horizon. The pattern's period is wider than that by a cloud on each side, so one copy
-  // of each cloud is ever drawn: the one nearest the centre.
-  double ox = 0.0, oy = 0.0, area = 0.0, horizon = 0.0, reach = 0.0;
+  // The near volumes draw clouds within `reach` around the ground's centre (ox, oy): the ground's
+  // half-width plus the horizon. The pattern's period is wider than that by a cloud on each side,
+  // so one copy of each of those clouds is drawn: the one nearest the centre. The far shells reach
+  // further, `farReach` around it, where the pattern repeats.
+  double ox = 0.0, oy = 0.0, area = 0.0, horizon = 0.0, reach = 0.0, farReach = 0.0;
+  double farHorizon = FAR_REACH;
   double shadeK = 0.1, shadeFloor = SHADE_FLOOR;
   double farK = 1.0; // a far slice's vertical optical depth at the table's largest opacity
   struct Near {
@@ -602,6 +625,7 @@ void groundBox(const cvc::height_field &g, double &ox, double &oy, double &area)
 // Lay the deck over the ground: the reach, the period, the shells; every cloud placed afresh.
 void layDeck(SkyRT &r) {
   r.reach = r.area + r.horizon;
+  r.farReach = std::max(r.reach, r.area + r.farHorizon);
   r.layer->set_area(r.reach + r.layer->params().extent);
   for (SkyRT::Near &v : r.near) {
     v.cell = -1;
@@ -614,7 +638,7 @@ void layDeck(SkyRT &r) {
   r.fresh = true;
   r.shade.phase = r.far.phase = 0;
   if (auto sh = r.shells.lock())
-    sh->setGeometry(shellMesh(*r.layer, r.ox, r.oy, r.reach));
+    sh->setGeometry(shellMesh(*r.layer, r.ox, r.oy, r.farReach));
 }
 
 // Give `g` and every mesh under it the deck's shade, once each.
@@ -734,8 +758,10 @@ bool stepComposite(Composite &c, long f, double morph, bool now, std::size_t cel
 // half), extent (a cloud's half-width), base and top (the deck's heights), spacing (cell size),
 // coverage (the share of cells with a cloud), variants, seed, sun_az / sun_el (the light the
 // clouds are lit from and cast along: the scene's key), near (volumes, at most 8), layers (far
-// shells), horizon (how far past the ground the shells reach; by default a cloud's half-width or
-// the shadow's throw: they are in the scene's bounds, which the camera fits and clips to),
+// shells), horizon (how far past the ground the near volumes draw clouds; by default a cloud's
+// half-width or the shadow's throw: they are in the scene's bounds, which the camera fits and
+// clips to), far_reach (how far past the ground the far shells reach; 4 km by default, out of the
+// bounds),
 // shade_k / shade_floor (the shade's strength and its darkest), shadow (0 starts the shade off).
 std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::SceneNode &n,
                                                 GraphicsNode *parent, RealizedScene &out,
@@ -773,7 +799,9 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
   const double throw_m =
       (p.top - p.base) / std::tan(std::min(89.0, std::max(5.0, p.sun_el)) * kPi / 180.0);
   rt->horizon = n.props.num("horizon", std::max(p.extent, throw_m));
+  rt->farHorizon = n.props.num("far_reach", FAR_REACH);
   rt->reach = rt->area + rt->horizon;
+  rt->farReach = std::max(rt->reach, rt->area + rt->farHorizon);
   p.area = rt->reach + p.extent;
   rt->layer = std::make_unique<cvc::world::cloud_layer>(p);
   // The volume's opacity is per 1/100 of its box's diagonal (VolumeNode::setVolume), so that is
@@ -806,7 +834,8 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
     }
     if (k == 0)
       first = gn;
-    vnode->setShading(false);
+    vnode->setShading(
+        false); // VTK's gradient lighting reads as storm cloud here: the tint is the TF's
     vnode->setAmbient(0.95);
     vnode->setDiffuse(0.35);
     vnode->setSpecular(0.0);
@@ -822,15 +851,21 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
   rt->inputs = std::make_shared<GeometryNode::ShaderInputs>();
   {
     const std::string id = n.id + "_far";
-    const cvc::geometry g = shellMesh(*rt->layer, rt->ox, rt->oy, rt->reach);
+    const cvc::geometry none; // the mesh comes once the shells are out of the bounds (below)
     std::shared_ptr<GraphicsNode> gn =
-        parent ? parent->createChild<GeometryNode>(id, g) : sg.addGraphics(id, g);
+        parent ? parent->createChild<GeometryNode>(id, none) : sg.addGraphics(id, none);
     if (auto shells = std::dynamic_pointer_cast<GeometryNode>(gn)) {
       shells->setCastsShadow(false);
       shells->setOpacity(0.99); // the translucent pass; the shader writes the real alpha
       shells->setSpecular(0.0);
       shells->addFragmentShaderReplacement("//VTK::Light::Dec", shellDec());
       shells->addFragmentShaderReplacement("//VTK::Light::Impl", SHELL_AFTER);
+      // Out of the bounds the camera fits and clips to, so the shells can reach the horizon; a
+      // vertex past the far plane is drawn on it (its depth only: where it lands on screen, and
+      // the world point the fragments read, are unchanged).
+      shells->setUseBounds(false);
+      shells->setGeometry(shellMesh(*rt->layer, rt->ox, rt->oy, rt->farReach));
+      shells->addVertexShaderReplacement("//VTK::PositionVC::Impl", SHELL_CLAMP);
       shells->setSharedShaderInputs(CLOUD_INPUTS, rt->inputs);
       shells->setVisible(false); // until its opacity is on the GPU
       rt->shells = shells;
@@ -1003,7 +1038,8 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
     in.f4["cloudXf"] = {float(r.driftX), 0.0f, float(1.0 / P), float(p.base)};
     in.f3["cloudSunR"] = {float(sx / sz), float(sy / sz), 0.0f};
     in.f["cloudShadeOn"] = shadeOn && in.tex.count("cloudShadeTex") ? 1.0f : 0.0f;
-    in.f4["cloudFar"] = {float(cp[0]), float(cp[1]), float(1.5 * r.reach), float(2.5 * r.reach)};
+    in.f4["cloudFar"] = {float(cp[0]), float(cp[1]), float(0.5 * r.farReach), float(r.farReach)};
+    in.f["cloudFarL"] = float(p.far_layers);
     in.f4["cloudFarZ"] = {float(p.base), float(1.0 / (p.top - p.base)), float(r.farK),
                           float(cp[2])};
   });

@@ -35,6 +35,7 @@ namespace world {
 namespace {
 constexpr double kPi = 3.14159265358979323846;
 constexpr double LUMP_FLOOR = 0.10;    // the density below which a map is clear sky
+constexpr double TAPER_FROM = 0.6;     // a map fades out from this fraction of its half-width
 constexpr int TAU_STEPS = 32;          // samples along the sun through the deck, per shadow texel
 constexpr int FAR_SUB = 3;             // sub-samples per far texel and axis (a box filter)
 constexpr int SHADOW_MAX = 512;        // the shadow mask's largest side, texels
@@ -125,6 +126,20 @@ cloud_layer::cloud_layer(const cloud_layer_params &p) : m_p(p) {
     cp.sun_el = m_p.sun_el;
     cp.depth = m_p.depth;
     std::vector<float> f = lsys::cloud_field(cp);
+    // A round taper over the outer part of the footprint. The grammar clamps its turtle at the
+    // grid's y edges (it wraps x), so a cloud that wanders there piles puffs against the face,
+    // and the grid's own window cuts that pile off in a few voxels: a straight edge along the
+    // volume's box. The taper also keeps the clouds from reading square.
+    for (int gy = 0; gy < n; ++gy)
+      for (int gx = 0; gx < n; ++gx) {
+        const double u = 2.0 * gx / (n - 1) - 1.0, v = 2.0 * gy / (n - 1) - 1.0;
+        const double t = (std::sqrt(u * u + v * v) - TAPER_FROM) / (1.0 - TAPER_FROM);
+        const float w = static_cast<float>(t <= 0.0   ? 1.0
+                                           : t >= 1.0 ? 0.0
+                                                      : 1.0 - t * t * (3.0 - 2.0 * t));
+        for (int gz = 0; gz < nz; ++gz)
+          f[lsys::cloud_index(n, gx, gy, gz)] *= w;
+      }
     const float peak = f.empty() ? 0.0f : *std::max_element(f.begin(), f.end());
     for (float &x : f) {
       const double r = peak > 0.0f ? x / peak : 0.0;
