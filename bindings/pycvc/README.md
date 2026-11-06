@@ -222,7 +222,8 @@ world, `cvc::world::generate_world`) on a dict of its params (the `generated_wor
 `world.*` key names, or the struct's): `.world()` is the `world_geometry` for physics and nav,
 `.terrain()` the ground, `.height(x, y)`, `.info()` the params and what came out. It is a pure
 function of the params and the library, so the same keys give the scene node's world exactly.
-`test_pycvc_plant_host.py` covers both.
+`test_pycvc_plant_host.py` covers both. `pycvc_gl.cars` ([docs/CARS.md](../../docs/CARS.md)) is
+built on them.
 
 ## Level of detail (cvc::simplify + cvc::lod)
 
