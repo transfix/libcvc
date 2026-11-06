@@ -106,7 +106,9 @@ As built in P1 (#985):
 - **Building.**
   - `-DCVC_BUILD_PYCVC=ON` in-tree, or `-DARI_WITH_PYTHON=ON` / `-DARIGL_WITH_PYTHON=ON` for a
     standalone recipe build, adds the `arix` / `ariglx` targets.
-  - A target is skipped when Python's Development.Embed isn't found.
+  - In-tree, a target is skipped when Python's Development.Embed isn't found. With
+    `-DARI_WITH_PYTHON=ON` / `-DARIGL_WITH_PYTHON=ON`, a missing Development.Embed is a configure
+    error.
   - Nothing is built under Emscripten.
 - **`cvc::ariadne::python::Engine`** (`EngineConfig`, `HostHandles`, `Attachment`, `attach()`,
   `run_script()`, `python_main()`) boots CPython once per process:
@@ -147,14 +149,15 @@ defined:
 | Host | Is | Links | Runtime packages |
 |---|---|---|---|
 | `ariglx` | `arigl` | the engine, libpython | `python312`, `numpy-cp312`, `pycvc-cp312`, `pycvc-gl-cp312` |
-| `arix` | `ari` | the engine, libpython | `python312`, `numpy-cp312`, `pycvc-cp312` |
+| `arix` | `ari` | the engine, libpython | `python312`, `numpy-cp312`, `pycvc-cp312`; a Python program also needs `pycvc-gl-cp312`, since `Host` is pycvc_gl's |
 | `arisrvx` | `arisrv` | not built (S1) | |
 
-Natively they link the prefix's shared `libcvc`, `libcvcGL` and `libpython3.12`, and import pycvc
-and pycvc_gl from the prefix's site-packages. So the `_pycvc_gl` extension that Python imports
-binds to the **same** cvcGL as the host: one app, one scene graph, one ImGui context. A second
-copy of cvcGL would mean a second ImGui context, and raw ImGui calls from the wrong copy crash.
-In wasm everything is one static module anyway (§5).
+Natively `ariglx` links the prefix's shared `libcvc`, `libcvcGL` and `libpython3.12`, and imports
+pycvc and pycvc_gl from the prefix's site-packages; `arix` links `libcvc` and `libpython3.12`. So
+the `_pycvc_gl` extension that Python imports in `ariglx` binds to the **same** cvcGL as the
+host: one app, one scene graph, one ImGui context. A second copy of cvcGL would mean a second
+ImGui context, and raw ImGui calls from the wrong copy crash. In wasm everything is one static
+module anyway (§5).
 
 A runtime-loaded Python plugin for the stock binaries was considered for native builds. wasm
 has to be a separate link regardless, and separate binaries keep Python out of the stock
@@ -208,7 +211,7 @@ modules aren't sub-interpreter safe. VolRover3 reached the same conclusion
 | Token | Holds when |
 |---|---|
 | `python` | the host embeds an interpreter |
-| `python.<module>` | `<module>` is importable. Checked at load with `importlib.util.find_spec`, not imported. For example `python.numpy`, or `python.vtkmodules` for the full browser tier (§5.2) |
+| `python.<module>` | `<module>` is importable. Checked at load with `importlib.util.find_spec`: a top-level module isn't imported, but a dotted one imports its parent package. For example `python.numpy`, or `python.vtkmodules` for the full browser tier (§5.2) |
 | `python.console` | the console widget (§4.5). Not built yet |
 
 - `(has? "python")` works as for any token, and `ari info` lists the tokens under its
@@ -287,7 +290,8 @@ the DSL it has no chroot. So:
   - `sys.argv` is `[app.py, args...]`, and the script's directory goes first on `sys.path`.
   - Typically the script does `host = Host()`, registers functions, then `host.load("app.ari")`
     and `host.run()`.
-  - `snapshot` and `check` take a script too, and so does `arix`.
+  - `snapshot` and `check` take a script too, and so does `arix`. A program under `arix` needs
+    `pycvc-gl-cp312` installed beside it, for `Host`.
   - Not under `ariglx --terminal`.
 - **`ariglx run -m package.module [args]`: planned (P1b).** It would do the same for a module.
   Today `ariglx python -m grl_snam.ariadne live austin-freedrive` runs one, but with no host
