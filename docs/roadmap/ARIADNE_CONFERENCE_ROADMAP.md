@@ -584,7 +584,10 @@ cannot) is filtered as a subject but never registered as a receiver — no conne
 **Pose pushes.** A non-inner subject's pose reaches the receiver as a targeted snapshot
 (`state_transport::push_snapshot_to`) carrying its whole pose subtree, with `server_tick` re-stamped to
 the relay holon's *current* tick and written last: the tree's heartbeat tick for a still subject can be
-~120 ticks old, and a client re-aligns its whole clock (and rubber-bands) on more than 24 ticks of skew.
+~600 ticks old (arisrv re-stamps it every 5 s; the pose stream carries the 1 s heartbeat), and a client
+re-aligns its whole clock (and rubber-bands) on more than 24 ticks of skew. A client takes no clock
+reading from a tick older than one it has already applied (`holon::apply_authoritative`), so a stale
+heartbeat in the tree no longer seeks a joiner's clock back and forth.
 A pair entering inner, and a new pair that starts middle or outer, is pushed at once. `relay_room_step`
 sends every push **before** the step's `drain_local` + publish, so on each connection a push precedes
 that tick's live writes.
@@ -1046,6 +1049,21 @@ chosen so each part can later come from the user without changing who decides.
 5. User controllers (sandboxed, deterministic, metered), or a user's body driven by a server
    controller of their choosing.
 
+### 5l. More streams, app and screen sharing, desktop audio (PLANNED)
+
+A participant sends more than one camera and mic, shares the Ariadne GL frame (the whole window or
+chosen windows), shares the desktop or other applications' windows, and sends the desktop's stereo
+audio in sync with it. Today the wire knows only `"camera"` and `"mic"`, and video is MJPEG only.
+The plan is [`CONFERENCE_SHARING.md`](CONFERENCE_SHARING.md). It covers:
+- named streams, with a capability record per client;
+- an inter-frame codec, H.264 with VP9 as the fallback;
+- a robust WebSocket path *and* a WebRTC media leg, chosen per stream;
+- capture on each platform, built for the browser and natively in parallel;
+- sync groups;
+- phases SH0–SH6.
+
+The owner settled its decisions on 2026-11-03.
+
 ---
 
 ## 6. Data plane & transport
@@ -1296,6 +1314,8 @@ mesh works first, auth hardens later (§5, Phase 8); **WASI server committed** (
 * LOD — geometry (holon §5h; **doc stale — landed PR #249+**; what the room uses since S7 is in its
   §4.1 status note): [`VISIBILITY-AND-LOD-ROADMAP.md`](VISIBILITY-AND-LOD-ROADMAP.md).
 * Physics (holon §5h): [`NAV-VEHICLE-PHYSICS-ROADMAP.md`](NAV-VEHICLE-PHYSICS-ROADMAP.md).
+* More streams, app and screen sharing, desktop audio (§5l):
+  [`CONFERENCE_SHARING.md`](CONFERENCE_SHARING.md).
 
 ---
 

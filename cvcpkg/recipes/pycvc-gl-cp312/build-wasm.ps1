@@ -22,7 +22,11 @@ $swigExe = Join-Path $hostEnv 'bin\swig.exe'
 # The cvcpkg-packaged SWIG reports a stale -swiglib after relocation, so FindSWIG
 # cannot locate SWIG_DIR (the .i library). Point it at the real library dir
 # (share/swig/<ver>) via both the env var swig itself reads and the CMake var.
+# The windows swig bundle keeps that library beside swig.exe instead (bin\Lib).
 $swigLibDir = Get-ChildItem (Join-Path $hostEnv 'share\swig') -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $swigLibDir -and (Test-Path (Join-Path $hostEnv 'bin\Lib\swig.swg'))) {
+    $swigLibDir = Get-Item (Join-Path $hostEnv 'bin\Lib')
+}
 if ($swigLibDir) {
     $env:SWIG_LIB = $swigLibDir.FullName
     $swigDir = $swigLibDir.FullName
@@ -57,15 +61,13 @@ $pthreads = if ($env:CVC_WASM_THREADS -eq '1') { 'ON' } else { 'OFF' }
 # Point config-mode find_package(Boost) (CMP0167=NEW) straight at the cvcpkg boost
 # config dir — avoids the emscripten cross FIND_ROOT_PATH re-rooting trap.
 $boostDir = (Get-ChildItem (Join-Path $env:CVC_DEPS_PREFIX 'lib\cmake') -Directory -Filter 'Boost-*' -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
-# NOTE: the shared Invoke-CvcWasmCMakeBuild runs `cmake --build` WITHOUT keep-going,
-# so on a Windows host the ungated cvcGL test exes (whose wasm-opt -O3 link crashes
-# with 0xC0000409 here) abort the build. The linux fleet path (build-wasm.sh) adds
-# `-- -k 0` to press past them; on Windows, build via the fleet or pre-gate those
-# test targets. (Not broadening the shared helper to keep-going for all recipes.)
-
 # ── (3) configure + build + install the trimmed closure (static, BRIDGE=ON) ──
 # Same OFF set as build-wasm.sh / examples/web/build-wasm-demo.sh, plus the pycvc bindings.
-Invoke-CvcWasmCMakeBuild -ExtraArgs @(
+# -KeepGoing, as build-wasm.sh's `-- -k 0`: cvcGL adds its test exes unconditionally, and
+# some fail to link (no -sFETCH for cvc::net's emscripten_fetch; on a Windows host, wasm-ld
+# out of memory or wasm-opt -O3 crashing with 0xC0000409). They are not in the package; the
+# archive check below is the gate.
+Invoke-CvcWasmCMakeBuild -KeepGoing -ExtraArgs @(
     # cmake >=3.30 deprecates the legacy FindBoost module (CMP0167); its module
     # mode fails to locate the cvcpkg boost layout under the cross FIND_ROOT_PATH.
     # NEW = use boost's BoostConfig.cmake (config mode), shipped by the wasm boost
@@ -108,6 +110,10 @@ Invoke-CvcWasmCMakeBuild -ExtraArgs @(
 if (-not (Select-String -Quiet -Pattern '^CVC_IMAGEMAGICK_ENABLED:INTERNAL=ON' -Path (Join-Path $env:CVC_BUILD_DIR 'CMakeCache.txt'))) {
     throw "pycvc-gl(wasm): the configure found no ImageMagick in $env:CVC_DEPS_PREFIX"
 }
+$pxa = Get-ChildItem $env:CVC_INSTALL_DIR -Recurse -Filter '_pycvc.a' -ErrorAction SilentlyContinue | Select-Object -First 1
+$gla = Get-ChildItem $env:CVC_INSTALL_DIR -Recurse -Filter '_pycvc_gl.a' -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $pxa -or -not $gla) { throw "pycvc-gl(wasm): static archives not installed" }
+Write-Host "pycvc-gl(wasm): installed $($pxa.FullName) + $($gla.FullName)"
 
 # ── (4) link the CPython-wasm host (embeds pycvc + pycvc_gl + numpy) ──────────
 # Invoke-CvcWasmCMakeBuild already installed the archives + .py proxies. Drive the
@@ -122,7 +128,8 @@ $bashEnv = @(
     "INST='$(ConvertTo-MsysPath $env:CVC_INSTALL_DIR)'",
     "SRC='$(ConvertTo-MsysPath $env:CVC_SOURCE_DIR)'",
     "EMSDK='$(ConvertTo-MsysPath $env:CVC_EMSDK_DIR)'",
-    "OUT='$(ConvertTo-MsysPath $share)'"
+    "OUT='$(ConvertTo-MsysPath $share)'",
+    "PYTHON='$(ConvertTo-MsysPath $pyNative)'"  # link-host's Python steps (wasm_pyext.py)
 ) -join ' '
 if ($nodeExe) { $bashEnv += " NODE='$(ConvertTo-MsysPath $nodeExe)'" }
 $linkScript = ConvertTo-MsysPath (Join-Path $env:CVC_SOURCE_DIR 'bindings\pycvc\wasm\link-host.sh')

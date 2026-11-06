@@ -1,0 +1,3 @@
+// Generated from ariadne_python.py by ariadne_python.cmake: edit that file, not this one.
+#pragma once
+static const char kAriadnePythonSource[] = R"ARIPY(@ARIADNE_PYTHON_SOURCE@)ARIPY";

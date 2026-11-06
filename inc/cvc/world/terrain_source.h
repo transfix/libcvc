@@ -125,10 +125,11 @@ private:
 raster_heightfield sample_terrain(const terrain_source &t, const grid_spec &g);
 
 // A relief from an elevation .npy (a 2-D float32 / float64 / int16 / uint16 / int32 / uint8 array,
-// C order, row 0 = min y) laid over [-half_m, half_m]^2 and anchored: its lowest sample at 0 and
-// its highest at relief_m (relief_m <= 0 keeps the file's metres, only shifted). Throws
+// C order, row 0 = min y) laid over [-half_m, half_m]^2 and anchored: its lowest sample at floor_m
+// and its highest relief_m above that (relief_m <= 0 keeps the file's metres, only shifted). Throws
 // std::runtime_error when the file is missing, malformed or under 2 x 2.
-raster_heightfield load_dem(const std::string &path, double half_m, double relief_m);
+raster_heightfield load_dem(const std::string &path, double half_m, double relief_m,
+                            double floor_m = 0.0);
 
 } // namespace world
 } // namespace cvc

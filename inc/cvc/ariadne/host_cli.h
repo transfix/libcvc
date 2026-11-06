@@ -20,6 +20,8 @@
 //   --png FILE            snapshot: also write a PNG (where the runtime can render one)
 //   --graphics MODE       how images draw in a terminal: auto, kitty, sixel, color or mono
 //   --image NAME=FILE     publish the picture in FILE under NAME, for image: widgets (repeatable)
+//   --set KEY=VALUE       write VALUE to the state key KEY under the document's state root before
+//                         the document loads, so its nodes start from it (repeatable, in order)
 //   --cell-size WxH       snapshot: a terminal cell's size in pixels, where it can't be asked
 //   --net                 let the document use the network (net_host.h); off by default
 //   --net-allow ORIGIN    ... and reach ORIGIN (repeatable; implies --net)
@@ -31,6 +33,8 @@
 //   --oidc-client I=ID    sign in to issuer I as client ID (repeatable; implies --net)
 //   --oidc-redirect-uri U a browser page's OAuth redirect URI
 //   --no-browser          never open the user's browser (sign-in shows a device code instead)
+//   --python-path DIR     a scripting host (arix, ariglx): DIR on its Python's sys.path
+//   (repeatable)
 //
 // boost::program_options reads them: --flag VALUE and --flag=VALUE both work, and an unknown flag
 // or one missing its value is an error.
@@ -42,6 +46,7 @@
 #include <vector>
 
 namespace cvc {
+class app;
 namespace ariadne {
 
 // snapshot's wait for the document's requests when --settle does not say (AppRuntime::settle).
@@ -69,9 +74,11 @@ struct HostOptions {
   std::string log;      // --log FILE: the run's warnings, appended as they happen (host_warnings.h)
   std::string graphics; // empty = auto (FtxuiBackend::Options::ImageColor)
   std::vector<std::pair<std::string, std::string>> images; // --image NAME=FILE, in order
+  std::vector<std::pair<std::string, std::string>> sets;   // --set KEY=VALUE, in order
   int cell_w = 0, cell_h = 0;                              // --cell-size; 0 = ask the terminal
   NetHostConfig net;                    // --net, --net-allow, --net-policy, --credential-store
   std::string media_play;               // --media-play auto|always|never; "" = auto (§5.13)
+  std::vector<std::string> python_path; // --python-path DIR: a scripting host's sys.path entries
   std::vector<std::string> extra_flags; // the runtime's own flags that were given
   bool help = false;                    // -h / --help, or `help` as the command
   std::string error;                    // a usage error: print it with the usage and exit 2
@@ -84,6 +91,15 @@ HostOptions parse_host_args(int argc, const char *const *argv,
 
 // The general flags' help lines, for a runtime's usage text.
 std::string host_flags_help();
+
+// --set's argument, KEY=VALUE: the key and the value (which may be empty, or hold '='). False for
+// one with no '=' or an empty key.
+bool parse_state_set(const std::string &arg, std::pair<std::string, std::string> &out);
+
+// Write each --set value to its key under `prefix` (a key with a leading '/' is absolute), as a
+// string the way a widget's text would be, in order.
+void apply_state_sets(cvc::app &app, const std::string &prefix,
+                      const std::vector<std::pair<std::string, std::string>> &sets);
 
 // For a document that declares no args: block: a note naming any of its arguments that is a
 // general flag, which was probably meant for the runtime ("" when there is none).

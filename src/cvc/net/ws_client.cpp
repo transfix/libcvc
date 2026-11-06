@@ -397,6 +397,10 @@ std::shared_ptr<WsConnection> ws_connect(const std::string &url, const WsOptions
   curl_easy_setopt(h, CURLOPT_TIMEOUT_MS, static_cast<long>(opts.connect_timeout_secs * 1000.0));
   curl_easy_setopt(h, CURLOPT_NOSIGNAL, 1L);
   curl_easy_setopt(h, CURLOPT_USERAGENT, "cvc-ari");
+#if defined(_WIN32)
+  // wss:// against the system's certificate store, as the http client does (http_client_curl.cpp).
+  curl_easy_setopt(h, CURLOPT_SSL_OPTIONS, static_cast<long>(CURLSSLOPT_NATIVE_CA));
+#endif
   const CURLcode rc = curl_easy_perform(h);
   curl_slist_free_all(headers); // the handshake is done: curl doesn't read them again
   if (rc != CURLE_OK) {

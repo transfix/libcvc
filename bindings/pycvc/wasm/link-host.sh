@@ -15,14 +15,24 @@
 #   NODE   = optional node to smoke-run the result. When set, the script's exit
 #            status is the smoke's (pycvc_host.cpp's default script exits non-zero
 #            when an import, or Exec(app) running a with-lock, fails).
+#   PYTHON = optional native Python 3 for the extension steps (default: python3).
 #
 # Key facts it encodes:
-#   * numpy's wasm C-extensions are RELOCATABLE objects (not side modules), so
-#     they link statically; each is inittab-registered under its dotted name.
-#   * each numpy ext statically bundles npymath -> --allow-multiple-definition.
+#   * Python C extensions for wasm (numpy's) are RELOCATABLE objects (not side
+#     modules), so they link statically; each is inittab-registered under its
+#     dotted name.
+#   * Each extension object has a namespace of its own (its PyInit renamed after
+#     its dotted module, its other globals local; cvcpkg/recipes/_common/
+#     wasm_pyext.py), listed in a share/python-wasm/*.inittab manifest. numpy's
+#     extensions each bundle npymath, which once needed --allow-multiple-definition;
+#     localized, they don't, and a real clash between extensions fails the link.
 #   * pycvc core is a flat module (_pycvc); pycvc_gl is a package (pycvc_gl._pycvc_gl).
 #   * libpython's _sha2 has an un-archived HACL gap -> ERROR_ON_UNDEFINED_SYMBOLS=0
 #     (harmless: the missing symbols are only reached if hashlib.sha256 is called).
+#   * cvc, cvcGL and the wrappers compile with -fexceptions (the top-level CMakeLists.txt),
+#     so this link must say it too. Without it emscripten links with exception catching
+#     off and every throw aborts ("Aborted(undefined)" in ___cxa_throw), even one a catch
+#     would take: cvc::state::instance() on a new app catches its first lookup's bad_any_cast.
 set -euo pipefail
 : "${DEPS:?}"; : "${INST:?}"; : "${SRC:?}"; : "${EMSDK:?}"; : "${OUT:?}"
 EMCC="${EMSDK}/upstream/emscripten/emcc.bat"; [ -x "$EMCC" ] || EMCC="${EMSDK}/upstream/emscripten/emcc"
@@ -36,30 +46,38 @@ PXA="$(find "$INST" -name '_pycvc.a' 2>/dev/null | head -1)"
 GLA="$(find "$INST" -name '_pycvc_gl.a' 2>/dev/null | head -1)"
 [ -n "$PXA" ] && [ -n "$GLA" ] || { echo "link-host: pycvc archives not found under $INST" >&2; exit 1; }
 
-# Generate the numpy static-extension inittab registrar from the actual .so set.
-GEN="$OUT/numpy_embed_gen.cpp"
-python3 - "$SP_DEPS" "$GEN" "$OUT/numpy_so_list.txt" <<'PY'
-import os, glob, re, sys
-sp, gen, lst = sys.argv[1], sys.argv[2], sys.argv[3]
-E=[]
-for so in glob.glob(os.path.join(sp,"numpy","**","*.so"), recursive=True):
-    rel=os.path.relpath(so,sp).replace("\\","/"); base=os.path.basename(so)
-    mod=re.sub(r"\.so$","",re.sub(r"\.cpython-.*$","",base))
-    if mod.endswith("_tests"): continue
-    E.append((os.path.dirname(rel).replace("/",".")+"."+mod,"PyInit_"+mod,so.replace("\\","/")))
-E.sort()
-with open(gen,"w") as f:
-    f.write('#include <Python.h>\nextern "C" {\n')
-    for d,pi,_ in E: f.write(f"PyObject *{pi}(void);\n")
-    f.write("int pycvc_register_numpy_inittab(void){\n")
-    for d,pi,_ in E: f.write(f'  if(PyImport_AppendInittab("{d}",{pi})) return 1;\n')
-    f.write("  return 0;\n}\n}\n")
-open(lst,"w").write("\n".join(e[2] for e in E))
-print(f"link-host: registered {len(E)} numpy extensions")
-PY
-# strip CR: on a Windows host the generator's python writes CRLF, which would
+# The Python C extensions, from the deps prefix's share/python-wasm/*.inittab
+# manifests: each lists a package's extensions (dotted module, renamed init symbol,
+# object). A package installed before it shipped one (numpy-cp312 before cvc.6) is
+# localized here instead, into copies under a scratch dir, so the deps prefix is
+# never modified. Then `check` refuses a set that would clash (one module listed
+# twice, a global defined by two extensions, an object not localized), and
+# `registrar` writes pycvc_register_pyext_inittab() and the list of objects.
+PYTHON="${PYTHON:-python3}"
+PYEXT="$SRC/cvcpkg/recipes/_common/wasm_pyext.py"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/link-host.XXXXXX")"
+trap 'rm -rf "$WORK"' EXIT
+MANIFESTS=()
+for m in "$DEPS"/share/python-wasm/*.inittab; do [ -f "$m" ] && MANIFESTS+=("$m"); done
+lists_numpy() { [ ${#MANIFESTS[@]} -gt 0 ] && grep -qsE '^numpy[.]' "${MANIFESTS[@]}"; }
+if [ -d "$SP_DEPS/numpy" ] && ! lists_numpy; then
+    echo "link-host: numpy ships no inittab manifest -> localizing copies of its extensions"
+    "$PYTHON" "$PYEXT" package "$DEPS" numpy --site-packages "$SP_DEPS" --out "$WORK/pyext" >/dev/null
+    MANIFESTS+=("$WORK/pyext/share/python-wasm/numpy.inittab")
+fi
+GEN="$WORK/pyext_inittab.cpp"
+if [ ${#MANIFESTS[@]} -gt 0 ]; then
+    "$PYTHON" "$PYEXT" check "${MANIFESTS[@]}"
+    "$PYTHON" "$PYEXT" registrar --function pycvc_register_pyext_inittab \
+        --cpp "$GEN" --objects "$WORK/pyext_objects.txt" "${MANIFESTS[@]}"
+else
+    echo "link-host: no Python C extensions in DEPS"
+    printf '#include <Python.h>\nextern "C" int pycvc_register_pyext_inittab(void) { return 0; }\n' > "$GEN"
+    : > "$WORK/pyext_objects.txt"
+fi
+# strip CR: on a Windows host the generator's python may write CRLF, which would
 # leave a trailing \r on each path and break emcc ("No such file").
-mapfile -t NPYOBJS < <(tr -d '\r' < "$OUT/numpy_so_list.txt")
+mapfile -t PYEXT_OBJS < <(tr -d '\r' < "$WORK/pyext_objects.txt")
 
 # vtk-python cvc.6: its static build aggregates ALL wrapped modules into ONE
 # builtin archive (_vtkmodules_static.a exporting PyInit__vtkmodules_static) plus
@@ -87,9 +105,9 @@ printf "Module.preRun=Module.preRun||[];Module.preRun.push(function(){ENV.PYTHON
 # builds use cvcpkg's libxml2, libtiff, liblzma and freetype instead of VTK's bundled
 # copies. Older vtk wasm bundles ship libvtklibxml2-9.5.a, which renames only libxml2's
 # public API. Its plain-named internals (__xmlRaiseError, xmlBuf*, ...) collide with the
-# libxml2 that ImageMagick brings, and under --allow-multiple-definition the module does
-# not compile ("expected 0 elements on the stack for fallthru"). The workflow's node check
-# fails on that.
+# libxml2 that ImageMagick brings: a duplicate-symbol error at this link (while it allowed
+# multiple definitions, a module that did not compile: "expected 0 elements on the stack
+# for fallthru").
 DEP_LIBS=("$DEPS"/lib/*.a)
 
 # TODO(cvcGL wasm app contract, docs/CVCGL_WASM.md): this host is node-only today, so it links
@@ -100,11 +118,10 @@ DEP_LIBS=("$DEPS"/lib/*.a)
 # -sASYNCIFY_IGNORE_INDIRECT do not apply until it does.
 
 "$EMCC" "$SRC/bindings/pycvc/wasm/pycvc_host.cpp" "$GEN" \
-    -std=c++17 -O1 -DPYCVC_EMBED_NUMPY ${VTK_DEF[@]+"${VTK_DEF[@]}"} -I "$PYINC" \
-    -Wl,--allow-multiple-definition \
+    -std=c++17 -O1 -fexceptions -DPYCVC_EMBED_PYEXT ${VTK_DEF[@]+"${VTK_DEF[@]}"} -I "$PYINC" \
     -Wl,--whole-archive "$PXA" "$GLA" -Wl,--no-whole-archive \
     ${VTK_WHOLE[@]+"${VTK_WHOLE[@]}"} \
-    "${NPYOBJS[@]}" \
+    ${PYEXT_OBJS[@]+"${PYEXT_OBJS[@]}"} \
     -Wl,--start-group "$INST"/lib/libcvc.a "$INST"/lib/libcvcGL.a "${DEP_LIBS[@]}" -Wl,--end-group \
     -sALLOW_MEMORY_GROWTH=1 -sEXIT_RUNTIME=1 -sSTACK_SIZE=8mb -sERROR_ON_UNDEFINED_SYMBOLS=0 \
     --embed-file "${PYSTD}@/py/lib/python3.12" \

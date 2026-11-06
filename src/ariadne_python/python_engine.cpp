@@ -1,0 +1,607 @@
+// python_engine.cpp — see the header. The interpreter's boot and teardown, the _arihost builtin
+// module, and the document side (a python: block at load, the python capability tokens).
+
+#include "python_engine.h"
+
+#define PY_SSIZE_T_CLEAN
+#include "ariadne_python_source.h" // kAriadnePythonSource: ariadne_python.py, compiled in
+
+#include <Python.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cvc/ariadne/app_runtime.h>
+#include <cvc/ariadne/loader.h>   // register_ari_block, LoadResult
+#include <cvc/ariadne/requires.h> // set_script_engine: the python tokens
+#include <cvc/ariadne/value.h>
+#include <cvc/core/app.h>
+#include <cvc/core/process.h> // self_path: the install prefix's Python
+#include <cvc/state/state.h>
+#include <filesystem>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace cvc {
+namespace ariadne {
+namespace python {
+
+namespace {
+
+namespace fs = std::filesystem;
+
+// The GIL for one crossing into Python, from any thread: the host's frames run without it.
+class Gil {
+public:
+  Gil() : state_(PyGILState_Ensure()) {}
+  ~Gil() { PyGILState_Release(state_); }
+  Gil(const Gil &) = delete;
+  Gil &operator=(const Gil &) = delete;
+
+private:
+  PyGILState_STATE state_;
+};
+
+// What the host lent (attach), for _arihost: one per process, like the interpreter. Read and
+// written with the GIL held.
+struct Lent {
+  std::string host; // the host's name, from the engine's config
+  HostHandles handles;
+  bool attached = false;
+  bool loop_ran = false;
+  int loop_status = 0;
+};
+Lent &lent() {
+  static Lent l;
+  return l;
+}
+
+PyObject *g_helper = nullptr;  // _ariadne_python (ariadne_python.py)
+PyObject *g_arihost = nullptr; // _arihost, once imported
+
+// The exception set now, with its traceback, as text; cleared.
+std::string take_error() {
+  PyObject *type = nullptr, *value = nullptr, *tb = nullptr;
+  PyErr_Fetch(&type, &value, &tb);
+  if (!type)
+    return "unknown error";
+  PyErr_NormalizeException(&type, &value, &tb);
+  if (value && tb)
+    PyException_SetTraceback(value, tb);
+  std::string text;
+  if (PyObject *d = g_helper && value ? PyObject_CallMethod(g_helper, "describe", "O", value)
+                                      : nullptr) { // the document's frames, not the engine's
+    if (const char *c = PyUnicode_AsUTF8(d))
+      text = c;
+    Py_DECREF(d);
+  }
+  PyErr_Clear();
+  if (PyObject *traceback = text.empty() ? PyImport_ImportModule("traceback") : nullptr) {
+    PyObject *lines = PyObject_CallMethod(traceback, "format_exception", "OOO", type,
+                                          value ? value : Py_None, tb ? tb : Py_None);
+    if (lines) {
+      PyObject *empty = PyUnicode_FromString("");
+      PyObject *joined = empty ? PyUnicode_Join(empty, lines) : nullptr;
+      if (const char *c = joined ? PyUnicode_AsUTF8(joined) : nullptr)
+        text = c;
+      Py_XDECREF(joined);
+      Py_XDECREF(empty);
+      Py_DECREF(lines);
+    }
+    Py_DECREF(traceback);
+  }
+  if (text.empty()) { // no traceback module: the exception's own str()
+    PyErr_Clear();
+    if (PyObject *s = value ? PyObject_Str(value) : nullptr) {
+      if (const char *c = PyUnicode_AsUTF8(s))
+        text = c;
+      Py_DECREF(s);
+    }
+  }
+  while (!text.empty() && text.back() == '\n')
+    text.pop_back();
+  Py_XDECREF(type);
+  Py_XDECREF(value);
+  Py_XDECREF(tb);
+  PyErr_Clear();
+  return text.empty() ? "error" : text;
+}
+
+// A program's exit status from the exception it ended with (set now; cleared): SystemExit's code,
+// or 1 once anything else's traceback is printed. PyErr_Print would exit the process on SystemExit.
+int exit_status_from_error() {
+  if (!PyErr_ExceptionMatches(PyExc_SystemExit)) {
+    PyErr_Print();
+    return 1;
+  }
+  PyObject *type = nullptr, *value = nullptr, *tb = nullptr;
+  PyErr_Fetch(&type, &value, &tb);
+  PyErr_NormalizeException(&type, &value, &tb);
+  int status = 0;
+  PyObject *code = value ? PyObject_GetAttrString(value, "code") : nullptr;
+  if (code && code != Py_None) {
+    if (PyLong_Check(code)) {
+      status = static_cast<int>(PyLong_AsLong(code));
+    } else { // sys.exit("message"): print it, status 1
+      if (PyObject *s = PyObject_Str(code)) {
+        if (const char *c = PyUnicode_AsUTF8(s))
+          std::fprintf(stderr, "%s\n", c);
+        Py_DECREF(s);
+      }
+      status = 1;
+    }
+  }
+  Py_XDECREF(code);
+  Py_XDECREF(type);
+  Py_XDECREF(value);
+  Py_XDECREF(tb);
+  PyErr_Clear();
+  return status;
+}
+
+// A neutral document value as Python: a scalar as str, a sequence as list, a map as dict.
+PyObject *to_python(const Value &v) {
+  switch (v.kind) {
+  case Value::Kind::Scalar:
+    return PyUnicode_FromStringAndSize(v.scalar.data(), static_cast<Py_ssize_t>(v.scalar.size()));
+  case Value::Kind::Sequence: {
+    PyObject *list = PyList_New(0);
+    for (const Value &item : v.items) {
+      PyObject *p = list ? to_python(item) : nullptr;
+      if (!p || PyList_Append(list, p) != 0) {
+        Py_XDECREF(p);
+        Py_XDECREF(list);
+        return nullptr;
+      }
+      Py_DECREF(p);
+    }
+    return list;
+  }
+  case Value::Kind::Map: {
+    PyObject *dict = PyDict_New();
+    for (const auto &[key, item] : v.entries) {
+      PyObject *p = dict ? to_python(item) : nullptr;
+      if (!p || PyDict_SetItemString(dict, key.c_str(), p) != 0) {
+        Py_XDECREF(p);
+        Py_XDECREF(dict);
+        return nullptr;
+      }
+      Py_DECREF(p);
+    }
+    return dict;
+  }
+  }
+  Py_RETURN_NONE;
+}
+
+// ── _arihost: what the host lends Python ────────────────────────────────────────────────────────
+
+PyObject *not_attached() {
+  PyErr_SetString(PyExc_RuntimeError,
+                  "_arihost: no document host is attached (this interpreter is the host's plain "
+                  "python, or the host has not attached a runtime yet)");
+  return nullptr;
+}
+
+void delete_app_capsule(PyObject *capsule) {
+  delete static_cast<std::shared_ptr<cvc::app> *>(PyCapsule_GetPointer(capsule, "cvc.app"));
+}
+
+// The live app, as pycvc.app_from_capsule takes it: a "cvc.app" capsule holding a
+// std::shared_ptr<cvc::app>*. Not an owner: the host owns its app, and takes it back (the
+// Attachment) before it goes.
+PyObject *arihost_app(PyObject *, PyObject *) {
+  if (!lent().attached)
+    return not_attached();
+  auto *held = new std::shared_ptr<cvc::app>(lent().handles.app, [](cvc::app *) {});
+  PyObject *capsule = PyCapsule_New(held, "cvc.app", delete_app_capsule);
+  if (!capsule)
+    delete held;
+  return capsule;
+}
+
+// The document's AppRuntime ("cvc.ariadne.AppRuntime"), for pycvc.ari_app_attach.
+PyObject *arihost_runtime(PyObject *, PyObject *) {
+  if (!lent().attached)
+    return not_attached();
+  return PyCapsule_New(lent().handles.runtime, "cvc.ariadne.AppRuntime", nullptr);
+}
+
+// A GL host's window objects, as pycvc_gl's *_from_capsule take them, or None.
+PyObject *arihost_gl(PyObject *, PyObject *) {
+  if (!lent().attached)
+    return not_attached();
+  const HostHandles &h = lent().handles;
+  if (!h.ari_runtime || !h.view || !h.camera || !h.overlay)
+    Py_RETURN_NONE;
+  return Py_BuildValue("(NNNN)", PyCapsule_New(h.ari_runtime, "cvc.gl.ariadne.AriRuntime", nullptr),
+                       PyCapsule_New(h.view, "cvc.gl.SceneRenderer", nullptr),
+                       PyCapsule_New(h.camera, "cvc.gl.CameraController", nullptr),
+                       PyCapsule_New(h.overlay, "cvc.gl.ImGuiOverlay", nullptr));
+}
+
+PyObject *arihost_attached(PyObject *, PyObject *) { return PyBool_FromLong(lent().attached); }
+
+PyObject *arihost_host(PyObject *, PyObject *) { return PyUnicode_FromString(lent().host.c_str()); }
+
+// "window", "offscreen", "terminal" or "headless"; None until a host attaches.
+PyObject *arihost_mode(PyObject *, PyObject *) {
+  if (!lent().attached)
+    Py_RETURN_NONE;
+  return PyUnicode_FromString(lent().handles.mode.c_str());
+}
+
+// host.run(): the host's own frame loop, until the document closes; its exit status. Once only.
+PyObject *arihost_run(PyObject *, PyObject *) {
+  Lent &l = lent();
+  if (!l.attached)
+    return not_attached();
+  if (!l.handles.run_loop) {
+    PyErr_SetString(
+        PyExc_RuntimeError,
+        ("_arihost.run: " + l.host + " has no frame loop to run here (a check)").c_str());
+    return nullptr;
+  }
+  if (l.loop_ran) {
+    PyErr_SetString(PyExc_RuntimeError, "_arihost.run: the host's loop has already run");
+    return nullptr;
+  }
+  l.loop_ran = true;
+  const std::function<int()> loop = l.handles.run_loop;
+  int status = 0;
+  std::string error;
+  PyThreadState *saved = PyEval_SaveThread(); // the frames call Python, here and on the pool
+  try {
+    status = loop();
+  } catch (const std::exception &e) {
+    error = e.what();
+  }
+  PyEval_RestoreThread(saved);
+  lent().loop_status = status;
+  if (!error.empty()) {
+    PyErr_SetString(PyExc_RuntimeError, error.c_str());
+    return nullptr;
+  }
+  return PyLong_FromLong(status);
+}
+
+// add_frame_hook(fn): fn() at the end of every frame the document's runtime runs, whichever loop
+// runs it (AppRuntime::add_frame_hook). An exception fn raises is printed and closes the document
+// with status 1, as an uncaught one ends a Python program.
+PyObject *arihost_add_frame_hook(PyObject *, PyObject *fn) {
+  if (!lent().attached)
+    return not_attached();
+  if (!PyCallable_Check(fn)) {
+    PyErr_SetString(PyExc_TypeError, "_arihost.add_frame_hook: expected a callable");
+    return nullptr;
+  }
+  Py_INCREF(fn);
+  std::shared_ptr<PyObject> held(fn, [](PyObject *p) {
+    Gil gil;
+    Py_DECREF(p);
+  });
+  AppRuntime *rt = lent().handles.runtime;
+  rt->add_frame_hook([held, rt] {
+    Gil gil;
+    PyObject *r = PyObject_CallObject(held.get(), nullptr);
+    if (r) {
+      Py_DECREF(r);
+      return;
+    }
+    if (PyErr_ExceptionMatches(PyExc_SystemExit)) { // sys.exit(code) from a frame: close with it
+      rt->request_close(exit_status_from_error());
+      return;
+    }
+    PyErr_Print();
+    rt->request_close(1);
+  });
+  Py_RETURN_NONE;
+}
+
+PyMethodDef kArihostMethods[] = {
+    {"add_frame_hook", arihost_add_frame_hook, METH_O,
+     "Call fn() at the end of every frame of the document's runtime."},
+    {"app", arihost_app, METH_NOARGS, "The host's live cvc::app, a capsule for pycvc."},
+    {"runtime", arihost_runtime, METH_NOARGS, "The document's AppRuntime, a capsule for pycvc."},
+    {"gl", arihost_gl, METH_NOARGS,
+     "A GL host's (AriRuntime, SceneRenderer, CameraController, ImGuiOverlay) capsules, or None."},
+    {"attached", arihost_attached, METH_NOARGS, "Whether a document host has lent its objects."},
+    {"host", arihost_host, METH_NOARGS, "The host's name: arix, ariglx."},
+    {"mode", arihost_mode, METH_NOARGS,
+     "window, offscreen, terminal or headless; None unattached."},
+    {"run", arihost_run, METH_NOARGS, "Run the host's frame loop until the document closes."},
+    {nullptr, nullptr, 0, nullptr}};
+
+PyModuleDef kArihostModule = {PyModuleDef_HEAD_INIT,
+                              "_arihost",
+                              "The scripting host this interpreter runs in (arix, ariglx): what it "
+                              "lends Python. pycvc_gl.ariadne.Host() adopts it.",
+                              -1,
+                              kArihostMethods,
+                              nullptr,
+                              nullptr,
+                              nullptr,
+                              nullptr};
+
+PyObject *init_arihost() { return PyModule_Create(&kArihostModule); }
+
+// ── boot ────────────────────────────────────────────────────────────────────────────────────────
+
+// Where the host's Python lives, when PYTHONHOME does not say: an installed prefix beside the
+// executable (<prefix>/bin/<host>, the cvcpkg python312 in <prefix>), else the Python the host was
+// built against. "" leaves it to CPython.
+std::string python_home() {
+  const fs::path self = cvc::process::self_path();
+  if (!self.empty()) {
+    const fs::path prefix = self.parent_path().parent_path();
+    std::error_code ec;
+#ifdef _WIN32
+    if (fs::exists(prefix / "Lib" / "os.py", ec))
+      return prefix.string();
+#else
+    const std::string lib =
+        "python" + std::to_string(PY_MAJOR_VERSION) + "." + std::to_string(PY_MINOR_VERSION);
+    if (fs::exists(prefix / "lib" / lib / "os.py", ec))
+      return prefix.string();
+#endif
+  }
+#ifdef CVC_ARIADNE_PYTHON_HOME
+  return CVC_ARIADNE_PYTHON_HOME;
+#else
+  return {};
+#endif
+}
+
+// The config both boots share: the program, its home, and --python-path ahead of PYTHONPATH.
+// False with `error` set.
+bool configure(PyConfig &cfg, const EngineConfig &config, std::string &error) {
+  cfg.install_signal_handlers = 0; // the host traps signals itself (host_signals.h)
+  const fs::path self = cvc::process::self_path();
+  PyStatus st = PyConfig_SetBytesString(&cfg, &cfg.program_name,
+                                        self.empty() ? config.host.c_str() : self.string().c_str());
+  const std::string home = python_home();
+  if (!PyStatus_Exception(st) && !home.empty() && !std::getenv("PYTHONHOME"))
+    st = PyConfig_SetBytesString(&cfg, &cfg.home, home.c_str());
+  std::string path;
+#ifdef _WIN32
+  const char sep = ';';
+#else
+  const char sep = ':';
+#endif
+  for (const std::string &p : config.path)
+    path += (path.empty() ? "" : std::string(1, sep)) + p;
+  if (const char *env = std::getenv("PYTHONPATH"); env && *env)
+    path += (path.empty() ? "" : std::string(1, sep)) + env;
+  if (!PyStatus_Exception(st) && !path.empty())
+    st = PyConfig_SetBytesString(&cfg, &cfg.pythonpath_env, path.c_str());
+  if (PyStatus_Exception(st)) {
+    error = st.err_msg ? st.err_msg : "could not configure Python";
+    return false;
+  }
+  return true;
+}
+
+// The document side: run a document's python: block at load (AppRuntime's load hook).
+void run_python_block(LoadResult &lr, const std::string &path) {
+  const Value *block = nullptr;
+  for (const auto &[key, value] : lr.extras)
+    if (key == "python")
+      block = &value;
+  if (!block)
+    return;
+  Gil gil;
+  PyObject *py_block = to_python(*block);
+  PyObject *reg = py_block ? PyObject_CallMethod(g_helper, "pycvc_register", nullptr) : nullptr;
+  PyObject *result =
+      reg ? PyObject_CallMethod(g_helper, "load_document", "OsO", py_block, path.c_str(), reg)
+          : nullptr;
+  Py_XDECREF(reg);
+  Py_XDECREF(py_block);
+  if (!result)
+    throw std::runtime_error("python: " + take_error());
+  if (PyList_Check(result))
+    for (Py_ssize_t i = 0; i < PyList_Size(result); ++i)
+      if (const char *w = PyUnicode_AsUTF8(PyList_GetItem(result, i)))
+        lr.warnings.push_back(w);
+  PyErr_Clear();
+  Py_DECREF(result);
+}
+
+} // namespace
+
+// ── Attachment ──────────────────────────────────────────────────────────────────────────────────
+
+Attachment::Attachment(Attachment &&other) noexcept : live_(std::exchange(other.live_, false)) {}
+
+Attachment &Attachment::operator=(Attachment &&other) noexcept {
+  if (this != &other) {
+    Attachment old(std::move(*this)); // gives back what this one lent
+    live_ = std::exchange(other.live_, false);
+  }
+  return *this;
+}
+
+Attachment::~Attachment() {
+  if (!live_ || !Py_IsInitialized())
+    return;
+  Gil gil;
+  Lent &l = lent();
+  l.handles = HostHandles{};
+  l.attached = false;
+}
+
+// ── Engine ──────────────────────────────────────────────────────────────────────────────────────
+
+Engine::Engine(EngineConfig config) : config_(std::move(config)) {
+  if (Py_IsInitialized()) {
+    error_ = "Python is already running in this process (one engine per process)";
+    return;
+  }
+  lent().host = config_.host;
+  if (PyImport_AppendInittab("_arihost", init_arihost) != 0) {
+    error_ = "could not register the _arihost module";
+    return;
+  }
+  PyConfig cfg;
+  PyConfig_InitPythonConfig(&cfg);
+  cfg.parse_argv = 0;
+  if (!configure(cfg, config_, error_)) {
+    PyConfig_Clear(&cfg);
+    return;
+  }
+  const PyStatus st = Py_InitializeFromConfig(&cfg);
+  PyConfig_Clear(&cfg);
+  if (PyStatus_Exception(st)) {
+    error_ = std::string("Python failed to start: ") + (st.err_msg ? st.err_msg : "unknown");
+    return;
+  }
+
+  // The document side, compiled in: ariadne_python.py as _ariadne_python. _arihost carries its
+  // export decorator, for a document's own modules (from _arihost import export).
+  PyObject *code = Py_CompileString(kAriadnePythonSource, "ariadne_python.py", Py_file_input);
+  g_helper = code ? PyImport_ExecCodeModule("_ariadne_python", code) : nullptr;
+  Py_XDECREF(code);
+  g_arihost = g_helper ? PyImport_ImportModule("_arihost") : nullptr;
+  PyObject *exp = g_arihost ? PyObject_GetAttrString(g_helper, "export") : nullptr;
+  if (!exp || PyObject_SetAttrString(g_arihost, "export", exp) != 0) {
+    error_ = "the document side did not load: " + take_error();
+    Py_XDECREF(exp);
+    mainState_ = PyEval_SaveThread();
+    return;
+  }
+  Py_DECREF(exp);
+
+  // `python` and `python.<module>` hold here, and a document's python: block is kept for the
+  // load hook (attach).
+  set_script_engine("python", [](const std::string &module) {
+    Gil gil;
+    if (!g_helper)
+      return false;
+    PyObject *r = PyObject_CallMethod(g_helper, "has_module", "s", module.c_str());
+    const bool has = r && PyObject_IsTrue(r) == 1;
+    Py_XDECREF(r);
+    PyErr_Clear();
+    return has;
+  });
+  register_ari_block("python", [](const Value &content, LoadResult &out) {
+    out.extras.emplace_back("python", content);
+  });
+
+  mainState_ = PyEval_SaveThread(); // park the GIL: the host's frames run without it
+  ok_ = true;
+}
+
+Engine::~Engine() {
+  set_script_engine("python", nullptr);
+  if (!mainState_)
+    return; // never started
+  PyEval_RestoreThread(static_cast<PyThreadState *>(mainState_));
+  Py_CLEAR(g_arihost);
+  Py_CLEAR(g_helper);
+  lent().handles = HostHandles{};
+  lent().attached = false;
+  Py_FinalizeEx();
+}
+
+std::string Engine::version() const {
+  std::string v = Py_GetVersion();
+  return v.substr(0, v.find(' '));
+}
+
+Attachment Engine::attach(const HostHandles &handles) {
+  if (!ok_ || !handles.app || !handles.runtime)
+    return Attachment();
+  {
+    Gil gil;
+    Lent &l = lent();
+    l.handles = handles;
+    l.attached = true;
+    l.loop_ran = false;
+    l.loop_status = 0;
+  }
+  // A Python function may take its time: the caps pycvc_gl.ariadne.Host sets (DEFAULT_LIMITS),
+  // unless the app already says otherwise.
+  cvc::state &root = handles.app->root();
+  if (!root.findDescendant("ariadne.limits.action_max_time"))
+    root("ariadne.limits.action_max_time").value("30");
+  if (!root.findDescendant("ariadne.limits.action_max_steps"))
+    root("ariadne.limits.action_max_steps").value("0");
+  handles.runtime->add_load_hook(run_python_block);
+  return Attachment(true);
+}
+
+int Engine::run_script(const std::string &path, const std::vector<std::string> &args) {
+  if (!ok_) {
+    std::fprintf(stderr, "%s: %s\n", config_.host.c_str(), error_.c_str());
+    return 1;
+  }
+  Gil gil;
+  PyObject *argv = PyList_New(0);
+  PyObject *runpy = nullptr, *result = nullptr;
+  bool ready = argv != nullptr;
+  for (std::size_t i = 0; ready && i <= args.size(); ++i) {
+    const std::string &a = i == 0 ? path : args[i - 1];
+    PyObject *s = PyUnicode_DecodeFSDefault(a.c_str());
+    ready = s && PyList_Append(argv, s) == 0;
+    Py_XDECREF(s);
+  }
+  ready = ready && PySys_SetObject("argv", argv) == 0;
+  // The script's directory first on sys.path, as `python script.py` puts it.
+  if (ready) {
+    std::error_code ec;
+    const std::string dir = fs::absolute(fs::path(path), ec).parent_path().string();
+    PyObject *sys_path = PySys_GetObject("path"); // borrowed
+    PyObject *d = PyUnicode_DecodeFSDefault(dir.c_str());
+    ready = sys_path && d && PyList_Insert(sys_path, 0, d) == 0;
+    Py_XDECREF(d);
+  }
+  if (ready)
+    runpy = PyImport_ImportModule("runpy");
+  if (runpy)
+    result = PyObject_CallMethod(runpy, "run_path", "sOs", path.c_str(), Py_None, "__main__");
+  Py_XDECREF(argv);
+  Py_XDECREF(runpy);
+  if (result) {
+    Py_DECREF(result);
+    return 0;
+  }
+  return exit_status_from_error();
+}
+
+bool Engine::loop_ran() const { return lent().loop_ran; }
+int Engine::loop_status() const { return lent().loop_status; }
+
+int Engine::python_main(const EngineConfig &config, const std::vector<std::string> &args) {
+  lent().host = config.host;
+  if (PyImport_AppendInittab("_arihost", init_arihost) != 0) {
+    std::fprintf(stderr, "%s: could not register the _arihost module\n", config.host.c_str());
+    return 1;
+  }
+  PyConfig cfg;
+  PyConfig_InitPythonConfig(&cfg);
+  std::string error;
+  std::vector<std::string> argv{config.host + " python"};
+  argv.insert(argv.end(), args.begin(), args.end());
+  std::vector<char *> raw;
+  for (std::string &a : argv)
+    raw.push_back(a.data());
+  PyStatus st = PyConfig_SetBytesArgv(&cfg, static_cast<Py_ssize_t>(raw.size()), raw.data());
+  if (!PyStatus_Exception(st) && configure(cfg, config, error))
+    st = Py_InitializeFromConfig(&cfg);
+  else if (!PyStatus_Exception(st))
+    st = PyStatus_Error(error.c_str());
+  PyConfig_Clear(&cfg);
+  if (PyStatus_Exception(st)) {
+    if (PyStatus_IsExit(st))
+      return st.exitcode;
+    std::fprintf(stderr, "%s: Python failed to start: %s\n", config.host.c_str(),
+                 st.err_msg ? st.err_msg : "unknown");
+    return 1;
+  }
+  return Py_RunMain();
+}
+
+} // namespace python
+} // namespace ariadne
+} // namespace cvc

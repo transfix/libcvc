@@ -10,8 +10,9 @@
 #include <boost/program_options.hpp>
 #include <cctype>
 #include <charconv>
-#include <cmath>   // isfinite (--action-time)
-#include <cstdlib> // strtod (--settle, --timeout, --action-time)
+#include <cmath>              // isfinite (--action-time)
+#include <cstdlib>            // strtod (--settle, --timeout, --action-time)
+#include <cvc/ariadne/bind.h> // resolve_bind, write (--set)
 #include <cvc/ariadne/host_cli.h>
 #include <cvc/net/credentials.h>
 #include <cvc/net/net_policy.h>
@@ -34,6 +35,7 @@ constexpr const char *kValueFlags[] = {"--prefix",
                                        "--png",
                                        "--graphics",
                                        "--image",
+                                       "--set",
                                        "--cell-size",
                                        "--net-allow",
                                        "--net-policy",
@@ -46,7 +48,8 @@ constexpr const char *kValueFlags[] = {"--prefix",
                                        "--oidc-issuer",
                                        "--oidc-client",
                                        "--oidc-redirect-uri",
-                                       "--media-play"};
+                                       "--media-play",
+                                       "--python-path"};
 constexpr const char *kBoolFlags[] = {"--no-mouse", "--ansi", "--net", "--no-browser"};
 
 bool is_general_flag(const std::string &a) {
@@ -169,6 +172,8 @@ bool apply(const po::option &opt, HostOptions &o) {
       return false;
     }
     o.media_play = value;
+  } else if (a == "--python-path") {
+    o.python_path.push_back(value);
   } else if (a == "--image") {
     const std::size_t at = value.find('=');
     if (at == std::string::npos || at == 0 || at + 1 == value.size()) {
@@ -176,6 +181,13 @@ bool apply(const po::option &opt, HostOptions &o) {
       return false;
     }
     o.images.emplace_back(value.substr(0, at), value.substr(at + 1));
+  } else if (a == "--set") {
+    std::pair<std::string, std::string> kv;
+    if (!parse_state_set(value, kv)) {
+      o.error = "--set is KEY=VALUE, not '" + value + "'";
+      return false;
+    }
+    o.sets.push_back(std::move(kv));
   } else if (a == "--cell-size") {
     const std::size_t x = value.find('x');
     int w = 0, h = 0;
@@ -330,6 +342,8 @@ std::string host_flags_help() {
          "                         for the document to go idle (default 10)\n"
          "  --graphics MODE        images in a terminal: auto, kitty, sixel, iterm, color or mono\n"
          "  --image NAME=FILE      publish FILE's picture as NAME, for image: widgets\n"
+         "  --set KEY=VALUE        set the state key KEY (under the document's root) before the\n"
+         "                         document loads (repeatable)\n"
          "  --media-play WHEN      video: / audio: play here: auto (not over SSH), always,\n"
          "                         never\n"
          "  --cell-size WxH        snapshot: a terminal cell's size in pixels\n"
@@ -348,7 +362,9 @@ std::string host_flags_help() {
          "                         (repeatable; pins I like --oidc-issuer)\n"
          "  --oidc-redirect-uri U  a browser page's redirect URI (default: the page's own URL)\n"
          "  --no-browser           never open a browser: sign-in uses a device code, and\n"
-         "                         open-url shows the URL instead\n";
+         "                         open-url shows the URL instead\n"
+         "  --python-path DIR      a scripting host (arix, ariglx): put DIR on the embedded\n"
+         "                         Python's sys.path (repeatable)\n";
 }
 
 std::string misplaced_flag_note(const std::string &runtime,
@@ -362,6 +378,20 @@ std::string misplaced_flag_note(const std::string &runtime,
              runtime + "'s own flags before the document path";
   }
   return {};
+}
+
+bool parse_state_set(const std::string &arg, std::pair<std::string, std::string> &out) {
+  const std::size_t at = arg.find('=');
+  if (at == std::string::npos || at == 0)
+    return false;
+  out = {arg.substr(0, at), arg.substr(at + 1)};
+  return true;
+}
+
+void apply_state_sets(cvc::app &app, const std::string &prefix,
+                      const std::vector<std::pair<std::string, std::string>> &sets) {
+  for (const auto &[key, value] : sets)
+    write<std::string>(app, resolve_bind(prefix, key), value);
 }
 
 } // namespace ariadne

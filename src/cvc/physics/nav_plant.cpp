@@ -535,7 +535,8 @@ void nav_plant::count_contacts() {
   std::map<std::uint32_t, std::size_t> of_chassis;
   for (std::size_t i = 0; i < _agents.size(); ++i)
     of_chassis[_agents[i].chassis.value] = i;
-  std::map<std::uint32_t, bool> fixed; // a body without mass: static or kinematic geometry
+  // A body without mass, static or kinematic geometry, that is not the ground.
+  std::map<std::uint32_t, bool> fixed;
   const auto is_fixed = [&](body_id b) {
     const auto it = fixed.find(b.value);
     if (it != fixed.end())
@@ -545,6 +546,9 @@ void nav_plant::count_contacts() {
       f = !(_w.get_body(b).mass > 0.0);
     } catch (const std::exception &) {
     }
+    for (const body_id &g : _o.ground_bodies)
+      if (g.value == b.value)
+        f = false;
     fixed[b.value] = f;
     return f;
   };

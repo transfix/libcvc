@@ -8,6 +8,7 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include <algorithm>
 #include <atomic>
 #include <cvc/state/state_compression_registry.h>
 #include <gtest/gtest.h>

@@ -868,6 +868,12 @@ add_test(NAME cvcgl_imgui_windows_menu COMMAND cvcgl_imgui_windows_menu)
 add_executable(cvcgl_imgui_radio test/cvcgl_imgui_radio.cpp)
 target_link_libraries(cvcgl_imgui_radio PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_radio COMMAND cvcgl_imgui_radio)
+# Scrolling with a finger (TouchScroll): a drag scrolls the window under it and a fling glides
+# against ui.scroll_friction, while sliders, fields being edited and title bars keep their drags.
+# Touches fed through ImGui's own input. No window, no GL.
+add_executable(cvcgl_imgui_touch_scroll test/cvcgl_imgui_touch_scroll.cpp)
+target_link_libraries(cvcgl_imgui_touch_scroll PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_touch_scroll COMMAND cvcgl_imgui_touch_scroll)
 # Pictures by URI (§5.11): an image: widget's file:// picture reaches ImGuiBackend as an RGBA
 # raster fitted to its box, with placeholders before and on failure. No window, no GL.
 add_executable(cvcgl_imgui_media test/cvcgl_imgui_media.cpp)
@@ -956,11 +962,26 @@ if(NOT EMSCRIPTEN)
   add_test(NAME cvcgl_ariadne_views COMMAND cvcgl_ariadne_views)
 endif()
 
+# A document's assets (read once, shared buffers) and its scenes: of their own (each a SceneGraph
+# with its own viewport, mirrored by the viewports that name it), and main_view: show. Offscreen;
+# the AriRuntime part skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_scenes test/cvcgl_ariadne_scenes.cpp)
+  target_link_libraries(cvcgl_ariadne_scenes PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_scenes COMMAND cvcgl_ariadne_scenes)
+endif()
+
 # Ariadne physics: / body: (WORLD-GEOMETRY-ROADMAP.md, G5): a spec's crate lands where the
 # heightfield node draws the ground. Headless; the dynamics need Jolt.
 add_executable(cvcgl_ariadne_physics test/cvcgl_ariadne_physics.cpp)
 target_link_libraries(cvcgl_ariadne_physics PRIVATE cvcGL)
 add_test(NAME cvcgl_ariadne_physics COMMAND cvcgl_ariadne_physics)
+
+# Ariadne data in the scene (docs/roadmap/ARIADNE_DATA_ROADMAP.md): a source: { data } node draws its
+# dataset once it loads, and again when the dataset is replaced. Headless.
+add_executable(cvcgl_ariadne_data test/cvcgl_ariadne_data.cpp)
+target_link_libraries(cvcgl_ariadne_data PRIVATE cvcGL)
+add_test(NAME cvcgl_ariadne_data COMMAND cvcgl_ariadne_data)
 
 # Every cvcGL setting must be IN the state tree and bound BOTH ways. This caught
 # cvc::state::SEPARATOR initialising to "" outside libcvc, which had been
@@ -984,6 +1005,20 @@ add_test(NAME cvcgl_shadow_caster_growth COMMAND cvcgl_shadow_caster_growth)
 add_executable(cvcgl_shadow_casters test/cvcgl_shadow_casters.cpp)
 target_link_libraries(cvcgl_shadow_casters PRIVATE cvcGL)
 add_test(NAME cvcgl_shadow_casters COMMAND cvcgl_shadow_casters)
+
+# Under shadows each caster is drawn by the bake and by the shadow pass, and VTK rebuilt its shader
+# at every switch; LowMemoryPolyDataMapper now keeps one per pass set. Pins no shader builds while
+# a caster moves (two a caster a frame without), and frames identical to pass programs off --
+# across a change of casting light, a shader-changing property and shadows off and on. The
+# low-memory mapper forced, as on WebGL. And that a bake checks its framebuffer's status once per
+# light's map, not every bake (counted at the driver, so desktop GL only). Renders; skips without
+# GL.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_shadow_pass_programs test/cvcgl_shadow_pass_programs.cpp
+                                            test/gl_call_counter.cpp)
+  target_link_libraries(cvcgl_shadow_pass_programs PRIVATE cvcGL)
+  add_test(NAME cvcgl_shadow_pass_programs COMMAND cvcgl_shadow_pass_programs)
+endif()
 
 # A low sun's shadows at a city's scale (a 3 km ground, the key 2.2 stage radii out, as cvcdbg's
 # demo3 lights Austin): a building's and a 2 m vehicle's shadows read on the ground. Renders;
@@ -1217,7 +1252,7 @@ list(REMOVE_ITEM _cvcgl_gl_tests
   cvcgl_grid_bounds cvcgl_bounds_walk cvcgl_scene_chrome cvcgl_remove
   cvcgl_teardown cvcgl_light_state_thread cvcgl_unattached_node_thread cvcgl_pose_echo
   cvcgl_physics_scene_binding
-  cvcgl_world_geometry_nodes cvcgl_ariadne_physics
+  cvcgl_world_geometry_nodes cvcgl_ariadne_physics cvcgl_ariadne_data
   cvcgl_node_outlives_scene cvcgl_texture cvcgl_texture_zerocopy
   cvcgl_stream_texture cvcgl_state_publisher cvcgl_nav_stats_publish
   cvcgl_camera cvcgl_track_parity cvcgl_fps_hud cvcgl_stage_setters
