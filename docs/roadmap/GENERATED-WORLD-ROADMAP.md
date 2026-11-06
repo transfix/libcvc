@@ -308,11 +308,23 @@ The conference is the world's second consumer. Peers must see the same world and
     - Live keys `sky.evolve` and `sky.orographic` are on `sky_controls.ari`. The props are
       `evolve`, `orographic`, `wind_az` (the drift now follows it) and `fade`.
     - Every rule is deterministic and frame-rate free (`world_cloud_test`).
-  - Still to do for the clouds: measure in Edge and Firefox, now with the shells' 6 samples a
-    fragment (10 layers of sky fill), and check the GLSL ES compile. The deck is one flat slab, so
-    a peak pierces it only where the ground rises past `base`. A lower deck over high relief (or
-    cloud bases that follow the ground) would show orographic caps at the terrain lab's 90 m of
-    relief.
+  - Measured in the browser, 2026-11-06: the gallery deploy of 38c6b071 (deploy-pages
+    42290995729), in the desktop app's built-in Chromium 152 browser (WebGL2), canvas 1077 x 772 at
+    device pixel ratio 1.25.
+    - The deck's shaders compile as GLSL ES: no shader errors in the console.
+    - Clouds reach past the world's edge.
+    - 1.2 km world, default camera: 34-47 fps, median frame 17-25 ms, p95 42-58 ms.
+    - 11.2 km world (World half 5600, regenerated, 2049^2 terrain), close-up camera: 25-29 fps,
+      median frame 25 ms, p95 83-133 ms. On 2026-11-03, before the terrain LOD, the same world
+      ran at 3.3 fps.
+    - JS heap about 64 MB.
+  - Still to do for the clouds:
+    - The deck's own cost in the browser. The cloud nodes can't be hidden from the URL, and the
+      document's Sky panel isn't reachable from the gallery's menus.
+    - Firefox (Joe's to check), and an 11.2 km overview camera.
+    - The deck is one flat slab, so a peak pierces it only where the ground rises past `base`. A
+      lower deck over high relief (or cloud bases that follow the ground) would show orographic
+      caps at the terrain lab's 90 m of relief.
 - **Dynamic props, demo3's way**, for vehicles and avatars on the world: unregistered slot nodes,
   a pose gate, out of the bounds fit, non-casting. demo3 does this by hand. A libcvc node type
   would make it a scene key.
