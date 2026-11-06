@@ -1,0 +1,50 @@
+# A document that carries Python, as `arix test` runs it (ctest arix_python_block): the block's own
+# functions, a module's, an export: entry under another name, an async function, a Python exception
+# the document catches as a PythonError, and the python capability tokens.
+
+meta:
+  name: python block
+  min_libcvc: 3.7.8
+
+requires: [python, python.json]
+
+python:
+  modules: [python_block_helpers]
+  export:
+    - {name: python_block_helpers.cube, as: cubed}
+  source: |
+    @export
+    def add(a, b):
+        return a + b
+
+    @export(name="word-count")
+    def words(text):
+        return len(text.split())
+
+    @export(is_async=True)
+    def slow_square(x):
+        return x * x
+
+    @export
+    def boom():
+        raise ValueError("no")
+
+root:
+  - text: python block
+
+tests:
+  calls: |
+    (assert (= (add 2 3) 5) "add")
+    (assert (= (word-count "a b c") 3) "an export under another name")
+  module: |
+    (assert (= (scale 2) 20) "a module's @export")
+    (assert (= (cubed 3) 27) "an export: entry with as:")
+  async: |
+    (assert (= (str (slow_square 9)) "81") "an async function parks the program")
+  errors: |
+    (set caught (try (boom) (catch (PythonError e) (get-attr e "python_type"))))
+    (assert (= caught "ValueError") "a Python exception is the document's to catch")
+  tokens: |
+    (assert (has? "python") "python")
+    (assert (has? "python.json") "an importable module")
+    (assert (not (has? "python.no_such_module_xyz")) "a missing one")

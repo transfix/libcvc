@@ -8,9 +8,11 @@
   Licensed under the GNU LGPL v2.1 (see cvc/world/roads.h for the full header).
 */
 
+#include <algorithm>
 #include <cmath>
 #include <cvc/world/roads.h>
 #include <gtest/gtest.h>
+#include <vector>
 
 using namespace cvc::world;
 
@@ -162,4 +164,129 @@ TEST(WorldRoads, DistanceMatchesBruteForce) {
       ++checked;
     }
   EXPECT_GT(checked, 0);
+}
+
+namespace {
+double seg_len(const road_network &n, const road_segment &s) {
+  return std::hypot(n.nodes[s.b].x - n.nodes[s.a].x, n.nodes[s.b].y - n.nodes[s.a].y);
+}
+} // namespace
+
+// The grade limit: a steep hill east of the centre (30 m high, its flanks up to 60 %). Unlimited,
+// the streets run straight over it; held to 12 %, every segment is steered toward the contours
+// and stays under the limit (with the snapped end's 1.5x slack), and most of the network survives,
+// winding round the hill.
+TEST(WorldRoads, GradeLimitSteersAlongTheContours) {
+  const road_height_fn hill = [](double x, double y) {
+    return 30.0 * std::exp(-((x - 80.0) * (x - 80.0) + y * y) / (2.0 * 30.0 * 30.0));
+  };
+  road_params p = demo_params();
+  auto worst = [&](const road_network &n) {
+    double g = 0.0;
+    for (const road_segment &s : n.segments) {
+      const road_node &a = n.nodes[s.a], &b = n.nodes[s.b];
+      g = std::max(g, std::fabs(hill(b.x, b.y) - hill(a.x, a.y)) / seg_len(n, s));
+    }
+    return g;
+  };
+  const road_network free = generate_roads(p, hill);
+  EXPECT_GT(worst(free), 0.2);
+  p.max_grade = 0.12;
+  const road_network n = generate_roads(p, hill);
+  EXPECT_LE(worst(n), 0.12 * 1.5 + 1e-9);
+  EXPECT_GT(n.segments.size(), free.segments.size() / 2);
+  int onHill = 0; // the streets still reach the hill's flanks
+  for (const road_node &q : n.nodes)
+    onHill += hill(q.x, q.y) > 3.0 ? 1 : 0;
+  EXPECT_GT(onHill, 5);
+}
+
+// The no-go mask (a lake east of x = 40): no road reaches into it, where unmasked ones do.
+TEST(WorldRoads, MaskKeepsRoadsOut) {
+  const road_params p = demo_params();
+  const road_mask_fn lake = [](double x, double) { return x > 40.0; };
+  auto east = [](const road_network &n) {
+    double m = -1e30;
+    for (const road_segment &s : n.segments)
+      m = std::max({m, n.nodes[s.a].x, n.nodes[s.b].x});
+    return m;
+  };
+  EXPECT_GT(east(generate_roads(p)), 60.0);
+  const road_network n = generate_roads(p, {}, lake);
+  EXPECT_GT(n.segments.size(), 50u);
+  EXPECT_LE(east(n), 40.0 + 1e-9);
+}
+
+// The hierarchy and districts: two centres each seed an arterial cross; an arterial's branches
+// are collectors (their own width), which sprout the local streets; a dense core packs local
+// streets tighter than sparse ground does.
+TEST(WorldRoads, HierarchyAndDistricts) {
+  road_params p = demo_params();
+  p.half = 240.0;
+  p.max_segments = 4000;
+  p.collector_width = 7.5;
+  p.centres = {{-120.0, 0.0}, {120.0, 0.0}};
+  const road_network n = generate_roads(p);
+  int kinds[3] = {0, 0, 0};
+  for (const road_segment &s : n.segments) {
+    ++kinds[int(s.kind)];
+    EXPECT_EQ(s.arterial, s.kind == road_class::arterial);
+    EXPECT_EQ(s.width, s.kind == road_class::arterial    ? p.arterial_width
+                       : s.kind == road_class::collector ? p.collector_width
+                                                         : p.local_width);
+  }
+  EXPECT_GT(kinds[0], 0);
+  EXPECT_GT(kinds[1], 0);
+  EXPECT_GT(kinds[2], 0);
+  for (const road_centre &c : p.centres) {
+    int at = 0;
+    for (const road_segment &s : n.segments)
+      at += (std::hypot(n.nodes[s.a].x - c.x, n.nodes[s.a].y - c.y) < 1e-9) ? 1 : 0;
+    EXPECT_GE(at, 2) << c.x; // the arterials leave each centre
+  }
+
+  // Urbanity 1 west of x = 0, 0 east: sparse ground has fewer, wider-spaced local streets.
+  p.sparse_spacing = 0.5;
+  p.sparse_branch = 0.3;
+  p.parallel_gap = 0.5;
+  const road_network d =
+      generate_roads(p, {}, {}, [](double x, double) { return x < 0.0 ? 1.0 : 0.0; });
+  double west = 0.0, eastLen = 0.0;
+  for (const road_segment &s : d.segments)
+    if (s.kind == road_class::local)
+      (d.nodes[s.a].x < 0.0 ? west : eastLen) += seg_len(d, s);
+  EXPECT_GT(west, 1.5 * eastLen);
+}
+
+// prune_roads trims every dead-end chain shorter than the limit and leaves the degrees right.
+TEST(WorldRoads, PruneTrimsShortStubs) {
+  road_network n = generate_roads(demo_params());
+  const std::size_t before = n.segments.size();
+  const std::size_t removed = prune_roads(n, 60.0);
+  EXPECT_GT(removed, 0u);
+  EXPECT_EQ(n.segments.size() + removed, before);
+  std::vector<int> deg(n.nodes.size(), 0);
+  std::vector<std::vector<int>> adj(n.nodes.size());
+  for (std::size_t i = 0; i < n.segments.size(); ++i) {
+    ++deg[n.segments[i].a];
+    ++deg[n.segments[i].b];
+    adj[n.segments[i].a].push_back(int(i));
+    adj[n.segments[i].b].push_back(int(i));
+  }
+  for (std::size_t k = 0; k < n.nodes.size(); ++k) {
+    EXPECT_EQ(n.nodes[k].degree, deg[k]);
+    if (deg[k] != 1)
+      continue;
+    double length = 0.0;
+    int cur = int(k), seg = adj[k][0];
+    while (true) {
+      length += seg_len(n, n.segments[seg]);
+      const road_segment &s = n.segments[seg];
+      cur = s.a == cur ? s.b : s.a;
+      if (deg[cur] != 2 || length >= 60.0)
+        break;
+      seg = adj[cur][0] == seg ? adj[cur][1] : adj[cur][0];
+    }
+    EXPECT_GE(length, 60.0) << "stub at node " << k;
+  }
 }

@@ -122,11 +122,23 @@ struct SceneHeightColorBand {
 // centered on the origin, displaced in Z by the sum of `layers`, with world→[0,1]² UVs and (if
 // `colors` is non-empty) per-vertex band colours. Normals are computed from the height gradient.
 // The reusable terrain primitive: no asset, authored entirely in the document.
+//
+// With a `generator` the ground comes from a cvc::world terrain generator first (the layers add
+// on top): `fbm` (the analytic relief), `dem` (an elevation .npy at `file`, anchored at 0 and
+// stretched to `amp`), or one a host registered (cvc::world::register_terrain_generator).
+// source: { terrain: {...} } is the same source with the generator defaulting to fbm, the size to
+// 1200 and the resolution to one vertex per 5 m (at most 2049).
 struct SceneHeightfield {
   float size = 1.0f;   // world edge length (the grid spans [-size/2, size/2]² in XY)
   int resolution = 64; // grid vertices per edge (resolution² points, clamped ≥ 2)
   std::vector<SceneHeightLayer> layers;
   std::vector<SceneHeightColorBand> colors;
+  std::string generator;           // a cvc::world terrain generator; empty = the layers alone
+  std::string file;                // dem: the .npy (a URI, or a path relative to the document)
+  double seed = 7.0;               // the generator's seed
+  double amp = 90.0;               // its relief (metres)
+  double water_level = 0.0;        // the water line from sea level (the island's rim sits below)
+  std::string preset = "standard"; // fbm: standard | island (the dome) | ...
 };
 
 // A node's rigid body (`body:`), in the scene's physics world (ScenePhysics). The node's realized
@@ -226,6 +238,13 @@ struct SceneNode {
   std::string id;                // node name → <prefix>.graphics.root.children.<id>
   std::string type = "geometry"; // node kind
   std::string source_file;       // source: { file: ... } (geometry/volume load path)
+  std::string source_asset; // source: { asset: <id> } — a document asset (assets:), loaded once
+  // source: { data: <name>, item: <output> } — a dataset of the document's data: block (data.h):
+  // the node draws what it decoded and is rebuilt each time it loads again. `source_data` is the
+  // bind path of its entry ("city" -> <prefix>.data.city; a leading '/' is the root's), and
+  // `source_item` one output of it ("buildings"), empty for the whole (a world, a mesh, ...).
+  std::string source_data;
+  std::string source_item;
 
   // A built-in PROCEDURAL primitive as a geometry node's source, instead of source: { file }.
   // Empty = use source_file. "plane" = a flat quad with UP normals, spanning
@@ -270,6 +289,37 @@ struct SceneNode {
   // setTexture). Empty = untextured. Meaningful only for a geometry node whose mesh carries UVs
   // (e.g. a heightfield, or a loaded mesh with texcoords); a mesh with no UVs is unaffected.
   std::string material_texture;
+  // material: { uv: { rotate, flip_u, flip_v, scale, offset } } — how the node's image texture
+  // (material: texture, or a dataset's draped satellite image) sits in texture space. Applied to
+  // the mesh's UVs in this order: flip_u / flip_v mirror the image (u -> 1 - u, v -> 1 - v);
+  // rotate turns it that many degrees counter-clockwise on the surface (0, 90, 180 or 270, about
+  // the image's centre); then uv * scale + offset. UV (0, 0) is the image's bottom-left corner.
+  bool has_uv_transform = false;
+  int uv_rotate = 0;
+  bool uv_flip_u = false;
+  bool uv_flip_v = false;
+  float uv_scale[2] = {1.0f, 1.0f};
+  float uv_offset[2] = {0.0f, 0.0f};
+  // material: { opaque: true } — draw the node as opaque whatever its texture or colours hold
+  // (vtkActor::SetForceOpaque). VTK otherwise scans a texture's every texel for alpha to decide
+  // the pass, which on a large ground texture is a measurable share of a browser frame.
+  bool material_opaque = false;
+
+  // casts_shadow: false — the node (and everything below it) receives shadows but casts none, so
+  // it never forces a shadow re-bake (GraphicsNode::setCastsShadow). For a ground too big to
+  // re-bake often, and for what moves every frame.
+  bool has_casts_shadow = false;
+  bool casts_shadow = true;
+  // frame: true | first | always — a source: { data } node frames the main view's camera on what
+  // its dataset drew: once, the first time it draws (true, first), or each time it draws again (a
+  // reload, a replacement). Empty: the camera is left alone.
+  std::string frame;
+
+  // tags: [sim, debug] — the node's view tags (§9.5.1). A `viewport` widget that names tags in its
+  // show: / hide: draws a tagged node only where they allow it; an untagged node is in every view.
+  // Tags hold for the node's whole subtree, so a tagged child under a tagged parent is drawn only
+  // where both are. The main view draws every node.
+  std::vector<std::string> tags;
 
   // fit: bake a "stand this mesh on the ground" normalization INTO the loaded geometry — center it
   // in XY, sit its base on z=0, and scale its tallest extent to fit_height; optionally first rotate
@@ -315,6 +365,18 @@ struct SceneNode {
   std::vector<SceneNode> children; // nested nodes (…children.<id>.children.<child>)
 };
 
+// The state key a custom node's live controls bind. A node type whose keys are scene-wide
+// (forest_trees' forest.*, wave_sea's sea.*, cloud_sky's sky.*, generated_world's world.*) moves
+// them under its `keys:` prop when it has one, so a document can hold two of a type, each with
+// its own panel: node_key(n, "forest.seed") is "forest.seed", or "north.seed" for `keys: north`.
+inline std::string node_key(const SceneNode &n, const std::string &key) {
+  const std::size_t dot = key.find('.');
+  const std::string root = n.props.str("keys");
+  if (dot == std::string::npos || root.empty())
+    return key;
+  return root + key.substr(dot);
+}
+
 // A scene light (§9.2). Either an explicit light (kind/pos/target/cone/intensity/
 // color, or azimuth/elevation for a directional sun) or a named StageLighting preset
 // rig. Realized by cvc::gl::ariadne::realize_scene into a cvc::gl::LightNode (or a
@@ -349,6 +411,12 @@ struct SceneLight {
   float environment = 0.0f; // environment: <intensity> (lifts what the cones miss)
   bool has_rig_ambient = false;
   float rig_ambient = 0.2f; // ambient: <0..1> (shadowed sides readable)
+  // wash: <intensity> | { intensity, count, height } — the overhead downlight ring. 0 (or count 0)
+  // removes it, and with it its shadow-map samplers: a rig over a whole city wants key + fill only.
+  bool has_wash = false;
+  float wash = 0.3f;
+  int wash_count = 4;
+  float wash_height = 1.8f; // multiples of the stage radius
 };
 
 // A simulation clock for the scene (§9 — time). Declares how the authoritative
@@ -374,9 +442,60 @@ struct SceneClock {
   std::string tick_key;                  // optional: published tick count (empty ⇒ not published)
 };
 
+// Where the shadow maps are spent (cvc::gl::SceneGraph::setShadowFocus). Unfocused, each light's
+// map covers the whole scene: over a city a 4096 map is several metres a texel. Focused, it covers
+// a sphere and the scene past it is lit unshadowed.
+//   focus: { center: [x, y, z], radius: <r> }  — a fixed sphere
+//   focus: camera                               — follow what the camera looks at, with the
+//   focus: { follow: camera, min_radius, max_radius, per_distance, lead, lift, ground }
+// Following, each frame the radius is min_radius + per_distance x (eye-to-focal distance), clamped
+// to [min_radius, max_radius]; the centre is `lead` radii ahead of the focal point along the view's
+// heading, `lift` above the `ground` node's heightfield there (or above the focal point's z).
+struct SceneShadowFocus {
+  bool present = false;
+  bool follow_camera = false;
+  double center[3] = {0.0, 0.0, 0.0};
+  double radius = 0.0;
+  double min_radius = 150.0;
+  double max_radius = 600.0;
+  double per_distance = 3.0;
+  double lead = 0.5;
+  double lift = 20.0;
+  std::string ground; // a node id whose heightfield the centre sits on (empty: the focal z)
+};
+
+// A named camera (§9.5, `scene: cameras:`): a camera of its own at <prefix>.viewers.<id>.camera
+// that `viewport` widgets bind with `camera: <id>`. Every viewport bound to it draws from it, so a
+// drag in any of them moves them all. Framed on the scene the first time a viewport draws it.
+struct SceneCamera {
+  std::string id;
+  std::string mode = "orbit"; // orbit | fly | map | track
+  std::string track;          // the node a track camera follows
+  bool has_azimuth = false, has_elevation = false;
+  double azimuth = 0.0, elevation = 0.0; // where an orbit starts, degrees
+  double zoom = 1.0;                     // on the framed distance (2: twice as close)
+};
+
+// A document asset (`assets:`): a mesh loaded once and drawn by every node, in any of the
+// document's scenes, whose source is `{ asset: <id> }`. `source` holds what a node would: its
+// source: and fit: (a file, a URI or a primitive), read and fitted the first time a node uses it.
+struct SceneAsset {
+  std::string id;
+  SceneNode source;
+};
+
 struct Scene {
+  std::string id; // a `scenes:` entry's name ("" for the document's `scene:`)
   std::vector<SceneNode> nodes;
+  // The document's assets (`assets:`), the same list in every scene: what `source: { asset }`
+  // names.
+  std::vector<SceneAsset> assets;
+  // main_view: { show, hide } — the tags the MAIN view draws (the untagged nodes always), as a
+  // viewport's show: / hide: do. For a document whose "scenes" are tagged groups in one scene.
+  bool has_main_view = false;
+  std::vector<std::string> main_show, main_hide;
   std::vector<SceneLight> lights;
+  std::vector<SceneCamera> cameras; // cameras: [...] — named cameras viewports bind
   SceneClock clock; // §9 time: the simulation clock (clock.present gates it) — see SceneClock
   ScenePhysics physics; // physics: {...} — the world the nodes' bodies live in (see SceneBody)
   bool has_shadows = false;
@@ -385,6 +504,9 @@ struct Scene {
   int shadow_resolution = 1024;
   bool has_shadow_interval = false; // shadows: { update_interval: <frames> } — 1 = bake every frame
   int shadow_interval = 1;
+  bool has_shadow_softness = false; // shadows: { softness: <texels> } — the edge filter's radius
+  double shadow_softness = 2.0;
+  SceneShadowFocus shadow_focus; // shadows: { focus: ... } — where the shadow maps are spent
   bool has_chrome = false;    // chrome: <bool> — the SceneGraph diagnostic grid/axis/bbox chrome
   bool chrome_visible = true; // default on (the SceneGraph default); `chrome: false` strips it
   // background: [r,g,b] (a solid colour) OR { top: [r,g,b], bottom: [r,g,b] } (a vertical

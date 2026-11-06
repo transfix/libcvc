@@ -65,11 +65,15 @@ UiSettings::UiSettings(cvc::app &ctx, const std::string &statePath,
 }
 
 void UiSettings::seedState() {
+  m_writing = true; // see the header: not an edit to hand back to the owner
   getState("visible").value(m_v.visible ? 1 : 0);
   getState("scale").value(m_v.scale);
   getState("touch_mode").value(m_v.touchMode ? 1 : 0);
   getState("panels_open").value(m_v.panelsOpen ? 1 : 0);
   getState("toggle_button").value(m_v.toggleButton ? 1 : 0);
+  getState("touch_scroll").value(m_v.touchScroll ? 1 : 0);
+  getState("scroll_friction").value(m_v.scrollFriction);
+  m_writing = false;
 }
 
 void UiSettings::set(Values v) {
@@ -81,12 +85,16 @@ void UiSettings::set(Values v) {
 UiSettings::Values UiSettings::get() const { return m_v; }
 
 void UiSettings::handleStateChanged(const std::string &) {
+  if (m_writing)
+    return; // our own publish (seedState) -- not an edit from outside
   try {
     m_v.visible = getState("visible").value<int>() != 0;
     m_v.scale = getState("scale").value<double>();
     m_v.touchMode = getState("touch_mode").value<int>() != 0;
     m_v.panelsOpen = getState("panels_open").value<int>() != 0;
     m_v.toggleButton = getState("toggle_button").value<int>() != 0;
+    m_v.touchScroll = getState("touch_scroll").value<int>() != 0;
+    m_v.scrollFriction = getState("scroll_friction").value<double>();
   } catch (const std::exception &) {
     return;
   }

@@ -24,6 +24,8 @@
 #include <vtkFloatArray.h>
 #include <vtkImageData.h>
 #include <vtkLine.h>
+#include <vtkMatrix4x4.h>
+#include <vtkNew.h>
 #include <vtkOpenGLPolyDataMapper.h>
 #include <vtkOpenGLRenderWindow.h>
 #include <vtkOpenGLState.h>
@@ -461,6 +463,48 @@ void GeometryNode::setTexture(const cvc::image &img, bool zeroCopy) {
   });
 }
 
+bool GeometryNode::hasTexture() const { return m_texture.Get() != nullptr; }
+
+int GeometryNode::textureWidth() const {
+  int d[3] = {0, 0, 0};
+  if (m_texture.Get() && m_textureImageData.Get())
+    m_textureImageData->GetDimensions(d);
+  return d[0];
+}
+
+int GeometryNode::textureHeight() const {
+  int d[3] = {0, 0, 0};
+  if (m_texture.Get() && m_textureImageData.Get())
+    m_textureImageData->GetDimensions(d);
+  return d[1];
+}
+
+void GeometryNode::shareTexture(std::shared_ptr<const GeometryNode> source) {
+  // Owner thread, like setTexture: and `source`'s own setTexture, marshaled before this, has run
+  // by the time this reads its texture.
+  if (!source)
+    return;
+  runOnMainThread([this, source]() {
+    const GeometryNode &from = *source;
+    if (!from.m_texture) {
+      clearTexture();
+      return;
+    }
+    m_texture = from.m_texture; // the same vtkTexture: one GL texture for every mesh sharing it
+    m_textureImageData = from.m_textureImageData;
+    m_textureStorage = from.m_textureStorage;
+    const bool reflip = m_textureFlipV != from.m_textureFlipV;
+    m_textureFlipV = from.m_textureFlipV;
+    if (reflip && m_hasGeometry && m_geometry)
+      updatePolyData(*m_geometry);
+    m_actor->SetTexture(m_texture);
+    // As setTexture: the texture is the colour, unless a scalar field asks otherwise.
+    m_mapper->SetScalarVisibility(m_scalarActive && !m_useSingleColor && m_polyData &&
+                                  m_polyData->GetPointData()->GetScalars() != nullptr);
+    m_actor->Modified();
+  });
+}
+
 void GeometryNode::clearTexture() {
   // Marshaled to the owner thread: mutates shared VTK state (m_actor's texture and,
   // via updatePolyData, the shared m_polyData) that the renderer reads.
@@ -780,19 +824,25 @@ bool isColorBy(const std::string &s) {
 }
 
 // colormap_rgb through a colour table (setColorTable) instead of a colormap: entry i of the
-// table's n sits at lo + i (hi - lo) / (n - 1), linear between entries, clamped at the ends.
-std::vector<unsigned char> tableRgb(const std::vector<double> &values,
-                                    const std::vector<float> &table, double lo, double hi) {
+// table's n sits at lo + i (hi - lo) / (n - 1), linear between entries, clamped at the ends. With
+// an opacity table (n entries too) each value gets a fourth byte, its opacity, sampled the same
+// way; NaN stays opaque.
+std::vector<unsigned char> tableColors(const std::vector<double> &values,
+                                       const std::vector<float> &table,
+                                       const std::vector<float> &alpha, double lo, double hi) {
   const std::size_t n = table.size() / 3;
-  std::vector<unsigned char> rgb(3 * values.size());
+  const std::size_t k = alpha.empty() ? 3 : 4;
+  std::vector<unsigned char> rgb(k * values.size());
   const double span = hi - lo;
   const auto byte = [](double c) {
     return static_cast<unsigned char>(std::lround(255.0 * std::clamp(c, 0.0, 1.0)));
   };
   for (std::size_t i = 0; i < values.size(); ++i) {
-    unsigned char *out = &rgb[3 * i];
+    unsigned char *out = &rgb[k * i];
     if (!std::isfinite(values[i])) {
       out[0] = out[1] = out[2] = 128;
+      if (k == 4)
+        out[3] = 255;
       continue;
     }
     const double t = span > 0.0 ? std::clamp((values[i] - lo) / span, 0.0, 1.0) : 0.5;
@@ -801,6 +851,8 @@ std::vector<unsigned char> tableRgb(const std::vector<double> &values,
     const double f = x - static_cast<double>(a);
     for (int c = 0; c < 3; ++c)
       out[c] = byte((1.0 - f) * table[3 * a + c] + f * table[3 * (a + 1) + c]);
+    if (k == 4)
+      out[3] = byte((1.0 - f) * alpha[a] + f * alpha[a + 1]);
   }
   return rgb;
 }
@@ -850,13 +902,16 @@ void GeometryNode::setColorMap(cvc::colormap_kind cm) {
   });
 }
 
-void GeometryNode::setColorTable(const std::vector<float> &rgb) {
-  runOnMainThread([this, table = rgb]() mutable {
+void GeometryNode::setColorTable(const std::vector<float> &rgb, const std::vector<float> &alpha) {
+  runOnMainThread([this, table = rgb, opacity = alpha]() mutable {
     if (table.size() < 6 || table.size() % 3 != 0)
       table.clear();
-    if (table == m_colorTable)
+    if (opacity.size() != table.size() / 3)
+      opacity.clear();
+    if (table == m_colorTable && opacity == m_alphaTable)
       return;
     m_colorTable = std::move(table);
+    m_alphaTable = std::move(opacity);
     recolor();
   });
 }
@@ -1039,12 +1094,15 @@ const cvc::geometry::curvatures_t *GeometryNode::vertexCurvatures(const cvc::geo
 // SetColorModeToDirectScalars() is ALSO set — the omission that turned red
 // meshes blue. This uchar path is also texture-ready: when UVs land later they
 // go in the dedicated SetTCoords slot and never collide with these colors.
-// geom.colors() are RGB doubles in [0,1] (geometry.h color_t).
+// geom.colors() are RGB doubles in [0,1] (geometry.h color_t). A field through
+// a colour table with opacities is a 4-component (RGBA) array: VTK takes its
+// alpha too, and draws the actor in the translucent pass while any is < 255.
 void GeometryNode::applyVertexColors(const cvc::geometry &geom, bool inPlace) {
   const size_t n = geom.num_points();
   std::vector<double> field;
   bool robust = false;
-  std::vector<unsigned char> rgb;
+  std::vector<unsigned char> rgb; // `comps` bytes a point: RGB, or RGBA through an opacity table
+  std::size_t comps = 3;
   m_scalarActive = resolveScalarField(geom, field, robust);
   m_scalarRangeUsed = {kAutoRange, kAutoRange};
   if (m_scalarActive) {
@@ -1071,10 +1129,16 @@ void GeometryNode::applyVertexColors(const cvc::geometry &geom, bool inPlace) {
     }
     m_scalarRangeUsed = {lo, hi};
     if (!m_useSingleColor) {
-      rgb = m_colorTable.empty() ? cvc::colormap_rgb(field, m_colorMap, lo, hi)
-                                 : tableRgb(field, m_colorTable, lo, hi);
-      if (rgb.size() != 3 * n)
+      if (m_colorTable.empty()) {
+        rgb = cvc::colormap_rgb(field, m_colorMap, lo, hi);
+      } else {
+        rgb = tableColors(field, m_colorTable, m_alphaTable, lo, hi);
+        comps = m_alphaTable.empty() ? 3 : 4;
+      }
+      if (rgb.size() != comps * n) {
         rgb.clear();
+        comps = 3;
+      }
     }
   }
 
@@ -1089,10 +1153,10 @@ void GeometryNode::applyVertexColors(const cvc::geometry &geom, bool inPlace) {
       inPlace ? vtkUnsignedCharArray::SafeDownCast(m_polyData->GetPointData()->GetScalars())
               : nullptr;
   vtkSmartPointer<vtkUnsignedCharArray> fresh;
-  if (!colors || colors->GetNumberOfComponents() != 3 ||
+  if (!colors || static_cast<size_t>(colors->GetNumberOfComponents()) != comps ||
       static_cast<size_t>(colors->GetNumberOfTuples()) != n) {
     fresh = vtkSmartPointer<vtkUnsignedCharArray>::New();
-    fresh->SetNumberOfComponents(3);
+    fresh->SetNumberOfComponents(static_cast<int>(comps));
     fresh->SetNumberOfTuples(n);
     fresh->SetName("Colors");
     colors = fresh;
@@ -1178,6 +1242,16 @@ void GeometryNode::addFragmentShaderReplacement(const std::string &original,
   });
 }
 
+void GeometryNode::addFragmentShaderPostReplacement(const std::string &original,
+                                                    const std::string &replacement) {
+  runOnMainThread([this, original, replacement]() {
+    m_userShaderRepl[{2, original}] = replacement;
+    installShaderReplacement({2, original});
+    if (SceneGraph *sg = getSceneGraph())
+      sg->requestRender();
+  });
+}
+
 void GeometryNode::clearShaderReplacements() {
   runOnMainThread([this]() {
     m_userShaderRepl.clear();
@@ -1212,11 +1286,12 @@ void GeometryNode::installShaderReplacement(const ShaderReplKey &key) {
   const std::string &anchor = key.second;
   const auto in = m_internalShaderRepl.find(key);
   const auto user = m_userShaderRepl.find(key);
+  const bool post = key.first == 2; // applied after VTK's own replacements
   if (in == m_internalShaderRepl.end() && user == m_userShaderRepl.end()) {
     if (key.first == 0)
       sp->ClearVertexShaderReplacement(anchor, true);
     else
-      sp->ClearFragmentShaderReplacement(anchor, true);
+      sp->ClearFragmentShaderReplacement(anchor, !post);
     return;
   }
   // vtkShaderProperty keeps ONE replacement per anchor, so compose: the
@@ -1236,7 +1311,16 @@ void GeometryNode::installShaderReplacement(const ShaderReplKey &key) {
   if (key.first == 0)
     sp->AddVertexShaderReplacement(anchor, true, text, false);
   else
-    sp->AddFragmentShaderReplacement(anchor, true, text, false);
+    sp->AddFragmentShaderReplacement(anchor, !post, text, false);
+}
+
+void GeometryNode::setForceOpaque(bool on) {
+  runOnMainThread([this, on]() {
+    if (m_actor)
+      m_actor->SetForceOpaque(on);
+    if (SceneGraph *sg = getSceneGraph())
+      sg->requestRender();
+  });
 }
 
 void GeometryNode::disableCoordinateShiftScale() {
@@ -1298,13 +1382,34 @@ void GeometryNode::onUpdateShader(vtkObject *, unsigned long, void *clientData, 
   for (auto &kv : self->m_uniforms3F)
     if (program->IsUniformUsed(kv.first.c_str()))
       program->SetUniform3f(kv.first.c_str(), kv.second.data());
-  if (self->m_shaderTextures.empty())
-    return;
   std::vector<std::pair<std::string, vtkTextureObject *>> textures;
-  textures.reserve(self->m_shaderTextures.size());
   for (auto &kv : self->m_shaderTextures)
     textures.emplace_back(kv.first, kv.second.GetPointer());
-  bindShaderTextures(program, textures);
+  for (auto &src : self->m_sharedInputs) {
+    const ShaderInputs &in = *src.second;
+    for (auto &kv : in.f)
+      if (program->IsUniformUsed(kv.first.c_str()))
+        program->SetUniformf(kv.first.c_str(), kv.second);
+    for (auto &kv : in.f3)
+      if (program->IsUniformUsed(kv.first.c_str()))
+        program->SetUniform3f(kv.first.c_str(), kv.second.data());
+    for (auto &kv : in.f4)
+      if (program->IsUniformUsed(kv.first.c_str()))
+        program->SetUniform4f(kv.first.c_str(), kv.second.data());
+    for (auto &kv : in.m4)
+      if (program->IsUniformUsed(kv.first.c_str())) {
+        // SetUniformMatrix uploads the rows as GLSL's columns (VTK hands it its own matrices
+        // pre-transposed), so hand it the transpose for `m * v` in GLSL to be the matrix's.
+        vtkNew<vtkMatrix4x4> m;
+        m->DeepCopy(kv.second.data());
+        m->Transpose();
+        program->SetUniformMatrix(kv.first.c_str(), m);
+      }
+    for (auto &kv : in.tex)
+      textures.emplace_back(kv.first, kv.second.GetPointer());
+  }
+  if (!textures.empty())
+    bindShaderTextures(program, textures);
 }
 
 void GeometryNode::bindShaderTextures(
@@ -1359,6 +1464,23 @@ void GeometryNode::ensureShaderTexObserver() {
   m_shaderTexCb->SetCallback(&GeometryNode::onUpdateShader);
   m_mapper->AddObserver(vtkCommand::UpdateShaderEvent, m_shaderTexCb);
   m_shaderTexObserverInstalled = true;
+}
+
+void GeometryNode::setSharedShaderInputs(const std::string &key,
+                                         std::shared_ptr<const ShaderInputs> in) {
+  runOnMainThread([this, key, in]() {
+    if (in)
+      m_sharedInputs[key] = in;
+    else
+      m_sharedInputs.erase(key);
+    ensureShaderTexObserver();
+    if (SceneGraph *sg = getSceneGraph())
+      sg->requestRender();
+  });
+}
+
+bool GeometryNode::hasSharedShaderInputs(const std::string &key) const {
+  return m_sharedInputs.count(key) != 0;
 }
 
 void GeometryNode::setShaderTexture(const std::string &name, vtkTextureObject *tex) {

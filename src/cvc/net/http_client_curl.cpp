@@ -160,6 +160,11 @@ public:
     // (CURL_VERSION_ASYNCHDNS), else a stalled DNS lookup ignores CONNECTTIMEOUT.
     curl_easy_setopt(h.get(), CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(h.get(), CURLOPT_USERAGENT, req.user_agent.c_str());
+#if defined(_WIN32) && LIBCURL_VERSION_NUM >= 0x074700
+    // Windows has no CA bundle file for OpenSSL to find: verify against the system's certificate
+    // store, as a browser there does (7.71.0+; Schannel builds use it already).
+    curl_easy_setopt(h.get(), CURLOPT_SSL_OPTIONS, static_cast<long>(CURLSSLOPT_NATIVE_CA));
+#endif
     // NO CURLOPT_FAILONERROR: the facade reports a >= 400 (and a 304) with the status set, and the
     // CALLER decides what is an error — a cache must be able to see a 304.
     // CURLOPT_PROTOCOLS(_STR) are enum values, not macros — key the choice on the libcurl version

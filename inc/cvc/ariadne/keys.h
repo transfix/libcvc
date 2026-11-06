@@ -13,6 +13,7 @@
 
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace cvc {
@@ -28,9 +29,30 @@ struct KeyBinding {
   std::string path; // the state key holding its keys ("" = keys.<id>; a leading '/' is absolute)
 };
 
-// The Keys window's id, its open state, and the state key naming the binding whose Change button
-// is waiting for a key ("" = none; it counts only while the window is open). Under the document's
-// prefix, beside the window's other tree.<id> state, so no binding id can collide with them.
+// The pointer and camera settings a host's camera reads, for the Controls window to change beside
+// the keys (AppRuntime::set_host_mouse). Each is a state path, as KeyBinding::path is (a leading
+// '/' is absolute); "" leaves its row out. The window writes what its widgets write: the look as
+// the string "0" or "1", the inverts as 0 or 1, the sensitivity and distance as doubles; the host's
+// camera reads them, and seeds them (arigl's: CameraController's settings.* and orbit.distance).
+struct MouseControls {
+  std::string look;        // 1: mouse look (once the scene is clicked the mouse turns the view,
+                           // Escape gives the mouse back); 0: drag to look, click the scene
+  std::string steer; // 1: in drag to look, a drag on the scene steers (what the host walks faces
+                     // the point under the pointer) and the right button turns the view instead
+  std::string steer_label = "Drag to steer"; // its checkbox, in the host's words
+  std::string sensitivity; // degrees of turn per pixel of motion
+  double sensitivity_lo = 0.02, sensitivity_hi = 1.0;
+  std::string invert_y; // 1: moving the mouse up looks down
+  std::string invert_x; // 1: moving the mouse right turns left
+  std::string distance; // the camera's distance from what it orbits (the wheel changes it too)
+  double distance_lo = 1.5, distance_hi = 40.0;
+  std::string note; // a line under them, what the look does here ("" = none)
+};
+
+// The Controls window's id, its open state, and the state key naming the binding whose Change
+// button is waiting for a key ("" = none; it counts only while the window is open). Under the
+// document's prefix, beside the window's other tree.<id> state, so no binding id can collide with
+// them. (Its id is from when it held only the keys.)
 inline constexpr const char *kKeysWindow = "ariadne_keys";
 inline constexpr const char *kKeysWindowOpen = "tree.ariadne_keys.open";
 inline constexpr const char *kKeyCapture = "tree.ariadne_keys.capture";
@@ -64,6 +86,21 @@ std::string stored_key_name(std::string_view pressed);
 
 // True when `key` is one of the keys stored at a binding (`stored`, as join_keys writes it).
 bool key_matches(std::string_view stored, std::string_view key);
+
+// The host's UI size, for the Controls window to change beside the keys (AppRuntime::
+// set_host_ui_size): the state path holding it, a number (1 = the UI at its own size; a leading
+// '/' is absolute, as KeyBinding::path is), and the sizes offered, each its label and the value
+// written, spelled as the host writes the number back. arigl's is cvc::gl::ImGuiOverlay's
+// <scene>.viewers.main.ui.scale, which the overlay applies at the next frame.
+// scroll_friction, when set, adds a slider under it for how fast a finger's fling slows (per
+// second; arigl's <scene>.viewers.main.ui.scroll_friction, offered on a touch screen).
+struct UiSizeControl {
+  std::string path; // "" = no UI size row
+  std::vector<std::pair<std::string, std::string>> sizes = {
+      {"75%", "0.75"}, {"100%", "1"}, {"125%", "1.25"}, {"150%", "1.5"}, {"200%", "2"}};
+  std::string scroll_friction; // "" = no friction row
+  double friction_lo = 0.5, friction_hi = 20.0;
+};
 
 } // namespace ariadne
 } // namespace cvc

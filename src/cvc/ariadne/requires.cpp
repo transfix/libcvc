@@ -5,6 +5,8 @@
 #include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <cvc/state/state_exec/types.h>
+#include <map>
+#include <mutex>
 #include <set>
 #include <unordered_set>
 
@@ -21,10 +23,16 @@ struct TokenRule {
 
 const std::vector<TokenRule> &rules() {
   static const std::vector<TokenRule> kRules = {
-      {{"gl.scene", "scene: blocks are realized (a GL scene adapter is present)"},
+      // GLSL runs in two places, and a host can have one without the other: arigl --terminal
+      // renders the scene offscreen through GL (its shaders run) but draws the UI as text cells.
+      {{"gl.scene", "scene: blocks are realized (a scene adapter is present)"},
        [](const HostFacts &f) { return f.scene; }},
-      {{"gl.shaders", "GLSL shaders run (scene shaders:, shader_canvas)"},
+      {{"gl.scene.shaders", "the scene runs the document's GLSL (a node's shader: block)"},
+       [](const HostFacts &f) { return f.scene_shaders; }},
+      {{"gl.ui.shaders", "the UI itself draws GLSL (shader_canvas): a GL window, not a terminal"},
        [](const HostFacts &f) { return f.caps.glsl; }},
+      {{"gl.shaders", "both gl.scene.shaders and gl.ui.shaders (name the one you need)"},
+       [](const HostFacts &f) { return f.scene_shaders && f.caps.glsl; }},
       {{"gl.view", "a live render view can be embedded in a widget"},
        [](const HostFacts &f) { return f.caps.view_embed; }},
       {{"ui.windows", "real movable windows (free layout)"},
@@ -49,8 +57,71 @@ const std::vector<TokenRule> &rules() {
        [](const HostFacts &f) { return f.net_auth; }},
       {{"net.auth.persist", "the host keeps credentials across runs"},
        [](const HostFacts &f) { return f.net_auth_persist; }},
+      {{"image.url", "image: shows a picture by URI (§5.11): http(s) where the network is on, "
+                     "file://, cvc://, state://"},
+       [](const HostFacts &) { return true; }},
+      {{"image.background", "a window, overlay or group draws a background: picture (§5.12)"},
+       [](const HostFacts &) { return true; }},
+      {{"image.animated", "image: and background: animate a GIF or WebP (APNG: its first frame)"},
+       [](const HostFacts &) { return true; }},
+      {{"video.decorative", "video: takes controls: false, and a video URL in image: or "
+                            "background: plays as a decorative video (with a player; else its "
+                            "poster or placeholder)"},
+       [](const HostFacts &) { return true; }},
+      {{"media", "video: and audio: play here (a player, and not an SSH session it would play "
+                 "remotely from, unless --media-play always)"},
+       [](const HostFacts &f) { return f.media; }},
+      {{"media.player",
+        "the host has a player for video: and audio: (ari-media, arigl, a browser)"},
+       [](const HostFacts &f) { return f.media_player; }},
+      {{"oidc", "the host signs in with OAuth 2.0 / OpenID Connect providers (oidc-sign-in)"},
+       [](const HostFacts &f) { return f.oidc; }},
+      {{"oidc.loopback", "sign-in through the system browser and a loopback redirect (RFC 8252)"},
+       [](const HostFacts &f) { return f.oidc_loopback; }},
+      {{"oidc.device", "sign-in with a code entered on another device (RFC 8628)"},
+       [](const HostFacts &f) { return f.oidc_device; }},
+      {{"oidc.redirect", "sign-in by sending the browser page to the provider and back"},
+       [](const HostFacts &f) { return f.oidc_redirect; }},
+      {{"browser", "open-url opens the user's web browser here (not over SSH or --no-browser)"},
+       [](const HostFacts &f) { return f.browser; }},
+      // A script language's tokens answer from the engine a scripting host registered
+      // (set_script_engine), not from HostFacts; the language name stands for itself here.
+      {{"python", "an embedded Python runs the document's python: block"},
+       [](const HostFacts &) { return has_script_engine("python"); }},
+      {{"python.<module>", "<module> is importable in the embedded Python (python.numpy, ...)"},
+       [](const HostFacts &) { return false; }},
   };
   return kRules;
+}
+
+// The script engines the host embeds, by language (set_script_engine).
+std::mutex &engines_mutex() {
+  static std::mutex m;
+  return m;
+}
+std::map<std::string, std::function<bool(const std::string &)>> &engines() {
+  static std::map<std::string, std::function<bool(const std::string &)>> e;
+  return e;
+}
+
+// The script languages a document can ask for, and the hosts that run each.
+struct ScriptLanguage {
+  const char *name;
+  const char *hosts;
+};
+constexpr ScriptLanguage kScriptLanguages[] = {{"python", "arix or ariglx"}};
+
+// `name`'s language when it is "<language>.<module>" with a module, else nullptr.
+const ScriptLanguage *module_token_language(const std::string &name, std::string *module) {
+  for (const ScriptLanguage &l : kScriptLanguages) {
+    const std::string prefix = std::string(l.name) + ".";
+    if (name.size() > prefix.size() && name.compare(0, prefix.size(), prefix) == 0) {
+      if (module)
+        *module = name.substr(prefix.size());
+      return &l;
+    }
+  }
+  return nullptr;
 }
 
 const TokenRule *find_rule(const std::string &name) {
@@ -221,11 +292,46 @@ const std::vector<CapabilityToken> &capability_tokens() {
   return kTokens;
 }
 
-bool is_capability_token(const std::string &name) { return find_rule(name) != nullptr; }
+bool is_capability_token(const std::string &name) {
+  return find_rule(name) != nullptr || module_token_language(name, nullptr) != nullptr;
+}
 
 bool capability_holds(const std::string &name, const HostFacts &facts) {
+  std::string module;
+  if (const ScriptLanguage *l = module_token_language(name, &module)) {
+    std::function<bool(const std::string &)> has_module;
+    {
+      std::lock_guard<std::mutex> lock(engines_mutex());
+      auto it = engines().find(l->name);
+      if (it != engines().end())
+        has_module = it->second;
+    }
+    return has_module && has_module(module); // outside the lock: it may take the engine's own
+  }
   const TokenRule *r = find_rule(name);
   return r && r->holds(facts);
+}
+
+void set_script_engine(const std::string &language,
+                       std::function<bool(const std::string &module)> has_module) {
+  std::lock_guard<std::mutex> lock(engines_mutex());
+  if (has_module)
+    engines()[language] = std::move(has_module);
+  else
+    engines().erase(language);
+}
+
+bool has_script_engine(const std::string &language) {
+  std::lock_guard<std::mutex> lock(engines_mutex());
+  return engines().count(language) != 0;
+}
+
+std::string capability_hint(const std::string &name) {
+  for (const ScriptLanguage &l : kScriptLanguages)
+    if ((name == l.name || module_token_language(name, nullptr) == &l) &&
+        !has_script_engine(l.name))
+      return std::string("a document's ") + l.name + " runs in the scripting hosts, " + l.hosts;
+  return {};
 }
 
 std::vector<std::string> free_heads(const std::string &program) {

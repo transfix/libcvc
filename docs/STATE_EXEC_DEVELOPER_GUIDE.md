@@ -15,7 +15,9 @@ Every scheduler steps its processes on one thread today. The design for
 running programs on several threads is in
 [STATE_EXEC_THREADED.md](STATE_EXEC_THREADED.md) (adopted, not yet built):
 execution groups, each one scheduler stepped by one thread at a time, run in
-parallel on a shared worker pool, added in stages.
+parallel on a shared worker pool, added in stages. Which scheduler each host
+and Ariadne lane runs, and which settings choose what, is in
+[Which Scheduler Runs a Program](#which-scheduler-runs-a-program).
 
 ---
 
@@ -152,6 +154,7 @@ form and `if` dropped forms after its else branch, silently; scripts that wrappe
 **Generator:** `generator`, `next`, `range`, `collect`, `gen-done?`
 **OOP:** `send` (method dispatch), `apply`
 **Errors:** `error`, `assert` ([Exceptions](#exceptions))
+**Hashing and secure randomness:** `sha256`, `sha256-hex`, `random-token` (below)
 **Stdlib:** `string.*`, `bytes.*`, `math.*`, `collections.*`, always loaded ([§11](#11-standard-library))
 
 `apply`, `send` and `collections.map`/`filter`/`reduce` call a native function or a DSL
@@ -163,6 +166,38 @@ function alike. A DSL function runs as the program's own frames on the same eval
 (set o (dict "__class__" (dict "inc" (lambda (self x) (+ x 1)))))
 (send o "inc" 41)                                ;; => 42
 ```
+
+#### Hashing and Secure Randomness
+
+```lisp
+(sha256-hex "abc")      ;; => "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+(sha256 "abc")          ;; => the same digest as 32 bytes
+(random-token 32)       ;; => 43 characters of unpadded base64url, e.g. "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+(random-token 16 "hex") ;; => 32 lowercase hex digits
+```
+
+- `(sha256 x)` and `(sha256-hex x)` hash a string's UTF-8 bytes or a bytes value's octets, and
+  return the SHA-256 digest as 32 bytes or as 64 lowercase hex digits. Any other argument is a
+  `TypeError`. They are libcvc's own SHA-256 (`cvc::sha256_hex`, `state_blob_store.h`), so they
+  need no crypto library, and they hash the whole input in one step.
+- `(random-token nbytes [encoding])` returns `nbytes` (1..256, `kRandomTokenMaxBytes`) from the
+  operating system's CSPRNG as text: unpadded base64url (RFC 4648 §5, the default, with the
+  alphabet `A-Z a-z 0-9 - _`) or `"hex"`. The bytes come from `getentropy` on Linux, macOS and
+  other POSIX systems, `crypto.getRandomValues` under Emscripten (its `getentropy`), and
+  `rand_s` on Windows. A count outside 1..256 or an unknown encoding is a `ValueError`, and a
+  non-integer count a `TypeError`. `math.random` is not a CSPRNG; use `random-token` for
+  secrets, nonces and verifiers.
+- A device-pairing or PKCE flow draws a secret verifier, sends only its hash first, and proves
+  it holds the verifier later:
+
+  ```lisp
+  (set verifier (random-token 32))
+  (set verifier-hash (sha256-hex verifier)) ;; sent when pairing starts; verifier when it ends
+  ```
+
+- None of the three is in Ariadne's read lane (`bind:`, `visible_when:`). Its environment is an
+  allowlist, and `random-token` would make a predicate nondeterministic. The `init:` and action
+  lanes have all three.
 
 #### Surprises
 
@@ -522,6 +557,61 @@ scheduler sched2(scheduling_policy::priority);     // -20..19 nice values
 scheduler sched3(scheduling_policy::priority_rr);  // priority + RR within tier
 ```
 
+### Which Scheduler Runs a Program
+
+There are two scheduler classes. Both step the stackless evaluator, one process step at a time,
+on whichever thread calls them: `scheduler` holds a `stackless_evaluator`, and `async_scheduler`
+an `async_stackless_evaluator`, which wraps one and steps it the same way.
+
+- `scheduler` (synchronous): `(await)` returns at once, and an async function's kernel runs
+  inline, so a process never parks on one.
+- `async_scheduler`: a process parks on an async call or `(await)`, and resumes when the result
+  comes back through the scheduler's ingress.
+
+The recursive `evaluator` and `async_evaluator` run only where code builds one directly: tests,
+`pycvc.evaluator`, and `state_exec_bench --executor recursive`. No scheduler uses them.
+
+Which class each host and lane uses is fixed in code. No setting, command-line flag or
+environment variable chooses it.
+
+| Host or lane | Scheduler | Policy | Lock home |
+|---|---|---|---|
+| Ariadne actions (`on:`), residents (`on_tick`, `on_key`, `on_pointer`, `on_signal`) and the children they spawn; `AppRuntime`'s verbs; sliced tasks, net and stream intrinsics | the app's `async_scheduler`, `app::exec_scheduler()`, one for every document the app hosts, stepped by whichever thread calls `Runtime::drain` | `state_exec.policy` | the app's manager; attached cross-thread when that manager is shared |
+| Ariadne `init:` | a private `scheduler`, run to completion on the loading thread (at most 10 million steps and 5 s) | `round_robin` | the app's manager, same thread; never waits for a lock |
+| Ariadne's read lane (`visible_when`, computed `bind:`, ...) | none: a long-lived `stackless_evaluator` (`ReactiveEngine`), during the render walk | - | - |
+| pycvc `Exec(app)` | a private `async_scheduler` per `Exec`, stepped by whichever Python thread calls `run()` | its `policy` argument, else `state_exec.policy` | the app's manager, `threaded_host_attach()` |
+| `pycvc.scheduler(policy)`, `pycvc.async_scheduler(policy)`, or one built in C++ | the one built | the one passed (`round_robin` by default in C++) | private, unless given one with `set_lock_manager` |
+| `cvc exec`, `cvc ps`, `cvc serve --enable-exec` (`exec_coordinator`) | a `scheduler` | `round_robin` | private |
+
+**Threads.** Every scheduler is stepped by one thread at a time, and no pool steps DSL code.
+Programs run in parallel today only where a host steps several schedulers on threads of its own:
+several pycvc `Exec`s, each `run()` on its own Python thread, or a C++ host that does the same.
+Async functions' kernels and threaded sliced-task chunks do run on other threads, and post their
+results back to the scheduler. The design for stepping schedulers on a shared worker pool is
+[STATE_EXEC_THREADED.md](STATE_EXEC_THREADED.md), not built yet. `state_exec.threads`, its pool
+size, starts no thread today; it only feeds the lock manager's `auto` mode
+([Locks](#locks-with-lock), "Single and shared mode").
+
+**Nothing here changes while programs run.** Each choice is made when its object is built:
+
+- `state_exec.policy` is read when `app::exec_scheduler()` is first built, and by each `Exec(app)`
+  given no policy ([Priorities](#priorities)).
+- `state_exec.locks.threading` and `state_exec.threads` are read when the app's lock manager is
+  made.
+- `state_exec.process_class` is read when `app::exec_scheduler()` is first built.
+
+A host sets these on the app tree before anything calls `app::exec_scheduler()`,
+`app::exec_async_host()` or `app::lock_manager()`. `ari` and `arigl` build the app scheduler while
+they set up, before any document loads (`AppRuntime::register_quit`, `register_verb` and
+`enable_net` each build it), and have no option that sets `state_exec.*`. A document cannot set
+them either: its programs' writes are chrooted under its own prefix. So `ari` runs `round_robin`,
+with a `single` lock manager unless pycvc is loaded in the same process.
+
+What does change at run time: a process's priority (`set-priority`, `Exec.set_priority`,
+`post_control`), and the settings read on every submission (`state_exec.defaults.parser.*`,
+`state_exec.defaults.data.*` and `state_exec.defaults.limits.*` on the async scheduler,
+`ariadne.limits.*` and `ariadne.exec.lock_timeout`).
+
 ### Submitting Programs
 
 ```cpp
@@ -603,10 +693,13 @@ it picks.)
   priority, however many are tied there (before the run queue the tie went to whatever an
   unstable `std::sort` left first, which was the lowest pid only while the runnable set fit the
   sort's insertion pass: 32 processes on MSVC, 16 on libstdc++); `priority_rr` goes round robin
-  among the best priority's. A process that becomes
-  runnable takes its place by pid, so the order in which a set of processes interleaves is fixed
-  by their pids, their statuses and their priorities, step by step. The run queue finds the pick
-  without scanning (order statistics over the processes in pid order).
+  among the best priority's. Under a priority policy the run queue's level key is the process's
+  effective priority (`process_table::level_key`), which is its base unless it inherits a better
+  one through a lock ([Priorities](#priorities)); under `round_robin` every process is on one
+  level. A process that becomes runnable takes its place by pid, so the order in which a set of
+  processes interleaves is fixed by their pids, their statuses and their priorities, step by step.
+  The run queue finds the pick without scanning (order statistics over the processes in pid
+  order).
 - **Sleeps and timed waits** wake from a timer heap, when their deadline comes; a message wakes
   the processes waiting on its channel from an index of waiters by channel.
 - **The sync `run()` does not spin.** `max_steps` counts the run loop's iterations, the idle ones
@@ -787,6 +880,16 @@ Programs can manage other processes using DSL intrinsics:
 (scheduler-stats)  ;; => {total: N, running: N, ...}
 ```
 
+**Which process they report on.** The resource readers (`time-elapsed`, `time-limit`,
+`step-count`, `memory-limit`, `message-count`, `message-limit` and the message-byte pair) and
+`state-watch` / `state-unwatch` speak for the process the scheduler is stepping, as `self-pid` and
+`budget-usage` do. Only with no step running (a bare evaluator, a unit-test context) do they use
+the context's own `proc` and `pid`. A host that runs many programs on one shared scheduler, such
+as Ariadne's action and resident lanes, gives each context a placeholder process. Before this
+rule those readers reported 0 there, so a loop bounded by `(time-elapsed)` never ended, and a
+watch was registered for pid 0 and never fired. `memory-usage` reads the context's tracker,
+which such a host keeps per program.
+
 **What a spawned child sees.** A child always keeps its parent's `owner`, so a host that reaps
 a document's processes with `kill_owner` reaps its children too. Its environment depends on the
 host (docs/STATE_EXEC_THREADED.md 4.15):
@@ -816,6 +919,107 @@ Each child then gets a context copying the parent's:
 The child's environment is `environment::extend(base)` with the intrinsics registered in it,
 then `after_register(env, ctx)`, the host's own bindings. A null `base` is one default
 environment, shared by the callback's children.
+
+### Priorities
+
+Every process has a base priority, a Unix nice value from -20 (best) to 19 (worst), given at
+submit (`execute_options::priority`, `spawn`'s third argument; 0 by default). What it does depends
+on the scheduler's policy, and under a priority policy a lock holder can run at a better priority
+than its base. The full rules are in [STATE_EXEC_LOCKS.md](STATE_EXEC_LOCKS.md) sections 6.2
+(inheritance) and 7 (changes and permissions).
+
+| Policy | The pick |
+|---|---|
+| `round_robin` (the default) | every runnable process in turn: priorities are stored and reported, and change no pick |
+| `priority` | the lowest pid at the best effective priority |
+| `priority_rr` | round robin among the processes at the best effective priority |
+
+Both priority policies are strict: while a better process is runnable, a worse one does not step.
+
+**Changing and reading.** `(set-priority p)` changes the caller's base priority, and
+`(set-priority pid p)` another process's. Each returns `#t` when applied and `#f` for a pid the
+caller may not see (unknown, ended, or out of reach under the rules below), and raises
+`PermissionError` (with `pid` and `priority`) for a raise past the floors. `p` must be an int in
+-20..19, else `ValueError`: nothing is clamped. `(get-priority [pid])` returns
+`{base effective floor policy}` for the caller or a process it may see, else `nil`; `policy` is
+the policy's name. Under `round_robin` a change is stored and reported, and `effective` is the
+base.
+
+```lisp
+;; under priority_rr, in a process submitted at 0 with no host floor
+(get-priority)          ;; => {"base": 0, "effective": 0, "floor": 0, "policy": "priority_rr"}
+(set-priority 5)        ;; => #t: a process may always lower itself
+(set-priority 0)        ;; => #t: and come back, down to its floor
+(set-priority -1)       ;; PermissionError: past its floor
+(set-priority 20)       ;; ValueError: out of range
+
+(set kid (spawn "(msg-recv \"kid.go\")" "kid" 3))
+(set-priority kid 10)   ;; => #t: its own child
+(set-priority kid 0)    ;; => #t: raised back to the worse of the two floors, not past it
+(set-priority 9999 0)   ;; => #f: no process it may see
+```
+
+**Floors.** Every process has a `priority_floor`, the best priority it may ask for: its submit
+priority, unless the host gives one (`execute_options::priority_floor`,
+`set_priority_floor(pid, floor)`, or an `exec_coordinator`'s `resource_policy::priority_floor`).
+Fork copies the parent's floor, a host's included.
+
+- **Itself.** A process may lower itself freely and raise itself down to its floor, never past
+  it: one that demoted itself can come back, never above what its host gave it.
+- **Another process.** It may see another process of the same owner (unowned hosts count `""` as
+  one owner) that has its uid or descends from it by `parent_pid` within 64 hops, through live
+  processes (an orphan no longer descends from its grandparent). It may lower such a process
+  freely, and raise it only down to the worse of the two floors, the target's and its own.
+- **`spawn`'s priority.** Under `priority` and `priority_rr` a spawn asking for a priority better
+  than the caller's floor gets the floor instead, counted in `scheduler_stats::priority_clamped`,
+  and the child's floor is the caller's, so a child spawned at a worse priority can be raised back
+  to it. Under `round_robin`, unless the host gave the caller a floor, the requested priority is
+  stored unchecked, as before priorities could change, and the child's floor is the priority it
+  was spawned at. A floor the host gave clamps under every policy, and the process's forked and
+  spawned children inherit it as a host's floor. A host's own spawn (no process stepping) is
+  unchecked.
+
+**Inheritance under locks.** Under `priority` and `priority_rr` only, a process runs at the best
+of its own base and the bases of the processes it blocks, directly or through other waiters (a
+process queued behind a waiter the holder blocks lends to the holder too), up to 8 edges of the
+wait-for graph. So a low-priority holder that a high-priority process waits for runs ahead of
+medium-priority work until it releases, instead of starving the waiter behind it. The value is
+exact at every step: the lock manager recomputes it whenever a request queues, is granted or
+cancelled, a lock is released, a process ends or a base changes, so a boost is withdrawn at once,
+down the whole chain, when the waiter times out or is killed or the holder releases.
+`set-priority` on a boosted holder changes its base only: it keeps running at the boost while it
+blocks the better waiter. The boost shows in `get-priority`'s `effective` (a holder at 10 that a
+-10 process waits for reports `{"base": 10, "effective": -10, ...}`) and in `inspect`'s
+`effective_priority` (its `priority` stays the base, and `priority_floor` is the floor); `ps`,
+snapshots and migration carry only the base. Under `round_robin` nothing is lent or inherited.
+
+**Hosts.** A host's calls are unchecked, and belong on the thread that steps the scheduler:
+
+```cpp
+sched.set_priority(pid, -5);        // the base; no range or floor check; false for an unknown pid
+sched.set_priority_floor(pid, 0);   // a host's floor: its spawns clamp under every policy
+auto pi = sched.get_priority(pid);  // priority_info{base, effective, floor, policy}
+
+control_cmd cmd;                    // from another thread: applied between steps
+cmd.what = control_cmd::kind::set_priority;
+cmd.value = -5;
+sched.post_control(pid, std::move(cmd));
+```
+
+`exec_coordinator::admin_set_priority(pid, node, p)` reaches the named node's scheduler the same
+way. pycvc's `Exec.set_priority(pid, p)` and `Exec.get_priority(pid)` (a dict, or `None`) may be
+called from any thread. A scheduler's policy is fixed when it is built: the constructor's
+argument, pycvc's `Exec(app, policy=...)`, or, for `app::exec_scheduler()` and an `Exec` built
+with `policy=None`, the app tree's `state_exec.policy` (`round_robin`, `priority` or
+`priority_rr`), read when that scheduler is first built. Unset, it is `round_robin`, as before;
+an unknown value is logged and `round_robin` used; changing the setting later changes nothing.
+
+**OS thread classes** are a different thing: `cvc::thread_class` (`background`, `utility`,
+`normal`), with `set_current_thread_class` and `set_process_class` in
+`cvc/core/thread_class.h`, asks the OS for less of the machine for a thread or for the whole
+process. They are for hosts only (no DSL intrinsic reaches them) and never go above normal;
+`state_exec.process_class` applies one when `app::exec_scheduler()` is first built. See
+[THREAD_POOL.md](THREAD_POOL.md#thread-classes).
 
 ---
 
@@ -1464,6 +1668,9 @@ section on such a key sees `abandoned: #t` through `:as`, once.
 raises `DeadlockError` at once, its `cycle` a list of `{pid key}` (a pid only for a process of
 the same scheduler and owner). A `try` around the `with-lock` can catch it and retry.
 
+**Priority inversion.** Under `priority` and `priority_rr` a holder runs at the best of its own
+priority and those of the processes it blocks, while it blocks them ([Priorities](#priorities)).
+
 **Reads.** `(locks-held)` lists the program's own holds, outermost first:
 `{key mode count generation}`. `(lock-query [prefix])` lists every lock under the prefix (the
 program's chroot by default): `{held: [{key mode pids count generation abandoned}], waiting:
@@ -1476,11 +1683,87 @@ it asks again, at the back of the queue, with what was left of its timeout. A re
 environment has no `with-lock` lock form raises `LockError` (`"restore"`) in the restored
 program.
 
-**Hosts.** Each scheduler has its own lock manager, made when a program first locks, unless the
-host gives it one with `set_lock_manager`. The app's `exec_scheduler()` uses the app's manager
-(`app::lock_manager()`). Ariadne's actions give up after `ariadne.exec.lock_timeout` seconds (1.0)
-when they name no `:timeout`. pycvc's `register_intrinsics` keeps the lock form's context alive,
-and `intrinsics_context.lock_wait_allowed` / `lock_default_timeout` set the context's rules.
+**Hosts: one manager per app.** A scheduler given no manager makes a private one when a program
+first locks, unless the host gives it one with `set_lock_manager`. An app has one,
+`app::lock_manager()`, and its host schedulers use it: `app::exec_scheduler()` (Ariadne's residents
+and actions), Ariadne's `init:` lane, and every pycvc `Exec`. So their `with-lock` keys are one
+namespace: a section in any of them excludes an overlapping section in any other, whichever thread
+steps it. Ariadne's actions give up after `ariadne.exec.lock_timeout` seconds (1.0) when they name
+no `:timeout`, and its `init:` lane never waits ([ARIADNE.md](ARIADNE.md)). pycvc's
+`register_intrinsics` keeps the lock form's context alive, and
+`intrinsics_context.lock_wait_allowed` / `lock_default_timeout` set the context's rules.
+
+**Single and shared mode.** A manager is called by one thread (`single`: no mutex) or by several,
+each operation under the manager's one mutex (`shared`); `lock_manager::options::threading` fixes
+it at construction ([STATE_EXEC_LOCKS.md](STATE_EXEC_LOCKS.md) 8.3). A scheduler's private manager
+is single. The app's takes its mode from the app tree's `state_exec.locks.threading`:
+
+| Value | The app manager's mode |
+|---|---|
+| `auto` (the default) | `shared` when the build has threads (`threads_compiled_in`, false only on Emscripten without pthreads) and either `state_exec.threads` is above 0 (a whole number, or `auto` where `std::thread::hardware_concurrency()` is above 1) or a host that steps schedulers on threads of its own announced itself (`detail::note_threaded_host()`, which pycvc calls at import); else `single` |
+| `single` | `single` |
+| `shared` | `shared` |
+
+An unknown value is logged and `auto` used. The mode is chosen once, when the manager is made: by
+the first of `app::lock_manager()` (which a pycvc `Exec(app)` and pycvc's
+`set_lock_manager(app)` call), `app::exec_scheduler()` and an Ariadne init script, each of which
+makes it. A host sets the setting before any of those; changing it later changes nothing. `ari`
+and `arigl` build `app::exec_scheduler()` while they set up, so their manager is `single` unless
+pycvc was imported first. `state_exec.threads` starts no thread today: it is read here, by `auto`,
+and nowhere else. Shared mode adds an uncontended mutex lock and unlock to each
+manager operation (STATE_EXEC_LOCKS.md 8.8).
+
+**A scheduler stepped on another thread.** `set_lock_manager(mgr, attach)` (both schedulers)
+makes the scheduler's lock home and attaches it to `mgr` at once. `lock_attach{true}` says the
+scheduler may be stepped on a thread other than the one the manager's other homes use; a single
+manager refuses such a home with `std::logic_error` naming `state_exec.locks.threading`, in every
+build. Pass `threaded_host_attach()` (`lock_attach{threads_compiled_in}`) rather than `true`, as
+pycvc's `Exec` does, so a build without threads, whose app manager `auto` makes single, never asks.
+`app::exec_scheduler()` attaches cross-thread when the app's manager is shared. `set_lock_manager`
+also throws `std::logic_error` while a process of the scheduler holds or waits for a lock. A
+refused attach changes nothing: the scheduler keeps its home and manager. `has_lock_home()` says
+whether a scheduler has its home yet.
+
+```cpp
+namespace se = cvc::state_exec;
+// Before anything makes the app's manager:
+cvc::state::instance(app)("state_exec.locks.threading").value("shared");
+se::async_scheduler worker; // stepped on a thread of its own
+worker.set_lock_manager(app.lock_manager(), se::threaded_host_attach());
+```
+
+**Several threads.** Each scheduler is still stepped by one thread at a time. Several schedulers,
+each on its own thread (or several pycvc `Exec`s, each `run()` on its own Python thread), share the
+app's shared-mode manager: a request is granted or queued under its mutex, in one FIFO across every
+scheduler.
+
+**Grants across threads.** A release on one thread may grant a waiter of a scheduler on another.
+The grant is made at once, under the manager's mutex, and the key is the waiter's from then on.
+The waiter's scheduler learns of it from a wake posted to its lock port, which it applies between
+steps ([STATE_EXEC_LOCKS_PROTOCOL.md](STATE_EXEC_LOCKS_PROTOCOL.md) 2.3, 4.14, 5.9). So the waiter
+resumes at its scheduler's next step boundary after the post. The waits end on a post:
+`async_scheduler::wait_for_work` returns, and the next `drain_ingress()` applies the post first; a
+sync `run()` waiting with nothing ready steps again. A sync `run(N)` bounded by steps and left with
+only waiters and no timer returns at once, as with only message waiters, and the next `run()`
+applies the wake (STATE_EXEC_LOCKS.md 6.1). A scheduler nobody steps keeps its granted waiter
+parked, and the key held, until it is stepped again: for a pycvc `Exec`, its next `run()`. Priority
+relevels for a holder on another scheduler travel the same way. A handoff between threads thus
+costs the release, the post, and the other thread's wake, drain and resume steps; the bench's
+`lock.cross_thread` measures it ([STATE_EXEC_BENCH.md](STATE_EXEC_BENCH.md)).
+
+**Deadlocks across threads** are found as on one scheduler: the check runs under the manager's
+mutex over every scheduler's holds and waiters, so the request that closes a cycle across `Exec`s
+or schedulers on different threads raises `DeadlockError` when it blocks. Its `cycle` shows the
+pids of another scheduler's processes as `nil`, since pids repeat across schedulers. Which request
+closes the cycle, and so raises, depends on the order in which the threads reach the manager.
+
+**Keep hot keys in one thread.** Every lock operation of every thread takes the manager's one
+mutex. Sections on keys of their own run in parallel (disjoint keys share only the mutex and their
+common ancestors' counts); sections on one key run one at a time, and on several threads each
+handoff adds a post and a wake. So keep a hot key's sections in one scheduler (one `Exec`), and give
+each thread keys of its own. `lock_manager::stats()` counts the `posts` and, in shared mode,
+`mutex_waits` and `mutex_wait_ns`: the operations that found the mutex held, and the time they
+waited for it.
 
 ## 7. Resource Limits & Policies
 
@@ -1661,6 +1944,21 @@ configuration back to the state tree:
 - `state_exec.schedulers.<id>.limits.max_alloc_bytes` — the resolved per-call allocation limit
 - `state_exec.schedulers.<id>.limits.heap_check_steps` — the resolved heap re-measure interval
 - `state_exec.schedulers.<id>.policy` — `"round_robin"`, `"priority"`, or `"priority_rr"`
+
+The published `policy` is a report: a scheduler's policy is fixed when it is built, and
+`load_settings()` does not change it. `state_exec.policy`, which chooses the policy of
+`app::exec_scheduler()` when it is first built, is described in [Priorities](#priorities).
+
+**App-level settings.** These configure the app's own objects, not a scheduler `load_settings()`
+reads. Each is read once, when that object is built, and a later change does nothing
+([Which Scheduler Runs a Program](#which-scheduler-runs-a-program)):
+
+| Setting | Read when | Values | Default |
+|---------|-----------|--------|---------|
+| `state_exec.policy` | `app::exec_scheduler()` is first built; each pycvc `Exec(app)` given no policy | `round_robin`, `priority`, `priority_rr` (anything else is logged) | `round_robin` |
+| `state_exec.locks.threading` | the app's lock manager is made ([Locks](#locks-with-lock)) | `auto`, `single`, `shared` (anything else is logged and `auto` used) | `auto` |
+| `state_exec.threads` | with `state_exec.locks.threading`, by `auto` only; it starts no thread yet | a whole number, or `auto` | unset (0) |
+| `state_exec.process_class` | `app::exec_scheduler()` is first built ([THREAD_POOL.md](THREAD_POOL.md)) | `background`, `utility`, `normal` (anything else is logged and ignored) | unset (the OS's) |
 
 ---
 
@@ -2069,7 +2367,9 @@ each environment.
 
 The shared scope is frozen. `set`, `defun` and `environment::set_existing()` never write into
 it: a program that rebinds a stdlib name shadows it in its own scope, and other programs keep
-the real function.
+the real function. To share DSL functions between programs, an Ariadne document declares them in a
+`functions:` block, which its runtime runs ahead of each of its programs and can grant to the
+modules it loads (docs/ARIADNE.md §6.6).
 
 ```lisp
 (set string.length 42)

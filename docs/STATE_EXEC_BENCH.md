@@ -54,7 +54,8 @@ On Windows use `python` and the executable needs the cvcpkg DLLs on `PATH`. Run 
 environment that has them, or pass `--dll-dir` to the runner (repeatable). The runner puts the
 executable's own directory on `PATH` for you. A full default run (`--reps 1`) takes about
 15 minutes on the 22-thread machine this suite was written on, and the `lock.*` scenarios add
-about 5 more (`lock.uncontended`'s 96 points most of it); `--reps 5` about five times that.
+about 5 more (`lock.uncontended`'s 96 `threading=single` points most of it), plus about as much
+again for its 96 `threading=shared` points (phase L3); `--reps 5` about five times that.
 
 ### Executable options
 
@@ -162,8 +163,9 @@ as `state_exec_bench_gates` (`src/cvc/tests/state_exec_bench_gates.cmake`, a `cm
 - `lock.uncontended --size n=2000` (one rep, no warmup, one timing round), then `gate --scenario
   lock.uncontended --where form=single` on `extra.steps_per_lock --max 0` and on
   `extra.allocs_per_lock --max 0`: an uncontended lock adds no step and no allocation over
-  `(begin ...)` (docs/STATE_EXEC_LOCKS.md 8.8), at every depth, mode, chroot and owner, on both
-  schedulers;
+  `(begin ...)` (docs/STATE_EXEC_LOCKS.md 8.8, 11.2), at every depth, mode, chroot and owner, on
+  both schedulers, and on both kinds of manager (`threading` single and shared: the manager's
+  mutex adds neither);
 - `sched.single.*` (one rep, no warmup), then `gate --metric steps_total --min N --max N` for
   `sched.single.arith_loop` (n 40000) and `sched.single.tail_rec` (n 1000, 10000, 100000), the
   same N on both schedulers. A deliberate change to one of these step counts updates the script
@@ -174,7 +176,8 @@ and only for Release and RelWithDebInfo: MSVC's Debug STL allocates for its iter
 so the allocation count is a Release number. With a single-config generator it exists only when
 `CMAKE_BUILD_TYPE` is one of the two, and `ctest` runs it only with `-C` naming it (CI passes
 `--build-config`): `ctest --test-dir build -C Release -R state_exec_bench_gates
---output-on-failure`. It takes 30-40 s on the machine this was written on.
+--output-on-failure`. It took 30-40 s on the machine this was written on before the
+`threading=shared` points (phase L3) doubled `lock.uncontended`'s share of it.
 
 ## Getting stable numbers
 
@@ -473,18 +476,27 @@ frames.
 `sched.single.*`, `flood.small` and `msg.*` have two more sweep keys, both at one value by default:
 
 - `policy`: the scheduler's policy. `rr` (round robin, the default), `priority` or `priority_rr`.
+  `rr` is the bench's short name only: on the state tree `state_exec.policy` takes `round_robin`,
+  and logs `rr` as unknown.
 - `locks`: which lock manager the scheduler gets (docs/STATE_EXEC_LOCKS.md 11.2). `none` (the
   default) passes none: the scheduler every existing suite builds, which makes its private manager
   and lock home only at its first lock request, so programs that never lock run as they did
   before the locks. `private` gives the scheduler a single-mode manager of its own through
   `set_lock_manager`, which attaches the home at once, so its points carry an attached home's
-  per-step costs (design 8.8). `shared` (a shared-mode manager) is phase L3's: this build skips
-  such a point and prints `locks=shared needs a lock manager this build lacks`, as it does for any
-  other value.
+  per-step costs (design 8.8). `shared` gives it a shared-mode manager of its own (design 8.3:
+  every manager operation under the manager's mutex), attached the same way; the async
+  scheduler's home attaches with `lock_attach{cross_thread}` (`threads_compiled_in`), as pycvc's
+  `Exec` attaches its own. From phase L3 an attached home pays a port test and a progress store
+  per step (design 8.4, 8.8), so the async `locks=shared` points are the threaded hosts' shape: an
+  `async_scheduler` with a shared-mode home, running a program that never locks, which is what
+  pycvc's `Exec`s run for a program without `with-lock`, and `app::exec_scheduler()` too when the
+  app's manager is shared. A plain `ari` run makes it `single`, attached on one thread: the
+  async `locks=private` shape. Any other value is skipped, with a line saying so.
 
-Sweep them with `--size policy=rr,priority_rr` or `--size locks=none,private`, and compare the two
-sides of a sweep with `compare --pair` ("Runner options"). Records from binaries that predate the
-keys still match, because both are implicit defaults.
+Sweep them with `--size policy=rr,priority_rr` or `--size locks=none,shared`, and compare the two
+sides of a sweep with `compare --pair` ("Runner options"; L3's gate is under "lock.cross_thread",
+"The phase L3 gates"). Records from binaries that predate the keys still match, because both are
+implicit defaults.
 
 ### flood.small (sync, async)
 
@@ -746,9 +758,12 @@ refcounts on a shared AST, the global exception class tables and the allocator u
 The state_exec locks (docs/STATE_EXEC_LOCKS.md, section 11.2). Every world these scenarios build
 gets a single-mode lock manager of its own through `set_lock_manager` before anything runs, as
 `locks=private` gives the scenarios that take the `locks` key, so no lock request pays for making
-the scheduler's lock home. Several scenarios time with natives they register (`bench-req`,
-`bench-got`, ...), which run on the driver thread. A wait or a section counts only when it began
-after the region did, so none of them carries the meter's probes at the region's start.
+the scheduler's lock home. Two exceptions: `lock.uncontended`'s `threading=shared` points give
+each world a shared-mode manager of its own instead (`locks=shared`), and `lock.cross_thread`'s
+schedulers share one shared-mode manager. Several scenarios time with natives they register
+(`bench-req`, `bench-got`, ...), which run on the driver thread (on the worker threads in
+`lock.cross_thread`). A wait or a section counts only when it began after the region did, so none
+of them carries the meter's probes at the region's start.
 
 #### lock.uncontended
 
@@ -766,7 +781,10 @@ the lock. The sweep:
   hold, so it never reaches the manager;
 - `owner`: the process's `execute_options::owner`, `short` (`""`) or `long` (40 characters, an
   Ariadne owner's length, past `std::string`'s small buffer);
-- `threading`: `single` only. `shared` is phase L3's, and a point asking for it is skipped;
+- `threading`: `single` (a single-mode manager, `locks=private`) or `shared` (a shared-mode one,
+  `locks=shared`: every manager operation, the fast path's included, takes the manager's mutex;
+  design 8.3). One thread locks either way: `shared` measures the mutex's uncontended cost, which
+  `lock.cross_thread` measures under contention;
 - `n` (10000): sections per loop.
 
 Extras:
@@ -787,9 +805,9 @@ Every run with the lock is checked: n grants, all on the fast path, no wait, not
 end.
 
 The gates (design 11.2) are on the `form=single` points; the `form=nested` points are recorded.
-The two counts hold at every depth, mode, chroot, owner and executor, and CTest runs them ("Gates
-in CTest"). The time, at most 60 ns over `begin` for the flat key on the sync scheduler, needs a
-Release build and 5 reps or more:
+The two counts hold at every depth, mode, chroot, owner, threading and executor, and CTest runs
+them ("Gates in CTest"). The times, at most 60 ns over `begin` single (phase L1) and 120 ns shared
+(phase L3) for the flat key on the sync scheduler, need a Release build and 5 reps or more:
 
 ```sh
 python3 tools/bench/state_exec_bench.py gate run.jsonl --scenario lock.uncontended \
@@ -797,9 +815,16 @@ python3 tools/bench/state_exec_bench.py gate run.jsonl --scenario lock.uncontend
 python3 tools/bench/state_exec_bench.py gate run.jsonl --scenario lock.uncontended \
     --where form=single --metric extra.allocs_per_lock --max 0
 python3 tools/bench/state_exec_bench.py gate run.jsonl --scenario lock.uncontended \
-    --executor sync --where depth=1 --where chroot=0 --where form=single --where owner=short \
-    --metric extra.ns_per_lock --max 60 --max-noise 10
+    --executor sync --where threading=single --where depth=1 --where chroot=0 \
+    --where form=single --where owner=short --metric extra.ns_per_lock --max 60 --max-noise 10
+python3 tools/bench/state_exec_bench.py gate run.jsonl --scenario lock.uncontended \
+    --executor sync --where threading=shared --where depth=1 --where chroot=0 \
+    --metric extra.ns_per_lock --max 120 --max-noise 10
 ```
+
+The single gate names `threading=single`: records from before phase L3 carry it too (the key
+existed with that one value), so it matches them. The shared gate is L3's as its plan states it
+(docs/STATE_EXEC_LOCKS.md 11.2, 12): every mode, form and owner of the flat unchrooted key.
 
 #### lock.handoff
 
@@ -915,6 +940,175 @@ turn. The region steps the scheduler one step at a time and times each step. Ext
 Checked: the members' caught errors add up to `cycles`, the manager counted as many, the
 coordinator returned `cycles`, and q requests are still queued at the end. Each step reads the clock
 and the lock stats around it: the per-step times leave that out, the region's wall includes it.
+
+#### lock.inherit (async)
+
+Priority inversion under `priority_rr` (docs/STATE_EXEC_LOCKS.md 6.2), `samples` (20) times a rep.
+A low holder (priority 10) takes `bench.pi.k` and parks in its section on `bench.pi.go`; then `m`
+(0, 1, 8) medium spinners (0) loop on `(bench-spinning)`, and a high waiter (-10) queues for the
+key. The bench delivers `bench.pi.go`, and the holder runs its section, `section` (2000) loop
+iterations between `(bench-sec 0)` and `(bench-sec 1)`, and releases; the waiter's grant runs
+`(bench-got)`. The spinners stop 50 ms after the release, and the next sample starts once
+everything has ended. The drive checks between slices of 200 steps. Extras:
+
+- `wait_ns`: p50/p90/p99/max from the release to `bench-got`. The time the holder sat parked
+  before the release is left out: only what the holder does once it can run is the inversion;
+- `section_ns`: p50/p90/p99/max of the holder's section, `bench-sec 0` to `bench-sec 1`;
+- `wait_p99_over_section`: the `wait_ns` p99 over the `section_ns` p50, the gate's ratio;
+- `starved`: the waits that lasted the 50 ms window or more;
+- `relevels`: the manager's `lock_stats::relevels` over the rep.
+
+`inherit` is `on`, or `off`: the private manager is built with
+`lock_manager::options::inheritance` false, a test-only switch. With inheritance the waiter boosts
+the holder to -10, so the holder runs its section ahead of the spinners and the ratio stays near 1.
+Without it the spinners, strictly better than the holder, run until their window ends, and every
+wait with `m` above 0 is starved. At `m=0` both settings measure the section alone.
+
+Gate (design 11.2): `gate RUN --scenario lock.inherit --where inherit=on --metric
+extra.wait_p99_over_section --max 2`.
+
+#### lock.cross_thread (async)
+
+Locks across threads on one shared-mode manager (docs/STATE_EXEC_LOCKS.md 3.3, 8.3, 11.2, 14.2
+question 9). `t` (1, 2, 4, 8) `async_scheduler`s, each in a world of its own over the point's app,
+their homes attached to one shared-mode manager with `lock_attach{cross_thread}`, each pumped on a
+thread of its own as pycvc's `Exec::run` pumps its scheduler: `drain_ingress()` (which applies the
+lock port's posts first), `wake_awaiting()`, a `sync_run_steps(2000000, 0.05)` slice while
+anything is runnable, else `wait_for_work(now + 50 ms)`, which a post from another home's thread
+ends. Each thread runs one loop of sections. A section's work is `(bench-work)`, a native that runs
+a dependent xorshift64 chain for `section_ns` (300, 3000, 30000) of CPU time: the chain's length is
+calibrated once per point on the driver thread (the fastest of 5 runs of 2^20 rounds). It is
+neither a sleep nor a spin on the clock, so a section that is preempted or lands on a slower core
+takes longer.
+
+- `keys=disjoint`: thread j loops on `(with-lock "bench.ct.k<j>" (bench-work))`, `work_ms` (20) of
+  sections each (`work_ms` / `section_ns` sections). The keys share their parent `bench.ct` and the
+  manager's mutex, and no request waits (checked).
+- `keys=hot`: every thread loops on
+  `(with-lock "bench.ct.hot" (bench-got) (bench-work) (bench-end))`, `handoffs` (2000) sections in
+  all, `handoffs` / t a thread.
+
+A rep runs two loops on the same t schedulers and threads, each released from a barrier: first
+every thread's loop of `(begin (bench-work))`, the disjoint workload without the lock (a `begin`
+in place of `with-lock`, as `lock.uncontended` compares them, so the two loops take the same steps
+when every grant is on the fast path), then the point's loop with it. The region (`wall_ns` and
+the meter's other fields) is the locked run. A run's span runs from the barrier's release to the
+last thread's end, read from the threads' own clocks. Extras:
+
+- `ratio_to_nolock`: the unlocked span over the locked one, which is the locked throughput over the
+  unlocked one (both runs make the same sections), from one rep. A hot point's ratio also carries
+  its two timing natives;
+- `locked_ns`, `nolock_ns`: the two spans; `sections_per_s`, `nolock_sections_per_s`;
+- `ns_per_lock`: the spans' difference over a thread's sections, the wall time a lock adds to a
+  thread's section. At t = 1 it is the uncontended shared-mode cost on the async scheduler; above
+  it, it adds the waits for the manager's mutex and the transfers of its cache lines (and on the
+  hot key, the serialization of the sections);
+- `sections_per_thread`, `section_rounds`, `burn_ns_per_round`, `section_cal_ns` (the calibrated
+  section on the driver's core), `nolock_thread_ns_per_section` (the median over the threads of
+  their unlocked loop's time per section, the loop's own steps included, on the cores they ran on);
+- `nolock_steps`: the unlocked run's steps (`steps_total` is the locked run's), and
+  `steps_per_lock`, their difference over the sections: 0 on disjoint keys; on the hot key the two
+  timing natives' steps, and above t = 1 each wait's park and resume;
+- `grants`, `waits`, `posts`: the manager's `lock_stats` over the locked run. Checked: one grant a
+  section; on disjoint keys all on the fast path and no wait; nothing held or queued at the end;
+  one timed handoff a post (below);
+- `threads_on_lower_efficiency_class` (Windows): the threads that ended the locked run on a slower
+  core class than another thread;
+- `mutex_waits`, `mutex_wait_ns`, `mutex_wait_ns_per_lock`: the manager mutex's contended
+  acquisitions in the locked run and the time they blocked, from `lock_stats` fields of those
+  names. Shared mode counts them: an operation that finds the mutex held reads the clock around
+  its wait, so an uncontended one pays only its `try_lock`;
+- hot, t at least 2: `handoffs` (the grants that reached their thread through its port),
+  `handoff_ns` (p50/p90/p99/max/n) and `handoff_p50_ns` (its p50, the gate's figure), and
+  `post_to_grant_ns`.
+
+How a handoff is timed. The hot key orders every section after the one before it.
+`(bench-end)`, a section's last form, stores the time in a clock the threads share, and the
+holder's lock frame releases the key on its next steps. When the release grants the key to a
+waiter of another home, the releasing thread hands that home a wake (`lock_home::deliver`, after
+the release returned from under the manager's mutex, before the post and its notify). The bench
+sees it through `lock_test_hooks::cross_home_note`, a test hook the library exports, installed
+only while a hot point's locked run runs, and notes the time against that home. The waiter's thread
+wakes from `wait_for_work`, applies the post in its next `drain_ingress()`, and steps the waiter;
+the section's first form, `(bench-got)`, finds the noted post and clears it, and records
+`handoff_ns` (now less the previous section's `bench-end`) and `post_to_grant_ns` (now less the
+post's note). A grant that needed no post (the key was free when asked) is no handoff and is not
+recorded; at t = 1 there is none. Every post is one waiter's wake, so the rep checks that it
+timed one handoff for each post the manager counted. So `handoff_ns` covers the holder's release
+(its steps and the operation under the mutex), the post and its notify, the other thread's wake
+from `wait_for_work`, its drain, and the waiter's resume steps up to its body's first form.
+
+Step counts: each thread's loops are pre-parsed ASTs of its own, and `keys=disjoint` takes only
+fast-path grants, so its `steps_total` equals its `nolock_steps` and both are the same in every
+rep at every t, as are hot's at t = 1. At hot t of 2 or more, a request that finds the key held
+parks and resumes, which takes a few more steps, and how many requests do depends on timing:
+those counts vary.
+
+#### The phase L3 gates
+
+Phase L3 (one app, several threads) has three gates of its own (docs/STATE_EXEC_LOCKS.md 11.2 and
+12; the L3 plan, section 4), measured on Windows (MSVC, Release) in recorded quiet windows with the
+driver pinned (`--pin auto`), 5 reps or more:
+
+- `lock.uncontended`, shared: at most 120 ns over `begin`, the `threading=shared` gate above.
+- `lock.cross_thread`: on disjoint keys with 3 us sections at t = 4, at least 0.9 of the no-lock
+  throughput; the hot key's handoff p50 at most 50 us, at each t that hands off (a point without
+  `handoff_p50_ns`, t = 1, would fail a gate, so the gate names t); the mutex wait time recorded:
+
+  ```sh
+  python3 tools/bench/state_exec_bench.py gate run.jsonl --scenario lock.cross_thread \
+      --where keys=disjoint --where section_ns=3000 --where t=4 \
+      --metric extra.ratio_to_nolock --min 0.9 --max-noise 10
+  for t in 2 4 8; do
+    python3 tools/bench/state_exec_bench.py gate run.jsonl --scenario lock.cross_thread \
+        --where keys=hot --where t=$t --metric extra.handoff_p50_ns --max 50000
+  done
+  ```
+
+  On Linux the same figures come from `locks-deep.yml`'s Release run, on a hosted runner: they are
+  recorded, with the design's 20 us handoff p50 beside them, and not gated, since there is no Linux
+  bench host. `lock.cross_thread` decides whether the manager needs sharding (design 3.3, 14.2
+  question 9), from at least two rounds in recorded quiet windows with every point under its noise
+  limit: a miss on Windows, or a Linux figure far outside the design's even on a hosted runner,
+  opens the subtree-sharding design, with its own review and model check, outside phase L3.
+- `sched.single.*`, `flood.small` and `msg.*` at `locks=shared` within 3 % (and the noise) of
+  `locks=none` in the same run, a paired gate over two runs in reverse order. Its async points are
+  the hosts' shape (`locks`, under `sched.single.*`):
+
+  ```sh
+  python3 tools/bench/state_exec_bench.py run --scenario 'sched.single.*' --scenario flood.small \
+      --scenario 'msg.*' --size locks=none,shared --reps 5 --out pooled.jsonl
+  python3 tools/bench/state_exec_bench.py run --scenario 'sched.single.*' --scenario flood.small \
+      --scenario 'msg.*' --size locks=shared,none --reps 5 --out pooled.jsonl
+  python3 tools/bench/state_exec_bench.py compare pooled.jsonl pooled.jsonl \
+      --pair locks=none:shared --max-noise 3 --fail-on-worse
+  ```
+
+The regression gates at `locks=none` against the tag after phases L1b and L2 run as for every
+phase ("Runner options").
+
+### prio.* (sync, async)
+
+Priority changes (docs/STATE_EXEC_LOCKS.md 7).
+
+#### prio.set
+
+`n` (1, 1000) processes submitted parked on a channel no one sends to, so they stay ready and in
+the run queue, and nothing steps. Process j's priority is 0 when `levels` is 1, or -20 + j mod
+`levels` when it is 40 (a point whose n is below `levels` is skipped). The region flips the first
+process's priority `changes` (100000) times between its own level and the next one down, through
+the scheduler's `set_priority_checked` with the process as its own caller. That is what
+`set-priority` calls once it has read its arguments: the permission check, the base, the re-level
+in the run queue. Extras:
+
+- `ns_per_change`: the region over the changes. Checked: every change applied, the process back at
+  its own level, and the scheduler's `check_tables()`;
+- `ns_per_pick`: `changes` picks on a `process_table` of the same shape (the schedulers' own is
+  private), timed after the region: `pick_first` under `priority`, the round-robin pick under `rr`.
+
+Under `rr` the table has one level, so a change re-levels nothing and the pick never scans levels.
+Gate (design 11.2): `gate RUN --scenario prio.set --where n=1000 --where policy=priority --metric
+extra.ns_per_change --max 500 --max-noise 10`.
 
 ## Known pathologies the suite exposes
 

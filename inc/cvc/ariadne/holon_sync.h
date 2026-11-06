@@ -19,9 +19,11 @@
 #include <cstdint>
 #include <cvc/ariadne/avatar_physics.h> // avatar_static
 #include <cvc/ariadne/avatar_sim.h>
-#include <cvc/ariadne/holon.h> // holon_config
+#include <cvc/ariadne/holon.h>       // holon_config
+#include <cvc/ariadne/pose_stream.h> // pose_stream_decoder
 #include <cvc/core/namespace.h>
 #include <cvc/physics/body.h>
+#include <cvc/state/pose_snapshot.h>
 #include <string>
 #include <vector>
 
@@ -120,13 +122,22 @@ std::vector<avatar_static> room_statics(cvc::app &app, const std::string &room);
 // read its proposed .intent, feed it to the holon (a stamped one queued for its tick,
 // holon::queue_intent; an untimed one at once); advance the holon one frame; then
 // write every participant's authoritative .pose + .server_tick back to the tree
-// (which replicates to the clients) -- what changed, plus a heartbeat of about a
-// second while nothing does (write_pose). The caller supplies the server holon
+// (which replicates to the clients) -- what changed, plus a heartbeat every
+// POSE_HEARTBEAT_S while nothing does (write_pose). The caller supplies the server holon
 // and calls this once per relay tick. A participant who left (room_leave) is dropped
 // from the holon, so a rejoin respawns on the spawn ring. wall_dt
 // is forwarded to holon::advance: the default (-1) measures real elapsed wall time
 // (what the relay wants); a test injects a fixed dt for a deterministic step count.
-void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_dt = -1.0);
+// WRITE_POSES false skips the pose write-back: a relay that streams poses to its clients
+// (room_pose_relay) writes the tree's copy only now and then, for late joiners and the log.
+// Clients that read their poses from the tree keep their clocks by the heartbeat, so a second
+// suits them; a relay whose pose stream carries its own heartbeat can stretch the tree's, since a
+// client takes no stale tick as a clock reading (holon::apply_authoritative). Keep it under
+// client_pump's 10 s leftover window: a returning peer's leftover pose is told from a new one by
+// its tick being at most that far below the newest one seen before it left.
+// Each participant's reserve (room_avatar.h) is written either way: no snapshot carries it.
+void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_dt = -1.0,
+                 bool write_poses = true, double pose_heartbeat_s = 1.0);
 
 // Drive one frame of a CLIENT holon against the replicated room tree (H1 slice 6), the mirror of
 // server_pump: register every present participant (room_roster) -- SELF_PID as the local,
@@ -139,6 +150,19 @@ void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_d
 // whenever its revision changes.
 void client_pump(holon &h, cvc::app &app, const std::string &room, const std::string &self_pid,
                  double wall_dt = -1.0);
+
+// A pose snapshot from the relay (room_pose_relay; transports' set_on_pose_snapshot): decode it
+// with this connection's DECODER and give each participant the holon already has its sample, as
+// a replicated pose would (holon::apply_authoritative: the local avatar reconciles, a peer joins
+// its playout). One the holon does not have yet (the roster has not replicated it) is skipped;
+// client_pump registers it, and its next entry is its first sample. Call it on the frame's thread,
+// before client_pump. Returns the samples applied; 0 for a snapshot out of step (decoder::gaps).
+std::size_t apply_pose_snapshot(holon &h, pose_stream_decoder &decoder,
+                                const cvc::pose_snapshot &snap);
+// The same for samples decoded elsewhere (the fast lane decodes, and acknowledges, on its own
+// thread: room_lane_session::set_on_pose_samples), at the snapshot's SERVER_TICK.
+std::size_t apply_pose_samples(holon &h, const std::vector<pose_sample> &samples,
+                               std::uint64_t server_tick);
 
 // Propose the local avatar's intent (client side): the client holon predicts with it from its next
 // tick, and it is written to <self>.intent stamped with that tick, for the server to validate and

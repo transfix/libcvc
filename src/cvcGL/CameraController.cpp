@@ -20,7 +20,9 @@
 #include <cvc/gl/SceneRenderer.h>
 #include <iterator>
 #include <set>
+#include <sstream> // a frame request's bounds
 #include <string>
+#include <utility> // std::move: the UI regions
 #include <vtkCamera.h>
 #include <vtkInteractorStyle.h>
 #include <vtkObjectFactory.h>
@@ -38,10 +40,179 @@
 #define CVCGL_HAVE_X11 1
 #include <X11/Xlib.h>
 #endif
+#ifdef CVC_ENABLE_SDL
+#include "SdlWindow.h" // pointer capture on cvcGL's SDL window: SDL's relative mouse mode
+#endif
+
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#include <vtkWebAssemblyRenderWindowInteractor.h> // the canvas the pointer lock is on
+// Pointer capture in the browser is the page's pointer lock on the canvas (SDL's window, or VTK's
+// canvas window). While it holds, the interactor's pointer positions stand still, so the motion
+// comes from the document's mousemove events (movementX/Y), summed here until update() takes it.
+// The browser ends the lock on Escape or when the tab loses focus; `lost` counts those, so
+// update() releases the capture too. An exit the camera asked for itself is not counted.
+// A refusal comes as pointerlockerror, as the request's rejected promise, or both (Chromium
+// rejects a page that can never lock, an embedded one, with WrongDocumentError and no event): it
+// counts once, and the console says why. The lock is taken inside the press on the canvas itself
+// while mouse look waits for one (`armed`: on, in Orbit) and the press is not on one of the UI's
+// windows (`ui`, cvcgl_pointer_lock_ui: tested against the press's own position, as the frame's
+// idea of where the pointer is can be a frame or two old): a browser grants it there, where a
+// request from the frame -- after the click, the interactor's events being queued -- can be
+// refused. That request from the frame is still made (a host that captures in code); when it is
+// refused it is asked again inside the next click on the canvas. A second refusal, or one that
+// can never be granted, counts as lost.
+// The lock asks for the mouse's raw motion (unadjustedMovement: no pointer acceleration, and
+// none of the jumps Chromium's adjusted motion can have under a lock); a browser that cannot
+// give it gets the plain lock instead.
+// clang-format off: JavaScript bodies (only == and != in them: the preprocessor reads them as C++
+// tokens, and a === would come out split)
+// on: 1 wants the lock, 0 lets it go, -1 leaves it as it is (only `armed` changes).
+EM_JS(void, cvcgl_pointer_lock, (int on, int armed, const char *selector), {
+  var st = Module.cvcglPointerLock;
+  if (!st) {
+    st = Module.cvcglPointerLock = {dx: 0, dy: 0, locked: false, exiting: false, lost: 0,
+                                    canvas: null, want: false, pending: false, retried: false,
+                                    armed: false, ui: [], raw: true, skipError: false};
+    // Whether a press is on one of the UI's windows (canvas pixels, origin top-left).
+    st.overUi = function(e) {
+      var c = st.canvas;
+      var r = c ? c.getBoundingClientRect() : null;
+      if (!r || !r.width || !r.height)
+        return false;
+      var x = (e.clientX - r.left) * c.width / r.width;
+      var y = (e.clientY - r.top) * c.height / r.height;
+      for (var i = 0; i + 3 < st.ui.length; i += 4)
+        if (x >= st.ui[i] && y >= st.ui[i + 1] && x < st.ui[i + 2] && y < st.ui[i + 3])
+          return true;
+      return false;
+    };
+    st.refused = function(name) {
+      if (!st.pending)
+        return; // the same refusal's other report
+      st.pending = false;
+      console.warn('cvcGL: the browser refused the pointer lock (' + (name || 'pointerlockerror') +
+                   ')');
+      if (st.want && !st.retried && name != 'WrongDocumentError' && name != 'NotSupportedError') {
+        st.retried = true; // again in the next click
+        return;
+      }
+      st.retried = false;
+      st.lost++;
+    };
+    st.request = function() {
+      var c = st.canvas;
+      if (!c || !c.requestPointerLock || document.pointerLockElement == c)
+        return;
+      st.pending = true;
+      var p = c.requestPointerLock(st.raw ? {unadjustedMovement: true} : undefined);
+      if (p && p.catch)
+        p.catch(function(e) {
+          if (st.raw && e && e.name == 'NotSupportedError') {
+            // No raw motion here: the plain lock, still inside the press's activation, and not the
+            // pointerlockerror this refusal also fires.
+            st.raw = false;
+            st.skipError = true;
+            st.pending = false;
+            st.request();
+            return;
+          }
+          st.refused(e && e.name);
+        });
+    };
+    document.addEventListener('pointerlockchange', function() {
+      var locked = !!st.canvas && document.pointerLockElement == st.canvas;
+      if (st.locked && !locked && !st.exiting)
+        st.lost++;
+      st.locked = locked;
+      st.exiting = false;
+      if (locked) {
+        st.pending = false;
+        st.retried = false;
+      }
+    });
+    document.addEventListener('pointerlockerror', function() {
+      if (st.skipError) {
+        st.skipError = false;
+        return;
+      }
+      st.refused('');
+    });
+    // Before VTK's own handlers (capture), so the press is still the user's gesture.
+    document.addEventListener('mousedown', function(e) {
+      if (e.button == 0 && st.armed && !st.locked && e.target == st.canvas && !st.overUi(e)) {
+        st.want = true;
+        st.retried = false;
+        st.request();
+      }
+    }, true);
+    document.addEventListener('mouseup', function(e) {
+      if (st.want && st.retried && !st.locked && e.target == st.canvas && !st.overUi(e))
+        st.request();
+    });
+    document.addEventListener('mousemove', function(e) {
+      if (st.locked) {
+        st.dx += e.movementX || 0;
+        st.dy += e.movementY || 0;
+      }
+    });
+  }
+  st.canvas = document.querySelector(UTF8ToString(selector)) || Module.canvas || null;
+  st.armed = armed != 0;
+  if (on > 0) {
+    st.want = true;
+    if (!st.pending) // the press already asked
+      st.request();
+  } else if (on == 0) {
+    st.want = false;
+    st.pending = false;
+    st.retried = false;
+    if (st.canvas && document.pointerLockElement == st.canvas) {
+      st.exiting = true;
+      document.exitPointerLock();
+    }
+  }
+});
+// Where the UI's windows are: n floats, x0 y0 x1 y1 each (canvas pixels, origin top-left). A press
+// in one is the UI's: it takes no lock.
+EM_JS(void, cvcgl_pointer_lock_ui, (const float *rects, int n), {
+  var st = Module.cvcglPointerLock;
+  if (st)
+    st.ui = n > 0 ? Array.from(HEAPF32.subarray(rects >> 2, (rects >> 2) + n)) : [];
+});
+// The motion along `axis` (0 = x, 1 = y; CSS pixels, y down) since the last call.
+EM_JS(double, cvcgl_pointer_lock_motion, (int axis), {
+  var st = Module.cvcglPointerLock;
+  if (!st)
+    return 0;
+  var v = axis ? st.dy : st.dx;
+  if (axis)
+    st.dy = 0;
+  else
+    st.dx = 0;
+  return v;
+});
+// Whether the page holds the lock now.
+EM_JS(int, cvcgl_pointer_locked, (), {
+  var st = Module.cvcglPointerLock;
+  return st && st.locked ? 1 : 0;
+});
+// How many times the browser ended the lock since the last call.
+EM_JS(int, cvcgl_pointer_lock_lost, (), {
+  var st = Module.cvcglPointerLock;
+  if (!st)
+    return 0;
+  var n = st.lost;
+  st.lost = 0;
+  return n;
+});
+// clang-format on
+#endif
 
 namespace {
 
 constexpr double kDeg2Rad = 3.14159265358979323846 / 180.0;
+constexpr int kClickSlop = 4; // px: farther than this from the press is a drag, not a click
 
 // Map mode looks straight down -z from this height (parallel projection, so the
 // height only places the eye above the content), and never zooms in past this
@@ -130,12 +301,7 @@ public:
     if (!m_controller || !this->Interactor)
       return;
     const char *ks = this->Interactor->GetKeySym();
-    const std::string sym = ks ? ks : "";
-    if (sym == "Escape") {
-      m_controller->setPointerCapture(false);
-      return;
-    }
-    m_controller->keyDown(sym);
+    m_controller->keyDown(ks ? ks : ""); // its release_pointer key (Escape) lets the pointer go
   }
   void OnKeyUp() override {
     if (!m_controller || !this->Interactor)
@@ -151,6 +317,7 @@ public:
     int x, y, lx, ly;
     this->Interactor->GetEventPosition(x, y);
     this->Interactor->GetLastEventPosition(lx, ly);
+    m_controller->notePointerMove(x, y);
     m_controller->mouseLook(x - lx, y - ly);
   }
   void OnLeftButtonDown() override {
@@ -161,7 +328,8 @@ public:
       this->Interactor->GetEventPosition(x, y);
       m_controller->notePointerDown(x, y);
     }
-    m_controller->beginDrag();
+    if (!m_controller->steering()) // a steering drag turns the host's avatar, not the view
+      m_controller->beginDrag();
   }
   void OnLeftButtonUp() override {
     if (!m_controller)
@@ -172,6 +340,15 @@ public:
       m_controller->notePointerUp(x, y);
     }
     m_controller->endDrag();
+  }
+  // Right button: turns the view, whatever the primary drag does (one that steers).
+  void OnRightButtonDown() override {
+    if (m_controller)
+      m_controller->beginSecondaryDrag();
+  }
+  void OnRightButtonUp() override {
+    if (m_controller)
+      m_controller->endSecondaryDrag();
   }
   // Middle button = pan, the standard "move the scene" drag.
   void OnMiddleButtonDown() override {
@@ -249,11 +426,16 @@ struct CameraController::Impl {
   // so a trip through another mode comes back to the same map.
   double mapCenterX = 0.0, mapCenterY = 0.0, mapScale = 10.0;
   double moveSpeed = 5.0, sprintMultiplier = 4.0, sensitivity = 0.25;
-  bool invertPitch = false, pointerCapture = false;
+  bool invertPitch = false, invertYaw = false, pointerCapture = false;
+  bool mouseLook = false; // setMouseLookEnabled: in Orbit, the captured pointer turns the orbit
+  double minElevation = -89.0, maxElevation = 89.0; // setOrbitElevationRange
+  bool floorOn = false; // setOrbitFloor: the eye stays above floorHeight + floorClearance
+  double floorHeight = 0.0, floorClearance = 0.25;
   double poseMirrorHz = 15.0;
   // key bindings, in SDL's names (canonical_key matches them with VTK's keysyms)
   std::string kForward = "W", kBackward = "S", kLeft = "A", kRight = "D";
   std::string kUp = "Space", kDown = "Left Ctrl", kToggle = "Tab", kSprint = "Left Shift";
+  std::string kRelease = "Escape"; // lets the captured pointer go (the browser's own Escape too)
 
   // cinematic track config (mirrored to state "track.*")
   std::string trackTarget;
@@ -263,6 +445,7 @@ struct CameraController::Impl {
   // runtime (not state)
   std::set<std::string> held;
   bool dragging = false;
+  bool secondaryDragging = false; // the right button's drag: it turns the view
   // Click detection (notePointerDown/Up, takeClick).
   bool pointerDown = false;
   int pressX = 0, pressY = 0;
@@ -270,6 +453,17 @@ struct CameraController::Impl {
   int clickX = 0, clickY = 0;
   bool panning = false; // middle-button drag, or primary drag on touch
   bool primaryDragPans = false;
+  bool primaryDragSteers = false; // setPrimaryDragSteers
+  // A steering drag (primaryDragSteers): the primary button is down, whether the pointer has gone
+  // further than a click's slop from the press, and where it is.
+  bool steering = false, steerMoved = false;
+  int steerX = 0, steerY = 0;
+  bool captureApplied = false;           // what the window / the browser was last told (capture)
+  bool browserLock = false;              // the browser was asked for its pointer lock (ever)
+  std::vector<float> uiRegions;          // setUiRegions: x0 y0 x1 y1 each, top-left origin
+  bool uiRegionsSent = false;            // the page has the latest uiRegions
+  int armedSent = -1;                    // what the page was last told of `armed` (-1: nothing)
+  double lockRemX = 0.0, lockRemY = 0.0; // the pointer lock's fractions of a pixel, carried
   double poseMirrorAccum = 0.0;
   // Map-mode fit: the rect frameMap() was asked to show, the aspect it was last
   // fitted at, and whether the user has since zoomed (which ends auto-fitting).
@@ -396,6 +590,11 @@ void CameraController::seedState() {
   getState("orbit.distance").value(s.orbitDistance);
   getState("orbit.azimuth").value(s.orbitAzimuth);
   getState("orbit.elevation").value(s.orbitElevation);
+  getState("orbit.min_elevation").value(s.minElevation);
+  getState("orbit.max_elevation").value(s.maxElevation);
+  getState("orbit.floor.on").value(s.floorOn ? 1 : 0);
+  getState("orbit.floor.height").value(s.floorHeight);
+  getState("orbit.floor.clearance").value(s.floorClearance);
   getState("fly.position.x").value(s.flyPos.x);
   getState("fly.position.y").value(s.flyPos.y);
   getState("fly.position.z").value(s.flyPos.z);
@@ -408,8 +607,11 @@ void CameraController::seedState() {
   getState("settings.sprint_multiplier").value(s.sprintMultiplier);
   getState("settings.mouse_sensitivity").value(s.sensitivity);
   getState("settings.invert_pitch").value(s.invertPitch ? 1 : 0);
+  getState("settings.invert_yaw").value(s.invertYaw ? 1 : 0);
   getState("settings.pointer_capture").value(s.pointerCapture ? 1 : 0);
+  getState("settings.mouse_look").value(s.mouseLook ? 1 : 0);
   getState("settings.primary_drag_pans").value(s.primaryDragPans ? 1 : 0);
+  getState("settings.primary_drag_steers").value(s.primaryDragSteers ? 1 : 0);
   getState("settings.pose_mirror_hz").value(s.poseMirrorHz);
   getState("keys.forward").value(s.kForward);
   getState("keys.backward").value(s.kBackward);
@@ -419,6 +621,7 @@ void CameraController::seedState() {
   getState("keys.down").value(s.kDown);
   getState("keys.toggle_mode").value(s.kToggle);
   getState("keys.sprint").value(s.kSprint);
+  getState("keys.release_pointer").value(s.kRelease);
   getState("track.target").value(s.trackTarget);
   getState("track.back").value(s.trackBack);
   getState("track.height").value(s.trackHeight);
@@ -471,6 +674,11 @@ void CameraController::readAllFromState() {
   s.orbitDistance = d("orbit.distance", s.orbitDistance);
   s.orbitAzimuth = d("orbit.azimuth", s.orbitAzimuth);
   s.orbitElevation = d("orbit.elevation", s.orbitElevation);
+  s.minElevation = d("orbit.min_elevation", s.minElevation);
+  s.maxElevation = d("orbit.max_elevation", s.maxElevation);
+  s.floorOn = i("orbit.floor.on", s.floorOn ? 1 : 0) != 0;
+  s.floorHeight = d("orbit.floor.height", s.floorHeight);
+  s.floorClearance = d("orbit.floor.clearance", s.floorClearance);
   s.flyPos = {d("fly.position.x", s.flyPos.x), d("fly.position.y", s.flyPos.y),
               d("fly.position.z", s.flyPos.z)};
   s.flyYaw = d("fly.yaw", s.flyYaw);
@@ -482,8 +690,11 @@ void CameraController::readAllFromState() {
   s.sprintMultiplier = d("settings.sprint_multiplier", s.sprintMultiplier);
   s.sensitivity = d("settings.mouse_sensitivity", s.sensitivity);
   s.invertPitch = i("settings.invert_pitch", s.invertPitch ? 1 : 0) != 0;
+  s.invertYaw = i("settings.invert_yaw", s.invertYaw ? 1 : 0) != 0;
   s.pointerCapture = i("settings.pointer_capture", s.pointerCapture ? 1 : 0) != 0;
+  s.mouseLook = i("settings.mouse_look", s.mouseLook ? 1 : 0) != 0;
   s.primaryDragPans = i("settings.primary_drag_pans", s.primaryDragPans ? 1 : 0) != 0;
+  s.primaryDragSteers = i("settings.primary_drag_steers", s.primaryDragSteers ? 1 : 0) != 0;
   s.poseMirrorHz = d("settings.pose_mirror_hz", s.poseMirrorHz);
   s.kForward = str("keys.forward", s.kForward);
   s.kBackward = str("keys.backward", s.kBackward);
@@ -493,6 +704,7 @@ void CameraController::readAllFromState() {
   s.kDown = str("keys.down", s.kDown);
   s.kToggle = str("keys.toggle_mode", s.kToggle);
   s.kSprint = str("keys.sprint", s.kSprint);
+  s.kRelease = str("keys.release_pointer", s.kRelease);
   s.trackTarget = str("track.target", s.trackTarget);
   s.trackBack = d("track.back", s.trackBack);
   s.trackHeight = d("track.height", s.trackHeight);
@@ -517,12 +729,20 @@ void CameraController::syncConfigToState() {
   getState("orbit.center.y").value(s.orbitCenter.y);
   getState("orbit.center.z").value(s.orbitCenter.z);
   getState("orbit.distance").value(s.orbitDistance);
+  getState("orbit.min_elevation").value(s.minElevation);
+  getState("orbit.max_elevation").value(s.maxElevation);
+  getState("orbit.floor.on").value(s.floorOn ? 1 : 0);
+  getState("orbit.floor.height").value(s.floorHeight);
+  getState("orbit.floor.clearance").value(s.floorClearance);
   getState("settings.move_speed").value(s.moveSpeed);
   getState("settings.sprint_multiplier").value(s.sprintMultiplier);
   getState("settings.mouse_sensitivity").value(s.sensitivity);
   getState("settings.invert_pitch").value(s.invertPitch ? 1 : 0);
+  getState("settings.invert_yaw").value(s.invertYaw ? 1 : 0);
   getState("settings.pointer_capture").value(s.pointerCapture ? 1 : 0);
+  getState("settings.mouse_look").value(s.mouseLook ? 1 : 0);
   getState("settings.primary_drag_pans").value(s.primaryDragPans ? 1 : 0);
+  getState("settings.primary_drag_steers").value(s.primaryDragSteers ? 1 : 0);
   getState("settings.pose_mirror_hz").value(s.poseMirrorHz);
   getState("keys.forward").value(s.kForward);
   getState("keys.backward").value(s.kBackward);
@@ -532,6 +752,7 @@ void CameraController::syncConfigToState() {
   getState("keys.down").value(s.kDown);
   getState("keys.toggle_mode").value(s.kToggle);
   getState("keys.sprint").value(s.kSprint);
+  getState("keys.release_pointer").value(s.kRelease);
   getState("track.target").value(s.trackTarget);
   getState("track.back").value(s.trackBack);
   getState("track.height").value(s.trackHeight);
@@ -609,9 +830,21 @@ bool CameraController::poseMirrorStale() const {
 }
 
 void CameraController::handleStateChanged(const std::string &childState) {
-  (void)childState;
   if (m_impl->selfWrite.load())
     return; // our own write echoing back
+  // A frame request: "min_x min_y min_z max_x max_y max_z" written to <camera>.frame (a scene's
+  // data node, when its dataset draws: scene_realize's `frame:`) frames those bounds as
+  // frameBounds does. Anything else in it is ignored.
+  const std::string key = "frame";
+  if (childState == key ||
+      (childState.size() > key.size() &&
+       childState.compare(childState.size() - key.size() - 1, std::string::npos, "." + key) == 0)) {
+    std::istringstream in(getState(key).value());
+    double b[6];
+    if (in >> b[0] >> b[1] >> b[2] >> b[3] >> b[4] >> b[5])
+      frameBounds(b[0], b[1], b[2], b[3], b[4], b[5]);
+    return;
+  }
   readAllFromState();
   applyToCamera();
 }
@@ -850,6 +1083,14 @@ void CameraController::frameBounds(double minX, double minY, double minZ, double
 void CameraController::update(double dtSeconds) {
   Impl &s = *m_impl;
   refitMapIfResized(); // cheap: only does work when the viewport changed shape
+  // Pointer capture: the browser's motion and its end of the lock; then the pointer let go when
+  // mouse look was turned off (a settings write), and the window told what state now says.
+  pollPointerLock();
+  if (s.pointerCapture && s.mode == Mode::Orbit && !s.mouseLook) {
+    s.pointerCapture = false;
+    syncConfigToState();
+  }
+  applyPointerCapture();
   if (s.mode == Mode::Fly) {
     double fwd = (s.held_has(s.kForward) ? 1 : 0) - (s.held_has(s.kBackward) ? 1 : 0);
     double strafe = (s.held_has(s.kRight) ? 1 : 0) - (s.held_has(s.kLeft) ? 1 : 0);
@@ -967,6 +1208,11 @@ void CameraController::keyDown(const std::string &keySym) {
     toggleMode();
     return;
   }
+  if (cvc::ariadne::key_matches(m_impl->kRelease, keySym)) { // not held: it would never move us
+    if (m_impl->pointerCapture)
+      setPointerCapture(false);
+    return;
+  }
   m_impl->held.insert(k);
 }
 void CameraController::keyUp(const std::string &keySym) {
@@ -976,8 +1222,10 @@ void CameraController::keyUp(const std::string &keySym) {
 void CameraController::mouseLook(int dxPixels, int dyPixels) {
   Impl &s = *m_impl;
   const double dpitch = (s.invertPitch ? -1.0 : 1.0) * dyPixels * s.sensitivity;
+  const double dyaw = (s.invertYaw ? -1.0 : 1.0) * dxPixels * s.sensitivity;
+  const bool looking = s.mouseLook && s.pointerCapture; // Orbit: the mouse turns it, no button
   if (s.mode == Mode::Fly) {
-    s.flyYaw -= dxPixels * s.sensitivity;
+    s.flyYaw -= dyaw;
     s.flyPitch = std::max(-89.0, std::min(89.0, s.flyPitch + dpitch));
     applyToCamera();
     // Recenter the OS pointer so continuous look never stops at the edge.
@@ -985,7 +1233,7 @@ void CameraController::mouseLook(int dxPixels, int dyPixels) {
       recenterPointer();
   } else if (s.mode == Mode::Map) {
     // 2-D map: drag PANS the view; rotation is deliberately unreachable.
-    if (s.dragging) {
+    if (s.dragging || s.secondaryDragging) {
       // Convert pixel motion to world units through the parallel scale so the
       // grabbed point stays under the cursor at any zoom. Scale by the VIEWPORT's
       // pixel height (the renderer's), not the whole window's, so a PiP inset
@@ -1024,15 +1272,21 @@ void CameraController::mouseLook(int dxPixels, int dyPixels) {
       applyToCamera();
       syncConfigToState();
     }
-  } else if (s.dragging) {
+  } else if (s.dragging || s.secondaryDragging || looking) {
     // ORBIT: the scene turns WITH the pointer, so dragging DOWN has to lift the
     // eye up and over the subject — you pull its top toward you and see more of
     // it — which is the OPPOSITE sign from Fly, where dragging down looks down.
     // Both modes read the same dpitch (so invert_pitch still applies to both),
     // so orbit negates it here rather than fighting over the shared value.
-    s.orbitAzimuth -= dxPixels * s.sensitivity;
-    s.orbitElevation = std::max(-89.0, std::min(89.0, s.orbitElevation - dpitch));
+    // Mouse look turns it the same way: moving the mouse up looks up, as the
+    // eye goes down, and right turns the view right.
+    s.orbitAzimuth -= dyaw;
+    s.orbitElevation =
+        std::max(std::max(-89.0, s.minElevation),
+                 std::min(std::min(89.0, s.maxElevation), s.orbitElevation - dpitch));
     applyToCamera();
+    if (looking && !s.dragging && !s.secondaryDragging)
+      recenterPointer();
   }
 }
 
@@ -1089,21 +1343,76 @@ void CameraController::setPrimaryDragPans(bool on) {
 }
 bool CameraController::primaryDragPans() const { return m_impl->primaryDragPans; }
 
+void CameraController::setPrimaryDragSteers(bool on) {
+  m_impl->primaryDragSteers = on;
+  m_impl->selfWrite = true; // as setPrimaryDragPans: no echo through readAllFromState
+  getState("settings.primary_drag_steers").value(on ? 1 : 0);
+  m_impl->selfWrite = false;
+}
+bool CameraController::primaryDragSteers() const { return m_impl->primaryDragSteers; }
+
+bool CameraController::steering() const {
+  const Impl &s = *m_impl;
+  return s.steering && s.mode == Mode::Orbit && !s.mouseLook;
+}
+
+bool CameraController::steerPoint(int &x, int &y) const {
+  const Impl &s = *m_impl;
+  if (!steering() || !s.steerMoved)
+    return false;
+  x = s.steerX;
+  y = s.steerY;
+  return true;
+}
+
+void CameraController::beginSecondaryDrag() { m_impl->secondaryDragging = true; }
+void CameraController::endSecondaryDrag() { m_impl->secondaryDragging = false; }
+
 void CameraController::beginDrag() { m_impl->dragging = true; }
 
 void CameraController::notePointerDown(int x, int y) {
-  m_impl->pointerDown = true;
-  m_impl->pressX = x;
-  m_impl->pressY = y;
+  Impl &s = *m_impl;
+  s.pointerDown = true;
+  s.pressX = x;
+  s.pressY = y;
+  // Drag to look with a host that steers: the drag points, once it is more than a click.
+  s.steering = s.primaryDragSteers && s.mode == Mode::Orbit && !s.mouseLook;
+  s.steerMoved = false;
+  s.steerX = x;
+  s.steerY = y;
+}
+
+void CameraController::notePointerMove(int x, int y) {
+  Impl &s = *m_impl;
+  if (!s.steering)
+    return;
+  s.steerMoved =
+      s.steerMoved || std::abs(x - s.pressX) > kClickSlop || std::abs(y - s.pressY) > kClickSlop;
+  s.steerX = x;
+  s.steerY = y;
+}
+
+void CameraController::cancelPointer() {
+  Impl &s = *m_impl;
+  s.pointerDown = false;
+  s.steering = false;
+  s.dragging = false;
 }
 
 void CameraController::notePointerUp(int x, int y) {
   Impl &s = *m_impl;
+  s.steering = false;
   if (!s.pointerDown)
     return;
   s.pointerDown = false;
-  constexpr int kClickSlop = 4; // px: farther than this from the press is a drag, not a click
   if (std::abs(x - s.pressX) <= kClickSlop && std::abs(y - s.pressY) <= kClickSlop) {
+    if (s.mouseLook && s.mode == Mode::Orbit) {
+      // Mouse look: a click on the scene takes the pointer (the browser grants its lock only
+      // inside a click, so at once); one while it is taken points at nothing.
+      if (!s.pointerCapture)
+        setPointerCapture(true);
+      return;
+    }
     s.clickPending = true;
     s.clickX = x;
     s.clickY = y;
@@ -1154,20 +1463,150 @@ bool CameraController::keyHeld(const std::string &keySym) const { return m_impl-
 void CameraController::setPointerCapture(bool on) {
   Impl &s = *m_impl;
   s.pointerCapture = on;
-  if (s.window) {
-    if (on)
-      s.window->HideCursor();
-    else
-      s.window->ShowCursor();
-  }
+  applyPointerCapture();
   syncConfigToState();
 }
 bool CameraController::pointerCapture() const { return m_impl->pointerCapture; }
 
+void CameraController::setMouseLookEnabled(bool on) {
+  Impl &s = *m_impl;
+  s.mouseLook = on;
+  if (!on && s.mode == Mode::Orbit && s.pointerCapture) // the pointer is the UI's again
+    setPointerCapture(false);
+  syncConfigToState();
+}
+bool CameraController::mouseLookEnabled() const { return m_impl->mouseLook; }
+bool CameraController::mouseLooking() const {
+  const Impl &s = *m_impl;
+  return s.mouseLook && s.mode == Mode::Orbit && s.pointerCapture;
+}
+void CameraController::setUiRegions(std::vector<float> rects) {
+  Impl &s = *m_impl;
+  if (rects == s.uiRegions)
+    return;
+  s.uiRegions = std::move(rects);
+  s.uiRegionsSent = false;
+}
+
+double CameraController::orbitDistance() const { return m_impl->orbitDistance; }
+
+void CameraController::setInvertYaw(bool invert) {
+  m_impl->invertYaw = invert;
+  syncConfigToState();
+}
+
+void CameraController::setOrbitElevationRange(double minDeg, double maxDeg) {
+  Impl &s = *m_impl;
+  s.minElevation = std::min(minDeg, maxDeg);
+  s.maxElevation = std::max(minDeg, maxDeg);
+  s.orbitElevation = std::max(s.minElevation, std::min(s.maxElevation, s.orbitElevation));
+  syncConfigToState();
+  applyToCamera();
+}
+
+void CameraController::setOrbitFloor(double height, double clearance) {
+  Impl &s = *m_impl;
+  s.floorOn = true;
+  s.floorHeight = height;
+  s.floorClearance = std::max(0.0, clearance);
+  syncConfigToState();
+  applyToCamera();
+}
+
+void CameraController::clearOrbitFloor() {
+  m_impl->floorOn = false;
+  syncConfigToState();
+  applyToCamera();
+}
+
+void CameraController::applyPointerCapture() {
+  Impl &s = *m_impl;
+#ifdef __EMSCRIPTEN__
+  const char *selector = "#canvas";
+#ifdef CVC_ENABLE_SDL
+  if (auto *sdl = SdlGLRenderWindow::SafeDownCast(s.window))
+    selector = sdl->GetCanvasSelector();
+#endif
+  if (auto *wi = vtkWebAssemblyRenderWindowInteractor::SafeDownCast(s.interactor))
+    if (wi->GetCanvasSelector())
+      selector = wi->GetCanvasSelector();
+  // A press on the canvas takes the lock itself while mouse look waits for one (one outside the
+  // UI's windows, which the page tests against the press's own position): tell the page.
+  const int armed = s.mouseLook && s.mode == Mode::Orbit ? 1 : 0;
+  if (s.captureApplied != s.pointerCapture) {
+    s.browserLock = s.browserLock || s.pointerCapture;
+    cvcgl_pointer_lock(s.pointerCapture ? 1 : 0, armed, selector); // the browser hides the cursor
+    s.armedSent = armed;
+  } else if (armed != s.armedSent && (armed || s.browserLock)) {
+    s.browserLock = true;
+    cvcgl_pointer_lock(-1, armed, selector);
+    s.armedSent = armed;
+  }
+  if (s.browserLock && !s.uiRegionsSent) {
+    cvcgl_pointer_lock_ui(s.uiRegions.data(), static_cast<int>(s.uiRegions.size()));
+    s.uiRegionsSent = true;
+  }
+#else
+  if (s.captureApplied == s.pointerCapture)
+    return;
+  if (!s.window)
+    return; // no window yet: update() tries again
+#ifdef CVC_ENABLE_SDL
+  if (auto *sdl = SdlGLRenderWindow::SafeDownCast(s.window)) {
+    sdl->SetRelativeMouse(s.pointerCapture);
+    s.captureApplied = s.pointerCapture;
+    return;
+  }
+#endif
+  if (s.pointerCapture)
+    s.window->HideCursor();
+  else
+    s.window->ShowCursor();
+#endif
+  s.captureApplied = s.pointerCapture;
+}
+
+void CameraController::pollPointerLock() {
+#ifdef __EMSCRIPTEN__
+  Impl &s = *m_impl;
+  if (!s.browserLock)
+    return;
+  const double dx = cvcgl_pointer_lock_motion(0) + s.lockRemX;
+  const double dy = cvcgl_pointer_lock_motion(1) + s.lockRemY;
+  if (cvcgl_pointer_lock_lost() > 0 && s.pointerCapture) {
+    s.pointerCapture = false; // the browser ended it (Escape, the tab lost focus): it is let go
+    s.captureApplied = false;
+    s.lockRemX = s.lockRemY = 0.0;
+    syncConfigToState();
+    return;
+  }
+  // The page took the lock in a press on the canvas (mouse look, armed): the pointer is captured.
+  if (!s.pointerCapture && s.mouseLook && s.mode == Mode::Orbit && cvcgl_pointer_locked()) {
+    s.pointerCapture = true;
+    s.captureApplied = true;
+    s.lockRemX = s.lockRemY = 0.0;
+    syncConfigToState();
+    return; // the press's own motion is not a turn
+  }
+  if (!s.pointerCapture)
+    return;
+  const int ix = static_cast<int>(std::trunc(dx)), iy = static_cast<int>(std::trunc(dy));
+  s.lockRemX = dx - ix;
+  s.lockRemY = dy - iy;
+  if (ix != 0 || iy != 0)
+    mouseLook(ix, -iy); // VTK's y is up
+#endif
+}
+
 void CameraController::recenterPointer() {
+#ifndef __EMSCRIPTEN__ // the browser's pointer lock keeps the pointer still
   Impl &s = *m_impl;
   if (!s.window)
     return;
+#ifdef CVC_ENABLE_SDL
+  if (auto *sdl = SdlGLRenderWindow::SafeDownCast(s.window); sdl && sdl->relativeMouse())
+    return; // and SDL's relative mode
+#endif
   int *size = s.window->GetSize();
   const int cx = size[0] / 2, cy = size[1] / 2; // VTK's coordinates: y up
 #ifdef CVCGL_HAVE_X11
@@ -1187,6 +1626,7 @@ void CameraController::recenterPointer() {
   // there rather than reporting a huge jump.
   if (s.interactor)
     s.interactor->SetLastEventPosition(cx, cy);
+#endif
 }
 
 void CameraController::setKeyBinding(const std::string &action, const std::string &keySym) {
@@ -1207,6 +1647,8 @@ void CameraController::setKeyBinding(const std::string &action, const std::strin
     s.kToggle = keySym;
   else if (action == "sprint")
     s.kSprint = keySym;
+  else if (action == "release_pointer")
+    s.kRelease = keySym;
   syncConfigToState();
 }
 std::string CameraController::keyBinding(const std::string &action) const {
@@ -1227,6 +1669,8 @@ std::string CameraController::keyBinding(const std::string &action) const {
     return s.kToggle;
   if (action == "sprint")
     return s.kSprint;
+  if (action == "release_pointer")
+    return s.kRelease;
   return "";
 }
 
@@ -1294,6 +1738,11 @@ void CameraController::getPose(double eye[3], double focal[3], double up[3]) con
   } else {
     e = s.orbitCenter + orbitOffset(b, s.orbitAzimuth, s.orbitElevation, s.orbitDistance);
     f = s.orbitCenter;
+    // Under the floor (setOrbitFloor): slide the eye in along its line of sight until it is just
+    // above it. A centre below the floor is left alone (there is nowhere above it to slide to).
+    const double lo = s.floorHeight + s.floorClearance, ce = dot(f, b.up), ee = dot(e, b.up);
+    if (s.floorOn && ee < lo && ce > lo)
+      e = f + (e - f) * ((ce - lo) / (ce - ee));
   }
   eye[0] = e.x;
   eye[1] = e.y;

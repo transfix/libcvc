@@ -1,0 +1,138 @@
+# chat_component.ari — `ari test` for the logic of components/chat.ari and components/room_users.ari.
+# ari has no relay, so the room verbs they call are played by functions over fake.* state: a
+# channel's messages are fake.<slot>.<seq>.{name,text}, fake.<slot>.n of them, the oldest held at
+# fake.<slot>.from (slot: the peer's pid, or _room). ctest: ari_chat_component.
+#
+#   ari test --component-path src/cvc/ariadne src/ari/tests/chat_component.ari
+
+meta: { name: chat component test, min_libcvc: 3.7.5 }
+
+import: [cvc://components/chat.ari, cvc://components/room_users.ari]
+
+functions: |
+  (defun fake-slot (ch) (if (= ch "") "_room" ch))
+  (defun fake-num (k) (if (is-null (state-get k)) 0 (int (state-get k))))
+  (defun fake-n (ch) (fake-num (str-concat "fake." (fake-slot ch) ".n")))
+  (defun fake-from (ch) (fake-num (str-concat "fake." (fake-slot ch) ".from")))
+  (defun fake-add (ch name text)
+    (set p (str-concat "fake." (fake-slot ch) "." (str (fake-n ch))))
+    (state-set (str-concat p ".name") name)
+    (state-set (str-concat p ".text") text)
+    (state-set (str-concat "fake." (fake-slot ch) ".n") (str (+ 1 (fake-n ch))))
+    (state-set "fake.rev" (str (+ 1 (fake-num "fake.rev")))))
+  (defun chat-rev (room) (fake-num "fake.rev"))
+  (defun chat-info (room ch)
+    (dict "available" #t "rev" (+ (* 100000 (fake-from ch)) (fake-n ch))
+          "count" (- (fake-n ch) (fake-from ch)) "oldest" (fake-from ch) "newest" (- (fake-n ch) 1)
+          "head" (fake-n ch) "first" 0 "more" (> (fake-from ch) 0) "loading" #f "error" ""))
+  ; (chat-messages ROOM CHANNEL [AFTER]): a variadic closure binds all of its arguments to one name
+  (defun chat-messages (&rest a)
+    (set ch (nth a 1))
+    (set out (list))
+    (set start (if (< (length a) 3) (fake-from ch) (+ 1 (int (nth a 2)))))
+    (for s (range start (fake-n ch))
+      (append out (dict "seq" s "clock" "12:00" "mine" #f
+                        "name" (state-get (str-concat "fake." (fake-slot ch) "." (str s) ".name"))
+                        "text" (state-get (str-concat "fake." (fake-slot ch) "." (str s) ".text")))))
+    out)
+  (defun chat-post (room text to)
+    (state-set "fake.posted" (str-concat to ":" text))
+    (dict "ok" #t))
+  ; The log asks for older messages on its own whenever its text fits (its on_top): counted, and
+  ; applied only while a test allows it, so a test's frames cannot change its channel under it.
+  (defun chat-more (room ch)
+    (state-set "fake.more_calls" (str (+ 1 (fake-num "fake.more_calls"))))
+    (if (= (state-get "fake.allow_more") "1") (state-set (str-concat "fake." (fake-slot ch) ".from") "0") #f)
+    (dict "ok" #t "loading" #f "more" #f))
+  (defun chat-conversations (room)
+    (set out (list))
+    (for p (string.split (if (is-null (state-get "fake.dms")) "" (state-get "fake.dms")) ",")
+      (if (= p "") #f
+        (append out (dict "peer" p "name" (str-concat "N-" p) "head" (fake-n p) "present" #t))))
+    out)
+  (defun room-roster (room)
+    (list (dict "pid" "me" "name" "Me" "video" "full" "video_off" "0" "ping" "5 ms" "down" "1M" "up" "1M")
+          (dict "pid" "bob" "name" "Bob" "video" "half" "video_off" "0" "ping" "9 ms" "down" "2M" "up" "1M")))
+  (defun step () (chat-ui-step "chat" "tok"))
+
+init: |
+  (state-set "self.pid" "me")
+  (state-set "fake.rev" "0")
+
+root:
+  - include: chat_panel
+    args: { id: chat, room: room.token }
+
+tests:
+  shows_the_room: |
+    (fake-add "" "alice" "hello")
+    (fake-add "" "bob" "two\nlines")
+    (step)
+    (assert (= (state-get "chat.view.text") "[12:00] alice: hello\n[12:00] bob: two\n        lines")
+            (state-get "chat.view.text"))
+    (assert (= (state-get "chat.channels") "Room"))
+    (assert (= (state-get "chat.pick") "Room"))
+    (assert (= (state-get "chat.view.status") "the start of the room's chat"))
+  appends_only_what_is_new: |
+    (state-set "chat.view.text" "SHOWN")
+    (fake-add "" "carol" "three")
+    (step)
+    (assert (= (state-get "chat.view.text") "SHOWN\n[12:00] carol: three") (state-get "chat.view.text"))
+  another_run_rebuilds_the_view: |
+    (state-set "fake._room.from" "2")
+    (fake-add "" "dave" "four")
+    (step)
+    (assert (= (state-get "chat.view.text") "[12:00] carol: three\n[12:00] dave: four")
+            (state-get "chat.view.text"))
+    (assert (= (state-get "chat.view.status") ""))
+  older_messages_rebuild_the_view: |
+    (state-set "fake.allow_more" "1")
+    (chat-ui-more "chat" "tok")
+    (state-set "fake.allow_more" "0")
+    (step)
+    (assert (string.starts-with (state-get "chat.view.text") "[12:00] alice: hello\n")
+            (state-get "chat.view.text"))
+  the_log_asked_for_older_messages_itself: |
+    (assert (> (fake-num "fake.more_calls") 0) "its on_top ran: the text fits the view")
+  a_conversation_shows_unread: |
+    (state-set "fake.dms" "bob")
+    (fake-add "bob" "Bob" "psst")
+    (step)
+    (assert (= (state-get "chat.channels") "Room\nN-bob (1)") (state-get "chat.channels"))
+    (assert (= (state-get "chat.unread.bob") "1"))
+  picking_it_shows_it_and_reads_it: |
+    (state-set "chat.pick" "N-bob (1)")
+    (step)
+    (assert (= (state-get "chat.channel") "bob"))
+    (assert (= (state-get "chat.view.text") "[12:00] Bob: psst") (state-get "chat.view.text"))
+    (assert (= (state-get "chat.channels") "Room\nN-bob") (state-get "chat.channels"))
+    (assert (= (state-get "chat.pick") "N-bob"))
+  open_before_the_first_message: |
+    (chat-ui-open "chat" "carol" "Carol")
+    (step)
+    (assert (= (state-get "chat.channels") "Room\nN-bob\nCarol") (state-get "chat.channels"))
+    (assert (= (state-get "chat.pick") "Carol"))
+    (assert (= (state-get "tree.chat.open") "1"))
+    (assert (= (state-get "chat.view.text") ""))
+  send_goes_to_the_shown_channel: |
+    (chat-ui-send "chat" "tok" "hi carol")
+    (assert (= (state-get "fake.posted") "carol:hi carol"))
+    (state-set "chat.pick" "Room")
+    (step)
+    (assert (= (state-get "chat.channel") ""))
+    (chat-ui-send "chat" "tok" "hi all")
+    (assert (= (state-get "fake.posted") ":hi all"))
+  the_users_rows_follow_the_roster: |
+    (state-set "chat.unread.bob" "2")
+    (room-users-step "peer" "r" "chat")
+    (assert (= (state-get "peer.count") "1"))
+    (assert (= (state-get "self.count") "2"))
+    (assert (= (state-get "peer.0.pid") "bob"))
+    (assert (= (state-get "peer.0.name") "Bob"))
+    (assert (= (state-get "peer.0.unread") "2 new"))
+    (assert (= (state-get "peer.0.dot") "red half video: reduced for the link"))
+    (assert (= (state-get "self.dot") "green full video"))
+    (state-set "peer.0.vol" "0.5")
+    (room-users-step "peer" "r" "chat")
+    (assert (= (state-get "ctl.bob.vol") "0.5") "the volume is parked under the person")
+    (assert (= (state-get "peer.0.vol") "0.5") "and given back to the row")

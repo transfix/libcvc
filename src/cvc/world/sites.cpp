@@ -45,13 +45,14 @@ inline double proj_radius(const obb &o, double ax, double ay) {
   return std::fabs((o.ux * ax + o.uy * ay)) * o.hu + std::fabs((vx * ax + vy * ay)) * o.hv;
 }
 
-// Do two oriented rectangles overlap? SAT over the four face normals (u1, v1, u2, v2).
+// Do two oriented rectangles overlap? SAT over the four face normals (u1, v1, u2, v2). Touching
+// (a shared wall) is not overlapping.
 bool obb_overlap(const obb &a, const obb &b) {
   const double dx = b.cx - a.cx, dy = b.cy - a.cy;
   const double axes[4][2] = {{a.ux, a.uy}, {-a.uy, a.ux}, {b.ux, b.uy}, {-b.uy, b.ux}};
   for (auto &ax : axes) {
     const double sep = std::fabs(dx * ax[0] + dy * ax[1]);
-    if (sep > proj_radius(a, ax[0], ax[1]) + proj_radius(b, ax[0], ax[1]))
+    if (sep > proj_radius(a, ax[0], ax[1]) + proj_radius(b, ax[0], ax[1]) - 1e-6)
       return false; // a separating axis exists
   }
   return true;
@@ -72,6 +73,7 @@ struct polyline {
   std::vector<double> span_w; // width of span i (px[i]..px[i+1])
   std::vector<char> span_art; // arterial flag of span i
   std::vector<double> cum;    // cum[i] = arc length up to vertex i (cum[0] = 0)
+  std::vector<int> segs;      // the network segment of span i
   double length() const { return cum.empty() ? 0.0 : cum.back(); }
 };
 
@@ -98,6 +100,7 @@ std::vector<polyline> trace_polylines(const road_network &net) {
     pl.py.push_back(net.nodes[to].y);
     pl.span_w.push_back(s.width);
     pl.span_art.push_back(s.arterial ? 1 : 0);
+    pl.segs.push_back(seg);
     const double dl =
         std::hypot(net.nodes[to].x - net.nodes[from].x, net.nodes[to].y - net.nodes[from].y);
     pl.cum.push_back(pl.cum.back() + dl);
@@ -162,13 +165,20 @@ std::vector<polyline> trace_polylines(const road_network &net) {
 
 } // namespace
 
-std::vector<lot> layout_lots(const road_network &net, const site_params &sp) {
+std::vector<lot> layout_lots(const road_network &net, const site_params &sp,
+                             const road_height_fn &height, const lot_density_fn &density) {
   std::vector<lot> out;
   if (net.segments.empty())
     return out;
+  using cvc::lsys::stream;
+  using cvc::lsys::uni;
+  auto urbanity = [&](double x, double y) {
+    return density ? std::max(0.0, std::min(1.0, density(x, y))) : 1.0;
+  };
 
   // A coarse spatial hash of accepted lots (as OBBs) for the cross-segment overlap test.
-  const double cell = std::max(8.0, std::max(sp.frontage, sp.lot_depth));
+  const double cell =
+      std::max(8.0, std::max(sp.frontage * (1.0 + std::fabs(sp.frontage_jitter)), sp.lot_depth));
   std::unordered_map<std::uint64_t, std::vector<obb>> grid;
   auto key = [&](int cx, int cy) {
     return (std::uint64_t(std::uint32_t(cx)) << 32) | std::uint32_t(cy);
@@ -197,33 +207,80 @@ std::vector<lot> layout_lots(const road_network &net, const site_params &sp) {
     grid[key(cx, cy)].push_back(o);
   };
 
-  const double step = sp.frontage + sp.spacing;
   const double clear = std::max(0.0, sp.junction_clear);
-  if (step <= 0.0)
+  if (sp.frontage + sp.spacing <= 0.0 || sp.frontage <= 0.0)
     return out;
 
   const std::vector<polyline> roads = trace_polylines(net);
+  std::vector<int> seg_road(net.segments.size(), -1); // network segment -> its polyline
+  for (std::size_t ri = 0; ri < roads.size(); ++ri)
+    for (int s : roads[ri].segs)
+      seg_road[std::size_t(s)] = int(ri);
+
+  // How far behind the setback line (at q, looking along (dx, dy)) the next OTHER road's edge is,
+  // or max_block when none is that close.
+  // Only a road whose edge the probe reaches counts, so each probe looks no further than the
+  // widest road's half-width (a probe deep inside a big block would otherwise search far).
+  double widest = 0.0;
+  for (const road_segment &s : net.segments)
+    widest = std::max(widest, s.width);
+  const double reach = 0.5 * widest + 0.5;
+  auto clear_behind = [&](double qx, double qy, double dx, double dy, int ri) {
+    for (double s = 2.0; s <= sp.max_block; s += 2.0) {
+      int si = -1;
+      const double d = net.distance_within(qx + dx * s, qy + dy * s, reach, &si);
+      if (si >= 0 && seg_road[std::size_t(si)] != ri && d <= 0.5 * net.segments[si].width + 0.5)
+        return s;
+    }
+    return sp.max_block;
+  };
+
   for (std::size_t ri = 0; ri < roads.size(); ++ri) {
     const polyline &pl = roads[ri];
     const double len = pl.length();
     if (len < sp.min_segment || pl.px.size() < 2)
       continue;
+    // A stable id for the road (its two ends), for its lot widths and its sides' fill.
+    const std::uint64_t road_id = lot_id(pl.px.front(), pl.py.front()) * 0x9E3779B97F4A7C15ull ^
+                                  lot_id(pl.px.back(), pl.py.back());
+    const double u_road = urbanity(pl.px[pl.px.size() / 2], pl.py[pl.py.size() / 2]);
+    const double gap = sp.spacing * (1.0 - sp.core_spacing * u_road);
 
-    // Keep both ends of the road clear of their junctions, then pack frontage slots down the
-    // middle.
+    // Keep both ends of the road clear of their junctions, then pack frontage slots (jittered
+    // widths) down the middle.
     const double usable = len - 2.0 * clear;
-    if (usable < sp.frontage)
+    if (usable < sp.frontage * (1.0 - std::fabs(sp.frontage_jitter)))
       continue;
-    const int n = int(std::floor((usable + sp.spacing) / step));
-    if (n <= 0)
+    std::vector<double> widths;
+    double total = 0.0;
+    for (std::uint32_t k = 0; k < 4096; ++k) {
+      const double j =
+          sp.frontage_jitter == 0.0
+              ? 0.0
+              : sp.frontage_jitter * uni(sp.seed, stream::floorplan, road_id, k, -1, 1);
+      const double f = sp.frontage * (1.0 + j);
+      const double next = total + (widths.empty() ? 0.0 : gap) + f;
+      if (next > usable + 1e-9)
+        break;
+      widths.push_back(f);
+      total = next;
+    }
+    if (widths.empty())
       continue;
-    const double total = n * sp.frontage + (n - 1) * sp.spacing;
-    const double start =
-        clear + 0.5 * (usable - total) + 0.5 * sp.frontage; // first lot arc position
+    const double start = clear + 0.5 * (usable - total); // the first lot's near edge
 
     const int sides = sp.both_sides ? 2 : 1;
-    for (int i = 0; i < n; ++i) {
-      const double arc = start + i * step;
+    // A street side is built or left empty as a whole (sparse_fill at urbanity 0).
+    bool built[2] = {true, true};
+    for (int side_i = 0; side_i < sides; ++side_i)
+      built[side_i] = uni(sp.seed, stream::floorplan, road_id, 100000u + side_i) <
+                      sp.sparse_fill + (1.0 - sp.sparse_fill) * u_road;
+
+    double edge = start;
+    for (std::size_t i = 0; i < widths.size(); ++i) {
+      const double f = widths[i];
+      const double arc = edge + 0.5 * f;
+      edge += f + gap;
       // Locate the span containing this arc length and interpolate point + tangent + width.
       std::size_t sp_i = 0;
       while (sp_i + 1 < pl.cum.size() && pl.cum[sp_i + 1] < arc)
@@ -243,28 +300,58 @@ std::vector<lot> layout_lots(const road_network &net, const site_params &sp) {
       uy /= ul;
       const double nx = -uy, ny = ux;          // + side perpendicular
       const double hw = 0.5 * pl.span_w[sp_i]; // local road half-width
-      const double offset = hw + sp.setback + 0.5 * sp.lot_depth;
       const bool arterial = pl.span_art[sp_i] != 0;
+      const double u = urbanity(px, py);
+      const double setback = sp.setback * (1.0 - sp.core_setback * u);
 
       for (int side_i = 0; side_i < sides; ++side_i) {
+        if (!built[side_i])
+          continue;
         const double side = side_i == 0 ? 1.0 : -1.0;
+        double depth = sp.lot_depth;
+        if (sp.block_depth) {
+          // Back onto the lots of the road behind: stop at the middle of the block.
+          const double qx = px + nx * side * (hw + setback), qy = py + ny * side * (hw + setback);
+          const double c = clear_behind(qx, qy, nx * side, ny * side, int(ri));
+          depth = std::min(depth, 0.5 * (c - setback) - 0.5);
+          if (depth < sp.min_depth)
+            continue;
+        }
+        const double offset = hw + setback + 0.5 * depth;
         const double cx = px + nx * side * offset;
         const double cy = py + ny * side * offset;
 
         // Keep the whole footprint off every road (room from the kerb + clear of crossing streets):
         // test the centre and the road-ward front-edge midpoint.
         const double frontx = -side * nx, fronty = -side * ny; // unit vector toward the road
-        const double fex = cx + frontx * 0.5 * sp.lot_depth;
-        const double fey = cy + fronty * 0.5 * sp.lot_depth;
+        const double fex = cx + frontx * 0.5 * depth;
+        const double fey = cy + fronty * 0.5 * depth;
         if (net.on_or_near_road(cx, cy, sp.road_margin) ||
             net.on_or_near_road(fex, fey, sp.road_margin))
           continue;
+
+        // The ground under the footprint: its centre, corners and edge midpoints.
+        double gmin = 0.0, gmax = 0.0;
+        if (height) {
+          gmin = 1e30;
+          gmax = -1e30;
+          for (int a = -1; a <= 1; ++a)
+            for (int b = -1; b <= 1; ++b) {
+              const double sx = cx + ux * a * 0.5 * f + nx * b * 0.5 * depth;
+              const double sy = cy + uy * a * 0.5 * f + ny * b * 0.5 * depth;
+              const double h = height(sx, sy);
+              gmin = std::min(gmin, h);
+              gmax = std::max(gmax, h);
+            }
+          if ((sp.max_relief > 0.0 && gmax - gmin > sp.max_relief) || gmin < sp.min_ground)
+            continue;
+        }
 
         // local +Y (the building front) points toward the road: rotation by yaw maps
         // (0,1) -> (-sin, cos) = (frontx, fronty)  =>  yaw = atan2(-frontx, fronty).
         const double yaw = std::atan2(-frontx, fronty);
 
-        obb o{cx, cy, ux, uy, 0.5 * sp.frontage, 0.5 * sp.lot_depth};
+        obb o{cx, cy, ux, uy, 0.5 * f, 0.5 * depth};
         if (!fits(o))
           continue;
         remember(o);
@@ -273,10 +360,15 @@ std::vector<lot> layout_lots(const road_network &net, const site_params &sp) {
         L.x = cx;
         L.y = cy;
         L.yaw = yaw;
-        L.frontage = sp.frontage;
-        L.depth = sp.lot_depth;
+        L.frontage = f;
+        L.depth = depth;
         L.seg = int(ri);
         L.arterial = arterial;
+        L.side = int(side);
+        L.urbanity = u;
+        L.has_ground = bool(height);
+        L.ground_min = gmin;
+        L.ground_max = gmax;
         out.push_back(L);
       }
     }
@@ -296,31 +388,50 @@ std::vector<building_instance> fit_buildings(const building_library &lib,
 
   for (const lot &L : lots) {
     const std::uint64_t id = lot_id(L.x, L.y);
-    const int idx = irand(fp.seed, stream::building, id, 0, 0, int(lib.size()) - 1);
-    const building_archetype &a = lib.archetypes[idx];
-
-    const double fw = 2.0 * a.footprint_x; // archetype footprint extents (full), local X / Y
-    const double fd = 2.0 * a.footprint_y;
-    if (fw <= 1e-6 || fd <= 1e-6)
-      continue;
-    const double longd = std::max(fw, fd), shortd = std::min(fw, fd);
+    const double usable_front = std::max(1e-3, L.frontage - 2.0 * fp.margin);
+    const double usable_depth = std::max(1e-3, L.depth - 2.0 * fp.margin);
+    // The scale at which archetype `i`'s footprint fits the lot (longer axis along the frontage),
+    // or 0 for a degenerate one.
+    auto fit_of = [&](int i) {
+      const building_archetype &a = lib.archetypes[i];
+      const double fw = 2.0 * a.footprint_x, fd = 2.0 * a.footprint_y;
+      if (fw <= 1e-6 || fd <= 1e-6)
+        return 0.0;
+      return std::min(usable_front / std::max(fw, fd), usable_depth / std::min(fw, fd));
+    };
+    int idx = irand(fp.seed, stream::building, id, 0, 0, int(lib.size()) - 1);
+    double scale = fit_of(idx);
+    if (fp.true_scale) {
+      // The first draw that fits near its own size, at most its own size.
+      int found = -1;
+      for (int k = 0; k < std::max(1, fp.candidates) && found < 0; ++k) {
+        const int i =
+            k == 0 ? idx : irand(fp.seed, stream::building, id, k, 0, int(lib.size()) - 1);
+        if (fit_of(i) >= fp.min_true)
+          found = i;
+      }
+      if (found < 0)
+        continue; // nothing fits this lot at its real size: leave it empty
+      idx = found;
+      scale = std::min(1.0, fit_of(idx));
+    } else {
+      if (scale <= 0.0)
+        continue;
+      if (scale < fp.min_scale)
+        scale = fp.min_scale;
+      if (scale > fp.max_scale)
+        scale = fp.max_scale;
+    }
 
     // Orient the longer footprint axis ALONG the frontage. lot.yaw already aligns local +X with the
     // frontage, so if the archetype's long axis is its local X we keep yaw; otherwise turn 90
     // degrees.
+    const building_archetype &a = lib.archetypes[idx];
     double yaw = L.yaw;
-    if (fd > fw)
+    if (a.footprint_y > a.footprint_x)
       yaw += M_PI / 2.0;
 
-    const double usable_front = std::max(1e-3, L.frontage - 2.0 * fp.margin);
-    const double usable_depth = std::max(1e-3, L.depth - 2.0 * fp.margin);
-    double scale = std::min(usable_front / longd, usable_depth / shortd);
-    if (scale < fp.min_scale)
-      scale = fp.min_scale;
-    if (scale > fp.max_scale)
-      scale = fp.max_scale;
-
-    const double z = height ? height(L.x, L.y) : 0.0;
+    const double z = L.has_ground ? L.ground_min : height ? height(L.x, L.y) : 0.0;
     building_instance bi;
     bi.archetype = idx;
     bi.x = L.x;

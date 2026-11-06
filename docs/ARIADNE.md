@@ -76,6 +76,21 @@ Every executable field in a document runs in one of two lanes. **The lane is cho
 by the slot the program sits in, not by what the program does** — this is the central
 safety property. You cannot make a "read" slot perform an action, or vice versa.
 
+What steps each kind of program is fixed in code; no setting or flag changes it:
+
+- the read lane: a long-lived stackless evaluator (`ReactiveEngine`) during the render walk, never
+  a scheduler (§2.1);
+- actions, residents and the children they spawn: the app-wide `async_scheduler`,
+  `app.exec_scheduler()`, shared by every document the app hosts and pumped by `Runtime::drain()`
+  (§2.2);
+- `init:`: a private synchronous scheduler, run to completion on the loading thread (at most 10
+  million steps and 5 s), always `round_robin`, locking on the app's lock manager without ever
+  waiting ("Locks in the other lanes" below).
+
+The developer guide's "Which Scheduler Runs a Program"
+([STATE_EXEC_DEVELOPER_GUIDE.md](STATE_EXEC_DEVELOPER_GUIDE.md#which-scheduler-runs-a-program))
+has the same table for every host, with the settings that apply and when they are read.
+
 ### 2.1 The reactive READ lane
 
 Reactive slots — `visible_when`, `enabled_when` / `disabled_when`, computed `bind` /
@@ -107,7 +122,11 @@ no build option to drop it), so the engine is always present.
 after `ariadne.exec.lock_timeout` seconds (default 1.0, a tree setting beside the
 `ariadne.limits.action_max_*` keys, read at each submission): a document never hangs on another's
 lock. A resident's request has no such default: it waits as long as it takes. The `init:` lane
-never waits for a lock: a busy request there is as `:timeout 0` (`TimeoutError`, or `:else` with
+locks on the app's lock manager (`app::lock_manager()`), the one the residents and actions use, so
+an init script's request meets their holds: its scheduler's lock home attaches when the script
+starts and detaches when it ends. The lane never waits for a lock (docs/STATE_EXEC_LOCKS.md 5.5,
+LW-9): the host thread that runs the script also steps the residents, so a holder could not
+release meanwhile, and a busy request there is as `:timeout 0` (`TimeoutError`, or `:else` with
 `:if-available`). An action's `(fork)` forks the action's process, and the child is reaped with
 the document.
 
@@ -126,7 +145,7 @@ stepped on the host thread with the script, so a busy request is as `:timeout 0`
 |-------|----------|-------|
 | per-eval step cap | `kMaxSteps` | `100000` |
 | per-eval wall-time cap | `kMaxSeconds` | `5 ms` |
-| per-frame aggregate | `kFrameBudgetSeconds` | `10 ms` |
+| per-frame aggregate | `kFrameBudgetSeconds` | `30 ms` |
 
 The frame budget resets at the top of each frame, so *N* widgets cannot jointly stall a
 frame — once the aggregate is spent, remaining predicates degrade fail-safe for that
@@ -143,6 +162,19 @@ or key step, a text field's Enter, a colour edit) and the resident
 handlers (`on_tick` / `on_key` / `on_pointer`) run in the action lane, on the
 **app-wide scheduler** (`app.exec_scheduler()`), **off** the render walk, inside
 `Runtime::drain()` ([`ariadne.cpp:1642`](../src/cvc/ariadne/ariadne.cpp)).
+
+That scheduler's policy is the app tree's `state_exec.policy` (`round_robin`, `priority` or
+`priority_rr`), read once, when `app.exec_scheduler()` is first built, and fixed from then on; an
+unknown value is logged and `round_robin` used. Ariadne sets none, so its default stays
+`round_robin`: a program's `set-priority` is stored and reported but changes no pick (developer
+guide, "Priorities").
+
+`ari` and `arigl` build this scheduler while they set up, before any document loads, and have no
+option that sets `state_exec.*`. A document cannot set those keys either, since its programs'
+writes are chrooted under its own prefix. So under `ari` the policy is `round_robin`, and the
+app's lock manager is `single` unless pycvc is loaded in the same process (developer guide,
+"Single and shared mode"). A host that embeds Ariadne sets them on the app tree before its first
+`AppRuntime::register_quit`, `register_verb` or `enable_net`, each of which builds the scheduler.
 
 A fire-once handler is *submitted* (`submit_action`,
 [`ariadne.cpp:1375`](../src/cvc/ariadne/ariadne.cpp)) with the full default environment
@@ -190,10 +222,42 @@ process, wrapped by the runtime as `(while t (let ((event (msg-recv "chan"))) bo
   `event` = `{kind: "signal", signal: "SIGINT", source: "terminal"}`. Signal names are
   POSIX: a terminal's Ctrl-C is `SIGINT`, Ctrl-\ is `SIGQUIT`.
 
-Residents have no total budget (they run for the life of the document), but each *step*
-is wall-capped at `kResidentStepSeconds = 0.05`
-([`ariadne.cpp:1497`](../src/cvc/ariadne/ariadne.cpp)). On teardown they are reaped as a
-group via their owner tag.
+Residents have no total budget (they run for the life of the document), but each *step* is
+time-capped, so that one runaway step cannot hang the host's drain. The cap is the tree setting
+`ariadne.limits.resident_max_step_time`, in seconds (`0` = no cap). It is read as each resident
+starts, and a missing or unparsable value keeps the default. The default is `0.05 s`, or `1 s` in a
+wasm build. The deadline is checked inside long builtin loops (`collect`, a generator, a big
+`state-data-get`), not by a plain body. It is a `se::time_budget`: its first half is charged on the
+steady clock, and its second half on the thread's CPU clock, with each gap between two checks
+counted up to a sixteenth of that half. So a native step that the OS deschedules must still run for
+half the cap itself before it is killed. Single-threaded wasm has no thread CPU clock: there,
+`thread_cpu_seconds` is the steady clock, so on a loaded machine a step that checks often (a big
+`collect`, decoding a large reply) is charged for its waits too, up to a sixteenth of the half per
+check. That is why its default is higher. On teardown, residents are reaped as a group by their owner tag.
+
+**A resident that stops is restarted.** A killed one (its step cap, or a syntax error read inside
+it) or a failed one (an exception it didn't catch) is reported once per message (§2.4). Then it
+is started again on a later drain, with a fresh loop; what it wrote to state stays:
+
+- the first time, at once;
+- while it keeps stopping within 100 drains of starting, after 1, 2, 4 … up to 64 drains;
+- after 8 such stops in a row, never again, with the warning `ari: <lane> resident [<channel>]
+  stopped 8 times in a row soon after starting: not restarted again`. Setting its program again,
+  which a reload does, starts it afresh.
+
+This holds for every lane: `on_tick`, each module's `on_tick` (whether or not the mount is
+drawn), `on_key`, `on_pointer` and `on_signal`. A dead input handler would leave the document
+deaf to keys. A dead signal handler would swallow every Ctrl-C, since declaring one takes the
+signal over (§5.3). A signal that arrives while its handler waits out a restart delay starts it
+at once. A key or pointer event that arrives in that wait is dropped, as it is for a document
+with no handler.
+
+A `load:`ed module's own `on_tick:` is a tick resident too, one per mount (§6.3): chrooted to the
+mount's sub-prefix, with the mount's functions (§6.6), on the channel
+`<owner>#tick@<sub-prefix>`, and woken with the document's each drain. It starts the first frame
+the mount is drawn, right after the module's `init:`, so a module in a tab that is not open starts
+when the tab opens. From then on it runs whether or not the mount is drawn, until a reconcile
+drops the mount (§7.4) or the document goes. A module has no input lanes of its own (§6.3).
 
 ### 2.4 Errors in actions and residents
 
@@ -213,13 +277,40 @@ drain sweep warns once per message, through the warnings `take_reactive_warnings
 | a resident, by a kill | `ari: <lane> resident [<channel>] stopped: <reason>` |
 
 `<where>` is the innermost line of the exception's traceback. `<program>` is the action's text on
-one line, cut at 80 characters, and `<lane>` is `on_tick:`, `on_key:`, `on_pointer:` or
-`on_signal:`. An `init:` program that fails
+one line, cut at 80 characters, and `<lane>` is `on_tick:`, `on_key:`, `on_pointer:`,
+`on_signal:`, or `on_tick: of mount '<sub-prefix>'` for a module's tick. An `init:` program that fails
 reports `failed: Class: message (at <where>)` to its caller.
 
-**Keeping a resident alive.** A resident is one process for the life of the document. An
-exception it doesn't catch ends it, and its channel goes unserved from then on. Catch inside the
-body to keep it running:
+**Where a host shows them, while the document runs.** Each warning reaches the host as it is
+produced, not only when the document exits. `AppRuntime::set_warning_listener` hears each one at the
+drain that collects it, and `take_warnings()` still returns them all for a summary at exit. The
+stock hosts hand them to a `LiveWarnings` ([`host_warnings.h`](../inc/cvc/ariadne/host_warnings.h)),
+which sends each one to:
+
+| Where | When |
+|---|---|
+| the bottom of the screen, wrapped, for 8 s, with how many there have been so far | `ari run` and `arigl run --terminal` with the FTXUI backend, or the status line on the tvision desktop |
+| a log file, one line each, with the time: `2026-10-30 18:31:02 ari: warning: on_tick: resident [...] stopped: ...` | `--log FILE`, or the environment variable `ARIADNE_LOG=FILE`. Appended, and flushed per line. |
+| stderr, as `ari: warning: ...` | when stderr is not the terminal: `ari run doc.ari 2>warnings.txt`, a pipe, or the browser page. On a terminal, a full-screen UI owns it, so they wait for the exit. |
+| the browser page: `Module.ariadneWarning(text)` ([`web_document.h`](../inc/cvc/ariadne/web_document.h)) | ari.html shows the latest in its header. arigl-web shows it in the canvas's corner for 8 s. Both keep them in `window.ariadneWeb.warnings`. |
+
+When `ari run` exits it lists every warning of the run on stderr. When they already went to stderr
+as they came, it prints only how many there were. arigl's window prints each one to stderr at the
+frame it comes, as it always has. A message is reported once per run (`warn_once`). So a resident
+that stops the same way each time shows one `stopped:` warning, and then the give-up warning if it
+gets that far. `snapshot`, `check` and `test` print their warnings when they finish, as before.
+
+To watch the warnings of a running document from another terminal:
+
+```sh
+ari run --log /tmp/ari.log app.ari     # or: ARIADNE_LOG=/tmp/ari.log ari run app.ari
+tail -f /tmp/ari.log                   # in another terminal
+```
+
+**Keeping a resident running.** An exception a resident doesn't catch ends its process. The
+runtime restarts it (§2.3), but the activation that raised is lost, and so is any request it had
+in flight. One that raises every time is given up after 8 quick restarts. Catch inside the body to
+keep it running:
 
 ```yaml
 on_key: |
@@ -277,6 +368,41 @@ A `progress:` widget is read-only: a bar showing the number at `bind` placed in 
 state path or a computed expression) drawn over it, else the percent. ImGui draws a progress bar;
 a backend with none gets a text value (`[########------------] 40%`).
 
+A `plot:` widget is read-only too: a line graph of the comma-separated numbers at `bind` (a state
+path or a computed expression), oldest first, between `lo` and `hi`. Leave them out (or give
+`lo` >= `hi`) and the range is fitted to the numbers. The text at `overlay` is its caption, and
+`height` its height in pixels (default 60). The host keeps the series (the conference's Avatar
+window plots the history `avatar_panel` publishes). ImGui draws a line plot that reads out the
+value under the mouse; a backend with none gets a text sparkline of the last 32 numbers with the
+newest and the range (`[ _.-=+*#] 12.3 (1..30)`).
+
+A `spinner:` widget says something is under way when there is no amount to show (a request, a
+search). The host turns it by its own frame clock (`Runtime::frame_clock`), not by state, so it keeps
+moving while the document's programs are parked: a program waiting on `http-get` still has a
+turning spinner beside it, in every backend and in the single-threaded browser pages (§10.2).
+Show it while the work runs with `visible_when`:
+
+```yaml
+- spinner: Signing in...
+  visible_when: (= (state-get "ui.busy") "1")
+- spinner:                                # the label from state, or a computed expression
+  bind: (string.join (list "Loading" (state-get "feed.name")) " ")
+- spinner: Working
+  glyphs: ascii                           # | / - \ rather than braille dots
+```
+
+- The label is the widget's key, or `bind:` (a state path, or a computed expression, read-lane
+  rules: `string.join`, not `str-concat`) when it has one; a bare `- spinner` has none.
+- Disabled (`enabled_when` falsy, or `disabled_when` truthy), it stands still, greyed where the
+  backend greys.
+- The terminal backends (FTXUI, tvision) draw ten braille dots a second (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`), then
+  the label. `glyphs: ascii` turns `| / - \` instead, as they do by themselves on the Linux console
+  and on a `dumb` or `vt*` terminal, which have no braille (`Backend::unicode_glyphs`). ImGui draws
+  a turning arc, a text line high, one turn a second, so it needs no glyph from the font (the browser
+  build's is ASCII).
+- A snapshot reads frame `f` at `f / fps` (`ari snapshot`: `--fps`, default 20; arigl's fixed
+  clock: 1/30 s a frame), so `--frames 3` shows the spinner one step on from `--frames 1`.
+
 A backend advertises `Capabilities{windows, menubar, mouse, keyboard, color, glsl,
 view_embed, owns_loop, terminal, bitmap, kitty, sixel}`
 ([`backend.h`](../inc/cvc/ariadne/backend.h)). A document's `requires:` and `(has? ...)`
@@ -325,6 +451,12 @@ Three backends ship:
     streams. A compressed codec needs a decoder from the host; `arigl` adds cvcGL's JPEG
     one for `mjpeg`. `ari` and `arigl --terminal` both register it. With no live stream,
     it shows whatever still image is published under the stream's name (`--image`).
+    Its `size:` is a width (`size: 320`, the height following each frame's aspect) or a box
+    (`size: [320, 240]`). In a box each frame is fitted inside it with its shape kept, and
+    ImGui fills the spare space with black bars, so a tile stays one size whatever a camera
+    sends: a portrait phone shows whole, not squashed. A camera captured with `jpeg:#t`
+    keeps its own aspect within the capture's `w` x `h`, a budget turned to the camera's
+    orientation (a portrait phone at 320x240 sends 240x320).
 
   Commit edges match the ImGui backend: discrete widgets commit on the edit, a
   mouse-dragged slider reports each move and commits on release (arrow-key steps commit at
@@ -401,8 +533,10 @@ Three backends ship:
   ([`inc/cvc/ariadne/tvision_backend.h`](../inc/cvc/ariadne/tvision_backend.h)) — the
   native-desktop terminal backend (roadmap §16.5 row 5). Turbo Vision owns the terminal
   and draws the chrome itself: movable, resizable, overlapping windows with close and
-  zoom boxes, a pull-down menu bar, a status line, and its own keys (F10, F6, Alt-X,
-  Ctrl-F5). The windows' *contents* are the FTXUI backend's: a `TvisionBackend` is an
+  zoom boxes, a pull-down menu bar, a status line, and its own keys (F10 for the menu bar, F6
+  for the next window, Alt-X to quit, Ctrl-F5 to move or resize the window from the keyboard:
+  the arrows move it, Shift and the arrows resize it, Return keeps it, Escape puts it back).
+  The windows' *contents* are the FTXUI backend's: a `TvisionBackend` is an
   `FtxuiBackend` in hosted mode (`Options::hosted`), which lays each window body out
   offscreen for tvision to draw and takes that window's input in its own cells. So both
   terminal backends share one widget engine, focus and commit rule, and the hosted mode
@@ -442,7 +576,7 @@ The built-in top-level keys (`is_builtin_block`,
 ```
 meta  menubar  windows  overlays  root (alias: children)  scene  customs  requires
 init  on_tick  on_key  on_pointer  on_signal  keys  units  import  channels  lint  args
-windows_menu  tests
+windows_menu  tests  functions  data
 ```
 
 `tests:` is read only by `ari test` (§13).
@@ -512,10 +646,44 @@ the loader only *captures*. The host wires them:
       on: (state-set "item" (+ (int (state-get "item")) 1))
   ```
 
-  `AppRuntime` lists every binding, the document's and the host's
-  (`set_host_keys`: `arigl` adds its camera's fly keys), in a **Keys** window it puts in the
-  document: closed until `tree.ariadne_keys.open` is set (arigl's *Settings > Keys...*), a row
-  per binding with its keys and a **Change** button. Change writes the binding's id to
+  `AppRuntime` lists every binding, the document's and the host's (`set_host_keys`), in a
+  **Controls** window it puts in the document: closed until `tree.ariadne_keys.open` is set
+  (arigl's *Settings > Controls...*), a row per binding with its keys and a **Change** button.
+  Every key a host acts on is such a binding, in the state tree beside what reads it. arigl's:
+
+  | binding | state key (under the scene prefix) | default |
+  |---|---|---|
+  | the camera's fly keys, Orbit / fly, Free the mouse | `viewers.main.camera.keys.<action>` | W A S D, Space, Left Ctrl, Left Shift, Tab, Escape |
+  | the avatar's walk keys (conference mode) | `viewers.main.avatar.keys.<action>` | W or Up, S or Down, A or Left, D or Right |
+
+  A host's pointer and camera settings (`set_host_mouse`, a `MouseControls`) go above the keys,
+  bound where its camera reads them: arigl's are `viewers.main.camera.settings.mouse_look`
+  (*Drag to look* or *Mouse look*), `primary_drag_steers` (in a room: *Drag the floor to face
+  it*), `mouse_sensitivity`, `invert_pitch` and `invert_yaw`, and *Camera distance*, the
+  camera's `orbit.distance` (the wheel changes it too). Under mouse look a click on the scene
+  captures the pointer and the mouse turns the view with no button held, until *Free the mouse*
+  (Escape; in a browser, Escape always ends its pointer lock). In a browser the page takes its
+  pointer lock inside that press itself (the cursor goes, and the view keeps turning past the
+  screen's edge), asking for the mouse's raw motion where the browser has it: a press on a
+  window is the UI's, judged by where the press lands against the windows the overlay drew
+  last frame (`CameraController::setUiRegions`), so a quick move onto a window and a click
+  there never takes the pointer. In drag to look, a click on the floor turns your avatar to
+  face it and a drag on the floor keeps it facing the point under the pointer, a mouse's or a
+  finger's (`CameraController::setPrimaryDragSteers`); the right button, or two fingers, turns
+  the view. In conference mode under mouse look the avatar faces where the camera aims,
+  standing or walking, and walks that way. Either way it turns every frame on your screen, and
+  the relay hears each turn (at most 20 intents a second, a key at once) and shows it to
+  everyone else. The camera looks past the avatar's
+  right shoulder at a point 4 m ahead of it (at most a third of the camera's distance), so the
+  crosshair marks where you aim, downrange. In either look
+  the ground is the camera's floor (`orbit.floor.*`): looking up slides the eye in along its line
+  of sight rather than under the ground, and an eye that comes inside the avatar hides it.
+  `$CVC_ARIGL_LOOK=mouse` (the browser page's `?look=mouse`) starts in mouse look. A touch
+  screen keeps dragging. In a browser arigl draws a frame per display refresh (it yields to the
+  page until the next animation frame; `$CVC_ARIGL_YIELD=timeout`, the page's `?yield=timeout`,
+  yields on a 0 ms timer instead, which judders on a fast screen).
+
+  A row's Change writes the binding's id to
   `tree.ariadne_keys.capture`; while the window is open the next key down becomes its key
   (Escape keeps the old one; the comma key is stored as `Comma`), and no handler sees that key.
   Closing the window drops a capture still waiting. In the terminal every key goes to the
@@ -579,8 +747,9 @@ A `scene:` node's `type:` is a built-in (`geometry`, `volume`, `volren`, `volsli
 ([`scene_realize.h`](../inc/cvc/gl/ariadne/scene_realize.h)). cvcGL bundles its custom
 types behind one call, `register_cvcgl_extensions`
 ([`extensions.h`](../inc/cvc/gl/ariadne/extensions.h)), which both `ariadne_hello` and
-`AriRuntime` (so pycvc hosts) make: `forest_trees`, `wave_sea`, `cloud_sky`, and — on a
-libcvc built with `CVC_ENABLE_LIBIGL` — `mesh_lab` and `fe_lab`. Keys the built-in parser
+`AriRuntime` (so pycvc hosts) make: `forest_trees`, `wave_sea`, `cloud_sky`,
+`generated_world` (terrain_lab's world, [`world_nodes.h`](../inc/cvc/gl/ariadne/world_nodes.h)),
+and — on a libcvc built with `CVC_ENABLE_LIBIGL` — `mesh_lab` and `fe_lab`. Keys the built-in parser
 does not know land in the node's `props`, which a custom realizer reads; most realizers
 **seed** state keys from them (`forest.*` for `forest_trees`, the node's own subtree for
 `mesh_lab` / `fe_lab`), so a document's prop is the starting value a bound component then
@@ -596,6 +765,93 @@ A heightfield is the world's own `cvc::height_field`: the node draws its mesh (e
 south-west to north-east), a body on it collides with the same triangles, and a custom node
 standing on it (`ground:` in `forest_trees`, `wave_sea`, `cloud_sky`) samples the triangle under
 each point.
+
+**Textures.** `material: { texture: <uri> }` drapes an image over a geometry node through its
+mesh's UVs. UV (0, 0) is the image's bottom-left corner. A `source: { data }` city's terrain wears
+its bundle's `satellite.png` this way, north up (§5.17).
+
+`material: { uv: { rotate, flip_u, flip_v, scale, offset } }` orients the image in texture space,
+for an image that sits otherwise. The steps apply in this order:
+1. `flip_u` and `flip_v` mirror it.
+2. `rotate` turns it 0, 90, 180 or 270 degrees counter-clockwise on the surface.
+3. `scale` and `offset` (a number, or `[u, v]`) map the result: `uv * scale + offset`.
+
+A textured node casts its shadow by its shape. Its image's alpha still cuts a cut-out's shadow,
+but its colours do not.
+
+**Clouds.** `cloud_sky` draws a deck of drifting, slowly changing L-system cumulus over its
+`ground:` node's extent (followed live): the clouds nearest the camera as volumes (`near:`), the
+rest as far shells. Their shade falls on the ground and on the nodes in `receivers:` (and their
+children, LOD rungs included) through those meshes' shaders: it dims the sun's light and leaves
+their textures and colours alone. Its other keys: `extent` (a cloud's half-width), `base` / `top`,
+`coverage`, `spacing`, `seed`, `variants`, `sun_az` / `sun_el` (the key light's, which the shade
+is cast along), `shade_k` / `shade_floor`, `horizon` and `shadow` (0 starts the shade off;
+`sky_controls.ari` toggles it, with the drift and morph speeds).
+
+**Generated terrain.** `source: { terrain: { generator, size, resolution, seed, amp, file,
+preset } }` draws a `cvc::world` terrain generator's ground as such a heightfield: `fbm` (the
+analytic relief the terrain lab stands on; the default), `dem` (an elevation `.npy` at `file`, a URI
+or a path relative to the document, stretched to `amp`), or one a host registered
+(`cvc::world::register_terrain_generator`). Sea level is 0 m: every generator lays its ground with
+0 m as the shoreline, its floor `world_sea_share` (34/90) of the relief below it (the island preset
+stands its dome in the sea), so `water_level` raises or lowers the sea from there and a lower or
+higher relief never floods or drains the world. The size defaults to 1200 and the resolution to one
+vertex per 5 m (at most 2049). A `heightfield:` source takes the same `generator:` keys, its
+layers adding on top. The `generated_world` node type uses the same generators (its `terrain:`,
+`city:` and `terrain_file:` props; `world_controls.ari` switches them live). Its first world is
+made while the document loads. An edit to a `world.*` key then waits (`world.pending` is 1) until
+Regenerate (`world.request: regenerate`) or Randomize, so several settings change in one rebuild;
+`world.auto` (the node's `auto_regenerate`) rebuilds after every edit instead. Every rebuild and
+every repaint (`world.color`, at once) is a sliced task on the app's scheduler
+([`sliced_task.h`](../inc/cvc/core/sliced_task.h), as `fe_lab`'s jobs are): `cvc::world::world_builder`
+and `surface_painter` step it a few rows at a time, on the background pool natively and a few
+milliseconds a frame on single-threaded wasm, so the old world stays on screen until the new one is
+swapped in. `world.busy`, `world.progress` (0–100) and `world.phase` (the stage and its percent)
+follow it, and `world.request: stop` ends it, keeping the world shown. Its trees and rocks draw
+with level of detail: a `LodGraphicsNode` ladder per 128 m ground cell (under `<id>_props`,
+`<id>_foliage` and `<id>_needles`), chosen each frame by screen error. Every rung is the same
+full-maturity tree, coarser further off: rung 1 from 260 m (three-sided tubes, none under 5 cm, the
+leaves as solids), rung 2 from 700 m (a trunk and a crown with the tree's colour and coverage), the
+radii scaled by the quality preset (the wasm build coarsens sooner). The ground does too: the node
+draws nothing itself but holds the texture, and its children are a ladder per chunk of 64 terrain
+cells (doubled until at most 16 chunks span the world). Rung k keeps every 2^k-th sample, down to 4
+cells a chunk, so every rung is the terrain's own surface, points, normals and UVs, with fewer
+triangles. A chunk coarsens once its largest height error falls under the preset's pixel budget,
+and stays within one rung of each neighbour; skirts hung from the edges two chunks share hide the
+seam. The chunks share the node's one texture and take its `casts_shadow`, `shader:` and
+`material:` keys. Physics, nav and `ground:` read the full terrain.
+
+**The fast render path.** A big static world draws fast when it is a few merged meshes and its
+shadow maps are re-baked rarely and spent where the camera looks. These keys say so
+(`examples/ariadne/documents/terrain_lab.ari` uses all of them but `casts_shadow: false`: its
+ground casts, so its ridges shade its valleys):
+
+```yaml
+scene:
+  shadows:
+    enabled: true
+    resolution: 4096
+    update_interval: 4
+    softness: 2                 # the edge filter's radius in map texels (0: one hard tap)
+    focus: camera               # or { follow: camera, min_radius: 150, max_radius: 600,
+                                #      per_distance: 3, lead: 0.5, lift: 20, ground: <node> }
+                                # or { center: [x, y, z], radius: r }: a fixed sphere
+  lights:
+    - light: sun
+      rig: three_point
+      back: 0
+      wash: 0                   # or { intensity, count, height }; 0 drops the downlight ring
+  nodes:
+    - node: ground
+      casts_shadow: false       # receives shadows, casts none, never forces a re-bake (no
+                                #   self-shading: a valley is not shaded by its ridge)
+      material: { opaque: true }  # drawn opaque: no per-texel alpha scan of its texture
+```
+
+A camera focus spends the maps on a sphere `lead` radii ahead of the focal point, of radius
+`min_radius + per_distance × (eye-to-focal distance)` clamped to `max_radius`, `lift` over the
+`ground` node's heightfield; `tick_scene` re-aims it every frame, and the maps re-bake once it has
+moved a fiftieth of its radius. Past it the scene is lit unshadowed.
 
 **Physics.** A scene-level `physics:` block declares a rigid-body world
 (`cvc::physics::world`), and a geometry node's `body:` gives it a body there:
@@ -675,9 +931,10 @@ down), centres it in x and y, sits it on z = 0 and scales its largest extent to 
 
 **Field colours (both node types).** The values a node shows are coloured through a transfer
 function at `<node>.field_colors` (a `cvc::tf::model` string, outside `mesh_ops.*` / `fe.*`), so
-a `tf_editor` edits the ramp: mesh_tools and fe_controls each hold one (`show_opacity: false`,
-`show_isocontours: false`). Only the colour ramp is used. The colormap key (`color.colormap`,
-`view.colormap`) seeds it and resets it to that colormap's ramp whenever it changes, so a
+a `tf_editor` edits the ramp and the opacity curve: mesh_tools and fe_controls each hold one
+(`show_isocontours: false`). The values draw see-through where the opacity curve is below 1 (times
+fe_lab's surface opacity); the isocontours are not used. The colormap key (`color.colormap`,
+`view.colormap`) seeds it and resets it to that colormap's ramp, opaque, whenever it changes, so a
 document stepping through colormaps still works; an edit stands until the next change. An
 explicit domain in the model is the range the values are coloured over (in fe_lab it wins over
 `view.fixed_range`). Beside it the node publishes `field_colors.range` (the colours' span under
@@ -731,13 +988,13 @@ Keys under `<node>.fe.*`:
 
 | key | meaning | seeded from prop |
 |---|---|---|
-| `request` | `load`, `reload`, `mesh`, `solve`, `stop` (`stop` interrupts a heat solve; any other job runs to the end and the status says so); several separated by spaces run in order | `auto_mesh: true` seeds `mesh` |
+| `request` | `load`, `reload`, `mesh`, `solve`, `stop` (`stop` ends the running job at its next step: a heat solve keeps its field so far, a load, mesh or other solve keeps nothing and the node keeps what it had); several separated by spaces run in order, so `stop load` drops the running job and loads | `auto_mesh: true` seeds `mesh` |
 | `busy`, `status`, `progress` (0-100), `stats.vertices`, `field.min`, `field.max` | published | — |
 | `phase` | published while a job runs: its stage and percent (`x lines 40%`, `factoring 62%`), `""` when idle; fe_controls' progress bar shows it | — |
 | `stats.tets`, `stats.hexes` | published: the element count (the other is 0) | — |
 | `stats.quality_min`, `stats.quality_mean` | published: minimum dihedral angle (tetrahedra, degrees) or scaled Jacobian (hexahedra) | — |
 | `stats.work_ms` | published: the wall time of the last run of commands, from the first to idle | — |
-| `stoppable` | published: 1 while a heat solve runs (the Stop button's `enabled_when`), else 0 | — |
+| `stoppable` | published: 1 while a job runs (the Stop button's `enabled_when`), else 0 | — |
 | `last_mesh` | published: the region and bounds the last mesh job started with (`solid <isovalue>` or `interval <lo> <hi>`), `""` before the first | — |
 | `source.type` | `sdf` (the signed distance field of a mesh) or `volume` (a volume file) | `source:` |
 | `source.file` | the mesh or the volume: a path or URI, a relative path resolved against the document's directory (`stanford.bunny` is built in) | `source.sdf.mesh` / `source.file` |
@@ -909,14 +1166,23 @@ entry warns. An entry is one of:
 
   | token | holds when |
   |---|---|
-  | `gl.scene` | a scene adapter realizes `scene:` (arigl, the cvcGL hosts) |
-  | `gl.shaders` | GLSL runs (scene `shaders:`, `shader_canvas`) |
+  | `gl.scene` | a scene adapter realizes `scene:` (arigl in a window or `--terminal`, the cvcGL hosts) |
+  | `gl.scene.shaders` | the scene runs the document's GLSL (a node's `shader:` block); arigl in a window or `--terminal` |
+  | `gl.ui.shaders` | the UI draws GLSL itself (`shader_canvas`): a GL window, never a terminal |
+  | `gl.shaders` | both `gl.scene.shaders` and `gl.ui.shaders` |
   | `gl.view` | a live render view can sit in a widget |
   | `ui.windows`, `ui.menubar`, `ui.color` | movable windows; a menu bar; coloured styling |
   | `input.mouse`, `input.keyboard` | pointer input; key and text input |
   | `raster.bitmap` | images show in real pixels (a GL window, or a kitty or Sixel terminal) |
   | `term`, `term.kitty`, `term.sixel` | a text terminal; one that speaks kitty graphics; one that draws Sixel |
 
+  GLSL runs in two places, and they are separate facts. The scene's shaders run in the
+  scene adapter's renderer (`SceneAdapter::runs_shaders`), the UI's in the backend
+  (`Capabilities::glsl`). `arigl --terminal` has the first without the second: it renders
+  the scene offscreen through GL and draws the UI as text cells. So a document whose only
+  GLSL is in `shader:` blocks requires `gl.scene.shaders` and runs there. One with a
+  `shader_canvas` requires `gl.ui.shaders`, or lists it as optional and checks
+  `(has? "gl.ui.shaders")`. `gl.shaders` asks for both, so it fails on `--terminal`.
 - a **function** a program can call: a builtin, a stdlib function, a state intrinsic or a
   host verb (`Runtime::has_function`);
 - a **widget type**, built in (`slider_int`, `button`, …) or registered
@@ -930,9 +1196,27 @@ quoted data and names the program binds itself. It cannot see a name built at ru
 handed to `apply`, so it only warns; `requires:` is the authoritative list, and a name
 listed there is not warned about again. `ari check doc.ari` shows both.
 
+A `shader:` block is an implicit `gl.scene.shaders` the same way. When the host has a scene
+but its renderer does not run the document's GLSL, the load warns once, naming the shaded
+nodes; they draw unshaded. Listing `gl.scene.shaders` makes that an error, or (optional)
+one "optional requirement" warning instead. A host with no scene at all already warns that
+the scene is ignored, so it adds nothing. (`shader_canvas` would be an implicit
+`gl.ui.shaders`, once that widget exists.)
+
+Every document under `examples/ariadne/` declares a `requires:` block, and
+`AriadneComponents.ShippedExamplesDeclareWhatTheyNeed` keeps it so. A document with a
+`scene:` lists `gl.scene`, so `ari` refuses it with one error where it used to drop the scene
+with a warning. One with a `shader:` block also lists `gl.scene.shaders` (`lsystem_forest.ari`,
+as optional: its bump and bark presets are detail). Write `requires:` the same way in a new example: list what the document cannot
+work without, and mark the rest `optional: true` (as `terminal_images.ari` does for
+`raster.bitmap`, since half-block cells still show the picture).
+
 A document that can run without something asks for it at run time with `(has? "name")`,
 which answers the same question for a token, a function or a widget type. It works in
-programs and in reactive expressions:
+programs and in reactive expressions, a `load:`ed module's included (its `init:` too: a module's
+host is the document's host). The load-time scan does not follow the guard: a call behind
+`(has? "name")` still warns, until `requires:` lists the name as `optional: true`. So the two go
+together: the entry says the document can do without it, and the guard is how it does.
 
 ```yaml
 windows:
@@ -947,6 +1231,17 @@ windows:
 A host can ask the same thing in C++: `Runtime::has`, `has_function`, `program_names` and
 `host_facts`.
 
+A `load:`ed module (§6.3) may have its own `requires:`, kept on its mount wrapper
+(`Widget::requirements`), and `AppRuntime::load` checks it with the document's:
+
+- A required entry the host lacks fails the whole load. The error names the module:
+  `... requires: room-join (module 'includes.call')`.
+- A missing optional entry warns, also naming the module.
+- An entry covers the calls of the programs in that module and the modules it mounts. The
+  document's own entries cover every program, its modules' included. A module's entries never
+  cover its parent's calls: what a module needs is its own business, and a parent that calls the
+  same verb lists it too.
+
 ### 5.8 Window size, placement and scrolling
 
 A window needs neither `pos:` nor `size:`. Its size:
@@ -957,6 +1252,9 @@ A window needs neither `pos:` nor `size:`. Its size:
 - A window with no `size:` fits its content every frame, so it grows and shrinks with what it
   shows. It stops at the edge of the view, measured from where it stands, and never goes below an
   authored `min:` or past a `max:`. Its persisted geometry places it but does not size it.
+- A window that closes and opens again in the same run (§5.9, or its `visible_when` turning true
+  again) is sized as on its first opening: by its `size:`, else by what it shows now, rows it
+  gained while closed included. Only a size the user gave it holds.
 
 Content that does not fit the window, whatever set its size, scrolls. A window gets a scroll bar
 on each axis where it needs one, and never clips its content or shrinks to a stub.
@@ -972,9 +1270,23 @@ the Windows menu (§5.9), takes its place in the column again. A new document
 
 How each backend does it:
 
-- **ImGui** gives a window with no size ImGui's always-auto-resize: it measures the window's
-  widgets each frame, its labeled widgets at the width ImGui gives an auto-resizing window's items
-  (16 font sizes), and a row-split pane as wide as its own widgets. A window with a size gets a
+- **ImGui** measures in logical pixels at the UI size (§5.14): a document's `px` (a window's
+  `pos:` and `size:`, a column's width, a picture's or a plot's size, the area a group's
+  `background:` takes) is multiplied by the UI size
+  and the display's pixel ratio, as the UI's text and widgets are, and the geometry it persists
+  is divided back, so a layout looks the same at any UI size and on a phone's dense screen. A
+  window opens inside the view: no larger than the work area, and moved in from its `pos:` (or
+  its persisted place) until all of it shows, so a layout made for a laptop opens on a phone in
+  reach. In a browser the view is the canvas from the first frame, as the page has laid it out.
+  When the view gets smaller later (a browser window made smaller, a phone turned on its side,
+  fullscreen left), a window that showed in full moves back in the same way, no larger than the
+  work area. A window moved in, where it opened or since, goes back toward its place and size as
+  the view grows again, as far as the view allows, until it is there (not one that opened in a
+  phone's list of titles, §5.14: its place is the list's). One the user moves or resizes
+  meanwhile stays where they put it, and so does one the user left partly outside the view.
+  ImGui gives a window with no size ImGui's always-auto-resize: it measures the window's widgets
+  each frame, its labeled widgets at the width ImGui gives an auto-resizing window's items (16
+  font sizes), and a row-split pane as wide as its own widgets. A window with a size gets a
   horizontal scroll bar as well as ImGui's vertical one, and a long label shrinks its slider,
   input, combo or colour widget rather than run past the window's edge. A
   `layout: {kind: horizontal}` row with no `col_widths` puts its cells side by side on one line,
@@ -985,15 +1297,24 @@ How each backend does it:
   and cascade new windows instead of flowing them. A window that would run off the screen stops at
   the screen's edge, and a window whose content is larger than it is (or than its `size:`) gets a
   scroll bar. Its body scrolls to keep the focused widget in view; there is no wheel scrolling.
-  On the tvision desktop, tvision's frame holds the window, and the host refits that frame to the
-  content in each axis the document did not size, until the user resizes the window with the
-  frame's own corner; from then on it keeps the user's size.
+  On the tvision desktop, tvision's frame holds the window, and the host sizes that frame on every
+  walk, in each axis: the document's size where it gave one, else the content's. That stops when
+  the user resizes the window (the frame's corner, Ctrl-F5 then Shift and the arrows, or the zoom
+  box): from then on it keeps the user's size, through a close and a reopen too. Nothing else
+  counts as the user's: not a size the host gave the window to fit it, nor tvision scaling the
+  windows when the terminal is resized, nor a move. Only the user's size is reported back to
+  `tree.<id>.geometry`; for any other window the host reports its place alone.
+  `ari_run_reopen_refit_ftxui` and `_tvision` check this in a tmux pane (Linux):
+  [`src/ari/tests/reopen_refit.ari`](../src/ari/tests/reopen_refit.ari)'s windows gain rows while
+  closed and must show them when they open again, and on tvision a window resized with Ctrl-F5
+  must come back at that size.
 
 ### 5.9 Closing and reopening windows: the Windows menu
 
 A window's open state is `tree.<id>.open` (default open; `<id>` is its `id:`, else its title). A
 window whose state is `0` is not drawn. A `closable: true` window has a close button that sets it
-to `0`.
+to `0`. One that opens again is sized as §5.8 says: by its `size:` or its content, unless the user
+resized it.
 
 Every document gets a **Windows** menu to open such a window again, with no menu items to write:
 
@@ -1003,11 +1324,14 @@ Every document gets a **Windows** menu to open such a window again, with no menu
   "Settings" or "View" menu bound to `tree.<id>.open` (`lsystem_forest.ari`,
   `conference_roster.ari`) keeps it, and the Windows menu lists only the windows that menu leaves
   out. When it leaves none out there is no Windows menu.
-- A window made by `repeat:` is not listed, since there can be any number of them. The document
-  opens those itself (`conference_roster.ari`'s camera windows open from the Users list).
+- A window made by `repeat:` is listed once per instance, under the title that instance shows
+  (its `bind:`, else its label with `{i}` filled in), after the other windows. The list follows the
+  repeat's count each frame. Opening one from the menu also brings it to the front.
+  `conference_roster.ari` sets `windows_menu: View`, so its per-peer camera windows are listed by
+  name at the end of its View menu.
 - A host's menus (`AppRuntime::set_host_menus`) count as the document's: arigl's
-  *Settings > Keys...* opens the Keys window, so arigl's Windows menu leaves it out. Under a host
-  without one, the Windows menu is how the Keys window opens.
+  *Settings > Controls...* opens the Controls window, so arigl's Windows menu leaves it out. Under
+  a host without one, the Windows menu is how the Controls window opens.
 - It goes after the document's own menus (and a host's). When the menu bar already has a menu of
   the same title (`fem_gallery.ari`'s own Windows menu), the items go at the end of that menu,
   after a separator, instead of a second menu of that name. A document with no `menubar:` gets a
@@ -1055,6 +1379,677 @@ windows:
   to scripts, `state://`, replication and the persisted tree as any other key; a document keeps a
   secret out of shared state by clearing the key once it has used it.
 
+### 5.11 Pictures by URL: `image:` with a URI
+
+An `image:` whose `src` (or the value at its `bind:`) is a URI shows that picture. Design and
+the work still to come: [ARIADNE_MEDIA.md](roadmap/ARIADNE_MEDIA.md).
+
+```yaml
+windows:
+  - window: Profile
+    children:
+      - image: avatar                        # the label: the caption a failure shows
+        src: https://media.example/u/42.webp
+        auth: example                        # optional: the host sends credential `example`
+        size: [48, 48]                       # a box in px; one number is a width
+        fit: cover                           # contain (default) | cover | fill
+        shape: circle                        # rect (default) | circle
+        status: profile.avatar_status        # optional: loading | ready | failed
+      - type: group
+        repeat: (state-get "feed.items")
+        children:
+          - image: ""
+            bind: feed.items.{i}.picture     # a key, or a computed expression, naming a URL
+            size: [480, 270]
+```
+
+- **What counts as a URI.** A value that starts with `http://`, `https://`, `file://`, `cvc://` or
+  `state://`. Anything else is the name of an image the host published (`set_image`,
+  `--image NAME=FILE`), as before. `src:` may be a computed expression too.
+- **http(s)** goes through the host's network (§10.3). The host must turn it on and allow the
+  picture's origin (`ari --net-allow https://media.example`). `auth: NAME` sends credential
+  `NAME` as `Authorization: Bearer`, on the same terms as `http-get`'s `auth`: only to an origin
+  the credential is bound to, never following a redirect. The token never reaches state, an
+  error, a tooltip or a published name. Without the network, an http(s) picture fails ("the host
+  has the network off").
+- **`file://`** paths resolve against the document's directory (`file://img/logo.png`), or are
+  absolute (`file:///usr/share/...`). `cvc://` and `state://` resolve as `import:` does (§6.4).
+- **Formats:** PNG, JPEG, GIF, BMP and, where libcvc has libwebp, WebP. Where it
+  has ImageMagick, also TIFF, AVIF and HEIC. The format comes from the bytes, not the name or the
+  Content-Type. A file over 64 MiB, or one wider or taller than 8192 px, is refused before it is
+  decoded. A decoded picture is downscaled to 2048 px on its long side.
+- **Off the frame.** The first frame that draws the widget starts the load, and the widget shows a
+  neutral placeholder of the same box until the picture arrives, so nothing moves. The fetch, the
+  decode and the fit run on the app's background pool. A failure shows a darker placeholder, says
+  why in its tooltip, and is tried again after 30 s. Pictures are kept in memory per runtime, up to
+  64 MiB, and dropped 30 s after the last frame that drew them. Two widgets that show the same URL
+  share one fetch. `ari snapshot` and `arigl snapshot` wait for the pictures they draw, those
+  whose URL a reply puts in state included: they draw again until no picture is still loading
+  (at most 10 s, as for requests).
+- **The box.** `size: [w, h]` is a box; `fit` says how the picture fills it: `contain` (all of it,
+  transparent bars), `cover` (all of the box, the middle of the picture) or `fill` (stretched).
+  `shape: circle` makes the outside of the inscribed circle transparent. `size: w` keeps the
+  picture's own shape at width `w`, and its placeholder is 16:9 (1:1 for a circle) until it loads.
+  The fitted picture is made at twice the box's size, where the source has the pixels, so it stays
+  sharp on a HiDPI screen.
+- **Every backend draws them**, since the core publishes the fitted picture as any other image:
+  ImGui as a texture, and the terminal backends as Kitty, Sixel or iTerm pixels, or half-blocks
+  (§4). Hosted tvision always draws half-blocks. In half-blocks, a transparent pixel leaves its
+  half of the cell to the terminal's own background, so a round avatar has no corners on a light
+  or a dark terminal. Kitty, Sixel and iTerm draw transparent pixels black.
+- **Animated GIF and WebP pictures move**, every frame fitted to the box like a still, on a
+  loop the widgets showing one picture share. A terminal gets at most 8 new frames a second.
+  An animated WebP needs libwebp's demux library (cvcpkg's libwebp has it). An APNG, or an
+  animation over 512 frames or 128 MiB decoded, shows its first frame.
+- **A video URL** (`.mp4`, `.webm`, `.mov` or `.m4v`, a query or fragment after it allowed, the
+  rule web clients use for avatars) in an `image:` plays as a decorative video (§5.13): looping,
+  silent, fitted and shaped like the picture would be. Without a player it is the placeholder,
+  and `status:` says `unsupported` (or `remote`, `failed`) where a picture would say `ready`.
+- **The capability token `image.url`** (§5.7) holds in every host that does this, so a document
+  for older hosts too gates its pictures with `(has? "image.url")` or
+  `requires: [{name: image.url, optional: true}]` and draws its own placeholder elsewhere (an
+  older host shows an unknown URI as text).
+- **`status:`** names a state key the widget keeps `loading`, `ready` or `failed` in, with the
+  reason under `<key>.error`. A document reads it to show something else when a picture is
+  missing, and a test asserts on it.
+- **In a browser build without threads** (ari.html, arigl-web) a picture's http(s) request is
+  started, not sent in place (§10.2), so the frame loop goes on while it is out. The reply is
+  decoded when the browser hands it over, between frames. A `file://`, `cvc://` or `state://`
+  picture is read and decoded between two frames, one at a time.
+
+### 5.12 Backgrounds: `background:` on a window or group
+
+A window, an overlay or a group can have a picture behind its content: a profile's background,
+a banner behind a name.
+
+```yaml
+windows:
+  - window: Profile
+    background: {src: https://media.example/bg/42.jpg, opacity: 0.4}
+    children:
+      - type: group
+        id: banner
+        size: [auto, 120]                    # a group's background area is at least this
+        background:
+          bind: profile.banner_url           # or src:; a URI (§5.11) or a published image name
+          auth: example
+          fit: cover                         # cover (default) | contain | fill
+          opacity: 1.0                       # 0..1
+          terminal: banner                   # behind (default) | banner | none
+          banner_rows: 6
+          status: profile.banner_status      # loading | ready | failed, as image:'s
+        children:
+          - image: avatar
+            bind: profile.avatar_url
+            size: [64, 64]
+            shape: circle
+          - text: ""
+            bind: profile.name
+```
+
+`background: URL` is short for `background: {src: URL}`. A video URL (as `image:` takes it,
+§5.11) plays as a silent looping video behind the content, where the host has a player; an
+animated GIF or WebP moves. The picture loads as an `image:`'s does
+(§5.11), at its own shape, and each backend fits it to the area the content takes. Until it
+has loaded, or when it failed, nothing is drawn behind the content.
+
+- **ImGui** draws it behind the content: a window's fills the window's inner area, and a group's
+  fills the group's area. That area is the full width available unless `size:` says otherwise,
+  and at least `size:`'s height. `fit` decides which part of the picture shows, and `opacity` is
+  how strongly it shows over the window's own background.
+- **The terminal backends** (FTXUI, and tvision's window bodies):
+  - **`behind`** draws half-blocks under the content, dimmed toward black by `opacity`. A cell
+    the content writes text into keeps the picture's colour as its background, dimmed to at most
+    40%, and the text is drawn in the terminal's own foreground unless the document coloured it.
+    So text stays readable on any picture. Pixel protocols can't put text over pixels (Kitty's
+    pictures are themselves cells, and Sixel and iTerm draw over the cells), so `behind` is
+    half-blocks whatever `--graphics` says.
+  - **`banner`** draws the picture as a row `banner_rows` tall above the content instead, at full
+    strength, and in Kitty, Sixel or iTerm pixels where the terminal has them (from the second
+    frame, once the row's width is known).
+  - **`none`** draws nothing in a terminal.
+  - A terminal with no colour (`--graphics mono`) draws no background.
+
+### 5.13 Video and audio: `video:` and `audio:`
+
+```yaml
+- video: clip                           # the label: the caption its messages use
+  src: https://media.example/p/9.webm   # a URI (§5.11), or a computed expression giving one
+  auth: example                         # optional: the host's credential, as image: takes it
+  poster: https://media.example/p/9.jpg # optional: shown until the first frame
+  size: [480, 270]                      # the picture's box; fit: as image: takes it
+  bind: feed.items.{i}.player           # the player's state keys (below)
+  autoplay: false
+  loop: false
+  muted: false
+- audio: voice note                     # the same, with no picture
+  src: https://media.example/p/10.opus
+  bind: feed.items.{i}.voice
+```
+
+- **`controls: false`** makes a decorative picture: no controls, and `autoplay`, `loop` and
+  `muted` default to true. A muted one opens no sound device, so it plays in an SSH session too
+  (it makes no sound there). `shape: circle` and `fit:` apply to its frames, and `status:` (as
+  `image:` takes it) holds its state. A video URL in `image:` or `background:` is one of these.
+- **The controls** are drawn with the widgets every backend has: Play / Pause, a seek slider
+  with `m:ss / m:ss` as its value, and Mute. "Open" is added where the media can't play here.
+  They look and work the same in ImGui, FTXUI and tvision.
+- **The picture.** The newest frame is published as an image and drawn like one: an ImGui
+  texture, or Kitty, Sixel, iTerm or half-block cells. A terminal gets at most 8 frames a
+  second. Before the first frame the poster shows, else a placeholder of the box.
+- **The state keys** live under `bind:`, or `ariadne.media.players.p<n>` without one:
+
+  | key | |
+  |---|---|
+  | `state` | `idle`, `loading`, `ready`, `playing`, `paused`, `ended`, `failed`, `remote` or `unsupported` |
+  | `playing` | `1` / `0`; write it to play or pause |
+  | `position`, `duration` | seconds (position at most 4 times a second while playing) |
+  | `seek` | write seconds to seek; it is emptied once done |
+  | `muted` | `1` / `0`; write it to mute |
+  | `error` | why it failed, or why it plays elsewhere |
+
+- **A host plays them only if it has a player.**
+  - `ari-media` (§9.2) and `arigl` have cvcMedia's FFmpeg + SDL3 player. FFmpeg decodes,
+    frames are scaled to the box, and the sound plays through SDL3's audio subsystem, which is
+    the clock (the wall clock without sound). The source is fetched whole first (the host's
+    network policy and `auth:`, as for `image:`, at most 64 MiB) and read from memory.
+  - FFmpeg is cvcpkg's `ffmpeg-lgpl`, linked shared, so the LGPL's terms are kept.
+  - The lean `ari`, or any build without FFmpeg, has no player. Its media widgets say
+    `unsupported` and offer "Open".
+  - **The browser pages** (ari.html, arigl-web) play through the browser's own `<video>` and
+    `<audio>`. FFmpeg is never compiled to wasm.
+    - Each player is a hidden element. It plays the sound itself, and a video's new frames are
+      drawn into a canvas the size of the box and copied into the widget's picture. That is one
+      copy per frame shown, and it works the same in both pages, under windows and menus.
+    - The policy and credentials are decided in C++ before the element sees anything:
+      - an http(s) URL with no `auth:` is given to the element (it streams and seeks with range
+        requests), once the host allows its origin;
+      - one with `auth:` is fetched with the bearer token alone (no cookies, no redirect) into a
+        blob;
+      - `file://`, `cvc://` and `state://` sources are read from the page's files into a blob.
+        A page lists its media in the config's `preload` to have them there.
+    - A picture from another origin needs CORS to be read back. Without it the sound still
+      plays and the error says so.
+    - A browser plays sound only after the user has clicked or typed on the page. A muted
+      `autoplay` starts by itself.
+    - A site serving the pages under a Content-Security-Policy adds `media-src 'self' blob:`
+      (and the media's origin when it is another).
+- **Over SSH** the sound would come out of the remote machine's speakers. So in an SSH session
+  (`SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY` set), players say `remote` and nothing is opened.
+  - "Open" runs `(open-url URL)` where the host has it, else it warns with the URL.
+  - An `auth:` source opened in a browser carries no token, so the browser needs its own
+    sign-in. The tooltip says so.
+  - `--media-play always` plays anyway, and `--media-play never` never plays.
+- **Capability tokens** (§5.7): `media` means the media plays here, and `media.player` means
+  the host has a player at all. `video.decorative` means `controls: false` and video URLs in
+  `image:` and `background:` are understood, and `image.animated` means GIF and WebP animate.
+- A player whose widget a frame did not draw (its window closed, its item scrolled out of a
+  `repeat:`) is paused at once and closed 5 s later. `ari snapshot` waits while a player is
+  still loading, as it waits for pictures.
+
+### 5.14 On a phone: UI size, hiding windows, the system keyboard
+
+A document needs nothing of its own to work on a phone: the ImGui host (arigl, cyprty) does
+this for every one.
+
+- **UI size.** The UI is sized in logical pixels (CSS pixels in a browser) times the UI size,
+  times the display's pixel ratio. A phone's canvas is about three device pixels to the CSS
+  pixel, so without the ratio its UI would come out a third of its size. The UI size starts at
+  1.25 on a touch device and 1 with a mouse, and is the state key
+  `<scene>.viewers.<viewer>.ui.scale` (arigl's: `ui.docs.ari.viewers.main.ui.scale`). The
+  Controls window offers it as **UI size** (75% to 200%), under *Display* above the keys, for any
+  host that calls `AppRuntime::set_host_ui_size`. A new size takes effect at the next frame, and
+  the open windows grow or shrink with it. It holds for the run.
+- **Hiding windows.** On a view whose short side is under 500 logical pixels the panels start
+  hidden, and a round button in the bottom-right corner shows and hides them all (the menu bar
+  too), so the scene is never buried. The button stays above every window, even one dragged over
+  its corner. A window collapses to its title bar with the arrow at the title's left (or a double
+  tap on the title), closes with its X when it is `closable:`, and comes back from the View or
+  Windows menu (§5.9). On a touch screen a window moves by its title bar only, so a finger that
+  slips off a widget does not carry its window away.
+- **A list of windows.** A document laid out for a wider screen would have its windows moved
+  into the phone's view all onto the same spot, one over another. So on a phone (a view under
+  500 CSS pixels on its short side, either way up) a window whose `pos:` or `size:` does not fit
+  opens collapsed instead: its title bar goes under those of the others that did, from the top of
+  the view, and the panels show a list of titles over the scene. The arrow (or a double tap)
+  opens one: it unfolds from its title, as wide as the view and no taller than the room below,
+  over the titles after it. Windows that fit where they were put, and those with no `pos:` (the
+  flow, §5.8), open as anywhere else.
+- **Labels.** A slider's, combo's or field's label stays in view: in a window that fits its
+  widgets, a widget that would push its label past the view's edge is narrowed to leave it room.
+- **Scrolling with a finger.** On a touch screen a finger drags a window's content along, its
+  scroll bar untouched, and a finger that lifts while moving leaves the content gliding at its
+  speed until friction stops it or it meets an end. This works in every window, child pane,
+  `text_view:` and drop-down list that scrolls, and a press on content that is still gliding
+  stops it (that press is not a tap). A drag scrolls when it starts on empty space, text, or a
+  widget worked by a tap (a button, a checkbox, a selectable, a text field not yet being edited):
+  past the drag threshold the widget's press is let go and it does not fire. A drag keeps its
+  old meaning on a slider or a drag widget, a field being edited, a title or menu bar, a resize
+  grip or border, a scroll bar, a table's column border, a scene view (§5.18), the transfer
+  function editor, and any widget whose document handles `on_drag:`, `on_drag_start:` or
+  `on_drag_end:` (§4.6). The window scrolled is the innermost one under the finger that scrolls
+  along the drag's main axis, as the mouse wheel's is.
+
+  The glide's speed falls as `v0 * exp(-friction * t)`, so a fling covers `v0 / friction`
+  before it stops. Both are state keys beside the UI size, and a document reaches them under
+  its own prefix in arigl (`viewers.main.ui.*`):
+
+  | key | default | |
+  |---|---|---|
+  | `<scene>.viewers.<viewer>.ui.touch_scroll` | `1` | `0`: a finger's drag scrolls nothing (the scroll bars still do) |
+  | `<scene>.viewers.<viewer>.ui.scroll_friction` | `2` | per second: 2 is iOS's normal deceleration, 10 its fast one; higher stops sooner, `0` glides to the end |
+
+  ```yaml
+  - slider_float: Scroll friction
+    bind: viewers.main.ui.scroll_friction   # arigl: under the document's own prefix
+    lo: 0.5
+    hi: 20
+  - button: Short flings
+    on: (state-set "viewers.main.ui.scroll_friction" 8)
+  ```
+
+  On a touch screen arigl's Controls window offers it as **Scroll friction** under *Display*,
+  for any host that sets `UiSizeControl::scroll_friction`. A mouse has the wheel and the scroll
+  bars, so none of this applies to one.
+- **The system keyboard.** A browser raises a phone's keyboard only for a focused text field,
+  which the canvas is not. When a finger (or a pen) activates an `input_text`, the page focuses a
+  hidden `<input>` placed at the field's caret, so the keyboard comes up and the browser keeps
+  the field in view above it; what the keyboard types goes to the field, autocorrect and
+  composed words included, and the field's deactivation puts the keyboard away. iOS raises its
+  keyboard only for a focus made while the finger lifts, which is when the page makes it; a field
+  that becomes active with no finger down (an `autofocus:` one) raises it on Android, and on iOS
+  at the first tap on it. While the hidden input has the keys the canvas does not, so typing never
+  reaches `on_key` or walks an avatar. A mouse click on a field types through the canvas as
+  before. A native build has no phone yet; SDL3's `SDL_StartTextInput` is how one would raise the
+  keyboard on iOS and Android.
+
+### 5.15 Text buffers and message fields: `text_view:` and `message_input:`
+
+Two widgets for a log and the field under it (a chat window, a console):
+
+```yaml
+- text_view: "##log"
+  bind: chat.view.text          # the text, lines split on \n (a state path or a computed expression)
+  height: 240                   # px (rows of 16 px in a terminal); 0 or left out: see below
+  follow: true                  # stay at the bottom while lines arrive, if it is there (default)
+  wrap: true                    # wrap long lines to the view's width (default)
+  on_top: (chat-ui-more "chat" (state-get "room.token"))   # runs when the view reaches its top
+- message_input: "##say"
+  bind: chat.draft              # the draft: kept when the field loses focus, cleared when sent
+  hint: Write a message         # shown while it is empty and not focused
+  multiline: true               # Shift+Enter adds a line (default); false: one line only
+  max_lines: 4                  # it grows to this many lines, then scrolls (default 4)
+  max_length: 2000              # bytes (default 0: no cap)
+  send: Send                    # a button beside it that sends it (ImGui; default: none)
+  on: (chat-ui-send "chat" (state-get "room.token") (get-attr event "text"))
+```
+
+**`text_view:`** is read-only. Its text is a state path, or a computed expression (read-lane
+rules, §2.1). The backend keeps its scroll position under the bound path, so a view that comes
+back (a window reopened) keeps its place.
+
+- **Following.** At the bottom, new lines keep it at the bottom. Scrolled up, it stays where it
+  is.
+- **Older lines.** When lines are added above (an older page), it moves by their height, so the
+  lines in view stay put. Any other change of text (another channel) starts at the bottom.
+- **`on_top:`** runs when the user scrolls the view to its top, once each time it gets there, and
+  again when the wheel turns up there (ImGui) or the user presses Up against it (terminal). It
+  also runs once for each text that does not fill the view, so a log with only a few lines asks
+  for more until it fills or there is nothing older. An empty text does not run it. A disabled
+  view runs nothing.
+- **ImGui.** A bordered child window. Only the lines in view are drawn: their wrapped layout is
+  kept and redone only when the text or the width changes, so a long log costs what is on
+  screen. `height: 0` fills the window less what the window draws after the view (measured the
+  frame before), which is how a log sits above its message field in a sized window. In a window
+  that fits its content, it is 12 lines tall. Right-click copies the text.
+- **Terminal backends** (FTXUI, and tvision, which draws FTXUI's widgets). The lines are
+  word-wrapped to the width the view was laid out at last frame. It is `height` px tall in rows
+  of `cell_px_h`, or 8 rows. With focus, Up and Down, PageUp and PageDown, and Home and End scroll
+  it, and the wheel scrolls it from under the pointer. A gutter shows ▲ or ▼ (`^` or `v` without
+  Unicode) where there is more.
+- **A backend without one** draws the last lines as text lines (`Backend::text_view`'s default).
+
+**`message_input:`** sends what is typed to its `on:` program.
+
+- **Enter** sends it. The program reads it as `(get-attr event "text")`, and the draft at
+  `bind:` is cleared. A message of blanks only is not sent. The field keeps the keyboard focus, so
+  the next message can be typed at once. **`send:`** puts a button with that label on the field's
+  right (ImGui), which sends it as Enter does; a terminal backend has Enter only.
+- **Shift+Enter** adds a line (`multiline: true`, the default). In ImGui Ctrl+Enter does too. In
+  a terminal, Shift+Enter usually reaches the program as a plain Enter, so Alt+Enter and Ctrl+J
+  add a line there. Shift+Enter works where the terminal reports it (the kitty keyboard
+  protocol, xterm's modifyOtherKeys).
+- **Losing focus** keeps the draft at `bind:`. A draft written to `bind:` by a program shows in
+  the field while it is not being edited.
+- **ImGui** draws one line that grows with its wrapped text up to `max_lines`, then scrolls. The
+  hint is drawn over it while it is empty. A bare-name `on:` (a host handler) gets no `event`;
+  give it a program.
+
+### 5.16 Conference chat: the chat verbs and the chat component
+
+In a conference, the relay (arisrv) keeps the chat. Each client is pushed what it may read:
+
+- the room's messages, to everyone in the room;
+- a direct message, only to the connections holding its two participants' pids.
+
+A client asks for an older page when its log reaches the top. The state layout, the pagination
+and the permissions are in [ARIADNE_CHAT.md](roadmap/ARIADNE_CHAT.md). `register_room_intrinsics`
+adds the verbs to the action lanes. `ROOM` is the `room-join` handle (or its token), and
+`CHANNEL` is `""` for the room or a peer's pid:
+
+| verb | returns |
+|---|---|
+| `(chat-post ROOM TEXT [TO])` | `{ok}`, or `{ok #f error}`: TEXT is empty or longer than 2000 bytes once cleaned, or there is no relay to send it to. TO `""` posts to the room, a pid is a direct message. The relay may still refuse it (its rate limit, TO not in the room): `chat-info`'s `error` says so. |
+| `(chat-info ROOM [CHANNEL])` | `{available rev count oldest newest head first more loading error}`. `rev` changes whenever the messages held change; `oldest`..`newest` is the contiguous run held (`count` of them); `head` is the next seq and `first` the oldest the relay keeps; `more` says older ones are kept; `loading` says a page is on its way. It also asks for the newest page the first time a channel is read, and again when a push was lost. |
+| `(chat-messages ROOM [CHANNEL [AFTER]])` | the run, oldest first, as `{seq from name text t clock mine}` (`clock` is the local "HH:MM", `mine` is #t for your own), or with AFTER only those after that seq. |
+| `(chat-more ROOM [CHANNEL])` | `{ok loading more}`: asks for the page before the oldest message held. One request per channel is in flight; one unanswered for 3 s is sent again. |
+| `(chat-conversations ROOM)` | the direct-message conversations: `{peer name head present}`. |
+| `(chat-rev ROOM)` | a number that changes with every push the relay makes to you. |
+
+The shipped component `chat.ari` (§6.5) builds a chat window from these verbs, in the DSL:
+- a channel picker, the room and each conversation, with what came since you last looked;
+- a `text_view` that pages back when scrolled to the top;
+- a `message_input`.
+
+`room_users.ari` is the conference's users list. Its message button opens a conversation in the
+chat window. `conference_roster.ari` (the document cyprty runs) is built from both:
+
+```yaml
+import: [cvc://components/room_users.ari, cvc://components/chat.ari]
+windows:
+  - include: room_users
+    args: { id: users, rows: peer, chat: chat }
+  - include: chat
+    args: { id: chat, room: room.token }
+on_tick: |
+  (begin
+    ...                                     ; join, media, avatar
+    (room-users-step "peer" (state-get "conf.room") "chat")
+    (chat-ui-step "chat" (state-get "room.token")))
+```
+
+`src/ari/tests/chat_component.ari` tests the components' logic under `ari test`. It stands in for
+the room verbs with functions. `src/arigl/tests/chat_driver.ari` and `chat_two_clients.sh` run
+scripted arigl clients through a local arisrv: one posts, a late joiner pages back through
+everything, the two exchange direct messages, and a third checks it was pushed none of them.
+
+### 5.17 `data:`: datasets in the state tree
+
+A document names its datasets by URI. The host loads each one off the frame thread into one
+shared place in the state tree, and the scene draws from there. The design and its later phases
+are in [ARIADNE_DATA_ROADMAP.md](roadmap/ARIADNE_DATA_ROADMAP.md); the code is
+[`data.h`](../inc/cvc/ariadne/data.h).
+
+```yaml
+data:
+  city:                                             # the document's data.city
+    uri: cvcpkg://cy-pca/scene-austin-south-small   # where it comes from
+    path: share/cvc-scenes/austin_south             # the part of the package to keep
+    as: city_bundle                                 # how to decode it
+  notes: notes.json                                 # a bare URI: decoded by its extension
+  big: { uri: https://example.org/big.tar.gz, load: lazy }
+
+scene:
+  physics: {}
+  nodes:
+    - node: city
+      source: { data: city }          # the terrain and the buildings, drawn
+      body: static                    # and in the physics world
+```
+
+**Sources.** A source can be any of these:
+- a file or a directory, relative to the document;
+- an `https://` URL;
+- `cvcpkg://ORG/NAME[@VERSION]`, a cvcpkg data package;
+- `state://PATH?data`, where the host registered the `state` scheme (`register_state_uri_handler`);
+- any scheme a host registered (§6.4).
+
+`https` and `cvcpkg` need the host's network: `--net-allow https://cvcpkg.org` (or
+`AriRuntime.enable_net_allow([...])` in Python). A document that loads from the network lists
+`net` in `requires:`.
+
+**cvcpkg packages.** For a `cvcpkg://` source the host:
+1. asks the registry (`CVCPKG_URL`, else `https://cvcpkg.org`) for the package's newest
+   noarch build, or for `@VERSION`;
+2. downloads its archive;
+3. checks the archive against the registry's size and sha256;
+4. keeps it in a cache keyed by that hash (`CVC_DATA_CACHE`, else the user's cache directory).
+
+The next run reads the cache.
+
+**Archives.** An archive is recognized by its bytes, whatever its name: tar (plain, gzip or zstd)
+and zip (stored or deflate). It is unpacked in memory, and only its regular files are kept.
+- `path:` keeps one directory of the archive, stripped from the paths, or names one file.
+- A path that is absolute or climbs out with `..` fails the load.
+- So does going past `sys.data.max_entries` files (default 100,000) or `sys.data.max_bytes`
+  bytes (default 2 GiB).
+
+**Where it lands.** The store is the `data` subtree at the app root, one node per request, so the
+same request from two documents or a host is loaded once. The document's `data.<name>` is a
+transparent link to that node, so `bind: data.city.status` and `(state-get "data.city.rev")` read
+through it:
+
+| Under `data.city` | |
+|---|---|
+| `status` | `idle`, `fetching`, `unpacking`, `decoding`, `ready` or `error`; the node's value is the same |
+| `progress`, `error` | 0..1 while it loads; why it failed |
+| `rev` | 1, 2, ... each time a load completes: what a watcher polls |
+| `uri`, `canonical`, `sha256`, `size`, `as` | the request, what it resolved to (`cvcpkg://cy-pca/scene-austin-south-small@1.0.0+cvc.2`), the archive's hash and size, the decoder |
+| `files`, `files.<i>` | the file count; each file's path, with its bytes on the node's `data()` |
+
+**Decoders (`as:`).** Each decoder writes its outputs next to those keys. The default is `files`
+for an archive or a directory, and otherwise one picked by the file's extension:
+
+| `as:` | Writes |
+|---|---|
+| `files` | the files only |
+| `bytes`, `text` | `content` (the bytes on `data()`), `text` (the value) |
+| `json` | `json`: objects as children (a `.` in a key becomes `_`), arrays as `0`, `1`, ... with the count as the value |
+| `mesh` | `geometry`: a `cvc::geometry`, from any format `read_geometry` reads |
+| `volume` | `volume`: a `cvc::volume` |
+| `heightfield` | `terrain` (a `cvc::height_field`) and `bounds.*`, from a `terrain.json` |
+| `city_bundle` | `world` (a `world_geometry`), `terrain`, `buildings` (a `cvc::geometry`), `buildings_error`, `bounds.min_x` ... `max_y`, `satellite` (`satellite.png` decoded: the image on `data()`, its file path as the value) |
+
+A host adds its own with `register_data_decoder`.
+
+**Scene nodes.** A `source: { data: NAME }` node is an empty group at load. Once its dataset is
+ready, the scene draws into it the first of the dataset's `world`, `geometry`, `terrain` or
+`volume` that it has (`item:` picks one). It draws again whenever the dataset's `rev` changes, or
+the document's link points at another dataset. What it drew before goes, and so do its bodies:
+- a world's items become the node's children, its terrain becomes the node's height field (for
+  `ground:`) and wears the dataset's `satellite` image (north at the image's top), and with
+  `body:` its items are static bodies in the scene's `physics:` world;
+- a mesh or a height field becomes one mesh node;
+- a volume becomes a volume node.
+
+`frame: true` (or `first`) frames the main view's camera on what the node drew, the first time it
+draws, and `frame: always` does so each time. It writes the bounds to the camera's `frame` request
+(`<prefix>.viewers.main.camera.frame`, "min_x min_y min_z max_x max_y max_z"), which any program
+or host can write as well.
+
+**Document logic.**
+- `(data-load NAME URI [AS [PATH]])` points `data.NAME` at a new request and starts it. The
+  nodes bound to `NAME` keep drawing the old dataset until the new one is ready.
+- `(data-reload NAME)` loads it again.
+- `(data-status NAME)` returns its status.
+- `(data-files NAME)` lists its file paths.
+- `(data-file NAME PATH)` returns one file's bytes, or nil.
+
+**Hosts.** In C++, use `AppRuntime::data_store()`. In Python:
+- `pycvc.data_load` and `data_wait` start and wait for a load;
+- `data_files` and `data_file` read the files;
+- `data_world`, `data_height_field` and `data_geometry` return the objects the scene draws, which
+  share their arrays.
+
+So a host reads `"<prefix>.data.city"` and never opens the bundle a second time.
+
+### 5.18 Views of the scene: `type: viewport` and node `tags:`
+
+A `viewport` widget shows the document's scene inside one of its windows, from a camera of its
+own. It can show the whole scene, or only some of it, chosen by the scene nodes' `tags:`
+(roadmap §9.5). An overview map, a second angle on the same scene, or a debug view of one layer
+needs no host code.
+
+```yaml
+scene:
+  nodes:
+    - node: city                  # untagged: drawn in every view
+      type: geometry
+      source: { file: city.glb }
+    - node: agents
+      type: geometry
+      tags: [sim]
+      source: { stream: { handler: agent_glyphs } }
+    - node: nav_field
+      type: geometry
+      tags: [sim, debug]          # in a view that shows sim OR debug
+      source: { file: field.vtk }
+windows:
+  - window: Overview
+    id: overview
+    pos: [16, 16]
+    size: [380, 330]
+    children:
+      - type: viewport
+        view: overview            # its camera: <prefix>.viewers.overview.camera
+        show: [sim]               # the untagged nodes, and those tagged sim
+        mode: map                 # orbit (the default) | fly | map | track
+        width: 360                # logical px; the window's width when unset
+        height: 270               # 3/4 of the width when unset
+```
+
+| Key | Meaning |
+|---|---|
+| `view` | The view's name. Its camera is `<prefix>.viewers.<view>.camera`, so `camera_settings` (`args: { viewer: <view> }`) and actions drive it as they do the main one. Defaults to the widget's `id`. |
+| `show` | Tags, as a list or one string (`show: "sim debug"`). The view draws the untagged nodes and the nodes that carry one of these tags. When unset, it draws every tag. |
+| `hide` | Tags the view leaves out, whatever `show` says. |
+| `bind` | A state key whose value is the tag list to show (space- or comma-separated), read every frame. Use it for a layers menu: a widget writes the key, and the view follows. |
+| `mode` | Its own camera's mode: `orbit` (the default), `fly`, `map` (top-down, framed on what the view shows), or `track` with `track: <node id>`. (`camera: map` and the other three mode names still mean the mode.) |
+| `camera` | Draw from a named camera instead of its own: one the scene declares (`scene: cameras:`, below), or `main`, the main view's. |
+| `scene` | The scene it shows: a `scenes:` entry's name (below). Unset: the document's `scene:`. |
+| `shadows` | `true` (the default) draws the scene's shadows from the maps the scene's own renderer bakes. `own` bakes maps of its own from what this view draws, so a node it leaves out casts nothing there and a node the main view leaves out still casts; it costs one more bake. `false` draws none. |
+| `chrome` | `false` leaves out the scene's grid, axes and bounding box. Defaults to `true`. |
+| `clear_color` | `[r, g, b]` in 0..1, what the view clears to (one colour, never the scene's gradient). Defaults to the main view's background. (`background:` on a widget is the §5.12 backdrop key.) |
+| `azimuth`, `elevation`, `zoom` | Where its own orbit camera starts once the view is framed: the orbit's azimuth and elevation in degrees, and a zoom factor on the framed distance (2 is twice as close). |
+| `override` | Per-view restyling, below. |
+| `caption` | A label in the view's top-left corner. |
+| `input` | `false` makes the view ignore the mouse. Otherwise a drag orbits its camera (the middle or right button pans), the wheel zooms, and a double-click puts the camera back where it started. The view is outlined while the pointer is over it. |
+
+**Tags.** A node's `tags:` hold for its whole subtree, so a tagged child under a tagged parent is
+drawn only where both are allowed: the parent's tags take the child out of a view that rules them
+out. An untagged node is in every view, so content meant for the main view only needs a tag of its
+own that the other views leave out (`hide: [main_only]`). The main view always draws every node. A
+node hidden with `visible:` is gone from every view.
+
+**Overrides.** `override:` restyles nodes in one view only. Each entry names a node id, a tag, or
+`"*"` (everything), and sets any of `drawstyle` (`surface`, `wireframe`, `points`), `opacity`,
+`color`, `line_width` and `point_size`. What an entry does not set stays as the node has it. An
+entry covers the named node's subtree, and later entries add to earlier ones field by field:
+
+```yaml
+- type: viewport
+  view: xray
+  override:
+    "*": { opacity: 0.5 }                                  # everything half see-through,
+    buildings: { opacity: 0.15 }                           # the buildings more so,
+    sim: { color: [1.0, 0.9, 0.15], opacity: 1.0 }         # and the agents solid yellow
+```
+
+A restyled actor is drawn in that view by a twin: a second `vtkActor` with its own `vtkProperty`
+over the node's own mapper. The geometry, the shader replacements and the texture are shared, not
+copied. The twin follows the node's transform, visibility and material every frame, so a node that
+moves, changes colour or swaps LOD rung keeps its override.
+`examples/ariadne/documents/viewer_looks.ari` draws one scene four ways: wireframe, X-ray, a plan of
+one layer, and a clay model. `viewer_grid.ari` is four independent cameras on one scene.
+
+**Cameras.** A view's camera is its own unless it names one. `scene: cameras:` declares named
+cameras, each at `<prefix>.viewers.<id>.camera`, with the same `mode`, `track`, `azimuth`,
+`elevation` and `zoom` keys. Every viewport with `camera: <id>` draws from that camera, so a drag,
+the wheel or a double-click in any of them moves all of them, whatever each one shows or restyles.
+`camera: main` follows the main view's camera, and moves it.
+
+```yaml
+scene:
+  cameras:
+    - camera: plaza
+      azimuth: -60
+      elevation: 30
+      zoom: 1.3
+windows:
+  - window: Looks
+    children:
+      - { type: viewport, view: wire, camera: plaza, override: { "*": { drawstyle: wireframe } } }
+      - { type: viewport, view: xray, camera: plaza, override: { buildings: { opacity: 0.2 } } }
+```
+
+A named camera is framed on the whole scene the first time a view shows it, and its near and far
+planes span the whole scene. Named cameras and views share the `viewers.*` names, so give them
+different ones.
+
+**Shadows.** When the scene casts shadows (`shadows: { enabled: true }`), every view draws them. A
+view does not bake shadow maps of its own: it reads the ones the main view bakes
+(`SceneGraph::makeShadowReceiverPass`). They are in light space, so they hold from any camera. A
+view that leaves part of the scene out can bake its own instead (`shadows: own`,
+`SceneGraph::makeShadowPasses`).
+
+**Assets.** `assets:` names meshes, each a node's `source:` and `fit:`, that any node in any of the
+document's scenes draws with `source: { asset: <id> }`. Each asset is read and fitted once. Every
+node on it shares its geometry's buffers (`cvc::geometry` is copy-on-write); each node keeps its own
+transform, material, tags and VTK actor.
+
+```yaml
+assets:
+  bunny: { source: { file: stanford.bunny }, fit: { height: 4, up: y } }
+  pillar: { source: { box: { size: [1.2, 1.2, 6] } } }
+scene:
+  nodes:
+    - { node: statue, type: geometry, source: { asset: bunny } }
+    - { node: post, type: geometry, source: { asset: pillar }, transform: { position: [7, 7, 3] } }
+```
+
+**Scenes.** `scenes:` declares scenes of their own beside the document's `scene:`. Each entry takes
+the keys `scene:` does: nodes, lights, shadows, background, chrome, cameras. A viewport shows one
+with `scene: <id>`, from its own camera or a named camera that scene declares. Each scene is a
+SceneGraph of its own, under state `<prefix>.scenes.<id>`, so its nodes are at
+`scenes.<id>.graphics.root.children.<node>`. Its nodes' `visible:` binds and the widgets share the
+document's prefix. It gets a viewport of its own (`scene.<id>`), never shown, which holds its
+lights, background and shadow chain; the views of it mirror that viewport. While its shadows are on
+and one of its views shows, that viewport draws one pixel in a corner of the view, under it, so its
+maps are baked. A document may have only `scenes:`, and then the main view is empty.
+`examples/ariadne/documents/viewer_scenes.ari` has three scenes (day, night, a studio) built from
+the same assets.
+
+**Groups in one scene.** Where the "scenes" should share the lights and the shadows, make them
+tagged groups of one scene. `main_view: { show: [...], hide: [...] }` in `scene:` picks the groups
+the main view draws, as a viewport's `show:` / `hide:` do, and the main camera is framed on them.
+The props of the groups the main view leaves out come out of the main renderer for the length of
+its draw, so the views, which mirror it, still have them. They cast no shadow in the main view's
+maps either, so a view that shows them uses `shadows: own`.
+`examples/ariadne/documents/viewer_groups.ari` shows a courtyard in the main view and a gallery in
+a viewport.
+
+**How it draws.** Each view is a mirror viewport of the main one
+(`ViewportManager::addMirrorViewport`). It draws the same props, the same geometry, from its own
+camera, less the props of the nodes it leaves out and with its twins in place of the props it restyles
+(`Viewport::setMirrorFilter`). The widget
+reserves its rect in the window and cuts that rect out of the window's background
+(`ImGuiBackend::cut_window_background`); the view is drawn there. So the view moves and scrolls with
+its window, is clipped where the window clips it, and is hidden on any frame its widget is not
+drawn: a closed or collapsed window, another tab. Every AriRuntime host (arigl, pycvc_gl) has the
+widget. A terminal backend shows its placeholder. A new document removes the last one's views.
+
+Limits:
+- An override restyles actors. A volume (`volren`, `volslice`) draws as it is.
+- The view lies under the whole UI. Another window behind the viewport's window still draws over
+  the view.
+- A view's shadows come from the main view's maps, unless it bakes its own. A node a view leaves
+  out still casts its shadow there, and with `shadows: { focus: camera }` the maps follow the main
+  camera, not the view's.
+- An asset's nodes share its geometry's buffers, but each builds its own VTK arrays to draw from.
+- A `scenes:` entry's shadows are baked only while one of its views shows.
+- A view's first frame is opaque: the window's background is cut from the frame after the widget
+  first draws.
+
 ## 6. Composition: include / import / load
 
 Three mechanisms compose documents. They differ in **isolation**, not in how they
@@ -1098,6 +2093,30 @@ Any widget may carry an `id:` (not only windows): it names the instance a backen
 per-instance state on and that the core persists view state under (`tree.<id>.*`). An include
 site may override the unit's `id:`, so two instances of one unit stay distinct.
 
+Args are strings. A unit takes whole widget lists through **slots**: a `- slot: NAME` item in
+any of its widget lists marks where they go. The include site's `slots: {NAME: [...]}` puts its
+widgets there, in place of the item; a single widget map works too, and a slot left unfilled is
+dropped. The include site's widgets are its own: the unit's args are not substituted into them,
+though a `repeat:` around the include still substitutes `{i}`.
+
+```yaml
+units:
+  framed:
+    args: { title: Untitled }
+    type: group
+    children:
+      - text: "{title}"
+      - slot: body
+      - slot: footer
+windows:
+  - window: W
+    children:
+      - include: framed
+        args: { title: Hello }
+        slots:
+          body: [ { text: first }, { button: Go, on: go } ]
+```
+
 ### 6.2 `import:` — shared-scope library merge
 
 `process_imports` ([`loader.cpp:761`](../src/cvc/ariadne/loader.cpp)) resolves a URI (or
@@ -1107,6 +2126,17 @@ and cycle-guards on the resolved `canonical` identity
 ([`loader.cpp:789`](../src/cvc/ariadne/loader.cpp)), capped at `kMaxImportDepth = 32` /
 `kMaxImports = 4096` ([`loader.cpp:758`](../src/cvc/ariadne/loader.cpp)). Local units
 override imported ones. This is how a document composes a library of shipped panels.
+
+An entry may be `{uri: URI, optional: true}`: a library the host may not have (a component
+newer than it), whose absence is no warning, so `ari test` does not fail on it. A document's
+own unit marked `fallback: true` stands in for a unit of that name only where no import defines
+it, so a document adopts a shipped component and still runs on hosts without it:
+
+```yaml
+import: [{uri: cvc://components/card.ari, optional: true}]
+units:
+  card: {fallback: true, type: group, children: [...]}   # used where card.ari is not there
+```
 
 ### 6.3 `load:` — isolated sub-module mount
 
@@ -1118,7 +2148,22 @@ based at its own directory. Guards: a resolved-URI cycle set, a per-chain depth 
 depth cap alone would miss. The mount id is the explicit `as:`, else it is derived from
 the URI basename, sanitized to a single state segment, with sibling duplicates
 disambiguated `_2` / `_3`. A mounted module is sandboxed to its own state sub-prefix
-(§7) and reaches the parent only through explicitly granted `link:` holes.
+(§7) and reaches the parent only through explicitly granted `link:` holes, and calls only the
+functions its mount grants (§6.6).
+
+A module's own programs are its `init:`, its `on_tick:` and its widgets' actions. What they need
+from the host goes in the module's own `requires:` (§5.7). The loader
+captures `init:` and `on_tick:` onto the mount wrapper (`Widget::init_script`,
+`Widget::tick_script`), and the runtime runs both at the sub-prefix with the mount's functions:
+`init:` once, `on_tick:` as the mount's own tick resident (§2.3). So a module can own a loop, a
+request poller say, and be tested on its own with `ari test` (§13).
+
+`on_key:`, `on_pointer:` and `on_signal:` stay the outermost document's. A fragment that declares
+one loads with a warning, and the handler is ignored. Raw input and signals belong to the
+document, not to whatever it mounts: a module that saw every key could read what is typed into
+the parent's fields, and two modules could not both decide what Ctrl-C does. A module reacts to its
+own widgets. When it needs more, the parent handles the event and passes on what the module needs
+through a `link:` hole, which the module's `on_tick:` can read.
 
 ### 6.4 The URI resolver
 
@@ -1147,21 +2192,84 @@ relative bases in nested composition.
 
 `src/cvc/ariadne/components/*.ari` (installed to `<prefix>/share/libcvc/ariadne/components`
 and embedded in the wasm demos) are reusable windows a document imports by `cvc://` and
-includes. Each binds state keys a C++ object owns, so it needs no host code;
+includes. The `libcvc` cvcpkg bundles and the release tarballs carry the directory from 3.7.10.
+Earlier native bundles left it out, so with those a host needs `CVC_ARIADNE_PATH` pointing at a
+copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object owns, so it needs no host code;
 [`INDEX.ari`](../src/cvc/ariadne/components/INDEX.ari) catalogs them:
 
 | component | drives |
 |---|---|
-| `stage_lighting`, `scene_controls`, `camera_controls` | a `rig:` light, `shadows:`, the main camera |
-| `display_toggles`, `sim_transport`, `raster_view` | `show.*` layer keys, `sim.*` + host verbs, a host-published image |
-| `volren_controls`, `volslice_controls` | a `volren` / `volslice` node named `bunny_volume` |
-| `forest_controls`, `sea_controls`, `sky_controls` | `forest_trees` / `wave_sea` / `cloud_sky` nodes |
-| `mesh_tools` | a `mesh_lab` node named `mesh` (§5.4) |
-| `fe_controls` | an `fe_lab` node named `domain` (§5.4) |
+| `viewer_settings` | a viewer (arg `viewer`, default `main`): the frame-rate readout, UI size, grid / origin axis / scene bounds, camera and shadows in one window |
+| `stage_lighting`, `scene_controls`, `camera_controls` | a `rig:` light, `shadows:`, a viewer's camera (arg `viewer`) |
+| `display_toggles`, `sim_transport`, `raster_view` | `show.*` layer keys, `sim.*` + host verbs, a host-published image (arg `keys`, default `raster`) |
+| `volren_controls`, `volslice_controls` | a `volren` / `volslice` node (arg `node`, default `bunny_volume`) |
+| `forest_controls`, `sea_controls`, `sky_controls` | a `forest_trees` / `wave_sea` / `cloud_sky` node (arg `keys`, below) |
+| `world_controls` | a `generated_world` node (§5.4; arg `keys`) |
+| `mesh_tools` | a `mesh_lab` node (§5.4; arg `node`, default `mesh`) |
+| `fe_controls` | an `fe_lab` node (§5.4; arg `node`, default `domain`) |
+| `scene_view` | a window holding a view of the scene (the `viewport` widget, §5.18), from a camera of its own or a named one (args `view`, `show`, `hide`, `mode`, `camera`, `chrome`, `width`, `height`, `title`, `id`) |
+| `card` | a card in a list: avatar / title / subtitle / timestamp header, body, `media` and `actions` slots; its args are state keys, so a `repeat:` includes one per item (not a window: embed it) |
 | `transfer_function`, `transfer_function_editor` | any node's `transfer_function` model (args `node`, `id`): the ColorTable2 editor with histogram / contour spectrum / contour tree layers — see [`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) |
+| `chat`, `chat_panel` | a room's chat and direct messages through the chat verbs (args `id`, `title`, `room`); its functions come with the import: call `(chat-ui-step ID ROOM)` from `on_tick` (§5.16) |
+| `room_users`, `room_users_compact` | everyone in a room from `room-roster`, with local cam / mic / volume and a message button (args `id`, `title`, `rows`, `chat`, `self`); call `(room-users-step ROWS ROOM CHAT)` from `on_tick` |
+
+Each window component also takes `title` and `id` args, and every arg has a default, so a bare
+`include:` works. A document with two nodes of a kind includes the panel twice, each with its
+own `node` (or `keys`) and `id`; the window's geometry persists under `tree.<id>`. The forest,
+sea, sky and world realizers keep their live keys scene-wide (`forest.*`, `sea.*`, `sky.*`,
+`world.*`). A node's `keys:` prop moves them under a root of its own, and the panel's `keys` arg
+names the same root:
+
+```yaml
+import: cvc://components/forest_controls.ari
+windows:
+  - include: forest_controls                           # forest.*: the south wood
+  - include: forest_controls
+    args: { keys: north, title: North wood, id: north_forest }
+scene:
+  nodes:
+    - { node: south, type: forest_trees, count: 40 }
+    - { node: north, type: forest_trees, count: 80, keys: north }   # north.count, north.seed, ...
+```
+
+`camera_controls` and `scene_controls` also ship their widgets without the window
+(`camera_settings`, `shadow_settings`); `viewer_settings` is built from them.
+
+The `card` is a generic social or inbox card (§5.11 pictures, slots in §6.1):
+
+```yaml
+import: cvc://components/card.ari
+windows:
+  - window: Feed
+    children:
+      - type: group
+        repeat: (state-get "feed.items")
+        children:
+          - include: card
+            args: {id: post_{i}, avatar: feed.items.{i}.author.avatar,
+                   title: feed.items.{i}.author.name, subtitle: feed.items.{i}.author.handle,
+                   time: feed.items.{i}.when, body: feed.items.{i}.text}
+            slots:
+              media:
+                - image: ""
+                  bind: feed.items.{i}.media.0.url
+                  visible_when: (!= (state-get "feed.items.{i}.media.0.url") "")
+                  size: [440, 248]
+                  fit: cover
+              actions:
+                - { button: Reply, on: (state-set "compose.reply_to" "{i}") }
+```
+
+Slots `note` (a row above the header), `extra` (lines under the byline, in the header's text
+column) and `body` (widgets after the body text) take more of a post's parts. A part whose key
+is empty is not drawn. The avatar is a circle `avatar_size` px across (40),
+loading through `avatar_auth`'s credential where its URL needs one. A one-column grid with an
+outer border frames the card: an ImGui table, a box in a terminal.
 
 Most components that address one node use a fixed node id; copy the file and change the id to
-drive another node. `transfer_function` instead takes the node as an include arg (§6.1).
+drive another node. `transfer_function` instead takes the node as an include arg (§6.1). A
+component may also carry `functions:` (§6.6), which the import brings with its units: `chat` and
+`room_users` keep their windows current that way, from the document's `on_tick`.
 `examples/ariadne/documents/mesh_lab.ari` uses the last two, and so does
 `examples/ariadne/documents/fem_gallery.ari`, which steps one `fe_lab` and one `mesh_lab`
 through the twenty items of [FEM_GALLERY.md](FEM_GALLERY.md). Run them from the repository
@@ -1169,6 +2277,68 @@ root, where the component path resolves:
 `arigl run --component-path src/cvc/ariadne examples/ariadne/documents/fem_gallery.ari`.
 
 ---
+
+### 6.6 `functions:` — code a document shares with its programs and its modules
+
+`defun` inside a program defines a function for that program alone, and the stdlib scope is
+frozen. A document declares the functions all of its programs can call in a top-level
+`functions:` block, and grants some of them to the modules it `load:`s.
+
+```yaml
+functions: |
+  ; a scalar state_exec program of (defun name (params) body...) forms, nothing else
+  (defun semver-part (v i) (int (nth (string.split v ".") i)))
+  (defun semver-major (v) (semver-part v 0))
+  (defun fetch-text (url)
+    (set r (http-get url))
+    (bytes.decode (get-attr r "body")))
+init: (state-set "major" (str (semver-major "3.7.5")))
+root:
+  - button: Refresh
+    on: (state-set "latest" (fetch-text "https://example.org/version"))
+  - load: badge.ari
+    as: badge
+    link: {server: {to: args.server, mode: ro}}
+    functions: [semver-major]          # a list of names, one name, or "*" for all of them
+```
+
+- **Declaring.** The block is split into its top-level forms. Each must be
+  `(defun name (params) body...)`; anything else (a `set`, a bare atom, a form that does not
+  parse) is skipped with a warning. When a name is defined twice, the later definition stands,
+  with a warning.
+- **Who can call them.** Every program in the document's scope: `init:`, every `on:` action,
+  the residents (`on_tick:`, `on_key:`, `on_pointer:`, `on_signal:`), key bindings, `tests:`
+  (§13), and the functions themselves. The read lane (`bind:`, `visible_when:` and other reactive
+  expressions) has its own reduced environment and does not get them.
+- **`import:`.** A library's `functions:` merge into the importer's, as its `units:` do. When two
+  imports define the same name, the later one stands, with a warning. The document's own
+  definition replaces an imported one silently. A library of functions with an `ari test`
+  document that imports it is a unit test (§13).
+- **Granting.** A `load:` entry's `functions:` names the functions its module may call. They come
+  from the parent's scope: its own, its imports', and the ones its own mount granted, so a grant
+  can pass down nested mounts. A granted function brings along the parent's functions it calls,
+  transitively, and the module can call those too. A name the parent does not define is skipped
+  with a warning. A module whose mount grants nothing gets none: it is isolated by default, as
+  its state is.
+- **A module's own.** A loaded fragment may have its own `functions:` and `import:`s. They are
+  visible inside the module only, never to its parent. One that replaces a granted function of
+  the same name warns.
+- **Code, not authority.** A function runs in the program that calls it. In a module it is
+  chrooted to the module's sub-prefix (§7.3), so `(state-set "out" ...)` writes
+  `includes.<as>.out`, and it reaches the parent's state only through the module's `link:` holes.
+  Granting a function never grants state.
+- **How they run.** The functions are a prelude, their sources one per line, that the runtime
+  runs ahead of each program in the scope (`Widget::functions`, a `FunctionScope` on the root and
+  on every mount wrapper). Each program defines them in its own process at the start, at about one
+  step per function against the action's step budget (§7.4 limits), so no closure or environment
+  is shared between processes. A resident defines them once, before its loop.
+- **Checked at load.** The free-head preflight (§5.7) knows each scope's functions. A program that
+  calls a function its scope lacks, such as a module calling one its mount did not grant, gets
+  the same "this host does not provide" warning as a missing host verb. The function bodies are
+  checked too, as `functions:`.
+
+`LoadResult::functions` lists the document's functions, and `LoadResult::root.functions` holds the
+same as a `FunctionScope`. A mount's are on its wrapper widget.
 
 ## 7. State prefix and mount scoping
 
@@ -1262,7 +2432,16 @@ part of what the parent granted), an opaque one is not. `state-delete`, the expi
 and `state-watch` still act on the physical path and do not reach through a hole. A fragment may declare
 the holes it expects with `needs:`; an ungranted expectation warns and the fragment falls
 back to a local (fail-safe) binding. A per-mount `init:` runs once at the sub-prefix
-**after** the holes are wired.
+**after** the holes are wired, with `(has? ...)` as the document's own `init:` has it and
+with the module's functions (§6.6). The mount's `on_tick:`
+resident starts right after it (§2.3). A reconcile keeps that resident running when the new tree
+has the same mount at the same sub-prefix with the same program (its body and its functions), as
+a reload of an unchanged document does, and stops it otherwise. A repeated mount's resident runs
+per instance and restarts at a reconcile. An instance stops when its outermost `repeat:` count
+drops below it (a nested repeat's count is not watched: its instances stop at the next
+reconcile). A module's functions come
+only from its own `functions:` and the mount's `functions:` grant, never from its parent
+implicitly.
 
 ---
 
@@ -1329,6 +2508,13 @@ document path is the document's (§5.6):
 | `ari` | libcvc only (FTXUI, optionally tvision) | in the terminal; a `scene:` is dropped | [`src/ari`](../src/ari/main.cpp) |
 | `arigl` | libcvc + cvcGL (VTK, ImGui) | in a real window, or `--terminal` with its scene rendered behind the widgets | [`src/arigl`](../src/arigl/main.cpp) |
 | `arisrv` | libcvc + gRPC + WebSocket | headless, as a server (the conference relay + WS↔gRPC bridge) | [`src/arisrv`](../src/arisrv/main.cpp) |
+| `arix`, `ariglx` | `ari`, `arigl` + an embedded CPython (pycvc, pycvc_gl, numpy) | as `ari` and `arigl`, plus a document's `python:` block and a Python program in place of the document (§9.6) | [`src/ariadne_python`](../src/ariadne_python/python_engine.h) |
+
+Each is its own cvcpkg package, built from its recipe in [`cvcpkg/recipes`](../cvcpkg/recipes)
+against the installed libcvc: `cvcpkg install ari`, `cvcpkg install arigl`, and for a room's
+server `cvcpkg install arisrv` (linux, macOS and windows). arisrv's transports, its Jolt avatars
+and its libjpeg-turbo video rungs are libcvc's, so it needs a libcvc built with them: every
+libcvc after 3.7.8 is, and arisrv's standalone configure refuses an SDK with neither transport.
 
 ```
 arigl run      [--terminal] [flags] doc.ari [document args...]
@@ -1368,7 +2554,8 @@ Two `AppRuntime` pieces make that possible for any host:
   host menu named like one of them adds its items to it. With no `document_menus()`, the host's
   menus go first.
 - `set_host_keys(keys)` adds the host's key bindings to every document's, and gives each
-  document the Keys window (§5.3), even one with no keys of its own.
+  document the Controls window (§5.3), even one with no keys of its own. `set_host_mouse(m)`
+  adds the host camera's pointer settings to that window, above the keys.
 - `load()` clears the last document's scene first (`SceneAdapter::clear()`: its nodes, free
   lights, rigs, physics, and the background, shadows and chrome it set), whether it is a hot
   reload or a switch to another document. A document without `channels:` also drops the last
@@ -1412,7 +2599,8 @@ ari test     [flags] doc.ari...                   # headless test run (§13)
 ```
 
 Its flags (`--backend ftxui|tvision`, `--prefix P`, `--fps N`, `--no-mouse`,
-`--component-path DIR`, and the snapshot ones) go **before** the document. They are the
+`--component-path DIR`, `--log FILE` for the run's warnings as they happen (§2.4), and the snapshot
+ones) go **before** the document. They are the
 general flags every runtime shares, parsed by
 [`host_cli.h`](../inc/cvc/ariadne/host_cli.h). Whatever follows the document is the
 document's (§5.6): `ari run doc.ari --help` prints the document's own usage. A general
@@ -1420,10 +2608,24 @@ flag written after the document goes to the document, and `ari` points that out.
 
 Three of the general flags are for pictures. `--graphics auto|kitty|sixel|iterm|color|mono` sets
 how images draw (see *Pixel graphics* in §4), and `--image NAME=FILE` publishes a picture
-for the document's `image:` widgets with `src: NAME`
+for the document's `image:` widgets with `src: NAME` (an `image:` can also name a URL itself,
+§5.11)
 ([`terminal_images.ari`](../examples/ariadne/terminal/terminal_images.ari) is an example).
 With `--ansi` and `--graphics kitty`, `sixel` or `iterm`, `snapshot` also prints the images, after
 clearing the screen, at the terminal's cell size (`--cell-size WxH` where it can't be asked).
+
+**`ari-media`** is the same program with sound: cvcMedia, libcvc's GL-free media library
+([`src/cvcMedia`](../src/cvcMedia/CMakeLists.txt)), is linked in. It brings up SDL3's audio
+subsystem alone, with no window, display or SDL video, and still no GL, VTK or ImGui, so it
+plays sound in a terminal; `ari-media info` lists the playback devices. The lean `ari` links
+libcvc only, with no SDL. `ari-media` is its own package
+([`cvcpkg/recipes/ari-media`](../cvcpkg/recipes/ari-media/recipe.yaml), depending on `sdl3`),
+a separate binary name, so the two never install the same file and a launcher can prefer
+`ari-media` where it is installed. In a libcvc build it is built with cvcGL or with
+`-DCVC_BUILD_ARI_MEDIA=ON`. cvcMedia holds the SDL3 audio output that used to be cvcGL's
+(`cvc::media::playback`; cvcGL links cvcMedia and keeps the `cvc::gl::playback` names), and
+its FFmpeg player plays the `video:` and `audio:` widgets (§5.13). The `ari-media` package also
+depends on `ffmpeg-lgpl`, linked shared.
 
 `ari` is its own cvcpkg package (`cvcpkg install ari`, linux for now), built from
 [`cvcpkg/recipes/ari`](../cvcpkg/recipes/ari/recipe.yaml) against the installed libcvc,
@@ -1520,39 +2722,154 @@ deletes the image tiles under them, and the addon decodes each image asynchronou
 moment the half-block underlay can show through: the picture flickers between its real pixels
 and the half-block version, never to blank.
 
-### 9.3 From Python (a full app via `AriRuntime`)
+### 9.3 Writing a Python host
 
-`AriRuntime` ([`AriRuntime.h`](../inc/cvc/gl/ariadne/AriRuntime.h)) collapses all of the
-above into one object, exposed through the `pycvc_gl` bindings. Python never sees SDL or
-VTK directly — cvcGL's onscreen window is SDL's (VTK renders into it) and SDL is the internal
-input backend:
+A Python program can be a document's host: it opens the document, the document calls into it,
+and the two pass data both ways. `pycvc_gl.ariadne.Host`
+([`pymod_gl/ariadne.py`](../bindings/pycvc/pymod_gl/ariadne.py)) is that host; the programs in
+[`examples/ariadne/python`](../examples/ariadne/python) are the place to start:
+
+| Example | The C++ host it mirrors | What it shows |
+|---|---|---|
+| [`hello.py`](../examples/ariadne/python/hello.py) | `ariadne_hello` | a button calls a Python function, another raises an event Python handles; Python writes the document every frame |
+| [`data_feed.py`](../examples/ariadne/python/data_feed.py) | `ariadne_stream` | Python pushes two plotted series, a table, a numpy picture and a live video stream, and reads the document's controls |
+| [`form.py`](../examples/ariadne/python/form.py) | `nav_compute` | a two-way form: a function returns a dict the document writes with `state-set-tree`, an async function runs a Monte Carlo while the UI keeps drawing, a watch recomputes a preview |
+| [`nav.py`](../examples/ariadne/python/nav.py) | `nav_convoy`, `nav_city_drive` | a Python loop drives Humvees on a `cvc::nav` sim_world (pycvc) through Austin, or a block city when its bundle is not installed: true-scale models, routes planned for their turning radius, Jolt physics or nav's kinematic bicycle (the Plant combo), a chase or overview camera, readouts and a map picture |
+
+Each takes `--offscreen` (GL with no window), `--headless` (no GL), `--frames N` and
+`--png PATH`; off a window it presses its own buttons and prints what the document shows.
+`nav.ari` has a `scene:`, so it requires `gl.scene` (§5.7) and `nav.py` has no headless run.
+
+`nav.py` finds Austin with `pycvc_gl.scenes.find_scene()` (`$CVC_NAV_BUNDLE`, else
+`<prefix>/share/cvc-scenes/austin_south`: `cvcpkg install scene-austin-south-small
+vehicle-humvee`) and the Humvee with `find_vehicle_model()`. `pycvc_gl.vehicle.VehicleModel`
+makes a glTF vehicle +X forward, +Z up and true to scale (as the C++ demos'
+`load_vehicle_template` does), and `seat_transform` / `body_transform` place it from a heading or
+a physics body's pose. Its planning grid is `pycvc.nav_world_rasterize(city.world(), rows, cols,
+...)`, cvc::nav's rasterizer (no VTK), which also gives the terrain's height at each sample: the
+navigator gets the grade (`nav_sim_world_set_terrain` with the Humvee's
+`nav_plant.terrain_config_of`), and the routes keep off the slopes `nav_terrain_build` marks
+infeasible for it. The Jolt plant drives on flat ground with the buildings as boxes, as the C++
+city demos do; `--relief` puts it on the city's own terrain and building mesh
+(`pycvc.nav_plant(..., ground=field)` starts each vehicle on the ground under it). There the grade
+term halves the rollovers but does not end them: the limit it applies is the climb, and a Humvee
+cornering on a 10-25 degree side slope at 5-9 m/s can still roll (4 of 16 in 96 s of Austin).
+
+Its `scene:` block is `terrain_lab.ari`'s soft afternoon look (§5.4): a pale sky gradient, a
+low warm `three_point` sun with a cool fill, and shadows that follow the camera with soft edges
+(`shadows.softness`, the shadow filter's radius in texels). The city's materials are matte (low
+specular), set from Python on the nodes it adds.
 
 ```python
-import pycvc, pycvc_gl
+from pycvc_gl.ariadne import Host
 
-app  = pycvc.App()
-view = pycvc_gl.SceneRenderer(...)      # owns the GL window
-rt   = pycvc_gl.AriRuntime(view.scene(), view.camera(), view.overlay())
+host = Host(mode="window")       # "window", "offscreen" (GL, no window) or "headless" (no GL)
 
-rt.load("demo.ari")
-# Register a Python function as a DSL verb (host intrinsic on the app-wide scheduler):
-rt.register_verb("greet", lambda name: f"hello {name}")
-rt.register_async_verb("fetch_rows", slow_query)   # an async function: (fetch_rows) parks
+@host.function("greet")          # (greet NAME) in any of the document's programs
+def greet(name):
+    return f"Hello, {name}!"     # numbers, str, list, dict, None (and numpy) go back
 
-while not rt.should_close():
-    rt.frame(dt)     # processUIEvents → cam.update → drain → visibility → tick
-    rt.render()      # NEVER call the underlying rt.render() directly; go through view
+@host.async_function("solve")    # (solve ...) parks its program; this runs on a pool thread
+def solve(a, b):
+    return heavy(a, b)
+
+@host.on("reset")                # a button or menu item with `on: reset`
+def reset():
+    host.set("count", 0)
+
+@host.on_frame                   # every frame, after the document's programs, before the draw
+def tick(dt):
+    host.set_series("signal", samples)   # a plot: draws it
+
+host.load("doc.ari")             # register first: requires: is checked here
+host.run()                       # until the window closes or the document quits
+host.close()
 ```
 
-`register_verb` / `register_async_verb` install exactly one `register_action_intrinsics`
-provider onto the app-wide scheduler, so the verbs are reachable from the document's
-action lane. An async verb is an async function on the app's async host
-([STATE_EXEC_EXCEPTIONS.md](STATE_EXEC_EXCEPTIONS.md) section 3): `(fetch_rows)` parks the
-action while `slow_query` runs on the app's background task pool, then returns `str()` of its
-result. If it raises, the call raises a `PythonError`, which a `try` can catch. The call is
-charged to the action's caps (§2.2). `register_async_verb(name, done_channel, fn)` also posts
-the result to `done_channel`, for documents that wait with `(msg-recv "done_channel")`. `AriRuntime` also exposes `step`, `run`, `on`, `post_key`, `post_pointer`,
-and `reload_if_changed`.
+**Keys.** A key is relative to the document's state prefix, as a `bind:` is (§7): `host.set("a.b",
+1)` writes what `bind: a.b` shows. A key starting with `/` is app-root absolute. The prefix is
+the host's `name` (`Host(name=...)`, `"ari"` by default).
+
+**Python to the document.**
+
+| Call | What the document sees |
+|---|---|
+| `host.set(key, value)` (also `host[key] = value`) | the value's text: an int, a float (shortest round trip), `"1"`/`"0"` for a bool, `""` for None |
+| `host.set_tree(key, value)` | a subtree, as `(state-set-tree)` writes one: dict keys and list indices name children, a list's node holds its length |
+| `host.set_table(key, rows, columns=None)` | rows at `key.<i>.<column>` and the row count at `key`, for `repeat: (state-get "key")` (column names at `key_columns`) |
+| `host.set_series(key, values, limit=None)` | the comma-separated numbers a `plot:` draws |
+| `host.publish_image(name, array)` | the picture `image:` widgets with `src: name` show: (H, W), (H, W, 3) or (H, W, 4), uint8 or float in [0, 1], row 0 at the top |
+| `host.open_stream(id, w, h)` | a live video stream at `streams.<id>` for a `stream_view` widget or a `type: stream` node; `stream.publish(frame)` sends one |
+| `host.run_program(script, done=None)` | a program queued as one of its actions (`done(how)` gets `""` or why it did not finish) |
+| `host.emit(event)` | the event a button raises: its `on()` handler runs in the next frame |
+
+**The document to Python.** `host.on(event)` handles a bare `on: event`.
+`host.function(name)` and `host.async_function(name)` make a Python callable a function the
+document's programs call with arguments (`pycvc.host_function` builds it; values convert as
+`pycvc.Exec`'s do, §10.1). A synchronous function runs inline in the frame. An async one is an
+async function on the app's async host
+([STATE_EXEC_EXCEPTIONS.md](STATE_EXEC_EXCEPTIONS.md) section 3): its program parks while it
+runs on the app's background task pool, `(name-async ...)` returns a future,
+`with_call=True` passes the call first (`call.cancelled()`, `call.post(value)`), and
+`done_channel` also posts its value there. Their exceptions are the document's: the call raises
+a `PythonError` (its `python_type` names the Python exception), which a `try` catches.
+
+**Reading back.** `host.get(key, default)`, `get_float`, `get_int`, `get_bool` (which reads
+`"1"`/`"true"`/`"yes"`...), `get_series` (a numpy array), `get_tree` (the inverse of `set_tree`),
+`host.watch(key)` (a callback with the new value after a frame that changed it; `tree=True`
+for a subtree), `host.warnings`, and the frame: `host.snapshot(path)` (PNG) and
+`host.frame_rgb()` (an (H, W, 3) array).
+
+**The scene.** In a GL mode `host.scene` is the document's `SceneGraph`, so Python can add its
+own nodes beside the ones the `scene:` block realizes: `host.lab` is a `pycvc_gl.lab.Lab` over
+it (meshes, markers, paths, fields), and `host.frame_bounds(lo, hi)` aims the camera.
+`nav.py` draws its agents and tracks that way.
+
+**Modes.** `"window"` needs a display. `"offscreen"` renders into an offscreen window: a capture,
+or CI on a software GL (VTK picks GLX, EGL or OSMesa at run time; the ImGui overlay needs GLX, so
+CI runs it under Xvfb, see `pycvc-linux` in ci.yml). Its scene and UI clocks step by each frame's
+`dt`, so its frames are reproducible. A view whose shorter side is under 700 logical pixels
+starts with the windows hidden, as on a phone (§5.14), so captures use 1024 x 768 or more. `"headless"` has no GL at all: a `pycvc.AriApp`, an
+`AppRuntime` with no backend and no scene. The document's `init:`, residents, actions, host calls
+and state all run, but nothing is drawn, so a computed `bind:` is never evaluated, a `scene:` is
+dropped with a warning, and a document that `requires: gl.scene` does not load. Tests and CI use
+it.
+
+**Threads and the GIL.** Handlers, functions, `on_frame` hooks and `watch` callbacks run on the
+thread that calls `step()`/`run()`; an async function runs on a pool thread. An async function
+may compute and write state, but the scene and the pictures (`publish_image`, `host.lab`,
+`host.scene`) belong to the frame's thread: hand its result to an `on_frame` hook. A frame releases the
+GIL while C++ runs (so do `load()`, `wait_idle()` and the destructors of the runtime and the
+app), and each Python call takes it back, so an async function or another Python thread runs
+while the frame does. A callback may read and write state and queue programs, but not run a
+frame: `step()`, `run()`, `frame()` or `render()` from inside one raises `RuntimeError`
+(`AriRuntime` refuses it too), and `load()` from inside one waits for the frame to end.
+`close()` waits for the async functions still running, so a long one should watch
+`call.cancelled()`.
+
+**Errors.** An exception in an `on()` handler, an `on_frame` hook or a `watch` callback is raised
+from the `step()`/`run()` that ran it. A function's is the document's (above); one it does not
+catch stops that program with a warning, logged through `logging` (`pycvc_gl.ariadne`), and with
+`Host(strict=True)` raised from `step()` as an `AriadneError` whose cause is the Python
+exception: what a test wants.
+
+**The caps.** Ariadne caps each action at 0.1 s and 5000 steps (§2.2), sized for a document's
+own code, and a Python function's run time counts against the time cap (an async one's CPU time
+as steps too). A Python host raises them: `Host` sets `ariadne.limits.action_max_time` to 30 s
+and `action_max_steps` to 0 (no limit) unless `limits=` says otherwise (`limits={}` keeps
+Ariadne's). An async call parks its program, so a long one costs the UI nothing.
+
+**Underneath.** `Host` composes the bindings, which a program can use directly:
+`pycvc_gl.AriRuntime(view, cam, ui)` ([`AriRuntime.h`](../inc/cvc/gl/ariadne/AriRuntime.h)) in a
+GL mode and `pycvc.AriApp(app, prefix)` headless, both with `load`, `frame`, `render`, `step`,
+`run`, `on`, `register_host_function(pycvc.host_function(name, fn, is_async=False,
+with_call=False, done_channel=""))`, `register_quit`, `run_program`, `take_warnings`,
+`wait_idle`, `has_function`, `prefix`; `AriRuntime` adds `publish_image`, `enable_streaming`,
+`set_fixed_clock`, `post_key`, `post_pointer` and `reload_if_changed`. The older
+`register_verb(name, fn)` (no arguments, no value) and `register_async_verb(name, fn)` (no
+arguments, `str()` of the value) still work. In C++ the same functions are
+`AppRuntime::register_function(name, native_fn)` and `register_async_function(name, marshal,
+done_channel)`.
 
 ### 9.4 A document set, installed or served
 
@@ -1598,6 +2915,107 @@ scene), `pycvc.Exec` ([`bindings/pycvc/pycvc_exec.h`](../bindings/pycvc/pycvc_ex
 is the lighter handle. It owns a **private** async scheduler and lets you register Python
 callables as DSL functions (§10). One `Exec` is driven by one thread — use a separate
 `Exec` per thread.
+
+### 9.6 The scripting hosts: `arix` and `ariglx`
+
+`arix` and `ariglx` are `ari` and `arigl` with an embedded CPython
+([`src/ariadne_python`](../src/ariadne_python/python_engine.h); the plan for the rest, the browser
+and `arisrv`, is [roadmap/ARIADNE_SCRIPTING_HOSTS.md](roadmap/ARIADNE_SCRIPTING_HOSTS.md)). They
+take the same commands and flags, and add:
+
+- a document's `python:` block, run at load;
+- a Python program in place of the document: `ariglx run app.py`;
+- `<host> python [args]`, the interpreter as a plain `python3`;
+- `--python-path DIR` (repeatable): DIR on the interpreter's `sys.path`, as `PYTHONPATH` puts it.
+
+The interpreter is the prefix's when the host is installed beside a `python312` (with what is in
+its site-packages: pycvc, pycvc_gl, numpy, ...), else the one the host was built against.
+`PYTHONHOME` and `PYTHONPATH` work as for `python3`. There is one interpreter per process: numpy
+and the SWIG modules are not sub-interpreter safe.
+
+Each is a cvcpkg package of its own (Linux), so the stock hosts stay Python-free:
+`cvcpkg install ariglx` brings `python312`, `numpy-cp312`, `pycvc-cp312` and `pycvc-gl-cp312` into
+the same prefix, and `ariglx` finds them there. `arix` brings pycvc but not pycvc_gl; install
+`pycvc-gl-cp312` too for a Python program, whose `Host` is pycvc_gl's.
+
+**A document's `python:` block.**
+
+```yaml
+requires: [python, python.numpy]
+python:
+  path: [py]              # sys.path entries, relative to the document (its directory is always one)
+  modules: [sim]          # imported at load
+  export:                 # functions to export by name
+    - sim.step_world
+    - {name: sim.reset, as: reset-world, async: true}
+  source: |
+    import numpy as np
+
+    @export
+    def histogram(values, bins=16):
+        counts, edges = np.histogram(values, bins)
+        return {"counts": counts.tolist(), "edges": edges.tolist()}
+init: (state-set-tree "hist" (histogram (list 1 2 2 3)))
+```
+
+- The block is its source alone (`python: |`), or a map of `source:`, `modules:`, `path:` and
+  `export:`.
+- **When.** It runs on every load (a reload too), after the document parses and before its
+  `requires:` is checked and `init:` runs, in a module of its own, fresh each load. A reload also
+  reloads the modules it imports from the document's own directories.
+- **Exports.** They become the document's host functions, as `Host.function` makes them (§9.3):
+  `(histogram xs)` passes the call's arguments as Python values and returns the function's value.
+  - `@export` marks a function in the source, where `export` is already defined. A module marks its
+    own with `from _arihost import export` (or `pycvc_gl.ariadne.export`, which also imports
+    under plain `python`).
+  - `export:` names functions too; `as:` gives one another name, and `async: true` makes it an
+    async function (§10.1).
+  - Exporting goes through pycvc, so pycvc must be importable.
+- **Errors.** A Python exception in a call is a `PythonError` the document can catch
+  ([STATE_EXEC_EXCEPTIONS.md](STATE_EXEC_EXCEPTIONS.md)). One at load fails the load, with the
+  traceback from the document's code.
+- **Caps.** As `Host` does, the host raises the per-action caps (§2.2) to 30 s and no step cap, so a
+  Python call can take its time, unless the app's tree already sets them.
+- **Tokens.** `python` holds where an embedded Python runs the block, and `python.<module>` where
+  `<module>` is importable (`python.numpy`): list them in `requires:`, or ask with
+  `(has? "python.numpy")`. A stock host fails a document that requires `python` with an error that
+  names the scripting hosts, and ignores a `python:` block with a warning.
+- **Trust.** Natively the block runs with the user's authority, like any program they start (it
+  can `import os`), so run a document with Python only when you would run the program.
+
+**A Python program in place of the document.** `ariglx run app.py [args]` (or `snapshot`, `check`;
+`arix` too) runs `app.py` as `__main__`, with `sys.argv` = `[app.py, args...]` and its directory
+first on `sys.path`. Its `pycvc_gl.ariadne.Host()` adopts the host (mode `"embedded"`, the default
+inside a scripting host) instead of opening a window of its own: the same window, runtime and
+state, with the rest of `Host`'s API (§9.3).
+
+```python
+from pycvc_gl.ariadne import Host
+
+host = Host()  # this ariglx's window and document runtime
+
+
+@host.function("twice")
+def twice(x):
+    return 2 * x
+
+
+host.load("app.ari")
+host.run()  # the host's own loop: run's window, snapshot's frames
+```
+
+- `host.run()` runs the host's loop, once, and returns the document's exit status. A program that
+  loads a document and returns has the host run it then. The host exits with the program's status,
+  or the document's when the program's is 0.
+- `on_frame` hooks, `watch` callbacks and `on` handlers run in each of the host's frames, whichever
+  loop drives them. An exception in one is printed and closes the document with status 1.
+- `pycvc_gl.ariadne.current_host()` is that Host (None under plain `python`), and the same program
+  runs under plain `python`, where `Host()` opens a window.
+- In `arix` the Host has no GL (its mode is `"headless"`).
+
+**`<host> python`.** The embedded interpreter as `python3`, with the host's packages:
+`ariglx python -m pytest`, or `ariglx python -m grl_snam.ariadne live austin-freedrive`. That
+interpreter has no document attached, so `Host()` there opens a window of its own.
 
 ---
 
@@ -1733,7 +3151,8 @@ arigl run --net-allow https://tx.wtf --credential-store nicotina share/nicotina/
 The flags hold for `run`, `snapshot`, `check` and `info` alike. With the network on, `ari
 snapshot` and `arigl snapshot` (in a window or with `--terminal`) keep running after their
 frames until the document is idle, no request in flight and no program step waiting (a program
-parsing one reply before it sends the next is not idle), for three steps running, at most 10 s.
+parsing one reply before it sends the next is not idle), for three steps running, at most 10 s
+(`--settle S` sets another limit, for a slow server or a slow build).
 So one frame shows what a document that signs in and fetches brought back, and CI can render it
 against a local test server. `ari snapshot` prints the programs' warnings after the frame, as
 `arigl snapshot` does.
@@ -1745,6 +3164,10 @@ against a local test server. `ari snapshot` prints the programs' warnings after 
 | `--net-policy FILE` | read `allow` and `credential` lines from `FILE` (repeatable; implies `--net`) |
 | `--credential-store S` | keep credentials across runs in `S` (implies `--net`; not in a browser) |
 | `--credential-env N=V` | credential `N` is the token in environment variable `V`, for this run (repeatable; a policy `credential` line must bind `N`; not in a browser) |
+| `--oidc-issuer ISSUER` | documents may sign in (§10.5) with `ISSUER` only; allows its origin (repeatable; implies `--net`) |
+| `--oidc-client I=ID` | sign in to issuer `I` as client `ID`, the launcher's registration (repeatable; pins `I` too) |
+| `--oidc-redirect-uri U` | the redirect URI a browser page registers (§10.5; default: the page's own URL) |
+| `--no-browser` | never open the user's browser: sign-in shows a device code, `open-url` shows the URL |
 
 Without them a document has no `http-get` or `http-request`, and an `http(s)://` URI does not
 resolve. With them the host ([`net_host.h`](../inc/cvc/ariadne/net_host.h), `enable_net`):
@@ -1872,6 +3295,186 @@ until they did, `ari snapshot`'s plain text put a space after each wide glyph. A
 three are data jobs: a large reply is parsed and written a slice per step, so it doesn't stall
 a frame. `json-parse` and `json-encode` are pure, so reactive expressions may use them too.
 
+### 10.5 Signing in: OAuth 2.0 and OpenID Connect
+
+A document signs its user in with any OpenID Connect provider (Keycloak, Authentik, Google, a
+txwtf instance, ...) from two public facts: the provider's **issuer** URL and the **client id** of
+a public client registered with it. The host ([`oidc_host.h`](../inc/cvc/ariadne/oidc_host.h))
+reads the provider's discovery document (`/.well-known/openid-configuration`), runs the whole flow
+and keeps every token in its credential store (§10.3) under a name the document chose. The
+document then names that credential on its requests, as it does any other:
+
+```lisp
+(oidc-sign-in (dict "issuer" "https://id.example/realms/demo" "client_id" "my-app"
+                    "scopes" (list "openid" "profile" "email") "credential" "me"))
+;; ... later, once oidc.me.phase is "signed_in":
+(http-get "https://api.example/v1/me" (dict "auth" "me"))
+```
+
+Nothing in libcvc is specific to a provider. The verbs exist wherever the network is on with an
+HTTP backend (every `ari` and `arigl`, in a terminal, a window and a browser page):
+
+| verb | what |
+|---|---|
+| `(oidc-sign-in OPTS)` | start a sign-in, or resume one kept from before; returns `"started"` at once (or `"in_progress"`) |
+| `(oidc-cancel NAME)` | stop a sign-in in progress; `#t` if there was one |
+| `(oidc-sign-out NAME [OPTS])` | forget the tokens; revoke them where the provider can (`"sent"` or `"no"`) |
+| `(oidc-status NAME)` | the sign-in's status as a dict: the keys of the table below, `claims` a dict |
+| `(open-url URL)` | open an http(s) URL the host allows in the user's browser (§10.6) |
+
+`oidc-sign-in`'s options (an unknown one is an error):
+
+| option | what |
+|---|---|
+| `issuer` | the issuer URL, exactly as the provider's discovery document writes it (required) |
+| `client_id` | the public client (required unless the launcher gives one with `--oidc-client`, which wins) |
+| `credential` | the credential to keep the sign-in under (required; 1-56 of `A-Z a-z 0-9 . _ -`) |
+| `scopes` | a list of scopes or one space-separated string; default `openid` (`openid` asks for an ID token, and so for the claims) |
+| `params` | a dict of extra authorization parameters: `prompt`, `login_hint`, `acr_values`, `audience`, ... (never one the host sets: `state`, `nonce`, `redirect_uri`, `code_challenge`, ...) |
+| `flow` | `auto` (default), `loopback`, `device` or `redirect` |
+| `interactive` | `#f`: only resume a kept sign-in (or complete a browser page's return); start nothing new. Default `#t` |
+| `status` | the state path the progress goes to, under the document's root; default `oidc.<credential>` |
+| `client_secret` | for a provider that gives installed apps a non-confidential "secret" (Google's desktop clients); never a confidential client's |
+| `port`, `redirect_path` | the loopback flow's port (default 0: any free one) and path (default `/callback`) |
+| `redirect_uri` | the redirect flow's redirect URI (default: the page's own URL; `--oidc-redirect-uri` wins) |
+| `timeout` | seconds to wait for the browser's redirect (default 300) |
+
+**Progress** goes to the state tree, so a widget shows it with a `bind:` or a `visible_when:`,
+and to the channel `oidc#<credential>`, which gets the final status dict when a sign-in ends
+(signed in, error, cancelled, signed out), so a program can wait with
+`(msg-recv "oidc#me")`. None of it is secret:
+
+| key under `oidc.<credential>` | what |
+|---|---|
+| `phase` | `signed_out`, `discovering`, `waiting_for_browser`, `redirecting`, `device_code_shown`, `exchanging`, `refreshing`, `signed_in`, `error`, `cancelled` |
+| `signed_in` | `true` or `false` |
+| `flow` | `loopback`, `device`, `redirect`, or `stored` (a sign-in kept from before) |
+| `issuer` | the issuer |
+| `error`, `error_description` | a short code (the provider's OAuth error, or `state_mismatch`, `invalid_token_reply`, `unsupported_flow`, `discovery_failed`, `timeout`, `network_error`, `session_expired`, ...) and a sentence for the user |
+| `user_code`, `verification_uri`, `verification_uri_complete`, `code_expires_at`, `interval` | the device flow's code and where to enter it |
+| `browser_url`, `browser_opened` | the authorization URL, and whether a browser was opened at it (show the URL when not) |
+| `expires_at`, `has_refresh` | when the access token expires (Unix seconds, `0` unknown), whether there is a refresh token |
+| `claims.sub`, `.iss`, `.name`, `.email`, `.preferred_username`, `.exp` | the signed-in user, from the ID token |
+
+**The flows.** `flow: auto` picks per host; a flow the host or the provider cannot run fails with
+`unsupported_flow` and says why (a provider without `device_authorization_endpoint` cannot run the
+device flow). All of them check the provider's reply against the request: the authorization code
+flows send PKCE S256 (RFC 7636), a random `state` and a `nonce`, check the `state` (and `iss`,
+RFC 9207, when the provider sends it) of the reply, and check the ID token.
+
+| host | auto picks | how |
+|---|---|---|
+| `ari` (FTXUI, tvision) or `arigl --terminal` on a machine with a desktop, `arigl` in a window | `loopback` (RFC 8252) | listens on `127.0.0.1` on a free port, opens the system browser at the authorization endpoint, takes the one redirect back and shows the tab "you can close this tab" |
+| the same over SSH, with no display, or `--no-browser` | `device` (RFC 8628) | shows `user_code` and `verification_uri` (the document shows them; `verification_uri_complete` carries the code in the URL) and polls the token endpoint every `interval` seconds, `slow_down` adding 5; `access_denied` and `expired_token` end it |
+| the arigl-web page and the `ari.html` (xterm.js) page | `redirect` | navigates the page to the authorization endpoint; the PKCE verifier, `state` and `nonce` wait in `sessionStorage` (this tab's, this origin's) meanwhile. When the provider sends the page back, the document's `oidc-sign-in` (run again as the page loads, `interactive` `#f` will do) exchanges the code, removes the record and takes `code` and `state` out of the address bar with `history.replaceState`. A page can also run `device` |
+
+With no browser and no device flow at the provider, `auto` still runs `loopback` and shows the
+authorization URL (`browser_url`) for the user to open on the same machine. A host that cannot open
+a browser prints the URL on stderr, except while a full-screen terminal UI owns the screen, where
+the document shows it.
+
+**Capability tokens** (`requires:`, `has?`, §5.7): `oidc` (the verbs are here), `oidc.loopback`
+(native hosts), `oidc.device` (every host), `oidc.redirect` (a browser page) and `browser` (a
+browser can be opened here: not over SSH, not with `--no-browser`).
+
+**Tokens** never reach the document. The access token is credential `NAME`, bound to the issuer's
+origin and to any origins a policy `credential NAME ...` line names (so an API on another origin
+gets it when the launcher says so). The refresh token is `NAME.refresh`, bound to the token
+endpoint's origin, and the ID token `NAME.id`. The host:
+
+- refreshes the access token (RFC 6749 6) before it expires, while the document is idle and before a
+  request that names it, and once more when a request is answered 401, then sends the request again;
+- with `--credential-store`, keeps the sign-in across runs: the next `oidc-sign-in` (`interactive`
+  `#f` is enough) refreshes it and reports `flow` `stored`, or, when the provider has ended the
+  session (`invalid_grant`), forgets it and reports `signed_out` with `error` `session_expired`;
+- on `(oidc-sign-out NAME)` forgets all three and revokes the refresh token (RFC 7009) where the
+  provider has a `revocation_endpoint` (`"revoke" #f` skips it). `"end_session" #t` also ends the
+  provider's own session in the browser (RP-initiated logout at `end_session_endpoint`, with
+  `post_logout_redirect_uri` when given).
+
+The ID token's `iss`, `aud` (and `azp`), `exp`, `iat` and `nonce` are checked (OIDC Core 3.1.3.7);
+a refreshed one must name the same `sub`. Its signature is not checked against the provider's
+JWKS: the host takes ID tokens only from the token endpoint, over TLS, which 3.1.3.7 (6) allows in
+place of the signature, and libcvc has no RSA/EC verification in every build (OpenSSL is optional,
+and absent from the browser builds). An unsigned token (`alg` `none`) is refused.
+
+**Which issuers.** By default a document may sign in with any issuer whose origin the host allows
+(§10.3), and the provider's endpoints must share the issuer's origin. A launcher pins it, gives
+the client id, or lets endpoints live elsewhere with flags or policy lines:
+
+```sh
+ari run --oidc-issuer https://id.example/realms/demo --oidc-client https://id.example/realms/demo=my-app \
+    --credential-store demo app.ari
+```
+
+```text
+oidc https://id.example/realms/demo                      # sign in with this issuer only
+oidc https://accounts.google.com https://oauth2.googleapis.com   # its endpoints are also there
+oidc-client https://accounts.google.com 1234.apps.googleusercontent.com
+credential me https://api.example                        # the access token may go to the API too
+```
+
+Naming an issuer in either form allows its origin (and the endpoint origins listed) and pins
+sign-in to the issuers named. An endpoint that is not https (http only for a loopback issuer, as a
+local provider and the tests use), or is at an origin the policy does not list for its issuer,
+fails the discovery: the host never contacts it. In a browser page the same flags go in the page
+config's `flags` (`ariadne.config.json`):
+
+```json
+{"flags": ["--net", "--oidc-issuer", "https://id.example/realms/demo",
+           "--oidc-client", "https://id.example/realms/demo=my-app"]}
+```
+
+**What a provider must allow** for a public client:
+
+- the authorization code grant with PKCE S256 and no client secret (a "public" client); the
+  device grant (`urn:ietf:params:oauth:grant-type:device_code`) for terminals over SSH;
+- for the loopback flow, the redirect URI `http://127.0.0.1/callback` with any port (RFC 8252
+  7.3), or a fixed `port` the document asks for;
+- for a browser page, the page's URL as a redirect URI, exactly (with its query, e.g.
+  `?src=app.ari`, or pin the page's document with `src_param: false` so it has none), and CORS for
+  the page's origin on the discovery document and the token, device authorization and revocation
+  endpoints (the page calls them with `fetch`), and the page's own Content-Security-Policy must list
+  the provider's origin in `connect-src` (the arigl-web and `ari.html` pages run under a strict
+  one);
+- refresh tokens if sessions should outlive the access token (some providers want the
+  `offline_access` scope, or a parameter such as Google's `access_type=offline` in `params`);
+- a `post_logout_redirect_uri` registered, if a document uses one.
+
+**What stays where.** The authorization URL holds no secret (the PKCE verifier never leaves the
+host; a leaked `state` cannot complete a sign-in without it), so it may go to the state tree. A
+browser page keeps its tokens in memory, like every credential there (§10.3): a reload signs in
+again, which the provider's own session cookie usually makes a redirect there and back. The
+loopback listener binds `127.0.0.1` only, takes one redirect, answers anything else 404, and
+closes.
+
+[`examples/ariadne/documents/oidc_sign_in.ari`](../examples/ariadne/documents/oidc_sign_in.ari)
+signs in to a provider given on its command line and shows the claims:
+
+```sh
+ari run --oidc-issuer https://id.example/realms/demo examples/ariadne/documents/oidc_sign_in.ari \
+    --issuer https://id.example/realms/demo --client my-app --api https://api.example/v1/me
+```
+
+The tests run every flow against a stub provider: `net_oidc_test` (the protocol pieces),
+`ariadne_runtime_test` `AriadneOidc.*` (the flows, a redirect included, refresh, sign-out, a forged
+`state` or `nonce`, the policy), `ari_net_test` `AriOidc.*` and `ari_oidc_hosts` (`ari` with FTXUI
+and tvision and `arigl --terminal` in tmux, `arigl` in a window: no token in any screen, stdout or
+stderr), and the wasm ari under node (ci.yml: the redirect flow there and back, the device code).
+[`src/ari/tests/stub_oidc_provider.py`](../src/ari/tests/stub_oidc_provider.py) is a stub provider
+to try a document against by hand.
+
+### 10.6 Opening the user's browser: `open-url`
+
+`(open-url URL)` opens an http(s) URL in the user's web browser
+([`browser.h`](../inc/cvc/net/browser.h)): natively with `$BROWSER` when it is set, else
+`xdg-open`, `open` or `ShellExecute`, its output thrown away; in a browser page with
+`window.open`. It returns `#t` when a browser was asked to open it and `#f` where there is none
+(over SSH, no display, `--no-browser`): the host then prints the URL, outside a full-screen terminal
+UI, and the document should show it. The URL's origin must be one the host allows (§10.3), since a
+page opened in a browser carries whatever its URL says; anything else, and a scheme other than
+http(s), raises. One URL a second at most. It needs the network on, like the other verbs here.
+
 ---
 
 ### 10.5 WebSockets
@@ -1947,20 +3550,24 @@ without either has no `ws-*` verbs, so a document asks `(has? "ws-open")` and po
 - `ws-open` and `ws-recv` are async I/O calls like the HTTP verbs: the connect, or the wait,
   runs on the background pool and the program parks. `ws-poll` is the one to call from an
   `on_tick` that also does other work: it takes what has arrived and returns.
-- In a browser build without threads (`ari.html`, arigl's page) they are started instead, as the
-  HTTP verbs are (§10.2): `ws-open` creates the browser's `WebSocket` and returns to the frame
-  loop, and its open, error or `timeout` resumes the program; `ws-recv` waits on the socket's
-  next message from its callbacks, with a timer for `SECONDS`. Frames keep drawing meanwhile. A
-  killed or timed-out program abandons its connect (the socket is closed) or drops its wait
-  (`cvc::net::ws_start`, `WsConnection::recv_async` in
-  [`ws_client.h`](../inc/cvc/net/ws_client.h)). A page may close a socket only with code 1000
-  or 3000-4999, so there any other `CODE` is sent as 1000.
 
 ## 11. Caveats — what is not yet wired
 
 State plainly so authors are not misled. Each item cites the code; the roadmap items
 below (G17–G21 in the internal gap report) are tracked for reconciliation.
 
+- **The scripting hosts are native and partial** (§9.6,
+  [roadmap](roadmap/ARIADNE_SCRIPTING_HOSTS.md)). Only the top document's `python:` block runs: a
+  `load:`ed module's is not run yet. A Python program runs in a window, offscreen or in `arix`, not
+  under `ariglx --terminal`, and its embedded `Host.load()` from inside a frame raises (load before
+  `run()`). There is no `ariglx-web` (the browser) and no `arisrvx` yet. The `arix` and `ariglx`
+  packages are Linux-only, where `pycvc-cp312` and `pycvc-gl-cp312` are; elsewhere build them
+  in-tree with the bindings (`-DCVC_BUILD_PYCVC=ON`).
+
+- **Sign-in checks an ID token's claims, not its signature** (§10.5): the token comes straight from
+  the token endpoint over TLS. A sign-in kept in a `--credential-store` file is picked up only when
+  the document calls `oidc-sign-in` again (with `"interactive" #f`); until then its access token is
+  sent but not refreshed.
 - **`http(s)://` resolves only where the host turned the network on** (§10.3). `ari` and
   `arigl` register the handler, checked against their allowlist, when given `--net` or its
   kin; otherwise `import:` / `load:` over http and `fetch("http://…")` fail with an
@@ -1986,13 +3593,14 @@ below (G17–G21 in the internal gap report) are tracked for reconciliation.
   planned follow-up.
 - **AriRuntime document-level `on_key` / `on_pointer` residents need a host to feed them.**
   The `post_key` / `post_pointer` forwarding is wired, and `arigl` feeds it from SDL3. On
-  Windows, Linux (X11 and Wayland) and macOS cvcGL's onscreen window is SDL's: SDL makes the
-  window and its OpenGL context, VTK renders into it, and the window's interactor turns SDL's
-  events into VTK's (the camera and ImGui see them as before) and hands the same events to
-  `cvc::gl::SdlInput::attach`, keys and pointer alike. `$CVCGL_SDL_WINDOW=0` keeps VTK's own
-  window; the documents then get VTK's key events, renamed as SDL names them, and no pointer. In
-  the browser VTK's canvas is still the window, and SDL listens on the page for the keys typed
-  into it (a hidden canvas of SDL's own); SDL owning the canvas is the next step. arigl hands the
+  Windows, Linux (X11 and Wayland), macOS and in the browser cvcGL's onscreen window is SDL's:
+  SDL makes the window and its OpenGL context (in the browser the page's canvas, filling its
+  container, and WebGL2), VTK renders into it, and the window's interactor turns SDL's events
+  into VTK's (the camera and ImGui see them as before) and hands the same events to
+  `cvc::gl::SdlInput::attach`, keys and pointer alike. `$CVCGL_SDL_WINDOW=0` (in the browser,
+  the page's `ENV`) keeps VTK's own window; the documents then get VTK's key events, renamed as
+  SDL names them, and no pointer, and in the browser SDL listens on the page for the keys typed
+  into VTK's canvas (a hidden canvas of SDL's own). arigl hands the
   document neither the keys typed into an ImGui field nor the clicks on a window. A host on
   AriRuntime's stock loop that does not attach an `SdlInput` gets no key or pointer residents
   ([`AriRuntime.h`](../inc/cvc/gl/ariadne/AriRuntime.h), [`SdlInput.h`](../inc/cvc/gl/SdlInput.h)).
@@ -2164,7 +3772,11 @@ tests:
 ```
 
 Each test runs as an `on:` action program would, chrooted to the document's prefix, with the
-document's host verbs and limits. The tests run one at a time, in document order, starting
+document's host verbs, functions (§6.6) and limits, save time. A running app gives a program 0.1 s
+(`ariadne.limits.action_max_time`). Under `ari test` every program may run as long as the run's
+`--timeout`, so a Debug build or a slow CI runner doesn't kill one that is merely slow, while the
+step cap still stops a runaway. `--action-time S` sets it: `0.1` holds a document to what an app
+allows, and `0` lifts it. The tests run one at a time, in document order, starting
 after `init:` and the first frame, and each starts once the one before has ended. A test fails
 when it raises an exception it doesn't catch, or is killed (a step or time cap, a syntax error).
 The rest still run. The loader's free-head check (§5.7) covers test programs too.
@@ -2195,7 +3807,8 @@ A document **fails** when:
 The network is as `snapshot`'s (§10.3): off unless `--net`, `--net-allow`, `--net-policy` or
 `--credential-store` turns it on. A test that makes a request waits for its reply as any program
 does. A document run for `--frames N` with the network on waits after its frames, as `snapshot`
-does, until its requests have come back (at most 10 s), and a warning in that time fails it too.
+does, until its requests have come back (at most 10 s, or `--settle S`), and a warning in that
+time fails it too.
 `--prefix`, `--component-path` and `--image` work as for `snapshot`. A document has no command
 line of its own under `ari test`: an `args:` block's arguments take their defaults. Flags go
 before the first document.

@@ -1408,6 +1408,13 @@ void GraphicsNode::addToRenderer(vtkRenderer *renderer) {
   }
 }
 
+void GraphicsNode::appendViewProps(std::vector<vtkProp *> &out) {
+  SceneNode::appendViewProps(out);
+  if (m_bboxNode)
+    if (vtkProp *p = m_bboxNode->actor())
+      out.push_back(p);
+}
+
 void GraphicsNode::removeFromRenderer(vtkRenderer *renderer) {
   // Remove label - capture the actor pointer to avoid accessing 'this' after
   // deletion

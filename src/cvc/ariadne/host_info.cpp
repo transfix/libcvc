@@ -6,6 +6,7 @@
 #include <cvc/ariadne/ftxui_backend.h>
 #include <cvc/ariadne/host_info.h>
 #include <cvc/ariadne/loader.h>
+#include <cvc/ariadne/media_player.h>
 #include <cvc/ariadne/net_host.h>
 #include <cvc/ariadne/requires.h>
 #include <cvc/ariadne/tvision_backend.h>
@@ -110,11 +111,14 @@ HostInfo gather_host_info(const Runtime &rt, const std::string &runtime) {
   info.ftxui = FtxuiBackend::available();
   info.tvision = TvisionBackend::available();
   info.http = cvc::net::have_http_backend();
+  info.media_player = media::have_player_factory();
   const NetHostStatus net = net_host_status();
   info.net = net.enabled;
   info.net_allowed = net.allowed;
   info.credential_store = net.credential_store;
   info.env_credentials = net.env_credentials;
+  info.oidc_issuers = net.oidc_issuers;
+  info.browser = net.browser;
   const HostFacts facts = rt.host_facts();
   info.graphics.kitty = facts.caps.kitty;
   info.graphics.sixel = facts.caps.sixel;
@@ -146,6 +150,8 @@ std::string format_host_info(const HostInfo &info, bool json, bool functions) {
       << ", \"gl\": " << (info.gl ? "true" : "false")
       << ", \"gl_info\": " << json_string(info.gl_info)
       << ", \"http\": " << (info.http ? "true" : "false")
+      << ", \"audio\": " << (info.audio ? "true" : "false")
+      << ", \"media_player\": " << (info.media_player ? "true" : "false")
       << "},\n  \"network\": {\"on\": " << (info.net ? "true" : "false") << ", \"allow\": [";
     for (std::size_t i = 0; i < info.net_allowed.size(); ++i)
       o << (i ? ", " : "") << json_string(info.net_allowed[i]);
@@ -153,7 +159,10 @@ std::string format_host_info(const HostInfo &info, bool json, bool functions) {
       << ", \"env_credentials\": [";
     for (std::size_t i = 0; i < info.env_credentials.size(); ++i)
       o << (i ? ", " : "") << json_string(info.env_credentials[i]);
-    o << "]},\n  \"capabilities\": {";
+    o << "], \"oidc_issuers\": [";
+    for (std::size_t i = 0; i < info.oidc_issuers.size(); ++i)
+      o << (i ? ", " : "") << json_string(info.oidc_issuers[i]);
+    o << "], \"browser\": " << (info.browser ? "true" : "false") << "},\n  \"capabilities\": {";
     for (std::size_t i = 0; i < info.capabilities.size(); ++i)
       o << (i ? ", " : "") << json_string(info.capabilities[i].first) << ": "
         << (info.capabilities[i].second ? "true" : "false");
@@ -204,6 +213,13 @@ std::string format_host_info(const HostInfo &info, bool json, bool functions) {
       o << "    " << line << "\n";
   }
   o << "  HTTP (cvc::net)               " << yes(info.http) << "\n";
+  o << "  audio output (SDL3)           " << yes(info.audio) << "\n";
+  o << "  video/audio player            " << yes(info.media_player) << "\n";
+  if (!info.audio_info.empty()) {
+    std::istringstream lines(info.audio_info);
+    for (std::string line; std::getline(lines, line);)
+      o << "    " << line << "\n";
+  }
   o << "\nnetwork\n";
   if (!info.net) {
     o << "  off (--net, --net-allow ORIGIN or --net-policy FILE turn it on)\n";
@@ -216,6 +232,12 @@ std::string format_host_info(const HostInfo &info, bool json, bool functions) {
       << (info.credential_store.empty() ? std::string("in memory") : info.credential_store) << "\n";
     for (const std::string &name : info.env_credentials)
       o << "  from the env    " << name << "\n";
+    if (info.oidc_issuers.empty())
+      o << "  sign-in         any issuer an allowed origin serves\n";
+    for (const std::string &issuer : info.oidc_issuers)
+      o << "  sign-in with    " << issuer << "\n";
+    o << "  browser         " << (info.browser ? "yes" : "no (sign-in shows a device code)")
+      << "\n";
   }
   o << "\ncapabilities (requires: / has?)\n";
   for (const auto &[name, holds] : info.capabilities) {
@@ -223,7 +245,7 @@ std::string format_host_info(const HostInfo &info, bool json, bool functions) {
     for (const CapabilityToken &t : capability_tokens())
       if (name == t.name)
         meaning = t.meaning;
-    std::string pad(name.size() < 16 ? 16 - name.size() : 1, ' ');
+    std::string pad(name.size() < 18 ? 18 - name.size() : 1, ' ');
     o << "  " << name << pad << (holds ? "yes" : "no ") << "  " << meaning << "\n";
   }
   o << "\nfunctions programs can call: " << info.functions.size();

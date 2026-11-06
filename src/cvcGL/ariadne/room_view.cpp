@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cvc/ariadne/conference/room_avatar.h>
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_roster
 #include <cvc/ariadne/conference/room_scene.h>
 #include <cvc/ariadne/holon.h>
@@ -28,9 +29,10 @@ namespace {
 
 namespace rs = cvc::ariadne::conference;
 
-// An avatar marker: a 0.5 x 0.5 x 1.7 m box standing on the pose (its base at the pose's z).
-constexpr float kAvatarWidth = 0.5f;
-constexpr float kAvatarHeight = 1.7f;
+// An avatar marker: a 0.5 x 0.5 x 1.7 m box standing on the pose (its base at the pose's z), the
+// body every avatar has (room_avatar.h), with what it wears posed around it.
+using rs::kAvatarHeight;
+using rs::kAvatarWidth;
 // Its visor: a dark slab across the front (+X in the avatar's frame) at head height, standing
 // proud of the face so it reads from behind and the side too. Centred at kVisorOffset from the
 // marker's centre.
@@ -51,44 +53,20 @@ std::string visor_node_id(const std::string &pid) {
   return room_view::avatar_node_id(pid) + "_visor";
 }
 
-// A stable, distinct colour per peer (a hue from the pid's hash); the local avatar is gold.
-void avatar_color(const std::string &pid, bool self, float out[3]) {
-  if (self) {
-    out[0] = 0.95f, out[1] = 0.75f, out[2] = 0.20f;
-    return;
-  }
-  std::uint32_t h = 2166136261u; // FNV-1a: the same pid colours the same on every client
-  for (unsigned char c : pid)
-    h = (h ^ c) * 16777619u;
-  // A hue in [0, 360) that skips 30-75 degrees, the oranges and yellows near the local avatar's
-  // gold, so a peer is never mistaken for you.
-  const std::uint32_t deg = h % 315u;
-  const float hue = static_cast<float>(deg < 30u ? deg : deg + 45u) / 60.0f; // [0, 6)
-  const float s = 0.55f, v = 0.85f, c = v * s;
-  const float x = c * (1.0f - std::fabs(std::fmod(hue, 2.0f) - 1.0f));
-  float r = 0, g = 0, b = 0;
-  switch (static_cast<int>(hue)) {
-  case 0:
-    r = c, g = x;
-    break;
-  case 1:
-    r = x, g = c;
-    break;
-  case 2:
-    g = c, b = x;
-    break;
-  case 3:
-    g = x, b = c;
-    break;
-  case 4:
-    r = x, b = c;
-    break;
-  default:
-    r = c, b = x;
-    break;
-  }
-  out[0] = r + (v - c), out[1] = g + (v - c), out[2] = b + (v - c);
+std::string part_node_id(const std::string &pid, std::size_t i) {
+  return room_view::avatar_node_id(pid) + "_part" + std::to_string(i);
 }
+
+// Frames between re-reads of the avatar catalog and everyone's choice (as for the names).
+constexpr int kLooksEvery = 15;
+
+// A marker is re-posed only once its pose matrix has moved this far (any element: metres, or a
+// rotation's cosines) from the one it shows: 0.1 mm, or under a hundredth of a degree. Less never
+// shows, but every pose applied moves a shadow caster, and a moved caster re-bakes the shadow maps.
+// A standing avatar's shown pose changes by rounding from frame to frame (under mouse look, held
+// at the camera's heading, its rotation by 2e-16 and its position by up to 3e-8 m), so the room
+// re-baked them -- and rebuilt every caster's shaders -- with nobody moving.
+constexpr double kPoseEpsilon = 1e-4;
 
 // Row-major 4x4 of a rotation quaternion and a translation.
 void pose_matrix(const cvc::physics::quat &q, double tx, double ty, double tz, double m[16]) {
@@ -134,11 +112,8 @@ room_view::room_view(SceneRenderer &view, cvc::app &app, std::string room, std::
 
 room_view::~room_view() {
   clear_scene();
-  SceneGraph &sg = _view.scene();
-  for (const auto &kv : _avatars) {
-    sg.removeGraphics(avatar_node_id(kv.first));
-    sg.removeGraphics(visor_node_id(kv.first));
-  }
+  while (!_avatars.empty())
+    remove_marker(_avatars.begin()->first);
   // _lod_cache goes with the members: it cancels its queued builds and waits for a running one.
 }
 
@@ -254,41 +229,26 @@ void room_view::sync_avatars(cvc::ariadne::holon &h, double wall_dt) {
   const std::set<std::string> present(pids.begin(), pids.end());
 
   // Departed participants (or one re-registered pose-less under the same pid): drop their markers.
-  for (auto it = _avatars.begin(); it != _avatars.end();) {
-    if (!present.count(it->first)) {
-      sg.removeGraphics(avatar_node_id(it->first));
-      sg.removeGraphics(visor_node_id(it->first));
-      _heads.erase(it->first);
-      it = _avatars.erase(it);
-    } else {
-      ++it;
-    }
+  std::vector<std::string> gone;
+  for (const auto &kv : _avatars)
+    if (!present.count(kv.first))
+      gone.push_back(kv.first);
+  for (const std::string &pid : gone) {
+    remove_marker(pid);
+    _heads.erase(pid);
   }
   if (!present.count(_self))
     _have_self = false;
 
+  sync_looks(pids);
   for (const std::string &pid : pids) {
     const bool self = (pid == _self);
     const std::string id = avatar_node_id(pid);
-    if (!_avatars.count(pid)) {
-      cvc::ariadne::Scene one;
-      cvc::ariadne::SceneNode n;
-      n.id = id;
-      n.source_primitive = "box";
-      n.box_size[0] = n.box_size[1] = kAvatarWidth;
-      n.box_size[2] = kAvatarHeight;
-      n.has_material = true;
-      avatar_color(pid, self, n.color);
-      n.ambient = 0.3f;
-      n.diffuse = 0.8f;
-      one.nodes.push_back(n);
-      cvc::ariadne::SceneNode v = n; // the visor: posed with the marker every frame below
-      v.id = visor_node_id(pid);
-      v.box_size[0] = kVisorSize[0], v.box_size[1] = kVisorSize[1], v.box_size[2] = kVisorSize[2];
-      v.color[0] = 0.08f, v.color[1] = 0.09f, v.color[2] = 0.12f;
-      one.nodes.push_back(v);
-      realize_scene(sg, one, _prefix, &_warnings); // plain geometry nodes: nothing to keep
-      _avatars[pid] = true;
+    const rs::avatar_look &look = _looks[pid];
+    const bool known = _avatars.count(pid) != 0;
+    if (!known || _avatars[pid].key != look.key)
+      build_marker(pid, look); // new, or it chose something else (or the catalog changed)
+    if (!known) {
       if (self) {
         // Its first pose is where it starts, not a correction to ease out: drop the jump from the
         // placeholder it was predicted at before the first sample, so the marker appears there
@@ -313,19 +273,127 @@ void room_view::sync_avatars(cvc::ariadne::holon &h, double wall_dt) {
     double m[16];
     // The box is centred on its origin: lift it by half its height to stand on the pose.
     pose_matrix(p.rotation, p.position.x, p.position.y, p.position.z + 0.5 * kAvatarHeight, m);
-    if (std::shared_ptr<GraphicsNode> node = sg.getGraphics(id))
-      node->setPoseMatrix(m);
-    if (std::shared_ptr<GraphicsNode> visor = sg.getGraphics(visor_node_id(pid))) {
-      // The same rotation, its centre moved by the offset in the avatar's frame (R * offset).
-      double vm[16];
-      std::copy(m, m + 16, vm);
-      for (int r = 0; r < 3; ++r)
-        vm[4 * r + 3] += m[4 * r] * kVisorOffset[0] + m[4 * r + 1] * kVisorOffset[1] +
-                         m[4 * r + 2] * kVisorOffset[2];
-      visor->setPoseMatrix(vm);
+    // The marker, visor and parts move together, or (within kPoseEpsilon of the pose they show)
+    // not at all.
+    const auto shown = _posed.find(pid);
+    bool moved = shown == _posed.end();
+    for (int i = 0; !moved && i < 16; ++i)
+      moved = std::fabs(m[i] - shown->second[i]) > kPoseEpsilon;
+    const std::vector<rs::avatar_part> &parts = _avatars[pid].parts;
+    if (moved) {
+      std::copy(m, m + 16, _posed[pid].begin());
+      if (std::shared_ptr<GraphicsNode> node = sg.getGraphics(id))
+        node->setPoseMatrix(m);
+      // The visor and what it wears: the same rotation, each centre moved by its offset in the
+      // avatar's frame (R * offset) -- the visor's from the box's centre, a part's from the feet.
+      const auto place = [&](const std::string &node_id, const double off[3]) {
+        if (std::shared_ptr<GraphicsNode> g = sg.getGraphics(node_id)) {
+          double pm[16];
+          std::copy(m, m + 16, pm);
+          for (int r = 0; r < 3; ++r)
+            pm[4 * r + 3] += m[4 * r] * off[0] + m[4 * r + 1] * off[1] + m[4 * r + 2] * off[2];
+          g->setPoseMatrix(pm);
+        }
+      };
+      place(visor_node_id(pid), kVisorOffset);
+      for (std::size_t i = 0; i < parts.size(); ++i) {
+        const double off[3] = {parts[i].pos[0], parts[i].pos[1],
+                               parts[i].pos[2] - 0.5 * kAvatarHeight};
+        place(part_node_id(pid, i), off);
+      }
+    }
+    if (self) { // shown or hidden (set_self_visible); a rebuilt marker starts shown
+      const auto show = [&](const std::string &node_id) {
+        if (std::shared_ptr<GraphicsNode> g = sg.getGraphics(node_id);
+            g && g->isVisible() != _self_visible)
+          g->setVisible(_self_visible);
+      };
+      show(id);
+      show(visor_node_id(pid));
+      for (std::size_t i = 0; i < parts.size(); ++i)
+        show(part_node_id(pid, i));
     }
     _heads[pid] = cvc::physics::vec3{p.position.x, p.position.y, p.position.z + kLabelHeight};
   }
+}
+
+void room_view::sync_looks(const std::vector<std::string> &pids) {
+  const bool refresh = _looks_age-- <= 0;
+  if (refresh) {
+    _looks_age = kLooksEvery;
+    const std::uint64_t rev = rs::avatar_catalog_revision(_app, _room);
+    if (rev != _catalog_rev) {
+      _catalog = rs::read_avatar_catalog(_app, _room);
+      _catalog_rev = rev;
+    }
+  }
+  std::map<std::string, rs::avatar_look> looks;
+  for (const std::string &pid : pids) {
+    const auto it = _looks.find(pid);
+    if (!refresh && it != _looks.end()) {
+      looks.emplace(pid, std::move(it->second));
+      continue;
+    }
+    // A newcomer is resolved at once, so its marker is built as it chose rather than rebuilt.
+    looks.emplace(pid,
+                  rs::resolve_avatar_look(_catalog, rs::read_avatar_choice(_app, _room, pid), pid));
+  }
+  _looks.swap(looks);
+}
+
+void room_view::build_marker(const std::string &pid, const rs::avatar_look &look) {
+  remove_marker(pid);
+  cvc::ariadne::Scene one;
+  cvc::ariadne::SceneNode n;
+  n.id = avatar_node_id(pid);
+  n.source_primitive = "box";
+  n.box_size[0] = n.box_size[1] = kAvatarWidth;
+  n.box_size[2] = kAvatarHeight;
+  n.has_material = true;
+  std::copy(look.body, look.body + 3, n.color);
+  n.ambient = 0.3f;
+  n.diffuse = 0.8f;
+  one.nodes.push_back(n);
+  cvc::ariadne::SceneNode v = n; // the visor: posed with the marker every frame
+  v.id = visor_node_id(pid);
+  v.box_size[0] = kVisorSize[0], v.box_size[1] = kVisorSize[1], v.box_size[2] = kVisorSize[2];
+  std::copy(look.visor, look.visor + 3, v.color);
+  one.nodes.push_back(v);
+  for (std::size_t i = 0; i < look.parts.size(); ++i) {
+    const rs::avatar_part &part = look.parts[i];
+    cvc::ariadne::SceneNode p = n;
+    p.id = part_node_id(pid, i);
+    p.source_primitive = part.shape;
+    if (part.shape == "sphere")
+      p.sphere_radius = part.radius;
+    else
+      std::copy(part.size, part.size + 3, p.box_size);
+    std::copy(part.color, part.color + 3, p.color);
+    one.nodes.push_back(p);
+  }
+  realize_scene(_view.scene(), one, _prefix, &_warnings); // plain geometry nodes: nothing to keep
+  _avatars[pid] = look;
+}
+
+void room_view::remove_marker(const std::string &pid) {
+  const auto it = _avatars.find(pid);
+  if (it == _avatars.end())
+    return;
+  SceneGraph &sg = _view.scene();
+  sg.removeGraphics(avatar_node_id(pid));
+  sg.removeGraphics(visor_node_id(pid));
+  for (std::size_t i = 0; i < it->second.parts.size(); ++i)
+    sg.removeGraphics(part_node_id(pid, i));
+  _avatars.erase(it);
+  _posed.erase(pid); // a marker built again starts unposed
+}
+
+bool room_view::avatar_look(const std::string &pid, rs::avatar_look &out) const {
+  const auto it = _avatars.find(pid);
+  if (it == _avatars.end())
+    return false;
+  out = it->second;
+  return true;
 }
 
 std::vector<std::string> room_view::avatar_pids() const {

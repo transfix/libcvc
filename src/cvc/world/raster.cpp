@@ -30,13 +30,15 @@ namespace world {
 world_model world_model::generate(const world_params &wp) {
   world_model wm(wp);
   wm.reg_ = &surface_registry::variant(wp.ontology);
-  // The heightfield takes the world seed.
-  wm.hf_ = heightfield([&] {
+  if (wp.terrain) {
+    wm.terrain_ = wp.terrain;
+  } else { // the fBm relief takes the world seed
     heightfield_params hp = wp.hf;
     hp.seed = wp.seed ^ hp.seed;
-    return hp;
-  }());
-  wm.props_ = scatter(wp.min_x, wp.min_y, wp.max_x, wp.max_y, wp.sc, wm.hf_, *wm.reg_, wp.seed);
+    wm.terrain_ = std::make_shared<const heightfield>(hp);
+  }
+  wm.props_ =
+      scatter(wp.min_x, wp.min_y, wp.max_x, wp.max_y, wp.sc, *wm.terrain_, *wm.reg_, wp.seed);
   return wm;
 }
 
@@ -96,35 +98,52 @@ void aabb(const footprint &f, double &x0, double &y0, double &x1, double &y1) {
 } // namespace
 
 void raster(const world_model &wm, const grid_spec &g, raster_out &out) {
-  const int rows = g.rows, cols = g.cols;
-  const std::size_t n = std::size_t(rows) * std::size_t(cols);
-  const surface_registry &reg = wm.registry();
-  const heightfield &hf = wm.hf();
+  raster_begin(g, out);
+  raster_rows(wm, g, out, 0, g.rows);
+  raster_finish(wm, g, out);
+}
 
-  out.rows = rows;
-  out.cols = cols;
+void raster_begin(const grid_spec &g, raster_out &out) {
+  const std::size_t n = std::size_t(g.rows) * std::size_t(g.cols);
+  out.rows = g.rows;
+  out.cols = g.cols;
   out.klass.assign(n, 0);
   out.risk_raw.assign(n, 0.0f);
   out.hard.assign(n, 0);
   out.occupancy.assign(n, 0);
   out.height.assign(n, 0.0f);
   out.layer_owner.assign(n, 0);
+}
 
-  const double sea = hf.params().sea_level_m;
-  const double amp = hf.params().island ? hf.params().island_peak_m : hf.params().amp_m;
+void raster_rows(const world_model &wm, const grid_spec &g, raster_out &out, int r0, int r1) {
+  const int cols = g.cols;
+  const terrain_source &ground = wm.terrain();
+  const double sea = ground.sea_level_m();
+  const double amp = ground.relief_m();
+  r0 = std::max(0, r0);
+  r1 = std::min(g.rows, r1);
 
   // ── Layer 0: derived predicates (each cell independent -> thread-invariant) ──
-  for (int r = 0; r < rows; ++r) {
+#ifdef CVC_USING_OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+  for (int r = r0; r < r1; ++r) {
     const double y = g.world_y(r); // row 0 == min_y
     for (int c = 0; c < cols; ++c) {
       const double x = g.world_x(c);
-      const double h = hf.sample(x, y);
-      const double sl = hf.slope_deg(x, y);
+      const double h = ground.sample(x, y);
+      const double sl = ground.slope_deg(x, y);
       const std::size_t i = std::size_t(r) * cols + c;
       out.height[i] = float(h);
       out.klass[i] = derived_class(h, sl, sea, amp);
     }
   }
+}
+
+void raster_finish(const world_model &wm, const grid_spec &g, raster_out &out) {
+  const int rows = g.rows, cols = g.cols;
+  const std::size_t n = std::size_t(rows) * std::size_t(cols);
+  const surface_registry &reg = wm.registry();
 
   // ── Layer 1: grammar paint (prop footprints). Two passes so occupied
   //    footprints (trunks, walls, rock) win over soft ones (canopy, ground). ──

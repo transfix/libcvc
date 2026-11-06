@@ -8,12 +8,14 @@
 #include <array>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cvc/ariadne/ariadne.h> // register_action_intrinsics
 #include <cvc/ariadne/net_intrinsics.h>
 #include <cvc/ariadne/uri.h> // resolve() — the generic (fetch uri) async resolver
 #include <cvc/core/app.h>
+#include <cvc/net/browser.h>
 #include <cvc/net/credentials.h>
 #include <cvc/net/http_client.h>
 #include <cvc/net/net_policy.h>
@@ -369,6 +371,7 @@ struct Prepared {
   cvc::net::HttpRequest req;
   std::optional<cvc::net::Origin> origin;
   std::vector<std::string> sent;
+  std::string used; // the auth: token sent, for a renewal after a 401 to compare
   std::optional<Outcome> failed;
 };
 
@@ -413,6 +416,7 @@ Prepared prepare(cvc::net::HttpRequest req, const RequestAuth &auth, const NetAc
       no_credential(auth.use);
       return p;
     }
+    p.used = *token;
     req.headers.push_back("Authorization: Bearer " + *token);
   }
   for (const CredentialValue &v : auth.values) {
@@ -445,6 +449,7 @@ Outcome complete(Prepared &p, cvc::net::HttpResponse r, const RequestAuth &auth,
   for (std::string &h : p.req.headers)
     wipe(h);
   wipe(p.req.body);
+  wipe(p.used);
   for (std::string &t : p.sent) {
     scrub(r, t);
     wipe(t);
@@ -483,13 +488,44 @@ Outcome complete(Prepared &p, cvc::net::HttpResponse r, const RequestAuth &auth,
   return Outcome{std::move(r), captured};
 }
 
-// One request, sent in place (blocking): prepare, send, complete.
+// The renewer of the credential a request sends as auth: (an OAuth access token the host can
+// refresh, cvc::net::CredentialRenewer), or null.
+std::shared_ptr<cvc::net::CredentialRenewer> renewer_for(const RequestAuth &auth,
+                                                         const NetAccess &access) {
+  if (auth.use.empty() || !access.credentials)
+    return nullptr;
+  return access.credentials->renewer(auth.use);
+}
+
+// Whether `r` is a server refusing the credential, which renewing it may cure: a 401. Both paths
+// (perform and StartedRequest) ask this, so they renew alike.
+bool should_renew(const std::shared_ptr<cvc::net::CredentialRenewer> &renewer,
+                  const cvc::net::HttpResponse &r) {
+  return renewer && r.ok && r.status == 401;
+}
+
+cvc::net::HttpResponse send_prepared(const Prepared &p, const NetAccess &access) {
+  return access.policy ? cvc::net::send(p.req, *access.policy) : cvc::net::send(p.req);
+}
+
+// One request, sent in place (blocking): prepare, send, complete. A credential the host can renew
+// is renewed first when it is about to expire, and once more after a 401, and the request sent
+// again.
 Outcome perform(cvc::net::HttpRequest req, const RequestAuth &auth, const NetAccess &access) {
-  Prepared p = prepare(std::move(req), auth, access);
+  const std::shared_ptr<cvc::net::CredentialRenewer> renewer = renewer_for(auth, access);
+  if (renewer && renewer->expiring())
+    renewer->renew(std::string()); // a failure leaves the old token, which may still do
+  Prepared p = prepare(req, auth, access);
   if (p.failed)
     return std::move(*p.failed);
-  cvc::net::HttpResponse r =
-      access.policy ? cvc::net::send(p.req, *access.policy) : cvc::net::send(p.req);
+  cvc::net::HttpResponse r = send_prepared(p, access);
+  if (should_renew(renewer, r) && renewer->renew(p.used).empty()) {
+    complete(p, std::move(r), auth, access); // the refused try's copies are blanked
+    p = prepare(std::move(req), auth, access);
+    if (p.failed)
+      return std::move(*p.failed);
+    r = send_prepared(p, access);
+  }
   return complete(p, std::move(r), auth, access);
 }
 
@@ -519,6 +555,71 @@ void settle_started(se::async_host &host, const std::shared_ptr<se::async_call> 
     host.finish(call);
 }
 
+// A request started rather than sent (http_work below), on the browser's one thread. A credential
+// the host can renew is renewed as perform() renews it, without blocking
+// (CredentialRenewer::renew_async): before the request goes when the token is about to expire, and
+// once after a 401, then the request is started again. A cancel aborts whichever transfer is out.
+struct StartedRequest : std::enable_shared_from_this<StartedRequest> {
+  cvc::net::HttpRequest req;
+  RequestAuth auth;
+  NetAccess access;
+  se::async_host *host = nullptr;
+  std::shared_ptr<se::async_call> call;
+  std::shared_ptr<cvc::net::CredentialRenewer> renewer;
+  std::shared_ptr<cvc::net::HttpTransfer> transfer; // the one out, for a cancel to abort
+
+  void begin() {
+    if (renewer && renewer->expiring()) {
+      std::shared_ptr<StartedRequest> self = shared_from_this();
+      renewer->renew_async(std::string(), [self](std::string) { self->go(false); });
+      return;
+    }
+    go(false);
+  }
+
+  // Prepare and start the request; `retried`: the second try, after a 401 and a renewal.
+  void go(bool retried) {
+    if (call->cancel_requested())
+      return;
+    auto p = std::make_shared<Prepared>(prepare(req, auth, access));
+    if (p->failed) {
+      settle_started(*host, call, marshal_response(p->failed->reply, p->failed->captured));
+      return;
+    }
+    std::shared_ptr<StartedRequest> self = shared_from_this();
+    transfer = cvc::net::start(p->req, access.policy, [self, p, retried](cvc::net::HttpResponse r) {
+      self->transfer.reset(); // done with: the transfer let go of this callback
+      if (!retried && should_renew(self->renewer, r)) {
+        auto refused = std::make_shared<cvc::net::HttpResponse>(std::move(r));
+        auto used = std::make_shared<std::string>(p->used);
+        self->renewer->renew_async(*used, [self, p, refused, used](std::string why) {
+          wipe(*used);
+          if (why.empty()) {
+            complete(*p, std::move(*refused), self->auth, self->access); // blank the copies
+            self->go(true);
+          } else {
+            self->finish(*p, std::move(*refused));
+          }
+        });
+        return;
+      }
+      self->finish(*p, std::move(r));
+    });
+  }
+
+  void finish(Prepared &p, cvc::net::HttpResponse r) {
+    const std::string url = p.req.url;
+    try {
+      const Outcome out = complete(p, std::move(r), auth, access);
+      settle_started(*host, call, marshal_response(out.reply, out.captured));
+    } catch (const std::exception &e) {
+      settle_started(*host, call, marshal_error(url, std::string("http: ") + e.what()));
+    } catch (...) {
+      settle_started(*host, call, marshal_error(url, "http: unknown error"));
+    }
+  }
+};
+
 // The same request started rather than sent (L4): where the transport starts requests without
 // blocking (the browser's fetch in a build without threads, cvc::net::http_starts_async), the
 // calling program parks on it and the frame loop goes on; the browser's event loop delivers the
@@ -533,29 +634,19 @@ se::async_work http_work(cvc::net::HttpRequest req, RequestAuth auth, NetAccess 
     return work;
   work.start = [req = std::move(req), auth = std::move(auth), access = std::move(access),
                 &host](const std::shared_ptr<se::async_call> &call) {
-    auto p = std::make_shared<Prepared>(prepare(req, auth, access));
-    if (p->failed) {
-      settle_started(host, call, marshal_response(p->failed->reply, p->failed->captured));
-      return;
-    }
-    const std::string url = p->req.url;
-    cvc::net::HttpDone done = [p, auth, access, url, call, &host](cvc::net::HttpResponse r) {
-      try {
-        const Outcome out = complete(*p, std::move(r), auth, access);
-        settle_started(host, call, marshal_response(out.reply, out.captured));
-      } catch (const std::exception &e) {
-        settle_started(host, call, marshal_error(url, std::string("http: ") + e.what()));
-      } catch (...) {
-        settle_started(host, call, marshal_error(url, "http: unknown error"));
-      }
-    };
-    std::shared_ptr<cvc::net::HttpTransfer> transfer =
-        cvc::net::start(p->req, access.policy, std::move(done));
-    if (transfer)
-      call->on_cancel([weak = std::weak_ptr<cvc::net::HttpTransfer>(transfer)] {
-        if (std::shared_ptr<cvc::net::HttpTransfer> t = weak.lock())
-          t->abort();
-      });
+    auto s = std::make_shared<StartedRequest>();
+    s->req = req;
+    s->auth = auth;
+    s->access = access;
+    s->host = &host;
+    s->call = call;
+    s->renewer = renewer_for(auth, access);
+    call->on_cancel([weak = std::weak_ptr<StartedRequest>(s)] {
+      if (std::shared_ptr<StartedRequest> t = weak.lock())
+        if (std::shared_ptr<cvc::net::HttpTransfer> transfer = t->transfer)
+          transfer->abort();
+    });
+    s->begin();
   };
   return work;
 }
@@ -677,6 +768,37 @@ void register_net_verbs(const std::shared_ptr<se::environment> &env, const NetAc
                                 return se::value_t(access.policy->allows_url(url));
                               return se::value_t(cvc::net::parse_origin(url).has_value());
                             });
+  // (open-url URL): open URL in the user's web browser (cvc/net/browser.h). Only an http(s) URL
+  // whose origin the host allows: a page opened in a browser carries what its URL says, so the
+  // allowlist bounds it as it does a request. #t when a browser was asked to open it; #f when there
+  // is none here (over SSH, no display, --no-browser), and the host shows the URL instead. One a
+  // second at most, so a loop cannot flood the desktop with tabs.
+  se::builtins::register_fn(
+      env, "open-url", [access, live](std::span<const se::value_t> args) -> se::value_t {
+        live("open-url");
+        const std::string url = arg_string(args, 0);
+        std::string why;
+        if (access.policy ? !access.policy->allows_url(url, &why)
+                          : !cvc::net::parse_origin(url, &why))
+          throw std::runtime_error("open-url: refused: " + why);
+        static std::atomic<std::int64_t> last_ms{0};
+        const std::int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now().time_since_epoch())
+                                     .count();
+        std::int64_t prev = last_ms.load();
+        if (prev != 0 && now - prev < 1000)
+          throw std::runtime_error("open-url: one URL a second at most");
+        last_ms.store(now);
+        switch (cvc::net::open_url(url, &why)) {
+        case cvc::net::OpenUrlResult::opened:
+          return se::value_t(true);
+        case cvc::net::OpenUrlResult::no_browser:
+          cvc::net::url_notice(url);
+          return se::value_t(false);
+        default:
+          throw std::runtime_error(why);
+        }
+      });
   if (!access.credentials)
     return;
   const std::shared_ptr<cvc::net::CredentialStore> store = access.credentials;
@@ -716,8 +838,7 @@ void register_net_verbs(const std::shared_ptr<se::environment> &env, const NetAc
 //
 // A connection is a handle string ("ws:N") in a process-global table, so a program can keep it in
 // state and use it from later ticks. (ws-open) connects on the background pool; the rest are plain
-// functions on the scheduler thread except (ws-recv), which waits on the pool. In a browser build
-// without threads both are started instead, answered by the socket's callbacks (ws_open_work).
+// functions on the scheduler thread except (ws-recv), which waits on the pool.
 
 constexpr std::size_t kMaxWsConnections = 64;
 
@@ -855,19 +976,6 @@ struct WsAuthProtocol {
   bool base64url = false;
 };
 
-// (ws-open URL [OPTS]): OPTS takes "headers", "auth", "query" as the http verbs do, "timeout"
-// (seconds to connect), "protocols" (subprotocols to offer) and "auth_protocol" (a credential
-// offered as one). The origin check uses the http(s) twin of the URL, so --net-allow https://h
-// covers wss://h.
-struct WsOpen {
-  cvc::net::HttpRequest req; // the URL and the handshake's header lines (placeholders unfilled)
-  RequestAuth auth;
-  double timeout = 15;
-  std::string http_url;
-  std::vector<std::string> protocols; // "protocols": offered as they are
-  WsAuthProtocol auth_protocol;
-};
-
 // "protocols": a list of subprotocol strings.
 std::vector<std::string> parse_ws_protocols(const se::value_t &v) {
   const se::list_ptr *lp = std::get_if<se::list_ptr>(&v.v);
@@ -911,193 +1019,138 @@ WsAuthProtocol parse_ws_auth_protocol(const se::value_t &v) {
   return a;
 }
 
-// The checks made where the verb is called (the scheduler thread), so a misuse is a DSL error.
-WsOpen build_ws_open(std::span<const se::value_t> args, const NetAccess &access) {
-  WsOpen o;
-  o.req.url = arg_string(args, 0);
+// (ws-open URL [OPTS]): OPTS takes "headers", "auth", "query" as the http verbs do, "timeout"
+// (seconds to connect), "protocols" (subprotocols to offer) and "auth_protocol" (a credential
+// offered as one). The origin check uses the http(s) twin of the URL, so --net-allow https://h
+// covers wss://h.
+se::async_kernel ws_open_kernel(std::span<const se::value_t> args, const NetAccess &access) {
+  RequestAuth auth;
+  cvc::net::HttpRequest req;
+  req.url = arg_string(args, 0);
+  double timeout = 15;
+  std::vector<std::string> protocols;
+  WsAuthProtocol auth_protocol;
   if (args.size() > 1) {
-    apply_http_options(o.req, args[1], o.auth);
-    if (!o.req.body.empty())
+    apply_http_options(req, args[1], auth);
+    if (!req.body.empty())
       throw std::runtime_error("ws-open: a WebSocket handshake has no body or form");
-    if (!o.auth.captures.empty())
+    if (!auth.captures.empty())
       throw std::runtime_error("ws-open: a WebSocket handshake captures no credential");
     if (const se::dict_ptr *dp = std::get_if<se::dict_ptr>(&args[1].v))
       for (const auto &kv : **dp)
         if (kv.first == "timeout") {
           const std::array<se::value_t, 1> one{kv.second};
-          o.timeout = number_arg(one, 0, -1);
-          if (!(o.timeout > 0))
+          timeout = number_arg(one, 0, -1);
+          if (!(timeout > 0))
             throw std::runtime_error("ws-open: 'timeout' must be a positive number of seconds");
         } else if (kv.first == "protocols") {
-          o.protocols = parse_ws_protocols(kv.second);
+          protocols = parse_ws_protocols(kv.second);
         } else if (kv.first == "auth_protocol") {
-          o.auth_protocol = parse_ws_auth_protocol(kv.second);
+          auth_protocol = parse_ws_auth_protocol(kv.second);
         }
   }
-  check_request("ws-open", o.req, o.auth, access);
-  if (!o.auth_protocol.name.empty() && !access.credentials)
+  check_request("ws-open", req, auth, access);
+  if (!auth_protocol.name.empty() && !access.credentials)
     throw std::runtime_error(
         "ws-open: this host keeps no credentials, so it takes no auth_protocol");
-  o.http_url = cvc::net::ws_http_equivalent(o.req.url);
-  if (o.http_url == o.req.url)
-    throw std::runtime_error("ws-open: a WebSocket URL starts with ws:// or wss://: " + o.req.url);
-  return o;
-}
-
-// A connect ready to make: the options with the credentials put in, and the tokens put in (to
-// blank any echo of them in an error), or the reply it fails with before connecting.
-struct WsPrepared {
-  cvc::net::WsOptions opts;
-  std::vector<std::string> sent;
-  cvc::net::Origin origin; // what ws-send fetches credentials for
-  std::optional<se::value_t> failed;
-};
-
-WsPrepared prepare_ws_open(const WsOpen &o, const NetAccess &access) {
-  WsPrepared p;
-  std::string why;
-  const std::optional<cvc::net::Origin> origin = cvc::net::parse_origin(o.http_url, &why);
-  if (!origin) {
-    p.failed = ws_open_reply(false, "", o.req.url, "ws-open: " + why);
-    return p;
-  }
-  if (access.policy && !access.policy->allows(*origin)) {
-    p.failed =
-        ws_open_reply(false, "", o.req.url,
-                      "ws-open: refused: " + origin->str() + " is not an origin this host allows");
-    return p;
-  }
-  p.origin = *origin;
-  p.opts.headers = o.req.headers;
-  p.opts.protocols = o.protocols;
-  p.opts.connect_timeout_secs = o.timeout;
-  const auto fail = [&](const std::string &message) {
-    for (std::string &h : p.opts.headers)
-      wipe(h);
-    for (std::string &s : p.opts.protocols)
-      wipe(s);
-    for (std::string &t : p.sent)
-      wipe(t);
-    p.failed = ws_open_reply(false, "", o.req.url, message);
-  };
-  if (!o.auth.use.empty()) {
-    std::optional<std::string> token = access.credentials->token_for(o.auth.use, *origin);
-    if (!token) {
-      fail("ws-open: no credential '" + o.auth.use + "' for " + origin->str() + " (sign in first)");
-      return p;
-    }
-    p.opts.headers.push_back("Authorization: Bearer " + *token);
-    p.sent.push_back(std::move(*token));
-  }
-  for (const CredentialValue &v : o.auth.values) {
-    std::optional<std::string> token = access.credentials->token_for(v.name, *origin);
-    if (!token) {
-      fail("ws-open: no credential '" + v.name + "' for " + origin->str() + " (sign in first)");
-      return p;
-    }
-    for (std::string &h : p.opts.headers)
-      if (const std::size_t at = h.find(v.placeholder); at != std::string::npos)
-        h.replace(at, v.placeholder.size(), *token);
-    p.sent.push_back(std::move(*token));
-  }
-  if (const WsAuthProtocol &a = o.auth_protocol; !a.name.empty()) {
-    std::optional<std::string> token = access.credentials->token_for(a.name, *origin);
-    if (!token) {
-      fail("ws-open: no credential '" + a.name + "' for " + origin->str() + " (sign in first)");
-      return p;
-    }
-    std::string offered = a.prefix + (a.base64url ? base64url(*token) : *token);
-    p.sent.push_back(std::move(*token));
-    if (!cvc::net::ws_valid_protocol(offered)) {
-      wipe(offered);
-      fail("ws-open: credential '" + a.name +
-           "' can't be a subprotocol as it is ('/' or '='); use \"encoding\" \"base64url\"");
-      return p;
-    }
-    if (a.base64url)
-      p.sent.push_back(offered); // to blank the spelling sent, too
-    p.opts.protocols.push_back(std::move(offered));
-  }
-  return p;
-}
-
-// The reply once the connect is over: the credentials blanked, and the connection, if any, in the
-// handle table.
-se::value_t finish_ws_open(const WsOpen &o, WsPrepared &p,
-                           std::shared_ptr<cvc::net::WsConnection> conn, std::string error) {
-  for (std::string &h : p.opts.headers)
-    wipe(h);
-  for (std::string &s : p.opts.protocols)
-    wipe(s);
-  for (std::string &t : p.sent) {
-    cvc::net::redact(error, t);
-    wipe(t);
-  }
-  if (!conn)
-    return ws_open_reply(false, "", o.req.url, error);
-  WsTable &t = ws_table();
-  std::lock_guard<std::mutex> lock(t.mutex);
-  if (t.open.size() >= kMaxWsConnections) {
-    conn->close(1013);
-    return ws_open_reply(false, "", o.req.url,
-                         "ws-open: too many open WebSockets (" + std::to_string(kMaxWsConnections) +
-                             "); close some first");
-  }
-  const std::string handle = "ws:" + std::to_string(t.next++);
-  WsEntry entry{std::move(conn), p.origin};
-  if (!o.auth.use.empty())
-    entry.sent->add(o.auth.use);
-  for (const CredentialValue &v : o.auth.values)
-    entry.sent->add(v.name);
-  if (!o.auth_protocol.name.empty())
-    entry.sent->add(o.auth_protocol.name);
-  t.open.emplace(handle, std::move(entry));
-  return ws_open_reply(true, handle, o.req.url, "");
-}
-
-// (ws-open)'s work: connect in a kernel (on the background pool), or, where the backend connects
-// without blocking (cvc::net::ws_starts_async: the browser without threads), start the connect
-// and let the socket's callbacks post the reply, so the frame loop goes on meanwhile (as
-// http_work does for HTTP). A killed or timed-out call abandons the connect.
-se::async_work ws_open_work(std::span<const se::value_t> args, const NetAccess &access,
-                            se::async_host &host) {
-  WsOpen o = build_ws_open(args, access);
-  se::async_work work;
-  work.kernel = [o, access](se::async_call &) -> se::value_t {
+  const std::string http_url = cvc::net::ws_http_equivalent(req.url);
+  if (http_url == req.url)
+    throw std::runtime_error("ws-open: a WebSocket URL starts with ws:// or wss://: " + req.url);
+  return [req = std::move(req), auth = std::move(auth), access, timeout, http_url,
+          protocols = std::move(protocols),
+          auth_protocol = std::move(auth_protocol)](se::async_call &) -> se::value_t {
     try {
-      WsPrepared p = prepare_ws_open(o, access);
-      if (p.failed)
-        return std::move(*p.failed);
+      std::string why;
+      const std::optional<cvc::net::Origin> origin = cvc::net::parse_origin(http_url, &why);
+      if (!origin)
+        return ws_open_reply(false, "", req.url, "ws-open: " + why);
+      if (access.policy && !access.policy->allows(*origin))
+        return ws_open_reply(false, "", req.url,
+                             "ws-open: refused: " + origin->str() +
+                                 " is not an origin this host allows");
+      cvc::net::WsOptions opts;
+      opts.headers = req.headers;
+      opts.protocols = protocols;
+      opts.connect_timeout_secs = timeout;
+      std::vector<std::string> sent;
+      const auto fail = [&](const std::string &message) {
+        for (std::string &h : opts.headers)
+          wipe(h);
+        for (std::string &p : opts.protocols)
+          wipe(p);
+        for (std::string &s : sent)
+          wipe(s);
+        return ws_open_reply(false, "", req.url, message);
+      };
+      if (!auth.use.empty()) {
+        std::optional<std::string> token = access.credentials->token_for(auth.use, *origin);
+        if (!token)
+          return fail("ws-open: no credential '" + auth.use + "' for " + origin->str() +
+                      " (sign in first)");
+        opts.headers.push_back("Authorization: Bearer " + *token);
+        sent.push_back(std::move(*token));
+      }
+      for (const CredentialValue &v : auth.values) {
+        std::optional<std::string> token = access.credentials->token_for(v.name, *origin);
+        if (!token)
+          return fail("ws-open: no credential '" + v.name + "' for " + origin->str() +
+                      " (sign in first)");
+        for (std::string &h : opts.headers)
+          if (const std::size_t at = h.find(v.placeholder); at != std::string::npos)
+            h.replace(at, v.placeholder.size(), *token);
+        sent.push_back(std::move(*token));
+      }
+      if (const WsAuthProtocol &a = auth_protocol; !a.name.empty()) {
+        std::optional<std::string> token = access.credentials->token_for(a.name, *origin);
+        if (!token)
+          return fail("ws-open: no credential '" + a.name + "' for " + origin->str() +
+                      " (sign in first)");
+        std::string offered = a.prefix + (a.base64url ? base64url(*token) : *token);
+        sent.push_back(std::move(*token));
+        if (!cvc::net::ws_valid_protocol(offered)) {
+          wipe(offered);
+          return fail("ws-open: credential '" + a.name +
+                      "' can't be a subprotocol as it is ('/' or '='); use \"encoding\" "
+                      "\"base64url\"");
+        }
+        if (a.base64url)
+          sent.push_back(offered); // to blank the spelling sent, too
+        opts.protocols.push_back(std::move(offered));
+      }
       std::string error;
-      std::shared_ptr<cvc::net::WsConnection> conn =
-          cvc::net::ws_connect(o.req.url, p.opts, &error);
-      return finish_ws_open(o, p, std::move(conn), std::move(error));
+      std::shared_ptr<cvc::net::WsConnection> conn = cvc::net::ws_connect(req.url, opts, &error);
+      for (std::string &h : opts.headers)
+        wipe(h);
+      for (std::string &p : opts.protocols)
+        wipe(p);
+      for (std::string &s : sent) {
+        cvc::net::redact(error, s);
+        wipe(s);
+      }
+      if (!conn)
+        return ws_open_reply(false, "", req.url, error);
+      WsTable &t = ws_table();
+      std::lock_guard<std::mutex> lock(t.mutex);
+      if (t.open.size() >= kMaxWsConnections) {
+        conn->close(1013);
+        return ws_open_reply(false, "", req.url,
+                             "ws-open: too many open WebSockets (" +
+                                 std::to_string(kMaxWsConnections) + "); close some first");
+      }
+      const std::string handle = "ws:" + std::to_string(t.next++);
+      WsEntry entry{std::move(conn), *origin};
+      if (!auth.use.empty())
+        entry.sent->add(auth.use);
+      for (const CredentialValue &v : auth.values)
+        entry.sent->add(v.name);
+      if (!auth_protocol.name.empty())
+        entry.sent->add(auth_protocol.name);
+      t.open.emplace(handle, std::move(entry));
+      return ws_open_reply(true, handle, req.url, "");
     } catch (const std::exception &e) {
-      return ws_open_reply(false, "", o.req.url, std::string("ws-open: ") + e.what());
+      return ws_open_reply(false, "", req.url, std::string("ws-open: ") + e.what());
     }
   };
-  if (!cvc::net::ws_starts_async())
-    return work;
-  work.start = [o = std::move(o), access, &host](const std::shared_ptr<se::async_call> &call) {
-    auto p = std::make_shared<WsPrepared>(prepare_ws_open(o, access));
-    if (p->failed) {
-      settle_started(host, call, std::move(*p->failed));
-      return;
-    }
-    std::function<void()> stop = cvc::net::ws_start(
-        o.req.url, p->opts,
-        [o, p, call, &host](std::shared_ptr<cvc::net::WsConnection> conn, std::string error) {
-          if (call->cancel_requested()) { // nobody waits for it now: don't keep it open
-            if (conn)
-              conn->close(1000);
-            return;
-          }
-          settle_started(host, call, finish_ws_open(o, *p, std::move(conn), std::move(error)));
-        });
-    if (stop)
-      call->on_cancel(std::move(stop));
-  };
-  return work;
 }
 
 // `message`, ready to JSON-encode, with each credential value in it, (dict "credential" NAME), a
@@ -1203,38 +1256,21 @@ void register_ws_verbs(const std::shared_ptr<se::environment> &env, se::async_ho
   // (ws-open URL [OPTS]) / (ws-open-async ...): connect. Reply {ok handle url error}.
   se::register_async_fn(
       env, host, "ws-open",
-      [access, &host](std::span<const se::value_t> args) {
-        return ws_open_work(args, access, host);
-      },
-      io);
+      [access](std::span<const se::value_t> args) { return ws_open_kernel(args, access); }, io);
   // (ws-recv H [SECONDS]) / (ws-recv-async ...): the next event, waiting up to SECONDS (default
   // 30); nil when none came. Events: {type "text"|"binary"|"close"|"error", data, code}.
   se::register_async_fn(
       env, host, "ws-recv",
-      [live, access, &host](std::span<const se::value_t> args) -> se::async_work {
+      [live, access](std::span<const se::value_t> args) -> se::async_kernel {
         live("ws-recv");
         WsEntry entry = ws_lookup("ws-recv", args);
         const double secs = number_arg(args, 1, 30);
-        se::async_work work;
-        work.kernel = [entry, secs, access](se::async_call &call) -> se::value_t {
+        return [entry = std::move(entry), secs, access](se::async_call &call) -> se::value_t {
           std::optional<cvc::net::WsEvent> e =
               entry.conn->recv(secs, [&call] { return call.cancel_requested(); });
           scrub_ws_event(e, entry, access);
           return marshal_ws_event(e);
         };
-        // Without threads: wait for the socket's next message from its callbacks, not in a loop
-        // on the frame's thread (ws_open_work).
-        if (cvc::net::ws_starts_async())
-          work.start = [entry, secs, access, &host](const std::shared_ptr<se::async_call> &call) {
-            std::function<void()> stop = entry.conn->recv_async(
-                secs, [entry, access, call, &host](std::optional<cvc::net::WsEvent> e) {
-                  scrub_ws_event(e, entry, access);
-                  settle_started(host, call, marshal_ws_event(e));
-                });
-            if (stop)
-              call->on_cancel(std::move(stop));
-          };
-        return work;
       },
       io);
   // (ws-poll H): the next event already received, or nil; never waits. For on_tick loops.
@@ -1281,6 +1317,95 @@ void register_ws_verbs(const std::shared_ptr<se::environment> &env, se::async_ho
 }
 
 } // namespace
+
+namespace {
+
+// What a host-side GET may not do at all (checked before anything is sent); "" when it may.
+std::string host_get_refusal(const std::string &auth, const NetAccess &access) {
+  if (!is_live(access))
+    return "http: the host turned the network off";
+  if (!auth.empty() && !cvc::net::CredentialStore::valid_name(auth))
+    return "http: auth must name a credential (1-64 of A-Z a-z 0-9 . _ -)";
+  if (!auth.empty() && !access.credentials)
+    return "http: auth '" + auth + "' needs the host's credential store (--net)";
+  return std::string();
+}
+
+// A reply as a host-side GET's result: ok only for a 2xx.
+HostGet host_get_result(Outcome out) {
+  HostGet g;
+  g.status = out.reply.status;
+  if (!out.reply.ok) {
+    g.error = out.reply.error.empty() ? std::string("http: no reply") : out.reply.error;
+    return g;
+  }
+  if (out.reply.status < 200 || out.reply.status >= 300) {
+    g.error = "http " + std::to_string(out.reply.status);
+    return g;
+  }
+  g.ok = true;
+  g.body = std::move(out.reply.body);
+  g.content_type = cvc::net::response_header(out.reply.headers, "Content-Type");
+  return g;
+}
+
+HostGet host_get_error(const std::string &message) {
+  HostGet g;
+  g.error = message;
+  return g;
+}
+
+} // namespace
+
+HostGet host_get(const std::string &url, const std::string &auth, const NetAccess &access) {
+  try {
+    if (const std::string no = host_get_refusal(auth, access); !no.empty())
+      return host_get_error(no);
+    cvc::net::HttpRequest req;
+    req.url = url;
+    RequestAuth ra;
+    ra.use = auth;
+    return host_get_result(perform(std::move(req), ra, access));
+  } catch (const std::exception &e) {
+    return host_get_error(std::string("http: ") + e.what());
+  } catch (...) {
+    return host_get_error("http: unknown error");
+  }
+}
+
+void host_get_start(const std::string &url, const std::string &auth, const NetAccess &access,
+                    std::function<void(HostGet)> done) {
+  if (!cvc::net::http_starts_async()) {
+    done(host_get(url, auth, access));
+    return;
+  }
+  try {
+    if (const std::string no = host_get_refusal(auth, access); !no.empty()) {
+      done(host_get_error(no));
+      return;
+    }
+    cvc::net::HttpRequest req;
+    req.url = url;
+    RequestAuth ra;
+    ra.use = auth;
+    auto p = std::make_shared<Prepared>(prepare(std::move(req), ra, access));
+    if (p->failed) {
+      done(host_get_result(std::move(*p->failed)));
+      return;
+    }
+    // The browser's event loop answers; the request's credentials are blanked in complete().
+    cvc::net::start(p->req, access.policy,
+                    [p, ra, access, done = std::move(done)](cvc::net::HttpResponse r) {
+                      try {
+                        done(host_get_result(complete(*p, std::move(r), ra, access)));
+                      } catch (const std::exception &e) {
+                        done(host_get_error(std::string("http: ") + e.what()));
+                      }
+                    });
+  } catch (const std::exception &e) {
+    done(host_get_error(std::string("http: ") + e.what()));
+  }
+}
 
 void register_net_intrinsics(cvc::app &app) { register_net_intrinsics(app, NetAccess{}); }
 

@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: libcvc
-  upstream_version: "3.7.5"
+  upstream_version: "3.7.11"
   # Bumped 1 -> 2: the host-only libcvc ABI changed (voxels::_cuda_unified_ptr is
   # now always std::shared_ptr<void>, +8 bytes, to match the CUDA build and make
   # cvc::volume's layout variant-invariant). The new CPU bundle is not ABI-
@@ -165,10 +165,12 @@ recipe:
 provides: ["libcvc"]
 
 source:
-  # The recipe is co-located with the libcvc source tree. `pack-from-prefix`
-  # (see cvcpkg roadmap) does not consume this field, but the schema
-  # requires it; `../../..` points at the libcvc repo root for tools that walk
-  # the source tree.
+  # Co-located with the libcvc source tree.
+  # `path` is counted from cvcpkg/recipes/_vendored/, where `cvcpkg build`
+  # looks first, so `../../..` is the libcvc repo root (CVC_SOURCE_DIR).
+  # `cvcpkg recipe push` does not bundle it: counted from cvcpkg/, its
+  # fallback base, the same path points outside the repo.
+  # The publish workflow's `cvcpkg pack --from-prefix` does not read it.
   type: vendored
   path: ../../..
 
@@ -474,6 +476,13 @@ package:
     - lib/cmake/cvc/
     - include/cvc/
     - include/xmlrpc/
+    # The Ariadne component library (cvc://components/*.ari: room_users, chat, ...).
+    # src/cvc installs it on every platform, and cvc:// looks for it beside the installed
+    # library (<bin or lib>/../share/libcvc/ariadne), so a native host resolves
+    # cvc://components/... with no CVC_ARIADNE_PATH. Up to 3.7.9 no bundle carried it: a
+    # document importing a component (the conference's Users and Chat windows) loaded
+    # without it everywhere but the browser pages, which embed the directory.
+    - share/libcvc/ariadne/
   cmake_packages:
     - name: cvc
       targets:

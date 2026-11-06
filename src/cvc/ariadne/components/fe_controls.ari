@@ -5,20 +5,21 @@
 # region "Solid" fills one side of Isovalue (Inside is: below for an SDF, above for a density);
 # "Interval" fills the shell between Isovalue and Isovalue 2, in either order, whatever Inside is
 # says (fe.mesh.region, fe.mesh.isovalue2; tetrahedra only). The node's transfer function
-# (graphics.root.children.domain.transfer_function, edited by the transfer_function component)
+# (graphics.root.children.<node>.transfer_function, edited by the transfer_function component)
 # holds the bounds as isocontours: dragging a bar moves its isovalue and re-meshes once the drag
 # settles, and the editor shades the meshed interval; these sliders move the bars too, and wait for
 # Mesh. "Solve" runs a linear (P1) FEM Poisson, heat or eigenmode problem on that mesh (cvc::fem,
 # libigl assembly). The field is shown on the tet boundary surface and on a movable axis-aligned
 # cut; the elements view shows the mesh itself, cut away, each element coloured by its size or
-# quality. Both are coloured through the node's field colours (graphics.root.children.domain
-# .field_colors, a transfer function: the Colours editor edits its ramp over the values' histogram,
-# and the Colormap combo resets it to a named ramp). Binds the fe.* keys
-# the cvcGL fe_lab realizer owns (state at "<scene>.graphics.root.children.domain.fe.*"). Commands
+# quality. Both are coloured through the node's field colours (graphics.root.children.<node>
+# .field_colors, a transfer function: the Colours editor edits its ramp and opacity curve over the
+# values' histogram -- the field is see-through where the curve is low -- and the Colormap combo
+# resets it to a named, opaque ramp). Binds the fe.* keys
+# the cvcGL fe_lab realizer owns (state at "<scene>.graphics.root.children.<node>.fe.*"). Commands
 # go through fe.request: the realizer consumes it and runs the job off the render thread; Stop
-# interrupts a heat solve at its next step, and is enabled only while one runs (fe.stoppable):
-# loading, tet meshing and the other solves cannot be interrupted. Needs a libcvc built with
-# CVC_ENABLE_LIBIGL (and CVC_ENABLE_MESHER for tet meshing).
+# ends the running job at its next step, and is enabled only while one runs (fe.stoppable): a heat
+# solve keeps its field so far, a load, mesh or other solve keeps nothing (the node keeps what it
+# had). Needs a libcvc built with CVC_ENABLE_LIBIGL (and CVC_ENABLE_MESHER for tet meshing).
 #
 #   Poisson: -lap u = f inside, u = 0 on the whole boundary.
 #   Heat:    u_t = k lap u from u = 0, the bottom 5% of the boundary held at 1 (a hot floor), the
@@ -26,7 +27,11 @@
 #            so k = 1 spreads heat across the body in about one time unit at any model scale.
 #   Modes:   the free-vibration (Neumann) eigenmodes of the solid; mode 1 is the first non-constant.
 #
-# Convention: it binds an fe_lab node named `domain`; copy + rename the node id for another.
+# Args (every one has a default, so a bare include works):
+#   node   the fe_lab node's id (default domain)
+#   title  the window's title (default Finite elements)
+#   id     the instance id: the window's geometry persists under tree.<id> (default fe_controls);
+#          give each include its own when a document drives several fe_lab nodes
 #
 # Use it:
 #     import: cvc://components/fe_controls.ari
@@ -41,212 +46,212 @@
 
 units:
   fe_controls:
-    window: Finite elements
-    id: fe_controls
+    args: { node: domain, title: Finite elements, id: fe_controls }
+    window: "{title}"
+    id: "{id}"
     children:
       - text: "status"
-        bind: graphics.root.children.domain.fe.status
+        bind: graphics.root.children.{node}.fe.status
       - text: "tets"
-        bind: graphics.root.children.domain.fe.stats.tets
+        bind: graphics.root.children.{node}.fe.stats.tets
       - text: "hexes"
-        bind: graphics.root.children.domain.fe.stats.hexes
-        visible_when: (!= (state-get "graphics.root.children.domain.fe.stats.hexes") "0")
+        bind: graphics.root.children.{node}.fe.stats.hexes
+        visible_when: (!= (state-get "graphics.root.children.{node}.fe.stats.hexes") "0")
       # The running job's progress: loading, meshing and solving step on the app's scheduler, so the
       # bar moves while they run (on single-threaded wasm too); the overlay names the stage.
       - progress: progress
-        bind: graphics.root.children.domain.fe.progress
+        bind: graphics.root.children.{node}.fe.progress
         hi: 100
-        overlay: graphics.root.children.domain.fe.phase
+        overlay: graphics.root.children.{node}.fe.phase
       - separator
       - text: "0. Source"
       - combo: Source
-        bind: graphics.root.children.domain.fe.source.type
+        bind: graphics.root.children.{node}.fe.source.type
         options: [Signed distance field of a mesh, Volume file]
         values: [sdf, volume]
       - input_text: File
-        bind: graphics.root.children.domain.fe.source.file
+        bind: graphics.root.children.{node}.fe.source.file
         tooltip: "a mesh (for an SDF) or a volume; a relative path is read from the document's directory; stanford.bunny is built in"
       - slider_int: Grid
-        bind: graphics.root.children.domain.fe.source.dim
+        bind: graphics.root.children.{node}.fe.source.dim
         lo: 0
         hi: 256
         tooltip: "the SDF's resolution, or the volume resampled to this cube (0 = as stored)"
       - combo: Up axis
-        bind: graphics.root.children.domain.fe.source.up
+        bind: graphics.root.children.{node}.fe.source.up
         options: [X, Y, Z]
         values: [x, y, z]
       - checkbox: Upside down
-        bind: graphics.root.children.domain.fe.source.flip
+        bind: graphics.root.children.{node}.fe.source.flip
       - slider_float: Fit height
-        bind: graphics.root.children.domain.fe.source.height
+        bind: graphics.root.children.{node}.fe.source.height
         lo: 0.0
         hi: 500.0
         fmt: "%.0f"
         tooltip: "stand it on z = 0, centred, its largest extent this long (0 = keep its own coordinates)"
       - checkbox: Mesh on load
-        bind: graphics.root.children.domain.fe.auto.mesh
+        bind: graphics.root.children.{node}.fe.auto.mesh
       - checkbox: Solve after meshing
-        bind: graphics.root.children.domain.fe.auto.solve
+        bind: graphics.root.children.{node}.fe.auto.solve
       - button: Load
-        on: (state-set "graphics.root.children.domain.fe.request" "load")
-        disabled_when: (= (state-get "graphics.root.children.domain.fe.busy") "1")
+        on: (state-set "graphics.root.children.{node}.fe.request" "load")
+        disabled_when: (= (state-get "graphics.root.children.{node}.fe.busy") "1")
         tooltip: "read the source again when these keys changed (then mesh and solve as ticked)"
       - separator
       - text: "1. Mesh the volume (LBIE)"
       - combo: Mesh region
-        bind: graphics.root.children.domain.fe.mesh.region
+        bind: graphics.root.children.{node}.fe.mesh.region
         options: [Solid (one side of the isovalue), Interval (between two isovalues)]
         values: [solid, interval]
         tooltip: "interval: the shell between Isovalue and Isovalue 2 (in either order; tetrahedra only); a transfer-function editor's two isocontour bars drive both"
       - slider_float: Isovalue
-        bind: graphics.root.children.domain.fe.mesh.isovalue
+        bind: graphics.root.children.{node}.fe.mesh.isovalue
         lo: -10.0
         hi: 255.0
         fmt: "%.2f"
         tooltip: "the surface that bounds the mesh, in the volume's units (0 = the surface of an SDF); ctrl-click to type"
       - slider_float: Isovalue 2
-        bind: graphics.root.children.domain.fe.mesh.isovalue2
+        bind: graphics.root.children.{node}.fe.mesh.isovalue2
         lo: -10.0
         hi: 255.0
         fmt: "%.2f"
         tooltip: "the interval's other bound, in the volume's units; ctrl-click to type"
-        visible_when: (= (state-get "graphics.root.children.domain.fe.mesh.region") "interval")
+        visible_when: (= (state-get "graphics.root.children.{node}.fe.mesh.region") "interval")
       - combo: Inside is
-        bind: graphics.root.children.domain.fe.mesh.inside
+        bind: graphics.root.children.{node}.fe.mesh.inside
         options: [Below the isovalue (SDF), Above the isovalue (density)]
         values: [below, above]
-        visible_when: (not (= (state-get "graphics.root.children.domain.fe.mesh.region") "interval"))
+        visible_when: (not (= (state-get "graphics.root.children.{node}.fe.mesh.region") "interval"))
       - combo: Elements
-        bind: graphics.root.children.domain.fe.mesh.elements
+        bind: graphics.root.children.{node}.fe.mesh.elements
         options: [Tetrahedra, Hexahedra (elements view only)]
         values: [tet, hex]
       - combo: Improve
-        bind: graphics.root.children.domain.fe.mesh.improve
+        bind: graphics.root.children.{node}.fe.mesh.improve
         options: [None, Geometric flow, Edge contraction, Joe-Liu, Minimal volume, Optimization]
         values: [0, 1, 2, 3, 4, 5] # cvc::improvement_method
       - slider_int: Improve iterations
-        bind: graphics.root.children.domain.fe.mesh.improve_iterations
+        bind: graphics.root.children.{node}.fe.mesh.improve_iterations
         lo: 0
         hi: 20
       - button: Mesh
-        on: (state-set "graphics.root.children.domain.fe.request" "mesh")
-        disabled_when: (= (state-get "graphics.root.children.domain.fe.busy") "1")
+        on: (state-set "graphics.root.children.{node}.fe.request" "mesh")
+        disabled_when: (= (state-get "graphics.root.children.{node}.fe.busy") "1")
       - separator
       - text: "2. Solve"
       - combo: Problem
-        bind: graphics.root.children.domain.fe.problem
+        bind: graphics.root.children.{node}.fe.problem
         options: [Poisson (-lap u = f; u = 0 on the boundary), Heat (hot floor), Vibration modes]
         values: [poisson, heat, modes]
       - slider_float: Source f
-        bind: graphics.root.children.domain.fe.poisson.f
+        bind: graphics.root.children.{node}.fe.poisson.f
         lo: 0.0
         hi: 10.0
         fmt: "%.2f"
-        visible_when: (= (state-get "graphics.root.children.domain.fe.problem") "poisson")
+        visible_when: (= (state-get "graphics.root.children.{node}.fe.problem") "poisson")
       - slider_float: Diffusivity
-        bind: graphics.root.children.domain.fe.heat.kappa
+        bind: graphics.root.children.{node}.fe.heat.kappa
         lo: 0.01
         hi: 10.0
         fmt: "%.2f"
-        visible_when: (= (state-get "graphics.root.children.domain.fe.problem") "heat")
+        visible_when: (= (state-get "graphics.root.children.{node}.fe.problem") "heat")
       - slider_float: Time step
-        bind: graphics.root.children.domain.fe.heat.dt
+        bind: graphics.root.children.{node}.fe.heat.dt
         lo: 0.0001
         hi: 0.1
         fmt: "%.4f"
-        visible_when: (= (state-get "graphics.root.children.domain.fe.problem") "heat")
+        visible_when: (= (state-get "graphics.root.children.{node}.fe.problem") "heat")
       - slider_int: Steps
-        bind: graphics.root.children.domain.fe.heat.steps
+        bind: graphics.root.children.{node}.fe.heat.steps
         lo: 1
         hi: 500
-        visible_when: (= (state-get "graphics.root.children.domain.fe.problem") "heat")
+        visible_when: (= (state-get "graphics.root.children.{node}.fe.problem") "heat")
       - slider_int: Mode
-        bind: graphics.root.children.domain.fe.modes.index
+        bind: graphics.root.children.{node}.fe.modes.index
         lo: 1
         hi: 20
-        visible_when: (= (state-get "graphics.root.children.domain.fe.problem") "modes")
+        visible_when: (= (state-get "graphics.root.children.{node}.fe.problem") "modes")
       - button: Solve
-        on: (state-set "graphics.root.children.domain.fe.request" "solve")
-        disabled_when: (or (= (state-get "graphics.root.children.domain.fe.busy") "1") (= (state-get "graphics.root.children.domain.fe.stats.tets") "0"))
+        on: (state-set "graphics.root.children.{node}.fe.request" "solve")
+        disabled_when: (or (= (state-get "graphics.root.children.{node}.fe.busy") "1") (= (state-get "graphics.root.children.{node}.fe.stats.tets") "0"))
       - button: Stop
-        on: (state-set "graphics.root.children.domain.fe.request" "stop")
-        enabled_when: (= (state-get "graphics.root.children.domain.fe.stoppable") "1")
-        tooltip: "interrupts a running heat solve; loading, meshing and the other solves run to the end"
+        on: (state-set "graphics.root.children.{node}.fe.request" "stop")
+        enabled_when: (= (state-get "graphics.root.children.{node}.fe.stoppable") "1")
+        tooltip: "ends the running job: a heat solve keeps its field so far, anything else keeps nothing"
       - separator
       - text: "3. Show"
       - combo: View
-        bind: graphics.root.children.domain.fe.view.mode
+        bind: graphics.root.children.{node}.fe.view.mode
         options: [The field, The elements]
         values: [field, elements]
       - combo: Colour elements by
-        bind: graphics.root.children.domain.fe.view.color_by
+        bind: graphics.root.children.{node}.fe.view.color_by
         options: [Size (octree level), Quality (min dihedral / scaled Jacobian)]
         values: [size, quality]
-        visible_when: (= (state-get "graphics.root.children.domain.fe.view.mode") "elements")
+        visible_when: (= (state-get "graphics.root.children.{node}.fe.view.mode") "elements")
       - combo: Keep
-        bind: graphics.root.children.domain.fe.view.cut_side
+        bind: graphics.root.children.{node}.fe.view.cut_side
         options: [The + side of the cut, The - side of the cut]
         values: [1, -1]
-        visible_when: (= (state-get "graphics.root.children.domain.fe.view.mode") "elements")
+        visible_when: (= (state-get "graphics.root.children.{node}.fe.view.mode") "elements")
       - slider_float: Ghost
-        bind: graphics.root.children.domain.fe.view.ghost
+        bind: graphics.root.children.{node}.fe.view.ghost
         lo: 0.0
         hi: 1.0
         fmt: "%.2f"
         tooltip: "the opacity of the whole outer surface over the cut-away elements (0 = off)"
-        visible_when: (= (state-get "graphics.root.children.domain.fe.view.mode") "elements")
+        visible_when: (= (state-get "graphics.root.children.{node}.fe.view.mode") "elements")
       - combo: Colormap
-        bind: graphics.root.children.domain.fe.view.colormap
+        bind: graphics.root.children.{node}.fe.view.colormap
         options: [viridis, magma, plasma, inferno, turbo, jet, parula, gray]
         tooltip: "resets the colours below to this colormap's ramp"
       - tf_editor: Colours
-        id: fe_field_colors
-        bind: graphics.root.children.domain.field_colors
+        id: "{id}_colors"
+        bind: graphics.root.children.{node}.field_colors
         height: 70
         layers: [histogram]
-        show_opacity: false
         show_isocontours: false
         interactive_updates: true
       - checkbox: Boundary surface
-        bind: graphics.root.children.domain.fe.view.show_surface
-        visible_when: (!= (state-get "graphics.root.children.domain.fe.view.mode") "elements")
+        bind: graphics.root.children.{node}.fe.view.show_surface
+        visible_when: (!= (state-get "graphics.root.children.{node}.fe.view.mode") "elements")
       - checkbox: Slice
-        bind: graphics.root.children.domain.fe.view.show_slice
+        bind: graphics.root.children.{node}.fe.view.show_slice
         tooltip: "the cut plane (in the elements view: cut the elements away)"
       - slider_float: Surface opacity (with a slice)
-        bind: graphics.root.children.domain.fe.view.surface_opacity
+        bind: graphics.root.children.{node}.fe.view.surface_opacity
         lo: 0.0
         hi: 1.0
         fmt: "%.2f"
-        visible_when: (!= (state-get "graphics.root.children.domain.fe.view.mode") "elements")
+        visible_when: (!= (state-get "graphics.root.children.{node}.fe.view.mode") "elements")
       - combo: Slice axis
-        bind: graphics.root.children.domain.fe.view.slice_axis
+        bind: graphics.root.children.{node}.fe.view.slice_axis
         options: [X, Y, Z]
         values: [0, 1, 2]
       - slider_float: Slice offset
-        bind: graphics.root.children.domain.fe.view.slice_offset # -1..1 across the mesh bounds
+        bind: graphics.root.children.{node}.fe.view.slice_offset # -1..1 across the mesh bounds
         lo: -1.0
         hi: 1.0
         fmt: "%.2f"
       - checkbox: Fixed colour range
-        bind: graphics.root.children.domain.fe.view.fixed_range
+        bind: graphics.root.children.{node}.fe.view.fixed_range
       - slider_float: Range min
-        bind: graphics.root.children.domain.fe.view.range_min
+        bind: graphics.root.children.{node}.fe.view.range_min
         lo: -10.0
         hi: 100.0
         fmt: "%.2f"
-        visible_when: (= (state-get "graphics.root.children.domain.fe.view.fixed_range") "1")
+        visible_when: (= (state-get "graphics.root.children.{node}.fe.view.fixed_range") "1")
       - slider_float: Range max
-        bind: graphics.root.children.domain.fe.view.range_max
+        bind: graphics.root.children.{node}.fe.view.range_max
         lo: -10.0
         hi: 100.0
         fmt: "%.2f"
-        visible_when: (= (state-get "graphics.root.children.domain.fe.view.fixed_range") "1")
+        visible_when: (= (state-get "graphics.root.children.{node}.fe.view.fixed_range") "1")
       - text: "field min"
-        bind: graphics.root.children.domain.fe.field.min
+        bind: graphics.root.children.{node}.fe.field.min
       - text: "field max"
-        bind: graphics.root.children.domain.fe.field.max
+        bind: graphics.root.children.{node}.fe.field.max
       - text: "quality min"
-        bind: graphics.root.children.domain.fe.stats.quality_min
+        bind: graphics.root.children.{node}.fe.stats.quality_min
       - text: "quality mean"
-        bind: graphics.root.children.domain.fe.stats.quality_mean
+        bind: graphics.root.children.{node}.fe.stats.quality_mean

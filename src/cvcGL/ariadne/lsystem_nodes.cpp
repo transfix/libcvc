@@ -26,6 +26,7 @@
 // cvc::lsys.
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cvc/ariadne/bind.h> // live node params: read_or_seed / read_or / resolve_bind
 #include <cvc/ariadne/scene.h>
@@ -39,15 +40,21 @@
 #include <cvc/gl/VolumeNode.h>
 #include <cvc/gl/ariadne/lsystem_nodes.h>
 #include <cvc/gl/ariadne/scene_realize.h>
-#include <cvc/image/image.h>
-#include <cvc/lsys/cloud.h>
 #include <cvc/lsys/forest.h>
 #include <cvc/lsys/water.h>
 #include <cvc/volume/bounding_box.h>
 #include <cvc/volume/volume.h>
+#include <cvc/world/cloud_layer.h>
 #include <memory>
 #include <string>
 #include <vector>
+#include <vtkCamera.h>
+#include <vtkMatrix4x4.h>
+#include <vtkNew.h>
+#include <vtkOpenGLRenderWindow.h>
+#include <vtkRenderer.h>
+#include <vtkSmartPointer.h>
+#include <vtkTextureObject.h>
 
 namespace cvc {
 namespace gl {
@@ -57,12 +64,14 @@ namespace {
 namespace ari = cvc::ariadne;
 
 // Live node params (§9 — control panels). Each node type reads its procedural settings from state
-// keys under a fixed per-type prefix (forest.* / sea.* / sky.*), SEEDED from the authored .ari prop
-// so the document's value is the starting point and a reusable control panel (bound to the same
-// keys) then drives it live. seed_key() runs once at realize (before any widget renders, so the
-// prop default wins over a widget's def:); read_key() is the per-frame follower the tick uses.
-std::string seed_key(cvc::app &app, const std::string &prefix, const char *key, double def) {
-  const std::string path = ari::resolve_bind(prefix, key);
+// keys under a per-type prefix (forest.* / sea.* / sky.*, or the node's `keys:` prop: node_key),
+// SEEDED from the authored .ari prop so the document's value is the starting point and a reusable
+// control panel (bound to the same keys) then drives it live. seed_key() runs once at realize
+// (before any widget renders, so the prop default wins over a widget's def:); read_key() is the
+// per-frame follower the tick uses.
+std::string seed_key(cvc::app &app, const std::string &prefix, const ari::SceneNode &n,
+                     const char *key, double def) {
+  const std::string path = ari::resolve_bind(prefix, ari::node_key(n, key));
   ari::read_or_seed<double>(app, path, def); // seed the key from the prop default
   return path;                               // hand back the resolved absolute path for the tick
 }
@@ -71,7 +80,7 @@ inline double read_key(cvc::app &app, const std::string &path, double def) {
 }
 
 // The ground a node stands on (its `ground:` prop): a heightfield node's own cvc::height_field
-// (RealizedScene::height_fields), so the forest, the sea floor and the cloud shadow sit on the
+// (RealizedScene::height_fields), so the forest and the sea floor sit on the
 // triangles the renderer draws and a body rests on. For any other grid-shaped mesh (res x res
 // row-major, as a loaded grid may be), the nearest vertex of the grid its vertex count implies.
 // Sampled in the ground node's own coordinates, before its transform.
@@ -132,19 +141,6 @@ struct TerrainHeights {
     }
     const std::int64_t v = vertex(x, y);
     return v < 0 ? 0.0 : mesh.const_points()[std::size_t(v)][2];
-  }
-  // The ground's per-vertex band colour at (x,y) (the nearest vertex), or white if the mesh has
-  // no colours, so the cloud-shadow texture can carry albedo x shadow and keep the ground coloured.
-  void color_at(double x, double y, double &r, double &g, double &b) const {
-    const std::int64_t v = vertex(x, y);
-    if (v < 0 || mesh.const_colors().size() != mesh.const_points().size()) {
-      r = g = b = 1.0;
-      return;
-    }
-    const auto &c = mesh.const_colors()[std::size_t(v)];
-    r = c[0];
-    g = c[1];
-    b = c[2];
   }
 };
 
@@ -248,18 +244,18 @@ std::shared_ptr<GraphicsNode> realize_forest_trees(SceneGraph &sg, const ari::Sc
 
   cvc::app &app = sg.appContext();
   const std::string pref = sg.getStatePrefix();
-  rt->k.seed = seed_key(app, pref, "forest.seed", double(rt->base.seed));
-  rt->k.count = seed_key(app, pref, "forest.count", rt->base.count);
-  rt->k.span = seed_key(app, pref, "forest.span", rt->base.span);
-  rt->k.sea_level = seed_key(app, pref, "forest.sea_level", rt->base.sea_level);
-  rt->k.species = seed_key(app, pref, "forest.species", double(int(rt->base.species)));
-  rt->k.scale = seed_key(app, pref, "forest.scale", rt->base.scale);
-  rt->k.length = seed_key(app, pref, "forest.length", rt->base.length);
-  rt->k.radius = seed_key(app, pref, "forest.radius", rt->base.radius);
-  rt->k.levels = seed_key(app, pref, "forest.levels", rt->base.levels);
-  rt->k.branches = seed_key(app, pref, "forest.branches", rt->base.branches);
-  rt->k.pine_scale = seed_key(app, pref, "forest.pine_scale", rt->base.pine_scale);
-  rt->k.wind = seed_key(app, pref, "forest.wind", windDef);
+  rt->k.seed = seed_key(app, pref, n, "forest.seed", double(rt->base.seed));
+  rt->k.count = seed_key(app, pref, n, "forest.count", rt->base.count);
+  rt->k.span = seed_key(app, pref, n, "forest.span", rt->base.span);
+  rt->k.sea_level = seed_key(app, pref, n, "forest.sea_level", rt->base.sea_level);
+  rt->k.species = seed_key(app, pref, n, "forest.species", double(int(rt->base.species)));
+  rt->k.scale = seed_key(app, pref, n, "forest.scale", rt->base.scale);
+  rt->k.length = seed_key(app, pref, n, "forest.length", rt->base.length);
+  rt->k.radius = seed_key(app, pref, n, "forest.radius", rt->base.radius);
+  rt->k.levels = seed_key(app, pref, n, "forest.levels", rt->base.levels);
+  rt->k.branches = seed_key(app, pref, n, "forest.branches", rt->base.branches);
+  rt->k.pine_scale = seed_key(app, pref, n, "forest.pine_scale", rt->base.pine_scale);
+  rt->k.wind = seed_key(app, pref, n, "forest.wind", windDef);
 
   // Grow the initial forest — ALWAYS with wind records, so enabling wind live later works.
   const cvc::lsys::forest_params fp0 = read_live_fp(*rt);
@@ -353,8 +349,8 @@ std::shared_ptr<GraphicsNode> realize_wave_sea(SceneGraph &sg, const ari::SceneN
   // these each frame, so the amplitude/level are tweakable live (the field is re-filled anyway, no
   // regen).
   const std::string pref = sg.getStatePrefix();
-  const std::string ampKey = seed_key(sg.appContext(), pref, "sea.wave_amp", sp->wave_amp);
-  const std::string lvlKey = seed_key(sg.appContext(), pref, "sea.sea_level", sp->sea_level);
+  const std::string ampKey = seed_key(sg.appContext(), pref, n, "sea.wave_amp", sp->wave_amp);
+  const std::string lvlKey = seed_key(sg.appContext(), pref, n, "sea.sea_level", sp->sea_level);
 
   // Terrain height at each sea-grid column (constant), sampled from the realized heightfield.
   TerrainHeights heights;
@@ -423,226 +419,595 @@ std::shared_ptr<GraphicsNode> realize_wave_sea(SceneGraph &sg, const ari::SceneN
   return gn;
 }
 
-// ───────────────────────────── the sky: a drifting cloud VolumeNode ──────────────────────────────
+// ─────────────────────── the sky: a world-scale cloud deck (cvc::world::cloud_layer)
+// ─────────────────────── A few L-system cumulus maps scattered over a periodic grid of cells that
+// covers the ground (cloud_layer.h). The clouds nearest the camera are drawn by a small pool of
+// VolumeNodes, the rest by one mesh of translucent horizontal shells sampling a coarse opacity
+// texture; a cloud passing between the two crossfades. The deck's shade is a periodic mask that the
+// receivers' shaders read by world position and apply to the direct light alone, so a ground keeps
+// its own texture.
 constexpr int SKY_N = 60, SKY_NZ = 28;
 constexpr double SKY_BASE = 74.0, SKY_TOP = 122.0, SKY_HALF = 150.0;
-constexpr double CLOUD_DRIFT = 3.0, CLOUD_MORPH_S = 60.0;
-constexpr int CLOUD_MAPS = 2, CLOUD_DEPTH = 6;
-constexpr double CLOUD_FLOOR = 0.10, CLOUD_EMPTY = 0.22;
+constexpr double CLOUD_DRIFT = 3.0;    // m/s along +x at drift 1
+constexpr double CLOUD_MORPH_S = 30.0; // seconds per variant change at morph 1
+constexpr double CLOUD_EMPTY = 0.22;
 constexpr double SUN_AZ = -52.0, SUN_EL = 34.0;
-constexpr int SHADOW_RES = 96;
-constexpr double SHADOW_PROJ_EL = 66.0, SHADOW_K = 0.13, SHADOW_FLOOR = 0.55;
+constexpr double SHADE_FLOOR =
+    0.2;                           // the shade: floor + (1 - floor) e^(-k tau), on the direct light
+constexpr double SHADE_GAIN = 4.0; // the shade's optical depth over the volume's (see shade_k)
+constexpr int NEAR_CLOUDS = 4;     // the near VolumeNodes
+constexpr int MAX_NEAR = 8;        // as many as the shells can cut out (cloudCut0..7)
+constexpr int STRIDE = 3;          // frames between the near volumes' work
+constexpr int REFRESH = 60;        // frames between shade and far composites (the morph is slow)
+constexpr int SLICES = 8;          // frames a composite's cells, then its rows, are spread over
+constexpr int AREA_STRIDE = 60;    // frames between looks at the ground's extent and receivers
+constexpr int FADE_FRAMES = 45;    // a cloud's near <-> far crossfade
+const char *CLOUD_INPUTS = "cloud_sky"; // the shared shader inputs' key on a mesh
 
-inline std::size_t skyIdx(int z, int y, int x) { return cvc::lsys::cloud_index(SKY_N, x, y, z); }
+// Where the deck's code goes in a lit mesh's fragment shader (vertexVC is there whenever a mesh
+// is lit by the scene's lights). A receiver rewrites VTK's lighting sum, which both its mappers
+// write (as gl_FragData[0] or fragOutput0), after VTK has generated it
+// (cvc::gl::GeometryNode::addFragmentShaderPostReplacement): only there are the direct terms,
+// diffuse and specular, apart (the WebGL2 mapper scopes them to its lighting block). The shells
+// overwrite the colour after the lighting: a replacement of //VTK::Light::Impl is applied before
+// VTK fills the anchor in, and VTK's lighting code ends with the anchor again, so the text after
+// it runs once the colour is written.
+const char *LIGHT_SUM = "vec4(ambientColor + diffuse + specular, opacity)";
 
-// Two L-system cloud maps (cvc::lsys::cloud_field) crossfaded + scrolled at runtime — the cheap
-// animation the library leaves to the consumer.
-struct SkyModel {
-  std::vector<std::vector<float>> maps;
-  double norm = 1.0;
-  std::vector<float> raw(double shift, double morph) const {
-    const int N = SKY_N, NZ = SKY_NZ;
-    long mi = static_cast<long>(std::floor(morph));
-    int i = static_cast<int>(((mi % CLOUD_MAPS) + CLOUD_MAPS) % CLOUD_MAPS);
-    int j = (i + 1) % CLOUD_MAPS;
-    double u = morph - std::floor(morph);
-    u = u * u * (3.0 - 2.0 * u);
-    long ks = static_cast<long>(std::floor(shift));
-    double fsh = shift - ks;
-    int k0 = static_cast<int>(((ks % N) + N) % N), k1 = (k0 + 1) % N;
-    const std::vector<float> &A = maps[i], &B = maps[j];
-    std::vector<float> out(static_cast<std::size_t>(NZ) * N * N);
-    for (int z = 0; z < NZ; ++z)
-      for (int y = 0; y < N; ++y)
-        for (int x = 0; x < N; ++x) {
-          int sx0 = ((x - k0) % N + N) % N, sx1 = ((x - k1) % N + N) % N;
-          auto mix = [&](int xx) {
-            return (1.0 - u) * A[skyIdx(z, y, xx)] + u * B[skyIdx(z, y, xx)];
-          };
-          double vold = (1.0 - fsh) * mix(sx0) + fsh * mix(sx1);
-          double lump = std::min(1.0, std::max(0.0, (vold - CLOUD_FLOOR) / (1.0 - CLOUD_FLOOR)));
-          out[skyIdx(z, y, x)] = static_cast<float>(lump * lump);
-        }
-    return out;
-  }
-  std::vector<float> field(double shift, double morph) const {
-    std::vector<float> r = raw(shift, morph);
-    const double inv = 1.0 / norm;
-    for (float &v : r)
-      v = static_cast<float>(v * inv);
-    return r;
-  }
-};
-SkyModel buildSky() {
-  SkyModel sky;
-  for (int m = 0; m < CLOUD_MAPS; ++m) {
-    cvc::lsys::cloud_params cp;
-    cp.seed = 20;
-    cp.variant = static_cast<std::uint32_t>(m);
-    cp.n = SKY_N;
-    cp.nz = SKY_NZ;
-    cp.half = SKY_HALF;
-    cp.base = SKY_BASE;
-    cp.top = SKY_TOP;
-    cp.sun_az = SUN_AZ;
-    cp.sun_el = SUN_EL;
-    cp.depth = CLOUD_DEPTH;
-    sky.maps.push_back(cvc::lsys::cloud_field(cp));
-  }
-  double norm = 0.0;
-  for (int c = 0; c < SKY_N; c += 8)
-    for (double mo : {0.0, 0.5, 1.0}) {
-      std::vector<float> r = sky.raw(double(c), mo);
-      for (float v : r)
-        norm = std::max(norm, double(v));
-    }
-  sky.norm = norm > 0 ? norm : 1.0;
-  return sky;
+// A receiver: the deck's shade at the base-plane point of the fragment's sun ray, on the direct
+// light. cloudVCWC = view -> world, cloudXf = (wind x, wind y, 1 / period, deck base),
+// cloudSunR = sun.xy / sun.z.
+const char *SHADE_DEC = R"(//VTK::Light::Dec
+uniform highp sampler2D cloudShadeTex;
+uniform mat4 cloudVCWC;
+uniform vec4 cloudXf;
+uniform vec3 cloudSunR;
+uniform float cloudShadeOn;
+float cloudShade(vec3 pVC) {
+  if (cloudShadeOn <= 0.0) return 1.0;
+  vec3 w = (cloudVCWC * vec4(pVC, 1.0)).xyz;
+  vec2 b = w.xy + (cloudXf.w - w.z) * cloudSunR.xy - cloudXf.xy;
+  return mix(1.0, texture(cloudShadeTex, b * cloudXf.z).r, cloudShadeOn);
 }
-void skyTransfer(std::vector<double> &color, std::vector<double> &opacity) {
+)";
+const char *SHADE_SUM =
+    "vec4(ambientColor + cloudShade(vertexVC.xyz) * (diffuse + specular), opacity)";
+
+// The far shells: each fragment reads its slice of the coarse opacity and turns it into the
+// slice's optical depth along the view ray (as the volume would integrate it), lightens with
+// height, thins out with distance from the camera (cloudFar = camera xy, fade start, fade end) and
+// leaves out what a near volume draws (cloudCutK = its cloud's centre xy, half-width, weight).
+// cloudFarZ = (deck base, 1 / deck depth, a slice's vertical optical depth at full opacity,
+// camera z).
+std::string shellDec() {
+  std::string s = R"(//VTK::Light::Dec
+uniform highp sampler3D cloudFarTex;
+uniform mat4 cloudVCWC;
+uniform vec4 cloudXf;
+uniform vec4 cloudFar;
+uniform vec4 cloudFarZ;
+)";
+  for (int k = 0; k < MAX_NEAR; ++k)
+    s += "uniform vec4 cloudCut" + std::to_string(k) + ";\n";
+  s += R"(float cloudCut(vec2 p, vec4 c) {
+  vec2 d = abs(p - c.xy) / max(c.z, 1.0);
+  return 1.0 - c.w * (1.0 - smoothstep(0.8, 1.0, max(d.x, d.y)));
+}
+vec4 cloudShell(vec3 pVC) {
+  vec3 w = (cloudVCWC * vec4(pVC, 1.0)).xyz;
+  float h = clamp((w.z - cloudFarZ.x) * cloudFarZ.y, 0.0, 1.0);
+  float d = texture(cloudFarTex, vec3((w.xy - cloudXf.xy) * cloudXf.z, h)).r;
+  float mu = abs(normalize(w - vec3(cloudFar.xy, cloudFarZ.w)).z);
+  float a = 1.0 - exp(-cloudFarZ.z * d / max(mu, 0.08));
+  a *= 1.0 - smoothstep(cloudFar.z, cloudFar.w, length(w.xy - cloudFar.xy));
+)";
+  for (int k = 0; k < MAX_NEAR; ++k)
+    s += "  a *= cloudCut(w.xy, cloudCut" + std::to_string(k) + ");\n";
+  s +=
+      R"(  vec3 c = mix(vec3(0.80, 0.85, 0.93), vec3(1.0), clamp(0.3 + 0.7 * h + 0.4 * d, 0.0, 1.0));
+  return vec4(c, a);
+}
+)";
+  return s;
+}
+const char *SHELL_AFTER = R"(//VTK::Light::Impl
+  gl_FragData[0] = cloudShell(vertexVC.xyz);
+)";
+
+void skyTransfer(double w, std::vector<double> &color, std::vector<double> &opacity) {
   color = {0.0, 0.80, 0.85, 0.93, 0.45, 0.94, 0.96, 0.98, 1.0, 1.00, 1.00, 1.00};
-  opacity = {0.0, 0.0, CLOUD_EMPTY, 0.0, 0.55, 0.26, 1.0, 0.54};
+  opacity = {0.0, 0.0, CLOUD_EMPTY, 0.0, 0.55, 0.26 * w, 1.0, 0.54 * w};
 }
 
-struct Vec3 {
-  double x, y, z;
+// One horizontal quad per far slice, at the slice's middle, `reach` around (cx, cy); the top
+// slice first, so a camera under the deck blends them far to near.
+cvc::geometry shellMesh(const cvc::world::cloud_layer &L, double cx, double cy, double reach) {
+  cvc::geometry g;
+  const cvc::world::cloud_layer_params &p = L.params();
+  for (int k = p.far_layers - 1; k >= 0; --k) {
+    const double z = p.base + (k + 0.5) * (p.top - p.base) / p.far_layers;
+    const auto v = static_cast<cvc::geometry::index_t>(g.points().size());
+    g.points().push_back({cx - reach, cy - reach, z});
+    g.points().push_back({cx + reach, cy - reach, z});
+    g.points().push_back({cx + reach, cy + reach, z});
+    g.points().push_back({cx - reach, cy + reach, z});
+    g.tris().push_back({v, v + 1, v + 2});
+    g.tris().push_back({v, v + 2, v + 3});
+  }
+  return g;
+}
+
+// A composite spread over frames: its cells a share at a time, then its bytes, then one upload.
+struct Composite {
+  int phase = 0; // 0 idle, 1 adding cells, 2 converting rows
+  std::size_t next = 0;
+  double m = 0.0;   // the morph clock it was started at
+  long started = 0; // the frame it was started on
+  std::vector<float> acc;
+  std::vector<unsigned char> bytes;
 };
-Vec3 sunDir(double azDeg, double elDeg) {
-  constexpr double kPi = 3.14159265358979323846; // not M_PI: MSVC needs _USE_MATH_DEFINES for it
-  const double az = azDeg * kPi / 180.0, el = elDeg * kPi / 180.0;
-  return {std::cos(el) * std::sin(az), -std::cos(el) * std::cos(az), std::sin(el)};
+
+struct SkyRT {
+  cvc::app *app = nullptr;
+  std::unique_ptr<cvc::world::cloud_layer> layer;
+  std::string driftKey, morphKey, shadowKey;
+  std::vector<std::string>
+      receivers; // the nodes whose meshes (and their children's) take the shade
+  std::shared_ptr<const cvc::height_field> ground; // its extent is the area, unless `area` is set
+  // The deck is drawn over `reach` around the ground's centre (ox, oy): the ground's half-width
+  // plus the horizon. The pattern's period is wider than that by a cloud on each side, so one copy
+  // of each cloud is ever drawn: the one nearest the centre.
+  double ox = 0.0, oy = 0.0, area = 0.0, horizon = 0.0, reach = 0.0;
+  double shadeK = 0.1, shadeFloor = SHADE_FLOOR;
+  double farK = 1.0; // a far slice's vertical optical depth at the table's largest opacity
+  struct Near {
+    std::weak_ptr<VolumeNode> node;
+    int cell = -1;  // the cell drawn, or -1
+    int weight = 0; // frames into its fade-in, 0..FADE_FRAMES
+    bool leaving = false;
+  };
+  std::vector<Near> near;
+  int nextMorph = 0;
+  std::weak_ptr<GeometryNode> shells;
+  std::shared_ptr<GeometryNode::ShaderInputs> inputs;
+  // Two of each, uploaded in turn, so an upload never waits on the GPU drawing the other.
+  vtkSmartPointer<vtkTextureObject> shadeTex[2], farTex[2];
+  int shadeAt = 0, farAt = 0;
+  Composite shade, far;
+  std::vector<float> field;
+  long frame = 0;
+  double lastT = -1.0, driftX = 0.0, morph = 0.0;
+  bool snap = true;  // the next assignment shows its clouds at once (the first frame, a new layout)
+  bool fresh = true; // the next composites are done at once (the first frame, a new layout)
+  bool shadeWas = false;
+};
+
+// The world xy of a cell's cloud: its pattern centre moved by the wind, the periodic copy nearest
+// the deck's centre.
+void cloudCentre(const SkyRT &r, const cvc::world::cloud_cell &c, double &wx, double &wy) {
+  const double P = r.layer->period_m();
+  wx = c.cx + r.driftX;
+  wy = c.cy;
+  wx += P * std::round((r.ox - wx) / P);
+  wy += P * std::round((r.oy - wy) / P);
 }
-float sampleSky(const std::vector<float> &field, double wx, double wy, double wz, double skyHalf) {
-  if (wz < SKY_BASE || wz > SKY_TOP)
-    return 0.0f;
-  double fx = (wx + skyHalf) / (2.0 * skyHalf) * (SKY_N - 1);
-  double fy = (wy + skyHalf) / (2.0 * skyHalf) * (SKY_N - 1);
-  double fz = (wz - SKY_BASE) / (SKY_TOP - SKY_BASE) * (SKY_NZ - 1);
-  if (fx < 0 || fx > SKY_N - 1 || fy < 0 || fy > SKY_N - 1)
-    return 0.0f;
-  int x0 = (int)fx, y0 = (int)fy, z0 = (int)fz;
-  int x1 = std::min(x0 + 1, SKY_N - 1), y1 = std::min(y0 + 1, SKY_N - 1),
-      z1 = std::min(z0 + 1, SKY_NZ - 1);
-  double tx = fx - x0, ty = fy - y0, tz = fz - z0;
-  auto V = [&](int x, int y, int z) { return (double)field[skyIdx(z, y, x)]; };
-  double c00 = V(x0, y0, z0) * (1 - tx) + V(x1, y0, z0) * tx;
-  double c10 = V(x0, y1, z0) * (1 - tx) + V(x1, y1, z0) * tx;
-  double c01 = V(x0, y0, z1) * (1 - tx) + V(x1, y0, z1) * tx;
-  double c11 = V(x0, y1, z1) * (1 - tx) + V(x1, y1, z1) * tx;
-  double c0 = c00 * (1 - ty) + c10 * ty, c1 = c01 * (1 - ty) + c11 * ty;
-  return (float)(c0 * (1 - tz) + c1 * tz);
+
+// The ground's centre and half-width (its height field's box).
+void groundBox(const cvc::height_field &g, double &ox, double &oy, double &area) {
+  ox = 0.5 * (g.x0() + g.max_x());
+  oy = 0.5 * (g.y0() + g.max_y());
+  area = 0.5 * std::max(g.max_x() - g.x0(), g.max_y() - g.y0());
 }
-// Bake the grey cloud shadow × terrain albedo over the footprint [-half,half]² into an RGB buffer.
-void bakeCloudShadow(const std::vector<float> &field, Vec3 sun, double half,
-                     const TerrainHeights &terr, std::vector<unsigned char> &rgb) {
-  const double L = std::sqrt(sun.x * sun.x + sun.y * sun.y + sun.z * sun.z);
-  Vec3 Ln{sun.x / L, sun.y / L, sun.z / L};
-  const int STEPS = 22;
-  rgb.resize(static_cast<std::size_t>(SHADOW_RES) * SHADOW_RES * 3);
-  for (int ty = 0; ty < SHADOW_RES; ++ty) {
-    double y = -half + 2.0 * half * ty / (SHADOW_RES - 1);
-    for (int tx = 0; tx < SHADOW_RES; ++tx) {
-      double x = -half + 2.0 * half * tx / (SHADOW_RES - 1);
-      double z0 = terr.ok() ? terr.at(x, y) : 0.0;
-      double tEntry = (SKY_BASE - z0) / Ln.z, tExit = (SKY_TOP - z0) / Ln.z;
-      double ds = (tExit - tEntry) / STEPS, tau = 0.0;
-      for (int i = 0; i < STEPS; ++i) {
-        double t = tEntry + (i + 0.5) * ds;
-        tau += sampleSky(field, x + t * Ln.x, y + t * Ln.y, z0 + t * Ln.z, half) * ds;
-      }
-      double s = SHADOW_FLOOR + (1.0 - SHADOW_FLOOR) * std::exp(-SHADOW_K * tau);
-      double ar, ag, ab;
-      terr.color_at(x, y, ar, ag, ab); // keep the terrain's band albedo under the shadow
-      std::size_t o = (static_cast<std::size_t>(ty) * SHADOW_RES + tx) * 3;
-      rgb[o] = (unsigned char)std::min(255.0, std::max(0.0, ar * s * 255.0));
-      rgb[o + 1] = (unsigned char)std::min(255.0, std::max(0.0, ag * s * 255.0));
-      rgb[o + 2] = (unsigned char)std::min(255.0, std::max(0.0, ab * s * 255.0));
-    }
+
+// Lay the deck over the ground: the reach, the period, the shells; every cloud placed afresh.
+void layDeck(SkyRT &r) {
+  r.reach = r.area + r.horizon;
+  r.layer->set_area(r.reach + r.layer->params().extent);
+  for (SkyRT::Near &v : r.near) {
+    v.cell = -1;
+    v.leaving = false;
+    v.weight = 0;
+    if (auto vn = v.node.lock())
+      vn->setVisible(false);
+  }
+  r.snap = true;
+  r.fresh = true;
+  r.shade.phase = r.far.phase = 0;
+  if (auto sh = r.shells.lock())
+    sh->setGeometry(shellMesh(*r.layer, r.ox, r.oy, r.reach));
+}
+
+// Give `g` and every mesh under it the deck's shade, once each.
+void wireReceivers(SkyRT &r, GraphicsNode &g) {
+  if (auto *m = dynamic_cast<GeometryNode *>(&g); m && !m->hasSharedShaderInputs(CLOUD_INPUTS)) {
+    m->addFragmentShaderReplacement("//VTK::Light::Dec", SHADE_DEC);
+    m->addFragmentShaderPostReplacement(LIGHT_SUM, SHADE_SUM);
+    m->setSharedShaderInputs(CLOUD_INPUTS, r.inputs);
+  }
+  for (const std::shared_ptr<GraphicsNode> &c : g.getGraphicsChildren())
+    if (c)
+      wireReceivers(r, *c);
+}
+
+void setNearWeight(SkyRT::Near &v) {
+  if (auto vn = v.node.lock()) {
+    std::vector<double> col, op;
+    skyTransfer(double(v.weight) / FADE_FRAMES, col, op);
+    vn->setTransferFunction(col, op);
   }
 }
 
-// type: cloud_sky — a drifting cloud VolumeNode (two cvc::lsys::cloud_field maps crossfaded +
-// scrolled) over the island, plus a baked cloud→ground shadow textured onto the terrain.
-// props: ground, half, shadow (0 disables the ground shadow).
+// The near volumes go to the clouds nearest the camera (a cloud already drawn counts a little
+// nearer, so two at much the same distance do not trade places); the others are far shells.
+void assignNear(SkyRT &r, double camx, double camy, double camz) {
+  const cvc::world::cloud_layer &L = *r.layer;
+  const double zc = 0.5 * (L.params().base + L.params().top);
+  const double out = L.params().extent + r.reach; // a cloud wholly past the deck's edge: not drawn
+  std::vector<std::pair<double, int>> order;
+  for (std::size_t k = 0; k < L.cells().size(); ++k) {
+    const cvc::world::cloud_cell &c = L.cells()[k];
+    if (!c.occupied)
+      continue;
+    double wx, wy;
+    cloudCentre(r, c, wx, wy);
+    if (std::fabs(wx - r.ox) > out || std::fabs(wy - r.oy) > out)
+      continue;
+    double d = std::sqrt((wx - camx) * (wx - camx) + (wy - camy) * (wy - camy) +
+                         (zc - camz) * (zc - camz));
+    for (const SkyRT::Near &v : r.near)
+      if (v.cell == int(k) && !v.leaving)
+        d *= 0.8;
+    order.emplace_back(d, int(k));
+  }
+  const std::size_t want = std::min(order.size(), r.near.size());
+  std::partial_sort(order.begin(), order.begin() + want, order.end());
+  std::vector<int> target;
+  for (std::size_t k = 0; k < want; ++k)
+    target.push_back(order[k].second);
+  for (SkyRT::Near &v : r.near)
+    if (v.cell >= 0 && std::find(target.begin(), target.end(), v.cell) == target.end())
+      v.leaving = true;
+  for (int cell : target) {
+    bool drawn = false;
+    for (SkyRT::Near &v : r.near)
+      if (v.cell == cell) {
+        v.leaving = false; // back before it faded out
+        drawn = true;
+      }
+    if (drawn)
+      continue;
+    for (SkyRT::Near &v : r.near) {
+      auto vn = v.node.lock();
+      if (v.cell >= 0 || !vn)
+        continue;
+      v.cell = cell;
+      v.leaving = false;
+      v.weight = r.snap ? FADE_FRAMES : 0;
+      L.cell_field(L.cells()[cell], r.morph, r.field);
+      vn->updateScalars(r.field);
+      setNearWeight(v);
+      vn->setVisible(true);
+      break;
+    }
+  }
+  r.snap = false;
+}
+
+// One frame's share of a composite: start one every REFRESH frames (at once when `now`), add a
+// share of the cells, then convert a share of the rows; true when the bytes are ready to upload.
+template <class Add, class Rows>
+bool stepComposite(Composite &c, long f, double morph, bool now, std::size_t cells, int rows,
+                   Add add, Rows convert) {
+  if (c.phase == 0) {
+    if (!now && f - c.started < REFRESH)
+      return false;
+    c.phase = 1;
+    c.next = 0;
+    c.m = morph;
+    c.started = f;
+    c.acc.clear();
+  }
+  const int slices = now ? 1 : SLICES;
+  if (c.phase == 1) {
+    const std::size_t share = (cells + slices - 1) / slices;
+    add(c.m, c.next, share, c.acc);
+    c.next += share;
+    if (c.next < cells)
+      return false;
+    c.phase = 2;
+    c.next = 0;
+    if (!now)
+      return false;
+  }
+  const int share = (rows + slices - 1) / slices;
+  convert(c.acc, int(c.next), share, c.bytes);
+  c.next += std::size_t(share);
+  if (int(c.next) < rows)
+    return false;
+  c.phase = 0;
+  return true;
+}
+
+// type: cloud_sky — a drifting, morphing cloud deck over the ground (see above).
+// props: ground (the node whose extent the deck covers and whose meshes take its shade), receivers
+// (more nodes that take the shade), area (the half-width to cover; default the ground's, else
+// half), extent (a cloud's half-width), base and top (the deck's heights), spacing (cell size),
+// coverage (the share of cells with a cloud), variants, seed, sun_az / sun_el (the light the
+// clouds are lit from and cast along: the scene's key), near (volumes, at most 8), layers (far
+// shells), horizon (how far past the ground the shells reach; by default a cloud's half-width or
+// the shadow's throw: they are in the scene's bounds, which the camera fits and clips to),
+// shade_k / shade_floor (the shade's strength and its darkest), shadow (0 starts the shade off).
 std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::SceneNode &n,
                                                 GraphicsNode *parent, RealizedScene &out,
                                                 std::vector<std::string> *warnings) {
-  auto sky = std::make_shared<SkyModel>(buildSky());
-  cvc::volume vol(sg.appContext(),
-                  reinterpret_cast<const unsigned char *>(sky->field(0.0, 0.0).data()),
-                  cvc::dimension(SKY_N, SKY_N, SKY_NZ), cvc::Float,
-                  cvc::bounding_box(-SKY_HALF, -SKY_HALF, SKY_BASE, SKY_HALF, SKY_HALF, SKY_TOP));
-  std::shared_ptr<GraphicsNode> gn =
-      parent ? parent->createChild<VolumeNode>(n.id, vol) : sg.addGraphics(n.id, vol);
-  auto vnode = std::dynamic_pointer_cast<VolumeNode>(gn);
-  if (!vnode) {
-    if (warnings)
-      warnings->push_back("ari: cloud_sky '" + n.id + "': could not create a VolumeNode");
-    return gn;
-  }
-  vnode->setShading(false);
-  vnode->setAmbient(0.95);
-  vnode->setDiffuse(0.35);
-  vnode->setSpecular(0.0);
-  vnode->setVolumetricScattering(0.0);
-  {
-    std::vector<double> col, op;
-    skyTransfer(col, op);
-    vnode->setTransferFunction(col, op);
-  }
-  const std::string ground = n.props.str("ground").empty() ? "terrain" : n.props.str("ground");
-  const double half = n.props.num("half", 120.0);
-  // Live controls (sky_controls.ari binds sky.drift / sky.morph / sky.shadow): drift/morph scale
-  // the scroll/crossfade speed each frame; shadow toggles the cloud→ground dappling live. The cloud
-  // SHAPE is baked once (buildSky) — regenerating it is seconds of work, out of scope for a live
-  // slider.
+  auto rt = std::make_shared<SkyRT>();
   cvc::app &app0 = sg.appContext();
-  const std::string pref = sg.getStatePrefix();
-  const std::string driftKey = seed_key(app0, pref, "sky.drift", 1.0);
-  const std::string morphKey = seed_key(app0, pref, "sky.morph", 1.0);
-  const std::string shadowKey = seed_key(app0, pref, "sky.shadow", n.props.num("shadow", 1.0));
-  // Always wire the terrain (if any) so the shadow can be toggled live; the tick decides per frame.
-  auto terr = std::make_shared<TerrainHeights>();
-  std::weak_ptr<GeometryNode> wterrain;
-  terr->build(sg, out, ground);
-  if (auto tnode = std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics(ground)))
-    wterrain = tnode;
-  auto rgb = std::make_shared<std::vector<unsigned char>>();
-  auto lastShadow = std::make_shared<int>(-1); // force the first bake; tracks on/off transitions
+  rt->app = &app0;
+  const std::string ground = n.props.str("ground").empty() ? "terrain" : n.props.str("ground");
+  if (const auto it = out.height_fields.find(ground); it != out.height_fields.end())
+    rt->ground = it->second;
+  cvc::world::cloud_layer_params p;
+  p.seed = static_cast<std::uint64_t>(n.props.num("seed", 20.0));
+  p.variants = std::max(1, int(n.props.num("variants", 4.0)));
+  p.n = SKY_N;
+  p.nz = SKY_NZ;
+  p.extent = n.props.num("extent", SKY_HALF);
+  p.base = n.props.num("base", SKY_BASE);
+  p.top = std::max(p.base + 1.0, n.props.num("top", SKY_TOP));
+  p.spacing = n.props.num("spacing", 0.0);
+  p.coverage = n.props.num("coverage", 0.6);
+  p.sun_az = n.props.num("sun_az", SUN_AZ);
+  p.sun_el = n.props.num("sun_el", SUN_EL);
+  p.far_layers = std::max(1, int(n.props.num("layers", 10.0)));
+  std::vector<double> col;
+  skyTransfer(1.0, col, p.opacity); // the shadow and the shells integrate what the volume shows
+  if (n.props.has("area") || !rt->ground) {
+    rt->area = n.props.num("area", n.props.num("half", p.extent));
+    rt->ground.reset(); // a fixed area: the ground's extent is not followed
+  } else {
+    groundBox(*rt->ground, rt->ox, rt->oy, rt->area);
+  }
+  // By default the shells reach past the ground as far as a cloud's width or its shadow's throw,
+  // whichever is more, so every shadow on the ground has its cloud drawn.
+  constexpr double kPi = 3.14159265358979323846;
+  const double throw_m =
+      (p.top - p.base) / std::tan(std::min(89.0, std::max(5.0, p.sun_el)) * kPi / 180.0);
+  rt->horizon = n.props.num("horizon", std::max(p.extent, throw_m));
+  rt->reach = rt->area + rt->horizon;
+  p.area = rt->reach + p.extent;
+  rt->layer = std::make_unique<cvc::world::cloud_layer>(p);
+  // The volume's opacity is per 1/100 of its box's diagonal (VolumeNode::setVolume), so that is
+  // the length a unit of the integrated opacity stands for; -ln(1 - a) ~ 1.1 a over the table.
+  // The shade takes SHADE_GAIN times that: the volume's thin outskirts read as solid white from
+  // the side (a long sight line), and a cumulus that looks solid should shade like one.
+  const double unit =
+      std::sqrt(8.0 * p.extent * p.extent + (p.top - p.base) * (p.top - p.base)) / 100.0;
+  rt->shadeK = n.props.num("shade_k", SHADE_GAIN * 1.1 / unit);
+  rt->shadeFloor = n.props.num("shade_floor", SHADE_FLOOR);
+  rt->farK = 1.1 * rt->layer->opacity_max() * (p.top - p.base) / p.far_layers / unit;
 
-  auto frame = std::make_shared<long>(0);
-  cvc::app *app = &sg.appContext();
-  std::weak_ptr<VolumeNode> wn = vnode;
-  out.custom_ticks.push_back([wn, sky, frame, app, terr, wterrain, rgb, half, driftKey, morphKey,
-                              shadowKey, lastShadow](vtkRenderer *) {
-    auto v = wn.lock();
-    if (!v)
-      return;
-    const long f = (*frame)++;
-    if (f % 3 != 0) // the 60³ crossfade + shadow bake run on a 3-frame stride (slow drift)
-      return;
-    const double t = app->world_clock().t();
-    const double drift = read_key(*app, driftKey, 1.0), morphRate = read_key(*app, morphKey, 1.0);
-    const bool shadowOn = read_key(*app, shadowKey, 1.0) != 0.0;
-    const double shift = t * CLOUD_DRIFT * drift * SKY_N / (2.0 * SKY_HALF);
-    const double morph = t / CLOUD_MORPH_S * morphRate * CLOUD_MAPS;
-    std::vector<float> field = sky->field(shift, morph);
-    v->updateScalars(field);
-    if (auto tn = wterrain.lock(); tn && terr->ok()) {
-      if (shadowOn) { // re-bake the drifting shadow × terrain albedo each stride
-        bakeCloudShadow(field, sunDir(SUN_AZ, SHADOW_PROJ_EL), half, *terr, *rgb);
-        tn->setTexture(cvc::image(SHADOW_RES, SHADOW_RES, cvc::image::pixel_format::RGB,
-                                  cvc::image::data_type::u8, rgb->data()));
-      } else if (*lastShadow != 0) { // just turned off -> restore the plain band albedo once
-        std::vector<float> none(field.size(), 0.0f);
-        bakeCloudShadow(none, sunDir(SUN_AZ, SHADOW_PROJ_EL), half, *terr, *rgb);
-        tn->setTexture(cvc::image(SHADOW_RES, SHADOW_RES, cvc::image::pixel_format::RGB,
-                                  cvc::image::data_type::u8, rgb->data()));
-      }
-      *lastShadow = shadowOn ? 1 : 0;
+  // The near volumes: the first carries the node's id. Each spans one cloud's map, placed each
+  // frame where the wind has taken its cloud; hidden while it draws none.
+  const int nearCount = std::clamp(int(n.props.num("near", double(NEAR_CLOUDS))), 1, MAX_NEAR);
+  const std::vector<float> empty(std::size_t(SKY_N) * SKY_N * SKY_NZ, 0.0f);
+  std::shared_ptr<GraphicsNode> first;
+  for (int k = 0; k < nearCount; ++k) {
+    const std::string id = k == 0 ? n.id : n.id + "_near" + std::to_string(k);
+    cvc::volume vol(app0, reinterpret_cast<const unsigned char *>(empty.data()),
+                    cvc::dimension(SKY_N, SKY_N, SKY_NZ), cvc::Float,
+                    cvc::bounding_box(-p.extent, -p.extent, p.base, p.extent, p.extent, p.top));
+    std::shared_ptr<GraphicsNode> gn =
+        parent ? parent->createChild<VolumeNode>(id, vol) : sg.addGraphics(id, vol);
+    auto vnode = std::dynamic_pointer_cast<VolumeNode>(gn);
+    if (!vnode) {
+      if (warnings)
+        warnings->push_back("ari: cloud_sky '" + n.id + "': could not create a VolumeNode");
+      return gn;
     }
+    if (k == 0)
+      first = gn;
+    vnode->setShading(false);
+    vnode->setAmbient(0.95);
+    vnode->setDiffuse(0.35);
+    vnode->setSpecular(0.0);
+    vnode->setVolumetricScattering(0.0);
+    vnode->setVisible(false);
+    SkyRT::Near v;
+    v.node = vnode;
+    rt->near.push_back(v);
+    setNearWeight(rt->near.back());
+  }
+
+  // The far shells: one mesh, drawn translucent over everything the near volumes do not draw.
+  rt->inputs = std::make_shared<GeometryNode::ShaderInputs>();
+  {
+    const std::string id = n.id + "_far";
+    const cvc::geometry g = shellMesh(*rt->layer, rt->ox, rt->oy, rt->reach);
+    std::shared_ptr<GraphicsNode> gn =
+        parent ? parent->createChild<GeometryNode>(id, g) : sg.addGraphics(id, g);
+    if (auto shells = std::dynamic_pointer_cast<GeometryNode>(gn)) {
+      shells->setCastsShadow(false);
+      shells->setOpacity(0.99); // the translucent pass; the shader writes the real alpha
+      shells->setSpecular(0.0);
+      shells->addFragmentShaderReplacement("//VTK::Light::Dec", shellDec());
+      shells->addFragmentShaderReplacement("//VTK::Light::Impl", SHELL_AFTER);
+      shells->setSharedShaderInputs(CLOUD_INPUTS, rt->inputs);
+      shells->setVisible(false); // until its opacity is on the GPU
+      rt->shells = shells;
+    }
+  }
+
+  // Live controls (sky_controls.ari binds sky.drift / sky.morph / sky.shadow): drift and morph
+  // scale the wind and the morph rate; shadow turns the shade on and off. The cloud SHAPES are made
+  // once (the maps); regenerating them is seconds of work, out of scope for a slider.
+  const std::string pref = sg.getStatePrefix();
+  rt->driftKey = seed_key(app0, pref, n, "sky.drift", 1.0);
+  rt->morphKey = seed_key(app0, pref, n, "sky.morph", 1.0);
+  rt->shadowKey = seed_key(app0, pref, n, "sky.shadow", n.props.num("shadow", 1.0));
+  rt->receivers.push_back(ground);
+  if (const ari::Value *rv = n.props.find("receivers"); rv && rv->is_seq())
+    for (const ari::Value &v : rv->items)
+      if (!v.scalar.empty())
+        rt->receivers.push_back(v.scalar);
+
+  SceneGraph *sgp = &sg;
+  out.custom_ticks.push_back([rt, sgp](vtkRenderer *ren) {
+    SkyRT &r = *rt;
+    cvc::world::cloud_layer &L = *r.layer;
+    cvc::app &app = *r.app;
+    const long f = r.frame++;
+
+    // The wind and the morph run on the world clock (Paused freezes them), at the live rates.
+    const double t = app.world_clock().t();
+    const double dt = r.lastT < 0.0 ? 0.0 : std::max(0.0, t - r.lastT);
+    r.lastT = t;
+    r.driftX += dt * CLOUD_DRIFT * read_key(app, r.driftKey, 1.0);
+    r.morph += dt / CLOUD_MORPH_S * read_key(app, r.morphKey, 1.0);
+
+    // A grown (or moved) ground re-lays the deck over it; new meshes under the receivers (a
+    // regenerated world, an LOD rung made late) take the shade.
+    if (f % AREA_STRIDE == 0) {
+      if (r.ground) {
+        double ox, oy, area;
+        groundBox(*r.ground, ox, oy, area);
+        if (std::fabs(area - r.area) > 1.0 || std::fabs(ox - r.ox) > 1.0 ||
+            std::fabs(oy - r.oy) > 1.0) {
+          r.ox = ox;
+          r.oy = oy;
+          r.area = area;
+          layDeck(r);
+        }
+      }
+      for (const std::string &id : r.receivers)
+        if (auto g = sgp->getGraphics(id))
+          wireReceivers(r, *g);
+    }
+    const double P = L.period_m();
+    r.driftX = std::fmod(r.driftX, P);
+    if (r.driftX < 0.0)
+      r.driftX += P;
+
+    if (!ren || !ren->IsActiveCameraCreated())
+      return;
+    vtkCamera *cam = ren->GetActiveCamera();
+    double cp[3];
+    cam->GetPosition(cp);
+
+    // The near volumes: who draws what, the fades, one morph refresh per stride.
+    if (r.snap || f % STRIDE == 0) {
+      assignNear(r, cp[0], cp[1], cp[2]);
+      for (SkyRT::Near &v : r.near) {
+        if (v.cell < 0)
+          continue;
+        const int was = v.weight;
+        v.weight =
+            v.leaving ? std::max(0, v.weight - STRIDE) : std::min(FADE_FRAMES, v.weight + STRIDE);
+        if (v.weight != was)
+          setNearWeight(v);
+        if (v.leaving && v.weight == 0) {
+          v.cell = -1;
+          v.leaving = false;
+          if (auto vn = v.node.lock())
+            vn->setVisible(false);
+        }
+      }
+      for (std::size_t k = 0; k < r.near.size(); ++k) {
+        SkyRT::Near &v = r.near[(r.nextMorph + k) % r.near.size()];
+        if (v.cell < 0)
+          continue;
+        if (auto vn = v.node.lock()) {
+          L.cell_field(L.cells()[v.cell], r.morph, r.field);
+          vn->updateScalars(r.field);
+        }
+        r.nextMorph = int((r.nextMorph + k + 1) % r.near.size());
+        break;
+      }
+    }
+    GeometryNode::ShaderInputs &in = *r.inputs;
+    for (std::size_t k = 0; k < r.near.size(); ++k) {
+      SkyRT::Near &v = r.near[k];
+      std::array<float, 4> cut{0.0f, 0.0f, 1.0f, 0.0f};
+      if (v.cell >= 0) {
+        double wx, wy;
+        cloudCentre(r, L.cells()[v.cell], wx, wy);
+        if (auto vn = v.node.lock())
+          vn->setPosition(wx, wy, 0.0);
+        cut = {float(wx), float(wy), float(L.params().extent), float(v.weight) / FADE_FRAMES};
+      }
+      in.f4["cloudCut" + std::to_string(k)] = cut;
+    }
+
+    // The GPU side: the shade and the far opacity, re-composited a share a frame as the clouds
+    // morph (all at once on the first frame and after a new layout).
+    auto *ow = vtkOpenGLRenderWindow::SafeDownCast(ren->GetRenderWindow());
+    if (!ow || !ow->GetInitialized())
+      return;
+    if (!r.shadeTex[0])
+      for (int k = 0; k < 2; ++k) {
+        r.shadeTex[k] = vtkSmartPointer<vtkTextureObject>::New();
+        r.shadeTex[k]->SetContext(ow);
+        r.farTex[k] = vtkSmartPointer<vtkTextureObject>::New();
+        r.farTex[k]->SetContext(ow);
+      }
+    const bool shadeOn = read_key(app, r.shadowKey, 1.0) != 0.0;
+    const bool now = r.fresh;
+    r.fresh = false;
+    const int S = L.shadow_size(), F = L.far_size();
+    if (shadeOn && stepComposite(
+                       r.shade, f, r.morph, now || !r.shadeWas, L.cells().size(), S,
+                       [&L](double m, std::size_t a, std::size_t n, std::vector<float> &acc) {
+                         L.add_shadow(m, a, n, acc);
+                       },
+                       [&L, &r](const std::vector<float> &acc, int row0, int rows,
+                                std::vector<unsigned char> &out) {
+                         L.shade_rows(acc, r.shadeK, r.shadeFloor, row0, rows, out);
+                       })) {
+      vtkTextureObject *tex = r.shadeTex[r.shadeAt ^= 1];
+      tex->Create2DFromRaw(S, S, 1, VTK_UNSIGNED_CHAR, r.shade.bytes.data());
+      tex->SetWrapS(vtkTextureObject::Repeat);
+      tex->SetWrapT(vtkTextureObject::Repeat);
+      tex->SetMinificationFilter(vtkTextureObject::Linear);
+      tex->SetMagnificationFilter(vtkTextureObject::Linear);
+      in.tex["cloudShadeTex"] = tex;
+    }
+    r.shadeWas = shadeOn;
+    if (stepComposite(
+            r.far, f, r.morph, now, L.cells().size(), L.params().far_layers,
+            [&L](double m, std::size_t a, std::size_t n, std::vector<float> &acc) {
+              L.add_far(m, a, n, {}, acc);
+            },
+            [&L](const std::vector<float> &acc, int slice0, int slices,
+                 std::vector<unsigned char> &out) { L.far_bytes(acc, slice0, slices, out); })) {
+      vtkTextureObject *tex = r.farTex[r.farAt ^= 1];
+      tex->Create3DFromRaw(F, F, L.params().far_layers, 1, VTK_UNSIGNED_CHAR, r.far.bytes.data());
+      tex->SetWrapS(vtkTextureObject::Repeat);
+      tex->SetWrapT(vtkTextureObject::Repeat);
+      tex->SetWrapR(vtkTextureObject::ClampToEdge);
+      tex->SetMinificationFilter(vtkTextureObject::Linear);
+      tex->SetMagnificationFilter(vtkTextureObject::Linear);
+      in.tex["cloudFarTex"] = tex;
+      if (auto sh = r.shells.lock())
+        sh->setVisible(true);
+    }
+
+    // The per-frame inputs: the wind, the camera (view -> world for the fragments), the sun.
+    const cvc::world::cloud_layer_params &p = L.params();
+    double sx, sy, sz;
+    L.sun_dir(sx, sy, sz);
+    vtkNew<vtkMatrix4x4> vcwc;
+    vtkMatrix4x4::Invert(cam->GetModelViewTransformMatrix(), vcwc);
+    std::array<double, 16> &m4 = in.m4["cloudVCWC"];
+    for (int i = 0; i < 4; ++i)
+      for (int j = 0; j < 4; ++j)
+        m4[i * 4 + j] = vcwc->GetElement(i, j);
+    in.f4["cloudXf"] = {float(r.driftX), 0.0f, float(1.0 / P), float(p.base)};
+    in.f3["cloudSunR"] = {float(sx / sz), float(sy / sz), 0.0f};
+    in.f["cloudShadeOn"] = shadeOn && in.tex.count("cloudShadeTex") ? 1.0f : 0.0f;
+    in.f4["cloudFar"] = {float(cp[0]), float(cp[1]), float(1.5 * r.reach), float(2.5 * r.reach)};
+    in.f4["cloudFarZ"] = {float(p.base), float(1.0 / (p.top - p.base)), float(r.farK),
+                          float(cp[2])};
   });
-  return gn;
+  return first;
 }
 
 } // namespace

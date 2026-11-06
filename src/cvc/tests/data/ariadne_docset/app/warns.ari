@@ -1,0 +1,9 @@
+# The browser smoke test's warning (src/arigl/web/test/arigl_web_smoke.mjs): its on_tick: fails
+# once, on the third tick, and is restarted. The page must show the warning while it runs.
+meta: {min_libcvc: 3.7.0}
+init: (state-set "n" 0)
+on_tick: |
+  (state-set "n" (+ 1 (int (state-get "n"))))
+  (if (= (int (state-get "n")) 3) (raise (ValueError "live in the page")))
+root:
+  - text: "warns: a tick fails once"

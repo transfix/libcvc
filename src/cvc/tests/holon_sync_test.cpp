@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cvc/ariadne/avatar_sim.h>
+#include <cvc/ariadne/conference/room_avatar.h>
 #include <cvc/ariadne/conference/room_intrinsics.h>
 #include <cvc/ariadne/conference/room_scene.h>
 #include <cvc/ariadne/holon.h>
@@ -251,8 +252,9 @@ TEST(HolonSyncTest, ClientPumpPredictsSelfAndWalksPeersSmoothly) {
       << "the server moved A per its intent (2 m/s for 2 s), no dropped quanta";
   // A's own prediction stays within a relay interval of the authority.
   EXPECT_NEAR(a.display_pose("A").position.x, server_x, 2.0 * kServerEvery * dt + 1e-9);
-  // B shows A at most one sample interval behind the authority.
-  EXPECT_NEAR(last_peer_x, server_x, 2.0 * kServerEvery * dt + 1e-9);
+  // B shows A one sample interval (and a tick) behind the authority: its playout delay with no
+  // jitter (holon::display_pose).
+  EXPECT_NEAR(last_peer_x, server_x, 2.0 * (kServerEvery + 2) * dt + 1e-9);
   // Both replicas count the server's ticks.
   EXPECT_LE(a.tick() > server.tick() ? a.tick() - server.tick() : server.tick() - a.tick(),
             static_cast<std::uint64_t>(kServerEvery));
@@ -273,6 +275,227 @@ TEST(HolonSyncTest, ClientPumpPredictsSelfAndWalksPeersSmoothly) {
     tp.unregister_shard(s);
     s->detach();
   }
+}
+
+// The relay's avatar policy reaches every holon through the pumps -- the relay's own and the
+// client's -- and the relay publishes each reserve beside the pose: the client's prediction of its
+// own spending stays with the authority's, and what it shows as stamina is the relay's count.
+TEST(HolonSyncTest, TheEnergyPolicyAndEachReserveReachTheClient) {
+  cvc::app server_app, a_app;
+  cvc::state_transport_inproc tp;
+  cvc::state_cluster_shard ss(server_app, "conf", "server");
+  cvc::state_cluster_shard as(a_app, "conf", "A");
+  for (cvc::state_cluster_shard *s : {&ss, &as}) {
+    s->attach();
+    tp.register_shard(s);
+  }
+  const std::string room = "r";
+  cvc::ariadne::holon_config cfg;
+  cfg.physics = true;
+  holon server(holon_role::server, cfg), a(holon_role::client, cfg);
+  if (!server.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  cvc::ariadne::conference::seed_default_scene(server_app, room); // something to stand on
+  cvc::ariadne::avatar_energy_policy policy;
+  policy.reserve_max = 2000.0; // small, so a walk visibly spends it
+  cvc::ariadne::conference::write_avatar_policy(server_app, room, policy);
+  cvc::ariadne::conference::room_join(a_app, room, "A");
+  tp.pump_all();
+
+  const double dt = server.clock().fixed_dt();
+  constexpr int kServerEvery = 6;
+  cvc::ariadne::server_pump(server, server_app, room, dt);
+  tp.pump_all();
+  cvc::ariadne::client_pump(a, a_app, room, "A", dt);
+  EXPECT_DOUBLE_EQ(server.energy_policy().reserve_max, 2000.0) << "the relay runs the room's";
+  EXPECT_DOUBLE_EQ(a.energy_policy().reserve_max, 2000.0) << "and so does the client";
+  EXPECT_EQ(a.energy_policy_revision(), server.energy_policy_revision());
+
+  cvc::ariadne::propose_intent(a, a_app, room, "A", avatar_intent{vec3{4.0, 0.0, 0.0}});
+  tp.pump_all();
+  for (int frame = 1; frame <= 360; ++frame) { // 3 s
+    if (frame % kServerEvery == 0)
+      cvc::ariadne::server_pump(server, server_app, room, kServerEvery * dt);
+    tp.pump_all();
+    cvc::ariadne::client_pump(a, a_app, room, "A", dt);
+  }
+  cvc::ariadne::avatar_energy se, ae;
+  ASSERT_TRUE(server.energy("A", se));
+  ASSERT_TRUE(a.energy("A", ae));
+  EXPECT_LT(se.reserve, 1500.0) << "the walk spent from the authority's reserve";
+  double published = 0.0;
+  std::uint64_t at_tick = 0;
+  ASSERT_TRUE(cvc::ariadne::conference::read_avatar_reserve(a_app, room, "A", published, at_tick))
+      << "the relay published it";
+  EXPECT_NEAR(published, se.reserve, 0.005 * 2000.0 + 1.0);
+  EXPECT_NEAR(ae.reserve, se.reserve, 60.0) << "the prediction keeps up with the authority";
+
+  for (cvc::state_cluster_shard *s : {&ss, &as}) {
+    tp.unregister_shard(s);
+    s->detach();
+  }
+}
+
+// A relay that streams the poses (room_pose_relay) skips the tree's copy on most steps
+// (write_poses false); the reserve still goes out on those steps, since no snapshot carries it.
+TEST(HolonSyncTest, TheReserveIsWrittenOnStepsThatSkipThePoses) {
+  cvc::app server_app;
+  const std::string room = "r";
+  cvc::ariadne::holon_config cfg;
+  cfg.physics = true;
+  holon server(holon_role::server, cfg);
+  if (!server.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  cvc::ariadne::conference::seed_default_scene(server_app, room);
+  cvc::ariadne::avatar_energy_policy policy;
+  policy.reserve_max = 2000.0;
+  cvc::ariadne::conference::write_avatar_policy(server_app, room, policy);
+  cvc::ariadne::conference::room_join(server_app, room, "A");
+  cvc::ariadne::write_intent(server_app, room, "A", avatar_intent{vec3{4.0, 0.0, 0.0}});
+  const double dt = server.clock().fixed_dt();
+  cvc::ariadne::server_pump(server, server_app, room, dt); // registers A and writes its pose
+  body_state pose;
+  std::uint64_t pose_tick = 0;
+  ASSERT_TRUE(cvc::ariadne::read_pose(server_app, room, "A", pose, pose_tick));
+
+  for (int step = 0; step < 120; ++step) // a second's walk, no pose write-back
+    cvc::ariadne::server_pump(server, server_app, room, dt, /*write_poses=*/false);
+  body_state later;
+  std::uint64_t later_tick = 0;
+  ASSERT_TRUE(cvc::ariadne::read_pose(server_app, room, "A", later, later_tick));
+  EXPECT_EQ(later_tick, pose_tick) << "no pose was written on those steps";
+  cvc::ariadne::avatar_energy e;
+  ASSERT_TRUE(server.energy("A", e));
+  EXPECT_LT(e.reserve, 1900.0) << "the walk spent";
+  double published = 0.0;
+  std::uint64_t reserve_tick = 0;
+  ASSERT_TRUE(cvc::ariadne::conference::read_avatar_reserve(server_app, room, "A", published,
+                                                            reserve_tick));
+  EXPECT_GT(reserve_tick, pose_tick) << "but the reserve was";
+  EXPECT_NEAR(published, e.reserve, 0.005 * 2000.0 + 1.0);
+}
+
+// An avatar standing still with a full reserve: once its reserve is published the relay writes no
+// more of it -- the re-stamp is for a reserve still drifting from the published one -- and a walk
+// publishes again. Each reserve write journals one mutation per leaf that changed.
+TEST(HolonSyncTest, AFullReserveAtRestIsNotRestamped) {
+  cvc::app server_app;
+  cvc::state_cluster_shard ss(server_app, "conf", "server");
+  ss.attach();
+  const std::string room = "r";
+  cvc::ariadne::holon_config cfg;
+  cfg.physics = true;
+  holon server(holon_role::server, cfg);
+  if (!server.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  cvc::ariadne::conference::seed_default_scene(server_app, room);
+  cvc::ariadne::avatar_energy_policy policy;
+  policy.reserve_max = 2000.0;
+  cvc::ariadne::conference::write_avatar_policy(server_app, room, policy);
+  cvc::ariadne::conference::room_join(server_app, room, "A");
+  const auto energy_writes = [&] {
+    std::size_t n = 0;
+    for (const cvc::state_mutation &m : ss.drain_local())
+      n += m.path.find(".energy.") != std::string::npos;
+    return n;
+  };
+  ss.drain_local(); // the policy's own leaves
+  const double dt = server.clock().fixed_dt();
+  cvc::ariadne::server_pump(server, server_app, room, dt);
+  double published = 0.0;
+  std::uint64_t at_tick = 0;
+  ASSERT_TRUE(
+      cvc::ariadne::conference::read_avatar_reserve(server_app, room, "A", published, at_tick));
+  EXPECT_DOUBLE_EQ(published, 2000.0) << "published full";
+  EXPECT_EQ(energy_writes(), 2u) << "the reserve and its tick, once each";
+
+  for (int step = 0; step < 1200; ++step) // 10 s at rest: two of the old 5 s re-stamps
+    cvc::ariadne::server_pump(server, server_app, room, dt, /*write_poses=*/step % 120 == 0);
+  EXPECT_EQ(energy_writes(), 0u) << "a full reserve at rest is not re-stamped";
+  std::uint64_t still_tick = 0;
+  ASSERT_TRUE(
+      cvc::ariadne::conference::read_avatar_reserve(server_app, room, "A", published, still_tick));
+  EXPECT_EQ(still_tick, at_tick);
+
+  cvc::ariadne::write_intent(server_app, room, "A", avatar_intent{vec3{4.0, 0.0, 0.0}});
+  for (int step = 0; step < 120; ++step)
+    cvc::ariadne::server_pump(server, server_app, room, dt, /*write_poses=*/false);
+  EXPECT_GT(energy_writes(), 0u) << "a walk spends, and that is published";
+  ASSERT_TRUE(
+      cvc::ariadne::conference::read_avatar_reserve(server_app, room, "A", published, still_tick));
+  EXPECT_LT(published, 2000.0);
+  EXPECT_GT(still_tick, at_tick);
+
+  // The writer itself: an unchanged reserve re-stamped is its tick alone; nothing new, nothing.
+  cvc::ariadne::conference::write_avatar_reserve(server_app, room, "A", published, 900000);
+  EXPECT_EQ(energy_writes(), 1u);
+  cvc::ariadne::conference::write_avatar_reserve(server_app, room, "A", published, 900000);
+  EXPECT_EQ(energy_writes(), 0u);
+  cvc::ariadne::conference::write_avatar_reserve(server_app, room, "A", published - 50.0, 900100);
+  EXPECT_EQ(energy_writes(), 2u);
+  ss.detach();
+}
+
+// POSE_HEARTBEAT_S paces the tree's re-stamp of an avatar standing still: about a second by
+// default, for clients that keep their clocks by it, and longer for a relay whose pose stream
+// carries that heartbeat (arisrv writes the tree's copy each second and re-stamps it every 5 s).
+TEST(HolonSyncTest, ThePoseHeartbeatPacesTheTreesRestamp) {
+  for (const double heartbeat_s : {1.0, 5.0}) {
+    cvc::app server_app;
+    cvc::state_cluster_shard ss(server_app, "conf", "server");
+    ss.attach();
+    const std::string room = "r";
+    holon server(holon_role::server, cvc::ariadne::holon_config{}); // kinematic: exactly still
+    cvc::ariadne::conference::room_join(server_app, room, "A");
+    const double dt = server.clock().fixed_dt();
+    cvc::ariadne::server_pump(server, server_app, room, dt, true, heartbeat_s);
+    ss.drain_local();
+    std::size_t ticks = 0, others = 0;
+    for (int step = 1; step <= 1200; ++step) { // 10 s, the tree's copy written every second
+      cvc::ariadne::server_pump(server, server_app, room, dt, step % 120 == 0, heartbeat_s);
+      for (const cvc::state_mutation &m : ss.drain_local()) {
+        const std::size_t at = m.path.find(".pose.");
+        if (at == std::string::npos)
+          continue;
+        if (m.path.compare(at, std::string::npos, ".pose.server_tick") == 0)
+          ++ticks;
+        else
+          ++others;
+      }
+    }
+    EXPECT_EQ(ticks, heartbeat_s == 1.0 ? 10u : 2u) << "heartbeat " << heartbeat_s << " s";
+    EXPECT_EQ(others, 0u) << "an avatar standing still writes only its tick";
+    ss.detach();
+  }
+}
+
+// A client joining a room where a peer stands still: the pose stream brings current samples, the
+// room tree a pose stamped at the peer's last heartbeat. The stale stamp is no clock reading, so
+// the join re-aligns the clock once, however old the tree's tick is.
+TEST(HolonSyncTest, AJoinerTakesNoClockReadingFromAStaleTreeTick) {
+  cvc::app app;
+  const std::string room = "r";
+  holon client(holon_role::client, cvc::ariadne::holon_config{}); // kinematic: the clock alone
+  client.set_lead_ticks(14);
+  cvc::ariadne::conference::room_join(app, room, "A");
+  cvc::ariadne::conference::room_join(app, room, "B");
+  // The tree as the relay last wrote it: B still since tick 4400 (a 5 s heartbeat ago), A new.
+  body_state a, b;
+  a.position = vec3{0.0, 0.0, 0.0};
+  b.position = vec3{4.0, 0.0, 0.0};
+  cvc::ariadne::write_pose(app, room, "B", b, 4400);
+  cvc::ariadne::write_pose(app, room, "A", a, 5000);
+  // The stream's sample of A lands first (a frame applies the snapshots before client_pump).
+  client.add_participant("A", /*local=*/true);
+  cvc::ariadne::apply_pose_samples(client, {cvc::ariadne::pose_sample{"A", a}}, 5000);
+  ASSERT_EQ(client.clock_realigns(), 1u) << "the join";
+  const double dt = client.clock().fixed_dt();
+  cvc::ariadne::client_pump(client, app, room, "A", dt); // takes B's pose from the tree
+  EXPECT_TRUE(client.pose_known("B")) << "B is placed from the tree";
+  // Then B's current sample on the stream.
+  cvc::ariadne::apply_pose_samples(client, {cvc::ariadne::pose_sample{"B", b}}, 5002);
+  cvc::ariadne::client_pump(client, app, room, "A", dt);
+  EXPECT_EQ(client.clock_realigns(), 1u) << "no seek back to B's tree tick, nor forward again";
 }
 
 // client_pump registers whoever the roster lists, but one whose pose has not replicated yet is
@@ -631,6 +854,69 @@ TEST(HolonSyncTest, ServerPumpAppliesAStampedIntentAtItsTick) {
   EXPECT_DOUBLE_EQ(server.state("A").position.x, start.x) << "not before its tick";
   cvc::ariadne::server_pump(server, app, room, dt); // tick 6: the stamp
   EXPECT_DOUBLE_EQ(server.state("A").position.x, start.x + 2.0 * dt);
+}
+
+// A turn in place (mouse look while standing) is a yaw-only intent: the live room's holons, Jolt
+// and all, turn A at once in its own prediction, at the relay, and in what B shows of A.
+TEST(HolonSyncTest, ATurnInPlaceReachesTheRelayAndThePeer) {
+  cvc::app server_app, a_app, b_app;
+  cvc::state_transport_inproc tp;
+  cvc::state_cluster_shard ss(server_app, "conf", "server");
+  cvc::state_cluster_shard as(a_app, "conf", "A");
+  cvc::state_cluster_shard bs(b_app, "conf", "B");
+  for (cvc::state_cluster_shard *s : {&ss, &as, &bs}) {
+    s->attach();
+    tp.register_shard(s);
+  }
+  const std::string room = "r";
+  const cvc::ariadne::holon_config cfg = cvc::ariadne::room_holon_config();
+  holon server(holon_role::server, cfg), a(holon_role::client, cfg), b(holon_role::client, cfg);
+  if (!server.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  cvc::ariadne::conference::seed_default_scene(server_app, room); // something to stand on
+  cvc::ariadne::conference::room_join(a_app, room, "A");
+  cvc::ariadne::conference::room_join(b_app, room, "B");
+  tp.pump_all();
+  const double dt = server.clock().fixed_dt();
+  constexpr int kServerEvery = 6;
+  const auto yaw_of = [](const cvc::physics::quat &q) { return 2.0 * std::atan2(q.z, q.w); };
+  const auto run = [&](int frames) {
+    for (int frame = 1; frame <= frames; ++frame) {
+      if (frame % kServerEvery == 0)
+        cvc::ariadne::server_pump(server, server_app, room, kServerEvery * dt);
+      tp.pump_all();
+      cvc::ariadne::client_pump(a, a_app, room, "A", dt);
+      cvc::ariadne::client_pump(b, b_app, room, "B", dt);
+    }
+  };
+  run(120); // joined, posed and settled on the floor
+  ASSERT_TRUE(b.has_participant("A"));
+  const vec3 start = server.state("A").position;
+  // A quarter turn in 0.1 rad steps, one proposal every 6 quanta (20 Hz), never walking.
+  double yaw = 0.0;
+  for (int step = 0; step < 16; ++step) {
+    yaw += 0.1;
+    avatar_intent turn;
+    turn.yaw = yaw;
+    cvc::ariadne::propose_intent(a, a_app, room, "A", turn);
+    run(6);
+    EXPECT_NEAR(yaw_of(a.display_pose("A").rotation), yaw, 1e-6)
+        << "A turns at once, step " << step;
+  }
+  run(120); // the relay's next poses, and B's playout delay
+  EXPECT_NEAR(yaw_of(server.state("A").rotation), yaw, 1e-6) << "the relay turned A";
+  body_state tree;
+  std::uint64_t tick = 0;
+  ASSERT_TRUE(cvc::ariadne::read_pose(b_app, room, "A", tree, tick));
+  EXPECT_NEAR(yaw_of(tree.rotation), yaw, 1e-6) << "its pose reached B";
+  EXPECT_NEAR(yaw_of(b.display_pose("A").rotation), yaw, 1e-3) << "and B shows A turned";
+  const vec3 end = server.state("A").position;
+  EXPECT_LT(std::hypot(end.x - start.x, end.y - start.y), 0.01) << "turning is not walking";
+
+  for (cvc::state_cluster_shard *s : {&ss, &as, &bs}) {
+    tp.unregister_shard(s);
+    s->detach();
+  }
 }
 
 // The room scene's objects become physics statics: the floor as a slab under z = 0, the cube as

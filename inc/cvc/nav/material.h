@@ -59,6 +59,7 @@
 #include <cvc/nav/detail/dyn_bike.h>
 #include <cvc/nav/drive.h>
 #include <cvc/nav/geom_rollout.h>
+#include <cvc/nav/rollout_plant.h>
 #include <vector>
 
 namespace cvc {
@@ -543,6 +544,57 @@ double multi_start_penalty_dynamic(const float *alphas, const float *beta, const
                                    const bicycle_material_params &v,
                                    const diff::dyn_bike_params &dyn, float *g_alphas, float *g_beta,
                                    float *g_gamma, int num_threads = 0);
+
+// ── the material rollout on a vehicle simulation (the Jolt rollout) ───────────
+// integrate_dynamic_material's controller (the same force law, pure pursuit, governors and
+// d_cap), its commands driving `plant` (rollout_plant.h; the Jolt vehicle is
+// cvc::physics::jolt_rollout) in place of a model. The forward is the simulation's, to the bit.
+// The reverse, integrate_plant_material_vjp, is the four-wheel port-Hamiltonian model's (`dyn4`,
+// diff::dyn4_plant on flat ground of friction mu, its wheelbase v.L) evaluated at the states the
+// simulation reached, which `tape` holds (docs/NAV_TRAINING.md, "Training on Jolt").
+//
+// The plant is reset to the batch first: agent b's rear axle on o (B,2) heading th (B), launched
+// at vx (B) along it; its own discs (C, R, mask) and, with hard_walls, the patch's hard cells
+// (phi 0, runs along each row merged) as walls; and vmax dt max(H) of room around them. Every
+// agent takes the same step, so dt must be one value. Out, IN PLACE: o, th, vx and x (B,4) =
+// (vy, r, delta, a), the model's state at each agent's H[b]. An agent past it is frozen there,
+// as the other rollouts freeze it: its vehicle brakes, unread. min_clear, cum_risk, hard_count
+// and arc_length are the dynamic rollout's, on the simulation's path. There is no external force
+// (material_ext) on this rollout yet. CPU only.
+struct material_plant_tape {
+  int B = 0, max_H = 0;
+  std::vector<float> o0; // [B*2]: the starts the patches are centred on
+  // [(max_H + 1) * B], step-major: each agent's state as each step started (frozen past its H),
+  // and after the last.
+  std::vector<diff::dyn4_state<float>> S;
+};
+
+void integrate_plant_material(rollout_plant &plant, float *o, float *th, float *vx, float *x,
+                              const float *goal, const float *C, const float *R,
+                              const std::uint8_t *mask, const float *alphas, const float *beta,
+                              const float *gamma, const float *lam_soft, const float *lam_hard,
+                              const float *rollout_patch, const float *rr, const float *d_hat,
+                              const float *dt, const int *H, int B, int N, int Hp, int Wp,
+                              const surrogate_material_params &p, const bicycle_material_params &v,
+                              const diff::dyn4_params &dyn4, float mu, bool hard_walls,
+                              float *min_clear, float *cum_risk, float *hard_count,
+                              float *arc_length, material_plant_tape &tape);
+
+// VJP of integrate_plant_material along its tape: upstream grads on (oT, thT, vxT, xT, min_clear,
+// cum_risk, arc_length; any may be null) -> grads w.r.t. the learned coefficients, ADDED into the
+// g_* buffers. Each step's plant part is diff::dyn4_plant_vjp at the tape's state under the
+// command the controller gave there, the controller's the bicycle's hand-written reverse. The
+// other inputs must be the forward's.
+void integrate_plant_material_vjp(
+    const material_plant_tape &tape, const float *goal, const float *C, const float *R,
+    const std::uint8_t *mask, const float *alphas, const float *beta, const float *gamma,
+    const float *lam_soft, const float *lam_hard, const float *rollout_patch, const float *rr,
+    const float *d_hat, const float *dt, const int *H, int B, int N, int Hp, int Wp,
+    const surrogate_material_params &p, const bicycle_material_params &v,
+    const diff::dyn4_params &dyn4, float mu, const float *g_oT, const float *g_thT,
+    const float *g_vxT, const float *g_xT, const float *g_min_clear, const float *g_cum_risk,
+    const float *g_arc_length, float *g_alphas, float *g_beta, float *g_gamma, float *g_lam_soft,
+    float *g_lam_hard, int num_threads = 0);
 
 // ── CUDA twins (defined in material_rollout.cu; CVC_ENABLE_CUDA only) ─────────
 // The GPU transcription of the two rollout functions above: one thread per

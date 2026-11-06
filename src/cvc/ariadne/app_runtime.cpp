@@ -9,6 +9,7 @@
 #include <cvc/ariadne/bind.h>     // resolve_bind / read_or_seed / write
 #include <cvc/ariadne/doc_args.h> // the document's command line
 #include <cvc/ariadne/loader.h>   // load_file / LoadResult / ChannelDecl / sources_changed
+#include <cvc/ariadne/oidc_host.h>
 #include <cvc/ariadne/requires.h> // requires:, free_heads (what a document needs from its host)
 #include <cvc/ariadne/uri.h>      // register_cvc_uri_handler
 #include <cvc/core/app.h>
@@ -18,6 +19,7 @@
 #include <cvc/state/state_exec/exceptions.h>      // dsl_error ((quit code) checks its code)
 #include <cvc/state/state_exec/intrinsics.h>      // intrinsics_context, resolve_channel_key
 #include <cvc/state/state_exec/types.h>           // value_t
+#include <deque>
 #include <filesystem>
 #include <iterator>
 #include <map>
@@ -37,14 +39,20 @@ namespace ariadne {
 
 AppRuntime::AppRuntime(cvc::app &app, std::string prefix, SceneAdapter *scene)
     : app_(app), prefix_(std::move(prefix)), scene_(scene), rt_(app, prefix_),
-      verbs_(std::make_shared<Verbs>()) {
+      verbs_(std::make_shared<Verbs>()), data_(DataStore::of(app)) {
   rt_.set_scene_capable(scene_ != nullptr); // the gl.scene capability (requires:, has?)
+  rt_.set_scene_shaders(scene_ && scene_->runs_shaders()); // gl.scene.shaders
+  verbs_->data = data_;
+  verbs_->prefix = prefix_;
 }
 
 AppRuntime::~AppRuntime() {
   verbs_->sync.clear(); // the provider outlives us in the registry: it must bind nothing of ours
   verbs_->async.clear();
   verbs_->quit = nullptr;
+  verbs_->data.reset();
+  verbs_->functions.clear();
+  verbs_->async_functions.clear();
   if (netEnabled_)
     disable_net(); // its provider holds app_ by reference
 }
@@ -54,7 +62,7 @@ bool AppRuntime::idle() const {
   // answers, docs/ARIADNE.md 10.2), which the host's count of running kernels leaves out.
   return app_.exec_async_host().in_flight() == 0 &&
          app_.exec_scheduler().async_calls_in_flight() == 0 &&
-         !app_.exec_scheduler().has_runnable();
+         !app_.exec_scheduler().has_runnable() && !rt_.media_busy() && !oidc_busy();
 }
 
 void AppRuntime::settle(const std::function<void()> &step, double max_seconds) {
@@ -71,6 +79,16 @@ void AppRuntime::settle(const std::function<void()> &step, double max_seconds) {
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
 #endif
   }
+}
+
+void AppRuntime::settle_and_render(const std::function<void()> &step,
+                                   const std::function<void()> &render, double max_seconds) {
+  using clock = std::chrono::steady_clock;
+  const auto deadline = clock::now() + std::chrono::duration<double>(max_seconds);
+  do {
+    settle(step, std::max(0.0, std::chrono::duration<double>(deadline - clock::now()).count()));
+    render();
+  } while (rt_.media_stale() && clock::now() < deadline);
 }
 
 std::string AppRuntime::enable_net(const NetHostConfig &config) {
@@ -169,17 +187,55 @@ void add_host_menus(Widget &root, const std::vector<Widget> &menus) {
 
 } // namespace
 
+void AppRuntime::set_host_ui_size(UiSizeControl ui) {
+  hostUiSize_ = std::move(ui);
+  keysWindow_ = true;
+}
+
 void AppRuntime::set_host_keys(std::vector<KeyBinding> keys) {
   hostKeys_ = std::move(keys);
   keysWindow_ = true;
 }
 
+void AppRuntime::set_host_mouse(MouseControls mouse) {
+  hostMouse_ = std::move(mouse);
+  keysWindow_ = true;
+}
+
 namespace {
 
-// The Keys window: every binding, with its keys and a Change button that makes the next key down
-// its new one (Runtime::set_key_bindings).
-Widget keys_window(const std::vector<KeyBinding> &bindings) {
+bool any_mouse_rows(const MouseControls &m) {
+  return !m.look.empty() || !m.steer.empty() || !m.sensitivity.empty() || !m.invert_y.empty() ||
+         !m.invert_x.empty() || !m.distance.empty();
+}
+
+// The Controls window: the host's pointer settings, then every key binding, with its keys and a
+// Change button that makes the next key down its new one (Runtime::set_key_bindings).
+Widget keys_window(const std::vector<KeyBinding> &bindings, const MouseControls &mouse) {
   std::vector<Widget> kids;
+  if (any_mouse_rows(mouse)) {
+    kids.push_back(text("Mouse and camera"));
+    if (!mouse.look.empty()) {
+      Widget look = radio("Look", mouse.look, {"Drag to look", "Mouse look"}, "0", true);
+      look.values = {"0", "1"};
+      kids.push_back(std::move(look));
+    }
+    if (!mouse.steer.empty())
+      kids.push_back(checkbox(mouse.steer_label, mouse.steer));
+    if (!mouse.sensitivity.empty())
+      kids.push_back(slider_float("Sensitivity", mouse.sensitivity, mouse.sensitivity_lo,
+                                  mouse.sensitivity_hi, 0.25, "%.2f deg/px"));
+    if (!mouse.invert_y.empty())
+      kids.push_back(checkbox("Invert up/down", mouse.invert_y));
+    if (!mouse.invert_x.empty())
+      kids.push_back(checkbox("Invert left/right", mouse.invert_x));
+    if (!mouse.distance.empty())
+      kids.push_back(slider_float("Camera distance", mouse.distance, mouse.distance_lo,
+                                  mouse.distance_hi, 10.0, "%.1f m"));
+    if (!mouse.note.empty())
+      kids.push_back(text(mouse.note));
+    kids.push_back(separator());
+  }
   kids.push_back(text(bindings.empty()
                           ? "No keys to change here."
                           : "Change, then press the new key. Escape keeps the old one."));
@@ -202,7 +258,7 @@ Widget keys_window(const std::vector<KeyBinding> &bindings) {
     row.layout.col_widths = {Track{Unit::Px, 150.0f}, Track{Unit::Px, 130.0f}, Track{}};
     kids.push_back(std::move(row));
   }
-  Widget w = window("Keys", std::move(kids));
+  Widget w = window("Controls", std::move(kids));
   w.id = kKeysWindow;
   w.closable = true;
   return w;
@@ -232,9 +288,38 @@ void AppRuntime::add_keys(Widget &root, std::vector<KeyBinding> keys) {
                        read_or<std::string>(app_, resolve_bind(prefix_, key_binding_path(b)), ""));
   if (keysWindow_ || !keys.empty()) {
     read_or_seed<int>(app_, resolve_bind(prefix_, kKeysWindowOpen), 0); // closed until asked for
-    root.children.push_back(keys_window(keys));
+    root.children.push_back(keys_window(keys, hostMouse_));
   }
   rt_.set_key_bindings(std::move(keys));
+  add_ui_size(root);
+}
+
+void AppRuntime::add_ui_size(Widget &root) const {
+  if (hostUiSize_.path.empty())
+    return;
+  for (Widget &w : root.children) {
+    if (w.kind != Kind::Window || w.id != kKeysWindow)
+      continue;
+    // A list rather than a slider: each size bakes the UI's font again, so it changes once, on
+    // the pick, never at every step of a drag.
+    std::vector<std::string> labels, values;
+    for (const auto &[label, value] : hostUiSize_.sizes) {
+      labels.push_back(label);
+      values.push_back(value);
+    }
+    Widget size = combo("UI size", hostUiSize_.path, std::move(labels));
+    size.values = std::move(values);
+    std::vector<Widget> rows = {text("Display"), std::move(size)};
+    // How fast a fling slows: low glides far, high stops soon (cvc::gl::TouchScroll).
+    if (!hostUiSize_.scroll_friction.empty())
+      rows.push_back(slider_float("Scroll friction", hostUiSize_.scroll_friction,
+                                  hostUiSize_.friction_lo, hostUiSize_.friction_hi, 2.0,
+                                  "%.1f /s"));
+    rows.push_back(separator());
+    w.children.insert(w.children.begin(), std::make_move_iterator(rows.begin()),
+                      std::make_move_iterator(rows.end()));
+    return;
+  }
 }
 
 bool AppRuntime::have_yaml() { return cvc::ariadne::have_yaml(); }
@@ -256,6 +341,34 @@ void AppRuntime::register_async_verb(const std::string &name, const std::string 
   verbs_->async.emplace_back(name, done_channel, std::move(work));
   ensure_intrinsics();
   rt_.refresh_program_names();
+}
+
+void AppRuntime::register_function(const std::string &name, cvc::state_exec::native_fn fn) {
+  verbs_->functions[name] = std::move(fn);
+  ensure_intrinsics();
+  rt_.refresh_program_names();
+}
+
+void AppRuntime::register_async_function(const std::string &name,
+                                         cvc::state_exec::async_marshal marshal,
+                                         const std::string &done_channel) {
+  verbs_->async_functions[name] = {done_channel, std::move(marshal)};
+  ensure_intrinsics();
+  rt_.refresh_program_names();
+}
+
+void AppRuntime::run_program(std::string script, std::function<void(const std::string &)> done) {
+  rt_.run_program(std::move(script), done ? std::move(done) : [](const std::string &) {});
+}
+
+void AppRuntime::add_load_hook(LoadHook hook) {
+  if (hook)
+    loadHooks_.push_back(std::move(hook));
+}
+
+void AppRuntime::add_frame_hook(std::function<void()> hook) {
+  if (hook)
+    frameHooks_.push_back(std::move(hook));
 }
 
 void AppRuntime::register_quit() {
@@ -324,6 +437,106 @@ void AppRuntime::ensure_intrinsics() {
                               };
                             });
     }
+    // The (data-*) verbs (data.h), for programs in this runtime's app: (data-load NAME URI [AS
+    // [PATH]]) points the document's data.NAME at a request and starts it (the scene's nodes bound
+    // to NAME follow when it is ready), (data-reload NAME), (data-status NAME), (data-files NAME)
+    // and (data-file NAME PATH) (its bytes, or nil).
+    // The store first: it is reset when this runtime dies, and only then is `app` still ours.
+    std::shared_ptr<DataStore> store = verbs->data.lock();
+    const auto own_program = [&] { // the program's chroot (se::apply_chroot) is in our app
+      cvc::state &tree = cvc::state::instance(*app);
+      return ictx.root &&
+             ictx.root == (ictx.root_path.empty() ? &tree : tree.findDescendant(ictx.root_path));
+    };
+    if (store && own_program()) {
+      const std::weak_ptr<DataStore> weak = store;
+      const std::string prefix = verbs->prefix, doc_dir = verbs->doc_dir;
+      const auto text = [](std::span<const se::value_t> a, std::size_t i, const char *fn) {
+        const auto *s = i < a.size() ? std::get_if<std::string>(&a[i].v) : nullptr;
+        if (!s)
+          throw se::dsl_error("TypeError", std::string(fn) + ": argument " + std::to_string(i + 1) +
+                                               " is a string" +
+                                               (i < a.size() ? ", not " + a[i].type_name() : ""));
+        return *s;
+      };
+      // The first argument: a dataset's name, one state key.
+      const auto name = [text](std::span<const se::value_t> a, const char *fn) {
+        const std::string s = text(a, 0, fn);
+        if (s.empty() || s.find(cvc::state::SEPARATOR) != std::string::npos)
+          throw se::dsl_error("ValueError", std::string(fn) + ": '" + s +
+                                                "' is not a dataset name (one word, no '.')");
+        return s;
+      };
+      const auto entry = [prefix](const std::string &n) {
+        return resolve_bind(prefix, std::string(kDataRoot) + cvc::state::SEPARATOR + n);
+      };
+      const auto live = [weak](const char *fn) {
+        std::shared_ptr<DataStore> s = weak.lock();
+        if (!s)
+          throw se::dsl_error("RuntimeError", std::string(fn) + ": the document has stopped");
+        return s;
+      };
+      se::builtins::register_fn(
+          env, "data-load",
+          [live, text, name, prefix, doc_dir](std::span<const se::value_t> a) -> se::value_t {
+            if (a.size() < 2 || a.size() > 4)
+              throw se::dsl_error("TypeError", "data-load: expected NAME URI [AS [PATH]], got " +
+                                                   std::to_string(a.size()) + " args");
+            DataSpec spec;
+            spec.name = name(a, "data-load");
+            spec.uri = text(a, 1, "data-load");
+            if (a.size() > 2)
+              spec.as = text(a, 2, "data-load");
+            if (a.size() > 3)
+              spec.path = text(a, 3, "data-load");
+            spec.base = doc_dir;
+            return se::value_t(live("data-load")->bind(prefix, spec));
+          });
+      se::builtins::register_fn(
+          env, "data-reload", [live, name, entry](std::span<const se::value_t> a) -> se::value_t {
+            return se::value_t(live("data-reload")->reload(entry(name(a, "data-reload"))));
+          });
+      se::builtins::register_fn(
+          env, "data-status", [app, name, entry](std::span<const se::value_t> a) -> se::value_t {
+            return se::value_t(data_status(*app, entry(name(a, "data-status"))));
+          });
+      se::builtins::register_fn(
+          env, "data-files", [app, name, entry](std::span<const se::value_t> a) -> se::value_t {
+            auto out = std::make_shared<std::vector<se::value_t>>();
+            for (std::string &p : data_files(*app, entry(name(a, "data-files"))))
+              out->push_back(se::value_t(std::move(p)));
+            return se::value_t(out);
+          });
+      se::builtins::register_fn(
+          env, "data-file",
+          [app, text, name, entry](std::span<const se::value_t> a) -> se::value_t {
+            const DataBytes b =
+                data_file(*app, entry(name(a, "data-file")), text(a, 1, "data-file"));
+            if (!b)
+              return se::value_t(std::monostate{});
+            return se::value_t(se::bytes_value{*b});
+          });
+    }
+    for (const auto &[name, fn] : verbs->functions)
+      se::builtins::register_fn(env, name, fn); // inline on the drain thread, like a sync verb
+    for (const auto &[name, entry] : verbs->async_functions) {
+      const se::async_marshal &marshal = entry.second;
+      if (entry.first.empty()) {
+        se::register_async_fn(env, app->exec_async_host(), name, marshal);
+        continue;
+      }
+      // With a done channel, the kernel's value is posted there too (resolved here, as above).
+      const std::string chan = se::resolve_channel_key(root, entry.first);
+      se::async_marshal posting = [app, chan, marshal](std::span<const se::value_t> args) {
+        se::async_kernel kernel = marshal(args);
+        return se::async_kernel([app, chan, kernel](se::async_call &call) -> se::value_t {
+          se::value_t result = kernel(call);
+          app->exec_scheduler().post_message(chan, result);
+          return result;
+        });
+      };
+      se::register_async_fn(env, app->exec_async_host(), name, std::move(posting));
+    }
   });
 }
 
@@ -339,42 +552,98 @@ std::string describe_requirement(const std::string &name) {
   return name;
 }
 
-// Every program in a loaded document, with where it sits, for the free-head scan.
-void collect_programs(const Widget &w, std::vector<std::pair<std::string, std::string>> &out) {
+// A program for the free-head scan: where it sits, its text, the functions its scope defines
+// (§6.6), which it may call, and the names its scope's requires: lists (§7.6), which it may call
+// without a warning.
+struct ScannedProgram {
+  std::string where;
+  std::string script;
+  const FunctionScope *functions = nullptr;
+  const std::set<std::string> *declared = nullptr;
+};
+
+// The requires: of the document and its modules, as the free-head scan walks them.
+struct RequirementScan {
+  const Runtime &rt;
+  std::vector<std::string> missing;         // required and not on this host: the load fails
+  std::vector<std::string> warnings;        // optional and not on this host
+  std::deque<std::set<std::string>> scopes; // each scope's declared names (stable addresses)
+
+  // Check `reqs` (the document's, or the module mounted at `scope`) against the host, and return
+  // the names its programs may call: these and the enclosing scope's.
+  const std::set<std::string> *add(const std::vector<HostRequirement> &reqs,
+                                   const std::set<std::string> *outer, const std::string &scope) {
+    const std::string of = scope.empty() ? std::string() : " (module '" + scope + "')";
+    std::set<std::string> names = outer ? *outer : std::set<std::string>();
+    for (const HostRequirement &req : reqs) {
+      names.insert(req.name);
+      if (rt.has(req.name))
+        continue;
+      if (req.optional)
+        warnings.push_back("optional requirement " + describe_requirement(req.name) + of +
+                           " is not available on this host");
+      else
+        missing.push_back(describe_requirement(req.name) + of);
+    }
+    scopes.push_back(std::move(names));
+    return &scopes.back();
+  }
+};
+
+// Every program in a loaded document, with where it sits, for the free-head scan. A function
+// scope's own bodies are scanned too, once, as "functions:" (a mount's, "functions: of mount ...").
+// A mount's requires: are checked as the walk reaches it, and cover its subtree's programs.
+void collect_programs(const Widget &w, const FunctionScope *functions,
+                      const std::set<std::string> *declared, RequirementScan &reqs,
+                      std::vector<ScannedProgram> &out) {
+  if (!w.requirements.empty())
+    declared = reqs.add(w.requirements, declared, w.scope);
+  if (w.functions) {
+    functions = w.functions.get();
+    if (!functions->prelude.empty())
+      out.push_back(
+          {w.scope.empty() ? std::string("functions:") : "functions: of mount '" + w.scope + "'",
+           functions->prelude, functions, declared});
+    if (!w.init_script.empty())
+      out.push_back({"init: of mount '" + w.scope + "'", w.init_script, functions, declared});
+    if (!w.tick_script.empty())
+      out.push_back({"on_tick: of mount '" + w.scope + "'", w.tick_script, functions, declared});
+  }
   const std::string where = "widget '" + (w.id.empty() ? w.label : w.id) + "'";
   for (const std::string *p :
-       {&w.on, &w.on_click, &w.on_hover, &w.on_drag, &w.on_drag_start, &w.on_drag_end})
+       {&w.on, &w.on_click, &w.on_hover, &w.on_drag, &w.on_drag_start, &w.on_drag_end, &w.on_top})
     if (!p->empty())
-      out.emplace_back(where, *p);
+      out.push_back({where, *p, functions, declared});
   for (const Widget &c : w.children)
-    collect_programs(c, out);
+    collect_programs(c, functions, declared, reqs, out);
 }
 
-// The load-time preflight. requires: entries the host lacks fail the load (all named in one
-// error) or, when optional, warn. Then every name a program calls that the host does not provide
-// gets one warning: today that program would stop with "undefined symbol" the first time it runs.
-// A name the document already listed in requires: is not repeated.
-void check_host_requirements(const Runtime &rt, LoadResult &lr) {
-  std::set<std::string> declared;
-  std::vector<std::string> missing;
-  for (const HostRequirement &req : lr.requirements) {
-    declared.insert(req.name);
-    if (rt.has(req.name))
-      continue;
-    if (req.optional)
-      lr.warnings.push_back("optional requirement " + describe_requirement(req.name) +
-                            " is not available on this host");
-    else
-      missing.push_back(describe_requirement(req.name));
-  }
-  if (!missing.empty()) {
-    std::string list;
-    for (const std::string &m : missing)
-      list += (list.empty() ? "" : ", ") + m;
-    throw std::runtime_error("this host does not provide what the document requires: " + list);
-  }
+bool defines(const FunctionScope *functions, const std::string &name) {
+  return functions && std::any_of(functions->defs.begin(), functions->defs.end(),
+                                  [&](const FunctionDef &f) { return f.name == name; });
+}
 
-  std::vector<std::pair<std::string, std::string>> programs;
+// The scene nodes that carry a shader: block, by id: each one needs gl.scene.shaders (§16.3).
+void collect_shaded_nodes(const std::vector<SceneNode> &nodes, std::vector<std::string> &out) {
+  for (const SceneNode &n : nodes) {
+    if (n.shader.present)
+      out.push_back(n.id);
+    collect_shaded_nodes(n.children, out);
+  }
+}
+
+// The load-time preflight. requires: entries the host lacks, the document's or a module's, fail
+// the load (all named in one error) or, when optional, warn. A shader: block is an implicit
+// gl.scene.shaders: on a scene that does not run the document's GLSL, the node draws unshaded, so
+// that warns unless the document listed the token. Then every name a program calls that the host
+// does not provide gets one warning: today that program would stop with "undefined symbol" the
+// first time it runs. A name its scope listed in requires: is not repeated: the document's covers
+// every program, a module's those in its mount.
+void check_host_requirements(const Runtime &rt, LoadResult &lr) {
+  RequirementScan reqs{rt};
+  const std::set<std::string> *declared = reqs.add(lr.requirements, nullptr, "");
+  std::vector<ScannedProgram> programs;
+  const FunctionScope *own = lr.root.functions.get(); // the document's: every top-level lane's
   const std::pair<const char *, const std::string *> lanes[] = {
       {"init:", &lr.init_script},
       {"on_tick:", &lr.on_tick_script},
@@ -383,14 +652,49 @@ void check_host_requirements(const Runtime &rt, LoadResult &lr) {
       {"on_signal:", &lr.on_signal_script}};
   for (const auto &[where, script] : lanes)
     if (!script->empty())
-      programs.emplace_back(where, *script);
+      programs.push_back({where, *script, own, declared});
   for (const auto &[name, script] : lr.tests)
-    programs.emplace_back("test '" + name + "'", script);
-  collect_programs(lr.root, programs);
+    programs.push_back({"test '" + name + "'", script, own, declared});
+  collect_programs(lr.root, nullptr, declared, reqs, programs); // and checks the modules' requires:
+  for (std::string &w : reqs.warnings)
+    lr.warnings.push_back(std::move(w));
+  if (!reqs.missing.empty()) {
+    std::string list, hints;
+    for (const std::string &m : reqs.missing) {
+      list += (list.empty() ? "" : ", ") + m;
+      const std::string hint = capability_hint(m.substr(0, m.find(' '))); // m may add its meaning
+      if (!hint.empty() && hints.find(hint) == std::string::npos)
+        hints += (hints.empty() ? "" : "; ") + hint;
+    }
+    throw std::runtime_error("this host does not provide what the document requires: " + list +
+                             (hints.empty() ? "" : "; " + hints));
+  }
+
+  // Without a scene adapter the whole scene is ignored, and load says so; only a scene that does
+  // run, without the shaders, needs this.
+  std::vector<std::string> shaded;
+  collect_shaded_nodes(lr.scene.nodes, shaded);
+  if (!shaded.empty() && !declared->count("gl.scene.shaders") && !declared->count("gl.shaders") &&
+      rt.has("gl.scene") && !rt.has("gl.scene.shaders")) {
+    std::string which;
+    for (std::size_t i = 0; i < shaded.size() && i < 3; ++i)
+      which += (i ? ", '" : "'") + shaded[i] + "'";
+    if (shaded.size() > 3)
+      which += " and " + std::to_string(shaded.size() - 3) + " more";
+    const bool one = shaded.size() == 1;
+    lr.warnings.push_back(std::string(one ? "scene node " : "scene nodes ") + which +
+                          (one ? " has a shader: block" : " have shader: blocks") +
+                          ", but this host's scene does not run the document's GLSL "
+                          "(gl.scene.shaders), so " +
+                          (one ? "it draws" : "they draw") +
+                          " unshaded (list gl.scene.shaders in requires: to make this an error, "
+                          "or as optional to accept it)");
+  }
+
   std::map<std::string, std::vector<std::string>> unprovided; // name -> where it is called
-  for (const auto &[where, script] : programs)
+  for (const auto &[where, script, functions, names] : programs)
     for (const std::string &name : free_heads(script))
-      if (!declared.count(name) && !rt.has_function(name)) {
+      if (!names->count(name) && !defines(functions, name) && !rt.has_function(name)) {
         std::vector<std::string> &at = unprovided[name];
         if (at.empty() || at.back() != where)
           at.push_back(where);
@@ -430,6 +734,10 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   if (!lr.ok)
     throw std::runtime_error(lr.error.empty() ? ("AppRuntime.load: failed to load " + path)
                                               : lr.error);
+  ensure_intrinsics(); // the (data-*) verbs are every document's
+  rt_.refresh_program_names();
+  for (const LoadHook &hook : loadHooks_) // a scripting host's python: block, before requires:
+    hook(lr, path);
   check_host_requirements(rt_, lr); // requires: and the calls programs make (§7.6)
 
   // The document's command line goes on the tree before init: runs, so init can read it.
@@ -453,6 +761,16 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   publish_document_args(app_, prefix_, docArgv_, lr.has_args_block ? &lr.args : nullptr,
                         lr.has_args_block ? &parsed : nullptr);
 
+  // data: (data.h) — each dataset a link at <prefix>.data.<name> to its load, which starts now
+  // (load: lazy ones when something asks), before init: runs, so init: can read their status.
+  {
+    std::error_code ec;
+    const std::filesystem::path abs = std::filesystem::absolute(path, ec);
+    verbs_->doc_dir = ec ? std::string() : abs.parent_path().string();
+  }
+  for (const DataSpec &d : lr.data)
+    data_->bind(prefix_, d);
+
   // A different document from the last one (a reload is the same file under any spelling): its
   // windows and key defaults start afresh. The defaults go in before init:, which may set its own.
   std::error_code same_ec;
@@ -461,8 +779,11 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   seed_keys(lr.keys, new_document);
 
   std::vector<std::string> initErrors;
-  run_init(app_, prefix_, lr.init_script, &initErrors, // §init: seeds win over widget defaults
-           [this](const std::string &n) { return rt_.has(n); });
+  // §init: seeds win over widget defaults. It runs with the document's functions (§6.6).
+  const std::string init = lr.init_script.empty() || !lr.root.functions
+                               ? lr.init_script
+                               : lr.root.functions->prelude + lr.init_script;
+  run_init(app_, prefix_, init, &initErrors, [this](const std::string &n) { return rt_.has(n); });
   for (std::string &e : initErrors) // a failed init: is not fatal, but it must not be silent
     lr.warnings.push_back(std::move(e));
   rt_.set_tick_program(lr.on_tick_script);          // empty = no resident (safe)
@@ -489,8 +810,11 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   if (lr.scene.any()) {
     if (scene_) {
       std::vector<std::string> warns;
-      if (scene_->verify(lr, &warns)) // a missing required node custom: no half-built scene
+      if (scene_->verify(lr, &warns)) { // a missing required node custom: no half-built scene
         scene_->realize(lr.scene, prefix_, &warns);
+        if (!lr.scenes.empty())
+          scene_->realize_scenes(lr.scenes, prefix_, &warns);
+      }
       for (std::string &w : warns)
         lr.warnings.push_back(std::move(w));
     } else {
@@ -499,11 +823,23 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
     }
   } else if (scene_) {
     scene_->no_scene();
+    if (!lr.scenes.empty()) { // scenes: alone, each drawn in the viewports that name it
+      std::vector<std::string> warns;
+      if (scene_->verify(lr, &warns))
+        scene_->realize_scenes(lr.scenes, prefix_, &warns);
+      for (std::string &w : warns)
+        lr.warnings.push_back(std::move(w));
+    }
   }
 
   if (new_document && !docPath_.empty())
     rt_.forget_layout();
   docPath_ = path;
+  { // §5.11: a picture's relative file:// URI is the document's neighbour
+    std::error_code ec;
+    const std::filesystem::path abs = std::filesystem::absolute(path, ec);
+    rt_.set_media_base(ec ? std::string() : abs.parent_path().string());
+  }
   add_host_menus(lr.root, hostMenus_);
   add_keys(lr.root, std::move(lr.keys));
   rt_.set_root(std::move(lr.root)); // applied at the next frame boundary
@@ -528,9 +864,20 @@ void AppRuntime::drain() {
     scene_->sync_visibility(app_); // bound visible: -> node .visible
     scene_->tick();                // volren/volslice per-frame service
   }
-  // Keep the read-lane diagnostics for take_warnings(); the Runtime reports each one only once.
-  for (std::string &w : rt_.take_reactive_warnings())
+  collect_warnings();
+  for (std::size_t i = 0; i < frameHooks_.size(); ++i) {
+    const std::function<void()> hook = frameHooks_[i]; // a copy: a hook may add another
+    hook();
+  }
+}
+
+// Keep the read-lane diagnostics for take_warnings(); the Runtime reports each one only once.
+void AppRuntime::collect_warnings() {
+  for (std::string &w : rt_.take_reactive_warnings()) {
     pendingWarnings_.push_back(std::move(w));
+    if (warningListener_)
+      warningListener_(pendingWarnings_.back());
+  }
 }
 
 bool AppRuntime::should_close() const { return quit_; }
@@ -573,11 +920,14 @@ bool AppRuntime::post_signal(const std::string &signal, const std::string &sourc
 // ── diagnostics ─────────────────────────────────────────────────────────────────────────────────
 
 std::vector<std::string> AppRuntime::take_warnings() {
+  collect_warnings();
   std::vector<std::string> out = std::move(pendingWarnings_);
   pendingWarnings_.clear();
-  for (std::string &w : rt_.take_reactive_warnings())
-    out.push_back(std::move(w));
   return out;
+}
+
+void AppRuntime::set_warning_listener(std::function<void(const std::string &)> listener) {
+  warningListener_ = std::move(listener);
 }
 
 bool AppRuntime::reload_if_changed() {

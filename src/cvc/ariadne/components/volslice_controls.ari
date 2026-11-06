@@ -1,10 +1,13 @@
 # volslice_controls.ari — a REUSABLE Ariadne component: live controls for a `type: volslice` node.
 # Binds the two-way cvc::volslice::state_settings keys (state at
-# "<scene>.graphics.root.children.bunny_volume.volslice.*"), so a slider drives the slice renderer
+# "<scene>.graphics.root.children.<node>.volslice.*"), so a slider drives the slice renderer
 # with NO host C++ — the declarative replacement for volslice_bunny.cpp's "Volume slices" panel.
 #
-# Convention: it binds a volslice node named `bunny_volume` (the id the volume demos use). To drive a
-# differently-named node, copy this file and change the node id in the bind paths.
+# Args (every one has a default, so a bare include works):
+#   node   the volslice node's id (default bunny_volume)
+#   title  the window's title (default Volume slices)
+#   id     the instance id: the window's geometry persists under tree.<id> (default volslice_controls);
+#          give each include its own when a document drives several volslice nodes
 #
 # Use it:
 #     import: components/volslice_controls.ari
@@ -13,21 +16,22 @@
 
 units:
   volslice_controls:
-    window: Volume slices
-    id: volslice_controls
+    args: { node: bunny_volume, title: Volume slices, id: volslice_controls }
+    window: "{title}"
+    id: "{id}"
     children:
       - slider_float: Quality
-        bind: graphics.root.children.bunny_volume.volslice.quality
+        bind: graphics.root.children.{node}.volslice.quality
         lo: 0.1
         hi: 1.0
         def: 0.6
       - slider_float: Near-plane peel
-        bind: graphics.root.children.bunny_volume.volslice.near_plane
+        bind: graphics.root.children.{node}.volslice.near_plane
         lo: 0.0
         hi: 2.0
         def: 0.0
       - slider_int: Max planes
-        bind: graphics.root.children.bunny_volume.volslice.max_planes
+        bind: graphics.root.children.{node}.volslice.max_planes
         lo: 32
         hi: 2000
         def: 1000

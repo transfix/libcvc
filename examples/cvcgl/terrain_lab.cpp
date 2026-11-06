@@ -1,20 +1,22 @@
 // terrain_lab — a pure-C++ cvcGL demo that RENDERS what cvc::world produces.
 //
 // The forest/coast demos hand-author their terrain (a fixed island + a hardcoded
-// tree grammar). Terrain Lab instead drives the real headless generator:
-//   cvc::world::world_model::generate(params) -> heightfield + surface registry +
-//   scattered L-system props; cvc::world::raster() -> the occupancy/material/height
-//   grid downstream training + gym consumers see. This demo turns that same output into
-//   geometry so we can SEE and TUNE it: the terrain mesh is coloured by the raster's
-//   per-cell MATERIAL (or risk / occupancy / height), the props are grown from the
-//   built-in L-system recipes and tessellated in place, water fills every cell that
-//   sits below the sea level (streams, ponds, coast), and a drifting cloud slab sits
-//   overhead — all navigable with the built-in CameraController.
+// tree grammar). Terrain Lab instead drives the real headless generator,
+// cvc::world::generate_world (inc/cvc/world/generated_world.h): world_model::generate's
+// heightfield + surface registry + scattered L-system props, cvc::world::raster()'s
+// occupancy/material/height grid (what downstream training + gym consumers see), and the
+// roads-first city. This demo turns that output into a scene so we can SEE and TUNE it: the
+// terrain mesh is coloured by the raster's per-cell MATERIAL (or risk / occupancy / height), the
+// props are grown from the built-in L-system recipes, water fills every cell that sits below the
+// water level (streams, ponds, coast), and a drifting cloud slab sits overhead — all navigable
+// with the built-in CameraController.
 //
 // The ImGui panel re-generates the world live: seed, per-species counts, tree
 // generations, relief amplitude, sea level, ontology and a preset — so you can tune
 // the generator and watch the scene rebuild. This is the visual QA surface for the
-// L-system terrain source (docs/roadmap/LSYSTEM-LABORATORY-ROADMAP.md).
+// L-system terrain source (docs/roadmap/LSYSTEM-LABORATORY-ROADMAP.md). The same world as an
+// Ariadne document: examples/ariadne/documents/terrain_lab.ari (arigl), on the generated_world
+// scene node type.
 //
 // Run (onscreen, navigable):   terrain_lab
 //   Tab toggles orbit/fly; WASD + mouse to fly; Esc releases the pointer.
@@ -33,7 +35,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <cvc/core/app.h>
-#include <cvc/core/text.h>        // display-width-aware column padding (§17.3)
 #include <cvc/core/world_clock.h> // the sea and cloud animate on the app's world clock
 #include <cvc/core/world_clock_binding.h>
 #include <cvc/core/world_units.h> // realistic world dimensions (metres/km) — §space units
@@ -57,33 +58,16 @@
 #include <cvc/gl/state_publisher.h>
 #include <emscripten.h>
 #endif
-#include <cvc/lsys/derive.h>
-#include <cvc/lsys/forest.h> // the preserved demo tree generators (grow_pine / grow_branchy)
-#include <cvc/lsys/grammar.h>
-#include <cvc/lsys/interp.h>
-#include <cvc/lsys/recipes.h>
-#include <cvc/lsys/rng.h> // hashed per-tree draws (uni/irand/cell_id)
-#include <cvc/model/model.h>
-#include <cvc/model/model_file_io.h> // read the Austin building bundle (glb)
 #include <cvc/volume/bounding_box.h>
 #include <cvc/volume/volume.h>
 #include <cvc/world/building_archetypes.h>
-#include <cvc/world/grid.h>
-#include <cvc/world/heightfield.h>
-#include <cvc/world/raster.h>
-#include <cvc/world/road_mesh.h>
-#include <cvc/world/road_raster.h>
-#include <cvc/world/roads.h>
-#include <cvc/world/scatter.h>
-#include <cvc/world/sites.h>
-#include <cvc/world/surface.h>
+#include <cvc/world/generated_world.h>
 #include <deque>
 #include <filesystem>
+#include <functional>
 #include <iostream>
-#include <map>
 #include <memory>
 #include <random>
-#include <set>
 #include <string>
 #include <vector>
 #include <vtkRenderer.h>
@@ -94,7 +78,6 @@ using cvc::gl::GeometryRenderMode;
 using cvc::gl::SceneGraph;
 using cvc::gl::SceneRenderer;
 using cvc::gl::VolumeNode;
-namespace lsys = cvc::lsys;
 namespace world = cvc::world;
 using idx_t = cvc::geometry::index_t;
 
@@ -115,191 +98,42 @@ Vec3d vnorm(Vec3d a) {
 Vec3d vcross(Vec3d a, Vec3d b) {
   return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
 }
-Vec3d fromLsys(const lsys::vec3 &v) { return {v.x, v.y, v.z}; }
-struct Apron {                // a paved plaza hugging one building's footprint (rotated by yaw)
-  double x = 0, y = 0, z = 0; // centre + base height
-  double hx = 0, hy = 0;      // footprint half-extents (+ sidewalk margin)
-  double yaw = 0;             // building rotation (radians)
-};
-// Rotate about +Z by yaw (radians).
-Vec3d rotZ(Vec3d p, double c, double s) { return {p.x * c - p.y * s, p.x * s + p.y * c, p.z}; }
 
-// ── the world scale + shared state the sea/sky/sun read ──────────────────────
-// world_model owns the heightfield; a pointer to the live one lets the water/shadow
-// code sample the same terrain the mesh was built from, across regenerations.
+// ── the world scale ──────────────────────────────────────────────────────────
 double gHalf = 600.0; // world spans [-gHalf, gHalf]^2 (metres) — set live from the size knob
 // The world's unit scale: one world unit == one metre. Realistic, centred-on-origin coordinates;
 // used to label spans in the natural regime (metres, promoting to km past 1000 m).
 cvc::world_units gUnits{cvc::world_units::config{cvc::world_units::system::si, 1.0}};
-// Render tessellation of the terrain MESH (cells = 2*gHalf/(gTerrainN-1)); scaled with the world
-// size in rebuild() so a big terrain stays detailed (and stresses the mesh/LOD path), capped.
-int gTerrainN = 289;
-// Resolution of the material / height / asphalt RASTER + the texture source. DECOUPLED from and
-// capped well below gTerrainN, so a huge terrain mesh does not make the per-cell raster work (which
-// includes an O(cells * road-segments) asphalt stamp) blow up.
-int gRasterN = 289;
-double gSeaLevel = 0.0; // water surface / shoreline height
-const world::heightfield *gHF = nullptr;
-
-double terrainH(double x, double y) { return gHF ? gHF->sample(x, y) : 0.0; }
-
-// ── generation parameters (the ImGui panel edits these) ──────────────────────
-struct GenParams {
-  std::uint64_t seed = 7;
-  // World half-extent in METRES — the terrain spans 2*half_m per side. A first-class knob so the
-  // lab can build very large terrains (to stress the mesh/LOD path) or tight city blocks.
-  double half_m = 600.0;
-  int trees = 500;
-  int rocks = 90;
-  int buildings = 110;
-  int tree_gen = 5;
-  double amp_m = 90.0;
-  // Water SURFACE height. The heightfield floor sits at 0, so terrain rises in
-  // [0, amp]; anything below this line floods — valleys become streams/ponds and
-  // the low rim becomes coast. Raised by default so the water sections read clearly.
-  double water_level_m = 34.0;
-  int preset = 0; // 0 standard, 1 forest, 2 urban, 3 sparse, 4 island
-  int ontology = 0;
-};
 const char *const kPresetNames[] = {"standard", "forest", "urban", "sparse", "island"};
 const char *const kOntologyNames[] = {"merged_default", "soft_vegetation", "strict_water_mud"};
 const char *const kColorModeNames[] = {"material", "risk", "occupancy", "height"};
+constexpr int TEX = 2048; // the terrain surface texture (material + roads + shoreline)
 
-world::world_params toWorldParams(const GenParams &gp) {
-  world::world_params wp;
-  wp.min_x = wp.min_y = -gHalf;
-  wp.max_x = wp.max_y = gHalf;
-  wp.seed = gp.seed;
-  wp.ontology = kOntologyNames[std::max(0, std::min(2, gp.ontology))];
-  // Relief scaled for a large world: long base wavelength, deep enough that low
-  // ground drops below the sea to carve streams/ponds.
-  wp.hf.seed = gp.seed;
-  wp.hf.amp_m = gp.amp_m;
-  wp.hf.sea_level_m = 0.0; // terrain floor at 0; water floods above it (see water_level_m)
-  // More variance: a shorter base wavelength + more octaves + higher gain give
-  // steeper, more broken relief, so the generator classifies more gravel / scree /
-  // bare rock (dirt) on the slopes instead of an all-grass plain.
-  wp.hf.base_wavelength_m = std::max(50.0, gHalf * 0.30);
-  wp.hf.octaves = 8;
-  wp.hf.gain = 0.55;
-  wp.hf.lacunarity = 2.1;
-  wp.hf.warp_m = 22.0;
-  wp.hf.warp_wavelength_m = gHalf * 0.6;
-  // The "island" preset shapes the relief (a central dome dropping below the water
-  // line at the rim); every preset's object mix lives in the count sliders (see
-  // presetFill), so counts here always come straight from the panel.
-  if (gp.preset == 4) {
-    wp.hf.island = true;
-    wp.hf.island_peak_m = std::max(gp.amp_m, 40.0);
-    wp.hf.island_radius_m = gHalf * 0.72;
-    wp.hf.shelf_m = -std::max(6.0, gp.water_level_m + 4.0);
-  }
-  world::scatter_params &s = wp.sc;
-  // Trees use the two PRESERVED demo generators, not the generic parametric recipes: "native_pine"
-  // (the conical string-grammar conifer) and "native_branchy" (the recursive broadleaf splitter) —
-  // the exact look from lsystem_forest. These are RESERVED recipe names dispatched in buildProps()
-  // straight to cvc::lsys::grow_pine / grow_branchy, bypassing derive()/interpret(). An even mix.
-  s.trees = {{"native_pine", 0.5}, {"native_branchy", 0.5}};
-  s.rocks = {{"boulder_cluster", 1.0}};
-  s.buildings = {{"office_block", 0.5}, {"brick_house", 0.5}};
-  s.tree_count = gp.trees;
-  s.rock_count = gp.rocks;
-  s.building_count = gp.buildings;
-  s.tree_gen = gp.tree_gen;
-  s.min_ground_m = gp.water_level_m + 1.0; // keep props on dry land, above the waterline
-  return wp;
-}
-
-// Fill the count/amp fields with a sensible mix for the chosen preset (the panel's
-// quick-set: pick a preset, get a good starting point, then fine-tune the sliders).
-void presetFill(GenParams &gp) {
-  switch (gp.preset) {
-  case 1:
-    gp.trees = 1600;
-    gp.rocks = 220;
-    gp.buildings = 8;
-    gp.amp_m = 26.0;
-    break; // forest
-  case 2:
-    gp.trees = 320;
-    gp.rocks = 40;
-    gp.buildings = 340;
-    gp.amp_m = 10.0;
-    break; // urban
-  case 3:
-    gp.trees = 260;
-    gp.rocks = 140;
-    gp.buildings = 70;
-    gp.amp_m = 22.0;
-    break; // sparse
-  case 4:
-    gp.trees = 900;
-    gp.rocks = 220;
-    gp.buildings = 60;
-    gp.amp_m = 46.0;
-    break; // island
-  default:
-    gp.trees = 500;
-    gp.rocks = 90;
-    gp.buildings = 110;
-    gp.amp_m = 36.0;
-    break; // standard
-  }
-}
-
-// ── raster -> terrain mesh ───────────────────────────────────────────────────
-// (terrain render resolution is now the runtime gTerrainN above, scaled with the world size)
-
-// Colour for one raster cell under the current colour mode.
-cvc::geometry::color_t cellColor(const world::raster_out &ro, const world::surface_registry &reg,
-                                 std::size_t i, int mode, float hmin, float hmax) {
-  auto heat = [](double t) -> cvc::geometry::color_t { // blue -> green -> yellow -> red
-    t = std::min(1.0, std::max(0.0, t));
-    double r = std::min(1.0, std::max(0.0, 1.5 - std::fabs(4.0 * t - 3.0)));
-    double g = std::min(1.0, std::max(0.0, 1.5 - std::fabs(4.0 * t - 2.0)));
-    double b = std::min(1.0, std::max(0.0, 1.5 - std::fabs(4.0 * t - 1.0)));
-    return {r, g, b};
-  };
-  if (mode == 1)
-    return heat(ro.risk_raw[i]);
-  if (mode == 2)
-    return ro.occupancy[i] ? cvc::geometry::color_t{0.85, 0.12, 0.12}
-                           : cvc::geometry::color_t{0.20, 0.22, 0.26};
-  if (mode == 3) {
-    double t = (hmax > hmin) ? (ro.height[i] - hmin) / (hmax - hmin) : 0.0;
-    return heat(t);
-  }
-  const world::surface_class &sc = reg[ro.klass[i]];
-  return {sc.albedo[0], sc.albedo[1], sc.albedo[2]};
-}
-
-// Build the terrain mesh by sampling the height field at NxN over [-half,half]^2, with UVs (world
-// -> [0,1]) so the surface colour comes from the baked texture. The mesh resolution N (gTerrainN)
-// is DECOUPLED from the raster/texture-source grid, so a large, high-poly terrain (the LOD stress
-// mesh) does not blow up the per-cell raster work (material / asphalt stamp / texture paint).
-cvc::geometry buildTerrainMesh(cvc::app &app, int N, double half) {
-  cvc::geometry geo(app);
-  auto &pts = geo.points();
-  auto &uvs = geo.uvs();
-  pts.reserve(std::size_t(N) * N);
-  uvs.reserve(std::size_t(N) * N);
-  const double span = 2.0 * half, step = span / (N - 1);
-  for (int r = 0; r < N; ++r)
-    for (int c = 0; c < N; ++c) {
-      const double x = -half + c * step, y = -half + r * step;
-      pts.push_back({x, y, terrainH(x, y)});
-      uvs.push_back({double(c) / (N - 1), double(r) / (N - 1)});
+// The Austin building archetype library, loaded once. Discovery: $CVC_NAV_BUNDLE (a buildings.glb
+// file, or a directory / scene dir containing one), else a buildings.glb beside the working dir.
+// Empty without one: the city's buildings are then procedural massing.
+const world::building_library &cityLibrary() {
+  static const world::building_library lib = [] {
+    std::vector<std::string> paths;
+    if (const char *env = std::getenv("CVC_NAV_BUNDLE"); env && *env) {
+      const std::string e(env);
+      paths = {e, e + "/buildings.glb", e + "/austin_south/buildings.glb"};
     }
-  auto &tris = geo.tris();
-  tris.reserve(std::size_t(N - 1) * (N - 1) * 2);
-  for (int r = 0; r < N - 1; ++r)
-    for (int c = 0; c < N - 1; ++c) {
-      idx_t v = idx_t(r) * N + c;
-      idx_t vr = v + 1, vd = v + N, vrd = vd + 1;
-      tris.push_back({v, vr, vd});
-      tris.push_back({vr, vrd, vd});
+    paths.push_back("/bundle/buildings.glb"); // emscripten --preload-file mount (wasm)
+    paths.push_back("buildings.glb");
+    for (const std::string &p : paths) {
+      world::building_library L = world::load_building_library(p);
+      if (!L.empty()) {
+        std::fprintf(stderr, "terrain_lab: %zu building archetypes from %s\n", L.size(), p.c_str());
+        return L;
+      }
     }
-  return geo;
+    std::fprintf(
+        stderr,
+        "terrain_lab: no Austin building bundle (set CVC_NAV_BUNDLE) — procedural buildings\n");
+    return world::building_library{};
+  }();
+  return lib;
 }
 
 // Procedural fragment bump map for the ground (verbatim GLSL from lsystem_forest / the Python demo:
@@ -346,670 +180,15 @@ void addTerrainBump(GeometryNode &node) {
                                     "  }\n");
 }
 
-// ── prop tessellation (L-system structure -> merged geometry) ────────────────
-void appendCylinder(cvc::geometry &g, Vec3d a, Vec3d b, double r0, double r1,
-                    const cvc::geometry::color_t &col, int sides = 6) {
-  Vec3d dir = b - a;
-  double len = vlen(dir);
-  if (len < 1e-5)
-    return;
-  dir = dir * (1.0 / len);
-  Vec3d up = std::fabs(dir.z) < 0.9 ? Vec3d{0, 0, 1} : Vec3d{1, 0, 0};
-  Vec3d u = vnorm(vcross(dir, up)), v = vcross(dir, u);
-  idx_t base = idx_t(g.points().size());
-  auto &P = g.points();
-  auto &C = g.colors();
-  for (int ring = 0; ring < 2; ++ring) {
-    Vec3d ctr = ring == 0 ? a : b;
-    double rr = ring == 0 ? r0 : r1;
-    for (int s = 0; s < sides; ++s) {
-      double th = s * 2.0 * M_PI / sides;
-      Vec3d p = ctr + (u * (std::cos(th) * rr)) + (v * (std::sin(th) * rr));
-      P.push_back({p.x, p.y, p.z});
-      C.push_back(col);
-    }
-  }
-  auto &T = g.tris();
-  for (int s = 0; s < sides; ++s) {
-    idx_t a0 = base + s, a1 = base + (s + 1) % sides;
-    idx_t b0 = base + sides + s, b1 = base + sides + (s + 1) % sides;
-    T.push_back({a0, a1, b1});
-    T.push_back({a0, b1, b0});
-  }
-}
-
-void appendBox(cvc::geometry &g, const lsys::obox &o, const cvc::geometry::color_t &col,
-               double yawC, double yawS, double sx, double sy, double sz, Vec3d origin) {
-  Vec3d ax[3] = {rotZ(fromLsys(o.axis[0]), yawC, yawS), rotZ(fromLsys(o.axis[1]), yawC, yawS),
-                 rotZ(fromLsys(o.axis[2]), yawC, yawS)};
-  Vec3d ctr = rotZ(Vec3d{o.center.x * sx, o.center.y * sy, o.center.z * sz}, yawC, yawS) + origin;
-  double hx = o.half.x * sx, hy = o.half.y * sy, hz = o.half.z * sz;
-  idx_t base = idx_t(g.points().size());
-  auto &P = g.points();
-  auto &C = g.colors();
-  for (int sx = -1; sx <= 1; sx += 2)
-    for (int sy = -1; sy <= 1; sy += 2)
-      for (int sz = -1; sz <= 1; sz += 2) {
-        Vec3d p = ctr + (ax[0] * (hx * sx)) + (ax[1] * (hy * sy)) + (ax[2] * (hz * sz));
-        P.push_back({p.x, p.y, p.z});
-        C.push_back(col);
-      }
-  // corner index = ((sx+1)/2)<<2 | ((sy+1)/2)<<1 | ((sz+1)/2)
-  auto co = [&](int ix, int iy, int iz) { return base + (ix << 2 | iy << 1 | iz); };
-  auto quad = [&](idx_t a, idx_t b, idx_t c, idx_t d) {
-    g.tris().push_back({a, b, c});
-    g.tris().push_back({a, c, d});
-  };
-  quad(co(0, 0, 0), co(0, 1, 0), co(0, 1, 1), co(0, 0, 1)); // -x
-  quad(co(1, 0, 0), co(1, 0, 1), co(1, 1, 1), co(1, 1, 0)); // +x
-  quad(co(0, 0, 0), co(0, 0, 1), co(1, 0, 1), co(1, 0, 0)); // -y
-  quad(co(0, 1, 0), co(1, 1, 0), co(1, 1, 1), co(0, 1, 1)); // +y
-  quad(co(0, 0, 0), co(1, 0, 0), co(1, 1, 0), co(0, 1, 0)); // -z
-  quad(co(0, 0, 1), co(0, 1, 1), co(1, 1, 1), co(1, 0, 1)); // +z
-}
-
-// A leaf marker (the L-system's terminal foliage primitive) rendered as a small
-// SOLID octahedron — real 3-D geometry, so the tree's own leaves fill out the
-// canopy from every angle. Slightly flattened in z so a cluster reads as a leafy
-// mass rather than a spiky ball.
-void appendLeaf(cvc::geometry &g, Vec3d pos, Vec3d dir, double size,
-                const cvc::geometry::color_t &col) {
-  (void)dir;
-  double r = 0.5 * size, rz = 0.38 * size;
-  idx_t b = idx_t(g.points().size());
-  Vec3d v[6] = {pos + Vec3d{r, 0, 0}, pos - Vec3d{r, 0, 0},  pos + Vec3d{0, r, 0},
-                pos - Vec3d{0, r, 0}, pos + Vec3d{0, 0, rz}, pos - Vec3d{0, 0, rz}};
-  for (const Vec3d &p : v) {
-    g.points().push_back({p.x, p.y, p.z});
-    g.colors().push_back(col);
-  }
-  const int f[8][3] = {{0, 2, 4}, {2, 1, 4}, {1, 3, 4}, {3, 0, 4},
-                       {2, 0, 5}, {1, 2, 5}, {3, 1, 5}, {0, 3, 5}};
-  for (auto &t : f)
-    g.tris().push_back({b + idx_t(t[0]), b + idx_t(t[1]), b + idx_t(t[2])});
-}
-
-cvc::geometry::color_t roleColor(const world::surface_registry &reg, lsys::role r) {
-  const world::surface_class &sc = reg[reg.class_for_role(r)];
-  cvc::geometry::color_t c{sc.albedo[0], sc.albedo[1], sc.albedo[2]};
-  // Canopy foliage: brighten so it reads as green crown against the grass rather
-  // than a dark speck (the registry's bush_cover albedo is a muted ground green).
-  if (r == lsys::role::foliage)
-    c = {0.19, 0.47, 0.16};
-  return c;
-}
-
-// A small pool of derived+interpreted variants per recipe, so instances of one
-// species are not identical. Keyed by recipe name.
-struct PropLib {
-  std::map<std::string, std::vector<lsys::structure>> variants;
-  int nvar = 5;
-
-  void build(const world::world_params &wp) {
-    variants.clear();
-    std::map<std::string, int> gen; // recipe -> generation count
-    for (const auto &sw : wp.sc.trees)
-      gen[sw.recipe] = wp.sc.tree_gen;
-    for (const auto &sw : wp.sc.rocks)
-      gen[sw.recipe] = wp.sc.rock_gen;
-    for (const auto &sw : wp.sc.buildings)
-      gen[sw.recipe] = wp.sc.building_gen;
-    // The defaults() mix is used when a species list is empty; cover it too by
-    // deriving whatever recipe a prop actually references (filled lazily below).
-    seed_ = wp.seed;
-    gen_ = gen;
-  }
-  const std::vector<lsys::structure> &get(const std::string &recipe) {
-    auto it = variants.find(recipe);
-    if (it != variants.end())
-      return it->second;
-    std::vector<lsys::structure> v;
-    if (lsys::has_recipe(recipe)) {
-      lsys::ruleset rs = lsys::load_recipe(recipe);
-      int g = 3;
-      auto gi = gen_.find(recipe);
-      if (gi != gen_.end())
-        g = gi->second;
-      for (int k = 0; k < nvar; ++k) {
-        lsys::derive_options opt;
-        opt.master_seed = seed_ + std::uint64_t(k) * 0x9E3779B97F4A7C15ull;
-        opt.generations = g;
-        lsys::derive_result dr = lsys::derive(rs, opt);
-        v.push_back(lsys::interpret(rs, dr.w));
-      }
-    }
-    return variants.emplace(recipe, std::move(v)).first->second;
-  }
-
-private:
-  std::uint64_t seed_ = 0;
-  std::map<std::string, int> gen_;
-};
-
-// Tessellate every placed prop into two merged meshes: solid (trunks/branches +
-// rock/building boxes, per-vertex material colour) and foliage (leaf quads).
-// Render the scattered TREES and ROCKS (buildings are handled by buildBuildings).
-// The two PRESERVED demo tree generators, invoked by reserved recipe name — the exact look from
-// lsystem_forest, not the generic parametric recipes. grow_pine fills the solid (trunk/branches)
-// AND a needle (LINES) mesh; grow_branchy fills only the solid. Per-tree size / maturity / length
-// jitter mirror grow_forest() so the shapes match, keyed by a STABLE cell id from the tree's
-// position (insertion-stable, deterministic). Returns false for any non-reserved recipe.
-bool growNativeTree(const std::string &recipe, const world::placed_prop &pp, std::uint64_t seed,
-                    cvc::geometry &solid, cvc::geometry &needle) {
-  using namespace cvc::lsys;
-  static const int MATURITY[7] = {1, 2, 2, 3, 3, 3, 4};
-  const std::uint64_t el =
-      cell_id(std::int32_t(std::lround(pp.x)), std::int32_t(std::lround(pp.y)));
-  if (recipe == "native_pine") {
-    const double size = (0.55 + 0.4 * uni(seed, stream::size, el, 0)) * 1.35 * pp.scale;
-    const int maturity = MATURITY[irand(seed, stream::maturity, el, 0, 0, 6)];
-    grow_pine(solid, needle, pp.x, pp.y, pp.z, size, maturity);
-    return true;
-  }
-  if (recipe == "native_branchy") {
-    const double lenJitter = uni(seed, stream::size, el, 1, 0.8, 1.25);
-    const std::uint64_t treeSeed = detail::splitmix(seed ^ path_id(el, 0xB2A4u));
-    grow_branchy(solid, treeSeed, pp.x, pp.y, pp.z, 6.0 * pp.scale * lenJitter, 0.7 * pp.scale, 4,
-                 3);
-    return true;
-  }
-  return false;
-}
-
-void buildProps(cvc::app &app, const world::world_model &wm, const world::surface_registry &reg,
-                PropLib &lib, cvc::geometry &solid, cvc::geometry &foliage, cvc::geometry &needle) {
-  const bool dbg = std::getenv("CVC_TL_DEBUG") != nullptr;
-  const double kStem = 1.7, kLeaf = 2.2;
-  std::set<std::string> buildingRecipes;
-  for (const auto &sw : wm.params().sc.buildings)
-    buildingRecipes.insert(sw.recipe);
-  const auto &props = wm.props();
-  std::map<std::string, int> dumped;
-  std::size_t i = 0;
-  for (const world::placed_prop &pp : props) {
-    if (buildingRecipes.count(pp.recipe)) { // buildings have their own massing generator
-      ++i;
-      continue;
-    }
-    if (growNativeTree(pp.recipe, pp, wm.params().seed, solid,
-                       needle)) { // native_pine / native_branchy
-      ++i;
-      continue;
-    }
-    const std::vector<lsys::structure> &vs = lib.get(pp.recipe);
-    if (vs.empty()) {
-      ++i;
-      continue;
-    }
-    const lsys::structure &st = vs[i % vs.size()];
-    if (dbg && dumped[pp.recipe]++ == 0)
-      std::fprintf(stderr, "  recipe %s segs=%zu leaves=%zu boxes=%zu bounds z[%.1f..%.1f]\n",
-                   cvc::text::pad_to_width(pp.recipe, 16).c_str(), st.segments.size(),
-                   st.leaves.size(), st.boxes.size(), st.lo.z, st.hi.z);
-    double yaw = pp.yaw_deg * M_PI / 180.0, yc = std::cos(yaw), ys = std::sin(yaw);
-    double sc = pp.scale;
-    Vec3d org{pp.x, pp.y, pp.z};
-    auto place = [&](const lsys::vec3 &p) { return rotZ(fromLsys(p) * sc, yc, ys) + org; };
-    for (const lsys::segment &s : st.segments)
-      appendCylinder(solid, place(s.a), place(s.b), std::max(0.06, s.r0 * sc * kStem),
-                     std::max(0.04, s.r1 * sc * kStem), roleColor(reg, s.rl), s.level >= 2 ? 5 : 6);
-    for (const lsys::obox &o : st.boxes)
-      appendBox(solid, o, roleColor(reg, o.rl), yc, ys, sc, sc, sc, org);
-    for (const lsys::leaf &lf : st.leaves)
-      appendLeaf(foliage, place(lf.pos), rotZ(fromLsys(lf.dir), yc, ys),
-                 std::max(1.2, lf.size * sc * kLeaf), roleColor(reg, lf.rl));
-    ++i;
-  }
-}
-
-// ── buildings: a per-building massing "sub-grammar" that lays out SOLID full-height
-// blocks in a varied footprint (tower / slab / L / T / podium+tower), on the world's
-// building sites but greedily de-conflicted so they never intersect ──────────────
-std::uint64_t splitmix(std::uint64_t x) {
-  x += 0x9E3779B97F4A7C15ull;
-  x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
-  x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
-  return x ^ (x >> 31);
-}
-struct BRng {
-  std::uint64_t s;
-  double next() {
-    s = splitmix(s);
-    return double(s >> 11) * (1.0 / 9007199254740992.0);
-  }
-  double range(double a, double b) { return a + (b - a) * next(); }
-  int pick(int n) { return int(next() * n) % n; }
-};
-lsys::obox groundBox(double cx, double cy, double w, double d, double h, lsys::role rl) {
-  lsys::obox b;
-  b.center = {cx, cy, 0.5 * h};
-  b.half = {0.5 * w, 0.5 * d, 0.5 * h};
-  b.axis[0] = {1, 0, 0};
-  b.axis[1] = {0, 1, 0};
-  b.axis[2] = {0, 0, 1};
-  b.rl = rl;
-  return b;
-}
-struct Massing {
-  std::vector<lsys::obox> boxes;
-  double radius = 0; // XY bounding radius (de-overlap + apron)
-};
-Massing genMassing(BRng &r) {
-  Massing m;
-  const lsys::role mats[4] = {lsys::role::wall_concrete, lsys::role::wall_brick, lsys::role::glass,
-                              lsys::role::metal};
-  lsys::role rl = mats[r.pick(4)];
-  int shape = r.pick(5);
-  double w = r.range(12, 22), d = r.range(10, 18);
-  auto add = [&](double cx, double cy, double bw, double bd, double bh) {
-    m.boxes.push_back(groundBox(cx, cy, bw, bd, bh, rl));
-  };
-  switch (shape) {
-  case 0:
-    add(0, 0, w, d, r.range(40, 78));
-    break; // tower
-  case 1:
-    add(0, 0, r.range(30, 46), r.range(11, 16), r.range(22, 40));
-    break;  // slab
-  case 2: { // L
-    double h = r.range(20, 40);
-    add(-0.25 * w, 0, 0.5 * w, d, h);
-    add(0.25 * w, -0.25 * d, 0.5 * w, 0.5 * d, h);
-    break;
-  }
-  case 3: { // T
-    double h = r.range(20, 42);
-    add(0, 0.2 * d, w * 1.3, 0.45 * d, h);
-    add(0, -0.25 * d, 0.4 * w, d, h);
-    break;
-  }
-  default: { // podium + tower
-    double pw = r.range(26, 40), pd = r.range(18, 28);
-    add(0, 0, pw, pd, r.range(10, 16));
-    add(r.range(-0.15, 0.15) * pw, r.range(-0.15, 0.15) * pd, r.range(12, 18), r.range(10, 16),
-        r.range(38, 66));
-    break;
-  }
-  }
-  for (const lsys::obox &b : m.boxes) {
-    double ex = std::fabs(b.center.x) + b.half.x, ey = std::fabs(b.center.y) + b.half.y;
-    m.radius = std::max(m.radius, std::sqrt(ex * ex + ey * ey));
-  }
-  return m;
-}
-void buildBuildings(cvc::app &app, const world::world_model &wm, const world::surface_registry &reg,
-                    std::uint64_t seed, cvc::geometry &solid, std::vector<Apron> &aprons) {
-  (void)app;
-  std::set<std::string> buildingRecipes;
-  for (const auto &sw : wm.params().sc.buildings)
-    buildingRecipes.insert(sw.recipe);
-  std::vector<const world::placed_prop *> sites;
-  for (const world::placed_prop &pp : wm.props())
-    if (buildingRecipes.count(pp.recipe))
-      sites.push_back(&pp);
-  std::vector<Vec3d> placed; // accepted (x, y, radius) for de-overlap
-  std::size_t idx = 0;
-  for (const world::placed_prop *pp : sites) {
-    BRng r{splitmix(seed ^ (std::uint64_t(idx + 1) * 0x100000001B3ull))};
-    ++idx;
-    Massing m = genMassing(r);
-    bool ok = true;
-    for (const Vec3d &q : placed) {
-      double dx = pp->x - q.x, dy = pp->y - q.y, gap = m.radius + q.z + 8.0;
-      if (dx * dx + dy * dy < gap * gap) {
-        ok = false;
-        break;
-      }
-    }
-    if (!ok)
-      continue;
-    placed.push_back({pp->x, pp->y, m.radius});
-    double yaw = pp->yaw_deg * M_PI / 180.0, yc = std::cos(yaw), ys = std::sin(yaw);
-    Vec3d org{pp->x, pp->y, pp->z};
-    for (const lsys::obox &b : m.boxes)
-      appendBox(solid, b, roleColor(reg, b.rl), yc, ys, 1.0, 1.0, 1.0, org);
-    // Plaza hugs the building's actual footprint AABB (+ a sidewalk margin) and is
-    // CENTRED on that footprint — asymmetric shapes (L/T/podium) sit off the massing
-    // origin, so a symmetric plaza would leave the building displaced to one side.
-    double minX = 1e30, maxX = -1e30, minY = 1e30, maxY = -1e30;
-    for (const lsys::obox &b : m.boxes) {
-      minX = std::min(minX, b.center.x - b.half.x);
-      maxX = std::max(maxX, b.center.x + b.half.x);
-      minY = std::min(minY, b.center.y - b.half.y);
-      maxY = std::max(maxY, b.center.y + b.half.y);
-    }
-    double lcx = 0.5 * (minX + maxX), lcy = 0.5 * (minY + maxY);
-    double hx = 0.5 * (maxX - minX) + 6.0, hy = 0.5 * (maxY - minY) + 6.0;
-    aprons.push_back(
-        {pp->x + lcx * yc - lcy * ys, pp->y + lcx * ys + lcy * yc, pp->z, hx, hy, yaw});
-  }
-}
-
-// ── procedural city (roads-first) ────────────────────────────────────────────
-// The newer path: generate a real street network (cvc::world::roads — a tensor-field grid that
-// bends to follow the terrain), lay out building lots along both sides of every street
-// (cvc::world::sites), and stamp REAL building shapes from the published Austin city bundle
-// (buildings.glb, the nav demos' scene) into those lots. Roads are drawn as an extruded 3D surface
-// and burned into the surface raster as asphalt. This reverses the old scatter->buildings->roads
-// order (buildings now follow the roads, not the other way round). If the Austin bundle is absent
-// the lab falls back to the box-massing buildings below, so it still runs without the assets.
-
-// The Austin building archetype library, loaded once. Discovery: $CVC_NAV_BUNDLE (a buildings.glb
-// file, or a directory / scene dir containing one), else a buildings.glb beside the working dir.
-const world::building_library &cityLibrary() {
-  static const world::building_library lib = [] {
-    std::vector<std::string> paths;
-    if (const char *env = std::getenv("CVC_NAV_BUNDLE"); env && *env) {
-      const std::string e(env);
-      paths = {e, e + "/buildings.glb", e + "/austin_south/buildings.glb"};
-    }
-    paths.push_back("/bundle/buildings.glb"); // emscripten --preload-file mount (wasm)
-    paths.push_back("buildings.glb");
-    for (const std::string &p : paths) {
-      world::building_library L = world::load_building_library(p);
-      if (!L.empty()) {
-        std::fprintf(stderr, "terrain_lab: %zu building archetypes from %s\n", L.size(), p.c_str());
-        return L;
-      }
-    }
-    std::fprintf(stderr,
-                 "terrain_lab: no Austin building bundle (set CVC_NAV_BUNDLE) — box massing\n");
-    return world::building_library{};
-  }();
-  return lib;
-}
-
-// Road-generation parameters scaled to the lab's world size (gHalf). Low branch_chance so the
-// streets run between junctions (real blocks a building can sit on) rather than a dense crosshatch.
-world::road_params cityRoadParams(std::uint64_t seed) {
-  world::road_params rp;
-  rp.half = gHalf;
-  rp.seed = seed;
-  // Moderate branching + roomy blocks = a readable street grid (not the dense crosshatch the
-  // default branch_chance makes, but enough roads to form a town). Short segment steps so each road
-  // ribbon hugs the terrain instead of a long flat quad poking through it.
-  rp.branch_chance = 0.14;
-  rp.terrain_weight = 0.35; // bend toward contours, but keep a readable grid
-  rp.block_size = std::max(110.0, gHalf * 0.20);
-  rp.local_block = std::max(48.0, gHalf * 0.08);
-  rp.segment_len = std::max(6.0, gHalf * 0.012);
-  rp.core_radius = gHalf * 0.6;
-  rp.arterial_width = 8.0; // thin carriageways
-  rp.local_width = 4.5;
-  return rp;
-}
-
-// Drop road segments that run below the water line (level-set at `waterLevel` on the heightfield)
-// so streets stay on dry land; endpoints left at the shore are fine. Rewrites the network in place.
-void pruneUnderwaterRoads(world::road_network &net, double waterLevel) {
-  std::vector<world::road_segment> keep;
-  keep.reserve(net.segments.size());
-  for (const world::road_segment &s : net.segments) {
-    if (s.a < 0 || s.b < 0 || s.a >= int(net.nodes.size()) || s.b >= int(net.nodes.size()))
-      continue;
-    const double mx = 0.5 * (net.nodes[s.a].x + net.nodes[s.b].x);
-    const double my = 0.5 * (net.nodes[s.a].y + net.nodes[s.b].y);
-    if (terrainH(mx, my) > waterLevel + 0.5)
-      keep.push_back(s);
-  }
-  net.segments.swap(keep);
-}
-
-// Stamp the Austin archetypes along the roads into `out` (concrete-grey, lit). Lots whose footprint
-// centre falls below the water line are dropped (same level-set boundary as the roads). Returns the
-// number of buildings placed (0 when the library is empty — caller then uses box massing).
-std::size_t buildCityBuildings(const world::road_network &net, std::uint64_t seed,
-                               double waterLevel, cvc::geometry &out) {
-  const world::building_library &lib = cityLibrary();
-  if (lib.empty())
-    return 0;
-  world::site_params sp;
-  sp.seed = seed;
-  sp.frontage = 10.0; // tight lots -> dense frontage (more buildings per street)
-  sp.spacing = 2.0;
-  sp.lot_depth = 18.0;
-  sp.setback = 4.0;
-  sp.junction_clear = 8.0;
-  std::vector<world::lot> lots = world::layout_lots(net, sp);
-  // Valid-placement level set: keep only lots on dry land, above the water surface.
-  lots.erase(
-      std::remove_if(lots.begin(), lots.end(),
-                     [&](const world::lot &L) { return terrainH(L.x, L.y) <= waterLevel + 1.0; }),
-      lots.end());
-  world::fit_params fp;
-  fp.seed = seed;
-  const std::vector<world::building_instance> inst =
-      world::fit_buildings(lib, lots, fp, [](double x, double y) { return terrainH(x, y); });
-  cvc::geometry b = world::stamp_buildings(lib, inst);
-  if (b.const_points().empty())
-    return 0;
-  if (b.const_normals().size() != b.const_points().size())
-    b.compute_normals();
-  // The Austin meshes carry no material colour; give them a uniform concrete tone so the per-vertex
-  // "props" shading path renders them.
-  b.colors().assign(b.const_points().size(), cvc::geometry::color_t{{0.64, 0.62, 0.59}});
-  out.merge(b);
-  return inst.size();
-}
-
-// ── streets + terrain texture: roads and plazas are BAKED INTO the terrain's
-// texture (not draped quads, which z-fight and shimmer). The mesh carries UVs; the
-// texture holds the final surface colour — per-cell material (+ dirt/grass variance
-// in material mode), a paved plaza hugging each building footprint, and an asphalt
-// street network connecting the plazas. ─────────────────────────────────────────
-struct Street {
-  double x0, y0, x1, y1;
-};
-
-// Connect each building plaza to its two nearest neighbours, skipping any span
-// whose midpoint terrain would sit underwater.
-std::vector<Street> computeStreets(const std::vector<Apron> &aprons, const world::heightfield &hf,
-                                   double waterLevel) {
-  std::vector<Street> out;
-  const int n = int(aprons.size());
-  const double maxLen = gHalf * 0.7;
-  std::set<std::pair<int, int>> edges;
-  for (int i = 0; i < n; ++i) {
-    int best[2] = {-1, -1};
-    double bd[2] = {1e30, 1e30};
-    for (int j = 0; j < n; ++j) {
-      if (j == i)
-        continue;
-      double dx = aprons[j].x - aprons[i].x, dy = aprons[j].y - aprons[i].y, d = dx * dx + dy * dy;
-      if (d < bd[0]) {
-        bd[1] = bd[0];
-        best[1] = best[0];
-        bd[0] = d;
-        best[0] = j;
-      } else if (d < bd[1]) {
-        bd[1] = d;
-        best[1] = j;
-      }
-    }
-    for (int k = 0; k < 2; ++k)
-      if (best[k] >= 0)
-        edges.insert({std::min(i, best[k]), std::max(i, best[k])});
-  }
-  for (const auto &e : edges) {
-    const Apron &A = aprons[e.first], &B = aprons[e.second];
-    double dx = B.x - A.x, dy = B.y - A.y, L = std::sqrt(dx * dx + dy * dy);
-    if (L < 1.0 || L > maxLen)
-      continue;
-    if (hf.sample(0.5 * (A.x + B.x), 0.5 * (A.y + B.y)) < waterLevel)
-      continue;
-    out.push_back({A.x, A.y, B.x, B.y});
-  }
-  return out;
-}
-
-// A cheap self-contained 2-D value-noise fBm (the cloud fBm is defined later).
-double gnoise2(double x, double y) {
-  auto hsh = [](int a, int b) {
-    unsigned u = unsigned(a * 374761393 + b * 668265263);
-    u = (u ^ (u >> 13)) * 1274126177u;
-    return ((u ^ (u >> 16)) & 0xffffffu) / double(0x1000000);
-  };
-  int xi = int(std::floor(x)), yi = int(std::floor(y));
-  double fx = x - xi, fy = y - yi;
-  fx = fx * fx * (3 - 2 * fx);
-  fy = fy * fy * (3 - 2 * fy);
-  double a = hsh(xi, yi), b = hsh(xi + 1, yi), c = hsh(xi, yi + 1), d = hsh(xi + 1, yi + 1);
-  return (a + (b - a) * fx) * (1 - fy) + (c + (d - c) * fx) * fy;
-}
-double gfbm2(double x, double y) {
-  double f = 0, amp = 0.5, tot = 0, fr = 1;
-  for (int i = 0; i < 4; ++i) {
-    f += amp * gnoise2(x * fr, y * fr);
-    tot += amp;
-    amp *= 0.5;
-    fr *= 2.03;
-  }
-  return f / tot;
-}
-
-// Bake the terrain surface into an RGB texture (TEX x TEX). Row 0 == min_y (v=0),
-// matching the mesh UVs. In material mode grass is broken up with dirt / dry-grass
-// patches and the roads + plazas are painted on top; QA colour modes stay raw.
-constexpr int TEX = 2048; // high-res terrain surface texture (material + roads + shoreline)
-std::vector<unsigned char> paintTerrain(int mode, const world::raster_out &ro,
-                                        const world::grid_spec &g,
-                                        const world::surface_registry &reg,
-                                        const std::vector<Apron> &aprons,
-                                        const std::vector<Street> &streets) {
-  const int T = TEX;
-  std::vector<unsigned char> img(std::size_t(T) * T * 3, 0);
-  float hmin = 1e30f, hmax = -1e30f;
-  for (float h : ro.height) {
-    hmin = std::min(hmin, h);
-    hmax = std::max(hmax, h);
-  }
-  const double spanx = g.max_x - g.min_x, spany = g.max_y - g.min_y;
-  const cvc::geometry::color_t dirt = {0.42, 0.34, 0.23}, dryGrass = {0.45, 0.47, 0.24};
-  auto put = [&](int tx, int ty, const cvc::geometry::color_t &c) {
-    std::size_t o = (std::size_t(ty) * T + tx) * 3;
-    img[o] = (unsigned char)std::min(255.0, std::max(0.0, c[0] * 255.0));
-    img[o + 1] = (unsigned char)std::min(255.0, std::max(0.0, c[1] * 255.0));
-    img[o + 2] = (unsigned char)std::min(255.0, std::max(0.0, c[2] * 255.0));
-  };
-  for (int ty = 0; ty < T; ++ty) {
-    double v = double(ty) / (T - 1), wy = g.min_y + v * spany;
-    int r = std::min(g.rows - 1, std::max(0, int(std::lround(v * (g.rows - 1)))));
-    for (int tx = 0; tx < T; ++tx) {
-      double u = double(tx) / (T - 1), wx = g.min_x + u * spanx;
-      int c = std::min(g.cols - 1, std::max(0, int(std::lround(u * (g.cols - 1)))));
-      std::size_t i = std::size_t(r) * g.cols + c;
-      cvc::geometry::color_t col = cellColor(ro, reg, i, mode, hmin, hmax);
-      if (mode == 0) {
-        std::uint16_t k = ro.klass[i];
-        if (k == 6 || k == 7 || k == 8) { // grass / tall_grass / bush_cover
-          double n1 = gfbm2(wx * 0.020, wy * 0.020), n2 = gfbm2(wx * 0.006 + 11, wy * 0.006 + 7);
-          double dfac = std::min(1.0, std::max(0.0, (n1 - 0.52) / 0.30));
-          double gfac = std::min(1.0, std::max(0.0, (n2 - 0.55) / 0.30));
-          for (int q = 0; q < 3; ++q)
-            col[q] = col[q] * (1 - dfac) + dirt[q] * dfac;
-          for (int q = 0; q < 3; ++q)
-            col[q] = col[q] * (1 - 0.5 * gfac) + dryGrass[q] * 0.5 * gfac;
-        }
-      }
-      put(tx, ty, col);
-    }
-  }
-  if (mode != 0)
-    return img; // QA modes: raw raster only
-  const cvc::geometry::color_t road = {0.20, 0.20, 0.23}, curb = {0.31, 0.31, 0.34};
-  const double roadW = 8.0;
-  double sx = (T - 1) / spanx, sy = (T - 1) / spany;
-  auto W2Tx = [&](double x) { return (x - g.min_x) * sx; };
-  auto W2Ty = [&](double y) { return (y - g.min_y) * sy; };
-  double rTexX = 0.5 * roadW * sx;
-  for (const Street &s : streets) {
-    double ax = W2Tx(s.x0), ay = W2Ty(s.y0), bx = W2Tx(s.x1), by = W2Ty(s.y1);
-    double dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy;
-    int x0 = std::max(0, int(std::floor(std::min(ax, bx) - rTexX - 2)));
-    int x1 = std::min(T - 1, int(std::ceil(std::max(ax, bx) + rTexX + 2)));
-    int y0 = std::max(0, int(std::floor(std::min(ay, by) - rTexX - 2)));
-    int y1 = std::min(T - 1, int(std::ceil(std::max(ay, by) + rTexX + 2)));
-    for (int ty = y0; ty <= y1; ++ty)
-      for (int tx = x0; tx <= x1; ++tx) {
-        double t = L2 > 1e-9 ? ((tx - ax) * dx + (ty - ay) * dy) / L2 : 0.0;
-        t = std::min(1.0, std::max(0.0, t));
-        double px = ax + t * dx, py = ay + t * dy;
-        double dd = std::sqrt((tx - px) * (tx - px) + (ty - py) * (ty - py));
-        if (dd <= rTexX)
-          put(tx, ty, road);
-        else if (dd <= rTexX + 1.5)
-          put(tx, ty, curb);
-      }
-  }
-  const cvc::geometry::color_t pave = {0.44, 0.44, 0.46};
-  for (const Apron &a : aprons) {
-    double cx = W2Tx(a.x), cy = W2Ty(a.y);
-    double hxT = a.hx * sx, hyT = a.hy * sy, R = std::sqrt(hxT * hxT + hyT * hyT);
-    double c = std::cos(a.yaw), s = std::sin(a.yaw);
-    int x0 = std::max(0, int(std::floor(cx - R))), x1 = std::min(T - 1, int(std::ceil(cx + R)));
-    int y0 = std::max(0, int(std::floor(cy - R))), y1 = std::min(T - 1, int(std::ceil(cy + R)));
-    for (int ty = y0; ty <= y1; ++ty)
-      for (int tx = x0; tx <= x1; ++tx) {
-        double dx = tx - cx, dy = ty - cy;
-        double lx = dx * c + dy * s, ly = -dx * s + dy * c;
-        if (std::fabs(lx) <= hxT && std::fabs(ly) <= hyT)
-          put(tx, ty, pave);
-      }
-  }
-  return img;
-}
-
-// ── the water: a volume of depth under a gently travelling wave, filling every
-// cell that sits below the sea level (streams, ponds, coast) ──────────────────
-int gSeaN = 160, gSeaNz = 22;
-double gSeaFloor = -30.0, gSeaTop = 5.0;
-
-double seaSurface(double x, double y, double t) {
-  struct Wave {
-    double hx, hy, len, omega, amp;
-  };
-  const double L = std::max(30.0, gHalf * 0.25);
-  const Wave W[] = {{0.86, 0.51, L, 0.42, 1.00},
-                    {-0.30, 0.95, L * 0.64, 0.73, 0.5},
-                    {0.42, 0.91, L * 1.2, 0.31, 0.55}};
-  double h = 0.0, peak = 0.0;
-  for (const Wave &w : W) {
-    double k = 2.0 * M_PI / w.len;
-    double s = 0.5 + 0.5 * std::sin(k * (w.hx * x + w.hy * y) - w.omega * t);
-    h += w.amp * std::pow(s, 2.2);
-    peak = std::max(peak, w.amp);
-  }
-  double crest = std::min(1.0, h / (peak > 1e-9 ? peak : 1.0));
-  return gSeaLevel + 0.9 * (crest - 0.7);
-}
-
-std::vector<float> seaField(double t) {
-  std::vector<float> f(std::size_t(gSeaN) * gSeaN * gSeaNz, 0.0f);
-  for (int k = 0; k < gSeaNz; ++k) {
-    double z = gSeaFloor + (gSeaTop - gSeaFloor) * k / (gSeaNz - 1);
-    for (int j = 0; j < gSeaN; ++j) {
-      double y = -gHalf + 2.0 * gHalf * j / (gSeaN - 1);
-      for (int i = 0; i < gSeaN; ++i) {
-        double x = -gHalf + 2.0 * gHalf * i / (gSeaN - 1);
-        double surf = seaSurface(x, y, t);
-        double below = surf - z, above = z - terrainH(x, y);
-        double depth = (below > 0.0 && above > 0.0) ? std::min(1.0, below / 5.0) : 0.0;
-        f[std::size_t(k) * gSeaN * gSeaN + j * gSeaN + i] = float(depth);
-      }
-    }
-  }
-  return f;
-}
-void seaTransfer(std::vector<double> &color, std::vector<double> &opacity, double t) {
-  double k = 0.0110 + 0.0016 * std::sin(t * 0.9);
-  color = {0.00, 0.40, 0.74, 0.72, 0.25, 0.13, 0.52, 0.64,
-           0.60, 0.05, 0.24, 0.44, 1.00, 0.02, 0.10, 0.24};
-  opacity = {0.00, 0.0, 0.14, k * 0.5, 0.55, k, 1.00, k * 2.2};
-}
-cvc::volume seaVolume(cvc::app &app, const std::vector<float> &field) {
-  return cvc::volume(app, reinterpret_cast<const unsigned char *>(field.data()),
-                     cvc::dimension(gSeaN, gSeaN, gSeaNz), cvc::Float,
-                     cvc::bounding_box(-gHalf, -gHalf, gSeaFloor, gHalf, gHalf, gSeaTop));
+// ── the water: generated_world's depth volume under a gently travelling wave ─
+int gSeaN = 160;
+constexpr int SEA_NZ = 22;
+cvc::volume seaVolume(cvc::app &app, const world::generated_world &w, double t) {
+  const std::vector<float> field = world::water_field(w, t, gSeaN, SEA_NZ);
+  return cvc::volume(
+      app, reinterpret_cast<const unsigned char *>(field.data()),
+      cvc::dimension(gSeaN, gSeaN, SEA_NZ), cvc::Float,
+      cvc::bounding_box(-gHalf, -gHalf, world::water_floor(w), gHalf, gHalf, world::water_top(w)));
 }
 
 // ── the sky: a drifting cloud slab (fixed 60^3 grid, world-scaled extent) ─────
@@ -1256,7 +435,7 @@ int main(int argc, char **argv) {
   bool offscreen = false, noShadows = false, verbose = false, no_ui = false, show_ui = false;
   int frames = 0, width = 1280, height = 800;
   double fps = 30.0, half = 600.0;
-  unsigned long seed = 7;
+  unsigned long seed = 5;
   std::string png, captureStr = "none", outDir = "frames", preset = "standard";
   po::options_description desc("terrain_lab — a pure-C++ cvcGL viewer for cvc::world\nOptions");
   desc.add_options()("help,h", "show this help and exit")                                     //
@@ -1274,7 +453,7 @@ int main(int argc, char **argv) {
       ("fps", po::value<double>(&fps)->default_value(30.0), "capture fps (synthetic clock)")  //
       ("out", po::value<std::string>(&outDir)->default_value("frames"), "capture output dir") //
       ("half", po::value<double>(&half)->default_value(600.0), "world half-extent (metres)")  //
-      ("seed", po::value<unsigned long>(&seed)->default_value(7), "generation seed")          //
+      ("seed", po::value<unsigned long>(&seed)->default_value(5), "generation seed")          //
       ("preset", po::value<std::string>(&preset)->default_value("standard"),
        "standard | forest | urban | sparse | island");
   po::variables_map vm;
@@ -1310,60 +489,53 @@ int main(int argc, char **argv) {
   gSeaN = std::max(80, std::min(160, int(std::lround(2.0 * gHalf / 8.0))));
   gSkyHalf = gHalf * 1.06;
 
-  GenParams gp;
+  world::generated_world_params gp;
   gp.seed = seed;
   gp.half_m = half; // the --half CLI value seeds the live world-size knob
-  for (int i = 0; i < 5; ++i)
-    if (preset == kPresetNames[i])
-      gp.preset = i;
+  gp.preset = world::world_preset_from_name(preset);
 
   cvc::app app;
   app.properties("system.log_verbosity", verbose ? "6" : "2");
   SceneGraph sg(app, "terrain_lab");
-  const world::surface_registry *reg =
-      &world::surface_registry::variant(kOntologyNames[gp.ontology]);
 
   int colorMode = 0; // material
-  PropLib lib;
+  world::generated_world W;
 
-  // Build (or rebuild) the whole world into the scene. Called once up front and on
-  // every ImGui "Regenerate". Keeps the same node names so nodes are reused.
-  world::world_model wm = world::world_model::generate(toWorldParams(gp));
-  world::grid_spec grid;
-  world::raster_out ro;
-  auto rasterize = [&]() {
-    grid.rows = grid.cols = gRasterN;
-    grid.min_x = grid.min_y = -gHalf;
-    grid.max_x = grid.max_y = gHalf;
-    world::raster(wm, grid, ro);
-  };
-
-  std::vector<Apron> gAprons; // current buildings' plazas (for the baked texture)
-  std::vector<Street> gStreets;
   // Paint the terrain texture (material + dirt + roads + plazas) for the current
   // colour mode and hand it to the terrain node — on rebuild and on colour switch.
   auto applyTexture = [&]() {
     if (!sg.hasGraphics("terrain"))
       return;
-    std::vector<unsigned char> rgb = paintTerrain(colorMode, ro, grid, *reg, gAprons, gStreets);
+    std::vector<unsigned char> rgb = world::paint_surface(W, world::surface_color(colorMode), TEX);
     cvc::image img(TEX, TEX, cvc::image::pixel_format::RGB, cvc::image::data_type::u8, rgb.data());
     std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("terrain"))->setTexture(img, false);
   };
 
+  // A merged mesh into the scene under `name`: replaced in place on a rebuild, created (and styled
+  // by `style`) the first time, removed when the new world has none.
+  auto putMesh = [&](const char *name, const cvc::geometry &g,
+                     const std::function<void(GeometryNode &)> &style) {
+    if (g.const_points().empty()) {
+      if (sg.hasGraphics(name))
+        sg.removeGraphics(name);
+      return;
+    }
+    if (sg.hasGraphics(name)) {
+      std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics(name))->setGeometry(g);
+      return;
+    }
+    if (auto n = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics(name, g)))
+      style(*n);
+  };
+
+  // Build (or rebuild) the whole world into the scene. Called once up front and on every ImGui
+  // "Regenerate". Keeps the same node names so nodes are reused.
   auto rebuild = [&](bool reframe) {
-    // The world size is a live knob. Derive gHalf and every size-dependent extent from it, and
-    // scale the render tessellation so a big terrain stays detailed (cell ~ fixed metres, capped) —
-    // this is the mesh the LOD path is stress-tested on. Must precede toWorldParams (which reads
-    // gHalf).
+    // The world size is a live knob: every size-dependent extent follows it, and the terrain
+    // mesh keeps a fixed cell size (capped), so a big terrain stays detailed — the mesh the LOD
+    // path is stress-tested on.
     gHalf = std::max(50.0, gp.half_m);
-    gSeaN = std::max(80, std::min(320, int(std::lround(2.0 * gHalf / 8.0))));
     gSkyHalf = gHalf * 1.06;
-    const double kCellM = 5.0; // target terrain cell size in metres
-    gTerrainN = std::max(129, std::min(2049, int(std::lround(2.0 * gHalf / kCellM)) + 1));
-    gRasterN = std::min(gTerrainN, 385); // raster stays moderate regardless of mesh size
-    world::world_params wp = toWorldParams(gp);
-    reg = &world::surface_registry::variant(wp.ontology);
-    gSeaLevel = gp.water_level_m;
     auto _tp = std::chrono::steady_clock::now();
     const bool _prof = std::getenv("CVC_TL_PROF") != nullptr;
     auto lap = [&](const char *name) {
@@ -1373,55 +545,14 @@ int main(int argc, char **argv) {
                      std::chrono::duration<double, std::milli>(n - _tp).count());
       _tp = n;
     };
-    wm = world::world_model::generate(wp);
-    gHF = &wm.hf();
-    lap("generate");
-    rasterize();
-    lap("rasterize");
-    // sea vertical extent from the actual relief
-    float hmin = 1e30f, hmax = -1e30f;
-    for (float h : ro.height) {
-      hmin = std::min(hmin, h);
-      hmax = std::max(hmax, h);
-    }
-    gSeaFloor = std::min(double(hmin) - 2.0, gSeaLevel - 6.0);
-    gSeaTop = gSeaLevel + 4.0;
-    gSkyBase = double(hmax) + gHalf * 0.35 + 60.0;
+    W = world::generate_world(gp, &cityLibrary());
+    lap("generate-world");
+    gSeaN = world::water_resolution(W);
+    gSkyBase = W.height_max + gHalf * 0.35 + 60.0;
     gSkyTop = gSkyBase + gHalf * 0.30 + 80.0;
 
-    lib.build(wp);
-    cvc::geometry terrain = buildTerrainMesh(app, gTerrainN, gHalf);
-    lap("terrain-mesh");
-    cvc::geometry solid(app), foliage(app), needle(app);
-    gAprons.clear();
-    buildProps(app, wm, *reg, lib, solid, foliage,
-               needle); // trees (native pine needles -> needle) + rocks
-    lap("props");
-
-    // Buildings + streets. With the Austin bundle present: roads FIRST (a terrain-following street
-    // network), then real building shapes stamped along the road-side lots, then asphalt burned
-    // into the surface raster + an extruded 3D road surface. Without the bundle: the original
-    // behaviour — scatter-placed box buildings and texture-baked streets connecting their plazas.
-    const auto road_h = [](double x, double y) { return terrainH(x, y); };
-    cvc::geometry roadGeom(app);
-    if (!cityLibrary().empty()) {
-      world::road_network net = world::generate_roads(cityRoadParams(gp.seed), road_h);
-      pruneUnderwaterRoads(net, gSeaLevel); // level-set boundary: streets stay on dry land
-      lap("roads-gen");
-      buildCityBuildings(net, gp.seed, gSeaLevel, solid);
-      lap("buildings");
-      world::rasterize_roads(net, grid, *reg, ro, 1.0);
-      lap("asphalt-raster");
-      world::road_mesh_params rmp;
-      rmp.lift = 0.35; // sit clearly above the terrain mesh so the ribbons don't z-fight it
-      roadGeom = world::extrude_roads(net, rmp, road_h);
-      lap("road-mesh");
-      gStreets.clear(); // the extruded 3D road surface replaces the texture-baked streets
-    } else {
-      buildBuildings(app, wm, *reg, gp.seed, solid, gAprons);
-      gStreets = computeStreets(gAprons, wm.hf(), gSeaLevel);
-    }
-
+    // A plain copy of the terrain's mesh (its arrays shared copy-on-write).
+    const cvc::geometry terrain(*W.terrain);
     if (sg.hasGraphics("terrain"))
       std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("terrain"))->setGeometry(terrain);
     else {
@@ -1434,63 +565,46 @@ int main(int argc, char **argv) {
           *t); // fragment bump map: fine surface relief in the lighting (from lsystem_forest)
     }
     applyTexture(); // material + dirt + roads + plazas, per the colour mode
+    lap("texture");
 
-    if (sg.hasGraphics("props"))
-      std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("props"))->setGeometry(solid);
-    else {
-      auto p = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("props", solid));
-      p->setUseSingleColor(false);
-      p->setAmbient(0.45);
-      p->setDiffuse(0.85);
-    }
-
+    putMesh("props", W.props, [](GeometryNode &p) {
+      p.setUseSingleColor(false);
+      p.setAmbient(0.45);
+      p.setDiffuse(0.85);
+    });
+    putMesh("buildings", W.buildings, [](GeometryNode &b) {
+      b.setUseSingleColor(false);
+      b.setAmbient(0.45);
+      b.setDiffuse(0.85);
+    });
     // The extruded 3D road surface (ribbons + junction pads), draped on the terrain.
-    if (roadGeom.points().size()) {
-      if (sg.hasGraphics("roads"))
-        std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("roads"))->setGeometry(roadGeom);
-      else {
-        auto rd = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("roads", roadGeom));
-        rd->setUseSingleColor(false);
-        rd->setAmbient(0.5);
-        rd->setDiffuse(0.7);
-      }
-    } else if (sg.hasGraphics("roads"))
-      sg.removeGraphics("roads");
-    if (foliage.points().size()) {
-      if (sg.hasGraphics("foliage"))
-        std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("foliage"))->setGeometry(foliage);
-      else {
-        auto fol = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("foliage", foliage));
-        fol->setUseSingleColor(false);
-        fol->setAmbient(0.6);
-        fol->setDiffuse(0.7);
-      }
-    } else if (sg.hasGraphics("foliage"))
-      sg.removeGraphics("foliage");
-
+    putMesh("roads", W.roads, [](GeometryNode &rd) {
+      rd.setUseSingleColor(false);
+      rd.setAmbient(0.5);
+      rd.setDiffuse(0.7);
+    });
+    putMesh("foliage", W.foliage, [](GeometryNode &fol) {
+      fol.setUseSingleColor(false);
+      fol.setAmbient(0.6);
+      fol.setDiffuse(0.7);
+    });
     // Pine needles: a LINES mesh (the native_pine conifer foliage), rendered as dark-green lines.
-    if (needle.points().size()) {
-      if (sg.hasGraphics("needles"))
-        std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("needles"))->setGeometry(needle);
-      else {
-        auto nd = std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics("needles", needle));
-        nd->setRenderMode(cvc::gl::GeometryRenderMode::LINES);
-        nd->setUseSingleColor(true);
-        nd->setColor(0.12, 0.34, 0.14);
-        nd->setAmbient(0.55);
-        nd->setDiffuse(0.75);
-      }
-    } else if (sg.hasGraphics("needles"))
-      sg.removeGraphics("needles");
+    putMesh("needles", W.needles, [](GeometryNode &nd) {
+      nd.setRenderMode(cvc::gl::GeometryRenderMode::LINES);
+      nd.setUseSingleColor(true);
+      nd.setColor(0.12, 0.34, 0.14);
+      nd.setAmbient(0.55);
+      nd.setDiffuse(0.75);
+    });
 
     // water volume
     if (sg.hasGraphics("water"))
       std::dynamic_pointer_cast<VolumeNode>(sg.getGraphics("water"))
-          ->setVolume(seaVolume(app, seaField(0.0)));
+          ->setVolume(seaVolume(app, W, 0.0));
     else {
-      auto w = sg.addGraphics("water", seaVolume(app, seaField(0.0)));
+      auto w = sg.addGraphics("water", seaVolume(app, W, 0.0));
       std::vector<double> col, op;
-      seaTransfer(col, op, 0.0);
+      world::water_transfer(0.0, col, op);
       w->setTransferFunction(col, op);
       w->setShading(true);
       w->setAmbient(0.18);
@@ -1498,19 +612,19 @@ int main(int argc, char **argv) {
       w->setSpecular(0.85);
       w->setSpecularPower(70.0);
     }
-    std::printf("terrain_lab: seed=%llu preset=%s trees=%d rocks=%d buildings=%d props=%zu "
+    lap("scene");
+    std::printf("terrain_lab: seed=%llu preset=%s trees=%d rocks=%d buildings=%zu props=%zu "
                 "occupied=%.2f%%\n",
                 (unsigned long long)gp.seed, kPresetNames[gp.preset], gp.trees, gp.rocks,
-                gp.buildings, wm.props().size(),
-                100.0 * double(ro.occupied_count()) / std::max<std::size_t>(1, ro.klass.size()));
+                W.building_count, W.model->props().size(),
+                100.0 * double(W.raster.occupied_count()) /
+                    std::max<std::size_t>(1, W.raster.klass.size()));
     (void)reframe;
   };
 
   // Recolour the terrain (colour-mode switch) — repaint the texture, no regeneration.
   auto recolor = [&]() { applyTexture(); };
 
-  gHF = &wm.hf();
-  gSeaLevel = gp.water_level_m;
   rebuild(true);
 
   // Stage lighting (a rig aimed at the world, not a sky).
@@ -1569,7 +683,7 @@ int main(int argc, char **argv) {
       gp.seed = std::uint64_t(std::max(0, seedI));
     }
     if (ImGui::Combo("preset", &gp.preset, kPresetNames, IM_ARRAYSIZE(kPresetNames))) {
-      presetFill(gp); // quick-set the sliders for this preset
+      world::apply_world_preset(gp); // quick-set the sliders for this preset
       wantRegen = true;
     }
     ImGui::Combo("ontology", &gp.ontology, kOntologyNames, IM_ARRAYSIZE(kOntologyNames));
@@ -1581,8 +695,8 @@ int main(int argc, char **argv) {
         gp.half_m = hm;
       const cvc::world_units::measurement span =
           gUnits.format(2.0 * gp.half_m, cvc::world_units::dimension::length);
-      ImGui::Text("   span %.2f %s  |  terrain %dx%d", span.value, span.unit.c_str(), gTerrainN,
-                  gTerrainN);
+      const int tn = W.terrain ? W.terrain->rows() : 0;
+      ImGui::Text("   span %.2f %s  |  terrain %dx%d", span.value, span.unit.c_str(), tn, tn);
     }
     ImGui::SliderInt("trees", &gp.trees, 0, 3000);
     ImGui::SliderInt("rocks", &gp.rocks, 0, 600);
@@ -1592,7 +706,7 @@ int main(int argc, char **argv) {
       float amp = float(gp.amp_m), sea = float(gp.water_level_m);
       if (ImGui::SliderFloat("relief amp m", &amp, 2.0f, 400.0f))
         gp.amp_m = amp;
-      if (ImGui::SliderFloat("water level m", &sea, 0.0f, 200.0f))
+      if (ImGui::SliderFloat("water level m", &sea, -100.0f, 100.0f)) // 0 m: sea level
         gp.water_level_m = sea;
     }
     if (ImGui::Button("Regenerate"))
@@ -1605,8 +719,9 @@ int main(int argc, char **argv) {
     ImGui::Separator();
     if (ImGui::Combo("colour by", &colorMode, kColorModeNames, IM_ARRAYSIZE(kColorModeNames)))
       recolor();
-    ImGui::Text("%zu props  |  %.1f%% occupied", wm.props().size(),
-                100.0 * double(ro.occupied_count()) / std::max<std::size_t>(1, ro.klass.size()));
+    ImGui::Text("%zu props  |  %.1f%% occupied", W.model->props().size(),
+                100.0 * double(W.raster.occupied_count()) /
+                    std::max<std::size_t>(1, W.raster.klass.size()));
     ImGui::End();
 
     cvc::gl::ui::ScenePanel(sg, &uiScene);
@@ -1743,9 +858,9 @@ int main(int argc, char **argv) {
     const bool cloudDue = capturing || frame % CLOUD_STRIDE == 1;
     if (seaDue && sg.hasGraphics("water")) {
       auto w = std::dynamic_pointer_cast<VolumeNode>(sg.getGraphics("water"));
-      w->updateScalars(seaField(wt));
+      w->updateScalars(world::water_field(W, wt, gSeaN, SEA_NZ));
       std::vector<double> col, op;
-      seaTransfer(col, op, wt);
+      world::water_transfer(wt, col, op);
       w->setTransferFunction(col, op);
     }
     if (cloudDue) {

@@ -42,6 +42,7 @@
 
 #include <cvc/world/world_geometry.h>
 #include <functional>
+#include <memory>
 #include <string>
 
 namespace cvc {
@@ -77,6 +78,16 @@ struct city_bundle {
 // cover of the wrong size; missing or unreadable buildings leave buildings_loaded
 // false and say why in buildings_error (the terrain alone is still a world).
 city_bundle load_city_bundle(const std::string &dir, const city_bundle_options &options = {});
+
+// The same from files held somewhere other than a directory (an archive unpacked in memory, a
+// download): `read(name)` gives the bytes of the bundle's file `name` ("terrain.json",
+// "buildings.glb", "buildings_flat.glb"), or null when it has none, and `label` names the bundle
+// in errors. Nothing is read from disk, so the result has no `dir` or `satellite` path, and
+// options.land_cover (which reads a directory) is not called. Throws as the directory form does.
+using city_bundle_reader =
+    std::function<std::shared_ptr<const std::string>(const std::string &name)>;
+city_bundle load_city_bundle(const city_bundle_reader &read, const std::string &label,
+                             const city_bundle_options &options = {});
 
 // terrain.json's grid size and extent alone: what a reader of the bundle's other
 // rasters (land-cover masks, imagery) lays them over. The height grid may be

@@ -27,7 +27,7 @@
 
 using namespace std;
 
-extern int verbose;
+#include "contour_verbose.h"
 
 //------------------------------------------------------------------------
 //

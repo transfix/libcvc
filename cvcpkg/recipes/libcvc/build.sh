@@ -45,7 +45,12 @@ CMAKE_ARGS=(
   # CPU build); the sibling `libcvc-cuda` recipe sets CVC_ENABLE_CUDA=ON in its
   # build.matrix env so this same script produces the GPU variant.
   -DCVC_ENABLE_CUDA="${CVC_ENABLE_CUDA:-OFF}"
-  -DCVC_ENABLE_GRPC=OFF
+  # The conference transports: cvc::state over gRPC and WebSocket, which arigl and the arisrv
+  # relay need to join a room. The recipe's runtime deps already carry grpc, protobuf, abseil and
+  # re2 for every platform this builds; with these OFF the SDK shipped without them, so an arigl or
+  # arisrv built against it compiled the conference out.
+  -DCVC_ENABLE_GRPC=ON
+  -DCVC_ENABLE_WS=ON
   # libcvc is a pure C++ SDK: the Python bindings are a SEPARATE `pycvc`
   # recipe that builds bindings/pycvc against the installed libcvc, so a plain
   # libcvc bundle pulls in no Python/numpy/swig/VTK dependency. (Default is
@@ -70,10 +75,12 @@ cmake --build "$CVC_BUILD_DIR" -j "$CVC_JOBS"
 # related reaches CVC_INSTALL_DIR or the published bundle. Running before the
 # install step keeps a failed suite from staging a bundle at all.
 # CVC_CTEST_EXCLUDE: a ctest -E regex of tests to leave out (CI's long-running suites).
+# CVC_CTEST_REPEAT: a ctest --repeat mode (CI's until-pass:3, as its package jobs run).
 case "$(printf %s "${CVC_BUILD_TESTS:-OFF}" | tr "[:upper:]" "[:lower:]")" in
   on|1|true|yes)
     ctest --test-dir "$CVC_BUILD_DIR" --output-on-failure -j "$CVC_JOBS" \
-      ${CVC_CTEST_EXCLUDE:+-E "$CVC_CTEST_EXCLUDE"} ;;
+      ${CVC_CTEST_EXCLUDE:+-E "$CVC_CTEST_EXCLUDE"} \
+      ${CVC_CTEST_REPEAT:+--repeat "$CVC_CTEST_REPEAT"} ;;
 esac
 
 cmake --install "$CVC_BUILD_DIR"

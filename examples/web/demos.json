@@ -3,6 +3,7 @@
       "Metadata for the wasm demo gallery. build-pages.py discovers demos by scanning the built bin/ for <demo>.wasm; anything listed here gets rich text, anything NOT listed still appears with name-based defaults. 'order' controls gallery ordering (listed first, discovered extras appended). WASM_MB is computed from the built file, not stored here. An entry with 'app' and 'doc' is a document demo: arigl (the gallery's Ariadne app) opened on examples/ariadne/documents/<doc>.ari, with no binary of its own; arigl's 'boot' is its command line, environment and pre-main files. An arigl_term document (arigl --terminal in xterm.js) names its path under examples/ariadne instead (documents/terminal_scene). 'card': false keeps a page off the index.",
   "order": [
     "terrain_lab",
+    "terrain_lab_ari",
     "lsystem_forest",
     "lsystem_forest_ari",
     "lsystem_coast",
@@ -49,10 +50,18 @@
           "The lsystem_forest demo reborn in the Ariadne UI DSL: the heightfield island, its sand/grass/rock height bands, the sky-gradient background, the StageLighting rig and shadows are all declared in one .ari document on the reusable scene capabilities — no demo-specific C++. The procedural pieces that aren't declaratively expressible are custom scene-node types the host registers: the L-system trees (both the original conifer pine and a compact branchy species), the travelling-wave sea volume, and the drifting L-system + fBm cloud sky volume. The pines sway in the wind and the cloud casts a soft shadow on the ground. 100% procedural — nothing is downloaded.",
       "thumb": "img/lsystem_forest_ari.jpg"
     },
+    "terrain_lab_ari": {
+      "app": "arigl",
+      "doc": "terrain_lab",
+      "desc": "the terrain lab's generated world as an Ariadne document, on demo3's render path",
+      "blurb":
+          "The terrain lab rebuilt in the Ariadne UI DSL: one generated_world scene node (cvc::world's relief, L-system props, roads-first city and water, as a handful of merged meshes) and its Terrain Lab panel, which regenerates the world live. The scene block carries the fast render discipline of the CVC-DBG Austin convoy demo: a ground that receives shadows but casts none, an opaque ground texture, a sun shadow map that follows the camera, a key + fill rig with no extra shadow casters, and the soft afternoon look. The city grows from district cores: a graded street network (arterials, collectors, local streets that thin out away from the cores), lots backing onto each other along it, filled from the cores out, with the Austin building archetypes when their bundle is mounted and procedural buildings (town houses with gable roofs, blocks and the odd tower) without it.",
+      "thumb": "img/terrain_lab_ari.jpg"
+    },
     "terrain_lab": {
       "desc": "a procedural city on generated terrain — real buildings along tensor-field streets",
       "blurb":
-          "A procedural city built from the cvc::world generator: a tensor-field street network traced over terrain-following ground, with real building shapes placed along the road-side lots and drawn as lit 3D geometry, roads extruded as asphalt ribbons with rounded junction pads, conical pine and broadleaf trees from the L-system forest, and volumetric water flooding the valleys — with road and building placement kept on dry land above the water line. Tune it live — world size (metres to kilometres, for large-terrain / LOD stress), seed, relief and water level — and watch the city rebuild, measured in real metres. The building shapes stream from the published Austin city bundle; without it, the demo falls back to procedural box massing.",
+          "A procedural city built from the cvc::world generator: a tensor-field street network traced over terrain-following ground, with real building shapes placed along the road-side lots and drawn as lit 3D geometry, roads extruded as asphalt ribbons with rounded junction pads, conical pine and broadleaf trees from the L-system forest, and volumetric water flooding the valleys — with road and building placement kept on dry land above the water line. Tune it live — world size (metres to kilometres, for large-terrain / LOD stress), seed, relief and water level — and watch the city rebuild, measured in real metres. The building shapes stream from the published Austin city bundle; without it, the demo builds procedural buildings along the same streets.",
       "thumb": "img/terrain_lab.jpg"
     },
     "lsystem_forest": {

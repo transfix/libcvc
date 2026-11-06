@@ -50,8 +50,9 @@ jobs:
       # grl-snam-weights lands here; --preload-file bakes the trained CoefMLP into
       # nav_city_swarm.data so the browser swarm drives with the published policy.
       CVC_WASM_NAV_WEIGHTS: /opt/cvc-wasm/deps-wasm-mt/share/grl-snam-weights/coef_sdf.cvcnav
-      # The .ari demos (lsystem_forest_ari, volren_bunny_ari, volslice_bunny_ari, fem_gallery_ari) are
-      # arigl on their documents: arigl is the binary to expect, their own dirs only redirect to it.
+      # The .ari demos (terrain_lab_ari, lsystem_forest_ari, volren_bunny_ari, volslice_bunny_ari,
+      # fem_gallery_ari) are arigl on their documents: arigl is the binary to expect, their own dirs
+      # only redirect to it.
       DEMOS: 'terrain_lab lsystem_forest arigl lsystem_coast volren_bunny volslice_bunny ari arigl_term nav_city_swarm nav_city_drive nav_fog_ghost bunny_shadow'
     steps:
       - name: Checkout master
@@ -91,6 +92,20 @@ jobs:
               --platform wasm --arch wasm32 --config release --link static \
               --no-fallback-to-source
           done
+          # vtk: the catalog's (9.5.0+cvc.4 or later), linked against the libtiff, libxml2, liblzma
+          # and freetype installed above. The VTK this prefix held before was installed by hand and
+          # bundles its own copies, which VTK renames only in part: once a demo also linked the
+          # catalog's libtiff (through ImageMagick), wasm-ld stopped on duplicate _TIFF* symbols
+          # between libvtktiff-9.5.a and libtiff.a, and every deploy failed from the media stack
+          # (60d9a52a) on. Not skippable: the gallery is VTK through and through.
+          echo "=== vtk ==="
+          cvcpkg install vtk --prefix "$CVC_WASM_DEPS" \
+            --platform wasm --arch wasm32 --config release --link static \
+            --no-fallback-to-source
+          # The old VTK's bundled archives stay behind in the prefix (an install does not remove
+          # another version's files). The new VTK's targets do not name them, but a link that globs
+          # the prefix would, so they go.
+          rm -f "$CVC_WASM_DEPS"/lib/libvtk{tiff,libxml2,lzma,freetype}-9.5.a
           # ftxui: the Ariadne terminal backend. build-wasm-demo.sh builds the `ari` page (an
           # .ari document in an xterm.js terminal) into the gallery only when it is here, and the
           # live check below expects ari, so it may not be skipped either.

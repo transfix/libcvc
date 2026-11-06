@@ -21,29 +21,30 @@ on:
 env:
   COVERAGE_MIN: '80'
 
-# Concurrency: split into two pools.
-#  * Cheap jobs (format-check, test) cancel in-progress on new pushes for
-#    fast feedback.
-#  * Heavy package jobs use job-level concurrency that does NOT cancel
-#    in-progress, so a long VTK build always finishes and seeds
-#    its cache. Without this, a push during a 22-min VTK build cancels
-#    the run before the post-job cache save can fire, which traps the
-#    workflow in a permanent cold-cache state.
+# Concurrency, workflow level:
+#  * Pull requests: one run per PR (the group names its number). A newer
+#    push cancels the PR's older run, queued or running, so a PR with several
+#    pushes never has more than its latest run on the account's shared
+#    runners. ci-cancel-closed.yml joins the same group when a PR merges or
+#    closes, which cancels the run it leaves behind. (Until 2026-11-03 each PR
+#    run had a group of its own and every push's run ran to the end: on that
+#    day 9 of 28 queued runs were for merged PRs or replaced commits.)
+#  * Pushes (master, tags, ci/full/**): one run per ref at a time, and a newer
+#    push replaces that ref's run still waiting to start. A running run is
+#    not cancelled: merges land faster than a 20-job run clears the shared
+#    runners, so cancelling would leave master with no finished run at all.
+#    Without the group every intermediate master commit's run queued behind
+#    the last (2026-10-30: seven full runs at once, with every other repo's
+#    jobs waiting behind them).
 #
-# (Defined per-job below.)
-#
-# Workflow level, pushes only (master, tags, ci/full/**): one run per ref at
-# a time, and a newer push replaces that ref's run still waiting to start.
-# cancel-in-progress stays false, so a running run finishes and its package
-# jobs seed their caches. Merges land faster than a 20-job run clears the
-# account's shared runners, so without this every intermediate master
-# commit's run queued behind the last (2026-10-30: seven full runs at once,
-# with every other repo's jobs waiting behind them). Pull requests get a group
-# of their own per run (github.run_id), so they behave as before: their cheap
-# jobs cancel per job, their heavy jobs finish.
+# Job level (defined per job below): cheap jobs cancel in-progress per ref;
+# the heavy package jobs don't. That rule once kept a VTK build from being
+# cancelled before its cache was saved. Nothing has been cached since VTK and
+# the other deps came from cvcpkg (2026-07, b640d5ed), so cancelling a heavy
+# job now loses only the minutes it has run.
 concurrency:
-  group: ci-${{ github.event_name == 'pull_request' && format('run-{0}', github.run_id) || format('push-{0}', github.ref) }}
-  cancel-in-progress: false
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('push-{0}', github.ref) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # ───────────────────────────────────────────────────────────────────
 # Per-PR / per-commit artifact set
@@ -371,6 +372,7 @@ jobs:
                    src/ari examples/ariadne/terminal CMakeLists.txt src/cvc/CMakeLists.txt CMake \
                    src/cvc/image inc/cvc/image src/cvc/tests/image_magick_roundtrip.cpp \
                    src/cvc/state inc/cvc/state src/cvc/tests/state_exec_wasm_smoke.cpp \
+                   src/cvc/core/app.cpp inc/cvc/core/app.h \
                    cvcpkg/recipes/libcvc \
                    .github/workflows/ci.yml | grep -q .; then
               run=false
@@ -472,6 +474,16 @@ jobs:
             echo "::error::a token reached the wasm ari's output"; exit 1
           fi
 
+      - name: Sign in from the wasm ari under node
+        # The browser pages' sign-in (docs/ARIADNE.md 10.5) against tests/stub_oidc_provider.py:
+        # the redirect flow there and back (page-shim.cjs stands in for the page's location,
+        # sessionStorage and history), the code exchange, the address bar cleaned, a request with
+        # the credential; and the device code. No token may reach the output.
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          bash src/ari/tests/oidc_wasm_node_test.sh "$node" "$PWD/build-wasm/bin/ari.js"
+
       - name: Frames go on while a request is out (L4)
         # The single-threaded build's requests are started, not sent in place: the browser's
         # fetch answers from the event loop while the frame loop goes on. tests/l4_frames.ari
@@ -496,32 +508,6 @@ jobs:
           fi
           echo "frames while the request was out: $frames"
 
-      - name: Frames go on while a WebSocket connects and waits (L4)
-        # ws-open and ws-recv are started in the single-threaded build too, answered by the
-        # browser WebSocket's callbacks (node 22 has one). tests/l4_ws.ari counts the frames that
-        # ran while tests/ws_probe_server.py took a second to answer the handshake and another to
-        # send its message; a connect or a wait that blocked the frame loop would leave them near 0.
-        if: steps.paths.outputs.run == 'true'
-        run: |
-          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
-          python3 src/ari/tests/ws_probe_server.py > ws-port.txt &
-          server=$!
-          trap 'kill $server' EXIT
-          for _ in $(seq 50); do [ -s ws-port.txt ] && break; sleep 0.1; done
-          port=$(cat ws-port.txt)
-          timeout 120 "$node" build-wasm/bin/ari.js snapshot --net-allow "http://127.0.0.1:$port" \
-            --width 100 --height 10 /tests/l4_ws.ari --url "ws://127.0.0.1:$port/" 2>&1 \
-            | tee l4ws.txt
-          grep -qF "message: slow hello" l4ws.txt \
-            || { echo "::error::the WebSocket message did not come back"; exit 1; }
-          for what in connecting waiting; do
-            n=$(sed -n "s/.*frames while $what: \([0-9][0-9]*\).*/\1/p" l4ws.txt | head -1)
-            if [ -z "$n" ] || [ "$n" -lt 20 ]; then
-              echo "::error::only '${n}' frames ran while the WebSocket was $what (L4)"; exit 1
-            fi
-            echo "frames while the WebSocket was $what: $n"
-          done
-
       - name: Round-trip images through ImageMagick under node
         # The link above only proves the codec libraries resolve. This proves Magick works at run
         # time: its coders are registered (an empty registry once failed every read and write
@@ -534,7 +520,9 @@ jobs:
 
       - name: with-lock without threads under node
         # The state_exec locks on a build with no pthreads (CVC_WASM_PTHREADS=OFF): a section, a
-        # waiter granted once its holder lets go, an empty lock-query, on both schedulers.
+        # waiter granted once its holder lets go, an empty lock-query, on both schedulers; then
+        # app::lock_manager()'s auto mode (single), the attach pycvc's Exec makes
+        # (lock_attach{ threads_compiled_in }) accepted, and a section with a waiter on it.
         if: steps.paths.outputs.run == 'true'
         run: |
           node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
@@ -608,13 +596,15 @@ jobs:
           echo "run=$run" >> "$GITHUB_OUTPUT"
           echo "arigl-web changed: $run"
 
-      - name: Install cvcpkg, cmake/ninja and the Emscripten SDK from the catalog
+      - name: Install cvcpkg, cmake/ninja, protoc and the Emscripten SDK from the catalog
         if: steps.paths.outputs.run == 'true'
         run: |
           curl -fsSL https://cvcpkg.org/install.sh | sh
           export PATH="$HOME/.local/bin:$PATH"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          cvcpkg install cmake ninja --prefix "$RUNNER_TEMP/tools" --config release --link shared
+          # protobuf: the native protoc the conference's messages are generated with (the recipe's
+          # host tool; the wasm protobuf ships none).
+          cvcpkg install cmake ninja protobuf --prefix "$RUNNER_TEMP/tools" --config release --link shared
           echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
           cvcpkg install emsdk --platform linux --prefix "$RUNNER_TEMP/emsdk" \
             --config release --link shared --no-fallback-to-source
@@ -662,8 +652,12 @@ jobs:
   # Mirrors release.yml's linux job exactly, but injects -<sha> into
   # the artifact filename stem and uploads each output file as its own
   # GitHub artifact so the format/extension is visible in the UI.
+  #
+  # Pinned to the glibc floor, ubuntu-22.04 (glibc 2.35, gcc 11.4), where publish-cvcpkg.yml and
+  # release.yml build every linux bundle; that file's `target` list says why. ubuntu-latest moved
+  # to 26.04 (gcc 15.2) under this job, so CI was compiling with a toolchain no release uses.
   package-linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     # Non-blocking for experimental matrix entries (the static-grpc probe below),
     # mirroring package-macos/package-windows: a new static-link grpc probe must
     # not fail the required Linux check while it is being proven out.
@@ -682,7 +676,8 @@ jobs:
             kind: libcvc
             build_type: Debug
             enable_grpc: true
-          # Release gRPC: the config publish-cvcpkg.yml ships on Linux (CVC_ENABLE_GRPC=ON). The
+          # Release gRPC: the config publish-cvcpkg.yml ships (CVC_ENABLE_GRPC=ON and CVC_ENABLE_WS=ON,
+          # on every platform since 3.7.5+cvc.3; before that the publish set neither). The
           # debug-grpc lane proves the surface compiles+tests with asserts; this proves it in the
           # OPTIMIZED build we actually ship, so a Release-only grpc break is caught before publish.
           - name: libcvc-release-grpc
@@ -698,10 +693,8 @@ jobs:
             enable_grpc: true
             grpc_link: static
     name: package-linux / ${{ matrix.name }}
-    # Heavy job (VTK from-source build): do NOT cancel in-progress runs.
-    # Cancellation strands the cache and forces every subsequent run
-    # back through a 22-min cold rebuild. Once a run completes, the
-    # cache is warm and future runs are fast.
+    # Heavy job: a newer push does not cancel it at the job level (see the
+    # workflow-level concurrency note for PRs and why no cache is at stake).
     concurrency:
       group: ci-${{ github.ref }}-package-linux-${{ matrix.name }}
       cancel-in-progress: false
@@ -1054,7 +1047,7 @@ jobs:
           # That is not a test failure and not a cancellation -- it is the
           # hosted runner being killed. These suites allocate large trees and
           # meshes, a Debug build inflates all of it, --parallel runs several
-          # at once, and ubuntu-latest has 16 GB. The agent dies with the box,
+          # at once, and the hosted runner has 16 GB. The agent dies with the box,
           # so ctest never gets to report anything, and the error names the
           # runner rather than the cause.
           #
@@ -1191,6 +1184,11 @@ jobs:
           cpack -G TGZ -D CPACK_COMPONENTS_ALL=libcvc \
                        -D CPACK_PACKAGE_FILE_NAME="$STEM"
           mv "$STEM-libcvc.tar.gz" "$STEM.tar.gz"
+          # The Ariadne component library is part of the SDK: cvc:// finds it beside the library,
+          # and a native host has no other copy. Up to 3.7.9 its install rule named no component,
+          # so this tarball left it out.
+          tar -tzf "$STEM.tar.gz" | grep -q 'share/libcvc/ariadne/components/chat\.ari$' ||
+            { echo "::error::the libcvc tarball has no share/libcvc/ariadne/components"; exit 1; }
           cp "$STEM.tar.gz" "$GITHUB_WORKSPACE/"
           echo "STEM=$STEM" >> "$GITHUB_ENV"
 
@@ -1244,8 +1242,10 @@ jobs:
   # those tests ran only in local Windows builds. The module is built without the
   # VTK-Python bridge (CVC_PYCVCGL_VTK_BRIDGE=OFF), so pycvc_vtk skips its
   # vtkmodules round trip.
+  #
+  # On the glibc floor, ubuntu-22.04, like package-linux and every published pycvc.
   pycvc-linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     name: pycvc-linux / cp312
     concurrency:
       group: ci-${{ github.ref }}-pycvc-linux
@@ -1318,9 +1318,13 @@ jobs:
 
       # The modules, the pycvc_gl package layout its tests import from, and the
       # C++ reference test_pycvc_physics.py compares against (physics_parity_test,
-      # which ctest hands it in CVC_PHYSICS_PARITY_EXE).
+      # which ctest hands it in CVC_PHYSICS_PARITY_EXE). Then the scripting hosts
+      # (arix, ariglx: ari and arigl with this Python embedded), and stock ari, which
+      # their tests compare against.
       - name: Build
-        run: cmake --build build --parallel --target pycvc pycvc_gl pycvc_gl_pkg physics_parity_test
+        run: |
+          cmake --build build --parallel --target pycvc pycvc_gl pycvc_gl_pkg physics_parity_test
+          cmake --build build --parallel --target ari arix ariglx
 
       # ── a software GL for the pycvc_gl tests ──
       # cvcpkg's mesa (llvmpipe) and xvfb, as in package-linux: libGLX.so.0 from
@@ -1379,6 +1383,22 @@ jobs:
           # its buffered stdout dies with it).
           PYTHONFAULTHANDLER=1 ctest --test-dir build -R '^pycvc_' --output-on-failure --timeout 1200
 
+      # arix and ariglx with this job's Python embedded: a document's python: block,
+      # a Python program in place of the document (ariglx renders it under Xvfb),
+      # <host> python, and stock ari naming them for a document that needs Python.
+      - name: Run the scripting-host tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          n=$(ctest --test-dir build -N -R '^(arix_|ariglx_|ari_python_)' | grep -c 'Test *#' || true)
+          echo "scripting-host tests registered with ctest: $n"
+          if [ "$n" -lt 7 ]; then
+            echo "::error::arix and ariglx were built, but their tests did not all reach CTestTestfile.cmake."
+            exit 1
+          fi
+          PYTHONFAULTHANDLER=1 ctest --test-dir build -R '^(arix_|ariglx_|ari_python_)' \
+            --output-on-failure --timeout 600
+
       # --output-on-failure hides a passing test's output, and with it whatever it
       # skipped. Print every skip line from LastTest.log, so what is left skipping
       # (a build option this job leaves off, such as the VTK-Python bridge) shows.
@@ -1405,6 +1425,14 @@ jobs:
   # the tree is fixed or suppressed before lock code lands. Suppressions go in
   # .github/sanitizers/*.supp, each with a comment naming what it hides. Each lock phase appends
   # its suites to the two lists below.
+  #
+  # The cases a lock phase most needs under a sanitizer are also named in the matrix's
+  # `required`, so a run that leaves one out (renamed, skipped, filtered) fails rather than
+  # passing without it. L3 (locks plan L3.8): the cross-thread cases of LocksThreads (LT-2..LT-4,
+  # LT-10, LD-6, PI-7, PI-10 and the posted LX cases) at the sanitizer sizes, LT-3b (a post racing
+  # its scheduler's destruction) under ASan, the model check's two- and three-home configurations
+  # at bound 2 (LocksModel.Homes*, LocksModel.TwoHomes*), and pycvc's cross-thread tests under
+  # TSan.
   sanitizers:
     name: sanitizers / ${{ matrix.name }}
     runs-on: ubuntu-24.04
@@ -1413,14 +1441,46 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # required: one per line, `<run>: <text>`, where <run> is a name in SAN_CXX_TESTS or
+          # SAN_PY_TESTS and <text> a line its log must contain (run.sh): gtest's "OK ]" line of a
+          # case, or the pycvc script's "ok:" line.
           - name: tsan
             flags: -fsanitize=thread
+            required: |
+              state_exec_locks_test: OK ] LocksThreads.LT02_CrossThreadGrantWakes
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.LT03_HolderKilledAndSchedulerDestroyed/
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.LT03b_PostRacesDestruction/
+              state_exec_locks_test: OK ] LocksThreads.LT04_FuzzedProtocolPoints
+              state_exec_locks_test: OK ] LocksThreads.LT10_EightSchedulersRandom
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.LD06_CrossHomeCycleDeterministic/
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.PI07_LateRelevelRereads/
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.PI10_RoundRobinChildLendsNothing/
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.LX05_TimeoutAndKillRaceAnotherHomesGrant/
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.LX07_DestroyedWithAWakeInItsPort/
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.LX10_GrantThenWaiterKilledBeforeWake/
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.LX11_StalePostedWake/
+              state_exec_locks_model_test: OK ] LocksModel.Homes
+              state_exec_locks_model_test: OK ] LocksModel.TwoHomes
+              test_pycvc_state_exec_locks.py: ok: test_lt01_two_execs_hot_key
+              test_pycvc_state_exec_locks.py: ok: test_lt03_exec_destroyed
+              test_pycvc_state_exec_locks.py: ok: test_lt07_progress_keeps_waiter_alive
+              test_pycvc_state_exec_locks.py: ok: test_lt08_idle_limit
+              test_pycvc_state_exec_locks.py: ok: test_lt10_eight_execs_smoke
+              test_pycvc_state_exec_locks.py: ok: test_ld05_cycle_across_execs
           # No vptr check: it references the typeinfo of every polymorphic class it checks.
           # Jolt is built without RTTI, as are the two libcvc files that subclass its classes
           # (src/cvc/CMakeLists.txt), so that typeinfo exists nowhere and libcvc.so fails to
           # link ("undefined reference to `typeinfo for JPH::GroupFilter'").
           - name: asan-ubsan
             flags: -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-sanitize=vptr
+            required: |
+              state_exec_locks_test: OK ] LocksThreads.LT02_CrossThreadGrantWakes
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.LT03b_PostRacesDestruction/sync
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.LT03b_PostRacesDestruction/async
+              state_exec_locks_test: OK ] Schedulers/LocksThreads.LX07_DestroyedWithAWakeInItsPort/
+              state_exec_locks_test: OK ] LocksThreads.LT10_EightSchedulersRandom
+              state_exec_locks_model_test: OK ] LocksModel.Homes
+              state_exec_locks_model_test: OK ] LocksModel.TwoHomes
     concurrency:
       group: ci-${{ github.ref }}-sanitizers-${{ matrix.name }}
       cancel-in-progress: true
@@ -1429,7 +1489,7 @@ jobs:
       SAN_CXX_TESTS: >-
         state_exec_scheduler_test state_exec_async_test state_exec_integration_test
         state_exec_coordinator_test ariadne_runtime_test thread_pool_test async_lane_test
-        state_exec_locks_test state_exec_locks_model_test
+        state_exec_locks_test state_exec_locks_model_test state_exec_priority_test
       # pycvc test scripts (bindings/pycvc/<name>).
       SAN_PY_TESTS: >-
         test_pycvc_exec.py test_pycvc_exec_async.py test_pycvc_exec_coro.py
@@ -1503,6 +1563,8 @@ jobs:
 
       - name: Run the suites under ${{ matrix.name }}
         shell: bash
+        env:
+          SAN_REQUIRED: ${{ matrix.required }}
         run: bash .github/sanitizers/run.sh "${{ matrix.name }}"
 
       - name: Upload the sanitizer logs
@@ -1548,7 +1610,7 @@ jobs:
             grpc_link: static
             experimental: true
     name: package-macos / ${{ matrix.name }}
-    # Heavy job: do not cancel in-progress runs (mirrors package-linux).
+    # Heavy job; see package-linux.
     concurrency:
       group: ci-${{ github.ref }}-package-macos-${{ matrix.name }}
       cancel-in-progress: false
@@ -1632,6 +1694,7 @@ jobs:
             -DCVC_ENABLE_MESHER=ON \
             -DCVC_ENABLE_SDF=ON \
             -DCVC_ENABLE_GRPC=${{ matrix.enable_grpc == true && 'ON' || 'OFF' }} \
+            -DCVC_ENABLE_WS=${{ matrix.enable_grpc == true && 'ON' || 'OFF' }} \
             | tee configure.log
 
       # The terminal backends are optional at configure time: without ftxui / tvision the
@@ -1832,7 +1895,7 @@ jobs:
             enable_grpc: true
             grpc_link: static
     name: package-windows / ${{ matrix.name }}
-    # Do NOT cancel in-progress runs; see package-linux for rationale.
+    # Heavy job; see package-linux.
     concurrency:
       group: ci-${{ github.ref }}-package-windows-${{ matrix.name }}
       cancel-in-progress: false
@@ -1942,6 +2005,7 @@ jobs:
             -DCVC_ENABLE_MESHER=ON `
             -DCVC_ENABLE_SDF=ON `
             -DCVC_ENABLE_GRPC=${{ matrix.enable_grpc == true && 'ON' || 'OFF' }} `
+            -DCVC_ENABLE_WS=${{ matrix.enable_grpc == true && 'ON' || 'OFF' }} `
             | Tee-Object -FilePath configure.log
 
       # The terminal backends are optional at configure time: without ftxui / tvision the

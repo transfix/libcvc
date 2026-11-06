@@ -36,6 +36,9 @@
 #include <cvc/nav/sim_world.h>
 #include <cvc/nav/vehicle_plant.h>
 #include <cvc/nav/vehicle_route.h>
+#include <cvc/physics/jolt_rollout.h>
+#include <cvc/physics/nav_plant.h>
+#include <cvc/physics/vehicle.h>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -250,6 +253,43 @@ PyObject *pycvc_nav_sense_impl(PyObject *truth, PyObject *positions, PyObject *h
   else
     Py_XDECREF(mchg);
   return flips;
+}
+
+// A vehicle for the Jolt rollout's bindings, by name.
+cvc::physics::vehicle_desc pycvc_nav_jolt_vehicle(const char *name) {
+  const std::string v = name ? name : "";
+  if (v == "humvee")
+    return cvc::physics::vehicle_desc::humvee();
+  if (v == "roboracer")
+    return cvc::physics::vehicle_desc::roboracer();
+  throw std::invalid_argument("pycvc: the Jolt rollout's vehicle is \"humvee\" or \"roboracer\", "
+                              "not \"" +
+                              v + "\"");
+}
+
+// A calibration (cvc::nav::calibrate_dyn4) as a dict.
+PyObject *pycvc_nav_calibration_dict(const cvc::nav::dyn4_calibration &c) {
+  PyObject *d = PyDict_New();
+  const auto put = [&](const char *k, double x) {
+    PyObject *f = PyFloat_FromDouble(x);
+    PyDict_SetItemString(d, k, f);
+    Py_DECREF(f);
+  };
+  put("drive_gain", c.drive_gain);
+  put("brake_gain", c.brake_gain);
+  put("resist_comp", c.resist_comp);
+  put("tau_drive", c.tau_drive);
+  put("tire", c.tire);
+  put("drag", c.drag);
+  put("rolling", c.rolling);
+  put("damper", c.damper);
+  put("price_drive", c.price.drive);
+  put("price_idle", c.price.idle);
+  put("dissipated_error", c.after.dissipated.error());
+  put("drawn_error", c.after.drawn.error());
+  put("twist_rms", c.after.twist_rms);
+  put("ticks", static_cast<double>(c.after.ticks));
+  return d;
 }
 
 } // namespace
@@ -1350,6 +1390,24 @@ inline PyObject *to_dict(const cvc::nav::drive_telemetry *tel, int N) {
     return pycvc_telemetry::to_dict(tel, sw->size());
   }
 
+  // ── the risk governor (sim_world::set_risk_governor) ────────────────────────────
+  // From the next step: the material's (and the terrain's) risk caps each agent's speed, down to
+  // vmin at risk 1, with `probes` points out to `lookahead` ahead slowing it before it gets there
+  // (speeds and look-ahead normalized). The material's forces alone do not slow an agent at its top
+  // speed that drives square at a hazard; this does. A bad argument raises RuntimeError.
+  PyObject *nav_sim_world_set_risk_governor(PyObject *handle, int on, double vmin = 0.0,
+                                            double onset = 0.3, double lookahead = 0.0,
+                                            int probes = 3) {
+    sim_world_from(handle)->set_risk_governor(on != 0, static_cast<float>(vmin),
+                                              static_cast<float>(onset),
+                                              static_cast<float>(lookahead), probes);
+    Py_RETURN_NONE;
+  }
+
+  PyObject *nav_sim_world_risk_governor(PyObject *handle) {
+    return PyBool_FromLong(sim_world_from(handle)->risk_governor() ? 1 : 0);
+  }
+
   // ── base nav_stats on the sim_world (internal collector) ────────────────────
   // Arm the world's own base nav_stats_collector. Captures the CURRENT pose as the
   // episode start, so CALL RIGHT AFTER create (before the first step). contact_r is the
@@ -1569,6 +1627,74 @@ inline PyObject *to_dict(const cvc::nav::drive_telemetry *tel, int N) {
     std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(out)), sw->belief_occ(m),
                 static_cast<std::size_t>(sw->rows()) * sw->cols());
     return out;
+  }
+
+  // The fog-of-war read and write surface (sim_world.h): the truth as it is now, and a plane's
+  // fog tiers (ever_seen: remembered; last_visible: in view at the last sense tick), each (H,W)
+  // uint8; a plane's dynamic layer, (H,W) float64 of the sim time each cell was last marked by
+  // add_obstacle (-inf never); set_truth replaces the truth (the agents sense it from the next
+  // sense tick), and add_obstacle stamps a decaying blob into every plane's dynamic layer.
+  PyObject *nav_sim_world_truth(PyObject *handle) {
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    npy_intp d[2] = {sw->rows(), sw->cols()};
+    PyObject *out = PyArray_SimpleNew(2, d, NPY_UINT8);
+    if (!out)
+      throw std::runtime_error("pycvc.nav_sim_world_truth: alloc failed");
+    std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(out)), sw->truth(),
+                static_cast<std::size_t>(sw->rows()) * sw->cols());
+    return out;
+  }
+  PyObject *nav_sim_world_ever_seen(PyObject *handle, int m) {
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    if (m < 0 || m >= sw->planes())
+      throw std::out_of_range("pycvc.nav_sim_world_ever_seen: plane out of range");
+    npy_intp d[2] = {sw->rows(), sw->cols()};
+    PyObject *out = PyArray_SimpleNew(2, d, NPY_UINT8);
+    if (!out)
+      throw std::runtime_error("pycvc.nav_sim_world_ever_seen: alloc failed");
+    std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(out)), sw->ever_seen(m),
+                static_cast<std::size_t>(sw->rows()) * sw->cols());
+    return out;
+  }
+  PyObject *nav_sim_world_last_visible(PyObject *handle, int m) {
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    if (m < 0 || m >= sw->planes())
+      throw std::out_of_range("pycvc.nav_sim_world_last_visible: plane out of range");
+    npy_intp d[2] = {sw->rows(), sw->cols()};
+    PyObject *out = PyArray_SimpleNew(2, d, NPY_UINT8);
+    if (!out)
+      throw std::runtime_error("pycvc.nav_sim_world_last_visible: alloc failed");
+    std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(out)), sw->last_visible(m),
+                static_cast<std::size_t>(sw->rows()) * sw->cols());
+    return out;
+  }
+  PyObject *nav_sim_world_dynamic_stamps(PyObject *handle, int m) {
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    if (m < 0 || m >= sw->planes())
+      throw std::out_of_range("pycvc.nav_sim_world_dynamic_stamps: plane out of range");
+    npy_intp d[2] = {sw->rows(), sw->cols()};
+    PyObject *out = PyArray_SimpleNew(2, d, NPY_FLOAT64);
+    if (!out)
+      throw std::runtime_error("pycvc.nav_sim_world_dynamic_stamps: alloc failed");
+    std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(out)), sw->dynamic_stamps(m),
+                sizeof(double) * static_cast<std::size_t>(sw->rows()) * sw->cols());
+    return out;
+  }
+  PyObject *nav_sim_world_set_truth(PyObject *handle, PyObject *truth) {
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    int rows = 0, cols = 0;
+    PyArrayObject *a = pycvc_nav_as_u8(truth, rows, cols);
+    if (rows != sw->rows() || cols != sw->cols()) {
+      Py_DECREF(a);
+      throw std::invalid_argument("pycvc.nav_sim_world_set_truth: truth must be (rows, cols)");
+    }
+    sw->set_truth(static_cast<const std::uint8_t *>(PyArray_DATA(a)));
+    Py_DECREF(a);
+    Py_RETURN_NONE;
+  }
+  PyObject *nav_sim_world_add_obstacle(PyObject *handle, int r0, int r1, int c0, int c1) {
+    sim_world_from(handle)->add_obstacle(r0, r1, c0, c1);
+    Py_RETURN_NONE;
   }
 
   // [n] int32 per-agent belief/material plane id — the map_id set_material
@@ -2272,6 +2398,59 @@ inline PyObject *to_dict(const cvc::nav::drive_telemetry *tel, int N) {
                                                  "trained by pycvc.nav_train_coef_mlp (cpu)");
     }
     return used_cuda ? 1.0 : 0.0; // which backend ran (weights are on disk at out_path)
+  }
+
+  // The same training on a vehicle simulation: the Jolt rollout (rollout_kind::jolt;
+  // docs/NAV_TRAINING.md, "Training on Jolt"). Jolt drives `vehicle` ("humvee" or "roboracer")
+  // at veh_L normalized units of wheelbase, and the gradient is the four-wheel port-Hamiltonian
+  // model's at Jolt's states, calibrated first on calib_agents vehicles for calib_steps steps of
+  // this scene (cvc::physics::use_jolt_rollout). veh_a_max and veh_a_lat_max are the controller's
+  // limits; w_energy > 0 prices the fuel Jolt burns. CPU only; the GIL is released during
+  // calibration and training. Writes the .cvcnav to `out_path` and returns the calibration as a
+  // dict (the drive's gain, brake gain, resistance trim and lag in s; the factors on the tires,
+  // drag, rolling resistance and dampers; the price per unit of port work and the idle power in
+  // the frame's units; and, on the fitted ticks, the books' errors and the one-tick twist rms).
+  PyObject *nav_train_coef_mlp_jolt(PyObject *occ, double min_x, double min_y, double max_x,
+                                    double max_y, double scale, double rr, double d_hat, double dt,
+                                    double vmax, int steps, int horizon, int n, int window,
+                                    int hidden, double lr, double w_coll, double w_energy,
+                                    double grad_clip, unsigned seed, const char *vehicle,
+                                    double veh_L, double veh_a_max, double veh_a_lat_max,
+                                    int calib_agents, int calib_steps, const char *out_path) {
+    const cvc::physics::vehicle_desc desc = pycvc_nav_jolt_vehicle(vehicle);
+    int rows, cols;
+    PyArrayObject *a = pycvc_nav_as_u8(occ, rows, cols);
+    cvc::nav::training_scene sc = cvc::nav::occupancy_scene(
+        static_cast<const std::uint8_t *>(PyArray_DATA(a)), rows, cols, min_x, min_y, max_x, max_y,
+        scale, (float)rr, (float)d_hat, (float)dt, (float)vmax);
+    Py_DECREF(a);
+    cvc::nav::train_config cfg;
+    cfg.steps = steps;
+    cfg.horizon = horizon;
+    cfg.n = n;
+    cfg.window = window;
+    cfg.hidden = hidden;
+    cfg.lr = (float)lr;
+    cfg.w_coll = (float)w_coll;
+    cfg.w_energy = (float)w_energy;
+    cfg.grad_clip = (float)grad_clip;
+    cfg.seed = seed;
+    cfg.veh_L = (float)veh_L;
+    cfg.veh_a_max = (float)veh_a_max;
+    cfg.veh_a_lat_max = (float)veh_a_lat_max;
+    cvc::nav::dyn4_calibration cal;
+    std::string err;
+    Py_BEGIN_ALLOW_THREADS try {
+      cal = cvc::physics::use_jolt_rollout(cfg, sc, desc, calib_agents, calib_steps, seed);
+      cvc::nav::coef_trainer tr(cfg, 1);
+      tr.train(sc);
+      tr.to_coef_mlp().save(out_path, "trained by pycvc.nav_train_coef_mlp_jolt (jolt)");
+    } catch (const std::exception &e) {
+      err = e.what();
+    }
+    Py_END_ALLOW_THREADS if (!err.empty()) throw std::runtime_error(
+        "pycvc.nav_train_coef_mlp_jolt: " + err);
+    return pycvc_nav_calibration_dict(cal);
   }
 
   // ── material-aware navigation (cvc/nav/material.h) ──────────────────────────
@@ -4102,11 +4281,75 @@ PyObject *nav_material_trainer_set_bicycle(PyObject *handle, int enabled, double
   Py_RETURN_NONE;
 }
 
-// "surrogate" or "bicycle": the rollout this handle's loss is taken through.
+// Take the loss through a vehicle simulation, the Jolt rollout (material_integrator::jolt;
+// docs/NAV_TRAINING.md, "Training on Jolt"): `vehicle` ("humvee" or "roboracer") at wheelbase L
+// in the batch's length units, with the controller's limits as nav_material_trainer_set_bicycle
+// takes them. Every batch must take the step dt. The four-wheel model whose gradient the loss
+// takes is calibrated here, before any step, on calib_agents vehicles driving calib_steps steps
+// of the trainer's city at these limits (cvc::physics::use_jolt_rollout); hard_walls puts the
+// patches' hard cells in Jolt as walls. Returns the calibration as nav_train_coef_mlp_jolt does.
+// enabled = 0 goes back to the surrogate. CPU only, as the bicycle. Each step resets Jolt to its
+// batch: the discs and hard cells as walls, every agent launched at its start speed.
+PyObject *nav_material_trainer_set_jolt(PyObject *handle, int enabled,
+                                        const char *vehicle = "humvee", double L = 0.35,
+                                        double dt = 0.06, double delta_max = 0.6,
+                                        double a_max = 0.3, double a_lat_max = 0.5,
+                                        double k_steer = 0.8, double vmax = 0.9,
+                                        int allow_reverse = 1, int calib_agents = 16,
+                                        int calib_steps = 150, int hard_walls = 1) {
+  MaterialTrainer *t = material_trainer_from(handle);
+  if (!enabled) {
+    t->cfg.integrator = cvc::nav::material_integrator::surrogate;
+    t->cfg.plant.reset();
+    Py_RETURN_NONE;
+  }
+  cvc::nav::bicycle_material_params v;
+  v.L = (float)L;
+  v.delta_max = (float)delta_max;
+  v.a_max = (float)a_max;
+  v.a_lat_max = (float)a_lat_max;
+  v.k_steer = (float)k_steer;
+  v.vmax = (float)vmax;
+  v.allow_reverse = allow_reverse != 0;
+  cvc::nav::validate(v); // throws std::invalid_argument
+  const cvc::physics::vehicle_desc desc = pycvc_nav_jolt_vehicle(vehicle);
+  if (!(dt > 0.0))
+    throw std::invalid_argument("pycvc.nav_material_trainer_set_jolt: dt must be > 0");
+  // The calibration's scene: the trainer's city at the batches' step and top speed.
+  cvc::nav::training_scene sc = cvc::nav::city_scene(96);
+  sc.dt = (float)dt;
+  sc.vmax = v.vmax;
+  cvc::nav::train_config tc;
+  tc.veh_L = v.L;
+  tc.veh_delta_max = v.delta_max;
+  tc.veh_a_max = v.a_max;
+  tc.veh_a_lat_max = v.a_lat_max;
+  tc.veh_k_steer = v.k_steer;
+  tc.veh_allow_reverse = v.allow_reverse;
+  cvc::nav::dyn4_calibration cal;
+  std::string err;
+  Py_BEGIN_ALLOW_THREADS try {
+    cal = cvc::physics::use_jolt_rollout(tc, sc, desc, calib_agents, calib_steps);
+  } catch (const std::exception &e) {
+    err = e.what();
+  }
+  Py_END_ALLOW_THREADS if (!err.empty()) throw std::runtime_error(
+      "pycvc.nav_material_trainer_set_jolt: " + err);
+  t->cfg.integrator = cvc::nav::material_integrator::jolt;
+  t->cfg.bicycle = v;
+  t->cfg.plant = tc.plant;
+  t->cfg.dyn4 = tc.dyn4;
+  t->cfg.ground_mu = tc.ground_mu;
+  t->cfg.hard_walls = hard_walls != 0;
+  return pycvc_nav_calibration_dict(cal);
+}
+
+// "surrogate", "bicycle" or "jolt": the rollout this handle's loss is taken through.
 PyObject *nav_material_trainer_integrator(PyObject *handle) {
-  const bool bike =
-      material_trainer_from(handle)->cfg.integrator == cvc::nav::material_integrator::bicycle;
-  return PyUnicode_FromString(bike ? "bicycle" : "surrogate");
+  const cvc::nav::material_integrator k = material_trainer_from(handle)->cfg.integrator;
+  return PyUnicode_FromString(k == cvc::nav::material_integrator::bicycle ? "bicycle"
+                              : k == cvc::nav::material_integrator::jolt  ? "jolt"
+                                                                          : "surrogate");
 }
 
 PyObject *nav_material_trainer_cuda_active(PyObject *handle) {

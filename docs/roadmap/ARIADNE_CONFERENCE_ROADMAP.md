@@ -153,6 +153,9 @@ These hide the transport/bridge/relay behind a room abstraction; a conferencing 
 | `(room-roster room) → [ {pid name flags…} … ]` | current participants + their published kinds + flags; backs the tile grid via `repeat`. |
 | `(room-flag room PID KEY)` / `(room-set-flag room {mic cam hand …})` | read any participant's flag; write only my own (server-validated). |
 | `(room-chat-send room TEXT)` / `(room-chat-stream room) → sub` | the room's ordered **chat stream** — send a line, or subscribe (backlog + live). Rendered in the UI; composing needs the `input_text` widget (§9). |
+| `(room-avatar-options ROOM KIND) → [label …]` | what the relay's avatar catalog offers (§5g): KIND `"color"` or `"accessory"`, in catalog order, default first. Empty until the catalog arrives. **Implemented.** |
+| `(room-avatar room) → {color accessory}` | the labels of my avatar as everyone draws it (the defaults until I choose). **Implemented.** |
+| `(room-set-avatar room COLOR ACCESSORY)` | pick my avatar from the catalog (ids or labels); writes only my own `avatar.*`, and refuses what the catalog lacks. **Implemented.** |
 
 ### 4c. Low-level transport verbs (escape hatch / mesh / tooling)
 
@@ -384,6 +387,20 @@ The conference is not just floating video windows: it is a **shared 3D space** t
   client's per-document `graphics.root` that gave the earlier build a de-facto shared scene; scoping
   replication to the room tree (the name-collision fix) correctly removed that. This section makes the
   shared scene a **first-class, server-authoritative** feature instead of a replication side effect.
+* **Avatar looks (built 2026-11-01).** Everyone sees an avatar the same way, its owner included (the
+  owner used to see itself gold while everyone else saw a hue from its pid).
+  * **Catalog.** The relay seeds `conf.rooms.<room>.avatars` (`room_avatar.h`): colours (an automatic
+    hue from the pid, the default, plus named ones) and accessories (nothing, the default, or parts:
+    boxes and spheres posed from the feet and tinted like the body, like the visor, or a fixed colour).
+  * **Choice.** Each participant writes its pick to its own `participants.<pid>.avatar.{color,
+    accessory}`, which the write gate already allows and nothing else may write.
+  * **Rendering.** `room_view` resolves each pid's look through the catalog. A pick the catalog lacks
+    draws as the default, and a changed pick rebuilds the marker everywhere.
+  * **Cosmetic only.** Parts must fit an envelope (the 0.5 x 0.5 x 1.7 m body grown 0.15 m sideways and
+    0.3 m up; at most 6 parts), and the physics body is the same for everyone.
+  * **UI.** The conference document's **My Avatar** window picks with two combos.
+  * **Next:** user-supplied avatars with their own physics, bounded by size and an energy budget (design
+    in progress).
 * **Sequencing.** MVP first = a minimal server-seeded environment (ground + grid + a reference object) to
   prove the shared-scene render path end-to-end; then layer avatars (pose publish + the avatars node).
   Schema impact (a `scene:` driven from state, a custom scene-node type) is coordinated with the host-caps
@@ -414,6 +431,45 @@ bundles them yet.
   validates it as an input to that avatar's physics body and writes the authoritative `…pose/body` —
   accept, veto (clamp/reject), or override at will (teleport, re-mass, re-parent). "Respect the veto" =
   authoritative wins on reconcile. This is the server-mediated-write path (§5d) applied per avatar.
+* **Peers play out from a buffer** (`holon::display_pose`). Each peer's samples are kept by server
+  tick, and the peer is shown on a wall-time timeline a delay behind its newest sample:
+  * the delay is one sample interval plus 1.5 times the measured arrival jitter;
+  * between samples the peer follows a cubic Hermite through their positions and velocities;
+  * when the buffer runs dry, it carries on along its velocity for up to 200 ms;
+  * a change of course eases out over about 100 ms, but a teleport snaps.
+
+  The old model walked from the shown pose to the newest sample, timed by arrival, so jitter made it
+  stop and go. Replayed through `HolonTest.APeerMovesSmoothlyThroughJitterAndLoss` (6-tick samples,
+  up to 40 ms late, 5% lost, 60 fps), the old walk stalled on 96 of 599 frames, with an RMS
+  acceleration of 107 m/s². The playout has no stalls and 2.3 m/s², against the walk's own 2.25. The
+  relay keeps the samples even by stepping the room on a fixed 50 ms grid and sending each step's
+  poses at once, and the WebSocket sockets set TCP_NODELAY.
+* **Poses travel as compact per-viewer snapshots** (`room_pose_relay`, `pose_stream.h`). The relay
+  steps the room at 60 Hz. Each step, a viewer that is due gets one `PoseSnapshot` frame with the
+  participants it sees.
+  * **Encoding:** millimetres, mm/s and quaternion components times 32767. Each value is the
+    difference from what that connection was last sent, so a walking avatar costs about a dozen
+    bytes and a still one a 2-byte heartbeat a second.
+  * **Rate:** each viewer gets snapshots at 60 Hz under an 80 ms round trip, 30 Hz under 160 ms and
+    20 Hz beyond, with 10% hysteresis.
+  * **Tiers:** middle and outer pairs get the AOI push cadence.
+  * **Recovery:** every 2 s a viewer's stream restarts with absolute entries, so a client that lost
+    its place is back in step.
+  * **Tree copy:** the tree's copy of the poses is written at 1 Hz, for late joiners and the log.
+
+  `arisrv_aoi_bench --poses tree|stream` (loopback, clients at 60 fps):
+
+  | | into each client | relay out | peer shown behind, p50 / p95 |
+  |---|---|---|---|
+  | 2 clients, 20 Hz tree poses | 168 kb/s | 0.35 Mb/s | 70 / 87 ms |
+  | 2 clients, 60 Hz snapshots | 47 kb/s | 0.10 Mb/s | 48 / 62 ms |
+  | 6 clients, 20 Hz tree poses | 400–431 kb/s | 2.5 Mb/s | 103 / 130 ms |
+  | 6 clients, 60 Hz snapshots | 92–122 kb/s | 0.66 Mb/s | 42 / 60 ms |
+
+  A snapshot frame is a link-level message like media: never journaled, relayed or bridged. It
+  carries a sequence number and the base it is a difference from. On the reliable transports the
+  base is always the previous snapshot. An unreliable channel would make it the last one the client
+  acknowledged.
   *(No client-prediction/reconcile/rollback loop exists today — it is new; distributed state resolves
   last-writer with vector clocks, not predict/rollback.)*
 * **LOD (realtime for large scenes).** A replica is a *scoped, decimated* view, not a full copy: **spatial
@@ -528,7 +584,10 @@ cannot) is filtered as a subject but never registered as a receiver — no conne
 **Pose pushes.** A non-inner subject's pose reaches the receiver as a targeted snapshot
 (`state_transport::push_snapshot_to`) carrying its whole pose subtree, with `server_tick` re-stamped to
 the relay holon's *current* tick and written last: the tree's heartbeat tick for a still subject can be
-~120 ticks old, and a client re-aligns its whole clock (and rubber-bands) on more than 24 ticks of skew.
+~600 ticks old (arisrv re-stamps it every 5 s; the pose stream carries the 1 s heartbeat), and a client
+re-aligns its whole clock (and rubber-bands) on more than 24 ticks of skew. A client takes no clock
+reading from a tick older than one it has already applied (`holon::apply_authoritative`), so a stale
+heartbeat in the tree no longer seeks a joiner's clock back and forth.
 A pair entering inner, and a new pair that starts middle or outer, is pushed at once. `relay_room_step`
 sends every push **before** the step's `drain_local` + publish, so on each connection a push precedes
 that tick's live writes.
@@ -550,6 +609,17 @@ WebSocket leg's 32 KB backlog drop. It covers every gRPC media write, the relay'
 and the media gate is asked only once the stream is held, so a dropped frame spends no thumbnail. (A
 write that starts and then blocks still holds its own thread until the 3 s watchdog; only an
 asynchronous write path would avoid that.)
+
+**gRPC delay drop.** `--media-delay-ms 100`: the stall drop rarely fires, because a gRPC `Write`
+returns once HTTP/2 flow control and the socket take the bytes, and gRPC grows the window to
+megabytes, so during a TCP loss burst seconds of media queued without a write ever blocking. Each
+stream that carries media or pose snapshots now follows them with a Ping (its seq's top bit set) at
+most every 50 ms. The stream is in order, so the Pong means the peer has read everything written
+before it, and the oldest unanswered probe dates the oldest byte that may still be queued. Past its
+base round trip (the least probe round trip over 10 s) by more than 100 ms, video to that receiver is
+dropped, pose snapshots past 200 ms and audio past 400 ms. A peer that never answers a probe is never
+held back. It applies on both ends, so a client's uplink is bounded too (the bench and arigl use
+the transport's default). Pose snapshots also never wait more than 1 ms for a busy stream.
 
 **Media defaults and the uplink.**
 - **Camera:** `conference_roster.ari` captures it at 320x240, 15 fps and JPEG q60
@@ -616,6 +686,7 @@ false)` is the old drain-and-publish exactly); arisrv and arigl turn them on.
 | `--relay-gate on\|off` | on | off: forward every client frame |
 | `--relay-journal trim\|keep` | trim | keep: journal backfill on connect, no trim |
 | `--media-stall-ms N` | 40 | gRPC stall drop; 0 = off |
+| `--media-delay-ms N` | 100 | gRPC delay drop (video past N ms of queue, poses 2N, audio 4N); 0 = off. Not an S7 switch |
 | `--admission-hold-ms N` | 2000 (only with an AOI) | hold a joiner's bootstrap for its filter, at most N ms; 0 = off (the admit snapshot goes out unfiltered, before Hello) |
 | `--scene default\|large` | default | the seeded scene; not an S7 switch (honoured under `--s7 off`) |
 | `--bind-writes on\|off` | on | bound writes (below): each client writes only its own participant, as itself; off takes any client's writes. Not an S7 switch |
@@ -923,6 +994,76 @@ Each viewer's rung adapts to its link.
     bundle is cy-pca/cvcpkg#467; the browser client needs it to hear Opus.
   - Audio is not re-encoded per viewer: 32 kbit/s is already far below anything video sends.
 
+### 5k. Avatars: look, body, controller, energy (the frame for bring-your-own)
+
+What a participant is in the room, as four parts. Today the server supplies every part. The frame is
+chosen so each part can later come from the user without changing who decides.
+
+| Part | What it is | Now | Later |
+|---|---|---|---|
+| **Look** | what is drawn | a colour + accessory from the relay's catalog (§5g) | a user's mesh inside the body's envelope |
+| **Body** | the collision shape and mass the physics simulates | one box for everyone | server-supplied bodies, then a user's description, within the server's size limits |
+| **Controller** | what turns a participant's intent into forces on the body | the server's walker | other server controllers a user picks (a Jolt vehicle: a Humvee like DBG demo3-csma's), then a user's own vehicle or controller |
+| **Energy** | what the controller may spend | the server's budget, the same for everyone | the same rule for every controller, user-supplied ones included |
+
+**Rules that hold at every step:**
+- **The relay is the authority.** It simulates every body and runs every controller. A participant
+  only asks (its intent) and picks from what the server offers. What a user brings is a description
+  the server validates (sizes, masses, a controller it can run), never code it trusts.
+- **The server sets the policy.**
+  - The size limits a body must fit (once bodies vary).
+  - The energy budget, the same for every avatar (decided 2026-11-01): size and mass are trade-offs,
+    not advantages.
+  - What an empty reserve means.
+
+  The relay publishes the policy in the room (`conf.rooms.<room>.avatars.policy`), so clients predict
+  under the same rule.
+- **Controllers are deterministic** on the relay and in the client's prediction (the same inputs,
+  the same state, the same result), and **metered by the budget**: whatever a controller does with
+  the body is paid for from the same reserve.
+
+**The energy budget (walker, built first).**
+- **Limits** are the same for everyone:
+  - a push of at most `force_max` (840 N), so a heavier body accelerates more slowly;
+  - at most `power_max` (1.2 kW);
+  - a reserve of `reserve_max` (30 kJ) that refills at `power_rest` (300 W) less what is being
+    spent.
+- **What it costs:**
+  - the positive work the controller does on the body;
+  - plus carrying its weight along at `transport_cost` x m g |v| (0.2, a walking human's cost of
+    transport).
+- **What that buys:** a 70 kg walker sustains about 2.2 m/s on resting power and walks at the 4 m/s
+  limit for about two minutes on its reserve.
+- **When the reserve is empty** (server policy):
+  - `rest`: resting power only;
+  - `stop`: no speeding up until a quarter has refilled.
+- **Replication:** the relay publishes each avatar's reserve beside its pose. The owner's client
+  predicts with it and shows it as stamina.
+
+**Phases:**
+1. Server looks (§5g).
+2. The energy budget, server policy, and the walker as the first controller (this step).
+3. Server-supplied bodies and controllers a participant picks from the catalog (sizes within the
+   policy; a Jolt vehicle among them).
+4. User looks, then user bodies.
+5. User controllers (sandboxed, deterministic, metered), or a user's body driven by a server
+   controller of their choosing.
+
+### 5l. More streams, app and screen sharing, desktop audio (PLANNED)
+
+A participant sends more than one camera and mic, shares the Ariadne GL frame (the whole window or
+chosen windows), shares the desktop or other applications' windows, and sends the desktop's stereo
+audio in sync with it. Today the wire knows only `"camera"` and `"mic"`, and video is MJPEG only.
+The plan is [`CONFERENCE_SHARING.md`](CONFERENCE_SHARING.md). It covers:
+- named streams, with a capability record per client;
+- an inter-frame codec, H.264 with VP9 as the fallback;
+- a robust WebSocket path *and* a WebRTC media leg, chosen per stream;
+- capture on each platform, built for the browser and natively in parallel;
+- sync groups;
+- phases SH0–SH6.
+
+The owner settled its decisions on 2026-11-03.
+
 ---
 
 ## 6. Data plane & transport
@@ -1173,6 +1314,8 @@ mesh works first, auth hardens later (§5, Phase 8); **WASI server committed** (
 * LOD — geometry (holon §5h; **doc stale — landed PR #249+**; what the room uses since S7 is in its
   §4.1 status note): [`VISIBILITY-AND-LOD-ROADMAP.md`](VISIBILITY-AND-LOD-ROADMAP.md).
 * Physics (holon §5h): [`NAV-VEHICLE-PHYSICS-ROADMAP.md`](NAV-VEHICLE-PHYSICS-ROADMAP.md).
+* More streams, app and screen sharing, desktop audio (§5l):
+  [`CONFERENCE_SHARING.md`](CONFERENCE_SHARING.md).
 
 ---
 

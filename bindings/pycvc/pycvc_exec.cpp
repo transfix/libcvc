@@ -10,20 +10,26 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
+#include <cstdlib>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_host.h>      // Exec's async functions run through its host
 #include <cvc/state/state_exec/async_scheduler.h> // Exec drives a private async scheduler
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/detail/lock_home.h> // the Exec's lock home: blocking_sinks, progress
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/intrinsics.h>
+#include <cvc/state/state_exec/lock_manager.h> // the app's lock manager (Exec::lock_query)
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/types.h>
+#include <deque>
 #include <mutex>
 #include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <variant>
 #include <vector>
@@ -32,6 +38,7 @@ namespace pycvc {
 
 namespace {
 using namespace cvc::state_exec;
+using cvc::state_exec::detail::lock_home;
 
 std::string fetch_py_error() {
   if (!PyErr_Occurred())
@@ -323,6 +330,209 @@ void wait_idle(async_host &host) {
   Py_BEGIN_ALLOW_THREADS host.wait_idle();
   Py_END_ALLOW_THREADS
 }
+
+// Py_BEGIN_ALLOW_THREADS / Py_END_ALLOW_THREADS as a scope: the GIL is released for the scope's
+// life and taken back however it ends, a C++ exception included (a sibling process's on_complete
+// raising out of a step), so run()'s catch path quiesces and reaps holding the GIL.
+class gil_released {
+public:
+  gil_released() : ts_(PyEval_SaveThread()) {}
+  ~gil_released() { PyEval_RestoreThread(ts_); }
+  gil_released(const gil_released &) = delete;
+  gil_released &operator=(const gil_released &) = delete;
+
+private:
+  PyThreadState *ts_;
+};
+
+// A priority call (Exec.set_priority / get_priority, docs/STATE_EXEC_LOCKS.md 7.4) as plain C++
+// data: what it asks, and its answer. The thread that answers it never builds a Python object;
+// the caller does, once it no longer holds the control mutex and holds the GIL again.
+struct priority_query {
+  int pid = -1;
+  std::optional<int> set_to;         // set_priority's priority; a get_priority when empty
+  std::optional<priority_info> info; // get_priority's answer
+  bool applied = false;              // set_priority's answer
+  std::string error;                 // no answer could be had: the call raises RuntimeError
+  bool done = false;
+};
+
+// Answer `q` from `sched`. The caller holds the Exec's control mutex and may touch the scheduler:
+// it is the active run()'s thread, between steps, or no run() is active.
+void answer(async_scheduler &sched, priority_query &q) noexcept {
+  try {
+    if (q.set_to)
+      q.applied = sched.set_priority(q.pid, *q.set_to); // a host's change: unchecked
+    else
+      q.info = sched.get_priority(q.pid);
+  } catch (const std::exception &e) {
+    q.error = e.what();
+  } catch (...) {
+    q.error = "pycvc.Exec: the priority call failed";
+  }
+  q.done = true;
+}
+
+// The Exec (its ExecImpl's address) whose run() this thread is in, the innermost; null when none.
+thread_local const void *t_running_exec = nullptr;
+
+// Step (1) of a priority call: from a thread running another Exec's run(), raise at once, with the
+// GIL held and no mutex taken. A call that waited there would hold that run() up, and the other
+// Exec's run() could be waiting for this one.
+void check_not_in_other_run(const void *impl) {
+  if (t_running_exec != nullptr && t_running_exec != impl)
+    throw std::runtime_error("Exec.run is active on another thread");
+}
+
+// CVC_PYCVC_TEST_QUIESCE_DELAY_MS, for PR-8's test only: milliseconds run() sleeps, holding the
+// GIL, between its quiesce and its reap's lock. 0 when unset or not a positive number.
+int test_quiesce_delay_ms() {
+  const char *v = std::getenv("CVC_PYCVC_TEST_QUIESCE_DELAY_MS");
+  if (v == nullptr)
+    return 0;
+  char *end = nullptr;
+  const long ms = std::strtol(v, &end, 10);
+  return end != v && ms > 0 ? static_cast<int>(std::min(ms, 60000L)) : 0;
+}
+
+std::optional<scheduling_policy> policy_named(const std::string &name) {
+  if (name == "round_robin")
+    return scheduling_policy::round_robin;
+  if (name == "priority")
+    return scheduling_policy::priority;
+  if (name == "priority_rr")
+    return scheduling_policy::priority_rr;
+  return std::nullopt;
+}
+
+// The policy an Exec's scheduler is built with (docs/STATE_EXEC_LOCKS.md 7.3, 7.4): None reads
+// state_exec.policy under `root`, logging an unknown value to `app`'s log and using round_robin, as
+// app::exec_scheduler() does; a pycvc.scheduling_policy member or its name is that policy. Anything
+// else throws std::invalid_argument (ValueError). The GIL is held.
+scheduling_policy exec_policy(PyObject *policy, cvc::state &root, cvc::app &app) {
+  if (policy == nullptr || policy == Py_None) {
+    bool unknown = false;
+    const scheduling_policy p = policy_from_state(root, scheduling_policy::round_robin, &unknown);
+    if (unknown) {
+      const cvc::state *node = root.findDescendant("state_exec.policy");
+      app.log(1, "pycvc.Exec: state_exec.policy: unknown value '" +
+                     (node ? const_cast<cvc::state *>(node)->value() : std::string()) +
+                     "' (round_robin, priority or priority_rr); using round_robin");
+    }
+    return p;
+  }
+  std::optional<scheduling_policy> chosen;
+  std::string got;
+  PyObject *type = scheduling_policy_type();
+  const int is_member = type != nullptr ? PyObject_IsInstance(policy, type) : 0;
+  if (is_member == 1) {
+    // A member's name is its C++ name.
+    if (PyObject *name = PyObject_GetAttrString(policy, "name")) {
+      if (const char *s = PyUnicode_Check(name) ? PyUnicode_AsUTF8(name) : nullptr)
+        chosen = policy_named(s);
+      Py_DECREF(name);
+    }
+  } else if (PyUnicode_Check(policy)) {
+    if (const char *s = PyUnicode_AsUTF8(policy)) {
+      got = std::string(" '") + s + "'";
+      chosen = policy_named(s);
+    }
+  } else {
+    got = std::string(" (") + Py_TYPE(policy)->tp_name + ")";
+  }
+  PyErr_Clear(); // a lookup that failed above is the ValueError below
+  if (!chosen)
+    throw std::invalid_argument("pycvc.Exec: policy must be None, a pycvc.scheduling_policy or its "
+                                "name (round_robin, priority, priority_rr), not" +
+                                (got.empty() ? std::string(" that") : got));
+  return *chosen;
+}
+
+// The absolute key of the lock a process waits for, from its waiting_on ("lock /<key>", design
+// 5.10), or nullopt when it waits for none.
+std::optional<std::string> lock_waited_for(const process_info &info) {
+  static constexpr std::string_view tag = "lock /";
+  if (!info.waiting_on || std::string_view(*info.waiting_on).substr(0, tag.size()) != tag)
+    return std::nullopt;
+  return info.waiting_on->substr(tag.size());
+}
+
+// run()'s idle rule for the lock waits of an Exec's processes (docs/STATE_EXEC_LOCKS.md 9.2: a
+// lock wait of any of them counts, not only run()'s own): of the processes they ultimately wait
+// for (blocking_sinks, protocol 4.13) that are on another home, the latest of their homes'
+// progress within `idle_timeout` of `now`; nullopt when there is none. One search from all of
+// `pids` at once, under one hold of the manager's mutex. Each sink comes with its home's progress,
+// loaded under that mutex, so no other home is reached here. A sink on this home counts only
+// through run()'s own test, never because this run() pumps it (LT-8b).
+std::optional<std::chrono::steady_clock::time_point>
+progress_waited_for(const lock_home &home, std::span<const int> pids, double idle_timeout,
+                    std::chrono::steady_clock::time_point now) {
+  using clock = std::chrono::steady_clock;
+  std::optional<clock::time_point> latest;
+  for (const auto &[sink, ticks] : home.blocking_sinks(pids)) {
+    if (sink.home == home.id())
+      continue;
+    const clock::time_point progress{clock::duration(ticks)};
+    if (std::chrono::duration<double>(now - progress).count() <= idle_timeout)
+      latest = std::max(latest.value_or(progress), progress);
+  }
+  return latest;
+}
+
+// A lock wait to name in a kill's message (pid and absolute key): run()'s own (`root`), else one
+// of the other lock waiters', or nullopt. Read only for a kill.
+std::optional<std::pair<int, std::string>> lock_wait_named(const async_scheduler &sched,
+                                                           const process_info &root,
+                                                           std::span<const int> waiters) {
+  if (std::optional<std::string> key = lock_waited_for(root))
+    return std::make_pair(root.pid, std::move(*key));
+  for (int pid : waiters)
+    if (const std::optional<process_info> info = sched.get_process_info(pid))
+      if (std::optional<std::string> key = lock_waited_for(*info))
+        return std::make_pair(pid, std::move(*key));
+  return std::nullopt;
+}
+
+// A lock-query answer as the DSL's (lock-query) builds it (lock_intrinsics.cpp), its keys shown
+// under `root` (protocol 5.10). Plain C++ values: Exec::lock_query converts them once it holds the
+// GIL again.
+value_t lock_query_value(const lock_query_result &r, std::string_view root) {
+  const auto mode = [](lock_mode m) {
+    return value_t(std::string(m == lock_mode::exclusive ? "exclusive" : "shared"));
+  };
+  std::vector<value_t> held;
+  for (const lock_info &i : r.held) {
+    std::vector<value_t> pids;
+    for (int pid : i.pids)
+      pids.emplace_back(static_cast<int64_t>(pid));
+    held.push_back(make_dict(
+        {{"key", value_t(lock_home::show(i.key, root))},
+         {"mode", mode(i.mode)},
+         {"pids", make_list(std::move(pids))},
+         {"count", value_t(static_cast<int64_t>(i.count))},
+         {"generation", i.generation ? value_t(static_cast<int64_t>(*i.generation)) : nil_value},
+         {"abandoned", value_t(i.abandoned)}}));
+  }
+  std::vector<value_t> waiting;
+  for (const lock_waiter_info &w : r.waiting) {
+    // A string for one key, a list for several.
+    value_t key;
+    if (w.keys.size() == 1) {
+      key = value_t(lock_home::show(w.keys[0], root));
+    } else {
+      std::vector<value_t> keys;
+      for (const std::string &k : w.keys)
+        keys.emplace_back(lock_home::show(k, root));
+      key = make_list(std::move(keys));
+    }
+    waiting.push_back(
+        make_dict({{"key", std::move(key)},
+                   {"mode", mode(w.mode)},
+                   {"pid", w.pid ? value_t(static_cast<int64_t>(*w.pid)) : nil_value}}));
+  }
+  return make_dict(
+      {{"held", make_list(std::move(held))}, {"waiting", make_list(std::move(waiting))}});
+}
 } // namespace
 
 // A SYNCHRONOUS DSL native_fn: it runs inline on the thread stepping the scheduler (Exec::run's,
@@ -377,6 +587,8 @@ std::shared_ptr<PyObject> python_ref(PyObject *o) { return own_callable(o); }
 // pointer), so ictx must outlive any run — holding it here (Exec-lifetime)
 // satisfies that. Mirrors the C++ tests' make_exec_env().
 struct Exec::ExecImpl {
+  explicit ExecImpl(scheduling_policy policy) : sched(policy) {}
+
   std::shared_ptr<cvc::app> app; // co-own so root/ictx stay valid for our lifetime
   cvc::state *root = nullptr;
   // A PRIVATE async_scheduler owned by this Exec (NOT the app-wide one): it supports park/await +
@@ -401,14 +613,123 @@ struct Exec::ExecImpl {
   // verb during sync_run + drive_coros after), so no lock needed.
   PyObject *loop = nullptr;
   std::vector<pending_coro> pending_coros;
-  bool running = false; // re-entrancy guard: a registered fn/coro must not call back into run()
+  // Re-entrancy guard: a registered fn/coro (or a kernel, or another thread) must not call back
+  // into run(). run() tests and sets it at entry, and its RunGuard clears it last, both under
+  // control_mutex, so a second run() raises even while the first quiesces.
+  bool running = false;
+  // How long run() waits while its program is parked with nothing pending (Exec's idle_timeout),
+  // and the test-only quiesce delay (CVC_PYCVC_TEST_QUIESCE_DELAY_MS, read at construction).
+  double idle_timeout = 60.0;
+  int test_quiesce_delay_ms = 0;
+
+  // The priority calls (docs/STATE_EXEC_LOCKS.md 7.4). control_mutex stands in for the pump
+  // token: the scheduler is touched only by the thread of the active run() or, with none active,
+  // by a holder of the mutex and the GIL (the GIL is what Python's own calls on the scheduler,
+  // Exec.scheduler()'s methods, hold). The GIL comes before the mutex: every thread takes the
+  // mutex with the GIL held (run() at entry, for its quiesce and its reaps, in RunGuard; a
+  // priority call), and no thread ever waits for the GIL while it holds the mutex. Nothing under
+  // the mutex runs Python or frees a Python object (reap() cancels its program's async calls
+  // before it and frees the process after it), and a
+  // priority call that waits for run() releases the GIL under the mutex and takes it back only
+  // once the mutex is unlocked (priority_call).
+  std::mutex control_mutex;
+  std::condition_variable control_cv;
+  // A run() is active: set before its first step, cleared by its quiesce. Not `running`, which
+  // stays set through the quiesce.
+  bool accepting_queries = false;
+  std::thread::id run_thread; // the active run()'s thread
+  // The calls waiting for the active run() to answer them between steps.
+  std::deque<std::shared_ptr<priority_query>> queries;
+
+  // Answer every waiting call and wake its caller. control_mutex is held, on the active run()'s
+  // thread between steps (the query a call posts runs this), or in the quiesce. Builds no PyObject.
+  void answer_queries() {
+    if (queries.empty())
+      return;
+    for (const std::shared_ptr<priority_query> &q : queries)
+      answer(sched, *q);
+    queries.clear();
+    control_cv.notify_all();
+  }
+
+  // run()'s quiesce, on every exit path, after its last step and any kill and before it waits for
+  // its kernels: no call is left waiting, and from now on a call acts directly, under the mutex.
+  void quiesce() {
+    std::lock_guard<std::mutex> lock(control_mutex);
+    accepting_queries = false;
+    answer_queries();
+  }
+
+  // run()'s reap of its program (both exit paths), under control_mutex, so a thread acting
+  // directly during the quiesce never touches the process table while the reap erases from it.
+  // The GIL is held, taken before the mutex. Nothing that can run Python happens under the
+  // mutex, where a finalizer or a slot that released and retook the GIL, or called this Exec,
+  // would deadlock: the program's async calls are cancelled first (their charge reads the step
+  // rate, which a scheduler with an id publishes to the tree, where a state_observer's
+  // on_changed runs), and the process is freed after the unlock (its captured values may hold the
+  // last reference to a Python object: an exception's traceback, and the frames and locals in it).
+  void reap(int pid) {
+    if (test_quiesce_delay_ms > 0) // PR-8: a woken caller reaches its GIL while run() holds it
+      std::this_thread::sleep_for(std::chrono::milliseconds(test_quiesce_delay_ms));
+    sched.cancel_async_calls_of(pid);
+    process_ptr gone; // freed when this returns: the GIL held, the mutex not
+    std::lock_guard<std::mutex> lock(control_mutex);
+    sched.reap(pid, &gone);
+  }
+
+  // Steps (2)-(5) of a priority call: answer `q`, directly or by the active run().
+  void priority_call(priority_query &q);
 };
 
-Exec::Exec(const std::shared_ptr<cvc::app> &app) : impl_(std::make_shared<ExecImpl>()) {
-  if (!app)
-    throw std::invalid_argument("pycvc.Exec: null app handle");
+void Exec::ExecImpl::priority_call(priority_query &q) {
+  // (2) Take the control mutex with the GIL held, the order run() uses. Waiting for it so cannot
+  // deadlock: no holder of the mutex waits for the GIL. Holding both, a direct answer excludes
+  // run() and Python's own calls on the scheduler alike.
+  std::unique_lock<std::mutex> lock(control_mutex);
+  if (!accepting_queries || std::this_thread::get_id() == run_thread) {
+    // (3) No run() is active, or this is its thread (a registered function, coroutine or
+    // callback): act directly.
+    answer(sched, q);
+    return;
+  }
+  // (3) A run() pumps on another thread: post the call for it to answer between steps, and wait
+  // with the GIL released. Its quiesce answers it too, if the run ends first.
+  auto pending = std::make_shared<priority_query>(q);
+  queries.push_back(pending);
+  control_cmd cmd;
+  cmd.what = control_cmd::kind::query;
+  cmd.query = [this](scheduler_base &) {
+    std::lock_guard<std::mutex> answering(control_mutex);
+    answer_queries();
+  };
+  sched.post_control(q.pid, std::move(cmd));
+  // The GIL is released under the mutex (taking it there is what may never happen), and on every
+  // path, an exception included, the mutex is unlocked (4) before the GIL is taken back (5).
+  struct gil_released_until_unlocked {
+    std::unique_lock<std::mutex> &lock;
+    PyThreadState *ts = PyEval_SaveThread();
+    ~gil_released_until_unlocked() {
+      if (lock.owns_lock())
+        lock.unlock();
+      PyEval_RestoreThread(ts);
+    }
+  } nogil{lock};
+  control_cv.wait(lock, [&] { return pending->done; });
+  q = *pending; // (4) the answer, copied out under the mutex
+}
+
+Exec::Exec(const std::shared_ptr<cvc::app> &app, PyObject *policy, double idle_timeout) {
+  if (!app) // a RuntimeError, as it always was (a bad policy or idle_timeout is a ValueError)
+    throw std::runtime_error("pycvc.Exec: null app handle");
+  if (!(idle_timeout >= 0.0)) // NaN too
+    throw std::invalid_argument("pycvc.Exec: idle_timeout must be a number of seconds, 0 or more");
+  cvc::state &root = cvc::state::instance(*app);
+  // The policy is fixed for the scheduler's life (docs/STATE_EXEC_LOCKS.md 7.3).
+  impl_ = std::make_shared<ExecImpl>(exec_policy(policy, root, *app));
   impl_->app = app; // keep the app (and its compute pool) alive for as long as this Exec exists
-  impl_->root = &cvc::state::instance(*app);
+  impl_->root = &root;
+  impl_->idle_timeout = idle_timeout;
+  impl_->test_quiesce_delay_ms = test_quiesce_delay_ms();
   // Warm the compute pool now, on this thread, before any worker touches it. The pool is the app's;
   // only the scheduler is private.
   app->computePool();
@@ -419,6 +740,12 @@ Exec::Exec(const std::shared_ptr<cvc::app> &app) : impl_(std::make_shared<ExecIm
   // state_exec.defaults.parser.* / data.* keys override them for both.
   impl_->sched.set_parser_defaults(async_scheduler::host_parser_defaults());
   impl_->sched.set_data_defaults(async_scheduler::host_data_defaults());
+  // Its locks are the app's (docs/STATE_EXEC_LOCKS.md 8.4, 9.2): one namespace for every Exec and
+  // the app's exec scheduler, the home attached now. An Exec may run() on any Python thread, so
+  // its home attaches as a threaded host's: cross-thread wherever the build has threads, which a
+  // single-mode manager refuses, naming state_exec.locks.threading (8.3). Without threads (the
+  // static Emscripten pycvc) auto made the manager single, and it takes that attach (9.5).
+  impl_->sched.set_lock_manager(app->lock_manager(), cvc::state_exec::threaded_host_attach());
 
   impl_->host_proc = make_process();
   impl_->host_proc->pid = 0;
@@ -550,19 +877,34 @@ void Exec::register_async_coro(const std::string &name, PyObject *coro_fn) {
 }
 
 std::string Exec::run(const std::string &src) {
+  ExecImpl *const impl = impl_.get();
   // One Exec is driven by ONE thread. A registered fn/coro that calls back into run() (or a second
-  // thread) would corrupt the shared scheduler + asyncio loop, so reject re-entrancy up front.
-  if (impl_->running)
-    throw std::runtime_error("pycvc.Exec.run: re-entrant call — a registered fn/coro must not call "
-                             "run() (use a separate Exec per thread)");
-  impl_->running = true;
-  // On EVERY exit: clear the running flag, and cancel+drop any coroutine Tasks still pending for
-  // this run (e.g. an orphaned coroutine of a sibling process that never completed) so it can't
-  // suppress the NEXT run()'s idle timeout. PyGILState_Ensure re-acquires the GIL on whatever path
-  // we unwind.
+  // thread, or a kernel while this run() quiesces) would corrupt the shared scheduler + asyncio
+  // loop, so reject re-entrancy up front. The test and set are under the control mutex, taken with
+  // the GIL held (the one order allowed, docs/STATE_EXEC_LOCKS.md 7.4), and so is what makes this
+  // run() the active one before its first step: from here another thread's priority call waits
+  // for this run() to answer it between steps.
+  {
+    std::lock_guard<std::mutex> lock(impl->control_mutex);
+    if (impl->running)
+      throw std::runtime_error("pycvc.Exec.run: re-entrant call — a registered fn/coro must not "
+                               "call run() (use a separate Exec per thread)");
+    impl->running = true;
+    impl->run_thread = std::this_thread::get_id();
+    impl->accepting_queries = true;
+  }
+  const void *const outer_run = t_running_exec; // a run() of another Exec this one nests in
+  t_running_exec = impl;
+  // On EVERY exit: quiesce (if an exit below didn't), cancel+drop any coroutine Tasks still pending
+  // for this run (e.g. an orphaned coroutine of a sibling process that never completed) so it can't
+  // suppress the NEXT run()'s idle timeout, and clear the running flag, last. PyGILState_Ensure
+  // re-acquires the GIL on whatever path we unwind.
   struct RunGuard {
     ExecImpl *impl;
+    const void *outer_run;
     ~RunGuard() {
+      // A run() that ended before its loop (execute() threw) quiesces here; the others did.
+      impl->quiesce();
       if (!impl->pending_coros.empty()) {
         PyGILState_STATE gil = PyGILState_Ensure();
         for (pending_coro &pc : impl->pending_coros) {
@@ -574,9 +916,13 @@ std::string Exec::run(const std::string &src) {
         PyErr_Clear();
         PyGILState_Release(gil);
       }
+      t_running_exec = outer_run;
+      // Last, under the control mutex: until here a second run() raises.
+      std::lock_guard<std::mutex> lock(impl->control_mutex);
+      impl->run_thread = std::thread::id();
       impl->running = false;
     }
-  } run_guard{impl_.get()};
+  } run_guard{impl, outer_run};
 
   async_scheduler &sched = impl_->sched;
   cvc::state_exec::async_host &host = *impl_->host;
@@ -595,10 +941,15 @@ std::string Exec::run(const std::string &src) {
   static constexpr uint64_t kSliceSteps = 2000000;
   static constexpr double kSliceSeconds = 0.05;
   static constexpr double kCoroSliceSeconds = 0.005; // asyncio-loop slice per pump iteration
-  static constexpr double kIdleTimeoutSecs = 60.0; // parked with NO pending work this long -> bail
+  const double idle_timeout = impl->idle_timeout; // parked with NO pending work this long -> bail
   using clock = std::chrono::steady_clock;
   static constexpr auto kMaxIdleWait = std::chrono::milliseconds(50);
-  auto idle_deadline = clock::now() + std::chrono::duration<double>(kIdleTimeoutSecs);
+  // Saturating: an infinite idle_timeout never runs out.
+  const auto fresh_idle_deadline = [idle_timeout] {
+    return cvc::state_exec::detail::time_after(clock::now(), idle_timeout);
+  };
+  clock::time_point idle_deadline = fresh_idle_deadline();
+  std::vector<int> lock_waiters; // the idle rule's lock-waiting pids, reused across passes
   std::optional<value_t> result;
   std::optional<std::string> error; // set -> throw AFTER the pool is quiesced
   bool killed = false;              // the scheduler killed the process (error has its exit error)
@@ -611,14 +962,16 @@ std::string Exec::run(const std::string &src) {
       // Release the GIL AROUND the slice: a synchronous Python native_fn stepped here re-acquires
       // it via call_python's PyGILState_Ensure, while an in-flight pool worker running a Python
       // async body is never starved of the GIL by a co-runnable process — the deadlock the review
-      // found.
-      Py_BEGIN_ALLOW_THREADS sched.sync_run_steps(kSliceSteps, kSliceSeconds); // reads get_result
-      Py_END_ALLOW_THREADS
-          // Coroutine leg: step the asyncio loop a bounded slice and deliver any completed
-          // coroutine's result to its parked process (GIL held here). A no-op when no coroutine is
-          // pending, so a coro-free Exec is unaffected.
-          const bool coros_waited =
-              drive_coros(impl_->loop, impl_->pending_coros, host, kCoroSliceSeconds);
+      // found. A throw out of the slice (a sibling's on_complete) takes the GIL back first.
+      {
+        gil_released nogil;
+        sched.sync_run_steps(kSliceSteps, kSliceSeconds); // reads get_result
+      }
+      // Coroutine leg: step the asyncio loop a bounded slice and deliver any completed
+      // coroutine's result to its parked process (GIL held here). A no-op when no coroutine is
+      // pending, so a coro-free Exec is unaffected.
+      const bool coros_waited =
+          drive_coros(impl_->loop, impl_->pending_coros, host, kCoroSliceSeconds);
       result = sched.get_result(pid);
       if (result)
         break; // the program terminated
@@ -651,20 +1004,50 @@ std::string Exec::run(const std::string &src) {
       // Fast-path only on OUR OWN pid's runnability — has_runnable() scans siblings too, so gating
       // on it would spin (holding the GIL) while our program is actually parked awaiting a worker.
       if (info->status == process_status::ready || info->status == process_status::running) {
-        idle_deadline = clock::now() + std::chrono::duration<double>(kIdleTimeoutSecs);
+        idle_deadline = fresh_idle_deadline();
         continue; // our program has more to run — loop (the next slice releases the GIL again)
       }
       // Our pid is parked (waiting). A pool worker still in flight, or any sibling progress, means
       // a delivery is coming, so keep the idle clock fresh; only a park with NOTHING pending can
       // time out (e.g. a msg-recv on a channel nobody sends to) — safe to abandon then, no worker
-      // to outlive us.
+      // to outlive us. Work pending here is this home's progress too (docs/STATE_EXEC_LOCKS.md
+      // 8.4), which a waiter on another Exec behind one of our processes reads. A lock wait of
+      // any of our processes is pending only while another home it waits for makes progress
+      // (9.2), as of that progress: the idle window runs from it, so a wait behind a home that
+      // stopped is killed about idle_timeout after its last progress. It stores none, so two
+      // Execs whose waiters wait on each other's parked holders can't keep each other alive.
+      // A post in the lock port (a grant made on another thread after this pass's drain) is work
+      // pending too: the next pass applies it. The Exec's lock home is read where it is used, never
+      // kept across the loop.
+      lock_home &home = *sched.locks();
       if (host.in_flight() > 0 || !impl_->pending_coros.empty() || sched.has_runnable() ||
-          had_runnable) {
-        idle_deadline = clock::now() + std::chrono::duration<double>(kIdleTimeoutSecs);
-      } else if (clock::now() > idle_deadline) {
-        sched.kill(pid);
-        error = "pycvc.Exec.run: parked with no pending work (pid " + std::to_string(pid) + ")";
-        break;
+          had_runnable || home.port_pending()) {
+        const clock::time_point now = clock::now();
+        idle_deadline = cvc::state_exec::detail::time_after(now, idle_timeout);
+        home.store_progress(now);
+      } else {
+        // The lock rule, only while a process of ours waits for a lock: one search from all of
+        // them (lock_waiters, reused across passes).
+        lock_waiters.clear();
+        if (sched.lock_waiting_count() > 0) {
+          sched.lock_waiting_pids(lock_waiters);
+          if (const std::optional<clock::time_point> progress =
+                  progress_waited_for(home, lock_waiters, idle_timeout, clock::now()))
+            idle_deadline = std::max(idle_deadline,
+                                     cvc::state_exec::detail::time_after(*progress, idle_timeout));
+        }
+        if (clock::now() > idle_deadline) {
+          const std::optional<std::pair<int, std::string>> named =
+              lock_wait_named(sched, *info, lock_waiters);
+          sched.kill(pid);
+          error = "pycvc.Exec.run: parked with no pending work (pid " + std::to_string(pid);
+          if (named) // ", waiting for lock k" for our own wait, else ", pid 2 waiting for lock k"
+            *error +=
+                (named->first == pid ? std::string(",") : ", pid " + std::to_string(named->first)) +
+                " waiting for lock " + lock_home::show(named->second, impl->ictx.root_path);
+          *error += ")";
+          break;
+        }
       }
       // Idle-wait with the GIL released (so a worker can take it and deliver) until there is
       // work: a kernel's post or result, a sleeper's or timed wait's deadline, a call's timeout
@@ -678,25 +1061,28 @@ std::string Exec::run(const std::string &src) {
       if (!impl_->pending_coros.empty() && coros_waited)
         continue;
       clock::time_point until =
-          std::min(std::chrono::time_point_cast<clock::duration>(idle_deadline),
-                   clock::time_point(clock::now() + kMaxIdleWait));
+          std::min(idle_deadline, clock::time_point(clock::now() + kMaxIdleWait));
       if (!impl_->pending_coros.empty())
         until = std::min(until, clock::now() + std::chrono::milliseconds(5));
       if (sched.awaiting_frame_count() > 0)
         until = std::min(until, clock::now() + std::chrono::milliseconds(1));
-      Py_BEGIN_ALLOW_THREADS sched.wait_for_work(until);
-      Py_END_ALLOW_THREADS
+      gil_released nogil;
+      sched.wait_for_work(until);
     }
   } catch (...) {
     sched.kill(pid); // cancels its calls in flight
+    impl->quiesce(); // after the last step and the kill: no priority call is left waiting
     wait_idle(host); // never leave a kernel touching our (about-to-unwind) scheduler
-    sched.reap(pid);
+    impl->reap(pid); // under the control mutex
     throw;
   }
+  // The last step is done (and any kill): answer the priority calls still waiting, and let later
+  // ones act directly, under the control mutex.
+  impl->quiesce();
   // No kernel of this run may outlive it: wait (GIL released) BEFORE we reap the process or return
   // to Python, so a kernel can never post to / be destroyed against a torn-down scheduler.
   wait_idle(host);
-  sched.reap(pid); // drop the finished/killed process from the private scheduler (no leak)
+  impl->reap(pid); // drop the finished/killed process from the private scheduler (no leak)
   if (killed) {
     // A script read inside its process (parser.step_tokens) reports a syntax error only as the
     // exit error's text. Re-parse it, so a syntax error raises pycvc.parse_error with its position
@@ -711,6 +1097,54 @@ std::string Exec::run(const std::string &src) {
     throw std::runtime_error("pycvc.Exec.run: program produced no result (pid " +
                              std::to_string(pid) + ")");
   return render_result(*result);
+}
+
+bool Exec::set_priority(int pid, int priority) {
+  check_not_in_other_run(impl_.get()); // (1)
+  priority_query q;
+  q.pid = pid;
+  q.set_to = priority;
+  impl_->priority_call(q); // (2)-(5)
+  if (!q.error.empty())
+    throw std::runtime_error(q.error);
+  return q.applied;
+}
+
+PyObject *Exec::get_priority(int pid) {
+  check_not_in_other_run(impl_.get()); // (1)
+  priority_query q;
+  q.pid = pid;
+  impl_->priority_call(q); // (2)-(5): the GIL is held again, the control mutex isn't
+  if (!q.error.empty())
+    throw std::runtime_error(q.error);
+  if (!q.info)
+    Py_RETURN_NONE;
+  return priority_info_to_py(*q.info);
+}
+
+PyObject *Exec::lock_query(const std::string &prefix) {
+  // (lock-query prefix)'s reading of the prefix: "" (or blanks) is every key under the Exec's
+  // root, anything else a key as a program writes it (app-global with a leading '/').
+  ExecImpl *const impl = impl_.get();
+  const intrinsics_context &ctx = impl->ictx;
+  std::string abs = ctx.root_path;
+  if (prefix.find_first_not_of(" \t\r\n\f\v") != std::string::npos)
+    abs = cvc::state_exec::detail::resolve_lock_key(ctx, prefix, "Exec.lock_query");
+  // Straight to the manager, from any thread (docs/STATE_EXEC_LOCKS.md 7.4): it never waits for
+  // run() or the control mutex, only for the manager's mutex, which nothing holds while it waits
+  // for the GIL. The home is the viewer (only this Exec's pids show, owner ""): its manager and id
+  // are copied while the GIL is held, and the home itself is never touched without it. The GIL is
+  // released for the query and taken back once it has returned, and only then are Python objects
+  // made.
+  const lock_home &home = *impl->sched.locks();
+  const std::shared_ptr<lock_manager> manager = home.manager_ptr();
+  const cvc::state_exec::detail::home_id viewer = home.id();
+  lock_query_result r;
+  {
+    gil_released nogil;
+    r = manager->table().query(abs, viewer, "");
+  }
+  return value_to_py(lock_query_value(r, ctx.root_path));
 }
 
 cvc::state_exec::parse_options Exec::parser_defaults() const {

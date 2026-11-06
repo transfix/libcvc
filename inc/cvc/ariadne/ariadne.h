@@ -27,6 +27,7 @@
 #include <cvc/ariadne/widget.h>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -60,6 +61,15 @@ public:
   // Choose the surface. Must be set before render(); the Runtime does not own
   // the Backend (it must outlive the Runtime).
   void set_backend(Backend *backend);
+
+  // §5.11: the directory a picture's relative file:// URI resolves against (the document's own;
+  // AppRuntime::load sets it). Empty: the working directory.
+  void set_media_base(std::string dir);
+  // §5.11: whether a picture by URI the document draws is still loading.
+  bool media_busy() const;
+  // §5.11: whether the last frame drew a picture that was still loading (a placeholder), so a
+  // later frame shows more once media_busy() is false: a snapshot waits, then draws again.
+  bool media_stale() const;
 
   // Set/replace the widget tree. The swap is applied at the next frame boundary
   // (the top of render(), before any node is emitted), never mid-walk — the P0
@@ -150,6 +160,15 @@ public:
   // ENQUEUES action intents — it never runs a handler or reloads a document.
   void render();
 
+  // The frame clock that animations read rather than state (a spinner, Kind::Spinner): seconds
+  // since this Runtime was made, read from the steady clock at the top of each render(), so it
+  // moves with the host's frames whatever the document's programs are doing. A host that renders
+  // frames with no real time between them (a snapshot) pins it instead: set_frame_clock(t) holds t
+  // from the next render() on; nullopt goes back to the steady clock.
+  void set_frame_clock(std::optional<double> seconds);
+  // The clock's reading for the frame render() last drew.
+  double frame_clock() const;
+
   // Run every queued action event's handler, then clear the queue. Call once per
   // frame in the host loop, BEFORE your sim tick and OUTSIDE render().
   //
@@ -182,8 +201,11 @@ public:
   // Whether a scene adapter realizes this document's scene: (the gl.scene capability). AppRuntime
   // sets it from its SceneAdapter.
   void set_scene_capable(bool on);
+  // Whether that adapter's renderer runs the GLSL a document gives its scene (the gl.scene.shaders
+  // capability; SceneAdapter::runs_shaders). AppRuntime sets it with set_scene_capable().
+  void set_scene_shaders(bool on);
   // The facts the capability tokens read: the backend's Capabilities (all false without a
-  // backend) and set_scene_capable().
+  // backend), set_scene_capable() and set_scene_shaders().
   HostFacts host_facts() const;
   // What (has? "name") answers: a capability token that holds here, a function a program can
   // call (has_function), or a registered widget type. Programs and reactive expressions both have

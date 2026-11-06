@@ -1,12 +1,16 @@
 // ari's testing features end to end (docs/ARIADNE.md "Testing a document"): (quit code) as the
 // exit status of check and snapshot, and `ari test` over passing, failing, quitting, timing-out
-// and networked documents, in its line and TAP forms. The ari binary is run as a launcher would.
+// and networked documents, in its line and TAP forms; and `ari run` reporting a warning while the
+// document runs. The ari binary is run as a launcher would.
 
 #include "../cvc/tests/local_http_server.h"
 #include "ari_run.h"
 
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
+#include <iterator>
 #include <string>
 
 namespace fs = std::filesystem;
@@ -144,6 +148,32 @@ TEST(AriTest, FramesAndTimeout) {
   EXPECT_TRUE(has(hung, "timed out after 1 s in test 'waits'")) << hung.output;
 }
 
+// A program's time backstop under `ari test` is the run's --timeout, not a running app's 0.1 s:
+// a Debug build or a slow runner must not kill a program that is merely slow (a few thousand
+// steps of the chat component's took longer than that on one). --action-time S sets it, which is
+// how this shows the run's own setting is the one a program gets: a millionth of a second kills
+// the same program, whatever the machine.
+TEST(AriTest, AProgramMayRunAsLongAsTheTimeout) {
+  REQUIRE_ARI();
+  TempDir dir;
+  const fs::path work = dir.write("work.ari", doc("tests:\n"
+                                                  "  sums: |\n"
+                                                  "    (set n 0)\n"
+                                                  "    (for i (range 200) (set n (+ n i)))\n"
+                                                  "    (assert (= n 19900))\n"));
+  const AriRun by_default = ari("test " + quoted(work));
+  EXPECT_EQ(by_default.status, 0) << by_default.output;
+  const AriRun unlimited = ari("test --action-time 0 " + quoted(work));
+  EXPECT_EQ(unlimited.status, 0) << unlimited.output;
+  const AriRun tiny = ari("test --action-time 0.000001 " + quoted(work));
+  EXPECT_EQ(tiny.status, 1) << tiny.output;
+  EXPECT_TRUE(has(tiny, "test 'sums' did not complete: time_limit_exceeded")) << tiny.output;
+  const AriRun bad = ari("test --action-time soon " + quoted(work));
+  EXPECT_NE(bad.status, 0) << bad.output;
+  EXPECT_TRUE(has(bad, "--action-time needs a number of seconds, 0 or more, not 'soon'"))
+      << bad.output;
+}
+
 TEST(AriTest, TapAndUsage) {
   REQUIRE_ARI();
   TempDir dir;
@@ -189,3 +219,120 @@ TEST(AriTest, NetworkRulesAreSnapshots) {
   EXPECT_EQ(on.status, 0) << on.output;
   EXPECT_TRUE(has(on, "ok   " + p.string() + " (1 test, ")) << on.output;
 }
+
+// §6.6 functions under ari test: a library's functions imported and tested directly, and a module
+// that calls what its mount granted.
+TEST(AriTest, FunctionsImportedAndGranted) {
+  REQUIRE_ARI();
+  TempDir dir;
+  dir.write("semver.ari", "functions: |\n"
+                          "  (defun semver-part (v i) (int (nth (string.split v \".\") i)))\n"
+                          "  (defun semver-major (v) (semver-part v 0))\n");
+  dir.write("badge.ari", "init: (state-set \"major\" (str (semver-major (state-get \"v\"))))\n"
+                         "root:\n  - text: badge\n");
+  const std::string mount = "  - load: badge.ari\n    as: badge\n";
+  const fs::path p = dir.write("semver_test.ari",
+                               "meta: {min_libcvc: 3.7.0}\n"
+                               "import: semver.ari\n"
+                               "init: (state-set \"includes.badge.v\" \"3.7.5\")\n"
+                               "root:\n" +
+                                   mount + "    functions: [semver-major]\n" +
+                                   "tests:\n"
+                                   "  major: (assert (= (semver-major \"3.7.5\") 3))\n"
+                                   "  part: (assert (= (semver-part \"3.7.5\" 2) 5))\n"
+                                   "  module: |\n"
+                                   "    (assert (= (state-get \"includes.badge.major\") \"3\")\n"
+                                   "            (state-get \"includes.badge.major\"))\n");
+  const AriRun r = ari("test " + quoted(p));
+  EXPECT_EQ(r.status, 0) << r.output;
+  EXPECT_TRUE(has(r, "ok   " + p.string() + " (3 tests, ")) << r.output;
+
+  // Without the grant the module's init: cannot call it, and the load says so.
+  const fs::path q = dir.write("ungranted.ari", "meta: {min_libcvc: 3.7.0}\n"
+                                                "import: semver.ari\n"
+                                                "on_tick: (quit 0)\n"
+                                                "root:\n" +
+                                                    mount);
+  const AriRun u = ari("test " + quoted(q));
+  EXPECT_EQ(u.status, 1) << u.output;
+  EXPECT_TRUE(has(u, "calls (semver-major ...), which this host does not provide")) << u.output;
+}
+
+// §6.3 a module's on_tick: under ari test: it runs at the mount, so a document testing the module
+// sees it tick, and a failing one fails the document, named by its mount.
+TEST(AriTest, AModulesOnTickRuns) {
+  REQUIRE_ARI();
+  TempDir dir;
+  dir.write("poller.ari", "init: (state-set \"n\" 0)\n"
+                          "on_tick: (state-set \"n\" (+ 1 (int (state-get \"n\"))))\n"
+                          "root:\n  - text: poller\n");
+  const fs::path p = dir.write("poller_test.ari",
+                               "meta: {min_libcvc: 3.7.0}\n"
+                               "root:\n  - load: poller.ari\n    as: p\n"
+                               "tests:\n"
+                               "  ticks: |\n"
+                               "    (while (< (int (state-get \"includes.p.n\")) 3) (sleep 0.01))\n"
+                               "    (assert (not (state-exists \"n\")) \"the parent's own n\")\n");
+  const AriRun r = ari("test " + quoted(p));
+  EXPECT_EQ(r.status, 0) << r.output;
+  EXPECT_TRUE(has(r, "ok   " + p.string() + " (1 test, ")) << r.output;
+
+  dir.write("broken.ari", "on_tick: (assert (= 1 2))\nroot:\n  - text: broken\n");
+  const fs::path q = dir.write("broken_test.ari", "meta: {min_libcvc: 3.7.0}\n"
+                                                  "root:\n  - load: broken.ari\n    as: b\n");
+  const AriRun f = ari("test --frames 50 " + quoted(q));
+  EXPECT_EQ(f.status, 1) << f.output;
+  EXPECT_TRUE(has(f, "on_tick: of mount 'ui.docs.")) << f.output;
+  EXPECT_TRUE(has(f, ".includes.b' resident")) << f.output;
+}
+
+#ifndef _WIN32
+// docs/ARIADNE.md §2.4: `ari run` reports a warning while the document runs. Its on_tick: fails
+// once (and is restarted); the document never quits. While ari is still running the warning is
+// already in --log FILE and on stderr (a file here, not the terminal), and FTXUI's screen shows it
+// on the bottom line. A SIGTERM ends the run; the exit summary then counts it.
+TEST(AriRun, WarningsWhileTheDocumentRuns) {
+  REQUIRE_ARI();
+  TempDir dir;
+  const fs::path d = dir.write("w.ari", doc("init: (state-set \"n\" 0)\n"
+                                            "on_tick: |\n"
+                                            "  (state-set \"n\" (+ 1 (int (state-get \"n\"))))\n"
+                                            "  (if (= (int (state-get \"n\")) 3)\n"
+                                            "      (raise (ValueError \"boom\")))\n"));
+  const fs::path log = dir.path / "w.log", out = dir.path / "out.txt", err = dir.path / "err.txt";
+  // Start ari, wait (at most 20 s) for the warning in the log, then see that ari is still running.
+  const std::string script =
+      "\"" + std::string(std::getenv("ARI_BINARY")) + "\" run --log " + quoted(log) + " " +
+      quoted(d) + " </dev/null >" + quoted(out) + " 2>" + quoted(err) +
+      " & pid=$!; i=0; until grep -q 'ValueError: boom' " + quoted(log) +
+      " 2>/dev/null || [ $i -ge 400 ]; do i=$((i+1)); sleep 0.05; done; "
+      "kill -0 $pid && echo still-running; kill -TERM $pid; wait $pid; echo \"exit $?\"";
+  const std::string sh = "sh -c '" + [&] {
+    std::string q;
+    for (char c : script)
+      q += c == '\'' ? std::string("'\\''") : std::string(1, c);
+    return q;
+  }() + "'";
+  FILE *fp = popen(sh.c_str(), "r");
+  ASSERT_NE(fp, nullptr);
+  std::string said;
+  char buf[256];
+  while (std::fgets(buf, sizeof buf, fp))
+    said += buf;
+  pclose(fp);
+  const auto slurp = [](const fs::path &p) {
+    std::ifstream in(p, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+  };
+  const std::string logged = slurp(log), stderr_text = slurp(err), screen = slurp(out);
+  EXPECT_NE(said.find("still-running"), std::string::npos) << said << stderr_text;
+  EXPECT_NE(said.find("exit 143"), std::string::npos) << said; // 128 + SIGTERM
+  const std::string line = "ari: warning: on_tick: resident [";
+  EXPECT_NE(logged.find(line), std::string::npos) << logged;
+  EXPECT_NE(logged.find("failed: ValueError: boom"), std::string::npos) << logged;
+  EXPECT_NE(stderr_text.find(line), std::string::npos) << stderr_text;
+  EXPECT_NE(stderr_text.find("ari: 1 warning while the document ran (above)"), std::string::npos)
+      << stderr_text;
+  EXPECT_NE(screen.find(line), std::string::npos); // the notice line
+}
+#endif

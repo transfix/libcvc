@@ -16,13 +16,13 @@
 #include <unistd.h>
 #endif
 
-#include "inttree.h"
+#include <vector>
 
-IntTree *global_tree = NULL;
+#include "inttree.h"
 
 #define DEBUG_TREENo
 
-extern int verbose;
+#include "contour_verbose.h"
 
 using namespace std;
 
@@ -81,15 +81,23 @@ printf("IntTree destructor\n");
    delete [] maxlist;
 }
 
+// A seed of a leaf's list with the bound the list is sorted by. mincmp and maxcmp compare that
+// bound alone, the comparisons they made reading the tree through the global_tree global, so
+// qsort leaves the seeds, tied bounds included, in the order it did then.
+struct BoundedSeed {
+   float bound;
+   u_int seed;
+};
+
 int
 IntTree::mincmp(const void *p1, const void *p2)
 {
-   u_int s1 = *((u_int*)p1);
-   u_int s2 = *((u_int*)p2);
+   float b1 = ((const BoundedSeed*)p1)->bound;
+   float b2 = ((const BoundedSeed*)p2)->bound;
 
-   if (global_tree->seedMin(s1) < global_tree->seedMin(s2))
+   if (b1 < b2)
       return(-1);
-   if (global_tree->seedMin(s1) > global_tree->seedMin(s2))
+   if (b1 > b2)
       return(1);
    return(0);
 }
@@ -97,14 +105,32 @@ IntTree::mincmp(const void *p1, const void *p2)
 int
 IntTree::maxcmp(const void *p1, const void *p2)
 {
-   u_int s1 = *((u_int*)p1);
-   u_int s2 = *((u_int*)p2);
+   float b1 = ((const BoundedSeed*)p1)->bound;
+   float b2 = ((const BoundedSeed*)p2)->bound;
 
-   if (global_tree->seedMax(s1) > global_tree->seedMax(s2))
+   if (b1 > b2)
       return(-1);
-   if (global_tree->seedMax(s1) < global_tree->seedMax(s2))
+   if (b1 < b2)
       return(1);
    return(0);
+}
+
+// sortSeeds() - sort n seeds by min ascending, or with by_max by max descending
+void
+IntTree::sortSeeds(u_int *seeds, u_int n, int by_max)
+{
+   vector<BoundedSeed> bounded(n);
+   u_int i;
+
+   if (n == 0)
+      return;
+   for (i=0; i<n; i++) {
+      bounded[i].bound = by_max ? seedMax(seeds[i]) : seedMin(seeds[i]);
+      bounded[i].seed = seeds[i];
+   }
+   qsort(&bounded[0], n, sizeof(BoundedSeed), by_max ? maxcmp : mincmp);
+   for (i=0; i<n; i++)
+      seeds[i] = bounded[i].seed;
 }
 
 void
@@ -112,11 +138,9 @@ IntTree::Done(void)
 {
    int i;
 
-   global_tree = this;
-
    for (i=0; i<nleaf; i++) {
-      qsort(minlist[i].getCells(), maxlist[i].nCells(), sizeof(u_int), mincmp);
-      qsort(maxlist[i].getCells(), maxlist[i].nCells(), sizeof(u_int), maxcmp);
+      sortSeeds(minlist[i].getCells(), maxlist[i].nCells(), 0);
+      sortSeeds(maxlist[i].getCells(), maxlist[i].nCells(), 1);
    }
 }
 

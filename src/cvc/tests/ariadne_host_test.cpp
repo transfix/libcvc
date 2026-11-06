@@ -2,22 +2,30 @@
 // document's own arguments (doc_args.h: the argv list, the args: block, their read-only state and
 // the mount grant), and AppRuntime's host verbs and init: diagnostics.
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/doc_args.h>
 #include <cvc/ariadne/ftxui_backend.h>
 #include <cvc/ariadne/host_cli.h>
+#include <cvc/ariadne/host_warnings.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_exec/async_call.h> // async_kernel, async_call
+#include <cvc/state/state_exec/exceptions.h> // dsl_error
 #include <cvc/state/state_exec/types.h>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace cvc::ariadne;
@@ -30,6 +38,14 @@ namespace {
   do {                                                                                             \
     if (!AppRuntime::have_yaml())                                                                  \
       GTEST_SKIP() << "libcvc built without yaml-cpp";                                             \
+  } while (0)
+
+// For a test that presses a widget or mounts a module through the backend: without FTXUI the
+// backend is an inert stub that draws and feeds nothing, so the test would wait out drain_until.
+#define REQUIRE_FTXUI()                                                                            \
+  do {                                                                                             \
+    if (!FtxuiBackend::available())                                                                \
+      GTEST_SKIP() << "libcvc built without FTXUI";                                                \
   } while (0)
 
 std::string val(cvc::app &app, const std::string &path) {
@@ -104,6 +120,21 @@ TEST(AriadneHostCli, RuntimeFlagsComeBeforeTheDocumentAndTheRestIsItsOwn) {
   EXPECT_NE(misplaced_flag_note("ari", o.doc_args).find("'--fps'"), std::string::npos);
 }
 
+TEST(AriadneHostCli, SettleIsSecondsAboveZero) {
+  const char *ok[] = {"ari", "snapshot", "--settle", "2.5", "d.ari"};
+  const HostOptions o = parse_host_args(5, ok);
+  EXPECT_TRUE(o.error.empty()) << o.error;
+  EXPECT_DOUBLE_EQ(o.settle, 2.5);
+  const char *none[] = {"ari", "snapshot", "d.ari"};
+  EXPECT_DOUBLE_EQ(parse_host_args(3, none).settle, 0.0); // the default: kDefaultSettleSeconds
+  for (const char *bad : {"0", "-1", "soon", "2s"}) {
+    const char *argv[] = {"ari", "snapshot", "--settle", bad, "d.ari"};
+    EXPECT_NE(parse_host_args(5, argv).error.find("--settle needs a number of seconds"),
+              std::string::npos)
+        << bad;
+  }
+}
+
 TEST(AriadneHostCli, TimeoutIsSecondsAboveZero) {
   const char *ok[] = {"ari", "test", "--timeout", "2.5", "a.ari", "b.ari"};
   HostOptions o = parse_host_args(6, ok, {"--tap"});
@@ -114,6 +145,26 @@ TEST(AriadneHostCli, TimeoutIsSecondsAboveZero) {
   for (const char *bad : {"0", "-1", "soon", "2s"}) {
     const char *argv[] = {"ari", "test", "--timeout", bad, "a.ari"};
     EXPECT_NE(parse_host_args(5, argv).error.find("--timeout needs a number of seconds"),
+              std::string::npos)
+        << bad;
+  }
+}
+
+// ari test's --action-time: a program's time backstop in seconds, 0 for none; unset (below 0)
+// means the run's timeout.
+TEST(AriadneHostCli, ActionTimeIsSecondsFromZero) {
+  const char *none[] = {"ari", "test", "a.ari"};
+  EXPECT_LT(parse_host_args(3, none).action_time, 0.0); // the run's timeout
+  for (const auto &[text, seconds] : {std::pair<const char *, double>{"0.1", 0.1}, {"0", 0.0}}) {
+    const char *argv[] = {"ari", "test", "--action-time", text, "a.ari"};
+    const HostOptions o = parse_host_args(5, argv);
+    EXPECT_TRUE(o.error.empty()) << o.error;
+    EXPECT_DOUBLE_EQ(o.action_time, seconds) << text;
+    EXPECT_EQ(o.doc, "a.ari");
+  }
+  for (const char *bad : {"-1", "soon", "2s", "inf"}) {
+    const char *argv[] = {"ari", "test", "--action-time", bad, "a.ari"};
+    EXPECT_NE(parse_host_args(5, argv).error.find("--action-time needs a number of seconds"),
               std::string::npos)
         << bad;
   }
@@ -225,6 +276,41 @@ TEST(AriadneHostCli, NetworkFlagsTurnItOnAndCheckTheirOrigins) {
   }
 }
 
+TEST(AriadneHostCli, SignInFlags) {
+  const char *a[] = {"ari",
+                     "run",
+                     "--oidc-issuer",
+                     "https://id.example/realms/demo",
+                     "--oidc-client",
+                     "https://accounts.example=123=abc.apps",
+                     "--oidc-redirect-uri=https://app.example/ari.html",
+                     "--no-browser",
+                     "d.ari",
+                     "--no-browser"};
+  HostOptions o = parse_host_args(10, a);
+  ASSERT_TRUE(o.error.empty()) << o.error;
+  EXPECT_TRUE(o.net.enabled) << "naming an issuer implies --net";
+  ASSERT_EQ(o.net.oidc.issuers.size(), 1u);
+  EXPECT_EQ(o.net.oidc.issuers[0], "https://id.example/realms/demo");
+  ASSERT_EQ(o.net.oidc.clients.size(), 1u);
+  EXPECT_EQ(o.net.oidc.clients[0].first, "https://accounts.example");
+  EXPECT_EQ(o.net.oidc.clients[0].second, "123=abc.apps") << "the issuer ends at the first '='";
+  EXPECT_EQ(o.net.oidc.redirect_uri, "https://app.example/ari.html");
+  EXPECT_TRUE(o.net.oidc.no_browser);
+  ASSERT_EQ(o.doc_args.size(), 1u) << "after the document, --no-browser is the document's";
+  EXPECT_NE(host_flags_help().find("--oidc-issuer ISSUER"), std::string::npos);
+  for (const char *bad : {"http://id.example", "https://id.example/?q=1", "id.example"}) {
+    const char *argv[] = {"ari", "run", "--oidc-issuer", bad, "d.ari"};
+    EXPECT_NE(parse_host_args(5, argv).error.find("--oidc-issuer"), std::string::npos) << bad;
+  }
+  for (const char *bad : {"https://id.example", "https://id.example=", "=client", "http://x=y"}) {
+    const char *argv[] = {"ari", "run", "--oidc-client", bad, "d.ari"};
+    EXPECT_NE(parse_host_args(5, argv).error.find("--oidc-client is ISSUER=CLIENT_ID"),
+              std::string::npos)
+        << bad;
+  }
+}
+
 // ── parsing a document's arguments ──────────────────────────────────────────────────────────────
 
 TEST(AriadneHostCli, GraphicsImageAndCellSizeFlags) {
@@ -256,6 +342,31 @@ TEST(AriadneHostCli, GraphicsImageAndCellSizeFlags) {
   o = parse_host_args(5, after);
   EXPECT_TRUE(o.graphics.empty());
   EXPECT_NE(misplaced_flag_note("ari", o.doc_args).find("'--graphics'"), std::string::npos);
+}
+
+// --set KEY=VALUE collects in order (the value keeps any '=' of its own), and the runtime writes
+// each under the document's state root before the document loads, so its nodes seed from it.
+TEST(AriadneHostCli, SetWritesStateKeysBeforeTheDocument) {
+  const char *a[] = {"arigl", "snapshot", "--set",  "world.preset=2", "--set=/abs.key=a=b",
+                     "--set", "empty=",   "doc.ari"};
+  HostOptions o = parse_host_args(8, a);
+  ASSERT_TRUE(o.error.empty()) << o.error;
+  ASSERT_EQ(o.sets.size(), 3u);
+  EXPECT_EQ(o.sets[0], std::make_pair(std::string("world.preset"), std::string("2")));
+  EXPECT_EQ(o.sets[1], std::make_pair(std::string("/abs.key"), std::string("a=b")));
+  EXPECT_EQ(o.sets[2], std::make_pair(std::string("empty"), std::string()));
+  EXPECT_EQ(o.doc, "doc.ari");
+  const char *bad[] = {"ari", "run", "--set", "novalue", "d.ari"};
+  EXPECT_NE(parse_host_args(5, bad).error.find("--set is KEY=VALUE"), std::string::npos);
+  const char *nokey[] = {"ari", "run", "--set", "=1", "d.ari"};
+  EXPECT_FALSE(parse_host_args(5, nokey).error.empty());
+
+  cvc::app app;
+  apply_state_sets(app, "ui.docs.t", o.sets);
+  auto &st = cvc::state::instance(app);
+  EXPECT_EQ(st("ui.docs.t.world.preset").value(), "2");
+  EXPECT_EQ(st("abs.key").value(), "a=b") << "a leading '/' is from the app's root";
+  EXPECT_DOUBLE_EQ(st("ui.docs.t.world.preset").value<double>(), 2.0);
 }
 
 TEST(AriadneDocArgs, ParsesOptionsBoolsAndPositionals) {
@@ -556,6 +667,32 @@ TEST(AriadneLinkHoles, ASubtreeGrantReachesItsDescendantsOnly) {
 
 // ── host verbs and init: diagnostics ────────────────────────────────────────────────────────────
 
+// A load:ed module's init: has (has? ...) for the same host, as the document's init: and every
+// action do, so it can guard an optional host function the documented way.
+TEST(AriadneHostVerbs, AModulesInitAsksHas) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("mount_has");
+  write(dir, "mod.ari",
+        "init: |\n"
+        "  (state-set \"verb\" (if (has? \"module-probe-verb\") \"yes\" \"no\"))\n"
+        "  (state-set \"absent\" (if (has? \"no-such-verb\") \"yes\" \"no\"))\n"
+        "root: [ { text: m } ]\n");
+  const fs::path doc = write(dir, "p.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "root:\n  - load: mod.ari\n    as: m\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.mh");
+  art.set_backend(be);
+  art.register_verb("module-probe-verb", [] {});
+  art.load(doc.string());
+  art.runtime().render(); // mounts the module and runs its init:
+  EXPECT_EQ(val(app, "ui.docs.mh.includes.m.verb"), "yes");
+  EXPECT_EQ(val(app, "ui.docs.mh.includes.m.absent"), "no");
+  const std::vector<std::string> warnings = art.take_warnings();
+  EXPECT_TRUE(warnings.empty()) << warnings.front();
+}
+
 TEST(AriadneHostVerbs, EveryRegisteredVerbIsBound) {
   REQUIRE_YAML();
   const fs::path doc = write(test_dir("verbs"), "v.ari",
@@ -705,6 +842,7 @@ TEST(AriadneQuit, ABadCodeRaisesAndNothingCloses) {
 // `on: quit` (a menu item's event) still closes, with code 0.
 TEST(AriadneQuit, TheQuitEventCloses) {
   REQUIRE_YAML();
+  REQUIRE_FTXUI();
   cvc::app app;
   FtxuiBackend be;
   AppRuntime art(app, "ui.docs.qe");
@@ -751,6 +889,7 @@ TEST(AriadneRunProgram, DoneSaysHowItEnded) {
 // An on: action's failure names the program it came from.
 TEST(AriadneRunProgram, AnActionsFailureNamesItsProgram) {
   REQUIRE_YAML();
+  REQUIRE_FTXUI();
   const fs::path doc = write(test_dir("action_names"), "a.ari", once_on_tick("(set y 1)"));
   cvc::app app;
   FtxuiBackend be;
@@ -855,6 +994,83 @@ TEST(AriadneHostVerbs, AnAsyncVerbsErrorRaisesAtTheCall) {
       << val(app, "ui.docs.e.err");
 }
 
+// register_function: a host function with arguments and a value, inline on the drain thread; its
+// exception raises at the call. A later registration of the name replaces it.
+TEST(AriadneHostVerbs, AFunctionTakesArgumentsAndReturnsAValue) {
+  REQUIRE_YAML();
+  const fs::path doc =
+      write(test_dir("fn"), "f.ari", "meta: {min_libcvc: 3.4.0}\nroot:\n  - text: hi\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.f");
+  art.set_backend(be);
+  namespace se = cvc::state_exec;
+  art.register_function("mul", [](std::span<const se::value_t> args) -> se::value_t {
+    return se::value_t(std::get<int64_t>(args[0].v) * 10);
+  });
+  art.register_function("mul", [](std::span<const se::value_t> args) -> se::value_t {
+    return se::value_t(std::get<int64_t>(args[0].v) * std::get<int64_t>(args[1].v));
+  });
+  art.register_function("bad", [](std::span<const se::value_t>) -> se::value_t {
+    throw se::dsl_error("ValueError", "the function failed");
+  });
+  art.load(doc.string());
+  EXPECT_TRUE(art.runtime().has_function("mul"));
+  std::vector<std::string> how;
+  art.run_program("(state-set \"got\" (mul 6 7))", [&](const std::string &h) { how.push_back(h); });
+  art.run_program("(state-set \"err\" (try (bad) (catch (ValueError e) (get-attr e \"message\"))))",
+                  [&](const std::string &h) { how.push_back(h); });
+  EXPECT_TRUE(drain_until(art, [&] { return how.size() == 2; }));
+  EXPECT_EQ(val(app, "ui.docs.f.got"), "42"); // the second registration replaced the first
+  EXPECT_NE(val(app, "ui.docs.f.err").find("the function failed"), std::string::npos)
+      << val(app, "ui.docs.f.err");
+  EXPECT_EQ(how, (std::vector<std::string>{"", ""}));
+  art.run_program("(bad)", [&](const std::string &h) { how.push_back(h); });
+  EXPECT_TRUE(drain_until(art, [&] { return how.size() == 3; }));
+  EXPECT_EQ(how.back().rfind("failed", 0), 0u) << how.back(); // run_program's done says why
+}
+
+// register_async_function: an async function with arguments; its kernel runs off the drain thread
+// while the program parks, and with a done channel its value is posted there too.
+TEST(AriadneHostVerbs, AnAsyncFunctionTakesArgumentsAndPostsToItsChannel) {
+  REQUIRE_YAML();
+  const fs::path doc =
+      write(test_dir("afn"), "f.ari", "meta: {min_libcvc: 3.4.0}\nroot:\n  - text: hi\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.af");
+  art.set_backend(be);
+  namespace se = cvc::state_exec;
+  const std::thread::id drain = std::this_thread::get_id();
+  std::atomic<bool> off_thread{false};
+  art.register_async_function(
+      "slow-add",
+      [&](std::span<const se::value_t> args) -> se::async_kernel {
+        const int64_t a = std::get<int64_t>(args[0].v), b = std::get<int64_t>(args[1].v);
+        return [&, a, b](se::async_call &) -> se::value_t {
+          off_thread = std::this_thread::get_id() != drain;
+          std::this_thread::sleep_for(std::chrono::milliseconds(20));
+          return se::value_t(a + b);
+        };
+      },
+      "add.done");
+  art.load(doc.string());
+  // The call's wait is charged to the action (ariadne.limits.action_max_time, 0.1 s by default):
+  // on a loaded runner (macOS CI) starting the kernel and its 20 ms took longer, and the program
+  // was stopped (time_limit_exceeded) before it set anything. This tests the arguments and the
+  // channel, not the budget, so it gets the room a host gives (pycvc_gl.ariadne.Host: 30 s).
+  cvc::state::instance(app)("ariadne.limits.action_max_time").value(30.0);
+  std::string how = "running";
+  art.run_program(
+      "(begin (state-set \"got\" (slow-add 2 3)) (state-set \"chan\" (msg-recv \"add.done\")))",
+      [&](const std::string &h) { how = h; });
+  EXPECT_TRUE(drain_until(art, [&] { return val(app, "ui.docs.af.chan") == "5"; }))
+      << val(app, "ui.docs.af.chan") << " (the program: " << how << ")";
+  EXPECT_EQ(val(app, "ui.docs.af.got"), "5");
+  EXPECT_EQ(how, ""); // it finished
+  EXPECT_TRUE(off_thread.load());
+}
+
 TEST(AriadneHostVerbs, AFailingInitIsAWarning) {
   REQUIRE_YAML();
   const fs::path doc = write(test_dir("init"), "i.ari",
@@ -869,4 +1085,622 @@ TEST(AriadneHostVerbs, AFailingInitIsAWarning) {
   const std::vector<std::string> warns = art.load(doc.string());
   ASSERT_FALSE(warns.empty());
   EXPECT_NE(warns.front().find("init:"), std::string::npos) << warns.front();
+}
+
+// ── §6.6 functions: a document's, and the ones a mount grants its module ─────────────────────────
+
+namespace {
+// Press the only button on screen (Tab to it, Enter).
+void press_only_button(AppRuntime &art, FtxuiBackend &be) {
+  be.render_to_string(art.runtime(), 80, 24);
+  be.feed(art.runtime(), TermEvent::key_event("Tab"));
+  be.render_to_string(art.runtime(), 80, 24);
+  be.feed(art.runtime(), TermEvent::key_event("Return"));
+}
+} // namespace
+
+TEST(AriadneFunctions, EveryLaneOfTheDocumentCallsItsFunctions) {
+  REQUIRE_YAML();
+  REQUIRE_FTXUI();
+  const fs::path doc = write(test_dir("fn_lanes"), "f.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "functions: |\n"
+                             "  (defun tag (s) (str-concat \"<\" s \">\"))\n"
+                             "  (defun mark (key s) (state-set key (tag s)))\n"
+                             "init: (mark \"t.init\" \"init\")\n"
+                             "on_tick: (mark \"t.tick\" \"tick\")\n"
+                             "root:\n"
+                             "  - button: Go\n"
+                             "    on: (mark \"t.click\" \"click\")\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.fl");
+  art.set_backend(be);
+  const std::vector<std::string> warnings = art.load(doc.string());
+  EXPECT_TRUE(warnings.empty()) << warnings.front(); // the preflight knows tag and mark
+  EXPECT_EQ(val(app, "ui.docs.fl.t.init"), "<init>");
+  ASSERT_TRUE(drain_until(art, [&] { return val(app, "ui.docs.fl.t.tick") == "<tick>"; }));
+  press_only_button(art, be);
+  ASSERT_TRUE(drain_until(art, [&] { return val(app, "ui.docs.fl.t.click") == "<click>"; }));
+  std::string how = "pending";
+  art.runtime().run_program("(assert (= (tag \"t\") \"<t>\"))",
+                            [&](const std::string &h) { how = h; });
+  ASSERT_TRUE(drain_until(art, [&] { return how != "pending"; }));
+  EXPECT_EQ(how, "");
+  EXPECT_TRUE(art.take_warnings().empty());
+}
+
+// A granted function runs in the module: its writes land in the module's own subtree (code is
+// granted, not the parent's state), and a module granted nothing cannot call it.
+TEST(AriadneFunctions, AModuleCallsWhatItsMountGrants) {
+  REQUIRE_YAML();
+  REQUIRE_FTXUI();
+  const fs::path dir = test_dir("fn_grant");
+  write(dir, "mod.ari",
+        "init: (record \"init\")\n"
+        "root:\n"
+        "  - button: Go\n"
+        "    on: (record \"click\")\n");
+  const fs::path doc = write(dir, "p.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "functions: |\n"
+                             "  (defun stamp (s) (str-concat s \"!\"))\n"
+                             "  (defun record (s) (state-set \"out\" (stamp s)))\n"
+                             "root:\n"
+                             "  - load: mod.ari\n"
+                             "    as: m\n"
+                             "    functions: [record]\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.fg");
+  art.set_backend(be);
+  const std::vector<std::string> warnings = art.load(doc.string());
+  EXPECT_TRUE(warnings.empty()) << warnings.front();
+  be.render_to_string(art.runtime(), 80, 24); // mounts the module, runs its init:
+  EXPECT_EQ(val(app, "ui.docs.fg.includes.m.out"), "init!");
+  EXPECT_EQ(val(app, "ui.docs.fg.out"), ""); // not the parent's
+  press_only_button(art, be);
+  ASSERT_TRUE(drain_until(art, [&] { return val(app, "ui.docs.fg.includes.m.out") == "click!"; }));
+  EXPECT_TRUE(art.take_warnings().empty());
+}
+
+TEST(AriadneFunctions, AModuleGrantedNothingCannotCall) {
+  REQUIRE_YAML();
+  REQUIRE_FTXUI();
+  const fs::path dir = test_dir("fn_deny");
+  write(dir, "mod.ari", "root:\n  - button: Go\n    on: (record \"click\")\n");
+  const fs::path doc = write(dir, "p.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "functions: |\n  (defun record (s) (state-set \"out\" s))\n"
+                             "root:\n  - load: mod.ari\n    as: m\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.fd");
+  art.set_backend(be);
+  bool told = false; // the preflight names the program in the module
+  for (const std::string &w : art.load(doc.string()))
+    told = told || w.find("widget 'Go' calls (record ...)") != std::string::npos;
+  EXPECT_TRUE(told);
+  press_only_button(art, be);
+  std::vector<std::string> warnings;
+  ASSERT_TRUE(drain_until(art, [&] {
+    for (std::string &w : art.take_warnings())
+      warnings.push_back(std::move(w));
+    return !warnings.empty();
+  }));
+  EXPECT_NE(warnings.front().find("NameError"), std::string::npos) << warnings.front();
+  EXPECT_EQ(val(app, "ui.docs.fd.includes.m.out"), "");
+}
+
+// ── §12 a module's on_tick: ──────────────────────────────────────────────────────────────────────
+
+namespace {
+// A module counting its ticks in its own `n`, seeded by its init:, and stamping each with a
+// function its mount grants.
+const char *kTickModule = "init: (state-set \"n\" 0)\n"
+                          "on_tick: |\n"
+                          "  (state-set \"n\" (+ 1 (int (state-get \"n\"))))\n"
+                          "  (record \"tick\")\n"
+                          "root:\n  - text: counter\n";
+
+int count_of(cvc::app &app, const std::string &path) {
+  const std::string v = val(app, path);
+  return v.empty() ? -1 : std::stoi(v);
+}
+} // namespace
+
+// Its on_tick: runs every drain from its first frame, after its init:, chrooted to the mount with
+// the functions the mount granted; the document's own runs beside it.
+TEST(AriadneModuleTick, RunsAtTheMountWithItsFunctions) {
+  REQUIRE_YAML();
+  REQUIRE_FTXUI();
+  const fs::path dir = test_dir("mod_tick");
+  write(dir, "mod.ari", kTickModule);
+  const fs::path doc = write(dir, "p.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "functions: |\n"
+                             "  (defun record (s) (state-set \"out\" (str-concat s \"!\")))\n"
+                             "on_tick: (state-set \"own\" \"parent\")\n"
+                             "root:\n"
+                             "  - load: mod.ari\n"
+                             "    as: m\n"
+                             "    functions: [record]\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.mt");
+  art.set_backend(be);
+  const std::vector<std::string> warnings = art.load(doc.string());
+  EXPECT_TRUE(warnings.empty()) << warnings.front(); // the preflight knows record in the module
+  be.render_to_string(art.runtime(), 80, 24);        // mounts the module: init:, then its tick
+  ASSERT_TRUE(drain_until(art, [&] { return count_of(app, "ui.docs.mt.includes.m.n") >= 3; }));
+  EXPECT_EQ(val(app, "ui.docs.mt.includes.m.out"), "tick!");
+  EXPECT_EQ(val(app, "ui.docs.mt.n"), ""); // the parent's subtree is out of its reach
+  EXPECT_EQ(val(app, "ui.docs.mt.out"), "");
+  ASSERT_TRUE(drain_until(art, [&] { return val(app, "ui.docs.mt.own") == "parent"; }));
+  EXPECT_TRUE(art.take_warnings().empty());
+}
+
+// A failing module tick is reported under its mount, once.
+TEST(AriadneModuleTick, AFailureNamesTheMount) {
+  REQUIRE_YAML();
+  REQUIRE_FTXUI();
+  const fs::path dir = test_dir("mod_tick_fail");
+  write(dir, "mod.ari", "on_tick: (raise (ValueError \"boom\"))\nroot:\n  - text: m\n");
+  const fs::path doc = write(dir, "p.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "root:\n  - load: mod.ari\n    as: bad\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.mf");
+  art.set_backend(be);
+  art.load(doc.string());
+  be.render_to_string(art.runtime(), 80, 24);
+  std::vector<std::string> warnings;
+  ASSERT_TRUE(drain_until(art, [&] {
+    for (std::string &w : art.take_warnings())
+      warnings.push_back(std::move(w));
+    return !warnings.empty();
+  }));
+  EXPECT_NE(warnings.front().find("on_tick: of mount 'ui.docs.mf.includes.bad' resident"),
+            std::string::npos)
+      << warnings.front();
+  EXPECT_NE(warnings.front().find("boom"), std::string::npos) << warnings.front();
+}
+
+// A reconcile that drops the mount stops its tick; one that keeps it (a reload of the same
+// document) leaves it running.
+TEST(AriadneModuleTick, StopsWhenAReconcileDropsTheMount) {
+  REQUIRE_YAML();
+  REQUIRE_FTXUI();
+  const fs::path dir = test_dir("mod_tick_drop");
+  write(dir, "mod.ari", kTickModule);
+  const fs::path doc = write(dir, "p.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "functions: |\n  (defun record (s) s)\n"
+                             "root:\n  - load: mod.ari\n    as: m\n    functions: [record]\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.md");
+  art.set_backend(be);
+  art.load(doc.string());
+  be.render_to_string(art.runtime(), 80, 24);
+  const std::string n = "ui.docs.md.includes.m.n";
+  ASSERT_TRUE(drain_until(art, [&] { return count_of(app, n) >= 2; }));
+
+  art.load(doc.string()); // the same tree again: the module keeps ticking
+  be.render_to_string(art.runtime(), 80, 24);
+  const int before = count_of(app, n);
+  ASSERT_TRUE(drain_until(art, [&] { return count_of(app, n) >= before + 2; }));
+
+  art.set_root(group({text("gone")}));
+  be.render_to_string(art.runtime(), 80, 24); // the reconcile drops the mount
+  art.drain();                                // anything already woken finishes
+  const int stopped = count_of(app, n);
+  for (int i = 0; i < 20; ++i) {
+    art.drain();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  EXPECT_EQ(count_of(app, n), stopped);
+  EXPECT_TRUE(art.take_warnings().empty());
+}
+
+// A repeated mount ticks once per instance, each in its own subtree; an instance the count drops
+// stops.
+TEST(AriadneModuleTick, ARepeatedMountTicksPerInstance) {
+  REQUIRE_YAML();
+  REQUIRE_FTXUI();
+  const fs::path dir = test_dir("mod_tick_repeat");
+  write(dir, "mod.ari", kTickModule);
+  const fs::path doc = write(dir, "p.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "functions: |\n  (defun record (s) s)\n"
+                             "init: (state-set \"count\" 2)\n"
+                             "root:\n"
+                             "  - load: mod.ari\n"
+                             "    as: m\n"
+                             "    functions: [record]\n"
+                             "    repeat: (int (state-get \"count\"))\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.mr");
+  art.set_backend(be);
+  const std::vector<std::string> warnings = art.load(doc.string());
+  EXPECT_TRUE(warnings.empty()) << warnings.front();
+  be.render_to_string(art.runtime(), 80, 24);
+  const std::string n0 = "ui.docs.mr.includes.m.0.n", n1 = "ui.docs.mr.includes.m.1.n";
+  ASSERT_TRUE(drain_until(art, [&] { return count_of(app, n0) >= 2 && count_of(app, n1) >= 2; }));
+
+  cvc::state::instance(app)("ui.docs.mr.count").value(1);
+  be.render_to_string(art.runtime(), 80, 24); // instance 1 is no longer made
+  art.drain();
+  const int stopped = count_of(app, n1), kept = count_of(app, n0);
+  for (int i = 0; i < 20; ++i) {
+    art.drain();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  EXPECT_EQ(count_of(app, n1), stopped);
+  EXPECT_GT(count_of(app, n0), kept);
+}
+
+// The input lanes stay the outermost document's: a module's are ignored, and the load says so.
+TEST(AriadneModuleTick, AModulesInputLanesAreIgnoredWithAWarning) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("mod_lanes");
+  write(dir, "mod.ari",
+        "on_key: (state-set \"k\" 1)\non_signal: (state-set \"s\" 1)\nroot:\n  - text: m\n");
+  LoadResult lr = load_file(
+      write(dir, "p.ari", "meta: {min_libcvc: 3.4.0}\nroot:\n  - load: mod.ari\n").string());
+  ASSERT_TRUE(lr.ok) << lr.error;
+  int told = 0;
+  for (const std::string &w : lr.warnings)
+    told += w.find("the fragment's on_key: is ignored") != std::string::npos ||
+            w.find("the fragment's on_signal: is ignored") != std::string::npos;
+  EXPECT_EQ(told, 2);
+}
+
+// ── residents that stop are restarted ───────────────────────────────────────────────────────────
+
+namespace {
+// Drain until `pred`, gathering the warnings as they come.
+template <class Pred>
+bool drain_collecting(AppRuntime &art, std::vector<std::string> &warnings, Pred pred) {
+  return drain_until(art, [&] {
+    for (std::string &w : art.take_warnings())
+      warnings.push_back(std::move(w));
+    return pred();
+  });
+}
+
+bool any_has(const std::vector<std::string> &warnings, const std::string &text) {
+  return std::any_of(warnings.begin(), warnings.end(),
+                     [&](const std::string &w) { return w.find(text) != std::string::npos; });
+}
+} // namespace
+
+// A tick resident ended by an exception it didn't catch is reported, then started again.
+TEST(AriadneResidents, AFailedTickIsRestarted) {
+  REQUIRE_YAML();
+  const fs::path doc =
+      write(test_dir("resident_fail"), "r.ari",
+            "meta: {min_libcvc: 3.4.0}\n"
+            "on_tick: |\n"
+            "  (if (state-exists \"failed\")\n"
+            "      (state-set \"ran\" \"again\")\n"
+            "      (begin (state-set \"failed\" 1) (raise (ValueError \"first\"))))\n"
+            "root:\n  - text: r\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.rf");
+  art.set_backend(be);
+  art.load(doc.string());
+  std::vector<std::string> warnings;
+  ASSERT_TRUE(
+      drain_collecting(art, warnings, [&] { return val(app, "ui.docs.rf.ran") == "again"; }));
+  EXPECT_TRUE(any_has(warnings, "on_tick: resident [")) << warnings.size();
+  EXPECT_TRUE(any_has(warnings, "failed: ValueError: first"));
+}
+
+// A module's tick killed by its per-step cap is restarted, and runs once the cap allows it.
+TEST(AriadneResidents, AKilledModuleTickIsRestarted) {
+  REQUIRE_YAML();
+  REQUIRE_FTXUI();
+  const fs::path dir = test_dir("resident_kill");
+  write(dir, "mod.ari",
+        "init: (state-set \"n\" 0)\n"
+        "on_tick: |\n"
+        "  (collect (range 0 20000))\n" // a step that checks its time cap as it goes
+        "  (state-set \"n\" (+ 1 (int (state-get \"n\"))))\n"
+        "root:\n  - text: m\n");
+  const fs::path doc =
+      write(dir, "p.ari", "meta: {min_libcvc: 3.4.0}\nroot:\n  - load: mod.ari\n    as: m\n");
+  cvc::app app;
+  cvc::state::instance(app)("ariadne.limits.resident_max_step_time").value(std::string("1e-9"));
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.rk");
+  art.set_backend(be);
+  art.load(doc.string());
+  be.render_to_string(art.runtime(), 80, 24); // mounts the module: its tick starts, under the cap
+  std::vector<std::string> warnings;
+  ASSERT_TRUE(drain_collecting(art, warnings, [&] {
+    return any_has(warnings, "on_tick: of mount 'ui.docs.rk.includes.m'");
+  }));
+  EXPECT_TRUE(any_has(warnings, "] stopped: ")) << warnings.front();
+  cvc::state::instance(app)("ariadne.limits.resident_max_step_time").value(std::string("0"));
+  ASSERT_TRUE(drain_until(art, [&] { return count_of(app, "ui.docs.rk.includes.m.n") >= 2; }));
+}
+
+// One that stops every time soon after starting is given up after a few restarts, with a warning;
+// loading the document again starts it afresh.
+TEST(AriadneResidents, OneThatAlwaysFailsIsGivenUp) {
+  REQUIRE_YAML();
+  const fs::path doc = write(test_dir("resident_give_up"), "g.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "init: (state-set \"starts\" 0)\n"
+                             "on_tick: |\n"
+                             "  (state-set \"starts\" (+ 1 (int (state-get \"starts\"))))\n"
+                             "  (raise (ValueError \"always\"))\n"
+                             "root:\n  - text: g\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.gu");
+  art.set_backend(be);
+  art.load(doc.string());
+  std::vector<std::string> warnings;
+  ASSERT_TRUE(drain_collecting(art, warnings, [&] { return any_has(warnings, "not restarted"); }));
+  EXPECT_TRUE(any_has(warnings, "stopped 8 times in a row soon after starting")) << warnings.back();
+  EXPECT_EQ(count_of(app, "ui.docs.gu.starts"), 9); // the first run and 8 restarts
+  for (int i = 0; i < 200; ++i)
+    art.drain();
+  EXPECT_EQ(count_of(app, "ui.docs.gu.starts"), 9); // given up: no more
+
+  art.load(doc.string()); // its program set again: a fresh start (init: seeds starts to 0)
+  ASSERT_TRUE(drain_until(art, [&] { return count_of(app, "ui.docs.gu.starts") >= 1; }));
+}
+
+// ── warnings while a document runs (docs/ARIADNE.md §2.4) ──────────────────────────────────────
+
+// The listener hears each warning at the drain that produces it, with nothing taking them; the
+// summary at exit (take_warnings) still has it.
+TEST(AriadneLiveWarnings, TheListenerHearsEachAsItComes) {
+  REQUIRE_YAML();
+  const fs::path doc =
+      write(test_dir("live_warning"), "w.ari",
+            "meta: {min_libcvc: 3.4.0}\n"
+            "on_tick: |\n"
+            "  (if (state-exists \"failed\")\n"
+            "      (state-set \"ran\" \"again\")\n"
+            "      (begin (state-set \"failed\" 1) (raise (ValueError \"live\"))))\n"
+            "root:\n  - text: w\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.lw");
+  art.set_backend(be);
+  art.load(doc.string());
+  std::vector<std::string> heard;
+  art.set_warning_listener([&](const std::string &w) { heard.push_back(w); });
+  ASSERT_TRUE(drain_until(art, [&] { return any_has(heard, "failed: ValueError: live"); }));
+  EXPECT_TRUE(any_has(heard, "on_tick: resident [")) << heard.front();
+  ASSERT_TRUE(drain_until(art, [&] { return val(app, "ui.docs.lw.ran") == "again"; }));
+  EXPECT_EQ(heard.size(), 1u); // once per message, restarted or not
+  const std::vector<std::string> all = art.take_warnings();
+  EXPECT_EQ(all, heard);
+  EXPECT_TRUE(art.take_warnings().empty());
+  art.set_warning_listener(nullptr);
+}
+
+// A host's LiveWarnings: each warning appended to the log file with the time, the latest as a
+// notice while it is recent, and a log it cannot open reported.
+TEST(AriadneLiveWarnings, LogFileAndNotice) {
+  const fs::path dir = test_dir("live_warning_log");
+  const fs::path log = dir / "warnings.log";
+  {
+    LiveWarnings live("ari", log.string(), /*stderr_when_not_a_terminal=*/false);
+    ASSERT_EQ(live.error(), "");
+    EXPECT_EQ(live.notice(), "");
+    live.log("ari: from the load");
+    EXPECT_EQ(live.count(), 0u); // the load's: logged, not counted
+    live("ari: on_tick: resident [t] stopped: killed");
+    live("ari: on_tick: resident [t] failed: ValueError: x");
+    EXPECT_EQ(live.count(), 2u);
+    const std::string n = live.notice();
+    EXPECT_NE(n.find("ari: warning: on_tick: resident [t] failed: ValueError: x"),
+              std::string::npos)
+        << n;
+    EXPECT_NE(n.find("2 warnings; in " + log.string()), std::string::npos) << n;
+    EXPECT_EQ(live.notice(-1.0), ""); // no longer recent
+  }
+  std::ifstream in(log);
+  std::vector<std::string> lines;
+  for (std::string line; std::getline(in, line);)
+    lines.push_back(line);
+  ASSERT_EQ(lines.size(), 3u);
+  EXPECT_NE(lines[0].find(" ari: warning: from the load"), std::string::npos) << lines[0];
+  EXPECT_NE(lines[1].find(" ari: warning: on_tick: resident [t] stopped: killed"),
+            std::string::npos);
+  EXPECT_EQ(lines[2][4], '-'); // 2026-10-30 18:31:02 ari: ...
+  EXPECT_EQ(lines[2][13], ':');
+
+  LiveWarnings nowhere("ari", (dir / "no" / "such" / "dir.log").string(), false);
+  EXPECT_NE(nowhere.error().find("--log "), std::string::npos);
+}
+
+// ── §7.6 a module's own requires: ───────────────────────────────────────────────────────────────
+
+namespace {
+// A module whose tick calls `absent-verb`, which no host provides, behind a has? guard, with
+// `requires` as its requires: block ("" for none).
+std::string guarded_module(const std::string &requires_block) {
+  return requires_block + "on_tick: (if (has? \"absent-verb\") (state-set \"t\" (absent-verb)))\n"
+                          "root:\n  - text: m\n";
+}
+
+std::vector<std::string> load_warnings(const fs::path &doc, const std::string &prefix) {
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, prefix);
+  art.set_backend(be);
+  return art.load(doc.string());
+}
+
+int count_with(const std::vector<std::string> &warnings, const std::string &text) {
+  return static_cast<int>(
+      std::count_if(warnings.begin(), warnings.end(),
+                    [&](const std::string &w) { return w.find(text) != std::string::npos; }));
+}
+} // namespace
+
+// A module's optional entry covers its own call: the load says the host lacks it, once, and does
+// not also warn about the call.
+TEST(AriadneModuleRequires, AnOptionalEntryCoversTheModulesCalls) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("mod_req_optional");
+  write(dir, "m.ari", guarded_module("requires:\n  - {name: absent-verb, optional: true}\n"));
+  const fs::path doc =
+      write(dir, "p.ari", "meta: {min_libcvc: 3.4.0}\nroot:\n  - load: m.ari\n    as: m\n");
+  const std::vector<std::string> warnings = load_warnings(doc, "ui.docs.mro");
+  EXPECT_EQ(count_with(warnings, "optional requirement absent-verb (module 'includes.m') is not "
+                                 "available on this host"),
+            1);
+  EXPECT_EQ(count_with(warnings, "calls (absent-verb"), 0);
+  EXPECT_EQ(warnings.size(), 1u) << warnings.front();
+}
+
+// Without it the call warns, as before; the document's own entry covers its modules too.
+TEST(AriadneModuleRequires, TheDocumentsEntryCoversItsModules) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("mod_req_document");
+  write(dir, "m.ari", guarded_module(""));
+  const fs::path bare =
+      write(dir, "bare.ari", "meta: {min_libcvc: 3.4.0}\nroot:\n  - load: m.ari\n    as: m\n");
+  EXPECT_EQ(count_with(load_warnings(bare, "ui.docs.mrb"),
+                       "on_tick: of mount 'includes.m' calls (absent-verb"),
+            1);
+  const fs::path covered = write(dir, "covered.ari",
+                                 "meta: {min_libcvc: 3.4.0}\n"
+                                 "requires:\n  - {name: absent-verb, optional: true}\n"
+                                 "root:\n  - load: m.ari\n    as: m\n");
+  const std::vector<std::string> warnings = load_warnings(covered, "ui.docs.mrc");
+  EXPECT_EQ(count_with(warnings, "calls (absent-verb"), 0);
+  EXPECT_EQ(count_with(warnings, "optional requirement absent-verb is not available"), 1);
+}
+
+// A module's entries are its own: they don't cover a call its parent makes.
+TEST(AriadneModuleRequires, AModulesEntryDoesNotCoverItsParent) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("mod_req_parent");
+  write(dir, "m.ari", guarded_module("requires:\n  - {name: absent-verb, optional: true}\n"));
+  const fs::path doc =
+      write(dir, "p.ari",
+            "meta: {min_libcvc: 3.4.0}\n"
+            "on_tick: (if (has? \"absent-verb\") (state-set \"t\" (absent-verb)))\n"
+            "root:\n  - load: m.ari\n    as: m\n");
+  const std::vector<std::string> warnings = load_warnings(doc, "ui.docs.mrp");
+  EXPECT_EQ(count_with(warnings, "on_tick: calls (absent-verb"), 1);
+  EXPECT_EQ(count_with(warnings, "of mount 'includes.m' calls (absent-verb"), 0);
+}
+
+// A module's required entry the host lacks fails the whole load, naming the module.
+TEST(AriadneModuleRequires, ARequiredEntryTheHostLacksFailsTheLoad) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("mod_req_hard");
+  write(dir, "m.ari", guarded_module("requires: [absent-verb]\n"));
+  const fs::path doc =
+      write(dir, "p.ari", "meta: {min_libcvc: 3.4.0}\nroot:\n  - load: m.ari\n    as: m\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.mrh");
+  art.set_backend(be);
+  try {
+    art.load(doc.string());
+    FAIL() << "the load should fail";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find("this host does not provide what the document requires: "
+                                         "absent-verb (module 'includes.m')"),
+              std::string::npos)
+        << e.what();
+  }
+}
+
+// ── the resource intrinsics report the running process ─────────────────────────────────────────
+
+// Ariadne's lanes run programs on the app's scheduler with a placeholder ictx.proc; (step-count),
+// (time-elapsed) and the limits read the process the scheduler is stepping, not the placeholder.
+TEST(AriadneResourceIntrinsics, AResidentSeesItsOwnProcess) {
+  REQUIRE_YAML();
+  const fs::path doc =
+      write(test_dir("resource_intrinsics"), "r.ari",
+            "meta: {min_libcvc: 3.4.0}\n"
+            "root:\n  - text: hi\n"
+            "init: (state-set \"t.done\" \"\")\n"
+            "on_tick: |\n"
+            "  (if (= (state-get \"t.done\") \"\")\n"
+            "    (begin\n"
+            "      (state-set \"t.done\" \"started\")\n"
+            "      (set t0 (time-elapsed))\n"
+            "      (set n 0)\n"
+            "      (while (and (< (- (time-elapsed) t0) 0.05) (< n 100000)) (set n (+ n 1)))\n"
+            "      (state-set \"t.steps\" (str (> (step-count) 0)))\n"
+            "      (state-set \"t.timed\" (str (>= (- (time-elapsed) t0) 0.05)))\n"
+            "      (state-set \"t.done\" \"yes\")))\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.ri");
+  art.set_backend(be);
+  art.load(doc.string());
+  // Before the fix (time-elapsed) read 0 here, so only the iteration cap ended the loop.
+  ASSERT_TRUE(drain_until(art, [&] { return val(app, "ui.docs.ri.t.done") == "yes"; }))
+      << val(app, "ui.docs.ri.t.done");
+  EXPECT_EQ(val(app, "ui.docs.ri.t.steps"), "#t");
+  EXPECT_EQ(val(app, "ui.docs.ri.t.timed"), "#t"); // the clock, not the cap, ended it
+  EXPECT_TRUE(art.take_warnings().empty());
+}
+
+TEST(AriadneResourceIntrinsics, AnActionSeesItsLimits) {
+  REQUIRE_YAML();
+  REQUIRE_FTXUI();
+  const fs::path doc = write(test_dir("resource_limits"), "a.ari",
+                             "meta: {min_libcvc: 3.4.0}\nroot:\n  - text: hi\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.rl");
+  art.set_backend(be);
+  art.load(doc.string());
+  art.drain();
+  // An action's caps (ariadne.limits: 5000 steps and 0.1 s by default) are its process's.
+  art.set_root(group({button("Go", "(state-set \"limits\" (str-concat (str (time-limit)) \" \" "
+                                   "(str (> (step-count) 0))))")}));
+  be.render_to_string(art.runtime(), 80, 24);
+  be.feed(art.runtime(), TermEvent::key_event("Tab"));
+  be.render_to_string(art.runtime(), 80, 24);
+  be.feed(art.runtime(), TermEvent::key_event("Return"));
+  ASSERT_TRUE(drain_until(art, [&] { return !val(app, "ui.docs.rl.limits").empty(); }));
+  const std::string limits = val(app, "ui.docs.rl.limits");
+  EXPECT_NE(limits.rfind("0 ", 0), 0u) << limits; // a time limit, not the placeholder's 0
+  EXPECT_NE(limits.find(" #t"), std::string::npos) << limits;
+}
+
+// A watch set from a resident fires there.
+TEST(AriadneResourceIntrinsics, AResidentsWatchFires) {
+  REQUIRE_YAML();
+  const fs::path doc = write(
+      test_dir("resident_watch"), "w.ari",
+      "meta: {min_libcvc: 3.4.0}\n"
+      "root:\n  - text: hi\n"
+      "init: (begin (state-set \"t.phase\" \"\") (state-set \"t.x\" \"0\"))\n"
+      "on_tick: |\n"
+      "  (if (= (state-get \"t.phase\") \"\")\n"
+      "    (begin (state-set \"t.phase\" \"watching\")\n"
+      "      (state-watch \"t.x\" (lambda (path value) (state-set \"t.seen\" (state-get path)))))\n"
+      "    (if (= (state-get \"t.phase\") \"watching\")\n"
+      "      (begin (state-set \"t.phase\" \"set\") (state-set \"t.x\" \"7\"))))\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.rw");
+  art.set_backend(be);
+  art.load(doc.string());
+  EXPECT_TRUE(drain_until(art, [&] { return val(app, "ui.docs.rw.t.seen") == "7"; }))
+      << "phase " << val(app, "ui.docs.rw.t.phase") << ", seen '" << val(app, "ui.docs.rw.t.seen")
+      << "'";
+  for (const std::string &w : art.take_warnings())
+    ADD_FAILURE() << w;
 }

@@ -12,12 +12,31 @@ cmake_minimum_required(VERSION 3.15)
 #              find_package(cvc CONFIG); the recipe points CMAKE_PREFIX_PATH at the deps prefix.
 # ---------------------------------------------------------------------------
 if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
-  # Standalone (a cvcpkg recipe builds ONLY this dir): the installed cvc SDK pulls its Boost
-  # dependency in via find_dependency, so the Boost imported targets exist in this scope.
+  # Standalone (the `arisrv` cvcpkg recipe builds ONLY this dir): the installed cvc SDK pulls its
+  # Boost dependency in via find_dependency, so the Boost imported targets exist in this scope.
   project(arisrv LANGUAGES CXX)
-  set(CMAKE_CXX_STANDARD 17)
+  set(CMAKE_CXX_STANDARD 20)
   set(CMAKE_CXX_STANDARD_REQUIRED ON)
   find_package(cvc CONFIG REQUIRED)
+  # The relay needs a transport, as in-tree (src/CMakeLists.txt adds this directory only with
+  # one). Here the SDK decides: CVC_ENABLE_GRPC and CVC_ENABLE_WS are PUBLIC definitions on cvc,
+  # so they are in its exported interface when that libcvc was built with them. Every libcvc
+  # through 3.7.8 was published without either (#943): a relay built on one of those has no
+  # transport for a client to join by.
+  get_target_property(_arisrv_cvc_defs cvc::cvc INTERFACE_COMPILE_DEFINITIONS)
+  set(_arisrv_transports "")
+  if("CVC_ENABLE_GRPC" IN_LIST _arisrv_cvc_defs)
+    list(APPEND _arisrv_transports gRPC)
+  endif()
+  if("CVC_ENABLE_WS" IN_LIST _arisrv_cvc_defs)
+    list(APPEND _arisrv_transports WebSocket)
+  endif()
+  if(NOT _arisrv_transports)
+    message(FATAL_ERROR "arisrv: the libcvc SDK in ${cvc_DIR} was built without CVC_ENABLE_GRPC "
+                        "and CVC_ENABLE_WS, so a relay built on it could serve no client")
+  endif()
+  string(REPLACE ";" " and " _arisrv_transports "${_arisrv_transports}")
+  message(STATUS "arisrv: the libcvc SDK carries the ${_arisrv_transports} transports")
 else()
   # In-tree: cvc links Boost PUBLIC (CMake/SetupBoost.cmake), so cvc's INTERFACE_LINK_LIBRARIES
   # references the Boost:: imported targets. find_package created those in src/cvc's directory

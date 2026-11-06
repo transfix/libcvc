@@ -42,7 +42,10 @@ if (-not (Test-Path $emscriptenToolchain)) { throw "Emscripten toolchain file no
 function Invoke-CvcWasmCMakeBuild {
     param(
         [string[]]$ExtraArgs = @(),
-        [string]$SourceDir = $env:CVC_SOURCE_DIR
+        [string]$SourceDir = $env:CVC_SOURCE_DIR,
+        # Press past targets that fail (ninja -k 0), as a build-wasm.sh's `-- -k 0 || true`
+        # does; the caller then checks for the outputs it needs.
+        [switch]$KeepGoing
     )
     $findRootPathArgs = @()
     if ($env:CVC_DEPS_PREFIX) {
@@ -64,8 +67,13 @@ function Invoke-CvcWasmCMakeBuild {
     & cmake @allArgs
     if ($LASTEXITCODE -ne 0) { throw "cmake configure failed" }
 
-    & cmake --build $env:CVC_BUILD_DIR -j $env:CVC_JOBS
-    if ($LASTEXITCODE -ne 0) { throw "cmake build failed" }
+    if ($KeepGoing) {
+        & cmake --build $env:CVC_BUILD_DIR -j $env:CVC_JOBS -- -k 0
+        if ($LASTEXITCODE -ne 0) { Write-Host "cmake build: some targets failed (keep-going)" }
+    } else {
+        & cmake --build $env:CVC_BUILD_DIR -j $env:CVC_JOBS
+        if ($LASTEXITCODE -ne 0) { throw "cmake build failed" }
+    }
 
     & cmake --install $env:CVC_BUILD_DIR
     if ($LASTEXITCODE -ne 0) { throw "cmake install failed" }

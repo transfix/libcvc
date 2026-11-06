@@ -82,8 +82,17 @@ public:
   // protected getProp() below stays as the polymorphic implementation hook.
   vtkProp *prop() { return getProp(); }
 
+  // Every 3-D prop this node and the nodes under it can put in a renderer, shown or not: what a
+  // second renderer leaves out to draw the scene without this subtree (a viewport that shows only
+  // some of the scene's tags). 2-D overlays (labels) are not included; a mirror skips those anyway.
+  // With subtree false, this node's own props only.
+  void collectViewProps(std::vector<vtkProp *> &out, bool subtree = true);
+
 protected:
   virtual vtkProp *getProp() = 0;
+  // This node's own part of collectViewProps(): getProp(). A node with more 3-D actors than that
+  // (a bounding box, a grid's planes) adds them too.
+  virtual void appendViewProps(std::vector<vtkProp *> &out);
   virtual void handleStateChanged(const std::string &childState) override;
 
   // Hand a visibility change on to the children. setVisible() calls this after

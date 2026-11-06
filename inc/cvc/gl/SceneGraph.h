@@ -16,6 +16,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 #include <vtkSmartPointer.h>
 
@@ -216,6 +217,12 @@ public:
   // when selectLOD() reports rung changes; a no-op with shadows off.
   void invalidateShadowBake();
 
+  // How many times the shadow maps have been baked since shadows were last turned
+  // on (0 with them off). A bake re-renders every caster from every casting
+  // light, so a scene where nothing moves should add none per frame: for the
+  // tests, and for telling a frame's cost apart.
+  std::uint64_t shadowBakes() const;
+
   // Shadow-map texture resolution (pixels per side). VTK defaults to a low 256,
   // which aliases thin casters (a forest of trunks/needles shows torn, "inverted"
   // shadows) and speckles broad surfaces with self-shadow acne. Larger is crisper
@@ -223,6 +230,41 @@ public:
   // and re-made at the new size by the next frame's bake.
   void setShadowResolution(int pixels);
   int shadowResolution() const { return m_shadowResolution; }
+
+  // Spend the shadow maps on a sphere around (x, y, z) of `radius` world units instead of the
+  // whole scene. VTK fits each light's map to everything there is, so over a city a 4096 map
+  // gives several metres a texel and a vehicle no shadow at all. Focused, each light's map is
+  // aimed from the light at the sphere and just covers it (a spot keeps its own position, a
+  // directional light looks along its direction at it); whatever lies between the light and the
+  // sphere still casts into it. Outside the map the scene is lit, unshadowed, and the shadows
+  // fade out over its last tenth so its edge never shows. A follow camera's subject is the usual
+  // focus: move it every frame, and the maps re-bake when it has moved a fiftieth of the radius.
+  // radius <= 0 is clearShadowFocus().
+  void setShadowFocus(double x, double y, double z, double radius);
+  void clearShadowFocus();
+  bool shadowFocused() const { return m_shadowFocusRadius > 0.0; }
+
+  // The shadow edges' softness: the radius, in shadow-map texels, of the disc the lookup filters
+  // over (16 taps; 0 = one hard tap). Default 2.
+  void setShadowSoftness(double texels);
+  double shadowSoftness() const { return m_shadowSoftness; }
+
+  // Shadows in a second renderer that draws this scene's props (a mirror viewport, from its own
+  // camera): a pass chain that RECEIVES the maps this scene's renderer bakes and bakes none of its
+  // own. The maps are in light space, so any camera reads them. The other renderer must hold the
+  // same lights in the same order (a mirror copies them) and draw after this scene's renderer in
+  // the frame (a higher layer). Null while shadows are off. The pass reads the current baker and
+  // softness: when shadowReceiverKey() changes (shadows switched off and on, a new renderer, a new
+  // softness), make a new one.
+  vtkSmartPointer<vtkRenderPass> makeShadowReceiverPass() const;
+  // A whole shadow chain of its own for another renderer, as installShadowPasses builds for this
+  // scene's: a baker of its own (this scene's resolution, interval, softness and focus when made)
+  // that bakes the casters THAT renderer draws. For a view that leaves some of the scene out and
+  // must not show their shadows. Null while shadows are off; remake it when shadowReceiverKey()
+  // changes, as for a receiver.
+  vtkSmartPointer<vtkRenderPass> makeShadowPasses() const;
+  // What a receiver pass was made from; a pass made under another key is stale. Null while off.
+  std::pair<const void *, double> shadowReceiverKey() const;
   void update();
 
   // Process pending events on the main thread
@@ -476,6 +518,10 @@ private:
   };
   void syncShadowState();     // mirror the shadow setters into cvc::state
   void installShadowPasses(); // build the pass chain on m_renderer
+  // The chain installShadowPasses puts on m_renderer (and makeShadowPasses on another), and its
+  // baker.
+  vtkSmartPointer<vtkRenderPass>
+  buildShadowPasses(vtkSmartPointer<vtkShadowMapBakerPass> &bakerOut) const;
   void removeShadowPasses();  // free its GL objects, then take it off m_renderer
   std::unique_ptr<cvc::gl::ShadowSettings> m_shadowSettings;
   bool m_applyingShadowState = false; // re-entry guard: state -> setter -> state
@@ -486,6 +532,11 @@ private:
   bool m_shadowsEnabled = false;
   int m_shadowInterval = 1;                             // re-bake every N frames
   int m_shadowResolution = 1024;                        // shadow-map pixels per side
+
+  // setShadowFocus (a radius of 0: the whole scene) and setShadowSoftness (texels).
+  double m_shadowFocus[3] = {0.0, 0.0, 0.0};
+  double m_shadowFocusRadius = 0.0;
+  double m_shadowSoftness = 2.0;
   // The installed chain (its root pass) and its baker, held so the interval and
   // resolution stay live. Only ever a chain on m_renderer, so its GL objects can
   // be freed against m_renderer's window.

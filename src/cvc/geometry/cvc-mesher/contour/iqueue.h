@@ -19,7 +19,11 @@
 #include "utilities.h"
 #include "queue.h"
 
-extern int verbose;
+#ifndef WIN32
+#include <unistd.h>	// sleep
+#endif
+
+#include "contour_verbose.h"
 
 template <class T, class K>
 class IndexedQueue;
@@ -99,7 +103,7 @@ protected:
 static int
 hashFun_iq(const int &i)
 {
-   static double A = (sqrt(5.0f)-1)/2.0;
+   const double A = (sqrt(5.0f)-1)/2.0;
 
    return((int)floor(30011 * frac(A*i)));
 }

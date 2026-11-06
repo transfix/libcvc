@@ -151,14 +151,21 @@ se2_flights load_plant_log_runs(const std::vector<std::string> &dirs) {
     if (seeds.size() != shape[0])
       throw std::runtime_error(dir + ": meta.json's flight_seed does not match flights.npy");
     const double dt = meta.get<double>("dt");
+    std::vector<std::string> columns;
+    if (const auto layout = meta.get_child_optional("layout"))
+      for (const auto &kv : *layout)
+        columns.push_back(kv.second.get_value<std::string>());
+    if (!columns.empty() && columns.size() != shape[2])
+      throw std::runtime_error(dir + ": meta.json's layout does not match flights.npy");
     if (first) {
       all.rows = shape[1];
       all.width = static_cast<int>(shape[2]);
       all.dt = dt;
+      all.columns = columns;
       first = false;
     } else if (shape[1] != all.rows || static_cast<int>(shape[2]) != all.width ||
-               std::fabs(dt - all.dt) > 1e-12) {
-      throw std::runtime_error(dir + ": rows, width or dt differ from the first run's");
+               std::fabs(dt - all.dt) > 1e-12 || columns != all.columns) {
+      throw std::runtime_error(dir + ": rows, width, layout or dt differ from the first run's");
     }
     for (std::size_t f = 0; f < shape[0]; ++f)
       for (int j = 6; j < all.width; ++j)
@@ -180,6 +187,7 @@ se2_flights select_seeds(const se2_flights &f, const std::vector<int> &seeds, bo
   out.width = f.width;
   out.dt = f.dt;
   const std::size_t n = f.rows * f.width;
+  out.columns = f.columns;
   for (std::size_t i = 0; i < f.count; ++i) {
     const bool in = std::find(seeds.begin(), seeds.end(), f.seed[i]) != seeds.end();
     if (in != keep)
@@ -187,6 +195,34 @@ se2_flights select_seeds(const se2_flights &f, const std::vector<int> &seeds, bo
     out.data.insert(out.data.end(), f.flight(i), f.flight(i) + n);
     out.seed.push_back(f.seed[i]);
     ++out.count;
+  }
+  return out;
+}
+
+se2_flights select_inputs(const se2_flights &f, const std::vector<std::string> &inputs) {
+  if (f.columns.size() != static_cast<std::size_t>(f.width))
+    throw std::invalid_argument("select_inputs: the flights carry no column names");
+  std::vector<int> col;
+  for (const std::string &name : inputs) {
+    const auto at = std::find(f.columns.begin() + 6, f.columns.end(), name);
+    if (at == f.columns.end())
+      throw std::invalid_argument("select_inputs: the flights have no input \"" + name + "\"");
+    col.push_back(static_cast<int>(at - f.columns.begin()));
+  }
+  se2_flights out;
+  out.count = f.count;
+  out.rows = f.rows;
+  out.width = 6 + static_cast<int>(col.size());
+  out.seed = f.seed;
+  out.dt = f.dt;
+  out.columns.assign(f.columns.begin(), f.columns.begin() + 6);
+  out.columns.insert(out.columns.end(), inputs.begin(), inputs.end());
+  out.data.reserve(f.count * f.rows * out.width);
+  for (std::size_t r = 0; r < f.count * f.rows; ++r) {
+    const double *row = f.data.data() + r * f.width;
+    out.data.insert(out.data.end(), row, row + 6);
+    for (const int c : col)
+      out.data.push_back(row[c]);
   }
   return out;
 }

@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cvc/ariadne/avatar_sim.h>
+#include <cvc/ariadne/conference/room_avatar.h>
 #include <cvc/ariadne/conference/room_scene.h>
 #include <cvc/ariadne/holon.h>
 #include <cvc/core/app.h>
@@ -242,6 +243,65 @@ int main() {
         "teardown removes the avatar markers");
   }
 
+  // ── everyone is drawn as they chose, the local avatar included ───────────
+  // Two viewers of the same room: A (whose own avatar it is) and B. Each draws A from the room
+  // tree, so both draw the same thing -- before any choice and after one.
+  {
+    SceneGraph sga(app, "room_looks_a"), sgb(app, "room_looks_b");
+    SceneRenderer viewa(sga, 64, 64, /*offscreen=*/true, "main");
+    SceneRenderer viewb(sgb, 64, 64, /*offscreen=*/true, "main");
+    holon h(holon_role::client);
+    body_state a0, b0;
+    a0.position = vec3{2.0, 0.0, 0.0};
+    b0.position = vec3{0.0, 2.0, 0.0};
+    h.add_participant("A", /*local=*/true, a0);
+    h.add_participant("B", /*local=*/false, b0);
+    const double dt = h.clock().fixed_dt();
+    {
+      room_view as_a(viewa, app, "looks", "A", sga.getStatePrefix());
+      room_view as_b(viewb, app, "looks", "B", sgb.getStatePrefix());
+      const auto frames = [&](int n) {
+        for (int i = 0; i < n; ++i) { // past the views' periodic re-read of the choices
+          h.advance(dt);
+          as_a.update(h, dt);
+          as_b.update(h, dt);
+        }
+      };
+      frames(1);
+      rs::avatar_look la, lb;
+      float auto_a[3];
+      rs::auto_avatar_color("A", auto_a);
+      chk(as_a.avatar_look("A", la) && as_b.avatar_look("A", lb) && la.key == lb.key &&
+              la.body[0] == auto_a[0] && la.body[1] == auto_a[1] && la.body[2] == auto_a[2],
+          "before any choice A looks the same to itself as to B: its automatic colour");
+
+      rs::seed_avatar_catalog(app, "looks");
+      rs::write_avatar_choice(app, "looks", "A", rs::avatar_choice{"crimson", "tophat"});
+      frames(20);
+      chk(as_a.avatar_look("A", la) && la.color_id == "crimson" && la.accessory_id == "tophat" &&
+              la.parts.size() == 2 && sga.getGraphics("avatar_A_part1") != nullptr,
+          "A's choice rebuilds its own marker in crimson with the top hat");
+      chk(as_b.avatar_look("A", lb) && lb.key == la.key && sgb.getGraphics("avatar_A_part1"),
+          "and B draws A exactly so");
+      double body[3], crown[3];
+      chk(node_xyz(sga, "avatar_A", body) && node_xyz(sga, "avatar_A_part1", crown) &&
+              near(crown[0], body[0], 1e-4) && near(crown[1], body[1], 1e-4) &&
+              crown[2] > body[2] + 0.5 * rs::kAvatarHeight,
+          "the hat's crown sits on top of the body");
+
+      rs::write_avatar_choice(app, "looks", "A", rs::avatar_choice{"crimson", "none"});
+      frames(20);
+      chk(sga.getGraphics("avatar_A_part0") == nullptr &&
+              sgb.getGraphics("avatar_A_part0") == nullptr,
+          "taking the hat off removes its parts for everyone");
+      h.remove_participant("B");
+      frames(1);
+      chk(sgb.getGraphics("avatar_B") == nullptr, "a departed avatar's marker goes");
+    }
+    chk(sga.getGraphics("avatar_A") == nullptr && sgb.getGraphics("avatar_A") == nullptr,
+        "teardown removes every marker");
+  }
+
   // ── no marker for a peer whose pose is not known yet ──────────────────────
   {
     SceneGraph sg(app, "room_pose_unknown");
@@ -466,6 +526,66 @@ int main() {
       }
     }
     chk(sg.getAllGraphicsOfType<LodGraphicsNode>().empty(), "teardown removes the LOD objects");
+  }
+
+  // ── an idle room bakes no shadows ─────────────────────────────────────────
+  // Every pose a marker is given moves a shadow caster, and a moved caster re-bakes the maps (in
+  // the browser, rebuilding every caster's shaders too). A standing avatar's shown pose changes by
+  // rounding from frame to frame (under mouse look its facing is the camera's heading); here its
+  // facing flips between a yaw and the next double up. That must not re-pose the marker; a turn
+  // and a walk must.
+  {
+    SceneGraph sg(app, "room_idle");
+    SceneRenderer view(sg, 96, 96, /*offscreen=*/true, "main");
+    holon h(holon_role::client);
+    rs::seed_default_scene(app, "idle");
+    body_state a0;
+    a0.position = vec3{1.0, 0.0, 0.0};
+    h.add_participant("A", /*local=*/true, a0);
+    const double dt = h.clock().fixed_dt();
+    room_view rv(view, app, "idle", "A", sg.getStatePrefix());
+    const double eye[3] = {6.0, -6.0, 5.0}, focal[3] = {0.0, 0.0, 0.5};
+    look(view, eye, focal);
+    sg.addSpotLight(-4.0, -4.0, 8.0, 0.0, 0.0, 0.0, 40.0, 1.0, 1.0, 1.0, 0.9);
+    if (!sg.setShadowsEnabled(true)) {
+      printf("  skipped the idle-room bakes: shadows unavailable\n");
+    } else {
+      sg.setShadowUpdateInterval(1); // the conference's: the baker decides every frame
+      const auto frame = [&](double yaw, double speed) {
+        avatar_intent in;
+        in.yaw = yaw;
+        in.move = vec3{speed * std::cos(yaw), speed * std::sin(yaw), 0.0};
+        h.set_intent("A", in);
+        h.advance(dt);
+        rv.update(h, dt);
+        sg.processEvents();
+        view.render();
+      };
+      const double yaw = 2.0943951023931957; // a camera's heading, as mouse look hands it over
+      for (int i = 0; i < 10; ++i) // realized, the marker built, turned and posed, the first bakes
+        frame(yaw, 0.0);
+      const std::uint64_t idle0 = sg.shadowBakes();
+      for (int i = 0; i < 60; ++i)
+        frame(i % 2 ? yaw : std::nextafter(yaw, 4.0), 0.0);
+      const std::uint64_t idle = sg.shadowBakes() - idle0;
+      chk(idle == 0, "60 frames standing still, the facing wandering by rounding: " +
+                         std::to_string(idle) + " bakes (want 0)");
+      const std::uint64_t turn0 = sg.shadowBakes();
+      frame(yaw + 0.3, 0.0);
+      frame(yaw + 0.3, 0.0);
+      chk(sg.shadowBakes() > turn0, "turning bakes");
+      double before[3], after[3];
+      node_xyz(sg, "avatar_A", before);
+      const std::uint64_t walk0 = sg.shadowBakes();
+      for (int i = 0; i < 10; ++i)
+        frame(yaw + 0.3, 2.0);
+      node_xyz(sg, "avatar_A", after);
+      const double walked = std::hypot(after[0] - before[0], after[1] - before[1]);
+      chk(sg.shadowBakes() - walk0 >= 9 && walked > 0.05,
+          "walking bakes (nearly) every frame, and the marker walks: " +
+              std::to_string(sg.shadowBakes() - walk0) + " bakes in 10 frames, " +
+              std::to_string(walked) + " m");
+    }
   }
 
   printf("%s (%d failure%s)\n", fails ? "FAILED" : "OK", fails, fails == 1 ? "" : "s");

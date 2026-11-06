@@ -80,9 +80,11 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/nav_es.h
   ../../inc/cvc/physics/plant_log.h
   ../../inc/cvc/physics/plant_log_scene.h
+  ../../inc/cvc/physics/jolt_rollout.h
   ../../inc/cvc/state/state_hash_partition.h
   ../../inc/cvc/state/distributed_state_session.h
   ../../inc/cvc/state/state_transport.h
+  ../../inc/cvc/state/pose_snapshot.h
   ../../inc/cvc/state/state_transport_inproc.h
   ../../inc/cvc/state/state_transport_ipc.h
   ../../inc/cvc/state/state_transport_grpc.h
@@ -95,6 +97,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/media/media_opus.h
   ../../inc/cvc/geometry/bunny.h
   ../../inc/cvc/volume/endians.h
+  ../../inc/cvc/utility/archive.h
   ../../inc/cvc/utility/utility.h
   ../../inc/cvc/state/state_object.h
   ../../inc/cvc/state/state_list.h
@@ -136,6 +139,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/process.h
   ../../inc/cvc/core/text.h
   ../../inc/cvc/core/thread_pool.h
+  ../../inc/cvc/core/thread_class.h
   ../../inc/cvc/volume/volmagick.h
   ../../inc/cvc/geometry/geometry_file_io.h
   ../../inc/cvc/model/model.h
@@ -155,6 +159,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/nav/route_follower.h
   ../../inc/cvc/nav/plant_types.h
   ../../inc/cvc/nav/plant_ledger.h
+  ../../inc/cvc/nav/rollout_plant.h
+  ../../inc/cvc/nav/dyn4_ledger.h
   ../../inc/cvc/nav/terrain.h
   ../../inc/cvc/nav/vehicle_plant.h
   ../../inc/cvc/ph/mat3.h
@@ -204,6 +210,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/lsys/cloud.h
   ../../inc/cvc/lsys/water.h
   ../../inc/cvc/world/surface.h
+  ../../inc/cvc/world/terrain_source.h
   ../../inc/cvc/world/world_geometry.h
   ../../inc/cvc/world/city_bundle.h
   ../../inc/cvc/world/grid.h
@@ -217,6 +224,9 @@ set(INCLUDE_FILES
   ../../inc/cvc/world/raster.h
   ../../inc/cvc/world/npy.h
   ../../inc/cvc/world/bundle.h
+  ../../inc/cvc/world/generated_world.h
+  ../../inc/cvc/world/terrain_lod.h
+  ../../inc/cvc/world/cloud_layer.h
 )
 
 # Source files
@@ -230,6 +240,7 @@ set(SOURCE_FILES
   core/process.cpp
   core/text.cpp
   core/thread_pool.cpp
+  core/thread_class.cpp
   processing/bilateral_filter.cpp
   processing/contrast_enhancement.cpp
   volume/cvcraw_io.cpp
@@ -242,6 +253,7 @@ set(SOURCE_FILES
   geometry/sliced_ldlt.cpp
   geometry/geometry_file_io.cpp
   image/image.cpp
+  image/image_decode.cpp
   image/magick_io.cpp
   image/stb_io.cpp
   model/model.cpp
@@ -287,6 +299,7 @@ set(SOURCE_FILES
   state/state_exec/lock_manager.cpp
   state/state_exec/lock_home.cpp
   state/state_exec/lock_intrinsics.cpp
+  state/state_exec/priority.cpp
   core/world_clock.cpp
   core/world_clock_binding.cpp
   core/clock_driver.cpp
@@ -312,6 +325,7 @@ set(SOURCE_FILES
   physics/nav_es.cpp
   physics/plant_log.cpp
   physics/plant_log_scene.cpp
+  physics/jolt_rollout.cpp
   state/state_change_journal.cpp
   state/state_subscription_router.cpp
   state/state_sync_adapter.cpp
@@ -346,6 +360,7 @@ set(SOURCE_FILES
   state/state_cluster_membership.cpp
   state/distributed_state_session.cpp
   state/state_message.cpp
+  utility/archive.cpp
   utility/utility.cpp
   utility/cuda_utils.cpp
   volume/voxels.cpp
@@ -390,6 +405,8 @@ set(SOURCE_FILES
   nav/sim_thread.cpp
   nav/nav_stats.cpp
   nav/plant_ledger.cpp
+  nav/rollout_plant.cpp
+  nav/dyn4_ledger.cpp
   ph/se2_data.cpp
   ph/se2_model.cpp
   ph/se2_train.cpp
@@ -419,6 +436,7 @@ set(SOURCE_FILES
   lsys/cloud.cpp
   lsys/water.cpp
   world/surface.cpp
+  world/terrain_source.cpp
   world/world_geometry.cpp
   world/city_bundle.cpp
   world/heightfield.cpp
@@ -431,6 +449,9 @@ set(SOURCE_FILES
   world/raster.cpp
   world/npy.cpp
   world/bundle.cpp
+  world/generated_world.cpp
+  world/terrain_lod.cpp
+  world/cloud_layer.cpp
 )
 
 # Architectural rule (roadmap §14.4): the cvc::world generator library is a FILE
@@ -512,11 +533,11 @@ endif()
 # byte-goldens are therefore intentionally NOT asserted. Same discipline as nav.
 if(NOT MSVC)
   set_source_files_properties(lsys/expr.cpp lsys/derive.cpp lsys/interp.cpp
-                              world/heightfield.cpp world/scatter.cpp world/roads.cpp world/sites.cpp world/road_mesh.cpp world/road_raster.cpp world/raster.cpp world/bundle.cpp
+                              world/heightfield.cpp world/scatter.cpp world/roads.cpp world/sites.cpp world/road_mesh.cpp world/road_raster.cpp world/raster.cpp world/bundle.cpp world/terrain_source.cpp
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 else()
   set_source_files_properties(lsys/expr.cpp lsys/derive.cpp lsys/interp.cpp
-                              world/heightfield.cpp world/scatter.cpp world/roads.cpp world/sites.cpp world/road_mesh.cpp world/road_raster.cpp world/raster.cpp world/bundle.cpp
+                              world/heightfield.cpp world/scatter.cpp world/roads.cpp world/sites.cpp world/road_mesh.cpp world/road_raster.cpp world/raster.cpp world/bundle.cpp world/terrain_source.cpp
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 
@@ -528,7 +549,8 @@ endif()
 # on their own target (below).
 set(_cvc_physics_exact_sources physics/world.cpp physics/vehicle.cpp physics/field_step.cpp
     physics/det_math.cpp physics/null_backend.cpp physics/nav_plant.cpp
-    physics/dyn_bike_plant.cpp physics/dyn_4w_plant.cpp physics/dyn_world.cpp)
+    physics/dyn_bike_plant.cpp physics/dyn_4w_plant.cpp physics/dyn_world.cpp
+    physics/jolt_rollout.cpp)
 if(NOT MSVC)
   set_source_files_properties(${_cvc_physics_exact_sources}
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
@@ -588,6 +610,10 @@ option(CVC_ENABLE_GRPC "Enable gRPC-based state_transport (Phase 3e)" OFF)
 # (protobuf) + Boost.Beast (native) — independent of CVC_ENABLE_GRPC. OFF by default so a build with
 # no protobuf in its deps is unaffected; the wasm/conference builds turn it ON.
 option(CVC_ENABLE_WS "Enable WebSocket-based state_transport (wasm interop)" OFF)
+# The conference's unreliable lane over WebRTC data channels (cvc/net/fast_lane_rtc.h):
+# libdatachannel natively, datachannel-wasm under Emscripten (both cvcpkg packages). OFF: the lane's
+# classes are inert stubs and every client stays on its reliable connection.
+option(CVC_ENABLE_RTC "WebRTC data-channel fast lane for the conference (libdatachannel)" OFF)
 # XMLRPC support
 if(CVC_USING_XMLRPC)
   list(APPEND CVC_LINK_LIBS xmlrpc)
@@ -753,6 +779,7 @@ if(CVC_ENABLE_MESHER)
       geometry/cvc-mesher/contour/basic.h
       geometry/cvc-mesher/contour/dataslc.h
       geometry/cvc-mesher/contour/contour.h
+      geometry/cvc-mesher/contour/contour_verbose.h
       geometry/cvc-mesher/contour/dict.h
       geometry/cvc-mesher/contour/contour2d.h
       geometry/cvc-mesher/contour/seedchkr3.h
@@ -1385,15 +1412,23 @@ endif()
 # are thin adapters over it, so they work identically on both targets. All three TUs are always
 # compiled; the inactive backend #ifdefs to empty, so exactly one make_default_backend() links.
 list(APPEND SOURCE_FILES net/http_client.cpp net/http_client_curl.cpp net/http_client_fetch.cpp
-  net/net_policy.cpp net/credentials.cpp net/ws_client.cpp)
+  net/net_policy.cpp net/credentials.cpp net/ws_client.cpp net/fast_lane.cpp net/fast_lane_rtc.cpp)
+list(APPEND INCLUDE_FILES ../../inc/cvc/net/fast_lane.h ../../inc/cvc/net/fast_lane_rtc.h)
 list(APPEND INCLUDE_FILES ../../inc/cvc/net/http_client.h ../../inc/cvc/net/net_policy.h
   ../../inc/cvc/net/credentials.h ../../inc/cvc/net/ws_client.h)
+# OAuth 2.0 / OpenID Connect sign-in (docs/ARIADNE.md §10.5): the protocol pieces, the loopback
+# redirect listener (native), the user's browser and a browser page's own URL and sessionStorage,
+# and the Ariadne host that runs the flows for documents.
+list(APPEND SOURCE_FILES net/json_lite.cpp net/oidc.cpp net/loopback_redirect.cpp net/browser.cpp
+  ariadne/oidc_host.cpp)
+list(APPEND INCLUDE_FILES ../../inc/cvc/net/oidc.h ../../inc/cvc/net/loopback_redirect.h
+  ../../inc/cvc/net/browser.h ../../inc/cvc/ariadne/oidc_host.h)
 
 # Ariadne — the context-agnostic UI/scene DSL core (cvc::ariadne). Pure libcvc:
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_rungs.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/requires.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/tf_editor_emit.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/data.cpp ariadne/media.cpp ariadne/media_player.cpp ariadne/media_browser.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_pose_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_chat.cpp ariadne/conference/room_rungs.cpp ariadne/conference/room_lane.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/pose_stream.cpp ariadne/tf_editor_emit.cpp)
 # A document set fetched from a URL, and a runtime's browser page loading one (arigl-web, ari).
 list(APPEND SOURCE_FILES ariadne/doc_fetch.cpp ariadne/web_document.cpp)
 list(APPEND INCLUDE_FILES
@@ -1404,6 +1439,7 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/avatar_physics.h
   ../../inc/cvc/ariadne/holon.h
   ../../inc/cvc/ariadne/holon_sync.h
+  ../../inc/cvc/ariadne/pose_stream.h
   ../../inc/cvc/ariadne/app_runtime.h
   ../../inc/cvc/ariadne/keys.h
   ../../inc/cvc/ariadne/doc_args.h
@@ -1411,6 +1447,7 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/web_document.h
   ../../inc/cvc/ariadne/host_cli.h
   ../../inc/cvc/ariadne/host_signals.h
+  ../../inc/cvc/ariadne/host_warnings.h
   ../../inc/cvc/ariadne/scene_adapter.h
   ../../inc/cvc/ariadne/bind.h
   ../../inc/cvc/ariadne/loader.h
@@ -1420,15 +1457,23 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/uri_http_cache.h
   ../../inc/cvc/ariadne/net_intrinsics.h
   ../../inc/cvc/ariadne/net_host.h
+  ../../inc/cvc/ariadne/data.h
+  ../../inc/cvc/ariadne/media.h
+  ../../inc/cvc/ariadne/media_player.h
   ../../inc/cvc/ariadne/stream_intrinsics.h
   ../../inc/cvc/ariadne/conference/room_intrinsics.h
   ../../inc/cvc/ariadne/conference/room_media_intrinsics.h
+  ../../inc/cvc/ariadne/conference/avatar_panel.h
+  ../../inc/cvc/ariadne/conference/room_avatar.h
   ../../inc/cvc/ariadne/conference/room_scene.h
   ../../inc/cvc/ariadne/conference/room_net.h
   ../../inc/cvc/ariadne/conference/room_rungs.h
   ../../inc/cvc/ariadne/conference/room_aoi.h
   ../../inc/cvc/ariadne/conference/room_aoi_relay.h
+  ../../inc/cvc/ariadne/conference/room_pose_relay.h
+  ../../inc/cvc/ariadne/conference/room_lane.h
   ../../inc/cvc/ariadne/conference/room_write_gate.h
+  ../../inc/cvc/ariadne/conference/room_chat.h
   ../../inc/cvc/ariadne/state_io.h
   ../../inc/cvc/ariadne/scene.h
   ../../inc/cvc/ariadne/value.h
@@ -1554,8 +1599,11 @@ endif()
 # components (stage_lighting, scene_controls, …) that documents import via the location-independent
 # cvc:// scheme (import: cvc://components/foo.ari). Install it as data alongside libcvc, and compile
 # the install datadir into the resolver so register_cvc_uri_handler() finds it with no env var.
+# COMPONENT libcvc like the library itself, so the release tarballs (cpack's libcvc component)
+# carry it as well as the cvcpkg bundles (package.files: share/libcvc/ariadne/).
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ariadne/components
         DESTINATION ${CMAKE_INSTALL_DATADIR}/libcvc/ariadne
+        COMPONENT libcvc
         FILES_MATCHING PATTERN "*.ari")
 target_compile_definitions(
   cvc PRIVATE CVC_ARIADNE_DATA_DIR="${CMAKE_INSTALL_FULL_DATADIR}/libcvc/ariadne")
@@ -1594,6 +1642,24 @@ else()
   endif()
 endif()
 
+# The fast lane (CVC_ENABLE_RTC): libdatachannel natively; in a browser datachannel-wasm, whose
+# target also hands emcc the two JS libraries that implement it over RTCPeerConnection.
+if(CVC_ENABLE_RTC)
+  if(EMSCRIPTEN)
+    find_package(datachannel-wasm CONFIG REQUIRED)
+    # PUBLIC: the target's link options (the two --js-library files) must reach the final emcc
+    # link of whatever links the static cvc; a PRIVATE (LINK_ONLY) dependency's do not.
+    target_link_libraries(cvc PUBLIC datachannel-wasm::datachannel-wasm)
+    list(APPEND CVC_PRIVATE_LINK_PACKAGES datachannel-wasm)
+  else()
+    find_package(LibDataChannel CONFIG REQUIRED)
+    target_link_libraries(cvc PRIVATE LibDataChannel::LibDataChannel)
+    list(APPEND CVC_PRIVATE_LINK_PACKAGES LibDataChannel)
+  endif()
+  target_compile_definitions(cvc PUBLIC CVC_ENABLE_RTC)
+  message(STATUS "cvc::net: WebRTC fast lane ENABLED")
+endif()
+
 # Device keys (state_device_key.h): a device proves its id with an Ed25519 key the relay pins on
 # first use. OPTIONAL: built on OpenSSL's libcrypto (cvcpkg's openssl bundle, wasm included); without
 # it no proof is made or verified and every device is unverified.
@@ -1625,6 +1691,30 @@ if(_cvc_core_turbojpeg)
   message(STATUS "cvc::media: video rungs transcode with ${_cvc_core_turbojpeg}")
 else()
   message(STATUS "cvc::media: no libjpeg-turbo - video rungs only drop frames, never re-encode")
+endif()
+
+# WebP decoding from memory (image_decode.h: Ariadne's image: widget takes a URL). OPTIONAL: libwebp
+# (cvcpkg `libwebp`, BSD-3-Clause, already a libcvc dependency through libtiff and ImageMagick); the
+# decoder-only library where the prefix exports it, plus libwebpdemux for an animated WebP's first
+# frame. Without it a WebP decodes through ImageMagick where the build has that, else it is refused.
+find_package(WebP CONFIG QUIET)
+set(_cvc_webp "")
+if(TARGET WebP::webpdecoder)
+  set(_cvc_webp WebP::webpdecoder)
+elseif(TARGET WebP::webp)
+  set(_cvc_webp WebP::webp)
+endif()
+if(_cvc_webp)
+  target_link_libraries(cvc PRIVATE ${_cvc_webp})
+  target_compile_definitions(cvc PRIVATE CVC_HAVE_WEBP=1)
+  if(TARGET WebP::webpdemux)
+    target_link_libraries(cvc PRIVATE WebP::webpdemux)
+    target_compile_definitions(cvc PRIVATE CVC_HAVE_WEBP_DEMUX=1)
+  endif()
+  list(APPEND CVC_PRIVATE_LINK_PACKAGES WebP)
+  message(STATUS "cvc::image: WebP decoding with ${_cvc_webp}")
+else()
+  message(STATUS "cvc::image: no libwebp - WebP decodes only through ImageMagick, if at all")
 endif()
 
 # Opus mics (media_opus.h): a sender encodes its mic in Opus, and a relay decodes it to f32 for the
@@ -1860,11 +1950,15 @@ if(CVC_ENABLE_GRPC OR CVC_ENABLE_WS)
   list(APPEND CVC_PRIVATE_LINK_PACKAGES Protobuf)
 endif()
 if(CVC_ENABLE_GRPC)
+  # Printed so a release can assert it (publish-cvcpkg.yml): with this OFF, arigl and arisrv built
+  # against the SDK compile the conference out, and nothing else fails.
+  message(STATUS "cvc::state: gRPC transport ENABLED")
   target_compile_definitions(cvc PUBLIC CVC_ENABLE_GRPC)
   target_link_libraries(cvc PRIVATE gRPC::grpc++)
   list(APPEND CVC_PRIVATE_LINK_PACKAGES gRPC)
 endif()
 if(CVC_ENABLE_WS)
+  message(STATUS "cvc::state: WebSocket transport ENABLED")
   target_compile_definitions(cvc PUBLIC CVC_ENABLE_WS)
 endif()
 if(CVC_STATE_MEMORY_MANAGER)

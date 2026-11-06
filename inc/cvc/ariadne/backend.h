@@ -22,6 +22,8 @@
 // The core writes to cvc::state on `committed`, so a slider drag costs ONE state
 // write (which fans out to observers / replicated peers), not one per frame.
 
+#include <algorithm>            // min (text_view's default)
+#include <cstdio>               // snprintf (plot_lines' text sparkline)
 #include <cvc/ariadne/widget.h> // Size / Layout / Extent (§3.0.3b) passed to the backend
 #include <cvc/tf/editor.h>      // tf_editor: the model + view the backend edits
 #include <cvc/tf/overlays.h>    // tf_editor: the histogram / contour spectrum / tree layers
@@ -63,6 +65,35 @@ struct StringEdit {
   bool committed = false;
   std::string value;
 };
+// A message field's edit (Kind::MessageInput). `submitted`: the user sent it (Enter), and `value`
+// is the message; the backend has cleared its field and keeps focus there. `committed` without
+// `submitted`: the field lost focus, and `value` is the draft to keep. `changed`: the text moved.
+struct MessageEdit {
+  bool changed = false;
+  bool committed = false;
+  bool submitted = false;
+  std::string value;
+};
+struct MessageInputOptions {
+  std::string hint;      // shown while the field is empty
+  bool multiline = true; // Shift+Enter adds a line (a terminal: Alt+Enter or Ctrl+J)
+  int max_lines = 4;     // the field grows to this many lines, then scrolls
+  int max_length = 0;    // bytes; 0: no cap
+  std::string send;      // a button beside the field that sends it, so labelled ("" none)
+};
+
+// What the core hands a backend to draw a text buffer (Kind::TextView).
+struct TextViewOptions {
+  float height = 0.0f; // px; 0: the space left in the window (a backend's default where none)
+  bool follow = true;  // stay at the bottom while lines arrive, if already there
+  bool wrap = true;    // wrap long lines to the view's width
+};
+// `at_top`: the user has scrolled the view to its top this frame (once each time it gets there,
+// and only when there is more text than fits): the core runs the widget's `on_top`.
+struct TextViewEvent {
+  bool at_top = false;
+};
+
 // The result of a backend-drawn CUSTOM widget (a novel primitive the compositional
 // path can't express — §16.1b). `handled` is the backend's signal that it actually
 // drew this custom_type (false = it doesn't know it, so the core shows a placeholder).
@@ -130,10 +161,25 @@ struct WindowGeom {
   bool authored = false;
 };
 
+// A container's background (§5.12), handed to begin_backdrop: the published image to draw behind
+// the container's content and how. `image` is empty while the picture loads or when it failed: the
+// backend then draws nothing behind the content (but still brackets it).
+struct Backdrop {
+  std::string image;
+  ImageFit fit = ImageFit::Cover;
+  float opacity = 1.0f;
+  BackdropTerminal terminal = BackdropTerminal::Behind;
+  int banner_rows = 6;
+  bool window = false; // the window's own background: it fills the window's inner area
+  Size size;           // a group's authored size: the backdrop's area is at least this big
+};
+
 // What a surface can and cannot do. AppRuntime::load checks a document's
 // `requires:` against it (§16.3/§7.6, cvc/ariadne/requires.h, which maps the
 // capability tokens onto these fields), and (has? "...") reads it at run time —
-// e.g. a shader widget needs `glsl`, `free` layout needs `windows`. `owns_loop`
+// e.g. a shader widget needs `glsl`, `free` layout needs `windows`. A scene's
+// shaders are not the backend's: they run in the SceneAdapter's renderer
+// (SceneAdapter::runs_shaders, the gl.scene.shaders token). `owns_loop`
 // distinguishes a host-pumped backend (ImGui: the host render pass calls
 // Runtime::render()) from a framework-owned loop (FTXUI/tvision: the backend's
 // own loop drives it). This seam is locked in P0 even though only the ImGui
@@ -144,7 +190,7 @@ struct Capabilities {
   bool mouse = false;      // pointer input
   bool keyboard = false;   // key input / text entry
   bool color = false;      // color styling
-  bool glsl = false;       // can render GLSL (scene-node shaders / shader_canvas)
+  bool glsl = false;       // the UI draws GLSL itself (shader_canvas; gl.ui.shaders)
   bool view_embed = false; // can embed a live render-to-texture view
   bool owns_loop = false;  // the backend drives its own event loop
   bool terminal = false;   // draws in a text terminal
@@ -152,6 +198,20 @@ struct Capabilities {
   bool kitty = false;      // the terminal speaks the kitty graphics protocol
   bool sixel = false;      // the terminal draws DEC Sixel
 };
+
+// A spinner's glyph at `seconds` on a frame clock: ten braille dots a second, the cycle a terminal
+// spinner commonly turns (U+280B U+2819 U+2839 U+2838 U+283C U+2834 U+2826 U+2827 U+2807
+// U+280F), or with `ascii`, | / - \ at the same rate. Spelled as UTF-8 bytes: a \u literal is
+// encoded in the code page on MSVC without /utf-8.
+inline std::string spinner_glyph(double seconds, bool ascii) {
+  static constexpr const char *kBraille[] = {
+      "\xE2\xA0\x8B", "\xE2\xA0\x99", "\xE2\xA0\xB9", "\xE2\xA0\xB8", "\xE2\xA0\xBC",
+      "\xE2\xA0\xB4", "\xE2\xA0\xA6", "\xE2\xA0\xA7", "\xE2\xA0\x87", "\xE2\xA0\x8F"};
+  static constexpr const char *kAscii[] = {"|", "/", "-", "\\"};
+  const double steps = seconds > 0.0 ? seconds * 10.0 : 0.0; // NaN and negative read 0
+  const auto step = static_cast<unsigned long long>(steps < 1e15 ? steps : 0.0);
+  return ascii ? kAscii[step % 4] : kBraille[step % 10];
+}
 
 // The pluggable UI handler. The core walks the tree and calls these; structural
 // Begin*/End* pair unconditionally (End* is always called, even when Begin*
@@ -272,6 +332,35 @@ public:
     text_value(label, value);
   }
   virtual void separator() = 0;
+  // A read-only line graph of VALUES (oldest first) between LO and HI (LO >= HI: fitted to them),
+  // with OVERLAY as its caption, HEIGHT pixels tall where the backend has pixels. By default a
+  // text sparkline of the last 32, with the newest value and the range, so every backend has one.
+  virtual void plot_lines(const char *label, const std::vector<float> &values, double lo, double hi,
+                          const std::string &overlay, double height) {
+    (void)height;
+    static const char kLevels[] = " _.-=+*#";
+    const std::size_t n = values.size(), first = n > 32 ? n - 32 : 0;
+    double a = lo, z = hi;
+    if (!(lo < hi) && n > 0) {
+      a = z = values[first];
+      for (std::size_t i = first; i < n; ++i)
+        a = values[i] < a ? values[i] : a, z = values[i] > z ? values[i] : z;
+    }
+    std::string line = overlay.empty() ? std::string() : overlay + " ";
+    line += "[";
+    for (std::size_t i = first; i < n; ++i) {
+      double f = z > a ? (values[i] - a) / (z - a) : 0.5;
+      f = f < 0.0 ? 0.0 : (f > 1.0 ? 1.0 : f);
+      line += kLevels[static_cast<int>(f * 7.0 + 0.5)];
+    }
+    line += "]";
+    if (n > 0) {
+      char buf[96];
+      std::snprintf(buf, sizeof(buf), " %.4g (%.4g..%.4g)", values[n - 1], a, z);
+      line += buf;
+    }
+    text_value(label, line);
+  }
   // A read-only progress bar at `fraction` (0..1) with `overlay` drawn over it (empty: the
   // percent). By default a text value, "[########------------] 40%", so every backend has one.
   virtual void progress_bar(const char *label, float fraction, const std::string &overlay) {
@@ -282,6 +371,18 @@ public:
     bar += overlay.empty() ? std::to_string(static_cast<int>(f * 100.f + 0.5f)) + "%" : overlay;
     text_value(label, bar);
   }
+  // An activity indicator (Kind::Spinner) at `seconds` on the host's frame clock (Runtime::
+  // frame_clock; frozen while the widget is disabled), with `label` beside it. By default a text
+  // line, the glyph spinner_glyph() picks and the label: braille dots, or | / - \ with `ascii` or
+  // where the surface cannot show braille (unicode_glyphs()).
+  virtual void spinner(const char *label, double seconds, bool ascii) {
+    std::string line = spinner_glyph(seconds, ascii || !unicode_glyphs());
+    if (label && *label)
+      line += std::string(" ") + label;
+    text_line(line.c_str());
+  }
+  // Whether the surface shows glyphs beyond ASCII (braille, box drawing). Default yes.
+  virtual bool unicode_glyphs() const { return true; }
   virtual bool button(const char *label) = 0;           // returns clicked
   virtual bool menu_item_action(const char *label) = 0; // returns clicked
 
@@ -346,6 +447,41 @@ public:
   virtual StringEdit input_text(const char *label, const char *key, const std::string &current,
                                 bool masked) = 0;
 
+  // A field to post a message (Kind::MessageInput), keyed like input_text. One line until the user
+  // adds another (Shift+Enter, with `multiline`); Enter sends: {submitted, value} = the message,
+  // and the field is cleared, keeping focus. Losing focus reports the draft as committed. The
+  // default is a single-line input_text whose commit is the send, for a backend without one.
+  virtual MessageEdit message_input(const char *label, const char *key, const std::string &current,
+                                    const MessageInputOptions &opts) {
+    (void)opts;
+    const StringEdit e = input_text(label, key, current, false);
+    MessageEdit out;
+    out.changed = e.changed;
+    out.committed = out.submitted = e.committed && !e.value.empty();
+    out.value = e.value;
+    return out;
+  }
+
+  // A read-only, scrollable text buffer (Kind::TextView): `text`'s lines, split on '\n', keyed by
+  // `key` (the backend keeps its scroll position under it). The default draws the last lines that
+  // fit `opts.height` (16 px a line, 8 lines without one) as text lines, and never reports the top.
+  virtual TextViewEvent text_view(const char *label, const char *key, const std::string &text,
+                                  const TextViewOptions &opts) {
+    (void)label;
+    (void)key;
+    const std::size_t rows =
+        opts.height > 0.0f ? static_cast<std::size_t>(opts.height / 16.0f) + 1 : 8;
+    std::vector<std::string> lines;
+    for (std::size_t i = 0; i <= text.size();) {
+      const std::size_t j = std::min(text.find('\n', i), text.size());
+      lines.push_back(text.substr(i, j - i));
+      i = j + 1;
+    }
+    for (std::size_t i = lines.size() > rows ? lines.size() - rows : 0; i < lines.size(); ++i)
+      text_line(lines[i].c_str());
+    return {};
+  }
+
   // Draw a host-published image named `name` at display `width` px (height from the image's
   // aspect). A read-only viewer of a buffer the host set via a backend-specific publish API (e.g.
   // ImGuiBackend::set_image) — used for live rasters (a nav occupancy/risk grid colorized to a
@@ -357,6 +493,16 @@ public:
     return false;
   }
 
+  // Draw image `name` inside a BOX_W x BOX_H px box, its aspect ratio kept ("contain"): scaled to
+  // touch the box on one axis and centred, the spare width or height left as bars. The box keeps
+  // its size whatever shape the image is, so a portrait phone camera in a landscape tile shows
+  // whole and unsquashed, and the tile does not grow. The default draws at the box width (the
+  // image's height then follows its aspect), for a backend that cannot fit; same return.
+  virtual bool draw_image_fit(const char *name, float box_w, float box_h) {
+    (void)box_h;
+    return draw_image(name, box_w);
+  }
+
   // Publish/replace the image draw_image(name, ...) shows. The ImGui and terminal backends store
   // it (the ImGui one uploads it to a texture lazily); the core uses it for raster previews it
   // renders itself (the composed tf_editor). Default: dropped, matching a backend with no image
@@ -365,6 +511,18 @@ public:
     (void)name;
     (void)img;
   }
+  // Forget the image published as `name` (its texture, its resampled copies): the core no longer
+  // draws it (a picture by URI the media cache dropped, §5.11). Default: nothing kept, nothing to
+  // do.
+  virtual void drop_image(const std::string &name) { (void)name; }
+
+  // §5.12 a container's background: begin_backdrop comes right before a group's children (or
+  // right after begin_window, with Backdrop::window, for a window's), end_backdrop right after them
+  // (before end_window); balanced, nested like begin_grid. The backend draws `bd.image` behind
+  // what is emitted between them, fitted to the area they take. Default: no background, the
+  // content drawn as without one.
+  virtual void begin_backdrop(const Backdrop &bd) { (void)bd; }
+  virtual void end_backdrop() {}
 
   // A transfer-function editor (Kind::TfEditor; a port of VolumeRover2's ColorTable2): the colour
   // ramp, opacity curve, isocontour bars and the overlay layers over a zoomable canvas. `key` is

@@ -413,6 +413,23 @@ TEST(AriadneFtxui, PasswordFieldShowsAMask) {
   EXPECT_FALSE(t.shows("s3cret")) << "masked when not focused too:\n" << t.screen;
 }
 
+// A spinner in a terminal: braille dots turned by the frame clock, the label after them; ASCII
+// with glyphs: ascii. (The tvision host draws the same widgets; tests/spinner_test.sh runs both
+// under tmux.)
+TEST(AriadneFtxui, SpinnerTurnsByTheFrameClock) {
+  REQUIRE_FTXUI();
+  Term t(group({spinner("Loading"), spinner("Plain", "", /*ascii*/ true)}));
+  t.rt.set_frame_clock(0.0);
+  t.draw();
+  // U+280B, U+2819 as UTF-8 bytes (this target has no /utf-8 on MSVC).
+  EXPECT_TRUE(t.shows("\xE2\xA0\x8B Loading")) << t.screen;
+  EXPECT_TRUE(t.shows("| Plain")) << t.screen;
+  t.rt.set_frame_clock(0.1);
+  t.draw();
+  EXPECT_TRUE(t.shows("\xE2\xA0\x99 Loading")) << t.screen;
+  EXPECT_TRUE(t.shows("/ Plain")) << t.screen;
+}
+
 TEST(AriadneFtxui, TextFieldEditsAtTheCursor) {
   REQUIRE_FTXUI();
   Term t(group({input_text("Name", "name")}));
@@ -428,6 +445,140 @@ TEST(AriadneFtxui, TextFieldEditsAtTheCursor) {
       "\xc3\xa9"); // a two-byte UTF-8 character arrives as one event in the loop; here, two bytes
   t.key("Return");
   EXPECT_EQ(val(t.app, "name"), "b\xc3\xa9");
+}
+
+// A message field: Enter sends it (its on: program reads event.text), the field left empty and
+// focused; Alt+Enter and Ctrl+J add a line; the hint shows while it is empty and unfocused; losing
+// focus keeps the draft, which Enter then sends. A blank message is not sent.
+TEST(AriadneFtxui, MessageFieldSendsOnEnterAndTakesNewLines) {
+  REQUIRE_FTXUI();
+  Widget msg = message_input("Say", "draft",
+                             "(state-set \"sent\" (str-concat (state-get \"sent\") \"|\" "
+                             "(get-attr event \"text\")))");
+  msg.hint = "type here";
+  Term t(group({msg, checkbox("X", "x")}));
+  cvc::state::instance(t.app)("sent").value(std::string());
+  const auto sent = [&] {
+    for (int i = 0; i < 50; ++i)
+      t.rt.drain();
+    return val(t.app, "sent");
+  };
+  EXPECT_TRUE(t.shows("Say: [type here")) << t.screen;
+  t.key("Tab");
+  t.type("hi");
+  EXPECT_TRUE(t.be.feed(t.rt, TermEvent::key_event("Return", false, false, /*alt=*/true)));
+  t.type("there");
+  t.draw();
+  EXPECT_TRUE(t.shows("Say: [hi")) << t.screen;
+  EXPECT_TRUE(t.shows("      there")) << "the second line under the first:\n" << t.screen;
+  t.key("Return");
+  EXPECT_EQ(val(t.app, "draft"), "");
+  EXPECT_EQ(sent(), "|hi\nthere");
+
+  t.type("ok"); // still focused
+  EXPECT_TRUE(t.be.feed(t.rt, TermEvent::key_event("J", false, /*ctrl=*/true)));
+  t.type("go");
+  t.key("Tab"); // focus leaves: the draft is kept
+  EXPECT_EQ(val(t.app, "draft"), "ok\ngo");
+  t.key("Tab", /*shift=*/true);
+  t.key("Return");
+  EXPECT_EQ(sent(), "|hi\nthere|ok\ngo");
+  t.type("   ");
+  t.key("Return");
+  EXPECT_EQ(sent(), "|hi\nthere|ok\ngo") << "blanks are not a message";
+
+  Widget one = message_input("One", "one", "(state-set \"x\" 1)");
+  one.multiline = false;
+  Term u(group({one, checkbox("Y", "y")})); // somewhere for the focus to go
+  u.key("Tab");
+  u.type("a");
+  u.be.feed(u.rt, TermEvent::key_event("Return", false, false, true));
+  u.type("b");
+  u.key("Tab");
+  EXPECT_EQ(val(u.app, "one"), "ab") << "multiline: false takes no new line";
+}
+
+// A text view shows the last rows of its text, scrolls with the keys and the wheel, keeps what is
+// in view when lines are added above it, and reports the top (on_top) once the user gets there. A
+// long line wraps at the view's width; the gutter shows which way there is more.
+TEST(AriadneFtxui, TextViewScrollsKeepsItsPlaceAndReportsTheTop) {
+  REQUIRE_FTXUI();
+  std::string text;
+  for (int i = 0; i < 20; ++i)
+    text += (i ? "\n" : "") + std::string("line ") + std::to_string(i);
+  Widget tv =
+      text_view("##log", "log", "(state-set \"tops\" (str (+ (int (state-get \"tops\")) 1)))");
+  tv.view_height = 5 * 16; // five rows
+  Term t(group({tv}));
+  cvc::state::instance(t.app)("log").value(text);
+  cvc::state::instance(t.app)("tops").value(std::string("0"));
+  const auto tops = [&] {
+    for (int i = 0; i < 50; ++i)
+      t.rt.drain();
+    return val(t.app, "tops");
+  };
+  t.draw();
+  EXPECT_TRUE(t.shows("line 19")) << t.screen;
+  EXPECT_TRUE(t.shows("line 15")) << t.screen;
+  EXPECT_FALSE(t.shows("line 14")) << t.screen;
+  EXPECT_TRUE(t.shows("\xe2\x96\xb2")) << "more above:\n" << t.screen;
+
+  t.key("Tab");
+  t.key("Up");
+  t.draw();
+  EXPECT_TRUE(t.shows("line 14")) << t.screen;
+  EXPECT_FALSE(t.shows("line 19")) << t.screen;
+  EXPECT_EQ(tops(), "0");
+  for (int i = 0; i < 4; ++i)
+    t.key("PageUp"); // four rows a page: 14, 10, 6, 2, then 0
+  t.draw();
+  EXPECT_TRUE(t.shows("line 0")) << t.screen;
+  EXPECT_EQ(tops(), "1") << "reached the top";
+  t.key("Up");
+  t.draw();
+  EXPECT_EQ(tops(), "2") << "pushed against it again";
+
+  // Older lines arrive above: what is in view stays in view.
+  cvc::state::instance(t.app)("log").value("older 1\nolder 0\n" + text);
+  t.draw();
+  EXPECT_TRUE(t.shows("line 0")) << t.screen;
+  EXPECT_FALSE(t.shows("older 0")) << t.screen;
+
+  t.key("End");
+  t.draw();
+  EXPECT_TRUE(t.shows("line 19")) << t.screen;
+  int x = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, "line 19", x, y));
+  t.mouse(TermEvent::Mouse::WheelUp, x, y);
+  t.draw();
+  EXPECT_TRUE(t.shows("line 13")) << "three rows up:\n" << t.screen;
+  EXPECT_FALSE(t.shows("line 19")) << t.screen;
+
+  // A new line arrives while it is not at the bottom: it stays where it is.
+  cvc::state::instance(t.app)("log").value("older 1\nolder 0\n" + text + "\nline 20");
+  t.draw();
+  EXPECT_FALSE(t.shows("line 20")) << t.screen;
+  t.key("End");
+  cvc::state::instance(t.app)("log").value("older 1\nolder 0\n" + text + "\nline 20\nline 21");
+  t.draw();
+  EXPECT_TRUE(t.shows("line 21")) << "at the bottom it follows:\n" << t.screen;
+
+  // A long line wraps; a text that fits reports the room above it at once.
+  std::string longline;
+  for (int i = 0; i < 30; ++i)
+    longline += "word" + std::to_string(i) + " ";
+  Widget wrap = text_view("##wrap", "wrap", "(state-set \"fits\" 1)");
+  wrap.view_height = 6 * 16;
+  Term w(group({wrap}));
+  cvc::state::instance(w.app)("wrap").value(longline);
+  w.draw();
+  int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+  ASSERT_TRUE(find_cell(w.screen, "word0 ", x0, y0)) << w.screen;
+  ASSERT_TRUE(find_cell(w.screen, "word29", x1, y1)) << w.screen;
+  EXPECT_GT(y1, y0) << "wrapped onto more rows:\n" << w.screen;
+  for (int i = 0; i < 50; ++i)
+    w.rt.drain();
+  EXPECT_EQ(val(w.app, "fits"), "1");
 }
 
 TEST(AriadneFtxui, MenuByKeyboard) {
@@ -1030,13 +1181,108 @@ TEST(AriadneFtxuiHosted, TheHostClosesAndPlacesWindows) {
   w.id = "w";
   w.closable = true;
   Term t(group({w}), hosted_opts());
-  t.be.set_window_geometry("w", 10, 3, 30, 8);
+  t.be.set_window_geometry("w", 10, 3, 30, 8, /*user_sized=*/true);
   t.draw();
   EXPECT_EQ(val(t.app, "tree.w.geometry"), "80,48,240,128") << "host bounds persist in px";
   t.be.close_window(t.rt, "w");
   EXPECT_EQ(val(t.app, "tree.w.open"), "0");
   t.draw();
   EXPECT_TRUE(t.be.hosted_windows().empty());
+}
+
+// The host reports every window's bounds on each walk. The size it gave a window to fit its
+// content is not the window's: one that closes, gains a row and opens again must be reported as
+// fitting (0) with its new content size, not at its old size. Only a size the user gave it holds.
+namespace {
+void set(cvc::app &app, const std::string &path, const std::string &v) {
+  cvc::state::instance(app)(path).value(v);
+}
+} // namespace
+
+TEST(AriadneFtxuiHosted, AReopenedWindowFitsWhatItShowsThen) {
+  REQUIRE_FTXUI();
+  Widget msg = text(""); // the controller's message, a row only while there is one
+  msg.literal_text = false;
+  msg.bind = "ui.msg";
+  msg.visible_when = "(!= (state-get \"ui.msg\") \"\")";
+  Widget fits = window("Notes", {text("Welcome."), msg});
+  fits.id = "notes";
+  fits.visible_when = "(= (state-get \"ui.screen\") \"in\")";
+  Widget wide = window("Sign in", {text("Username: grace"), msg}); // width authored, height fits
+  wide.id = "signin";
+  wide.size.w = Extent{Unit::Px, 240};
+  wide.visible_when = fits.visible_when;
+  Term t(group({fits, wide}), hosted_opts());
+  set(t.app, "ui.screen", "in");
+  set(t.app, "ui.msg", "");
+  t.draw();
+  auto find = [&](const std::string &id) {
+    for (const auto &hw : t.be.hosted_windows())
+      if (hw.id == id)
+        return hw;
+    ADD_FAILURE() << "no hosted window " << id;
+    return FtxuiBackend::HostedWindow{};
+  };
+  const auto notes = find("notes"), signin = find("signin");
+  EXPECT_EQ(notes.w, 0);
+  EXPECT_EQ(notes.h, 0);
+  EXPECT_EQ(signin.w, 30) << "240 px is 30 cells";
+  EXPECT_EQ(signin.h, 0);
+  EXPECT_EQ(notes.content_h, 1);
+  // The host fitted them and reports that back, as tvision's does on every walk.
+  t.be.set_window_geometry("notes", 2, 14, notes.content_w + 2, notes.content_h + 2, false);
+  t.be.set_window_geometry("signin", 2, 2, 30, signin.content_h + 2, false);
+  t.draw();
+  EXPECT_EQ(val(t.app, "tree.notes.geometry"), "16,224,0,0") << "the place persists, not the fit";
+
+  // Sign out: both close, and a row appears while they are closed.
+  set(t.app, "ui.screen", "out");
+  set(t.app, "ui.msg", "Signed out, see you soon.");
+  t.draw();
+  EXPECT_TRUE(t.be.hosted_windows().empty());
+  set(t.app, "ui.screen", "in");
+  t.draw();
+  const auto notes2 = find("notes"), signin2 = find("signin");
+  EXPECT_FALSE(notes2.user_sized);
+  EXPECT_EQ(notes2.w, 0) << "it fits again, as on its first opening";
+  EXPECT_EQ(notes2.h, 0);
+  EXPECT_EQ(notes2.content_h, 2) << "the row that appeared while it was closed";
+  EXPECT_GT(notes2.content_w, notes.content_w);
+  EXPECT_EQ(notes2.x, 2) << "it opens where it was";
+  EXPECT_EQ(notes2.y, 14);
+  EXPECT_EQ(signin2.w, 30) << "the authored width";
+  EXPECT_EQ(signin2.h, 0) << "the height still fits";
+  EXPECT_EQ(signin2.content_h, 2);
+}
+
+TEST(AriadneFtxuiHosted, AWindowTheUserResizedKeepsItsSizeWhenItOpensAgain) {
+  REQUIRE_FTXUI();
+  Widget msg = text("");
+  msg.literal_text = false;
+  msg.bind = "ui.msg";
+  msg.visible_when = "(!= (state-get \"ui.msg\") \"\")";
+  Widget w = window("Notes", {text("Welcome."), msg});
+  w.id = "notes";
+  w.visible_when = "(= (state-get \"ui.screen\") \"in\")";
+  Term t(group({w}), hosted_opts());
+  set(t.app, "ui.screen", "in");
+  set(t.app, "ui.msg", "");
+  t.draw();
+  t.be.set_window_geometry("notes", 4, 5, 40, 9, /*user_sized=*/true); // the user's corner drag
+  t.draw();
+  EXPECT_EQ(val(t.app, "tree.notes.geometry"), "32,80,320,144") << "the user's size persists";
+  set(t.app, "ui.screen", "out");
+  set(t.app, "ui.msg", "Signed out.");
+  t.draw();
+  set(t.app, "ui.screen", "in");
+  t.draw();
+  ASSERT_EQ(t.be.hosted_windows().size(), 1u);
+  const auto hw = t.be.hosted_windows()[0];
+  EXPECT_TRUE(hw.user_sized);
+  EXPECT_EQ(hw.w, 40);
+  EXPECT_EQ(hw.h, 9);
+  EXPECT_EQ(hw.x, 4);
+  EXPECT_EQ(hw.y, 5);
 }
 
 TEST(AriadneFtxuiHosted, ComboListOpensInsideItsWindow) {

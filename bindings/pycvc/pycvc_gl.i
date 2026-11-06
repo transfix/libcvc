@@ -556,6 +556,11 @@ except Exception:  # pragma: no cover -- VTK python bindings are optional
   // Convert-flip-and-copy fallback (any format; the texture owns its own copy).
   void set_texture_copy(const cvc::image& img) { $self->setTexture(img, /*zeroCopy=*/false); }
   void clear_texture() { $self->clearTexture(); }
+  // Whether a texture is set, and its (width, height) in pixels ((0, 0) when none).
+  bool has_texture() const { return $self->hasTexture(); }
+  PyObject *texture_size() const {
+    return Py_BuildValue("(ii)", $self->textureWidth(), $self->textureHeight());
+  }
 
   // numpy-direct vertex update: accept a C-contiguous float64 buffer (e.g. a numpy
   // array's .ravel()) and blit it in place — skipping the ~N Python-float

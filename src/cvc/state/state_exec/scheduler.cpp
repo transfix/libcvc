@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/detail/priority.h>
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/scheduler.h>
 #include <cvc/state/state_exec/state_value_codec.h> // snapshot / restore
@@ -20,20 +21,69 @@ scheduler::scheduler(scheduling_policy policy)
 
 scheduler::~scheduler() { home_.reset(); }
 
-void scheduler::set_lock_manager(std::shared_ptr<lock_manager> mgr) {
+void scheduler::set_lock_manager(std::shared_ptr<lock_manager> mgr, lock_attach attach) {
   if (home_)
     for (const auto &[pid, p] : procs_.all())
       if (p->locks && (!p->locks->holds.empty() || p->locks->ticket))
         throw std::logic_error("set_lock_manager: process " + std::to_string(pid) +
                                " holds or waits for a lock");
-  home_.reset();
-  home_ = std::make_unique<detail::lock_home>(std::move(mgr), lock_ops_);
+  // The port shares run()'s idle wakeup, made with the first home (protocol 2.3), so a post ends
+  // an idle wait; a replacing home gets the same one.
+  if (!idle_)
+    idle_ = std::make_shared<detail::wakeup>();
+  // The new home is attached before the old one goes, so a refused attach (lock_attach) leaves
+  // the scheduler its home and manager. Both are attached meanwhile, which a manager allows; the
+  // old one is destroyed here, before any other member (protocol 5.7).
+  auto home =
+      std::make_unique<detail::lock_home>(std::move(mgr), lock_ops_, policy_, idle_, attach);
+  home_.swap(home);
+  home.reset();
 }
 
 detail::lock_home *scheduler::locks() {
-  if (!home_)
-    home_ = std::make_unique<detail::lock_home>(std::make_shared<lock_manager>(), lock_ops_);
+  if (!home_) {
+    if (!idle_)
+      idle_ = std::make_shared<detail::wakeup>();
+    home_ = std::make_unique<detail::lock_home>(std::make_shared<lock_manager>(), lock_ops_,
+                                                policy_, idle_);
+  }
   return home_.get();
+}
+
+void scheduler::keep_lock_expiries(clock::time_point now) {
+  // An expiry pass that throws (wake_due, or wait_expired: an allocation, a callback) keeps no
+  // raw pointer past it, since a process may be reaped before the next pass. wake_due spent the
+  // deadline of each lock waiter it listed, so one the pass had not yet timed out gets a deadline
+  // due `now` and goes back on the timer heap: the next timer pass expires it the normal way,
+  // whatever else is due then. A process ended meanwhile leaves the heap with its timer. Only an
+  // allocation failure re-heaping one loses it (its wait then lasts until a grant or a kill).
+  for (process *p : lock_expired_) {
+    if (p->status != process_status::waiting || !p->lock_waiting || p->lock_deadline)
+      continue;
+    p->lock_deadline = now;
+    try {
+      procs_.update(*p);
+    } catch (...) { // the pass's own exception is the one to report
+    }
+  }
+  lock_expired_.clear();
+}
+
+void scheduler::lock_waiting_pids(std::vector<int> &out) const {
+  out.clear();
+  std::size_t left = procs_.lock_waiting_count();
+  if (left == 0)
+    return;
+  // The table counts the waiters (its entry's lock_waiting) but keeps no list of them: the walk
+  // stops once it has found them all.
+  for (const auto &[pid, p] : procs_.all()) {
+    if (!p->table.lock_waiting)
+      continue;
+    out.push_back(pid);
+    if (--left == 0)
+      break;
+  }
+  std::sort(out.begin(), out.end());
 }
 
 bool scheduler::lock_ops_impl::park_lock(process &p) {
@@ -267,7 +317,7 @@ int scheduler::execute(const std::string &script, const execute_options &opts) {
   // The floor (design 7.2): a host's, explicit, or the submit priority; and what the process
   // keeps alive (a spawned child's context, td 4.15).
   proc.priority_floor = opts.priority_floor.value_or(opts.priority);
-  proc.priority_floor_explicit = opts.priority_floor.has_value();
+  proc.priority_floor_explicit = opts.priority_floor.has_value() && opts.priority_floor_explicit;
   proc.parent_pid = opts.parent_pid;
   proc.keep_alive = opts.keep_alive;
   proc.max_steps = opts.max_steps;
@@ -305,7 +355,7 @@ int scheduler::execute(const value_t &expr, const execute_options &opts) {
   // The floor (design 7.2): a host's, explicit, or the submit priority; and what the process
   // keeps alive (a spawned child's context, td 4.15).
   proc.priority_floor = opts.priority_floor.value_or(opts.priority);
-  proc.priority_floor_explicit = opts.priority_floor.has_value();
+  proc.priority_floor_explicit = opts.priority_floor.has_value() && opts.priority_floor_explicit;
   proc.parent_pid = opts.parent_pid;
   proc.keep_alive = opts.keep_alive;
   proc.max_steps = opts.max_steps;
@@ -476,6 +526,8 @@ void scheduler::execute_process_step(const process_ptr &pp) {
 
   // 4. Accumulate running time, and charge it to what the step was spent on
   const clock::time_point now = clock::now();
+  if (home_)
+    home_->store_progress(now); // the home's last_progress, read by blocking_sinks (design 8.4)
   const double step_seconds = std::chrono::duration<double>(now - start).count();
   proc.accumulated_time += step_seconds;
   proc.state.stats.add_step_time(step_seconds - proc.step_async_wall);
@@ -525,14 +577,29 @@ int scheduler::step() {
 
 int scheduler::step_once() {
   detail::check_not_in_async_kernel("scheduler::step");
+  // Posts from other homes' threads (wakes, relevels), between steps (protocol 5.9).
+  if (home_ && home_->port_pending()) {
+    home_->drain_port();
+    chain_valid_ = false; // the posts are no step's time
+  }
+  // Commands posted from other threads (post_control), between steps.
+  if (control_pending_.load(std::memory_order_acquire))
+    apply_controls();
   // Wake sleeping processes (and timed waits) whose deadline has passed; time out the lock waits
   // whose deadline passed (a program with no timer pays nothing for them).
   if (procs_.timed_count() > 0) {
     const clock::time_point now = now_for_step();
-    if (procs_.timer_due(now) && procs_.wake_due(now, &lock_expired_) > 0) {
-      chain_valid_ = false; // the wakes are no step's time
-      if (!lock_expired_.empty() && home_)
-        home_->wait_expired(lock_expired_);
+    if (procs_.timer_due(now)) {
+      try {
+        if (procs_.wake_due(now, &lock_expired_) > 0) {
+          chain_valid_ = false; // the wakes are no step's time
+          if (!lock_expired_.empty() && home_)
+            home_->wait_expired(lock_expired_);
+        }
+      } catch (...) {
+        keep_lock_expiries(now);
+        throw;
+      }
       lock_expired_.clear();
     }
   }
@@ -599,7 +666,8 @@ uint64_t scheduler::run_steps(std::optional<uint64_t> max_steps, std::optional<d
 }
 
 bool scheduler::idle_wait(std::optional<uint64_t> max_steps, uint64_t &steps, time_budget *budget) {
-  // Nothing is ready: only sleepers and processes waiting for messages are left (has_runnable).
+  // Nothing is ready: only sleepers and processes waiting for messages or locks are left
+  // (has_runnable).
   // run() used to spin here, each idle iteration one of max_steps, until a deadline passed or
   // its budgets ran out. It waits instead, burning no CPU, and keeps both budgets as the spin
   // spent them: the wait is charged to max_time as run time (time_budget::charge_wait), and to
@@ -617,8 +685,9 @@ bool scheduler::idle_wait(std::optional<uint64_t> max_steps, uint64_t &steps, ti
     budget->stop(); // what is left of it, as of now
     until = std::min(until, detail::time_after(now, budget->remaining()));
   }
-  // The step budget runs out first (or only message waiters without a time limit are left,
-  // whom nothing in a synchronous run can wake): what spinning through it would come to.
+  // The step budget runs out first (or only message or lock waiters without a time limit are
+  // left, whom nothing in this run can be counted on to wake): what spinning through it would
+  // come to. A lock waiter's posted wake is applied by the next run (design 6.1, 8.7).
   if (max_steps && (!next || detail::time_after(now, static_cast<double>(steps_left) *
                                                          kIdleStepSeconds) < until)) {
     if (budget)
@@ -626,12 +695,15 @@ bool scheduler::idle_wait(std::optional<uint64_t> max_steps, uint64_t &steps, ti
     return false;
   }
   if (!idle_)
-    idle_ = std::make_unique<detail::wakeup>();
+    idle_ = std::make_shared<detail::wakeup>();
   // stop() may come meanwhile (from another thread, a signal handler): checked every 10 ms. A
   // sleeper's or a timed wait's deadline is waited for precisely, the budget's end need not be.
+  // A post to the lock port (another home's wake or relevel) ends the wait: it is tested before
+  // each slice, and its notify() ends the slice it lands in (protocol 2.3, 5.9).
   constexpr auto kStopCheck = std::chrono::milliseconds(10);
   const bool for_timer = next && *next == until;
-  for (clock::time_point t = now; !stop_requested_ && t < until; t = clock::now()) {
+  const auto posted = [this] { return home_ && home_->port_pending(); };
+  for (clock::time_point t = now; !stop_requested_ && t < until && !posted(); t = clock::now()) {
     const clock::time_point slice = until - t > kStopCheck ? t + kStopCheck : until;
     idle_->wait_until(slice, for_timer && slice == until);
   }
@@ -643,7 +715,9 @@ bool scheduler::idle_wait(std::optional<uint64_t> max_steps, uint64_t &steps, ti
   }
   if (max_steps && steps_left > 1)
     steps += std::min(static_cast<uint64_t>(waited / kIdleStepSeconds), steps_left - 1);
-  return next.has_value(); // only message waiters: the budget ran out or stop() came
+  // Only message or lock waiters: the budget ran out or stop() came, unless a post ended the wait
+  // (run() then steps again, and step_once applies it).
+  return next.has_value() || posted();
 }
 
 void scheduler::stop() { stop_requested_ = true; }
@@ -1139,6 +1213,8 @@ int scheduler::fork(int pid) {
   child->gid = parent.gid;
   child->root_path = parent.root_path;
   child->owner = parent.owner; // td B28: a host reaps the child with its parent (kill_owner)
+  child->priority_floor = parent.priority_floor; // design 7.2: fork copies the floor
+  child->priority_floor_explicit = parent.priority_floor_explicit;
   child->max_steps = parent.max_steps;
   child->max_time = parent.max_time;
   child->max_memory = parent.max_memory;
@@ -1207,22 +1283,54 @@ bool scheduler::set_priority(int pid, int priority) {
 }
 
 // ---------------------------------------------------------------------------
-// Priorities (docs/STATE_EXEC_LOCKS.md 7.4): declared now, built in phase L2
+// Priorities (docs/STATE_EXEC_LOCKS.md 7.4)
 // ---------------------------------------------------------------------------
+
+namespace {
+// The effective priority get-priority and inspect report: the one the pick uses, which under
+// round_robin is the base (design 7.1).
+int reported_effective(const process &p, scheduling_policy policy) {
+  return policy == scheduling_policy::round_robin ? p.priority : p.effective_priority();
+}
+
+// The descent walk's lookup (design 7.2): a live process of `procs`.
+std::function<const process *(int)> live_in(const detail::process_table &procs) {
+  return [&procs](int pid) -> const process * {
+    const process *p = procs.find(pid);
+    return p && !is_finished(p->status) ? p : nullptr;
+  };
+}
+} // namespace
 
 std::optional<priority_info> scheduler::get_priority(int pid) const {
   const process *p = procs_.find(pid);
   if (!p)
     return std::nullopt;
-  return priority_info{p->priority,
-                       policy_ == scheduling_policy::round_robin ? p->priority
-                                                                 : p->effective_priority(),
-                       p->priority_floor.value_or(p->priority), policy_};
+  return priority_info{p->priority, reported_effective(*p, policy_), detail::floor_of(*p), policy_,
+                       p->priority_floor_explicit};
 }
 
-priority_change scheduler::set_priority_checked(int, int, int) { return priority_change::unknown; }
+priority_change scheduler::set_priority_checked(int caller_pid, int pid, int priority) {
+  const process *caller = procs_.find(caller_pid);
+  const process *target = procs_.find(pid);
+  if (!caller || !target)
+    return priority_change::unknown;
+  const priority_change r =
+      detail::check_priority_change(*caller, *target, priority, live_in(procs_));
+  if (r == priority_change::applied)
+    set_priority(pid, priority);
+  return r;
+}
 
-std::optional<priority_info> scheduler::get_priority_as(int, int) const { return std::nullopt; }
+std::optional<priority_info> scheduler::get_priority_as(int caller_pid, int pid) const {
+  if (caller_pid != pid) { // a caller's own pid is always visible to it
+    const process *caller = procs_.find(caller_pid);
+    const process *target = procs_.find(pid);
+    if (!caller || !target || !detail::visible_to(*caller, *target, live_in(procs_)))
+      return std::nullopt;
+  }
+  return get_priority(pid);
+}
 
 bool scheduler::set_priority_floor(int pid, int floor) {
   process *p = procs_.find(pid);
@@ -1233,9 +1341,41 @@ bool scheduler::set_priority_floor(int pid, int floor) {
   return true;
 }
 
-void scheduler::note_priority_clamped() {}
+void scheduler::note_priority_clamped() {
+  // The count is the record: state_exec has no log sink to tell once (gap G-5).
+  ++priority_clamped_;
+}
 
-bool scheduler::post_control(int, control_cmd) { return false; }
+bool scheduler::post_control(int pid, control_cmd cmd) {
+  // Any thread: queued, and applied at the top of the next step (apply_controls), on the
+  // scheduler's thread. The posting thread may not read procs_, so an unknown pid is found, and
+  // ignored, there. An idle run() is not woken: it applies the command once its wait ends.
+  std::lock_guard<std::mutex> lock(control_mutex_);
+  controls_.emplace_back(pid, std::move(cmd));
+  control_pending_.store(true, std::memory_order_release);
+  return true;
+}
+
+void scheduler::apply_controls() {
+  std::vector<std::pair<int, control_cmd>> controls;
+  {
+    std::lock_guard<std::mutex> lock(control_mutex_);
+    controls.swap(controls_);
+    control_pending_.store(false, std::memory_order_relaxed);
+  }
+  chain_valid_ = false; // a query's time is no step's
+  for (auto &[pid, cmd] : controls) {
+    switch (cmd.what) {
+    case control_cmd::kind::set_priority:
+      set_priority(pid, cmd.value); // the host path, unchecked (design 7.4); false for a gone pid
+      break;
+    case control_cmd::kind::query:
+      if (cmd.query)
+        cmd.query(*this);
+      break;
+    }
+  }
+}
 
 bool scheduler::set_max_steps(int pid, uint64_t max_steps) {
   auto it = procs_.all().find(pid);
@@ -1307,6 +1447,8 @@ process_info scheduler::make_info(const process &proc) const {
   info.exit_error = proc.exit_error;
   info.exit_exception = proc.exit_exception;
   info.locks_held = proc.locks ? proc.locks->holds.size() : 0;
+  info.effective_priority = reported_effective(proc, policy_);
+  info.priority_floor = detail::floor_of(proc);
   if (proc.status == process_status::waiting) {
     if (proc.lock_waiting)
       info.waiting_on = "lock /" + detail::lock_home::waiting_key(proc);
@@ -1396,6 +1538,7 @@ scheduler_stats scheduler::get_stats() const {
   scheduler_stats s;
   s.total_processes = static_cast<int>(procs_.size());
   s.total_steps = total_steps_;
+  s.priority_clamped = priority_clamped_;
   for (const auto &[pid, proc] : procs_.all()) {
     switch (proc->status) {
     case process_status::running:

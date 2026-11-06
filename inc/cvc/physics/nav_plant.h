@@ -58,6 +58,11 @@ struct nav_plant_options {
   // The ground's height under a start (world metres, at the rear axle's x, y in metres), for a
   // terrain that is not flat; empty: ground_z everywhere.
   std::function<double(double x, double y)> ground_height;
+  // The bodies the vehicles drive on (the ground, the terrain), as the dynamic plants' own
+  // ground_bodies: a chassis that touches one, scraping it or rolled onto it, has not hit static
+  // geometry, so static_contacts_step (nav_stats' building_contacts) leaves it out. Empty: every
+  // massless body counts, the ground included.
+  std::vector<body_id> ground_bodies;
   // advance() steps the world dt / fixed_dt times (a whole number, or attach() throws). false:
   // the world steps itself on the clock nav follows (world::follow), and advance() only reads.
   bool step_world = true;
@@ -117,6 +122,10 @@ public:
   // resting against another counts every tick it does.
   int vehicle_contact_step(int i) const;
   double vehicle_contact_depth(int i) const;
+  // Agent i's energy ledger over the last tick, J: energy_lines of the vehicle's ledger at the
+  // tick's start and end (vehicle.h), so its lines balance as the ledger does; all zero at
+  // attach(). energy_step(i) is what the source paid of it.
+  const vehicle_energy &ledger_step(int i) const;
   bool tracks_energy() const override { return true; }
   // The plant ledger's sample of agent i at the end of the last tick (at attach(), the vehicle
   // at rest and no command), from the vehicle's state then. The fields it shares with
@@ -215,6 +224,16 @@ public:
   double advance_us() const;
   double advance_us_per_vehicle() const;
 
+  // ── replay ──
+  // The run's whole state: the world's (world::save) and each agent's (its last command, its
+  // energy so far and over the last tick, the contacts, sample and drift of that tick), and the
+  // drift summary, so a run restored to it continues bit for bit. restore() needs this plant
+  // attached to the same agents, on a world that world::restore accepts the state's world for;
+  // otherwise it throws cvc::physics_error and changes nothing. The cost (advance_us) and the
+  // settings are not part of it, as a world's materials are not part of world::save.
+  std::vector<std::uint8_t> save() const;
+  void restore(const std::vector<std::uint8_t> &state);
+
   // ── the settings ──
   const nav_plant_options &options() const { return _o; }
   // The live ones; an invalid value throws cvc::physics_error and changes nothing.
@@ -270,6 +289,8 @@ private:
     cvc::nav::plant_sample sample; // as of the last tick (sample())
     double psi = 0.0;              // the heading then, rad
     double vwx = 0.0, vwy = 0.0;   // the centre of mass's world velocity then, m/s
+    vehicle_energy ledger;         // the vehicle's ledger then
+    vehicle_energy line;           // and over that tick (ledger_step())
   };
   struct bin_sums {
     std::uint64_t ticks = 0;

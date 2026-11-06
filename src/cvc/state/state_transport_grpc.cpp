@@ -8,6 +8,8 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include "grpc_dns_resolver.h"
+#include "pose_snapshot_wire.h"
 #include "proto/state_transport.grpc.pb.h"
 #include "proto/state_transport.pb.h"
 
@@ -43,6 +45,19 @@ inline std::int64_t link_now_ns() {
 // for a large binary message payload (a 1080p RGBA frame is ~8 MiB); match the IPC transport's
 // 64 MiB frame cap so both wire paths agree on the ceiling.
 constexpr int kMaxGrpcMessageBytes = 64 * 1024 * 1024;
+
+// Queue probes (state_transport_grpc::set_media_delay_drop). A probe is a Ping whose seq has the
+// top bit set, so its Pong is told apart from the link probe's (which feeds the RTT stats). One
+// follows the loss-tolerant writes on a stream at most every kProbeIntervalNs, once kProbeBytes
+// more have been written; at most kMaxProbes are out at once. The base round trip is the least
+// probe round trip over the last kBaseRttWindowNs (two half-window buckets).
+constexpr std::uint64_t kProbeSeqBit = std::uint64_t{1} << 63;
+constexpr std::int64_t kProbeIntervalNs = 50'000'000;
+constexpr std::uint64_t kProbeBytes = 1024;
+constexpr std::size_t kMaxProbes = 8;
+constexpr std::int64_t kBaseRttWindowNs = 10'000'000'000;
+// How long a pose snapshot waits for a busy stream before it is skipped.
+constexpr std::uint64_t kPoseLockWaitNs = 1'000'000;
 
 pb::MutationOp encode_op(state_mutation_op op) {
   switch (op) {
@@ -392,8 +407,10 @@ public:
 
   bool can_write() const { return static_cast<bool>(write_raw); }
 
-  bool write_locked(const pb::Frame &f) {
-    if (!alive.load() || !write_raw || held.load(std::memory_order_relaxed))
+  // THROUGH_HOLD: written even while held (send_message_to: an out-of-band answer is not tree
+  // state, so it cannot get ahead of the bootstrap's view of the tree).
+  bool write_locked(const pb::Frame &f, bool through_hold = false) {
+    if (!alive.load() || !write_raw || (held.load(std::memory_order_relaxed) && !through_hold))
       return false;
     const std::size_t bytes = f.ByteSizeLong();
     write_started_ns.store(link_now_ns(), std::memory_order_relaxed);
@@ -402,6 +419,7 @@ public:
     if (!ok)
       return false;
     link.note_tx(bytes);
+    tx_bytes += bytes;
     return true;
   }
 
@@ -409,6 +427,105 @@ public:
   bool try_write(const pb::Frame &f) {
     std::unique_lock<std::timed_mutex> lk(write_mu, std::try_to_lock);
     return lk.owns_lock() && write_locked(f);
+  }
+
+  // Take write_mu (deferred in LK) for a loss-tolerant write: give up at once when the write in
+  // progress has already run longer than WAIT_NS (it is blocked on flow control), else wait for the
+  // stream at most that long.
+  bool lock_within(std::unique_lock<std::timed_mutex> &lk, std::uint64_t wait_ns) {
+    const auto started =
+        static_cast<std::uint64_t>(write_started_ns.load(std::memory_order_relaxed));
+    if (state_transport_grpc::media_write_stalled(
+            started, static_cast<std::uint64_t>(link_now_ns()), wait_ns))
+      return false;
+    return lk.try_lock_for(std::chrono::nanoseconds(wait_ns));
+  }
+
+  // ── Queue probes (state_transport_grpc::set_media_delay_drop) ──
+  // tx_bytes, probe_tx_mark, last_probe_ns and probe_seq are written only under write_mu; the
+  // probes out and the base round trip are under probe_mu, mirrored into the two atomics that
+  // queue_delay_ns() reads without a lock.
+  std::uint64_t tx_bytes = 0;
+  std::uint64_t probe_tx_mark = 0;
+  std::int64_t last_probe_ns = 0;
+  std::uint64_t probe_seq = 0;
+  struct probe {
+    std::uint64_t seq;
+    std::int64_t sent_ns;
+  };
+  std::mutex probe_mu;
+  std::vector<probe> probes_out; // oldest first, at most kMaxProbes
+  std::int64_t rtt_min_now = -1, rtt_min_before = -1, rtt_bucket_ns = 0;
+  std::atomic<std::int64_t> oldest_probe_ns{0}; // 0: none out
+  std::atomic<std::int64_t> base_rtt_ns{-1};    // -1: no probe answered yet
+
+  std::int64_t queue_delay_ns(std::int64_t now) const {
+    return state_transport_grpc::probe_queue_delay_ns(
+        oldest_probe_ns.load(std::memory_order_relaxed),
+        base_rtt_ns.load(std::memory_order_relaxed), now);
+  }
+
+  // After a loss-tolerant write (write_mu held): follow it with a probe when one is due. The probe
+  // is recorded before it is written, so its Pong can never come back first.
+  void probe_after_write_locked() {
+    const std::int64_t now = link_now_ns();
+    if (tx_bytes - probe_tx_mark < kProbeBytes || now - last_probe_ns < kProbeIntervalNs)
+      return;
+    const std::uint64_t seq = kProbeSeqBit | ++probe_seq;
+    {
+      std::lock_guard<std::mutex> lk(probe_mu);
+      if (probes_out.size() >= kMaxProbes) {
+        // Until one is answered, the oldest dates nothing (an older relay does not answer a Ping
+        // during its admission hold): make room. After that, it dates the queue.
+        if (base_rtt_ns.load(std::memory_order_relaxed) >= 0)
+          return;
+        probes_out.erase(probes_out.begin());
+      }
+      probes_out.push_back({seq, now});
+      oldest_probe_ns.store(probes_out.front().sent_ns, std::memory_order_relaxed);
+    }
+    last_probe_ns = now;
+    pb::Frame f;
+    f.mutable_ping()->set_seq(seq);
+    f.mutable_ping()->set_sent_ns(now);
+    if (!write_locked(f)) {
+      // Never answered, so never left out: it would hold the stream back for good.
+      std::lock_guard<std::mutex> lk(probe_mu);
+      if (!probes_out.empty() && probes_out.back().seq == seq)
+        probes_out.pop_back();
+      oldest_probe_ns.store(probes_out.empty() ? 0 : probes_out.front().sent_ns,
+                            std::memory_order_relaxed);
+    }
+    probe_tx_mark = tx_bytes; // its own bytes do not count toward the next one
+  }
+
+  // A probe's Pong (reader thread). The stream is in order, so it answers every probe sent before
+  // it too, whether or not their Pongs are still on the way.
+  void on_probe_pong(std::uint64_t seq, std::int64_t now) {
+    std::lock_guard<std::mutex> lk(probe_mu);
+    std::int64_t sent = -1;
+    std::size_t answered = 0;
+    while (answered < probes_out.size() && probes_out[answered].seq <= seq) {
+      if (probes_out[answered].seq == seq)
+        sent = probes_out[answered].sent_ns;
+      ++answered;
+    }
+    if (sent < 0)
+      return; // not one of ours, or already answered
+    probes_out.erase(probes_out.begin(),
+                     probes_out.begin() + static_cast<std::ptrdiff_t>(answered));
+    oldest_probe_ns.store(probes_out.empty() ? 0 : probes_out.front().sent_ns,
+                          std::memory_order_relaxed);
+    const std::int64_t rtt = now - sent;
+    if (now - rtt_bucket_ns >= kBaseRttWindowNs / 2) {
+      rtt_min_before = rtt_min_now;
+      rtt_min_now = -1;
+      rtt_bucket_ns = now;
+    }
+    if (rtt_min_now < 0 || rtt < rtt_min_now)
+      rtt_min_now = rtt;
+    base_rtt_ns.store(rtt_min_before < 0 ? rtt_min_now : (std::min)(rtt_min_now, rtt_min_before),
+                      std::memory_order_relaxed);
   }
 
   // Cancel the stream: a blocked Write fails and frees write_mu (the write watchdog).
@@ -422,6 +539,10 @@ public:
   bool write(const pb::Frame &f) {
     std::lock_guard<std::timed_mutex> lk(write_mu);
     return write_locked(f);
+  }
+  bool write_through_hold(const pb::Frame &f) {
+    std::lock_guard<std::timed_mutex> lk(write_mu);
+    return write_locked(f, /*through_hold=*/true);
   }
 
   // Client-side only.
@@ -500,6 +621,8 @@ public:
         _owner->increment_recv_messages();
       } else if (in.has_media()) {
         _owner->on_inbound_media(decode_media(in.media()), conn.get());
+      } else if (in.has_pose_snapshot()) {
+        _owner->on_inbound_pose_snapshot(cvc::pose_wire::decode(in.pose_snapshot()));
       } else if (in.has_chunk_request()) {
         _owner->on_inbound_chunk_request(conn.get(), in.chunk_request().digest(),
                                          in.chunk_request().request_id());
@@ -565,7 +688,9 @@ struct state_transport_grpc::impl {
   std::unique_ptr<grpc::Server> server;
 };
 
-state_transport_grpc::state_transport_grpc() : _impl(new impl()) {}
+state_transport_grpc::state_transport_grpc() : _impl(new impl()) {
+  cvc::grpc_dns::default_to_native_on_windows();
+}
 
 state_transport_grpc::~state_transport_grpc() { stop(); }
 
@@ -666,6 +791,10 @@ bool state_transport_grpc::connect_to_peer(const std::string &target,
   grpc::ChannelArguments chan_args;
   chan_args.SetMaxReceiveMessageSize(kMaxGrpcMessageBytes);
   chan_args.SetMaxSendMessageSize(kMaxGrpcMessageBytes);
+  // Its own connection: gRPC otherwise carries every channel in the process to the same target on
+  // one HTTP/2 connection, so two transports dialing one relay (a bench, a test) would share its
+  // flow-control window and every TCP stall, as two separate clients never do.
+  chan_args.SetInt(GRPC_ARG_USE_LOCAL_SUBCHANNEL_POOL, 1);
   auto channel = grpc::CreateCustomChannel(target, chan_creds, chan_args);
   auto deadline = std::chrono::system_clock::now() + timeout;
   if (!channel->WaitForConnected(deadline))
@@ -719,6 +848,8 @@ bool state_transport_grpc::connect_to_peer(const std::string &target,
         increment_recv_messages();
       } else if (in.has_media()) {
         on_inbound_media(decode_media(in.media()), conn.get());
+      } else if (in.has_pose_snapshot()) {
+        on_inbound_pose_snapshot(cvc::pose_wire::decode(in.pose_snapshot()));
       } else if (in.has_chunk_request()) {
         on_inbound_chunk_request(conn.get(), in.chunk_request().digest(),
                                  in.chunk_request().request_id());
@@ -1046,8 +1177,8 @@ void state_transport_grpc::on_inbound_message(const state_message &m, connection
   for (auto *peer : peers)
     (void)peer->ingest_remote_message(m);
   const bool relay = _relay.load(std::memory_order_relaxed);
-  if (!relay && !_bridge)
-    return;
+  if ((!relay && !_bridge) || m.ttl_hops == 0)
+    return; // ttl 0: for this node alone (state_transport::send_message_to)
   if (!relay_admits(m, peers)) {
     _relay_withheld.fetch_add(1, std::memory_order_relaxed);
     return;
@@ -1135,6 +1266,10 @@ std::size_t state_transport_grpc::write_media(const media_frame &m, const void *
     shaper = _media_shaper;
   }
   const std::uint64_t stall_ns = _media_stall_ns.load(std::memory_order_relaxed);
+  // Audio is small and the first thing a listener misses, so it may queue four times as long as
+  // video before it is dropped: a backed-up link sheds video first.
+  const std::int64_t delay_ns =
+      _media_delay_ns.load(std::memory_order_relaxed) * (m.sample_rate > 0 ? 4 : 1);
   // Media is unreplicated, un-bridged (it crosses protocols via the media_router), and carries no
   // path. `exclude` (a connection*) skips the origin peer when a relay fans; nullptr sends to all.
   std::size_t n = 0;
@@ -1144,17 +1279,20 @@ std::size_t state_transport_grpc::write_media(const media_frame &m, const void *
     if (!c || c.get() == exclude || !c->alive.load() || !c->can_write() ||
         c->held.load(std::memory_order_relaxed))
       continue;
+    // A stream already queueing past the delay drop: this frame would only arrive later still,
+    // and hold back the ones after it.
+    if (delay_ns != 0 && c->queue_delay_ns(link_now_ns()) > delay_ns) {
+      _media_delay_dropped.fetch_add(1, std::memory_order_relaxed);
+      c->link.note_media_dropped();
+      continue;
+    }
     std::unique_lock<std::timed_mutex> lk(c->write_mu, std::defer_lock);
     if (stall_ns != 0) {
       // A write that has already run past the window: drop at once. Otherwise wait for the stream
       // at most the window, so this (publisher's reader) thread never queues behind a slow
       // receiver for longer -- a write that starts and then blocks on flow control would hold
       // every frame behind it until the 3 s watchdog.
-      const auto started =
-          static_cast<std::uint64_t>(c->write_started_ns.load(std::memory_order_relaxed));
-      if ((started != 0 &&
-           media_write_stalled(started, static_cast<std::uint64_t>(link_now_ns()), stall_ns)) ||
-          !lk.try_lock_for(std::chrono::nanoseconds(stall_ns))) {
+      if (!c->lock_within(lk, stall_ns)) {
         _media_stall_dropped.fetch_add(1, std::memory_order_relaxed);
         c->link.note_media_dropped();
         continue;
@@ -1190,6 +1328,8 @@ std::size_t state_transport_grpc::write_media(const media_frame &m, const void *
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
       c->link.note_media_sent();
       ++n;
+      if (delay_ns != 0)
+        c->probe_after_write_locked();
     }
   }
   return n;
@@ -1236,6 +1376,19 @@ bool state_transport_grpc::media_write_stalled(std::uint64_t write_started_ns, s
          now_ns - write_started_ns > stall_ns;
 }
 
+void state_transport_grpc::set_media_delay_drop(std::chrono::milliseconds ms) noexcept {
+  const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(ms).count();
+  _media_delay_ns.store(ns > 0 ? static_cast<std::int64_t>(ns) : 0, std::memory_order_relaxed);
+}
+
+std::int64_t state_transport_grpc::probe_queue_delay_ns(std::int64_t oldest_probe_ns,
+                                                        std::int64_t base_rtt_ns,
+                                                        std::int64_t now_ns) noexcept {
+  if (oldest_probe_ns == 0 || base_rtt_ns < 0 || now_ns - oldest_probe_ns <= base_rtt_ns)
+    return 0;
+  return now_ns - oldest_probe_ns - base_rtt_ns;
+}
+
 void state_transport_grpc::set_media_sink(media_sink_fn sink) { _media_sink = std::move(sink); }
 
 void state_transport_grpc::set_on_media(media_frame_fn cb) {
@@ -1244,6 +1397,57 @@ void state_transport_grpc::set_on_media(media_frame_fn cb) {
     return;
   }
   _media_sink = [cb = std::move(cb)](const media_frame &f, const void * /*src_conn*/) { cb(f); };
+}
+
+void state_transport_grpc::set_on_pose_snapshot(pose_snapshot_fn fn) {
+  _on_pose_snapshot = std::move(fn);
+}
+
+void state_transport_grpc::on_inbound_pose_snapshot(const pose_snapshot &s) {
+  _poses_recv.fetch_add(1, std::memory_order_relaxed);
+  if (_on_pose_snapshot)
+    _on_pose_snapshot(s);
+}
+
+std::size_t state_transport_grpc::push_pose_snapshot_to(const std::string &node_id,
+                                                        const pose_snapshot &snap) {
+  std::vector<std::shared_ptr<connection>> targets;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    for (const auto &c : _conns) {
+      if (!c || !c->alive.load() || !c->can_write())
+        continue;
+      const std::string *pid = c->peer_id();
+      if (pid && *pid == node_id)
+        targets.push_back(c);
+    }
+  }
+  if (targets.empty())
+    return 0;
+  pb::Frame f;
+  cvc::pose_wire::encode(snap, f.mutable_pose_snapshot());
+  // Poses may queue twice as long as video: they are small, and an avatar that stops is missed
+  // sooner than a frame of video.
+  const std::int64_t delay_ns = 2 * _media_delay_ns.load(std::memory_order_relaxed);
+  std::size_t n = 0;
+  for (auto &c : targets) {
+    // Never wait behind a busy or backed-up stream (the caller is the relay's room step): the next
+    // snapshot carries what this one would have.
+    std::unique_lock<std::timed_mutex> lk(c->write_mu, std::defer_lock);
+    if ((delay_ns != 0 && c->queue_delay_ns(link_now_ns()) > delay_ns) ||
+        !c->lock_within(lk, kPoseLockWaitNs)) {
+      _poses_skipped.fetch_add(1, std::memory_order_relaxed);
+      continue;
+    }
+    if (c->write_locked(f)) {
+      _sent_frames.fetch_add(1, std::memory_order_relaxed);
+      _poses_sent.fetch_add(1, std::memory_order_relaxed);
+      ++n;
+      if (delay_ns != 0)
+        c->probe_after_write_locked();
+    }
+  }
+  return n;
 }
 
 void state_transport_grpc::on_inbound_media(const media_frame &m, connection *origin) {
@@ -1545,15 +1749,20 @@ bool state_transport_grpc::on_link_frame(connection &c, const pb::Frame &in) {
   c.link.note_rx(in.ByteSizeLong());
   c.last_rx_ns.store(link_now_ns(), std::memory_order_relaxed);
   if (in.has_ping()) {
+    // Answered without fail, and through the admission hold (a Pong is not tree state): an
+    // unanswered queue probe would hold the peer's media back.
     pb::Frame f;
     f.mutable_pong()->set_seq(in.ping().seq());
     f.mutable_pong()->set_sent_ns(in.ping().sent_ns());
-    if (c.write(f))
+    if (c.write_through_hold(f))
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
     return true;
   }
   if (in.has_pong()) {
-    c.link.note_rtt(link_now_ns() - in.pong().sent_ns());
+    if (in.pong().seq() & kProbeSeqBit)
+      c.on_probe_pong(in.pong().seq(), link_now_ns());
+    else
+      c.link.note_rtt(link_now_ns() - in.pong().sent_ns());
     return true;
   }
   return false;
@@ -1879,9 +2088,9 @@ bool state_transport_grpc::request_snapshot(const std::string &cluster_id,
   return result;
 }
 
-std::size_t state_transport_grpc::push_snapshot_to(const std::string &node_id,
-                                                   const std::vector<snapshot_entry> &entries) {
-  if (entries.empty())
+std::size_t state_transport_grpc::send_message_to(const std::string &node_id,
+                                                  const state_message &m) {
+  if (node_id.empty())
     return 0;
   std::vector<std::shared_ptr<connection>> targets;
   {
@@ -1892,6 +2101,49 @@ std::size_t state_transport_grpc::push_snapshot_to(const std::string &node_id,
       const std::string *pid = c->peer_id();
       if (pid && *pid == node_id)
         targets.push_back(c);
+    }
+  }
+  if (targets.empty())
+    return 0;
+  pb::Frame frame;
+  encode_message(m, frame.mutable_message());
+  std::size_t n = 0;
+  for (auto &c : targets)
+    if (c->write_through_hold(frame)) {
+      _sent_frames.fetch_add(1, std::memory_order_relaxed);
+      ++n;
+    }
+  return n;
+}
+
+std::size_t state_transport_grpc::push_snapshot_to(const std::string &node_id,
+                                                   const std::vector<snapshot_entry> &entries) {
+  return push_to(node_id, entries, false);
+}
+
+std::size_t
+state_transport_grpc::push_snapshot_to_holder(const std::string &node_id,
+                                              const std::vector<snapshot_entry> &entries) {
+  return push_to(node_id, entries, true);
+}
+
+std::size_t state_transport_grpc::push_to(const std::string &node_id,
+                                          const std::vector<snapshot_entry> &entries,
+                                          bool holder_only) {
+  if (entries.empty())
+    return 0;
+  std::vector<std::shared_ptr<connection>> targets;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    for (const auto &c : _conns) {
+      if (!c || !c->alive.load() || !c->can_write())
+        continue;
+      const std::string *pid = c->peer_id();
+      if (!pid || *pid != node_id)
+        continue;
+      if (holder_only && c->gate && c->gate->holder(node_id) != c.get())
+        continue; // claims the id without holding it
+      targets.push_back(c);
     }
   }
   if (targets.empty())
@@ -1939,9 +2191,10 @@ void state_transport_grpc::heartbeat_loop() {
       conns = _conns;
     }
     for (auto &c : conns) {
+      // A busy stream skips this beat (the next one covers it) rather than hold up the others.
       if (!c || !c->alive.load() || !c->can_write())
         continue;
-      if (c->write(frame))
+      if (c->try_write(frame))
         _sent_frames.fetch_add(1, std::memory_order_relaxed);
     }
   }

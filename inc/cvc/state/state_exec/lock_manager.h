@@ -8,12 +8,16 @@
  * (detail::lock_home, one per scheduler), which runs the home actions of protocol section 5; the
  * manager itself is the table of protocol sections 2-4 (detail::lock_table).
  *
- * Phase L1: single mode only (one thread calls the manager), one home per manager. Shared mode,
- * ports and several homes are phase L3's; inheritance is phase L2's.
+ * Phases L1 and L2 built single mode (one thread calls the manager) with one home per manager, and
+ * priority inheritance (protocol 3.3) among the processes of a home whose scheduler uses a
+ * priority policy. Phase L3 adds shared mode (every operation under the manager's mutex, M.mu),
+ * several homes per manager, and the homes' ports (detail::lock_port), through which an operation
+ * on one home's thread reaches a process of another (protocol 2.3, 4.14).
  */
 #ifndef CVC_STATE_EXEC_LOCK_MANAGER_H
 #define CVC_STATE_EXEC_LOCK_MANAGER_H
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -27,9 +31,32 @@ namespace cvc::state_exec {
 /// A request's mode: shared (S) or exclusive (X). Two shared requests never conflict.
 enum class lock_mode : std::uint8_t { shared, exclusive };
 
-/// How a manager is called: by one thread (single), or by several under its mutex (shared,
-/// phase L3). Fixed at construction.
+/// How a manager is called: by one thread (single), or by several, each operation under the
+/// manager's mutex (shared). Fixed at construction.
 enum class lock_threading : std::uint8_t { single, shared };
+
+/// Whether this build has threads. False only on Emscripten without pthreads, where every home is
+/// pumped on the one thread: app::lock_manager()'s auto mode picks single there, and a host that
+/// attaches with cross_thread passes this, so such a build never asks for a cross-thread attach.
+#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+inline constexpr bool threads_compiled_in = false;
+#else
+inline constexpr bool threads_compiled_in = true;
+#endif
+
+/// How a scheduler's home attaches to a manager (scheduler::set_lock_manager). `cross_thread`:
+/// the home may be pumped on a thread other than the one other homes of the manager use (a pycvc
+/// Exec, a scheduler of its own thread). A single-mode manager refuses it with std::logic_error
+/// naming state_exec.locks.threading (design 8.3; gap G-24).
+struct lock_attach {
+  bool cross_thread = false;
+};
+
+/// The attach a host makes for a scheduler it may pump on a thread of its own (pycvc's Exec, the
+/// wasm smoke): cross-thread wherever threads exist, a same-thread attach on a build without them.
+inline constexpr lock_attach threaded_host_attach() noexcept {
+  return lock_attach{threads_compiled_in};
+}
 
 /// One locked key, as lock-query reports it (protocol 4.13). Keys are absolute here; the DSL shows
 /// them relative to the caller's chroot.
@@ -70,16 +97,23 @@ struct lock_stats {
   std::uint64_t ends = 0;               // end calls that found a record
   std::size_t trie_nodes = 0;           // trie nodes now, the root included
   std::size_t cache_refs = 0;           // key-cache references now, over every home
-  std::uint64_t relevels = 0;           // relevel notifications emitted (phase L2)
-  std::uint64_t relevels_coalesced = 0; // relevels coalesced away (phase L2)
+  std::uint64_t relevels = 0;           // relevel notifications emitted (from phase L2)
+  std::uint64_t relevels_coalesced = 0; // relevels coalesced away (from phase L2)
   std::uint64_t posts = 0;              // posts that landed in a port (phase L3)
   std::uint64_t posts_dropped = 0;      // posts refused by a closed port (phase L3)
   std::uint64_t posts_discarded = 0;    // posts accepted, then discarded at the close (phase L3)
+  std::uint64_t mutex_waits = 0;        // shared mode: operations that found M.mu held
+  std::uint64_t mutex_wait_ns = 0;      // shared mode: the time those operations blocked on it
 };
 
 namespace detail {
 class lock_table;
 class lock_home;
+
+/// A host that pumps schedulers on threads of its own (pycvc, at import) announces itself, so
+/// app::lock_manager()'s auto mode picks shared (gap G-24). Process-wide; never cleared.
+void note_threaded_host() noexcept;
+bool threaded_host_noted() noexcept;
 } // namespace detail
 
 /// The lock manager. Owned by shared_ptr: the app (or a scheduler, for its private one) and every
@@ -95,8 +129,10 @@ public:
   };
 
   lock_manager();
-  /// Phase L1: options.threading must be single (shared mode is phase L3's): throws
-  /// std::invalid_argument otherwise.
+  /// A single manager is called by one thread at a time (debug builds assert it); a shared one
+  /// takes its mutex (M.mu) around every operation, so homes on several threads can share it
+  /// (design 8.3). Either accepts any number of homes; only a shared one accepts a home attached
+  /// with lock_attach::cross_thread.
   explicit lock_manager(options opts);
   ~lock_manager();
   lock_manager(const lock_manager &) = delete;
@@ -120,8 +156,15 @@ public:
   const detail::lock_table &table() const { return *table_; }
 
 private:
+  friend class detail::lock_home; // counts its posts (below)
+
   options opts_;
   std::unique_ptr<detail::lock_table> table_;
+  // lock_stats' port counters (protocol 4.14, 5.7): bumped by the homes with relaxed adds outside
+  // M.mu, read by stats().
+  std::atomic<std::uint64_t> posts_{0};
+  std::atomic<std::uint64_t> posts_dropped_{0};
+  std::atomic<std::uint64_t> posts_discarded_{0};
 };
 
 } // namespace cvc::state_exec

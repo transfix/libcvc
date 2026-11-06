@@ -2,12 +2,23 @@
 #
 # Layout (all windows are closable + openable from the View menu):
 #   • My Camera  (id mycam)   — your own camera, a camera + mic device picker, and camera/mic toggles.
-#   • Users      (id users)   — everyone in the room: name (lights up GREEN while talking), per-peer
-#                               LOCAL camera/mic mute + a volume slider, and click a name to raise
-#                               that peer's camera window. These controls are LOCAL — they change only
-#                               what THIS client sees/hears, never the other person's capture.
+#   • Avatar     (id myavatar) — your avatar: what you look like (a colour and something to wear, from
+#                               the relay's catalog; everyone sees the same avatar, you included),
+#                               your body and controller, and your energy -- the relay's budget,
+#                               where your reserve went (the ledger) and its recent history.
+#   • Users      (id users)   — everyone in the room (components/room_users.ari): name (lights up
+#                               GREEN while talking), per-peer LOCAL camera/mic mute + a volume slider,
+#                               click a name to raise that peer's camera window, and a message button
+#                               for a direct message. These controls are LOCAL — they change only what
+#                               THIS client sees/hears, never the other person's capture.
+#   • Chat       (id chat)    — the room's chat and your direct messages (components/chat.ari): pick
+#                               the room or a conversation, scroll up for older messages, Enter sends
+#                               and Shift+Enter adds a line.
 #   • cam_<i>    (per peer)    — one window per OTHER participant, titled by their name, showing their
-#                               camera. Repeated over peer.count; opened automatically, closable.
+#                               camera. Repeated over peer.count; opened automatically, closable, and
+#                               listed by name at the end of the View menu to open again (or click
+#                               the name in Users). Closed or open, it stays with the person when
+#                               the list reorders.
 #
 # The host (arigl ConferenceSession) drives the media: it forwards our camera+mic, mixes every peer's
 # audio into one output (per-peer volume + mute from the Users window), measures voice activity
@@ -21,11 +32,31 @@ meta:
   author: cvc
   min_libcvc: 3.6.0
 
+requires:
+  - gl.scene                       # a scene renderer realizes the scene: block (arigl; not ari)
+  - stream_view
+  - stream-open                    # media: capture and mute
+  - stream-capture-camera
+  - stream-capture-audio
+  - stream-set-muted
+  - room-join                      # the room (arigl registers these when CVC_ARIADNE_RELAY is set)
+  - room-roster
+  - room-set-avatar                # the Avatar window
+  - plot                           # its history graphs
+  - chat-post                      # the Chat window (chat.ari; the relay keeps the history)
+  - text_view
+  - message_input
+
+# The Users and Chat windows are the shipped components: their units, and the functions that keep
+# them current (room-users-step, chat-ui-step), which on_tick calls.
+import: [cvc://components/room_users.ari, cvc://components/chat.ari]
+
 # The room's LOOK. The relay owns what is IN the room (conf.rooms.<room>.scene: the ground, the
 # reference box; the avatars), and every client draws it under this document's lighting, so the
 # rig lives here, not in the server. A three-point rig staged over the 20 m floor: the key spot casts
-# real-time shadows from the scene objects and every avatar (re-baked each frame, so a walking
-# avatar's shadow walks with it); fill, back and environment keep the shaded sides readable.
+# real-time shadows from the scene objects and every avatar (re-baked in any frame something that
+# casts has moved, so a walking avatar's shadow walks with it, and an idle room bakes none); fill,
+# back and environment keep the shaded sides readable.
 scene:
   lights:
     - light: room_rig
@@ -42,6 +73,10 @@ scene:
     resolution: 2048
     update_interval: 1
 
+# The peers' camera windows (cam_<i>, made by a repeat) are listed by name at the end of View: the
+# built-in Windows menu under that title joins it (ARIADNE.md §5.9).
+windows_menu: View
+
 menubar:
   - menu: Room
     items:
@@ -53,6 +88,10 @@ menubar:
         bind: tree.mycam.open
       - menu_item: Users
         bind: tree.users.open
+      - menu_item: Chat
+        bind: tree.chat.open
+      - menu_item: Avatar
+        bind: tree.myavatar.open
 
 windows:
   # ── My Camera: your name, self-view, device pickers + on/off toggles ──
@@ -76,9 +115,11 @@ windows:
         color: [1.0, 0.4, 0.4]
         visible_when: (not (= (state-get "name_error") ""))
       - separator
+      # A box, not a width: a portrait phone camera shows whole, letterboxed, rather than squashed
+      # or standing taller than the window.
       - type: stream_view
         bind: cam_token
-        size: 320
+        size: [320, 240]
       - separator
       # Device pickers (real-device builds only; empty + hidden under ?synthetic=1). Picking a device
       # updates cam.sel / mic.sel; the host maps it to cam.want_device / mic.want_device and on_tick
@@ -114,109 +155,223 @@ windows:
       - text: ""
         bind: self.video_in
 
-  # ── Users: the roster with per-peer local controls ──
-  # One compact ROW per participant, as a table of unit widgets: every row is its own grid with the
-  # SAME fixed column widths, so the rows line up as columns. ping / down / up are each person's
-  # link to the relay AS THEY MEASURE IT (published to the room once a second; "--" = not measured
-  # yet). cam / mic / vol are LOCAL controls (what YOU see and hear of them), never sent. The dot
-  # before each name is the size the relay sends that person video at, adapted to THEIR link:
-  # green full, red reduced (half, quarter, thumbnails), black none; hover it for which.
-  # Every column has a FIXED width, the window wide enough for all of them: an auto-width column is
-  # re-fitted to its content each frame, and a slider sized from its column then chased its own
-  # width (it could not be dragged).
-  - window: Users
-    id: users
-    pos: [390, 40]
-    size: [480, 260]
+  # ── Avatar: how you look, what you move with, and where your energy went ──
+  # The look: the relay offers the choices (conf.rooms.<room>.avatars, room_avatar.h); on_tick writes
+  # a pick to your own participant subtree, and every client -- yours too -- draws what it resolves
+  # to. So the avatar you walk around as is the one everyone else sees. Automatic is a colour derived
+  # from your id, which is what you look like until you choose. What you wear is only drawn.
+  # The rest is published by the host as self.avatar.* (avatar_panel.h), four times a second:
+  #   * body and controller: what the physics simulates (everyone's is the same box, walking);
+  #   * the energy budget: the relay's policy, the same for everyone -- a push of at most 840 N, at
+  #     most 1.2 kW, a 30 kJ reserve refilled at 300 W, carrying the body costs 0.2 m g |v| -- and
+  #     your reserve now (your client's count, which the relay's corrects);
+  #   * the ledger: where the reserve went since you joined, line by line. The lines balance:
+  #     now = started with + refilled - work - carried - overflow + unpaid + corrections, so the
+  #     residual is 0 (rounding aside);
+  #   * the history: the reserve and the power you spent over the last minute.
+  # Each line shows a short value; what it means is its tooltip (a policy line's is published as
+  # self.avatar.policy.<line>_tip), since a sentence beside the value is cut off in a narrow window.
+  - window: Avatar
+    id: myavatar
+    pos: [20, 610]
+    size: [440, 680]
     closable: true
     children:
-      - text: "in the room"
-        bind: self.count
+      - text: "How everyone sees you in the room, you included."
+      # The pickers' options: the catalog's labels, which on_tick publishes newline-joined (a widget's
+      # expression may only use pure functions, so it cannot call room-avatar-options itself).
+      - type: combo
+        label: "Colour"
+        bind: avatar.color
+        options: (string.split (state-get "avatar.colors") "\n")
+        visible_when: (not (= (state-get "avatar.colors") ""))
+      - type: combo
+        label: "Wear"
+        bind: avatar.accessory
+        options: (string.split (state-get "avatar.accessories") "\n")
+        visible_when: (not (= (state-get "avatar.accessories") ""))
+      - type: group
+        layout: { kind: grid, col_widths: [104, 300] }
+        children:
+          - text: "body"
+          - text: ""
+            bind: self.avatar.body
+      - type: group
+        layout: { kind: grid, col_widths: [104, 300] }
+        children:
+          - text: "controller"
+          - text: ""
+            bind: self.avatar.controller
       - separator
+      - text: "Energy budget"
+        color: [0.75, 0.85, 1.0]
+      - text: "waiting for your avatar to join the room"
+        visible_when: (not (= (state-get "self.avatar.ready") "1"))
+      - progress: Reserve
+        bind: self.avatar.energy.fraction
+        overlay: self.avatar.energy.text
       - type: group
-        id: users_head
-        layout: { kind: grid, col_widths: [16, 96, 52, 52, 52, 30, 30, 72] }
+        layout: { kind: grid, col_widths: [104, 300] }
         children:
+          - text: "now"
           - text: ""
-          - text: "name"
-          - text: "ping"
-          - text: "down"
-          - text: "up"
-          - text: "cam"
-          - text: "mic"
-          - text: "vol"
-      # You: your name lights up GREEN while YOU talk (text colour is static, so it is a visibility
-      # swap: only one of the two is visible). The two are one group, so they always fill exactly
-      # one cell, even on a frame where neither check runs.
+            bind: self.avatar.energy.line
       - type: group
-        id: users_you
-        layout: { kind: grid, col_widths: [16, 96, 52, 52, 52, 30, 30, 72] }
+        layout: { kind: grid, col_widths: [104, 300] }
         children:
-          - type: status_dot
-            bind: self.dot
-          - type: group
-            children:
-              - text: ""
-                bind: conf.self
-                visible_when: (not (= (state-get "self.talking") "1"))
-              - text: ""
-                bind: conf.self
-                color: [0.30, 1.0, 0.40]
-                visible_when: (= (state-get "self.talking") "1")
+          - text: "budget"
+            tooltip: (state-get "self.avatar.policy.budget_tip")
           - text: ""
-            bind: self.ping
-          - text: ""
-            bind: self.down
-          - text: ""
-            bind: self.up
-          - text: ""
-          - text: ""
-          - text: "(you)"
-      # Everyone else: one row per peer (peer.<i>), filled by on_tick.
+            bind: self.avatar.policy.budget
+            tooltip: (state-get "self.avatar.policy.budget_tip")
       - type: group
-        repeat: (state-get "peer.count")
-        layout: { kind: grid, col_widths: [16, 96, 52, 52, 52, 30, 30, 72] }
+        layout: { kind: grid, col_widths: [104, 300] }
         children:
-          - type: status_dot
-            bind: peer.{i}.dot
-          # Name: click to open + raise this peer's camera window (cam_<i>); GREEN while talking. One
-          # group, so it is always one cell (see the you row).
-          - type: group
-            children:
-              - text: ""
-                bind: peer.{i}.name
-                on_click: (begin (state-set "tree.cam_{i}.open" "1") (state-set "tree.cam_{i}.raise" "1"))
-                visible_when: (not (= (state-get "peer.{i}.talking") "1"))
-              - text: ""
-                bind: peer.{i}.name
-                color: [0.30, 1.0, 0.40]
-                on_click: (begin (state-set "tree.cam_{i}.open" "1") (state-set "tree.cam_{i}.raise" "1"))
-                visible_when: (= (state-get "peer.{i}.talking") "1")
+          - text: "push"
+            tooltip: (state-get "self.avatar.policy.push_tip")
           - text: ""
-            bind: peer.{i}.ping
+            bind: self.avatar.policy.push
+            tooltip: (state-get "self.avatar.policy.push_tip")
+      - type: group
+        layout: { kind: grid, col_widths: [104, 300] }
+        children:
+          - text: "power"
+            tooltip: (state-get "self.avatar.policy.power_tip")
           - text: ""
-            bind: peer.{i}.down
+            bind: self.avatar.policy.power
+            tooltip: (state-get "self.avatar.policy.power_tip")
+      - type: group
+        layout: { kind: grid, col_widths: [104, 300] }
+        children:
+          - text: "reserve"
+            tooltip: (state-get "self.avatar.policy.reserve_tip")
           - text: ""
-            bind: peer.{i}.up
-          # Local mute toggles (checked = on). Default on: the host treats von/aon as muted only when
-          # explicitly "0", so an untouched peer is shown + heard. "##" hides the label (the header
-          # names the column). These and vol belong to the PERSON: on_tick moves them with the pid
-          # when rows shift.
-          - type: checkbox
-            label: "##cam"
-            bind: peer.{i}.von
-            def: true
-          - type: checkbox
-            label: "##mic"
-            bind: peer.{i}.aon
-            def: true
-          # Local volume in our mix (1 = unity, up to 2x boost).
-          - type: slider_float
-            label: "##vol"
-            bind: peer.{i}.vol
-            lo: 0
-            hi: 2
-            def: 1
+            bind: self.avatar.policy.reserve
+            tooltip: (state-get "self.avatar.policy.reserve_tip")
+      - type: group
+        layout: { kind: grid, col_widths: [104, 300] }
+        children:
+          - text: "carrying"
+            tooltip: (state-get "self.avatar.policy.carrying_tip")
+          - text: ""
+            bind: self.avatar.policy.carrying
+            tooltip: (state-get "self.avatar.policy.carrying_tip")
+      - type: group
+        layout: { kind: grid, col_widths: [104, 300] }
+        children:
+          - text: "sustains"
+            tooltip: (state-get "self.avatar.policy.sustains_tip")
+          - text: ""
+            bind: self.avatar.policy.sustains
+            tooltip: (state-get "self.avatar.policy.sustains_tip")
+      - type: group
+        layout: { kind: grid, col_widths: [104, 300] }
+        children:
+          - text: "when empty"
+            tooltip: (state-get "self.avatar.policy.empty_tip")
+          - text: ""
+            bind: self.avatar.policy.empty
+            tooltip: (state-get "self.avatar.policy.empty_tip")
+      - separator
+      - text: "Ledger: where your reserve went since you joined"
+        color: [0.75, 0.85, 1.0]
+      - type: group
+        layout: { kind: grid, col_widths: [104, 300] }
+        children:
+          - text: "started with"
+          - text: ""
+            bind: self.avatar.ledger.start
+      - type: group
+        layout: { kind: grid, col_widths: [104, 300] }
+        children:
+          - text: "refilled"
+            tooltip: "Resting power refills the reserve, all the time."
+          - text: ""
+            bind: self.avatar.ledger.refilled
+            tooltip: "Resting power refills the reserve, all the time."
+      - type: group
+        layout: { kind: grid, col_widths: [104, 300] }
+        children:
+          - text: "work"
+            tooltip: "Speeding up and pushing."
+          - text: ""
+            bind: self.avatar.ledger.work
+            tooltip: "Speeding up and pushing."
+      - type: group
+        layout: { kind: grid, col_widths: [104, 300] }
+        children:
+          - text: "carried"
+            tooltip: "Carrying your weight along."
+          - text: ""
+            bind: self.avatar.ledger.carried
+            tooltip: "Carrying your weight along."
+      - type: group
+        layout: { kind: grid, col_widths: [104, 300] }
+        children:
+          - text: "overflow"
+            tooltip: "Refill lost to a reserve that was already full."
+          - text: ""
+            bind: self.avatar.ledger.overflow
+            tooltip: "Refill lost to a reserve that was already full."
+      - type: group
+        layout: { kind: grid, col_widths: [104, 300] }
+        children:
+          - text: "unpaid"
+            tooltip: "Stopping on an empty reserve, which it could not pay for."
+          - text: ""
+            bind: self.avatar.ledger.unpaid
+            tooltip: "Stopping on an empty reserve, which it could not pay for."
+      - type: group
+        layout: { kind: grid, col_widths: [104, 300] }
+        children:
+          - text: "corrections"
+            tooltip: "The relay's count over yours."
+          - text: ""
+            bind: self.avatar.ledger.corrections
+            tooltip: "The relay's count over yours."
+      - type: group
+        layout: { kind: grid, col_widths: [104, 300] }
+        children:
+          - text: "now"
+            tooltip: (state-get "self.avatar.ledger.balance")
+          - text: ""
+            bind: self.avatar.ledger.now
+            tooltip: (state-get "self.avatar.ledger.balance")
+      - progress: Work
+        bind: self.avatar.ledger.share.work
+      - progress: Carried
+        bind: self.avatar.ledger.share.carried
+      - progress: Overflow
+        bind: self.avatar.ledger.share.overflow
+      - text: ""
+        bind: self.avatar.ledger.summary
+      - separator
+      - plot: Reserve kJ
+        bind: self.avatar.history.reserve
+        height: 70
+        overlay: self.avatar.history.window
+      - plot: Power W
+        bind: self.avatar.history.power
+        height: 70
+
+  # ── Users: everyone in the room, a row each (components/room_users.ari) ──
+  # Per row: the video dot, the name (click: their camera window; green while talking), their link
+  # as they measure it, LOCAL cam / mic / volume (what YOU see and hear of them, never sent), and a
+  # message button that opens a conversation in the Chat window. room-users-step fills the rows.
+  - include: room_users
+    args: { id: users, title: Users, rows: peer, chat: chat, self: conf.self }
+    pos: [390, 40]
+    size: [570, 260]
+
+  # ── Chat: the room's chat and direct messages (components/chat.ari) ──
+  # The relay keeps the history and pushes each client what it may read: the room's messages to
+  # everyone in the room, a direct message to its two participants only. Scrolled to the top, the
+  # log asks for older messages a page at a time. chat-ui-step keeps it current. 320 tall, so its
+  # message field is still on screen in cyprty in a 1600x900 browser window.
+  - include: chat
+    args: { id: chat, title: Chat, room: room.token }
+    pos: [390, 310]
+    size: [570, 320]
 
   # ── One camera window per OTHER participant, titled by their name ──
   - window: Peer
@@ -230,7 +385,7 @@ windows:
       # Their camera, or "camera off" while they have it off (they send no frames then).
       - type: stream_view
         bind: peer.{i}.cam
-        size: 300
+        size: [300, 225]
         visible_when: (not (= (state-get "peer.{i}.video_off") "1"))
       - text: "camera off"
         visible_when: (= (state-get "peer.{i}.video_off") "1")
@@ -242,23 +397,32 @@ on_tick: |
       (begin
         (state-set "joined" "1")
         (state-set "name_error" "") ; no name conflict yet (the web client's launch name is random)
+        ; the avatar pickers start blank; on_tick fills them once the relay's catalog is here
+        ; (an unset key reads as nil, which compares unequal to "")
+        (state-set "avatar.color" "")
+        (state-set "avatar.accessory" "")
+        (state-set "avatar.sent.color" "")
+        (state-set "avatar.sent.accessory" "")
+        (state-set "avatar.colors" "")
+        (state-set "avatar.accessories" "")
         ; ── pre-seed each peer camera window at a distinct TILED position ──
         ; every cam_<i> declares the SAME authored pos:, so without this the per-peer windows land
         ; exactly on top of one another and look like a single window — the #1 reason a user reports
-        ; "I can't see the other cameras". Tile them in a 2-column grid to the RIGHT of the Users
-        ; window (which sits at x≈390–870): the roster is NEVER covered, and up to four cameras show
+        ; "I can't see the other cameras". Tile them in a 2-column grid to the RIGHT of the Users and
+        ; Chat windows (x≈390–960): those are NEVER covered, and up to four cameras show
         ; side-by-side without overlapping on a laptop screen. Seeded ONCE here, before any peer window
         ; exists, so each window's first-use geometry seed lands at its own spot; the user's drag then
         ; persists and wins. Covers 6 peers; a 7th+ falls back to the authored pos.
-        (state-set "tree.cam_0.geometry" "876,66,330,290")
-        (state-set "tree.cam_1.geometry" "1216,66,330,290")
-        (state-set "tree.cam_2.geometry" "876,364,330,290")
-        (state-set "tree.cam_3.geometry" "1216,364,330,290")
-        (state-set "tree.cam_4.geometry" "876,662,330,290")
-        (state-set "tree.cam_5.geometry" "1216,662,330,290")
+        (state-set "tree.cam_0.geometry" "966,66,330,290")
+        (state-set "tree.cam_1.geometry" "1306,66,330,290")
+        (state-set "tree.cam_2.geometry" "966,364,330,290")
+        (state-set "tree.cam_3.geometry" "1306,364,330,290")
+        (state-set "tree.cam_4.geometry" "966,662,330,290")
+        (state-set "tree.cam_5.geometry" "1306,662,330,290")
         (state-set "cam_on" "1") ; on/off toggles start ON (streams open unmuted)
         (state-set "mic_on" "1")
-        (room-join "" (state-get "conf.room") (dict "name" (state-get "conf.self")))
+        (state-set "room.token"
+          (get-attr (room-join "" (state-get "conf.room") (dict "name" (state-get "conf.self"))) "token"))
         (state-set "joined.name" (state-get "conf.self")) ; remember it for name-change detection
         (set mic (stream-open (dict "id" "mic" "codec" "f32" "rate" 48000 "ch" 1 "frames_per_chunk" 1024
                                     "subscriber_depth" 8 "expected_subscribers" 2)))
@@ -271,7 +435,9 @@ on_tick: |
                 (dict "device" 0 "rate" 48000 "ch" 1 "frames" 1024))
               (state-set "mic.cur_device" "0")))
         ; The camera at the size it is shown (peer tiles are ~300 px wide): 320x240 MJPEG at q60 and
-        ; 15 fps is ~0.6 Mbit/s per receiver, where 640x480 at q70 and 30 fps was ~5.
+        ; 15 fps is ~0.6 Mbit/s per receiver, where 640x480 at q70 and 30 fps was ~5. 320x240 is a
+        ; budget, not a shape: a camera keeps its own aspect within it, turned with it (a portrait
+        ; phone sends 240x320, or 180x320 at 9:16), and the tiles letterbox whatever arrives.
         (set cam (stream-open (dict "id" "camera" "codec" "mjpeg" "w" 320 "h" 240 "stride" 1280
                                     "expected_subscribers" 3)))
         (state-set "cam_token" (get-attr cam "token"))
@@ -300,7 +466,8 @@ on_tick: |
             (state-set "name_error" (str-concat "name '" want "' is taken; pick another"))
             (begin
               (state-set "name_error" "")
-              (room-join "" (state-get "conf.room") (dict "name" want))
+              (state-set "room.token"
+                (get-attr (room-join "" (state-get "conf.room") (dict "name" want)) "token"))
               (state-set "joined.name" want))))
       (state-set "name_error" "")) ; back at the current name: clear any stale error
     ; ── device switch: re-capture when the user picks a different camera / mic (real devices only) ──
@@ -320,54 +487,34 @@ on_tick: |
                 (dict "device" (int (state-get "mic.want_device")) "rate" 48000 "ch" 1 "frames" 1024))
               (state-set "mic.cur_device" (state-get "mic.want_device")))
             #f)))
-    ; ── mirror self voice-activity for the (you) row ──
-    (state-set "self.talking" (state-get (str-concat "media." (state-get "self.pid") ".talking")))
-    ; ── per-peer controls follow the PERSON, not the row: rows are sorted by pid, so they shift when
-    ;    someone joins or leaves. Park each row's cam/mic/vol under its pid (ctl.<pid>.*) before the
-    ;    rebuild; the rebuild gives each row its own pid's back ("" lets the widget seed its default) ──
-    (for i (range (if (= (state-get "peer.count") "") 0 (int (state-get "peer.count"))))
+    ; ── my avatar: once the relay's catalog has arrived, show the current look in the pickers (the
+    ;    defaults until you choose); after that, write a changed pick. room-set-avatar checks it
+    ;    against the catalog and writes only your own choice; every client draws it from there. ──
+    (if (= (state-get "joined") "1")
       (begin
-        (set opid (state-get (str-concat "peer." i ".pid")))
-        (if (= opid "") #f
-          (begin
-            (state-set (str-concat "ctl." opid ".vol") (state-get (str-concat "peer." i ".vol")))
-            (state-set (str-concat "ctl." opid ".von") (state-get (str-concat "peer." i ".von")))
-            (state-set (str-concat "ctl." opid ".aon") (state-get (str-concat "peer." i ".aon")))))))
-    ; ── rebuild the OTHER-participant slots each tick (self excluded: it has My Camera + the you row) ──
-    (set idx 0)
-    (set total 1)
-    ; The dot for a rung: green full, red reduced, black none ("" before the relay has adapted it).
-    (defun rung-dot (v)
-      (if (= v "") ""
-        (if (= v "full") "green full video"
-          (if (= v "off") "black no video: the link cannot carry it"
-            (str-concat "red " v " video: reduced for the link")))))
-    (for p (room-roster (state-get "conf.room"))
-      (begin
-        (set pid (get-attr p "pid"))
-        (if (= pid (state-get "self.pid"))
-          (begin
-           (state-set "self.dot" (rung-dot (get-attr p "video")))
-           (state-set "self.video_in"
-            (if (or (= (get-attr p "video") "") (= (get-attr p "video") "full")) ""
-                (str-concat "video in: " (get-attr p "video") " (adapted to your link)"))))
-          (begin
-            (state-set (str-concat "peer." idx ".pid") pid)
-            (state-set (str-concat "peer." idx ".vol") (state-get (str-concat "ctl." pid ".vol")))
-            (state-set (str-concat "peer." idx ".von") (state-get (str-concat "ctl." pid ".von")))
-            (state-set (str-concat "peer." idx ".aon") (state-get (str-concat "ctl." pid ".aon")))
-            (state-set (str-concat "peer." idx ".name") (get-attr p "name"))
-            (state-set (str-concat "peer." idx ".cam")
-              (state-get (str-concat "media." pid ".camera")))
-            (state-set (str-concat "peer." idx ".talking")
-              (state-get (str-concat "media." pid ".talking")))
-            (state-set (str-concat "peer." idx ".video_off") (get-attr p "video_off"))
-            (state-set (str-concat "peer." idx ".dot") (rung-dot (get-attr p "video")))
-            ; their link quality, as THEY measure it (ping to the relay, bits/s down + up)
-            (state-set (str-concat "peer." idx ".ping") (get-attr p "ping"))
-            (state-set (str-concat "peer." idx ".down") (get-attr p "down"))
-            (state-set (str-concat "peer." idx ".up") (get-attr p "up"))
-            (set idx (+ idx 1))
-            (set total (+ total 1))))))
-    (state-set "peer.count" (str idx))
-    (state-set "self.count" (str total)))
+        ; write a list only when it changes: an options list rewritten every tick is re-read
+        ; every frame, and a picker that drops out for a frame closes its open popup
+        (set colors (string.join (room-avatar-options (state-get "conf.room") "color") "\n"))
+        (if (= colors (state-get "avatar.colors")) #f (state-set "avatar.colors" colors))
+        (set wear (string.join (room-avatar-options (state-get "conf.room") "accessory") "\n"))
+        (if (= wear (state-get "avatar.accessories")) #f (state-set "avatar.accessories" wear))
+        (set look (room-avatar (state-get "room.token")))
+        (if (= (state-get "avatar.sent.color") "")
+          (if (= (get-attr look "color") "") #f
+            (begin
+              (state-set "avatar.color" (get-attr look "color"))
+              (state-set "avatar.accessory" (get-attr look "accessory"))
+              (state-set "avatar.sent.color" (get-attr look "color"))
+              (state-set "avatar.sent.accessory" (get-attr look "accessory"))))
+          (if (or (not (= (state-get "avatar.color") (state-get "avatar.sent.color")))
+                  (not (= (state-get "avatar.accessory") (state-get "avatar.sent.accessory"))))
+            (begin
+              (room-set-avatar (state-get "room.token")
+                               (state-get "avatar.color") (state-get "avatar.accessory"))
+              (state-set "avatar.sent.color" (state-get "avatar.color"))
+              (state-set "avatar.sent.accessory" (state-get "avatar.accessory")))
+            #f)))
+      #f)
+    ; ── the Users rows (components/room_users.ari) and the Chat window (components/chat.ari) ──
+    (room-users-step "peer" (state-get "conf.room") "chat")
+    (chat-ui-step "chat" (state-get "room.token")))

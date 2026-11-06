@@ -164,6 +164,35 @@ message MediaFrame {
   uint32 channels = 10;      // audio: channel count (0 for video)
 }
 
+// A room step's avatar poses for ONE viewer: the conference relay's per-connection send of the
+// participants that viewer sees (room_pose_relay), at the rate its link allows. Compact: position in
+// millimetres, velocity in mm/s, rotation as a unit quaternion's components times 32767. Every
+// number in an entry is the DIFFERENCE from what this connection was last sent for the same slot
+// (the first entry of a slot carries its pid and absolute values), so an avatar standing still costs
+// two bytes, and one walking about a dozen; a field that did not change is not on the wire. Not
+// shard state: never journaled, relayed or bridged.
+message PoseEntry {
+  uint32 slot = 1;  // this connection's id for the participant
+  string pid = 2;   // set on the slot's first entry: the participant it names
+  sint32 x = 3;     // position, mm
+  sint32 y = 4;
+  sint32 z = 5;
+  sint32 vx = 6;    // linear velocity, mm/s
+  sint32 vy = 7;
+  sint32 vz = 8;
+  sint32 qw = 9;    // rotation, x 32767
+  sint32 qx = 10;
+  sint32 qy = 11;
+  sint32 qz = 12;
+}
+message PoseSnapshot {
+  uint64 server_tick = 1;        // the relay holon's tick every entry is at
+  uint32 seq = 2;                // per connection, +1 each snapshot
+  uint32 base_seq = 3;           // the snapshot the entries are differences from (seq - 1 here)
+  repeated PoseEntry entries = 4;
+  repeated uint32 gone = 5;      // slots that left: forget them
+}
+
 // Link-quality probe. Each end of a connection sends a Ping on a timer; the other end answers at
 // once with a Pong echoing seq + sent_ns, and the sender measures the round trip on its OWN
 // monotonic clock (no clock sync). A Ping/Pong is link-level: never replicated, never relayed or
@@ -195,6 +224,7 @@ message Frame {
     Ping ping = 10;
     Pong pong = 11;
     DeviceProof device_proof = 12;
+    PoseSnapshot pose_snapshot = 13;
   }
 }
 

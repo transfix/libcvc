@@ -77,11 +77,9 @@ list(APPEND CVCGL_SOURCES ${CVCGL_ARIADNE_SOURCES})
 # the sources compile to graceful no-ops (open_camera returns an empty result).
 file(GLOB CVCGL_CAPTURE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/capture/*.cpp")
 list(APPEND CVCGL_SOURCES ${CVCGL_CAPTURE_SOURCES})
-# Phase-3 peripheral playback (SDL3 audio-output sink, cvc::gl::playback). Lives in a subdirectory,
-# so the non-recursive top-level glob does not pick it up. SDL-gated internally; with no SDL the
-# sink compiles to a graceful no-op (open_audio_output returns an empty result).
-file(GLOB CVCGL_PLAYBACK_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/playback/*.cpp")
-list(APPEND CVCGL_SOURCES ${CVCGL_PLAYBACK_SOURCES})
+# Phase-3 peripheral playback (the SDL3 audio-output sink) moved to cvcMedia, the GL-free media
+# library (src/cvcMedia), so a terminal program plays sound without GL; cvcGL links it (below) and
+# keeps the cvc::gl::playback names as aliases (cvc/gl/playback/*.h).
 # Header root is <repo>/inc  (headers under inc/cvc/gl/).
 get_filename_component(_CVCGL_INC "${CMAKE_CURRENT_SOURCE_DIR}/../../inc" ABSOLUTE)
 
@@ -257,6 +255,13 @@ if(CVC_ENABLE_SDL)
     message(STATUS "cvcGL: SDL3 not found -- input seam falls back to the VTK interactor")
   endif()
 endif()
+
+# cvcMedia: in-tree it exists already (src/CMakeLists.txt); a standalone cvcGL build (the cvcgl
+# recipe) builds it here and installs it with cvcGL, its package beside cvcGL's.
+if(NOT TARGET cvcMedia)
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../cvcMedia" "${CMAKE_CURRENT_BINARY_DIR}/cvcMedia")
+endif()
+target_link_libraries(cvcGL PUBLIC cvcMedia)
 
 vtk_module_autoinit(TARGETS cvcGL MODULES ${VTK_LIBRARIES})
 
@@ -863,6 +868,33 @@ add_test(NAME cvcgl_imgui_windows_menu COMMAND cvcgl_imgui_windows_menu)
 add_executable(cvcgl_imgui_radio test/cvcgl_imgui_radio.cpp)
 target_link_libraries(cvcgl_imgui_radio PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_radio COMMAND cvcgl_imgui_radio)
+# Scrolling with a finger (TouchScroll): a drag scrolls the window under it and a fling glides
+# against ui.scroll_friction, while sliders, fields being edited and title bars keep their drags.
+# Touches fed through ImGui's own input. No window, no GL.
+add_executable(cvcgl_imgui_touch_scroll test/cvcgl_imgui_touch_scroll.cpp)
+target_link_libraries(cvcgl_imgui_touch_scroll PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_touch_scroll COMMAND cvcgl_imgui_touch_scroll)
+# Pictures by URI (§5.11): an image: widget's file:// picture reaches ImGuiBackend as an RGBA
+# raster fitted to its box, with placeholders before and on failure. No window, no GL.
+add_executable(cvcgl_imgui_media test/cvcgl_imgui_media.cpp)
+target_link_libraries(cvcgl_imgui_media PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_media COMMAND cvcgl_imgui_media)
+# A spinner's arc turns with the frame clock and comes round after a second; disabled, it stands
+# still; visible_when hides it. No window, no GL.
+add_executable(cvcgl_imgui_spinner test/cvcgl_imgui_spinner.cpp)
+target_link_libraries(cvcgl_imgui_spinner PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_spinner COMMAND cvcgl_imgui_spinner)
+# text_view and message_input (§5.15) driven by synthesized keys and the wheel: Enter sends and keeps
+# the focus, Shift+Enter adds a line, the log's top asks for older lines and lines added above keep
+# it in place. No window, no GL.
+add_executable(cvcgl_imgui_chat_widgets test/cvcgl_imgui_chat_widgets.cpp)
+target_link_libraries(cvcgl_imgui_chat_widgets PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_chat_widgets COMMAND cvcgl_imgui_chat_widgets)
+# The keys ImGuiOverlay hands ImGui under both of VTK's names for them: X11's (its own windows)
+# and a browser's (KeyboardEvent.key: Enter, Backspace, ArrowLeft). No window, no GL.
+add_executable(cvcgl_imgui_key_names test/cvcgl_imgui_key_names.cpp)
+target_link_libraries(cvcgl_imgui_key_names PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_key_names COMMAND cvcgl_imgui_key_names)
 
 # The tf_editor transfer-function widget (ImGuiBackend::tf_editor) on a bare ImGui context, driven
 # by synthesized mouse input: drags, adds, deletes, the zoom strip, the context menu, commits.
@@ -890,6 +922,22 @@ add_test(NAME cvcgl_fe_interval COMMAND cvcgl_fe_interval)
 add_executable(cvcgl_imgui_window_fit test/cvcgl_imgui_window_fit.cpp)
 target_link_libraries(cvcgl_imgui_window_fit PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_window_fit COMMAND cvcgl_imgui_window_fit)
+# ImGuiBackend at a phone's UI size: a document's px scale with the UI (its windows, columns and
+# persisted geometry), and a window laid out for a laptop opens inside a phone's view. No window,
+# no GL.
+add_executable(cvcgl_imgui_ui_size test/cvcgl_imgui_ui_size.cpp)
+target_link_libraries(cvcgl_imgui_ui_size PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_ui_size COMMAND cvcgl_imgui_ui_size)
+# The overlay's panels start hidden on a phone's view and open on a laptop's browser canvas,
+# offscreen windows of each size and pixel ratio.
+add_executable(cvcgl_imgui_panels_start test/cvcgl_imgui_panels_start.cpp)
+target_link_libraries(cvcgl_imgui_panels_start PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_panels_start COMMAND cvcgl_imgui_panels_start)
+# ImGuiBackend when the view gets smaller after its windows opened: a window that showed in full
+# moves back in, one the user left partly outside stays. No window, no GL.
+add_executable(cvcgl_imgui_view_shrink test/cvcgl_imgui_view_shrink.cpp)
+target_link_libraries(cvcgl_imgui_view_shrink PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_view_shrink COMMAND cvcgl_imgui_view_shrink)
 
 # Golden images of the Ariadne ImGui/VTK backend (roadmap §16.6 phase 1): each .ari in
 # test/golden runs through AriRuntime + ImGuiBackend offscreen and its frame is compared with the
@@ -905,11 +953,35 @@ if(NOT EMSCRIPTEN)
                    ${CMAKE_CURRENT_BINARY_DIR}/ari_golden)
 endif()
 
+# Ariadne `viewport` widgets and node `tags:` (scene_views.h): each widget's mirror viewport, the
+# props a view's show: / hide: leave out, its pixels, and its hiding with its window. Offscreen;
+# skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_views test/cvcgl_ariadne_views.cpp)
+  target_link_libraries(cvcgl_ariadne_views PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_views COMMAND cvcgl_ariadne_views)
+endif()
+
+# A document's assets (read once, shared buffers) and its scenes: of their own (each a SceneGraph
+# with its own viewport, mirrored by the viewports that name it), and main_view: show. Offscreen;
+# the AriRuntime part skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_scenes test/cvcgl_ariadne_scenes.cpp)
+  target_link_libraries(cvcgl_ariadne_scenes PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_scenes COMMAND cvcgl_ariadne_scenes)
+endif()
+
 # Ariadne physics: / body: (WORLD-GEOMETRY-ROADMAP.md, G5): a spec's crate lands where the
 # heightfield node draws the ground. Headless; the dynamics need Jolt.
 add_executable(cvcgl_ariadne_physics test/cvcgl_ariadne_physics.cpp)
 target_link_libraries(cvcgl_ariadne_physics PRIVATE cvcGL)
 add_test(NAME cvcgl_ariadne_physics COMMAND cvcgl_ariadne_physics)
+
+# Ariadne data in the scene (docs/roadmap/ARIADNE_DATA_ROADMAP.md): a source: { data } node draws its
+# dataset once it loads, and again when the dataset is replaced. Headless.
+add_executable(cvcgl_ariadne_data test/cvcgl_ariadne_data.cpp)
+target_link_libraries(cvcgl_ariadne_data PRIVATE cvcGL)
+add_test(NAME cvcgl_ariadne_data COMMAND cvcgl_ariadne_data)
 
 # Every cvcGL setting must be IN the state tree and bound BOTH ways. This caught
 # cvc::state::SEPARATOR initialising to "" outside libcvc, which had been
@@ -933,6 +1005,27 @@ add_test(NAME cvcgl_shadow_caster_growth COMMAND cvcgl_shadow_caster_growth)
 add_executable(cvcgl_shadow_casters test/cvcgl_shadow_casters.cpp)
 target_link_libraries(cvcgl_shadow_casters PRIVATE cvcGL)
 add_test(NAME cvcgl_shadow_casters COMMAND cvcgl_shadow_casters)
+
+# Under shadows each caster is drawn by the bake and by the shadow pass, and VTK rebuilt its shader
+# at every switch; LowMemoryPolyDataMapper now keeps one per pass set. Pins no shader builds while
+# a caster moves (two a caster a frame without), and frames identical to pass programs off --
+# across a change of casting light, a shader-changing property and shadows off and on. The
+# low-memory mapper forced, as on WebGL. And that a bake checks its framebuffer's status once per
+# light's map, not every bake (counted at the driver, so desktop GL only). Renders; skips without
+# GL.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_shadow_pass_programs test/cvcgl_shadow_pass_programs.cpp
+                                            test/gl_call_counter.cpp)
+  target_link_libraries(cvcgl_shadow_pass_programs PRIVATE cvcGL)
+  add_test(NAME cvcgl_shadow_pass_programs COMMAND cvcgl_shadow_pass_programs)
+endif()
+
+# A low sun's shadows at a city's scale (a 3 km ground, the key 2.2 stage radii out, as cvcdbg's
+# demo3 lights Austin): a building's and a 2 m vehicle's shadows read on the ground. Renders;
+# skips without GL.
+add_executable(cvcgl_city_sun_shadows test/cvcgl_city_sun_shadows.cpp)
+target_link_libraries(cvcgl_city_sun_shadows PRIVATE cvcGL)
+add_test(NAME cvcgl_city_sun_shadows COMMAND cvcgl_city_sun_shadows)
 
 # Changing the shadow interval or resolution used to rebuild the whole pass chain
 # (the state echo re-ran setShadowsEnabled(true)), dropping the old baker with its
@@ -1159,7 +1252,7 @@ list(REMOVE_ITEM _cvcgl_gl_tests
   cvcgl_grid_bounds cvcgl_bounds_walk cvcgl_scene_chrome cvcgl_remove
   cvcgl_teardown cvcgl_light_state_thread cvcgl_unattached_node_thread cvcgl_pose_echo
   cvcgl_physics_scene_binding
-  cvcgl_world_geometry_nodes cvcgl_ariadne_physics
+  cvcgl_world_geometry_nodes cvcgl_ariadne_physics cvcgl_ariadne_data
   cvcgl_node_outlives_scene cvcgl_texture cvcgl_texture_zerocopy
   cvcgl_stream_texture cvcgl_state_publisher cvcgl_nav_stats_publish
   cvcgl_camera cvcgl_track_parity cvcgl_fps_hud cvcgl_stage_setters

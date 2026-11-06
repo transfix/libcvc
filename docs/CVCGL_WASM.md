@@ -11,6 +11,7 @@ and what it promises in return. Reference for `cvcgl_wasm_app()`
 - [Overview](#overview)
 - [Quick start](#quick-start)
 - [cvcgl_wasm_app()](#cvcgl_wasm_app)
+- [The window: SDL's canvas](#the-window-sdls-canvas)
 - [The WebGL state shim](#the-webgl-state-shim)
 - [FrameYield: who yields to the browser](#frameyield-who-yields-to-the-browser)
 - [mimalloc](#mimalloc)
@@ -174,6 +175,35 @@ wasm-mt (`-pthread`) build.
 so it links neither speedup. When it gets a browser page, its link must add the shim
 `--pre-js "$INST/share/cvcGL/wasm/webgl_state_shadow.js"` and, on wasm-mt,
 `-sMALLOC=mimalloc`. A TODO in the script says the same.
+
+## The window: SDL's canvas
+
+With SDL3 built in (`CVC_ENABLE_SDL`), an onscreen window in the browser is SDL's, as it is
+natively (`src/cvcGL/SdlWindow.h`): the page's `#canvas` and its WebGL2 context. SDL's events
+drive VTK's interactor, so the camera, ImGui and `SdlInput` read the same events, with the same
+key names, as on the desktop.
+
+- **Size.** The canvas fills its parent element, styled as VTK's canvas window styled it, and
+  the window takes the canvas's CSS size (times `devicePixelRatio`) when it is made and at every
+  browser resize. A size the app asks for is ignored.
+- **Context.** WebGL2 with the attributes VTK's canvas window asks for: no antialiasing (VTK
+  resolves its own multisampled framebuffers into it), opaque unless the window is translucent,
+  depth and stencil.
+- **Keys.** SDL listens for the keys typed into the canvas only, so the canvas needs
+  `tabindex` and the focus (the stock pages focus it on a click). The page's own fields and
+  ImGuiOverlay's system-keyboard field keep their keys.
+- **Pointer and touch.** SDL reads the canvas's pointer events and makes the first finger the
+  mouse. The canvas cancels its touch events, as VTK's canvas window did, so a touch makes no
+  mouse events or click of its own: the browser's mousedown would focus the canvas and take the
+  focus from ImGuiOverlay's system-keyboard field. CameraController still takes the pointer lock
+  inside the press and reads the raw motion itself; under the lock the interactor's position
+  stands still. TouchGestures still reads two-finger gestures from the page's touch events, and
+  while two fingers are down the mouse SDL makes of the first one stays still.
+- **Frames.** There is no swap: WebGL shows the frame when the page yields. The window yields
+  in `Frame()` where VTK 9.5's canvas window does, so [FrameYield](#frameyield-who-yields-to-the-browser)
+  means the same with either window.
+- **Fallback.** `ENV.CVCGL_SDL_WINDOW = '0'` in the page's `preRun` keeps VTK's canvas window
+  (`vtkWebAssemblyRenderWindowInteractor`).
 
 ## The WebGL state shim
 
@@ -507,22 +537,55 @@ in the config's `preload`.
 | `src` | `main.ari` | the document when the URL names none |
 | `src_param` | `true` | `false` ignores `?src=` and always runs `src` |
 | `src_origins` | `[]` | other origins `src` may name (`"*"` for any); their server must allow CORS |
-| `flags` | `[]` | arigl's host flags, before the document, e.g. the network flags: `["--net"]` lets the document reach the page's origin, `["--net-allow", "https://api.example"]` another; `{origin}` in a flag becomes the page's origin. A `--net-policy` file must be in MEMFS: list it in `preload` and pass its URL path. `--credential-store` is refused in a browser |
-| `args` | `[]` | the document's arguments (§5.6 of ARIADNE.md); `{origin}` in one becomes the page's origin, e.g. `["--instance", "{origin}"]` for an app that talks to the server it is served from. The URL adds more with `?arg=`, taken as given |
+| `flags` | `[]` | arigl's host flags, before the document, e.g. the network flags: `["--net"]` lets the document reach the page's origin, `["--net-allow", "https://api.example"]` another. A `--net-policy` file must be in MEMFS: list it in `preload` and pass its URL path. `--credential-store` is refused in a browser |
+| `args` | `[]` | the document's arguments (§5.6 of ARIADNE.md), e.g. `["--instance", "{origin}"]` for an app that talks to the server it is served from. The URL adds more with `?arg=`, taken as given |
 | `preload` | `[]` | more files to fetch with the document, relative to it |
 | `env` | `{}` | the module's environment (e.g. `CVC_ARIADNE_RELAY`) |
+| `url_env` | `{}` | which `?param=` of the page's URL may set which env variable (below) |
+| `fragment_env` | `{}` | the same from the URL's `#fragment`, which the browser never sends to a server (a room token, say) |
+| `device_identity` | `false` | `true`: a random device id and key for this browser, made once and kept in localStorage (`cvc.device_id`, `cvc.device_key`), as `CVC_DEVICE_ID` and `CVC_DEVICE_KEY` (a conference relay shows the device and pins its key) |
+| `fullscreen_button` | `false` | `true`: a small Fullscreen button in the bottom-right corner |
+
+**Placeholders**, in a flag, a config argument or an env value: `{origin}` is the page's origin,
+`{ws_origin}` the same host as a WebSocket origin (`wss://` on an https page, `ws://` on http),
+and `{random}` five random characters, the same everywhere in one page load.
+
+**URL rules.** A `url_env` or `fragment_env` rule is the variable's name, or
+`{"env", "match", "value", "max"}`. The parameter's value is trimmed and cut to `max` characters
+(256). It must match the regular expression `match` when one is given, and `value`, when given, is
+set instead (a switch). Parameters the config does not name are ignored. An Ariadne conference
+client's config, for example:
+
+```json
+{
+  "src_param": false,
+  "env": {"CVC_ARIADNE_RELAY": "{ws_origin}/conference-ws",
+          "CVC_ARIADNE_NAME": "guest-{random}"},
+  "url_env": {"name": {"env": "CVC_ARIADNE_NAME", "max": 32},
+              "look": {"env": "CVC_ARIGL_LOOK", "match": "^(mouse|drag)$"},
+              "synthetic": {"env": "CVC_ARIADNE_SYNTHETIC_CAM", "match": "^[^0]", "value": "1"}},
+  "fragment_env": {"token": "CVC_ARIADNE_ROOM_TOKEN"},
+  "device_identity": true,
+  "fullscreen_button": true
+}
+```
+
+The page also resumes the module's audio contexts on the first click, key or touch (browsers
+start them suspended), so a document's sound and a conference peer's voice play.
 
 Host flags come only from the config, never from the URL, so a link cannot widen what the
-page lets a document do. The page's origin is always allowed, and a site that also serves
+page lets a document do, and a link sets only the env variables the config names. The page's origin is always allowed, and a site that also serves
 untrusted files from it (user uploads, say) should pin the document with
 `"src_param": false`.
 
 **Errors.** A failed load replaces the loading screen with an error page: one line on what
 went wrong, then everything arigl printed (`arigl: could not fetch .../main.ari: HTTP 404`,
 `... not this page's origin ...`, a YAML error, an unknown host flag). A document that quits
-shows that it has ended. The page reads `Module.ariadneRunning()` and `Module.ariadneExit(status)`,
-which arigl calls, and keeps its state in `window.ariadneWeb` (`state` is `loading`,
-`running`, `ended` or `failed`, and `log` holds arigl's output) for tests and the console.
+shows that it has ended. A warning while the document runs (a program that failed, an
+`on_tick:` that stopped) shows in the canvas's corner for 8 s (ARIADNE.md §2.4). The page reads
+`Module.ariadneRunning()`, `Module.ariadneWarning(text)` and `Module.ariadneExit(status)`, which
+arigl calls, and keeps its state in `window.ariadneWeb` (`state` is `loading`, `running`, `ended`
+or `failed`, `log` holds arigl's output, and `warnings` the warnings) for tests and the console.
 
 **Content-Security-Policy.** Nothing in the page is inline, and nothing in the module
 evals: cvcGL's touch probe used `emscripten_run_script_int` and is now an `EM_JS`. The

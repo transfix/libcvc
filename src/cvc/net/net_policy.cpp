@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cvc/net/net_policy.h>
+#include <cvc/net/oidc.h>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -185,6 +186,49 @@ void NetPolicy::bind_credential(const std::string &name, const Origin &o) {
     v.push_back(o);
 }
 
+std::string NetPolicy::add_oidc_issuer(const std::string &issuer,
+                                       const std::vector<Origin> &endpoint_origins) {
+  if (const std::string why = oidc::check_issuer(issuer); !why.empty())
+    return why;
+  OidcIssuer *entry = nullptr;
+  for (OidcIssuer &i : oidc_)
+    if (i.issuer == issuer)
+      entry = &i;
+  if (!entry) {
+    oidc_.push_back(OidcIssuer{issuer, {}, {}});
+    entry = &oidc_.back();
+  }
+  allow(*parse_origin(issuer));
+  for (const Origin &o : endpoint_origins) {
+    allow(o);
+    if (std::find(entry->endpoint_origins.begin(), entry->endpoint_origins.end(), o) ==
+        entry->endpoint_origins.end())
+      entry->endpoint_origins.push_back(o);
+  }
+  return std::string();
+}
+
+std::string NetPolicy::set_oidc_client(const std::string &issuer, const std::string &client_id) {
+  if (client_id.empty() || client_id.size() > 255 ||
+      std::any_of(client_id.begin(), client_id.end(), [](char c) {
+        return static_cast<unsigned char>(c) <= 0x20 || static_cast<unsigned char>(c) >= 0x7F;
+      }))
+    return "a client_id is 1-255 printable characters with no space";
+  if (const std::string why = add_oidc_issuer(issuer); !why.empty())
+    return why;
+  for (OidcIssuer &i : oidc_)
+    if (i.issuer == issuer)
+      i.client_id = client_id;
+  return std::string();
+}
+
+const OidcIssuer *NetPolicy::oidc_issuer(const std::string &issuer) const {
+  for (const OidcIssuer &i : oidc_)
+    if (i.issuer == issuer)
+      return &i;
+  return nullptr;
+}
+
 bool parse_net_policy(const std::string &text, NetPolicy &into, std::string *error,
                       const std::string &source) {
   std::istringstream in(text);
@@ -216,8 +260,26 @@ bool parse_net_policy(const std::string &text, NetPolicy &into, std::string *err
           return fail(error, where + why);
         into.bind_credential(w[1], *o);
       }
+    } else if (w[0] == "oidc") {
+      if (w.size() < 2)
+        return fail(error, where + "oidc takes an issuer, then any endpoint origins");
+      std::vector<Origin> origins;
+      for (std::size_t i = 2; i < w.size(); ++i) {
+        const std::optional<Origin> o = parse_origin_spec(w[i], &why);
+        if (!o)
+          return fail(error, where + why);
+        origins.push_back(*o);
+      }
+      if (const std::string bad = into.add_oidc_issuer(w[1], origins); !bad.empty())
+        return fail(error, where + bad);
+    } else if (w[0] == "oidc-client") {
+      if (w.size() != 3)
+        return fail(error, where + "oidc-client takes an issuer and a client_id");
+      if (const std::string bad = into.set_oidc_client(w[1], w[2]); !bad.empty())
+        return fail(error, where + bad);
     } else {
-      return fail(error, where + "unknown directive '" + w[0] + "' (allow or credential)");
+      return fail(error, where + "unknown directive '" + w[0] +
+                             "' (allow, credential, oidc or oidc-client)");
     }
   }
   return true;

@@ -14,6 +14,7 @@
 */
 
 #include <cctype>
+#include <cvc/ariadne/conference/room_chat.h> // chat_request_path
 #include <cvc/ariadne/conference/room_intrinsics.h>
 #include <cvc/ariadne/conference/room_write_gate.h>
 #include <cvc/state/state.h> // isValidStateName
@@ -71,13 +72,13 @@ std::vector<std::string> canonical_segments(const std::string &path) {
 }
 
 // Whether REST (the path below a participant) names a key the relay writes there: the server
-// holon's `pose` (holon_sync.h), the relay's link sample `net.relay` and the participant's
-// `device` tag (room_net.h), and in SFU mode each stream's `streams.<kind>.ready`
-// (room_relay_tick).
+// holon's `pose` (holon_sync.h) and `energy` reserve (room_avatar.h), the relay's link sample
+// `net.relay` and the participant's `device` tag (room_net.h), and in SFU mode each stream's
+// `streams.<kind>.ready` (room_relay_tick).
 bool relay_owned(const std::vector<std::string> &rest) {
   if (rest.empty())
     return false;
-  if (rest[0] == "pose" || rest[0] == "device")
+  if (rest[0] == "pose" || rest[0] == "device" || rest[0] == "energy")
     return true;
   if (rest[0] == "net" && rest.size() >= 2 && rest[1] == "relay")
     return true;
@@ -112,7 +113,10 @@ bool room_write_gate::admit(const std::string &node_id, const cvc::state_mutatio
 }
 
 bool room_write_gate::admit(const std::string &node_id, const cvc::state_message &m) const {
-  return own_path(node_id, m.path);
+  if (!own_path(node_id, m.path))
+    return false;
+  // A chat request (room_chat.h) is for the relay alone: one it would fan out never gets in.
+  return m.path != chat_request_path(_room, node_id) || m.ttl_hops == 0;
 }
 
 bool room_write_gate::sources(const std::string &node_id, const std::string &path) const {
