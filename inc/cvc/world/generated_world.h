@@ -115,6 +115,12 @@ struct generated_world_params {
   std::string terrain_file;
 };
 
+// A lane of the generated city's streets: the widest vehicle driven on them, the Humvee (2.18 m
+// overall, cvc::physics::vehicle_desc::humvee), with 0.4 m clear either side. Every street is at
+// least two lanes wide, so two Humvees pass.
+constexpr double world_vehicle_width_m = 2.18;
+constexpr double world_lane_m = world_vehicle_width_m + 2.0 * 0.4;
+
 // How much of a generator's relief lies below sea level (0 m): its floor sits world_sea_share x
 // amp_m under the sea, so a lower or higher relief never floods or drains the world.
 constexpr double world_sea_share = 34.0 / 90.0;

@@ -226,6 +226,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/world/bundle.h
   ../../inc/cvc/world/generated_world.h
   ../../inc/cvc/world/terrain_lod.h
+  ../../inc/cvc/world/road_grade.h
   ../../inc/cvc/world/cloud_layer.h
 )
 
@@ -451,6 +452,7 @@ set(SOURCE_FILES
   world/bundle.cpp
   world/generated_world.cpp
   world/terrain_lod.cpp
+  world/road_grade.cpp
   world/cloud_layer.cpp
 )
 

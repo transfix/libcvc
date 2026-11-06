@@ -10,8 +10,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cvc/world/road_grade.h>
 #include <cvc/world/roads.h>
+#include <functional>
 #include <gtest/gtest.h>
+#include <memory>
 #include <vector>
 
 using namespace cvc::world;
@@ -289,4 +292,141 @@ TEST(WorldRoads, PruneTrimsShortStubs) {
     }
     EXPECT_GE(length, 60.0) << "stub at node " << k;
   }
+}
+
+// ── road grading (road_grade.h) ─────────────────────────────────────────────────────────────────
+
+namespace {
+
+// A ground from a height function, for the grading tests.
+class fn_ground : public terrain_source {
+public:
+  explicit fn_ground(std::function<double(double, double)> h) : h_(std::move(h)) {}
+  double sample(double x, double y) const override { return h_(x, y); }
+  terrain_bounds bounds() const override { return {-500, -500, 500, 500}; }
+  double relief_m() const override { return 20.0; }
+
+private:
+  std::function<double(double, double)> h_;
+};
+
+// A road of `n` segments along x from x0 to x1 at y, width w, appended to `net`. Returns its nodes.
+std::vector<int> add_road(road_network &net, double x0, double x1, double y, int n, double w) {
+  std::vector<int> ids;
+  for (int i = 0; i <= n; ++i) {
+    ids.push_back(int(net.nodes.size()));
+    net.nodes.push_back(road_node{x0 + (x1 - x0) * i / n, y, (i == 0 || i == n) ? 1 : 2});
+  }
+  for (int i = 0; i < n; ++i) {
+    road_segment s;
+    s.a = ids[std::size_t(i)];
+    s.b = ids[std::size_t(i) + 1];
+    s.width = w;
+    net.segments.push_back(s);
+  }
+  return ids;
+}
+
+// A rolling, bumpy ground: a 4% ramp, 1.5 m bumps every 20 m, and a side slope of 30%.
+double bumpy(double x, double y) { return 0.04 * x + 1.5 * std::sin(x * 0.314) + 0.3 * y + 5.0; }
+
+} // namespace
+
+// The road over bumpy ground is held to its grade, changes grade gradually, and its surface is
+// level across, though the ground under it climbs 30% sideways and bumps 1.5 m every 20 m.
+TEST(WorldRoadGrade, ARoadIsSmoothAlongAndLevelAcross) {
+  road_network net;
+  const std::vector<int> ids = add_road(net, -200.0, 200.0, 0.0, 80, 6.0); // 5 m segments
+  const auto ground = std::make_shared<fn_ground>(bumpy);
+  road_grade_params p;
+  const std::vector<double> z = grade_road_profile(net, *ground, p);
+  ASSERT_EQ(z.size(), net.nodes.size());
+  double worstGrade = 0, worstChange = 0, groundChange = 0;
+  for (std::size_t i = 1; i < ids.size(); ++i) {
+    const double g = (z[ids[i]] - z[ids[i - 1]]) / 5.0;
+    worstGrade = std::max(worstGrade, std::abs(g));
+    if (i >= 2) {
+      const double g0 = (z[ids[i - 1]] - z[ids[i - 2]]) / 5.0;
+      worstChange = std::max(worstChange, std::abs(g - g0));
+      const double h2 = bumpy(net.nodes[ids[i]].x, 0), h1 = bumpy(net.nodes[ids[i - 1]].x, 0),
+                   h0 = bumpy(net.nodes[ids[i - 2]].x, 0);
+      groundChange = std::max(groundChange, std::abs((h2 - h1) - (h1 - h0)) / 5.0);
+    }
+  }
+  EXPECT_LE(worstGrade, p.max_grade + 1e-6);
+  EXPECT_LT(worstChange, 0.25 * groundChange)
+      << "the grade changes far more gently than the ground";
+  // Never far from the ground it is laid on.
+  for (int i : ids)
+    EXPECT_LT(std::abs(z[std::size_t(i)] - bumpy(net.nodes[std::size_t(i)].x, 0)), 2.0);
+
+  // Level across: within 2 cm edge to edge, 0.3% (exactly level mid-segment, a little off
+  // within a metre of a node, where the next segment blends in), where the ground tilts 30%.
+  const graded_terrain g(ground, net, z, p);
+  for (double x = -150.0; x <= 150.0; x += 0.73) {
+    const double c = g.sample(x, 0.0), l = g.sample(x, 2.9), r = g.sample(x, -2.9);
+    EXPECT_NEAR(l, c, 0.02) << x;
+    EXPECT_NEAR(r, c, 0.02) << x;
+  }
+  EXPECT_NEAR(g.sample(12.5, 2.9), g.sample(12.5, -2.9), 1e-9) << "mid-segment: exact";
+  // Far from the road the ground is its own; between, it eases back without a step.
+  EXPECT_EQ(g.sample(0.0, 80.0), bumpy(0.0, 80.0));
+  EXPECT_FALSE(g.graded_at(0.0, 80.0));
+  EXPECT_TRUE(g.graded_at(0.0, 3.0));
+  double prev = g.sample(10.0, 0.0);
+  for (double y = 0.25; y < 60.0; y += 0.25) {
+    const double h = g.sample(10.0, y);
+    EXPECT_LT(std::abs(h - prev), 0.5) << y;
+    prev = h;
+  }
+}
+
+// A road crossing a dip under the water stays above it, and the ground under it is raised to it.
+TEST(WorldRoadGrade, ARoadStaysAboveTheWater) {
+  road_network net;
+  add_road(net, -100.0, 100.0, 0.0, 40, 6.0);
+  const auto ground = std::make_shared<fn_ground>([](double x, double) {
+    return 3.0 - 6.0 * std::exp(-x * x / 400.0); // a 3 m-deep hollow at x = 0, the sea at 0
+  });
+  road_grade_params p;
+  p.water_level = 0.0;
+  const std::vector<double> z = grade_road_profile(net, *ground, p);
+  for (double zi : z)
+    EXPECT_GE(zi, p.water_level + p.water_clearance - 1e-9);
+  const graded_terrain g(ground, net, z, p);
+  for (double x = -30.0; x <= 30.0; x += 2.5)
+    EXPECT_GE(g.sample(x, 2.0), p.water_level + p.water_clearance - 1e-9) << x;
+  EXPECT_LT(g.sample(0.0, 40.0), 0.0) << "away from the road the hollow is still under water";
+}
+
+// Two roads that pass close without meeting agree in height, so neither tilts toward the other
+// and the ground between them does not step; a junction is near level.
+TEST(WorldRoadGrade, CloseRoadsAgreeAndJunctionsAreLevel) {
+  road_network net;
+  const std::vector<int> a = add_road(net, -100.0, 100.0, 0.0, 20, 6.0);
+  const std::vector<int> b = add_road(net, -100.0, 100.0, 8.0, 20, 6.0); // 2 m between edges
+  const auto ground = std::make_shared<fn_ground>([](double, double y) { return 1.2 * y; });
+  road_grade_params p;
+  const std::vector<double> z = grade_road_profile(net, *ground, p);
+  const double gap = 8.0 - 6.0 - 2.0 * p.flat_margin;
+  for (std::size_t i = 0; i < a.size(); ++i)
+    EXPECT_LE(std::abs(z[std::size_t(b[i])] - z[std::size_t(a[i])]),
+              std::max(0.0, gap) * p.side_slope + 1e-3)
+        << i;
+
+  // A T: a side road leaving the middle of a road climbs no faster than junction_grade at first.
+  road_network t;
+  const std::vector<int> main = add_road(t, -50.0, 50.0, 0.0, 10, 6.0);
+  const int mid = main[5];
+  t.nodes[std::size_t(mid)].degree = 3;
+  const int up = int(t.nodes.size());
+  t.nodes.push_back(road_node{0.0, 10.0, 1});
+  road_segment s;
+  s.a = mid;
+  s.b = up;
+  s.width = 6.0;
+  t.segments.push_back(s);
+  const auto steep = std::make_shared<fn_ground>([](double, double y) { return 0.5 * y; });
+  const std::vector<double> zt = grade_road_profile(t, *steep, p);
+  EXPECT_LE(std::abs(zt[std::size_t(up)] - zt[std::size_t(mid)]) / 10.0, p.junction_grade + 1e-6);
 }
