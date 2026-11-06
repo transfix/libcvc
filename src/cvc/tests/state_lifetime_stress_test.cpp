@@ -28,6 +28,7 @@
 #include <cstdio>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_json.h>
 #include <gtest/gtest.h>
 #include <memory>
 #include <string>
@@ -433,6 +434,48 @@ TEST(StateLifetime, LinkResolutionAssignmentReleasesTheTargetFirst) {
   EXPECT_TRUE(v_died);
   EXPECT_FALSE(u_freed_when_v_died) << "t.u.v died after its parent t.u was freed";
   EXPECT_TRUE(u_freed->load());
+}
+
+// A subtree cursor assigned over, the last owner of a removed subtree, releases its deepest level
+// first and its start last, so each node dies with its parent alive (state_json.h).
+TEST(StateLifetime, CursorAssignmentReleasesTheDeepestLevelFirst) {
+  cvc::app a;
+  auto &root = state::instance(a);
+  root("a.b.c.d").value("leaf");
+  root("x").value("other");
+  cvc::state_subtree_cursor cursor(root("a"));
+  std::string path, value;
+  for (int i = 0; i < 3; ++i)
+    ASSERT_NE(cursor.next(path, value), cvc::state_subtree_cursor::visit::done);
+
+  struct gone_flag {
+    std::shared_ptr<std::atomic<bool>> gone;
+    ~gone_flag() {
+      if (gone)
+        gone->store(true);
+    }
+  };
+  const auto freed_flag = [](state &node) {
+    auto freed = std::make_shared<std::atomic<bool>>(false);
+    auto flag = std::make_shared<gone_flag>();
+    flag->gone = freed;
+    node.data(boost::any(std::move(flag)));
+    return freed;
+  };
+  const auto a_freed = freed_flag(root("a"));
+  const auto c_freed = freed_flag(root("a.b.c"));
+  bool d_died = false, c_freed_when_d_died = false;
+  boost::signals2::scoped_connection died = root("a.b.c.d").destroyed.connect([&] {
+    d_died = true;
+    c_freed_when_d_died = c_freed->load();
+  });
+
+  ASSERT_TRUE(root.removeChild("a")); // the cursor is now the last owner of a's subtree
+  EXPECT_FALSE(a_freed->load());
+  cursor = cvc::state_subtree_cursor(root("x"));
+  EXPECT_TRUE(d_died);
+  EXPECT_FALSE(c_freed_when_d_died) << "a.b.c.d died after its parent a.b.c was freed";
+  EXPECT_TRUE(a_freed->load());
 }
 
 // A node reached by a pinned walk stays readable, and writable, after an ancestor is removed: its
