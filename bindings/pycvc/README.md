@@ -180,6 +180,26 @@ vehicle and steering geometry from the plant (None on nav's bicycle). The follow
 reference to its world.
 `test_pycvc_nav_routes.py` covers them.
 
+### Your own commands
+
+A controller of your own drives the agents in the navigator's place, on any plant, with
+`sim_world::override_command`:
+
+```python
+steer = np.array([...])   # (N,) bicycle angles, rad, + left
+accel = np.array([...])   # (N,) along the heading, m/s^2 x the world's scale (normalized / s^2)
+pycvc.nav_sim_world_override(sim, steer, accel)   # for the next step only; NaN: the navigator's
+pycvc.nav_sim_world_step(sim)
+```
+
+On nav's bicycle the agent integrates the command; on a plant it is the plant's command (Jolt's
+driver model, or the dynamic vehicle's actuators), which backs a vehicle up from rest on a
+negative acceleration. Either way the steer is held to the lock and the speed to the agent's top
+speed. `nav_sim_world_set_pose(sim, i, x, y, heading, speed=0)` places an agent on nav's bicycle
+(normalized units); a plant owns its vehicles' poses, so place the agents before
+`nav_sim_world_set_plant`, which attaches each vehicle where its agent is.
+`test_pycvc_nav_override.py` covers both.
+
 ## Level of detail (cvc::simplify + cvc::lod)
 
 The whole LOD family is wrapped directly (`pycvc_lod.i`, `LodGraphicsNode` in
