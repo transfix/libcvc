@@ -4,8 +4,10 @@
 
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_exec/async_evaluator.h>
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/evaluator.h>
 #include <cvc/state/state_exec/heap.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/parser.h>
@@ -115,6 +117,86 @@ TEST(CycleCollectorTest, ClassesStillWork) {
   sched.run();
   ASSERT_TRUE(sched.get_result(pid));
   EXPECT_EQ(to_string(*sched.get_result(pid)), "(5 14 #f)");
+}
+
+namespace {
+// A class with methods, and one inheriting it with no init or finalize of its own: each binds,
+// in the scope its methods capture, a cycle through its class dict.
+const char *const kClassScript =
+    "(begin (defclass A (init (self v) (set-attr self \"v\" v) self) (get (self) (get-attr self "
+    "\"v\"))) (defclass B A (twice (self) (* 2 (send self \"get\")))) "
+    "(list (send (A 21) \"get\") (send (B 21) \"twice\")))";
+} // namespace
+
+TEST(CycleCollectorTest, TheRecursiveEvaluatorsClassesAreFreed) {
+  // The recursive evaluator's defclass stores its methods, default init and finalize as named
+  // natives (closure_natives.h), so the collector sees the methods' closures and the cycle.
+  collect_cycles();
+  std::weak_ptr<environment> seen;
+  {
+    auto env = builtins::make_default_environment();
+    seen = env;
+    evaluator ev(env);
+    EXPECT_EQ(to_string(ev.evaluate_script(kClassScript)), "(21 42)");
+  }
+  EXPECT_GT(collect_cycles().freed, 0u);
+  EXPECT_TRUE(seen.expired());
+}
+
+TEST(CycleCollectorTest, TheCoroutineEvaluatorsClassesAreFreed) {
+  // The coroutine evaluator's too, and its constructor is the stackless evaluator's.
+  collect_cycles();
+  std::weak_ptr<environment> seen;
+  {
+    auto env = builtins::make_default_environment();
+    seen = env;
+    async_evaluator ev(env);
+    EXPECT_EQ(to_string(ev.sync_evaluate_script(kClassScript)), "(21 42)");
+  }
+  EXPECT_GT(collect_cycles().freed, 0u);
+  EXPECT_TRUE(seen.expired());
+}
+
+TEST(CycleCollectorTest, ARestoredProcessIsFreed) {
+  // A restored process's closures capture scopes the codec made. They are tracked as the
+  // evaluators track theirs, so a defun and a class's methods bound back into them are freed once
+  // the process is gone.
+  collect_cycles();
+  std::weak_ptr<environment> seen;
+  bool remembered = false;
+  {
+    cvc::app app;
+    cvc::state &snap = cvc::state::instance(app)("snap");
+    async_scheduler a, b;
+    execute_options opts;
+    opts.env = builtins::make_default_environment();
+    const int pid = a.execute(
+        std::string("(begin (defun twice (x) (* 2 x)) (defclass Box (init (self v) (set-attr "
+                    "self \"v\" v) self) (get (self) (get-attr self \"v\"))) (set box (Box 21)) "
+                    "(set i 0) (while (< i 200) (set i (+ i 1))) (remember twice) "
+                    "(list (twice 21) (send box \"get\")))"),
+        opts);
+    for (int s = 0; s < 100; ++s)
+      a.sync_step();
+    ASSERT_FALSE(a.get_result(pid).has_value());
+    ASSERT_TRUE(a.snapshot(pid, snap));
+    a.kill(pid);
+    auto natives = builtins::make_default_environment();
+    builtins::register_fn(natives, "remember", [&](std::span<const value_t> args) -> value_t {
+      if (const auto *c = std::get_if<closure_ptr>(&args[0].v)) {
+        seen = (*c)->env_snapshot;
+        remembered = true;
+      }
+      return nil_value;
+    });
+    const int moved = b.restore(snap, natives);
+    b.sync_run();
+    ASSERT_TRUE(b.get_result(moved)) << b.get_exit_error(moved).value_or("");
+    EXPECT_EQ(to_string(*b.get_result(moved)), "(42 21)");
+  }
+  ASSERT_TRUE(remembered);
+  EXPECT_GT(collect_cycles().freed, 0u);
+  EXPECT_TRUE(seen.expired());
 }
 
 TEST(CycleCollectorTest, LiveDataIsNeverFreed) {

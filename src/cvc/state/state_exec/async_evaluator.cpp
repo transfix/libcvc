@@ -8,6 +8,8 @@
   special form suspends the coroutine after evaluating expr.
 */
 
+#include "closure_natives.h" // the natives defclass makes
+
 #include <cvc/state/state_exec/async_evaluator.h>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/data_job.h>
@@ -557,42 +559,16 @@ task<value_t> async_evaluator::do_defclass(const std::vector<value_t> &args, env
     return false;
   };
 
-  if (!has_method("init")) {
-    auto super_copy = super_cls_dict;
-    native_fn default_init = [super_copy](std::span<const value_t> a) -> value_t {
-      if (super_copy) {
-        for (auto &[k, v] : *super_copy) {
-          if (k == "init") {
-            if (auto *fn = std::get_if<native_fn>(&v.v))
-              return (*fn)(a);
-            break;
-          }
-        }
-      }
-      return a.empty() ? nil_value : a[0];
-    };
-    cls_dict->emplace_back("init", value_t{std::move(default_init)});
-  }
+  // Default init and finalize: the superclass's, else init returns self and finalize nil. These
+  // natives, the methods and the constructor are named types (closure_natives.h), so the cycle
+  // collector sees what they hold: the methods capture the scope the class is bound in.
+  if (!has_method("init"))
+    cls_dict->emplace_back(
+        "init", value_t{native_fn{detail::class_inherited_method{super_cls_dict, "init"}}});
+  if (!has_method("finalize"))
+    cls_dict->emplace_back(
+        "finalize", value_t{native_fn{detail::class_inherited_method{super_cls_dict, "finalize"}}});
 
-  if (!has_method("finalize")) {
-    auto super_copy = super_cls_dict;
-    native_fn default_finalize = [super_copy](std::span<const value_t>) -> value_t {
-      if (super_copy) {
-        for (auto &[k, v] : *super_copy) {
-          if (k == "finalize") {
-            if (auto *fn = std::get_if<native_fn>(&v.v))
-              return (*fn)({});
-            break;
-          }
-        }
-      }
-      return nil_value;
-    };
-    cls_dict->emplace_back("finalize", value_t{std::move(default_finalize)});
-  }
-
-  // Process methods — note: we capture `this` for apply_closure
-  async_evaluator *self = this;
   for (size_t i = methods_start; i < args.size(); ++i) {
     auto *ml = std::get_if<list_ptr>(&args[i].v);
     if (!ml || !*ml || (**ml).empty())
@@ -603,35 +579,24 @@ task<value_t> async_evaluator::do_defclass(const std::vector<value_t> &args, env
       continue;
 
     std::vector<value_t> lambda_args(mlist.begin() + 1, mlist.end());
-    auto method_val = co_await do_lambda(lambda_args, env);
+    auto method_val = co_await do_lambda(lambda_args, env); // tracks the scope it captures
     auto method_closure = std::get<closure_ptr>(method_val.v);
 
-    // Wrap in native_fn — the native_fn is synchronous, so we use
-    // sync_wait() on the async apply_closure
-    native_fn wrapper = [self, method_closure](std::span<const value_t> call_args) -> value_t {
-      std::vector<value_t> v(call_args.begin(), call_args.end());
-      return self->apply_closure(method_closure, v).sync_wait();
+    // A native is synchronous, so the method waits on this evaluator's apply_closure.
+    const detail::evaluator_method::apply_fn apply = [](void *ev, const closure_ptr &method,
+                                                        std::span<const value_t> call_args) {
+      return static_cast<async_evaluator *>(ev)
+          ->apply_closure(method, std::vector<value_t>(call_args.begin(), call_args.end()))
+          .sync_wait();
     };
-    cls_dict->emplace_back(method_name_sym->name, value_t{std::move(wrapper)});
+    cls_dict->emplace_back(
+        method_name_sym->name,
+        value_t{native_fn{detail::evaluator_method{apply, this, std::move(method_closure)}}});
   }
 
+  // The stackless evaluator's constructor: a new instance, passed to the class's init.
   auto cls_dict_val = value_t{cls_dict};
-  native_fn constructor = [cls_dict, cls_dict_val](std::span<const value_t> init_args) -> value_t {
-    auto inst = std::make_shared<std::vector<std::pair<std::string, value_t>>>();
-    inst->emplace_back("__class__", cls_dict_val);
-    value_t inst_val{inst};
-    for (auto &[k, v] : *cls_dict) {
-      if (k == "init") {
-        std::vector<value_t> a;
-        a.push_back(inst_val);
-        a.insert(a.end(), init_args.begin(), init_args.end());
-        if (auto *fn = std::get_if<native_fn>(&v.v))
-          (*fn)(a);
-        break;
-      }
-    }
-    return inst_val;
-  };
+  native_fn constructor{detail::class_constructor{cls_dict}};
 
   auto ctor_env = environment::extend(env);
   ctor_env->set("__cls_dict__", cls_dict_val);

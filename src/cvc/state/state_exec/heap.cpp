@@ -64,6 +64,9 @@ template <class F> void value_edges(const value_t &v, F &f) {
           } else if (const auto *i = x.template target<detail::class_inherited_method>()) {
             if (i->super_cls)
               f(node_kind::dict, i->super_cls);
+          } else if (const auto *m = x.template target<detail::evaluator_method>()) {
+            if (m->method)
+              f(node_kind::closure, m->method);
           }
         }
       },
