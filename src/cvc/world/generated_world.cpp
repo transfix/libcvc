@@ -1570,9 +1570,11 @@ struct world_builder::impl {
 #ifdef CVC_USING_OPENMP
 #pragma omp parallel for schedule(dynamic)
 #endif
-      for (int i = next; i < next + m; ++i)
-        w.terrain_chunks[std::size_t(i)] =
-            make_terrain_chunk(*w.terrain, L, i / L.chunk_cols, i % L.chunk_cols);
+      for (int i = next; i < next + m; ++i) {
+        terrain_chunk &ch = w.terrain_chunks[std::size_t(i)];
+        ch = make_terrain_chunk(*w.terrain, L, i / L.chunk_cols, i % L.chunk_cols);
+        ch.water = make_water_rungs(*w.terrain, L, ch, p.water_level_m); // its water, if any
+      }
       next += m;
       frac = n > 0 ? double(next) / n : 1.0;
       if (next >= n)

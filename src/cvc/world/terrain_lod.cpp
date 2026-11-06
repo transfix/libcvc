@@ -227,6 +227,78 @@ terrain_chunk make_terrain_chunk(const cvc::height_field &hf, const terrain_chun
   return ch;
 }
 
+cvc::geometry::color_t water_colour(double depth_m) {
+  // Per-metre absorption (pure water's ratios, a little turbid), the bed (sand), and the water's
+  // own scattered colour; the path is down and back up at a typical slant.
+  const double sigma[3] = {0.45, 0.065, 0.035};
+  const double bed[3] = {0.60, 0.55, 0.40}, deep[3] = {0.02, 0.13, 0.21};
+  const double path = 2.6 * std::max(0.0, depth_m);
+  cvc::geometry::color_t c;
+  for (int k = 0; k < 3; ++k) {
+    const double t = std::exp(-sigma[k] * path);
+    c[std::size_t(k)] = bed[k] * t + deep[k] * (1.0 - t);
+  }
+  return c;
+}
+
+std::vector<cvc::geometry> make_water_rungs(const cvc::height_field &hf,
+                                            const terrain_chunk_layout &L, const terrain_chunk &ch,
+                                            double water_level_m) {
+  const int K = std::max(1, L.rungs);
+  std::vector<cvc::geometry> out(static_cast<std::size_t>(K));
+  if (!std::isfinite(water_level_m) || ch.min[2] >= water_level_m)
+    return out; // nothing of this chunk is under water
+  const std::vector<float> &h = hf.heights();
+  const int cols = hf.cols();
+  auto H = [&](int r, int c) { return double(h[std::size_t(r) * cols + c]); };
+  bool any = false;
+  for (int k = 0; k < K; ++k) {
+    const std::vector<int> rs = stridedSamples(ch.r0, ch.r1, 1 << k);
+    const std::vector<int> cs = stridedSamples(ch.c0, ch.c1, 1 << k);
+    const std::size_t nr = rs.size(), nc = cs.size();
+    constexpr std::uint64_t kNone = std::numeric_limits<std::uint64_t>::max();
+    std::vector<std::uint64_t> vert(nr * nc, kNone);
+    cvc::geometry::points_t pts;
+    cvc::geometry::normals_t nrm;
+    cvc::geometry::colors_t col;
+    cvc::geometry::tris_t tri;
+    auto vertex = [&](std::size_t i, std::size_t j) {
+      std::uint64_t &v = vert[i * nc + j];
+      if (v == kNone) {
+        const double z = H(rs[i], cs[j]);
+        v = pts.size();
+        pts.push_back({{hf.x0() + cs[j] * hf.dx(), hf.y0() + rs[i] * hf.dy(), water_level_m}});
+        nrm.push_back({{0.0, 0.0, 1.0}});
+        col.push_back(water_colour(std::isnan(z) ? 0.0 : water_level_m - z));
+      }
+      return v;
+    };
+    for (std::size_t i = 0; i + 1 < nr; ++i)
+      for (std::size_t j = 0; j + 1 < nc; ++j) {
+        const double lo = std::min({H(rs[i], cs[j]), H(rs[i], cs[j + 1]), H(rs[i + 1], cs[j]),
+                                    H(rs[i + 1], cs[j + 1])});
+        if (!(lo < water_level_m))
+          continue;
+        const std::uint64_t a = vertex(i, j), b = vertex(i, j + 1), d = vertex(i + 1, j + 1),
+                            e = vertex(i + 1, j);
+        tri.push_back({{a, b, d}});
+        tri.push_back({{a, d, e}});
+      }
+    if (tri.empty())
+      continue;
+    any = true;
+    cvc::geometry g;
+    g.points() = std::move(pts);
+    g.normals() = std::move(nrm);
+    g.colors() = std::move(col);
+    g.tris() = std::move(tri);
+    out[std::size_t(k)] = std::move(g);
+  }
+  if (!any)
+    out.assign(std::size_t(K), cvc::geometry());
+  return out;
+}
+
 void constrain_terrain_rungs(std::vector<int> &rung, int rows, int cols) {
   if (rows <= 0 || cols <= 0 || rung.size() != std::size_t(rows) * cols)
     return;
