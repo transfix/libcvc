@@ -399,6 +399,12 @@ arigl's browser loop yields with `emscripten_sleep(0)` under Asyncify (the
     `--allow-multiple-definition`.
   - That flag also hides real clashes. Two packages with different code under one name would link,
     and one would silently run the other's.
+  - **It already broke numpy.** `numpy.random.mtrand` and `_bounded_integers` define seven
+    distributions with different signatures (`random_poisson`, `random_zipf`,
+    `random_binomial_btpe` and four more; i32 against i64). wasm-ld warned "function signature
+    mismatch" and bound one extension's calls to a trapping stub. On 2026-11-06,
+    `np.random.RandomState(1).poisson(4.0, 4)` aborted the host with `RuntimeError:
+    unreachable`.
 - **Binary tools can't fix it.**
   - `llvm-objcopy` refuses every symbol option on wasm objects, in emsdk's LLVM 23 and on LLVM
     main.
@@ -424,16 +430,32 @@ arigl's browser loop yields with `emscripten_sleep(0)` under Asyncify (the
   The rewrite covered 395 COMDAT groups. The unmodified objects fail that link with
   duplicate-symbol errors.
 
-**The convention:**
+**The convention (W2, built):**
 
-- **Recipes.** A wasm C-extension recipe runs the rewriter on each extension. It ships the objects
-  plus `share/python-wasm/<pkg>.inittab`, which maps each dotted module name to its renamed
-  `PyInit_` symbol.
-- **The host link.** It generates one registrar from every manifest in the deps prefix. A clash
-  between two extensions is then a link error.
-- **Debug names.** Strip each object's `name` section, or prefix the names in it. After the
-  rewrite several objects carry the same debug names, which `llvm-nm` rejects in a combined `-r`
-  link. The final link is fine either way.
+- **The tool.** `cvcpkg/recipes/_common/wasm_pyext.py`: stdlib-only Python, run with a build's
+  native interpreter. It's vendored from cy-pca/cvcpkg's `recipes/_common/`, where its unit tests
+  live.
+  - `object` and `package` localize extensions. With `--out DIR`, `package` writes the copies
+    into a prefix overlay instead of in place.
+  - Exported and `NO_STRIP` symbols stay global and are reported.
+  - Debug function names get the same per-extension prefix, so a combined `wasm-ld -r` link of
+    several objects stays readable.
+- **Recipes.** A wasm C-extension recipe runs `package` on its extensions and ships
+  `share/python-wasm/<cvcpkg package>.inittab`. Each line holds the dotted module, the renamed
+  init symbol, and the object's path relative to the prefix. numpy-cp312 does this from cvc.6
+  (wasm and wasm-mt).
+- **The host link** ([`link-host.sh`](../../bindings/pycvc/wasm/link-host.sh)) works in five
+  steps:
+  1. It reads every manifest in the deps prefix.
+  2. It localizes copies of any numpy that ships no manifest, in a scratch directory, never in
+     the prefix.
+  3. `check` refuses a set that would clash: a module listed twice, a global defined by two
+     extensions, or an object that isn't localized.
+  4. `registrar` writes the `pycvc_register_pyext_inittab()` that `pycvc_host.cpp` calls.
+  5. It links with no `--allow-multiple-definition`.
+
+  The whole pycvc_gl host (VTK bridge, numpy, the deps' 256 archives) links that way, and its
+  smoke prints `PYCVC_WASM_OK`.
 - **Limits.** An extension that relies on another extension's global symbols breaks here, as it
   would natively under `RTLD_LOCAL`. Extensions share through capsules instead; numpy's C API is
   one. A package's own C library is linked into each extension that uses it, or shipped as a

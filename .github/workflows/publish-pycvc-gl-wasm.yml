@@ -164,7 +164,10 @@ jobs:
             || { echo "::error::bundle has no pycvc_host.wasm"; exit 1; }
 
       - name: Upload pycvc_host.wasm
-        if: always()
+        # A real publish only (a v* tag, or dry_run=false), and then even when it fails, so a
+        # broken host can be inspected. A dry run packs and checks and stores nothing: artifact
+        # storage is paid for.
+        if: ${{ always() && (github.event_name == 'push' || inputs.dry_run == false) }}
         uses: actions/upload-artifact@v4
         with:
           name: pycvc-host-wasm
