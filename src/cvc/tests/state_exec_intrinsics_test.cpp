@@ -1,6 +1,7 @@
 /// @file state_exec_intrinsics_test.cpp
 /// @brief Tests for Phase 5: Intrinsics, Resource Policy, Stdlib.
 
+#include <algorithm>
 #include <boost/any.hpp>
 #include <boost/thread/thread.hpp>
 #include <cmath>
