@@ -4,8 +4,10 @@
 
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_exec/async_evaluator.h>
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/evaluator.h>
 #include <cvc/state/state_exec/heap.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/parser.h>
@@ -115,6 +117,44 @@ TEST(CycleCollectorTest, ClassesStillWork) {
   sched.run();
   ASSERT_TRUE(sched.get_result(pid));
   EXPECT_EQ(to_string(*sched.get_result(pid)), "(5 14 #f)");
+}
+
+namespace {
+// A class with methods, and one inheriting it with no init or finalize of its own: each binds,
+// in the scope its methods capture, a cycle through its class dict.
+const char *const kClassScript =
+    "(begin (defclass A (init (self v) (set-attr self \"v\" v) self) (get (self) (get-attr self "
+    "\"v\"))) (defclass B A (twice (self) (* 2 (send self \"get\")))) "
+    "(list (send (A 21) \"get\") (send (B 21) \"twice\")))";
+} // namespace
+
+TEST(CycleCollectorTest, TheRecursiveEvaluatorsClassesAreFreed) {
+  // The recursive evaluator's defclass stores its methods, default init and finalize as named
+  // natives (closure_natives.h), so the collector sees the methods' closures and the cycle.
+  collect_cycles();
+  std::weak_ptr<environment> seen;
+  {
+    auto env = builtins::make_default_environment();
+    seen = env;
+    evaluator ev(env);
+    EXPECT_EQ(to_string(ev.evaluate_script(kClassScript)), "(21 42)");
+  }
+  EXPECT_GT(collect_cycles().freed, 0u);
+  EXPECT_TRUE(seen.expired());
+}
+
+TEST(CycleCollectorTest, TheCoroutineEvaluatorsClassesAreFreed) {
+  // The coroutine evaluator's too, and its constructor is the stackless evaluator's.
+  collect_cycles();
+  std::weak_ptr<environment> seen;
+  {
+    auto env = builtins::make_default_environment();
+    seen = env;
+    async_evaluator ev(env);
+    EXPECT_EQ(to_string(ev.sync_evaluate_script(kClassScript)), "(21 42)");
+  }
+  EXPECT_GT(collect_cycles().freed, 0u);
+  EXPECT_TRUE(seen.expired());
 }
 
 TEST(CycleCollectorTest, LiveDataIsNeverFreed) {

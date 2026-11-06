@@ -14,7 +14,7 @@ namespace cvc::state_exec::detail {
 // Each drops what it holds through drop_owner, as value_t does: a class dict holds these natives,
 // and they hold the next class dict up the chain, so plain shared_ptr destructors would free a
 // long superclass chain with a native stack frame per class. (A class's own methods are plain
-// closures in its dict.)
+// closures in its dict, but for the recursive and coroutine evaluators': evaluator_method.)
 
 /// A defclass constructor: a new instance dict whose __class__ is `cls_dict`, passed to the
 /// class's init method if it has one.
@@ -41,6 +41,20 @@ struct class_inherited_method {
 /// How many classes up one call of an inherited method looks itself (class_inherited_method::
 /// resolve) before it leaves the rest of the chain to a call.
 constexpr int kInheritedHops = 64;
+
+/// A method of a class the recursive or the coroutine evaluator made: those evaluators can't run
+/// a closure a native calls, so their defclass stores each method as this native, which applies
+/// `method` on the evaluator that made the class (`apply`, with `evaluator` passed back to it).
+/// `method` is in the open for the collector; `evaluator` is not an owner.
+struct evaluator_method {
+  using apply_fn = value_t (*)(void *evaluator, const closure_ptr &method,
+                               std::span<const value_t> args);
+  apply_fn apply;
+  void *evaluator;
+  closure_ptr method;
+  value_t operator()(std::span<const value_t> args) const { return apply(evaluator, method, args); }
+  ~evaluator_method() { drop_owner(method); }
+};
 
 } // namespace cvc::state_exec::detail
 
