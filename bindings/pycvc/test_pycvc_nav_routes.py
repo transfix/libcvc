@@ -183,6 +183,18 @@ if "jolt" in pycvc.physics_backends() and pycvc.physics_backend_info("jolt")["av
           f"the Humvee finishes its route on the plant (tick {tick})")
     check(math.hypot(float(pos[0, 0]) - 20.0, float(pos[0, 1])) < rv["reach"] + 2.0,
           f"the Humvee ends near (20, 0) m: {pos[0].tolist()}")
+    # 10. a plant on ground that is not at z = 0: `ground` (the terrain the world collides with)
+    #     starts each vehicle on the ground under it; without it a start is at ground_z, inside
+    #     a raised terrain.
+    raised = pycvc.height_field(81, 81, -40.0, -40.0, 1.0, 1.0, [5.0] * (81 * 81))
+    for ground, expect in ((raised, lambda z: z > 5.0), (None, lambda z: z < 5.0)):
+        w = pycvc.physics_world()
+        w.add_terrain(raised)
+        sim = make_sim(open_ground)
+        plant = pycvc.nav_plant(w, [pycvc.vehicle_desc.humvee()], ground=ground)
+        pycvc.nav_sim_world_set_plant(sim, plant)
+        z = w.vehicle_state(plant.vehicle(0))["position"][2]
+        check(expect(z), f"ground={'the terrain' if ground else None}: the chassis at z {z:.2f}")
 else:
     print("no Jolt in this build: the plant checks are skipped")
 

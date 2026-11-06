@@ -1299,11 +1299,11 @@ volume job_volume(app &ctx, int job) {
 
 } // namespace
 
-// LIBISOCONTOUR runs the vendored libContour, whose state is process-wide (libcontour_mutex.h):
-// IntTree::Done() points global_tree at the tree it sorts, and its qsort comparators read the cell
-// ranges through it. The extraction holds libcontour_mutex(). Each thread meshes a volume of its
-// own size, so a comparator that read another thread's tree would sort by the wrong ranges, or
-// past the tree's end. Without the lock every round failed here.
+// LIBISOCONTOUR runs the vendored libContour, which keeps no process-wide state, so concurrent
+// extractions take no lock. It once did: IntTree::Done() pointed a global_tree at the tree it
+// sorted, and its qsort comparators read the cell ranges through it; unlocked, every round here
+// failed. Each thread meshes a volume of its own size, so a comparator that read another thread's
+// tree would sort by the wrong ranges, or past the tree's end.
 TEST_F(LbieMesherTest, ConcurrentLibisocontourMeshesMatchTheSerialOnes) {
   constexpr int kThreads = 4, kRounds = 4;
   std::vector<volume> vols;
@@ -1330,10 +1330,9 @@ TEST_F(LbieMesherTest, ConcurrentLibisocontourMeshesMatchTheSerialOnes) {
   }
 }
 
-// The contour spectrum's libContour oracle (cvc::compute_contour_spectrum_libcontour) shares that
-// state with LIBISOCONTOUR under the same lock: it sets `verbose`, which libContour reads
-// throughout (a race only a race detector would see; the two meshes' trees are what visibly
-// collide without the lock). Two threads mesh while two compute spectra.
+// The contour spectrum's libContour oracle (cvc::compute_contour_spectrum_libcontour) runs the
+// same library beside LIBISOCONTOUR. It once zeroed libContour's `verbose` global around each
+// computation, a race only a race detector would see. Two threads mesh while two compute spectra.
 TEST_F(LbieMesherTest, LibisocontourMeshesBesideTheLibcontourSpectrumMatchTheSerialOnes) {
   constexpr int kThreads = 4, kRounds = 4;
   std::vector<volume> vols;

@@ -41,7 +41,9 @@
 #include <cvc/physics/vehicle.h>
 #include <cvc/physics/world.h>
 #include <cvc/physics/world_binding.h>
+#include <cmath>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -157,6 +159,32 @@ ph::body_id body_of(long id) {
   ph::body_id b;
   b.value = static_cast<std::uint32_t>(id);
   return b;
+}
+
+// A sequence of body ids (None: none), for a plant's ground_bodies; `who` names the caller in the
+// ValueError.
+std::vector<ph::body_id> body_ids(PyObject *ids, const std::string &who) {
+  std::vector<ph::body_id> out;
+  if (!ids || ids == Py_None)
+    return out;
+  const std::string bad = who + ": ground_bodies is a sequence of body ids";
+  PyObject *seq = PySequence_Fast(ids, bad.c_str());
+  if (!seq) {
+    PyErr_Clear();
+    throw std::invalid_argument(bad);
+  }
+  const Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
+  for (Py_ssize_t k = 0; k < n; ++k) {
+    const long id = PyLong_AsLong(PySequence_Fast_GET_ITEM(seq, k));
+    if (PyErr_Occurred()) {
+      PyErr_Clear();
+      Py_DECREF(seq);
+      throw std::invalid_argument(bad);
+    }
+    out.push_back(body_of(id));
+  }
+  Py_DECREF(seq);
+  return out;
 }
 
 ph::vehicle_id vehicle_of(long id) {
@@ -388,14 +416,95 @@ PyObject *plant_state_dict(const cvc::nav::plant_state &s) {
 PyObject *dyn_books_dict(const ph::dyn_bike_books &b) {
   PyObject *d = PyDict_New();
   const std::pair<const char *, double> v[] = {
-      {"kinetic", b.kinetic},       {"drive", b.drive},     {"brake", b.brake},
-      {"dissipated", b.dissipated}, {"floor", b.floor},     {"grade", b.grade},
-      {"limiter", b.limiter},       {"contact", b.contact}, {"residual", b.residual},
+      {"kinetic", b.kinetic},
+      {"drive", b.drive},
+      {"brake", b.brake},
+      {"dissipated", b.dissipated},
+      {"slip", b.slip},
+      {"floor", b.floor},
+      {"grade", b.grade},
+      {"limiter", b.limiter},
+      {"contact", b.contact},
+      {"contact_energy", b.contact_energy},
+      {"contact_stored", b.contact_stored},
+      {"contact_dissipated", b.contact_dissipated},
+      {"contact_exchange", b.contact_exchange},
+      {"residual", b.residual},
       {"flow", b.flow()},
   };
   for (const auto &kv : v)
     put(d, kv.first, PyFloat_FromDouble(kv.second));
   return d;
+}
+
+// The compliant contact's settings (cvc/nav/detail/dyn_contact.h) as a dict, and from one: keys
+// it lacks keep their defaults.
+PyObject *contact_params_dict(const cvc::nav::diff::dyn_contact_params &p) {
+  return Py_BuildValue("{s:d,s:d,s:d,s:d,s:d,s:i,s:i,s:d}", "k", p.k, "c", p.c, "friction",
+                       p.friction, "slide", p.slide, "skin", p.skin, "per_side", p.per_side,
+                       "per_end", p.per_end, "rounding", p.rounding);
+}
+
+cvc::nav::diff::dyn_contact_params contact_params_of(PyObject *o) {
+  cvc::nav::diff::dyn_contact_params p;
+  if (!o || o == Py_None)
+    return p;
+  if (!PyDict_Check(o))
+    throw std::invalid_argument("dyn_bike_plant: contact_params is a dict");
+  PyObject *key, *value;
+  Py_ssize_t pos = 0;
+  while (PyDict_Next(o, &pos, &key, &value)) {
+    const char *k = PyUnicode_AsUTF8(key);
+    if (!k) {
+      PyErr_Clear();
+      throw std::invalid_argument("dyn_bike_plant: contact_params' keys are strings");
+    }
+    const std::string s(k);
+    const double v = PyFloat_AsDouble(value);
+    if (PyErr_Occurred()) {
+      PyErr_Clear();
+      throw std::invalid_argument("dyn_bike_plant: contact_params' " + s + " is a number");
+    }
+    if (s == "per_side" || s == "per_end") {
+      if (v != std::floor(v))
+        throw std::invalid_argument("dyn_bike_plant: contact_params' " + s +
+                                    " is a whole number");
+      (s == "per_side" ? p.per_side : p.per_end) = static_cast<int>(v);
+    } else if (s == "k")
+      p.k = v;
+    else if (s == "c")
+      p.c = v;
+    else if (s == "friction")
+      p.friction = v;
+    else if (s == "slide")
+      p.slide = v;
+    else if (s == "skin")
+      p.skin = v;
+    else if (s == "rounding")
+      p.rounding = v;
+    else
+      throw std::invalid_argument("dyn_bike_plant: contact_params has no field '" + s + "'");
+  }
+  return p;
+}
+
+// A compliant-contact field from a sim_world's signed distance (plane `plane`) as it is now.
+// dyn_bike_plant::sdf_field borrows its grid, and the world rebuilds that grid when its map
+// changes, so the field keeps a copy of the plane: obstacles the world learns later are not in it.
+std::function<void(double, double, double &, double &, double &)>
+sdf_field_snapshot(const cvc::nav::field_stack &fs, int plane, double metres_per_world_unit) {
+  if (!fs.data || fs.H < 2 || fs.W < 2 || plane < 0 || plane >= fs.M)
+    throw std::invalid_argument("dyn_bike_plant: the sim_world has no signed-distance plane " +
+                                std::to_string(plane));
+  const std::size_t n = static_cast<std::size_t>(3) * fs.H * fs.W;
+  auto grid = std::make_shared<std::vector<float>>(fs.data + plane * n, fs.data + (plane + 1) * n);
+  cvc::nav::field_stack one = fs;
+  one.data = grid->data();
+  one.M = 1;
+  auto f = ph::dyn_bike_plant::sdf_field(one, 0, metres_per_world_unit);
+  return [grid, f](double x, double y, double &phi, double &gx, double &gy) {
+    f(x, y, phi, gx, gy);
+  };
 }
 
 } // namespace pycvc_physics
@@ -875,11 +984,15 @@ public:
 
 %extend cvc::physics::nav_plant {
   // A physics world's vehicles as a sim_world's plant (nav_plant.h): agent i drives
-  // descs[i % len(descs)]. The plant keeps the world alive.
+  // descs[i % len(descs)]. The plant keeps the world alive. `ground_bodies` (ids): the bodies the
+  // vehicles drive on, whose contacts with a chassis are not building contacts. `ground` (a
+  // pycvc.height_field, the terrain the world collides with) is the ground under each start, for
+  // terrain that is not flat (nav_plant_options::ground_height); None: ground_z everywhere.
   nav_plant(cvc::physics::world &world, const std::vector<cvc::physics::vehicle_desc> &descs,
             bool step_world = true, double latency = 0.1, double brake_margin = 0.8,
             double metres_per_world_unit = 1.0, double ground_z = 0.0,
-            double spawn_height = -1.0, int drift_nsub = 0, PyObject *drift_bins_g = nullptr) {
+            double spawn_height = -1.0, int drift_nsub = 0, PyObject *drift_bins_g = nullptr,
+            PyObject *ground_bodies = nullptr, const cvc::height_field *ground = nullptr) {
     cvc::physics::nav_plant_options o;
     o.step_world = step_world;
     o.latency = latency;
@@ -888,10 +1001,19 @@ public:
     o.ground_z = ground_z;
     o.spawn_height = spawn_height;
     o.drift_nsub = drift_nsub;
+    if (ground) {
+      const cvc::height_field field = *ground; // a copy sharing its arrays
+      const double fallback = ground_z;
+      o.ground_height = [field, fallback](double x, double y) {
+        const double h = field.height(x, y);
+        return std::isnan(h) ? fallback : h;
+      };
+    }
     if (drift_bins_g && drift_bins_g != Py_None) {
       std::vector<long> shape;
       o.drift_bins_g = pycvc_world::doubles(drift_bins_g, "nav_plant: drift_bins_g", shape);
     }
+    o.ground_bodies = pycvc_physics::body_ids(ground_bodies, "nav_plant");
     return new cvc::physics::nav_plant(world, descs, o);
   }
   std::string kind() const { return "jolt"; }
@@ -1004,16 +1126,53 @@ public:
 %extend cvc::physics::dyn_bike_plant {
   // The dynamic single-track vehicle as a sim_world's plant (dyn_bike_plant.h): tires, load
   // transfer, actuator lag and the port-Hamiltonian energy books, no Jolt in the loop. Agent i
-  // drives descs[i % len(descs)] on a flat ground of grip `mu` at ground_z. With `world` (a
-  // physics_world, kept alive by the plant) each chassis is a box in it that collides with its
-  // bodies, except `ground_bodies` (ids), the ground the wheels drive on.
+  // drives descs[i % len(descs)] on a ground of grip `mu`: flat at ground_z, or `ground` (a
+  // pycvc.height_field in world metres, copied as it is now; ground_z where it has no height),
+  // which the vehicle climbs and descends along its heading. With `world` (a physics_world, kept
+  // alive by the plant) each chassis is a box in it that collides with its bodies, except
+  // `ground_bodies` (ids), the ground the wheels drive on.
+  //
+  // The options, all off by default:
+  //   wheel_spin  each axle's wheels spin at their own speed, driven and braked by torques; the
+  //               books gain the slip line.
+  //   side_slope  gravity along and across the heading, from `ground`'s gradient under the centre
+  //               of gravity; the grade line is minus the potential's change.
+  //   contact     compliant contact, through the plant's external port: each footprint against
+  //               `contact_field` (a sim_world handle: a copy of its signed distance on plane
+  //               `contact_plane` as it is now) and, with contact_vehicles, the vehicles against
+  //               each other. The books gain the contact_* lines. `contact_params` (a dict:
+  //               k, c, friction, slide, skin, per_side, per_end, rounding) changes the
+  //               defaults. Not with `world`, which collides the chassis instead.
   dyn_bike_plant(const std::vector<cvc::physics::vehicle_desc> &descs,
                  cvc::physics::world *world = nullptr, PyObject *ground_bodies = nullptr,
                  double mu = 0.9, double substep = 0.01, double drive_lag = -1.0,
                  bool driver = true, double latency = 0.1, double brake_margin = 0.8,
                  double metres_per_world_unit = 1.0, double ground_z = 0.0,
-                 double chassis_friction = 0.3) {
+                 double chassis_friction = 0.3, const cvc::height_field *ground = nullptr,
+                 bool wheel_spin = false, bool side_slope = false, bool contact = false,
+                 PyObject *contact_field = nullptr, int contact_plane = 0,
+                 bool contact_vehicles = true, PyObject *contact_params = nullptr) {
     cvc::physics::dyn_bike_plant_options o;
+    if (ground) {
+      auto hf = std::make_shared<cvc::height_field>(*ground);
+      o.plant.ground_height = [hf, ground_z](double x, double y) {
+        const double h = hf->height(x, y);
+        return std::isfinite(h) ? h : ground_z;
+      };
+    }
+    o.wheel_spin = wheel_spin;
+    o.side_slope = side_slope;
+    o.contact = contact;
+    o.contact_vehicles = contact_vehicles;
+    o.contact_params = pycvc_physics::contact_params_of(contact_params);
+    if (contact_field && contact_field != Py_None) {
+      if (!contact)
+        throw std::invalid_argument("dyn_bike_plant: contact_field needs contact=True");
+      o.contact_field = pycvc_physics::sdf_field_snapshot(
+          pycvc::sim_world_from(contact_field)->field(), contact_plane, metres_per_world_unit);
+    }
+    if (contact && world)
+      throw std::invalid_argument("dyn_bike_plant: contact or a world, not both");
     o.plant.latency = latency;
     o.plant.brake_margin = brake_margin;
     o.plant.metres_per_world_unit = metres_per_world_unit;
@@ -1024,24 +1183,7 @@ public:
     o.driver = driver;
     o.physics = world;
     o.chassis_friction = chassis_friction;
-    if (ground_bodies && ground_bodies != Py_None) {
-      PyObject *seq = PySequence_Fast(ground_bodies, "dyn_bike_plant: ground_bodies");
-      if (!seq) {
-        PyErr_Clear();
-        throw std::invalid_argument("dyn_bike_plant: ground_bodies is a sequence of body ids");
-      }
-      const Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
-      for (Py_ssize_t k = 0; k < n; ++k) {
-        const long id = PyLong_AsLong(PySequence_Fast_GET_ITEM(seq, k));
-        if (PyErr_Occurred()) {
-          PyErr_Clear();
-          Py_DECREF(seq);
-          throw std::invalid_argument("dyn_bike_plant: ground_bodies is a sequence of body ids");
-        }
-        o.ground_bodies.push_back(pycvc_physics::body_of(id));
-      }
-      Py_DECREF(seq);
-    }
+    o.ground_bodies = pycvc_physics::body_ids(ground_bodies, "dyn_bike_plant");
     if (!world && !o.ground_bodies.empty())
       throw std::invalid_argument("dyn_bike_plant: ground_bodies needs a world");
     return new cvc::physics::dyn_bike_plant(descs, o);
@@ -1066,7 +1208,11 @@ public:
                          "vx", s.vx, "vy", s.vy, "r", s.r, "delta", s.delta, "a", s.a);
   }
   // Agent i's energy books (J) since attach, and over the last tick: kinetic, drive, brake,
-  // dissipated, floor, grade, limiter, contact, residual, and flow (everything that moved).
+  // dissipated, slip, floor, grade, limiter, contact (the world's), contact_energy (the compliant
+  // barrier's level), contact_stored, contact_dissipated, contact_exchange, residual, and flow
+  // (everything that moved). kinetic - kinetic_at_attach = drive - brake - dissipated - slip +
+  // floor + grade + limiter + contact - contact_stored - contact_dissipated + contact_exchange +
+  // residual.
   PyObject *books(int i) const {
     if (i < 0 || i >= $self->size())
       throw std::invalid_argument("dyn_bike_plant.books: no agent " + std::to_string(i));
@@ -1109,15 +1255,43 @@ public:
                                   std::to_string(i));
     return $self->vehicle_contact_step(i);
   }
+  // Agent i's wheels' speed (rad/s, + rolling forward) on `axle`, 0 the front and 1 the rear:
+  // with wheel_spin their own, else the speed's at the rolling radius.
+  double wheel_speed(int i, int axle) const {
+    if (i < 0 || i >= $self->size())
+      throw std::invalid_argument("dyn_bike_plant.wheel_speed: no agent " + std::to_string(i));
+    return $self->wheel_speed(i, axle);
+  }
+  // With contact: the compliant contact on agent i at the start of its last substep, against the
+  // field and the other vehicles: the barrier's energy (J), the damper's and the friction's power
+  // (W, >= 0), the points touching, and the body wrench (N, N, N m: along the body, across it, and
+  // about the centre of gravity). None without contact.
+  PyObject *contact_now(int i) const {
+    if (i < 0 || i >= $self->size())
+      throw std::invalid_argument("dyn_bike_plant.contact_now: no agent " + std::to_string(i));
+    if (!$self->options().contact)
+      Py_RETURN_NONE;
+    const cvc::nav::diff::dyn_contact &c = $self->contact_now(i);
+    double W[3];
+    c.wrench(W);
+    return Py_BuildValue("{s:d,s:d,s:i,s:(ddd)}", "energy", c.energy, "damping", c.damping,
+                         "touching", c.touching, "wrench", W[0], W[1], W[2]);
+  }
   // The plant's settings as a dict.
   PyObject *options() const {
     const cvc::physics::dyn_bike_plant_options &o = $self->options();
-    return Py_BuildValue("{s:d,s:d,s:d,s:O,s:d,s:d,s:d,s:d,s:d}", "mu", o.mu, "substep",
-                         o.substep, "drive_lag", o.drive_lag, "driver",
-                         o.driver ? Py_True : Py_False, "latency", o.plant.latency,
-                         "brake_margin", o.plant.brake_margin, "metres_per_world_unit",
-                         o.plant.metres_per_world_unit, "ground_z", o.plant.ground_z,
-                         "chassis_friction", o.chassis_friction);
+    return Py_BuildValue(
+        "{s:d,s:d,s:d,s:O,s:d,s:d,s:d,s:d,s:d,s:O,s:O,s:O,s:O,s:O,s:O,s:N}", "mu", o.mu,
+        "substep", o.substep, "drive_lag", o.drive_lag, "driver", o.driver ? Py_True : Py_False,
+        "latency", o.plant.latency, "brake_margin", o.plant.brake_margin,
+        "metres_per_world_unit", o.plant.metres_per_world_unit, "ground_z", o.plant.ground_z,
+        "chassis_friction", o.chassis_friction, "ground",
+        o.plant.ground_height ? Py_True : Py_False, "wheel_spin",
+        o.wheel_spin ? Py_True : Py_False, "side_slope", o.side_slope ? Py_True : Py_False,
+        "contact", o.contact ? Py_True : Py_False, "contact_field",
+        o.contact_field ? Py_True : Py_False, "contact_vehicles",
+        o.contact_vehicles ? Py_True : Py_False, "contact_params",
+        pycvc_physics::contact_params_dict(o.contact_params));
   }
 }
 

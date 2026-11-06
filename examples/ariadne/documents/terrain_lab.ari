@@ -12,8 +12,8 @@
 # The look and the render discipline are demo3-csma's (CVC-DBG's Austin convoy demo, our fastest
 # cvcGL scene), all declared below:
 #   - one merged mesh per layer, so the city is a few draw calls whatever its size;
-#   - the ground receives shadows but casts none (`casts_shadow: false`): as a caster the terrain
-#     shadows itself everywhere and forces every re-bake;
+#   - the ground casts shadows as well as receiving them, so its ridges shade its own valleys (a
+#     textured caster's shadow comes from its shape, never its texture's colours);
 #   - the ground's texture is drawn opaque (`material: { opaque: true }`): no per-texel alpha scan;
 #   - the sun's shadow map follows what the camera looks at (`shadows: { focus: camera }`), so a
 #     4096 map is ~0.2 m a texel close in and still covers an overview;
@@ -44,16 +44,14 @@ customs:
 import:
   - cvc://components/world_controls.ari
   - cvc://components/stage_lighting.ari
-  - cvc://components/camera_controls.ari
-  - cvc://components/scene_controls.ari
+  - cvc://components/viewer_settings.ari     # frame rate, UI size, grid / axis, camera, shadows
   - cvc://components/sim_transport.ari
   - cvc://components/sky_controls.ari
 
 # Only the Terrain Lab panel opens at first, so the world fills the view; Settings opens the rest.
 init: |
   (state-set "tree.stage_lighting.open" "0")
-  (state-set "tree.camera_controls.open" "0")
-  (state-set "tree.scene_controls.open" "0")
+  (state-set "tree.viewer_settings.open" "0")
   (state-set "tree.sim_transport.open" "0")
   (state-set "tree.sky_controls.open" "0")
 
@@ -69,10 +67,8 @@ menubar:
       - separator
       - menu_item: Stage lighting
         bind: tree.stage_lighting.open
-      - menu_item: Camera
-        bind: tree.camera_controls.open
-      - menu_item: Scene
-        bind: tree.scene_controls.open
+      - menu_item: Viewer
+        bind: tree.viewer_settings.open
       - menu_item: Simulation
         bind: tree.sim_transport.open
       - menu_item: Sky
@@ -87,20 +83,16 @@ windows:
     pos: [370, 16]
     size: [370, 210]
     closable: true
-  - include: camera_controls
+  - include: viewer_settings
     pos: [370, 234]
-    size: [370, 132]
-    closable: true
-  - include: scene_controls
-    pos: [370, 374]
-    size: [370, 120]
+    size: [370, 440]
     closable: true
   - include: sim_transport   # Paused / Speed: the water and the clouds run on the clock below
-    pos: [370, 502]
+    pos: [370, 682]
     size: [370, 150]
     closable: true
   - include: sky_controls
-    pos: [370, 660]
+    pos: [754, 16]
     size: [370, 116]
     closable: true
 
@@ -119,17 +111,18 @@ scene:
              lift: 20, ground: world }
   lights:
     # The afternoon sun: low in the west-southwest and warm, the key and the one shadow caster; a
-    # cool fill keeps the shade from going black; no back light or wash.
+    # cool fill keeps the shade from going black; no back light or wash. The fill, the environment
+    # and the ambient are kept low so the sun carries the light: building and cloud shadows read.
     - light: sun
       rig: three_point
       stage: { center: [0, 0, 25], radius: 850 }
       key: { intensity: 1.3, azimuth: -60, elevation: 28, cone: 62 }
-      fill: 0.3
+      fill: 0.15
       back: 0
       wash: 0
       warmth: 0.5
-      environment: 0.5
-      ambient: 0.32
+      environment: 0.2
+      ambient: 0.2
   nodes:
     # The world. Every key below seeds a world.* state key the Terrain Lab panel drives.
     - node: world
@@ -144,19 +137,23 @@ scene:
       buildings: 110       # the most buildings, filled from the district cores out
       tree_gen: 5
       amp: 90              # relief, metres
-      water_level: 34      # metres; everything below is water
+      water_level: 0       # metres from sea level (the shoreline); everything below is water
       color: material      # material | risk | occupancy | height
       look: soft           # soft (demo3's matte daylight) | classic (the C++ lab's)
-      casts_shadow: false
       material: { opaque: true }
       shader: { preset: terrain_bump }   # value-noise fBm ground detail
-    # The clouds: a drifting L-system slab high over the world (no ground shadow: the world's
-    # texture is its own).
+    # The clouds: a deck of L-system cumulus scattered over the whole world, drifting and slowly
+    # changing shape. The ones near the camera are volumes, the rest far shells to the horizon.
+    # Their shade dims the sun on the ground, the buildings, the roads and the trees; it is drawn
+    # in the receivers' shaders, so the world's own texture is untouched.
     - node: sky
       type: cloud_sky
-      ground: world
-      half: 600
-      extent: 640
-      base: 350
-      top: 610
-      shadow: 0
+      ground: world        # the deck covers this node's extent, live, and shades its meshes
+      receivers: [world_buildings, world_roads, world_props, world_foliage]
+      extent: 250          # a cloud's half-width, metres: small fair-weather cumulus
+      base: 300
+      top: 520
+      coverage: 0.6        # the share of the sky's cells holding a cloud
+      near: 6              # the clouds nearest the camera drawn as volumes; the rest far shells
+      sun_az: -60          # the key light's: the clouds cast along it
+      sun_el: 28

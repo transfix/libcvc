@@ -25,7 +25,7 @@
 
 #define FSAMPLES 256
 
-extern int verbose;
+#include "contour_verbose.h"
 
 using namespace std;
 

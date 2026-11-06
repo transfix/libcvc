@@ -58,6 +58,11 @@ struct nav_plant_options {
   // The ground's height under a start (world metres, at the rear axle's x, y in metres), for a
   // terrain that is not flat; empty: ground_z everywhere.
   std::function<double(double x, double y)> ground_height;
+  // The bodies the vehicles drive on (the ground, the terrain), as the dynamic plants' own
+  // ground_bodies: a chassis that touches one, scraping it or rolled onto it, has not hit static
+  // geometry, so static_contacts_step (nav_stats' building_contacts) leaves it out. Empty: every
+  // massless body counts, the ground included.
+  std::vector<body_id> ground_bodies;
   // advance() steps the world dt / fixed_dt times (a whole number, or attach() throws). false:
   // the world steps itself on the clock nav follows (world::follow), and advance() only reads.
   bool step_world = true;

@@ -152,7 +152,7 @@ manager holds records of its processes), `group_teardown`, `post_dropped_closed_
 the `state_exec_locks_model_test` executable) ports this model to C++ and runs it against the real
 lock table, `detail::lock_table` (locks plan L1.3). It was written from the protocol and from these
 files, not from the table's code. Phases L1 and L2 run it on one home (L2.3 added priorities,
-inheritance and their mutations); L3.4 extends it to several.
+inheritance and their mutations); L3.4 runs it on two and three homes.
 
 - **The spec oracle** (`spec_manager`) is `lockmodel.py`'s `Manager`: protocol 2-4 over sets and
   maps, without the trie. It takes `lock_table::mutation`'s bits, its `check()` asserts section
@@ -168,7 +168,11 @@ inheritance and their mutations); L3.4 extends it to several.
   implementation note (`impl-note`) run too. When the oracle refuses an operation (a `require` of
   the protocol, the traces' `refused`), the same call goes to the table, which must refuse it too
   (its precondition's `lock_violation`, or 4.4's `std::logic_error`), and the two states must
-  still be equal. A finding is a `lock_violation` named as here (`I6`, `4.13`, `lockstep`, ...).
+  still be equal. Each home attaches with a progress cell, which the oracle's `M.homes` entry and
+  the table's share, and on the table with a `lock_port` of its own: every notification the table
+  returns must carry its home's port (2.3's `Notification`, captured under `M.mu`, 4.14).
+  `blocking_sinks` (4.13) is the oracle's, compared with the table's. A finding is a
+  `lock_violation` named as here (`I6`, `4.13`, `lockstep`, ...).
 - **Inheritance, three ways.** The table recomputes inherited priorities by 4.3's implementation
   note (the set A, a reverse breadth-first search of depth 8 per process over predecessor edges
   found through its trie); its `check()` compares every record with its own layered search over
@@ -186,7 +190,13 @@ inheritance and their mutations); L3.4 extends it to several.
   taking a free entry or evicting the oldest unpinned one, so a miss never evicts a key of the
   request it builds, and a key that finds every entry pinned passes uncached. `world.py`'s plain
   FIFO, which may evict a key of the same request, is an option (`pin`), used for the state counts
-  below.
+  below. On several homes (L3.4) it has `world.py`'s ports: a post to another home is an action of
+  its own (in the `splitpost` configurations the post's critical section under the port's mutex,
+  `dlv_append`, is a further one), a home is destroyed in two actions (the port's close, then
+  `detach_home`, other homes acting in between), a late home is attached by an action, and each
+  step of a process advances its home's progress cell, a logical clock. At every quiescent state
+  it checks `blocking_sinks` for every waiter: each sink a process that can run, with its home's
+  cell.
 - **The explorer** (`explore()`) is `explore.py`'s 0-1 BFS (external events cost 1, home steps
   and posts 0) with a fair drain at the bound. States are deduplicated on a 128-bit fingerprint
   of a dump of the world (the oracle's `canonical()` and every field `World.key()` has), and kept
@@ -234,6 +244,28 @@ on the oracle and the table together (`Mutation_CancelSkipsRelevel`, `Mutation_C
 `LockTable` suite has the same three manager mutations as directed cases on the table alone, where
 the table's own `impl-note` check, not the oracle's, reports the third.
 
+Phase L3 (locks plan L3.4) explores `explore.py`'s configurations of two and three homes over the
+table, each exactly as `explore.py` has it: `core`, `wide`, `handlers`, `priority`, `destroy`,
+`coalesce`, `attach`, `noinh`, `foreign`, `splitpost`, `splitpost2`, `cache`, `two2`,
+`grantseeds` and `three` (`LocksModel.Homes<Name>` at the regular bound of its lane, below, and
+`LocksModelStress.Homes<Name>` at 3). Coalescing is on in `coalesce` alone, on the table and the
+oracle together, as `explore.py` sets it (G-39); `CVC_LOCKS_MODEL_COALESCE=1` turns it on in every
+`LocksModelStress.Homes*` case (the `+c` variants of `locks-deep.yml`). `grantseeds` checks 4.3's
+implementation note with seeds that leave out the processes granted ('no-granted-seeds', the
+oracle's check alone). `LocksModel.RandomHomes` runs `random_runs.py`'s episodes over one to three
+homes (a home attached late in 30% of the worlds of several, coalescing per seed; L4's group
+teardown, and with it `gdestroy`, is left out).
+
+`scenarios.py`'s scenarios also run as written, on two `priority_rr` homes (`TwoHomes*`): the L1
+and L2 ones above, with posts between the homes, and `CacheDetach`, `CacheClear`,
+`CycleOtherHomePid`, `QueryVisibility`, `SplitPost` and `SinksProgress`, whose assertions name
+the homes. All 13 of its mutations run there, each reporting exactly the violation it names:
+L3.4's `closed_outside_mu` (`post-test-outside-mu`: a post tests the port's `closed` outside the
+port's mutex and lands after the close, `port-race`), set on the oracle and the table together and
+acted on by the world's ports, and the L1 and L2 ones again (`TwoHomesMutation*`). Two explorations
+check the same: `HomesSplitpostMut` (`splitpost_mut`: `port-race`) and `HomesCoalesceNoClear`
+(`coalesce` with `coalesce_no_clear`: `I8`).
+
 `LocksModel.PortMatchesPythonStateCounts` ties the port to this model: on the oracle alone and
 with `world.py`'s FIFO cache, `l1`, `l1x` (as `explore.py`'s `l1` with `signals=1` and
 `foreign=True`), `explore.py`'s two-home `core`, `l2` and `noinh1` (as `explore.py`'s `l2` with
@@ -247,6 +279,26 @@ counts, both copied and replayed:
 | `core` | 25, 24 | 776, 871 | 15,746, 23,201 |
 | `l2` | 121, 120 | 2,587, 3,624 | 42,075, 63,798 |
 | `noinh1` | 121, 120 | 2,323, 3,360 | 33,297, 55,020 |
+
+`LocksModel.PortMatchesPythonStateCountsHomes` does the same for L3.4's other configurations
+(replayed too only in an optimized build; bound 3 in `LocksModelStress`):
+
+| Configuration | Bound 1 | Bound 2 | Bound 3 (`LocksModelStress`) |
+|---|---|---|---|
+| `wide` | 40, 39 | 2,612, 2,683 | 97,523, 145,729 |
+| `handlers` | 19, 33 | 449, 754 | 9,857, 18,248 |
+| `priority` | 31, 30 | 813, 1,121 | 20,610, 34,143 |
+| `destroy` | 20, 19 | 344, 419 | 4,855, 7,132 |
+| `coalesce` | 29, 28 | 764, 989 | 17,414, 28,209 |
+| `attach` | 16, 15 | 227, 265 | 2,210, 3,067 |
+| `noinh` | 29, 28 | 624, 849 | 10,438, 17,485 |
+| `foreign` | 19, 24 | 425, 619 | 6,751, 12,801 |
+| `splitpost` | 7, 6 | 31, 40 | 159, 252 |
+| `splitpost2` | 17, 16 | 219, 279 | 2,419, 3,655 |
+| `cache` | 26, 43 | 802, 1,207 | 19,932, 34,312 |
+| `two2` | 29, 28 | 747, 888 | 13,959, 20,516 |
+| `grantseeds` | 25, 24 | 663, 833 | 15,920, 25,129 |
+| `three` | 28, 27 | 784, 945 | 18,382, 29,205 |
 
 **`explore.py` used to under-count `l2`.** It deduplicated states on `hash(World.key())`, and in
 CPython `hash(-1) == hash(-2)`, so two states that differed only in a priority of -1 against -2
@@ -275,11 +327,15 @@ false (the ones that need several homes or L2's inheritance are left out, and li
 coalescing off and four with it on, 200 steps each and the fair drain. For phase L2 it does the
 same on one home of prio true, files `l2_*.txt`: the inheritance scenarios (`L2_SCENARIOS`: those
 of `chain_cap8`, `coalesce`, `impl_note`, `l2_one_home`, `pi11`, `pi9` and `set_base`) and eight
-episodes of the first seeds whose world is one home of prio true. It records every manager
-operation the world makes, with its result and notifications, one per line; its docstring
-specifies the format. `LocksModel.PythonTraces` replays every file into the oracle and into the
-table and requires the recorded results and notifications. Regenerate the committed files after
-a change to the model (the output does not depend on the hash seed):
+episodes of the first seeds whose world is one home of prio true. For phase L3, files `l3_*.txt`:
+the scenarios of two or more homes as `scenarios.py` writes them (L4's group teardown left out)
+and eight episodes of the first seeds whose world has two or three homes and no group teardown;
+these also record `blocking_sinks` with the progress cells it loaded, which the replay stores
+into its own cells first. It records every manager operation the world makes, with its result and
+notifications, one per line; its docstring specifies the format. `LocksModel.PythonTraces` replays
+every file into the oracle and into the table and requires the recorded results and notifications.
+Regenerate the committed files after a change to the model (the output does not depend on the hash
+seed):
 
     python -I export_traces.py ../../src/cvc/tests/data/locks_model_traces
 
@@ -295,7 +351,9 @@ L1 section 3, "Sizes, by lane"):
 | Variable | Read by | Default: Release / Debug / `CVC_LOCKS_SANITIZER=1` | `LocksModelStress` |
 |---|---|---|---|
 | `CVC_LOCKS_MODEL_BOUND` | `L1Bounded`, `L2Bounded`, `NoInheritance`; `L1Bound4`, `L2Bound4` | 3 / 2 / 2 | 4 (5 in `locks-deep.yml`) |
-| `CVC_LOCKS_MODEL_STEPS` | `RandomL1`, `RandomL2` | 2*10^4 / 5*10^3 / 2*10^3 | 2*10^5 |
+| `CVC_LOCKS_MODEL_BOUND` | `Homes*` (L3.4) | 3, but 2 for `wide` / 3 for `attach`, `splitpost` and `splitpost2`, else 2 / 2 | 3 (4, and 5 for some, in `locks-deep.yml`) |
+| `CVC_LOCKS_MODEL_STEPS` | `RandomL1`, `RandomL2`, `RandomHomes` | 2*10^4 / 5*10^3 / 2*10^3 | 2*10^5 |
+| `CVC_LOCKS_MODEL_COALESCE` | `LocksModelStress.Homes*` | - | 1: coalescing on in every configuration (the `+c` variants) |
 
 "Debug" is a build without `NDEBUG`. Two more variables serve development:
 `CVC_LOCKS_MODEL_REAL=0` runs every test on the oracle alone (the tests that need the table skip
@@ -352,6 +410,45 @@ a Debug build's unoptimized table and coverage, which bound 3 in a Debug lane wo
 alone would take 32 s, before coverage). In a build without `NDEBUG`,
 `LockstepCatchesPlantedDivergence` stops at its first violation instead of exploring all of `l1`
 at bound 3 (7 s unoptimized).
+
+**L3.4, two and three homes.** Taken on 2026-11-01 on the same machine, again not in a quiet
+window: the bound-3 column was measured twice, once with several builds beside it and once in a
+quieter spell (`wide` took 129 s and 48 s), and both are shown. The explorer over the real table,
+Release, with the implementation's pinned cache (`attach`, `cache` and `three` have a few states
+fewer than `explore.py`'s FIFO counts above):
+
+| Configuration | Bound 2 | Bound 3 | Bound 4 | Bound 5 |
+|---|---|---|---|---|
+| `core` | 776 states, 0.18 s | 15,746, 8.9 s / 4.6 s | 203,381, 72 s | 1,776,323, 2,158 s, 189 MB |
+| `wide` | 2,612, 0.85 s | 97,523, 129 s / 48 s | 622,225, 2,478 s, 189 MB | |
+| `handlers` | 449, 0.09 s | 9,857, 4.8 s / 2.6 s | 167,194, 53 s | |
+| `priority` | 813, 0.16 s | 20,610, 11 s / 5.9 s | 415,593, 155 s, 54 MB | |
+| `destroy` | 344, 0.08 s | 4,855, 2.1 s / 1.3 s | 52,365, 15 s | 430,966, 130 s, 55 MB |
+| `coalesce` | 764, 0.21 s | 17,414, 9.0 s / 5.1 s | 289,468, 98 s | |
+| `attach` | 229, 0.05 s | 2,229, 0.66 s / 0.36 s | 16,894, 3.5 s | 122,116, 29 s, 27 MB |
+| `noinh` | 624, 0.13 s | 10,438, 3.7 s / 2.1 s | 130,087, 31 s | |
+| `foreign` | 425, 0.12 s | 6,751, 3.9 s / 2.3 s | 74,106, 29 s | |
+| `splitpost` | 31, 0.004 s | 159, 0.04 s / 0.02 s | 356, 0.05 s | |
+| `splitpost2` | 219, 0.05 s | 2,419, 0.87 s / 0.49 s | 21,711, 5.4 s | 153,711, 45 s, 55 MB |
+| `cache` | 802, 0.23 s | 19,910, 10.5 s / 6.1 s | 358,673, 147 s | |
+| `two2` | 747, 0.25 s | 13,959, 7.8 s / 4.6 s | 180,214, 120 s | |
+| `grantseeds` | 663, 0.20 s | 15,920, 9.5 s / 4.8 s | 282,685, 134 s | |
+| `three` | 784, 0.23 s | 18,279, 13 s / 6.1 s | 314,250, 121 s, 54 MB | |
+
+Peak memory is under 35 MB where none is shown. Every run reported no violation.
+
+Without optimization (`/Od`, asserts on, the test file alone against the Release library, as
+above), bound 3 took 1.4 to 2.3 times the first Release column (`core` 12.7 s, `cache` 24 s, `three`
+20 s, `attach` 1.4 s, `splitpost2` 1.7 s), and the whole regular suite (`LocksModel.*`, 98 cases
+with L3.4) took 22.8 s at its Debug sizes. A real Debug lane is slower than that: on CI's Linux
+Debug lane with coverage, `L1Bounded` (`l1x` at bound 2) took 7.8 s and `RandomL1` (5,000 steps)
+10.9 s, about 30 times this machine's Release (0.23 s and 0.40 s). At 30 times the quieter Release
+column only `attach` (11 s), `splitpost` and `splitpost2` (15 s) finish within 60 s at bound 3
+(`destroy` would take about 40 s, too close), so the Debug lane runs those three at bound 3 and the
+rest at 2 (at most `wide`'s 26 s); Release runs every one at 3 but `wide` (48-129 s), which
+`LocksModelStress` covers. The sanitizer lanes run bound 2. `PortMatchesPythonStateCountsHomes`
+replays its configurations only in an optimized build: copied and replayed, it would take about a
+minute in that Debug lane.
 
 ## Revisions
 

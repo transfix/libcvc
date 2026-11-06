@@ -42,6 +42,7 @@
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/height_field.h>
 #include <cvc/gl/GeometryNode.h>
+#include <cvc/gl/LodGraphicsNode.h> // the props' and the ground's ladders, make_view_params
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/VolumeNode.h>
 #include <cvc/gl/ariadne/scene_realize.h>
@@ -58,6 +59,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <vtkRenderer.h>
 
 namespace cvc {
 namespace gl {
@@ -68,6 +70,12 @@ namespace ari = cvc::ariadne;
 namespace world = cvc::world;
 
 constexpr int WATER_NZ = 22;
+// The props' and the ground's LOD budget, as the room view's: the wasm profile coarsens sooner.
+#ifdef __EMSCRIPTEN__
+constexpr cvc::lod::quality_preset kLodPreset = cvc::lod::quality_preset::aggressive;
+#else
+constexpr cvc::lod::quality_preset kLodPreset = cvc::lod::quality_preset::balanced;
+#endif
 const char *const kColorNames[] = {"material", "risk", "occupancy", "height"};
 
 int color_from(const std::string &s, int def) {
@@ -125,7 +133,7 @@ const world::building_library &find_library(const ari::SceneNode &n,
 struct WorldKeys {
   std::string seed, half, trees, rocks, buildings, tree_gen, amp, water_level, preset, ontology,
       color, request, status, props, building_count, occupied, terrain, terrain_gen, city,
-      terrain_file, busy, progress, phase;
+      terrain_file, busy, progress, phase, autoregen, pending;
 };
 
 // A regeneration (a new world, then its texture) or a repaint (the texture of the shown world).
@@ -157,7 +165,20 @@ struct WorldRT {
   int water_stride = 4; // refill the water every this many frames
   long frame = 0;
   std::shared_ptr<cvc::height_field> field; // published in RealizedScene::height_fields
-  std::weak_ptr<GeometryNode> terrain, props, buildings, roads, foliage, needles;
+  std::weak_ptr<GeometryNode> terrain, buildings, roads;
+  // The props, a LOD ladder per ground cell (world::generated_world::prop_cells) under the groups
+  // <id>_props, <id>_foliage and <id>_needles. The wood ladder chooses; the cell's leaves and
+  // needles follow it.
+  struct PropCell {
+    std::weak_ptr<LodGraphicsNode> wood, leaves, needles;
+  };
+  std::vector<PropCell> cells;
+  // The ground, a LOD ladder per chunk (world::generated_world::terrain_chunks) under the terrain
+  // node, which holds the texture they all share and draws nothing itself. Each frame every chunk
+  // chooses its rung, then is held within one of its neighbours' (what the skirts cover).
+  std::vector<std::weak_ptr<LodGraphicsNode>> chunks;
+  std::vector<int> chunk_want; // each chunk's own choice last frame: its hysteresis history
+  std::shared_ptr<const ari::SceneNode> keys; // the authored node, for its mesh keys
   std::weak_ptr<VolumeNode> water;
   int water_n = 0;
   std::shared_ptr<WorldJob> job; // the running job, or null
@@ -323,28 +344,190 @@ std::weak_ptr<GeometryNode> put_mesh(SceneGraph &sg, const std::string &name,
   return n;
 }
 
+// The props' ladder: rung 0 the full trees, rung 1 from world::prop_rung_radius_m[0] and rung 2
+// from [1] -- radii authored against the reference view, so the preset scales them.
+cvc::lod::mesh_pyramid prop_ladder(std::vector<cvc::geometry> rungs) {
+  const cvc::lod::view_params ref = cvc::lod::preset_view(cvc::lod::quality_preset::balanced);
+  cvc::lod::mesh_pyramid pyr;
+  pyr.rungs = std::move(rungs);
+  pyr.world_error_m = {0.0,
+                       cvc::lod::world_error_for_switch_radius(world::prop_rung_radius_m[0], ref),
+                       cvc::lod::world_error_for_switch_radius(world::prop_rung_radius_m[1], ref)};
+  return pyr;
+}
+
+// Replace the last world's prop cells with rt.w's: a ladder per cell and layer, under a group per
+// layer (made the first time).
+void put_prop_cells(SceneGraph &sg, const std::string &id, WorldRT &rt) {
+  const world::generated_world &w = *rt.w;
+  auto group = [&sg](const std::string &name) {
+    std::shared_ptr<GraphicsNode> g = sg.getGraphics(name);
+    return g ? g : sg.addGraphics(name);
+  };
+  std::shared_ptr<GraphicsNode> wood = group(id + "_props"), leaves = group(id + "_foliage"),
+                                needles = group(id + "_needles");
+  for (const WorldRT::PropCell &c : rt.cells) {
+    if (auto n = c.wood.lock(); n && wood)
+      wood->removeGraphicsChild(n);
+    if (auto n = c.leaves.lock(); n && leaves)
+      leaves->removeGraphicsChild(n);
+    if (auto n = c.needles.lock(); n && needles)
+      needles->removeGraphicsChild(n);
+  }
+  rt.cells.clear();
+  if (!wood || !leaves || !needles)
+    return;
+  const bool soft = rt.soft;
+  auto ladder = [](GraphicsNode &parent, const std::string &name, std::vector<cvc::geometry> rungs,
+                   LodGraphicsNode::RungStyle style) {
+    auto n = parent.addGraphicsChild<LodGraphicsNode>(name);
+    n->setRungStyle(std::move(style)); // before the rungs exist, so none draws unstyled
+    n->setPyramid(prop_ladder(std::move(rungs)));
+    return n;
+  };
+  for (std::size_t i = 0; i < w.prop_cells.size(); ++i) {
+    const world::generated_world::prop_cell &pc = w.prop_cells[i];
+    const std::string name = "cell" + std::to_string(i);
+    WorldRT::PropCell c;
+    c.wood = ladder(*wood, name,
+                    {world::prop_span_mesh(w.props, pc.props),
+                     world::prop_span_mesh(w.props_r1, pc.props_r1),
+                     world::prop_span_mesh(w.props_r2, pc.props_r2)},
+                    [soft](GeometryNode &g) { style_solid(g, soft); });
+    // The leaves and needles are rung 0's only: the coarser rungs carry them as solids.
+    if (!pc.foliage.empty())
+      c.leaves =
+          ladder(*leaves, name,
+                 {world::prop_span_mesh(w.foliage, pc.foliage), cvc::geometry(), cvc::geometry()},
+                 [soft](GeometryNode &g) { style_foliage(g, soft); });
+    if (!pc.needles.empty())
+      c.needles =
+          ladder(*needles, name,
+                 {world::prop_span_mesh(w.needles, pc.needles), cvc::geometry(), cvc::geometry()},
+                 [](GeometryNode &g) { style_needles(g); });
+    rt.cells.push_back(c);
+  }
+}
+
+// Give every rung of the ground's chunks the terrain node's texture as it is now.
+void share_ground_texture(WorldRT &rt) {
+  auto t = rt.terrain.lock();
+  if (!t)
+    return;
+  for (const std::weak_ptr<LodGraphicsNode> &c : rt.chunks)
+    if (auto n = c.lock())
+      for (int k = 0; k < n->rungCount(); ++k)
+        if (auto g = n->rung(k))
+          g->shareTexture(t);
+}
+
+// Replace the last world's ground chunks with rt.w's: a ladder per chunk under the terrain node,
+// each rung styled as the terrain, with the node's mesh keys and its texture.
+void put_terrain_chunks(WorldRT &rt) {
+  auto t = rt.terrain.lock();
+  for (const std::weak_ptr<LodGraphicsNode> &c : rt.chunks)
+    if (auto n = c.lock(); n && t)
+      t->removeGraphicsChild(n);
+  rt.chunks.clear();
+  rt.chunk_want.clear();
+  if (!t)
+    return;
+  const world::generated_world &w = *rt.w;
+  const bool soft = rt.soft;
+  const std::weak_ptr<GeometryNode> ground = t; // weak: the node owns its chunks
+  const std::shared_ptr<const ari::SceneNode> keys = rt.keys;
+  for (std::size_t i = 0; i < w.terrain_chunks.size(); ++i) {
+    const world::terrain_chunk &ch = w.terrain_chunks[i];
+    auto n = t->addGraphicsChild<LodGraphicsNode>("chunk" + std::to_string(i));
+    n->setRungStyle([soft, ground, keys](GeometryNode &g) {
+      style_terrain(g, soft);
+      if (keys)
+        apply_mesh_keys(g, *keys);
+      if (auto from = ground.lock())
+        g.shareTexture(from);
+    });
+    cvc::lod::mesh_pyramid pyr;
+    pyr.rungs = ch.rungs;
+    pyr.world_error_m = ch.error_m;
+    n->setPyramid(pyr);
+    rt.chunks.push_back(n);
+  }
+  rt.chunk_want.assign(rt.chunks.size(), -1);
+}
+
+// Each ground chunk's rung for `view`: its own choice from its error, then refined until no
+// neighbour is more than one rung off. Returns how many chunks changed rung.
+int select_terrain_lod(WorldRT &rt, const cvc::lod::view_params &view) {
+  const world::generated_world &w = *rt.w;
+  const world::terrain_chunk_layout &L = w.terrain_layout;
+  const std::size_t n = rt.chunks.size();
+  if (n == 0 || n != w.terrain_chunks.size())
+    return 0;
+  std::vector<int> rung(n, 0);
+  for (std::size_t i = 0; i < n; ++i) {
+    auto c = rt.chunks[i].lock();
+    if (!c)
+      continue;
+    const cvc::bounding_box bb = c->getWorldBoundingBox();
+    const double centre[3] = {0.5 * (bb.minx + bb.maxx), 0.5 * (bb.miny + bb.maxy),
+                              0.5 * (bb.minz + bb.maxz)};
+    const double dx = bb.maxx - bb.minx, dy = bb.maxy - bb.miny, dz = bb.maxz - bb.minz;
+    const double dist =
+        cvc::lod::bound_distance_m(centre, 0.5 * std::sqrt(dx * dx + dy * dy + dz * dz), view);
+    const std::vector<double> &err = w.terrain_chunks[i].error_m;
+    rung[i] = rt.chunk_want[i] =
+        cvc::lod::select_rung(dist, err.data(), int(err.size()), rt.chunk_want[i], view);
+  }
+  world::constrain_terrain_rungs(rung, L.chunk_rows, L.chunk_cols);
+  int changes = 0;
+  for (std::size_t i = 0; i < n; ++i)
+    if (auto c = rt.chunks[i].lock(); c && c->selectedRung() != rung[i]) {
+      c->setRung(rung[i]);
+      ++changes;
+    }
+  return changes;
+}
+
+// Each prop cell's rung for `view`: its wood ladder chooses, its leaves and needles follow.
+// Returns how many cells changed rung.
+int select_prop_lod(WorldRT &rt, const cvc::lod::view_params &view) {
+  if (rt.cells.empty())
+    return 0;
+  int changes = 0;
+  for (const WorldRT::PropCell &c : rt.cells) {
+    auto wood = c.wood.lock();
+    if (!wood)
+      continue;
+    const int before = wood->activeRung();
+    const int k = wood->select(view);
+    if (k == before)
+      continue;
+    ++changes;
+    if (auto n = c.leaves.lock())
+      n->setRung(k);
+    if (auto n = c.needles.lock())
+      n->setRung(k);
+  }
+  return changes;
+}
+
 // Push rt.w (and its texture, painted in rt.color) into the nodes, creating the beside-nodes the
 // first time.
 void apply_world(SceneGraph &sg, const std::string &id, WorldRT &rt,
                  const std::vector<unsigned char> &texture) {
   const world::generated_world &w = *rt.w;
   if (auto t = rt.terrain.lock()) {
-    t->setGeometry(cvc::geometry(*w.terrain));
     style_terrain(*t, rt.soft);
     t->setTexture(surface_image(rt.texture_size, texture), false);
   }
+  put_terrain_chunks(rt);
   *rt.field = *w.terrain; // the published ground follows the world
   const bool soft = rt.soft, arch = w.archetypes;
-  rt.props = put_mesh(sg, id + "_props", w.props, rt.props,
-                      [soft](GeometryNode &g) { style_solid(g, soft); });
+  put_prop_cells(sg, id, rt);
   rt.buildings = put_mesh(sg, id + "_buildings", w.buildings, rt.buildings,
                           [soft, arch](GeometryNode &g) { style_buildings(g, soft, arch); });
   rt.roads = put_mesh(sg, id + "_roads", w.roads, rt.roads,
                       [soft](GeometryNode &g) { style_roads(g, soft); });
-  rt.foliage = put_mesh(sg, id + "_foliage", w.foliage, rt.foliage,
-                        [soft](GeometryNode &g) { style_foliage(g, soft); });
-  rt.needles = put_mesh(sg, id + "_needles", w.needles, rt.needles,
-                        [](GeometryNode &g) { style_needles(g); });
   rt.water_n = world::water_resolution(w);
   if (auto v = rt.water.lock())
     v->setVolume(water_volume(sg.appContext(), rt, rt.app->world_clock().t()));
@@ -500,6 +683,7 @@ void apply_world_job(SceneGraph &sg, const std::string &id, WorldRT &rt) {
   } else {
     if (auto t = rt.terrain.lock())
       t->setTexture(surface_image(rt.texture_size, j->texture), false);
+    share_ground_texture(rt);
     publish_stats(rt);
   }
 }
@@ -538,7 +722,8 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
   rt->library = &find_library(n, warnings);
 
   const std::string pref = sg.getStatePrefix();
-  auto key = [&](const char *k) { return ari::resolve_bind(pref, k); };
+  // world.*, or under the node's `keys:` prop (node_key) so two worlds keep separate panels.
+  auto key = [&](const char *k) { return ari::resolve_bind(pref, ari::node_key(n, k)); };
   auto seed_key = [&](const char *k, double def) {
     const std::string path = key(k);
     ari::read_or_seed<double>(app, path, def);
@@ -557,6 +742,11 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
   rt->k.color = seed_key("world.color", rt->color);
   rt->k.request = key("world.request");
   ari::read_or_seed<std::string>(app, rt->k.request, std::string());
+  // An edit waits for Regenerate unless world.auto is on (the node's auto_regenerate prop seeds
+  // it); world.pending says the settings differ from the world shown or being made.
+  rt->k.autoregen = seed_key("world.auto", n.props.num("auto_regenerate", 0.0));
+  rt->k.pending = key("world.pending");
+  ari::write<int>(app, rt->k.pending, 0);
   rt->k.status = key("world.status");
   rt->k.props = key("world.stats.props");
   rt->k.building_count = key("world.stats.buildings");
@@ -601,12 +791,16 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
   }
   rt->sig = params_sig(p0);
 
-  // The node is the terrain; its height_field is what `ground: <id>` and a body stand on.
+  // The node is the terrain; its height_field is what `ground: <id>` and a body stand on. It draws
+  // through its chunks (put_terrain_chunks): its own mesh stays empty, and it holds their texture.
   rt->field = std::make_shared<cvc::height_field>(*rt->w->terrain);
   out.height_fields[n.id] = rt->field;
-  const cvc::geometry ground(*rt->w->terrain);
+  auto keys = std::make_shared<ari::SceneNode>(n);
+  keys->children.clear(); // realize_scene realizes those itself
+  rt->keys = keys;
+  const cvc::geometry none;
   std::shared_ptr<GraphicsNode> gn =
-      parent ? parent->createChild<GeometryNode>(n.id, ground) : sg.addGraphics(n.id, ground);
+      parent ? parent->createChild<GeometryNode>(n.id, none) : sg.addGraphics(n.id, none);
   auto tnode = std::dynamic_pointer_cast<GeometryNode>(gn);
   if (!tnode) {
     if (warnings)
@@ -634,9 +828,20 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
 
   SceneGraph *sgp = &sg;
   const std::string id = n.id;
-  out.custom_ticks.push_back([rt, sgp, id](vtkRenderer *) {
+  out.custom_ticks.push_back([rt, sgp, id](vtkRenderer *ren) {
     if (rt->terrain.expired())
       return;
+    // The props' and the ground's LOD for this frame's camera; a caster that changed rung casts a
+    // different shadow.
+    if (ren && ren->IsActiveCameraCreated()) {
+      const cvc::lod::view_params view = make_view_params(ren, cvc::lod::preset_view(kLodPreset));
+      int recast = select_prop_lod(*rt, view);
+      const int ground = select_terrain_lod(*rt, view);
+      if (auto t = rt->terrain.lock(); t && t->castsShadow())
+        recast += ground;
+      if (recast > 0)
+        sgp->invalidateShadowBake();
+    }
     cvc::app &app = *rt->app;
     const long f = rt->frame++;
     // Commands: Regenerate forces a rebuild, Randomize steps the seed, Stop ends the running job
@@ -661,25 +866,30 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
       }
     }
     world::generated_world_params p = read_live(*rt);
-    if (p.preset != rt->preset) { // a new preset quick-sets the counts and relief
+    if (p.preset != rt->preset) { // a new preset quick-sets the counts, relief and water level
       rt->preset = p.preset;
       world::apply_world_preset(p);
       ari::write<double>(app, rt->k.trees, p.trees);
       ari::write<double>(app, rt->k.rocks, p.rocks);
       ari::write<double>(app, rt->k.buildings, p.buildings);
       ari::write<double>(app, rt->k.amp, p.amp_m);
+      ari::write<double>(app, rt->k.water_level, p.water_level_m);
     }
-    // A changed key (or a command) starts a rebuild, ending any job under way; a new colour alone
-    // repaints the shown world, once no rebuild is running (a rebuild paints in the colour asked
-    // when it started, and a later change is repainted after it).
+    // Regenerate (or Randomize) starts a rebuild from the keys as they are, ending any job under
+    // way; so does any changed key while world.auto is on. Otherwise an edit only marks the world
+    // pending, so several can be made before one rebuild. A new colour alone repaints the shown
+    // world at once, once no rebuild is running (a rebuild paints in the colour asked when it
+    // started, and a later change is repainted after it).
     const std::string sig = params_sig(p);
     const int c = int(ari::read_or<double>(app, rt->k.color, rt->color));
-    if (force || sig != rt->sig) {
+    const bool live = ari::read_bool_or(app, rt->k.autoregen, 0) != 0;
+    if (force || (live && sig != rt->sig)) {
       rt->sig = sig;
       launch_world_job(*rt, true, p, c);
     } else if (!rt->job ? c != rt->color : !rt->job->rebuild && rt->job->color != c) {
       launch_world_job(*rt, false, p, c);
     }
+    ari::write<int>(app, rt->k.pending, sig != rt->sig ? 1 : 0);
     if (rt->job) {
       ari::write<int>(app, rt->k.progress, rt->job->progress.load());
       const char *ph = rt->job->phase.load(std::memory_order_relaxed);

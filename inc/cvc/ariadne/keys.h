@@ -37,6 +37,9 @@ struct KeyBinding {
 struct MouseControls {
   std::string look;        // 1: mouse look (once the scene is clicked the mouse turns the view,
                            // Escape gives the mouse back); 0: drag to look, click the scene
+  std::string steer; // 1: in drag to look, a drag on the scene steers (what the host walks faces
+                     // the point under the pointer) and the right button turns the view instead
+  std::string steer_label = "Drag to steer"; // its checkbox, in the host's words
   std::string sensitivity; // degrees of turn per pixel of motion
   double sensitivity_lo = 0.02, sensitivity_hi = 1.0;
   std::string invert_y; // 1: moving the mouse up looks down
@@ -89,10 +92,14 @@ bool key_matches(std::string_view stored, std::string_view key);
 // '/' is absolute, as KeyBinding::path is), and the sizes offered, each its label and the value
 // written, spelled as the host writes the number back. arigl's is cvc::gl::ImGuiOverlay's
 // <scene>.viewers.main.ui.scale, which the overlay applies at the next frame.
+// scroll_friction, when set, adds a slider under it for how fast a finger's fling slows (per
+// second; arigl's <scene>.viewers.main.ui.scroll_friction, offered on a touch screen).
 struct UiSizeControl {
   std::string path; // "" = no UI size row
   std::vector<std::pair<std::string, std::string>> sizes = {
       {"75%", "0.75"}, {"100%", "1"}, {"125%", "1.25"}, {"150%", "1.5"}, {"200%", "2"}};
+  std::string scroll_friction; // "" = no friction row
+  double friction_lo = 0.5, friction_hi = 20.0;
 };
 
 } // namespace ariadne

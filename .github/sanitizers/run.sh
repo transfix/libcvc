@@ -7,7 +7,9 @@
 #     preloaded into the interpreter, which was not built with it, except those py_skip (below)
 #     names for the sanitizer.
 # Each run's output goes to san-logs/<name>.log, and a table of the runs to the job summary.
-# Exits 1 when any run failed or printed a sanitizer report.
+# SAN_REQUIRED (ci.yml's matrix `required`) names, one per line as `<run>: <text>`, lines a run's
+# log must contain: the cases the job is there for, which must not drop out unseen.
+# Exits 1 when any run failed or printed a sanitizer report, or a required line is missing.
 #
 # Usage: run.sh tsan|asan-ubsan
 set -uo pipefail
@@ -102,11 +104,32 @@ for s in $SAN_PY_TESTS; do
   esac
 done
 
+missing=()
+while IFS= read -r line; do
+  [ -n "${line// /}" ] || continue
+  run=${line%%:*}
+  text=${line#*:}
+  text=${text# }
+  if ! grep -qF -- "$text" "san-logs/$run.log" 2>/dev/null; then
+    failed=1
+    missing+=("| $run | $text |")
+    echo "::error::$run: its log has no '$text' (a case this job requires did not run or pass)"
+  fi
+done <<< "${SAN_REQUIRED:-}"
+
 {
   echo "### sanitizers / $kind"
   echo
   echo "| run | exit | reports | seconds |"
   echo "|---|---|---|---|"
   printf '%s\n' "${rows[@]}"
+  if [ "${#missing[@]}" -ne 0 ]; then
+    echo
+    echo "Required lines missing:"
+    echo
+    echo "| run | line |"
+    echo "|---|---|"
+    printf '%s\n' "${missing[@]}"
+  fi
 } >> "${GITHUB_STEP_SUMMARY:-/dev/stdout}"
 exit "$failed"

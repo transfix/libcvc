@@ -88,7 +88,7 @@ double heightfield::sample(double x, double y) const {
   // Rolling LAND: rise from sea level so the default scene is solvable terrain,
   // not half-submerged. Occupancy then comes from props (trees/buildings/rocks)
   // and only genuinely steep cells, never a spurious waterline at h == 0.
-  return p_.sea_level_m + p_.amp_m * (0.5 + 0.5 * f);
+  return p_.sea_level_m + p_.base_m + p_.amp_m * (0.5 + 0.5 * f);
 }
 
 double heightfield::slope_deg(double x, double y, double h_m) const {

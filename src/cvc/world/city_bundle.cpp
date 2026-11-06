@@ -15,6 +15,9 @@
 #include <cvc/model/model_file_io.h>
 #include <cvc/world/city_bundle.h>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <sstream>
 #include <stdexcept>
 
 namespace cvc {
@@ -51,6 +54,18 @@ boost::property_tree::ptree read_json_file(const fs::path &path) {
   return pt;
 }
 
+// terrain.json from its text; `path` names it in errors.
+boost::property_tree::ptree read_json_text(const std::string &text, const fs::path &path) {
+  boost::property_tree::ptree pt;
+  std::istringstream in(text);
+  try {
+    boost::property_tree::read_json(in, pt);
+  } catch (const std::exception &e) {
+    throw std::runtime_error("load_city_bundle: " + path.string() + " is not JSON: " + e.what());
+  }
+  return pt;
+}
+
 // The fields every terrain.json has, grid or not: the one place they are read.
 void read_extent(const boost::property_tree::ptree &pt, const fs::path &path, terrain_grid &t) {
   try {
@@ -68,8 +83,7 @@ void read_extent(const boost::property_tree::ptree &pt, const fs::path &path, te
                              ": needs at least 2 x 2 samples over a non-empty extent");
 }
 
-terrain_grid read_terrain_json(const fs::path &path) {
-  const boost::property_tree::ptree pt = read_json_file(path);
+terrain_grid read_terrain_json(const boost::property_tree::ptree &pt, const fs::path &path) {
   terrain_grid t;
   read_extent(pt, path, t);
   const auto grid = pt.get_child_optional("grid");
@@ -126,8 +140,12 @@ terrain_extent read_terrain_extent(const std::string &dir) {
   return {t.rows, t.cols, t.min_x, t.min_y, t.max_x, t.max_y};
 }
 
-city_bundle load_city_bundle(const std::string &dir, const city_bundle_options &options) {
-  const fs::path root(dir);
+// The loader both forms share: the bundle's files from `read`, `label` naming it in errors, `dir`
+// its directory when it has one (land cover and the satellite's path need it).
+static city_bundle load_city_bundle_impl(const city_bundle_reader &read, const std::string &label,
+                                         const std::string &dir,
+                                         const city_bundle_options &options) {
+  const fs::path root(label);
   city_bundle out;
   out.dir = dir;
   const surface_registry &surfaces = out.geometry.surfaces();
@@ -135,7 +153,11 @@ city_bundle load_city_bundle(const std::string &dir, const city_bundle_options &
   const std::uint16_t building = surface_id(surfaces, options.building_surface, "building_surface");
 
   // --- terrain ----------------------------------------------------------------
-  const terrain_grid t = read_terrain_json(root / "terrain.json");
+  const std::shared_ptr<const std::string> terrain_text = read("terrain.json");
+  if (!terrain_text)
+    throw std::runtime_error("load_city_bundle: no terrain.json in " + label);
+  const terrain_grid t = read_terrain_json(read_json_text(*terrain_text, root / "terrain.json"),
+                                           root / "terrain.json");
   out.min_x = t.min_x;
   out.min_y = t.min_y;
   out.max_x = t.max_x;
@@ -150,7 +172,7 @@ city_bundle load_city_bundle(const std::string &dir, const city_bundle_options &
               heights.begin() + static_cast<std::size_t>(r) * t.cols);
   }
   std::vector<cvc::face_material_t> cells;
-  if (options.land_cover) {
+  if (options.land_cover && !dir.empty()) { // land cover reads the bundle's directory
     const std::vector<std::uint16_t> samples = options.land_cover(dir, t.rows, t.cols);
     if (!samples.empty()) {
       if (samples.size() != t.heights.size())
@@ -175,23 +197,26 @@ city_bundle load_city_bundle(const std::string &dir, const city_bundle_options &
   terrain.surface = ground;
   out.geometry.add(terrain);
 
-  if (fs::exists(root / "satellite.png"))
-    out.satellite = (root / "satellite.png").string();
+  if (!dir.empty() && fs::exists(fs::path(dir) / "satellite.png"))
+    out.satellite = (fs::path(dir) / "satellite.png").string();
 
   // --- buildings --------------------------------------------------------------
   if (!options.buildings) {
     out.buildings_error = "not requested";
     return out;
   }
-  fs::path glb = root / "buildings.glb";
-  if (options.prefer_flat && fs::exists(root / "buildings_flat.glb"))
-    glb = root / "buildings_flat.glb";
-  if (!fs::exists(glb)) {
-    out.buildings_error = "no " + glb.filename().string() + " in " + dir;
+  fs::path glb = "buildings.glb";
+  std::shared_ptr<const std::string> glb_bytes;
+  if (options.prefer_flat && (glb_bytes = read("buildings_flat.glb")))
+    glb = "buildings_flat.glb";
+  else
+    glb_bytes = read("buildings.glb");
+  if (!glb_bytes) {
+    out.buildings_error = "no " + glb.filename().string() + " in " + label;
     return out;
   }
   try {
-    cvc::model m = cvc::read_model(glb.string());
+    cvc::model m = cvc::read_model_from_memory(glb_bytes->data(), glb_bytes->size(), ".glb");
     for (auto &mesh : m.meshes)
       mesh.geom.face_materials().assign(mesh.geom.num_faces(), building);
     auto mesh = std::make_shared<cvc::geometry>(m.merged());
@@ -222,6 +247,25 @@ city_bundle load_city_bundle(const std::string &dir, const city_bundle_options &
     out.buildings_error = glb.filename().string() + ": " + e.what();
   }
   return out;
+}
+
+city_bundle load_city_bundle(const city_bundle_reader &read, const std::string &label,
+                             const city_bundle_options &options) {
+  return load_city_bundle_impl(read, label, std::string(), options);
+}
+
+city_bundle load_city_bundle(const std::string &dir, const city_bundle_options &options) {
+  const city_bundle_reader from_dir = [&dir](const std::string &name) {
+    const fs::path p = fs::path(dir) / name;
+    std::error_code ec;
+    if (!fs::is_regular_file(p, ec))
+      return std::shared_ptr<const std::string>();
+    std::ifstream in(p, std::ios::binary);
+    auto bytes = std::make_shared<std::string>(std::istreambuf_iterator<char>(in),
+                                               std::istreambuf_iterator<char>());
+    return std::shared_ptr<const std::string>(std::move(bytes));
+  };
+  return load_city_bundle_impl(from_dir, dir, dir, options);
 }
 
 } // namespace world

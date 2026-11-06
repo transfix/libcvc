@@ -31,8 +31,14 @@
 //    the same arrays as the C++ objects, never a re-read file.
 
 %{
+#include <boost/any.hpp>
+#include <cvc/ariadne/data.h>
+#include <cvc/core/app.h>
 #include <cvc/geometry/height_field.h>
 #include <cvc/nav/land_cover.h>
+#include <cvc/nav/world_planes.h> // nav_world_rasterize
+#include <cvc/net/net_policy.h>
+#include <cvc/state/state.h>
 #include <cvc/world/city_bundle.h>
 #include <cvc/world/world_geometry.h>
 #include <cmath>
@@ -41,6 +47,24 @@
 #include <string>
 
 namespace pycvc_world {
+
+// The object a dataset's output node holds (cvc/ariadne/data.h): `path` is the dataset (a store node
+// or a document's link to one), `item` the output. Raises when it holds none of type T.
+template <class T>
+std::shared_ptr<const T> data_object(cvc::app &app, const std::string &path, const std::string &item,
+                                     const char *what) {
+  const std::string at = path + cvc::state::SEPARATOR + item;
+  cvc::state *n = cvc::state::instance(app).findThroughLinks(at);
+  if (n) {
+    try {
+      if (auto p = boost::any_cast<std::shared_ptr<const T>>(n->data()))
+        return p;
+    } catch (const boost::bad_any_cast &) {
+    }
+  }
+  throw std::runtime_error(at + " holds no " + what + " (status: " +
+                           cvc::ariadne::data_status(app, path) + ")");
+}
 
 // Any sequence or array of numbers as floats (float64 input is narrowed).
 // None or null: empty.
@@ -468,6 +492,128 @@ PyObject *read_terrain_extent(const std::string &dir) {
   const cvc::world::terrain_extent e = cvc::world::read_terrain_extent(dir);
   return Py_BuildValue("{s:i,s:i,s:d,s:d,s:d,s:d}", "rows", e.rows, "cols", e.cols, "min_x",
                        e.min_x, "min_y", e.min_y, "max_x", e.max_x, "max_y", e.max_y);
+}
+
+// cvc::nav::rasterize: the grid a navigator plans on, from a world (a city_bundle's world(), say)
+// over (min_x, min_y)-(max_x, max_y) at rows x cols samples, row 0 at min y. A dict of (rows, cols)
+// arrays: occupancy (uint8 0/1, its obstacles dilated by `inflate` cells) and height (float32,
+// the terrain's). The C++ demos' occupancy; no VTK.
+PyObject *nav_world_rasterize(const cvc::world::world_geometry &world, int rows, int cols,
+                              double min_x, double min_y, double max_x, double max_y,
+                              int inflate = 0) {
+  cvc::nav::world_planes p;
+  {
+    pycvc::gil_release nogil; // pycvc_lod.i's; a throw takes the GIL back on the way out
+    p = cvc::nav::rasterize(world, rows, cols, min_x, min_y, max_x, max_y, inflate);
+  }
+  npy_intp dims[2] = {p.rows, p.cols};
+  PyObject *occ = PyArray_SimpleNew(2, dims, NPY_UINT8);
+  PyObject *height = PyArray_SimpleNew(2, dims, NPY_FLOAT32);
+  if (!occ || !height) {
+    Py_XDECREF(occ);
+    Py_XDECREF(height);
+    throw std::runtime_error("pycvc.nav_world_rasterize: alloc failed");
+  }
+  const std::size_t n = static_cast<std::size_t>(p.rows) * static_cast<std::size_t>(p.cols);
+  if (p.occupancy.size() == n)
+    std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(occ)), p.occupancy.data(), n);
+  else
+    std::memset(PyArray_DATA(reinterpret_cast<PyArrayObject *>(occ)), 0, n);
+  if (p.height.size() == n)
+    std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(height)), p.height.data(),
+                n * sizeof(float));
+  else
+    std::memset(PyArray_DATA(reinterpret_cast<PyArrayObject *>(height)), 0, n * sizeof(float));
+  return Py_BuildValue("{s:N,s:N}", "occupancy", occ, "height", height);
+}
+} // namespace pycvc
+%}
+
+%feature("kwargs") pycvc::data_load;
+%feature("kwargs") pycvc::data_wait;
+%feature("kwargs") pycvc::data_world;
+%feature("kwargs") pycvc::data_height_field;
+%feature("kwargs") pycvc::data_geometry;
+
+%inline %{
+namespace pycvc {
+// Ariadne data (cvc/ariadne/data.h, docs/roadmap/ARIADNE_DATA_ROADMAP.md): datasets in the state
+// tree, loaded once and shared by the documents and hosts of an app. `path` names a dataset: its
+// store node ("data.<key>"), or a document's link to it ("<prefix>.data.<name>").
+
+// Load `uri` (a file or directory, https://, cvcpkg://ORG/NAME[@VERSION], state://...) into the
+// store, keeping `path` of an archive and decoding it with `decoder` (the data: block's as: files,
+// bytes, text, json, mesh, heightfield, volume, city_bundle; "" picks one). With `name`,
+// <prefix>.data.<name> links to it.
+// Returns the store node; the load runs on a worker thread (data_wait).
+std::string data_load(const std::shared_ptr<cvc::app> &app, const std::string &uri,
+                      const std::string &path = "", const std::string &decoder = "",
+                      const std::string &name = "", const std::string &prefix = "",
+                      bool reload = false) {
+  cvc::ariadne::DataSpec spec;
+  spec.uri = uri;
+  spec.path = path;
+  spec.as = decoder;
+  spec.name = name;
+  auto store = cvc::ariadne::DataStore::of(*app);
+  if (!name.empty())
+    return store->bind(prefix, spec);
+  return store->load(spec, reload);
+}
+
+// Let the app's https:// and cvcpkg:// data reach these origins ("https://cvcpkg.org"), when no
+// document host turned the network on for it (a Python program loading data itself). A document
+// host's --net-allow, or AriRuntime.enable_net_allow, does this for its documents.
+void data_allow_network(const std::shared_ptr<cvc::app> &app,
+                        const std::vector<std::string> &origins) {
+  auto policy = std::make_shared<cvc::net::NetPolicy>();
+  for (const std::string &o : origins) {
+    std::string error;
+    const auto origin = cvc::net::parse_origin_spec(o, &error);
+    if (!origin)
+      throw std::invalid_argument("data_allow_network: " + o + ": " + error);
+    policy->allow(*origin);
+  }
+  cvc::ariadne::DataStore::of(*app)->set_network(policy);
+}
+
+// The dataset's status: idle, fetching, unpacking, decoding, ready or error ("" for none).
+std::string data_status(const std::shared_ptr<cvc::app> &app, const std::string &path) {
+  return cvc::ariadne::data_status(*app, path);
+}
+
+// Wait until the dataset is ready or has failed (`timeout` seconds; negative: as long as it takes):
+// True when it is ready.
+bool data_wait(const std::shared_ptr<cvc::app> &app, const std::string &path,
+               double timeout = -1.0) {
+  return cvc::ariadne::DataStore::of(*app)->wait(path, timeout);
+}
+
+// The paths of the dataset's files, and one file's bytes (None when it has no such file).
+std::vector<std::string> data_files(const std::shared_ptr<cvc::app> &app, const std::string &path) {
+  return cvc::ariadne::data_files(*app, path);
+}
+PyObject *data_file(const std::shared_ptr<cvc::app> &app, const std::string &path,
+                    const std::string &file) {
+  const cvc::ariadne::DataBytes b = cvc::ariadne::data_file(*app, path, file);
+  if (!b)
+    Py_RETURN_NONE;
+  return PyBytes_FromStringAndSize(b->data(), static_cast<Py_ssize_t>(b->size()));
+}
+
+// What a decoder made, sharing its arrays with the scene that draws it: a city_bundle's world, its
+// terrain's height field and its buildings' mesh (a mesh decoder's geometry).
+cvc::world::world_geometry data_world(const std::shared_ptr<cvc::app> &app, const std::string &path,
+                                      const std::string &item = "world") {
+  return *pycvc_world::data_object<cvc::world::world_geometry>(*app, path, item, "world_geometry");
+}
+cvc::height_field data_height_field(const std::shared_ptr<cvc::app> &app, const std::string &path,
+                                    const std::string &item = "terrain") {
+  return *pycvc_world::data_object<cvc::height_field>(*app, path, item, "height_field");
+}
+cvc::geometry data_geometry(const std::shared_ptr<cvc::app> &app, const std::string &path,
+                            const std::string &item = "geometry") {
+  return *pycvc_world::data_object<cvc::geometry>(*app, path, item, "geometry");
 }
 } // namespace pycvc
 %}

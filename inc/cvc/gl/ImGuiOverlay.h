@@ -58,9 +58,9 @@ class SceneRenderer;
 // IMGUI_IMPL_OPENGL_ES3 under Emscripten (WebGL2). Mouse and rendering work.
 // KEYBOARD events from the VTK interactor are now translated to ImGui (text
 // entry, editing keys, Ctrl-shortcuts — see the intercept() key handling), so
-// text entry works natively. In the BROWSER this additionally needs the VTK
-// wasm interactor (vtkWebAssemblyRenderWindowInteractor) to receive DOM key
-// events, which requires the canvas to hold focus (tabindex).
+// text entry works natively. In the BROWSER the canvas's interactor (SDL's, or
+// VTK's canvas window's) takes the DOM key events typed into the canvas, which
+// therefore has to hold the focus (tabindex).
 //
 // A PHONE has no keyboard to send them, and a browser raises its own only for
 // a focused text field, which a canvas is not. So when a text field is tapped
@@ -192,6 +192,22 @@ public:
   void setTouchMode(bool on);
   bool touchMode() const;
 
+  // ---- scrolling with a finger ------------------------------------------------
+  // In touch mode a finger's drag across a window's content scrolls it, and a
+  // fling leaves it gliding until friction stops it, as a phone's lists do
+  // (cvc::gl::TouchScroll says which drags count: a slider, a field being
+  // edited, a title bar or a scene view keeps its own). On by default; the
+  // state key "<scene>.viewers.<viewer>.ui.touch_scroll". The friction is per
+  // second: a glide's speed falls as exp(-friction * t), so a fling covers its
+  // speed / friction. 2 (the default) is iOS's normal deceleration, 10 its fast
+  // one, 0 glides on to the end. The state key ".ui.scroll_friction", which a
+  // document may set or bind a slider to, and AppRuntime's Controls window
+  // offers in touch mode (arigl).
+  void setTouchScrollEnabled(bool on);
+  bool touchScrollEnabled() const;
+  void setScrollFriction(float perSecond);
+  float scrollFriction() const;
+
   // ---- frame clock ----------------------------------------------------------
   // ImGui's per-frame delta (io.DeltaTime: hover delays, the text cursor blink,
   // modal dimming) comes from the wall clock by default. A positive value pins it
@@ -206,7 +222,7 @@ public:
   // just want to look at it. On by default, and on a device with no keyboard it
   // is the only practical way to get the UI back, so it stays above the windows
   // even when one is dragged over its corner. The panels start hidden when the
-  // view's short side is under 700 logical pixels (a phone).
+  // view's short side is under 500 logical pixels (a phone).
   void setToggleButtonEnabled(bool on);
   bool toggleButtonEnabled() const;
   // Whether the panels (your draw callback) are currently shown. The button

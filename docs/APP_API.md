@@ -30,6 +30,7 @@ threads, and named-mutex hub used throughout libcvc.*
   - [Named Mutexes](#named-mutexes)
   - [Scoped Locks](#scoped-locks)
   - [Mutex Debugging](#mutex-debugging)
+- [Program Execution (state_exec)](#program-execution-state_exec)
 - [Type Registration](#type-registration)
   - [Registering Type Names](#registering-type-names)
   - [Registering Type Enums](#registering-type-enums)
@@ -929,6 +930,32 @@ std::cout << "Lock held by: " << holder << std::endl;
 ```
 
 **Note:** `scoped_lock` automatically sets this to `"<threadKey>: <info>"`
+
+## Program Execution (state_exec)
+
+Three members connect an app to state_exec programs. Each is built at its first call.
+[STATE_EXEC_DEVELOPER_GUIDE.md](STATE_EXEC_DEVELOPER_GUIDE.md#which-scheduler-runs-a-program)
+says which host and lane runs on which scheduler.
+
+- `exec_scheduler()`: the app's one `async_scheduler`. Ariadne's actions and residents,
+  `AppRuntime`'s verbs and the app's posting hosts (sliced tasks, net and stream intrinsics) run
+  on it, one timeline for every document. Building it reads `state_exec.policy` and
+  `state_exec.process_class`, and makes the lock manager below if nothing has yet.
+- `exec_async_host()`: the async host for `exec_scheduler()`, which it builds first. An async
+  function registered with it parks its calling process while the kernel runs on the app's
+  background pool.
+- `lock_manager()`: the `with-lock` table that `exec_scheduler()`, Ariadne's `init:` lane and
+  pycvc's `Exec`s share. Made at the first call to it or to `exec_scheduler()`, which fixes its
+  mode from `state_exec.locks.threading`.
+
+Settings are read once, so a host sets them before the first call to any of the three:
+
+```cpp
+cvc::app app;
+app.root()("state_exec.policy").value("priority_rr");
+app.root()("state_exec.locks.threading").value("shared");
+cvc::state_exec::async_scheduler &sched = app.exec_scheduler(); // reads both now
+```
 
 ## Type Registration
 

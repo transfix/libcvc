@@ -436,6 +436,82 @@ int main() {
     check("no floor: the eye goes under", e[2] < 0.0);
   }
 
+  printf("O. drag to steer: the primary drag points, the right button turns the view\n");
+  {
+    vtkNew<vtkCamera> scam;
+    CameraController sc(ctx, "st.camera");
+    sc.setCamera(scam);
+    sc.frameBounds(-5, -5, 0, 5, 5, 2);
+    int sx = 0, sy = 0, cx = 0, cy = 0;
+    sc.notePointerDown(10, 10);
+    check("off: a press does not steer", !sc.steerPoint(sx, sy));
+    sc.notePointerUp(40, 10);
+    sc.setPrimaryDragSteers(true);
+    check("settings.primary_drag_steers mirrored",
+          root("st.camera.settings.primary_drag_steers").value<int>() == 1);
+    double e0[3], e1[3], ff[3], uu[3];
+    sc.getPose(e0, ff, uu);
+    // As the interactor style does it: the press, no drag begun while it steers, then the move.
+    sc.notePointerDown(100, 50);
+    check("on: a press is a steering one (no drag of the view begins)", sc.steering());
+    check("but it points nowhere yet (it may be a click)", !sc.steerPoint(sx, sy));
+    sc.notePointerMove(103, 52);
+    check("nor a move within a click's slop", !sc.steerPoint(sx, sy));
+    sc.notePointerMove(160, 80);
+    sc.mouseLook(60, 30);
+    sc.getPose(e1, ff, uu);
+    check("the drag steers where the pointer goes", sc.steerPoint(sx, sy) && sx == 160 && sy == 80);
+    check("and turns nothing", dist(e0, e1) < 1e-9);
+    sc.beginSecondaryDrag();
+    sc.mouseLook(60, 0);
+    sc.endSecondaryDrag();
+    sc.getPose(e1, ff, uu);
+    check("the right button turns the view meanwhile", dist(e0, e1) > 1e-3);
+    sc.notePointerUp(160, 80);
+    check("released: it steers no more, and was no click",
+          !sc.steerPoint(sx, sy) && !sc.takeClick(cx, cy));
+    sc.notePointerDown(30, 30);
+    sc.notePointerUp(31, 30);
+    check("a click is still a click", sc.takeClick(cx, cy) && cx == 31);
+    // A second finger lands (TouchGestures): the first one's press is the gesture's.
+    sc.notePointerDown(30, 30);
+    sc.notePointerMove(90, 30);
+    sc.cancelPointer();
+    check("cancelled: it steers no more", !sc.steerPoint(sx, sy));
+    sc.notePointerUp(30, 30);
+    check("and is no click when it comes up", !sc.takeClick(cx, cy));
+    root("st.camera.settings.primary_drag_steers").value(0);
+    sc.notePointerDown(30, 30);
+    sc.notePointerMove(90, 30);
+    check("turned off from state: a drag does not steer",
+          !sc.primaryDragSteers() && !sc.steerPoint(sx, sy));
+    sc.notePointerUp(30, 30);
+    sc.takeClick(cx, cy);
+    sc.setPrimaryDragSteers(true);
+    sc.setMouseLookEnabled(true);
+    sc.notePointerDown(30, 30);
+    sc.notePointerMove(90, 30);
+    check("under mouse look a drag does not steer", !sc.steerPoint(sx, sy));
+    sc.notePointerUp(30, 30);
+  }
+
+  printf("P. a frame request through the state tree (a scene's data node: frame:)\n");
+  {
+    CameraController rc(ctx, "fr.camera");
+    vtkNew<vtkCamera> rcam;
+    rc.setCamera(rcam);
+    root("fr.camera.frame").value(std::string("-50 -50 0 50 50 20"));
+    const double want = std::sqrt(100.0 * 100.0 + 100.0 * 100.0 + 20.0 * 20.0) * 1.1;
+    check("frame: the orbit centres on the bounds",
+          std::fabs(root("fr.camera.orbit.center.z").value<double>() - 10.0) < 1e-9 &&
+              std::fabs(root("fr.camera.orbit.center.x").value<double>()) < 1e-9);
+    check("frame: the orbit backs off as frameBounds does",
+          std::fabs(root("fr.camera.orbit.distance").value<double>() - want) < 1e-6);
+    root("fr.camera.frame").value(std::string("not bounds")); // ignored
+    check("a malformed frame request is ignored",
+          std::fabs(root("fr.camera.orbit.distance").value<double>() - want) < 1e-6);
+  }
+
   printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
   // cvcGL's state_object / handler-thread teardown races at process exit (a known,
   // harmless issue, independent of the checks above). Hard-exit with the real

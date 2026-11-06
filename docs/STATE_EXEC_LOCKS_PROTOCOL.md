@@ -1,9 +1,10 @@
 # state_exec locks: the protocol
 
-Status: specification, 2026-10-27. Phase L1 (one home, single mode, no inheritance) is built:
-section 4 in `src/cvc/state/state_exec/lock_manager.cpp` (`detail::lock_table`, one member per
-operation), section 5 in `lock_home.cpp`, the lock form in `stackless_evaluator.cpp` and the
-natives in `lock_intrinsics.cpp`; the clause-to-code map is the locks plan's L1 section 2. It is
+Status: specification, 2026-10-27. Phases L1-L3 are built (several homes, single and shared
+mode, inheritance): section 4 in `src/cvc/state/state_exec/lock_manager.cpp`
+(`detail::lock_table`, one member per operation, each under `M.mu` in shared mode), section 5 and
+the port of 2.3 in `lock_home.cpp`, the lock form in `stackless_evaluator.cpp` and the natives in
+`lock_intrinsics.cpp`; the clause-to-code maps are the locks plan's L1, L2 and L3 sections 2. It is
 the exact protocol behind
 [`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) (the design), section 8.6. `td` is
 [`docs/STATE_EXEC_THREADED.md`](STATE_EXEC_THREADED.md); `Qn` are its decisions (td 9.2). A model
@@ -667,6 +668,10 @@ query(prefix, viewer) -> { held, waiting }:    # lock-query, design 4.1; viewer 
 blocking_sinks(P) -> set of (Pid, time):     # pycvc's idle test (design 9.2), L3
     with M: return { (Q, M.homes[Q.home].progress.load()) :
                      Q in reach({P}), Q != P, succ(Q) == {} }
+
+blocking_sinks(S) -> set of (Pid, time):     # every lock waiter of a home at once
+    with M: return { (Q, M.homes[Q.home].progress.load()) :
+                     Q in reach(S), Q not in S, succ(Q) == {} }
 ```
 
 `query(prefix, viewer)` takes the viewer's home with its owner, copies under `M.mu` and formats
@@ -679,7 +684,10 @@ it deletes the home), and the cell is shared, so the load needs no other lock an
 home object. pycvc counts only a sink on another home whose value lies within its idle window,
 and a sink on the waiter's own home is judged by `run()`'s own test (design 9.2). The caller
 gets values only: it never reaches another home after `M.mu` is released, so a home destroyed
-meanwhile on another thread is never touched.
+meanwhile on another thread is never touched. The set form is one search from every source under
+one `M.mu` hold, for an `Exec` with several lock waiters; it is the union of the single-source
+results less the sources, which differs from that union only by a source that is another's sink
+(on the caller's own home, so judged by `run()`'s test anyway).
 
 ### 4.14 Delivery
 
@@ -864,9 +872,12 @@ release_lock_frame(p, frame):        # noexcept; the body's last form completing
         if h.count == 0:
             remove h from p.locks
             N = M.release(P, h.id); deliver(N)
-    if frame is lock_enter and p.lock_ticket != none:  # defensive: woken without a grant
+    if frame is lock_enter and p.lock_ticket != none:  # defensive: unwound with its ticket set
         tid = p.lock_ticket
-        (_, N) = M.cancel(P, tid); deliver(N); M.resume(P, tid)
+        (_, N) = M.cancel(P, tid); deliver(N)
+        (out, _) = M.resume(P, tid)
+        if out is granted(id, _, _):                    # granted by another home meanwhile
+            N = M.release(P, id); deliver(N)
         p.lock_ticket = none; p.lock_waiting = false; p.lock_deadline = none
 ```
 
@@ -876,6 +887,11 @@ release_lock_frame(p, frame):        # noexcept; the body's last form completing
   was woken but left before its body began: a signal handler that raised, or an error injected
   into the `lock_enter` step (LX-4, LX-8). Its hold was never started, so the release is clean
   and returns any abandoned flag the grant took.
+- A `lock_enter` frame unwound with its ticket still set (an error in the step that queued it,
+  after `block`) may find the ticket granted: from L3 another home's thread can grant it at any
+  time, so `cancel` returns `granted` and `resume` hands over a hold the mirror never collected.
+  That hold is released at once, as a grant whose body never began; dropping it would leave a
+  record no `end` releases (I3). With one home the ticket was always still queued here.
 
 ### 5.5 A lock deadline
 
@@ -903,7 +919,9 @@ on_end(p, abandon):                  # in kill_process (true), fail_process (tru
 
 `kill`, SIGKILL, `kill_owner`, every budget, a step deadline and an internal step error reach
 `kill_process`. The test `p.locks == [] and p.lock_ticket == none` is exact: `M.recs` has `P`
-exactly when one of them is set (I3).
+exactly when one of them is set (I3). The implementation tests a superset, every process that
+ever reached the manager (`process::locks` allocated), so a record the mirror missed through an
+error is still ended; an `end` that finds no record changes nothing.
 
 ### 5.7 A scheduler is destroyed
 

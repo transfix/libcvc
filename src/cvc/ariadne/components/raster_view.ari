@@ -9,6 +9,12 @@
 #   - the `raster.image` key holds the name to display (seed it in init:, or drive it with a second
 #     combo of your layer names).
 #
+# Args (every one has a default, so a bare include works):
+#   keys   the key root the host reads and publishes under: <keys>.colormap and <keys>.image
+#          (default raster). Two views of two grids take two roots, e.g. args: { keys: risk, id: risk }
+#   title  the window's title (default Raster)
+#   id     the instance id: the window's geometry persists under tree.<id> (default raster_view)
+#
 # Use it:
 #     import: cvc://components/raster_view.ari
 #     windows:
@@ -16,13 +22,14 @@
 
 units:
   raster_view:
-    window: Raster
-    id: raster_view
+    args: { keys: raster, title: Raster, id: raster_view }
+    window: "{title}"
+    id: "{id}"
     children:
       - combo: Colormap
-        bind: raster.colormap
+        bind: "{keys}.colormap"
         options: [viridis, gray, magma, plasma]
         default: viridis
       - image: view
-        bind: raster.image # the host-published image name (seed/switch this key in the app)
+        bind: "{keys}.image" # the host-published image name (seed/switch this key in the app)
         size: 320

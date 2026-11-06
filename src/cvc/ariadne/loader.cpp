@@ -102,7 +102,8 @@ bool is_builtin_block(const std::string &k) {
          k == "children" || k == "scene" || k == "customs" || k == "init" || k == "on_tick" ||
          k == "on_key" || k == "on_pointer" || k == "on_signal" || k == "units" || k == "import" ||
          k == "channels" || k == "lint" || k == "args" || k == "requires" || k == "keys" ||
-         k == "windows_menu" || k == "tests" || k == "functions";
+         k == "windows_menu" || k == "tests" || k == "functions" || k == "data" || k == "assets" ||
+         k == "scenes";
 }
 } // namespace
 
@@ -171,6 +172,19 @@ const char *const kAriSchema = R"ARISCHEMA({
         "required": ["name"]
       }
     },
+    "data": {
+      "type": "object",
+      "additionalProperties": {
+        "type": ["string", "object"],
+        "properties": {
+          "uri": {"type": "string"},
+          "path": {"type": "string"},
+          "as": {"type": "string"},
+          "load": {"enum": ["eager", "lazy"]}
+        },
+        "required": ["uri"]
+      }
+    },
     "args": {
       "type": "object",
       "additionalProperties": {
@@ -208,6 +222,7 @@ const char *const kAriSchema = R"ARISCHEMA({
         "multiline": {"$ref": "#/$defs/flag"},
         "max_lines": {"type": "number"},
         "max_length": {"type": "number"},
+        "send": {"type": "string"},
         "options": {"type": ["array", "string"], "items": {"type": "string"}},
         "pos": {"type": "array", "items": {"type": "number"}},
         "size": {"type": ["array", "number"], "items": {"type": ["number", "string"]}},
@@ -889,6 +904,7 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
       ctx.warn("ari: message_input '" + label + "' max_length must be >= 0 — no cap");
     w.max_lines = lines >= 1.0 ? static_cast<int>(lines) : 4;
     w.max_length = length >= 0.0 ? static_cast<int>(length) : 0;
+    w.send = str(n, "send");
     return w;
   }
   if (type == "input_int") {
@@ -1916,7 +1932,7 @@ bool known_scene_node_key(const std::string &k) {
   return k == "node" || k == "id" || k == "type" || k == "source" || k == "material" ||
          k == "transform" || k == "fit" || k == "visible" || k == "volren" || k == "volslice" ||
          k == "volume" || k == "shader" || k == "clip" || k == "body" || k == "children" ||
-         k == "casts_shadow";
+         k == "casts_shadow" || k == "tags";
 }
 
 std::string lowered(std::string s) {
@@ -2386,7 +2402,9 @@ SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
     } else if (src.IsMap()) {
       // A procedural primitive (no asset) takes precedence over a file: source: { plane: { size } }
       // (or the shorthand source: { plane: <size> }). Otherwise a URI/file.
-      if (const YAML::Node plane = src["plane"]) {
+      if (const YAML::Node asset = src["asset"]; asset && asset.IsScalar()) {
+        sn.source_asset = asset.Scalar(); // a document asset (assets:), loaded once
+      } else if (const YAML::Node plane = src["plane"]) {
         sn.source_primitive = "plane";
         if (plane.IsMap())
           sn.plane_size = static_cast<float>(num(plane, "size", sn.plane_size));
@@ -2461,6 +2479,12 @@ SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
                 band.color[i] = static_cast<float>(cc[i].as<double>());
             sn.heightfield.colors.push_back(band);
           }
+      } else if (src["data"]) {
+        // source: { data: <name>, item: <output> } — a dataset the document's data: block names.
+        sn.source_data = str(src, "data");
+        sn.source_item = str(src, "item");
+        if (sn.source_data.empty())
+          ctx.warn("ari: scene node '" + sn.id + "': source: { data: } names no dataset");
       } else {
         sn.source_file = str(src, "uri", str(src, "file"));
       }
@@ -2488,11 +2512,57 @@ SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
       else if (tex.IsMap())
         sn.material_texture = str(tex, "uri", str(tex, "file"));
     }
+    if (const YAML::Node uv = mat["uv"]; uv && uv.IsMap()) {
+      // material: { uv: { rotate, flip_u, flip_v, scale, offset } } — the texture's orientation
+      sn.has_uv_transform = true;
+      const int rot = static_cast<int>(num(uv, "rotate", 0.0));
+      sn.uv_rotate = ((rot % 360) + 360) % 360;
+      if (sn.uv_rotate % 90 != 0) {
+        ctx.warn("ari: scene node '" + sn.id + "': material.uv.rotate is 0, 90, 180 or 270, not " +
+                 std::to_string(rot) + " — not rotated");
+        sn.uv_rotate = 0;
+      }
+      sn.uv_flip_u = flag(uv, "flip_u", false);
+      sn.uv_flip_v = flag(uv, "flip_v", false);
+      for (const char *key : {"scale", "offset"}) {
+        float *out = std::string(key) == "scale" ? sn.uv_scale : sn.uv_offset;
+        const YAML::Node v = uv[key];
+        if (v && v.IsSequence() && v.size() >= 2) {
+          out[0] = static_cast<float>(v[0].as<double>());
+          out[1] = static_cast<float>(v[1].as<double>());
+        } else if (v && v.IsScalar()) {
+          out[0] = out[1] = static_cast<float>(v.as<double>());
+        }
+      }
+    }
     sn.material_opaque = flag(mat, "opaque", false);
   }
   if (n["casts_shadow"]) {
     sn.has_casts_shadow = true;
     sn.casts_shadow = flag(n, "casts_shadow", true);
+  }
+  if (const YAML::Node fr = n["frame"]; fr && fr.IsScalar()) {
+    // frame: true | first | always (false / none: the camera is left alone)
+    const std::string v = fr.Scalar();
+    if (v == "always" || v == "first")
+      sn.frame = v;
+    else if (flag(n, "frame", false))
+      sn.frame = "first";
+    else if (v != "none" && v != "false" && v != "no" && v != "off")
+      ctx.warn("ari: scene node '" + sn.id + "': frame: is true, first, always or none, not '" + v +
+               "'");
+    if (!sn.frame.empty() && sn.source_data.empty())
+      ctx.warn("ari: scene node '" + sn.id +
+               "': frame: frames a source: { data } node's dataset; this node has none");
+  }
+  // tags: [a, b] or tags: a
+  if (const YAML::Node tags = n["tags"]) {
+    if (tags.IsScalar())
+      sn.tags.push_back(tags.Scalar());
+    else if (tags.IsSequence())
+      for (const auto &t : tags)
+        if (t.IsScalar() && !t.Scalar().empty())
+          sn.tags.push_back(t.Scalar());
   }
   const YAML::Node tf = n["transform"];
   if (tf && tf.IsMap()) {
@@ -2684,6 +2754,39 @@ Scene parse_scene(Ctx &ctx, const YAML::Node &s) {
   if (lights && lights.IsSequence())
     for (const YAML::Node &l : lights)
       sc.lights.push_back(parse_scene_light(l));
+  // main_view: { show: [tags], hide: [tags] }
+  if (const YAML::Node mv = s["main_view"]; mv && mv.IsMap()) {
+    sc.has_main_view = true;
+    auto tags = [](const YAML::Node &t, std::vector<std::string> &out) {
+      if (t && t.IsScalar())
+        out.push_back(t.Scalar());
+      else if (t && t.IsSequence())
+        for (const auto &e : t)
+          if (e.IsScalar())
+            out.push_back(e.Scalar());
+    };
+    tags(mv["show"], sc.main_show);
+    tags(mv["hide"], sc.main_hide);
+  }
+  // cameras: [{ camera: <id>, mode, azimuth, elevation, zoom, track }]
+  const YAML::Node cameras = s["cameras"];
+  if (cameras && cameras.IsSequence())
+    for (const YAML::Node &c : cameras) {
+      if (!c.IsMap())
+        continue;
+      SceneCamera cam;
+      cam.id = str(c, "camera", str(c, "id"));
+      if (cam.id.empty())
+        continue;
+      cam.mode = str(c, "mode", "orbit");
+      cam.track = str(c, "track");
+      cam.has_azimuth = static_cast<bool>(c["azimuth"]);
+      cam.azimuth = num(c, "azimuth", 0.0);
+      cam.has_elevation = static_cast<bool>(c["elevation"]);
+      cam.elevation = num(c, "elevation", 0.0);
+      cam.zoom = num(c, "zoom", 1.0);
+      sc.cameras.push_back(cam);
+    }
   const YAML::Node sh = s["shadows"];
   if (sh && sh.IsMap()) {
     sc.has_shadows = true;
@@ -3179,6 +3282,48 @@ void lint_channels(Ctx &ctx, LoadResult &r) {
   }
 }
 
+// The data: block (data.h): a map of name -> URI, or name -> { uri, path, as, load }.
+std::vector<DataSpec> parse_data(Ctx &ctx, const YAML::Node &n) {
+  std::vector<DataSpec> out;
+  if (!n)
+    return out;
+  if (!n.IsMap()) {
+    ctx.warn("ari: data: must be a MAP of name -> URI or { uri, path, as, load } — ignored");
+    return out;
+  }
+  for (const auto &kv : n) {
+    DataSpec d;
+    d.name = kv.first.IsScalar() ? kv.first.Scalar() : std::string();
+    d.base = ctx.base_dir;
+    const YAML::Node e = kv.second;
+    if (e.IsScalar()) {
+      d.uri = e.Scalar();
+    } else if (e.IsMap()) {
+      d.uri = str(e, "uri");
+      d.path = str(e, "path");
+      d.as = str(e, "as");
+      const std::string load = str(e, "load", "eager");
+      d.lazy = load == "lazy";
+      if (load != "lazy" && load != "eager")
+        ctx.warn("ari: data." + d.name + ": load: is eager or lazy, not '" + load +
+                 "' — loading it eagerly");
+    }
+    if (d.name.empty() || d.name.find('.') != std::string::npos) { // one state key
+      ctx.warn("ari: data: '" + d.name + "' is not a name (one word, no '.') — ignored");
+      continue;
+    }
+    if (d.uri.empty()) {
+      ctx.warn("ari: data." + d.name + " names no uri — ignored");
+      continue;
+    }
+    if (!d.as.empty() && !has_data_decoder(d.as))
+      ctx.warn("ari: data." + d.name + ": as: " + d.as +
+               " is not a decoder this build has, so its load will fail");
+    out.push_back(std::move(d));
+  }
+  return out;
+}
+
 // Parse an already-loaded YAML node into a LoadResult, applying the meta gate. `base_dir` is
 // the document's directory (relative `import:`s resolve against it; empty = cwd for a string);
 // `self_path` is its canonical identity, seeded into the import cycle-guard so a library that
@@ -3276,6 +3421,41 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
   if (doc.IsMap()) {
     r.scene = parse_scene(ctx, doc["scene"]);    // §9: the scene graph, alongside the widgets
     stamp_base_dir(r.scene.nodes, ctx.base_dir); // relative paths in a node's keys resolve here
+    r.data = parse_data(ctx, doc["data"]);       // the datasets, relative to the document too
+    // assets: { <id>: { source: ..., fit: ... } } — meshes loaded once, shared by every scene.
+    std::vector<SceneAsset> assets;
+    if (const YAML::Node as = doc["assets"]; as && as.IsMap()) {
+      for (const auto &kv : as) {
+        if (!kv.first.IsScalar() || !kv.second.IsMap())
+          continue;
+        SceneAsset a;
+        a.id = kv.first.Scalar();
+        a.source = parse_scene_node(ctx, kv.second);
+        a.source.id = a.id;
+        a.source.base_dir = ctx.base_dir;
+        assets.push_back(std::move(a));
+      }
+    } else if (as) {
+      ctx.warn("ari: assets: must be a map of id -> { source, fit } — ignored");
+    }
+    r.scene.assets = assets;
+    // scenes: [{ scene: <id>, nodes, lights, shadows, background, cameras, ... }] — scenes of
+    // their own, each drawn by the viewports that name it (scene: <id>).
+    if (const YAML::Node ss = doc["scenes"]; ss && ss.IsSequence()) {
+      for (const YAML::Node &s : ss) {
+        Scene sc = parse_scene(ctx, s);
+        sc.id = str(s, "scene", str(s, "id"));
+        if (sc.id.empty()) {
+          ctx.warn("ari: a scenes: entry has no `scene:` name — ignored");
+          continue;
+        }
+        stamp_base_dir(sc.nodes, ctx.base_dir);
+        sc.assets = assets;
+        r.scenes.push_back(std::move(sc));
+      }
+    } else if (ss) {
+      ctx.warn("ari: scenes: must be a list of { scene: <id>, ... } — ignored");
+    }
     // init: a state_exec script the host runs once at load (cvc::ariadne::run_init).
     // The loader only captures the text — it has no app and never runs the DSL.
     const YAML::Node in = doc["init"];
@@ -3361,6 +3541,9 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
       }
       if (parser)
         parser(to_value(kv.second), r);
+      else if (key == "python")
+        r.warnings.push_back("ari: this document's python: block needs a scripting host (arix or "
+                             "ariglx); this host has no Python, so it was ignored");
     }
 
   r.ok = true;

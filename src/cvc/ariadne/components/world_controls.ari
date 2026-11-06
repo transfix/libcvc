@@ -1,12 +1,21 @@
 # world_controls.ari — a REUSABLE Ariadne component: live controls for a `generated_world` node.
 # The controls bind the world.* state keys the cvcGL generated_world realizer reads each frame; the
 # realizer SEEDS them from the node's authored .ari props, so the panel starts at the document's
-# world and then regenerates it live. Every structural change rebuilds the whole world, so the
-# sliders write when they are let go (`commit: release`). The rebuild is a task on the app's
-# scheduler, a few milliseconds a frame (on single-threaded wasm too): the old world stays on screen
-# and the progress bar names the stage until the new one is swapped in; Stop ends it. A new preset
-# quick-sets the counts and the relief; Colour by only repaints the ground. Regenerate, Randomize
-# and Stop go through a request key (world.request) the realizer consumes.
+# world. Edits wait: change as many settings as you like, then Regenerate rebuilds the whole world
+# from them (a note says when the settings differ from the world shown). "Regenerate on change"
+# (world.auto) rebuilds after every edit instead, and its sliders write when they are let go
+# (`commit: release`). The rebuild is a task on the app's scheduler, a few milliseconds a frame (on
+# single-threaded wasm too): the old world stays on screen and the progress bar names the stage
+# until the new one is swapped in; Stop ends it. A new preset quick-sets the counts, the relief and
+# the water level; Colour by only repaints the ground, at once. Regenerate, Randomize and Stop go
+# through a request key (world.request) the realizer consumes.
+#
+# Args (every one has a default, so a bare include works):
+#   keys   the generated_world node's state key root: its `keys:` prop, else world (the default).
+#          A second generated_world node with `keys: island` gets its own panel from
+#          `args: { keys: island, title: ..., id: island_world }`
+#   title  the window's title (default Terrain Lab)
+#   id     the instance id: the window's geometry persists under tree.<id> (default world_controls)
 #
 # Use it:
 #     import: cvc://components/world_controls.ari
@@ -15,103 +24,111 @@
 
 units:
   world_controls:
-    window: Terrain Lab
-    id: world_controls
+    args: { keys: world, title: Terrain Lab, id: world_controls }
+    window: "{title}"
+    id: "{id}"
     children:
       - text: "Live view of cvc::world: the L-system terrain source."
       - text: "status"
-        bind: world.status
+        bind: "{keys}.status"
       # The running rebuild or repaint: the bar moves while it steps, and the overlay names the stage.
       - progress: progress
-        bind: world.progress
+        bind: "{keys}.progress"
         hi: 100
-        overlay: world.phase
+        overlay: "{keys}.phase"
       - separator
       - slider_int: Seed
-        bind: world.seed
+        bind: "{keys}.seed"
         commit: release
         lo: 0
         hi: 99999
       - combo: Preset
-        bind: world.preset
+        bind: "{keys}.preset"
         options: [Standard, Forest, Urban, Sparse, Island]
         values: [0, 1, 2, 3, 4]
       - combo: Ontology
-        bind: world.ontology
+        bind: "{keys}.ontology"
         options: [merged_default, soft_vegetation, strict_water_mud]
         values: [0, 1, 2]
       # The generators, by name: the realizer publishes the ones registered (a host may add its own).
       - combo: Terrain
-        bind: world.terrain
-        options: (string.split (state-get "world.generators.terrain") "\n")
-        tooltip: "fbm: the analytic relief; dem: an elevation .npy, anchored at 0 and stretched to the relief"
+        bind: "{keys}.terrain"
+        options: (string.split (state-get "{keys}.generators.terrain") "\n")
+        tooltip: "fbm: the analytic relief; dem: an elevation .npy, stretched to the relief; either way 0 m is the shoreline"
       - input_text: Elevation file
-        bind: world.terrain_file
-        visible_when: (= (state-get "world.terrain") "dem")
+        bind: "{keys}.terrain_file"
+        visible_when: (= (state-get "{keys}.terrain") "dem")
         tooltip: "a 2-D .npy of heights (row 0 = south); a relative path is read from the document's directory"
       - combo: City
-        bind: world.city
-        options: (string.split (state-get "world.generators.city") "\n")
+        bind: "{keys}.city"
+        options: (string.split (state-get "{keys}.generators.city") "\n")
         tooltip: "districts: the roads-first city; none: no streets or buildings"
       - slider_float: World half (m)
-        bind: world.half
+        bind: "{keys}.half"
         commit: release
         lo: 150.0
         hi: 10000.0
         fmt: "%.0f"
         tooltip: "the terrain spans twice this per side; the mesh keeps ~5 m cells (capped at 2049)"
       - text: "terrain"
-        bind: world.stats.terrain
+        bind: "{keys}.stats.terrain"
       - slider_int: Trees
-        bind: world.trees
+        bind: "{keys}.trees"
         commit: release
         lo: 0
         hi: 3000
       - slider_int: Rocks
-        bind: world.rocks
+        bind: "{keys}.rocks"
         commit: release
         lo: 0
         hi: 600
       - slider_int: Buildings
-        bind: world.buildings
+        bind: "{keys}.buildings"
         commit: release
         lo: 0
         hi: 600
         tooltip: "the most buildings the city builds, filled from the district cores out"
       - slider_int: Tree generations
-        bind: world.tree_gen
+        bind: "{keys}.tree_gen"
         commit: release
         lo: 2
         hi: 8
       - slider_float: Relief (m)
-        bind: world.amp
+        bind: "{keys}.amp"
         commit: release
         lo: 2.0
         hi: 400.0
         fmt: "%.0f"
       - slider_float: Water level (m)
-        bind: world.water_level
+        bind: "{keys}.water_level"
         commit: release
-        lo: 0.0
-        hi: 200.0
+        lo: -100.0
+        hi: 100.0
         fmt: "%.1f"
+        tooltip: "0 m is sea level, the shoreline every relief is laid against; raise or lower the sea from it"
+      - text: "Settings changed: Regenerate to apply them."
+        visible_when: (= (state-get "{keys}.pending") "1")
       - button: Regenerate
-        on: (state-set "world.request" "regenerate")
+        on: (state-set "{keys}.request" "regenerate")
+        tooltip: "rebuild the world from the settings above"
       - button: Randomize
-        on: (state-set "world.request" "randomize")
-        tooltip: "a new seed"
+        on: (state-set "{keys}.request" "randomize")
+        tooltip: "a new seed, and regenerate"
+      - checkbox: Regenerate on change
+        bind: "{keys}.auto"
+        tooltip: "rebuild after every edit instead of waiting for Regenerate"
       - button: Stop
-        on: (state-set "world.request" "stop")
-        enabled_when: (= (state-get "world.busy") "1")
+        on: (state-set "{keys}.request" "stop")
+        enabled_when: (= (state-get "{keys}.busy") "1")
         tooltip: "ends the rebuild under way; the world shown stays"
       - separator
       - combo: Colour by
-        bind: world.color
+        bind: "{keys}.color"
         options: [Material, Risk, Occupancy, Height]
         values: [0, 1, 2, 3]
       - text: "props"
-        bind: world.stats.props
+        bind: "{keys}.stats.props"
       - text: "buildings"
-        bind: world.stats.buildings
+        bind: "{keys}.stats.buildings"
       - text: "occupied"
-        bind: world.stats.occupied
+        bind: "{keys}.stats.occupied"

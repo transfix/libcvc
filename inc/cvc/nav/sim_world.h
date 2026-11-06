@@ -335,6 +335,13 @@ public:
   // false.
   bool set_pose(int i, float x_n, float y_n, float heading, float speed = 0.0f);
   void add_obstacle(int r0, int r1, int c0, int c1);
+  // Replace the world as it is: `truth` is rows*cols uint8, row-major, as the constructor's (a
+  // wall raised or taken down, or a moving vehicle's footprint each tick). truth() reads it back
+  // at once; the agents learn it as the constructor's truth, by sensing: from the next sense tick,
+  // where a ray reaches it, and under freeze_sense never. What was derived from the truth before
+  // keeps it: the material gate surface (set_material again to refresh it). A physics plant's
+  // colliders are its own world's, which the caller changes with it.
+  void set_truth(const std::uint8_t *truth);
 
   // ── yielding: agents that get out of each other's way (nav/yield.h, nav/intent.h) ──
   // Off by default (yield_config::horizon_s 0): runs are byte-unchanged. On, every step()
@@ -504,6 +511,18 @@ public:
   }
   float material_lam_soft_scale() const { return mat_cfg_.lam_soft_scale; }
   float material_lam_hard_scale() const { return mat_cfg_.lam_hard_scale; }
+  // The risk governor (veh_params::risk_governor), on or off from the next step(), as
+  // cfg.veh.risk_governor sets it at construction: the material's risk (and the terrain's) caps
+  // each agent's speed, down to vmin at risk 1, and `probes` points out to `lookahead` along its
+  // direction of travel slow it before it gets there. Speeds and the look-ahead are normalized. The
+  // material's forces steer an agent off risky ground, but they slow it only by what they take
+  // from its goal pull's surplus over the speed cap: an agent at its top speed driving square at a
+  // hazard (no steer, and a pull worth more than the hazard's push) is not slowed at all. The
+  // governor is what slows it. Throws std::invalid_argument on a negative or non-finite vmin or
+  // lookahead, an onset outside [0, 1), or probes < 1.
+  void set_risk_governor(bool on, float vmin = 0.0f, float onset = 0.3f, float lookahead = 0.0f,
+                         int probes = 3);
+  bool risk_governor() const { return cfg_.veh.risk_governor; }
   // Last tick's per-agent gate decisions (renderer/telemetry hook); valid only
   // while material is set.
   const std::uint8_t *material_gate_active() const { return mat_gate_active_.data(); }

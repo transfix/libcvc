@@ -19,7 +19,7 @@
 #include "data.h"
 #include "endian_io.h"
 
-extern int verbose;
+#include "contour_verbose.h"
 
 #define normalize(v) { \
                        float len; \

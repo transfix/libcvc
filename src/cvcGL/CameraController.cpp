@@ -20,7 +20,9 @@
 #include <cvc/gl/SceneRenderer.h>
 #include <iterator>
 #include <set>
+#include <sstream> // a frame request's bounds
 #include <string>
+#include <utility> // std::move: the UI regions
 #include <vtkCamera.h>
 #include <vtkInteractorStyle.h>
 #include <vtkObjectFactory.h>
@@ -38,26 +40,31 @@
 #define CVCGL_HAVE_X11 1
 #include <X11/Xlib.h>
 #endif
-#if defined(CVC_ENABLE_SDL) && !defined(__EMSCRIPTEN__)
+#ifdef CVC_ENABLE_SDL
 #include "SdlWindow.h" // pointer capture on cvcGL's SDL window: SDL's relative mouse mode
 #endif
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #include <vtkWebAssemblyRenderWindowInteractor.h> // the canvas the pointer lock is on
-// Pointer capture in the browser is the page's pointer lock on VTK's canvas. While it holds,
-// VTK's pointer positions stand still, so the motion comes from the document's mousemove events
-// (movementX/Y), summed here until update() takes it. The browser ends the lock on Escape or when
-// the tab loses focus; `lost` counts those, so update() releases the capture too. An exit the
-// camera asked for itself is not counted.
+// Pointer capture in the browser is the page's pointer lock on the canvas (SDL's window, or VTK's
+// canvas window). While it holds, the interactor's pointer positions stand still, so the motion
+// comes from the document's mousemove events (movementX/Y), summed here until update() takes it.
+// The browser ends the lock on Escape or when the tab loses focus; `lost` counts those, so
+// update() releases the capture too. An exit the camera asked for itself is not counted.
 // A refusal comes as pointerlockerror, as the request's rejected promise, or both (Chromium
 // rejects a page that can never lock, an embedded one, with WrongDocumentError and no event): it
 // counts once, and the console says why. The lock is taken inside the press on the canvas itself
-// while mouse look waits for one (`armed`: on, in Orbit, the pointer not over the UI): a browser
-// grants it there, where a request from the frame -- after the click, VTK's events being queued --
-// can be refused. That request from the frame is still made (a host that captures in code); when
-// it is refused it is asked again inside the next click on the canvas. A second refusal, or one
-// that can never be granted, counts as lost.
+// while mouse look waits for one (`armed`: on, in Orbit) and the press is not on one of the UI's
+// windows (`ui`, cvcgl_pointer_lock_ui: tested against the press's own position, as the frame's
+// idea of where the pointer is can be a frame or two old): a browser grants it there, where a
+// request from the frame -- after the click, the interactor's events being queued -- can be
+// refused. That request from the frame is still made (a host that captures in code); when it is
+// refused it is asked again inside the next click on the canvas. A second refusal, or one that
+// can never be granted, counts as lost.
+// The lock asks for the mouse's raw motion (unadjustedMovement: no pointer acceleration, and
+// none of the jumps Chromium's adjusted motion can have under a lock); a browser that cannot
+// give it gets the plain lock instead.
 // clang-format off: JavaScript bodies (only == and != in them: the preprocessor reads them as C++
 // tokens, and a === would come out split)
 // on: 1 wants the lock, 0 lets it go, -1 leaves it as it is (only `armed` changes).
@@ -66,7 +73,20 @@ EM_JS(void, cvcgl_pointer_lock, (int on, int armed, const char *selector), {
   if (!st) {
     st = Module.cvcglPointerLock = {dx: 0, dy: 0, locked: false, exiting: false, lost: 0,
                                     canvas: null, want: false, pending: false, retried: false,
-                                    armed: false};
+                                    armed: false, ui: [], raw: true, skipError: false};
+    // Whether a press is on one of the UI's windows (canvas pixels, origin top-left).
+    st.overUi = function(e) {
+      var c = st.canvas;
+      var r = c ? c.getBoundingClientRect() : null;
+      if (!r || !r.width || !r.height)
+        return false;
+      var x = (e.clientX - r.left) * c.width / r.width;
+      var y = (e.clientY - r.top) * c.height / r.height;
+      for (var i = 0; i + 3 < st.ui.length; i += 4)
+        if (x >= st.ui[i] && y >= st.ui[i + 1] && x < st.ui[i + 2] && y < st.ui[i + 3])
+          return true;
+      return false;
+    };
     st.refused = function(name) {
       if (!st.pending)
         return; // the same refusal's other report
@@ -85,9 +105,20 @@ EM_JS(void, cvcgl_pointer_lock, (int on, int armed, const char *selector), {
       if (!c || !c.requestPointerLock || document.pointerLockElement == c)
         return;
       st.pending = true;
-      var p = c.requestPointerLock();
+      var p = c.requestPointerLock(st.raw ? {unadjustedMovement: true} : undefined);
       if (p && p.catch)
-        p.catch(function(e) { st.refused(e && e.name); });
+        p.catch(function(e) {
+          if (st.raw && e && e.name == 'NotSupportedError') {
+            // No raw motion here: the plain lock, still inside the press's activation, and not the
+            // pointerlockerror this refusal also fires.
+            st.raw = false;
+            st.skipError = true;
+            st.pending = false;
+            st.request();
+            return;
+          }
+          st.refused(e && e.name);
+        });
     };
     document.addEventListener('pointerlockchange', function() {
       var locked = !!st.canvas && document.pointerLockElement == st.canvas;
@@ -100,17 +131,23 @@ EM_JS(void, cvcgl_pointer_lock, (int on, int armed, const char *selector), {
         st.retried = false;
       }
     });
-    document.addEventListener('pointerlockerror', function() { st.refused(''); });
+    document.addEventListener('pointerlockerror', function() {
+      if (st.skipError) {
+        st.skipError = false;
+        return;
+      }
+      st.refused('');
+    });
     // Before VTK's own handlers (capture), so the press is still the user's gesture.
     document.addEventListener('mousedown', function(e) {
-      if (e.button == 0 && st.armed && !st.locked && e.target == st.canvas) {
+      if (e.button == 0 && st.armed && !st.locked && e.target == st.canvas && !st.overUi(e)) {
         st.want = true;
         st.retried = false;
         st.request();
       }
     }, true);
     document.addEventListener('mouseup', function(e) {
-      if (st.want && st.retried && !st.locked && e.target == st.canvas)
+      if (st.want && st.retried && !st.locked && e.target == st.canvas && !st.overUi(e))
         st.request();
     });
     document.addEventListener('mousemove', function(e) {
@@ -135,6 +172,13 @@ EM_JS(void, cvcgl_pointer_lock, (int on, int armed, const char *selector), {
       document.exitPointerLock();
     }
   }
+});
+// Where the UI's windows are: n floats, x0 y0 x1 y1 each (canvas pixels, origin top-left). A press
+// in one is the UI's: it takes no lock.
+EM_JS(void, cvcgl_pointer_lock_ui, (const float *rects, int n), {
+  var st = Module.cvcglPointerLock;
+  if (st)
+    st.ui = n > 0 ? Array.from(HEAPF32.subarray(rects >> 2, (rects >> 2) + n)) : [];
 });
 // The motion along `axis` (0 = x, 1 = y; CSS pixels, y down) since the last call.
 EM_JS(double, cvcgl_pointer_lock_motion, (int axis), {
@@ -168,6 +212,7 @@ EM_JS(int, cvcgl_pointer_lock_lost, (), {
 namespace {
 
 constexpr double kDeg2Rad = 3.14159265358979323846 / 180.0;
+constexpr int kClickSlop = 4; // px: farther than this from the press is a drag, not a click
 
 // Map mode looks straight down -z from this height (parallel projection, so the
 // height only places the eye above the content), and never zooms in past this
@@ -272,6 +317,7 @@ public:
     int x, y, lx, ly;
     this->Interactor->GetEventPosition(x, y);
     this->Interactor->GetLastEventPosition(lx, ly);
+    m_controller->notePointerMove(x, y);
     m_controller->mouseLook(x - lx, y - ly);
   }
   void OnLeftButtonDown() override {
@@ -282,7 +328,8 @@ public:
       this->Interactor->GetEventPosition(x, y);
       m_controller->notePointerDown(x, y);
     }
-    m_controller->beginDrag();
+    if (!m_controller->steering()) // a steering drag turns the host's avatar, not the view
+      m_controller->beginDrag();
   }
   void OnLeftButtonUp() override {
     if (!m_controller)
@@ -293,6 +340,15 @@ public:
       m_controller->notePointerUp(x, y);
     }
     m_controller->endDrag();
+  }
+  // Right button: turns the view, whatever the primary drag does (one that steers).
+  void OnRightButtonDown() override {
+    if (m_controller)
+      m_controller->beginSecondaryDrag();
+  }
+  void OnRightButtonUp() override {
+    if (m_controller)
+      m_controller->endSecondaryDrag();
   }
   // Middle button = pan, the standard "move the scene" drag.
   void OnMiddleButtonDown() override {
@@ -389,6 +445,7 @@ struct CameraController::Impl {
   // runtime (not state)
   std::set<std::string> held;
   bool dragging = false;
+  bool secondaryDragging = false; // the right button's drag: it turns the view
   // Click detection (notePointerDown/Up, takeClick).
   bool pointerDown = false;
   int pressX = 0, pressY = 0;
@@ -396,9 +453,15 @@ struct CameraController::Impl {
   int clickX = 0, clickY = 0;
   bool panning = false; // middle-button drag, or primary drag on touch
   bool primaryDragPans = false;
+  bool primaryDragSteers = false; // setPrimaryDragSteers
+  // A steering drag (primaryDragSteers): the primary button is down, whether the pointer has gone
+  // further than a click's slop from the press, and where it is.
+  bool steering = false, steerMoved = false;
+  int steerX = 0, steerY = 0;
   bool captureApplied = false;           // what the window / the browser was last told (capture)
   bool browserLock = false;              // the browser was asked for its pointer lock (ever)
-  bool pointerOverUi = false;            // setPointerOverUi: a press there is the UI's
+  std::vector<float> uiRegions;          // setUiRegions: x0 y0 x1 y1 each, top-left origin
+  bool uiRegionsSent = false;            // the page has the latest uiRegions
   int armedSent = -1;                    // what the page was last told of `armed` (-1: nothing)
   double lockRemX = 0.0, lockRemY = 0.0; // the pointer lock's fractions of a pixel, carried
   double poseMirrorAccum = 0.0;
@@ -548,6 +611,7 @@ void CameraController::seedState() {
   getState("settings.pointer_capture").value(s.pointerCapture ? 1 : 0);
   getState("settings.mouse_look").value(s.mouseLook ? 1 : 0);
   getState("settings.primary_drag_pans").value(s.primaryDragPans ? 1 : 0);
+  getState("settings.primary_drag_steers").value(s.primaryDragSteers ? 1 : 0);
   getState("settings.pose_mirror_hz").value(s.poseMirrorHz);
   getState("keys.forward").value(s.kForward);
   getState("keys.backward").value(s.kBackward);
@@ -630,6 +694,7 @@ void CameraController::readAllFromState() {
   s.pointerCapture = i("settings.pointer_capture", s.pointerCapture ? 1 : 0) != 0;
   s.mouseLook = i("settings.mouse_look", s.mouseLook ? 1 : 0) != 0;
   s.primaryDragPans = i("settings.primary_drag_pans", s.primaryDragPans ? 1 : 0) != 0;
+  s.primaryDragSteers = i("settings.primary_drag_steers", s.primaryDragSteers ? 1 : 0) != 0;
   s.poseMirrorHz = d("settings.pose_mirror_hz", s.poseMirrorHz);
   s.kForward = str("keys.forward", s.kForward);
   s.kBackward = str("keys.backward", s.kBackward);
@@ -677,6 +742,7 @@ void CameraController::syncConfigToState() {
   getState("settings.pointer_capture").value(s.pointerCapture ? 1 : 0);
   getState("settings.mouse_look").value(s.mouseLook ? 1 : 0);
   getState("settings.primary_drag_pans").value(s.primaryDragPans ? 1 : 0);
+  getState("settings.primary_drag_steers").value(s.primaryDragSteers ? 1 : 0);
   getState("settings.pose_mirror_hz").value(s.poseMirrorHz);
   getState("keys.forward").value(s.kForward);
   getState("keys.backward").value(s.kBackward);
@@ -764,9 +830,21 @@ bool CameraController::poseMirrorStale() const {
 }
 
 void CameraController::handleStateChanged(const std::string &childState) {
-  (void)childState;
   if (m_impl->selfWrite.load())
     return; // our own write echoing back
+  // A frame request: "min_x min_y min_z max_x max_y max_z" written to <camera>.frame (a scene's
+  // data node, when its dataset draws: scene_realize's `frame:`) frames those bounds as
+  // frameBounds does. Anything else in it is ignored.
+  const std::string key = "frame";
+  if (childState == key ||
+      (childState.size() > key.size() &&
+       childState.compare(childState.size() - key.size() - 1, std::string::npos, "." + key) == 0)) {
+    std::istringstream in(getState(key).value());
+    double b[6];
+    if (in >> b[0] >> b[1] >> b[2] >> b[3] >> b[4] >> b[5])
+      frameBounds(b[0], b[1], b[2], b[3], b[4], b[5]);
+    return;
+  }
   readAllFromState();
   applyToCamera();
 }
@@ -1155,7 +1233,7 @@ void CameraController::mouseLook(int dxPixels, int dyPixels) {
       recenterPointer();
   } else if (s.mode == Mode::Map) {
     // 2-D map: drag PANS the view; rotation is deliberately unreachable.
-    if (s.dragging) {
+    if (s.dragging || s.secondaryDragging) {
       // Convert pixel motion to world units through the parallel scale so the
       // grabbed point stays under the cursor at any zoom. Scale by the VIEWPORT's
       // pixel height (the renderer's), not the whole window's, so a PiP inset
@@ -1194,7 +1272,7 @@ void CameraController::mouseLook(int dxPixels, int dyPixels) {
       applyToCamera();
       syncConfigToState();
     }
-  } else if (s.dragging || looking) {
+  } else if (s.dragging || s.secondaryDragging || looking) {
     // ORBIT: the scene turns WITH the pointer, so dragging DOWN has to lift the
     // eye up and over the subject — you pull its top toward you and see more of
     // it — which is the OPPOSITE sign from Fly, where dragging down looks down.
@@ -1207,7 +1285,7 @@ void CameraController::mouseLook(int dxPixels, int dyPixels) {
         std::max(std::max(-89.0, s.minElevation),
                  std::min(std::min(89.0, s.maxElevation), s.orbitElevation - dpitch));
     applyToCamera();
-    if (looking && !s.dragging)
+    if (looking && !s.dragging && !s.secondaryDragging)
       recenterPointer();
   }
 }
@@ -1265,20 +1343,68 @@ void CameraController::setPrimaryDragPans(bool on) {
 }
 bool CameraController::primaryDragPans() const { return m_impl->primaryDragPans; }
 
+void CameraController::setPrimaryDragSteers(bool on) {
+  m_impl->primaryDragSteers = on;
+  m_impl->selfWrite = true; // as setPrimaryDragPans: no echo through readAllFromState
+  getState("settings.primary_drag_steers").value(on ? 1 : 0);
+  m_impl->selfWrite = false;
+}
+bool CameraController::primaryDragSteers() const { return m_impl->primaryDragSteers; }
+
+bool CameraController::steering() const {
+  const Impl &s = *m_impl;
+  return s.steering && s.mode == Mode::Orbit && !s.mouseLook;
+}
+
+bool CameraController::steerPoint(int &x, int &y) const {
+  const Impl &s = *m_impl;
+  if (!steering() || !s.steerMoved)
+    return false;
+  x = s.steerX;
+  y = s.steerY;
+  return true;
+}
+
+void CameraController::beginSecondaryDrag() { m_impl->secondaryDragging = true; }
+void CameraController::endSecondaryDrag() { m_impl->secondaryDragging = false; }
+
 void CameraController::beginDrag() { m_impl->dragging = true; }
 
 void CameraController::notePointerDown(int x, int y) {
-  m_impl->pointerDown = true;
-  m_impl->pressX = x;
-  m_impl->pressY = y;
+  Impl &s = *m_impl;
+  s.pointerDown = true;
+  s.pressX = x;
+  s.pressY = y;
+  // Drag to look with a host that steers: the drag points, once it is more than a click.
+  s.steering = s.primaryDragSteers && s.mode == Mode::Orbit && !s.mouseLook;
+  s.steerMoved = false;
+  s.steerX = x;
+  s.steerY = y;
+}
+
+void CameraController::notePointerMove(int x, int y) {
+  Impl &s = *m_impl;
+  if (!s.steering)
+    return;
+  s.steerMoved =
+      s.steerMoved || std::abs(x - s.pressX) > kClickSlop || std::abs(y - s.pressY) > kClickSlop;
+  s.steerX = x;
+  s.steerY = y;
+}
+
+void CameraController::cancelPointer() {
+  Impl &s = *m_impl;
+  s.pointerDown = false;
+  s.steering = false;
+  s.dragging = false;
 }
 
 void CameraController::notePointerUp(int x, int y) {
   Impl &s = *m_impl;
+  s.steering = false;
   if (!s.pointerDown)
     return;
   s.pointerDown = false;
-  constexpr int kClickSlop = 4; // px: farther than this from the press is a drag, not a click
   if (std::abs(x - s.pressX) <= kClickSlop && std::abs(y - s.pressY) <= kClickSlop) {
     if (s.mouseLook && s.mode == Mode::Orbit) {
       // Mouse look: a click on the scene takes the pointer (the browser grants its lock only
@@ -1354,7 +1480,13 @@ bool CameraController::mouseLooking() const {
   const Impl &s = *m_impl;
   return s.mouseLook && s.mode == Mode::Orbit && s.pointerCapture;
 }
-void CameraController::setPointerOverUi(bool over) { m_impl->pointerOverUi = over; }
+void CameraController::setUiRegions(std::vector<float> rects) {
+  Impl &s = *m_impl;
+  if (rects == s.uiRegions)
+    return;
+  s.uiRegions = std::move(rects);
+  s.uiRegionsSent = false;
+}
 
 double CameraController::orbitDistance() const { return m_impl->orbitDistance; }
 
@@ -1391,22 +1523,29 @@ void CameraController::applyPointerCapture() {
   Impl &s = *m_impl;
 #ifdef __EMSCRIPTEN__
   const char *selector = "#canvas";
+#ifdef CVC_ENABLE_SDL
+  if (auto *sdl = SdlGLRenderWindow::SafeDownCast(s.window))
+    selector = sdl->GetCanvasSelector();
+#endif
   if (auto *wi = vtkWebAssemblyRenderWindowInteractor::SafeDownCast(s.interactor))
     if (wi->GetCanvasSelector())
       selector = wi->GetCanvasSelector();
-  // A press on the canvas takes the lock itself while mouse look waits for one: tell the page.
-  const int armed = s.mouseLook && s.mode == Mode::Orbit && !s.pointerOverUi ? 1 : 0;
-  if (s.captureApplied == s.pointerCapture) {
-    if (armed != s.armedSent && (armed || s.browserLock)) {
-      s.browserLock = true;
-      cvcgl_pointer_lock(-1, armed, selector);
-      s.armedSent = armed;
-    }
-    return;
+  // A press on the canvas takes the lock itself while mouse look waits for one (one outside the
+  // UI's windows, which the page tests against the press's own position): tell the page.
+  const int armed = s.mouseLook && s.mode == Mode::Orbit ? 1 : 0;
+  if (s.captureApplied != s.pointerCapture) {
+    s.browserLock = s.browserLock || s.pointerCapture;
+    cvcgl_pointer_lock(s.pointerCapture ? 1 : 0, armed, selector); // the browser hides the cursor
+    s.armedSent = armed;
+  } else if (armed != s.armedSent && (armed || s.browserLock)) {
+    s.browserLock = true;
+    cvcgl_pointer_lock(-1, armed, selector);
+    s.armedSent = armed;
   }
-  s.browserLock = s.browserLock || s.pointerCapture;
-  cvcgl_pointer_lock(s.pointerCapture ? 1 : 0, armed, selector); // the browser hides the cursor
-  s.armedSent = armed;
+  if (s.browserLock && !s.uiRegionsSent) {
+    cvcgl_pointer_lock_ui(s.uiRegions.data(), static_cast<int>(s.uiRegions.size()));
+    s.uiRegionsSent = true;
+  }
 #else
   if (s.captureApplied == s.pointerCapture)
     return;

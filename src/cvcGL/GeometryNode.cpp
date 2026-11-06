@@ -24,6 +24,8 @@
 #include <vtkFloatArray.h>
 #include <vtkImageData.h>
 #include <vtkLine.h>
+#include <vtkMatrix4x4.h>
+#include <vtkNew.h>
 #include <vtkOpenGLPolyDataMapper.h>
 #include <vtkOpenGLRenderWindow.h>
 #include <vtkOpenGLState.h>
@@ -455,6 +457,48 @@ void GeometryNode::setTexture(const cvc::image &img, bool zeroCopy) {
     // LAST -- the updatePolyData above ran before m_texture was set, so it may have
     // enabled scalar visibility for a colored mesh. The rule is applyVertexColors':
     // only a scalar field (an explicit request) still shows over the texture.
+    m_mapper->SetScalarVisibility(m_scalarActive && !m_useSingleColor && m_polyData &&
+                                  m_polyData->GetPointData()->GetScalars() != nullptr);
+    m_actor->Modified();
+  });
+}
+
+bool GeometryNode::hasTexture() const { return m_texture.Get() != nullptr; }
+
+int GeometryNode::textureWidth() const {
+  int d[3] = {0, 0, 0};
+  if (m_texture.Get() && m_textureImageData.Get())
+    m_textureImageData->GetDimensions(d);
+  return d[0];
+}
+
+int GeometryNode::textureHeight() const {
+  int d[3] = {0, 0, 0};
+  if (m_texture.Get() && m_textureImageData.Get())
+    m_textureImageData->GetDimensions(d);
+  return d[1];
+}
+
+void GeometryNode::shareTexture(std::shared_ptr<const GeometryNode> source) {
+  // Owner thread, like setTexture: and `source`'s own setTexture, marshaled before this, has run
+  // by the time this reads its texture.
+  if (!source)
+    return;
+  runOnMainThread([this, source]() {
+    const GeometryNode &from = *source;
+    if (!from.m_texture) {
+      clearTexture();
+      return;
+    }
+    m_texture = from.m_texture; // the same vtkTexture: one GL texture for every mesh sharing it
+    m_textureImageData = from.m_textureImageData;
+    m_textureStorage = from.m_textureStorage;
+    const bool reflip = m_textureFlipV != from.m_textureFlipV;
+    m_textureFlipV = from.m_textureFlipV;
+    if (reflip && m_hasGeometry && m_geometry)
+      updatePolyData(*m_geometry);
+    m_actor->SetTexture(m_texture);
+    // As setTexture: the texture is the colour, unless a scalar field asks otherwise.
     m_mapper->SetScalarVisibility(m_scalarActive && !m_useSingleColor && m_polyData &&
                                   m_polyData->GetPointData()->GetScalars() != nullptr);
     m_actor->Modified();
@@ -1198,6 +1242,16 @@ void GeometryNode::addFragmentShaderReplacement(const std::string &original,
   });
 }
 
+void GeometryNode::addFragmentShaderPostReplacement(const std::string &original,
+                                                    const std::string &replacement) {
+  runOnMainThread([this, original, replacement]() {
+    m_userShaderRepl[{2, original}] = replacement;
+    installShaderReplacement({2, original});
+    if (SceneGraph *sg = getSceneGraph())
+      sg->requestRender();
+  });
+}
+
 void GeometryNode::clearShaderReplacements() {
   runOnMainThread([this]() {
     m_userShaderRepl.clear();
@@ -1232,11 +1286,12 @@ void GeometryNode::installShaderReplacement(const ShaderReplKey &key) {
   const std::string &anchor = key.second;
   const auto in = m_internalShaderRepl.find(key);
   const auto user = m_userShaderRepl.find(key);
+  const bool post = key.first == 2; // applied after VTK's own replacements
   if (in == m_internalShaderRepl.end() && user == m_userShaderRepl.end()) {
     if (key.first == 0)
       sp->ClearVertexShaderReplacement(anchor, true);
     else
-      sp->ClearFragmentShaderReplacement(anchor, true);
+      sp->ClearFragmentShaderReplacement(anchor, !post);
     return;
   }
   // vtkShaderProperty keeps ONE replacement per anchor, so compose: the
@@ -1256,7 +1311,7 @@ void GeometryNode::installShaderReplacement(const ShaderReplKey &key) {
   if (key.first == 0)
     sp->AddVertexShaderReplacement(anchor, true, text, false);
   else
-    sp->AddFragmentShaderReplacement(anchor, true, text, false);
+    sp->AddFragmentShaderReplacement(anchor, !post, text, false);
 }
 
 void GeometryNode::setForceOpaque(bool on) {
@@ -1327,13 +1382,34 @@ void GeometryNode::onUpdateShader(vtkObject *, unsigned long, void *clientData, 
   for (auto &kv : self->m_uniforms3F)
     if (program->IsUniformUsed(kv.first.c_str()))
       program->SetUniform3f(kv.first.c_str(), kv.second.data());
-  if (self->m_shaderTextures.empty())
-    return;
   std::vector<std::pair<std::string, vtkTextureObject *>> textures;
-  textures.reserve(self->m_shaderTextures.size());
   for (auto &kv : self->m_shaderTextures)
     textures.emplace_back(kv.first, kv.second.GetPointer());
-  bindShaderTextures(program, textures);
+  for (auto &src : self->m_sharedInputs) {
+    const ShaderInputs &in = *src.second;
+    for (auto &kv : in.f)
+      if (program->IsUniformUsed(kv.first.c_str()))
+        program->SetUniformf(kv.first.c_str(), kv.second);
+    for (auto &kv : in.f3)
+      if (program->IsUniformUsed(kv.first.c_str()))
+        program->SetUniform3f(kv.first.c_str(), kv.second.data());
+    for (auto &kv : in.f4)
+      if (program->IsUniformUsed(kv.first.c_str()))
+        program->SetUniform4f(kv.first.c_str(), kv.second.data());
+    for (auto &kv : in.m4)
+      if (program->IsUniformUsed(kv.first.c_str())) {
+        // SetUniformMatrix uploads the rows as GLSL's columns (VTK hands it its own matrices
+        // pre-transposed), so hand it the transpose for `m * v` in GLSL to be the matrix's.
+        vtkNew<vtkMatrix4x4> m;
+        m->DeepCopy(kv.second.data());
+        m->Transpose();
+        program->SetUniformMatrix(kv.first.c_str(), m);
+      }
+    for (auto &kv : in.tex)
+      textures.emplace_back(kv.first, kv.second.GetPointer());
+  }
+  if (!textures.empty())
+    bindShaderTextures(program, textures);
 }
 
 void GeometryNode::bindShaderTextures(
@@ -1388,6 +1464,23 @@ void GeometryNode::ensureShaderTexObserver() {
   m_shaderTexCb->SetCallback(&GeometryNode::onUpdateShader);
   m_mapper->AddObserver(vtkCommand::UpdateShaderEvent, m_shaderTexCb);
   m_shaderTexObserverInstalled = true;
+}
+
+void GeometryNode::setSharedShaderInputs(const std::string &key,
+                                         std::shared_ptr<const ShaderInputs> in) {
+  runOnMainThread([this, key, in]() {
+    if (in)
+      m_sharedInputs[key] = in;
+    else
+      m_sharedInputs.erase(key);
+    ensureShaderTexObserver();
+    if (SceneGraph *sg = getSceneGraph())
+      sg->requestRender();
+  });
+}
+
+bool GeometryNode::hasSharedShaderInputs(const std::string &key) const {
+  return m_sharedInputs.count(key) != 0;
 }
 
 void GeometryNode::setShaderTexture(const std::string &name, vtkTextureObject *tex) {

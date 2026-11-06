@@ -31,6 +31,7 @@
 #include <cvc/nav/coef_train.h> // city_scene, training_scene
 #include <cvc/nav/sim_world.h>
 #include <gtest/gtest.h>
+#include <stdexcept>
 #include <vector>
 
 using cvc::nav::city_scene;
@@ -113,6 +114,54 @@ TEST(NavSimWorld, StepsAdvanceWithoutCorruption) {
   }
   for (int i = 0; i < 2 * n; ++i)
     EXPECT_TRUE(std::isfinite(pos[i]));
+}
+
+// set_truth: a wall raised in an open field mid-run. truth() has it at once; the agent's belief
+// gains it from the next sense tick (a ray reaches it), and never before; taken down again, the
+// belief clears as the sensor sees free space there. Fog-of-war stories on the native world (a
+// blocker that appears, traffic) rely on this.
+TEST(NavSimWorld, SetTruthIsSensedFromTheNextSenseTick) {
+  const training_scene ts = city_scene(96);
+  sim_world::config cfg = make_cfg(ts);
+  cfg.sense_every = 2;
+  const std::size_t hw = static_cast<std::size_t>(ts.rows) * ts.cols;
+  const std::vector<std::uint8_t> open(hw, 0);
+  const float o[2] = {0.0f, 0.0f}, g[2] = {0.0f, 0.0f}, col[3] = {1, 1, 1};
+  sim_world w(cfg, open.data(), open.data(), coef_mlp::default_biased(), o, g, col, 1);
+  w.step(0);
+
+  // The agent's cell, and a wall 4..5 cells east of it, 13 cells tall.
+  float pos[2];
+  w.snapshot(pos, nullptr, nullptr, nullptr, nullptr);
+  const int r =
+      static_cast<int>(std::lround((pos[1] - ts.min_y) / (ts.max_y - ts.min_y) * (ts.rows - 1)));
+  const int c =
+      static_cast<int>(std::lround((pos[0] - ts.min_x) / (ts.max_x - ts.min_x) * (ts.cols - 1)));
+  std::vector<std::uint8_t> walled = open;
+  for (int rr = r - 6; rr <= r + 6; ++rr)
+    for (int cc = c + 4; cc <= c + 5; ++cc)
+      walled[static_cast<std::size_t>(rr) * ts.cols + cc] = 1;
+  const auto believed = [&] {
+    int k = 0;
+    for (std::size_t i = 0; i < hw; ++i)
+      k += walled[i] && w.belief_occ(0)[i];
+    return k;
+  };
+  ASSERT_EQ(believed(), 0) << "an open field, believed open";
+
+  w.set_truth(walled.data());
+  EXPECT_TRUE(std::equal(walled.begin(), walled.end(), w.truth())) << "truth() reads it at once";
+  EXPECT_EQ(believed(), 0) << "nothing is believed before the agent senses it";
+  for (int k = 0; k < cfg.sense_every; ++k)
+    w.step(0);
+  const int seen = believed();
+  EXPECT_GT(seen, 4) << "the near face is believed after a sense tick";
+
+  w.set_truth(open.data());
+  for (int k = 0; k < 12 * cfg.sense_every; ++k)
+    w.step(0);
+  EXPECT_LT(believed(), seen) << "taken down, the belief clears where the sensor sees free space";
+  EXPECT_THROW(w.set_truth(nullptr), std::invalid_argument);
 }
 
 } // namespace

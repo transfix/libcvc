@@ -179,10 +179,10 @@ class Config(object):
 
 
 EXTERNAL = ('req', 'enter_step', 'finish', 'raise', 'hraise', 'signal', 'hend', 'prio', 'kill',
-            'deadline', 'destroy', 'attach', 'foreign', 'cclear')
+            'deadline', 'destroy', 'attach', 'foreign', 'cclear', 'wraise')
 
 # rev 5: actions that run a process's step, which advance its home's progress cell (a logical clock)
-STEPS = ('req', 'enter_step', 'finish', 'raise', 'hraise', 'signal', 'hend')
+STEPS = ('req', 'enter_step', 'finish', 'raise', 'hraise', 'signal', 'hend', 'wraise')
 
 
 class World(object):
@@ -685,6 +685,9 @@ class World(object):
                 N = self.mcall(self.M.release, p.P, h.id)
                 ops += self.dlv_ops(N)
         if f.kind == 'enter' and p.lock_ticket is not None:
+            # the defensive path (5.4): withdraw the ticket and deliver the cancel's notes; then
+            # the resume, which releases a grant the cancel found (from L3 another home may grant
+            # it meanwhile)
             self.soft.append(('defensive-path', 'release_lock_frame withdrew a ticket still pending'))
             tid = p.lock_ticket
             _, N2 = self.mcall(self.M.cancel, p.P, tid)
@@ -693,10 +696,15 @@ class World(object):
 
     def op_defensive_resume(self, hid, pid, tid):
         p = self.procs[pid]
-        self.mcall(self.M.resume, p.P, tid)
+        out, _ = self.mcall(self.M.resume, p.P, tid)
         p.lock_ticket = None
         p.lock_waiting = False
         p.lock_deadline = False
+        if out[0] == 'granted' and 'unwound-wait-drops-grant' not in self.cfg.mutation:
+            # released as any lock_enter frame's grant is, and the release's notes delivered (the
+            # reading before the L3 review fix dropped it: a hold no mirror has, I3)
+            STATS['unwound_wait_grant_released'] += 1
+            self.push_front(hid, self.dlv_ops(self.mcall(self.M.release, p.P, out[1])))
 
     # -- process actions ------------------------------------------------------------------------------
     def a_req(self, pid, ri, kind):
@@ -810,6 +818,18 @@ class World(object):
         p = self.procs[pid]
         p.in_handler = False
         p.hbase = None
+
+    def a_wraise(self, pid):
+        # directed checks only, never enabled: a raise into a parked waiter, whose lock_enter frame
+        # unwinds with its ticket still set (5.4's defensive path; 5.3's unreachable "woken
+        # without a grant" is one way): it runs again, its wait left, and the unwind withdraws it
+        p = self.procs[pid]
+        if p.status != 'parked' or not p.frames or p.frames[-1].kind != 'enter':
+            self.fail('model', 'raise into p%d, which is not parked on a lock' % pid)
+        p.status = 'run'
+        p.lock_waiting = False
+        p.lock_deadline = False
+        self.a_finish(pid)
 
     def a_prio(self, pid, v):
         p = self.procs[pid]
