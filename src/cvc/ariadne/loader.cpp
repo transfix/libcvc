@@ -102,8 +102,8 @@ bool is_builtin_block(const std::string &k) {
          k == "children" || k == "scene" || k == "customs" || k == "init" || k == "on_tick" ||
          k == "on_key" || k == "on_pointer" || k == "on_signal" || k == "units" || k == "import" ||
          k == "channels" || k == "lint" || k == "args" || k == "requires" || k == "keys" ||
-         k == "windows_menu" || k == "tests" || k == "functions" || k == "data" ||
-         k == "assets" || k == "scenes";
+         k == "windows_menu" || k == "tests" || k == "functions" || k == "data" || k == "assets" ||
+         k == "scenes";
 }
 } // namespace
 
