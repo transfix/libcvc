@@ -423,8 +423,18 @@ TEST(WorldGenerated, BuildingsAreInTheRaster) {
       EXPECT_EQ(w.raster.hard[i], w.model->registry()[wall].hard ? 1 : 0);
     }
   EXPECT_GE(walls, w.building_count);
+  // Without a city there are no wall cells, and the rest of the ground is occupied as it was: the
+  // walls are what the city adds. (Comparing the whole occupied count does not say this: the
+  // roads' banks lift some deep water, which is occupied, to dry gravel, which is not.)
   p.city = "none";
-  EXPECT_LT(generate_world(p).raster.occupied_count(), w.raster.occupied_count());
+  const generated_world bare = generate_world(p);
+  std::size_t bareWalls = 0, wallsOccupied = 0;
+  for (std::size_t i = 0; i < bare.raster.klass.size(); ++i)
+    bareWalls += bare.raster.klass[i] == wall;
+  for (std::size_t i = 0; i < w.raster.klass.size(); ++i)
+    wallsOccupied += w.raster.klass[i] == wall && w.raster.occupancy[i] == 1;
+  EXPECT_EQ(bareWalls, 0u);
+  EXPECT_EQ(wallsOccupied, walls);
 }
 
 // world_builder steps generate_world a stage at a time: stepped in small budgets it makes the same
