@@ -8,7 +8,7 @@
 */
 
 // geom_rollout.cpp — see geom_rollout.h. The geometry rollout
-// (integrate_surrogate_v2, explicit or semi-implicit Euler), its reverse-mode
+// (integrate_surrogate_v2, semi-implicit or explicit Euler), its reverse-mode
 // adjoint, and the multi-start robustness penalty L_multi. Reuses the CVC_HD IPC
 // primitives from detail/material_rollout.h. Built with -ffp-contract=off (CMake).
 

@@ -133,6 +133,87 @@ beating it. Both are gradient-correct (see [gradcheck](#correctness-the-gradchec
 prefer the surrogate unless you specifically need the deployment integrator in the
 loop.
 
+### The point mass's integrator
+
+`train_config::point_mass` selects the surrogate's integrator.
+
+- **`point_mass_integrator::semi_implicit`** is the default. It is GRL-SNAM's `sdf_rollout`, which
+  trained the shipped weights: the velocity updates first, and the position steps with the new
+  velocity.
+- **`explicit_euler`** steps the position with the old velocity. It is CPU only, and it is kept as
+  the A/B's control.
+
+The material trainer's multi-start term, `L_multi` (`geom_rollout.h`), is semi-implicit by default
+too ([NAV_MATERIAL.md](NAV_MATERIAL.md)).
+
+**The A/B** (`NavPlantConvergence.PointMassIntegratorAB`, a heavy run: `CVC_NAV_INTEGRATOR_AB=1`):
+
+- **Training.** 10 training seeds per arm on the city (`city_scene(96)`, `n` 128, `horizon` 28,
+  `window` 7).
+- **Evaluation.** Every policy, and the untrained one, drives Jolt RoboRacers over 20 seeds of 48
+  agents for 400 ticks.
+- **Statistics.** Differences are from semi-implicit, with a 95% paired bootstrap CI that resamples
+  both the training seeds and the evaluation seeds.
+- **Columns.** Building hits and seconds touching another vehicle are per agent per run. Path is
+  each agent's chassis distance, in metres. Closest is the mean over agents of the closest each
+  chassis's centre came to a building.
+
+| Training | Arm | Reach | Building hits | Contact s | Path m | Closest m |
+|---|---|---|---|---|---|---|
+| untrained | | 52.2% | 7.23 | 0.036 | 44.0 | 3.17 |
+| lr 5e-5, 150 steps (the gate's) | semi-implicit | 51.3% | 7.36 | 0.034 | 43.8 | 3.17 |
+| | explicit - semi | +1.0 [+0.1, +1.9] | +0.32 [+0.21, +0.45] | +0.005 [+0.003, +0.008] | +2.1 [+1.4, +2.7] | +0.02 [+0.01, +0.03] |
+| | Strang - semi | +0.6 [-0.2, +1.4] | +0.00 [-0.12, +0.13] | +0.001 [-0.002, +0.003] | +0.0 [-0.5, +0.5] | +0.01 [-0.01, +0.02] |
+| lr 1e-4, 300 steps | semi-implicit | 46.1% | 5.37 | 0.052 | 48.4 | 3.47 |
+| | explicit - semi | -7.3 [-10.1, -4.7] | -2.32 [-3.31, -1.42] | -0.006 [-0.009, -0.002] | -4.3 [-5.4, -3.2] | +0.17 [+0.11, +0.25] |
+| | Strang - semi | +0.8 [-1.6, +3.3] | +0.22 [-0.86, +1.35] | +0.003 [-0.001, +0.007] | +1.0 [-0.5, +2.4] | +0.01 [-0.07, +0.08] |
+| lr 2e-4, 300 steps | semi-implicit | 22.3% | 3.11 | 0.028 | 30.8 | 4.53 |
+| | explicit - semi | -4.7 [-8.4, -1.6] | -0.08 [-0.16, +0.01] | -0.006 [-0.011, -0.002] | -4.6 [-7.8, -2.0] | +0.29 [+0.06, +0.55] |
+| | Strang - semi | +3.0 [-1.0, +7.4] | +0.14 [+0.06, +0.21] | +0.002 [-0.003, +0.008] | +3.1 [-0.2, +6.7] | -0.26 [-0.51, -0.01] |
+
+The same test books each arm's point-mass steps, driven by its trained policies (96 agents, 60
+steps, per training seed).
+
+- **Which steps.** Only steps outside every barrier are booked, where U is exactly the goal spring,
+  and only those whose cheap bound exceeds 1e-5. Below that, an agent parked at its goal moves less
+  energy than float round-off.
+- **The sharp check.** It is semi-implicit's: `(r_E - r_hat_E) / bound`, with `book_step`'s
+  `r_hat_E`.
+- **Strang's books.** Strang keeps its own: the damping halves and both clamps exactly, a cross
+  term for the clamp before the drift, and `r_hat_E = 0`, since its residual is third order.
+
+| Training | Arm | Steps booked | Largest \|(r_E - r_hat_E) / bound\| | Steps alarming (\|.\| > 0.1) | Of those, gaining energy |
+|---|---|---|---|---|---|
+| lr 5e-5, 150 | semi-implicit | 24,657 | 4.0e-4 | none | |
+| | explicit | 25,097 | 0.996 | 19.4% | 93.5% |
+| | Strang | 24,821 | 5.8e-3 | none | |
+| lr 1e-4, 300 | semi-implicit | 26,237 | 1.2e-3 | none | |
+| | explicit | 20,475 | 1.000 | 15.6% | 87.1% |
+| | Strang | 25,946 | 5.6e-3 | none | |
+| lr 2e-4, 300 | semi-implicit | 12,745 | 1.2e-3 | none | |
+| | explicit | 12,438 | 1.000 | 13.9% | 78.2% |
+| | Strang | 13,290 | 5.5e-3 | none | |
+
+**Read it carefully.**
+
+- **At the gate's settings the arms barely move from one another.** Training at lr 5e-5 barely
+  moves the policy. Even so, the explicit-trained policies drive 5% further and hit buildings 4%
+  more, for a point of reach.
+- **When training moves the policy, explicit Euler costs reach:** 7.3 points at lr 1e-4 and 4.7 at
+  2e-4. Its policies drive less (shorter paths, fewer hits) and arrive less.
+- **The explicit-Euler alarm fires on 14-19% of the booked steps, not on every step.**
+  - Under these policies the point mass is heavily damped and near its terminal velocity, where
+    explicit Euler's gain, `dt^2 g.(g + gamma v)`, vanishes.
+  - The steps that accelerate alarm, and 78-94% of those gained energy.
+  - On an undamped orbit it alarms on every step (`NavPotential.ExplicitEulerRaisesTheAlarm`).
+- **Strang did not earn its place, so it was dropped.**
+  - The arm was velocity Verlet on the conservative force, with the damping (exactly) and the speed
+    clamp split out.
+  - Its reach is never different from semi-implicit's outside the CI.
+  - At lr 2e-4 it hits buildings more and comes 0.26 m closer to them.
+  - It costs two force evaluations a step, and its books need their own accounting.
+  - The arm, its gradcheck and its books are in the commit that added this A/B (`AB_ARMS=semi,explicit,strang`).
+
 ## The dynamic vehicle: `dyn_bike_step` (P8a)
 
 `inc/cvc/nav/detail/dyn_bike.h` is a differentiable dynamic single-track vehicle beside

@@ -10,9 +10,10 @@
 // nav_geom_rollout_grad_test — finite-difference gradchecks for the P5-P3b
 // geometry rollout adjoint (integrate_surrogate_v2_vjp) and the multi-start
 // penalty (multi_start_penalty), both w.r.t. the geometry coefficients
-// (alphas, beta, gamma), under both integrators and with sampled starts at a
-// fixed seed. Torch-independent ground truth, same discipline as the material
-// rollout gradcheck. The NavGeomRolloutParity cases then pin the draw (bit for
+// (alphas, beta, gamma), under both integrators (semi-implicit Euler, the
+// default, and explicit) and with sampled starts at a fixed seed.
+// Torch-independent ground truth, same discipline as the material rollout
+// gradcheck. The NavGeomRolloutParity cases then pin the draw (bit for
 // bit) and the loss/grads (to float tolerance) against goldens generated from
 // GRL-SNAM's surrogate_robust.py by gen_nav_geom_multistart_golden.py.
 
@@ -202,6 +203,7 @@ TEST(NavGeomRolloutGrad, V2SemiImplicitGradcheckMatchesFiniteDifference) { v2_gr
 // The two integrators really differ: same inputs, different trajectory.
 TEST(NavGeomRolloutGrad, SemiImplicitIsADifferentIntegrator) {
   GB b = make_batch(31);
+  b.gp.semi_implicit = false;
   std::vector<float> o1(b.o0), v1(b.v0), mc1(b.B), o2(b.o0), v2(b.v0), mc2(b.B);
   integrate_surrogate_v2(o1.data(), v1.data(), b.goal.data(), b.C.data(), b.R.data(), b.mask.data(),
                          b.alphas.data(), b.beta.data(), b.gamma.data(), b.rr.data(),
@@ -316,6 +318,13 @@ multi_start_params sampled(bool semi_implicit, std::uint32_t seed = 11) {
   return mp;
 }
 
+// The legacy single start (frac = 0.9), with the integrator named.
+multi_start_params legacy(bool semi_implicit) {
+  multi_start_params mp;
+  mp.semi_implicit = semi_implicit;
+  return mp;
+}
+
 void ms_gradcheck(const multi_start_params &mp, const char *tag) {
   const GB b = make_ms_batch(17);
   const int P = num_params(b);
@@ -366,12 +375,13 @@ void ms_gradcheck(const multi_start_params &mp, const char *tag) {
 }
 
 TEST(NavGeomRolloutGrad, MultiStartGradcheckMatchesFiniteDifference) {
-  ms_gradcheck(multi_start_params{}, "legacy explicit");
+  ms_gradcheck(legacy(false), "legacy explicit");
 }
 
 // Semi-implicit applies each step's acceleration at once, so on this batch at
-// the explicit-tuned dt' = 4*dt its starts land deep in the barrier's stiff,
-// kinked band: there the central FD only settles onto the analytic gradient
+// dt' = 4*dt (tuned when the explicit order was the default) its starts land
+// deep in the barrier's stiff, kinked band: there the central FD only settles
+// onto the analytic gradient
 // below eps ~ 2e-5 (an eps sweep converges to it param by param), too fine for
 // a float rollout across the board. dt' = 2.5*dt keeps the same physics in the
 // well-conditioned range. The 4*dt semi-implicit gradient itself is pinned
@@ -383,7 +393,7 @@ multi_start_params semi_for_fd(multi_start_params mp) {
 }
 
 TEST(NavGeomRolloutGrad, MultiStartSemiImplicitGradcheckMatchesFiniteDifference) {
-  ms_gradcheck(semi_for_fd(multi_start_params{}), "legacy semi");
+  ms_gradcheck(semi_for_fd(legacy(true)), "legacy semi");
 }
 
 TEST(NavGeomRolloutGrad, MultiStartSampledGradcheckMatchesFiniteDifference) {
@@ -413,7 +423,7 @@ TEST(NavGeomRolloutGrad, MultiStartSeedChangesTheDraw) {
   const MSOut a = ms_eval(b, sampled(false, 11)), c = ms_eval(b, sampled(false, 12));
   EXPECT_NE(a.L, c.L);
   // ... and sampling moves the value off the legacy single start.
-  EXPECT_NE(a.L, ms_eval(b, multi_start_params{}).L);
+  EXPECT_NE(a.L, ms_eval(b, legacy(false)).L);
 }
 
 // A degenerate range draws nothing, so the seed is moot and ms_count identical
@@ -428,6 +438,16 @@ TEST(NavGeomRolloutGrad, MultiStartDegenerateRangeIsTheLegacyStart) {
     many.seed = 99;
     EXPECT_TRUE(bit_equal(ms_eval(b, legacy), ms_eval(b, many)));
   }
+}
+
+// Semi-implicit Euler is the default integrator, in both parameter blocks; explicit Euler is
+// semi_implicit = false.
+TEST(NavGeomRolloutGrad, SemiImplicitIsTheDefault) {
+  EXPECT_TRUE(geom_rollout_params{}.semi_implicit);
+  EXPECT_TRUE(multi_start_params{}.semi_implicit);
+  const GB b = make_ms_batch(17);
+  EXPECT_TRUE(bit_equal(ms_eval(b, multi_start_params{}), ms_eval(b, legacy(true))));
+  EXPECT_FALSE(bit_equal(ms_eval(b, multi_start_params{}), ms_eval(b, legacy(false))));
 }
 
 TEST(NavGeomRolloutGrad, MultiStartZeroCountIsZero) {
