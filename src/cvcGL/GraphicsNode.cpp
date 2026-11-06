@@ -886,6 +886,8 @@ void GraphicsNode::addGraphicsChild(std::shared_ptr<GraphicsNode> child) {
 
   // Propagate SceneGraph reference to child
   child->setSceneGraph(getSceneGraph());
+  if (SceneGraph *sg = getSceneGraph())
+    sg->markTreeChanged(); // a mesh decorator (cloud_sky's receivers) looks for it
 
   // A non-casting subtree stays non-casting as it grows (LOD rungs, parts).
   if (!castsShadow())
@@ -942,8 +944,11 @@ void GraphicsNode::removeGraphicsChild(std::shared_ptr<GraphicsNode> child) {
   // the prop has already left the renderer through the scene above. The node
   // used to keep its scene, so a host still holding a removed node published its
   // poses into the scene it had left and posted its work to that scene's queue.
-  if (wasChild)
+  if (wasChild) {
     child->setSceneGraph(nullptr);
+    if (SceneGraph *sg = getSceneGraph())
+      sg->markTreeChanged();
+  }
 
   // Update this node's bounding box after removing child
   if (m_showBBox) {
