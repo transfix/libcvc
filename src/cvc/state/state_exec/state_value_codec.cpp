@@ -13,6 +13,7 @@
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/detail/lock_home.h>
 #include <cvc/state/state_exec/exceptions.h>
+#include <cvc/state/state_exec/heap.h> // track_captured_env
 #include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/state_value_codec.h>
@@ -479,6 +480,9 @@ private:
       const std::string type = get_type(env);
       current = type != "env_chain";
       cls->env_snapshot = env_at(env, root);
+      // As the evaluators do when they make a closure: bound back into the scope it captures (a
+      // defun, a class's method), it is a cycle only the collector frees (heap.h).
+      track_captured_env(cls->env_snapshot);
     }
     if (has_child(node, "__body__"))
       push(kind::body, node("__body__"), &cls->body, nullptr, nullptr, root, !current);
