@@ -387,7 +387,12 @@ jobs:
           # fallback until the Phase-9 emulated-arch/arm64 builders land.
           # 22.04 here too, for the same floor reason.
           - { os: ubuntu-22.04-arm, platform: linux,   arch: arm64, experimental: true }
-          - { os: macos-14,         platform: macos,   arch: arm64 }
+          # macos-15, not macos-14: GitHub stopped taking macos-14 jobs ("The configuration
+          # 'macos-14-arm64-us-default' is not supported", run 42145987364, v3.7.11), so neither
+          # arm64 row ran and 3.7.11 shipped no macos/arm64 packages. macos_min keeps the floor the
+          # macos-14 image gave: ari 3.7.10 arm64 says minos 14.0, where a macos-15 build with no
+          # pin says 15.0 (as ari 3.7.11 x86_64 from macos-15-intel does).
+          - { os: macos-15,         platform: macos,   arch: arm64, macos_min: "14.0" }
           # macos-13 was RETIRED by GitHub on 2025-12-04. The label still
           # resolves, so jobs did not fail — they queued forever. Observed on
           # 2026-08-05: run 30887429235 sat with both macos-13 jobs `queued`
@@ -457,6 +462,15 @@ jobs:
       CMAKE_CFG: ${{ matrix.config == 'debug' && 'Debug' || 'Release' }}
     steps:
       - uses: actions/checkout@v5
+
+      # A row's macOS floor (matrix.target.macos_min), for every step after this one: clang and
+      # CMake both read MACOSX_DEPLOYMENT_TARGET. Without it a binary's minos is the runner's own
+      # macOS. The recipes' env (MACOSX_DEPLOYMENT_TARGET 13.0) applies only when cvcpkg builds
+      # them, not to the build.sh calls here.
+      - name: macOS deployment target
+        if: matrix.target.macos_min
+        shell: bash
+        run: echo "MACOSX_DEPLOYMENT_TARGET=${{ matrix.target.macos_min }}" >> "$GITHUB_ENV"
 
       - name: Install cvcpkg (from local workspace clone)
         shell: bash
@@ -1728,6 +1742,15 @@ jobs:
           export CVC_JOBS="$(sysctl -n hw.ncpu)"
           bash cvcpkg/recipes/ari/build.sh
           test -x stage-ari/bin/ari
+          # A row with a pinned floor (macos_min) ships binaries that say it: LC_BUILD_VERSION's minos.
+          if [ -n "${MACOSX_DEPLOYMENT_TARGET:-}" ]; then
+            for bin in stage-ari/bin/ari "$STAGE"/lib/libcvc.[0-9]*.dylib; do
+              minos="$(otool -l "$bin" | awk '/LC_BUILD_VERSION/ {f = 1} f && $1 == "minos" {print $2; exit}')"
+              echo "$bin: minos $minos"
+              [ "$minos" = "$MACOSX_DEPLOYMENT_TARGET" ] \
+                || { echo "::error::$bin says minos $minos, not the row's $MACOSX_DEPLOYMENT_TARGET"; exit 1; }
+            done
+          fi
           # The binary that ships must render a document: the real backend and loader, not stubs.
           # Its rpath is @loader_path/../lib, the flat prefix it is installed into, so point dyld at
           # the two prefixes it is split across here.
