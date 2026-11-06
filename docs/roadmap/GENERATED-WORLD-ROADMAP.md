@@ -280,9 +280,14 @@ The conference is the world's second consumer. Peers must see the same world and
       (`GeometryNode::usesLowMemoryMapper`), not by `__EMSCRIPTEN__`, so `CVCGL_LOWMEM_MAPPER=force`
       natively draws the whole terrain lab (ground, shade, shells, volumes) without a shader error:
       the browser's shader path, as GLSL 150, can be checked here.
+  - Landed: new meshes take the shade as they join. `SceneGraph::treeVersion()` moves whenever a
+    node joins or leaves the tree (registered or removed, or a child added or removed anywhere in
+    the scene) and holds still for moves, visibility and geometry swaps (`cvcgl_tree_version`). The
+    deck walks its receivers on the frame after it moves, instead of once a second: an LOD rung or
+    a regenerated world's part is shaded on its first frame, and a settled scene never walks
+    (`cvcgl_ariadne_realize` adds a mesh under the ground and checks the next tick shades it).
   - Still to do for the clouds: measure in Edge and Firefox, now with the shells' 6 samples a
-    fragment (10 layers of sky fill), and check the GLSL ES compile. Wiring new meshes is a periodic
-    walk; an LOD rung or a regenerated world could announce its meshes instead. Then
+    fragment (10 layers of sky fill), and check the GLSL ES compile. Then
     LSYSTEM-LABORATORY-ROADMAP section 4.7's evolving coverage (a cellular automaton) and
     orographic clouds.
 - **Dynamic props, demo3's way**, for vehicles and avatars on the world: unregistered slot nodes,

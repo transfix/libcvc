@@ -446,6 +446,7 @@ std::shared_ptr<GraphicsNode> SceneGraph::addGraphics(const std::string &name,
   }
 
   // Emit signal for dialogs
+  markTreeChanged();
   graphicsChanged();
 
   return graphicsNode;
@@ -477,6 +478,7 @@ std::shared_ptr<GraphicsNode> SceneGraph::addGraphics(const std::string &name) {
   }
 
   // Emit signal for dialogs
+  markTreeChanged();
   graphicsChanged();
 
   return graphicsNode;
@@ -515,6 +517,7 @@ void SceneGraph::removeGraphics(const std::string &name) {
   }
 
   // Emit signal for dialogs
+  markTreeChanged();
   graphicsChanged();
 
   // If scene is now empty, add null graphic back
@@ -656,6 +659,7 @@ std::shared_ptr<VolumeNode> SceneGraph::addGraphics(const std::string &name,
   }
 
   // Emit signal for dialogs
+  markTreeChanged();
   graphicsChanged();
 
   return volumeNode;
