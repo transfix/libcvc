@@ -24,8 +24,8 @@
 
 using namespace std;
 
-extern int verbose;
-extern void (*errorHandler)(const char *, int);
+#include "contour_verbose.h"
+void errorHandler(const char *, int);
 
 //------------------------------------------------------------------------
 //
@@ -43,7 +43,7 @@ typedef struct {
    int d1,d2;
 } EdgeInfo;
 
-static EdgeInfo edgeinfo[12] = {
+static const EdgeInfo edgeinfo[12] = {
    { 0, 0, 0, 0, 0, 1 },
    { 2, 1, 0, 0, 1, 2 },
    { 0, 0, 0, 1, 3, 2 },
@@ -189,7 +189,7 @@ Conplotreg3::InterpEdge(float *val, float *val2, float grad[3][8], float isovalu
    float pt[3];
    float norm[3];
    float fval;
-   EdgeInfo *ei = &edgeinfo[edge];
+   const EdgeInfo *ei = &edgeinfo[edge];
    int v;
 
 					// do the interpolation

@@ -138,7 +138,7 @@ Range::operator+=(const Range &r)
 Range &
 Range::operator-=(const Range &r2)
 {
-   static Range r;
+   Range r;
    Range *result = &r;
    int i, j, n;
    float curmin;
@@ -231,10 +231,10 @@ Range::operator-=(const Range &r2)
 // Intersect --  ***** WARNING - this is broken
 //
 //-----------------------------------------------------------
-Range&
+Range
 Range::operator^(const Range &r2)
 {
-   static Range r;
+   Range r;
    Range *result = &r;
    int i, j, n;
 
@@ -311,7 +311,7 @@ Range::operator==(const Range &r2) const
 Range
 Range::Complement(float min_val, float max_val)
 {
-   static Range r;
+   Range r;
    Range *result=&r;
    int i, n;
 
@@ -355,7 +355,7 @@ Range::Complement(float min_val, float max_val)
 int
 Range::Disjoint(const Range &r2) const
 {
-   static Range diff;
+   Range diff;
 
    diff = (*this) - r2;
    return((diff == *this));

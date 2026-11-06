@@ -1,0 +1,92 @@
+# viewer_groups.ari — two "scenes" as tagged groups of one scene, built from shared assets
+# (docs/ARIADNE.md §5.18).
+#
+# `assets:` loads the bunny, the pillar and the orb once; both groups are built from them. The
+# courtyard (tagged courtyard) and the gallery (tagged gallery) stand side by side in one scene, so
+# they share its lights and soft shadows. `main_view:` draws only the courtyard in the main view;
+# the Gallery window's viewport draws only the gallery, and the Map window draws both from above.
+# Compare viewer_scenes.ari, where each scene is a scene of its own, with its own lights.
+#
+#   arigl viewer_groups.ari
+#   arigl snapshot --frames 6 --png viewer_groups.png viewer_groups.ari
+
+meta:
+  name: Viewer groups (Ariadne)
+  author: cvc
+  min_libcvc: 3.7.0
+
+requires:
+  - gl.scene                       # a scene renderer realizes the scene: block (arigl; not ari)
+
+assets:
+  bunny:
+    source: { file: stanford.bunny }
+    fit: { height: 4, up: y }
+  pillar:
+    source: { box: { size: [1.2, 1.2, 6] } }
+  orb:
+    source: { sphere: 0.9 }
+
+windows:
+  - window: Gallery
+    id: gallery
+    pos: [16, 16]
+    children:
+      - text: "The gallery group, which the main view leaves out."
+      - type: viewport
+        view: gallery_view
+        show: [gallery]
+        shadows: own                 # a bake of its own: the gallery's shadows, not the courtyard's
+        caption: Gallery
+        azimuth: -70
+        elevation: 25
+        width: 340
+        height: 250
+  - window: Map
+    id: map
+    pos: [16, 340]
+    children:
+      - type: viewport
+        view: map_view
+        mode: map
+        shadows: own                 # both groups cast here (the main view's bake has the courtyard only)
+        caption: Both groups
+        chrome: false
+        width: 340
+        height: 170
+
+scene:
+  chrome: false
+  background: { top: [0.40, 0.55, 0.75], bottom: [0.80, 0.84, 0.88] }
+  shadows: { enabled: true, resolution: 2048, softness: 3 }
+  main_view: { show: [courtyard] }  # the main view: the courtyard only (and what is untagged)
+  nodes:
+    # The courtyard, around the origin, on its own ground.
+    - node: courtyard
+      type: group
+      tags: [courtyard]
+      children:
+        - { node: c_ground, type: geometry, source: { plane: { size: 24 } }, material: { color: [0.44, 0.48, 0.40] } }
+        - { node: c_bunny, type: geometry, source: { asset: bunny }, material: { color: [0.88, 0.85, 0.80] } }
+        - { node: c_ne, type: geometry, source: { asset: pillar }, transform: { position: [7, 7, 3] }, material: { color: [0.90, 0.25, 0.20] } }
+        - { node: c_nw, type: geometry, source: { asset: pillar }, transform: { position: [-7, 7, 3] }, material: { color: [0.20, 0.45, 0.90] } }
+        - { node: c_sw, type: geometry, source: { asset: pillar }, transform: { position: [-7, -7, 3] }, material: { color: [0.95, 0.80, 0.20] } }
+        - { node: c_se, type: geometry, source: { asset: pillar }, transform: { position: [7, -7, 3] }, material: { color: [0.25, 0.80, 0.40] } }
+    # The gallery, 30 units east on a floor of its own: three bunnies and a row of orbs.
+    - node: gallery
+      type: group
+      tags: [gallery]
+      transform: { position: [30, 0, 0] }
+      children:
+        - { node: g_floor, type: geometry, source: { plane: { size: 20 } }, material: { color: [0.62, 0.60, 0.56] } }
+        - { node: g_bunny_1, type: geometry, source: { asset: bunny }, transform: { position: [-5, 0, 0] }, material: { color: [0.85, 0.40, 0.30] } }
+        - { node: g_bunny_2, type: geometry, source: { asset: bunny }, transform: { position: [0, 0, 0] }, material: { color: [0.35, 0.60, 0.85] } }
+        - { node: g_bunny_3, type: geometry, source: { asset: bunny }, transform: { position: [5, 0, 0] }, material: { color: [0.55, 0.80, 0.45] } }
+        - { node: g_orb_1, type: geometry, source: { asset: orb }, transform: { position: [-5, 6, 0.9] }, material: { color: [0.95, 0.75, 0.25] } }
+        - { node: g_orb_2, type: geometry, source: { asset: orb }, transform: { position: [0, 6, 0.9] }, material: { color: [0.95, 0.75, 0.25] } }
+        - { node: g_orb_3, type: geometry, source: { asset: orb }, transform: { position: [5, 6, 0.9] }, material: { color: [0.95, 0.75, 0.25] } }
+  lights:
+    - light: sun
+      kind: directional
+      azimuth: 135
+      elevation: 55

@@ -137,14 +137,17 @@ _GLA="$(find "${CVC_INSTALL_DIR}" -name '_pycvc_gl.a' 2>/dev/null | head -1)"
 echo "pycvc-gl(wasm): installed ${_PXA} + ${_GLA}"
 
 # ── (5) link the CPython-wasm host (embeds pycvc + pycvc_gl + numpy) ──────────
-# link-host.sh is the PROVEN link (numpy static-embed registrar + the closure
+# link-host.sh is the PROVEN link (the extensions' inittab registrar + the closure
 # group + MEMFS stdlib/proxies → pycvc_host.{wasm,js}). Non-fatal: the archives are
-# the primary deliverable, and link-host.sh can also be run standalone.
+# the primary deliverable, and link-host.sh can also be run standalone. Its Python
+# steps (the extension manifests, _common/wasm_pyext.py) run on the native hostenv
+# interpreter.
 mkdir -p "${CVC_INSTALL_DIR}/share/pycvc-gl-wasm"
 cp "${CVC_SOURCE_DIR}/bindings/pycvc/wasm/pycvc_host.cpp" "${CVC_INSTALL_DIR}/share/pycvc-gl-wasm/"
 _NODE="$(command -v node 2>/dev/null || ls "${CVC_EMSDK_DIR}"/node/*/bin/node 2>/dev/null | head -1 || true)"
 if DEPS="${CVC_DEPS_PREFIX}" INST="${CVC_INSTALL_DIR}" SRC="${CVC_SOURCE_DIR}" \
      EMSDK="${CVC_EMSDK_DIR}" OUT="${CVC_INSTALL_DIR}/share/pycvc-gl-wasm" NODE="${_NODE}" \
+     PYTHON="${HOSTENV}/bin/python3.12" \
      bash "${CVC_SOURCE_DIR}/bindings/pycvc/wasm/link-host.sh"; then
     echo "pycvc-gl(wasm): host binary pycvc_host.wasm linked"
 else

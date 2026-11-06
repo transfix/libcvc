@@ -7,6 +7,7 @@
 #include "range.h"
 // #include "spqueue.h"
 #include "ipqueue.h"
+#include "iqueue.h"
 #include "seedcells.h"
 #include "conplot.h"
 #include "data.h"
@@ -21,6 +22,8 @@ class RangeSweepRec {
       Range range;
 };
 
+class QueueRec;
+
 class rangeSweep {
    public:
       rangeSweep(Data &d, SeedCells &s, Conplot &p) : data(d), seeds(s), plot(p) {}
@@ -29,7 +32,7 @@ class rangeSweep {
       void compSeeds(void);
 
    private:
-      void PropagateRegion(int cellid, float min, float max);
+      void PropagateRegion(IndexedQueue<QueueRec, int> &q, int cellid, float min, float max);
 
 //      SortedPriorityQueue<RangeSweepRec> queue;
       IndexedPriorityQueue<RangeSweepRec, double, int> queue;

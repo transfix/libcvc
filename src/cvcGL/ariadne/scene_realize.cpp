@@ -763,9 +763,45 @@ realize_lod_geometry(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const cvc
   return lod;
 }
 
+// The geometry of a `source: { asset: <id> }` node: the asset's, read and fitted the first time a
+// node asks (a copy-on-write copy, so every node on it shares the buffers).
+bool asset_geometry(SceneGraph &sg, const cvc::ariadne::SceneNode &n,
+                    const std::vector<cvc::ariadne::SceneAsset> &assets, SceneAssetCache &cache,
+                    cvc::geometry &geom, std::vector<std::string> *warnings) {
+  const std::string &id = n.source_asset;
+  auto hit = cache.geometry.find(id);
+  if (hit != cache.geometry.end()) {
+    geom = hit->second;
+    return true;
+  }
+  if (cache.failed.count(id))
+    return false;
+  const cvc::ariadne::SceneAsset *asset = nullptr;
+  for (const cvc::ariadne::SceneAsset &a : assets)
+    if (a.id == id)
+      asset = &a;
+  if (!asset) {
+    warn(warnings,
+         "ari: scene node '" + n.id + "': no asset '" + id + "' in the document's assets:");
+    cache.failed.insert(id);
+    return false;
+  }
+  cvc::geometry g;
+  std::shared_ptr<const cvc::height_field> field;
+  if (!read_node_geometry_and_field(sg, asset->source, g, field, warnings)) {
+    cache.failed.insert(id);
+    return false;
+  }
+  ++cache.reads;
+  cache.geometry[id] = g;
+  geom = g;
+  return true;
+}
+
 void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::string &bind_prefix,
                   RealizedScene &out, GraphicsNode *parent, std::vector<pending_body> &bodies,
-                  const RealizeOptions &options, std::vector<std::string> *warnings) {
+                  const RealizeOptions &options, std::vector<std::string> *warnings,
+                  const std::vector<cvc::ariadne::SceneAsset> &assets) {
   std::shared_ptr<GraphicsNode> node;
 
   if (!n.source_data.empty()) {
@@ -788,8 +824,12 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
   } else if (n.type == "geometry") {
     cvc::geometry geom;
     std::shared_ptr<const cvc::height_field> field;
-    if (!read_node_geometry_and_field(sg, n, geom, field, warnings))
+    if (!n.source_asset.empty()) {
+      if (!options.assets || !asset_geometry(sg, n, assets, *options.assets, geom, warnings))
+        return;
+    } else if (!read_node_geometry_and_field(sg, n, geom, field, warnings)) {
       return;
+    }
     if (field)
       out.height_fields[n.id] = field; // the grid this node draws, for bodies and custom nodes
     if (lod_eligible(n, geom, options)) {
@@ -969,12 +1009,11 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
   warn_clip_capability(*node, n, warnings);
   if (n.body.present && n.source_data.empty()) // a data node's come with its dataset
     bodies.push_back({&n, node}); // added once every node exists (realize_physics)
-  if (!n.tags.empty())
-    out.tagged.push_back({n.id, n.tags, node});
+  out.nodes.push_back({n.id, n.tags, node});
 
   // Children nest UNDER this node, so each child's transform is local to it.
   for (const auto &c : n.children)
-    realize_node(sg, c, bind_prefix, out, node.get(), bodies, options, warnings);
+    realize_node(sg, c, bind_prefix, out, node.get(), bodies, options, warnings, assets);
 }
 
 LightNode::Kind light_kind(const std::string &k) {
@@ -1638,6 +1677,10 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
   out.app = &sg.appContext();
   out.sg = &sg;
   out.clock = scene.clock;
+  out.cameras = scene.cameras; // what viewport widgets bind by id (scene_views.cpp)
+  out.has_main_view = scene.has_main_view;
+  out.main_show = scene.main_show;
+  out.main_hide = scene.main_hide;
   // Resolve the clock's key paths to absolute state paths now, with the host bind prefix — the SAME
   // rule widget binds use (resolve_bind) — so the clock and a sim_transport slider on `sim.speed`
   // land on one key. Resolved once here (like the visibility bindings), so tick_scene stays prefix-
@@ -1647,12 +1690,18 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
   out.clock.time_key = cvc::ariadne::resolve_bind(bind_prefix, scene.clock.time_key);
   out.clock.tick_key = cvc::ariadne::resolve_bind(bind_prefix, scene.clock.tick_key);
   out.created.reserve(scene.nodes.size());
+  // The assets' geometry: the caller's cache (shared across a document's scenes), or one for this
+  // scene alone.
+  SceneAssetCache own_assets;
+  RealizeOptions opts = options;
+  if (!opts.assets)
+    opts.assets = &own_assets;
   std::set<std::string> present; // the top-level graphics before this scene's
   for (const auto &kv : sg.getAllGraphics())
     present.insert(kv.first);
   std::vector<pending_body> bodies;
   for (const auto &n : scene.nodes) {
-    realize_node(sg, n, bind_prefix, out, /*parent=*/nullptr, bodies, options, warnings);
+    realize_node(sg, n, bind_prefix, out, /*parent=*/nullptr, bodies, opts, warnings, scene.assets);
     out.created.push_back(n.id);
   }
   // A custom node type may add top-level graphics beside its own node (forest_trees' needles).
