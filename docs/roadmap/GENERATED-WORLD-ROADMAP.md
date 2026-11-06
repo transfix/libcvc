@@ -257,18 +257,34 @@ The conference is the world's second consumer. Peers must see the same world and
       third frame. In the browser, expect 2-3x the CPU on single-threaded wasm (about 1 ms a frame,
       4 ms once a second) and, on the GPU, up to 6 small volume ray casts plus 10 shell layers'
       fill. Not yet measured in a browser.
-  - Still to do for the clouds: measure in Edge and Firefox (the GLSL ES compile is unchecked; the
-    forced WebGL2 mapper natively compiles GLSL 150). With `CVCGL_LOWMEM_MAPPER=force` natively the
-    ground itself fails to compile: `terrain_bump` picks the mapper's normal by `__EMSCRIPTEN__`,
-    not by the mapper (in the browser it is right). The shells streak at grazing angles near the horizon: fade them by
-    view angle, or add the billboard rung. The near volumes are flat white beside the shells' height
-    shading: give the volumes the shells' top light. Clouds past the world's edge are kept short of
-    the horizon, because the deck is in the scene's bounds, which the camera fits and clips to; a
-    clipping range that ignores the deck would let them reach it. Wiring new meshes is a periodic
-    walk; an LOD rung or a regenerated world could announce its meshes instead. One top-down view
-    showed a cloud with a straight edge, likely where two near volumes' boxes overlap; not seen
-    elsewhere. Then LSYSTEM-LABORATORY-ROADMAP section 4.7's evolving coverage (a cellular
-    automaton) and orographic clouds.
+  - Landed: the cloud deck's look, the five issues the first part left.
+    - Clouds reach the horizon. The far shells are out of the bounds the camera fits and clips to
+      (`GeometryNode::setUseBounds(false)`: VTK's UseBounds and the scene's own box), and reach
+      `far_reach` (4 km by default) past the ground, where the pattern repeats. A shell vertex
+      past the far plane is drawn on it: its clip-space depth is clamped to 0.999 w, which leaves
+      where it lands on screen and the world point its fragments read unchanged. The near volumes
+      still draw only within `horizon` of the ground and stay in the bounds, so the framing holds.
+    - No banding seen edge-on. Each shell stands for the slab of deck around it: its fragment
+      marches the view ray across that slab (6 samples, at most 24 slabs' depth) and sums the
+      optical depth, so the slices join into one cloud from below, beside or above, and the last
+      3 degrees fade into haze. (Tried and dropped: a column-mean slice every shell reads, which
+      stacked identical footprints into striped pillars at middling angles.)
+    - Near and far clouds look alike. VTK's volume shading reads as storm cloud here (dark,
+      metallic), so the volumes stay unshaded and both take one colour ramp from the density:
+      grey-blue thin, white dense, the shells a little lighter with height.
+    - No straight-edged clouds. The grammar clamps its turtle at the grid's y edges (it wraps x), so
+      a cloud that wanders there piled puffs against the face and the grid's window cut them off:
+      a straight edge along the volume's box. Each map now fades out over the outer 40% of its
+      radius (`world_cloud_test` checks nothing reaches the rim), which also keeps the clouds round.
+    - `terrain_bump` and `bark` name the normal by the node's mapper
+      (`GeometryNode::usesLowMemoryMapper`), not by `__EMSCRIPTEN__`, so `CVCGL_LOWMEM_MAPPER=force`
+      natively draws the whole terrain lab (ground, shade, shells, volumes) without a shader error:
+      the browser's shader path, as GLSL 150, can be checked here.
+  - Still to do for the clouds: measure in Edge and Firefox, now with the shells' 6 samples a
+    fragment (10 layers of sky fill), and check the GLSL ES compile. Wiring new meshes is a periodic
+    walk; an LOD rung or a regenerated world could announce its meshes instead. Then
+    LSYSTEM-LABORATORY-ROADMAP section 4.7's evolving coverage (a cellular automaton) and
+    orographic clouds.
 - **Dynamic props, demo3's way**, for vehicles and avatars on the world: unregistered slot nodes,
   a pose gate, out of the bounds fit, non-casting. demo3 does this by hand. A libcvc node type
   would make it a scene key.

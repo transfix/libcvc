@@ -240,7 +240,20 @@ TEST(WorldCloudLayer, ACompositeInSharesIsTheWhole) {
   for (int k = 0; k < L.params().far_layers; k += 3)
     L.far_bytes(acc, k, 3, farParts);
   EXPECT_EQ(farWhole, farParts);
-  // Every variant is a whole cloud, however faint the grammar grew it.
-  for (int v = 0; v < L.params().variants; ++v)
-    EXPECT_FLOAT_EQ(*std::max_element(L.variant_map(v).begin(), L.variant_map(v).end()), 1.0f);
+  // Every variant is a whole cloud, however faint the grammar grew it, and a round one: nothing
+  // reaches the footprint's rim, so no cloud is cut off by its volume's box.
+  const int n = L.params().n, nz = L.params().nz;
+  for (int v = 0; v < L.params().variants; ++v) {
+    const std::vector<float> &f = L.variant_map(v);
+    EXPECT_FLOAT_EQ(*std::max_element(f.begin(), f.end()), 1.0f);
+    float rim = 0.0f;
+    for (int z = 0; z < nz; ++z)
+      for (int y = 0; y < n; ++y)
+        for (int x = 0; x < n; ++x) {
+          const double u = 2.0 * x / (n - 1) - 1.0, w = 2.0 * y / (n - 1) - 1.0;
+          if (u * u + w * w >= 1.0)
+            rim = std::max(rim, f[cvc::lsys::cloud_index(n, x, y, z)]);
+        }
+    EXPECT_EQ(rim, 0.0f);
+  }
 }

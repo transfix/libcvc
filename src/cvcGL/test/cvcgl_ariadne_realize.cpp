@@ -1118,6 +1118,9 @@ int main() {
     chk(std::dynamic_pointer_cast<cvc::gl::VolumeNode>(sg.getGraphics("sky_near3")) != nullptr &&
             std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("sky_far")) != nullptr,
         "cloud_sky realized its near volumes and its far shells");
+    // The shells reach far past the ground (to the horizon): out of the bounds the camera frames.
+    chk(sg.getGraphics("sky_far") && !sg.getGraphics("sky_far")->contributesToSceneBounds(),
+        "cloud_sky's far shells are out of the scene's bounds");
     // forest wind + sea refill + cloud drift each push a tick.
     chk(realized.custom_ticks.size() >= 3u, "forest/sea/sky each registered a per-frame tick");
     // The sky's first tick gives the ground (its `ground:`, default terrain) the deck's shade: in
