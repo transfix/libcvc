@@ -1913,7 +1913,7 @@ windows:
       - type: viewport
         view: overview            # its camera: <prefix>.viewers.overview.camera
         show: [sim]               # the untagged nodes, and those tagged sim
-        camera: map               # orbit (the default) | fly | map | track
+        mode: map                 # orbit (the default) | fly | map | track
         width: 360                # logical px; the window's width when unset
         height: 270               # 3/4 of the width when unset
 ```
@@ -1924,10 +1924,16 @@ windows:
 | `show` | Tags, as a list or one string (`show: "sim debug"`). The view draws the untagged nodes and the nodes that carry one of these tags. When unset, it draws every tag. |
 | `hide` | Tags the view leaves out, whatever `show` says. |
 | `bind` | A state key whose value is the tag list to show (space- or comma-separated), read every frame. Use it for a layers menu: a widget writes the key, and the view follows. |
-| `camera` | `orbit` (the default), `fly`, `map` (top-down, framed on what the view shows), or `track` with `track: <node id>`. |
+| `mode` | Its own camera's mode: `orbit` (the default), `fly`, `map` (top-down, framed on what the view shows), or `track` with `track: <node id>`. (`camera: map` and the other three mode names still mean the mode.) |
+| `camera` | Draw from a named camera instead of its own: one the scene declares (`scene: cameras:`, below), or `main`, the main view's. |
+| `scene` | The scene it shows: a `scenes:` entry's name (below). Unset: the document's `scene:`. |
+| `shadows` | `true` (the default) draws the scene's shadows from the maps the scene's own renderer bakes. `own` bakes maps of its own from what this view draws, so a node it leaves out casts nothing there and a node the main view leaves out still casts; it costs one more bake. `false` draws none. |
 | `chrome` | `false` leaves out the scene's grid, axes and bounding box. Defaults to `true`. |
-| `clear_color` | `[r, g, b]` in 0..1, what the view clears to. Defaults to the main view's background. (`background:` on a widget is the §5.12 backdrop key.) |
-| `input` | `false` makes the view ignore the mouse. Otherwise a drag orbits its camera (the middle or right button pans) and the wheel zooms. |
+| `clear_color` | `[r, g, b]` in 0..1, what the view clears to (one colour, never the scene's gradient). Defaults to the main view's background. (`background:` on a widget is the §5.12 backdrop key.) |
+| `azimuth`, `elevation`, `zoom` | Where its own orbit camera starts once the view is framed: the orbit's azimuth and elevation in degrees, and a zoom factor on the framed distance (2 is twice as close). |
+| `override` | Per-view restyling, below. |
+| `caption` | A label in the view's top-left corner. |
+| `input` | `false` makes the view ignore the mouse. Otherwise a drag orbits its camera (the middle or right button pans), the wheel zooms, and a double-click puts the camera back where it started. The view is outlined while the pointer is over it. |
 
 **Tags.** A node's `tags:` hold for its whole subtree, so a tagged child under a tagged parent is
 drawn only where both are allowed: the parent's tags take the child out of a view that rules them
@@ -1935,9 +1941,97 @@ out. An untagged node is in every view, so content meant for the main view only 
 own that the other views leave out (`hide: [main_only]`). The main view always draws every node. A
 node hidden with `visible:` is gone from every view.
 
+**Overrides.** `override:` restyles nodes in one view only. Each entry names a node id, a tag, or
+`"*"` (everything), and sets any of `drawstyle` (`surface`, `wireframe`, `points`), `opacity`,
+`color`, `line_width` and `point_size`. What an entry does not set stays as the node has it. An
+entry covers the named node's subtree, and later entries add to earlier ones field by field:
+
+```yaml
+- type: viewport
+  view: xray
+  override:
+    "*": { opacity: 0.5 }                                  # everything half see-through,
+    buildings: { opacity: 0.15 }                           # the buildings more so,
+    sim: { color: [1.0, 0.9, 0.15], opacity: 1.0 }         # and the agents solid yellow
+```
+
+A restyled actor is drawn in that view by a twin: a second `vtkActor` with its own `vtkProperty`
+over the node's own mapper. The geometry, the shader replacements and the texture are shared, not
+copied. The twin follows the node's transform, visibility and material every frame, so a node that
+moves, changes colour or swaps LOD rung keeps its override.
+`examples/ariadne/documents/viewer_looks.ari` draws one scene four ways: wireframe, X-ray, a plan of
+one layer, and a clay model. `viewer_grid.ari` is four independent cameras on one scene.
+
+**Cameras.** A view's camera is its own unless it names one. `scene: cameras:` declares named
+cameras, each at `<prefix>.viewers.<id>.camera`, with the same `mode`, `track`, `azimuth`,
+`elevation` and `zoom` keys. Every viewport with `camera: <id>` draws from that camera, so a drag,
+the wheel or a double-click in any of them moves all of them, whatever each one shows or restyles.
+`camera: main` follows the main view's camera, and moves it.
+
+```yaml
+scene:
+  cameras:
+    - camera: plaza
+      azimuth: -60
+      elevation: 30
+      zoom: 1.3
+windows:
+  - window: Looks
+    children:
+      - { type: viewport, view: wire, camera: plaza, override: { "*": { drawstyle: wireframe } } }
+      - { type: viewport, view: xray, camera: plaza, override: { buildings: { opacity: 0.2 } } }
+```
+
+A named camera is framed on the whole scene the first time a view shows it, and its near and far
+planes span the whole scene. Named cameras and views share the `viewers.*` names, so give them
+different ones.
+
+**Shadows.** When the scene casts shadows (`shadows: { enabled: true }`), every view draws them. A
+view does not bake shadow maps of its own: it reads the ones the main view bakes
+(`SceneGraph::makeShadowReceiverPass`). They are in light space, so they hold from any camera. A
+view that leaves part of the scene out can bake its own instead (`shadows: own`,
+`SceneGraph::makeShadowPasses`).
+
+**Assets.** `assets:` names meshes, each a node's `source:` and `fit:`, that any node in any of the
+document's scenes draws with `source: { asset: <id> }`. Each asset is read and fitted once. Every
+node on it shares its geometry's buffers (`cvc::geometry` is copy-on-write); each node keeps its own
+transform, material, tags and VTK actor.
+
+```yaml
+assets:
+  bunny: { source: { file: stanford.bunny }, fit: { height: 4, up: y } }
+  pillar: { source: { box: { size: [1.2, 1.2, 6] } } }
+scene:
+  nodes:
+    - { node: statue, type: geometry, source: { asset: bunny } }
+    - { node: post, type: geometry, source: { asset: pillar }, transform: { position: [7, 7, 3] } }
+```
+
+**Scenes.** `scenes:` declares scenes of their own beside the document's `scene:`. Each entry takes
+the keys `scene:` does: nodes, lights, shadows, background, chrome, cameras. A viewport shows one
+with `scene: <id>`, from its own camera or a named camera that scene declares. Each scene is a
+SceneGraph of its own, under state `<prefix>.scenes.<id>`, so its nodes are at
+`scenes.<id>.graphics.root.children.<node>`. Its nodes' `visible:` binds and the widgets share the
+document's prefix. It gets a viewport of its own (`scene.<id>`), never shown, which holds its
+lights, background and shadow chain; the views of it mirror that viewport. While its shadows are on
+and one of its views shows, that viewport draws one pixel in a corner of the view, under it, so its
+maps are baked. A document may have only `scenes:`, and then the main view is empty.
+`examples/ariadne/documents/viewer_scenes.ari` has three scenes (day, night, a studio) built from
+the same assets.
+
+**Groups in one scene.** Where the "scenes" should share the lights and the shadows, make them
+tagged groups of one scene. `main_view: { show: [...], hide: [...] }` in `scene:` picks the groups
+the main view draws, as a viewport's `show:` / `hide:` do, and the main camera is framed on them.
+The props of the groups the main view leaves out come out of the main renderer for the length of
+its draw, so the views, which mirror it, still have them. They cast no shadow in the main view's
+maps either, so a view that shows them uses `shadows: own`.
+`examples/ariadne/documents/viewer_groups.ari` shows a courtyard in the main view and a gallery in
+a viewport.
+
 **How it draws.** Each view is a mirror viewport of the main one
 (`ViewportManager::addMirrorViewport`). It draws the same props, the same geometry, from its own
-camera, less the props of the nodes it leaves out (`Viewport::setMirrorFilter`). The widget
+camera, less the props of the nodes it leaves out and with its twins in place of the props it restyles
+(`Viewport::setMirrorFilter`). The widget
 reserves its rect in the window and cuts that rect out of the window's background
 (`ImGuiBackend::cut_window_background`); the view is drawn there. So the view moves and scrolls with
 its window, is clipped where the window clips it, and is hidden on any frame its widget is not
@@ -1945,10 +2039,14 @@ drawn: a closed or collapsed window, another tab. Every AriRuntime host (arigl, 
 widget. A terminal backend shows its placeholder. A new document removes the last one's views.
 
 Limits:
-- A view leaves nodes out. It does not yet restyle them (the roadmap's per-view `override:`).
+- An override restyles actors. A volume (`volren`, `volslice`) draws as it is.
 - The view lies under the whole UI. Another window behind the viewport's window still draws over
   the view.
-- A view has no shadows of its own.
+- A view's shadows come from the main view's maps, unless it bakes its own. A node a view leaves
+  out still casts its shadow there, and with `shadows: { focus: camera }` the maps follow the main
+  camera, not the view's.
+- An asset's nodes share its geometry's buffers, but each builds its own VTK arrays to draw from.
+- A `scenes:` entry's shadows are baked only while one of its views shows.
 - A view's first frame is opaque: the window's background is cut from the frame after the widget
   first draws.
 
@@ -2109,7 +2207,7 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `world_controls` | a `generated_world` node (§5.4; arg `keys`) |
 | `mesh_tools` | a `mesh_lab` node (§5.4; arg `node`, default `mesh`) |
 | `fe_controls` | an `fe_lab` node (§5.4; arg `node`, default `domain`) |
-| `scene_view` | a window holding a view of the scene (the `viewport` widget, §5.18), from a camera of its own (args `view`, `show`, `hide`, `camera`, `chrome`, `width`, `height`, `title`, `id`) |
+| `scene_view` | a window holding a view of the scene (the `viewport` widget, §5.18), from a camera of its own or a named one (args `view`, `show`, `hide`, `mode`, `camera`, `chrome`, `width`, `height`, `title`, `id`) |
 | `card` | a card in a list: avatar / title / subtitle / timestamp header, body, `media` and `actions` slots; its args are state keys, so a `repeat:` includes one per item (not a window: embed it) |
 | `transfer_function`, `transfer_function_editor` | any node's `transfer_function` model (args `node`, `id`): the ColorTable2 editor with histogram / contour spectrum / contour tree layers — see [`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) |
 | `chat`, `chat_panel` | a room's chat and direct messages through the chat verbs (args `id`, `title`, `room`); its functions come with the import: call `(chat-ui-step ID ROOM)` from `on_tick` (§5.16) |

@@ -33,7 +33,12 @@
 #include <fstream>
 #include <string>
 #include <vector>
+#include <vtkActor.h>
+#include <vtkCamera.h>
+#include <vtkCollection.h>
+#include <vtkMapper.h>
 #include <vtkPropCollection.h>
+#include <vtkProperty.h>
 #include <vtkRenderer.h>
 #ifdef CVC_ENABLE_IMGUI
 #include <imgui.h>
@@ -72,9 +77,40 @@ windows:
         hide: sim
         width: 360
         height: 270
+  - window: Restyled
+    id: restyled
+    pos: [520, 380]
+    size: [400, 320]
+    children:
+      - type: viewport
+        view: restyled
+        azimuth: 45
+        elevation: 20
+        override:
+          "*": { opacity: 0.5 }
+          debug: { color: [0.1, 0.1, 0.9], drawstyle: wireframe }
+        shadows: false
+        width: 360
+        height: 270
+  - window: Shared
+    id: shared
+    pos: [20, 380]
+    size: [480, 200]
+    children:
+      - type: group
+        layout: { kind: grid, col_widths: [auto, auto, auto] }
+        children:
+          - { type: viewport, view: pair_a, camera: pair, width: 140, height: 105 }
+          - { type: viewport, view: pair_b, camera: pair, hide: debug, width: 140, height: 105 }
+          - { type: viewport, view: follow, camera: main, width: 140, height: 105 }
 
 scene:
   chrome: false
+  shadows: { enabled: true }
+  cameras:
+    - camera: pair
+      azimuth: -30
+      elevation: 40
   nodes:
     - node: red
       type: geometry
@@ -181,7 +217,7 @@ int main() {
   }
 
   cvc::gl::ViewportManager &vm = view.viewportManager();
-  check(rt.views().size() == 2, "each viewport widget made a view",
+  check(rt.views().size() == 6, "each viewport widget made a view",
         std::to_string(rt.views().size()));
   check(vm.hasViewport("sim") && vm.hasViewport("nosim"), "the views are the manager's viewports");
   if (!vm.hasViewport("sim") || !vm.hasViewport("nosim"))
@@ -222,6 +258,58 @@ int main() {
   // Each view's camera is its own, at <prefix>.viewers.<name>.camera.
   const std::string poseKey = cvc::ariadne::resolve_bind("views", "viewers.sim.camera");
   check(st(poseKey).children().size() > 0, "the sim view's camera is in the state tree", poseKey);
+
+  // override: the restyled view draws a twin of each actor (its own property, the SAME mapper, so
+  // no geometry is copied); "*" restyles everything and a later tag entry adds to it; the main
+  // view's actors keep their own look.
+  if (vm.hasViewport("restyled")) {
+    cvc::gl::Viewport &restyled = vm.viewport("restyled");
+    auto twin_of = [&](vtkProp *orig) -> vtkActor * {
+      vtkActor *a = vtkActor::SafeDownCast(orig);
+      vtkPropCollection *props = restyled.renderer()->GetViewProps();
+      vtkCollectionSimpleIterator it;
+      props->InitTraversal(it);
+      while (vtkProp *p = props->GetNextProp(it))
+        if (vtkActor *b = vtkActor::SafeDownCast(p))
+          if (a && b != a && b->GetMapper() == a->GetMapper())
+            return b;
+      return nullptr;
+    };
+    vtkActor *redA = vtkActor::SafeDownCast(prop("red"));
+    vtkActor *yellowA = vtkActor::SafeDownCast(prop("yellow"));
+    vtkActor *redTwin = twin_of(redA), *yellowTwin = twin_of(yellowA);
+    check(!has_prop(restyled.renderer(), redA) && !has_prop(restyled.renderer(), yellowA),
+          "override: the restyled view draws twins, not the main view's actors");
+    check(redTwin && yellowTwin, "override: each twin shares its original's mapper");
+    if (redTwin && yellowTwin && redA && yellowA) {
+      double c[3];
+      redTwin->GetProperty()->GetColor(c);
+      check(std::fabs(redTwin->GetProperty()->GetOpacity() - 0.5) < 1e-9 && c[0] > 0.8 &&
+                c[2] < 0.2,
+            "override \"*\": half opacity, the node's own colour kept");
+      yellowTwin->GetProperty()->GetColor(c);
+      check(std::fabs(yellowTwin->GetProperty()->GetOpacity() - 0.5) < 1e-9 && c[2] > 0.8 &&
+                c[0] < 0.2 && yellowTwin->GetProperty()->GetRepresentation() == VTK_WIREFRAME,
+            "override debug: blue wireframe, on top of \"*\"'s opacity");
+      yellowA->GetProperty()->GetColor(c);
+      check(yellowA->GetProperty()->GetOpacity() == 1.0 && c[0] > 0.8 && c[1] > 0.8 &&
+                yellowA->GetProperty()->GetRepresentation() == VTK_SURFACE,
+            "the main view's yellow ball keeps its own look");
+    }
+    // azimuth: / elevation: are where its orbit starts.
+    const std::string orbit = cvc::ariadne::resolve_bind("views", "viewers.restyled.camera.orbit");
+    double az = 0.0, el = 0.0;
+    try {
+      az = st(orbit + ".azimuth").value<double>();
+      el = st(orbit + ".elevation").value<double>();
+    } catch (...) {
+    }
+    check(std::fabs(az - 45.0) < 1e-6 && std::fabs(el - 20.0) < 1e-6,
+          "azimuth / elevation: the orbit starts where the widget says",
+          std::to_string(az) + " " + std::to_string(el));
+  } else {
+    check(false, "the restyled view exists");
+  }
 
   // The pixels: the sim view's rect shows red and blue and no yellow (the main view's yellow ball
   // would be under it otherwise; the window's background is cut away there).
@@ -275,7 +363,77 @@ int main() {
     io.AddMousePosEvent(-1.0f, -1.0f);
     rt.step(kDt);
   }
+
+  // Named cameras: pair_a and pair_b draw from one camera, so a drag in one moves both and nothing
+  // else; `camera: main` draws from the main view's camera, and a drag there moves the main view.
+  if (vm.hasViewport("pair_a") && vm.hasViewport("pair_b") && vm.hasViewport("follow")) {
+    cvc::gl::Viewport &pa = vm.viewport("pair_a"), &pb = vm.viewport("pair_b");
+    cvc::gl::Viewport &follow = vm.viewport("follow");
+    vtkCamera *shared = pa.renderer()->GetActiveCamera();
+    check(shared == pb.renderer()->GetActiveCamera(),
+          "camera: pair: both views draw from one camera");
+    check(shared != view.renderer()->GetActiveCamera() &&
+              shared != sim.renderer()->GetActiveCamera(),
+          "camera: pair: not the main view's, nor another view's");
+    check(follow.renderer()->GetActiveCamera() == view.renderer()->GetActiveCamera(),
+          "camera: main: the view draws from the main view's camera");
+    const std::string pairAz = cvc::ariadne::resolve_bind("views", "viewers.pair.camera.orbit");
+    double az = 0.0;
+    try {
+      az = st(pairAz + ".azimuth").value<double>();
+    } catch (...) {
+    }
+    check(std::fabs(az - (-30.0)) < 1e-6, "the named camera starts where cameras: says",
+          std::to_string(az));
+    ImGui::SetCurrentContext(ui.imguiContext());
+    ImGuiIO &io = ImGui::GetIO();
+    auto drag = [&](cvc::gl::Viewport &vp) {
+      double r[4];
+      vp.region(r);
+      const float x = static_cast<float>(0.5 * (r[0] + r[2]) * W);
+      const float y = static_cast<float>((1.0 - 0.5 * (r[1] + r[3])) * H);
+      io.AddMousePosEvent(x, y);
+      rt.step(kDt);
+      io.AddMouseButtonEvent(0, true);
+      rt.step(kDt);
+      for (int i = 1; i <= 4; ++i) {
+        io.AddMousePosEvent(x + 10.0f * i, y);
+        rt.step(kDt);
+      }
+      io.AddMouseButtonEvent(0, false);
+      rt.step(kDt);
+      io.AddMousePosEvent(-1.0f, -1.0f);
+      rt.step(kDt);
+    };
+    double before[3], after[3], mainBefore[3], mainAfter[3], simBefore[3], simAfter[3];
+    shared->GetPosition(before);
+    view.renderer()->GetActiveCamera()->GetPosition(mainBefore);
+    sim.renderer()->GetActiveCamera()->GetPosition(simBefore);
+    drag(pb);
+    shared->GetPosition(after);
+    view.renderer()->GetActiveCamera()->GetPosition(mainAfter);
+    sim.renderer()->GetActiveCamera()->GetPosition(simAfter);
+    auto moved = [](const double a[3], const double b[3]) {
+      return std::fabs(a[0] - b[0]) + std::fabs(a[1] - b[1]) + std::fabs(a[2] - b[2]) > 1e-6;
+    };
+    check(moved(before, after), "a drag in pair_b moves the shared camera, so pair_a moves too");
+    check(!moved(mainBefore, mainAfter) && !moved(simBefore, simAfter),
+          "a drag in pair_b leaves the main view and the sim view alone");
+    view.renderer()->GetActiveCamera()->GetPosition(mainBefore);
+    drag(follow);
+    view.renderer()->GetActiveCamera()->GetPosition(mainAfter);
+    check(moved(mainBefore, mainAfter), "a drag in the camera: main view moves the main view");
+  } else {
+    check(false, "the shared-camera views exist");
+  }
 #endif
+
+  // Shadows: a view receives the scene's shadows through a pass of its own (reading the main
+  // view's maps); `shadows: false` leaves it without.
+  check(sim.renderer()->GetPass() != nullptr, "a view draws the scene's shadows (it has a pass)");
+  if (vm.hasViewport("restyled"))
+    check(vm.viewport("restyled").renderer()->GetPass() == nullptr,
+          "shadows: false: that view has no shadow pass");
 
   // Closing the window hides its view; opening it shows it again.
   const std::string open = cvc::ariadne::resolve_bind("views", "tree.sim_view.open");
@@ -311,7 +469,7 @@ int main() {
   rt.load(doc.string());
   for (int f = 0; f < 3; ++f)
     rt.step(kDt);
-  check(rt.views().size() == 2, "the views are back with the document");
+  check(rt.views().size() == 6, "the views are back with the document");
   view.close(); // ~AriRuntime runs after the return below, with the view closed
   return cvcgl_test::finish("cvcgl_ariadne_views");
 }

@@ -238,6 +238,7 @@ struct SceneNode {
   std::string id;                // node name → <prefix>.graphics.root.children.<id>
   std::string type = "geometry"; // node kind
   std::string source_file;       // source: { file: ... } (geometry/volume load path)
+  std::string source_asset; // source: { asset: <id> } — a document asset (assets:), loaded once
   // source: { data: <name>, item: <output> } — a dataset of the document's data: block (data.h):
   // the node draws what it decoded and is rebuilt each time it loads again. `source_data` is the
   // bind path of its entry ("city" -> <prefix>.data.city; a leading '/' is the root's), and
@@ -463,9 +464,38 @@ struct SceneShadowFocus {
   std::string ground; // a node id whose heightfield the centre sits on (empty: the focal z)
 };
 
+// A named camera (§9.5, `scene: cameras:`): a camera of its own at <prefix>.viewers.<id>.camera
+// that `viewport` widgets bind with `camera: <id>`. Every viewport bound to it draws from it, so a
+// drag in any of them moves them all. Framed on the scene the first time a viewport draws it.
+struct SceneCamera {
+  std::string id;
+  std::string mode = "orbit"; // orbit | fly | map | track
+  std::string track;          // the node a track camera follows
+  bool has_azimuth = false, has_elevation = false;
+  double azimuth = 0.0, elevation = 0.0; // where an orbit starts, degrees
+  double zoom = 1.0;                     // on the framed distance (2: twice as close)
+};
+
+// A document asset (`assets:`): a mesh loaded once and drawn by every node, in any of the
+// document's scenes, whose source is `{ asset: <id> }`. `source` holds what a node would: its
+// source: and fit: (a file, a URI or a primitive), read and fitted the first time a node uses it.
+struct SceneAsset {
+  std::string id;
+  SceneNode source;
+};
+
 struct Scene {
+  std::string id; // a `scenes:` entry's name ("" for the document's `scene:`)
   std::vector<SceneNode> nodes;
+  // The document's assets (`assets:`), the same list in every scene: what `source: { asset }`
+  // names.
+  std::vector<SceneAsset> assets;
+  // main_view: { show, hide } — the tags the MAIN view draws (the untagged nodes always), as a
+  // viewport's show: / hide: do. For a document whose "scenes" are tagged groups in one scene.
+  bool has_main_view = false;
+  std::vector<std::string> main_show, main_hide;
   std::vector<SceneLight> lights;
+  std::vector<SceneCamera> cameras; // cameras: [...] — named cameras viewports bind
   SceneClock clock; // §9 time: the simulation clock (clock.present gates it) — see SceneClock
   ScenePhysics physics; // physics: {...} — the world the nodes' bodies live in (see SceneBody)
   bool has_shadows = false;

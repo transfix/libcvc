@@ -102,7 +102,8 @@ bool is_builtin_block(const std::string &k) {
          k == "children" || k == "scene" || k == "customs" || k == "init" || k == "on_tick" ||
          k == "on_key" || k == "on_pointer" || k == "on_signal" || k == "units" || k == "import" ||
          k == "channels" || k == "lint" || k == "args" || k == "requires" || k == "keys" ||
-         k == "windows_menu" || k == "tests" || k == "functions" || k == "data";
+         k == "windows_menu" || k == "tests" || k == "functions" || k == "data" || k == "assets" ||
+         k == "scenes";
 }
 } // namespace
 
@@ -2401,7 +2402,9 @@ SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
     } else if (src.IsMap()) {
       // A procedural primitive (no asset) takes precedence over a file: source: { plane: { size } }
       // (or the shorthand source: { plane: <size> }). Otherwise a URI/file.
-      if (const YAML::Node plane = src["plane"]) {
+      if (const YAML::Node asset = src["asset"]; asset && asset.IsScalar()) {
+        sn.source_asset = asset.Scalar(); // a document asset (assets:), loaded once
+      } else if (const YAML::Node plane = src["plane"]) {
         sn.source_primitive = "plane";
         if (plane.IsMap())
           sn.plane_size = static_cast<float>(num(plane, "size", sn.plane_size));
@@ -2751,6 +2754,39 @@ Scene parse_scene(Ctx &ctx, const YAML::Node &s) {
   if (lights && lights.IsSequence())
     for (const YAML::Node &l : lights)
       sc.lights.push_back(parse_scene_light(l));
+  // main_view: { show: [tags], hide: [tags] }
+  if (const YAML::Node mv = s["main_view"]; mv && mv.IsMap()) {
+    sc.has_main_view = true;
+    auto tags = [](const YAML::Node &t, std::vector<std::string> &out) {
+      if (t && t.IsScalar())
+        out.push_back(t.Scalar());
+      else if (t && t.IsSequence())
+        for (const auto &e : t)
+          if (e.IsScalar())
+            out.push_back(e.Scalar());
+    };
+    tags(mv["show"], sc.main_show);
+    tags(mv["hide"], sc.main_hide);
+  }
+  // cameras: [{ camera: <id>, mode, azimuth, elevation, zoom, track }]
+  const YAML::Node cameras = s["cameras"];
+  if (cameras && cameras.IsSequence())
+    for (const YAML::Node &c : cameras) {
+      if (!c.IsMap())
+        continue;
+      SceneCamera cam;
+      cam.id = str(c, "camera", str(c, "id"));
+      if (cam.id.empty())
+        continue;
+      cam.mode = str(c, "mode", "orbit");
+      cam.track = str(c, "track");
+      cam.has_azimuth = static_cast<bool>(c["azimuth"]);
+      cam.azimuth = num(c, "azimuth", 0.0);
+      cam.has_elevation = static_cast<bool>(c["elevation"]);
+      cam.elevation = num(c, "elevation", 0.0);
+      cam.zoom = num(c, "zoom", 1.0);
+      sc.cameras.push_back(cam);
+    }
   const YAML::Node sh = s["shadows"];
   if (sh && sh.IsMap()) {
     sc.has_shadows = true;
@@ -3386,6 +3422,40 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
     r.scene = parse_scene(ctx, doc["scene"]);    // §9: the scene graph, alongside the widgets
     stamp_base_dir(r.scene.nodes, ctx.base_dir); // relative paths in a node's keys resolve here
     r.data = parse_data(ctx, doc["data"]);       // the datasets, relative to the document too
+    // assets: { <id>: { source: ..., fit: ... } } — meshes loaded once, shared by every scene.
+    std::vector<SceneAsset> assets;
+    if (const YAML::Node as = doc["assets"]; as && as.IsMap()) {
+      for (const auto &kv : as) {
+        if (!kv.first.IsScalar() || !kv.second.IsMap())
+          continue;
+        SceneAsset a;
+        a.id = kv.first.Scalar();
+        a.source = parse_scene_node(ctx, kv.second);
+        a.source.id = a.id;
+        a.source.base_dir = ctx.base_dir;
+        assets.push_back(std::move(a));
+      }
+    } else if (as) {
+      ctx.warn("ari: assets: must be a map of id -> { source, fit } — ignored");
+    }
+    r.scene.assets = assets;
+    // scenes: [{ scene: <id>, nodes, lights, shadows, background, cameras, ... }] — scenes of
+    // their own, each drawn by the viewports that name it (scene: <id>).
+    if (const YAML::Node ss = doc["scenes"]; ss && ss.IsSequence()) {
+      for (const YAML::Node &s : ss) {
+        Scene sc = parse_scene(ctx, s);
+        sc.id = str(s, "scene", str(s, "id"));
+        if (sc.id.empty()) {
+          ctx.warn("ari: a scenes: entry has no `scene:` name — ignored");
+          continue;
+        }
+        stamp_base_dir(sc.nodes, ctx.base_dir);
+        sc.assets = assets;
+        r.scenes.push_back(std::move(sc));
+      }
+    } else if (ss) {
+      ctx.warn("ari: scenes: must be a list of { scene: <id>, ... } — ignored");
+    }
     // init: a state_exec script the host runs once at load (cvc::ariadne::run_init).
     // The loader only captures the text — it has no app and never runs the DSL.
     const YAML::Node in = doc["init"];
