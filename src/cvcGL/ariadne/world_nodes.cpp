@@ -157,7 +157,7 @@ struct WorldRT {
   int preset = 0;  // the preset the counts last came from
   int color = 0;   // the colour the shown texture was painted in
   int texture_size = 2048;
-  bool soft = true;     // look: soft (demo3's) or classic (terrain_lab's)
+  bool soft = true; // look: soft (demo3's) or classic (terrain_lab's)
   long frame = 0;
   bool shown = true; // the node's visibility, which the parts beside it last followed
   std::shared_ptr<cvc::height_field> field; // published in RealizedScene::height_fields

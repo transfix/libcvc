@@ -1237,7 +1237,8 @@ int main() {
             ++wet;
             styled = styled && l->rungCount() == 5 && !l->rung(0)->castsShadow();
           }
-      chk(wet > 0 && styled, "generated_world drew its water as surface ladders on the chunk rungs");
+      chk(wet > 0 && styled,
+          "generated_world drew its water as surface ladders on the chunk rungs");
     }
     chk(realized.height_fields.count("world") == 1,
         "generated_world published its ground (ground: world stands on it)");

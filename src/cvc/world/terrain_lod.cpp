@@ -275,8 +275,8 @@ std::vector<cvc::geometry> make_water_rungs(const cvc::height_field &hf,
     };
     for (std::size_t i = 0; i + 1 < nr; ++i)
       for (std::size_t j = 0; j + 1 < nc; ++j) {
-        const double lo = std::min({H(rs[i], cs[j]), H(rs[i], cs[j + 1]), H(rs[i + 1], cs[j]),
-                                    H(rs[i + 1], cs[j + 1])});
+        const double lo = std::min(
+            {H(rs[i], cs[j]), H(rs[i], cs[j + 1]), H(rs[i + 1], cs[j]), H(rs[i + 1], cs[j + 1])});
         if (!(lo < water_level_m))
           continue;
         const std::uint64_t a = vertex(i, j), b = vertex(i, j + 1), d = vertex(i + 1, j + 1),

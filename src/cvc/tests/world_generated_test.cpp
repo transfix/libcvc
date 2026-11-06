@@ -824,7 +824,8 @@ TEST(WorldGenerated, WaterRungsCoverTheWetCells) {
     EXPECT_EQ(water[0].const_normals()[i][2], 1.0);
   }
   for (int k = 1; k < L.rungs; ++k)
-    EXPECT_LT(water[std::size_t(k)].const_tris().size(), water[std::size_t(k - 1)].const_tris().size());
+    EXPECT_LT(water[std::size_t(k)].const_tris().size(),
+              water[std::size_t(k - 1)].const_tris().size());
   for (const cvc::geometry &g : make_water_rungs(hf, L, ch, -10.0)) // below the pit's floor: dry
     EXPECT_TRUE(g.const_tris().empty());
 }
