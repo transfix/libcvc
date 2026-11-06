@@ -392,10 +392,10 @@ arigl's browser loop yields with `emscripten_sleep(0)` under Asyncify (the
   the extensions share one namespace.
 - **Init names collide.** `PyInit_<leaf>` is named after the last component only, so `a._common`
   and `b._common` both define `PyInit__common`.
-- **Duplicates are hidden today.**
+- **Duplicates were hidden, until W2.**
   - numpy's 14 extensions define 799 of the same global names: npymath and the random
     distributions are copied into several of them.
-  - So [`link-host.sh`](../../bindings/pycvc/wasm/link-host.sh) links with
+  - So [`link-host.sh`](../../bindings/pycvc/wasm/link-host.sh) linked with
     `--allow-multiple-definition`.
   - That flag also hides real clashes. Two packages with different code under one name would link,
     and one would silently run the other's.
@@ -416,10 +416,19 @@ arigl's browser loop yields with `emscripten_sleep(0)` under Asyncify (the
 - **Where it edits.** Each extension is one relocatable object (emcc `-shared` without
   `SIDE_MODULE`). Its symbol table lives in the `linking` custom section that
   [tool-conventions/Linking.md](https://github.com/WebAssembly/tool-conventions/blob/main/Linking.md)
-  documents. A rewriter of about 150 lines of Python edits that table:
-  - `PyInit_<leaf>` becomes `PyInit__x_<dotted name>`, with `.` written as `__`;
-  - every other defined global becomes local, so it's private, as `RTLD_LOCAL` makes it natively;
-  - COMDAT groups get a per-extension prefix, so C++ inline and template code stays per extension.
+  documents. A rewriter in Python edits that table:
+  - `PyInit_<leaf>` becomes `PyInit__x_` plus each part of the dotted name with its length in
+    front, as C++ mangling does. `numpy._core._simd` becomes `PyInit__x_5numpy5_core5_simd`, so
+    distinct module names give distinct symbols.
+  - Every other defined global becomes local, so it's private, as `RTLD_LOCAL` makes it natively.
+  - **Weak C++ RTTI is the exception.** Weak `_ZTI*` type_info objects and `_ZTS*` names stay
+    global and weak. libc++abi matches a catch clause by comparing type_info pointers, and numpy
+    builds `-fno-rtti`, which leaves weak copies of `std::bad_alloc`'s and the other std
+    typeinfo in the extension. A private copy stops the extension catching what libc++ throws: in
+    review, an out-of-memory in `np.unique` aborted the host instead of raising `MemoryError`.
+  - A COMDAT group with a symbol made local gets a per-extension prefix, so C++ inline and
+    template code stays per extension. RTTI's groups keep their names, so the linker merges them
+    as usual.
 
   References inside an object go by symbol index, so they survive the rename.
 - **The test.** A minimal CPython host linked numpy 2.4.6's 14 extensions with no
@@ -430,27 +439,34 @@ arigl's browser loop yields with `emscripten_sleep(0)` under Asyncify (the
   The rewrite covered 395 COMDAT groups. The unmodified objects fail that link with
   duplicate-symbol errors.
 
-**The convention (W2, built):**
+**The convention (W2):**
 
 - **The tool.** `cvcpkg/recipes/_common/wasm_pyext.py`: stdlib-only Python, run with a build's
   native interpreter. It's vendored from cy-pca/cvcpkg's `recipes/_common/`, where its unit tests
-  live.
+  live (`tests/unit/test_wasm_pyext.py`).
   - `object` and `package` localize extensions. With `--out DIR`, `package` writes the copies
     into a prefix overlay instead of in place.
   - Exported and `NO_STRIP` symbols stay global and are reported.
   - Debug function names get the same per-extension prefix, so a combined `wasm-ld -r` link of
     several objects stays readable.
+  - Common symbols (binding 3) are refused; emsdk's clang doesn't emit them for wasm.
 - **Recipes.** A wasm C-extension recipe runs `package` on its extensions and ships
   `share/python-wasm/<cvcpkg package>.inittab`. Each line holds the dotted module, the renamed
-  init symbol, and the object's path relative to the prefix. numpy-cp312 does this from cvc.6
-  (wasm and wasm-mt).
+  init symbol, and the object's path relative to the prefix.
+  - numpy-cp312 does this from cvc.6 (wasm and wasm-mt), in the cy-pca/cvcpkg change that adds
+    the tool.
+  - Publish cvc.6 only after this link-host is on master: an older link-host registers
+    `PyInit_<leaf>`, which cvc.6's objects no longer define.
+  - Until cvc.6 is published, the link localizes numpy itself (step 2 below).
 - **The host link** ([`link-host.sh`](../../bindings/pycvc/wasm/link-host.sh)) works in five
   steps:
   1. It reads every manifest in the deps prefix.
   2. It localizes copies of any numpy that ships no manifest, in a scratch directory, never in
      the prefix.
-  3. `check` refuses a set that would clash: a module listed twice, a global defined by two
-     extensions, or an object that isn't localized.
+  3. `check` refuses a set that would clash: a module listed twice, an object that isn't
+     localized, or a global defined by two extensions. Weak RTTI is exempt, since its copies are
+     meant to merge. Any other weak global still counts, because two packages' copies may
+     differ.
   4. `registrar` writes the `pycvc_register_pyext_inittab()` that `pycvc_host.cpp` calls.
   5. It links with no `--allow-multiple-definition`.
 
