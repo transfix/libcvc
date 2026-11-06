@@ -8,9 +8,8 @@
 
 #define DEBUGNo
 #define DEBUGSLEEPNo
-#define MAXQUEUESIZE
 
-extern int verbose;
+#include "contour_verbose.h"
 
 class QueueRec {
    public:
@@ -49,15 +48,11 @@ class QueueRec {
       Range range[6];
 };
 
-#ifdef MAXQUEUESIZE
-static int maxqsize = 0;
-#endif
-
+// q is compSeeds' queue, empty between calls (it was a function-local static)
 void
-rangeSweep::PropagateRegion(int cellid, float min, float max)
+rangeSweep::PropagateRegion(IndexedQueue<QueueRec, int> &q, int cellid, float min, float max)
 {
 //   SQueue<QueueRec> q;
-   static IndexedQueue<QueueRec, int> q;
    QueueRec qr, current, *old;
    RangeSweepRec rsr, *rsritem;
    u_int c; 
@@ -74,14 +69,6 @@ rangeSweep::PropagateRegion(int cellid, float min, float max)
 //   sleep(5);
 //}
    while (!q.isEmpty()) {
-#ifdef MAXQUEUESIZE
-if (q.getLength() > maxqsize) {
-   maxqsize = q.getLength();
-   if (verbose)
-   if (maxqsize%10000 == 0)
-      printf("qsize: %d\n", maxqsize);
-}
-#endif
       q.dequeue(current);
 //      item = q.dequeue();
 //      current = *item;
@@ -236,6 +223,7 @@ rangeSweep::compSeeds(void)
 {
    RangeSweepRec rsr, item;
    Range fullrange, added, outgoing;
+   IndexedQueue<QueueRec, int> region;	// PropagateRegion's queue
    float min, max;
    //double p;
 
@@ -272,7 +260,7 @@ sleep(3);
       // mark this cell as processed
 //      plot.TouchCell(item.cellid);
 
-      PropagateRegion(item.cellid, item.range.MinAll(), item.range.MaxAll());
+      PropagateRegion(region, item.cellid, item.range.MinAll(), item.range.MaxAll());
    }
 
    if (verbose)

@@ -584,7 +584,10 @@ cannot) is filtered as a subject but never registered as a receiver — no conne
 **Pose pushes.** A non-inner subject's pose reaches the receiver as a targeted snapshot
 (`state_transport::push_snapshot_to`) carrying its whole pose subtree, with `server_tick` re-stamped to
 the relay holon's *current* tick and written last: the tree's heartbeat tick for a still subject can be
-~120 ticks old, and a client re-aligns its whole clock (and rubber-bands) on more than 24 ticks of skew.
+~600 ticks old (arisrv re-stamps it every 5 s; the pose stream carries the 1 s heartbeat), and a client
+re-aligns its whole clock (and rubber-bands) on more than 24 ticks of skew. A client takes no clock
+reading from a tick older than one it has already applied (`holon::apply_authoritative`), so a stale
+heartbeat in the tree no longer seeks a joiner's clock back and forth.
 A pair entering inner, and a new pair that starts middle or outer, is pushed at once. `relay_room_step`
 sends every push **before** the step's `drain_local` + publish, so on each connection a push precedes
 that tick's live writes.
@@ -606,6 +609,17 @@ WebSocket leg's 32 KB backlog drop. It covers every gRPC media write, the relay'
 and the media gate is asked only once the stream is held, so a dropped frame spends no thumbnail. (A
 write that starts and then blocks still holds its own thread until the 3 s watchdog; only an
 asynchronous write path would avoid that.)
+
+**gRPC delay drop.** `--media-delay-ms 100`: the stall drop rarely fires, because a gRPC `Write`
+returns once HTTP/2 flow control and the socket take the bytes, and gRPC grows the window to
+megabytes, so during a TCP loss burst seconds of media queued without a write ever blocking. Each
+stream that carries media or pose snapshots now follows them with a Ping (its seq's top bit set) at
+most every 50 ms. The stream is in order, so the Pong means the peer has read everything written
+before it, and the oldest unanswered probe dates the oldest byte that may still be queued. Past its
+base round trip (the least probe round trip over 10 s) by more than 100 ms, video to that receiver is
+dropped, pose snapshots past 200 ms and audio past 400 ms. A peer that never answers a probe is never
+held back. It applies on both ends, so a client's uplink is bounded too (the bench and arigl use
+the transport's default). Pose snapshots also never wait more than 1 ms for a busy stream.
 
 **Media defaults and the uplink.**
 - **Camera:** `conference_roster.ari` captures it at 320x240, 15 fps and JPEG q60
@@ -672,6 +686,7 @@ false)` is the old drain-and-publish exactly); arisrv and arigl turn them on.
 | `--relay-gate on\|off` | on | off: forward every client frame |
 | `--relay-journal trim\|keep` | trim | keep: journal backfill on connect, no trim |
 | `--media-stall-ms N` | 40 | gRPC stall drop; 0 = off |
+| `--media-delay-ms N` | 100 | gRPC delay drop (video past N ms of queue, poses 2N, audio 4N); 0 = off. Not an S7 switch |
 | `--admission-hold-ms N` | 2000 (only with an AOI) | hold a joiner's bootstrap for its filter, at most N ms; 0 = off (the admit snapshot goes out unfiltered, before Hello) |
 | `--scene default\|large` | default | the seeded scene; not an S7 switch (honoured under `--s7 off`) |
 | `--bind-writes on\|off` | on | bound writes (below): each client writes only its own participant, as itself; off takes any client's writes. Not an S7 switch |
@@ -1034,6 +1049,21 @@ chosen so each part can later come from the user without changing who decides.
 5. User controllers (sandboxed, deterministic, metered), or a user's body driven by a server
    controller of their choosing.
 
+### 5l. More streams, app and screen sharing, desktop audio (PLANNED)
+
+A participant sends more than one camera and mic, shares the Ariadne GL frame (the whole window or
+chosen windows), shares the desktop or other applications' windows, and sends the desktop's stereo
+audio in sync with it. Today the wire knows only `"camera"` and `"mic"`, and video is MJPEG only.
+The plan is [`CONFERENCE_SHARING.md`](CONFERENCE_SHARING.md). It covers:
+- named streams, with a capability record per client;
+- an inter-frame codec, H.264 with VP9 as the fallback;
+- a robust WebSocket path *and* a WebRTC media leg, chosen per stream;
+- capture on each platform, built for the browser and natively in parallel;
+- sync groups;
+- phases SH0–SH6.
+
+The owner settled its decisions on 2026-11-03.
+
 ---
 
 ## 6. Data plane & transport
@@ -1284,6 +1314,8 @@ mesh works first, auth hardens later (§5, Phase 8); **WASI server committed** (
 * LOD — geometry (holon §5h; **doc stale — landed PR #249+**; what the room uses since S7 is in its
   §4.1 status note): [`VISIBILITY-AND-LOD-ROADMAP.md`](VISIBILITY-AND-LOD-ROADMAP.md).
 * Physics (holon §5h): [`NAV-VEHICLE-PHYSICS-ROADMAP.md`](NAV-VEHICLE-PHYSICS-ROADMAP.md).
+* More streams, app and screen sharing, desktop audio (§5l):
+  [`CONFERENCE_SHARING.md`](CONFERENCE_SHARING.md).
 
 ---
 

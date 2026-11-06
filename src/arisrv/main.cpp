@@ -35,6 +35,7 @@
 #include <cvc/ariadne/conference/room_aoi.h>        // aoi_params, the presets, write_aoi_params
 #include <cvc/ariadne/conference/room_aoi_relay.h>  // room_aoi_relay, relay_room_step
 #include <cvc/ariadne/conference/room_avatar.h>     // seed_avatar_catalog (what avatars may wear)
+#include <cvc/ariadne/conference/room_chat.h>       // room chat and direct messages
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_leave (retract a departed peer)
 #include <cvc/ariadne/conference/room_lane.h>       // the pose lane + lane signaling
 #include <cvc/ariadne/conference/room_media_intrinsics.h> // room_relay_tick
@@ -45,6 +46,7 @@
 #include <cvc/ariadne/conference/room_write_gate.h> // bound writes: a client writes only itself
 #include <cvc/ariadne/holon.h>                      // server-authoritative avatar holon (H1)
 #include <cvc/ariadne/holon_sync.h> // server_pump: intent -> holon -> authoritative pose
+#include <cvc/ariadne/host_cli.h>   // --set KEY=VALUE, as ari and arigl take it
 #include <cvc/ariadne/stream/stream_relay.h>
 #include <cvc/core/app.h>
 #include <cvc/media/media_router.h> // protocol-agnostic media hub (WS + gRPC + future protocols)
@@ -59,6 +61,7 @@
 #endif
 #include <fstream>
 #include <initializer_list>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -147,10 +150,16 @@ int main(int argc, char **argv) {
   //                              journal backfill, and the journal is erased as it is published
   //   --media-stall-ms N         gRPC: skip a receiver whose media write has been stuck N ms
   //                              (default 40; 0 = off)
+  //   --media-delay-ms N         gRPC: skip a receiver whose stream has queued N ms past its base
+  //                              round trip (video; poses at 2N, audio at 4N; default 100; 0 = off)
   //   --admission-hold-ms N      hold a joiner's bootstrap until the area of interest has its
   //                              filter, so its admit snapshot is filtered too; at most N ms, then
   //                              unfiltered (default 2000; 0 = off; only with an area of interest)
   //   --scene default|large      the seeded scene (large: a 100 m plane of LOD meshes)
+  // Debugging (repeatable, in order):
+  //   --set KEY=VALUE            write VALUE to the state key KEY (from the app's root, e.g.
+  //                              conf.rooms.main.topic) once the room tree is up, before any
+  //                              client connects; a conf.* key reaches every client
   // Bound writes (not an S7 switch, so --s7 off leaves it on):
   //   --bind-writes on|off       each client connection speaks only as the pid of its Hello, held
   //                              by one live connection at a time, and writes only its own
@@ -213,9 +222,11 @@ int main(int argc, char **argv) {
   std::string devicePinsFile;
   bool devicePinsFlag = false; // --device-pins was given (even with no path)
   std::string adaptArg = "on", videoMaxArg = "full", videoFloorArg = "thumb", viewerKbpsArg = "0";
-  std::string aoiVideoMaxArg = "0", mediaStallArg = "40", admissionHoldArg = "2000";
+  std::string aoiVideoMaxArg = "0", mediaStallArg = "40", mediaDelayArg = "100",
+              admissionHoldArg = "2000";
   std::string laneListen, laneAdvertise, laneMediaArg = "off";
   std::string avatarEnergyArg = "on", avatarEmptyArg = "rest";
+  std::vector<std::pair<std::string, std::string>> stateSets; // --set KEY=VALUE
   for (int i = 1; i < argc; ++i) {
     const char *a = argv[i];
     auto next = [&](const char *d) { return (i + 1 < argc) ? argv[++i] : d; };
@@ -243,6 +254,8 @@ int main(int argc, char **argv) {
       relayJournal = next("trim");
     else if (!std::strcmp(a, "--media-stall-ms"))
       mediaStallArg = next("");
+    else if (!std::strcmp(a, "--media-delay-ms"))
+      mediaDelayArg = next("");
     else if (!std::strcmp(a, "--admission-hold-ms"))
       admissionHoldArg = next("");
     else if (!std::strcmp(a, "--scene"))
@@ -273,6 +286,15 @@ int main(int argc, char **argv) {
       avatarEnergyArg = next("on");
     else if (!std::strcmp(a, "--avatar-empty"))
       avatarEmptyArg = next("rest");
+    else if (!std::strcmp(a, "--set")) {
+      std::pair<std::string, std::string> kv;
+      const char *v = next("");
+      if (!cvc::ariadne::parse_state_set(v, kv)) {
+        std::fprintf(stderr, "[arisrv] --set expects KEY=VALUE, got '%s'\n", v);
+        return 2;
+      }
+      stateSets.push_back(std::move(kv));
+    }
   }
   if (aoiMode.empty())
     aoiMode = scene == "large" ? "hall" : "conference";
@@ -289,9 +311,10 @@ int main(int argc, char **argv) {
       !check_choice("--avatar-energy", avatarEnergyArg, {"on", "off"}) ||
       !check_choice("--avatar-empty", avatarEmptyArg, {"rest", "stop"}))
     return 2;
-  long aoiVideoMaxN = 0, mediaStallMs = 40, admissionHoldMs = 2000;
+  long aoiVideoMaxN = 0, mediaStallMs = 40, mediaDelayMs = 100, admissionHoldMs = 2000;
   if (!check_count("--aoi-video-max", aoiVideoMaxArg, aoiVideoMaxN) ||
       !check_count("--media-stall-ms", mediaStallArg, mediaStallMs) ||
+      !check_count("--media-delay-ms", mediaDelayArg, mediaDelayMs) ||
       !check_count("--admission-hold-ms", admissionHoldArg, admissionHoldMs))
     return 2;
   long viewerKbps = 0;
@@ -416,6 +439,7 @@ int main(int argc, char **argv) {
   state_tp.set_relay_requires_interest(relayGate);
   state_tp.set_backfill_on_connect(!trimJournal);
   state_tp.set_media_stall_drop(std::chrono::milliseconds(stallMs));
+  state_tp.set_media_delay_drop(std::chrono::milliseconds(mediaDelayMs));
   state_tp.set_admission_hold(std::chrono::milliseconds(holdMs));
   state_tp.set_inbound_gate(bindGate);
   state_tp.set_auth_config({roomToken, std::string()});
@@ -434,6 +458,7 @@ int main(int argc, char **argv) {
   shard.attach();
   shard.install_as_default();
   state_tp.register_shard(&shard);
+  cvc::ariadne::apply_state_sets(app, "", stateSets); // --set, before any client connects
 
 #if CVC_ENABLE_WS
   // WebSocket control plane + the WS<->gRPC bridge, so BROWSER (wasm) clients join the SAME room as
@@ -497,6 +522,18 @@ int main(int argc, char **argv) {
 #endif
   }
 
+  // Room chat and direct messages (room_chat.h): the relay keeps the history and pushes each client
+  // what it may read. A DM is pushed only to the connections holding its two pids, which takes
+  // bound writes: without them any connection could claim a pid and read its DMs, so they are off.
+  cvc::ariadne::conference::chat_limits chatLimits;
+  chatLimits.dms = bindGate != nullptr;
+  auto chat =
+      std::make_unique<cvc::ariadne::conference::room_chat_relay>(app, shard, room, chatLimits);
+  chat->add_transport(&state_tp);
+#if CVC_ENABLE_WS
+  chat->add_transport(&ws_tp);
+#endif
+
   install_crash_trace();
   std::signal(SIGINT, on_signal);
   std::signal(SIGTERM, on_signal);
@@ -507,11 +544,17 @@ int main(int argc, char **argv) {
               ws_tp.listen_address().c_str());
 #endif
   std::printf("[arisrv] S7 %s | aoi %s (full-rate cameras: %d, 0 = all) | relay gate %s | journal "
-              "%s | grpc media stall drop %ld ms | scene %s | bound writes %s | room token %s\n",
+              "%s | grpc media stall drop %ld ms, delay drop %ld ms | scene %s | bound writes %s | "
+              "room token %s\n",
               s7 ? "on" : "off (the pre-S7 relay)", aoiMode.c_str(), aoiVideoMax,
               relayGate ? "on" : "off", trimJournal ? "trim (no backfill)" : "keep (backfill)",
-              stallMs, scene.c_str(), bindGate ? "on" : "off (any client's writes are taken)",
+              stallMs, mediaDelayMs, scene.c_str(),
+              bindGate ? "on" : "off (any client's writes are taken)",
               roomToken.empty() ? "off (an open room)" : "on");
+  std::printf("[arisrv] chat: room%s | history in memory: %zu room messages, %zu per "
+              "conversation\n",
+              chatLimits.dms ? " and direct messages" : " only (direct messages need bound writes)",
+              chatLimits.room_keep, chatLimits.dm_keep);
   if (!cvc::device_keys_available())
     std::printf("[arisrv] device keys: unavailable (no OpenSSL in this build): no device tags\n");
   else if (devicePins->path().empty())
@@ -544,7 +587,8 @@ int main(int argc, char **argv) {
   // at most ~17 ms before the server integrates it. Each step the pose relay sends every
   // viewer that is due its snapshot of the poses it sees (room_pose_relay: 60, 30 or 20 Hz
   // by its round trip); the tree's copy of the poses is written every kTreePoseSteps steps
-  // (1 Hz), for late joiners and the log.
+  // (1 Hz), for late joiners and the log -- and an avatar standing still is re-stamped there only
+  // every kTreePoseHeartbeatS, since the stream's own heartbeat is what keeps clients' clocks.
   cvc::ariadne::holon server_holon(cvc::ariadne::holon_role::server,
                                    cvc::ariadne::room_holon_config());
   std::printf("[arisrv] avatar physics: %s\n",
@@ -552,6 +596,7 @@ int main(int argc, char **argv) {
   constexpr int kRoomSubsteps = 12;
   constexpr auto kRoomStep = std::chrono::microseconds(16667); // x kRoomSubsteps = the 200 ms pass
   constexpr std::uint64_t kTreePoseSteps = 60;
+  constexpr double kTreePoseHeartbeatS = 5.0;
   cvc::ariadne::conference::room_pose_relay::config pose_cfg;
   pose_cfg.heartbeat_ticks =
       static_cast<std::uint64_t>(std::llround(1.0 / server_holon.clock().fixed_dt()));
@@ -565,7 +610,8 @@ int main(int argc, char **argv) {
 #endif
   std::uint64_t room_steps = 0;
   const auto pump_room = [&] {
-    cvc::ariadne::server_pump(server_holon, app, room, -1.0, room_steps % kTreePoseSteps == 0);
+    cvc::ariadne::server_pump(server_holon, app, room, -1.0, room_steps % kTreePoseSteps == 0,
+                              kTreePoseHeartbeatS);
   };
   // Fan the relay's OWN room-tree writes -- the room_leave retractions, room_relay_tick's
   // per-stream "ready" markers, the holon's poses -- out to EVERY client on BOTH transports.
@@ -619,6 +665,9 @@ int main(int argc, char **argv) {
   const auto room_step = [&] {
     const double now_s =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - room_start).count();
+    // Chat first: its pushes go out now, and the room head it writes rides this step's drain, so
+    // a client never sees the head before the message.
+    chat->step(now_s);
     cvc::ariadne::conference::relay_room_step(shard, planes, aoi_relay.get(), server_holon, now_s,
                                               trimJournal);
     const std::shared_ptr<const cvc::ariadne::conference::aoi_snapshot> tiers =
@@ -633,12 +682,16 @@ int main(int argc, char **argv) {
   std::uint64_t lastUnauthorized = 0;  // connections refused for the room token, at the last log
   std::uint64_t lastProofsRefused = 0; // device proofs refused (another key, a bad signature)
   // Link stats (~1 s): every connection on both planes reports its traffic and Ping/Pong round
-  // trip (state_transport::link_reports); the rate meter turns the counters into rates. The relay
-  // publishes its view of each participant (net.relay.*) and its totals (server.net.*) into the
-  // room tree, and logs them: every link each ~5 s with CVC_ARISRV_ROOM_DEBUG, a totals line each
-  // minute otherwise. Links that are not participants (peer servers, delegation) are logged too.
+  // trip (state_transport::link_reports). Every net_publish_period_s (room_net.h) the rate meter
+  // turns the counters into rates over that window; the relay publishes its view of each
+  // participant (net.relay.*) and its totals (server.net.*) into the room tree, and logs them:
+  // every link each time with CVC_ARISRV_ROOM_DEBUG, a totals line each minute otherwise. Links
+  // that are not participants (peer servers, delegation) are logged too.
   cvc::state_link_rate_meter link_meter;
   int net_ticks = 0;
+  // The meters' window in 200 ms passes: a whole number of the ~1 s link-stat steps.
+  const long netPublishSteps = std::lround(cvc::ariadne::conference::net_publish_period_s);
+  const int netPublishTicks = 5 * static_cast<int>(std::max(1L, netPublishSteps));
   const auto net_start = std::chrono::steady_clock::now();
   // The shared 3D scene (H1 slice 5, roadmap §5g): the relay is its sole writer and seeds the MVP
   // environment (ground + a reference box under a sun) once -- or, with --scene large, a 100 m
@@ -726,6 +779,7 @@ int main(int argc, char **argv) {
       }
       for (const std::string &nid : gone) {
         cvc::ariadne::conference::room_leave(app, room, nid);
+        chat->participant_left(nid);
         cvc::ariadne::write_intent(app, room, nid, cvc::ariadne::avatar_intent{});
         shaper.forget_viewer(nid);
         shaper.forget_publisher(nid);
@@ -753,7 +807,10 @@ int main(int argc, char **argv) {
 #endif
       const double now_s =
           std::chrono::duration<double>(std::chrono::steady_clock::now() - net_start).count();
-      const auto rates = link_meter.update(links, now_s);
+      const bool publish = net_ticks % netPublishTicks == 0;
+      std::map<std::string, cvc::state_link_rate_meter::rate> rates;
+      if (publish)
+        rates = link_meter.update(links, now_s);
       cvc::ariadne::conference::server_net total;
       std::set<std::string> present;
       for (const auto &p : cvc::ariadne::conference::room_roster(app, room))
@@ -769,8 +826,9 @@ int main(int argc, char **argv) {
         // another connection claiming it is not that participant.
         if (!r.holds_id || !present.count(r.remote_node_id))
           continue;
-        cvc::ariadne::conference::write_relay_net(app, room, r.remote_node_id,
-                                                  {r.stats.rtt_ms, in_kbps, out_kbps});
+        if (publish)
+          cvc::ariadne::conference::write_relay_net(app, room, r.remote_node_id,
+                                                    {r.stats.rtt_ms, in_kbps, out_kbps});
         if (r.stats.rtt_ms >= 0.0) // its pose snapshot rate
           pose_relay.set_rtt(r.remote_node_id, r.stats.rtt_ms);
       }
@@ -799,7 +857,8 @@ int main(int argc, char **argv) {
           std::fflush(stdout);
         }
       }
-      cvc::ariadne::conference::write_server_net(app, room, total);
+      if (publish)
+        cvc::ariadne::conference::write_server_net(app, room, total);
       // A client writing outside its own participant, or as another peer, is refused: say so (at
       // most every ~5 s) whenever the count has grown.
       if (net_ticks % 25 == 0) {
@@ -841,8 +900,8 @@ int main(int argc, char **argv) {
           lastProofsRefused = proofsRefused;
         }
       }
-      const bool detail = room_debug && net_ticks % 25 == 0;
-      if (detail || net_ticks % 300 == 0) {
+      const bool detail = room_debug && publish;
+      if (detail || (publish && net_ticks % 300 < netPublishTicks)) {
         std::printf("[arisrv] net: %d link(s) | in %.1f kb/s | out %.1f kb/s\n", total.links,
                     total.in_kbps, total.out_kbps);
         if (detail)
@@ -947,6 +1006,13 @@ int main(int argc, char **argv) {
           static_cast<unsigned long long>(state_tp.total_media_gated()), ws_gated,
           static_cast<unsigned long long>(state_tp.total_media_stall_dropped()), ws_backlog, held,
           held_timeouts, shard.journal().size());
+      const auto cs = chat->take_stats();
+      std::printf(
+          "[arisrv] chat: %llu post(s) (%llu direct) | %llu page(s) | %llu refused | %llu "
+          "dropped | %llu push(es)\n",
+          static_cast<unsigned long long>(cs.posts), static_cast<unsigned long long>(cs.dms),
+          static_cast<unsigned long long>(cs.pages), static_cast<unsigned long long>(cs.refused),
+          static_cast<unsigned long long>(cs.dropped), static_cast<unsigned long long>(cs.pushes));
       const auto ps = pose_relay.take_stats();
       std::printf(
           "[arisrv] poses: %llu snapshot(s) (%llu on pose lanes, %llu acks), %llu entries, "
@@ -1009,8 +1075,9 @@ int main(int argc, char **argv) {
   std::printf("[arisrv] shutting down (relayed %zu stream(s), %llu frames forwarded)\n",
               relay.stream_count(), static_cast<unsigned long long>(relay.frames_forwarded()));
   // The AOI first, while the transports still run: it clears the media gates and the registry
-  // filters it installed.
+  // filters it installed. Chat too: it unsubscribes from the shard's message bus.
   aoi_relay.reset();
+  chat.reset();
   relay.stop();
   media_tp.stop();
 #if CVC_ENABLE_WS

@@ -1390,6 +1390,24 @@ inline PyObject *to_dict(const cvc::nav::drive_telemetry *tel, int N) {
     return pycvc_telemetry::to_dict(tel, sw->size());
   }
 
+  // ── the risk governor (sim_world::set_risk_governor) ────────────────────────────
+  // From the next step: the material's (and the terrain's) risk caps each agent's speed, down to
+  // vmin at risk 1, with `probes` points out to `lookahead` ahead slowing it before it gets there
+  // (speeds and look-ahead normalized). The material's forces alone do not slow an agent at its top
+  // speed that drives square at a hazard; this does. A bad argument raises RuntimeError.
+  PyObject *nav_sim_world_set_risk_governor(PyObject *handle, int on, double vmin = 0.0,
+                                            double onset = 0.3, double lookahead = 0.0,
+                                            int probes = 3) {
+    sim_world_from(handle)->set_risk_governor(on != 0, static_cast<float>(vmin),
+                                              static_cast<float>(onset),
+                                              static_cast<float>(lookahead), probes);
+    Py_RETURN_NONE;
+  }
+
+  PyObject *nav_sim_world_risk_governor(PyObject *handle) {
+    return PyBool_FromLong(sim_world_from(handle)->risk_governor() ? 1 : 0);
+  }
+
   // ── base nav_stats on the sim_world (internal collector) ────────────────────
   // Arm the world's own base nav_stats_collector. Captures the CURRENT pose as the
   // episode start, so CALL RIGHT AFTER create (before the first step). contact_r is the
@@ -1609,6 +1627,74 @@ inline PyObject *to_dict(const cvc::nav::drive_telemetry *tel, int N) {
     std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(out)), sw->belief_occ(m),
                 static_cast<std::size_t>(sw->rows()) * sw->cols());
     return out;
+  }
+
+  // The fog-of-war read and write surface (sim_world.h): the truth as it is now, and a plane's
+  // fog tiers (ever_seen: remembered; last_visible: in view at the last sense tick), each (H,W)
+  // uint8; a plane's dynamic layer, (H,W) float64 of the sim time each cell was last marked by
+  // add_obstacle (-inf never); set_truth replaces the truth (the agents sense it from the next
+  // sense tick), and add_obstacle stamps a decaying blob into every plane's dynamic layer.
+  PyObject *nav_sim_world_truth(PyObject *handle) {
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    npy_intp d[2] = {sw->rows(), sw->cols()};
+    PyObject *out = PyArray_SimpleNew(2, d, NPY_UINT8);
+    if (!out)
+      throw std::runtime_error("pycvc.nav_sim_world_truth: alloc failed");
+    std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(out)), sw->truth(),
+                static_cast<std::size_t>(sw->rows()) * sw->cols());
+    return out;
+  }
+  PyObject *nav_sim_world_ever_seen(PyObject *handle, int m) {
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    if (m < 0 || m >= sw->planes())
+      throw std::out_of_range("pycvc.nav_sim_world_ever_seen: plane out of range");
+    npy_intp d[2] = {sw->rows(), sw->cols()};
+    PyObject *out = PyArray_SimpleNew(2, d, NPY_UINT8);
+    if (!out)
+      throw std::runtime_error("pycvc.nav_sim_world_ever_seen: alloc failed");
+    std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(out)), sw->ever_seen(m),
+                static_cast<std::size_t>(sw->rows()) * sw->cols());
+    return out;
+  }
+  PyObject *nav_sim_world_last_visible(PyObject *handle, int m) {
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    if (m < 0 || m >= sw->planes())
+      throw std::out_of_range("pycvc.nav_sim_world_last_visible: plane out of range");
+    npy_intp d[2] = {sw->rows(), sw->cols()};
+    PyObject *out = PyArray_SimpleNew(2, d, NPY_UINT8);
+    if (!out)
+      throw std::runtime_error("pycvc.nav_sim_world_last_visible: alloc failed");
+    std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(out)), sw->last_visible(m),
+                static_cast<std::size_t>(sw->rows()) * sw->cols());
+    return out;
+  }
+  PyObject *nav_sim_world_dynamic_stamps(PyObject *handle, int m) {
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    if (m < 0 || m >= sw->planes())
+      throw std::out_of_range("pycvc.nav_sim_world_dynamic_stamps: plane out of range");
+    npy_intp d[2] = {sw->rows(), sw->cols()};
+    PyObject *out = PyArray_SimpleNew(2, d, NPY_FLOAT64);
+    if (!out)
+      throw std::runtime_error("pycvc.nav_sim_world_dynamic_stamps: alloc failed");
+    std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(out)), sw->dynamic_stamps(m),
+                sizeof(double) * static_cast<std::size_t>(sw->rows()) * sw->cols());
+    return out;
+  }
+  PyObject *nav_sim_world_set_truth(PyObject *handle, PyObject *truth) {
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    int rows = 0, cols = 0;
+    PyArrayObject *a = pycvc_nav_as_u8(truth, rows, cols);
+    if (rows != sw->rows() || cols != sw->cols()) {
+      Py_DECREF(a);
+      throw std::invalid_argument("pycvc.nav_sim_world_set_truth: truth must be (rows, cols)");
+    }
+    sw->set_truth(static_cast<const std::uint8_t *>(PyArray_DATA(a)));
+    Py_DECREF(a);
+    Py_RETURN_NONE;
+  }
+  PyObject *nav_sim_world_add_obstacle(PyObject *handle, int r0, int r1, int c0, int c1) {
+    sim_world_from(handle)->add_obstacle(r0, r1, c0, c1);
+    Py_RETURN_NONE;
   }
 
   // [n] int32 per-agent belief/material plane id — the map_id set_material

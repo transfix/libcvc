@@ -79,6 +79,12 @@ inline diff::dyn4_params dyn4_params_of(const dyn4_si &si, const world_units::no
   p.c_r = static_cast<float>(si.damper_rear);
   p.fz_min = static_cast<float>(si.min_wheel_load);
   p.grade_force = si.grade_force ? 1 : 0;
+  // The wheels (dyn4_spin_plant): the single track's, each axle's inertia split between its two.
+  p.r_w = b.r_w;
+  p.J_f = 0.5f * b.J_f;
+  p.J_r = 0.5f * b.J_r;
+  p.B_x = b.B_x;
+  p.C_x = b.C_x;
   return p;
 }
 

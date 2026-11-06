@@ -3,7 +3,9 @@
 // the mount grant), and AppRuntime's host verbs and init: diagnostics.
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/doc_args.h>
 #include <cvc/ariadne/ftxui_backend.h>
@@ -12,14 +14,18 @@
 #include <cvc/ariadne/loader.h>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_exec/async_call.h> // async_kernel, async_call
+#include <cvc/state/state_exec/exceptions.h> // dsl_error
 #include <cvc/state/state_exec/types.h>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace cvc::ariadne;
@@ -139,6 +145,26 @@ TEST(AriadneHostCli, TimeoutIsSecondsAboveZero) {
   for (const char *bad : {"0", "-1", "soon", "2s"}) {
     const char *argv[] = {"ari", "test", "--timeout", bad, "a.ari"};
     EXPECT_NE(parse_host_args(5, argv).error.find("--timeout needs a number of seconds"),
+              std::string::npos)
+        << bad;
+  }
+}
+
+// ari test's --action-time: a program's time backstop in seconds, 0 for none; unset (below 0)
+// means the run's timeout.
+TEST(AriadneHostCli, ActionTimeIsSecondsFromZero) {
+  const char *none[] = {"ari", "test", "a.ari"};
+  EXPECT_LT(parse_host_args(3, none).action_time, 0.0); // the run's timeout
+  for (const auto &[text, seconds] : {std::pair<const char *, double>{"0.1", 0.1}, {"0", 0.0}}) {
+    const char *argv[] = {"ari", "test", "--action-time", text, "a.ari"};
+    const HostOptions o = parse_host_args(5, argv);
+    EXPECT_TRUE(o.error.empty()) << o.error;
+    EXPECT_DOUBLE_EQ(o.action_time, seconds) << text;
+    EXPECT_EQ(o.doc, "a.ari");
+  }
+  for (const char *bad : {"-1", "soon", "2s", "inf"}) {
+    const char *argv[] = {"ari", "test", "--action-time", bad, "a.ari"};
+    EXPECT_NE(parse_host_args(5, argv).error.find("--action-time needs a number of seconds"),
               std::string::npos)
         << bad;
   }
@@ -316,6 +342,31 @@ TEST(AriadneHostCli, GraphicsImageAndCellSizeFlags) {
   o = parse_host_args(5, after);
   EXPECT_TRUE(o.graphics.empty());
   EXPECT_NE(misplaced_flag_note("ari", o.doc_args).find("'--graphics'"), std::string::npos);
+}
+
+// --set KEY=VALUE collects in order (the value keeps any '=' of its own), and the runtime writes
+// each under the document's state root before the document loads, so its nodes seed from it.
+TEST(AriadneHostCli, SetWritesStateKeysBeforeTheDocument) {
+  const char *a[] = {"arigl", "snapshot", "--set",  "world.preset=2", "--set=/abs.key=a=b",
+                     "--set", "empty=",   "doc.ari"};
+  HostOptions o = parse_host_args(8, a);
+  ASSERT_TRUE(o.error.empty()) << o.error;
+  ASSERT_EQ(o.sets.size(), 3u);
+  EXPECT_EQ(o.sets[0], std::make_pair(std::string("world.preset"), std::string("2")));
+  EXPECT_EQ(o.sets[1], std::make_pair(std::string("/abs.key"), std::string("a=b")));
+  EXPECT_EQ(o.sets[2], std::make_pair(std::string("empty"), std::string()));
+  EXPECT_EQ(o.doc, "doc.ari");
+  const char *bad[] = {"ari", "run", "--set", "novalue", "d.ari"};
+  EXPECT_NE(parse_host_args(5, bad).error.find("--set is KEY=VALUE"), std::string::npos);
+  const char *nokey[] = {"ari", "run", "--set", "=1", "d.ari"};
+  EXPECT_FALSE(parse_host_args(5, nokey).error.empty());
+
+  cvc::app app;
+  apply_state_sets(app, "ui.docs.t", o.sets);
+  auto &st = cvc::state::instance(app);
+  EXPECT_EQ(st("ui.docs.t.world.preset").value(), "2");
+  EXPECT_EQ(st("abs.key").value(), "a=b") << "a leading '/' is from the app's root";
+  EXPECT_DOUBLE_EQ(st("ui.docs.t.world.preset").value<double>(), 2.0);
 }
 
 TEST(AriadneDocArgs, ParsesOptionsBoolsAndPositionals) {
@@ -941,6 +992,83 @@ TEST(AriadneHostVerbs, AnAsyncVerbsErrorRaisesAtTheCall) {
       << val(app, "ui.docs.e.err");
   EXPECT_NE(val(app, "ui.docs.e.err").find("the verb failed"), std::string::npos)
       << val(app, "ui.docs.e.err");
+}
+
+// register_function: a host function with arguments and a value, inline on the drain thread; its
+// exception raises at the call. A later registration of the name replaces it.
+TEST(AriadneHostVerbs, AFunctionTakesArgumentsAndReturnsAValue) {
+  REQUIRE_YAML();
+  const fs::path doc =
+      write(test_dir("fn"), "f.ari", "meta: {min_libcvc: 3.4.0}\nroot:\n  - text: hi\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.f");
+  art.set_backend(be);
+  namespace se = cvc::state_exec;
+  art.register_function("mul", [](std::span<const se::value_t> args) -> se::value_t {
+    return se::value_t(std::get<int64_t>(args[0].v) * 10);
+  });
+  art.register_function("mul", [](std::span<const se::value_t> args) -> se::value_t {
+    return se::value_t(std::get<int64_t>(args[0].v) * std::get<int64_t>(args[1].v));
+  });
+  art.register_function("bad", [](std::span<const se::value_t>) -> se::value_t {
+    throw se::dsl_error("ValueError", "the function failed");
+  });
+  art.load(doc.string());
+  EXPECT_TRUE(art.runtime().has_function("mul"));
+  std::vector<std::string> how;
+  art.run_program("(state-set \"got\" (mul 6 7))", [&](const std::string &h) { how.push_back(h); });
+  art.run_program("(state-set \"err\" (try (bad) (catch (ValueError e) (get-attr e \"message\"))))",
+                  [&](const std::string &h) { how.push_back(h); });
+  EXPECT_TRUE(drain_until(art, [&] { return how.size() == 2; }));
+  EXPECT_EQ(val(app, "ui.docs.f.got"), "42"); // the second registration replaced the first
+  EXPECT_NE(val(app, "ui.docs.f.err").find("the function failed"), std::string::npos)
+      << val(app, "ui.docs.f.err");
+  EXPECT_EQ(how, (std::vector<std::string>{"", ""}));
+  art.run_program("(bad)", [&](const std::string &h) { how.push_back(h); });
+  EXPECT_TRUE(drain_until(art, [&] { return how.size() == 3; }));
+  EXPECT_EQ(how.back().rfind("failed", 0), 0u) << how.back(); // run_program's done says why
+}
+
+// register_async_function: an async function with arguments; its kernel runs off the drain thread
+// while the program parks, and with a done channel its value is posted there too.
+TEST(AriadneHostVerbs, AnAsyncFunctionTakesArgumentsAndPostsToItsChannel) {
+  REQUIRE_YAML();
+  const fs::path doc =
+      write(test_dir("afn"), "f.ari", "meta: {min_libcvc: 3.4.0}\nroot:\n  - text: hi\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.af");
+  art.set_backend(be);
+  namespace se = cvc::state_exec;
+  const std::thread::id drain = std::this_thread::get_id();
+  std::atomic<bool> off_thread{false};
+  art.register_async_function(
+      "slow-add",
+      [&](std::span<const se::value_t> args) -> se::async_kernel {
+        const int64_t a = std::get<int64_t>(args[0].v), b = std::get<int64_t>(args[1].v);
+        return [&, a, b](se::async_call &) -> se::value_t {
+          off_thread = std::this_thread::get_id() != drain;
+          std::this_thread::sleep_for(std::chrono::milliseconds(20));
+          return se::value_t(a + b);
+        };
+      },
+      "add.done");
+  art.load(doc.string());
+  // The call's wait is charged to the action (ariadne.limits.action_max_time, 0.1 s by default):
+  // on a loaded runner (macOS CI) starting the kernel and its 20 ms took longer, and the program
+  // was stopped (time_limit_exceeded) before it set anything. This tests the arguments and the
+  // channel, not the budget, so it gets the room a host gives (pycvc_gl.ariadne.Host: 30 s).
+  cvc::state::instance(app)("ariadne.limits.action_max_time").value(30.0);
+  std::string how = "running";
+  art.run_program(
+      "(begin (state-set \"got\" (slow-add 2 3)) (state-set \"chan\" (msg-recv \"add.done\")))",
+      [&](const std::string &h) { how = h; });
+  EXPECT_TRUE(drain_until(art, [&] { return val(app, "ui.docs.af.chan") == "5"; }))
+      << val(app, "ui.docs.af.chan") << " (the program: " << how << ")";
+  EXPECT_EQ(val(app, "ui.docs.af.got"), "5");
+  EXPECT_EQ(how, ""); // it finished
+  EXPECT_TRUE(off_thread.load());
 }
 
 TEST(AriadneHostVerbs, AFailingInitIsAWarning) {

@@ -26,7 +26,8 @@ namespace gl {
 //
 //   Vtk (default) VTK 9.5's vtkWebAssemblyOpenGLRenderWindow::Frame() calls
 //                 emscripten_sleep(0) at the end of every render (when the build
-//                 has Asyncify), so each render() is one trip through the
+//                 has Asyncify; cvcGL's SDL window yields at the same place),
+//                 so each render() is one trip through the
 //                 browser's event loop -- and a frame that also yields in its own
 //                 loop pays the clamped trip twice.
 //   App           the app's loop calls emscripten_sleep(0) once per frame on EVERY

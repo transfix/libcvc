@@ -52,7 +52,7 @@ generated_world_params small_world() {
   p.buildings = 16;
   p.tree_gen = 3;
   p.amp_m = 40.0;
-  p.water_level_m = 14.0;
+  p.water_level_m = 0.0; // sea level
   return p;
 }
 
@@ -197,6 +197,30 @@ TEST(WorldGenerated, PresetsQuickSetCounts) {
   EXPECT_TRUE(to_world_params(p).hf.island);
 }
 
+// Sea level is 0 m whatever the relief, so no preset drowns its world or drains it: the urban
+// preset's 10 m relief under the document's old 34 m water level was a world of sea. The fbm
+// land's floor sits world_sea_share of the relief under the sea; the island stands in it.
+TEST(WorldGenerated, EveryPresetHasLandAndWater) {
+  for (int preset = 0; preset < 5; ++preset) {
+    generated_world_params p = small_world();
+    p.preset = preset;
+    apply_world_preset(p);
+    EXPECT_EQ(p.water_level_m, 0.0) << world_preset_name(preset);
+    const generated_world w = generate_world(p);
+    std::size_t dry = 0;
+    const auto &h = w.terrain->heights();
+    for (float z : h)
+      dry += z > p.water_level_m;
+    const double share = double(dry) / double(h.size());
+    const bool island = preset == int(world_preset::island);
+    EXPECT_GT(share, island ? 0.05 : 0.6) << world_preset_name(preset) << ": " << share << " dry";
+    EXPECT_LT(share, island ? 0.5 : 0.995) << world_preset_name(preset) << ": " << share << " dry";
+    if (!island) // the same land under every relief: its floor the same share of it below the sea
+      EXPECT_NEAR(*std::min_element(h.begin(), h.end()) / p.amp_m, 0.15 - world_sea_share, 0.05);
+    EXPECT_GT(w.building_count + w.prop_cells.size(), 0u) << world_preset_name(preset);
+  }
+}
+
 // Trees are tree-sized in metres (the island-scaled pine once stood 20..100 m over one- and
 // two-storey buildings): nothing in the props or needles rises 35 m over the ground under it.
 TEST(WorldGenerated, TreesAreTreeSized) {
@@ -318,8 +342,8 @@ TEST(WorldGenerated, GeneratorsByName) {
   EXPECT_GT(tilt.building_count, 0u);
 }
 
-// A DEM file through the "dem" generator: the world's ground is the file's relief, anchored at 0
-// and stretched to amp_m.
+// A DEM file through the "dem" generator: the world's ground is the file's relief, stretched to
+// amp_m and anchored as every generator's is, world_sea_share of it below sea level.
 TEST(WorldGenerated, DemTerrainFromAFile) {
   const std::string f =
       (std::filesystem::temp_directory_path() / "cvc_world_generated_test_dem.npy").string();
@@ -333,12 +357,12 @@ TEST(WorldGenerated, DemTerrainFromAFile) {
   p.terrain = "dem";
   p.terrain_file = f;
   p.amp_m = 24.0;
-  p.water_level_m = 4.0;
   const generated_world w = generate_world(p);
   std::remove(f.c_str());
-  EXPECT_NEAR(w.height(-200.0, -200.0), 0.0, 1e-3);
-  EXPECT_NEAR(w.height(200.0, 200.0), 24.0, 1e-3);
-  EXPECT_NEAR(w.height(200.0, -200.0), 16.0, 1e-3);
+  const double floor = -world_sea_share * 24.0;
+  EXPECT_NEAR(w.height(-200.0, -200.0), floor, 1e-3);
+  EXPECT_NEAR(w.height(200.0, 200.0), floor + 24.0, 1e-3);
+  EXPECT_NEAR(w.height(200.0, -200.0), floor + 16.0, 1e-3);
   EXPECT_GT(w.road_length, 100.0);
 }
 
@@ -389,4 +413,307 @@ TEST(WorldGenerated, BuildingsAreInTheRaster) {
   EXPECT_GE(walls, w.building_count);
   p.city = "none";
   EXPECT_LT(generate_world(p).raster.occupied_count(), w.raster.occupied_count());
+}
+
+// world_builder steps generate_world a stage at a time: stepped in small budgets it makes the same
+// world, through every stage, its progress rising to 1; surface_painter paints the same texture a
+// few rows a step; and the ground under the water is cached with the world.
+TEST(WorldGenerated, SteppedBuildIsTheSameWorld) {
+  const generated_world_params p = small_world();
+  const generated_world a = generate_world(p);
+  world_builder b(p);
+  std::set<std::string> phases;
+  double last = -1.0;
+  int steps = 0;
+  while (!b.done()) {
+    phases.insert(b.phase());
+    b.step(2000);
+    EXPECT_GE(b.progress(), last);
+    last = b.progress();
+    ASSERT_LT(++steps, 100000);
+  }
+  EXPECT_DOUBLE_EQ(b.progress(), 1.0);
+  EXPECT_GT(steps, 20); // the row stages took many steps
+  for (const char *s : {"terrain", "scatter", "raster", "mesh", "materials", "streets", "city",
+                        "roads", "props", "water"})
+    EXPECT_EQ(phases.count(s), 1u) << s;
+  const generated_world w = b.take();
+  ASSERT_TRUE(w.terrain);
+  ASSERT_EQ(w.terrain->const_points().size(), a.terrain->const_points().size());
+  for (std::size_t i = 0; i < a.terrain->const_points().size(); ++i)
+    ASSERT_EQ(w.terrain->const_points()[i][2], a.terrain->const_points()[i][2]) << i;
+  EXPECT_EQ(w.raster.klass, a.raster.klass);
+  EXPECT_EQ(w.raster.height, a.raster.height);
+  EXPECT_EQ(w.building_count, a.building_count);
+  EXPECT_EQ(w.buildings.const_points().size(), a.buildings.const_points().size());
+  EXPECT_EQ(w.roads.const_points().size(), a.roads.const_points().size());
+  EXPECT_EQ(w.props.const_points().size(), a.props.const_points().size());
+  EXPECT_EQ(w.props_r1.const_points().size(), a.props_r1.const_points().size());
+  EXPECT_EQ(w.props_r2.const_points().size(), a.props_r2.const_points().size());
+  EXPECT_EQ(w.prop_cells.size(), a.prop_cells.size());
+  ASSERT_EQ(w.terrain_chunks.size(), a.terrain_chunks.size());
+  for (std::size_t i = 0; i < w.terrain_chunks.size(); ++i)
+    EXPECT_EQ(w.terrain_chunks[i].error_m, a.terrain_chunks[i].error_m) << i;
+  EXPECT_EQ(w.water_ground, a.water_ground);
+  const int n = water_resolution(w);
+  ASSERT_EQ(w.water_ground.size(), std::size_t(n) * n);
+  EXPECT_NEAR(w.water_ground[std::size_t(n) * n - 1], w.model->terrain().sample(200.0, 200.0),
+              1e-3);
+
+  const std::vector<unsigned char> whole = paint_surface(w, surface_color::material, 256);
+  surface_painter sp(w, surface_color::material, 256);
+  int rows = 0;
+  while (!sp.step(256 * 3)) // three rows a step
+    ASSERT_LT(++rows, 1000);
+  EXPECT_GT(rows, 50);
+  EXPECT_EQ(sp.take(), whole);
+}
+
+// The prop cells cut rung 0 into contiguous runs that cover every mesh exactly, in order; each
+// cell's rung-0 mesh is inside its bounds, its coarser rungs stand where its full trees do (no
+// higher, no lower, nearly as tall) at a fraction of the triangles, and they carry no lines.
+TEST(WorldGenerated, PropCellsAreTheFullTreesCoarsened) {
+  generated_world_params p = small_world();
+  p.trees = 120;
+  const generated_world w = generate_world(p);
+  ASSERT_FALSE(w.prop_cells.empty());
+  EXPECT_GE(w.prop_cell_m, 128.0);
+  EXPECT_TRUE(w.props_r1.const_lines().empty());
+  EXPECT_LT(w.props_r1.const_tris().size(), w.props.const_tris().size() / 2);
+  EXPECT_LT(w.props_r2.const_tris().size(), w.props.const_tris().size() / 20);
+  auto covers = [&](const cvc::geometry &g, auto span, bool lines) {
+    std::size_t p = 0, c = 0;
+    for (const generated_world::prop_cell &pc : w.prop_cells) {
+      const generated_world::prop_span &s = span(pc);
+      EXPECT_EQ(s.p0, p);
+      EXPECT_EQ(s.c0, c);
+      p = s.p1;
+      c = s.c1;
+    }
+    EXPECT_EQ(p, g.const_points().size());
+    EXPECT_EQ(c, lines ? g.const_lines().size() : g.const_tris().size());
+  };
+  covers(w.props, [](const auto &c) -> const auto & { return c.props; }, false);
+  covers(w.needles, [](const auto &c) -> const auto & { return c.needles; }, true);
+  covers(w.props_r1, [](const auto &c) -> const auto & { return c.props_r1; }, false);
+  covers(w.props_r2, [](const auto &c) -> const auto & { return c.props_r2; }, false);
+  for (const generated_world::prop_cell &pc : w.prop_cells) {
+    const cvc::geometry r0 = prop_span_mesh(w.props, pc.props);
+    for (const auto &q : r0.const_points())
+      for (int a = 0; a < 3; ++a) {
+        EXPECT_GE(q[a], pc.min[a]);
+        EXPECT_LE(q[a], pc.max[a]);
+      }
+    for (const auto &t : r0.const_tris())
+      for (int k = 0; k < 3; ++k)
+        ASSERT_LT(t[k], r0.const_points().size());
+    const double h = pc.max[2] - pc.min[2];
+    for (const generated_world::prop_span *s : {&pc.props_r1, &pc.props_r2}) {
+      const cvc::geometry r = prop_span_mesh(s == &pc.props_r1 ? w.props_r1 : w.props_r2, *s);
+      ASSERT_FALSE(r.const_points().empty());
+      double zmin = 1e30, zmax = -1e30;
+      for (const auto &q : r.const_points()) {
+        zmin = std::min(zmin, q[2]);
+        zmax = std::max(zmax, q[2]);
+      }
+      EXPECT_GE(zmin, pc.min[2] - 0.5);
+      EXPECT_LE(zmax, pc.max[2] + 0.5);
+      EXPECT_GT(zmax, pc.max[2] - 0.15 * h) << "the coarse trees are as tall as the full ones";
+    }
+  }
+}
+
+// A stepped build fails where generate_world would, and keeps failing.
+TEST(WorldGenerated, SteppedBuildRethrows) {
+  generated_world_params p = small_world();
+  p.terrain = "no_such";
+  world_builder b(p);
+  EXPECT_THROW(b.step(1000), std::invalid_argument);
+  EXPECT_THROW(b.step(1000), std::invalid_argument);
+  EXPECT_FALSE(b.done());
+}
+
+namespace {
+
+// The height of mesh g's triangle under (x, y), among its first `top` vertices' triangles (the
+// surface, not the skirts); NaN where none covers it.
+double meshHeight(const cvc::geometry &g, std::size_t top, double x, double y) {
+  const auto &P = g.const_points();
+  for (const auto &t : g.const_tris()) {
+    if (t[0] >= top || t[1] >= top || t[2] >= top)
+      continue;
+    const auto &a = P[t[0]], &b = P[t[1]], &c = P[t[2]];
+    const double d = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]);
+    if (std::abs(d) < 1e-12)
+      continue;
+    const double l0 = ((b[1] - c[1]) * (x - c[0]) + (c[0] - b[0]) * (y - c[1])) / d;
+    const double l1 = ((c[1] - a[1]) * (x - c[0]) + (a[0] - c[0]) * (y - c[1])) / d;
+    const double l2 = 1.0 - l0 - l1;
+    if (l0 >= -1e-9 && l1 >= -1e-9 && l2 >= -1e-9)
+      return l0 * a[2] + l1 * b[2] + l2 * c[2];
+  }
+  return std::nan("");
+}
+
+// A chunk's rung k samples down and across (its last row and column always).
+std::size_t stridedCount(int a, int b, int k) {
+  return std::size_t((b - a + (1 << k) - 1) >> k) + 1;
+}
+
+} // namespace
+
+// The ground's LOD chunks tile the terrain: rung 0 is the terrain's own mesh, cut up, and every
+// rung's vertices are the terrain's own samples (point, normal, UV). A rung's error_m bounds how
+// far it is from every sample it skips, it grows with the stride, and only edges a neighbour
+// shares carry a skirt, hung skirt_m straight down.
+TEST(WorldGenerated, TerrainChunksAreTheGroundAtCoarserStrides) {
+  const generated_world w = generate_world(small_world());
+  const cvc::height_field &hf = *w.terrain;
+  const terrain_chunk_layout &L = w.terrain_layout;
+  ASSERT_EQ(L.cells, 64);
+  ASSERT_EQ(L.rungs, 5); // strides 1..16: down to 4 cells a side
+  ASSERT_EQ(w.terrain_chunks.size(), std::size_t(L.chunk_rows) * L.chunk_cols);
+  ASSERT_EQ(L.chunk_rows, 2);
+  std::size_t tris0 = 0;
+  for (const terrain_chunk &ch : w.terrain_chunks) {
+    ASSERT_EQ(int(ch.rungs.size()), L.rungs);
+    ASSERT_EQ(ch.error_m.size(), ch.rungs.size());
+    EXPECT_EQ(ch.error_m[0], 0.0);
+    for (int k = 1; k < L.rungs; ++k) {
+      EXPECT_GE(ch.error_m[k], ch.error_m[k - 1]);
+      EXPECT_LT(ch.rungs[k].const_tris().size(), ch.rungs[k - 1].const_tris().size());
+    }
+    EXPECT_GT(ch.error_m.back(), 0.1); // 40 m of relief is not flat at 50 m a sample
+    for (int k = 0; k < L.rungs; ++k) {
+      const cvc::geometry &g = ch.rungs[std::size_t(k)];
+      const std::size_t nr = stridedCount(ch.r0, ch.r1, k), nc = stridedCount(ch.c0, ch.c1, k);
+      const std::size_t top = nr * nc;
+      ASSERT_GE(g.const_points().size(), top);
+      ASSERT_EQ(g.const_normals().size(), g.const_points().size());
+      ASSERT_EQ(g.const_uvs().size(), g.const_points().size());
+      // Every vertex is a terrain sample's, the skirts' lowered by skirt_m.
+      for (std::size_t v = 0; v < g.const_points().size(); ++v) {
+        const auto &p = g.const_points()[v];
+        const int c = int(std::lround((p[0] - hf.x0()) / hf.dx()));
+        const int r = int(std::lround((p[1] - hf.y0()) / hf.dy()));
+        const auto src = std::size_t(hf.vertex_of(r, c));
+        const auto &q = hf.const_points()[src];
+        EXPECT_EQ(p[0], q[0]);
+        EXPECT_EQ(p[1], q[1]);
+        EXPECT_NEAR(p[2], q[2] - (v < top ? 0.0 : ch.skirt_m[std::size_t(k)]), 1e-9);
+        EXPECT_EQ(g.const_normals()[v], hf.const_normals()[src]);
+        EXPECT_EQ(g.const_uvs()[v], hf.const_uvs()[src]);
+      }
+      // The skirts: one edge's samples again for each edge a neighbour shares.
+      std::size_t skirt = 0;
+      skirt += ch.row > 0 ? nc : 0;
+      skirt += ch.row + 1 < L.chunk_rows ? nc : 0;
+      skirt += ch.col > 0 ? nr : 0;
+      skirt += ch.col + 1 < L.chunk_cols ? nr : 0;
+      EXPECT_EQ(g.const_points().size() - top, skirt);
+      EXPECT_GT(ch.skirt_m[std::size_t(k)], 0.0); // every chunk of a 2 x 2 ground has neighbours
+      if (k == 0) {
+        std::size_t surface = 0;
+        for (const auto &t : g.const_tris())
+          surface += t[0] < top && t[1] < top && t[2] < top;
+        EXPECT_EQ(surface, std::size_t(2 * (ch.r1 - ch.r0) * (ch.c1 - ch.c0)));
+        tris0 += surface;
+        continue;
+      }
+      // No skipped sample is further from the rung than its error.
+      double worst = 0.0;
+      for (int r = ch.r0; r <= ch.r1; ++r)
+        for (int c = ch.c0; c <= ch.c1; ++c) {
+          const auto &q = hf.const_points()[std::size_t(hf.vertex_of(r, c))];
+          const double z = meshHeight(g, top, q[0], q[1]);
+          ASSERT_FALSE(std::isnan(z)) << "rung " << k << " misses sample " << r << "," << c;
+          worst = std::max(worst, std::abs(z - q[2]));
+        }
+      EXPECT_LE(worst, ch.error_m[std::size_t(k)] + 1e-6) << "rung " << k;
+    }
+  }
+  EXPECT_EQ(tris0, hf.const_tris().size());
+}
+
+// Where two chunks meet a rung apart, the gap between their surfaces along the shared edge is
+// never deeper than either one's skirt: no crack shows.
+TEST(WorldGenerated, TerrainSkirtsCoverTheSeams) {
+  const generated_world w = generate_world(small_world());
+  const terrain_chunk_layout &L = w.terrain_layout;
+  ASSERT_GE(L.chunk_cols, 2);
+  const terrain_chunk &a = w.terrain_chunks[0], &b = w.terrain_chunks[1]; // b east of a
+  const double x = w.terrain->x0() + a.c1 * w.terrain->dx();
+  // The edge x = const of a rung as a polyline in y.
+  auto edge = [x](const terrain_chunk &ch, int k) {
+    const cvc::geometry &g = ch.rungs[std::size_t(k)];
+    const std::size_t nr = stridedCount(ch.r0, ch.r1, k), nc = stridedCount(ch.c0, ch.c1, k);
+    std::vector<std::pair<double, double>> e;
+    for (std::size_t v = 0; v < nr * nc; ++v)
+      if (std::abs(g.const_points()[v][0] - x) < 1e-9)
+        e.emplace_back(g.const_points()[v][1], g.const_points()[v][2]);
+    std::sort(e.begin(), e.end());
+    return e;
+  };
+  auto at = [](const std::vector<std::pair<double, double>> &e, double y) {
+    for (std::size_t i = 0; i + 1 < e.size(); ++i)
+      if (y >= e[i].first - 1e-9 && y <= e[i + 1].first + 1e-9)
+        return e[i].second +
+               (e[i + 1].second - e[i].second) * (y - e[i].first) / (e[i + 1].first - e[i].first);
+    return std::nan("");
+  };
+  for (int ka = 0; ka < L.rungs; ++ka)
+    for (int kb = std::max(0, ka - 1); kb <= std::min(L.rungs - 1, ka + 1); ++kb) {
+      const auto ea = edge(a, ka), eb = edge(b, kb);
+      ASSERT_GE(ea.size(), 2u);
+      ASSERT_EQ(ea.front().first, eb.front().first);
+      ASSERT_EQ(ea.back().first, eb.back().first);
+      for (int r = a.r0; r <= a.r1; ++r) {
+        const double y = w.terrain->y0() + r * w.terrain->dy();
+        const double gap = std::abs(at(ea, y) - at(eb, y));
+        EXPECT_LT(gap, a.skirt_m[std::size_t(ka)]) << ka << " beside " << kb << " at " << r;
+        EXPECT_LT(gap, b.skirt_m[std::size_t(kb)]) << ka << " beside " << kb << " at " << r;
+      }
+    }
+}
+
+// A ground that does not divide into whole chunks ends in narrower ones, each still ending on the
+// terrain's last sample; a ground of one chunk has no skirts.
+TEST(WorldGenerated, TerrainChunksFitAnyGround) {
+  std::vector<float> h(101 * 101);
+  for (int r = 0; r < 101; ++r)
+    for (int c = 0; c < 101; ++c)
+      h[std::size_t(r) * 101 + c] = float(3.0 * std::sin(0.2 * r) * std::cos(0.13 * c));
+  const cvc::height_field hf(101, 101, 0.0, 0.0, 2.0, 2.0, h);
+  const terrain_chunk_layout L = plan_terrain_chunks(hf, 16, 32);
+  EXPECT_EQ(L.cells, 32);
+  EXPECT_EQ(L.chunk_rows, 4); // 32 + 32 + 32 + 4 cells
+  EXPECT_EQ(L.rungs, 4);      // 32 / 8 = 4 cells a side at the coarsest
+  const terrain_chunk last = make_terrain_chunk(hf, L, 3, 3);
+  EXPECT_EQ(last.r1, 100);
+  EXPECT_EQ(last.c1, 100);
+  for (const cvc::geometry &g : last.rungs) // 4 cells: every rung keeps the corner samples
+    EXPECT_FALSE(g.const_tris().empty());
+  const terrain_chunk_layout one = plan_terrain_chunks(hf, 1, 32);
+  EXPECT_EQ(one.cells, 128);
+  ASSERT_EQ(one.chunk_rows * one.chunk_cols, 1);
+  const terrain_chunk whole = make_terrain_chunk(hf, one, 0, 0);
+  for (double s : whole.skirt_m)
+    EXPECT_EQ(s, 0.0);
+  EXPECT_EQ(whole.rungs[0].const_tris().size(), hf.const_tris().size());
+}
+
+// No chunk ends up more than one rung off a neighbour, and none is made coarser than it chose.
+TEST(WorldGenerated, TerrainRungsStayWithinOneOfTheirNeighbours) {
+  std::vector<int> r = {4, 4, 4, //
+                        4, 0, 4, //
+                        4, 4, 4};
+  constrain_terrain_rungs(r, 3, 3);
+  EXPECT_EQ(r, (std::vector<int>{2, 1, 2, 1, 0, 1, 2, 1, 2}));
+  std::vector<int> line = {0, 5, 5, 5, 5, 5};
+  constrain_terrain_rungs(line, 1, 6);
+  EXPECT_EQ(line, (std::vector<int>{0, 1, 2, 3, 4, 5}));
+  std::vector<int> fine = {1, 0, 2, 1};
+  const std::vector<int> before = fine;
+  constrain_terrain_rungs(fine, 2, 2);
+  EXPECT_EQ(fine, before);
 }

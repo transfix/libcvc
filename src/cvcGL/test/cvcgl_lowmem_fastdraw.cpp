@@ -897,6 +897,8 @@ struct Scene {
       s.coincidentFallbacks += t.coincidentFallbacks;
       s.programLookups += t.programLookups;
       s.programLookupsSkipped += t.programLookupsSkipped;
+      s.shaderBuilds += t.shaderBuilds;
+      s.passProgramsRestored += t.passProgramsRestored;
     }
     return s;
   }
@@ -1103,8 +1105,9 @@ struct PathRun {
 };
 
 // Two frames on one draw path: `first` (a real shadow bake when shadows are on:
-// every opaque mapper draws twice, rebuilding its shader for each pass) and
-// `steady` (re-uses the bake; nothing rebuilt).
+// every opaque mapper draws twice, once under each pass, putting back the shader
+// kept for it -- or, with pass programs off, rebuilding it) and `steady` (re-uses
+// the bake; nothing rebuilt).
 PathRun runPath(Scene &s, DrawPath path) {
   LowMemoryPolyDataMapper::setDrawPath(path);
   // One frame on this path first, so the counted frames start from the GL
@@ -1714,7 +1717,17 @@ void comparePaths(Scene &s, const std::string &label, bool shadows) {
             double(fast.steadyStats.coincidentFallbacks)));
   check(stock.steadyStats.stockDraws == stock.steadyStats.draws && stock.steadyStats.draws > 0,
         label + ": Stock draws through VTK's own path");
-  if (shadows)
+  // A bake draws every caster under the baker's pass and then the shadow pass's. With pass
+  // programs each draw puts back the shader kept for its pass set and re-binds its program; without
+  // them each rebuilds its shader and so takes the full lookup.
+  if (shadows && LowMemoryPolyDataMapper::passProgramsEnabled())
+    check(fast.firstStats.passProgramsRestored > 0 && fast.firstStats.shaderBuilds == 0 &&
+              fast.firstStats.programLookups == 0,
+          label + ": a shadow bake puts back each pass set's shader (no build, no lookup)",
+          fmt("restored %.0f, builds %.0f, lookups %.0f",
+              double(fast.firstStats.passProgramsRestored), double(fast.firstStats.shaderBuilds),
+              double(fast.firstStats.programLookups)));
+  else if (shadows)
     check(fast.firstStats.programLookups > 0,
           label + ": a shadow bake (render-pass change) takes the full lookup",
           fmt("lookups %.0f", double(fast.firstStats.programLookups)));

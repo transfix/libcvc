@@ -1,0 +1,50 @@
+# When a pull request merges or closes, cancel the CI runs it leaves behind.
+# Merges land faster than the account's shared runners clear, so a merged PR's
+# runs used to sit in the queue and then run to the end, ahead of every newer
+# job (2026-11-03: 9 of 28 queued runs were for merged PRs or replaced
+# commits). The master push run tests the merge itself.
+#
+# Two parts:
+#  * The concurrency group is CI/CD's group for this PR (ci.yml). Joining it
+#    with cancel-in-progress cancels the PR's CI/CD run as soon as this run is
+#    created, without waiting for a runner.
+#  * The job cancels whatever is left on the PR's branch (CI (recipe-first),
+#    llm-gate, ...). It waits for a hosted runner like any other job.
+#
+# Same-repo PRs only: a fork's pull_request token can't cancel runs. The job
+# runs no code from the PR (it checks nothing out).
+name: CI cancel on close
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  actions: write
+
+concurrency:
+  group: ci-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  cancel:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Cancel the branch's unfinished pull_request runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          gh run list -R "$GITHUB_REPOSITORY" --branch "$BRANCH" --event pull_request \
+            --limit 200 --json databaseId,status,workflowName \
+            -q '.[] | select(.status != "completed") | "\(.databaseId) \(.workflowName)"' |
+          while read -r id name; do
+            [ "$id" = "$GITHUB_RUN_ID" ] && continue
+            if gh run cancel "$id" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "cancelled $id ($name)"
+            else
+              echo "left $id ($name): it finished or was cancelled first"
+            fi
+          done

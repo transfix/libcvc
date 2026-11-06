@@ -27,6 +27,8 @@
 //   w.terrain        // the ground as a cvc::height_field (UVs over the extent)
 //   paint_surface(w) // its colour: material, roads and plazas baked into an RGB texture
 //   w.props / w.foliage / w.needles / w.buildings / w.roads   // merged meshes, one per look
+//   w.prop_cells, w.props_r1, w.props_r2                      // the props' render LOD, by cell
+//   w.terrain_chunks                                          // the ground's render LOD, by chunk
 //   water_field(w, t, ...)                                    // the water, as a volume of depth
 //   w.geometry()     // the world as cvc::world::world_geometry, for physics and nav
 //
@@ -53,10 +55,13 @@
 // below water_level_m, and water_field fills it with a gently travelling wave.
 //
 // GL-free and deterministic: a pure function of the params and the library. Every mesh is one
-// merged cvc::geometry, so a renderer draws the world in a handful of nodes.
+// merged cvc::geometry, so a renderer draws the world in a handful of nodes. world_builder and
+// surface_painter make the same world and texture a step at a time, for a caller that must not
+// block (a big world takes seconds on single-threaded wasm).
 #ifndef CVC_WORLD_GENERATED_WORLD_H
 #define CVC_WORLD_GENERATED_WORLD_H
 
+#include <cstddef>
 #include <cstdint>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/height_field.h>
@@ -64,6 +69,7 @@
 #include <cvc/world/grid.h>
 #include <cvc/world/raster.h>
 #include <cvc/world/roads.h>
+#include <cvc/world/terrain_lod.h>
 #include <cvc/world/terrain_source.h>
 #include <cvc/world/world_geometry.h>
 #include <functional>
@@ -91,9 +97,10 @@ struct generated_world_params {
   int buildings = 110; // the most buildings the city builds, filled from the district cores out
   int tree_gen = 5;
   double amp_m = 90.0;
-  // The water surface. The terrain floor sits at 0 and rises to about amp_m; below this line is
-  // water (streams, ponds, coast).
-  double water_level_m = 34.0;
+  // The water surface. Sea level is 0 m: every generator lays its ground so that 0 m is the
+  // shoreline (world_sea_share of the relief below it, or the island's shelf), whatever the relief.
+  // This raises or lowers the sea from there; below it is water (streams, ponds, coast).
+  double water_level_m = 0.0;
   int preset = 0;           // world_preset; island also shapes the relief
   int ontology = 0;         // world_ontology_name
   double cell_m = 5.0;      // the terrain mesh's target cell size
@@ -108,8 +115,12 @@ struct generated_world_params {
   std::string terrain_file;
 };
 
-// The counts and relief a preset starts from (the lab's quick-set): fills trees, rocks, buildings
-// and amp_m for p.preset.
+// How much of a generator's relief lies below sea level (0 m): its floor sits world_sea_share x
+// amp_m under the sea, so a lower or higher relief never floods or drains the world.
+constexpr double world_sea_share = 34.0 / 90.0;
+
+// The counts and relief a preset starts from (the lab's quick-set): fills trees, rocks, buildings,
+// amp_m, and water_level_m (0 m: the sea level every relief is laid against) for p.preset.
 void apply_world_preset(generated_world_params &p);
 
 // The world_model params for these (the relief scaled to the world size), the ground from
@@ -117,9 +128,10 @@ void apply_world_preset(generated_world_params &p);
 world_params to_world_params(const generated_world_params &p);
 
 // ── generators, by name ──────────────────────────────────────────────────────────────────────────
-// A terrain generator makes the ground for p over [-p.half_m, p.half_m]^2, its floor near 0 and its
-// relief about p.amp_m, so p.water_level_m means the same thing whatever made the relief. A
-// generator's own masks (channel, cliff, buildable) are respected by the city.
+// A terrain generator makes the ground for p over [-p.half_m, p.half_m]^2 with its relief about
+// p.amp_m and 0 m its shoreline (its floor world_sea_share x p.amp_m below), so p.water_level_m
+// means the same thing whatever made the relief. A generator's own masks (channel, cliff,
+// buildable) are respected by the city.
 using terrain_generator =
     std::function<std::shared_ptr<const terrain_source>(const generated_world_params &p)>;
 // Add a generator, or replace the one of that name. Thread-safe.
@@ -145,6 +157,8 @@ struct city_context {
   // cliff masks where it has them.
   road_mask_fn blocked;
 };
+// The context lives only for the call (world_builder lays the city out a stage later): the
+// streets it returns, their urbanity included, must not refer to it.
 using city_generator = std::function<city_streets(const city_context &c)>;
 void register_city_generator(const std::string &name, city_generator g);
 // The names: the built-ins first ("districts", "none"), then in registration order.
@@ -160,6 +174,35 @@ struct generated_world {
   cvc::geometry props;                        // trunks, branches, rocks: per-vertex colour
   cvc::geometry foliage;                      // leaves: per-vertex colour
   cvc::geometry needles;                      // the pines' needles: line segments, one colour
+
+  // Render LOD for the props (prop_cells below): coarser copies of props + foliage + needles, of
+  // the same full trees. Rung 1 draws each tree with three-sided tubes, none under 5 cm, and its
+  // leaves as solids (cvc::lsys::tree_detail); rung 2 is each tree's trunk and a crown over its
+  // full canopy, and a box per rock. Per-vertex colour.
+  cvc::geometry props_r1, props_r2;
+
+  // The props are laid down a ground cell at a time (prop_cell_m squares), so each cell is one
+  // contiguous run of points and of triangles (lines, for the needles) in every mesh above. A
+  // renderer draws a cell as a ladder: rung 0 = its props + foliage + needles, rung 1 = its
+  // props_r1, rung 2 = its props_r2 (prop_rung_radius_m says where each starts). LOD is a render
+  // proxy only: geometry() and every physics or nav path read rung 0.
+  struct prop_span {
+    std::size_t p0 = 0, p1 = 0; // points [p0, p1)
+    std::size_t c0 = 0, c1 = 0; // triangles (lines in needles) [c0, c1)
+    bool empty() const { return p1 == p0; }
+  };
+  struct prop_cell {
+    double min[3] = {0, 0, 0}, max[3] = {0, 0, 0}; // rung 0's bounds
+    prop_span props, foliage, needles, props_r1, props_r2;
+  };
+  std::vector<prop_cell> prop_cells; // the cells with props in them
+  double prop_cell_m = 0.0;
+
+  // Render LOD for the ground (cvc/world/terrain_lod.h): the terrain cut into chunks, each a
+  // ladder of the same surface at coarser sample strides, skirted where chunks meet. Row-major,
+  // terrain_layout.chunk_rows x chunk_cols. A render proxy too: everything else reads terrain.
+  terrain_chunk_layout terrain_layout;
+  std::vector<terrain_chunk> terrain_chunks;
   cvc::geometry buildings; // per-vertex colour (the archetypes' concrete, or the massing's)
   cvc::geometry roads;     // the extruded street surface
   std::size_t building_count = 0;
@@ -176,6 +219,10 @@ struct generated_world {
 
   double height_min = 0, height_max = 0; // the relief's range over the raster
 
+  // The ground under each water column (water_resolution(w)^2 samples, row-major, x fastest), so
+  // water_field, called every few frames, need not sample the terrain again.
+  std::vector<float> water_ground;
+
   // The ground height at (x, y): the terrain mesh's own surface.
   double height(double x, double y) const;
   // The world for physics and nav: the terrain (collide + navigate), the buildings (collide),
@@ -183,10 +230,70 @@ struct generated_world {
   world_geometry geometry() const;
 };
 
+// One cell's run of a prop mesh (generated_world::prop_cell) as a mesh of its own: its points,
+// colours and triangles or lines, the indices rebased.
+cvc::geometry prop_span_mesh(const cvc::geometry &g, const generated_world::prop_span &s);
+
+// Where a prop cell's coarser rungs start, for a renderer authoring its ladder: rung 1 at
+// prop_rung_radius_m[0] and rung 2 at [1], in metres from the camera, for the reference view of
+// cvc::lod::world_error_for_switch_radius (800 px at 2 px error). The vegetation bands of
+// LSYSTEM-LABORATORY-ROADMAP section 8.4: the full plant to 260 m, a reduced one to 700 m.
+constexpr double prop_rung_radius_m[2] = {260.0, 700.0};
+
 // Generate. `library` may be null or empty: the city's buildings are then procedural massing.
-// Throws std::invalid_argument on an unknown generator name.
+// Throws std::invalid_argument on an unknown generator name. world_builder stepped to its end.
 generated_world generate_world(const generated_world_params &p,
                                const building_library *library = nullptr);
+
+// generate_world as a resumable job, for a caller that must not block: the generated_world node
+// steps one on the app's scheduler (cvc/core/sliced_task.h), a few milliseconds a frame on
+// single-threaded wasm. step(budget) does about `budget` units of work and returns true once the
+// world is made; budget 0 runs to the end. A unit is one terrain sample (a raster cell, a terrain
+// mesh or water sample, a terrain LOD chunk's sample, those a whole chunk at a time); the stages
+// that are one call (the scatter, the streets, the city, the roads, the props) take a step each,
+// whatever the budget. phase() names the stage the next step works on ("terrain", "scatter",
+// "raster", "mesh", "materials", "streets", "city", "roads", "props", "water", "lod"), a static
+// string. A throw (an unknown generator, a missing DEM) comes out of the step that hit it
+// and every later one. The library must outlive the builder.
+class world_builder {
+public:
+  explicit world_builder(const generated_world_params &p,
+                         const building_library *library = nullptr);
+  ~world_builder();
+  world_builder(const world_builder &) = delete;
+  world_builder &operator=(const world_builder &) = delete;
+
+  bool step(std::size_t budget);
+  bool done() const;
+  const char *phase() const;
+  double progress() const; // in [0, 1], monotone; 1 once done
+  generated_world take();  // the world, once done (moved out; call once)
+
+private:
+  struct impl;
+  std::unique_ptr<impl> d_;
+};
+
+// paint_surface as a resumable job: step(budget) paints about `budget` texels (whole rows) and
+// returns true once the texture is done; budget 0 paints the rest. `w` must outlive the painter.
+class surface_painter {
+public:
+  surface_painter(const generated_world &w, surface_color mode = surface_color::material,
+                  int size = 2048);
+  bool step(std::size_t budget);
+  bool done() const { return next_ >= size_ && finished_; }
+  double progress() const { return size_ > 0 ? double(next_) / size_ : 1.0; }
+  int size() const { return size_; }
+  std::vector<unsigned char> take(); // the RGB texels, once done (moved out)
+
+private:
+  const generated_world &w_;
+  surface_color mode_;
+  int size_;
+  int next_ = 0;
+  bool finished_ = false;
+  std::vector<unsigned char> img_;
+};
 
 // The ground's colour as a size x size RGB texture over the extent (row 0 = min y, matching the
 // terrain's UVs). The raster is far coarser than the texture, so no texel shows its cell's square:

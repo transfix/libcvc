@@ -55,10 +55,22 @@ public:
 
   // --- Locks (docs/STATE_EXEC_LOCKS.md) ---
 
-  /// Use `mgr` for this scheduler's locks: the home is made and attached now. Throws
-  /// std::logic_error when a process of this scheduler holds or waits for a lock.
-  void set_lock_manager(std::shared_ptr<lock_manager> mgr);
+  /// Use `mgr` for this scheduler's locks: the home is made and attached now, with `attach`
+  /// (lock_attach::cross_thread when this scheduler may be pumped on another thread than the
+  /// manager's other homes; a single-mode manager refuses it). Throws std::logic_error when a
+  /// process of this scheduler holds or waits for a lock, or when `mgr` refuses the attach; the
+  /// scheduler then keeps the home and manager it had.
+  void set_lock_manager(std::shared_ptr<lock_manager> mgr, lock_attach attach = {});
   detail::lock_home *locks() override;
+  /// Whether the scheduler has its lock home yet (made by set_lock_manager, or by locks() on first
+  /// use); locks() makes one when it doesn't.
+  bool has_lock_home() const noexcept { return home_ != nullptr; }
+  /// The processes parked on a with-lock request: the process table's count (0: none, and
+  /// nothing to look for).
+  std::size_t lock_waiting_count() const noexcept { return procs_.lock_waiting_count(); }
+  /// Clear `out`, then append the pid of every process parked on a with-lock request, in pid
+  /// order. Walks the processes only while lock_waiting_count() is not zero.
+  void lock_waiting_pids(std::vector<int> &out) const;
   bool check_tables() const override { return procs_.check(); }
 
   // --- Process submission ---
@@ -87,7 +99,9 @@ public:
   /// (a frame's run(N) pump), waits when it would not (a bounded run to completion), and
   /// returns when the time budget runs out first. While only processes waiting for a message
   /// with no time limit are left, nothing can wake them in a synchronous run: run() returns at
-  /// once when `max_steps` bounds it, else waits out `max_time`, else waits until stop().
+  /// once when `max_steps` bounds it, else waits out `max_time`, else waits until stop(). A post
+  /// to the scheduler's lock port (a grant for a lock waiter, made on another home's thread) ends
+  /// any such wait, and run() steps again (design 8.7).
   std::unordered_map<int, value_t> run(std::optional<uint64_t> max_steps = std::nullopt,
                                        std::optional<double> max_time = std::nullopt);
 
@@ -328,8 +342,10 @@ private:
   uint64_t rate_seen_ = 0;
   bool rate_valid_ = false;
   double rate_ = kDefaultAsyncStepsPerCpuMs;
-  std::unique_ptr<detail::wakeup> idle_; // run()'s idle wait, made on first use
-  std::vector<process *> woken_;         // reused by deliver_to_receivers
+  /// run()'s idle wait: made with the lock home, which shares it with its port so a post ends the
+  /// wait (protocol 2.3), else on the first idle wait.
+  std::shared_ptr<detail::wakeup> idle_;
+  std::vector<process *> woken_; // reused by deliver_to_receivers
 
   /// Per-path FIFO queue for messages sent when no receiver is waiting.
   std::unordered_map<std::string, std::queue<value_t>> pending_messages_;
@@ -339,10 +355,12 @@ private:
   /// Select the next process to run based on scheduling policy.
   const process_ptr *select_process();
 
-  /// One step of the run loop (step() starts a fresh clock chain).
+  /// One step of the run loop (step() starts a fresh clock chain). It first applies the lock
+  /// port's posts, when there are any (protocol 5.9).
   int step_once();
   /// run()'s wait while nothing is ready, charged to its budgets (`steps`, the loop's
-  /// iterations so far, and `budget`, running): false to end the run.
+  /// iterations so far, and `budget`, running): false to end the run. A post to the lock port
+  /// ends it (true: the next step_once applies the post).
   bool idle_wait(std::optional<uint64_t> max_steps, uint64_t &steps, time_budget *budget);
 
   /// Execute one step on a specific process and check resource limits.
@@ -397,6 +415,9 @@ private:
   /// Made by locks() or set_lock_manager(); null until a with-lock needs it.
   std::unique_ptr<detail::lock_home> home_;
   std::vector<process *> lock_expired_; // reused by step_once's lock expiries
+  /// An expiry pass (at `now`) threw: the lock waiters it had not timed out get a deadline due
+  /// `now`, back on the timer heap, and lock_expired_ is emptied.
+  void keep_lock_expiries(clock::time_point now);
 
   /// post_control's commands, from any thread: guarded by control_mutex_, applied at the top of
   /// step_once. control_pending_ is set (under the mutex) while there are any, so a step finds

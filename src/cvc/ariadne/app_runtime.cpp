@@ -39,15 +39,20 @@ namespace ariadne {
 
 AppRuntime::AppRuntime(cvc::app &app, std::string prefix, SceneAdapter *scene)
     : app_(app), prefix_(std::move(prefix)), scene_(scene), rt_(app, prefix_),
-      verbs_(std::make_shared<Verbs>()) {
+      verbs_(std::make_shared<Verbs>()), data_(DataStore::of(app)) {
   rt_.set_scene_capable(scene_ != nullptr); // the gl.scene capability (requires:, has?)
   rt_.set_scene_shaders(scene_ && scene_->runs_shaders()); // gl.scene.shaders
+  verbs_->data = data_;
+  verbs_->prefix = prefix_;
 }
 
 AppRuntime::~AppRuntime() {
   verbs_->sync.clear(); // the provider outlives us in the registry: it must bind nothing of ours
   verbs_->async.clear();
   verbs_->quit = nullptr;
+  verbs_->data.reset();
+  verbs_->functions.clear();
+  verbs_->async_functions.clear();
   if (netEnabled_)
     disable_net(); // its provider holds app_ by reference
 }
@@ -200,8 +205,8 @@ void AppRuntime::set_host_mouse(MouseControls mouse) {
 namespace {
 
 bool any_mouse_rows(const MouseControls &m) {
-  return !m.look.empty() || !m.sensitivity.empty() || !m.invert_y.empty() || !m.invert_x.empty() ||
-         !m.distance.empty();
+  return !m.look.empty() || !m.steer.empty() || !m.sensitivity.empty() || !m.invert_y.empty() ||
+         !m.invert_x.empty() || !m.distance.empty();
 }
 
 // The Controls window: the host's pointer settings, then every key binding, with its keys and a
@@ -215,6 +220,8 @@ Widget keys_window(const std::vector<KeyBinding> &bindings, const MouseControls 
       look.values = {"0", "1"};
       kids.push_back(std::move(look));
     }
+    if (!mouse.steer.empty())
+      kids.push_back(checkbox(mouse.steer_label, mouse.steer));
     if (!mouse.sensitivity.empty())
       kids.push_back(slider_float("Sensitivity", mouse.sensitivity, mouse.sensitivity_lo,
                                   mouse.sensitivity_hi, 0.25, "%.2f deg/px"));
@@ -302,7 +309,15 @@ void AppRuntime::add_ui_size(Widget &root) const {
     }
     Widget size = combo("UI size", hostUiSize_.path, std::move(labels));
     size.values = std::move(values);
-    w.children.insert(w.children.begin(), {text("Display"), std::move(size), separator()});
+    std::vector<Widget> rows = {text("Display"), std::move(size)};
+    // How fast a fling slows: low glides far, high stops soon (cvc::gl::TouchScroll).
+    if (!hostUiSize_.scroll_friction.empty())
+      rows.push_back(slider_float("Scroll friction", hostUiSize_.scroll_friction,
+                                  hostUiSize_.friction_lo, hostUiSize_.friction_hi, 2.0,
+                                  "%.1f /s"));
+    rows.push_back(separator());
+    w.children.insert(w.children.begin(), std::make_move_iterator(rows.begin()),
+                      std::make_move_iterator(rows.end()));
     return;
   }
 }
@@ -326,6 +341,34 @@ void AppRuntime::register_async_verb(const std::string &name, const std::string 
   verbs_->async.emplace_back(name, done_channel, std::move(work));
   ensure_intrinsics();
   rt_.refresh_program_names();
+}
+
+void AppRuntime::register_function(const std::string &name, cvc::state_exec::native_fn fn) {
+  verbs_->functions[name] = std::move(fn);
+  ensure_intrinsics();
+  rt_.refresh_program_names();
+}
+
+void AppRuntime::register_async_function(const std::string &name,
+                                         cvc::state_exec::async_marshal marshal,
+                                         const std::string &done_channel) {
+  verbs_->async_functions[name] = {done_channel, std::move(marshal)};
+  ensure_intrinsics();
+  rt_.refresh_program_names();
+}
+
+void AppRuntime::run_program(std::string script, std::function<void(const std::string &)> done) {
+  rt_.run_program(std::move(script), done ? std::move(done) : [](const std::string &) {});
+}
+
+void AppRuntime::add_load_hook(LoadHook hook) {
+  if (hook)
+    loadHooks_.push_back(std::move(hook));
+}
+
+void AppRuntime::add_frame_hook(std::function<void()> hook) {
+  if (hook)
+    frameHooks_.push_back(std::move(hook));
 }
 
 void AppRuntime::register_quit() {
@@ -393,6 +436,106 @@ void AppRuntime::ensure_intrinsics() {
                                 return se::value_t(std::move(result));
                               };
                             });
+    }
+    // The (data-*) verbs (data.h), for programs in this runtime's app: (data-load NAME URI [AS
+    // [PATH]]) points the document's data.NAME at a request and starts it (the scene's nodes bound
+    // to NAME follow when it is ready), (data-reload NAME), (data-status NAME), (data-files NAME)
+    // and (data-file NAME PATH) (its bytes, or nil).
+    // The store first: it is reset when this runtime dies, and only then is `app` still ours.
+    std::shared_ptr<DataStore> store = verbs->data.lock();
+    const auto own_program = [&] { // the program's chroot (se::apply_chroot) is in our app
+      cvc::state &tree = cvc::state::instance(*app);
+      return ictx.root &&
+             ictx.root == (ictx.root_path.empty() ? &tree : tree.findDescendant(ictx.root_path));
+    };
+    if (store && own_program()) {
+      const std::weak_ptr<DataStore> weak = store;
+      const std::string prefix = verbs->prefix, doc_dir = verbs->doc_dir;
+      const auto text = [](std::span<const se::value_t> a, std::size_t i, const char *fn) {
+        const auto *s = i < a.size() ? std::get_if<std::string>(&a[i].v) : nullptr;
+        if (!s)
+          throw se::dsl_error("TypeError", std::string(fn) + ": argument " + std::to_string(i + 1) +
+                                               " is a string" +
+                                               (i < a.size() ? ", not " + a[i].type_name() : ""));
+        return *s;
+      };
+      // The first argument: a dataset's name, one state key.
+      const auto name = [text](std::span<const se::value_t> a, const char *fn) {
+        const std::string s = text(a, 0, fn);
+        if (s.empty() || s.find(cvc::state::SEPARATOR) != std::string::npos)
+          throw se::dsl_error("ValueError", std::string(fn) + ": '" + s +
+                                                "' is not a dataset name (one word, no '.')");
+        return s;
+      };
+      const auto entry = [prefix](const std::string &n) {
+        return resolve_bind(prefix, std::string(kDataRoot) + cvc::state::SEPARATOR + n);
+      };
+      const auto live = [weak](const char *fn) {
+        std::shared_ptr<DataStore> s = weak.lock();
+        if (!s)
+          throw se::dsl_error("RuntimeError", std::string(fn) + ": the document has stopped");
+        return s;
+      };
+      se::builtins::register_fn(
+          env, "data-load",
+          [live, text, name, prefix, doc_dir](std::span<const se::value_t> a) -> se::value_t {
+            if (a.size() < 2 || a.size() > 4)
+              throw se::dsl_error("TypeError", "data-load: expected NAME URI [AS [PATH]], got " +
+                                                   std::to_string(a.size()) + " args");
+            DataSpec spec;
+            spec.name = name(a, "data-load");
+            spec.uri = text(a, 1, "data-load");
+            if (a.size() > 2)
+              spec.as = text(a, 2, "data-load");
+            if (a.size() > 3)
+              spec.path = text(a, 3, "data-load");
+            spec.base = doc_dir;
+            return se::value_t(live("data-load")->bind(prefix, spec));
+          });
+      se::builtins::register_fn(
+          env, "data-reload", [live, name, entry](std::span<const se::value_t> a) -> se::value_t {
+            return se::value_t(live("data-reload")->reload(entry(name(a, "data-reload"))));
+          });
+      se::builtins::register_fn(
+          env, "data-status", [app, name, entry](std::span<const se::value_t> a) -> se::value_t {
+            return se::value_t(data_status(*app, entry(name(a, "data-status"))));
+          });
+      se::builtins::register_fn(
+          env, "data-files", [app, name, entry](std::span<const se::value_t> a) -> se::value_t {
+            auto out = std::make_shared<std::vector<se::value_t>>();
+            for (std::string &p : data_files(*app, entry(name(a, "data-files"))))
+              out->push_back(se::value_t(std::move(p)));
+            return se::value_t(out);
+          });
+      se::builtins::register_fn(
+          env, "data-file",
+          [app, text, name, entry](std::span<const se::value_t> a) -> se::value_t {
+            const DataBytes b =
+                data_file(*app, entry(name(a, "data-file")), text(a, 1, "data-file"));
+            if (!b)
+              return se::value_t(std::monostate{});
+            return se::value_t(se::bytes_value{*b});
+          });
+    }
+    for (const auto &[name, fn] : verbs->functions)
+      se::builtins::register_fn(env, name, fn); // inline on the drain thread, like a sync verb
+    for (const auto &[name, entry] : verbs->async_functions) {
+      const se::async_marshal &marshal = entry.second;
+      if (entry.first.empty()) {
+        se::register_async_fn(env, app->exec_async_host(), name, marshal);
+        continue;
+      }
+      // With a done channel, the kernel's value is posted there too (resolved here, as above).
+      const std::string chan = se::resolve_channel_key(root, entry.first);
+      se::async_marshal posting = [app, chan, marshal](std::span<const se::value_t> args) {
+        se::async_kernel kernel = marshal(args);
+        return se::async_kernel([app, chan, kernel](se::async_call &call) -> se::value_t {
+          se::value_t result = kernel(call);
+          app->exec_scheduler().post_message(chan, result);
+          return result;
+        });
+      };
+      se::register_async_fn(env, app->exec_async_host(), name, std::move(posting));
     }
   });
 }
@@ -468,7 +611,7 @@ void collect_programs(const Widget &w, const FunctionScope *functions,
   }
   const std::string where = "widget '" + (w.id.empty() ? w.label : w.id) + "'";
   for (const std::string *p :
-       {&w.on, &w.on_click, &w.on_hover, &w.on_drag, &w.on_drag_start, &w.on_drag_end})
+       {&w.on, &w.on_click, &w.on_hover, &w.on_drag, &w.on_drag_start, &w.on_drag_end, &w.on_top})
     if (!p->empty())
       out.push_back({where, *p, functions, declared});
   for (const Widget &c : w.children)
@@ -516,10 +659,15 @@ void check_host_requirements(const Runtime &rt, LoadResult &lr) {
   for (std::string &w : reqs.warnings)
     lr.warnings.push_back(std::move(w));
   if (!reqs.missing.empty()) {
-    std::string list;
-    for (const std::string &m : reqs.missing)
+    std::string list, hints;
+    for (const std::string &m : reqs.missing) {
       list += (list.empty() ? "" : ", ") + m;
-    throw std::runtime_error("this host does not provide what the document requires: " + list);
+      const std::string hint = capability_hint(m.substr(0, m.find(' '))); // m may add its meaning
+      if (!hint.empty() && hints.find(hint) == std::string::npos)
+        hints += (hints.empty() ? "" : "; ") + hint;
+    }
+    throw std::runtime_error("this host does not provide what the document requires: " + list +
+                             (hints.empty() ? "" : "; " + hints));
   }
 
   // Without a scene adapter the whole scene is ignored, and load says so; only a scene that does
@@ -586,6 +734,10 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   if (!lr.ok)
     throw std::runtime_error(lr.error.empty() ? ("AppRuntime.load: failed to load " + path)
                                               : lr.error);
+  ensure_intrinsics(); // the (data-*) verbs are every document's
+  rt_.refresh_program_names();
+  for (const LoadHook &hook : loadHooks_) // a scripting host's python: block, before requires:
+    hook(lr, path);
   check_host_requirements(rt_, lr); // requires: and the calls programs make (§7.6)
 
   // The document's command line goes on the tree before init: runs, so init can read it.
@@ -608,6 +760,16 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   }
   publish_document_args(app_, prefix_, docArgv_, lr.has_args_block ? &lr.args : nullptr,
                         lr.has_args_block ? &parsed : nullptr);
+
+  // data: (data.h) — each dataset a link at <prefix>.data.<name> to its load, which starts now
+  // (load: lazy ones when something asks), before init: runs, so init: can read their status.
+  {
+    std::error_code ec;
+    const std::filesystem::path abs = std::filesystem::absolute(path, ec);
+    verbs_->doc_dir = ec ? std::string() : abs.parent_path().string();
+  }
+  for (const DataSpec &d : lr.data)
+    data_->bind(prefix_, d);
 
   // A different document from the last one (a reload is the same file under any spelling): its
   // windows and key defaults start afresh. The defaults go in before init:, which may set its own.
@@ -648,8 +810,11 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   if (lr.scene.any()) {
     if (scene_) {
       std::vector<std::string> warns;
-      if (scene_->verify(lr, &warns)) // a missing required node custom: no half-built scene
+      if (scene_->verify(lr, &warns)) { // a missing required node custom: no half-built scene
         scene_->realize(lr.scene, prefix_, &warns);
+        if (!lr.scenes.empty())
+          scene_->realize_scenes(lr.scenes, prefix_, &warns);
+      }
       for (std::string &w : warns)
         lr.warnings.push_back(std::move(w));
     } else {
@@ -658,6 +823,13 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
     }
   } else if (scene_) {
     scene_->no_scene();
+    if (!lr.scenes.empty()) { // scenes: alone, each drawn in the viewports that name it
+      std::vector<std::string> warns;
+      if (scene_->verify(lr, &warns))
+        scene_->realize_scenes(lr.scenes, prefix_, &warns);
+      for (std::string &w : warns)
+        lr.warnings.push_back(std::move(w));
+    }
   }
 
   if (new_document && !docPath_.empty())
@@ -693,6 +865,10 @@ void AppRuntime::drain() {
     scene_->tick();                // volren/volslice per-frame service
   }
   collect_warnings();
+  for (std::size_t i = 0; i < frameHooks_.size(); ++i) {
+    const std::function<void()> hook = frameHooks_[i]; // a copy: a hook may add another
+    hook();
+  }
 }
 
 // Keep the read-lane diagnostics for take_warnings(); the Runtime reports each one only once.

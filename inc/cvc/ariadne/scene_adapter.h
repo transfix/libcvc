@@ -48,6 +48,17 @@ public:
   virtual void realize(const Scene &scene, const std::string &prefix,
                        std::vector<std::string> *warns) = 0;
 
+  // Realize the document's other scenes (`scenes:`), each a scene of its own (its own nodes,
+  // lights, shadows and background) that viewports name. Called from AppRuntime::load() after
+  // realize() (or after no_scene() when the document has only these). clear() takes them down too.
+  // The default cannot draw them and says so.
+  virtual void realize_scenes(const std::vector<Scene> &scenes, const std::string &prefix,
+                              std::vector<std::string> *warns) {
+    (void)prefix;
+    if (warns && !scenes.empty())
+      warns->push_back("ari: this host draws one scene: the document's scenes: are ignored");
+  }
+
   // Take down what the last realize() built (its nodes, lights, physics, and the view properties
   // it set), so the next document starts on an empty stage. AppRuntime::load() calls it before
   // each load, when a host switches documents as much as on a hot reload. The default keeps

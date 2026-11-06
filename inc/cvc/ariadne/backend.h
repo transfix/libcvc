@@ -22,6 +22,7 @@
 // The core writes to cvc::state on `committed`, so a slider drag costs ONE state
 // write (which fans out to observers / replicated peers), not one per frame.
 
+#include <algorithm>            // min (text_view's default)
 #include <cstdio>               // snprintf (plot_lines' text sparkline)
 #include <cvc/ariadne/widget.h> // Size / Layout / Extent (§3.0.3b) passed to the backend
 #include <cvc/tf/editor.h>      // tf_editor: the model + view the backend edits
@@ -64,6 +65,35 @@ struct StringEdit {
   bool committed = false;
   std::string value;
 };
+// A message field's edit (Kind::MessageInput). `submitted`: the user sent it (Enter), and `value`
+// is the message; the backend has cleared its field and keeps focus there. `committed` without
+// `submitted`: the field lost focus, and `value` is the draft to keep. `changed`: the text moved.
+struct MessageEdit {
+  bool changed = false;
+  bool committed = false;
+  bool submitted = false;
+  std::string value;
+};
+struct MessageInputOptions {
+  std::string hint;      // shown while the field is empty
+  bool multiline = true; // Shift+Enter adds a line (a terminal: Alt+Enter or Ctrl+J)
+  int max_lines = 4;     // the field grows to this many lines, then scrolls
+  int max_length = 0;    // bytes; 0: no cap
+  std::string send;      // a button beside the field that sends it, so labelled ("" none)
+};
+
+// What the core hands a backend to draw a text buffer (Kind::TextView).
+struct TextViewOptions {
+  float height = 0.0f; // px; 0: the space left in the window (a backend's default where none)
+  bool follow = true;  // stay at the bottom while lines arrive, if already there
+  bool wrap = true;    // wrap long lines to the view's width
+};
+// `at_top`: the user has scrolled the view to its top this frame (once each time it gets there,
+// and only when there is more text than fits): the core runs the widget's `on_top`.
+struct TextViewEvent {
+  bool at_top = false;
+};
+
 // The result of a backend-drawn CUSTOM widget (a novel primitive the compositional
 // path can't express — §16.1b). `handled` is the backend's signal that it actually
 // drew this custom_type (false = it doesn't know it, so the core shows a placeholder).
@@ -416,6 +446,41 @@ public:
   // mask in place of the text, never the text itself.
   virtual StringEdit input_text(const char *label, const char *key, const std::string &current,
                                 bool masked) = 0;
+
+  // A field to post a message (Kind::MessageInput), keyed like input_text. One line until the user
+  // adds another (Shift+Enter, with `multiline`); Enter sends: {submitted, value} = the message,
+  // and the field is cleared, keeping focus. Losing focus reports the draft as committed. The
+  // default is a single-line input_text whose commit is the send, for a backend without one.
+  virtual MessageEdit message_input(const char *label, const char *key, const std::string &current,
+                                    const MessageInputOptions &opts) {
+    (void)opts;
+    const StringEdit e = input_text(label, key, current, false);
+    MessageEdit out;
+    out.changed = e.changed;
+    out.committed = out.submitted = e.committed && !e.value.empty();
+    out.value = e.value;
+    return out;
+  }
+
+  // A read-only, scrollable text buffer (Kind::TextView): `text`'s lines, split on '\n', keyed by
+  // `key` (the backend keeps its scroll position under it). The default draws the last lines that
+  // fit `opts.height` (16 px a line, 8 lines without one) as text lines, and never reports the top.
+  virtual TextViewEvent text_view(const char *label, const char *key, const std::string &text,
+                                  const TextViewOptions &opts) {
+    (void)label;
+    (void)key;
+    const std::size_t rows =
+        opts.height > 0.0f ? static_cast<std::size_t>(opts.height / 16.0f) + 1 : 8;
+    std::vector<std::string> lines;
+    for (std::size_t i = 0; i <= text.size();) {
+      const std::size_t j = std::min(text.find('\n', i), text.size());
+      lines.push_back(text.substr(i, j - i));
+      i = j + 1;
+    }
+    for (std::size_t i = lines.size() > rows ? lines.size() - rows : 0; i < lines.size(); ++i)
+      text_line(lines[i].c_str());
+    return {};
+  }
 
   // Draw a host-published image named `name` at display `width` px (height from the image's
   // aspect). A read-only viewer of a buffer the host set via a backend-specific publish API (e.g.

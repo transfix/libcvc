@@ -74,6 +74,11 @@ struct holon_config {
   // CLIENT: how far (in ticks) the replica's clock may drift from the server's tick before
   // apply_authoritative re-aligns it. 60 = 0.5 s at the default 120 Hz. See apply_authoritative.
   std::uint64_t max_skew_ticks = 60;
+  // CLIENT: a sample older than the newest one applied, from any participant, is no clock reading
+  // unless it is more than this many ticks older: a restarted relay, whose ticks start again near
+  // zero. 1200 = 10 s at the default 120 Hz, client_pump's window for a departed peer's leftover
+  // pose. See apply_authoritative.
+  std::uint64_t stale_reading_ticks = 1200;
   // CLIENT with a lead (set_lead_ticks > 0): how far the replica may fall BEHIND its lead target
   // (late inputs: the server would apply them after their tick, a correction each time) or run
   // AHEAD of it (only delays what peers see) before it re-aligns.
@@ -272,6 +277,13 @@ public:
   // anything; its state is kept). With a lead the target is server_tick + lead and the
   // tolerance the lead slack (holon_config). Between re-alignments both clocks run
   // from wall time at the same rate.
+  //
+  // Only a sample at least as new as the newest one applied, from any participant, is
+  // a clock reading. An older one updates its participant and leaves the clock alone:
+  // a still peer's pose in the room tree carries the tick of its last heartbeat while
+  // the pose stream's samples are current, and seeking back to it, then forward again
+  // at the next, would drop the local avatar's logged inputs twice. One more than
+  // holon_config::stale_reading_ticks older is a restarted relay: a reading.
   void apply_authoritative(const std::string &pid, const cvc::physics::body_state &auth,
                            std::uint64_t server_tick);
 
@@ -394,6 +406,8 @@ private:
   bool world_reconcile(const std::string &pid, participant &p, const cvc::physics::body_state &auth,
                        std::uint64_t server_tick);
 
+  // CLIENT: a clock reading (apply_authoritative): slew or seek the replica toward SERVER_TICK.
+  void read_clock(std::uint64_t server_tick);
   void on_step(const cvc::clock_driver::clock_frame &f);
   void on_present(const cvc::clock_driver::clock_frame &f);
   // CLIENT peer playout (display_pose): take a sample; show this frame (`frame_ticks` of wall time
@@ -422,6 +436,8 @@ private:
   std::uint64_t _slews = 0;             // CLIENT: slews started in apply_authoritative
   bool _slewing = false;                // CLIENT: the clock runs off its scale toward the target
   bool _synced = false;                 // CLIENT: a first sample has set (or found) the clock
+  bool _have_reading = false;           // CLIENT: _newest_reading holds a tick
+  std::uint64_t _newest_reading = 0;    // CLIENT: the newest tick taken as a clock reading
   std::uint64_t _statics_rev = 0;
 };
 

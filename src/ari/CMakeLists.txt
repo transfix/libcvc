@@ -55,6 +55,59 @@ if(NOT EMSCRIPTEN AND (TARGET cvcMedia OR ARI_WITH_MEDIA))
   install(TARGETS ari-media RUNTIME DESTINATION bin COMPONENT ari)
 endif()
 
+# arix: the scripting host, the same ari with an embedded Python (src/ariadne_python): a document's
+# python: block, a Python program in place of the document (arix run app.py), and arix python
+# (docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md). Its Python's exports cross through pycvc, so in-tree it
+# is built with the bindings (CVC_BUILD_PYCVC); standalone (the arix cvcpkg recipe), with
+# -DARI_WITH_PYTHON=ON. The lean `ari` above stays Python-free.
+option(ARI_WITH_PYTHON "Also build arix, ari with an embedded Python" OFF)
+if(NOT EMSCRIPTEN AND (CVC_BUILD_PYCVC OR ARI_WITH_PYTHON))
+  include("${CMAKE_CURRENT_LIST_DIR}/../ariadne_python/ariadne_python.cmake")
+  cvc_find_ariadne_python(ARI_WITH_PYTHON)
+  if(CVC_ARIADNE_PYTHON_FOUND)
+    add_executable(arix main.cpp)
+    if(TARGET cvc::cvc)
+      target_link_libraries(arix PRIVATE cvc::cvc)
+    else()
+      target_link_libraries(arix PRIVATE cvc)
+    endif()
+    cvc_ariadne_python_host(arix)
+    cvc_set_install_rpath(arix bin)
+    install(TARGETS arix RUNTIME DESTINATION bin COMPONENT arix)
+
+    # ctest, in-tree: a document's python: block (arix test), a Python program in place of the
+    # document, a block that raises at load, arix python, and stock ari's answer to a document that
+    # needs Python.
+    if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
+      set(_pyt "${CVC_ARIADNE_PYTHON_TESTS}")
+      add_test(NAME arix_python_block
+               COMMAND arix test ${CVC_ARIADNE_PYTHON_TEST_PATH} "${_pyt}/python_block.ari")
+      add_test(NAME arix_python_program
+               COMMAND arix snapshot --frames 3 --width 40 --height 3 ${CVC_ARIADNE_PYTHON_TEST_PATH}
+                       "${_pyt}/app.py" one two)
+      set_tests_properties(arix_python_program PROPERTIES
+                           PASS_REGULAR_EXPRESSION "app.py: result 14, frames [1-9].*'one', 'two'")
+      add_test(NAME arix_python_error
+               COMMAND arix check ${CVC_ARIADNE_PYTHON_TEST_PATH} "${_pyt}/python_error.ari")
+      set_tests_properties(arix_python_error PROPERTIES
+                           PASS_REGULAR_EXPRESSION "python_error.ari \\(python: source\\).*ZeroDivisionError")
+      add_test(NAME arix_python_interpreter
+               COMMAND arix python -c "import _arihost; print(_arihost.host(), _arihost.attached())")
+      set_tests_properties(arix_python_interpreter PROPERTIES PASS_REGULAR_EXPRESSION "arix False")
+      add_test(NAME ari_python_needs_arix COMMAND ari check "${_pyt}/python_block.ari")
+      set_tests_properties(ari_python_needs_arix PROPERTIES
+                           PASS_REGULAR_EXPRESSION "scripting hosts, arix or ariglx")
+      cvc_ariadne_python_test_properties(arix_python_block arix_python_program arix_python_error
+                                         arix_python_interpreter)
+      set_tests_properties(arix_python_block arix_python_program arix_python_error
+                           ari_python_needs_arix PROPERTIES
+                           SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
+    endif()
+  else()
+    message(STATUS "arix: not built (no Python embedding files: Python3 Development.Embed)")
+  endif()
+endif()
+
 # ctest coverage of the binary, in-tree only. A document set as an app installs one
 # (share/<app>/main.ari), run from another working directory: its relative imports, out of its own
 # directory and its parent's, resolve against the importing file's directory, as in arigl
@@ -72,7 +125,13 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR AND NOT EMSCRIPTEN)
   add_test(NAME ari_url_document COMMAND ari check https://example.invalid/app/main.ari)
   set_tests_properties(ari_url_document PROPERTIES
                        PASS_REGULAR_EXPRESSION "ari runs a document from a path")
-  set_tests_properties(ari_docset ari_url_document PROPERTIES
+  # The chat and users components' DSL (components/chat.ari, room_users.ari), with the room verbs
+  # they call played by the test document's functions: ari has no relay.
+  add_test(NAME ari_chat_component
+           COMMAND ari test --component-path "${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne"
+                   "${CMAKE_CURRENT_SOURCE_DIR}/tests/chat_component.ari"
+           WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+  set_tests_properties(ari_docset ari_url_document ari_chat_component PROPERTIES
                        SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
 endif()
 

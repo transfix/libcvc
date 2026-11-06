@@ -21,6 +21,8 @@ add_executable(ariadne_requires_test ariadne_requires_test.cpp)
 add_executable(ariadne_stream_view_test ariadne_stream_view_test.cpp)
 add_executable(x11_macro_headers_test x11_macro_headers_test.cpp)
 add_executable(net_http_client_test net_http_client_test.cpp)
+# Ariadne data (cvc/ariadne/data.h) and the archive reader it unpacks with (cvc/utility/archive.h).
+add_executable(ariadne_data_test ariadne_data_test.cpp)
 add_executable(net_ws_client_test net_ws_client_test.cpp)
 add_executable(net_policy_test net_policy_test.cpp)
 add_executable(net_oidc_test net_oidc_test.cpp)
@@ -140,6 +142,7 @@ add_executable(pose_stream_test pose_stream_test.cpp)
 add_executable(state_link_stats_test state_link_stats_test.cpp)
 add_executable(room_scene_test room_scene_test.cpp)
 add_executable(room_avatar_test room_avatar_test.cpp)
+add_executable(room_chat_test room_chat_test.cpp)
 add_executable(room_aoi_test room_aoi_test.cpp)
 add_executable(room_aoi_relay_test room_aoi_relay_test.cpp)
 add_executable(physics_codec_test physics_codec_test.cpp)
@@ -151,6 +154,9 @@ add_executable(physics_plant_log_test physics_plant_log_test.cpp)
 add_executable(physics_jolt_rollout_test physics_jolt_rollout_test.cpp)
 add_executable(nav_dyn_bike_test nav_dyn_bike_test.cpp)
 add_executable(nav_dyn_4w_test nav_dyn_4w_test.cpp)
+add_executable(nav_dyn_spin_test nav_dyn_spin_test.cpp)
+add_executable(physics_dyn_contact_test physics_dyn_contact_test.cpp)
+add_executable(nav_dyn_ph_full_test nav_dyn_ph_full_test.cpp)
 add_executable(nav_potential_test nav_potential_test.cpp)
 # nav_potential_test compares U logged by the material rollouts (built with -ffp-contract=off)
 # with the same inline evaluator called here, bit for bit: build it the same way, or clang
@@ -303,6 +309,7 @@ add_executable(world_road_mesh_test world_road_mesh_test.cpp)
 add_executable(world_road_raster_test world_road_raster_test.cpp)
 add_executable(world_raster_test world_raster_test.cpp)
 add_executable(world_generated_test world_generated_test.cpp)
+add_executable(world_cloud_test world_cloud_test.cpp)
 add_executable(world_bundle_test world_bundle_test.cpp)
 
 # Every test target `check` should build. Keep this in the same order as the
@@ -326,6 +333,7 @@ set(TEST_TARGETS
   ariadne_stream_view_test
   x11_macro_headers_test
   net_http_client_test
+  ariadne_data_test
   net_ws_client_test
   net_policy_test
   net_oidc_test
@@ -389,6 +397,7 @@ set(TEST_TARGETS
   state_link_stats_test
   room_scene_test
   room_avatar_test
+  room_chat_test
   room_aoi_test
   room_aoi_relay_test
   physics_codec_test
@@ -400,6 +409,9 @@ set(TEST_TARGETS
   physics_jolt_rollout_test
   nav_dyn_bike_test
   nav_dyn_4w_test
+  nav_dyn_spin_test
+  physics_dyn_contact_test
+  nav_dyn_ph_full_test
   nav_potential_test
   ph_se2_test
   ph_se2_train_test
@@ -502,6 +514,7 @@ set(TEST_TARGETS
   world_road_raster_test
   world_raster_test
   world_generated_test
+  world_cloud_test
   world_bundle_test
   volren_math_test
   volren_camera_test
@@ -726,6 +739,13 @@ target_link_libraries(ariadne_stream_view_test
 )
 
 target_link_libraries(net_http_client_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ariadne_data_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1319,7 +1339,7 @@ target_link_libraries(vis_tiler_test
 foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
                    lsys_interp_test lsys_recipes_test lsys_svg_test lsys_forest_test
                    lsys_fields_test world_surface_test world_heightfield_test world_terrain_test world_scatter_test world_roads_test world_buildings_test world_sites_test world_road_mesh_test world_road_raster_test
-                   world_raster_test world_bundle_test world_generated_test)
+                   world_raster_test world_bundle_test world_generated_test world_cloud_test)
   target_link_libraries(${_lsys_test} PRIVATE cvc GTest::gtest GTest::gtest_main)
   target_compile_features(${_lsys_test} PRIVATE cxx_std_17)
 endforeach()
@@ -1979,6 +1999,13 @@ target_link_libraries(room_avatar_test
     GTest::gtest_main
 )
 
+target_link_libraries(room_chat_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(room_aoi_test
   PRIVATE
     cvc
@@ -2036,6 +2063,27 @@ target_link_libraries(physics_jolt_rollout_test
 )
 
 target_link_libraries(nav_dyn_bike_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_dyn_spin_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(physics_dyn_contact_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_dyn_ph_full_test
   PRIVATE
     cvc
     GTest::gtest
@@ -2452,6 +2500,7 @@ target_compile_features(pose_stream_test PRIVATE cxx_std_17)
 target_compile_features(state_link_stats_test PRIVATE cxx_std_17)
 target_compile_features(room_scene_test PRIVATE cxx_std_17)
 target_compile_features(room_avatar_test PRIVATE cxx_std_17)
+target_compile_features(room_chat_test PRIVATE cxx_std_20)
 target_compile_features(room_aoi_test PRIVATE cxx_std_17)
 target_compile_features(room_aoi_relay_test PRIVATE cxx_std_17)
 target_compile_features(physics_codec_test PRIVATE cxx_std_17)
@@ -2463,6 +2512,9 @@ target_compile_features(physics_plant_log_test PRIVATE cxx_std_17)
 target_compile_features(physics_jolt_rollout_test PRIVATE cxx_std_17)
 target_compile_features(nav_dyn_bike_test PRIVATE cxx_std_17)
 target_compile_features(nav_dyn_4w_test PRIVATE cxx_std_17)
+target_compile_features(nav_dyn_spin_test PRIVATE cxx_std_17)
+target_compile_features(physics_dyn_contact_test PRIVATE cxx_std_17)
+target_compile_features(nav_dyn_ph_full_test PRIVATE cxx_std_17)
 target_compile_features(nav_potential_test PRIVATE cxx_std_17)
 target_compile_features(ph_se2_test PRIVATE cxx_std_17)
 target_compile_features(ph_se2_train_test PRIVATE cxx_std_17)
@@ -2627,6 +2679,7 @@ cvc_discover_tests(ariadne_stream_view_test)
 cvc_discover_tests(ariadne_bind_test)
 cvc_discover_tests(x11_macro_headers_test)
 cvc_discover_tests(net_http_client_test)
+cvc_discover_tests(ariadne_data_test)
 cvc_discover_tests(net_ws_client_test)
 cvc_discover_tests(net_policy_test)
 cvc_discover_tests(net_oidc_test)
@@ -2703,7 +2756,7 @@ cvc_discover_tests(vis_tiler_test)
 foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
                    lsys_interp_test lsys_recipes_test lsys_svg_test lsys_forest_test
                    lsys_fields_test world_surface_test world_heightfield_test world_terrain_test world_scatter_test world_roads_test world_buildings_test world_sites_test world_road_mesh_test world_road_raster_test
-                   world_raster_test world_bundle_test world_generated_test)
+                   world_raster_test world_bundle_test world_generated_test world_cloud_test)
   cvc_discover_tests(${_lsys_test})
 endforeach()
 cvc_discover_tests(volume_io_extra_test)
@@ -2964,6 +3017,7 @@ cvc_discover_tests(pose_stream_test)
 cvc_discover_tests(state_link_stats_test)
 cvc_discover_tests(room_scene_test)
 cvc_discover_tests(room_avatar_test)
+cvc_discover_tests(room_chat_test)
 cvc_discover_tests(room_aoi_test)
 cvc_discover_tests(room_aoi_relay_test)
 cvc_discover_tests(physics_codec_test)
@@ -2975,6 +3029,9 @@ cvc_discover_tests(physics_plant_log_test)
 cvc_discover_tests(physics_jolt_rollout_test)
 cvc_discover_tests(nav_dyn_bike_test)
 cvc_discover_tests(nav_dyn_4w_test)
+cvc_discover_tests(nav_dyn_spin_test)
+cvc_discover_tests(physics_dyn_contact_test)
+cvc_discover_tests(nav_dyn_ph_full_test)
 cvc_discover_tests(nav_potential_test)
 cvc_discover_tests(ph_se2_test)
 cvc_discover_tests(ph_se2_train_test)

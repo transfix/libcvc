@@ -5,6 +5,8 @@
 #include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <cvc/state/state_exec/types.h>
+#include <map>
+#include <mutex>
 #include <set>
 #include <unordered_set>
 
@@ -82,8 +84,44 @@ const std::vector<TokenRule> &rules() {
        [](const HostFacts &f) { return f.oidc_redirect; }},
       {{"browser", "open-url opens the user's web browser here (not over SSH or --no-browser)"},
        [](const HostFacts &f) { return f.browser; }},
+      // A script language's tokens answer from the engine a scripting host registered
+      // (set_script_engine), not from HostFacts; the language name stands for itself here.
+      {{"python", "an embedded Python runs the document's python: block"},
+       [](const HostFacts &) { return has_script_engine("python"); }},
+      {{"python.<module>", "<module> is importable in the embedded Python (python.numpy, ...)"},
+       [](const HostFacts &) { return false; }},
   };
   return kRules;
+}
+
+// The script engines the host embeds, by language (set_script_engine).
+std::mutex &engines_mutex() {
+  static std::mutex m;
+  return m;
+}
+std::map<std::string, std::function<bool(const std::string &)>> &engines() {
+  static std::map<std::string, std::function<bool(const std::string &)>> e;
+  return e;
+}
+
+// The script languages a document can ask for, and the hosts that run each.
+struct ScriptLanguage {
+  const char *name;
+  const char *hosts;
+};
+constexpr ScriptLanguage kScriptLanguages[] = {{"python", "arix or ariglx"}};
+
+// `name`'s language when it is "<language>.<module>" with a module, else nullptr.
+const ScriptLanguage *module_token_language(const std::string &name, std::string *module) {
+  for (const ScriptLanguage &l : kScriptLanguages) {
+    const std::string prefix = std::string(l.name) + ".";
+    if (name.size() > prefix.size() && name.compare(0, prefix.size(), prefix) == 0) {
+      if (module)
+        *module = name.substr(prefix.size());
+      return &l;
+    }
+  }
+  return nullptr;
 }
 
 const TokenRule *find_rule(const std::string &name) {
@@ -254,11 +292,46 @@ const std::vector<CapabilityToken> &capability_tokens() {
   return kTokens;
 }
 
-bool is_capability_token(const std::string &name) { return find_rule(name) != nullptr; }
+bool is_capability_token(const std::string &name) {
+  return find_rule(name) != nullptr || module_token_language(name, nullptr) != nullptr;
+}
 
 bool capability_holds(const std::string &name, const HostFacts &facts) {
+  std::string module;
+  if (const ScriptLanguage *l = module_token_language(name, &module)) {
+    std::function<bool(const std::string &)> has_module;
+    {
+      std::lock_guard<std::mutex> lock(engines_mutex());
+      auto it = engines().find(l->name);
+      if (it != engines().end())
+        has_module = it->second;
+    }
+    return has_module && has_module(module); // outside the lock: it may take the engine's own
+  }
   const TokenRule *r = find_rule(name);
   return r && r->holds(facts);
+}
+
+void set_script_engine(const std::string &language,
+                       std::function<bool(const std::string &module)> has_module) {
+  std::lock_guard<std::mutex> lock(engines_mutex());
+  if (has_module)
+    engines()[language] = std::move(has_module);
+  else
+    engines().erase(language);
+}
+
+bool has_script_engine(const std::string &language) {
+  std::lock_guard<std::mutex> lock(engines_mutex());
+  return engines().count(language) != 0;
+}
+
+std::string capability_hint(const std::string &name) {
+  for (const ScriptLanguage &l : kScriptLanguages)
+    if ((name == l.name || module_token_language(name, nullptr) == &l) &&
+        !has_script_engine(l.name))
+      return std::string("a document's ") + l.name + " runs in the scripting hosts, " + l.hosts;
+  return {};
 }
 
 std::vector<std::string> free_heads(const std::string &program) {

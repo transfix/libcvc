@@ -1,12 +1,12 @@
 schema_version: 1
 recipe:
   name: libcvc-examples-web
-  upstream_version: "3.7.8"
+  upstream_version: "3.7.11"
   # Replaces cvcgl-examples' wasm-mt column (last published 3.7.0+cvc.1), which carried
   # only the four nav/terrain demos; this carries the whole gallery.
   # Bumped 1 -> 2: the gallery now links ImageMagick (CVC_ENABLE_IMAGEMAGICK=ON, was OFF
   # because the demo link could not resolve MagickCore's static codec libraries).
-  # Reset to 1 for the 3.7.1 upstream version: a version bump restarts cvc_revision.
+  # Reset to 1 for the 3.7.11 upstream version: a version bump restarts cvc_revision.
   cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
@@ -85,6 +85,12 @@ depends:
     - name: scene-austin-south-small
     - name: grl-snam-weights
     - name: vehicle-humvee
+  # Nothing at run time: the bundle is finished page files (share/libcvc-examples-web/web/), the
+  # libraries above all linked into the demos' .wasm and the scene, policy and vehicle preloaded
+  # into their .data. Without this list cvcpkg records the build list as the bundle's required
+  # deps, and `cvcpkg install libcvc-examples-web` lays the whole static closure (vtk, boost,
+  # imagemagick, the Austin scene, ...) down beside the gallery.
+  runtime: []
   host_tools:
     - cmake
     - ninja

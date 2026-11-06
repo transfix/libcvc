@@ -137,6 +137,10 @@ Full design: [STATE_EXEC_PORTING_PLAN.md](STATE_EXEC_PORTING_PLAN.md)
   `async_evaluator`, `stackless_evaluator`) are local-only — they do not
   appear in `ps-all`, cannot be migrated, and are not first-class system
   citizens.  Developers may use any evaluator for local/embedded scripting.
+  *As built:* the sync `scheduler` steps a `stackless_evaluator` too (`cvc exec`,
+  `exec_coordinator`, Ariadne's `init:`), and `async_scheduler` steps an
+  `async_stackless_evaluator`, which wraps one; the recursive evaluators are not scheduled
+  (`docs/STATE_EXEC_DEVELOPER_GUIDE.md`, "Which Scheduler Runs a Program").
 - **Local sovereignty model**: No local ACL enforcement; cluster consensus
   protects shared state at the replication boundary.
 - **Two-tier memory management**: Tree-level LRU eviction + per-process

@@ -141,6 +141,26 @@ void grow_pine(cvc::geometry &wood, cvc::geometry &needle, double bx, double by,
 void grow_branchy(cvc::geometry &wood, std::uint64_t seed, double bx, double by, double bz,
                   double length, double radius, int levels, int branches);
 
+// How finely a single-tree generator draws, for a render LOD rung. The tree is always the same one
+// -- its maturity, skeleton, jitter and size are the full tree's -- and only the tessellation
+// changes: fewer tube sides, the tubes too thin to show left out, and the leaves drawn as solid
+// shapes in the wood mesh (per-vertex colour) instead of needle lines or twig tubes.
+struct tree_detail {
+  int ring = 3;            // sides per branch tube, uncapped
+  double min_radius = 0.0; // tubes thinner than this (metres) are left out; their leaves stay
+  // The leaves as solids: each pine leaf (a cone of needles) a 3-sided cone of its own shape; the
+  // leaf twigs off one broadleaf fork one 8-triangle blob over their spread.
+  bool leaf_solids = true;
+  double leaf_color[3] = {0.137, 0.557, 0.137}; // the solids' colour (the needles' own, by default)
+};
+// grow_pine / grow_branchy at that detail: the same tree as the full-detail calls, `needle` and
+// the twig tubes left empty when the leaves are solids.
+void grow_pine(cvc::geometry &wood, cvc::geometry &needle, double bx, double by, double bz,
+               double size, int maturity, const tree_detail &detail);
+void grow_branchy(cvc::geometry &wood, std::uint64_t seed, double bx, double by, double bz,
+                  double length, double radius, int levels, int branches,
+                  const tree_detail &detail);
+
 } // namespace lsys
 } // namespace cvc
 

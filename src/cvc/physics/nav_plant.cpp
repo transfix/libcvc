@@ -369,6 +369,21 @@ cvc::nav::dyn_bike_si nav_plant::dyn_bike_si_of(const vehicle_desc &d, double mu
   si.steer_rate = d.max_steer_rate;
   si.drive_lag = drive_lag >= 0.0 ? drive_lag : (direct ? 0.0 : 0.1);
   si.gravity = gravity;
+  // The wheels (dyn_spin_plant): the steered axles' spin inertia on the front, the others' on the
+  // rear (not the driveline's, which Jolt couples to the driven wheels through the gears).
+  si.wheel_radius = radius > 0.0 ? radius : si.wheel_radius;
+  si.wheel_inertia_front = si.wheel_inertia_rear = 0.0;
+  for (const axle_desc &a : d.axles)
+    (a.steered ? si.wheel_inertia_front : si.wheel_inertia_rear) += 2.0 * a.wheel_inertia;
+  if (!(si.wheel_inertia_front > 0.0))
+    si.wheel_inertia_front = si.wheel_inertia_rear;
+  if (!(si.wheel_inertia_rear > 0.0))
+    si.wheel_inertia_rear = si.wheel_inertia_front;
+  // The longitudinal tire: Jolt's friction rises linearly to its peak at the slip ratio
+  // tire_peak_slip, then falls to tire_sliding at a slip of 1 (jolt_backend.cpp). Pacejka's C as
+  // the lateral one's (the same sliding fraction), B to put the peak at Jolt's.
+  si.tire_C_long = si.tire_C;
+  si.tire_B_long = std::tan(kPi / (2.0 * si.tire_C_long)) / std::max(d.tire_peak_slip, 1e-3);
   return si;
 }
 
@@ -520,7 +535,8 @@ void nav_plant::count_contacts() {
   std::map<std::uint32_t, std::size_t> of_chassis;
   for (std::size_t i = 0; i < _agents.size(); ++i)
     of_chassis[_agents[i].chassis.value] = i;
-  std::map<std::uint32_t, bool> fixed; // a body without mass: static or kinematic geometry
+  // A body without mass, static or kinematic geometry, that is not the ground.
+  std::map<std::uint32_t, bool> fixed;
   const auto is_fixed = [&](body_id b) {
     const auto it = fixed.find(b.value);
     if (it != fixed.end())
@@ -530,6 +546,9 @@ void nav_plant::count_contacts() {
       f = !(_w.get_body(b).mass > 0.0);
     } catch (const std::exception &) {
     }
+    for (const body_id &g : _o.ground_bodies)
+      if (g.value == b.value)
+        f = false;
     fixed[b.value] = f;
     return f;
   };

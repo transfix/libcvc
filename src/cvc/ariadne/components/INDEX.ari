@@ -35,13 +35,22 @@ catalog:
     unit: scene_controls
     binds: "<prefix>.shadows.*"            # cvc::gl::ShadowSettings
     for: "any scene with `shadows:`"
-    args: []
+    args: { title: Scene, id: scene_controls }   # defaults
+    note: "shadow_settings is its widgets without the window"
   - component: camera_controls
     file: camera_controls.ari
     unit: camera_controls
-    binds: "<prefix>.viewers.main.camera.settings.*"   # cvc::gl::CameraController
-    for: "any scene with a navigable camera (single 'main' viewer)"
-    args: []                               # copy the unit + change the viewer segment for a 2nd viewport
+    binds: "<prefix>.viewers.{viewer}.camera.settings.*"   # cvc::gl::CameraController
+    for: "any scene with a navigable camera"
+    args: { viewer: main, title: Camera, id: camera_controls }   # defaults
+    note: "camera_settings is its widgets without the window (args: viewer)"
+  - component: viewer_settings
+    file: viewer_settings.ari
+    unit: viewer_settings
+    binds: "<prefix>.viewers.{viewer}.{hud.enabled,hud.fps,ui.scale,ui.scroll_friction,camera.settings.*}, <prefix>.graphics.root.{show_bbox,children.grid.visible,children.axis.visible}, <prefix>.shadows.*"
+    for: "any scene: one settings window for a viewer (frame-rate readout, UI size, scroll friction on a touch screen, grid / axis / scene bounds, camera, shadows)"
+    args: { viewer: main, title: Viewer, id: viewer_settings }   # defaults
+    note: "imports camera_controls.ari and scene_controls.ari for its Camera and Shadows sections; FpsHud, UiSettings, GridNode, AxisNode, CameraController and ShadowSettings own the keys"
   - component: display_toggles
     file: display_toggles.ari
     unit: display_toggles
@@ -58,61 +67,61 @@ catalog:
   - component: raster_view
     file: raster_view.ari
     unit: raster_view
-    binds: "<prefix>.raster.{image,colormap}"    # host: colorize a grid -> backend.set_image(name,img)
+    binds: "<prefix>.{keys}.{image,colormap}"    # host: colorize a grid -> backend.set_image(name,img)
     for: "a live image/raster viewer (nav grids, textures) with a colormap menu"
-    args: []
+    args: { keys: raster, title: Raster, id: raster_view }   # defaults
     note: "needs a host that publishes named cvc::images (ImGuiBackend::set_image) each frame"
   - component: volren_controls
     file: volren_controls.ari
     unit: volren_controls
-    binds: "<prefix>.graphics.root.children.bunny_volume.volren.*"   # cvc::volren::state_settings
+    binds: "<prefix>.graphics.root.children.{node}.volren.*"   # cvc::volren::state_settings
     for: "a `type: volren` node (steps / ambient / supersample / volumetric shadows)"
-    args: []                               # convention: node id `bunny_volume`; copy + rename for another
+    args: { node: bunny_volume, title: Volume raycast, id: volren_controls }   # defaults
   - component: volslice_controls
     file: volslice_controls.ari
     unit: volslice_controls
-    binds: "<prefix>.graphics.root.children.bunny_volume.volslice.*" # cvc::volslice::state_settings
+    binds: "<prefix>.graphics.root.children.{node}.volslice.*" # cvc::volslice::state_settings
     for: "a `type: volslice` node (quality / near-plane peel / max planes)"
-    args: []                               # convention: node id `bunny_volume`; copy + rename for another
+    args: { node: bunny_volume, title: Volume slices, id: volslice_controls }   # defaults
   - component: forest_controls
     file: forest_controls.ari
     unit: forest_controls
-    binds: "<prefix>.forest.*"             # read every frame by the cvcGL forest_trees realizer
+    binds: "<prefix>.{keys}.*"             # read every frame by the cvcGL forest_trees realizer
     for: "a `type: forest_trees` node (count / seed / species / span / branching / wind)"
-    args: []
+    args: { keys: forest, title: Forest, id: forest_controls }   # defaults; keys = the node's `keys:` prop
     note: "the realizer seeds forest.* from the node props; structural edits re-grow the mesh"
   - component: world_controls
     file: world_controls.ari
     unit: world_controls
-    binds: "<prefix>.world.*"              # read every frame by the cvcGL generated_world realizer
+    binds: "<prefix>.{keys}.*"              # read every frame by the cvcGL generated_world realizer
     for: "a `type: generated_world` node (seed / preset / size / counts / relief / water / colour)"
-    args: []
+    args: { keys: world, title: Terrain Lab, id: world_controls }   # defaults; keys = the node's `keys:` prop
     note: "the realizer seeds world.* from the node props; structural edits regenerate the world"
   - component: sea_controls
     file: sea_controls.ari
     unit: sea_controls
-    binds: "<prefix>.sea.{wave_amp,sea_level}"   # read on every refill by the wave_sea realizer
+    binds: "<prefix>.{keys}.{wave_amp,sea_level}"   # read on every refill by the wave_sea realizer
     for: "a `type: wave_sea` node"
-    args: []
+    args: { keys: sea, title: Sea, id: sea_controls }   # defaults; keys = the node's `keys:` prop
   - component: sky_controls
     file: sky_controls.ari
     unit: sky_controls
-    binds: "<prefix>.sky.{drift,morph,shadow}"   # read every frame by the cloud_sky realizer
+    binds: "<prefix>.{keys}.{drift,morph,shadow}"   # read every frame by the cloud_sky realizer
     for: "a `type: cloud_sky` node"
-    args: []
+    args: { keys: sky, title: Sky, id: sky_controls }   # defaults; keys = the node's `keys:` prop
   - component: mesh_tools
     file: mesh_tools.ari
     unit: mesh_tools
-    binds: "<prefix>.graphics.root.children.mesh.mesh_ops.*"   # the cvcGL mesh_lab realizer
+    binds: "<prefix>.graphics.root.children.{node}.mesh_ops.*"   # the cvcGL mesh_lab realizer
     for: "a `type: mesh_lab` node (load a mesh; smooth / decimate / repair / orient; colour by curvature, geodesic distance or a Laplace-Beltrami eigenfunction)"
-    args: []                               # convention: node id `mesh`; copy + rename for another
+    args: { node: mesh, title: Mesh tools, id: mesh_tools }   # defaults
     note: "needs a CVC_ENABLE_LIBIGL build; commands are written to mesh_ops.request and run off the render thread"
   - component: fe_controls
     file: fe_controls.ari
     unit: fe_controls
-    binds: "<prefix>.graphics.root.children.domain.fe.*"       # the cvcGL fe_lab realizer
+    binds: "<prefix>.graphics.root.children.{node}.fe.*"       # the cvcGL fe_lab realizer
     for: "a `type: fe_lab` node (load an SDF or a volume; LBIE tet / hex mesh of a solid, or a tet mesh of the interval between two isovalues; P1 Poisson / heat / eigenmode solve; the field on the boundary and a cut, or the elements cut away)"
-    args: []                               # convention: node id `domain`; copy + rename for another
+    args: { node: domain, title: Finite elements, id: fe_controls }   # defaults
     note: "needs a CVC_ENABLE_LIBIGL build (and CVC_ENABLE_MESHER to tet-mesh); commands go through fe.request"
   - component: transfer_function
     file: transfer_function.ari
@@ -127,6 +136,13 @@ catalog:
     binds: "<prefix>.graphics.root.children.{node}.transfer_function (+ the layers beside it) and <prefix>.tree.{id}.view.*"
     for: "the same editor without a window, to embed in a document's own window (several in one document: give each its own id)"
     args: { node: volume, label: Transfer function, id: transfer_function_editor }   # defaults
+  - component: scene_view
+    file: scene_view.ari
+    unit: scene_view
+    binds: "<prefix>.viewers.{view}.camera.*"   # the view's own CameraController
+    for: "a second view of the scene in a window: an overview map, another angle, one layer (the nodes whose tags: it shows)"
+    args: { view: scene_view, title: View, id: scene_view, show: "", hide: "", mode: orbit, camera: "", chrome: true, width: 360, height: 270 }   # defaults
+    note: "the cvcGL `viewport` widget (AriRuntime hosts: arigl, pycvc_gl); a terminal backend shows a placeholder"
   - component: card
     file: card.ari
     unit: card
@@ -135,3 +151,25 @@ catalog:
     args: { id: card, avatar: "", avatar_auth: "", avatar_size: 40, title: "", subtitle: "", time: "", body: "" }
     slots: [media, actions]                # widget lists the include site supplies (§6.1)
     note: "not a window: include it in a document's own window, once per item of a repeat: (id: post_{i})"
+  - component: chat
+    file: chat.ari
+    unit: chat
+    binds: "<prefix>.{id}.* (channel, pick, view.text, draft, read.*, unread.*) and <prefix>.tree.{id}.*"
+    for: "a room's chat and its direct messages: a channel picker with unread counts, a log that asks for older messages when scrolled to the top, Enter to send and Shift+Enter for a new line"
+    args: { id: chat, title: Chat, room: room.token }   # room: the key holding the room-join token
+    verbs: [chat-post, chat-info, chat-messages, chat-more, chat-conversations, chat-rev]
+    note: "call (chat-ui-step ID ROOM) from on_tick; the functions come with the import (room verbs: arigl joined to a relay)"
+  - component: chat_panel
+    file: chat.ari
+    unit: chat_panel
+    binds: "<prefix>.{id}.*"
+    for: "the same chat without a window, to embed in a document's own window"
+    args: { id: chat, room: room.token }
+  - component: room_users
+    file: room_users.ari
+    unit: room_users
+    binds: "<prefix>.{rows}.* rows, self.*, ctl.<pid>.* (local cam / mic / volume), media.<pid>.* (host)"
+    for: "everyone in a room: video dot, name (green while talking; click for their camera window), link, local cam / mic / volume, and a message button that opens a conversation in the chat component"
+    args: { id: users, title: Users, rows: peer, chat: chat, self: conf.self }
+    verbs: [room-roster]
+    note: "call (room-users-step ROWS ROOM CHAT) from on_tick; room_users_compact is the same list without the media columns"

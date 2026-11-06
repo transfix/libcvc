@@ -170,6 +170,21 @@ private:
 // 2024 -- Joe R. -- Creation.
 model read_model(const std::string &filename);
 
+// ----------------------
+// read_model_from_memory
+// ----------------------
+// Purpose:
+//   A model from its encoded bytes in memory (a .glb out of an unpacked archive, a download), no
+//   file: the format by `extension` (".glb" or "glb"). Only a self-contained file reads this way
+//   (a .glb, a .ply, an .stl, an .obj with no .mtl): a reference to another file (a .gltf's .bin,
+//   an external texture) has nowhere to resolve. Throws unsupported_model_file_type when no
+//   backend reads the format from memory (Assimp off, or an extension it does not know), and
+//   std::runtime_error when the bytes do not read. can_read_model_from_memory says which.
+// ---- Change History ----
+// 2026 -- Joe R. -- Creation.
+model read_model_from_memory(const void *data, std::size_t size, const std::string &extension);
+bool can_read_model_from_memory(const std::string &extension);
+
 // -----------
 // write_model
 // -----------

@@ -6,10 +6,14 @@
 #                               the relay's catalog; everyone sees the same avatar, you included),
 #                               your body and controller, and your energy -- the relay's budget,
 #                               where your reserve went (the ledger) and its recent history.
-#   • Users      (id users)   — everyone in the room: name (lights up GREEN while talking), per-peer
-#                               LOCAL camera/mic mute + a volume slider, and click a name to raise
-#                               that peer's camera window. These controls are LOCAL — they change only
-#                               what THIS client sees/hears, never the other person's capture.
+#   • Users      (id users)   — everyone in the room (components/room_users.ari): name (lights up
+#                               GREEN while talking), per-peer LOCAL camera/mic mute + a volume slider,
+#                               click a name to raise that peer's camera window, and a message button
+#                               for a direct message. These controls are LOCAL — they change only what
+#                               THIS client sees/hears, never the other person's capture.
+#   • Chat       (id chat)    — the room's chat and your direct messages (components/chat.ari): pick
+#                               the room or a conversation, scroll up for older messages, Enter sends
+#                               and Shift+Enter adds a line.
 #   • cam_<i>    (per peer)    — one window per OTHER participant, titled by their name, showing their
 #                               camera. Repeated over peer.count; opened automatically, closable, and
 #                               listed by name at the end of the View menu to open again (or click
@@ -39,12 +43,20 @@ requires:
   - room-roster
   - room-set-avatar                # the Avatar window
   - plot                           # its history graphs
+  - chat-post                      # the Chat window (chat.ari; the relay keeps the history)
+  - text_view
+  - message_input
+
+# The Users and Chat windows are the shipped components: their units, and the functions that keep
+# them current (room-users-step, chat-ui-step), which on_tick calls.
+import: [cvc://components/room_users.ari, cvc://components/chat.ari]
 
 # The room's LOOK. The relay owns what is IN the room (conf.rooms.<room>.scene: the ground, the
 # reference box; the avatars), and every client draws it under this document's lighting, so the
 # rig lives here, not in the server. A three-point rig staged over the 20 m floor: the key spot casts
-# real-time shadows from the scene objects and every avatar (re-baked each frame, so a walking
-# avatar's shadow walks with it); fill, back and environment keep the shaded sides readable.
+# real-time shadows from the scene objects and every avatar (re-baked in any frame something that
+# casts has moved, so a walking avatar's shadow walks with it, and an idle room bakes none); fill,
+# back and environment keep the shaded sides readable.
 scene:
   lights:
     - light: room_rig
@@ -76,6 +88,8 @@ menubar:
         bind: tree.mycam.open
       - menu_item: Users
         bind: tree.users.open
+      - menu_item: Chat
+        bind: tree.chat.open
       - menu_item: Avatar
         bind: tree.myavatar.open
 
@@ -340,111 +354,24 @@ windows:
         bind: self.avatar.history.power
         height: 70
 
-  # ── Users: the roster with per-peer local controls ──
-  # One compact ROW per participant, as a table of unit widgets: every row is its own grid with the
-  # SAME fixed column widths, so the rows line up as columns. ping / down / up are each person's
-  # link to the relay AS THEY MEASURE IT (published to the room once a second; "--" = not measured
-  # yet). cam / mic / vol are LOCAL controls (what YOU see and hear of them), never sent. The dot
-  # before each name is the size the relay sends that person video at, adapted to THEIR link:
-  # green full, red reduced (half, quarter, thumbnails), black none; hover it for which.
-  # Every column has a FIXED width, the window wide enough for all of them: an auto-width column is
-  # re-fitted to its content each frame, and a slider sized from its column then chased its own
-  # width (it could not be dragged).
-  - window: Users
-    id: users
+  # ── Users: everyone in the room, a row each (components/room_users.ari) ──
+  # Per row: the video dot, the name (click: their camera window; green while talking), their link
+  # as they measure it, LOCAL cam / mic / volume (what YOU see and hear of them, never sent), and a
+  # message button that opens a conversation in the Chat window. room-users-step fills the rows.
+  - include: room_users
+    args: { id: users, title: Users, rows: peer, chat: chat, self: conf.self }
     pos: [390, 40]
-    size: [480, 260]
-    closable: true
-    children:
-      - text: "in the room"
-        bind: self.count
-      - separator
-      - type: group
-        id: users_head
-        layout: { kind: grid, col_widths: [16, 96, 52, 52, 52, 30, 30, 72] }
-        children:
-          - text: ""
-          - text: "name"
-          - text: "ping"
-          - text: "down"
-          - text: "up"
-          - text: "cam"
-          - text: "mic"
-          - text: "vol"
-      # You: your name lights up GREEN while YOU talk (text colour is static, so it is a visibility
-      # swap: only one of the two is visible). The two are one group, so they always fill exactly
-      # one cell, even on a frame where neither check runs.
-      - type: group
-        id: users_you
-        layout: { kind: grid, col_widths: [16, 96, 52, 52, 52, 30, 30, 72] }
-        children:
-          - type: status_dot
-            bind: self.dot
-          - type: group
-            children:
-              - text: ""
-                bind: conf.self
-                visible_when: (not (= (state-get "self.talking") "1"))
-              - text: ""
-                bind: conf.self
-                color: [0.30, 1.0, 0.40]
-                visible_when: (= (state-get "self.talking") "1")
-          - text: ""
-            bind: self.ping
-          - text: ""
-            bind: self.down
-          - text: ""
-            bind: self.up
-          - text: ""
-          - text: ""
-          - text: "(you)"
-      # Everyone else: one row per peer (peer.<i>), filled by on_tick.
-      - type: group
-        repeat: (state-get "peer.count")
-        layout: { kind: grid, col_widths: [16, 96, 52, 52, 52, 30, 30, 72] }
-        children:
-          - type: status_dot
-            bind: peer.{i}.dot
-          # Name: click to open + raise this peer's camera window (cam_<i>); GREEN while talking. One
-          # group, so it is always one cell (see the you row).
-          - type: group
-            children:
-              - text: ""
-                bind: peer.{i}.name
-                on_click: (begin (state-set "tree.cam_{i}.open" "1") (state-set "tree.cam_{i}.raise" "1"))
-                tooltip: "Show their camera"
-                visible_when: (not (= (state-get "peer.{i}.talking") "1"))
-              - text: ""
-                bind: peer.{i}.name
-                color: [0.30, 1.0, 0.40]
-                on_click: (begin (state-set "tree.cam_{i}.open" "1") (state-set "tree.cam_{i}.raise" "1"))
-                tooltip: "Show their camera"
-                visible_when: (= (state-get "peer.{i}.talking") "1")
-          - text: ""
-            bind: peer.{i}.ping
-          - text: ""
-            bind: peer.{i}.down
-          - text: ""
-            bind: peer.{i}.up
-          # Local mute toggles (checked = on). Default on: the host treats von/aon as muted only when
-          # explicitly "0", so an untouched peer is shown + heard. "##" hides the label (the header
-          # names the column). These and vol belong to the PERSON: on_tick moves them with the pid
-          # when rows shift.
-          - type: checkbox
-            label: "##cam"
-            bind: peer.{i}.von
-            def: true
-          - type: checkbox
-            label: "##mic"
-            bind: peer.{i}.aon
-            def: true
-          # Local volume in our mix (1 = unity, up to 2x boost).
-          - type: slider_float
-            label: "##vol"
-            bind: peer.{i}.vol
-            lo: 0
-            hi: 2
-            def: 1
+    size: [570, 260]
+
+  # ── Chat: the room's chat and direct messages (components/chat.ari) ──
+  # The relay keeps the history and pushes each client what it may read: the room's messages to
+  # everyone in the room, a direct message to its two participants only. Scrolled to the top, the
+  # log asks for older messages a page at a time. chat-ui-step keeps it current. 320 tall, so its
+  # message field is still on screen in cyprty in a 1600x900 browser window.
+  - include: chat
+    args: { id: chat, title: Chat, room: room.token }
+    pos: [390, 310]
+    size: [570, 320]
 
   # ── One camera window per OTHER participant, titled by their name ──
   - window: Peer
@@ -481,17 +408,17 @@ on_tick: |
         ; ── pre-seed each peer camera window at a distinct TILED position ──
         ; every cam_<i> declares the SAME authored pos:, so without this the per-peer windows land
         ; exactly on top of one another and look like a single window — the #1 reason a user reports
-        ; "I can't see the other cameras". Tile them in a 2-column grid to the RIGHT of the Users
-        ; window (which sits at x≈390–870): the roster is NEVER covered, and up to four cameras show
+        ; "I can't see the other cameras". Tile them in a 2-column grid to the RIGHT of the Users and
+        ; Chat windows (x≈390–960): those are NEVER covered, and up to four cameras show
         ; side-by-side without overlapping on a laptop screen. Seeded ONCE here, before any peer window
         ; exists, so each window's first-use geometry seed lands at its own spot; the user's drag then
         ; persists and wins. Covers 6 peers; a 7th+ falls back to the authored pos.
-        (state-set "tree.cam_0.geometry" "876,66,330,290")
-        (state-set "tree.cam_1.geometry" "1216,66,330,290")
-        (state-set "tree.cam_2.geometry" "876,364,330,290")
-        (state-set "tree.cam_3.geometry" "1216,364,330,290")
-        (state-set "tree.cam_4.geometry" "876,662,330,290")
-        (state-set "tree.cam_5.geometry" "1216,662,330,290")
+        (state-set "tree.cam_0.geometry" "966,66,330,290")
+        (state-set "tree.cam_1.geometry" "1306,66,330,290")
+        (state-set "tree.cam_2.geometry" "966,364,330,290")
+        (state-set "tree.cam_3.geometry" "1306,364,330,290")
+        (state-set "tree.cam_4.geometry" "966,662,330,290")
+        (state-set "tree.cam_5.geometry" "1306,662,330,290")
         (state-set "cam_on" "1") ; on/off toggles start ON (streams open unmuted)
         (state-set "mic_on" "1")
         (state-set "room.token"
@@ -588,57 +515,6 @@ on_tick: |
               (state-set "avatar.sent.accessory" (state-get "avatar.accessory")))
             #f)))
       #f)
-    ; ── mirror self voice-activity for the (you) row ──
-    (state-set "self.talking" (state-get (str-concat "media." (state-get "self.pid") ".talking")))
-    ; ── per-peer controls follow the PERSON, not the row: rows are sorted by pid, so they shift when
-    ;    someone joins or leaves. Park each row's cam/mic/vol, and whether its camera window is open,
-    ;    under its pid (ctl.<pid>.*) before the rebuild; the rebuild gives each row its own pid's back
-    ;    ("" lets the widget seed its default: a newcomer's window opens) ──
-    (for i (range (if (= (state-get "peer.count") "") 0 (int (state-get "peer.count"))))
-      (begin
-        (set opid (state-get (str-concat "peer." i ".pid")))
-        (if (= opid "") #f
-          (begin
-            (state-set (str-concat "ctl." opid ".vol") (state-get (str-concat "peer." i ".vol")))
-            (state-set (str-concat "ctl." opid ".von") (state-get (str-concat "peer." i ".von")))
-            (state-set (str-concat "ctl." opid ".aon") (state-get (str-concat "peer." i ".aon")))
-            (state-set (str-concat "ctl." opid ".win") (state-get (str-concat "tree.cam_" i ".open")))))))
-    ; ── rebuild the OTHER-participant slots each tick (self excluded: it has My Camera + the you row) ──
-    (set idx 0)
-    (set total 1)
-    ; The dot for a rung: green full, red reduced, black none ("" before the relay has adapted it).
-    (defun rung-dot (v)
-      (if (= v "") ""
-        (if (= v "full") "green full video"
-          (if (= v "off") "black no video: the link cannot carry it"
-            (str-concat "red " v " video: reduced for the link")))))
-    (for p (room-roster (state-get "conf.room"))
-      (begin
-        (set pid (get-attr p "pid"))
-        (if (= pid (state-get "self.pid"))
-          (begin
-           (state-set "self.dot" (rung-dot (get-attr p "video")))
-           (state-set "self.video_in"
-            (if (or (= (get-attr p "video") "") (= (get-attr p "video") "full")) ""
-                (str-concat "video in: " (get-attr p "video") " (adapted to your link)"))))
-          (begin
-            (state-set (str-concat "peer." idx ".pid") pid)
-            (state-set (str-concat "peer." idx ".vol") (state-get (str-concat "ctl." pid ".vol")))
-            (state-set (str-concat "peer." idx ".von") (state-get (str-concat "ctl." pid ".von")))
-            (state-set (str-concat "peer." idx ".aon") (state-get (str-concat "ctl." pid ".aon")))
-            (state-set (str-concat "tree.cam_" idx ".open") (state-get (str-concat "ctl." pid ".win")))
-            (state-set (str-concat "peer." idx ".name") (get-attr p "name"))
-            (state-set (str-concat "peer." idx ".cam")
-              (state-get (str-concat "media." pid ".camera")))
-            (state-set (str-concat "peer." idx ".talking")
-              (state-get (str-concat "media." pid ".talking")))
-            (state-set (str-concat "peer." idx ".video_off") (get-attr p "video_off"))
-            (state-set (str-concat "peer." idx ".dot") (rung-dot (get-attr p "video")))
-            ; their link quality, as THEY measure it (ping to the relay, bits/s down + up)
-            (state-set (str-concat "peer." idx ".ping") (get-attr p "ping"))
-            (state-set (str-concat "peer." idx ".down") (get-attr p "down"))
-            (state-set (str-concat "peer." idx ".up") (get-attr p "up"))
-            (set idx (+ idx 1))
-            (set total (+ total 1))))))
-    (state-set "peer.count" (str idx))
-    (state-set "self.count" (str total)))
+    ; ── the Users rows (components/room_users.ari) and the Chat window (components/chat.ari) ──
+    (room-users-step "peer" (state-get "conf.room") "chat")
+    (chat-ui-step "chat" (state-get "room.token")))

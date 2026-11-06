@@ -560,13 +560,17 @@ public:
   cvc::world_units &world_units();
 
   // This application's single, app-wide state_exec scheduler — the one long-lived
-  // async_stackless-backed scheduler on which all Ariadne program lanes (init:/action
-  // on:/on:tick·on:key residents/spawned), and any other state_exec host, schedule.
-  // Per-app-instance and lazily constructed (like computePool()/world_clock()), wired
-  // to this app's state root for state-watches. "App-wide" = scoped to this cvc::app:
-  // one cooperative timeline shared by every .ari document the app hosts, with
-  // per-document isolation layered on top by the Ariadne runtime (owner scope +
-  // per-process chroot + per-document child env). See CVCGL-UI-DSL-ROADMAP §4.7.
+  // async_stackless-backed scheduler on which Ariadne's action lanes (action on:, on:tick·on:key
+  // residents, their spawned children), AppRuntime's verbs and the app's posting hosts (sliced
+  // tasks, net and stream intrinsics) schedule. Ariadne's init: runs on a private sync scheduler
+  // of its own, and each pycvc Exec owns a private async_scheduler; both share this app's
+  // lock_manager(). Per-app-instance and lazily constructed (like computePool()/world_clock()),
+  // wired to this app's state root for state-watches; state_exec.policy and
+  // state_exec.process_class are read once, when it is built. "App-wide" = scoped to this
+  // cvc::app: one cooperative timeline shared by every .ari document the app hosts, with
+  // per-document isolation layered on top by the Ariadne runtime (owner scope + per-process
+  // chroot + per-document child env). See docs/STATE_EXEC_DEVELOPER_GUIDE.md, "Which Scheduler
+  // Runs a Program".
   cvc::state_exec::async_scheduler &exec_scheduler();
 
   // The async host for exec_scheduler() (docs/STATE_EXEC_EXCEPTIONS.md 3.2): an async function
@@ -578,10 +582,14 @@ public:
   // those first, and their calls raise RuntimeError.)
   cvc::state_exec::async_host &exec_async_host();
 
-  // The app's lock manager (docs/STATE_EXEC_LOCKS.md 8.3): the with-lock table that
-  // exec_scheduler()'s processes share. Made on first use; exec_scheduler() attaches its home to
-  // it when it is built. Phase L1: single mode, so only exec_scheduler() uses it (another
-  // scheduler keeps a private manager of its own).
+  // The app's lock manager (docs/STATE_EXEC_LOCKS.md 8.3, 8.4): the with-lock table that the
+  // schedulers over this app's tree share: exec_scheduler() (which attaches its home when it is
+  // built), Ariadne's init lane, and pycvc's Execs. A scheduler given no manager keeps a private
+  // one. Made at the first call, which fixes its mode from state_exec.locks.threading: single or
+  // shared as it says, or auto (the default): shared when the build has threads
+  // (state_exec::threads_compiled_in) and either state_exec.threads is above 0 or a threaded host
+  // announced itself (state_exec::detail::note_threaded_host(), pycvc's import), else single. An
+  // unknown value is logged and auto used. A single manager refuses a home attached cross_thread.
   std::shared_ptr<cvc::state_exec::lock_manager> lock_manager();
 
   // Used to easily manage saving/restoring thread info as we
@@ -961,8 +969,13 @@ protected:
   std::unique_ptr<cvc::state_exec::async_host> _execAsyncHost;
   // lock_manager(); guarded by _execSchedulerMutex. Its homes hold it too.
   std::shared_ptr<cvc::state_exec::lock_manager> _lockManager;
-  // lock_manager() with _execSchedulerMutex held (a boost::mutex: not recursive).
+  // lock_manager() with _execSchedulerMutex held (a boost::mutex: not recursive). The call that
+  // makes the manager chooses its mode; an unknown state_exec.locks.threading is kept and logged
+  // by the next lock_manager() or exec_scheduler() call, once its mutex is released.
   std::shared_ptr<cvc::state_exec::lock_manager> lock_manager_locked();
+  // The same, leaving that warning (or a kept one) in `note` for the caller to log after unlocking.
+  std::shared_ptr<cvc::state_exec::lock_manager> lock_manager_locked(std::string &note);
+  std::string _lockManagerNote; // lock_manager_locked()'s kept warning; guarded by the mutex
 
   // Interrupt and join this app's tracked threads (two-phase, per-thread
   // timeout). Call it (or wait()) from main() before exit if you spawned work;

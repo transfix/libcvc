@@ -8,6 +8,7 @@
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/ftxui_backend.h>
 #include <cvc/ariadne/host_info.h>
+#include <cvc/ariadne/loader.h> // LoadResult (a load hook's argument)
 #include <cvc/ariadne/requires.h>
 #include <cvc/ariadne/scene_adapter.h>
 #include <cvc/core/app.h>
@@ -118,6 +119,28 @@ TEST(AriadneRequires, CapabilityTokensReadTheHostFacts) {
   EXPECT_FALSE(capability_holds("term.sixel", f));
   EXPECT_FALSE(capability_holds("gl.shaders", f));
   EXPECT_FALSE(capability_holds("no.such.token", f));
+}
+
+// A script language's tokens answer from the engine a scripting host registered (arix and ariglx
+// embed Python), not from HostFacts; elsewhere they fail, and the error says which hosts run it.
+TEST(AriadneRequires, ScriptLanguageTokensHoldOnlyWithItsEngine) {
+  const HostFacts f;
+  EXPECT_TRUE(is_capability_token("python"));
+  EXPECT_TRUE(is_capability_token("python.numpy"));
+  EXPECT_FALSE(is_capability_token("python."));
+  EXPECT_FALSE(capability_holds("python", f));
+  EXPECT_FALSE(capability_holds("python.numpy", f));
+  EXPECT_EQ(capability_hint("python.numpy"),
+            "a document's python runs in the scripting hosts, arix or ariglx");
+  EXPECT_EQ(capability_hint("gl.scene"), "");
+
+  set_script_engine("python", [](const std::string &module) { return module == "numpy"; });
+  EXPECT_TRUE(capability_holds("python", f));
+  EXPECT_TRUE(capability_holds("python.numpy", f));
+  EXPECT_FALSE(capability_holds("python.scipy", f));
+  EXPECT_EQ(capability_hint("python"), ""); // this host runs it
+  set_script_engine("python", nullptr);
+  EXPECT_FALSE(capability_holds("python", f));
 }
 
 // GLSL runs in the scene's renderer and in the UI, and the two are separate facts. arigl --terminal
@@ -241,6 +264,76 @@ TEST(AriadneRequires, AMissingRequirementFailsTheLoadNamingEveryOne) {
     EXPECT_NE(what.find("frobnicate"), std::string::npos) << what;
     EXPECT_EQ(what.find("state-get"), std::string::npos) << what; // that one is provided
   }
+}
+
+// A host extension's load hook sees the parsed document before its requires: is checked, so a
+// function it registers there (a scripting host's python: exports) satisfies requires: and the
+// scan of what init: calls; and a stock host names the scripting hosts for a document that needs
+// Python.
+TEST(AriadneRequires, ALoadHookRunsBeforeRequiresIsChecked) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "ui.req");
+  const fs::path doc = write_doc("load_hook", "requires: [triple]\n"
+                                              "init: (state-set \"x\" (triple 2))\n"
+                                              "windows:\n"
+                                              "  - window: W\n"
+                                              "    children:\n"
+                                              "      - text: hi\n");
+  std::string hooked;
+  art.add_load_hook([&](LoadResult &lr, const std::string &path) {
+    hooked = path;
+    art.register_function(
+        "triple", [](std::span<const cvc::state_exec::value_t> args) -> cvc::state_exec::value_t {
+          return cvc::state_exec::value_t(std::get<int64_t>(args[0].v) * 3);
+        });
+    lr.warnings.push_back("from the hook");
+  });
+  std::vector<std::string> warns;
+  ASSERT_NO_THROW(warns = art.load(doc.string()));
+  EXPECT_EQ(hooked, doc.string());
+  EXPECT_TRUE(any_contains(warns, "from the hook"));
+  EXPECT_FALSE(any_contains(warns, "triple")) << "the scan saw the hook's function";
+  EXPECT_EQ(val(app, "ui.req.x"), "6");
+
+  const fs::path py = write_doc("needs_python", "requires: [python]\n"
+                                                "python: |\n"
+                                                "  x = 1\n"
+                                                "windows:\n"
+                                                "  - window: W\n"
+                                                "    children:\n"
+                                                "      - text: hi\n");
+  AppRuntime stock(app, "ui.stock");
+  try {
+    stock.load(py.string());
+    FAIL() << "a stock host has no Python";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find("scripting hosts, arix or ariglx"), std::string::npos)
+        << e.what();
+  }
+}
+
+// A frame hook runs at the end of every drain(), after the document's programs.
+TEST(AriadneRequires, AFrameHookRunsAfterEachDrain) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "ui.req");
+  const fs::path doc = write_doc("frame_hook", "init: (state-set \"n\" \"seeded\")\n"
+                                               "windows:\n"
+                                               "  - window: W\n"
+                                               "    children:\n"
+                                               "      - text: hi\n");
+  ASSERT_NO_THROW(art.load(doc.string()));
+  int frames = 0;
+  std::string seen;
+  art.add_frame_hook([&] {
+    ++frames;
+    seen = val(app, "ui.req.n");
+  });
+  art.drain();
+  art.drain();
+  EXPECT_EQ(frames, 2);
+  EXPECT_EQ(seen, "seeded");
 }
 
 TEST(AriadneRequires, AnOptionalRequirementOnlyWarns) {

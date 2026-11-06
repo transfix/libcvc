@@ -314,6 +314,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_exec:test_pycvc_exec.py
              pycvc_exec_async:test_pycvc_exec_async.py
              pycvc_exec_coro:test_pycvc_exec_coro.py
+             pycvc_ariadne:test_pycvc_ariadne.py
              pycvc_state_exec:test_pycvc_state_exec.py
              pycvc_state_exec_sched:test_pycvc_state_exec_sched.py
              pycvc_state_exec_eval:test_pycvc_state_exec_eval.py
@@ -329,11 +330,14 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_nav_belief:test_pycvc_nav_belief.py
              pycvc_nav_routes:test_pycvc_nav_routes.py
              pycvc_nav_telemetry:test_pycvc_nav_telemetry.py
+             pycvc_nav_fog:test_pycvc_nav_fog.py
+             pycvc_nav_governor:test_pycvc_nav_governor.py
              pycvc_nav_cuda:test_pycvc_nav_cuda.py
              pycvc_integration:test_pycvc_integration.py
              pycvc_proxy_hooks:test_pycvc_proxy_hooks.py
              pycvc_lod:test_pycvc_lod.py
-             pycvc_world_geometry:test_pycvc_world_geometry.py)
+             pycvc_world_geometry:test_pycvc_world_geometry.py
+             pycvc_data:test_pycvc_data.py)
     string(REPLACE ":" ";" _pair "${_t}")
     list(GET _pair 0 _name)
     list(GET _pair 1 _script)
@@ -497,6 +501,17 @@ if(CVC_BUILD_PYCVC_GL)
   add_test(NAME pycvc_ari
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_ari.py)
   set_tests_properties(pycvc_ari PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
+  # pycvc_gl.ariadne.Host, the Python host: data both ways, callbacks, errors and re-entrancy
+  # headless, then (in a child; skipped without GL unless CVC_REQUIRE_RENDER) a published picture and
+  # a stream in the frame, and the examples/ariadne/python programs offscreen.
+  add_test(NAME pycvc_gl_ariadne_host
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_ariadne_host.py)
+  set_tests_properties(pycvc_gl_ariadne_host PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
+  # The GIL both ways: AriRuntime.run() with an async Python function, re-entrant frames, other
+  # threads, and teardown with a call in flight; each case in its own process with a timeout.
+  add_test(NAME pycvc_gl_ariadne_gil
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_ariadne_gil.py)
+  set_tests_properties(pycvc_gl_ariadne_gil PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
   # VTK Python bridge test — skips gracefully unless the vtk-python wrappers
   # (vtkmodules) are importable; runs the vtkProp<->vtkActor round trip when they are.
   add_test(NAME pycvc_vtk

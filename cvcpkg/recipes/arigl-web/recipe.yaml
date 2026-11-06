@@ -1,11 +1,9 @@
 schema_version: 1
 recipe:
   name: arigl-web
-  upstream_version: "3.7.8"
-  # 2: the same files with no runtime deps (depends.runtime below), so a site's install stops
-  # pulling the static build closure. publish-cvcgl-wasm packs at this revision and skips one the
-  # catalog already has, so the bump is what lets it republish 3.7.8.
-  cvc_revision: 2
+  upstream_version: "3.7.11"
+  # Reset to 1 for the 3.7.11 upstream version: a version bump restarts cvc_revision.
+  cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
@@ -72,6 +70,21 @@ depends:
     # packages.
     # cvcGL's conference video (mjpeg).
     - name: libjpeg-turbo
+    # The rest of an Ariadne conference client (arigl's conference mode, which a page sets up from
+    # its config: CVC_ARIADNE_RELAY and friends): the WebSocket state transport's messages
+    # (protobuf, built with CVC_ENABLE_WS), the avatars' rigid bodies (joltphysics), Opus mics
+    # (libopus) and the device key that signs the join (openssl). The single-threaded package only
+    # (the one a site serves without special headers; libopus has no -pthread archive).
+    # build-wasm.sh builds the conference in when the deps prefix has protobuf (28.3+cvc.2, wasm
+    # since cy-pca/cvcpkg#541), and then fails the build without any of the others.
+    - name: protobuf
+      platforms: [wasm]
+    - name: joltphysics
+      platforms: [wasm]
+    - name: libopus
+      platforms: [wasm]
+    - name: openssl
+      platforms: [wasm]
     # Scene sources: meshes through assimp (.glb), and cvc's mesh_ops / fem (header-only).
     - name: assimp
     - name: eigen
@@ -96,6 +109,9 @@ depends:
   host_tools:
     - cmake
     - ninja
+    # A native protoc for the WebSocket transport's messages: the wasm protobuf ships none, and the
+    # generated code must match its libprotobuf (28.3) exactly.
+    - protobuf
 
 build:
   matrix:

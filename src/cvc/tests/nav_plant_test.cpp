@@ -108,14 +108,15 @@ struct scene {
       }
   }
 
-  void build(world &w, double mu) const {
+  // Returns the ground's body.
+  body_id build(world &w, double mu) const {
     const material_id m = w.add_material({"ground", static_cast<float>(mu), 0.0f, 0.015f});
     body_desc g;
     g.shape = box{{150.0, 150.0, 0.5}};
     g.motion = motion_type::static_;
     g.position = {0.0, 0.0, -0.5};
     g.material = m;
-    w.add_body(g);
+    const body_id ground = w.add_body(g);
     for (const rect &r : walls) {
       body_desc b;
       b.shape = box{{0.5 * (r.x1 - r.x0) + 0.5, 0.5 * (r.y1 - r.y0) + 0.5, 1.5}};
@@ -124,6 +125,7 @@ struct scene {
       b.material = m;
       w.add_body(b);
     }
+    return ground;
   }
 };
 
@@ -829,6 +831,45 @@ TEST(NavPlant, NeverExceedsTheLatencyAwareStoppingSpeed) {
   EXPECT_GT(fastest, 3.0);
   EXPECT_LE(worst, 0.1);
   EXPECT_EQ(e.per_vehicle[0].building_contacts, 0);
+}
+
+// The ground is not a building (nav_plant_options::ground_bodies). A chassis that touches the
+// ground, here a body box that reaches below the wheels and so rests on it, is no building contact
+// once the plant knows the ground; a pole through its nose still is one. Without the ground's id
+// every massless body counts, the ground too, as nav_stats' building_contacts did.
+TEST(NavPlant, GroundContactsAreNotBuildingContacts) {
+  REQUIRE_JOLT();
+  const auto contacts = [](const vehicle_desc &d, bool pole, bool tell) {
+    scene sc;
+    sim_world sim = make_sim(nav_config(d, 12.0, 0.25), sc, -60, 0, 60, 0);
+    world w(jolt_config());
+    const body_id ground = sc.build(w, 0.9);
+    if (pole) {
+      body_desc b;
+      b.shape = box{{0.3, 0.3, 1.5}};
+      b.motion = motion_type::static_;
+      b.position = {-57.0, 0.0, 1.5}; // 3 m ahead of the rear axle, inside the body
+      w.add_body(b);
+    }
+    nav_plant_options o = nav_sized();
+    if (tell)
+      o.ground_bodies = {ground};
+    nav_plant plant(w, {d}, o);
+    sim.set_plant(&plant);
+    sim.begin_nav_stats();
+    int n = 0;
+    for (int t = 0; t < 40; ++t) {
+      sim.step();
+      n += plant.static_contacts_step(0);
+    }
+    EXPECT_EQ(sim.nav_stats().per_vehicle[0].building_contacts, n);
+    return n;
+  };
+  vehicle_desc low = vehicle_desc::humvee();
+  low.half_extents.z = 1.2; // the box reaches below the wheels: the chassis rests on the ground
+  EXPECT_GT(contacts(low, false, false), 0) << "without the ground's id, the ground counts";
+  EXPECT_EQ(contacts(low, false, true), 0) << "the ground is not a building";
+  EXPECT_GT(contacts(vehicle_desc::humvee(), true, true), 0) << "a pole through the nose counts";
 }
 
 // nav_stats carries the plant's energy: what the vehicle drew, per km, and its building contacts;

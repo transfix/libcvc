@@ -38,7 +38,9 @@
 //   flights.npy   float64 (F, T, 8): equal-length flights cut from the runs, rows
 //                 [x, y, psi, vx, vy, r, drive, steer] (kPlanarWidth): the centre of mass on
 //                 SE(2), its body twist, nav's acceleration command and the steering (steer
-//                 actual or command). Row k's inputs acted from t_k-1 to t_k.
+//                 actual or command). Row k's inputs acted from t_k-1 to t_k. With `wide`,
+//                 (F, T, 20) (kPlanarWideWidth): also the attitude, the wheels' speeds, the pedals,
+//                 the ledger's shaft and brake power, and the ground's slope under the wheels.
 //   meta.json     the rate, the layout, the run's settings and each flight's seed and agent.
 //   residual.json the one-tick residuals of diff::dyn_plant and the kinematic bicycle against
 //                 the plant, binned by lateral g (also reported).
@@ -80,7 +82,10 @@ struct plant_log_options {
   std::string out;
   double flight_seconds = 5.0, stride_seconds = 5.0;
   steer_input steer = steer_input::actual;
-  int nsub = 0; // residual substeps; 0: the physics steps a tick
+  bool wide = false; // flights.npy in the wide layout (kPlanarWideWidth: the wheels, attitude and
+                     // pedals too); off, the planar eight columns
+  bool keep_contact = false; // keep the windows with contacts, a contact feature last (cut_flights)
+  int nsub = 0;      // residual substeps; 0: the physics steps a tick
   bool samples = false;
   bool fit_dyn = false;
   bool fit_power = false;

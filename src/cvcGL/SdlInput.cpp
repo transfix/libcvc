@@ -227,7 +227,8 @@ bool SdlInput::attach(vtkRenderWindow *host) {
   }
 #endif
 #if defined(CVC_ENABLE_SDL) && defined(__EMSCRIPTEN__)
-  // The browser still draws in VTK's canvas: SDL listens on the page for the keys typed into it.
+  // VTK's canvas window ($CVCGL_SDL_WINDOW=0, or SDL made none): SDL listens on the page for the
+  // keys typed into it.
   if (!init())
     return false;
   if (!video_) {
