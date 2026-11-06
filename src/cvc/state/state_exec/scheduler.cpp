@@ -1593,26 +1593,41 @@ void scheduler::apply_controls() {
 
 void scheduler::apply_control(int pid, control_cmd &cmd) {
   bool applied = false;
-  switch (cmd.what) {
-  case control_cmd::kind::query:
-    if (cmd.query)
-      cmd.query(*this);
-    return; // a query has no done
-  case control_cmd::kind::set_priority:
-    applied = set_priority(pid, cmd.value); // the host path, unchecked (design 7.4)
-    break;
-  case control_cmd::kind::kill:
-    applied = kill(pid); // killed_by_user
-    break;
-  case control_cmd::kind::pause:
-    applied = pause(pid);
-    break;
-  case control_cmd::kind::resume:
-    applied = resume(pid);
-    break;
-  case control_cmd::kind::signal:
-    applied = send_signal(pid, cmd.signal); // "SIGKILL" kills
-    break;
+  try {
+    switch (cmd.what) {
+    case control_cmd::kind::query:
+      if (cmd.query)
+        cmd.query(*this);
+      return; // a query has no done
+    case control_cmd::kind::set_priority:
+      applied = set_priority(pid, cmd.value); // the host path, unchecked (design 7.4)
+      break;
+    case control_cmd::kind::kill:
+      applied = kill(pid); // killed_by_user
+      break;
+    case control_cmd::kind::pause:
+      applied = pause(pid);
+      break;
+    case control_cmd::kind::resume:
+      applied = resume(pid);
+      break;
+    case control_cmd::kind::signal:
+      applied = send_signal(pid, cmd.signal); // "SIGKILL" kills
+      break;
+    }
+  } catch (...) {
+    // A kill (or a SIGKILL) that throws has still killed its process (kill_process; R0-final), and
+    // its done hears that. Any other command that throws is refused, done(false), by the batch.
+    if ((cmd.what == control_cmd::kind::kill || cmd.what == control_cmd::kind::signal) &&
+        cmd.done) {
+      const process *const p = procs_.find(pid);
+      if (p && p->status == process_status::killed) {
+        const std::function<void(bool)> done = std::move(cmd.done);
+        cmd.done = nullptr;
+        done(true);
+      }
+    }
+    throw;
   }
   if (cmd.done) {
     // Taken from the command first: a done that throws (against its contract) is not called

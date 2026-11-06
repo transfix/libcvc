@@ -1416,18 +1416,29 @@ void async_scheduler::terminate_process(process &proc, value_t result) {
 
 void async_scheduler::kill_process(process &proc, const std::string &reason) {
   const int pid = proc.pid;
-  cancel_async_calls(pid); // its kernels see cancelled(), and their results are dropped
+  // Its kernels see cancelled(), and their results are dropped. Cancelling can throw (a cancel
+  // hook, against its contract; the rate's publication, which runs the tree's slots): the process
+  // is killed all the same, and the exception reported after (R0-final), as a kill whose locks'
+  // release throws leaves its process killed. It must not run on with its calls cancelled.
+  std::exception_ptr cancel_error;
+  try {
+    cancel_async_calls(pid);
+  } catch (...) {
+    cancel_error = std::current_exception();
+  }
   // Cancelling may publish the rate, a write to the tree whose slots may have ended (or reaped)
   // the process meanwhile: that stands.
   process *const p = procs_.find(pid);
-  if (!p || is_finished(p->status))
-    return;
-  procs_.set_status(*p, process_status::killed);
-  if (p->locks && home_)
-    home_->process_ended(*p, true); // a kill or a budget: the sections it was in are abandoned
-  p->exit_error = reason;
-  p->state.stats.mark_complete();
-  release_if_idle(*p);
+  if (p && !is_finished(p->status)) {
+    procs_.set_status(*p, process_status::killed);
+    if (p->locks && home_)
+      home_->process_ended(*p, true); // a kill or a budget: the sections it was in are abandoned
+    p->exit_error = reason;
+    p->state.stats.mark_complete();
+    release_if_idle(*p);
+  }
+  if (cancel_error)
+    std::rethrow_exception(cancel_error);
 }
 
 void async_scheduler::fail_process(process &proc, value_t exc, std::exception_ptr original) {
@@ -1689,26 +1700,41 @@ bool async_scheduler::post_control(int pid, control_cmd cmd) {
 
 void async_scheduler::apply_control(int pid, control_cmd &cmd) {
   bool applied = false;
-  switch (cmd.what) {
-  case control_cmd::kind::query:
-    if (cmd.query)
-      cmd.query(*this);
-    return; // a query has no done
-  case control_cmd::kind::set_priority:
-    applied = set_priority(pid, cmd.value); // the host path, unchecked (design 7.4)
-    break;
-  case control_cmd::kind::kill:
-    applied = kill(pid); // killed_by_user
-    break;
-  case control_cmd::kind::pause:
-    applied = pause(pid);
-    break;
-  case control_cmd::kind::resume:
-    applied = resume(pid);
-    break;
-  case control_cmd::kind::signal:
-    applied = send_signal(pid, cmd.signal); // "SIGKILL" kills
-    break;
+  try {
+    switch (cmd.what) {
+    case control_cmd::kind::query:
+      if (cmd.query)
+        cmd.query(*this);
+      return; // a query has no done
+    case control_cmd::kind::set_priority:
+      applied = set_priority(pid, cmd.value); // the host path, unchecked (design 7.4)
+      break;
+    case control_cmd::kind::kill:
+      applied = kill(pid); // killed_by_user
+      break;
+    case control_cmd::kind::pause:
+      applied = pause(pid);
+      break;
+    case control_cmd::kind::resume:
+      applied = resume(pid);
+      break;
+    case control_cmd::kind::signal:
+      applied = send_signal(pid, cmd.signal); // "SIGKILL" kills
+      break;
+    }
+  } catch (...) {
+    // A kill (or a SIGKILL) that throws has still killed its process (kill_process; R0-final), and
+    // its done hears that. Any other command that throws is refused, done(false), by the batch.
+    if ((cmd.what == control_cmd::kind::kill || cmd.what == control_cmd::kind::signal) &&
+        cmd.done) {
+      const process *const p = procs_.find(pid);
+      if (p && p->status == process_status::killed) {
+        const std::function<void(bool)> done = std::move(cmd.done);
+        cmd.done = nullptr;
+        done(true);
+      }
+    }
+    throw;
   }
   if (cmd.done) {
     // Taken from the command first: a done that throws (against its contract) is not called

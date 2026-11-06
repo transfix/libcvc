@@ -975,9 +975,9 @@ void kill_pause_resume_signal(S &sched, done_log &log, const std::function<void(
   EXPECT_TRUE(sched.check_tables());
 }
 
-// A command that throws (here a query; a kill can, through its locks' release or a tree write's
-// slots) is refused, and the commands after it go back to the front of the queue: the next drain
-// or step applies them, in order, ahead of what was posted since.
+// A command that throws (a query; a kill can, through its locks' release or a tree write's slots,
+// and still kills) stops the batch, and the commands after it go back to the front of the queue:
+// the next drain or step applies them, in order, ahead of what was posted since.
 template <class S>
 void a_throwing_command_requeues_the_rest(S &sched, done_log &log, int thrower_pid,
                                           control_cmd thrower, const done_calls &first,
@@ -1080,8 +1080,9 @@ TEST(AsyncPostControl, HasPendingControlCountsCommandsOnly) {
 TEST(AsyncPostControl, AThrowingCommandRequeuesTheRest) {
   done_log log, rest; // before the scheduler: its destructor may call what was never applied
   async_scheduler sched;
-  // A kill whose async call's cancel hook throws: the process is not killed, and the kill's done
-  // gets false.
+  // A kill whose async call's cancel hook throws: the kill throws, and the commands after it are
+  // requeued, but the process is killed all the same (a kill always kills, R0-final), and the
+  // kill's done hears so: true.
   const int c = sched.execute(std::string("(begin (set i 0) (while #t (set i (+ i 1))))"));
   auto call = std::make_shared<async_call>("probe", c);
   call->on_cancel([] { throw std::runtime_error("the cancel hook threw"); });
@@ -1089,9 +1090,10 @@ TEST(AsyncPostControl, AThrowingCommandRequeuesTheRest) {
   a_throwing_command_requeues_the_rest(sched, rest, c,
                                        control(control_cmd::kind::kill, log.done("kill c")),
                                        {{"pause a", true}}, [&] { sched.drain_ingress(); });
-  EXPECT_EQ(log.calls, (done_calls{{"kill c", false}}));
-  EXPECT_FALSE(is_finished(sched.get_process_info(c)->status));
-  EXPECT_TRUE(sched.kill(c)); // its call is gone: the kill goes through
+  EXPECT_EQ(log.calls, (done_calls{{"kill c", true}}));
+  EXPECT_EQ(sched.get_process_info(c)->status, process_status::killed);
+  EXPECT_EQ(sched.get_exit_error(c), "killed_by_user");
+  EXPECT_FALSE(sched.kill(c)); // killed already
 }
 
 TEST(AsyncPostControl, TheDestructorRefusesWhatWasNeverApplied) {
