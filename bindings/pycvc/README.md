@@ -200,6 +200,30 @@ speed. `nav_sim_world_set_pose(sim, i, x, y, heading, speed=0)` places an agent 
 `nav_sim_world_set_plant`, which attaches each vehicle where its agent is.
 `test_pycvc_nav_override.py` covers both.
 
+### The plant by name, and generated worlds
+
+`pycvc.plant_host` is libcvc's `plant_host`: it owns the physics world and the plant a sim_world
+drives on, and switches them by name (`kinematic`, `humvee`, `roboracer`, a comma list cycled over
+the agents, `dynamic[:presets]`, `dynamic4w[:presets]`):
+
+```python
+host = pycvc.plant_host(latency=0.1, brake_margin=0.8)
+host.set_geometry(world_geometry)      # a city's or a generated world's colliders; None: flat ground
+host.use(sim, "humvee")                # the agents at their poses, at rest, on Jolt Humvees
+host.pull(app, "cars", sim)            # live: cars.nav_plant.vehicle switches it, its knobs apply
+host.kind(), host.driving(), host.limits(i), host.state(i), host.vehicle_state(i), host.body(i)
+```
+
+With a geometry the vehicles start on its terrain. The host holds the sim_world it drives and puts
+it back on the bicycle before it goes.
+
+`pycvc.generate_world(params, building_library="")` is libcvc's terrain generator (terrain_lab's
+world, `cvc::world::generate_world`) on a dict of its params (the `generated_world` node's
+`world.*` key names, or the struct's): `.world()` is the `world_geometry` for physics and nav,
+`.terrain()` the ground, `.height(x, y)`, `.info()` the params and what came out. It is a pure
+function of the params and the library, so the same keys give the scene node's world exactly.
+`test_pycvc_plant_host.py` covers both.
+
 ## Level of detail (cvc::simplify + cvc::lod)
 
 The whole LOD family is wrapped directly (`pycvc_lod.i`, `LodGraphicsNode` in

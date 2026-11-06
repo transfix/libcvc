@@ -617,3 +617,157 @@ cvc::geometry data_geometry(const std::shared_ptr<cvc::app> &app, const std::str
 }
 } // namespace pycvc
 %}
+
+// ── generated worlds (cvc::world::generate_world, terrain_lab's world) ──────────
+// The world the generated_world scene node draws, made in Python: its ground (a height_field) and
+// the world for physics and nav (a world_geometry: the terrain to collide and navigate, the
+// buildings to collide). generate_world is a pure function of its params and the building library,
+// so the same world.* keys give the node's world exactly.
+%{
+#include <cvc/world/building_archetypes.h>
+#include <cvc/world/generated_world.h>
+#include <sys/stat.h>
+%}
+
+%feature("kwargs") pycvc::generate_world;
+%newobject pycvc::generate_world;
+
+%inline %{
+namespace pycvc {
+
+class generated_world {
+public:
+  // The world for physics and nav, and the ground (copies sharing their arrays).
+  cvc::world::world_geometry world() const { return geometry_; }
+  cvc::height_field terrain() const { return terrain_; }
+  // The ground's height at (x, y), m: the terrain mesh's own surface.
+  double height(double x, double y) const { return terrain_.height(x, y); }
+  // The params it was made from (generated_world_params' fields) and what came out: buildings,
+  // archetypes (whether they came from a building library), road_length (m), districts,
+  // height_min and height_max (m).
+  PyObject *info() const {
+    const cvc::world::generated_world_params &p = params_;
+    return Py_BuildValue(
+        "{s:K,s:d,s:i,s:i,s:i,s:i,s:d,s:d,s:i,s:i,s:d,s:i,s:i,s:s,s:s,s:s,s:n,s:O,s:d,s:n,s:d,s:d}",
+        "seed", (unsigned long long)p.seed, "half_m", p.half_m, "trees", p.trees, "rocks",
+        p.rocks, "buildings", p.buildings, "tree_gen", p.tree_gen, "amp_m", p.amp_m,
+        "water_level_m", p.water_level_m, "preset", p.preset, "ontology", p.ontology, "cell_m",
+        p.cell_m, "max_terrain_n", p.max_terrain_n, "raster_n", p.raster_n, "terrain",
+        p.terrain.c_str(), "city", p.city.c_str(), "terrain_file", p.terrain_file.c_str(),
+        "building_count", (Py_ssize_t)building_count_, "archetypes", archetypes_ ? Py_True : Py_False,
+        "road_length", road_length_, "districts", (Py_ssize_t)districts_, "height_min",
+        height_min_, "height_max", height_max_);
+  }
+
+  // Only generate_world makes one.
+  generated_world(const cvc::world::generated_world &w)
+      : geometry_(w.geometry()), terrain_(w.terrain ? *w.terrain : cvc::height_field()),
+        params_(w.params),
+        building_count_(w.building_count), archetypes_(w.archetypes),
+        road_length_(w.road_length), districts_(w.districts), height_min_(w.height_min),
+        height_max_(w.height_max) {}
+
+private:
+  cvc::world::world_geometry geometry_;
+  cvc::height_field terrain_;
+  cvc::world::generated_world_params params_;
+  std::size_t building_count_ = 0;
+  bool archetypes_ = false;
+  double road_length_ = 0.0;
+  std::size_t districts_ = 0;
+  double height_min_ = 0.0, height_max_ = 0.0;
+};
+
+// Generate a world. `params` is a dict of generated_world_params' fields, by their names or the
+// generated_world node's world.* keys (seed, half or half_m, trees, rocks, buildings, tree_gen,
+// amp or amp_m, water_level or water_level_m, preset, ontology, cell_m, max_terrain_n, raster_n,
+// terrain, city, terrain_file); a missing one keeps its default, an unknown one is an error.
+// `building_library` is a buildings.glb (or a directory holding one) of archetypes for the city;
+// "" builds procedural massing. Runs without the GIL; a big world takes seconds.
+generated_world *generate_world(PyObject *params = nullptr,
+                                const std::string &building_library = "") {
+  cvc::world::generated_world_params p;
+  if (params && params != Py_None) {
+    if (!PyDict_Check(params))
+      throw std::invalid_argument("generate_world: params is a dict");
+    PyObject *key = nullptr, *value = nullptr;
+    Py_ssize_t pos = 0;
+    while (PyDict_Next(params, &pos, &key, &value)) {
+      if (!PyUnicode_Check(key))
+        throw std::invalid_argument("generate_world: a param's name is a string");
+      const std::string k = PyUnicode_AsUTF8(key);
+      const auto num = [&]() {
+        const double v = PyFloat_AsDouble(value);
+        if (PyErr_Occurred()) {
+          PyErr_Clear();
+          throw std::invalid_argument("generate_world: " + k + " is a number");
+        }
+        return v;
+      };
+      const auto str = [&]() {
+        if (!PyUnicode_Check(value))
+          throw std::invalid_argument("generate_world: " + k + " is a string");
+        return std::string(PyUnicode_AsUTF8(value));
+      };
+      if (k == "seed")
+        p.seed = static_cast<std::uint64_t>(num());
+      else if (k == "half" || k == "half_m")
+        p.half_m = num();
+      else if (k == "trees")
+        p.trees = static_cast<int>(num());
+      else if (k == "rocks")
+        p.rocks = static_cast<int>(num());
+      else if (k == "buildings")
+        p.buildings = static_cast<int>(num());
+      else if (k == "tree_gen")
+        p.tree_gen = static_cast<int>(num());
+      else if (k == "amp" || k == "amp_m")
+        p.amp_m = num();
+      else if (k == "water_level" || k == "water_level_m")
+        p.water_level_m = num();
+      else if (k == "preset")
+        p.preset = static_cast<int>(num());
+      else if (k == "ontology")
+        p.ontology = static_cast<int>(num());
+      else if (k == "cell_m")
+        p.cell_m = num();
+      else if (k == "max_terrain_n")
+        p.max_terrain_n = static_cast<int>(num());
+      else if (k == "raster_n")
+        p.raster_n = static_cast<int>(num());
+      else if (k == "terrain")
+        p.terrain = str();
+      else if (k == "city")
+        p.city = str();
+      else if (k == "terrain_file")
+        p.terrain_file = str();
+      else
+        throw std::invalid_argument("generate_world: no param " + k);
+    }
+  }
+  std::shared_ptr<const cvc::world::building_library> library;
+  if (!building_library.empty()) {
+    std::string path = building_library;
+    struct stat st {};
+    if (stat(path.c_str(), &st) == 0 && (st.st_mode & S_IFDIR))
+      path += "/buildings.glb";
+    library = std::make_shared<const cvc::world::building_library>(
+        cvc::world::load_building_library(path));
+  }
+  std::unique_ptr<cvc::world::generated_world> w;
+  std::string error;
+  Py_BEGIN_ALLOW_THREADS;
+  try {
+    w = std::make_unique<cvc::world::generated_world>(
+        cvc::world::generate_world(p, library.get()));
+  } catch (const std::exception &e) {
+    error = e.what();
+  }
+  Py_END_ALLOW_THREADS;
+  if (!w)
+    throw std::invalid_argument("generate_world: " + error);
+  return new generated_world(*w);
+}
+
+} // namespace pycvc
+%}
