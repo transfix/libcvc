@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <cvc/ariadne/bind.h> // live node params: read_or_seed / read_or / resolve_bind
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/value.h>
@@ -442,7 +443,7 @@ constexpr int MAX_NEAR = 8;        // as many as the shells can cut out (cloudCu
 constexpr int STRIDE = 3;          // frames between the near volumes' work
 constexpr int REFRESH = 60;        // frames between shade and far composites (the morph is slow)
 constexpr int SLICES = 8;          // frames a composite's cells, then its rows, are spread over
-constexpr int AREA_STRIDE = 60;    // frames between looks at the ground's extent and receivers
+constexpr int AREA_STRIDE = 60;    // frames between looks at the ground's extent
 constexpr int FADE_FRAMES = 45;    // a cloud's near <-> far crossfade
 constexpr double FAR_REACH = 4000.0;    // how far past the ground the far shells reach, metres
 const char *CLOUD_INPUTS = "cloud_sky"; // the shared shader inputs' key on a mesh
@@ -609,6 +610,7 @@ struct SkyRT {
   std::vector<float> field;
   long frame = 0;
   double lastT = -1.0, driftX = 0.0, driftY = 0.0, morph = 0.0;
+  std::uint64_t wiredTree = ~std::uint64_t(0); // the scene's treeVersion() at the last wiring
   bool snap = true;  // the next assignment shows its clouds at once (the first frame, a new layout)
   bool fresh = true; // the next composites are done at once (the first frame, a new layout)
   bool shadeWas = false;
@@ -953,8 +955,17 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
     r.driftY += ds * r.windY;
     r.morph += dt / CLOUD_MORPH_S * read_key(app, r.morphKey, 1.0);
 
-    // A grown (or moved) ground re-lays the deck over it; new meshes under the receivers (a
-    // regenerated world, an LOD rung made late) take the shade.
+    // New meshes under the receivers (a regenerated world, an LOD rung made late) take the shade
+    // on the frame after they join the scene: adding a node anywhere in it bumps its
+    // treeVersion(), so the receivers are walked then and never on a timer. The version is read
+    // before the walk, so a mesh added during it is found on the next frame.
+    if (const std::uint64_t tv = sgp->treeVersion(); tv != r.wiredTree) {
+      r.wiredTree = tv;
+      for (const std::string &id : r.receivers)
+        if (auto g = sgp->getGraphics(id))
+          wireReceivers(r, *g);
+    }
+    // A grown (or moved) ground re-lays the deck over it.
     if (f % AREA_STRIDE == 0) {
       if (r.ground) {
         double ox, oy, area;
@@ -967,9 +978,6 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
           layDeck(r);
         }
       }
-      for (const std::string &id : r.receivers)
-        if (auto g = sgp->getGraphics(id))
-          wireReceivers(r, *g);
       giveRelief(r); // a regenerated ground: the flanks move, the weather follows
     }
     const double P = L.period_m();

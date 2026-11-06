@@ -491,6 +491,16 @@ public:
   // well outside where it was, a prop's UseBounds turned back on. Any thread.
   void markContentChanged() { m_contentVersion.fetch_add(1, std::memory_order_acq_rel); }
 
+  // A counter bumped whenever a node joins or leaves the tree: a graphics node
+  // registered or removed, or a child added to or removed from any node in the
+  // scene (an LOD rung made late, a regenerated world's new meshes). Something
+  // that decorates the scene's meshes -- cloud_sky giving its receivers the
+  // deck's shade -- compares it to know when to look for new ones, instead of
+  // walking the tree on a timer. Unlike contentVersion() it ignores moves,
+  // visibility and geometry swaps: those keep a node's decoration. Any thread.
+  std::uint64_t treeVersion() const { return m_treeVersion.load(std::memory_order_acquire); }
+  void markTreeChanged() { m_treeVersion.fetch_add(1, std::memory_order_acq_rel); }
+
   // Compute combined bounding box of all volumes
   cvc::bounding_box computeVolumeBounds() const;
 
@@ -581,6 +591,7 @@ private:
   std::atomic<bool> m_boundsRefreshQueued{false};      // one refreshWorldBounds() event is queued
   mutable std::atomic<std::uint64_t> m_boundsWalks{0}; // see boundsWalkCount()
   std::atomic<std::uint64_t> m_contentVersion{0};      // see contentVersion()
+  std::atomic<std::uint64_t> m_treeVersion{0};         // see treeVersion()
   // A grow-only walk skipped while nothing showed the world box (grid, axis and
   // root box all hidden); run by catchUpWorldBounds() or processEvents() once
   // one of them is shown again.

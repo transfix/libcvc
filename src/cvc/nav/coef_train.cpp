@@ -103,6 +103,32 @@ void validate_body(const train_config &c) {
         "cvc::nav::coef_trainer: coll_offsets needs coll_rr > 0 and finite offsets");
 }
 
+// One point-mass step with train_config::point_mass's integrator, and its backward.
+void surr_step_with(point_mass_integrator pm, const diff::field &F, float ox, float oy, float vx,
+                    float vy, float gx, float gy, float al, float be, float ga, float rr,
+                    float d_hat, float vmax, float hdt, float &ox1, float &oy1, float &vx1,
+                    float &vy1) {
+  if (pm == point_mass_integrator::explicit_euler)
+    diff::surr_step_explicit(F, ox, oy, vx, vy, gx, gy, al, be, ga, rr, d_hat, vmax, hdt, ox1, oy1,
+                             vx1, vy1);
+  else
+    diff::surr_step(F, ox, oy, vx, vy, gx, gy, al, be, ga, rr, d_hat, vmax, hdt, ox1, oy1, vx1,
+                    vy1);
+}
+
+void surr_step_bwd_with(point_mass_integrator pm, const diff::field &F, float ox, float oy,
+                        float vx, float vy, float gx, float gy, float al, float be, float ga,
+                        float rr, float d_hat, float vmax, float hdt, float go1x, float go1y,
+                        float gv1x, float gv1y, float &gox, float &goy, float &gvx, float &gvy,
+                        float &gal, float &gbe, float &gga) {
+  if (pm == point_mass_integrator::explicit_euler)
+    diff::surr_step_explicit_bwd(F, ox, oy, vx, vy, gx, gy, al, be, ga, rr, d_hat, vmax, hdt, go1x,
+                                 go1y, gv1x, gv1y, gox, goy, gvx, gvy, gal, gbe, gga);
+  else
+    diff::surr_step_bwd(F, ox, oy, vx, vy, gx, gy, al, be, ga, rr, d_hat, vmax, hdt, go1x, go1y,
+                        gv1x, gv1y, gox, goy, gvx, gvy, gal, gbe, gga);
+}
+
 // w_progress != 0 needs the Jolt rollout and a speed to keep.
 void validate_progress(const train_config &c) {
   if (c.w_progress == 0.0f)
@@ -1031,8 +1057,8 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
       } else if (bike)
         diff::bike_step(F, ox, oy, ax, ay, gx, gy, al, be, ga, bv, ox1, oy1, ax1, ay1);
       else
-        diff::surr_step(F, ox, oy, ax, ay, gx, gy, al, be, ga, rr, d_hat, vmax, hdt, ox1, oy1, ax1,
-                        ay1);
+        surr_step_with(cfg_.point_mass, F, ox, oy, ax, ay, gx, gy, al, be, ga, rr, d_hat, vmax, hdt,
+                       ox1, oy1, ax1, ay1);
 
       const diff::sample cs = diff::sample_fwd(F, ox1, oy1);
       // Margin shortfall, not breach depth. A breach depth is nonzero only for
@@ -1115,8 +1141,8 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
       } else if (bike)
         diff::bike_step(F, S.ox, S.oy, S.auxx, S.auxy, gx, gy, al, be, ga, bv, ox1, oy1, ax1, ay1);
       else
-        diff::surr_step(F, S.ox, S.oy, S.auxx, S.auxy, gx, gy, al, be, ga, rr, d_hat, vmax, hdt,
-                        ox1, oy1, ax1, ay1);
+        surr_step_with(cfg_.point_mass, F, S.ox, S.oy, S.auxx, S.auxy, gx, gy, al, be, ga, rr,
+                       d_hat, vmax, hdt, ox1, oy1, ax1, ay1);
       const diff::sample cs = diff::sample_fwd(F, ox1, oy1);
       const float pen = d_safe - (cs.phi - rr);
       if (pen > 0.0f) {
@@ -1148,8 +1174,9 @@ double coef_trainer::loss_and_grad(const training_scene &scene, const float *o_i
         diff::bike_step_bwd(F, S.ox, S.oy, S.auxx, S.auxy, gx, gy, al, be, ga, bv, go_x, go_y,
                             gaux_x, gaux_y, gox, goy, gauxx, gauxy, g_al, g_be, g_ga);
       else
-        diff::surr_step_bwd(F, S.ox, S.oy, S.auxx, S.auxy, gx, gy, al, be, ga, rr, d_hat, vmax, hdt,
-                            go_x, go_y, gaux_x, gaux_y, gox, goy, gauxx, gauxy, g_al, g_be, g_ga);
+        surr_step_bwd_with(cfg_.point_mass, F, S.ox, S.oy, S.auxx, S.auxy, gx, gy, al, be, ga, rr,
+                           d_hat, vmax, hdt, go_x, go_y, gaux_x, gaux_y, gox, goy, gauxx, gauxy,
+                           g_al, g_be, g_ga);
 
       // The policy's backward, and coef_feats' onto o_t (added to the rollout's gox/goy).
       float god_x = gox, god_y = goy;

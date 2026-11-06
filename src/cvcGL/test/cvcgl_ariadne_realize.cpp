@@ -1132,6 +1132,15 @@ int main() {
       realized.custom_ticks.back()(nullptr);
       chk(ground && ground->hasSharedShaderInputs("cloud_sky"),
           "the sky's first tick wired its shade into the ground's shader");
+      // A mesh that joins a receiver later (an LOD rung, a regenerated world's part) takes the
+      // shade on the next tick: joining bumps the scene's treeVersion(), no timer to wait out.
+      if (ground) {
+        auto rung = ground->addGraphicsChild<cvc::gl::GeometryNode>("late_rung");
+        chk(!rung->hasSharedShaderInputs("cloud_sky"), "a new mesh has no shade before a tick");
+        realized.custom_ticks.back()(nullptr);
+        chk(rung->hasSharedShaderInputs("cloud_sky"),
+            "the next tick wired the shade into a mesh added under a receiver");
+      }
     }
     bool emptyForest = false;
     for (const std::string &w : warnings)

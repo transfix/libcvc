@@ -132,6 +132,12 @@ training_scene occupancy_scene(const std::uint8_t *occ, int rows, int cols, doub
 // All share the SAME coef_feats -> CoefMLP -> loss; only the integrator differs.
 enum class rollout_kind { surrogate, bicycle, dynamic, jolt };
 
+// The point-mass surrogate's integrator (rollout_kind::surrogate). Semi-implicit Euler, the
+// default, is coef_train.py's sdf_rollout (diff::surr_step). explicit_euler, which steps the
+// position with the old velocity, is the integrator A/B's other arm (docs/NAV_TRAINING.md, "The
+// point mass's integrator"); trained on, it costs reach. CPU only: the CUDA trainer refuses it.
+enum class point_mass_integrator { semi_implicit, explicit_euler };
+
 // Self-supervised training hyperparameters (mirror coef_train.py train()).
 struct train_config {
   int steps = 400;  // outer optimization steps (each a fresh agent batch)
@@ -178,6 +184,8 @@ struct train_config {
   float goal_min = 0.0f, goal_max = 0.0f;
 
   rollout_kind rollout = rollout_kind::surrogate; // which integrator to train on
+  // The point mass's integrator, when rollout == surrogate.
+  point_mass_integrator point_mass = point_mass_integrator::semi_implicit;
   // Bicycle vehicle params (used only when rollout == bicycle); defaults are the
   // SdfNavigator VEHICLE_DEFAULTS, so bicycle training matches deployment.
   float veh_L = 0.035f, veh_delta_max = 0.6f, veh_a_max = 1.5f, veh_a_lat_max = 1.0f,
