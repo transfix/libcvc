@@ -39,18 +39,26 @@ boost::shared_ptr<cvc::state> host_held(cvc::state *node) {
 
 async_scheduler::~async_scheduler() {
   home_.reset();
-  // Commands posted and never applied: their done gets false. Taken under the lock, so a post
-  // that returned before the destruction began is seen. From then on a post is refused at once
-  // (post_control): a done that posts again is refused too, rather than dropped, and nothing is
-  // queued behind this.
+  // Commands posted and never applied: their done gets false, each counted out first. Taken under
+  // the lock, so a post that returned before the destruction began is seen. A done that posts
+  // again (only a done may post to a scheduler being destroyed) is queued for refusal, never
+  // applied, and refused by the next round here: the refusals iterate, and never nest, however
+  // often a done posts again. A done that posts again every time it is refused never ends this.
   std::vector<std::pair<int, control_cmd>> left;
   {
     std::lock_guard<std::mutex> lock(ingress_mutex_);
     destroying_ = true;
     left.swap(controls_);
   }
-  for (auto &entry : left)
-    refuse_control(entry.second);
+  while (!left.empty()) {
+    for (auto &entry : left) {
+      controls_waiting_.fetch_sub(1, std::memory_order_release);
+      refuse_control(entry.second);
+    }
+    left.clear();
+    std::lock_guard<std::mutex> lock(ingress_mutex_);
+    left.swap(controls_);
+  }
 }
 
 void async_scheduler::set_lock_manager(std::shared_ptr<lock_manager> mgr, lock_attach attach) {
@@ -478,6 +486,7 @@ void async_scheduler::drain(bool in_step) {
     // a time: a call's finish or a kill can throw (a tree write's slots), and what was not yet
     // applied then goes back to the ingress before the exception propagates (S0.7).
     std::size_t m = 0, f = 0, c = 0;
+    bool counted_out = false; // the command being applied no longer counts as waiting
     try {
       while (m < batch.size()) {
         auto &[path, msg] = batch[m++];
@@ -487,13 +496,14 @@ void async_scheduler::drain(bool in_step) {
         finish_async_call(finished[f++]);
       while (c < controls.size()) {
         auto &[pid, cmd] = controls[c++];
-        apply_control(pid, cmd);
-        controls_waiting_.fetch_sub(1, std::memory_order_release);
+        counted_out = false;
+        apply_control(pid, cmd, counted_out);
       }
     } catch (...) {
-      if (c > 0) { // a command threw: it is refused
+      if (c > 0) { // a command threw: it is refused, unless its done was called already
+        if (!counted_out)
+          controls_waiting_.fetch_sub(1, std::memory_order_release);
         refuse_control(controls[c - 1].second);
-        controls_waiting_.fetch_sub(1, std::memory_order_release);
       }
       requeue_ingress(batch, m, finished, f, controls, c);
       throw;
@@ -1416,18 +1426,29 @@ void async_scheduler::terminate_process(process &proc, value_t result) {
 
 void async_scheduler::kill_process(process &proc, const std::string &reason) {
   const int pid = proc.pid;
-  cancel_async_calls(pid); // its kernels see cancelled(), and their results are dropped
+  // Its kernels see cancelled(), and their results are dropped. Cancelling can throw (a cancel
+  // hook, against its contract; the rate's publication, which runs the tree's slots): the process
+  // is killed all the same, and the exception reported after (R0-final), as a kill whose locks'
+  // release throws leaves its process killed. It must not run on with its calls cancelled.
+  std::exception_ptr cancel_error;
+  try {
+    cancel_async_calls(pid);
+  } catch (...) {
+    cancel_error = std::current_exception();
+  }
   // Cancelling may publish the rate, a write to the tree whose slots may have ended (or reaped)
   // the process meanwhile: that stands.
   process *const p = procs_.find(pid);
-  if (!p || is_finished(p->status))
-    return;
-  procs_.set_status(*p, process_status::killed);
-  if (p->locks && home_)
-    home_->process_ended(*p, true); // a kill or a budget: the sections it was in are abandoned
-  p->exit_error = reason;
-  p->state.stats.mark_complete();
-  release_if_idle(*p);
+  if (p && !is_finished(p->status)) {
+    procs_.set_status(*p, process_status::killed);
+    if (p->locks && home_)
+      home_->process_ended(*p, true); // a kill or a budget: the sections it was in are abandoned
+    p->exit_error = reason;
+    p->state.stats.mark_complete();
+    release_if_idle(*p);
+  }
+  if (cancel_error)
+    std::rethrow_exception(cancel_error);
 }
 
 void async_scheduler::fail_process(process &proc, value_t exc, std::exception_ptr original) {
@@ -1671,52 +1692,64 @@ bool async_scheduler::post_control(int pid, control_cmd cmd) {
   // Any thread. Queued with the ingress and applied by the next drain, on the scheduler thread
   // (apply_control): the posting thread may not read procs_, so an unknown pid is found, and
   // refused, there. Notified under the lock, as post_message is.
-  {
-    std::lock_guard<std::mutex> lock(ingress_mutex_);
-    if (!destroying_) {
-      controls_.emplace_back(pid, std::move(cmd));
-      controls_waiting_.fetch_add(1, std::memory_order_release);
-      ingress_pending_.store(true, std::memory_order_seq_cst);
-      notify_work();
-      return true;
-    }
-  }
-  // The scheduler is being destroyed (a done its destructor calls posted this): refused at once,
-  // never queued, so the destructor's refusals end.
-  refuse_control(cmd);
-  return false;
+  std::lock_guard<std::mutex> lock(ingress_mutex_);
+  controls_.emplace_back(pid, std::move(cmd));
+  controls_waiting_.fetch_add(1, std::memory_order_release);
+  if (destroying_)
+    return false; // a done the destructor calls posted this: the destructor refuses it next
+  ingress_pending_.store(true, std::memory_order_seq_cst);
+  notify_work();
+  return true;
 }
 
-void async_scheduler::apply_control(int pid, control_cmd &cmd) {
+void async_scheduler::apply_control(int pid, control_cmd &cmd, bool &counted_out) {
+  // The command stops counting as waiting once its call is made, before its done hears what the
+  // call returned (a query has no done); `counted_out` tells the batch it was.
+  const auto settle = [this, &cmd, &counted_out](bool result) {
+    controls_waiting_.fetch_sub(1, std::memory_order_release);
+    counted_out = true;
+    if (cmd.done && cmd.what != control_cmd::kind::query) {
+      // Taken from the command first: a done that throws (against its contract) is not called
+      // again by the refusal of the command that threw.
+      const std::function<void(bool)> done = std::move(cmd.done);
+      cmd.done = nullptr;
+      done(result);
+    }
+  };
   bool applied = false;
-  switch (cmd.what) {
-  case control_cmd::kind::query:
-    if (cmd.query)
-      cmd.query(*this);
-    return; // a query has no done
-  case control_cmd::kind::set_priority:
-    applied = set_priority(pid, cmd.value); // the host path, unchecked (design 7.4)
-    break;
-  case control_cmd::kind::kill:
-    applied = kill(pid); // killed_by_user
-    break;
-  case control_cmd::kind::pause:
-    applied = pause(pid);
-    break;
-  case control_cmd::kind::resume:
-    applied = resume(pid);
-    break;
-  case control_cmd::kind::signal:
-    applied = send_signal(pid, cmd.signal); // "SIGKILL" kills
-    break;
+  try {
+    switch (cmd.what) {
+    case control_cmd::kind::query:
+      if (cmd.query)
+        cmd.query(*this);
+      break;
+    case control_cmd::kind::set_priority:
+      applied = set_priority(pid, cmd.value); // the host path, unchecked (design 7.4)
+      break;
+    case control_cmd::kind::kill:
+      applied = kill(pid); // killed_by_user
+      break;
+    case control_cmd::kind::pause:
+      applied = pause(pid);
+      break;
+    case control_cmd::kind::resume:
+      applied = resume(pid);
+      break;
+    case control_cmd::kind::signal:
+      applied = send_signal(pid, cmd.signal); // "SIGKILL" kills
+      break;
+    }
+  } catch (...) {
+    // A kill (or a SIGKILL) that throws has still killed its process (kill_process; R0-final), and
+    // its done hears that. Any other command that throws is refused, done(false), by the batch.
+    if (cmd.what == control_cmd::kind::kill || cmd.what == control_cmd::kind::signal) {
+      const process *const p = procs_.find(pid);
+      if (p && p->status == process_status::killed)
+        settle(true);
+    }
+    throw;
   }
-  if (cmd.done) {
-    // Taken from the command first: a done that throws (against its contract) is not called
-    // again by the refusal of the command that threw.
-    const std::function<void(bool)> done = std::move(cmd.done);
-    cmd.done = nullptr;
-    done(applied);
-  }
+  settle(applied);
 }
 
 void async_scheduler::requeue_ingress(std::vector<std::pair<std::string, value_t>> &batch,
@@ -1751,8 +1784,8 @@ void async_scheduler::requeue_ingress(std::vector<std::pair<std::string, value_t
       }
     }
     for (; c < controls.size(); ++c) {
-      refuse_control(controls[c].second);
       controls_waiting_.fetch_sub(1, std::memory_order_release);
+      refuse_control(controls[c].second);
     }
   }
 }

@@ -2108,6 +2108,42 @@ TEST(AsyncCalls, ATimeoutWhoseCancelHookThrowsStillResumesItsProcess) {
   EXPECT_EQ(outcome_of(w, pid), "timed out");
 }
 
+// Skeptic round 2's R2-1: a kill that throws, while cancelling its process's call (a cancel hook
+// that throws, or the step rate's publication, whose slot on the tree throws), still kills the
+// process: it is killed_by_user, and never runs on. Since 3ada6e4fd woke it before the throw, it
+// ran on instead, its await raising the cancel's error, which it caught; before that it stayed
+// parked.
+TEST(AsyncCalls, AKillThatThrowsStillKillsItsProcess) {
+  for (const bool rate : {false, true}) {
+    SCOPED_TRACE(rate ? "the rate's publication throws" : "the cancel hook throws");
+    std::atomic<int> started{0};
+    world w(async_sched);
+    w.async->set_id("kill_throws");
+    if (rate)
+      register_blind(w, started);
+    else
+      register_blind_hook(w, started);
+    const int pid = w.submit(
+        std::string("(begin (set f ") + (rate ? "(blind-async 300)" : "(blind-hook-async 300)") +
+        ") (try (await f) (catch (RuntimeError e) \"ran on after its kill\")))");
+    ASSERT_TRUE(pump_through_throws(w, [&] { return w.waiting(pid) && started > 0; }, 10.0));
+    (*w.tree)("state_exec.defaults.limits.async_steps_per_cpu_ms").value(std::string("2000"));
+    std::atomic<bool> armed{rate};
+    boost::signals2::scoped_connection slot =
+        (*w.tree)("state_exec.schedulers").childChanged.connect([&](const std::string &) {
+          if (armed.exchange(false))
+            throw std::runtime_error("a slot on the tree threw");
+        });
+    EXPECT_THROW(w.async->kill(pid), std::runtime_error);
+    slot.disconnect();
+    EXPECT_EQ(w.info(pid).status, process_status::killed);
+    pump_through_throws(w, [] { return false; }, 0.5); // a woken process would run on now
+    EXPECT_EQ(w.info(pid).status, process_status::killed) << outcome_of(w, pid);
+    EXPECT_EQ(w.async->get_exit_error(pid), "killed_by_user");
+    EXPECT_FALSE(w.result(pid).has_value());
+  }
+}
+
 // --- Stage 0 hazards (td 8.1) ---
 
 namespace {

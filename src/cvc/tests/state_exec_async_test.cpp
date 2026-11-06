@@ -975,9 +975,9 @@ void kill_pause_resume_signal(S &sched, done_log &log, const std::function<void(
   EXPECT_TRUE(sched.check_tables());
 }
 
-// A command that throws (here a query; a kill can, through its locks' release or a tree write's
-// slots) is refused, and the commands after it go back to the front of the queue: the next drain
-// or step applies them, in order, ahead of what was posted since.
+// A command that throws (a query; a kill can, through its locks' release or a tree write's slots,
+// and still kills) stops the batch, and the commands after it go back to the front of the queue:
+// the next drain or step applies them, in order, ahead of what was posted since.
 template <class S>
 void a_throwing_command_requeues_the_rest(S &sched, done_log &log, int thrower_pid,
                                           control_cmd thrower, const done_calls &first,
@@ -1080,8 +1080,9 @@ TEST(AsyncPostControl, HasPendingControlCountsCommandsOnly) {
 TEST(AsyncPostControl, AThrowingCommandRequeuesTheRest) {
   done_log log, rest; // before the scheduler: its destructor may call what was never applied
   async_scheduler sched;
-  // A kill whose async call's cancel hook throws: the process is not killed, and the kill's done
-  // gets false.
+  // A kill whose async call's cancel hook throws: the kill throws, and the commands after it are
+  // requeued, but the process is killed all the same (a kill always kills, R0-final), and the
+  // kill's done hears so: true.
   const int c = sched.execute(std::string("(begin (set i 0) (while #t (set i (+ i 1))))"));
   auto call = std::make_shared<async_call>("probe", c);
   call->on_cancel([] { throw std::runtime_error("the cancel hook threw"); });
@@ -1089,9 +1090,10 @@ TEST(AsyncPostControl, AThrowingCommandRequeuesTheRest) {
   a_throwing_command_requeues_the_rest(sched, rest, c,
                                        control(control_cmd::kind::kill, log.done("kill c")),
                                        {{"pause a", true}}, [&] { sched.drain_ingress(); });
-  EXPECT_EQ(log.calls, (done_calls{{"kill c", false}}));
-  EXPECT_FALSE(is_finished(sched.get_process_info(c)->status));
-  EXPECT_TRUE(sched.kill(c)); // its call is gone: the kill goes through
+  EXPECT_EQ(log.calls, (done_calls{{"kill c", true}}));
+  EXPECT_EQ(sched.get_process_info(c)->status, process_status::killed);
+  EXPECT_EQ(sched.get_exit_error(c), "killed_by_user");
+  EXPECT_FALSE(sched.kill(c)); // killed already
 }
 
 TEST(AsyncPostControl, TheDestructorRefusesWhatWasNeverApplied) {
@@ -1261,26 +1263,44 @@ TEST(SyncPostControl, ADoneThatThrowsIsCalledOnce) {
 
 namespace {
 
-// The skeptic pass's SK-4: once the destructor has taken the queue, a post (here from the done it
-// refuses, which posts again each time, 1000 times) is refused at once, with done(false), and not
-// queued: post_control returns false, and the destructor's refusals end with the done's reposts.
-// They used to be queued and looped over, with no bound but the done's.
+// The skeptic passes' SK-4 and R2-2: once the destructor has taken the queue, a post (here from
+// the done it refuses, which posts again each time, 100000 times, as a done that retries until
+// applied would) returns false, is never applied, and is refused, with done(false), by the
+// destructor's next round: the refusals iterate. When the refusal was made inside post_control,
+// they nested one level a repost, and ran out of stack (about 1800 on a 1 MiB thread, Release).
+// On a thread of its own, whose stack is the default 1 MiB on Windows.
 template <class S> void the_destructor_refuses_every_repost() {
-  int refused = 0, queued = 0;
-  std::function<void(bool)> again;
-  S *target = nullptr;
-  again = [&](bool applied) {
-    EXPECT_FALSE(applied);
-    if (++refused < 1000)
-      queued += target->post_control(1, control(control_cmd::kind::kill, again)) ? 1 : 0;
-  };
-  {
+  constexpr long kReposts = 100000;
+  long refused = 0, accepted = 0;
+  std::thread([&] {
+    std::function<void(bool)> again;
+    S *target = nullptr;
+    again = [&](bool applied) {
+      EXPECT_FALSE(applied);
+      if (++refused < kReposts)
+        accepted += target->post_control(1, control(control_cmd::kind::kill, again)) ? 1 : 0;
+    };
     S sched;
     target = &sched;
     EXPECT_TRUE(sched.post_control(1, control(control_cmd::kind::kill, again)));
+  }).join();
+  EXPECT_EQ(refused, kReposts);
+  EXPECT_EQ(accepted, 0) << "a post made while the destructor ran was taken as queued to apply";
+}
+
+// has_pending_control() inside the destructor's refusals: each command is counted out as it is
+// refused, so the first refusal's done sees the second still waiting, and the last sees none
+// (the skeptic's round 2: the destructor never lowered the count).
+template <class S> void the_destructor_counts_out_what_it_refuses() {
+  std::vector<bool> seen;
+  {
+    S sched;
+    S *const raw = &sched;
+    const auto look = [&seen, raw](bool) { seen.push_back(raw->has_pending_control()); };
+    sched.post_control(1, control(control_cmd::kind::kill, look));
+    sched.post_control(2, control(control_cmd::kind::kill, look));
   }
-  EXPECT_EQ(refused, 1000);
-  EXPECT_EQ(queued, 0) << "a post made while the destructor ran was queued";
+  EXPECT_EQ(seen, (std::vector<bool>{true, false}));
 }
 
 // has_pending_control() counts the commands posted and not yet applied or refused (the skeptic
@@ -1323,6 +1343,14 @@ TEST(AsyncPostControl, TheDestructorRefusesEveryRepost) {
 
 TEST(SyncPostControl, TheDestructorRefusesEveryRepost) {
   the_destructor_refuses_every_repost<scheduler>();
+}
+
+TEST(AsyncPostControl, TheDestructorCountsOutWhatItRefuses) {
+  the_destructor_counts_out_what_it_refuses<async_scheduler>();
+}
+
+TEST(SyncPostControl, TheDestructorCountsOutWhatItRefuses) {
+  the_destructor_counts_out_what_it_refuses<scheduler>();
 }
 
 TEST(AsyncPostControl, HasPendingControlCountsWhatWaits) {

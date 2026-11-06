@@ -238,9 +238,12 @@ public:
   /// Commands are applied one at a time, first in, first out. kill, pause, resume, signal and
   /// set_priority are the direct calls' host paths, unchecked (kill's reason is killed_by_user;
   /// signal "SIGKILL" kills); an unknown pid is found, and refused, then. Each one's `done`, when
-  /// set, gets what its call returned; one never applied gets false from the destructor. A query
-  /// runs its function, and must not throw. True once queued; false once the scheduler is being
-  /// destroyed, when `done` gets false at once.
+  /// set, gets what its call returned (a kill that throws has still killed its process: true);
+  /// one that throws otherwise, or is never applied, gets false. A query runs its function, and
+  /// must not throw. True once queued. A done that the destructor calls (with false) may post
+  /// again: that post returns false, and the destructor refuses it in turn, never applying it.
+  /// Any other post to a scheduler being destroyed is undefined: a host must not post to a
+  /// scheduler it is destroying, except from a done.
   bool post_control(int pid, control_cmd cmd);
   /// Thread-safe: whether a posted command waits to be applied (the CLI's serve loop steps for
   /// one even with nothing runnable).
@@ -513,8 +516,9 @@ private:
   /// post_control's commands, from any thread: guarded by control_mutex_, applied at the top of
   /// step_once and of run()'s loop. controls_waiting_ counts the commands posted and not yet
   /// applied or refused, queued or in a batch being applied: has_pending_control(), and a step
-  /// finds none without the lock. destroying_ (under the mutex): the destructor took the queue,
-  /// and a post is refused at once.
+  /// finds none without the lock. A command stops counting once its call is made, before its done
+  /// runs, or as it is refused. destroying_ (under the mutex): the destructor took the queue, and
+  /// a post (a done's) is queued for it to refuse.
   std::mutex control_mutex_;
   std::vector<std::pair<int, control_cmd>> controls_;
   std::atomic<std::size_t> controls_waiting_{0};
@@ -522,7 +526,7 @@ private:
   /// Apply the queued commands in order. One that throws gets done(false), and the rest go back
   /// to the front of the queue before the exception propagates.
   void apply_controls();
-  void apply_control(int pid, control_cmd &cmd);
+  void apply_control(int pid, control_cmd &cmd, bool &counted_out);
 };
 
 /// limits.max_alloc_bytes from the state tree under `root`:
