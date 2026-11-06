@@ -280,11 +280,34 @@ The conference is the world's second consumer. Peers must see the same world and
       (`GeometryNode::usesLowMemoryMapper`), not by `__EMSCRIPTEN__`, so `CVCGL_LOWMEM_MAPPER=force`
       natively draws the whole terrain lab (ground, shade, shells, volumes) without a shader error:
       the browser's shader path, as GLSL 150, can be checked here.
+  - The weather evolves, and it gathers on windward flanks (LSYSTEM-LABORATORY-ROADMAP section
+    4.7):
+    - A Dobashi-style cellular automaton in `cvc::world::cloud_layer` decides which cells hold a
+      cloud. Each cell has one bit-packed column of 32 layers, with Dobashi's humidity, activation
+      and cloud bits.
+    - Activation runs up a whole column and, by chance, into the four neighbours. Clouds go extinct
+      at random and humidity returns, so clouds grow in patches and dissipate.
+    - The cells with the most cloud hold the deck's clouds, still exactly `coverage` of them.
+    - It steps on the world clock, once every 5 s at rate 1, so a cloud lasts some 8 minutes. A
+      step over 64 x 64 cells takes 0.9 ms, and the 11.2 km world's 21 x 21 takes a fraction of
+      that.
+    - A cloud fades in or out over 20 s. The volume, the far slices and the shade take the same
+      weight, so nothing shades where no cloud is drawn.
+    - Orographic coupling: the slope along the wind under each cell, averaged over a cloud's
+      footprint, raises its humidity and activation on a windward flank and its extinction in the
+      lee. The pattern drifts over the ground, so a cloud forms as it reaches a mountain and dies
+      past the crest.
+    - Over ridges, windward cells hold a cloud 99% of the time and lee cells 14%; without the
+      coupling both are 60%.
+    - Live keys `sky.evolve` and `sky.orographic` are on `sky_controls.ari`. The props are
+      `evolve`, `orographic`, `wind_az` (the drift now follows it) and `fade`.
+    - Every rule is deterministic and frame-rate free (`world_cloud_test`).
   - Still to do for the clouds: measure in Edge and Firefox, now with the shells' 6 samples a
     fragment (10 layers of sky fill), and check the GLSL ES compile. Wiring new meshes is a periodic
-    walk; an LOD rung or a regenerated world could announce its meshes instead. Then
-    LSYSTEM-LABORATORY-ROADMAP section 4.7's evolving coverage (a cellular automaton) and
-    orographic clouds.
+    walk; an LOD rung or a regenerated world could announce its meshes instead. The deck is one
+    flat slab, so a peak pierces it only where the ground rises past `base`. A lower deck over
+    high relief (or cloud bases that follow the ground) would show orographic caps at the
+    terrain lab's 90 m of relief.
 - **Dynamic props, demo3's way**, for vehicles and avatars on the world: unregistered slot nodes,
   a pose gate, out of the bounds fit, non-casting. demo3 does this by hand. A libcvc node type
   would make it a scene key.

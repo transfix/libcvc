@@ -425,10 +425,12 @@ std::shared_ptr<GraphicsNode> realize_wave_sea(SceneGraph &sg, const ari::SceneN
 // VolumeNodes, the rest by one mesh of translucent horizontal shells sampling a coarse opacity
 // texture; a cloud passing between the two crossfades. The deck's shade is a periodic mask that the
 // receivers' shaders read by world position and apply to the direct light alone, so a ground keeps
-// its own texture.
+// its own texture. Which cells hold a cloud evolves on the world clock (the layer's cellular
+// automaton, coupled to the ground's windward flanks); a cloud coming or going fades, and its
+// volume, its shell slices and its shade all take the same weight.
 constexpr int SKY_N = 60, SKY_NZ = 28;
 constexpr double SKY_BASE = 74.0, SKY_TOP = 122.0, SKY_HALF = 150.0;
-constexpr double CLOUD_DRIFT = 3.0;    // m/s along +x at drift 1
+constexpr double CLOUD_DRIFT = 3.0;    // m/s along the wind at drift 1
 constexpr double CLOUD_MORPH_S = 30.0; // seconds per variant change at morph 1
 constexpr double CLOUD_EMPTY = 0.22;
 constexpr double SUN_AZ = -52.0, SUN_EL = 34.0;
@@ -571,10 +573,16 @@ struct Composite {
 struct SkyRT {
   cvc::app *app = nullptr;
   std::unique_ptr<cvc::world::cloud_layer> layer;
-  std::string driftKey, morphKey, shadowKey;
+  std::string driftKey, morphKey, shadowKey, evolveKey, oroKey;
   std::vector<std::string>
       receivers; // the nodes whose meshes (and their children's) take the shade
   std::shared_ptr<const cvc::height_field> ground; // its extent is the area, unless `area` is set
+  // The height field the orographic coupling reads (the ground's, area or not), and the samples it
+  // was last given: a regenerated ground is given again.
+  std::shared_ptr<const cvc::height_field> relief;
+  const float *reliefData = nullptr;
+  std::size_t reliefSize = 0;
+  double windX = 1.0, windY = 0.0; // the wind's heading
   // The near volumes draw clouds within `reach` around the ground's centre (ox, oy): the ground's
   // half-width plus the horizon. The pattern's period is wider than that by a cloud on each side,
   // so one copy of each of those clouds is drawn: the one nearest the centre. The far shells reach
@@ -588,6 +596,7 @@ struct SkyRT {
     int cell = -1;  // the cell drawn, or -1
     int weight = 0; // frames into its fade-in, 0..FADE_FRAMES
     bool leaving = false;
+    double shown = -1.0; // the opacity scale its transfer function was last given
   };
   std::vector<Near> near;
   int nextMorph = 0;
@@ -599,7 +608,7 @@ struct SkyRT {
   Composite shade, far;
   std::vector<float> field;
   long frame = 0;
-  double lastT = -1.0, driftX = 0.0, morph = 0.0;
+  double lastT = -1.0, driftX = 0.0, driftY = 0.0, morph = 0.0;
   bool snap = true;  // the next assignment shows its clouds at once (the first frame, a new layout)
   bool fresh = true; // the next composites are done at once (the first frame, a new layout)
   bool shadeWas = false;
@@ -610,7 +619,7 @@ struct SkyRT {
 void cloudCentre(const SkyRT &r, const cvc::world::cloud_cell &c, double &wx, double &wy) {
   const double P = r.layer->period_m();
   wx = c.cx + r.driftX;
-  wy = c.cy;
+  wy = c.cy + r.driftY;
   wx += P * std::round((r.ox - wx) / P);
   wy += P * std::round((r.oy - wy) / P);
 }
@@ -641,6 +650,21 @@ void layDeck(SkyRT &r) {
     sh->setGeometry(shellMesh(*r.layer, r.ox, r.oy, r.farReach));
 }
 
+// Give the layer the ground's relief for its orographic coupling, when it is new or regenerated;
+// true when it was given.
+bool giveRelief(SkyRT &r) {
+  if (!r.relief || r.relief->rows() < 2 || r.relief->cols() < 2)
+    return false;
+  const std::vector<float> &h = r.relief->heights();
+  if (h.data() == r.reliefData && h.size() == r.reliefSize)
+    return false;
+  r.reliefData = h.data();
+  r.reliefSize = h.size();
+  r.layer->set_ground(h, r.relief->rows(), r.relief->cols(), r.relief->x0(), r.relief->y0(),
+                      r.relief->dx(), r.relief->dy());
+  return true;
+}
+
 // Give `g` and every mesh under it the deck's shade, once each.
 void wireReceivers(SkyRT &r, GraphicsNode &g) {
   if (auto *m = dynamic_cast<GeometryNode *>(&g); m && !m->hasSharedShaderInputs(CLOUD_INPUTS)) {
@@ -653,16 +677,25 @@ void wireReceivers(SkyRT &r, GraphicsNode &g) {
       wireReceivers(r, *c);
 }
 
-void setNearWeight(SkyRT::Near &v) {
+// A near volume's opacity: its near <-> far crossfade times its cloud's own fade in or out.
+void setNearWeight(const SkyRT &r, SkyRT::Near &v) {
+  double w = double(v.weight) / FADE_FRAMES;
+  if (v.cell >= 0)
+    w *= r.layer->cells()[v.cell].weight();
+  if (std::fabs(w - v.shown) < 0.01 && !(w == 0.0 && v.shown != 0.0) &&
+      !(w == 1.0 && v.shown != 1.0))
+    return;
+  v.shown = w;
   if (auto vn = v.node.lock()) {
     std::vector<double> col, op;
-    skyTransfer(double(v.weight) / FADE_FRAMES, col, op);
+    skyTransfer(w, col, op);
     vn->setTransferFunction(col, op);
   }
 }
 
 // The near volumes go to the clouds nearest the camera (a cloud already drawn counts a little
-// nearer, so two at much the same distance do not trade places); the others are far shells.
+// nearer, so two at much the same distance do not trade places), held or still fading out; the
+// others are far shells.
 void assignNear(SkyRT &r, double camx, double camy, double camz) {
   const cvc::world::cloud_layer &L = *r.layer;
   const double zc = 0.5 * (L.params().base + L.params().top);
@@ -670,7 +703,7 @@ void assignNear(SkyRT &r, double camx, double camy, double camz) {
   std::vector<std::pair<double, int>> order;
   for (std::size_t k = 0; k < L.cells().size(); ++k) {
     const cvc::world::cloud_cell &c = L.cells()[k];
-    if (!c.occupied)
+    if (!c.occupied && c.presence <= 0.0)
       continue;
     double wx, wy;
     cloudCentre(r, c, wx, wy);
@@ -709,7 +742,7 @@ void assignNear(SkyRT &r, double camx, double camy, double camz) {
       v.weight = r.snap ? FADE_FRAMES : 0;
       L.cell_field(L.cells()[cell], r.morph, r.field);
       vn->updateScalars(r.field);
-      setNearWeight(v);
+      setNearWeight(r, v);
       vn->setVisible(true);
       break;
     }
@@ -752,7 +785,7 @@ bool stepComposite(Composite &c, long f, double morph, bool now, std::size_t cel
   return true;
 }
 
-// type: cloud_sky — a drifting, morphing cloud deck over the ground (see above).
+// type: cloud_sky — a drifting, morphing, evolving cloud deck over the ground (see above).
 // props: ground (the node whose extent the deck covers and whose meshes take its shade), receivers
 // (more nodes that take the shade), area (the half-width to cover; default the ground's, else
 // half), extent (a cloud's half-width), base and top (the deck's heights), spacing (cell size),
@@ -762,7 +795,10 @@ bool stepComposite(Composite &c, long f, double morph, bool now, std::size_t cel
 // half-width or the shadow's throw: they are in the scene's bounds, which the camera fits and
 // clips to), far_reach (how far past the ground the far shells reach; 4 km by default, out of the
 // bounds),
-// shade_k / shade_floor (the shade's strength and its darkest), shadow (0 starts the shade off).
+// shade_k / shade_floor (the shade's strength and its darkest), shadow (0 starts the shade off),
+// wind_az (the heading the wind blows toward, degrees as sun_az: 90, the default, is +x), evolve
+// (the weather's rate: 0 holds the clouds where they are), orographic (how strongly windward
+// flanks gather cloud: 0 none, 1 the default) and fade (seconds a cloud takes to come or go).
 std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::SceneNode &n,
                                                 GraphicsNode *parent, RealizedScene &out,
                                                 std::vector<std::string> *warnings) {
@@ -785,8 +821,12 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
   p.sun_az = n.props.num("sun_az", SUN_AZ);
   p.sun_el = n.props.num("sun_el", SUN_EL);
   p.far_layers = std::max(1, int(n.props.num("layers", 10.0)));
+  p.wind_az = n.props.num("wind_az", 90.0);
+  p.orographic = std::max(0.0, n.props.num("orographic", 1.0));
+  p.fade_s = std::max(0.0, n.props.num("fade", 20.0));
   std::vector<double> col;
   skyTransfer(1.0, col, p.opacity); // the shadow and the shells integrate what the volume shows
+  rt->relief = rt->ground;          // the orographic coupling reads it even when the area is fixed
   if (n.props.has("area") || !rt->ground) {
     rt->area = n.props.num("area", n.props.num("half", p.extent));
     rt->ground.reset(); // a fixed area: the ground's extent is not followed
@@ -804,6 +844,14 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
   rt->farReach = std::max(rt->reach, rt->area + rt->farHorizon);
   p.area = rt->reach + p.extent;
   rt->layer = std::make_unique<cvc::world::cloud_layer>(p);
+  {
+    const double az = p.wind_az * kPi / 180.0;
+    rt->windX = std::sin(az);
+    rt->windY = -std::cos(az);
+  }
+  // The first deck settles over the ground's flanks.
+  if (giveRelief(*rt))
+    rt->layer->warm(cvc::world::cloud_layer::WARM_STEPS);
   // The volume's opacity is per 1/100 of its box's diagonal (VolumeNode::setVolume), so that is
   // the length a unit of the integrated opacity stands for; -ln(1 - a) ~ 1.1 a over the table.
   // The shade takes SHADE_GAIN times that: the volume's thin outskirts read as solid white from
@@ -844,7 +892,7 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
     SkyRT::Near v;
     v.node = vnode;
     rt->near.push_back(v);
-    setNearWeight(rt->near.back());
+    setNearWeight(*rt, rt->near.back());
   }
 
   // The far shells: one mesh, drawn translucent over everything the near volumes do not draw.
@@ -872,13 +920,17 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
     }
   }
 
-  // Live controls (sky_controls.ari binds sky.drift / sky.morph / sky.shadow): drift and morph
-  // scale the wind and the morph rate; shadow turns the shade on and off. The cloud SHAPES are made
-  // once (the maps); regenerating them is seconds of work, out of scope for a slider.
+  // Live controls (sky_controls.ari binds sky.drift / sky.morph / sky.evolve / sky.orographic /
+  // sky.shadow): drift and morph scale the wind and the morph rate, evolve the weather's (the
+  // automaton's steps), orographic the windward flanks' pull; shadow turns the shade on and off.
+  // The cloud SHAPES are made once (the maps); regenerating them is seconds of work, out of scope
+  // for a slider.
   const std::string pref = sg.getStatePrefix();
   rt->driftKey = seed_key(app0, pref, n, "sky.drift", 1.0);
   rt->morphKey = seed_key(app0, pref, n, "sky.morph", 1.0);
   rt->shadowKey = seed_key(app0, pref, n, "sky.shadow", n.props.num("shadow", 1.0));
+  rt->evolveKey = seed_key(app0, pref, n, "sky.evolve", std::max(0.0, n.props.num("evolve", 1.0)));
+  rt->oroKey = seed_key(app0, pref, n, "sky.orographic", p.orographic);
   rt->receivers.push_back(ground);
   if (const ari::Value *rv = n.props.find("receivers"); rv && rv->is_seq())
     for (const ari::Value &v : rv->items)
@@ -896,7 +948,9 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
     const double t = app.world_clock().t();
     const double dt = r.lastT < 0.0 ? 0.0 : std::max(0.0, t - r.lastT);
     r.lastT = t;
-    r.driftX += dt * CLOUD_DRIFT * read_key(app, r.driftKey, 1.0);
+    const double ds = dt * CLOUD_DRIFT * read_key(app, r.driftKey, 1.0);
+    r.driftX += ds * r.windX;
+    r.driftY += ds * r.windY;
     r.morph += dt / CLOUD_MORPH_S * read_key(app, r.morphKey, 1.0);
 
     // A grown (or moved) ground re-lays the deck over it; new meshes under the receivers (a
@@ -916,11 +970,20 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
       for (const std::string &id : r.receivers)
         if (auto g = sgp->getGraphics(id))
           wireReceivers(r, *g);
+      giveRelief(r); // a regenerated ground: the flanks move, the weather follows
     }
     const double P = L.period_m();
-    r.driftX = std::fmod(r.driftX, P);
-    if (r.driftX < 0.0)
-      r.driftX += P;
+    for (double *d : {&r.driftX, &r.driftY}) {
+      *d = std::fmod(*d, P);
+      if (*d < 0.0)
+        *d += P;
+    }
+
+    // The weather: the automaton steps on the world clock at the live rate, over the ground the
+    // wind has brought each cell to; its clouds fade in and out.
+    L.set_drift(r.driftX, r.driftY);
+    L.set_orographic(std::max(0.0, read_key(app, r.oroKey, L.params().orographic)));
+    L.evolve(dt, std::max(0.0, read_key(app, r.evolveKey, 1.0)));
 
     if (!ren || !ren->IsActiveCameraCreated())
       return;
@@ -934,11 +997,9 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
       for (SkyRT::Near &v : r.near) {
         if (v.cell < 0)
           continue;
-        const int was = v.weight;
         v.weight =
             v.leaving ? std::max(0, v.weight - STRIDE) : std::min(FADE_FRAMES, v.weight + STRIDE);
-        if (v.weight != was)
-          setNearWeight(v);
+        setNearWeight(r, v); // the near crossfade and the cloud's own fade
         if (v.leaving && v.weight == 0) {
           v.cell = -1;
           v.leaving = false;
@@ -1035,7 +1096,7 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
     for (int i = 0; i < 4; ++i)
       for (int j = 0; j < 4; ++j)
         m4[i * 4 + j] = vcwc->GetElement(i, j);
-    in.f4["cloudXf"] = {float(r.driftX), 0.0f, float(1.0 / P), float(p.base)};
+    in.f4["cloudXf"] = {float(r.driftX), float(r.driftY), float(1.0 / P), float(p.base)};
     in.f3["cloudSunR"] = {float(sx / sz), float(sy / sz), 0.0f};
     in.f["cloudShadeOn"] = shadeOn && in.tex.count("cloudShadeTex") ? 1.0f : 0.0f;
     in.f4["cloudFar"] = {float(cp[0]), float(cp[1]), float(0.5 * r.farReach), float(r.farReach)};

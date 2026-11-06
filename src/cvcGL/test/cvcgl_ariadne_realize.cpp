@@ -14,7 +14,7 @@
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
-#include <cvc/core/async_lane.h> // field colours: pump the scheduler their overlay tasks run on
+#include <cvc/core/async_lane.h>  // field colours: pump the scheduler their overlay tasks run on
 #include <cvc/core/world_clock.h> // clock test: app.world_clock() drive via tick_scene
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
@@ -1157,6 +1157,15 @@ int main() {
                        .value<double>(),
                    1.0),
         "cloud_sky with keys: storm seeded storm.* from its props");
+    // The weather's live keys: its rate and the orographic coupling's strength.
+    chk(approx(cvc::state::instance(app)(cvc::ariadne::resolve_bind("forest", "storm.evolve"))
+                   .value<double>(),
+               1.0) &&
+            approx(
+                cvc::state::instance(app)(cvc::ariadne::resolve_bind("forest", "storm.orographic"))
+                    .value<double>(),
+                1.0),
+        "cloud_sky seeded storm.evolve and storm.orographic");
   }
 
   // ── generated_world + the fast render path's keys (casts_shadow, opaque, shadow focus) ──────
