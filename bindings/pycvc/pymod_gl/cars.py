@@ -414,15 +414,17 @@ class Cars:
     ``<prefix>.nav.*``, ``<prefix>.nav.vehicle.*`` and ``<prefix>.nav_plant.*`` (a new
     ``nav_plant.vehicle`` switches the plant, the cars keeping their poses) and :meth:`publish`
     writes them back with what is measured. ``nav_weights`` is a ``.cvcnav`` policy for the
-    navigator ("" = libcvc's built-in one). ``seed`` makes the starts and goals repeatable.
+    navigator ("" = libcvc's built-in one), and ``scale`` the frame it was trained in (normalized
+    units per metre; nav's demos use 0.05). ``seed`` makes the starts and goals repeatable.
     ``rays`` and ``range_m`` shape the range readings."""
 
     def __init__(self, world: World, n=6, vehicle="humvee", *, seed=0, navigator=False,
-                 nav_weights="", app=None, prefix="", rays=16, range_m=60.0):  # fmt: skip
+                 nav_weights="", scale=SCALE, app=None, prefix="", rays=16, range_m=60.0):  # fmt: skip
         _require()
         self.world, self.n = world, int(max(1, n))
         self.app, self.prefix = app, prefix
         self.navigator, self.nav_weights = bool(navigator), str(nav_weights or "")
+        self.scale = float(scale)
         self.rng = np.random.default_rng(seed)
         self.ray_angles = np.linspace(-math.pi, math.pi, int(rays), endpoint=False)
         self.range_max = float(range_m)
@@ -466,7 +468,7 @@ class Cars:
         w = self.world
         rows, cols = w.occ.shape
         self.cx, self.cy = w.center
-        S = SCALE
+        S = self.scale
         on = ((self.starts - [self.cx, self.cy]) * S).astype(np.float32)
         goal = ((self.goals - [self.cx, self.cy]) * S).astype(np.float32)
         L = float(np.mean(self.wheelbase))
@@ -531,7 +533,7 @@ class Cars:
         for i in np.flatnonzero(mask):
             gx, gy = self.goals[i]
             pycvc.nav_sim_world_retarget(
-                self.sim, int(i), (gx - self.cx) * SCALE, (gy - self.cy) * SCALE
+                self.sim, int(i), (gx - self.cx) * self.scale, (gy - self.cy) * self.scale
             )
         self._state = self._read()
         return self._state
@@ -545,7 +547,7 @@ class Cars:
         accel = np.asarray(accel, float).reshape(self.n)
         steer = np.where(np.isnan(steer), np.nan, np.clip(steer, -self.max_steer, self.max_steer))
         accel = np.where(np.isnan(accel), np.nan, np.clip(accel, -self.max_decel, self.max_accel))
-        pycvc.nav_sim_world_override(self.sim, steer, accel * SCALE)
+        pycvc.nav_sim_world_override(self.sim, steer, accel * self.scale)
         pycvc.nav_sim_world_step(self.sim)
         self.last_command = (steer, accel)
         self._steer_cmd = np.where(np.isnan(steer), 0.0, steer)
@@ -903,6 +905,9 @@ def _parse(argv, doc_default):
     )
     p.add_argument("--controller", choices=("yours", "navigator"), default=None)
     p.add_argument("--nav-weights", default="", help="a .cvcnav policy for the navigator")
+    p.add_argument("--nav-scale", type=float, default=SCALE,
+                   help="the navigator's normalized units per metre: the frame its policy was "
+                        "trained in (default 0.05)")  # fmt: skip
     p.add_argument("--seed", type=int, default=0, help="the starts and goals")
     p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                    help="a state-tree setting, relative to the document (nav.vehicle.vmax=12, "
@@ -979,7 +984,8 @@ def run(controller, params: dict, *, cost=None, doc=None, argv=None) -> int:
         vehicle = host.get("nav_plant.vehicle", "humvee") or "humvee"
         nav = host.get("run.controller", "yours") == "navigator"
         cars = Cars(world, n, vehicle, seed=args.seed if seed is None else seed, navigator=nav,
-                    nav_weights=args.nav_weights, app=host.app, prefix=pre)  # fmt: skip
+                    nav_weights=args.nav_weights, scale=args.nav_scale, app=host.app,
+                    prefix=pre)  # fmt: skip
         st.update(cars=cars, speed=[], gap=[], coef={}, world=world)
         show_world(host, world.kind, args.doc)
         if log is not None:
@@ -989,6 +995,7 @@ def run(controller, params: dict, *, cost=None, doc=None, argv=None) -> int:
                 seed=args.seed if seed is None else seed,
                 controller="navigator" if nav else "yours",
                 nav_weights=args.nav_weights,
+                nav_scale=args.nav_scale,
             )
         if drawn:
             draw_world(host, st)

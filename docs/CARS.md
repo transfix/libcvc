@@ -351,7 +351,9 @@ log.save("run.npz")
 
 `C.world_from_data(app, "<prefix>.data.city")` reads a city from an app's data store.
 `C.flat_world(unit)` gives a flat square. `Cars(..., navigator=True)` with `step_navigator()`
-runs libcvc's navigator, and `nav_weights=` gives it a `.cvcnav` policy. `Cars(..., app=app,
+runs libcvc's navigator. `nav_weights=` gives it a `.cvcnav` policy and `scale=` the frame
+that policy was trained in (normalized units per metre; `--nav-weights` and `--nav-scale` on
+the command line). `Cars(..., app=app,
 prefix=...)` keeps its settings in that app's state tree (`pull()` and `publish()`).
 
 ## Known limits
