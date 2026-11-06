@@ -22,39 +22,20 @@
 // Pascucci & Schikore, "The Contour Spectrum", IEEE Visualization 1997; libContour by Dan Schikore
 // and Emilio Camahort, see THIRD_PARTY_NOTICES.md) as VolumeRover2's ColorTable2 did, but on a
 // Datareg3 built directly over the voxels: newDatasetReg would also build a Conplotreg3 (cell
-// index trees, seed cells) that the spectrum never uses, and leak it. Compiled only in a
-// CVC_ENABLE_MESHER build, inside libcvc, so no libContour global crosses the DLL boundary.
+// index trees, seed cells) that the spectrum never uses, and leak it. libContour keeps no
+// process-wide state, so concurrent calls need no lock. Compiled only in a CVC_ENABLE_MESHER
+// build, inside libcvc.
 
 #include <climits>
 #include <cstdlib>
 #include <cvc/volume/contour_spectrum.h>
 #include <cvc/volume/volume.h>
 #include <datareg3.h>
-#include <libcontour_mutex.h>
 #include <memory>
-#include <mutex>
 #include <vector>
 
 namespace cvc {
-
-std::mutex &libcontour_mutex() {
-  static std::mutex m;
-  return m;
-}
-
 namespace {
-
-// Silences libContour's stdout chatter (`verbose` is 1 by default) for one computation.
-class quiet_libcontour {
-public:
-  quiet_libcontour() : _saved(::verbose) { ::verbose = 0; }
-  ~quiet_libcontour() { ::verbose = _saved; }
-  quiet_libcontour(const quiet_libcontour &) = delete;
-  quiet_libcontour &operator=(const quiet_libcontour &) = delete;
-
-private:
-  int _saved;
-};
 
 // compFunction returns malloc'd arrays (the sample values and the function) that libContour
 // itself never frees.
@@ -111,8 +92,6 @@ contour_spectrum compute_contour_spectrum_libcontour(const volume &vol, bool wor
       sx * sy * sz;
 
   int dim[3] = {static_cast<int>(nx), static_cast<int>(ny), static_cast<int>(nz)};
-  std::lock_guard<std::mutex> lock(libcontour_mutex());
-  quiet_libcontour quiet;
   // Datareg3 borrows the voxels (it only reads them) and copies dim. Its destructor is empty, so
   // the small pointer table and min/max arrays its constructor mallocs leak; freeing them here
   // would double-free once the vendored destructors are fixed.

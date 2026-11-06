@@ -40,8 +40,8 @@ typedef unsigned int	u_int;
 
 const unsigned int BAD_INDEX = 0xFFFFFFFF;
 
-extern int verbose;
-extern void (*errorHandler)(const char *, int);
+#include "contour_verbose.h"
+void errorHandler(const char *, int);
 
 //--------------------------------------------------------------------
 //
@@ -108,12 +108,12 @@ class Data {
 #endif /* of VARIABLE */
 
     // for topology  add by fan
-      static int funtopol1;
-      static int funtopol2;
-      static void setFunTopol1(int f){funtopol1 = f;}
-      static void setFunTopol2(int f){funtopol2 = f;}
-      static int getFunTopol1(){return funtopol1;}
-      static int getFunTopol2(){return funtopol2;}
+      int funtopol1;
+      int funtopol2;
+      void setFunTopol1(int f){funtopol1 = f;}
+      void setFunTopol2(int f){funtopol2 = f;}
+      int getFunTopol1(){return funtopol1;}
+      int getFunTopol2(){return funtopol2;}
 
       float  getMin() const { return(min[funcontour]); }
       float  getMax() const { return(max[funcontour]); }
@@ -247,6 +247,9 @@ Data::commonConstructor(DataType t, int _ndata, char *fn)
 	{
 	funcontour = 0;
 	funcolor = 0;
+
+	funtopol1 = 0;
+	funtopol2 = 0;
 	}
     // end fan
 
@@ -309,6 +312,9 @@ inline Data::Data(Data::DataType t, int _ndata, u_char *data)
 	{
 	funcontour = 0;
 	funcolor = 0;
+
+	funtopol1 = 0;
+	funtopol2 = 0;
 	}				// end fan
 
 }     
@@ -324,7 +330,7 @@ inline void Data::readData(void)
    u_int i;
    u_int f;
    float v;
-   static float min_cutoff;					// add by fan
+   float min_cutoff;					// add by fan
 
    data = (datatypes *)malloc(sizeof(datatypes)*ndata);
 
@@ -402,7 +408,7 @@ inline void Data::preprocessData(u_char *data)
    u_int	i;
    u_int	f;
    float	v;
-   static float min_cutoff;					// add by fan
+   float min_cutoff;					// add by fan
 
    Data::data = (datatypes *)malloc(sizeof(datatypes)*ndata);
 
