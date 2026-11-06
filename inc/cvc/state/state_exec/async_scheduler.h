@@ -235,8 +235,10 @@ public:
   /// reason is killed_by_user; signal "SIGKILL" kills); an unknown pid is found, and refused,
   /// then. Each one's `done`, when set, gets what its call returned (a kill that throws has still
   /// killed its process: true); one that throws otherwise, or is never applied, gets false. A
-  /// query runs its function, and must not throw. True once queued; false once the scheduler is
-  /// being destroyed, when `done` gets false at once.
+  /// query runs its function, and must not throw. True once queued. A done that the destructor
+  /// calls (with false) may post again: that post returns false, and the destructor refuses it in
+  /// turn, never applying it. Any other post to a scheduler being destroyed is undefined: a host
+  /// must not post to a scheduler it is destroying, except from a done.
   bool post_control(int pid, control_cmd cmd);
   /// Thread-safe: whether a posted command waits for a drain (a posted message is no command).
   bool has_pending_control() const noexcept {
@@ -482,8 +484,9 @@ private:
   /// drain finds an empty ingress without the lock.
   std::atomic<bool> ingress_pending_{false};
   /// The commands posted and not yet applied or refused, queued or in a batch a drain is
-  /// applying: has_pending_control(). destroying_ (under ingress_mutex_): the destructor took the
-  /// queue, and a post is refused at once.
+  /// applying: has_pending_control(). A command stops counting once its call is made, before its
+  /// done runs, or as it is refused. destroying_ (under ingress_mutex_): the destructor took the
+  /// queue, and a post (a done's) is queued for it to refuse.
   std::atomic<std::size_t> controls_waiting_{0};
   bool destroying_ = false;
   /// A wait_for_work() is (about to be) blocked: a post notifies wakeup_.
@@ -526,7 +529,7 @@ private:
   // the due timers.
   void drain(bool in_step);
   // Apply one post_control command (scheduler thread), then tell its done what the call returned.
-  void apply_control(int pid, control_cmd &cmd);
+  void apply_control(int pid, control_cmd &cmd, bool &counted_out);
   // A drain that threw: what it had not applied (batch[m..], finished[f..], controls[c..]) goes
   // back to the front of the ingress, ahead of what was posted since (S0.7).
   void requeue_ingress(std::vector<std::pair<std::string, value_t>> &batch, std::size_t m,

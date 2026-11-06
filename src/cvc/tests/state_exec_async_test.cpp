@@ -1263,26 +1263,44 @@ TEST(SyncPostControl, ADoneThatThrowsIsCalledOnce) {
 
 namespace {
 
-// The skeptic pass's SK-4: once the destructor has taken the queue, a post (here from the done it
-// refuses, which posts again each time, 1000 times) is refused at once, with done(false), and not
-// queued: post_control returns false, and the destructor's refusals end with the done's reposts.
-// They used to be queued and looped over, with no bound but the done's.
+// The skeptic passes' SK-4 and R2-2: once the destructor has taken the queue, a post (here from
+// the done it refuses, which posts again each time, 100000 times, as a done that retries until
+// applied would) returns false, is never applied, and is refused, with done(false), by the
+// destructor's next round: the refusals iterate. When the refusal was made inside post_control,
+// they nested one level a repost, and ran out of stack (about 1800 on a 1 MiB thread, Release).
+// On a thread of its own, whose stack is the default 1 MiB on Windows.
 template <class S> void the_destructor_refuses_every_repost() {
-  int refused = 0, queued = 0;
-  std::function<void(bool)> again;
-  S *target = nullptr;
-  again = [&](bool applied) {
-    EXPECT_FALSE(applied);
-    if (++refused < 1000)
-      queued += target->post_control(1, control(control_cmd::kind::kill, again)) ? 1 : 0;
-  };
-  {
+  constexpr long kReposts = 100000;
+  long refused = 0, accepted = 0;
+  std::thread([&] {
+    std::function<void(bool)> again;
+    S *target = nullptr;
+    again = [&](bool applied) {
+      EXPECT_FALSE(applied);
+      if (++refused < kReposts)
+        accepted += target->post_control(1, control(control_cmd::kind::kill, again)) ? 1 : 0;
+    };
     S sched;
     target = &sched;
     EXPECT_TRUE(sched.post_control(1, control(control_cmd::kind::kill, again)));
+  }).join();
+  EXPECT_EQ(refused, kReposts);
+  EXPECT_EQ(accepted, 0) << "a post made while the destructor ran was taken as queued to apply";
+}
+
+// has_pending_control() inside the destructor's refusals: each command is counted out as it is
+// refused, so the first refusal's done sees the second still waiting, and the last sees none
+// (the skeptic's round 2: the destructor never lowered the count).
+template <class S> void the_destructor_counts_out_what_it_refuses() {
+  std::vector<bool> seen;
+  {
+    S sched;
+    S *const raw = &sched;
+    const auto look = [&seen, raw](bool) { seen.push_back(raw->has_pending_control()); };
+    sched.post_control(1, control(control_cmd::kind::kill, look));
+    sched.post_control(2, control(control_cmd::kind::kill, look));
   }
-  EXPECT_EQ(refused, 1000);
-  EXPECT_EQ(queued, 0) << "a post made while the destructor ran was queued";
+  EXPECT_EQ(seen, (std::vector<bool>{true, false}));
 }
 
 // has_pending_control() counts the commands posted and not yet applied or refused (the skeptic
@@ -1325,6 +1343,14 @@ TEST(AsyncPostControl, TheDestructorRefusesEveryRepost) {
 
 TEST(SyncPostControl, TheDestructorRefusesEveryRepost) {
   the_destructor_refuses_every_repost<scheduler>();
+}
+
+TEST(AsyncPostControl, TheDestructorCountsOutWhatItRefuses) {
+  the_destructor_counts_out_what_it_refuses<async_scheduler>();
+}
+
+TEST(SyncPostControl, TheDestructorCountsOutWhatItRefuses) {
+  the_destructor_counts_out_what_it_refuses<scheduler>();
 }
 
 TEST(AsyncPostControl, HasPendingControlCountsWhatWaits) {

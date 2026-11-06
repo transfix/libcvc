@@ -37,18 +37,26 @@ boost::shared_ptr<cvc::state> host_held(cvc::state *node) {
 
 scheduler::~scheduler() {
   home_.reset();
-  // Commands posted and never applied: their done gets false. Taken under the lock, so a post
-  // that returned before the destruction began is seen. From then on a post is refused at once
-  // (post_control): a done that posts again is refused too, rather than dropped, and nothing is
-  // queued behind this.
+  // Commands posted and never applied: their done gets false, each counted out first. Taken under
+  // the lock, so a post that returned before the destruction began is seen. A done that posts
+  // again (only a done may post to a scheduler being destroyed) is queued for refusal, never
+  // applied, and refused by the next round here: the refusals iterate, and never nest, however
+  // often a done posts again. A done that posts again every time it is refused never ends this.
   std::vector<std::pair<int, control_cmd>> left;
   {
     std::lock_guard<std::mutex> lock(control_mutex_);
     destroying_ = true;
     left.swap(controls_);
   }
-  for (auto &entry : left)
-    refuse_control(entry.second);
+  while (!left.empty()) {
+    for (auto &entry : left) {
+      controls_waiting_.fetch_sub(1, std::memory_order_release);
+      refuse_control(entry.second);
+    }
+    left.clear();
+    std::lock_guard<std::mutex> lock(control_mutex_);
+    left.swap(controls_);
+  }
 }
 
 void scheduler::set_lock_manager(std::shared_ptr<lock_manager> mgr, lock_attach attach) {
@@ -1540,19 +1548,13 @@ bool scheduler::post_control(int pid, control_cmd cmd) {
   // unknown pid is found, and refused, there. An idle run() wakes (td 4.12). The wait is notified
   // under the lock: once the poster lets go of it, it touches the scheduler no more, so a
   // scheduler thread that applies this post may destroy the scheduler.
-  {
-    std::lock_guard<std::mutex> lock(control_mutex_);
-    if (!destroying_) {
-      controls_.emplace_back(pid, std::move(cmd));
-      controls_waiting_.fetch_add(1, std::memory_order_release);
-      idle_->notify();
-      return true;
-    }
-  }
-  // The scheduler is being destroyed (a done its destructor calls posted this): refused at once,
-  // never queued, so the destructor's refusals end.
-  refuse_control(cmd);
-  return false;
+  std::lock_guard<std::mutex> lock(control_mutex_);
+  controls_.emplace_back(pid, std::move(cmd));
+  controls_waiting_.fetch_add(1, std::memory_order_release);
+  if (destroying_)
+    return false; // a done the destructor calls posted this: the destructor refuses it next
+  idle_->notify();
+  return true;
 }
 
 void scheduler::apply_controls() {
@@ -1566,15 +1568,17 @@ void scheduler::apply_controls() {
   // write's slots): the command that threw is refused, and the rest go back to the front of the
   // queue, ahead of what was posted since, before the exception propagates. None is lost.
   std::size_t next = 0;
+  bool counted_out = false; // the command being applied no longer counts as waiting
   try {
     while (next < controls.size()) {
       auto &[pid, cmd] = controls[next++];
-      apply_control(pid, cmd);
-      controls_waiting_.fetch_sub(1, std::memory_order_release);
+      counted_out = false;
+      apply_control(pid, cmd, counted_out);
     }
   } catch (...) {
-    refuse_control(controls[next - 1].second);
-    controls_waiting_.fetch_sub(1, std::memory_order_release);
+    if (!counted_out)
+      controls_waiting_.fetch_sub(1, std::memory_order_release);
+    refuse_control(controls[next - 1].second); // unless its done was called already
     if (next < controls.size()) {
       try { // back in the queue: still waiting
         std::lock_guard<std::mutex> lock(control_mutex_);
@@ -1582,8 +1586,8 @@ void scheduler::apply_controls() {
                          std::make_move_iterator(controls.end()));
       } catch (...) { // no memory to queue them again: refused rather than lost
         for (std::size_t i = next; i < controls.size(); ++i) {
-          refuse_control(controls[i].second);
           controls_waiting_.fetch_sub(1, std::memory_order_release);
+          refuse_control(controls[i].second);
         }
       }
     }
@@ -1591,14 +1595,27 @@ void scheduler::apply_controls() {
   }
 }
 
-void scheduler::apply_control(int pid, control_cmd &cmd) {
+void scheduler::apply_control(int pid, control_cmd &cmd, bool &counted_out) {
+  // The command stops counting as waiting once its call is made, before its done hears what the
+  // call returned (a query has no done); `counted_out` tells the batch it was.
+  const auto settle = [this, &cmd, &counted_out](bool result) {
+    controls_waiting_.fetch_sub(1, std::memory_order_release);
+    counted_out = true;
+    if (cmd.done && cmd.what != control_cmd::kind::query) {
+      // Taken from the command first: a done that throws (against its contract) is not called
+      // again by the refusal of the command that threw.
+      const std::function<void(bool)> done = std::move(cmd.done);
+      cmd.done = nullptr;
+      done(result);
+    }
+  };
   bool applied = false;
   try {
     switch (cmd.what) {
     case control_cmd::kind::query:
       if (cmd.query)
         cmd.query(*this);
-      return; // a query has no done
+      break;
     case control_cmd::kind::set_priority:
       applied = set_priority(pid, cmd.value); // the host path, unchecked (design 7.4)
       break;
@@ -1618,24 +1635,14 @@ void scheduler::apply_control(int pid, control_cmd &cmd) {
   } catch (...) {
     // A kill (or a SIGKILL) that throws has still killed its process (kill_process; R0-final), and
     // its done hears that. Any other command that throws is refused, done(false), by the batch.
-    if ((cmd.what == control_cmd::kind::kill || cmd.what == control_cmd::kind::signal) &&
-        cmd.done) {
+    if (cmd.what == control_cmd::kind::kill || cmd.what == control_cmd::kind::signal) {
       const process *const p = procs_.find(pid);
-      if (p && p->status == process_status::killed) {
-        const std::function<void(bool)> done = std::move(cmd.done);
-        cmd.done = nullptr;
-        done(true);
-      }
+      if (p && p->status == process_status::killed)
+        settle(true);
     }
     throw;
   }
-  if (cmd.done) {
-    // Taken from the command first: a done that throws (against its contract) is not called
-    // again by the refusal of the command that threw.
-    const std::function<void(bool)> done = std::move(cmd.done);
-    cmd.done = nullptr;
-    done(applied);
-  }
+  settle(applied);
 }
 
 bool scheduler::set_max_steps(int pid, uint64_t max_steps) {
