@@ -10,7 +10,8 @@
 //      it, and what it drew before is gone, its bodies too;
 //   4. a dataset with nothing to draw warns, never throws;
 //   5. material: { uv } orients a texture in texture space;
-//   6. frame: asks the main view's camera to frame what the dataset drew, once (frame: true).
+//   6. frame: asks the main view's camera to frame what the dataset drew, once (frame: true);
+//   7. a hidden node draws nothing when its dataset arrives, and shows it with the node.
 //
 // NOT assert(): built Release, where NDEBUG makes assert() a no-op.
 #include <boost/any.hpp>
@@ -33,6 +34,8 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <vtkNew.h>
+#include <vtkRenderer.h>
 
 using cvc::gl::SceneGraph;
 namespace ari = cvc::gl::ariadne;
@@ -250,6 +253,91 @@ scene:
     CHECK(!terrain->hasTexture()); // the big city's package has no aerial image
 }
 
+// A hidden `source: { data }` node draws nothing when its dataset arrives. What it draws keeps its
+// own flag (shown) but stays out of the renderer while the node is hidden; showing the node puts it
+// in, hiding it takes it out again, and a dataset that replaces the old one while the node is
+// hidden arrives hidden too.
+void test_a_hidden_data_node_draws_nothing() {
+  std::printf("test_a_hidden_data_node_draws_nothing\n");
+  if (!cvc::ariadne::have_yaml()) {
+    std::printf("  skipped: no YAML in this build\n");
+    return;
+  }
+  TempDir t;
+  t.put("small.tar.zst", package(3, true));
+  const std::string big = t.put("big.tgz", package(5, false));
+  t.put("tri.off", "OFF\n3 1 0\n0 0 0\n1 0 0\n0 1 0\n3 0 1 2\n");
+  const std::string doc = R"(
+meta: { min_libcvc: "0.0.0" }
+data:
+  city: { uri: small.tar.zst, path: share/cvc-scenes/test, as: city_bundle }
+  tri: tri.off
+scene:
+  nodes:
+    - node: city
+      source: { data: city }
+      visible: false
+    - node: tri
+      source: { data: tri }
+      visible: false
+)";
+  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(doc);
+  CHECK(r.ok);
+  if (!r.ok)
+    return;
+  cvc::app app;
+  SceneGraph sg(app);
+  vtkNew<vtkRenderer> ren; // no window: the prop bookkeeping is what is checked
+  sg.setRenderer(ren);
+  const std::string prefix = sg.getStatePrefix();
+  auto store = cvc::ariadne::DataStore::of(app);
+  for (cvc::ariadne::DataSpec d : r.data) {
+    d.base = t.dir.generic_string();
+    store->bind(prefix, d);
+  }
+  std::vector<std::string> warnings;
+  ari::RealizedScene out = ari::realize_scene(sg, r.scene, prefix, &warnings);
+  std::shared_ptr<cvc::gl::GraphicsNode> city = sg.getGraphics("city"), tri = sg.getGraphics("tri");
+  CHECK(city && tri);
+  if (!city || !tri)
+    return;
+  CHECK(!city->isVisible() && !tri->isVisible());
+  CHECK(wait_ready(app, prefix + ".data.city"));
+  CHECK(wait_ready(app, prefix + ".data.tri"));
+  CHECK(ari::sync_scene_data(out, &warnings) == 2);
+  auto drawn = [&](cvc::gl::GraphicsNode &node, const char *child) {
+    std::shared_ptr<cvc::gl::GraphicsNode> c = node.findChildByName(child);
+    return c && c->prop() && ren->HasViewProp(c->prop());
+  };
+  auto own_flag = [&](cvc::gl::GraphicsNode &node, const char *child) {
+    std::shared_ptr<cvc::gl::GraphicsNode> c = node.findChildByName(child);
+    return c && c->isVisible() && !c->isVisibleInHierarchy();
+  };
+  CHECK(!drawn(*city, "city_terrain") && !drawn(*tri, "tri_geometry")); // the nodes are hidden
+  CHECK(own_flag(*city, "city_terrain") && own_flag(*tri, "tri_geometry"));
+  city->setVisible(true);
+  CHECK(drawn(*city, "city_terrain") && !drawn(*tri, "tri_geometry"));
+  tri->setVisible(true);
+  CHECK(drawn(*tri, "tri_geometry"));
+  city->setVisible(false);
+  tri->setVisible(false);
+  CHECK(!drawn(*city, "city_terrain") && !drawn(*tri, "tri_geometry"));
+
+  // A new dataset while the node is hidden: drawn into it, hidden; shown with the node.
+  cvc::ariadne::DataSpec bigger;
+  bigger.name = "city";
+  bigger.uri = big;
+  bigger.path = "share/cvc-scenes/test";
+  bigger.as = "city_bundle";
+  store->bind(prefix, bigger);
+  CHECK(wait_ready(app, prefix + ".data.city"));
+  CHECK(ari::sync_scene_data(out, &warnings) == 1);
+  CHECK(!drawn(*city, "city_terrain"));
+  city->setVisible(true);
+  CHECK(drawn(*city, "city_terrain"));
+  sg.setRenderer(nullptr);
+}
+
 // material: { uv: ... } turns a texture's UVs: flips, then quarter turns (the image
 // counter-clockwise), then scale and offset.
 void test_a_uv_block_orients_the_texture() {
@@ -289,6 +377,7 @@ void test_a_uv_block_orients_the_texture() {
 
 int main() {
   test_a_dataset_draws_into_its_node_and_redraws_when_replaced();
+  test_a_hidden_data_node_draws_nothing();
   test_a_uv_block_orients_the_texture();
   if (g_failures) {
     std::printf("cvcgl_ariadne_data: %d FAILED\n", g_failures);

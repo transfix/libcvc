@@ -106,10 +106,22 @@ protected:
   // An ancestor's visibility changed, but this node's own flag already had the
   // value pushed down -- it was attached under an already-hidden parent, say, or
   // shown on its own while one was -- so its setVisible() was not called. The
-  // default passes the news on to the children and changes nothing: an ordinary
-  // node draws by its own flag alone. A node whose drawing depends on its
-  // ANCESTORS' visibility re-derives it here, as LodGraphicsNode does.
+  // default re-derives whether this node's own prop draws (syncProp: its flag AND
+  // its ancestors) and passes the news on to the children; no flag changes. A
+  // node with its own drawing policy re-derives that here too, as LodGraphicsNode
+  // does for its rungs.
   virtual void ancestorVisibilityChanged();
+
+  // Whether this node's ancestors let it draw. A node draws only when its own flag
+  // is set AND every ancestor is visible: a hidden node hides its whole subtree,
+  // children attached under it later included, while each child keeps its own
+  // flag. SceneNode has no parent link, so the default says yes; GraphicsNode
+  // walks its parents.
+  virtual bool ancestorsVisible() const { return true; }
+
+  // Put this node's own prop in the renderer, or take it out, as its flag and
+  // ancestorsVisible() say. Idempotent; runs on the owner thread.
+  void syncProp();
 
   // The default propagation to one child: setVisible(visible) when its flag
   // differs, else ancestorVisibilityChanged(). For propagateVisible() overrides

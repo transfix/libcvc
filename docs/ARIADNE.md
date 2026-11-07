@@ -1941,7 +1941,10 @@ windows:
 drawn only where both are allowed: the parent's tags take the child out of a view that rules them
 out. An untagged node is in every view, so content meant for the main view only needs a tag of its
 own that the other views leave out (`hide: [main_only]`). The main view always draws every node. A
-node hidden with `visible:` is gone from every view.
+node hidden with `visible:` is gone from every view, and so is everything under it: its children,
+the ones a `source: { data }` node draws when its dataset arrives included, keep their own flags
+but draw only while every ancestor is visible. A `generated_world` node's meshes and water beside
+it follow it too.
 
 **Overrides.** `override:` restyles nodes in one view only. Each entry names a node id, a tag, or
 `"*"` (everything), and sets any of `drawstyle` (`surface`, `wireframe`, `points`), `opacity`,

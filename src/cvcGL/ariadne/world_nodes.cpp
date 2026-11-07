@@ -164,6 +164,7 @@ struct WorldRT {
   bool soft = true;     // look: soft (demo3's) or classic (terrain_lab's)
   int water_stride = 4; // refill the water every this many frames
   long frame = 0;
+  bool shown = true; // the node's visibility, which the parts beside it last followed
   std::shared_ptr<cvc::height_field> field; // published in RealizedScene::height_fields
   std::weak_ptr<GeometryNode> terrain, buildings, roads;
   // The props, a LOD ladder per ground cell (world::generated_world::prop_cells) under the groups
@@ -831,6 +832,19 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
   out.custom_ticks.push_back([rt, sgp, id](vtkRenderer *ren) {
     if (rt->terrain.expired())
       return;
+    // The meshes and the water beside the node follow its visibility, so a `visible:` on the node
+    // hides (and shows) the whole world, not only the ground it draws itself. Each follows a change
+    // of the node's, as a child follows its parent's (SceneNode::propagateVisible).
+    if (auto t = rt->terrain.lock()) {
+      const bool shown = t->isVisibleInHierarchy();
+      if (shown != rt->shown) {
+        rt->shown = shown;
+        for (const char *part :
+             {"_props", "_foliage", "_needles", "_buildings", "_roads", "_water"})
+          if (auto g = sgp->getGraphics(id + part))
+            g->setVisible(shown);
+      }
+    }
     // The props' and the ground's LOD for this frame's camera; a caster that changed rung casts a
     // different shadow.
     if (ren && ren->IsActiveCameraCreated()) {
