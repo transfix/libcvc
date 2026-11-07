@@ -1,5 +1,6 @@
 #include <cvc/state/state_exec/async_host.h>
 #include <cvc/state/state_exec/async_scheduler.h>
+#include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/exec_group.h>
 #include <mutex>
 #include <utility>
@@ -70,6 +71,13 @@ int exec_group::execute(const std::string &script, const execute_options &opts) 
 
 int exec_group::execute(const value_t &expr, const execute_options &opts) {
   return impl_->sched->execute(expr, opts);
+}
+
+// S1.0 stub: binds every kind as it is (a host-affinity group's rule); P's S1.8 wrapping does the
+// rest.
+void exec_group::install(const environment_ptr &env, const std::string &name, native_fn fn,
+                         provider_affinity) {
+  builtins::register_fn(env, name, std::move(fn));
 }
 
 bool exec_group::failed() const { return impl_->failed; }

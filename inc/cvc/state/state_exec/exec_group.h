@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <cvc/core/thread_class.h>
 #include <cvc/state/state_exec/heap.h>           // cycle_registry
+#include <cvc/state/state_exec/intrinsics.h>     // provider_affinity
 #include <cvc/state/state_exec/scheduler_base.h> // execute_options
 #include <cvc/state/state_exec/types.h>
 #include <functional>
@@ -101,6 +102,14 @@ public:
   /// (td B12), so two groups never share quoted literals.
   int execute(const std::string &script, const execute_options &opts = {});
   int execute(const value_t &expr, const execute_options &opts = {});
+
+  /// Bind a host native `name` into `env` (one of this group's envs) by its kind (td 4.9, S1.8):
+  /// in a host-affinity group every kind is bound as it is; in an `any` group a `host_only`
+  /// native is not bound (a call is a NameError), and a `host_proxied` one is bound as a wrapper
+  /// that runs `fn` on the pump_all caller's thread through the host-call queue (inline when the
+  /// calling thread is that caller), parking its process until the result comes back.
+  void install(const environment_ptr &env, const std::string &name, native_fn fn,
+               provider_affinity kind);
 
   /// Whether a pump failed the group (a C++ exception escaped it).
   bool failed() const;
