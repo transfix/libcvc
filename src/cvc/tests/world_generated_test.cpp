@@ -30,6 +30,7 @@
 #include <cstdio>
 #include <cvc/world/generated_world.h>
 #include <cvc/world/npy.h>
+#include <cvc/world/road_grade.h>
 #include <filesystem>
 #include <gtest/gtest.h>
 #include <map>
@@ -336,8 +337,19 @@ TEST(WorldGenerated, GeneratorsByName) {
   p = small_world();
   p.terrain = "test_tilt";
   const generated_world tilt = generate_world(p);
-  EXPECT_NEAR(tilt.height(-200.0, 0.0), 10.0, 1e-3);
-  EXPECT_NEAR(tilt.height(200.0, 0.0), 30.0, 1e-3);
+  // The ground is the generator's, wherever no road grades it.
+  const auto *graded = dynamic_cast<const graded_terrain *>(&tilt.model->terrain());
+  ASSERT_NE(graded, nullptr);
+  int checked = 0;
+  for (double y = -190.0; y <= 190.0; y += 20.0)
+    for (double x : {-195.0, 195.0})
+      if (!graded->graded_at(x, y)) {
+        EXPECT_NEAR(tilt.height(x, y),
+                    x < 0 ? 10.0 + 20.0 * 5.0 / 400.0 : 30.0 - 20.0 * 5.0 / 400.0, 1e-3)
+            << x << "," << y;
+        ++checked;
+      }
+  EXPECT_GT(checked, 4);
   EXPECT_GT(tilt.road_length, 100.0);
   EXPECT_GT(tilt.building_count, 0u);
 }
@@ -411,8 +423,18 @@ TEST(WorldGenerated, BuildingsAreInTheRaster) {
       EXPECT_EQ(w.raster.hard[i], w.model->registry()[wall].hard ? 1 : 0);
     }
   EXPECT_GE(walls, w.building_count);
+  // Without a city there are no wall cells, and the rest of the ground is occupied as it was: the
+  // walls are what the city adds. (Comparing the whole occupied count does not say this: the
+  // roads' banks lift some deep water, which is occupied, to dry gravel, which is not.)
   p.city = "none";
-  EXPECT_LT(generate_world(p).raster.occupied_count(), w.raster.occupied_count());
+  const generated_world bare = generate_world(p);
+  std::size_t bareWalls = 0, wallsOccupied = 0;
+  for (std::size_t i = 0; i < bare.raster.klass.size(); ++i)
+    bareWalls += bare.raster.klass[i] == wall;
+  for (std::size_t i = 0; i < w.raster.klass.size(); ++i)
+    wallsOccupied += w.raster.klass[i] == wall && w.raster.occupancy[i] == 1;
+  EXPECT_EQ(bareWalls, 0u);
+  EXPECT_EQ(wallsOccupied, walls);
 }
 
 // world_builder steps generate_world a stage at a time: stepped in small budgets it makes the same
@@ -716,4 +738,49 @@ TEST(WorldGenerated, TerrainRungsStayWithinOneOfTheirNeighbours) {
   const std::vector<int> before = fine;
   constrain_terrain_rungs(fine, 2, 2);
   EXPECT_EQ(fine, before);
+}
+
+// The streets are driveable on the ground physics drives on (the terrain mesh): each fits two
+// Humvees side by side, is near level across, climbs gently and never dips into the water, though
+// the ground the network was traced over tilts and bumps under it.
+TEST(WorldGenerated, RoadsAreDriveable) {
+  const generated_world w = generate_world(small_world());
+  const auto *graded = dynamic_cast<const graded_terrain *>(&w.model->terrain());
+  ASSERT_NE(graded, nullptr);
+  const road_network &net = graded->roads();
+  ASSERT_GT(net.segments.size(), 20u);
+  std::vector<double> tilt, tiltBefore, grade;
+  bool wet = false;
+  for (const road_segment &s : net.segments) {
+    EXPECT_GE(s.width, 2.0 * world_lane_m - 1e-9);
+    EXPECT_GE(s.width, 2.0 * world_vehicle_width_m + 0.8);
+    const road_node &a = net.nodes[s.a], &b = net.nodes[s.b];
+    const double L = std::hypot(b.x - a.x, b.y - a.y);
+    if (L < 2.0)
+      continue;
+    const double ux = (b.x - a.x) / L, uy = (b.y - a.y) / L, hw = 0.5 * s.width;
+    const int n = int(L / 2.0);
+    double prev = 0.0;
+    for (int i = 0; i <= n; ++i) {
+      const double x = a.x + ux * L * i / n, y = a.y + uy * L * i / n;
+      const double l = w.height(x - uy * hw, y + ux * hw), r = w.height(x + uy * hw, y - ux * hw);
+      const double c = w.height(x, y);
+      tilt.push_back(std::abs(l - r) / s.width);
+      tiltBefore.push_back(std::abs(graded->ground().sample(x - uy * hw, y + ux * hw) -
+                                    graded->ground().sample(x + uy * hw, y - ux * hw)) /
+                           s.width);
+      wet = wet || std::min({l, r, c}) < w.params.water_level_m;
+      if (i > 0)
+        grade.push_back(std::abs(c - prev) / (L / n));
+      prev = c;
+    }
+  }
+  auto p95 = [](std::vector<double> v) {
+    std::sort(v.begin(), v.end());
+    return v[std::size_t(0.95 * (v.size() - 1))];
+  };
+  EXPECT_LT(p95(tilt), 0.08);
+  EXPECT_GT(p95(tiltBefore), 4.0 * p95(tilt)) << "the grading levelled the roads";
+  EXPECT_LT(p95(grade), 0.16);
+  EXPECT_FALSE(wet);
 }

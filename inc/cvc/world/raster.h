@@ -72,6 +72,13 @@ public:
   const surface_registry &registry() const noexcept { return *reg_; }
   const std::vector<placed_prop> &props() const noexcept { return props_; }
   const world_params &params() const noexcept { return wp_; }
+  // The same world on other ground (e.g. with roads graded into it): the props keep their places,
+  // and a consumer reads their heights from terrain() again.
+  world_model with_terrain(std::shared_ptr<const terrain_source> t) const {
+    world_model m(*this);
+    m.terrain_ = std::move(t);
+    return m;
+  }
 
 private:
   explicit world_model(const world_params &wp) : wp_(wp) {}

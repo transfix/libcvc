@@ -507,7 +507,11 @@ int main(int argc, char **argv) {
     if (!sg.hasGraphics("terrain"))
       return;
     std::vector<unsigned char> rgb = world::paint_surface(W, world::surface_color(colorMode), TEX);
-    cvc::image img(TEX, TEX, cvc::image::pixel_format::RGB, cvc::image::data_type::u8, rgb.data());
+    // paint_surface's row 0 is the south edge; an image's is its top, so the rows are reversed
+    // (setTexture turns them back, putting the south row at the terrain's v = 0).
+    cvc::image img =
+        cvc::image(TEX, TEX, cvc::image::pixel_format::RGB, cvc::image::data_type::u8, rgb.data())
+            .flipped_vertical();
     std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("terrain"))->setTexture(img, false);
   };
 

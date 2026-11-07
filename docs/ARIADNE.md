@@ -828,7 +828,11 @@ cells a chunk, so every rung is the terrain's own surface, points, normals and U
 triangles. A chunk coarsens once its largest height error falls under the preset's pixel budget,
 and stays within one rung of each neighbour; skirts hung from the edges two chunks share hide the
 seam. The chunks share the node's one texture and take its `casts_shadow`, `shader:` and
-`material:` keys. Physics, nav and `ground:` read the full terrain.
+`material:` keys. Physics, nav and `ground:` read the full terrain. The roads shape that terrain
+rather than lie on it (`cvc::world::road_grade`): each is level across, climbs at most 12% (5% into
+a junction), changes grade gradually and stays above the water, with the ground cut or banked to
+it, so a vehicle drives them without bouncing; every street is two Humvee lanes wide, drawn as
+smooth strips with a dark yellow centre stripe.
 
 **The fast render path.** A big static world draws fast when it is a few merged meshes and its
 shadow maps are re-baked rarely and spent where the camera looks. These keys say so

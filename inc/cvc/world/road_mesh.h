@@ -23,13 +23,16 @@
 // road_mesh.h — turn the road GRAPH into a drawable 3D road SURFACE.
 //
 // cvc::world::roads gives a graph (width-tagged segments + junction nodes); this extrudes it into a
-// real surface mesh the renderers can draw instead of (or alongside) a flat texture bake: a
-// width-wide quad RIBBON per segment, laid on the terrain by sampling the height field at each
-// corner, plus a rounded PAD polygon at every junction so roads meeting at an angle join cleanly
-// with no gap or overlap seam. Arterials are drawn a shade darker than local streets (per-vertex
-// colour). Output is plain cvc::geometry (triangles + up normals + colour) — GL-free and reusable
-// by the native lab and the wasm demos alike. Deterministic: a pure function of the network +
-// params.
+// real surface mesh the renderers can draw instead of (or alongside) a flat texture bake. Each run
+// of segments between junctions (and dead ends, and changes of width) is one width-wide STRIP,
+// its bends rounded by corner cutting and mitred, so a winding road is one smooth band with no gap
+// or overlap at a bend, laid on the terrain by sampling the height field at each vertex. A round
+// PAD sits at every junction and dead end, a hair above the strips it covers, so roads meeting at
+// an angle join cleanly. A single dark yellow CENTRE STRIPE runs down each road wide enough for
+// one, stopping short of the junctions. Arterials are drawn a shade darker than local streets
+// (per-vertex colour). Output is plain cvc::geometry (triangles + up normals + colour) — GL-free
+// and reusable by the native lab and the wasm demos alike. Deterministic: a pure function of the
+// network + params.
 
 #ifndef CVC_WORLD_ROAD_MESH_H
 #define CVC_WORLD_ROAD_MESH_H
@@ -43,8 +46,15 @@ namespace world {
 struct road_mesh_params {
   double lift = 0.08;        // raise the surface this far above the sampled ground (metres), so it
                              // sits just over the terrain instead of z-fighting it
-  bool intersections = true; // emit a rounded pad at every junction (degree >= 2) node
+  bool intersections = true; // a round pad at every junction and dead end
   int pad_segments = 12;     // rim vertices of a junction pad (higher = rounder)
+  double pad_lift = 0.02;    // a pad sits this far above the strips it covers
+  int smooth_passes = 2;     // corner-cutting passes rounding each road's bends (0: the segments)
+  bool centerline = true;    // a centre stripe on each road at least this wide:
+  double centerline_min_width = 4.5;             // (metres)
+  double centerline_width = 0.15;                // the stripe's width
+  double centerline_lift = 0.03;                 // above the road surface
+  double centerline_rgb[3] = {0.62, 0.47, 0.10}; // dark yellow
   double arterial_rgb[3] = {0.24, 0.24, 0.26}; // asphalt colour for major roads
   double local_rgb[3] = {0.32, 0.32, 0.34};    // ... and for local streets (a shade lighter)
 };

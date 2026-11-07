@@ -121,9 +121,31 @@ opt-in through `road_params` (the defaults are the classic network):
   shore or stop at it, instead of being cut off after tracing.
 - **`prune_roads`**: dead-end stubs shorter than 30 m are trimmed, and node degrees recomputed.
 
+**Roads shape the ground (landed).** A road laid on the ground as it was rose and fell with every
+bump and tilted with every side slope: on the 1.2 km lab world the 95th-percentile tilt across a
+road was 0.76 (37 degrees), the grade 0.61, and 51 of 4,568 road samples were under water, so a
+Humvee bounced and rolled. `cvc::world::road_grade` gives each road node a height: the ground,
+kept 0.8 m above the water, relaxed along the network so the grade changes gradually, held to a
+12% climb (5% on a segment meeting a junction, so a crossing is level), with roads that pass close
+without meeting held to agree. `graded_terrain` presses that surface into the ground: level across
+the road and a mesh cell past each edge, then a cut or bank back to the ground; where several roads
+reach a point the ground blends toward all of them, so it never steps. `world_builder`'s new
+`grade` stage swaps it in for everything after the streets: the buildings, the road mesh, the trees
+and rocks (re-read their ground), the water, the raster (a bank lifted out of the water is gravel),
+and the terrain mesh physics and nav drive on. Measured on that mesh (`RoadsAreDriveable`, and the
+1.2 / 5.3 km worlds): tilt across p95 0.043 / 0.010, grade p95 0.134 / 0.065, grade change per
+2 m p95 0.057 / 0.023, nothing under water; cuts and fills stay within about 7 / 12 m. What is left
+is the terrain mesh's own resolution: a 5 m street on 5 m cells.
+
+Every street is two lanes of `world_lane_m` (the Humvee's 2.18 m plus 0.4 m either side): local
+streets 6.0 m (were 5.0), collectors 7.0 m (6.5), arterials 9.0 m. The road mesh draws each run of
+segments between junctions as one strip, its bends rounded and mitred (no gaps or overlaps at a
+bend), ending on the rim of the junction's pad so no corner pokes out, one asphalt colour, and a
+dark yellow centre stripe that stops short of the junctions.
+
 Still to do: routing a long street over the relief by a grade-limited A* (where steering only
-winds), smoothing the traced polylines, service alleys in the cores, and district modes
-(industrial, rural) with their own spacing and widths.
+winds), service alleys in the cores, and district modes (industrial, rural) with their own spacing
+and widths.
 
 ## G3 — building placement
 
