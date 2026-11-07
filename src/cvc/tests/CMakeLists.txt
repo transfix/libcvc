@@ -153,6 +153,7 @@ add_executable(nav_plant_test nav_plant_test.cpp)
 add_executable(physics_plant_log_test physics_plant_log_test.cpp)
 add_executable(physics_jolt_rollout_test physics_jolt_rollout_test.cpp)
 add_executable(nav_dyn_bike_test nav_dyn_bike_test.cpp)
+add_executable(nav_dyn_bike_dg_test nav_dyn_bike_dg_test.cpp)
 add_executable(nav_dyn_4w_test nav_dyn_4w_test.cpp)
 add_executable(nav_dyn_spin_test nav_dyn_spin_test.cpp)
 add_executable(physics_dyn_contact_test physics_dyn_contact_test.cpp)
@@ -408,6 +409,7 @@ set(TEST_TARGETS
   physics_plant_log_test
   physics_jolt_rollout_test
   nav_dyn_bike_test
+  nav_dyn_bike_dg_test
   nav_dyn_4w_test
   nav_dyn_spin_test
   physics_dyn_contact_test
@@ -2097,6 +2099,13 @@ target_link_libraries(nav_dyn_4w_test
     GTest::gtest_main
 )
 
+target_link_libraries(nav_dyn_bike_dg_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(nav_potential_test
   PRIVATE
     cvc
@@ -2511,6 +2520,7 @@ target_compile_features(nav_plant_test PRIVATE cxx_std_17)
 target_compile_features(physics_plant_log_test PRIVATE cxx_std_17)
 target_compile_features(physics_jolt_rollout_test PRIVATE cxx_std_17)
 target_compile_features(nav_dyn_bike_test PRIVATE cxx_std_17)
+target_compile_features(nav_dyn_bike_dg_test PRIVATE cxx_std_17)
 target_compile_features(nav_dyn_4w_test PRIVATE cxx_std_17)
 target_compile_features(nav_dyn_spin_test PRIVATE cxx_std_17)
 target_compile_features(physics_dyn_contact_test PRIVATE cxx_std_17)
@@ -3028,6 +3038,7 @@ cvc_discover_tests(nav_plant_test)
 cvc_discover_tests(physics_plant_log_test)
 cvc_discover_tests(physics_jolt_rollout_test)
 cvc_discover_tests(nav_dyn_bike_test)
+cvc_discover_tests(nav_dyn_bike_dg_test)
 cvc_discover_tests(nav_dyn_4w_test)
 cvc_discover_tests(nav_dyn_spin_test)
 cvc_discover_tests(physics_dyn_contact_test)
