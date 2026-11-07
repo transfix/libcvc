@@ -386,13 +386,26 @@ already holds the world should download nothing.
 - **A client looks for an asset by hash, nearest first:**
   1. the application's own bundle: a client built or packaged with a world pack;
   2. the local content cache: what it fetched before, or a pack copied in ahead of time;
-  3. an installed world pack: a cvcpkg package checked against the registry's sha256, as a
-     document's `data:` archives are today;
+  3. a world pack the client was pointed at: a cvcpkg package, an archive from a URL, or a data
+     directory on disk (below);
   4. the relay's origin, or the CDN it names (§3).
   The hash makes every local copy safe to use without asking the server.
 - **A world pack** is a world document and its assets, versioned and content-addressed. The relay
   is deployed with one, and the same pack can be bundled with a client. When the server's world
   moves on, the client fetches only the assets whose hashes it lacks.
+- **A pack can come from anywhere** (Q16, settled 2026-11-07). What makes it a pack is its index
+  (the world document, every asset's hash and size, and where in the pack each one is), not how it
+  arrived:
+  - a cvcpkg package, checked against the registry's sha256, as a document's `data:` archives are
+    today;
+  - a generic archive downloaded from a URL (zip or tar), checked against a hash the manifest or
+    the user gives;
+  - a data directory on disk: a mounted share, a checkout, an unpacked archive, an application's
+    install folder.
+  Each asset is checked against its hash as it is read, so a pack from an untrusted place can't
+  substitute content: it can only be missing things, which the client then fetches from the relay.
+  A client is pointed at packs by its viewer document, a command-line flag or an environment
+  variable, and may use several at once.
 - **Fetch by need, not up front.** A client fetches the room it joins: the statics' colliders
   where it spawns first, then the cells near it, coarse level of detail before fine. Until an
   asset arrives the client draws a stand-in (its bounds, or a coarser level), and until a cell's
@@ -553,7 +566,7 @@ asset delivery, **E** = end-to-end encryption.
 | RM2 | **Rooms made at run time,** by server programs and by participants where the rules allow. | RM1, S0 | S |
 | CF1 | **The features sections** and server tokens in `requires:`. | RM1 | S |
 | CF2 | **The stock conference components** under `cvc://conference/`; the example documents become layouts over them. | CF1 | M |
-| AD1 | **Assets by hash** in the manifest, with size and priority; the lookup order (bundle, cache, pack, relay); world packs as cvcpkg packages. | WD1 | M |
+| AD1 | **Assets by hash** in the manifest, with size and priority; the lookup order (bundle, cache, pack, relay); world packs from a cvcpkg package, an archive at a URL or a directory, each read through its index. | WD1 | M |
 | AD2 | **Fetch by need:** colliders first, cells near the client, coarse before fine; stand-ins; the browser's content cache. | AD1, WD9 for cells | M |
 | E0 | **Keys:** X25519 identity and prekeys signed by the device key, the key directory on the relay, safety numbers, the libsodium recipe. | — | M |
 | E1 | **Encrypted direct messages:** X3DH and the Double Ratchet; `chat.ari` gets txwtf's lock. | E0 | M |
@@ -612,8 +625,9 @@ mind from the start.
   lockstep later.
 - **Q15. May a private room leak a coarse position for area-of-interest filtering?** Proposed: no
   by default; a room may opt in.
-- **Q16. What is a world pack?** Proposed: a cvcpkg package (a world document plus its assets by
-  hash), so bundles, caches and installs share one format and one checksum.
+- **Q16. What is a world pack? Settled (owner, 2026-11-07):** a world document and its assets
+  with an index, from any source: a cvcpkg package, a generic archive from a URL, or a local data
+  directory on disk (§12).
 - **Settled with C++ for the core (owner, 2026-11-07):** the world runtime is C++, behind a scene
   node and pycvc; the lab's panels are `.ari` components over it.
 
