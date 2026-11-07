@@ -14,7 +14,11 @@ Headless, in this process (no GL):
   5. rollout, local_raster and CarsLog (npz and csv);
   6. the template, run headless: it logs states, commands, coefficients, rasters and the effective
      settings; it drives on a generated world and on a city loaded by --uri; --min-arrivals and a
-     controller that raises set the exit code; --copy writes cars.py and cars.ari.
+     controller that raises set the exit code; --copy writes cars.py and cars.ari;
+  7. the pieces another host reuses: cars.ari's panels come from cars_panels.ari by cvc://, a
+     state from a host's own arrays (state_from) goes in a CarsLog, the rasters and pictures, the
+     coefficient plots, Cars at given starts and goals, add_args and apply_settings, save_log's
+     meta and exit_code.
 Script-style, like the other pycvc tests; self-skips (exit 0) when the running pycvc predates the
 bindings pycvc_gl.cars needs.
 """
@@ -231,6 +235,66 @@ try:
         "it writes cars.py and cars.ari",
     )
     check(C.run(T.controller, T.PARAMS, argv=["--copy", mine]) == 1, "and refuses to overwrite")
+
+    # 7. the pieces for another host: the panels as units, a state from its own arrays, the
+    #    pictures, the flags and settings, the log and the exit code.
+    import argparse
+
+    from pycvc_gl.ariadne import Host
+
+    host = Host(mode="headless", name="pieces", component_paths=[C.COMPONENTS])
+    warns = host.load(str(C.template_files()[1]))
+    check(not [w for w in warns if "unit" in w or "import" in w],
+          f"cars.ari's panels come from cars_panels.ari ({warns})")  # fmt: skip
+    flat = C.flat_world(4.84)
+    s = C.state_from(flat, [0.0, 2.0], [0.0, 0.0], [0.0, 0.0], [1.0, 2.0], [[50.0, 0.0], [0.0, 0.5]],
+                     t=1.5, tick=30, driving="mine", nav={"alpha": [0.1, 0.2]})  # fmt: skip
+    check(s.n == 2 and s.ranges.shape == (2, 16) and s.world == "flat" and s.t == 1.5,
+          "state_from: a state from a host's own arrays")  # fmt: skip
+    check(s.collided.all() and not s.reached[0] and s.reached[1],
+          "its contacts and arrivals, worked out on the world")  # fmt: skip
+    check(np.allclose(s.vx, [1.0, 2.0]) and np.allclose(s.length, 4.84), "its defaults")
+    log = C.CarsLog()
+    log.record(s)
+    log.coeffs(s.nav, s.n)
+    check(len(log) == 1 and log.arrays()["coef_alpha"].shape == (1, 2), "and CarsLog takes it")
+    belief = np.zeros_like(flat.occ)
+    r = C.raster_arrays(flat, s, 0, 40.0, 32, belief=belief, cost=lambda X, Y: X + Y)
+    check(r["sdf"].shape == (32, 32) and r["belief"].max() == 0 and r["cost"].dtype == np.float32,
+          "raster_arrays: distance, belief and cost around a car")  # fmt: skip
+    rp = C.raster_arrays(flat, s, 0, 40.0, 32, belief=np.full(flat.occ.shape, 0.5, np.float32))
+    check(rp["belief"].dtype == np.float32 and np.allclose(rp["belief"], 0.5),
+          "a belief as a probability stays one")  # fmt: skip
+    pics = C.raster_pictures(r, s, 0, 40.0, path=[(5.0, 0.0), (10.0, 0.0)])
+    check(sorted(pics) == ["raster.cost", "raster.sdf"] and pics["raster.sdf"].shape == (32, 32, 3),
+          "raster_pictures: the panel's two pictures")  # fmt: skip
+    hist = {}
+    C.plot_coefficients(host, hist, {"alpha": np.array([0.1, 0.2]), "beta": np.array([1.0, 2.0])}, 1)
+    check(host.get("plot.coef0_name") == "alpha" and host.get("plot.coef2_name") == ""
+          and hist["beta"] == [2.0], "plot_coefficients: the chosen car's coefficients")  # fmt: skip
+    cars = C.Cars(flat, 2, "kinematic", starts=[[0.0, 0.0], [0.0, 20.0]],
+                  goals=[[30.0, 0.0], [0.0, 60.0]], app=host.app, prefix=host.prefix)  # fmt: skip
+    st = cars.state()
+    check(np.allclose(st.pos, [[0.0, 0.0], [0.0, 20.0]], atol=1e-3)
+          and np.allclose(st.heading, [0.0, math.pi / 2], atol=1e-3),
+          "Cars(starts, goals): placed, facing their goals")  # fmt: skip
+    p = C.add_args(argparse.ArgumentParser())
+    params = os.path.join(TMP, "params.json")
+    with open(params, "w") as f:
+        json.dump({"nav.vehicle.vmax": 9, "view.car": 1}, f)
+    a = p.parse_args(["--set", "nav.vehicle.vmax=7", "--world", "flat", "--params", params,
+                      "--log", "x.npz", "--min-arrivals", "2"])  # fmt: skip
+    done = C.apply_settings(host, a, {"run.cars": 3, "nav_plant.vehicle": None})
+    check(host.get("nav.vehicle.vmax") == "7" and host.get("view.car") == "1"
+          and host.get("run.world") == "flat" and host.get("run.cars") == "3"
+          and "nav_plant.vehicle" not in done, "add_args and apply_settings: --set over --params")  # fmt: skip
+    out = C.save_log(log, host, os.path.join(TMP, "pieces.npz"), who="pieces")
+    meta = json.loads(str(np.load(out)["meta"]))
+    check("nav.vehicle.vmax" in meta["settings"] and meta["who"] == "pieces" and "world_keys" in meta,
+          "save_log: every setting in the log's meta")  # fmt: skip
+    check(C.exit_code(0, error="boom") == 1 and C.exit_code(0, arrivals=1, min_arrivals=2) == 3
+          and C.exit_code(4, arrivals=2, min_arrivals=2) == 4, "exit_code: 1, 3 or the document's")  # fmt: skip
+    host.close()
 finally:
     shutil.rmtree(TMP, ignore_errors=True)
 

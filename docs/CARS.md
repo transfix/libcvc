@@ -40,6 +40,7 @@ Contents:
 - [The panels](#the-panels)
 - [Batch runs](#batch-runs)
 - [From a script](#from-a-script)
+- [Your own host](#your-own-host)
 - [Known limits](#known-limits)
 
 ## Your controller
@@ -280,6 +281,10 @@ path), `view.raster_m` (the raster window, m), `show.plans`.
 
 ## The panels
 
+Settings, World, Rasters, the coefficient plots and Run's world choice are units in the package's
+`cars_panels.ari`, which `cars.ari` imports ([Your own host](#your-own-host)). To change one, put
+a window of your own in its place in your copy of `cars.ari`.
+
 - **Run**: the world (and a city's URI), the vehicle, the number of cars, the controller (yours,
   or libcvc's navigator as a baseline), ticks per frame, a new goal on arrival, pause, the camera
   and the chosen car. New goals and Reset are document buttons that call back into Python
@@ -300,6 +305,11 @@ path), `view.raster_m` (the raster window, m), `show.plans`.
   The predicted path is `pycvc_gl.cars.rollout`: your controller driving every car forward on
   nav's bicycle for `view.horizon` seconds. It is what the controller plans, not what the plant
   will do. The scene draws it too.
+- **The scene**: each Humvee (and each car on nav's bicycle, which has a Humvee's body) is the
+  Humvee's model, with a tag in the car's colour above it. The model is an installed
+  `vehicle-humvee`'s, else the Austin package's `Humvee.glb` (from the city, or asked for as
+  `data.vehicles` when another world is in use; from the data cache after the first download).
+  Until it is there, and for a RoboRacer, a car is a box its size.
 
 ## Batch runs
 
@@ -355,6 +365,66 @@ runs libcvc's navigator. `nav_weights=` gives it a `.cvcnav` policy and `scale=`
 that policy was trained in (normalized units per metre; `--nav-weights` and `--nav-scale` on
 the command line). `Cars(..., app=app,
 prefix=...)` keeps its settings in that app's state tree (`pull()` and `publish()`).
+`Cars(..., starts=..., goals=...)` places the cars ((n, 2) world positions) instead of picking
+random ones.
+
+## Your own host
+
+A host with its own loop, its own document, or cars stepped some other way (its own navigator,
+its own simulator) uses the template's pieces rather than copying them. GRL-SNAM's Ariadne ports
+are built this way.
+
+- **Panels.** `cars_panels.ari` holds the template's panels as units:
+  - `cars_settings` (window): the navigator, vehicle and plant knobs;
+  - `cars_world` (window): the generator's parameters, shown with World: Generated;
+  - `cars_world_choice` (group): the World combo, the city's URI and Load;
+  - `cars_coefficients` (group): four coefficient plots;
+  - `cars_rasters` (window): the two pictures around the chosen car (arg `cost`: the second
+    one's caption).
+
+  Pass `C.COMPONENTS` as a component path and import the file by `cvc://`. A window's `pos:` and
+  `size:` at the include site place it:
+
+  ```python
+  host = Host(mode=args.mode, name="mine", component_paths=[C.COMPONENTS])
+  ```
+
+  ```yaml
+  import: cvc://cars_panels.ari
+  windows:
+    - include: cars_settings
+      pos: [16, 422]
+    - window: Mine
+      children:
+        - include: cars_coefficients
+  ```
+
+  The units bind the template's keys, so the document needs those keys too: `run.world`,
+  `run.uri`, `run.data_path`, `world.*`, `view.car`, `view.raster_m`, and a scene with a
+  `city` node (`source: { data: city }`) and a `generated_world` node named `gen`.
+- **Flags and settings.** `C.add_args(parser)` adds `--world`, `--uri`, `--data-path`, `--set`,
+  `--params`, `--log`, `--raster-every` and `--min-arrivals` to an `argparse` parser.
+  `C.apply_settings(host, args, flags)` applies them over the document's `init:`:
+  - the `--params` file first;
+  - then each `--set`;
+  - then `flags` ({key: value}; a None value is skipped);
+  - then `--world`.
+
+  Last, `--uri` points `data.city` at that world.
+- **Worlds.** `C.make_world(host, kind)` builds the world `run.world` names, from the document's
+  `data.city`, its `world.*` keys or a flat square. `C.show_world(host, kind, doc)` shows only
+  that one in the scene.
+- **State.** `C.state_from(world, x, y, heading, speed, goal, ...)` makes a `CarsState` from your
+  own arrays, with its ranges and contacts worked out on the world. `CarsLog`, the pictures and the
+  panels then take your cars as they take `Cars`'.
+- **Pictures and plots.** `C.raster_arrays(world, s, k, size_m, belief=, cost=)` gives car `k`'s
+  rasters as the log keeps them. `C.raster_pictures(r, s, k, size_m, path=)` turns them into the
+  `cars_rasters` panel's two pictures (publish each with `host.publish_image`).
+  `C.plot_coefficients(host, history, coeffs, k)` fills the `cars_coefficients` plots. `C.chosen(host, n)` is
+  the chosen car, and `C.raster_size(host, length)` the pictures' width.
+- **The end of a run.** `C.save_log(log, host, path, **meta)` saves the log with every setting
+  and the `world.*` keys in its meta. `C.exit_code(code, error=, arrivals=, min_arrivals=)`
+  gives the template's exit code: 0, 1 or 3.
 
 ## Known limits
 
@@ -365,7 +435,8 @@ prefix=...)` keeps its settings in that app's state tree (`pull()` and `publish(
   lock. Each vehicle on a plant has its own.
 - **The navigator is tuned for its policy's bodies.** As a baseline on vehicles it often does
   worse than a controller made for them. GRL-SNAM's docs/PLANTS.md says why.
-- **A scene node's `visible:` hides that node alone.** cvcGL keeps what a data node drew (its
-  children), and the generated_world node's meshes (nodes beside it), on screen. So the template
-  hides the unused world itself: it clears `data.city` and hides the generated world's nodes by
-  name.
+- **The template hides the unused world itself.** Before transfix/libcvc#1037, a scene node's
+  `visible:` hid that node alone: cvcGL kept what a data node drew (its children), and the
+  generated_world node's meshes (nodes beside it), on screen. So `show_world()` clears
+  `data.city` and hides the generated world's nodes by name, which libcvc builds with #1037 no
+  longer need but which does no harm.
