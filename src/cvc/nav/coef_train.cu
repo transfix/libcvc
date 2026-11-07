@@ -358,6 +358,9 @@ double loss_and_grad_cuda(const training_scene &scene, const train_config &cfg,
     throw std::runtime_error(
         "cvc::nav::loss_and_grad_cuda: the dynamic rollout is CPU-only for now "
         "(coef_trainer)");
+  if (cfg.point_mass != point_mass_integrator::semi_implicit)
+    throw std::runtime_error("cvc::nav::loss_and_grad_cuda: train_config::point_mass other than "
+                             "semi_implicit is CPU-only (coef_trainer)");
   const field_stack fs = scene.field();
   const int h = cfg.hidden;
   if (h > kMaxH)
@@ -443,6 +446,9 @@ coef_mlp train_coef_mlp_cuda(const training_scene &scene, const train_config &cf
     throw std::runtime_error(
         "cvc::nav::train_coef_mlp_cuda: the dynamic rollout is CPU-only for now "
         "(coef_trainer)");
+  if (cfg.point_mass != point_mass_integrator::semi_implicit)
+    throw std::runtime_error("cvc::nav::train_coef_mlp_cuda: train_config::point_mass other than "
+                             "semi_implicit is CPU-only (coef_trainer)");
   const int h = cfg.hidden;
   if (h > kMaxH)
     throw std::runtime_error("cvc::nav::train_coef_mlp_cuda: hidden > 64 unsupported");

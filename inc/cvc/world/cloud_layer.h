@@ -44,6 +44,21 @@
 // not the raw density.
 // Morphs are linear crossfades of maps that were lumped and normalized once, so the optical depth
 // of a crossfade is the crossfade of the optical depths: the shadow follows the morph exactly.
+//
+// Which cells hold a cloud evolves (evolve()): a Dobashi-style cellular automaton [Dobashi et al.
+// 2000] runs over the cell grid, one bit-packed column of `layers` bits per cell with Dobashi's
+// three states (humidity, activation, cloud). Activation spreads through humid bits, up and down a
+// whole column at once and, by chance, sideways to the four neighbours; cloud bits go extinct at
+// random and humidity comes back, so clouds grow, last and dissipate in patches. The cells with the
+// most cloud bits hold the deck's clouds, exactly round(coverage * cells) of them, so `coverage`
+// still means what it says. A cell's cloud appears and fades over `fade_s` (its weight(), a
+// smoothstep of its presence), and the shadow and far slices take the same weight the renderer
+// gives the cell's volume.
+// Orographic coupling (set_ground): air pushed up a windward flank condenses, so a cell over one
+// gets more humidity and activation, and one over a lee slope, where the air sinks, loses its
+// cloud sooner. The pattern drifts over the ground (set_drift), so a cloud forms as it reaches a
+// mountain's windward side and dies past the crest; the deck gathers on the windward flanks while
+// a high peak stands through it.
 #ifndef CVC_WORLD_CLOUD_LAYER_H
 #define CVC_WORLD_CLOUD_LAYER_H
 
@@ -70,6 +85,14 @@ struct cloud_layer_params {
   int far_texels = 16;    // far-density texels per cell (fewer when a slice would pass 256)
   int far_layers = 10;    // far-density slices between base and top
   int depth = 6;          // the cloud grammar's recursion cap (cvc::lsys::cloud_params::depth)
+  // The evolving coverage: seconds per automaton step at rate 1 (evolve's `rate` scales it), a
+  // cloud's fade in or out (seconds), the heading the wind blows toward (degrees, as sun_az: 90 is
+  // +x), and the strength of the orographic coupling (0: none; 1: a steep windward flank nearly
+  // always holds a cloud).
+  double evolve_s = 5.0;
+  double fade_s = 20.0;
+  double wind_az = 90.0;
+  double orographic = 1.0;
   // The renderer's opacity per unit density, as (density, opacity) pairs in rising density,
   // linear between them: what the shadow and the far slices integrate, so they show the cloud
   // the volume shows and not the faint haze its transfer function hides. Empty: the density.
@@ -78,10 +101,15 @@ struct cloud_layer_params {
 
 struct cloud_cell {
   int i = 0, j = 0;
-  bool occupied = false;
+  bool occupied = false;     // the automaton gives this cell a cloud now
   double cx = 0.0, cy = 0.0; // the cloud's centre in the pattern frame, metres
   double phase = 0.0;        // its morph offset, in variant steps
   int jx = 0, jy = 0;        // its offset from the cell centre, in 1/far_texels of a cell
+  double presence = 0.0;     // its crossfade, 0..1: moves toward `occupied` over fade_s
+  double cloud = 0.0;        // the share of its column's bits that are cloud
+  double forcing = 0.0;      // the orographic forcing under it at the last step, -1..1
+  // The weight its cloud is drawn and shades with: a smoothstep of the presence.
+  double weight() const { return presence * presence * (3.0 - 2.0 * presence); }
 };
 
 class cloud_layer {
@@ -95,9 +123,46 @@ public:
   const std::vector<cloud_cell> &cells() const { return m_cells; }
   int occupied() const;
   // Re-lay the cells for a world of half-width `area` (the period follows it). A cell's offset and
-  // morph depend on its (i, j) alone; which cells hold a cloud is re-ranked for the new count. The
-  // maps are kept, and the shadow patches are re-made only when the mask's texel changes.
+  // morph depend on its (i, j) alone. The automaton starts over on the new grid and is run until it
+  // has settled (warm()), with the cells' presence snapped to it. The maps are kept, and the shadow
+  // patches are re-made only when the mask's texel changes.
   void set_area(double area);
+
+  // ── The evolving coverage
+  // Run the automaton for dt seconds at `rate` (dt * rate / evolve_s steps: whole steps run, the
+  // remainder carries to the next call) and move every cell's presence toward its target by
+  // dt / fade_s, split at the steps so that one call of 10 s is many of 0.1 s. rate 0 freezes the
+  // automaton; fades still finish.
+  void evolve(double dt, double rate = 1.0);
+  // One automaton step, then the ranking (no fade).
+  void step();
+  // Run `steps` steps and snap every presence to its cell's target (a deck that has been there).
+  void warm(int steps);
+  // Every presence to its target at once.
+  void snap();
+  long generation() const { return m_gen; }
+  int layers() const { return CA_LAYERS; }
+  // The pattern's offset in the world (world xy = pattern xy + drift): where the cells are over
+  // the ground, for the orographic forcing.
+  void set_drift(double dx, double dy) {
+    m_dx = dx;
+    m_dy = dy;
+  }
+  void set_orographic(double s) { m_p.orographic = s < 0.0 ? 0.0 : s; }
+  void set_wind(double az_deg) { m_p.wind_az = az_deg; }
+  // The ground under the deck, for orographic coupling: rows x cols heights, row-major, sample
+  // (r, c) at (x0 + c dx, y0 + r dy) (cvc::height_field's layout). It is kept box-averaged to
+  // about an eighth of a cloud. Empty: no ground, no coupling.
+  void set_ground(const std::vector<float> &heights, int rows, int cols, double x0, double y0,
+                  double dx, double dy);
+  bool has_ground() const { return !m_gh.empty(); }
+  // The orographic forcing at world (x, y): the ground's slope along the wind, averaged over a
+  // cloud's footprint, over SLOPE_REF and clamped to [-1, 1]; positive on a windward flank, 0 off
+  // the ground or without one. Its strength is applied in the automaton, not here.
+  double forcing(double x, double y) const;
+  // A cell's cloud centre in the world: its pattern centre moved by the drift, the copy nearest
+  // the ground's centre (the pattern's origin without a ground).
+  void cell_world(const cloud_cell &c, double &x, double &y) const;
 
   // The unit vector toward the sun.
   void sun_dir(double &x, double &y, double &z) const;
@@ -115,7 +180,8 @@ public:
   int cell_variant(const cloud_cell &c, long k) const;
 
   // A cell's density at morph clock m: n*n*nz floats in [0, 1], cvc::lsys::cloud_index layout,
-  // spanning [cx - extent, cx + extent]^2 x [base, top].
+  // spanning [cx - extent, cx + extent]^2 x [base, top]. Its full cloud: the renderer applies the
+  // cell's weight() (the shadow and far slices below already do).
   void cell_field(const cloud_cell &c, double m, std::vector<float> &out) const;
   // One variant's lumped, normalized map (the u = 0 field of a cell showing it).
   const std::vector<float> &variant_map(int v) const { return m_maps[v]; }
@@ -123,7 +189,8 @@ public:
   // The periodic shadow mask at morph clock m: shadow_size()^2 bytes, row-major (x fastest), texel
   // (tx, ty) centred on the pattern point ((tx + 0.5), (ty + 0.5)) * period_m() / shadow_size().
   // 255 is full sun; a texel's shade is floor + (1 - floor) * exp(-k * tau), tau the density
-  // integrated in metres along the sun from that base-plane point.
+  // integrated in metres along the sun from that base-plane point, each cell's weighted by its
+  // weight().
   int shadow_size() const { return m_m * m_s; }
   void shadow_mask(double m, double k, double floor, std::vector<unsigned char> &out) const;
   // The same optical depth, unshaded (for tests and tuning): shadow_size()^2 floats.
@@ -137,7 +204,7 @@ public:
 
   // The periodic far opacity at morph clock m: far_size()^2 * far_layers bytes, x fastest, then y,
   // then the slice (bottom first), 255 the table's largest opacity. weight[k] scales cell k's
-  // cloud (cells() order; missing = 1).
+  // cloud (cells() order; missing = 1), on top of its weight().
   int far_size() const { return m_m * m_f; }
   // The opacity a far byte of 255 stands for: the opacity table's largest value (1 without one).
   double opacity_max() const { return m_amax; }
@@ -150,8 +217,26 @@ public:
   void far_bytes(const std::vector<float> &acc, int slice0, int slices,
                  std::vector<unsigned char> &out) const;
 
+  // The automaton's layers per cell (bits in a column word).
+  static constexpr int CA_LAYERS = 32;
+  // The steps warm() runs after a new layout.
+  static constexpr int WARM_STEPS = 200;
+
 private:
   cloud_layer_params m_p;
+  // The automaton: per cell, its column's humidity, activation and cloud bits.
+  std::vector<std::uint32_t> m_hum, m_act, m_cld, m_tmp;
+  long m_gen = 0;
+  double m_carry = 0.0; // the step fraction evolve() has run toward the next step
+  double m_dx = 0.0, m_dy = 0.0;
+  // The ground, box-averaged: m_gw x m_grows samples from (m_gx0, m_gy0), (m_gsx, m_gsy) apart.
+  std::vector<float> m_gh;
+  int m_gw = 0, m_grows = 0;
+  double m_gx0 = 0.0, m_gy0 = 0.0, m_gsx = 1.0, m_gsy = 1.0;
+  void seed_automaton();
+  void rank_cells();
+  void fade(double share);
+  double ground_at(double x, double y) const;
   int m_m = 2;         // period, in cells
   double m_c = 0;      // cell size, metres
   double m_amax = 1.0; // the opacity table's largest value

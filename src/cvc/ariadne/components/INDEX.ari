@@ -106,7 +106,7 @@ catalog:
   - component: sky_controls
     file: sky_controls.ari
     unit: sky_controls
-    binds: "<prefix>.{keys}.{drift,morph,shadow}"   # read every frame by the cloud_sky realizer
+    binds: "<prefix>.{keys}.{drift,morph,evolve,orographic,shadow}"   # read every frame by the cloud_sky realizer
     for: "a `type: cloud_sky` node"
     args: { keys: sky, title: Sky, id: sky_controls }   # defaults; keys = the node's `keys:` prop
   - component: mesh_tools

@@ -190,14 +190,14 @@ _CREATE_DEFAULTS = (5.0, 1.0, 0.5, 0.1, 5e-3, 0.01, 2.0, 0.01, 1.0, 5.0, 0.95, 0
 
 def test_sampled_multi_start_args():
     """The L_multi start-sampling args (GRL-SNAM #113): the degenerate default is the legacy single
-    start, a sampled range changes the loss, validation scores the base seed, and step k draws with
-    seed + k."""
+    start, semi-implicit unless ms_semi_implicit = 0, a sampled range changes the loss, validation
+    scores the base seed, and step k draws with seed + k."""
     with tempfile.TemporaryDirectory() as d:
         init = os.path.join(d, "init.cvcnm")
         _write_random_cvcnm(init, patch_size=16, seed=5)
         args = _packed(_synthetic_batch(seed=13))
 
-        def create(ms_count, frac_lo, frac_hi, seed, semi=0):
+        def create(ms_count, frac_lo, frac_hi, seed, semi=1):
             return pycvc.nav_material_trainer_create(init, *_CREATE_DEFAULTS, ms_count, frac_lo, frac_hi,
                                                      seed, semi)
 
@@ -207,10 +207,11 @@ def test_sampled_multi_start_args():
         legacy = loss(pycvc.nav_material_trainer_create(init))
         # A degenerate range draws nothing: any ms_count/seed is the legacy single start, exactly.
         assert loss(create(10, 0.9, 0.9, 123)) == legacy, "degenerate range moved the loss"
+        assert loss(create(1, 0.9, 0.9, 0, 0)) != legacy, "the default is not semi-implicit"
         sampled = create(4, 0.8, 0.98, 5)
         assert loss(sampled) != legacy, "sampled starts did not reach the loss"
         assert loss(sampled) == loss(sampled), "validation loss is not deterministic"
-        assert loss(create(4, 0.8, 0.98, 5, 1)) != loss(sampled), "semi-implicit flag ignored"
+        assert loss(create(4, 0.8, 0.98, 5, 0)) != loss(sampled), "explicit flag ignored"
 
         # step k samples with seed + k: at lr=0 the weights never move, so handle(seed=5)'s second
         # step scores what handle(seed=6) scores at its base seed. (step vs loss: same value, but

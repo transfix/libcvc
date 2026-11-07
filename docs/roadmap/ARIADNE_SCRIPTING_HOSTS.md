@@ -4,7 +4,9 @@ Status:
 - **P1 shipped** in transfix/libcvc#985 (d0bb057d, released in v3.7.11): `arix` and `ariglx`,
   natively, with Linux packages on cvcpkg.org. §3 and §4 describe what shipped and mark what
   didn't. The user-facing reference is [ARIADNE.md](../ARIADNE.md) §9.6.
-- **The rest is design** (2026-11-02; §4.6, §5.5, §5.6 and §8.2–8.9 added 2026-11-03).
+- **The rest is design** (2026-11-02; §4.6, §5.5, §5.6 and §8.2–8.9 added 2026-11-03;
+  §6.5, application services: an ASGI API and live state from one `arisrvx`, and phases
+  S5–S7 added 2026-11-05).
 - Each phase in §10 becomes one or more PRs, and the reference moves into ARIADNE.md as each one
   lands.
 
@@ -703,6 +705,272 @@ to WASI. Guests also take any language that compiles to wasm, and they run the s
 the browser. Once either is in, it's the better engine for client code, and RestrictedPython stays
 for clients that need Python's libraries.
 
+### 6.5 Application services: an HTTP API and live state from one process
+
+Added 2026-11-05 for cy-pca/cyprov, CyberPC Angel's VPS and colo provisioning service. The
+same shape fits any service that needs a REST API for programs and live views for Ariadne
+clients.
+
+**The shape.** One `arisrvx` process holds three things:
+
+- the relay, as today;
+- the server document (S0);
+- the script thread (S1). The thread runs **one asyncio event loop**, which serves both an
+  ASGI app (FastAPI on uvicorn) and the `room-call` functions (S2).
+
+Programs and webhooks reach the service over HTTP/JSON. Ariadne clients (`ari`, `arigl`,
+`arix`, `ariglx`, the browser) reach it over the state plane: a server-published subtree for
+live views, and `room-call` for actions. Both front ends call the same Python service layer.
+
+```
+ programs, webhooks ──HTTP/JSON──► uvicorn ─┐
+                                           ├─► service layer (Python, asyncio) ──► DB, outbound APIs
+ Ariadne clients ──room-call──► relay ─────┘            │
+        ▲                                               │ host.set_tree("app.…")
+        └──────── replicated "app.*" subtree ◄── relay ◄┘  (applied on the next relay tick)
+```
+
+TLS is terminated by a reverse proxy in front of both the HTTP port and the WebSocket port,
+the same way cyprty's relay is served today. Native clients that dial gRPC directly need
+transport security of their own (see "Transport for native clients" below).
+
+**Packages.** Everything the Python side needs is on cvcpkg for cp312. Checked 2026-11-05:
+
+- `fastapi-cp312` 0.141.1, `starlette-cp312` 1.7.0, `uvicorn-cp312` 0.53.0;
+- `pydantic-cp312` 2.13.4, with native `pydantic-core-cp312` 2.46.4;
+- `httpx-cp312`, `httpcore-cp312`;
+- `sqlalchemy-cp312` 2.0.50, `aiosqlite-cp312`, `alembic-cp312` 1.20.0;
+- `pyjwt-cp312`, `cryptography-cp312` 48.0.0;
+- `websockets-cp312`, `anyio-cp312`, `h11-cp312`, `python-multipart-cp312`.
+
+Unless noted they are noarch. `cvcpkg install arisrvx fastapi-cp312 uvicorn-cp312 …` puts them
+in the host's prefix, and the embedded interpreter finds them there (§3.1). No venv is needed.
+
+#### 6.5.1 The script thread's event loop (part of S1)
+
+- The script thread creates an asyncio loop at start and runs it until shutdown.
+  `Host().loop` is that loop. Under plain `python` it is the running loop.
+- **Relay to Python.** Room-call requests, connection authentication (6.5.4), signals and
+  shutdown are posted to the loop with `call_soon_threadsafe`. The relay never waits on them.
+- **Python to relay.**
+  - `host.set`, `set_tree` and `set_series` queue mutations. The relay applies them on its next
+    tick, coalesced per path, so a burst of writes costs one delta.
+  - A per-tick byte cap (`--script-write-budget`, with a default) keeps a runaway writer from
+    starving the relay. Writes past the cap wait for the next tick, in order.
+- **Sync and async functions.** Async exports are awaited on the loop. Sync exports run on the
+  loop thread, so they must be quick. Blocking or CPU-heavy work goes to
+  `await asyncio.to_thread(...)`. A sync export that runs longer than `--script-slow-ms`
+  (default 50 ms) logs a warning with its name, because it stalls every other caller.
+- **One interpreter, one GIL.** This is unchanged from §3.3. The relay's own threads never take
+  the GIL.
+
+#### 6.5.2 Serving an ASGI app (part of S1)
+
+```python
+# main.py, run as: arisrvx --python main.py [relay flags]
+from pycvc.ariadne import Host, serve_asgi
+from myservice.api import app          # a FastAPI app
+from myservice import rpc              # room-call exports (6.5.5)
+
+host = Host()                          # the arisrvx's own runtime (§3.2 embedded mode)
+serve_asgi(app, host="127.0.0.1", port=8780,
+           proxy_headers=True, forwarded_allow_ips="10.10.10.5")
+host.run()                             # until SIGTERM; then ASGI shutdown, then the relay
+```
+
+- `serve_asgi` builds a `uvicorn.Config` and schedules `uvicorn.Server(config).serve()` as a task
+  on `host.loop`. Several apps on several ports are allowed.
+- Uvicorn installs signal handlers only on the main thread (to verify per uvicorn version,
+  §9). The script thread isn't the main thread, so the host keeps ownership of signals
+  (`host_signals.h`).
+- **Lifespan.**
+  - The app's startup runs before the relay starts accepting clients. A startup failure exits
+    non-zero with the traceback.
+  - On SIGTERM or SIGINT the host stops accepting, runs uvicorn's graceful shutdown (bounded by
+    `--shutdown-timeout`, default 10 s), runs the app's shutdown, cancels the loop's remaining
+    tasks, and then stops the relay.
+- Under plain `python main.py` (#985's `Host`, no relay), `serve_asgi` and `host.run()` behave the
+  same, so the API runs and is tested without arisrvx. Room-call exports then simply have no
+  callers.
+- `--http-listen ADDR:PORT` is a shorthand for scripts that export one `app` and don't call
+  `serve_asgi` themselves: `arisrvx --python main.py --http-listen 127.0.0.1:8780` serves
+  `main.app`.
+
+#### 6.5.3 Server-published subtrees (part of S0)
+
+Today arisrv relays only `conf.*` (`shard.add_interest("conf")`, with enforcement on). A server
+publishes its own namespaces in its document:
+
+```yaml
+server:
+  publish: [cyprov]          # replicated to clients; only the server writes under it
+```
+
+- **Writes.** Only the server document's programs and the script thread can write a published
+  namespace. A client write there is refused, as for any path outside its bound subtree.
+- **Reads.** By default every authenticated client receives the whole published subtree. With
+  6.5.6, each client receives only what its principal may read.
+- **Size.** A published subtree is state, not a database. Keep large or historical data behind
+  HTTP, and publish only what a live view shows: status, progress, rings of recent samples.
+
+#### 6.5.4 Identity: an authenticate hook (S5)
+
+Today a client proves only that it holds the shared room token, plus its pinned device key.
+Bound writes are keyed by participant. Applications need to know **who** is connecting.
+
+```python
+@host.authenticate                     # async; runs on host.loop, with a timeout
+async def auth(cred):                  # cred.bearer, cred.transport ("grpc"|"ws"), cred.peer
+    user = await verify_oidc(cred.bearer)        # e.g. JWT check with pyjwt, or the IdP's userinfo
+    if not user:
+        return None                              # refuse the connection
+    return {"id": user.sub, "name": user.name,
+            "roles": ["staff"] if "cyprov-staff" in user.groups else ["customer"]}
+```
+
+- **Where the bearer comes from.** Over gRPC it is the `authorization: Bearer` metadata. Over
+  WebSocket it is the `cvc-token.<t>` subprotocol. Both are already parsed for the room token
+  (`--room-token-file`). When a server has an `authenticate` hook, the hook decides instead of
+  the room token.
+- **What a principal is.** A plain dict with a required `id`. The relay keys bound writes by
+  `id`, room-call passes it to functions as `ctx.principal`, and rate limits (§6.4) key on it.
+- **What stays in Python.** Token validation (pyjwt, cryptography, or an HTTP call to the
+  IdP). This keeps JWT and signature crypto out of libcvc, which has no RSA or EC verification in
+  every build (ARIADNE.md §10.5).
+- **Timeouts and failures.** A hook that doesn't answer within `--auth-timeout` (default 5 s), or
+  that raises, refuses the connection. The client gets an `unauthenticated` error, not a hang.
+- **Revocation.** `host.disconnect(principal_id)` drops that principal's connections.
+  Re-validating long-lived connections is the application's job: it schedules a task that calls
+  `disconnect`.
+
+#### 6.5.5 `room-call` for applications (part of S2)
+
+§6.3's tier 1, with what a service needs:
+
+```python
+from pycvc.ariadne import export, CallError
+
+@export(clients=True, roles=["staff"], timeout=30)
+async def instances_list(ctx, project: str):
+    return await service.instances.list(ctx.principal, project)      # same call the HTTP route makes
+
+@export(clients=True, roles=["staff"], timeout=600)
+async def instance_create(ctx, project: str, spec: dict):
+    job = await service.instances.create(ctx.principal, project, spec,
+                                         idempotency_key=ctx.idempotency_key)
+    async for step in job.steps():
+        ctx.progress(step.fraction, step.message)                     # lands in the caller's reply subtree
+    return job.result
+```
+
+- **Client side.** `(room-call "instances_list" {project: "acme"})` returns a future, which
+  `await` resolves. `(room-call-async …)` returns at once. Progress updates appear under the
+  call's reply path, so a `progress:` widget can bind to them.
+- **Context.** `ctx` carries:
+  - `principal` (6.5.4);
+  - `call_id`;
+  - `idempotency_key`: the client's, or the `call_id`;
+  - `progress(fraction, message)`;
+  - `deadline`.
+- **Gates.** `roles=` is checked against the principal before the function runs. A missing role is
+  a `forbidden` error, and the function never sees the call.
+- **Errors.** `raise CallError("not_found", "no such project", detail={...})` reaches the client
+  as `{code, message, detail}`, which a DSL `try` catches. Any other exception becomes
+  `internal`: the traceback is logged on the server and never sent to the client.
+- **Limits.**
+  - The call is cancelled at `timeout` and the client gets `deadline_exceeded`.
+  - Results are capped (`--call-result-max`, default 1 MiB), and anything bigger belongs behind
+    HTTP.
+  - Concurrency and rate limits are per principal (§6.4).
+- **One service layer.** FastAPI routes and room-call exports are two thin front ends over the
+  same async service functions. Both take a principal, so the same authorization applies either
+  way.
+
+#### 6.5.6 Bound reads: per-principal read scope (S6)
+
+Bound writes keep a client from writing outside its subtree, but today every client still reads
+the whole relayed tree. A multi-tenant service needs reads bounded too:
+
+```python
+@host.read_scope                       # sync and quick; called at connect and on refresh
+def scope(principal):
+    if "staff" in principal["roles"]:
+        return ["cyprov"]
+    return ["cyprov.public"] + [f"cyprov.projects.{p}" for p in projects_of(principal["id"])]
+```
+
+- **What's filtered.** The relay sends a connection only the deltas, and the initial snapshot,
+  under its prefixes. The connection's own bound subtree and its call replies are always
+  included. This is the same per-connection filter the area-of-interest code already applies
+  to `conf.*`, extended to path prefixes.
+- **Changes.** `host.refresh_scope(principal_id)` re-evaluates the scope. Paths that become
+  readable arrive as a snapshot; for paths that stop being readable, the client gets a
+  retraction.
+- **Without a hook** nothing changes: every authenticated client reads everything published,
+  which suits staff-only consoles.
+
+#### 6.5.7 Clients join a server (part of S2)
+
+- **Declaring the server.** A document can name its server:
+
+  ```yaml
+  relay:
+    url: wss://example.com/app-ws        # or grpc://, grpcs:// (below)
+    token: oidc                          # or env:NAME
+    subscribe: [cyprov]                  # published namespaces to mirror into this document's tree
+  ```
+
+  `--relay URL` on the command line does the same.
+- **Which hosts.** `ari` gains this join mode. Today only arigl joins a relay, in conference
+  mode through `CVC_ARIADNE_RELAY`. The `x` hosts inherit it.
+- **The token.** `token: oidc` presents the document's OIDC session access token (`oidc_host.h`)
+  as the bearer and refreshes it on reconnect. The token never enters the tree, as for
+  `http-request`.
+- **Mirroring.** Subscribed namespaces appear read-only in the client's tree at the same paths,
+  so widgets bind to `cyprov.projects.acme.instances` like any other state.
+- **Transport for native clients.** arisrv's WebSocket listener has no TLS, and arisrv never
+  turns on the gRPC transport's TLS. Two routes:
+  - **wss:// through the proxy.** This needs the native WebSocket client to speak TLS: Beast's
+    SSL stream, the "native wss:// state transport" card in the conference work.
+  - **`grpcs://` direct.** arisrv(x) takes `--tls-cert` and `--tls-key`, and clients dial
+    `grpcs://`, using `state_transport_grpc::tls_config`, which already exists.
+
+  Either is enough for staff consoles. Pick one.
+
+#### 6.5.8 Testing without a server (S7)
+
+- **`pycvc.ariadne.testing.ServerHarness`.** A fake server Host for plain `python`. It holds an
+  in-process tree; `authenticate`, `read_scope` and `room-call` dispatch run as arisrvx would run
+  them; and `harness.client(principal)` returns an object with `call(name, **args)` and a view of
+  what that principal can read. Together with FastAPI's `TestClient`, a service's tests run under
+  `pytest` with no arisrvx and no network.
+- **One end-to-end test in libcvc's CI.** `arisrvx --python tests/echo_service.py`, with:
+  - an HTTP route;
+  - an export;
+  - an authenticate hook using a fixed test token;
+  - a published `echo.*` subtree.
+
+  An `arix test` document joins it, calls the export, checks the reply and progress, reads the
+  published subtree, and fails its read of a path outside its scope.
+
+#### 6.5.9 Operating it
+
+- **Checking before starting.** `arisrvx check main.py` imports the script without serving.
+  It reports missing modules (`requires: [python.fastapi, python.uvicorn]` in the server
+  document works as in §4.1), ports that are already bound, and flag errors.
+- **Logs.**
+  - Python's `logging` goes to stderr in the relay's format, which journald collects under
+    systemd.
+  - Tracebacks from exports and routes are logged on the server and never sent to clients.
+- **Secrets.** Tokens and keys stay in the environment or in files the application reads. The
+  tree, the published subtrees and room-call results never carry them. This is the same rule
+  `net_host` follows for documents.
+- **Process.** One `arisrvx` process per service, under systemd, with `Restart=on-failure`.
+  Durable work (jobs that must survive a restart) belongs in the application's database, not in
+  loop tasks.
+- **Reference service.** cy-pca/cyprov's `docs/plan/PLAN.md` describes the first service built
+  on this shape.
+
 ## 7. The demos and VolRover
 
 - **GRL-SNAM's Ariadne ports** (`grl_snam/ariadne/`: `live`, `fleet`, ...) run on #985 under
@@ -1105,8 +1373,24 @@ hook is declared in the block's `hooks:`, or registered by `ari_init` through th
     DSL programs under the same caps.
 15. **Priorities need a policy** (§8.5). Under the stock hosts' `round_robin`, a guest's priority
     is stored but changes no pick, until a host sets `state_exec.policy`.
+16. **Uvicorn inside an embedded interpreter** (§6.5.2). Confirm on the pinned uvicorn
+    (0.53.0) that `Server.serve()` off the main thread installs no signal handlers. Also confirm
+    that `asyncio`'s default loop on the script thread coexists with the relay's own threads.
+    Test it in S1 before relying on it.
+17. **Sync exports stall everyone** (§6.5.1). One interpreter means one slow sync handler delays
+    HTTP and room-call alike. The `--script-slow-ms` warning makes this visible, but it is a
+    convention, not a guarantee. Services should be async throughout.
+18. **Published state is not a database** (§6.5.3). Every byte under a published namespace is
+    replicated to every reader. Size rules and the per-tick write budget need measured defaults.
+19. **Native client transport security** (§6.5.7). Neither TLS route exists in the native
+    clients yet. Until one does, staff consoles join through a proxy only from inside the
+    network.
 
 ## 10. Phases
+
+**The application-services cut** is S0 → S1 → S2 + S5 → S7. It is what cy-pca/cyprov needs to
+start. S6 can follow, because cyprov's first consoles are staff-only. S3 and S4 aren't needed
+for it.
 
 | Phase | What | Needs | Size |
 |---|---|---|---|
@@ -1124,11 +1408,14 @@ hook is declared in the block's `hooks:`, or registered by `ari_init` through th
 | N1 | `ariglx` on Windows and macOS | pycvc packages for those platforms | M |
 | D1 | GRL-SNAM in the browser: torch-free inference, a demo page | W1 | M |
 | D2 | VolRover gap audit, then VolRover as an Ariadne app | P2 | L |
-| S0 | Server documents in stock arisrv (`--doc`) | — | M |
-| S1 | `arisrvx`: the engine on a script thread, operator Python | S0, P1 | M |
-| S2 | `room-call`: functions clients may call | S1 | M |
+| S0 | Server documents in stock arisrv (`--doc`), plus the `server: publish:` namespaces (§6.5.3) | — | M |
+| S1 | `arisrvx`: the engine on a script thread with an asyncio loop, operator Python (§6.5.1); `serve_asgi` / `--http-listen`, lifespan and graceful shutdown (§6.5.2); `arisrvx check`; the `arisrvx` recipe | S0, P1 | M |
+| S2 | `room-call`: functions clients may call, with `ctx` (principal, progress, idempotency key, deadline), role gates and `CallError` (§6.5.5); the `relay:` block and `--relay` join mode in `ari` and the `x` hosts, and transport security for native clients (§6.5.7) | S1 | M |
 | S3 | Client DSL programs | S0 | S |
 | S4 | Restricted client Python in worker processes | S2 | L |
+| S5 | The `authenticate` hook and principals: bound writes, room-call and rate limits keyed by principal; `host.disconnect` (§6.5.4) | S1 | S |
+| S6 | Bound reads: `read_scope`, the per-connection prefix filter, `refresh_scope` (§6.5.6) | S5 | M |
+| S7 | `ServerHarness` for plain `python`, and the end-to-end CI test (§6.5.8) | S2, S5 | S |
 | L1 | Lua bindings (SWIG), the Lua engine in the `x` hosts, Lua for client code on `arisrvx` | the `script_engine` interface (P1b) | L |
 | G1 | WebAssembly guests natively on wasmtime (§8.2–8.7): the runtime interface; the guest ABI; activations as app-scheduler processes in slices from wasmtime's async C API (its fuel until G2's gas), under the DSL's limits; the frame budget; one activation per instance; the lane's access surface; hooks; the `wasm:` block; a host option for `state_exec.policy`; a pump budget that counts guest slices' steps | the `script_engine` interface (P1b) | L |
 | G2 | The install-time transform (§8.5: gas injection, built through cvcpkg's Rust crates; Asyncify) and the browser backend: the same slices, limits, access and hooks in a single-threaded page | G1 | L |

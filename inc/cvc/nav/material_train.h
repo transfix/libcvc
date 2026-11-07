@@ -44,7 +44,7 @@
 // -74% over 70 Adam steps.
 //
 // L_multi (multi_start_penalty, geom_rollout.h) is a SEPARATE geometry rollout
-// (EXPLICIT Euler by default, no material) that backprops only into
+// (semi-implicit Euler by default, no material) that backprops only into
 // alphas/beta/gamma; its grads sum into those seeds before backward_one. With the
 // bicycle integrator its short rollouts run on the bicycle too
 // (multi_start_penalty_bicycle, material.h), from the same starts. Set

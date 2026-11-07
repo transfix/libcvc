@@ -612,6 +612,12 @@ add_executable(cvcgl_node_outlives_scene test/cvcgl_node_outlives_scene.cpp)
 target_link_libraries(cvcgl_node_outlives_scene PRIVATE cvcGL)
 add_test(NAME cvcgl_node_outlives_scene COMMAND cvcgl_node_outlives_scene)
 
+# SceneGraph::treeVersion() moves when a node joins or leaves the tree and only then: cloud_sky
+# walks its receivers for new meshes when it moves, not on a timer.
+add_executable(cvcgl_tree_version test/cvcgl_tree_version.cpp)
+target_link_libraries(cvcgl_tree_version PRIVATE cvcGL)
+add_test(NAME cvcgl_tree_version COMMAND cvcgl_tree_version)
+
 # Phase-4 texture support: geometry UVs -> SetTCoords + setTexture(cvc::image).
 add_executable(cvcgl_texture test/cvcgl_texture.cpp)
 target_link_libraries(cvcgl_texture PRIVATE cvcGL)
@@ -1253,7 +1259,7 @@ list(REMOVE_ITEM _cvcgl_gl_tests
   cvcgl_teardown cvcgl_light_state_thread cvcgl_unattached_node_thread cvcgl_pose_echo
   cvcgl_physics_scene_binding
   cvcgl_world_geometry_nodes cvcgl_ariadne_physics cvcgl_ariadne_data
-  cvcgl_node_outlives_scene cvcgl_texture cvcgl_texture_zerocopy
+  cvcgl_node_outlives_scene cvcgl_tree_version cvcgl_texture cvcgl_texture_zerocopy
   cvcgl_stream_texture cvcgl_state_publisher cvcgl_nav_stats_publish
   cvcgl_camera cvcgl_track_parity cvcgl_fps_hud cvcgl_stage_setters
   cvcgl_streaming_races cvcgl_sdl_input cvcgl_tet_surface

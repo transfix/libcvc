@@ -781,14 +781,21 @@ but its colours do not.
 
 **Clouds.** `cloud_sky` draws a deck of drifting, slowly changing L-system cumulus over its
 `ground:` node's extent (followed live): the clouds nearest the camera as volumes (`near:`), the
-rest as far shells. Their shade falls on the ground and on the nodes in `receivers:` (and their
+rest as far shells. The weather evolves on the world clock: a cellular automaton over the deck's
+cells (`cvc::world::cloud_layer`) grows clouds in patches and dissipates them, always holding the
+`coverage` share of the cells. A cloud fades in or out over `fade` seconds (20), and its volume,
+far shells and shade fade together. Orographic coupling reads the ground's heights. The cells over a
+windward flank (the slope along `wind_az`, the heading the wind blows toward, 90 = +x) gather cloud,
+and the cells in the lee lose theirs, so a cloud forms as the wind brings it to a mountain and dies
+past the crest. `orographic` (default 1; 0 turns the coupling off) sets how strongly. Their shade falls on the ground and on the nodes in `receivers:` (and their
 children, LOD rungs included) through those meshes' shaders: it dims the sun's light and leaves
 their textures and colours alone. Its other keys: `extent` (a cloud's half-width), `base` / `top`,
 `coverage`, `spacing`, `seed`, `variants`, `sun_az` / `sun_el` (the key light's, which the shade
 is cast along), `shade_k` / `shade_floor`, `horizon` (how far past the ground the volumes draw
-clouds), `far_reach` (how far the shells reach toward the horizon; out of the camera's bounds) and
-`shadow` (0 starts the shade off;
-`sky_controls.ari` toggles it, with the drift and morph speeds).
+clouds), `far_reach` (how far the shells reach toward the horizon; out of the camera's bounds),
+`evolve` (the weather's speed: 1 is a step every 5 s, a cloud lasting some 8 minutes; 0 holds the
+clouds) and `shadow` (0 starts the shade off). Live keys under the node's root (`sky.` unless
+`keys:`): `drift`, `morph`, `evolve`, `orographic` and `shadow`, all on `sky_controls.ari`.
 
 **Generated terrain.** `source: { terrain: { generator, size, resolution, seed, amp, file,
 preset } }` draws a `cvc::world` terrain generator's ground as such a heightfield: `fbm` (the
@@ -821,7 +828,11 @@ cells a chunk, so every rung is the terrain's own surface, points, normals and U
 triangles. A chunk coarsens once its largest height error falls under the preset's pixel budget,
 and stays within one rung of each neighbour; skirts hung from the edges two chunks share hide the
 seam. The chunks share the node's one texture and take its `casts_shadow`, `shader:` and
-`material:` keys. Physics, nav and `ground:` read the full terrain.
+`material:` keys. Physics, nav and `ground:` read the full terrain. The roads shape that terrain
+rather than lie on it (`cvc::world::road_grade`): each is level across, climbs at most 12% (5% into
+a junction), changes grade gradually and stays above the water, with the ground cut or banked to
+it, so a vehicle drives them without bouncing; every street is two Humvee lanes wide, drawn as
+smooth strips with a dark yellow centre stripe.
 
 **The fast render path.** A big static world draws fast when it is a few merged meshes and its
 shadow maps are re-baked rarely and spent where the camera looks. These keys say so
@@ -3509,9 +3520,30 @@ without either has no `ws-*` verbs, so a document asks `(has? "ws-open")` and po
   an error is the last message; `ws-open?` is `#f` from then on. Fragmented messages arrive
   whole; one longer than 16 MiB is an error and closes the connection.
 - `OPTS` takes `query`, `headers`, `auth` and credential values as the HTTP verbs do (§10.2,
-  §10.3), plus `timeout`, the seconds to connect (15). A browser's `WebSocket` can't send
-  request headers, so there `headers` and `auth` are refused; a server that wants a token takes
-  it in a message instead, which `ws-send` can carry without the document holding it (below).
+  §10.3), plus `timeout`, the seconds to connect (15), `protocols` and `auth_protocol` (below).
+  A browser's `WebSocket` can't send request headers, so there `headers` and `auth` are
+  refused; a server that wants a token takes it as a subprotocol (`auth_protocol`) or in a
+  message (`ws-send`), and either way the document never holds it.
+- `protocols` is a list of subprotocols to offer (`Sec-WebSocket-Protocol`), each an HTTP token
+  (letters, digits and ``!#$%&'*+-.^_`|~``). The server must pick one of those offered, or the
+  connect fails: browsers require that, and the native client checks it too.
+- `auth_protocol`, `(dict "credential" NAME ["prefix" P] ["encoding" "raw"|"base64url"])`,
+  offers the host's token for `NAME` as one more subprotocol, `P` followed by the token. This is
+  the one handshake credential a browser can send. A token holding `/` or `=` (token68 may)
+  can't be a subprotocol as it is, so use `"encoding" "base64url"` (unpadded, RFC 4648 §5),
+  as Kubernetes does:
+
+  ```lisp
+  (ws-open "wss://k8s.example/api/v1/watch"
+           (dict "protocols" (list "v4.channel.k8s.io")
+                 "auth_protocol" (dict "credential" "kube"
+                                       "prefix" "base64url.bearer.authorization.k8s.io."
+                                       "encoding" "base64url")))
+  ```
+
+  The server should pick the real subprotocol, not the credential one. The token is fetched
+  for the URL's origin, as for `auth`, and is never in the reply or an error. No credential
+  ever goes in the URL: a query refuses one.
 - `ws-send` sends a dict or a list as JSON, compact (`json-encode`'s rules: a value JSON lacks
   is an error). A credential value in it, `(dict "credential" NAME)` at any depth, is sent as
   the token the host keeps for `NAME`, a JSON string, so a document signs in to a live feed the
@@ -3529,7 +3561,8 @@ without either has no `ws-*` verbs, so a document asks `(has? "ws-open")` and po
   with no token there is an error and sends nothing; so is a credential value on a host that
   keeps no credentials. As with HTTP replies, a token a connection has sent (in its handshake
   or a message) is blanked to `[redacted]` in what `ws-recv` and `ws-poll` return, should the
-  server echo it. A string is sent as it is: a document can't put a token in one.
+  server echo it (in its raw spelling, or in base64url as an `auth_protocol` sends it). A string
+  is sent as it is: a document can't put a token in one.
 - The host's policy (§10.3) checks the URL as its `http(s)` twin: `--net-allow
   https://example.org` allows `wss://example.org/...`.
 - `ws-open` and `ws-recv` are async I/O calls like the HTTP verbs: the connect, or the wait,

@@ -885,6 +885,32 @@ WsEntry ws_lookup(const char *verb, std::span<const se::value_t> args) {
   return it->second;
 }
 
+// Unpadded base64url of `in`.
+std::string base64url(const std::string &in) {
+  static const char kAlphabet[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  std::string out;
+  out.reserve((in.size() + 2) / 3 * 4);
+  std::size_t i = 0;
+  for (; i + 2 < in.size(); i += 3) {
+    const unsigned v = (static_cast<unsigned char>(in[i]) << 16) |
+                       (static_cast<unsigned char>(in[i + 1]) << 8) |
+                       static_cast<unsigned char>(in[i + 2]);
+    for (int shift = 18; shift >= 0; shift -= 6)
+      out.push_back(kAlphabet[(v >> shift) & 63]);
+  }
+  if (const std::size_t rest = in.size() - i; rest > 0) {
+    unsigned v = static_cast<unsigned char>(in[i]) << 16;
+    if (rest == 2)
+      v |= static_cast<unsigned char>(in[i + 1]) << 8;
+    out.push_back(kAlphabet[(v >> 18) & 63]);
+    out.push_back(kAlphabet[(v >> 12) & 63]);
+    if (rest == 2)
+      out.push_back(kAlphabet[(v >> 6) & 63]);
+  }
+  return out;
+}
+
 // Blank, in an event, each token the connection has sent (WsSent), as the store holds it now.
 void scrub_ws_event(std::optional<cvc::net::WsEvent> &e, const WsEntry &entry,
                     const NetAccess &access) {
@@ -897,8 +923,11 @@ void scrub_ws_event(std::optional<cvc::net::WsEvent> &e, const WsEntry &entry,
   }
   for (const std::string &name : names)
     if (std::optional<std::string> token = access.credentials->token_for(name, entry.origin)) {
+      std::string encoded = base64url(*token); // as an auth_protocol may have sent it
       cvc::net::redact(e->data, *token);
+      cvc::net::redact(e->data, encoded);
       wipe(*token);
+      wipe(encoded);
     }
 }
 
@@ -939,14 +968,68 @@ se::value_t ws_open_reply(bool ok, const std::string &handle, const std::string 
   });
 }
 
-// (ws-open URL [OPTS]): OPTS takes "headers", "auth", "query" as the http verbs do, and "timeout"
-// (seconds to connect). The origin check uses the http(s) twin of the URL, so --net-allow
-// https://h covers wss://h.
+// auth_protocol: a credential offered as a subprotocol, `prefix` then the token, as it is or as
+// unpadded base64url (RFC 4648 section 5), since a subprotocol can't hold a token's '/' or '='.
+struct WsAuthProtocol {
+  std::string name; // "" = none
+  std::string prefix;
+  bool base64url = false;
+};
+
+// "protocols": a list of subprotocol strings.
+std::vector<std::string> parse_ws_protocols(const se::value_t &v) {
+  const se::list_ptr *lp = std::get_if<se::list_ptr>(&v.v);
+  if (!lp)
+    throw std::runtime_error("ws-open: 'protocols' must be a list of subprotocol strings");
+  std::vector<std::string> out;
+  for (const se::value_t &e : **lp) {
+    const std::string *p = std::get_if<std::string>(&e.v);
+    if (!p || !cvc::net::ws_valid_protocol(*p))
+      throw std::runtime_error("ws-open: a subprotocol is a non-empty HTTP token (letters, digits "
+                               "and !#$%&'*+-.^_`|~)");
+    out.push_back(*p);
+  }
+  return out;
+}
+
+// "auth_protocol": (dict "credential" NAME ["prefix" P] ["encoding" "raw"|"base64url"]).
+WsAuthProtocol parse_ws_auth_protocol(const se::value_t &v) {
+  const se::dict_ptr *d = std::get_if<se::dict_ptr>(&v.v);
+  if (!d)
+    throw std::runtime_error("ws-open: 'auth_protocol' is (dict \"credential\" NAME [\"prefix\" P] "
+                             "[\"encoding\" \"raw\"|\"base64url\"])");
+  WsAuthProtocol a;
+  for (const auto &kv : **d) {
+    const std::string *s = std::get_if<std::string>(&kv.second.v);
+    if (kv.first == "credential") {
+      a.name = credential_name(kv.second, "auth_protocol");
+    } else if (kv.first == "prefix") {
+      if (!s || (!s->empty() && !cvc::net::ws_valid_protocol(*s)))
+        throw std::runtime_error("ws-open: an 'auth_protocol' prefix is an HTTP token");
+      a.prefix = *s;
+    } else if (kv.first == "encoding") {
+      if (!s || (*s != "raw" && *s != "base64url"))
+        throw std::runtime_error(
+            "ws-open: an 'auth_protocol' encoding is \"raw\" or \"base64url\"");
+      a.base64url = *s == "base64url";
+    }
+  }
+  if (a.name.empty())
+    throw std::runtime_error("ws-open: 'auth_protocol' needs a credential");
+  return a;
+}
+
+// (ws-open URL [OPTS]): OPTS takes "headers", "auth", "query" as the http verbs do, "timeout"
+// (seconds to connect), "protocols" (subprotocols to offer) and "auth_protocol" (a credential
+// offered as one). The origin check uses the http(s) twin of the URL, so --net-allow https://h
+// covers wss://h.
 se::async_kernel ws_open_kernel(std::span<const se::value_t> args, const NetAccess &access) {
   RequestAuth auth;
   cvc::net::HttpRequest req;
   req.url = arg_string(args, 0);
   double timeout = 15;
+  std::vector<std::string> protocols;
+  WsAuthProtocol auth_protocol;
   if (args.size() > 1) {
     apply_http_options(req, args[1], auth);
     if (!req.body.empty())
@@ -960,14 +1043,22 @@ se::async_kernel ws_open_kernel(std::span<const se::value_t> args, const NetAcce
           timeout = number_arg(one, 0, -1);
           if (!(timeout > 0))
             throw std::runtime_error("ws-open: 'timeout' must be a positive number of seconds");
+        } else if (kv.first == "protocols") {
+          protocols = parse_ws_protocols(kv.second);
+        } else if (kv.first == "auth_protocol") {
+          auth_protocol = parse_ws_auth_protocol(kv.second);
         }
   }
   check_request("ws-open", req, auth, access);
+  if (!auth_protocol.name.empty() && !access.credentials)
+    throw std::runtime_error(
+        "ws-open: this host keeps no credentials, so it takes no auth_protocol");
   const std::string http_url = cvc::net::ws_http_equivalent(req.url);
   if (http_url == req.url)
     throw std::runtime_error("ws-open: a WebSocket URL starts with ws:// or wss://: " + req.url);
-  return [req = std::move(req), auth = std::move(auth), access, timeout,
-          http_url](se::async_call &) -> se::value_t {
+  return [req = std::move(req), auth = std::move(auth), access, timeout, http_url,
+          protocols = std::move(protocols),
+          auth_protocol = std::move(auth_protocol)](se::async_call &) -> se::value_t {
     try {
       std::string why;
       const std::optional<cvc::net::Origin> origin = cvc::net::parse_origin(http_url, &why);
@@ -979,11 +1070,14 @@ se::async_kernel ws_open_kernel(std::span<const se::value_t> args, const NetAcce
                                  " is not an origin this host allows");
       cvc::net::WsOptions opts;
       opts.headers = req.headers;
+      opts.protocols = protocols;
       opts.connect_timeout_secs = timeout;
       std::vector<std::string> sent;
       const auto fail = [&](const std::string &message) {
         for (std::string &h : opts.headers)
           wipe(h);
+        for (std::string &p : opts.protocols)
+          wipe(p);
         for (std::string &s : sent)
           wipe(s);
         return ws_open_reply(false, "", req.url, message);
@@ -1006,10 +1100,29 @@ se::async_kernel ws_open_kernel(std::span<const se::value_t> args, const NetAcce
             h.replace(at, v.placeholder.size(), *token);
         sent.push_back(std::move(*token));
       }
+      if (const WsAuthProtocol &a = auth_protocol; !a.name.empty()) {
+        std::optional<std::string> token = access.credentials->token_for(a.name, *origin);
+        if (!token)
+          return fail("ws-open: no credential '" + a.name + "' for " + origin->str() +
+                      " (sign in first)");
+        std::string offered = a.prefix + (a.base64url ? base64url(*token) : *token);
+        sent.push_back(std::move(*token));
+        if (!cvc::net::ws_valid_protocol(offered)) {
+          wipe(offered);
+          return fail("ws-open: credential '" + a.name +
+                      "' can't be a subprotocol as it is ('/' or '='); use \"encoding\" "
+                      "\"base64url\"");
+        }
+        if (a.base64url)
+          sent.push_back(offered); // to blank the spelling sent, too
+        opts.protocols.push_back(std::move(offered));
+      }
       std::string error;
       std::shared_ptr<cvc::net::WsConnection> conn = cvc::net::ws_connect(req.url, opts, &error);
       for (std::string &h : opts.headers)
         wipe(h);
+      for (std::string &p : opts.protocols)
+        wipe(p);
       for (std::string &s : sent) {
         cvc::net::redact(error, s);
         wipe(s);
@@ -1030,6 +1143,8 @@ se::async_kernel ws_open_kernel(std::span<const se::value_t> args, const NetAcce
         entry.sent->add(auth.use);
       for (const CredentialValue &v : auth.values)
         entry.sent->add(v.name);
+      if (!auth_protocol.name.empty())
+        entry.sent->add(auth_protocol.name);
       t.open.emplace(handle, std::move(entry));
       return ws_open_reply(true, handle, req.url, "");
     } catch (const std::exception &e) {

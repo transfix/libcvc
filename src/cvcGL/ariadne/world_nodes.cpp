@@ -253,9 +253,14 @@ bool regenerate(WorldRT &rt, const world::generated_world_params &p) {
   }
 }
 
+// world::paint_surface's rows run south to north (row 0 = min y, the terrain's v = 0); a
+// cvc::image's run top down, so its rows are reversed here: setTexture turns them back, and the
+// south row lands at v = 0. (Taken as they were, the texture lay north-south mirrored on the
+// ground: water painted under dry land and buildings, ground painted on the lakes.)
 cvc::image surface_image(int size, const std::vector<unsigned char> &rgb) {
   return cvc::image(size, size, cvc::image::pixel_format::RGB, cvc::image::data_type::u8,
-                    rgb.data());
+                    rgb.data())
+      .flipped_vertical();
 }
 
 cvc::volume water_volume(cvc::app &app, const WorldRT &rt, double t) {

@@ -1121,6 +1121,11 @@ int main() {
     // The shells reach far past the ground (to the horizon): out of the bounds the camera frames.
     chk(sg.getGraphics("sky_far") && !sg.getGraphics("sky_far")->contributesToSceneBounds(),
         "cloud_sky's far shells are out of the scene's bounds");
+    // ...and drawn with the volumes, after the water's, so a water volume below never covers them.
+    {
+      auto far = std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("sky_far"));
+      chk(far && far->drawsWithVolumes(), "cloud_sky's far shells draw in the volume layer");
+    }
     // forest wind + sea refill + cloud drift each push a tick.
     chk(realized.custom_ticks.size() >= 3u, "forest/sea/sky each registered a per-frame tick");
     // The sky's first tick gives the ground (its `ground:`, default terrain) the deck's shade: in
@@ -1132,6 +1137,15 @@ int main() {
       realized.custom_ticks.back()(nullptr);
       chk(ground && ground->hasSharedShaderInputs("cloud_sky"),
           "the sky's first tick wired its shade into the ground's shader");
+      // A mesh that joins a receiver later (an LOD rung, a regenerated world's part) takes the
+      // shade on the next tick: joining bumps the scene's treeVersion(), no timer to wait out.
+      if (ground) {
+        auto rung = ground->addGraphicsChild<cvc::gl::GeometryNode>("late_rung");
+        chk(!rung->hasSharedShaderInputs("cloud_sky"), "a new mesh has no shade before a tick");
+        realized.custom_ticks.back()(nullptr);
+        chk(rung->hasSharedShaderInputs("cloud_sky"),
+            "the next tick wired the shade into a mesh added under a receiver");
+      }
     }
     bool emptyForest = false;
     for (const std::string &w : warnings)
@@ -1157,6 +1171,15 @@ int main() {
                        .value<double>(),
                    1.0),
         "cloud_sky with keys: storm seeded storm.* from its props");
+    // The weather's live keys: its rate and the orographic coupling's strength.
+    chk(approx(cvc::state::instance(app)(cvc::ariadne::resolve_bind("forest", "storm.evolve"))
+                   .value<double>(),
+               1.0) &&
+            approx(
+                cvc::state::instance(app)(cvc::ariadne::resolve_bind("forest", "storm.orographic"))
+                    .value<double>(),
+                1.0),
+        "cloud_sky seeded storm.evolve and storm.orographic");
   }
 
   // ── generated_world + the fast render path's keys (casts_shadow, opaque, shadow focus) ──────
