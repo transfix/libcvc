@@ -1078,7 +1078,8 @@ The plan is [`ARIADNE_WORLDS.md`](ARIADNE_WORLDS.md). It covers:
 - the tiers of bring-your-own, and persistence and cells for a large world;
 - phases WD0–WD9.
 
-Its decisions are open.
+The owner settled Q1 on 2026-11-07: the light rig lives in the server's world document, not in the
+client's. The other decisions are open.
 
 ---
 

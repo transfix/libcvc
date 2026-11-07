@@ -1,6 +1,7 @@
 # Ariadne worlds: the server's document defines the world, and every client runs it
 
-> **Status: PLANNED (2026-11-07).** Nothing here is built. The decisions in §11 are open. Parent
+> **Status: PLANNED (2026-11-07).** Nothing here is built. Q1 is settled: the light rig lives in
+> the server (§11). The other decisions are open. Parent
 > roadmap: [`ARIADNE_CONFERENCE_ROADMAP.md`](ARIADNE_CONFERENCE_ROADMAP.md) (§2 "Server is an `.ari`
 > app too", §5g, §5h, §5i, §5k). The server side rides
 > [`ARIADNE_SCRIPTING_HOSTS.md`](ARIADNE_SCRIPTING_HOSTS.md) §6 (S0–S7) and §8 (wasm guests).
@@ -75,6 +76,10 @@ same leaves. This plan generalizes that one pattern to everything that defines t
   `cvc://worlds/large.ari` (today's `--scene large`). `--scene default|large` becomes a shorthand
   for those documents and is kept for compatibility.
 - **A site ships its own world document** beside its viewer document, and the relay runs it.
+- **The look is the world's** (Q1, settled 2026-11-07). The light rig and the shadows move from the
+  viewer document into the world document. The relay publishes them through `scene.env.lights.*`
+  and `scene.env.shadows.*`, which the wire already carries and `read_room_scene` already turns
+  into the scene's lights, rigs included.
 - **Clients never receive the world document's source.** The relay publishes what the document
   *derives*: the sections in §3. The document can hold room rules, server programs, and anything
   else the operator doesn't want sent to clients. Clients need the world, not the program that
@@ -282,7 +287,7 @@ GENERATED-WORLD-ROADMAP.md's.)
 | Phase | What | Depends on | Size |
 |---|---|---|---|
 | WD0 | The loose ends: `--set` after seeding, or a guard so a `--set` can't suppress the default world; the "under a sun" comment | — | S |
-| WD1 | **The world document seeds the room.** `arisrv --doc world.ari` publishes the document's `scene:` (objects, lights, shadows) through `write_scene_object` / `write_scene_env`. `cvc://worlds/default.ari` and `large.ari` replace the C++ seeds, and `--scene` names them. The look moves to the world; the viewer document keeps what §11 Q1 settles. | S0 | M |
+| WD1 | **The world document seeds the room.** `arisrv --doc world.ari` publishes the document's `scene:` (objects, lights, shadows) through `write_scene_object` / `write_scene_env`. `cvc://worlds/default.ari` and `large.ari` replace the C++ seeds, and `--scene` names them. The light rig and shadows move from the conference document to the world document (Q1), and the conference document drops its `scene:` block. | S0 | M |
 | WD2 | **The rules come from the document.** The physics, archetype, policy and controller sections (§3), with the activation tick. The holon and `room_view` read them instead of `avatar_body{}`, `kAvatarWidth`, `max_speed = 4.0` and the panel's "walker" literal. | WD1 | M |
 | WD3 | **Entities.** The entities table (§4); server-dynamic props and NPC bodies from the document and from server programs; their poses on the pose stream; colliders for meshes. | WD2 | L |
 | WD4 | **A controller catalog.** Kernels by `name@version`, a determinism gate per kernel, capability negotiation with an interpolation fallback; the vehicle as the second kernel. A participant picks from the archetype's list (§5k phase 3). | WD2 | L |
@@ -298,9 +303,10 @@ mind from the start.
 
 ## 11. Open decisions
 
-- **Q1. What may a viewer document override?** The world defines the look; does the viewer keep any
-  of it? Proposed: a viewer may only lower cost (shadow resolution, LOD, effects off) and add
-  cosmetic or accessibility changes (brightness, contrast). It may not change geometry or physics.
+- **Q1. Where does the look live? Settled (owner, 2026-11-07): the rig lives in the server.** The
+  world document declares the lights and shadows, and every client draws the world under them.
+  Still open: whether a viewer may lower their cost (shadow resolution, LOD, effects off) or adjust
+  for accessibility (brightness, contrast). It never changes geometry or physics.
 - **Q2. Do clients ever see the world document?** Proposed: no; only the derived sections (§2).
 - **Q3. Which guest format for controllers comes first?** Proposed: native kernels now; wasm guests
   for world- and user-supplied controllers once G2 lands. DSL programs are for rules, not per-tick
