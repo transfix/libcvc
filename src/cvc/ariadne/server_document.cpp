@@ -64,6 +64,16 @@ const Value *find_server_block(const LoadResult &lr) {
   return nullptr;
 }
 
+// "" or why `block` may not be published by a document bound at `prefix`: a namespace that is the
+// document's own state, holds it or lies inside it (the default prefix is under ui, refused by
+// check_published_namespace already; this covers any other).
+std::string check_against_prefix(const ServerBlock &block, const std::string &prefix) {
+  for (const std::string &ns : block.publish)
+    if (under(ns, prefix) || under(prefix, ns))
+      return "server: publish: '" + ns + "' overlaps the document's own state, " + prefix;
+  return std::string();
+}
+
 // The nodes under `nodes` (their children too) that have a body:.
 std::size_t count_bodies(const std::vector<SceneNode> &nodes) {
   std::size_t n = 0;
@@ -152,11 +162,15 @@ void register_server_block() {
 ServerDocument::ServerDocument(cvc::app &app, std::string room, std::string prefix)
     : app_(app), room_(std::move(room)), rt_(app, std::move(prefix)) {
   register_server_block();
+  rt_.runtime().set_relay_document(true); // requires: [relay]
   rt_.add_load_hook([this](LoadResult &lr, const std::string &path) {
     ServerBlock b;
     if (const Value *content = find_server_block(lr)) {
       std::vector<std::string> w;
-      if (const std::string error = parse_server_block(*content, b, &w); !error.empty())
+      std::string error = parse_server_block(*content, b, &w);
+      if (error.empty())
+        error = check_against_prefix(b, rt_.prefix());
+      if (!error.empty())
         throw std::runtime_error(path + ": " + error);
       for (std::string &s : w)
         lr.warnings.push_back(std::move(s));
@@ -192,9 +206,13 @@ std::string ServerDocument::read(const std::string &path, std::vector<std::strin
   if (!lr.ok)
     return lr.error.empty() ? "cannot load " + path : lr.error;
   ServerBlock b;
-  if (const Value *content = find_server_block(lr))
-    if (const std::string error = parse_server_block(*content, b, warnings); !error.empty())
+  if (const Value *content = find_server_block(lr)) {
+    std::string error = parse_server_block(*content, b, warnings);
+    if (error.empty())
+      error = check_against_prefix(b, rt_.prefix());
+    if (!error.empty())
       return path + ": " + error;
+  }
   block_ = std::move(b);
   read_ = true;
   return std::string();

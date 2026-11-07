@@ -909,6 +909,7 @@ struct Runtime::Impl {
   // registered (the registry's generation moves) or refresh_program_names() drops it.
   bool scene_capable = false;
   bool scene_shaders = false;
+  bool relay_document = false;
   mutable std::mutex names_mutex;
   mutable bool names_valid = false;
   mutable std::uint64_t names_generation = 0;
@@ -938,6 +939,7 @@ struct Runtime::Impl {
     f.oidc_device = net.oidc && net.oidc_flows.device;
     f.oidc_redirect = net.oidc && net.oidc_flows.redirect;
     f.browser = net.enabled && net.browser;
+    f.relay = relay_document;
     return f;
   }
   bool has(const std::string &name) const {
@@ -3354,6 +3356,7 @@ std::vector<std::string> Runtime::program_names() const {
 
 void Runtime::set_scene_capable(bool on) { m_->scene_capable = on; }
 void Runtime::set_scene_shaders(bool on) { m_->scene_shaders = on; }
+void Runtime::set_relay_document(bool on) { m_->relay_document = on; }
 
 HostFacts Runtime::host_facts() const { return m_->facts(); }
 

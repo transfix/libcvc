@@ -106,11 +106,16 @@ if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
   set_tests_properties(arisrv_doc_echo arisrv_doc_quit_code arisrv_doc_publish_conf
                        arisrv_doc_needs_bound_writes PROPERTIES
                        SKIP_REGULAR_EXPRESSION "built without yaml-cpp" TIMEOUT 90)
-  # A host that is not the relay ignores the server: block, and says so.
+  # A host that is not the relay ignores a server: block, and says so; a document that requires
+  # the relay does not run there, and the error says where it does.
   if(TARGET ari)
-    add_test(NAME ari_server_block_ignored COMMAND ari check "${_srv_tests}/echo_server.ari")
+    add_test(NAME ari_server_block_ignored COMMAND ari check "${_srv_tests}/server_block.ari")
     set_tests_properties(ari_server_block_ignored PROPERTIES
-                         PASS_REGULAR_EXPRESSION "server: block is for the relay that runs it"
+                         PASS_REGULAR_EXPRESSION "server: block is for the relay that runs it")
+    add_test(NAME ari_server_document_needs_relay COMMAND ari check "${_srv_tests}/echo_server.ari")
+    set_tests_properties(ari_server_document_needs_relay PROPERTIES
+                         PASS_REGULAR_EXPRESSION "a server document runs on the relay: arisrv --doc")
+    set_tests_properties(ari_server_block_ignored ari_server_document_needs_relay PROPERTIES
                          SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
   endif()
 endif()

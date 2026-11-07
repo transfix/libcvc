@@ -1,0 +1,6 @@
+# A document with a server: block and no requires: [relay], for ari's ctest: a host that is not
+# the relay loads it, and warns that it ignored the block.
+meta: { name: server block elsewhere, min_libcvc: 3.7.5 }
+server:
+  publish: [board]
+init: (state-set "board.status" "up")

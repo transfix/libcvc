@@ -2,6 +2,7 @@
 # writes it at init: and on each room step, keeps a count of its own, and stops the relay with
 # (quit 0) after its fifth step. The relay runs on loopback ports, and no client joins.
 meta: { name: arisrv echo server, min_libcvc: 3.7.5 }
+requires: [relay]
 server:
   publish: [echo]
 init: |

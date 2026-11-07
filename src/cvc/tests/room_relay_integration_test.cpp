@@ -1328,7 +1328,13 @@ TEST(RoomRelayLoopbackTest, NoIntentOrUiDocsLeak) {
 // shard's interest here, which S2's relay: subscribe: will set) applies it, one that does not
 // filters it out. No client is sent the document's own state, not even W, whose interest takes
 // everything. W's own write to echo is refused, so echo stays the server's for the relay and A.
+//
+// Each step also writes a revisioned section by hand, as WD1's sections will: echo.board's fields,
+// then its rev LAST. A client that sees rev move must already hold the fields of that revision
+// (the relay sends one step's writes in the order they were made). And echo.tick copies the
+// relay's world clock (sim.tick), which a client sees go forward only.
 const char *const kEchoServerDoc = R"(meta: { name: echo server, min_libcvc: 3.7.5 }
+requires: [relay]
 server: { publish: [echo] }
 init: |
   (state-set "echo.status" "up")
@@ -1336,6 +1342,10 @@ init: |
 on_tick: |
   (state-incr "echo.ticks")
   (state-incr "own.ticks")
+  (state-set "echo.tick" (state-get "sim.tick"))
+  (state-set "echo.board.a" (state-incr "own.rev"))
+  (state-set "echo.board.b" (state-get "own.rev"))
+  (state-set "echo.board.rev" (state-get "own.rev"))
 )";
 
 std::string tree_value(cvc::app &a, const std::string &path) {
@@ -1349,6 +1359,11 @@ long tree_number(cvc::app &a, const std::string &path) {
 TEST(RoomRelayLoopbackTest, ServerDocumentPublishesItsNamespaceOnly) {
   if (!cvc::ariadne::AppRuntime::have_yaml())
     GTEST_SKIP() << "built without yaml-cpp";
+  // What A sees as each frame lands (its transport's reader thread): every echo.board.rev, with
+  // the fields A holds by then, and echo.tick's steps. Declared before the clients, so they
+  // outlive A's callback.
+  std::mutex seen_mu;
+  long revs_seen = 0, fields_behind = 0, ticks_back = 0, last_tick = 0;
   relay_options o;
   o.doc = kEchoServerDoc;
   test_relay r(o);
@@ -1364,6 +1379,23 @@ TEST(RoomRelayLoopbackTest, ServerDocumentPublishesItsNamespaceOnly) {
   test_client &A = *cs[0], &B = *cs[1], &W = *cs[2];
   A.shard->add_interest("echo");
   W.shard->add_interest(""); // everything it is sent
+  A.shard->adapter().set_on_remote_applied([&](const cvc::state_mutation &m) {
+    A.tap.on_applied(m);
+    if (m.op != cvc::state_mutation_op::set_value)
+      return;
+    std::lock_guard<std::mutex> lk(seen_mu);
+    if (m.path == "echo.board.rev") {
+      const long rev = std::strtol(m.string_value.c_str(), nullptr, 10);
+      ++revs_seen;
+      if (tree_number(A.app, "echo.board.a") < rev || tree_number(A.app, "echo.board.b") < rev)
+        ++fields_behind;
+    } else if (m.path == "echo.tick") {
+      const long t = std::strtol(m.string_value.c_str(), nullptr, 10);
+      if (t < last_tick)
+        ++ticks_back;
+      last_tick = t;
+    }
+  });
   ASSERT_NO_FATAL_FAILURE(bring_up(r, cs));
 
   const auto a_follows = [&] {
@@ -1374,6 +1406,13 @@ TEST(RoomRelayLoopbackTest, ServerDocumentPublishesItsNamespaceOnly) {
   ASSERT_TRUE(run_room(r, cs, 3.0, {}, [&] { return tree_number(A.app, "echo.ticks") > ticks; }))
       << "echo.ticks stopped reaching A live";
   EXPECT_EQ(tree_value(W.app, "echo.status"), "up");
+  {
+    std::lock_guard<std::mutex> lk(seen_mu);
+    EXPECT_GE(revs_seen, 10) << "echo.board.rev moved every step";
+    EXPECT_EQ(fields_behind, 0) << "a rev arrived before the fields of its revision";
+    EXPECT_GT(last_tick, 0) << "the document saw the world clock";
+    EXPECT_EQ(ticks_back, 0) << "the world clock went backwards";
+  }
   EXPECT_EQ(B.app.root().findDescendant("echo"), nullptr) << "B never subscribed";
   EXPECT_GT(B.shard->total_remote_filtered_out(), 0u) << "B was sent echo all the same";
 

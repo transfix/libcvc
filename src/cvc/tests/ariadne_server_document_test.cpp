@@ -327,3 +327,53 @@ scene:
   EXPECT_EQ(doc.scene().nodes[1].id, "crate");
   EXPECT_TRUE(doc.scene().nodes[1].body.present);
 }
+
+// The document's own state is never published, whatever prefix it binds under: an entry that is
+// that prefix, holds it or lies inside it is refused (the default prefix is under ui, refused by
+// name already).
+TEST(ServerDocumentTest, RefusesToPublishItsOwnState) {
+  if (!ari::AppRuntime::have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  TempDir dir;
+  cvc::app app;
+  ari::ServerDocument doc(app, kRoom, "srv.doc");
+  for (const char *ns : {"srv", "srv.doc", "srv.doc.board"}) {
+    const std::string path =
+        dir.write("own.ari", std::string("meta: { name: own, min_libcvc: 3.7.5 }\n"
+                                         "server: { publish: [") +
+                                 ns + "] }\n");
+    EXPECT_NE(doc.read(path).find("overlaps the document's own state, srv.doc"), std::string::npos)
+        << ns;
+  }
+  const std::string ok = dir.write("ok.ari", "meta: { name: ok, min_libcvc: 3.7.5 }\n"
+                                             "server: { publish: [srvx] }\n");
+  EXPECT_EQ(doc.read(ok), "") << "a dot-segment boundary, not an overlap";
+}
+
+// requires: [relay] holds in a relay's server document and nowhere else; elsewhere the load fails
+// and says where such a document runs.
+TEST(ServerDocumentTest, TheRelayTokenHoldsOnlyOnTheRelay) {
+  if (!ari::AppRuntime::have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  TempDir dir;
+  const std::string path = dir.write("relay.ari", R"(meta: { name: relay, min_libcvc: 3.7.5 }
+requires: [relay]
+init: (if (has? "relay") (state-set "on_relay" "yes") #f)
+)");
+  cvc::app app;
+  ari::ServerDocument doc(app, kRoom);
+  ASSERT_EQ(doc.read(path), "");
+  doc.load(path);
+  EXPECT_EQ(value_at(app, "ui.docs.arisrv.on_relay"), "yes");
+
+  cvc::app other;
+  ari::AppRuntime client(other, "ui.docs.ari");
+  try {
+    client.load(path);
+    FAIL() << "a host that is not the relay ran a document that requires it";
+  } catch (const std::runtime_error &e) {
+    const std::string what = e.what();
+    EXPECT_NE(what.find("relay"), std::string::npos) << what;
+    EXPECT_NE(what.find("arisrv --doc"), std::string::npos) << what;
+  }
+}
