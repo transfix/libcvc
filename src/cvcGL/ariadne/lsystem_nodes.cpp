@@ -53,6 +53,7 @@
 #include <vtkMatrix4x4.h>
 #include <vtkNew.h>
 #include <vtkOpenGLRenderWindow.h>
+#include <vtkPropCollection.h>
 #include <vtkRenderer.h>
 #include <vtkSmartPointer.h>
 #include <vtkTextureObject.h>
@@ -679,6 +680,48 @@ void wireReceivers(SkyRT &r, GraphicsNode &g) {
       wireReceivers(r, *c);
 }
 
+// VTK draws the volume layer in the renderer's prop order, and the shells draw in it
+// (GeometryNode::setDrawWithVolumes). Keep that order [the scene's other props..., the shells, the
+// near volumes...]: the shells over the water, the near clouds over the shells. A node shown again
+// rejoins the renderer at the end (SceneNode::setVisible), so the order drifts: when it has,
+// move the shells, then each near volume in the renderer, to the end.
+void orderDeck(SkyRT &r, vtkRenderer *ren) {
+  auto sh = r.shells.lock();
+  vtkProp *sp = sh ? sh->prop() : nullptr;
+  vtkPropCollection *props = ren->GetViewProps();
+  if (!sp || !props->IsItemPresent(sp))
+    return;
+  std::vector<vtkProp *> nearProps;
+  for (const SkyRT::Near &v : r.near)
+    if (auto vn = v.node.lock())
+      if (vtkProp *p = vn->prop(); p && props->IsItemPresent(p))
+        nearProps.push_back(p);
+  // In order: the shells, then nothing but near volumes after them.
+  bool seen = false, ok = true;
+  std::size_t after = 0;
+  vtkCollectionSimpleIterator it;
+  props->InitTraversal(it);
+  while (vtkProp *p = props->GetNextProp(it)) {
+    if (p == sp) {
+      seen = true;
+      continue;
+    }
+    const bool isNear = std::find(nearProps.begin(), nearProps.end(), p) != nearProps.end();
+    if (seen && !isNear)
+      ok = false;
+    if (seen && isNear)
+      ++after;
+  }
+  if (ok && after == nearProps.size())
+    return;
+  ren->RemoveViewProp(sp);
+  ren->AddViewProp(sp);
+  for (vtkProp *p : nearProps) {
+    ren->RemoveViewProp(p);
+    ren->AddViewProp(p);
+  }
+}
+
 // A near volume's opacity: its near <-> far crossfade times its cloud's own fade in or out.
 void setNearWeight(const SkyRT &r, SkyRT::Near &v) {
   double w = double(v.weight) / FADE_FRAMES;
@@ -906,7 +949,13 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
         parent ? parent->createChild<GeometryNode>(id, none) : sg.addGraphics(id, none);
     if (auto shells = std::dynamic_pointer_cast<GeometryNode>(gn)) {
       shells->setCastsShadow(false);
-      shells->setOpacity(0.99); // the translucent pass; the shader writes the real alpha
+      shells->setOpacity(0.99); // drawn as translucent; the shader writes the real alpha
+      // With the volumes: VTK lays every volume over the translucent layer whatever its depth, so
+      // a water volume covered the clouds above it. In the volume layer the shells come after the
+      // scene's other volumes (the water: the deck is above sea level, so in front of it from any
+      // camera above it) and before the near cloud volumes (nearer the camera); orderDeck keeps
+      // the renderer's props in that order.
+      shells->setDrawWithVolumes(true);
       shells->setSpecular(0.0);
       shells->addFragmentShaderReplacement("//VTK::Light::Dec", shellDec());
       shells->addFragmentShaderReplacement("//VTK::Light::Impl", SHELL_AFTER);
@@ -995,6 +1044,7 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
 
     if (!ren || !ren->IsActiveCameraCreated())
       return;
+    orderDeck(r, ren);
     vtkCamera *cam = ren->GetActiveCamera();
     double cp[3];
     cam->GetPosition(cp);

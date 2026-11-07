@@ -26,6 +26,8 @@
 #include <vtkLine.h>
 #include <vtkMatrix4x4.h>
 #include <vtkNew.h>
+#include <vtkObjectFactory.h>
+#include <vtkOpenGLActor.h>
 #include <vtkOpenGLPolyDataMapper.h>
 #include <vtkOpenGLRenderWindow.h>
 #include <vtkOpenGLState.h>
@@ -53,6 +55,55 @@
 namespace cvc {
 namespace gl {
 
+namespace {
+// Every GeometryNode's actor: VTK's own, unless the node asks to be drawn with the volumes
+// (setDrawWithVolumes). Then it sits out the opaque and translucent layers (and so the shadow
+// bake, which draws the opaque one) and draws in the volume layer, in its place in the renderer's
+// prop order among the volumes, as translucent geometry draws: blended, with the depth test on
+// and no depth written (vtkOpenGLActor::Render reads the translucent flag).
+class GeometryActor : public vtkOpenGLActor {
+public:
+  static GeometryActor *New();
+  vtkTypeMacro(GeometryActor, vtkOpenGLActor);
+  bool WithVolumes = false;
+
+  int RenderOpaqueGeometry(vtkViewport *vp) override {
+    return WithVolumes ? 0 : vtkOpenGLActor::RenderOpaqueGeometry(vp);
+  }
+  int RenderTranslucentPolygonalGeometry(vtkViewport *vp) override {
+    return WithVolumes ? 0 : vtkOpenGLActor::RenderTranslucentPolygonalGeometry(vp);
+  }
+  vtkTypeBool HasOpaqueGeometry() override {
+    return WithVolumes ? 0 : vtkOpenGLActor::HasOpaqueGeometry();
+  }
+  vtkTypeBool HasTranslucentPolygonalGeometry() override {
+    return WithVolumes ? 0 : vtkOpenGLActor::HasTranslucentPolygonalGeometry();
+  }
+  int RenderVolumetricGeometry(vtkViewport *vp) override {
+    if (!WithVolumes || !this->Mapper)
+      return 0;
+    auto *ren = static_cast<vtkRenderer *>(vp);
+    vtkProperty *prop = this->GetProperty();
+    this->SetIsRenderingTranslucentPolygonalGeometry(true);
+    prop->Render(this, ren);
+    if (this->Texture)
+      this->Texture->Render(ren);
+    this->Render(ren, this->Mapper);
+    prop->PostRender(this, ren);
+    if (this->Texture)
+      this->Texture->PostRender(ren);
+    this->SetIsRenderingTranslucentPolygonalGeometry(false);
+    this->EstimatedRenderTime += this->Mapper->GetTimeToDraw();
+    return 1;
+  }
+
+protected:
+  GeometryActor() = default;
+  ~GeometryActor() override = default;
+};
+vtkStandardNewMacro(GeometryActor);
+} // namespace
+
 GeometryNode::GeometryNode(cvc::app &ctx, const std::string &statePath, const std::string &name)
     : GeometryNode(ctx, statePath, name, newPolyDataMapper()) {}
 
@@ -64,7 +115,8 @@ GeometryNode::GeometryNode(cvc::app &ctx, const std::string &statePath, const st
       m_scalarMax(std::numeric_limits<double>::quiet_NaN()),
       m_scalarRangeUsed(std::numeric_limits<double>::quiet_NaN(),
                         std::numeric_limits<double>::quiet_NaN()),
-      m_actor(vtkSmartPointer<vtkActor>::New()), m_mapper(mapper ? mapper : newPolyDataMapper()),
+      m_actor(vtkSmartPointer<GeometryActor>::New()),
+      m_mapper(mapper ? mapper : newPolyDataMapper()),
       m_polyData(vtkSmartPointer<vtkPolyData>::New()), m_textureFlipV(false) {
   m_mapper->SetInputData(m_polyData);
   m_actor->SetMapper(m_mapper);
@@ -1333,6 +1385,20 @@ void GeometryNode::setUseBounds(bool on) {
       sg->requestRender();
     }
   });
+}
+
+void GeometryNode::setDrawWithVolumes(bool on) {
+  runOnMainThread([this, on]() {
+    if (auto *a = GeometryActor::SafeDownCast(m_actor))
+      a->WithVolumes = on;
+    if (SceneGraph *sg = getSceneGraph())
+      sg->requestRender();
+  });
+}
+
+bool GeometryNode::drawsWithVolumes() const {
+  auto *a = GeometryActor::SafeDownCast(m_actor);
+  return a && a->WithVolumes;
 }
 
 bool GeometryNode::usesLowMemoryMapper() const {
