@@ -286,10 +286,45 @@ The conference is the world's second consumer. Peers must see the same world and
     deck walks its receivers on the frame after it moves, instead of once a second: an LOD rung or
     a regenerated world's part is shaded on its first frame, and a settled scene never walks
     (`cvcgl_ariadne_realize` adds a mesh under the ground and checks the next tick shades it).
-  - Still to do for the clouds: measure in Edge and Firefox, now with the shells' 6 samples a
-    fragment (10 layers of sky fill), and check the GLSL ES compile. Then
-    LSYSTEM-LABORATORY-ROADMAP section 4.7's evolving coverage (a cellular automaton) and
-    orographic clouds.
+  - The weather evolves, and it gathers on windward flanks (LSYSTEM-LABORATORY-ROADMAP section
+    4.7):
+    - A Dobashi-style cellular automaton in `cvc::world::cloud_layer` decides which cells hold a
+      cloud. Each cell has one bit-packed column of 32 layers, with Dobashi's humidity, activation
+      and cloud bits.
+    - Activation runs up a whole column and, by chance, into the four neighbours. Clouds go extinct
+      at random and humidity returns, so clouds grow in patches and dissipate.
+    - The cells with the most cloud hold the deck's clouds, still exactly `coverage` of them.
+    - It steps on the world clock, once every 5 s at rate 1, so a cloud lasts some 8 minutes. A
+      step over 64 x 64 cells takes 0.9 ms, and the 11.2 km world's 21 x 21 takes a fraction of
+      that.
+    - A cloud fades in or out over 20 s. The volume, the far slices and the shade take the same
+      weight, so nothing shades where no cloud is drawn.
+    - Orographic coupling: the slope along the wind under each cell, averaged over a cloud's
+      footprint, raises its humidity and activation on a windward flank and its extinction in the
+      lee. The pattern drifts over the ground, so a cloud forms as it reaches a mountain and dies
+      past the crest.
+    - Over ridges, windward cells hold a cloud 99% of the time and lee cells 14%; without the
+      coupling both are 60%.
+    - Live keys `sky.evolve` and `sky.orographic` are on `sky_controls.ari`. The props are
+      `evolve`, `orographic`, `wind_az` (the drift now follows it) and `fade`.
+    - Every rule is deterministic and frame-rate free (`world_cloud_test`).
+  - Measured in the browser, 2026-11-06: the gallery deploy of 38c6b071 (deploy-pages
+    42290995729), in the desktop app's built-in Chromium 152 browser (WebGL2), canvas 1077 x 772 at
+    device pixel ratio 1.25.
+    - The deck's shaders compile as GLSL ES: no shader errors in the console.
+    - Clouds reach past the world's edge.
+    - 1.2 km world, default camera: 34-47 fps, median frame 17-25 ms, p95 42-58 ms.
+    - 11.2 km world (World half 5600, regenerated, 2049^2 terrain), close-up camera: 25-29 fps,
+      median frame 25 ms, p95 83-133 ms. On 2026-11-03, before the terrain LOD, the same world
+      ran at 3.3 fps.
+    - JS heap about 64 MB.
+  - Still to do for the clouds:
+    - The deck's own cost in the browser. The cloud nodes can't be hidden from the URL, and the
+      document's Sky panel isn't reachable from the gallery's menus.
+    - Firefox (Joe's to check), and an 11.2 km overview camera.
+    - The deck is one flat slab, so a peak pierces it only where the ground rises past `base`. A
+      lower deck over high relief (or cloud bases that follow the ground) would show orographic
+      caps at the terrain lab's 90 m of relief.
 - **Dynamic props, demo3's way**, for vehicles and avatars on the world: unregistered slot nodes,
   a pose gate, out of the bounds fit, non-casting. demo3 does this by hand. A libcvc node type
   would make it a scene key.

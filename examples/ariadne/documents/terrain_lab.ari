@@ -145,7 +145,9 @@ scene:
     # The clouds: a deck of L-system cumulus scattered over the whole world, drifting and slowly
     # changing shape. The ones near the camera are volumes, the rest far shells to the horizon.
     # Their shade dims the sun on the ground, the buildings, the roads and the trees; it is drawn
-    # in the receivers' shaders, so the world's own texture is untouched.
+    # in the receivers' shaders, so the world's own texture is untouched. The weather evolves:
+    # clouds grow in patches and dissipate, gathering on the slopes the wind climbs (Sky panel:
+    # Weather speed, Orographic).
     - node: sky
       type: cloud_sky
       ground: world        # the deck covers this node's extent, live, and shades its meshes
@@ -157,3 +159,6 @@ scene:
       near: 6              # the clouds nearest the camera drawn as volumes; the rest far shells
       sun_az: -60          # the key light's: the clouds cast along it
       sun_el: 28
+      wind_az: 90          # the wind blows toward +x
+      evolve: 1            # a weather step every 5 s; 0 holds the clouds
+      orographic: 1        # windward flanks gather cloud
