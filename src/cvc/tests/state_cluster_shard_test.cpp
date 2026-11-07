@@ -187,7 +187,7 @@ TEST(StateClusterShardTest, TrimPublishedKeepsDrainOrdered) {
   cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
   sh.attach();
   const auto set = [&](const char *v) { cvc::state::instance(a)("tp.path").value(std::string(v)); };
-  set("seed"); // the first set on a fresh child may land before the adapter observes it
+  set("seed"); // a fresh node's first write, journaled like the others
   set("a");
   set("b");
 

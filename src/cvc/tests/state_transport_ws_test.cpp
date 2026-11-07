@@ -179,9 +179,8 @@ std::string value_at(cvc::app &a, const std::string &path) {
   return cvc::state::instance(a)(path).value();
 }
 
-// The first set on a fresh child is not observed, so seed it before the value that must replicate.
+// Write `v` at `path`, which journals it (a fresh node's first write too).
 void write_value(cvc::app &a, const std::string &path, const std::string &v) {
-  cvc::state::instance(a)(path).value(std::string("seed"));
   cvc::state::instance(a)(path).value(v);
 }
 
@@ -276,7 +275,6 @@ TEST(StateTransportWsTest, LiveMutationCrossesServerToClient) {
   ASSERT_TRUE(tB.connect_to_peer(ws(tA.listen_address()), std::chrono::milliseconds(2000)));
   ASSERT_TRUE(wait_connected(tA, tB, std::chrono::milliseconds(2000)));
 
-  cvc::state::instance(aA)("live.k").value(std::string("seed"));
   cvc::state::instance(aA)("live.k").value(std::string("v1"));
   EXPECT_GT(tA.pump_all(), 0u);
   tA.flush();
@@ -303,7 +301,6 @@ TEST(StateTransportWsTest, LateJoinerReceivesWritesMadeBeforeItConnected) {
   tA.register_shard(&sA);
   tB.register_shard(&sB);
 
-  cvc::state::instance(aA)("late.k").value(std::string("seed"));
   cvc::state::instance(aA)("late.k").value(std::string("v1"));
 
   ASSERT_EQ(tA.connection_count(), 0u);
@@ -347,7 +344,6 @@ TEST(StateTransportWsTest, RelayBridgesTwoClients) {
   ASSERT_TRUE(
       wait_until([&] { return S.connection_count() >= 2; }, std::chrono::milliseconds(2000)));
 
-  cvc::state::instance(aA)("relay.k").value(std::string("seed"));
   cvc::state::instance(aA)("relay.k").value(std::string("hello"));
   EXPECT_GT(tA.pump_all(), 0u);
   tA.flush();
@@ -622,7 +618,6 @@ TEST(StateTransportWsTest, RelayBackfillsLateJoinerWithExistingState) {
   ASSERT_TRUE(tA.connect_to_peer(ws(S.listen_address()), std::chrono::milliseconds(2000)));
   ASSERT_TRUE(
       wait_until([&] { return S.connection_count() >= 1; }, std::chrono::milliseconds(2000)));
-  cvc::state::instance(aA)("room.a.name").value(std::string("seed"));
   cvc::state::instance(aA)("room.a.name").value(std::string("alice"));
   EXPECT_GT(tA.pump_all(), 0u);
   tA.flush();
@@ -2149,7 +2144,6 @@ TEST(StateTransportWsTest, BridgeWsAndGrpcClientsShareARoom) {
                          std::chrono::milliseconds(2000)));
 
   // WS client writes -> reaches the gRPC client through the bridge.
-  cvc::state::instance(aWs)("bridge.ws.k").value(std::string("seed"));
   cvc::state::instance(aWs)("bridge.ws.k").value(std::string("from-ws"));
   wc.pump_all();
   wc.flush();
@@ -2159,7 +2153,6 @@ TEST(StateTransportWsTest, BridgeWsAndGrpcClientsShareARoom) {
   EXPECT_EQ(cvc::state::instance(aGrpc)("bridge.ws.k").value(), "from-ws");
 
   // gRPC client writes -> reaches the WS client through the bridge.
-  cvc::state::instance(aGrpc)("bridge.grpc.k").value(std::string("seed"));
   cvc::state::instance(aGrpc)("bridge.grpc.k").value(std::string("from-grpc"));
   gc.pump_all();
   gc.flush();

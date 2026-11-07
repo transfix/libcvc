@@ -89,7 +89,6 @@ TEST(StateReconnectResilienceTest, StopRestartReconnect) {
   tA->register_shard(&sA);
   tB.register_shard(&sB);
 
-  cvc::state::instance(aA)("k").value(std::string("seed"));
   cvc::state::instance(aA)("k").value(std::string("v1"));
   tA->pump_all();
   tA->flush();
@@ -145,7 +144,6 @@ TEST(StateReconnectResilienceTest, PeerDisconnectNoHang) {
   tA.register_shard(&sA);
   tB.register_shard(&sB);
 
-  cvc::state::instance(aA)("x").value(std::string("seed"));
   cvc::state::instance(aA)("x").value(std::string("v1"));
   tA.pump_all();
   tA.flush();
