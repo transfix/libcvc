@@ -143,6 +143,28 @@ segments between junctions as one strip, its bends rounded and mitred (no gaps o
 bend), ending on the rim of the junction's pad so no corner pokes out, one asphalt colour, and a
 dark yellow centre stripe that stops short of the junctions.
 
+**Roads through hills (2026-11-07).** On the larger worlds the first grading carved hills oddly
+and left roads up on ridges. Three causes, each fixed:
+- A larger world's street segments are long (32 m at 5.3 km, 67 m at 11.2 km), and a segment's
+  surface is straight, so it bridged dips and cut hills whole; relaxing by passes spread the
+  profile over kilometres (fills up to 74 m at 250 m relief). The grade stage now grades a copy of
+  the network subdivided to about a mesh cell and a half (`subdivide_roads`), and the road mesh
+  samples the ground every 4 m along a road (`road_mesh_params::sample_step`).
+- The profile relaxed every bend. Now only what breaks a limit moves: the grade is held to 12% and
+  its change to `max_curvature` (0.015 per metre), so a road keeps to a gentle hill and cuts
+  through a steep one, and a climb too steep comes three quarters off its top (`cut_share`), so
+  roads sit in cuts rather than up on banks. Largest fill on the 5.3 km world: 47.6 m to about 4 m.
+- The ground blended toward each road with a shoulder as narrow as 2 m where a road was at
+  grade, so a lower road's wide cut nearby dug the ground beside it below it. Now the ground
+  beside a road keeps its own height unless it rises above the road's cut or falls below its bank
+  (side slope 0.5, steeper if it must to meet the ground within 40 m); where two roads' cuts and
+  banks cannot both hold, it settles between them, nearer the nearer road's.
+
+Measured (`roadcheck`): tilt across p95 0.032 / 0.015 on the 1.2 / 5.3 km worlds, grade p95
+0.116 / 0.112, grade change per 2 m p95 0.031 / 0.013, nothing under water. A street the generator
+laid up a steep slope (it allows 35%) still needs a long cut to come down to 12%: the deepest on
+the 5.3 km world is 29 m, where a plateau's streets come down to the shore.
+
 Still to do: routing a long street over the relief by a grade-limited A* (where steering only
 winds), service alleys in the cores, and district modes (industrial, rural) with their own spacing
 and widths.
@@ -264,6 +286,9 @@ The conference is the world's second consumer. Peers must see the same world and
       sum VTK generates, the one place both mappers keep the direct terms apart (the WebGL2 mapper
       scopes them to its lighting block). Checked on that mapper natively
       (`CVCGL_LOWMEM_MAPPER=force`): it applies the replacement and compiles the deck's shaders.
+      The mask is re-composited every 60 frames as the clouds change; the receivers crossfade from
+      the last composite to the newest over the 60 frames to the next (`cloudShadePrev`,
+      `cloudShadeMix`), so the shadows change shape smoothly instead of jumping at each one.
     - Coverage: a pool of near `VolumeNode`s (6 in the terrain lab, at most 8) on the clouds nearest
       the camera, and one mesh of 10 translucent shells for the rest, sampling a coarse opacity
       texture as the optical depth along the view ray. A cloud passing between the two

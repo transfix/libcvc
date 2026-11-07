@@ -142,6 +142,22 @@ std::vector<P2> rounded(std::vector<P2> pts, bool closed, int passes) {
   return pts;
 }
 
+// The line with points added along each piece longer than `step`, evenly, so none is longer.
+std::vector<P2> densified(const std::vector<P2> &pts, double step) {
+  if (step <= 0.0 || pts.size() < 2)
+    return pts;
+  std::vector<P2> out{pts.front()};
+  for (std::size_t i = 1; i < pts.size(); ++i) {
+    const double len = std::hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+    const int k = std::max(1, int(std::ceil(len / step - 1e-9)));
+    for (int j = 1; j < k; ++j)
+      out.push_back({pts[i - 1].x + (pts[i].x - pts[i - 1].x) * j / k,
+                     pts[i - 1].y + (pts[i].y - pts[i - 1].y) * j / k});
+    out.push_back(pts[i]);
+  }
+  return out;
+}
+
 // The line with `from` metres cut off its start and `to` off its end (empty if nothing is left).
 std::vector<P2> trimmed(const std::vector<P2> &pts, double from, double to) {
   std::vector<double> s(pts.size(), 0.0);
@@ -258,14 +274,14 @@ cvc::geometry extrude_roads(const road_network &net, const road_mesh_params &p,
     std::vector<P2> body = trimmed(pts, into_pad(c.nodes.front()), into_pad(c.nodes.back()));
     if (body.empty())
       body = pts;
-    strip(b, body, c.closed, hw, rgb, road_z);
+    strip(b, densified(body, p.sample_step), c.closed, hw, rgb, road_z);
     if (!p.centerline || c.width < p.centerline_min_width)
       continue;
     auto stop = [&](int v) {
       return c.closed ? 0.0 : (deg[v] >= 3 ? node_hw[v] + 1.0 : deg[v] == 1 ? 1.0 : 0.0);
     };
     const std::vector<P2> line = trimmed(pts, stop(c.nodes.front()), stop(c.nodes.back()));
-    strip(b, line, false, 0.5 * p.centerline_width, p.centerline_rgb,
+    strip(b, densified(line, p.sample_step), false, 0.5 * p.centerline_width, p.centerline_rgb,
           [&](double x, double y) { return ground(x, y) + stripeZ; });
   }
 
