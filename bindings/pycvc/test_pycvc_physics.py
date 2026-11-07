@@ -414,19 +414,24 @@ def test_the_dynamic_plant_options():
 
     # A wall across the road at x = 0..2 m in one sim_world's map, and a vehicle driven by
     # another whose map is empty: the navigator drives at it, at about 7.8 m/s, and the barrier
-    # stops it. At the default 0.01 s substep the contact's damper, held over the substep,
-    # overshoots an impact that fast (the books show the contact supplying energy and the
-    # residual at 3e-2 of the flow); 0.005 s resolves it.
+    # stops it, at the default 0.01 s substep (the implicit damper and the contact substeps,
+    # contact_step_depth).
     occ = np.zeros((81, 81), np.uint8)
     occ[:, 40:42] = 1
     walled = make_sim(occ)
-    hit = pycvc.dyn_bike_plant([humvee], substep=0.005, contact=True, contact_field=walled,
+    hit = pycvc.dyn_bike_plant([humvee], contact=True, contact_field=walled,
                                contact_params={"friction": 0.3})
     del walled
     gc.collect()  # the plant keeps its own copy of the field
     o = hit.options()
     check(o["contact"] and o["contact_field"] and o["contact_params"]["friction"] == 0.3
-          and o["contact_params"]["k"] > 0.0, "contact, its field and its settings")
+          and o["contact_params"]["k"] > 0.0 and o["substep"] == 0.01
+          and o["contact_step_depth"] > 0.0, "contact, its field and its settings")
+    check(pycvc.dyn_bike_plant([humvee], contact=True, contact_step_depth=0.25).options()
+          ["contact_step_depth"] == 0.25
+          and pycvc.dyn_bike_plant([humvee], contact=True, contact_step_depth=None).options()
+          ["contact_step_depth"] == o["contact_step_depth"],
+          "contact_step_depth is set, and None keeps the plant's default")
     sim = make_sim()
     pycvc.nav_sim_world_set_plant(sim, hit)
     front, pressed = -1e9, None
@@ -441,9 +446,10 @@ def test_the_dynamic_plant_options():
     check(pressed is not None and pressed["energy"] > 0.0 and pressed["wrench"][0] < 0.0,
           "against the wall: %d points, %.1f J, %.0f N back" % (
               pressed["touching"], pressed["energy"], pressed["wrench"][0]))
-    check(b["contact_dissipated"] > 0.0 and b["contact"] == 0.0,
-          "the contact's damping is booked (%.0f J), the world's contact line is not"
-          % b["contact_dissipated"])
+    check(b["contact_dissipated"] > 0.0 and b["contact"] == 0.0
+          and abs(b["limiter"]) <= 1e-6 * b["flow"],
+          "the contact's damping is booked (%.0f J), the world's contact line is not, and the "
+          "speed clamp takes nothing" % b["contact_dissipated"])
     check(abs(books_gap(hit, 0)) <= 1e-9 * b["flow"] and abs(b["residual"]) / b["flow"] < 5e-3,
           "the books close with the contact lines")
 
@@ -457,6 +463,8 @@ def test_the_dynamic_plant_options():
     expect_raises(lambda: pycvc.dyn_bike_plant([humvee], contact=True,
                                                contact_params={"stiffness": 1.0}),
                   "a contact setting that does not exist")
+    expect_raises(lambda: pycvc.dyn_bike_plant([humvee], contact=True, contact_step_depth="deep"),
+                  "a contact_step_depth that is not a number")
 
 
 def test_private_belief_planes():
