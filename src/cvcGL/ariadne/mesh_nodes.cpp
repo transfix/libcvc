@@ -38,6 +38,7 @@
 #include <cstdio>
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/scene.h>
+#include <cvc/ariadne/scene_geometry.h> // fit_up_axis (core)
 #include <cvc/ariadne/uri.h>
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
