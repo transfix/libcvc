@@ -62,8 +62,11 @@
 #include <mutex>
 #include <optional>
 #include <vector>
+#include <vtkWeakPointer.h>
 
 class vtkTextureObject;
+class vtkPolyDataMapper;
+class vtkRenderer;
 
 namespace cvc {
 namespace gl {
@@ -104,6 +107,16 @@ public:
   // rendering a scene with more than one slice node.
   static void depthSortSliceProps(vtkRenderer *renderer, const std::vector<VolSliceNode *> &nodes);
 
+  // This node as a renderer with a camera of its own draws it (a view of the scene: Ariadne's
+  // `viewport` widget): an actor of its own holding slices swept for `view`'s active camera, over
+  // this node's shaders, textures, uniforms and property. tick() uploads the textures it samples,
+  // so call tick() first each frame. The slices are swept again when that camera, the node's place,
+  // its settings or its volume change. It turns `view`'s order-independent translucency off, as
+  // addToRenderer does for the node's own renderer. The actor lives as long as this node, or until
+  // releaseViewProp. Null before the node has a volume. Owner thread.
+  vtkActor *viewProp(vtkRenderer *view);
+  void releaseViewProp(vtkRenderer *view);
+
 private:
   void rebuildSliceGeometry(const cvc::volslice::mat4 &localToClip,
                             const cvc::volslice::render_settings &s);
@@ -132,6 +145,18 @@ private:
   int m_uploadedFilter = -1;
 
   std::size_t m_planesRendered = 0;
+
+  // viewProp: one actor per view, with the slices last swept for it.
+  struct ViewSlices {
+    vtkWeakPointer<vtkRenderer> view;
+    vtkSmartPointer<vtkActor> actor;
+    vtkSmartPointer<vtkPolyData> poly;
+    vtkSmartPointer<vtkPolyDataMapper> mapper;
+    std::array<double, 16> applied{};
+    std::uint64_t settings = std::uint64_t(-1), volume = std::uint64_t(-1);
+  };
+  std::vector<ViewSlices> m_views;
+  cvc::volslice::mat4 localToClip(vtkRenderer *renderer) const;
 };
 
 } // namespace gl

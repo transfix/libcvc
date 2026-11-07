@@ -12,6 +12,11 @@
     "volslice_bunny",
     "volslice_bunny_ari",
     "fem_gallery_ari",
+    "viewer_grid_ari",
+    "viewer_looks_ari",
+    "viewer_scenes_ari",
+    "viewer_groups_ari",
+    "scene_views_ari",
     "ari",
     "ari_tvision",
     "terminal_scene_term",
@@ -41,6 +46,51 @@
       "blurb":
           "The FEM gallery, live: Poisson, heat diffusion and the vibration modes of solids tet-meshed by the LBIE mesher, surface curvature, geodesics and Laplace-Beltrami modes, and LBIE's own tet and hex meshes cut away and coloured by element size or quality, on the Stanford bunny, a scanned head and a Visible Human CT. Step through the items from the Gallery menu or with the arrow keys, then change any solve or mesh in its panel. libigl solves it on cvc::fem, in an Ariadne document that arigl runs.",
       "thumb": "img/fem_gallery_ari.jpg"
+    },
+    "viewer_grid_ari": {
+      "app": "arigl",
+      "doc": "viewer_grid",
+      "title": "viewer_grid",
+      "desc": "four views of one scene, each turned by its own camera",
+      "blurb":
+          "Four viewport widgets in one window, each a view of the same scene from a camera of its own: front, side, a top-down map and a close-up. Drag in a view to turn it, the wheel zooms, a double-click puts it back. Every view draws the scene's soft shadows from the maps the main view bakes. An Ariadne document with no host code: each view is a mirror of the main renderer, drawn where its widget sits in the window.",
+      "thumb": "img/viewer_grid_ari.jpg"
+    },
+    "viewer_looks_ari": {
+      "app": "arigl",
+      "doc": "viewer_looks",
+      "title": "viewer_looks",
+      "desc": "one scene drawn four ways: wireframe, X-ray, plan and clay",
+      "blurb":
+          "A plaza with buildings, a statue and people walking it, drawn four ways at once with no copy of the geometry. Each view's override: restyles the nodes it names, by id, tag or everything, as a twin actor over the node's own mapper: a wireframe on black, an X-ray where the people show through the walls, a plan of the people and their paths, and a clay model. Three of the views share one named camera, so turning one turns all three.",
+      "thumb": "img/viewer_looks_ari.jpg"
+    },
+    "viewer_scenes_ari": {
+      "app": "arigl",
+      "doc": "viewer_scenes",
+      "title": "viewer_scenes",
+      "desc": "three scenes, day, night and a studio, from one set of assets",
+      "blurb":
+          "Three scenes of their own in one document, each with its own lights, shadows and background, built from the same assets: the meshes are read once, and every node on them shares one copy of the geometry and its GPU buffers. Each viewport names the scene it shows. Drag a view to turn it.",
+      "thumb": "img/viewer_scenes_ari.jpg"
+    },
+    "viewer_groups_ari": {
+      "app": "arigl",
+      "doc": "viewer_groups",
+      "title": "viewer_groups",
+      "desc": "two tagged groups of one scene: a courtyard in the main view, a gallery in a window",
+      "blurb":
+          "One scene, two tagged groups. The scene's main_view: picks the courtyard for the main view, and a viewport shows the gallery the main view leaves out, with shadows baked for what it draws. A map view shows both groups from above.",
+      "thumb": "img/viewer_groups_ari.jpg"
+    },
+    "scene_views_ari": {
+      "app": "arigl",
+      "doc": "scene_views",
+      "title": "scene_views",
+      "desc": "an overview map and a layers view of one scene, picked by node tags",
+      "blurb":
+          "A block of buildings with agents tagged sim and their goals tagged debug. The overview window is a top-down map of the buildings and agents; the layers window's view draws the tags its menu picks, through a bound state key, from its own orbiting camera.",
+      "thumb": "img/scene_views_ari.jpg"
     },
     "lsystem_forest_ari": {
       "app": "arigl",

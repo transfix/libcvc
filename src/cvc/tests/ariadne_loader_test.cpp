@@ -2561,6 +2561,27 @@ scene:
   EXPECT_FLOAT_EQ(n.volren.tf.points[1].color[3], 1.0f); // alpha
   ASSERT_EQ(n.volren.lights.size(), 1u);
   EXPECT_FLOAT_EQ(n.volren.lights[0].direction[2], 1.0f);
+  EXPECT_FALSE(n.volren.shadows); // the raycaster's own shadows are off unless asked for
+}
+
+// volren: { shadows }: the raycaster's own volumetric shadows, as a flag or a map with a strength.
+TEST(AriadneScene, VolRenShadowsParse) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - { node: a, type: volren, source: { file: head.rawiv }, volren: { shadows: true } }
+    - { node: b, type: volren, source: { file: head.rawiv }, volren: { shadows: { strength: 0.6 } } }
+    - { node: c, type: volren, source: { file: head.rawiv }, volren: { shadows: { enabled: false } } }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.nodes.size(), 3u);
+  EXPECT_TRUE(r.scene.nodes[0].volren.shadows);
+  EXPECT_LT(r.scene.nodes[0].volren.shadow_strength, 0.0f); // the raycaster's default
+  EXPECT_TRUE(r.scene.nodes[1].volren.shadows);             // a map means on, unless it says
+  EXPECT_FLOAT_EQ(r.scene.nodes[1].volren.shadow_strength, 0.6f);
+  EXPECT_FALSE(r.scene.nodes[2].volren.shadows);
 }
 
 TEST(AriadneScene, VolSliceNodeParses) {

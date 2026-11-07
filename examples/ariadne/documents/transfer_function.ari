@@ -72,6 +72,7 @@ scene:
         ambient: 0.35
         steps: 384
         resolution_scale: 0.6
+        shadows: true            # its lights cast through the volume onto itself (soft, on in every demo)
         transfer_function:
           domain: [-8, 8]
           color: [[0, 0.90, 0.60, 0.20], [0.5, 1.00, 0.95, 0.85], [1, 0.30, 0.50, 1.00]]

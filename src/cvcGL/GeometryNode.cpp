@@ -168,6 +168,9 @@ GeometryNode::~GeometryNode() {
   // ImGuiOverlay observer-teardown pattern.
   if (m_shaderTexObserverInstalled && m_mapper && m_shaderTexCb)
     m_mapper->RemoveObserver(m_shaderTexCb);
+  for (const vtkWeakPointer<vtkMapper> &m : m_observedMappers) // observeShaderInputs's
+    if (m && m_shaderTexCb)
+      m->RemoveObserver(m_shaderTexCb);
 }
 
 void GeometryNode::applyTransformToVTK() {
@@ -752,15 +755,17 @@ void GeometryNode::updateVertices(const std::vector<double> &xyz) {
   runOnMainThread([this, xyz]() {
     if (!m_polyData)
       return;
-    vtkPoints *pts = m_polyData->GetPoints();
     const size_t n = xyz.size() / 3;
-    if (!pts || static_cast<size_t>(pts->GetNumberOfPoints()) != n) {
+    if (!m_polyData->GetPoints() || static_cast<size_t>(m_polyData->GetNumberOfPoints()) != n) {
       app().log(1, "GeometryNode::updateVertices[" + getName() + "]: point-count mismatch (" +
                        std::to_string(n) + " given, " +
-                       std::to_string(pts ? pts->GetNumberOfPoints() : 0) +
+                       std::to_string(m_polyData->GetNumberOfPoints()) +
                        " in mesh) — ignoring; call setGeometry to change topology");
       return;
     }
+    detachSharedArrays(); // the points may be another node's too (shareArraysFrom)
+    m_arraysEdited = true;
+    vtkPoints *pts = m_polyData->GetPoints();
     // Bulk raw-buffer write. vtkPoints::SetPoint is a per-point virtual +
     // type-dispatch call; for the per-frame agent pack (N x a multi-thousand-vert
     // Humvee streamed every frame) that loop dominates the CPU frame time. When the
@@ -840,6 +845,9 @@ void GeometryNode::updateNormals(const std::vector<double> &xyz) {
                        " in mesh) — ignoring; needs a mesh that already carries normals");
       return;
     }
+    detachSharedArrays(); // the normals may be another node's too (shareArraysFrom)
+    m_arraysEdited = true;
+    normals = m_polyData->GetPointData()->GetNormals();
     for (size_t i = 0; i < n; ++i)
       normals->SetTuple3(static_cast<vtkIdType>(i), xyz[3 * i], xyz[3 * i + 1], xyz[3 * i + 2]);
     normals->Modified();
@@ -1625,7 +1633,71 @@ bool GeometryNode::tetSurfaceCells(const cvc::geometry &geom, vtkCellArray *cell
   return true;
 }
 
+void GeometryNode::shareArraysFrom(const std::shared_ptr<GeometryNode> &donor) {
+  m_arrayDonor = donor.get() == this ? std::weak_ptr<GeometryNode>() : donor;
+  if (donor && m_hasGeometry && m_geometry && adoptDonorArrays(*m_geometry))
+    m_polyData->Modified();
+}
+
+void GeometryNode::detachSharedArrays() {
+  if (!m_arraysShared || !m_polyData)
+    return;
+  vtkSmartPointer<vtkPolyData> own = vtkSmartPointer<vtkPolyData>::New();
+  own->DeepCopy(m_polyData);
+  m_polyData->ShallowCopy(own); // the same polydata (the mapper's input), arrays of its own
+  m_arraysShared = false;
+}
+
+// Take the donor's arrays (shareArraysFrom) when the donor was built from the same buffers, in the
+// same render mode and texture-coordinate flip, and has not written into them since. The colours
+// are this node's own (they follow its material and colour-by settings).
+bool GeometryNode::adoptDonorArrays(const cvc::geometry &geom) {
+  std::shared_ptr<GeometryNode> d = m_arrayDonor.lock();
+  if (!d || d.get() == this || !d->m_hasGeometry || !d->m_geometry || !d->m_polyData ||
+      d->m_arraysEdited || d->m_renderMode != m_renderMode || d->m_textureFlipV != m_textureFlipV ||
+      m_renderMode == GeometryRenderMode::TETS)
+    return false;
+  const cvc::geometry &dg = *d->m_geometry;
+  if (&dg.const_points() != &geom.const_points() || &dg.const_lines() != &geom.const_lines() ||
+      &dg.const_tris() != &geom.const_tris() || &dg.const_quads() != &geom.const_quads() ||
+      &dg.const_hexs() != &geom.const_hexs() || &dg.const_normals() != &geom.const_normals() ||
+      &dg.const_uvs() != &geom.const_uvs() ||
+      static_cast<size_t>(d->m_polyData->GetNumberOfPoints()) != geom.num_points())
+    return false;
+  if (m_arraysShared && d->m_polyData->GetPoints() == m_polyData->GetPoints())
+    return true; // already
+  m_polyData->ShallowCopy(d->m_polyData);
+  m_arraysShared = true;
+  d->m_arraysShared = true; // its in-place writes must not reach this node now
+  m_arraysEdited = false;
+  applyVertexColors(geom, /*inPlace=*/false);
+  return true;
+}
+
+void GeometryNode::observeShaderInputs(vtkMapper *other) {
+  if (!other || other == m_mapper.GetPointer())
+    return;
+  ensureShaderTexObserver();
+  if (!m_shaderTexCb)
+    return;
+  m_observedMappers.erase(std::remove_if(m_observedMappers.begin(), m_observedMappers.end(),
+                                         [](const vtkWeakPointer<vtkMapper> &m) { return !m; }),
+                          m_observedMappers.end());
+  for (const vtkWeakPointer<vtkMapper> &m : m_observedMappers)
+    if (m.GetPointer() == other)
+      return;
+  other->AddObserver(vtkCommand::UpdateShaderEvent, m_shaderTexCb);
+  m_observedMappers.emplace_back(other);
+}
+
 void GeometryNode::updatePolyData(const cvc::geometry &geom) {
+  // An asset's nodes draw from one set of arrays (shareArraysFrom).
+  if (adoptDonorArrays(geom)) {
+    m_polyData->Modified();
+    return;
+  }
+  m_arraysShared = false; // the arrays built below are this node's own
+  m_arraysEdited = false;
   // Create VTK points from geometry
   vtkSmartPointer<vtkPoints> points = vtkSmartPointer<vtkPoints>::New();
   points->SetNumberOfPoints(geom.num_points());

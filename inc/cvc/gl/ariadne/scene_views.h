@@ -23,6 +23,11 @@
 // the main renderer's props, the same geometry, from its own camera, less the props of the tagged
 // nodes it leaves out, and with a twin in place of each actor it restyles: its own vtkActor and
 // vtkProperty over the original's mapper, so no geometry is copied (Viewport::setMirrorFilter).
+// An override entry may also move, turn or scale what it covers (`transform:`, in the frame of the
+// node it names) and start over from the node's own look (`mode: replace`). A volslice node, whose
+// slices face the main camera, draws slices swept for a view's own camera (VolSliceNode::viewProp);
+// a volren node, raycast for the main view and composited into its pixels, is in no view. A
+// `type: volume` node takes an opacity override.
 // The widget reserves its rect in the window,
 // cuts it out of the window's background (ImGuiBackend::cut_window_background) and puts the
 // viewport there, so the view sits where the widget is, scrolls and moves with its window, and is
@@ -99,6 +104,11 @@ public:
   // The views that exist, by name, for tests and hosts.
   std::size_t size() const { return views_.size(); }
   bool has_view(const std::string &name) const { return views_.count(name) != 0; }
+  // The scene a viewport would show for `scene` ("" the main one), as the constructor's lookup
+  // finds it. False when there is none.
+  bool scene(const std::string &scene, SceneSlot &out) const {
+    return scenes_ && scenes_(scene, out);
+  }
 
 private:
   struct View;
