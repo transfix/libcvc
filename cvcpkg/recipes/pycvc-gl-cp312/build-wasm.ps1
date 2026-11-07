@@ -128,7 +128,8 @@ $bashEnv = @(
     "INST='$(ConvertTo-MsysPath $env:CVC_INSTALL_DIR)'",
     "SRC='$(ConvertTo-MsysPath $env:CVC_SOURCE_DIR)'",
     "EMSDK='$(ConvertTo-MsysPath $env:CVC_EMSDK_DIR)'",
-    "OUT='$(ConvertTo-MsysPath $share)'"
+    "OUT='$(ConvertTo-MsysPath $share)'",
+    "PYTHON='$(ConvertTo-MsysPath $pyNative)'"  # link-host's Python steps (wasm_pyext.py)
 ) -join ' '
 if ($nodeExe) { $bashEnv += " NODE='$(ConvertTo-MsysPath $nodeExe)'" }
 $linkScript = ConvertTo-MsysPath (Join-Path $env:CVC_SOURCE_DIR 'bindings\pycvc\wasm\link-host.sh')

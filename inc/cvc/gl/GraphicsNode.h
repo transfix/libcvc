@@ -345,8 +345,8 @@ public:
   // True when this node AND every graphics ancestor are visible, i.e. whether
   // the node can draw at all. isVisible() is only the node's own flag, which a
   // hidden parent does not always reach: a child added under an already-hidden
-  // parent keeps its own `true`. A walk up the parent chain; cheap at scene
-  // depths.
+  // parent keeps its own `true` (and draws nothing until the parent is shown).
+  // A walk up the parent chain; cheap at scene depths.
   bool isVisibleInHierarchy() const;
 
   // Override update to handle transform changes
@@ -357,6 +357,15 @@ public:
   void removeFromRenderer(vtkRenderer *renderer) override;
 
 protected:
+  // A hidden graphics ancestor keeps this node from drawing (SceneNode::ancestorsVisible). Under
+  // a parent that draws its children itself (drawsChildrenItself), the parent decides.
+  bool ancestorsVisible() const override;
+  // An ancestor shown or hidden: the prop (SceneNode) and the label follow.
+  void ancestorVisibilityChanged() override;
+  // True for a node whose children draw by its own policy and stay registered with the renderer
+  // whatever is above: LodGraphicsNode shows exactly one rung by its actor's visibility.
+  virtual bool drawsChildrenItself() const { return false; }
+
   void appendViewProps(std::vector<vtkProp *> &out) override; // + the bounding box's outline
   // isRoot=true (the default, used by the public setters + state handlers) fires
   // transformChanged after the subtree is updated; the child recursion passes

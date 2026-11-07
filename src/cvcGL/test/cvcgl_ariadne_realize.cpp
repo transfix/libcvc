@@ -1098,7 +1098,7 @@ int main() {
       Value v;
       v.kind = Value::Kind::Scalar;
       v.scalar = "0";
-      sky.props.entries.emplace_back("shadow", v); // skip the shadow bake to keep the test quick
+      sky.props.entries.emplace_back("shadow", v); // the shade starts off
       v.scalar = "storm";
       sky.props.entries.emplace_back("keys", v); // its live keys under storm.*, not sky.*
     }
@@ -1114,8 +1114,39 @@ int main() {
         "wave_sea realized a VolumeNode");
     chk(std::dynamic_pointer_cast<cvc::gl::VolumeNode>(sg.getGraphics("sky")) != nullptr,
         "cloud_sky realized a VolumeNode");
+    // The deck: a pool of near volumes (the node's id is the first) and one mesh of far shells.
+    chk(std::dynamic_pointer_cast<cvc::gl::VolumeNode>(sg.getGraphics("sky_near3")) != nullptr &&
+            std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("sky_far")) != nullptr,
+        "cloud_sky realized its near volumes and its far shells");
+    // The shells reach far past the ground (to the horizon): out of the bounds the camera frames.
+    chk(sg.getGraphics("sky_far") && !sg.getGraphics("sky_far")->contributesToSceneBounds(),
+        "cloud_sky's far shells are out of the scene's bounds");
+    // ...and drawn with the volumes, after the water's, so a water volume below never covers them.
+    {
+      auto far = std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("sky_far"));
+      chk(far && far->drawsWithVolumes(), "cloud_sky's far shells draw in the volume layer");
+    }
     // forest wind + sea refill + cloud drift each push a tick.
     chk(realized.custom_ticks.size() >= 3u, "forest/sea/sky each registered a per-frame tick");
+    // The sky's first tick gives the ground (its `ground:`, default terrain) the deck's shade: in
+    // its shader, not its texture.
+    {
+      auto ground = std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("terrain"));
+      chk(ground && !ground->hasSharedShaderInputs("cloud_sky"),
+          "the ground takes no shade before the sky's first tick");
+      realized.custom_ticks.back()(nullptr);
+      chk(ground && ground->hasSharedShaderInputs("cloud_sky"),
+          "the sky's first tick wired its shade into the ground's shader");
+      // A mesh that joins a receiver later (an LOD rung, a regenerated world's part) takes the
+      // shade on the next tick: joining bumps the scene's treeVersion(), no timer to wait out.
+      if (ground) {
+        auto rung = ground->addGraphicsChild<cvc::gl::GeometryNode>("late_rung");
+        chk(!rung->hasSharedShaderInputs("cloud_sky"), "a new mesh has no shade before a tick");
+        realized.custom_ticks.back()(nullptr);
+        chk(rung->hasSharedShaderInputs("cloud_sky"),
+            "the next tick wired the shade into a mesh added under a receiver");
+      }
+    }
     bool emptyForest = false;
     for (const std::string &w : warnings)
       if (w.find("no trees planted") != std::string::npos)
@@ -1140,6 +1171,15 @@ int main() {
                        .value<double>(),
                    1.0),
         "cloud_sky with keys: storm seeded storm.* from its props");
+    // The weather's live keys: its rate and the orographic coupling's strength.
+    chk(approx(cvc::state::instance(app)(cvc::ariadne::resolve_bind("forest", "storm.evolve"))
+                   .value<double>(),
+               1.0) &&
+            approx(
+                cvc::state::instance(app)(cvc::ariadne::resolve_bind("forest", "storm.orographic"))
+                    .value<double>(),
+                1.0),
+        "cloud_sky seeded storm.evolve and storm.orographic");
   }
 
   // ── generated_world + the fast render path's keys (casts_shadow, opaque, shadow focus) ──────
@@ -1167,7 +1207,7 @@ int main() {
     prop("buildings", "8");
     prop("tree_gen", "3");
     prop("amp", "40");
-    prop("water_level", "14");
+    prop("water_level", "0"); // sea level
     prop("texture", "256");
     w.has_casts_shadow = true;
     w.casts_shadow = false;
@@ -1273,10 +1313,17 @@ int main() {
       view.render();
       cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
     }
-    // A live edit regenerates the world in place, as a task on the app's scheduler: the old world
-    // stays until the new one is made, then a bigger world, a bigger ground.
+    // An edit waits for Regenerate, which rebuilds the world in place as a task on the app's
+    // scheduler: the old world stays until the new one is made, then a bigger world, a bigger
+    // ground.
     const std::string busy_key = cvc::ariadne::resolve_bind("gw", "world.busy");
     auto busy = [&]() { return st(busy_key).value() == "1"; };
+    auto pending = [&]() {
+      return st(cvc::ariadne::resolve_bind("gw", "world.pending")).value() == "1";
+    };
+    auto regenerate = [&]() {
+      st(cvc::ariadne::resolve_bind("gw", "world.request")).value(std::string("regenerate"));
+    };
     auto settle_world = [&]() {
       cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0); // sees the edit, starts it
       for (int i = 0; i < 60000 && busy(); ++i) {
@@ -1292,17 +1339,43 @@ int main() {
       return f ? std::size_t(f->rows()) * std::size_t(f->cols()) : std::size_t(0);
     };
     const auto pts0 = ground_n();
+    chk(!pending(), "the world shown is the one the settings describe");
     st(cvc::ariadne::resolve_bind("gw", "world.half")).value(700.0);
     cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
-    chk(busy() && ground_n() == pts0,
-        "a world.half edit starts a rebuild task and keeps the old world meanwhile");
+    chk(!busy() && pending() && ground_n() == pts0,
+        "a world.half edit waits for Regenerate and says the settings changed");
+    regenerate();
+    cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+    chk(busy() && !pending() && ground_n() == pts0,
+        "Regenerate starts a rebuild task and keeps the old world meanwhile");
     chk(settle_world(), "the rebuild finished");
     const auto pts1 = ground_n();
     chk(pts1 > pts0, "a world.half edit regenerated the world in place");
+    // And the regenerated world draws: every ground chunk's and prop cell's active rung is in the
+    // renderer and visible after the next frame.
+    {
+      view.render();
+      cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+      view.render();
+      vtkPropCollection *props = view.renderer()->GetViewProps();
+      auto drawn = [&](const std::vector<std::shared_ptr<cvc::gl::LodGraphicsNode>> &ladders) {
+        int ok = 0, bad = 0;
+        for (const auto &l : ladders) {
+          auto g = l->rung(l->activeRung());
+          vtkProp *a = g ? g->prop() : nullptr;
+          (a && props->IsItemPresent(a) && a->GetVisibility() ? ok : bad)++;
+        }
+        printf("    %d drawn, %d not\n", ok, bad);
+        return ok > 0 && bad == 0;
+      };
+      chk(drawn(ladders_under("world")), "the regenerated ground's chunks draw");
+      chk(drawn(ladders_under("world_props")), "the regenerated props draw");
+    }
     chk(st(cvc::ariadne::resolve_bind("gw", "world.progress")).value() == "100",
         "world.progress reached 100");
     // Stop ends a rebuild and keeps the world shown, and does not restart it by itself.
     st(cvc::ariadne::resolve_bind("gw", "world.seed")).value(9.0);
+    regenerate();
     cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
     st(cvc::ariadne::resolve_bind("gw", "world.request")).value(std::string("stop"));
     cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
@@ -1327,18 +1400,66 @@ int main() {
         st(cvc::ariadne::resolve_bind("gw", "world.generators.terrain")).value<std::string>();
     chk(terrains.find("fbm") != std::string::npos && terrains.find("dem") != std::string::npos,
         "generated_world published its terrain generators");
+    // A new preset quick-sets the counts, the relief and the water level: the sea at 0 m, which
+    // every relief is laid against (the urban preset's 10 m relief once sat under the document's
+    // 34 m water level: a world of sea).
+    st(cvc::ariadne::resolve_bind("gw", "world.water_level")).value(5.0);
+    st(cvc::ariadne::resolve_bind("gw", "world.preset")).value(2.0);
+    cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+    {
+      const double amp = st(cvc::ariadne::resolve_bind("gw", "world.amp")).value<double>();
+      const double sea = st(cvc::ariadne::resolve_bind("gw", "world.water_level")).value<double>();
+      chk(approx(amp, 10.0) && approx(sea, 0.0),
+          "the urban preset set its 10 m relief and the sea back to sea level");
+    }
+    // With world.auto on, an edit rebuilds by itself.
+    st(cvc::ariadne::resolve_bind("gw", "world.auto")).value(1.0);
     st(cvc::ariadne::resolve_bind("gw", "world.city")).value(std::string("none"));
     settle_world();
+    st(cvc::ariadne::resolve_bind("gw", "world.auto")).value(0.0);
     const auto bld =
         std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("world_buildings"));
     chk(bld && bld->getGeometry()->const_points().empty(),
         "world.city: none regenerated a world without buildings");
     st(cvc::ariadne::resolve_bind("gw", "world.terrain")).value(std::string("no_such"));
+    regenerate();
     settle_world();
     const std::string status =
         st(cvc::ariadne::resolve_bind("gw", "world.status")).value<std::string>();
     chk(status.rfind("error:", 0) == 0 && ground_n() == pts1,
         "an unknown terrain generator keeps the world and reports the error");
+    // A `visible:` on the node hides the whole world: the ground's chunks (its children) at once,
+    // and the meshes and the water beside it at the next tick; showing it brings all of it back.
+    {
+      const char *parts[] = {"world_props",     "world_foliage", "world_needles",
+                             "world_buildings", "world_roads",   "world_water"};
+      auto drawn_rungs = [&](const char *under) {
+        int n = 0;
+        for (const auto &c : ladders_under(under))
+          for (int k = 0; k < c->rungCount(); ++k)
+            if (vtkProp *p = c->rung(k)->prop())
+              n += p->GetVisibility();
+        return n;
+      };
+      auto parts_shown = [&](bool want) {
+        bool ok = true;
+        for (const char *p : parts)
+          if (auto g = sg.getGraphics(p))
+            ok = ok && g->isVisible() == want;
+        return ok;
+      };
+      cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+      chk(drawn_rungs("world") > 0 && parts_shown(true), "shown, the whole world draws");
+      terrain->setVisible(false);
+      chk(drawn_rungs("world") == 0, "hiding the node hides its ground's chunks at once");
+      cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+      chk(parts_shown(false) && drawn_rungs("world_props") == 0,
+          "and, at the next tick, the meshes, the trees and the water beside it");
+      terrain->setVisible(true);
+      cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+      chk(drawn_rungs("world") > 0 && parts_shown(true) && drawn_rungs("world_props") > 0,
+          "showing the node brings the whole world back");
+    }
   }
 
   // ── a generated terrain as a geometry source (source: { terrain: {...} }) ─────────────────

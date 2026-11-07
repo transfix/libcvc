@@ -1370,6 +1370,59 @@ inline PyObject *to_dict(const cvc::nav::drive_telemetry *tel, int N) {
     Py_RETURN_NONE;
   }
 
+  // The caller's commands for the next nav_sim_world_step only, in place of the navigator's
+  // (sim_world::override_command): steer (N,) bicycle angles (rad, + left) and accel (N,)
+  // accelerations along the heading, normalized / s^2 (m/s^2 times the world's scale). A NaN in
+  // either array leaves that agent to the navigator for the step. On nav's kinematic bicycle the
+  // agent integrates the command; on a plant (nav_sim_world_set_plant) it is the plant's command.
+  // Either way the steer is held to the lock and the acceleration to the agent's top speed (and,
+  // with the risk governor, its cap). Returns how many agents took a command.
+  int nav_sim_world_override(PyObject *handle, PyObject *steer, PyObject *accel) {
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    const int N = sw->size();
+    PyArrayObject *s = reinterpret_cast<PyArrayObject *>(
+        PyArray_FROMANY(steer, NPY_DOUBLE, 1, 1, NPY_ARRAY_C_CONTIGUOUS));
+    if (!s)
+      throw std::invalid_argument("pycvc.nav_sim_world_override: steer must be an (N,) array");
+    PyArrayObject *a = reinterpret_cast<PyArrayObject *>(
+        PyArray_FROMANY(accel, NPY_DOUBLE, 1, 1, NPY_ARRAY_C_CONTIGUOUS));
+    if (!a) {
+      Py_DECREF(s);
+      throw std::invalid_argument("pycvc.nav_sim_world_override: accel must be an (N,) array");
+    }
+    if (PyArray_DIM(s, 0) != N || PyArray_DIM(a, 0) != N) {
+      Py_DECREF(s);
+      Py_DECREF(a);
+      throw std::invalid_argument(
+          "pycvc.nav_sim_world_override: steer and accel must hold one value per agent");
+    }
+    const double *sv = static_cast<const double *>(PyArray_DATA(s));
+    const double *av = static_cast<const double *>(PyArray_DATA(a));
+    int taken = 0;
+    for (int i = 0; i < N; ++i) {
+      if (std::isnan(sv[i]) || std::isnan(av[i]))
+        continue;
+      sw->override_command(i, static_cast<float>(sv[i]), static_cast<float>(av[i]));
+      ++taken;
+    }
+    Py_DECREF(s);
+    Py_DECREF(a);
+    return taken;
+  }
+
+  // Put agent i at (x_n, y_n) (normalized) with a heading (rad) and a speed (normalized / s), on
+  // nav's kinematic bicycle (sim_world::set_pose). A plant owns its vehicles' poses: with one set
+  // this does nothing and returns False, so place the agents first and set the plant after (it
+  // attaches each vehicle at its agent's pose). An index out of range is an error.
+  bool nav_sim_world_set_pose(PyObject *handle, int i, double x_n, double y_n, double heading,
+                              double speed = 0.0) {
+    cvc::nav::sim_world *sw = sim_world_from(handle);
+    if (i < 0 || i >= sw->size())
+      throw std::invalid_argument("pycvc.nav_sim_world_set_pose: no such agent");
+    return sw->set_pose(i, static_cast<float>(x_n), static_cast<float>(y_n),
+                        static_cast<float>(heading), static_cast<float>(speed));
+  }
+
   // ── the drive telemetry of the last tick (sim_world::drive_telemetry_data) ──────
   // Off by default; turn it on before the step()s to read (the world steps bit for bit the same
   // either way). nav_sim_world_drive_telemetry returns the last captured tick as a dict of (N,)
@@ -1388,6 +1441,24 @@ inline PyObject *to_dict(const cvc::nav::drive_telemetry *tel, int N) {
     if (!tel)
       Py_RETURN_NONE;
     return pycvc_telemetry::to_dict(tel, sw->size());
+  }
+
+  // ── the risk governor (sim_world::set_risk_governor) ────────────────────────────
+  // From the next step: the material's (and the terrain's) risk caps each agent's speed, down to
+  // vmin at risk 1, with `probes` points out to `lookahead` ahead slowing it before it gets there
+  // (speeds and look-ahead normalized). The material's forces alone do not slow an agent at its top
+  // speed that drives square at a hazard; this does. A bad argument raises RuntimeError.
+  PyObject *nav_sim_world_set_risk_governor(PyObject *handle, int on, double vmin = 0.0,
+                                            double onset = 0.3, double lookahead = 0.0,
+                                            int probes = 3) {
+    sim_world_from(handle)->set_risk_governor(on != 0, static_cast<float>(vmin),
+                                              static_cast<float>(onset),
+                                              static_cast<float>(lookahead), probes);
+    Py_RETURN_NONE;
+  }
+
+  PyObject *nav_sim_world_risk_governor(PyObject *handle) {
+    return PyBool_FromLong(sim_world_from(handle)->risk_governor() ? 1 : 0);
   }
 
   // ── base nav_stats on the sim_world (internal collector) ────────────────────
@@ -4093,9 +4164,10 @@ PyObject *nav_material_trainer_create(const char *cvcnm_path, double grad_clip =
                                       double ms_dt_mult = 4.0, int use_cuda = 0,
                                       int ms_count = 1, double frac_lo = 0.9,
                                       double frac_hi = 0.9, unsigned long long seed = 0,
-                                      int ms_semi_implicit = 0) {
+                                      int ms_semi_implicit = 1) {
   // L_multi start sampling (multi_start_params): the defaults are the legacy single
-  // start. Validated here, before any step releases the GIL — a throw from inside
+  // start, integrated with semi-implicit Euler (ms_semi_implicit = 0: explicit, the
+  // material fork's order). Validated here, before any step releases the GIL — a throw from inside
   // the GIL-free step would leave it unrestored. Only the low 32 bits of `seed`
   // matter, as for torch.Generator.manual_seed.
   cvc::nav::multi_start_params ms;

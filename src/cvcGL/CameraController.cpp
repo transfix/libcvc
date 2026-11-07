@@ -20,6 +20,7 @@
 #include <cvc/gl/SceneRenderer.h>
 #include <iterator>
 #include <set>
+#include <sstream> // a frame request's bounds
 #include <string>
 #include <utility> // std::move: the UI regions
 #include <vtkCamera.h>
@@ -39,28 +40,28 @@
 #define CVCGL_HAVE_X11 1
 #include <X11/Xlib.h>
 #endif
-#if defined(CVC_ENABLE_SDL) && !defined(__EMSCRIPTEN__)
+#ifdef CVC_ENABLE_SDL
 #include "SdlWindow.h" // pointer capture on cvcGL's SDL window: SDL's relative mouse mode
 #endif
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #include <vtkWebAssemblyRenderWindowInteractor.h> // the canvas the pointer lock is on
-// Pointer capture in the browser is the page's pointer lock on VTK's canvas. While it holds,
-// VTK's pointer positions stand still, so the motion comes from the document's mousemove events
-// (movementX/Y), summed here until update() takes it. The browser ends the lock on Escape or when
-// the tab loses focus; `lost` counts those, so update() releases the capture too. An exit the
-// camera asked for itself is not counted.
+// Pointer capture in the browser is the page's pointer lock on the canvas (SDL's window, or VTK's
+// canvas window). While it holds, the interactor's pointer positions stand still, so the motion
+// comes from the document's mousemove events (movementX/Y), summed here until update() takes it.
+// The browser ends the lock on Escape or when the tab loses focus; `lost` counts those, so
+// update() releases the capture too. An exit the camera asked for itself is not counted.
 // A refusal comes as pointerlockerror, as the request's rejected promise, or both (Chromium
 // rejects a page that can never lock, an embedded one, with WrongDocumentError and no event): it
 // counts once, and the console says why. The lock is taken inside the press on the canvas itself
 // while mouse look waits for one (`armed`: on, in Orbit) and the press is not on one of the UI's
 // windows (`ui`, cvcgl_pointer_lock_ui: tested against the press's own position, as the frame's
 // idea of where the pointer is can be a frame or two old): a browser grants it there, where a
-// request from the frame -- after the click, VTK's events being queued -- can be refused. That
-// request from the frame is still made (a host that captures in code); when it is refused it is
-// asked again inside the next click on the canvas. A second refusal, or one that can never be
-// granted, counts as lost.
+// request from the frame -- after the click, the interactor's events being queued -- can be
+// refused. That request from the frame is still made (a host that captures in code); when it is
+// refused it is asked again inside the next click on the canvas. A second refusal, or one that
+// can never be granted, counts as lost.
 // The lock asks for the mouse's raw motion (unadjustedMovement: no pointer acceleration, and
 // none of the jumps Chromium's adjusted motion can have under a lock); a browser that cannot
 // give it gets the plain lock instead.
@@ -829,9 +830,21 @@ bool CameraController::poseMirrorStale() const {
 }
 
 void CameraController::handleStateChanged(const std::string &childState) {
-  (void)childState;
   if (m_impl->selfWrite.load())
     return; // our own write echoing back
+  // A frame request: "min_x min_y min_z max_x max_y max_z" written to <camera>.frame (a scene's
+  // data node, when its dataset draws: scene_realize's `frame:`) frames those bounds as
+  // frameBounds does. Anything else in it is ignored.
+  const std::string key = "frame";
+  if (childState == key ||
+      (childState.size() > key.size() &&
+       childState.compare(childState.size() - key.size() - 1, std::string::npos, "." + key) == 0)) {
+    std::istringstream in(getState(key).value());
+    double b[6];
+    if (in >> b[0] >> b[1] >> b[2] >> b[3] >> b[4] >> b[5])
+      frameBounds(b[0], b[1], b[2], b[3], b[4], b[5]);
+    return;
+  }
   readAllFromState();
   applyToCamera();
 }
@@ -1510,6 +1523,10 @@ void CameraController::applyPointerCapture() {
   Impl &s = *m_impl;
 #ifdef __EMSCRIPTEN__
   const char *selector = "#canvas";
+#ifdef CVC_ENABLE_SDL
+  if (auto *sdl = SdlGLRenderWindow::SafeDownCast(s.window))
+    selector = sdl->GetCanvasSelector();
+#endif
   if (auto *wi = vtkWebAssemblyRenderWindowInteractor::SafeDownCast(s.interactor))
     if (wi->GetCanvasSelector())
       selector = wi->GetCanvasSelector();

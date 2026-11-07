@@ -19,6 +19,7 @@
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/Settings.h>
+#include <cvc/gl/TouchScroll.h>
 #include <imgui.h>
 #include <imgui_internal.h> // the toggle's z-order; carrying windows along with a new UI size
 // The GL loader must match VTK's context: WebGL2/GLES3 in the browser build.
@@ -54,11 +55,11 @@ EM_JS(double, cvcgl_device_pixel_ratio, (), {
 // The field starts as two spaces so a Backspace always has something to delete (a keyboard sends
 // nothing for a Backspace in an empty field), and is reset to them when it runs short or long.
 //
-// iOS raises the keyboard only for a focus made inside a user gesture. VTK turns a touchstart into
-// a press that ImGui takes at the next frame, so by the time the finger lifts the field has become
-// active: the touchend handler focuses the input then. A field that becomes active with no finger
-// down (one that took the text by itself, or a very quick tap) is focused at once, which raises the
-// keyboard on Android; on iOS the next tap on it does.
+// iOS raises the keyboard only for a focus made inside a user gesture. The interactor turns a
+// touch into a press that ImGui takes at the next frame, so by the time the finger lifts the field
+// has become active: the touchend handler focuses the input then. A field that becomes active with
+// no finger down (one that took the text by itself, or a very quick tap) is focused at once, which
+// raises the keyboard on Android; on iOS the next tap on it does.
 EM_JS(void, cvcgl_ime_install, (const char *sel), {
   var el = document.querySelector(UTF8ToString(sel)) || document.getElementById('canvas') ||
            document.querySelector('canvas');
@@ -370,7 +371,7 @@ float detectPixelRatio() {
 }
 
 #ifdef __EMSCRIPTEN__
-// VTK's canvas, which TouchGestures listens on as well.
+// The canvas (SDL's window, or VTK's canvas window), which TouchGestures listens on as well.
 constexpr const char *kCanvas = "#canvas";
 
 // The system keyboard's keys (cvcgl_ime_install's KEYS), by minus their code.
@@ -479,6 +480,7 @@ struct ImGuiOverlay::Impl {
   float ratioOverride = 0; // setPixelRatio; 0 = the display's
   float windowRescale = 1; // the open windows' share of a scale change, for the next frame
   bool touchMode = false;
+  TouchScroll touchScroll;              // touch mode: a finger's drag scrolls, a fling glides
   bool panelsOpen = true;               // the floating toggle drives this
   bool showToggle = true;               // draw the floating show/hide button
   bool sizedOnce = false;               // first frame with a real DisplaySize
@@ -552,6 +554,12 @@ struct ImGuiOverlay::Impl {
     ImGui_ImplOpenGL3_NewFrame();
     ImGui::NewFrame();
     frameOpen = true;
+    // A finger's drag moves the content it drags and a fling glides on, before the widgets draw
+    // where it is now. A mouse has the wheel and the scroll bars.
+    if (touchMode)
+      touchScroll.beginFrame();
+    else
+      touchScroll.reset();
     // On a SMALL viewport (a phone), start with the panels hidden. Finger-sized
     // widgets on a 400px-wide screen would otherwise bury the scene the moment
     // it loads — the UI has to be reachable, not permanently in the way. The
@@ -592,6 +600,8 @@ struct ImGuiOverlay::Impl {
   void renderFrame() {
     if (!frameOpen)
       return;
+    if (touchMode) // after the widgets: is the finger's drag a scroll, or the widget's?
+      touchScroll.endFrame();
     findUiRegions();
     if (cam) // a press over a window is the UI's, not the camera's (a browser's pointer lock)
       cam->setUiRegions(uiRegions);
@@ -647,6 +657,8 @@ struct ImGuiOverlay::Impl {
     v.touchMode = touchMode;
     v.panelsOpen = panelsOpen;
     v.toggleButton = showToggle;
+    v.touchScroll = touchScroll.settings().enabled;
+    v.scrollFriction = touchScroll.settings().friction;
     settings->set(v);
   }
 
@@ -908,6 +920,7 @@ ImGuiOverlay::ImGuiOverlay(SceneRenderer &viewer) : m_impl(new Impl) {
         impl->panelsOpen = v.panelsOpen;
         impl->showToggle = v.toggleButton;
         impl->uiScale = clampUiScale(static_cast<float>(v.scale));
+        impl->touchScroll.setSettings({v.touchScroll, static_cast<float>(v.scrollFriction)});
         impl->applyingState = false;
       });
   m_impl->syncSettings();
@@ -1016,6 +1029,21 @@ void ImGuiOverlay::setTouchMode(bool on) {
 }
 bool ImGuiOverlay::touchMode() const { return m_impl->touchMode; }
 
+void ImGuiOverlay::setTouchScrollEnabled(bool on) {
+  TouchScroll::Settings s = m_impl->touchScroll.settings();
+  s.enabled = on;
+  m_impl->touchScroll.setSettings(s); // a drag or a glide under way stops at the next frame
+  m_impl->syncSettings();
+}
+bool ImGuiOverlay::touchScrollEnabled() const { return m_impl->touchScroll.settings().enabled; }
+void ImGuiOverlay::setScrollFriction(float perSecond) {
+  TouchScroll::Settings s = m_impl->touchScroll.settings();
+  s.friction = perSecond;
+  m_impl->touchScroll.setSettings(s);
+  m_impl->syncSettings();
+}
+float ImGuiOverlay::scrollFriction() const { return m_impl->touchScroll.settings().friction; }
+
 void ImGuiOverlay::setFixedDeltaTime(float seconds) {
   m_impl->fixedDt = seconds > 0.0f ? seconds : 0.0f;
 }
@@ -1086,6 +1114,10 @@ void ImGuiOverlay::setPixelRatio(float) {}
 float ImGuiOverlay::pixelRatio() const { return 1.0f; }
 void ImGuiOverlay::setTouchMode(bool) {}
 bool ImGuiOverlay::touchMode() const { return false; }
+void ImGuiOverlay::setTouchScrollEnabled(bool) {}
+bool ImGuiOverlay::touchScrollEnabled() const { return false; }
+void ImGuiOverlay::setScrollFriction(float) {}
+float ImGuiOverlay::scrollFriction() const { return 0.0f; }
 void ImGuiOverlay::setFixedDeltaTime(float) {}
 float ImGuiOverlay::fixedDeltaTime() const { return 0.0f; }
 void ImGuiOverlay::setToggleButtonEnabled(bool) {}

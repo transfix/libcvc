@@ -47,8 +47,8 @@ catalog:
   - component: viewer_settings
     file: viewer_settings.ari
     unit: viewer_settings
-    binds: "<prefix>.viewers.{viewer}.{hud.enabled,hud.fps,ui.scale,camera.settings.*}, <prefix>.graphics.root.{show_bbox,children.grid.visible,children.axis.visible}, <prefix>.shadows.*"
-    for: "any scene: one settings window for a viewer (frame-rate readout, UI size, grid / axis / scene bounds, camera, shadows)"
+    binds: "<prefix>.viewers.{viewer}.{hud.enabled,hud.fps,ui.scale,ui.scroll_friction,camera.settings.*}, <prefix>.graphics.root.{show_bbox,children.grid.visible,children.axis.visible}, <prefix>.shadows.*"
+    for: "any scene: one settings window for a viewer (frame-rate readout, UI size, scroll friction on a touch screen, grid / axis / scene bounds, camera, shadows)"
     args: { viewer: main, title: Viewer, id: viewer_settings }   # defaults
     note: "imports camera_controls.ari and scene_controls.ari for its Camera and Shadows sections; FpsHud, UiSettings, GridNode, AxisNode, CameraController and ShadowSettings own the keys"
   - component: display_toggles
@@ -106,7 +106,7 @@ catalog:
   - component: sky_controls
     file: sky_controls.ari
     unit: sky_controls
-    binds: "<prefix>.{keys}.{drift,morph,shadow}"   # read every frame by the cloud_sky realizer
+    binds: "<prefix>.{keys}.{drift,morph,evolve,orographic,shadow}"   # read every frame by the cloud_sky realizer
     for: "a `type: cloud_sky` node"
     args: { keys: sky, title: Sky, id: sky_controls }   # defaults; keys = the node's `keys:` prop
   - component: mesh_tools
@@ -141,7 +141,7 @@ catalog:
     unit: scene_view
     binds: "<prefix>.viewers.{view}.camera.*"   # the view's own CameraController
     for: "a second view of the scene in a window: an overview map, another angle, one layer (the nodes whose tags: it shows)"
-    args: { view: scene_view, title: View, id: scene_view, show: "", hide: "", camera: orbit, chrome: true, width: 360, height: 270 }   # defaults
+    args: { view: scene_view, title: View, id: scene_view, show: "", hide: "", mode: orbit, camera: "", chrome: true, width: 360, height: 270 }   # defaults
     note: "the cvcGL `viewport` widget (AriRuntime hosts: arigl, pycvc_gl); a terminal backend shows a placeholder"
   - component: card
     file: card.ari

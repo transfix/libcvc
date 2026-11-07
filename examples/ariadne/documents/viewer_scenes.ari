@@ -1,0 +1,140 @@
+# viewer_scenes.ari — three scenes of their own in one document, built from the same assets
+# (docs/ARIADNE.md §5.18).
+#
+# `assets:` loads the bunny and the pillar once. `scenes:` declares three scenes, each with its own
+# nodes, lights, soft shadows and background: a courtyard by day, the same courtyard by night under
+# one warm lamp, and a studio where the bunny stands alone. The Scenes window shows each in a
+# viewport that names it (`scene: day`, ...), each with a camera of its own: drag to turn it, the
+# wheel to zoom, double-click to reset. Every node on an asset shares its geometry.
+#
+#   arigl viewer_scenes.ari
+#   arigl snapshot --frames 6 --png viewer_scenes.png viewer_scenes.ari
+
+meta:
+  name: Viewer scenes (Ariadne)
+  author: cvc
+  min_libcvc: 3.7.0
+
+requires:
+  - gl.scene                       # a scene renderer realizes the scenes (arigl; not ari)
+
+assets:
+  bunny:
+    source: { file: stanford.bunny }
+    fit: { height: 4, up: y }
+  pillar:
+    source: { box: { size: [1.2, 1.2, 6] } }
+  orb:
+    source: { sphere: 0.9 }
+
+windows:
+  - window: Scenes
+    id: scenes
+    pos: [16, 16]
+    children:
+      - text: "Three scenes, one set of assets. Drag a view to turn it, double-click to reset."
+      - type: group
+        layout: { kind: grid, col_widths: [auto, auto, auto] }
+        children:
+          - type: viewport
+            view: day_view
+            scene: day
+            caption: Day
+            azimuth: -50
+            elevation: 25
+            zoom: 1.3
+            width: 300
+            height: 260
+          - type: viewport
+            view: night_view
+            scene: night
+            caption: Night
+            azimuth: -50
+            elevation: 25
+            zoom: 1.3
+            width: 300
+            height: 260
+          - type: viewport
+            view: studio_view
+            scene: studio
+            caption: Studio
+            azimuth: -30
+            elevation: 15
+            zoom: 1.6
+            width: 300
+            height: 260
+
+scenes:
+  - scene: day
+    background: { top: [0.45, 0.62, 0.85], bottom: [0.85, 0.88, 0.90] }
+    shadows: { enabled: true, resolution: 2048, softness: 3 }
+    nodes:
+      - node: ground
+        type: geometry
+        source: { plane: { size: 30 } }
+        material: { color: [0.42, 0.50, 0.36] }
+      - node: bunny
+        type: geometry
+        source: { asset: bunny }
+        material: { color: [0.88, 0.85, 0.80] }
+      - { node: pillar_ne, type: geometry, source: { asset: pillar }, transform: { position: [7, 7, 3] }, material: { color: [0.90, 0.25, 0.20] } }
+      - { node: pillar_nw, type: geometry, source: { asset: pillar }, transform: { position: [-7, 7, 3] }, material: { color: [0.20, 0.45, 0.90] } }
+      - { node: pillar_sw, type: geometry, source: { asset: pillar }, transform: { position: [-7, -7, 3] }, material: { color: [0.95, 0.80, 0.20] } }
+      - { node: pillar_se, type: geometry, source: { asset: pillar }, transform: { position: [7, -7, 3] }, material: { color: [0.25, 0.80, 0.40] } }
+      - { node: orb, type: geometry, source: { asset: orb }, transform: { position: [4, -2, 0.9] }, material: { color: [0.95, 0.55, 0.15] } }
+    lights:
+      - light: sun
+        kind: directional
+        azimuth: 135
+        elevation: 55
+
+  - scene: night
+    background: { top: [0.02, 0.03, 0.08], bottom: [0.08, 0.08, 0.14] }
+    shadows: { enabled: true, resolution: 2048, softness: 4 }
+    nodes:
+      - node: ground
+        type: geometry
+        source: { plane: { size: 30 } }
+        material: { color: [0.30, 0.32, 0.38] }
+      - node: bunny
+        type: geometry
+        source: { asset: bunny }
+        material: { color: [0.80, 0.82, 0.95] }
+      - { node: pillar_1, type: geometry, source: { asset: pillar }, transform: { position: [-6, 5, 3] }, material: { color: [0.55, 0.55, 0.65] } }
+      - { node: pillar_2, type: geometry, source: { asset: pillar }, transform: { position: [0, 6, 3] }, material: { color: [0.55, 0.55, 0.65] } }
+      - { node: pillar_3, type: geometry, source: { asset: pillar }, transform: { position: [6, 5, 3] }, material: { color: [0.55, 0.55, 0.65] } }
+    lights:
+      - light: moon
+        kind: directional
+        azimuth: 200
+        elevation: 35
+        intensity: 0.35
+        color: [0.55, 0.65, 1.0]
+      - light: lamp
+        kind: spot
+        pos: [5, -6, 9]
+        target: [0, 0, 0]
+        cone: 40
+        intensity: 1.4
+        color: [1.0, 0.78, 0.45]
+
+  - scene: studio
+    background: { top: [0.30, 0.30, 0.32], bottom: [0.12, 0.12, 0.13] }
+    shadows: { enabled: true, resolution: 2048, softness: 5 }
+    nodes:
+      - node: floor
+        type: geometry
+        source: { plane: { size: 16 } }
+        material: { color: [0.46, 0.46, 0.48] }
+      - node: bunny
+        type: geometry
+        source: { asset: bunny }
+        transform: { position: [0, 0, 0] }
+        material: { color: [0.90, 0.45, 0.30], specular: 0.4, specular_power: 40 }
+    lights:
+      - light: key
+        rig: three_point
+        stage: { center: [0, 0, 2], radius: 5 }
+        key: { intensity: 1.1, azimuth: -40, elevation: 45, cone: 40 }
+        fill: 0.45
+        back: 0.5

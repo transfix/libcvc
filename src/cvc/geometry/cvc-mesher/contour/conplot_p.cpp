@@ -55,7 +55,7 @@
 //#define DIRSEEDSREG3
 //#define DIRSEEDSREG2
 
-extern int verbose;
+#include "contour_verbose.h"
 
 using namespace std;
 

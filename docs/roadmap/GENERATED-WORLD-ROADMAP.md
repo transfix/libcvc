@@ -30,7 +30,8 @@ switches between generators at run time, and libcvc's water whatever the generat
   - `material: { opaque: true }`: `GeometryNode::setForceOpaque`, new (no per-texel alpha scan);
   - a rig's `wash:`: removes the downlight ring and its shadow-map samplers.
 - **`terrain_lab.ari`**: the lab as a document on those keys, with demo3's soft afternoon look.
-  `cloud_sky` takes `extent` / `base` / `top`, so its slab fits a world of any size.
+  `cloud_sky` takes `extent` / `base` / `top`, so its slab fits a world of any size (since G6 a
+  deck of clouds over the whole world, below).
 
 ## G1 — a generator interface and the switch
 
@@ -63,9 +64,15 @@ in the panel:
   amp, file, preset } }` in any document (or `heightfield: { generator: ... }`, whose layers add on
   top) draws a generator's ground as a `cvc::height_field`, so `ground:`, bodies and band colours
   work on it as on any heightfield.
-- **Water stays libcvc's**: everything under `water_level_m` is water, whatever made the relief. A
-  DEM is anchored (its floor at 0) and stretched to `amp_m`, so the water level means the same
-  thing. The roads' no-go mask is the water plus the terrain's channel and cliff masks; lots also
+- **Water stays libcvc's**: everything under `water_level_m` is water, whatever made the relief.
+  Sea level is 0 m: every generator lays its ground with 0 m as the shoreline, its floor
+  `world_sea_share` (34/90) of `amp_m` below it (a DEM is stretched to `amp_m` and anchored there
+  too; the island stands its dome in the sea), so the water level means the same thing on any
+  relief, and a preset's lower relief no longer drowns the world under a water level set for a
+  higher one (the urban preset's 10 m under the old 34 m: a world of sea). The raster classes the
+  ground under it as water and the 0.6 m above it as sand, and the ground texture shades it from a
+  light shore green-blue to deep blue over 8 m, since the water volume all but vanishes over the
+  shallows. The roads' no-go mask is the water plus the terrain's channel and cliff masks; lots also
   stay on its buildable mask; district centres keep off it.
 - **Fixed on the way** (bugs, not kept): the fBm seed was XORed with the world seed, which was the
   same number, so every seed stood on the same ground (the default document is now seed 5, whose
@@ -114,9 +121,31 @@ opt-in through `road_params` (the defaults are the classic network):
   shore or stop at it, instead of being cut off after tracing.
 - **`prune_roads`**: dead-end stubs shorter than 30 m are trimmed, and node degrees recomputed.
 
+**Roads shape the ground (landed).** A road laid on the ground as it was rose and fell with every
+bump and tilted with every side slope: on the 1.2 km lab world the 95th-percentile tilt across a
+road was 0.76 (37 degrees), the grade 0.61, and 51 of 4,568 road samples were under water, so a
+Humvee bounced and rolled. `cvc::world::road_grade` gives each road node a height: the ground,
+kept 0.8 m above the water, relaxed along the network so the grade changes gradually, held to a
+12% climb (5% on a segment meeting a junction, so a crossing is level), with roads that pass close
+without meeting held to agree. `graded_terrain` presses that surface into the ground: level across
+the road and a mesh cell past each edge, then a cut or bank back to the ground; where several roads
+reach a point the ground blends toward all of them, so it never steps. `world_builder`'s new
+`grade` stage swaps it in for everything after the streets: the buildings, the road mesh, the trees
+and rocks (re-read their ground), the water, the raster (a bank lifted out of the water is gravel),
+and the terrain mesh physics and nav drive on. Measured on that mesh (`RoadsAreDriveable`, and the
+1.2 / 5.3 km worlds): tilt across p95 0.043 / 0.010, grade p95 0.134 / 0.065, grade change per
+2 m p95 0.057 / 0.023, nothing under water; cuts and fills stay within about 7 / 12 m. What is left
+is the terrain mesh's own resolution: a 5 m street on 5 m cells.
+
+Every street is two lanes of `world_lane_m` (the Humvee's 2.18 m plus 0.4 m either side): local
+streets 6.0 m (were 5.0), collectors 7.0 m (6.5), arterials 9.0 m. The road mesh draws each run of
+segments between junctions as one strip, its bends rounded and mitred (no gaps or overlaps at a
+bend), ending on the rim of the junction's pad so no corner pokes out, one asphalt colour, and a
+dark yellow centre stripe that stops short of the junctions.
+
 Still to do: routing a long street over the relief by a grade-limited A* (where steering only
-winds), smoothing the traced polylines, service alleys in the cores, and district modes
-(industrial, rural) with their own spacing and widths.
+winds), service alleys in the cores, and district modes (industrial, rural) with their own spacing
+and widths.
 
 ## G3 — building placement
 
@@ -214,6 +243,110 @@ The conference is the world's second consumer. Peers must see the same world and
     whole, is 0.26 M from its middle and 16 k from the overview (natively, balanced preset); a
     1.2 km world's 5 m relief stays at rung 0 in the balanced preset. The rungs hold 1.42x the
     terrain's vertices as well as the terrain.
+  - Landed: the cloud deck and its shade (section 8.4's cloud ladder, a first part). `cloud_sky`
+    was one fixed 60x60x28 slab (1.28 km across in the terrain lab) whose ground shadow was a
+    96^2 bake of shade x band albedo that replaced the ground's texture, so the terrain lab turned
+    it off, and an 11.2 km world had clouds over its middle 1.28 km only. Now:
+    - `cvc::world::cloud_layer` (GL-free, `world_cloud_test`) scatters a few L-system cumulus
+      maps over a periodic grid of cells: which cells hold a cloud (`coverage`), its offset in the
+      cell, and a per-cell sequence of maps it morphs through. The period is wider than the
+      drawn area, so each cloud has one copy drawn and every texture wraps; the wind is a
+      translation of the whole pattern. Each map is scaled to its own peak (the grammar grows some
+      variants nearly empty: the old slab spent half its morph on a faint one). Morphs are linear
+      crossfades, so the shadow's optical depth is the crossfade of the maps' and follows the
+      morph exactly. The shadow and the far slices integrate the volume's transfer-function
+      opacity, not the raw density, so they show the cloud the volume shows.
+    - The shade is drawn in the receivers' shaders: the ground (every LOD rung), the buildings,
+      the roads, the props. A periodic mask is read at the fragment's base-plane point along the
+      sun and scales the direct light only; the ground's texture is untouched. `GeometryNode` gained
+      shared shader inputs (one set that many meshes read at draw time; the deck updates it each
+      frame) and fragment replacements applied after VTK's own: a receiver rewrites the lighting
+      sum VTK generates, the one place both mappers keep the direct terms apart (the WebGL2 mapper
+      scopes them to its lighting block). Checked on that mapper natively
+      (`CVCGL_LOWMEM_MAPPER=force`): it applies the replacement and compiles the deck's shaders.
+    - Coverage: a pool of near `VolumeNode`s (6 in the terrain lab, at most 8) on the clouds nearest
+      the camera, and one mesh of 10 translucent shells for the rest, sampling a coarse opacity
+      texture as the optical depth along the view ray. A cloud passing between the two
+      crossfades: the shells cut out the near volumes' squares by uniform, so a fade never
+      re-composites. The deck follows the ground's extent live.
+    - The terrain lab's fill, environment and ambient went from 0.3 / 0.5 / 0.32 to 0.15 / 0.2 /
+      0.2: with more light from the sky than the sun, building and cloud shadows washed out.
+    - Cost, measured natively (this box, 1280x720 offscreen): the sky's tick averages 0.4 ms a
+      frame on both the 1.2 km and the 11.2 km world. The shade (512^2 at most) and far (256^2 x 10
+      at most) composites are spread over 8 frames once a second; their uploads take about 0.4 ms
+      and 1 ms, into double-buffered textures; walking the receivers for new meshes about 1.5 ms
+      once a second. The old slab cost about the same: a 60x60x28 crossfade and a 96^2 bake every
+      third frame. In the browser, expect 2-3x the CPU on single-threaded wasm (about 1 ms a frame,
+      4 ms once a second) and, on the GPU, up to 6 small volume ray casts plus 10 shell layers'
+      fill. Not yet measured in a browser.
+  - Landed: the cloud deck's look, the five issues the first part left.
+    - Clouds reach the horizon. The far shells are out of the bounds the camera fits and clips to
+      (`GeometryNode::setUseBounds(false)`: VTK's UseBounds and the scene's own box), and reach
+      `far_reach` (4 km by default) past the ground, where the pattern repeats. A shell vertex
+      past the far plane is drawn on it: its clip-space depth is clamped to 0.999 w, which leaves
+      where it lands on screen and the world point its fragments read unchanged. The near volumes
+      still draw only within `horizon` of the ground and stay in the bounds, so the framing holds.
+    - No banding seen edge-on. Each shell stands for the slab of deck around it: its fragment
+      marches the view ray across that slab (6 samples, at most 24 slabs' depth) and sums the
+      optical depth, so the slices join into one cloud from below, beside or above, and the last
+      3 degrees fade into haze. (Tried and dropped: a column-mean slice every shell reads, which
+      stacked identical footprints into striped pillars at middling angles.)
+    - Near and far clouds look alike. VTK's volume shading reads as storm cloud here (dark,
+      metallic), so the volumes stay unshaded and both take one colour ramp from the density:
+      grey-blue thin, white dense, the shells a little lighter with height.
+    - No straight-edged clouds. The grammar clamps its turtle at the grid's y edges (it wraps x), so
+      a cloud that wanders there piled puffs against the face and the grid's window cut them off:
+      a straight edge along the volume's box. Each map now fades out over the outer 40% of its
+      radius (`world_cloud_test` checks nothing reaches the rim), which also keeps the clouds round.
+    - `terrain_bump` and `bark` name the normal by the node's mapper
+      (`GeometryNode::usesLowMemoryMapper`), not by `__EMSCRIPTEN__`, so `CVCGL_LOWMEM_MAPPER=force`
+      natively draws the whole terrain lab (ground, shade, shells, volumes) without a shader error:
+      the browser's shader path, as GLSL 150, can be checked here.
+  - Landed: new meshes take the shade as they join. `SceneGraph::treeVersion()` moves whenever a
+    node joins or leaves the tree (registered or removed, or a child added or removed anywhere in
+    the scene) and holds still for moves, visibility and geometry swaps (`cvcgl_tree_version`). The
+    deck walks its receivers on the frame after it moves, instead of once a second: an LOD rung or
+    a regenerated world's part is shaded on its first frame, and a settled scene never walks
+    (`cvcgl_ariadne_realize` adds a mesh under the ground and checks the next tick shades it).
+  - The weather evolves, and it gathers on windward flanks (LSYSTEM-LABORATORY-ROADMAP section
+    4.7):
+    - A Dobashi-style cellular automaton in `cvc::world::cloud_layer` decides which cells hold a
+      cloud. Each cell has one bit-packed column of 32 layers, with Dobashi's humidity, activation
+      and cloud bits.
+    - Activation runs up a whole column and, by chance, into the four neighbours. Clouds go extinct
+      at random and humidity returns, so clouds grow in patches and dissipate.
+    - The cells with the most cloud hold the deck's clouds, still exactly `coverage` of them.
+    - It steps on the world clock, once every 5 s at rate 1, so a cloud lasts some 8 minutes. A
+      step over 64 x 64 cells takes 0.9 ms, and the 11.2 km world's 21 x 21 takes a fraction of
+      that.
+    - A cloud fades in or out over 20 s. The volume, the far slices and the shade take the same
+      weight, so nothing shades where no cloud is drawn.
+    - Orographic coupling: the slope along the wind under each cell, averaged over a cloud's
+      footprint, raises its humidity and activation on a windward flank and its extinction in the
+      lee. The pattern drifts over the ground, so a cloud forms as it reaches a mountain and dies
+      past the crest.
+    - Over ridges, windward cells hold a cloud 99% of the time and lee cells 14%; without the
+      coupling both are 60%.
+    - Live keys `sky.evolve` and `sky.orographic` are on `sky_controls.ari`. The props are
+      `evolve`, `orographic`, `wind_az` (the drift now follows it) and `fade`.
+    - Every rule is deterministic and frame-rate free (`world_cloud_test`).
+  - Measured in the browser, 2026-11-06: the gallery deploy of 38c6b071 (deploy-pages
+    42290995729), in the desktop app's built-in Chromium 152 browser (WebGL2), canvas 1077 x 772 at
+    device pixel ratio 1.25.
+    - The deck's shaders compile as GLSL ES: no shader errors in the console.
+    - Clouds reach past the world's edge.
+    - 1.2 km world, default camera: 34-47 fps, median frame 17-25 ms, p95 42-58 ms.
+    - 11.2 km world (World half 5600, regenerated, 2049^2 terrain), close-up camera: 25-29 fps,
+      median frame 25 ms, p95 83-133 ms. On 2026-11-03, before the terrain LOD, the same world
+      ran at 3.3 fps.
+    - JS heap about 64 MB.
+  - Still to do for the clouds:
+    - The deck's own cost in the browser. The cloud nodes can't be hidden from the URL, and the
+      document's Sky panel isn't reachable from the gallery's menus.
+    - Firefox (Joe's to check), and an 11.2 km overview camera.
+    - The deck is one flat slab, so a peak pierces it only where the ground rises past `base`. A
+      lower deck over high relief (or cloud bases that follow the ground) would show orographic
+      caps at the terrain lab's 90 m of relief.
 - **Dynamic props, demo3's way**, for vehicles and avatars on the world: unregistered slot nodes,
   a pose gate, out of the bounds fit, non-casting. demo3 does this by hand. A libcvc node type
   would make it a scene key.

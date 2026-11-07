@@ -64,6 +64,17 @@ void set_replicated(cvc::app &app, const std::string &path, const std::string &v
   n.touch();
   n.value(val);
 }
+// Changed-only, ONE journaled mutation per change, for a leaf rewritten often: touch() fires
+// valueChanged before value() fires it again, so only a new or still empty leaf (the attach race)
+// is touched first; a valued one is already observed and takes its new value alone.
+void set_changed(cvc::app &app, const std::string &path, const std::string &val) {
+  if (cvc::state *n = app.root().findDescendant(path); n && !n->value().empty()) {
+    if (n->value() != val)
+      n->value(val);
+    return;
+  }
+  set_replicated(app, path, val);
+}
 void set_f(cvc::app &app, const std::string &path, float f) { set_replicated(app, path, fmt(f)); }
 void set_b(cvc::app &app, const std::string &path, bool b) {
   set_replicated(app, path, b ? "1" : "0");
@@ -460,9 +471,9 @@ bool read_avatar_policy(cvc::app &app, const std::string &room_id, avatar_energy
 void write_avatar_reserve(cvc::app &app, const std::string &room_id, const std::string &pid,
                           double joules, std::uint64_t server_tick) {
   const std::string base = reserve_path(room_id, pid);
-  set_replicated(app, sub(base, {"reserve"}), std::to_string(static_cast<long long>(joules + 0.5)));
-  set_replicated(app, sub(base, {"server_tick"}),
-                 std::to_string(static_cast<unsigned long long>(server_tick)));
+  set_changed(app, sub(base, {"reserve"}), std::to_string(static_cast<long long>(joules + 0.5)));
+  set_changed(app, sub(base, {"server_tick"}),
+              std::to_string(static_cast<unsigned long long>(server_tick)));
 }
 
 bool read_avatar_reserve(cvc::app &app, const std::string &room_id, const std::string &pid,

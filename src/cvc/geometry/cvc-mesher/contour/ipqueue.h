@@ -27,7 +27,7 @@
 
 #include <cstdio>
 
-extern int verbose;
+#include "contour_verbose.h"
 
 template <class T, class P, class K>
 class IndexedPriorityQueue;

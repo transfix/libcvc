@@ -175,6 +175,12 @@ public:
   // (to the anchor it re-emits) instead of replacing it.
   void addVertexShaderReplacement(const std::string &original, const std::string &replacement);
   void addFragmentShaderReplacement(const std::string &original, const std::string &replacement);
+  // The same, applied AFTER VTK has filled in its own code, so `original` may be a line VTK
+  // generates -- e.g. its lighting sum `gl_FragData[0] = vec4(ambientColor + diffuse + specular,
+  // opacity);`, to shade the direct light alone. Kept apart from the replacements above (the
+  // same anchor may hold one of each); clearShaderReplacements() removes these too.
+  void addFragmentShaderPostReplacement(const std::string &original,
+                                        const std::string &replacement);
   void clearShaderReplacements();
 
   // ── Custom shader inputs (for procedural nodes such as the FFT ocean) ────────
@@ -190,6 +196,21 @@ public:
   void setShaderUniform3f(const std::string &name, float x, float y, float z);
   void setShaderTexture(const std::string &name, vtkTextureObject *tex); // nullptr unbinds
 
+  // Shader inputs SHARED by many meshes and changed in one place: a node that owns a scene-wide
+  // effect (the cloud deck's shade) fills one set and hands it to every mesh that draws the
+  // effect, then updates the set as it likes; each draw reads its values as they are then. The
+  // owner changes it on the render thread only. Sets are kept by key, so a source replaces its
+  // own; nullptr removes it.
+  struct ShaderInputs {
+    std::map<std::string, float> f;
+    std::map<std::string, std::array<float, 3>> f3;
+    std::map<std::string, std::array<float, 4>> f4;
+    std::map<std::string, std::array<double, 16>> m4; // row-major, as a vtkMatrix4x4
+    std::map<std::string, vtkSmartPointer<vtkTextureObject>> tex;
+  };
+  void setSharedShaderInputs(const std::string &key, std::shared_ptr<const ShaderInputs> in);
+  bool hasSharedShaderInputs(const std::string &key) const;
+
   // Disable VTK's VBO coordinate shift/scale so `vertexMC` in a custom shader is
   // the mesh's ACTUAL (world/model) coordinates rather than an internally-shifted
   // frame. Needed whenever a shader reads vertex position for a WORLD-space
@@ -202,6 +223,27 @@ public:
   // SetForceOpaque). Without it VTK scans a texture's every texel for alpha to choose the pass,
   // which on a large ground texture is a measurable share of a browser frame.
   void setForceOpaque(bool on);
+
+  // Keep this mesh out of (or put it back in) the bounds the camera fits and clips to: VTK's
+  // (vtkProp UseBounds) and the scene's (contributesToSceneBounds, for a node at the scene's top
+  // level). For something that may reach far past the scene, such as a sky drawn to the horizon,
+  // that must neither zoom the view out nor push its near plane away. Set it before the mesh has
+  // its geometry: the scene's own box only grows until nodes are added or removed.
+  void setUseBounds(bool on);
+
+  // Draw this mesh in VTK's volume layer instead of with the opaque or translucent geometry: in its
+  // place in the renderer's prop order among the volumes, blended over what is already drawn,
+  // depth-tested against the opaque geometry but writing no depth, and casting no shadow. VTK
+  // composites every volume over the translucent layer whatever its depth, so a translucent mesh
+  // in front of a volume (a cloud deck above a water volume) is drawn behind it; in the volume
+  // layer it comes after the volumes added before it and before those added after it (the owner
+  // keeps that order: a node shown again rejoins the renderer at the end).
+  void setDrawWithVolumes(bool on);
+  bool drawsWithVolumes() const;
+
+  // True when this mesh draws through the low-memory (WebGL2) mapper: its fragment shader names the
+  // view-space normal normalizedNormalVCVSOutput, not normalVCVSOutput.
+  bool usesLowMemoryMapper() const;
 
   // Apply a texture (a cvc::image) to this mesh — sampled through the geometry's
   // UVs (SetTCoords). Meaningful only when the geometry carries uvs.
@@ -225,6 +267,11 @@ public:
   // is the texture `from` has now: after a new setTexture on `from`, share it again.
   void shareTexture(std::shared_ptr<const GeometryNode> from);
   void clearTexture();
+  // Whether a texture is set, and its size in pixels (0 x 0 when none). Read on the owner
+  // thread, where setTexture/clearTexture land.
+  bool hasTexture() const;
+  int textureWidth() const;
+  int textureHeight() const;
   // Signal that the texture's pixels were edited in place (through an aliased
   // zero-copy buffer): marks the vtkTexture + its input image data Modified() so
   // the next render re-samples the new bytes WITHOUT any re-copy.
@@ -370,12 +417,13 @@ private:
   std::map<std::string, int> m_uniformsI;
   std::map<std::string, std::array<float, 3>> m_uniforms3F;
   std::map<std::string, vtkSmartPointer<vtkTextureObject>> m_shaderTextures;
+  std::map<std::string, std::shared_ptr<const ShaderInputs>> m_sharedInputs;
   vtkSmartPointer<vtkCallbackCommand> m_shaderTexCb;
   bool m_shaderTexObserverInstalled = false;
 
-  // Shader replacements by (stage: 0 vertex, 1 fragment; anchor): the caller's
-  // (public API) and the subclass's own. The actor's shader property holds one
-  // entry per anchor -- their composition -- rebuilt by installShaderReplacement.
+  // Shader replacements by (stage: 0 vertex, 1 fragment, 2 fragment after VTK's; anchor): the
+  // caller's (public API) and the subclass's own. The actor's shader property holds one entry per
+  // anchor -- their composition -- rebuilt by installShaderReplacement.
   using ShaderReplKey = std::pair<int, std::string>;
   std::map<ShaderReplKey, std::string> m_userShaderRepl;
   std::map<ShaderReplKey, std::string> m_internalShaderRepl;

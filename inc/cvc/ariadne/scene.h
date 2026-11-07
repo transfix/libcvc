@@ -137,7 +137,7 @@ struct SceneHeightfield {
   std::string file;                // dem: the .npy (a URI, or a path relative to the document)
   double seed = 7.0;               // the generator's seed
   double amp = 90.0;               // its relief (metres)
-  double water_level = 34.0;       // the water line (fbm's island preset sinks its rim below it)
+  double water_level = 0.0;        // the water line from sea level (the island's rim sits below)
   std::string preset = "standard"; // fbm: standard | island (the dome) | ...
 };
 
@@ -238,6 +238,13 @@ struct SceneNode {
   std::string id;                // node name → <prefix>.graphics.root.children.<id>
   std::string type = "geometry"; // node kind
   std::string source_file;       // source: { file: ... } (geometry/volume load path)
+  std::string source_asset; // source: { asset: <id> } — a document asset (assets:), loaded once
+  // source: { data: <name>, item: <output> } — a dataset of the document's data: block (data.h):
+  // the node draws what it decoded and is rebuilt each time it loads again. `source_data` is the
+  // bind path of its entry ("city" -> <prefix>.data.city; a leading '/' is the root's), and
+  // `source_item` one output of it ("buildings"), empty for the whole (a world, a mesh, ...).
+  std::string source_data;
+  std::string source_item;
 
   // A built-in PROCEDURAL primitive as a geometry node's source, instead of source: { file }.
   // Empty = use source_file. "plane" = a flat quad with UP normals, spanning
@@ -282,16 +289,31 @@ struct SceneNode {
   // setTexture). Empty = untextured. Meaningful only for a geometry node whose mesh carries UVs
   // (e.g. a heightfield, or a loaded mesh with texcoords); a mesh with no UVs is unaffected.
   std::string material_texture;
+  // material: { uv: { rotate, flip_u, flip_v, scale, offset } } — how the node's image texture
+  // (material: texture, or a dataset's draped satellite image) sits in texture space. Applied to
+  // the mesh's UVs in this order: flip_u / flip_v mirror the image (u -> 1 - u, v -> 1 - v);
+  // rotate turns it that many degrees counter-clockwise on the surface (0, 90, 180 or 270, about
+  // the image's centre); then uv * scale + offset. UV (0, 0) is the image's bottom-left corner.
+  bool has_uv_transform = false;
+  int uv_rotate = 0;
+  bool uv_flip_u = false;
+  bool uv_flip_v = false;
+  float uv_scale[2] = {1.0f, 1.0f};
+  float uv_offset[2] = {0.0f, 0.0f};
   // material: { opaque: true } — draw the node as opaque whatever its texture or colours hold
   // (vtkActor::SetForceOpaque). VTK otherwise scans a texture's every texel for alpha to decide
   // the pass, which on a large ground texture is a measurable share of a browser frame.
   bool material_opaque = false;
 
   // casts_shadow: false — the node (and everything below it) receives shadows but casts none, so
-  // it never forces a shadow re-bake (GraphicsNode::setCastsShadow). For the ground under a city
-  // (as a caster the terrain shadows itself everywhere), and for what moves every frame.
+  // it never forces a shadow re-bake (GraphicsNode::setCastsShadow). For a ground too big to
+  // re-bake often, and for what moves every frame.
   bool has_casts_shadow = false;
   bool casts_shadow = true;
+  // frame: true | first | always — a source: { data } node frames the main view's camera on what
+  // its dataset drew: once, the first time it draws (true, first), or each time it draws again (a
+  // reload, a replacement). Empty: the camera is left alone.
+  std::string frame;
 
   // tags: [sim, debug] — the node's view tags (§9.5.1). A `viewport` widget that names tags in its
   // show: / hide: draws a tagged node only where they allow it; an untagged node is in every view.
@@ -442,9 +464,38 @@ struct SceneShadowFocus {
   std::string ground; // a node id whose heightfield the centre sits on (empty: the focal z)
 };
 
+// A named camera (§9.5, `scene: cameras:`): a camera of its own at <prefix>.viewers.<id>.camera
+// that `viewport` widgets bind with `camera: <id>`. Every viewport bound to it draws from it, so a
+// drag in any of them moves them all. Framed on the scene the first time a viewport draws it.
+struct SceneCamera {
+  std::string id;
+  std::string mode = "orbit"; // orbit | fly | map | track
+  std::string track;          // the node a track camera follows
+  bool has_azimuth = false, has_elevation = false;
+  double azimuth = 0.0, elevation = 0.0; // where an orbit starts, degrees
+  double zoom = 1.0;                     // on the framed distance (2: twice as close)
+};
+
+// A document asset (`assets:`): a mesh loaded once and drawn by every node, in any of the
+// document's scenes, whose source is `{ asset: <id> }`. `source` holds what a node would: its
+// source: and fit: (a file, a URI or a primitive), read and fitted the first time a node uses it.
+struct SceneAsset {
+  std::string id;
+  SceneNode source;
+};
+
 struct Scene {
+  std::string id; // a `scenes:` entry's name ("" for the document's `scene:`)
   std::vector<SceneNode> nodes;
+  // The document's assets (`assets:`), the same list in every scene: what `source: { asset }`
+  // names.
+  std::vector<SceneAsset> assets;
+  // main_view: { show, hide } — the tags the MAIN view draws (the untagged nodes always), as a
+  // viewport's show: / hide: do. For a document whose "scenes" are tagged groups in one scene.
+  bool has_main_view = false;
+  std::vector<std::string> main_show, main_hide;
   std::vector<SceneLight> lights;
+  std::vector<SceneCamera> cameras; // cameras: [...] — named cameras viewports bind
   SceneClock clock; // §9 time: the simulation clock (clock.present gates it) — see SceneClock
   ScenePhysics physics; // physics: {...} — the world the nodes' bodies live in (see SceneBody)
   bool has_shadows = false;

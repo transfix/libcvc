@@ -54,8 +54,9 @@ import: [cvc://components/room_users.ari, cvc://components/chat.ari]
 # The room's LOOK. The relay owns what is IN the room (conf.rooms.<room>.scene: the ground, the
 # reference box; the avatars), and every client draws it under this document's lighting, so the
 # rig lives here, not in the server. A three-point rig staged over the 20 m floor: the key spot casts
-# real-time shadows from the scene objects and every avatar (re-baked each frame, so a walking
-# avatar's shadow walks with it); fill, back and environment keep the shaded sides readable.
+# real-time shadows from the scene objects and every avatar (re-baked in any frame something that
+# casts has moved, so a walking avatar's shadow walks with it, and an idle room bakes none); fill,
+# back and environment keep the shaded sides readable.
 scene:
   lights:
     - light: room_rig

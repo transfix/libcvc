@@ -30,6 +30,7 @@
 #include <cstdio>
 #include <cvc/world/generated_world.h>
 #include <cvc/world/npy.h>
+#include <cvc/world/road_grade.h>
 #include <filesystem>
 #include <gtest/gtest.h>
 #include <map>
@@ -52,7 +53,7 @@ generated_world_params small_world() {
   p.buildings = 16;
   p.tree_gen = 3;
   p.amp_m = 40.0;
-  p.water_level_m = 14.0;
+  p.water_level_m = 0.0; // sea level
   return p;
 }
 
@@ -197,6 +198,30 @@ TEST(WorldGenerated, PresetsQuickSetCounts) {
   EXPECT_TRUE(to_world_params(p).hf.island);
 }
 
+// Sea level is 0 m whatever the relief, so no preset drowns its world or drains it: the urban
+// preset's 10 m relief under the document's old 34 m water level was a world of sea. The fbm
+// land's floor sits world_sea_share of the relief under the sea; the island stands in it.
+TEST(WorldGenerated, EveryPresetHasLandAndWater) {
+  for (int preset = 0; preset < 5; ++preset) {
+    generated_world_params p = small_world();
+    p.preset = preset;
+    apply_world_preset(p);
+    EXPECT_EQ(p.water_level_m, 0.0) << world_preset_name(preset);
+    const generated_world w = generate_world(p);
+    std::size_t dry = 0;
+    const auto &h = w.terrain->heights();
+    for (float z : h)
+      dry += z > p.water_level_m;
+    const double share = double(dry) / double(h.size());
+    const bool island = preset == int(world_preset::island);
+    EXPECT_GT(share, island ? 0.05 : 0.6) << world_preset_name(preset) << ": " << share << " dry";
+    EXPECT_LT(share, island ? 0.5 : 0.995) << world_preset_name(preset) << ": " << share << " dry";
+    if (!island) // the same land under every relief: its floor the same share of it below the sea
+      EXPECT_NEAR(*std::min_element(h.begin(), h.end()) / p.amp_m, 0.15 - world_sea_share, 0.05);
+    EXPECT_GT(w.building_count + w.prop_cells.size(), 0u) << world_preset_name(preset);
+  }
+}
+
 // Trees are tree-sized in metres (the island-scaled pine once stood 20..100 m over one- and
 // two-storey buildings): nothing in the props or needles rises 35 m over the ground under it.
 TEST(WorldGenerated, TreesAreTreeSized) {
@@ -312,14 +337,25 @@ TEST(WorldGenerated, GeneratorsByName) {
   p = small_world();
   p.terrain = "test_tilt";
   const generated_world tilt = generate_world(p);
-  EXPECT_NEAR(tilt.height(-200.0, 0.0), 10.0, 1e-3);
-  EXPECT_NEAR(tilt.height(200.0, 0.0), 30.0, 1e-3);
+  // The ground is the generator's, wherever no road grades it.
+  const auto *graded = dynamic_cast<const graded_terrain *>(&tilt.model->terrain());
+  ASSERT_NE(graded, nullptr);
+  int checked = 0;
+  for (double y = -190.0; y <= 190.0; y += 20.0)
+    for (double x : {-195.0, 195.0})
+      if (!graded->graded_at(x, y)) {
+        EXPECT_NEAR(tilt.height(x, y),
+                    x < 0 ? 10.0 + 20.0 * 5.0 / 400.0 : 30.0 - 20.0 * 5.0 / 400.0, 1e-3)
+            << x << "," << y;
+        ++checked;
+      }
+  EXPECT_GT(checked, 4);
   EXPECT_GT(tilt.road_length, 100.0);
   EXPECT_GT(tilt.building_count, 0u);
 }
 
-// A DEM file through the "dem" generator: the world's ground is the file's relief, anchored at 0
-// and stretched to amp_m.
+// A DEM file through the "dem" generator: the world's ground is the file's relief, stretched to
+// amp_m and anchored as every generator's is, world_sea_share of it below sea level.
 TEST(WorldGenerated, DemTerrainFromAFile) {
   const std::string f =
       (std::filesystem::temp_directory_path() / "cvc_world_generated_test_dem.npy").string();
@@ -333,12 +369,12 @@ TEST(WorldGenerated, DemTerrainFromAFile) {
   p.terrain = "dem";
   p.terrain_file = f;
   p.amp_m = 24.0;
-  p.water_level_m = 4.0;
   const generated_world w = generate_world(p);
   std::remove(f.c_str());
-  EXPECT_NEAR(w.height(-200.0, -200.0), 0.0, 1e-3);
-  EXPECT_NEAR(w.height(200.0, 200.0), 24.0, 1e-3);
-  EXPECT_NEAR(w.height(200.0, -200.0), 16.0, 1e-3);
+  const double floor = -world_sea_share * 24.0;
+  EXPECT_NEAR(w.height(-200.0, -200.0), floor, 1e-3);
+  EXPECT_NEAR(w.height(200.0, 200.0), floor + 24.0, 1e-3);
+  EXPECT_NEAR(w.height(200.0, -200.0), floor + 16.0, 1e-3);
   EXPECT_GT(w.road_length, 100.0);
 }
 
@@ -387,8 +423,18 @@ TEST(WorldGenerated, BuildingsAreInTheRaster) {
       EXPECT_EQ(w.raster.hard[i], w.model->registry()[wall].hard ? 1 : 0);
     }
   EXPECT_GE(walls, w.building_count);
+  // Without a city there are no wall cells, and the rest of the ground is occupied as it was: the
+  // walls are what the city adds. (Comparing the whole occupied count does not say this: the
+  // roads' banks lift some deep water, which is occupied, to dry gravel, which is not.)
   p.city = "none";
-  EXPECT_LT(generate_world(p).raster.occupied_count(), w.raster.occupied_count());
+  const generated_world bare = generate_world(p);
+  std::size_t bareWalls = 0, wallsOccupied = 0;
+  for (std::size_t i = 0; i < bare.raster.klass.size(); ++i)
+    bareWalls += bare.raster.klass[i] == wall;
+  for (std::size_t i = 0; i < w.raster.klass.size(); ++i)
+    wallsOccupied += w.raster.klass[i] == wall && w.raster.occupancy[i] == 1;
+  EXPECT_EQ(bareWalls, 0u);
+  EXPECT_EQ(wallsOccupied, walls);
 }
 
 // world_builder steps generate_world a stage at a time: stepped in small budgets it makes the same
@@ -692,4 +738,49 @@ TEST(WorldGenerated, TerrainRungsStayWithinOneOfTheirNeighbours) {
   const std::vector<int> before = fine;
   constrain_terrain_rungs(fine, 2, 2);
   EXPECT_EQ(fine, before);
+}
+
+// The streets are driveable on the ground physics drives on (the terrain mesh): each fits two
+// Humvees side by side, is near level across, climbs gently and never dips into the water, though
+// the ground the network was traced over tilts and bumps under it.
+TEST(WorldGenerated, RoadsAreDriveable) {
+  const generated_world w = generate_world(small_world());
+  const auto *graded = dynamic_cast<const graded_terrain *>(&w.model->terrain());
+  ASSERT_NE(graded, nullptr);
+  const road_network &net = graded->roads();
+  ASSERT_GT(net.segments.size(), 20u);
+  std::vector<double> tilt, tiltBefore, grade;
+  bool wet = false;
+  for (const road_segment &s : net.segments) {
+    EXPECT_GE(s.width, 2.0 * world_lane_m - 1e-9);
+    EXPECT_GE(s.width, 2.0 * world_vehicle_width_m + 0.8);
+    const road_node &a = net.nodes[s.a], &b = net.nodes[s.b];
+    const double L = std::hypot(b.x - a.x, b.y - a.y);
+    if (L < 2.0)
+      continue;
+    const double ux = (b.x - a.x) / L, uy = (b.y - a.y) / L, hw = 0.5 * s.width;
+    const int n = int(L / 2.0);
+    double prev = 0.0;
+    for (int i = 0; i <= n; ++i) {
+      const double x = a.x + ux * L * i / n, y = a.y + uy * L * i / n;
+      const double l = w.height(x - uy * hw, y + ux * hw), r = w.height(x + uy * hw, y - ux * hw);
+      const double c = w.height(x, y);
+      tilt.push_back(std::abs(l - r) / s.width);
+      tiltBefore.push_back(std::abs(graded->ground().sample(x - uy * hw, y + ux * hw) -
+                                    graded->ground().sample(x + uy * hw, y - ux * hw)) /
+                           s.width);
+      wet = wet || std::min({l, r, c}) < w.params.water_level_m;
+      if (i > 0)
+        grade.push_back(std::abs(c - prev) / (L / n));
+      prev = c;
+    }
+  }
+  auto p95 = [](std::vector<double> v) {
+    std::sort(v.begin(), v.end());
+    return v[std::size_t(0.95 * (v.size() - 1))];
+  };
+  EXPECT_LT(p95(tilt), 0.08);
+  EXPECT_GT(p95(tiltBefore), 4.0 * p95(tilt)) << "the grading levelled the roads";
+  EXPECT_LT(p95(grade), 0.16);
+  EXPECT_FALSE(wet);
 }

@@ -446,6 +446,7 @@ std::shared_ptr<GraphicsNode> SceneGraph::addGraphics(const std::string &name,
   }
 
   // Emit signal for dialogs
+  markTreeChanged();
   graphicsChanged();
 
   return graphicsNode;
@@ -477,6 +478,7 @@ std::shared_ptr<GraphicsNode> SceneGraph::addGraphics(const std::string &name) {
   }
 
   // Emit signal for dialogs
+  markTreeChanged();
   graphicsChanged();
 
   return graphicsNode;
@@ -515,6 +517,7 @@ void SceneGraph::removeGraphics(const std::string &name) {
   }
 
   // Emit signal for dialogs
+  markTreeChanged();
   graphicsChanged();
 
   // If scene is now empty, add null graphic back
@@ -656,6 +659,7 @@ std::shared_ptr<VolumeNode> SceneGraph::addGraphics(const std::string &name,
   }
 
   // Emit signal for dialogs
+  markTreeChanged();
   graphicsChanged();
 
   return volumeNode;
@@ -1101,6 +1105,51 @@ static bool releaseShadowGL(vtkRenderer *ren, vtkRenderPass *pass) {
   return true;
 }
 
+// The shadow bake's framebuffer: VTK's, with a StartNonOrtho that asks the driver whether the
+// framebuffer is complete only for attachments it has not asked about yet. VTK's asks on every
+// call, so every bake, once per casting light; on WebGL glCheckFramebufferStatus waits on the GPU
+// process, and in the browser conference it was 8% of the CPU while walking, all of it in the bake.
+// The answer cannot change while the color attachment (the light's map) and the size are the same:
+// the depth buffer is the FBO's own, made once and sized with it.
+class ShadowBakeFramebuffer : public vtkOpenGLFramebufferObject {
+public:
+  static ShadowBakeFramebuffer *New();
+  vtkTypeMacro(ShadowBakeFramebuffer, vtkOpenGLFramebufferObject);
+
+  // vtkOpenGLFramebufferObject::StartNonOrtho (VTK 9.5, BSD-3-Clause, Copyright (c) Ken Martin,
+  // Will Schroeder, Bill Lorensen) for a bake into `map`, its status asked once per map and size.
+  bool startBake(int width, int height, vtkTextureObject *map) {
+    this->Bind();
+    this->UpdateSize();
+    if (this->LastSize[0] != width || this->LastSize[1] != height)
+      vtkErrorMacro("FBO size does not match the size of its attachments!.");
+    this->ActivateBuffers();
+    for (const Checked &c : m_checked)
+      if (c.map.GetPointer() == map && c.width == width && c.height == height)
+        return true;
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+      vtkErrorMacro("Frame buffer object was not initialized correctly.");
+      this->CheckFrameBufferStatus(GL_FRAMEBUFFER);
+      return false;
+    }
+    m_checked.push_back(Checked{map, width, height});
+    return true;
+  }
+
+protected:
+  ShadowBakeFramebuffer() = default;
+
+private:
+  struct Checked {
+    vtkWeakPointer<vtkTextureObject> map; // weak: a new map at an old address is not this one
+    int width = 0, height = 0;
+  };
+  std::vector<Checked> m_checked; // one per casting light, as a rule
+  ShadowBakeFramebuffer(const ShadowBakeFramebuffer &) = delete;
+  void operator=(const ShadowBakeFramebuffer &) = delete;
+};
+vtkStandardNewMacro(ShadowBakeFramebuffer);
+
 // A shadow baker that only re-bakes every Nth frame. The base pass re-renders the
 // whole scene depth from every light whenever geometry has moved; for a scene that
 // deforms every frame (a swaying forest) that is the dominant cost, yet the shadows
@@ -1120,6 +1169,8 @@ public:
   // SceneGraph::setShadowFocus: each light's map aimed at this sphere (FocusRadius > 0).
   double Focus[3] = {0.0, 0.0, 0.0};
   double FocusRadius = 0.0;
+  // Bakes made (SceneGraph::shadowBakes).
+  std::uint64_t Bakes = 0;
 
   // GL objects made by a bake: the FBO and the shadow maps. None before the
   // first bake (or after a release), when the window may have no context yet.
@@ -1174,6 +1225,7 @@ public:
       m_bakedCasters = casters;
       ForceNext = false;
       if (this->GetNeedUpdate()) {
+        ++Bakes;
         noteBake(s);
         std::copy(Focus, Focus + 3, m_bakedFocus);
         m_bakedFocusRadius = FocusRadius;
@@ -1198,6 +1250,22 @@ protected:
     vtkShaderProgram::Substitute(fragmentShader, "gl_FragData[0].r = exp(depthC * ldepth);",
                                  "gl_FragData[0].r = 1.0 + exp(depthC * ldepth);", false);
     return true;
+  }
+
+  // A textured caster's bake: VTK's texture code runs after the depth is written and multiplies
+  // gl_FragData[0] by the texture's colour, so the stored 1 + exp(c * depth) was scaled by each
+  // texel's brightness and read back nearer the light than the surface: a textured ground (a
+  // city's aerial image) shadowed itself, darker where the image is darker, and a dark enough
+  // texel fell under the "nothing drawn" threshold and read lit. The bake keeps its depth; the
+  // texture only contributes its alpha, so a cut-out (a leaf's transparent texels) still casts
+  // nothing where it is clear.
+  bool PostReplaceShaderValues(std::string &vertexShader, std::string &geometryShader,
+                               std::string &fragmentShader, vtkAbstractMapper *mapper,
+                               vtkProp *prop) override {
+    vtkShaderProgram::Substitute(fragmentShader, "gl_FragData[0] = gl_FragData[0] * tcolor;",
+                                 "gl_FragData[0].a = gl_FragData[0].a * tcolor.a;", true);
+    return this->Superclass::PostReplaceShaderValues(vertexShader, geometryShader, fragmentShader,
+                                                     mapper, prop);
   }
 
   bool focusChanged() const {
@@ -1260,7 +1328,7 @@ protected:
   }
 
   // vtkShadowMapBakerPass::Render (VTK 9.5, BSD-3-Clause, Copyright (c) Ken Martin, Will
-  // Schroeder, Bill Lorensen), with three changes:
+  // Schroeder, Bill Lorensen), with four changes:
   //   - each light camera is re-aimed at the focus (aimAtFocus) after BuildCameraLight, when
   //     there is one;
   //   - the bake's shader keys go on EVERY prop it draws (PreRender(&s2)), not only on those the
@@ -1270,7 +1338,9 @@ protected:
   //   - (PreReplaceShaderValues) a drawn texel holds 1 + exp(c * depth), at least 2: the renderer
   //     clears each map to its background (its red, or a gradient's), anywhere in [0, 1], and
   //     FilteredShadowMapPass must tell an empty texel from a caster at the light's near plane,
-  //     whose exp(c * 0) = 1 a pale background's red comes close to.
+  //     whose exp(c * 0) = 1 a pale background's red comes close to;
+  //   - its framebuffer is a ShadowBakeFramebuffer, which checks that it is complete once per
+  //     light's map rather than in every bake.
   // Otherwise as VTK has it: the same props, update test, maps, FBO and passes. But not VTK's
   // vtkOpenGL{Clear,Check}ErrorMacro around it: those report only in a build without NDEBUG, so
   // VTK's own compile away in the VTK we link, and here they would report in libcvc's Debug
@@ -1328,7 +1398,7 @@ protected:
     vtkRenderState s2(r);
     s2.SetPropArrayAndCount(propArray.data(), static_cast<int>(propArray.size()));
     if (!this->FrameBufferObject) {
-      this->FrameBufferObject = vtkOpenGLFramebufferObject::New();
+      this->FrameBufferObject = ShadowBakeFramebuffer::New();
       this->FrameBufferObject->SetContext(context);
       context->GetState()->PushFramebufferBindings();
       this->FrameBufferObject->Resize(this->Resolution, this->Resolution);
@@ -1431,8 +1501,11 @@ protected:
       this->FrameBufferObject->ActivateBuffer(0);
       this->FrameBufferObject->Resize(static_cast<int>(this->Resolution),
                                       static_cast<int>(this->Resolution));
-      this->FrameBufferObject->StartNonOrtho(static_cast<int>(this->Resolution),
-                                             static_cast<int>(this->Resolution));
+      if (auto *fbo = ShadowBakeFramebuffer::SafeDownCast(this->FrameBufferObject))
+        fbo->startBake(static_cast<int>(this->Resolution), static_cast<int>(this->Resolution), map);
+      else
+        this->FrameBufferObject->StartNonOrtho(static_cast<int>(this->Resolution),
+                                               static_cast<int>(this->Resolution));
       ostate->vtkglDepthMask(GL_TRUE);
       ostate->vtkglEnable(GL_DEPTH_TEST);
       this->OpaqueSequence->Render(&s2);
@@ -1691,6 +1764,27 @@ public:
     return true;
   }
 
+  // The shader this pass writes (PreReplaceShaderValues) changes with which of the renderer's
+  // lights cast -- ShadowTextureUnits, which Render sets before its draws -- and with nothing else
+  // from frame to frame: the units, transforms, ranges and softness are uniforms. VTK's pass
+  // reports 0 here, so nothing told a mapper to rebuild when a light started or stopped casting
+  // (with the light count unchanged, which VTK's light mod does check) other than the bake's
+  // alternation, which rebuilt every caster's shader every frame. Now that a mapper keeps its
+  // shader per pass set (LowMemoryPolyDataMapper), say when that pattern last changed.
+  vtkMTimeType GetShaderStageMTime() override {
+    const std::vector<int> &units = this->ShadowTextureUnits;
+    bool same = m_casting.size() == units.size();
+    for (std::size_t i = 0; same && i < units.size(); ++i)
+      same = m_casting[i] == (units[i] >= 0);
+    if (!same) {
+      m_casting.resize(units.size());
+      for (std::size_t i = 0; i < units.size(); ++i)
+        m_casting[i] = units[i] >= 0;
+      m_shaderStage.Modified();
+    }
+    return m_shaderStage.GetMTime();
+  }
+
 protected:
   FilteredShadowMapPass() = default;
 
@@ -1752,6 +1846,8 @@ protected:
   }
 
 private:
+  std::vector<bool> m_casting; // per light: casting, when GetShaderStageMTime last looked
+  vtkTimeStamp m_shaderStage;  // when that changed
   FilteredShadowMapPass(const FilteredShadowMapPass &) = delete;
   void operator=(const FilteredShadowMapPass &) = delete;
 };
@@ -1874,6 +1970,11 @@ void SceneGraph::invalidateShadowBake() {
   }
 }
 
+std::uint64_t SceneGraph::shadowBakes() const {
+  const auto *b = StridedShadowBaker::SafeDownCast(m_shadowBaker);
+  return b ? b->Bakes : 0;
+}
+
 void SceneGraph::setShadowResolution(int pixels) {
   m_shadowResolution = pixels < 64 ? 64 : pixels;
   if (auto *b = StridedShadowBaker::SafeDownCast(m_shadowBaker))
@@ -1947,6 +2048,22 @@ bool SceneGraph::setShadowsEnabled(bool enabled) {
 }
 
 void SceneGraph::installShadowPasses() {
+  vtkSmartPointer<vtkShadowMapBakerPass> baker;
+  vtkSmartPointer<vtkRenderPass> cam = buildShadowPasses(baker);
+  m_renderer->SetPass(cam);
+  m_shadowPass = cam;
+  m_shadowBaker = baker;
+}
+
+vtkSmartPointer<vtkRenderPass> SceneGraph::makeShadowPasses() const {
+  if (!m_shadowsEnabled)
+    return nullptr;
+  vtkSmartPointer<vtkShadowMapBakerPass> baker;
+  return buildShadowPasses(baker);
+}
+
+vtkSmartPointer<vtkRenderPass>
+SceneGraph::buildShadowPasses(vtkSmartPointer<vtkShadowMapBakerPass> &bakerOut) const {
   // VTK's shadow maps are render PASSES, not a renderer flag: the baker renders
   // the scene once per light into a depth map, and the shadow pass consumes
   // those while drawing. They have to sit inside a camera pass, or the light's
@@ -1988,10 +2105,33 @@ void SceneGraph::installShadowPasses() {
   seq->SetPasses(passes);
   vtkSmartPointer<vtkCameraPass> cam = vtkSmartPointer<vtkCameraPass>::New();
   cam->SetDelegatePass(seq);
+  bakerOut = baker;
+  return cam;
+}
 
-  m_renderer->SetPass(cam);
-  m_shadowPass = cam;
-  m_shadowBaker = baker;
+std::pair<const void *, double> SceneGraph::shadowReceiverKey() const {
+  return {m_shadowsEnabled ? static_cast<const void *>(m_shadowBaker.GetPointer()) : nullptr,
+          m_shadowSoftness};
+}
+
+vtkSmartPointer<vtkRenderPass> SceneGraph::makeShadowReceiverPass() const {
+  if (!m_shadowsEnabled || !m_shadowBaker)
+    return nullptr;
+  // installShadowPasses' chain without the baker: the shadowed opaque layer reads this scene's
+  // maps, then the rest of VTK's layers.
+  vtkSmartPointer<FilteredShadowMapPass> shadows = vtkSmartPointer<FilteredShadowMapPass>::New();
+  shadows->Softness = m_shadowSoftness;
+  shadows->SetShadowMapBakerPass(m_shadowBaker);
+  vtkSmartPointer<vtkRenderPassCollection> passes = vtkSmartPointer<vtkRenderPassCollection>::New();
+  passes->AddItem(shadows);
+  passes->AddItem(vtkSmartPointer<vtkTranslucentPass>::New());
+  passes->AddItem(vtkSmartPointer<vtkVolumetricPass>::New());
+  passes->AddItem(vtkSmartPointer<vtkOverlayPass>::New());
+  vtkSmartPointer<vtkSequencePass> seq = vtkSmartPointer<vtkSequencePass>::New();
+  seq->SetPasses(passes);
+  vtkSmartPointer<vtkCameraPass> cam = vtkSmartPointer<vtkCameraPass>::New();
+  cam->SetDelegatePass(seq);
+  return cam;
 }
 
 void SceneGraph::removeShadowPasses() {

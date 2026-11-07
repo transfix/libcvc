@@ -507,7 +507,11 @@ int main(int argc, char **argv) {
     if (!sg.hasGraphics("terrain"))
       return;
     std::vector<unsigned char> rgb = world::paint_surface(W, world::surface_color(colorMode), TEX);
-    cvc::image img(TEX, TEX, cvc::image::pixel_format::RGB, cvc::image::data_type::u8, rgb.data());
+    // paint_surface's row 0 is the south edge; an image's is its top, so the rows are reversed
+    // (setTexture turns them back, putting the south row at the terrain's v = 0).
+    cvc::image img =
+        cvc::image(TEX, TEX, cvc::image::pixel_format::RGB, cvc::image::data_type::u8, rgb.data())
+            .flipped_vertical();
     std::dynamic_pointer_cast<GeometryNode>(sg.getGraphics("terrain"))->setTexture(img, false);
   };
 
@@ -706,7 +710,7 @@ int main(int argc, char **argv) {
       float amp = float(gp.amp_m), sea = float(gp.water_level_m);
       if (ImGui::SliderFloat("relief amp m", &amp, 2.0f, 400.0f))
         gp.amp_m = amp;
-      if (ImGui::SliderFloat("water level m", &sea, 0.0f, 200.0f))
+      if (ImGui::SliderFloat("water level m", &sea, -100.0f, 100.0f)) // 0 m: sea level
         gp.water_level_m = sea;
     }
     if (ImGui::Button("Regenerate"))

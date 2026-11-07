@@ -133,7 +133,7 @@ const world::building_library &find_library(const ari::SceneNode &n,
 struct WorldKeys {
   std::string seed, half, trees, rocks, buildings, tree_gen, amp, water_level, preset, ontology,
       color, request, status, props, building_count, occupied, terrain, terrain_gen, city,
-      terrain_file, busy, progress, phase;
+      terrain_file, busy, progress, phase, autoregen, pending;
 };
 
 // A regeneration (a new world, then its texture) or a repaint (the texture of the shown world).
@@ -164,6 +164,7 @@ struct WorldRT {
   bool soft = true;     // look: soft (demo3's) or classic (terrain_lab's)
   int water_stride = 4; // refill the water every this many frames
   long frame = 0;
+  bool shown = true; // the node's visibility, which the parts beside it last followed
   std::shared_ptr<cvc::height_field> field; // published in RealizedScene::height_fields
   std::weak_ptr<GeometryNode> terrain, buildings, roads;
   // The props, a LOD ladder per ground cell (world::generated_world::prop_cells) under the groups
@@ -253,9 +254,14 @@ bool regenerate(WorldRT &rt, const world::generated_world_params &p) {
   }
 }
 
+// world::paint_surface's rows run south to north (row 0 = min y, the terrain's v = 0); a
+// cvc::image's run top down, so its rows are reversed here: setTexture turns them back, and the
+// south row lands at v = 0. (Taken as they were, the texture lay north-south mirrored on the
+// ground: water painted under dry land and buildings, ground painted on the lakes.)
 cvc::image surface_image(int size, const std::vector<unsigned char> &rgb) {
   return cvc::image(size, size, cvc::image::pixel_format::RGB, cvc::image::data_type::u8,
-                    rgb.data());
+                    rgb.data())
+      .flipped_vertical();
 }
 
 cvc::volume water_volume(cvc::app &app, const WorldRT &rt, double t) {
@@ -742,6 +748,11 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
   rt->k.color = seed_key("world.color", rt->color);
   rt->k.request = key("world.request");
   ari::read_or_seed<std::string>(app, rt->k.request, std::string());
+  // An edit waits for Regenerate unless world.auto is on (the node's auto_regenerate prop seeds
+  // it); world.pending says the settings differ from the world shown or being made.
+  rt->k.autoregen = seed_key("world.auto", n.props.num("auto_regenerate", 0.0));
+  rt->k.pending = key("world.pending");
+  ari::write<int>(app, rt->k.pending, 0);
   rt->k.status = key("world.status");
   rt->k.props = key("world.stats.props");
   rt->k.building_count = key("world.stats.buildings");
@@ -826,6 +837,19 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
   out.custom_ticks.push_back([rt, sgp, id](vtkRenderer *ren) {
     if (rt->terrain.expired())
       return;
+    // The meshes and the water beside the node follow its visibility, so a `visible:` on the node
+    // hides (and shows) the whole world, not only the ground it draws itself. Each follows a change
+    // of the node's, as a child follows its parent's (SceneNode::propagateVisible).
+    if (auto t = rt->terrain.lock()) {
+      const bool shown = t->isVisibleInHierarchy();
+      if (shown != rt->shown) {
+        rt->shown = shown;
+        for (const char *part :
+             {"_props", "_foliage", "_needles", "_buildings", "_roads", "_water"})
+          if (auto g = sgp->getGraphics(id + part))
+            g->setVisible(shown);
+      }
+    }
     // The props' and the ground's LOD for this frame's camera; a caster that changed rung casts a
     // different shadow.
     if (ren && ren->IsActiveCameraCreated()) {
@@ -861,25 +885,30 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
       }
     }
     world::generated_world_params p = read_live(*rt);
-    if (p.preset != rt->preset) { // a new preset quick-sets the counts and relief
+    if (p.preset != rt->preset) { // a new preset quick-sets the counts, relief and water level
       rt->preset = p.preset;
       world::apply_world_preset(p);
       ari::write<double>(app, rt->k.trees, p.trees);
       ari::write<double>(app, rt->k.rocks, p.rocks);
       ari::write<double>(app, rt->k.buildings, p.buildings);
       ari::write<double>(app, rt->k.amp, p.amp_m);
+      ari::write<double>(app, rt->k.water_level, p.water_level_m);
     }
-    // A changed key (or a command) starts a rebuild, ending any job under way; a new colour alone
-    // repaints the shown world, once no rebuild is running (a rebuild paints in the colour asked
-    // when it started, and a later change is repainted after it).
+    // Regenerate (or Randomize) starts a rebuild from the keys as they are, ending any job under
+    // way; so does any changed key while world.auto is on. Otherwise an edit only marks the world
+    // pending, so several can be made before one rebuild. A new colour alone repaints the shown
+    // world at once, once no rebuild is running (a rebuild paints in the colour asked when it
+    // started, and a later change is repainted after it).
     const std::string sig = params_sig(p);
     const int c = int(ari::read_or<double>(app, rt->k.color, rt->color));
-    if (force || sig != rt->sig) {
+    const bool live = ari::read_bool_or(app, rt->k.autoregen, 0) != 0;
+    if (force || (live && sig != rt->sig)) {
       rt->sig = sig;
       launch_world_job(*rt, true, p, c);
     } else if (!rt->job ? c != rt->color : !rt->job->rebuild && rt->job->color != c) {
       launch_world_job(*rt, false, p, c);
     }
+    ari::write<int>(app, rt->k.pending, sig != rt->sig ? 1 : 0);
     if (rt->job) {
       ari::write<int>(app, rt->k.progress, rt->job->progress.load());
       const char *ph = rt->job->phase.load(std::memory_order_relaxed);

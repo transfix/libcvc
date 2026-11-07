@@ -97,6 +97,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/media/media_opus.h
   ../../inc/cvc/geometry/bunny.h
   ../../inc/cvc/volume/endians.h
+  ../../inc/cvc/utility/archive.h
   ../../inc/cvc/utility/utility.h
   ../../inc/cvc/state/state_object.h
   ../../inc/cvc/state/state_list.h
@@ -225,6 +226,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/world/bundle.h
   ../../inc/cvc/world/generated_world.h
   ../../inc/cvc/world/terrain_lod.h
+  ../../inc/cvc/world/road_grade.h
+  ../../inc/cvc/world/cloud_layer.h
 )
 
 # Source files
@@ -359,6 +362,7 @@ set(SOURCE_FILES
   state/state_cluster_membership.cpp
   state/distributed_state_session.cpp
   state/state_message.cpp
+  utility/archive.cpp
   utility/utility.cpp
   utility/cuda_utils.cpp
   volume/voxels.cpp
@@ -449,6 +453,8 @@ set(SOURCE_FILES
   world/bundle.cpp
   world/generated_world.cpp
   world/terrain_lod.cpp
+  world/road_grade.cpp
+  world/cloud_layer.cpp
 )
 
 # Architectural rule (roadmap §14.4): the cvc::world generator library is a FILE
@@ -776,6 +782,7 @@ if(CVC_ENABLE_MESHER)
       geometry/cvc-mesher/contour/basic.h
       geometry/cvc-mesher/contour/dataslc.h
       geometry/cvc-mesher/contour/contour.h
+      geometry/cvc-mesher/contour/contour_verbose.h
       geometry/cvc-mesher/contour/dict.h
       geometry/cvc-mesher/contour/contour2d.h
       geometry/cvc-mesher/contour/seedchkr3.h
@@ -833,7 +840,6 @@ if(CVC_ENABLE_MESHER)
       geometry/cvc-mesher/LBIE/octree.h
       geometry/cvc-mesher/LBIE/LBIEMesherRenderable.h
       geometry/cvc-mesher/Mesher/mesher.h
-      geometry/cvc-mesher/libcontour_mutex.h
   )
   set(MESHER_SOURCE_FILES
       geometry/cvc-mesher/contour/squeue.cpp
@@ -1425,7 +1431,7 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/oidc.h ../../inc/cvc/net/loopback_re
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/media.cpp ariadne/media_player.cpp ariadne/media_browser.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_pose_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_chat.cpp ariadne/conference/room_rungs.cpp ariadne/conference/room_lane.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/pose_stream.cpp ariadne/tf_editor_emit.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/data.cpp ariadne/media.cpp ariadne/media_player.cpp ariadne/media_browser.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_pose_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_chat.cpp ariadne/conference/room_rungs.cpp ariadne/conference/room_lane.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/pose_stream.cpp ariadne/tf_editor_emit.cpp)
 # A document set fetched from a URL, and a runtime's browser page loading one (arigl-web, ari).
 list(APPEND SOURCE_FILES ariadne/doc_fetch.cpp ariadne/web_document.cpp)
 list(APPEND INCLUDE_FILES
@@ -1454,6 +1460,7 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/uri_http_cache.h
   ../../inc/cvc/ariadne/net_intrinsics.h
   ../../inc/cvc/ariadne/net_host.h
+  ../../inc/cvc/ariadne/data.h
   ../../inc/cvc/ariadne/media.h
   ../../inc/cvc/ariadne/media_player.h
   ../../inc/cvc/ariadne/stream_intrinsics.h
@@ -1595,8 +1602,11 @@ endif()
 # components (stage_lighting, scene_controls, …) that documents import via the location-independent
 # cvc:// scheme (import: cvc://components/foo.ari). Install it as data alongside libcvc, and compile
 # the install datadir into the resolver so register_cvc_uri_handler() finds it with no env var.
+# COMPONENT libcvc like the library itself, so the release tarballs (cpack's libcvc component)
+# carry it as well as the cvcpkg bundles (package.files: share/libcvc/ariadne/).
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ariadne/components
         DESTINATION ${CMAKE_INSTALL_DATADIR}/libcvc/ariadne
+        COMPONENT libcvc
         FILES_MATCHING PATTERN "*.ari")
 target_compile_definitions(
   cvc PRIVATE CVC_ARIADNE_DATA_DIR="${CMAKE_INSTALL_FULL_DATADIR}/libcvc/ariadne")

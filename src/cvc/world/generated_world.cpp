@@ -37,6 +37,7 @@
 #include <cvc/lsys/rng.h> // hashed per-tree draws (uni/irand/cell_id)
 #include <cvc/world/generated_world.h>
 #include <cvc/world/heightfield.h>
+#include <cvc/world/road_grade.h>
 #include <cvc/world/road_mesh.h>
 #include <cvc/world/road_raster.h>
 #include <cvc/world/roads.h>
@@ -426,9 +427,10 @@ void buildProps(const world_model &wm, const surface_registry &reg, PropLib &lib
 
   // One prop at all three details. `i` is its index in wm.props(), which picks its variant.
   auto emit = [&](std::size_t i) {
-    const placed_prop &pp = props[i];
+    placed_prop pp = props[i];
     if (buildingRecipes.count(pp.recipe) || (keep && !keep(pp.x, pp.y)))
       return;
+    pp.z = wm.terrain().sample(pp.x, pp.y); // the ground as built: a road's cut or bank moves it
     const std::size_t s0 = solid.points().size(), n0 = needle.points().size();
     const std::size_t t0 = solid.tris().size();
     if (growNativeTree(pp.recipe, pp, seed, solid, needle)) {
@@ -652,10 +654,12 @@ road_params cityRoadParams(std::uint64_t seed, double half, const Districts &dis
   rp.snap_dist = std::min(10.0, 0.8 * rp.segment_len);
   rp.min_segment = 0.5 * rp.segment_len;
   rp.core_radius = half * 0.35;
-  rp.arterial_width = 9.0;
-  rp.collector_width = 6.5;
-  rp.local_width = 5.0;
-  rp.max_grade = 0.35;
+  // Two lanes on every street, each room for the widest vehicle the world drives with clearance
+  // either side (world_lane_m): two Humvees pass on a local street.
+  rp.arterial_width = std::max(9.0, 3.0 * world_lane_m);
+  rp.collector_width = std::max(7.0, 2.0 * world_lane_m);
+  rp.local_width = 2.0 * world_lane_m;
+  rp.max_grade = 0.35; // the network may climb steep ground; the grading holds its surface to 12%
   rp.steer_max_deg = 80.0;
   rp.sparse_spacing = 0.55;
   rp.sparse_branch = 0.45;
@@ -1052,6 +1056,7 @@ void apply_world_preset(generated_world_params &p) {
     p.amp_m = 36.0;
     break;
   }
+  p.water_level_m = 0.0; // sea level: each relief is laid against it (fbm_terrain_params)
 }
 
 heightfield_params fbm_terrain_params(const generated_world_params &gp) {
@@ -1063,7 +1068,8 @@ heightfield_params fbm_terrain_params(const generated_world_params &gp) {
   heightfield_params hp;
   hp.seed = gp.seed;
   hp.amp_m = gp.amp_m;
-  hp.sea_level_m = 0.0; // terrain floor at 0; water floods above it (water_level_m)
+  hp.sea_level_m = 0.0; // the sea; the land rises from world_sea_share of the relief below it
+  hp.base_m = -world_sea_share * gp.amp_m;
   hp.base_wavelength_m = std::max(50.0, half * 0.30);
   hp.octaves = 8;
   hp.gain = 0.55;
@@ -1076,7 +1082,7 @@ heightfield_params fbm_terrain_params(const generated_world_params &gp) {
     hp.island = true;
     hp.island_peak_m = std::max(gp.amp_m, 40.0);
     hp.island_radius_m = half * 0.72;
-    hp.shelf_m = -std::max(6.0, gp.water_level_m + 4.0);
+    hp.shelf_m = gp.water_level_m - std::max(6.0, 0.3 * hp.island_peak_m); // under the sea
   }
   return hp;
 }
@@ -1126,7 +1132,8 @@ Registry<terrain_generator> &terrainRegistry() {
     if (p.terrain_file.empty())
       throw std::invalid_argument("generate_world: the dem terrain needs a terrain_file (.npy)");
     return std::shared_ptr<const terrain_source>(std::make_shared<const raster_heightfield>(
-        load_dem(p.terrain_file, std::max(50.0, p.half_m), p.amp_m)));
+        load_dem(p.terrain_file, std::max(50.0, p.half_m), p.amp_m,
+                 -world_sea_share * std::max(0.0, p.amp_m))));
   };
   static Registry<terrain_generator> r({{"fbm", fbm}, {"dem", dem}});
   return r;
@@ -1250,6 +1257,7 @@ enum class build_stage {
   mesh,
   materials,
   streets,
+  grade,
   city,
   roads,
   props,
@@ -1259,11 +1267,42 @@ enum class build_stage {
 };
 
 const char *const kStageNames[] = {"terrain",   "scatter", "raster", "raster", "mesh",
-                                   "materials", "streets", "city",   "roads",  "props",
-                                   "water",     "lod",     "done"};
+                                   "materials", "streets", "grade",  "city",   "roads",
+                                   "props",     "water",   "lod",    "done"};
 // Each stage's share of the progress, about its share of a 5 km world's time natively.
-const double kStageWeight[] = {0.02, 0.06, 0.19, 0.02, 0.27, 0.03, 0.08,
-                               0.08, 0.05, 0.06, 0.08, 0.06, 0.0};
+const double kStageWeight[] = {0.02, 0.06, 0.19, 0.02, 0.24, 0.03, 0.08,
+                               0.03, 0.08, 0.05, 0.06, 0.08, 0.06, 0.0};
+
+// The raster where the roads graded the ground: its heights, and the cells a bank lifted out of the
+// water re-classed as gravel (with their risk, hardness and occupancy), so the ground texture and
+// the navigator see the dry bank the road stands on.
+void regradeRaster(const graded_terrain &g, const generated_world_params &p, raster_out &ro,
+                   const grid_spec &grid, const surface_registry &reg) {
+  std::uint16_t shallow = 0, deep = 0, gravel = 0;
+  const bool hasShallow = reg.find("water_shallow", shallow),
+             hasDeep = reg.find("water_deep", deep);
+  if (!reg.find("gravel", gravel))
+    return;
+  for (int r = 0; r < grid.rows; ++r)
+    for (int c = 0; c < grid.cols; ++c) {
+      const double x = grid.world_x(c), y = grid.world_y(r);
+      if (!g.graded_at(x, y))
+        continue;
+      const std::size_t i = std::size_t(r) * grid.cols + c;
+      const double h = g.sample(x, y);
+      if (i < ro.height.size())
+        ro.height[i] = float(h);
+      if (i >= ro.klass.size() || h < p.water_level_m)
+        continue;
+      const std::uint16_t k = ro.klass[i];
+      if ((hasShallow && k == shallow) || (hasDeep && k == deep)) {
+        ro.klass[i] = gravel;
+        ro.risk_raw[i] = reg[gravel].rho;
+        ro.hard[i] = reg[gravel].hard ? 1 : 0;
+        ro.occupancy[i] = reg[gravel].hard ? 1 : 0;
+      }
+    }
+}
 
 // Rows of `cols` samples, `per` units each, that fit in `budget` (at least one).
 int rowsFor(std::size_t budget, int cols, int per) {
@@ -1287,6 +1326,7 @@ struct world_builder::impl {
   std::vector<cvc::geometry::face_material_t> mats;
   city_streets streets;
   FootprintIndex fps;
+  std::shared_ptr<const graded_terrain> graded; // the ground with the roads graded in
 
   void advance(build_stage s) {
     base += kStageWeight[int(st)];
@@ -1406,6 +1446,45 @@ struct world_builder::impl {
                                       (cliff && hf.mask(terrain_mask::cliff, x, y) > 0.5);
                              }};
       streets = city(ctx);
+      advance(build_stage::grade);
+      return;
+    }
+    case build_stage::grade: {
+      // The roads graded into the ground (road_grade.h): level across, smooth along, held to a 12%
+      // climb, and above the water. Everything after this stands on the graded ground: the
+      // buildings, the road surface, the trees and rocks, the water, and the terrain mesh, which
+      // physics and nav drive on, re-sampled here a few rows a step where a road changed it.
+      const int N = w.terrain->rows();
+      if (next == 0) {
+        road_grade_params gp;
+        gp.water_level = p.water_level_m;
+        gp.flat_margin = std::max(1.0, 0.75 * w.terrain->dx()); // a mesh cell past each edge
+        const std::shared_ptr<const terrain_source> base = w.model->terrain_ptr();
+        std::vector<double> z = grade_road_profile(streets.roads, *base, gp);
+        graded = std::make_shared<const graded_terrain>(base, streets.roads, std::move(z), gp);
+        w.model = std::make_shared<const world_model>(w.model->with_terrain(graded));
+        regradeRaster(*graded, p, w.raster, w.grid, w.model->registry());
+        heights = w.terrain->heights();
+      }
+      const int r1 = next + std::min(N - next, rowsFor(budget, N, 1));
+      const double x0 = w.terrain->x0(), y0 = w.terrain->y0(), dx = w.terrain->dx(),
+                   dy = w.terrain->dy();
+      const graded_terrain &g = *graded;
+#ifdef CVC_USING_OPENMP
+#pragma omp parallel for schedule(dynamic, 4)
+#endif
+      for (int r = next; r < r1; ++r)
+        for (int c = 0; c < N; ++c) {
+          const double x = x0 + c * dx, y = y0 + r * dy;
+          if (g.graded_at(x, y))
+            heights[std::size_t(r) * N + c] = float(g.sample(x, y));
+        }
+      next = r1;
+      frac = double(next) / N;
+      if (next < N)
+        return;
+      w.terrain->set_heights(std::move(heights));
+      heights = std::vector<float>();
       advance(build_stage::city);
       return;
     }
@@ -1431,6 +1510,11 @@ struct world_builder::impl {
       stampBuildings(fps, w.grid, reg, w.raster); // after the asphalt: a building always wins
       road_mesh_params rmp;
       rmp.lift = 0.35; // clearly above the terrain mesh, so the ribbons don't z-fight it
+      // One asphalt for every road (width and the centre stripe tell them apart), so a junction's
+      // pad matches every road meeting it; rounder pads at this scale.
+      for (int k = 0; k < 3; ++k)
+        rmp.local_rgb[k] = rmp.arterial_rgb[k] = 0.27;
+      rmp.pad_segments = 24;
       w.roads = extrude_roads(net, rmp, [&hf](double x, double y) { return hf.sample(x, y); });
       advance(build_stage::props);
       return;
@@ -1584,6 +1668,17 @@ void paintRows(const generated_world &w, surface_color mode, int T, int ty0, int
   const double jitterFreq = 1.0 / std::max(0.5, 0.35 * std::max(cellx, celly));
   std::uint16_t asphalt = 0;
   const bool hasAsphalt = reg.find("asphalt", asphalt);
+  // Under the water the ground carries the water's colour by depth: the water volume all but
+  // vanishes over the shallows, so the texture is what shows them. A light green-blue at the
+  // shoreline deepens to blue by bedDepth metres down, a grade from the sand band at 0 m out.
+  std::uint16_t shallow = 0, deep = 0;
+  const bool hasShallow = reg.find("water_shallow", shallow),
+             hasDeep = reg.find("water_deep", deep);
+  auto isWater = [&](std::uint16_t k) {
+    return (hasShallow && k == shallow) || (hasDeep && k == deep);
+  };
+  const cvc::geometry::color_t shoreWater = {0.36, 0.52, 0.50}, deepWater = {0.09, 0.19, 0.27};
+  const double sea = w.params.water_level_m, bedDepth = 8.0;
   auto isGrass = [](std::uint16_t k) { return k == 6 || k == 7 || k == 8; }; // grass/tall/bush
   auto ease = [](double t) { return t * t * (3.0 - 2.0 * t); };
   auto cell = [&](int r, int c) { return std::size_t(r) * g.cols + c; };
@@ -1641,10 +1736,17 @@ void paintRows(const generated_world &w, surface_color mode, int T, int ty0, int
       cvc::geometry::color_t col{0.0, 0.0, 0.0};
       double grass = 0.0;
       for (int k = 0; k < 4; ++k) {
-        const surface_class &sc = reg[ro.klass[idx[k]]];
+        const std::uint16_t kk = ro.klass[idx[k]];
+        if (isWater(kk)) {
+          const double d = std::min(1.0, std::max(0.0, (sea - ro.height[idx[k]]) / bedDepth));
+          for (int q = 0; q < 3; ++q)
+            col[q] += wt[k] * (shoreWater[q] * (1.0 - d) + deepWater[q] * d);
+          continue;
+        }
+        const surface_class &sc = reg[kk];
         for (int q = 0; q < 3; ++q)
           col[q] += wt[k] * sc.albedo[q];
-        if (isGrass(ro.klass[idx[k]]))
+        if (isGrass(kk))
           grass += wt[k];
       }
       if (grass > 0.0) { // grass broken up by dirt and dry patches, as much as the texel is grass

@@ -10,9 +10,9 @@
 // MEMFS on sys.path; `import pycvc` / `import pycvc_gl` then resolve the C ext to
 // the builtin and the .py proxy layer on top.
 //
-// Built by recipes/pycvc-gl-cp312/build-wasm.sh, which links this against the
-// static libpython3.12.a + the static cvc/cvcGL/VTK closure + libpycvc.a +
-// libpycvc_gl.a (force-loaded) and emits pycvc_host.{wasm,js}.
+// Linked by bindings/pycvc/wasm/link-host.sh (which recipes/pycvc-gl-cp312/build-wasm.sh
+// runs) against the static libpython3.12.a + the static cvc/cvcGL/VTK closure + _pycvc.a +
+// _pycvc_gl.a (force-loaded), emitting pycvc_host.{wasm,js}.
 
 #include <Python.h>
 #include <cstdio>
@@ -24,15 +24,17 @@
 extern "C" PyObject *PyInit__pycvc(void);
 extern "C" PyObject *PyInit__pycvc_gl(void);
 
-// numpy's wasm C-extensions ship as relocatable WASM objects (not side modules),
-// so on Emscripten they link statically into this binary and register as builtins
-// under their full dotted import names (CPython's BuiltinImporter checks the
-// inittab before the filesystem .so). The set of extensions is enumerated by the
-// recipe (build-wasm.{sh,ps1}) into a generated pycvc_register_numpy_inittab()
-// that AppendInittab's each one — `import numpy` eagerly pulls the core plus
+// Python C extensions (numpy's, and any other package's) ship for wasm as relocatable
+// objects (not side modules), so they link statically into this binary and register as
+// builtins under their full dotted import names (CPython's BuiltinImporter checks the
+// inittab before the filesystem .so). Each object has a namespace of its own: its init
+// function is PyInit__x_<dotted module> and its other globals are local
+// (cvcpkg/recipes/_common/wasm_pyext.py). link-host.sh generates
+// pycvc_register_pyext_inittab() from the deps' share/python-wasm/*.inittab manifests;
+// it AppendInittab's each one -- `import numpy` eagerly pulls the core plus
 // linalg/fft/etc., so all must be registered.
-#ifdef PYCVC_EMBED_NUMPY
-extern "C" int pycvc_register_numpy_inittab(void); // generated; 0 = success
+#ifdef PYCVC_EMBED_PYEXT
+extern "C" int pycvc_register_pyext_inittab(void); // generated; 0 = success
 #endif
 
 // VTK's static Python build (vtk-python-cp312 wasm) aggregates EVERY wrapped
@@ -100,9 +102,9 @@ int main(int argc, char **argv) {
     fprintf(stderr, "pycvc_host: failed to register pycvc_gl._pycvc_gl inittab\n");
     return 1;
   }
-#ifdef PYCVC_EMBED_NUMPY
-  if (pycvc_register_numpy_inittab() != 0) {
-    fprintf(stderr, "pycvc_host: numpy inittab registration failed\n");
+#ifdef PYCVC_EMBED_PYEXT
+  if (pycvc_register_pyext_inittab() != 0) {
+    fprintf(stderr, "pycvc_host: Python extension inittab registration failed\n");
     return 1;
   }
 #endif

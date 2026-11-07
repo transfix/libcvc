@@ -97,9 +97,10 @@ struct generated_world_params {
   int buildings = 110; // the most buildings the city builds, filled from the district cores out
   int tree_gen = 5;
   double amp_m = 90.0;
-  // The water surface. The terrain floor sits at 0 and rises to about amp_m; below this line is
-  // water (streams, ponds, coast).
-  double water_level_m = 34.0;
+  // The water surface. Sea level is 0 m: every generator lays its ground so that 0 m is the
+  // shoreline (world_sea_share of the relief below it, or the island's shelf), whatever the relief.
+  // This raises or lowers the sea from there; below it is water (streams, ponds, coast).
+  double water_level_m = 0.0;
   int preset = 0;           // world_preset; island also shapes the relief
   int ontology = 0;         // world_ontology_name
   double cell_m = 5.0;      // the terrain mesh's target cell size
@@ -114,8 +115,18 @@ struct generated_world_params {
   std::string terrain_file;
 };
 
-// The counts and relief a preset starts from (the lab's quick-set): fills trees, rocks, buildings
-// and amp_m for p.preset.
+// A lane of the generated city's streets: the widest vehicle driven on them, the Humvee (2.18 m
+// overall, cvc::physics::vehicle_desc::humvee), with 0.4 m clear either side. Every street is at
+// least two lanes wide, so two Humvees pass.
+constexpr double world_vehicle_width_m = 2.18;
+constexpr double world_lane_m = world_vehicle_width_m + 2.0 * 0.4;
+
+// How much of a generator's relief lies below sea level (0 m): its floor sits world_sea_share x
+// amp_m under the sea, so a lower or higher relief never floods or drains the world.
+constexpr double world_sea_share = 34.0 / 90.0;
+
+// The counts and relief a preset starts from (the lab's quick-set): fills trees, rocks, buildings,
+// amp_m, and water_level_m (0 m: the sea level every relief is laid against) for p.preset.
 void apply_world_preset(generated_world_params &p);
 
 // The world_model params for these (the relief scaled to the world size), the ground from
@@ -123,9 +134,10 @@ void apply_world_preset(generated_world_params &p);
 world_params to_world_params(const generated_world_params &p);
 
 // ── generators, by name ──────────────────────────────────────────────────────────────────────────
-// A terrain generator makes the ground for p over [-p.half_m, p.half_m]^2, its floor near 0 and its
-// relief about p.amp_m, so p.water_level_m means the same thing whatever made the relief. A
-// generator's own masks (channel, cliff, buildable) are respected by the city.
+// A terrain generator makes the ground for p over [-p.half_m, p.half_m]^2 with its relief about
+// p.amp_m and 0 m its shoreline (its floor world_sea_share x p.amp_m below), so p.water_level_m
+// means the same thing whatever made the relief. A generator's own masks (channel, cliff,
+// buildable) are respected by the city.
 using terrain_generator =
     std::function<std::shared_ptr<const terrain_source>(const generated_world_params &p)>;
 // Add a generator, or replace the one of that name. Thread-safe.

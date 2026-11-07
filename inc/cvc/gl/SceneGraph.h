@@ -16,6 +16,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 #include <vtkSmartPointer.h>
 
@@ -216,6 +217,12 @@ public:
   // when selectLOD() reports rung changes; a no-op with shadows off.
   void invalidateShadowBake();
 
+  // How many times the shadow maps have been baked since shadows were last turned
+  // on (0 with them off). A bake re-renders every caster from every casting
+  // light, so a scene where nothing moves should add none per frame: for the
+  // tests, and for telling a frame's cost apart.
+  std::uint64_t shadowBakes() const;
+
   // Shadow-map texture resolution (pixels per side). VTK defaults to a low 256,
   // which aliases thin casters (a forest of trunks/needles shows torn, "inverted"
   // shadows) and speckles broad surfaces with self-shadow acne. Larger is crisper
@@ -241,6 +248,23 @@ public:
   // over (16 taps; 0 = one hard tap). Default 2.
   void setShadowSoftness(double texels);
   double shadowSoftness() const { return m_shadowSoftness; }
+
+  // Shadows in a second renderer that draws this scene's props (a mirror viewport, from its own
+  // camera): a pass chain that RECEIVES the maps this scene's renderer bakes and bakes none of its
+  // own. The maps are in light space, so any camera reads them. The other renderer must hold the
+  // same lights in the same order (a mirror copies them) and draw after this scene's renderer in
+  // the frame (a higher layer). Null while shadows are off. The pass reads the current baker and
+  // softness: when shadowReceiverKey() changes (shadows switched off and on, a new renderer, a new
+  // softness), make a new one.
+  vtkSmartPointer<vtkRenderPass> makeShadowReceiverPass() const;
+  // A whole shadow chain of its own for another renderer, as installShadowPasses builds for this
+  // scene's: a baker of its own (this scene's resolution, interval, softness and focus when made)
+  // that bakes the casters THAT renderer draws. For a view that leaves some of the scene out and
+  // must not show their shadows. Null while shadows are off; remake it when shadowReceiverKey()
+  // changes, as for a receiver.
+  vtkSmartPointer<vtkRenderPass> makeShadowPasses() const;
+  // What a receiver pass was made from; a pass made under another key is stale. Null while off.
+  std::pair<const void *, double> shadowReceiverKey() const;
   void update();
 
   // Process pending events on the main thread
@@ -467,6 +491,16 @@ public:
   // well outside where it was, a prop's UseBounds turned back on. Any thread.
   void markContentChanged() { m_contentVersion.fetch_add(1, std::memory_order_acq_rel); }
 
+  // A counter bumped whenever a node joins or leaves the tree: a graphics node
+  // registered or removed, or a child added to or removed from any node in the
+  // scene (an LOD rung made late, a regenerated world's new meshes). Something
+  // that decorates the scene's meshes -- cloud_sky giving its receivers the
+  // deck's shade -- compares it to know when to look for new ones, instead of
+  // walking the tree on a timer. Unlike contentVersion() it ignores moves,
+  // visibility and geometry swaps: those keep a node's decoration. Any thread.
+  std::uint64_t treeVersion() const { return m_treeVersion.load(std::memory_order_acquire); }
+  void markTreeChanged() { m_treeVersion.fetch_add(1, std::memory_order_acq_rel); }
+
   // Compute combined bounding box of all volumes
   cvc::bounding_box computeVolumeBounds() const;
 
@@ -494,6 +528,10 @@ private:
   };
   void syncShadowState();     // mirror the shadow setters into cvc::state
   void installShadowPasses(); // build the pass chain on m_renderer
+  // The chain installShadowPasses puts on m_renderer (and makeShadowPasses on another), and its
+  // baker.
+  vtkSmartPointer<vtkRenderPass>
+  buildShadowPasses(vtkSmartPointer<vtkShadowMapBakerPass> &bakerOut) const;
   void removeShadowPasses();  // free its GL objects, then take it off m_renderer
   std::unique_ptr<cvc::gl::ShadowSettings> m_shadowSettings;
   bool m_applyingShadowState = false; // re-entry guard: state -> setter -> state
@@ -553,6 +591,7 @@ private:
   std::atomic<bool> m_boundsRefreshQueued{false};      // one refreshWorldBounds() event is queued
   mutable std::atomic<std::uint64_t> m_boundsWalks{0}; // see boundsWalkCount()
   std::atomic<std::uint64_t> m_contentVersion{0};      // see contentVersion()
+  std::atomic<std::uint64_t> m_treeVersion{0};         // see treeVersion()
   // A grow-only walk skipped while nothing showed the world box (grid, axis and
   // root box all hidden); run by catchUpWorldBounds() or processEvents() once
   // one of them is shown again.

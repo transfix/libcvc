@@ -166,8 +166,9 @@ SceneNode::~SceneNode() {
 
 void SceneNode::addToRenderer(vtkRenderer *renderer) {
   m_renderer = renderer;
-  // Capture the prop pointer before queuing the lambda
-  vtkProp *prop = m_visible ? getProp() : nullptr;
+  // Capture the prop pointer before queuing the lambda. A hidden ancestor keeps it out: a node
+  // attached under a hidden one draws nothing until that one is shown.
+  vtkProp *prop = m_visible && ancestorsVisible() ? getProp() : nullptr;
   if (prop) {
     // Wrap VTK operation in runOnMainThread
     runOnMainThread([prop, renderer]() { renderer->AddViewProp(prop); });
@@ -224,21 +225,26 @@ void SceneNode::setVisible(bool visible) {
   if (SceneGraph *sg = getSceneGraph())
     sg->markContentChanged();
 
-  if (m_renderer && getProp()) {
-    // Wrap VTK operations in runOnMainThread for thread safety
-    runOnMainThread([this, visible]() {
-      vtkProp *prop = getProp();
-      if (m_renderer && prop) {
-        if (visible) {
-          m_renderer->AddViewProp(prop);
-        } else {
-          m_renderer->RemoveViewProp(prop);
-        }
-      }
-    });
-  }
+  syncProp(); // shown: only if every ancestor is too
 
   propagateVisible(visible);
+}
+
+void SceneNode::syncProp() {
+  if (!m_renderer || !getProp())
+    return;
+  // Wrap VTK operations in runOnMainThread for thread safety
+  runOnMainThread([this]() {
+    vtkProp *prop = getProp();
+    if (!m_renderer || !prop)
+      return;
+    const bool want = m_visible && ancestorsVisible();
+    const bool has = m_renderer->HasViewProp(prop) != 0;
+    if (want && !has)
+      m_renderer->AddViewProp(prop);
+    else if (!want && has)
+      m_renderer->RemoveViewProp(prop);
+  });
 }
 
 void SceneNode::propagateVisible(bool visible) {
@@ -258,6 +264,7 @@ void SceneNode::pushVisible(SceneNode &child, bool visible) {
 }
 
 void SceneNode::ancestorVisibilityChanged() {
+  syncProp(); // an ancestor shown or hidden: whether this node may draw changed
   for (auto &child : m_children) {
     child->ancestorVisibilityChanged();
   }

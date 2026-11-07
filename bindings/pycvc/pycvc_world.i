@@ -31,8 +31,14 @@
 //    the same arrays as the C++ objects, never a re-read file.
 
 %{
+#include <boost/any.hpp>
+#include <cvc/ariadne/data.h>
+#include <cvc/core/app.h>
 #include <cvc/geometry/height_field.h>
 #include <cvc/nav/land_cover.h>
+#include <cvc/nav/world_planes.h> // nav_world_rasterize
+#include <cvc/net/net_policy.h>
+#include <cvc/state/state.h>
 #include <cvc/world/city_bundle.h>
 #include <cvc/world/world_geometry.h>
 #include <cmath>
@@ -41,6 +47,24 @@
 #include <string>
 
 namespace pycvc_world {
+
+// The object a dataset's output node holds (cvc/ariadne/data.h): `path` is the dataset (a store node
+// or a document's link to one), `item` the output. Raises when it holds none of type T.
+template <class T>
+std::shared_ptr<const T> data_object(cvc::app &app, const std::string &path, const std::string &item,
+                                     const char *what) {
+  const std::string at = path + cvc::state::SEPARATOR + item;
+  cvc::state *n = cvc::state::instance(app).findThroughLinks(at);
+  if (n) {
+    try {
+      if (auto p = boost::any_cast<std::shared_ptr<const T>>(n->data()))
+        return p;
+    } catch (const boost::bad_any_cast &) {
+    }
+  }
+  throw std::runtime_error(at + " holds no " + what + " (status: " +
+                           cvc::ariadne::data_status(app, path) + ")");
+}
 
 // Any sequence or array of numbers as floats (float64 input is narrowed).
 // None or null: empty.
@@ -469,5 +493,281 @@ PyObject *read_terrain_extent(const std::string &dir) {
   return Py_BuildValue("{s:i,s:i,s:d,s:d,s:d,s:d}", "rows", e.rows, "cols", e.cols, "min_x",
                        e.min_x, "min_y", e.min_y, "max_x", e.max_x, "max_y", e.max_y);
 }
+
+// cvc::nav::rasterize: the grid a navigator plans on, from a world (a city_bundle's world(), say)
+// over (min_x, min_y)-(max_x, max_y) at rows x cols samples, row 0 at min y. A dict of (rows, cols)
+// arrays: occupancy (uint8 0/1, its obstacles dilated by `inflate` cells) and height (float32,
+// the terrain's). The C++ demos' occupancy; no VTK.
+PyObject *nav_world_rasterize(const cvc::world::world_geometry &world, int rows, int cols,
+                              double min_x, double min_y, double max_x, double max_y,
+                              int inflate = 0) {
+  cvc::nav::world_planes p;
+  {
+    pycvc::gil_release nogil; // pycvc_lod.i's; a throw takes the GIL back on the way out
+    p = cvc::nav::rasterize(world, rows, cols, min_x, min_y, max_x, max_y, inflate);
+  }
+  npy_intp dims[2] = {p.rows, p.cols};
+  PyObject *occ = PyArray_SimpleNew(2, dims, NPY_UINT8);
+  PyObject *height = PyArray_SimpleNew(2, dims, NPY_FLOAT32);
+  if (!occ || !height) {
+    Py_XDECREF(occ);
+    Py_XDECREF(height);
+    throw std::runtime_error("pycvc.nav_world_rasterize: alloc failed");
+  }
+  const std::size_t n = static_cast<std::size_t>(p.rows) * static_cast<std::size_t>(p.cols);
+  if (p.occupancy.size() == n)
+    std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(occ)), p.occupancy.data(), n);
+  else
+    std::memset(PyArray_DATA(reinterpret_cast<PyArrayObject *>(occ)), 0, n);
+  if (p.height.size() == n)
+    std::memcpy(PyArray_DATA(reinterpret_cast<PyArrayObject *>(height)), p.height.data(),
+                n * sizeof(float));
+  else
+    std::memset(PyArray_DATA(reinterpret_cast<PyArrayObject *>(height)), 0, n * sizeof(float));
+  return Py_BuildValue("{s:N,s:N}", "occupancy", occ, "height", height);
+}
+} // namespace pycvc
+%}
+
+%feature("kwargs") pycvc::data_load;
+%feature("kwargs") pycvc::data_wait;
+%feature("kwargs") pycvc::data_world;
+%feature("kwargs") pycvc::data_height_field;
+%feature("kwargs") pycvc::data_geometry;
+
+%inline %{
+namespace pycvc {
+// Ariadne data (cvc/ariadne/data.h, docs/roadmap/ARIADNE_DATA_ROADMAP.md): datasets in the state
+// tree, loaded once and shared by the documents and hosts of an app. `path` names a dataset: its
+// store node ("data.<key>"), or a document's link to it ("<prefix>.data.<name>").
+
+// Load `uri` (a file or directory, https://, cvcpkg://ORG/NAME[@VERSION], state://...) into the
+// store, keeping `path` of an archive and decoding it with `decoder` (the data: block's as: files,
+// bytes, text, json, mesh, heightfield, volume, city_bundle; "" picks one). With `name`,
+// <prefix>.data.<name> links to it.
+// Returns the store node; the load runs on a worker thread (data_wait).
+std::string data_load(const std::shared_ptr<cvc::app> &app, const std::string &uri,
+                      const std::string &path = "", const std::string &decoder = "",
+                      const std::string &name = "", const std::string &prefix = "",
+                      bool reload = false) {
+  cvc::ariadne::DataSpec spec;
+  spec.uri = uri;
+  spec.path = path;
+  spec.as = decoder;
+  spec.name = name;
+  auto store = cvc::ariadne::DataStore::of(*app);
+  if (!name.empty())
+    return store->bind(prefix, spec);
+  return store->load(spec, reload);
+}
+
+// Let the app's https:// and cvcpkg:// data reach these origins ("https://cvcpkg.org"), when no
+// document host turned the network on for it (a Python program loading data itself). A document
+// host's --net-allow, or AriRuntime.enable_net_allow, does this for its documents.
+void data_allow_network(const std::shared_ptr<cvc::app> &app,
+                        const std::vector<std::string> &origins) {
+  auto policy = std::make_shared<cvc::net::NetPolicy>();
+  for (const std::string &o : origins) {
+    std::string error;
+    const auto origin = cvc::net::parse_origin_spec(o, &error);
+    if (!origin)
+      throw std::invalid_argument("data_allow_network: " + o + ": " + error);
+    policy->allow(*origin);
+  }
+  cvc::ariadne::DataStore::of(*app)->set_network(policy);
+}
+
+// The dataset's status: idle, fetching, unpacking, decoding, ready or error ("" for none).
+std::string data_status(const std::shared_ptr<cvc::app> &app, const std::string &path) {
+  return cvc::ariadne::data_status(*app, path);
+}
+
+// Wait until the dataset is ready or has failed (`timeout` seconds; negative: as long as it takes):
+// True when it is ready.
+bool data_wait(const std::shared_ptr<cvc::app> &app, const std::string &path,
+               double timeout = -1.0) {
+  return cvc::ariadne::DataStore::of(*app)->wait(path, timeout);
+}
+
+// The paths of the dataset's files, and one file's bytes (None when it has no such file).
+std::vector<std::string> data_files(const std::shared_ptr<cvc::app> &app, const std::string &path) {
+  return cvc::ariadne::data_files(*app, path);
+}
+PyObject *data_file(const std::shared_ptr<cvc::app> &app, const std::string &path,
+                    const std::string &file) {
+  const cvc::ariadne::DataBytes b = cvc::ariadne::data_file(*app, path, file);
+  if (!b)
+    Py_RETURN_NONE;
+  return PyBytes_FromStringAndSize(b->data(), static_cast<Py_ssize_t>(b->size()));
+}
+
+// What a decoder made, sharing its arrays with the scene that draws it: a city_bundle's world, its
+// terrain's height field and its buildings' mesh (a mesh decoder's geometry).
+cvc::world::world_geometry data_world(const std::shared_ptr<cvc::app> &app, const std::string &path,
+                                      const std::string &item = "world") {
+  return *pycvc_world::data_object<cvc::world::world_geometry>(*app, path, item, "world_geometry");
+}
+cvc::height_field data_height_field(const std::shared_ptr<cvc::app> &app, const std::string &path,
+                                    const std::string &item = "terrain") {
+  return *pycvc_world::data_object<cvc::height_field>(*app, path, item, "height_field");
+}
+cvc::geometry data_geometry(const std::shared_ptr<cvc::app> &app, const std::string &path,
+                            const std::string &item = "geometry") {
+  return *pycvc_world::data_object<cvc::geometry>(*app, path, item, "geometry");
+}
+} // namespace pycvc
+%}
+
+// ── generated worlds (cvc::world::generate_world, terrain_lab's world) ──────────
+// The world the generated_world scene node draws, made in Python: its ground (a height_field) and
+// the world for physics and nav (a world_geometry: the terrain to collide and navigate, the
+// buildings to collide). generate_world is a pure function of its params and the building library,
+// so the same world.* keys give the node's world exactly.
+%{
+#include <cvc/world/building_archetypes.h>
+#include <cvc/world/generated_world.h>
+#include <sys/stat.h>
+%}
+
+%feature("kwargs") pycvc::generate_world;
+%newobject pycvc::generate_world;
+
+%inline %{
+namespace pycvc {
+
+class generated_world {
+public:
+  // The world for physics and nav, and the ground (copies sharing their arrays).
+  cvc::world::world_geometry world() const { return geometry_; }
+  cvc::height_field terrain() const { return terrain_; }
+  // The ground's height at (x, y), m: the terrain mesh's own surface.
+  double height(double x, double y) const { return terrain_.height(x, y); }
+  // The params it was made from (generated_world_params' fields) and what came out: buildings,
+  // archetypes (whether they came from a building library), road_length (m), districts,
+  // height_min and height_max (m).
+  PyObject *info() const {
+    const cvc::world::generated_world_params &p = params_;
+    return Py_BuildValue(
+        "{s:K,s:d,s:i,s:i,s:i,s:i,s:d,s:d,s:i,s:i,s:d,s:i,s:i,s:s,s:s,s:s,s:n,s:O,s:d,s:n,s:d,s:d}",
+        "seed", (unsigned long long)p.seed, "half_m", p.half_m, "trees", p.trees, "rocks",
+        p.rocks, "buildings", p.buildings, "tree_gen", p.tree_gen, "amp_m", p.amp_m,
+        "water_level_m", p.water_level_m, "preset", p.preset, "ontology", p.ontology, "cell_m",
+        p.cell_m, "max_terrain_n", p.max_terrain_n, "raster_n", p.raster_n, "terrain",
+        p.terrain.c_str(), "city", p.city.c_str(), "terrain_file", p.terrain_file.c_str(),
+        "building_count", (Py_ssize_t)building_count_, "archetypes", archetypes_ ? Py_True : Py_False,
+        "road_length", road_length_, "districts", (Py_ssize_t)districts_, "height_min",
+        height_min_, "height_max", height_max_);
+  }
+
+  // Only generate_world makes one.
+  generated_world(const cvc::world::generated_world &w)
+      : geometry_(w.geometry()), terrain_(w.terrain ? *w.terrain : cvc::height_field()),
+        params_(w.params),
+        building_count_(w.building_count), archetypes_(w.archetypes),
+        road_length_(w.road_length), districts_(w.districts), height_min_(w.height_min),
+        height_max_(w.height_max) {}
+
+private:
+  cvc::world::world_geometry geometry_;
+  cvc::height_field terrain_;
+  cvc::world::generated_world_params params_;
+  std::size_t building_count_ = 0;
+  bool archetypes_ = false;
+  double road_length_ = 0.0;
+  std::size_t districts_ = 0;
+  double height_min_ = 0.0, height_max_ = 0.0;
+};
+
+// Generate a world. `params` is a dict of generated_world_params' fields, by their names or the
+// generated_world node's world.* keys (seed, half or half_m, trees, rocks, buildings, tree_gen,
+// amp or amp_m, water_level or water_level_m, preset, ontology, cell_m, max_terrain_n, raster_n,
+// terrain, city, terrain_file); a missing one keeps its default, an unknown one is an error.
+// `building_library` is a buildings.glb (or a directory holding one) of archetypes for the city;
+// "" builds procedural massing. Runs without the GIL; a big world takes seconds.
+generated_world *generate_world(PyObject *params = nullptr,
+                                const std::string &building_library = "") {
+  cvc::world::generated_world_params p;
+  if (params && params != Py_None) {
+    if (!PyDict_Check(params))
+      throw std::invalid_argument("generate_world: params is a dict");
+    PyObject *key = nullptr, *value = nullptr;
+    Py_ssize_t pos = 0;
+    while (PyDict_Next(params, &pos, &key, &value)) {
+      if (!PyUnicode_Check(key))
+        throw std::invalid_argument("generate_world: a param's name is a string");
+      const std::string k = PyUnicode_AsUTF8(key);
+      const auto num = [&]() {
+        const double v = PyFloat_AsDouble(value);
+        if (PyErr_Occurred()) {
+          PyErr_Clear();
+          throw std::invalid_argument("generate_world: " + k + " is a number");
+        }
+        return v;
+      };
+      const auto str = [&]() {
+        if (!PyUnicode_Check(value))
+          throw std::invalid_argument("generate_world: " + k + " is a string");
+        return std::string(PyUnicode_AsUTF8(value));
+      };
+      if (k == "seed")
+        p.seed = static_cast<std::uint64_t>(num());
+      else if (k == "half" || k == "half_m")
+        p.half_m = num();
+      else if (k == "trees")
+        p.trees = static_cast<int>(num());
+      else if (k == "rocks")
+        p.rocks = static_cast<int>(num());
+      else if (k == "buildings")
+        p.buildings = static_cast<int>(num());
+      else if (k == "tree_gen")
+        p.tree_gen = static_cast<int>(num());
+      else if (k == "amp" || k == "amp_m")
+        p.amp_m = num();
+      else if (k == "water_level" || k == "water_level_m")
+        p.water_level_m = num();
+      else if (k == "preset")
+        p.preset = static_cast<int>(num());
+      else if (k == "ontology")
+        p.ontology = static_cast<int>(num());
+      else if (k == "cell_m")
+        p.cell_m = num();
+      else if (k == "max_terrain_n")
+        p.max_terrain_n = static_cast<int>(num());
+      else if (k == "raster_n")
+        p.raster_n = static_cast<int>(num());
+      else if (k == "terrain")
+        p.terrain = str();
+      else if (k == "city")
+        p.city = str();
+      else if (k == "terrain_file")
+        p.terrain_file = str();
+      else
+        throw std::invalid_argument("generate_world: no param " + k);
+    }
+  }
+  std::shared_ptr<const cvc::world::building_library> library;
+  if (!building_library.empty()) {
+    std::string path = building_library;
+    struct stat st {};
+    if (stat(path.c_str(), &st) == 0 && (st.st_mode & S_IFDIR))
+      path += "/buildings.glb";
+    library = std::make_shared<const cvc::world::building_library>(
+        cvc::world::load_building_library(path));
+  }
+  std::unique_ptr<cvc::world::generated_world> w;
+  std::string error;
+  Py_BEGIN_ALLOW_THREADS;
+  try {
+    w = std::make_unique<cvc::world::generated_world>(
+        cvc::world::generate_world(p, library.get()));
+  } catch (const std::exception &e) {
+    error = e.what();
+  }
+  Py_END_ALLOW_THREADS;
+  if (!w)
+    throw std::invalid_argument("generate_world: " + error);
+  return new generated_world(*w);
+}
+
 } // namespace pycvc
 %}

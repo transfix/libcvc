@@ -2111,6 +2111,65 @@ scene:
   EXPECT_DOUBLE_EQ(cam.scene.shadow_focus.max_radius, 600.0);
 }
 
+// assets: (id -> a node's source and fit), source: { asset } on a node, scenes: entries (each a
+// whole scene with its id, and the document's assets), main_view: on a scene, and the cameras:
+// a scene names.
+TEST(AriadneScene, AssetsScenesAndMainView) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = load_string(R"(
+meta: { min_libcvc: "0.0.0" }
+assets:
+  bunny: { source: { file: stanford.bunny }, fit: { height: 4, up: y } }
+  crate: { source: { box: { size: 2 } } }
+scene:
+  main_view: { show: [courtyard], hide: debug }
+  cameras:
+    - { camera: overview, mode: map }
+    - { camera: rig, azimuth: -30, elevation: 20, zoom: 1.5 }
+  nodes:
+    - { node: b, source: { asset: bunny }, tags: [courtyard] }
+scenes:
+  - scene: night
+    background: [0.0, 0.0, 0.1]
+    shadows: { enabled: true, softness: 4 }
+    lights: [{ light: moon, kind: directional, azimuth: 200, elevation: 30 }]
+    nodes:
+      - { node: c, source: { asset: crate } }
+  - { nodes: [] }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.assets.size(), 2u);
+  EXPECT_EQ(r.scene.assets[0].id, "bunny");
+  EXPECT_EQ(r.scene.assets[0].source.source_file, "stanford.bunny");
+  EXPECT_TRUE(r.scene.assets[0].source.has_fit);
+  EXPECT_EQ(r.scene.assets[1].source.source_primitive, "box");
+  ASSERT_EQ(r.scene.nodes.size(), 1u);
+  EXPECT_EQ(r.scene.nodes[0].source_asset, "bunny");
+  EXPECT_TRUE(r.scene.nodes[0].source_file.empty());
+  EXPECT_TRUE(r.scene.has_main_view);
+  EXPECT_EQ(r.scene.main_show, (std::vector<std::string>{"courtyard"}));
+  EXPECT_EQ(r.scene.main_hide, (std::vector<std::string>{"debug"}));
+  ASSERT_EQ(r.scene.cameras.size(), 2u);
+  EXPECT_EQ(r.scene.cameras[0].id, "overview");
+  EXPECT_EQ(r.scene.cameras[0].mode, "map");
+  EXPECT_TRUE(r.scene.cameras[1].has_azimuth);
+  EXPECT_DOUBLE_EQ(r.scene.cameras[1].azimuth, -30.0);
+  EXPECT_DOUBLE_EQ(r.scene.cameras[1].zoom, 1.5);
+  ASSERT_EQ(r.scenes.size(), 1u); // the unnamed entry is warned of and dropped
+  const Scene &night = r.scenes[0];
+  EXPECT_EQ(night.id, "night");
+  EXPECT_TRUE(night.has_background);
+  EXPECT_TRUE(night.shadows_enabled);
+  ASSERT_EQ(night.lights.size(), 1u);
+  ASSERT_EQ(night.nodes.size(), 1u);
+  EXPECT_EQ(night.nodes[0].source_asset, "crate");
+  EXPECT_EQ(night.assets.size(), 2u); // every scene can name every asset
+  bool warned = false;
+  for (const std::string &w : r.warnings)
+    warned = warned || w.find("no `scene:` name") != std::string::npos;
+  EXPECT_TRUE(warned);
+}
+
 // §9.5.1 tags: a list or one name, on any node at any depth; a built-in key, not a custom node's
 // prop. A node without tags has none (it is in every view).
 TEST(AriadneScene, NodeTags) {
@@ -3507,7 +3566,8 @@ TEST(AriadneComponents, ShippedComponentsLoadClean) {
 }
 
 // scene_view.ari: a window around one `viewport` widget. Its args reach the widget's props (the
-// cvcGL widget reads view / show / hide / camera / chrome / width / height), bare and overridden.
+// cvcGL widget reads view / show / hide / mode / camera / chrome / width / height), bare and
+// overridden.
 TEST(AriadneComponents, SceneViewPassesItsArgsToTheViewport) {
   SKIP_WITHOUT_YAML();
   namespace fs = std::filesystem;
@@ -3525,7 +3585,7 @@ windows:
   - include: scene_view
   - include: scene_view
     args: { view: overview, title: Overview, id: overview, show: "sim debug", hide: hud,
-            camera: map, chrome: false, width: 280 }
+            mode: map, camera: plaza, chrome: false, width: 280 }
 )");
   ASSERT_TRUE(r.ok) << r.error;
   std::vector<const Widget *> views;
@@ -3537,14 +3597,16 @@ windows:
   const Value &bare = views[0]->props, &over = views[1]->props;
   EXPECT_EQ(bare.str("view"), "scene_view");
   EXPECT_EQ(bare.str("show"), "");
-  EXPECT_EQ(bare.str("camera"), "orbit");
+  EXPECT_EQ(bare.str("mode"), "orbit");
+  EXPECT_EQ(bare.str("camera"), "");
   EXPECT_TRUE(bare.flag("chrome", false));
   EXPECT_EQ(bare.num("width", 0.0), 360.0);
   EXPECT_EQ(bare.num("height", 0.0), 270.0);
   EXPECT_EQ(over.str("view"), "overview");
   EXPECT_EQ(over.str("show"), "sim debug");
   EXPECT_EQ(over.str("hide"), "hud");
-  EXPECT_EQ(over.str("camera"), "map");
+  EXPECT_EQ(over.str("mode"), "map");
+  EXPECT_EQ(over.str("camera"), "plaza");
   EXPECT_FALSE(over.flag("chrome", true));
   EXPECT_EQ(over.num("width", 0.0), 280.0);
   EXPECT_EQ(r.root.children[1].label, "Overview");
@@ -5478,8 +5540,8 @@ windows:
     std::vector<std::string> keys;
     collect_key_strings(*windows[i], keys);
     for (const std::string &want :
-         {v + "hud.enabled", v + "hud.fps", v + "ui.scale", v + "camera.settings.move_speed",
-          std::string("graphics.root.children.grid.visible"),
+         {v + "hud.enabled", v + "hud.fps", v + "ui.scale", v + "ui.scroll_friction",
+          v + "camera.settings.move_speed", std::string("graphics.root.children.grid.visible"),
           std::string("graphics.root.children.axis.visible"),
           std::string("graphics.root.show_bbox"), std::string("shadows.enabled")})
       EXPECT_NE(std::find(keys.begin(), keys.end(), want), keys.end()) << want;
