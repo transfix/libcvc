@@ -14,15 +14,20 @@
 // true drops inbound mutations / messages whose paths are not
 // covered by a registered interest prefix, while preserving the
 // previous "mirror everything" behavior when the filter is off.
+// StatePublishScopeTest covers the sender's side, add_publish_prefix.
 
 #include <atomic>
+#include <cstdint>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_message.h>
 #include <cvc/state/state_message_bus.h>
 #include <gtest/gtest.h>
+#include <initializer_list>
+#include <set>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -293,4 +298,128 @@ TEST(StateInterestFilterTest, DelegationOpsBypassInterestFilter) {
   auto r = sh.ingest_remote(d);
   EXPECT_TRUE(r.applied) << r.reject_reason;
   EXPECT_EQ(sh.total_remote_filtered_out(), 0u);
+}
+
+// ---- The sender's side: the outbound scope (add_publish_prefix) ----
+
+namespace {
+
+// Write VALUE at each of PATHS, twice: the first set on a fresh child may land before the adapter
+// observes it (StateClusterShardTest.TrimPublishedKeepsDrainOrdered).
+void write_all(cvc::app &a, std::initializer_list<const char *> paths, const std::string &value) {
+  for (int pass = 0; pass < 2; ++pass)
+    for (const char *p : paths)
+      cvc::state::instance(a)(p).value(value + std::to_string(pass));
+}
+
+bool under_scope(const std::string &path) {
+  const auto under = [&](const std::string &root) {
+    return path.compare(0, root.size(), root) == 0 &&
+           (path.size() == root.size() || path[root.size()] == '.');
+  };
+  return under("conf") || under("cyprov");
+}
+
+} // namespace
+
+TEST(StatePublishScopeTest, NoPrefixesSendEverything) {
+  cvc::app a;
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
+  sh.attach();
+  EXPECT_TRUE(sh.publish_prefixes().empty());
+  EXPECT_TRUE(sh.path_is_published("ui.docs.arisrv.secret"));
+  write_all(a, {"conf.rooms.r.topic", "ui.docs.arisrv.secret"}, "v");
+  bool ui = false;
+  for (const cvc::state_mutation &m : sh.drain_local())
+    ui = ui || m.path == "ui.docs.arisrv.secret";
+  EXPECT_TRUE(ui) << "without a scope the shard sends its whole tree, as before";
+}
+
+// A relay's shard with a scope sends the room tree and the published namespace, and nothing of
+// the server document's own state; the publish cursor moves past what it holds back, so a trim
+// erases that too and a later drain does not scan it again.
+TEST(StatePublishScopeTest, DrainSendsOnlyTheScope) {
+  cvc::app a;
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
+  sh.add_publish_prefix("conf");
+  sh.add_publish_prefix(".cyprov."); // normalized, as an interest is
+  sh.add_publish_prefix("cyprov");   // and kept once
+  sh.attach();
+  ASSERT_EQ(sh.publish_prefixes(), (std::vector<std::string>{"conf", "cyprov"}));
+  EXPECT_TRUE(sh.path_is_published("conf"));
+  EXPECT_TRUE(sh.path_is_published("cyprov.jobs.1"));
+  EXPECT_FALSE(sh.path_is_published("cyprovx.y")); // dot-segment boundary
+  EXPECT_FALSE(sh.path_is_published("ui.docs.arisrv.cyprov"));
+
+  write_all(a, {"conf.rooms.r.topic", "cyprov.status", "ui.docs.arisrv.secret", "cyprovx.y"}, "v");
+  const std::vector<cvc::state_mutation> sent = sh.drain_local();
+  bool topic = false, status = false;
+  for (const cvc::state_mutation &m : sent) {
+    EXPECT_TRUE(under_scope(m.path)) << m.path << " left the relay";
+    topic = topic || m.path == "conf.rooms.r.topic";
+    status = status || m.path == "cyprov.status";
+  }
+  EXPECT_TRUE(topic);
+  EXPECT_TRUE(status);
+  EXPECT_EQ(sh.published_cursor(), sh.journal().last_sequence());
+  const std::size_t pending = sh.journal().size();
+  EXPECT_EQ(sh.trim_published(), pending) << "a trim erases what was held back too";
+  EXPECT_EQ(sh.journal().size(), 0u);
+
+  // Only held-back writes: nothing is sent, and the cursor still moves past them.
+  write_all(a, {"ui.docs.arisrv.secret"}, "w");
+  const std::uint64_t before = sh.published_cursor();
+  EXPECT_TRUE(sh.drain_local().empty());
+  EXPECT_GT(sh.published_cursor(), before);
+  EXPECT_EQ(sh.published_cursor(), sh.journal().last_sequence());
+}
+
+// With max_count, drain_local stops at its last mutation sent, and the rest comes next time.
+TEST(StatePublishScopeTest, CappedDrainResumesAfterItsLastMutation) {
+  cvc::app a;
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
+  sh.add_publish_prefix("cyprov");
+  sh.attach();
+  write_all(a, {"cyprov.a", "ui.hidden", "cyprov.b"}, "v");
+  const std::vector<cvc::state_mutation> first = sh.drain_local(1);
+  ASSERT_EQ(first.size(), 1u);
+  EXPECT_EQ(sh.published_cursor(), first.back().sequence);
+  const std::vector<cvc::state_mutation> rest = sh.drain_local();
+  ASSERT_FALSE(rest.empty());
+  for (const cvc::state_mutation &m : rest) {
+    EXPECT_GT(m.sequence, first.back().sequence);
+    EXPECT_NE(m.path, "ui.hidden");
+  }
+  EXPECT_EQ(sh.published_cursor(), sh.journal().last_sequence());
+}
+
+// A joiner's backfill and its snapshots hold only the scope.
+TEST(StatePublishScopeTest, ReplayAndSnapshotHoldOnlyTheScope) {
+  cvc::app a;
+  cvc::state_cluster_shard sh(a, "clusterA", "nodeA");
+  sh.add_publish_prefix("conf");
+  sh.add_publish_prefix("cyprov");
+  sh.attach();
+  write_all(a, {"conf.rooms.r.topic", "cyprov.status", "ui.docs.arisrv.secret", "cyprovx.y"}, "v");
+
+  bool status = false;
+  for (const cvc::state_mutation &m : sh.replay_local(0)) {
+    EXPECT_TRUE(under_scope(m.path)) << m.path << " in the backfill";
+    status = status || m.path == "cyprov.status";
+  }
+  EXPECT_TRUE(status);
+
+  std::set<std::string> paths;
+  for (const auto &e : sh.snapshot()) {
+    EXPECT_TRUE(under_scope(e.path)) << e.path << " in the snapshot";
+    paths.insert(e.path);
+  }
+  EXPECT_TRUE(paths.count("conf.rooms.r.topic"));
+  EXPECT_TRUE(paths.count("cyprov.status"));
+
+  // A request for a prefix gets what is both under it and in the scope.
+  for (const auto &e : sh.snapshot("cyprov"))
+    EXPECT_EQ(e.path.rfind("cyprov", 0), 0u) << e.path;
+  EXPECT_TRUE(sh.snapshot("ui").empty());
+  EXPECT_TRUE(sh.snapshot("cyprovx").empty());
 }

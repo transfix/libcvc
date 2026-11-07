@@ -1,0 +1,12 @@
+# A server document for arisrv's ctest (CMakeLists.txt beside this directory): it publishes `echo`,
+# writes it at init: and on each room step, keeps a count of its own, and stops the relay with
+# (quit 0) after its fifth step. The relay runs on loopback ports, and no client joins.
+meta: { name: arisrv echo server, min_libcvc: 3.7.5 }
+server:
+  publish: [echo]
+init: |
+  (state-set "echo.status" "up")
+  (state-set "own.note" "the server's own")
+on_tick: |
+  (state-incr "own.steps")
+  (if (>= (state-incr "echo.ticks") 5) (quit 0) #f)

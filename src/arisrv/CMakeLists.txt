@@ -73,3 +73,44 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR AND (CVC_ENABLE_GRPC O
   target_compile_features(arisrv_aoi_bench PRIVATE cxx_std_17)
   target_link_libraries(arisrv_aoi_bench PRIVATE cvc)
 endif()
+
+# ctest, in-tree: a server document on the relay (--doc, docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md
+# §6.5.3), on loopback ports no client joins. tests/echo_server.ari publishes echo and stops the
+# relay with (quit 0) after five room steps; (quit 3) is arisrv's exit status; a document that
+# would publish the room tree, or publish without bound writes, stops arisrv before it listens.
+# What clients receive is RoomRelayLoopbackTest.ServerDocumentPublishesItsNamespaceOnly
+# (src/cvc/tests/room_relay_integration_test.cpp). A libcvc without yaml-cpp skips.
+if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
+  set(_srv_tests "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+  set(_srv_listen "--room@@ctest@@--state-listen@@127.0.0.1:0@@--media-listen@@127.0.0.1:0@@--ws-listen@@127.0.0.1:0")
+  add_test(NAME arisrv_doc_echo
+           COMMAND ${CMAKE_COMMAND} -DARISRV=$<TARGET_FILE:arisrv>
+                   "-DARGS=--doc@@${_srv_tests}/echo_server.ari@@${_srv_listen}" -DSTATUS=0
+                   "-DEXPECT1=binds under ui\\.docs\\.arisrv[^\n]*publishes echo \\(to every client\\)"
+                   "-DEXPECT2=the server document asked to stop \\(quit 0\\)"
+                   -P "${_srv_tests}/run_arisrv.cmake")
+  add_test(NAME arisrv_doc_quit_code
+           COMMAND ${CMAKE_COMMAND} -DARISRV=$<TARGET_FILE:arisrv>
+                   "-DARGS=--doc@@${_srv_tests}/quit_code.ari@@${_srv_listen}" -DSTATUS=3
+                   "-DEXPECT1=asked to stop \\(quit 3\\)" -P "${_srv_tests}/run_arisrv.cmake")
+  add_test(NAME arisrv_doc_publish_conf
+           COMMAND ${CMAKE_COMMAND} -DARISRV=$<TARGET_FILE:arisrv>
+                   "-DARGS=--doc@@${_srv_tests}/publish_conf.ari@@${_srv_listen}" -DSTATUS=2
+                   "-DEXPECT1=server: publish: 'conf' is under conf, the relay's room tree"
+                   -P "${_srv_tests}/run_arisrv.cmake")
+  add_test(NAME arisrv_doc_needs_bound_writes
+           COMMAND ${CMAKE_COMMAND} -DARISRV=$<TARGET_FILE:arisrv>
+                   "-DARGS=--doc@@${_srv_tests}/echo_server.ari@@--bind-writes@@off@@${_srv_listen}"
+                   -DSTATUS=2 "-DEXPECT1=publishes namespaces, which needs bound writes"
+                   -P "${_srv_tests}/run_arisrv.cmake")
+  set_tests_properties(arisrv_doc_echo arisrv_doc_quit_code arisrv_doc_publish_conf
+                       arisrv_doc_needs_bound_writes PROPERTIES
+                       SKIP_REGULAR_EXPRESSION "built without yaml-cpp" TIMEOUT 90)
+  # A host that is not the relay ignores the server: block, and says so.
+  if(TARGET ari)
+    add_test(NAME ari_server_block_ignored COMMAND ari check "${_srv_tests}/echo_server.ari")
+    set_tests_properties(ari_server_block_ignored PROPERTIES
+                         PASS_REGULAR_EXPRESSION "server: block is for the relay that runs it"
+                         SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
+  endif()
+endif()

@@ -44,6 +44,7 @@
 #include <cvc/ariadne/conference/room_write_gate.h> // bound writes
 #include <cvc/ariadne/holon.h>
 #include <cvc/ariadne/holon_sync.h> // server_pump, client_pump, read_pose, write_intent
+#include <cvc/ariadne/server_document.h> // a server document (arisrv --doc)
 #include <cvc/core/app.h>
 #include <cvc/media/media_frame.h>
 #include <cvc/media/media_router.h>
@@ -59,6 +60,8 @@
 #if defined(CVC_ENABLE_WS)
 #include <cvc/state/state_transport_ws.h>
 #endif
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <gtest/gtest.h>
 #include <initializer_list>
@@ -233,6 +236,7 @@ struct relay_options {
   bool hold = true;         // hold each admission for its filter (--admission-hold-ms; AOI only)
   bool bind_writes = true;  // each client writes only its own participant (--bind-writes)
   std::string room_token;   // admit only clients that present it (--room-token-file); "" = open
+  std::string doc;          // a server document's text, run as --doc runs one ("" = none)
 };
 
 // The relay, as arisrv builds it, stepped by the test.
@@ -242,9 +246,26 @@ public:
     const std::chrono::milliseconds hold(opt.use_aoi && opt.hold ? 2000 : 0);
     if (opt.bind_writes)
       bind_gate = std::make_shared<ra::room_write_gate>(kRoom);
+    // The server document's server: block is read before anything listens, and scopes what the
+    // shard sends (without one, the room tree alone).
+    if (!opt.doc.empty()) {
+      doc_dir = std::filesystem::temp_directory_path() /
+                ("relay-doc-" + std::to_string(reinterpret_cast<std::uintptr_t>(this)) + "-" +
+                 std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+      std::filesystem::create_directories(doc_dir);
+      doc_path = (doc_dir / "server.ari").string();
+      std::ofstream(doc_path, std::ios::binary) << opt.doc;
+      doc = std::make_unique<cvc::ariadne::ServerDocument>(app, kRoom);
+      if (const std::string error = doc->read(doc_path); !error.empty())
+        ADD_FAILURE() << "the server document: " << error;
+    }
     shard = std::make_unique<cvc::state_cluster_shard>(app, "conf", kRelayId);
     shard->add_interest("conf");
     shard->set_enforce_interest(true);
+    if (doc)
+      doc->scope(*shard);
+    else
+      shard->add_publish_prefix("conf");
     shard->attach();
     shard->install_as_default();
     shard->adapter().set_on_local_mutation([this](const cvc::state_mutation &m) { note_local(m); });
@@ -311,6 +332,16 @@ public:
 #endif
       ra::write_aoi_params(app, kRoom, opt.aoi);
     }
+    // And the document runs once the room is up.
+    if (doc) {
+      try {
+        for (const std::string &w : doc->load(doc_path))
+          ADD_FAILURE() << "the server document warns: " << w;
+      } catch (const std::exception &e) {
+        ADD_FAILURE() << "the server document did not load: " << e.what();
+        doc.reset();
+      }
+    }
   }
 
   ~test_relay() {
@@ -331,6 +362,11 @@ public:
     shard->adapter().set_on_local_mutation({});
     shard->adapter().set_on_remote_applied({});
     shard->detach();
+    doc.reset();
+    if (!doc_dir.empty()) {
+      std::error_code ec;
+      std::filesystem::remove_all(doc_dir, ec);
+    }
   }
 
   test_relay(const test_relay &) = delete;
@@ -350,6 +386,8 @@ public:
       ra::room_leave(app, kRoom, nid);
       cvc::ariadne::write_intent(app, kRoom, nid, cvc::ariadne::avatar_intent{});
     }
+    if (doc) // the server document's programs, ahead of the holon, as arisrv runs them
+      doc->step(server.tick(), server.clock().t());
     cvc::ariadne::server_pump(server, app, kRoom);
     // The clients' joins land on transport threads, so a pump can add a newcomer that the pass
     // before it never saw: place newcomers and re-pump until a pass finds none, so the area of
@@ -543,6 +581,9 @@ public:
   // it outlives every fan that calls it). A test sets rungs directly; arisrv's controller does.
   cvc::media_rung_shaper shaper;
   cvc::app app;
+  std::unique_ptr<cvc::ariadne::ServerDocument> doc; // opt.doc, run on the relay's app
+  std::filesystem::path doc_dir;
+  std::string doc_path;
   std::unique_ptr<cvc::state_cluster_shard> shard;
 #if defined(CVC_ENABLE_GRPC)
   cvc::state_transport_grpc grpc;
@@ -1279,6 +1320,84 @@ TEST(RoomRelayLoopbackTest, NoIntentOrUiDocsLeak) {
   EXPECT_EQ(A.shard->total_remote_filtered_out(), filtered_a) << "no ui.docs frame reached A";
   EXPECT_EQ(B.app.root().findDescendant("ui.docs"), nullptr);
   EXPECT_EQ(r.app.root().findDescendant("ui.docs"), nullptr) << "ingest keeps only the room";
+}
+
+// A server document (arisrv --doc) that publishes `echo`: its init: writes echo.status and its own
+// state, and each room step bumps echo.ticks and its own count. With the area of interest on,
+// every client is sent echo, live and in a late joiner's admit snapshot: one that subscribes (its
+// shard's interest here, which S2's relay: subscribe: will set) applies it, one that does not
+// filters it out. No client is sent the document's own state, not even W, whose interest takes
+// everything. W's own write to echo is refused, so echo stays the server's for the relay and A.
+const char *const kEchoServerDoc = R"(meta: { name: echo server, min_libcvc: 3.7.5 }
+server: { publish: [echo] }
+init: |
+  (state-set "echo.status" "up")
+  (state-set "own.note" "the server's own")
+on_tick: |
+  (state-incr "echo.ticks")
+  (state-incr "own.ticks")
+)";
+
+std::string tree_value(cvc::app &a, const std::string &path) {
+  cvc::state *n = a.root().findDescendant(path);
+  return n ? n->value() : std::string();
+}
+long tree_number(cvc::app &a, const std::string &path) {
+  return std::strtol(tree_value(a, path).c_str(), nullptr, 10);
+}
+
+TEST(RoomRelayLoopbackTest, ServerDocumentPublishesItsNamespaceOnly) {
+  if (!cvc::ariadne::AppRuntime::have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  relay_options o;
+  o.doc = kEchoServerDoc;
+  test_relay r(o);
+  ASSERT_FALSE(HasFailure());
+  ASSERT_NE(r.doc, nullptr);
+  EXPECT_EQ(r.shard->publish_prefixes(), (std::vector<std::string>{"conf", "echo"}));
+  const std::vector<link_kind> kinds = link_kinds();
+  client_list own;
+  own.push_back(std::make_unique<test_client>("A", kinds[0 % kinds.size()]));
+  own.push_back(std::make_unique<test_client>("B", kinds[1 % kinds.size()]));
+  own.push_back(std::make_unique<test_client>("W", kinds[2 % kinds.size()], ""));
+  const std::vector<test_client *> cs = ptrs(own);
+  test_client &A = *cs[0], &B = *cs[1], &W = *cs[2];
+  A.shard->add_interest("echo");
+  W.shard->add_interest(""); // everything it is sent
+  ASSERT_NO_FATAL_FAILURE(bring_up(r, cs));
+
+  const auto a_follows = [&] {
+    return tree_value(A.app, "echo.status") == "up" && tree_number(A.app, "echo.ticks") >= 10;
+  };
+  ASSERT_TRUE(run_room(r, cs, 5.0, {}, a_follows)) << "A never saw the server's echo";
+  const long ticks = tree_number(A.app, "echo.ticks");
+  ASSERT_TRUE(run_room(r, cs, 3.0, {}, [&] { return tree_number(A.app, "echo.ticks") > ticks; }))
+      << "echo.ticks stopped reaching A live";
+  EXPECT_EQ(tree_value(W.app, "echo.status"), "up");
+  EXPECT_EQ(B.app.root().findDescendant("echo"), nullptr) << "B never subscribed";
+  EXPECT_GT(B.shard->total_remote_filtered_out(), 0u) << "B was sent echo all the same";
+
+  // W writes echo from its own replica: bound writes refuse it, as any path outside W's own.
+  const std::uint64_t refused = r.inbound_rejected();
+  W.app.root()("echo.status").value(std::string("spoofed by W"));
+  run_room(r, cs, 1.0);
+  EXPECT_GT(r.inbound_rejected(), refused) << "the relay refused W's write";
+  EXPECT_EQ(tree_value(r.app, "echo.status"), "up");
+  EXPECT_EQ(tree_value(A.app, "echo.status"), "up");
+
+  // A late joiner subscribing to echo gets it from its admit snapshot (the journal is trimmed).
+  test_client L("L", kinds[0]);
+  L.shard->add_interest("echo");
+  ASSERT_TRUE(L.connect(r));
+  EXPECT_TRUE(run_room(r, cs, 4.0, {}, [&] {
+    return tree_value(L.app, "echo.status") == "up" && tree_number(L.app, "echo.ticks") > 0;
+  })) << "the late joiner never got echo";
+
+  // The document ran, and its own state stayed on the relay.
+  EXPECT_GT(tree_number(r.app, "ui.docs.arisrv.own.ticks"), 0);
+  EXPECT_EQ(tree_value(r.app, "ui.docs.arisrv.own.note"), "the server's own");
+  for (test_client *c : {&A, &B, &W, &L})
+    EXPECT_EQ(c->app.root().findDescendant("ui.docs.arisrv"), nullptr) << c->pid;
 }
 
 // Bound writes (arisrv --bind-writes, on by default). M writes, from its own replica and through
