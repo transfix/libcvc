@@ -493,5 +493,12 @@ TEST(WorldCloudLayer, AStepIsCheap) {
   const double ms =
       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / 50;
   std::printf("cloud automaton: %.3f ms a step over %zu cells\n", ms, L.cells().size());
-  EXPECT_LT(ms, 20.0); // well under a millisecond in a release build; generous for debug builds
+  // Well under a millisecond in a release build. The Debug package lanes measured 25-32 ms a step
+  // on a loaded runner, so unoptimized builds get 100. By the optimizer, not NDEBUG, which a Debug
+  // build can define.
+#if defined(__OPTIMIZE__) || (defined(_MSC_VER) && !defined(_DEBUG))
+  EXPECT_LT(ms, 20.0);
+#else
+  EXPECT_LT(ms, 100.0);
+#endif
 }
