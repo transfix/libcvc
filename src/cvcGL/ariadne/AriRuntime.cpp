@@ -151,6 +151,7 @@ public:
         }
       RealizeOptions options;
       options.assets = &assets_;
+      options.physics_key = "scenes." + scene.id + ".physics"; // beside its nodes' state
       s->realized = realize_scene(*s->sg, scene, prefix, warns, options);
       scenes_.push_back(std::move(s));
     }

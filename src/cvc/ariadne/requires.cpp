@@ -2,6 +2,7 @@
 // program calls; AppRuntime::load applies both.
 
 #include <cvc/ariadne/requires.h>
+#include <cvc/physics/backend.h> // scene.physics: is there an engine
 #include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <cvc/state/state_exec/types.h>
@@ -29,6 +30,13 @@ const std::vector<TokenRule> &rules() {
        [](const HostFacts &f) { return f.scene; }},
       {{"gl.scene.shaders", "the scene runs the document's GLSL (a node's shader: block)"},
        [](const HostFacts &f) { return f.scene_shaders; }},
+      // The world half of a scene runs on every host, headless ones included (scene_world.h):
+      // what this asks is whether its bodies move.
+      {{"scene.physics", "a scene's physics: and its nodes' body:s run, drawn or not (headless "
+                         "too): this build has a physics engine (Jolt)"},
+       [](const HostFacts &) {
+         return cvc::physics::backend_available(cvc::physics::backend::jolt);
+       }},
       {{"gl.ui.shaders", "the UI itself draws GLSL (shader_canvas): a GL window, not a terminal"},
        [](const HostFacts &f) { return f.caps.glsl; }},
       {{"gl.shaders", "both gl.scene.shaders and gl.ui.shaders (name the one you need)"},
