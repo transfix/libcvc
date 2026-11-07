@@ -461,9 +461,13 @@ const char *LIGHT_SUM = "vec4(ambientColor + diffuse + specular, opacity)";
 
 // A receiver: the deck's shade at the base-plane point of the fragment's sun ray, on the direct
 // light. cloudVCWC = view -> world, cloudXf = (wind x, wind y, 1 / period, deck base),
-// cloudSunR = sun.xy / sun.z.
+// cloudSunR = sun.xy / sun.z. The shade is re-composited every REFRESH frames as the clouds
+// change; it crossfades from the last composite (cloudShadePrev) to the newest over the frames
+// to the next (cloudShadeMix 0 -> 1), so the shadows change shape smoothly instead of jumping.
 const char *SHADE_DEC = R"(//VTK::Light::Dec
 uniform highp sampler2D cloudShadeTex;
+uniform highp sampler2D cloudShadePrev;
+uniform float cloudShadeMix;
 uniform mat4 cloudVCWC;
 uniform vec4 cloudXf;
 uniform vec3 cloudSunR;
@@ -471,8 +475,9 @@ uniform float cloudShadeOn;
 float cloudShade(vec3 pVC) {
   if (cloudShadeOn <= 0.0) return 1.0;
   vec3 w = (cloudVCWC * vec4(pVC, 1.0)).xyz;
-  vec2 b = w.xy + (cloudXf.w - w.z) * cloudSunR.xy - cloudXf.xy;
-  return mix(1.0, texture(cloudShadeTex, b * cloudXf.z).r, cloudShadeOn);
+  vec2 uv = (w.xy + (cloudXf.w - w.z) * cloudSunR.xy - cloudXf.xy) * cloudXf.z;
+  float s = mix(texture(cloudShadePrev, uv).r, texture(cloudShadeTex, uv).r, cloudShadeMix);
+  return mix(1.0, s, cloudShadeOn);
 }
 )";
 const char *SHADE_SUM =
@@ -607,6 +612,7 @@ struct SkyRT {
   // Two of each, uploaded in turn, so an upload never waits on the GPU drawing the other.
   vtkSmartPointer<vtkTextureObject> shadeTex[2], farTex[2];
   int shadeAt = 0, farAt = 0;
+  long shadeSwap = 0; // the frame the newest shade went up: its crossfade from the last starts
   Composite shade, far;
   std::vector<float> field;
   long frame = 0;
@@ -1107,8 +1113,9 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
     const bool now = r.fresh;
     r.fresh = false;
     const int S = L.shadow_size(), F = L.far_size();
+    const bool shadeNow = now || !r.shadeWas;
     if (shadeOn && stepComposite(
-                       r.shade, f, r.morph, now || !r.shadeWas, L.cells().size(), S,
+                       r.shade, f, r.morph, shadeNow, L.cells().size(), S,
                        [&L](double m, std::size_t a, std::size_t n, std::vector<float> &acc) {
                          L.add_shadow(m, a, n, acc);
                        },
@@ -1116,6 +1123,10 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
                                 std::vector<unsigned char> &out) {
                          L.shade_rows(acc, r.shadeK, r.shadeFloor, row0, rows, out);
                        })) {
+      // The new composite goes into the other texture; the one shown until now stays as the
+      // crossfade's start (none on the first composite, or one done at once: it just shows).
+      const auto shown = in.tex.find("cloudShadeTex");
+      vtkTextureObject *last = shown != in.tex.end() && !shadeNow ? shown->second.Get() : nullptr;
       vtkTextureObject *tex = r.shadeTex[r.shadeAt ^= 1];
       tex->Create2DFromRaw(S, S, 1, VTK_UNSIGNED_CHAR, r.shade.bytes.data());
       tex->SetWrapS(vtkTextureObject::Repeat);
@@ -1123,8 +1134,11 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
       tex->SetMinificationFilter(vtkTextureObject::Linear);
       tex->SetMagnificationFilter(vtkTextureObject::Linear);
       in.tex["cloudShadeTex"] = tex;
+      in.tex["cloudShadePrev"] = last ? last : tex;
+      r.shadeSwap = f;
     }
     r.shadeWas = shadeOn;
+    in.f["cloudShadeMix"] = float(std::clamp(double(f - r.shadeSwap) / REFRESH, 0.0, 1.0));
     if (stepComposite(
             r.far, f, r.morph, now, L.cells().size(), L.params().far_layers,
             [&L](double m, std::size_t a, std::size_t n, std::vector<float> &acc) {

@@ -212,6 +212,8 @@ public:
   };
   void setSharedShaderInputs(const std::string &key, std::shared_ptr<const ShaderInputs> in);
   bool hasSharedShaderInputs(const std::string &key) const;
+  // The inputs shared under `key` (null if none): what a test reads back.
+  std::shared_ptr<const ShaderInputs> sharedShaderInputs(const std::string &key) const;
 
   // Disable VTK's VBO coordinate shift/scale so `vertexMC` in a custom shader is
   // the mesh's ACTUAL (world/model) coordinates rather than an internally-shifted

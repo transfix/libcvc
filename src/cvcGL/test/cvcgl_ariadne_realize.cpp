@@ -14,7 +14,7 @@
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
-#include <cvc/core/async_lane.h> // field colours: pump the scheduler their overlay tasks run on
+#include <cvc/core/async_lane.h>  // field colours: pump the scheduler their overlay tasks run on
 #include <cvc/core/world_clock.h> // clock test: app.world_clock() drive via tick_scene
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
@@ -53,6 +53,7 @@
 #include <vtkPolyData.h>
 #include <vtkProperty.h>
 #include <vtkRenderer.h>
+#include <vtkTextureObject.h> // the cloud shade's crossfade textures
 
 using cvc::ariadne::Scene;
 using cvc::ariadne::SceneClipPlane;
@@ -1180,6 +1181,40 @@ int main() {
                     .value<double>(),
                 1.0),
         "cloud_sky seeded storm.evolve and storm.orographic");
+    // The shade crossfades: the first composite shows at once; each later one keeps the last as
+    // cloudShadePrev and cloudShadeMix climbs from 0 to 1 over the frames to the next, so the
+    // shadows change shape smoothly rather than jumping every refresh.
+    {
+      cvc::state::instance(app)(cvc::ariadne::resolve_bind("forest", "storm.shadow")).value(1.0);
+      view.render();
+      auto ground = std::dynamic_pointer_cast<cvc::gl::GeometryNode>(sg.getGraphics("terrain"));
+      auto tickSky = [&]() { realized.custom_ticks.back()(view.renderer()); };
+      tickSky();
+      auto in = ground ? ground->sharedShaderInputs("cloud_sky") : nullptr;
+      auto tex = [&](const char *k) -> vtkTextureObject * {
+        return in && in->tex.count(k) ? in->tex.at(k).Get() : nullptr;
+      };
+      auto mix = [&]() {
+        return in && in->f.count("cloudShadeMix") ? in->f.at("cloudShadeMix") : -1.0f;
+      };
+      vtkTextureObject *first = tex("cloudShadeTex");
+      chk(first && tex("cloudShadePrev") == first, "the first shade shows at once");
+      bool swapped = false;
+      for (int k = 0; k < 200 && !swapped; ++k) {
+        tickSky();
+        swapped = tex("cloudShadeTex") != first;
+      }
+      chk(swapped && tex("cloudShadePrev") == first && mix() == 0.0f,
+          "a new shade starts its crossfade from the one shown");
+      bool rising = true;
+      float last = mix();
+      for (int k = 0; k < 30; ++k) {
+        tickSky();
+        rising = rising && mix() > last;
+        last = mix();
+      }
+      chk(rising && last > 0.0f && last < 1.0f, "the crossfade climbs frame by frame");
+    }
   }
 
   // ── generated_world + the fast render path's keys (casts_shadow, opaque, shadow focus) ──────
