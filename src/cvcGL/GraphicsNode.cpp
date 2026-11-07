@@ -1224,10 +1224,28 @@ void GraphicsNode::setVisible(bool visible) {
   if (m_labelActor) {
     runOnMainThread([this, visible]() {
       if (m_labelActor) {
-        m_labelActor->SetVisibility(m_showLabel && visible);
+        m_labelActor->SetVisibility(m_showLabel && visible && ancestorsVisible());
       }
     });
   }
+}
+
+bool GraphicsNode::ancestorsVisible() const {
+  if (m_parent && m_parent->drawsChildrenItself())
+    return true; // an LOD node's rungs stay registered; it shows them by actor visibility
+  for (const GraphicsNode *n = m_parent; n; n = n->m_parent)
+    if (!n->isVisible())
+      return false;
+  return true;
+}
+
+void GraphicsNode::ancestorVisibilityChanged() {
+  if (m_labelActor)
+    runOnMainThread([this]() {
+      if (m_labelActor)
+        m_labelActor->SetVisibility(m_showLabel && isVisibleInHierarchy());
+    });
+  SceneNode::ancestorVisibilityChanged();
 }
 
 bool GraphicsNode::isVisibleInHierarchy() const {

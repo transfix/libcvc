@@ -38,18 +38,15 @@
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
 #include <cvc/core/sliced_task.h>
-#include <cvc/core/world_clock.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/height_field.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/LodGraphicsNode.h> // the props' and the ground's ladders, make_view_params
 #include <cvc/gl/SceneGraph.h>
-#include <cvc/gl/VolumeNode.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/world_nodes.h>
 #include <cvc/image/image.h>
 #include <cvc/volume/bounding_box.h>
-#include <cvc/volume/volume.h>
 #include <cvc/world/building_archetypes.h>
 #include <cvc/world/generated_world.h>
 #include <functional>
@@ -69,7 +66,6 @@ namespace {
 namespace ari = cvc::ariadne;
 namespace world = cvc::world;
 
-constexpr int WATER_NZ = 22;
 // The props' and the ground's LOD budget, as the room view's: the wasm profile coarsens sooner.
 #ifdef __EMSCRIPTEN__
 constexpr cvc::lod::quality_preset kLodPreset = cvc::lod::quality_preset::aggressive;
@@ -161,9 +157,9 @@ struct WorldRT {
   int preset = 0;  // the preset the counts last came from
   int color = 0;   // the colour the shown texture was painted in
   int texture_size = 2048;
-  bool soft = true;     // look: soft (demo3's) or classic (terrain_lab's)
-  int water_stride = 4; // refill the water every this many frames
+  bool soft = true; // look: soft (demo3's) or classic (terrain_lab's)
   long frame = 0;
+  bool shown = true; // the node's visibility, which the parts beside it last followed
   std::shared_ptr<cvc::height_field> field; // published in RealizedScene::height_fields
   std::weak_ptr<GeometryNode> terrain, buildings, roads;
   // The props, a LOD ladder per ground cell (world::generated_world::prop_cells) under the groups
@@ -179,8 +175,10 @@ struct WorldRT {
   std::vector<std::weak_ptr<LodGraphicsNode>> chunks;
   std::vector<int> chunk_want; // each chunk's own choice last frame: its hysteresis history
   std::shared_ptr<const ari::SceneNode> keys; // the authored node, for its mesh keys
-  std::weak_ptr<VolumeNode> water;
-  int water_n = 0;
+  // The water: a surface per chunk that has any, under the group <id>_water (made the first time),
+  // each a ladder on its chunk's rungs that switches with it. Null where a chunk has no water.
+  bool show_water = true;
+  std::vector<std::weak_ptr<LodGraphicsNode>> water;
   std::shared_ptr<WorldJob> job; // the running job, or null
   int task = -1;                 // its sliced task's pid
 
@@ -263,15 +261,6 @@ cvc::image surface_image(int size, const std::vector<unsigned char> &rgb) {
       .flipped_vertical();
 }
 
-cvc::volume water_volume(cvc::app &app, const WorldRT &rt, double t) {
-  const world::generated_world &w = *rt.w;
-  const std::vector<float> f = world::water_field(w, t, rt.water_n, WATER_NZ);
-  const double h = w.params.half_m;
-  return cvc::volume(app, reinterpret_cast<const unsigned char *>(f.data()),
-                     cvc::dimension(rt.water_n, rt.water_n, WATER_NZ), cvc::Float,
-                     cvc::bounding_box(-h, -h, world::water_floor(w), h, h, world::water_top(w)));
-}
-
 void publish_stats(WorldRT &rt) {
   cvc::app &app = *rt.app;
   const world::generated_world &w = *rt.w;
@@ -324,6 +313,18 @@ void style_foliage(GeometryNode &g, bool soft) {
   g.setUseSingleColor(false);
   g.setAmbient(soft ? 0.45 : 0.6);
   g.setDiffuse(0.7);
+}
+// The water surface: its colour is the depth's (world::water_colour, per vertex), with a glint of
+// the sun; it casts no shadow onto its own bed, and it is opaque (the depth colour stands in for
+// what shows through).
+void style_water(GeometryNode &g) {
+  g.setUseSingleColor(false);
+  g.setAmbient(0.45);
+  g.setDiffuse(0.55);
+  g.setSpecular(0.6);
+  g.setSpecularPower(80.0);
+  g.setCastsShadow(false);
+  g.setForceOpaque(true);
 }
 void style_needles(GeometryNode &g) {
   g.setRenderMode(GeometryRenderMode::LINES);
@@ -427,16 +428,24 @@ void share_ground_texture(WorldRT &rt) {
 }
 
 // Replace the last world's ground chunks with rt.w's: a ladder per chunk under the terrain node,
-// each rung styled as the terrain, with the node's mesh keys and its texture.
-void put_terrain_chunks(WorldRT &rt) {
+// each rung styled as the terrain, with the node's mesh keys and its texture; and a water ladder
+// per chunk with water, under <id>_water.
+void put_terrain_chunks(SceneGraph &sg, const std::string &id, WorldRT &rt) {
   auto t = rt.terrain.lock();
   for (const std::weak_ptr<LodGraphicsNode> &c : rt.chunks)
     if (auto n = c.lock(); n && t)
       t->removeGraphicsChild(n);
+  std::shared_ptr<GraphicsNode> waterGroup = sg.getGraphics(id + "_water");
+  for (const std::weak_ptr<LodGraphicsNode> &c : rt.water)
+    if (auto n = c.lock(); n && waterGroup)
+      waterGroup->removeGraphicsChild(n);
   rt.chunks.clear();
   rt.chunk_want.clear();
+  rt.water.clear();
   if (!t)
     return;
+  if (rt.show_water && !waterGroup)
+    waterGroup = sg.addGraphics(id + "_water");
   const world::generated_world &w = *rt.w;
   const bool soft = rt.soft;
   const std::weak_ptr<GeometryNode> ground = t; // weak: the node owns its chunks
@@ -456,6 +465,18 @@ void put_terrain_chunks(WorldRT &rt) {
     pyr.world_error_m = ch.error_m;
     n->setPyramid(pyr);
     rt.chunks.push_back(n);
+    std::shared_ptr<LodGraphicsNode> wn;
+    const bool wet = std::any_of(ch.water.begin(), ch.water.end(),
+                                 [](const cvc::geometry &g) { return !g.const_tris().empty(); });
+    if (waterGroup && wet) {
+      wn = waterGroup->addGraphicsChild<LodGraphicsNode>("chunk" + std::to_string(i));
+      wn->setRungStyle([](GeometryNode &g) { style_water(g); });
+      cvc::lod::mesh_pyramid wp;
+      wp.rungs = ch.water;
+      wp.world_error_m = ch.error_m;
+      wn->setPyramid(wp);
+    }
+    rt.water.push_back(wn);
   }
   rt.chunk_want.assign(rt.chunks.size(), -1);
 }
@@ -488,6 +509,9 @@ int select_terrain_lod(WorldRT &rt, const cvc::lod::view_params &view) {
   for (std::size_t i = 0; i < n; ++i)
     if (auto c = rt.chunks[i].lock(); c && c->selectedRung() != rung[i]) {
       c->setRung(rung[i]);
+      if (i < rt.water.size())
+        if (auto wn = rt.water[i].lock()) // the chunk's water on the same rung as its ground
+          wn->setRung(rung[i]);
       ++changes;
     }
   return changes;
@@ -525,7 +549,7 @@ void apply_world(SceneGraph &sg, const std::string &id, WorldRT &rt,
     style_terrain(*t, rt.soft);
     t->setTexture(surface_image(rt.texture_size, texture), false);
   }
-  put_terrain_chunks(rt);
+  put_terrain_chunks(sg, id, rt);
   *rt.field = *w.terrain; // the published ground follows the world
   const bool soft = rt.soft, arch = w.archetypes;
   put_prop_cells(sg, id, rt);
@@ -533,9 +557,6 @@ void apply_world(SceneGraph &sg, const std::string &id, WorldRT &rt,
                           [soft, arch](GeometryNode &g) { style_buildings(g, soft, arch); });
   rt.roads = put_mesh(sg, id + "_roads", w.roads, rt.roads,
                       [soft](GeometryNode &g) { style_roads(g, soft); });
-  rt.water_n = world::water_resolution(w);
-  if (auto v = rt.water.lock())
-    v->setVolume(water_volume(sg.appContext(), rt, rt.app->world_clock().t()));
   publish_stats(rt);
 }
 
@@ -722,8 +743,7 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
   rt->color = color_from(n.props.str("color", "material"), 0);
   rt->texture_size = std::max(256, std::min(4096, int(n.props.num("texture", 2048.0))));
   rt->soft = n.props.str("look", "soft") != "classic";
-  rt->water_stride = std::max(1, int(n.props.num("water_stride", 4.0)));
-  const bool water = n.props.num("water", 1.0) != 0.0;
+  rt->show_water = n.props.num("water", 1.0) != 0.0;
   rt->library = &find_library(n, warnings);
 
   const std::string pref = sg.getStatePrefix();
@@ -813,21 +833,6 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
     return gn;
   }
   rt->terrain = tnode;
-  if (water) {
-    rt->water_n = world::water_resolution(*rt->w);
-    auto v = sg.addGraphics(n.id + "_water", water_volume(app, *rt, 0.0));
-    if (v) {
-      std::vector<double> col, op;
-      world::water_transfer(0.0, col, op);
-      v->setTransferFunction(col, op);
-      v->setShading(true);
-      v->setAmbient(0.18);
-      v->setDiffuse(0.72);
-      v->setSpecular(0.85);
-      v->setSpecularPower(70.0);
-      rt->water = v;
-    }
-  }
   apply_world(sg, n.id, *rt,
               world::paint_surface(*rt->w, world::surface_color(rt->color), rt->texture_size));
 
@@ -836,6 +841,19 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
   out.custom_ticks.push_back([rt, sgp, id](vtkRenderer *ren) {
     if (rt->terrain.expired())
       return;
+    // The meshes and the water beside the node follow its visibility, so a `visible:` on the node
+    // hides (and shows) the whole world, not only the ground it draws itself. Each follows a change
+    // of the node's, as a child follows its parent's (SceneNode::propagateVisible).
+    if (auto t = rt->terrain.lock()) {
+      const bool shown = t->isVisibleInHierarchy();
+      if (shown != rt->shown) {
+        rt->shown = shown;
+        for (const char *part :
+             {"_props", "_foliage", "_needles", "_buildings", "_roads", "_water"})
+          if (auto g = sgp->getGraphics(id + part))
+            g->setVisible(shown);
+      }
+    }
     // The props' and the ground's LOD for this frame's camera; a caster that changed rung casts a
     // different shadow.
     if (ren && ren->IsActiveCameraCreated()) {
@@ -848,7 +866,7 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
         sgp->invalidateShadowBake();
     }
     cvc::app &app = *rt->app;
-    const long f = rt->frame++;
+    rt->frame++;
     // Commands: Regenerate forces a rebuild, Randomize steps the seed, Stop ends the running job
     // (the world shown stays; the keys keep what was asked, so nothing restarts until one changes).
     const std::string req = ari::read_or<std::string>(app, rt->k.request, std::string());
@@ -905,15 +923,6 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
       if (rt->job->done.load(std::memory_order_acquire))
         apply_world_job(*sgp, id, *rt);
     }
-    // The water rolls on the world clock (Paused freezes it).
-    if (f % rt->water_stride == 0)
-      if (auto v = rt->water.lock()) {
-        const double t = app.world_clock().t();
-        v->updateScalars(world::water_field(*rt->w, t, rt->water_n, WATER_NZ));
-        std::vector<double> col, op;
-        world::water_transfer(t, col, op);
-        v->setTransferFunction(col, op);
-      }
   });
   return gn;
 }

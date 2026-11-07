@@ -70,11 +70,27 @@ struct terrain_chunk {
   std::vector<cvc::geometry> rungs; // rung 0 the full surface; points, normals, uvs, tris
   std::vector<double> error_m;      // each rung's vertical error, non-decreasing; [0] == 0
   std::vector<double> skirt_m;      // each rung's skirt depth (0 for a chunk with no neighbour)
+  std::vector<cvc::geometry> water; // each rung's water surface (make_water_rungs), or empty
 };
 
 // Chunk (row, col) of layout L over hf.
 terrain_chunk make_terrain_chunk(const cvc::height_field &hf, const terrain_chunk_layout &L,
                                  int row, int col);
+
+// The water over chunk `ch`, a surface per rung on that rung's samples: level at water_level_m over
+// every cell with a corner under it, so the terrain, drawn with it, hides it past the shoreline,
+// exactly where the ground rises out of the water whatever the rung. Each vertex is coloured by
+// the water column under it (water_colour). All empty when no cell of the chunk is under water.
+// The water as a surface rather than a volume: for uniform water a closed surface gives the same
+// image (WATER-RENDERING-ROADMAP section 0), at a cost that falls with distance.
+std::vector<cvc::geometry> make_water_rungs(const cvc::height_field &hf,
+                                            const terrain_chunk_layout &L, const terrain_chunk &ch,
+                                            double water_level_m);
+
+// Water `depth_m` deep seen from above, as one colour: the bed's light absorbed per channel along
+// the way down and back (Beer-Lambert, red first, then green, blue last) and the water's own
+// scattered blue filling in, so the shallows are a sandy bed tint, then green, then deep blue.
+cvc::geometry::color_t water_colour(double depth_m);
 
 // Coarsen nothing and refine where needed so that no chunk's rung is more than one off a
 // neighbour's (4-connected): what the skirts are deep enough for. `rung` is row-major,

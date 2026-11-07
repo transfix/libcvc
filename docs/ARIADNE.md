@@ -832,7 +832,10 @@ seam. The chunks share the node's one texture and take its `casts_shadow`, `shad
 rather than lie on it (`cvc::world::road_grade`): each is level across, climbs at most 12% (5% into
 a junction), changes grade gradually and stays above the water, with the ground cut or banked to
 it, so a vehicle drives them without bouncing; every street is two Humvee lanes wide, drawn as
-smooth strips with a dark yellow centre stripe.
+smooth strips with a dark yellow centre stripe. The water is a surface per terrain chunk with any
+under it (`<id>_water`), level at the water line and hidden by the terrain past the shoreline, on
+its chunk's LOD rung, coloured by the depth under it (`cvc::world::water_colour`: the bed absorbed
+red first, so the shallows read sandy, then green, then deep blue); `water: 0` leaves it out.
 
 **The fast render path.** A big static world draws fast when it is a few merged meshes and its
 shadow maps are re-baked rarely and spent where the camera looks. These keys say so
@@ -1952,7 +1955,10 @@ windows:
 drawn only where both are allowed: the parent's tags take the child out of a view that rules them
 out. An untagged node is in every view, so content meant for the main view only needs a tag of its
 own that the other views leave out (`hide: [main_only]`). The main view always draws every node. A
-node hidden with `visible:` is gone from every view.
+node hidden with `visible:` is gone from every view, and so is everything under it: its children,
+the ones a `source: { data }` node draws when its dataset arrives included, keep their own flags
+but draw only while every ancestor is visible. A `generated_world` node's meshes and water beside
+it follow it too.
 
 **Overrides.** `override:` restyles nodes in one view only. Each entry names a node id, a tag, or
 `"*"` (everything), and sets any of `drawstyle` (`surface`, `wireframe`, `points`), `opacity`,

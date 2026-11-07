@@ -187,6 +187,9 @@ protected:
   // Re-applies the rung policy when an ancestor's visibility changed but this
   // node's flag did not.
   void ancestorVisibilityChanged() override;
+  // Its rungs stay registered with the renderer whatever is above; applyRungVisibility shows the
+  // active one by its actor's visibility, from isVisibleInHierarchy().
+  bool drawsChildrenItself() const override { return true; }
 
 private:
   void clearRungs(std::size_t keep = 0); // remove and destroy rungs [keep, n)

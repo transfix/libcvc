@@ -21,7 +21,7 @@
 */
 
 // world_nodes.h — the generated_world Ariadne scene node type: cvc::world::generate_world
-// (inc/cvc/world/generated_world.h) drawn as a handful of merged meshes and a water volume.
+// (inc/cvc/world/generated_world.h) drawn as a handful of merged meshes and its water surfaces.
 //
 //   - node: world
 //     type: generated_world
@@ -40,8 +40,10 @@
 // The node itself is the terrain: a GeometryNode with the surface texture (material, roads,
 // plazas), its cvc::height_field published to RealizedScene::height_fields under the node's id, so
 // `ground: <id>` (forest_trees, cloud_sky, shadows.focus) stands on it. Beside it, top-level nodes
-// <id>_props, _buildings, _roads, _foliage, _needles (merged meshes) and _water (the depth volume
-// under a travelling wave, refilled every `water_stride` frames). A change to a world.* key
+// <id>_props, _buildings, _roads, _foliage, _needles (merged meshes) and _water (a water surface
+// per terrain chunk with water in it, coloured by depth and on its chunk's LOD rung; `water: 0`
+// leaves it out). They follow the node's visibility: a `visible:` on the node hides or shows the
+// whole world. A change to a world.* key
 // regenerates the world in place; a change of world.color only repaints the texture.
 //
 // `look: soft` is demo3's daylight materials (matte ground and concrete); `classic` is

@@ -784,3 +784,76 @@ TEST(WorldGenerated, RoadsAreDriveable) {
   EXPECT_LT(p95(grade), 0.16);
   EXPECT_FALSE(wet);
 }
+
+// Water seen from above: the bed's sandy tint in the shallows, absorbed red first, so it greens and
+// then blues with depth.
+TEST(WorldGenerated, WaterColourDeepensWithDepth) {
+  const auto shallow = water_colour(0.05), mid = water_colour(2.0), deep = water_colour(12.0);
+  EXPECT_GT(shallow[0], shallow[2]) << "a sandy bed shows through the shallows";
+  EXPECT_LT(deep[0], deep[2]) << "deep water is blue";
+  for (int k = 0; k < 3; ++k)
+    EXPECT_GE(shallow[std::size_t(k)], deep[std::size_t(k)]);
+  EXPECT_GT(shallow[0], mid[0]);
+  EXPECT_GT(mid[0], deep[0]);
+}
+
+// A chunk's water: level at the water line over every cell of a rung with a corner under it, each
+// vertex coloured by the water above the bed there; none for a dry chunk.
+TEST(WorldGenerated, WaterRungsCoverTheWetCells) {
+  std::vector<float> h(65 * 65);
+  for (int r = 0; r < 65; ++r)
+    for (int c = 0; c < 65; ++c)
+      h[std::size_t(r) * 65 + c] = float(std::hypot(r - 32.0, c - 32.0) * 0.4 - 5.0); // a pit
+  const cvc::height_field hf(65, 65, 0.0, 0.0, 2.0, 2.0, h);
+  const terrain_chunk_layout L = plan_terrain_chunks(hf, 16, 64);
+  ASSERT_EQ(L.chunk_rows * L.chunk_cols, 1);
+  const terrain_chunk ch = make_terrain_chunk(hf, L, 0, 0);
+  const std::vector<cvc::geometry> water = make_water_rungs(hf, L, ch, 0.0);
+  ASSERT_EQ(int(water.size()), L.rungs);
+  std::size_t wetCells = 0;
+  for (int r = 0; r < 64; ++r)
+    for (int c = 0; c < 64; ++c)
+      wetCells += std::min({hf.height_at(r, c), hf.height_at(r, c + 1), hf.height_at(r + 1, c),
+                            hf.height_at(r + 1, c + 1)}) < 0.0f;
+  EXPECT_EQ(water[0].const_tris().size(), 2 * wetCells);
+  for (std::size_t i = 0; i < water[0].const_points().size(); ++i) {
+    const auto &p = water[0].const_points()[i];
+    EXPECT_EQ(p[2], 0.0);
+    const int c = int(std::lround(p[0] / 2.0)), r = int(std::lround(p[1] / 2.0));
+    EXPECT_EQ(water[0].const_colors()[i], water_colour(-double(hf.height_at(r, c))));
+    EXPECT_EQ(water[0].const_normals()[i][2], 1.0);
+  }
+  for (int k = 1; k < L.rungs; ++k)
+    EXPECT_LT(water[std::size_t(k)].const_tris().size(),
+              water[std::size_t(k - 1)].const_tris().size());
+  for (const cvc::geometry &g : make_water_rungs(hf, L, ch, -10.0)) // below the pit's floor: dry
+    EXPECT_TRUE(g.const_tris().empty());
+}
+
+// Every point of the generated world under the water has a water surface over it.
+TEST(WorldGenerated, TheWaterIsDrawnWhereverItIs) {
+  const generated_world w = generate_world(small_world());
+  const cvc::height_field &hf = *w.terrain;
+  const int cr = hf.cell_rows(), cc = hf.cell_cols();
+  std::vector<char> lid(std::size_t(cr) * cc, 0);
+  for (const terrain_chunk &ch : w.terrain_chunks) {
+    if (ch.water.empty() || ch.water[0].const_tris().empty())
+      continue;
+    const auto &P = ch.water[0].const_points();
+    for (const auto &t : ch.water[0].const_tris()) {
+      const double x = (P[t[0]][0] + P[t[1]][0] + P[t[2]][0]) / 3.0;
+      const double y = (P[t[0]][1] + P[t[1]][1] + P[t[2]][1]) / 3.0;
+      lid[std::size_t(int((y - hf.y0()) / hf.dy())) * cc + int((x - hf.x0()) / hf.dx())] = 1;
+    }
+  }
+  int wet = 0;
+  for (int r = 0; r < cr; ++r)
+    for (int c = 0; c < cc; ++c) {
+      const double x = hf.x0() + (c + 0.5) * hf.dx(), y = hf.y0() + (r + 0.5) * hf.dy();
+      if (w.height(x, y) < w.params.water_level_m) {
+        ++wet;
+        EXPECT_TRUE(lid[std::size_t(r) * cc + c]) << x << "," << y;
+      }
+    }
+  EXPECT_GT(wet, 100);
+}
