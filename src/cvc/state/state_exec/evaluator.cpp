@@ -1,3 +1,4 @@
+#include "builtin_class.h"
 #include "closure_natives.h" // detail::class_constructor
 #include "special_forms.h"
 
@@ -222,6 +223,8 @@ std::optional<value_t> evaluator::caught(const std::exception &e) {
 }
 
 void evaluator::annotate(value_t &exc) {
+  if (detail::is_builtin_class(exc)) // read-only: raised as it is (S0.1)
+    return;
   if (const value_t *tb = field(exc, "traceback"); !tb || tb->is_nil()) {
     std::vector<value_t> lines;
     lines.reserve(raise_trail_.size());
@@ -705,45 +708,17 @@ value_t evaluator::do_defclass(const std::vector<value_t> &args, const environme
     return false;
   };
 
-  // Default init
-  if (!has_method("init")) {
-    auto super_copy = super_cls_dict;
-    native_fn default_init = [super_copy](std::span<const value_t> a) -> value_t {
-      if (super_copy) {
-        // Call parent init
-        for (auto &[k, v] : *super_copy) {
-          if (k == "init") {
-            if (auto *fn = std::get_if<native_fn>(&v.v))
-              return (*fn)(a);
-            break;
-          }
-        }
-      }
-      return a.empty() ? nil_value : a[0];
-    };
-    cls_dict->emplace_back("init", value_t{std::move(default_init)});
-  }
-
-  // Default finalize
-  if (!has_method("finalize")) {
-    auto super_copy = super_cls_dict;
-    native_fn default_finalize = [super_copy](std::span<const value_t> a) -> value_t {
-      if (super_copy) {
-        for (auto &[k, v] : *super_copy) {
-          if (k == "finalize") {
-            if (auto *fn = std::get_if<native_fn>(&v.v))
-              return (*fn)(a);
-            break;
-          }
-        }
-      }
-      return nil_value;
-    };
-    cls_dict->emplace_back("finalize", value_t{std::move(default_finalize)});
-  }
+  // Default init and finalize: the superclass's, else init returns self and finalize nil. These
+  // natives, the methods and the constructor are named types (closure_natives.h), so the cycle
+  // collector sees what they hold: the methods capture the scope the class is bound in.
+  if (!has_method("init"))
+    cls_dict->emplace_back(
+        "init", value_t{native_fn{detail::class_inherited_method{super_cls_dict, "init"}}});
+  if (!has_method("finalize"))
+    cls_dict->emplace_back(
+        "finalize", value_t{native_fn{detail::class_inherited_method{super_cls_dict, "finalize"}}});
 
   // Process method definitions
-  evaluator *self = this;
   for (size_t i = methods_start; i < args.size(); ++i) {
     auto *ml = std::get_if<list_ptr>(&args[i].v);
     if (!ml || !*ml || (**ml).empty())
@@ -753,23 +728,24 @@ value_t evaluator::do_defclass(const std::vector<value_t> &args, const environme
     if (!method_name_sym)
       continue;
 
-    // Create closure for the method
+    // Create closure for the method (do_lambda tracks the scope it captures)
     std::vector<value_t> lambda_args(mlist.begin() + 1, mlist.end());
     auto method_val = do_lambda(lambda_args, env);
     auto method_closure = std::get<closure_ptr>(method_val.v);
 
-    // Wrap closure in a native_fn so it can be called via send
-    auto cls_env = env;
-    native_fn wrapper = [self, method_closure,
-                         cls_env](std::span<const value_t> call_args) -> value_t {
-      std::vector<value_t> v(call_args.begin(), call_args.end());
-      return self->apply_closure(method_closure, v);
+    // Wrapped in a native so it can be called via send: this evaluator applies the closure.
+    const detail::evaluator_method::apply_fn apply = [](void *ev, const closure_ptr &method,
+                                                        std::span<const value_t> call_args) {
+      return static_cast<evaluator *>(ev)->apply_closure(
+          method, std::vector<value_t>(call_args.begin(), call_args.end()));
     };
-    cls_dict->emplace_back(method_name_sym->name, value_t{std::move(wrapper)});
+    cls_dict->emplace_back(
+        method_name_sym->name,
+        value_t{native_fn{detail::evaluator_method{apply, this, std::move(method_closure)}}});
   }
 
   // Create constructor: the stackless evaluator's, so isinstance and catch find the class. Its
-  // init is a native here (the wrapper above), which it calls directly.
+  // init is a native here (a method above, or the inherited one), which it calls directly.
   auto cls_dict_val = value_t{cls_dict};
   native_fn constructor{detail::class_constructor{cls_dict}};
 

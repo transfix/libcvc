@@ -10,6 +10,7 @@
 #define CVC_STATE_EXEC_PROCESS_H
 
 #include <algorithm>
+#include <boost/shared_ptr.hpp>
 #include <chrono>
 #include <climits>
 #include <cstdint>
@@ -23,6 +24,10 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+namespace cvc {
+class state;
+} // namespace cvc
 
 namespace cvc::state_exec {
 
@@ -168,6 +173,9 @@ struct process {
     value_t handler;
     std::string path;
     std::string last_value; // snapshot for change detection
+    /// Where `path` resolves, pinned: a chrooted context's root (td 4.8). Null: the scheduler's
+    /// watch root.
+    boost::shared_ptr<cvc::state> root;
   };
   std::unordered_map<int, watch_handler_entry> watch_handlers;
 

@@ -14,6 +14,7 @@
 #include <boost/thread/thread.hpp>
 #include <cvc/core/app.h>
 #include <cvc/state/state_json.h>
+#include <vector>
 
 namespace cvc {
 
@@ -180,10 +181,41 @@ void append_utf8(std::string &out, unsigned cp) {
   }
 }
 
+// The nodes one of the reader's writes holds (td 4.8): what its walk passes below the target, the
+// node written last, kept until value(), which emits up them, is done, so another thread's
+// state-delete cannot free one meanwhile. They sit on one stack per thread, released leaf first
+// back to where the write found it, so a write allocates nothing once the stack has grown, and a
+// write a slot makes inside another nests (state_exec's chain_pins work the same way).
+class write_pins {
+public:
+  write_pins() : stack_(pin_stack()), mark_(stack_.size()) {}
+  ~write_pins() {
+    // One at a time: a node freed here may run a slot that makes a frame of its own.
+    while (stack_.size() > mark_) {
+      state::state_ptr last = std::move(stack_.back());
+      stack_.pop_back();
+    }
+  }
+  write_pins(const write_pins &) = delete;
+  write_pins &operator=(const write_pins &) = delete;
+
+  std::vector<state::state_ptr> *get() { return &stack_; }
+
+private:
+  static std::vector<state::state_ptr> &pin_stack() {
+    thread_local std::vector<state::state_ptr> stack;
+    return stack;
+  }
+  std::vector<state::state_ptr> &stack_;
+  std::size_t mark_;
+};
+
 } // namespace
 
+// Every live node is owned by a shared_ptr (its app's root, or its parent's child), so the target
+// has one: its writes walk from it (emit).
 state_json_reader::state_json_reader(state &target, std::string_view doc, std::string filename)
-    : keep_(target.weak_from_this().lock()), target_(&target), doc_(doc),
+    : keep_(target.shared_from_this()), target_(&target), doc_(doc),
       filename_(std::move(filename)) {}
 
 void state_json_reader::fail(const char *msg) const {
@@ -367,7 +399,8 @@ void state_json_reader::emit(const std::string &text) {
   if (!applying_ || stack_.empty() || text.empty())
     return;
   const frame &f = stack_.back();
-  (*target_)(f.array ? std::string() : f.key).value(text);
+  write_pins pins; // the node and the hops of a dotted key, held across the write
+  target_->sharedChild(keep_, f.array ? std::string() : f.key, pins.get())->value(text);
   ++applied_;
 }
 

@@ -35,6 +35,7 @@ windows:
         def: true
 
 scene:
+  shadows: { enabled: true, resolution: 2048 }   # soft shadows (softness 2), on in every demo
   nodes:
     - node: bunny
       type: geometry

@@ -141,7 +141,7 @@ catalog:
     unit: scene_view
     binds: "<prefix>.viewers.{view}.camera.*"   # the view's own CameraController
     for: "a second view of the scene in a window: an overview map, another angle, one layer (the nodes whose tags: it shows)"
-    args: { view: scene_view, title: View, id: scene_view, show: "", hide: "", mode: orbit, camera: "", chrome: true, width: 360, height: 270 }   # defaults
+    args: { view: scene_view, title: View, id: scene_view, show: "", hide: "", mode: orbit, camera: "", chrome: true, scene: "", shadows: true, caption: "", width: 360, height: 270 }   # defaults
     note: "the cvcGL `viewport` widget (AriRuntime hosts: arigl, pycvc_gl); a terminal backend shows a placeholder"
   - component: card
     file: card.ari

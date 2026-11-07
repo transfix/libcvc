@@ -1,6 +1,7 @@
 #if defined(_WIN32) && !defined(_CRT_RAND_S)
 #define _CRT_RAND_S // rand_s: the CRT's CSPRNG (RtlGenRandom), for random-token
 #endif
+#include "builtin_class.h"
 #include "closure_body.h"
 
 #include <algorithm>
@@ -14,6 +15,7 @@
 #include <cvc/state/state_exec/stdlib.h>
 #include <cvc/state/state_exec/utf8.h> // SE-1: (length "...") counts codepoints for a string
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #if defined(_WIN32)
@@ -99,6 +101,14 @@ dict_type &as_dict_mut(const value_t &v, const char *name) {
 }
 
 const dict_type &as_dict(const value_t &v, const char *name) { return as_dict_mut(v, name); }
+
+/// The built-in exception classes are read-only (td 5 item 1): `who` may not change `d`, the
+/// dict `v` holds, when it is one.
+void refuse_builtin_class(const value_t &v, const dict_type &d, const char *who) {
+  if (detail::is_builtin_class(d))
+    throw dsl_error("TypeError", std::string(who) + ": built-in class is read-only: " +
+                                     class_name(std::get<dict_ptr>(v.v)));
+}
 
 const std::string &as_string(const value_t &v, const char *name) {
   if (auto *s = std::get_if<std::string>(&v.v))
@@ -598,6 +608,8 @@ value_t builtin_get_attr(std::span<const value_t> args) {
 value_t builtin_set_attr(std::span<const value_t> args) {
   expect_exact(args, 3, "set-attr");
   auto &d = as_dict_mut(args[0], "set-attr");
+  // Refused before track_mutated, so a built-in class never enters a cycle registry.
+  refuse_builtin_class(args[0], d, "set-attr");
   const std::string &key = as_string(args[1], "set-attr");
   if (can_close_cycle(args[2]))
     track_mutated(std::get<dict_ptr>(args[0].v));
@@ -614,6 +626,7 @@ value_t builtin_set_attr(std::span<const value_t> args) {
 value_t builtin_del_attr(std::span<const value_t> args) {
   expect_exact(args, 2, "del-attr");
   auto &d = as_dict_mut(args[0], "del-attr");
+  refuse_builtin_class(args[0], d, "del-attr");
   const std::string &key = as_string(args[1], "del-attr");
   for (auto it = d.begin(); it != d.end(); ++it) {
     if (it->first == key) {
@@ -831,6 +844,19 @@ value_t builtin_random_token(std::span<const value_t> args) {
 // I/O
 // ---------------------------------------------------------------------------
 
+namespace {
+// print writes whole lines (td 4.11): the line is made first, outside the lock, then written with
+// its newline in one call. The lock is held for that write only, never across a data job or DSL
+// code, so lines printed from several threads never interleave. The mutex is never destroyed: a
+// thread can still print during static destruction (a daemon Python thread inside Exec.run).
+void write_print_line(std::string line) {
+  static std::mutex &out = *new std::mutex;
+  line += '\n';
+  std::lock_guard<std::mutex> lock(out);
+  std::cout.write(line.data(), static_cast<std::streamsize>(line.size()));
+}
+} // namespace
+
 value_t builtin_print(std::span<const value_t> args) {
   if (std::any_of(args.begin(), args.end(), is_compound)) {
     // The line goes out once all of it is printed. A string prints quoted here, as to_string
@@ -840,16 +866,17 @@ value_t builtin_print(std::span<const value_t> args) {
     for (auto &a : args)
       parts.push_back(std::holds_alternative<std::string>(a.v) ? value_t{to_string(a)} : a);
     return run_data_job(make_concat_job(std::move(parts), " ", "print"), [](value_t line) {
-      std::cout << std::get<std::string>(line.v) << '\n';
+      write_print_line(std::move(std::get<std::string>(line.v)));
       return nil_value;
     });
   }
+  std::string line;
   for (size_t i = 0; i < args.size(); ++i) {
     if (i > 0)
-      std::cout << ' ';
-    std::cout << to_string(args[i]);
+      line += ' ';
+    line += to_string(args[i]);
   }
-  std::cout << '\n';
+  write_print_line(std::move(line));
   return nil_value;
 }
 

@@ -72,8 +72,20 @@ private:
 
 /// The built-in exception class named `name` (Exception, RuntimeError, TypeError, ValueError,
 /// NameError, KeyError, IndexError, ArithmeticError, MemoryError, ParseError, TimeoutError,
-/// NativeError, PythonError, LockError, DeadlockError, PermissionError), or null.
+/// NativeError, PythonError, LockError, DeadlockError, PermissionError, AssertionError), or null.
+/// The 17 class dicts are one per OS process, shared by every environment, and read-only
+/// (td 5 item 1): set-attr, del-attr and set_field refuse them.
 dict_ptr exception_class(std::string_view name);
+
+/// Whether `dict` (a dict_ptr's get()) is one of the built-in class dicts.
+bool is_builtin_class_dict(const void *dict) noexcept;
+
+/// The built-in class `dict` is a copy of, or null. A snapshot's codec and pycvc carry a class
+/// dict as data, so they make copies; each relinks a copy to the class itself, parents first. A
+/// copy has exactly the class dict's shape: its keys in its order, `__name__` naming the class,
+/// `__super__` the parent's dict itself, and `init` the built-in init or nil (a native function
+/// restored from a snapshot). A user class has an init or a finalize of its own, so it never is.
+dict_ptr builtin_class_of_copy(const std::vector<std::pair<std::string, value_t>> &dict);
 
 /// The built-in exception class names, parents before children.
 const std::vector<std::string> &exception_class_names();

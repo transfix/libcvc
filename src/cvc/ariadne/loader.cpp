@@ -2612,6 +2612,13 @@ SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
     sn.volren.ambient = static_cast<float>(num(vr, "ambient", 0.0));
     sn.volren.resolution_scale = static_cast<float>(num(vr, "resolution_scale", 0.5));
     sn.volren.backend = str(vr, "backend", "cpu");
+    const YAML::Node vsh = vr["shadows"];
+    if (vsh && vsh.IsMap()) {
+      sn.volren.shadows = flag(vsh, "enabled", true);
+      sn.volren.shadow_strength = static_cast<float>(num(vsh, "strength", -1.0));
+    } else {
+      sn.volren.shadows = flag(vr, "shadows", false);
+    }
     sn.volren.tf = parse_scene_tf(ctx, vr["transfer_function"], sn.id);
     const YAML::Node iso = vr["isosurfaces"];
     if (iso && iso.IsSequence())

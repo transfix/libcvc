@@ -7,6 +7,7 @@
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/scheduler.h>
 #include <cvc/state/state_exec/state_value_codec.h> // snapshot / restore
+#include <iterator>
 #include <stdexcept>
 
 namespace cvc::state_exec {
@@ -17,9 +18,46 @@ namespace cvc::state_exec {
 
 scheduler::scheduler(scheduling_policy policy)
     : policy_(policy), evaluator_(builtins::make_default_environment()),
-      procs_(policy != scheduling_policy::round_robin) {}
+      procs_(policy != scheduling_policy::round_robin), idle_(std::make_shared<detail::wakeup>()) {}
 
-scheduler::~scheduler() { home_.reset(); }
+namespace {
+// What a posted command never applied, or whose call threw, tells its done: false (S0.0's
+// contract; a query has no done). done must not throw.
+void refuse_control(control_cmd &cmd) noexcept {
+  if (cmd.done && cmd.what != control_cmd::kind::query)
+    cmd.done(false);
+}
+
+// The start-pinned lookups' hold on a node its host keeps alive (the watch root): a non-owning
+// alias, so a lookup takes no reference on it (td 4.8).
+boost::shared_ptr<cvc::state> host_held(cvc::state *node) {
+  return boost::shared_ptr<cvc::state>(boost::shared_ptr<cvc::state>(), node);
+}
+} // namespace
+
+scheduler::~scheduler() {
+  home_.reset();
+  // Commands posted and never applied: their done gets false, each counted out first. Taken under
+  // the lock, so a post that returned before the destruction began is seen. A done that posts
+  // again (only a done may post to a scheduler being destroyed) is queued for refusal, never
+  // applied, and refused by the next round here: the refusals iterate, and never nest, however
+  // often a done posts again. A done that posts again every time it is refused never ends this.
+  std::vector<std::pair<int, control_cmd>> left;
+  {
+    std::lock_guard<std::mutex> lock(control_mutex_);
+    destroying_ = true;
+    left.swap(controls_);
+  }
+  while (!left.empty()) {
+    for (auto &entry : left) {
+      controls_waiting_.fetch_sub(1, std::memory_order_release);
+      refuse_control(entry.second);
+    }
+    left.clear();
+    std::lock_guard<std::mutex> lock(control_mutex_);
+    left.swap(controls_);
+  }
+}
 
 void scheduler::set_lock_manager(std::shared_ptr<lock_manager> mgr, lock_attach attach) {
   if (home_)
@@ -27,10 +65,8 @@ void scheduler::set_lock_manager(std::shared_ptr<lock_manager> mgr, lock_attach 
       if (p->locks && (!p->locks->holds.empty() || p->locks->ticket))
         throw std::logic_error("set_lock_manager: process " + std::to_string(pid) +
                                " holds or waits for a lock");
-  // The port shares run()'s idle wakeup, made with the first home (protocol 2.3), so a post ends
-  // an idle wait; a replacing home gets the same one.
-  if (!idle_)
-    idle_ = std::make_shared<detail::wakeup>();
+  // The port shares run()'s idle wakeup (protocol 2.3), so a post ends an idle wait; a replacing
+  // home gets the same one.
   // The new home is attached before the old one goes, so a refused attach (lock_attach) leaves
   // the scheduler its home and manager. Both are attached meanwhile, which a manager allows; the
   // old one is destroyed here, before any other member (protocol 5.7).
@@ -41,12 +77,9 @@ void scheduler::set_lock_manager(std::shared_ptr<lock_manager> mgr, lock_attach 
 }
 
 detail::lock_home *scheduler::locks() {
-  if (!home_) {
-    if (!idle_)
-      idle_ = std::make_shared<detail::wakeup>();
+  if (!home_)
     home_ = std::make_unique<detail::lock_home>(std::make_shared<lock_manager>(), lock_ops_,
                                                 policy_, idle_);
-  }
   return home_.get();
 }
 
@@ -126,12 +159,39 @@ const process_ptr &scheduler::no_process() {
 // Settings — state-tree-backed configuration
 // ---------------------------------------------------------------------------
 
-// Helper: read a size_t from a state node, returning nullopt on missing/bad.
-static std::optional<std::size_t> read_size_setting(cvc::state *root, const std::string &path) {
-  auto *node = root->findDescendant(path);
+namespace detail {
+
+std::optional<std::string> setting_value(cvc::state &root, const std::string &path) {
+  const cvc::state::state_ptr node =
+      root.findDescendantShared(cvc::state::state_ptr(cvc::state::state_ptr(), &root), path);
   if (!node)
     return std::nullopt;
-  std::string v = node->value();
+  return node->value();
+}
+
+void publish_setting(cvc::state &root, const std::string &path, const std::string &value) {
+  // The chain below `root`, which the write emits through, let go of leaf first: a node another
+  // thread unlinked meanwhile, whose last owner this is, goes after its descendants.
+  struct leaf_first {
+    std::vector<cvc::state::state_ptr> pins;
+    ~leaf_first() {
+      while (!pins.empty())
+        pins.pop_back();
+    }
+  } chain;
+  const cvc::state::state_ptr node =
+      root.sharedChild(cvc::state::state_ptr(cvc::state::state_ptr(), &root), path, &chain.pins);
+  node->value(value);
+}
+
+} // namespace detail
+
+// Helper: read a size_t from a state node, returning nullopt on missing/bad.
+static std::optional<std::size_t> read_size_setting(cvc::state *root, const std::string &path) {
+  const std::optional<std::string> value = detail::setting_value(*root, path);
+  if (!value)
+    return std::nullopt;
+  const std::string &v = *value;
   if (v.empty())
     return std::nullopt;
   try {
@@ -173,31 +233,37 @@ void scheduler::load_settings() {
   // Publish effective values to per-scheduler subtree
   if (!id_.empty()) {
     std::string base = std::string(sched_prefix) + "." + id_;
-    (*watch_root_)(base + ".max_pending_messages").value(std::to_string(max_pending_messages));
-    (*watch_root_)(base + ".parser.max_depth").value(std::to_string(parse_options_.max_depth));
-    (*watch_root_)(base + ".parser.step_tokens").value(std::to_string(parse_options_.step_tokens));
-    (*watch_root_)(base + ".data.step_nodes").value(std::to_string(data_options_.step_nodes));
-    (*watch_root_)(base + ".limits.max_alloc_bytes").value(std::to_string(max_alloc_bytes_));
-    (*watch_root_)(base + ".limits.heap_check_steps")
-        .value(std::to_string(heap_options_.check_steps));
+    cvc::state &root = *watch_root_;
+    detail::publish_setting(root, base + ".max_pending_messages",
+                            std::to_string(max_pending_messages));
+    detail::publish_setting(root, base + ".parser.max_depth",
+                            std::to_string(parse_options_.max_depth));
+    detail::publish_setting(root, base + ".parser.step_tokens",
+                            std::to_string(parse_options_.step_tokens));
+    detail::publish_setting(root, base + ".data.step_nodes",
+                            std::to_string(data_options_.step_nodes));
+    detail::publish_setting(root, base + ".limits.max_alloc_bytes",
+                            std::to_string(max_alloc_bytes_));
+    detail::publish_setting(root, base + ".limits.heap_check_steps",
+                            std::to_string(heap_options_.check_steps));
     // Read live at every charge; this publishes what it is now.
-    const double rate = async_steps_per_cpu_ms_from_state(*watch_root_, id_);
-    publish_async_steps_per_cpu_ms(*watch_root_, id_, rate);
+    const double rate = async_steps_per_cpu_ms_from_state(root, id_);
+    publish_async_steps_per_cpu_ms(root, id_, rate);
     published_rate_ = rate;
-    (*watch_root_)(base + ".policy")
-        .value(policy_ == scheduling_policy::round_robin ? "round_robin"
-               : policy_ == scheduling_policy::priority  ? "priority"
-                                                         : "priority_rr");
+    detail::publish_setting(root, base + ".policy",
+                            policy_ == scheduling_policy::round_robin ? "round_robin"
+                            : policy_ == scheduling_policy::priority  ? "priority"
+                                                                      : "priority_rr");
   }
 }
 
 // A non-negative decimal number ("1000", "0.5", ".25"), read without the C locale's help; nullopt
 // for anything else.
 static std::optional<double> read_rate_setting(cvc::state *root, const std::string &path) {
-  auto *node = root->findDescendant(path);
-  if (!node)
+  const std::optional<std::string> value = detail::setting_value(*root, path);
+  if (!value)
     return std::nullopt;
-  const std::string v = node->value();
+  const std::string &v = *value;
   double whole = 0.0, scale = 1.0;
   bool digits = false, point = false;
   for (const char c : v) {
@@ -221,10 +287,10 @@ static std::optional<double> read_rate_setting(cvc::state *root, const std::stri
 scheduling_policy policy_from_state(cvc::state &root, scheduling_policy fallback, bool *unknown) {
   if (unknown)
     *unknown = false;
-  const cvc::state *node = root.findDescendant("state_exec.policy");
-  if (!node)
+  const std::optional<std::string> value = detail::setting_value(root, "state_exec.policy");
+  if (!value)
     return fallback;
-  const std::string v = const_cast<cvc::state *>(node)->value();
+  const std::string &v = *value;
   if (v.empty())
     return fallback;
   if (v == "round_robin")
@@ -255,9 +321,10 @@ void publish_async_steps_per_cpu_ms(cvc::state &root, const std::string &schedul
     return;
   char buf[32];
   std::snprintf(buf, sizeof buf, "%.17g", rate);
-  root(std::string(scheduler::sched_prefix) + "." + scheduler_id +
-       ".effective.async_steps_per_cpu_ms")
-      .value(buf);
+  detail::publish_setting(root,
+                          std::string(scheduler::sched_prefix) + "." + scheduler_id +
+                              ".effective.async_steps_per_cpu_ms",
+                          buf);
 }
 
 double scheduler::async_steps_per_cpu_ms(const process &proc) {
@@ -583,7 +650,7 @@ int scheduler::step_once() {
     chain_valid_ = false; // the posts are no step's time
   }
   // Commands posted from other threads (post_control), between steps.
-  if (control_pending_.load(std::memory_order_acquire))
+  if (controls_waiting_.load(std::memory_order_acquire) != 0)
     apply_controls();
   // Wake sleeping processes (and timed waits) whose deadline has passed; time out the lock waits
   // whose deadline passed (a program with no timer pays nothing for them).
@@ -633,9 +700,20 @@ std::unordered_map<int, value_t> scheduler::run(std::optional<uint64_t> max_step
 }
 
 uint64_t scheduler::run_steps(std::optional<uint64_t> max_steps, std::optional<double> max_time) {
-  running_ = true;
-  stop_requested_ = false;
+  // A stop() from before this run is discarded. The clear comes before the release that
+  // publishes the run, so a stop() made once is_running() reads true is seen (td B17).
+  stop_requested_.store(false, std::memory_order_relaxed);
+  running_.store(true, std::memory_order_release);
   chain_valid_ = false;
+  // However the run ends (a step's exception too: a throwing on_complete), it is over.
+  struct run_end {
+    std::atomic<bool> &running;
+    bool &chain_valid;
+    ~run_end() {
+      running.store(false, std::memory_order_release);
+      chain_valid = false;
+    }
+  } end_of_run{running_, chain_valid_};
   uint64_t steps = 0; // the loop's iterations, idle ones included (max_steps counts them)
   uint64_t taken = 0; // the process steps among them
   // max_time is a time_budget: the run's own time, not time its thread spent descheduled.
@@ -645,7 +723,13 @@ uint64_t scheduler::run_steps(std::optional<uint64_t> max_steps, std::optional<d
     budget->start();
   }
 
-  while (!stop_requested_ && has_runnable()) {
+  while (!stop_requested_.load(std::memory_order_relaxed)) {
+    // Commands posted from other threads first (S0.7): a resume may make the only process
+    // runnable, and a kill may end the last one.
+    if (controls_waiting_.load(std::memory_order_acquire) != 0)
+      apply_controls();
+    if (!has_runnable())
+      break;
     if (max_steps && steps >= *max_steps)
       break;
     if (budget && budget->spent(now_for_step()))
@@ -659,9 +743,6 @@ uint64_t scheduler::run_steps(std::optional<uint64_t> max_steps, std::optional<d
     if (!idle_wait(max_steps, steps, budget ? &*budget : nullptr))
       break;
   }
-
-  running_ = false;
-  chain_valid_ = false;
   return taken;
 }
 
@@ -694,16 +775,20 @@ bool scheduler::idle_wait(std::optional<uint64_t> max_steps, uint64_t &steps, ti
       budget->start(now);
     return false;
   }
-  if (!idle_)
-    idle_ = std::make_shared<detail::wakeup>();
-  // stop() may come meanwhile (from another thread, a signal handler): checked every 10 ms. A
-  // sleeper's or a timed wait's deadline is waited for precisely, the budget's end need not be.
-  // A post to the lock port (another home's wake or relevel) ends the wait: it is tested before
-  // each slice, and its notify() ends the slice it lands in (protocol 2.3, 5.9).
+  // stop() may come meanwhile, from another thread: it notifies the wait, and the flag is also
+  // checked every 10 ms. A sleeper's or a timed wait's deadline is waited for precisely, the
+  // budget's end need not be. A post to the lock port (another home's wake or relevel) or to
+  // post_control ends the wait: each is tested before each slice, and its notify() ends the slice
+  // it lands in (protocol 2.3, 5.9; td 4.12).
   constexpr auto kStopCheck = std::chrono::milliseconds(10);
   const bool for_timer = next && *next == until;
-  const auto posted = [this] { return home_ && home_->port_pending(); };
-  for (clock::time_point t = now; !stop_requested_ && t < until && !posted(); t = clock::now()) {
+  const auto posted = [this] {
+    return controls_waiting_.load(std::memory_order_acquire) != 0 ||
+           (home_ && home_->port_pending());
+  };
+  for (clock::time_point t = now;
+       !stop_requested_.load(std::memory_order_relaxed) && t < until && !posted();
+       t = clock::now()) {
     const clock::time_point slice = until - t > kStopCheck ? t + kStopCheck : until;
     idle_->wait_until(slice, for_timer && slice == until);
   }
@@ -716,11 +801,18 @@ bool scheduler::idle_wait(std::optional<uint64_t> max_steps, uint64_t &steps, ti
   if (max_steps && steps_left > 1)
     steps += std::min(static_cast<uint64_t>(waited / kIdleStepSeconds), steps_left - 1);
   // Only message or lock waiters: the budget ran out or stop() came, unless a post ended the wait
-  // (run() then steps again, and step_once applies it).
+  // (run()'s loop then applies it).
   return next.has_value() || posted();
 }
 
-void scheduler::stop() { stop_requested_ = true; }
+void scheduler::stop() {
+  // Any thread. The notify ends an idle wait at once (td 4.12); the wait's 10 ms slices are left
+  // as a fallback. The wakeup is held here before the store: once a run sees the flag it may
+  // return, and its owner destroy the scheduler, while this call still notifies.
+  const std::shared_ptr<detail::wakeup> idle = idle_;
+  stop_requested_.store(true, std::memory_order_release);
+  idle->notify();
+}
 
 bool scheduler::has_runnable() const {
   // Ready or running, or waiting with a wake_time (a sleeper becomes runnable at its deadline),
@@ -739,18 +831,25 @@ void scheduler::queue_watch_event(int pid, process::watch_event evt) {
 
 void scheduler::register_watch_handler(int pid, int watch_id, value_t handler,
                                        const std::string &path) {
+  register_watch_handler(pid, watch_id, std::move(handler), path, nullptr);
+}
+
+void scheduler::register_watch_handler(int pid, int watch_id, value_t handler,
+                                       const std::string &path,
+                                       boost::shared_ptr<cvc::state> root) {
   auto it = procs_.all().find(pid);
   if (it == procs_.all().end())
     return;
-  // Capture current value so the first change can be detected by polling.
+  // Capture current value so the first change can be detected by polling. The path resolves
+  // under the watch's own root when it has one (td 4.8), else under the watch root.
   std::string initial;
-  if (watch_root_) {
-    auto *node = watch_root_->findDescendant(path);
-    if (node)
+  // Start-pinned: the entry holds its root, the host the watch root.
+  if (const boost::shared_ptr<cvc::state> under = root ? root : host_held(watch_root_))
+    if (const boost::shared_ptr<cvc::state> node = under->findDescendantShared(under, path))
       initial = node->value();
-  }
-  it->second->watch_handlers[watch_id] = {std::move(handler), path, initial};
+  it->second->watch_handlers[watch_id] = {std::move(handler), path, initial, std::move(root)};
   procs_.update(*it->second);
+  watch_roots_.invalidate();
 }
 
 void scheduler::unregister_watch_handler(int pid, int watch_id) {
@@ -759,14 +858,23 @@ void scheduler::unregister_watch_handler(int pid, int watch_id) {
     return;
   it->second->watch_handlers.erase(watch_id);
   procs_.update(*it->second);
+  watch_roots_.invalidate();
 }
 
-void scheduler::set_watch_root(cvc::state *root) {
-  if (root != watch_root_ && tree_changes_.root())
-    tree_changes_.watch(root); // counted afresh (a new root counts as a change)
-  if (root != watch_root_)
+void scheduler::set_watch_root(cvc::state *root) { set_watch_root(root, nullptr); }
+
+void scheduler::set_watch_root(cvc::state *root, boost::shared_ptr<cvc::state> pin) {
+  if (root != watch_root_) {
+    if (tree_changes_.root())
+      tree_changes_.watch(root); // counted afresh (a new root counts as a change)
+    settings_changes_.clear();   // the node it holds is the old root's
     rate_valid_ = false;
+    watch_roots_.invalidate(); // an entry whose root this is now counts under it
+  }
   watch_root_ = root;
+  // A host keeps its root alive; one a step gave is kept here (R0-mid). The old hold goes last,
+  // once nothing is connected to what it held.
+  watch_root_pin_.swap(pin);
 }
 
 // ---------------------------------------------------------------------------
@@ -774,31 +882,49 @@ void scheduler::set_watch_root(cvc::state *root) {
 // ---------------------------------------------------------------------------
 
 void scheduler::poll_watches() {
-  // Only the processes with watches, and only when the tree under the watch root changed since
-  // the last poll (a write anywhere under it counts: tree_changes). A value the poll finds
-  // changed queues a watch event, as it always did.
-  if (!watch_root_)
-    return;
-  if (procs_.watchers().empty()) {
-    if (tree_changes_.root()) {
+  // Only the processes with watches, and only the watches under a root whose tree changed since
+  // the last poll (a write anywhere under it counts: tree_changes). A watch resolves under its
+  // own root (a chrooted context's) or the watch root, and each root is counted on its own
+  // (td 4.8, S0.5). A value the poll finds changed queues a watch event, as it always did.
+  const std::vector<process *> &watchers = procs_.watchers();
+  if (watchers.empty()) {
+    if (tree_changes_.root() || !watch_roots_.empty()) {
       tree_changes_.watch(nullptr); // no slot on the tree while nothing watches it
+      watch_roots_.clear();
       chain_valid_ = false;
     }
     return;
   }
-  if (tree_changes_.root() != watch_root_) {
-    tree_changes_.watch(watch_root_);
+  if (watch_roots_.sync(watchers, watch_root_))
+    chain_valid_ = false; // connecting is no step's time
+  cvc::state *const counted = watch_roots_.uses_main() ? watch_root_ : nullptr;
+  if (tree_changes_.root() != counted) {
+    tree_changes_.watch(counted);
     watch_seen_ = tree_changes_.count() - 1; // poll once now: changes before it weren't counted
     chain_valid_ = false;                    // connecting is no step's time
   }
-  const uint64_t seen = tree_changes_.count();
-  if (seen == watch_seen_)
+  bool main_moved = false;
+  if (counted) {
+    const uint64_t seen = tree_changes_.count();
+    main_moved = seen != watch_seen_;
+    watch_seen_ = seen;
+  }
+  const bool roots_moved = watch_roots_.poll();
+  if (!main_moved && !roots_moved)
     return;
-  watch_seen_ = seen;
   chain_valid_ = false; // the reads below are no step's time
-  for (process *proc : procs_.watchers()) {
+  const boost::shared_ptr<cvc::state> held_root = host_held(watch_root_);
+  for (process *proc : watchers) {
     for (auto &[wid, entry] : proc->watch_handlers) {
-      auto *node = watch_root_->findDescendant(entry.path);
+      cvc::state *const root = entry.root ? entry.root.get() : watch_root_;
+      if (!root || !(root == watch_root_ ? main_moved : watch_roots_.moved(root)))
+        continue;
+      ++watch_polls_;
+      // Pinned while it is read: another thread may delete it meanwhile (td 4.8). The lookup is
+      // start-pinned: the entry holds its own root, the host the watch root, so it takes no
+      // reference on the root.
+      const boost::shared_ptr<cvc::state> &start = entry.root ? entry.root : held_root;
+      const boost::shared_ptr<cvc::state> node = start->findDescendantShared(start, entry.path);
       if (!node)
         continue;
       std::string cur = node->value();
@@ -809,6 +935,76 @@ void scheduler::poll_watches() {
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// detail::watch_roots
+// ---------------------------------------------------------------------------
+
+namespace detail {
+
+bool watch_roots::sync(const std::vector<process *> &watchers, const cvc::state *watch_root) {
+  // The entries change only through register/unregister (invalidate()) or a watching process
+  // ending, which leaves the watchers: anything else finds nothing to do here.
+  if (!stale_ && watchers.size() == watchers_)
+    return false;
+  stale_ = false;
+  watchers_ = watchers.size();
+  uses_main_ = false;
+  bool changed = false;
+  for (auto &[node, s] : slots_)
+    s->used = false;
+  for (const process *proc : watchers) {
+    for (const auto &[wid, entry] : proc->watch_handlers) {
+      if (!entry.root || entry.root.get() == watch_root) {
+        uses_main_ = true;
+        continue;
+      }
+      std::unique_ptr<slot> &s = slots_[entry.root.get()];
+      if (!s) {
+        s = std::make_unique<slot>();
+        s->root = entry.root;
+        s->changes.watch(entry.root.get());
+        s->seen = s->changes.count() - 1; // read once now: changes before it weren't counted
+        changed = true;
+      }
+      s->used = true;
+    }
+  }
+  for (auto it = slots_.begin(); it != slots_.end();) {
+    if (it->second->used) {
+      ++it;
+    } else {
+      it = slots_.erase(it); // the last entry under it went: so does its counter
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+bool watch_roots::poll() {
+  bool any = false;
+  for (auto &[node, s] : slots_) {
+    const uint64_t seen = s->changes.count();
+    s->moved = seen != s->seen;
+    s->seen = seen;
+    any = any || s->moved;
+  }
+  return any;
+}
+
+bool watch_roots::moved(const cvc::state *root) const {
+  const auto it = slots_.find(root);
+  return it != slots_.end() && it->second->moved;
+}
+
+void watch_roots::clear() {
+  slots_.clear();
+  stale_ = true;
+  uses_main_ = false;
+  watchers_ = 0;
+}
+
+} // namespace detail
 
 // ---------------------------------------------------------------------------
 // Signal handling
@@ -1347,12 +1543,17 @@ void scheduler::note_priority_clamped() {
 }
 
 bool scheduler::post_control(int pid, control_cmd cmd) {
-  // Any thread: queued, and applied at the top of the next step (apply_controls), on the
-  // scheduler's thread. The posting thread may not read procs_, so an unknown pid is found, and
-  // ignored, there. An idle run() is not woken: it applies the command once its wait ends.
+  // Any thread: queued, and applied at the top of the next step or run() iteration
+  // (apply_controls), on the scheduler's thread. The posting thread may not read procs_, so an
+  // unknown pid is found, and refused, there. An idle run() wakes (td 4.12). The wait is notified
+  // under the lock: once the poster lets go of it, it touches the scheduler no more, so a
+  // scheduler thread that applies this post may destroy the scheduler.
   std::lock_guard<std::mutex> lock(control_mutex_);
   controls_.emplace_back(pid, std::move(cmd));
-  control_pending_.store(true, std::memory_order_release);
+  controls_waiting_.fetch_add(1, std::memory_order_release);
+  if (destroying_)
+    return false; // a done the destructor calls posted this: the destructor refuses it next
+  idle_->notify();
   return true;
 }
 
@@ -1360,21 +1561,88 @@ void scheduler::apply_controls() {
   std::vector<std::pair<int, control_cmd>> controls;
   {
     std::lock_guard<std::mutex> lock(control_mutex_);
-    controls.swap(controls_);
-    control_pending_.store(false, std::memory_order_relaxed);
+    controls.swap(controls_); // still counted as waiting, each until it is applied or refused
   }
   chain_valid_ = false; // a query's time is no step's
-  for (auto &[pid, cmd] : controls) {
+  // One at a time, in the order posted (S0.7). A kill can throw (its locks' release, a tree
+  // write's slots): the command that threw is refused, and the rest go back to the front of the
+  // queue, ahead of what was posted since, before the exception propagates. None is lost.
+  std::size_t next = 0;
+  bool counted_out = false; // the command being applied no longer counts as waiting
+  try {
+    while (next < controls.size()) {
+      auto &[pid, cmd] = controls[next++];
+      counted_out = false;
+      apply_control(pid, cmd, counted_out);
+    }
+  } catch (...) {
+    if (!counted_out)
+      controls_waiting_.fetch_sub(1, std::memory_order_release);
+    refuse_control(controls[next - 1].second); // unless its done was called already
+    if (next < controls.size()) {
+      try { // back in the queue: still waiting
+        std::lock_guard<std::mutex> lock(control_mutex_);
+        controls_.insert(controls_.begin(), std::make_move_iterator(controls.begin() + next),
+                         std::make_move_iterator(controls.end()));
+      } catch (...) { // no memory to queue them again: refused rather than lost
+        for (std::size_t i = next; i < controls.size(); ++i) {
+          controls_waiting_.fetch_sub(1, std::memory_order_release);
+          refuse_control(controls[i].second);
+        }
+      }
+    }
+    throw;
+  }
+}
+
+void scheduler::apply_control(int pid, control_cmd &cmd, bool &counted_out) {
+  // The command stops counting as waiting once its call is made, before its done hears what the
+  // call returned (a query has no done); `counted_out` tells the batch it was.
+  const auto settle = [this, &cmd, &counted_out](bool result) {
+    controls_waiting_.fetch_sub(1, std::memory_order_release);
+    counted_out = true;
+    if (cmd.done && cmd.what != control_cmd::kind::query) {
+      // Taken from the command first: a done that throws (against its contract) is not called
+      // again by the refusal of the command that threw.
+      const std::function<void(bool)> done = std::move(cmd.done);
+      cmd.done = nullptr;
+      done(result);
+    }
+  };
+  bool applied = false;
+  try {
     switch (cmd.what) {
-    case control_cmd::kind::set_priority:
-      set_priority(pid, cmd.value); // the host path, unchecked (design 7.4); false for a gone pid
-      break;
     case control_cmd::kind::query:
       if (cmd.query)
         cmd.query(*this);
       break;
+    case control_cmd::kind::set_priority:
+      applied = set_priority(pid, cmd.value); // the host path, unchecked (design 7.4)
+      break;
+    case control_cmd::kind::kill:
+      applied = kill(pid); // killed_by_user
+      break;
+    case control_cmd::kind::pause:
+      applied = pause(pid);
+      break;
+    case control_cmd::kind::resume:
+      applied = resume(pid);
+      break;
+    case control_cmd::kind::signal:
+      applied = send_signal(pid, cmd.signal); // "SIGKILL" kills
+      break;
     }
+  } catch (...) {
+    // A kill (or a SIGKILL) that throws has still killed its process (kill_process; R0-final), and
+    // its done hears that. Any other command that throws is refused, done(false), by the batch.
+    if (cmd.what == control_cmd::kind::kill || cmd.what == control_cmd::kind::signal) {
+      const process *const p = procs_.find(pid);
+      if (p && p->status == process_status::killed)
+        settle(true);
+    }
+    throw;
   }
+  settle(applied);
 }
 
 bool scheduler::set_max_steps(int pid, uint64_t max_steps) {

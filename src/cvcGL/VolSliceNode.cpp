@@ -9,9 +9,14 @@
 #include <cvc/volslice/slicer.h>
 #include <vtkActor.h>
 #include <vtkCamera.h>
+#include <vtkCellArray.h>
+#include <vtkFloatArray.h>
 #include <vtkMapper.h>
 #include <vtkMatrix4x4.h>
+#include <vtkNew.h>
 #include <vtkOpenGLRenderWindow.h>
+#include <vtkPoints.h>
+#include <vtkPolyData.h>
 #include <vtkPolyDataMapper.h>
 #include <vtkPropCollection.h>
 #include <vtkProperty.h>
@@ -402,6 +407,102 @@ void VolSliceNode::depthSortSliceProps(vtkRenderer *renderer,
       p->UnRegister(renderer);
     }
   }
+}
+
+// local -> clip for `renderer`'s active camera, with clip z flipped for the slicer (see tick()).
+cvc::volslice::mat4 VolSliceNode::localToClip(vtkRenderer *renderer) const {
+  vtkCamera *cam = renderer->GetActiveCamera();
+  const double aspect = renderer->GetTiledAspectRatio();
+  cvc::volslice::mat4 worldToClip =
+      to_mat4(cam->GetCompositeProjectionTransformMatrix(aspect, -1, 1));
+  worldToClip.m[8] = -worldToClip.m[8];
+  worldToClip.m[9] = -worldToClip.m[9];
+  worldToClip.m[10] = -worldToClip.m[10];
+  worldToClip.m[11] = -worldToClip.m[11];
+  return worldToClip * to_mat4(getWorldTransform());
+}
+
+vtkActor *VolSliceNode::viewProp(vtkRenderer *view) {
+  if (!view || !view->GetActiveCamera() || !hasVolume())
+    return nullptr;
+  m_views.erase(
+      std::remove_if(m_views.begin(), m_views.end(), [](const ViewSlices &v) { return !v.view; }),
+      m_views.end());
+  ViewSlices *vs = nullptr;
+  for (ViewSlices &v : m_views)
+    if (v.view.GetPointer() == view)
+      vs = &v;
+  if (!vs) {
+    ViewSlices v;
+    v.view = view;
+    v.poly = vtkSmartPointer<vtkPolyData>::New();
+    v.mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+    v.mapper->SetInputData(v.poly);
+    v.mapper->ScalarVisibilityOff();
+    // The vertex shader reads the true model coordinate (see the constructor).
+    v.mapper->SetVBOShiftScaleMethod(vtkPolyDataMapper::ShiftScaleMethodType::DISABLE_SHIFT_SCALE);
+    v.actor = vtkSmartPointer<vtkActor>::New();
+    v.actor->SetMapper(v.mapper);
+    v.actor->SetShaderProperty(actor()->GetShaderProperty()); // the sampling shader
+    v.actor->SetProperty(actor()->GetProperty());             // unlit white, as the node's
+    v.actor->ForceTranslucentOn();
+    v.actor->SetPickable(false);
+    observeShaderInputs(v.mapper); // the volume and LUT textures, the uniforms
+    m_views.push_back(std::move(v));
+    vs = &m_views.back();
+  }
+  if (view->GetUseOIT())
+    view->UseOITOff(); // sequential blending, as addToRenderer (see the header)
+  // The slices are in the node's own frame, as its own actor's are: place it as that one is.
+  vtkActor *own = actor();
+  vs->actor->SetPosition(own->GetPosition());
+  vs->actor->SetOrientation(own->GetOrientation());
+  vs->actor->SetScale(own->GetScale());
+  vs->actor->SetOrigin(own->GetOrigin());
+  vs->actor->SetUserMatrix(own->GetUserMatrix());
+  vs->actor->SetUserTransform(own->GetUserTransform());
+  vs->actor->SetVisibility(actor()->GetVisibility());
+
+  const cvc::volslice::mat4 l2c = localToClip(view);
+  if (l2c.m == vs->applied && vs->settings == m_settingsVersion && vs->volume == m_volumeVersion)
+    return vs->actor;
+  const cvc::volslice::render_settings s = m_stateSettings->get();
+  cvc::volslice::box3d box;
+  {
+    std::lock_guard<std::mutex> lock(m_volumeMutex);
+    const cvc::bounding_box bb = m_volume->boundingBox();
+    box.min = {bb.minx, bb.miny, bb.minz};
+    box.max = {bb.maxx, bb.maxy, bb.maxz};
+  }
+  const cvc::volslice::slice_geometry geo = cvc::volslice::compute_slices(l2c, box, s.slices);
+  vtkNew<vtkPoints> pts;
+  pts->SetDataTypeToFloat();
+  pts->SetNumberOfPoints(static_cast<vtkIdType>(geo.vertices()));
+  for (std::size_t v = 0; v < geo.vertices(); ++v)
+    pts->SetPoint(static_cast<vtkIdType>(v), geo.positions[v * 3 + 0], geo.positions[v * 3 + 1],
+                  geo.positions[v * 3 + 2]);
+  vtkNew<vtkCellArray> tris; // fans, back to front: the draw order is the compositing
+  for (std::size_t p = 0; p < geo.planes(); ++p) {
+    const auto off = geo.fan_offset[p], cnt = geo.fan_count[p];
+    for (std::uint32_t v = 1; v + 1 < cnt; ++v) {
+      const vtkIdType t[3] = {static_cast<vtkIdType>(off), static_cast<vtkIdType>(off + v),
+                              static_cast<vtkIdType>(off + v + 1)};
+      tris->InsertNextCell(3, t);
+    }
+  }
+  vs->poly->SetPoints(pts);
+  vs->poly->SetPolys(tris);
+  vs->poly->Modified();
+  vs->applied = l2c.m;
+  vs->settings = m_settingsVersion;
+  vs->volume = m_volumeVersion;
+  return vs->actor;
+}
+
+void VolSliceNode::releaseViewProp(vtkRenderer *view) {
+  m_views.erase(std::remove_if(m_views.begin(), m_views.end(),
+                               [view](const ViewSlices &v) { return !v.view || v.view == view; }),
+                m_views.end());
 }
 
 bool VolSliceNode::tick() {

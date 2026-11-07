@@ -216,12 +216,15 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
 // Opt-in realize behaviour. The defaults are the four-argument realize_scene, exactly.
 // The geometry of a document's assets (`assets:`), each read and fitted once: what every node whose
 // source is { asset: <id> } draws, in every scene that shares the cache. cvc::geometry is
-// copy-on-write, so those nodes share its buffers; each node's GeometryNode still builds its own
-// VTK arrays from them. Keep one per document, across its scenes (AriRuntime's scene adapter does).
+// copy-on-write, so those nodes share its buffers, and they share the VTK arrays built from them
+// too: the first node on an asset builds them, the others take them (GeometryNode::shareArraysFrom,
+// copy-on-write). Keep one per document, across its scenes (AriRuntime's scene adapter does).
 struct SceneAssetCache {
   std::map<std::string, cvc::geometry> geometry;
   std::set<std::string> failed; // read once and failed: not read again, nor warned again
   std::size_t reads = 0;        // how many assets have been read (for tests)
+  // Each asset's first node: the one whose VTK arrays the asset's other nodes draw from.
+  std::map<std::string, std::weak_ptr<GeometryNode>> donors;
 };
 
 struct RealizeOptions {

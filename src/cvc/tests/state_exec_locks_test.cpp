@@ -2710,11 +2710,10 @@ TEST_P(Locks, LW05_PauseHolderAndWaiter) {
 // context's pid says (a host's placeholder: pycvc's 0, Ariadne's -1), and the child keeps the
 // parent's owner, so kill_owner reaps it.
 //
-// Known (not a lock bug; reported): a DSL (fork) forks mid-step, and the child's copied stack
-// still applies (fork), so the child forks again at its first step, and so on without end; its
-// frames also share the parent's scopes (scheduler::fork copies the stack, not the environments,
-// and the child's 0 goes to state.result, which no frame reads). So the child is checked and
-// reaped before it ever steps.
+// The child's (fork) returns 0 and it goes on from there (td B28:
+// LocksReview.ForkInAStepReturnsZeroInTheChild), with its own copies of the parent's scopes
+// (detail::fork_scopes: a set in the child never lands in the parent's). Here the child is checked
+// and reaped before it steps.
 TEST_P(Locks, LW06_Fork) {
   const std::size_t before = w.base().list_processes().size();
   EXPECT_EQ(
@@ -2909,9 +2908,8 @@ TEST_P(Locks, LW10_GeneratorBodies) {
                                (set g nil)
                                r))")),
       "generator");
-  // Shared across a fork (made by the host between steps: a DSL (fork) can't make a usable
-  // child, see LW06_Fork): whichever process steps the generator first is refused, and the
-  // other finds it ended.
+  // Shared across a fork (made here by the host between steps, which puts the fork at a known
+  // point): whichever process steps the generator first is refused, and the other finds it ended.
   const int p = w.submit(R"((begin (set g (generator (lambda () (with-lock "k" (yield 1)))))
                               (state-set "ready" "1")
                               (while (not (state-exists "go")) (set i 1))

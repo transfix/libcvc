@@ -234,6 +234,8 @@ private:
   void meter();              // record the kernel thread's CPU time so far
   bool over_budget_inline(); // an inline call: whether its process's budget is spent
 
+  // Claimed by the one finish_async_call or cancel that settles the call (td 4.9, S0.9).
+  std::atomic<bool> closed_{false};
   std::string name_;
   int pid_;
   std::string channel_; // the reply channel (threaded calls)

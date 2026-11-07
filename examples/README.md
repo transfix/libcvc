@@ -28,7 +28,7 @@ CVC_ARIGL_GALLERY=build/src/cvcGL/examples/gallery.json \
 |---|---|
 | [`cvcgl/`](cvcgl) | scene demos on the cvcGL scene graph: `lsystem_forest` ([LSYSTEM_FOREST.md](cvcgl/LSYSTEM_FOREST.md)), `lsystem_coast`, `terrain_lab`, and the `bunny_shadow` / `volren_bunny` / `volslice_bunny` benches |
 | [`nav/`](nav) | the GRL-SNAM navigation demos rendered through cvcGL, and three headless `cvc::nav` CLIs ([NAV_DEMOS.md](nav/NAV_DEMOS.md)) |
-| [`ariadne/documents/`](ariadne/documents) | `.ari` documents for a generic host: `arigl doc.ari` (a window), `arigl --terminal doc.ari`, or `ariadne_hello` |
+| [`ariadne/documents/`](ariadne/documents) | `.ari` documents for a generic host: `arigl doc.ari` (a window), `arigl --terminal doc.ari`, or `ariadne_hello`. The views of a scene (ARIADNE.md §5.18): `scene_views` (an overview map and a layers view), `viewer_grid` (four cameras on one scene), `viewer_looks` (one scene four ways, three of them on one shared camera), `viewer_scenes` (three scenes from one set of assets) and `viewer_groups` (two tagged groups of one scene) |
 | [`ariadne/terminal/`](ariadne/terminal) | GL-free documents for the terminal runner: `ari run ariadne/terminal/terminal_tour.ari` |
 | [`ariadne/hosts/`](ariadne/hosts) | C++ Ariadne hosts. `ariadne_hello` is the generic one, the reference for embedding the runtime ([ARIADNE.md](../docs/ARIADNE.md) §9.1); `ariadne_terminal`, `ariadne_stream` and `ariadne_conference` add the terminal, streaming and conference pieces |
 | [`ariadne/nav_convoy/`](ariadne/nav_convoy), [`ariadne/nav_compute/`](ariadne/nav_compute) | hosts that register their own verbs, each beside the document that calls them |

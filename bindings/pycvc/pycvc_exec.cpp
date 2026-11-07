@@ -414,9 +414,10 @@ scheduling_policy exec_policy(PyObject *policy, cvc::state &root, cvc::app &app)
     bool unknown = false;
     const scheduling_policy p = policy_from_state(root, scheduling_policy::round_robin, &unknown);
     if (unknown) {
-      const cvc::state *node = root.findDescendant("state_exec.policy");
-      app.log(1, "pycvc.Exec: state_exec.policy: unknown value '" +
-                     (node ? const_cast<cvc::state *>(node)->value() : std::string()) +
+      // Read with the node held, as the schedulers read their settings (R0-mid).
+      const std::optional<std::string> value =
+          cvc::state_exec::detail::setting_value(root, "state_exec.policy");
+      app.log(1, "pycvc.Exec: state_exec.policy: unknown value '" + value.value_or(std::string()) +
                      "' (round_robin, priority or priority_rr); using round_robin");
     }
     return p;
@@ -872,7 +873,9 @@ void Exec::register_async_coro(const std::string &name, PyObject *coro_fn) {
                             if (std::none_of(args.begin(), args.end(),
                                              [](const value_t &a) { return is_compound(a); }))
                               return then(std::move(argv));
-                            return run_data_job(make_copy_job(std::move(argv)), std::move(then));
+                            return run_data_job(
+                                make_copy_job(std::move(argv), copy_mode::share, "async arguments"),
+                                std::move(then));
                           });
 }
 

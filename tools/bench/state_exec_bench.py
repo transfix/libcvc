@@ -57,7 +57,7 @@ REPO = os.path.dirname(os.path.dirname(HERE))
 # Metrics where a larger value is better; every other metric is a cost.
 HIGHER_IS_BETTER = {"programs_per_s", "extra.messages_per_s", "extra.mb_per_s",
                     "extra.pool_efficiency", "extra.speedup", "extra.fairness",
-                    "extra.steps_per_wall_s"}
+                    "extra.steps_per_wall_s", "extra.of_ceiling"}
 
 
 def find_exe(explicit):
@@ -105,8 +105,10 @@ def load(path):
 
 # Sweep keys some scenarios gained after records existed, at the value every point ran at before
 # them. A param at its implicit default is left out of a record's match key, so a record from a
-# binary without the key and one from a binary with it at its default are the same point.
-IMPLICIT_DEFAULTS = {"policy": "rr", "locks": "none"}
+# binary without the key and one from a binary with it at its default are the same point. Stage 0
+# of threaded execution added chroot (native.state_get, native.state_set, sched.watch_poll; it was
+# already lock.uncontended's) and writes (sched.watch_poll).
+IMPLICIT_DEFAULTS = {"policy": "rr", "locks": "none", "chroot": "0", "writes": "none"}
 
 
 def param(r, name):

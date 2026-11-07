@@ -1143,7 +1143,9 @@ public:
   //               `contact_plane` as it is now) and, with contact_vehicles, the vehicles against
   //               each other. The books gain the contact_* lines. `contact_params` (a dict:
   //               k, c, friction, slide, skin, per_side, per_end, rounding) changes the
-  //               defaults. Not with `world`, which collides the chassis instead.
+  //               defaults. `contact_step_depth` (m; None keeps the plant's default) cuts a
+  //               substep in which a point would close more than it into pieces; <= 0 never
+  //               does. Not with `world`, which collides the chassis instead.
   dyn_bike_plant(const std::vector<cvc::physics::vehicle_desc> &descs,
                  cvc::physics::world *world = nullptr, PyObject *ground_bodies = nullptr,
                  double mu = 0.9, double substep = 0.01, double drive_lag = -1.0,
@@ -1152,7 +1154,8 @@ public:
                  double chassis_friction = 0.3, const cvc::height_field *ground = nullptr,
                  bool wheel_spin = false, bool side_slope = false, bool contact = false,
                  PyObject *contact_field = nullptr, int contact_plane = 0,
-                 bool contact_vehicles = true, PyObject *contact_params = nullptr) {
+                 bool contact_vehicles = true, PyObject *contact_params = nullptr,
+                 PyObject *contact_step_depth = nullptr) {
     cvc::physics::dyn_bike_plant_options o;
     if (ground) {
       auto hf = std::make_shared<cvc::height_field>(*ground);
@@ -1166,6 +1169,14 @@ public:
     o.contact = contact;
     o.contact_vehicles = contact_vehicles;
     o.contact_params = pycvc_physics::contact_params_of(contact_params);
+    if (contact_step_depth && contact_step_depth != Py_None) {
+      const double d = PyFloat_AsDouble(contact_step_depth);
+      if (PyErr_Occurred()) {
+        PyErr_Clear();
+        throw std::invalid_argument("dyn_bike_plant: contact_step_depth is a number or None");
+      }
+      o.contact_step_depth = d;
+    }
     if (contact_field && contact_field != Py_None) {
       if (!contact)
         throw std::invalid_argument("dyn_bike_plant: contact_field needs contact=True");
@@ -1282,7 +1293,7 @@ public:
   PyObject *options() const {
     const cvc::physics::dyn_bike_plant_options &o = $self->options();
     return Py_BuildValue(
-        "{s:d,s:d,s:d,s:O,s:d,s:d,s:d,s:d,s:d,s:O,s:O,s:O,s:O,s:O,s:O,s:N}", "mu", o.mu,
+        "{s:d,s:d,s:d,s:O,s:d,s:d,s:d,s:d,s:d,s:O,s:O,s:O,s:O,s:O,s:O,s:N,s:d}", "mu", o.mu,
         "substep", o.substep, "drive_lag", o.drive_lag, "driver", o.driver ? Py_True : Py_False,
         "latency", o.plant.latency, "brake_margin", o.plant.brake_margin,
         "metres_per_world_unit", o.plant.metres_per_world_unit, "ground_z", o.plant.ground_z,
@@ -1292,7 +1303,8 @@ public:
         "contact", o.contact ? Py_True : Py_False, "contact_field",
         o.contact_field ? Py_True : Py_False, "contact_vehicles",
         o.contact_vehicles ? Py_True : Py_False, "contact_params",
-        pycvc_physics::contact_params_dict(o.contact_params));
+        pycvc_physics::contact_params_dict(o.contact_params), "contact_step_depth",
+        o.contact_step_depth);
   }
 }
 

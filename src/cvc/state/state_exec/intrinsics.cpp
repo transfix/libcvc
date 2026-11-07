@@ -2,7 +2,9 @@
 #include <boost/algorithm/string/trim.hpp>
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/lexical_cast.hpp>
+#include <boost/make_shared.hpp>
 #include <boost/property_tree/json_parser/error.hpp>
+#include <cassert>
 #include <charconv>
 #include <chrono>
 #include <cmath>
@@ -125,22 +127,106 @@ void require_sched(const intrinsics_context *ctx, const char *name) {
 // State tree intrinsics
 // ---------------------------------------------------------------------------
 
+// Pinned lookups (td 4.8, S0.md S0.4). The context's root_pins hold its root and every ancestor
+// (pinned_root), and a walk holds the nodes below the root it passes, so no node an intrinsic uses
+// can be freed under it by another thread's state-delete. A read keeps the node it returns (a leaf
+// pin); a write or a walk up the parents (fullName(), a write's childChanged) keeps the chain.
+using state_ptr = cvc::state::state_ptr;
+
+// A chain kept past the call that made it (a data job's, a callback's, root_pins) is a
+// cvc::pin_vector: it releases leaf first, as each node must die with its ancestors alive.
+using cvc::pin_vector;
+
+// root_pins for `ctx.root`: it and each ancestor, top first, walking parent() once. The host
+// promises the root is alive when it assigns it, and so its ancestors are. Every live node is
+// owned by a shared_ptr (the root by its app, a child by its parent), so each has
+// shared_from_this(). The old pins go after the new ones are taken, leaf first.
+void pin_root_chain(intrinsics_context &ctx) {
+  pin_vector chain;
+  for (const cvc::state *n = ctx.root; n; n = n->parent()) {
+    cvc::state &node = const_cast<cvc::state &>(*n);
+    assert(!node.weak_from_this().expired() && "pinned_root: a node being destroyed");
+    chain.push_back(node.shared_from_this());
+  }
+  std::reverse(chain.begin(), chain.end());
+  ctx.root_pins.swap(chain); // the old pins go with `chain`
+}
+
+// One hold on `pins` (root_pins: the tree's root .. a context's root), pointing at their last: what
+// a scheduler keeps of a watch root a step gives it, which no host keeps alive (R0-mid). The whole
+// chain is held, as a write under the root emits through it, and let go of leaf first.
+state_ptr hold_chain(const pin_vector &pins) {
+  return state_ptr(boost::make_shared<pin_vector>(pins), pins.back().get());
+}
+
+// The chain pins one intrinsic call holds to its end. They sit on one stack per thread, popped
+// back to where the call found it, so a call allocates nothing once the stack has grown (CTest's
+// state_exec_bench_gates). Calls nest as frames do. A data job that writes after the call holds
+// the root's chain itself (root_chain) and walks when it writes.
+class chain_pins {
+public:
+  chain_pins() : stack_(pin_stack()), mark_(stack_.size()) {}
+  ~chain_pins() {
+    // One at a time: a node freed here may run a slot that makes a frame of its own.
+    while (stack_.size() > mark_) {
+      state_ptr last = std::move(stack_.back());
+      stack_.pop_back();
+    }
+  }
+  chain_pins(const chain_pins &) = delete;
+  chain_pins &operator=(const chain_pins &) = delete;
+
+  std::vector<state_ptr> *get() { return &stack_; }
+
+private:
+  static std::vector<state_ptr> &pin_stack() {
+    thread_local std::vector<state_ptr> stack;
+    return stack;
+  }
+  std::vector<state_ptr> &stack_;
+  std::size_t mark_;
+};
+
 namespace {
-// The node a READ of `path` sees. A transparent link is the sanctioned cross-subtree channel
+// The node a READ of `path` sees, held. A transparent link is the sanctioned cross-subtree channel
 // (roadmap §7.8.3): a chrooted program cannot NAME anything outside its subtree, but the host may
 // plant a transparent link node inside it whose target lies elsewhere (a "named hole"). A read
 // sees through it on every hop, so "hole" reads the target and "hole.a" the target's child "a",
 // matching what a write does (state::childThroughLinks + value(v) route through a writable link).
 // A non-link, an opaque link, or a broken / cyclic / budget-exhausted transparent link stays put
-// (the same fallback resolvedValue() documents). nullptr when a segment is absent.
-cvc::state *read_node(intrinsics_context *ctx, const std::string &path) {
-  return ctx->root->findThroughLinks(path);
+// (the same fallback resolvedValue() documents). Null when a segment is absent. `pins`, when
+// given, gets the chain below the root, for a caller that walks the node's parents.
+state_ptr read_node(intrinsics_context *ctx, const std::string &path,
+                    std::vector<state_ptr> *pins = nullptr) {
+  return pinned_root(ctx).findThroughLinksShared(path, pins);
 }
 
-// The node a WRITE of `path` lands on, made when absent: through a writable transparent link on
-// the target, through a read-only one on the link node's own (local) children.
-cvc::state &write_node(cvc::state *root, const std::string &path) {
-  return root->childThroughLinks(path);
+// The node a WRITE of `path` under `root` lands on, made when absent: through a writable
+// transparent link on the target, through a read-only one on the link node's own (local) children.
+// `pins` gets the chain below the root, which the write emits through.
+state_ptr write_node(cvc::state &root, const std::string &path, std::vector<state_ptr> *pins) {
+  return root.childThroughLinksShared(path, /*refuse_read_only=*/false, pins);
+}
+
+// The node at the physical `path` (state-delete's, expiry's and the channels' walk: not through
+// links), held, or null; `pins` gets the chain below the root.
+state_ptr find_node(intrinsics_context *ctx, const std::string &path,
+                    std::vector<state_ptr> *pins = nullptr) {
+  cvc::state &root = pinned_root(ctx);
+  return root.findDescendantShared(ctx->root_pins.back(), path, pins);
+}
+
+// As find_node, making what is absent (operator()'s walk).
+state_ptr make_node(intrinsics_context *ctx, const std::string &path,
+                    std::vector<state_ptr> *pins) {
+  cvc::state &root = pinned_root(ctx);
+  return root.sharedChild(ctx->root_pins.back(), path, pins);
+}
+
+// The context's root chain, for a data job that writes after the call (the job holds it, td 4.8).
+pin_vector root_chain(intrinsics_context *ctx) {
+  pinned_root(ctx);
+  return ctx->root_pins;
 }
 } // namespace
 
@@ -148,7 +234,7 @@ value_t intrinsic_state_get(intrinsics_context *ctx, std::span<const value_t> ar
   expect_exact(args, 1, "state-get");
   require_root(ctx, "state-get");
   auto &path = as_string(args[0], "state-get");
-  auto *node = read_node(ctx, path);
+  const state_ptr node = read_node(ctx, path);
   if (!node)
     return nil_value;
   return value_t(node->value());
@@ -163,23 +249,26 @@ value_t intrinsic_state_set(intrinsics_context *ctx, std::span<const value_t> ar
   // structured value should use state-data-set (the typed data() channel).
   if (is_compound(args[1])) {
     // A list or dict prints as a walk, a slice per step when the process slices deep data
-    // ("Deep data on the executor"); the node is written once the whole string is ready.
-    cvc::state *root = ctx->root;
-    return run_data_job(make_print_job(args[1]), [root, path = path](value_t printed) {
-      write_node(root, path).value(std::get<std::string>(printed.v));
-      return nil_value;
-    });
+    // ("Deep data on the executor"); the node is written once the whole string is ready, under
+    // the root chain the job holds.
+    return run_data_job(
+        make_print_job(args[1]), [roots = root_chain(ctx), path = path](value_t printed) {
+          chain_pins pins;
+          write_node(*roots.back(), path, pins.get())->value(std::get<std::string>(printed.v));
+          return nil_value;
+        });
   }
   // childThroughLinks creates child nodes as needed
-  write_node(ctx->root, path).value(coerce_state_string(args[1]));
+  chain_pins pins;
+  write_node(pinned_root(ctx), path, pins.get())->value(coerce_state_string(args[1]));
   return nil_value;
 }
 
-// The node an atomic native writes: `path` under the chroot, made when absent. It must be the node
-// a read sees, so a path through a read-only transparent link is refused (read_only_error) rather
-// than taking the write on the link's own children.
-cvc::state &atomic_node(intrinsics_context *ctx, const std::string &path) {
-  return ctx->root->childThroughLinks(path, /*refuse_read_only=*/true);
+// The node an atomic native writes: `path` under the chroot, made when absent, its chain in `pins`.
+// It must be the node a read sees, so a path through a read-only transparent link is refused
+// (read_only_error) rather than taking the write on the link's own children.
+state_ptr atomic_node(intrinsics_context *ctx, const std::string &path, chain_pins &pins) {
+  return pinned_root(ctx).childThroughLinksShared(path, /*refuse_read_only=*/true, pins.get());
 }
 
 // (state-cas path expected new): #t when the value equalled `expected` and is now `new` (an equal
@@ -193,7 +282,8 @@ value_t intrinsic_state_cas(intrinsics_context *ctx, std::span<const value_t> ar
   const std::string desired = atomic_scalar(args[2], "state-cas");
   if (!read_node(ctx, path) && !expected.empty())
     return value_t(false);
-  return value_t(atomic_node(ctx, path).compareAndSetValue(expected, desired));
+  chain_pins pins;
+  return value_t(atomic_node(ctx, path, pins)->compareAndSetValue(expected, desired));
 }
 
 // (state-swap path new): the value it replaced, nil when the node was absent or "".
@@ -202,7 +292,8 @@ value_t intrinsic_state_swap(intrinsics_context *ctx, std::span<const value_t> a
   require_root(ctx, "state-swap");
   const auto &path = as_string(args[0], "state-swap");
   const std::string desired = atomic_scalar(args[1], "state-swap");
-  std::string old = atomic_node(ctx, path).exchangeValue(desired);
+  chain_pins pins;
+  std::string old = atomic_node(ctx, path, pins)->exchangeValue(desired);
   return old.empty() ? nil_value : value_t(std::move(old));
 }
 
@@ -225,7 +316,8 @@ value_t intrinsic_state_incr(intrinsics_context *ctx, std::span<const value_t> a
     delta = args[1];
   }
   value_t result;
-  atomic_node(ctx, path).updateValue([&](const std::string &old) {
+  chain_pins pins;
+  atomic_node(ctx, path, pins)->updateValue([&](const std::string &old) {
     value_t cur(int64_t(0));
     if (!old.empty()) {
       std::optional<value_t> number = detail::read_number_text(old);
@@ -254,7 +346,8 @@ value_t intrinsic_state_children(intrinsics_context *ctx, std::span<const value_
   expect_exact(args, 1, "state-children");
   require_root(ctx, "state-children");
   auto &path = as_string(args[0], "state-children");
-  auto *node = read_node(ctx, path);
+  chain_pins pins; // children() names them from fullName(), up the chain
+  const state_ptr node = read_node(ctx, path, pins.get());
   if (!node)
     return make_list();
   auto names = node->children();
@@ -276,12 +369,20 @@ value_t intrinsic_state_delete(intrinsics_context *ctx, std::span<const value_t>
   expect_exact(args, 1, "state-delete");
   require_root(ctx, "state-delete");
   auto &path = as_string(args[0], "state-delete");
-  auto *node = ctx->root->findDescendant(path);
-  if (node) {
-    // Use expiry for immediate deletion
-    node->expireAt(boost::posix_time::microsec_clock::universal_time());
-    ctx->root->sweepExpired();
+  // One node, unlinked from its parent (td 4.8, 5 item 3): no sweep of other expired nodes, and
+  // the context's own root is never deleted (an empty path does nothing). The walk is physical,
+  // so a link node is deleted, not its target.
+  const std::string key = cvc::state::normalize_path(path);
+  if (key.empty())
+    return nil_value;
+  const std::size_t dot = key.rfind(cvc::state::SEPARATOR[0]);
+  if (dot == std::string::npos) {
+    pinned_root(ctx).removeChild(key);
+    return nil_value;
   }
+  chain_pins pins; // removeChild emits up the parent's chain
+  if (const state_ptr parent = find_node(ctx, key.substr(0, dot), pins.get()))
+    parent->removeChild(key.substr(dot + 1));
   return nil_value;
 }
 
@@ -289,7 +390,7 @@ value_t intrinsic_state_data_get(intrinsics_context *ctx, std::span<const value_
   expect_exact(args, 1, "state-data-get");
   require_root(ctx, "state-data-get");
   auto &path = as_string(args[0], "state-data-get");
-  auto *node = read_node(ctx, path);
+  const state_ptr node = read_node(ctx, path);
   if (!node)
     return nil_value;
   auto d = node->data();
@@ -316,30 +417,51 @@ value_t intrinsic_state_data_get(intrinsics_context *ctx, std::span<const value_
   return value_t(std::move(obj));
 }
 
+namespace {
+// A value state-data-set stores as it is, needing no copy (td 4.3): nil, a scalar, a string or a
+// symbol. Keyed on the variant, so an empty list or dict is still copied, and so is every
+// data_object: the copy shares an ordinary one and refuses the internal ones (a with-lock binding,
+// a lock wait, an async call), at no cost beyond the check of its root.
+bool stores_as_is(const value_t &v) {
+  return v.is_nil() || std::holds_alternative<bool>(v.v) || std::holds_alternative<int64_t>(v.v) ||
+         std::holds_alternative<double>(v.v) || std::holds_alternative<std::string>(v.v) ||
+         std::holds_alternative<symbol>(v.v);
+}
+} // namespace
+
 value_t intrinsic_state_data_set(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 2, "state-data-set");
   require_root(ctx, "state-data-set");
   auto &path = as_string(args[0], "state-data-set");
-  // Refuse to store a callable. A native_fn/closure/generator captures an environment or
-  // intrinsics_context that may not outlive this (persistent) node — a use-after-free
-  // waiting to happen — and a stored callable is an invocation channel that would bypass
-  // any environment allowlist a later reader relies on. The data channel is for structured
-  // DATA (scalars/lists/dicts), not code.
-  if (std::holds_alternative<native_fn>(args[1].v) ||
-      std::holds_alternative<closure_ptr>(args[1].v) ||
-      std::holds_alternative<generator_ptr>(args[1].v))
-    throw std::runtime_error(
-        "state-data-set: cannot store a callable (function/closure/generator) as data");
   // A `bytes` value (opaque octets) is stored as a RAW std::string on the data channel — the SAME
   // representation the `?data` URI channel (uri_state.cpp) and the §13.9 HTTP cache use — so a byte
   // blob written from the DSL is readable via state://…?data and a blob parked by the cache reads
-  // back as `bytes` here (state-data-get, above). Every other value_t is stored as-is, so
-  // structured data (lists/dicts/scalars/text strings) round-trips via the value_t path.
-  if (const bytes_value *b = std::get_if<bytes_value>(&args[1].v))
-    write_node(ctx->root, path).data(boost::any(b->data));
-  else
-    write_node(ctx->root, path).data(boost::any(args[1]));
-  return nil_value;
+  // back as `bytes` here (state-data-get, above).
+  if (const bytes_value *b = std::get_if<bytes_value>(&args[1].v)) {
+    chain_pins pins;
+    write_node(pinned_root(ctx), path, pins.get())->data(boost::any(b->data));
+    return nil_value;
+  }
+  if (stores_as_is(args[1])) {
+    chain_pins pins;
+    write_node(pinned_root(ctx), path, pins.get())->data(boost::any(args[1]));
+    return nil_value;
+  }
+  // Anything else is stored as an isolating copy (td 4.3, 5 item 2): a list changed after it was
+  // stored no longer changes what state-data-get returns, and nothing that runs code or holds a
+  // process's state is stored, at any depth. A closure, native, generator, future, lock form, lock
+  // wait or object instance is refused ("state-data-set: cannot store a closure (nested in a
+  // list)"): a stored callable can outlive what it captures, and is an invocation channel around
+  // an allowlist. The copy is deep-data work charged to the writer, a slice per step on a host;
+  // the node is written once, when the whole copy is made, so a refusal leaves it as it was. The
+  // copy is the tree's and is never tracked by this thread's cycle registry.
+  return run_data_job(
+      make_copy_job(args[1], copy_mode::isolate, "state-data-set"),
+      [roots = root_chain(ctx), path = path](value_t copy) {
+        chain_pins pins;
+        write_node(*roots.back(), path, pins.get())->data(boost::any(std::move(copy)));
+        return nil_value;
+      });
 }
 
 // ---------------------------------------------------------------------------
@@ -354,13 +476,17 @@ value_t intrinsic_state_data_set(intrinsics_context *ctx, std::span<const value_
 
 namespace {
 
-// A writable transparent link routes a write to its target, as state-set's value() does.
-cvc::state *write_through_link(cvc::state *node) {
+// A writable transparent link routes a write to its target, as state-set's value() does: the
+// target, its chain added to `pins`.
+state_ptr write_through_link(state_ptr node, std::vector<state_ptr> &pins) {
   if (node && node->isLink() && node->linkMode() == cvc::state::link_mode::transparent &&
       node->linkWritable()) {
-    const cvc::state::link_resolution lr = node->resolveLink();
-    if (lr.kind == cvc::state::link_resolution_kind::resolved && lr.target)
-      return lr.target;
+    cvc::state::link_resolution lr = node->resolveLink();
+    if (lr.kind == cvc::state::link_resolution_kind::resolved && lr.target_owned) {
+      for (state_ptr &p : lr.target_pins)
+        pins.push_back(std::move(p));
+      return std::move(lr.target_owned);
+    }
   }
   return node;
 }
@@ -371,7 +497,7 @@ cvc::state *write_through_link(cvc::state *node) {
 // allocation limit as it grows.
 class state_json_job final : public data_job {
 public:
-  explicit state_json_job(cvc::state &node) : writer_(node) {}
+  explicit state_json_job(state_ptr node) : node_(std::move(node)), writer_(*node_) {}
 
   bool step(std::size_t budget) override {
     const std::size_t start = nodes_;
@@ -392,16 +518,19 @@ public:
   value_t result() override { return value_t(writer_.take()); }
 
 private:
+  state_ptr node_; // the subtree's top, read through its own storage only (a leaf pin)
   cvc::state_json_writer writer_;
   std::size_t noted_ = 0; // text bytes reported to heap accounting so far
 };
 
 // The reader checks the whole document before it sets anything, so a malformed one changes
 // nothing even when the check spans many steps. A slice ends when its units are spent, a long
-// string counting for its bytes.
+// string counting for its bytes. The job holds its target's chain, from the tree's root and
+// through any link, for its whole life (td 4.8): every value it sets emits up that chain.
 class state_from_json_job final : public data_job {
 public:
-  state_from_json_job(cvc::state &node, std::string_view doc) : reader_(node, doc) {}
+  state_from_json_job(pin_vector pins, state_ptr node, std::string_view doc)
+      : pins_(std::move(pins)), node_(std::move(node)), reader_(*node_, doc) {}
 
   bool step(std::size_t budget) override {
     const std::size_t start = nodes_;
@@ -427,6 +556,10 @@ public:
   }
 
 private:
+  // Declared first, so released last: the reader's hold and node_ (the target) go first, then
+  // its chain, leaf first.
+  pin_vector pins_;
+  state_ptr node_;
   std::string doc_;
   cvc::state_json_reader reader_;
 };
@@ -465,18 +598,23 @@ bool is_index_below(const std::string &name, std::size_t size) {
 
 class state_set_tree_job final : public data_job {
 public:
-  // The node at `path` under `root` is made (or found, through a writable link) once the value
-  // has passed its check.
-  state_set_tree_job(cvc::state &root, std::string path, value_t v)
-      : keep_(root.weak_from_this().lock()), tree_(&root), path_(std::move(path)),
-        root_(std::move(v)) {}
+  // The node at `path` under the root (the back of `root_pins`, the context's root chain) is made
+  // (or found, through a writable link) once the value has passed its check.
+  state_set_tree_job(pin_vector root_pins, std::string path, value_t v)
+      : pins_(std::move(root_pins)), path_(std::move(path)), root_(std::move(v)) {}
+  // The open frames' nodes, deepest first, then the chain to the target, leaf first (pins_ is
+  // declared first, so released last).
+  ~state_set_tree_job() override {
+    while (!open_.empty())
+      open_.pop_back();
+  }
 
   bool step(std::size_t budget) override {
     const std::size_t start = nodes_;
     while (budget == 0 || nodes_ - start < budget) {
       if (!started_) {
         started_ = true;
-        visit(root_, writing_ ? write_through_link(&(*tree_)(path_)) : nullptr);
+        visit(root_, writing_ ? target() : nullptr);
         continue;
       }
       if (open_.empty()) {
@@ -497,14 +635,15 @@ public:
       ++nodes_;
       if (f.list) {
         const value_t &e = (*f.list)[i];
-        visit(e, writing_ ? &(*f.node)(std::to_string(i)) : nullptr); // may push, invalidating f
+        visit(e, writing_ ? f.node->sharedChild(f.node, std::to_string(i))
+                          : nullptr); // may push, invalidating f
       } else {
         const auto &[key, e] = (*f.dict)[i];
         if (!names_a_node(key))
           throw dsl_error("ValueError",
                           "state-set-tree: the key \"" + key +
                               "\" can't name a node (it is empty, has a '.' or space at an end)");
-        visit(e, writing_ ? &(*f.node)(key) : nullptr); // may push, invalidating f
+        visit(e, writing_ ? f.node->sharedChild(f.node, key) : nullptr); // may push, invalidating f
       }
     }
     return false;
@@ -529,9 +668,17 @@ private:
     }
   };
 
+  // The node at path_, made when absent (a physical walk, as operator()'s), or its writable link's
+  // target. The job holds the chain from the tree's root down to it, and the link's, for the rest
+  // of its life (td 4.8): the nodes below it are held by the open frames.
+  state_ptr target() {
+    const state_ptr root = pins_.back();
+    return write_through_link(root->sharedChild(root, path_, &pins_), pins_);
+  }
+
   // Check `v`, and when writing, write it at `n`: a scalar's text, or a list's or dict's own
   // text, its stale children removed and its elements left for step().
-  void visit(const value_t &v, cvc::state *n) {
+  void visit(const value_t &v, state_ptr n) {
     frame f;
     std::string text;
     if (v.is_nil()) {
@@ -565,14 +712,14 @@ private:
       if (n->value() != text)
         n->value(text);
       remove_stale(*n, f);
-      f.node = n->weak_from_this().lock();
+      f.node = std::move(n);
     }
     if (compound && f.size() > 0)
       open_.push_back(std::move(f));
   }
 
   // Remove the children of `n` that the value written there doesn't name: all of them for a
-  // scalar. The same expiry state-delete uses, swept from `n`.
+  // scalar. Each is unlinked as state-delete unlinks a node, a unit apiece.
   void remove_stale(cvc::state &n, const frame &f) {
     const std::vector<std::string> names = n.childNames();
     if (names.empty())
@@ -581,25 +728,16 @@ private:
     if (f.dict)
       for (const auto &[k, e] : *f.dict)
         keys.insert(k);
-    const auto now = boost::posix_time::microsec_clock::universal_time();
-    bool stale = false;
     for (const std::string &name : names) {
       const bool named = f.list   ? is_index_below(name, f.list->size())
                          : f.dict ? keys.count(name) > 0
                                   : false;
-      if (named)
-        continue;
-      if (cvc::state *child = n.findDescendant(name)) {
-        child->expireAt(now);
-        stale = true;
-      }
+      if (!named && n.removeChild(name))
+        ++nodes_;
     }
-    if (stale)
-      nodes_ += n.sweepExpired();
   }
 
-  cvc::state::state_ptr keep_;
-  cvc::state *tree_;
+  pin_vector pins_; // the root's chain, then the target's (target())
   std::string path_;
   value_t root_;
   bool started_ = false;
@@ -614,10 +752,10 @@ value_t intrinsic_state_json(intrinsics_context *ctx, std::span<const value_t> a
   expect_exact(args, 1, "state-json");
   require_root(ctx, "state-json");
   auto &path = as_string(args[0], "state-json");
-  cvc::state *node = read_node(ctx, path);
+  state_ptr node = read_node(ctx, path);
   if (!node)
     return nil_value;
-  return run_data_job(std::make_unique<state_json_job>(*node));
+  return run_data_job(std::make_unique<state_json_job>(std::move(node)));
 }
 
 value_t intrinsic_state_from_json(intrinsics_context *ctx, std::span<const value_t> args) {
@@ -625,8 +763,10 @@ value_t intrinsic_state_from_json(intrinsics_context *ctx, std::span<const value
   require_root(ctx, "state-from-json");
   auto &path = as_string(args[0], "state-from-json");
   auto &doc = as_string(args[1], "state-from-json");
-  cvc::state *node = write_through_link(&write_node(ctx->root, path));
-  return run_data_job(std::make_unique<state_from_json_job>(*node, doc));
+  pin_vector pins = root_chain(ctx);
+  cvc::state &root = *pins.back();
+  state_ptr node = write_through_link(write_node(root, path, &pins), pins);
+  return run_data_job(std::make_unique<state_from_json_job>(std::move(pins), std::move(node), doc));
 }
 
 value_t intrinsic_state_set_tree(intrinsics_context *ctx, std::span<const value_t> args) {
@@ -636,7 +776,7 @@ value_t intrinsic_state_set_tree(intrinsics_context *ctx, std::span<const value_
   // The root's subtree is everything the program can reach: replacing it is never what's meant.
   if (path.find_first_not_of(". \t\r\n") == std::string::npos)
     throw dsl_error("ValueError", "state-set-tree: an empty path would replace the whole tree");
-  return run_data_job(std::make_unique<state_set_tree_job>(*ctx->root, path, args[1]));
+  return run_data_job(std::make_unique<state_set_tree_job>(root_chain(ctx), path, args[1]));
 }
 
 value_t intrinsic_state_root_path(intrinsics_context *ctx, std::span<const value_t> args) {
@@ -671,7 +811,7 @@ value_t intrinsic_state_watch(intrinsics_context *ctx, std::span<const value_t> 
   value_t handler = args[1];
 
   // Navigate to the node (create if needed so we can watch it)
-  (void)(*ctx->root)(path);
+  const state_ptr node = make_node(ctx, path, nullptr);
 
   // Allocate a watch ID, on the process the handler belongs to
   process *self = running_process(ctx);
@@ -681,16 +821,20 @@ value_t intrinsic_state_watch(intrinsics_context *ctx, std::span<const value_t> 
 
   // Register the handler.  The scheduler polls watched paths each step
   // instead of using boost::signals2 (which segfaults on macOS).
+  //
+  // The watch keeps its own root, this context's (td 4.8, B13): `path` resolves under it, and the
+  // scheduler's watch root, where it reads its settings and the async charge rate, stays the
+  // host's (td 5 item 4). A chrooted context never moves it. An unchrooted one sets it only on a
+  // scheduler that has none, as today (S0.md section 0, item 20): that makes the scheduler read
+  // its settings there and gate its watches.
+  const state_ptr root = ctx->root_pins.back(); // make_node pinned it
   if (ctx->sched) {
-    ctx->sched->set_watch_root(ctx->root);
-    ctx->sched->register_watch_handler(running_pid(ctx), watch_id, handler, path);
+    if (ctx->root_path.empty() && !ctx->sched->watch_root())
+      ctx->sched->set_watch_root(ctx->root, hold_chain(ctx->root_pins)); // kept (R0-mid)
+    ctx->sched->register_watch_handler(running_pid(ctx), watch_id, handler, path, root);
   } else {
-    // No-scheduler path (unit tests): record handler + initial value.
-    std::string initial;
-    auto *node = ctx->root->findDescendant(path);
-    if (node)
-      initial = node->value();
-    self->watch_handlers[watch_id] = {handler, path, initial};
+    // No-scheduler path (unit tests): record handler, initial value and root.
+    self->watch_handlers[watch_id] = {handler, path, node->value(), root};
   }
 
   // Keep a local registry for unwatch; no signal connection needed.
@@ -1200,7 +1344,7 @@ value_t intrinsic_state_expire(intrinsics_context *ctx, std::span<const value_t>
   require_root(ctx, "state-expire");
   auto &path = as_string(args[0], "state-expire");
   double secs = as_number(args[1], "state-expire");
-  auto *node = ctx->root->findDescendant(path);
+  const state_ptr node = find_node(ctx, path);
   if (!node)
     throw std::runtime_error("state-expire: path not found: " + path);
   node->expireAfter(boost::posix_time::milliseconds(static_cast<int64_t>(secs * 1000.0)));
@@ -1212,7 +1356,7 @@ value_t intrinsic_state_expire_at(intrinsics_context *ctx, std::span<const value
   require_root(ctx, "state-expire-at");
   auto &path = as_string(args[0], "state-expire-at");
   auto &iso = as_string(args[1], "state-expire-at");
-  auto *node = ctx->root->findDescendant(path);
+  const state_ptr node = find_node(ctx, path);
   if (!node)
     throw std::runtime_error("state-expire-at: path not found: " + path);
   auto pt = boost::posix_time::time_from_string(iso);
@@ -1224,7 +1368,7 @@ value_t intrinsic_state_has_expiry(intrinsics_context *ctx, std::span<const valu
   expect_exact(args, 1, "state-has-expiry");
   require_root(ctx, "state-has-expiry");
   auto &path = as_string(args[0], "state-has-expiry");
-  auto *node = ctx->root->findDescendant(path);
+  const state_ptr node = find_node(ctx, path);
   if (!node)
     return false_value;
   return value_t(node->hasExpiry());
@@ -1234,7 +1378,7 @@ value_t intrinsic_state_is_expired(intrinsics_context *ctx, std::span<const valu
   expect_exact(args, 1, "state-is-expired");
   require_root(ctx, "state-is-expired");
   auto &path = as_string(args[0], "state-is-expired");
-  auto *node = ctx->root->findDescendant(path);
+  const state_ptr node = find_node(ctx, path);
   if (!node)
     return false_value;
   return value_t(node->isExpired());
@@ -1244,7 +1388,7 @@ value_t intrinsic_state_clear_expiry(intrinsics_context *ctx, std::span<const va
   expect_exact(args, 1, "state-clear-expiry");
   require_root(ctx, "state-clear-expiry");
   auto &path = as_string(args[0], "state-clear-expiry");
-  auto *node = ctx->root->findDescendant(path);
+  const state_ptr node = find_node(ctx, path);
   if (!node)
     throw std::runtime_error("state-clear-expiry: path not found: " + path);
   node->clearExpiry();
@@ -1256,12 +1400,15 @@ value_t intrinsic_state_sweep(intrinsics_context *ctx, std::span<const value_t> 
     throw std::runtime_error("state-sweep-expired: expected 0-1 argument(s), got " +
                              std::to_string(args.size()));
   require_root(ctx, "state-sweep-expired");
-  cvc::state *target = ctx->root;
+  cvc::state *target = &pinned_root(ctx);
+  chain_pins pins; // the sweep emits up the target's chain
+  state_ptr held;
   if (args.size() == 1) {
     auto &path = as_string(args[0], "state-sweep-expired");
-    target = ctx->root->findDescendant(path);
-    if (!target)
+    held = find_node(ctx, path, pins.get());
+    if (!held)
       return value_t(int64_t(0));
+    target = held.get();
   }
   return value_t(static_cast<int64_t>(target->sweepExpired()));
 }
@@ -1276,14 +1423,14 @@ value_t intrinsic_state_sweep(intrinsics_context *ctx, std::span<const value_t> 
 // following — a §12 mount plants a transparent link at <root_path>.channels.<name> (wire_holes), so
 // a sender and a granted receiver resolve to ONE absolute key via the SAME resolveLink() state uses
 // (no parallel registry, no async_scheduler change). Every msg-* intrinsic resolves once at entry.
-std::string resolve_channel(const intrinsics_context *ctx, const std::string &channel) {
+std::string resolve_channel(intrinsics_context *ctx, const std::string &channel) {
   const std::string key = resolve_channel_key(ctx ? ctx->root_path : std::string(), channel);
   // Only a private-by-prefix channel (not a '#'-runtime channel, not a '/'-global, non-empty root)
   // can carry a planted grant link; if one is planted, follow it to the granted target's key.
   if (ctx && ctx->root && !ctx->root_path.empty() && channel.find('#') == std::string::npos &&
       !(!channel.empty() && channel.front() == '/')) {
     const std::string rel = std::string("channels") + cvc::state::SEPARATOR + channel;
-    if (cvc::state *n = ctx->root->findDescendant(rel)) {
+    if (const state_ptr n = find_node(ctx, rel)) {
       // A grant is a transparent link whose TARGET PATH is the shared channel key. Read the target
       // string directly (linkTarget), NOT resolveLink: a channel is a scheduler key, not a state
       // value, so the target node need not exist (resolveLink would report it "broken"). The stored
@@ -1305,7 +1452,7 @@ std::string resolve_channel(const intrinsics_context *ctx, const std::string &ch
 // declared app-root-global (for a '/'-ref); or a channel granted via a planted transparent-link
 // (a §12 mount grant). Otherwise throw (the action lane catches it fail-safe and warns once). A
 // no-op unless enforce is set (warn/off leave it false — the load lint handled those at load).
-void enforce_channel_policy(const intrinsics_context *ctx, const std::string &channel) {
+void enforce_channel_policy(intrinsics_context *ctx, const std::string &channel) {
   if (!ctx || !ctx->channels || !ctx->channels->enforce)
     return;
   if (channel.find('#') != std::string::npos)
@@ -1322,7 +1469,7 @@ void enforce_channel_policy(const intrinsics_context *ctx, const std::string &ch
     return;        // a declared channel
   if (ctx->root) { // or a channel granted via a planted transparent-link (a §12 mount grant)
     const std::string rel = std::string("channels") + cvc::state::SEPARATOR + channel;
-    if (cvc::state *n = ctx->root->findDescendant(rel))
+    if (const state_ptr n = find_node(ctx, rel))
       if (n->isLink() && n->linkMode() == cvc::state::link_mode::transparent &&
           !n->linkTarget().empty())
         return;
@@ -1342,11 +1489,10 @@ value_t intrinsic_msg_send(intrinsics_context *ctx, std::span<const value_t> arg
   std::string content_type = binary ? "application/octet-stream" : "text/plain";
   if (args.size() > 2)
     content_type = as_string(args[2], "msg-send");
-  auto *node = ctx->root->findDescendant(path);
-  if (!node) {
-    // Create the node so we can send to it
-    node = &(*ctx->root)(path);
-  }
+  // The node, made when absent so we can send to it, held with its chain across sendMessage
+  // (which reads its fullName()).
+  chain_pins pins;
+  const state_ptr node = make_node(ctx, path, pins.get());
   auto result = node->sendMessage(payload, content_type, /*hop_budget=*/64, /*binary=*/binary);
   // Update message counters on the currently executing process.
   process *proc = nullptr;
@@ -1516,6 +1662,7 @@ std::function<spawn_setup(const intrinsics_context &)> make_spawn_context(
     auto child = std::make_shared<intrinsics_context>();
     child->sched = parent.sched;
     child->root = parent.root;
+    child->root_pins = parent.root_pins;
     child->tracker = parent.tracker;
     child->root_path = parent.root_path;
     child->uid = parent.uid;
@@ -1631,14 +1778,28 @@ std::string format_number_shortest(double d) {
 }
 
 void apply_chroot(intrinsics_context &ctx, cvc::state &tree_root, const std::string &root_path) {
+  ctx.root = &tree_root;
+  pin_root_chain(ctx);
   if (root_path.empty()) {
-    ctx.root = &tree_root;
     ctx.root_path.clear();
     return;
   }
-  // Navigate or create the subtree node
-  ctx.root = &tree_root(root_path);
+  // Navigate or create the subtree node, pinned with the chain down to it (td 4.8), once here
+  // rather than per call.
+  const state_ptr top = ctx.root_pins.back();
+  const state_ptr node = tree_root.sharedChild(top, root_path, &ctx.root_pins);
+  ctx.root = node.get();
   ctx.root_path = root_path;
+}
+
+cvc::state &pinned_root(intrinsics_context *ctx) {
+  // One compare per call; a host that assigned `root` directly (or moved it) is pinned here.
+  if (ctx->root_pins.empty() || ctx->root_pins.back().get() != ctx->root) {
+    if (!ctx->root)
+      throw std::runtime_error("no state root bound");
+    pin_root_chain(*ctx);
+  }
+  return *ctx->root;
 }
 
 std::string resolve_channel_key(const std::string &root_path, const std::string &channel) {

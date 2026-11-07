@@ -249,6 +249,9 @@ TEST(StateExecTypesTest, WalksTerminateOnCyclicStructure) {
   EXPECT_FALSE(s.empty());
   EXPECT_LT(s.size(), std::size_t{1} << 17);
   EXPECT_TRUE(values_equal(cyc, cyc)); // must terminate, not overflow the stack
+  // The list holds itself, and no collector tracks a list made here: break the cycle, or the list
+  // outlives the test (LeakSanitizer reports it).
+  l->pop_back();
 }
 
 // A time_budget charges its first half on the steady clock and its second on the thread's CPU

@@ -69,6 +69,10 @@ struct SceneVolRen {
   float ambient = 0.0f;
   float resolution_scale = 0.5f;
   std::string backend = "cpu"; // cpu | cuda | automatic
+  // shadows: true | { enabled, strength }: the raycaster's own volumetric shadows (its lights cast
+  // through the volume onto itself). A volume casts nothing into the scene's shadow maps.
+  bool shadows = false;
+  float shadow_strength = -1.0f; // < 0: the raycaster's default
   SceneTransferFunction tf;
   std::vector<SceneIsosurface> isosurfaces;
   std::vector<SceneVolRenLight> lights;
