@@ -1,7 +1,8 @@
 # Ariadne worlds: the server's document defines the world, and every client runs it
 
 > **Status: PLANNED (2026-11-07).** Nothing here is built. Q1 is settled: the light rig lives in
-> the server (§11). The other decisions are open. Parent
+> the server (§12). The other decisions are open. The same world also runs with no relay, as the
+> lab and gym that agents and people drive locally (§10, phases L0–L4). Parent
 > roadmap: [`ARIADNE_CONFERENCE_ROADMAP.md`](ARIADNE_CONFERENCE_ROADMAP.md) (§2 "Server is an `.ari`
 > app too", §5g, §5h, §5i, §5k). The server side rides
 > [`ARIADNE_SCRIPTING_HOSTS.md`](ARIADNE_SCRIPTING_HOSTS.md) §6 (S0–S7) and §8 (wasm guests).
@@ -23,9 +24,23 @@ The owner's request, 2026-11-07:
 The goal is a persistent, large-scale, real-time world built on what exists: the `.ari` document
 model, the replicated state tree, message passing, streams, and scheduled state execution.
 
+**The lab ask, 2026-11-06,** folded in here because it is the same world without a relay: a strong
+lab and gym, a digital world that agents and users interact with. Its pieces are components any
+document imports, general beyond GRL-SNAM and `cvc::nav`:
+
+- **A world module** that sets the world for vehicles and the navigator, in place of the Austin
+  bundle or synthetic city blocks.
+- **A vehicle selector.** It previews the vehicle alone in its own lit, shadowed view; shows its
+  size, mass, power and top speed; holds its settings and whether it drives the default or a trained
+  network; and spawns it, with a name, a team, a primary and secondary colour, and key/value
+  metadata.
+- **Spawn points and a spawn policy,** set on a minimap: which vehicle type or team uses which
+  points, picked at random, round-robin, and so on.
+- **A physics panel:** physics on or off, and stats on the active entities and forces.
+
 ## 1. What exists
 
-Checked against master 797ba4d9.
+Checked against master 797ba4d9; the lab's rows, from "Vehicles and their navigator" down, against 19423da3.
 
 | Part | Today | Where |
 |---|---|---|
@@ -46,6 +61,13 @@ Checked against master 797ba4d9.
 | What a document can already say | Far more than the room tree carries: `scene:` with primitives, meshes with `fit:`, heightfields, light rigs and shadows, and the custom node types `generated_world` and `cloud_sky`. `scene.physics:` gives gravity, `fixed_dt`, materials and per-node bodies (dynamic, kinematic or static; box, sphere, hull, mesh or terrain). All of it parses in core libcvc, with no GL. | `docs/ARIADNE.md` (Scene, Physics); `src/cvc/ariadne/loader.cpp` |
 | Persistence | None. The room lives in memory, and a restart re-seeds it. Only the device-key pins can go to a file. `distributed_state_config::blob_store_path` is not read. | `src/arisrv/main.cpp` (`--device-pins`); DISTRIBUTED_STATE_ROADMAP.md |
 | Scale pieces | Built but unused by the conference: hash partitioning (`state_hash_partition`, `state_cluster_shard::partition()`) and delegation leases (`state_delegation_manager`). | `inc/cvc/state/` |
+| Vehicles and their navigator | `cvc::nav::sim_world` runs N agents on an occupancy raster with one `coef_mlp` policy for all of them. N is fixed when it is built: agents can't be added or removed. Agents have colours and, in C++ only, a team (`set_team`, used for yielding); they have no name. | `inc/cvc/nav/sim_world.h`; `src/cvc/nav/sim_world_binding.cpp` |
+| Vehicle plants | `plant_host` puts each agent on a plant: nav's kinematic bicycle, a Jolt vehicle, the dynamic single track or the dynamic four-wheel model. Presets `vehicle_desc::humvee()` and `roboracer()` carry mass, wheelbase, track, engine and `max_speed`. | `inc/cvc/physics/plant_host.h`, `inc/cvc/physics/vehicle.h` |
+| Generated worlds in a document | The `generated_world` node builds terrain, roads, buildings, trees and water, but publishes only its height field (`RealizedScene::height_fields`), so `ground:` and bodies stand on it. Buildings, occupancy, the road graph and water stay inside the node. | `src/cvcGL/ariadne/world_nodes.cpp` |
+| World to navigator | Only in Python: the `pycvc_gl.cars` template rasterizes a city or generated world (`nav_world_rasterize`) into the navigator's planes and hands colliders to the plants. | `bindings/pycvc/pymod_gl/cars.py`; `docs/CARS.md` |
+| Physics stats | `physics::world_binding` writes `tick`, `step_ms`, `bodies`, `active_bodies`, `contact_events` and a snapshot to its prefix. A document's `scene.physics:` world is held directly by the realized scene, not through the binding, so it publishes none of them. | `inc/cvc/physics/world_binding.h`; `inc/cvc/gl/ariadne/scene_realize.h` |
+| Step and restart | `sim_transport.ari`'s Step and Restart buttons raise `sim.step` and `sim.restart` for the host to handle. The clock binding can queue steps (`request_steps`); nothing restarts a world. | `src/cvc/ariadne/components/sim_transport.ari`; `inc/cvc/core/world_clock_binding.h` |
+| Views | A document's `viewport` widgets draw the scene from cameras of their own, with per-view overrides, and `scenes:` gives a viewport a scene of its own: a studio set for one vehicle costs no host code. A click in a view doesn't give a world point. | `docs/ARIADNE.md` §5.18; `src/cvcGL/ariadne/scene_views.cpp` |
 
 **What that adds up to.** The data already flows the way the ask wants: the server holds the state,
 and each client rebuilds its view and its physics from the tree. Most of the *rules*, though, are
@@ -141,6 +163,8 @@ revision, written last, exactly as `avatars.policy` does today.
 | policy | `avatars.policy.*` | energy, `max_speed`, later per-controller limits | built (energy only) |
 | controllers | `controllers.<id>.*` | kernel or guest, version, params, content hash | new |
 | entities | `entities.<id>.*` | §4 | new |
+| spawns | `spawns.*` | spawn points (position, heading, tags) and the spawn policy (§10) | new |
+| stats | `physics.stats.*` | bodies, active bodies, contacts, step time; per entity its energy and forces. Read-only, written by whoever simulates: the relay, or a local world | new |
 | manifest | `world.*` | the world's name, version, and the revision of every section | new |
 
 **Rules for the sections:**
@@ -170,6 +194,9 @@ props, vehicles, doors and characters the server drives. Each **entity** has:
 - an **archetype** (body, look, allowed controllers);
 - a **controller**, or none;
 - an **owner**: the server, or a participant;
+- an **identity**: a name, a team, a primary and secondary colour, and key/value metadata. The
+  colours drive the archetype's look; the team is a label that spawn rules filter on (§10); the
+  metadata is the user's own and nothing reads it;
 - a **simulation class**:
 
 | Class | Who simulates it | Clients | Example |
@@ -205,6 +232,10 @@ A controller is a pure step:
    `walker@1` is today's `drive_walker`. The second is a vehicle on the Jolt vehicle plant
    (NAV-VEHICLE-PHYSICS-ROADMAP.md; §5k's Humvee); a flyer might follow. The world document picks
    kernels and sets their params.
+   - **`nav@1` is the navigator** (§10): `sim_world`'s planner over the entity's plant. Its params
+     name a policy by URI and content hash (a trained `.cvcnav`), or none for `default_biased`.
+     Entities naming the same policy share one loaded copy, so a policy per entity costs nothing
+     extra. It runs as one batch over every entity that uses it, as `sim_world` does today.
 2. **Portable guests.** Logic the world, or later a user, ships as a module: a wasm guest (scripting
    §8) or a DSL program. The same module runs on the relay and on the owner's client.
 
@@ -278,7 +309,55 @@ it.
   machinery exists and is unused.
 - **Persistence per cell.** A cell's snapshot and journal move with it when its region moves.
 
-## 10. Phases
+## 10. Local worlds: the lab and gym
+
+The world document doesn't need a relay. Run in arigl, in the browser, from pycvc or headless, the
+process runs the world document itself and is its own authority: it writes the sections of §3 into
+its own state tree and simulates every entity. That is the lab: people and agents drive vehicles in
+a world, change it, and measure what happens. With reset, step and observe from Python it is a gym.
+
+- **One runtime, two places.** A C++ **world runtime** reads the sections and runs the entities:
+  their plants, their controllers, physics, spawning. Locally it is the authority. On the relay
+  (WD1 on) the same runtime is the holon's authority, and clients build theirs from the published
+  sections. Nothing in the lab is a second implementation that the relay later replaces.
+- **The lab comes first** because it needs no server: no S0, no prediction, no determinism gate.
+  Each piece it builds is a piece WD2–WD5 need anyway.
+- **The components are panels over sections.** Locally a panel writes the section. In a room the
+  same panel sends a request that the world's rules check before the relay writes it (§6's tier 1).
+
+**The four components,** each an `.ari` file a document imports (`cvc://` or `load:`, with
+`link:` holes for the prefix and the viewport):
+
+| Component | What it does | Sections | Built on |
+|---|---|---|---|
+| `world_source` | Picks the world: generated (today's world controls), a data bundle such as Austin, a flat square or a file. Regenerates it, with progress and a ready revision other panels wait on. | `scene.world.*` | `generated_world`; the world runtime turns the world into the navigator's rasters and the plants' colliders, buildings included |
+| `vehicle_selector` | A list of the world's vehicle archetypes. The chosen one is drawn alone on a lit, shadowed studio set in its own viewport (a `scenes:` entry). Stats from the archetype's body: size, mass, power, top speed, wheelbase. Settings within the archetype's ranges. The policy: default or a trained network. Identity: name, team, two colours, metadata. A Spawn button. | `avatars.archetypes.*`, `controllers.*`, `entities.*` | §4's identity, §5's `nav@1`, runtime spawning |
+| `spawn_points` | A top-down minimap viewport: click to add a point, click one to remove or tag it (team, archetype). The policy: fixed, random, round-robin or nearest-free, per team or archetype. Points are checked against the world's occupancy; candidates are suggested along the roads. | `spawns.*` | click-to-world picking; the road graph |
+| `world_physics` | Physics on or off, speed, step and restart. A table of entities: bodies, active, contacts, step time; per vehicle its energy and forces. | `physics.*`, `physics.stats.*` | stats from the world runtime; built-in step and restart |
+
+**Vehicles are archetypes.** The vehicle catalog is the world document's archetypes, beside
+`person`: each names its plant (`kinematic`, `jolt`, `dynamic`, `dynamic4w`), its body (a
+`vehicle_desc` preset or its fields), its look (a mesh, or the generated Humvee), and the
+controllers it allows. libcvc's default worlds ship the built-in vehicles; a site adds its own in
+its own world document.
+
+**The gym** is the world runtime driven from Python or headless: `reset(seed)`, `step(actions)`,
+`observe()`, a reward the user writes, and an episode log. It absorbs the glue in `pycvc_gl.cars`
+(rasters, colliders, plants), which then becomes a thin layer over it. Training runs many worlds
+headless; the same document opens in arigl to watch one.
+
+**What the runtime needs that isn't there** (§1):
+
+- `sim_world` takes agents at run time: add and remove, with a stable entity id each.
+- A policy per agent, as `nav@1`'s params, loaded once per hash.
+- A name per agent, and the team bound to Python and to documents.
+- `generated_world` gives the runtime its whole world (buildings, occupancy, road graph, water),
+  not only the height field, and the world-to-navigator glue moves from Python to C++.
+- The document's physics publishes `physics.stats.*`.
+- Built-in handlers for `sim.step` and `sim.restart`.
+- A viewport click gives a world point (a ray against the scene, or the ground's height field).
+
+## 11. Phases
 
 Each phase leaves the conference working. **WD** = world document. (S, G, W, H and D are the
 scripting-hosts, wasm-guest, ariglx-web, holon and DSL-citizen phases in the documents above; G5 is
@@ -297,11 +376,22 @@ GENERATED-WORLD-ROADMAP.md's.)
 | WD8 | **Persistence.** Snapshot and journal of the world's state; restart restores it; per-principal saved state. | WD3, S5 | M |
 | WD9 | **Cells and many holons.** Cell sections and paging, then subdelegation and handoff. | WD8, H3, H4 | L |
 
-**The first cut is WD0 + WD1.** WD1 needs S0, which is next on the tracker anyway, for application
-services. S0's `server: publish:` namespaces (§6.5.3) should be designed with world sections in
+The lab's phases (§10). **L** = local world. They need no relay, so they can start before S0;
+each builds what a WD phase needs.
+
+| Phase | What | Feeds | Size |
+|---|---|---|---|
+| L0 | **The world runtime, local.** It reads a document's world sections and runs entities: `sim_world` with agents added and removed at run time; `nav@1` with a policy per entity; identity on entities; the whole generated world handed to the runtime, with its rasters and colliders built in C++; `physics.stats.*`; built-in step and restart; click-to-world picking in a viewport. pycvc bindings for all of it. | WD2, WD3, WD4, WD5 | L |
+| L1 | **`world_source` and `world_physics`,** the two panels on pieces that already exist. | WD5 | M |
+| L2 | **Vehicle archetypes and `vehicle_selector`,** with the studio preview. | WD4 | M |
+| L3 | **`spawns.*` and `spawn_points`,** with the minimap and road suggestions. | WD3 | M |
+| L4 | **The gym:** reset, step, observe, reward, episode logs, headless; `pycvc_gl.cars` moves onto it. | — | M |
+
+**The first cut is WD0 + WD1** for the relay, and **L0** for the lab, which can run beside it. WD1
+needs S0, which is next on the tracker anyway, for application services. S0's `server: publish:` namespaces (§6.5.3) should be designed with world sections in
 mind from the start.
 
-## 11. Open decisions
+## 12. Open decisions
 
 - **Q1. Where does the look live? Settled (owner, 2026-11-07): the rig lives in the server.** The
   world document declares the lights and shadows, and every client draws the world under them.
@@ -319,8 +409,18 @@ mind from the start.
 - **Q7. What persists, and for how long?** The state in §8, and its retention.
 - **Q8. What scale does the first persistent world need?** Users per room or cell, and the world's
   size. This decides when WD9 is needed.
+- **Q9. One simulator or two?** The holon runs avatars in Jolt at 120 Hz; `sim_world` runs nav
+  agents at its own tick and reaches Jolt through `plant_host`. Proposed: the entities table is the
+  one registry, `sim_world` becomes `nav@1`'s batch kernel over the entities using it, and both run
+  on the world clock.
+- **Q10. What does a team mean?** Proposed: a label and colours that spawn rules filter on, and the
+  yielding `sim_world` already does. Rules and scoring by team come later, as server programs (§7).
+- **Q11. What does "physics off" mean?** Proposed: `physics.enabled = false` pauses the world.
+  Dropping vehicles to the kinematic plant is a per-archetype choice, not this switch.
+- **Settled with C++ for the core (owner, 2026-11-07):** the world runtime is C++, behind a scene
+  node and pycvc; the lab's panels are `.ari` components over it.
 
-## 12. Where this plugs in
+## 13. Where this plugs in
 
 - [`ARIADNE_CONFERENCE_ROADMAP.md`](ARIADNE_CONFERENCE_ROADMAP.md): §2 (the server is an `.ari` app),
   §5g (the shared scene), §5h (the holon; H2–H4), §5i (the DSL as a holon citizen; D1–D4), §5k
@@ -334,3 +434,5 @@ mind from the start.
   comes from.
 - [`DISTRIBUTED_STATE_ROADMAP.md`](DISTRIBUTED_STATE_ROADMAP.md): persistence, partitioning,
   subdelegation.
+- [`../CARS.md`](../CARS.md): the multi-car controller template, whose world glue the gym (L4)
+  takes over.
