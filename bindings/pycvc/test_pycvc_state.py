@@ -8,6 +8,9 @@ of THAT app's tree, carrying the full dotted path (real push).
 """
 
 import gc
+import os
+import threading
+import time
 
 import pycvc
 
@@ -303,6 +306,136 @@ def test_update_value_not_wrapped():
     # Its std::function parameter has no Python form (pycvc.i ignores it).
     app = pycvc.make_app()
     assert not hasattr(pycvc.State.instance(app).child("u"), "updateValue")
+
+
+# ── the accessors against another thread's deletes (threaded execution, Stage 0) ──
+# The sanitizer jobs set CVC_LOCKS_SANITIZER=1 and run the smaller size, as
+# test_pycvc_state_exec_locks.py does; LONG is a whole run's ceiling.
+SANITIZER = os.environ.get("CVC_LOCKS_SANITIZER") == "1"
+LONG = 600.0
+
+
+def test_hz06_accessors_against_deletes():
+    # HZ-6's twin for the free accessors (td 4.8, 4.12; S0.4; Linux TSan and ASan). Exec A
+    # deletes p.x and makes p.x.y again, round after round, on a thread of its own (its run
+    # releases the GIL while it steps), while this thread reads p, its children and p.x.y and
+    # removes p.x.y and p.x. Each accessor holds the nodes it walks, so a read gives a value or
+    # "no node", p's sibling never changes, and nothing crashes.
+    n = 2000 if SANITIZER else 20000
+    app = pycvc.make_app()
+    pycvc.state_set(app, "p.s1", "one")
+    pycvc.state_set(app, "p.x.y", "0")
+    a = pycvc.Exec(app)
+    prog = (f'(begin (set i 0) (while (< i {n}) (begin (state-delete "p.x") '
+            '(state-set "p.x.y" (str i)) (set i (+ i 1)))) i)')
+    out = {}
+
+    def run_a():
+        try:
+            out["value"] = a.run(prog)
+        except BaseException as e:  # noqa: BLE001 - the case reads it
+            out["error"] = e
+
+    counts = {"values": 0, "misses": 0}
+
+    def read(fn, *args):
+        # A value, or None for a node another thread deleted first.
+        try:
+            v = fn(app, *args)
+        except RuntimeError as e:
+            assert "no node at path" in str(e), e
+            counts["misses"] += 1
+            return None
+        counts["values"] += 1
+        return v
+
+    t = threading.Thread(target=run_a, name="hz06-a")
+    t0 = time.monotonic()
+    t.start()
+    rounds = 0
+    while rounds < n and (t.is_alive() or rounds < 10):
+        rounds += 1
+        v = read(pycvc.state_get, "p.x.y")
+        assert v is None or isinstance(v, str), v
+        assert pycvc.state_has(app, "p.x.y") in (True, False)
+        assert "s1" in pycvc.state_children(app, "p")
+        assert read(pycvc.state_comment, "p.x.y") in (None, "")
+        assert read(pycvc.state_property, "p.x", "k") in (None, "")
+        read(pycvc.state_property_keys, "p.x.y")
+        if rounds % 3 == 0:
+            pycvc.state_remove(app, "p.x.y")
+        if rounds % 7 == 0:
+            pycvc.state_remove(app, "p.x")
+        assert pycvc.state_get(app, "p.s1") == "one"
+    t.join(LONG)
+    assert not t.is_alive(), f"Exec A did not finish within {LONG} s"
+    assert "error" not in out, out["error"]
+    assert out["value"] == str(n), out["value"]
+    print(f"  {rounds} rounds of reads ({counts['values']} values, {counts['misses']} misses) "
+          f"beside {n} deletes: {time.monotonic() - t0:.2f} s")
+    assert pycvc.state_get(app, "p.s1") == "one"
+
+
+class _CountingObserver(pycvc.state_observer):
+    """Counts its calls. A call on an observer that is not a whole, live one (a dropped one, or a
+    new object at a freed one's address before its __init__ ran) is counted in `stale`."""
+
+    stale = 0
+
+    def __init__(self):
+        super().__init__()
+        self.n = 0
+
+    def on_changed(self, path):
+        if "n" not in self.__dict__:
+            _CountingObserver.stale += 1
+            return
+        self.n += 1
+
+
+def test_observer_dropped_mid_callback_is_never_called():
+    # R0a-mem-1 (td 4.12; Linux TSan and ASan): an Exec writes the tree on a thread of its own
+    # (its run releases the GIL while it steps), so each write's slot waits for the GIL that this
+    # thread holds while it makes observers, watches the app with each and drops it. signals2 does
+    # not wait for a slot already called, so a dropped observer used to be called through a freed
+    # pointer; the slot now checks, once it has the GIL, that its observer was not dropped.
+    seconds = 2.0 if SANITIZER else 10.0
+    app = pycvc.make_app()
+    ex = pycvc.Exec(app)
+    prog = ('(begin (set i 0) (while (< i 2000) (begin (state-set "obs.x" (str i)) '
+            '(set i (+ i 1)))) 1)')
+    stop = threading.Event()
+    out = {"runs": 0}
+
+    def writer():
+        try:
+            while not stop.is_set():
+                ex.run(prog)
+                out["runs"] += 1
+        except BaseException as e:  # noqa: BLE001 - the case reads it
+            out["error"] = e
+
+    _CountingObserver.stale = 0
+    t = threading.Thread(target=writer, name="r0a-mem-1")
+    made = 0
+    t0 = time.monotonic()
+    t.start()
+    try:
+        while time.monotonic() - t0 < seconds:
+            o = _CountingObserver()
+            o.watch(app)
+            for _ in range(200):  # let the writer reach the slot
+                pass
+            del o
+            made += 1
+    finally:
+        stop.set()
+        t.join(LONG)
+    assert not t.is_alive(), f"the writer did not finish within {LONG} s"
+    assert "error" not in out, out["error"]
+    print(f"  {made} observers made and dropped beside {out['runs']} writer runs")
+    assert out["runs"] > 0
+    assert _CountingObserver.stale == 0, f"on_changed ran on {_CountingObserver.stale} dropped observers"
 
 
 if __name__ == "__main__":

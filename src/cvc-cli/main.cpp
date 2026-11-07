@@ -1418,9 +1418,18 @@ static int cmd_serve(int argc, char **argv) {
   std::cout << "Press Ctrl+C to stop." << std::endl;
   while (g_serve_running.load()) {
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    // If exec enabled, step the scheduler
-    if (sched && sched->has_runnable())
-      sched->step();
+    // If exec enabled, step the scheduler: for a runnable process, or for a command posted to it
+    // (the coordinator's bus threads post_control), which only a step applies.
+    if (sched && (sched->has_runnable() || sched->has_pending_control())) {
+      try {
+        sched->step();
+      } catch (const std::exception &e) {
+        // A posted command that throws (a kill whose lock release or tree write a slot refuses),
+        // or a step's own error: logged, and the server goes on. The commands after it stay
+        // queued for the next step.
+        std::cerr << "exec: " << e.what() << "\n";
+      }
+    }
   }
 
   std::cout << "\nShutting down...\n";

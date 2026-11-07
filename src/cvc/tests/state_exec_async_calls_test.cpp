@@ -20,6 +20,7 @@
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/evaluator.h>
 #include <cvc/state/state_exec/exceptions.h>
+#include <cvc/state/state_exec/heap.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/scheduler.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
@@ -37,6 +38,18 @@
 
 using namespace cvc::state_exec;
 using namespace std::chrono_literals;
+
+// A program's closure bound in the scope it captured (a defun, a lambda set at top level) and that
+// scope hold each other, and only the cycle collector frees them
+// (docs/STATE_EXEC_DEVELOPER_GUIDE.md, "Reference cycles"). Nothing here runs long enough for a
+// collection to be due, so once every test is done one collection leaves LeakSanitizer only real
+// leaks to report.
+class collect_cycles_at_exit : public ::testing::Environment {
+public:
+  void TearDown() override { collect_cycles(); }
+};
+[[maybe_unused]] ::testing::Environment *const g_collect_cycles =
+    ::testing::AddGlobalTestEnvironment(new collect_cycles_at_exit);
 
 namespace {
 
@@ -1769,4 +1782,464 @@ TEST(AsyncCalls, WhereAStartedCallCantParkItsKernelRuns) {
     EXPECT_EQ(sp.starts, 0);
     EXPECT_EQ(sp.kernels, 1);
   });
+}
+
+// --- a cancelled call, however it is awaited (td 4.9; R0-final's R0b-sem-1) ---
+
+namespace {
+
+// A process makes `future_expr`'s call and forks; the parent awaits it, the child (after a message
+// "go" when `after_kill`) awaits it with `child_wait`, catching RuntimeError as (list
+// "RuntimeError" message). Once both wait, the parent is killed, which cancels the call before it
+// settles, once `ready()` holds too. What the child came to: its result, or "<status>" when it
+// didn't end within `secs`.
+std::string fork_child_after_parent_kill(
+    world &w, const std::string &future_expr, const std::string &child_wait, bool after_kill,
+    double secs, const std::function<bool()> &ready = [] { return true; }) {
+  const std::string gate = after_kill ? R"((begin (msg-recv "go") )" : "(begin ";
+  const int parent = w.submit(
+      "(begin (set f " + future_expr + ") (set c (fork)) (if (= c 0) " + gate + "(try " +
+      child_wait +
+      " (catch (RuntimeError e) (list \"RuntimeError\" (get-attr e \"message\"))))) (await f)))");
+  int child = -1;
+  EXPECT_TRUE(w.pump([&] {
+    for (const process_info &i : w.async->list_processes())
+      if (i.parent_pid == parent)
+        child = i.pid;
+    return child >= 0 && w.waiting(parent) && w.waiting(child) && ready();
+  })) << "the parent and the child never both waited";
+  if (child < 0)
+    return "<no child>";
+  const auto t0 = clock_type::now();
+  EXPECT_TRUE(w.async->kill(parent));
+  if (after_kill) // the child awaits only now, after the call was cancelled
+    w.async->post_message("go", value_t(int64_t(1)));
+  const bool ended = w.pump([&] { return w.finished(child); }, secs);
+  std::printf("%s: the child %s %.3f s after the kill\n", child_wait.c_str(),
+              ended ? "ended" : "still waited", seconds_since(t0));
+  if (!ended) {
+    w.async->kill(child);
+    return "<waiting>";
+  }
+  const std::optional<value_t> r = w.result(child);
+  return r ? to_string(*r) : "<" + std::string(to_string(w.info(child).status)) + ">";
+}
+
+// What the error says, after the function's name.
+const char *const kCancelled = ": cancelled: the process that made the call ended";
+
+// (blind ms): sleeps ms ignoring cancelled(), then returns ms; `started` counts the kernels begun.
+void register_blind(world &w, std::atomic<int> &started) {
+  register_async_fn(w.env, *w.host, "blind",
+                    [&started](std::span<const value_t> a) -> async_kernel {
+                      const int64_t ms = int_arg(a, 0, 50);
+                      return [&started, ms](async_call &) -> value_t {
+                        started.fetch_add(1);
+                        std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+                        return value_t(ms);
+                      };
+                    });
+}
+
+} // namespace
+
+// A call cancelled before it settled (its process was killed) is settled then, with RuntimeError
+// "cancelled: the process that made the call ended", so another process awaiting the same future
+// raises that however it awaits. The kernel here ignores the cancel and returns 400 after 400 ms,
+// which used to be what await-all, a later await and a generator body's await got.
+TEST(AsyncCalls, ACancelledCallRaisesForAnAwaitAllParkedBeforeTheKill) {
+  std::atomic<int> started{0};
+  world w(async_sched);
+  register_blind(w, started);
+  const std::string got = fork_child_after_parent_kill(
+      w, "(blind-async 400)", "(await-all (list f))", false, 5.0, [&] { return started > 0; });
+  EXPECT_NE(got.find(kCancelled), std::string::npos) << got;
+}
+
+TEST(AsyncCalls, ACancelledCallRaisesForAnAwaitAfterTheCancel) {
+  std::atomic<int> started{0};
+  world w(async_sched);
+  register_blind(w, started);
+  const std::string got = fork_child_after_parent_kill(w, "(blind-async 400)", "(await f)", true,
+                                                       5.0, [&] { return started > 0; });
+  EXPECT_NE(got.find(kCancelled), std::string::npos) << got;
+}
+
+TEST(AsyncCalls, ACancelledCallRaisesForAGeneratorBodysAwaitAfterTheCancel) {
+  std::atomic<int> started{0};
+  world w(async_sched);
+  register_blind(w, started);
+  const std::string got = fork_child_after_parent_kill(
+      w, "(blind-async 400)", "(next (generator (lambda () (yield (await f)))))", true, 5.0,
+      [&] { return started > 0; });
+  EXPECT_NE(got.find(kCancelled), std::string::npos) << got;
+}
+
+// Work that starts by itself (async_start) and never settles once cancelled: the awaits that used
+// to wait for good raise the same error.
+TEST(AsyncCalls, ACancelledStartedCallRaisesForAnAwaitAllParkedBeforeTheKill) {
+  world w(async_sched);
+  started_probe sp;
+  register_started(w, sp);
+  const std::string got =
+      fork_child_after_parent_kill(w, "(self-op-async 1)", "(await-all (list f))", false, 3.0);
+  EXPECT_NE(got.find(kCancelled), std::string::npos) << got;
+  EXPECT_EQ(sp.stopped, 1);
+}
+
+TEST(AsyncCalls, ACancelledStartedCallRaisesForAnAwaitAfterTheCancel) {
+  world w(async_sched);
+  started_probe sp;
+  register_started(w, sp);
+  const std::string got =
+      fork_child_after_parent_kill(w, "(self-op-async 1)", "(await f)", true, 3.0);
+  EXPECT_NE(got.find(kCancelled), std::string::npos) << got;
+  EXPECT_EQ(sp.stopped, 1);
+}
+
+// R0-final's R0a-conc-1: a drain whose finish of a completed call throws (the step rate it reads
+// is published to the tree, and a slot there throws) has claimed the call and taken it off the
+// list; it still wakes the process awaiting it before the exception propagates, and that process
+// gets the call's value. It used to stay parked for good: nothing finishes a call twice.
+TEST(AsyncCalls, AFinishThatThrowsStillWakesItsWaiter) {
+  std::atomic<bool> release{false}, started{false};
+  world w(async_sched);
+  w.async->set_id("finish_throws");
+  register_async_fn(w.env, *w.host, "held", [&](std::span<const value_t>) -> async_kernel {
+    return [&](async_call &) -> value_t {
+      started = true;
+      const auto end = clock_type::now() + std::chrono::seconds(20);
+      while (!release.load() && clock_type::now() < end)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      return value_t(int64_t(7));
+    };
+  });
+  const int pid = w.submit("(+ 1 (held))");
+  ASSERT_TRUE(w.pump([&] { return started.load() && w.waiting(pid); }));
+  // A new rate, so the finish's read publishes it; then a slot under the published key that throws.
+  (*w.tree)("state_exec.defaults.limits.async_steps_per_cpu_ms").value(std::string("2000"));
+  std::atomic<bool> armed{true};
+  boost::signals2::scoped_connection slot =
+      (*w.tree)("state_exec.schedulers").childChanged.connect([&](const std::string &) {
+        if (armed.exchange(false))
+          throw std::runtime_error("a slot on the tree threw");
+      });
+  release = true;
+  ASSERT_TRUE(w.async->wait_for_work(clock_type::now() + std::chrono::seconds(10)));
+  bool threw = false;
+  for (int i = 0; i < 1000 && !threw; ++i) { // the completion may land a moment after the wake
+    try {
+      w.async->drain_ingress();
+    } catch (const std::runtime_error &) {
+      threw = true;
+    }
+    if (!threw)
+      w.async->wait_for_work(clock_type::now() + std::chrono::milliseconds(10));
+  }
+  slot.disconnect();
+  EXPECT_TRUE(threw) << "the finish never threw";
+  EXPECT_TRUE(w.pump([&] { return w.finished(pid); }, 5.0)) << "the awaiting process stayed parked";
+  const std::optional<value_t> r = w.result(pid);
+  ASSERT_TRUE(r.has_value());
+  EXPECT_EQ(std::get<int64_t>(r->v), 8);
+}
+
+// --- the skeptic pass: a cancel or a timeout that throws (R0-final) ---
+
+namespace {
+
+// Drive the scheduler until `done` (or `secs` pass), going on past a drain that throws: what the
+// cases below make happen. Whether `done` held.
+template <class Done> bool pump_through_throws(world &w, Done done, double secs) {
+  const auto start = clock_type::now();
+  while (seconds_since(start) < secs) {
+    try {
+      w.async->drain_ingress();
+      w.async->sync_run(100000, 0.02);
+    } catch (const std::exception &e) {
+      std::printf("  (a drain threw: %s)\n", e.what());
+    }
+    if (done())
+      return true;
+    std::this_thread::sleep_for(1ms);
+  }
+  return done();
+}
+
+// (blind-hook ms): as blind, but its kernel first sets a cancel hook that throws.
+void register_blind_hook(world &w, std::atomic<int> &started, async_options opts = {}) {
+  register_async_fn(
+      w.env, *w.host, "blind-hook",
+      [&started](std::span<const value_t> a) -> async_kernel {
+        const int64_t ms = int_arg(a, 0, 50);
+        return [&started, ms](async_call &call) -> value_t {
+          call.on_cancel([] { throw std::runtime_error("the cancel hook threw"); });
+          started.fetch_add(1);
+          std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+          return value_t(ms);
+        };
+      },
+      opts);
+}
+
+// (stuck): work started by itself that never settles; its cancel hook throws.
+void register_stuck(world &w, std::atomic<int> &started) {
+  register_async_fn(w.env, *w.host, "stuck", [&started](std::span<const value_t>) -> async_work {
+    async_work work;
+    work.start = [&started](const std::shared_ptr<async_call> &call) {
+      call->on_cancel([] { throw std::runtime_error("the cancel hook threw"); });
+      started.fetch_add(1);
+    };
+    return work;
+  });
+}
+
+// A process makes `future_expr`'s call and forks; the child awaits it with `child_wait` (catching
+// RuntimeError as (list "RuntimeError" message)), the parent with (await f). Once both wait and
+// `ready()` holds: {parent, child}.
+std::pair<int, int> fork_both_awaiting(world &w, const std::string &future_expr,
+                                       const std::string &child_wait,
+                                       const std::function<bool()> &ready) {
+  const int parent = w.submit(
+      "(begin (set f " + future_expr + ") (set c (fork)) (if (= c 0) (try " + child_wait +
+      " (catch (RuntimeError e) (list \"RuntimeError\" (get-attr e \"message\")))) (await f)))");
+  int child = -1;
+  EXPECT_TRUE(pump_through_throws(
+      w,
+      [&] {
+        for (const process_info &i : w.async->list_processes())
+          if (i.parent_pid == parent)
+            child = i.pid;
+        return child >= 0 && w.waiting(parent) && w.waiting(child) && ready();
+      },
+      10.0))
+      << "the parent and the child never both waited";
+  return {parent, child};
+}
+
+std::string outcome_of(world &w, int pid) {
+  const std::optional<value_t> r = w.result(pid);
+  return r ? show(*r) : "<" + std::string(to_string(w.info(pid).status)) + ">";
+}
+
+} // namespace
+
+// SK-1: the kill of the process that made the call cancels it, then reads the step rate to charge
+// it, and a slot on the tree throws when the new rate is published. The kill throws, and the fork
+// child awaiting the cancelled call, which was woken before that read, still ends with the
+// cancel's error; so does the parent. Before, both stayed parked: the call was claimed and off the
+// list, and nothing finished it again.
+TEST(AsyncCalls, AKillWhoseRateReadThrowsStillWakesTheForkChild) {
+  for (const char *const wait : {"(await f)", "(await-all (list f))"}) {
+    SCOPED_TRACE(wait);
+    std::atomic<int> started{0};
+    world w(async_sched);
+    w.async->set_id("kill_rate_throws");
+    register_blind(w, started);
+    const auto [parent, child] =
+        fork_both_awaiting(w, "(blind-async 300)", wait, [&] { return started > 0; });
+    ASSERT_GE(child, 0);
+    (*w.tree)("state_exec.defaults.limits.async_steps_per_cpu_ms").value(std::string("2000"));
+    std::atomic<bool> armed{true};
+    boost::signals2::scoped_connection slot =
+        (*w.tree)("state_exec.schedulers").childChanged.connect([&](const std::string &) {
+          if (armed.exchange(false))
+            throw std::runtime_error("a slot on the tree threw");
+        });
+    EXPECT_THROW(w.async->kill(parent), std::runtime_error);
+    slot.disconnect();
+    EXPECT_TRUE(pump_through_throws(
+        w, [&] { return w.finished(child); }, 3.0))
+        << "the fork child stayed parked";
+    EXPECT_NE(outcome_of(w, child).find(kCancelled), std::string::npos) << outcome_of(w, child);
+    EXPECT_TRUE(pump_through_throws(
+        w, [&] { return w.finished(parent); }, 3.0))
+        << "the parent stayed parked";
+  }
+}
+
+// SK-2: a cancel hook that throws (against its contract) skips neither the call's settling nor
+// its waiters' wake: the call is settled before the hook runs. The kill reports the hook's
+// exception, and the fork child gets the cancel's error, not the kernel's late value (blind-hook
+// ignores the cancel and returns 300); with started work that never settles, it doesn't wait for
+// good.
+TEST(AsyncCalls, AThrowingCancelHookSkipsNeitherTheSettleNorTheWake) {
+  {
+    SCOPED_TRACE("a kernel that ignores the cancel");
+    std::atomic<int> started{0};
+    world w(async_sched);
+    register_blind_hook(w, started);
+    const auto [parent, child] =
+        fork_both_awaiting(w, "(blind-hook-async 300)", "(await f)", [&] { return started > 0; });
+    ASSERT_GE(child, 0);
+    EXPECT_THROW(w.async->kill(parent), std::runtime_error);
+    EXPECT_TRUE(pump_through_throws(w, [&] { return w.finished(child); }, 3.0));
+    EXPECT_NE(outcome_of(w, child).find(kCancelled), std::string::npos) << outcome_of(w, child);
+  }
+  {
+    SCOPED_TRACE("started work that never settles");
+    std::atomic<int> started{0};
+    world w(async_sched);
+    register_stuck(w, started);
+    const auto [parent, child] =
+        fork_both_awaiting(w, "(stuck-async)", "(await f)", [&] { return started > 0; });
+    ASSERT_GE(child, 0);
+    EXPECT_THROW(w.async->kill(parent), std::runtime_error);
+    EXPECT_TRUE(pump_through_throws(
+        w, [&] { return w.finished(child); }, 3.0))
+        << "the child waited for good";
+    EXPECT_NE(outcome_of(w, child).find(kCancelled), std::string::npos) << outcome_of(w, child);
+  }
+}
+
+// SK-3: a call past its timeout is settled TimeoutError and its kernel told to stop; a cancel
+// hook that throws there no longer skips the call's finish, so the process awaiting it resumes
+// (and catches the TimeoutError) instead of waiting until its own time limit.
+TEST(AsyncCalls, ATimeoutWhoseCancelHookThrowsStillResumesItsProcess) {
+  std::atomic<int> started{0};
+  world w(async_sched);
+  async_options opts;
+  opts.timeout = 0.05;
+  register_blind_hook(w, started, opts);
+  const int pid = w.submit(R"((try (blind-hook 300) (catch (TimeoutError e) "timed out")))");
+  EXPECT_TRUE(pump_through_throws(
+      w, [&] { return w.finished(pid); }, 3.0))
+      << "the process awaiting the timed-out call stayed parked";
+  EXPECT_EQ(outcome_of(w, pid), "timed out");
+}
+
+// Skeptic round 2's R2-1: a kill that throws, while cancelling its process's call (a cancel hook
+// that throws, or the step rate's publication, whose slot on the tree throws), still kills the
+// process: it is killed_by_user, and never runs on. Since 3ada6e4fd woke it before the throw, it
+// ran on instead, its await raising the cancel's error, which it caught; before that it stayed
+// parked.
+TEST(AsyncCalls, AKillThatThrowsStillKillsItsProcess) {
+  for (const bool rate : {false, true}) {
+    SCOPED_TRACE(rate ? "the rate's publication throws" : "the cancel hook throws");
+    std::atomic<int> started{0};
+    world w(async_sched);
+    w.async->set_id("kill_throws");
+    if (rate)
+      register_blind(w, started);
+    else
+      register_blind_hook(w, started);
+    const int pid = w.submit(
+        std::string("(begin (set f ") + (rate ? "(blind-async 300)" : "(blind-hook-async 300)") +
+        ") (try (await f) (catch (RuntimeError e) \"ran on after its kill\")))");
+    ASSERT_TRUE(pump_through_throws(w, [&] { return w.waiting(pid) && started > 0; }, 10.0));
+    (*w.tree)("state_exec.defaults.limits.async_steps_per_cpu_ms").value(std::string("2000"));
+    std::atomic<bool> armed{rate};
+    boost::signals2::scoped_connection slot =
+        (*w.tree)("state_exec.schedulers").childChanged.connect([&](const std::string &) {
+          if (armed.exchange(false))
+            throw std::runtime_error("a slot on the tree threw");
+        });
+    EXPECT_THROW(w.async->kill(pid), std::runtime_error);
+    slot.disconnect();
+    EXPECT_EQ(w.info(pid).status, process_status::killed);
+    pump_through_throws(w, [] { return false; }, 0.5); // a woken process would run on now
+    EXPECT_EQ(w.info(pid).status, process_status::killed) << outcome_of(w, pid);
+    EXPECT_EQ(w.async->get_exit_error(pid), "killed_by_user");
+    EXPECT_FALSE(w.result(pid).has_value());
+  }
+}
+
+// --- Stage 0 hazards (td 8.1) ---
+
+namespace {
+
+// A process rate of 0 leaves a call only its minimum charge, one step (3.8): a process's
+// async_steps then counts the calls it was charged for.
+execute_options one_step_a_call() {
+  execute_options o;
+  o.async_steps_per_cpu_ms = 0.0;
+  return o;
+}
+
+// The processes `parent` forked.
+std::vector<int> children_of(const world &w, int parent) {
+  std::vector<int> out;
+  for (const process_info &i : w.sync ? w.sync->list_processes() : w.async->list_processes())
+    if (i.parent_pid == parent)
+      out.push_back(i.pid);
+  return out;
+}
+
+} // namespace
+
+// HZ-13 (td 8.1, S0.9): a future awaited twice is finished, and charged, once: both awaits get its
+// one result, and the process is charged what one await costs. The same for a call that fails
+// (both awaits raise its error), and for a future a fork child awaits beside its parent: both get
+// the value, and the child, which made no call, is charged nothing.
+TEST(AsyncCalls, HZ13_AFutureAwaitedTwiceIsChargedOnce) {
+  for_engines(kSchedulers, [](unsigned e) {
+    world w(e);
+    const int once = w.run_to_end(w.submit("(await (slow-op-async 5))", one_step_a_call()));
+    const int twice = w.run_to_end(w.submit(
+        "(begin (set f (slow-op-async 5)) (list (await f) (await f)))", one_step_a_call()));
+    EXPECT_EQ(show(*w.result(once)), "10");
+    EXPECT_EQ(show(*w.result(twice)), "(10 10)");
+    EXPECT_EQ(w.info(once).async_steps, 1u);
+    EXPECT_EQ(w.info(twice).async_steps, 1u);
+    EXPECT_EQ(w.p.ended, 2);
+
+    const int failed = w.run_to_end(w.submit(R"((begin (set f (b-async))
+        (list (try (await f) (catch (ValueError e) (get-attr e "message")))
+              (try (await f) (catch (ValueError e) (get-attr e "message"))))))",
+                                             one_step_a_call()));
+    EXPECT_EQ(show(*w.result(failed)), R"(("b failed" "b failed"))");
+    EXPECT_EQ(w.info(failed).async_steps, 1u);
+
+    const int parent = w.submit(
+        "(begin (set f (slow-op-async 5)) (set c (fork)) (list c (await f)))", one_step_a_call());
+    ASSERT_TRUE(w.pump([&] { return w.finished(parent) && children_of(w, parent).size() == 1; }));
+    const int child = children_of(w, parent)[0];
+    w.run_to_end(child);
+    EXPECT_EQ(show(*w.result(parent)), "(" + std::to_string(child) + " 10)");
+    EXPECT_EQ(show(*w.result(child)), "(0 10)");
+    EXPECT_EQ(w.info(parent).async_steps, 1u);
+    EXPECT_EQ(w.info(child).async_steps, 0u);
+    EXPECT_EQ(w.p.ended, 3);
+  });
+}
+
+// HZ-13: a future's outcome taken before the scheduler drains the call's completion is not charged
+// again by the drain. An await in a generator's body can't park, so it waits for the call there
+// and takes the outcome at once; the completion the kernel posted is drained after.
+TEST(AsyncCalls, HZ13_AnOutcomeTakenBeforeTheDrainIsNotChargedAgain) {
+  world w(async_sched);
+  const int pid = w.submit(R"((begin (set f (slow-op-async 5 20))
+                                    (set g (generator (lambda () (yield (await f)))))
+                                    (list (next g) (await f))))",
+                           one_step_a_call());
+  w.run_to_end(pid);
+  w.host->wait_idle();
+  w.async->drain_ingress(); // whatever the kernel posted is drained now, if it wasn't
+  EXPECT_EQ(show(*w.result(pid)), "(10 10)");
+  EXPECT_EQ(w.info(pid).async_steps, 1u);
+  EXPECT_EQ(w.async->async_calls_in_flight(), 0u);
+}
+
+// HZ-13: killing the process that made a call wakes every process awaiting its future. Here a fork
+// child awaits the same future as its parent; the kill cancels the call and drops it from the
+// list, which used to wake nobody, so the child waited for ever.
+TEST(AsyncCalls, HZ13_ACancelledCallWakesEveryWaiter) {
+  world w(async_sched);
+  const int parent = w.submit("(begin (set f (slow-op-async 1 5000)) (set c (fork)) (await f))");
+  ASSERT_TRUE(w.pump([&] {
+    const std::vector<int> kids = children_of(w, parent);
+    return w.p.started && w.waiting(parent) && kids.size() == 1 && w.waiting(kids[0]);
+  }));
+  const int child = children_of(w, parent)[0];
+  const auto t0 = clock_type::now();
+  ASSERT_TRUE(w.async->kill(parent));
+  const bool woken = w.pump([&] { return w.finished(child); }, 10.0);
+  std::printf("HZ-13: the child %s %.3f s after the kill (%s)\n", woken ? "ended" : "still waited",
+              seconds_since(t0), to_string(w.info(child).status));
+  EXPECT_TRUE(woken);
+  EXPECT_EQ(w.info(parent).status, process_status::killed);
+  EXPECT_EQ(w.info(parent).exit_error.value_or(""), "killed_by_user");
+  EXPECT_TRUE(w.pump([&] { return w.p.cancelled_seen.load(); }, 10.0));
+  if (!woken)
+    w.async->kill(child);
 }

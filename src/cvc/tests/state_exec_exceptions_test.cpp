@@ -10,6 +10,7 @@
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/evaluator.h>
 #include <cvc/state/state_exec/exceptions.h>
+#include <cvc/state/state_exec/heap.h>
 #include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/scheduler.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
@@ -21,6 +22,18 @@
 #include <vector>
 
 using namespace cvc::state_exec;
+
+// A program's closure bound in the scope it captured (a defun, a lambda set at top level) and that
+// scope hold each other, and only the cycle collector frees them
+// (docs/STATE_EXEC_DEVELOPER_GUIDE.md, "Reference cycles"). Nothing here runs long enough for a
+// collection to be due, so once every test is done one collection leaves LeakSanitizer only real
+// leaks to report.
+class collect_cycles_at_exit : public ::testing::Environment {
+public:
+  void TearDown() override { collect_cycles(); }
+};
+[[maybe_unused]] ::testing::Environment *const g_collect_cycles =
+    ::testing::AddGlobalTestEnvironment(new collect_cycles_at_exit);
 
 namespace exceptions_test {
 // A C++ exception type of the test's own, for UN-9: a native error becomes NativeError, its
@@ -223,6 +236,30 @@ TEST(BuiltinClasses, AssertTracebackNamesTheForm) {
     ASSERT_FALSE(o.raised) << o.message;
     EXPECT_NE(o.value.find("(assert (= (+ 1 1) 3) \"sum\")"), std::string::npos) << o.value;
   }
+}
+
+// A native that throws a built-in class dict itself (a kernel's dsl_exception can hold one) has
+// it caught as it is, on both evaluators: annotate leaves the read-only dict alone (S0.1), where
+// its set_field would turn the raise into a TypeError. (raise ValueError.__cls_dict__) never gets
+// that far: raise refuses a value that is no instance first.
+TEST(BuiltinClasses, ANativeRaisingAClassDictIsCaughtUnchanged) {
+  const dict_ptr cls = exception_class("ValueError");
+  const std::size_t size = cls->size();
+  environment_ptr env = builtins::make_default_environment();
+  builtins::register_fn(env, "throw-cls", [cls](std::span<const value_t>) -> value_t {
+    throw dsl_exception(value_t(cls));
+  });
+  const std::string prog = R"((try (throw-cls) (catch (e) (get-attr e "__name__"))))";
+  const auto got = [&](auto &&ev) {
+    try {
+      return show(ev.evaluate_script(prog));
+    } catch (const std::exception &e) {
+      return std::string("threw ") + e.what();
+    }
+  };
+  EXPECT_EQ(got(evaluator(env)), "ValueError");
+  EXPECT_EQ(got(stackless_evaluator(env)), "ValueError");
+  EXPECT_EQ(cls->size(), size);
 }
 
 // ===========================================================================
@@ -607,9 +644,10 @@ TEST(ExceptionsLeaving, FailedAndKilledAreCountedApart) {
 }
 
 TEST(ExceptionsLeaving, AnExceptionFromBeforeASnapshotKeepsItsClass) {
-  // A snapshot writes a class dict once for each value holding it, so a restored exception's
-  // class is a copy: catch matches it by its chain of names. A handler is running when the
-  // snapshot is taken; after the restore it re-raises its exception to an outer catch by class.
+  // A snapshot writes a class dict once for each value holding it, so a restored user class is a
+  // copy (a built-in class is relinked to itself): catch matches it by its chain of names. A
+  // handler is running when the snapshot is taken; after the restore it re-raises its exception to
+  // an outer catch by class.
   cvc::app app;
   stackless_evaluator ev(builtins::make_default_environment());
   auto st = ev.create_state(parse(
@@ -805,4 +843,170 @@ TEST(ExceptionsNotCatchable, TimeoutAndInterruptReachTheCaller) {
     EXPECT_THROW(r.evaluate_script("(try (begin (stop) (while t 1)) (catch (e) \"caught\"))"),
                  evaluation_interrupted);
   }
+}
+
+// --- Stage 0 hazards (td 8.1) ---
+
+namespace {
+
+using class_entries = dict_ptr::element_type;
+
+// The 17 built-in class dicts are one per OS process (td 5 item 1), so a case that changed one
+// would change it for every later test in this binary. Each case runs under this guard, which puts
+// them back as they were: on a build where they are still writable, one failure doesn't spread.
+class builtin_classes_restored {
+public:
+  builtin_classes_restored() {
+    for (const std::string &name : exception_class_names())
+      saved_.emplace_back(exception_class(name), *exception_class(name));
+  }
+  ~builtin_classes_restored() {
+    for (auto &[cls, entries] : saved_)
+      *cls = entries;
+  }
+  builtin_classes_restored(const builtin_classes_restored &) = delete;
+  builtin_classes_restored &operator=(const builtin_classes_restored &) = delete;
+
+private:
+  std::vector<std::pair<dict_ptr, class_entries>> saved_;
+};
+
+// expect_case one engine at a time, with the built-in classes put back after each.
+void expect_case_restoring(const program_case &c) {
+  for (unsigned e : {recursive, stackless, sync_sched, async_sched}) {
+    if (!(c.engines & e))
+      continue;
+    builtin_classes_restored guard;
+    program_case one = c;
+    one.engines = e;
+    expect_case(one);
+  }
+}
+
+// The keys of a class dict, in order.
+std::vector<std::string> keys_of(const dict_ptr &cls) {
+  std::vector<std::string> keys;
+  for (const auto &kv : *cls)
+    keys.push_back(kv.first);
+  return keys;
+}
+
+} // namespace
+
+// HZ-1 (td 8.1, S0.1): the built-in class dicts are read-only, however a program reaches them.
+// set-attr and del-attr name themselves; the C++ set_field (here through init called on the class
+// dict) does not.
+TEST(BuiltinClasses, HZ01_BuiltinClassDictsAreReadOnly) {
+  const program_case cases[] = {
+      {"set-attr", R"((set-attr ValueError.__cls_dict__ "init" (lambda (self m) self)))", nullptr,
+       "TypeError", "set-attr: built-in class is read-only: ValueError"},
+      {"set-attr-new-key", R"((set-attr ValueError.__cls_dict__ "hz01" 1))", nullptr, "TypeError",
+       "set-attr: built-in class is read-only: ValueError"},
+      {"del-attr", R"((del-attr ValueError.__cls_dict__ "init"))", nullptr, "TypeError",
+       "del-attr: built-in class is read-only: ValueError"},
+      {"caught-class-set",
+       R"((try (raise (KeyError "k")) (catch (e) (set-attr (get-attr e "__class__") "x" 1))))",
+       nullptr, "TypeError", "set-attr: built-in class is read-only: KeyError"},
+      {"caught-class-del",
+       R"((try (raise (KeyError "k")) (catch (e) (del-attr (get-attr e "__class__") "__name__"))))",
+       nullptr, "TypeError", "del-attr: built-in class is read-only: KeyError"},
+      {"super-key", R"((set-attr ValueError.__cls_dict__ "__super__" nil))", nullptr, "TypeError",
+       "set-attr: built-in class is read-only: ValueError"},
+      {"super-set",
+       R"((set-attr (get-attr ValueError.__cls_dict__ "__super__") "init" (lambda (self) self)))",
+       nullptr, "TypeError", "set-attr: built-in class is read-only: Exception"},
+      {"super-del", R"((del-attr (get-attr DeadlockError.__cls_dict__ "__super__") "init"))",
+       nullptr, "TypeError", "del-attr: built-in class is read-only: LockError"},
+      {"init-on-the-class",
+       R"((begin (set init (get-attr ValueError.__cls_dict__ "init"))
+                  (init ValueError.__cls_dict__ "m")))",
+       nullptr, "TypeError", "built-in class is read-only: ValueError"},
+      // A refused change leaves the class as it was: a later instance is made as before.
+      {"unaffected",
+       R"((begin (try (set-attr ValueError.__cls_dict__ "init" (lambda (self m) self))
+                       (catch (TypeError e) nil))
+                  (list (get-attr (ValueError "v") "message")
+                        (get-attr (get-attr (ValueError "v") "__class__") "__name__"))))",
+       R"(("v" "ValueError"))"},
+  };
+  for (const program_case &c : cases)
+    expect_case_restoring(c);
+
+  // From C++: set_field on each of the 17 throws the same TypeError and leaves the dict as it was.
+  builtin_classes_restored guard;
+  const std::vector<std::string> &names = exception_class_names();
+  EXPECT_EQ(names.size(), 17u);
+  for (const std::string &name : names) {
+    SCOPED_TRACE(name);
+    const dict_ptr cls = exception_class(name);
+    ASSERT_NE(cls, nullptr);
+    EXPECT_TRUE(is_builtin_class_dict(cls.get()));
+    const std::vector<std::string> before = keys_of(cls);
+    for (const char *key : {"hz01", "init", "__name__"}) {
+      try {
+        set_field(value_t(cls), key, value_t(int64_t{1}));
+        ADD_FAILURE() << "set_field(" << key << ") changed the class";
+      } catch (const std::exception &e) {
+        const value_t exc = exception_from(e);
+        EXPECT_EQ(class_name(class_of_instance(exc)), "TypeError");
+        EXPECT_EQ(exception_message(exc), "built-in class is read-only: " + name);
+      }
+    }
+    EXPECT_EQ(keys_of(cls), before);
+    EXPECT_EQ(class_name(cls), name);
+  }
+  // A user class's dict, and an instance's, are not built-in ones.
+  EXPECT_FALSE(is_builtin_class_dict(nullptr));
+  const value_t inst = make_exception(exception_class("ValueError"), "m");
+  EXPECT_FALSE(is_builtin_class_dict(std::get<dict_ptr>(inst.v).get()));
+}
+
+// HZ-1c (S0.1): raising a built-in class dict goes as it did before the classes were read-only. A
+// class dict is no exception instance, so the raise is the TypeError it always was, not the
+// read-only one, and the shared dict is left as it was: no traceback, cause or origin added.
+TEST(BuiltinClasses, HZ01c_RaisingAClassDictIsUnchanged) {
+  const program_case cases[] = {
+      {"raise-class-dict",
+       R"((try (raise ValueError.__cls_dict__)
+               (catch (e) (list (get-attr (get-attr e "__class__") "__name__")
+                                (get-attr e "message")))))",
+       R"(("TypeError" "raise: expected an exception, got dict"))"},
+      {"raise-class-dict-uncaught", "(raise ValueError.__cls_dict__)", nullptr, "TypeError",
+       "raise: expected an exception, got dict"},
+  };
+  for (const program_case &c : cases) {
+    for (unsigned e : {recursive, stackless, sync_sched, async_sched}) {
+      builtin_classes_restored guard;
+      const std::vector<std::string> before = keys_of(exception_class("ValueError"));
+      program_case one = c;
+      one.engines = e;
+      expect_case(one);
+      EXPECT_EQ(keys_of(exception_class("ValueError")), before) << c.id << " on " << engine_name(e);
+    }
+  }
+}
+
+// HZ-2 (S0.1): a user class derived from a built-in one is the program's own, and stays mutable.
+TEST(BuiltinClasses, HZ02_DerivedClassesStayMutable) {
+  const char *const define_v =
+      R"((defclass V ValueError (init (self m) (super self init (str-concat "v:" m)) self)))";
+  const auto with_v = [&](const std::string &body) {
+    return "(begin " + std::string(define_v) + " " + body + ")";
+  };
+  const std::string own_init =
+      with_v(R"((list (get-attr (V "x") "message") (get-attr (ValueError "y") "message")))");
+  const std::string set_del =
+      with_v(R"((begin (set-attr V.__cls_dict__ "note" 1) (del-attr V.__cls_dict__ "note")))");
+  const std::string del_init = with_v(R"((begin (del-attr V.__cls_dict__ "init")
+      (list (get-attr (get-attr (V "z") "__class__") "__name__") (get-attr (ValueError "y") "message"))))");
+  const std::string caught =
+      with_v(R"((try (raise (V "x")) (catch (ValueError e) (get-attr e "message"))))");
+  const program_case cases[] = {
+      {"own-init", own_init.c_str(), R"(("v:x" "y"))"},
+      {"set-and-del-attr", set_del.c_str(), "1"},
+      {"del-own-init", del_init.c_str(), R"(("V" "y"))"},
+      {"caught-as-parent", caught.c_str(), "v:x"},
+  };
+  for (const program_case &c : cases)
+    expect_case_restoring(c);
 }

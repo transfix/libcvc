@@ -622,6 +622,54 @@ def test_exec_exposes_its_scheduler():
     assert sched.process_count() == 1 and sched.reap(pid) and sched.process_count() == 0
 
 
+# --- Stage 0 hazards (td 8.1) ---
+
+
+def test_hz14_stop_from_another_thread():
+    # HZ-14 (S0.6, S0-Q5): stop() is the one raw scheduler call another Python thread may make
+    # while run() pumps (run and sync_run release the GIL). It ends a run stepping a busy loop on
+    # either scheduler, and the sync run of a lone sleeper; the process is left as it was.
+    def stop_when_running(sched, after, out):
+        deadline = time.monotonic() + 10.0
+        while not sched.is_running() and time.monotonic() < deadline:
+            time.sleep(0.0005)
+        out["saw_running"] = sched.is_running()
+        time.sleep(after)
+        out["stopped_at"] = time.monotonic()
+        sched.stop()
+
+    # A lost stop ends the run at the process's max_time instead.
+    cases = [(sched, run, "(while #t nil)", process_status.ready, _opts(max_time=60.0))
+             for sched, run, _ in _schedulers()]
+    app = pycvc.make_app()
+    s = pycvc.scheduler()
+    ctx = pycvc.intrinsics_context()  # sleep is an intrinsic
+    ctx.sched = s
+    ctx.root = pycvc.State.instance(app)
+    env = pycvc.builtins.make_default_environment()
+    pycvc.register_intrinsics(env, ctx)
+    cases.append((s, s.run, "(begin (sleep 5) 1)", process_status.waiting,
+                  _opts(max_time=60.0, env=env)))
+    for sched, run, prog, status, opts in cases:
+        pid = sched.execute(prog, opts)
+        out = {}
+        t = threading.Thread(target=stop_when_running, args=(sched, 0.05, out),
+                             name="hz14-stopper")
+        t.start()
+        t0 = time.monotonic()
+        run()
+        t1 = time.monotonic()
+        t.join(10.0)
+        assert not t.is_alive()
+        print(f"  {type(sched).__name__} {prog}: run returned {t1 - out['stopped_at']:.4f} s "
+              f"after stop(), {t1 - t0:.3f} s in all")
+        assert out["saw_running"]
+        assert not sched.is_running()
+        assert t1 - t0 < 30.0
+        assert sched.get_process_info(pid).status == status
+        assert sched.kill(pid)
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

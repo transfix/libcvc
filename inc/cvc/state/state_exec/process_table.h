@@ -266,12 +266,16 @@ private:
 /// It costs one lookup of the `state_exec` node per call. Like the watches, it relies on writes
 /// firing the tree's signals: one that doesn't (state::reset with fireCallbacks=false, a node
 /// operator() creates without a value) is seen at the next write under the node that does.
+/// The node it counts is held while it is counted: another thread's program may delete it.
 class settings_changes {
 public:
   std::uint64_t version(cvc::state *root);
+  /// Stop counting, and let go of the node (its root is going).
+  void clear();
 
 private:
   tree_changes changes_;
+  boost::shared_ptr<cvc::state> node_; // the node changes_ is connected to
 };
 
 } // namespace cvc::state_exec::detail

@@ -40,6 +40,24 @@ class state_subtree_cursor {
 public:
   // Walk `start`'s subtree. The cursor keeps `start` alive while it walks.
   explicit state_subtree_cursor(state &start);
+  // The levels go deepest first, so a node dies with its parent alive (~state).
+  ~state_subtree_cursor() {
+    while (!stack_.empty())
+      stack_.pop_back();
+  }
+  state_subtree_cursor(const state_subtree_cursor &) = default;
+  state_subtree_cursor(state_subtree_cursor &&) = default;
+  // Assignment drops the old levels deepest first too, then the old start.
+  state_subtree_cursor &operator=(state_subtree_cursor other) {
+    while (!stack_.empty())
+      stack_.pop_back();
+    stack_ = std::move(other.stack_);
+    keep_ = std::move(other.keep_);
+    start_ = other.start_;
+    started_ = other.started_;
+    visited_ = other.visited_;
+    return *this;
+  }
 
   enum class visit {
     listed,   // the node belongs in the document: it has a value, or it is childless below start

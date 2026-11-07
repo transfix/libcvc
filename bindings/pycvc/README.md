@@ -359,6 +359,40 @@ waits; these two act as follows:
 `run()` itself stays one thread's: a second `run()` of the same `Exec`, from any
 thread (a kernel's included), raises `RuntimeError` until the first has returned.
 
+**The raw schedulers are the pump thread's.** `Exec.scheduler()`, `pycvc.scheduler` and
+`pycvc.async_scheduler` are the C++ classes, and their calls (`execute`, `kill`, `pause`,
+`resume`, `send_signal`, `fork`, `set_max_steps`, `list_processes`, `get_process_info`, ...)
+belong on the thread that steps the scheduler: inside its `run()` (a registered function or
+callback), or while nothing steps it. Nothing enforces this: from another thread, while a run
+pumps, they race it. (`Exec.kill`, `pause`, `resume` and `send_signal`, posted the way
+`set_priority` is, are not built yet.) Some `Exec` calls are the same: `set_parser_defaults` and
+`set_data_defaults` change its scheduler, and `register_fn`, `register_async_fn` and
+`register_async_coro` change the natives environment its programs share, so call them while no
+`run()` is pumping. The exceptions:
+
+- `stop()` and `is_running()` may come from any thread. `stop()` ends the scheduler's `run()`
+  or `sync_run()` at its next step boundary, and an idle sync `run()` at once; under `Exec.run()`
+  it ends only the slice that is running, and `run()` goes on. A `stop()` made while no run is
+  active is discarded by the next run.
+- `async_scheduler.post_message()` may come from any thread.
+- `Exec.set_priority`, `Exec.get_priority` and `Exec.lock_query`, above.
+
+The tree helpers (`pycvc.state_get`, `state_has`, `state_set`, `state_children`,
+`state_comment`, `state_property`, `state_property_keys`, `state_remove`) may be called from any
+thread while `Exec`s run: each holds the nodes it walks, so a node an `Exec` deletes meanwhile is
+freed only once the helper is done with it (`docs/STATE_EXEC_THREADED.md` 4.8).
+`state_remove(app, path)` removes its one node, with its subtree, as the DSL's `state-delete`
+does: it no longer sweeps the tree's other expired nodes, and an empty path does nothing. A
+program sweeps with `(state-sweep-expired)`. A `pycvc.state_observer` dropped while another
+thread's write is firing its slot is never called. The C++ pinned walks
+(`findThroughLinksShared`, `childThroughLinksShared`, the start-pinned `findDescendantShared` and
+`sharedChild`) and `removeChild` are not wrapped: these helpers are Python's way in.
+
+A built-in exception that passes through Python (a registered function's return value, alone or
+in a list, or `pycvc.make_exception`'s, given the class's name or its dict) comes back with its
+built-in class, the shared read-only one, so a program can `state-data-set` it and its class
+refuses `set-attr` (`docs/STATE_EXEC_EXCEPTIONS.md` 2.3).
+
 `pycvc.set_thread_class(cls)` puts the calling thread in a `pycvc.thread_class`
 (`background`, `utility`, `normal`) as far as the OS allows, and returns whether it
 did (`docs/THREAD_POOL.md`, "Thread classes"). On Linux an unprivileged thread

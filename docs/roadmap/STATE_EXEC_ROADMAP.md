@@ -108,6 +108,20 @@ Full design: [STATE_EXEC_PORTING_PLAN.md](STATE_EXEC_PORTING_PLAN.md)
 
 **Phase 7 test total: 7**
 
+## Planned
+
+- **Storing an object instance on the data channel.** `state-data-set` refuses an instance of a
+  user class, at any depth ("state-data-set: cannot store an object instance"), since threaded
+  execution's Stage 0 (`docs/STATE_EXEC_THREADED.md` 5 item 2, decision S0-Q4). Its methods are
+  closures over the environment `defclass` ran in, the writing program's live environment, which
+  no copy can isolate. The plan: `state-data-set` stores an instance as its fields plus its
+  class's name chain, and `state-data-get` rebuilds it with the reader's own class of that name,
+  or returns a plain dict when the reader has none, so the methods that run are the reader's, in
+  the reader's environment. `is_instance` already matches a class by its name chain after a
+  snapshot restore (`docs/STATE_EXEC_EXCEPTIONS.md` 2.7). Open: how the data job resolves a name
+  in the reader's environment, and what a name clash means (two classes with one name). Until
+  then a program stores the fields as a dict and rebuilds the object with its own class.
+
 ## Architecture
 
 ```

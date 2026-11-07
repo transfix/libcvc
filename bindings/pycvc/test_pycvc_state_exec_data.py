@@ -216,6 +216,49 @@ def test_a_registry_of_ones_own():
     _raises(RuntimeError, reg.import_module, "py", None)
 
 
+# --- Stage 0 hazards (td 8.1) ---
+
+
+def test_hz03_state_data_set_copies():
+    # HZ-3 (S0.2): state-data-set stores a copy, so a list the program changes afterwards, at any
+    # depth, doesn't change what state-data-get returns.
+    ex = pycvc.Exec(pycvc.make_app())
+    assert ex.run('(begin (set l (list 1 2)) (state-data-set "k" l) (set-nth l 0 9) '
+                  '(state-data-get "k"))') == "(1 2)"
+    assert ex.run('(begin (set l (list 1 (list 2))) (state-data-set "k" l) (append (nth l 1) 3) '
+                  '(state-data-get "k"))') == "(1 (2))"
+
+
+def test_hz04_state_data_set_refuses_nested_callables():
+    # HZ-4's twin (S0.2, S0-Q4): each kind state-data-set can't copy, at the root, in a list and in
+    # a dict, is refused with a RuntimeError naming it, and the node keeps what it had. (A lock
+    # wait has no DSL form; the C++ case covers it.) A built-in exception is stored, its class
+    # shared, and read back it is stored again.
+    ex = pycvc.Exec(pycvc.make_app())
+    ex.register_async_fn("triple", lambda n: n * 3)
+    ex.run('(begin (defclass Box) (state-data-set "k" (list 7)))')
+    kinds = (
+        ("a closure", "(lambda (x) x)"),
+        ("a native function", "state-get"),
+        ("a generator", "(generator (lambda () (yield 1)))"),
+        ("a future", "(triple-async 1)"),
+        ("a lock form", "with-lock"),
+        ("an object instance", "(Box)"),
+    )
+    places = (("{}", ""), ("(list 1 {})", " (nested in a list)"),
+              ('(dict "a" 1 "f" {})', " (nested in a dict)"))
+    for kind, expr in kinds:
+        for place, where in places:
+            prog = f'(state-data-set "k" {place.format(expr)})'
+            e = _raises(RuntimeError, ex.run, prog)
+            assert str(e) == f"RuntimeError: state-data-set: cannot store {kind}{where}", str(e)
+            assert ex.run('(state-data-get "k")') == "(7)", prog
+    assert ex.run('(begin (state-data-set "e" (list (ValueError "v"))) '
+                  '(set got (nth (state-data-get "e") 0)) (state-data-set "e2" got) '
+                  '(set again (state-data-get "e2")) '
+                  '(list (get-attr again "message") (isinstance again ValueError)))') == '("v" #t)'
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

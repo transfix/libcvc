@@ -147,10 +147,16 @@ bool async_call::wait(std::optional<double> seconds) {
 }
 
 value_t async_call::outcome() {
-  // The rest of the call is charged before the program sees its outcome (3.8): a call whose
-  // completion the scheduler hasn't taken yet is finished now.
-  if (async_sched_ && !charged.closed)
+  // The rest of the call is charged before the program sees its outcome (3.8): a call no finish
+  // or cancel has claimed yet is finished now (td 4.9, S0.9).
+  if (async_sched_ && !closed_.load(std::memory_order_acquire))
     async_sched_->finish_async_call(shared_from_this());
+  if (!finished() && cancel_requested())
+    // Cancelled before it settled. The scheduler that cancels a call for its process's end settles
+    // it with this same error (cancel_async_calls), so every await sees it; this is the backstop
+    // for a call cancelled otherwise and read before it settles.
+    throw dsl_error("RuntimeError", name_ + ": cancelled: the process that made the call ended",
+                    "async", function_fields(name_));
   if (timed_out_) {
     std::string limit = "its timeout";
     if (timeout_) {
@@ -173,8 +179,13 @@ value_t async_call::outcome() {
     } catch (...) {
       exc = make_exception(exception_class("NativeError"), name_ + ": unknown error", {}, "async");
     }
-    set_field(exc, "origin", value_t(std::string("async")));
-    set_field(exc, "function", value_t(name_));
+    // A built-in class dict raised as it is (a kernel's dsl_exception can hold one) is read-only
+    // (td 5 item 1): it stays as it is, as the evaluators' raise leaves it.
+    const dict_ptr *d = std::get_if<dict_ptr>(&exc.v);
+    if (!d || !is_builtin_class_dict(d->get())) {
+      set_field(exc, "origin", value_t(std::string("async")));
+      set_field(exc, "function", value_t(name_));
+    }
     exception_ = std::move(exc);
   }
   throw dsl_exception(*exception_, error_);
@@ -840,7 +851,8 @@ void register_async_natives(const environment_ptr &env, const std::string &name,
         return start(std::move(argv));
       // The program may change a list or dict it passed while the kernel runs: the kernel gets
       // copies, made as deep-data work, counted against the process's budget.
-      return run_data_job(make_copy_job(std::move(argv)), std::move(start));
+      return run_data_job(make_copy_job(std::move(argv), copy_mode::share, "async arguments"),
+                          std::move(start));
     };
   };
   builtins::register_fn(env, name, make(false));

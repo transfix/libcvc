@@ -49,14 +49,14 @@ struct evaluation_stats {
   // Move-only: transfer ownership of internals
   evaluation_stats(evaluation_stats &&o) noexcept
       : start_time(o.start_time), end_time(o.end_time), complete(o.complete),
-        last_kind(o.last_kind) {
+        last_kind(o.last_kind.load(std::memory_order_relaxed)) {
     copy_counts(o);
   }
   evaluation_stats &operator=(evaluation_stats &&o) noexcept {
     start_time = o.start_time;
     end_time = o.end_time;
     complete = o.complete;
-    last_kind = o.last_kind;
+    last_kind.store(o.last_kind.load(std::memory_order_relaxed), std::memory_order_relaxed);
     copy_counts(o);
     return *this;
   }
@@ -94,7 +94,7 @@ struct evaluation_stats {
     step_count.fetch_add(1, std::memory_order_relaxed);
     if (kind != step_kind::eval) // eval steps are the rest, so the common step costs no more
       kind_steps[static_cast<std::size_t>(kind)].fetch_add(1, std::memory_order_relaxed);
-    last_kind = kind;
+    last_kind.store(kind, std::memory_order_relaxed);
   }
   /// Count `n` steps of `kind` that no evaluator step took: what an async call is charged
   /// (step_kind::async), or the counts a restored process had. The last step's kind stays.
@@ -119,7 +119,7 @@ struct evaluation_stats {
     return all > other ? all - other : 0;
   }
   /// The kind of the last step counted.
-  step_kind last_step_kind() const { return last_kind; }
+  step_kind last_step_kind() const { return last_kind.load(std::memory_order_relaxed); }
 
   /// Count nodes of deep-data work (elements walked, owners freed), in whatever step did it.
   void add_data_nodes(uint64_t nodes) {
@@ -130,8 +130,8 @@ struct evaluation_stats {
   /// A scheduler that times its steps charges each step's seconds here, to the step's kind.
   void add_step_time(double seconds) {
     if (seconds > 0.0)
-      kind_ns[static_cast<std::size_t>(last_kind)].fetch_add(static_cast<uint64_t>(seconds * 1e9),
-                                                             std::memory_order_relaxed);
+      kind_ns[static_cast<std::size_t>(last_step_kind())].fetch_add(
+          static_cast<uint64_t>(seconds * 1e9), std::memory_order_relaxed);
   }
   /// Seconds of scheduler-timed steps spent on `kind`.
   double step_time(step_kind kind) const {
@@ -158,7 +158,7 @@ private:
   void count_eval_step() {
     eval_step_count.store(eval_step_count.load(std::memory_order_relaxed) + 1,
                           std::memory_order_relaxed);
-    last_kind = step_kind::eval;
+    last_kind.store(step_kind::eval, std::memory_order_relaxed);
   }
   static constexpr std::size_t kKinds = 4;
   void copy_counts(const evaluation_stats &o) {
@@ -184,7 +184,10 @@ private:
   std::atomic<uint64_t> kind_ns[kKinds] = {};
   std::atomic<uint64_t> data_node_count{0};
   bool complete{false};
-  step_kind last_kind = step_kind::eval;
+  // Written by the evaluator's steps and by increment_step() on any thread, so atomic (relaxed:
+  // it orders nothing). A plain field raced, and under TSan the race's reports slowed the tests
+  // that count from another thread past an hour.
+  std::atomic<step_kind> last_kind{step_kind::eval};
 };
 
 /// Synchronous recursive evaluator (Tier 2 — local contexts only).

@@ -22,6 +22,7 @@
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <cvc/state/state_exec/types.h>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <queue>
@@ -38,6 +39,56 @@ namespace cvc::state_exec {
 // scheduling_policy, execute_options, process_info, scheduler_stats now live in
 // scheduler_base.h (shared by the sync scheduler and async_scheduler).
 
+namespace detail {
+
+/// The roots a scheduler's watches resolve under, other than its watch root: a chrooted
+/// context's (watch_handler_entry::root; td 4.8, S0.5). Each distinct root gets its own change
+/// counter on that node's signals, shared by the entries with that root and dropped with the last
+/// of them, so a watch is read only after a write under its own root. Scheduler thread only.
+class watch_roots {
+public:
+  /// The entries may have changed: a watch registered or removed, or the watch root moved.
+  void invalidate() noexcept { stale_ = true; }
+  /// Bring the counters in line with the entries of `watchers` when they may have changed (after
+  /// invalidate(), or once the number of watching processes changed: one ended). `watch_root` is
+  /// the scheduler's watch root: an entry without a root of its own, or with that one, counts
+  /// toward uses_main() instead. True when it connected or dropped a counter.
+  bool sync(const std::vector<process *> &watchers, const cvc::state *watch_root);
+  /// Whether an entry resolves under the scheduler's watch root (as of the last sync()).
+  bool uses_main() const noexcept { return uses_main_; }
+  bool empty() const noexcept { return slots_.empty(); }
+  /// Read every counter: true when any moved since the last poll() (a new counter has).
+  bool poll();
+  /// Whether `root`'s counter moved at the last poll().
+  bool moved(const cvc::state *root) const;
+  /// Drop every counter (nothing watches).
+  void clear();
+
+private:
+  struct slot {
+    boost::shared_ptr<cvc::state> root; // the entries pin it too; this keeps its signals
+    tree_changes changes;
+    uint64_t seen = 0;
+    bool moved = false;
+    bool used = false;
+  };
+  std::unordered_map<const cvc::state *, std::unique_ptr<slot>> slots_;
+  bool stale_ = true;
+  bool uses_main_ = false;
+  std::size_t watchers_ = 0;
+};
+
+/// The value at `path` under `root`, or nullopt when there is none: the schedulers' settings
+/// reads. The node is held while it is read, and each node of the walk while it is walked:
+/// another thread's program may delete them meanwhile (R0-mid). The walk starts at `root`, which
+/// the caller keeps alive, and takes no reference on it.
+std::optional<std::string> setting_value(cvc::state &root, const std::string &path);
+/// Write `value` at `path` under `root`, making the nodes that are missing: the schedulers'
+/// settings publication. The chain below `root` is held while the write emits through it.
+void publish_setting(cvc::state &root, const std::string &path, const std::string &value);
+
+} // namespace detail
+
 /// Synchronous process scheduler.
 ///
 /// Manages multiple processes backed by stackless_evaluator.  Uses
@@ -50,7 +101,8 @@ namespace cvc::state_exec {
 class scheduler : public scheduler_base {
 public:
   explicit scheduler(scheduling_policy policy = scheduling_policy::round_robin);
-  /// Destroys the lock home first (protocol 5.7), before any other member goes.
+  /// Destroys the lock home first (protocol 5.7), before any other member goes; then a posted
+  /// command never applied gets done(false).
   ~scheduler() override;
 
   // --- Locks (docs/STATE_EXEC_LOCKS.md) ---
@@ -100,8 +152,8 @@ public:
   /// returns when the time budget runs out first. While only processes waiting for a message
   /// with no time limit are left, nothing can wake them in a synchronous run: run() returns at
   /// once when `max_steps` bounds it, else waits out `max_time`, else waits until stop(). A post
-  /// to the scheduler's lock port (a grant for a lock waiter, made on another home's thread) ends
-  /// any such wait, and run() steps again (design 8.7).
+  /// to the scheduler's lock port (a grant for a lock waiter, made on another home's thread) or a
+  /// post_control ends any such wait, and run() steps again (design 8.7; td 4.12).
   std::unordered_map<int, value_t> run(std::optional<uint64_t> max_steps = std::nullopt,
                                        std::optional<double> max_time = std::nullopt);
 
@@ -111,11 +163,13 @@ public:
   uint64_t run_steps(std::optional<uint64_t> max_steps = std::nullopt,
                      std::optional<double> max_time = std::nullopt);
 
-  /// Stop the run loop.
+  /// Any thread: end the run loop at its next check, an idle wait included (td 4.12). Not
+  /// async-signal-safe: it notifies the idle wait, which takes a lock on POSIX. A stop() with no
+  /// run active is discarded by the next run, which starts by clearing it.
   void stop();
 
-  /// Is the run loop active?
-  bool is_running() const { return running_; }
+  /// Any thread: is the run loop active? Once this is true, a stop() ends that run.
+  bool is_running() const { return running_.load(std::memory_order_acquire); }
 
   /// Erase a finished (terminated, killed or failed) process, freeing what it kept (its
   /// result, error and statistics). False for an unknown pid or a live one. Until then a
@@ -177,11 +231,25 @@ public:
   std::optional<priority_info> get_priority_as(int caller_pid, int pid) const override;
   bool set_priority_floor(int pid, int floor) override;
   void note_priority_clamped() override;
-  /// Thread-safe: `cmd` for process `pid`, applied between steps, at the top of the next step
-  /// (step(), or run()'s next iteration: an idle run() applies it once its wait ends).
-  /// set_priority applies through the host path (unchecked); an unknown pid is found, and ignored,
-  /// then. A query runs its function on the scheduler thread, and must not throw. True once queued.
+  /// Thread-safe: `cmd` for process `pid`, applied between steps on the scheduler's thread, at
+  /// the top of the next step (step(), or run()'s next iteration). A post ends an idle run()'s
+  /// wait, and run() applies what is posted before it tests has_runnable(), so a resume of the
+  /// only process, or a kill of the last one, takes effect in a run with nothing else to do.
+  /// Commands are applied one at a time, first in, first out. kill, pause, resume, signal and
+  /// set_priority are the direct calls' host paths, unchecked (kill's reason is killed_by_user;
+  /// signal "SIGKILL" kills); an unknown pid is found, and refused, then. Each one's `done`, when
+  /// set, gets what its call returned (a kill that throws has still killed its process: true);
+  /// one that throws otherwise, or is never applied, gets false. A query runs its function, and
+  /// must not throw. True once queued. A done that the destructor calls (with false) may post
+  /// again: that post returns false, and the destructor refuses it in turn, never applying it.
+  /// Any other post to a scheduler being destroyed is undefined: a host must not post to a
+  /// scheduler it is destroying, except from a done.
   bool post_control(int pid, control_cmd cmd);
+  /// Thread-safe: whether a posted command waits to be applied (the CLI's serve loop steps for
+  /// one even with nothing runnable).
+  bool has_pending_control() const noexcept {
+    return controls_waiting_.load(std::memory_order_acquire) != 0;
+  }
   bool set_max_steps(int pid, uint64_t max_steps);
   bool set_max_time(int pid, double seconds);
   bool set_max_memory(int pid, uint64_t bytes);
@@ -229,14 +297,30 @@ public:
   /// Queue a watch event for a process by PID.
   void queue_watch_event(int pid, process::watch_event evt);
 
-  /// Register a watch handler with its watched path on the scheduler's process.
+  /// Register a watch handler with its watched path on the scheduler's process: the 5-argument
+  /// form with a null root (the scheduler's watch root).
   void register_watch_handler(int pid, int watch_id, value_t handler, const std::string &path);
+  /// The same, resolving `path` under `root` when it is non-null (a chrooted context's root, which
+  /// the entry pins; td 4.8). The watch is read only after a write under its own root.
+  void register_watch_handler(int pid, int watch_id, value_t handler, const std::string &path,
+                              boost::shared_ptr<cvc::state> root) override;
 
   /// Remove a watch handler from the scheduler's process object.
   void unregister_watch_handler(int pid, int watch_id);
 
-  /// Set the state-tree root for watch polling.
+  /// Set the state-tree root for watch polling and settings: a host's call (app, pycvc, the CLI),
+  /// which keeps the root alive. A step makes only the pinned form below (td 4.8).
   void set_watch_root(cvc::state *root);
+  /// The same for a root a program's step gives (state-watch's): kept by `pin` while it is the
+  /// watch root (scheduler_base).
+  void set_watch_root(cvc::state *root, boost::shared_ptr<cvc::state> pin) override;
+  /// The root set_watch_root() gave, or null.
+  cvc::state *watch_root() const override { return watch_root_; }
+
+  /// The watch entries poll_watches() has looked up so far, one each time it polls a watch,
+  /// whether or not its node exists. A watch is polled only after a write under the root it
+  /// resolves under (td 4.8: per-root gating).
+  uint64_t watch_polls() const noexcept { return watch_polls_; }
 
   /// Set a unique identifier for this scheduler instance.
   /// Used as the key under `state_exec.schedulers.<id>` in the state tree.
@@ -310,8 +394,12 @@ private:
   uint32_t cycle_check_ = 0; // steps, for checking every 64th whether a cycle collection is due
   int next_pid_ = 1;
   int rr_index_ = 0;
-  bool running_ = false;
-  bool stop_requested_ = false;
+  /// run()'s flags, which stop() and is_running() touch from any thread (td B17). A run clears
+  /// stop_requested_ before it publishes running_, so a stop() made once is_running() is true is
+  /// never lost. No data rides on them: the loop reads stop_requested_ relaxed.
+  std::atomic<bool> running_{false};
+  std::atomic<bool> stop_requested_{false};
+  static_assert(std::atomic<bool>::is_always_lock_free, "stop() must not take a lock");
   uint64_t total_steps_ = 0;
   uint64_t priority_clamped_ = 0; // spawns clamped to the spawner's floor (note_priority_clamped)
   int current_pid_ = -1;
@@ -321,6 +409,9 @@ private:
   stackless_evaluator evaluator_;
   memory_tracker mem_tracker_;
   cvc::state *watch_root_ = nullptr;
+  /// What keeps watch_root_ alive when a step gave it (set_watch_root's pin); null for a host's.
+  /// Declared before what connects to the root, so it goes after them.
+  boost::shared_ptr<cvc::state> watch_root_pin_;
 
   /// Every process by pid (finished ones until reaped), its run queue, timers and waiters.
   detail::process_table procs_;
@@ -333,17 +424,20 @@ private:
   double chain_cpu_ = -1.0; // the thread's CPU time then, when it was read (else < 0)
   clock::time_point now_for_step();
 
-  /// Counts tree changes under watch_root_ while processes have watches: poll_watches() reads
-  /// the watched nodes only when the count moved.
+  /// Counts tree changes under watch_root_ while a watch resolves under it: poll_watches() reads
+  /// those watched nodes only when the count moved. A watch with a root of its own is counted in
+  /// watch_roots_ instead (td 4.8).
   detail::tree_changes tree_changes_;
   uint64_t watch_seen_ = 0;
+  detail::watch_roots watch_roots_;
+  uint64_t watch_polls_ = 0; // watch entries polled (watch_polls())
   /// limits.async_steps_per_cpu_ms as last read from the tree, and the settings version then.
   detail::settings_changes settings_changes_;
   uint64_t rate_seen_ = 0;
   bool rate_valid_ = false;
   double rate_ = kDefaultAsyncStepsPerCpuMs;
-  /// run()'s idle wait: made with the lock home, which shares it with its port so a post ends the
-  /// wait (protocol 2.3), else on the first idle wait.
+  /// run()'s idle wait, made at construction (td 4.12). The lock home shares it with its port, so
+  /// a post ends the wait (protocol 2.3), and stop() notifies it.
   std::shared_ptr<detail::wakeup> idle_;
   std::vector<process *> woken_; // reused by deliver_to_receivers
 
@@ -359,8 +453,8 @@ private:
   /// port's posts, when there are any (protocol 5.9).
   int step_once();
   /// run()'s wait while nothing is ready, charged to its budgets (`steps`, the loop's
-  /// iterations so far, and `budget`, running): false to end the run. A post to the lock port
-  /// ends it (true: the next step_once applies the post).
+  /// iterations so far, and `budget`, running): false to end the run. A post to the lock port or
+  /// to post_control ends it (true: the run's loop applies the post).
   bool idle_wait(std::optional<uint64_t> max_steps, uint64_t &steps, time_budget *budget);
 
   /// Execute one step on a specific process and check resource limits.
@@ -420,12 +514,19 @@ private:
   void keep_lock_expiries(clock::time_point now);
 
   /// post_control's commands, from any thread: guarded by control_mutex_, applied at the top of
-  /// step_once. control_pending_ is set (under the mutex) while there are any, so a step finds
-  /// none without the lock.
+  /// step_once and of run()'s loop. controls_waiting_ counts the commands posted and not yet
+  /// applied or refused, queued or in a batch being applied: has_pending_control(), and a step
+  /// finds none without the lock. A command stops counting once its call is made, before its done
+  /// runs, or as it is refused. destroying_ (under the mutex): the destructor took the queue, and
+  /// a post (a done's) is queued for it to refuse.
   std::mutex control_mutex_;
   std::vector<std::pair<int, control_cmd>> controls_;
-  std::atomic<bool> control_pending_{false};
+  std::atomic<std::size_t> controls_waiting_{0};
+  bool destroying_ = false;
+  /// Apply the queued commands in order. One that throws gets done(false), and the rest go back
+  /// to the front of the queue before the exception propagates.
   void apply_controls();
+  void apply_control(int pid, control_cmd &cmd, bool &counted_out);
 };
 
 /// limits.max_alloc_bytes from the state tree under `root`:

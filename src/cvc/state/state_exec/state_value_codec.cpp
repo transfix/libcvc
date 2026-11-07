@@ -12,6 +12,8 @@
 #include <cstdlib>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/detail/lock_home.h>
+#include <cvc/state/state_exec/exceptions.h>
+#include <cvc/state/state_exec/heap.h> // track_captured_env
 #include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/state_value_codec.h>
@@ -169,6 +171,17 @@ std::optional<std::size_t> ref_index(const std::string &ref, std::size_t size) {
   if (ec != std::errc{} || end != ref.data() + ref.size() || i >= size)
     return std::nullopt;
   return i;
+}
+
+// A decoded dict with exactly the shape of a built-in exception class dict is that class
+// (builtin_class_of_copy). The writer writes the shared, read-only dict as data and its init
+// native decodes as nil, so a restored exception's class would otherwise be a copy: still caught
+// by its chain of names, but not read-only, and refused by state-data-set as an object instance
+// (S0.1, S0.2). A dict's __super__ is decoded, and relinked, before the dict is done.
+void relink_builtin_class(value_t &v) {
+  if (const auto *d = std::get_if<dict_ptr>(&v.v); d && *d)
+    if (dict_ptr cls = builtin_class_of_copy(**d))
+      v = value_t(std::move(cls));
 }
 
 // One encode walk, from the node encode_value or encode_environment was called on.
@@ -384,6 +397,7 @@ private:
     environment *env;           // scope
     cvc::state *root;
     bool own_roots;
+    value_t *out = nullptr; // dict: the value holding it, relinked when it is done
   };
 
   struct spill_table {
@@ -398,14 +412,15 @@ private:
     cvc::state *root;
   };
 
+  // Every element slot is reserved up front, so a slot (a frame's `out`) stays where it is.
   void push(kind what, cvc::state &items, std::vector<value_t> *list, ordered_map *dict,
-            environment *env, cvc::state *root, bool own_roots) {
+            environment *env, cvc::state *root, bool own_roots, value_t *out = nullptr) {
     const std::size_t n = state_list(items).size();
     if (list)
       list->reserve(n);
     else if (dict)
       dict->reserve(n);
-    stack_.push_back({what, &items, 0, n, list, dict, env, root, own_roots});
+    stack_.push_back({what, &items, 0, n, list, dict, env, root, own_roots, out});
   }
 
   // Read the value at `node` into `out`: a leaf now, anything with elements as an empty value
@@ -440,7 +455,7 @@ private:
       auto entries = std::make_shared<ordered_map>();
       out = value_t(entries);
       if (has_child(*src, "__entries__"))
-        push(kind::dict, (*src)("__entries__"), nullptr, entries.get(), nullptr, root, false);
+        push(kind::dict, (*src)("__entries__"), nullptr, entries.get(), nullptr, root, false, &out);
     } else if (type == "closure") {
       begin_closure(*src, out, root);
     } else {
@@ -465,6 +480,9 @@ private:
       const std::string type = get_type(env);
       current = type != "env_chain";
       cls->env_snapshot = env_at(env, root);
+      // As the evaluators do when they make a closure: bound back into the scope it captures (a
+      // defun, a class's method), it is a cycle only the collector frees (heap.h).
+      track_captured_env(cls->env_snapshot);
     }
     if (has_child(node, "__body__"))
       push(kind::body, node("__body__"), &cls->body, nullptr, nullptr, root, !current);
@@ -517,6 +535,8 @@ private:
       while (!stack_.empty()) {
         frame &f = stack_.back();
         if (f.next == f.size) {
+          if (f.out)
+            relink_builtin_class(*f.out);
           stack_.pop_back();
           continue;
         }

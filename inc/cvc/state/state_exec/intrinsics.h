@@ -12,13 +12,16 @@
 #ifndef CVC_STATE_EXEC_INTRINSICS_H
 #define CVC_STATE_EXEC_INTRINSICS_H
 
+#include <boost/shared_ptr.hpp>
 #include <cstring> // std::strcmp — document_scope's cross-module-stable type tag compare
+#include <cvc/state/state.h> // cvc::pin_vector
 #include <cvc/state/state_exec/types.h>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -160,6 +163,11 @@ struct intrinsics_context {
   std::string cluster_id;            // Cluster identity
   std::string node_id;               // Node identity
   std::string root_path;             // Chroot path (empty = full tree)
+  /// Owning pins of `root` and its ancestors (td 4.8): every node from the tree's root node down
+  /// to `root` inclusive, so back() == root. Empty until first pinned (pinned_root), then never
+  /// empty; an unchrooted context holds just the root. Copied to spawned children. Released leaf
+  /// first (pin_vector): a context can outlive the document it is chrooted in.
+  cvc::pin_vector root_pins;
   const channel_policy *channels = nullptr; // §12 channel enforcement (non-owning; host-installed)
   document_scope *document = nullptr; // Per-document resource owner (non-owning; host-installed)
 
@@ -186,6 +194,7 @@ struct intrinsics_context {
   /// process ends (Ariadne's actions) keeps it while the children live. Unset: nothing is called.
   std::function<void(int pid)> on_child;
 };
+static_assert(std::is_aggregate_v<intrinsics_context>); // hosts may brace-initialise it
 
 /// Register all DSL intrinsics into an environment.
 ///
@@ -212,6 +221,12 @@ std::function<spawn_setup(const intrinsics_context &)> make_spawn_context(
 /// Call this after assigning ctx->root = &tree_root and before
 /// register_intrinsics().
 void apply_chroot(intrinsics_context &ctx, cvc::state &tree_root, const std::string &root_path);
+
+/// `ctx->root`, with root_pins holding it and its ancestors (td 4.8). When root_pins is empty or
+/// its back() is not `root` (a host assigned `root` directly), it pins `root` and its parents
+/// first, as the host promises the node is alive when it assigns it. Call on the context's
+/// scheduler thread.
+cvc::state &pinned_root(intrinsics_context *ctx);
 
 /// §12 channel scoping: the message-channel key for `channel` under chroot `root_path`, mirroring
 /// how state paths are chrooted. This is the PURE-STRING form (no state-tree walk, so it is

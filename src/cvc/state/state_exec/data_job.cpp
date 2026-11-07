@@ -5,18 +5,24 @@
              work on the heap and run a slice at a time.
 */
 
+#include "builtin_class.h"
 #include "native_stack.h"
 
 #include <algorithm>
 #include <charconv>
 #include <cstdint>
+#include <cstring>
 #include <cvc/state/state.h>
+#include <cvc/state/state_exec/async_host.h> // is_async_future
 #include <cvc/state/state_exec/data_job.h>
-#include <cvc/state/state_exec/evaluator.h> // evaluation_stats
+#include <cvc/state/state_exec/detail/lock_home.h> // lock_ops, the lock objects' type names
+#include <cvc/state/state_exec/evaluator.h>        // evaluation_stats
 #include <cvc/state/state_exec/generator.h>
-#include <cvc/state/state_exec/scheduler.h> // the settings' key prefixes
+#include <cvc/state/state_exec/scheduler.h>           // the settings' key prefixes
+#include <cvc/state/state_exec/stackless_evaluator.h> // detail::awaitable, kAwaitableType
 #include <optional>
 #include <stdexcept>
+#include <typeinfo>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -345,17 +351,37 @@ private:
 
 // -- copy --------------------------------------------------------------------
 
+// The kind of internal object that must not cross a thread, or null: an async call's handle (a
+// future's), the with-lock form (it holds its context's raw pointer), a lock wait's handle. Known
+// by type name, and by payload type where there is one.
+const char *refused_object(const data_object &obj) {
+  const std::type_info &payload = obj.payload.type();
+  if (obj.type_name == detail::kAwaitableType ||
+      payload == typeid(std::shared_ptr<detail::awaitable>))
+    return "future";
+  if (obj.type_name == detail::kLockOpsType || payload == typeid(detail::lock_ops))
+    return "lock form";
+  if (obj.type_name == detail::kLockWaitType)
+    return "lock wait";
+  return nullptr;
+}
+
 // Memoized on the source node, so a shared-pointer DAG is copied in PHYSICAL time (the copy has
 // the same sharing, disjoint from the original) and a cycle is copied as a cycle. A deadline
 // poll per node aborts a huge payload at the time budget.
+//
+// copy_mode::isolate is state-data-set's copy (td 4.3): it refuses, at any depth, what cannot
+// cross a thread, and shares the built-in class dicts, which are read-only (S0.1). It throws
+// from step(), so a refusal in any slice leaves no result to write.
 class copy_walk final : public data_job {
 public:
-  explicit copy_walk(value_t v) : root_(std::move(v)) {}
+  copy_walk(value_t v, copy_mode mode, const char *who)
+      : root_(std::move(v)), mode_(mode), who_(who) {}
 
   bool step(std::size_t budget) override {
     if (!started_) {
       started_ = true;
-      result_ = copy(root_);
+      result_ = copy(root_, nullptr);
     }
     for (std::size_t visited = 0; !open_.empty(); ++visited) {
       if (budget != 0 && visited >= budget)
@@ -367,15 +393,15 @@ public:
         continue;
       }
       ++nodes_;
-      eval_deadline_check("state-data-get");
+      eval_deadline_check(who_);
       if (src.list) {
         list_ptr out = std::get<list_ptr>(dst.v);
         const value_t &e = (*src.list)[i];
-        out->push_back(copy(e)); // may push, invalidating src and dst
+        out->push_back(copy(e, "list")); // may push, invalidating src and dst
       } else {
         dict_ptr out = std::get<dict_ptr>(dst.v);
         const auto &[k, e] = (*src.dict)[i];
-        out->emplace_back(k, copy(e)); // may push, invalidating src and dst
+        out->emplace_back(k, copy(e, "dict")); // may push, invalidating src and dst
       }
     }
     return true;
@@ -384,8 +410,15 @@ public:
   value_t result() override { return std::move(result_); }
 
 private:
-  // The copy of `v`: a list or dict is a new empty one, filled by step() through its cursor.
-  value_t copy(const value_t &v) {
+  // The copy of `v`, the root (`in` null) or an element of a list or dict (`in`): a list or dict
+  // is a new empty one, filled by step() through its cursor.
+  value_t copy(const value_t &v, const char *in) {
+    // A built-in class dict is read-only (S0.1), so both modes share it: an exception read back
+    // with state-data-get can be stored again.
+    if (const auto *d = std::get_if<dict_ptr>(&v.v); d && *d && detail::is_builtin_class(**d))
+      return v;
+    if (mode_ == copy_mode::isolate)
+      isolate_refuse(v, in);
     std::optional<cursor> c = open_cursor(v);
     if (!c) {
       // empty or null lists and dicts still get their own (empty) copy
@@ -393,12 +426,16 @@ private:
         return make_list();
       if (auto *d = std::get_if<dict_ptr>(&v.v); d && *d)
         return make_dict();
-      return v; // scalar / symbol (opaque callables are refused at state-data-set)
+      // Shared: scalars, strings, symbols and bytes are values; a data_object is shared under its
+      // read-only contract; share mode also shares callables, generators and handles.
+      return v;
     }
     const void *key = c->list ? static_cast<const void *>(c->list.get())
                               : static_cast<const void *>(c->dict.get());
     if (auto found = memo_.find(key); found != memo_.end())
-      return found->second; // shared node / cycle already copied -> reuse (bounds the walk)
+      return found->second.copy; // shared node / cycle already copied -> reuse (bounds the walk)
+    if (mode_ == copy_mode::isolate && c->dict)
+      isolate_dict(v, in); // once per dict: a dict reached again was checked
     value_t out;
     if (c->list) {
       auto l = std::make_shared<std::vector<value_t>>();
@@ -409,15 +446,66 @@ private:
       d->reserve(c->dict->size());
       out = value_t{d};
     }
-    memo_.emplace(key, out); // registered before its elements are copied
+    // Registered before its elements are copied, with its source held (memo_entry).
+    memo_.emplace(key, memo_entry{c->list ? std::shared_ptr<const void>(c->list)
+                                          : std::shared_ptr<const void>(c->dict),
+                                  out});
     open_.emplace_back(std::move(*c), out);
     return out;
   }
 
+  [[noreturn]] void refuse(const char *kind, const char *in) const {
+    std::string what = std::string(who_) + ": cannot store " +
+                       (std::strchr("aeiou", kind[0]) ? "an " : "a ") + kind;
+    if (in)
+      what += std::string(" (nested in a ") + in + ")";
+    throw std::runtime_error(what);
+  }
+
+  // Isolate mode, before `v` is copied: throws for a callable, a generator or an internal object
+  // (refused_object).
+  void isolate_refuse(const value_t &v, const char *in) const {
+    if (std::holds_alternative<closure_ptr>(v.v))
+      refuse("closure", in);
+    if (std::holds_alternative<native_fn>(v.v))
+      refuse("native function", in);
+    if (std::holds_alternative<generator_ptr>(v.v))
+      refuse("generator", in);
+    if (const auto *obj = std::get_if<data_object_ptr>(&v.v); obj && *obj)
+      if (const char *kind = refused_object(**obj))
+        refuse(kind, in);
+  }
+
+  // Isolate mode, a dict seen for the first time: an async call's future is refused, and so is
+  // an instance of a user class, whose methods hold the defining program's live environment
+  // (S0-Q4). An instance has the shape defclass and make_exception give it: "__class__" first,
+  // holding a class dict whose "__name__" is first (a class of any size). A built-in exception's
+  // instance is copied, its class shared, and any other dict is data.
+  void isolate_dict(const value_t &v, const char *in) const {
+    if (is_async_future(v))
+      refuse("future", in);
+    const ordered_map &d = *std::get<dict_ptr>(v.v); // not empty: it has a cursor
+    if (d.front().first != "__class__")
+      return;
+    const auto *cls = std::get_if<dict_ptr>(&d.front().second.v);
+    if (cls && *cls && !(*cls)->empty() && (*cls)->front().first == "__name__" &&
+        !detail::is_builtin_class(**cls))
+      refuse("object instance", in);
+  }
+
   value_t root_;
+  copy_mode mode_;
+  const char *who_; // a string literal: the deadline's and the refusals' label
   bool started_ = false;
   value_t result_;
-  std::unordered_map<const void *, value_t> memo_;
+  // A source list or dict's copy, by the source's address. The entry holds the source as well:
+  // one another process drops between two slices stays allocated until the copy is done, so its
+  // address can't come back as a new list or dict that the walk would take for it (R0a-mem-2).
+  struct memo_entry {
+    std::shared_ptr<const void> source;
+    value_t copy;
+  };
+  std::unordered_map<const void *, memo_entry> memo_;
   std::vector<std::pair<cursor, value_t>> open_;
 };
 
@@ -625,10 +713,10 @@ template <class Walk> Walk &finish_walk(Walk &walk) {
 }
 
 std::optional<std::size_t> read_size_setting(cvc::state &root, const std::string &path) {
-  cvc::state *node = root.findDescendant(path);
-  if (!node)
+  const std::optional<std::string> value = detail::setting_value(root, path); // held (R0-mid)
+  if (!value)
     return std::nullopt;
-  const std::string v = node->value();
+  const std::string &v = *value;
   std::size_t n = 0;
   const auto [end, ec] = std::from_chars(v.data(), v.data() + v.size(), n);
   if (ec != std::errc{} || end != v.data() + v.size() || v.empty())
@@ -673,8 +761,8 @@ std::unique_ptr<data_job> make_print_job(value_t v) {
   return std::make_unique<print_walk>(std::move(v));
 }
 
-std::unique_ptr<data_job> make_copy_job(value_t v) {
-  return std::make_unique<copy_walk>(std::move(v));
+std::unique_ptr<data_job> make_copy_job(value_t v, copy_mode mode, const char *who) {
+  return std::make_unique<copy_walk>(std::move(v), mode, who);
 }
 
 std::unique_ptr<data_job> make_substitute_job(value_t tmpl,

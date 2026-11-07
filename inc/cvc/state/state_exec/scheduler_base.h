@@ -22,6 +22,7 @@
 #ifndef CVC_STATE_EXEC_SCHEDULER_BASE_H
 #define CVC_STATE_EXEC_SCHEDULER_BASE_H
 
+#include <boost/shared_ptr.hpp>
 #include <cstdint>
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/types.h>
@@ -186,12 +187,17 @@ class scheduler_base;
 
 /// A command posted to a scheduler from another thread, applied between its steps (td Stage 0's
 /// post_control; gap G-20). L2 has set_priority, and a query (pycvc's between-steps reads); Stage
-/// 0 adds kill, pause, resume and signal.
+/// 0 adds kill, pause, resume and signal, each the direct call's host path, unchecked.
 struct control_cmd {
-  enum class kind { set_priority, query };
+  enum class kind { set_priority, query, kill, pause, resume, signal };
   kind what = kind::set_priority;
   int value = 0;
   std::function<void(scheduler_base &)> query;
+  std::string signal; // kind::signal: the name send_signal takes ("SIGKILL" kills)
+  /// Optional, not used for a query: called once, on the scheduler's thread, with what the direct
+  /// call returned, or with false from the scheduler's destructor when the command was never
+  /// applied. It must not throw, block or take the GIL.
+  std::function<void(bool)> done;
 };
 
 /// state_exec.policy under `root` (round_robin, priority, priority_rr), else `fallback`; an
@@ -253,8 +259,28 @@ public:
 
   // --- State-watch registry (state-watch/state-unwatch) ---
   virtual void set_watch_root(cvc::state *root) = 0;
+  /// The same for a root a program's step gives (state-watch's, S0.md section 0, item 20): the
+  /// scheduler keeps `pin` (a hold on `root`, and on its ancestors when the caller's pin holds
+  /// them) for as long as `root` is its watch root, since no host keeps it alive. A later
+  /// set_watch_root, of either form, replaces or drops it. This default ignores `pin`.
+  virtual void set_watch_root(cvc::state *root, boost::shared_ptr<cvc::state> pin) {
+    (void)pin;
+    set_watch_root(root);
+  }
+  /// The root set_watch_root() gave, or null. state-watch sets one only on a scheduler that has
+  /// none (S0.md section 0, item 20).
+  virtual cvc::state *watch_root() const { return nullptr; }
   virtual void register_watch_handler(int pid, int watch_id, value_t handler,
                                       const std::string &path) = 0;
+  /// A watch that resolves `path` under its own `root` (a chrooted context's: td 4.8), pinned by
+  /// the entry; null resolves under the scheduler's watch root. This default ignores `root`, and
+  /// state-watch no longer moves the watch root for a chrooted context, so a scheduler that keeps
+  /// it resolves a chrooted watch under its own watch root: override it.
+  virtual void register_watch_handler(int pid, int watch_id, value_t handler,
+                                      const std::string &path, boost::shared_ptr<cvc::state> root) {
+    (void)root;
+    register_watch_handler(pid, watch_id, std::move(handler), path);
+  }
   virtual void unregister_watch_handler(int pid, int watch_id) = 0;
 
   // --- Async calls (await, and the async host: docs/STATE_EXEC_EXCEPTIONS.md 3) ---

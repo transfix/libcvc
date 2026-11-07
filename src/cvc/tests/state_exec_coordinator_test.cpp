@@ -4,9 +4,11 @@
   observation, admin controls, and end-to-end scenarios.
 */
 
+#include <atomic>
 #include <chrono>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/detail/lock_home.h>
 #include <cvc/state/state_exec/exec_coordinator.h>
@@ -19,8 +21,12 @@
 #include <cvc/state/state_exec/state_value_codec.h>
 #include <cvc/state/state_message.h>
 #include <cvc/state/state_message_bus.h>
+#include <cvc/state/state_transport.h>
 #include <deque>
 #include <gtest/gtest.h>
+#include <memory>
+#include <optional>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -414,6 +420,9 @@ TEST_F(CoordinatorTest, SubmitViaMessage) {
   msg.origin_node_id = "node-C";
 
   coord.on_message(msg);
+  // The submission is posted: it runs at the scheduler's next step, not on the bus's thread.
+  EXPECT_EQ(sched.process_count(), 0);
+  sched.step();
 
   auto s = coord.stats();
   EXPECT_EQ(s.submissions_received, 1u);
@@ -421,6 +430,33 @@ TEST_F(CoordinatorTest, SubmitViaMessage) {
 
   // Verify process was created
   EXPECT_EQ(sched.process_count(), 1);
+}
+
+// A posted entry must not throw (post_control): a script that doesn't parse is a rejected
+// submission, answered as one, and the step that ran it goes on.
+TEST_F(CoordinatorTest, SubmitViaMessageThatDoesNotParseIsRejected) {
+  coord.start();
+  coord.on_message(state_message::make_text(
+      "__state_exec.cluster-1.election", "{\"type\":\"election-victory\",\"node_id\":\"node-A\"}",
+      MIME_EXEC_ELECTION));
+  std::vector<state_message> replies;
+  bus.subscribe("__state_exec.cluster-1.submit.reply.node-C",
+                [&](const state_message &m) { replies.push_back(m); });
+
+  auto msg = state_message::make_text("__state_exec.cluster-1.submit",
+                                      "{\"action\":\"submit\",\"script\":\"(+ 1\","
+                                      "\"reply_node\":\"node-C\"}",
+                                      MIME_EXEC_SUBMIT);
+  msg.cluster_id = "cluster-1";
+  coord.on_message(msg);
+  EXPECT_NO_THROW(sched.step());
+
+  auto s = coord.stats();
+  EXPECT_EQ(s.submissions_received, 1u);
+  EXPECT_EQ(s.submissions_rejected, 1u);
+  EXPECT_EQ(s.submissions_accepted, 0u);
+  ASSERT_EQ(replies.size(), 1u);
+  EXPECT_NE(replies[0].string_value.find("\"accepted\":false"), std::string::npos);
 }
 
 TEST_F(CoordinatorTest, SubmitStats) {
@@ -470,11 +506,20 @@ TEST_F(CoordinatorTest, MigrateToSelfFails) {
   EXPECT_EQ(result.error, "cannot migrate to self");
 }
 
+// migrate() only requests the migration: the pause fails on the scheduler's thread, at its next
+// step, and the failure shows in the stats.
 TEST_F(CoordinatorTest, MigrateNonexistentProcess) {
   coord.start();
   auto result = coord.migrate(999, "node-B");
-  EXPECT_FALSE(result.success);
-  EXPECT_EQ(result.error, "failed to pause process");
+  EXPECT_TRUE(result.success);
+  EXPECT_EQ(result.new_pid, -1);
+  EXPECT_EQ(result.target_node, "node-B");
+  EXPECT_EQ(result.error, "");
+  EXPECT_EQ(coord.stats().migrations_failed, 0u);
+  sched.step();
+  auto s = coord.stats();
+  EXPECT_EQ(s.migrations_failed, 1u);
+  EXPECT_EQ(s.migrations_initiated, 0u);
 }
 
 TEST_F(CoordinatorTest, MigrateNoScheduler) {
@@ -506,6 +551,7 @@ TEST_F(CoordinatorTest, MigrateRunningProcess) {
   auto result = coord.migrate(pid, "node-B");
   EXPECT_TRUE(result.success);
   EXPECT_EQ(result.target_node, "node-B");
+  sched.step(); // the migration runs on the scheduler's thread
 
   auto s = coord.stats();
   EXPECT_EQ(s.migrations_initiated, 1u);
@@ -531,6 +577,7 @@ TEST_F(CoordinatorTest, MigrateReceiveOnTarget) {
   msg.origin_node_id = "node-B";
 
   coord.on_message(msg);
+  sched.step(); // the ingest is posted: it runs at the scheduler's next step
 
   // A new process should have been created
   EXPECT_GE(sched.process_count(), 1);
@@ -554,6 +601,77 @@ TEST_F(CoordinatorTest, MigrateAckReceived) {
 
   auto s = coord.stats();
   EXPECT_EQ(s.migrations_completed, 1u);
+}
+
+namespace {
+
+// A transport whose migrate-requests fail: publish_message throws for them, as a transport that
+// loses its peers may.
+struct migrate_refusing_transport : cvc::state_transport {
+  void register_shard(cvc::state_cluster_shard *) override {}
+  void unregister_shard(cvc::state_cluster_shard *) override {}
+  publish_stats publish(const cvc::state_mutation &) override { return {}; }
+  publish_message_stats publish_message(const state_message &m) override {
+    if (m.string_value.find("\"migrate-request\"") != std::string::npos)
+      throw std::runtime_error("transport down");
+    return {};
+  }
+  std::size_t pump_shard(cvc::state_cluster_shard &) override { return 0; }
+  std::size_t pump_all() override { return 0; }
+  void flush() override {}
+};
+
+} // namespace
+
+// A migration whose send throws fails as a whole: its entry resumes the process, which runs on
+// here, and counts one failed migration and none initiated. It used to leave the process paused
+// for good, counted both initiated and failed.
+TEST_F(CoordinatorTest, AMigrationWhoseSendThrowsResumesItsProcess) {
+  migrate_refusing_transport transport;
+  cvc::state_cluster_shard shard(app_ctx, "cluster_1", "node_C"); // C identifiers
+  shard.set_transport(&transport);
+  exec_coordinator c;
+  c.set_node_id("node_C");
+  c.set_cluster_id("cluster_1");
+  c.attach_scheduler(&sched);
+  c.attach_shard(&shard);
+  c.attach_message_bus(&shard.message_bus());
+  c.start();
+
+  const int pid = sched.execute(std::string("(while #t nil)"));
+  const uint64_t steps = sched.get_process_info(pid)->step_count;
+  EXPECT_TRUE(c.migrate(pid, "node-B").success); // requested
+  sched.step(); // the migration fails, then the process takes a step
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::ready);
+  EXPECT_GT(sched.get_process_info(pid)->step_count, steps); // it ran: not paused
+  auto s = c.stats();
+  EXPECT_EQ(s.migrations_failed, 1u);
+  EXPECT_EQ(s.migrations_initiated, 0u);
+  c.stop();
+}
+
+// A sent migration whose source process can't be killed: its kill is made to throw before it
+// kills, by marking the scheduler's thread as running an async kernel from the send on (every
+// scheduler mutator refuses a kernel). The entry tries the kill once more, then leaves the process
+// paused, never resumed, so it doesn't run here as well as on the target, and counts it.
+TEST_F(CoordinatorTest, AMigrationWhoseKillThrowsLeavesItsProcessPaused) {
+  coord.start();
+  const int pid = sched.execute(std::string("(while #t nil)"));
+  std::unique_ptr<detail::async_kernel_scope> kernel;
+  bus.subscribe("__state_exec.cluster-1.migrate.node-B", [&](const state_message &) {
+    kernel = std::make_unique<detail::async_kernel_scope>(true); // until the step is over
+  });
+  EXPECT_TRUE(coord.migrate(pid, "node-B").success); // requested
+  EXPECT_NO_THROW(sched.step());
+  ASSERT_TRUE(kernel) << "the request was never sent";
+  kernel.reset();
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::paused);
+  auto s = coord.stats();
+  EXPECT_EQ(s.migrations_initiated, 1u);
+  EXPECT_EQ(s.migrations_kill_failed, 1u);
+  EXPECT_EQ(s.migrations_failed, 0u);
+  sched.step(); // nothing resumes it
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::paused);
 }
 
 // ===========================================================================
@@ -682,6 +800,9 @@ TEST_F(CoordinatorTest, AdminPauseLocal) {
   int pid = sr.pid;
 
   EXPECT_TRUE(coord.admin_pause(pid));
+  // Posted: applied at the scheduler's next step.
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::ready);
+  sched.step();
 
   auto pi = sched.get_process_info(pid);
   ASSERT_TRUE(pi.has_value());
@@ -700,6 +821,7 @@ TEST_F(CoordinatorTest, AdminResumeLocal) {
 
   EXPECT_TRUE(coord.admin_pause(pid));
   EXPECT_TRUE(coord.admin_resume(pid));
+  sched.step(); // both applied, in order; then the process takes a step
 
   auto pi = sched.get_process_info(pid);
   ASSERT_TRUE(pi.has_value());
@@ -717,6 +839,7 @@ TEST_F(CoordinatorTest, AdminKillLocal) {
   int pid = sr.pid;
 
   EXPECT_TRUE(coord.admin_kill(pid));
+  sched.step();
 
   auto pi = sched.get_process_info(pid);
   ASSERT_TRUE(pi.has_value());
@@ -776,6 +899,7 @@ TEST_F(CoordinatorTest, ReceiveControlMessage) {
   msg.cluster_id = "cluster-1";
   msg.origin_node_id = "node-B";
   coord.on_message(msg);
+  sched.step(); // the command is posted: applied at the scheduler's next step
 
   auto pi = sched.get_process_info(pid);
   ASSERT_TRUE(pi.has_value());
@@ -815,10 +939,57 @@ TEST_F(CoordinatorTest, ReceiveKillCommand) {
   msg.cluster_id = "cluster-1";
   msg.origin_node_id = "node-B";
   coord.on_message(msg);
+  sched.step();
 
   auto pi = sched.get_process_info(sr.pid);
   ASSERT_TRUE(pi.has_value());
   EXPECT_EQ(pi->status, process_status::killed);
+}
+
+// A bus thread's control waits for the scheduler's next step (td 8.1, 4.12): a pause, and a kill,
+// that a bus thread sends while the scheduler's thread is held between steps (inside a posted
+// query) leave the process as it is there, and the next step applies them. A coordinator that
+// applied them on the bus thread would show the process paused or killed inside the query.
+TEST_F(CoordinatorTest, ABusThreadsControlWaitsForTheSchedulersNextStep) {
+  using clock_type = std::chrono::steady_clock;
+  coord.start();
+  // Bounds a hang only: nothing is timed.
+  const auto deadline = clock_type::now() + std::chrono::seconds(30);
+  for (const std::string command : {"pause", "kill"}) {
+    SCOPED_TRACE(command);
+    const int p = sched.execute(std::string("(while #t nil)"));
+    std::atomic<bool> in_query{false}, bus_done{false};
+    process_status seen = process_status::terminated;
+    control_cmd hold;
+    hold.what = control_cmd::kind::query;
+    hold.query = [&](scheduler_base &s) {
+      in_query.store(true);
+      while (!bus_done.load() && clock_type::now() < deadline)
+        std::this_thread::yield();
+      seen = s.get_process_info(p)->status;
+    };
+    ASSERT_TRUE(sched.post_control(-1, std::move(hold)));
+    std::thread pump([&] { sched.step(); });
+    while (!in_query.load() && clock_type::now() < deadline)
+      std::this_thread::yield();
+    std::thread bus_thread([&] {
+      auto msg = state_message::make_text(
+          "__state_exec.cluster-1.control.node-A",
+          "{\"command\":\"" + command + "\",\"pid\":" + std::to_string(p) + ",\"from\":\"node-B\"}",
+          MIME_EXEC_CONTROL);
+      msg.cluster_id = "cluster-1";
+      msg.origin_node_id = "node-B";
+      coord.on_message(msg);
+      bus_done.store(true);
+    });
+    bus_thread.join();
+    pump.join();
+    ASSERT_TRUE(in_query.load()) << "the held query never ran";
+    EXPECT_EQ(seen, process_status::ready); // between steps, before the command applies
+    sched.step();
+    EXPECT_EQ(sched.get_process_info(p)->status,
+              command == "pause" ? process_status::paused : process_status::killed);
+  }
 }
 
 TEST_F(CoordinatorTest, AdminCommandStats) {
@@ -830,6 +1001,38 @@ TEST_F(CoordinatorTest, AdminCommandStats) {
 
   auto s = coord.stats();
   EXPECT_EQ(s.admin_commands, 3u);
+}
+
+// What the coordinator posts can outlive it (the tests and the CLI destroy it before its
+// scheduler): each entry holds the coordinator's token weakly, so a submission, an ingest or a
+// migration still queued once it is gone does nothing when the scheduler applies it.
+TEST_F(CoordinatorTest, PostedEntriesOutliveTheCoordinator) {
+  const int pid = sched.execute(std::string("(begin (+ 1 2) (+ 3 4))"));
+  {
+    exec_coordinator c;
+    c.set_node_id("node-C");
+    c.set_cluster_id("cluster-1");
+    c.attach_scheduler(&sched);
+    c.attach_message_bus(&bus);
+    c.start();
+    c.on_message(state_message::make_text("__state_exec.cluster-1.election",
+                                          "{\"type\":\"election-victory\",\"node_id\":\"node-C\"}",
+                                          MIME_EXEC_ELECTION));
+    c.on_message(state_message::make_text(
+        "__state_exec.cluster-1.submit",
+        "{\"action\":\"submit\",\"script\":\"(+ 10 20)\",\"reply_node\":\"node-D\"}",
+        MIME_EXEC_SUBMIT));
+    c.on_message(state_message::make_text(
+        "__state_exec.cluster-1.migrate.node-C",
+        "{\"action\":\"migrate-request\",\"source_node\":\"node-B\",\"source_pid\":42,"
+        "\"process_data\":\"{\\\"name\\\":\\\"migrated-proc\\\"}\"}",
+        MIME_EXEC_MIGRATE));
+    EXPECT_TRUE(c.migrate(pid, "node-B").success);
+  }
+  EXPECT_TRUE(sched.has_pending_control());
+  EXPECT_EQ(sched.step(), 1); // the entries, then a step of `pid`
+  EXPECT_EQ(sched.process_count(), 1);
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::ready);
 }
 
 // ===========================================================================
@@ -922,18 +1125,22 @@ TEST_F(CoordinatorTest, E2E_PauseResumeKill) {
   auto r = coord.submit("(begin (+ 1 2) (+ 3 4) (+ 5 6))");
   int pid = r.pid;
 
+  // Each command is posted, and applied at the scheduler's next step.
   // Pause
   EXPECT_TRUE(coord.admin_pause(pid));
+  sched.step();
   auto pi = sched.get_process_info(pid);
   EXPECT_EQ(pi->status, process_status::paused);
 
-  // Resume
+  // Resume (the step then runs the process)
   EXPECT_TRUE(coord.admin_resume(pid));
+  sched.step();
   pi = sched.get_process_info(pid);
   EXPECT_EQ(pi->status, process_status::ready);
 
   // Kill
   EXPECT_TRUE(coord.admin_kill(pid));
+  sched.step();
   pi = sched.get_process_info(pid);
   EXPECT_EQ(pi->status, process_status::killed);
 }
@@ -1294,6 +1501,7 @@ TEST_F(TwoCoordinatorTest, CrossNodeControlCommands) {
   ctrl.cluster_id = "cluster-1";
   ctrl.origin_node_id = "node-B";
   coord1.on_message(ctrl);
+  sched1.step(); // the kill is posted: applied at node-A's next step
 
   auto pi = sched1.get_process_info(r.pid);
   ASSERT_TRUE(pi.has_value());
@@ -1380,6 +1588,7 @@ TEST_F(CoordinatorTest, LW08_MetadataMigrateReleases) {
 
   const auto r = coord.migrate(pid, "node-B");
   EXPECT_TRUE(r.success) << r.error;
+  sched.step(); // the migration runs on the scheduler's thread
   const auto info = sched.get_process_info(pid);
   EXPECT_EQ(info->status, process_status::killed);
   EXPECT_EQ(info->locks_held, 0u);
@@ -1436,7 +1645,8 @@ protected:
   }
 
   // A migration request from node-B, as migrate() sends it: process_data is the metadata JSON.
-  // Without `floor_explicit`, as a source older than the flag sends it.
+  // Without `floor_explicit`, as a source older than the flag sends it. The ingest is posted, so
+  // a step follows.
   void receive_migration(const std::string &name, int priority, int floor,
                          std::optional<bool> floor_explicit = std::nullopt) {
     std::string data = "{\\\"name\\\":\\\"" + name +
@@ -1455,6 +1665,7 @@ protected:
     msg.cluster_id = "cluster-1";
     msg.origin_node_id = "node-B";
     coord.on_message(msg);
+    sched.step();
   }
 };
 
@@ -1555,6 +1766,8 @@ TEST_F(Priority, PR11_FloorInMetadata) {
   bus.subscribe("__state_exec.cluster-1.migrate.node-B",
                 [&](const state_message &m) { sent.push_back(m); });
   ASSERT_TRUE(coord.migrate(src, "node-B").success);
+  EXPECT_TRUE(sent.empty()); // requested: it runs at the scheduler's next step
+  sched.step();
   ASSERT_EQ(sent.size(), 1u);
   EXPECT_NE(sent[0].string_value.find("\\\"priority\\\":4"), std::string::npos)
       << sent[0].string_value;
@@ -1567,6 +1780,7 @@ TEST_F(Priority, PR11_FloorInMetadata) {
   ASSERT_TRUE(sched.set_priority(own, 6));
   sent.clear();
   ASSERT_TRUE(coord.migrate(own, "node-B").success);
+  sched.step();
   ASSERT_EQ(sent.size(), 1u);
   EXPECT_NE(sent[0].string_value.find("\\\"priority_floor\\\":0"), std::string::npos)
       << sent[0].string_value;
@@ -1643,4 +1857,118 @@ TEST_F(Priority, PR11_FloorInMetadata) {
   ASSERT_TRUE(exec_coordinator::deserialize_resource_policy(
       exec_coordinator::serialize_resource_policy(none), none_back));
   EXPECT_FALSE(none_back.priority_floor.has_value());
+}
+
+// --- Stage 0 hazards (td 8.1) ---
+
+namespace {
+
+// What a query posted between the controls saw, on the scheduler's thread.
+struct hz09_seen {
+  int current_pid = -2;
+  std::optional<process_info> p, q;
+};
+
+} // namespace
+
+// HZ-9 (td 8.1, S0.7, S0.8; TSan): the coordinator's control messages arrive on a bus thread while
+// a pump thread steps the scheduler. The bus thread sends, in order: pause P, a query, (once the
+// pump has stepped Q a while) a second query, resume P, a query, set P's priority to 7, SIGKILL to
+// Q, kill P, and a last query. Each is applied between steps, in that order: the queries see P
+// paused, then ready, with no process stepping; P takes no step while it is paused; at the end P
+// was killed by the user, Q by SIGKILL, P's priority is 7, and the tables hold.
+TEST_F(Priority, HZ09_BusThreadControlAppliesBetweenSteps) {
+  using clock_type = std::chrono::steady_clock;
+  lead();
+  const auto forever = [&] {
+    const submit_result r = coord.submit("(while #t nil)");
+    EXPECT_TRUE(r.accepted) << r.error;
+    return r.pid;
+  };
+  const int p = forever();
+  const int q = forever();
+  ASSERT_GE(p, 0);
+  ASSERT_GE(q, 0);
+
+  std::vector<hz09_seen> seen(4);
+  std::atomic<int> answered{0};
+  std::atomic<uint64_t> stepped{0};
+  const auto t0 = clock_type::now();
+  const auto deadline = t0 + std::chrono::seconds(30);
+  std::thread pump([&] {
+    while (answered.load(std::memory_order_acquire) < 4 && clock_type::now() < deadline)
+      if (sched.step() != 0)
+        stepped.fetch_add(1, std::memory_order_relaxed);
+  });
+
+  const auto control = [&](const std::string &command, int pid, const std::string &extra = "") {
+    auto msg =
+        state_message::make_text("__state_exec.cluster-1.control.node-A",
+                                 "{\"command\":\"" + command + "\",\"pid\":" + std::to_string(pid) +
+                                     extra + ",\"from\":\"node-B\"}",
+                                 MIME_EXEC_CONTROL);
+    msg.cluster_id = "cluster-1";
+    msg.origin_node_id = "node-B";
+    coord.on_message(msg);
+  };
+  const auto query = [&](std::size_t k) {
+    control_cmd cmd;
+    cmd.what = control_cmd::kind::query;
+    cmd.query = [&, k](scheduler_base &s) {
+      seen[k].current_pid = s.current_pid();
+      seen[k].p = s.get_process_info(p);
+      seen[k].q = s.get_process_info(q);
+      answered.fetch_add(1, std::memory_order_release);
+    };
+    EXPECT_TRUE(sched.post_control(-1, std::move(cmd)));
+  };
+  const auto wait_for = [&](const auto &done) {
+    while (!done() && clock_type::now() < deadline)
+      std::this_thread::yield();
+    return done();
+  };
+
+  std::thread bus([&] {
+    control("pause", p);
+    query(0);
+    // While P is paused the pump goes on stepping Q.
+    ASSERT_TRUE(wait_for([&] { return answered.load(std::memory_order_acquire) >= 1; }));
+    const uint64_t at_pause = stepped.load(std::memory_order_relaxed);
+    ASSERT_TRUE(
+        wait_for([&] { return stepped.load(std::memory_order_relaxed) >= at_pause + 200; }));
+    query(1);
+    control("resume", p);
+    query(2);
+    control("set_priority", p, ",\"priority\":7");
+    control("send_signal", q, ",\"signal\":\"SIGKILL\"");
+    control("kill", p);
+    query(3);
+  });
+  bus.join();
+  pump.join();
+  std::printf("HZ-9: %llu steps, %.3f s\n",
+              static_cast<unsigned long long>(stepped.load(std::memory_order_relaxed)),
+              std::chrono::duration<double>(clock_type::now() - t0).count());
+  ASSERT_EQ(answered.load(std::memory_order_acquire), 4) << "a query was never applied";
+
+  for (const hz09_seen &s : seen) {
+    EXPECT_EQ(s.current_pid, -1); // between steps
+    ASSERT_TRUE(s.p.has_value());
+    ASSERT_TRUE(s.q.has_value());
+  }
+  EXPECT_EQ(seen[0].p->status, process_status::paused);
+  EXPECT_EQ(seen[1].p->status, process_status::paused);
+  EXPECT_EQ(seen[1].p->step_count, seen[0].p->step_count); // no step while paused
+  EXPECT_GT(seen[1].q->step_count, seen[0].q->step_count); // while Q stepped on
+  EXPECT_EQ(seen[2].p->status, process_status::ready);
+  EXPECT_EQ(seen[3].p->status, process_status::killed);
+  EXPECT_EQ(seen[3].p->exit_error.value_or(""), "killed_by_user");
+  EXPECT_EQ(seen[3].p->priority, 7);
+  EXPECT_EQ(seen[3].q->status, process_status::killed);
+  EXPECT_EQ(seen[3].q->exit_error.value_or(""), "SIGKILL");
+
+  EXPECT_EQ(sched.get_process_info(p)->priority, 7);
+  EXPECT_EQ(sched.get_process_info(p)->status, process_status::killed);
+  EXPECT_EQ(sched.get_process_info(q)->exit_error.value_or(""), "SIGKILL");
+  EXPECT_TRUE(sched.check_tables());
 }
