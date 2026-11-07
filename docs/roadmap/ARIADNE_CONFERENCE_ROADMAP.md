@@ -1076,6 +1076,14 @@ The plan is [`ARIADNE_WORLDS.md`](ARIADNE_WORLDS.md). It covers:
 - entities with an owner and a simulation class;
 - controllers as native kernels or guests, with a determinism gate per kernel;
 - the tiers of bring-your-own, and persistence and cells for a large world;
+- many rooms per server, each its own world, and a lobby;
+- conference features the server declares and stock `cvc://conference/` components detect;
+- worlds bundled, cached or fetched by need, assets by hash, so no client downloads a whole world
+  up front;
+- private rooms, end-to-end encrypted after txwtf (X3DH, Double Ratchet, sender keys, SFrame),
+  whose world one member simulates while the relay only forwards;
+- the same world run locally, with no relay, as the lab and gym (vehicles, spawns, physics panels,
+  reset/step/observe from Python), phases L0–L4;
 - phases WD0–WD9.
 
 The owner settled Q1 on 2026-11-07: the light rig lives in the server's world document, not in the
@@ -1167,6 +1175,9 @@ We deliberately **avoid STUN/TURN**. The central server/cluster is publicly reac
   to note: a fully-E2EE SFU cannot transcode or do content-based processing — header-based routing,
   simulcast selection, and active-speaker (via marked headers) still work; anything needing *decoded*
   media does not.
+* **Keys and private rooms** are planned in [`ARIADNE_WORLDS.md`](ARIADNE_WORLDS.md) §13: X25519 keys signed
+  by the device key, X3DH and the Double Ratchet between members, sender keys for a room, SFrame
+  keys derived from them.
 
 ---
 
