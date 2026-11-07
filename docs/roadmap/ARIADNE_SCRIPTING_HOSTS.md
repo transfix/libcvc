@@ -43,11 +43,12 @@ against `f88eb3dd` (v3.7.11) on 2026-11-06.
 | Piece | Where | State |
 |---|---|---|
 | CPython 3.12, static, for wasm | `python312` | wasm `3.12.10+cvc.13`, wasm-mt `+cvc.11` |
-| numpy for wasm | `numpy-cp312` 2.4.6 | wasm and wasm-mt. Its C extensions are relocatable wasm objects, linked statically and registered as builtins ([`link-host.sh`](../../bindings/pycvc/wasm/link-host.sh)) |
-| vtk-python for wasm | `vtk-python-cp312` 9.5.0 | wasm `+cvc.6` (rendering, IOHDF, IONetCDF); wasm-mt only `+cvc.2` |
+| numpy for wasm | `numpy-cp312` 2.4.6 | wasm and wasm-mt `+cvc.6` (2026-11-07). Its C extensions are relocatable wasm objects, each in a namespace of its own and listed in `share/python-wasm/numpy-cp312.inittab` (§5.5), linked statically and registered as builtins ([`link-host.sh`](../../bindings/pycvc/wasm/link-host.sh)) |
+| vtk-python for wasm | `vtk-python-cp312` 9.5.0 | wasm `+cvc.8` (rendering, IOHDF, IONetCDF); wasm-mt only `+cvc.2` |
 | pycvc + pycvc_gl for wasm | `pycvc-gl-cp312` 3.7.8 | wasm only (87 MB of static archives). [`pycvc_host.cpp`](../../bindings/pycvc/wasm/pycvc_host.cpp) embeds them with numpy and vtk-python and prints `PYCVC_VTK_BRIDGE_OK`, **under node only**: no browser, no window |
 | Python drives a document | [`pymod_gl/ariadne.py`](../../bindings/pycvc/pymod_gl/ariadne.py) (#985, merged) | `Host` (window / offscreen / headless / embedded), functions with arguments and values, the GL-free `AriApp`, and GIL release in both directions |
-| The scripting hosts (P1) | `arix`, `ariglx`: `src/ari`, `src/arigl` with [`src/ariadne_python`](../../src/ariadne_python) | Native. `arix` and `ariglx` 3.7.11 are on cvcpkg.org for Linux. No `ariglx-web`, no `arisrvx` |
+| The scripting hosts (P1) | `arix`, `ariglx`: `src/ari`, `src/arigl` with [`src/ariadne_python`](../../src/ariadne_python) | Native. `arix` and `ariglx` 3.7.11 are on cvcpkg.org for Linux. No `arisrvx` |
+| The browser host (W1) | `ariglx-web`: [`cvcpkg/recipes/ariglx-web`](../../cvcpkg/recipes/ariglx-web/recipe.yaml) | Single-threaded wasm, lean tier, checked in headless Chrome (§5.1). Not on cvcpkg.org yet |
 | An app with an embedded interpreter | volrover `volrover3/docs/EMBEDDED_PYTHON.md` | `EmbeddedInterpreter`: one interpreter per process, GIL parked after boot, the live app handed to a host module (`vrhost`) by PyCapsule, a console dock. Qt-bound |
 | The hosts | `src/ari`, `src/arigl`, `src/arisrv`; `arigl-web` | `ari` = libcvc + FTXUI/tvision. `arigl` = + cvcGL. `arisrv` = the conference relay, core libcvc only, **no document runtime**. `arigl-web` = wasm and wasm-mt pages |
 | Native pycvc packages | `pycvc-cp312`, `pycvc-gl-cp312` | **Linux only**. No Windows or macOS, so the `arix` and `ariglx` packages are Linux-only too |
@@ -400,6 +401,40 @@ A recipe `ariglx-web` (`cvcpkg/recipes/ariglx-web/build-wasm.sh`) does:
 It ships arigl-web's page files plus `python312.zip`: the stdlib and the pure-Python packages,
 fetched before start and imported through zipimport.
 
+**What W1 built.**
+- **The target.** `ariglx` is the arigl-web branch's second target in
+  [`src/arigl/CMakeLists.txt`](../../src/arigl/CMakeLists.txt). It is built when the bindings are
+  on (`CVC_BUILD_PYCVC`), which on Emscripten makes the SWIG modules static archives.
+- **The link.** `cvc_ariadne_python_wasm_host` in
+  [`ariadne_python.cmake`](../../src/ariadne_python/ariadne_python.cmake) links:
+  - libpython3.12.a;
+  - pycvc and pycvc_gl, whole-archived;
+  - every extension object the deps' `share/python-wasm/*.inittab` manifests list (§5.5). A
+    numpy from before the manifests (cvc.5) is localized at configure time.
+  It also generates `cvc_ariadne_python_register_builtins()`, which the engine calls before the
+  interpreter boots.
+- **The zip.** [`make_python_zip.py`](../../src/ariadne_python/make_python_zip.py) writes it,
+  stored, not deflated, so zipimport needs no zlib. It holds:
+  - the stdlib, without its tests or the GUI and build tools;
+  - the prefix's packages, `.py` files and package data only;
+  - `pycvc.py` and the `pycvc_gl` package.
+  The page writes it to `/py/lib/python312.zip`, which CPython puts on `sys.path`.
+- **The page** is arigl-web's. `arigl-web.js` reads `data-module="ariglx"` and
+  `data-python="python312.zip"` from its script tag, downloads both files together, and writes
+  the zip in `preRun`.
+- **Tiers.** The recipe builds the lean tier, or the full tier when vtk-python's wasm build is in
+  the deps prefix.
+- **The check.** ci.yml's `ariglx-web` job runs arigl-web's browser smoke on the page, with
+  arigl-web's cases and three of its own (`--pydocs src/arigl/web/test/python`):
+  - a `python:` block with numpy and pycvc_gl;
+  - a Python program in place of the document;
+  - a block that raises.
+- **The link allows undefined symbols** (`-sERROR_ON_UNDEFINED_SYMBOLS=0`), as link-host.sh
+  does. cvcpkg's wasm python312 (3.12.10+cvc.13) archives pyexpat and `_sha2` without the objects
+  they call: its bundled expat (52 `PyExpat_XML_*` symbols) and HACL's SHA-2 (12). It has no
+  OpenSSL `_hashlib` either. So `xml.parsers.expat` and hashlib's SHA-2 abort when called. The
+  fix belongs in the python312 recipe.
+
 ### 5.2 Packages in the browser
 
 - **C extensions are linked in**, so the browser's package set is fixed at build time. The
@@ -439,6 +474,29 @@ arigl's browser loop yields with `emscripten_sleep(0)` under Asyncify (the
   3. JSPI, where the browser has it.
 
   `-sASYNCIFY_IGNORE_INDIRECT` stays a checklist, never a default (CVCGL_WASM.md).
+
+**W1's numbers** (2026-11-07). The lean tier, single-threaded, emsdk 5.0.7, `-O3`. Headless Chrome
+on a Windows desktop, served from loopback; the median of three loads.
+
+| | `ariglx.wasm` raw | imports of numpy, pycvc, pycvc_gl | a 200000-step Python loop | the numpy document running |
+|---|---|---|---|---|
+| everything instrumented (the default, shipped) | 89.2 MB | 1.83 s | 32.5 ms | 3.4 s after navigation |
+| libpython's and numpy's 16,000 functions in `ASYNCIFY_REMOVE` (fallback 1) | 82.1 MB | 1.32 s | 17.1 ms | 2.5 s |
+| the full tier (vtk-python), everything instrumented | 190.4 MB | 11.1 s | 106 ms | 18 s |
+
+The same loop takes 19.2 ms in native CPython 3.12.10 on the same machine, and stock `arigl.wasm`
+from the same tree is 54.2 MB. So Asyncify costs the interpreter about half its speed and 8% of
+the module, and fallback 1 removes both. The full tier doubles the module. pycvc_gl with the bridge
+imports vtkmodules, which costs ten seconds, and the interpreter runs three times slower in the
+larger module. So the lean tier is the package, and the full tier is for pages that need
+`vtkmodules` itself. CVCGL_WASM.md has the compressed sizes.
+
+Fallback 1 is not the default because it assumes Python is never on the stack when the module
+sleeps. ariglx-web's own loop keeps that true (`host.run()` returns at once). But any C++ that
+Python calls and that reaches an Asyncify import (a blocking fetch, a sleep) would unwind through
+uninstrumented frames. W1 didn't audit those paths; the smoke's cases pass under both links.
+Before fallback 1 becomes the default, those paths need to be found and made non-blocking, or the
+list narrowed to CPython's eval loop.
 
 ### 5.4 Flavors
 
@@ -518,11 +576,12 @@ arigl's browser loop yields with `emscripten_sleep(0)` under Asyncify (the
 - **Recipes.** A wasm C-extension recipe runs `package` on its extensions and ships
   `share/python-wasm/<cvcpkg package>.inittab`. Each line holds the dotted module, the renamed
   init symbol, and the object's path relative to the prefix.
-  - numpy-cp312 does this from cvc.6 (wasm and wasm-mt), in the cy-pca/cvcpkg change that adds
-    the tool.
-  - Publish cvc.6 only after this link-host is on master: an older link-host registers
-    `PyInit_<leaf>`, which cvc.6's objects no longer define.
-  - Until cvc.6 is published, the link localizes numpy itself (step 2 below).
+  - numpy-cp312 does this from cvc.6 (wasm and wasm-mt), in cy-pca/cvcpkg#549, which adds the
+    tool. cvc.6 has been on cvcpkg.org since 2026-11-07.
+  - A link-host older than this one registers `PyInit_<leaf>`, which cvc.6's objects no longer
+    define, so it can't link cvc.6.
+  - A prefix with an older numpy (cvc.5) still links: the host localizes numpy itself (step 2
+    below).
 - **The host link** ([`link-host.sh`](../../bindings/pycvc/wasm/link-host.sh)) works in five
   steps:
   1. It reads every manifest in the deps prefix.
@@ -1338,21 +1397,25 @@ hook is declared in the block's `hooks:`, or registered by `ari_init` through th
 
 ## 9. Risks and open questions
 
-1. **Browser module size.** arigl.wasm is 14.6 MB gzipped. The September node harness was 158 MB
-   uncompressed, with the stdlib embedded in MEMFS and the full vtk-python. Measure lean and full.
-   Levers: the stdlib as a lazily fetched zip, no test modules, `-Oz` on the Python objects.
-2. **Asyncify with CPython** (§5.3).
-3. **Python has never run in a real browser here.** The wasm harness only ran under node,
-   headless. W1's first milestone is a browser page with a window, checked in headless Chrome
-   with the CDP driver from the conference work.
+1. **Browser module size.** Measured in W1 (§5.3, CVCGL_WASM.md). The lean `ariglx.wasm` is
+   89.2 MB raw and 16.5 MB brotli, plus a 2.4 MB brotli zip, against 54.2 MB raw for arigl from the
+   same tree. The full tier is 190.4 MB raw (26.8 MB brotli). The stdlib is already a zip
+   fetched with the module, without its tests. Levers left: the Asyncify remove list (−8%), and
+   `-Oz` on the Python objects.
+2. **Asyncify with CPython** (§5.3). Measured in W1: it halves the interpreter's speed. The
+   remove-list fallback restores it, once the paths that could sleep under Python are audited.
+3. **Python in a real browser.** Done in W1. ci.yml's `ariglx-web` job runs documents with Python
+   in headless Chrome, under a strict CSP, through the CDP driver from the conference work.
 4. **Native packages are Linux-only.** `pycvc-cp312` and `pycvc-gl-cp312` are Linux-only on
    cvcpkg.org, so the `arix` and `ariglx` packages are too.
    - In-tree builds work elsewhere with `-DCVC_BUILD_PYCVC=ON`.
    - Windows packages wait on those two (N1); the Windows pycvc rebuild has known blockers.
      python312's DLLs have been in `bin\` since cy-pca/cvcpkg#542.
    - macOS `ariglx` also waits on the VTK and cvcGL macOS bundles.
-5. **Startup time.** CPython init, then importing numpy and pycvc_gl, in the browser. Measure,
-   then precompile `.pyc` into the zip or freeze the hot modules.
+5. **Startup time.** CPython init, then importing numpy and pycvc_gl, in the browser. W1 measured
+   1.3–1.8 s for the imports, and 2.5–3.4 s from navigation to a running document with numpy,
+   against 0.8 s for stock arigl's documents (§5.3). Next: precompile `.pyc` into the zip, or
+   freeze the hot modules.
 6. **Native trust UX** (§4.3). P1 needs no gate: Python comes only from a local top document.
    Before module blocks or remote documents run Python, decide whether `--python-allow` is
    enough or documents need signing.
@@ -1401,8 +1464,8 @@ for it.
 | P1 | **Done** (#985, v3.7.11). The engine, `_arihost`, `Host` embedded mode, the top document's `python:` block, the `python` / `python.<module>` tokens, `run app.py` and `<host> python`, `--python-path`; `ariglx` and `arix`, native, with Linux recipes. Tests: the `arix_*` / `ariglx_*` ctests and three `AriadneRequires` cases | P0 | L |
 | P1b | The rest of P1: `run -m`; `load:`ed modules' `python:` blocks, then `--python-allow`; the `script_engine` interface; pycvc's tests through the embedded interpreter; GRL-SNAM's ports on `ariglx` | P1 | M |
 | P2 | `py_console`, then `py_editor` with jedi | P1 | M |
-| W1 | `ariglx-web` wasm: the combined link, a browser smoke in headless Chrome, size and Asyncify numbers, lean vs full | P1 | L |
-| W2 | The wasm C-extension convention in cvcpkg (§5.5): the rewriter and `inittab` manifests, numpy republished with them, and a host link that no longer allows duplicate extension symbols | — | S |
+| W1 | **Done** (§5.1, §5.3). `ariglx-web` wasm: the combined link, a browser smoke in headless Chrome, size and Asyncify numbers, lean vs full | P1 | L |
+| W2 | **Done** (cy-pca/cvcpkg#549, transfix/libcvc#1027; numpy-cp312 2.4.6+cvc.6 on cvcpkg.org for wasm and wasm-mt, 2026-11-07). The wasm C-extension convention in cvcpkg (§5.5): the rewriter and `inittab` manifests, numpy republished with them, and a host link that no longer allows duplicate extension symbols | — | S |
 | W3 | wasm-mt: vtk-python wasm-mt republished, pycvc-gl wasm-mt | W1, cy-pca/cvcpkg#109 | M |
 | W4 | Runtime package installs, plain wasm (§5.6): a `MAIN_MODULE=2` `ariglx-web` variant, `link: shared` side-module packages, `host.install`, the cvcpkg.org origin allowlist | W1, W2 | L |
 | W5 | pillow, then matplotlib (kiwisolver, contourpy, fonts) for wasm | W2 | M each |

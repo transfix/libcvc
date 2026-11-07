@@ -1,0 +1,32 @@
+# ariglx-web's browser smoke, the full tier only (vtk-python linked in, its vtkmodules in
+# python312.zip): a python: block that runs a live VTK pipeline through vtkmodules, as the node
+# host's PYCVC_VTK_BRIDGE_OK check does.
+
+meta:
+  name: vtk-python in the page
+  min_libcvc: 3.7.11
+
+requires: [python, python.vtkmodules]
+
+python:
+  source: |
+    import sys
+
+    import vtkmodules.vtkCommonCore as vcc
+    import vtkmodules.vtkFiltersSources as vfs
+
+    @export
+    def sphere_points():
+        s = vfs.vtkSphereSource()
+        s.Update()
+        n = s.GetOutput().GetNumberOfPoints()
+        print(f"ariglx-web: vtkmodules {vcc.vtkObject().GetClassName()}, sphere points {n}",
+              file=sys.stderr)
+        return n
+
+init: |
+  (state-set "points" (str (sphere_points)))
+
+root:
+  - text: points
+    bind: points
