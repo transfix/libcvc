@@ -2757,6 +2757,11 @@ and the two pass data both ways. `pycvc_gl.ariadne.Host`
 
 Each takes `--offscreen` (GL with no window), `--headless` (no GL), `--frames N` and
 `--png PATH`; off a window it presses its own buttons and prints what the document shows.
+
+For a controller of your own driving N Ackermann cars, start from `pycvc_gl.cars`: a template
+(`python -m pycvc_gl.cars --copy DIR` writes `cars.py` and `cars.ari`) whose document loads Austin
+through its `data:` block, picks the plant with `nav_plant.vehicle`, binds the navigator's settings,
+and runs headless too. [CARS.md](CARS.md) describes it.
 `nav.ari` has a `scene:`, so it requires `gl.scene` (§5.7) and `nav.py` has no headless run.
 
 `nav.py` finds Austin with `pycvc_gl.scenes.find_scene()` (`$CVC_NAV_BUNDLE`, else

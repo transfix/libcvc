@@ -467,7 +467,7 @@ if(CVC_BUILD_PYCVC_GL)
     DESTINATION "${_PYCVC_SITEDIR}/pycvc_gl" RENAME __init__.py COMPONENT pycvc_gl)
   install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/pymod_gl/"
     DESTINATION "${_PYCVC_SITEDIR}/pycvc_gl" COMPONENT pycvc_gl
-    FILES_MATCHING PATTERN "*.py")
+    FILES_MATCHING PATTERN "*.py" PATTERN "*.ari")  # *.ari: pycvc_gl.cars' template document
   # Mirror that INSTALLED package layout in the build tree (pkg/pycvc_gl/: the proxy as
   # __init__.py, the extension inside, pymod_gl/*.py as submodules) and run the pycvc_gl
   # tests against it, so they import pycvc_gl exactly as a consumer does. The flat
@@ -475,7 +475,8 @@ if(CVC_BUILD_PYCVC_GL)
   # `pycvc_gl.camera` et al. could never resolve from the build tree.
   set(_PYCVC_GL_PKGROOT "${CMAKE_CURRENT_BINARY_DIR}/pkg")
   set(_PYCVC_GL_PKG "${_PYCVC_GL_PKGROOT}/pycvc_gl")
-  file(GLOB _PYCVC_GL_PYMODS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/pymod_gl/*.py")
+  file(GLOB _PYCVC_GL_PYMODS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/pymod_gl/*.py"
+       "${CMAKE_CURRENT_SOURCE_DIR}/pymod_gl/*.ari")
   add_custom_command(
     OUTPUT "${_PYCVC_GL_PKGROOT}/pycvc_gl.staged"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${_PYCVC_GL_PKG}"
@@ -514,6 +515,11 @@ if(CVC_BUILD_PYCVC_GL)
   add_test(NAME pycvc_gl_ariadne_gil
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_ariadne_gil.py)
   set_tests_properties(pycvc_gl_ariadne_gil PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
+  # pycvc_gl.cars: N Ackermann cars a Python controller drives (worlds, plants, settings in the
+  # state tree, rasters, the log) and its template, run headless.
+  add_test(NAME pycvc_gl_cars
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_gl_cars.py)
+  set_tests_properties(pycvc_gl_cars PROPERTIES ENVIRONMENT "${_PYCVC_GL_TEST_ENV}")
   # VTK Python bridge test — skips gracefully unless the vtk-python wrappers
   # (vtkmodules) are importable; runs the vtkProp<->vtkActor round trip when they are.
   add_test(NAME pycvc_vtk
