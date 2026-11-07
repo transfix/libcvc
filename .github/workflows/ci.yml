@@ -647,6 +647,90 @@ jobs:
           name: arigl-web
           path: stage-arigl-web/share/arigl-web
 
+  # ariglx-web, the same shell with an embedded Python (cvcpkg/recipes/ariglx-web, roadmap phase
+  # W1): CPython, pycvc, pycvc_gl and numpy linked into one single-threaded module, the stdlib and
+  # the pure-Python packages in python312.zip beside it. Built by the recipe's own script (the lean
+  # tier: the deps have no vtk-python; it prints the sizes), then the same headless-Chrome smoke
+  # runs arigl-web's cases on its page and, with --pydocs, a python: block with numpy and pycvc_gl,
+  # a Python program in place of the document, and a block that raises (src/arigl/web/test/python).
+  # Python's report in the log says how long a plain loop took in the page. Only when the shell,
+  # the engine, the bindings or the recipe changed. Nothing is uploaded.
+  ariglx-web:
+    name: ariglx-web shell + Python (wasm, headless Chrome)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    concurrency:
+      group: ci-${{ github.ref }}-ariglx-web
+      cancel-in-progress: true
+    defaults:
+      run:
+        shell: bash
+    env:
+      WASM_DEPS: ${{ github.workspace }}/wasm-deps
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Did the shell or its Python change?
+        id: paths
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          run=true
+          if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ] \
+             && git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            if ! git diff --name-only "$base" HEAD -- src/arigl src/ariadne_python bindings/pycvc \
+                   inc/cvc/ariadne/doc_fetch.h src/cvc/ariadne/doc_fetch.cpp \
+                   inc/cvc/ariadne/web_document.h src/cvc/ariadne/web_document.cpp \
+                   src/cvc/tests/data/ariadne_docset src/cvcGL/wasm cvcpkg/recipes/ariglx-web \
+                   cvcpkg/recipes/_common/wasm_pyext.py .github/workflows/ci.yml | grep -q .; then
+              run=false
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "ariglx-web changed: $run"
+
+      - name: Install cvcpkg, cmake/ninja, protoc and the Emscripten SDK from the catalog
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          curl -fsSL https://cvcpkg.org/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          cvcpkg install cmake ninja protobuf --prefix "$RUNNER_TEMP/tools" --config release --link shared
+          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+          cvcpkg install emsdk --platform linux --prefix "$RUNNER_TEMP/emsdk" \
+            --config release --link shared --no-fallback-to-source
+          test -f "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          echo "CVC_EMSDK_DIR=$RUNNER_TEMP/emsdk" >> "$GITHUB_ENV"
+
+      - name: Install the recipe's wasm deps
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          cvcpkg install-deps cvcpkg/recipes/ariglx-web --prefix "$WASM_DEPS" \
+            --platform wasm --arch wasm32 --config release --link static --no-fallback-to-source
+
+      - name: Build ariglx-web (wasm, the lean tier) with the recipe's script
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          CVC_SOURCE_DIR="$GITHUB_WORKSPACE" CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-ariglx-web" \
+          CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-ariglx-web" CVC_DEPS_PREFIX="$WASM_DEPS" \
+          CVC_PLATFORM=wasm bash cvcpkg/recipes/ariglx-web/build-wasm.sh
+          ls -la stage-ariglx-web/share/ariglx-web
+
+      - name: Run documents with Python in headless Chrome
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          chrome=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium)
+          "$chrome" --version
+          "$node" src/arigl/web/test/arigl_web_smoke.mjs --web stage-ariglx-web/share/ariglx-web \
+            --docset src/cvc/tests/data/ariadne_docset --pydocs src/arigl/web/test/python \
+            --chrome "$chrome"
+
   # ──────────────────────────── Linux packaging ────────────────────────────
   #
   # Mirrors release.yml's linux job exactly, but injects -<sha> into

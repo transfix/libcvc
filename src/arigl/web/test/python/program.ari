@@ -1,0 +1,15 @@
+# The document program.py loads (ariglx-web's browser smoke): it calls the program's function at
+# init and shows what came back.
+
+meta:
+  name: python program
+  min_libcvc: 3.7.11
+
+requires: [twice]
+
+init: |
+  (state-set "result" (str (twice 7)))
+
+root:
+  - text: result
+    bind: result

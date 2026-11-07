@@ -1,0 +1,96 @@
+schema_version: 1
+recipe:
+  name: ariglx-web
+  upstream_version: "3.7.11"
+  cvc_revision: 1
+  maintainer: "cvcpkg group"
+  maintainer_email: "info@cvcpkg.org"
+  maintainer_url: "https://cvcpkg.org"
+  description: "ariglx-web — arigl-web with an embedded Python: the browser host for Ariadne (.ari) documents that carry Python, in share/ariglx-web/ (index.html with arigl-web.js and arigl-web.css, ariglx.js, ariglx.wasm and python312.zip). CPython 3.12 with pycvc, pycvc_gl and numpy is linked into the module, and python312.zip holds the stdlib and the pure-Python packages, fetched with it before it starts. A document's python: block runs at load and the functions it exports are the document's to call; ?src=app.py runs a Python program in place of the document, its pycvc_gl.ariadne.Host() adopting the page's canvas (host.run() returns at once in a browser: the page runs the frames once the program returns; the files the program loads go in the page config's preload, since only a document's own imports are followed). Serve the files beside your documents and open ?src=main.ari, as for arigl-web. Single-threaded: no special headers."
+  homepage: https://github.com/transfix/libcvc
+  # BSD-3-Clause: the module links cvcGL statically (code derived from VTK 9.5.0); PSF-2.0: CPython,
+  # linked in, and its stdlib in python312.zip; BSD-3-Clause again for numpy. The notices are in
+  # THIRD_PARTY_NOTICES.md and python312.zip's LICENSE.txt, shipped beside the page.
+  license: "LGPL-2.1-only AND BSD-3-Clause AND PSF-2.0"
+  tags: [ui, wasm, web, graphics, vtk, imgui, python, scripting]
+
+# arigl-web's closure (its recipe says what each dependency is for) compiled from the repo root with
+# the pycvc bindings on, and only the ariglx target built: arigl's main.cpp with the embedded engine
+# (src/ariadne_python), linked as section 5.1 of docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md says. The
+# tier follows the deps prefix: lean (no vtk-python; pycvc_gl built with
+# CVC_PYCVCGL_VTK_BRIDGE=OFF), or full when vtk-python-cp312's wasm build is installed beside these
+# (its _vtkmodules_static builtin linked, its _vtk.zip merged into python312.zip). build-wasm.sh says
+# which it built.
+
+source:
+  # Co-located with the libcvc source tree (see arigl-web's recipe).
+  type: vendored
+  path: ../../..
+
+patches: []
+
+depends:
+  build:
+    # The interpreter, and the C-extension packages linked into it. numpy-cp312 cvc.6 and later
+    # ship share/python-wasm/numpy-cp312.inittab; an older one is localized at configure time.
+    - name: python312
+    - name: numpy-cp312
+    # python312's own static libraries (ctypes, sqlite3, ssl and hashlib, the codecs). `cvcpkg
+    # install` lays bundles down flat, so they are listed.
+    - name: libffi
+    - name: sqlite
+    # arigl-web's.
+    - name: vtk
+    - name: boost
+    - name: zstd
+    - name: zlib
+    - name: pegtl
+    - name: yaml-cpp
+    - name: imgui
+    - name: sdl3
+    - name: ftxui
+    - name: libjpeg-turbo
+    - name: protobuf
+      platforms: [wasm]
+    - name: joltphysics
+      platforms: [wasm]
+    - name: libopus
+      platforms: [wasm]
+    - name: openssl
+    - name: assimp
+    - name: eigen
+    - name: libigl
+    - name: imagemagick
+    - name: tiff
+    - name: libpng
+    - name: libwebp
+    - name: lerc
+    - name: xz
+    - name: bzip2
+    - name: libxml2
+    - name: freetype
+  # Nothing at run time: page files only (see arigl-web's recipe).
+  runtime: []
+  host_tools:
+    - cmake
+    - ninja
+    - protobuf
+    # The bindings' build steps: SWIG generates the wrappers, and a native Python runs it, the
+    # extension manifests and the zip.
+    - swig
+    - python312
+
+build:
+  matrix:
+    # Single-threaded first (the roadmap's section 5.4): wasm-mt waits on wasm-mt builds of
+    # pycvc-gl-cp312 and vtk-python.
+    - platform: wasm
+      host_platform: linux
+      script: build-wasm.sh
+
+package:
+  files:
+    - share/ariglx-web/
+
+abi:
+  cxx_std: 17

@@ -279,5 +279,54 @@ if(EMSCRIPTEN)
       file(GENERATE OUTPUT "$<TARGET_FILE_DIR:arigl>/${_f}"
            INPUT "${CMAKE_CURRENT_SOURCE_DIR}/web/${_f}")
     endforeach()
+
+    # ariglx-web: the same shell with an embedded Python (cvcpkg/recipes/ariglx-web;
+    # docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md §5): a document's python: block, and a Python program
+    # in place of the document, run in the browser with pycvc, pycvc_gl and numpy. A browser has no
+    # dlopen, so the interpreter and every extension are linked in (ariadne_python.cmake), and the
+    # pure-Python side is python312.zip beside the page, which arigl-web.js fetches before the
+    # module starts. Built with the bindings (CVC_BUILD_PYCVC, which builds the SWIG modules as
+    # static archives on Emscripten); CVC_PYCVCGL_VTK_BRIDGE also links vtk-python (the full tier).
+    if(CVC_BUILD_PYCVC)
+      include("${CMAKE_CURRENT_LIST_DIR}/../ariadne_python/ariadne_python.cmake")
+      add_executable(ariglx main.cpp gallery.cpp)
+      target_link_libraries(ariglx PRIVATE cvc::cvcGL ${VTK_LIBRARIES})
+      vtk_module_autoinit(TARGETS ariglx MODULES ${VTK_LIBRARIES})
+      set(_ariglx_bridge "")
+      if(CVC_PYCVCGL_VTK_BRIDGE)
+        set(_ariglx_bridge VTK_BRIDGE)
+      endif()
+      # Beside ariglx.js (an OUTPUT can't name a target's directory).
+      set(_ariglx_dir "${CMAKE_CURRENT_BINARY_DIR}")
+      if(CMAKE_RUNTIME_OUTPUT_DIRECTORY)
+        set(_ariglx_dir "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+      endif()
+      cvc_ariadne_python_wasm_host(ariglx ZIP "${_ariglx_dir}/python312.zip" ${_ariglx_bridge})
+      # The shell's link, with a deeper stack for the interpreter (link-host.sh's 8 MB), and a
+      # first heap that holds it and the module's static data (22 MB of it), which the default
+      # 16 MB does not.
+      list(TRANSFORM _arigl_wasm_link REPLACE "^-sSTACK_SIZE=.*" "-sSTACK_SIZE=8388608"
+           OUTPUT_VARIABLE _ariglx_wasm_link)
+      target_link_options(ariglx PRIVATE
+        "--embed-file=${_arigl_components}@/usr/share/libcvc/ariadne/components"
+        ${_ariglx_wasm_link} -sINITIAL_MEMORY=67108864)
+      target_compile_definitions(ariglx PRIVATE
+                                 CVC_ARIGL_COMPONENT_DIR="/usr/share/libcvc/ariadne")
+      set_property(TARGET ariglx APPEND PROPERTY LINK_DEPENDS ${_arigl_component_files})
+      if(COMMAND cvcgl_wasm_app)
+        cvcgl_wasm_app(ariglx)
+      endif()
+      # Its page: arigl-web's, told to start ariglx.js on ariglx.wasm and to fetch the zip first.
+      file(READ "${CMAKE_CURRENT_SOURCE_DIR}/web/arigl-web.html" _ariglx_html)
+      string(REPLACE "<title>arigl</title>" "<title>ariglx</title>" _ariglx_html "${_ariglx_html}")
+      string(REPLACE "<script src=\"arigl-web.js\"></script>"
+             "<script src=\"arigl-web.js\" data-module=\"ariglx\" data-python=\"python312.zip\"></script>"
+             _ariglx_html "${_ariglx_html}")
+      if(NOT _ariglx_html MATCHES "data-module=\"ariglx\"")
+        message(FATAL_ERROR "ariglx: web/arigl-web.html no longer has the script tag to point at "
+                            "ariglx.js")
+      endif()
+      file(GENERATE OUTPUT "$<TARGET_FILE_DIR:arigl>/ariglx.html" CONTENT "${_ariglx_html}")
+    endif()
   endif()
 endif()

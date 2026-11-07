@@ -3041,6 +3041,28 @@ host.run()  # the host's own loop: run's window, snapshot's frames
 `ariglx python -m pytest`, or `ariglx python -m grl_snam.ariadne live austin-freedrive`. That
 interpreter has no document attached, so `Host()` there opens a window of its own.
 
+**In the browser: `ariglx-web`.** The `ariglx-web` package is arigl-web's page (§9.4) with
+`ariglx` in it, built to single-threaded WebAssembly
+([`cvcpkg/recipes/ariglx-web`](../cvcpkg/recipes/ariglx-web/recipe.yaml)). Serve
+`share/ariglx-web/` beside the documents as for arigl-web, with the same `ariadne.config.json`.
+The page fetches `python312.zip` with the module and puts it on `sys.path`. The zip holds the
+stdlib and the pure-Python packages.
+
+- **What runs.** A document's `python:` block runs at load as it does natively, with pycvc,
+  pycvc_gl and numpy (`?src=main.ari`).
+- **A program as the entry point.** `?src=app.py` runs a Python program in place of the document.
+  Only a document's own imports are fetched ahead, so list the files the program loads in the
+  config's `preload`.
+- **`host.run()` returns 0 at once.** The page's frames run between yields to the browser, and
+  Python is never on the stack at a yield. The page runs the document once the program returns,
+  so a program reports from `on_frame` or `watch`, not after `run()`.
+- **The packages are fixed when the page is built.** A browser can't load an extension module at
+  run time, so every C extension is linked into the module: numpy now. A `.py` beside the
+  document works as it does natively.
+- **No `xml.parsers.expat` and no SHA-2 in `hashlib`.** cvcpkg's wasm python312 ships without the
+  objects they need, so a call into either aborts the page. That includes `hashlib.sha256()`
+  and `random.seed()` with a string.
+
 ---
 
 ## 10. Async and networking
@@ -3580,11 +3602,12 @@ without either has no `ws-*` verbs, so a document asks `(has? "ws-open")` and po
 State plainly so authors are not misled. Each item cites the code; the roadmap items
 below (G17–G21 in the internal gap report) are tracked for reconciliation.
 
-- **The scripting hosts are native and partial** (§9.6,
+- **The scripting hosts are partial** (§9.6,
   [roadmap](roadmap/ARIADNE_SCRIPTING_HOSTS.md)). Only the top document's `python:` block runs: a
   `load:`ed module's is not run yet. A Python program runs in a window, offscreen or in `arix`, not
   under `ariglx --terminal`, and its embedded `Host.load()` from inside a frame raises (load before
-  `run()`). There is no `ariglx-web` (the browser) and no `arisrvx` yet. The `arix` and `ariglx`
+  `run()`). `ariglx-web` (the browser) is single-threaded only, with numpy as its one C-extension
+  package, and its `host.run()` returns at once. There is no `arisrvx` yet. The `arix` and `ariglx`
   packages are Linux-only, where `pycvc-cp312` and `pycvc-gl-cp312` are; elsewhere build them
   in-tree with the bindings (`-DCVC_BUILD_PYCVC=ON`).
 

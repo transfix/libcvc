@@ -5,8 +5,16 @@
 // document is loaded, Module.ariadneWarning(text) for each warning while it runs (shown in the
 // corner for a few seconds; a click dismisses it), Module.ariadneExit(status) when it stops. A
 // failure shows the error screen with everything arigl printed.
+//
+// The script tag may name another build of the shell: data-module="ariglx" starts ariglx.js on
+// ariglx.wasm (ariglx-web, arigl with an embedded Python), and data-python="python312.zip" fetches
+// that zip with it and writes it to /py/lib/python312.zip, the interpreter's stdlib and pure-Python
+// packages, before the module starts.
 (function () {
   'use strict';
+  const tag = document.currentScript;
+  const MODULE = (tag && tag.dataset.module) || 'arigl';
+  const PYTHON_ZIP = (tag && tag.dataset.python) || '';
   const overlay = document.getElementById('overlay');
   const statusEl = document.getElementById('status');
   const detailsEl = document.getElementById('details');
@@ -59,10 +67,10 @@
     state.state = 'failed';
     overlay.classList.remove('hidden', 'ended');
     overlay.classList.add('failed');
-    const said = stderrTail.filter(l => /^arigl: /.test(l) && !/^arigl: warning: /.test(l));
-    status(headline + (said.length ? ' — ' + said[said.length - 1].replace(/^arigl: /, '') : ''));
+    const said = stderrTail.filter(l => /^arigl(x)?: /.test(l) && !/^arigl(x)?: warning: /.test(l));
+    status(headline + (said.length ? ' — ' + said[said.length - 1].replace(/^arigl(x)?: /, '') : ''));
     detailsEl.textContent = (srcShown ? 'document: ' + srcShown + '\n\n' : '') +
-                            (stderrTail.length ? stderrTail.join('\n') : '(arigl printed nothing)');
+                            (stderrTail.length ? stderrTail.join('\n') : '(' + MODULE + ' printed nothing)');
     document.title = 'Error — ' + document.title;
   }
 
@@ -184,32 +192,52 @@
                               () => setTimeout(() => window.dispatchEvent(new Event('resize')), 60));
   }
 
-  // Download arigl.wasm with a progress line, then start arigl.js on it.
+  // Download the files the module needs before it starts, together, with one progress line.
+  async function download(names) {
+    const got = names.map(() => 0);
+    const show = () => {
+      const mb = (got.reduce((a, b) => a + b, 0) / 1048576).toFixed(1);
+      status('Downloading ' + names.join(' and ') + ' — ' + mb + ' MB');
+    };
+    return Promise.all(names.map(async (name, i) => {
+      const resp = await fetch(name, {cache: 'no-cache'});
+      if (!resp.ok) throw new Error('HTTP ' + resp.status + ' fetching ' + name);
+      const reader = resp.body.getReader();
+      const chunks = [];
+      for (;;) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        got[i] += value.length;
+        show();
+      }
+      const buf = new Uint8Array(got[i]);
+      let off = 0;
+      for (const c of chunks) { buf.set(c, off); off += c.length; }
+      return buf;
+    }));
+  }
+
+  // Download the module's .wasm (and the Python zip), then start its .js on it.
   async function startModule(Module) {
-    const resp = await fetch('arigl.wasm', {cache: 'no-cache'});
-    if (!resp.ok) throw new Error('HTTP ' + resp.status + ' fetching arigl.wasm');
-    const total = Number(resp.headers.get('content-length')) || 0; // compressed: a rough guide
-    const reader = resp.body.getReader();
-    const chunks = [];
-    let got = 0;
-    for (;;) {
-      const {done, value} = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      got += value.length;
-      const mb = (got / 1048576).toFixed(1);
-      status('Downloading arigl.wasm — ' + mb + ' MB' +
-             (total > got ? ' (' + Math.round(100 * got / total) + '%)' : ''));
+    const names = [MODULE + '.wasm'].concat(PYTHON_ZIP ? [PYTHON_ZIP] : []);
+    const files = await download(names);
+    Module.wasmBinary = files[0];
+    let zip = files[1];
+    if (zip) {
+      // The interpreter's home is /py: CPython puts <home>/lib/python312.zip on sys.path. The
+      // file system keeps its own copy, so this one goes.
+      Module.preRun.push(() => {
+        FS.mkdirTree('/py/lib');
+        FS.writeFile('/py/lib/python312.zip', zip);
+        zip = null;
+      });
     }
-    const buf = new Uint8Array(got);
-    let off = 0;
-    for (const c of chunks) { buf.set(c, off); off += c.length; }
-    Module.wasmBinary = buf;
     status('Starting…');
     window.Module = Module;
     const s = document.createElement('script');
-    s.src = 'arigl.js';
-    s.onerror = () => fail('Could not load arigl.js');
+    s.src = MODULE + '.js';
+    s.onerror = () => fail('Could not load ' + MODULE + '.js');
     document.body.appendChild(s);
   }
 
@@ -294,7 +322,7 @@
         overlay.classList.add('ended');
         status(document.title + ' has ended. Reload the page to start it again.');
       },
-      onAbort: what => fail('arigl stopped: ' + what),
+      onAbort: what => fail(MODULE + ' stopped: ' + what),
     };
     await startModule(Module);
   }

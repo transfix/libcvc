@@ -1,0 +1,47 @@
+# ariglx-web's browser smoke (arigl_web_smoke.mjs --pydocs): a python: block in the page, with
+# numpy, pycvc and pycvc_gl linked in. Its init calls the block's functions and reports to stderr,
+# which the page keeps (window.ariadneWeb.log): numpy's sum, a seeded Poisson draw (numpy.random's
+# extensions each in a namespace of their own: linked together they once trapped here), how long
+# numpy, pycvc and pycvc_gl take to import (roadmap §9, startup), and how long the interpreter
+# takes over a plain loop, the Asyncify cost the roadmap asks for (§5.3).
+
+meta:
+  name: python in the page
+  min_libcvc: 3.7.11
+
+requires: [python, python.numpy, python.pycvc_gl]
+
+python:
+  source: |
+    import sys
+    import time
+
+    _t0 = time.perf_counter()
+    import numpy as np
+    import pycvc
+    import pycvc_gl
+    _imports_ms = (time.perf_counter() - _t0) * 1000.0
+
+    @export
+    def numpy_sum(n):
+        return int(np.arange(int(n)).sum())
+
+    @export
+    def report(total):
+        draw = np.random.RandomState(1).poisson(4.0, 4).tolist()
+        t = time.perf_counter()
+        s = 0
+        for i in range(200000):
+            s += i * i
+        ms = (time.perf_counter() - t) * 1000.0
+        print(f"ariglx-web: numpy {np.__version__} sum {total}, poisson {draw}, "
+              f"{pycvc.__name__} and {pycvc_gl.__name__} imported in {_imports_ms:.0f} ms, "
+              f"a 200000-step Python loop in {ms:.1f} ms", file=sys.stderr)
+        return total
+
+init: |
+  (state-set "sum" (str (report (numpy_sum 5))))
+
+root:
+  - text: sum
+    bind: sum

@@ -720,6 +720,59 @@ By hand: serve a directory holding the five files, `app/` and `shared/` from
 and open `http://localhost:8000/app/`. The *Document set* window shows a line from
 `lib/panel.ari` and one from `shared/note.ari`, beside the component library's *Display*.
 
+### ariglx-web: the shell with Python
+
+`ariglx-web` (`cvcpkg/recipes/ariglx-web`) is the same page with `ariglx` in it: arigl with an
+embedded CPython 3.12, pycvc, pycvc_gl and numpy linked into one single-threaded module. Its design
+and phases are in
+[roadmap/ARIADNE_SCRIPTING_HOSTS.md](roadmap/ARIADNE_SCRIPTING_HOSTS.md) §5, and what a
+document can do with it is in ARIADNE.md §9.6. Here is what is different about the build.
+
+| File | What |
+|---|---|
+| `index.html`, `arigl-web.js`, `arigl-web.css` | arigl-web's page. Its script tag carries `data-module="ariglx" data-python="python312.zip"`, so the loader starts `ariglx.js` and writes the zip to `/py/lib/python312.zip` before the module runs |
+| `ariglx.js`, `ariglx.wasm` | the module: arigl, libpython3.12.a, the pycvc / pycvc_gl SWIG archives and every extension object the deps' `share/python-wasm/*.inittab` manifests list |
+| `python312.zip` | the stdlib without its tests or the GUI and build tools, the deps' pure-Python packages, `pycvc.py` and `pycvc_gl/`. Stored, not deflated: zipimport needs no zlib, and the server compresses it on the wire |
+| `THIRD_PARTY_NOTICES.md`, `LICENSE` | as arigl-web's; CPython's licence is the zip's `LICENSE.txt` |
+
+**The link** is the shell's, plus:
+- an 8 MB stack and a 64 MB first heap (the module has 22 MB of static data);
+- `-sERROR_ON_UNDEFINED_SYMBOLS=0`, as `bindings/pycvc/wasm/link-host.sh` has. cvcpkg's wasm
+  python312 archives pyexpat and `_sha2` without the expat and HACL SHA-2 objects they call. The
+  link warns about each of the 64 symbols, and a call into one aborts.
+
+**Tiers.** The recipe builds the lean tier unless vtk-python's wasm build is in the deps prefix.
+The full tier links vtk-python's `_vtkmodules_static` builtin, and every archive in the prefix
+for the wrapped modules behind it. Measured 2026-11-07 on 3.7.11, emsdk 5.0.7, `-O3`, in headless
+Chrome on a Windows desktop (the median of three loads):
+
+| Module | raw | gzip -9 | brotli -q 11 | imports of numpy, pycvc, pycvc_gl | 200000-step Python loop |
+|---|---|---|---|---|---|
+| `ariglx.wasm`, lean (the package) | 89.2 MB | 24.5 MB | 16.5 MB | 1.8 s | 32.5 ms |
+| `ariglx.wasm`, lean, libpython and numpy in `ASYNCIFY_REMOVE` | 82.1 MB | 22.9 MB | 15.7 MB | 1.3 s | 17.1 ms |
+| `ariglx.wasm`, full (vtk-python) | 190.4 MB | 42.7 MB | 26.8 MB | 11 s | 106 ms |
+| `arigl.wasm` from the same tree, for scale | 54.2 MB | 15.5 MB | 10.6 MB | | |
+
+`python312.zip` is 14.2 MB raw, 3.3 MB gzip and 2.4 MB brotli (14.7 MB raw with vtk-python's
+modules). A document with numpy runs about 3.4 s after the page opens on the lean tier and about
+18 s on the full one, against 0.8 s for arigl's documents. Native CPython runs the same loop in
+19.2 ms on that machine.
+- **The remove list is not the default.** It needs every path where Python calls C++ that sleeps
+  to be found first (roadmap §5.3).
+- **The full tier costs about 10 s at import.** pycvc_gl with the bridge brings in vtkmodules,
+  and the larger module runs the interpreter slower.
+
+**Testing.** `arigl_web_smoke.mjs --web <share/ariglx-web> --docset
+src/cvc/tests/data/ariadne_docset --pydocs src/arigl/web/test/python` runs arigl-web's cases on
+the page, then the Python ones:
+- `numpy.ari`, a `python:` block with numpy and pycvc_gl, which reports the imports' time and
+  the loop's;
+- `program.py`, a program in place of the document;
+- `python_error.ari`, a block that raises;
+- `vtk.ari`, a VTK pipeline through vtkmodules, when the zip has them.
+
+CI's `ariglx-web` job builds the lean tier with the recipe's script and runs these.
+
 ## Related
 
 This document covers the cvcGL-specific half. The platform-agnostic flow —

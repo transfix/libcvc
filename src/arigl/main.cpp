@@ -2187,15 +2187,25 @@ int run_window(const ari::HostOptions &o) {
   // The window is lent to the Python: the document's python: block runs at its load. A Python
   // program in place of the document has its Host() adopt this window and load a document; its
   // host.run() runs after_load, and when it returns without, this host does.
+#ifdef __EMSCRIPTEN__
+  // In a browser the loop yields to the page between frames (Asyncify), and Python must never be
+  // on the stack then (docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md §5.3): host.run() returns 0 at
+  // once, and the loop runs once the program has returned.
+  const std::function<int()> loop = [] { return 0; };
+#else
+  const std::function<int()> loop = after_load;
+#endif
   const ari::python::Attachment lent =
-      lend_python(app, rt, view, cam, ui, offscreen ? "offscreen" : "window", after_load);
+      lend_python(app, rt, view, cam, ui, offscreen ? "offscreen" : "window", loop);
   if (is_python_program(o.doc)) {
     bool loaded = false;
     rt.app_runtime().add_load_hook(
         [&loaded](ari::LoadResult &, const std::string &) { loaded = true; });
     const int status = g_python->run_script(o.doc, o.doc_args);
+#ifndef __EMSCRIPTEN__
     if (g_python->loop_ran())
       return status ? status : g_python->loop_status();
+#endif
     return status != 0 || !loaded ? status : after_load();
   }
 #endif
