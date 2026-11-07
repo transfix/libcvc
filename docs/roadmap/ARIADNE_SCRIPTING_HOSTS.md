@@ -614,6 +614,9 @@ for room rules, bots and checks written in the DSL.
 That belongs in the stock arisrv, because the DSL is already sandboxed: step and time caps, the
 chroot, and bound writes.
 
+The largest server document planned is a world: the scene, physics, avatars and controllers every
+client builds its simulation from ([`ARIADNE_WORLDS.md`](ARIADNE_WORLDS.md), whose WD1 rides S0).
+
 ### 6.2 Python on the server
 
 `arisrvx` adds the engine with pycvc core.
