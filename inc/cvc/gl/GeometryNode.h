@@ -231,6 +231,16 @@ public:
   // its geometry: the scene's own box only grows until nodes are added or removed.
   void setUseBounds(bool on);
 
+  // Draw this mesh in VTK's volume layer instead of with the opaque or translucent geometry: in its
+  // place in the renderer's prop order among the volumes, blended over what is already drawn,
+  // depth-tested against the opaque geometry but writing no depth, and casting no shadow. VTK
+  // composites every volume over the translucent layer whatever its depth, so a translucent mesh
+  // in front of a volume (a cloud deck above a water volume) is drawn behind it; in the volume
+  // layer it comes after the volumes added before it and before those added after it (the owner
+  // keeps that order: a node shown again rejoins the renderer at the end).
+  void setDrawWithVolumes(bool on);
+  bool drawsWithVolumes() const;
+
   // True when this mesh draws through the low-memory (WebGL2) mapper: its fragment shader names the
   // view-space normal normalizedNormalVCVSOutput, not normalVCVSOutput.
   bool usesLowMemoryMapper() const;
