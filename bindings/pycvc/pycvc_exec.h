@@ -7,6 +7,7 @@
 // registered here becomes callable from DSL source like any builtin.
 #pragma once
 
+#include <cstddef>
 #include <cvc/state/state_exec/data_job.h> // data_options
 #include <cvc/state/state_exec/parser.h>   // parse_options
 #include <memory>
@@ -161,6 +162,11 @@ public:
   // (scheduler().execute(...)) runs alongside run()'s programs, and run() steps it too. In Python
   // the returned scheduler keeps this Exec alive.
   cvc::state_exec::async_scheduler &scheduler();
+
+  // Objects this Exec's cycle registry tracks (docs/STATE_EXEC_THREADED.md 4.7): its programs'
+  // captured scopes and mutated containers, alive after the last collection or tracked since,
+  // whichever thread ran them.
+  std::size_t tracked_objects() const;
 
 private:
   struct ExecImpl;

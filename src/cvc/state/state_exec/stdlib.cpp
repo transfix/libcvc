@@ -1506,4 +1506,10 @@ const native_fn *stdlib_registry::lookup_qualified(const std::string &qualified_
   return nullptr;
 }
 
+// Stage 1 interfaces: a stub that binds nothing, so math.random keeps the thread's engine. S1.2
+// binds the stream and draws from it.
+random_stream_scope::random_stream_scope(random_stream *) noexcept : outer_(nullptr) {}
+
+random_stream_scope::~random_stream_scope() = default;
+
 } // namespace cvc::state_exec

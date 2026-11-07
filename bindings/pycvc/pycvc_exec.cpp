@@ -19,6 +19,7 @@
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/detail/lock_home.h> // the Exec's lock home: blocking_sinks, progress
 #include <cvc/state/state_exec/exceptions.h>
+#include <cvc/state/state_exec/heap.h> // Exec::tracked_objects
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/lock_manager.h> // the app's lock manager (Exec::lock_query)
 #include <cvc/state/state_exec/process.h>
@@ -1165,5 +1166,9 @@ void Exec::set_data_defaults(const cvc::state_exec::data_options &defaults) {
 }
 
 cvc::state_exec::async_scheduler &Exec::scheduler() { return impl_->sched; }
+
+// Stage 1 interfaces: a stub reading the calling thread's registry, as pycvc.tracked_objects()
+// does. S1.12 gives the Exec a registry of its own and reads it.
+std::size_t Exec::tracked_objects() const { return cvc::state_exec::tracked_objects(); }
 
 } // namespace pycvc

@@ -186,6 +186,12 @@ bool waits_on_data_work(const evaluator_state &st);
 // was delivered, or raises at the call. A frame stepped without either (a process restored from
 // a snapshot while it waited) raises RuntimeError: its call can't resume.
 
+class async_scheduler;
+
+/// The RuntimeError's message when a program awaits a threaded future another scheduler owns
+/// (await, await-all, msg-recv on a future; S1-Q2). An inline future is a plain value, and exempt.
+inline constexpr const char *kForeignFutureError = "await: the future belongs to another scheduler";
+
 namespace detail {
 
 /// What an await_call frame waits for when it isn't a plain channel: an async call. A handle
@@ -195,6 +201,9 @@ public:
   virtual ~awaitable() = default;
   /// The function's name, for errors.
   virtual const std::string &function_name() const = 0;
+  /// The scheduler its completion is posted to and finished on (a threaded async call's), or null:
+  /// an inline call, settled before it returned, which any scheduler may read (S1-Q2).
+  virtual const async_scheduler *owner() const noexcept { return nullptr; }
   /// Whether its outcome is known.
   virtual bool finished() const = 0;
   /// Block until it is finished or `seconds` pass (nullopt: no limit); whether it finished.

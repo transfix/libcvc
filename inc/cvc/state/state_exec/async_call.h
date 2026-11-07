@@ -125,6 +125,8 @@ public:
 
   /// The function's name.
   const std::string &function_name() const override { return name_; }
+  /// A threaded call's scheduler (where its completion is posted), or null for an inline one.
+  const async_scheduler *owner() const noexcept override { return async_sched_; }
 
   /// Whether the kernel should stop: its process was killed or reaped (its budget ran out
   /// while the call ran included), the call timed out, its owner group was reaped, or the host

@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cvc/state/state_exec/async_stackless_evaluator.h>
 #include <cvc/state/state_exec/detail/lock_home.h>
+#include <cvc/state/state_exec/heap.h> // cycle_registry
 #include <cvc/state/state_exec/lock_manager.h>
 #include <cvc/state/state_exec/memory_tracker.h>
 #include <cvc/state/state_exec/process.h>
@@ -26,6 +27,7 @@
 #include <optional>
 #include <queue>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -37,6 +39,7 @@ class state;
 namespace cvc::state_exec {
 
 class async_call;
+struct random_stream; // stdlib.h
 
 /// Async process scheduler using C++20 coroutines.
 ///
@@ -50,6 +53,10 @@ class async_call;
 class async_scheduler : public scheduler_base {
 public:
   explicit async_scheduler(scheduling_policy policy = scheduling_policy::round_robin);
+  /// A group's scheduler (docs/STATE_EXEC_THREADED.md 4.2): its global environment is
+  /// environment::extend(base), so an unbound set from an env-less process lands in its own scope,
+  /// never in `base` (which may be frozen: the shared builtins).
+  async_scheduler(scheduling_policy policy, environment_ptr base);
   /// Destroys the lock home first (protocol 5.7), before any other member goes; then a posted
   /// command never applied gets done(false).
   ~async_scheduler() override;
@@ -73,6 +80,47 @@ public:
   /// order. Walks the processes only while lock_waiting_count() is not zero.
   void lock_waiting_pids(std::vector<int> &out) const;
   bool check_tables() const override { return procs_.check(); }
+  /// Close the lock home's port, if it has a home (lock_port::close, idempotent): no post lands
+  /// after it. A group's teardown does it first, before its kills (td 4.2, S1-Q1).
+  void close_lock_port();
+
+  // --- Groups (docs/STATE_EXEC_THREADED.md 4.1, 4.5, 4.7, 4.10; Stage 1) ---
+
+  /// Use `r` (null: none) for this scheduler's tracked objects: it binds `r` on every entry that
+  /// can run DSL or track, and names it for its due check and its exit notes, so they reach `r`
+  /// whichever thread drives it (a host's kill(pid) between pumps included). The owner keeps `r`
+  /// alive, and collects and frees it after this scheduler and its environments are gone. Unset,
+  /// the thread's own registry is used, as today.
+  void set_cycle_registry(cycle_registry *r);
+  /// The registry set_cycle_registry() gave, or null.
+  cycle_registry *registry() const noexcept { return registry_; }
+  /// Use `s` (null: none) for math.random, bound with the registry. The owner keeps it alive.
+  void set_random_stream(random_stream *s);
+  /// Draw new pids from `source` (its fetch_add(1)) instead of this scheduler's own counter, so the
+  /// schedulers sharing it never repeat a pid (td 4.5, B32): the app pool's groups and the app
+  /// scheduler. `source` must be above every pid this scheduler has issued (process_table's
+  /// insert rule).
+  void set_pid_source(std::shared_ptr<std::atomic<int>> source);
+
+  /// RAII: the calling thread is this scheduler's pump owner while the scope lives (S1-Q4). The
+  /// rule is "no owner, or me": it takes an unset owner, nests in a scope of the same thread, and
+  /// restores what it found. Another thread's owner makes the constructor throw
+  /// std::runtime_error(kPumpedElsewhereError). A driver holds one while it drives: an exec_group's
+  /// pump (the group's token, taken per pump by the pool), pycvc's Exec::run until it quiesces,
+  /// the Python pump wrappers per call.
+  class pump_owner_scope {
+  public:
+    explicit pump_owner_scope(async_scheduler &s);
+    ~pump_owner_scope();
+    pump_owner_scope(const pump_owner_scope &) = delete;
+    pump_owner_scope &operator=(const pump_owner_scope &) = delete;
+
+  private:
+    async_scheduler &s_;
+    std::thread::id outer_;
+  };
+  /// Any thread (one relaxed load): whether a thread other than the caller holds the pump owner.
+  bool pumped_elsewhere() const noexcept;
 
   // --- Process submission ---
 
@@ -551,6 +599,14 @@ private:
   /// now, release its evaluation state (process::release_state).
   void release_if_idle(process &proc);
   process_info make_info(const process &proc) const;
+
+  /// Stage 1: the registry and stream the owner set (null: the thread's own), the pid source
+  /// (null: next_pid_), and the pump owner, the thread driving this scheduler (none:
+  /// std::thread::id()).
+  cycle_registry *registry_ = nullptr;
+  random_stream *random_ = nullptr;
+  std::shared_ptr<std::atomic<int>> pid_source_;
+  std::atomic<std::thread::id> pump_owner_{};
 };
 
 } // namespace cvc::state_exec

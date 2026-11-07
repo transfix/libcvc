@@ -57,6 +57,7 @@ if _sys.platform == "win32":
 #include "pycvc_algorithm.h"
 #include "pycvc_state.h"
 #include "pycvc_exec.h"
+#include "pycvc_exec_pool.h"
 #include <stdexcept>
 #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
 #include <numpy/arrayobject.h>
@@ -4500,6 +4501,30 @@ def register_intrinsics(env, ctx):
 // SWIG's raw-passthrough type (the callable crosses uninspected; the .cpp
 // INCREFs and manages its lifetime).
 %include "pycvc_exec.h"
+
+// pycvc.ExecPool(app, threads=None, size=None, prefix="exec_pool", fresh_env=False,
+// idle_timeout=60.0) (docs/STATE_EXEC_THREADED.md 4.12; S1-Q5): many programs at once on the app's
+// exec_pool. Keywords, as Exec's: the constructor is one declaration. An argument it can't take
+// raises ValueError. run_all, register_fn, register_async_fn and close() are methods; threads is
+// a read-only property.
+%feature("kwargs") pycvc::ExecPool::ExecPool;
+%feature("kwargs") pycvc::ExecPool::register_async_fn;
+%exception pycvc::ExecPool::ExecPool {
+  try {
+    $action
+  } catch (const std::invalid_argument &e) {
+    SWIG_exception(SWIG_ValueError, e.what());
+  }
+  PYCVC_STATE_EXEC_CATCH
+}
+%rename(_threads) pycvc::ExecPool::threads;
+%include "pycvc_exec_pool.h"
+%extend pycvc::ExecPool {
+  %pythoncode %{
+    threads = property(lambda self: self._threads(),
+                       doc="The app pool's worker count (the real one).")
+  %}
+}
 
 // The GL-free half of a Python Ariadne host: pycvc.host_function (a Python callable as a host
 // function with arguments and a value) and pycvc.AriApp (a document's programs with no window).

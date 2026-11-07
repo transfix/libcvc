@@ -122,6 +122,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/state/state_exec/async_call.h
   ../../inc/cvc/state/state_exec/async_host.h
   ../../inc/cvc/state/state_exec/async_scheduler.h
+  ../../inc/cvc/state/state_exec/exec_group.h
   ../../inc/cvc/state/state_exec/intrinsics.h
   ../../inc/cvc/state/state_exec/resource_policy.h
   ../../inc/cvc/state/state_exec/stdlib.h
@@ -140,6 +141,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/text.h
   ../../inc/cvc/core/thread_pool.h
   ../../inc/cvc/core/thread_class.h
+  ../../inc/cvc/core/exec_pool.h
+  ../../inc/cvc/core/cpu_placement.h
   ../../inc/cvc/volume/volmagick.h
   ../../inc/cvc/geometry/geometry_file_io.h
   ../../inc/cvc/model/model.h
@@ -242,6 +245,8 @@ set(SOURCE_FILES
   core/text.cpp
   core/thread_pool.cpp
   core/thread_class.cpp
+  core/exec_pool.cpp
+  core/cpu_placement.cpp
   processing/bilateral_filter.cpp
   processing/contrast_enhancement.cpp
   volume/cvcraw_io.cpp
@@ -294,6 +299,7 @@ set(SOURCE_FILES
   state/state_exec/scheduler.cpp
   state/state_exec/async_host.cpp
   state/state_exec/async_scheduler.cpp
+  state/state_exec/exec_group.cpp
   state/state_exec/intrinsics.cpp
   state/state_exec/resource_policy.cpp
   state/state_exec/stdlib.cpp

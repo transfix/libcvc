@@ -394,7 +394,7 @@ struct tracked_object {
   const void *raw;
 };
 
-struct cycle_registry {
+struct thread_registry {
   std::vector<tracked_object> objects;
   std::unordered_map<const void *, std::size_t> index; // object -> its entry in `objects`
   std::size_t since_last = 0;                          // newly tracked since the last collection
@@ -410,8 +410,8 @@ struct cycle_registry {
   }
 };
 
-cycle_registry &registry() {
-  thread_local cycle_registry r;
+thread_registry &registry() {
+  thread_local thread_registry r;
   return r;
 }
 
@@ -420,7 +420,7 @@ constexpr std::size_t kMinCollectionGrowth = 256;
 template <class T> void track(node_kind k, const std::shared_ptr<T> &p) {
   if (!p)
     return;
-  cycle_registry &r = registry();
+  thread_registry &r = registry();
   if (auto it = r.index.find(p.get()); it != r.index.end()) {
     tracked_object &t = r.objects[it->second];
     if (!t.ptr.owner_before(p) && !p.owner_before(t.ptr))
@@ -571,7 +571,7 @@ cycle_stats collect_cycles() {
   cycle_stats stats;
   if (detail::data_step_scope::current())
     return stats; // inside an evaluator step: native code may hold raw pointers into the heap
-  cycle_registry &r = registry();
+  thread_registry &r = registry();
   r.since_last = 0;
   r.exit_pending = false;
   r.last_collection = std::chrono::steady_clock::now();
@@ -652,7 +652,7 @@ cycle_stats collect_cycles() {
 }
 
 bool cycle_collection_due() {
-  const cycle_registry &r = registry();
+  const thread_registry &r = registry();
   // As many new objects as survived, and at least an eighth of what the last collection walked,
   // so a collection's walk costs a bounded amount per object tracked since the one before.
   if (r.since_last >= std::max({kMinCollectionGrowth, r.survivors, r.last_examined / 8}))
@@ -664,5 +664,35 @@ bool cycle_collection_due() {
 void note_process_exit() { registry().exit_pending = true; }
 
 std::size_t tracked_objects() { return registry().objects.size(); }
+
+// ---------------------------------------------------------------------------
+// Registries a group owns (heap.h). Stage 1 interfaces: these stubs keep today's per-thread
+// behaviour. S1.1 makes cycle_registry the real registry (the thread's own becoming one), binds
+// it, and gives each an id.
+// ---------------------------------------------------------------------------
+
+struct cycle_registry {};
+
+void cycle_registry_deleter::operator()(cycle_registry *r) const noexcept { delete r; }
+
+cycle_registry_ptr make_cycle_registry() { return cycle_registry_ptr(new cycle_registry); }
+
+cycle_registry_scope::cycle_registry_scope(cycle_registry *) noexcept : outer_(nullptr) {}
+
+cycle_registry_scope::~cycle_registry_scope() = default;
+
+cycle_stats collect_cycles(cycle_registry &) { return collect_cycles(); }
+
+bool cycle_collection_due(const cycle_registry &) { return cycle_collection_due(); }
+
+void note_process_exit(cycle_registry &) { note_process_exit(); }
+
+std::size_t tracked_objects(const cycle_registry &) { return tracked_objects(); }
+
+std::uint64_t bound_cycle_registry_id() noexcept { return 0; }
+
+void collect_cycles_at_thread_exit() {}
+
+bool exit_pending_for_test(const cycle_registry &) { return false; }
 
 } // namespace cvc::state_exec

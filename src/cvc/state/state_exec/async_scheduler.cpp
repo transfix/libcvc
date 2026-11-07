@@ -22,6 +22,26 @@ async_scheduler::async_scheduler(scheduling_policy policy)
       procs_(policy != scheduling_policy::round_robin),
       wakeup_(std::make_shared<detail::wakeup>()) {}
 
+// Stage 1 interfaces: a stub, the one-argument constructor's scheduler. S1.3 extends `base`.
+async_scheduler::async_scheduler(scheduling_policy policy, environment_ptr)
+    : async_scheduler(policy) {}
+
+// Stage 1 interfaces: stubs. S1.1 binds the registry and the stream on every entry, and S1.4 draws
+// pids from the source and takes the pump owner; until then they are stored and unused.
+void async_scheduler::set_cycle_registry(cycle_registry *r) { registry_ = r; }
+
+void async_scheduler::set_random_stream(random_stream *s) { random_ = s; }
+
+void async_scheduler::set_pid_source(std::shared_ptr<std::atomic<int>> source) {
+  pid_source_ = std::move(source);
+}
+
+async_scheduler::pump_owner_scope::pump_owner_scope(async_scheduler &s) : s_(s), outer_() {}
+
+async_scheduler::pump_owner_scope::~pump_owner_scope() = default;
+
+bool async_scheduler::pumped_elsewhere() const noexcept { return false; }
+
 namespace {
 // What a posted command never applied, or whose call threw, tells its done: false (S0.0's
 // contract; a query has no done). done must not throw.
@@ -82,6 +102,12 @@ detail::lock_home *async_scheduler::locks() {
     home_ = std::make_unique<detail::lock_home>(std::make_shared<lock_manager>(), lock_ops_,
                                                 policy_, wakeup_);
   return home_.get();
+}
+
+void async_scheduler::close_lock_port() {
+  // Never through locks(), which would make a private home to close.
+  if (has_lock_home())
+    home_->port()->close();
 }
 
 void async_scheduler::keep_lock_expiries(clock::time_point now) {

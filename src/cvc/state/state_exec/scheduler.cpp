@@ -20,6 +20,18 @@ scheduler::scheduler(scheduling_policy policy)
     : policy_(policy), evaluator_(builtins::make_default_environment()),
       procs_(policy != scheduling_policy::round_robin), idle_(std::make_shared<detail::wakeup>()) {}
 
+// Stage 1 interfaces: stubs. S1.1 binds the registry and the stream on every entry, and S1.4 takes
+// the pump owner; until then they are stored and unused.
+void scheduler::set_cycle_registry(cycle_registry *r) { registry_ = r; }
+
+void scheduler::set_random_stream(random_stream *s) { random_ = s; }
+
+scheduler::pump_owner_scope::pump_owner_scope(scheduler &s) : s_(s), outer_() {}
+
+scheduler::pump_owner_scope::~pump_owner_scope() = default;
+
+bool scheduler::pumped_elsewhere() const noexcept { return false; }
+
 namespace {
 // What a posted command never applied, or whose call threw, tells its done: false (S0.0's
 // contract; a query has no done). done must not throw.
@@ -81,6 +93,12 @@ detail::lock_home *scheduler::locks() {
     home_ = std::make_unique<detail::lock_home>(std::make_shared<lock_manager>(), lock_ops_,
                                                 policy_, idle_);
   return home_.get();
+}
+
+void scheduler::close_lock_port() {
+  // Never through locks(), which would make a private home to close.
+  if (has_lock_home())
+    home_->port()->close();
 }
 
 void scheduler::keep_lock_expiries(clock::time_point now) {

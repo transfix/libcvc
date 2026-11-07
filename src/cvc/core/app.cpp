@@ -23,6 +23,7 @@
 /* $Id: App.cpp 5881 2012-07-20 19:34:04Z edwardsj $ */
 
 #include <cvc/core/app.h>
+#include <cvc/core/exec_pool.h>
 #include <cvc/core/thread_class.h>
 #include <cvc/core/thread_pool.h>
 #include <cvc/core/types.h>
@@ -158,6 +159,9 @@ void app::wait_for_threads() {
     std::cerr << msg; // Also print to stderr to ensure visibility
   }
 }
+
+// Group 0's own state (app.h). Stage 1 interfaces: empty and never built; S1.7 fills it.
+struct app::exec_group0_state {};
 
 app::app()
     : _maxPoolSize(boost::thread::hardware_concurrency() > 0 ? boost::thread::hardware_concurrency()
@@ -1406,6 +1410,63 @@ cvc::state_exec::async_host &app::exec_async_host() {
   if (!_execAsyncHost)
     _execAsyncHost.reset(new cvc::state_exec::async_host(sched, this));
   return *_execAsyncHost;
+}
+
+// Stage 1 interfaces: stubs. The pool is built with the options given (the stub pool has no
+// workers), and exec_pump_frame() only advances the generation. S1.7 reads the tree's settings,
+// gives group 0 its registry and stream, and pumps the frame.
+cvc::exec_pool &app::exec_pool() { return exec_pool(pool_options{}); }
+
+cvc::exec_pool &app::exec_pool(const pool_options &opts) {
+  boost::mutex::scoped_lock lock(_execPoolMutex);
+  if (!_execPool)
+    _execPool = std::make_unique<cvc::exec_pool>(opts);
+  return *_execPool;
+}
+
+cvc::exec_pool *app::exec_pool_probe() const {
+  boost::mutex::scoped_lock lock(_execPoolMutex);
+  return _execPool.get();
+}
+
+void app::exec_pump_frame() { _execPumpGeneration.fetch_add(1, std::memory_order_acq_rel); }
+
+std::uint64_t app::exec_pump_generation() const {
+  return _execPumpGeneration.load(std::memory_order_acquire);
+}
+
+frame_group_handle app::register_frame_group(cvc::state_exec::exec_group &group) {
+  boost::mutex::scoped_lock lock(_execPoolMutex);
+  _frameGroups.push_back(&group);
+  return frame_group_handle(*this, group);
+}
+
+void app::unregister_frame_group(cvc::state_exec::exec_group *group) noexcept {
+  boost::mutex::scoped_lock lock(_execPoolMutex);
+  const auto it = std::find(_frameGroups.begin(), _frameGroups.end(), group);
+  if (it != _frameGroups.end())
+    _frameGroups.erase(it);
+}
+
+frame_group_handle::frame_group_handle(frame_group_handle &&other) noexcept
+    : _app(std::exchange(other._app, nullptr)), _group(std::exchange(other._group, nullptr)) {}
+
+frame_group_handle &frame_group_handle::operator=(frame_group_handle &&other) noexcept {
+  if (this != &other) {
+    reset();
+    _app = std::exchange(other._app, nullptr);
+    _group = std::exchange(other._group, nullptr);
+  }
+  return *this;
+}
+
+frame_group_handle::~frame_group_handle() { reset(); }
+
+void frame_group_handle::reset() noexcept {
+  if (_app)
+    _app->unregister_frame_group(_group);
+  _app = nullptr;
+  _group = nullptr;
 }
 
 void app::setThreadPoolSize(unsigned int size) {

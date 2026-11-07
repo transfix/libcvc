@@ -68,6 +68,9 @@ class thread_pool; // persistent-worker fork-join pool owned below (thread_pool.
 class world_clock; // per-app simulation clock owned below (world_clock.h)
 class world_units; // per-app unit base + display regime owned below (world_units.h)
 
+class exec_pool;     // the app's pool of execution groups owned below (exec_pool.h)
+struct pool_options; // its options (exec_pool.h)
+
 // --------
 // cvc::app
 // --------
@@ -119,7 +122,33 @@ namespace state_exec {
 class async_scheduler;
 class async_host;
 class lock_manager;
+class exec_group;
 } // namespace state_exec
+
+class app;
+
+// An exec_group registered as one of an app's frame groups (app::register_frame_group): every
+// app::exec_pump_frame() pumps it until the handle is reset or destroyed. Movable, not copyable.
+// Destroy it before the group, on the host thread, outside a pump.
+class frame_group_handle {
+public:
+  frame_group_handle() = default;
+  frame_group_handle(frame_group_handle &&other) noexcept;
+  frame_group_handle &operator=(frame_group_handle &&other) noexcept;
+  frame_group_handle(const frame_group_handle &) = delete;
+  frame_group_handle &operator=(const frame_group_handle &) = delete;
+  ~frame_group_handle();
+  // Unregister the group now (nothing when empty).
+  void reset() noexcept;
+  explicit operator bool() const noexcept { return _app != nullptr; }
+
+private:
+  friend class app;
+  frame_group_handle(app &a, cvc::state_exec::exec_group &group) noexcept
+      : _app(&a), _group(&group) {}
+  app *_app = nullptr;
+  cvc::state_exec::exec_group *_group = nullptr;
+};
 
 class app {
   // ~app's hold on interruption (app.cpp), taken first thing in ~app. Declared before every other
@@ -592,6 +621,31 @@ public:
   // unknown value is logged and auto used. A single manager refuses a home attached cross_thread.
   std::shared_ptr<cvc::state_exec::lock_manager> lock_manager();
 
+  // This app's pool of execution groups (docs/STATE_EXEC_THREADED.md 4.1, 4.12; exec_pool.h): the
+  // fork-join pool that pumps exec_groups (Ariadne's frame groups, pycvc's ExecPool) on persistent
+  // workers and the calling thread. One per app, built at the first call under its own mutex: with
+  // `opts` when that call gives them, else from the tree's state_exec.threads (a number or auto),
+  // state_exec.cpu_set and state_exec.deterministic. Options given once it is built are not applied
+  // (the built size is kept, and a different one logged). exec_pool(opts) asking for threads above
+  // 0 before anything has made lock_manager() also makes that manager shared (S1-Q1), for this app
+  // only. With 0 threads, or no threads in the build, every pump runs on the calling thread.
+  cvc::exec_pool &exec_pool();
+  cvc::exec_pool &exec_pool(const pool_options &opts);
+  // The pool if it has been built, else null; never builds it.
+  cvc::exec_pool *exec_pool_probe() const;
+
+  // One frame's pump of the app's groups (td 4.12): a single exec_pool().pump_all with a 0.1 s
+  // deadline over group 0 (exec_scheduler(), once, when it is built and has work; a host-affinity
+  // group) and every registered frame group; then exec_pump_generation() advances. Host thread,
+  // outside a pump. cvc::pump_exec_frame (async_lane.h) is another driver of exec_scheduler(),
+  // which does not advance the generation.
+  void exec_pump_frame();
+  // How many exec_pump_frame() calls have finished: Ariadne's drain_end() skips its own pump when
+  // it moved since its drain_begin().
+  std::uint64_t exec_pump_generation() const;
+  // Have exec_pump_frame() pump `group` until the handle goes. The group must outlive the handle.
+  frame_group_handle register_frame_group(cvc::state_exec::exec_group &group);
+
   // Used to easily manage saving/restoring thread info as we
   // traverse a threads stack.
   //
@@ -961,6 +1015,11 @@ protected:
   std::unique_ptr<cvc::world_units> _worldUnits;
   boost::mutex _worldBasesMutex;
 
+  // Group 0's own state (S1.7: exec_scheduler()'s cycle registry and math.random stream), defined
+  // in app.cpp. Declared before the scheduler and its host, so it goes after both.
+  struct exec_group0_state;
+  std::unique_ptr<exec_group0_state> _execGroup0;
+
   // The app-wide state_exec scheduler (exec_scheduler()). Lazily built; the mutex
   // guards first construction. unique_ptr so app.h needs only a forward declaration.
   std::unique_ptr<cvc::state_exec::async_scheduler> _execScheduler;
@@ -976,6 +1035,17 @@ protected:
   // The same, leaving that warning (or a kept one) in `note` for the caller to log after unlocking.
   std::shared_ptr<cvc::state_exec::lock_manager> lock_manager_locked(std::string &note);
   std::string _lockManagerNote; // lock_manager_locked()'s kept warning; guarded by the mutex
+
+  // exec_pool(): built once; _execPoolMutex guards its construction and _frameGroups
+  // (register_frame_group's, in registration order). unique_ptr so app.h needs only a forward
+  // declaration. exec_pump_frame() counts into _execPumpGeneration.
+  std::unique_ptr<cvc::exec_pool> _execPool;
+  mutable boost::mutex _execPoolMutex;
+  std::vector<cvc::state_exec::exec_group *> _frameGroups;
+  std::atomic<std::uint64_t> _execPumpGeneration{0};
+  // frame_group_handle's: drop `group` from _frameGroups.
+  friend class frame_group_handle;
+  void unregister_frame_group(cvc::state_exec::exec_group *group) noexcept;
 
   // Interrupt and join this app's tracked threads (two-phase, per-thread
   // timeout). Call it (or wait()) from main() before exit if you spawned work;
