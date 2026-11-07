@@ -2701,6 +2701,10 @@ SceneLight parse_scene_light(const YAML::Node &n) {
     vec3(stage, "center", sl.stage_center);
     sl.stage_radius = static_cast<float>(num(stage, "radius", sl.stage_radius));
   }
+  if (n["sun"]) { // sun: true: the key is the sun (directional), not a spot on the stage
+    sl.has_sun = true;
+    sl.sun = flag(n, "sun");
+  }
   if (const YAML::Node key = n["key"]; key && key.IsMap()) {
     sl.has_key = true;
     sl.key_intensity = static_cast<float>(num(key, "intensity", sl.key_intensity));
