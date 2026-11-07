@@ -11,6 +11,7 @@
 // SceneViews — the `viewport` widget. See inc/cvc/gl/ariadne/scene_views.h.
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cvc/ariadne/widget.h>
 #include <cvc/gl/CameraController.h>
@@ -20,6 +21,9 @@
 #include <cvc/gl/TouchScroll.h>
 #include <cvc/gl/Viewport.h>
 #include <cvc/gl/ViewportManager.h>
+#include <cvc/gl/VolRenNode.h>
+#include <cvc/gl/VolSliceNode.h>
+#include <cvc/gl/VolumeNode.h>
 #include <cvc/gl/ariadne/ImGuiBackend.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/scene_views.h>
@@ -32,6 +36,10 @@
 #include <vtkCamera.h>
 #include <vtkCommand.h>
 #include <vtkMapper.h>
+#include <vtkMatrix4x4.h>
+#include <vtkNew.h>
+#include <vtkPiecewiseFunction.h>
+#include <vtkPlaneCollection.h>
 #include <vtkPropCollection.h>
 #include <vtkProperty.h>
 #include <vtkRenderPass.h>
@@ -39,6 +47,10 @@
 #include <vtkRenderer.h>
 #include <vtkShaderProperty.h>
 #include <vtkSmartPointer.h>
+#include <vtkSmartVolumeMapper.h>
+#include <vtkTransform.h>
+#include <vtkVolume.h>
+#include <vtkVolumeProperty.h>
 
 #ifdef CVC_ENABLE_IMGUI
 #include <imgui.h>
@@ -54,12 +66,16 @@ namespace ari = cvc::ariadne;
 namespace {
 
 // An override:'s look: the fields it sets on a node's actors in one view, the rest as the node has
-// them. Later entries win field by field.
+// them. Later entries win field by field, unless an entry's mode is replace. Its transform is kept
+// apart (View::draw composes them).
 struct Look {
   int rep = -1; // VTK_POINTS / VTK_WIREFRAME / VTK_SURFACE, -1 unset
   double opacity = -1.0, line_width = -1.0, point_size = -1.0;
   bool has_color = false;
   double color[3] = {1.0, 1.0, 1.0};
+  bool replace = false;   // mode: replace: start over from the node's own look
+  bool has_xform = false; // transform: { position, rotation, scale }
+  double xform[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
   bool empty() const {
     return rep < 0 && opacity < 0.0 && line_width < 0.0 && point_size < 0.0 && !has_color;
   }
@@ -88,10 +104,58 @@ struct Look {
 // SAME mapper (the geometry is not copied), kept in step with the original each frame.
 struct Twin {
   vtkSmartPointer<vtkActor> actor;
+  vtkSmartPointer<vtkVolume> volume;          // a volume node's stand-in
+  vtkSmartPointer<vtkSmartVolumeMapper> vmap; // ... and its own mapper, while it restyles
+  vtkSmartPointer<vtkMatrix4x4> placed;       // where a transform: override puts it
   vtkMTimeType copied = 0; // the original's property MTime when it was last copied
   Look look;               // the look last applied
   bool seen = false;       // drawn this frame
 };
+
+// One override: entry, resolved for this frame: its look, and the props it covers, each with the
+// world matrix of the node the entry names (the frame its transform: applies in). "*" covers all,
+// in world space.
+struct Entry {
+  Look look;
+  bool all = false;
+  std::unordered_map<vtkProp *, std::array<double, 16>> props;
+};
+
+// The scene's volume nodes, by prop: how a view from its own camera draws each.
+enum class VolumeKind { slices, raycast, gpu };
+struct VolumeProp {
+  VolumeKind kind = VolumeKind::gpu;
+  GraphicsNode *node = nullptr;
+};
+
+void identity(double m[16]) {
+  for (int i = 0; i < 16; ++i)
+    m[i] = (i % 5 == 0) ? 1.0 : 0.0;
+}
+
+// b at a's place, or at X times a's place (a transform: override, a world-space premultiplier).
+void place(vtkProp3D *b, vtkProp3D *a, const double *X, vtkSmartPointer<vtkMatrix4x4> &placed) {
+  if (!X) {
+    b->SetPosition(a->GetPosition());
+    b->SetOrientation(a->GetOrientation());
+    b->SetScale(a->GetScale());
+    b->SetOrigin(a->GetOrigin());
+    b->SetUserMatrix(a->GetUserMatrix());
+    b->SetUserTransform(a->GetUserTransform());
+    return;
+  }
+  if (!placed)
+    placed = vtkSmartPointer<vtkMatrix4x4>::New();
+  double m[16];
+  vtkMatrix4x4::Multiply4x4(X, a->GetMatrix()->GetData(), m);
+  placed->DeepCopy(m);
+  b->SetUserTransform(nullptr);
+  b->SetPosition(0.0, 0.0, 0.0);
+  b->SetOrientation(0.0, 0.0, 0.0);
+  b->SetScale(1.0, 1.0, 1.0);
+  b->SetOrigin(0.0, 0.0, 0.0);
+  b->SetUserMatrix(placed);
+}
 
 } // namespace
 
@@ -117,8 +181,9 @@ struct SceneViews::View {
   std::unordered_set<vtkProp *> hidden; // the main view's props this one leaves out
   // override: entries in order: a node id, a tag, or "*" (everything), and its look.
   std::vector<std::pair<std::string, Look>> overrides;
-  std::unordered_map<vtkProp *, Look> looks; // each restyled prop's merged look, this frame
-  Look all;                                  // the "*" entry's look
+  std::vector<Entry> entries; // ... resolved to props, this frame
+  std::unordered_map<vtkProp *, VolumeProp> volumes;
+  bool own_eye = true; // its camera is not the main view's
   std::unordered_map<vtkProp *, Twin> twins;
   bool dragging = false, panning = false;
 
@@ -126,13 +191,60 @@ struct SceneViews::View {
   vtkProp *draw(vtkProp *p) {
     if (hidden.count(p))
       return nullptr;
-    Look look = all;
-    auto it = looks.find(p);
-    if (it != looks.end())
-      look.merge(it->second);
-    vtkActor *a = vtkActor::SafeDownCast(p);
-    if (look.empty() || !a || !a->GetMapper())
-      return p;
+    // The volumes drawn for the main view: a volslice node's slices face its camera, so a view from
+    // another camera draws slices of its own; a volren node's picture is raycast for the main view
+    // and composited into its pixels, so no view draws it.
+    vtkProp *src = p;
+    auto vi = volumes.find(p);
+    if (vi != volumes.end()) {
+      if (vi->second.kind == VolumeKind::raycast)
+        return nullptr;
+      if (own_eye && vi->second.kind == VolumeKind::slices)
+        src = static_cast<VolSliceNode *>(vi->second.node)->viewProp(vp->renderer());
+      if (!src)
+        return nullptr;
+    }
+    // Its look: the entries that cover it, in order; their transforms compose, each in the frame of
+    // the node it names.
+    Look look;
+    double X[16];
+    identity(X);
+    bool moved = false;
+    for (const Entry &e : entries) {
+      const std::array<double, 16> *frame = nullptr;
+      if (!e.all) {
+        auto it = e.props.find(p);
+        if (it == e.props.end())
+          continue;
+        frame = &it->second;
+      }
+      if (e.look.replace) {
+        look = Look{};
+        identity(X);
+        moved = false;
+      }
+      look.merge(e.look);
+      if (e.look.has_xform) {
+        double F[16], Fi[16], M[16], N[16];
+        if (frame)
+          std::copy(frame->begin(), frame->end(), F);
+        else
+          identity(F);
+        vtkMatrix4x4::Invert(F, Fi);
+        vtkMatrix4x4::Multiply4x4(F, e.look.xform, M);
+        vtkMatrix4x4::Multiply4x4(M, Fi, N);
+        vtkMatrix4x4::Multiply4x4(N, X, M);
+        std::copy(M, M + 16, X);
+        moved = true;
+      }
+    }
+    if (look.empty() && !moved)
+      return src;
+    if (vtkVolume *vol = vtkVolume::SafeDownCast(src))
+      return volume_twin(p, vol, look, moved ? X : nullptr);
+    vtkActor *a = vtkActor::SafeDownCast(src);
+    if (!a || !a->GetMapper())
+      return src;
     Twin &t = twins[p];
     if (!t.actor)
       t.actor = vtkSmartPointer<vtkActor>::New();
@@ -141,12 +253,7 @@ struct SceneViews::View {
       b->SetMapper(a->GetMapper());
     b->SetShaderProperty(a->GetShaderProperty()); // the node's shader: replacements, shared
     b->SetTexture(a->GetTexture());
-    b->SetPosition(a->GetPosition());
-    b->SetOrientation(a->GetOrientation());
-    b->SetScale(a->GetScale());
-    b->SetOrigin(a->GetOrigin());
-    b->SetUserMatrix(a->GetUserMatrix());
-    b->SetUserTransform(a->GetUserTransform());
+    place(b, a, moved ? X : nullptr, t.placed);
     b->SetVisibility(a->GetVisibility()); // an LOD ladder shows one rung
     b->SetPickable(false);
     const vtkMTimeType m = a->GetProperty()->GetMTime();
@@ -169,8 +276,74 @@ struct SceneViews::View {
     // A see-through override draws in the translucent pass even where the node is forced opaque.
     const bool see_through = look.opacity >= 0.0 && look.opacity < 1.0;
     b->SetForceOpaque(see_through ? false : a->GetForceOpaque());
-    b->SetForceTranslucent(see_through);
+    b->SetForceTranslucent(see_through || a->GetForceTranslucent());
     t.seen = true;
+    return b;
+  }
+
+  // A `type: volume` node's stand-in: moved by a transform: override over the node's own mapper,
+  // or, with an opacity, a property and mapper of its own (a GPU volume mapper keeps one set of
+  // transfer-function tables, for the property it last drew, so a second property needs a second
+  // mapper, which uploads the volume again).
+  vtkProp *volume_twin(vtkProp *p, vtkVolume *a, const Look &look, const double *X) {
+    vtkVolumeProperty *ap = a->GetProperty();
+    if (!a->GetMapper() || !ap)
+      return a;
+    Twin &t = twins[p];
+    if (!t.volume)
+      t.volume = vtkSmartPointer<vtkVolume>::New();
+    vtkVolume *b = t.volume;
+    place(b, a, X, t.placed);
+    b->SetVisibility(a->GetVisibility());
+    b->SetPickable(false);
+    t.seen = true;
+    if (look.opacity < 0.0) {
+      t.vmap = nullptr;
+      if (b->GetMapper() != a->GetMapper())
+        b->SetMapper(a->GetMapper());
+      if (b->GetProperty() != ap)
+        b->SetProperty(ap);
+      return b;
+    }
+    auto *am = vtkSmartVolumeMapper::SafeDownCast(a->GetMapper());
+    if (!am)
+      return a; // only VolumeNode's mapper is restyled
+    if (!t.vmap)
+      t.vmap = vtkSmartPointer<vtkSmartVolumeMapper>::New();
+    vtkSmartVolumeMapper *bm = t.vmap;
+    if (bm->GetInputDataObject(0, 0) != am->GetInputDataObject(0, 0))
+      bm->SetInputDataObject(am->GetInputDataObject(0, 0));
+    bm->SetBlendMode(am->GetBlendMode());
+    bm->SetAutoAdjustSampleDistances(am->GetAutoAdjustSampleDistances());
+    bm->SetSampleDistance(am->GetSampleDistance());
+    bm->SetVolumetricScatteringBlending(am->GetVolumetricScatteringBlending());
+    bm->SetGlobalIlluminationReach(am->GetGlobalIlluminationReach());
+    bm->SetClippingPlanes(am->GetClippingPlanes());
+    if (b->GetMapper() != bm)
+      b->SetMapper(bm);
+    // Its property: the node's, with every opacity point scaled, copied again when the node's
+    // property or the look changes.
+    vtkMTimeType m = ap->GetMTime();
+    if (vtkPiecewiseFunction *f = ap->GetScalarOpacity())
+      m = std::max(m, f->GetMTime());
+    if (b->GetProperty() == ap || m != t.copied || !(look == t.look)) {
+      vtkSmartPointer<vtkVolumeProperty> q = vtkSmartPointer<vtkVolumeProperty>::New();
+      q->DeepCopy(ap);
+      if (vtkPiecewiseFunction *f = ap->GetScalarOpacity()) {
+        vtkSmartPointer<vtkPiecewiseFunction> g = vtkSmartPointer<vtkPiecewiseFunction>::New();
+        g->DeepCopy(f);
+        for (int i = 0; i < g->GetSize(); ++i) {
+          double node[4];
+          g->GetNodeValue(i, node);
+          node[1] = std::clamp(node[1] * look.opacity, 0.0, 1.0);
+          g->SetNodeValue(i, node);
+        }
+        q->SetScalarOpacity(g);
+      }
+      b->SetProperty(q);
+      t.copied = m;
+      t.look = look;
+    }
     return b;
   }
 };
@@ -238,6 +411,35 @@ Look look_of(const ari::Value &v) {
   Look l;
   if (!v.is_map())
     return l;
+  l.replace = v.str("mode") == "replace";
+  // transform: { position: [x, y, z], rotation: [rx, ry, rz] (degrees), scale: s | [sx, sy, sz] },
+  // as a node's transform: spells it (translate, then rotate z, y, x, then scale).
+  if (const ari::Value *tf = v.find("transform"))
+    if (tf->is_map()) {
+      auto vec = [tf](const char *key, double def, double out[3]) {
+        out[0] = out[1] = out[2] = def;
+        if (const ari::Value *x = tf->find(key)) {
+          if (x->is_seq() && x->items.size() >= 3)
+            for (int i = 0; i < 3; ++i)
+              out[i] = x->items[i].as_double();
+          else if (x->is_scalar())
+            out[0] = out[1] = out[2] = x->as_double();
+        }
+      };
+      double pos[3], rot[3], scl[3];
+      vec("position", 0.0, pos);
+      vec("rotation", 0.0, rot);
+      vec("scale", 1.0, scl);
+      vtkNew<vtkTransform> t;
+      t->Translate(pos);
+      t->RotateZ(rot[2]);
+      t->RotateY(rot[1]);
+      t->RotateX(rot[0]);
+      t->Scale(scl);
+      const double *d = t->GetMatrix()->GetData();
+      std::copy(d, d + 16, l.xform);
+      l.has_xform = true;
+    }
   const std::string ds = v.str("drawstyle");
   if (ds == "wireframe")
     l.rep = VTK_WIREFRAME;
@@ -253,6 +455,14 @@ Look look_of(const ari::Value &v) {
       l.has_color = true;
       for (int i = 0; i < 3; ++i)
         l.color[i] = c->items[i].as_double();
+    }
+  // material: { color, opacity } spells the same fields, as a node's material: does.
+  if (const ari::Value *m = v.find("material"))
+    if (m->is_map()) {
+      Look ml = look_of(*m);
+      ml.replace = false;
+      ml.has_xform = false;
+      l.merge(ml);
     }
   return l;
 }
@@ -557,8 +767,12 @@ void SceneViews::end_walk() {
       continue;
     Viewport &a = vm.viewport(slot.source);
     a.setRegion(v.region[0], v.region[1], v.region[0] + 1.0 / W, v.region[1] + 1.0 / H);
-    if (!a.visible())
+    if (!a.visible()) {
+      // Shown again after frames unseen: bake its maps on this frame, whatever its stride, so the
+      // views never draw maps from before (the anchor draws first, a layer under them).
       a.setVisible(true);
+      slot.sg->invalidateShadowBake();
+    }
     anchors.push_back(slot.source);
   }
   for (const std::string &old : anchors_on_)
@@ -587,9 +801,17 @@ void SceneViews::update(double dt) {
     anchors_on_.clear();
     return;
   }
-  // No widget walk last frame (the host hid the UI): no widget drew a view, so none shows.
+  // No widget walk last frame (the host hid the UI): no widget drew a view, so none shows, and the
+  // scenes: entries' viewports, drawn only under a view, stop too.
   const bool walked = walked_;
   walked_ = false;
+  if (!walked) {
+    ViewportManager &vm = view_->viewportManager();
+    for (const std::string &a : anchors_on_)
+      if (vm.hasViewport(a))
+        vm.viewport(a).setVisible(false);
+    anchors_on_.clear();
+  }
   // main_view: { show, hide }: what the main view leaves out, taken out of the main renderer for
   // the length of its draw (main_view_begin / _end), so the views, which mirror it, keep it.
   main_hidden_.clear();
@@ -646,25 +868,49 @@ void SceneViews::update(double dt) {
         if (!in_view(t.tags, v.show, v.hide))
           collect(t.node.lock(), v.hidden);
     // How it restyles the rest: each override: entry's look on the props of the nodes it names (by
-    // id or tag, with their subtrees), later entries winning field by field.
-    v.looks.clear();
-    v.all = Look{};
+    // id or tag, with their subtrees), in order; a transform applies in the named node's frame.
+    v.entries.clear();
     for (const auto &o : v.overrides) {
-      if (o.first == "*") {
-        v.all.merge(o.second);
-        continue;
-      }
-      if (!rs)
-        continue;
-      for (const RealizedScene::TaggedNode &t : rs->nodes) {
-        if (t.id != o.first && std::find(t.tags.begin(), t.tags.end(), o.first) == t.tags.end())
-          continue;
-        std::unordered_set<vtkProp *> props;
-        collect(t.node.lock(), props);
-        for (vtkProp *p : props)
-          v.looks[p].merge(o.second);
-      }
+      Entry e;
+      e.look = o.second;
+      e.all = o.first == "*";
+      if (!e.all && rs)
+        for (const RealizedScene::TaggedNode &t : rs->nodes) {
+          if (t.id != o.first && std::find(t.tags.begin(), t.tags.end(), o.first) == t.tags.end())
+            continue;
+          std::shared_ptr<GraphicsNode> n = t.node.lock();
+          if (!n)
+            continue;
+          std::array<double, 16> frame;
+          identity(frame.data());
+          if (o.second.has_xform)
+            if (vtkSmartPointer<vtkMatrix4x4> w = n->getWorldTransform())
+              std::copy(w->GetData(), w->GetData() + 16, frame.begin());
+          std::unordered_set<vtkProp *> props;
+          collect(n, props);
+          for (vtkProp *p : props)
+            e.props.emplace(p, frame); // an outer named node's frame wins over one inside it
+        }
+      v.entries.push_back(std::move(e));
     }
+    // Its volumes, which a view from a camera of its own draws as its own eye needs.
+    v.own_eye = v.camera != "main";
+    v.volumes.clear();
+    if (rs)
+      for (const RealizedScene::TaggedNode &t : rs->nodes) {
+        std::shared_ptr<GraphicsNode> n = t.node.lock();
+        VolumeProp vol;
+        if (auto *sl = dynamic_cast<VolSliceNode *>(n.get()))
+          vol = {VolumeKind::slices, sl};
+        else if (auto *rc = dynamic_cast<VolRenNode *>(n.get()))
+          vol = {VolumeKind::raycast, rc};
+        else if (dynamic_cast<VolumeNode *>(n.get()))
+          vol = {VolumeKind::gpu, n.get()};
+        else
+          continue;
+        if (vtkProp *own = n->prop())
+          v.volumes[own] = vol;
+      }
     // The twins of props no longer drawn (a node removed, an override dropped) go.
     for (auto it = v.twins.begin(); it != v.twins.end();) {
       if (!it->second.seen)

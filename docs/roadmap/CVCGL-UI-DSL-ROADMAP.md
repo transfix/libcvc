@@ -2034,15 +2034,19 @@ subject of the still-open streamed-source contract (§9.8).
 > the traversal tree or bit allocation (no 32-tag limit). `override:` (§9.5.3) is implemented
 > too, by node id, tag or `"*"`, as merge-mode field overrides (drawstyle, opacity, color, line
 > width, point size). It is lowered not to duplicated traversal branches but to a twin vtkActor per
-> restyled actor over the node's own mapper. Not done: `transform:` overrides, `mode: replace`, a
-> top-level `views:` block of full-window views, and the mask as a state_exec expression (a bound
-> tag list does that job). Named cameras (`scene: cameras:`, a viewport's `camera: <id>` or
+> restyled actor over the node's own mapper. `transform:` overrides (in the named node's frame) and
+> `mode: replace` are in too, though `merge` stays the default mode: an entry adds to the ones
+> before it unless it says replace. Volumes: a `type: volume` node takes opacity and transform, a
+> volslice node draws slices swept for a view's own camera, and a volren node is in the main view
+> only. Not done: a top-level `views:` block of full-window views, and the mask as a state_exec
+> expression (a bound tag list does that job). Named cameras (`scene: cameras:`, a viewport's `camera: <id>` or
 > `camera: main`) let several viewports draw from one camera, and every view receives the scene's
 > shadows from the main renderer's maps (SceneGraph::makeShadowReceiverPass), or bakes its own
 > (`shadows: own`). Several scenes per document: `scenes:` (each a SceneGraph of its own, shown by
 > the viewports that name it), `assets:` read once and shared by every scene's nodes, and
-> `main_view:` for tagged groups in one scene. This is a simpler cousin of the §12.2 sub-scene
-> mounts: no separate .ari file, no own chroot.
+> `main_view:` for tagged groups in one scene; an asset's nodes share one set of VTK arrays
+> (copy-on-write). This is a simpler cousin of the §12.2 sub-scene mounts: no separate .ari file, no
+> own chroot.
 
 One render window hosts **N layered viewports**, each its own camera — this is
 `ViewportManager` (`SceneRenderer` is its single-viewport facade and exposes

@@ -399,6 +399,7 @@ keys:
         (state-set "gallery.index" (% (+ (int (state-get "gallery.index")) (- n 1)) n)))
 
 scene:
+  shadows: { enabled: true, resolution: 2048 }   # soft shadows (softness 2), on in every demo
   chrome: false
   clock: {} # sim.time: the tour's dwell
   background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] }

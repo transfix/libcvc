@@ -12,8 +12,10 @@
 #include <utility>
 #include <vector>
 #include <vtkSmartPointer.h>
+#include <vtkWeakPointer.h>
 
 class vtkActor;
+class vtkMapper;
 class vtkCellArray;
 class vtkPolyDataMapper;
 class vtkPolyData;
@@ -326,6 +328,23 @@ public:
   // which has no clipping-plane support.
   int maxClipPlanes() const override;
 
+  // Draw from `donor`'s VTK arrays (points, cells, normals, texture coordinates) instead of
+  // building its own, whenever both nodes were built from the same cvc::geometry buffers in the
+  // same render mode: an Ariadne asset's nodes (`source: { asset }`) share one copy, and so share
+  // the GPU buffers VTK makes from it. Applied at once when the two match, and again on each
+  // rebuild. Copy-on-write: an in-place write (updateVertices, updateNormals) first gives the
+  // writer arrays of its own, the donor's writes included. Per-vertex colours are always the node's
+  // own. Null stops sharing at the next rebuild. Owner thread.
+  void shareArraysFrom(const std::shared_ptr<GeometryNode> &donor);
+  // Whether this node's polydata holds arrays another node draws from too.
+  bool sharesArrays() const { return m_arraysShared; }
+
+  // Bind this node's shader uniforms and textures (setShaderUniform*, setShaderTexture,
+  // setSharedShaderInputs) in `other` too: another mapper that draws with this node's shader
+  // property, such as a view's stand-in for it. The observer is removed in the destructor; a
+  // stand-in must not draw after its node is gone. Owner thread.
+  void observeShaderInputs(vtkMapper *other);
+
 protected:
   // For subclasses that need a specific vtkPolyDataMapper instead of the
   // factory one the public constructor creates (vtkPolyDataMapper::New(), i.e.
@@ -367,8 +386,19 @@ protected:
   void updateRenderModeVTK(); // Helper to update VTK properties from render mode
   void updateMetadata(const cvc::geometry &geom);
   void onDataChanged();
+  // Give the polydata arrays of its own when it shares them (shareArraysFrom): call before writing
+  // into its arrays in place. Owner thread.
+  void detachSharedArrays();
 
 private:
+  // shareArraysFrom: the donor, whether the polydata's arrays are shared (as donor or taker), and
+  // whether its points or normals were written since the last build (then no longer the geometry's,
+  // and not to be taken).
+  std::weak_ptr<GeometryNode> m_arrayDonor;
+  bool m_arraysShared = false;
+  bool m_arraysEdited = false;
+  bool adoptDonorArrays(const cvc::geometry &geom);
+  std::vector<vtkWeakPointer<vtkMapper>> m_observedMappers; // observeShaderInputs
   bool m_hasGeometry;
   std::shared_ptr<cvc::geometry> m_geometry;
   GeometryRenderMode m_renderMode;

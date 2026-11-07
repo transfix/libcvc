@@ -475,6 +475,9 @@ void configure_volren(VolRenNode &vn, const cvc::ariadne::SceneVolRen &v, const 
     lt.direction = {l.direction[0], l.direction[1], l.direction[2]};
     rs.lights.push_back(lt);
   }
+  rs.shadows.enabled = v.shadows;
+  if (v.shadow_strength >= 0.0f)
+    rs.shadows.strength = v.shadow_strength;
   vn.setRenderConfig(rs);
   if (v.backend == "cuda")
     vn.setBackend(cvc::volren::backend::cuda);
@@ -843,6 +846,14 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
                  : std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics(n.id, geom));
       if (g)
         apply_node_material(*g, n);
+      // An asset's nodes draw from its first node's VTK arrays (copy-on-write).
+      if (g && !n.source_asset.empty() && options.assets) {
+        std::weak_ptr<GeometryNode> &donor = options.assets->donors[n.source_asset];
+        if (std::shared_ptr<GeometryNode> d = donor.lock())
+          g->shareArraysFrom(d);
+        else
+          donor = g;
+      }
       // A heightfield's per-vertex band colours are there to be shown: switch the node to
       // per-vertex colour (overriding the material single-colour default) when the field supplied
       // them.

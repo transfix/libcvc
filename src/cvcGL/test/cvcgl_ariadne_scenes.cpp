@@ -1,7 +1,8 @@
-// A document's assets, its scenes of their own, and its main view's show: (docs/ARIADNE.md §5.18).
+// A document's assets, its scenes of their own, and its main view's show: (docs/ARIADNE.md Â§5.18).
 //
 // Part 1, realize_scene with a shared SceneAssetCache (no window): two scenes built from one asset
-// read it once, and their nodes share its geometry's buffers.
+// read it once, and their nodes share its geometry's buffers and the VTK arrays built from them,
+// until one writes into its points (copy-on-write).
 //
 // Part 2, a document run as a host runs it (AriRuntime offscreen):
 //   - `scenes:`: a scene of its own gets a viewport of its own ("scene.<id>", not shown), and the
@@ -9,10 +10,13 @@
 //     two viewports of one scene both draw it; its shadows reach them;
 //   - `main_view: { show }`: the main view leaves a tagged group out while a viewport that shows
 //     the group draws it, and the main renderer has the group's props back after its draw;
+//   - a scene's shadow maps are baked on the first frame a view shows it again, whatever its
+//     stride, when something moved while it was unseen;
 //   - a new document takes the scenes' viewports down.
 // Part 2 skips (rc 0) where nothing rasterises, unless CVC_REQUIRE_RENDER=1.
 #include "streaming_test_util.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/ariadne/loader.h>
@@ -31,6 +35,11 @@
 #include <fstream>
 #include <string>
 #include <vector>
+#include <vtkActor.h>
+#include <vtkMapper.h>
+#include <vtkPointData.h>
+#include <vtkPoints.h>
+#include <vtkPolyData.h>
 #include <vtkPropCollection.h>
 #include <vtkRenderer.h>
 
@@ -120,6 +129,13 @@ bool has_prop(vtkRenderer *r, vtkProp *p) {
   return r && p && r->GetViewProps()->IsItemPresent(p) != 0;
 }
 
+// The polydata a geometry node draws (its actor's mapper's input).
+vtkPolyData *drawn(const std::shared_ptr<cvc::gl::GeometryNode> &n) {
+  auto *a = n ? vtkActor::SafeDownCast(n->prop()) : nullptr;
+  return a && a->GetMapper() ? vtkPolyData::SafeDownCast(a->GetMapper()->GetInputDataObject(0, 0))
+                             : nullptr;
+}
+
 struct Counts {
   int red = 0, blue = 0, yellow = 0, green = 0;
 };
@@ -151,7 +167,8 @@ int main() {
   cvc::app app;
   app.properties("system.log_verbosity", "0");
 
-  // ── part 1: one read per asset, shared buffers, across two scenes ─────────────────────────────
+  // â”€â”€ part 1: one read per asset, shared buffers, across two scenes
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   {
     cvc::ariadne::LoadResult lr = cvc::ariadne::load_string(kAssetsOnly);
     check(lr.ok, "the assets document loads", lr.error);
@@ -179,6 +196,40 @@ int main() {
     check(ga && gb && gc && ga->points_ptr() == gb->points_ptr() &&
               ga->points_ptr() == gc->points_ptr(),
           "the nodes share the asset's point buffer (no copy)");
+    vtkPolyData *pa = drawn(a), *pb = drawn(b), *pc = drawn(c);
+    check(pa && pb && pc && pa != pb && pa->GetPoints() && pa->GetPoints() == pb->GetPoints() &&
+              pa->GetPoints() == pc->GetPoints() && pa->GetPolys() == pb->GetPolys() &&
+              pa->GetPointData()->GetNormals() == pc->GetPointData()->GetNormals(),
+          "each node has a polydata of its own over the first node's VTK arrays");
+    check(a && b && c && a->sharesArrays() && b->sharesArrays() && c->sharesArrays(),
+          "the three nodes report shared arrays");
+    if (pa && pb && pa->GetPoints() && a && b) {
+      double before[3], after[3];
+      pa->GetPoints()->GetPoint(0, before);
+      std::vector<double> xyz(static_cast<std::size_t>(pb->GetNumberOfPoints()) * 3);
+      for (vtkIdType i = 0; i < pb->GetNumberOfPoints(); ++i) {
+        double p[3];
+        pb->GetPoint(i, p);
+        xyz[3 * i] = p[0] + 10.0;
+        xyz[3 * i + 1] = p[1];
+        xyz[3 * i + 2] = p[2];
+      }
+      b->updateVertices(xyz);
+      sg.processEvents();
+      pa->GetPoints()->GetPoint(0, after);
+      double moved[3];
+      pb->GetPoints()->GetPoint(0, moved);
+      check(pa->GetPoints() != pb->GetPoints() && after[0] == before[0] &&
+                std::abs(moved[0] - (before[0] + 10.0)) < 1e-6 && !b->sharesArrays(),
+            "a node that writes its points gets points of its own; the others keep the asset's");
+      check(pa->GetPoints() == pc->GetPoints(), "the untouched nodes still share theirs");
+      a->updateVertices(xyz); // the first node (the donor) writing its own: c keeps the asset's
+      sg.processEvents();
+      double cp[3];
+      pc->GetPoints()->GetPoint(0, cp);
+      check(pa->GetPoints() != pc->GetPoints() && cp[0] == before[0],
+            "the first node's own writes do not reach the nodes that took its arrays");
+    }
     bool warned = false;
     for (const std::string &w : warns)
       warned = warned || w.find("no asset 'nothing'") != std::string::npos;
@@ -186,7 +237,8 @@ int main() {
           "a node on an unknown asset is warned of and left out");
   }
 
-  // ── part 2: the document in a host ─────────────────────────────────────────────────────────────
+  // â”€â”€ part 2: the document in a host
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const fs::path dir = fs::temp_directory_path() / "cvcgl_ariadne_scenes";
   fs::create_directories(dir);
   const fs::path doc = dir / "scenes.ari", other = dir / "other.ari";
@@ -283,6 +335,36 @@ int main() {
   check(inRight.blue > 50, "the right view draws the blue ball");
   check(inMain.red > 50 && inMain.blue == 0 && inMain.green == 0,
         "the main view: the left group only, and not the other scene");
+
+  // A scene's maps are baked on the first frame a view shows it again, whatever its stride: move
+  // its crate while no view shows it (the UI hidden), then show the UI again.
+  {
+    cvc::gl::ariadne::SceneSlot slot;
+    if (rt.views().scene("other", slot) && slot.sg) {
+      slot.sg->setShadowUpdateInterval(1000);
+      for (int f = 0; f < 3; ++f)
+        rt.step(kDt);
+      ui.setVisible(false);
+      for (int f = 0; f < 3; ++f)
+        rt.step(kDt);
+      check(!anchor.visible(), "the other scene's viewport stops drawing while no view shows it");
+      const std::uint64_t bakes = slot.sg->shadowBakes();
+      if (auto crate = slot.sg->getGraphics("yellow_crate"))
+        crate->setPosition(1.5, 0.5, 0.0);
+      for (int f = 0; f < 2; ++f)
+        rt.step(kDt);
+      check(slot.sg->shadowBakes() == bakes, "nothing bakes the unseen scene's maps");
+      ui.setVisible(true);
+      rt.step(kDt);
+      rt.step(kDt);
+      check(anchor.visible() && slot.sg->shadowBakes() > bakes,
+            "shown again, the scene's maps are baked for what moved while it was unseen",
+            std::to_string(slot.sg->shadowBakes()) + " bakes, " + std::to_string(bakes) +
+                " before");
+    } else {
+      check(false, "the views find the other scene");
+    }
+  }
 
   // A new document takes the scenes down.
   rt.load(other.string());

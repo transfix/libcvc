@@ -10,7 +10,12 @@
 //   - the pixels: the [sim] view shows red and blue and no yellow where the main view has yellow;
 //   - closing a viewport's window hides its view, and opening it again shows it; hiding the UI
 //     hides every view;
-//   - a new document removes the last one's views.
+//   - a new document removes the last one's views;
+//   - a second document: an override's transform: moves, turns and scales a group's actors in the
+//     group's frame, mode: replace starts over from the node's own look, a `type: volume` node's
+//     opacity override draws a stand-in volume with its opacity scaled, and the volumes drawn for
+//     the main camera's eye: a view from its own camera draws a volslice node's slices swept for
+//     its camera, a `camera: main` view the node's own slices, and no view a volren node.
 // Skips (rc 0) where nothing rasterises, unless CVC_REQUIRE_RENDER=1.
 #include "streaming_test_util.h"
 
@@ -29,6 +34,8 @@
 #include <cvc/gl/ariadne/AriRuntime.h>
 #include <cvc/gl/ariadne/scene_views.h>
 #include <cvc/state/state.h>
+#include <cvc/volume/volume.h>
+#include <cvc/volume/volume_file_io.h>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -37,9 +44,14 @@
 #include <vtkCamera.h>
 #include <vtkCollection.h>
 #include <vtkMapper.h>
+#include <vtkMatrix4x4.h>
+#include <vtkPiecewiseFunction.h>
+#include <vtkPolyData.h>
 #include <vtkPropCollection.h>
 #include <vtkProperty.h>
 #include <vtkRenderer.h>
+#include <vtkVolume.h>
+#include <vtkVolumeProperty.h>
 #ifdef CVC_ENABLE_IMGUI
 #include <imgui.h>
 #endif
@@ -146,6 +158,57 @@ windows:
     id: plain
     children:
       - text: "No viewport here."
+)";
+
+// The looks document: overrides with a transform and mode: replace, and the three volume kinds in
+// a view with its own camera and one on the main camera. VOLFILE is a small ball volume.
+const char *kLooksDoc = R"(meta:
+  name: looks test
+  min_libcvc: 3.7.0
+
+windows:
+  - window: Looks
+    id: looks
+    pos: [20, 20]
+    size: [920, 300]
+    children:
+      - type: group
+        layout: { kind: grid, col_widths: [auto, auto, auto] }
+        children:
+          - type: viewport
+            view: moved
+            override:
+              "*": { opacity: 0.5 }
+              pack: { transform: { position: [0, 0, 4], scale: 2 } }
+              red: { mode: replace, material: { color: [0.2, 0.9, 0.2] } }
+              vol: { opacity: 0.25 }
+            shadows: false
+            width: 280
+            height: 210
+          - { type: viewport, view: other_eye, azimuth: 60, shadows: false, width: 280, height: 210 }
+          - { type: viewport, view: same_eye, camera: main, shadows: false, width: 280, height: 210 }
+
+scene:
+  chrome: false
+  nodes:
+    - { node: red, type: geometry, source: { box: { size: [1, 1, 1] } }, transform: { position: [-3, 0, 0] }, material: { color: [0.9, 0.1, 0.1] } }
+    - node: pack
+      type: group
+      transform: { position: [3, 0, 0] }
+      children:
+        - { node: crate, type: geometry, source: { box: { size: [1, 1, 1] } }, transform: { position: [1, 0, 0] } }
+    - { node: vol, type: volume, source: { file: VOLFILE } }
+    - node: slices
+      type: volslice
+      source: { file: VOLFILE }
+      transform: { position: [0, 3, 0] }
+    - node: raycast
+      type: volren
+      source: { file: VOLFILE }
+      transform: { position: [0, -3, 0] }
+      volren:
+        ambient: 0.5
+        isosurfaces: [ { value: 0.5, color: [1, 1, 1], opacity: 1.0 } ]
 )";
 
 bool has_prop(vtkRenderer *r, vtkProp *p) {
@@ -470,6 +533,156 @@ int main() {
   for (int f = 0; f < 3; ++f)
     rt.step(kDt);
   check(rt.views().size() == 6, "the views are back with the document");
+
+  // ── the looks document: transform:, mode: replace, volumes ───────────────────────────────────
+  {
+    const fs::path volPath = dir / "ball.rawiv";
+    {
+      const unsigned n = 24;
+      cvc::volume vol(app, cvc::dimension(n, n, n), cvc::Float,
+                      cvc::bounding_box(-1, -1, -1, 1, 1, 1));
+      for (unsigned k = 0; k < n; ++k)
+        for (unsigned j = 0; j < n; ++j)
+          for (unsigned i = 0; i < n; ++i) {
+            const double x = -1.0 + 2.0 * i / (n - 1), y = -1.0 + 2.0 * j / (n - 1),
+                         z = -1.0 + 2.0 * k / (n - 1);
+            const double r = std::sqrt(x * x + y * y + z * z);
+            vol(i, j, k, r >= 0.9 ? 0.0 : 1.0 - r / 0.9);
+          }
+      vol.min(0.0);
+      vol.max(1.0);
+      cvc::writeVolumeFile(app, vol, volPath.string());
+    }
+    std::string text = kLooksDoc;
+    for (std::size_t at; (at = text.find("VOLFILE")) != std::string::npos;)
+      text.replace(at, 7, volPath.generic_string());
+    const fs::path looks = dir / "looks.ari";
+    std::ofstream(looks) << text;
+    for (const std::string &w : rt.load(looks.string()))
+      std::printf("  (looks document: %s)\n", w.c_str());
+    for (int f = 0; f < 6; ++f)
+      rt.step(kDt);
+    check(vm.hasViewport("moved") && vm.hasViewport("other_eye") && vm.hasViewport("same_eye"),
+          "the looks document's views exist");
+    if (vm.hasViewport("moved") && vm.hasViewport("other_eye") && vm.hasViewport("same_eye")) {
+      vtkRenderer *moved = vm.viewport("moved").renderer();
+      vtkRenderer *other_eye = vm.viewport("other_eye").renderer();
+      vtkRenderer *same_eye = vm.viewport("same_eye").renderer();
+      auto stand_in = [](vtkRenderer *r, vtkProp *orig) -> vtkProp * {
+        vtkPropCollection *props = r->GetViewProps();
+        vtkCollectionSimpleIterator it;
+        props->InitTraversal(it);
+        while (vtkProp *p = props->GetNextProp(it)) {
+          if (p == orig)
+            continue;
+          auto *a = vtkActor::SafeDownCast(orig), *b = vtkActor::SafeDownCast(p);
+          if (a && b && b->GetMapper() == a->GetMapper())
+            return b;
+        }
+        return nullptr;
+      };
+      std::shared_ptr<cvc::gl::GraphicsNode> pack = sg.getGraphics("pack");
+      std::shared_ptr<cvc::gl::GraphicsNode> crate =
+          pack ? pack->findChildByName("crate") : nullptr;
+      vtkProp *crateA = crate ? crate->prop() : nullptr;
+      auto *crateTwin = vtkActor::SafeDownCast(stand_in(moved, crateA));
+      check(crateTwin != nullptr, "transform: the moved view draws a twin of the group's actor");
+      if (crateTwin) {
+        const double *b = crateTwin->GetBounds();
+        const double c[3] = {0.5 * (b[0] + b[1]), 0.5 * (b[2] + b[3]), 0.5 * (b[4] + b[5])};
+        // The crate sits 1 m along x in the pack (at x = 3); scaled 2x in the pack's frame and
+        // raised 4 m: its centre at (3 + 2, 0, 4), twice its size.
+        check(std::fabs(c[0] - 5.0) < 1e-6 && std::fabs(c[1]) < 1e-6 &&
+                  std::fabs(c[2] - 4.0) < 1e-6 && std::fabs((b[1] - b[0]) - 2.0) < 1e-6,
+              "transform: in the named group's frame (scaled about its origin, then moved)",
+              std::to_string(c[0]) + " " + std::to_string(c[1]) + " " + std::to_string(c[2]) +
+                  " size " + std::to_string(b[1] - b[0]));
+        check(std::fabs(crateTwin->GetProperty()->GetOpacity() - 0.5) < 1e-9,
+              "transform: the \"*\" entry's opacity still applies");
+        const double *ob = crateA->GetBounds();
+        check(std::fabs(0.5 * (ob[0] + ob[1]) - 4.0) < 1e-6 &&
+                  std::fabs(0.5 * (ob[4] + ob[5])) < 1e-6,
+              "transform: the main view's crate stays where it is");
+      }
+      vtkProp *redA = sg.getGraphics("red") ? sg.getGraphics("red")->prop() : nullptr;
+      auto *redTwin = vtkActor::SafeDownCast(stand_in(moved, redA));
+      if (redTwin) {
+        double c[3];
+        redTwin->GetProperty()->GetColor(c);
+        check(std::fabs(redTwin->GetProperty()->GetOpacity() - 1.0) < 1e-9 && c[1] > 0.8 &&
+                  c[0] < 0.3,
+              "mode: replace: the node's own opacity, not \"*\"'s, and the entry's colour "
+              "(material: spelling)");
+      } else {
+        check(false, "mode: replace: the moved view draws a twin of the red box");
+      }
+
+      // type: volume, opacity: a stand-in volume over a mapper of its own, its opacity scaled.
+      vtkProp *volA = sg.getGraphics("vol") ? sg.getGraphics("vol")->prop() : nullptr;
+      auto *volOrig = vtkVolume::SafeDownCast(volA);
+      vtkVolume *volTwin = nullptr;
+      {
+        vtkPropCollection *props = moved->GetViewProps();
+        vtkCollectionSimpleIterator it;
+        props->InitTraversal(it);
+        while (vtkProp *p = props->GetNextProp(it))
+          if (auto *v = vtkVolume::SafeDownCast(p))
+            if (v != volOrig)
+              volTwin = v;
+      }
+      check(volOrig && volTwin && !has_prop(moved, volOrig) &&
+                volTwin->GetMapper() != volOrig->GetMapper() &&
+                volTwin->GetProperty() != volOrig->GetProperty(),
+            "volume opacity: a stand-in with a mapper and property of its own");
+      if (volOrig && volTwin) {
+        vtkPiecewiseFunction *f = volOrig->GetProperty()->GetScalarOpacity();
+        vtkPiecewiseFunction *g = volTwin->GetProperty()->GetScalarOpacity();
+        bool scaled = f && g && f != g && f->GetSize() == g->GetSize() && f->GetSize() > 0;
+        double maxA = 0.0;
+        for (int i = 0; scaled && i < f->GetSize(); ++i) {
+          double a[4], b[4];
+          f->GetNodeValue(i, a);
+          g->GetNodeValue(i, b);
+          scaled = std::fabs(b[1] - 0.25 * a[1]) < 1e-9;
+          maxA = std::max(maxA, a[1]);
+        }
+        check(scaled && maxA > 0.0, "volume opacity: every opacity point scaled by the override");
+        check(has_prop(other_eye, volOrig), "a view without overrides draws the volume itself");
+      }
+
+      // The eye-bound volumes: volslice slices for the view's own camera, volren only from the main
+      // camera's eye.
+      vtkProp *slicesA = sg.getGraphics("slices") ? sg.getGraphics("slices")->prop() : nullptr;
+      vtkProp *raycastA = sg.getGraphics("raycast") ? sg.getGraphics("raycast")->prop() : nullptr;
+      check(slicesA && raycastA, "the volslice and volren nodes are realized");
+      vtkActor *ownSlices = nullptr;
+      {
+        vtkPropCollection *props = other_eye->GetViewProps();
+        vtkCollectionSimpleIterator it;
+        props->InitTraversal(it);
+        auto *sa = vtkActor::SafeDownCast(slicesA);
+        while (vtkProp *p = props->GetNextProp(it))
+          if (auto *a = vtkActor::SafeDownCast(p))
+            if (sa && a != sa && a->GetShaderProperty() == sa->GetShaderProperty() &&
+                a->GetMapper() != sa->GetMapper())
+              ownSlices = a;
+      }
+      vtkPolyData *own =
+          ownSlices ? vtkPolyData::SafeDownCast(ownSlices->GetMapper()->GetInputDataObject(0, 0))
+                    : nullptr;
+      check(!has_prop(other_eye, slicesA) && own && own->GetNumberOfPoints() > 0,
+            "own camera: the volslice node draws slices of its own, over its shaders",
+            own ? std::to_string(own->GetNumberOfPoints()) + " points" : "none");
+      check(!has_prop(other_eye, raycastA), "own camera: the volren node is left out");
+      check(has_prop(same_eye, slicesA) && !has_prop(same_eye, raycastA),
+            "camera: main: the volslice node drawn as the main view draws it; the volren node "
+            "(composited into the main view's pixels) in no view");
+    }
+    rt.load(doc.string()); // back to the main document for the teardown below
+    for (int f = 0; f < 3; ++f)
+      rt.step(kDt);
+  }
+
   view.close(); // ~AriRuntime runs after the return below, with the view closed
   return cvcgl_test::finish("cvcgl_ariadne_views");
 }
