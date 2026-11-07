@@ -14,6 +14,12 @@
 # The world: the data: block's city (Austin from cvcpkg.org by default; Run's URI loads another
 # package or a local bundle), a generated world (the World window; Python generates it from the
 # world.* keys and the scene's generated_world node draws the same world), or a flat square.
+#
+# Settings, World, Rasters, the coefficient plots and Run's world choice come from the package's
+# cars_panels.ari (cvc://cars_panels.ari: pycvc_gl.cars adds its directory to the component path).
+# To change one, put a window of your own in its place.
+
+import: cvc://cars_panels.ari
 
 meta:
   name: Cars (your controller)
@@ -72,24 +78,7 @@ windows:
     pos: [16, 30]
     size: [360, 380]
     children:
-      - combo: World
-        bind: run.world
-        options: [City (data block), Generated terrain, Flat square]
-        values: [data, generated, flat]
-        tooltip: "rebuilds the run"
-      - input_text: URI
-        bind: run.uri
-        visible_when: (= (state-get "run.world") "data")
-        tooltip: "cvcpkg://ORG/NAME, an https archive, or a local bundle directory (terrain.json + buildings.glb)"
-      - input_text: Path in package
-        bind: run.data_path
-        visible_when: (= (state-get "run.world") "data")
-      - button: Load the city
-        on: load_world
-        visible_when: (= (state-get "run.world") "data")
-      - text: "city"
-        bind: data.city.status
-        visible_when: (= (state-get "run.world") "data")
+      - include: cars_world_choice
       - combo: Vehicle
         bind: nav_plant.vehicle
         options: [Kinematic bicycle, Humvees (Jolt), RoboRacers (Jolt), Humvees and RoboRacers, Dynamic Humvees, Dynamic RoboRacers, Dynamic 4-wheel Humvees]
@@ -129,76 +118,9 @@ windows:
       - button: Reset
         on: reset
 
-  - window: Settings
-    id: settings
+  - include: cars_settings
     pos: [16, 422]
     size: [360, 330]
-    children:
-      - text: "navigator and vehicles: applied on the next tick"
-      - slider_float: Top speed (m/s)
-        bind: nav.vehicle.vmax
-        lo: 0.5
-        hi: 40
-        fmt: "%.1f"
-        tooltip: "nav.vehicle.vmax: the top speed; on a vehicle, the lower of this and its own"
-      - slider_float: Acceleration (m/s^2)
-        bind: nav.vehicle.a_max
-        lo: 0.5
-        hi: 15
-        fmt: "%.1f"
-        tooltip: "nav.vehicle.a_max: the acceleration and braking the navigator commands"
-      - slider_float: Cornering (m/s^2)
-        bind: nav.vehicle.a_lat_max
-        lo: 0.5
-        hi: 15
-        fmt: "%.1f"
-        tooltip: "nav.vehicle.a_lat_max: the sideways acceleration the corner speed limit allows"
-      - slider_float: Barrier range d_hat (m)
-        bind: nav.vehicle.d_hat
-        lo: 0.5
-        hi: 30
-        fmt: "%.1f"
-        tooltip: "nav.vehicle.d_hat: how far from a wall the barrier that pushes the vehicle away reaches"
-      - slider_float: Footprint radius (m)
-        bind: nav.vehicle.rr
-        lo: 0.1
-        hi: 5
-        fmt: "%.2f"
-        tooltip: "nav.vehicle.rr: the footprint disc the navigator keeps clear of walls"
-      - slider_float: Wall steering k_steer (rad)
-        bind: nav.vehicle.k_steer
-        lo: 0
-        hi: 2
-        fmt: "%.2f"
-      - slider_float: Bicycle wheelbase (m)
-        bind: nav.vehicle.wheelbase
-        lo: 0.2
-        hi: 8
-        fmt: "%.2f"
-        tooltip: "nav.vehicle.wheelbase: nav's bicycle (the kinematic plant); a vehicle has its own"
-      - slider_float: Steering lock (rad)
-        bind: nav.vehicle.delta_max
-        lo: 0.1
-        hi: 1
-        fmt: "%.3f"
-      - checkbox: Risk governor
-        bind: nav.vehicle.risk_governor
-      - slider_float: Arrival radius (m)
-        bind: nav.reach_tol
-        lo: 0.5
-        hi: 20
-        fmt: "%.1f"
-      - slider_float: Plant latency (s)
-        bind: nav_plant.latency
-        lo: 0
-        hi: 0.5
-        fmt: "%.2f"
-        tooltip: "nav_plant.latency: the response time the navigator's stopping limit allows for"
-      - slider_float: Brake margin
-        bind: nav_plant.brake_margin
-        lo: 0.3
-        hi: 1
-        fmt: "%.2f"
 
   - window: Controller
     id: controller
@@ -232,59 +154,9 @@ windows:
         hi: 8.0
         fmt: "%.1f"
 
-  - window: World
-    id: world
+  - include: cars_world
     pos: [388, 232]
     size: [340, 330]
-    visible_when: (= (state-get "run.world") "generated")
-    children:
-      - text: "libcvc's terrain generator: Regenerate rebuilds the world and the run"
-      - slider_int: Seed
-        bind: world.seed
-        commit: release
-        lo: 0
-        hi: 99999
-      - slider_float: World half (m)
-        bind: world.half
-        commit: release
-        lo: 150
-        hi: 3000
-        fmt: "%.0f"
-      - slider_float: Relief (m)
-        bind: world.amp
-        commit: release
-        lo: 2
-        hi: 400
-        fmt: "%.0f"
-      - slider_float: Water level (m)
-        bind: world.water_level
-        commit: release
-        lo: -100
-        hi: 100
-        fmt: "%.1f"
-      - slider_int: Buildings
-        bind: world.buildings
-        commit: release
-        lo: 0
-        hi: 600
-      - slider_int: Trees
-        bind: world.trees
-        commit: release
-        lo: 0
-        hi: 3000
-      - slider_int: Rocks
-        bind: world.rocks
-        commit: release
-        lo: 0
-        hi: 600
-      - combo: City
-        bind: world.city
-        options: [Districts (roads and buildings), None]
-        values: [districts, none]
-      - button: Regenerate
-        on: regenerate_world
-      - text: "status"
-        bind: world.status
 
   - window: Cars
     id: cars
@@ -314,26 +186,7 @@ windows:
       - plot: Closest gap between two cars (m)
         bind: plot.gap
         height: 44
-      - text: ""
-        bind: plot.coef0_name
-      - plot: coefficient 1
-        bind: plot.coef0
-        height: 36
-      - text: ""
-        bind: plot.coef1_name
-      - plot: coefficient 2
-        bind: plot.coef1
-        height: 36
-      - text: ""
-        bind: plot.coef2_name
-      - plot: coefficient 3
-        bind: plot.coef2
-        height: 36
-      - text: ""
-        bind: plot.coef3_name
-      - plot: coefficient 4
-        bind: plot.coef3
-        height: 36
+      - include: cars_coefficients
       - separator
       - type: group
         layout: { kind: grid, col_widths: [36, 64, 56, 64, 72, 80] }
@@ -361,28 +214,9 @@ windows:
           - text: ""
             bind: carrows.{i}.status
 
-  - window: Rasters
-    id: rasters
+  - include: cars_rasters
     pos: [740, 602]
     size: [420, 300]
-    children:
-      - text: "around the chosen car, heading up: distance to obstacles, its predicted path (yellow), goal (green), other cars (red)"
-      - type: group
-        layout: { kind: grid, col_widths: [200, 200] }
-        children:
-          - text: "signed distance"
-          - text: "your cost (navigator: its belief)"
-          - image: sdf
-            src: raster.sdf
-            size: 190
-          - image: cost
-            src: raster.cost
-            size: 190
-      - slider_float: Window (m)
-        bind: view.raster_m
-        lo: 5
-        hi: 300
-        fmt: "%.0f"
 
 scene:
   chrome: false

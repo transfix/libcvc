@@ -21,6 +21,13 @@ this module is everything under it:
 - :class:`CarsLog`: every tick's state and command, the rasters and the settings, to .npz or .csv.
 - :func:`run`: the Ariadne host the template calls (panels, sliders, callbacks, headless).
 
+A host of your own reuses the rest: the panels as units (``cars_panels.ari``, imported by
+``cvc://`` with :data:`COMPONENTS` as a component path), the flags and settings
+(:func:`add_args`, :func:`apply_settings`), the worlds (:func:`make_world`, :func:`show_world`),
+a state from cars stepped some other way (:func:`state_from`), the pictures and plots
+(:func:`raster_arrays`, :func:`raster_pictures`, :func:`plot_coefficients`) and the end of a run
+(:func:`save_log`, :func:`exit_code`). docs/CARS.md, "Your own host".
+
 Every navigator, vehicle and plant setting is a state-tree node the document can set in its
 ``init:``, bind to a slider, or that Python sets: libcvc's own keys, ``<prefix>.nav.*`` and
 ``<prefix>.nav.vehicle.*`` (``sim_world::pull``) and ``<prefix>.nav_plant.*`` (``plant_host``:
@@ -397,6 +404,48 @@ def collisions(world: World, x, y, heading, length, width, wheelbase):
     return out
 
 
+def state_from(world: World, x, y, heading, speed, goal, *, t=0.0, tick=0, dt=DT, steer=None,
+               vx=None, vy=None, reach=7.0, driving="", length=None, width=None, wheelbase=None,
+               max_steer=None, max_accel=None, max_decel=None, max_speed=None, rays=16,
+               range_m=60.0, nav=None) -> CarsState:  # fmt: skip
+    """A :class:`CarsState` for cars a host steps some other way (its own navigator, its own
+    simulator), so :class:`CarsLog`, :func:`raster_arrays` and the panels take them as they take
+    :class:`Cars`'. ``x``, ``y`` (the rear axle), ``heading``, ``speed`` are (n,) arrays and ``goal``
+    is (n, 2), in metres and radians; the ranges and contacts are worked out on ``world`` as
+    :class:`Cars` works them out. ``vx``, ``vy`` default to the speed along the heading, ``steer``
+    to 0. A size or limit is one number for every car or an (n,) array (default: nav's bicycle, the
+    Humvee preset's). ``nav`` is per-car telemetry, name -> (n,) array."""
+    x, y, heading, speed = (np.atleast_1d(np.asarray(a, float)).copy() for a in (x, y, heading, speed))
+    n = x.shape[0]
+    goal = np.asarray(goal, float).reshape(n, 2).copy()
+
+    def per_car(v, default):
+        return np.broadcast_to(np.asarray(default if v is None else v, float), (n,)).copy()
+
+    length = per_car(length, _BICYCLE["length"])
+    width = per_car(width, _BICYCLE["width"])
+    wheelbase = per_car(wheelbase, _BICYCLE["wheelbase"])
+    angles = np.linspace(-math.pi, math.pi, int(rays), endpoint=False)
+    d = goal - np.stack([x, y], 1)
+    dist = np.hypot(d[:, 0], d[:, 1])
+    return CarsState(
+        t=float(t), tick=int(tick), dt=float(dt), x=x, y=y, heading=heading, speed=speed,
+        steer=per_car(steer, 0.0),
+        vx=per_car(vx, speed * np.cos(heading)), vy=per_car(vy, speed * np.sin(heading)),
+        goal=goal, goal_dist=dist, reached=dist < reach,
+        ranges=ranges(world, x, y, heading, angles, range_m, 0.5 * float(np.mean(wheelbase))),
+        ray_angles=angles, range_max=float(range_m),
+        collided=collisions(world, x, y, heading, length, width, wheelbase),
+        length=length, width=width, wheelbase=wheelbase,
+        max_steer=per_car(max_steer, _BICYCLE["max_steer"]),
+        max_accel=per_car(max_accel, _BICYCLE["max_accel"]),
+        max_decel=per_car(max_decel, _BICYCLE["max_decel"]),
+        max_speed=per_car(max_speed, _BICYCLE["max_speed"]),
+        reach=float(reach), driving=str(driving), world=world.kind,
+        nav={k: np.asarray(v, float) for k, v in (nav or {}).items()},
+    )  # fmt: skip
+
+
 # ── the cars ───────────────────────────────────────────────────────────────────────────────────
 
 # nav's bicycle, when no plant gives a size: the Humvee preset's body and limits.
@@ -415,11 +464,13 @@ class Cars:
     ``nav_plant.vehicle`` switches the plant, the cars keeping their poses) and :meth:`publish`
     writes them back with what is measured. ``nav_weights`` is a ``.cvcnav`` policy for the
     navigator ("" = libcvc's built-in one), and ``scale`` the frame it was trained in (normalized
-    units per metre; nav's demos use 0.05). ``seed`` makes the starts and goals repeatable.
-    ``rays`` and ``range_m`` shape the range readings."""
+    units per metre; nav's demos use 0.05). ``seed`` makes the starts and goals repeatable;
+    ``starts`` and ``goals`` ((n, 2) world positions) set them instead, and the cars start facing
+    their goals. ``rays`` and ``range_m`` shape the range readings."""
 
     def __init__(self, world: World, n=6, vehicle="humvee", *, seed=0, navigator=False,
-                 nav_weights="", scale=SCALE, app=None, prefix="", rays=16, range_m=60.0):  # fmt: skip
+                 nav_weights="", scale=SCALE, app=None, prefix="", rays=16, range_m=60.0,
+                 starts=None, goals=None):  # fmt: skip
         _require()
         self.world, self.n = world, int(max(1, n))
         self.app, self.prefix = app, prefix
@@ -431,9 +482,15 @@ class Cars:
         self.vehicle0 = vehicle
         self._sizes(vehicle)
         self.reach = max(3.0, 1.5 * float(np.max(self.length)))
-        self.starts = world.free_points(self.rng, self.n, 0.8 * float(np.max(self.length)),
-                                        2.5 * float(np.max(self.length)))  # fmt: skip
-        self.goals = self._new_goals(self.starts)
+        if starts is not None:
+            self.starts = np.asarray(starts, float).reshape(self.n, 2).copy()
+        else:
+            self.starts = world.free_points(self.rng, self.n, 0.8 * float(np.max(self.length)),
+                                            2.5 * float(np.max(self.length)))  # fmt: skip
+        if goals is not None:
+            self.goals = np.asarray(goals, float).reshape(self.n, 2).copy()
+        else:
+            self.goals = self._new_goals(self.starts)
         self._build(vehicle)
         self.t, self.tick = 0.0, 0
         self.last_command = (np.zeros(self.n), np.zeros(self.n))
@@ -457,12 +514,14 @@ class Cars:
                 sizes.append({"length": 2 * hx, "width": 2 * hy, "wheelbase": front - rear,
                               "rear": hx + rear, "max_steer": float(d.max_steer),
                               "max_accel": float(d.max_accel), "max_decel": float(d.max_decel),
-                              "max_speed": float(d.max_speed)})  # fmt: skip
+                              "max_speed": float(d.max_speed), "preset": p})  # fmt: skip
             else:
-                sizes.append(dict(_BICYCLE))
+                sizes.append({**_BICYCLE, "preset": None})
         for k in ("length", "width", "wheelbase", "rear", "max_steer", "max_accel", "max_decel",
                   "max_speed"):  # fmt: skip
             setattr(self, k, np.array([s[k] for s in sizes], float))
+        #: Each car's vehicle preset (humvee, roboracer), or None on nav's bicycle (a Humvee's body).
+        self.preset = [s["preset"] for s in sizes]
 
     def _build(self, vehicle):
         w = self.world
@@ -694,6 +753,55 @@ def draw_path(img, pts, x, y, heading, size_m, color):
     return img
 
 
+def raster_arrays(world: World, s: CarsState, k: int, size_m: float, n=96, *, belief=None,
+                  cost=None) -> dict:  # fmt: skip
+    """Car ``k``'s surroundings, heading up (:func:`local_grid`), as the log keeps them: ``sdf``
+    (float32, m) and ``occ`` (uint8); with ``belief`` (an occupancy grid on ``world``'s cells, as an
+    agent believes it: nonzero blocked, or a float probability of blocked for an agent that has
+    not seen everything) also ``belief`` sampled there (uint8, or float32 for a probability); with
+    ``cost`` (``cost(X, Y) ->
+    array``, world coordinates) also ``cost`` (float32)."""
+    loc = local_raster(world, s.x[k], s.y[k], s.heading[k], size_m, n)
+    out = {"sdf": loc["sdf"].astype(np.float32), "occ": loc["occ"].astype(np.uint8)}
+    X, Y = local_grid(s.x[k], s.y[k], s.heading[k], size_m, n)
+    if belief is not None:
+        r, c = world.cells(X, Y)
+        b = np.asarray(belief)[r, c]
+        out["belief"] = b.astype(np.float32) if b.dtype.kind == "f" else (b != 0).astype(np.uint8)
+    if cost is not None:
+        out["cost"] = np.asarray(cost(X, Y), np.float32)
+    return out
+
+
+def raster_pictures(r: dict, s: CarsState, k: int, size_m: float, *, path=None) -> dict:
+    """:func:`raster_arrays`' rasters as the cars_rasters panel's pictures: ``raster.sdf``, the
+    signed distance with car ``k``'s ``path`` ((m, 2) world points, yellow), its goal (green) and
+    the other cars (red), and ``raster.cost``, the cost (or else the belief) when there is one."""
+    img = colorize(np.clip(r["sdf"], -2.0, 0.25 * size_m), occ=r["occ"])
+    if path is not None:
+        draw_path(img, path, s.x[k], s.y[k], s.heading[k], size_m, (250, 200, 40))
+    for j in range(s.n):
+        if j != k:
+            draw_path(img, [s.pos[j]], s.x[k], s.y[k], s.heading[k], size_m, (230, 90, 70))
+    draw_path(img, [s.goal[k]], s.x[k], s.y[k], s.heading[k], size_m, (90, 230, 120))
+    out = {"raster.sdf": img}
+    if "cost" in r:
+        out["raster.cost"] = colorize(r["cost"], occ=r["occ"])
+    elif "belief" in r:
+        out["raster.cost"] = colorize(r["belief"].astype(float), 0, 1)
+    return out
+
+
+def chosen(host, n: int) -> int:
+    """The chosen car (``view.car``), held to the cars there are."""
+    return min(max(0, host.get_int("view.car", 0)), int(n) - 1)
+
+
+def raster_size(host, length: float) -> float:
+    """The pictures' width (m): ``view.raster_m``, else twelve car lengths."""
+    return host.get_float("view.raster_m", 0.0) or 12.0 * float(length)
+
+
 # ── settings ───────────────────────────────────────────────────────────────────────────────────
 
 
@@ -814,6 +922,12 @@ COLORS = [(0.90, 0.33, 0.20), (0.18, 0.55, 0.90), (0.95, 0.75, 0.15), (0.35, 0.7
 
 HERE = Path(__file__).resolve().parent
 
+#: The directory holding cars_panels.ari, the template's panels as units: a host passes it as a
+#: component path (``Host(component_paths=[COMPONENTS])``) and its document imports
+#: ``cvc://cars_panels.ari`` and includes them (cars_settings, cars_world, cars_world_choice,
+#: cars_coefficients, cars_rasters).
+COMPONENTS = str(HERE)
+
 
 def template_files() -> tuple[Path, Path]:
     """The template's two files in this package: cars_template.py and cars.ari."""
@@ -883,6 +997,31 @@ def _car_mesh(length, width, height):
                    _box(-0.6 * hl, -0.85 * hw, 0.25 * hl, 0.85 * hw, 0.55 * height, height)])  # fmt: skip
 
 
+def add_args(p):
+    """Add the flags :func:`run` shares with any host built on these pieces to the
+    ``argparse`` parser ``p``: ``--world``, ``--uri``, ``--data-path`` (the world), ``--set``,
+    ``--params`` (settings, :func:`apply_settings`), ``--log``, ``--raster-every`` and
+    ``--min-arrivals`` (the headless run, :func:`save_log` and :func:`exit_code`)."""
+    p.add_argument(
+        "--world", choices=WORLDS, default=None, help="data (default), generated or flat"
+    )
+    p.add_argument("--uri", default=None,
+                   help="the data world: a cvcpkg://ORG/NAME package, an https archive or a local "
+                        "bundle directory (default: the document's data: block)")  # fmt: skip
+    p.add_argument(
+        "--data-path", default=None, help="the part of the package to keep (a cvcpkg uri)"
+    )
+    p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
+                   help="a state-tree setting, relative to the document (nav.vehicle.vmax=12, "
+                        "world.seed=3, ctl.gain=2); repeatable")  # fmt: skip
+    p.add_argument("--params", default=None, help="a JSON file of settings, {key: value}")
+    p.add_argument("--log", default=None, help="write every tick (.npz, or .csv + .npz)")
+    p.add_argument("--raster-every", type=int, default=10, help="log the rasters every N ticks")
+    p.add_argument("--min-arrivals", type=int, default=None,
+                   help="exit 3 when fewer goals were reached (for scripted experiments)")  # fmt: skip
+    return p
+
+
 def _parse(argv, doc_default):
     from pycvc_gl.ariadne import main_args
 
@@ -894,35 +1033,67 @@ def _parse(argv, doc_default):
     p.add_argument("--vehicle", default=None,
                    help="the plant: kinematic, humvee, roboracer, a comma list, dynamic[:presets] "
                         "(sets nav_plant.vehicle)")  # fmt: skip
-    p.add_argument(
-        "--world", choices=WORLDS, default=None, help="data (default), generated or flat"
-    )
-    p.add_argument("--uri", default=None,
-                   help="the data world: a cvcpkg://ORG/NAME package, an https archive or a local "
-                        "bundle directory (default: the document's data: block)")  # fmt: skip
-    p.add_argument(
-        "--data-path", default=None, help="the part of the package to keep (a cvcpkg uri)"
-    )
+    add_args(p)
     p.add_argument("--controller", choices=("yours", "navigator"), default=None)
     p.add_argument("--nav-weights", default="", help="a .cvcnav policy for the navigator")
     p.add_argument("--nav-scale", type=float, default=SCALE,
                    help="the navigator's normalized units per metre: the frame its policy was "
                         "trained in (default 0.05)")  # fmt: skip
     p.add_argument("--seed", type=int, default=0, help="the starts and goals")
-    p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
-                   help="a state-tree setting, relative to the document (nav.vehicle.vmax=12, "
-                        "world.seed=3, ctl.gain=2); repeatable")  # fmt: skip
-    p.add_argument("--params", default=None, help="a JSON file of settings, {key: value}")
-    p.add_argument("--log", default=None, help="write every tick (.npz, or .csv + .npz)")
-    p.add_argument("--raster-every", type=int, default=10, help="log the rasters every N ticks")
-    p.add_argument("--min-arrivals", type=int, default=None,
-                   help="exit 3 when fewer goals were reached (for scripted experiments)")  # fmt: skip
     p.add_argument("--doc", default=doc_default, help=argparse.SUPPRESS)
     ns = p.parse_args(host_ns.rest)
     for k, v in vars(host_ns).items():
         if k != "rest":
             setattr(ns, k, v)
     return ns
+
+
+def apply_settings(host, args, flags=None) -> dict:
+    """Set what :func:`add_args`' flags ask for over the document's ``init:``: the ``--params``
+    file's keys, then each ``--set``, then ``flags`` ({key: value}; a None value is skipped), and
+    ``--world`` (``run.world``). Then ``--uri`` points the document's ``data.city`` at that world
+    (``--data-path`` the part of it to keep). Keys are relative to the document. Returns the keys
+    set."""
+    overrides = {}
+    if getattr(args, "params", None):
+        overrides.update(json.loads(Path(args.params).read_text()))
+    for kv in getattr(args, "set", None) or []:
+        k, _, v = kv.partition("=")
+        overrides[k.strip()] = v.strip()
+    for key, value in (flags or {}).items():
+        if value is not None:
+            overrides[key] = value
+    if getattr(args, "world", None) is not None:
+        overrides["run.world"] = args.world
+    for k, v in overrides.items():
+        host.set(k, v)
+    if getattr(args, "uri", None):
+        host.set("run.data_path", args.data_path or "")
+        load_data_world(host, args.uri, args.data_path)
+    return overrides
+
+
+def save_log(log, host, path, **meta) -> str:
+    """Save ``log`` to ``path`` with every setting (:func:`settings`: ``nav.*``, ``nav_plant.*``)
+    and the generator's ``world.*`` keys in its meta, and ``meta`` besides. Returns the path."""
+    log.meta["settings"] = {d["path"]: d["value"] for d in settings(host.app, host.prefix)}
+    log.meta["world_keys"] = {k: host.get(f"world.{k}") for k in WORLD_KEYS}
+    log.meta.update(meta)
+    return log.save(path)
+
+
+def exit_code(code=0, *, error=None, arrivals=0, min_arrivals=None, who="cars") -> int:
+    """The run's exit code: 1 when it stopped on an ``error`` (a controller or world that failed),
+    3 when ``min_arrivals`` was asked for and fewer goals were reached, else ``code`` (the
+    document's)."""
+    if error:
+        print(f"{who}: stopped: {error}", file=sys.stderr)
+        return 1
+    if min_arrivals is not None and arrivals < min_arrivals:
+        print(f"{who}: {arrivals} arrivals, fewer than --min-arrivals {min_arrivals}",
+              file=sys.stderr)  # fmt: skip
+        return 3
+    return code
 
 
 def run(controller, params: dict, *, cost=None, doc=None, argv=None) -> int:
@@ -943,29 +1114,17 @@ def run(controller, params: dict, *, cost=None, doc=None, argv=None) -> int:
     args = _parse(argv, doc)
     from pycvc_gl.ariadne import Host
 
-    host = Host(mode=args.mode, name="cars", width=args.width, height=args.height)
+    host = Host(mode=args.mode, name="cars", width=args.width, height=args.height,
+                component_paths=[COMPONENTS])
     pycvc.data_allow_network(host.app, ["https://cvcpkg.org"])
     host.load(args.doc)
     pre = host.prefix
     # The settings: the document's init:, then a params file, then --set, then the flags.
-    overrides = {}
-    if args.params:
-        overrides.update(json.loads(Path(args.params).read_text()))
-    for kv in args.set:
-        k, _, v = kv.partition("=")
-        overrides[k.strip()] = v.strip()
-    for flag, key in ((args.cars, "run.cars"), (args.vehicle, "nav_plant.vehicle"),
-                      (args.world, "run.world"), (args.controller, "run.controller")):  # fmt: skip
-        if flag is not None:
-            overrides[key] = flag
     for k, v in PARAMS_DEFAULTS(params).items():
         if host.get(f"ctl.{k}") in (None, ""):
             host.set(f"ctl.{k}", v)
-    for k, v in overrides.items():
-        host.set(k, v)
-    if args.uri:
-        host.set("run.data_path", args.data_path or "")
-        load_data_world(host, args.uri, args.data_path)
+    apply_settings(host, args, {"run.cars": args.cars, "nav_plant.vehicle": args.vehicle,
+                                "run.controller": args.controller})  # fmt: skip
 
     drawn = host.mode != "headless"
     log = CarsLog() if args.log else None
@@ -1084,30 +1243,18 @@ def run(controller, params: dict, *, cost=None, doc=None, argv=None) -> int:
     cars = st["cars"]
     s = cars.state()
     if log is not None:
-        log.meta["settings"] = {d["path"]: d["value"] for d in settings(host.app, pre)}
-        log.meta["ctl"] = {k: host.get(f"ctl.{k}") for k in PARAMS_DEFAULTS(params)}
-        log.meta["run"] = {
-            k: host.get(f"run.{k}") for k in ("cars", "world", "controller", "ticks", "regoal")
-        }
-        log.meta["world_keys"] = {k: host.get(f"world.{k}") for k in WORLD_KEYS}
-        log.meta.update(
-            arrivals=cars.arrivals, collisions=int(cars.collisions.sum()), error=st["error"]
-        )
-        print(f"cars: {len(log)} ticks to {log.save(args.log)}")
+        path = save_log(
+            log, host, args.log,
+            ctl={k: host.get(f"ctl.{k}") for k in PARAMS_DEFAULTS(params)},
+            run={k: host.get(f"run.{k}") for k in ("cars", "world", "controller", "ticks", "regoal")},
+            arrivals=cars.arrivals, collisions=int(cars.collisions.sum()), error=st["error"],
+        )  # fmt: skip
+        print(f"cars: {len(log)} ticks to {path}")
     print(f"cars: {s.driving} on {s.world}, {s.n} cars, {s.t:.1f} s: {cars.arrivals} arrivals, "
           f"{int(cars.collisions.sum())} car-ticks touching")  # fmt: skip
     code = host.exit_code()
     host.close()
-    if st["error"]:
-        print(f"cars: stopped: {st['error']}", file=sys.stderr)
-        return 1
-    if args.min_arrivals is not None and cars.arrivals < args.min_arrivals:
-        print(
-            f"cars: {cars.arrivals} arrivals, fewer than --min-arrivals {args.min_arrivals}",
-            file=sys.stderr,
-        )
-        return 3
-    return code
+    return exit_code(code, error=st["error"], arrivals=cars.arrivals, min_arrivals=args.min_arrivals)
 
 
 def PARAMS_DEFAULTS(params):  # noqa: N802 - reads as the constant it returns
@@ -1132,12 +1279,14 @@ def load_data_world(host, uri, path=None):
     host.set("run.uri", str(uri))
 
 
-def make_world(host, kind) -> World:
-    """The world ``kind`` names, from the document: its data.city, its world.* keys, or flat."""
+def make_world(host, kind, cell=None) -> World:
+    """The world ``kind`` names, from the document: its data.city, its world.* keys, or flat.
+    ``cell`` is the grid's cell (m; default: 2 m for a city, the generator's world over 600)."""
     if kind == "data":
         load_data_world(host, host.get("run.uri") or AUSTIN, host.get("run.data_path") or None)
         return world_from_data(
-            host.app, f"{host.prefix}.data.city", half=host.get_float("run.crop", 600.0) or None
+            host.app, f"{host.prefix}.data.city", half=host.get_float("run.crop", 600.0) or None,
+            cell=cell or 2.0,
         )
     if kind == "generated":
         params = {}
@@ -1146,7 +1295,7 @@ def make_world(host, kind) -> World:
             if v in (None, ""):
                 continue
             params[k] = v if k in ("terrain", "city", "terrain_file") else float(v)
-        return world_from_generated(generate(params))
+        return world_from_generated(generate(params), cell=cell)
     return flat_world(4.84)
 
 
@@ -1196,22 +1345,91 @@ def draw_world(host, st):
     st["camera"] = None
 
 
+_HUMVEE = {"path": None, "dir": None, "models": {}}
+
+
+def humvee_model_path(host):
+    """A local path to the Humvee's glTF model (``Humvee.glb``), or None while there is none:
+    an installed ``vehicle-humvee`` package's, else the document's city package's (the Austin
+    package carries it). With another world in use, the Austin package's copy is asked for once
+    as the document's ``data.vehicles`` (from the data cache after the first download); it is
+    read from there when it has loaded. Written once to a temporary directory."""
+    if _HUMVEE["path"]:
+        return _HUMVEE["path"]
+    try:
+        from pycvc_gl.scenes import find_vehicle_model
+
+        _HUMVEE["path"] = find_vehicle_model()
+    except Exception:  # noqa: BLE001 - none installed: the packages', or boxes
+        pass
+    if _HUMVEE["path"] or not hasattr(pycvc, "data_file"):
+        return _HUMVEE["path"]
+    for name in ("city", "vehicles"):
+        path = f"{host.prefix}.data.{name}"
+        if pycvc.data_status(host.app, path) != "ready":
+            continue
+        data = pycvc.data_file(host.app, path, "Humvee.glb")
+        if data:
+            import tempfile
+
+            _HUMVEE["dir"] = _HUMVEE["dir"] or tempfile.TemporaryDirectory(prefix="pycvc-gl-cars-")
+            out = os.path.join(_HUMVEE["dir"].name, "Humvee.glb")
+            with open(out, "wb") as f:
+                f.write(data)
+            _HUMVEE["path"] = out
+            return out
+    if not pycvc.data_status(host.app, f"{host.prefix}.data.vehicles"):
+        pycvc.data_load(host.app, AUSTIN, path=AUSTIN_PATH, decoder="files", name="vehicles",
+                        prefix=host.prefix)  # fmt: skip
+    return None
+
+
+def humvee_model(host, length):
+    """The Humvee's model at ``length`` m (a ``pycvc_gl.vehicle.VehicleModel``), or None."""
+    path = humvee_model_path(host)
+    if not path:
+        return None
+    key = round(float(length), 3)
+    if key not in _HUMVEE["models"]:
+        try:
+            from pycvc_gl.vehicle import VehicleModel
+
+            _HUMVEE["models"][key] = VehicleModel(path, float(length))
+        except Exception as e:  # noqa: BLE001 - say why once, then draw boxes
+            print(f"cars: the Humvee model did not load ({e}); boxes instead", file=sys.stderr)
+            _HUMVEE["models"][key] = None
+    return _HUMVEE["models"][key]
+
+
 def draw_cars(host, st):
+    """Each car: the Humvee's model for a Humvee (or nav's bicycle, which has a Humvee's body),
+    with a tag in the car's colour above it; a box its size for another preset. Its goal post."""
     cars = st["cars"]
     for name in st["nodes"]:
         if host.scene.hasGraphics(name):
             host.scene.removeGraphics(name)
     st["nodes"], st["tracks"] = [], [[] for _ in range(cars.n)]
     u = float(np.max(cars.length))
+    modeled = []
     for i in range(cars.n):
         col = COLORS[i % len(COLORS)]
-        host.lab.add_mesh(
-            f"car_{i}", *_car_mesh(cars.length[i], cars.width[i], 0.4 * cars.length[i]), color=col
-        )
+        preset = cars.preset[i] if i < len(getattr(cars, "preset", [])) else None
+        model = humvee_model(host, cars.length[i]) if preset in (None, "humvee") else None
+        if model is not None:
+            model.add(host.scene, f"car_{i}", col)
+            host.lab.add_mesh(f"tag_{i}", *_box(-0.35, -0.35, 0.35, 0.35, 0.0, 0.5), color=col)
+            st["nodes"].append(f"tag_{i}")
+        else:
+            host.lab.add_mesh(
+                f"car_{i}", *_car_mesh(cars.length[i], cars.width[i], 0.4 * cars.length[i]),
+                color=col,
+            )  # fmt: skip
+        modeled.append(model is not None)
         host.lab.add_mesh(
             f"goal_{i}", *_box(-0.08 * u, -0.08 * u, 0.08 * u, 0.08 * u, 0, 2 * u), color=col
         )
         st["nodes"] += [f"car_{i}", f"goal_{i}"]
+    st["modeled"] = modeled
 
 
 def update_scene(host, cars, st):
@@ -1221,10 +1439,12 @@ def update_scene(host, cars, st):
     s, w = cars.state(), cars.world
     sampler = None if w.height is None else w.z
     if (
-        s.n * 2 != len(st["nodes"])
+        len(st.get("modeled", [])) != s.n
         or len(st.get("sized", [])) != s.n
         or st.get("sized") != list(cars.length)
-    ):
+        or (not all(st["modeled"]) and host.frame_count % 30 == 0 and humvee_model_path(host)
+            and any(p in (None, "humvee") for p in cars.preset))  # the model has come since
+    ):  # fmt: skip
         draw_cars(host, st)
         st["sized"] = list(cars.length)
     c = s.center
@@ -1232,6 +1452,10 @@ def update_scene(host, cars, st):
         host.scene.getGraphics(f"car_{i}").setTransform(
             seat_transform(c[i, 0], c[i, 1], s.heading[i], sampler)
         )
+        if st["modeled"][i]:
+            host.scene.getGraphics(f"tag_{i}").setTransform(
+                seat_transform(c[i, 0], c[i, 1], s.heading[i], sampler, lift=2.3)
+            )
         gx, gy = s.goal[i]
         host.scene.getGraphics(f"goal_{i}").setTransform(
             [1, 0, 0, gx, 0, 1, 0, gy, 0, 0, 1, w.z(gx, gy), 0, 0, 0, 1]
@@ -1275,18 +1499,14 @@ def rasters(cars, s, p, controller, cost, host, st, for_log=False):
     """The chosen car's pictures: its surroundings' signed distance with the controller's predicted
     path, and the controller's cost (or, under the navigator, its belief) there. As arrays for the
     log, and as pictures for the panels."""
-    k = min(max(0, host.get_int("view.car", 0)), s.n - 1)
-    size = host.get_float("view.raster_m", 0.0) or 12.0 * float(np.max(cars.length))
-    n = 96
-    loc = local_raster(cars.world, s.x[k], s.y[k], s.heading[k], size, n)
-    out = {"sdf": loc["sdf"].astype(np.float32), "occ": loc["occ"].astype(np.uint8)}
-    X, Y = local_grid(s.x[k], s.y[k], s.heading[k], size, n)
-    if cars.navigator:
-        b = np.asarray(pycvc.nav_sim_world_belief_occ(cars.sim, 0))
-        r, c = cars.world.cells(X, Y)
-        out["belief"] = b[r, c].astype(np.uint8)
-    elif cost is not None:
-        out["cost"] = np.asarray(cost(s, p, k, X, Y), np.float32)
+    k = chosen(host, s.n)
+    size = raster_size(host, np.max(cars.length))
+    belief = np.asarray(pycvc.nav_sim_world_belief_occ(cars.sim, 0)) if cars.navigator else None
+    field = None
+    if not cars.navigator and cost is not None:
+        def field(X, Y):  # noqa: E306 - the controller's cost around car k
+            return cost(s, p, k, X, Y)
+    out = raster_arrays(cars.world, s, k, size, belief=belief, cost=field)
     if for_log and not cars.navigator:  # every car's predicted path: (n, k, 2)
         horizon = max(2, int((host.get_float("view.horizon", 3.0) or 3.0) / DT))
         out["plan"] = rollout(controller, s, p, cars.world, steps=horizon, every=2).astype(
@@ -1305,44 +1525,40 @@ def show_rasters(host, cars, controller, cost, st, params):
         st["paths"] = None
     if host.mode == "headless" or host.frame_count % 4 != 0:
         return
-    k = min(max(0, host.get_int("view.car", 0)), s.n - 1)
-    size = host.get_float("view.raster_m", 0.0) or 12.0 * float(np.max(cars.length))
+    k = chosen(host, s.n)
     r = rasters(cars, s, p, controller, cost, host, st)
-    img = colorize(np.clip(r["sdf"], -2.0, 0.25 * size), occ=r["occ"])
-    if st["paths"] is not None:
-        draw_path(img, st["paths"][k], s.x[k], s.y[k], s.heading[k], size, (250, 200, 40))
-    for j in range(s.n):
-        if j != k:
-            draw_path(img, [s.pos[j]], s.x[k], s.y[k], s.heading[k], size, (230, 90, 70))
-    draw_path(img, [s.goal[k]], s.x[k], s.y[k], s.heading[k], size, (90, 230, 120))
-    host.publish_image("raster.sdf", img)
-    if "cost" in r:
-        host.publish_image("raster.cost", colorize(r["cost"], occ=r["occ"]))
-    elif "belief" in r:
-        host.publish_image("raster.cost", colorize(r["belief"].astype(float), 0, 1))
+    path = None if st["paths"] is None else st["paths"][k]
+    for name, img in raster_pictures(r, s, k, raster_size(host, np.max(cars.length)), path=path).items():
+        host.publish_image(name, img)
+
+
+def plot_coefficients(host, history: dict, coeffs: dict, k: int):
+    """Car ``k``'s first four ``coeffs`` (name -> (n,) array) as the cars_coefficients panel's
+    plots: each name's last 240 values, kept in ``history`` (a dict the caller holds), at
+    ``plot.coef<j>`` with the name at ``plot.coef<j>_name``; unused plots get an empty name."""
+    names = list(coeffs)[:4]
+    for j in range(4):
+        if j < len(names):
+            series = history.setdefault(names[j], [])
+            series.append(float(np.asarray(coeffs[names[j]], float).reshape(-1)[k]))
+            del series[:-240]
+            host.set(f"plot.coef{j}_name", names[j])
+            host.set_series(f"plot.coef{j}", series)
+        else:
+            host.set(f"plot.coef{j}_name", "")
 
 
 def publish(host, cars, st):
     """The readouts: the run's numbers, a row per car, and the plots."""
     s = cars.state()
-    k = min(max(0, host.get_int("view.car", 0)), s.n - 1)
+    k = chosen(host, s.n)
     st["speed"] = (st["speed"] + [float(s.speed[k])])[-240:]
     if s.n > 1:
         d = np.hypot(s.x[:, None] - s.x[None, :], s.y[:, None] - s.y[None, :]) + np.eye(s.n) * 1e9
         st["gap"] = (st["gap"] + [float(d.min())])[-240:]
     host.set_series("plot.speed", st["speed"])
     host.set_series("plot.gap", st["gap"])
-    coeffs = st.get("coef_now") or {}
-    names = list(coeffs)[:4]
-    for j in range(4):
-        if j < len(names):
-            series = st["coef"].setdefault(names[j], [])
-            series.append(float(np.asarray(coeffs[names[j]]).reshape(-1)[k]))
-            del series[:-240]
-            host.set(f"plot.coef{j}_name", names[j])
-            host.set_series(f"plot.coef{j}", series)
-        else:
-            host.set(f"plot.coef{j}_name", "")
+    plot_coefficients(host, st["coef"], st.get("coef_now") or {}, k)
     host.set_many({"time": f"{s.t:.1f}", "plant": s.driving, "world": s.world,
                    "arrived": f"{int(s.reached.sum())} / {s.n}", "arrivals": cars.arrivals,
                    "touching": int(cars.collisions.sum()),
