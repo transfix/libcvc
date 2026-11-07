@@ -358,7 +358,8 @@ TEST(ServerDocumentTest, TheRelayTokenHoldsOnlyOnTheRelay) {
   TempDir dir;
   const std::string path = dir.write("relay.ari", R"(meta: { name: relay, min_libcvc: 3.7.5 }
 requires: [relay]
-init: (if (has? "relay") (state-set "on_relay" "yes") #f)
+init: |
+  (if (has? "relay") (state-set "on_relay" "yes") #f)
 )");
   cvc::app app;
   ari::ServerDocument doc(app, kRoom);

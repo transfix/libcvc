@@ -219,7 +219,9 @@ int main(int argc, char **argv) {
   //                              and reads the room through `room` (read-only). Its server: block's
   //                              publish: list names the namespaces every client is sent; only the
   //                              document writes them, so it needs --bind-writes on. (quit [code])
-  //                              stops the relay with that exit status. Unset: no document
+  //                              stops the relay with that exit status; requires: [relay] holds
+  //                              only there. --set is applied before the seeds and the document
+  //                              (WD0 in ARIADNE_WORLDS.md moves it last). Unset: no document
   const char *s7_env = std::getenv("CVC_ARISRV_S7");
   const char *aoi_env = std::getenv("CVC_ARISRV_AOI");
   // CVC_ARISRV_S7: 0/off or 1/on (unset: on).
@@ -789,8 +791,9 @@ int main(int argc, char **argv) {
     published.enabled = aoi_relay != nullptr;
     cvc::ariadne::conference::write_aoi_params(app, room, published);
   }
-  // The server document, now that the room is up: its init: runs here, and its other programs on
-  // the room steps below. A load that fails stops the relay before it serves a step.
+  // The server document, now that the room is up: its init: runs here, after --set and the seeds
+  // (so it can extend or override the seeded room), and its other programs on the room steps
+  // below. A load that fails stops the relay before it serves a step.
   bool docFailed = false;
   if (serverDoc) {
     serverDoc->runtime().set_warning_listener([](const std::string &w) {

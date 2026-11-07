@@ -35,9 +35,13 @@
 // - What reaches through a hole. Reads, state-set, state-set-tree and the atomics do; state-delete
 //   and state-watch act on the physical path (ARIADNE.md §7.4). Remove published entries by
 //   rewriting their parent with state-set-tree.
-// - The clock. Each step(tick, seconds) publishes the relay's world clock (the avatar holon's) to
-//   the document at sim.tick and sim.time, the keys a scene's clock: publishes in a window, so its
+// - The clock. A relay calls step(tick, seconds) once per room step, the room rules' cadence. It
+//   publishes the relay's world clock (the avatar holon's, 120 Hz, never backwards) to the
+//   document at sim.tick and sim.time, the keys a scene's clock: publishes in a window, so its
 //   programs count world ticks, not steps.
+// - requires: [relay] holds in this runtime only (Runtime::set_relay_document).
+// - Several, later. Each instance is one room's runtime under its own prefix, so a relay with
+//   many rooms can build one each.
 // - The scene. The relay neither draws a scene: nor simulates its physics yet. The document's
 //   parsed scene is kept here (scene()) for the world runtime that will run it as the holon's one
 //   physics world (ARIADNE_WORLDS.md §14), and its load says so.

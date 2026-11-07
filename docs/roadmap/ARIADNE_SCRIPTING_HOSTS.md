@@ -673,17 +673,30 @@ server.ari` runs a headless `AppRuntime` (no backend, like #985's `AriApp`) on t
 for room rules, bots and checks written in the DSL
 ([`server_document.h`](../../inc/cvc/ariadne/server_document.h)).
 
-- arisrv reads the document's `server:` block before it listens, and loads the document once the
-  room is seeded. `on_tick:` runs every room step (60 Hz), on the relay's loop, ahead of the
-  avatar holon. Each step first writes the holon's world-clock tick and time to the document's
-  `sim.tick` and `sim.time`.
-- A `scene:` is not run yet. Its parse, physics and bodies included, is kept on the runtime for
-  the world runtime that will make it the holon's one physics world (ARIADNE_WORLDS.md §14), and
-  the load warns that its physics is not simulated.
-- The document binds under `ui.docs.arisrv`, which the relay never sends, and reads the room
-  through a read-only hole, `room` (`conf.rooms.<room>`).
+- **Startup order.** arisrv reads the document's `server:` block before it binds its ports. It
+  then applies `--set`, seeds the room, and loads the document, whose `init:` runs then. `--set`
+  stays before both the seeds and the document; the worlds plan's WD0 moves it last.
+- **Its cadence and clock.** `on_tick:` runs once per room step (60 Hz), on the relay's loop, ahead
+  of the avatar holon, under the DSL's caps. Its writes go out at the end of that step.
+  - It is the room rules' cadence, not a per-world-tick controller: worlds Q3 keeps DSL programs
+    off per-tick control until their cost at 120 Hz is measured.
+  - Each step first writes the holon's world clock to the document's `sim.tick` and `sim.time`.
+    `sim.tick` is the current world tick (120 Hz, about 2 per step, never backwards), so a later
+    activation tick is simply a future `sim.tick`.
+- **The world.** This runtime is the one that will run the world headless. A `scene:` is not run
+  yet: its parse, physics and bodies included, is kept on the runtime for the world runtime to
+  attach to, as the holon's one physics world (ARIADNE_WORLDS.md §14, L0, then WD2). The load
+  warns that its physics is not simulated.
+- **Its state.** The document binds under `ui.docs.arisrv`, which the relay never sends (worlds
+  Q2). It reads the room through a read-only hole, `room` (`conf.rooms.<room>`).
+- **One per room, later.** `ServerDocument(app, room, prefix)` builds a runtime for one room under
+  its own prefix, so a relay with many rooms (worlds RM1, RM2) can build one each. arisrv
+  serves one room today.
+- **`requires: [relay]`** holds only in a server document, and elsewhere names `arisrv --doc`. It
+  is outside the `server.*` feature tokens and `conference.world`, which can build on it.
 - `(quit [code])` stops the relay with that exit status.
-- Not in S0: reloading a changed document, `--net`, and `on_signal:` for arisrv's own signals.
+- Not in S0: reloading a changed document (the holes are re-planted idempotently, so a reload can
+  be added), `--net`, and `on_signal:` for arisrv's own signals.
 
 That belongs in the stock arisrv, because the DSL is already sandboxed: step and time caps, the
 chroot, and bound writes.
@@ -886,7 +899,8 @@ server:
 **As built in S0** (transfix/libcvc#1046):
 
 - **Names.** A namespace is a dotted path of identifiers. It may not be under `conf`, `ui`,
-  `ariadne`, `state_exec` or `room`, and no two may overlap.
+  `ariadne`, `state_exec` or `room`, no two may overlap, and none may overlap the document's own
+  prefix.
 - **The document writes through holes.** Each namespace is a writable transparent link of the
   same name in the document's chroot, so `(state-set "cyprov.status" "up")` writes the tree's
   `cyprov.status`. `state-set-tree` now follows a writable link on every hop, as `state-set`
@@ -896,6 +910,17 @@ server:
   (`state_cluster_shard::add_publish_prefix`): `conf` plus the published namespaces, for live
   writes, backfill and every snapshot. The area of interest subscribes each participant to the
   same prefixes. The server document's own state never leaves the relay.
+  - This is where S0 departs from the text above. A namespace is not added to the shard's
+    *ingest* interest: the relay never needs to take a client's write there, and bound writes
+    refuse one before ingest would.
+- **One write path for both kinds of relay-written state.** The holes, and the scope behind them,
+  carry (a) the application namespaces outside `conf`, and later (b) the world sections inside
+  `conf.rooms.<room>.*`, which are already in the scope. WD1 points the same mechanism at (b).
+  Nothing makes "every room's sections are relay-written" an invariant of the write gate:
+  private rooms (worlds §13) will have a member's client as the authority.
+- **Order.** Writes leave in the order a program makes them. A section's fields, then its `rev`
+  last, arrive in that order, and a test pins it. So the revisioned-section pattern works by
+  hand in the DSL today. WD1's writer, in core for L0 to share, is sugar over it.
 - **First writes replicate.** The sync adapter used to miss the first write to a fresh node (its
   `valueChanged` fired before the adapter attached to it). That is why C++ writers `touch()` first
   and tests "set twice". A DSL program can do neither, so the adapter now journals what it finds
@@ -1513,7 +1538,7 @@ for it.
 | N1 | `ariglx` on Windows and macOS | pycvc packages for those platforms | M |
 | D1 | GRL-SNAM in the browser: torch-free inference, a demo page | W1 | M |
 | D2 | VolRover gap audit, then VolRover as an Ariadne app | P2 | L |
-| S0 | **Done** (transfix/libcvc#1046). Server documents in stock arisrv (`--doc`), plus the `server: publish:` namespaces (§6.1, §6.5.3): `ServerDocument`, the shard's outbound scope, the area of interest subscribed to it, the read-only `room` hole, the holon's world clock at `sim.tick`, the parsed `scene:` kept for the world runtime (with a warning that it is not simulated), `(quit)` as arisrv's exit status, `state-set-tree` through writable links on every hop, and first writes to fresh nodes journaled. Tests: `ServerBlockTest`, `ServerDocumentTest`, `StatePublishScopeTest`, `RoomRelayLoopbackTest.ServerDocumentPublishesItsNamespaceOnly`, the `arisrv_doc_*` ctests and `ari_server_block_ignored` | — | M |
+| S0 | **Done** (transfix/libcvc#1046). Server documents in stock arisrv (`--doc`), plus the `server: publish:` namespaces (§6.1, §6.5.3): `ServerDocument`, the shard's outbound scope, the area of interest subscribed to it, the read-only `room` hole, the holon's world clock at `sim.tick`, the parsed `scene:` kept for the world runtime (with a warning that it is not simulated), `requires: [relay]`, `(quit)` as arisrv's exit status, `state-set-tree` through writable links on every hop, and first writes to fresh nodes journaled. Tests: `ServerBlockTest`, `ServerDocumentTest`, `StatePublishScopeTest`, `RoomRelayLoopbackTest.ServerDocumentPublishesItsNamespaceOnly`, the rev-before-fields order, the `arisrv_doc_*` ctests, `ari_server_block_ignored` and `ari_server_document_needs_relay` | — | M |
 | S1 | `arisrvx`: the engine on a script thread with an asyncio loop, operator Python (§6.5.1); `serve_asgi` / `--http-listen`, lifespan and graceful shutdown (§6.5.2); `arisrvx check`; the `arisrvx` recipe | S0, P1 | M |
 | S2 | `room-call`: functions clients may call, with `ctx` (principal, progress, idempotency key, deadline), role gates and `CallError` (§6.5.5); the `relay:` block and `--relay` join mode in `ari` and the `x` hosts, and transport security for native clients (§6.5.7) | S1 | M |
 | S3 | Client DSL programs | S0 | S |
