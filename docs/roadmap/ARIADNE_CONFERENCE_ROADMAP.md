@@ -376,7 +376,9 @@ The conference is not just floating video windows: it is a **shared 3D space** t
 
 * **Scene tree.** `conf.rooms.<room>.scene.*` (server-owned, replicates on the existing `"conf"` shard
   scope). The server seeds `scene.env` (background, ground, lights) and `scene.objects.<id>`
-  (`source` URI + `transform` + `material`). Clients render it via a `scene:` block in the conference
+  (`source` URI + `transform` + `material`). Since WD1 it publishes them from a world document,
+  look included: the light rig, its knobs and the shadows (`cvc://worlds/default.ari`, or a `--doc`
+  with a `scene:`; [ARIADNE_WORLDS.md](ARIADNE_WORLDS.md)). Clients render it via a `scene:` block in the conference
   `.ari` fed from that subtree — likely a small custom scene node type (the `agents`/`count:` pattern in
   §3 and the example scenes), since the live tree, not the document, is the source of truth.
 * **Avatars.** Each participant writes its own `participants.<pid>.pose` (`pos`, `orient`) — e.g. derived
@@ -668,10 +670,10 @@ search), because the admit snapshot already carries every relay-local leaf.
   keeps primitives only). Builds run on one `async_lane` (deferred to one per frame on single-threaded
   wasm), one per distinct mesh, capped at 2M triangles threaded and 60k single-threaded — so the deployed
   single-threaded cyprty keeps the 69,473-triangle bunny at rung 0 and logs the refusal once.
-* **`--scene large`**: a 100 m plane, the reference box, and 24 `x.bunny` meshes on a 5×5 lattice 20 m
-  apart (the centre cell, which holds the box and the spawn ring, is skipped), each fitted ~1.7 m tall
-  by new `source.fit.{height, up_y}` scene leaves (a fit, not a transform scale, so LOD errors are in
-  metres); one pyramid serves all 24.
+* **`--scene large`** (`cvc://worlds/large.ari` since WD1): a 100 m plane, the reference box, and
+  24 `x.bunny` meshes on a 5×5 lattice 20 m apart (the centre cell, which holds the box and the
+  spawn ring, is skipped), each fitted ~1.7 m tall by new `source.fit.{height, up_y}` scene leaves
+  (a fit, not a transform scale, so LOD errors are in metres); one pyramid serves all 24.
 
 **Switches.** In the library every relay mechanism is **opt-in and off by default** (no filter or gate
 until one is installed, `set_relay_requires_interest(false)`, backfill on and no trim,
@@ -688,7 +690,7 @@ false)` is the old drain-and-publish exactly); arisrv and arigl turn them on.
 | `--media-stall-ms N` | 40 | gRPC stall drop; 0 = off |
 | `--media-delay-ms N` | 100 | gRPC delay drop (video past N ms of queue, poses 2N, audio 4N); 0 = off. Not an S7 switch |
 | `--admission-hold-ms N` | 2000 (only with an AOI) | hold a joiner's bootstrap for its filter, at most N ms; 0 = off (the admit snapshot goes out unfiltered, before Hello) |
-| `--scene default\|large` | default | the seeded scene; not an S7 switch (honoured under `--s7 off`) |
+| `--scene default\|large` | default | the room's world, `cvc://worlds/<name>.ari` (a `--doc` with a `scene:` is the world instead, WD1); not an S7 switch (honoured under `--s7 off`) |
 | `--bind-writes on\|off` | on | bound writes (below): each client writes only its own participant, as itself; off takes any client's writes. Not an S7 switch |
 | `--room-token-file PATH` / `CVC_ARISRV_ROOM_TOKEN` | unset (an open room) | admit only clients that present the room token (§5f). Not an S7 switch |
 | `--device-pins PATH` | unset (pins in memory) | keep the device-key pins in PATH, so they outlive a restart (§5f). Device keys are always checked. Not an S7 switch |
@@ -1087,7 +1089,8 @@ The plan is [`ARIADNE_WORLDS.md`](ARIADNE_WORLDS.md). It covers:
 - phases WD0–WD9.
 
 The owner settled Q1 on 2026-11-07: the light rig lives in the server's world document, not in the
-client's. The other decisions are open.
+client's. The other decisions are open. WD0 and WD1 are built: the relay seeds each room from a
+world document, and the conference document has no `scene:` block.
 
 ---
 

@@ -38,9 +38,13 @@ namespace conference {
 //   conf.rooms.<room>.scene.rev                          bumped by every scene write
 //   conf.rooms.<room>.scene.env.background.{gradient, top.{r,g,b}, bottom.{r,g,b}}
 //   conf.rooms.<room>.scene.env.chrome                   the SceneGraph diagnostic chrome (1/0)
-//   conf.rooms.<room>.scene.env.shadows.{enabled, resolution}   real-time shadow maps
+//   conf.rooms.<room>.scene.env.shadows.{enabled, resolution, interval}   real-time shadow maps
 //   conf.rooms.<room>.scene.env.lights.<id>.{present, kind, rig, azimuth, elevation, intensity,
 //                                            cone, color.{r,g,b}, pos.{x,y,z}, target.{x,y,z}}
+//   conf.rooms.<room>.scene.env.lights.<id>.{stage.{center.{x,y,z}, radius}, key.{intensity,
+//                                            azimuth, elevation, cone}, fill, back, warmth,
+//                                            environment, ambient, wash.{intensity, count,
+//                                            height}}   a rig's knobs; empty = the preset's
 //   conf.rooms.<room>.scene.objects.<id>.{present, source.{uri, primitive, plane_size,
 //                                         box.{x,y,z}, radius}, transform.{pos,rot,scale}.{x,y,z},
 //                                         material.{color.{r,g,b}, ambient, diffuse, specular,
@@ -73,8 +77,11 @@ struct room_scene_env {
   // client keeps whatever its document set (the conference document turns them on).
   bool shadows = false;
   int shadow_resolution = 2048;
-  // Each light's explicit fields (kind, pos, target, cone, azimuth, elevation, intensity, color)
-  // or a bare rig: preset name. Rig tuning knobs (stage/key/fill/...) are not replicated.
+  // Frames between re-bakes (shadows: { update_interval }); 1 = every frame.
+  int shadow_interval = 1;
+  // Each light's explicit fields (kind, pos, target, cone, azimuth, elevation, intensity, color),
+  // or a rig: preset with the tuning knobs it sets (stage, key, fill, back, warmth, environment,
+  // ambient, wash). An unset knob keeps the preset's value, as in a document.
   std::vector<cvc::ariadne::SceneLight> lights;
 };
 
@@ -109,8 +116,8 @@ cvc::ariadne::Scene read_room_scene(cvc::app &app, const std::string &room_id);
 
 // The MVP environment the server seeds a room with (§5g "ground + grid + a reference object"): a
 // gradient background, the diagnostic chrome off, a 20 m ground plane and a 1 m reference box
-// standing on it at the origin. Z is up, as in every .ari scene. No lights and no shadows: the
-// room's look is the client document's (conference_roster.ari declares its light rig + shadows).
+// standing on it at the origin. Z is up, as in every .ari scene. No lights and no shadows: those
+// are the world's (default_world() adds the stock rig).
 room_scene_env default_scene_env();
 std::vector<cvc::ariadne::SceneNode> default_scene_objects();
 
@@ -134,6 +141,50 @@ std::vector<cvc::ariadne::SceneNode> large_demo_scene_objects(double side_m = 10
 // with the default one (idempotent; true if it seeded).
 bool seed_large_demo_scene(cvc::app &app, const std::string &room_id, double side_m = 100.0,
                            int grid = 5);
+
+// ----------------
+// Worlds (ARIADNE_WORLDS.md WD1)
+// ----------------
+// A room's world comes from a world document: arisrv --doc world.ari when the document has a
+// scene:, else the stock world --scene names, cvc://worlds/default.ari or large.ari. The relay
+// publishes what the room's wire carries of that scene, look included: the light rig and shadows
+// are the world's (Q1), so every client draws the room under the rig the relay sends.
+
+// A whole room scene: its environment and its objects.
+struct room_world {
+  room_scene_env env;
+  std::vector<cvc::ariadne::SceneNode> objects;
+};
+
+// Write a whole scene in one revision: the environment, every object, a soft removal for each
+// object present before but absent from WORLD, then scene.rev, once and last. Writing the same
+// world again changes nothing but rev. Throws std::invalid_argument on a bad id.
+void write_room_world(cvc::app &app, const std::string &room_id, const room_world &world);
+
+// What the room's wire carries of a document's scene:. The environment: the background (when the
+// scene sets one), the chrome (off unless the scene turns it on), the shadows and the lights,
+// rigs and their knobs included. The objects: each top-level geometry node with a plane, box or
+// sphere source, or a mesh by URI and its fit:, with its transform and plain material. The rest
+// is left out, each with a warning in WARNINGS: other node types and sources, children,
+// textures, shaders, a fit: up x or flip:, a visible: bind, shadow softness and focus. A body is
+// published as a static, as room_statics builds every object (server-dynamic entities are WD3's),
+// with a warning for one that is not static, and a physics: block is not simulated (the headless
+// world runtime is ARIADNE_WORLDS.md §14's L0). A light or node without an id gets light_<i> /
+// node_<i>.
+room_world room_world_from_scene(const cvc::ariadne::Scene &scene,
+                                 std::vector<std::string> *warnings = nullptr);
+
+// The rig the stock worlds are lit by, as conference_roster.ari declared it before WD1: a
+// three_point rig staged over the 20 m floor whose key spot casts the shadows, with fill, back,
+// warmth and environment.
+cvc::ariadne::SceneLight default_room_rig();
+
+// The C++ twins of cvc://worlds/default.ari and cvc://worlds/large.ari: default_scene_objects()
+// and large_demo_scene_objects() under default_scene_env(), lit by default_room_rig() with 2048 px
+// shadows re-baked every frame. A relay that cannot find its world file seeds the twin, and a
+// test pins each twin equal to its document.
+room_world default_world();
+room_world large_world(double side_m = 100.0, int grid = 5);
 
 } // namespace conference
 } // namespace ariadne

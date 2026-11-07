@@ -103,8 +103,30 @@ if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
                    "-DARGS=--doc@@${_srv_tests}/echo_server.ari@@--bind-writes@@off@@${_srv_listen}"
                    -DSTATUS=2 "-DEXPECT1=publishes namespaces, which needs bound writes"
                    -P "${_srv_tests}/run_arisrv.cmake")
+  # The room's world (ARIADNE_WORLDS.md WD1): a --doc with a scene: is it, published before init:
+  # runs; --scene and such a --doc both naming it stop arisrv; and --set comes after the stock
+  # world (WD0), which the relay finds as cvc://worlds/default.ari in this source tree.
+  add_test(NAME arisrv_world_from_doc
+           COMMAND ${CMAKE_COMMAND} -DARISRV=$<TARGET_FILE:arisrv>
+                   "-DARGS=--doc@@${_srv_tests}/world_doc.ari@@${_srv_listen}" -DSTATUS=0
+                   "-DEXPECT1=world: [^\n]*world_doc\\.ari for room 'ctest': 2 objects, 1 light, shadows on"
+                   -P "${_srv_tests}/run_arisrv.cmake")
+  add_test(NAME arisrv_world_doc_and_scene
+           COMMAND ${CMAKE_COMMAND} -DARISRV=$<TARGET_FILE:arisrv>
+                   "-DARGS=--doc@@${_srv_tests}/world_doc.ari@@--scene@@large@@${_srv_listen}"
+                   -DSTATUS=2 "-DEXPECT1=both name the room's world"
+                   -P "${_srv_tests}/run_arisrv.cmake")
+  add_test(NAME arisrv_set_after_world
+           COMMAND ${CMAKE_COMMAND} -DARISRV=$<TARGET_FILE:arisrv>
+                   "-DARGS=--doc@@${_srv_tests}/set_after_world.ari@@--set@@conf.rooms.ctest.scene.rev=7@@--set@@conf.rooms.ctest.scene.objects.ref.transform.pos.z=2@@${_srv_listen}"
+                   -DSTATUS=0
+                   "-DEXPECT1=world: cvc://worlds/default\\.ari for room 'ctest': 2 objects, 1 light, shadows on"
+                   -P "${_srv_tests}/run_arisrv.cmake")
+  set_tests_properties(arisrv_set_after_world PROPERTIES
+                       ENVIRONMENT "CVC_ARIADNE_PATH=${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne")
   set_tests_properties(arisrv_doc_echo arisrv_doc_quit_code arisrv_doc_publish_conf
-                       arisrv_doc_needs_bound_writes PROPERTIES
+                       arisrv_doc_needs_bound_writes arisrv_world_from_doc arisrv_world_doc_and_scene
+                       arisrv_set_after_world PROPERTIES
                        SKIP_REGULAR_EXPRESSION "built without yaml-cpp" TIMEOUT 90)
   # A host that is not the relay ignores a server: block, and says so; a document that requires
   # the relay does not run there, and the error says where it does.

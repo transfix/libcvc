@@ -1,0 +1,19 @@
+# A server document that is also the room's world (ARIADNE_WORLDS.md WD1), for arisrv's ctest: the
+# relay publishes its scene: into conf.rooms.<room>.scene before init: runs, so init: reads it back
+# through `room` and stops the relay with (quit 0), or with 4 when it isn't there.
+meta: { name: arisrv world document, min_libcvc: 3.7.12 }
+requires: [relay]
+scene:
+  lights:
+    - { light: lamp, kind: directional, azimuth: 30, elevation: 50, intensity: 0.9 }
+  shadows: { enabled: true, resolution: 1024 }
+  nodes:
+    - node: floor
+      source: { plane: { size: 12 } }
+    - node: crate
+      source: { box: { size: [0.6, 0.6, 0.6] } }
+      transform: { position: [2, 0, 0.3] }
+init: |
+  (quit (if (and (= (state-get "room.scene.objects.crate.present") "1")
+                 (= (state-get "room.scene.env.lights.lamp.present") "1"))
+            0 4))

@@ -42,7 +42,9 @@
 // - requires: [relay] holds in this runtime only (Runtime::set_relay_document).
 // - Several, later. Each instance is one room's runtime under its own prefix, so a relay with
 //   many rooms can build one each.
-// - The scene. The relay neither draws a scene: nor simulates its physics yet. The document's
+// - The scene. A document whose scene: has nodes or lights is the room's world: the relay
+//   publishes it into conf.rooms.<room>.scene (conference::room_world_from_scene,
+//   ARIADNE_WORLDS.md WD1), after read() and before load(). Its physics is not simulated yet: the
 //   parsed scene is kept here (scene()) for the world runtime that will run it as the holon's one
 //   physics world (ARIADNE_WORLDS.md §14), and its load says so.
 #pragma once
@@ -114,7 +116,8 @@ public:
   bool should_close() const { return rt_.should_close(); }
   int exit_code() const { return rt_.exit_code(); }
 
-  // The last load's scene: block, as parsed: nodes, bodies and physics: (see the note above).
+  // The scene: block as read() and then each load() parsed it: nodes, bodies and physics: (see
+  // the note above).
   const Scene &scene() const { return scene_; }
 
   AppRuntime &runtime() { return rt_; }

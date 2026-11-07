@@ -3135,15 +3135,16 @@ on_tick: |
 ```
 
 - **When it runs.** In this order:
-  1. arisrv reads the `server:` block, before anything else that could fail late.
+  1. arisrv reads the `server:` block and chooses the room's world (below), before anything else
+     that could fail late.
   2. It binds its ports, as it always has.
-  3. It applies `--set`.
-  4. It seeds the scene, the avatar catalog and the policy.
+  3. It publishes the world, in one revision, and seeds the avatar catalog and the policy.
+  4. It applies `--set`.
   5. It loads the document, which runs its `init:`.
 
-  `--set` comes before both the seeds and the document. The worlds plan's WD0 moves it last, as
-  the operator's override. A client that connects before the document has loaded still gets
-  `init:`'s writes, live.
+  `--set` comes after the world and the policies, so it overrides them (the worlds plan's WD0),
+  and before the document, so its `ariadne.limits.*` bound `init:` too. A client that connects
+  before the document has loaded still gets `init:`'s writes, live.
 - **Every room step** (60 a second), `on_tick:` and the other residents run, ahead of the avatar
   holon. What they write goes out at the end of that step, which §6.5 of the roadmap calls "the
   next relay tick".
@@ -3185,11 +3186,26 @@ on_tick: |
 - **Stopping.** `(quit [code])` stops the relay with that exit status. A document that fails to
   load stops it with 1. One arisrv cannot read, or a bad `server:` block, stops it with 2 before
   it listens.
-- **A `scene:`** is neither drawn nor simulated on the relay yet. Its parse, the physics and bodies
-  included, is kept on the runtime (`ServerDocument::scene()`). This runtime is the one the world
-  runtime will run the world in, headless, as the holon's one physics world
-  ([roadmap/ARIADNE_WORLDS.md](roadmap/ARIADNE_WORLDS.md) §14). Until then the load warns that the
-  physics is not simulated.
+- **A `scene:` with nodes or lights is the room's world** ([roadmap/ARIADNE_WORLDS.md](roadmap/ARIADNE_WORLDS.md)
+  WD1). The relay publishes it into `conf.rooms.<room>.scene` before `init:` runs, and every
+  client builds the room from that, look included: the light rig, its tuning knobs and the shadows
+  are the world's, not the client document's.
+  - **What the room carries:** the background, the chrome, the shadows (resolution and
+    `update_interval`), every light and rig, and each top-level geometry node with a plane, box or
+    sphere source or a mesh by URI (with its `fit:`), its transform and its plain material.
+  - **What it leaves out**, with a warning at start-up: other node types and sources (a
+    heightfield, a volume, a custom node), children, textures, shaders, a `fit:` with `up: x` or
+    `flip`, and a `visible:` bind.
+  - **Bodies and `physics:`.** A body is published as a static, since the holon builds its statics
+    from the published objects; a server-dynamic one waits for WD3, with a warning. The parse,
+    `physics:` and bodies included, is kept on the runtime (`ServerDocument::scene()`). This
+    runtime is the one the world runtime will run the world in, headless, as the holon's one
+    physics world (§14 of the same roadmap). Until then the load warns that the physics is not
+    simulated.
+  - **Without one**, the room's world is the stock world `--scene` names: `cvc://worlds/default.ari`
+    (the 20 m room) or `cvc://worlds/large.ari`. `--scene` and a `--doc` with a `scene:` both
+    naming it stop arisrv with 2. A stock world opens in arigl too (`arigl
+    cvc://worlds/default.ari`), to see the room without a relay.
 - **Other hosts** ignore a `server:` block, with a warning.
 - **Not yet:** a reload when the file changes, the network (`--net`), `on_signal:` for arisrv's
   own SIGTERM, and Python (`arisrvx`, S1).
