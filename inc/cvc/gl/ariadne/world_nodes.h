@@ -41,7 +41,8 @@
 // plazas), its cvc::height_field published to RealizedScene::height_fields under the node's id, so
 // `ground: <id>` (forest_trees, cloud_sky, shadows.focus) stands on it. Beside it, top-level nodes
 // <id>_props, _buildings, _roads, _foliage, _needles (merged meshes) and _water (the depth volume
-// under a travelling wave, refilled every `water_stride` frames). A change to a world.* key
+// under a travelling wave, refilled every `water_stride` frames). They follow the node's
+// visibility: a `visible:` on the node hides or shows the whole world. A change to a world.* key
 // regenerates the world in place; a change of world.color only repaints the texture.
 //
 // `look: soft` is demo3's daylight materials (matte ground and concrete); `classic` is

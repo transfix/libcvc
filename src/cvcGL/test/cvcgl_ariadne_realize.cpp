@@ -1428,6 +1428,38 @@ int main() {
         st(cvc::ariadne::resolve_bind("gw", "world.status")).value<std::string>();
     chk(status.rfind("error:", 0) == 0 && ground_n() == pts1,
         "an unknown terrain generator keeps the world and reports the error");
+    // A `visible:` on the node hides the whole world: the ground's chunks (its children) at once,
+    // and the meshes and the water beside it at the next tick; showing it brings all of it back.
+    {
+      const char *parts[] = {"world_props",     "world_foliage", "world_needles",
+                             "world_buildings", "world_roads",   "world_water"};
+      auto drawn_rungs = [&](const char *under) {
+        int n = 0;
+        for (const auto &c : ladders_under(under))
+          for (int k = 0; k < c->rungCount(); ++k)
+            if (vtkProp *p = c->rung(k)->prop())
+              n += p->GetVisibility();
+        return n;
+      };
+      auto parts_shown = [&](bool want) {
+        bool ok = true;
+        for (const char *p : parts)
+          if (auto g = sg.getGraphics(p))
+            ok = ok && g->isVisible() == want;
+        return ok;
+      };
+      cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+      chk(drawn_rungs("world") > 0 && parts_shown(true), "shown, the whole world draws");
+      terrain->setVisible(false);
+      chk(drawn_rungs("world") == 0, "hiding the node hides its ground's chunks at once");
+      cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+      chk(parts_shown(false) && drawn_rungs("world_props") == 0,
+          "and, at the next tick, the meshes, the trees and the water beside it");
+      terrain->setVisible(true);
+      cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
+      chk(drawn_rungs("world") > 0 && parts_shown(true) && drawn_rungs("world_props") > 0,
+          "showing the node brings the whole world back");
+    }
   }
 
   // ── a generated terrain as a geometry source (source: { terrain: {...} }) ─────────────────
