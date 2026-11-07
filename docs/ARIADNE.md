@@ -832,7 +832,10 @@ seam. The chunks share the node's one texture and take its `casts_shadow`, `shad
 rather than lie on it (`cvc::world::road_grade`): each is level across, climbs at most 12% (5% into
 a junction), changes grade gradually and stays above the water, with the ground cut or banked to
 it, so a vehicle drives them without bouncing; every street is two Humvee lanes wide, drawn as
-smooth strips with a dark yellow centre stripe.
+smooth strips with a dark yellow centre stripe. The water is a surface per terrain chunk with any
+under it (`<id>_water`), level at the water line and hidden by the terrain past the shoreline, on
+its chunk's LOD rung, coloured by the depth under it (`cvc::world::water_colour`: the bed absorbed
+red first, so the shallows read sandy, then green, then deep blue); `water: 0` leaves it out.
 
 **The fast render path.** A big static world draws fast when it is a few merged meshes and its
 shadow maps are re-baked rarely and spent where the camera looks. These keys say so

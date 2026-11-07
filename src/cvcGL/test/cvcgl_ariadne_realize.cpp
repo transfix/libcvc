@@ -1226,8 +1226,20 @@ int main() {
     chk(sg.getGraphics("world_props") != nullptr && sg.getGraphics("world_buildings") != nullptr &&
             sg.getGraphics("world_foliage") != nullptr,
         "generated_world added its merged props / buildings / foliage meshes beside it");
-    chk(std::dynamic_pointer_cast<cvc::gl::VolumeNode>(sg.getGraphics("world_water")) != nullptr,
-        "generated_world added the water volume");
+    {
+      // The water: a surface ladder per wet chunk under world_water, on its chunk's rungs, opaque,
+      // casting no shadow, coloured by depth.
+      int wet = 0;
+      bool styled = true;
+      if (auto g = sg.getGraphics("world_water"))
+        for (const auto &c : g->getGraphicsChildren())
+          if (auto l = std::dynamic_pointer_cast<cvc::gl::LodGraphicsNode>(c)) {
+            ++wet;
+            styled = styled && l->rungCount() == 5 && !l->rung(0)->castsShadow();
+          }
+      chk(wet > 0 && styled,
+          "generated_world drew its water as surface ladders on the chunk rungs");
+    }
     chk(realized.height_fields.count("world") == 1,
         "generated_world published its ground (ground: world stands on it)");
     auto &st = cvc::state::instance(app);
@@ -1276,6 +1288,23 @@ int main() {
       view.render();
       cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
       chk(rungs().first > 0, "5 km off, every chunk draws a coarser rung");
+      {
+        // Each chunk's water is on its chunk's rung.
+        bool same = true;
+        int seen = 0;
+        if (auto wg = sg.getGraphics("world_water"))
+          for (const auto &c : wg->getGraphicsChildren()) {
+            auto wl = std::dynamic_pointer_cast<cvc::gl::LodGraphicsNode>(c);
+            auto tl = std::dynamic_pointer_cast<cvc::gl::LodGraphicsNode>(
+                sg.getGraphics("world") ? sg.getGraphics("world")->findChildByName(c->getName())
+                                        : nullptr);
+            if (wl && tl) {
+              ++seen;
+              same = same && wl->activeRung() == tl->activeRung();
+            }
+          }
+        chk(seen > 0 && same, "every chunk's water switches rung with its ground");
+      }
       view.setCamera(0, -300, 200, 0, 0, 0, 0, 0, 1, 40.0);
       view.render();
       cvc::gl::ariadne::tick_scene(realized, view.renderer(), 0.0);
