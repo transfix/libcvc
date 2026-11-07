@@ -1356,14 +1356,36 @@ long tree_number(cvc::app &a, const std::string &path) {
   return std::strtol(tree_value(a, path).c_str(), nullptr, 10);
 }
 
+// What one client sees of echo as each frame lands, on its transport's reader thread: every
+// echo.board.rev, with the fields that client holds by then, and echo.tick's steps. A snapshot
+// entry (the admit snapshot, a re-broadcast) counts as a frame like a live mutation.
+struct echo_watch {
+  void on_applied(cvc::app &app, const cvc::state_mutation &m) {
+    if (m.op != cvc::state_mutation_op::set_value)
+      return;
+    std::lock_guard<std::mutex> lk(mu);
+    if (m.path == "echo.board.rev") {
+      const long rev = std::strtol(m.string_value.c_str(), nullptr, 10);
+      ++revs;
+      if (tree_number(app, "echo.board.a") < rev || tree_number(app, "echo.board.b") < rev)
+        ++fields_behind;
+    } else if (m.path == "echo.tick") {
+      const long t = std::strtol(m.string_value.c_str(), nullptr, 10);
+      if (t < last_tick)
+        ++ticks_back;
+      last_tick = t;
+    }
+  }
+  std::mutex mu;
+  long revs = 0, fields_behind = 0, ticks_back = 0, last_tick = 0;
+};
+
 TEST(RoomRelayLoopbackTest, ServerDocumentPublishesItsNamespaceOnly) {
   if (!cvc::ariadne::AppRuntime::have_yaml())
     GTEST_SKIP() << "built without yaml-cpp";
-  // What A sees as each frame lands (its transport's reader thread): every echo.board.rev, with
-  // the fields A holds by then, and echo.tick's steps. Declared before the clients, so they
-  // outlive A's callback.
-  std::mutex seen_mu;
-  long revs_seen = 0, fields_behind = 0, ticks_back = 0, last_tick = 0;
+  // What A and the late joiner L see of echo. Declared before the clients, so they outlive the
+  // clients' callbacks.
+  echo_watch seen_a, seen_l;
   relay_options o;
   o.doc = kEchoServerDoc;
   test_relay r(o);
@@ -1381,20 +1403,7 @@ TEST(RoomRelayLoopbackTest, ServerDocumentPublishesItsNamespaceOnly) {
   W.shard->add_interest(""); // everything it is sent
   A.shard->adapter().set_on_remote_applied([&](const cvc::state_mutation &m) {
     A.tap.on_applied(m);
-    if (m.op != cvc::state_mutation_op::set_value)
-      return;
-    std::lock_guard<std::mutex> lk(seen_mu);
-    if (m.path == "echo.board.rev") {
-      const long rev = std::strtol(m.string_value.c_str(), nullptr, 10);
-      ++revs_seen;
-      if (tree_number(A.app, "echo.board.a") < rev || tree_number(A.app, "echo.board.b") < rev)
-        ++fields_behind;
-    } else if (m.path == "echo.tick") {
-      const long t = std::strtol(m.string_value.c_str(), nullptr, 10);
-      if (t < last_tick)
-        ++ticks_back;
-      last_tick = t;
-    }
+    seen_a.on_applied(A.app, m);
   });
   ASSERT_NO_FATAL_FAILURE(bring_up(r, cs));
 
@@ -1407,11 +1416,11 @@ TEST(RoomRelayLoopbackTest, ServerDocumentPublishesItsNamespaceOnly) {
       << "echo.ticks stopped reaching A live";
   EXPECT_EQ(tree_value(W.app, "echo.status"), "up");
   {
-    std::lock_guard<std::mutex> lk(seen_mu);
-    EXPECT_GE(revs_seen, 10) << "echo.board.rev moved every step";
-    EXPECT_EQ(fields_behind, 0) << "a rev arrived before the fields of its revision";
-    EXPECT_GT(last_tick, 0) << "the document saw the world clock";
-    EXPECT_EQ(ticks_back, 0) << "the world clock went backwards";
+    std::lock_guard<std::mutex> lk(seen_a.mu);
+    EXPECT_GE(seen_a.revs, 10) << "echo.board.rev moved every step";
+    EXPECT_EQ(seen_a.fields_behind, 0) << "a rev arrived before the fields of its revision";
+    EXPECT_GT(seen_a.last_tick, 0) << "the document saw the world clock";
+    EXPECT_EQ(seen_a.ticks_back, 0) << "the world clock went backwards";
   }
   EXPECT_EQ(B.app.root().findDescendant("echo"), nullptr) << "B never subscribed";
   EXPECT_GT(B.shard->total_remote_filtered_out(), 0u) << "B was sent echo all the same";
@@ -1424,13 +1433,25 @@ TEST(RoomRelayLoopbackTest, ServerDocumentPublishesItsNamespaceOnly) {
   EXPECT_EQ(tree_value(r.app, "echo.status"), "up");
   EXPECT_EQ(tree_value(A.app, "echo.status"), "up");
 
-  // A late joiner subscribing to echo gets it from its admit snapshot (the journal is trimmed).
+  // A late joiner subscribing to echo gets it from its admit snapshot (the journal is trimmed), and
+  // then live: in both, never a rev ahead of its fields.
   test_client L("L", kinds[0]);
   L.shard->add_interest("echo");
+  L.shard->adapter().set_on_remote_applied([&](const cvc::state_mutation &m) {
+    L.tap.on_applied(m);
+    seen_l.on_applied(L.app, m);
+  });
   ASSERT_TRUE(L.connect(r));
   EXPECT_TRUE(run_room(r, cs, 4.0, {}, [&] {
-    return tree_value(L.app, "echo.status") == "up" && tree_number(L.app, "echo.ticks") > 0;
+    std::lock_guard<std::mutex> lk(seen_l.mu);
+    return tree_value(L.app, "echo.status") == "up" && tree_number(L.app, "echo.ticks") > 0 &&
+           seen_l.revs >= 3;
   })) << "the late joiner never got echo";
+  {
+    std::lock_guard<std::mutex> lk(seen_l.mu);
+    EXPECT_EQ(seen_l.fields_behind, 0) << "the late joiner saw a rev before its fields";
+    EXPECT_EQ(seen_l.ticks_back, 0);
+  }
 
   // The document ran, and its own state stayed on the relay.
   EXPECT_GT(tree_number(r.app, "ui.docs.arisrv.own.ticks"), 0);
