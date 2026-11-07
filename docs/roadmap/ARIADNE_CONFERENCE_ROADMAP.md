@@ -1064,6 +1064,23 @@ The plan is [`CONFERENCE_SHARING.md`](CONFERENCE_SHARING.md). It covers:
 
 The owner settled its decisions on 2026-11-03.
 
+### 5m. Worlds from a server document (PLANNED)
+
+The relay runs a world document (`arisrv --doc world.ari`), and every client builds its world and
+its simulation from what that document publishes. Today the world is seeded from C++, and the body,
+the controller and the speed veto are compiled into both ends; only the energy policy is published.
+The plan is [`ARIADNE_WORLDS.md`](ARIADNE_WORLDS.md). It covers:
+- a world document on the relay and a viewer document on each client;
+- revisioned sections in the room tree for the scene, physics, archetypes, controllers and policy,
+  with assets by hash and an activation tick for simulation changes;
+- entities with an owner and a simulation class;
+- controllers as native kernels or guests, with a determinism gate per kernel;
+- the tiers of bring-your-own, and persistence and cells for a large world;
+- phases WD0–WD9.
+
+The owner settled Q1 on 2026-11-07: the light rig lives in the server's world document, not in the
+client's. The other decisions are open.
+
 ---
 
 ## 6. Data plane & transport
@@ -1316,6 +1333,7 @@ mesh works first, auth hardens later (§5, Phase 8); **WASI server committed** (
 * Physics (holon §5h): [`NAV-VEHICLE-PHYSICS-ROADMAP.md`](NAV-VEHICLE-PHYSICS-ROADMAP.md).
 * More streams, app and screen sharing, desktop audio (§5l):
   [`CONFERENCE_SHARING.md`](CONFERENCE_SHARING.md).
+* Worlds from a server document (§5m): [`ARIADNE_WORLDS.md`](ARIADNE_WORLDS.md).
 
 ---
 
