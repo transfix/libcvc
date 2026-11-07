@@ -1,8 +1,12 @@
 # Ariadne worlds: the server's document defines the world, and every client runs it
 
 > **Status: PLANNED (2026-11-07).** Nothing here is built. Q1 is settled: the light rig lives in
-> the server (§12). The other decisions are open. The same world also runs with no relay, as the
-> lab and gym that agents and people drive locally (§10, phases L0–L4). Parent
+> the server (§16). The other decisions are open. One server holds many rooms, each its own world
+> (§10); it says which conference features it offers, and stock components follow (§11); clients
+> may already hold the world, or fetch it as they need it (§12); a private room is end-to-end
+> encrypted, its world simulated by its members, and the relay only forwards it (§13). The same
+> world also runs with no relay, as the lab and gym that agents and people drive locally (§14,
+> phases L0–L4). Parent
 > roadmap: [`ARIADNE_CONFERENCE_ROADMAP.md`](ARIADNE_CONFERENCE_ROADMAP.md) (§2 "Server is an `.ari`
 > app too", §5g, §5h, §5i, §5k). The server side rides
 > [`ARIADNE_SCRIPTING_HOSTS.md`](ARIADNE_SCRIPTING_HOSTS.md) §6 (S0–S7) and §8 (wasm guests).
@@ -38,6 +42,22 @@ document imports, general beyond GRL-SNAM and `cvc::nav`:
   points, picked at random, round-robin, and so on.
 - **A physics panel:** physics on or off, and stats on the active entities and forces.
 
+**The delivery, rooms and privacy ask, 2026-11-07:**
+
+- **Clients may already have the world.** A client may hold the same scene locally, have
+  downloaded it before, or ship bundled with a set of assets. Worlds will grow large, with many
+  assets, so a client should not have to download hundreds of megabytes at once. An application may
+  be deployed with its client side and its server side each holding a copy of the world up front.
+  A client without the world, its controllers or anything else must still be able to download all
+  of it.
+- **The server defines the conference features, and the client detects them** so it can join
+  conferences. Conference widgets belong in the stock component set.
+- **One server, many rooms,** each with its own scene, world, physics, actors and entities.
+- **End-to-end encryption through the relay.** Users talk to each other so that the server cannot
+  see what they say: it only relays. They can make a private room with a private conference and a
+  private world holon of their own; the stock default world is enough for now. txwtf's encrypted
+  messaging is the model.
+
 ## 1. What exists
 
 Checked against master 797ba4d9; the lab's rows, from "Vehicles and their navigator" down, against 19423da3.
@@ -67,6 +87,11 @@ Checked against master 797ba4d9; the lab's rows, from "Vehicles and their naviga
 | World to navigator | Only in Python: the `pycvc_gl.cars` template rasterizes a city or generated world (`nav_world_rasterize`) into the navigator's planes and hands colliders to the plants. | `bindings/pycvc/pymod_gl/cars.py`; `docs/CARS.md` |
 | Physics stats | `physics::world_binding` writes `tick`, `step_ms`, `bodies`, `active_bodies`, `contact_events` and a snapshot to its prefix. A document's `scene.physics:` world is held directly by the realized scene, not through the binding, so it publishes none of them. | `inc/cvc/physics/world_binding.h`; `inc/cvc/gl/ariadne/scene_realize.h` |
 | Step and restart | `sim_transport.ari`'s Step and Restart buttons raise `sim.step` and `sim.restart` for the host to handle. The clock binding can queue steps (`request_steps`); nothing restarts a world. | `src/cvc/ariadne/components/sim_transport.ari`; `inc/cvc/core/world_clock_binding.h` |
+| Rooms | One room per relay: `arisrv --room <id>` (default `standup`). The tree is already shaped for more, `conf.rooms.<room>.*`, and the area-of-interest, avatar and scene paths all take a room id. | `src/arisrv/main.cpp`; `inc/cvc/ariadne/conference/` |
+| Conference in documents | The stock components include `room_users.ari` (the Users window) and `chat.ari`. The rest of a conference (joining, media controls, tiles, the avatar panel, the 3D room) is in the example documents `conference_roster.ari`, `conference_media.ari`, `conference_live.ari` and in C++ widgets (`room_view`, `stream_view`). | `src/cvc/ariadne/components/`; `examples/ariadne/documents/` |
+| Feature detection | A document's `requires:` names host features (`gl.scene`, `net`, `media.player`, ...) and the host says whether it has them. Nothing asks the *server* what it offers. | `src/cvc/ariadne/requires.cpp` |
+| Asset cache | A document's `data:` block fetches cvcpkg archives checked against the registry's sha256 and keeps them in a local cache by hash (`CVC_DATA_CACHE`, else the user's cache directory). A browser has no cache: downloads are not kept. | `inc/cvc/ariadne/data.h` |
+| Keys and encryption | Each device has an Ed25519 key (a 32-byte seed, OpenSSL) and the relay pins it. Links to the relay use TLS, so the relay reads everything it forwards. SFrame end-to-end media is planned (§6g of the conference roadmap); no end-to-end encryption is built. | `src/cvc/state/state_device_key.cpp`; `inc/cvc/ariadne/stream/stream_relay.h` |
 | Views | A document's `viewport` widgets draw the scene from cameras of their own, with per-view overrides, and `scenes:` gives a viewport a scene of its own: a studio set for one vehicle costs no host code. A click in a view doesn't give a world point. | `docs/ARIADNE.md` §5.18; `src/cvcGL/ariadne/scene_views.cpp` |
 
 **What that adds up to.** The data already flows the way the ask wants: the server holds the state,
@@ -163,7 +188,7 @@ revision, written last, exactly as `avatars.policy` does today.
 | policy | `avatars.policy.*` | energy, `max_speed`, later per-controller limits | built (energy only) |
 | controllers | `controllers.<id>.*` | kernel or guest, version, params, content hash | new |
 | entities | `entities.<id>.*` | §4 | new |
-| spawns | `spawns.*` | spawn points (position, heading, tags) and the spawn policy (§10) | new |
+| spawns | `spawns.*` | spawn points (position, heading, tags) and the spawn policy (§14) | new |
 | stats | `physics.stats.*` | bodies, active bodies, contacts, step time; per entity its energy and forces. Read-only, written by whoever simulates: the relay, or a local world | new |
 | manifest | `world.*` | the world's name, version, and the revision of every section | new |
 
@@ -195,7 +220,7 @@ props, vehicles, doors and characters the server drives. Each **entity** has:
 - a **controller**, or none;
 - an **owner**: the server, or a participant;
 - an **identity**: a name, a team, a primary and secondary colour, and key/value metadata. The
-  colours drive the archetype's look; the team is a label that spawn rules filter on (§10); the
+  colours drive the archetype's look; the team is a label that spawn rules filter on (§14); the
   metadata is the user's own and nothing reads it;
 - a **simulation class**:
 
@@ -232,7 +257,7 @@ A controller is a pure step:
    `walker@1` is today's `drive_walker`. The second is a vehicle on the Jolt vehicle plant
    (NAV-VEHICLE-PHYSICS-ROADMAP.md; §5k's Humvee); a flyer might follow. The world document picks
    kernels and sets their params.
-   - **`nav@1` is the navigator** (§10): `sim_world`'s planner over the entity's plant. Its params
+   - **`nav@1` is the navigator** (§14): `sim_world`'s planner over the entity's plant. Its params
      name a policy by URI and content hash (a trained `.cvcnav`), or none for `default_biased`.
      Entities naming the same policy share one loaded copy, so a policy per entity costs nothing
      extra. It runs as one batch over every entity that uses it, as `sim_world` does today.
@@ -309,7 +334,150 @@ it.
   machinery exists and is unused.
 - **Persistence per cell.** A cell's snapshot and journal move with it when its region moves.
 
-## 10. Local worlds: the lab and gym
+## 10. Rooms: one server, many worlds
+
+A relay serves one room today. A world server serves many, and each room is a world of its own.
+
+- **The server's document declares its rooms.** Each room names a world document
+  (`cvc://worlds/default.ari`, or the site's own) or defines its world inline. Several rooms can
+  share one world definition; each still has its own copy of the state.
+- **Each room has its own everything:** sections (§3), entities, policy, holon and world clock. A
+  room's physics, controllers and rules never reach into another room.
+- **A lobby section lists the rooms:** `conf.lobby.rooms.<id>.{title, world, features, capacity,
+  occupancy, access}`, where access is open, by token, by invitation or private (§13). A client
+  reads the lobby before it joins anything.
+- **Rooms can be made at run time,** by the server's programs (§7), or by a participant where the
+  server's rules allow it: a private room (§13) or a copy of a template world.
+- **A client reads only the rooms it joined.** Bound reads keep other rooms' trees off its link,
+  as bound writes already keep it to its own participant subtree.
+- **Rooms spread over servers** the way cells do (§9): a room is a natural unit for a holon and for
+  the partitioning and leases that exist and are unused.
+
+## 11. What a server offers: conference features, detected
+
+The server says what it offers; a client's stock components show what is there.
+
+- **A features section per room, and one for the server:** `conf.features.*` and
+  `conf.rooms.<room>.features.*`, revisioned like the others. Entries name a feature and its
+  version and limits: `conference.chat`, `conference.media` (audio and video, with codecs and
+  simulcast), `conference.screen`, `conference.avatars`, `conference.world` (a shared scene and
+  holon), `conference.e2ee` (§13), `conference.rooms` (the lobby and making rooms).
+- **The client learns it on connect.** Before it shows anything, it reads the server's features
+  and the lobby. `requires:` gains server tokens beside the host's (`server.conference.media`, ...),
+  so a document can say what it needs from a server as it does from its host.
+- **The conference is stock components.** A document gets a conference by importing them and
+  pointing them at a server: `cvc://conference/` with `lobby` (rooms, join, create), `room_users`
+  and `chat` (moved there), `media_bar` (camera, microphone, screen, devices), `tiles` (the stream
+  views), `avatar_panel`, `room_view` (the 3D room), `room_settings`, and `e2ee_status` (keys,
+  verification, who is in a private room). Each hides itself when the server doesn't offer its
+  feature.
+- **The example conference documents shrink** to a layout over those components, and a
+  site's viewer document is the same components in its own layout.
+
+## 12. Getting the world to a client: bundled, cached or fetched
+
+Worlds will be large. A client should be able to start without downloading all of one, and one that
+already holds the world should download nothing.
+
+- **The manifest lists every asset by hash, size and priority.** Priority says when an asset is
+  needed: the statics' colliders first, then by cell (§9) and level of detail, coarse before fine.
+  Controllers that are guests (§5) are assets too. A native kernel is not: the client has it or
+  says it hasn't (§5's capability negotiation).
+- **A client looks for an asset by hash, nearest first:**
+  1. the application's own bundle: a client built or packaged with a world pack;
+  2. the local content cache: what it fetched before, or a pack copied in ahead of time;
+  3. an installed world pack: a cvcpkg package checked against the registry's sha256, as a
+     document's `data:` archives are today;
+  4. the relay's origin, or the CDN it names (§3).
+  The hash makes every local copy safe to use without asking the server.
+- **A world pack** is a world document and its assets, versioned and content-addressed. The relay
+  is deployed with one, and the same pack can be bundled with a client. When the server's world
+  moves on, the client fetches only the assets whose hashes it lacks.
+- **Fetch by need, not up front.** A client fetches the room it joins: the statics' colliders
+  where it spawns first, then the cells near it, coarse level of detail before fine. Until an
+  asset arrives the client draws a stand-in (its bounds, or a coarser level), and until a cell's
+  colliders arrive it interpolates there rather than predicting. Later cells stream as the client
+  moves.
+- **Everything is fetchable.** A client with nothing still gets the whole world from the relay: the
+  manifest names every asset, guest controller and texture. Bundles and packs only make that
+  faster.
+- **The browser needs a content cache:** the Cache API or OPFS, keyed by hash, so a page that
+  loaded a world once doesn't fetch it again.
+- **Live edits list changed hashes** in the section revision that carries them, so a client fetches
+  only what changed.
+
+## 13. Private rooms: end-to-end encrypted, the relay only forwards
+
+A private room's members talk, share media and run a world together; the relay forwards their
+traffic and cannot read it. txwtf's encrypted messaging (`docs/ENCRYPTED_MESSAGING.md` there) is the
+model: X3DH, the Double Ratchet, keys only in clients.
+
+**What the relay can and can't see.**
+
+- **It can't see content:** chat, media payloads, and the private room's world (sections, entity
+  state, intents, poses) reach it as ciphertext.
+- **It sees metadata,** as txwtf's server does: who is in the room, who sends, when and how much. It
+  routes on a small clear envelope: room, sender, sequence, kind, and for media the RTP header
+  SFrame leaves clear (enough for routing, simulcast layers and the active speaker).
+- **It is not defended against** traffic analysis, a malicious member's client, or a weak backup
+  passphrase.
+
+**Keys.**
+
+| Key | Type | Purpose | The relay holds |
+|---|---|---|---|
+| Device key | Ed25519 | today's device identity; signs the keys below | public only (pinned today) |
+| Identity DH key | X25519 | X3DH | public only |
+| Signed prekey | X25519, signed | X3DH, rotated | public only |
+| One-time prekeys | X25519 | X3DH, used once, replenished | public only |
+| Sender key | a chain key per member per room | encrypts what a member sends to the room | never |
+| Backup | AEAD ciphertext, Argon2id from a passphrase | restoring keys on a new device | opaque ciphertext |
+
+- **A key directory on the relay** holds the public keys (txwtf's E1). A user's devices group under
+  their principal once S5 exists; before then a device is its own identity.
+- **Verification is the users'.** The relay could hand out its own keys, so clients show a safety
+  number (both devices' key fingerprints) to compare, and warn when a member's key changes.
+
+**Sessions and room keys.**
+
+- **Pairwise sessions:** X3DH to start, the Double Ratchet per message, between every two members.
+  They carry direct messages and nothing else but keys.
+- **Room traffic uses sender keys** (txwtf's group design): each member has a chain key for the room
+  and sends it to every other member over their pairwise sessions; a member's messages are
+  encrypted once under its chain and fanned out by the relay. Someone leaving makes everyone
+  rotate. txwtf's per-message fan-out of a fresh key (`grp-dr-v1`) is right for chat but not for
+  120 Hz intents and media frames; sender keys are.
+- **Media is SFrame,** its keys derived from the sender key, as the conference roadmap's §6g plans.
+- **Joining needs a member, not the relay.** An invitation is a room id and a secret passed out of
+  band or over a pairwise session; a member admits the newcomer by sending it the sender keys. The
+  relay can admit someone to the traffic, never to the content.
+- **Larger rooms may want MLS** (RFC 9420): rekeying in log n instead of n. Sender keys first (Q13).
+
+**The private world.**
+
+- **The relay can't be its authority:** it can't see the poses. The members simulate it.
+  - **Proposed first: one member's client is the authority** (the room's creator), running the
+    holon that the relay runs for a public room. The others predict and reconcile against it, as
+    they do against the relay. When it leaves, the next member takes over from its last snapshot.
+  - **Later: lockstep.** Every member runs the same deterministic simulation from everyone's
+    intents. Jolt's cross-platform determinism gate makes it possible; there is then no authority
+    to trust or lose.
+- **The world is the stock default world** (`cvc://worlds/default.ari`). Every client has it bundled
+  (§12), so a private room fetches no assets and leaks nothing by fetching them.
+- **A private world of one's own comes later,** with assets encrypted the way txwtf's media store
+  does it: a content key per asset (XChaCha20-Poly1305), sealed to each member's key; the relay
+  stores and serves only ciphertext.
+- **What doesn't work in a private room:** anything the relay does by reading content. The speed
+  veto and the energy policy are enforced by the authority member instead; area-of-interest
+  filtering by position doesn't work unless members put a coarse cell id in the clear envelope
+  (Q15); the relay keeps no world state and no history.
+
+**Crypto library (Q12).** txwtf uses libsodium (X25519, Ed25519, XChaCha20-Poly1305, Argon2id) and
+its sumo build in the browser. libcvc's device key uses OpenSSL, which has X25519, Ed25519, HKDF and
+ChaCha20-Poly1305 but not XChaCha20, and Argon2 only from 3.2. Proposed: libsodium for the
+end-to-end layer, through a cvcpkg recipe, on every target including wasm.
+
+## 14. Local worlds: the lab and gym
 
 The world document doesn't need a relay. Run in arigl, in the browser, from pycvc or headless, the
 process runs the world document itself and is its own authority: it writes the sections of §3 into
@@ -357,7 +525,7 @@ headless; the same document opens in arigl to watch one.
 - Built-in handlers for `sim.step` and `sim.restart`.
 - A viewport click gives a world point (a ray against the scene, or the ground's height field).
 
-## 11. Phases
+## 15. Phases
 
 Each phase leaves the conference working. **WD** = world document. (S, G, W, H and D are the
 scripting-hosts, wasm-guest, ariglx-web, holon and DSL-citizen phases in the documents above; G5 is
@@ -376,7 +544,25 @@ GENERATED-WORLD-ROADMAP.md's.)
 | WD8 | **Persistence.** Snapshot and journal of the world's state; restart restores it; per-principal saved state. | WD3, S5 | M |
 | WD9 | **Cells and many holons.** Cell sections and paging, then subdelegation and handoff. | WD8, H3, H4 | L |
 
-The lab's phases (§10). **L** = local world. They need no relay, so they can start before S0;
+Rooms, features, delivery and privacy. **RM** = rooms, **CF** = conference features, **AD** =
+asset delivery, **E** = end-to-end encryption.
+
+| Phase | What | Depends on | Size |
+|---|---|---|---|
+| RM1 | **Many rooms on one relay,** each its own world, sections, holon and clock; the lobby section; bound reads per room. | WD1 | M |
+| RM2 | **Rooms made at run time,** by server programs and by participants where the rules allow. | RM1, S0 | S |
+| CF1 | **The features sections** and server tokens in `requires:`. | RM1 | S |
+| CF2 | **The stock conference components** under `cvc://conference/`; the example documents become layouts over them. | CF1 | M |
+| AD1 | **Assets by hash** in the manifest, with size and priority; the lookup order (bundle, cache, pack, relay); world packs as cvcpkg packages. | WD1 | M |
+| AD2 | **Fetch by need:** colliders first, cells near the client, coarse before fine; stand-ins; the browser's content cache. | AD1, WD9 for cells | M |
+| E0 | **Keys:** X25519 identity and prekeys signed by the device key, the key directory on the relay, safety numbers, the libsodium recipe. | — | M |
+| E1 | **Encrypted direct messages:** X3DH and the Double Ratchet; `chat.ari` gets txwtf's lock. | E0 | M |
+| E2 | **Private rooms:** invitations, admission by a member, sender keys, encrypted chat and membership. | E1, RM2 | M |
+| E3 | **SFrame media** in private rooms. | E2 | M |
+| E4 | **The private world:** a member's client as the authority over the stock default world; handover when it leaves. | E2, WD2 | L |
+| E5 | **Private worlds of one's own:** encrypted assets sealed to members; lockstep as an option; MLS for large rooms. | E4, AD1 | L |
+
+The lab's phases (§14). **L** = local world. They need no relay, so they can start before S0;
 each builds what a WD phase needs.
 
 | Phase | What | Feeds | Size |
@@ -387,11 +573,12 @@ each builds what a WD phase needs.
 | L3 | **`spawns.*` and `spawn_points`,** with the minimap and road suggestions. | WD3 | M |
 | L4 | **The gym:** reset, step, observe, reward, episode logs, headless; `pycvc_gl.cars` moves onto it. | — | M |
 
-**The first cut is WD0 + WD1** for the relay, and **L0** for the lab, which can run beside it. WD1
+**The first cut is WD0 + WD1** for the relay, and **L0** for the lab, which can run beside it. E0
+and E1 need neither and can start any time. WD1
 needs S0, which is next on the tracker anyway, for application services. S0's `server: publish:` namespaces (§6.5.3) should be designed with world sections in
 mind from the start.
 
-## 12. Open decisions
+## 16. Open decisions
 
 - **Q1. Where does the look live? Settled (owner, 2026-11-07): the rig lives in the server.** The
   world document declares the lights and shadows, and every client draws the world under them.
@@ -417,10 +604,20 @@ mind from the start.
   yielding `sim_world` already does. Rules and scoring by team come later, as server programs (§7).
 - **Q11. What does "physics off" mean?** Proposed: `physics.enabled = false` pauses the world.
   Dropping vehicles to the kinematic plant is a per-archetype choice, not this switch.
+- **Q12. Which crypto library for the end-to-end layer?** Proposed: libsodium, as txwtf, on every
+  target (§13).
+- **Q13. Sender keys or MLS for room keys?** Proposed: sender keys first; MLS if rooms grow past a
+  few dozen members.
+- **Q14. Who is a private world's authority?** Proposed: one member's client, with handover;
+  lockstep later.
+- **Q15. May a private room leak a coarse position for area-of-interest filtering?** Proposed: no
+  by default; a room may opt in.
+- **Q16. What is a world pack?** Proposed: a cvcpkg package (a world document plus its assets by
+  hash), so bundles, caches and installs share one format and one checksum.
 - **Settled with C++ for the core (owner, 2026-11-07):** the world runtime is C++, behind a scene
   node and pycvc; the lab's panels are `.ari` components over it.
 
-## 13. Where this plugs in
+## 17. Where this plugs in
 
 - [`ARIADNE_CONFERENCE_ROADMAP.md`](ARIADNE_CONFERENCE_ROADMAP.md): §2 (the server is an `.ari` app),
   §5g (the shared scene), §5h (the holon; H2–H4), §5i (the DSL as a holon citizen; D1–D4), §5k
@@ -434,5 +631,7 @@ mind from the start.
   comes from.
 - [`DISTRIBUTED_STATE_ROADMAP.md`](DISTRIBUTED_STATE_ROADMAP.md): persistence, partitioning,
   subdelegation.
+- txwtf's `docs/ENCRYPTED_MESSAGING.md` and `docs/ENCRYPTED_MEDIA.md`: the end-to-end design §13
+  follows (X3DH, Double Ratchet, sender keys, sealed content keys).
 - [`../CARS.md`](../CARS.md): the multi-car controller template, whose world glue the gym (L4)
   takes over.
