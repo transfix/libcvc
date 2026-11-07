@@ -1171,6 +1171,15 @@ int main() {
                        .value<double>(),
                    1.0),
         "cloud_sky with keys: storm seeded storm.* from its props");
+    // The weather's live keys: its rate and the orographic coupling's strength.
+    chk(approx(cvc::state::instance(app)(cvc::ariadne::resolve_bind("forest", "storm.evolve"))
+                   .value<double>(),
+               1.0) &&
+            approx(
+                cvc::state::instance(app)(cvc::ariadne::resolve_bind("forest", "storm.orographic"))
+                    .value<double>(),
+                1.0),
+        "cloud_sky seeded storm.evolve and storm.orographic");
   }
 
   // ── generated_world + the fast render path's keys (casts_shadow, opaque, shadow focus) ──────

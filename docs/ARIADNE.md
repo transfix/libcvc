@@ -781,14 +781,21 @@ but its colours do not.
 
 **Clouds.** `cloud_sky` draws a deck of drifting, slowly changing L-system cumulus over its
 `ground:` node's extent (followed live): the clouds nearest the camera as volumes (`near:`), the
-rest as far shells. Their shade falls on the ground and on the nodes in `receivers:` (and their
+rest as far shells. The weather evolves on the world clock: a cellular automaton over the deck's
+cells (`cvc::world::cloud_layer`) grows clouds in patches and dissipates them, always holding the
+`coverage` share of the cells. A cloud fades in or out over `fade` seconds (20), and its volume,
+far shells and shade fade together. Orographic coupling reads the ground's heights. The cells over a
+windward flank (the slope along `wind_az`, the heading the wind blows toward, 90 = +x) gather cloud,
+and the cells in the lee lose theirs, so a cloud forms as the wind brings it to a mountain and dies
+past the crest. `orographic` (default 1; 0 turns the coupling off) sets how strongly. Their shade falls on the ground and on the nodes in `receivers:` (and their
 children, LOD rungs included) through those meshes' shaders: it dims the sun's light and leaves
 their textures and colours alone. Its other keys: `extent` (a cloud's half-width), `base` / `top`,
 `coverage`, `spacing`, `seed`, `variants`, `sun_az` / `sun_el` (the key light's, which the shade
 is cast along), `shade_k` / `shade_floor`, `horizon` (how far past the ground the volumes draw
-clouds), `far_reach` (how far the shells reach toward the horizon; out of the camera's bounds) and
-`shadow` (0 starts the shade off;
-`sky_controls.ari` toggles it, with the drift and morph speeds).
+clouds), `far_reach` (how far the shells reach toward the horizon; out of the camera's bounds),
+`evolve` (the weather's speed: 1 is a step every 5 s, a cloud lasting some 8 minutes; 0 holds the
+clouds) and `shadow` (0 starts the shade off). Live keys under the node's root (`sky.` unless
+`keys:`): `drift`, `morph`, `evolve`, `orographic` and `shadow`, all on `sky_controls.ari`.
 
 **Generated terrain.** `source: { terrain: { generator, size, resolution, seed, amp, file,
 preset } }` draws a `cvc::world` terrain generator's ground as such a heightfield: `fbm` (the

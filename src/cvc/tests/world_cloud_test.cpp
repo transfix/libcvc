@@ -22,10 +22,13 @@
 
 // cvc::world::cloud_layer — the world-scale cloud deck: its period covers the world, it holds the
 // clouds asked for, it is deterministic, its morphs are continuous, and its shadow lies where the
-// sun puts it.
+// sun puts it. Its coverage evolves (a cellular automaton), deterministically and whatever the
+// frame rate, its clouds fade in and out with their shade, and it gathers on windward flanks.
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cvc/lsys/cloud.h>
 #include <cvc/world/cloud_layer.h>
 #include <gtest/gtest.h>
@@ -256,4 +259,239 @@ TEST(WorldCloudLayer, ACompositeInSharesIsTheWhole) {
         }
     EXPECT_EQ(rim, 0.0f);
   }
+}
+
+// ─────────────────────── the evolving coverage
+
+namespace {
+// A 21 x 21 deck (a period of 21 cells of 375 m): the size of the 11.2 km world's, stepping
+// every 3 s.
+cloud_layer_params wide() {
+  cloud_layer_params p = small(3900.0);
+  p.evolve_s = 3.0;
+  return p;
+}
+
+std::vector<bool> held(const cloud_layer &L) {
+  std::vector<bool> h;
+  for (const cloud_cell &c : L.cells())
+    h.push_back(c.occupied);
+  return h;
+}
+
+constexpr double kPi = 3.14159265358979323846;
+
+// Ridges across the wind over one period [0, P)^2: h = A sin(2 pi x / lambda), three to a period,
+// steepest slope `slope`.
+void ridges(cloud_layer &L, double slope) {
+  const double P = L.period_m(), lambda = P / 3.0, A = slope * lambda / (2.0 * kPi);
+  const double d = 25.0;
+  const int n = static_cast<int>(P / d) + 1;
+  std::vector<float> h(std::size_t(n) * n);
+  for (int r = 0; r < n; ++r)
+    for (int c = 0; c < n; ++c)
+      h[std::size_t(r) * n + c] = static_cast<float>(A * std::sin(2.0 * kPi * c * d / lambda));
+  L.set_ground(h, n, n, 0.0, 0.0, d, d);
+}
+} // namespace
+
+TEST(WorldCloudLayer, CoverageEvolvesAndHoldsItsCount) {
+  cloud_layer L(wide());
+  ASSERT_EQ(L.period_cells(), 21);
+  const int want = static_cast<int>(std::lround(0.6 * 21 * 21));
+  EXPECT_EQ(L.occupied(), want);
+  // A new deck has settled: every cloud it holds is fully there, every other cell clear.
+  for (const cloud_cell &c : L.cells())
+    EXPECT_EQ(c.presence, c.occupied ? 1.0 : 0.0);
+  const std::vector<bool> h0 = held(L);
+  for (int s = 0; s < 90; ++s) { // 90 s: 30 steps of 3 s
+    L.evolve(1.0);
+    ASSERT_EQ(L.occupied(), want);
+    for (const cloud_cell &c : L.cells()) {
+      ASSERT_GE(c.presence, 0.0);
+      ASSERT_LE(c.presence, 1.0);
+    }
+  }
+  EXPECT_EQ(L.generation(), cloud_layer::WARM_STEPS + 30);
+  const std::vector<bool> h1 = held(L);
+  int changed = 0;
+  for (std::size_t k = 0; k < h0.size(); ++k)
+    changed += h0[k] != h1[k] ? 1 : 0;
+  std::printf("%d of %zu cells changed in 30 steps\n", changed, h0.size());
+  EXPECT_GT(changed, 10); // clouds came and went
+  // but the deck did not start over (a reshuffle changes 2 * 0.6 * 0.4 of the cells)
+  EXPECT_LT(changed, int(0.3 * h0.size()));
+}
+
+TEST(WorldCloudLayer, EvolveIsDeterministicAndDoesNotDependOnTheFrames) {
+  cloud_layer a(wide()), b(wide());
+  const long g0 = a.generation();
+  a.evolve(37.0);
+  for (int k = 0; k < 148; ++k)
+    b.evolve(0.25);
+  EXPECT_EQ(a.generation(), g0 + 12);
+  EXPECT_EQ(b.generation(), g0 + 12);
+  ASSERT_EQ(a.cells().size(), b.cells().size());
+  for (std::size_t k = 0; k < a.cells().size(); ++k) {
+    EXPECT_EQ(a.cells()[k].occupied, b.cells()[k].occupied);
+    EXPECT_NEAR(a.cells()[k].presence, b.cells()[k].presence, 1e-9);
+  }
+  cloud_layer_params q = wide();
+  q.seed = 21;
+  cloud_layer c(q);
+  c.evolve(37.0);
+  EXPECT_NE(held(a), held(c)); // another seed, another weather
+}
+
+TEST(WorldCloudLayer, ACloudFadesInAndItsShadeAndSlicesFollow) {
+  cloud_layer L(wide());
+  // Run until a cloud is part-way in.
+  int k = -1;
+  for (int s = 0; s < 400 && k < 0; ++s) {
+    L.evolve(1.0);
+    for (std::size_t i = 0; i < L.cells().size(); ++i)
+      if (L.cells()[i].occupied && L.cells()[i].presence > 0.2 && L.cells()[i].presence < 0.8)
+        k = static_cast<int>(i);
+  }
+  ASSERT_GE(k, 0);
+  // Its presence climbs dt / fade_s a second while it is held.
+  cloud_layer M = L;
+  const double p0 = M.cells()[k].presence;
+  M.evolve(0.5, 0.0); // rate 0: no step, so it stays held
+  EXPECT_NEAR(M.cells()[k].presence, std::min(1.0, p0 + 0.5 / M.params().fade_s), 1e-12);
+  EXPECT_EQ(M.generation(), L.generation());
+  // Its shade and far opacity are its full cloud's times its weight.
+  const double w = L.cells()[k].weight();
+  EXPECT_GT(w, 0.0);
+  EXPECT_LT(w, 1.0);
+  cloud_layer full = L;
+  full.snap();
+  ASSERT_EQ(full.cells()[k].presence, 1.0);
+  std::vector<float> tw, t1, fw, f1;
+  L.add_shadow(0.4, k, 1, tw);
+  full.add_shadow(0.4, k, 1, t1);
+  L.add_far(0.4, k, 1, {}, fw);
+  full.add_far(0.4, k, 1, {}, f1);
+  double sw = 0, s1 = 0, gw = 0, g1 = 0;
+  for (std::size_t i = 0; i < tw.size(); ++i) {
+    sw += tw[i];
+    s1 += t1[i];
+  }
+  for (std::size_t i = 0; i < fw.size(); ++i) {
+    gw += fw[i];
+    g1 += f1[i];
+  }
+  ASSERT_GT(s1, 0.0);
+  ASSERT_GT(g1, 0.0);
+  EXPECT_NEAR(sw / s1, w, 1e-4);
+  EXPECT_NEAR(gw / g1, w, 1e-4);
+}
+
+TEST(WorldCloudLayer, RateZeroFreezesTheWeatherButFinishesTheFades) {
+  cloud_layer L(wide());
+  L.evolve(4.5); // a step and a half: some fades under way
+  const long g = L.generation();
+  const std::vector<bool> h = held(L);
+  for (int s = 0; s < 25; ++s)
+    L.evolve(1.0, 0.0);
+  EXPECT_EQ(L.generation(), g);
+  EXPECT_EQ(held(L), h);
+  for (const cloud_cell &c : L.cells())
+    EXPECT_EQ(c.presence, c.occupied ? 1.0 : 0.0); // 25 s > fade_s: every fade is done
+}
+
+TEST(WorldCloudLayer, TheForcingIsTheSlopeAlongTheWind) {
+  cloud_layer L(small(1000.0));
+  EXPECT_FALSE(L.has_ground());
+  EXPECT_EQ(L.forcing(500.0, 500.0), 0.0);
+  // A plane rising 5 m in 100 toward +x, 4 km square.
+  const int n = 161;
+  const double d = 25.0;
+  std::vector<float> h(std::size_t(n) * n);
+  for (int r = 0; r < n; ++r)
+    for (int c = 0; c < n; ++c)
+      h[std::size_t(r) * n + c] = static_cast<float>(0.05 * c * d);
+  L.set_ground(h, n, n, 0.0, 0.0, d, d);
+  ASSERT_TRUE(L.has_ground());
+  EXPECT_NEAR(L.forcing(2000.0, 2000.0), 0.5, 1e-3); // a wind blowing up it (az 90: +x)
+  L.set_wind(270.0);
+  EXPECT_NEAR(L.forcing(2000.0, 2000.0), -0.5, 1e-3); // blowing down it: the lee
+  L.set_wind(0.0);
+  EXPECT_NEAR(L.forcing(2000.0, 2000.0), 0.0, 1e-3); // across it
+  L.set_wind(90.0);
+  EXPECT_EQ(L.forcing(20000.0, 2000.0), 0.0); // off the ground
+  // A steep flank saturates.
+  for (float &v : h)
+    v *= 10.0f;
+  L.set_ground(h, n, n, 0.0, 0.0, d, d);
+  EXPECT_EQ(L.forcing(2000.0, 2000.0), 1.0);
+  // The cells read the ground where the drift has taken them.
+  L.set_drift(130.0, -40.0);
+  double x, y;
+  L.cell_world(L.cells()[0], x, y);
+  const double P = L.period_m();
+  EXPECT_NEAR(std::remainder(x - L.cells()[0].cx - 130.0, P), 0.0, 1e-6);
+  EXPECT_NEAR(std::remainder(y - L.cells()[0].cy + 40.0, P), 0.0, 1e-6);
+  EXPECT_LE(std::fabs(x - 2000.0), 0.5 * P); // the copy nearest the ground's centre
+  EXPECT_LE(std::fabs(y - 2000.0), 0.5 * P);
+}
+
+TEST(WorldCloudLayer, WindwardFlanksHoldTheCloud) {
+  // Over ridges across the wind, the cells on the windward flanks hold a cloud far more of the
+  // time than those in the lee; without the coupling they hold one as often.
+  auto shares = [](double strength, double &windward, double &lee) {
+    cloud_layer_params p = wide();
+    p.orographic = strength;
+    cloud_layer L(p);
+    ridges(L, 0.3);
+    L.warm(cloud_layer::WARM_STEPS);
+    std::vector<int> on(L.cells().size(), 0);
+    const int steps = 300;
+    for (int s = 0; s < steps; ++s) {
+      L.step();
+      for (std::size_t k = 0; k < L.cells().size(); ++k)
+        on[k] += L.cells()[k].occupied ? 1 : 0;
+    }
+    double w = 0, l = 0;
+    int nw = 0, nl = 0;
+    for (std::size_t k = 0; k < L.cells().size(); ++k) {
+      double x, y;
+      L.cell_world(L.cells()[k], x, y);
+      const double f = L.forcing(x, y);
+      if (f > 0.5) {
+        w += on[k];
+        ++nw;
+      } else if (f < -0.5) {
+        l += on[k];
+        ++nl;
+      }
+    }
+    EXPECT_GT(nw, 20);
+    EXPECT_GT(nl, 20);
+    windward = nw ? w / nw / steps : 0.0;
+    lee = nl ? l / nl / steps : 0.0;
+  };
+  double w1, l1, w0, l0;
+  shares(1.0, w1, l1);
+  shares(0.0, w0, l0);
+  std::printf("held: windward %.2f lee %.2f (coupled), %.2f / %.2f (not)\n", w1, l1, w0, l0);
+  EXPECT_GT(w1, 0.85);
+  EXPECT_LT(l1, 0.45);
+  EXPECT_LT(std::fabs(w0 - l0), 0.25);
+}
+
+TEST(WorldCloudLayer, AStepIsCheap) {
+  // A 64 x 64 deck (4096 cells): a step is bit operations and a few draws a cell.
+  cloud_layer_params p = small(64 * 375.0 / 2.0);
+  p.shadow_texels = 2;
+  p.far_texels = 2;
+  cloud_layer L(p);
+  ASSERT_EQ(L.period_cells(), 64);
+  const auto t0 = std::chrono::steady_clock::now();
+  for (int s = 0; s < 50; ++s)
+    L.step();
+  const double ms =
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / 50;
+  std::printf("cloud automaton: %.3f ms a step over %zu cells\n", ms, L.cells().size());
+  EXPECT_LT(ms, 20.0); // well under a millisecond in a release build; generous for debug builds
 }

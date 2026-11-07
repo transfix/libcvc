@@ -23,6 +23,7 @@
 // cloud_layer.cpp — the world-scale cloud deck (see cloud_layer.h).
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cvc/lsys/cloud.h>
 #include <cvc/lsys/rng.h>
@@ -43,6 +44,55 @@ constexpr int FAR_MAX = 256;           // the far slices' largest side, texels
 constexpr double SHADOW_SOFT_M = 40.0; // the shadow's softening, metres (blur passes x texel)
 // Cell draws sit apart from the variant maps' (element ids 0..variants) on the cloud stream.
 constexpr std::uint64_t CELL_SALT = 1ull << 52;
+// The automaton's draws: a step's per cell, and the starting state's.
+constexpr std::uint64_t STEP_SALT = 1ull << 51;
+constexpr std::uint64_t INIT_SALT = 1ull << 50;
+
+// The automaton's rates, per bit and step (tuned so that over a 21 x 21 deck a cell's cloud
+// lasts some 100 steps, about 8 minutes at the default 5 s a step, the cells' cloud shares spread
+// widely, and neighbours hold clouds together): humidity's return, spontaneous activation,
+// extinction, and the chance an active neighbour activates a humid bit beside it. The coupling
+// multiplies them by (1 + gain * s * f), f the forcing, positive on a windward flank (humidity,
+// activation) or negative in the lee (extinction).
+constexpr double P_HUM = 0.01, P_ACT = 0.0001, P_EXT = 0.015, P_SPREAD = 0.03;
+constexpr double HUM_GAIN = 3.0, ACT_GAIN = 10.0, EXT_GAIN = 3.0;
+constexpr double HYSTERESIS = 0.1; // a held cloud's lead in the ranking (a share of the column)
+constexpr double SLOPE_REF = 0.1;  // the slope along the wind that is full forcing
+constexpr double GROUND_STEP = 1.0 / 8.0;   // the kept ground's spacing, in cloud half-widths
+constexpr std::uint32_t FULL = 0xffffffffu; // a column's 32 layers
+
+// A splitmix64 stream: one step's draws for one cell.
+struct bit_stream {
+  std::uint64_t s;
+  std::uint32_t next() {
+    s += 0x9E3779B97F4A7C15ull;
+    std::uint64_t z = s;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return static_cast<std::uint32_t>((z ^ (z >> 31)) >> 32);
+  }
+  // A word whose bits are each set with probability p, independently: each bit's uniform is
+  // compared with p one binary digit at a time, all 32 at once, until every bit is decided (a few
+  // draws on average, whatever p).
+  std::uint32_t bernoulli(double p) {
+    if (p <= 0.0)
+      return 0u;
+    if (p >= 1.0)
+      return FULL;
+    const std::uint32_t q = static_cast<std::uint32_t>(p * 16777216.0); // 24 binary digits
+    std::uint32_t out = 0u, open = FULL;
+    for (int d = 23; d >= 0 && open; --d) {
+      const std::uint32_t r = next();
+      if ((q >> d) & 1u) {
+        out |= open & ~r; // the bit's digit is 0 where p's is 1: below p
+        open &= r;
+      } else {
+        open &= ~r; // its digit is 1 where p's is 0: above p
+      }
+    }
+    return out;
+  }
+};
 
 // Soften a square patch: `passes` rounds of a separable [1 4 6 4 1] / 16 blur (each a variance
 // of one texel), clamped at the edges. A cloud's shadow is soft: its edges are thin cloud.
@@ -166,11 +216,9 @@ void cloud_layer::set_area(double area) {
   const bool refar = f != m_f || m_far.empty();
   m_f = f;
 
-  // The cells: exactly round(coverage * cells) hold a cloud (at least one when coverage > 0), the
-  // ones whose hashed draw ranks lowest, so a small world is never left clear by chance.
+  // The cells: their places and morphs. Which hold a cloud is the automaton's (rank_cells).
   const int ncell = m_m * m_m;
   m_cells.assign(ncell, cloud_cell());
-  std::vector<double> rank(ncell);
   for (int j = 0; j < m_m; ++j)
     for (int i = 0; i < m_m; ++i) {
       cloud_cell &c = m_cells[j * m_m + i];
@@ -184,16 +232,9 @@ void cloud_layer::set_area(double area) {
       c.cx = (i + 0.5) * m_c + c.jx * m_c / F;
       c.cy = (j + 0.5) * m_c + c.jy * m_c / F;
       c.phase = lsys::uni(m_p.seed, lsys::stream::cloud, el, 3, 0.0, double(m_p.variants));
-      rank[j * m_m + i] = lsys::uni(m_p.seed, lsys::stream::cloud, el, 0);
     }
-  int want = static_cast<int>(std::lround(m_p.coverage * ncell));
-  if (m_p.coverage > 0.0)
-    want = std::max(1, want);
-  std::vector<int> order(ncell);
-  std::iota(order.begin(), order.end(), 0);
-  std::sort(order.begin(), order.end(), [&](int a, int b) { return rank[a] < rank[b]; });
-  for (int k = 0; k < want; ++k)
-    m_cells[order[k]].occupied = true;
+  seed_automaton();
+  warm(WARM_STEPS);
   if (retexel)
     build_tau();
   if (refar)
@@ -283,6 +324,221 @@ int cloud_layer::occupied() const {
   return k;
 }
 
+// ─────────────────────── the evolving coverage
+
+void cloud_layer::seed_automaton() {
+  const std::size_t ncell = m_cells.size();
+  m_hum.assign(ncell, 0u);
+  m_act.assign(ncell, 0u);
+  m_cld.assign(ncell, 0u);
+  m_tmp.assign(ncell, 0u);
+  for (std::size_t k = 0; k < ncell; ++k) {
+    const cloud_cell &c = m_cells[k];
+    bit_stream s{lsys::hash4(m_p.seed, static_cast<std::uint32_t>(lsys::stream::cloud),
+                             cell_el(c.i, c.j) ^ INIT_SALT, 0)};
+    m_hum[k] = s.bernoulli(0.5);
+    m_cld[k] = s.bernoulli(0.3);
+  }
+  m_gen = 0;
+  m_carry = 0.0;
+}
+
+void cloud_layer::step() {
+  const int M = m_m;
+  const double str = m_p.orographic;
+  const bool oro = str > 0.0 && has_ground();
+  for (int j = 0; j < M; ++j)
+    for (int i = 0; i < M; ++i) {
+      const std::size_t k = static_cast<std::size_t>(j) * M + i;
+      cloud_cell &c = m_cells[k];
+      bit_stream s{lsys::hash4(m_p.seed, static_cast<std::uint32_t>(lsys::stream::cloud),
+                               cell_el(i, j) ^ STEP_SALT, static_cast<std::uint32_t>(m_gen))};
+      // Dobashi's rules: activation reaches a humid bit from an active neighbour, here the whole
+      // column (a cloud builds through its depth) and, by chance, the same layer of the four
+      // neighbouring cells; an active bit turns to cloud and spends its humidity.
+      const std::uint32_t a = m_act[k];
+      const std::uint32_t side = m_act[static_cast<std::size_t>(j) * M + (i + 1) % M] |
+                                 m_act[static_cast<std::size_t>(j) * M + (i + M - 1) % M] |
+                                 m_act[static_cast<std::size_t>((j + 1) % M) * M + i] |
+                                 m_act[static_cast<std::size_t>((j + M - 1) % M) * M + i];
+      const std::uint32_t reach = (side & s.bernoulli(P_SPREAD)) | (a ? FULL : 0u);
+      const std::uint32_t hum = m_hum[k], cld = m_cld[k];
+      std::uint32_t nh = hum & ~a, nc = cld | a, na = ~a & hum & reach;
+      // The chances: extinction, humidity's return, spontaneous activation, pushed by the
+      // ground under the cell.
+      double up = 0.0, down = 0.0;
+      c.forcing = 0.0;
+      if (oro) {
+        double wx, wy;
+        cell_world(c, wx, wy);
+        c.forcing = forcing(wx, wy);
+        up = str * std::max(0.0, c.forcing);
+        down = str * std::max(0.0, -c.forcing);
+      }
+      nc &= ~s.bernoulli(P_EXT * (1.0 + EXT_GAIN * down));
+      nh |= s.bernoulli(P_HUM * (1.0 + HUM_GAIN * up));
+      na |= s.bernoulli(P_ACT * (1.0 + ACT_GAIN * up));
+      m_hum[k] = nh;
+      m_cld[k] = nc;
+      m_tmp[k] = na; // the neighbours still read this step's activation
+      c.cloud = std::popcount(nc) / double(CA_LAYERS);
+    }
+  m_act.swap(m_tmp);
+  ++m_gen;
+  rank_cells();
+}
+
+void cloud_layer::rank_cells() {
+  // The cells with the most cloud hold the deck's clouds, exactly round(coverage * cells) (at
+  // least one when coverage > 0), so a small world is never left clear by chance. A held cloud
+  // leads by HYSTERESIS, so two cells with much the same cloud do not trade places; ties go by a
+  // hashed draw.
+  const int ncell = static_cast<int>(m_cells.size());
+  int want = static_cast<int>(std::lround(m_p.coverage * ncell));
+  if (m_p.coverage > 0.0)
+    want = std::max(1, want);
+  std::vector<double> score(ncell);
+  for (int k = 0; k < ncell; ++k) {
+    const cloud_cell &c = m_cells[k];
+    score[k] = c.cloud + (c.occupied ? HYSTERESIS : 0.0) +
+               1e-6 * lsys::uni(m_p.seed, lsys::stream::cloud, cell_el(c.i, c.j), 0);
+  }
+  std::vector<int> order(ncell);
+  std::iota(order.begin(), order.end(), 0);
+  std::sort(order.begin(), order.end(),
+            [&](int a, int b) { return score[a] != score[b] ? score[a] > score[b] : a < b; });
+  for (int k = 0; k < ncell; ++k)
+    m_cells[order[k]].occupied = k < want;
+}
+
+void cloud_layer::fade(double share) {
+  if (share <= 0.0)
+    return;
+  for (cloud_cell &c : m_cells)
+    c.presence = c.occupied ? std::min(1.0, c.presence + share) : std::max(0.0, c.presence - share);
+}
+
+void cloud_layer::snap() {
+  for (cloud_cell &c : m_cells)
+    c.presence = c.occupied ? 1.0 : 0.0;
+}
+
+void cloud_layer::warm(int steps) {
+  for (int k = 0; k < steps; ++k)
+    step();
+  if (steps <= 0)
+    rank_cells();
+  snap();
+}
+
+void cloud_layer::evolve(double dt, double rate) {
+  if (!(dt > 0.0))
+    return;
+  const double fade_all = m_p.fade_s > 0.0 ? dt / m_p.fade_s : 2.0;
+  double steps = m_p.evolve_s > 0.0 && rate > 0.0 ? dt * rate / m_p.evolve_s : 0.0;
+  if (steps > WARM_STEPS) { // a long gap (a hitch, a reload): a settled deck, not a replay
+    warm(WARM_STEPS);
+    m_carry = 0.0;
+    return;
+  }
+  if (steps <= 0.0) {
+    fade(fade_all);
+    return;
+  }
+  // The fade runs at a steady rate between the steps, so the result does not depend on how dt
+  // was split.
+  const double per_step = fade_all / steps;
+  while (steps > 0.0) {
+    const double to_next = 1.0 - m_carry;
+    if (steps + 1e-12 >= to_next) {
+      fade(to_next * per_step);
+      steps -= to_next;
+      m_carry = 0.0;
+      step();
+    } else {
+      fade(steps * per_step);
+      m_carry += steps;
+      steps = 0.0;
+    }
+  }
+}
+
+void cloud_layer::set_ground(const std::vector<float> &heights, int rows, int cols, double x0,
+                             double y0, double dx, double dy) {
+  m_gh.clear();
+  m_gw = m_grows = 0;
+  if (rows < 2 || cols < 2 || heights.size() < static_cast<std::size_t>(rows) * cols ||
+      !(dx > 0.0) || !(dy > 0.0))
+    return;
+  // Box-average k x k samples into one, k the samples in GROUND_STEP of a cloud's half-width:
+  // the forcing reads the ground at a cloud's scale, not its 5 m bumps.
+  const int k = std::max(1, static_cast<int>(GROUND_STEP * m_p.extent / std::max(dx, dy)));
+  m_gw = std::max(2, cols / k);
+  m_grows = std::max(2, rows / k);
+  m_gsx = k * dx;
+  m_gsy = k * dy;
+  m_gx0 = x0 + 0.5 * (k - 1) * dx;
+  m_gy0 = y0 + 0.5 * (k - 1) * dy;
+  m_gh.assign(static_cast<std::size_t>(m_gw) * m_grows, 0.0f);
+  for (int r = 0; r < m_grows; ++r)
+    for (int c = 0; c < m_gw; ++c) {
+      double acc = 0.0;
+      int n = 0;
+      for (int a = 0; a < k; ++a)
+        for (int b = 0; b < k; ++b) {
+          const int rr = std::min(rows - 1, r * k + a), cc = std::min(cols - 1, c * k + b);
+          const float h = heights[static_cast<std::size_t>(rr) * cols + cc];
+          if (std::isfinite(h)) {
+            acc += h;
+            ++n;
+          }
+        }
+      m_gh[static_cast<std::size_t>(r) * m_gw + c] = static_cast<float>(n ? acc / n : 0.0);
+    }
+}
+
+double cloud_layer::ground_at(double x, double y) const {
+  // Bilinear in the kept ground, clamped at its edges (no slope off the ground).
+  const double fx = std::min(double(m_gw - 1), std::max(0.0, (x - m_gx0) / m_gsx));
+  const double fy = std::min(double(m_grows - 1), std::max(0.0, (y - m_gy0) / m_gsy));
+  const int x0 = std::min(m_gw - 2, static_cast<int>(fx)),
+            y0 = std::min(m_grows - 2, static_cast<int>(fy));
+  const double tx = fx - x0, ty = fy - y0;
+  auto H = [&](int c, int r) { return double(m_gh[static_cast<std::size_t>(r) * m_gw + c]); };
+  return (H(x0, y0) * (1 - tx) + H(x0 + 1, y0) * tx) * (1 - ty) +
+         (H(x0, y0 + 1) * (1 - tx) + H(x0 + 1, y0 + 1) * tx) * ty;
+}
+
+double cloud_layer::forcing(double x, double y) const {
+  if (!has_ground())
+    return 0.0;
+  // The slope along the wind, by central differences half a cloud apart, averaged over nine
+  // points of the cloud's footprint.
+  const double az = m_p.wind_az * kPi / 180.0;
+  const double ux = std::sin(az), uy = -std::cos(az);
+  const double e = 0.5 * m_p.extent;
+  double g = 0.0;
+  for (int a = -1; a <= 1; ++a)
+    for (int b = -1; b <= 1; ++b) {
+      const double px = x + a * e, py = y + b * e;
+      g += (ground_at(px + e * ux, py + e * uy) - ground_at(px - e * ux, py - e * uy)) / (2.0 * e);
+    }
+  return std::min(1.0, std::max(-1.0, g / 9.0 / SLOPE_REF));
+}
+
+void cloud_layer::cell_world(const cloud_cell &c, double &x, double &y) const {
+  const double P = period_m();
+  double ox = 0.0, oy = 0.0;
+  if (has_ground()) {
+    ox = m_gx0 + 0.5 * (m_gw - 1) * m_gsx;
+    oy = m_gy0 + 0.5 * (m_grows - 1) * m_gsy;
+  }
+  x = c.cx + m_dx;
+  y = c.cy + m_dy;
+  x += P * std::round((ox - x) / P);
+  y += P * std::round((oy - y) / P);
+}
+
 void cloud_layer::sun_dir(double &x, double &y, double &z) const {
   const double az = m_p.sun_az * kPi / 180.0, el = m_p.sun_el * kPi / 180.0;
   x = std::cos(el) * std::sin(az);
@@ -338,11 +594,12 @@ void cloud_layer::add_shadow(double m, std::size_t first, std::size_t count,
   const std::size_t last = std::min(m_cells.size(), first + count);
   for (std::size_t ci = first; ci < last; ++ci) {
     const cloud_cell &c = m_cells[ci];
-    if (!c.occupied)
+    const float cw = static_cast<float>(c.weight()); // its crossfade in or out
+    if (cw <= 0.0f)
       continue;
     const morph_state s = cell_morph(c, m);
     const std::vector<float> &A = m_tau[s.a], &B = m_tau[s.b];
-    const float u = static_cast<float>(s.u), w = 1.0f - u;
+    const float u = static_cast<float>(s.u) * cw, w = (1.0f - static_cast<float>(s.u)) * cw;
     // The cloud's centre, to the nearest texel corner.
     const long ox = std::lround(c.cx / ts) - m_tau_n / 2;
     const long oy = std::lround(c.cy / ts) - m_tau_n / 2;
@@ -388,8 +645,8 @@ void cloud_layer::add_far(double m, std::size_t first, std::size_t count,
   const std::size_t last = std::min(m_cells.size(), first + count);
   for (std::size_t ci = first; ci < last; ++ci) {
     const cloud_cell &c = m_cells[ci];
-    const float wt = ci < weight.size() ? weight[ci] : 1.0f;
-    if (!c.occupied || wt <= 0.0f)
+    const float wt = (ci < weight.size() ? weight[ci] : 1.0f) * static_cast<float>(c.weight());
+    if (wt <= 0.0f)
       continue;
     const morph_state s = cell_morph(c, m);
     const std::vector<float> &A = m_far[s.a], &B = m_far[s.b];
