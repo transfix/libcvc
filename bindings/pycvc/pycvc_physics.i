@@ -37,6 +37,7 @@
 #include <cvc/physics/backend.h>
 #include <cvc/physics/dyn_bike_plant.h>
 #include <cvc/physics/nav_plant.h>
+#include <cvc/physics/plant_host.h>
 #include <cvc/physics/snapshot_json.h>
 #include <cvc/physics/vehicle.h>
 #include <cvc/physics/world.h>
@@ -1467,6 +1468,197 @@ PyObject *nav_sim_world_publish(PyObject *handle, std::shared_ptr<cvc::app> app,
   sim_world_from(handle)->publish(*app, prefix);
   Py_RETURN_NONE;
 }
+
+} // namespace pycvc
+%}
+
+// ── plant_host: the plant chosen by name, in code or live from the state tree ──
+// cvc::physics::plant_host (plant_host.h) for Python. It owns the physics world and the plant a
+// sim_world drives on, and switches them by name: "kinematic", a preset ("humvee", "roboracer"),
+// a comma list cycled over the agents, "dynamic[:presets]" or "dynamic4w[:presets]". pull() does it
+// live from <prefix>.nav_plant.vehicle and reads the plant's own knobs. The host holds the
+// sim_world it last drove, and puts it back on the kinematic bicycle before it goes, so neither
+// outlives what the other points at.
+%feature("kwargs") pycvc::plant_host::plant_host;
+%feature("kwargs") pycvc::plant_host::use;
+%feature("kwargs") pycvc::plant_host::pull;
+
+%inline %{
+namespace pycvc {
+
+class plant_host {
+public:
+  // The world each switch builds: its fixed step (s), and the flat ground (its top's height,
+  // grip, rolling resistance and half extent, m) used until set_geometry gives a world; the
+  // plant's latency (s), brake margin and metres per nav world unit.
+  plant_host(double fixed_dt = 0.01, double ground_mu = 0.9, double rolling_resistance = 0.015,
+             double ground_z = 0.0, double ground_half_size = 2000.0, double latency = 0.1,
+             double brake_margin = 0.8, double metres_per_world_unit = 1.0) {
+    cvc::physics::plant_host_options o;
+    o.world.fixed_dt = fixed_dt;
+    o.ground_z = ground_z;
+    o.ground_mu = ground_mu;
+    o.ground_rolling_resistance = rolling_resistance;
+    o.ground_half_size = ground_half_size;
+    o.plant.latency = latency;
+    o.plant.brake_margin = brake_margin;
+    o.plant.metres_per_world_unit = metres_per_world_unit;
+    opts_ = o;
+    host_ = std::make_unique<cvc::physics::plant_host>(opts_);
+  }
+  ~plant_host() {
+    if (sim_) {
+      try {
+        host_->use(*sim_world_from(sim_), "kinematic");
+      } catch (...) {
+      }
+      Py_DECREF(sim_);
+    }
+  }
+
+  // Whether this build has Jolt, the presets use() takes, and whether it takes `vehicle` (raises
+  // RuntimeError when it does not).
+  static bool available() { return cvc::physics::plant_host::available(); }
+  static std::vector<std::string> presets() { return cvc::physics::plant_host::presets(); }
+  static void check(const std::string &vehicle) { cvc::physics::plant_host::check(vehicle); }
+
+  // The next world's static colliders: a pycvc.world_geometry's collide items (a city bundle's
+  // data_world, a generated world's), in place of the flat ground; None goes back to it. The host
+  // keeps a copy, and the vehicles start on its terrain (plant_host_options' ground_height). The
+  // sim_world it drives goes back to the kinematic bicycle: use() puts it on vehicles in the new
+  // world.
+  void set_geometry(PyObject *geometry) {
+    std::unique_ptr<cvc::world::world_geometry> copy;
+    if (geometry && geometry != Py_None) {
+      void *p = nullptr;
+      if (!SWIG_IsOK(SWIG_ConvertPtr(geometry, &p, SWIGTYPE_p_cvc__world__world_geometry, 0)) || !p)
+        throw std::invalid_argument(
+            "plant_host.set_geometry: expected a pycvc.world_geometry or None");
+      copy = std::make_unique<cvc::world::world_geometry>(
+          *static_cast<cvc::world::world_geometry *>(p));
+    }
+    std::shared_ptr<const cvc::height_field> terrain = copy ? copy->terrain() : nullptr;
+    if (terrain) {
+      const double fallback = opts_.ground_z;
+      opts_.plant.ground_height = [terrain, fallback](double x, double y) {
+        const double h = terrain->height(x, y);
+        return std::isnan(h) ? fallback : h;
+      };
+    } else {
+      opts_.plant.ground_height = nullptr;
+    }
+    if (sim_) { // off the old host's plant before that host goes
+      try {
+        host_->use(*sim_world_from(sim_), "kinematic");
+      } catch (...) {
+      }
+    }
+    host_ = std::make_unique<cvc::physics::plant_host>(opts_);
+    host_->set_geometry(copy.get());
+    geometry_ = std::move(copy);
+  }
+
+  // Put sim's agents on `vehicle`, at their poses, at rest, in a new world. Returns what they
+  // drive: `vehicle`, or "kinematic" when it asked for vehicles and the build has no Jolt. An
+  // unknown name raises and changes nothing.
+  std::string use(PyObject *sim, const std::string &vehicle) {
+    cvc::nav::sim_world *sw = sim_world_from(sim);
+    hold(sim);
+    return host_->use(*sw, vehicle);
+  }
+  // The state tree: <prefix>.nav_plant.vehicle switches the plant when it changes (unset, it is
+  // seeded with the current one; an unknown name is ignored), the plant's own knobs are read
+  // (nav_plant::pull), and .driving / .available are written. Call it between steps.
+  void pull(std::shared_ptr<cvc::app> app, const std::string &prefix, PyObject *sim) {
+    if (!app)
+      throw std::invalid_argument("plant_host.pull: app is None");
+    cvc::nav::sim_world *sw = sim_world_from(sim);
+    hold(sim);
+    host_->pull(*app, prefix, *sw);
+  }
+
+  std::string vehicle() const { return host_->vehicle(); } // what use() was last asked for
+  std::string driving() const { return host_->driving(); } // what the agents drive
+  bool fallback() const { return host_->fallback(); }
+  // "kinematic", "jolt", "dynamic" or "dynamic4w".
+  std::string kind() {
+    if (host_->dynamic4w())
+      return "dynamic4w";
+    if (host_->dynamic())
+      return "dynamic";
+    return host_->plant() ? "jolt" : "kinematic";
+  }
+
+  // Agent i as the plant reads it (nav's normalized frame: x, y, heading, speed, steer, tire_use,
+  // load_transfer, pitch, roll), or None on the kinematic bicycle.
+  PyObject *state(int i) {
+    cvc::nav::vehicle_plant *vp = host_->active();
+    if (!vp)
+      Py_RETURN_NONE;
+    check_agent(i, "state");
+    return pycvc_physics::plant_state_dict(vp->state(i));
+  }
+  // Agent i's limits on its plant (nav's normalized frame: wheelbase, max_steer, steer_rate,
+  // a_brake, latency, a_max, vmax, a_lat, half_width, front, rear), or None on the bicycle.
+  PyObject *limits(int i) {
+    cvc::nav::vehicle_plant *vp = host_->active();
+    if (!vp)
+      Py_RETURN_NONE;
+    check_agent(i, "limits");
+    const cvc::nav::plant_limits l = vp->limits(i);
+    return Py_BuildValue("{s:d,s:d,s:d,s:d,s:d,s:d,s:d,s:d,s:d,s:d,s:d}", "wheelbase",
+                         (double)l.wheelbase, "max_steer", (double)l.max_steer, "steer_rate",
+                         (double)l.steer_rate, "a_brake", (double)l.a_brake, "latency",
+                         (double)l.latency, "a_max", (double)l.a_max, "vmax", (double)l.vmax,
+                         "a_lat", (double)l.a_lat, "half_width", (double)l.half_width, "front",
+                         (double)l.front, "rear", (double)l.rear);
+  }
+  // Agent i's Jolt vehicle (physics_world.vehicle_state's dict: the chassis' position, rotation,
+  // velocities, speed, steer, pedals, gear, wheels, energy), or None off a Jolt plant.
+  PyObject *vehicle_state(int i) {
+    cvc::physics::nav_plant *np = host_->plant();
+    cvc::physics::world *w = host_->physics();
+    if (!np || !w)
+      Py_RETURN_NONE;
+    check_agent(i, "vehicle_state");
+    return pycvc_physics::vehicle_state_dict(w->vehicle_state(np->vehicle(i)));
+  }
+  // Agent i's dynamic single-track state in SI (x, y, psi, vx, vy, r, delta, a), or None off it.
+  PyObject *body(int i) {
+    cvc::physics::dyn_bike_plant *d = host_->dynamic();
+    if (!d)
+      Py_RETURN_NONE;
+    check_agent(i, "body");
+    const auto &s = d->body(i);
+    return Py_BuildValue("{s:d,s:d,s:d,s:d,s:d,s:d,s:d,s:d}", "x", s.x, "y", s.y, "psi", s.psi,
+                         "vx", s.vx, "vy", s.vy, "r", s.r, "delta", s.delta, "a", s.a);
+  }
+
+private:
+  void hold(PyObject *sim) {
+    if (sim == sim_)
+      return;
+    if (sim_) { // the old one back on the bicycle before it is let go
+      try {
+        host_->use(*sim_world_from(sim_), "kinematic");
+      } catch (...) {
+      }
+    }
+    Py_INCREF(sim);
+    Py_XDECREF(sim_);
+    sim_ = sim;
+  }
+  void check_agent(int i, const char *what) {
+    const int n = sim_ ? sim_world_from(sim_)->size() : 0;
+    if (i < 0 || i >= n)
+      throw std::invalid_argument(std::string("plant_host.") + what + ": no agent " +
+                                  std::to_string(i));
+  }
+  cvc::physics::plant_host_options opts_;
+  std::unique_ptr<cvc::world::world_geometry> geometry_; // borrowed by host_, so it goes after it
+  std::unique_ptr<cvc::physics::plant_host> host_;
+  PyObject *sim_ = nullptr;
+};
 
 } // namespace pycvc
 %}
