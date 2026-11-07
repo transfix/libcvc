@@ -78,6 +78,14 @@ void on_small_stack(const std::function<void()> &body) {
     } catch (...) {
       error = std::current_exception();
     }
+    // The cycle collector's registry is per thread, and nothing collects a thread's when it ends:
+    // free the cycles the body's programs made here, or they outlive the test (LeakSanitizer).
+    try {
+      collect_cycles();
+    } catch (...) {
+      if (!error)
+        error = std::current_exception();
+    }
   });
   t.join();
   if (error)
@@ -475,6 +483,14 @@ void on_stack(std::size_t kib, const std::function<void()> &body) {
       body();
     } catch (...) {
       error = std::current_exception();
+    }
+    // The cycle collector's registry is per thread, and nothing collects a thread's when it ends:
+    // free the cycles the body's programs made here, or they outlive the test (LeakSanitizer).
+    try {
+      collect_cycles();
+    } catch (...) {
+      if (!error)
+        error = std::current_exception();
     }
   });
   t.join();
