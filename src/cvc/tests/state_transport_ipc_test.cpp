@@ -924,8 +924,7 @@ TEST(StateTransportIpcTest, RedundantConnectionsSendEachMutationOncePerPeer) {
   ASSERT_TRUE(
       wait_until([&] { return tA.total_received_frames() >= 2; }, std::chrono::milliseconds(2000)));
 
-  const int kCount = 32;
-  cvc::state::instance(aA)("dup.k").value(std::string("seed"));
+  const int kCount = 32; // v0's write is the fresh node's first, journaled like the rest
   for (int i = 0; i < kCount; ++i) {
     cvc::state::instance(aA)("dup.k").value("v" + std::to_string(i));
     tA.pump_all();
