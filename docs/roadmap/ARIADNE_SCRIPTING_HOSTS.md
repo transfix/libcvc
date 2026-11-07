@@ -4,7 +4,7 @@ Status:
 - **P1 shipped** in transfix/libcvc#985 (d0bb057d, released in v3.7.11): `arix` and `ariglx`,
   natively, with Linux packages on cvcpkg.org. §3 and §4 describe what shipped and mark what
   didn't. The user-facing reference is [ARIADNE.md](../ARIADNE.md) §9.6.
-- **S0 shipped** in transfix/libcvc#S0PR: `arisrv --doc` and `server: publish:` (§6.1, §6.5.3).
+- **S0 shipped** in transfix/libcvc#1046: `arisrv --doc` and `server: publish:` (§6.1, §6.5.3).
 - **The rest is design** (2026-11-02; §4.6, §5.5, §5.6 and §8.2–8.9 added 2026-11-03;
   §6.5, application services: an ASGI API and live state from one `arisrvx`, and phases
   S5–S7 added 2026-11-05).
@@ -668,7 +668,7 @@ list narrowed to CPython's eval loop.
 ### 6.1 Server documents first, in stock arisrv
 
 Before S0, arisrv ran no document: it was a fixed relay. **Shipped in S0**
-(transfix/libcvc#S0PR; the reference is [ARIADNE.md](../ARIADNE.md) §9.7): `arisrv --doc
+(transfix/libcvc#1046; the reference is [ARIADNE.md](../ARIADNE.md) §9.7): `arisrv --doc
 server.ari` runs a headless `AppRuntime` (no backend, like #985's `AriApp`) on the relay's app,
 for room rules, bots and checks written in the DSL
 ([`server_document.h`](../../inc/cvc/ariadne/server_document.h)).
@@ -883,7 +883,7 @@ server:
   publish: [cyprov]          # replicated to clients; only the server writes under it
 ```
 
-**As built in S0** (transfix/libcvc#S0PR):
+**As built in S0** (transfix/libcvc#1046):
 
 - **Names.** A namespace is a dotted path of identifiers. It may not be under `conf`, `ui`,
   `ariadne`, `state_exec` or `room`, and no two may overlap.
@@ -1513,7 +1513,7 @@ for it.
 | N1 | `ariglx` on Windows and macOS | pycvc packages for those platforms | M |
 | D1 | GRL-SNAM in the browser: torch-free inference, a demo page | W1 | M |
 | D2 | VolRover gap audit, then VolRover as an Ariadne app | P2 | L |
-| S0 | **Done** (transfix/libcvc#S0PR). Server documents in stock arisrv (`--doc`), plus the `server: publish:` namespaces (§6.1, §6.5.3): `ServerDocument`, the shard's outbound scope, the area of interest subscribed to it, the read-only `room` hole, the holon's world clock at `sim.tick`, the parsed `scene:` kept for the world runtime (with a warning that it is not simulated), `(quit)` as arisrv's exit status, `state-set-tree` through writable links on every hop, and first writes to fresh nodes journaled. Tests: `ServerBlockTest`, `ServerDocumentTest`, `StatePublishScopeTest`, `RoomRelayLoopbackTest.ServerDocumentPublishesItsNamespaceOnly`, the `arisrv_doc_*` ctests and `ari_server_block_ignored` | — | M |
+| S0 | **Done** (transfix/libcvc#1046). Server documents in stock arisrv (`--doc`), plus the `server: publish:` namespaces (§6.1, §6.5.3): `ServerDocument`, the shard's outbound scope, the area of interest subscribed to it, the read-only `room` hole, the holon's world clock at `sim.tick`, the parsed `scene:` kept for the world runtime (with a warning that it is not simulated), `(quit)` as arisrv's exit status, `state-set-tree` through writable links on every hop, and first writes to fresh nodes journaled. Tests: `ServerBlockTest`, `ServerDocumentTest`, `StatePublishScopeTest`, `RoomRelayLoopbackTest.ServerDocumentPublishesItsNamespaceOnly`, the `arisrv_doc_*` ctests and `ari_server_block_ignored` | — | M |
 | S1 | `arisrvx`: the engine on a script thread with an asyncio loop, operator Python (§6.5.1); `serve_asgi` / `--http-listen`, lifespan and graceful shutdown (§6.5.2); `arisrvx check`; the `arisrvx` recipe | S0, P1 | M |
 | S2 | `room-call`: functions clients may call, with `ctx` (principal, progress, idempotency key, deadline), role gates and `CallError` (§6.5.5); the `relay:` block and `--relay` join mode in `ari` and the `x` hosts, and transport security for native clients (§6.5.7) | S1 | M |
 | S3 | Client DSL programs | S0 | S |
