@@ -6,7 +6,8 @@
 > may already hold the world, or fetch it as they need it (§12); a private room is end-to-end
 > encrypted, its world simulated by its members, and the relay only forwards it (§13). The same
 > world also runs with no relay, as the lab and gym that agents and people drive locally (§14,
-> phases L0–L4). Parent
+> phases L0–L4). It runs with no rendering too: a headless runtime runs the physics and the whole
+> world, and a window only adds a view (§14, settled). Parent
 > roadmap: [`ARIADNE_CONFERENCE_ROADMAP.md`](ARIADNE_CONFERENCE_ROADMAP.md) (§2 "Server is an `.ari`
 > app too", §5g, §5h, §5i, §5k). The server side rides
 > [`ARIADNE_SCRIPTING_HOSTS.md`](ARIADNE_SCRIPTING_HOSTS.md) §6 (S0–S7) and §8 (wasm guests).
@@ -58,6 +59,10 @@ document imports, general beyond GRL-SNAM and `cvc::nav`:
   private world holon of their own; the stock default world is enough for now. txwtf's encrypted
   messaging is the model.
 
+**The headless ask, 2026-11-07:** a headless runtime must still run physics and support the world
+with no local rendering. The relay, a gym worker, a test and a terminal host run the same world a
+window draws (§14, "Headless first").
+
 ## 1. What exists
 
 Checked against master 797ba4d9; the lab's rows, from "Vehicles and their navigator" down, against 19423da3.
@@ -85,6 +90,7 @@ Checked against master 797ba4d9; the lab's rows, from "Vehicles and their naviga
 | Vehicle plants | `plant_host` puts each agent on a plant: nav's kinematic bicycle, a Jolt vehicle, the dynamic single track or the dynamic four-wheel model. Presets `vehicle_desc::humvee()` and `roboracer()` carry mass, wheelbase, track, engine and `max_speed`. | `inc/cvc/physics/plant_host.h`, `inc/cvc/physics/vehicle.h` |
 | Generated worlds in a document | The `generated_world` node builds terrain, roads, buildings, trees and water, but publishes only its height field (`RealizedScene::height_fields`), so `ground:` and bodies stand on it. Buildings, occupancy, the road graph and water stay inside the node. | `src/cvcGL/ariadne/world_nodes.cpp` |
 | World to navigator | Only in Python: the `pycvc_gl.cars` template rasterizes a city or generated world (`nav_world_rasterize`) into the navigator's planes and hands colliders to the plants. | `bindings/pycvc/pymod_gl/cars.py`; `docs/CARS.md` |
+| Physics with no rendering | None for a document. Its `scene.physics:` world and its nodes' `body:` are built only by cvcGL's scene realizer (`realize_physics`), which binds bodies to SceneGraph nodes through `physics_scene_binding`; `generated_world` is a cvcGL node too. A headless runtime (`pycvc.AriApp` and `Host(mode="headless")`, `ari`, `ari test`, arisrv) has no scene: it drops `scene:` with a warning, and a document that requires `gl.scene` doesn't load. The physics world itself (`cvc::physics::world`, Jolt), the plants and the relay's holon are core libcvc and need no GL. | `src/cvcGL/ariadne/scene_realize.cpp`; `inc/cvc/physics/world.h`; `docs/ARIADNE.md` (the headless mode) |
 | Physics stats | `physics::world_binding` writes `tick`, `step_ms`, `bodies`, `active_bodies`, `contact_events` and a snapshot to its prefix. A document's `scene.physics:` world is held directly by the realized scene, not through the binding, so it publishes none of them. | `inc/cvc/physics/world_binding.h`; `inc/cvc/gl/ariadne/scene_realize.h` |
 | Step and restart | `sim_transport.ari`'s Step and Restart buttons raise `sim.step` and `sim.restart` for the host to handle. The clock binding can queue steps (`request_steps`); nothing restarts a world. | `src/cvc/ariadne/components/sim_transport.ari`; `inc/cvc/core/world_clock_binding.h` |
 | Rooms | One room per relay: `arisrv --room <id>` (default `standup`). The tree is already shaped for more, `conf.rooms.<room>.*`, and the area-of-interest, avatar and scene paths all take a room id. | `src/arisrv/main.cpp`; `inc/cvc/ariadne/conference/` |
@@ -506,6 +512,36 @@ a world, change it, and measure what happens. With reset, step and observe from 
 - **The components are panels over sections.** Locally a panel writes the section. In a room the
   same panel sends a request that the world's rules check before the relay writes it (§6's tier 1).
 
+**Headless first** (settled, owner, 2026-11-07). The world runtime needs no rendering. With no GL,
+no window and no scene graph it still runs physics and the whole world: the physics world and its
+bodies, the entities, their plants and controllers, spawning, the world clock, the sections and
+`physics.stats.*`. Rendering is a view onto that world, never its owner. That holds on the relay, in
+`ari` and `ari test`, in `pycvc.AriApp` and `Host(mode="headless")`, in `arix`, in a gym worker that
+runs many worlds at once, and in wasm under node.
+
+- **Scene realization splits in two.** Today it is all in cvcGL (§1, "Physics with no rendering").
+  - **The world half moves to core libcvc.** `scene.physics:` and every node's `body:` become a
+    `cvc::physics::world` with its bodies and materials. The shapes those bodies need (primitives,
+    meshes for `hull` and `mesh` bodies, height fields) are built from data, not from VTK.
+    `generated_world` produces its terrain, buildings, occupancy, roads and water in core, which
+    the navigator's rasters and the plants' colliders need anyway.
+  - **The view half stays in cvcGL.** It holds the SceneGraph nodes and binds them to the world's
+    poses: `physics_scene_binding` reads from the core world instead of owning it.
+  - So one document runs headless or in a window, and in a window it is the same world plus a view.
+- **The loader runs a scene headless.** A headless host no longer drops `scene:`: its world half
+  runs and its draw half is skipped.
+  - A token says so. Proposed: `scene.physics`, meaning "the scene's physics and bodies run", which
+    holds on every host, headless ones included. `gl.scene` keeps meaning "the scene is drawn".
+  - A document that needs the world but no picture requires `scene.physics` and loads headless.
+  - A computed `bind:` or a view-only node still needs `gl.scene`.
+- **The same world, drawn or not.** The world steps on the world clock, never on frames.
+  - A test pins it: one document's state hash after N ticks is the same headless and in
+    `arigl --offscreen`.
+  - The determinism gate (§5) runs headless.
+- **On the relay** the headless runtime is the holon's world: one `cvc::physics::world` holds the
+  document's bodies and the avatars, never two worlds side by side (Q9). S0's server-document
+  runtime is the runtime this attaches to (ARIADNE_SCRIPTING_HOSTS.md §6.1).
+
 **The four components,** each an `.ari` file a document imports (`cvc://` or `load:`, with
 `link:` holes for the prefix and the viewport):
 
@@ -549,7 +585,7 @@ GENERATED-WORLD-ROADMAP.md's.)
 | WD0 | The loose ends: `--set` after seeding, or a guard so a `--set` can't suppress the default world; the "under a sun" comment | — | S |
 | WD1 | **The world document seeds the room.** `arisrv --doc world.ari` publishes the document's `scene:` (objects, lights, shadows) through `write_scene_object` / `write_scene_env`. `cvc://worlds/default.ari` and `large.ari` replace the C++ seeds, and `--scene` names them. The light rig and shadows move from the conference document to the world document (Q1), and the conference document drops its `scene:` block. | S0 | M |
 | WD2 | **The rules come from the document.** The physics, archetype, policy and controller sections (§3), with the activation tick. The holon and `room_view` read them instead of `avatar_body{}`, `kAvatarWidth`, `max_speed = 4.0` and the panel's "walker" literal. | WD1 | M |
-| WD3 | **Entities.** The entities table (§4); server-dynamic props and NPC bodies from the document and from server programs; their poses on the pose stream; colliders for meshes. | WD2 | L |
+| WD3 | **Entities.** The entities table (§4); server-dynamic props and NPC bodies from the document and from server programs, simulated on the relay by L0's headless runtime; their poses on the pose stream; colliders for meshes. | WD2, L0 | L |
 | WD4 | **A controller catalog.** Kernels by `name@version`, a determinism gate per kernel, capability negotiation with an interpolation fallback; the vehicle as the second kernel. A participant picks from the archetype's list (§5k phase 3). | WD2 | L |
 | WD5 | **Generated worlds** through the world document: G5's descriptor, height-field statics on the relay. | WD1, G5 | M |
 | WD6 | **User looks and bodies.** Assets by hash, checked and rehosted by the relay; bodies clamped to the archetype (§5k phase 4). | WD2, S5 | M |
@@ -580,7 +616,7 @@ each builds what a WD phase needs.
 
 | Phase | What | Feeds | Size |
 |---|---|---|---|
-| L0 | **The world runtime, local.** It reads a document's world sections and runs entities: `sim_world` with agents added and removed at run time; `nav@1` with a policy per entity; identity on entities; the whole generated world handed to the runtime, with its rasters and colliders built in C++; `physics.stats.*`; built-in step and restart; click-to-world picking in a viewport. pycvc bindings for all of it. | WD2, WD3, WD4, WD5 | L |
+| L0 | **The world runtime, local and headless.** The world half of scene realization moves to core libcvc (§14, "Headless first"): the document's physics world and bodies, and `generated_world`'s terrain, buildings and occupancy, with no GL. The `scene.physics` token; a test that a document's state hash after N ticks is the same headless and in `arigl --offscreen`. It reads a document's world sections and runs entities: `sim_world` with agents added and removed at run time; `nav@1` with a policy per entity; identity on entities; the whole generated world handed to the runtime, with its rasters and colliders built in C++; `physics.stats.*`; built-in step and restart; click-to-world picking in a viewport. pycvc bindings for all of it. | WD2, WD3, WD4, WD5 | L |
 | L1 | **`world_source` and `world_physics`,** the two panels on pieces that already exist. | WD5 | M |
 | L2 | **Vehicle archetypes and `vehicle_selector`,** with the studio preview. | WD4 | M |
 | L3 | **`spawns.*` and `spawn_points`,** with the minimap and road suggestions. | WD3 | M |
@@ -628,6 +664,9 @@ mind from the start.
 - **Q16. What is a world pack? Settled (owner, 2026-11-07):** a world document and its assets
   with an index, from any source: a cvcpkg package, a generic archive from a URL, or a local data
   directory on disk (§12).
+- **Settled, headless (owner, 2026-11-07):** a headless runtime still runs physics and the whole
+  world without local rendering. The world half of scene realization is core libcvc; cvcGL adds the
+  view (§14). Open within it: the token's name (proposed `scene.physics`).
 - **Settled with C++ for the core (owner, 2026-11-07):** the world runtime is C++, behind a scene
   node and pycvc; the lab's panels are `.ari` components over it.
 
