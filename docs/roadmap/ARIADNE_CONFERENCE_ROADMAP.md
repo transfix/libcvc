@@ -1076,6 +1076,8 @@ The plan is [`ARIADNE_WORLDS.md`](ARIADNE_WORLDS.md). It covers:
 - entities with an owner and a simulation class;
 - controllers as native kernels or guests, with a determinism gate per kernel;
 - the tiers of bring-your-own, and persistence and cells for a large world;
+- the same world run locally, with no relay, as the lab and gym (vehicles, spawns, physics panels,
+  reset/step/observe from Python), phases L0–L4;
 - phases WD0–WD9.
 
 The owner settled Q1 on 2026-11-07: the light rig lives in the server's world document, not in the
