@@ -73,18 +73,13 @@ void on_small_stack(const std::function<void()> &body) {
   boost::thread::attributes attrs;
   attrs.set_stack_size(kib * 1024);
   boost::thread t(attrs, [&] {
+    // The cycles the body's programs make here go to this thread's own registry: collected when
+    // the thread ends, so they don't outlive the test (LeakSanitizer; S1-Q3).
+    collect_cycles_at_thread_exit();
     try {
       body();
     } catch (...) {
       error = std::current_exception();
-    }
-    // The cycle collector's registry is per thread, and nothing collects a thread's when it ends:
-    // free the cycles the body's programs made here, or they outlive the test (LeakSanitizer).
-    try {
-      collect_cycles();
-    } catch (...) {
-      if (!error)
-        error = std::current_exception();
     }
   });
   t.join();
@@ -479,18 +474,13 @@ void on_stack(std::size_t kib, const std::function<void()> &body) {
   boost::thread::attributes attrs;
   attrs.set_stack_size(kib * 1024);
   boost::thread t(attrs, [&] {
+    // The cycles the body's programs make here go to this thread's own registry: collected when
+    // the thread ends, so they don't outlive the test (LeakSanitizer; S1-Q3).
+    collect_cycles_at_thread_exit();
     try {
       body();
     } catch (...) {
       error = std::current_exception();
-    }
-    // The cycle collector's registry is per thread, and nothing collects a thread's when it ends:
-    // free the cycles the body's programs made here, or they outlive the test (LeakSanitizer).
-    try {
-      collect_cycles();
-    } catch (...) {
-      if (!error)
-        error = std::current_exception();
     }
   });
   t.join();

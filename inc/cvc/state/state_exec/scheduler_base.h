@@ -207,6 +207,9 @@ scheduling_policy policy_from_state(cvc::state &root, scheduling_policy fallback
 
 namespace detail {
 class lock_home;
+/// The next scheduler_base::serial(), from one counter in the library (out of line, so every
+/// module draws from the same one).
+std::uint64_t next_scheduler_serial() noexcept;
 } // namespace detail
 
 /// Abstract scheduler — the surface the DSL intrinsics call through
@@ -223,6 +226,10 @@ class lock_home;
 class scheduler_base {
 public:
   virtual ~scheduler_base() = default;
+
+  /// This scheduler's serial: unique in the OS process and never reused, as its address can be
+  /// once it is gone (the foreign-future check, S1-Q2).
+  std::uint64_t serial() const noexcept { return serial_; }
 
   // --- Process submission (spawn) ---
   virtual int execute(const std::string &script, const execute_options &opts) = 0;
@@ -335,6 +342,9 @@ public:
   virtual scheduling_policy policy() const { return scheduling_policy::round_robin; }
   /// A spawn's priority was clamped to the spawner's floor: count it (gap G-40).
   virtual void note_priority_clamped() {}
+
+private:
+  const std::uint64_t serial_ = detail::next_scheduler_serial();
 };
 
 /// limits.async_steps_per_cpu_ms when nothing sets it: what the steps cost, a step being about

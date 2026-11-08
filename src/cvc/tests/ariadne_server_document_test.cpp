@@ -73,7 +73,7 @@ ari::Value seq(const std::vector<std::string> &items) {
   return v;
 }
 
-ari::Value map(std::vector<std::pair<std::string, ari::Value>> entries) {
+ari::Value map(std::vector<ari::Value::Entry> entries) {
   ari::Value v;
   v.kind = ari::Value::Kind::Map;
   v.entries = std::move(entries);
@@ -294,9 +294,9 @@ TEST(ServerDocumentTest, QuitAsksTheRelayToStop) {
   EXPECT_EQ(doc.exit_code(), 3);
 }
 
-// The relay draws no scene and runs no world from a document yet: the parsed scene, its physics and
-// bodies included, is kept for the world runtime that will attach (ARIADNE_WORLDS.md §14), and the
-// load says it is not simulated.
+// The relay publishes a document's scene as the room's world (WD1) but simulates none of its
+// physics yet: the parsed scene, its physics and bodies included, is kept from read() on for the
+// world runtime that will attach (ARIADNE_WORLDS.md §14), and the load says it is not simulated.
 TEST(ServerDocumentTest, KeepsTheSceneAndSaysItIsNotSimulated) {
   if (!ari::AppRuntime::have_yaml())
     GTEST_SKIP() << "built without yaml-cpp";
@@ -315,6 +315,8 @@ scene:
   cvc::app app;
   ari::ServerDocument doc(app, kRoom);
   ASSERT_EQ(doc.read(path), "");
+  // read() has it already, so the relay can publish the world before the document runs.
+  EXPECT_EQ(doc.scene().nodes.size(), 2u);
   const std::vector<std::string> warnings = doc.load(path);
   bool said = false;
   for (const std::string &w : warnings) {

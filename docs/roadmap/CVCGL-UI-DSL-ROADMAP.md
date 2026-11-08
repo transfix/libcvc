@@ -4449,9 +4449,17 @@ A cross-cutting v1 workstream, sequenced so each phase is independently useful:
    embedded) → `setUiFontPath()` → `$CVC_UI_FONT` → a search of common system fonts (DejaVu / Noto /
    Arial Unicode / …) → the ASCII vector face as a logged fallback. ImGui 1.92 bakes glyphs on demand,
    so a loaded covering font needs no glyph-range wrangling. Verified: the old default lacks Cyrillic /
-   Greek (`IsGlyphInFont` = 0); DejaVu carries them (= 1). CJK/emoji still need a larger font, supplied
-   the same way (`setUiFont*`). A future refinement is a bundled/`cvcpkg` font so wasm and font-less
-   hosts get coverage without a system font.
+   Greek (`IsGlyphInFont` = 0); DejaVu carries them (= 1). CJK still needs a larger font, supplied
+   the same way (`setUiFont*`). **Emoji and the bundled fonts ✅ LANDED** (for nicotina's feed on
+   the web page): cvcGL bundles DejaVu Sans Mono and Twemoji Mozilla (`src/cvcGL/fonts`, installed
+   to `share/libcvc/fonts`, embedded at `/usr/share/libcvc/fonts` in the browser hosts). DejaVu
+   Sans Mono is the UI font where no other resolves (the browser), and under any UI font it supplies
+   the symbols the font lacks (`↩ ⇄ ♥`). Emoji draw in colour where cvcGL compiles imgui's FreeType
+   loader, which the cvcpkg imgui 1.92.9+cvc.4 ships as source along with a 32-bit `ImWchar` (a
+   16-bit one can't hold a character past U+FFFF). ImGui then rasterises all its text with FreeType;
+   `setUiFontFallbacks(false)` keeps stb_truetype and the UI font alone (the golden-image test).
+   ImGui doesn't shape text, so a ZWJ sequence (a family, a profession), a flag (two regional
+   indicators) or a skin tone shows as its parts.
 3. **Layout uses display-width** — route §3.0.3 sizing / truncation / the terminal column math through
    `cvc::text::display_width`. **✅ LANDED.** A codebase-wide audit found the UI/backend text paths are
    **already display-correct by delegation**: the ImGui reference backend measures per-glyph via the

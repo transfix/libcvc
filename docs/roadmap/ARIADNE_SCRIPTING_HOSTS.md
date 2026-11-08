@@ -703,6 +703,8 @@ chroot, and bound writes.
 
 The largest server document planned is a world: the scene, physics, avatars and controllers every
 client builds its simulation from ([`ARIADNE_WORLDS.md`](ARIADNE_WORLDS.md), whose WD1 rides S0).
+WD1 is built: a server document whose `scene:` has nodes or lights is the room's world, and the
+relay publishes it before `init:` runs.
 
 ### 6.2 Python on the server
 

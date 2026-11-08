@@ -524,25 +524,24 @@ jobs:
           "$py" -m pip install 'httpx>=0.24'
           "$py" -c 'import httpx; print("cvcpkg publish extra ok: httpx", httpx.__version__)'
 
-      # The macos-15-intel image has Homebrew's jpeg-turbo (3.2.0, for its Java and PHP tools)
-      # linked into /usr/local/include, which Apple clang searches, and libcvc compiled
-      # media_rungs.cpp against that turbojpeg.h ahead of the deps prefix's. 3.2 makes tj3Init a
-      # macro for tj3InitVersion, which the prefix's 3.1.0 libturbojpeg lacks, so every Intel row
-      # failed to link from 3.7.1 on ("_tj3InitVersion" undefined). Unlinked, the prefix's header
-      # is found (checked on this image, diagnostic run 41007705020). arm64's Homebrew is
-      # /opt/homebrew, which clang does not search.
-      - name: Keep Homebrew's turbojpeg.h out of the build (macOS Intel)
-        if: matrix.target.platform == 'macos' && matrix.target.arch == 'x86_64'
-        shell: bash
-        run: |
-          set -euo pipefail
-          if brew list --versions jpeg-turbo >/dev/null 2>&1; then
-            brew unlink jpeg-turbo
-          fi
-          if [ -e /usr/local/include/turbojpeg.h ]; then
-            echo "::error::/usr/local/include/turbojpeg.h is still there: it would shadow the deps prefix's"
-            exit 1
-          fi
+      # No Homebrew on macOS: not its tools, not its headers, not its libraries. The runner images
+      # ship it (/usr/local on Intel, /opt/homebrew on arm64), and a job that takes cmake, ninja
+      # and pkg-config from PATH gets Homebrew's. So libcvc is built with cvcpkg's, first on PATH
+      # from here on (the ari steps below use them too), configured to ignore both Homebrew
+      # prefixes, and checked after the build for anything that came from one.
+      #
+      # This replaces `brew unlink jpeg-turbo`. The macos-15-intel image has Homebrew's
+      # jpeg-turbo 3.2.0 in /usr/local, and libcvc once compiled media_rungs.cpp against its
+      # turbojpeg.h instead of the deps prefix's 3.1.0. 3.2 makes tj3Init a macro for
+      # tj3InitVersion, which 3.1.0 lacks, so every Intel row failed to link from 3.7.1 on
+      # ("_tj3InitVersion" undefined; diagnostic run 41007705020). The deps prefix's include dir
+      # is on the compile line and outranks clang's built-in /usr/local/include, so Homebrew's
+      # header can only win when /usr/local itself is put on the line, by Homebrew's pkg-config
+      # or by a CMake search of /usr/local. Both are gone now, and the check after the build
+      # fails on any header or library from a Homebrew prefix.
+      - name: Install build tools (cvcpkg) [macOS]
+        if: matrix.target.platform == 'macos'
+        uses: ./.github/actions/cvcpkg-build-tools
 
       - name: Configure (Linux/macOS)
         if: matrix.target.platform != 'windows'
@@ -564,7 +563,14 @@ jobs:
           # libcvc through 3.7.5+cvc.2 shipped WITHOUT the conference transports (their
           # defaults are OFF) while the recipe declared grpc/protobuf as runtime deps: an
           # arigl or arisrv built on the SDK compiled the conference out. Asserted below.
+          # macOS: CMake must never find a package in a Homebrew prefix (see the build tools
+          # step above).
+          platform_args=()
+          if [ "${{ matrix.target.platform }}" = "macos" ]; then
+            platform_args+=("-DCMAKE_IGNORE_PREFIX_PATH=/usr/local;/opt/homebrew")
+          fi
           cmake -B build -G Ninja \
+            ${platform_args[@]+"${platform_args[@]}"} \
             -DCMAKE_BUILD_TYPE="$CMAKE_CFG" \
             -DCMAKE_PREFIX_PATH="$extra_prefix" \
             -DCMAKE_INSTALL_PREFIX="$PWD/stage" \
@@ -644,6 +650,29 @@ jobs:
           set -euo pipefail
           cmake --build build --parallel --config "$CMAKE_CFG"
           cmake --install build --config "$CMAKE_CFG" --component libcvc
+
+      # Nothing in the macOS build came from Homebrew. ninja's deps log lists every header each
+      # object read, and otool every library the staged libraries load.
+      - name: Check the build used nothing from Homebrew [macOS]
+        if: matrix.target.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew_paths='^[[:space:]]+/(usr/local|opt/homebrew)/'
+          headers=$(ninja -C build -t deps | grep -E "$brew_paths" | sort -u || true)
+          if [ -n "$headers" ]; then
+            echo "$headers"
+            echo "::error::the build read the headers above from a Homebrew prefix"
+            exit 1
+          fi
+          libs=$(find stage -type f -name '*.dylib' -exec otool -L {} + | grep -E "$brew_paths" || true)
+          if [ -n "$libs" ]; then
+            echo "$libs"
+            echo "::error::a staged library loads the libraries above from a Homebrew prefix"
+            exit 1
+          fi
+          echo "no header or library from /usr/local or /opt/homebrew"
+          echo "build tools: $(command -v cmake), $(command -v ninja), $(command -v pkg-config); bash: $BASH ($BASH_VERSION)"
 
       - name: Assert XMLRPC landed in the stage
         shell: bash
@@ -1716,9 +1745,10 @@ jobs:
       # The twins of "Build, pack & publish ari [Linux]", "... arisrv [Linux]" and "... arigl
       # [Linux]": the recipe's own build script against the libcvc just installed into $STAGE (and
       # for arigl the cvcGL in stage-cvcgl). Last in the job because they take cmake and ninja from
-      # cvcpkg, which this action puts first on PATH for every later step.
+      # cvcpkg, which this action puts first on PATH for every later step. macOS has them already
+      # (its libcvc build used them), so this is Windows'.
       - name: Install build tools (cvcpkg) for ari
-        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform != 'linux' && matrix.config == 'release' && matrix.pyver == '311' }}
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'windows' && matrix.config == 'release' && matrix.pyver == '311' }}
         uses: ./.github/actions/cvcpkg-build-tools
         with:
           tools: cmake ninja

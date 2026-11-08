@@ -1,7 +1,8 @@
 # Ariadne worlds: the server's document defines the world, and every client runs it
 
-> **Status: PLANNED (2026-11-07).** Nothing here is built. Q1 is settled: the light rig lives in
-> the server (§16). The other decisions are open. One server holds many rooms, each its own world
+> **Status: WD0 and WD1 BUILT (2026-11-07); the rest is planned.** The relay seeds each room from
+> a world document, look included (§15). Q1 is settled: the light rig lives in the server (§16).
+> The other decisions are open. One server holds many rooms, each its own world
 > (§10); it says which conference features it offers, and stock components follow (§11); clients
 > may already hold the world, or fetch it as they need it (§12); a private room is end-to-end
 > encrypted, its world simulated by its members, and the relay only forwards it (§13). The same
@@ -69,9 +70,9 @@ Checked against master 797ba4d9; the lab's rows, from "Vehicles and their naviga
 
 | Part | Today | Where |
 |---|---|---|
-| World geometry | C++. The relay seeds a 20 m ground plane and a 1 m reference box, or with `--scene large` a 100 m plane and 24 meshes (the built-in bunny). It seeds only while the scene's revision is 0. | `default_scene_objects`, `large_demo_scene_objects` in `src/cvc/ariadne/conference/room_scene.cpp`; `src/arisrv/main.cpp` (`--scene`) |
+| World geometry | A world document (WD1). `arisrv` runs `cvc://worlds/default.ari` (a 20 m ground plane and a 1 m reference box), `--scene large` runs `cvc://worlds/large.ari` (a 100 m plane and 24 meshes, the built-in bunny), and a `--doc` whose document has a `scene:` is the world instead. The relay publishes it in one revision at start-up. The C++ twins `default_world()` / `large_world()` are the fallback when the file can't be found; a test pins each equal to its document. | `src/cvc/ariadne/worlds/`; `room_world_from_scene`, `write_room_world` in `src/cvc/ariadne/conference/room_scene.cpp`; `src/arisrv/main.cpp` |
 | Wire format | Scalar leaves under `conf.rooms.<room>.scene.{rev, env.*, objects.<id>.*}`: a subset of the document's `Scene` / `SceneNode` / `SceneLight`. Meshes go by `source.uri`. Removal is soft (`present = 0`); `rev` is written last. | `inc/cvc/ariadne/conference/room_scene.h` |
-| Look | The wire carries lights and shadows (`scene.env.lights.*`, `scene.env.shadows.*`), but the relay seeds none. The client document declares the light rig and shadows, by an earlier choice, so the rig "lives here, not in the server". | `default_scene_env`; `examples/ariadne/documents/conference_roster.ari` |
+| Look | The world's (Q1, WD1). The world document declares the light rig and the shadows, and the relay publishes them through `scene.env.lights.*` and `scene.env.shadows.*`, which now carry a rig's tuning knobs (stage, key, fill, back, warmth, environment, ambient, wash, sun) and the shadows' re-bake interval. The conference document has no `scene:` block. | `default_room_rig`, `write_scene_env` in `room_scene.cpp`; `src/cvc/ariadne/worlds/default.ari` |
 | Who writes the scene | Only the relay. A client may write only its own participant subtree (bound writes, default on). | `room_write_gate.h` |
 | Client realization | `room_view` rebuilds the scene from the tree whenever `scene.rev` moves, with the same realizer a document's `scene:` uses. | `src/cvcGL/ariadne/room_view.cpp` (`sync_scene`) |
 | Physics statics | Built from the scene objects: a plane becomes a 0.2 m slab, and boxes and spheres become themselves. Meshes are skipped, so the bunnies don't collide. | `room_statics` in `src/cvc/ariadne/holon_sync.cpp` |
@@ -82,7 +83,7 @@ Checked against master 797ba4d9; the lab's rows, from "Vehicles and their naviga
 | Speed veto | Compiled in: `room_holon_config()` sets `max_speed = 4.0`. | `holon_sync.cpp` |
 | Holon | One world clock at 120 Hz. The relay simulates every avatar in Jolt. A client simulates its own avatar too, predicts it, and snaps and replays past 5 cm. Peers are kinematic, played from a buffer. Intents go up; pose snapshots come down at 60, 30 or 20 Hz depending on round-trip time. | `inc/cvc/ariadne/holon.h`, `holon_sync.h`, `room_pose_relay.cpp`, `inc/cvc/core/world_clock.h` |
 | Determinism | Jolt runs in cross-platform determinism mode. A golden state hash pins it on Windows, Linux, macOS, x86_64 and arm64, and wasm-mt (its own CI job). | `physics_world_test.cpp` (`exact_scene_hash`), `physics_parity_test.cpp`; ci.yml "physics replay (wasm-mt, node)" |
-| Documents on the server | `arisrv --doc server.ari` (S0, transfix/libcvc#1046) runs one headless: DSL programs on the relay's loop once per room step, the holon's world clock at `sim.tick`, the room read-only at `room`, `server: publish:` namespaces sent to every client, and `requires: [relay]`. It keeps the parsed `scene:` (physics and bodies included) on `ServerDocument::scene()` but doesn't run it yet, and warns so: WD1 publishes it, and §14's headless world runtime will simulate it as the holon's one physics world. | ARIADNE_SCRIPTING_HOSTS.md §6.1, §6.5.3; `inc/cvc/ariadne/server_document.h` |
+| Documents on the server | `arisrv --doc server.ari` (S0, transfix/libcvc#1046) runs one headless: DSL programs on the relay's loop once per room step, the holon's world clock at `sim.tick`, the room read-only at `room`, `server: publish:` namespaces sent to every client, and `requires: [relay]`. A `scene:` with nodes or lights is the room's world, which the relay publishes before `init:` runs (WD1). Its physics and bodies are kept on `ServerDocument::scene()` but not simulated yet, and the load warns so: §14's headless world runtime will simulate them as the holon's one physics world. | ARIADNE_SCRIPTING_HOSTS.md §6.1, §6.5.3; `inc/cvc/ariadne/server_document.h` |
 | What a document can already say | Far more than the room tree carries: `scene:` with primitives, meshes with `fit:`, heightfields, light rigs and shadows, and the custom node types `generated_world` and `cloud_sky`. `scene.physics:` gives gravity, `fixed_dt`, materials and per-node bodies (dynamic, kinematic or static; box, sphere, hull, mesh or terrain). All of it parses in core libcvc, with no GL. | `docs/ARIADNE.md` (Scene, Physics); `src/cvc/ariadne/loader.cpp` |
 | Persistence | None. The room lives in memory, and a restart re-seeds it. Only the device-key pins can go to a file. `distributed_state_config::blob_store_path` is not read. | `src/arisrv/main.cpp` (`--device-pins`); DISTRIBUTED_STATE_ROADMAP.md |
 | Scale pieces | Built but unused by the conference: hash partitioning (`state_hash_partition`, `state_cluster_shard::partition()`) and delegation leases (`state_delegation_manager`). | `inc/cvc/state/` |
@@ -110,13 +111,16 @@ world works.
 writes, with its revision written last, and both the relay's holon and every client read it from the
 same leaves. This plan generalizes that one pattern to everything that defines the world.
 
-**Two loose ends**, for WD0:
+**Two loose ends, fixed by WD0:**
 
-- The comment above the seeding in `src/arisrv/main.cpp` says the world is lit "under a sun"; no
-  light is seeded.
-- `--set` is applied before the scene is seeded, and seeding happens only at revision 0. A `--set`
-  of `scene.rev` therefore stops the default world from being seeded at all, and a `--set` of an
-  object's leaves is overwritten by the seed or quietly added to it.
+- The comment above the seeding in `src/arisrv/main.cpp` said the world is lit "under a sun"; no
+  light was seeded. The world's rig lights it now (WD1).
+- `--set` was applied before the scene was seeded, and seeding happened only at revision 0. A
+  `--set` of `scene.rev` therefore stopped the default world from being seeded at all, and a
+  `--set` of an object's leaves was overwritten by the seed or quietly added to it. `--set` now
+  comes after the world and the room's policies (and before a server document's `init:`, so its
+  `ariadne.limits.*` still bound the document), and the world is published whatever the
+  revision.
 
 ## 2. Two documents: the world and the viewer
 
@@ -583,8 +587,8 @@ GENERATED-WORLD-ROADMAP.md's.)
 
 | Phase | What | Depends on | Size |
 |---|---|---|---|
-| WD0 | The loose ends: `--set` after seeding, or a guard so a `--set` can't suppress the default world; the "under a sun" comment | — | S |
-| WD1 | **The world document seeds the room.** `arisrv --doc world.ari` publishes the document's `scene:` (objects, lights, shadows) through `write_scene_object` / `write_scene_env`. `cvc://worlds/default.ari` and `large.ari` replace the C++ seeds, and `--scene` names them. The light rig and shadows move from the conference document to the world document (Q1), and the conference document drops its `scene:` block. | S0 (met by transfix/libcvc#1046) | M |
+| WD0 | **Done** (2026-11-07). The loose ends: `--set` after seeding, or a guard so a `--set` can't suppress the default world; the "under a sun" comment. Built as `--set` after the world and the room's policies, before a server document's `init:` (§1) | — | S |
+| WD1 | **Done** (2026-11-07). **The world document seeds the room.** `arisrv --doc world.ari` publishes the document's `scene:` (objects, lights, shadows), in one revision (`write_room_world`). `cvc://worlds/default.ari` and `large.ari` replace the C++ seeds, and `--scene` names them. The light rig and shadows move from the conference document to the world document (Q1), and the conference document drops its `scene:` block. As built: the wire gained a rig's knobs and the shadows' interval; `room_world_from_scene` leaves out, with a warning, what the wire can't hold (other node types and sources, children, textures, shaders), and publishes every body as a static until WD3; `--scene` together with a `--doc` that has a `scene:` is refused; the C++ twins are the fallback | S0 (met by transfix/libcvc#1046) | M |
 | WD2 | **The rules come from the document.** The physics, archetype, policy and controller sections (§3), with the activation tick. The holon and `room_view` read them instead of `avatar_body{}`, `kAvatarWidth`, `max_speed = 4.0` and the panel's "walker" literal. | WD1 | M |
 | WD3 | **Entities.** The entities table (§4); server-dynamic props and NPC bodies from the document and from server programs, simulated on the relay by L0's headless runtime; their poses on the pose stream; colliders for meshes. | WD2, L0 | L |
 | WD4 | **A controller catalog.** Kernels by `name@version`, a determinism gate per kernel, capability negotiation with an interpolation fallback; the vehicle as the second kernel. A participant picks from the archetype's list (§5k phase 3). | WD2 | L |

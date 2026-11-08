@@ -122,6 +122,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/state/state_exec/async_call.h
   ../../inc/cvc/state/state_exec/async_host.h
   ../../inc/cvc/state/state_exec/async_scheduler.h
+  ../../inc/cvc/state/state_exec/exec_group.h
   ../../inc/cvc/state/state_exec/intrinsics.h
   ../../inc/cvc/state/state_exec/resource_policy.h
   ../../inc/cvc/state/state_exec/stdlib.h
@@ -140,6 +141,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/text.h
   ../../inc/cvc/core/thread_pool.h
   ../../inc/cvc/core/thread_class.h
+  ../../inc/cvc/core/exec_pool.h
+  ../../inc/cvc/core/cpu_placement.h
   ../../inc/cvc/volume/volmagick.h
   ../../inc/cvc/geometry/geometry_file_io.h
   ../../inc/cvc/model/model.h
@@ -242,6 +245,8 @@ set(SOURCE_FILES
   core/text.cpp
   core/thread_pool.cpp
   core/thread_class.cpp
+  core/exec_pool.cpp
+  core/cpu_placement.cpp
   processing/bilateral_filter.cpp
   processing/contrast_enhancement.cpp
   volume/cvcraw_io.cpp
@@ -294,6 +299,7 @@ set(SOURCE_FILES
   state/state_exec/scheduler.cpp
   state/state_exec/async_host.cpp
   state/state_exec/async_scheduler.cpp
+  state/state_exec/exec_group.cpp
   state/state_exec/intrinsics.cpp
   state/state_exec/resource_policy.cpp
   state/state_exec/stdlib.cpp
@@ -1609,6 +1615,12 @@ endif()
 # COMPONENT libcvc like the library itself, so the release tarballs (cpack's libcvc component)
 # carry it as well as the cvcpkg bundles (package.files: share/libcvc/ariadne/).
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ariadne/components
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/libcvc/ariadne
+        COMPONENT libcvc
+        FILES_MATCHING PATTERN "*.ari")
+# The stock worlds beside them (cvc://worlds/default.ari, large.ari): what arisrv seeds a room
+# with (ARIADNE_WORLDS.md WD1).
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ariadne/worlds
         DESTINATION ${CMAKE_INSTALL_DATADIR}/libcvc/ariadne
         COMPONENT libcvc
         FILES_MATCHING PATTERN "*.ari")

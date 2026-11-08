@@ -88,7 +88,7 @@ jobs:
         # Drives the recipe's build-wasm.sh against the pre-installed deps. It
         # compiles cvc+cvcGL+pycvc+pycvc_gl, then link-host.sh embeds vtk-python
         # cvc.6 and runs the node smoke (prints PYCVC_VTK_BRIDGE_OK / PYCVC_EXEC_OK /
-        # PYCVC_WASM_OK), non-fatal here; the next step is the check.
+        # PYCVC_EXEC_POOL_OK / PYCVC_WASM_OK), non-fatal here; the next step is the check.
         #
         # Pack ONLY what this build installed. $WASM_DEPS holds the whole dep closure, so
         # `pack --from-prefix "$WASM_DEPS"` shipped every dep with its manifest, and
@@ -115,7 +115,9 @@ jobs:
         # step is the PR check). build-wasm.sh keeps the host link, and link-host.sh's own smoke,
         # non-fatal for packaging, so the installed host is run here: it must exit 0 and print
         # PYCVC_VTK_BRIDGE_OK, PYCVC_EXEC_OK (an Exec on the app's lock manager, which is single in
-        # this no-threads build, runs a with-lock: docs/STATE_EXEC_LOCKS.md 9.5) and PYCVC_WASM_OK.
+        # this no-threads build, runs a with-lock: docs/STATE_EXEC_LOCKS.md 9.5), PYCVC_EXEC_POOL_OK
+        # (an ExecPool at threads=0 runs a batch, its groups pumped inline: threaded execution's
+        # Stage 1a) and PYCVC_WASM_OK.
         # A missing host fails it too: there would be nothing checked. (v3.7.2's first build
         # packed a host that node could not compile, two libxml2s.)
         run: |
@@ -128,7 +130,7 @@ jobs:
           status=${PIPESTATUS[0]}
           [ "$status" -eq 0 ] \
             || { echo "::error::pycvc_host exited with status $status under node"; exit 1; }
-          for m in PYCVC_VTK_BRIDGE_OK PYCVC_EXEC_OK PYCVC_WASM_OK; do
+          for m in PYCVC_VTK_BRIDGE_OK PYCVC_EXEC_OK PYCVC_EXEC_POOL_OK PYCVC_WASM_OK; do
             grep -qx "$m" "$RUNNER_TEMP/host-smoke.txt" \
               || { echo "::error::the pycvc_host smoke printed no $m"; exit 1; }
           done

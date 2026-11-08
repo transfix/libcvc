@@ -35,6 +35,7 @@
 //
 // What it makes, all deterministic in the params:
 //   - cell_field: a cell's density at a morph, the map a near VolumeNode draws;
+//   - cell_sun_tau: the same cell's optical depth toward the sun from each voxel, its self-shade;
 //   - shadow_mask: the periodic ground shade, the optical depth along the sun from each point of
 //     the base plane through the deck. A receiver at (x, y, z) reads it at its base-plane point,
 //     base_point(); the projection is exact for any ground height below the deck;
@@ -185,6 +186,12 @@ public:
   void cell_field(const cloud_cell &c, double m, std::vector<float> &out) const;
   // One variant's lumped, normalized map (the u = 0 field of a cell showing it).
   const std::vector<float> &variant_map(int v) const { return m_maps[v]; }
+  // The cloud's own shade inside it: at each of a cell's voxels (cell_field's layout), the optical
+  // depth from there toward the sun to where the ray leaves the map, the renderer's opacity
+  // integrated in metres (as the shadow's). 0 on the top layer and in the open, growing down into
+  // the cloud and away from the sun. A crossfade of two variants' depths, as cell_field's density.
+  void cell_sun_tau(const cloud_cell &c, double m, std::vector<float> &out) const;
+  const std::vector<float> &variant_sun_tau(int v) const { return m_sun[v]; }
 
   // The periodic shadow mask at morph clock m: shadow_size()^2 bytes, row-major (x fastest), texel
   // (tx, ty) centred on the pattern point ((tx + 0.5), (ty + 0.5)) * period_m() / shadow_size().
@@ -244,6 +251,8 @@ private:
   int m_f = 16;        // far texels per cell
   std::vector<cloud_cell> m_cells;
   std::vector<std::vector<float>> m_maps; // per variant, lumped and normalized
+  std::vector<std::vector<float>> m_sun;  // per variant, the optical depth toward the sun
+  void build_sun();
   // Per variant: the optical depth over the base plane around the cloud (m_tau_n^2, even, centred
   // on the cloud), and its coarse slices (m_far_n^2 * far_layers, centred).
   int m_tau_n = 0, m_far_n = 0;

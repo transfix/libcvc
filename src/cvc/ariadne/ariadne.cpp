@@ -195,6 +195,7 @@ Widget substitute_index(const Widget &w, int index) {
   out.background.bind = replace_all(out.background.bind, kTok, idx);
   out.background.status = replace_all(out.background.status, kTok, idx);
   out.poster = replace_all(out.poster, kTok, idx); // §5.13
+  out.emoji = replace_all(out.emoji, kTok, idx);   // §5.11 a post's own shortcodes
   // §12: a repeated MOUNT (Widget::scope set) gets a per-instance sub-prefix — append the loop
   // index so each instance's fragment binds to its OWN state subtree (includes.<as>.<i>), rather
   // than all N instances sharing one, which would violate repeat's per-instance-state contract.
@@ -648,8 +649,8 @@ public:
   // before the walk. Once the frame's cumulative predicate-eval time is spent, the
   // remaining predicates this frame skip evaluation and degrade fail-safe (hidden) with a
   // one-time warning, so N reactive widgets cannot together stall the frame.
-  void begin_frame() {
-    frame_ = se::time_budget(kFrameBudgetSeconds);
+  void begin_frame(double budget_seconds = kFrameBudgetSeconds) {
+    frame_ = se::time_budget(budget_seconds);
     resolve_data_settings();
   }
 
@@ -665,8 +666,9 @@ public:
   }
 
   struct Outcome {
-    bool value;        // predicate result, or the caller's `dflt` on any failure
-    std::string error; // empty on success; a diagnostic otherwise
+    bool value;           // predicate result, or the caller's `dflt` on any failure
+    std::string error;    // empty on success; a diagnostic otherwise
+    bool skipped = false; // not evaluated: the frame's budget was spent (not a broken predicate)
   };
   struct StringOutcome {
     std::string value; // display string, or the caller's `dflt` on any failure
@@ -678,7 +680,7 @@ public:
   Outcome eval_bool(const std::string &src, bool dflt) {
     const RawOutcome o = eval_raw(src);
     if (!o.error.empty())
-      return {dflt, o.error};
+      return {dflt, o.error, o.skipped};
     return {o.value.is_truthy(), std::string()};
   }
 
@@ -750,8 +752,9 @@ public:
 
 private:
   struct RawOutcome {
-    se::value_t value; // valid only when error is empty
-    std::string error; // empty on success; a diagnostic otherwise (contains src + cause)
+    se::value_t value;    // valid only when error is empty
+    std::string error;    // empty on success; a diagnostic otherwise (contains src + cause)
+    bool skipped = false; // the per-frame budget was spent before it ran
   };
 
   // The shared evaluate path for every read-lane expression: compile-cached, bounded three
@@ -762,7 +765,7 @@ private:
       return {{}, "ari: reactive expr parse error in \"" + src + "\""};
     const double remaining = frame_.remaining();
     if (remaining <= 0.0)
-      return {{}, "ari: reactive expr \"" + src + "\" skipped — per-frame budget exhausted"};
+      return {{}, "ari: reactive expr \"" + src + "\" skipped — per-frame budget exhausted", true};
     struct charge_frame { // charges the eval, and its steps, to the frame however run() ends
       se::time_budget &frame;
       const se::evaluator_state &st;
@@ -993,6 +996,7 @@ struct Runtime::Impl {
   // with no reactive fields pays nothing), plus de-duplicated diagnostics surfaced by
   // take_reactive_warnings(). reactive_warned keeps the dedup set across drains.
   std::unique_ptr<ReactiveEngine> reactive;
+  double reactive_budget = 0.030; // set_reactive_frame_budget; the engine's default
   std::vector<std::string> reactive_warnings;
   std::set<std::string> reactive_warned;
   int frame_instances = 0; // §3: repeat instances emitted this frame (bounds many repeats)
@@ -1032,6 +1036,17 @@ struct Runtime::Impl {
     return *images;
   }
   void emit_media_image(const Widget &w, const std::string &uri, const char *label);
+  // §5.11: the name of what to draw for a picture request now: its fitted raster (published), the
+  // frame of its animation that is due, or the placeholder of its box. `v` gets the cache's view.
+  std::string media_picture(const media::ImageRequest &rq, media::ImageView &v);
+  // §5.11 `size: "N%"`: a picture's or a player's width in px, that share of the width the backend
+  // gives it on its line (at least its own width where the window fits its content), else its
+  // own width (img_size).
+  int fill_width(const Widget &w);
+  // §5.11 a text: with emoji:: its line with the `:name:`s the map names as pictures, or as the
+  // text the map gives; where the backend can't put a picture in a line, the text with them as
+  // their `:name:`. False when the map names none of them (the caller draws the line as it is).
+  bool emit_text_runs(const Widget &w, const char *label, const std::string &value, bool literal);
   // §5.11: publish a ready picture once per raster generation; keep a status: key current.
   void publish_media(const media::ImageView &v);
   void write_media_status(const std::string &status_path, const media::ImageView &v);
@@ -1054,6 +1069,10 @@ struct Runtime::Impl {
     bool has_pending = false;
     double last_publish = 0.0;
     bool autoplay_done = false;
+    // An autoplaying player the user (or the document) hasn't played or paused since: it plays
+    // while its picture is in view, and `offscreen_paused` says it was paused for leaving it.
+    bool autoplay_owned = false, offscreen_paused = false;
+    float aspect = 0.0f; // the last frame's height / width (0: none yet)
     std::string wrote_playing, wrote_muted, wrote_state, wrote_duration, wrote_error;
     double wrote_position = -1.0, wrote_position_at = 0.0;
     std::uint64_t drawn_walk = 0;
@@ -1292,9 +1311,11 @@ struct Runtime::Impl {
   // it at the active mount scope so a mounted fragment's predicates read its own sub-prefix,
   // matching where its binds resolve. Every reactive helper goes through here.
   ReactiveEngine &ensure_reactive() {
-    if (!reactive)
+    if (!reactive) {
       reactive = std::make_unique<ReactiveEngine>(app, prefix,
                                                   [this](const std::string &n) { return has(n); });
+      reactive->begin_frame(reactive_budget); // made mid-frame: this frame's budget is the host's
+    }
     reactive->set_root_path(app, current_prefix());
     return *reactive;
   }
@@ -1370,6 +1391,10 @@ struct Runtime::Impl {
   // §4 read-lane: is `w` shown this frame? True when it has no visible_when; otherwise
   // the predicate's result (fail-safe HIDDEN on a broken predicate).
   bool visible(const Widget &w);
+  // A visible_when / enabled_when / disabled_when predicate's value: `dflt` when it is broken
+  // (warned once), and last frame's value when this frame's budget ran out before it.
+  bool predicate(const std::string &src, bool dflt);
+  std::unordered_map<std::string, bool> last_good_predicate;
   // §4 read-lane: is `w` disabled (greyed, non-interactive) this frame? True when
   // enabled_when is falsy OR disabled_when is truthy. Fail-safe DISABLED on a broken
   // predicate.
@@ -1392,35 +1417,37 @@ struct Runtime::Impl {
   }
 };
 
+bool Runtime::Impl::predicate(const std::string &src, bool dflt) {
+  const ReactiveEngine::Outcome o = ensure_reactive().eval_bool(src, dflt);
+  if (o.skipped) {
+    // The frame's budget ran out before it (a slow frame in wasm, a big feed): keep last frame's
+    // answer rather than hide or disable the widget for a frame, which flickers it.
+    const auto it = last_good_predicate.find(src);
+    if (it != last_good_predicate.end())
+      return it->second;
+  }
+  if (!o.error.empty())
+    warn_once(o.error);
+  else
+    last_good_predicate[src] = o.value;
+  return o.value;
+}
+
 bool Runtime::Impl::visible(const Widget &w) {
   if (w.visible_when.empty())
     return true;
-  const ReactiveEngine::Outcome o = ensure_reactive().eval_bool(w.visible_when, /*dflt=*/false);
-  if (!o.error.empty())
-    warn_once(o.error);
-  return o.value;
+  return predicate(w.visible_when, /*dflt=*/false);
 }
 
 bool Runtime::Impl::disabled(const Widget &w) {
   if (w.enabled_when.empty() && w.disabled_when.empty())
     return false;
-  ReactiveEngine &re = ensure_reactive();
   // enabled_when falsy -> disabled (fail-safe dflt=false: a broken predicate disables).
-  if (!w.enabled_when.empty()) {
-    const ReactiveEngine::Outcome o = re.eval_bool(w.enabled_when, /*dflt=*/false);
-    if (!o.error.empty())
-      warn_once(o.error);
-    if (!o.value)
-      return true;
-  }
+  if (!w.enabled_when.empty() && !predicate(w.enabled_when, /*dflt=*/false))
+    return true;
   // disabled_when truthy -> disabled (fail-safe dflt=true: a broken predicate disables).
-  if (!w.disabled_when.empty()) {
-    const ReactiveEngine::Outcome o = re.eval_bool(w.disabled_when, /*dflt=*/true);
-    if (!o.error.empty())
-      warn_once(o.error);
-    if (o.value)
-      return true;
-  }
+  if (!w.disabled_when.empty() && predicate(w.disabled_when, /*dflt=*/true))
+    return true;
   return false;
 }
 
@@ -1860,6 +1887,9 @@ void Runtime::Impl::emit_node(const Widget &w) {
 
   case Kind::Text:
     if (w.literal_text) {
+      // §5.11 emoji: the caption's `:name:`s as pictures, where the backend draws them in a line.
+      if (!w.emoji.empty() && emit_text_runs(w, "", label, true))
+        break;
       // §G? optional fixed tint (has_text_color) -> the *_colored leaf; else the plain draw.
       if (w.has_text_color)
         b.text_line_colored(label, w.text_color);
@@ -1871,6 +1901,8 @@ void Runtime::Impl::emit_node(const Widget &w) {
       // with '(', so this is unambiguous. Read-only, bounded, fail-safe empty.
       const std::string val =
           is_expr(w.bind) ? eval_text(w.bind) : read_string(app, resolve(w.bind));
+      if (!w.emoji.empty() && emit_text_runs(w, label, val, false))
+        break;
       if (w.has_text_color)
         b.text_value_colored(label, val, w.text_color);
       else
@@ -2110,7 +2142,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
       vw.bind.clear();
       vw.controls = false;
       vw.autoplay = vw.loop = vw.muted = true;
-      if (vw.img_h <= 0)
+      if (vw.img_h <= 0 && vw.img_fill <= 0) // one that fills the width takes its frames' shape
         vw.img_h = media::placeholder_height(static_cast<int>(vw.img_size), 0, vw.img_shape);
       emit_player(vw, label);
       break;
@@ -2119,7 +2151,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
       emit_media_image(w, name, label);
       break;
     }
-    const float width = static_cast<float>(w.img_size > 0 ? w.img_size : 256.0);
+    const float width = static_cast<float>(fill_width(w));
     if (!b.draw_image(name.c_str(), width)) // a backend with no image path -> show the name as text
       b.text_value(w.label.empty() ? "image" : w.label.c_str(),
                    name.empty() ? std::string("(no image)") : name);
@@ -2232,17 +2264,35 @@ std::string program_string(const std::string &s) {
 
 } // namespace
 
-// §5.11: draw a picture by URI — the cache's fitted raster once it is ready, else a placeholder
-// of the same box — and report its state to the widget's status: path.
-void Runtime::Impl::emit_media_image(const Widget &w, const std::string &uri, const char *label) {
-  media::ImageRequest rq;
-  rq.uri = uri;
-  rq.auth = w.media_auth;
-  rq.w = std::max(1, static_cast<int>(std::lround(w.img_size > 0 ? w.img_size : 256.0)));
-  rq.h = w.img_h > 0 ? std::max(1, static_cast<int>(std::lround(w.img_h))) : 0;
-  rq.fit = w.img_fit;
-  rq.shape = w.img_shape;
-  const media::ImageView v = image_cache().image(rq);
+namespace {
+
+// A width that fills a line (§5.11 `size: "N%"`) changes while a window is resized; its raster is
+// fitted at the next multiple of 64 px up, so a resize refits it every 64 px, not every frame, and
+// the backend scales it the rest of the way.
+int fill_box(int px) { return std::max(64, (px + 63) / 64 * 64); }
+
+// The width a picture `draw_w` px wide is drawn at when its height follows its shape (`aspect`,
+// height / width; 0 unknown) and must stay within `max_h` px (0: no bound): narrower, not cut.
+float within_height(float draw_w, float aspect, double max_h) {
+  if (!(max_h > 0.0) || !(aspect > 0.0f))
+    return draw_w;
+  return std::min(draw_w, static_cast<float>(max_h) / aspect);
+}
+
+} // namespace
+
+int Runtime::Impl::fill_width(const Widget &w) {
+  const double own = w.img_size > 0 ? w.img_size : 256.0;
+  if (!(w.img_fill > 0.0))
+    return std::max(1, static_cast<int>(std::lround(own)));
+  const float avail = backend->available_width(static_cast<float>(own * 100.0 / w.img_fill));
+  if (!(avail > 0.0f))
+    return std::max(1, static_cast<int>(std::lround(own)));
+  return std::max(1, static_cast<int>(std::floor(avail * w.img_fill / 100.0)));
+}
+
+std::string Runtime::Impl::media_picture(const media::ImageRequest &rq, media::ImageView &v) {
+  v = image_cache().image(rq);
   drew_loading = drew_loading || v.status == media::Status::Loading;
   std::string name;
   if (v.status == media::Status::Ready) {
@@ -2277,7 +2327,32 @@ void Runtime::Impl::emit_media_image(const Widget &w, const std::string &uri, co
       published[name] = 0;
     }
   }
-  const float width = static_cast<float>(rq.w);
+  return name;
+}
+
+// §5.11: draw a picture by URI — the cache's fitted raster once it is ready, else a placeholder
+// of the same box — and report its state to the widget's status: path.
+void Runtime::Impl::emit_media_image(const Widget &w, const std::string &uri, const char *label) {
+  const int draw_w = fill_width(w);
+  const bool fill = w.img_fill > 0.0;
+  media::ImageRequest rq;
+  rq.uri = uri;
+  rq.auth = w.media_auth;
+  rq.w = fill ? fill_box(draw_w) : draw_w;
+  // A box keeps its height however the width is rounded: the raster's is scaled with it.
+  rq.h = w.img_h > 0 ? std::max(1, static_cast<int>(std::lround(w.img_h * rq.w / draw_w))) : 0;
+  rq.fit = w.img_fit;
+  rq.shape = w.img_shape;
+  media::ImageView v;
+  const std::string name = media_picture(rq, v);
+  // Its height follows its shape (16:9 until it is known), within max_height:.
+  float aspect = 0.0f;
+  if (rq.h <= 0)
+    aspect = v.status == media::Status::Ready && v.image.width() > 0
+                 ? static_cast<float>(v.image.height()) / static_cast<float>(v.image.width())
+                 : static_cast<float>(media::placeholder_height(rq.w, 0, rq.shape)) /
+                       static_cast<float>(rq.w);
+  const float width = within_height(static_cast<float>(draw_w), aspect, w.img_max_h);
   const std::string caption = (label && *label) ? std::string(label) : std::string("image");
   if (!backend->draw_image(name.c_str(), width)) // a backend with no image path: say what it is
     backend->text_value(caption.c_str(),
@@ -2287,6 +2362,125 @@ void Runtime::Impl::emit_media_image(const Widget &w, const std::string &uri, co
   if (v.status == media::Status::Failed)
     backend->set_tooltip((caption + ": " + v.error).c_str());
   write_media_status(w.media_status, v);
+}
+
+bool Runtime::Impl::emit_text_runs(const Widget &w, const char *label, const std::string &value,
+                                   bool literal) {
+  if (value.find(':') == std::string::npos)
+    return false;
+  // A `:name:` as txwtf, Slack and Mastodon find one: 1-64 of [A-Za-z0-9_+-] between two colons
+  // that aren't glued to a word character outside them, so the :50: in 14:50:47 stays a time.
+  const auto word = [](char c) {
+    const unsigned char u = static_cast<unsigned char>(c);
+    return (u < 0x80 && std::isalnum(u)) || c == '_';
+  };
+  const auto name_char = [&](char c) { return word(c) || c == '+' || c == '-'; };
+  const std::string map = resolve(w.emoji);
+  // A terminal can't put a picture in a line: its pictures aren't fetched (or played) at all.
+  const bool pictures_here = !backend->capabilities().terminal;
+  std::vector<TextRun> runs;
+  std::string text;  // the run being built
+  std::string plain; // the line with the text the map gives, its pictures as their :name:
+  bool changed = false, pictures = false;
+  std::size_t i = 0;
+  while (i < value.size()) {
+    if (value[i] == ':' && (i == 0 || !word(value[i - 1]))) {
+      std::size_t j = i + 1;
+      while (j < value.size() && j - i <= 65 && name_char(value[j]))
+        ++j;
+      const std::size_t len = j - i - 1;
+      if (j < value.size() && value[j] == ':' && len >= 1 && len <= 64 &&
+          (j + 1 == value.size() || !word(value[j + 1]))) {
+        const std::string name = value.substr(i + 1, len);
+        std::string to = read_or<std::string>(app, map + "." + name, std::string());
+        if (to.empty()) { // the map's names are case-insensitive, as txwtf's are
+          std::string lower = name;
+          for (char &c : lower)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+          if (lower != name)
+            to = read_or<std::string>(app, map + "." + lower, std::string());
+        }
+        if (media::is_uri(to) && pictures_here) {
+          std::string pic;
+          if (media::is_video_uri(to)) {
+            // A short video, as some sites allow for an emoji: silent, looping, playing by itself
+            // (a decorative video, §5.13), its frames one line tall. One player per line and URI.
+            std::string key = "emoji";
+            for (std::size_t k = 0; k < emit_path.size(); ++k)
+              key += "_" + std::to_string(emit_path[k]);
+            key += "#" + to;
+            media::PlayerSource ps;
+            ps.uri = to;
+            ps.video = true;
+            ps.frame_w = ps.frame_h = 64;
+            ps.loop = ps.muted = true;
+            ps.audio = false;
+            PlayerSlot &p = player_slot(key, ps);
+            if (p.player && !p.autoplay_done && p.state == media::PlayerState::Ready) {
+              p.autoplay_done = true;
+              p.player->play();
+            }
+            if (player_frame(p, 64, 0, ImageFit::Contain, ImageShape::Rect, steady_seconds())) {
+              pic = p.frame_name;
+            } else {
+              const bool failed = p.state == media::PlayerState::Failed;
+              pic = std::string("media:placeholder:") + (failed ? "failed:" : "loading:") + "32x32";
+              if (!published.count(pic)) {
+                backend->set_image(pic, media::placeholder_image(32, 32, ImageShape::Rect, failed));
+                published[pic] = 0;
+              }
+            }
+          } else {
+            // A picture one line tall: fitted at 32 px wide (64 on a HiDPI screen), its own
+            // shape; an animated GIF or WebP moves, as an image:'s does.
+            media::ImageRequest rq;
+            rq.uri = to;
+            rq.w = 32;
+            media::ImageView v;
+            pic = media_picture(rq, v);
+          }
+          if (!text.empty())
+            runs.push_back(TextRun{std::move(text), std::string()});
+          text.clear();
+          runs.push_back(TextRun{value.substr(i, len + 2), pic});
+          plain += value.substr(i, len + 2);
+          changed = pictures = true;
+          i = j + 1;
+          continue;
+        }
+        if (!to.empty() && !media::is_uri(to)) { // text, such as a unicode emoji's character
+          text += to;
+          plain += to;
+          changed = true;
+          i = j + 1;
+          continue;
+        }
+      }
+    }
+    text += value[i];
+    plain += value[i++];
+  }
+  if (!changed)
+    return false;
+  if (!text.empty())
+    runs.push_back(TextRun{std::move(text), std::string()});
+  const float *rgb = w.has_text_color ? w.text_color : nullptr;
+  if (pictures) {
+    if (label && *label)
+      runs.insert(runs.begin(), TextRun{std::string(label) + ": ", std::string()});
+    if (backend->text_runs(runs, rgb))
+      return true;
+  }
+  // No pictures, or a backend that can't put one in a line: the text, the map's text in it.
+  if (literal && rgb)
+    backend->text_line_colored(plain.c_str(), rgb);
+  else if (literal)
+    backend->text_line(plain.c_str());
+  else if (rgb)
+    backend->text_value_colored(label, plain, rgb);
+  else
+    backend->text_value(label, plain);
+  return true;
 }
 
 void Runtime::Impl::publish_media(const media::ImageView &v) {
@@ -2394,7 +2588,8 @@ Runtime::Impl::PlayerSlot &Runtime::Impl::player_slot(const std::string &key,
     p.auth = ps.auth;
     p.have_frame = false;
     p.has_pending = false;
-    p.autoplay_done = false;
+    p.autoplay_done = p.autoplay_owned = p.offscreen_paused = false;
+    p.aspect = 0.0f;
     p.error.clear();
     p.frame_name = "media:player:" + std::to_string(std::hash<std::string>()(key));
   }
@@ -2434,6 +2629,8 @@ bool Runtime::Impl::player_frame(PlayerSlot &p, int bw, int bh, ImageFit fit, Im
     if (pl->frame(f, p.frame_gen)) {
       p.pending = media::fit_image(f, bw, bh > 0 ? bh : 0, fit, shape, 1.0);
       p.has_pending = !p.pending.empty();
+      if (p.has_pending)
+        p.aspect = static_cast<float>(p.pending.height()) / static_cast<float>(p.pending.width());
     }
     // At most 8 frames a second to a terminal (each is a picture sent).
     const double min_gap = backend->capabilities().terminal ? 1.0 / 8.0 : 0.0;
@@ -2469,8 +2666,12 @@ void Runtime::Impl::emit_player(const Widget &w, const char *label) {
           ? key
           : resolve("ariadne.media.players.p" +
                     std::to_string(std::hash<std::string>()(key) % 1000000007));
-  const int bw = std::max(1, static_cast<int>(std::lround(w.img_size)));
-  const int bh = w.img_h > 0 ? static_cast<int>(std::lround(w.img_h)) : 0;
+  // The picture's box: its size:, or (§5.11 "N%") as wide as its share of the line, its frames
+  // fitted at that width rounded up to 64 px and drawn at the width itself.
+  const int draw_w = fill_width(w);
+  const int bw = w.img_fill > 0.0 ? fill_box(draw_w) : draw_w;
+  const int bh =
+      w.img_h > 0 ? std::max(1, static_cast<int>(std::lround(w.img_h * bw / draw_w))) : 0;
   // A decorative picture (controls: false, muted) never makes a sound, so it opens no audio device
   // and plays wherever it can, an SSH session included.
   const bool decorative = !w.controls;
@@ -2500,6 +2701,7 @@ void Runtime::Impl::emit_player(const Widget &w, const char *label) {
       else
         pl->pause();
       p.wrote_playing = want;
+      p.autoplay_owned = p.offscreen_paused = false; // the document's now, in view or not
     }
     const std::string seek = read_or<std::string>(app, key_of("seek"), std::string());
     if (!seek.empty()) {
@@ -2514,18 +2716,17 @@ void Runtime::Impl::emit_player(const Widget &w, const char *label) {
       pl->set_muted(mute == "1" || mute == "true");
       p.wrote_muted = mute;
     }
-    if (w.autoplay && !p.autoplay_done && p.state == media::PlayerState::Ready) {
-      p.autoplay_done = true;
-      pl->play();
-    }
   }
 
   // The picture: the newest frame (at most 8 a second in a terminal), else the poster, else a
-  // placeholder of the box.
+  // placeholder of the box. One whose height follows its shape stays within max_height:.
+  bool in_view = true;
   if (video) {
     std::string name;
+    float aspect = 0.0f; // its height / width, where the box doesn't set it
     if (player_frame(p, bw, bh, w.img_fit, w.img_shape, now)) {
       name = p.frame_name;
+      aspect = p.aspect;
     } else if (media::is_uri(w.poster)) {
       media::ImageRequest rq;
       rq.uri = w.poster;
@@ -2539,6 +2740,8 @@ void Runtime::Impl::emit_player(const Widget &w, const char *label) {
       if (v.status == media::Status::Ready) {
         publish_media(v);
         name = v.name;
+        if (v.image.width() > 0)
+          aspect = static_cast<float>(v.image.height()) / static_cast<float>(v.image.width());
       }
     }
     if (name.empty()) {
@@ -2551,9 +2754,29 @@ void Runtime::Impl::emit_player(const Widget &w, const char *label) {
         b.set_image(name, media::placeholder_image(bw, bh, w.img_shape, failed));
         published[name] = 0;
       }
+      aspect = static_cast<float>(ph) / static_cast<float>(bw);
     }
-    if (!b.draw_image(name.c_str(), static_cast<float>(bw)))
+    const float width =
+        within_height(static_cast<float>(draw_w), bh > 0 ? 0.0f : aspect, w.img_max_h);
+    if (!b.draw_image(name.c_str(), width))
       b.text_value(caption.c_str(), "(" + std::string(media::player_state_name(p.state)) + ")");
+    in_view = b.item_visible();
+  }
+
+  // autoplay: it starts once it can, and until the user (or the document) plays or pauses it, it
+  // plays while its picture is in view: a feed's videos play as they scroll by, not all at once.
+  if (pl && w.autoplay) {
+    if (!p.autoplay_done && p.state == media::PlayerState::Ready && in_view) {
+      p.autoplay_done = p.autoplay_owned = true;
+      pl->play();
+    } else if (p.autoplay_owned && !in_view && p.state == media::PlayerState::Playing) {
+      pl->pause();
+      p.offscreen_paused = true;
+    } else if (p.autoplay_owned && p.offscreen_paused && in_view &&
+               p.state == media::PlayerState::Paused) {
+      pl->play();
+      p.offscreen_paused = false;
+    }
   }
 
   const bool playing = p.state == media::PlayerState::Playing;
@@ -2578,6 +2801,7 @@ void Runtime::Impl::emit_player(const Widget &w, const char *label) {
           pl->pause();
         else
           pl->play();
+        p.autoplay_owned = p.offscreen_paused = false; // the user's now, in view or not
       }
       b.grid_next_cell();
       // The slider's value shows as the time line: a format with no conversion prints as it is,
@@ -2668,6 +2892,7 @@ void Runtime::Impl::players_end_walk() {
       if (p.player && !p.hidden_paused && p.player->state() == media::PlayerState::Playing) {
         p.player->pause();
         p.hidden_paused = true;
+        p.offscreen_paused = p.autoplay_owned; // an autoplaying one plays again when it is back
       }
       if (now - p.last_drawn > 5.0) {
         if (backend)
@@ -2730,7 +2955,7 @@ void Runtime::Impl::render() {
     backend->reset_layout();
   }
   if (reactive)
-    reactive->begin_frame(); // §4: reset the per-frame reactive eval budget
+    reactive->begin_frame(reactive_budget); // §4: reset the per-frame reactive eval budget
   frame_instances = 0;       // §3: reset the per-frame repeat-expansion budget
   emit_path.clear();
   scope_stack.clear(); // §12: start every frame at the document scope (RAII keeps it balanced;
@@ -3524,6 +3749,9 @@ void Runtime::render() { m_->render(); }
 
 void Runtime::set_frame_clock(std::optional<double> seconds) { m_->pinned_clock = seconds; }
 double Runtime::frame_clock() const { return m_->frame_t; }
+void Runtime::set_reactive_frame_budget(double seconds) {
+  m_->reactive_budget = seconds > 0.0 ? seconds : 0.0;
+}
 
 void Runtime::run_program(std::string script, std::function<void(const std::string &)> done) {
   Impl::QueuedAction a;

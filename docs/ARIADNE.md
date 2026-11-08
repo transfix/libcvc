@@ -798,9 +798,14 @@ windward flank (the slope along `wind_az`, the heading the wind blows toward, 90
 and the cells in the lee lose theirs, so a cloud forms as the wind brings it to a mountain and dies
 past the crest. `orographic` (default 1; 0 turns the coupling off) sets how strongly. Their shade falls on the ground and on the nodes in `receivers:` (and their
 children, LOD rungs included) through those meshes' shaders: it dims the sun's light and leaves
-their textures and colours alone. Its other keys: `extent` (a cloud's half-width), `base` / `top`,
+their textures and colours alone. The clouds are lit by the same sun: each volume's colour is the
+sunlight left after its own cloud's depth toward the sun, and each far shell's after the whole
+deck's, so the tops are white and the undersides and down-sun flanks grey. Far clouds also shade one
+another; the near volumes shade only themselves. `light_k` sets how strongly (optical depth per
+metre of opacity; by default twice the volumes' own, about 0.3 on terrain_lab's deck; 0 lights them
+evenly). Its other keys: `extent` (a cloud's half-width), `base` / `top`,
 `coverage`, `spacing`, `seed`, `variants`, `sun_az` / `sun_el` (the key light's, which the shade
-is cast along), `shade_k` / `shade_floor`, `horizon` (how far past the ground the volumes draw
+is cast along and the clouds are lit from), `shade_k` / `shade_floor`, `horizon` (how far past the ground the volumes draw
 clouds), `far_reach` (how far the shells reach toward the horizon; out of the camera's bounds),
 `evolve` (the weather's speed: 1 is a step every 5 s, a cloud lasting some 8 minutes; 0 holds the
 clouds) and `shadow` (0 starts the shade off). Live keys under the node's root (`sky.` unless
@@ -1461,6 +1466,20 @@ windows:
   picture's own shape at width `w`, and its placeholder is 16:9 (1:1 for a circle) until it loads.
   The fitted picture is made at twice the box's size, where the source has the pixels, so it stays
   sharp on a HiDPI screen.
+- **Filling the width.** `size: "N%"` makes the picture that share of the width it has on its
+  line: `"100%"` is as wide as its window, or its cell of a grid, and grows and shrinks with it,
+  the picture's own shape setting the height. `size: ["N%", h]` is a box that wide and `h` tall.
+  A small picture is scaled up to the width; a large one keeps its pixels up to the cache's 2048.
+  `max_height: h` keeps a picture whose height follows its shape (a phone's portrait video, say)
+  no taller than `h`: it is drawn narrower instead. `video:` takes both too (§5.13).
+  - ImGui measures the line where the picture is drawn. A window with no `size:` is as wide as its
+    other content makes it, and at least the widget's own width (256 px for `image:`, 480 for
+    `video:`), so a window holding only the picture still has room for it. While a window is
+    resized the picture is fitted again each 64 px, and scaled in between.
+  - The terminal backends lay a window out after its widgets are drawn, so they can't measure
+    the line: there the picture is the widget's own width.
+  - The capability token `image.fill` (§5.7) says a host does this. An older host reads
+    `size: "100%"` as no size and draws the widget at its own width.
 - **Every backend draws them**, since the core publishes the fitted picture as any other image:
   ImGui as a texture, and the terminal backends as Kitty, Sixel or iTerm pixels, or half-blocks
   (§4). Hosted tvision always draws half-blocks. In half-blocks, a transparent pixel leaves its
@@ -1485,6 +1504,31 @@ windows:
   started, not sent in place (§10.2), so the frame loop goes on while it is out. The reply is
   decoded when the browser hands it over, between frames. A `file://`, `cvc://` or `state://`
   picture is read and decoded between two frames, one at a time.
+- **Pictures in a line of text: `emoji:`.** A `text:` with `emoji:` names a state key that holds
+  a map of shortcode names to picture URIs (a post's custom emoji, as a social site's API gives
+  them) or to text. Each `:name:` in the text that the map names as a picture is drawn as that
+  picture, one line tall at its own shape, in the line where the backend can put a picture there:
+
+  ```yaml
+  - text: ""
+    bind: feed.items.{i}.line          # "Shipped it :party: at 14:50:47"
+    emoji: feed.items.{i}.emoji        # {party: "https://media.example/e/12.gif"}
+  ```
+
+  - A shortcode is found as txwtf, Slack and Mastodon find one: 1 to 64 of `A-Z a-z 0-9 _ + -`
+    between two colons that aren't glued to a letter, digit or `_` outside them. So the `:50:` in
+    `14:50:47` stays part of the time, while `:a::b:` is two. The map's names are looked up as
+    written, then in lower case.
+  - A name whose value isn't a URI is replaced by that value, as text, in every backend: a
+    unicode emoji's character (`100: "💯"`), which the font draws. A name the map doesn't have
+    stays as it is. A terminal backend can't put a picture in a line of text, so there a picture's
+    `:name:` stays text too.
+  - The pictures load as an `image:`'s do (the host's network and its allowlist, the cache), and
+    a picture still loading is a placeholder. An animated GIF or WebP moves in the line, on the
+    loop every widget showing it shares. A video URL (as `image:` takes one, §5.11) plays in the
+    line as a decorative video (§5.13): silent, looping, by itself, where the host has a player.
+    Hovering a picture shows its `:name:`. `{i}` in `emoji:` is substituted in a `repeat:`.
+  - The capability token `text.emoji` says a host does this.
 
 ### 5.12 Backgrounds: `background:` on a window or group
 
@@ -1566,6 +1610,14 @@ has loaded, or when it failed, nothing is drawn behind the content.
 - **The picture.** The newest frame is published as an image and drawn like one: an ImGui
   texture, or Kitty, Sixel, iTerm or half-block cells. A terminal gets at most 8 frames a
   second. Before the first frame the poster shows, else a placeholder of the box.
+  `size: "100%"` and `max_height:` (§5.11) make it as wide as its line, at the video's own shape:
+  `size: "100%"` with `max_height: 480` is a feed's video, as wide as the post, a portrait one
+  narrower.
+- **`autoplay: true`** starts it once it can, and from then on, until the user presses Play or
+  Pause (or the document writes `playing`), it plays while its picture shows: scrolled out of its
+  window's view, or its window closed, it pauses, and back in view it plays on. So a feed's
+  videos play as they scroll by, not all at once. A terminal shows the whole window, so there it
+  plays while its window is open.
 - **The state keys** live under `bind:`, or `ariadne.media.players.p<n>` without one:
 
   | key | |
@@ -1602,7 +1654,9 @@ has loaded, or when it failed, nothing is drawn behind the content.
     - A browser plays sound only after the user has clicked or typed on the page. A muted
       `autoplay` starts by itself.
     - A site serving the pages under a Content-Security-Policy adds `media-src 'self' blob:`
-      (and the media's origin when it is another).
+      (and the media's origin when it is another). Without it the element falls back to
+      `default-src`, and Chrome refuses media from another origin with "Media load rejected by
+      URL safety check", which the player's `error` shows.
 - **Over SSH** the sound would come out of the remote machine's speakers. So in an SSH session
   (`SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY` set), players say `remote` and nothing is opened.
   - "Open" runs `(open-url URL)` where the host has it, else it warns with the URL.
@@ -1611,7 +1665,8 @@ has loaded, or when it failed, nothing is drawn behind the content.
   - `--media-play always` plays anyway, and `--media-play never` never plays.
 - **Capability tokens** (§5.7): `media` means the media plays here, and `media.player` means
   the host has a player at all. `video.decorative` means `controls: false` and video URLs in
-  `image:` and `background:` are understood, and `image.animated` means GIF and WebP animate.
+  `image:` and `background:` are understood, `image.animated` means GIF and WebP animate, and
+  `image.fill` means `size: "N%"` and `max_height:` are understood.
 - A player whose widget a frame did not draw (its window closed, its item scrolled out of a
   `repeat:`) is paused at once and closed 5 s later. `ari snapshot` waits while a player is
   still loading, as it waits for pictures.
@@ -3138,15 +3193,16 @@ on_tick: |
 ```
 
 - **When it runs.** In this order:
-  1. arisrv reads the `server:` block, before anything else that could fail late.
+  1. arisrv reads the `server:` block and chooses the room's world (below), before anything else
+     that could fail late.
   2. It binds its ports, as it always has.
-  3. It applies `--set`.
-  4. It seeds the scene, the avatar catalog and the policy.
+  3. It publishes the world, in one revision, and seeds the avatar catalog and the policy.
+  4. It applies `--set`.
   5. It loads the document, which runs its `init:`.
 
-  `--set` comes before both the seeds and the document. The worlds plan's WD0 moves it last, as
-  the operator's override. A client that connects before the document has loaded still gets
-  `init:`'s writes, live.
+  `--set` comes after the world and the policies, so it overrides them (the worlds plan's WD0),
+  and before the document, so its `ariadne.limits.*` bound `init:` too. A client that connects
+  before the document has loaded still gets `init:`'s writes, live.
 - **Every room step** (60 a second), `on_tick:` and the other residents run, ahead of the avatar
   holon. What they write goes out at the end of that step, which §6.5 of the roadmap calls "the
   next relay tick".
@@ -3188,11 +3244,26 @@ on_tick: |
 - **Stopping.** `(quit [code])` stops the relay with that exit status. A document that fails to
   load stops it with 1. One arisrv cannot read, or a bad `server:` block, stops it with 2 before
   it listens.
-- **A `scene:`** is neither drawn nor simulated on the relay yet. Its parse, the physics and bodies
-  included, is kept on the runtime (`ServerDocument::scene()`). This runtime is the one the world
-  runtime will run the world in, headless, as the holon's one physics world
-  ([roadmap/ARIADNE_WORLDS.md](roadmap/ARIADNE_WORLDS.md) §14). Until then the load warns that the
-  physics is not simulated.
+- **A `scene:` with nodes or lights is the room's world** ([roadmap/ARIADNE_WORLDS.md](roadmap/ARIADNE_WORLDS.md)
+  WD1). The relay publishes it into `conf.rooms.<room>.scene` before `init:` runs, and every
+  client builds the room from that, look included: the light rig, its tuning knobs and the shadows
+  are the world's, not the client document's.
+  - **What the room carries:** the background, the chrome, the shadows (resolution and
+    `update_interval`), every light and rig, and each top-level geometry node with a plane, box or
+    sphere source or a mesh by URI (with its `fit:`), its transform and its plain material.
+  - **What it leaves out**, with a warning at start-up: other node types and sources (a
+    heightfield, a volume, a custom node), children, textures, shaders, a `fit:` with `up: x` or
+    `flip`, and a `visible:` bind.
+  - **Bodies and `physics:`.** A body is published as a static, since the holon builds its statics
+    from the published objects; a server-dynamic one waits for WD3, with a warning. The parse,
+    `physics:` and bodies included, is kept on the runtime (`ServerDocument::scene()`). This
+    runtime is the one the world runtime will run the world in, headless, as the holon's one
+    physics world (§14 of the same roadmap). Until then the load warns that the physics is not
+    simulated.
+  - **Without one**, the room's world is the stock world `--scene` names: `cvc://worlds/default.ari`
+    (the 20 m room) or `cvc://worlds/large.ari`. `--scene` and a `--doc` with a `scene:` both
+    naming it stop arisrv with 2. A stock world opens in arigl too (`arigl
+    cvc://worlds/default.ari`), to see the room without a relay.
 - **Other hosts** ignore a `server:` block, with a warning.
 - **Not yet:** a reload when the file changes, the network (`--net`), `on_signal:` for arisrv's
   own SIGTERM, and Python (`arisrvx`, S1).

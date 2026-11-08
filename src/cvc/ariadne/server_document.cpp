@@ -181,19 +181,16 @@ ServerDocument::ServerDocument(cvc::app &app, std::string room, std::string pref
                                "]");
     block_ = std::move(b);
     plant();
-    // The scene stays here instead of in the load, which would only say it was ignored.
+    // The scene stays here instead of in the load, which would only say it was ignored. The
+    // relay publishes it into the room (room_world_from_scene, WD1); its physics waits for the
+    // world runtime.
     scene_ = std::move(lr.scene);
     lr.scene = Scene{};
-    if (scene_.any()) {
-      const std::size_t bodies = count_bodies(scene_.nodes);
-      if (scene_.physics.present || bodies > 0)
-        lr.warnings.push_back(
-            path + ": its scene's physics (" + std::to_string(bodies) +
-            " bodies) is kept but not simulated: the relay runs no world from a document yet");
-      else
-        lr.warnings.push_back(path + ": its scene: is kept but not published: the relay runs no " +
-                              "world from a document yet");
-    }
+    const std::size_t bodies = count_bodies(scene_.nodes);
+    if (scene_.physics.present || bodies > 0)
+      lr.warnings.push_back(path + ": its scene's physics (" + std::to_string(bodies) +
+                            " bodies) is kept but not simulated yet: the headless world runtime "
+                            "(ARIADNE_WORLDS.md §14) will make it the holon's");
   });
 }
 
@@ -214,6 +211,7 @@ std::string ServerDocument::read(const std::string &path, std::vector<std::strin
       return path + ": " + error;
   }
   block_ = std::move(b);
+  scene_ = lr.scene; // the world, for a relay that publishes it before the document runs
   read_ = true;
   return std::string();
 }

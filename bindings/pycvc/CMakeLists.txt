@@ -286,6 +286,7 @@ if(CVC_BUILD_PYCVC_CORE)
     TYPE ${_PYCVC_SWIG_TYPE}
     LANGUAGE python
     SOURCES pycvc.i pycvc_context.cpp pycvc_algorithm.cpp pycvc_state.cpp pycvc_exec.cpp
+            pycvc_exec_pool.cpp
   )
   target_include_directories(pycvc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(pycvc PRIVATE ${_PYCVC_CVC_TARGET} Python3::Module Python3::NumPy)
@@ -314,6 +315,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_exec:test_pycvc_exec.py
              pycvc_exec_async:test_pycvc_exec_async.py
              pycvc_exec_coro:test_pycvc_exec_coro.py
+             pycvc_exec_pool:test_pycvc_exec_pool.py
              pycvc_ariadne:test_pycvc_ariadne.py
              pycvc_state_exec:test_pycvc_state_exec.py
              pycvc_state_exec_sched:test_pycvc_state_exec_sched.py

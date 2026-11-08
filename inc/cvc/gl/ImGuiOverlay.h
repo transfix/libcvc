@@ -7,6 +7,7 @@
 
 struct ImGuiContext; // Dear ImGui (global namespace) — forward-declared so this
                      // header stays imgui-free for consumers that don't draw UI.
+struct ImGuiIO;
 
 namespace cvc {
 namespace gl {
@@ -92,9 +93,22 @@ public:
   //   1. setUiFontMemory() if set (for wasm / an embedded font), else
   //   2. setUiFontPath(), else 3. the CVC_UI_FONT environment variable, else
   //   4. a search of common system fonts (DejaVu / Noto / Arial Unicode / …),
-  //   5. fall back to the ASCII face.
+  //   5. the bundled DejaVu Sans Mono (share/libcvc/fonts: a browser build's font),
+  //   6. fall back to the ASCII face.
   // An unfound or unloadable font is a logged fallback, never a hard failure.
+  // Under that font it merges the fallbacks (setUiFontFallbacks): DejaVu Sans Mono's symbols, and
+  // emoji in colour (the bundled Twemoji, else the system's colour emoji font) where ImGui draws
+  // with FreeType, which a build with the cvcpkg imgui 1.92.9+cvc.4 and FreeType does.
   static void setUiFontPath(const std::string &ttfPath);
+
+  // Whether the overlay draws with FreeType and merges the fallback fonts (default on). Off:
+  // ImGui's own stb_truetype and the UI font alone, as before colour emoji, which a golden-image
+  // test that pins its pixels wants. Call it before constructing an overlay.
+  static void setUiFontFallbacks(bool on);
+
+  // Load the UI font and its fallbacks into `io.Fonts`, as an overlay does when it builds its
+  // context: for an ImGui context of a host's own, or a test's. Without imgui, nothing.
+  static void loadUiFonts(ImGuiIO &io);
 
   // Supply the UI font as an in-memory TTF (a build with no system fonts — wasm —
   // or to embed one). The buffer must outlive every overlay. Pass compressed=true

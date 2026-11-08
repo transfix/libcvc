@@ -1323,7 +1323,10 @@ public:
       if (!recs.count(h.pid))
         fail("I3", "hold " + std::to_string(i) + " without rec");
     // I9: M.cache_refs has an entry exactly for each attached home; I4: counts positive
-    for (const auto &[H, d] : cache_refs) {
+    for (const auto &ref : cache_refs) {
+      // Not a structured binding: clang with -fopenmp cannot capture one in the lambda below.
+      const auto &H = ref.first;
+      const auto &d = ref.second;
       if (!homes.count(H))
         fail("I9", "key-cache references of detached home H" + std::to_string(H) +
                        " kept: " + keys_br([&] {
