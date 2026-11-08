@@ -2502,15 +2502,41 @@ TEST(AriadneStdlib, ActionMemoryBudgetIsATreeSetting) {
 }
 
 // A finished action's process is reaped from the app scheduler, and a function it defined (bound
-// in the scope it captured: a reference cycle) is freed by the cycle collector.
+// in the scope it captured: a reference cycle) is freed by the cycle collector of group 0: the app
+// scheduler's own registry, which the scheduler binds whenever it runs (S1.1; S1.md's AH-1). Read
+// through the thread's own registry, which nothing feeds now, the case would pass whatever the
+// actions leaked. Each action hands its function to the host, which holds it until every action
+// has ended: the scopes are live then, so whatever collections ran, group 0's registry tracks each
+// of them, and the thread's own none. Let go, they are cycles that group 0's collection frees.
 TEST(AriadneHeap, FinishedActionsAreReapedAndTheirCyclesFreed) {
+  namespace se = cvc::state_exec;
   cvc::app app;
+  std::vector<se::value_t> held;
+  std::vector<std::weak_ptr<se::environment>> scopes;
+  register_action_intrinsics([&](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+    se::builtins::register_fn(env, "hand-over", [&](std::span<const se::value_t> a) {
+      if (!a.empty())
+        if (const auto *c = std::get_if<se::closure_ptr>(&a[0].v)) {
+          held.push_back(a[0]);
+          scopes.push_back((*c)->env_snapshot);
+        }
+      return se::value_t{};
+    });
+  });
+  struct providers_cleared {
+    ~providers_cleared() { clear_action_intrinsics(); } // process-global: gone before the next test
+  } clear_after;
   Runtime rt(app, "");
   MockBackend mb;
   rt.set_backend(&mb);
-  rt.set_root(group({button("Go", "(begin (defun helper (x) x) (state-set \"n\" (helper 7)))")}));
-  cvc::state_exec::collect_cycles(); // earlier tests' leftovers
-  const std::size_t before = cvc::state_exec::tracked_objects();
+  rt.set_root(group({button(
+      "Go", "(begin (defun helper (x) x) (hand-over helper) (state-set \"n\" (helper 7)))")}));
+  se::cycle_registry *const reg = app.exec_scheduler().registry();
+  ASSERT_NE(reg, nullptr) << "the app scheduler has no registry of its own";
+  se::collect_cycles(*reg);
+  const std::size_t before = se::tracked_objects(*reg);
+  se::collect_cycles(); // this thread's own, for the check that it gains nothing
+  const std::size_t thread_before = se::tracked_objects();
   for (int i = 0; i < 20; ++i) {
     mb.button_click = true;
     rt.render();
@@ -2518,8 +2544,24 @@ TEST(AriadneHeap, FinishedActionsAreReapedAndTheirCyclesFreed) {
   }
   EXPECT_EQ(cvc::state::instance(app)("n").value(), "7");
   EXPECT_EQ(app.exec_scheduler().process_count(), 0); // every finished action was reaped
-  cvc::state_exec::collect_cycles();
-  EXPECT_LE(cvc::state_exec::tracked_objects(), before); // the 20 action scopes are gone
+  ASSERT_EQ(scopes.size(), 20u);
+  std::set<const se::environment *> distinct;
+  for (const auto &w : scopes)
+    if (const auto e = w.lock())
+      distinct.insert(e.get());
+  EXPECT_EQ(distinct.size(), 20u) << "the host holds every action's scope";
+  se::collect_cycles(*reg); // the held scopes are live: it keeps them
+  EXPECT_GE(se::tracked_objects(*reg), before + distinct.size())
+      << "the actions' scopes are not in group 0's registry";
+  se::collect_cycles();
+  EXPECT_EQ(se::tracked_objects(), thread_before) << "an action tracked into this thread's own";
+  held.clear(); // now only their cycles hold them
+  se::collect_cycles(*reg);
+  std::size_t alive = 0;
+  for (const auto &w : scopes)
+    alive += w.expired() ? 0 : 1;
+  EXPECT_EQ(alive, 0u) << "group 0's collection did not free the actions' cycles";
+  EXPECT_LE(se::tracked_objects(*reg), before); // the 20 action scopes are gone
 }
 
 // An action's live values count against its memory budget, not only its state-tree writes.
@@ -6446,7 +6488,7 @@ Value tf_seq(std::vector<Value> items) {
   return v;
 }
 
-Value tf_map(std::vector<std::pair<std::string, Value>> entries) {
+Value tf_map(std::vector<Value::Entry> entries) {
   Value v;
   v.kind = Value::Kind::Map;
   v.entries = std::move(entries);

@@ -33,7 +33,7 @@ meta:
   min_libcvc: 3.6.0
 
 requires:
-  - gl.scene                       # a scene renderer realizes the scene: block (arigl; not ari)
+  - gl.scene                       # a scene renderer draws the room in 3D (arigl; not ari)
   - stream_view
   - stream-open                    # media: capture and mute
   - stream-capture-camera
@@ -51,27 +51,10 @@ requires:
 # them current (room-users-step, chat-ui-step), which on_tick calls.
 import: [cvc://components/room_users.ari, cvc://components/chat.ari]
 
-# The room's LOOK. The relay owns what is IN the room (conf.rooms.<room>.scene: the ground, the
-# reference box; the avatars), and every client draws it under this document's lighting, so the
-# rig lives here, not in the server. A three-point rig staged over the 20 m floor: the key spot casts
-# real-time shadows from the scene objects and every avatar (re-baked in any frame something that
-# casts has moved, so a walking avatar's shadow walks with it, and an idle room bakes none); fill,
-# back and environment keep the shaded sides readable.
-scene:
-  lights:
-    - light: room_rig
-      rig: three_point
-      stage: { center: [0, 0, 1], radius: 10 }
-      key: { intensity: 0.9, azimuth: -35, elevation: 55, cone: 48 }
-      fill: 0.25
-      back: 0.25
-      warmth: 0.25
-      environment: 0.15
-      ambient: 0.12
-  shadows:
-    enabled: true
-    resolution: 2048
-    update_interval: 1
+# No scene: block. The room and its LOOK are the world's (ARIADNE_WORLDS.md WD1, Q1): the relay
+# publishes the world document's scene into conf.rooms.<room>.scene (the ground, the reference
+# box, the three-point rig and its shadows; cvc://worlds/default.ari unless the relay runs
+# another), and the host's room view draws it, with the avatars, under that rig.
 
 # The peers' camera windows (cam_<i>, made by a repeat) are listed by name at the end of View: the
 # built-in Windows menu under that title joins it (ARIADNE.md §5.9).

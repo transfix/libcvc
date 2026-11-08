@@ -7,16 +7,26 @@
 // registered here becomes callable from DSL source like any builtin.
 #pragma once
 
+#include <cstddef>
 #include <cvc/state/state_exec/data_job.h> // data_options
+#include <cvc/state/state_exec/heap.h>     // cycle_stats
 #include <cvc/state/state_exec/parser.h>   // parse_options
 #include <memory>
 #include <string>
+#ifndef SWIG
+#include <atomic>
+#include <exception>
+#include <span>
+#include <vector>
+#endif
 
 namespace cvc {
 class app;
+class exec_pool;
 namespace state_exec {
 class async_host;
 class async_scheduler;
+class exec_group;
 } // namespace state_exec
 } // namespace cvc
 
@@ -25,6 +35,8 @@ struct _object;
 typedef _object PyObject;
 
 namespace pycvc {
+
+class ExecPool;
 
 class Exec {
 public:
@@ -116,6 +128,15 @@ public:
   // second run() of the same Exec, from any thread, raises RuntimeError until the
   // first has returned. set_priority, get_priority and lock_query are the
   // exceptions: any thread may call them.
+  //
+  // The pump owner (S1-Q4): run() is its scheduler's pump owner until it
+  // returns. Meanwhile register_fn, register_async_fn, register_async_coro,
+  // set_parser_defaults, set_data_defaults, tracked_objects, collect_cycles and
+  // scheduler()'s calls (all but stop, is_running and post_message) raise RuntimeError
+  // ("scheduler: another thread is pumping it") on any other thread, a kernel's
+  // included; from run()'s own thread (a registered function) they work. A
+  // run() started while another thread pumps the scheduler through one of its
+  // raw calls raises the same.
   std::string run(const std::string &src);
 
   // A process's priorities (docs/STATE_EXEC_LOCKS.md 7.4). set_priority(pid, p)
@@ -162,9 +183,47 @@ public:
   // the returned scheduler keeps this Exec alive.
   cvc::state_exec::async_scheduler &scheduler();
 
+  // Objects this Exec's cycle registry tracks (docs/STATE_EXEC_THREADED.md 4.7): its programs'
+  // captured scopes and mutated containers, alive after the last collection or tracked since,
+  // whichever thread ran them. The pump thread's, as register_fn is (run(), above).
+  std::size_t tracked_objects() const;
+
+  // Collect this Exec's cycle registry now, with the GIL released, and return what it did. Its
+  // runs collect it as they go (every so many steps, and as they end, throttled); this frees its
+  // garbage at once. pycvc.collect_cycles() collects the calling thread's own registry, which an
+  // Exec's programs never use. The pump thread's, as register_fn is; from inside a step (a
+  // registered function) it does nothing.
+  cvc::state_exec::cycle_stats collect_cycles();
+
 private:
   struct ExecImpl;
   std::shared_ptr<ExecImpl> impl_;
+
+#ifndef SWIG
+  // ExecPool's pooled Execs (S1.12, S1-Q5), never exposed to Python.
+  friend class ExecPool;
+  struct pooled_tag {};
+  // Pooled Exec `name`, an Exec in group mode: its scheduler, async host, cycle registry and
+  // random stream are an exec_group's (the app pool's pid source, the app's lock manager), its
+  // natives extend the frozen builtins (td 4.2), and its context is chrooted at `name`.
+  Exec(pooled_tag, const std::shared_ptr<cvc::app> &app, const std::string &name,
+       double idle_timeout);
+  // A pooled Exec's group.
+  cvc::state_exec::exec_group &group() const;
+  // A program's outcome in a batch: its result as run() renders it, or what run() would raise.
+  struct batch_outcome {
+    std::string result;
+    std::exception_ptr error;
+  };
+  // ExecPool::run_all's batch, called with the GIL released: program i runs on
+  // execs[i % execs.size()], each pooled Exec's programs one at a time and in order, in its env
+  // (a fresh extend of its natives with `fresh_env`). It pumps their groups on `pool` in fork-join
+  // rounds until every program has ended or passed its idle limit, then waits for their kernels.
+  // Once `closing` is set, what runs is killed and what has not started is not started.
+  static std::vector<batch_outcome> run_batch(cvc::exec_pool &pool, std::span<Exec *const> execs,
+                                              std::span<const std::string> programs, bool fresh_env,
+                                              const std::atomic<bool> &closing);
+#endif
 };
 
 } // namespace pycvc

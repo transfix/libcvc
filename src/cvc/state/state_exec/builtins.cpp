@@ -1112,4 +1112,16 @@ environment_ptr builtins::make_default_environment() {
   return env;
 }
 
+environment_ptr frozen_builtins() {
+  // Built once (thread-safe static init) and never written again. Its natives are free functions
+  // safe on any thread: print takes a process-wide lock, generator, next and collect reach the
+  // bound registry and the step's data scope, math.random the bound stream (td 4.2, B16).
+  static const environment_ptr scope = [] {
+    environment_ptr env = builtins::make_default_environment();
+    env->frozen = true;
+    return env;
+  }();
+  return scope;
+}
+
 } // namespace cvc::state_exec

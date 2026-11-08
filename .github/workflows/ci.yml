@@ -373,6 +373,8 @@ jobs:
                    src/cvc/image inc/cvc/image src/cvc/tests/image_magick_roundtrip.cpp \
                    src/cvc/state inc/cvc/state src/cvc/tests/state_exec_wasm_smoke.cpp \
                    src/cvc/core/app.cpp inc/cvc/core/app.h \
+                   src/cvc/core/exec_pool.cpp inc/cvc/core/exec_pool.h \
+                   src/cvc/core/cpu_placement.cpp inc/cvc/core/cpu_placement.h \
                    cvcpkg/recipes/libcvc \
                    .github/workflows/ci.yml | grep -q .; then
               run=false
@@ -522,7 +524,8 @@ jobs:
         # The state_exec locks on a build with no pthreads (CVC_WASM_PTHREADS=OFF): a section, a
         # waiter granted once its holder lets go, an empty lock-query, on both schedulers; then
         # app::lock_manager()'s auto mode (single), the attach pycvc's Exec makes
-        # (lock_attach{ threads_compiled_in }) accepted, and a section with a waiter on it.
+        # (lock_attach{ threads_compiled_in }) accepted, and a section with a waiter on it; then
+        # app::exec_pool() at threads 0, whose pump_all pumps two groups inline (threaded Stage 1a).
         if: steps.paths.outputs.run == 'true'
         run: |
           node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
@@ -1529,6 +1532,17 @@ jobs:
   # corpus, PEGTL, gaps, advanced integration and deep data suites, and the micro-benchmarks
   # (no-ops without CVC_STATE_EXEC_BENCH=1). state_exec_multiprocess_test calls fork() and stays
   # out.
+  #
+  # Threaded execution's Stage 1a (groups and the fork-join pool; S1.md sections 5 and S1.15) adds
+  # exec_pool_test (state_exec_groups_test and test_pycvc_exec_pool.py came with its interface
+  # commit), and SAN_BENCH runs mt.groups at t=8 groups=8: eight groups on the app's exec_pool,
+  # pumped by up to seven workers (the pool clamps to hardware_concurrency() - 1: three on a 4-vCPU
+  # runner) and the caller through fib, raises and closure cycles. A third leg,
+  # clang-tsan, builds with the runner's own clang (S1-Q9; td 8.7's TS-1) and runs, under clang's
+  # TSan, Stage 1a's binaries, the hazards binary, the async, scheduler and lock binaries,
+  # mt.groups and the pycvc scripts. Every Stage 1a case (the groups, the pool, the pycvc pool and
+  # pump-owner cases) and mt.groups' three points are required in all three legs: SAN_REQUIRED_S1A
+  # below, which the run step appends to the leg's own `required`.
   sanitizers:
     name: sanitizers / ${{ matrix.name }}
     runs-on: ubuntu-24.04
@@ -1541,8 +1555,10 @@ jobs:
           # SAN_PY_TESTS and <text> a line its log must contain (run.sh): gtest's "OK ]" line of a
           # case, or the pycvc script's "ok:" line. <run> may also be a scenario in SAN_BENCH, whose
           # line for a point is its params ("t=8 prog=fib runs=1"). Stage 0's lines, the same in
-          # both legs, follow the locks phases'; "(" after a name keeps it from matching a longer
-          # one.
+          # both gcc legs, follow the locks phases'; "(" after a name keeps it from matching a
+          # longer one. Stage 1a's are SAN_REQUIRED_S1A's, in every leg. A leg may also name its
+          # own C and C++ compilers (cc, cxx; the runner's gcc otherwise), C++ tests (cxx_tests, for
+          # SAN_CXX_TESTS) and bench runs (bench, for SAN_BENCH).
           - name: tsan
             flags: -fsanitize=thread
             required: |
@@ -1696,6 +1712,24 @@ jobs:
               state_exec_scheduler_test: OK ] SchedulerStop.HZ14_StopFromAnotherThreadEndsRun
               state_exec_async_test: OK ] AsyncSchedulerStop.HZ14_StopFromAnotherThreadEndsSyncRun
               test_pycvc_state_exec_sched.py: ok: test_hz14_stop_from_another_thread
+          # clang's TSan (S1-Q9), with the runner's preinstalled clang. clang links its TSan
+          # runtime into each executable, and run.sh preloads the shared one, libclang_rt.tsan,
+          # into the interpreter. Its own lines are Stage 1a's only.
+          # --gcc-install-dir: gcc 13's libstdc++, the gcc legs' own, not the newer 14 clang would
+          # pick, so every leg builds against one library. (Either one's C++20 std::pair rejects
+          # pair<std::string, T> inside T under clang, which is why such members are structs.)
+          # No ImageMagick: libcvc-deps' is built by gcc with OpenMP and its flags carry -fopenmp,
+          # which under clang emits calls into libomp, a runtime this leg does not have.
+          - name: clang-tsan
+            flags: -fsanitize=thread --gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/13
+            cmake_args: -DCVC_ENABLE_IMAGEMAGICK=OFF
+            cc: clang
+            cxx: clang++
+            cxx_tests: >-
+              state_exec_groups_test exec_pool_test state_exec_hazards_test
+              state_exec_scheduler_test state_exec_async_test state_exec_async_calls_test
+              async_lane_test thread_pool_test state_exec_locks_test state_exec_locks_model_test
+            bench: mt.groups --size t=8 --size groups=8 --size runs=1
     concurrency:
       group: ci-${{ github.ref }}-sanitizers-${{ matrix.name }}
       cancel-in-progress: true
@@ -1712,17 +1746,109 @@ jobs:
         state_exec_unicode_test state_exec_stdlib_test state_exec_heap_test
         state_exec_grammar_test state_exec_corpus_test state_exec_pegtl_test
         state_exec_gaps_test state_exec_advanced_integration_test state_exec_deep_data_test
-        state_exec_bench_test
+        state_exec_bench_test state_exec_groups_test exec_pool_test
       # pycvc test scripts (bindings/pycvc/<name>).
       SAN_PY_TESTS: >-
         test_pycvc_exec.py test_pycvc_exec_async.py test_pycvc_exec_coro.py
         test_pycvc_state_exec.py test_pycvc_state_exec_async.py test_pycvc_state_exec_data.py
         test_pycvc_state_exec_eval.py test_pycvc_state_exec_exceptions.py
         test_pycvc_state_exec_sched.py test_pycvc_state_exec_locks.py test_pycvc_state.py
+        test_pycvc_exec_pool.py
       # state_exec_bench runs (build/bin/state_exec_bench), one a line: a scenario and its --size
       # options; run.sh adds --reps 1 --warmup 0 --timeout 900 and the JSON file.
       SAN_BENCH: |
         mt.multi_exec --size t=8 --size runs=1
+        mt.groups --size t=8 --size groups=8 --size runs=1
+      # Stage 1a's required lines (the matrix's `required` format), the same in every leg: each
+      # case of state_exec_groups_test and exec_pool_test (a case added to either adds its line),
+      # KO-1 and KO-2, the foreign-future cases of state_exec_async_calls_test, K's pycvc pool
+      # cases, Y's ExecPool, registry and pump-owner cases, and mt.groups' points.
+      SAN_REQUIRED_S1A: |
+        state_exec_groups_test: OK ] Groups.RX01_AnOptedInThreadsCyclesAreCollectedWhenItEnds
+        state_exec_groups_test: OK ] Groups.RX02_AHostKillNotesTheSchedulersRegistry
+        state_exec_groups_test: OK ] Groups.RX03_EveryDriverTracksIntoTheSchedulersRegistry
+        state_exec_groups_test: OK ] Groups.BF01a_TheFrozenScopeRefusesASet
+        state_exec_groups_test: OK ] Groups.PO02_TheOwnerRule
+        state_exec_groups_test: OK ] Groups.GR01_EveryGroupEqualsItsSoloRun
+        state_exec_groups_test: OK ] Groups.GR02_ForcedMovesAndRandomBudgets
+        state_exec_groups_test: OK ] Groups.GR03_HostAffinityGroupsStayOnTheCaller
+        state_exec_groups_test: OK ] Groups.GR04_ACycleBelongsToItsGroup
+        state_exec_groups_test: OK ] Groups.GR05_ARegistryDiesWithItsGroup
+        state_exec_groups_test: OK ] Groups.GR06_ARandomStreamFollowsItsGroup
+        state_exec_groups_test: OK ] Groups.GR07_PidsAreUniqueAcrossGroups
+        state_exec_groups_test: OK ] Groups.GR08_TheFrameDeadlineBoundsAFrame
+        state_exec_groups_test: OK ] Groups.GR09_SmallFramesWakeNoHelper
+        state_exec_groups_test: OK ] Groups.GR10_HostOnlyAndHostProxiedNatives
+        state_exec_groups_test: OK ] Groups.GR11_AProxiedCallInAGeneratorBlocksItsWorker
+        state_exec_groups_test: OK ] Groups.GR12_AnExceptionEscapingAPumpFailsOnlyItsGroup
+        state_exec_groups_test: OK ] Groups.RB01_ClosureBodiesAreNotSharedAcrossGroups
+        state_exec_groups_test: OK ] Groups.AS01_ASharedAstIsCopied
+        state_exec_groups_test: OK ] Groups.BF01_TheFrozenBaseIsShared
+        state_exec_groups_test: OK ] Groups.OC01_OnCompleteRunsOnTheCallerAfterTheJoin
+        state_exec_groups_test: OK ] Groups.DT01_DeterministicRunsRepeat
+        state_exec_groups_test: OK ] Groups.DT02_ThreadsZeroEqualsBareSchedulers
+        state_exec_groups_test: OK ] Groups.GL01_TwoGroupsExcludeOneKey
+        state_exec_groups_test: OK ] Groups.GL02_TeardownClosesThePortBeforeItsKills
+        state_exec_groups_test: OK ] Groups.PA01_TwoCallersShareThePool
+        state_exec_groups_test: OK ] Groups.FF01_AnotherSchedulersFutureRaises
+        state_exec_groups_test: OK ] Groups.FF02_AnInlineFutureIsAValue
+        exec_pool_test: OK ] CpuPlacement.PlacementListsAreSubsetsOfTheProcessCpus
+        exec_pool_test: OK ] ExecPool.ThreadsAreClampedAndReported
+        exec_pool_test: OK ] ExecPool.ThreadsZeroPumpsEveryGroupOnTheCallerInCreationOrder
+        exec_pool_test: OK ] ExecPool.HeavyGroupsGoToWorkersAndHostGroupsStayOnTheCaller
+        exec_pool_test: OK ] ExecPool.TheHelperWakeFollowsTheLastPumps
+        exec_pool_test: OK ] ExecPool.APassedDeadlineSkipsGroupsAndTheyGoFirstNextTime
+        exec_pool_test: OK ] ExecPool.AnExceptionEscapingAPumpFailsOnlyItsGroup
+        exec_pool_test: OK ] ExecPool.OnCompleteOfAWorkerPumpedGroupRunsOnTheCallerAfterTheJoin
+        exec_pool_test: OK ] ExecPool.RunOnHostRunsInlineOutsideAWorker
+        exec_pool_test: OK ] ExecPool.TwoCallersShareThePool
+        exec_pool_test: OK ] ExecGroup.InstallByKind
+        exec_pool_test: OK ] ExecGroup.ExecuteCopiesASharedAst
+        exec_pool_test: OK ] ExecGroup.WantsPumpAndTheLiveCount
+        exec_pool_test: OK ] ExecGroup.TeardownRunsItsHookBeforeTheKills
+        exec_pool_test: OK ] ExecGroup.PumpBindsCurrentAndHonoursTheBudget
+        exec_pool_test: OK ] AppExecPool.ThreadsBeforeTheLockManagerMakeItShared
+        exec_pool_test: OK ] AppExecPool.ASingleLockManagerKeepsThePoolInline
+        exec_pool_test: OK ] AppExecPool.TheTreeSizesThePool
+        exec_pool_test: OK ] AppExecPool.PumpFramePumpsGroupZeroAndFrameGroupsAndAdvances
+        exec_pool_test: OK ] AppExecPool.GroupsAndTheAppSchedulerShareOnePidSource
+        exec_pool_test: OK ] ExecPool.SingleManagerGroupsStayOnTheCaller
+        exec_pool_test: OK ] AppExecPool.ABusyGroupZeroDoesNotStarveFrameGroups
+        exec_pool_test: OK ] ExecGroup.WantsPumpCountsAFrameWaiter
+        exec_pool_test: OK ] ExecPool.ThreadedCallbacksRunAfterTheJoinWithTheirRegistry
+        exec_pool_test: OK ] ExecGroup.ExecuteDefaultsTheOwner
+        exec_pool_test: OK ] AppExecPool.DeterministicModeSeedsGroupZero
+        exec_pool_test: OK ] ExecGroupDeathTest.DestroyedFromInsideItsOwnPumpAborts
+        exec_pool_test: OK ] ExecPool.FailedGroupsAreTheCallersOwn
+        exec_pool_test: OK ] AppExecPool.TwoBusyFrameGroupsDoNotStarveGroupZero
+        exec_pool_test: OK ] ExecPool.OneGroupsHostBodiesRunInQueueOrder
+        exec_pool_test: OK ] ExecGroupDeathTest.DestroyedFromACallbackOfItsCallAborts
+        exec_pool_test: OK ] ExecGroupDeathTest.DestroyedFromItsOwnHostBodyAborts
+        exec_pool_test: OK ] ExecPool.FailedGroupsOfAReusedThreadId
+        state_exec_async_test: OK ] AsyncScheduler.KO01_KillOwnerSurvivesSlotsThatReapAndSubmit
+        state_exec_async_test: OK ] AsyncScheduler.KO02_AThrowingKillDoesNotStopTheRest
+        state_exec_async_calls_test: OK ] AsyncCalls.AnotherSchedulersThreadedFutureRaises
+        state_exec_async_calls_test: OK ] AsyncCalls.AnotherSchedulersInlineFutureIsItsValue
+        state_exec_async_calls_test: OK ] AsyncCalls.AwaitAllRefusesAForeignFutureBeforeItWaits
+        state_exec_async_calls_test: OK ] AsyncCalls.AFutureOfAGoneSchedulerRaisesAtItsAddress
+        test_pycvc_exec_pool.py: ok: test_ar04_run_all
+        test_pycvc_exec_pool.py: ok: test_is02_in_a_pooled_exec
+        test_pycvc_exec_pool.py: ok: test_gr05_exec_from_short_lived_threads
+        test_pycvc_exec_pool.py: ok: test_ff03_future_across_execs_raises
+        test_pycvc_exec_pool.py: ok: test_po01_raw_call_while_another_thread_pumps
+        test_pycvc_exec.py: ok: test_exec_pool_order_async_and_first_failure
+        test_pycvc_exec.py: ok: test_exec_pool_idle_limit
+        test_pycvc_exec.py: ok: test_exec_pool_close_and_calls_during_a_batch
+        test_pycvc_exec.py: ok: test_exec_pool_frame_yields_keep_a_program_alive
+        test_pycvc_exec.py: ok: test_exec_pool_size_follows_the_pools_threads
+        test_pycvc_exec.py: ok: test_exec_collect_cycles_collects_its_registry
+        test_pycvc_exec.py: ok: test_exec_pool_frame_waiters_wait_for_the_frame
+        test_pycvc_state_exec_locks.py: ok: test_po_pump_calls_refused_while_run_pumps
+        test_pycvc_state_exec_locks.py: ok: test_po_raw_pump_call_holds_the_owner
+        test_pycvc_state_exec_locks.py: ok: test_po_run_holds_the_owner_until_it_returns
+        mt.groups: t=8 groups=8 prog=fib runs=1
+        mt.groups: t=8 groups=8 prog=exceptions runs=1
+        mt.groups: t=8 groups=8 prog=cycle runs=1
       # The lock tests read this and run their smaller sanitizer sizes.
       CVC_LOCKS_SANITIZER: '1'
     steps:
@@ -1754,6 +1880,26 @@ jobs:
       - name: Narrow mmap randomization for the sanitizer runtimes
         run: sudo sysctl vm.mmap_rnd_bits=28
 
+      # clang-tsan: the runner's clang must link -fsanitize=thread. Its runtime ships in
+      # libclang-rt-<major>-dev, installed for that clang if the image lacks it.
+      - name: Check clang's TSan runtime
+        if: matrix.cc == 'clang'
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang --version
+          printf 'int main(void) { return 0; }\n' > "$RUNNER_TEMP/tsan_check.c"
+          if ! clang -fsanitize=thread "$RUNNER_TEMP/tsan_check.c" -o "$RUNNER_TEMP/tsan_check"; then
+            major=$(clang -dumpversion | cut -d. -f1)
+            sudo apt-get update
+            sudo apt-get install -y "libclang-rt-$major-dev"
+            clang -fsanitize=thread "$RUNNER_TEMP/tsan_check.c" -o "$RUNNER_TEMP/tsan_check"
+          fi
+          "$RUNNER_TEMP/tsan_check"
+          # The leg's --gcc-install-dir must name an installed gcc 13 (its libstdc++).
+          test -d /usr/lib/gcc/x86_64-linux-gnu/13 ||
+            { echo "::error::/usr/lib/gcc/x86_64-linux-gnu/13 is missing"; exit 1; }
+
       # RelWithDebInfo, for line numbers in the reports. CUDA, OpenMP and cvcGL are off: nothing
       # under test uses them, and libgomp's uninstrumented barriers would only add TSan noise.
       - name: Configure
@@ -1768,7 +1914,11 @@ jobs:
           export LD_LIBRARY_PATH="$deps/lib:$PY_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
           flags="${{ matrix.flags }} -fno-omit-frame-pointer"
-          cmake -B build -G Ninja \
+          compilers=()
+          if [ -n "${{ matrix.cc }}" ]; then
+            compilers=(-DCMAKE_C_COMPILER="${{ matrix.cc }}" -DCMAKE_CXX_COMPILER="${{ matrix.cxx }}")
+          fi
+          cmake -B build -G Ninja "${compilers[@]}" \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_PREFIX_PATH="$deps;$PY_PREFIX" \
             -DCMAKE_C_FLAGS="$flags" \
@@ -1783,15 +1933,24 @@ jobs:
             -DCVC_BUILD_PYCVC=ON \
             -DCVC_BUILD_PYCVC_GL=OFF \
             -DPython3_EXECUTABLE="$PY_PREFIX/bin/python3.12" \
-            -DSWIG_EXECUTABLE="$PY_PREFIX/bin/swig"
+            -DSWIG_EXECUTABLE="$PY_PREFIX/bin/swig" \
+            ${{ matrix.cmake_args }}
 
       - name: Build
-        run: cmake --build build --parallel --target $SAN_CXX_TESTS state_exec_bench pycvc
+        env:
+          SAN_CXX_TESTS: ${{ matrix.cxx_tests || env.SAN_CXX_TESTS }}
+        # -k 0: build on past a failing object, so one run lists every error (a new compiler leg
+        # such as clang-tsan otherwise shows them one push at a time).
+        run: cmake --build build --parallel --target $SAN_CXX_TESTS state_exec_bench pycvc -- -k 0
 
       - name: Run the suites under ${{ matrix.name }}
         shell: bash
         env:
-          SAN_REQUIRED: ${{ matrix.required }}
+          SAN_CXX_TESTS: ${{ matrix.cxx_tests || env.SAN_CXX_TESTS }}
+          SAN_BENCH: ${{ matrix.bench || env.SAN_BENCH }}
+          SAN_REQUIRED: |
+            ${{ matrix.required }}
+            ${{ env.SAN_REQUIRED_S1A }}
         run: bash .github/sanitizers/run.sh "${{ matrix.name }}"
 
       - name: Upload the sanitizer logs

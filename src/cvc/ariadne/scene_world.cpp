@@ -13,7 +13,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cvc/ariadne/bind.h>
+#include <cvc/ariadne/data.h>
 #include <cvc/ariadne/scene.h>
+#include <cvc/ariadne/scene_generated_world.h>
 #include <cvc/ariadne/scene_geometry.h>
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/core/app.h>
@@ -22,7 +25,9 @@
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/height_field.h>
 #include <cvc/physics/world.h>
+#include <cvc/physics/world_geometry.h>
 #include <cvc/state/state.h>
+#include <cvc/world/world_geometry.h>
 #include <exception>
 #include <optional>
 #include <set>
@@ -119,6 +124,59 @@ std::string num(double v) {
   return o.str();
 }
 
+bool is_identity(const std::array<double, 16> &m) {
+  for (int r = 0; r < 4; ++r)
+    for (int c = 0; c < 4; ++c)
+      if (std::fabs(m[4 * r + c] - (r == c ? 1.0 : 0.0)) > 1e-12)
+        return false;
+  return true;
+}
+
+// What a data node's body: collides with, from the dataset at `store`: its source: { item }, else
+// the first of its world, geometry and terrain it has (a volume has no body). Null when it has
+// none of those.
+std::shared_ptr<const cvc::world::world_geometry> dataset_colliders(cvc::state &root,
+                                                                    const std::string &store,
+                                                                    const std::string &item_key,
+                                                                    const std::string &node) {
+  const std::vector<std::string> keys =
+      item_key.empty() ? std::vector<std::string>{"world", "geometry", "terrain", "volume"}
+                       : std::vector<std::string>{item_key};
+  boost::any obj;
+  for (const std::string &k : keys)
+    if (cvc::state *s = root.findDescendant(store + cvc::state::SEPARATOR + k)) {
+      obj = s->data();
+      if (!obj.empty())
+        break;
+    }
+  using world_ptr = std::shared_ptr<const cvc::world::world_geometry>;
+  using geometry_ptr = std::shared_ptr<const cvc::geometry>;
+  using field_ptr = std::shared_ptr<const cvc::height_field>;
+  if (const world_ptr *w = boost::any_cast<world_ptr>(&obj))
+    return *w;
+  cvc::world::geometry_item item;
+  item.name = node;
+  if (const field_ptr *f = boost::any_cast<field_ptr>(&obj))
+    item.geometry = *f;
+  else if (const geometry_ptr *g = boost::any_cast<geometry_ptr>(&obj))
+    item.geometry = *g;
+  else
+    return nullptr;
+  auto out = std::make_shared<cvc::world::world_geometry>();
+  out->add(std::move(item));
+  return out;
+}
+
+// A data node's dataset, as the node names it: <prefix>.data.<name>, or an absolute state path.
+std::string data_path(const std::string &bind_prefix, const SceneNode &n) {
+  return resolve_bind(bind_prefix, n.source_data[0] == '/'
+                                       ? n.source_data
+                                       : std::string(kDataRoot) + "." + n.source_data);
+}
+
+const char *const kDataNeedsPhysics =
+    "body: needs the scene's physics: block for a dataset's bodies";
+
 } // namespace
 
 bool scene_has_world(const Scene &scene) {
@@ -211,6 +269,47 @@ struct SceneWorld::impl {
   std::string stats; // "<stats_key>.stats", or empty
   std::optional<cvc::clock_follower> follower;
   ph::step_report last;
+
+  // A node whose colliders come at run time: a generated world's, or a dataset's.
+  struct tracked {
+    std::string node;
+    std::shared_ptr<SceneColliders> colliders;
+    std::uint64_t applied = 0; // the revision its bodies are from (0: none yet)
+    std::string item;          // a data node's source: { item }
+    std::string data_path;     // a data node's dataset, or empty
+    std::string target, rev;   // the store node and its rev last taken
+  };
+  std::vector<tracked> tracked_nodes;
+  std::vector<std::unique_ptr<GeneratedWorldRuntime>> generated; // run here (from_scene)
+  std::vector<std::string> warnings;                             // follow()'s syncs'
+
+  // Swap node t's bodies for its colliders' current geometry.
+  void apply(tracked &t, std::vector<std::string> *w) {
+    for (auto it = bodies.begin(); it != bodies.end();) {
+      if (it->node == t.node) {
+        world->remove_body(it->id);
+        it = bodies.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    t.applied = t.colliders->revision;
+    if (!t.colliders->geometry)
+      return;
+    try {
+      const ph::world_bodies made = ph::add_world_geometry(*world, *t.colliders->geometry);
+      for (const auto &b : made.bodies) {
+        SceneWorldBody body;
+        body.node = t.node;
+        body.id = b.second;
+        body.moves = false;
+        body.body_from_visual = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        bodies.push_back(body);
+      }
+    } catch (const std::exception &e) {
+      warn(w, "ari: scene node '" + t.node + "': body: " + e.what());
+    }
+  }
 };
 
 SceneWorld::SceneWorld() : _impl(std::make_unique<impl>()) {}
@@ -287,6 +386,24 @@ SceneWorld::build(cvc::app &app, const ScenePhysics &spec,
     const auto bad = [&](const std::string &m) {
       warn(warnings, "ari: scene node '" + n.id + "': body: " + m);
     };
+    if (p.colliders || !p.data_path.empty()) {
+      // Colliders made at run time: a generated world's now, a dataset's once it is ready (sync).
+      if (!is_identity(p.world))
+        bad("its colliders stay where they were made; the node's transform does not move them");
+      if (!b.shape.empty() && b.shape != "auto")
+        bad("shape '" + b.shape + "' is ignored: the body is the colliders the node makes");
+      if (!b.motion.empty() && b.motion != "static")
+        bad("its colliders are static");
+      impl::tracked t;
+      t.node = n.id;
+      t.item = n.source_item;
+      t.data_path = p.data_path;
+      t.colliders = p.colliders ? p.colliders : std::make_shared<SceneColliders>();
+      out->_impl->tracked_nodes.push_back(std::move(t));
+      if (p.colliders && p.colliders->revision > 0)
+        out->_impl->apply(out->_impl->tracked_nodes.back(), warnings);
+      continue;
+    }
     if (!p.geometry) {
       bad("needs a geometry node; skipped");
       continue;
@@ -440,10 +557,21 @@ SceneWorld::build(cvc::app &app, const ScenePhysics &spec,
 }
 
 std::unique_ptr<SceneWorld> SceneWorld::from_scene(cvc::app &app, const Scene &scene,
+                                                   const std::string &bind_prefix,
                                                    const std::string &stats_key,
                                                    std::vector<std::string> *warnings) {
-  if (!scene_has_world(scene))
+  if (!scene_has_world(scene)) {
+    // A data node's bodies need the physics: block (as cvcGL says when it draws the dataset).
+    const std::function<void(const SceneNode &)> data = [&](const SceneNode &n) {
+      if (n.body.present && !n.source_data.empty())
+        warn(warnings, "ari: scene node '" + n.id + "': " + kDataNeedsPhysics);
+      for (const SceneNode &c : n.children)
+        data(c);
+    };
+    for (const SceneNode &n : scene.nodes)
+      data(n);
     return nullptr;
+  }
   std::map<const SceneNode *, std::array<double, 16>> matrices;
   scene_world_matrices(scene, matrices);
 
@@ -452,8 +580,26 @@ std::unique_ptr<SceneWorld> SceneWorld::from_scene(cvc::app &app, const Scene &s
   std::map<std::string, std::shared_ptr<const cvc::geometry>> assets; // read once each
   std::set<std::string> failed_assets;
 
+  std::vector<std::unique_ptr<GeneratedWorldRuntime>> generated;
   const std::function<void(const SceneNode &)> visit = [&](const SceneNode &n) {
-    if (n.body.present && n.source_data.empty()) {
+    if (n.type == "generated_world" && n.source_data.empty()) {
+      // The world runs the node: its world made now, its keys seeded as a renderer's would be.
+      generated.push_back(std::make_unique<GeneratedWorldRuntime>(app, n, bind_prefix, warnings));
+      if (n.body.present) {
+        SceneBodyInput in;
+        in.spec = &n;
+        in.world = matrices[&n];
+        in.colliders = generated.back()->colliders();
+        inputs.push_back(std::move(in));
+      }
+    } else if (n.body.present && !n.source_data.empty()) {
+      SceneBodyInput in;
+      in.spec = &n;
+      in.world = matrices[&n];
+      in.data_path = data_path(bind_prefix, n);
+      DataStore::of(app)->touch(in.data_path); // a lazy dataset loads now
+      inputs.push_back(std::move(in));
+    } else if (n.body.present) {
       SceneBodyInput in;
       in.spec = &n;
       in.world = matrices[&n];
@@ -502,12 +648,66 @@ std::unique_ptr<SceneWorld> SceneWorld::from_scene(cvc::app &app, const Scene &s
   };
   for (const SceneNode &n : scene.nodes)
     visit(n);
-  return build(app, scene.physics, inputs, fields, stats_key, warnings);
+  std::unique_ptr<SceneWorld> out = build(app, scene.physics, inputs, fields, stats_key, warnings);
+  if (out)
+    out->_impl->generated = std::move(generated);
+  return out;
+}
+
+std::vector<ph::body_id> SceneWorld::bodies_of(const std::string &id) const {
+  std::vector<ph::body_id> out;
+  for (const SceneWorldBody &b : _impl->bodies)
+    if (b.node == id)
+      out.push_back(b.id);
+  return out;
+}
+
+std::shared_ptr<const cvc::world::generated_world>
+SceneWorld::generated_world(const std::string &id) const {
+  for (const auto &g : _impl->generated)
+    if (g->node() == id)
+      return g->world();
+  return nullptr;
+}
+
+void SceneWorld::sync(std::vector<std::string> *warnings) {
+  impl &d = *_impl;
+  for (const auto &g : d.generated)
+    g->tick(warnings);
+  cvc::state *root = d.app ? &cvc::state::instance(*d.app) : nullptr;
+  for (impl::tracked &t : d.tracked_nodes) {
+    if (!t.data_path.empty() && root) {
+      // A dataset that is ready and new (its first load, a reload, a replacement): its colliders.
+      if (cvc::state *node = root->findThroughLinks(t.data_path)) {
+        const std::string store = node->fullName();
+        cvc::state *status = root->findDescendant(store + cvc::state::SEPARATOR + "status");
+        if (status && status->value() == "ready") {
+          cvc::state *rev = root->findDescendant(store + cvc::state::SEPARATOR + "rev");
+          const std::string r = rev ? rev->value() : std::string();
+          if (store != t.target || r != t.rev) {
+            t.target = store;
+            t.rev = r;
+            t.colliders->geometry = dataset_colliders(*root, store, t.item, t.node);
+            ++t.colliders->revision;
+          }
+        }
+      }
+    }
+    if (t.colliders->revision != t.applied)
+      d.apply(t, warnings);
+  }
+}
+
+std::vector<std::string> SceneWorld::take_warnings() {
+  std::vector<std::string> out;
+  out.swap(_impl->warnings);
+  return out;
 }
 
 std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
                                  const std::function<void()> &after_step) {
   impl &d = *_impl;
+  sync(&d.warnings);
   if (!d.follower) {
     d.follower = cvc::clock_follower::for_step(clock, d.world->config().fixed_dt);
     if (after_step)

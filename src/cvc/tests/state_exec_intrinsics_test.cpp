@@ -2098,6 +2098,30 @@ TEST_F(SpawnContext, AfterRegisterRuns) {
   EXPECT_EQ(std::get<std::string>((**l)[1].v), "host");
 }
 
+// S1.8 (td 4.15, 4.9): a child's context has its parent's async host, and so does a grandchild's,
+// so a provider bound in after_register registers its async functions on the group's host.
+TEST_F(SpawnContext, ChildrenGetTheParentsHost) {
+  async_host host(&sched); // inline: kernels run in the calling step
+  ictx.host = &host;
+  std::vector<async_host *> seen;
+  ictx.spawn_context =
+      make_spawn_context(nullptr, [&seen](const environment_ptr &e, intrinsics_context &c) {
+        seen.push_back(c.host);
+        if (c.host)
+          register_async_fn(e, *c.host, "triple", [](std::span<const value_t> a) -> async_kernel {
+            const int64_t n = std::get<int64_t>(a[0].v);
+            return [n](async_call &) { return value_t(n * 3); };
+          });
+      });
+  const int child = child_of(run(R"S((spawn "(begin (spawn \"(triple 5)\") (triple 2))"))S"));
+  ASSERT_EQ(seen.size(), 2u);
+  EXPECT_EQ(seen[0], &host);
+  EXPECT_EQ(seen[1], &host);
+  const std::optional<value_t> r = sched.get_result(child);
+  ASSERT_TRUE(r.has_value()) << sched.get_exit_error(child).value_or("");
+  EXPECT_EQ(std::get<int64_t>(r->v), 6);
+}
+
 // --- Stage 0 hazards (td 8.1) ---
 
 // HZ-5 (td 8.1, S0.4): state-delete unlinks its one node from its parent. It no longer expires the

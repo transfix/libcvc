@@ -122,6 +122,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/state/state_exec/async_call.h
   ../../inc/cvc/state/state_exec/async_host.h
   ../../inc/cvc/state/state_exec/async_scheduler.h
+  ../../inc/cvc/state/state_exec/exec_group.h
   ../../inc/cvc/state/state_exec/intrinsics.h
   ../../inc/cvc/state/state_exec/resource_policy.h
   ../../inc/cvc/state/state_exec/stdlib.h
@@ -140,6 +141,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/text.h
   ../../inc/cvc/core/thread_pool.h
   ../../inc/cvc/core/thread_class.h
+  ../../inc/cvc/core/exec_pool.h
+  ../../inc/cvc/core/cpu_placement.h
   ../../inc/cvc/volume/volmagick.h
   ../../inc/cvc/geometry/geometry_file_io.h
   ../../inc/cvc/model/model.h
@@ -242,6 +245,8 @@ set(SOURCE_FILES
   core/text.cpp
   core/thread_pool.cpp
   core/thread_class.cpp
+  core/exec_pool.cpp
+  core/cpu_placement.cpp
   processing/bilateral_filter.cpp
   processing/contrast_enhancement.cpp
   volume/cvcraw_io.cpp
@@ -294,6 +299,7 @@ set(SOURCE_FILES
   state/state_exec/scheduler.cpp
   state/state_exec/async_host.cpp
   state/state_exec/async_scheduler.cpp
+  state/state_exec/exec_group.cpp
   state/state_exec/intrinsics.cpp
   state/state_exec/resource_policy.cpp
   state/state_exec/stdlib.cpp
@@ -1431,7 +1437,7 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/oidc.h ../../inc/cvc/net/loopback_re
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/data.cpp ariadne/media.cpp ariadne/media_player.cpp ariadne/media_browser.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_pose_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_chat.cpp ariadne/conference/room_rungs.cpp ariadne/conference/room_lane.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/scene_geometry.cpp ariadne/scene_world.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/pose_stream.cpp ariadne/tf_editor_emit.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/data.cpp ariadne/media.cpp ariadne/media_player.cpp ariadne/media_browser.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_pose_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_chat.cpp ariadne/conference/room_rungs.cpp ariadne/conference/room_lane.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/scene_geometry.cpp ariadne/scene_generated_world.cpp ariadne/scene_world.cpp ariadne/keys.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/pose_stream.cpp ariadne/tf_editor_emit.cpp)
 # A document set fetched from a URL, and a runtime's browser page loading one (arigl-web, ari).
 list(APPEND SOURCE_FILES ariadne/doc_fetch.cpp ariadne/web_document.cpp)
 # The document a relay runs (arisrv --doc) and the namespaces it publishes.
@@ -1608,6 +1614,12 @@ endif()
 # COMPONENT libcvc like the library itself, so the release tarballs (cpack's libcvc component)
 # carry it as well as the cvcpkg bundles (package.files: share/libcvc/ariadne/).
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ariadne/components
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/libcvc/ariadne
+        COMPONENT libcvc
+        FILES_MATCHING PATTERN "*.ari")
+# The stock worlds beside them (cvc://worlds/default.ari, large.ari): what arisrv seeds a room
+# with (ARIADNE_WORLDS.md WD1).
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ariadne/worlds
         DESTINATION ${CMAKE_INSTALL_DATADIR}/libcvc/ariadne
         COMPONENT libcvc
         FILES_MATCHING PATTERN "*.ari")

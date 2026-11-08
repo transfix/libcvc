@@ -25,11 +25,15 @@ namespace ariadne {
 
 struct Value {
   enum class Kind { Scalar, Sequence, Map };
+  // One map entry: `first` is the key, `second` the value. A plain struct, not std::pair: clang
+  // with libstdc++ in C++20 checks std::pair's explicit default constructor while Value's own
+  // members are being defined, and rejects a pair holding Value inside Value.
+  struct Entry;
 
   Kind kind = Kind::Scalar;
-  std::string scalar;                                 // Kind::Scalar
-  std::vector<Value> items;                           // Kind::Sequence
-  std::vector<std::pair<std::string, Value>> entries; // Kind::Map (insertion order)
+  std::string scalar;         // Kind::Scalar
+  std::vector<Value> items;   // Kind::Sequence
+  std::vector<Entry> entries; // Kind::Map (insertion order)
 
   bool is_scalar() const { return kind == Kind::Scalar; }
   bool is_seq() const { return kind == Kind::Sequence; }
@@ -65,13 +69,7 @@ struct Value {
   }
 
   // --- map access (nullptr / default when absent or wrong kind) ----------------
-  const Value *find(const std::string &key) const {
-    if (is_map())
-      for (const auto &e : entries)
-        if (e.first == key)
-          return &e.second;
-    return nullptr;
-  }
+  const Value *find(const std::string &key) const;
   bool has(const std::string &key) const { return find(key) != nullptr; }
   std::string str(const std::string &key, const std::string &dflt = std::string()) const {
     const Value *v = find(key);
@@ -86,6 +84,22 @@ struct Value {
     return v ? v->as_bool(dflt) : dflt;
   }
 };
+
+struct Value::Entry {
+  std::string first;
+  Value second;
+
+  Entry() = default;
+  Entry(std::string key, Value value) : first(std::move(key)), second(std::move(value)) {}
+};
+
+inline const Value *Value::find(const std::string &key) const {
+  if (is_map())
+    for (const auto &e : entries)
+      if (e.first == key)
+        return &e.second;
+  return nullptr;
+}
 
 } // namespace ariadne
 } // namespace cvc

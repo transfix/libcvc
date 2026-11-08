@@ -125,6 +125,10 @@ public:
 
   /// The function's name.
   const std::string &function_name() const override { return name_; }
+  /// A threaded call's scheduler (where its completion is posted), or null for an inline one.
+  const async_scheduler *owner() const noexcept override { return async_sched_; }
+  /// owner()'s serial(), kept from when the call was made.
+  std::uint64_t owner_serial() const noexcept override { return owner_serial_; }
 
   /// Whether the kernel should stop: its process was killed or reaped (its budget ran out
   /// while the call ran included), the call timed out, its owner group was reaped, or the host
@@ -247,6 +251,7 @@ private:
   std::string progress_channel_;
   scheduler_base *sched_ = nullptr;        // where progress goes (inline: on this thread)
   async_scheduler *async_sched_ = nullptr; // threaded: where the completion is posted
+  std::uint64_t owner_serial_ = 0;         // async_sched_'s serial(), set as it tracks the call
   std::optional<double> timeout_;
   bool io_ = false; // async_options::io
   clock::time_point created_ = clock::now();

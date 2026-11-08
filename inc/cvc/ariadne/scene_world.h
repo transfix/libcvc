@@ -14,9 +14,19 @@
 // the bodies, so one document runs the same world drawn or not (ARIADNE_WORLDS.md section 14,
 // "Headless first").
 //
-//   auto w = SceneWorld::from_scene(app, scene, "physics", &warnings); // the bodies, built
-//   SceneClockDriver clock(app, scene.clock);                          // the scene's clock
+//   auto w = SceneWorld::from_scene(app, scene, prefix, "physics", &warnings); // the bodies
+//   SceneClockDriver clock(app, scene.clock);                                  // the scene's clock
 //   ... per frame: clock.drive(wall_dt); w->follow(app.world_clock());
+//
+// Some nodes make what their body: collides with at run time, and the world swaps those bodies
+// when it changes (sync(), which follow() runs first):
+//   * a `generated_world` node: its terrain and buildings (scene_generated_world.h). Headless, the
+//     world runs the node itself (GeneratedWorldRuntime: its world.* keys and Regenerate);
+//     drawn, cvcGL's node does and hands over its colliders.
+//   * a `source: { data }` node: its dataset's world, terrain or geometry, once the dataset is
+//     ready and again each time it changes (its rev). It needs the scene's physics: block.
+// Those colliders are static and placed as they were made: the node's transform does not move
+// them.
 //
 // The world steps on the app's world clock, never on frames, so N quanta give one state whether a
 // window draws them or not.
@@ -55,6 +65,9 @@ struct world_clock_keys;
 namespace physics {
 class world;
 }
+namespace world {
+struct generated_world;
+}
 
 namespace ariadne {
 
@@ -62,6 +75,7 @@ struct Scene;
 struct SceneClock;
 struct SceneNode;
 struct ScenePhysics;
+struct SceneColliders;
 
 // Whether a scene has a world to run: a `physics:` block, or a node (at any depth) with a `body:`
 // (a data node's bodies come with its dataset, so it does not count).
@@ -94,11 +108,15 @@ private:
   std::unique_ptr<impl> _impl;
 };
 
-// A body the world builds from a node: where the node is and the mesh it has.
+// A body the world builds from a node: where the node is and the mesh it has. A node that makes
+// its colliders at run time gives `colliders` (a generated world) or `data_path` (a data node's
+// dataset, an absolute state path) instead of a mesh.
 struct SceneBodyInput {
   const SceneNode *spec = nullptr;
   std::array<double, 16> world{};                // the node's world matrix, row-major
   std::shared_ptr<const cvc::geometry> geometry; // the node's mesh (its source:, fitted)
+  std::shared_ptr<SceneColliders> colliders;     // what the node makes, swapped on each revision
+  std::string data_path;                         // <prefix>.data.<name>
 };
 
 // A body the world made, and the node it came from.
@@ -114,9 +132,12 @@ class SceneWorld {
 public:
   // The world of `scene` from its spec alone: the node transforms composed, each body node's mesh
   // read from its source: (a primitive, a heightfield, a file or an asset), its heightfield's grid
-  // for a terrain. `stats_key` is the absolute state path the telemetry goes under ("" = none).
+  // for a terrain; each generated_world node run here (its world made now, its world.* keys under
+  // `bind_prefix`), its colliders a body: on it; each data node's dataset watched (under
+  // `bind_prefix`). `stats_key` is the absolute state path the telemetry goes under ("" = none).
   // Null when the scene has no world or its world could not be made (it warns).
   static std::unique_ptr<SceneWorld> from_scene(cvc::app &app, const Scene &scene,
+                                                const std::string &bind_prefix,
                                                 const std::string &stats_key,
                                                 std::vector<std::string> *warnings);
 
@@ -135,8 +156,20 @@ public:
   physics::world &world();
   const physics::world &world() const;
   const std::vector<SceneWorldBody> &bodies() const;
-  // The body node `id` declared (an invalid id when it has none).
+  // The body node `id` declared (an invalid id when it has none); a node with colliders has a
+  // body per collider, and this is the first.
   physics::body_id body(const std::string &id) const;
+  // The bodies node `id` has now.
+  std::vector<physics::body_id> bodies_of(const std::string &id) const;
+
+  // The world a generated_world node made, when this world runs the node (from_scene); null when a
+  // renderer runs it, or there is no such node.
+  std::shared_ptr<const cvc::world::generated_world> generated_world(const std::string &id) const;
+
+  // Run the generated_world nodes this world runs (a request or an edit makes a new world), take a
+  // ready or changed dataset's colliders, and swap the bodies of each node whose colliders changed.
+  // follow() runs it first. Problems warn, naming the node.
+  void sync(std::vector<std::string> *warnings = nullptr);
 
   // Run the steps due on `clock` since the last call and publish the telemetry when any ran. The
   // first call anchors at the clock's tick and runs none. `after_step` is called after the last two
@@ -147,6 +180,9 @@ public:
 
   // The telemetry, written now.
   void publish_stats();
+
+  // The warnings follow()'s syncs gathered since the last call.
+  std::vector<std::string> take_warnings();
 
 private:
   SceneWorld();

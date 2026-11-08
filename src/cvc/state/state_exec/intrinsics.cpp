@@ -992,6 +992,17 @@ void park_await(intrinsics_context *ctx, int pid, const std::string &channel,
   request_await(std::move(request));
 }
 
+// S1-Q2 (td 4.9): a threaded future is finished by the scheduler its completion is posted to, so
+// awaiting it from another one raises, before anything reads, parks on or waits for the call. An
+// inline future (no owner) was settled before it returned: a plain value any scheduler may read.
+// Owners are compared by serial, not address: a host can keep a future after its scheduler is
+// gone, and a later scheduler can sit at the freed address (R1-mid C-m13).
+void check_future_owner(const intrinsics_context *ctx, const detail::awaitable &call) {
+  const std::uint64_t owner = call.owner_serial();
+  if (owner != 0 && owner != ctx->sched->serial())
+    throw dsl_error("RuntimeError", kForeignFutureError, "async");
+}
+
 // (await f [seconds]): an async call's future returns its value or raises its exception once it
 // finishes (at once if it has); a channel future, the value its producer delivers; anything
 // else, itself, after a frame. With seconds, a future that hasn't finished by then raises
@@ -1025,6 +1036,7 @@ value_t intrinsic_await(intrinsics_context *ctx, std::span<const value_t> args) 
       throw dsl_error("RuntimeError",
                       "await: the call can't resume (its future was restored from a snapshot)",
                       "async");
+    check_future_owner(ctx, *call); // msg-recv on a future comes here too
     if (call->finished())
       return call->outcome();
     const std::string channel = *future_channel_of(args[0]);
@@ -1079,6 +1091,12 @@ value_t intrinsic_await_all(intrinsics_context *ctx, std::span<const value_t> ar
     throw dsl_error("TypeError",
                     "await-all: expected a list of futures, got " + args[0].type_name());
   const std::vector<value_t> &items = **lp;
+  // Every future's owner first (S1-Q2): a list holding another scheduler's future raises before
+  // the call waits for, or parks on, any entry.
+  for (const value_t &f : items)
+    if (is_async_future(f))
+      if (const std::shared_ptr<detail::awaitable> call = async_call_of_future(f))
+        check_future_owner(ctx, *call);
   const int pid = ctx->sched->current_pid();
   const bool parkable = pid >= 0 && can_await();
   for (std::size_t i = 0; i < items.size(); ++i) {
@@ -1664,6 +1682,7 @@ std::function<spawn_setup(const intrinsics_context &)> make_spawn_context(
           after_register = std::move(after_register)](const intrinsics_context &parent) {
     auto child = std::make_shared<intrinsics_context>();
     child->sched = parent.sched;
+    child->host = parent.host; // the same group's async host (td 4.15)
     child->root = parent.root;
     child->root_pins = parent.root_pins;
     child->tracker = parent.tracker;

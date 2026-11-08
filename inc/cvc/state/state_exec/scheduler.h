@@ -27,6 +27,7 @@
 #include <optional>
 #include <queue>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -36,8 +37,14 @@ class state;
 
 namespace cvc::state_exec {
 
+struct random_stream; // stdlib.h
+
 // scheduling_policy, execute_options, process_info, scheduler_stats now live in
 // scheduler_base.h (shared by the sync scheduler and async_scheduler).
+
+/// What a pump-thread-only call raises while another thread holds the scheduler's pump owner
+/// (S1-Q4): a std::runtime_error, a RuntimeError in Python.
+inline constexpr const char *kPumpedElsewhereError = "scheduler: another thread is pumping it";
 
 namespace detail {
 
@@ -124,6 +131,39 @@ public:
   /// order. Walks the processes only while lock_waiting_count() is not zero.
   void lock_waiting_pids(std::vector<int> &out) const;
   bool check_tables() const override { return procs_.check(); }
+  /// Close the lock home's port, if it has a home (lock_port::close, idempotent): no post lands
+  /// after it. A group's teardown does it first, before its kills (td 4.2, S1-Q1).
+  void close_lock_port();
+
+  // --- Groups (docs/STATE_EXEC_THREADED.md 4.1, 4.7, 4.10; Stage 1) ---
+
+  /// Use `r` (null: none) for this scheduler's tracked objects: it binds `r` on every entry that
+  /// can run DSL or track, and names it for its due check and its exit notes, so they reach `r`
+  /// whichever thread drives it. The owner keeps `r` alive, and collects and frees it after this
+  /// scheduler and its environments are gone. Unset, the thread's own registry is used, as today.
+  void set_cycle_registry(cycle_registry *r);
+  /// The registry set_cycle_registry() gave, or null.
+  cycle_registry *registry() const noexcept { return registry_; }
+  /// Use `s` (null: none) for math.random, bound with the registry. The owner keeps it alive.
+  void set_random_stream(random_stream *s);
+
+  /// RAII: the calling thread is this scheduler's pump owner while the scope lives (S1-Q4). The
+  /// rule is "no owner, or me": it takes an unset owner, nests in a scope of the same thread, and
+  /// restores what it found. Another thread's owner makes the constructor throw
+  /// std::runtime_error(kPumpedElsewhereError). A driver holds one while it drives.
+  class pump_owner_scope {
+  public:
+    explicit pump_owner_scope(scheduler &s);
+    ~pump_owner_scope();
+    pump_owner_scope(const pump_owner_scope &) = delete;
+    pump_owner_scope &operator=(const pump_owner_scope &) = delete;
+
+  private:
+    scheduler &s_;
+    std::thread::id outer_;
+  };
+  /// Any thread (one relaxed load): whether a thread other than the caller holds the pump owner.
+  bool pumped_elsewhere() const noexcept;
 
   // --- Process submission ---
 
@@ -527,6 +567,12 @@ private:
   /// to the front of the queue before the exception propagates.
   void apply_controls();
   void apply_control(int pid, control_cmd &cmd, bool &counted_out);
+
+  /// Stage 1: the registry and stream the owner set (null: the thread's own), and the pump owner,
+  /// the thread driving this scheduler (none: std::thread::id()).
+  cycle_registry *registry_ = nullptr;
+  random_stream *random_ = nullptr;
+  std::atomic<std::thread::id> pump_owner_{};
 };
 
 /// limits.max_alloc_bytes from the state tree under `root`:

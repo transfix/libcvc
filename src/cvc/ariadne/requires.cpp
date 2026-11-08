@@ -72,6 +72,12 @@ const std::vector<TokenRule> &rules() {
        [](const HostFacts &) { return true; }},
       {{"image.animated", "image: and background: animate a GIF or WebP (APNG: its first frame)"},
        [](const HostFacts &) { return true; }},
+      {{"image.fill", "image: and video: take size: \"N%\" (that share of the line's width, as "
+                      "wide as the window where the backend can measure it) and max_height:"},
+       [](const HostFacts &) { return true; }},
+      {{"text.emoji", "text: takes emoji: (a map of :shortcode: names to picture URIs), drawn "
+                      "in the line where the backend can put a picture there"},
+       [](const HostFacts &) { return true; }},
       {{"video.decorative", "video: takes controls: false, and a video URL in image: or "
                             "background: plays as a decorative video (with a player; else its "
                             "poster or placeholder)"},

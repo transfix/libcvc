@@ -1,0 +1,93 @@
+# large.ari -- the stock large world: a 100 m plane with meshes to walk between (ARIADNE_WORLDS.md
+# WD1). `arisrv --scene large` runs it, with the area of interest's hall preset; it is what mesh LOD
+# and the spatial interest filter are measured on.
+#
+# The default room's floor scaled to 100 m, its reference box, and the embedded Stanford bunny
+# (x.bunny, 69,473 triangles) stood about 1.7 m tall at the centre of each cell of a 5 x 5 grid,
+# 20 m apart, except the middle cell, which is the reference box's and the avatars' spawn ring's.
+# The bunnies are meshes, so they have no physics (room_statics keeps the plane and the box), and
+# every one is the same asset, so a client builds one LOD pyramid for them all. bunny_<i>_<j> is
+# column i, row j.
+#
+# conference::large_world() in room_scene.cpp is its C++ twin, which the relay seeds when it cannot
+# find this file; room_scene_test pins the two equal, so change both together.
+meta: { name: large world, min_libcvc: 3.7.12 }
+
+scene:
+  background: { top: [0.20, 0.24, 0.30], bottom: [0.05, 0.06, 0.08] }
+  chrome: false
+  # The default world's rig, staged over its middle 20 m.
+  lights:
+    - light: room_rig
+      rig: three_point
+      stage: { center: [0, 0, 1], radius: 10 }
+      key: { intensity: 0.9, azimuth: -35, elevation: 55, cone: 48 }
+      fill: 0.25
+      back: 0.25
+      warmth: 0.25
+      environment: 0.15
+      ambient: 0.12
+  shadows:
+    enabled: true
+    resolution: 2048
+    update_interval: 1
+  nodes:
+    - node: ground
+      source: { plane: { size: 100 } }
+      material: { color: [0.32, 0.34, 0.38], ambient: 0.35, diffuse: 0.85 }
+    - node: ref
+      source: { box: { size: [1, 1, 1] } }
+      transform: { position: [0, 0, 0.5] }
+      material: { color: [0.85, 0.45, 0.20], specular: 0.25, specular_power: 24 }
+    - node: bunny_0_0
+      source: x.bunny
+      fit: &bunny_fit { height: 1.7, up: y }
+      transform: { position: [-40, -40, 0] }
+      material: &bunny_material
+        { color: [0.78, 0.74, 0.66], ambient: 0.3, diffuse: 0.8, specular: 0.2, specular_power: 16 }
+    - { node: bunny_1_0, source: x.bunny, fit: *bunny_fit, material: *bunny_material,
+        transform: { position: [-20, -40, 0] } }
+    - { node: bunny_2_0, source: x.bunny, fit: *bunny_fit, material: *bunny_material,
+        transform: { position: [0, -40, 0] } }
+    - { node: bunny_3_0, source: x.bunny, fit: *bunny_fit, material: *bunny_material,
+        transform: { position: [20, -40, 0] } }
+    - { node: bunny_4_0, source: x.bunny, fit: *bunny_fit, material: *bunny_material,
+        transform: { position: [40, -40, 0] } }
+    - { node: bunny_0_1, source: x.bunny, fit: *bunny_fit, material: *bunny_material,
+        transform: { position: [-40, -20, 0] } }
+    - { node: bunny_1_1, source: x.bunny, fit: *bunny_fit, material: *bunny_material,
+        transform: { position: [-20, -20, 0] } }
+    - { node: bunny_2_1, source: x.bunny, fit: *bunny_fit, material: *bunny_material,
+        transform: { position: [0, -20, 0] } }
+    - { node: bunny_3_1, source: x.bunny, fit: *bunny_fit, material: *bunny_material,
+        transform: { position: [20, -20, 0] } }
+    - { node: bunny_4_1, source: x.bunny, fit: *bunny_fit, material: *bunny_material,
+        transform: { position: [40, -20, 0] } }
+    - { node: bunny_0_2, source: x.bunny, fit: *bunny_fit, material: *bunny_material,
+        transform: { position: [-40, 0, 0] } }
+    - { node: bunny_1_2, source: x.bunny, fit: *bunny_fit, material: *bunny_material,
+        transform: { position: [-20, 0, 0] } }
+    - { node: bunny_3_2, source: x.bunny, fit: *bunny_fit, material: *bunny_material,
+        transform: { position: [20, 0, 0] } }
+    - { node: bunny_4_2, source: x.bunny, fit: *bunny_fit, material: *bunny_material,
+        transform: { position: [40, 0, 0] } }
+    - { node: bunny_0_3, source: x.bunny, fit: *bunny_fit, material: *bunny_material,
+        transform: { position: [-40, 20, 0] } }
+    - { node: bunny_1_3, source: x.bunny, fit: *bunny_fit, material: *bunny_material,
+        transform: { position: [-20, 20, 0] } }
+    - { node: bunny_2_3, source: x.bunny, fit: *bunny_fit, material: *bunny_material,
+        transform: { position: [0, 20, 0] } }
+    - { node: bunny_3_3, source: x.bunny, fit: *bunny_fit, material: *bunny_material,
+        transform: { position: [20, 20, 0] } }
+    - { node: bunny_4_3, source: x.bunny, fit: *bunny_fit, material: *bunny_material,
+        transform: { position: [40, 20, 0] } }
+    - { node: bunny_0_4, source: x.bunny, fit: *bunny_fit, material: *bunny_material,
+        transform: { position: [-40, 40, 0] } }
+    - { node: bunny_1_4, source: x.bunny, fit: *bunny_fit, material: *bunny_material,
+        transform: { position: [-20, 40, 0] } }
+    - { node: bunny_2_4, source: x.bunny, fit: *bunny_fit, material: *bunny_material,
+        transform: { position: [0, 40, 0] } }
+    - { node: bunny_3_4, source: x.bunny, fit: *bunny_fit, material: *bunny_material,
+        transform: { position: [20, 40, 0] } }
+    - { node: bunny_4_4, source: x.bunny, fit: *bunny_fit, material: *bunny_material,
+        transform: { position: [40, 40, 0] } }

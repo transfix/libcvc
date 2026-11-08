@@ -169,6 +169,12 @@ public:
   // The clock's reading for the frame render() last drew.
   double frame_clock() const;
 
+  // The time a frame's read-lane expressions (visible_when, enabled_when, computed binds) may take
+  // together, from the next render() on (default 0.030 s). Past it the rest skip that frame: a
+  // visible_when or enabled_when keeps the value it had last frame (hidden or disabled where it
+  // never had one), so a slow frame doesn't flicker the widgets at the end of a long list.
+  void set_reactive_frame_budget(double seconds);
+
   // Run every queued action event's handler, then clear the queue. Call once per
   // frame in the host loop, BEFORE your sim tick and OUTSIDE render().
   //

@@ -32,9 +32,21 @@ class state;
 
 namespace cvc::state_exec {
 
+class async_host;
 class scheduler_base;
 class memory_tracker;
 struct process;
+
+/// Where a provider's natives may run (docs/STATE_EXEC_THREADED.md 4.9; S1-Q7), registered per
+/// provider. In group 0 (the app scheduler) and in a host-affinity group, every kind is installed
+/// as it is, and runs on the host thread. In an `any` group, which a pool worker may pump:
+/// - `any`: installed as it is; it runs on whatever thread pumps the group, so it touches only
+///   its own context, thread-safe tables and the tree through pinned lookups;
+/// - `host_proxied`: installed as a wrapper that runs its body on the host thread, through the
+///   pool's host-call queue (exec_pool::run_on_host), its process resuming at the group's next
+///   pump; inline when the thread calling it is the pump_all's caller or no pump_all is active;
+/// - `host_only`: not installed, so a call is a NameError.
+enum class provider_affinity { any, host_proxied, host_only };
 
 /// Runtime context available to DSL intrinsics.
 ///
@@ -193,6 +205,11 @@ struct intrinsics_context {
   /// shares this context (its natives point at it), so a host that frees the context when its
   /// process ends (Ariadne's actions) keeps it while the children live. Unset: nothing is called.
   std::function<void(int pid)> on_child;
+
+  /// The async host of the context's group (td 4.9, B30), non-owning: providers register their
+  /// async functions on it and post their completions to its parking_scheduler(). Null: the host
+  /// set none.
+  async_host *host = nullptr;
 };
 static_assert(std::is_aggregate_v<intrinsics_context>); // hosts may brace-initialise it
 
@@ -204,10 +221,11 @@ static_assert(std::is_aggregate_v<intrinsics_context>); // hosts may brace-initi
 void register_intrinsics(environment_ptr env, intrinsics_context *ctx);
 
 /// The spawn_context callback for a host that registers the plain intrinsics: each child gets a
-/// context copying the parent's (scheduler, root, chroot, identity, channel policy, document, lock
-/// fields and this callback, so grandchildren get one too) and `environment::extend(base)` with
-/// the intrinsics registered over it, then `after_register` (the host's own bindings). A null
-/// `base` is one default environment, made with the callback and shared by its children.
+/// context copying the parent's (scheduler, async host, root, chroot, identity, channel policy,
+/// document, lock fields and this callback, so grandchildren get one too) and
+/// `environment::extend(base)` with the intrinsics registered over it, then `after_register` (the
+/// host's own bindings). A null `base` is one default environment, made with the callback and
+/// shared by its children.
 std::function<spawn_setup(const intrinsics_context &)> make_spawn_context(
     environment_ptr base = nullptr,
     std::function<void(const environment_ptr &, intrinsics_context &)> after_register = {});

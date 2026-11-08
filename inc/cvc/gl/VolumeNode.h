@@ -54,6 +54,13 @@ public:
   // animation fast path — orders of magnitude cheaper than setVolume(), which
   // reallocates the image, rescans the range, and resets the transfer function.
   void updateScalars(const std::vector<float> &data);
+  // The same refresh with TWO values per voxel, VTK's dependent components: `colour` is looked up
+  // in the colour transfer function and `opacity` in the opacity one, so what a voxel looks like
+  // and how much of it there is come apart (a cloud's sunlight and its density). The first such
+  // call turns the volume into 2-component float data of the same dimensions, origin and spacing
+  // and turns independent components off; later calls only copy. Both must match the voxel count.
+  // setVolume() goes back to one independent component.
+  void updateScalars(const std::vector<float> &colour, const std::vector<float> &opacity);
   bool hasVolume() const { return m_hasVolume; }
   const cvc::volume *getVolume() const { return m_volume.get(); }
   // The same volume by its shared owner (null before setVolume). Each setVolume makes a new one,

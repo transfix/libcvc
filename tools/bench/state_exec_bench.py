@@ -12,6 +12,7 @@
   state_exec_bench.py table base.jsonl
   state_exec_bench.py compare base.jsonl cand.jsonl [--metric wall_ns] [--threshold 3]
                       [--pair KEY=A:B] [--max-noise P] [--fail-on-worse | --fail-on-change]
+                      [--same-pin]
   state_exec_bench.py gate run.jsonl --scenario GLOB --metric M (--max X | --min X) [--stat median]
 
 `run` starts the executable once per scenario (with --split, once per scenario, executor and sweep
@@ -29,9 +30,12 @@ whose checks failed on either side, or that only the base has, is reported as su
 regression for --fail-on-worse. A param at its implicit default (IMPLICIT_DEFAULTS) is left out of
 the match, so records from binaries that predate the param still match. --pair KEY=A:B compares
 the points whose KEY is A in the base with those whose KEY is B in the candidate (one run against
-itself, say). With --max-noise P, a point noisier than P percent is INCONCLUSIVE rather than judged.
-Exit status: 1 when a point fails under --fail-on-worse or --fail-on-change; else 2 when a point is
-INCONCLUSIVE (repeat the run on a quieter machine; never a pass); else 0.
+itself, say); a scenario that has records on one side only fails it. With --max-noise P, a point
+noisier than P percent is INCONCLUSIVE rather than judged. A matched point whose two sides ran their
+driver on different CPUs (pin_cpu) is warned about, and fails with --same-pin. Exit status: 1 when a
+--pair leaves a scenario unpaired, a point fails under --fail-on-worse or --fail-on-change, or the
+CPUs differ under --same-pin; else 2 when a point is INCONCLUSIVE (repeat the run on a quieter
+machine; never a pass); else 0.
 
 `gate` checks one statistic of a metric against an absolute bound on every matching point of one
 run (a gate the design states in nanoseconds, steps or allocations rather than as a change), with
@@ -107,8 +111,11 @@ def load(path):
 # them. A param at its implicit default is left out of a record's match key, so a record from a
 # binary without the key and one from a binary with it at its default are the same point. Stage 0
 # of threaded execution added chroot (native.state_get, native.state_set, sched.watch_poll; it was
-# already lock.uncontended's) and writes (sched.watch_poll).
-IMPLICIT_DEFAULTS = {"policy": "rr", "locks": "none", "chroot": "0", "writes": "none"}
+# already lock.uncontended's) and writes (sched.watch_poll); Stage 1 added base (sched.single.*'s
+# async points: driver=group's base env, own by default). sched.single.*'s driver key was already
+# there (spin, the bare scheduler's loop), so its new value, group, needs no default.
+IMPLICIT_DEFAULTS = {"policy": "rr", "locks": "none", "chroot": "0", "writes": "none",
+                     "base": "own"}
 
 
 def param(r, name):
@@ -198,18 +205,46 @@ def table(recs, out=sys.stdout):
                 print(f"    error: {e}", file=out)
 
 
+def pins(recs):
+    """The driver CPUs (pin_cpu) a point's records ran on; empty when they don't say."""
+    return {r["pin_cpu"] for r in recs if "pin_cpu" in r}
+
+
 def compare(base, cand, metrics, threshold, pair=None, max_noise=None):
     """Print the comparison; return the counts of worse, changed (any verdict but ~), inconclusive
-    and failed (failed its checks or missing in the candidate) points."""
+    and failed (failed its checks or missing in the candidate) points; with `pair`, the scenarios
+    only one side has records of (unpaired); and the matched points whose sides ran their driver on
+    different CPUs (pins)."""
     drop = ()
+    unpaired = 0
     if pair:
         # The base side keeps the points at A, the candidate side those at B, matched without the
-        # key; a point at neither value is left out.
+        # key; a point at neither value is left out. A scenario with records on one side only is a
+        # pair that matched nothing there (a value misspelled, or not run): it fails, rather than
+        # passing with every point "only in" one side.
         key, a, b = pair
         base = [r for r in base if param(r, key) == a]
         cand = [r for r in cand if param(r, key) == b]
         drop = (key,)
+        sb = {r.get("scenario", "?") for r in base}
+        sc = {r.get("scenario", "?") for r in cand}
+        for s in sorted(sb ^ sc):
+            side, value = ("base", a) if s not in sb else ("candidate", b)
+            print(f"pair {key}={a}:{b}: {s} has no {side} record at {key}={value}")
+        unpaired = len(sb ^ sc)
+        if not sb and not sc:
+            print(f"pair {key}={a}:{b}: no record has {key}={a} or {key}={b}")
+            unpaired = 1
     gb, gc = group(base, drop), group(cand, drop)
+    # The driver's CPU is part of what a timing measures: an A/B whose two binaries pinned it to
+    # different CPUs (another core, another scheduling class) compares the cores as much as the
+    # code. Warned about here; --same-pin fails it.
+    pin_keys = [k for k in sorted(set(gb) & set(gc))
+                if pins(gb[k]) and pins(gc[k]) and pins(gb[k]) != pins(gc[k])]
+    for k in pin_keys:
+        print(f"warning: {k[0]} {k[1]} {k[2]}: the driver ran on CPU "
+              f"{','.join(map(str, sorted(pins(gb[k]))))} in base and "
+              f"{','.join(map(str, sorted(pins(gc[k]))))} in cand (pin_cpu)")
     flagged = worse = inconclusive = 0
     failed_keys = set()
     for name in metrics:
@@ -270,9 +305,11 @@ def compare(base, cand, metrics, threshold, pair=None, max_noise=None):
     print(f"\n{flagged} change(s) beyond the noise, {worse} of them worse; "
           f"{len(failed_keys)} point(s) failed or missing in the candidate"
           + (f"; {inconclusive} inconclusive (noise above {max_noise:g}%)"
-             if max_noise is not None else ""))
+             if max_noise is not None else "")
+          + (f"; {unpaired} scenario(s) unpaired" if unpaired else "")
+          + (f"; {len(pin_keys)} point(s) with the driver on another CPU" if pin_keys else ""))
     return {"worse": worse, "changed": flagged, "inconclusive": inconclusive,
-            "failed": len(failed_keys)}
+            "failed": len(failed_keys), "unpaired": unpaired, "pins": len(pin_keys)}
 
 
 def parse_pair(text):
@@ -508,6 +545,9 @@ def main():
                         "matched without KEY (both files may be the same run)")
     c.add_argument("--max-noise", type=float, metavar="P",
                    help="a point noisier than P percent is INCONCLUSIVE, not judged (exit 2)")
+    c.add_argument("--same-pin", action="store_true",
+                   help="exit 1 when a matched point's base and candidate ran their driver on "
+                        "different CPUs (pin_cpu); without it they are only warned about")
     g = sub.add_parser("gate", help="check a metric of one run against an absolute bound")
     g.add_argument("run")
     g.add_argument("--scenario", required=True, help="name or glob")
@@ -548,6 +588,8 @@ def main():
     metrics = args.metric or ["wall_ns", "ns_per_step"]
     res = compare(load(args.base), load(args.cand), metrics, args.threshold, pair=pair,
                   max_noise=args.max_noise)
+    if res["unpaired"] or (args.same_pin and res["pins"]):
+        return 1
     if args.fail_on_change and (res["changed"] or res["failed"]):
         return 1
     if args.fail_on_worse and (res["worse"] or res["failed"]):

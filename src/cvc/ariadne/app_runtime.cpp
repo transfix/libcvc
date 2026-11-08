@@ -823,7 +823,8 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
       // No adapter draws it, but its world runs: the physics world and its bodies, stepped on the
       // world clock (ARIADNE_WORLDS.md section 14, "Headless first").
       std::vector<std::string> warns;
-      world_ = SceneWorld::from_scene(app_, lr.scene, resolve_bind(prefix_, "physics"), &warns);
+      world_ =
+          SceneWorld::from_scene(app_, lr.scene, prefix_, resolve_bind(prefix_, "physics"), &warns);
       if (world_ || lr.scene.clock.present) {
         // A physics world runs on the scene's clock, as if it declared `clock: {}`.
         SceneClock c = lr.scene.clock;
@@ -889,6 +890,8 @@ void AppRuntime::drain() {
   if (world_) {
     try {
       world_->follow(app_.world_clock());
+      for (std::string &w : world_->take_warnings()) // a regenerated world's, a dataset's bodies
+        pendingWarnings_.push_back(std::move(w));
     } catch (const std::exception &e) {
       // A clock whose quantum changed under the world: stop stepping rather than throw out of
       // every frame.
