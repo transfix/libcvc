@@ -43,7 +43,8 @@ input had been truncated. With all five judged, the decision changed (section 3.
   (S1-Q1 to S1-Q12, listed in 9.2), is `threaded-impl/S1.md`. Stage 1b's Ariadne text (4.8, 4.9's
   provider sites, 4.11 item 7, 4.12's Ariadne part, 5 items 10 and 11) is still the design.
 - **The benchmark suite** and its documentation are `src/cvc/tests/state_exec_bench.cpp` and
-  `docs/STATE_EXEC_BENCH.md` on `feat/state-exec-bench` (#834), not yet on master.
+  `docs/STATE_EXEC_BENCH.md`, on master since #834 (bc4761bf); this design was first written
+  against the `feat/state-exec-bench` branch.
 - **The measured numbers** are the first full run of that suite on the development machine:
   - The machine is a Core Ultra 9 185H with 6 P-cores, 8 E-cores and 2 low-power E-cores (22 logical
     CPUs), running Windows. The build is MSVC 14.44 Release.
@@ -1947,8 +1948,10 @@ group automatically (D's `auto_spawn` is not taken; Q4).
 - `CVC_EXEC_VERIFY=1`: in Stage 1, the pump owner's check in the schedulers' public mutators in a
   release build (4.1; debug builds always check). Read once, when the library loads. Boundary
   tagging and isolation walks (4.3) are not built yet.
-- `CVC_EXEC_FUZZ=<seed>` (Stage 2): yields and short sleeps at the protocol points (the state word,
-  ingress push, eventcount, router posts).
+- `CVC_EXEC_FUZZ=<seed>`: yields and short pauses (0-50 us) at the protocol points, read once as
+  the library loads. The locks track's L3 built it for the lock manager's operations and the lock
+  ports' posts, drains and close (`lock_fuzz_point`, LT-4); Stage 2 adds the state word, ingress
+  push, eventcount and router posts.
 
 ### 4.14 When only one thread is available
 
@@ -2495,8 +2498,9 @@ or refute it.
 - `sched.single.*`, `flood.*` and `limits.*`: at `threads = 0`, within 3% of the base, since the
   pump scope must cost under 1 ns a step;
 - `msg.*`, `async.*`: unchanged at `threads = 0`;
-- `mt.independent`: the ceiling, re-measured in the same rep as every new `mt.*` point; it already
-  runs at t = 12, 16 and 20.
+- `mt.independent`: the ceiling, re-measured in the same rep as each `mt.*` point that reports
+  `extra.of_ceiling` (`mt.multi_exec` and `mt.groups`; `mt.groups.flood` and `mt.state_tree`
+  measure no ceiling); it already runs at t = 12, 16 and 20.
 
 **New scenarios** (in `make_scenarios()` of `state_exec_bench.cpp`, marked `spawns_threads`):
 
@@ -2504,7 +2508,7 @@ or refute it.
 |---|---|---|---|
 | `mt.multi_exec` | 0 | T threads, each with a full `async_scheduler`, app-tree intrinsics and async host, running fib and raise/catch; the TSan shape. As built, a third program, `prog=tree` (recorded, never gated), runs Stage 0's code on every thread: chrooted state natives, `state-data-set`, a `state-watch`, and controls posted across threads | `extra.speedup`, and `extra.of_ceiling` against `mt.independent` in the same rep |
 | `mt.groups` | 1a | `groups` (8, 16) `exec_group`s over the frozen builtins on the app's pool, fork-join, `t` (1, 2, 4, 8, 16) pumping threads (`t - 1` workers and the caller); each group runs `prog` (fib, exceptions, or `cycle`: closure cycles) `runs` (5) times, completion read from process info after each round, not from `on_complete`. As built (Stage 2 adds continuous mode) | `extra.speedup` against one group alone through the pool, `extra.of_ceiling` against `mt.independent` in the same rep with the pool's placement, the pool's `pumps`, `helper_wakes`, `worker_pumps`, `skipped` and `effective_threads` |
-| `mt.groups.flood` | 1a | `n` (2000) tiny programs on the app's pool at `t` 1 and 4, through `t` reused groups (`mode=reuse`, `ExecPool`'s default size) or a group per program built and destroyed in the region (`mode=fresh`). The `ExecPool` twin, a pycvc script, is not written yet | `programs_per_s`, `extra.group_setup_ns`, `extra.group_teardown_ns` |
+| `mt.groups.flood` | 1a | `n` (2000) tiny programs on the app's pool at `t` 1 and 4, through `t` reused groups (`mode=reuse`) or a group per program built and destroyed in the region (`mode=fresh`). The `ExecPool` twin, a pycvc script, is not written yet | `programs_per_s`, `extra.group_setup_ns`, `extra.group_teardown_ns` |
 | `mt.pycvc_threads` | 0 | T Python threads, one `Exec` each. As built, a standard-library script (`tools/bench/mt_pycvc_threads.py`) writing the bench's records, not pytest-benchmark; recorded, not gated | speedup |
 | `mt.ariadne_docs` | 1b | D Runtimes with heavy residents, and D small documents, through `drain_begin` / `exec_pump_frame` / `drain_end`, threads 0-8 | frame DSL time, `extra.helper_wakes` |
 | `mt.cross_group_msg` | 2 | pingpong within one group and across two; fan-out from one dispatcher to k groups; broadcast to waiters in k groups | ns per message, wake latency percentiles |
