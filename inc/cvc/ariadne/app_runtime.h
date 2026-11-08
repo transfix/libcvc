@@ -191,6 +191,18 @@ public:
   // is set) mirror bound scene visibility and service the scene. The host does input pump /
   // camera / draw around this. Call once per frame.
   void drain();
+  // drain() in two halves around app.exec_pump_frame() (Runtime::drain_begin/drain_end): the
+  // scene work, warnings and frame hooks come after drain_end(). drain() is both.
+  void drain_begin();
+  void drain_end();
+  // Declare that a subscriber this host connected under `prefix` must run on the host thread
+  // (STATE_EXEC_THREADED.md 4.8). A document whose prefix is or contains a declared one is never
+  // pumped on a worker. Call before load().
+  void declare_thread_affine_prefix(const std::string &prefix);
+  // Wait, without cancelling anything, until no async kernel of this document is queued or
+  // running: on the app's host, and on its own group's when the document is isolated. Host thread,
+  // outside a frame.
+  void wait_idle();
 
   bool should_close() const;
   void request_close();
@@ -264,6 +276,7 @@ private:
   std::shared_ptr<Verbs> verbs_;
   std::shared_ptr<DataStore> data_; // DataStore::of(app_): kept alive while this runtime is
   std::vector<std::string> pendingWarnings_; // read-lane diagnostics drain() collected
+  std::vector<std::string> threadAffinePrefixes_;            // declare_thread_affine_prefix
   std::function<void(const std::string &)> warningListener_; // set_warning_listener
   void collect_warnings(); // the Runtime's new warnings -> pendingWarnings_, each to the listener
   std::vector<Widget> hostMenus_;            // set_host_menus: put in every mounted tree

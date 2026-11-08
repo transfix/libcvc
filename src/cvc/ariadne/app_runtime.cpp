@@ -871,6 +871,18 @@ void AppRuntime::drain() {
   }
 }
 
+// S1b.0 stubs: drain_end() is today's whole drain(); S1.10 splits it.
+void AppRuntime::drain_begin() {}
+void AppRuntime::drain_end() { drain(); }
+
+// S1b.0 stub: recorded; S1.10 reads the declarations at load (S1-Q6).
+void AppRuntime::declare_thread_affine_prefix(const std::string &prefix) {
+  threadAffinePrefixes_.push_back(prefix);
+}
+
+// S1b.0 stub: the app's host only; S1.10 adds the document's group's.
+void AppRuntime::wait_idle() { app_.exec_async_host().wait_idle(); }
+
 // Keep the read-lane diagnostics for take_warnings(); the Runtime reports each one only once.
 void AppRuntime::collect_warnings() {
   for (std::string &w : rt_.take_reactive_warnings()) {

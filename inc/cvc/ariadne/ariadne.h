@@ -40,6 +40,7 @@ namespace state_exec {
 // Runtime::document_scope() return type; full definition in <cvc/state/state_exec/intrinsics.h>.
 // `class` (not struct) to match the real declaration — a tag mismatch is an LNK2019 on MSVC.
 class document_scope;
+class exec_group; // Runtime::isolated_group(); <cvc/state/state_exec/exec_group.h>
 } // namespace state_exec
 } // namespace cvc
 
@@ -186,6 +187,22 @@ public:
   // frame, not once per Runtime. While nothing has used the scheduler it is neither pumped nor
   // built. A host with no Runtime pumps it itself (cvc::pump_exec_frame, cvc/core/async_lane.h).
   void drain();
+  // drain() in two halves, for a host that pumps once a frame for all its Runtimes (threaded
+  // Stage 1, STATE_EXEC_THREADED.md 4.12): drain_begin() on each Runtime (events, key bindings,
+  // actions submitted, ticks, input residents), then app.exec_pump_frame(), then drain_end() on
+  // each (the sweep). drain_end() pumps the scheduler itself unless exec_pump_frame() ran since
+  // this Runtime's drain_begin(). drain() is drain_begin() then drain_end(). Host thread only.
+  void drain_begin();
+  void drain_end();
+
+  // ---- isolated documents (threaded Stage 1, S1-Q6) ----
+  // The group this document's programs run in when ariadne.exec.isolate_documents isolated it
+  // (pumped on a worker, or on the host thread when its affinity is host); null when they run in
+  // group 0, the app scheduler. Decided at load.
+  cvc::state_exec::exec_group *isolated_group() const;
+  // Why the document stays in group 0: "" when it is isolated, else the first rule it failed (also
+  // logged once).
+  std::string isolation_reason() const;
 
   // Drain the §4 read-lane diagnostics accumulated during render() — one message per
   // distinct failing predicate (a parse error, a runtime error, or a per-frame budget
@@ -317,6 +334,7 @@ struct environment; // NB: struct, not class — MSVC encodes the class/struct t
 struct intrinsics_context; // name (types.h/intrinsics.h declare both as struct); a mismatch =
                            // LNK2019 on Windows (Itanium ABI ignores the tag, so it hides on
                            // Linux/macOS).
+enum class provider_affinity; // intrinsics.h: any, host_proxied, host_only
 } // namespace state_exec
 namespace ariadne {
 
@@ -324,7 +342,13 @@ using ActionIntrinsicProvider = std::function<void(
     std::shared_ptr<cvc::state_exec::environment> env, cvc::state_exec::intrinsics_context &ictx)>;
 
 // Register a provider of host intrinsics for the program lanes (append; providers run in order).
+// The one-argument form registers it host_only.
 void register_action_intrinsics(ActionIntrinsicProvider provider);
+// The same, with the kind of every native the provider registers (STATE_EXEC_THREADED.md 4.9): an
+// isolated document's group installs them by it. A provider installed in an `any` group must also
+// have a registration body safe to run on a worker, since a spawned child runs it there.
+void register_action_intrinsics(ActionIntrinsicProvider provider,
+                                cvc::state_exec::provider_affinity affinity);
 // Remove all registered providers (a host tears down before its captured context dies; also for
 // tests).
 void clear_action_intrinsics();

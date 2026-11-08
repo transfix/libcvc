@@ -26,6 +26,7 @@
 #include <cvc/ariadne/oidc_host.h> // pump_oidc
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_exec/async_host.h>      // ictx.host: each lane's async host (S1.9)
 #include <cvc/state/state_exec/async_scheduler.h> // §4.7 app-wide action scheduler (exec_scheduler)
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/evaluator.h> // evaluation_timeout / evaluation_interrupted
@@ -312,6 +313,11 @@ void register_action_intrinsics(ActionIntrinsicProvider provider) {
   action_intrinsics_registry().push_back(std::move(provider));
   ++action_intrinsics_generation();
 }
+// S1b.0 stub: the kind is not kept yet; every provider is installed as today.
+void register_action_intrinsics(ActionIntrinsicProvider provider,
+                                cvc::state_exec::provider_affinity /*affinity*/) {
+  register_action_intrinsics(std::move(provider));
+}
 void clear_action_intrinsics() {
   std::lock_guard<std::mutex> lock(action_intrinsics_mutex());
   action_intrinsics_registry().clear();
@@ -459,6 +465,9 @@ std::string run_scoped_program(cvc::app &app, const std::string &prefix, const s
     // residents' and actions' holds. This thread pumps it: not cross_thread. The home attaches
     // here and detaches with the scheduler, at the end of this scope.
     sched.set_lock_manager(app.lock_manager());
+    // Init's own inline host (S1-Q2): a provider registers its async verbs on *ictx.host, so here
+    // they run inline, charged to init's process. Declared after sched, so it goes first.
+    se::async_host init_host(&sched);
     se::memory_tracker tracker;
     auto proc = se::make_process();
     proc->pid = 1;
@@ -466,6 +475,7 @@ std::string run_scoped_program(cvc::app &app, const std::string &prefix, const s
     se::intrinsics_context ictx;
     cvc::state &root = cvc::state::instance(app);
     ictx.sched = &sched;
+    ictx.host = &init_host;
     ictx.tracker = &tracker;
     ictx.proc = proc;
     ictx.pid = 1;
@@ -3142,6 +3152,7 @@ Runtime::Impl::make_action_context(const std::string &scope_prefix,
   ac->proc = se::make_process(); // placeholder for ictx.proc; the RUNNING process is the
   ac->proc->status = se::process_status::ready; // scheduler's own, reached via current_process()
   ac->ictx.sched = &sched;
+  ac->ictx.host = &app.exec_async_host(); // group 0's (S1.9); an isolated document's own (S1.10)
   ac->ictx.tracker = &ac->tracker;
   ac->ictx.proc = ac->proc;
   // Confine writes to the document/mount subtree.
@@ -3544,12 +3555,14 @@ void Runtime::Impl::load_names() const {
   // The env an action runs in (submit_action), never executed: only its bindings are read. The
   // context mirrors a real action's, so a provider that reads it while binding sees what it would.
   se::scheduler sched;
+  se::async_host probe_host(&sched); // inline, never called: a provider registers on *ictx.host
   se::memory_tracker tracker;
   auto proc = se::make_process();
   proc->pid = 1;
   proc->status = se::process_status::ready;
   se::intrinsics_context ictx;
   ictx.sched = &sched;
+  ictx.host = &probe_host;
   ictx.tracker = &tracker;
   ictx.proc = proc;
   ictx.pid = 1;
@@ -3804,6 +3817,14 @@ void Runtime::drain() {
   if (cvc::state_exec::async_scheduler *sched = m_->scheduler_to_pump())
     m_->pump_and_sweep_actions(*sched);
 }
+
+// S1b.0 stubs: drain_end() is today's whole drain(); S1.10 splits it.
+void Runtime::drain_begin() {}
+void Runtime::drain_end() { drain(); }
+
+// S1b.0 stubs: no document is isolated yet (S1.10).
+cvc::state_exec::exec_group *Runtime::isolated_group() const { return nullptr; }
+std::string Runtime::isolation_reason() const { return "isolated documents are not built yet"; }
 
 std::vector<std::string> Runtime::take_reactive_warnings() {
   std::vector<std::string> out;

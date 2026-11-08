@@ -3149,6 +3149,16 @@ set_property(DIRECTORY APPEND PROPERTY CVC_REGISTERED_TESTS procedural_geometry_
 add_test(NAME physics_replay_test COMMAND physics_replay_test ${CVC_PHYSICS_REPLAY_TRACE})
 set_tests_properties(physics_replay_test PROPERTIES SKIP_RETURN_CODE 77)
 set_property(DIRECTORY APPEND PROPERTY CVC_REGISTERED_TESTS physics_replay_test)
+# Threaded Stage 1's AR-1: the two Ariadne suites whole, again, with CVC_EXEC_THREADS=auto, so the
+# app's pool has workers and its lock manager is shared. With no document opted in, nothing may
+# change. AppLockManager.* is left out: it asserts the single manager CVC_EXEC_THREADS turns off.
+# One entry per binary, so each gets its own timeout, above ctest's default for one case.
+foreach(_cvc_ari_suite ariadne_runtime_test ariadne_host_test)
+  add_test(NAME ${_cvc_ari_suite}_threads_auto
+           COMMAND ${_cvc_ari_suite} --gtest_filter=-AppLockManager.*)
+  set_tests_properties(${_cvc_ari_suite}_threads_auto PROPERTIES
+                       ENVIRONMENT "CVC_EXEC_THREADS=auto" TIMEOUT 1800)
+endforeach()
 # state_exec_bench (plain main()): --smoke runs every scenario once at tiny sizes and fails on a
 # program that returned the wrong thing, so the benchmarks can't rot between real runs.
 if(TARGET state_exec_bench)
