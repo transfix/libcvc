@@ -1498,8 +1498,8 @@ windows:
   picture is read and decoded between two frames, one at a time.
 - **Pictures in a line of text: `emoji:`.** A `text:` with `emoji:` names a state key that holds
   a map of shortcode names to picture URIs (a post's custom emoji, as a social site's API gives
-  them). Each `:name:` in the text that the map names is drawn as that picture, one line tall at
-  its own shape, in the line where the backend can put a picture there:
+  them) or to text. Each `:name:` in the text that the map names as a picture is drawn as that
+  picture, one line tall at its own shape, in the line where the backend can put a picture there:
 
   ```yaml
   - text: ""
@@ -1511,11 +1511,15 @@ windows:
     between two colons that aren't glued to a letter, digit or `_` outside them. So the `:50:` in
     `14:50:47` stays part of the time, while `:a::b:` is two. The map's names are looked up as
     written, then in lower case.
-  - A name the map doesn't have, or whose value isn't a URI, stays text. So does every shortcode
-    in a terminal backend, which can't put a picture in a line of text.
-  - The pictures load as an `image:`'s do (the host's network and its allowlist, the cache, an
-    animated GIF moving), and a picture still loading is a placeholder. Hovering a picture shows
-    its `:name:`. `{i}` in `emoji:` is substituted in a `repeat:`.
+  - A name whose value isn't a URI is replaced by that value, as text, in every backend: a
+    unicode emoji's character (`100: "💯"`), which the font draws. A name the map doesn't have
+    stays as it is. A terminal backend can't put a picture in a line of text, so there a picture's
+    `:name:` stays text too.
+  - The pictures load as an `image:`'s do (the host's network and its allowlist, the cache), and
+    a picture still loading is a placeholder. An animated GIF or WebP moves in the line, on the
+    loop every widget showing it shares. A video URL (as `image:` takes one, §5.11) plays in the
+    line as a decorative video (§5.13): silent, looping, by itself, where the host has a player.
+    Hovering a picture shows its `:name:`. `{i}` in `emoji:` is substituted in a `repeat:`.
   - The capability token `text.emoji` says a host does this.
 
 ### 5.12 Backgrounds: `background:` on a window or group

@@ -1040,9 +1040,10 @@ struct Runtime::Impl {
   // gives it on its line (at least its own width where the window fits its content), else its
   // own width (img_size).
   int fill_width(const Widget &w);
-  // §5.11 a text: with emoji:: its line with the `:name:`s the map names as pictures; false when
-  // it has none, or the backend can't draw pictures in a line (the caller draws the plain text).
-  bool emit_text_runs(const Widget &w, const char *label, const std::string &value);
+  // §5.11 a text: with emoji:: its line with the `:name:`s the map names as pictures, or as the
+  // text the map gives; where the backend can't put a picture in a line, the text with them as
+  // their `:name:`. False when the map names none of them (the caller draws the line as it is).
+  bool emit_text_runs(const Widget &w, const char *label, const std::string &value, bool literal);
   // §5.11: publish a ready picture once per raster generation; keep a status: key current.
   void publish_media(const media::ImageView &v);
   void write_media_status(const std::string &status_path, const media::ImageView &v);
@@ -1876,7 +1877,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
   case Kind::Text:
     if (w.literal_text) {
       // §5.11 emoji: the caption's `:name:`s as pictures, where the backend draws them in a line.
-      if (!w.emoji.empty() && emit_text_runs(w, "", label))
+      if (!w.emoji.empty() && emit_text_runs(w, "", label, true))
         break;
       // §G? optional fixed tint (has_text_color) -> the *_colored leaf; else the plain draw.
       if (w.has_text_color)
@@ -1889,7 +1890,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
       // with '(', so this is unambiguous. Read-only, bounded, fail-safe empty.
       const std::string val =
           is_expr(w.bind) ? eval_text(w.bind) : read_string(app, resolve(w.bind));
-      if (!w.emoji.empty() && emit_text_runs(w, label, val))
+      if (!w.emoji.empty() && emit_text_runs(w, label, val, false))
         break;
       if (w.has_text_color)
         b.text_value_colored(label, val, w.text_color);
@@ -2352,7 +2353,8 @@ void Runtime::Impl::emit_media_image(const Widget &w, const std::string &uri, co
   write_media_status(w.media_status, v);
 }
 
-bool Runtime::Impl::emit_text_runs(const Widget &w, const char *label, const std::string &value) {
+bool Runtime::Impl::emit_text_runs(const Widget &w, const char *label, const std::string &value,
+                                   bool literal) {
   if (value.find(':') == std::string::npos)
     return false;
   // A `:name:` as txwtf, Slack and Mastodon find one: 1-64 of [A-Za-z0-9_+-] between two colons
@@ -2363,9 +2365,12 @@ bool Runtime::Impl::emit_text_runs(const Widget &w, const char *label, const std
   };
   const auto name_char = [&](char c) { return word(c) || c == '+' || c == '-'; };
   const std::string map = resolve(w.emoji);
+  // A terminal can't put a picture in a line: its pictures aren't fetched (or played) at all.
+  const bool pictures_here = !backend->capabilities().terminal;
   std::vector<TextRun> runs;
-  std::string text = (label && *label) ? std::string(label) + ": " : std::string();
-  bool pictures = false;
+  std::string text;  // the run being built
+  std::string plain; // the line with the text the map gives, its pictures as their :name:
+  bool changed = false, pictures = false;
   std::size_t i = 0;
   while (i < value.size()) {
     if (value[i] == ':' && (i == 0 || !word(value[i - 1]))) {
@@ -2376,38 +2381,95 @@ bool Runtime::Impl::emit_text_runs(const Widget &w, const char *label, const std
       if (j < value.size() && value[j] == ':' && len >= 1 && len <= 64 &&
           (j + 1 == value.size() || !word(value[j + 1]))) {
         const std::string name = value.substr(i + 1, len);
-        std::string uri = read_or<std::string>(app, map + "." + name, std::string());
-        if (uri.empty()) { // the map's names are case-insensitive, as txwtf's are
+        std::string to = read_or<std::string>(app, map + "." + name, std::string());
+        if (to.empty()) { // the map's names are case-insensitive, as txwtf's are
           std::string lower = name;
           for (char &c : lower)
             c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
           if (lower != name)
-            uri = read_or<std::string>(app, map + "." + lower, std::string());
+            to = read_or<std::string>(app, map + "." + lower, std::string());
         }
-        if (media::is_uri(uri)) {
-          // A picture one line tall: fitted at 32 px wide (64 on a HiDPI screen), its own shape.
-          media::ImageRequest rq;
-          rq.uri = uri;
-          rq.w = 32;
-          media::ImageView v;
-          const std::string pic = media_picture(rq, v);
+        if (media::is_uri(to) && pictures_here) {
+          std::string pic;
+          if (media::is_video_uri(to)) {
+            // A short video, as some sites allow for an emoji: silent, looping, playing by itself
+            // (a decorative video, §5.13), its frames one line tall. One player per line and URI.
+            std::string key = "emoji";
+            for (std::size_t k = 0; k < emit_path.size(); ++k)
+              key += "_" + std::to_string(emit_path[k]);
+            key += "#" + to;
+            media::PlayerSource ps;
+            ps.uri = to;
+            ps.video = true;
+            ps.frame_w = ps.frame_h = 64;
+            ps.loop = ps.muted = true;
+            ps.audio = false;
+            PlayerSlot &p = player_slot(key, ps);
+            if (p.player && !p.autoplay_done && p.state == media::PlayerState::Ready) {
+              p.autoplay_done = true;
+              p.player->play();
+            }
+            if (player_frame(p, 64, 0, ImageFit::Contain, ImageShape::Rect, steady_seconds())) {
+              pic = p.frame_name;
+            } else {
+              const bool failed = p.state == media::PlayerState::Failed;
+              pic = std::string("media:placeholder:") + (failed ? "failed:" : "loading:") + "32x32";
+              if (!published.count(pic)) {
+                backend->set_image(pic, media::placeholder_image(32, 32, ImageShape::Rect, failed));
+                published[pic] = 0;
+              }
+            }
+          } else {
+            // A picture one line tall: fitted at 32 px wide (64 on a HiDPI screen), its own
+            // shape; an animated GIF or WebP moves, as an image:'s does.
+            media::ImageRequest rq;
+            rq.uri = to;
+            rq.w = 32;
+            media::ImageView v;
+            pic = media_picture(rq, v);
+          }
           if (!text.empty())
             runs.push_back(TextRun{std::move(text), std::string()});
           text.clear();
           runs.push_back(TextRun{value.substr(i, len + 2), pic});
-          pictures = true;
+          plain += value.substr(i, len + 2);
+          changed = pictures = true;
+          i = j + 1;
+          continue;
+        }
+        if (!to.empty() && !media::is_uri(to)) { // text, such as a unicode emoji's character
+          text += to;
+          plain += to;
+          changed = true;
           i = j + 1;
           continue;
         }
       }
     }
-    text += value[i++];
+    text += value[i];
+    plain += value[i++];
   }
-  if (!pictures)
+  if (!changed)
     return false;
   if (!text.empty())
     runs.push_back(TextRun{std::move(text), std::string()});
-  return backend->text_runs(runs, w.has_text_color ? w.text_color : nullptr);
+  const float *rgb = w.has_text_color ? w.text_color : nullptr;
+  if (pictures) {
+    if (label && *label)
+      runs.insert(runs.begin(), TextRun{std::string(label) + ": ", std::string()});
+    if (backend->text_runs(runs, rgb))
+      return true;
+  }
+  // No pictures, or a backend that can't put one in a line: the text, the map's text in it.
+  if (literal && rgb)
+    backend->text_line_colored(plain.c_str(), rgb);
+  else if (literal)
+    backend->text_line(plain.c_str());
+  else if (rgb)
+    backend->text_value_colored(label, plain, rgb);
+  else
+    backend->text_value(label, plain);
+  return true;
 }
 
 void Runtime::Impl::publish_media(const media::ImageView &v) {

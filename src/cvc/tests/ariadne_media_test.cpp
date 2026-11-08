@@ -1607,19 +1607,23 @@ TEST(MediaEmoji, TheShortcodesTheMapNamesArePicturesInTheLine) {
                               "            emoji: t.items.{i}.emoji\n");
   ASSERT_TRUE(lr.ok) << lr.error;
   cvc::state &root = cvc::state::instance(app);
-  root("t.items").value(std::string("2"));
-  root("t.items.0.line").value(std::string("Shipped :Party: at 14:50:47, :nope: :a::b: x:a:"));
+  const std::string hundred = "\xF0\x9F\x92\xAF"; // U+1F4AF, a unicode emoji's character
+  root("t.items").value(std::string("3"));
+  root("t.items.0.line")
+      .value(std::string("Shipped :Party: at 14:50:47, :100: :nope: :a::b: x:a:"));
   root("t.items.0.emoji.party").value(std::string("https://e.test/party.gif"));
   root("t.items.0.emoji.a").value(std::string("https://e.test/a.png"));
   root("t.items.0.emoji.b").value(std::string("https://e.test/b.png"));
-  root("t.items.0.emoji.nope").value(std::string("not a uri"));
-  root("t.items.1.line").value(std::string("no pictures :party: here"));
+  root("t.items.0.emoji.100").value(hundred);
+  root("t.items.1.line").value(std::string("done :OK:, no pictures"));
+  root("t.items.1.emoji.ok").value(std::string("\xE2\x9C\x94"));     // U+2714
+  root("t.items.2.line").value(std::string("nothing :party: here")); // its map is empty
   Runtime rt(app);
   ImageBackend b;
   rt.set_backend(&b);
   rt.set_root(std::move(lr.root));
   rt.render();
-  ASSERT_EQ(b.runs.size(), 1u); // the second line's map is empty: plain text
+  ASSERT_EQ(b.runs.size(), 1u); // only the first line has pictures
   const std::vector<TextRun> &r = b.runs[0];
   std::vector<std::string> texts, pictures;
   for (const TextRun &run : r) {
@@ -1627,16 +1631,97 @@ TEST(MediaEmoji, TheShortcodesTheMapNamesArePicturesInTheLine) {
     pictures.push_back(run.image.empty() ? "" : "pic");
   }
   EXPECT_EQ(texts, (std::vector<std::string>{
-                       "Shipped ", ":Party:", " at 14:50:47, :nope: ", ":a:", ":b:", " x:a:"}));
+                       "Shipped ",
+                       ":Party:", " at 14:50:47, " + hundred + " :nope: ", ":a:", ":b:", " x:a:"}));
   EXPECT_EQ(pictures, (std::vector<std::string>{"", "pic", "", "pic", "pic", ""}));
-  EXPECT_NE(std::find(b.texts.begin(), b.texts.end(), "=no pictures :party: here"), b.texts.end());
+  EXPECT_NE(std::find(b.texts.begin(), b.texts.end(), "=done \xE2\x9C\x94, no pictures"),
+            b.texts.end());
+  EXPECT_NE(std::find(b.texts.begin(), b.texts.end(), "=nothing :party: here"), b.texts.end());
 
-  // A backend that can't put a picture in a line draws the text as it is.
+  // A backend that can't put a picture in a line draws the text, the map's text in it.
   b.runs_drawn = false;
   rt.render();
-  EXPECT_NE(
-      std::find(b.texts.begin(), b.texts.end(), "=Shipped :Party: at 14:50:47, :nope: :a::b: x:a:"),
-      b.texts.end());
+  EXPECT_NE(std::find(b.texts.begin(), b.texts.end(),
+                      "=Shipped :Party: at 14:50:47, " + hundred + " :nope: :a::b: x:a:"),
+            b.texts.end());
+}
+
+TEST(MediaEmoji, AnAnimatedGifOrWebpInTheLineMoves) {
+  for (const char *file : {"anim.gif", "anim.webp"}) {
+    SCOPED_TRACE(file);
+    cvc::app app;
+    LoadResult lr = load_string("windows:\n"
+                                "  - window: W\n"
+                                "    children:\n"
+                                "      - text: \"\"\n"
+                                "        bind: t.line\n"
+                                "        emoji: t.emoji\n");
+    ASSERT_TRUE(lr.ok) << lr.error;
+    cvc::state &root = cvc::state::instance(app);
+    root("t.line").value(std::string("it moves :spin: in the line"));
+    root("t.emoji.spin").value("file://media/" + std::string(file));
+    Runtime rt(app);
+    rt.set_media_base(media_dir());
+    ImageBackend b;
+    rt.set_backend(&b);
+    rt.set_root(std::move(lr.root));
+    // Loaded once its picture isn't the placeholder any more.
+    const auto picture = [&]() -> std::string {
+      for (const std::vector<TextRun> &line : b.runs)
+        for (const TextRun &r : line)
+          if (!r.image.empty() && r.image.rfind("media:placeholder:", 0) != 0)
+            return r.image;
+      return std::string();
+    };
+    ASSERT_TRUE(settle([&] { rt.render(); }, [&] { return !picture().empty(); }));
+    const std::string name = picture();
+    const int before = b.publishes[name];
+    const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(900);
+    while (std::chrono::steady_clock::now() < end) {
+      rt.render();
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    EXPECT_GE(b.publishes[name] - before, 3) << "four 200 ms frames, a new one each 200 ms";
+  }
+}
+
+TEST(MediaEmoji, AVideoInTheLinePlaysSilentlyOnALoop) {
+  FakeFactory ff;
+  cvc::app app;
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    children:\n"
+                              "      - text: \"\"\n"
+                              "        bind: t.line\n"
+                              "        emoji: t.emoji\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  cvc::state &root = cvc::state::instance(app);
+  root("t.line").value(std::string("a loop :dance: here"));
+  root("t.emoji.dance").value(std::string("https://e.test/dance.mp4"));
+  Runtime rt(app);
+  ImageBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  ASSERT_EQ(ff.made.size(), 1u);
+  FakePlayback &f = *ff.made[0];
+  EXPECT_TRUE(f.src.video && f.src.loop && f.src.muted);
+  EXPECT_FALSE(f.src.audio); // no sound device: it plays anywhere, an SSH session included
+  ASSERT_EQ(b.runs.size(), 1u);
+  EXPECT_EQ(b.runs[0][1].image, "media:placeholder:loading:32x32");
+  {
+    std::lock_guard<std::mutex> l(f.mu);
+    f.state = media::PlayerState::Ready;
+    f.frame = make_image(
+        48, 48, [](int, int) -> std::array<unsigned char, 4> { return {200, 30, 30, 255}; });
+    f.frame_gen = 1;
+  }
+  rt.render();
+  rt.render();
+  EXPECT_TRUE(called(f, "play"));
+  ASSERT_EQ(b.runs.size(), 1u);
+  EXPECT_EQ(b.runs[0][1].text, ":dance:");
+  EXPECT_EQ(b.runs[0][1].image.rfind("media:player:", 0), 0u) << b.runs[0][1].image;
 }
 
 TEST(MediaParse, VideoUris) {
