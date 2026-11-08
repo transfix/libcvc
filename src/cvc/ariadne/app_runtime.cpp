@@ -394,9 +394,10 @@ void AppRuntime::ensure_intrinsics() {
   // table rather than copy it, so every verb registered so far is bound, not only the first.
   std::shared_ptr<Verbs> verbs = verbs_;
   namespace se = cvc::state_exec;
-  // Four providers, one per kind (S1-Q7, STATE_EXEC_THREADED.md 4.9): an isolated document whose
-  // group a worker may pump installs each by it.
-  // 1. The host's verbs and functions, host_only: arbitrary host code, run in the calling step.
+  // Six providers, in the order the one provider bound them before (S1-Q7, STATE_EXEC_THREADED.md
+  // 4.9), so a name two of them bind resolves as it did, the later one winning; an isolated
+  // document whose group a worker may pump installs each by its kind.
+  // 1. The host's verbs, host_only: arbitrary host code, run in the calling step.
   register_action_intrinsics(
       [verbs](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
         for (const auto &v : verbs->sync) {
@@ -407,15 +408,11 @@ void AppRuntime::ensure_intrinsics() {
                                       return se::value_t(std::monostate{});
                                     });
         }
-        for (const auto &[name, fn] : verbs->functions)
-          se::builtins::register_fn(env, name, fn); // inline on the drain thread, like a sync verb
       },
       se::provider_affinity::host_only);
-  // 2. (quit [code]) and the (data-*) verbs, host_proxied: quit writes quit_ and exitCode_, and the
-  // data verbs walk the tree raw (data.cpp). Its body runs on a spawned child's pumping thread,
-  // so it reads the tree only through a pinned walk.
+  // 2. (quit [code]), host_proxied: it writes quit_ and exitCode_.
   register_action_intrinsics(
-      [app, verbs](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
+      [verbs](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
         if (verbs->quit) {
           std::function<void(int)> quit = verbs->quit;
           se::builtins::register_fn(env, "quit", [quit](std::span<const se::value_t> args) {
@@ -437,6 +434,51 @@ void AppRuntime::ensure_intrinsics() {
             return se::value_t(std::monostate{});
           });
         }
+      },
+      se::provider_affinity::host_proxied);
+  // Where an async verb's done channel goes (S1.9): the scheduler the program's calls park on,
+  // captured as its env is built (an isolated document's group, else group 0), or group 0 from an
+  // inline host (the init lane's, S1-Q2), as before.
+  const auto done_poster = [app](se::async_host &host) {
+    se::async_scheduler *const parks = host.parking_scheduler();
+    return [app, parks](const std::string &chan, const se::value_t &v) {
+      (parks ? *parks : app->exec_scheduler()).post_message(chan, v);
+    };
+  };
+  // 3. The host's async verbs, any: libcvc's own marshal, the work on the background task pool, on
+  // the program's own host (*ictx.host).
+  register_action_intrinsics(
+      [app, verbs, done_poster](std::shared_ptr<se::environment> env,
+                                se::intrinsics_context &ictx) {
+        se::async_host &host = ictx.host ? *ictx.host : app->exec_async_host();
+        const auto post = done_poster(host);
+        const std::string root = ictx.root_path;
+        for (const auto &v : verbs->async) {
+          // An async function: (name) parks the program while `work` runs on the background task
+          // pool, charged to its budget, and returns `work`'s string or raises its exception. The
+          // done channel, if any, is resolved here on the scheduler thread (a kernel never walks
+          // the state tree), and the result is posted to it too.
+          const std::string chan = std::get<1>(v).empty()
+                                       ? std::string()
+                                       : se::resolve_channel_key(root, std::get<1>(v));
+          std::function<std::string()> work = std::get<2>(v);
+          se::register_async_fn(
+              env, host, std::get<0>(v),
+              [post, chan, work](std::span<const se::value_t>) -> se::async_kernel {
+                return [post, chan, work](se::async_call &) -> se::value_t {
+                  std::string result = work();
+                  if (!chan.empty())
+                    post(chan, se::value_t(result));
+                  return se::value_t(std::move(result));
+                };
+              });
+        }
+      },
+      se::provider_affinity::any);
+  // 4. The (data-*) verbs, host_proxied: they walk the tree raw (data.cpp). The body runs on a
+  // spawned child's pumping thread, so it reads the tree only through a pinned walk.
+  register_action_intrinsics(
+      [app, verbs](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
         // The (data-*) verbs (data.h), for programs in this runtime's app: (data-load NAME URI [AS
         // [PATH]]) points the document's data.NAME at a request and starts it (the scene's nodes
         // bound to NAME follow when it is ready), (data-reload NAME), (data-status NAME),
@@ -524,46 +566,14 @@ void AppRuntime::ensure_intrinsics() {
             });
       },
       se::provider_affinity::host_proxied);
-  // Where an async verb's done channel goes (S1.9): the scheduler the program's calls park on,
-  // captured as its env is built (an isolated document's group, else group 0), or group 0 from an
-  // inline host (the init lane's, S1-Q2), as before.
-  const auto done_poster = [app](se::async_host &host) {
-    se::async_scheduler *const parks = host.parking_scheduler();
-    return [app, parks](const std::string &chan, const se::value_t &v) {
-      (parks ? *parks : app->exec_scheduler()).post_message(chan, v);
-    };
-  };
-  // 3. The host's async verbs, any: libcvc's own marshal, the work on the background task pool, on
-  // the program's own host (*ictx.host).
+  // 5. The host's functions, host_only: inline on the drain thread, like a sync verb.
   register_action_intrinsics(
-      [app, verbs, done_poster](std::shared_ptr<se::environment> env,
-                                se::intrinsics_context &ictx) {
-        se::async_host &host = ictx.host ? *ictx.host : app->exec_async_host();
-        const auto post = done_poster(host);
-        const std::string root = ictx.root_path;
-        for (const auto &v : verbs->async) {
-          // An async function: (name) parks the program while `work` runs on the background task
-          // pool, charged to its budget, and returns `work`'s string or raises its exception. The
-          // done channel, if any, is resolved here on the scheduler thread (a kernel never walks
-          // the state tree), and the result is posted to it too.
-          const std::string chan = std::get<1>(v).empty()
-                                       ? std::string()
-                                       : se::resolve_channel_key(root, std::get<1>(v));
-          std::function<std::string()> work = std::get<2>(v);
-          se::register_async_fn(
-              env, host, std::get<0>(v),
-              [post, chan, work](std::span<const se::value_t>) -> se::async_kernel {
-                return [post, chan, work](se::async_call &) -> se::value_t {
-                  std::string result = work();
-                  if (!chan.empty())
-                    post(chan, se::value_t(result));
-                  return se::value_t(std::move(result));
-                };
-              });
-        }
+      [verbs](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+        for (const auto &[name, fn] : verbs->functions)
+          se::builtins::register_fn(env, name, fn);
       },
-      se::provider_affinity::any);
-  // 4. The host's async functions, host_only: the host's marshal runs in the calling step (pycvc's
+      se::provider_affinity::host_only);
+  // 6. The host's async functions, host_only: the host's marshal runs in the calling step (pycvc's
   // takes the GIL, a C++ host's is unaudited), on the program's own host.
   register_action_intrinsics(
       [app, verbs, done_poster](std::shared_ptr<se::environment> env,
