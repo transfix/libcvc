@@ -90,12 +90,24 @@ jobs:
         with:
           python-version: "3.12"
 
-      # The cvcpkg CLI itself (same pin used by publish-cvcpkg.yml: master,
-      # so server/schema fixes arrive without a release cadence).
+      # The cvcpkg CLI itself, from the same source and pin as publish-cvcpkg.yml
+      # and the cvcpkg-build-tools action: cy-pca/cvcpkg master, so builder and
+      # server/schema fixes arrive without a release cadence.
+      #
+      # Not transfix/libcvc-deps: that copy stopped tracking upstream in
+      # September, and its builder still exports DYLD_LIBRARY_PATH=<prefix>/lib
+      # around every build step. dyld searches DYLD_LIBRARY_PATH by leaf name
+      # ahead of a library's install path, so the runner's Homebrew cmake bound
+      # its libiconv.2.dylib to the prefix's GNU libiconv (which exports
+      # _libiconv, not _iconv) and aborted before configure. Upstream moved the
+      # prefix to DYLD_FALLBACK_LIBRARY_PATH (cy-pca/cvcpkg#221), which only
+      # fills in what a binary cannot find at its install path or rpaths: system
+      # tools keep the system libraries and the ctest step still finds the
+      # prefix's dylibs.
       - name: Install cvcpkg
         shell: bash
         run: |
-          pip install 'git+https://github.com/transfix/libcvc-deps@master'
+          pip install 'git+https://github.com/cy-pca/cvcpkg@master'
           cvcpkg --version
 
       # Put cl.exe/link.exe on PATH before cvcpkg runs a recipe's build.ps1.
