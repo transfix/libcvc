@@ -5,6 +5,7 @@
 // menus, window placement / drag / close and its §11.4 persistence, disabled scopes, images.
 // Skipped when libcvc is built without FTXUI.
 
+#include <chrono>
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/ftxui_backend.h>
@@ -467,6 +468,30 @@ TEST(AriadneFtxui, SpinnerTurnsByTheFrameClock) {
   t.draw();
   EXPECT_TRUE(t.shows("\xE2\xA0\x99 Loading")) << t.screen;
   EXPECT_TRUE(t.shows("/ Plain")) << t.screen;
+}
+
+// (time-now) is the wall clock in a computed value (a post's "2h ago") and in a program.
+TEST(AriadneFtxui, TimeNowIsTheWallClockInTextAndPrograms) {
+  REQUIRE_FTXUI();
+  Term t(group(
+      {text_bound("posted", "(let ((s (- (time-now) (float (state-get \"post.at\"))))) "
+                            "(if (< s 3600) \"just now\" (string.join (list (str (int (/ s 3600))) "
+                            "\"h ago\") \"\")))"),
+       button("Stamp", "(state-set \"stamp\" (str (int (time-now))))")}));
+  const long long now = static_cast<long long>(
+      std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count());
+  cvc::state::instance(t.app)("post.at").value(std::to_string(now - 2 * 3600 - 60));
+  t.draw();
+  EXPECT_TRUE(t.shows("posted: 2h ago")) << t.screen;
+  cvc::state::instance(t.app)("post.at").value(std::to_string(now));
+  t.draw();
+  EXPECT_TRUE(t.shows("posted: just now")) << t.screen;
+  ASSERT_TRUE(t.click("[ Stamp ]"));
+  for (int i = 0; i < 50; ++i)
+    t.rt.drain();
+  const long long stamp = std::stoll(val(t.app, "stamp"));
+  EXPECT_GE(stamp, now);
+  EXPECT_LE(stamp, now + 60);
 }
 
 TEST(AriadneFtxui, TextFieldEditsAtTheCursor) {
