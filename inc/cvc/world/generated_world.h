@@ -291,6 +291,9 @@ public:
   double progress() const { return size_ > 0 ? double(next_) / size_ : 1.0; }
   int size() const { return size_; }
   std::vector<unsigned char> take(); // the RGB texels, once done (moved out)
+  // The water's texture (paint_water, the same size), painted row by row with the ground's;
+  // once done (moved out).
+  std::vector<unsigned char> take_water();
 
 private:
   const generated_world &w_;
@@ -299,6 +302,7 @@ private:
   int next_ = 0;
   bool finished_ = false;
   std::vector<unsigned char> img_;
+  std::vector<unsigned char> water_;
 };
 
 // The ground's colour as a size x size RGB texture over the extent (row 0 = min y, matching the
@@ -310,6 +314,15 @@ private:
 std::vector<unsigned char> paint_surface(const generated_world &w,
                                          surface_color mode = surface_color::material,
                                          int size = 2048);
+
+// The water's texture over the extent, size x size RGBA with paint_surface's rows and texels:
+// where the terrain mesh lies under the water, water_colour of the column there, opaque; where it
+// is dry, transparent (alpha 0), in the shallowest water's colour so a filtered edge fades into
+// the shallows. make_water_rungs' surfaces drawn with it end at the mesh's own shoreline whatever
+// their rung, since a renderer discards fully transparent fragments; a coarse rung's cell, drawn
+// whole, would put lake over dry ground wherever its corners straddle the shore. The texels are
+// as fine as paint_surface's (2048 a side: 5 m on a 10 km world, about the mesh's own cell).
+std::vector<unsigned char> paint_water(const generated_world &w, int size = 2048);
 
 // The water as a volume of depth: n x n x nz samples over [-half, half]^2 x [water_floor(w),
 // water_top(w)], 1 where the travelling wave's surface is a few metres above both the sample and
