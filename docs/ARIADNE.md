@@ -104,6 +104,15 @@ Reactive slots — `visible_when`, `enabled_when` / `disabled_when`, computed `b
   ([§5.7](#57-requires-and-has--what-a-document-needs-from-its-host)). `json-parse` and
   `json-encode` are on it ([§10.4](#104-json-replies)); `str-concat` is not, so a computed
   label joins its parts with `string.join`.
+- `(time-now)`, the wall clock in seconds since the Unix epoch (a float), is on it too, so a
+  computed text can say how long ago a timestamp was. It reads the clock each frame it is drawn.
+  `(time-elapsed)` is different: it is the program's own budget clock, not the time of day.
+
+  ```yaml
+  - text: ""
+    bind: (let ((s (- (time-now) (float (state-get "post.created_at")))))
+            (if (< s 3600) "just now" (string.join (list (str (int (/ s 3600))) "h ago") "")))
+  ```
 - The special-form gate admits only `if / begin / let / while / for / lambda / defun /
   set / return / quote / yield / break / and / or` (`kAllowedForms`,
   [`ariadne.cpp:433`](../src/cvc/ariadne/ariadne.cpp)).

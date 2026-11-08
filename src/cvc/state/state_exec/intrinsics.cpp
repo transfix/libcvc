@@ -1239,6 +1239,14 @@ value_t intrinsic_time_elapsed(intrinsics_context *ctx, std::span<const value_t>
   return value_t(p->elapsed_time());
 }
 
+// (time-now): the wall clock, seconds since the Unix epoch (UTC) with a fraction, for "2h ago"
+// against a stored timestamp. Not the program's budget clock: that is (time-elapsed).
+value_t intrinsic_time_now(intrinsics_context *, std::span<const value_t> args) {
+  expect_exact(args, 0, "time-now");
+  return value_t(
+      std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count());
+}
+
 value_t intrinsic_time_limit(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 0, "time-limit");
   const process *p = running_process(ctx);
@@ -1631,6 +1639,9 @@ void register_intrinsics(environment_ptr env, intrinsics_context *ctx) {
   reg("message-bytes-limit", intrinsic_message_bytes_limit);
   reg("step-count", intrinsic_step_count);
   reg("budget-usage", intrinsic_budget_usage);
+
+  // The wall clock
+  reg("time-now", intrinsic_time_now);
 
   // System identity
   reg("cluster-id", intrinsic_cluster_id);

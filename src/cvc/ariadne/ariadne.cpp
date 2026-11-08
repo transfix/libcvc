@@ -614,6 +614,8 @@ public:
         "state-root-path", "state-has-expiry", "state-is-expired",
         // JSON text to values and back: pure, sliced data steps under the allocation limit
         "json-parse", "json-encode",
+        // the wall clock (a post's "2h ago"): one read, nothing written
+        "time-now",
         // the stdlib: the pure, bounded functions (a scalar, or a result no bigger than its
         // argument), and the materializers, which do their work as sliced data steps (each
         // eval slices, see data_step_nodes_) under the per-call allocation limit. A function
