@@ -798,9 +798,14 @@ windward flank (the slope along `wind_az`, the heading the wind blows toward, 90
 and the cells in the lee lose theirs, so a cloud forms as the wind brings it to a mountain and dies
 past the crest. `orographic` (default 1; 0 turns the coupling off) sets how strongly. Their shade falls on the ground and on the nodes in `receivers:` (and their
 children, LOD rungs included) through those meshes' shaders: it dims the sun's light and leaves
-their textures and colours alone. Its other keys: `extent` (a cloud's half-width), `base` / `top`,
+their textures and colours alone. The clouds are lit by the same sun: each volume's colour is the
+sunlight left after its own cloud's depth toward the sun, and each far shell's after the whole
+deck's, so the tops are white and the undersides and down-sun flanks grey. Far clouds also shade one
+another; the near volumes shade only themselves. `light_k` sets how strongly (optical depth per
+metre of opacity; by default twice the volumes' own, about 0.3 on terrain_lab's deck; 0 lights them
+evenly). Its other keys: `extent` (a cloud's half-width), `base` / `top`,
 `coverage`, `spacing`, `seed`, `variants`, `sun_az` / `sun_el` (the key light's, which the shade
-is cast along), `shade_k` / `shade_floor`, `horizon` (how far past the ground the volumes draw
+is cast along and the clouds are lit from), `shade_k` / `shade_floor`, `horizon` (how far past the ground the volumes draw
 clouds), `far_reach` (how far the shells reach toward the horizon; out of the camera's bounds),
 `evolve` (the weather's speed: 1 is a step every 5 s, a cloud lasting some 8 minutes; 0 holds the
 clouds) and `shadow` (0 starts the shade off). Live keys under the node's root (`sky.` unless

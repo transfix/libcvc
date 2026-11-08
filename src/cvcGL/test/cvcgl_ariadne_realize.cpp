@@ -43,7 +43,9 @@
 #include <cvc/world/generated_world.h> // terrain source test: the generator it draws
 #include <filesystem>                  // mesh_lab / fe_lab sources: a temp "document directory"
 #include <thread>
+#include <vtkAbstractVolumeMapper.h>
 #include <vtkActor.h> // LOD test: a rung's material
+#include <vtkImageData.h>
 #include <vtkLight.h>
 #include <vtkLightCollection.h>
 #include <vtkMapper.h> // field colours: an opacity curve is an RGBA colour array
@@ -54,6 +56,8 @@
 #include <vtkProperty.h>
 #include <vtkRenderer.h>
 #include <vtkTextureObject.h> // the cloud shade's crossfade textures
+#include <vtkVolume.h>
+#include <vtkVolumeProperty.h>
 
 using cvc::ariadne::Scene;
 using cvc::ariadne::SceneClipPlane;
@@ -1214,6 +1218,24 @@ int main() {
         last = mix();
       }
       chk(rising && last > 0.0f && last < 1.0f, "the crossfade climbs frame by frame");
+      // The clouds are lit by the sun: a near volume showing a cloud carries (its sunlight, its
+      // density), VTK's dependent components, and the shells get the sun and the light's strength.
+      int lit = 0;
+      bool dependent = true;
+      for (const char *id : {"sky", "sky_near1", "sky_near2", "sky_near3"}) {
+        auto vn = std::dynamic_pointer_cast<cvc::gl::VolumeNode>(sg.getGraphics(id));
+        auto *vol = vn ? vtkVolume::SafeDownCast(vn->prop()) : nullptr;
+        auto *im = vol ? vtkImageData::SafeDownCast(vol->GetMapper()->GetDataSetInput()) : nullptr;
+        if (!im || im->GetNumberOfScalarComponents() != 2)
+          continue;
+        ++lit;
+        dependent = dependent && !vol->GetProperty()->GetIndependentComponents();
+      }
+      chk(lit > 0 && dependent,
+          "the near clouds carry (sunlight, density) as dependent components");
+      chk(in && in->f4.count("cloudSun") && in->f4.at("cloudSun")[2] > 0.0f &&
+              in->f4.at("cloudSun")[3] > 0.0f,
+          "the shells are given the sun and the clouds' light (cloudSun)");
     }
   }
 
