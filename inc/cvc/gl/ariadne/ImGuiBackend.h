@@ -84,6 +84,11 @@ public:
   bool item_drag_started() override; // §4.6 on_drag_start: ImGui::IsItemActivated() (gesture begin)
   bool item_drag_ended() override;   // §4.6 on_drag_end: ImGui::IsItemDeactivated() (gesture end)
   bool item_pointer(float &x, float &y, float &dx, float &dy, int &button) override; // §4.6 event.*
+  // §4.6 a group that is one item: an InvisibleButton over its area once it is laid out, which a
+  // button inside it hides (a click there is the button's), lit under the content (a draw-list
+  // channel below it) while hovered with `highlight`.
+  void begin_item_group(const char *id, const cvc::ariadne::ItemGroupOptions &opts) override;
+  void end_item_group() override;
 
   cvc::ariadne::BoolEdit menu_item_toggle(const char *label, bool current) override;
   cvc::ariadne::BoolEdit checkbox(const char *label, bool current) override;
@@ -281,6 +286,12 @@ private:
   // §5.12 backdrops open in this frame, innermost last (a splitter each, so they nest).
   struct BackdropFrame;
   std::vector<std::shared_ptr<BackdropFrame>> m_backdrops;
+  // §4.6 item groups open in this frame, innermost last; the last one closed (its button's
+  // ImGuiID) and whether it was clicked.
+  struct ItemGroupFrame;
+  std::vector<std::shared_ptr<ItemGroupFrame>> m_itemGroups;
+  unsigned int m_groupHitId = 0;
+  bool m_groupHit = false;
 
   // Per-key in-progress InputText / InputInt text. Follows the value in state while no field is
   // active and holds the edit while one is — the string counterpart of cache_int/cache_float.

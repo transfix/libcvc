@@ -574,7 +574,7 @@ struct FtxuiBackend::Impl {
 
   // A container being filled during the walk.
   struct Frame {
-    enum class Type { Root, Menubar, Menu, InlineMenu, Window, Grid, Backdrop };
+    enum class Type { Root, Menubar, Menu, InlineMenu, Window, Grid, Backdrop, ItemGroup };
     Type type = Type::Root;
     fx::Elements items;
     std::vector<fx::Elements> cells; // Grid: one list per cell
@@ -586,6 +586,8 @@ struct FtxuiBackend::Impl {
     Size size;                       // Window: the authored size spec (min / max)
     bool *p_open = nullptr;          // Window
     Backdrop backdrop;               // Backdrop
+    bool focusable = false;          // ItemGroup: Tab reaches it, Enter fires it
+    bool highlight = false;          // ItemGroup: lit while the pointer is over it
     void add(fx::Element e) {
       if (type == Type::Grid) {
         if (cells.empty())
@@ -610,8 +612,9 @@ struct FtxuiBackend::Impl {
   // One emitted leaf, kept for the next event's focus walk and hit-test.
   struct Item {
     std::string id;
-    std::string win;  // owning window id; "" = the root layer
-    std::string menu; // owning dropdown; "" = none
+    std::string win;   // owning window id; "" = the root layer
+    std::string menu;  // owning dropdown; "" = none
+    std::string group; // the item group (begin_item_group) it is inside, innermost; "" = none
     bool focusable = false;
   };
 
@@ -660,6 +663,10 @@ struct FtxuiBackend::Impl {
   fx::Element root = fx::text("");
   std::string tooltip;
   std::string last_item; // the leaf emitted last (item_* queries, set_tooltip)
+  std::vector<std::string> item_groups; // the item groups open in the walk, innermost last
+  // The last item group closed, and whether this walk's press or key fired it (item_clicked).
+  std::string group_hit_id;
+  bool group_hit = false;
   bool menu_close_req = false;
   WindowGeom pending_geom;
   bool have_geom = false;
@@ -732,6 +739,10 @@ struct FtxuiBackend::Impl {
   bool focus_next = false; // autofocus: the next focusable leaf of this walk takes focus
   std::string hovered;
   std::string active; // the item the left button went down on, until it comes up
+  // The item groups around `hovered`, which the pointer is over too; and around the item the
+  // left button went down on, when that one takes no clicks of its own (text, a picture), whose
+  // press is theirs.
+  std::set<std::string> hover_groups, press_groups;
   std::string open_menu;
   std::string focus_before_menu;
   std::string open_combo;
@@ -892,6 +903,7 @@ struct FtxuiBackend::Impl {
     it.id = id;
     it.win = wins.empty() ? std::string() : wins.back();
     it.menu = cur_menu;
+    it.group = item_groups.empty() ? std::string() : item_groups.back();
     it.focusable = focusable && !is_disabled();
     if (it.focusable && focus_next && cur_menu.empty()) {
       focus_next = false;
@@ -920,7 +932,9 @@ struct FtxuiBackend::Impl {
     consumed = true;
     return true;
   }
-  bool pressed(const std::string &id) const { return !is_disabled() && press_id == id; }
+  bool pressed(const std::string &id) const {
+    return !is_disabled() && (press_id == id || press_groups.count(id) != 0);
+  }
   bool activated(const std::string &id) {
     return pressed(id) || key(id, "Return") || key(id, "Space");
   }
@@ -1247,6 +1261,21 @@ struct FtxuiBackend::Impl {
     return best;
   }
 
+  // The item groups `it` is inside, in the frame last drawn, innermost first.
+  std::vector<const Item *> groups_around(const Item *it) const {
+    std::vector<const Item *> out;
+    for (const Item *g = it ? find_item(shown, it->group) : nullptr; g;
+         g = find_item(shown, g->group))
+      out.push_back(g);
+    return out;
+  }
+  void set_hovered(const Item *it) {
+    hovered = it ? it->id : "";
+    hover_groups.clear();
+    for (const Item *g : groups_around(it))
+      hover_groups.insert(g->id);
+  }
+
   const Item *item_at(int x, int y, const std::string &win, const std::string &menu) const {
     for (const Item &it : shown.items) {
       if (it.win != win || it.menu != menu)
@@ -1353,8 +1382,7 @@ struct FtxuiBackend::Impl {
         moved = true;
         consumed = true;
       } else {
-        const Item *it = item_at(e.x, e.y, opt.hosted ? host_window : window_at(e.x, e.y), "");
-        hovered = it ? it->id : "";
+        set_hovered(item_at(e.x, e.y, opt.hosted ? host_window : window_at(e.x, e.y), ""));
       }
       return;
     case TermEvent::Mouse::Release:
@@ -1452,11 +1480,21 @@ struct FtxuiBackend::Impl {
     if (const Item *it = item_at(x, y, win, "")) {
       press_id = it->id;
       active = it->id;
-      hovered = it->id;
+      set_hovered(it);
       press_x = x;
       press_y = y;
-      if (it->focusable)
+      if (it->focusable) {
         set_focus(it->id);
+      } else { // text or a picture: the press is the item groups' around it (a feed's card)
+        const Item *focus = nullptr;
+        for (const Item *g : groups_around(it)) {
+          press_groups.insert(g->id);
+          if (!focus && g->focusable)
+            focus = g;
+        }
+        if (focus)
+          set_focus(focus->id);
+      }
     } else {
       set_focus(""); // a click on empty space blurs (and so commits) the focused field
       if (win.empty())
@@ -1505,6 +1543,7 @@ struct FtxuiBackend::Impl {
       active.clear();
     ev_live = false;
     press_id.clear();
+    press_groups.clear();
     release_id.clear();
     close_win.clear();
     combo_pick = -1;
@@ -1604,6 +1643,7 @@ Capabilities FtxuiBackend::capabilities() const {
   c.kitty = m_->term_gfx.kitty;
   c.sixel = m_->term_gfx.sixel;
   c.bitmap = m_->pixels();
+  c.item_groups = true; // begin_item_group: focusable, lit in a gutter
   return c;
 }
 
@@ -1623,6 +1663,8 @@ void FtxuiBackend::begin_frame() {
   m.menubar = nullptr;
   m.tooltip.clear();
   m.last_item.clear();
+  m.item_groups.clear();
+  m.group_hit_id.clear();
   m.have_geom = false;
   m.have_tracks = false;
   m.have_columns = false;
@@ -2231,13 +2273,86 @@ void FtxuiBackend::end_disabled() {
 
 void FtxuiBackend::set_tooltip(const char *text) {
   Impl &m = *m_;
-  if (text && !m.last_item.empty() && (m.last_item == m.focused || m.last_item == m.hovered))
+  if (text && !m.last_item.empty() &&
+      (m.last_item == m.focused || m.last_item == m.hovered || m.hover_groups.count(m.last_item)))
     m.tooltip = text;
 }
 
-bool FtxuiBackend::item_clicked() { return !m_->last_item.empty() && m_->pressed(m_->last_item); }
+bool FtxuiBackend::item_clicked() {
+  const Impl &m = *m_;
+  if (!m.last_item.empty() && m.last_item == m.group_hit_id)
+    return m.group_hit; // an item group: a press on it, or Enter / Space while it has focus
+  return !m.last_item.empty() && m.pressed(m.last_item);
+}
 bool FtxuiBackend::item_hovered() {
-  return !m_->last_item.empty() && !m_->is_disabled() && m_->hovered == m_->last_item;
+  const Impl &m = *m_;
+  return !m.last_item.empty() && !m.is_disabled() &&
+         (m.hovered == m.last_item || m.hover_groups.count(m.last_item) != 0);
+}
+
+// §4.6 a group that is one item: its own frame of the walk, then one item over all of it. In Tab
+// order it comes before what it holds. Focus marks it with a bar in a gutter column to its left
+// (`>` where the terminal has no block glyphs) and a grey background; so does the pointer, with
+// `hover: highlight`, as a thinner bar. The gutter is there whenever it can be lit, so the layout
+// never shifts.
+void FtxuiBackend::begin_item_group(const char *id, const ItemGroupOptions &opts) {
+  Impl &m = *m_;
+  Impl::Frame f;
+  f.type = Impl::Frame::Type::ItemGroup;
+  f.id = m.uid(std::string("g|") + (id ? id : ""));
+  f.focusable = opts.focusable && !m.is_disabled();
+  f.highlight = opts.highlight;
+  if (f.focusable) {
+    if (m.focus_next && m.cur_menu.empty()) {
+      m.focus_next = false;
+      m.set_focus(f.id); // autofocus:
+    }
+    if (!m.cur_menu.empty())
+      m.walk.menu_items[m.cur_menu].push_back(f.id);
+    else
+      m.walk.focus_order.push_back(f.id);
+  }
+  m.item_groups.push_back(f.id);
+  m.stack.push_back(std::move(f));
+}
+
+void FtxuiBackend::end_item_group() {
+  Impl &m = *m_;
+  if (m.stack.empty() || m.top().type != Impl::Frame::Type::ItemGroup)
+    return;
+  Impl::Frame f = m.pop();
+  if (!m.item_groups.empty())
+    m.item_groups.pop_back();
+  const std::string gid = f.id;
+  fx::Element el = f.items.empty() ? fx::emptyElement() : fx::vbox(std::move(f.items));
+  const bool focused = f.focusable && m.has_focus(gid);
+  const bool over = !m.is_disabled() && (m.hovered == gid || m.hover_groups.count(gid) != 0);
+  if (f.focusable || f.highlight) {
+    const bool lit = focused || (f.highlight && over);
+    const bool blocks = unicode_glyphs();
+    const char *mark = focused ? (blocks ? "\xE2\x96\x8C" : ">") // U+258C left half block
+                       : lit   ? (blocks ? "\xE2\x94\x82" : "|") // U+2502 light vertical
+                               : " ";
+    // A separator fills the group's height: the mark is beside every row of it.
+    fx::Element gutter = fx::separatorCharacter(mark) | (focused ? fx::bold : fx::nothing);
+    el = el | fx::xflex;
+    if (lit && image_mode() != ImageMode::Mono)
+      el = el | fx::bgcolor(fx::Color::GrayDark); // behind the text: a picture's cells keep theirs
+    el = fx::hbox({gutter, el});
+  }
+  if (focused)
+    el = el | fx::focus; // a scrolled window keeps it in view
+  Impl::Item it;
+  it.id = gid;
+  it.win = m.wins.empty() ? std::string() : m.wins.back();
+  it.menu = m.cur_menu;
+  it.group = m.item_groups.empty() ? std::string() : m.item_groups.back();
+  it.focusable = f.focusable;
+  m.add(el | fx::reflect(m.boxes[gid]));
+  m.walk.items.push_back(std::move(it));
+  m.last_item = gid;
+  m.group_hit_id = gid;
+  m.group_hit = f.focusable ? m.activated(gid) : m.pressed(gid);
 }
 bool FtxuiBackend::item_dragged() {
   return !m_->last_item.empty() && !m_->is_disabled() && m_->moved && m_->active == m_->last_item;
@@ -3632,6 +3747,8 @@ bool FtxuiBackend::button(const char *) { return false; }
 bool FtxuiBackend::menu_item_action(const char *) { return false; }
 bool FtxuiBackend::item_clicked() { return false; }
 bool FtxuiBackend::item_hovered() { return false; }
+void FtxuiBackend::begin_item_group(const char *, const ItemGroupOptions &) {}
+void FtxuiBackend::end_item_group() {}
 bool FtxuiBackend::item_dragged() { return false; }
 bool FtxuiBackend::item_drag_started() { return false; }
 bool FtxuiBackend::item_drag_ended() { return false; }
