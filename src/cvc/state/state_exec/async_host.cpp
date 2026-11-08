@@ -828,6 +828,25 @@ void async_host::finish(const std::shared_ptr<async_call> &call) {
     call->async_sched_->post_async_completion(call);
 }
 
+bool async_host::finisher::finish(const std::shared_ptr<async_call> &call) const {
+  return call && state_ && finish_unless_stopped(*state_, call);
+}
+
+bool async_host::finish_unless_stopped(shared_state &state,
+                                       const std::shared_ptr<async_call> &call) {
+  // Under the lock shutdown() sets `stopped` under, so either this post ends before the shutdown
+  // goes on (and the host and its scheduler outlive it), or it sees `stopped` and touches neither:
+  // after the shutdown the call is cancelled, and the host and the scheduler may be gone.
+  std::lock_guard<std::mutex> lk(state.m);
+  if (state.stopped.load(std::memory_order_relaxed))
+    return false;
+  if (call->external_)
+    state.remove_locked(*call); // settled: nothing to cancel any more
+  if (call->async_sched_)
+    call->async_sched_->post_async_completion(call);
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // register_async_fn and futures
 // ---------------------------------------------------------------------------

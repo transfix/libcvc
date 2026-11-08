@@ -548,10 +548,12 @@ se::async_kernel http_kernel(cvc::net::HttpRequest req, RequestAuth auth, NetAcc
   };
 }
 
-// Settle a started call with its reply and post it, unless the call was cancelled first: then its
-// host may be gone (async_start's contract).
-void settle_started(se::async_host &host, const std::shared_ptr<se::async_call> &call,
-                    se::value_t value) {
+// Settle a started call with its reply and post it, unless the call was cancelled first. The post
+// goes through the host's finisher, never the host: a transport may answer on a thread of its own
+// just as the host is destroyed (an isolated document's group's goes with its Runtime), and the
+// finisher posts only while the host has not begun to shut down, under the host's lock.
+void settle_started(const se::async_host::finisher &host,
+                    const std::shared_ptr<se::async_call> &call, se::value_t value) {
   if (!call->cancel_requested() && call->settle(std::move(value), nullptr))
     host.finish(call);
 }
@@ -564,7 +566,7 @@ struct StartedRequest : std::enable_shared_from_this<StartedRequest> {
   cvc::net::HttpRequest req;
   RequestAuth auth;
   NetAccess access;
-  se::async_host *host = nullptr;
+  se::async_host::finisher host; // what finishes the call on its host, safely after the host
   std::shared_ptr<se::async_call> call;
   std::shared_ptr<cvc::net::CredentialRenewer> renewer;
   std::shared_ptr<cvc::net::HttpTransfer> transfer; // the one out, for a cancel to abort
@@ -584,7 +586,7 @@ struct StartedRequest : std::enable_shared_from_this<StartedRequest> {
       return;
     auto p = std::make_shared<Prepared>(prepare(req, auth, access));
     if (p->failed) {
-      settle_started(*host, call, marshal_response(p->failed->reply, p->failed->captured));
+      settle_started(host, call, marshal_response(p->failed->reply, p->failed->captured));
       return;
     }
     std::shared_ptr<StartedRequest> self = shared_from_this();
@@ -612,11 +614,11 @@ struct StartedRequest : std::enable_shared_from_this<StartedRequest> {
     const std::string url = p.req.url;
     try {
       const Outcome out = complete(p, std::move(r), auth, access);
-      settle_started(*host, call, marshal_response(out.reply, out.captured));
+      settle_started(host, call, marshal_response(out.reply, out.captured));
     } catch (const std::exception &e) {
-      settle_started(*host, call, marshal_error(url, std::string("http: ") + e.what()));
+      settle_started(host, call, marshal_error(url, std::string("http: ") + e.what()));
     } catch (...) {
-      settle_started(*host, call, marshal_error(url, "http: unknown error"));
+      settle_started(host, call, marshal_error(url, "http: unknown error"));
     }
   }
 };
@@ -634,12 +636,12 @@ se::async_work http_work(cvc::net::HttpRequest req, RequestAuth auth, NetAccess 
   if (!starts)
     return work;
   work.start = [req = std::move(req), auth = std::move(auth), access = std::move(access),
-                &host](const std::shared_ptr<se::async_call> &call) {
+                fin = host.make_finisher()](const std::shared_ptr<se::async_call> &call) {
     auto s = std::make_shared<StartedRequest>();
     s->req = req;
     s->auth = auth;
     s->access = access;
-    s->host = &host;
+    s->host = fin;
     s->call = call;
     s->renewer = renewer_for(auth, access);
     call->on_cancel([weak = std::weak_ptr<StartedRequest>(s)] {
@@ -744,10 +746,10 @@ se::async_work uri_fetch_work(std::span<const se::value_t> args, se::async_host 
   work.kernel = uri_fetch_kernel(uri, base);
   if (!cvc::net::http_starts_async() || !has_uri_async_handler(parse_uri(uri).scheme))
     return work;
-  work.start = [uri, base, &host](const std::shared_ptr<se::async_call> &call) {
-    std::function<void()> stop = resolve_async(uri, base, [call, &host](UriResult r) {
-      settle_started(host, call, marshal_uri_result(r));
-    });
+  work.start = [uri, base,
+                fin = host.make_finisher()](const std::shared_ptr<se::async_call> &call) {
+    std::function<void()> stop = resolve_async(
+        uri, base, [call, fin](UriResult r) { settle_started(fin, call, marshal_uri_result(r)); });
     if (stop)
       call->on_cancel(std::move(stop));
   };
@@ -1453,9 +1455,10 @@ void register_net_intrinsics(cvc::app &app, NetAccess access) {
       return; // the host turned the network off: later programs do not get the verbs
     // The calling program's async host (td 4.9, B30): the app's for a document in group 0, its own
     // group's for an isolated one, the init lane's inline one in init:. A started request
-    // (http_work, uri_fetch_work) keeps the host it started on, which outlives it: a host's
-    // shutdown (a group's comes after the group's kills) cancels each call it started, and a
-    // cancelled call is never finished on its host (settle_started).
+    // (http_work, uri_fetch_work) keeps its host's finisher, not the host: a host's shutdown (a
+    // group's comes after the group's kills) cancels each call it started, and the finisher posts
+    // only while its host has not begun to shut down, so an answer that comes as the group goes
+    // touches neither its host nor its scheduler (settle_started).
     se::async_host *host = ictx.host;
     // Async functions on the calling program's scheduler (docs/STATE_EXEC_EXCEPTIONS.md 3): each
     // verb parks the calling process while its kernel runs on the app's background task pool and
