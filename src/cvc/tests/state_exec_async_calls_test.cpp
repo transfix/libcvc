@@ -2039,8 +2039,10 @@ TEST(AsyncCalls, AKillWhoseRateReadThrowsStillWakesTheForkChild) {
     world w(async_sched);
     w.async->set_id("kill_rate_throws");
     register_blind(w, started);
-    const auto [parent, child] =
+    // Plain ints, not a structured binding: clang cannot capture one in the lambdas below.
+    const std::pair<int, int> pc =
         fork_both_awaiting(w, "(blind-async 300)", wait, [&] { return started > 0; });
+    const int parent = pc.first, child = pc.second;
     ASSERT_GE(child, 0);
     (*w.tree)("state_exec.defaults.limits.async_steps_per_cpu_ms").value(std::string("2000"));
     std::atomic<bool> armed{true};
@@ -2072,8 +2074,9 @@ TEST(AsyncCalls, AThrowingCancelHookSkipsNeitherTheSettleNorTheWake) {
     std::atomic<int> started{0};
     world w(async_sched);
     register_blind_hook(w, started);
-    const auto [parent, child] =
+    const std::pair<int, int> pc =
         fork_both_awaiting(w, "(blind-hook-async 300)", "(await f)", [&] { return started > 0; });
+    const int parent = pc.first, child = pc.second;
     ASSERT_GE(child, 0);
     EXPECT_THROW(w.async->kill(parent), std::runtime_error);
     EXPECT_TRUE(pump_through_throws(w, [&] { return w.finished(child); }, 3.0));
@@ -2084,8 +2087,9 @@ TEST(AsyncCalls, AThrowingCancelHookSkipsNeitherTheSettleNorTheWake) {
     std::atomic<int> started{0};
     world w(async_sched);
     register_stuck(w, started);
-    const auto [parent, child] =
+    const std::pair<int, int> pc =
         fork_both_awaiting(w, "(stuck-async)", "(await f)", [&] { return started > 0; });
+    const int parent = pc.first, child = pc.second;
     ASSERT_GE(child, 0);
     EXPECT_THROW(w.async->kill(parent), std::runtime_error);
     EXPECT_TRUE(pump_through_throws(
