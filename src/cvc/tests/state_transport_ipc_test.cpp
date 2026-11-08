@@ -8,6 +8,8 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include "ipc_socket_path.h" // a socket path short enough for sun_path
+
 #include <atomic>
 #include <boost/any.hpp>
 #include <chrono>
@@ -43,10 +45,8 @@ bool env_flag(const char *name) {
 std::string make_socket_path(const std::string &label) {
   auto pid = static_cast<long long>(::getpid());
   auto now = std::chrono::steady_clock::now().time_since_epoch().count();
-  auto dir = std::filesystem::temp_directory_path();
-  auto p =
-      dir / ("cvc_ipc_" + std::to_string(pid) + "_" + std::to_string(now) + "_" + label + ".sock");
-  return p.string();
+  return cvc_test::ipc_socket_path("cvc_ipc_" + std::to_string(pid) + "_" + std::to_string(now) +
+                                   "_" + label + ".sock");
 }
 
 // Spin until both endpoints have at least one connection or timeout.
