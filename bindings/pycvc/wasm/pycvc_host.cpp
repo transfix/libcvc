@@ -88,6 +88,12 @@ static const char *kDefaultScript =
     "_r = _ex.run('(with-lock \"k\" (+ 1 2))')\n"
     "assert _r == '3', _r\n"
     "print('PYCVC_EXEC_OK')\n"
+    // ExecPool without threads: its groups are pumped inline on this thread (S1.12).
+    "_pool = pycvc.ExecPool(pycvc.make_app(), threads=0, size=2)\n"
+    "_r = _pool.run_all(['(+ 1 2)', '(with-lock \"k\" 4)'])\n"
+    "assert _r == ['3', '4'], _r\n"
+    "_pool.close()\n"
+    "print('PYCVC_EXEC_POOL_OK')\n"
     "print('PYCVC_WASM_OK')\n";
 
 int main(int argc, char **argv) {

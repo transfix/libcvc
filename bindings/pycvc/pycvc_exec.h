@@ -12,12 +12,20 @@
 #include <cvc/state/state_exec/parser.h>   // parse_options
 #include <memory>
 #include <string>
+#ifndef SWIG
+#include <atomic>
+#include <exception>
+#include <span>
+#include <vector>
+#endif
 
 namespace cvc {
 class app;
+class exec_pool;
 namespace state_exec {
 class async_host;
 class async_scheduler;
+class exec_group;
 } // namespace state_exec
 } // namespace cvc
 
@@ -26,6 +34,8 @@ struct _object;
 typedef _object PyObject;
 
 namespace pycvc {
+
+class ExecPool;
 
 class Exec {
 public:
@@ -180,6 +190,32 @@ public:
 private:
   struct ExecImpl;
   std::shared_ptr<ExecImpl> impl_;
+
+#ifndef SWIG
+  // ExecPool's pooled Execs (S1.12, S1-Q5), never exposed to Python.
+  friend class ExecPool;
+  struct pooled_tag {};
+  // Pooled Exec `name`, an Exec in group mode: its scheduler, async host, cycle registry and
+  // random stream are an exec_group's (the app pool's pid source, the app's lock manager), its
+  // natives extend the frozen builtins (td 4.2), and its context is chrooted at `name`.
+  Exec(pooled_tag, const std::shared_ptr<cvc::app> &app, const std::string &name,
+       double idle_timeout);
+  // A pooled Exec's group.
+  cvc::state_exec::exec_group &group() const;
+  // A program's outcome in a batch: its result as run() renders it, or what run() would raise.
+  struct batch_outcome {
+    std::string result;
+    std::exception_ptr error;
+  };
+  // ExecPool::run_all's batch, called with the GIL released: program i runs on
+  // execs[i % execs.size()], each pooled Exec's programs one at a time and in order, in its env
+  // (a fresh extend of its natives with `fresh_env`). It pumps their groups on `pool` in fork-join
+  // rounds until every program has ended or passed its idle limit, then waits for their kernels.
+  // Once `closing` is set, what runs is killed and what has not started is not started.
+  static std::vector<batch_outcome> run_batch(cvc::exec_pool &pool, std::span<Exec *const> execs,
+                                              std::span<const std::string> programs, bool fresh_env,
+                                              const std::atomic<bool> &closing);
+#endif
 };
 
 } // namespace pycvc

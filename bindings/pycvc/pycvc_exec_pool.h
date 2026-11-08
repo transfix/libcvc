@@ -43,6 +43,11 @@ public:
   // passed its idle limit. Returns a list of their results in program order, each rendered as
   // Exec.run renders it. A program that fails makes run_all raise its error, as Exec.run would,
   // once every program has ended (the first failing program's, in program order).
+  //
+  // Program i runs on pooled Exec i % size; each pooled Exec runs its programs one at a time, in
+  // order, so the programs sharing its top-level definitions never interleave. A run_all or
+  // register_* call while another is in progress (on another thread, or from a function the
+  // batch calls) raises RuntimeError.
   PyObject *run_all(PyObject *programs);
 
   // Register a Python callable as a DSL function in every pooled Exec, as Exec.register_fn does.
@@ -57,7 +62,7 @@ public:
 
   // Kill what is still running, wait for its kernels and a batch in progress (with the GIL
   // released), and destroy the pooled Execs. Idempotent; afterwards run_all and register_* raise
-  // RuntimeError.
+  // RuntimeError. From inside its own batch (a function a program calls) it raises RuntimeError.
   void close();
 
 private:
