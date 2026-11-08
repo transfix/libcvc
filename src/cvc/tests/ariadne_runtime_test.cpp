@@ -3446,9 +3446,10 @@ std::string spinner_line(const MockBackend &mb, const std::string &label) {
   return std::string();
 }
 
-// The nav_compute demo's verb: (nav-step) is an async function on the app's async host. The action
-// parks at the call while the kernel runs on the background task pool and fans out over the compute
-// pool, then resumes with the call's value. No channel, no msg-recv.
+// The nav_compute demo's verb: (nav-step) is an async function on the calling program's async host
+// (*ictx.host, the app's here), in an `any` provider as the demo registers it. The action parks at
+// the call while the kernel runs on the background task pool and fans out over the compute pool,
+// then resumes with the call's value. No channel, no msg-recv.
 TEST(AriadneAction, NavStepAsAnAsyncFunctionReturnsItsResult) {
   namespace se = cvc::state_exec;
   cvc::app app;
@@ -3456,8 +3457,8 @@ TEST(AriadneAction, NavStepAsAnAsyncFunctionReturnsItsResult) {
   app.exec_scheduler();
   app.exec_async_host(); // warm them on THIS thread
   register_action_intrinsics(
-      [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
-        se::register_async_fn(env, app.exec_async_host(), "nav-step",
+      [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
+        se::register_async_fn(env, *ictx.host, "nav-step",
                               [&app](std::span<const se::value_t>) -> se::async_kernel {
                                 return [&app](se::async_call &) -> se::value_t {
                                   std::atomic<int> arrived{0};
@@ -3468,7 +3469,8 @@ TEST(AriadneAction, NavStepAsAnAsyncFunctionReturnsItsResult) {
                                   return se::value_t(std::to_string(arrived.load()));
                                 };
                               });
-      });
+      },
+      se::provider_affinity::any);
   Runtime rt(app, "");
   MockBackend mb;
   rt.set_backend(&mb);

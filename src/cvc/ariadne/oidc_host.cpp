@@ -380,7 +380,9 @@ void Session::set_status(const std::function<void(Status &)> &edit, bool termina
     copy = status_;
     path = status_path_;
   }
-  if (terminal && app_) // a program waiting with (msg-recv "oidc#NAME") hears of the end
+  // A program waiting with (msg-recv "oidc#NAME") hears of the end. On group 0: a document that
+  // uses oidc is never isolated (S1-Q6), and a "#" key is never scoped to a document anyway.
+  if (terminal && app_)
     app_->exec_scheduler().post_message("oidc#" + name_, status_dict(copy, name_));
 }
 
@@ -1616,13 +1618,18 @@ void enable_oidc(cvc::app &app, std::shared_ptr<const cvc::net::NetPolicy> polic
   }
   g_on.store(true);
   std::weak_ptr<Host> weak = host;
+  // host_proxied (S1-Q7): the sessions are process-global and pump_oidc steps them on the host
+  // thread. A document that uses oidc stays in group 0 (S1-Q6), where a flow's end is posted
+  // (Session::set_status). The body reads the weak host and the atomic `live`, and binds natives
+  // into the new env only, so a spawned child may run it on a worker.
   register_action_intrinsics(
       [weak](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
         std::shared_ptr<Host> h = weak.lock();
         if (!h || (h->live && !h->live->load()))
           return; // turned off: later programs do not get the verbs
         register_verbs(weak, env, ictx);
-      });
+      },
+      se::provider_affinity::host_proxied);
 }
 
 void disable_oidc() {
