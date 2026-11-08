@@ -19,6 +19,7 @@
 #include <gtest/gtest.h>
 #include <memory>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -483,6 +484,28 @@ TEST(RandomStreamTest, ASeededStreamRepeatsOnAnyThread) {
   random_stream d;
   draw(d);
   EXPECT_TRUE(d.seeded);
+}
+
+TEST(FrozenBuiltinsTest, OneFrozenScopeForTheProcess) {
+  // S1.3: one default environment per process, frozen, so groups on any thread share it.
+  const environment_ptr base = frozen_builtins();
+  ASSERT_TRUE(base);
+  EXPECT_TRUE(base->frozen);
+  EXPECT_EQ(frozen_builtins(), base);
+  environment_ptr elsewhere;
+  std::thread([&] { elsewhere = frozen_builtins(); }).join();
+  EXPECT_EQ(elsewhere, base);
+  ASSERT_NE(base->lookup("str-concat"), nullptr);
+  EXPECT_NE(base->lookup("math.random"), nullptr); // through the stdlib scope, its outer
+  EXPECT_THROW(base->set("x", value_t(int64_t{1})), std::logic_error);
+  EXPECT_THROW(base->set_existing("x", value_t(int64_t{1})), std::logic_error);
+  // A scope over it runs programs; a set of a builtin's name lands there, not in the base.
+  auto env = environment::extend(base);
+  stackless_evaluator ev(env);
+  EXPECT_EQ(
+      to_string(ev.evaluate_script("(begin (set str-concat 5) (list str-concat (str 1)))", env)),
+      "(5 \"1\")");
+  EXPECT_TRUE(std::holds_alternative<native_fn>(base->lookup("str-concat")->v));
 }
 
 // --- measuring a share -------------------------------------------------------------------------
