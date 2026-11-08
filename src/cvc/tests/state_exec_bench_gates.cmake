@@ -7,7 +7,9 @@
 #     and on both kinds of manager: threading=single and threading=shared, whose mutex (phase L3)
 #     adds neither (design 8.8, 11.2);
 #   - sched.single.arith_loop and sched.single.tail_rec: steps_total pinned, so a change to the
-#     evaluator's or a scheduler's step counts shows here.
+#     evaluator's or a scheduler's step counts shows here; on the async scheduler also through an
+#     exec_group at threads 0 (driver=group, over its own and over the frozen base), which takes
+#     the same steps (threaded execution's Stage 1, rule 1).
 #
 # Run by CTest as
 #   cmake -DBENCH=<state_exec_bench> -DPYTHON=<python3> -DRUNNER=<tools/bench/state_exec_bench.py>
@@ -45,7 +47,8 @@ gate_step("state_exec_bench lock.uncontended"
   "${BENCH}" --scenario lock.uncontended --size n=2000 --size rounds=1
   --size threading=single,shared --reps 1 --warmup 0 --json "${LOCKS_RUN}")
 gate_step("state_exec_bench sched.single.*"
-  "${BENCH}" --scenario "sched.single.*" --reps 1 --warmup 0 --json "${SCHED_RUN}")
+  "${BENCH}" --scenario "sched.single.*" --size driver=spin,group --size base=own,frozen
+  --reps 1 --warmup 0 --json "${SCHED_RUN}")
 
 # 0 steps and 0 allocations per uncontended lock, for a one-form body (design 8.8, 11.2).
 foreach(metric extra.steps_per_lock extra.allocs_per_lock)
@@ -54,10 +57,11 @@ foreach(metric extra.steps_per_lock extra.allocs_per_lock)
     --where form=single --metric ${metric} --max 0)
 endforeach()
 
-# Pinned steps_total, the same on both schedulers (the programs are submitted pre-parsed, so the
-# async scheduler takes no read steps). Measured on the L1 lock branch (locks/l1-bench, cut from
-# 769f47aa), Windows MSVC Release, the same on sync and async: 27 steps an iteration of the
-# arithmetic loop, 25 a level of the tail call, and 20 to set up and return.
+# Pinned steps_total, the same on both schedulers and through a group (the programs are submitted
+# pre-parsed, so the async scheduler takes no read steps; every matching point is gated, the
+# driver=group ones included). Measured on the L1 lock branch (locks/l1-bench, cut from 769f47aa),
+# Windows MSVC Release, the same on sync and async: 27 steps an iteration of the arithmetic loop,
+# 25 a level of the tail call, and 20 to set up and return.
 #   sched.single.arith_loop n=40000:   1080020
 #   sched.single.tail_rec   n=1000:      25020
 #   sched.single.tail_rec   n=10000:    250020

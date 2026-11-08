@@ -107,8 +107,11 @@ def load(path):
 # them. A param at its implicit default is left out of a record's match key, so a record from a
 # binary without the key and one from a binary with it at its default are the same point. Stage 0
 # of threaded execution added chroot (native.state_get, native.state_set, sched.watch_poll; it was
-# already lock.uncontended's) and writes (sched.watch_poll).
-IMPLICIT_DEFAULTS = {"policy": "rr", "locks": "none", "chroot": "0", "writes": "none"}
+# already lock.uncontended's) and writes (sched.watch_poll); Stage 1 added base (sched.single.*'s
+# async points: driver=group's base env, own by default). sched.single.*'s driver key was already
+# there (spin, the bare scheduler's loop), so its new value, group, needs no default.
+IMPLICIT_DEFAULTS = {"policy": "rr", "locks": "none", "chroot": "0", "writes": "none",
+                     "base": "own"}
 
 
 def param(r, name):

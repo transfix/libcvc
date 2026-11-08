@@ -36,7 +36,7 @@ The executable lands in the build tree's `bin` directory: `build/bin` with the C
 # What is there, with default and smoke sizes:
 build/bin/state_exec_bench --list
 
-# Every scenario at tiny sizes, about 10-12 s (the lock.* scenarios about 3 s of it); fails if
+# Every scenario at tiny sizes, about 15 s (the lock.* scenarios about 3 s of it); fails if
 # any program returns the wrong thing:
 build/bin/state_exec_bench --smoke
 
@@ -118,10 +118,11 @@ More `compare` rules, for gates:
 - **Implicit defaults.** Some sweep keys were added after records existed: `policy` and `locks`
   (on `sched.single.*`, `flood.small` and `msg.*`), and with threaded execution's Stage 0 `chroot`
   (on `native.state_get`, `native.state_set` and `sched.watch_poll`; `lock.uncontended` always had
-  it) and `writes` (on `sched.watch_poll`). Every point ran at `policy=rr`, `locks=none`,
-  `chroot=0` and `writes=none` before them. A param at its implicit default is left out of the
-  match, so a record from an older binary (no such param) and one at the default are the same
-  point.
+  it) and `writes` (on `sched.watch_poll`), and with Stage 1 `base` (on `sched.single.*`'s async
+  points). Every point ran at `policy=rr`, `locks=none`, `chroot=0`, `writes=none` and `base=own`
+  before them. A param at its implicit default is left out of the match, so a record from an older
+  binary (no such param) and one at the default are the same point. (`sched.single.*`'s `driver`
+  key was there before Stage 1 gave it the value `group`: its records carry `driver=spin`.)
 - **`--pair KEY=A:B`** compares the base's points whose `KEY` is `A` with the candidate's whose
   `KEY` is `B`, matched without `KEY`. Both files may be the same run: `compare run.jsonl run.jsonl
   --pair op=set:incr` compares two points of one sweep. A point at neither value is left out.
@@ -171,10 +172,11 @@ as `state_exec_bench_gates` (`src/cvc/tests/state_exec_bench_gates.cmake`, a `cm
   `(begin ...)` (docs/STATE_EXEC_LOCKS.md 8.8, 11.2), at every depth, mode, chroot and owner, on
   both schedulers, and on both kinds of manager (`threading` single and shared: the manager's
   mutex adds neither);
-- `sched.single.*` (one rep, no warmup), then `gate --metric steps_total --min N --max N` for
-  `sched.single.arith_loop` (n 40000) and `sched.single.tail_rec` (n 1000, 10000, 100000), the
-  same N on both schedulers. A deliberate change to one of these step counts updates the script
-  in the same commit, with the reason.
+- `sched.single.*` (one rep, no warmup, at `--size driver=spin,group --size base=own,frozen`),
+  then `gate --metric steps_total --min N --max N` for `sched.single.arith_loop` (n 40000) and
+  `sched.single.tail_rec` (n 1000, 10000, 100000), the same N on both schedulers and through an
+  `exec_group` at threads 0 (threaded execution's Stage 1: a group adds no step). A deliberate
+  change to one of these step counts updates the script in the same commit, with the reason.
 
 Every command must exit 0. The test is registered where the tool test is (a working Python 3),
 and only for Release and RelWithDebInfo: MSVC's Debug STL allocates for its iterator debugging,
@@ -186,8 +188,9 @@ so the allocation count is a Release number. With a single-config generator it e
 
 ## Getting stable numbers
 
-- **Pin the driver to a performance core.** `--pin auto` (the runner's default) picks, on
-  Windows, a CPU set with the highest `EfficiencyClass` from `GetSystemCpuSetInformation`, off the
+- **Pin the driver to a performance core.** The bench pins it with the library's placement
+  (`cvc/core/cpu_placement.h`, which the `exec_pool` places its workers with). `--pin auto` (the
+  runner's default) picks, on Windows, a CPU set with the highest `EfficiencyClass` from `GetSystemCpuSetInformation`, off the
   core that logical CPU 0 is on (most interrupts land there), and pins the driver thread to it
   with `SetThreadAffinityMask` and `SetThreadSelectedCpuSets`. On Linux it picks among the CPUs
   with the highest `/sys/devices/system/cpu/cpu*/cpu_capacity` (hybrid and big.LITTLE parts), or,
@@ -203,7 +206,10 @@ so the allocation count is a Release number. With a single-config generator it e
   when a measured region begins. Threads the driver starts inside a region (a background kernel's
   thread) would still inherit the pin, so on Linux the scenarios that start threads
   (`async.*`, `msg.ingress`, `mt.*`; `spawns_threads` in `--list-json`) run with the driver
-  unpinned, and their records say `pin_cpu: -1`.
+  unpinned, and their records say `pin_cpu: -1`. The pool scenarios (`mt.groups`,
+  `mt.groups.flood`, `mt.state_tree`) are the exception: their `exec_pool` places its workers, the
+  region leaves them placed, and a pinned driver moves off worker 1's CPU for the point (mt.groups,
+  "Placement").
 - **Keep the pinned core's SMT sibling idle.** The header and the records (`pin_sibling`) name the
   other logical CPUs on the driver's core. A busy sibling slows the driver by tens of percent and
   is a large part of the rep-to-rep spread. On Windows, keep other work off it (for example
@@ -502,6 +508,29 @@ Sweep them with `--size policy=rr,priority_rr` or `--size locks=none,shared`, an
 sides of a sweep with `compare --pair` ("Runner options"; L3's gate is under "lock.cross_thread",
 "The phase L3 gates"). Records from binaries that predate the keys still match, because both are
 implicit defaults.
+
+The async points also take `driver`, at one value by default, `spin`: the bare scheduler pumped by
+the loop of "How the schedulers are driven" (`poll1ms` sleeps 1 ms when idle instead of
+yielding). Threaded execution's Stage 1 adds a value and a key:
+
+- `driver=group`: the same program pumped through an `exec_group` at threads 0, by the app's
+  `exec_pool` (`pool_options{}`), which pumps it on the driver with the same slices
+  (`exec_group::pump`: the group's token taken, its registry and `math.random` stream bound,
+  `drain_ingress`, `wake_awaiting`, `sync_run_steps`). The submit copies the AST, as a group's
+  `execute` does (td B12). At `locks=none` the group is built without the app, so its scheduler
+  has no lock manager, as the bare one; at `locks=private` it is built on the app and attached to
+  the app's manager (single at threads 0), the `locks=private` shape. Other `locks` values and
+  policies but `rr` are skipped. It takes the same steps (`state_exec_bench_gates` pins them).
+- `base`: what the group's global env and each process's scope extend. `own` (the default) is the
+  world's own default environment with the bench's natives and intrinsics, as for `driver=spin`;
+  `frozen` is the frozen builtins (td 4.2) with the natives and intrinsics in a scope over them, a
+  pooled `Exec`'s shape, so a builtin is one lookup hop further. `base=frozen` with another driver
+  is skipped.
+
+Neither is swept by default (`--size driver=spin,group`, `--size base=own,frozen`); the smoke sizes
+run both. `driver=group` against `driver=spin` is the pump scope's cost (td 6.3: under 1 ns a
+step), `base=frozen` against `base=own` the frozen base's hop ("Threaded execution's Stage 1
+gates").
 
 ### flood.small (sync, async)
 
@@ -857,6 +886,144 @@ one run of each program, under TSan and under ASan with UBSan and LeakSanitizer:
 --timeout 900 --json san-logs/mt.multi_exec.jsonl`. Each point's line (`t=8 prog=fib runs=1`, and
 `exceptions` and `tree`) is required in the log: a run whose points were all skipped would exit 0.
 The worker threads collect the cycles their runs left before they end, as mt.independent's do.
+
+### mt.groups (async)
+
+Threaded execution's Stage 1 (td 4.1, 6.3): `groups` (8, 16) `exec_group`s on the app's
+`exec_pool`, fork-join. `t` (1, 2, 4, 8, 16) is the number of pumping threads: the pool is built
+with `t - 1` workers (`app::exec_pool(pool_options{threads = t - 1})`), and the caller, the
+driver, pumps as the pool's thread 0. Every group runs the program `runs` (5) times, one run at a
+time, each run a process of its own reaped once read: fib 18 and 2000 caught raises, as in
+mt.multi_exec, or `prog=cycle`, 2000 closure cycles (each iteration a `let` scope binding the
+lambda that captured it), so each group's cycle registry has work. The groups take the frozen
+builtins as their base (td 4.2), and env-less processes, so a group's top-level definitions
+persist from run to run, as a pooled `Exec`'s do.
+
+The driver submits each group's first run, then calls `pump_all` on every group that still has a
+run, with `Exec::run`'s slice (`pump_budget{2000000, 0.05}`) and no frame deadline, until every
+group's last run has ended. After each round it reads each group's process info: a run that ended
+is checked (terminated, its result) and reaped, and the group's next run submitted. Completion is
+never read from `on_complete` (which a worker-pumped group defers to the caller). The pool, its
+workers and the groups are built once a point, before any rep and outside every meter: the pool
+first, so that `threads` above 0 makes the app's lock manager shared and the workers pump (S1-Q1),
+under `unpinned_scope`. The groups are kept from rep to rep, so the pool's order and its helper
+wake (both by the groups' last pumps) are primed by the warmup rep; with `--warmup 0` the first
+rep's first round has no history and runs every group on the caller.
+
+**Placement.** The pool puts worker i on the i-th CPU of `placement_cpus(performance)`
+(`cvc/core/cpu_placement.h`), and starts it under `unpinned_scope`. A driver pinned by `--pin`
+(`auto` pins it to that list's first CPU, worker 1's) moves for the point to the list's next CPU
+after the workers' (`extra.caller_cpu`, and `pin_cpu`), and back once the point ends; an unpinned
+driver (`--pin none`, or Linux, where `spawns_threads` points run unpinned) stays unpinned. The
+region does not widen the other threads' masks (Linux), which would undo the workers' placement.
+mt.independent's threads are placed the same way: thread 0 as the caller, thread k as worker k.
+
+A rep runs, in order: mt.independent's `ast=private` worker on one thread and then on t, with the
+pool's placement, the ceiling; one group alone, `runs` runs (the caller pumps it), the reference;
+then every group, the region. `steps_total` is the region's steps in every group. Extras:
+
+- `speedup`: `groups` x the one group's time over the region's;
+- `ceiling_speedup`: mt.independent's speedup at t in the same rep, and `of_ceiling`, `speedup`
+  over it. Both count pumping threads, so with fewer groups than threads (`groups=8` at `t=16`)
+  `of_ceiling` is at most `groups / t`;
+- `pumps`, `helper_wakes`, `worker_pumps` and `skipped`: the pool's counters over the region
+  (`pool_stats`); `rounds`, the `pump_all` calls;
+- `effective_threads`: the pool's workers after its clamps (`t - 1` unless `hardware_concurrency()
+  - 1`, the affinity mask, or a single lock manager clamped it; td 4.14);
+- `single_group_ns_per_iter` (the reference) and `independent_ns_per_iter` (mt.independent's one
+  thread): they differ by what a scheduler, a group and a pump cost a program;
+- `caller_cpu`: where the driver pumped, or -1.
+
+B25 (the frozen builtin classes under raise/catch on several threads) is read from
+`prog=exceptions`. The sanitizer jobs run it at `t=8 groups=8`, one run of each program
+(`--size t=8 --size groups=8 --size runs=1`), and require each point's line (`t=8 groups=8
+prog=fib runs=1`, and `exceptions` and `cycle`), as for mt.multi_exec.
+
+### mt.groups.flood (async)
+
+`n` (2000) tiny programs, flood.small's (`(+ 1 2)` and a 10-iteration loop, alternating, as
+source text read inside the process), on the app's `exec_pool` with `t - 1` workers (`t` 1, 4):
+
+- `mode=reuse`: `t` groups (`ExecPool`'s default size, its threads) built for the point and kept
+  from rep to rep; the region submits every program at once, program i to group i mod t, and pumps
+  every group in `pump_all` rounds until all have ended;
+- `mode=fresh`: a group per program, built inside the region, `t` at a time: the batch's groups are
+  built, each given its program, pumped until done, and destroyed. A fresh group has no last pump,
+  so the adaptive helper wake (under 100 us of last pumps in all, td 4.4) pumps every batch on the
+  caller.
+
+Completion is read from process info after each round, as in mt.groups. `programs_per_s` is the
+throughput; `extra.group_setup_ns` the mean time to build one group (for `reuse`, the point's `t`
+groups, built outside the region; for `fresh`, the region's), `extra.group_teardown_ns` (`fresh`)
+the mean time to destroy one, `extra.groups_built`, and the pool's `pumps`, `helper_wakes`,
+`effective_threads` and `rounds`. td 4.12's `ExecPool` twin, a pycvc script beside
+`mt_pycvc_threads.py`, is not written yet.
+
+### mt.state_tree (async)
+
+`groups` (1, 2, 4, 8) groups on the app's `exec_pool` with `groups - 1` workers (a pumping thread
+per group), each running one program of `n` (20000) calls, `op=get` (`state-get`) or `op=set`
+(`state-set ... i`), of a node `depth` (1, 4) levels down, set to 7 beforehand:
+
+- `subtree=disjoint`: each group its own node; `subtree=shared`: one node for all;
+- `chroot=1` (native.state_get's chroot sweep): each group's intrinsics chrooted at
+  `bench.doc.g<k>` (disjoint, like isolated documents) or all at `bench.doc` (shared), the path
+  relative (`bench.d1...`); `chroot=0`: unchrooted, from `bench` (shared) or `g<k>` (disjoint).
+
+Each group has an intrinsics context of its own, its intrinsics in a scope over the frozen
+builtins. The groups are kept from rep to rep. `ns_per_iter` and `extra.ns_per_op` are the region
+over every group's calls; `extra.group_ns_per_op` the region over one group's, flat as `groups`
+grows while the groups do not contend (td 6.3: disjoint chrooted subtrees about 2-3x at 8 groups,
+shared or unchrooted about 1x). Plus the pool's `pumps`, `helper_wakes`, `effective_threads` and
+`rounds`.
+
+### Threaded execution's Stage 1 gates
+
+td 6.3 and S1.md section 6, on Windows (MSVC, Release) in recorded quiet windows with `--pin
+auto`, base and candidate interleaved, two rounds of 5 reps or more ("Getting stable numbers"):
+
+- **Regression** (base: master at the cut; candidate: the branch): `steps_total` unchanged on
+  `eval.*`, `sched.single.*`, `flood.small` sync, `native.*`, `data.*` and `limits.*`
+  (`compare --metric steps_total --threshold 0 --fail-on-change`); `sched.single.*`, `flood.*`,
+  `limits.*`, `msg.*` and `async.*` within 3 % (`compare --fail-on-worse --max-noise 3`). A base
+  binary's points match the candidate's default ones (`driver=spin`, `base=own`).
+- **The pump scope** (paired, one binary): `sched.single.*` `driver=group` within 3 % of
+  `driver=spin`, over two runs in reverse order; and `base=frozen` against `base=own` recorded:
+
+  ```sh
+  B=tools/bench/state_exec_bench.py
+  python3 $B run --scenario 'sched.single.*' --executor async --size driver=spin,group \
+      --reps 5 --out pump.jsonl
+  python3 $B run --scenario 'sched.single.*' --executor async --size driver=group,spin \
+      --reps 5 --out pump.jsonl
+  python3 $B compare pump.jsonl pump.jsonl --pair driver=spin:group --threshold 3 \
+      --max-noise 3 --fail-on-worse
+  python3 $B run --scenario 'sched.single.*' --executor async --size driver=group \
+      --size base=own,frozen --reps 5 --out base.jsonl
+  python3 $B run --scenario 'sched.single.*' --executor async --size driver=group \
+      --size base=frozen,own --reps 5 --out base.jsonl
+  python3 $B compare base.jsonl base.jsonl --pair base=own:frozen --threshold 3
+  ```
+
+  (`--pair base=own:frozen` over a run that also holds `driver=spin` points would count those
+  `only in base`, hence `--size driver=group`.)
+- **Scaling**: `mt.groups` fib at `t=8` at least 0.9 of mt.independent's speedup in the same rep,
+  for each `groups` size:
+
+  ```sh
+  python3 tools/bench/state_exec_bench.py run --scenario mt.groups --size t=8 --reps 5 \
+      --out groups.jsonl
+  python3 tools/bench/state_exec_bench.py gate groups.jsonl --scenario mt.groups --where t=8 \
+      --where prog=fib --metric extra.of_ceiling --min 0.9 --max-noise 10
+  ```
+
+- **Recorded, not gated**: `mt.groups` exceptions and cycle, `mt.groups.flood`, `mt.state_tree`,
+  `mt.independent` and `mt.multi_exec`.
+- **In CTest and CI**: `state_exec_bench_gates` pins `sched.single.*`'s `steps_total` through a
+  group too ("Gates in CTest"), and the sanitizer jobs run `mt.groups` under gcc's TSan, clang's
+  TSan and ASan with UBSan (docs/TESTING.md, "The Sanitizer Jobs").
+
+S1b adds `mt.ariadne_docs` and its gate (small frames wake no helper).
 
 ### mt.pycvc_threads (pycvc)
 

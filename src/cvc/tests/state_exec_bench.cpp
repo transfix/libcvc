@@ -70,6 +70,8 @@
 #include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/core/async_lane.h>
+#include <cvc/core/cpu_placement.h>
+#include <cvc/core/exec_pool.h>
 #include <cvc/core/thread_pool.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_host.h>
@@ -78,6 +80,7 @@
 #include <cvc/state/state_exec/detail/lock_home.h>
 #include <cvc/state/state_exec/evaluator.h>
 #include <cvc/state/state_exec/exceptions.h>
+#include <cvc/state/state_exec/exec_group.h>
 #include <cvc/state/state_exec/heap.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/lock_manager.h>
@@ -87,6 +90,7 @@
 #include <cvc/state/state_exec/scheduler.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <cvc/state/state_exec/types.h>
+#include <deque>
 #include <fstream>
 #include <functional>
 #include <map>
@@ -566,35 +570,6 @@ pin_state &pinning() {
 }
 
 #if defined(__linux__)
-std::string read_first_line(const std::string &path) {
-  std::ifstream f(path);
-  std::string s;
-  std::getline(f, s);
-  return s;
-}
-
-// "0-3,8,10-11" -> {0,1,2,3,8,10,11}.
-std::vector<int> parse_cpu_list(const std::string &s) {
-  std::vector<int> out;
-  std::stringstream in(s);
-  std::string part;
-  while (std::getline(in, part, ',')) {
-    if (part.empty())
-      continue;
-    const auto dash = part.find('-');
-    const int lo = std::atoi(part.c_str());
-    const int hi = dash == std::string::npos ? lo : std::atoi(part.c_str() + dash + 1);
-    for (int c = lo; c <= hi && c >= 0 && c < CPU_SETSIZE; ++c)
-      out.push_back(c);
-  }
-  return out;
-}
-
-std::vector<int> smt_siblings(int cpu) {
-  return parse_cpu_list(read_first_line("/sys/devices/system/cpu/cpu" + std::to_string(cpu) +
-                                        "/topology/thread_siblings_list"));
-}
-
 bool set_thread_mask(pid_t tid, const cpu_set_t &set) {
   return sched_setaffinity(tid, sizeof set, &set) == 0;
 }
@@ -607,7 +582,9 @@ cpu_set_t single_cpu(int cpu) {
 }
 #endif
 
-// Pin the calling (driver) thread. Returns the logical CPU it is pinned to, or -1.
+// Pin the calling (driver) thread with the library's placement (cvc/core/cpu_placement.h), which
+// the exec_pool places its workers with. `auto` is a performance core off the core logical CPU 0
+// sits on, where most interrupts land. Returns the logical CPU it is pinned to, or -1.
 int pin_driver(const std::string &mode) {
   pin_state &ps = pinning();
   std::string &how = ps.how;
@@ -625,148 +602,41 @@ int pin_driver(const std::string &mode) {
     }
   }
 #if defined(_WIN32)
-  // The CPU set API is Windows 10+; _WIN32_WINNT is 0x0601 repo-wide, so resolve it at run time.
-  using get_sets_fn = BOOL(WINAPI *)(PSYSTEM_CPU_SET_INFORMATION, ULONG, PULONG, HANDLE, ULONG);
-  using set_sets_fn = BOOL(WINAPI *)(HANDLE, const ULONG *, ULONG);
-  HMODULE k32 = GetModuleHandleW(L"kernel32.dll");
-  auto get_sets = reinterpret_cast<get_sets_fn>(
-      reinterpret_cast<void *>(GetProcAddress(k32, "GetSystemCpuSetInformation")));
-  auto set_sets = reinterpret_cast<set_sets_fn>(
-      reinterpret_cast<void *>(GetProcAddress(k32, "SetThreadSelectedCpuSets")));
-  struct cpu_set {
-    ULONG id;
-    int lp, core;
-    unsigned eff;
-  };
-  std::vector<cpu_set> sets;
-  if (get_sets) {
-    ULONG len = 0;
-    get_sets(nullptr, 0, &len, GetCurrentProcess(), 0);
-    std::vector<unsigned char> buf(len);
-    if (len && get_sets(reinterpret_cast<PSYSTEM_CPU_SET_INFORMATION>(buf.data()), len, &len,
-                        GetCurrentProcess(), 0)) {
-      for (ULONG off = 0; off < len;) {
-        auto *e = reinterpret_cast<SYSTEM_CPU_SET_INFORMATION *>(buf.data() + off);
-        if (e->Type == CpuSetInformation && e->CpuSet.Group == 0)
-          sets.push_back({e->CpuSet.Id, e->CpuSet.LogicalProcessorIndex, e->CpuSet.CoreIndex,
-                          e->CpuSet.EfficiencyClass});
-        off += e->Size;
-      }
-    }
-  }
-  if (cpu < 0) {
-    // A performance core: the highest EfficiencyClass. Prefer one off the core logical CPU 0
-    // sits on, where most interrupts and DPCs land.
-    unsigned best = 0;
-    int core0 = -1;
-    for (const auto &s : sets) {
-      best = std::max(best, s.eff);
-      if (s.lp == 0)
-        core0 = s.core;
-    }
-    for (const auto &s : sets)
-      if (s.eff == best && s.core != core0) {
-        cpu = s.lp;
-        break;
-      }
-    if (cpu < 0)
-      for (const auto &s : sets)
-        if (s.eff == best) {
-          cpu = s.lp;
-          break;
-        }
-    if (cpu < 0) {
-      how = "auto: no CPU set information";
-      return -1;
-    }
-  }
   if (cpu >= 64) {
     how = "cpu beyond processor group 0";
     return -1;
   }
-  bool ok = SetThreadAffinityMask(GetCurrentThread(), DWORD_PTR(1) << cpu) != 0;
-  int core = -1;
-  for (const auto &s : sets)
-    if (s.lp == cpu) {
-      core = s.core;
-      if (set_sets)
-        ok = set_sets(GetCurrentThread(), &s.id, 1) && ok;
-    }
-  for (const auto &s : sets)
-    if (s.core == core && s.lp != cpu)
-      ps.sibling += (ps.sibling.empty() ? "" : ",") + std::to_string(s.lp);
-  std::string eff;
-  for (const auto &s : sets)
-    if (s.lp == cpu)
-      eff = " efficiency class " + std::to_string(s.eff);
-  how = (mode == "auto" ? "auto:" : "explicit:") + eff + (ok ? "" : " (affinity call failed)");
-  ps.cpu = ok ? cpu : -1;
-  return ps.cpu;
 #elif defined(__linux__)
   if (sched_getaffinity(0, sizeof ps.orig, &ps.orig) != 0) {
     how = "sched_getaffinity failed";
     return -1;
   }
   ps.have_orig = true;
+  std::string source = "explicit";
   if (cpu < 0) {
-    // Hybrid and big.LITTLE parts report a per-CPU capacity; the biggest is a performance core.
-    // x86 hybrid kernels may not, but list their performance cores under cpu_core. Prefer a CPU
-    // off the core CPU 0 sits on (its SMT siblings included), where most interrupts land.
-    std::vector<int> candidates;
-    long best = -1;
-    for (int i = 0; i < CPU_SETSIZE; ++i) {
-      if (!CPU_ISSET(i, &ps.orig))
-        continue;
-      std::ifstream f("/sys/devices/system/cpu/cpu" + std::to_string(i) + "/cpu_capacity");
-      long c = -1;
-      if (!(f >> c))
-        continue;
-      if (c > best) {
-        best = c;
-        candidates.clear();
-      }
-      if (c == best)
-        candidates.push_back(i);
-    }
-    std::string source = "highest cpu_capacity";
-    if (candidates.empty()) {
-      for (int c : parse_cpu_list(read_first_line("/sys/devices/cpu_core/cpus")))
-        if (CPU_ISSET(c, &ps.orig))
-          candidates.push_back(c);
-      source = "cpu_core (hybrid P-cores)";
-    }
-    if (candidates.empty()) {
+    // Where the kernel names no faster class (no cpu_capacity, no hybrid cpu_core list), the
+    // library puts every CPU in class 0, and auto pins nothing.
+    const std::vector<cvc::logical_cpu> cpus = cvc::logical_cpus();
+    if (std::all_of(cpus.begin(), cpus.end(),
+                    [](const cvc::logical_cpu &c) { return c.efficiency == 0; })) {
       how = "auto: no cpu_capacity or cpu_core list (not pinned)";
       return -1;
     }
-    std::vector<int> core0 = smt_siblings(0);
-    if (core0.empty())
-      core0 = {0};
-    for (int c : candidates)
-      if (std::find(core0.begin(), core0.end(), c) == core0.end()) {
-        cpu = c;
-        break;
-      }
-    if (cpu < 0)
-      cpu = candidates.front();
-    how = "auto: " + source;
-  } else {
-    how = "explicit";
+    std::ifstream f("/sys/devices/system/cpu/cpu" + std::to_string(cpus.front().index) +
+                    "/cpu_capacity");
+    long capacity = -1;
+    source = f >> capacity ? "auto: highest cpu_capacity" : "auto: cpu_core (hybrid P-cores)";
   }
-  if (cpu >= CPU_SETSIZE || !set_thread_mask(0, single_cpu(cpu))) {
-    how += " (sched_setaffinity failed)";
-    return -1;
-  }
-  for (int c : smt_siblings(cpu))
-    if (c != cpu)
-      ps.sibling += (ps.sibling.empty() ? "" : ",") + std::to_string(c);
-  ps.cpu = cpu;
-  return cpu;
-#else
-  (void)cpu; // macOS has no thread affinity to set
-  how = "pinning not supported on this platform";
-  return -1;
 #endif
+  const cvc::pin_result r = cvc::pin_current_thread(cpu);
+  ps.cpu = r.cpu;
+  ps.sibling = r.siblings;
+#if defined(__linux__)
+  how = source + (r.cpu < 0 ? " (sched_setaffinity failed)" : ""); // the words it always had
+#else
+  how = r.how;
+#endif
+  return ps.cpu;
 }
 
 // While alive, the calling thread runs on the process's whole mask, so threads it starts don't
@@ -2160,6 +2030,9 @@ struct sample {
 struct meter {
   bool want_heap = false;
   cvc::app *app = nullptr; // when set, its thread map and pool counts are sampled too
+  // begin() widens the other threads' masks (Linux); false where threads are placed on purpose
+  // (an exec_pool's workers, pool_point).
+  bool widen = true;
   bool begun = false, ended = false;
   sample a, b;
   void probe(sample &s) {
@@ -2174,7 +2047,8 @@ struct meter {
     }
   }
   void begin() {
-    widen_other_threads();
+    if (widen)
+      widen_other_threads();
     probe(a);
     a.mem = memory(want_heap);
     a.proc_cpu = process_cpu_ns();
@@ -2388,7 +2262,7 @@ void point_ctx::record(int rep, const meter &m, rep_out &o) {
   if (!o.sample.body.empty())
     r.body += ", " + o.sample.body;
   r.i("pin_cpu", pin_cpu);
-  if (pin_cpu >= 0 && !cfg.host.pin_sibling.empty())
+  if (pin_cpu >= 0 && pin_cpu == cfg.host.pinned_cpu && !cfg.host.pin_sibling.empty())
     r.s("pin_sibling", cfg.host.pin_sibling);
   r.i("logical_cpus", cfg.host.logical_cpus)
       .i("sleep_1ms_ns", cfg.host.sleep_1ms_ns)
@@ -2707,6 +2581,14 @@ struct world_opts {
   // locks=shared: the manager to attach to, so several worlds share one (lock.cross_thread);
   // null makes one of the world's own.
   std::shared_ptr<se::lock_manager> manager;
+  // sched.single's driver=group (async): the scheduler is an exec_group's, pumped through the
+  // app's exec_pool at threads 0 (drive). At locks=none the group is built without the app (no
+  // lock manager, as the bare scheduler), at locks=private on it (the app's manager, single at
+  // threads 0, attached as the app scheduler's is). `base` is what the group's global env and the
+  // processes' scopes extend: the world's own default environment (own) or the frozen builtins
+  // (frozen), with the world's natives and intrinsics in a scope over them.
+  bool group = false;
+  std::string base = "own";
   static world_opts of(const point_ctx &pc) {
     world_opts o;
     o.policy = policy_of(pc.s("policy", "rr"));
@@ -2721,6 +2603,8 @@ struct world {
   cvc::state *tree = nullptr;
   std::unique_ptr<se::scheduler> sync;
   std::unique_ptr<se::async_scheduler> async;
+  std::unique_ptr<se::exec_group> group; // driver=group: the async scheduler is the group's
+  cvc::exec_pool *pool = nullptr;        // driver=group: the app's, at threads 0
   std::vector<std::unique_ptr<cvc::async_lane>> lanes;
   std::unique_ptr<se::async_host> host;
   se::intrinsics_context ictx;
@@ -2734,7 +2618,13 @@ struct world {
     if (app)
       tree = &cvc::state::instance(*app);
     const bool shared = o.locks == "shared";
-    if (o.locks == "private" || shared) {
+    const bool grouped = o.group && exec != "sync";
+    if (grouped) {
+      if (!app || o.policy != se::scheduling_policy::round_robin ||
+          (o.locks != "none" && o.locks != "private"))
+        throw std::invalid_argument("driver=group: needs an app, policy=rr and locks=none or "
+                                    "private");
+    } else if (o.locks == "private" || shared) {
       se::lock_manager::options lo;
       lo.inheritance = o.inherit;
       lo.threading = shared ? se::lock_threading::shared : se::lock_threading::single;
@@ -2748,6 +2638,23 @@ struct world {
       if (lock_mgr)
         sync->set_lock_manager(lock_mgr);
       ictx.sched = sync.get();
+    } else if (grouped) {
+      // The group sets what the branch below sets (the hosts' parser and data defaults, the watch
+      // root), and its own registry and math.random stream, which its scheduler binds.
+      if (o.base == "frozen")
+        env = se::environment::extend(se::frozen_builtins());
+      else if (o.base != "own")
+        throw std::invalid_argument("base=" + o.base + ": not own or frozen");
+      se::exec_group::options go;
+      go.name = "bench";
+      go.app = o.locks == "private" ? app : nullptr;
+      go.watch_root = tree;
+      go.base = env;
+      group = std::make_unique<se::exec_group>(std::move(go));
+      if (o.locks == "private")
+        lock_mgr = app->lock_manager();
+      pool = &app->exec_pool(cvc::pool_options{});
+      ictx.sched = &group->sched();
     } else {
       async = std::make_unique<se::async_scheduler>(o.policy);
       // What app::exec_scheduler() and pycvc's Exec give theirs: scripts read inside the
@@ -2782,11 +2689,14 @@ struct world {
       host->shutdown();
     host.reset();
     lanes.clear();
+    group.reset();
     async.reset();
     sync.reset();
   }
 
-  se::scheduler_base &base() { return sync ? static_cast<se::scheduler_base &>(*sync) : *async; }
+  // The async scheduler: the world's own, or its group's.
+  se::async_scheduler *as() const { return group ? &group->sched() : async.get(); }
+  se::scheduler_base &base() { return sync ? static_cast<se::scheduler_base &>(*sync) : *as(); }
 
   // An async host whose kernels run `where`: background (the app's task pool), lane (a
   // cvc::async_lane named "bench"), or inline (the sync scheduler: in the step that calls).
@@ -2795,7 +2705,7 @@ struct world {
       host = std::make_unique<se::async_host>(sync.get());
       return;
     }
-    host = std::make_unique<se::async_host>(*async, app);
+    host = std::make_unique<se::async_host>(*as(), app);
     if (where == "lane")
       add_lane("bench");
   }
@@ -2820,30 +2730,35 @@ struct world {
     return own;
   }
 
+  // A group's execute copies the AST first (td B12), as a host's submit to a group does.
   int submit(const std::string &src, se::execute_options opts) {
-    return sync ? sync->execute(src, opts) : async->execute(src, opts);
+    return sync    ? sync->execute(src, opts)
+           : group ? group->execute(src, opts)
+                   : async->execute(src, opts);
   }
   int submit(const se::value_t &ast, se::execute_options opts) {
-    return sync ? sync->execute(ast, opts) : async->execute(ast, opts);
+    return sync    ? sync->execute(ast, opts)
+           : group ? group->execute(ast, opts)
+                   : async->execute(ast, opts);
   }
   std::optional<se::process_info> info(int pid) const {
-    return sync ? sync->get_process_info(pid) : async->get_process_info(pid);
+    return sync ? sync->get_process_info(pid) : as()->get_process_info(pid);
   }
   uint64_t total_steps() const {
-    return sync ? sync->get_stats().total_steps : async->get_stats().total_steps;
+    return sync ? sync->get_stats().total_steps : as()->get_stats().total_steps;
   }
-  int process_count() const { return sync ? sync->process_count() : async->process_count(); }
-  bool kill(int pid) { return sync ? sync->kill(pid) : async->kill(pid); }
+  int process_count() const { return sync ? sync->process_count() : as()->process_count(); }
+  bool kill(int pid) { return sync ? sync->kill(pid) : as()->kill(pid); }
   // The scheduler's lock home (made by set_lock_manager for locks=private and shared).
-  se::detail::lock_home *lock_home() { return sync ? sync->locks() : async->locks(); }
+  se::detail::lock_home *lock_home() { return sync ? sync->locks() : as()->locks(); }
   se::lock_stats lock_stats() const { return lock_mgr ? lock_mgr->stats() : se::lock_stats{}; }
   // One scheduler step, as a pump would take it (the async one wakes the frame waiters first).
   // Returns whether a process stepped.
   bool step_one() {
     if (sync)
       return sync->step() != 0;
-    async->wake_awaiting();
-    return async->sync_step() != 0;
+    as()->wake_awaiting();
+    return as()->sync_step() != 0;
   }
 };
 
@@ -3038,7 +2953,9 @@ struct drive_cfg {
 // posts), wake_awaiting, then a sync_run_steps slice (what pycvc's Exec runs: done() reads the
 // results it needs, so no slice builds the map of every finished process); it has no wakeup
 // signal, so when nothing is runnable the driver yields (spin) or sleeps 1 ms (poll1ms, as
-// pycvc did). after() runs after every slice. Returns "" or why it gave up.
+// pycvc did). A group's world (sched.single's driver=group) is pumped the same way through its
+// app's exec_pool, and idles as spin does. after() runs after every slice. Returns "" or why it
+// gave up.
 template <class Done, class After>
 std::string drive(world &w, const drive_cfg &d, Done done, After after) {
   const auto deadline = clk::now() + std::chrono::duration<double>(d.timeout);
@@ -3053,14 +2970,25 @@ std::string drive(world &w, const drive_cfg &d, Done done, After after) {
     }
     return "";
   }
-  auto &a = *w.async;
+  auto &a = *w.as();
   auto last_busy = clk::now();
   while (!done()) {
-    a.drain_ingress();
-    a.wake_awaiting();
-    const bool runnable = a.has_runnable();
-    if (runnable)
-      a.sync_run_steps(d.slice_steps, d.slice_secs);
+    bool runnable;
+    if (w.group) {
+      // driver=group: the app's pool at threads 0 pumps the group on this thread with the same
+      // slice (exec_group::pump: its token and bindings, drain_ingress, wake_awaiting,
+      // sync_run_steps). No frame deadline.
+      se::exec_group *const g = w.group.get();
+      w.pool->pump_all({&g, 1}, se::pump_budget{d.slice_steps, d.slice_secs},
+                       std::chrono::steady_clock::time_point::max());
+      runnable = a.has_runnable();
+    } else {
+      a.drain_ingress();
+      a.wake_awaiting();
+      runnable = a.has_runnable();
+      if (runnable)
+        a.sync_run_steps(d.slice_steps, d.slice_secs);
+    }
     after();
     if (done())
       break;
@@ -3596,29 +3524,14 @@ std::string run_batch(world &w, const point_ctx &pc, const std::vector<std::stri
 }
 
 #if defined(_WIN32)
-// The efficiency class of logical CPU lp (Windows CPU sets), or -1.
+// The efficiency class of logical CPU lp (cvc/core/cpu_placement.h: Windows CPU sets), or -1.
 int lp_efficiency(int lp) {
   static const std::vector<int> eff = [] {
     std::vector<int> e;
-    using get_sets_fn = BOOL(WINAPI *)(PSYSTEM_CPU_SET_INFORMATION, ULONG, PULONG, HANDLE, ULONG);
-    auto get_sets = reinterpret_cast<get_sets_fn>(reinterpret_cast<void *>(
-        GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetSystemCpuSetInformation")));
-    if (!get_sets)
-      return e;
-    ULONG len = 0;
-    get_sets(nullptr, 0, &len, GetCurrentProcess(), 0);
-    std::vector<unsigned char> buf(len);
-    if (!len || !get_sets(reinterpret_cast<PSYSTEM_CPU_SET_INFORMATION>(buf.data()), len, &len,
-                          GetCurrentProcess(), 0))
-      return e;
-    for (ULONG off = 0; off < len;) {
-      auto *s = reinterpret_cast<SYSTEM_CPU_SET_INFORMATION *>(buf.data() + off);
-      if (s->Type == CpuSetInformation && s->CpuSet.Group == 0) {
-        if (e.size() <= s->CpuSet.LogicalProcessorIndex)
-          e.resize(s->CpuSet.LogicalProcessorIndex + 1, -1);
-        e[s->CpuSet.LogicalProcessorIndex] = s->CpuSet.EfficiencyClass;
-      }
-      off += s->Size;
+    for (const cvc::logical_cpu &c : cvc::logical_cpus()) {
+      if (e.size() <= std::size_t(c.index))
+        e.resize(std::size_t(c.index) + 1, -1);
+      e[std::size_t(c.index)] = int(c.efficiency);
     }
     return e;
   }();
@@ -3899,10 +3812,12 @@ struct mt_prog {
 };
 
 // prog=fib: fib 18 (smoke 10), iterations its calls; prog=exceptions: 2000 caught raises (smoke
-// 50). prog=tree (mt.multi_exec only): `n` rounds (2000, smoke 50) of state-set, state-get and
-// state-data-set under the context's chroot, after a state-watch on "w"; every 16th round writes
-// "w" (the watch's handler counts in "events") and calls bench-post, which posts controls to the
-// next thread's scheduler (run_multi_exec).
+// 50); prog=cycle (mt.groups): 2000 closure cycles (smoke 50), each a let scope binding the lambda
+// that captured it, so a group's registry has garbage to collect. prog=tree (mt.multi_exec only):
+// `n` rounds (2000, smoke 50) of state-set, state-get and state-data-set under the context's
+// chroot, after a state-watch on "w"; every 16th round writes "w" (the watch's handler counts in
+// "events") and calls bench-post, which posts controls to the next thread's scheduler
+// (run_multi_exec).
 mt_prog mt_program(const std::string &prog, bool smoke) {
   mt_prog p;
   if (prog == "fib") {
@@ -3918,6 +3833,12 @@ mt_prog mt_program(const std::string &prog, bool smoke) {
                  "(set c (+ c (try (raise (ValueError \"boom\")) (catch (ValueError e) 1))))", "c");
     p.expect = istr(size);
     p.iters = size;
+  } else if (prog == "cycle") {
+    const int64_t n = smoke ? 50 : 2000;
+    p.src =
+        loop_src(n, "(set c 0)", "(set c (+ c (let ((h nil)) (set h (lambda () i)) (h))))", "c");
+    p.expect = istr(n * (n - 1) / 2);
+    p.iters = n;
   } else if (prog == "tree") {
     const int64_t n = smoke ? 50 : 2000;
     p.src = loop_src(n,
@@ -3930,7 +3851,7 @@ mt_prog mt_program(const std::string &prog, bool smoke) {
     p.expect = istr(n * (n - 1) / 2 + (n - 1));
     p.iters = n;
   } else {
-    throw std::invalid_argument("prog=" + prog + ": not fib, exceptions or tree");
+    throw std::invalid_argument("prog=" + prog + ": not fib, exceptions, cycle or tree");
   }
   return p;
 }
@@ -3945,12 +3866,27 @@ struct ind_worker {
   std::string error;
 };
 
+// Where run_independent's threads run, when given (mt.groups: as the pool's pumping threads).
+// Thread 0 is the caller's twin: on caller_cpu, or floating at -1. Thread k is worker k's: on
+// placement_cpus(performance)[k - 1] while there is one, else floating (exec_pool.cpp).
+struct ind_placement {
+  int caller_cpu = -1;
+};
+
 // Run `count` of them from a barrier: each parses its own AST, or runs `shared` when given
 // (ast=shared). Returns the wall time from the barrier to the last join, and fills ws.
 int64_t run_independent(int64_t count, const mt_prog &p, int64_t runs, const se::value_t *shared,
-                        std::vector<ind_worker> &ws, meter *m) {
-  const auto work = [&](std::atomic<bool> &go, std::atomic<int64_t> &ready, ind_worker &me) {
+                        std::vector<ind_worker> &ws, meter *m,
+                        const ind_placement *place = nullptr) {
+  const std::size_t placed =
+      place ? cvc::placement_cpus(cvc::cpu_set::performance).size() : std::size_t(0);
+  const auto work = [&](std::atomic<bool> &go, std::atomic<int64_t> &ready, ind_worker &me,
+                        std::size_t k) {
     try {
+      if (place && k == 0 && place->caller_cpu >= 0)
+        cvc::pin_current_thread(place->caller_cpu);
+      else if (place && k > 0 && k - 1 < placed)
+        cvc::place_current_thread(cvc::cpu_set::performance, static_cast<unsigned>(k - 1));
       auto env = se::builtins::make_default_environment();
       const se::value_t ast = shared ? *shared : se::parse(p.src);
       se::stackless_evaluator ev(env);
@@ -3983,8 +3919,8 @@ int64_t run_independent(int64_t count, const mt_prog &p, int64_t runs, const se:
   std::atomic<int64_t> ready{0};
   {
     unpinned_scope u;
-    for (auto &w : ws)
-      w.th = std::thread([&, wp = &w] { work(go, ready, *wp); });
+    for (std::size_t k = 0; k < ws.size(); ++k)
+      ws[k].th = std::thread([&, wp = &ws[k], k] { work(go, ready, *wp, k); });
   }
   while (ready.load() < count)
     std::this_thread::yield();
@@ -4206,6 +4142,215 @@ int64_t run_multi_exec(cvc::app *app, const std::string &prog, const mt_prog &p,
   return span;
 }
 
+// ---------------------------------------------------------------------------------------------
+// mt.groups, mt.groups.flood, mt.state_tree: exec_groups on the app's exec_pool, fork-join
+// (docs/STATE_EXEC_THREADED.md 4.1, 6.3; threaded execution's Stage 1).
+// ---------------------------------------------------------------------------------------------
+
+// A group's pump: Exec::run's slice (pycvc_exec.cpp), as mt.multi_exec's threads take it.
+constexpr se::pump_budget kGroupSlice{2000000, 0.05};
+
+// A point's pool: the app's exec_pool with `workers` workers besides the caller, built before any
+// group of the app (so threads above 0 make its lock manager shared and the workers pump, S1-Q1)
+// and before any rep's meter, under unpinned_scope (a Linux worker inherits its creator's mask and
+// reads the CPUs it places itself on from it). The pool puts worker i on
+// placement_cpus(performance)[i - 1]. A driver pinned by --pin (auto: that list's first CPU) would
+// share worker 1's CPU, so for the point the caller moves to the list's next CPU after the
+// workers' when there is one, and back after; an unpinned driver (spawns_threads on Linux, --pin
+// none) stays unpinned.
+struct pool_point {
+  cvc::exec_pool &pool;
+  int caller_cpu = -1; // where the caller pumps for the point, or -1: floating
+  int home = -1;       // where the driver was pinned before it
+  bool moved = false;
+  pool_point(cvc::app &app, unsigned workers, point_ctx &pc) : pool(build(app, workers)) {
+    home = caller_cpu = pc.pin_cpu;
+    const std::vector<cvc::logical_cpu> cpus = cvc::placement_cpus(cvc::cpu_set::performance);
+    if (home >= 0 && pool.threads() < cpus.size() && cpus[pool.threads()].index != home) {
+      moved = true;
+      const int to = cpus[pool.threads()].index;
+      caller_cpu = cvc::pin_current_thread(to).cpu >= 0 ? to : home;
+    }
+    pc.pin_cpu = caller_cpu;
+  }
+  ~pool_point() {
+    if (moved)
+      cvc::pin_current_thread(home);
+  }
+  pool_point(const pool_point &) = delete;
+  pool_point &operator=(const pool_point &) = delete;
+  static cvc::exec_pool &build(cvc::app &app, unsigned workers) {
+    unpinned_scope u;
+    cvc::pool_options o;
+    o.threads = workers;
+    return app.exec_pool(o);
+  }
+};
+
+// Groups on `app`, named bench.g<k>; `base(k)`, when given, is group k's base env. The pool
+// scenarios keep theirs for a point (the pool orders and wakes helpers by the groups' last pumps,
+// so the warmup rep primes them), but for mt.groups.flood's fresh ones.
+struct group_set {
+  std::vector<std::unique_ptr<se::exec_group>> owned;
+  std::vector<se::exec_group *> gs;
+  int64_t setup_ns = 0; // building them, all told
+  group_set(cvc::app &app, int64_t n,
+            const std::function<se::environment_ptr(int64_t)> &base = nullptr) {
+    for (int64_t k = 0; k < n; ++k) {
+      se::exec_group::options o;
+      o.name = "bench.g" + istr(k);
+      o.app = &app;
+      if (base)
+        o.base = base(k);
+      const int64_t t0 = now_ns();
+      owned.push_back(std::make_unique<se::exec_group>(std::move(o)));
+      setup_ns += now_ns() - t0;
+      gs.push_back(owned.back().get());
+    }
+  }
+};
+
+// What a run of groups did.
+struct groups_out {
+  uint64_t steps = 0, rounds = 0;
+  std::string error;
+};
+
+// Pump `gs` with pool.pump_all rounds (kGroupSlice, no deadline) until each group's program has
+// ended `runs` times. Group k runs asts[k % asts.size()] (expect[...] the same), one run at a time,
+// each run a process of its own, reaped once read. Completion is read from the groups' process
+// info after each round, never from on_complete (S1.md section 0, item 13). Returns the time from
+// the first submit to the last round's end (the meter, when given, brackets it). What is left of a
+// failed run is killed and reaped outside it.
+int64_t run_groups(cvc::exec_pool &pool, const std::vector<se::exec_group *> &gs,
+                   const std::vector<se::value_t> &asts, const std::vector<std::string> &expect,
+                   int64_t runs, double timeout, meter *m, groups_out &out) {
+  const std::size_t n = gs.size();
+  std::vector<int> pid(n, -1);
+  std::vector<int64_t> left(n, runs);
+  std::vector<uint64_t> steps0(n);
+  std::vector<std::size_t> live;
+  for (std::size_t k = 0; k < n; ++k) {
+    steps0[k] = gs[k]->sched().get_stats().total_steps;
+    live.push_back(k);
+  }
+  std::vector<se::exec_group *> round;
+  const auto deadline = clk::now() + std::chrono::duration<double>(timeout);
+  if (m)
+    m->begin();
+  const int64_t t0 = now_ns();
+  for (std::size_t k = 0; k < n; ++k)
+    pid[k] = gs[k]->execute(asts[k % asts.size()]);
+  while (!live.empty() && out.error.empty()) {
+    round.clear();
+    for (std::size_t k : live)
+      round.push_back(gs[k]);
+    pool.pump_all(round, kGroupSlice, std::chrono::steady_clock::time_point::max());
+    ++out.rounds;
+    for (se::exec_group *g : pool.failed_groups())
+      if (out.error.empty())
+        out.error = g->opts().name + " failed: a C++ exception escaped its pump";
+    std::size_t kept = 0;
+    for (std::size_t k : live) {
+      se::async_scheduler &s = gs[k]->sched();
+      const std::optional<se::process_info> info = s.get_process_info(pid[k]);
+      if (info && !se::is_finished(info->status)) {
+        live[kept++] = k;
+        continue;
+      }
+      const std::string &want = expect[k % expect.size()];
+      if (!info) {
+        out.error = gs[k]->opts().name + ": pid " + std::to_string(pid[k]) + " vanished";
+      } else if (info->status != se::process_status::terminated) {
+        out.error = gs[k]->opts().name + ": " + se::to_string(info->status) + ": " +
+                    info->exit_error.value_or("");
+      } else if (const std::optional<se::value_t> r = s.get_result(pid[k]);
+                 !r || se::to_string(*r) != want) {
+        out.error = gs[k]->opts().name + " returned " + (r ? se::to_string(*r) : "nothing") +
+                    ", expected " + want;
+      }
+      s.reap(pid[k]);
+      if (--left[k] > 0 && out.error.empty()) {
+        pid[k] = gs[k]->execute(asts[k % asts.size()]);
+        live[kept++] = k;
+      }
+    }
+    live.resize(kept);
+    if (!live.empty() && out.error.empty() && clk::now() > deadline)
+      out.error = "timeout: " + istr(int64_t(live.size())) + " groups still running";
+  }
+  const int64_t wall = now_ns() - t0;
+  if (m)
+    m->end();
+  for (std::size_t k : live) {
+    gs[k]->sched().kill(pid[k]);
+    gs[k]->sched().reap(pid[k]);
+  }
+  for (std::size_t k = 0; k < n; ++k)
+    out.steps += gs[k]->sched().get_stats().total_steps - steps0[k];
+  return wall;
+}
+
+// mt.groups.flood's run: programs [b, e) of `src` submitted at once, program i to group
+// gs[(i - b) % gs.size()], then pool.pump_all rounds of every group until each has ended; what
+// each returned is checked, and it is reaped. Completion from process info, as run_groups. The
+// meter, when given, runs from the first submit to the last round's end.
+void flood_groups(cvc::exec_pool &pool, const std::vector<se::exec_group *> &gs,
+                  const std::vector<std::string> &src, const std::vector<std::string> &expect,
+                  std::size_t b, std::size_t e, double timeout, meter *m, groups_out &out) {
+  std::vector<uint64_t> steps0;
+  for (se::exec_group *g : gs)
+    steps0.push_back(g->sched().get_stats().total_steps);
+  const auto group_of = [&](std::size_t i) -> se::async_scheduler & {
+    return gs[(i - b) % gs.size()]->sched();
+  };
+  std::vector<std::pair<std::size_t, int>> live; // (program, pid)
+  const auto deadline = clk::now() + std::chrono::duration<double>(timeout);
+  if (m)
+    m->begin();
+  for (std::size_t i = b; i < e; ++i)
+    live.push_back({i, gs[(i - b) % gs.size()]->execute(src[i])});
+  while (!live.empty() && out.error.empty()) {
+    pool.pump_all(gs, kGroupSlice, std::chrono::steady_clock::time_point::max());
+    ++out.rounds;
+    for (se::exec_group *g : pool.failed_groups())
+      if (out.error.empty())
+        out.error = g->opts().name + " failed: a C++ exception escaped its pump";
+    std::size_t kept = 0;
+    for (const auto &[i, pid] : live) {
+      se::async_scheduler &s = group_of(i);
+      const std::optional<se::process_info> info = s.get_process_info(pid);
+      if (info && !se::is_finished(info->status)) {
+        live[kept++] = {i, pid};
+        continue;
+      }
+      std::string why;
+      if (!info)
+        why = "vanished";
+      else if (info->status != se::process_status::terminated)
+        why = std::string(se::to_string(info->status)) + ": " + info->exit_error.value_or("");
+      else if (const std::optional<se::value_t> r = s.get_result(pid);
+               !r || se::to_string(*r) != expect[i])
+        why = "returned " + (r ? se::to_string(*r) : std::string("nothing")) + ", expected " +
+              expect[i];
+      if (!why.empty() && out.error.empty())
+        out.error = "program " + istr(int64_t(i)) + " " + why;
+      s.reap(pid);
+    }
+    live.resize(kept);
+    if (!live.empty() && out.error.empty() && clk::now() > deadline)
+      out.error = "timeout: " + istr(int64_t(live.size())) + " programs still running";
+  }
+  if (m)
+    m->end();
+  for (const auto &[i, pid] : live) {
+    group_of(i).kill(pid);
+    group_of(i).reap(pid);
+  }
+  for (std::size_t k = 0; k < gs.size(); ++k)
+    out.steps += gs[k]->sched().get_stats().total_steps - steps0[k];
+}
+
 std::vector<scenario> make_scenarios() {
   std::vector<scenario> all;
   const std::vector<std::string> both_sched = {"sync", "async"};
@@ -4256,16 +4401,39 @@ std::vector<scenario> make_scenarios() {
     sc.executors = both_sched;
     sc.sizes = p.sizes;
     sc.smoke = p.smoke;
+    // driver=group (threaded Stage 1): the same program pumped through an exec_group at threads
+    // 0; base=frozen gives the group the frozen builtins in place of the world's own default
+    // environment (world_opts). Swept, not run by default: --size driver=spin,group.
     sc.sizes.push_back({"driver", {"spin"}});
-    sc.smoke.push_back({"driver", {"spin"}});
-    sc.async_only = {"driver"};
+    sc.smoke.push_back({"driver", {"spin", "group"}});
+    sc.sizes.push_back({"base", {"own"}});
+    sc.smoke.push_back({"base", {"own", "frozen"}});
+    sc.async_only = {"driver", "base"};
     sc.want_heap = true;
+    sc.accept = [](const std::string &exec, const point_ctx &pc) {
+      const bool group = pc.s("driver", "spin") == "group";
+      const std::string base = pc.s("base", "own"), locks = pc.s("locks", "none");
+      std::string why;
+      if (base != "own" && base != "frozen")
+        why = "base=" + base + " is not own or frozen";
+      else if (!group && base != "own")
+        why = "base=" + base + " is driver=group's only";
+      else if (group && (pc.s("policy", "rr") != "rr" || (locks != "none" && locks != "private")))
+        why = "driver=group runs at policy=rr, with locks=none or private";
+      if (why.empty())
+        return true;
+      std::printf("  %-28s %-9s %-34s skipped: %s\n", pc.sc.name.c_str(), exec.c_str(),
+                  params_text(pc.params).c_str(), why.c_str());
+      return false;
+    };
     add_policy_and_locks(sc);
     const eval_prog *pp = &p;
     sc.run = [pp](point_ctx &pc) {
       const se::value_t ast = se::parse(pp->src(pc));
       const std::string expect = pp->expect(pc);
-      const world_opts wo = world_opts::of(pc);
+      world_opts wo = world_opts::of(pc);
+      wo.group = pc.s("driver", "spin") == "group";
+      wo.base = pc.s("base", "own");
       auto app = make_app();
       pc.reps([&](meter &m, rep_out &o) {
         world w(pc.executor, app.get(), wo);
@@ -6104,6 +6272,259 @@ std::vector<scenario> make_scenarios() {
               .i("queries_posted", ctl.queries_posted.load())
               .i("queries_run", ctl.queries_run.load());
         }
+      });
+    };
+    all.push_back(std::move(sc));
+  }
+
+  // mt.groups: G groups on the app's exec_pool, fork-join (td 6.3, threaded Stage 1).
+  {
+    scenario sc;
+    sc.name = "mt.groups";
+    sc.what = "G exec_groups on the app's exec_pool with t - 1 workers (t pumping threads, the "
+              "caller one of them), each running fib 18, 2000 caught raises or 2000 closure cycles "
+              "`runs` times, one run at a time, pumped by pump_all rounds until every group's last "
+              "run ends: extra.speedup over one group alone and extra.of_ceiling, that over "
+              "mt.independent's speedup at t, both measured in the same rep with the pool's CPU "
+              "placement (Stage 1's gate: at least 0.9 at t=8 for fib), extra.pumps, "
+              "extra.helper_wakes and extra.effective_threads (td 6.3; the sanitizer jobs)";
+    sc.executors = {"async"};
+    sc.sizes = {{"t", {"1", "2", "4", "8", "16"}},
+                {"groups", {"8", "16"}},
+                {"prog", {"fib", "exceptions", "cycle"}},
+                {"runs", {"5"}}};
+    sc.smoke = {{"t", {"1", "2"}},
+                {"groups", {"2"}},
+                {"prog", {"fib", "exceptions", "cycle"}},
+                {"runs", {"1"}}};
+    sc.spawns_threads = true;
+    sc.accept = [](const std::string &exec, const point_ctx &pc) {
+      const std::string prog = pc.s("prog");
+      if (prog == "fib" || prog == "exceptions" || prog == "cycle")
+        return true;
+      std::printf("  %-28s %-9s %-34s skipped: prog=%s is not fib, exceptions or cycle\n",
+                  pc.sc.name.c_str(), exec.c_str(), params_text(pc.params).c_str(), prog.c_str());
+      return false;
+    };
+    sc.run = [](point_ctx &pc) {
+      const int64_t nt = std::max<int64_t>(1, pc.i("t")), ng = std::max<int64_t>(1, pc.i("groups"));
+      const int64_t runs = std::max<int64_t>(1, pc.i("runs"));
+      const mt_prog p = mt_program(pc.s("prog"), pc.cfg.smoke);
+      const double per_group = double(runs * p.iters);
+      const std::vector<se::value_t> asts{se::parse(p.src)}; // a group's execute copies it
+      const std::vector<std::string> expect{p.expect};
+      auto app = make_app();
+      pool_point pp(*app, static_cast<unsigned>(nt - 1), pc);
+      const group_set groups(*app, ng);
+      const std::vector<se::exec_group *> first(groups.gs.begin(), groups.gs.begin() + 1);
+      const ind_placement place{pp.caller_cpu};
+      pc.reps([&](meter &m, rep_out &o) {
+        m.widen = false; // the workers keep their CPUs (Linux)
+        // The ceiling, from this rep: mt.independent's ast=private speedup at t, its threads
+        // placed as the pool's.
+        std::vector<ind_worker> iw;
+        const int64_t ind_one = run_independent(1, p, runs, nullptr, iw, nullptr, &place);
+        const int64_t ind_wall = run_independent(nt, p, runs, nullptr, iw, nullptr, &place);
+        for (const ind_worker &w : iw)
+          if (!w.error.empty())
+            o.fail("mt.independent: " + w.error);
+        const double ceiling = ind_wall > 0 ? double(nt) * double(ind_one) / double(ind_wall) : 0.0;
+        // One group alone (the caller pumps it), the reference; then all of them, measured.
+        groups_out ref, out;
+        const int64_t one =
+            run_groups(pp.pool, first, asts, expect, runs, pc.cfg.timeout, nullptr, ref);
+        if (!ref.error.empty())
+          o.fail("one group: " + ref.error);
+        const cvc::pool_stats s0 = pp.pool.stats();
+        run_groups(pp.pool, groups.gs, asts, expect, runs, pc.cfg.timeout, &m, out);
+        const cvc::pool_stats s1 = pp.pool.stats();
+        if (!out.error.empty())
+          o.fail(out.error);
+        o.iterations = ng * runs * p.iters;
+        o.programs = ng * runs;
+        o.steps_total = out.steps;
+        const double wall = double(m.wall());
+        const double speedup = wall > 0 ? double(ng) * double(one) / wall : 0.0;
+        o.extra.d("speedup", speedup)
+            .d("ceiling_speedup", ceiling)
+            .d("of_ceiling", ceiling > 0 ? speedup / ceiling : 0.0)
+            .i("pumps", int64_t(s1.pumps - s0.pumps))
+            .i("helper_wakes", int64_t(s1.helper_wakes - s0.helper_wakes))
+            .i("worker_pumps", int64_t(s1.worker_pumps - s0.worker_pumps))
+            .i("skipped", int64_t(s1.skipped - s0.skipped))
+            .i("effective_threads", s1.effective_threads)
+            .i("rounds", int64_t(out.rounds))
+            .d("single_group_ns_per_iter", double(one) / per_group)
+            .d("independent_ns_per_iter", double(ind_one) / per_group)
+            .i("caller_cpu", pp.caller_cpu);
+      });
+    };
+    all.push_back(std::move(sc));
+  }
+
+  // mt.groups.flood: tiny programs through reused and through fresh groups (td 6.3).
+  {
+    scenario sc;
+    sc.name = "mt.groups.flood";
+    sc.what = "n tiny programs (flood.small's) on the app's exec_pool with t - 1 workers: "
+              "mode=reuse submits them all at once to t groups kept for the point (ExecPool's "
+              "reused Execs), mode=fresh gives each program a group of its own, built and "
+              "destroyed inside the region, t at a time; programs_per_s, extra.group_setup_ns and "
+              "extra.group_teardown_ns (td 6.3)";
+    sc.executors = {"async"};
+    sc.sizes = {{"t", {"1", "4"}}, {"mode", {"reuse", "fresh"}}, {"n", {"2000"}}};
+    sc.smoke = {{"t", {"1", "2"}}, {"mode", {"reuse", "fresh"}}, {"n", {"20"}}};
+    sc.spawns_threads = true;
+    sc.accept = [](const std::string &exec, const point_ctx &pc) {
+      const std::string mode = pc.s("mode");
+      if (mode == "reuse" || mode == "fresh")
+        return true;
+      std::printf("  %-28s %-9s %-34s skipped: mode=%s is not reuse or fresh\n", pc.sc.name.c_str(),
+                  exec.c_str(), params_text(pc.params).c_str(), mode.c_str());
+      return false;
+    };
+    sc.run = [tiny_flood](point_ctx &pc) {
+      const int64_t nt = std::max<int64_t>(1, pc.i("t")), n = std::max<int64_t>(1, pc.i("n"));
+      const bool fresh = pc.s("mode") == "fresh";
+      std::vector<std::string> src, expect;
+      tiny_flood(n, src, expect);
+      auto app = make_app();
+      pool_point pp(*app, static_cast<unsigned>(nt - 1), pc);
+      std::optional<group_set> kept; // mode=reuse: t groups for the point
+      if (!fresh)
+        kept.emplace(*app, nt);
+      pc.reps([&](meter &m, rep_out &o) {
+        m.widen = false;
+        groups_out out;
+        int64_t setup_ns = 0, teardown_ns = 0, built = 0;
+        const cvc::pool_stats s0 = pp.pool.stats();
+        if (kept) {
+          flood_groups(pp.pool, kept->gs, src, expect, 0, src.size(), pc.cfg.timeout, &m, out);
+          setup_ns = kept->setup_ns;
+          built = nt;
+        } else {
+          m.begin();
+          for (std::size_t b = 0; b < src.size() && out.error.empty(); b += std::size_t(nt)) {
+            const std::size_t e = std::min(src.size(), b + std::size_t(nt));
+            group_set batch(*app, int64_t(e - b));
+            setup_ns += batch.setup_ns;
+            built += int64_t(e - b);
+            flood_groups(pp.pool, batch.gs, src, expect, b, e, pc.cfg.timeout, nullptr, out);
+            const int64_t t0 = now_ns();
+            batch.owned.clear();
+            teardown_ns += now_ns() - t0;
+          }
+          m.end();
+        }
+        const cvc::pool_stats s1 = pp.pool.stats();
+        if (!out.error.empty())
+          o.fail(out.error);
+        o.programs = n;
+        o.steps_total = out.steps;
+        o.extra.d("group_setup_ns", built > 0 ? double(setup_ns) / double(built) : 0.0)
+            .i("groups_built", built)
+            .i("pumps", int64_t(s1.pumps - s0.pumps))
+            .i("helper_wakes", int64_t(s1.helper_wakes - s0.helper_wakes))
+            .i("effective_threads", s1.effective_threads)
+            .i("rounds", int64_t(out.rounds));
+        if (fresh)
+          o.extra.d("group_teardown_ns", built > 0 ? double(teardown_ns) / double(built) : 0.0);
+      });
+    };
+    all.push_back(std::move(sc));
+  }
+
+  // mt.state_tree: state-get and state-set loops from G groups (td 6.3).
+  {
+    scenario sc;
+    sc.name = "mt.state_tree";
+    sc.what = "G exec_groups on the app's exec_pool with G - 1 workers, each running n state-get "
+              "or state-set calls (op) of a node `depth` levels down, on a subtree of its own or "
+              "one they share, chrooted (each group at bench.doc.g<k>, or all at bench.doc) or not "
+              "(native.state_get's chroot sweep): extra.ns_per_op (the region over every group's "
+              "calls) and extra.group_ns_per_op (the region over one group's), against G (td 6.3)";
+    sc.executors = {"async"};
+    sc.sizes = {{"groups", {"1", "2", "4", "8"}},
+                {"op", {"get", "set"}},
+                {"subtree", {"disjoint", "shared"}},
+                {"chroot", {"0", "1"}},
+                {"depth", {"1", "4"}},
+                {"n", {"20000"}}};
+    sc.smoke = {{"groups", {"1", "2"}}, {"op", {"get", "set"}}, {"subtree", {"disjoint", "shared"}},
+                {"chroot", {"0", "1"}}, {"depth", {"1"}},       {"n", {"300"}}};
+    sc.spawns_threads = true;
+    sc.accept = [](const std::string &exec, const point_ctx &pc) {
+      const std::string op = pc.s("op"), subtree = pc.s("subtree");
+      if ((op == "get" || op == "set") && (subtree == "disjoint" || subtree == "shared"))
+        return true;
+      std::printf("  %-28s %-9s %-34s skipped: op is get or set, subtree disjoint or shared\n",
+                  pc.sc.name.c_str(), exec.c_str(), params_text(pc.params).c_str());
+      return false;
+    };
+    sc.run = [](point_ctx &pc) {
+      const int64_t ng = std::max<int64_t>(1, pc.i("groups")), n = std::max<int64_t>(1, pc.i("n"));
+      const int64_t depth = std::max<int64_t>(1, pc.i("depth", 1));
+      const bool set = pc.s("op") == "set", disjoint = pc.s("subtree") == "disjoint";
+      const bool chroot = pc.i("chroot", 0) != 0;
+      auto app = make_app();
+      pool_point pp(*app, static_cast<unsigned>(ng - 1), pc);
+      cvc::state &root = cvc::state::instance(*app);
+      // Group k's chroot, and its node's path under it: `depth` levels from bench, or from g<k>
+      // for a disjoint group that is not chrooted.
+      const auto prefix = [&](int64_t k) -> std::string {
+        return !chroot ? "" : disjoint ? "bench.doc.g" + istr(k) : "bench.doc";
+      };
+      const auto path = [&](int64_t k) {
+        std::string s = disjoint && !chroot ? "g" + istr(k) : "bench";
+        for (int64_t d = 1; d < depth; ++d)
+          s += ".d" + istr(d);
+        return s;
+      };
+      std::vector<se::value_t> asts;
+      for (int64_t k = 0; k < ng; ++k) {
+        root(chroot ? prefix(k) + "." + path(k) : path(k)).value("7");
+        const std::string call =
+            set ? "(state-set \"" + path(k) + "\" i)" : "(state-get \"" + path(k) + "\")";
+        asts.push_back(se::parse(loop_src(n, "", call, "i")));
+      }
+      const std::vector<std::string> expect{istr(n)};
+      // Each group's intrinsics over the frozen builtins, in a context of its own.
+      std::deque<se::intrinsics_context> ctx;
+      group_set groups(*app, ng, [&](int64_t k) {
+        se::intrinsics_context &c = ctx.emplace_back();
+        c.root = &root;
+        c.proc = se::make_process();
+        c.proc->pid = 0;
+        c.pid = 0;
+        c.uid = "bench";
+        c.cluster_id = "local";
+        c.node_id = "local";
+        if (chroot)
+          se::apply_chroot(c, root, prefix(k));
+        se::environment_ptr env = se::environment::extend(se::frozen_builtins());
+        se::register_intrinsics(env, &c);
+        return env;
+      });
+      for (int64_t k = 0; k < ng; ++k)
+        ctx[std::size_t(k)].sched = &groups.gs[std::size_t(k)]->sched();
+      pc.reps([&](meter &m, rep_out &o) {
+        m.widen = false;
+        groups_out out;
+        const cvc::pool_stats s0 = pp.pool.stats();
+        run_groups(pp.pool, groups.gs, asts, expect, 1, pc.cfg.timeout, &m, out);
+        const cvc::pool_stats s1 = pp.pool.stats();
+        if (!out.error.empty())
+          o.fail(out.error);
+        o.iterations = ng * n;
+        o.programs = ng;
+        o.steps_total = out.steps;
+        const double wall = double(m.wall());
+        o.extra.d("ns_per_op", wall / double(ng * n))
+            .d("group_ns_per_op", wall / double(n))
+            .i("pumps", int64_t(s1.pumps - s0.pumps))
+            .i("helper_wakes", int64_t(s1.helper_wakes - s0.helper_wakes))
+            .i("effective_threads", s1.effective_threads)
+            .i("rounds", int64_t(out.rounds));
       });
     };
     all.push_back(std::move(sc));

@@ -110,6 +110,18 @@ class KeyOf(unittest.TestCase):
         self.assertIn("chroot=1", seb.key_of(rec("native.state_get", {"n": 1, "chroot": 1}))[2])
         self.assertEqual(seb.param(base, "writes"), "none")
 
+    def test_stage1_base_key_matches_records_without_it(self):
+        # Threaded Stage 1 gave sched.single.*'s async points a base key (own by default) beside
+        # their driver key: a base binary's point (no base) matches the candidate's at base=own.
+        old = rec("sched.single.fib", {"n": 20, "driver": "spin", "policy": "rr",
+                                       "locks": "none"})
+        new = rec("sched.single.fib", dict(old["params"], base="own"))
+        self.assertEqual(seb.key_of(old), seb.key_of(new))
+        self.assertEqual(seb.param(old, "base"), "own")
+        frozen = rec("sched.single.fib", dict(old["params"], driver="group", base="frozen"))
+        self.assertIn("base=frozen", seb.key_of(frozen)[2])
+        self.assertIn("driver=group", seb.key_of(frozen)[2])
+
 
 class ParsePair(unittest.TestCase):
     def test_parses(self):
@@ -161,6 +173,27 @@ class Compare(unittest.TestCase):
                reps("native.state_get", {"n": 100, "depth": 4, "chroot": 1}, [130, 131, 129]))
         res = quiet(seb.compare, run, run, ["wall_ns"], 3.0, pair=("chroot", "0", "1"))
         self.assertEqual(res, {"worse": 1, "changed": 1, "inconclusive": 0, "failed": 0})
+
+    def test_pair_driver_and_base_in_one_run(self):
+        # Stage 1's paired points: driver=group against today's driver=spin at base=own, and the
+        # frozen base against its own on driver=group. A group point with no spin twin
+        # (base=frozen) is only in the candidate, which fails nothing.
+        p = {"n": 100, "policy": "rr", "locks": "none"}
+        run = (reps("sched.single.fib", dict(p, driver="spin", base="own"), [100, 101, 99]) +
+               reps("sched.single.fib", dict(p, driver="group", base="own"), [101, 102, 100]) +
+               reps("sched.single.fib", dict(p, driver="group", base="frozen"), [110, 111, 109]))
+        res = quiet(seb.compare, run, run, ["wall_ns"], 3.0, pair=("driver", "spin", "group"))
+        self.assertEqual(res, {"worse": 0, "changed": 0, "inconclusive": 0, "failed": 0})
+        groups = [r for r in run if r["params"]["driver"] == "group"]
+        res = quiet(seb.compare, groups, groups, ["wall_ns"], 3.0, pair=("base", "own", "frozen"))
+        self.assertEqual(res, {"worse": 1, "changed": 1, "inconclusive": 0, "failed": 0})
+        # A base binary's spin points carry no base, and still pair with the group's base=own.
+        old = [dict(r, params={k: v for k, v in r["params"].items() if k != "base"})
+               for r in run if r["params"]["driver"] == "spin"]
+        res = quiet(seb.compare, old + groups, old + groups, ["wall_ns"], 3.0,
+                    pair=("driver", "spin", "group"))
+        self.assertEqual(res["failed"], 0)
+        self.assertEqual(res["changed"], 0)
 
     def test_of_ceiling_is_better_higher(self):
         def point(value):
@@ -291,6 +324,26 @@ class Gate(unittest.TestCase):
         code, out = self.gate(recs, *gate)
         self.assertEqual(code, 1, out)
         self.assertIn("no extra.of_ceiling", out)
+
+
+    def test_groups_gate_takes_every_groups_size(self):
+        # Stage 1's gate: mt.groups fib at t=8 at least 0.9 of mt.independent's speedup, which
+        # holds for every groups size the run has (8 and 16).
+        def point(groups, prog, values):
+            out = []
+            for i, v in enumerate(values):
+                r = rec("mt.groups", {"t": 8, "groups": groups, "prog": prog, "runs": 5}, rep=i,
+                        wall_ns=1)
+                r["extra"] = {"of_ceiling": v, "helper_wakes": 7, "effective_threads": 7}
+                out.append(r)
+            return out
+        gate = ["--scenario", "mt.groups", "--where", "t=8", "--where", "prog=fib", "--metric",
+                "extra.of_ceiling", "--min", "0.9", "--max-noise", "10"]
+        eight = point(8, "fib", [0.95, 0.94, 0.96])
+        code, out = self.gate(eight + point(16, "fib", [0.93, 0.92, 0.93]) +
+                              point(8, "cycle", [0.5, 0.5, 0.5]), *gate)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.gate(eight + point(16, "fib", [0.85, 0.85, 0.85]), *gate)[0], 1)
 
 
 class MtPycvcThreads(unittest.TestCase):
