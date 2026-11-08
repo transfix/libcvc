@@ -992,6 +992,10 @@ public:
     f_->calls.push_back(m ? "mute" : "unmute");
     f_->muted = m;
   }
+  void set_frame_box(int w, int h) override {
+    std::lock_guard<std::mutex> l(f_->mu);
+    f_->calls.push_back("box:" + std::to_string(w) + "x" + std::to_string(h));
+  }
   media::PlayerState state() const override {
     std::lock_guard<std::mutex> l(f_->mu);
     return f_->state;
@@ -1228,6 +1232,111 @@ TEST(MediaPlayer, TheControlsAndTheStateKeysDriveThePlayer) {
   rt.render();
   EXPECT_EQ(static_cast<std::size_t>(std::count(f.calls.begin(), f.calls.end(), "pause")),
             pauses + 1);
+}
+
+// §5.13 fullscreen: true on a video: its Full screen button shows it alone in the backend's view,
+// the window covering the screen; it keeps its player, decoding for the view's box, and its
+// <bind>.fullscreen says so. Exit (or Esc, or the window leaving fullscreen) comes back.
+struct FullscreenBackend : ImageBackend {
+  bool os = false;      // the window covers the screen
+  bool exit = false;    // the view reports Esc this frame
+  int views = 0;        // frames drawn in the view
+  bool in_view = false; // drawing in it now
+  std::vector<std::string> view_buttons;
+  Capabilities capabilities() const override {
+    Capabilities c = ImageBackend::capabilities();
+    c.fullscreen = c.fullscreen_view = true;
+    return c;
+  }
+  bool set_fullscreen(bool on) override {
+    os = on;
+    return true;
+  }
+  bool is_fullscreen() const override { return os; }
+  FullscreenView begin_fullscreen_view() override {
+    FullscreenView v;
+    v.shown = true;
+    v.w = 800.0f;
+    v.h = 600.0f;
+    v.controls_h = 24.0f;
+    v.exit = exit;
+    exit = false;
+    ++views;
+    in_view = true;
+    return v;
+  }
+  void end_fullscreen_view() override { in_view = false; }
+  bool button(const char *l) override {
+    if (in_view)
+      view_buttons.push_back(l);
+    return ImageBackend::button(l);
+  }
+};
+
+TEST(MediaPlayer, AFullscreenVideoIsShownAloneAndComesBack) {
+  FakeFactory ff;
+  media::set_play_policy(media::PlayPolicy::Always);
+  cvc::app app;
+  LoadResult lr = load_string(std::string(kPlayerDoc) + "        fullscreen: true\n" +
+                              "      - text: the rest of the window\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  FullscreenBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  ASSERT_EQ(ff.made.size(), 1u);
+  FakePlayback &f = *ff.made[0];
+  {
+    std::lock_guard<std::mutex> l(f.mu);
+    f.state = media::PlayerState::Ready;
+  }
+  rt.render();
+  EXPECT_NE(std::find(b.buttons.begin(), b.buttons.end(), "Full screen"), b.buttons.end());
+  EXPECT_EQ(read_state(app, "p.clip.fullscreen"), "0");
+
+  b.click = "Full screen";
+  rt.render();
+  EXPECT_TRUE(b.os) << "the window covers the screen";
+  rt.render();
+  EXPECT_GE(b.views, 1);
+  EXPECT_EQ(ff.made.size(), 1u) << "the same player, not a new one";
+  EXPECT_TRUE(called(f, "box:800x576")) << "decoding for the view less a row of controls";
+  EXPECT_EQ(std::find(b.texts.begin(), b.texts.end(), "the rest of the window"), b.texts.end())
+      << "the view is the video alone";
+  EXPECT_NE(std::find(b.view_buttons.begin(), b.view_buttons.end(), "Exit full screen"),
+            b.view_buttons.end());
+  EXPECT_EQ(read_state(app, "p.clip.fullscreen"), "1");
+
+  b.click = "Exit full screen";
+  rt.render();
+  rt.render();
+  EXPECT_FALSE(b.os) << "the window is put back";
+  EXPECT_NE(std::find(b.texts.begin(), b.texts.end(), "the rest of the window"), b.texts.end());
+  EXPECT_TRUE(called(f, "box:160x90")) << "back to its own box";
+  EXPECT_EQ(read_state(app, "p.clip.fullscreen"), "0");
+
+  // The document opens it with <bind>.fullscreen; Esc leaves.
+  cvc::state::instance(app)("p.clip.fullscreen").value(std::string("1"));
+  rt.render();
+  rt.render();
+  EXPECT_TRUE(b.os);
+  EXPECT_EQ(read_state(app, "p.clip.fullscreen"), "1");
+  b.exit = true;
+  rt.render();
+  rt.render();
+  EXPECT_FALSE(b.os);
+  EXPECT_EQ(read_state(app, "p.clip.fullscreen"), "0");
+
+  // A browser page's Esc ends the window's fullscreen without a key reaching the document.
+  b.click = "Full screen";
+  rt.render();
+  rt.render();
+  ASSERT_TRUE(b.os);
+  b.os = false;
+  rt.render();
+  rt.render();
+  EXPECT_NE(std::find(b.texts.begin(), b.texts.end(), "the rest of the window"), b.texts.end());
 }
 
 TEST(MediaPlayer, AutoplayAndAFailure) {

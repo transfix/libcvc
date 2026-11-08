@@ -89,6 +89,21 @@ public:
   // channel below it) while hovered with `highlight`.
   void begin_item_group(const char *id, const cvc::ariadne::ItemGroupOptions &opts) override;
   void end_item_group() override;
+  // (clipboard-set TEXT): cvc::gl::clipboard::set (SDL's, the platform's, the browser's
+  // navigator.clipboard, which wants the click's user activation: an action a frame later still
+  // has it).
+  bool set_clipboard(const std::string &text) override;
+  // The window's fullscreen, as the host does it (AriRuntime: the VTK / SDL window natively,
+  // requestFullscreen on the canvas in a browser): `set(on)` asks and says whether it could, `is()`
+  // says whether the window covers the screen now. Until one is installed, (fullscreen ON)
+  // answers #f.
+  void set_fullscreen_handler(std::function<bool(bool)> set, std::function<bool()> is);
+  bool set_fullscreen(bool on) override;
+  bool is_fullscreen() const override;
+  // §5.13 the fullscreen view: a borderless black window over the whole viewport, its content in
+  // the document's px; Esc leaves.
+  cvc::ariadne::FullscreenView begin_fullscreen_view() override;
+  void end_fullscreen_view() override;
 
   cvc::ariadne::BoolEdit menu_item_toggle(const char *label, bool current) override;
   cvc::ariadne::BoolEdit checkbox(const char *label, bool current) override;
@@ -292,6 +307,9 @@ private:
   std::vector<std::shared_ptr<ItemGroupFrame>> m_itemGroups;
   unsigned int m_groupHitId = 0;
   bool m_groupHit = false;
+  std::function<bool(bool)> m_setFullscreen; // set_fullscreen_handler
+  std::function<bool()> m_isFullscreen;
+  bool m_inFullscreenView = false; // between begin_ and end_fullscreen_view: an ImGui window open
 
   // Per-key in-progress InputText / InputInt text. Follows the value in state while no field is
   // active and holds the edit while one is — the string counterpart of cache_int/cache_float.

@@ -1503,6 +1503,63 @@ TEST(AriadneFtxui, ImageRampOnAMonochromeTerminal) {
   EXPECT_TRUE(t.shows("@")) << "white maps to the dense end of the ramp\n" << t.screen;
 }
 
+// §5.13 fullscreen: true on an image: Tab reaches the picture, Enter (or a click) shows it alone,
+// filling the terminal, and Esc (or a click on it) comes back.
+TEST(AriadneFtxui, AFullscreenPictureFillsTheTerminalUntilEsc) {
+  REQUIRE_FTXUI();
+  const std::vector<unsigned char> white(4 * 4 * 3, 255);
+  cvc::image img(4, 4, cvc::image::pixel_format::RGB, cvc::image::data_type::u8, white.data());
+  FtxuiBackend::Options o;
+  o.image_color = FtxuiBackend::Options::ImageColor::Mono;
+  Widget pic = image_widget("pic", "photo", 32.0);
+  pic.fullscreen_control = true;
+  Term t(group({pic, text("elsewhere")}), o);
+  t.be.set_image("photo", img);
+  t.draw();
+  EXPECT_TRUE(t.be.capabilities().fullscreen_view);
+  EXPECT_FALSE(t.be.capabilities().fullscreen) << "a terminal is not a window";
+  const std::string row(40, '@');
+  ASSERT_TRUE(t.shows("elsewhere")) << t.screen;
+  ASSERT_FALSE(t.shows(row)) << t.screen;
+
+  t.key("Tab");
+  t.key("Return");
+  t.draw();
+  EXPECT_TRUE(t.shows(row)) << "the picture fills the terminal\n" << t.screen;
+  EXPECT_FALSE(t.shows("elsewhere")) << "alone\n" << t.screen;
+  t.key("Escape");
+  t.draw();
+  EXPECT_TRUE(t.shows("elsewhere")) << t.screen;
+  EXPECT_FALSE(t.shows(row)) << t.screen;
+
+  ASSERT_TRUE(t.click("@@"));
+  EXPECT_TRUE(t.shows(row)) << "a click opens it too\n" << t.screen;
+  ASSERT_TRUE(t.click(row));
+  EXPECT_TRUE(t.shows("elsewhere")) << "and a click on it comes back\n" << t.screen;
+}
+
+// (clipboard-set TEXT) in a terminal is an OSC 52 escape, written after the drain that ran it;
+// (fullscreen ON) answers #f, a terminal having no window to make cover the screen.
+TEST(AriadneFtxui, ClipboardSetIsAnOsc52Escape) {
+  REQUIRE_FTXUI();
+  Widget copy = button("Copy link", "(state-set \"ok\" (if (clipboard-set \"https://tx.wtf/p/1\") "
+                                    "\"yes\" \"no\"))");
+  copy.visible_when = "(has? \"clipboard-set\")";
+  Widget fs = button("Full", "(state-set \"fs\" (if (fullscreen #t) \"yes\" \"no\"))");
+  Term t(group({copy, fs}));
+  ASSERT_TRUE(t.shows("[ Copy link ]")) << "(has? \"clipboard-set\") holds\n" << t.screen;
+  EXPECT_FALSE(t.rt.has("ui.fullscreen"));
+  EXPECT_TRUE(t.rt.has("fullscreen")) << "the verb is there, answering #f";
+  ASSERT_TRUE(t.click("[ Copy link ]"));
+  ASSERT_TRUE(t.click("[ Full ]"));
+  for (int i = 0; i < 50; ++i)
+    t.rt.drain();
+  EXPECT_EQ(val(t.app, "ok"), "yes");
+  EXPECT_EQ(val(t.app, "fs"), "no");
+  EXPECT_EQ(t.be.take_clipboard(), "\x1b]52;c;aHR0cHM6Ly90eC53dGYvcC8x\x07");
+  EXPECT_EQ(t.be.take_clipboard(), "") << "taken once";
+}
+
 TEST(AriadneFtxui, BackgroundImageFillsTheScreenUnderTheWidgets) {
   REQUIRE_FTXUI();
   const unsigned char px[] = {200, 20, 20, 20, 20, 200, 20, 200, 20, 200, 200, 20};

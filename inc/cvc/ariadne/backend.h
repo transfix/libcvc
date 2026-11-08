@@ -214,7 +214,20 @@ struct Capabilities {
   bool bitmap = false;     // shows images in real pixels (a GL window, or a kitty / Sixel terminal)
   bool kitty = false;      // the terminal speaks the kitty graphics protocol
   bool sixel = false;      // the terminal draws DEC Sixel
-  bool item_groups = false; // a group can be one item (begin_item_group): ui.group_click
+  bool item_groups = false;     // a group can be one item (begin_item_group): ui.group_click
+  bool clipboard = false;       // set_clipboard reaches the system clipboard: (clipboard-set TEXT)
+  bool fullscreen = false;      // set_fullscreen makes the window cover the screen: ui.fullscreen
+  bool fullscreen_view = false; // begin_fullscreen_view shows a picture alone: image.fullscreen
+};
+
+// The fullscreen view's area (Backend::begin_fullscreen_view): `shown` false where the backend has
+// none. `w` x `h` is its size in the document's px, `controls_h` the height a row of controls takes
+// there, and `exit` says the user asked to leave it (Esc).
+struct FullscreenView {
+  bool shown = false;
+  bool exit = false;
+  float w = 0.0f, h = 0.0f;
+  float controls_h = 0.0f;
 };
 
 // A spinner's glyph at `seconds` on a frame clock: ten braille dots a second, the cycle a terminal
@@ -599,6 +612,30 @@ public:
     (void)rgb;
     return {};
   }
+
+  // ---- host services: the verbs the core binds from them (§10.7) ----------
+  // Put `text` on the system clipboard, for (clipboard-set TEXT): true when it went there, or was
+  // sent where nothing reports back (a terminal's OSC 52, a browser's asynchronous write). The core
+  // binds the verb only where Capabilities::clipboard. Default: no clipboard.
+  virtual bool set_clipboard(const std::string &text) {
+    (void)text;
+    return false;
+  }
+  // Make the window cover the whole screen, or not, for (fullscreen ON): true when the host did or
+  // asked (a browser grants it only within a user's gesture). Only called where
+  // Capabilities::fullscreen. is_fullscreen: whether it does now (a browser's Esc ends it without
+  // the document hearing a key). Defaults: no such window.
+  virtual bool set_fullscreen(bool on) {
+    (void)on;
+    return false;
+  }
+  virtual bool is_fullscreen() const { return false; }
+  // §5.13 the fullscreen view: one picture or player shown alone over everything, with no chrome
+  // (`fullscreen: true` on an image: or video:). The core draws it between begin_fullscreen_view
+  // and end_fullscreen_view in place of the document's tree, sized to the view. Default: none
+  // (`shown` false), and the core closes it.
+  virtual FullscreenView begin_fullscreen_view() { return {}; }
+  virtual void end_fullscreen_view() {}
 
   // ---- custom widgets: the novel-primitive escape (§16.1b) ----------------
   // Draw a registered custom widget the compositional path can't express (a colour

@@ -163,7 +163,8 @@ void quiet_ffmpeg() {
 
 class FfmpegPlayer : public am::Player {
 public:
-  FfmpegPlayer(const am::PlayerSource &src, const PlayerOptions &opt) : src_(src), opt_(opt) {
+  FfmpegPlayer(const am::PlayerSource &src, const PlayerOptions &opt)
+      : src_(src), box_w_(src.frame_w), box_h_(src.frame_h), opt_(opt) {
     quiet_ffmpeg();
     sh_.muted = src.muted;
     worker_ = std::thread([this] { run(); });
@@ -223,6 +224,11 @@ public:
   std::string error() const override {
     std::lock_guard<std::mutex> lock(sh_.mu);
     return sh_.error;
+  }
+  // The decoder thread scales the frames it makes from now on to the new box.
+  void set_frame_box(int w, int h) override {
+    box_w_ = w;
+    box_h_ = h;
   }
   bool frame(cvc::image &out, long &gen) override {
     service();
@@ -395,8 +401,9 @@ private:
   // A decoded video frame as RGBA, scaled to fit the widget's box (never up).
   cvc::image to_rgba(const AVFrame *f) {
     int w = f->width, h = f->height;
-    if (src_.frame_w > 0 && src_.frame_h > 0) {
-      const double k = std::min({1.0, double(src_.frame_w) / w, double(src_.frame_h) / h});
+    const int bw = box_w_, bh = box_h_;
+    if (bw > 0 && bh > 0) {
+      const double k = std::min({1.0, double(bw) / w, double(bh) / h});
       w = std::max(2, static_cast<int>(w * k)) & ~1;
       h = std::max(2, static_cast<int>(h * k)) & ~1;
     }
@@ -617,6 +624,7 @@ private:
   }
 
   am::PlayerSource src_;
+  std::atomic<int> box_w_, box_h_; // the picture's box (set_frame_box), read by the decoder
   PlayerOptions opt_;
   mutable Shared sh_;
   std::thread worker_;

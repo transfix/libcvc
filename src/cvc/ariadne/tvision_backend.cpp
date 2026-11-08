@@ -28,6 +28,7 @@
 
 #define Uses_TApplication
 #define Uses_TBackground
+#define Uses_TClipboard
 #define Uses_TDeskTop
 #define Uses_TDrawBuffer
 #define Uses_TEvent
@@ -68,6 +69,7 @@ Capabilities TvisionBackend::capabilities() const {
   Capabilities c = FtxuiBackend::capabilities();
   c.windows = available(); // native movable / resizable / overlapping windows
   c.menubar = available();
+  c.clipboard = available(); // TClipboard
   return c;
 }
 
@@ -638,6 +640,11 @@ TvisionBackend::run_desktop(Runtime &rt, const RunOptions &opts, const std::func
 
 bool TvisionBackend::available() { return true; }
 
+bool TvisionBackend::set_clipboard(const std::string &text) {
+  TClipboard::setText(TStringView(text.data(), text.size())); // it reports nothing back
+  return true;
+}
+
 #else // !CVC_ARIADNE_TVISION
 
 FtxuiBackend::RunExit TvisionBackend::run_desktop(Runtime &, const RunOptions &,
@@ -648,6 +655,8 @@ FtxuiBackend::RunExit TvisionBackend::run_desktop(Runtime &, const RunOptions &,
 }
 
 bool TvisionBackend::available() { return false; }
+
+bool TvisionBackend::set_clipboard(const std::string &) { return false; }
 
 #endif
 
