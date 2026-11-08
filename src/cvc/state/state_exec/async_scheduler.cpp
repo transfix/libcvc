@@ -982,6 +982,7 @@ void async_scheduler::drain_ingress() {
 // ---------------------------------------------------------------------------
 
 void async_scheduler::track_async_call(std::shared_ptr<async_call> call) {
+  call->owner_serial_ = serial(); // what the foreign-future check compares (S1-Q2)
   async_calls_.push_back(std::move(call));
 }
 

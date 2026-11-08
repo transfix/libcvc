@@ -11,8 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/state/state.h>
-#include <cvc/state/state_exec/async_host.h>      // async calls' futures, for await/await-all
-#include <cvc/state/state_exec/async_scheduler.h> // a future's owner, against ctx->sched
+#include <cvc/state/state_exec/async_host.h> // async calls' futures, for await/await-all
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/data_job.h>
 #include <cvc/state/state_exec/detail/lock_home.h>
@@ -993,9 +992,11 @@ void park_await(intrinsics_context *ctx, int pid, const std::string &channel,
 // S1-Q2 (td 4.9): a threaded future is finished by the scheduler its completion is posted to, so
 // awaiting it from another one raises, before anything reads, parks on or waits for the call. An
 // inline future (no owner) was settled before it returned: a plain value any scheduler may read.
+// Owners are compared by serial, not address: a host can keep a future after its scheduler is
+// gone, and a later scheduler can sit at the freed address (R1-mid C-m13).
 void check_future_owner(const intrinsics_context *ctx, const detail::awaitable &call) {
-  const async_scheduler *owner = call.owner();
-  if (owner && static_cast<const scheduler_base *>(owner) != ctx->sched)
+  const std::uint64_t owner = call.owner_serial();
+  if (owner != 0 && owner != ctx->sched->serial())
     throw dsl_error("RuntimeError", kForeignFutureError, "async");
 }
 

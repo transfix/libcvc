@@ -204,6 +204,9 @@ public:
   /// The scheduler its completion is posted to and finished on (a threaded async call's), or null:
   /// an inline call, settled before it returned, which any scheduler may read (S1-Q2).
   virtual const async_scheduler *owner() const noexcept { return nullptr; }
+  /// owner()'s scheduler_base::serial(), or 0 with no owner. It outlives the owner, and no later
+  /// scheduler at the owner's address has it, so the foreign-future check compares it (S1-Q2).
+  virtual std::uint64_t owner_serial() const noexcept { return 0; }
   /// Whether its outcome is known.
   virtual bool finished() const = 0;
   /// Block until it is finished or `seconds` pass (nullopt: no limit); whether it finished.
