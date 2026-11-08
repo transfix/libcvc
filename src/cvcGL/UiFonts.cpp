@@ -37,7 +37,8 @@ bool readable(const std::string &path) {
 
 // <the file holding cvcGL>/../share/libcvc/fonts: cvcGL's shared library (lib/ on POSIX, bin/ on
 // Windows) or the program that links it statically. A cvcpkg install unpacked anywhere has it, and
-// so does a build tree (<build>/bin and <build>/share). Empty where it can't be found.
+// so does a build tree (<build>/bin and <build>/share), or ../../share from a multi-config build's
+// <build>/bin/<Config>. Empty where it can't be found.
 std::string beside_module() {
   namespace fs = std::filesystem;
   fs::path module;
@@ -58,10 +59,14 @@ std::string beside_module() {
 #endif
   if (module.empty())
     return std::string();
-  std::error_code ec;
-  const fs::path dir =
-      fs::weakly_canonical(module.parent_path() / ".." / "share" / "libcvc" / "fonts", ec);
-  return !ec && fs::is_directory(dir, ec) ? dir.string() : std::string();
+  for (const fs::path up : {fs::path(".."), fs::path("..") / ".."}) {
+    std::error_code ec;
+    const fs::path dir =
+        fs::weakly_canonical(module.parent_path() / up / "share" / "libcvc" / "fonts", ec);
+    if (!ec && fs::is_directory(dir, ec))
+      return dir.string();
+  }
+  return std::string();
 }
 
 } // namespace
