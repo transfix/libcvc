@@ -78,11 +78,13 @@ struct NetAccess {
   std::shared_ptr<const std::atomic<bool>> live;
 };
 
-// Register the verbs against `app` (its background task pool and exec scheduler). Appends to the
-// process-global action-intrinsic providers, so call it once at setup, before load_*; tear down
-// with cvc::ariadne::clear_action_intrinsics() (or clear `access.live`) before `app` dies, since
-// the provider holds `app` by reference. A host that hands documents the network uses
-// enable_net (net_host.h), which builds the NetAccess from its flags.
+// Register the verbs: their kernels run on `app`'s background task pool, and each program calls
+// through its own context's async host (intrinsics_context::host). Appends two providers to the
+// process-global action-intrinsic providers (`any`: the requests, net-allowed? and net-auth-*;
+// `host_proxied`: open-url), so call it once at setup, before load_*; tear down with
+// cvc::ariadne::clear_action_intrinsics() (or clear `access.live`) before `app` dies. A host that
+// hands documents the network uses enable_net (net_host.h), which builds the NetAccess from its
+// flags.
 void register_net_intrinsics(cvc::app &app, NetAccess access);
 // register_net_intrinsics(app, {}): unchecked, and no credentials.
 void register_net_intrinsics(cvc::app &app);
