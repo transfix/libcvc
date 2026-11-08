@@ -750,6 +750,62 @@ TEST(AsyncSchedulerTest, KillOwnerReapsProcessGroup) {
   EXPECT_EQ(sched.kill_owner("docA"), 0); // already reaped
 }
 
+// S1.4: kill_owner tries every kill. Each of the owner's processes has a call whose cancel hook
+// throws, so each kill throws (and still kills, kill_process): every process is killed, the first
+// throw is the one rethrown, and the other owner's process is untouched. It used to stop at the
+// first throw, leaving the rest running.
+TEST(AsyncSchedulerTest, KillOwnerKillsTheRestAfterAThrowingKill) {
+  std::vector<int> hooked; // the pids whose cancel hook ran, in order (outlives the hooks)
+  async_scheduler sched;
+  execute_options a;
+  a.owner = "docA";
+  std::vector<int> pids;
+  for (int i = 0; i < 4; ++i) {
+    const int pid = sched.execute(std::string("(begin (set i 0) (while #t (set i (+ i 1))))"), a);
+    auto call = std::make_shared<async_call>("probe", pid);
+    call->on_cancel([&hooked, pid] {
+      hooked.push_back(pid);
+      throw std::runtime_error("cancel " + std::to_string(pid));
+    });
+    sched.track_async_call(call);
+    pids.push_back(pid);
+  }
+  execute_options b;
+  b.owner = "docB";
+  const int other = sched.execute(std::string("(begin 1 2 3 4 5)"), b);
+  sched.sync_step();
+  std::string thrown;
+  try {
+    sched.kill_owner("docA");
+  } catch (const std::runtime_error &e) {
+    thrown = e.what();
+  }
+  ASSERT_EQ(hooked.size(), pids.size());
+  EXPECT_EQ(thrown, "cancel " + std::to_string(hooked.front()));
+  for (const int pid : pids) {
+    EXPECT_EQ(sched.get_process_info(pid)->status, process_status::killed) << pid;
+    EXPECT_EQ(sched.get_exit_error(pid), "owner_reaped") << pid;
+  }
+  EXPECT_FALSE(is_finished(sched.get_process_info(other)->status));
+  EXPECT_EQ(sched.kill_owner("docA"), 0); // all killed: nothing left to kill, nothing thrown
+}
+
+// The pool kills a failed group's processes with its own reason (S1.6): kill(pid, reason) is
+// kill(pid) with that exit error. kill(pid) keeps killed_by_user.
+TEST(AsyncSchedulerTest, KillWithAReasonSetsTheExitError) {
+  async_scheduler sched;
+  const int failed = sched.execute(std::string("(begin 1 2 3 4 5)"));
+  const int plain = sched.execute(std::string("(begin 1 2 3 4 5)"));
+  sched.sync_step();
+  EXPECT_TRUE(sched.kill(failed, "internal error"));
+  EXPECT_TRUE(sched.kill(plain));
+  EXPECT_EQ(sched.get_process_info(failed)->status, process_status::killed);
+  EXPECT_EQ(sched.get_exit_error(failed), "internal error");
+  EXPECT_EQ(sched.get_exit_error(plain), "killed_by_user");
+  EXPECT_FALSE(sched.kill(failed, "internal error")); // finished
+  EXPECT_FALSE(sched.kill(999, "internal error"));    // unknown
+}
+
 TEST(AsyncSchedulerTest, PostMessageFromAnotherThreadWakesReceiver) {
   async_scheduler sched;
   int pid = sched.execute(std::string("(begin 1 2 3 4 5)"));

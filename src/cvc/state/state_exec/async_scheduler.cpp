@@ -1,5 +1,7 @@
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_call.h>
 #include <cvc/state/state_exec/async_scheduler.h>
@@ -8,8 +10,12 @@
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/scheduler.h>         // max_alloc_bytes_from_state
 #include <cvc/state/state_exec/state_value_codec.h> // snapshot / restore
+#include <cvc/state/state_exec/stdlib.h>            // random_stream_scope
 #include <exception>
 #include <iterator>
+#include <optional>
+#include <stdexcept>
+#include <thread>
 
 namespace cvc::state_exec {
 
@@ -22,27 +28,102 @@ async_scheduler::async_scheduler(scheduling_policy policy)
       procs_(policy != scheduling_policy::round_robin),
       wakeup_(std::make_shared<detail::wakeup>()) {}
 
-// Stage 1 interfaces: a stub, the one-argument constructor's scheduler. S1.3 extends `base`.
-async_scheduler::async_scheduler(scheduling_policy policy, environment_ptr)
-    : async_scheduler(policy) {}
+// A group's scheduler (S1.3): its global environment is its own scope over `base`, so what is bound
+// there (environment::set_existing binds in the outermost unfrozen scope) never reaches `base`,
+// which may be frozen and shared (the builtins).
+async_scheduler::async_scheduler(scheduling_policy policy, environment_ptr base)
+    : policy_(policy), evaluator_(environment::extend(std::move(base))),
+      procs_(policy != scheduling_policy::round_robin),
+      wakeup_(std::make_shared<detail::wakeup>()) {}
 
-// Stage 1 interfaces: stubs. S1.1 binds the registry and the stream on every entry, and S1.4 draws
-// pids from the source and takes the pump owner; until then they are stored and unused.
 void async_scheduler::set_cycle_registry(cycle_registry *r) { registry_ = r; }
 
 void async_scheduler::set_random_stream(random_stream *s) { random_ = s; }
 
 void async_scheduler::set_pid_source(std::shared_ptr<std::atomic<int>> source) {
+  if (source) {
+    // Above every pid issued here (process_table's insert rule): the own counter's, and every pid
+    // in the table, which a source set before may have issued.
+    int highest = pid_source_ ? 0 : next_pid_ - 1;
+    for (const auto &[pid, p] : procs_.all())
+      highest = std::max(highest, pid);
+    const int first = source->load(std::memory_order_relaxed);
+    if (first <= highest)
+      throw std::invalid_argument("set_pid_source: the source's next pid " + std::to_string(first) +
+                                  " is not above pid " + std::to_string(highest));
+  } else if (pid_source_) {
+    // Back to the own counter, above whatever the source issued.
+    next_pid_ = std::max(next_pid_, pid_source_->load(std::memory_order_relaxed));
+  }
   pid_source_ = std::move(source);
 }
 
-async_scheduler::pump_owner_scope::pump_owner_scope(async_scheduler &s) : s_(s), outer_() {}
+async_scheduler::pump_owner_scope::pump_owner_scope(async_scheduler &s) : s_(s), outer_() {
+  // "No owner, or me" (S1-Q4): taken from unset with acquire, the handoff edge td 4.1 asks for.
+  const std::thread::id me = std::this_thread::get_id();
+  std::thread::id seen{};
+  while (!s_.pump_owner_.compare_exchange_weak(seen, me, std::memory_order_acquire,
+                                               std::memory_order_relaxed)) {
+    if (seen == me) { // nested in a scope of this thread
+      outer_ = me;
+      return;
+    }
+    if (seen != std::thread::id{})
+      throw std::runtime_error(kPumpedElsewhereError);
+  }
+}
 
-async_scheduler::pump_owner_scope::~pump_owner_scope() = default;
+async_scheduler::pump_owner_scope::~pump_owner_scope() {
+  s_.pump_owner_.store(outer_, std::memory_order_release);
+}
 
-bool async_scheduler::pumped_elsewhere() const noexcept { return false; }
+bool async_scheduler::pumped_elsewhere() const noexcept {
+  const std::thread::id owner = pump_owner_.load(std::memory_order_relaxed);
+  return owner != std::thread::id{} && owner != std::this_thread::get_id();
+}
 
 namespace {
+// S1.1: a scheduler given a registry or a random stream binds what it was given on each entry
+// that can run DSL or track, one store and one restore per call (never per step); a bare one binds
+// nothing, as before. What it was not given stays as the caller bound it.
+class entry_binding {
+public:
+  entry_binding(cycle_registry *r, random_stream *s) {
+    if (r)
+      registry_.emplace(r);
+    if (s)
+      random_.emplace(s);
+  }
+
+private:
+  std::optional<cycle_registry_scope> registry_;
+  std::optional<random_stream_scope> random_;
+};
+
+// S1-Q4 (td 4.1): debug builds, or CVC_EXEC_VERIFY=1 (read once, as the library loads), check the
+// pump owner's rule in the public mutators. A call while another thread pumps is a host's race:
+// it aborts.
+#ifdef NDEBUG
+const bool kVerifyPumpOwner = [] {
+  const char *v = std::getenv("CVC_EXEC_VERIFY");
+  return v && *v && *v != '0';
+}();
+#else
+constexpr bool kVerifyPumpOwner = true;
+#endif
+
+void verify_pump_owner(const async_scheduler &s, const char *what) {
+  if (kVerifyPumpOwner && s.pumped_elsewhere()) {
+    std::fprintf(stderr, "%s: %s\n", what, kPumpedElsewhereError);
+    std::abort();
+  }
+}
+
+// The next pid: from the shared source when there is one (td 4.5, B32), else the own counter.
+int draw_pid(const std::shared_ptr<std::atomic<int>> &source, int &next) {
+  return source ? source->fetch_add(1, std::memory_order_relaxed) : next++;
+}
+
 // What a posted command never applied, or whose call threw, tells its done: false (S0.0's
 // contract; a query has no done). done must not throw.
 void refuse_control(control_cmd &cmd) noexcept {
@@ -185,7 +266,8 @@ const process_ptr &async_scheduler::no_process() {
 
 int async_scheduler::execute(const std::string &script, const execute_options &opts) {
   detail::check_not_in_async_kernel("async_scheduler::execute");
-  int pid = next_pid_++;
+  verify_pump_owner(*this, "async_scheduler::execute");
+  int pid = draw_pid(pid_source_, next_pid_);
   process_ptr pp = make_process(); // built in place: no move of its tables
   process &proc = *pp;
   proc.pid = pid;
@@ -226,7 +308,8 @@ int async_scheduler::execute(const std::string &script, const execute_options &o
 
 int async_scheduler::execute(const value_t &expr, const execute_options &opts) {
   detail::check_not_in_async_kernel("async_scheduler::execute");
-  int pid = next_pid_++;
+  verify_pump_owner(*this, "async_scheduler::execute");
+  int pid = draw_pid(pid_source_, next_pid_);
   process_ptr pp = make_process(); // built in place: no move of its tables
   process &proc = *pp;
   proc.pid = pid;
@@ -313,9 +396,14 @@ async_scheduler::clock::time_point async_scheduler::now_for_step() {
 void async_scheduler::execute_process_step(const process_ptr &pp) {
   process &proc = *pp;
   // Between steps: free the reference cycles programs leaked, once enough piled up (heap.h).
-  // Checked every 64 steps: the check reads thread-local state.
-  if ((++cycle_check_ & 63) == 0 && cycle_collection_due()) {
-    collect_cycles();
+  // Checked every 64 steps: the check reads the registry's counters. A scheduler given a registry
+  // names it (S1.1), else the thread's own is used.
+  if ((++cycle_check_ & 63) == 0 &&
+      (registry_ ? cycle_collection_due(*registry_) : cycle_collection_due())) {
+    if (registry_)
+      collect_cycles(*registry_);
+    else
+      collect_cycles();
     chain_valid_ = false;
   }
 
@@ -587,12 +675,14 @@ int async_scheduler::step_once() {
 }
 
 task<int> async_scheduler::step() {
+  const entry_binding bound(registry_, random_);
   chain_valid_ = false;
   co_return step_once();
 }
 
 uint64_t async_scheduler::run_loop(std::optional<uint64_t> max_steps,
                                    std::optional<double> max_time) {
+  const entry_binding bound(registry_, random_);
   // As the sync scheduler's run (td B17): a stop() from before this run is discarded, and one
   // made once is_running() reads true is seen.
   stop_requested_.store(false, std::memory_order_relaxed);
@@ -625,6 +715,10 @@ uint64_t async_scheduler::run_loop(std::optional<uint64_t> max_steps,
     taken += static_cast<uint64_t>(step_once());
     ++steps;
   }
+  // The idle collection (S1.1): a group's registry is collected only by its own steps, and an idle
+  // group takes none, so a run that leaves nothing runnable collects when one is due.
+  if (registry_ && !has_runnable() && cycle_collection_due(*registry_))
+    collect_cycles(*registry_);
   return taken;
 }
 
@@ -635,6 +729,7 @@ task<std::unordered_map<int, value_t>> async_scheduler::run(std::optional<uint64
 }
 
 int async_scheduler::sync_step() {
+  const entry_binding bound(registry_, random_);
   chain_valid_ = false;
   return step_once();
 }
@@ -763,6 +858,7 @@ bool async_scheduler::yield_frame(int pid) {
 }
 
 int async_scheduler::wake_awaiting() {
+  const entry_binding bound(registry_, random_);
   std::vector<process *> list;
   list.swap(woken_);
   procs_.take_awaiting(list);
@@ -871,6 +967,7 @@ void async_scheduler::post_message(const std::string &path, const value_t &msg) 
 
 void async_scheduler::drain_ingress() {
   detail::check_not_in_async_kernel("async_scheduler::drain_ingress");
+  const entry_binding bound(registry_, random_);
   // What a step does first: deliver the posts, finish the settled calls, charge the ones still
   // running, and wake the sleepers and timed waits that are due ((await f seconds)), so a driver
   // that only drains while nothing is runnable still sees them.
@@ -1162,6 +1259,7 @@ void async_scheduler::track_tree_changes() {
 void async_scheduler::set_watch_root(cvc::state *root) { set_watch_root(root, nullptr); }
 
 void async_scheduler::set_watch_root(cvc::state *root, boost::shared_ptr<cvc::state> pin) {
+  verify_pump_owner(*this, "async_scheduler::set_watch_root");
   if (root != watch_root_) {
     rate_valid_ = false;
     submit_valid_ = false;
@@ -1176,6 +1274,8 @@ void async_scheduler::set_watch_root(cvc::state *root, boost::shared_ptr<cvc::st
 }
 
 int async_scheduler::restore(process_ptr proc) {
+  verify_pump_owner(*this, "async_scheduler::restore");
+  const entry_binding bound(registry_, random_);
   // A stack that holds a lock (a lock_body with its hold, or a lock_enter woken with a grant)
   // can't be restored: no snapshot makes one, and its hold is no restored process's (protocol
   // 5.11; LW-12).
@@ -1188,7 +1288,7 @@ int async_scheduler::restore(process_ptr proc) {
     if (std::holds_alternative<int64_t>(f.extra_vals[slot].v))
       throw std::invalid_argument("restore: the process's stack holds a lock");
   }
-  const int pid = next_pid_++;
+  const int pid = draw_pid(pid_source_, next_pid_);
   proc->pid = pid;
   if (!is_finished(proc->status))
     proc->status = process_status::ready;
@@ -1222,6 +1322,7 @@ void async_scheduler::register_watch_handler(int pid, int watch_id, value_t hand
 void async_scheduler::register_watch_handler(int pid, int watch_id, value_t handler,
                                              const std::string &path,
                                              boost::shared_ptr<cvc::state> root) {
+  verify_pump_owner(*this, "async_scheduler::register_watch_handler");
   auto it = procs_.all().find(pid);
   if (it == procs_.all().end())
     return;
@@ -1383,6 +1484,7 @@ void async_scheduler::handle_watch_event(process &proc) {
 }
 
 bool async_scheduler::send_signal(int pid, const std::string &signal) {
+  verify_pump_owner(*this, "async_scheduler::send_signal");
   auto it = procs_.all().find(pid);
   if (it == procs_.all().end())
     return false;
@@ -1489,13 +1591,19 @@ void async_scheduler::fail_process(process &proc, value_t exc, std::exception_pt
 }
 
 void async_scheduler::release_if_idle(process &proc) {
-  note_process_exit(); // what it leaked is garbage now (heap.h)
+  // What it leaked is garbage now (heap.h): noted in this scheduler's registry when it has one
+  // (S1.1), so a host's kill(pid) between pumps notes the group's, not the host thread's.
+  if (registry_)
+    note_process_exit(*registry_);
+  else
+    note_process_exit();
   // A process stepping right now (one that killed itself) is released once its step is over.
   if (proc.pid != current_pid_)
     proc.release_state();
 }
 
 bool async_scheduler::pause(int pid) {
+  verify_pump_owner(*this, "async_scheduler::pause");
   auto it = procs_.all().find(pid);
   if (it == procs_.all().end())
     return false;
@@ -1511,6 +1619,7 @@ bool async_scheduler::pause(int pid) {
 }
 
 bool async_scheduler::resume(int pid) {
+  verify_pump_owner(*this, "async_scheduler::resume");
   auto it = procs_.all().find(pid);
   if (it == procs_.all().end())
     return false;
@@ -1521,26 +1630,48 @@ bool async_scheduler::resume(int pid) {
   return true;
 }
 
-bool async_scheduler::kill(int pid) {
+bool async_scheduler::kill(int pid) { return kill(pid, "killed_by_user"); }
+
+bool async_scheduler::kill(int pid, const std::string &reason) {
   detail::check_not_in_async_kernel("async_scheduler::kill");
+  verify_pump_owner(*this, "async_scheduler::kill");
   auto it = procs_.all().find(pid);
   if (it == procs_.all().end())
     return false;
   auto &proc = *it->second;
   if (is_finished(proc.status))
     return false;
-  kill_process(proc, "killed_by_user");
+  kill_process(proc, reason);
   return true;
 }
 
 int async_scheduler::kill_owner(const std::string &owner) {
+  verify_pump_owner(*this, "async_scheduler::kill_owner");
+  // The owner's live processes first, then each by its pid (S1.4; reap is the model): a kill can
+  // publish the step rate, whose tree slots may reap or submit processes, so the loop never ranges
+  // over the table itself. One ended or reaped meanwhile is passed over, and one submitted
+  // meanwhile is not killed. Every kill is tried; the first that threw is rethrown after the rest,
+  // its process killed all the same (kill_process).
+  std::vector<int> pids;
+  for (const auto &[pid, proc] : procs_.all())
+    if (proc->owner == owner && !is_finished(proc->status))
+      pids.push_back(pid);
   int killed = 0;
-  for (auto &[pid, proc] : procs_.all()) {
-    if (proc->owner == owner && !is_finished(proc->status)) {
-      kill_process(*proc, "owner_reaped");
-      ++killed;
+  std::exception_ptr first_error;
+  for (const int pid : pids) {
+    process *const p = procs_.find(pid);
+    if (!p || is_finished(p->status))
+      continue;
+    try {
+      kill_process(*p, "owner_reaped");
+    } catch (...) {
+      if (!first_error)
+        first_error = std::current_exception();
     }
+    ++killed;
   }
+  if (first_error)
+    std::rethrow_exception(first_error);
   return killed;
 }
 
@@ -1553,12 +1684,15 @@ bool async_scheduler::snapshot(int pid, cvc::state &node) const {
 }
 
 int async_scheduler::restore(cvc::state &node, environment_ptr natives) {
+  verify_pump_owner(*this, "async_scheduler::restore");
+  const entry_binding bound(registry_, random_); // the decode tracks class scopes
   process_ptr proc = decode_process(node);
   rebind_natives(proc->state, natives);
   return restore(std::move(proc));
 }
 
 int async_scheduler::fork(int pid) {
+  verify_pump_owner(*this, "async_scheduler::fork");
   auto it = procs_.all().find(pid);
   if (it == procs_.all().end())
     return -1;
@@ -1574,7 +1708,7 @@ int async_scheduler::fork(int pid) {
   if (parent.locks && !parent.locks->holds.empty())
     return -1;
 
-  int child_pid = next_pid_++;
+  int child_pid = draw_pid(pid_source_, next_pid_);
   auto child = make_process();
   child->pid = child_pid;
   child->name = parent.name + "-fork";
@@ -1640,6 +1774,7 @@ int async_scheduler::fork(int pid) {
 // ---------------------------------------------------------------------------
 
 bool async_scheduler::set_priority(int pid, int priority) {
+  verify_pump_owner(*this, "async_scheduler::set_priority");
   auto it = procs_.all().find(pid);
   if (it == procs_.all().end())
     return false;
@@ -1679,6 +1814,7 @@ std::optional<priority_info> async_scheduler::get_priority(int pid) const {
 }
 
 priority_change async_scheduler::set_priority_checked(int caller_pid, int pid, int priority) {
+  verify_pump_owner(*this, "async_scheduler::set_priority_checked");
   const process *caller = procs_.find(caller_pid);
   const process *target = procs_.find(pid);
   if (!caller || !target)
@@ -1701,6 +1837,7 @@ std::optional<priority_info> async_scheduler::get_priority_as(int caller_pid, in
 }
 
 bool async_scheduler::set_priority_floor(int pid, int floor) {
+  verify_pump_owner(*this, "async_scheduler::set_priority_floor");
   process *p = procs_.find(pid);
   if (!p)
     return false;
@@ -1950,6 +2087,7 @@ void async_scheduler::raise_exit_exception(int pid) const {
 }
 
 bool async_scheduler::reap(int pid, process_ptr *released) {
+  verify_pump_owner(*this, "async_scheduler::reap");
   auto it = procs_.all().find(pid);
   if (it == procs_.all().end())
     return false;
