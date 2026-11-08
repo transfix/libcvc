@@ -1724,6 +1724,57 @@ TEST(MediaEmoji, AVideoInTheLinePlaysSilentlyOnALoop) {
   EXPECT_EQ(b.runs[0][1].image.rfind("media:player:", 0), 0u) << b.runs[0][1].image;
 }
 
+// A feed's cards each carry several visible_when predicates; in wasm a slow frame used to spend the
+// 30 ms budget before the last cards' ran, hiding their pictures for that frame (a flicker).
+TEST(AriadneReactiveBudget, ASkippedPredicateKeepsLastFramesAnswer) {
+  cvc::app app;
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    children:\n"
+                              "      - text: card\n"
+                              "        visible_when: (= (state-get \"s.show\") \"1\")\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  cvc::state &root = cvc::state::instance(app);
+  root("s.show").value(std::string("1"));
+  const auto shown = [](const ImageBackend &b, const char *t) {
+    return std::find(b.texts.begin(), b.texts.end(), t) != b.texts.end();
+  };
+  {
+    Runtime rt(app);
+    ImageBackend b;
+    rt.set_backend(&b);
+    LoadResult first = load_string("windows:\n"
+                                   "  - window: W\n"
+                                   "    children:\n"
+                                   "      - text: card\n"
+                                   "        visible_when: (= (state-get \"s.show\") \"1\")\n");
+    ASSERT_TRUE(first.ok) << first.error;
+    rt.set_root(std::move(first.root));
+    rt.render();
+    EXPECT_TRUE(shown(b, "card"));
+    rt.set_reactive_frame_budget(0.0); // every predicate skips from here on
+    rt.render();
+    EXPECT_TRUE(shown(b, "card")) << "a skipped predicate keeps last frame's answer";
+    root("s.show").value(std::string("0"));
+    rt.render();
+    EXPECT_TRUE(shown(b, "card")) << "... until it runs again";
+    rt.set_reactive_frame_budget(0.030);
+    rt.render();
+    EXPECT_FALSE(shown(b, "card"));
+  }
+  {
+    // A predicate the budget skips before it ever ran stays fail-safe: hidden.
+    root("s.show").value(std::string("1"));
+    Runtime rt(app);
+    ImageBackend b;
+    rt.set_backend(&b);
+    rt.set_reactive_frame_budget(0.0);
+    rt.set_root(std::move(lr.root));
+    rt.render();
+    EXPECT_FALSE(shown(b, "card"));
+  }
+}
+
 TEST(MediaParse, VideoUris) {
   EXPECT_TRUE(media::is_video_uri("https://x.test/a.MP4"));
   EXPECT_TRUE(media::is_video_uri("https://x.test/a.webm?sig=1#t=2"));

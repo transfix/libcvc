@@ -649,8 +649,8 @@ public:
   // before the walk. Once the frame's cumulative predicate-eval time is spent, the
   // remaining predicates this frame skip evaluation and degrade fail-safe (hidden) with a
   // one-time warning, so N reactive widgets cannot together stall the frame.
-  void begin_frame() {
-    frame_ = se::time_budget(kFrameBudgetSeconds);
+  void begin_frame(double budget_seconds = kFrameBudgetSeconds) {
+    frame_ = se::time_budget(budget_seconds);
     resolve_data_settings();
   }
 
@@ -666,8 +666,9 @@ public:
   }
 
   struct Outcome {
-    bool value;        // predicate result, or the caller's `dflt` on any failure
-    std::string error; // empty on success; a diagnostic otherwise
+    bool value;           // predicate result, or the caller's `dflt` on any failure
+    std::string error;    // empty on success; a diagnostic otherwise
+    bool skipped = false; // not evaluated: the frame's budget was spent (not a broken predicate)
   };
   struct StringOutcome {
     std::string value; // display string, or the caller's `dflt` on any failure
@@ -679,7 +680,7 @@ public:
   Outcome eval_bool(const std::string &src, bool dflt) {
     const RawOutcome o = eval_raw(src);
     if (!o.error.empty())
-      return {dflt, o.error};
+      return {dflt, o.error, o.skipped};
     return {o.value.is_truthy(), std::string()};
   }
 
@@ -751,8 +752,9 @@ public:
 
 private:
   struct RawOutcome {
-    se::value_t value; // valid only when error is empty
-    std::string error; // empty on success; a diagnostic otherwise (contains src + cause)
+    se::value_t value;    // valid only when error is empty
+    std::string error;    // empty on success; a diagnostic otherwise (contains src + cause)
+    bool skipped = false; // the per-frame budget was spent before it ran
   };
 
   // The shared evaluate path for every read-lane expression: compile-cached, bounded three
@@ -763,7 +765,7 @@ private:
       return {{}, "ari: reactive expr parse error in \"" + src + "\""};
     const double remaining = frame_.remaining();
     if (remaining <= 0.0)
-      return {{}, "ari: reactive expr \"" + src + "\" skipped — per-frame budget exhausted"};
+      return {{}, "ari: reactive expr \"" + src + "\" skipped — per-frame budget exhausted", true};
     struct charge_frame { // charges the eval, and its steps, to the frame however run() ends
       se::time_budget &frame;
       const se::evaluator_state &st;
@@ -994,6 +996,7 @@ struct Runtime::Impl {
   // with no reactive fields pays nothing), plus de-duplicated diagnostics surfaced by
   // take_reactive_warnings(). reactive_warned keeps the dedup set across drains.
   std::unique_ptr<ReactiveEngine> reactive;
+  double reactive_budget = 0.030; // set_reactive_frame_budget; the engine's default
   std::vector<std::string> reactive_warnings;
   std::set<std::string> reactive_warned;
   int frame_instances = 0; // §3: repeat instances emitted this frame (bounds many repeats)
@@ -1308,9 +1311,11 @@ struct Runtime::Impl {
   // it at the active mount scope so a mounted fragment's predicates read its own sub-prefix,
   // matching where its binds resolve. Every reactive helper goes through here.
   ReactiveEngine &ensure_reactive() {
-    if (!reactive)
+    if (!reactive) {
       reactive = std::make_unique<ReactiveEngine>(app, prefix,
                                                   [this](const std::string &n) { return has(n); });
+      reactive->begin_frame(reactive_budget); // made mid-frame: this frame's budget is the host's
+    }
     reactive->set_root_path(app, current_prefix());
     return *reactive;
   }
@@ -1386,6 +1391,10 @@ struct Runtime::Impl {
   // §4 read-lane: is `w` shown this frame? True when it has no visible_when; otherwise
   // the predicate's result (fail-safe HIDDEN on a broken predicate).
   bool visible(const Widget &w);
+  // A visible_when / enabled_when / disabled_when predicate's value: `dflt` when it is broken
+  // (warned once), and last frame's value when this frame's budget ran out before it.
+  bool predicate(const std::string &src, bool dflt);
+  std::unordered_map<std::string, bool> last_good_predicate;
   // §4 read-lane: is `w` disabled (greyed, non-interactive) this frame? True when
   // enabled_when is falsy OR disabled_when is truthy. Fail-safe DISABLED on a broken
   // predicate.
@@ -1408,35 +1417,37 @@ struct Runtime::Impl {
   }
 };
 
+bool Runtime::Impl::predicate(const std::string &src, bool dflt) {
+  const ReactiveEngine::Outcome o = ensure_reactive().eval_bool(src, dflt);
+  if (o.skipped) {
+    // The frame's budget ran out before it (a slow frame in wasm, a big feed): keep last frame's
+    // answer rather than hide or disable the widget for a frame, which flickers it.
+    const auto it = last_good_predicate.find(src);
+    if (it != last_good_predicate.end())
+      return it->second;
+  }
+  if (!o.error.empty())
+    warn_once(o.error);
+  else
+    last_good_predicate[src] = o.value;
+  return o.value;
+}
+
 bool Runtime::Impl::visible(const Widget &w) {
   if (w.visible_when.empty())
     return true;
-  const ReactiveEngine::Outcome o = ensure_reactive().eval_bool(w.visible_when, /*dflt=*/false);
-  if (!o.error.empty())
-    warn_once(o.error);
-  return o.value;
+  return predicate(w.visible_when, /*dflt=*/false);
 }
 
 bool Runtime::Impl::disabled(const Widget &w) {
   if (w.enabled_when.empty() && w.disabled_when.empty())
     return false;
-  ReactiveEngine &re = ensure_reactive();
   // enabled_when falsy -> disabled (fail-safe dflt=false: a broken predicate disables).
-  if (!w.enabled_when.empty()) {
-    const ReactiveEngine::Outcome o = re.eval_bool(w.enabled_when, /*dflt=*/false);
-    if (!o.error.empty())
-      warn_once(o.error);
-    if (!o.value)
-      return true;
-  }
+  if (!w.enabled_when.empty() && !predicate(w.enabled_when, /*dflt=*/false))
+    return true;
   // disabled_when truthy -> disabled (fail-safe dflt=true: a broken predicate disables).
-  if (!w.disabled_when.empty()) {
-    const ReactiveEngine::Outcome o = re.eval_bool(w.disabled_when, /*dflt=*/true);
-    if (!o.error.empty())
-      warn_once(o.error);
-    if (o.value)
-      return true;
-  }
+  if (!w.disabled_when.empty() && predicate(w.disabled_when, /*dflt=*/true))
+    return true;
   return false;
 }
 
@@ -2944,7 +2955,7 @@ void Runtime::Impl::render() {
     backend->reset_layout();
   }
   if (reactive)
-    reactive->begin_frame(); // §4: reset the per-frame reactive eval budget
+    reactive->begin_frame(reactive_budget); // §4: reset the per-frame reactive eval budget
   frame_instances = 0;       // §3: reset the per-frame repeat-expansion budget
   emit_path.clear();
   scope_stack.clear(); // §12: start every frame at the document scope (RAII keeps it balanced;
@@ -3738,6 +3749,9 @@ void Runtime::render() { m_->render(); }
 
 void Runtime::set_frame_clock(std::optional<double> seconds) { m_->pinned_clock = seconds; }
 double Runtime::frame_clock() const { return m_->frame_t; }
+void Runtime::set_reactive_frame_budget(double seconds) {
+  m_->reactive_budget = seconds > 0.0 ? seconds : 0.0;
+}
 
 void Runtime::run_program(std::string script, std::function<void(const std::string &)> done) {
   Impl::QueuedAction a;
