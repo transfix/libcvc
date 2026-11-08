@@ -1208,14 +1208,263 @@ TEST(AriadneIsolatedDocs, ALaterDocumentThatIsNotEligibleMovesToGroupZero) {
     rt.render(); // placed again, then drawn: the hole is planted in group 0
     EXPECT_EQ(rt.isolated_group(), nullptr);
     EXPECT_FALSE(rt.isolation_reason().empty());
-    EXPECT_EQ(first->sched().list_processes().size(), 0u); // kept, empty, until the Runtime goes
+    EXPECT_EQ(se::detail::live_groups(&app), 0u); // the group it left went at once
     isolated_frame(app, rt);
     EXPECT_EQ(isolated_value(app, "docs.move.ticked"), "yes"); // started again, in group 0
     tree("docs.move.mod.out").value(std::string("written"));
     EXPECT_EQ(isolated_value(app, "outside.v"), "written");
-    EXPECT_EQ(se::detail::live_groups(&app), 1u);
   }
   EXPECT_EQ(se::detail::live_groups(&app), 0u);
+}
+
+// R1b-mid S-M2: a thread-affine prefix declared ABOVE the document's prefix makes its group host:
+// a write under the document emits childChanged on every ancestor, so the subscriber connected
+// there runs on whichever thread writes. Under CVC_EXEC_FORCE_MOVE an `any` group would run it on a
+// worker too.
+TEST(AriadneIsolatedDocs, AThreadAffinePrefixAboveTheDocumentMakesItHost) {
+  namespace se = cvc::state_exec;
+  isolated_env_var force("CVC_EXEC_FORCE_MOVE", "1");
+  cvc::app app;
+  isolate_documents(app, 2);
+  clear_action_intrinsics();
+  isolated_providers_cleared cleared;
+  cvc::state &root = cvc::state::instance(app);
+  root("scene.doc").value(std::string(""));
+  const std::thread::id frame_thread = std::this_thread::get_id();
+  std::mutex mu;
+  std::set<std::thread::id> slot_threads;
+  boost::signals2::scoped_connection conn =
+      root("scene").childChanged.connect([&](const std::string &) {
+        std::lock_guard<std::mutex> lock(mu);
+        slot_threads.insert(std::this_thread::get_id());
+      });
+  Runtime rt(app, "scene.doc");
+  rt.declare_thread_affine_prefix("scene"); // the host's render-thread subscriber sits at "scene"
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_channel_policy({}, {}, true, true);
+  rt.set_root(group({text("c")}));
+  rt.set_tick_program("(state-incr \"n\")");
+  se::exec_group *g = rt.isolated_group();
+  ASSERT_NE(g, nullptr) << rt.isolation_reason();
+  for (int f = 0; f < 20; ++f)
+    isolated_frame(app, rt);
+  std::lock_guard<std::mutex> lock(mu);
+  std::printf("the slot at 'scene' ran on %zu thread(s); n = %s\n", slot_threads.size(),
+              isolated_value(app, "scene.doc.n").c_str());
+  EXPECT_EQ(g->opts().affinity, se::group_affinity::host);
+  EXPECT_EQ(slot_threads, std::set<std::thread::id>{frame_thread});
+}
+
+// R1b-mid s-m2: a lane's program set after the placement is read by the isolation rules too: an
+// on_tick: that waits on oidc's channel moves the document to group 0 (where oidc posts).
+TEST(AriadneIsolatedDocs, AProgramSetAfterThePlacementIsScanned) {
+  cvc::app app;
+  isolate_documents(app, 0);
+  Runtime rt(app, "docs.later");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_channel_policy({}, {}, true, true);
+  rt.set_root(group({text("d")}));
+  rt.drain();
+  ASSERT_NE(rt.isolated_group(), nullptr) << rt.isolation_reason();
+  rt.set_tick_program("(state-set \"r\" (msg-recv \"oidc#probe\"))");
+  rt.drain();
+  EXPECT_EQ(rt.isolated_group(), nullptr) << "an on_tick: on oidc's channel runs isolated";
+  EXPECT_NE(rt.isolation_reason().find("oidc"), std::string::npos) << rt.isolation_reason();
+}
+
+// R1b-mid s-m3: a stream the document opened before its placement changed goes with it: after the
+// move to group 0 a resident there hears the stream's own close, posted to where the document now
+// runs, and the old group is gone.
+TEST(AriadneIsolatedDocs, AMovedDocumentsStreamPostsWhereItNowRuns) {
+  namespace se = cvc::state_exec;
+  cvc::app app;
+  isolate_documents(app, 0);
+  isolated_providers_cleared cleared;
+  register_stream_intrinsics(app);
+  cvc::state &tree = cvc::state::instance(app);
+  {
+    Runtime rt(app, "docs.pe");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    rt.set_channel_policy({"streams.cam0.evt"}, {}, true, true);
+    rt.set_root(group({text("first")}));
+    ASSERT_NE(rt.isolated_group(), nullptr) << rt.isolation_reason();
+    std::string how = "running";
+    rt.run_program("(state-set \"tok\" (get-attr (stream-open (dict \"id\" \"cam0\" \"w\" 4 \"h\" "
+                   "2)) \"token\"))",
+                   [&](const std::string &h) { how = h; });
+    for (int f = 0; f < 10 && how == "running"; ++f) {
+      rt.render();
+      isolated_frame(app, rt);
+    }
+    ASSERT_EQ(how, "");
+    ASSERT_FALSE(isolated_value(app, "docs.pe.tok").empty());
+    EXPECT_EQ(se::detail::live_groups(&app), 1u);
+    tree("outside.v").value(std::string("seed"));
+    Widget mount = group({text("m")});
+    mount.scope = "mod";
+    mount.links = {LinkHole{"out", "/outside.v", true}};
+    rt.set_root(group({mount})); // a writable hole out of the prefix: group 0
+    rt.render();
+    ASSERT_EQ(rt.isolated_group(), nullptr);
+    EXPECT_EQ(se::detail::live_groups(&app), 0u); // the old group went at the move
+    rt.set_tick_program("(state-set \"evt\" (msg-recv \"streams.cam0.evt\"))");
+    for (int f = 0; f < 3; ++f) {
+      rt.render();
+      isolated_frame(app, rt);
+    }
+    how = "running";
+    rt.run_program("(state-set \"closed\" (get-attr (stream-close (state-get \"tok\")) \"ok\"))",
+                   [&](const std::string &h) { how = h; });
+    for (int f = 0; f < 10 && isolated_value(app, "docs.pe.evt") != "closed"; ++f) {
+      rt.render();
+      isolated_frame(app, rt);
+    }
+    EXPECT_EQ(how, "");
+    EXPECT_EQ(isolated_value(app, "docs.pe.closed"), "true");
+    EXPECT_EQ(isolated_value(app, "docs.pe.evt"), "closed")
+        << "the document's resident never heard its own stream close";
+  }
+}
+
+// R1b-mid c-m1: a document whose eligibility flips keeps one group at most: each placement change
+// destroys the group it leaves, so neither the live groups nor a frame's pumps grow.
+TEST(AriadneIsolatedDocs, AnEligibilityThatFlipsKeepsOneGroupAtMost) {
+  namespace se = cvc::state_exec;
+  cvc::app app;
+  isolate_documents(app, 0);
+  {
+    Runtime rt(app, "docs.flip");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    rt.set_channel_policy({}, {}, true, true);
+    cvc::state::instance(app)("outside.v").value(std::string("seed"));
+    std::string trace;
+    std::size_t most = 0;
+    for (int i = 0; i < 8; ++i) {
+      if (i % 2 == 0) {
+        rt.set_root(group({text("eligible")}));
+      } else {
+        Widget mount = group({text("module")});
+        mount.scope = "mod";
+        mount.links = {LinkHole{"out", "/outside.v", true}};
+        rt.set_root(group({mount}));
+      }
+      rt.render();
+      const std::uint64_t before = app.exec_pool().stats().pumps;
+      isolated_frame(app, rt);
+      const std::uint64_t pumps = app.exec_pool().stats().pumps - before;
+      const std::size_t live = se::detail::live_groups(&app);
+      most = std::max(most, live);
+      EXPECT_EQ(live, rt.isolated_group() ? 1u : 0u) << "round " << i;
+      EXPECT_LE(pumps, 1u) << "round " << i;
+      trace += std::string(rt.isolated_group() ? "G" : "0") + ":live=" + std::to_string(live) +
+               ",pumps=" + std::to_string(pumps) + " ";
+    }
+    std::printf("%s\n", trace.c_str());
+    EXPECT_LE(most, 1u);
+  }
+  EXPECT_EQ(se::detail::live_groups(&app), 0u);
+}
+
+// R1b-mid s-m4: a host verb registered after load() is bound in an isolated document as in group 0:
+// the registration has the placement decided again, and the verb, a host_only one, makes the group
+// host.
+TEST(AriadneIsolatedDocs, AHostVerbRegisteredAfterLoadIsBound) {
+  if (!have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  const std::filesystem::path doc =
+      std::filesystem::temp_directory_path() / "ariadne_isolated_late_verb.ari";
+  std::ofstream(doc) << "meta: {min_libcvc: 3.4.0}\nchannels: []\nroot:\n  - text: late\n";
+  cvc::app app;
+  isolate_documents(app, 0);
+  isolated_providers_cleared cleared;
+  AppRuntime art(app, "ui.docs.late");
+  MockBackend mb;
+  art.set_backend(mb);
+  art.load(doc.string());
+  ASSERT_NE(art.runtime().isolated_group(), nullptr) << art.runtime().isolation_reason();
+  EXPECT_EQ(art.runtime().isolated_group()->opts().affinity, cvc::state_exec::group_affinity::any);
+  int calls = 0;
+  art.register_verb("late-verb", [&] { ++calls; });
+  std::string how = "running";
+  art.run_program("(late-verb)", [&](const std::string &h) { how = h; });
+  for (int i = 0; i < 20 && how == "running"; ++i)
+    art.drain();
+  EXPECT_EQ(how, "") << "a verb registered after load is not callable in the isolated document";
+  EXPECT_EQ(calls, 1);
+  ASSERT_NE(art.runtime().isolated_group(), nullptr) << art.runtime().isolation_reason();
+  EXPECT_EQ(art.runtime().isolated_group()->opts().affinity, cvc::state_exec::group_affinity::host);
+}
+
+// R1b-mid c-m2: AppRuntime::idle() and wait_idle() decide nothing: after a set_root that would move
+// the document, neither moves it (nor builds or destroys a group); the next frame does.
+TEST(AriadneIsolatedDocs, IdleAndWaitIdleDecideNothing) {
+  if (!have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  const std::filesystem::path doc =
+      std::filesystem::temp_directory_path() / "ariadne_isolated_idle_decides.ari";
+  std::ofstream(doc) << "meta: {min_libcvc: 3.4.0}\nchannels: []\nroot:\n  - text: hi\n";
+  namespace se = cvc::state_exec;
+  cvc::app app;
+  isolate_documents(app, 0);
+  AppRuntime art(app, "ui.docs.quiet");
+  MockBackend mb;
+  art.set_backend(mb);
+  art.load(doc.string());
+  se::exec_group *first = art.runtime().isolated_group();
+  ASSERT_NE(first, nullptr) << art.runtime().isolation_reason();
+  cvc::state::instance(app)("outside.v").value(std::string("seed"));
+  Widget mount = group({text("module")});
+  mount.scope = "mod";
+  mount.links = {LinkHole{"out", "/outside.v", true}};
+  art.set_root(group({mount})); // ineligible from the next decision on
+  (void)art.idle();
+  art.wait_idle();
+  EXPECT_EQ(art.runtime().current_group(), first) << "a query moved the document";
+  EXPECT_EQ(se::detail::live_groups(&app), 1u);
+  art.drain(); // the frame decides: group 0
+  EXPECT_EQ(art.runtime().current_group(), nullptr);
+  EXPECT_EQ(se::detail::live_groups(&app), 0u);
+}
+
+// R1b-mid c-m4: tearing a Runtime down inside a pump_all of the app's pool (here a host native that
+// closes another document, run in group 0 while exec_pump_frame pumps it beside an isolated
+// document's group) is refused in every build: logged, then aborted before anything is touched.
+TEST(AriadneIsolatedDocsDeathTest, ATeardownInsideAPumpIsRefused) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_DEATH(
+      {
+        cvc::app app;
+        isolate_documents(app, 0);
+        Runtime isolated(app, "docs.beside"); // makes exec_pump_frame a pump_all
+        MockBackend mb;
+        isolated.set_backend(&mb);
+        isolated.set_channel_policy({}, {}, true, true);
+        isolated.set_root(group({text("beside")}));
+        if (!isolated.isolated_group())
+          std::exit(0); // not isolated: no pump_all to be inside
+        auto victim = std::make_unique<Runtime>(app, "docs.victim");
+        victim->set_root(group({text("victim")}));
+        register_action_intrinsics([&](std::shared_ptr<cvc::state_exec::environment> env,
+                                       cvc::state_exec::intrinsics_context &) {
+          cvc::state_exec::builtins::register_fn(env, "close-victim",
+                                                 [&](std::span<const cvc::state_exec::value_t>) {
+                                                   victim.reset();
+                                                   return cvc::state_exec::value_t{};
+                                                 });
+        });
+        Runtime closer(app, ""); // no prefix: group 0, which exec_pump_frame pumps on its caller
+        closer.set_backend(&mb);
+        closer.run_program("(close-victim)", [](const std::string &) {});
+        closer.drain_begin();
+        isolated.drain_begin();
+        app.exec_pump_frame();
+        std::exit(0); // not refused
+      },
+      "");
 }
 
 // §4.6 input seam: set_key_program submits a resident that receives events posted via post_input,
@@ -9055,6 +9304,28 @@ TEST(AriadneHazards, HZ08_ForkedChildKeepsOwnerAndTeardownReapsIt) {
   }
   EXPECT_FALSE(app.exec_scheduler().get_process_info(child).has_value());  // reaped
   EXPECT_FALSE(app.exec_scheduler().get_process_info(action).has_value()); // reaped too
+}
+
+// R1b-mid s-m1 (S1-Q8): a resident a reload stops (set_tick_program, as AppRuntime::load calls it)
+// is killed and reaped then, so nothing of the Runtime's owner is left in group 0 after teardown.
+TEST(AriadneHazards, AResidentAReloadStopsIsReaped) {
+  cvc::app app;
+  {
+    Runtime rt(app, "docs.reload");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    rt.set_tick_program("(msg-recv \"never\")");
+    for (int i = 0; i < 3; ++i)
+      rt.drain();
+    rt.set_tick_program("(msg-recv \"never.again\")"); // a reload's set_tick_program
+    for (int i = 0; i < 3; ++i)
+      rt.drain();
+    EXPECT_EQ(app.exec_scheduler().list_processes().size(), 1u); // the new resident only
+  }
+  const auto procs = app.exec_scheduler().list_processes();
+  for (const auto &p : procs)
+    std::printf("left: pid %d status %d\n", p.pid, static_cast<int>(p.status));
+  EXPECT_EQ(procs.size(), 0u) << "a process of the torn-down Runtime's owner is left in group 0";
 }
 
 // --- Stage 1b Ariadne (td 8.2) ---

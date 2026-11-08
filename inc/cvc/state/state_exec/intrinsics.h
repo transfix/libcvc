@@ -46,6 +46,9 @@ struct process;
 ///   pool's host-call queue (exec_pool::run_on_host), its process resuming at the group's next
 ///   pump; inline when the thread calling it is the pump_all's caller or no pump_all is active;
 /// - `host_only`: not installed, so a call is a NameError.
+/// A provider's bindings that are not natives (constants) go into an `any` group's env as they
+/// are, so each is made fresh for every env, or is immutable: two groups' programs must never share
+/// a mutable value (td 4.3). A `host_proxied` provider binds synchronous natives only.
 enum class provider_affinity { any, host_proxied, host_only };
 
 /// Runtime context available to DSL intrinsics.

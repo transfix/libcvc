@@ -27,6 +27,7 @@
 #include <cvc/ariadne/net_host.h>  // net_host_status (the net capability tokens)
 #include <cvc/ariadne/oidc_host.h> // pump_oidc
 #include <cvc/ariadne/requires.h>  // free_heads: the isolation rules' oidc check
+#include <cvc/ariadne/stream/stream.h> // stream::retarget: a moved document takes its streams
 #include <cvc/core/app.h>
 #include <cvc/core/exec_pool.h> // an isolated document's pump; in_pump_all (host-thread calls)
 #include <cvc/state/state.h>
@@ -286,7 +287,9 @@ bool has_widget_type(const std::string &type) {
 // the init lane, but on the pumping thread for a spawned child, which is a worker in an `any`
 // group. So a provider an `any` group runs (`any` or `host_proxied`) has a thread-safe body.
 // A `host_proxied` provider binds synchronous natives: an async one, so wrapped, would run its
-// kernel inline on the caller (its host has no running process there), uncharged.
+// kernel inline on the caller (its host has no running process there), uncharged. What a provider
+// binds that is not a native goes into the env as it is, so it is made fresh for each env or is
+// immutable (c-m7): two groups' programs must never share a mutable value.
 namespace {
 namespace se_reg = cvc::state_exec;
 struct registered_provider {
@@ -979,6 +982,23 @@ void assert_outside_pump(const cvc::app &app) {
 #endif
 }
 
+// Tearing a Runtime down and moving a document (c-m4) kill and reap on a scheduler a worker of the
+// same pump_all may be pumping, and destroy its group, which then aborts anyway: inside a pump_all
+// (a host verb that closes a document, run from exec_pump_frame's group 0, say) they are refused in
+// every build, logged and then aborted before anything is touched.
+void refuse_inside_pump(cvc::app &app, const std::string &what) noexcept {
+  const cvc::exec_pool *pool = app.exec_pool_probe();
+  if (!pool || !pool->in_pump_all())
+    return;
+  try {
+    app.log(1, "ari: " + what +
+                   " inside a pump of the app's pool: refused (host thread, outside a "
+                   "pump)");
+  } catch (...) {
+  }
+  std::abort();
+}
+
 // ariadne.exec.isolate_documents (S1-Q6): on for "1" or "true".
 bool isolate_documents_on(cvc::state &root) {
   cvc::state *node = root.findDescendant("ariadne.exec.isolate_documents");
@@ -1264,15 +1284,10 @@ struct Runtime::Impl {
   // Decide where the programs run: when `submitting` (a program is about to start) or a document
   // has been set, unless that document's placement is decided already. Host thread.
   void ensure_placement(bool submitting);
-  // A new document that goes elsewhere (move_out): the earlier one's processes are killed and
-  // reaped where they ran, and its records dropped, so its residents start again in the new
-  // place. Its group stays registered, and its contexts kept, until ~Impl: a stream the document
-  // left open still posts to that group, whose frames drain its ingress.
-  struct RetiredGroup {
-    std::unique_ptr<cvc::state_exec::exec_group> group;
-    cvc::frame_group_handle handle; // goes before the group
-  };
-  std::vector<RetiredGroup> retired_groups_;
+  // A placement change (ensure_placement) moves the document: move_out kills and reaps its
+  // processes where they ran and drops their records, so its residents start again in the new
+  // place; its open streams are re-pointed there (stream::retarget), and its old group, if any, is
+  // destroyed at once. The dropped contexts stay until ~Impl, for a process a failed kill left.
   std::vector<std::shared_ptr<ActionContext>> retired_contexts_;
   void move_out();
   // Kill every process of the owner on `sched` and reap each one the Runtime knows of, each step
@@ -3300,6 +3315,9 @@ void Runtime::Impl::emit_windows_menu_items() {
 std::atomic<uint64_t> Runtime::Impl::owner_seq{0};
 
 Runtime::Impl::~Impl() {
+  // Host thread, outside a pump: the kills below would race a worker on the group, and its
+  // destruction abort. Refused in every build, before anything is touched.
+  refuse_inside_pump(app, "tearing down the document at '" + prefix + "'");
   // Teardown (S1.10, S1-Q8), each step catching and logging what it throws. First close anything
   // the document left open (a (stream-open) with no (stream-close)), while the app, its state tree
   // and the document's scheduler are still alive: each owned resource's destructor runs here
@@ -3322,15 +3340,11 @@ Runtime::Impl::~Impl() {
   }
   if (sched)
     kill_and_reap(*sched, "tearing down");
-  // Last the groups, which the app's frames stop pumping first: each one's own teardown (S1.5)
-  // kills and reaps whatever is left, before channel_policy_ and doc_scope_ go, which its
-  // processes' contexts point at. Both catch and log what they throw.
+  // Last the group, which the app's frames stop pumping first: its own teardown (S1.5) kills and
+  // reaps whatever is left, before channel_policy_ and doc_scope_ go, which its processes'
+  // contexts point at. Both catch and log what they throw.
   frame_handle_.reset();
   group_.reset();
-  for (RetiredGroup &r : retired_groups_) {
-    r.handle.reset();
-    r.group.reset();
-  }
 }
 
 void Runtime::Impl::kill_and_reap(cvc::state_exec::async_scheduler &sched,
@@ -3402,7 +3416,17 @@ void Runtime::Impl::ensure_placement(bool submitting) {
       host_affinity ? se::group_affinity::host : se::group_affinity::any;
   const bool stays = reason.empty() ? group_ && group_->opts().affinity == affinity : !group_;
   if (!stays) {
-    move_out(); // what an earlier document runs, where it runs
+    // Where its programs and streams were (null: nothing ran yet).
+    se::async_scheduler *const from = group_            ? &group_->sched()
+                                      : used_scheduler_ ? &app.exec_scheduler()
+                                                        : nullptr;
+    // A move kills and reaps on the scheduler a worker may be pumping, and destroys its group:
+    // host thread, outside a pump. Refused in every build, before the kills.
+    if (from)
+      refuse_inside_pump(app, "moving the document at '" + prefix + "'");
+    move_out(); // what an earlier document runs, killed and reaped where it runs
+    std::unique_ptr<se::exec_group> old_group = std::move(group_);
+    frame_handle_.reset(); // the app's frames stop pumping the old group now
     if (reason.empty()) {
       try {
         se::exec_group::options o;
@@ -3418,8 +3442,20 @@ void Runtime::Impl::ensure_placement(bool submitting) {
         reason = std::string("its group could not be made: ") + e.what();
       }
     }
+    // Its open streams post where its programs run from now on; then the old group can go, with
+    // nothing left in it and nothing posting to it (s-m3, c-m1).
+    if (from) {
+      try {
+        stream::stream::retarget(app, prefix, from,
+                                 group_ ? &group_->sched() : &app.exec_scheduler());
+      } catch (const std::exception &e) {
+        teardown_note("moving", "re-pointing its streams", e.what());
+      }
+    }
+    old_group.reset(); // its own teardown catches and logs what it throws
   }
-  // Why a document stays in group 0 is logged once, when the setting asks for isolation.
+  // Why a document stays in group 0 is logged when the reason changes (a new document's, or a
+  // first), and only when the setting asks for isolation; one reason is logged once.
   if (!reason.empty() && reason != isolation_reason_ &&
       isolate_documents_on(cvc::state::instance(app)))
     app.log(1, "ari: the document at '" + prefix + "' runs in group 0: " + reason);
@@ -3457,8 +3493,6 @@ void Runtime::Impl::move_out() {
     t.resident = Resident{};
   }
   used_scheduler_ = false;
-  if (group_)
-    retired_groups_.push_back(RetiredGroup{std::move(group_), std::move(frame_handle_)});
 }
 
 std::string Runtime::Impl::isolation_verdict(bool &host_affinity) const {
@@ -3546,8 +3580,9 @@ std::string Runtime::Impl::isolation_verdict(bool &host_affinity) const {
   // subscriber at or under its prefix (S1.11), or when a host_only provider binds anything in its
   // env, which an `any` group would leave out.
   for (const std::string &p : thread_affine_)
-    if (p == prefix || p.rfind(inside, 0) == 0)
-      host_affinity = true;
+    if (p == prefix || p.rfind(inside, 0) == 0 || p.empty() ||
+        prefix.rfind(p + cvc::state::SEPARATOR, 0) == 0) // at, under or above: a write under the
+      host_affinity = true; // document emits childChanged on every ancestor (S-M2)
   if (!host_affinity)
     host_affinity = host_only_bindings();
   return std::string();
@@ -3802,16 +3837,12 @@ void Runtime::Impl::pump_frame() {
   }
   // An isolated document's group, one pump through the app's pool, as exec_pump_frame() would
   // pump it: a host with one Runtime that opts in may keep calling drain() (td 4.12). Its pump
-  // drains, wakes the frame-waiters and runs a slice of the same budget. A group an earlier
-  // document left (move_out) is pumped with it, so its ingress drains.
-  std::vector<se::exec_group *> groups;
-  if (group_)
-    groups.push_back(group_.get());
-  for (const RetiredGroup &r : retired_groups_)
-    groups.push_back(r.group.get());
-  if (!groups.empty())
+  // drains, wakes the frame-waiters and runs a slice of the same budget.
+  if (group_) {
+    se::exec_group *const groups[] = {group_.get()};
     app.exec_pool().pump_all(groups, se::pump_budget{kPumpMaxSteps, kPumpMaxSeconds},
                              std::chrono::steady_clock::now() + std::chrono::milliseconds(100));
+  }
 }
 
 void Runtime::Impl::sweep_actions(cvc::state_exec::async_scheduler &sched) {
@@ -3904,8 +3935,11 @@ void Runtime::Impl::retire_if_stopped(cvc::state_exec::async_scheduler &sched, R
 }
 
 void Runtime::Impl::stop_resident(Resident &r) {
-  if (r.pid >= 0)
-    current_sched().kill(r.pid);
+  if (r.pid >= 0) { // killed and reaped (S1-Q8): its record goes with it, on a reload too
+    cvc::state_exec::async_scheduler &sched = current_sched();
+    sched.kill(r.pid);
+    sched.reap(r.pid);
+  }
   r = Resident{};
 }
 
@@ -4116,6 +4150,9 @@ bool Runtime::has(const std::string &name) const { return m_->has(name); }
 void Runtime::refresh_program_names() {
   std::lock_guard<std::mutex> lock(m_->names_mutex);
   m_->names_valid = false;
+  // A host verb or function registered since the placement may need the host thread (s-m4): the
+  // placement is decided again before the next program starts.
+  m_->placement_decided_ = false;
 }
 
 void Runtime::set_backend(Backend *backend) { m_->backend = backend; }
@@ -4149,25 +4186,36 @@ void Runtime::on(std::string event, std::function<void()> handler) {
   m_->handlers[std::move(event)] = std::move(handler);
 }
 
+// A lane's program, the channel policy and the key bindings are read by the isolation rules
+// (S1-Q6): setting one decides the placement again before the next program starts (s-m2). Host
+// thread, outside a pump (they kill residents).
 void Runtime::set_tick_program(std::string script) {
+  assert_outside_pump(m_->app);
   // Replacing the program kills any running resident so the new body starts fresh next drain.
   m_->stop_resident(m_->tick_resident_);
   m_->tick_script_ = std::move(script);
+  m_->placement_decided_ = false;
 }
 
 void Runtime::set_key_program(std::string script) {
+  assert_outside_pump(m_->app);
   m_->stop_resident(m_->key_resident_);
   m_->key_script_ = std::move(script);
+  m_->placement_decided_ = false;
 }
 
 void Runtime::set_pointer_program(std::string script) {
+  assert_outside_pump(m_->app);
   m_->stop_resident(m_->pointer_resident_);
   m_->pointer_script_ = std::move(script);
+  m_->placement_decided_ = false;
 }
 
 void Runtime::set_signal_program(std::string script) {
+  assert_outside_pump(m_->app);
   m_->stop_resident(m_->signal_resident_);
   m_->signal_script_ = std::move(script);
+  m_->placement_decided_ = false;
 }
 
 bool Runtime::has_signal_program() const { return !m_->signal_script_.empty(); }
@@ -4202,6 +4250,7 @@ void Runtime::set_channel_policy(std::vector<std::string> declared, std::vector<
   m_->channel_policy_.global = std::move(global);
   m_->channel_policy_.enforce = strict;
   m_->channel_policy_.quiet = quiet;
+  m_->placement_decided_ = false; // the isolation rules read it (s-m2)
 }
 
 void Runtime::post_input(const InputEvent &ev) {
@@ -4229,6 +4278,7 @@ void Runtime::forget_layout() { m_->forget_layout_pending = true; }
 void Runtime::set_key_bindings(std::vector<KeyBinding> bindings) {
   m_->key_bindings_ = std::move(bindings);
   m_->have_key_bindings_.store(!m_->key_bindings_.empty());
+  m_->placement_decided_ = false; // their programs are scanned too (s-m2)
 }
 
 void Runtime::Impl::run_key_bindings() {
@@ -4284,6 +4334,7 @@ void Runtime::set_reactive_frame_budget(double seconds) {
 }
 
 void Runtime::run_program(std::string script, std::function<void(const std::string &)> done) {
+  assert_outside_pump(m_->app); // host thread, outside a pump (c-m4)
   Impl::QueuedAction a;
   a.event = std::move(script);
   a.prefix = m_->prefix;
@@ -4373,7 +4424,10 @@ std::string Runtime::isolation_reason() const {
 
 void Runtime::declare_thread_affine_prefix(const std::string &prefix) {
   m_->thread_affine_.push_back(prefix);
+  m_->placement_decided_ = false;
 }
+
+cvc::state_exec::exec_group *Runtime::current_group() const { return m_->group_.get(); }
 
 void Runtime::set_document_programs(std::vector<std::string> programs) {
   m_->document_programs_ = std::move(programs);

@@ -25,10 +25,12 @@
 #include <iterator>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <span>
 #include <stdexcept>
 #include <thread>
+#include <tuple>
 #include <utility>
 
 #ifdef __EMSCRIPTEN__
@@ -38,22 +40,40 @@
 namespace cvc {
 namespace ariadne {
 
+namespace {
+// Every AppRuntime's verb table (Verbs) is read by its providers' bodies, which a spawned child in
+// an `any` group runs on the pumping worker, and written by the registrations, a load and the
+// destructor (c-m5): both hold this. A body copies what it binds under it, then binds unlocked.
+// Nothing a host gave (a callable) is destroyed under it, since its destructor may take a lock of
+// its own (pycvc's takes the GIL): what goes is moved out first.
+std::mutex &verbs_mutex() {
+  static std::mutex m;
+  return m;
+}
+} // namespace
+
 AppRuntime::AppRuntime(cvc::app &app, std::string prefix, SceneAdapter *scene)
     : app_(app), prefix_(std::move(prefix)), scene_(scene), rt_(app, prefix_),
       verbs_(std::make_shared<Verbs>()), data_(DataStore::of(app)) {
   rt_.set_scene_capable(scene_ != nullptr); // the gl.scene capability (requires:, has?)
   rt_.set_scene_shaders(scene_ && scene_->runs_shaders()); // gl.scene.shaders
+  std::lock_guard<std::mutex> lock(verbs_mutex());
   verbs_->data = data_;
   verbs_->prefix = prefix_;
 }
 
 AppRuntime::~AppRuntime() {
-  verbs_->sync.clear(); // the provider outlives us in the registry: it must bind nothing of ours
-  verbs_->async.clear();
-  verbs_->quit = nullptr;
-  verbs_->data.reset();
-  verbs_->functions.clear();
-  verbs_->async_functions.clear();
+  // The provider outlives us in the registry: it must bind nothing of ours.
+  Verbs dropped; // goes after the lock
+  {
+    std::lock_guard<std::mutex> lock(verbs_mutex());
+    std::swap(dropped.sync, verbs_->sync);
+    std::swap(dropped.async, verbs_->async);
+    std::swap(dropped.quit, verbs_->quit);
+    std::swap(dropped.data, verbs_->data);
+    std::swap(dropped.functions, verbs_->functions);
+    std::swap(dropped.async_functions, verbs_->async_functions);
+  }
   if (netEnabled_)
     disable_net(); // its provider holds app_ by reference
 }
@@ -62,7 +82,8 @@ bool AppRuntime::idle() const {
   // The scheduler's calls in flight include those no executor runs (a request a browser's fetch
   // answers, docs/ARIADNE.md 10.2), which the host's count of running kernels leaves out. An
   // isolated document's group counts too (S1.9): its programs and calls are there, not in group 0.
-  if (cvc::state_exec::exec_group *group = rt_.isolated_group())
+  // The group as it is (current_group): a query decides nothing and moves nothing (c-m2).
+  if (cvc::state_exec::exec_group *group = rt_.current_group())
     if (group->host().in_flight() != 0 || group->sched().async_calls_in_flight() != 0 ||
         group->sched().has_runnable())
       return false;
@@ -333,7 +354,10 @@ bool AppRuntime::have_yaml() { return cvc::ariadne::have_yaml(); }
 // ── host verbs on the app-wide scheduler ────────────────────────────────────────────────────────
 
 void AppRuntime::register_verb(const std::string &name, std::function<void()> fn) {
-  verbs_->sync.emplace_back(name, std::move(fn));
+  {
+    std::lock_guard<std::mutex> lock(verbs_mutex());
+    verbs_->sync.emplace_back(name, std::move(fn));
+  }
   ensure_intrinsics();
   rt_.refresh_program_names(); // has? / requires: see the new verb
 }
@@ -344,13 +368,19 @@ void AppRuntime::register_async_verb(const std::string &name, std::function<std:
 
 void AppRuntime::register_async_verb(const std::string &name, const std::string &done_channel,
                                      std::function<std::string()> work) {
-  verbs_->async.emplace_back(name, done_channel, std::move(work));
+  {
+    std::lock_guard<std::mutex> lock(verbs_mutex());
+    verbs_->async.emplace_back(name, done_channel, std::move(work));
+  }
   ensure_intrinsics();
   rt_.refresh_program_names();
 }
 
 void AppRuntime::register_function(const std::string &name, cvc::state_exec::native_fn fn) {
-  verbs_->functions[name] = std::move(fn);
+  {
+    std::lock_guard<std::mutex> lock(verbs_mutex());
+    std::swap(verbs_->functions[name], fn); // the replaced one goes after the lock
+  }
   ensure_intrinsics();
   rt_.refresh_program_names();
 }
@@ -358,7 +388,11 @@ void AppRuntime::register_function(const std::string &name, cvc::state_exec::nat
 void AppRuntime::register_async_function(const std::string &name,
                                          cvc::state_exec::async_marshal marshal,
                                          const std::string &done_channel) {
-  verbs_->async_functions[name] = {done_channel, std::move(marshal)};
+  std::pair<std::string, cvc::state_exec::async_marshal> entry{done_channel, std::move(marshal)};
+  {
+    std::lock_guard<std::mutex> lock(verbs_mutex());
+    std::swap(verbs_->async_functions[name], entry); // the replaced one goes after the lock
+  }
   ensure_intrinsics();
   rt_.refresh_program_names();
 }
@@ -379,7 +413,10 @@ void AppRuntime::add_frame_hook(std::function<void()> hook) {
 
 void AppRuntime::register_quit() {
   on("quit", [this] { request_close(0); });
-  verbs_->quit = [this](int code) { request_close(code); };
+  {
+    std::lock_guard<std::mutex> lock(verbs_mutex());
+    verbs_->quit = [this](int code) { request_close(code); };
+  }
   ensure_intrinsics();
   rt_.refresh_program_names();
 }
@@ -400,7 +437,12 @@ void AppRuntime::ensure_intrinsics() {
   // 1. The host's verbs, host_only: arbitrary host code, run in the calling step.
   register_action_intrinsics(
       [verbs](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
-        for (const auto &v : verbs->sync) {
+        std::vector<std::pair<std::string, std::function<void()>>> sync;
+        {
+          std::lock_guard<std::mutex> lock(verbs_mutex());
+          sync = verbs->sync;
+        }
+        for (const auto &v : sync) {
           std::function<void()> fn = v.second;
           se::builtins::register_fn(env, v.first,
                                     [fn](std::span<const se::value_t>) -> se::value_t {
@@ -413,8 +455,12 @@ void AppRuntime::ensure_intrinsics() {
   // 2. (quit [code]), host_proxied: it writes quit_ and exitCode_.
   register_action_intrinsics(
       [verbs](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
-        if (verbs->quit) {
-          std::function<void(int)> quit = verbs->quit;
+        std::function<void(int)> quit;
+        {
+          std::lock_guard<std::mutex> lock(verbs_mutex());
+          quit = verbs->quit;
+        }
+        if (quit) {
           se::builtins::register_fn(env, "quit", [quit](std::span<const se::value_t> args) {
             if (args.size() > 1)
               throw se::dsl_error("TypeError", "quit: expected an optional exit code, got " +
@@ -453,7 +499,12 @@ void AppRuntime::ensure_intrinsics() {
         se::async_host &host = ictx.host ? *ictx.host : app->exec_async_host();
         const auto post = done_poster(host);
         const std::string root = ictx.root_path;
-        for (const auto &v : verbs->async) {
+        std::vector<std::tuple<std::string, std::string, std::function<std::string()>>> async;
+        {
+          std::lock_guard<std::mutex> lock(verbs_mutex());
+          async = verbs->async;
+        }
+        for (const auto &v : async) {
           // An async function: (name) parks the program while `work` runs on the background task
           // pool, charged to its budget, and returns `work`'s string or raises its exception. The
           // done channel, if any, is resolved here on the scheduler thread (a kernel never walks
@@ -484,7 +535,14 @@ void AppRuntime::ensure_intrinsics() {
         // bound to NAME follow when it is ready), (data-reload NAME), (data-status NAME),
         // (data-files NAME) and (data-file NAME PATH) (its bytes, or nil).
         // The store first: it is reset when this runtime dies, and only then is `app` still ours.
-        std::shared_ptr<DataStore> store = verbs->data.lock();
+        std::shared_ptr<DataStore> store;
+        std::string prefix, doc_dir;
+        {
+          std::lock_guard<std::mutex> lock(verbs_mutex());
+          store = verbs->data.lock();
+          prefix = verbs->prefix;
+          doc_dir = verbs->doc_dir;
+        }
         const auto own_program = [&] { // the program's chroot (se::apply_chroot) is in our app
           if (!ictx.root)
             return false;
@@ -498,7 +556,6 @@ void AppRuntime::ensure_intrinsics() {
         if (!store || !own_program())
           return;
         const std::weak_ptr<DataStore> weak = store;
-        const std::string prefix = verbs->prefix, doc_dir = verbs->doc_dir;
         const auto text = [](std::span<const se::value_t> a, std::size_t i, const char *fn) {
           const auto *s = i < a.size() ? std::get_if<std::string>(&a[i].v) : nullptr;
           if (!s)
@@ -569,7 +626,12 @@ void AppRuntime::ensure_intrinsics() {
   // 5. The host's functions, host_only: inline on the drain thread, like a sync verb.
   register_action_intrinsics(
       [verbs](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
-        for (const auto &[name, fn] : verbs->functions)
+        std::map<std::string, se::native_fn> functions;
+        {
+          std::lock_guard<std::mutex> lock(verbs_mutex());
+          functions = verbs->functions;
+        }
+        for (const auto &[name, fn] : functions)
           se::builtins::register_fn(env, name, fn);
       },
       se::provider_affinity::host_only);
@@ -580,7 +642,12 @@ void AppRuntime::ensure_intrinsics() {
                                 se::intrinsics_context &ictx) {
         se::async_host &host = ictx.host ? *ictx.host : app->exec_async_host();
         const auto post = done_poster(host);
-        for (const auto &[name, entry] : verbs->async_functions) {
+        std::map<std::string, std::pair<std::string, se::async_marshal>> async_functions;
+        {
+          std::lock_guard<std::mutex> lock(verbs_mutex());
+          async_functions = verbs->async_functions;
+        }
+        for (const auto &[name, entry] : async_functions) {
           const se::async_marshal &marshal = entry.second;
           if (entry.first.empty()) {
             se::register_async_fn(env, host, name, marshal);
@@ -828,6 +895,7 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   {
     std::error_code ec;
     const std::filesystem::path abs = std::filesystem::absolute(path, ec);
+    std::lock_guard<std::mutex> lock(verbs_mutex());
     verbs_->doc_dir = ec ? std::string() : abs.parent_path().string();
   }
   for (const DataSpec &d : lr.data)
@@ -960,7 +1028,7 @@ void AppRuntime::declare_thread_affine_prefix(const std::string &prefix) {
 // The app's host, then an isolated document's group's (S1.9), whose kernels its programs start.
 void AppRuntime::wait_idle() {
   app_.exec_async_host().wait_idle();
-  if (cvc::state_exec::exec_group *group = rt_.isolated_group())
+  if (cvc::state_exec::exec_group *group = rt_.current_group()) // decides nothing (c-m2)
     group->host().wait_idle();
 }
 

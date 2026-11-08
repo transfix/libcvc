@@ -44,6 +44,7 @@ public:
   // adapter (nullptr = no scene: a scene-bearing document warns and drops its scene).
   // `scene`, once given, must outlive this AppRuntime.
   AppRuntime(cvc::app &app, std::string prefix, SceneAdapter *scene = nullptr);
+  // Host thread, outside a pump (Runtime::~Runtime).
   ~AppRuntime();
   AppRuntime(const AppRuntime &) = delete;
   AppRuntime &operator=(const AppRuntime &) = delete;
@@ -98,16 +99,22 @@ public:
   // Register a host verb the .ari program can call. register_verb is SYNCHRONOUS (fn runs
   // inline on the drain thread, no args/return).
   //
-  // register_async_verb makes `name` an async function on the app's async host
-  // (docs/STATE_EXEC_EXCEPTIONS.md 3):
+  // Every registration below is made on the host thread, outside a frame (not from a verb or a
+  // function while one runs). Register before load(): one registered later has the document's
+  // placement decided again before its next program (an isolated document may then move, see
+  // Runtime::isolated_group), so it is bound there as in group 0.
+  //
+  // register_async_verb makes `name` an async function on the calling program's async host (the
+  // app's, or an isolated document's group's) (docs/STATE_EXEC_EXCEPTIONS.md 3):
   // - (name) parks the calling program while `work` runs on the app's background task pool,
   //   then returns `work`'s string;
   // - an exception `work` throws raises at the call;
   // - (name-async) returns a future for (await f);
   // - the work is charged to the calling action's budget (ariadne.limits.action_max_steps and
   //   action_max_time).
-  // With a `done_channel`, the result is also posted there. That keeps documents that wait with
-  // (msg-recv "done_channel") working: the old nav_compute pattern.
+  // With a `done_channel`, the result is also posted there, to the calling program's group (group
+  // 0 from init:). That keeps documents that wait with (msg-recv "done_channel") working: the old
+  // nav_compute pattern.
   void register_verb(const std::string &name, std::function<void()> fn);
   void register_async_verb(const std::string &name, std::function<std::string()> work);
   void register_async_verb(const std::string &name, const std::string &done_channel,
@@ -172,7 +179,9 @@ public:
   // Load + mount a .ari document, running its init:/on_* scripts and (via the SceneAdapter,
   // if any) realizing its scene under the state prefix. Returns non-fatal warnings; THROWS
   // std::runtime_error on a fatal load (min_libcvc gate, parse error, no yaml support), and
-  // document_args_error when its arguments do not match its args: block or ask for --help.
+  // document_args_error when its arguments do not match its args: block or ask for --help. It
+  // decides where the document's programs run (Runtime::isolated_group). Host thread, outside a
+  // pump.
   std::vector<std::string> load(const std::string &path);
 
   // Whether the last load()ed document declares an args: block.
@@ -182,7 +191,8 @@ public:
   // runs each with runtime().run_program).
   const std::vector<std::pair<std::string, std::string>> &tests() const;
 
-  // Mount a programmatically-built widget tree instead of a file. Applied next frame.
+  // Mount a programmatically-built widget tree instead of a file. Applied next frame. Host thread,
+  // outside a pump (Runtime::set_root).
   void set_root(Widget root);
 
   // --- per-frame (NEUTRAL core; no draw, no dt) ---
@@ -195,9 +205,9 @@ public:
   // scene work, warnings and frame hooks come after drain_end(). drain() is both.
   void drain_begin();
   void drain_end();
-  // Declare that a subscriber this host connected under `prefix` must run on the host thread
-  // (STATE_EXEC_THREADED.md 4.8). A document whose prefix is or contains a declared one is never
-  // pumped on a worker. Call before load().
+  // Declare that a subscriber this host connected at or under `prefix` must run on the host thread
+  // (STATE_EXEC_THREADED.md 4.8). A document whose prefix is at, above or under a declared one is
+  // never pumped on a worker (a write emits childChanged on every ancestor). Call before load().
   void declare_thread_affine_prefix(const std::string &prefix);
   // Wait, without cancelling anything, until no async kernel of this document is queued or
   // running: on the app's host, and on its own group's when the document is isolated. Host thread,
