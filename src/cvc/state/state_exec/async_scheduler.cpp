@@ -962,6 +962,7 @@ void async_scheduler::post_message(const std::string &path, const value_t &msg) 
   // The wait is notified under the lock: once the poster lets go of it, it touches the scheduler
   // no more, so a scheduler thread that drains this post may destroy the scheduler.
   std::lock_guard<std::mutex> lock(ingress_mutex_);
+  ingress_posts_.fetch_add(1, std::memory_order_relaxed);
   ingress_.emplace_back(path, msg);
   ingress_pending_.store(true, std::memory_order_seq_cst);
   notify_work();
@@ -988,6 +989,7 @@ void async_scheduler::track_async_call(std::shared_ptr<async_call> call) {
 
 void async_scheduler::post_async_completion(std::shared_ptr<async_call> call) {
   std::lock_guard<std::mutex> lock(ingress_mutex_); // notified under it: see post_message
+  ingress_posts_.fetch_add(1, std::memory_order_relaxed);
   completions_.push_back(std::move(call));
   ingress_pending_.store(true, std::memory_order_seq_cst);
   notify_work();

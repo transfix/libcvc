@@ -11,6 +11,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cvc/state/state_exec/async_stackless_evaluator.h>
 #include <cvc/state/state_exec/detail/lock_home.h>
 #include <cvc/state/state_exec/heap.h> // cycle_registry
@@ -245,6 +246,11 @@ public:
   void post_async_completion(std::shared_ptr<async_call> call);
   /// Async calls tracked and not yet finished.
   std::size_t async_calls_in_flight() const { return async_calls_.size(); }
+  /// Tests (AR-3b): the post_message() and post_async_completion() calls this scheduler has
+  /// taken, from any thread.
+  std::uint64_t ingress_posts_for_test() const noexcept {
+    return ingress_posts_.load(std::memory_order_relaxed);
+  }
 
   /// The steps a CPU millisecond of `proc`'s async calls is charged: its own
   /// execute_options::async_steps_per_cpu_ms, else limits.async_steps_per_cpu_ms from the tree
@@ -536,6 +542,8 @@ private:
   /// Set (under ingress_mutex_) while ingress_, completions_ or controls_ holds something, so a
   /// drain finds an empty ingress without the lock.
   std::atomic<bool> ingress_pending_{false};
+  /// post_message() and post_async_completion() calls taken (ingress_posts_for_test()).
+  std::atomic<std::uint64_t> ingress_posts_{0};
   /// The commands posted and not yet applied or refused, queued or in a batch a drain is
   /// applying: has_pending_control(). A command stops counting once its call is made, before its
   /// done runs, or as it is refused. destroying_ (under ingress_mutex_): the destructor took the
