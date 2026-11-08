@@ -1,0 +1,55 @@
+name: 'cvcpkg CLI'
+description: |
+  Installs the released, packaged cvcpkg CLI and puts it on PATH for the rest
+  of the job. It uses the one-line installers cvcpkg.org serves (install.sh,
+  install.ps1; cy-pca/cvcpkg docs/pypi-install.md), the way a developer
+  installs it, not a pip install of a git checkout.
+
+  The installer takes the registry's cvcpkg package for this platform and
+  checks its sha256. Where the registry has no package at the pinned version
+  (macOS: the registry's newest macOS package is 2.5.1), it falls back to the
+  checksum-verified standalone binary on the cvcpkg-v<version> GitHub release.
+  The binary is self-contained: PyInstaller freezes CPython 3.12, cvcpkg and
+  its remote/builder/signing/validate extras, so it needs no Python.
+
+  The pin keeps every job on the same cvcpkg. Bump `version` here to take a
+  new release.
+inputs:
+  version:
+    description: 'cvcpkg release to install (a cvcpkg-v<version> release).'
+    required: false
+    default: '2.5.12'
+runs:
+  using: 'composite'
+  steps:
+    - name: Install cvcpkg (POSIX)
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        CVCPKG_VERSION: ${{ inputs.version }}
+        CVCPKG_INSTALL_DIR: ${{ runner.temp }}/cvcpkg-bin
+      run: |
+        set -euo pipefail
+        curl -fsSL https://cvcpkg.org/install.sh | sh
+        echo "$CVCPKG_INSTALL_DIR" >> "$GITHUB_PATH"
+
+    - name: Install cvcpkg (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        CVCPKG_VERSION: ${{ inputs.version }}
+        CVCPKG_INSTALL_DIR: ${{ runner.temp }}\cvcpkg-bin
+      run: |
+        $ErrorActionPreference = 'Stop'
+        irm https://cvcpkg.org/install.ps1 | iex
+        # install.ps1 adds the dir to the USER Path, which later steps do not
+        # read; GITHUB_PATH does.
+        Add-Content -Path $env:GITHUB_PATH -Value $env:CVCPKG_INSTALL_DIR
+
+    # A separate step because GITHUB_PATH only takes effect for later steps.
+    - name: Check the cvcpkg CLI
+      shell: bash
+      run: |
+        set -euo pipefail
+        command -v cvcpkg
+        cvcpkg --version

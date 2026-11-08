@@ -45,53 +45,89 @@ outputs:
 runs:
   using: 'composite'
   steps:
-    # PINNED, deliberately. This is the one `uses:` in this repo that points
-    # at another repository, and it used to track @master — so every commit
-    # to libcvc-deps was live in libcvc CI the moment it merged, with no
-    # review and no way to reproduce a green run later.
+    # The packaged cvcpkg CLI (cvcpkg.org's installer, pinned in
+    # ../cvcpkg-cli). This used to be transfix/libcvc-deps's cvcpkg-install
+    # action, pinned by SHA, which pip installed cy-pca/cvcpkg master from a
+    # sparse git checkout. transfix/libcvc-deps is archived, and installing the
+    # tool from a repo made every cvcpkg commit live in libcvc CI the moment it
+    # merged: on 2026-08-05 a change to that checkout's PEP 517 backend failed
+    # every package-* job on every open PR for 37 minutes before any C++
+    # compiled. A released package is versioned, checksummed and reproducible.
     #
-    # That is not hypothetical. On 2026-08-05 libcvc-deps merged an in-tree
-    # PEP 517 backend (its PR #448, on master at 06:16:53Z). The action's
-    # sparse checkout did not include the `pep517-backend/` directory the new
-    # `backend-path` names, so `pip install ./_libcvc-deps` failed before any
-    # C++ compiled:
-    #
-    #     BackendUnavailable: Cannot find module 'cvcpkg_build_backend'
-    #       in ['.../_libcvc-deps/pep517-backend']
-    #
-    # Every package-linux / package-macos / package-windows job on every open
-    # libcvc PR failed for the next 37 minutes, until libcvc-deps #462 added
-    # the directory to the sparse checkout at 06:53:34Z. Nothing in libcvc
-    # changed; nothing in libcvc could have prevented it.
-    #
-    # A full-length commit SHA is what GitHub recommends for third-party
-    # actions, and it is what makes a libcvc CI run reproducible: re-running
-    # an old commit resolves the same action it originally used.
-    #
-    # To bump: pick a libcvc-deps commit, put its full SHA here, and note what
-    # it buys in the commit message. Tags are not usable for this yet — the
-    # newest libcvc-deps tag (cvcpkg-v2.0.0) predates the fix above. Prefer a
-    # tag once the tag series catches up with master.
+    # Python 3.12 stays: the frozen cvcpkg does not need it, but later steps in
+    # the jobs that use this action ran under the Python the old action set up.
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install the cvcpkg CLI
+      uses: ./.github/actions/cvcpkg-cli
+
+    # "Just recipes": install libcvc's dependency closure straight from its
+    # in-tree recipe (single source of truth), instead of a parallel
+    # cvc-requirements.yaml. cvcpkg install-deps reads the recipe's
+    # build+runtime deps (host_tools excluded; cvcpkg-build-tools provides
+    # cmake/ninja). The same command, prefix default and empty-path fallback
+    # as the libcvc-deps action this replaces.
     - name: Install libcvc-deps via cvcpkg
       id: cvcpkg
-      # libcvc-deps master @ 2026-08-05T07:15:32Z
-      # "fix(recipes): co-locate the PyInstaller patch with its recipe (#461)"
-      # Includes #462, the sparse-checkout fix for pep517-backend.
-      uses: transfix/libcvc-deps/.github/actions/cvcpkg-install@c5091347c596fcf09c697bc74c585370fce08ad9
-      with:
-        # The cvcpkg TOOL relocated to cy-pca/cvcpkg; transfix/libcvc-deps is archived
-        # (frozen, and its cvcpkg carried the broken-stdlib bundle-extraction bug). This
-        # composite action's default `repository` is still the archived repo, so it
-        # would reinstall that OLD cvcpkg and clobber the cy-pca one the pip steps
-        # install — feeding the broken tool to the later cvcgl/pycvc-gl pack steps.
-        # Point it at the maintained, fixed cvcpkg instead (@master).
-        repository: cy-pca/cvcpkg
-        libcvc_deps_ref: master
-        # "Just recipes": install libcvc's dependency closure straight from its
-        # in-tree recipe (single source of truth), instead of a parallel
-        # cvc-requirements.yaml. cvcpkg install-deps reads the recipe's
-        # build+runtime deps (host_tools excluded — CI provides cmake/ninja).
-        recipe: cvcpkg/recipes/libcvc
-        build_type: ${{ inputs.build_type }}
-        link: ${{ inputs.link }}
-        prefix: ${{ inputs.prefix }}
+      shell: bash
+      env:
+        LCD_RECIPE: cvcpkg/recipes/libcvc
+        LCD_BUILD_TYPE: ${{ inputs.build_type }}
+        LCD_LINK: ${{ inputs.link }}
+        LCD_PREFIX: ${{ inputs.prefix }}
+      run: |
+        set -euo pipefail
+        case "$RUNNER_OS" in
+          Linux)   platform=linux ;;
+          macOS)   platform=macos ;;
+          Windows) platform=windows ;;
+          *)       platform=$(echo "$RUNNER_OS" | tr '[:upper:]' '[:lower:]') ;;
+        esac
+        if [ "$platform" = "windows" ]; then
+          arch="x86_64"
+        else
+          case "$(uname -m)" in
+            x86_64|amd64|x64) arch="x86_64" ;;
+            aarch64|arm64)    arch="arm64" ;;
+            *)                arch=$(uname -m) ;;
+          esac
+        fi
+
+        prefix="${LCD_PREFIX}"
+        if [ -z "$prefix" ]; then
+          if [ "$platform" = "windows" ]; then
+            prefix="D:/libcvc-deps"
+          else
+            prefix="$HOME/libcvc-deps"
+          fi
+        fi
+        mkdir -p "$prefix"
+        config=$(echo "${LCD_BUILD_TYPE}" | tr '[:upper:]' '[:lower:]')
+
+        if [ ! -e "${LCD_RECIPE}" ]; then
+          echo "fetch-libcvc-deps: recipe path not found: ${LCD_RECIPE}"
+          echo "path=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        cmd=(
+          cvcpkg install-deps "${LCD_RECIPE}"
+          --prefix "$prefix"
+          --platform "$platform"
+          --arch "$arch"
+          --config "$config"
+          --link "${LCD_LINK}"
+        )
+        echo "fetch-libcvc-deps: ${cmd[*]}"
+        if "${cmd[@]}"; then
+          echo "fetch-libcvc-deps: installed to $prefix"
+          ls "$prefix" | head -20 || true
+          echo "path=$prefix" >> "$GITHUB_OUTPUT"
+        else
+          echo "fetch-libcvc-deps: install failed; falling back."
+          echo "path=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
