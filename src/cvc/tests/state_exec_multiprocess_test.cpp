@@ -9,6 +9,8 @@
 
 #ifndef _WIN32
 
+#include "ipc_socket_path.h"
+
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -46,10 +48,8 @@ namespace {
 std::string make_socket_path(const std::string &label) {
   auto pid = static_cast<long long>(::getpid());
   auto now = std::chrono::steady_clock::now().time_since_epoch().count();
-  auto dir = std::filesystem::temp_directory_path();
-  auto p = dir / ("cvc_exec_mp_" + std::to_string(pid) + "_" + std::to_string(now) + "_" + label +
-                  ".sock");
-  return p.string();
+  return cvc_test::ipc_socket_path("cvc_exec_mp_" + std::to_string(pid) + "_" +
+                                   std::to_string(now) + "_" + label + ".sock");
 }
 
 bool wait_for_socket(const std::string &path, std::chrono::milliseconds timeout) {
