@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/detail/priority.h>
@@ -9,6 +10,7 @@
 #include <cvc/state/state_exec/state_value_codec.h> // snapshot / restore
 #include <iterator>
 #include <stdexcept>
+#include <thread>
 
 namespace cvc::state_exec {
 
@@ -20,19 +22,55 @@ scheduler::scheduler(scheduling_policy policy)
     : policy_(policy), evaluator_(builtins::make_default_environment()),
       procs_(policy != scheduling_policy::round_robin), idle_(std::make_shared<detail::wakeup>()) {}
 
-// Stage 1 interfaces: stubs. S1.1 binds the registry and the stream on every entry, and S1.4 takes
-// the pump owner; until then they are stored and unused.
+// Stage 1 interfaces: stubs. S1.1 binds the registry and the stream on every entry; until then
+// they are stored and unused.
 void scheduler::set_cycle_registry(cycle_registry *r) { registry_ = r; }
 
 void scheduler::set_random_stream(random_stream *s) { random_ = s; }
 
-scheduler::pump_owner_scope::pump_owner_scope(scheduler &s) : s_(s), outer_() {}
+scheduler::pump_owner_scope::pump_owner_scope(scheduler &s) : s_(s), outer_() {
+  // "No owner, or me" (S1-Q4), as async_scheduler's: taken from unset with acquire.
+  const std::thread::id me = std::this_thread::get_id();
+  std::thread::id seen{};
+  while (!s_.pump_owner_.compare_exchange_weak(seen, me, std::memory_order_acquire,
+                                               std::memory_order_relaxed)) {
+    if (seen == me) { // nested in a scope of this thread
+      outer_ = me;
+      return;
+    }
+    if (seen != std::thread::id{})
+      throw std::runtime_error(kPumpedElsewhereError);
+  }
+}
 
-scheduler::pump_owner_scope::~pump_owner_scope() = default;
+scheduler::pump_owner_scope::~pump_owner_scope() {
+  s_.pump_owner_.store(outer_, std::memory_order_release);
+}
 
-bool scheduler::pumped_elsewhere() const noexcept { return false; }
+bool scheduler::pumped_elsewhere() const noexcept {
+  const std::thread::id owner = pump_owner_.load(std::memory_order_relaxed);
+  return owner != std::thread::id{} && owner != std::this_thread::get_id();
+}
 
 namespace {
+// S1-Q4 (td 4.1), as async_scheduler's: debug builds, or CVC_EXEC_VERIFY=1 (read once), abort on a
+// public mutator called while another thread pumps.
+#ifdef NDEBUG
+const bool kVerifyPumpOwner = [] {
+  const char *v = std::getenv("CVC_EXEC_VERIFY");
+  return v && *v && *v != '0';
+}();
+#else
+constexpr bool kVerifyPumpOwner = true;
+#endif
+
+void verify_pump_owner(const scheduler &s, const char *what) {
+  if (kVerifyPumpOwner && s.pumped_elsewhere()) {
+    std::fprintf(stderr, "%s: %s\n", what, kPumpedElsewhereError);
+    std::abort();
+  }
+}
+
 // What a posted command never applied, or whose call threw, tells its done: false (S0.0's
 // contract; a query has no done). done must not throw.
 void refuse_control(control_cmd &cmd) noexcept {
@@ -388,6 +426,7 @@ uint64_t max_alloc_bytes_from_state(cvc::state &root, const std::string &schedul
 
 int scheduler::execute(const std::string &script, const execute_options &opts) {
   detail::check_not_in_async_kernel("scheduler::execute");
+  verify_pump_owner(*this, "scheduler::execute");
   int pid = next_pid_++;
   process_ptr pp = make_process(); // built in place: no move of its tables
   process &proc = *pp;
@@ -426,6 +465,7 @@ int scheduler::execute(const std::string &script, const execute_options &opts) {
 
 int scheduler::execute(const value_t &expr, const execute_options &opts) {
   detail::check_not_in_async_kernel("scheduler::execute");
+  verify_pump_owner(*this, "scheduler::execute");
   int pid = next_pid_++;
   process_ptr pp = make_process(); // built in place: no move of its tables
   process &proc = *pp;
@@ -855,6 +895,7 @@ void scheduler::register_watch_handler(int pid, int watch_id, value_t handler,
 void scheduler::register_watch_handler(int pid, int watch_id, value_t handler,
                                        const std::string &path,
                                        boost::shared_ptr<cvc::state> root) {
+  verify_pump_owner(*this, "scheduler::register_watch_handler");
   auto it = procs_.all().find(pid);
   if (it == procs_.all().end())
     return;
@@ -882,6 +923,7 @@ void scheduler::unregister_watch_handler(int pid, int watch_id) {
 void scheduler::set_watch_root(cvc::state *root) { set_watch_root(root, nullptr); }
 
 void scheduler::set_watch_root(cvc::state *root, boost::shared_ptr<cvc::state> pin) {
+  verify_pump_owner(*this, "scheduler::set_watch_root");
   if (root != watch_root_) {
     if (tree_changes_.root())
       tree_changes_.watch(root); // counted afresh (a new root counts as a change)
@@ -1116,6 +1158,7 @@ void scheduler::handle_watch_event(process &proc) {
 }
 
 bool scheduler::send_signal(int pid, const std::string &signal) {
+  verify_pump_owner(*this, "scheduler::send_signal");
   auto it = procs_.all().find(pid);
   if (it == procs_.all().end())
     return false;
@@ -1215,6 +1258,7 @@ void scheduler::release_if_idle(process &proc) {
 }
 
 bool scheduler::pause(int pid) {
+  verify_pump_owner(*this, "scheduler::pause");
   auto it = procs_.all().find(pid);
   if (it == procs_.all().end())
     return false;
@@ -1231,6 +1275,7 @@ bool scheduler::pause(int pid) {
 }
 
 bool scheduler::resume(int pid) {
+  verify_pump_owner(*this, "scheduler::resume");
   auto it = procs_.all().find(pid);
   if (it == procs_.all().end())
     return false;
@@ -1345,6 +1390,7 @@ std::size_t scheduler::total_pending_messages() const {
 
 bool scheduler::kill(int pid) {
   detail::check_not_in_async_kernel("scheduler::kill");
+  verify_pump_owner(*this, "scheduler::kill");
   auto it = procs_.all().find(pid);
   if (it == procs_.all().end())
     return false;
@@ -1356,6 +1402,7 @@ bool scheduler::kill(int pid) {
 }
 
 int scheduler::restore(process_ptr proc) {
+  verify_pump_owner(*this, "scheduler::restore");
   // A stack that holds a lock (a lock_body with its hold, or a lock_enter woken with a grant)
   // can't be restored: no snapshot makes one, and its hold is no restored process's (protocol
   // 5.11; LW-12).
@@ -1396,12 +1443,14 @@ bool scheduler::snapshot(int pid, cvc::state &node) const {
 }
 
 int scheduler::restore(cvc::state &node, environment_ptr natives) {
+  verify_pump_owner(*this, "scheduler::restore");
   process_ptr proc = decode_process(node);
   rebind_natives(proc->state, natives);
   return restore(std::move(proc));
 }
 
 int scheduler::fork(int pid) {
+  verify_pump_owner(*this, "scheduler::fork");
   auto it = procs_.all().find(pid);
   if (it == procs_.all().end())
     return -1;
@@ -1486,6 +1535,7 @@ int scheduler::fork(int pid) {
 // ---------------------------------------------------------------------------
 
 bool scheduler::set_priority(int pid, int priority) {
+  verify_pump_owner(*this, "scheduler::set_priority");
   auto it = procs_.all().find(pid);
   if (it == procs_.all().end())
     return false;
@@ -1525,6 +1575,7 @@ std::optional<priority_info> scheduler::get_priority(int pid) const {
 }
 
 priority_change scheduler::set_priority_checked(int caller_pid, int pid, int priority) {
+  verify_pump_owner(*this, "scheduler::set_priority_checked");
   const process *caller = procs_.find(caller_pid);
   const process *target = procs_.find(pid);
   if (!caller || !target)
@@ -1547,6 +1598,7 @@ std::optional<priority_info> scheduler::get_priority_as(int caller_pid, int pid)
 }
 
 bool scheduler::set_priority_floor(int pid, int floor) {
+  verify_pump_owner(*this, "scheduler::set_priority_floor");
   process *p = procs_.find(pid);
   if (!p)
     return false;
@@ -1799,6 +1851,7 @@ void scheduler::raise_exit_exception(int pid) const {
 
 bool scheduler::reap(int pid) {
   detail::check_not_in_async_kernel("scheduler::reap");
+  verify_pump_owner(*this, "scheduler::reap");
   if (pid == current_pid_) {
     // The process stepping now (its on_complete reaping it): erased once its step is over.
     const process *p = procs_.find(pid);

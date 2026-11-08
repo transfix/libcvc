@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <atomic>
 #include <boost/signals2.hpp>
+#include <cassert>
 #include <chrono>
 #include <climits>
 #include <cmath>
@@ -274,6 +275,11 @@ process_table::process_table(bool by_priority) : by_priority_(by_priority) {
 const process_ptr &process_table::insert(process_ptr p) {
   process &proc = *p;
   proc.table = process::table_entry{};
+#ifndef NDEBUG
+  // A pid source below a live pid (set_pid_source refuses one) would replace it here (S1.4).
+  if (const auto old = map_.find(proc.pid); old != map_.end())
+    assert(is_finished(old->second->status) && "process_table: insert replaces a live pid");
+#endif
   const auto [it, inserted] = map_.insert_or_assign(proc.pid, std::move(p));
   (void)inserted;
   if (!is_finished(proc.status))

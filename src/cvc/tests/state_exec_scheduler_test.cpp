@@ -1134,6 +1134,112 @@ TEST_F(AsyncSchedulerTest, TenProcessesConcurrent) {
 }
 
 // ===========================================================================
+// Stage 1: pids from a source and the pump owner (docs/STATE_EXEC_THREADED.md 4.1, 4.5; S1.md
+// S1.4)
+// ===========================================================================
+
+// S1.4: schedulers sharing a pid source never repeat a pid: each draws the source's next one, for
+// an execute, a fork and a restore alike, so one scheduler's pids increase. A source at or below
+// a pid already issued is refused (process_table's insert rule), and the own counter, taken back,
+// goes on above what the source issued.
+TEST(AsyncSchedulerPids, ASourceGivesIncreasingPidsAndAStaleOneIsRefused) {
+  auto source = std::make_shared<std::atomic<int>>(100);
+  async_scheduler a, b;
+  a.set_pid_source(source);
+  b.set_pid_source(source);
+  std::vector<int> pa, pb;
+  for (int i = 0; i < 3; ++i) {
+    pa.push_back(a.execute(std::string("(begin 1 2 3)")));
+    pb.push_back(b.execute(std::string("(begin 1 2 3)")));
+  }
+  pa.push_back(a.fork(pa[0]));
+  pa.push_back(a.restore(make_process()));
+  EXPECT_EQ(pa, (std::vector<int>{100, 102, 104, 106, 107}));
+  EXPECT_EQ(pb, (std::vector<int>{101, 103, 105}));
+  EXPECT_EQ(source->load(), 108);
+
+  async_scheduler c;
+  for (int i = 0; i < 5; ++i)
+    c.execute(std::string("1")); // pids 1..5
+  EXPECT_THROW(c.set_pid_source(std::make_shared<std::atomic<int>>(5)), std::invalid_argument);
+  EXPECT_EQ(c.execute(std::string("1")), 6); // the refused source was not taken
+  EXPECT_NO_THROW(c.set_pid_source(std::make_shared<std::atomic<int>>(7)));
+  EXPECT_EQ(c.execute(std::string("1")), 7);
+  // A source set before issued pid 7: a new one must be above it too.
+  EXPECT_THROW(c.set_pid_source(std::make_shared<std::atomic<int>>(7)), std::invalid_argument);
+  a.set_pid_source(nullptr);
+  EXPECT_EQ(a.execute(std::string("1")), 108);
+}
+
+// S1-Q4: the pump owner's rule, "no owner, or me", on both schedulers. A scope nests on its
+// thread, another thread's scope is refused while one is held, and the owner is released when the
+// outermost scope ends, after which another thread may take it.
+template <class S> void the_pump_owner_rule(S &s) {
+  using scope = typename S::pump_owner_scope;
+  const auto elsewhere_seen_from_another_thread = [&s] {
+    bool seen = false;
+    std::thread([&] { seen = s.pumped_elsewhere(); }).join();
+    return seen;
+  };
+  const auto another_thread_takes_it = [&s] {
+    std::string refused;
+    std::thread([&] {
+      try {
+        scope taken(s);
+      } catch (const std::runtime_error &e) {
+        refused = e.what();
+      }
+    }).join();
+    return refused;
+  };
+  EXPECT_FALSE(s.pumped_elsewhere());
+  EXPECT_FALSE(elsewhere_seen_from_another_thread());
+  {
+    scope outer(s);
+    EXPECT_FALSE(s.pumped_elsewhere()); // mine
+    EXPECT_TRUE(elsewhere_seen_from_another_thread());
+    EXPECT_EQ(another_thread_takes_it(), kPumpedElsewhereError);
+    {
+      scope inner(s); // nests
+      EXPECT_FALSE(s.pumped_elsewhere());
+    }
+    EXPECT_TRUE(elsewhere_seen_from_another_thread()); // the inner scope kept the outer's owner
+    EXPECT_EQ(another_thread_takes_it(), kPumpedElsewhereError);
+  }
+  EXPECT_FALSE(elsewhere_seen_from_another_thread()); // released
+  EXPECT_EQ(another_thread_takes_it(), "");
+  // Held by another thread: this one is refused, and sees it pumped elsewhere.
+  std::atomic<bool> held{false}, done{false};
+  std::thread holder([&] {
+    scope taken(s);
+    held = true;
+    while (!done)
+      std::this_thread::yield();
+  });
+  while (!held)
+    std::this_thread::yield();
+  EXPECT_TRUE(s.pumped_elsewhere());
+  EXPECT_THROW(scope mine(s), std::runtime_error);
+  done = true;
+  holder.join();
+  EXPECT_FALSE(s.pumped_elsewhere());
+  EXPECT_NO_THROW(scope mine(s));
+}
+
+TEST(SchedulerPumpOwner, NestsRefusesAnotherThreadAndReleases) {
+  {
+    SCOPED_TRACE("async_scheduler");
+    async_scheduler s;
+    the_pump_owner_rule(s);
+  }
+  {
+    SCOPED_TRACE("scheduler");
+    scheduler s;
+    the_pump_owner_rule(s);
+  }
+}
+
+// ===========================================================================
 // Cross-scheduler consistency
 // ===========================================================================
 

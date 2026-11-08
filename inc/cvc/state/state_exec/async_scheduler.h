@@ -165,6 +165,9 @@ public:
   /// (sleep/msg-recv/await) are killed too, so nothing lingers after the document
   /// that owned them closes. `owner` == "" reaps the unowned group.
   int kill_owner(const std::string &owner);
+  /// kill(pid) with `reason` as the process's exit error (get_exit_error): a pool failing a group
+  /// kills its processes with "internal error" (S1.6). False for an unknown or finished pid.
+  bool kill(int pid, const std::string &reason);
 
   /// Cooperative sleep: put a process into `waiting`; woken by the pump
   /// (wake_sleeping_processes, called at the top of step()) once the deadline
