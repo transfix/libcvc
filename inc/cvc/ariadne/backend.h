@@ -174,6 +174,14 @@ struct Backdrop {
   Size size;           // a group's authored size: the backdrop's area is at least this big
 };
 
+// One piece of a line of text with pictures in it (a `text:` with `emoji:`, §5.11), handed to
+// text_runs: text, or a published image drawn one line tall in the line. `text` is also what a
+// picture says where it can't be drawn (its `:shortcode:`).
+struct TextRun {
+  std::string text;
+  std::string image; // a published image's name ("" for text)
+};
+
 // What a surface can and cannot do. AppRuntime::load checks a document's
 // `requires:` against it (§16.3/§7.6, cvc/ariadne/requires.h, which maps the
 // capability tokens onto these fields), and (has? "...") reads it at run time —
@@ -331,6 +339,15 @@ public:
     (void)rgb;
     text_value(label, value);
   }
+  // A line of text with pictures in it (§5.11 `emoji:`): the runs one after another on one line,
+  // each picture one line tall at its own shape, in `rgb` when it is not null. Returns false when
+  // the backend can't put a picture in a line (the terminals: the core then draws the text as it
+  // is, the pictures' `:shortcode:`s included). Default false.
+  virtual bool text_runs(const std::vector<TextRun> &runs, const float *rgb) {
+    (void)runs;
+    (void)rgb;
+    return false;
+  }
   virtual void separator() = 0;
   // A read-only line graph of VALUES (oldest first) between LO and HI (LO >= HI: fitted to them),
   // with OVERLAY as its caption, HEIGHT pixels tall where the backend has pixels. By default a
@@ -402,6 +419,19 @@ public:
   // IsMouseDragging()); a mock/test backend can drive them. A disabled item reports false for both.
   virtual bool item_hovered() { return false; }
   virtual bool item_dragged() { return false; }
+  // Whether the LAST item drawn shows in its window, not scrolled out of view or clipped away. An
+  // autoplaying video plays while it does (§5.13). Default true: a backend that draws everything.
+  virtual bool item_visible() { return true; }
+
+  // §5.11 a picture or a player that fills the width (`size: "N%"`): the width, in the document's
+  // px, the next widget has on its line. In a window that sizes itself to its content, where the
+  // content makes the width, at least `at_least`, so a window holding little else still has room
+  // for it. 0 where the backend can't tell before it lays out (the terminals): the core then uses
+  // the widget's own width.
+  virtual float available_width(float at_least) const {
+    (void)at_least;
+    return 0.0f;
+  }
 
   // §4.6 widget-level on_drag_start / on_drag_end: one-shot EDGES for the LAST item drawn.
   // item_drag_started(): the item just became active this frame (a press/drag gesture began).

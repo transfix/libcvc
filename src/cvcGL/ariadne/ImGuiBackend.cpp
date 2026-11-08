@@ -823,6 +823,40 @@ void ImGuiBackend::text_value_colored(const char *label, const std::string &valu
   std::string line = (label && *label) ? (std::string(label) + ": " + value) : value;
   ui::TextLineColored(line.c_str(), rgb[0], rgb[1], rgb[2]);
 }
+bool ImGuiBackend::text_runs(const std::vector<cvc::ariadne::TextRun> &runs, const float *rgb) {
+#ifdef CVC_ENABLE_IMGUI
+  // Each run right after the last (SameLine with no spacing), a picture as tall as a line of text
+  // at its own shape; a picture not published yet shows its text.
+  const float lh = ImGui::GetTextLineHeight();
+  if (rgb)
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(rgb[0], rgb[1], rgb[2], 1.0f));
+  ImGui::BeginGroup();
+  bool first = true;
+  for (const cvc::ariadne::TextRun &r : runs) {
+    if (!first)
+      ImGui::SameLine(0.0f, 0.0f);
+    first = false;
+    int W = 0, H = 0;
+    const unsigned int tex = r.image.empty() ? 0 : image_texture(r.image.c_str(), W, H);
+    if (tex != 0 && W > 0 && H > 0) {
+      ImGui::Image(static_cast<ImTextureID>(static_cast<std::intptr_t>(tex)),
+                   ImVec2(lh * static_cast<float>(W) / static_cast<float>(H), lh));
+      if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip))
+        ImGui::SetTooltip("%s", r.text.c_str()); // its :shortcode:
+    } else {
+      ImGui::TextUnformatted(r.text.data(), r.text.data() + r.text.size());
+    }
+  }
+  ImGui::EndGroup();
+  if (rgb)
+    ImGui::PopStyleColor();
+  return true;
+#else
+  (void)runs;
+  (void)rgb;
+  return false;
+#endif
+}
 void ImGuiBackend::separator() { ui::Separator(); }
 void ImGuiBackend::progress_bar(const char *label, float fraction, const std::string &overlay) {
 #ifdef CVC_ENABLE_IMGUI
@@ -912,6 +946,28 @@ bool ImGuiBackend::item_hovered() {
   return false;
 #endif
 }
+// §5.13 an autoplaying video plays while its picture shows: not scrolled out of its window's view.
+bool ImGuiBackend::item_visible() {
+#ifdef CVC_ENABLE_IMGUI
+  return ImGui::IsItemVisible();
+#else
+  return true;
+#endif
+}
+// §5.11 the width left on the line, in the document's px. A window that fits its content has the
+// width its widest row makes (last frame's), so a picture that takes all of it keeps it as it is;
+// `at_least` keeps a window holding little else from fitting the picture to nothing.
+float ImGuiBackend::available_width(float at_least) const {
+#ifdef CVC_ENABLE_IMGUI
+  const float scale = ui_px(1.0f);
+  const float avail = ImGui::GetContentRegionAvail().x / (scale > 0.0f ? scale : 1.0f);
+  const bool fit = (ImGui::GetCurrentWindow()->Flags & ImGuiWindowFlags_AlwaysAutoResize) != 0;
+  return fit ? ImMax(avail, at_least) : ImMax(avail, 1.0f);
+#else
+  (void)at_least;
+  return 0.0f;
+#endif
+}
 // §4.6 widget on_drag: is the last item being actively dragged this frame? IsItemActive() is true
 // while the item holds the mouse capture (press-and-hold begun on it); gating on IsMouseDragging()
 // restricts firing to frames where the pointer is actually moving past the drag threshold, so a
@@ -994,10 +1050,22 @@ ariadne::BoolEdit ImGuiBackend::checkbox(const char *label, bool current) {
 // back into an auto-width column, which ImGui re-fits to its content each frame: the column shrank
 // to 65% of itself every frame until the 48 px floor snapped it back, so the slider never held a
 // width long enough to be dragged.
-void reserve_label_width(const char *label) {
+//
+// In a row of widgets side by side (a player's Play, seek slider and Mute) the widget takes at most
+// the 16 font sizes ImGui gives an auto-resizing window's items, so the cells after it keep their
+// room: filling the line, as in a table cell, pushed them out of the window.
+void reserve_label_width(const char *label, bool in_row) {
   const ImGuiStyle &style = ImGui::GetStyle();
   const float labelW = ImGui::CalcTextSize(label, nullptr, /*hide_text_after_double_hash=*/true).x;
   const ImGuiWindow *win = ImGui::GetCurrentWindow();
+  if (in_row) {
+    const float room = (win->Flags & ImGuiWindowFlags_AlwaysAutoResize)
+                           ? FLT_MAX
+                           : ImGui::GetContentRegionAvail().x;
+    const float fit = ImMin(room, 16.0f * ImGui::GetFontSize()) - style.ItemInnerSpacing.x - labelW;
+    ImGui::SetNextItemWidth(ImMax(fit, 48.0f));
+    return;
+  }
   // A window that fits its widgets grows to the label instead -- and shrinking the frame to the
   // window's width there would only shrink the window with it, frame after frame. It grows only as
   // far as the view's edge, though, which on a phone is near: ImGui gives such a window's widgets
@@ -1026,7 +1094,7 @@ ariadne::IntEdit ImGuiBackend::slider_int(const char *label, const char *key, in
                                           int hi) {
 #ifdef CVC_ENABLE_IMGUI
   int &v = *cache_int(key, current, ImGui::IsAnyItemActive());
-  reserve_label_width(label);
+  reserve_label_width(label, in_flow_row());
   const bool changed = ImGui::SliderInt(label, &v, lo, hi);
   const bool committed = ImGui::IsItemDeactivatedAfterEdit(); // the drag ended
   return {changed, committed, v};
@@ -1043,7 +1111,7 @@ ariadne::DoubleEdit ImGuiBackend::slider_double(const char *label, const char *k
                                                 double lo, double hi, const char *fmt) {
 #ifdef CVC_ENABLE_IMGUI
   float &v = *cache_float(key, static_cast<float>(current), ImGui::IsAnyItemActive());
-  reserve_label_width(label);
+  reserve_label_width(label, in_flow_row());
   const bool changed =
       ImGui::SliderFloat(label, &v, static_cast<float>(lo), static_cast<float>(hi), fmt);
   const bool committed = ImGui::IsItemDeactivatedAfterEdit();
@@ -1067,7 +1135,7 @@ ariadne::IndexEdit ImGuiBackend::combo(const char *label, int current_index,
 #ifdef CVC_ENABLE_IMGUI
   const int idx =
       (current_index >= 0 && current_index < static_cast<int>(options.size())) ? current_index : 0;
-  reserve_label_width(label);
+  reserve_label_width(label, in_flow_row());
   if (ImGui::BeginCombo(label, options[idx].c_str())) {
     for (std::size_t i = 0; i < options.size(); ++i) {
       const bool sel = (static_cast<int>(i) == idx);
@@ -1136,7 +1204,7 @@ ariadne::StringEdit ImGuiBackend::input_text(const char *label, const char *key,
   if (!ImGui::IsAnyItemActive())
     buf = current;
   InputTextStr ud{&buf};
-  reserve_label_width(label);
+  reserve_label_width(label, in_flow_row());
   // EnterReturnsTrue commits on Enter (a chat box's send); IsItemDeactivatedAfterEdit commits on
   // focus-leave; CallbackResize lets the std::string grow past its initial capacity as typed.
   // Password: ImGui draws a mask and refuses to copy the text out.
@@ -1391,7 +1459,7 @@ ariadne::ColorEdit ImGuiBackend::color(const char *label, const float rgb[3]) {
   e.rgb[2] = rgb[2];
 #ifdef CVC_ENABLE_IMGUI
   e.drawn = true;
-  reserve_label_width(label);
+  reserve_label_width(label, in_flow_row());
   // ColorEdit3 edits e.rgb in place and returns true on any change this frame. Commit immediately
   // (like a discrete widget) — the core writes each change, so the picker reads its own value back
   // next frame with no per-widget edit cache (a colour edit is infrequent, not a continuous drag).
