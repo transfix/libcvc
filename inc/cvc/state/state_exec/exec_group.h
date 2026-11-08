@@ -48,8 +48,8 @@ struct group_pool_link {
   std::uint64_t skipped_since = 0; ///< the pump_all that first skipped it (the oldest goes first)
   int last_thread = -1;            ///< which thread pumped it last (CVC_EXEC_FORCE_MOVE)
   std::atomic<void *> call{nullptr}; ///< the pump_all it belongs to now, or null
-  random_stream *random = nullptr; ///< its math.random stream (seeded from its name)
-  std::string failure;             ///< what failed its last failed pump
+  random_stream *random = nullptr;   ///< its math.random stream (seeded from its name)
+  std::string failure;               ///< what failed its last failed pump
   /// Its lock home is attached to a single-mode manager (S1-Q1): every pool pumps it on the
   /// caller of pump_all only, as a host-affinity group. That keeps one pump_all's pumps of it on
   /// one thread; a single manager also needs one thread to drive the whole app (every pump_all of
@@ -83,13 +83,13 @@ struct pump_result {
 class exec_group {
 public:
   struct options {
-    std::string name;  ///< for logs and stats; seeds the random stream in deterministic mode
+    std::string name; ///< for logs and stats; seeds the random stream in deterministic mode
     /// The owner tag of what it runs (an Ariadne Runtime's): execute() submits with it when the
     /// execute_options give none, so kill_owner(owner) reaches the group's own submissions.
     std::string owner;
     group_affinity affinity = group_affinity::any;
-    cvc::app *app = nullptr;           ///< its settings, lock manager, pid source and kernel pool
-    cvc::state *watch_root = nullptr;  ///< null: the app's root
+    cvc::app *app = nullptr;          ///< its settings, lock manager, pid source and kernel pool
+    cvc::state *watch_root = nullptr; ///< null: the app's root
     /// The scope its global env extends; null: frozen_builtins(). A program's set binds in its
     /// own run env, never in the base, so a base is only read; but a native or host that writes
     /// an unfrozen base shared by several groups writes it from whichever thread pumps each, so a
