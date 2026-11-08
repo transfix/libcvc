@@ -1814,6 +1814,11 @@ jobs:
         exec_pool_test: OK ] AppExecPool.DeterministicModeSeedsGroupZero
         exec_pool_test: OK ] ExecGroupDeathTest.DestroyedFromInsideItsOwnPumpAborts
         exec_pool_test: OK ] ExecPool.FailedGroupsAreTheCallersOwn
+        exec_pool_test: OK ] AppExecPool.TwoBusyFrameGroupsDoNotStarveGroupZero
+        exec_pool_test: OK ] ExecPool.OneGroupsHostBodiesRunInQueueOrder
+        exec_pool_test: OK ] ExecGroupDeathTest.DestroyedFromACallbackOfItsCallAborts
+        exec_pool_test: OK ] ExecGroupDeathTest.DestroyedFromItsOwnHostBodyAborts
+        exec_pool_test: OK ] ExecPool.FailedGroupsOfAReusedThreadId
         state_exec_async_test: OK ] AsyncScheduler.KO01_KillOwnerSurvivesSlotsThatReapAndSubmit
         state_exec_async_test: OK ] AsyncScheduler.KO02_AThrowingKillDoesNotStopTheRest
         state_exec_async_calls_test: OK ] AsyncCalls.AnotherSchedulersThreadedFutureRaises
@@ -1831,6 +1836,7 @@ jobs:
         test_pycvc_exec.py: ok: test_exec_pool_frame_yields_keep_a_program_alive
         test_pycvc_exec.py: ok: test_exec_pool_size_follows_the_pools_threads
         test_pycvc_exec.py: ok: test_exec_collect_cycles_collects_its_registry
+        test_pycvc_exec.py: ok: test_exec_pool_frame_waiters_wait_for_the_frame
         test_pycvc_state_exec_locks.py: ok: test_po_pump_calls_refused_while_run_pumps
         test_pycvc_state_exec_locks.py: ok: test_po_raw_pump_call_holds_the_owner
         test_pycvc_state_exec_locks.py: ok: test_po_run_holds_the_owner_until_it_returns
