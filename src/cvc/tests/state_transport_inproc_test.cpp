@@ -65,8 +65,7 @@ TEST(StateTransportInprocTest, TwoShardConvergence) {
   t.register_shard(&sA);
   t.register_shard(&sB);
 
-  // First-set-on-fresh-child is lost (see adapter doc); set twice.
-  cvc::state::instance(aA)("k").value(std::string("init"));
+  // A fresh node's first write is journaled (see the adapter's attach()).
   cvc::state::instance(aA)("k").value(std::string("v1"));
   std::size_t pumped = t.pump_all();
   EXPECT_GE(pumped, 1u);
@@ -87,7 +86,6 @@ TEST(StateTransportInprocTest, RoundTripSuppressedByDedup) {
   t.register_shard(&sA);
   t.register_shard(&sB);
 
-  cvc::state::instance(aA)("rt").value(std::string("seed"));
   cvc::state::instance(aA)("rt").value(std::string("payload"));
   t.pump_all();
 
@@ -123,7 +121,6 @@ TEST(StateTransportInprocTest, ThreeShardFanOut) {
   t.register_shard(&sB);
   t.register_shard(&sC);
 
-  cvc::state::instance(aA)("fan").value(std::string("seed"));
   cvc::state::instance(aA)("fan").value(std::string("hello"));
   t.pump_all();
 
@@ -141,7 +138,6 @@ TEST(StateTransportInprocTest, CrossClusterIsolation) {
   t.register_shard(&sA);
   t.register_shard(&sB);
 
-  cvc::state::instance(aA)("iso").value(std::string("seed"));
   cvc::state::instance(aA)("iso").value(std::string("v"));
   t.pump_all();
 
@@ -160,7 +156,6 @@ TEST(StateTransportInprocTest, UnregisterStopsDelivery) {
   t.register_shard(&sA);
   t.register_shard(&sB);
 
-  cvc::state::instance(aA)("u").value(std::string("seed"));
   cvc::state::instance(aA)("u").value(std::string("first"));
   t.pump_all();
   EXPECT_EQ(cvc::state::instance(aB)("u").value(), "first");
@@ -184,7 +179,6 @@ TEST(StateTransportInprocTest, PublishReturnsStats) {
   t.register_shard(&sB);
   t.register_shard(&sC);
 
-  cvc::state::instance(aA)("p").value(std::string("seed"));
   cvc::state::instance(aA)("p").value(std::string("once"));
   auto pending = sA.drain_local();
   ASSERT_FALSE(pending.empty());
@@ -212,7 +206,6 @@ TEST(StateTransportInprocTest, AuthorityRejectionCountedAsRejected) {
   t.register_shard(&sA);
   t.register_shard(&sB);
 
-  cvc::state::instance(aA)("owned.x").value(std::string("seed"));
   cvc::state::instance(aA)("owned.x").value(std::string("nope"));
   auto drained = sA.drain_local();
   ASSERT_FALSE(drained.empty());

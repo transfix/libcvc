@@ -668,12 +668,15 @@ private:
     }
   };
 
-  // The node at path_, made when absent (a physical walk, as operator()'s), or its writable link's
-  // target. The job holds the chain from the tree's root down to it, and the link's, for the rest
-  // of its life (td 4.8): the nodes below it are held by the open frames.
+  // The node at path_, made when absent, as state-set's write finds it: through a writable link on
+  // every hop (a read-only one keeps the walk on the link node's own children), the last hop
+  // included, since the job writes the node's children as well as its text. The job holds the
+  // chain from the tree's root down to it, and the links', for the rest of its life (td 4.8): the
+  // nodes below it are held by the open frames.
   state_ptr target() {
     const state_ptr root = pins_.back();
-    return write_through_link(root->sharedChild(root, path_, &pins_), pins_);
+    return write_through_link(
+        root->childThroughLinksShared(path_, /*refuse_read_only=*/false, &pins_), pins_);
   }
 
   // Check `v`, and when writing, write it at `n`: a scalar's text, or a list's or dict's own

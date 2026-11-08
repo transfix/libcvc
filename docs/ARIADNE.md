@@ -1200,6 +1200,7 @@ entry warns. An entry is one of:
   | `input.mouse`, `input.keyboard` | pointer input; key and text input |
   | `raster.bitmap` | images show in real pixels (a GL window, or a kitty or Sixel terminal) |
   | `term`, `term.kitty`, `term.sixel` | a text terminal; one that speaks kitty graphics; one that draws Sixel |
+  | `relay` | the document is a relay's server document, run by `arisrv --doc` (§9.7) |
 
   GLSL runs in two places, and they are separate facts. The scene's shaders run in the
   scene adapter's renderer (`SceneAdapter::runs_shaders`), the UI's in the backend
@@ -2488,8 +2489,9 @@ and `childThroughLinks` (writes) ([`state.h`](../inc/cvc/state/state.h)), which 
 transparent link on every hop of the path; Ariadne binds (`bind.h`) and the state_exec
 `state-*` natives use them. The mode covers the whole subtree:
 
-- `rw`: a write under the hole (`state-set`, `state-data-set`, `state-from-json`, the
-  atomics, a widget commit) lands on the target's descendant, created when absent.
+- `rw`: a write under the hole (`state-set`, `state-set-tree`, `state-data-set`,
+  `state-from-json`, the atomics, a widget commit) lands on the target's descendant, created
+  when absent.
 - `ro`: a write under the hole lands on the hole's own local child and never touches the
   target. Reads keep seeing the target, so the local copy is shadowed. The atomics
   (`state-cas`, `state-swap`, `state-incr`) refuse instead (`read_only_error`), since their
@@ -2576,7 +2578,7 @@ document path is the document's (§5.6):
 |---|---|---|---|
 | `ari` | libcvc only (FTXUI, optionally tvision) | in the terminal; a `scene:` is dropped | [`src/ari`](../src/ari/main.cpp) |
 | `arigl` | libcvc + cvcGL (VTK, ImGui) | in a real window, or `--terminal` with its scene rendered behind the widgets | [`src/arigl`](../src/arigl/main.cpp) |
-| `arisrv` | libcvc + gRPC + WebSocket | headless, as a server (the conference relay + WS↔gRPC bridge) | [`src/arisrv`](../src/arisrv/main.cpp) |
+| `arisrv` | libcvc + gRPC + WebSocket | headless, as a server (the conference relay + WS↔gRPC bridge); with `--doc`, a server document on the relay (§9.7) | [`src/arisrv`](../src/arisrv/main.cpp) |
 | `arix`, `ariglx` | `ari`, `arigl` + an embedded CPython (pycvc, pycvc_gl, numpy) | as `ari` and `arigl`, plus a document's `python:` block and a Python program in place of the document (§9.6) | [`src/ariadne_python`](../src/ariadne_python/python_engine.h) |
 
 Each is its own cvcpkg package, built from its recipe in [`cvcpkg/recipes`](../cvcpkg/recipes)
@@ -3112,6 +3114,85 @@ stdlib and the pure-Python packages.
 - **No `xml.parsers.expat` and no SHA-2 in `hashlib`.** cvcpkg's wasm python312 ships without the
   objects they need, so a call into either aborts the page. That includes `hashlib.sha256()`
   and `random.seed()` with a string.
+
+### 9.7 A server document: `arisrv --doc`
+
+`arisrv --doc server.ari` runs a document on the relay
+([`server_document.h`](../inc/cvc/ariadne/server_document.h); the plan is
+[roadmap/ARIADNE_SCRIPTING_HOSTS.md](roadmap/ARIADNE_SCRIPTING_HOSTS.md) §6.1 and §6.5.3). It is a
+headless `AppRuntime`, with no backend and no scene, over the relay's own app tree: room rules,
+bots and checks, written in the DSL and held to its caps and its chroot.
+
+```yaml
+# server.ari, run by the relay: arisrv --doc server.ari
+requires: [relay]              # a relay's server document; elsewhere the load fails
+server:
+  publish: [board]             # every client is sent it; only this document writes it
+init: (state-set "board.status" "up")
+on_tick: |
+  (state-set "board.present" (length (state-children "room.participants")))
+  (state-set "board.rev" (state-get "sim.tick"))   # a live view watches this one key
+```
+
+- **When it runs.** In this order:
+  1. arisrv reads the `server:` block, before anything else that could fail late.
+  2. It binds its ports, as it always has.
+  3. It applies `--set`.
+  4. It seeds the scene, the avatar catalog and the policy.
+  5. It loads the document, which runs its `init:`.
+
+  `--set` comes before both the seeds and the document. The worlds plan's WD0 moves it last, as
+  the operator's override. A client that connects before the document has loaded still gets
+  `init:`'s writes, live.
+- **Every room step** (60 a second), `on_tick:` and the other residents run, ahead of the avatar
+  holon. What they write goes out at the end of that step, which §6.5 of the roadmap calls "the
+  next relay tick".
+- **The clock.** `on_tick:` runs once per room step: it is the room rules' cadence, not a
+  per-tick controller.
+  - Before each step the relay writes its world clock (the avatar holon's) to the document's
+    `sim.tick` and `sim.time`. These are the keys a scene's `clock:` publishes in a window (§9).
+  - `sim.tick` counts 120 a second, so it moves by about 2 a step, and never back. A change that
+    takes effect "at world tick N" means the same here as in the holon.
+- **The relay's loop.** The programs run on it, under the DSL's caps (`ariadne.limits.*`, which
+  arisrv's `--set` reaches, since it is applied before the document loads). A slow `on_tick:`
+  delays everyone's poses, so keep it short.
+- **Its own state.** The document binds under `ui.docs.arisrv`, which the relay never sends. No
+  client gets the document or its own state.
+- **`requires: [relay]`** holds only in a server document. On any other host, a document that
+  requires it fails to load, and the error says it runs on the relay (`arisrv --doc`).
+- **`server: publish:`** names the namespaces the document publishes.
+  - A name is a dotted path of identifiers. It may not be `conf`, `ui`, `ariadne`,
+    `state_exec` or `room`, or under one of them, and none may be inside another or overlap the
+    document's own prefix.
+  - Each is a writable hole of the same name in the document's chroot (§7.4): `board` there is
+    the tree's `board`. `state-set`, `state-set-tree` and the atomics write through it.
+    `state-delete` and `state-watch` act on the physical path (§7.4), so to take entries out,
+    rewrite their parent with `state-set-tree`.
+  - Every client is sent the published namespaces, live and in a joiner's snapshot. Clients'
+    interest takes only `conf` for now, so they drop them until a document subscribes (the
+    roadmap's `relay: subscribe:`, S2).
+  - Only the server writes them. Bound writes refuse a client's write there, as anywhere outside
+    its own participant, so a document that publishes needs `--bind-writes on`: arisrv refuses to
+    start without it.
+  - Writes reach clients in the order a program makes them. So a live view can watch one key:
+    write a section's fields, then its `rev`, and a client holds those fields by the time it
+    sees `rev` move.
+- **`room`** is a read-only hole on the relay's room, `conf.rooms.<room>`:
+  `(state-get "room.topic")`, `(state-children "room.participants")`. A write under it stays in
+  the document's own subtree.
+- **What the relay sends** is the room tree and the published namespaces, with or without a
+  document. Anything else in its tree, such as a `--set` key outside `conf`, stays on the relay.
+- **Stopping.** `(quit [code])` stops the relay with that exit status. A document that fails to
+  load stops it with 1. One arisrv cannot read, or a bad `server:` block, stops it with 2 before
+  it listens.
+- **A `scene:`** is neither drawn nor simulated on the relay yet. Its parse, the physics and bodies
+  included, is kept on the runtime (`ServerDocument::scene()`). This runtime is the one the world
+  runtime will run the world in, headless, as the holon's one physics world
+  ([roadmap/ARIADNE_WORLDS.md](roadmap/ARIADNE_WORLDS.md) §14). Until then the load warns that the
+  physics is not simulated.
+- **Other hosts** ignore a `server:` block, with a warning.
+- **Not yet:** a reload when the file changes, the network (`--net`), `on_signal:` for arisrv's
+  own SIGTERM, and Python (`arisrvx`, S1).
 
 ---
 

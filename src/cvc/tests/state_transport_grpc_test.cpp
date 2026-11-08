@@ -129,7 +129,6 @@ TEST(StateTransportGrpcTest, LateJoinerReceivesWritesMadeBeforeItConnected) {
   tA.register_shard(&sA);
   tB.register_shard(&sB);
 
-  cvc::state::instance(aA)("late.k").value(std::string("seed"));
   cvc::state::instance(aA)("late.k").value(std::string("v1"));
 
   // The drop: drained with zero connections, cursor advanced anyway.
@@ -167,7 +166,6 @@ TEST(StateTransportGrpcTest, LateJoinerBackfilledWhenLocalNodeDials) {
   tA.register_shard(&sA);
   tB.register_shard(&sB);
 
-  cvc::state::instance(aA)("dial.k").value(std::string("seed"));
   cvc::state::instance(aA)("dial.k").value(std::string("v1"));
   ASSERT_EQ(tA.connection_count(), 0u);
   EXPECT_GT(tA.pump_all(), 0u);
@@ -376,7 +374,6 @@ TEST(StateTransportGrpcTest, BackfillCanBeDisabled) {
   tA.register_shard(&sA);
   tB.register_shard(&sB);
 
-  cvc::state::instance(aA)("nobf.k").value(std::string("seed"));
   cvc::state::instance(aA)("nobf.k").value(std::string("v1"));
   tA.pump_all();
   tA.flush();
@@ -407,7 +404,6 @@ TEST(StateTransportGrpcTest, TwoEndpointConvergence) {
   tA.register_shard(&sA);
   tB.register_shard(&sB);
 
-  cvc::state::instance(aA)("k").value(std::string("init"));
   cvc::state::instance(aA)("k").value(std::string("v1"));
 
   std::size_t pumped = tA.pump_all();
@@ -437,7 +433,6 @@ TEST(StateTransportGrpcTest, RoundTripSuppressedByDedup) {
   tA.register_shard(&sA);
   tB.register_shard(&sB);
 
-  cvc::state::instance(aA)("rt").value(std::string("seed"));
   cvc::state::instance(aA)("rt").value(std::string("payload"));
   tA.pump_all();
   tA.flush();
@@ -470,7 +465,6 @@ TEST(StateTransportGrpcTest, CrossClusterIsolation) {
   tA.register_shard(&sA);
   tB.register_shard(&sB);
 
-  cvc::state::instance(aA)("iso").value(std::string("seed"));
   cvc::state::instance(aA)("iso").value(std::string("v"));
   tA.pump_all();
   tA.flush();
@@ -501,7 +495,7 @@ TEST(StateTransportGrpcTest, ThreeEndpointFanOut) {
   tB.register_shard(&sB);
   tC.register_shard(&sC);
 
-  cvc::state::instance(aA)("fan").value(std::string("seed"));
+  // One write to a fresh node, and one frame: the adapter journals a node's first write.
   cvc::state::instance(aA)("fan").value(std::string("hello"));
   tA.pump_all();
   tA.flush();
@@ -1107,8 +1101,7 @@ TEST(StateTransportGrpcReconnectTest, StopRestartReconnect) {
   tA->register_shard(&sA);
   tB.register_shard(&sB);
 
-  // Phase 1: replicate a value.
-  cvc::state::instance(aA)("k").value(std::string("seed"));
+  // Phase 1: replicate a value (a fresh node's first write, one frame).
   cvc::state::instance(aA)("k").value(std::string("v1"));
   tA->pump_all();
   tA->flush();
@@ -1155,7 +1148,6 @@ TEST(StateTransportGrpcReconnectTest, PeerDisconnectNoHang) {
   tA.register_shard(&sA);
   tB.register_shard(&sB);
 
-  cvc::state::instance(aA)("x").value(std::string("seed"));
   cvc::state::instance(aA)("x").value(std::string("v1"));
   tA.pump_all();
   tA.flush();
@@ -1231,8 +1223,7 @@ TEST(StateTransportGrpcTest, RelayForwardsBetweenStarClients) {
         << "relay R should have admitted both A and B before A writes";
   }
 
-  // A writes (set twice: first-set-on-fresh-child is not observed) and pumps -> A -> R -> B.
-  cvc::state::instance(aA)("k").value(std::string("init"));
+  // A writes and pumps -> A -> R -> B.
   cvc::state::instance(aA)("k").value(std::string("v1"));
   EXPECT_GT(tA.pump_all(), 0u);
 
@@ -1278,10 +1269,8 @@ std::string leaf(cvc::app &a, const std::string &path) {
   return n ? n->value() : std::string("<absent>");
 }
 
-// Write `v` at a fresh `path` so that it is journaled: the first set on a new child is not
-// observed, so it is set twice (as in RelayForwardsBetweenStarClients).
+// Write `v` at a fresh `path`, which journals it (as in RelayForwardsBetweenStarClients).
 void write_fresh(cvc::app &a, const std::string &path, const std::string &v) {
-  cvc::state::instance(a)(path).value(std::string("init"));
   cvc::state::instance(a)(path).value(v);
 }
 

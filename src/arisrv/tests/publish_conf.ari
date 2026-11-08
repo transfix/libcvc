@@ -1,0 +1,5 @@
+# A server document that would publish the relay's own room tree: arisrv refuses it before it
+# listens on anything (exit 2).
+meta: { name: arisrv bad publish, min_libcvc: 3.7.5 }
+server:
+  publish: [conf]

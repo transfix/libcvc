@@ -18,7 +18,9 @@
 // go through the room's AREA OF INTEREST (room_aoi_relay): how much of each participant every
 // other one receives, by their distance in the room. The stream_relay plane (--media-listen:
 // room-publish / room-subscribe streams) is not gated by it.
-// Core libcvc + gRPC only — NO cvcGL/VTK/GL — so it runs on a plain headless VM.
+// Core libcvc + gRPC only — NO cvcGL/VTK/GL — so it runs on a plain headless VM. With --doc it
+// also runs a server document: room rules, bots and checks in the DSL, and the namespaces it
+// publishes to every client (cvc/ariadne/server_document.h).
 //
 //   arisrv --room standup --state-listen 0.0.0.0:7700 --media-listen 0.0.0.0:7701
 
@@ -47,6 +49,7 @@
 #include <cvc/ariadne/holon.h>                      // server-authoritative avatar holon (H1)
 #include <cvc/ariadne/holon_sync.h> // server_pump: intent -> holon -> authoritative pose
 #include <cvc/ariadne/host_cli.h>   // --set KEY=VALUE, as ari and arigl take it
+#include <cvc/ariadne/server_document.h> // --doc: the server document and what it publishes
 #include <cvc/ariadne/stream/stream_relay.h>
 #include <cvc/core/app.h>
 #include <cvc/media/media_router.h> // protocol-agnostic media hub (WS + gRPC + future protocols)
@@ -208,6 +211,17 @@ int main(int argc, char **argv) {
   //   --avatar-empty rest|stop   when an avatar's reserve runs out: rest leaves resting power (it
   //                              slows to what that sustains); stop holds it until a quarter has
   //                              refilled (default rest)
+  // The server document (docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md §6.1, §6.5.3; not an S7 switch):
+  //   --doc PATH                 run the .ari document at PATH on the relay, headless: its init:
+  //                              once the room is up, its on_tick: every room step (60 Hz), under
+  //                              the DSL's step and time caps (ariadne.limits.*, which --set
+  //                              reaches). It binds under ui.docs.arisrv, which no client is sent,
+  //                              and reads the room through `room` (read-only). Its server: block's
+  //                              publish: list names the namespaces every client is sent; only the
+  //                              document writes them, so it needs --bind-writes on. (quit [code])
+  //                              stops the relay with that exit status; requires: [relay] holds
+  //                              only there. --set is applied before the seeds and the document
+  //                              (WD0 in ARIADNE_WORLDS.md moves it last). Unset: no document
   const char *s7_env = std::getenv("CVC_ARISRV_S7");
   const char *aoi_env = std::getenv("CVC_ARISRV_AOI");
   // CVC_ARISRV_S7: 0/off or 1/on (unset: on).
@@ -226,6 +240,8 @@ int main(int argc, char **argv) {
               admissionHoldArg = "2000";
   std::string laneListen, laneAdvertise, laneMediaArg = "off";
   std::string avatarEnergyArg = "on", avatarEmptyArg = "rest";
+  std::string docPath;
+  bool docFlag = false;                                       // --doc was given (even with no path)
   std::vector<std::pair<std::string, std::string>> stateSets; // --set KEY=VALUE
   for (int i = 1; i < argc; ++i) {
     const char *a = argv[i];
@@ -286,7 +302,10 @@ int main(int argc, char **argv) {
       avatarEnergyArg = next("on");
     else if (!std::strcmp(a, "--avatar-empty"))
       avatarEmptyArg = next("rest");
-    else if (!std::strcmp(a, "--set")) {
+    else if (!std::strcmp(a, "--doc")) {
+      docFlag = true;
+      docPath = next("");
+    } else if (!std::strcmp(a, "--set")) {
       std::pair<std::string, std::string> kv;
       const char *v = next("");
       if (!cvc::ariadne::parse_state_set(v, kv)) {
@@ -414,6 +433,34 @@ int main(int argc, char **argv) {
 
   cvc::app app;
 
+  // The server document's server: block, read now, before anything listens: the shard below is
+  // scoped by it, and a document that does not parse stops arisrv here. It runs once the room is
+  // up (below the seeding).
+  std::unique_ptr<cvc::ariadne::ServerDocument> serverDoc;
+  if (docFlag) {
+    if (docPath.empty()) {
+      std::fprintf(stderr, "arisrv: --doc expects a path\n");
+      return 2;
+    }
+    serverDoc = std::make_unique<cvc::ariadne::ServerDocument>(app, room);
+    std::vector<std::string> warnings;
+    if (const std::string error = serverDoc->read(docPath, &warnings); !error.empty()) {
+      std::fprintf(stderr, "arisrv: --doc: %s\n", error.c_str());
+      return 2;
+    }
+    for (const std::string &w : warnings)
+      std::fprintf(stderr, "arisrv: --doc: %s\n", w.c_str());
+    // A published namespace is the server's alone because bound writes refuse every client write
+    // outside its own participant. Without them a client could write it.
+    if (!serverDoc->block().publish.empty() && bindWritesArg != "on") {
+      std::fprintf(stderr,
+                   "arisrv: --doc: %s publishes namespaces, which needs bound writes "
+                   "(--bind-writes on): without them a client could write there too\n",
+                   docPath.c_str());
+      return 2;
+    }
+  }
+
   // Presence: when a client's connection ends -- a native (gRPC) client exits, or a browser (WS)
   // tab closes -- retract it from the room so the roster and the avatar holon do not accumulate
   // ghosts. Both transports report the departed node id the same way, on their own threads, so the
@@ -455,6 +502,13 @@ int main(int argc, char **argv) {
   // local and keeps the late-joiner snapshot to just the room tree.
   shard.add_interest("conf");
   shard.set_enforce_interest(true);
+  // And it SENDS only the room tree, plus the namespaces a server document publishes: the relay's
+  // tree also holds that document's own state (ui.docs.arisrv), which no client is sent. Clients
+  // took nothing else before either, since each one's interest takes only conf.
+  if (serverDoc)
+    serverDoc->scope(shard);
+  else
+    shard.add_publish_prefix("conf");
   shard.attach();
   shard.install_as_default();
   state_tp.register_shard(&shard);
@@ -737,6 +791,45 @@ int main(int argc, char **argv) {
     published.enabled = aoi_relay != nullptr;
     cvc::ariadne::conference::write_aoi_params(app, room, published);
   }
+  // The server document, now that the room is up: its init: runs here, after --set and the seeds
+  // (so it can extend or override the seeded room), and its other programs on the room steps
+  // below. A load that fails stops the relay before it serves a step.
+  bool docFailed = false;
+  if (serverDoc) {
+    serverDoc->runtime().set_warning_listener([](const std::string &w) {
+      std::printf("[arisrv] server document: %s\n", w.c_str());
+      std::fflush(stdout);
+    });
+    try {
+      for (const std::string &w : serverDoc->load(docPath))
+        std::printf("[arisrv] server document: %s\n", w.c_str());
+      std::string published;
+      for (const std::string &ns : serverDoc->block().publish)
+        published += (published.empty() ? "" : ", ") + ns;
+      std::printf("[arisrv] server document: %s | binds under %s, the room read-only at `room` | "
+                  "publishes %s\n",
+                  docPath.c_str(), serverDoc->prefix().c_str(),
+                  published.empty() ? "nothing" : (published + " (to every client)").c_str());
+    } catch (const std::exception &e) {
+      std::fprintf(stderr, "arisrv: --doc: %s\n", e.what());
+      docFailed = true;
+      g_stop.store(true);
+    }
+    std::fflush(stdout);
+  }
+  // The server document's programs, each room step and ahead of the holon, so what they write
+  // rides that step's fan-out. They read the holon's world clock (sim.tick, sim.time). (quit
+  // [code]) stops the loop.
+  const auto doc_step = [&] {
+    if (!serverDoc || docFailed)
+      return;
+    serverDoc->step(server_holon.tick(), server_holon.clock().t());
+    if (serverDoc->should_close() && !g_stop.load()) {
+      std::printf("[arisrv] the server document asked to stop (quit %d)\n", serverDoc->exit_code());
+      std::fflush(stdout);
+      g_stop.store(true);
+    }
+  };
   // The room steps on a fixed 50 ms grid (sleep_until, not sleep_for after each step's work), so
   // pose samples leave evenly spaced: a client shows each peer a fixed delay behind its newest
   // sample, and every late one is a stall it has to cover. A loop that falls a step behind (a
@@ -794,6 +887,7 @@ int main(int argc, char **argv) {
     // Advance the authoritative avatar holon and write each participant's pose, then fan them out
     // at once: the pose writes are local shard mutations, and the housekeeping below would
     // otherwise make this step's samples later than the other three's.
+    doc_step();
     pump_room();
     room_step();
     // CVC_ARISRV_ROOM_DEBUG=1: every ~5 s, log the room as the server holds it -- each present
@@ -1066,6 +1160,7 @@ int main(int argc, char **argv) {
     // poses between the loop's slower housekeeping.
     for (int i = 1; i < kRoomSubsteps && !g_stop.load(); ++i) {
       wait_room_step();
+      doc_step();
       pump_room();
       room_step();
     }
@@ -1091,5 +1186,7 @@ int main(int argc, char **argv) {
   state_tp.unregister_shard(&shard);
   state_tp.stop();
   shard.detach();
-  return 0;
+  if (docFailed)
+    return 1;
+  return serverDoc && serverDoc->should_close() ? serverDoc->exit_code() : 0;
 }

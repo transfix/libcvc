@@ -41,6 +41,7 @@ struct HostFacts {
   bool oidc_device = false;      // ... with a device code (RFC 8628)
   bool oidc_redirect = false;    // ... by sending a browser page to the provider and back
   bool browser = false;          // open-url can open the user's browser here
+  bool relay = false;            // the document is a relay's server document (server_document.h)
 };
 
 // One capability token and what it means.
@@ -69,7 +70,8 @@ bool has_script_engine(const std::string &language);
 
 // What to tell the author when this host lacks `name`, beyond its name: for a script language's
 // token on a host without that language, which hosts run it ("a document's python runs in the
-// scripting hosts, arix or ariglx"). "" when there is nothing to add.
+// scripting hosts, arix or ariglx"), and for `relay`, that a server document runs on the relay
+// (arisrv --doc). "" when there is nothing to add.
 std::string capability_hint(const std::string &name);
 
 // The names a program applies as functions but does not define itself, in first-appearance order,

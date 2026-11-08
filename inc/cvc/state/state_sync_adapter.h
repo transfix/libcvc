@@ -82,7 +82,11 @@ public:
 
   // Attach observers to the current subtree. Idempotent; calling
   // twice is a no-op for already-attached paths. New child nodes
-  // discovered after attach() are wired up lazily.
+  // discovered after attach() are wired up lazily, when their
+  // ancestors' childChanged first names them. That comes after the
+  // write that made the node, so a node first seen through a local
+  // write has its content (value, and data() with a codec) journaled
+  // then: the first write to a fresh node replicates too.
   void attach();
 
   // Detach all observers. After this, local mutations are no longer
@@ -183,6 +187,11 @@ private:
   // captures `node`), early-returns while applying a remote mutation, and journals + dispatches the
   // corresponding mutation.
   connection_set connect_node(state &node, const std::string &full_path);
+
+  // Journal + dispatch a local change to the node at `path`: its value, or its data() payload
+  // (skipped without a codec registry or a codec for its type).
+  void journal_value(const std::string &path);
+  void journal_data(const std::string &path);
 
   // Compose a full dot-path for a given child of `parent_full_path`.
   static std::string join_path(const std::string &parent_full_path, const std::string &child);
