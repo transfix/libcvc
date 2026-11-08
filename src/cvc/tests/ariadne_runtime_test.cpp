@@ -3669,6 +3669,38 @@ TEST(AriadneNetIntrinsics, HttpGetAsyncDoesNotBlockTheScheduler) {
   EXPECT_EQ(cvc::state::instance(app)("r.status").value(), "200");
 }
 
+// The verbs call through the calling program's async host, *ictx.host (td 4.9, S1.9), not the
+// app's: with a host of its own in each context, as an isolated document's context has its
+// group's, a request is that host's kernel and the app's host never sees it.
+TEST(AriadneNetIntrinsics, RequestsGoThroughTheContextsHost) {
+  if (!cvc::net::have_http_backend())
+    GTEST_SKIP() << "libcvc built without an HTTP backend";
+  cvc::app app;
+  cvc::state_exec::async_host own(app.exec_scheduler(), &app); // outlives the Runtime
+  NetIntrinsicsGuard guard;
+  auto *fake = new BlockingHttpClient(http_ok(200, "later"));
+  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(fake));
+  use_host_in_contexts(&own);
+  register_net_intrinsics(app);
+
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button(
+      "Go", "(state-set \"r.status\" (get-attr (http-get \"http://ex/slow\") \"status\"))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain(); // the action parks on the request, whose kernel blocks in send()
+  mb.button_click = false;
+  EXPECT_EQ(own.in_flight(), 1u) << "the request is a kernel of the context's host";
+  EXPECT_EQ(app.exec_async_host().in_flight(), 0u) << "the app's host never sees it";
+
+  fake->release();
+  ASSERT_TRUE(
+      pump_until(rt, [&] { return !cvc::state::instance(app)("r.status").value().empty(); }));
+  EXPECT_EQ(cvc::state::instance(app)("r.status").value(), "200");
+}
+
 // PR-A: the TRANSPARENT verb — (http-get url) self-parks and yields the dict directly, no msg-recv.
 TEST(AriadneNetIntrinsics, HttpGetTransparentReturnsDictNoMsgRecv) {
   if (!cvc::net::have_http_backend())
@@ -5124,6 +5156,36 @@ TEST(AriadneNetL4, FetchOfAnHttpUriIsStartedToo) {
   ASSERT_TRUE(pump_until(rt, [&] { return !node_data_string(app, "r2.body").empty(); }));
   EXPECT_EQ(node_data_string(app, "r2.body"), "host's http://api.test/y");
   EXPECT_TRUE(net->pending.empty());
+}
+
+// A started request belongs to the host it started on, the calling program's (*ictx.host, td 4.9,
+// S1.9): it is finished there, and that host's shutdown, which a group's teardown makes after its
+// kills, cancels it and aborts the fetch, though the app's host is still up.
+TEST(AriadneNetL4, AStartedRequestKeepsTheHostItStartedOn) {
+  cvc::app app;
+  cvc::state_exec::async_host own(app.exec_scheduler(), &app); // outlives the Runtime
+  L4Guard guard;
+  auto *net = new DeferredHttpClient(l4_api);
+  cvc::net::set_http_client(std::unique_ptr<cvc::net::HttpClient>(net));
+  use_host_in_contexts(&own);
+  ASSERT_EQ(enable_net(app, allow({"http://api.test"})), "");
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  click(rt, mb, "(state-set \"r.status\" (get-attr (http-get \"http://api.test/x\") \"status\"))");
+  frames(rt, 3);
+  ASSERT_EQ(net->live(), 1u);
+  ASSERT_TRUE(net->answer()); // settled and finished on `own`: the program resumes
+  ASSERT_TRUE(pump_until(rt, [&] { return !sval(app, "r.status").empty(); }));
+  EXPECT_EQ(sval(app, "r.status"), "200");
+
+  click(rt, mb, "(state-set \"r2.status\" (get-attr (http-get \"http://api.test/y\") \"status\"))");
+  frames(rt, 3);
+  ASSERT_EQ(net->live(), 1u);
+  own.shutdown();
+  EXPECT_EQ(net->live(), 0u) << "the host it started on cancelled it, and the fetch was aborted";
+  EXPECT_FALSE(net->answer());
+  EXPECT_EQ(sval(app, "r2.status"), "");
 }
 
 // launch_pool_task generalizes beyond HTTP: a NON-network "heavy" kernel offloaded to the compute

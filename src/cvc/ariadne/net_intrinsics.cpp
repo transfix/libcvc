@@ -23,6 +23,7 @@
 #include <cvc/state/state_exec/async_host.h> // register_async_fn — the verbs are async functions
 #include <cvc/state/state_exec/builtins.h>   // percent_encode, builtin_json_encode
 #include <cvc/state/state_exec/data_job.h>   // kJsonMaxDepth — a ws-send message's nesting
+#include <cvc/state/state_exec/intrinsics.h> // ictx.host, provider_affinity
 #include <cvc/state/state_exec/types.h>      // value_t, make_dict/make_list/make_bytes
 #include <map>
 #include <mutex>
@@ -753,21 +754,13 @@ se::async_work uri_fetch_work(std::span<const se::value_t> args, se::async_host 
   return work;
 }
 
-// The credential verbs and (net-allowed? URL), plain functions on the scheduler thread.
-void register_net_verbs(const std::shared_ptr<se::environment> &env, const NetAccess &access) {
+// (open-url URL), a plain function on the host thread (its provider is host_proxied: it opens a
+// browser tab, a side effect on the user's desktop).
+void register_open_url(const std::shared_ptr<se::environment> &env, const NetAccess &access) {
   const auto live = [access](const char *verb) {
     if (!is_live(access))
       throw std::runtime_error(std::string(verb) + ": the host has turned the network off");
   };
-  // (net-allowed? URL): whether a request to URL may be made here.
-  se::builtins::register_fn(env, "net-allowed?",
-                            [access, live](std::span<const se::value_t> args) -> se::value_t {
-                              live("net-allowed?");
-                              const std::string url = arg_string(args, 0);
-                              if (access.policy)
-                                return se::value_t(access.policy->allows_url(url));
-                              return se::value_t(cvc::net::parse_origin(url).has_value());
-                            });
   // (open-url URL): open URL in the user's web browser (cvc/net/browser.h). Only an http(s) URL
   // whose origin the host allows: a page opened in a browser carries what its URL says, so the
   // allowlist bounds it as it does a request. #t when a browser was asked to open it; #f when there
@@ -799,6 +792,25 @@ void register_net_verbs(const std::shared_ptr<se::environment> &env, const NetAc
           throw std::runtime_error(why);
         }
       });
+}
+
+// The credential verbs and (net-allowed? URL), plain functions on whatever thread pumps the
+// program: the policy is immutable once the host made it, and the credential store locks (see
+// register_net_intrinsics).
+void register_net_verbs(const std::shared_ptr<se::environment> &env, const NetAccess &access) {
+  const auto live = [access](const char *verb) {
+    if (!is_live(access))
+      throw std::runtime_error(std::string(verb) + ": the host has turned the network off");
+  };
+  // (net-allowed? URL): whether a request to URL may be made here.
+  se::builtins::register_fn(env, "net-allowed?",
+                            [access, live](std::span<const se::value_t> args) -> se::value_t {
+                              live("net-allowed?");
+                              const std::string url = arg_string(args, 0);
+                              if (access.policy)
+                                return se::value_t(access.policy->allows_url(url));
+                              return se::value_t(cvc::net::parse_origin(url).has_value());
+                            });
   if (!access.credentials)
     return;
   const std::shared_ptr<cvc::net::CredentialStore> store = access.credentials;
@@ -1419,7 +1431,6 @@ void register_net_intrinsics(cvc::app &app, NetAccess access) {
   // (file/state/cvc/http) and are useful with or without an HTTP backend.
   const bool have_http = cvc::net::have_http_backend();
 
-  se::async_host &host = app.exec_async_host();
   // I/O calls (async_options::io): a request's network wait and its transport's CPU (one HTTPS
   // request: a 100-300 ms round trip and about 16 ms of CPU for the TLS handshake and the CA
   // store, 130,000 steps) are the host's, not the program's. Charged as other calls are, no
@@ -1428,12 +1439,26 @@ void register_net_intrinsics(cvc::app &app, NetAccess access) {
   se::async_options io;
   io.io = true;
   const bool have_ws = cvc::net::have_ws_backend();
-  register_action_intrinsics([&host, have_http, have_ws, access,
-                              io](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+  // Two providers by kind (S1-Q7). The first, `any`: the requests, net-allowed? and the net-auth-*
+  // verbs. A request's kernel runs on the app's background task pool and its completion goes to
+  // the call's own scheduler; the WebSocket table and each connection's sent list lock; the policy
+  // is immutable once the host made it; and the credential store locks: every CredentialStore
+  // member that reads or writes its entries, bindings or renewers holds its mutex_
+  // (cvc/net/credentials.h, "Thread-safe"), so net-allowed? and net-auth-* need no host thread.
+  // The body reads the context and the atomic `live`, and binds natives into the new env only, so
+  // a spawned child may run it on a worker.
+  auto requests = [have_http, have_ws, access, io](std::shared_ptr<se::environment> env,
+                                                   se::intrinsics_context &ictx) {
     if (!is_live(access))
       return; // the host turned the network off: later programs do not get the verbs
-    // Async functions on the app's exec scheduler (docs/STATE_EXEC_EXCEPTIONS.md 3): each verb
-    // parks the calling process while its kernel runs on the app's background task pool and
+    // The calling program's async host (td 4.9, B30): the app's for a document in group 0, its own
+    // group's for an isolated one, the init lane's inline one in init:. A started request
+    // (http_work, uri_fetch_work) keeps the host it started on, which outlives it: a host's
+    // shutdown (a group's comes after the group's kills) cancels each call it started, and a
+    // cancelled call is never finished on its host (settle_started).
+    se::async_host *host = ictx.host;
+    // Async functions on the calling program's scheduler (docs/STATE_EXEC_EXCEPTIONS.md 3): each
+    // verb parks the calling process while its kernel runs on the app's background task pool and
     // resumes it with the reply dict, at any depth (the whole program included); its "-async"
     // form returns a future for (await f [seconds]) or (await-all (list ...)). A call is charged
     // to its process (its run time against max_time), and a killed or reaped process's call is
@@ -1442,12 +1467,12 @@ void register_net_intrinsics(cvc::app &app, NetAccess access) {
       // (http-get URL [OPTS]) / (http-get-async URL [OPTS]) — a GET; OPTS is the options dict
       // (query/headers/auth/capture_auth). The future form fans out N fetches.
       se::register_async_fn(
-          env, host, "http-get",
-          [access, &host](std::span<const se::value_t> args) -> se::async_work {
+          env, *host, "http-get",
+          [access, host](std::span<const se::value_t> args) -> se::async_work {
             RequestAuth auth;
             cvc::net::HttpRequest req = build_get_request(args, auth);
             check_request("http-get", req, auth, access);
-            return http_work(std::move(req), std::move(auth), access, host);
+            return http_work(std::move(req), std::move(auth), access, *host);
           },
           io);
 
@@ -1455,12 +1480,12 @@ void register_net_intrinsics(cvc::app &app, NetAccess access) {
       // method with an options dict OPTS carrying query/headers/body/form/auth/capture_auth (see
       // apply_http_options). It resumes with the same reply dict as (http-get).
       se::register_async_fn(
-          env, host, "http-request",
-          [access, &host](std::span<const se::value_t> args) -> se::async_work {
+          env, *host, "http-request",
+          [access, host](std::span<const se::value_t> args) -> se::async_work {
             RequestAuth auth;
             cvc::net::HttpRequest req = build_method_request(args, auth);
             check_request("http-request", req, auth, access);
-            return http_work(std::move(req), std::move(auth), access, host);
+            return http_work(std::move(req), std::move(auth), access, *host);
           },
           io);
     }
@@ -1470,15 +1495,23 @@ void register_net_intrinsics(cvc::app &app, NetAccess access) {
     // blocking the scheduler thread. Reply dict: { ok body(bytes) url error }. An http(s) URI goes
     // through the registered handler, which carries the host's policy (enable_net).
     se::register_async_fn(
-        env, host, "fetch",
-        [&host](std::span<const se::value_t> args) { return uri_fetch_work(args, host); }, io);
+        env, *host, "fetch",
+        [host](std::span<const se::value_t> args) { return uri_fetch_work(args, *host); }, io);
 
     // (ws-*) — WebSocket clients, where this build has a backend (libcurl with ws, a browser).
     if (have_ws)
-      register_ws_verbs(env, host, access, io);
+      register_ws_verbs(env, *host, access, io);
 
     register_net_verbs(env, access);
-  });
+  };
+  register_action_intrinsics(std::move(requests), se::provider_affinity::any);
+  // The second, host_proxied: (open-url), whose effect is a tab in the user's browser.
+  register_action_intrinsics(
+      [access](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+        if (is_live(access))
+          register_open_url(env, access);
+      },
+      se::provider_affinity::host_proxied);
 }
 
 } // namespace ariadne
