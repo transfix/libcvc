@@ -895,6 +895,9 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   add_host_menus(lr.root, hostMenus_);
   add_keys(lr.root, std::move(lr.keys));
   rt_.set_root(std::move(lr.root)); // applied at the next frame boundary
+  // Where its programs run is decided here, at load (S1-Q6): its channel policy, programs, tree
+  // and this host's providers and thread-affine prefixes are all known now.
+  (void)rt_.isolated_group();
   sources_ = std::move(lr.sources);
   tests_ = std::move(lr.tests);
   stamps_ = std::move(lr.source_stamps);
@@ -911,7 +914,16 @@ void AppRuntime::set_root(Widget root) {
 // ── per-frame (neutral core) ─────────────────────────────────────────────────────────────────────
 
 void AppRuntime::drain() {
-  rt_.drain(); // run queued Ariadne actions on this thread + pump the scheduler a slice
+  drain_begin();
+  drain_end();
+}
+
+// The document's half before the app's frame pump: run queued Ariadne actions on this thread,
+// submit them and the residents, and post the frame's ticks (Runtime::drain_begin).
+void AppRuntime::drain_begin() { rt_.drain_begin(); }
+
+void AppRuntime::drain_end() {
+  rt_.drain_end(); // pump a slice (unless app.exec_pump_frame() did) and sweep
   if (scene_) {
     scene_->sync_visibility(app_); // bound visible: -> node .visible
     scene_->tick();                // volren/volslice per-frame service
@@ -923,13 +935,10 @@ void AppRuntime::drain() {
   }
 }
 
-// S1b.0 stubs: drain_end() is today's whole drain(); S1.10 splits it.
-void AppRuntime::drain_begin() {}
-void AppRuntime::drain_end() { drain(); }
-
-// S1b.0 stub: recorded; S1.10 reads the declarations at load (S1-Q6).
+// The Runtime reads the declarations when it decides where the document runs, at load (S1-Q6).
 void AppRuntime::declare_thread_affine_prefix(const std::string &prefix) {
   threadAffinePrefixes_.push_back(prefix);
+  rt_.declare_thread_affine_prefix(prefix);
 }
 
 // The app's host, then an isolated document's group's (S1.9), whose kernels its programs start.
