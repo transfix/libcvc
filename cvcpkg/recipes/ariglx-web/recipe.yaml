@@ -46,7 +46,7 @@ depends:
     - name: zlib
     - name: pegtl
     - name: yaml-cpp
-    - name: imgui
+    - name: imgui-w32
     - name: sdl3
     - name: ftxui
     - name: libjpeg-turbo
