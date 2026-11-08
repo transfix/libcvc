@@ -5,6 +5,7 @@
 // accumulator is stored ON THE CANVAS ELEMENT, not on window, so two viewers on
 // one page do not share one.
 
+#include <cassert>
 #include <cmath>
 #include <cvc/core/app.h>
 #include <cvc/gl/CameraController.h>
@@ -13,6 +14,7 @@
 #include <cvc/gl/TouchGestures.h>
 #include <cvc/state/state.h>
 #include <stdexcept>
+#include <thread>
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -120,6 +122,10 @@ struct TouchGestures::Impl {
   bool panEnabled = true;
   bool invertPinch = false;
   double pinchSteps = 4.0; // wheel-steps per doubling of the pinch distance
+  // The thread that built this, so connected it to its state path: the render thread. Every
+  // state change must reach handleStateChanged there (debug-asserted; STATE_EXEC_THREADED.md
+  // 4.8: a document group pumped on a worker would run it on the worker).
+  std::thread::id home = std::this_thread::get_id();
 };
 
 std::string TouchGestures::viewerStatePath(const std::string &scenePrefix,
@@ -177,7 +183,11 @@ void TouchGestures::readAllFromState() {
   }
 }
 
-void TouchGestures::handleStateChanged(const std::string &) { readAllFromState(); }
+void TouchGestures::handleStateChanged(const std::string &) {
+  assert(std::this_thread::get_id() == m_impl->home &&
+         "TouchGestures: a state change off its render thread (STATE_EXEC_THREADED.md 4.8)");
+  readAllFromState();
+}
 
 void TouchGestures::setEnabled(bool on) { getState("enabled").value(on ? 1 : 0); }
 bool TouchGestures::enabled() const { return m_impl->enabled; }
