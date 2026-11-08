@@ -27,6 +27,7 @@
 #include <cvc/ariadne/net_host.h>  // net_host_status (the net capability tokens)
 #include <cvc/ariadne/oidc_host.h> // pump_oidc
 #include <cvc/ariadne/requires.h>  // free_heads: the isolation rules' oidc check
+#include <cvc/ariadne/stream/stream.h> // stream::retarget: a moved document takes its streams
 #include <cvc/core/app.h>
 #include <cvc/core/exec_pool.h> // an isolated document's pump; in_pump_all (host-thread calls)
 #include <cvc/state/state.h>
@@ -1281,15 +1282,10 @@ struct Runtime::Impl {
   // Decide where the programs run: when `submitting` (a program is about to start) or a document
   // has been set, unless that document's placement is decided already. Host thread.
   void ensure_placement(bool submitting);
-  // A new document that goes elsewhere (move_out): the earlier one's processes are killed and
-  // reaped where they ran, and its records dropped, so its residents start again in the new
-  // place. Its group stays registered, and its contexts kept, until ~Impl: a stream the document
-  // left open still posts to that group, whose frames drain its ingress.
-  struct RetiredGroup {
-    std::unique_ptr<cvc::state_exec::exec_group> group;
-    cvc::frame_group_handle handle; // goes before the group
-  };
-  std::vector<RetiredGroup> retired_groups_;
+  // A placement change (ensure_placement) moves the document: move_out kills and reaps its
+  // processes where they ran and drops their records, so its residents start again in the new
+  // place; its open streams are re-pointed there (stream::retarget), and its old group, if any, is
+  // destroyed at once. The dropped contexts stay until ~Impl, for a process a failed kill left.
   std::vector<std::shared_ptr<ActionContext>> retired_contexts_;
   void move_out();
   // Kill every process of the owner on `sched` and reap each one the Runtime knows of, each step
@@ -3342,15 +3338,11 @@ Runtime::Impl::~Impl() {
   }
   if (sched)
     kill_and_reap(*sched, "tearing down");
-  // Last the groups, which the app's frames stop pumping first: each one's own teardown (S1.5)
-  // kills and reaps whatever is left, before channel_policy_ and doc_scope_ go, which its
-  // processes' contexts point at. Both catch and log what they throw.
+  // Last the group, which the app's frames stop pumping first: its own teardown (S1.5) kills and
+  // reaps whatever is left, before channel_policy_ and doc_scope_ go, which its processes'
+  // contexts point at. Both catch and log what they throw.
   frame_handle_.reset();
   group_.reset();
-  for (RetiredGroup &r : retired_groups_) {
-    r.handle.reset();
-    r.group.reset();
-  }
 }
 
 void Runtime::Impl::kill_and_reap(cvc::state_exec::async_scheduler &sched,
@@ -3422,7 +3414,17 @@ void Runtime::Impl::ensure_placement(bool submitting) {
       host_affinity ? se::group_affinity::host : se::group_affinity::any;
   const bool stays = reason.empty() ? group_ && group_->opts().affinity == affinity : !group_;
   if (!stays) {
-    move_out(); // what an earlier document runs, where it runs
+    // Where its programs and streams were (null: nothing ran yet).
+    se::async_scheduler *const from = group_            ? &group_->sched()
+                                      : used_scheduler_ ? &app.exec_scheduler()
+                                                        : nullptr;
+    // A move kills and reaps on the scheduler a worker may be pumping, and destroys its group:
+    // host thread, outside a pump. Refused in every build, before the kills.
+    if (from)
+      refuse_inside_pump(app, "moving the document at '" + prefix + "'");
+    move_out(); // what an earlier document runs, killed and reaped where it runs
+    std::unique_ptr<se::exec_group> old_group = std::move(group_);
+    frame_handle_.reset(); // the app's frames stop pumping the old group now
     if (reason.empty()) {
       try {
         se::exec_group::options o;
@@ -3438,8 +3440,20 @@ void Runtime::Impl::ensure_placement(bool submitting) {
         reason = std::string("its group could not be made: ") + e.what();
       }
     }
+    // Its open streams post where its programs run from now on; then the old group can go, with
+    // nothing left in it and nothing posting to it (s-m3, c-m1).
+    if (from) {
+      try {
+        stream::stream::retarget(app, prefix, from,
+                                 group_ ? &group_->sched() : &app.exec_scheduler());
+      } catch (const std::exception &e) {
+        teardown_note("moving", "re-pointing its streams", e.what());
+      }
+    }
+    old_group.reset(); // its own teardown catches and logs what it throws
   }
-  // Why a document stays in group 0 is logged once, when the setting asks for isolation.
+  // Why a document stays in group 0 is logged when the reason changes (a new document's, or a
+  // first), and only when the setting asks for isolation; one reason is logged once.
   if (!reason.empty() && reason != isolation_reason_ &&
       isolate_documents_on(cvc::state::instance(app)))
     app.log(1, "ari: the document at '" + prefix + "' runs in group 0: " + reason);
@@ -3477,8 +3491,6 @@ void Runtime::Impl::move_out() {
     t.resident = Resident{};
   }
   used_scheduler_ = false;
-  if (group_)
-    retired_groups_.push_back(RetiredGroup{std::move(group_), std::move(frame_handle_)});
 }
 
 std::string Runtime::Impl::isolation_verdict(bool &host_affinity) const {
@@ -3823,16 +3835,12 @@ void Runtime::Impl::pump_frame() {
   }
   // An isolated document's group, one pump through the app's pool, as exec_pump_frame() would
   // pump it: a host with one Runtime that opts in may keep calling drain() (td 4.12). Its pump
-  // drains, wakes the frame-waiters and runs a slice of the same budget. A group an earlier
-  // document left (move_out) is pumped with it, so its ingress drains.
-  std::vector<se::exec_group *> groups;
-  if (group_)
-    groups.push_back(group_.get());
-  for (const RetiredGroup &r : retired_groups_)
-    groups.push_back(r.group.get());
-  if (!groups.empty())
+  // drains, wakes the frame-waiters and runs a slice of the same budget.
+  if (group_) {
+    se::exec_group *const groups[] = {group_.get()};
     app.exec_pool().pump_all(groups, se::pump_budget{kPumpMaxSteps, kPumpMaxSeconds},
                              std::chrono::steady_clock::now() + std::chrono::milliseconds(100));
+  }
 }
 
 void Runtime::Impl::sweep_actions(cvc::state_exec::async_scheduler &sched) {

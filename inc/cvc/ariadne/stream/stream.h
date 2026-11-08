@@ -19,6 +19,7 @@
 #include <cvc/ariadne/stream/stream_channel.h>
 #include <cvc/state/state.h>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -71,7 +72,8 @@ struct stream_params {
   double heartbeat_hz = 10.0;               // cap on seq-tick posts (0 => post every seq)
   // Where the stream posts its seq and lifecycle events, from the producer thread too: the opening
   // program's group's scheduler (its ictx.host->parking_scheduler(), STATE_EXEC_THREADED.md 4.9).
-  // Null: the app's exec scheduler (group 0), as before. It must outlive the stream.
+  // Null: the app's exec scheduler (group 0), as before. It must outlive the stream, or the stream
+  // must be re-pointed elsewhere first (retarget).
   cvc::state_exec::async_scheduler *scheduler = nullptr;
 };
 
@@ -89,6 +91,14 @@ public:
   // resolves the identical key. A consumer (e.g. StreamTextureBinding) that knows
   // (root_path, id) uses this to look the channel up; token() returns it.
   static std::string registry_key(const std::string &root_path, const std::string &id);
+
+  // Re-point every live stream of `ctx` opened under `scope` (at or under it) that posts to `from`
+  // at `to`, and return how many: an Ariadne document whose programs move to another scheduler
+  // (an isolated document's placement change) takes its open streams along, so `from` may go as
+  // soon as this returns. A post already made stays where it went. Host thread, between pumps.
+  static std::size_t retarget(app &ctx, const std::string &scope,
+                              cvc::state_exec::async_scheduler *from,
+                              cvc::state_exec::async_scheduler *to);
 
   stream(const stream &) = delete;
   stream &operator=(const stream &) = delete;
@@ -141,7 +151,11 @@ private:
   stream(app &ctx, std::string id);
 
   app &ctx_;
-  cvc::state_exec::async_scheduler *sched_ = nullptr; // where events go (stream_params::scheduler)
+  // Where events go (stream_params::scheduler). Read by every post, on the producer thread too,
+  // and changed by retarget, so both hold sched_mu_: a retarget returns with no post to the old
+  // scheduler in flight.
+  std::mutex sched_mu_;
+  cvc::state_exec::async_scheduler *sched_ = nullptr;
   std::string id_;
   std::string scope_;  // root_path this stream was opened under
   std::string token_;  // == registry_key(scope_, id_): canonical descriptor path + registry key

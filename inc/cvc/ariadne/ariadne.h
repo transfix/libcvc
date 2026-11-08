@@ -77,8 +77,8 @@ public:
 
   // Set/replace the widget tree. The swap is applied at the next frame boundary
   // (the top of render(), before any node is emitted), never mid-walk — the P0
-  // form of the §11.5.1 reconcile commit boundary. Safe to call from the host
-  // thread between frames.
+  // form of the §11.5.1 reconcile commit boundary. Host thread, between frames and outside a
+  // pump. A new tree is a new document: where its programs run is decided again (isolated_group).
   void set_root(Widget root);
 
   // Register a host handler for an action event name (a Button / MenuItemAction
@@ -193,6 +193,8 @@ public:
   // frame boundary: with each drained once a frame, in any order, an (await …) resumes once a
   // frame, not once per Runtime. While nothing has used the scheduler it is neither pumped nor
   // built. A host with no Runtime pumps it itself (cvc::pump_exec_frame, cvc/core/async_lane.h).
+  // An isolated document's group (isolated_group) is pumped there too, through the app's pool
+  // (app.exec_pool().pump_all), once a drain.
   void drain();
   // drain() in two halves, for a host that pumps once a frame for all its Runtimes (threaded
   // Stage 1, STATE_EXEC_THREADED.md 4.12): drain_begin() on each Runtime (events, key bindings,
@@ -205,14 +207,22 @@ public:
   // ---- isolated documents (threaded Stage 1, S1-Q6) ----
   // The group this document's programs run in when ariadne.exec.isolate_documents isolated it
   // (pumped on a worker, or on the host thread when its affinity is host); null when they run in
-  // group 0, the app scheduler. Decided at load.
+  // group 0, the app scheduler. Decided at load (AppRuntime::load asks at its end), and again,
+  // before the next program starts or the next frame is drawn, after a set_root, a lane's program,
+  // the channel policy, the key bindings or the host's verbs change (refresh_program_names). When
+  // the answer changes the document moves: its actions, spawned children and residents are killed
+  // and reaped where they ran, a run_program caller is told "did not complete: the document moved
+  // to another group", the residents start again in the new place, its open streams post there
+  // from then on, and an old group is destroyed. Host thread, outside a pump.
   cvc::state_exec::exec_group *isolated_group() const;
-  // Why the document stays in group 0: "" when it is isolated, else the first rule it failed (also
-  // logged once).
+  // Why the document stays in group 0: "" when it is isolated, else the first rule it failed
+  // (logged when it changes, with the setting on).
   std::string isolation_reason() const;
   // A subscriber the host connected at or under `prefix` must run on the host thread
-  // (AppRuntime::declare_thread_affine_prefix forwards here): an isolated document whose prefix is
-  // or contains it gets a host-affinity group. Before the document is loaded.
+  // (AppRuntime::declare_thread_affine_prefix forwards here). An isolated document gets a
+  // host-affinity group when a declared prefix is at, above or under its own: a write under the
+  // document emits childChanged on every ancestor, so a subscriber above it runs on the writing
+  // thread too. Before the document is loaded.
   void declare_thread_affine_prefix(const std::string &prefix);
   // The document's programs this Runtime does not hold, which run elsewhere: AppRuntime::load
   // passes its init: (run_init) and its tests: (run_program). The isolation rules read them with

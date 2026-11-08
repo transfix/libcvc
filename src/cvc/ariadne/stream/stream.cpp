@@ -8,6 +8,7 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include <algorithm>
 #include <boost/any.hpp>
 #include <chrono>
 #include <cvc/ariadne/stream/frame_source.h>    // frame_source (start_producer)
@@ -30,6 +31,17 @@ std::int64_t steady_now_ns() {
              std::chrono::steady_clock::now().time_since_epoch())
       .count();
 }
+
+// Every live stream, of every app, so retarget can find a document's (open() adds one, ~stream
+// drops it).
+std::mutex &live_mutex() {
+  static std::mutex m;
+  return m;
+}
+std::vector<stream *> &live_streams() {
+  static std::vector<stream *> v;
+  return v;
+}
 } // namespace
 
 stream::stream(app &ctx, std::string id) : ctx_(ctx), id_(std::move(id)) {}
@@ -44,6 +56,11 @@ std::string stream::registry_key(const std::string &root_path, const std::string
 }
 
 stream::~stream() {
+  {
+    std::lock_guard<std::mutex> lk(live_mutex());
+    std::vector<stream *> &live = live_streams();
+    live.erase(std::remove(live.begin(), live.end(), this), live.end());
+  }
   close();
   // Release the descriptor pins/handles, the pins leaf first (a pin_vector), so each node dies with
   // its ancestors alive. The channel's dtor close()s again (idempotent). The /streams/<id> node
@@ -125,13 +142,36 @@ std::unique_ptr<stream> stream::open(app &ctx, const stream_params &p) {
 
   s->update_stats();
   s->live_ = true; // fully constructed: the "closed" teardown is now this stream's to post
+  {
+    std::lock_guard<std::mutex> lk(live_mutex());
+    live_streams().push_back(s.get());
+  }
   s->post_lifecycle("live");
   return s;
+}
+
+std::size_t stream::retarget(app &ctx, const std::string &scope,
+                             cvc::state_exec::async_scheduler *from,
+                             cvc::state_exec::async_scheduler *to) {
+  const std::string below = scope + state::SEPARATOR;
+  std::size_t moved = 0;
+  std::lock_guard<std::mutex> lk(live_mutex());
+  for (stream *s : live_streams()) {
+    if (&s->ctx_ != &ctx || (s->scope_ != scope && s->scope_.rfind(below, 0) != 0))
+      continue;
+    std::lock_guard<std::mutex> post_lock(s->sched_mu_); // no post to `from` is in flight after it
+    if (s->sched_ == from) {
+      s->sched_ = to;
+      ++moved;
+    }
+  }
+  return moved;
 }
 
 void stream::post_seq(std::int64_t seq) {
   pending_seq_.store(seq, std::memory_order_relaxed);
   if (heartbeat_ns_ <= 0) {
+    std::lock_guard<std::mutex> lk(sched_mu_);
     sched_->post_message(seq_channel_, cvc::state_exec::value_t(static_cast<int64_t>(seq)));
     return;
   }
@@ -141,11 +181,13 @@ void stream::post_seq(std::int64_t seq) {
     return; // throttle: coalesce; the payload carries the latest seq
   if (!last_post_ns_.compare_exchange_strong(last, now, std::memory_order_relaxed))
     return; // another poster won this window
+  std::lock_guard<std::mutex> lk(sched_mu_);
   sched_->post_message(seq_channel_, cvc::state_exec::value_t(static_cast<int64_t>(
                                          pending_seq_.load(std::memory_order_relaxed))));
 }
 
 void stream::post_lifecycle(const char *lifecycle) {
+  std::lock_guard<std::mutex> lk(sched_mu_);
   sched_->post_message(evt_channel_, cvc::state_exec::value_t(std::string(lifecycle)));
 }
 
@@ -234,9 +276,11 @@ void stream::close() {
     return;
   // Flush the final seq the heartbeat throttle may have withheld, so a receiver
   // sees the last frame index before the "closed" event.
-  if (pending_seq_.load(std::memory_order_relaxed) >= 0)
+  if (pending_seq_.load(std::memory_order_relaxed) >= 0) {
+    std::lock_guard<std::mutex> lk(sched_mu_);
     sched_->post_message(seq_channel_, cvc::state_exec::value_t(static_cast<int64_t>(
                                            pending_seq_.load(std::memory_order_relaxed))));
+  }
   if (descriptor_) {
     try {
       descriptor_->value("closed");
