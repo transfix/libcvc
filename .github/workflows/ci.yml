@@ -1716,8 +1716,8 @@ jobs:
           # runtime into each executable, and run.sh preloads the shared one, libclang_rt.tsan,
           # into the interpreter. Its own lines are Stage 1a's only.
           # --gcc-install-dir: gcc 13's libstdc++, the gcc legs' own, not the newer 14 clang would
-          # pick, whose C++20 std::pair checks its explicit default constructor on instantiation
-          # and so rejects pair<std::string, T> inside T (ariadne::Value, net::json_lite::Value).
+          # pick, so every leg builds against one library. (Either one's C++20 std::pair rejects
+          # pair<std::string, T> inside T under clang, which is why such members are structs.)
           - name: clang-tsan
             flags: -fsanitize=thread --gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/13
             cc: clang
