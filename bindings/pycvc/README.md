@@ -470,6 +470,54 @@ Contract tests: `test_pycvc_exec.py`, `test_pycvc_state_exec.py`,
 `test_pycvc_state_exec_sched.py`, `test_pycvc_state_exec_eval.py`,
 `test_pycvc_state_exec_data.py`.
 
+### Many programs at once: `ExecPool`
+
+`pycvc.ExecPool(app, threads=None, size=None, prefix="exec_pool", fresh_env=False,
+idle_timeout=60.0)` runs batches of programs on the app's pool of execution groups
+(`docs/STATE_EXEC_THREADED.md` 4.1, 4.12). The app has one pool, sized by whoever builds it
+first: `threads` (workers besides the calling thread), else the tree's `state_exec.threads`; a
+later different request keeps the built size and logs a warning, and `pool.threads` is the real
+count. The pool holds `size` pooled `Exec`s (`threads` by default, at least 1), each its own
+group: its own scheduler, async host, cycle registry and `math.random` stream, its natives over
+the one frozen builtins scope, and its context chrooted at `"<prefix>.<i>"`, so its programs'
+state keys, channels and lock keys resolve under it. The pooled `Exec`s are not exposed.
+
+```python
+pool = pycvc.ExecPool(app, threads=8)
+pool.register_fn("score", score)               # in every pooled Exec
+pool.run_all([f"(score {i})" for i in range(64)])   # ['...', ...], in program order
+pool.close()
+```
+
+- `run_all(programs)` takes a list of `str` and returns their results in program order, rendered
+  as `Exec.run` renders them. Program `i` runs on pooled `Exec` `i % size`, each pooled `Exec`'s
+  programs one at a time and in order; the groups are pumped together in fork-join rounds, on the
+  workers and the calling thread, until every program has ended. A failing program does not stop
+  the others: once all have ended, `run_all` raises the first failure in program order, as
+  `Exec.run` would raise it. A program parked for `idle_timeout` seconds with nothing pending is
+  killed, as in `Exec.run`. No kernel of the batch outlives it.
+- Top-level definitions persist per pooled `Exec` from one program to the next; with
+  `fresh_env=True` each program gets a fresh scope over the natives instead.
+- `register_fn` and `register_async_fn` register on every pooled `Exec`, as `Exec`'s do.
+- `run_all` releases the GIL for the whole batch: pure-DSL programs run in parallel, and a
+  registered Python function takes the GIL for its call, so such calls serialize on it.
+- One call at a time: `run_all`, `register_fn` or `register_async_fn` while another is in progress
+  (on another thread, or from a function the batch calls) raises `RuntimeError`.
+- `close()` kills what a batch on another thread still runs (that `run_all` raises `the pool was
+  closed`), waits for it with the GIL released, and destroys the pooled `Exec`s. It is idempotent;
+  afterwards the calls raise `RuntimeError("... the pool is closed")`. From a function its own batch
+  calls it raises instead.
+- Without threads (the Emscripten pycvc), or at `threads=0`, every group is pumped on the calling
+  thread, in creation order.
+
+**The GIL and `state_observer`.** A `pycvc.state_observer`'s slot takes the GIL on the thread that
+writes, which can be a pool worker. `run_all` and `AriApp.frame` release the GIL while workers
+run; a host embedding pycvc that pumps the app's pool from C++ (`app::exec_pump_frame()`, or an
+`exec_pool().pump_all`) must release it too, or the first worker write under an observer
+deadlocks.
+
+Contract tests: `test_pycvc_exec_pool.py`, `test_pycvc_exec.py`.
+
 ### Locks across `Exec`s and threads
 
 Every `Exec` attaches its scheduler to the app's lock manager (`app::lock_manager()`,

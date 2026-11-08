@@ -8,6 +8,9 @@ exception is contained (surfaced as a run() error, not a crash). Because the
 Exec shares the app's state tree, DSL <-> Python <-> state all interoperate.
 """
 
+import threading
+import time
+
 import pycvc
 
 
@@ -413,6 +416,100 @@ def test_is02_spawned_child_calls_registered_function():
     assert out == "42", out
     assert seen == [21], seen
     assert ex.run('(state-get "is02")') == "child"
+
+
+# ── ExecPool (S1-Q5): what test_pycvc_exec_pool.py's AR-4 and IS-2 leave out ──
+
+
+def _pool_error(fn, *args):
+    try:
+        fn(*args)
+    except Exception as e:  # noqa: BLE001 - RuntimeError, pycvc.dsl_error or parse_error
+        return str(e)
+    return None
+
+
+def test_exec_pool_order_async_and_first_failure():
+    # At threads 0 every group is pumped on the caller. Program i runs on pooled Exec i % size,
+    # chrooted at "<prefix>.<i>"; an async function registered on the pool parks and resumes its
+    # program; a batch with failures runs every program and raises the first failure in program
+    # order; the pool goes on working.
+    app = pycvc.make_app()
+    pool = pycvc.ExecPool(app, threads=0, size=3, prefix="poolord")
+    try:
+        print(f"  ExecPool.threads {pool.threads}")  # 0 unless CVC_EXEC_THREADS overrides it
+        assert pool.run_all(['(state-incr "n")'] * 6) == ["1", "1", "1", "2", "2", "2"]
+        assert pycvc.Exec(app).run('(state-get "poolord.2.n")') == "2"
+        pool.register_async_fn("twice", lambda x: 2 * x)
+        assert pool.run_all([f"(+ (twice {i}) 1)" for i in range(5)]) == ["1", "3", "5", "7", "9"]
+        seen = []
+        pool.register_fn("note", lambda x: seen.append(x) or x)
+        msg = _pool_error(pool.run_all,
+                          ["(note 1)", '(error "first")', "(note 3)", "(car 1)", "(note 5)"])
+        assert msg is not None and "first" in msg, msg
+        assert sorted(seen) == [1, 3, 5], seen
+        assert pool.run_all(["(+ 2 2)"]) == ["4"]
+        assert _pool_error(pool.run_all, ["(+ 1"]) is not None  # a syntax error raises too
+    finally:
+        pool.close()
+
+
+def test_exec_pool_idle_limit():
+    # A pooled program parked with nothing pending is killed at the pool's idle_timeout, as in
+    # Exec.run; the pooled Exec goes on working.
+    app = pycvc.make_app()
+    pool = pycvc.ExecPool(app, threads=2, size=2, idle_timeout=0.2)
+    try:
+        t0 = time.monotonic()
+        msg = _pool_error(pool.run_all, ['(begin (msg-recv "nobody"))', "(+ 1 1)"])
+        took = time.monotonic() - t0
+        print(f"  killed after {took:.3f} s")
+        assert msg is not None and "parked with no pending work" in msg, msg
+        assert took < 10.0, took
+        assert pool.run_all(["(+ 1 2)", "(+ 2 2)"]) == ["3", "4"]
+    finally:
+        pool.close()
+
+
+def test_exec_pool_close_and_calls_during_a_batch():
+    # While a batch runs on another thread, run_all and register_fn raise; close() kills what the
+    # batch runs, waits for it, and the batch raises; afterwards the calls raise "closed". From a
+    # function the batch calls, close() and run_all raise instead of waiting for themselves.
+    app = pycvc.make_app()
+    pool = pycvc.ExecPool(app, threads=2, size=2)
+    started = threading.Event()
+    pool.register_fn("started", lambda: started.set() or True)
+    box = {}
+
+    def batch():
+        box["error"] = _pool_error(pool.run_all, ['(begin (started) (msg-recv "never"))', "1"])
+
+    t = threading.Thread(target=batch, name="pool-batch")
+    t.start()
+    try:
+        assert started.wait(10.0), "the batch never started"
+        busy = "in progress"
+        assert busy in (_pool_error(pool.run_all, ["1"]) or ""), "a second run_all ran"
+        assert busy in (_pool_error(pool.register_fn, "x", lambda: 1) or ""), "registered"
+    finally:
+        pool.close()
+        t.join(10.0)
+    assert not t.is_alive(), "close() did not end the batch"
+    assert "the pool was closed" in (box.get("error") or ""), box
+    assert "the pool is closed" in (_pool_error(pool.run_all, ["1"]) or "")
+    pool.close()  # idempotent
+
+    inner = pycvc.ExecPool(app, size=1, prefix="poolinner")
+    try:
+        inner.register_fn("close-me", lambda: inner.close() or True)
+        inner.register_fn("again", lambda: inner.run_all(["1"]) or True)
+        msg = _pool_error(inner.run_all, ["(close-me)"])
+        assert msg is not None and "from inside its run_all" in msg, msg
+        msg = _pool_error(inner.run_all, ["(again)"])
+        assert msg is not None and "in progress" in msg, msg
+        assert inner.run_all(["(+ 1 1)"]) == ["2"]
+    finally:
+        inner.close()
 
 
 if __name__ == "__main__":

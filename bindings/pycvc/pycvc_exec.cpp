@@ -13,13 +13,15 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <cvc/core/app.h>
+#include <cvc/core/exec_pool.h> // ExecPool's batches pump on the app's pool
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_host.h>      // Exec's async functions run through its host
 #include <cvc/state/state_exec/async_scheduler.h> // Exec drives a private async scheduler
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/detail/lock_home.h> // the Exec's lock home: blocking_sinks, progress
 #include <cvc/state/state_exec/exceptions.h>
-#include <cvc/state/state_exec/heap.h> // Exec::tracked_objects
+#include <cvc/state/state_exec/exec_group.h> // a pooled Exec's scheduler is a group's
+#include <cvc/state/state_exec/heap.h>       // Exec::tracked_objects
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/lock_manager.h> // the app's lock manager (Exec::lock_query)
 #include <cvc/state/state_exec/process.h>
@@ -599,25 +601,39 @@ std::shared_ptr<PyObject> python_ref(PyObject *o) { return own_callable(o); }
 // pointer), so ictx must outlive any run — holding it here (Exec-lifetime)
 // satisfies that. Mirrors the C++ tests' make_exec_env().
 struct Exec::ExecImpl {
-  explicit ExecImpl(scheduling_policy policy) : sched(policy) {
+  // A plain Exec: a scheduler of its own, with its own registry and random stream.
+  explicit ExecImpl(scheduling_policy policy)
+      : registry(make_cycle_registry()), own_sched(std::in_place, policy), sched(*own_sched) {
     sched.set_cycle_registry(registry.get());
     sched.set_random_stream(&random);
   }
+  // A pooled Exec (ExecPool): an exec_group's scheduler, which binds the group's registry and
+  // stream.
+  explicit ExecImpl(std::unique_ptr<exec_group> g) : group(std::move(g)), sched(group->sched()) {}
+  // The spawn context holds `natives`: let it go with them, before a pooled Exec's group.
+  ~ExecImpl() { ictx.spawn_context = nullptr; }
 
   std::shared_ptr<cvc::app> app; // co-own so root/ictx stay valid for our lifetime
   cvc::state *root = nullptr;
-  // The Exec is its own group 0 (S1.12, td 4.7, 4.10): its scheduler binds this registry and
-  // random stream itself whichever thread drives it. Before `sched`, `env` and `natives`, so the
-  // registry is collected and freed after them; after `app`, whose tree what it frees may pin.
-  cycle_registry_ptr registry = make_cycle_registry();
+  // A plain Exec is its own group 0 (S1.12, td 4.7, 4.10): its scheduler binds this registry and
+  // random stream itself whichever thread drives it. Before `own_sched`, `env` and `natives`, so
+  // the registry is collected and freed after them; after `app`, whose tree what it frees may pin.
+  // A pooled Exec's are its group's (null and unused here).
+  cycle_registry_ptr registry;
   random_stream random;
-  // A PRIVATE async_scheduler owned by this Exec (NOT the app-wide one): it supports park/await +
+  // A plain Exec's PRIVATE async_scheduler (NOT the app-wide one): it supports park/await +
   // cross-thread delivery, and isolating it means a pycvc program never races an Ariadne Runtime
   // (or another Exec) driving a shared scheduler, and its finished processes die with the Exec. An
   // async fn offloaded to the compute pool posts back to THIS scheduler (register_async_fn passes
   // it), so the parked program resumes here.
-  async_scheduler sched;
+  std::optional<async_scheduler> own_sched;
   intrinsics_context ictx;
+  // A pooled Exec's group (S1.12), which owns its scheduler, async host, registry and stream.
+  // After `ictx` and before `natives` and `env`: the group's teardown kills and reaps its
+  // processes while the context they point into is here, and its registry is collected once the
+  // Exec's environments are gone.
+  std::unique_ptr<exec_group> group;
+  async_scheduler &sched; // *own_sched, or the group's
   process_ptr host_proc;
   // The builtins, the intrinsics and the registered functions; `env` extends it with the
   // programs' top-level definitions, which persist across run(). A spawned child extends `natives`
@@ -625,9 +641,11 @@ struct Exec::ExecImpl {
   environment_ptr natives;
   environment_ptr env;
   // The async host of this Exec's async functions (docs/STATE_EXEC_EXCEPTIONS.md 3): kernels run
-  // on the app's background task pool and post back to `sched`. After `sched`, so it goes first;
-  // ~Exec shuts it down before that, with the GIL released.
-  std::unique_ptr<cvc::state_exec::async_host> host;
+  // on the app's background task pool and post back to `sched`. A plain Exec's own (after
+  // `own_sched`, so it goes first), or its group's; ~Exec shuts it down first, with the GIL
+  // released.
+  std::unique_ptr<cvc::state_exec::async_host> own_host;
+  cvc::state_exec::async_host *host = nullptr;
   // Coroutine support (register_async_coro): a private asyncio loop (lazily created; owned) and the
   // coroutines in flight, which the pump steps + collects. Touched only on the run() thread (the
   // verb during sync_run + drive_coros after), so no lock needed.
@@ -706,6 +724,34 @@ struct Exec::ExecImpl {
 
   // Steps (2)-(5) of a priority call: answer `q`, directly or by the active run().
   void priority_call(priority_query &q);
+
+  // The programs' context over `root`, chrooted at `root_path` (none when empty) before the
+  // intrinsics are registered into `base`, which becomes `natives`; `h` is the async host.
+  void init_context(const std::string &root_path, environment_ptr base,
+                    cvc::state_exec::async_host *h) {
+    host_proc = make_process();
+    host_proc->pid = 0;
+    host_proc->status = process_status::ready;
+    ictx.sched = &sched;
+    ictx.root = root;
+    if (!root_path.empty())
+      apply_chroot(ictx, *root, root_path);
+    ictx.proc = host_proc;
+    ictx.pid = 0;
+    ictx.uid = "pycvc";
+    ictx.cluster_id = "local";
+    ictx.node_id = "local";
+    natives = std::move(base);
+    register_intrinsics(natives, &ictx);
+    env = environment::extend(natives);
+    // On one scheduler the intrinsics act for the running process, so the Exec's own context
+    // serves its children; they keep its owner and extend its natives.
+    ictx.spawn_context = [natives = natives](const intrinsics_context &) {
+      return spawn_setup{environment::extend(natives), nullptr};
+    };
+    host = h;
+    ictx.host = h; // its group's host (td 4.9, B30); spawned children copy it
+  }
 };
 
 void Exec::ExecImpl::priority_call(priority_query &q) {
@@ -775,30 +821,30 @@ Exec::Exec(const std::shared_ptr<cvc::app> &app, PyObject *policy, double idle_t
   // single-mode manager refuses, naming state_exec.locks.threading (8.3). Without threads (the
   // static Emscripten pycvc) auto made the manager single, and it takes that attach (9.5).
   impl_->sched.set_lock_manager(app->lock_manager(), cvc::state_exec::threaded_host_attach());
-
-  impl_->host_proc = make_process();
-  impl_->host_proc->pid = 0;
-  impl_->host_proc->status = process_status::ready;
-
-  impl_->ictx.sched = &impl_->sched;
-  impl_->ictx.root = impl_->root;
-  impl_->ictx.proc = impl_->host_proc;
-  impl_->ictx.pid = 0;
-  impl_->ictx.uid = "pycvc";
-  impl_->ictx.cluster_id = "local";
-  impl_->ictx.node_id = "local";
-
-  impl_->natives = builtins::make_default_environment();
-  register_intrinsics(impl_->natives, &impl_->ictx);
-  impl_->env = environment::extend(impl_->natives);
-  // On one scheduler the intrinsics act for the running process, so the Exec's own context serves
-  // its children; they keep its owner and extend its natives.
-  impl_->ictx.spawn_context = [natives = impl_->natives](const intrinsics_context &) {
-    return spawn_setup{environment::extend(natives), nullptr};
-  };
-  impl_->host = std::make_unique<cvc::state_exec::async_host>(impl_->sched, app.get());
-  impl_->ictx.host = impl_->host.get(); // its group's host (td 4.9, B30); spawned children copy it
+  impl_->own_host = std::make_unique<cvc::state_exec::async_host>(impl_->sched, app.get());
+  impl_->init_context("", builtins::make_default_environment(), impl_->own_host.get());
 }
+
+Exec::Exec(pooled_tag, const std::shared_ptr<cvc::app> &app, const std::string &name,
+           double idle_timeout) {
+  cvc::state &root = cvc::state::instance(*app);
+  // The group builds its scheduler as the app's is built (the policy, the watch root, the parser
+  // and data defaults, the lock attach in the manager's own mode), with the app pool's pid source
+  // and its own registry and random stream (S1.5).
+  exec_group::options opts;
+  opts.name = name;
+  opts.app = app.get();
+  impl_ = std::make_shared<ExecImpl>(std::make_unique<exec_group>(std::move(opts)));
+  impl_->app = app;
+  impl_->root = &root;
+  impl_->idle_timeout = idle_timeout;
+  app->computePool();
+  // Chrooted at its name (td 4.8: an unchrooted Exec locks from the app root), over the frozen
+  // builtins rather than a default environment of its own (S1.3).
+  impl_->init_context(name, environment::extend(frozen_builtins()), &impl_->group->host());
+}
+
+exec_group &Exec::group() const { return *impl_->group; }
 
 Exec::~Exec() {
   // No kernel may outlive the private scheduler it posts to: cancel what is in flight and wait for
@@ -1206,7 +1252,221 @@ cvc::state_exec::async_scheduler &Exec::scheduler() { return impl_->sched; }
 // is the pump thread's too.
 std::size_t Exec::tracked_objects() const {
   check_pump_thread(impl_->sched);
-  return cvc::state_exec::tracked_objects(*impl_->registry);
+  return cvc::state_exec::tracked_objects(impl_->group ? *impl_->group->registry()
+                                                       : *impl_->registry);
+}
+
+std::vector<Exec::batch_outcome> Exec::run_batch(cvc::exec_pool &pool, std::span<Exec *const> execs,
+                                                 std::span<const std::string> programs,
+                                                 bool fresh_env, const std::atomic<bool> &closing) {
+  using clock = std::chrono::steady_clock;
+  // A group's slice per round, as run()'s.
+  static constexpr uint64_t kSliceSteps = 2000000;
+  static constexpr double kSliceSeconds = 0.05;
+  // With nothing runnable, the wait on one parked group, rotating, so that a completion posted to
+  // any group is seen within about this long (S1.12; Stage 2's eventcount replaces it).
+  static constexpr auto kIdleBeat = std::chrono::milliseconds(1);
+  std::vector<batch_outcome> out(programs.size());
+  struct slot {
+    ExecImpl *impl;
+    std::deque<std::size_t> queue; // its programs not started yet, in order
+    std::size_t prog = 0;          // the program running
+    int pid = -1;                  // its process; -1 while none runs
+    bool had_runnable = false;     // something was runnable before the round
+    clock::time_point idle_deadline{};
+  };
+  std::vector<slot> slots;
+  for (Exec *e : execs)
+    slots.push_back({e->impl_.get(), {}});
+  if (slots.empty())
+    return out;
+  for (std::size_t i = 0; i < programs.size(); ++i)
+    slots[i % slots.size()].queue.push_back(i);
+  const auto fail = [&](std::size_t prog, const std::string &what) {
+    out[prog].error = std::make_exception_ptr(std::runtime_error(what));
+  };
+  const auto pid_text = [](int pid) { return " (pid " + std::to_string(pid) + ")"; };
+  static constexpr const char *kClosed = "pycvc.ExecPool.run_all: the pool was closed";
+  // The program ended: its calls cancelled, its process reaped and freed here, the GIL released
+  // (what it holds of Python is freed under the GIL its owner takes).
+  const auto reap = [](slot &s) {
+    s.impl->sched.cancel_async_calls_of(s.pid);
+    process_ptr gone;
+    s.impl->sched.reap(s.pid, &gone);
+    s.pid = -1;
+  };
+  std::vector<exec_group *> groups;
+  std::vector<int> lock_waiters;
+  std::size_t rotate = 0;
+  // After a round, run()'s tests on slot `s`'s program: ended (its outcome set, its process
+  // reaped), runnable (true), or parked, killed past its idle limit.
+  const auto settle = [&](slot &s) -> bool {
+    async_scheduler &sched = s.impl->sched;
+    const int pid = s.pid;
+    if (std::optional<value_t> result = sched.get_result(pid)) {
+      out[s.prog].result = render_result(*result);
+      reap(s);
+      return false;
+    }
+    const std::optional<process_info> info = sched.get_process_info(pid);
+    if (!info) {
+      fail(s.prog, "pycvc.ExecPool.run_all: process vanished" + pid_text(pid));
+      s.pid = -1;
+      return false;
+    }
+    if (info->status == process_status::failed) {
+      // Its uncaught exception, as run() raises it.
+      try {
+        sched.raise_exit_exception(pid);
+        fail(s.prog, "pycvc.ExecPool.run_all: program produced no result" + pid_text(pid));
+      } catch (const dsl_exception &) {
+        out[s.prog].error = std::current_exception();
+      }
+      reap(s);
+      return false;
+    }
+    if (info->status == process_status::killed) {
+      const std::optional<std::string> ex = sched.get_exit_error(pid);
+      const std::string error =
+          ex && !ex->empty() ? *ex : "pycvc.ExecPool.run_all: program killed" + pid_text(pid);
+      reap(s);
+      // A syntax error read inside the process is only its exit error's text: re-parsed, it
+      // raises pycvc.parse_error with its position, as run() does.
+      try {
+        (void)parse_all(programs[s.prog],
+                        parse_options_from_state(*s.impl->root, {}, sched.parser_defaults()));
+        fail(s.prog, error);
+      } catch (...) {
+        out[s.prog].error = std::current_exception();
+      }
+      return false;
+    }
+    if (closing.load(std::memory_order_acquire)) {
+      // ExecPool.close() from another thread: what still runs is killed.
+      sched.kill(pid);
+      fail(s.prog, kClosed);
+      reap(s);
+      return false;
+    }
+    if (info->status == process_status::ready || info->status == process_status::running) {
+      s.idle_deadline = cvc::state_exec::detail::time_after(clock::now(), s.impl->idle_timeout);
+      return true;
+    }
+    // Parked: run()'s idle rule (docs/STATE_EXEC_LOCKS.md 8.4, 9.2).
+    lock_home &home = *sched.locks();
+    const double idle_timeout = s.impl->idle_timeout;
+    if (s.impl->host->in_flight() > 0 || sched.has_runnable() || s.had_runnable ||
+        home.port_pending()) {
+      const clock::time_point now = clock::now();
+      s.idle_deadline = cvc::state_exec::detail::time_after(now, idle_timeout);
+      home.store_progress(now);
+      return false;
+    }
+    lock_waiters.clear();
+    if (sched.lock_waiting_count() > 0) {
+      sched.lock_waiting_pids(lock_waiters);
+      if (const std::optional<clock::time_point> progress =
+              progress_waited_for(home, lock_waiters, idle_timeout, clock::now()))
+        s.idle_deadline =
+            std::max(s.idle_deadline, cvc::state_exec::detail::time_after(*progress, idle_timeout));
+    }
+    if (clock::now() > s.idle_deadline) {
+      const std::optional<std::pair<int, std::string>> named =
+          lock_wait_named(sched, *info, lock_waiters);
+      sched.kill(pid);
+      std::string error =
+          "pycvc.ExecPool.run_all: parked with no pending work (pid " + std::to_string(pid);
+      if (named)
+        error +=
+            (named->first == pid ? std::string(",") : ", pid " + std::to_string(named->first)) +
+            " waiting for lock " + lock_home::show(named->second, s.impl->ictx.root_path);
+      fail(s.prog, error + ")");
+      reap(s);
+    }
+    return false;
+  };
+  try {
+    for (;;) {
+      // Each pooled Exec with no program running starts its next one. One that cannot start (a
+      // syntax error, with parser.step_tokens 0 on the tree) has its error at once.
+      for (slot &s : slots) {
+        while (s.pid < 0 && !s.queue.empty()) {
+          s.prog = s.queue.front();
+          s.queue.pop_front();
+          if (closing.load(std::memory_order_acquire)) {
+            fail(s.prog, kClosed);
+            continue;
+          }
+          try {
+            execute_options opts;
+            opts.name = "pycvc";
+            opts.env = fresh_env ? environment::extend(s.impl->natives) : s.impl->env;
+            s.pid = s.impl->group->execute(programs[s.prog], opts);
+            s.idle_deadline =
+                cvc::state_exec::detail::time_after(clock::now(), s.impl->idle_timeout);
+          } catch (...) {
+            out[s.prog].error = std::current_exception();
+          }
+        }
+      }
+      groups.clear();
+      for (slot &s : slots)
+        if (s.pid >= 0) {
+          s.had_runnable = s.impl->sched.has_runnable();
+          groups.push_back(s.impl->group.get());
+        }
+      if (groups.empty())
+        break;
+      // One fork-join round: each group pumped once, on the pool's workers and this thread.
+      pool.pump_all(groups, pump_budget{kSliceSteps, kSliceSeconds}, clock::time_point::max());
+      bool runnable = false;
+      for (slot &s : slots)
+        if (s.pid >= 0)
+          runnable = settle(s) || runnable;
+      if (runnable)
+        continue;
+      bool work = false;
+      clock::time_point until = clock::now() + kIdleBeat;
+      std::size_t parked = 0;
+      for (slot &s : slots)
+        if (s.pid >= 0) {
+          work = work || s.impl->group->wants_pump();
+          until = std::min(until, s.idle_deadline);
+          ++parked;
+        }
+      if (work || parked == 0)
+        continue;
+      // Nothing to pump: wait on one parked group, the next each time.
+      std::size_t k = rotate++ % parked;
+      for (slot &s : slots)
+        if (s.pid >= 0 && k-- == 0) {
+          s.impl->sched.wait_for_work(until);
+          break;
+        }
+    }
+  } catch (...) {
+    // As run()'s catch: what runs is killed, no kernel outlives the batch, and the processes are
+    // reaped.
+    for (slot &s : slots)
+      if (s.pid >= 0)
+        try {
+          s.impl->sched.kill(s.pid);
+        } catch (...) {
+        }
+    for (Exec *e : execs)
+      e->impl_->host->wait_idle();
+    for (slot &s : slots)
+      if (s.pid >= 0)
+        try {
+          reap(s);
+        } catch (...) {
+        }
+    throw;
+  }
+  // No kernel of the batch outlives it.
+  for (Exec *e : execs)
+    e->impl_->host->wait_idle();
+  return out;
 }
 
 } // namespace pycvc
