@@ -870,6 +870,27 @@ TEST(ExecGroup, ExecuteDefaultsTheOwner) {
   EXPECT_EQ(g.sched().kill_owner("other"), 1);
 }
 
+// S-m3, C-m5: deterministic mode reaches group 0 in exec_pump_frame: its math.random stream is
+// seeded from a fixed name, so two apps draw the same numbers.
+TEST(AppExecPool, DeterministicModeSeedsGroupZero) {
+  const auto draw = [] {
+    cvc::app app;
+    cvc::pool_options po;
+    po.deterministic = true;
+    app.exec_pool(po);
+    exec_group fg(opts_for(app, "frame"));
+    cvc::frame_group_handle handle = app.register_frame_group(fg);
+    async_scheduler &zero = app.exec_scheduler();
+    const int pid = zero.execute(std::string("(list (math.random) (math.random))"));
+    app.exec_pump_frame();
+    const auto r = zero.get_result(pid);
+    return r ? to_string(*r) : std::string("<none>");
+  };
+  const std::string a = draw(), b = draw();
+  EXPECT_NE(a, "<none>");
+  EXPECT_EQ(a, b);
+}
+
 // C-m9: destroying a group from inside its own pump aborts, rather than freeing the scheduler
 // under its run loop.
 TEST(ExecGroupDeathTest, DestroyedFromInsideItsOwnPumpAborts) {
