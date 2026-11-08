@@ -918,6 +918,9 @@ def test_po_run_holds_the_owner_until_it_returns():
     # run() stays its scheduler's pump owner through its quiesce, while it waits for its kernels
     # and reaps (R1-mid C-m3): a raw call from another thread raises then, as during the run,
     # while a priority call still acts directly. Once run() has returned the raw call works.
+    # (ended) is the program's last form, so once it has run no step is left to answer a priority
+    # call between steps: only run()'s quiesce answers it, and the raw calls made after it are made
+    # in the quiesce for certain, with no sleep (the R1 skeptic's T1).
     app = pycvc.make_app()
     ex = pycvc.Exec(app)
     sched = ex.scheduler()
@@ -928,19 +931,19 @@ def test_po_run_holds_the_owner_until_it_returns():
     def on_end():
         box["pid"] = sched.current_pid()
         ended.set()
-        return True
+        return 7
 
     ex.register_async_fn("hold", lambda: gate.wait(WAIT) and 1)
     ex.register_fn("ended", on_end)
-    t, out = _in_thread("po-quiesce", ex.run, "(begin (hold-async) (ended) 7)")
+    t, out = _in_thread("po-quiesce", ex.run, "(begin (hold-async) (ended))")
     try:
         assert ended.wait(WAIT), "the program never ended"
-        time.sleep(0.05)  # the program has ended: run() waits for the kernel, quiesced
         pid = box["pid"]
+        info = ex.get_priority(pid)  # answered by the quiesce
+        assert info is None or info["base"] == 0, info
         _pumping(sched.get_process_info, pid)
         _pumping(sched.sync_run)
-        info = ex.get_priority(pid)
-        assert info is None or info["base"] == 0, info
+        assert ex.get_priority(pid) == info  # in the quiesce, a call acts directly
         assert t.is_alive()
     finally:
         gate.set()
