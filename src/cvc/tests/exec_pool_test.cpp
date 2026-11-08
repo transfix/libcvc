@@ -119,15 +119,33 @@ TEST(CpuPlacement, PlacementListsAreSubsetsOfTheProcessCpus) {
   EXPECT_GE(cvc::performance_core_count(), 1u);
   if (!all.empty()) {
     EXPECT_EQ(cvc::performance_core_count(), perf.size());
-    // `all`: the faster class first.
-    for (std::size_t i = 1; i < every.size(); ++i)
+    // `all`: the faster class first (the driver's CPU, last, aside).
+    for (std::size_t i = 1; i + 1 < every.size(); ++i)
       EXPECT_GE(every[i - 1].efficiency, every[i].efficiency);
+    // One logical CPU per physical core before any sibling: the first workers never share a core.
+    std::set<int> cores;
+    for (const cvc::logical_cpu &c : perf)
+      cores.insert(c.core);
+    const std::size_t distinct = cores.size();
+    std::set<int> first_cores;
+    for (std::size_t i = 0; i + 1 < distinct && i < perf.size(); ++i)
+      EXPECT_TRUE(first_cores.insert(perf[i].core).second)
+          << "entry " << i << " shares core " << perf[i].core << " with an earlier one";
+    // The driver's CPU is last in both lists, off logical CPU 0's core when there is another.
+    EXPECT_EQ(perf.back().index, every.back().index);
+    int core0 = -1;
+    for (const cvc::logical_cpu &c : all)
+      if (c.index == 0)
+        core0 = c.core;
+    if (distinct > 1)
+      EXPECT_NE(perf.back().core, core0);
 #if defined(_WIN32) || defined(__linux__)
     // A thread of its own, pinned and then gone: the caller's affinity is left alone.
     cvc::pin_result r;
     std::thread([&] { r = cvc::pin_current_thread(); }).join();
     std::cout << "pin: cpu " << r.cpu << " (" << r.how << ")\n";
     EXPECT_GE(r.cpu, 0);
+    EXPECT_EQ(r.cpu, perf.back().index) << "auto pins to the CPU no pool worker takes";
     bool placed = false;
     std::thread([&] { placed = cvc::place_current_thread(cvc::cpu_set::all, 0); }).join();
     EXPECT_TRUE(placed);

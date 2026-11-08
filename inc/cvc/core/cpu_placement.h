@@ -35,9 +35,12 @@ std::vector<logical_cpu> logical_cpus();
 // (at least 1) where that is unknown.
 unsigned performance_core_count();
 
-// The CPUs `set` names, in the order a pool places its workers on them: worker i on entry
-// i % size(). Performance cores first, and on each class a CPU off the core logical CPU 0 is on
-// (where most interrupts land) before it. Empty where the platform says nothing.
+// The CPUs `set` names, in the order a pool places its workers on them (worker i on entry i;
+// the pool lets a worker beyond them float). The faster class first; in each class one logical
+// CPU per physical core before any hyperthread sibling, so the first workers never share a core,
+// with logical CPU 0's core (where most interrupts land) after the others. Last comes the CPU
+// pin_current_thread(-1) takes: off CPU 0's core, and never used by a pool of fewer workers than
+// CPUs. Empty where the platform says nothing.
 std::vector<logical_cpu> placement_cpus(cpu_set set);
 
 // Pin the calling thread to the `index`-th CPU of placement_cpus(set) (wrapping). False when the
@@ -52,7 +55,8 @@ struct pin_result {
 };
 
 // Pin the calling thread to logical CPU `cpu`, or, with `cpu` below 0, to a performance core off
-// the core logical CPU 0 is on (the bench's --pin auto).
+// the core logical CPU 0 is on that placement_cpus(cpu_set::performance) lists last, which no
+// pool worker takes (the bench's --pin auto).
 pin_result pin_current_thread(int cpu = -1);
 
 } // namespace cvc
