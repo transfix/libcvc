@@ -17,7 +17,9 @@
 #include <cvc/state/state_exec/state_value_codec.h>
 #include <gtest/gtest.h>
 #include <memory>
+#include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 // A program's closure bound in the scope it captured (a defun, a lambda set at top level) and that
@@ -298,6 +300,157 @@ TEST(CycleCollectorTest, SchedulersCollectOnTheirOwn) {
   ASSERT_TRUE(sched.get_result(pid));
   EXPECT_TRUE(first.expired());
   EXPECT_LT(tracked_objects(), 2000u);
+}
+
+// --- a group's registry, stream and base (S1.1-S1.3) ---------------------------------------------
+
+namespace {
+const char *const kCycleScript = "(begin (set big (collections.range 1000)) (defun f (x) x))";
+} // namespace
+
+TEST(CycleRegistryTest, ABoundRegistryTakesWhatIsTracked) {
+  // A scheduler binds its group's registry on every entry (td 4.7): whatever runs under the
+  // binding tracks into it, and the no-argument forms follow it.
+  collect_cycles();
+  const std::size_t own = tracked_objects();
+  cycle_registry_ptr r = make_cycle_registry();
+  leak_probe p;
+  {
+    cycle_registry_scope bind(r.get());
+    p = run_and_drop(kCycleScript);
+    EXPECT_GT(tracked_objects(*r), 0u);
+    EXPECT_EQ(tracked_objects(), tracked_objects(*r));
+    note_process_exit();
+    EXPECT_TRUE(exit_pending_for_test(*r));
+  }
+  EXPECT_EQ(tracked_objects(), own); // nothing went to this thread's registry
+  collect_cycles();                  // so its collection does not see the cycle
+  EXPECT_FALSE(p.env.expired());
+  EXPECT_GT(collect_cycles(*r).freed, 0u);
+  EXPECT_TRUE(p.env.expired());
+  EXPECT_TRUE(p.big.expired());
+  EXPECT_FALSE(exit_pending_for_test(*r));
+}
+
+TEST(CycleRegistryTest, TheDeleterFreesWhatADeadSchedulerLeft) {
+  // A group's owner frees its registry after its scheduler and envs: the deleter's collection
+  // frees the cycle the dead scheduler's env still makes.
+  collect_cycles();
+  cycle_registry_ptr r = make_cycle_registry();
+  leak_probe p;
+  {
+    cycle_registry_scope bind(r.get());
+    p = run_and_drop(kCycleScript); // the scheduler and its env are gone
+  }
+  collect_cycles();
+  EXPECT_FALSE(p.env.expired());
+  r.reset();
+  EXPECT_TRUE(p.env.expired());
+  EXPECT_TRUE(p.big.expired());
+}
+
+TEST(CycleRegistryTest, WhatOutlivesARegistryJoinsTheCallers) {
+  // A host keeping a group's function past the group: the function and the scope it is bound in
+  // survive the registry's final collection, and the host thread's registry frees them once the
+  // host lets go.
+  collect_cycles();
+  std::weak_ptr<environment> seen;
+  value_t held;
+  cycle_registry_ptr r = make_cycle_registry();
+  {
+    cycle_registry_scope bind(r.get());
+    scheduler sched;
+    execute_options opts;
+    opts.env = builtins::make_default_environment();
+    seen = opts.env;
+    const int pid = sched.execute(std::string("(begin (defun f (x) x) f)"), opts);
+    sched.run();
+    ASSERT_TRUE(sched.get_result(pid));
+    held = *sched.get_result(pid);
+  }
+  const std::size_t own = tracked_objects();
+  r.reset();
+  EXPECT_FALSE(seen.expired());
+  EXPECT_GT(tracked_objects(), own);
+  held = nil_value;
+  EXPECT_FALSE(seen.expired()); // the scope and f hold each other
+  EXPECT_GT(collect_cycles().freed, 0u);
+  EXPECT_TRUE(seen.expired());
+}
+
+TEST(CycleRegistryTest, EveryRegistryHasAnIdOfItsOwn) {
+  // Ids are never reused, though a registry made after one is freed often takes its address.
+  EXPECT_EQ(bound_cycle_registry_id(), 0u);
+  std::set<std::uint64_t> ids;
+  for (int i = 0; i < 100; ++i) {
+    cycle_registry_ptr r = make_cycle_registry();
+    cycle_registry_scope bind(r.get());
+    EXPECT_NE(bound_cycle_registry_id(), 0u);
+    EXPECT_TRUE(ids.insert(bound_cycle_registry_id()).second);
+  }
+  // Scopes nest and restore what they found; a null one binds none.
+  cycle_registry_ptr a = make_cycle_registry();
+  cycle_registry_ptr b = make_cycle_registry();
+  {
+    cycle_registry_scope bind_a(a.get());
+    const std::uint64_t id_a = bound_cycle_registry_id();
+    {
+      cycle_registry_scope bind_b(b.get());
+      EXPECT_NE(bound_cycle_registry_id(), id_a);
+      {
+        cycle_registry_scope none(nullptr);
+        EXPECT_EQ(bound_cycle_registry_id(), 0u);
+      }
+    }
+    EXPECT_EQ(bound_cycle_registry_id(), id_a);
+  }
+  EXPECT_EQ(bound_cycle_registry_id(), 0u);
+}
+
+TEST(CycleRegistryTest, AThreadThatOptsInIsCollectedWhenItEnds) {
+  // S1-Q3: a thread's own registry is collected at its exit only if the thread asked.
+  const auto on_thread = [](bool opt_in) {
+    leak_probe p;
+    std::thread t([&] {
+      if (opt_in)
+        collect_cycles_at_thread_exit();
+      p = run_and_drop(kCycleScript);
+    });
+    t.join();
+    return p;
+  };
+  const leak_probe in = on_thread(true);
+  EXPECT_TRUE(in.env.expired());
+  EXPECT_TRUE(in.big.expired());
+  const leak_probe out = on_thread(false);
+  EXPECT_FALSE(out.env.expired()); // its registry went with nothing collected
+  if (environment_ptr env = out.env.lock())
+    env->bindings.clear(); // break the cycle by hand, so LeakSanitizer finds no leak
+  EXPECT_TRUE(out.env.expired());
+}
+
+TEST(CycleRegistryTest, ClosureBodiesAreSharedWithinARegistryOnly) {
+  // The closures one lambda form makes share their (begin ...) body list on a thread, but only
+  // under one registry: two groups taking turns on a worker never share one (td 4.7).
+  const value_t form = parse("(lambda () 1 2)");
+  auto env = builtins::make_default_environment();
+  stackless_evaluator ev(env);
+  const auto make = [&] { return std::get<closure_ptr>(ev.evaluate(form, env).v); };
+  cycle_registry_ptr a = make_cycle_registry();
+  cycle_registry_ptr b = make_cycle_registry();
+  closure_ptr a1, a2, b1;
+  {
+    cycle_registry_scope bind(a.get());
+    a1 = make();
+    a2 = make();
+  }
+  {
+    cycle_registry_scope bind(b.get());
+    b1 = make();
+  }
+  ASSERT_TRUE(a1->body_expr && a2->body_expr && b1->body_expr);
+  EXPECT_EQ(a1->body_expr, a2->body_expr);
+  EXPECT_NE(a1->body_expr, b1->body_expr);
 }
 
 // --- measuring a share -------------------------------------------------------------------------
