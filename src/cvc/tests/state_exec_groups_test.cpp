@@ -16,6 +16,7 @@
 #include <cvc/state/state_exec/async_host.h>
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/exec_group.h>
 #include <cvc/state/state_exec/heap.h>
 #include <cvc/state/state_exec/intrinsics.h>
@@ -1626,4 +1627,297 @@ TEST(Groups, PA01_TwoCallersShareThePool) {
   EXPECT_EQ(mine[0]->outcome(uses), "8");
   ASSERT_EQ(proxied_on.size(), 1u);
   EXPECT_EQ(proxied_on[0], my_caller) << "another caller ran the proxied body";
+}
+
+// --- Foreign futures and host-thread natives (S1.8) ---
+
+namespace {
+
+std::string exception_class(const async_scheduler &sched, int pid) {
+  const auto exc = sched.get_exit_exception(pid);
+  return exc ? class_name(class_of_instance(*exc)) : "<no exception>";
+}
+
+std::string exception_text(const async_scheduler &sched, int pid) {
+  const auto exc = sched.get_exit_exception(pid);
+  return exc ? exception_message(*exc) : sched.get_exit_error(pid).value_or("<none>");
+}
+
+// Two bare async schedulers of one app, each with its own async host on the app's background pool
+// and its own environment (FF-1, FF-2). A has (hold) and (hold-async), a kernel that runs until
+// `release` is set, then returns 21; (twice) and (twice-async) on an inline executor; and
+// (stash f), which keeps f. B has (fetch), which returns what A stashed.
+struct two_schedulers {
+  struct side {
+    async_scheduler sched;
+    std::unique_ptr<async_host> host;
+    intrinsics_context ictx;
+    environment_ptr env = builtins::make_default_environment();
+
+    void setup(cvc::app &app, cvc::state &tree) {
+      sched.set_watch_root(&tree);
+      host = std::make_unique<async_host>(sched, &app);
+      ictx.sched = &sched;
+      ictx.root = &tree;
+      ictx.proc = make_process();
+      ictx.host = host.get();
+      register_intrinsics(env, &ictx);
+    }
+    int submit(const std::string &script) {
+      execute_options opts;
+      opts.env = environment::extend(env);
+      opts.max_time = kProcessCeiling;
+      return sched.execute(script, opts);
+    }
+    void pump() {
+      sched.drain_ingress();
+      sched.sync_run_steps(100000, 0.02);
+    }
+  };
+
+  cvc::app app;
+  cvc::state &tree = cvc::state::instance(app);
+  side a, b;
+  std::atomic<bool> release{false};
+  std::mutex m;
+  value_t stashed;
+
+  two_schedulers() {
+    tree("state_exec.defaults.limits.async_steps_per_cpu_ms").value(std::string("0"));
+    a.setup(app, tree);
+    b.setup(app, tree);
+    register_async_fn(a.env, *a.host, "hold", [this](std::span<const value_t>) -> async_kernel {
+      return [this](async_call &call) -> value_t {
+        while (!release.load() && !call.cancelled())
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        return value_t(int64_t(21));
+      };
+    });
+    async_options inline_call;
+    inline_call.where = executor::inline_call();
+    register_async_fn(
+        a.env, *a.host, "twice",
+        [](std::span<const value_t> args) -> async_kernel {
+          const int64_t x = std::get<int64_t>(args[0].v);
+          return [x](async_call &) -> value_t { return value_t(2 * x); };
+        },
+        inline_call);
+    builtins::register_fn(a.env, "stash", [this](std::span<const value_t> args) -> value_t {
+      std::lock_guard<std::mutex> lock(m);
+      stashed = args[0];
+      return nil_value;
+    });
+    builtins::register_fn(b.env, "fetch", [this](std::span<const value_t>) -> value_t {
+      std::lock_guard<std::mutex> lock(m);
+      return stashed;
+    });
+  }
+  ~two_schedulers() {
+    release.store(true);
+    b.host->shutdown();
+    a.host->shutdown();
+  }
+  bool has_stash() {
+    std::lock_guard<std::mutex> lock(m);
+    return !std::holds_alternative<std::monostate>(stashed.v);
+  }
+};
+
+} // namespace
+
+// FF-1 (S1-Q2, td 4.9): a threaded future made on scheduler A, awaited from scheduler B, raises
+// RuntimeError "await: the future belongs to another scheduler" at once, through await, await-all
+// and msg-recv on the future. A's call list is untouched (A's finish_async_call never ran on B's
+// thread), and A's own await still gets the value once the kernel ends.
+TEST(Groups, FF01_AnotherSchedulersFutureRaises) {
+  for (const char *const wait : {"(begin (await (fetch)))", "(begin (await-all (list (fetch))))",
+                                 "(begin (msg-recv (fetch)))"}) {
+    SCOPED_TRACE(wait);
+    two_schedulers w;
+    const int owner = w.a.submit("(begin (set f (hold-async)) (stash f) (await f))");
+    const auto t0 = clock_type::now();
+    while (!(w.has_stash() && status_of(w.a.sched, owner) == process_status::waiting) &&
+           seconds_since(t0) < kCeiling)
+      w.a.pump();
+    ASSERT_TRUE(w.has_stash());
+    ASSERT_EQ(w.a.sched.async_calls_in_flight(), 1u);
+    const int awaiter = w.b.submit(wait);
+    for (int i = 0; i < 3; ++i)
+      w.b.pump();
+    EXPECT_EQ(status_of(w.b.sched, awaiter), process_status::failed)
+        << "B's await did not raise: " << outcome_of(w.b.sched, awaiter);
+    EXPECT_EQ(exception_class(w.b.sched, awaiter), "RuntimeError");
+    EXPECT_NE(exception_text(w.b.sched, awaiter).find(kForeignFutureError), std::string::npos)
+        << exception_text(w.b.sched, awaiter);
+    EXPECT_EQ(w.a.sched.async_calls_in_flight(), 1u) << "A's call list changed";
+    EXPECT_EQ(status_of(w.a.sched, owner), process_status::waiting);
+    w.release.store(true);
+    const auto t1 = clock_type::now();
+    while (!finished(w.a.sched, owner) && seconds_since(t1) < kCeiling)
+      w.a.pump();
+    EXPECT_EQ(outcome_of(w.a.sched, owner), "21");
+    if (!finished(w.b.sched, awaiter))
+      w.b.sched.kill(awaiter);
+  }
+}
+
+// FF-2 (S1-Q2): an inline future (a call on an inline executor, settled before it returned, with
+// no owner) is a plain value: awaited from another scheduler, through await, await-all and
+// msg-recv, it gives its value.
+TEST(Groups, FF02_AnInlineFutureIsAValue) {
+  for (const auto &[wait, want] : std::vector<std::pair<std::string, std::string>>{
+           {"(begin (await (fetch)))", "42"},
+           {"(begin (await-all (list (fetch))))", "(42)"},
+           {"(begin (msg-recv (fetch)))", "42"}}) {
+    SCOPED_TRACE(wait);
+    two_schedulers w;
+    const int maker = w.a.submit("(begin (stash (twice-async 21)) 1)");
+    for (int i = 0; i < 10 && !finished(w.a.sched, maker); ++i)
+      w.a.pump();
+    ASSERT_EQ(outcome_of(w.a.sched, maker), "1");
+    const int awaiter = w.b.submit(wait);
+    for (int i = 0; i < 10 && !finished(w.b.sched, awaiter); ++i)
+      w.b.pump();
+    EXPECT_EQ(outcome_of(w.b.sched, awaiter), want);
+  }
+}
+
+// GR-10 (td 4.9, S1.8): natives installed by kind (exec_group::install). In an `any` group a
+// worker pumps, a host_only native is not bound (a call is a NameError), and a host_proxied one
+// runs on the caller's thread, outside any pump, its process resuming at the group's next pump.
+// At threads 0 the caller pumps the group and the wrapper runs the body inline, in the pump.
+TEST(Groups, GR10_HostOnlyAndHostProxiedNatives) {
+  const auto caller = std::this_thread::get_id();
+  native_calls proxied;
+  const auto install = [&](group_world &gw) {
+    gw.g().install(
+        gw.env, "host-only-fn",
+        [](std::span<const value_t>) -> value_t { return value_t(int64_t(1)); },
+        provider_affinity::host_only);
+    gw.g().install(
+        gw.env, "proxied",
+        [&](std::span<const value_t>) -> value_t {
+          proxied.note();
+          return value_t(int64_t(7));
+        },
+        provider_affinity::host_proxied);
+  };
+  const auto no_deadline = clock_type::now() + std::chrono::hours(1);
+  {
+    SCOPED_TRACE("a worker pumps the group");
+    pool_app w(4);
+    if (w.pool.threads() == 0) {
+      ADD_FAILURE() << "the pool has no worker";
+    } else {
+      caller_hold hold(w, "gr10hold");
+      std::thread::id pumped_on;
+      group_world target(w, "gr10", group_affinity::any, [&](exec_group::options &o) {
+        o.pump_hook_for_test = [&](exec_group &) {
+          if (!hold.go.load())
+            pumped_on = std::this_thread::get_id();
+          hold.go.store(true);
+        };
+      });
+      install(target);
+      const int unbound = target.submit("(host-only-fn)");
+      const int uses = target.submit("(+ (proxied) 1)");
+      w.pool.set_last_pump_for_test(hold.g(), 1e-3);
+      w.pool.set_last_pump_for_test(target.g(), 1e-3);
+      w.pool.pump_all(std::vector<exec_group *>{&hold.g(), &target.g()}, steps_only(10000),
+                      no_deadline);
+      EXPECT_NE(pumped_on, caller) << "the group was pumped on the caller";
+      EXPECT_EQ(status_of(target.sched(), unbound), process_status::failed);
+      EXPECT_EQ(exception_class(target.sched(), unbound), "NameError")
+          << exception_text(target.sched(), unbound);
+      const std::vector<native_call> calls = proxied.get();
+      ASSERT_EQ(calls.size(), 1u);
+      EXPECT_EQ(calls[0].thread, caller) << "the proxied body ran off the caller";
+      EXPECT_EQ(calls[0].in, nullptr) << "the proxied body ran inside a pump";
+      EXPECT_FALSE(finished(target.sched(), uses)) << "it resumed in the pump that called it";
+      w.pool.pump_all(std::vector<exec_group *>{&target.g()}, steps_only(10000), no_deadline);
+      EXPECT_EQ(target.outcome(uses), "8") << "it did not resume at the group's next pump";
+    }
+  }
+  proxied.calls.clear();
+  {
+    SCOPED_TRACE("threads 0");
+    pool_app w(0);
+    group_world target(w, "gr10c");
+    install(target);
+    const int uses = target.submit("(+ (proxied) 1)");
+    w.pool.pump_all(std::vector<exec_group *>{&target.g()}, steps_only(10000), no_deadline);
+    EXPECT_EQ(target.outcome(uses), "8") << "not run inline in its pump";
+    const std::vector<native_call> calls = proxied.get();
+    ASSERT_EQ(calls.size(), 1u);
+    EXPECT_EQ(calls[0].thread, caller);
+    EXPECT_EQ(calls[0].in, &target.g()) << "not inline in the group's pump";
+  }
+}
+
+// GR-11 (td 4.9, S1.6): a host_proxied native called inside a generator body, which cannot park,
+// on a worker: the worker blocks until the caller runs the body while it waits at the join, and
+// the process ends in that same frame (no deadlock; the frame's time is printed, under a generous
+// ceiling). The same group pumped by the caller runs it inline.
+TEST(Groups, GR11_AProxiedCallInAGeneratorBlocksItsWorker) {
+  const auto caller = std::this_thread::get_id();
+  native_calls proxied;
+  const auto install = [&](group_world &gw) {
+    gw.g().install(
+        gw.env, "proxied",
+        [&](std::span<const value_t>) -> value_t {
+          proxied.note();
+          return value_t(int64_t(7));
+        },
+        provider_affinity::host_proxied);
+  };
+  const std::string program = "(begin (set g (generator (lambda () (yield (proxied))))) "
+                              "(+ (next g) 1))";
+  const auto no_deadline = clock_type::now() + std::chrono::hours(1);
+  {
+    SCOPED_TRACE("a worker pumps the group");
+    pool_app w(4);
+    if (w.pool.threads() == 0) {
+      ADD_FAILURE() << "the pool has no worker";
+    } else {
+      caller_hold hold(w, "gr11hold");
+      std::thread::id pumped_on;
+      group_world target(w, "gr11", group_affinity::any, [&](exec_group::options &o) {
+        o.pump_hook_for_test = [&](exec_group &) {
+          if (!hold.go.load())
+            pumped_on = std::this_thread::get_id();
+          hold.go.store(true);
+        };
+      });
+      install(target);
+      const int uses = target.submit(program);
+      w.pool.set_last_pump_for_test(hold.g(), 1e-3);
+      w.pool.set_last_pump_for_test(target.g(), 1e-3);
+      const auto t0 = clock_type::now();
+      w.pool.pump_all(std::vector<exec_group *>{&hold.g(), &target.g()}, steps_only(100000),
+                      no_deadline);
+      const double took = seconds_since(t0);
+      std::printf("GR-11: the frame took %.3f s (effective %u)\n", took, w.effective());
+      EXPECT_LT(took, kCeiling);
+      EXPECT_NE(pumped_on, caller) << "the group was pumped on the caller";
+      EXPECT_EQ(target.outcome(uses), "8") << "the worker did not wait for the body";
+      const std::vector<native_call> calls = proxied.get();
+      ASSERT_EQ(calls.size(), 1u);
+      EXPECT_EQ(calls[0].thread, caller) << "the proxied body ran off the caller";
+      EXPECT_EQ(calls[0].in, nullptr) << "the proxied body ran inside a pump";
+    }
+  }
+  proxied.calls.clear();
+  {
+    SCOPED_TRACE("the caller pumps the group");
+    pool_app w(0);
+    group_world target(w, "gr11c");
+    install(target);
+    const int uses = target.submit(program);
+    w.pool.pump_all(std::vector<exec_group *>{&target.g()}, steps_only(100000), no_deadline);
+    EXPECT_EQ(target.outcome(uses), "8");
+    const std::vector<native_call> calls = proxied.get();
+    ASSERT_EQ(calls.size(), 1u);
+    EXPECT_EQ(calls[0].thread, caller);
+    EXPECT_EQ(calls[0].in, &target.g()) << "not inline in the group's pump";
+  }
 }
