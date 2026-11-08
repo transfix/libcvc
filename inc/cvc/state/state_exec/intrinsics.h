@@ -221,10 +221,11 @@ static_assert(std::is_aggregate_v<intrinsics_context>); // hosts may brace-initi
 void register_intrinsics(environment_ptr env, intrinsics_context *ctx);
 
 /// The spawn_context callback for a host that registers the plain intrinsics: each child gets a
-/// context copying the parent's (scheduler, root, chroot, identity, channel policy, document, lock
-/// fields and this callback, so grandchildren get one too) and `environment::extend(base)` with
-/// the intrinsics registered over it, then `after_register` (the host's own bindings). A null
-/// `base` is one default environment, made with the callback and shared by its children.
+/// context copying the parent's (scheduler, async host, root, chroot, identity, channel policy,
+/// document, lock fields and this callback, so grandchildren get one too) and
+/// `environment::extend(base)` with the intrinsics registered over it, then `after_register` (the
+/// host's own bindings). A null `base` is one default environment, made with the callback and
+/// shared by its children.
 std::function<spawn_setup(const intrinsics_context &)> make_spawn_context(
     environment_ptr base = nullptr,
     std::function<void(const environment_ptr &, intrinsics_context &)> after_register = {});
