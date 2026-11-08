@@ -1,7 +1,9 @@
 // A document's scene world with no renderer (scene_world.h; ARIADNE_WORLDS.md section 14,
 // "Headless first"): the physics world and its bodies built from the scene alone, stepped on the
-// world clock, publishing physics.stats.*, and run by an AppRuntime with no SceneAdapter. The same
-// world drawn by cvcGL is cvcgl_ariadne_physics's test_same_world_headless_and_drawn.
+// world clock, publishing physics.stats.*, and run by an AppRuntime with no SceneAdapter; a
+// generated_world node run here (its world, keys, Regenerate and colliders); a data node's bodies
+// taken from its dataset when it is ready, and swapped when it changes. The same worlds drawn by
+// cvcGL are cvcgl_ariadne_physics's test_same_world_headless_and_drawn.
 
 #include <chrono>
 #include <cmath>
@@ -9,12 +11,15 @@
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/requires.h>
 #include <cvc/ariadne/scene.h>
+#include <cvc/ariadne/scene_generated_world.h>
 #include <cvc/ariadne/scene_geometry.h>
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/core/app.h>
+#include <cvc/geometry/height_field.h>
 #include <cvc/physics/backend.h>
 #include <cvc/physics/world.h>
 #include <cvc/state/state.h>
+#include <cvc/world/world_geometry.h>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
@@ -115,7 +120,7 @@ TEST(AriadneSceneWorld, BuildsTheBodiesFromTheSceneAlone) {
   EXPECT_TRUE(scene_has_world(r.scene));
   cvc::app app;
   std::vector<std::string> warnings;
-  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "physics", &warnings);
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
   ASSERT_NE(w, nullptr);
   if (jolt())
     EXPECT_TRUE(warnings.empty()) << warnings.front();
@@ -140,7 +145,7 @@ TEST(AriadneSceneWorld, StepsOnTheClockAndPublishesItsStats) {
   ASSERT_TRUE(r.ok) << r.error;
   cvc::app app;
   std::vector<std::string> warnings;
-  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "physics", &warnings);
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
   ASSERT_NE(w, nullptr);
   SceneClockDriver clock(app, resolved_clock(r.scene));
   const auto crate = w->body("crate");
@@ -178,7 +183,7 @@ scene:
   ASSERT_TRUE(r.ok) << r.error;
   cvc::app app;
   std::vector<std::string> warnings;
-  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", &warnings);
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "", &warnings);
   ASSERT_NE(w, nullptr);
   EXPECT_TRUE(any_contains(warnings, "'lump' (group): body:"));
   ASSERT_EQ(w->bodies().size(), 1u);
@@ -220,4 +225,164 @@ TEST(AriadneSceneWorld, ScenePhysicsTokenIsTheEngine) {
     if (std::string(t.name) == "scene.physics")
       found = true;
   EXPECT_TRUE(found);
+}
+
+namespace {
+
+// A small generated world (a few hundred metres, a handful of props) and a ball above it.
+const char *kGenerated = R"(
+scene:
+  physics: {}
+  nodes:
+    - node: world
+      type: generated_world
+      seed: 5
+      half: 150
+      trees: 6
+      rocks: 3
+      buildings: 6
+      body: {}
+    - node: ball
+      source: { sphere: 0.5 }
+      transform: { position: [3, -4, 80] }
+      body: { density: 400 }
+)";
+
+std::size_t collide_items(const cvc::world::generated_world &w) {
+  std::size_t n = 0;
+  const cvc::world::world_geometry g = w.geometry();
+  for (const cvc::world::geometry_item &it : g.items())
+    if (it.has(cvc::world::role_collide))
+      ++n;
+  return n;
+}
+
+} // namespace
+
+TEST(AriadneSceneWorld, AGeneratedWorldRunsWithoutARenderer) {
+  REQUIRE_YAML();
+  LoadResult r = load_string(kGenerated);
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  if (jolt())
+    EXPECT_TRUE(warnings.empty()) << warnings.front();
+  std::shared_ptr<const cvc::world::generated_world> gw = w->generated_world("world");
+  ASSERT_NE(gw, nullptr);
+  ASSERT_NE(gw->terrain, nullptr);
+  EXPECT_EQ(gw->params.half_m, 150.0);
+  // The node's body: is the world's colliders, the terrain first: a static body each.
+  const std::size_t items = collide_items(*gw);
+  EXPECT_GE(items, 1u);
+  EXPECT_EQ(w->bodies_of("world").size(), items);
+  EXPECT_EQ(w->world().body_count(), items + 1);
+  for (const SceneWorldBody &b : w->bodies())
+    EXPECT_EQ(b.moves, b.node == "ball");
+  // Its keys are seeded and its stats published, as a renderer's node does.
+  EXPECT_EQ(val(app, "world.seed"), "5");
+  EXPECT_EQ(val(app, "world.half"), "150");
+  EXPECT_EQ(val(app, "world.stats.buildings"), std::to_string(gw->building_count));
+  EXPECT_NE(val(app, "world.status").find("fbm terrain"), std::string::npos);
+  EXPECT_FALSE(val(app, "world.generators.terrain").empty());
+
+  if (!jolt())
+    return;
+  // The ball falls onto the generated ground and rests on it.
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+  for (int i = 0; i < 600; ++i) {
+    clock.drive(1.0 / 60.0);
+    w->follow(app.world_clock());
+  }
+  const cvc::physics::body_state b = w->world().state(w->body("ball"));
+  const double ground = gw->height(b.position.x, b.position.y);
+  EXPECT_NEAR(b.position.z, ground + 0.5, 0.25);
+}
+
+TEST(AriadneSceneWorld, RegenerateMakesANewWorldAndSwapsItsBodies) {
+  REQUIRE_YAML();
+  LoadResult r = load_string(kGenerated);
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "", &warnings);
+  ASSERT_NE(w, nullptr);
+  std::shared_ptr<const cvc::world::generated_world> first = w->generated_world("world");
+  ASSERT_NE(first, nullptr);
+
+  // An edit alone only marks the world pending (world.auto is off).
+  cvc::state::instance(app)("world.seed").value("11");
+  w->sync(&warnings);
+  EXPECT_EQ(w->generated_world("world"), first);
+  EXPECT_EQ(val(app, "world.pending"), "1");
+
+  // Regenerate makes the new world at once, and the node's bodies are its colliders now.
+  cvc::state::instance(app)("world.request").value("regenerate");
+  w->sync(&warnings);
+  std::shared_ptr<const cvc::world::generated_world> second = w->generated_world("world");
+  ASSERT_NE(second, nullptr);
+  EXPECT_NE(second, first);
+  EXPECT_EQ(second->params.seed, 11u);
+  EXPECT_EQ(val(app, "world.request"), "");
+  EXPECT_EQ(val(app, "world.pending"), "0");
+  EXPECT_EQ(w->bodies_of("world").size(), collide_items(*second));
+  EXPECT_EQ(w->world().body_count(), collide_items(*second) + 1);
+  EXPECT_TRUE(w->body("ball").valid());
+}
+
+TEST(AriadneSceneWorld, ADataNodesBodiesComeWithItsDataset) {
+  REQUIRE_YAML();
+  LoadResult r = load_string(R"(
+scene:
+  physics: {}
+  nodes:
+    - node: city
+      source: { data: city }
+      body: {}
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "", &warnings);
+  ASSERT_NE(w, nullptr);
+  EXPECT_TRUE(w->bodies_of("city").empty()); // nothing loaded yet
+  w->sync(&warnings);
+  EXPECT_TRUE(w->bodies_of("city").empty());
+
+  // The dataset is ready: its terrain becomes the node's body.
+  cvc::state &root = cvc::state::instance(app);
+  root("data.city.terrain")
+      .data(std::shared_ptr<const cvc::height_field>(
+          std::make_shared<cvc::height_field>(3, 3, -10.0, -10.0, 10.0, 10.0)));
+  root("data.city.rev").value("1");
+  root("data.city.status").value("ready");
+  w->sync(&warnings);
+  ASSERT_EQ(w->bodies_of("city").size(), 1u);
+  const auto first = w->body("city");
+  w->sync(&warnings); // the same rev: nothing changes
+  EXPECT_EQ(w->body("city"), first);
+
+  // A reload (a new rev) swaps it; the old body goes.
+  root("data.city.terrain")
+      .data(std::shared_ptr<const cvc::height_field>(
+          std::make_shared<cvc::height_field>(5, 5, -10.0, -10.0, 5.0, 5.0)));
+  root("data.city.rev").value("2");
+  w->sync(&warnings);
+  ASSERT_EQ(w->bodies_of("city").size(), 1u);
+  EXPECT_EQ(w->world().body_count(), 1u);
+  EXPECT_FALSE(w->world().contains(first));
+
+  // Without the physics: block a data node's body warns, as cvcGL does.
+  LoadResult bare = load_string(R"(
+scene:
+  nodes:
+    - node: city
+      source: { data: city }
+      body: {}
+)");
+  ASSERT_TRUE(bare.ok) << bare.error;
+  std::vector<std::string> bare_warnings;
+  EXPECT_EQ(SceneWorld::from_scene(app, bare.scene, "", "", &bare_warnings), nullptr);
+  EXPECT_TRUE(any_contains(bare_warnings, "needs the scene's physics: block"));
 }

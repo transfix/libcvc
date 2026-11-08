@@ -925,17 +925,32 @@ scene:
   builds the world from the scene alone and steps it on the clock in `drain()`, on real time; a
   paused clock with step requests, or lockstep, makes that deterministic. Nothing is drawn, and a
   scene with no world still loads with "scene ignored". The same document reaches the same world
-  state drawn or not, bit for bit (`cvcgl_ariadne_physics`). Headless, only a geometry node's body
-  runs: a custom node's (a `generated_world`'s terrain) needs a renderer for now.
-  `AppRuntime::scene_world()` is the world it runs.
+  state drawn or not, bit for bit (`cvcgl_ariadne_physics`). A geometry node's body, a
+  `generated_world` node's and a data node's run headless; another custom node's needs a
+  renderer. `AppRuntime::scene_world()` is the world it runs.
+- **A generated world's body.** `body: {}` on a `generated_world` node is the world's colliders:
+  its terrain and its buildings, each a static body (`shape:` and `motion:` do not apply). The
+  world is made in core libcvc ([`scene_generated_world.h`](../inc/cvc/ariadne/scene_generated_world.h)),
+  so headless the scene's world runs the node itself: it seeds the `world.*` keys, makes the
+  world as the document says, publishes `world.stats.*`, and makes a new world at once on
+  Regenerate (or on an edit while `world.auto` is on). Drawn, cvcGL's node makes it as a sliced
+  task and hands over its colliders. Either way a new world's colliders replace the old ones.
+  `SceneWorld::generated_world(id)` is the world a headless host made: its raster, roads,
+  buildings and water.
+- **A data node's body.** `body: {}` on a `source: { data }` node collides with its dataset's
+  world, terrain or geometry once the dataset is ready, and again each time it changes. The
+  scene's world takes them, headless or drawn, and it needs the scene's `physics:` block.
+- **Made colliders stay put.** A generated world's and a dataset's colliders sit where they were
+  made: the node's transform does not move them (it warns).
 - **Telemetry.** Each step publishes `physics.stats.{tick, time, step_ms, bodies, active_bodies,
   contact_events, saturated}` under the document's prefix, drawn or not (a `scenes:` entry's
   under `scenes.<id>.physics.stats`).
 - **Terrain transforms.** A terrain follows its node's position but not its rotation or scale.
   Draw a ground you collide with unrotated and unscaled.
 - **Reading physics.** `RealizedScene::physics` is the world (`RealizedScene::world` the
-  `SceneWorld` holding it), `RealizedScene::body(id)` a node's body, and
-  `RealizedScene::height_fields` the heightfield nodes' fields.
+  `SceneWorld` holding it), `RealizedScene::body(id)` a node's body (the first, for a node with
+  colliders; `world->bodies_of(id)` has them all), and `RealizedScene::height_fields` the
+  heightfield nodes' fields.
 - **Problems** (an unknown material, a body on a group, a fixed_dt between quanta) warn and never
   throw.
 

@@ -10,12 +10,15 @@
 //   5. the null backend places bodies and never moves them; problems warn, never throw;
 //   6. the same document's world built headless (core libcvc's SceneWorld, no SceneGraph) and drawn
 //      here reaches the same state, bit for bit (physics::world::state_hash), and both publish
-//      physics.stats.*.
+//      physics.stats.*;
+//   7. so does a generated world's: a generated_world node's body: (its terrain and buildings, made
+//      in core) with a ball falling onto it, run headless and drawn.
 // The dynamics need Jolt and YAML; without either, those checks are skipped.
 //
 // NOT assert(): built Release, where NDEBUG makes assert() a no-op.
 #include <cmath>
 #include <cstdio>
+#include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/core/app.h>
@@ -26,6 +29,7 @@
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/ariadne/scene_realize.h>
+#include <cvc/gl/ariadne/world_nodes.h>
 #include <cvc/physics/world.h>
 #include <cvc/state/state.h>
 #include <memory>
@@ -323,8 +327,8 @@ void test_same_world_headless_and_drawn() {
   // Headless: the scene alone, stepped on its clock.
   cvc::app headless_app;
   std::vector<std::string> headless_warnings;
-  std::unique_ptr<cvc::ariadne::SceneWorld> world =
-      cvc::ariadne::SceneWorld::from_scene(headless_app, r.scene, "physics", &headless_warnings);
+  std::unique_ptr<cvc::ariadne::SceneWorld> world = cvc::ariadne::SceneWorld::from_scene(
+      headless_app, r.scene, "", "physics", &headless_warnings);
   for (const auto &w : headless_warnings)
     std::printf("  headless warning: %s\n", w.c_str());
   CHECK(world != nullptr);
@@ -359,6 +363,95 @@ void test_same_world_headless_and_drawn() {
   CHECK(cvc::state::instance(headless_app)("physics.stats.bodies").value() == "5");
 }
 
+const char *kGeneratedWorld = R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  physics: {}
+  nodes:
+    - node: world
+      type: generated_world
+      seed: 5
+      half: 150
+      trees: 6
+      rocks: 3
+      buildings: 6
+      texture: 256
+      body: {}
+    - node: ball
+      source: { sphere: 0.5 }
+      transform: { position: [3, -4, 80] }
+      body: { density: 400 }
+)";
+
+void test_same_generated_world_headless_and_drawn() {
+  std::printf("test_same_generated_world_headless_and_drawn\n");
+  if (!cvc::ariadne::have_yaml()) {
+    std::printf("  skipped: no YAML in this build\n");
+    return;
+  }
+  ari::register_world_node_types();
+  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(kGeneratedWorld);
+  CHECK(r.ok);
+  if (!r.ok)
+    return;
+  constexpr int kFrames = 300; // five seconds: the ball falls and lands
+
+  cvc::app drawn_app;
+  SceneGraph sg(drawn_app);
+  std::vector<std::string> drawn_warnings;
+  ari::RealizedScene out = ari::realize_scene(sg, r.scene, "", &drawn_warnings);
+  for (const auto &w : drawn_warnings)
+    std::printf("  drawn warning: %s\n", w.c_str());
+  CHECK(out.world != nullptr);
+  if (!out.world)
+    return;
+  for (int i = 0; i < kFrames; ++i)
+    ari::tick_scene(out, nullptr, 1.0 / 60.0);
+
+  cvc::app headless_app;
+  std::vector<std::string> headless_warnings;
+  std::unique_ptr<cvc::ariadne::SceneWorld> world = cvc::ariadne::SceneWorld::from_scene(
+      headless_app, r.scene, "", "physics", &headless_warnings);
+  for (const auto &w : headless_warnings)
+    std::printf("  headless warning: %s\n", w.c_str());
+  CHECK(world != nullptr);
+  if (!world)
+    return;
+  CHECK(headless_warnings == drawn_warnings);
+  CHECK(world->generated_world("world") != nullptr);
+  CHECK(out.world->generated_world("world") == nullptr); // the drawn node runs it there
+  cvc::ariadne::SceneClockDriver clock(headless_app, r.scene.clock);
+  for (int i = 0; i < kFrames; ++i) {
+    clock.drive(1.0 / 60.0);
+    world->follow(headless_app.world_clock());
+  }
+
+  // The same colliders (the terrain, and the buildings when the city has any) and the ball.
+  CHECK(world->bodies_of("world").size() >= 1);
+  CHECK(world->bodies_of("world").size() == out.world->bodies_of("world").size());
+  CHECK(world->world().body_count() == out.physics->body_count());
+  CHECK(world->world().tick() == out.physics->tick());
+  const std::uint64_t drawn_hash = out.physics->state_hash();
+  const std::uint64_t headless_hash = world->world().state_hash();
+  if (drawn_hash != headless_hash)
+    std::printf("  drawn %016llx, headless %016llx\n", static_cast<unsigned long long>(drawn_hash),
+                static_cast<unsigned long long>(headless_hash));
+  CHECK(drawn_hash == headless_hash);
+  // Both made the same world and say so (the drawn node's keys are under the SceneGraph's prefix).
+  for (const char *k : {"world.stats.buildings", "world.stats.props", "world.status"}) {
+    const std::string drawn =
+        cvc::state::instance(drawn_app)(cvc::ariadne::resolve_bind(sg.getStatePrefix(), k)).value();
+    const std::string headless = cvc::state::instance(headless_app)(k).value();
+    if (drawn != headless)
+      std::printf("  %s: drawn '%s', headless '%s'\n", k, drawn.c_str(), headless.c_str());
+    CHECK(!drawn.empty() && drawn == headless);
+  }
+  if (cvc::physics::backend_available(cvc::physics::backend::jolt)) {
+    const auto b = world->world().state(world->body("ball"));
+    CHECK(b.position.z < 80.0); // it fell
+  }
+}
+
 } // namespace
 
 int main() {
@@ -366,6 +459,7 @@ int main() {
   test_null_backend_places_and_holds();
   test_problems_warn();
   test_same_world_headless_and_drawn();
+  test_same_generated_world_headless_and_drawn();
   if (g_failures) {
     std::printf("cvcgl_ariadne_physics: %d FAILURE(S)\n", g_failures);
     return 1;

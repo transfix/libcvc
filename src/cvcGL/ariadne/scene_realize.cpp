@@ -1121,9 +1121,11 @@ namespace {
 
 // The scene's world, built by core libcvc (cvc::ariadne::SceneWorld) from the nodes that declared a
 // body: their specs, their world matrices from the spec (as a headless host composes them, so both
-// make the same world), the meshes the nodes already hold, and the terrains' grids. The moving
-// bodies are bound to their nodes so tick_scene draws them where physics has them. Problems warn
-// (naming the node) and leave that body out; nothing here throws.
+// make the same world), the meshes the nodes already hold, the terrains' grids, the colliders a
+// custom node makes (out.colliders: a generated world's) and the data nodes' datasets (their bodies
+// come once a dataset is ready, at the world's sync). The moving bodies are bound to their nodes so
+// tick_scene draws them where physics has them. Problems warn (naming the node) and leave that body
+// out; nothing here throws.
 void realize_physics(SceneGraph &sg, const cvc::ariadne::Scene &scene,
                      const std::vector<pending_body> &pending, RealizedScene &out,
                      const std::string &stats_key, std::vector<std::string> *warnings) {
@@ -1137,12 +1139,26 @@ void realize_physics(SceneGraph &sg, const cvc::ariadne::Scene &scene,
     auto m = matrices.find(p.spec);
     if (m != matrices.end())
       in.world = m->second;
-    auto gnode = std::dynamic_pointer_cast<GeometryNode>(p.node);
-    if (gnode && gnode->getGeometry()) // a copy-on-write copy: the buffers are shared
-      in.geometry = std::make_shared<const cvc::geometry>(*gnode->getGeometry());
+    if (auto c = out.colliders.find(p.spec->id); c != out.colliders.end() && c->second) {
+      in.colliders = c->second; // a custom node's own colliders (a generated world's)
+    } else {
+      auto gnode = std::dynamic_pointer_cast<GeometryNode>(p.node);
+      if (gnode && gnode->getGeometry()) // a copy-on-write copy: the buffers are shared
+        in.geometry = std::make_shared<const cvc::geometry>(*gnode->getGeometry());
+    }
     inputs.push_back(std::move(in));
     nodes[p.spec->id] = p.node;
   }
+  for (const SceneDataBinding &b : out.data_nodes) // a dataset's bodies come with the dataset
+    if (b.spec.body.present) {
+      cvc::ariadne::SceneBodyInput in;
+      in.spec = &b.spec;
+      for (const auto &m : matrices) // the node's matrix, by id (the binding holds a copy)
+        if (m.first->id == b.spec.id)
+          in.world = m.second;
+      in.data_path = b.path;
+      inputs.push_back(std::move(in));
+    }
   out.world = cvc::ariadne::SceneWorld::build(sg.appContext(), scene.physics, inputs,
                                               out.height_fields, stats_key, warnings);
   if (!out.world)
@@ -1337,10 +1353,6 @@ bool draw_dataset(RealizedScene &r, SceneDataBinding &b, const std::string &stor
   for (const std::shared_ptr<GraphicsNode> &c : b.drawn)
     group->removeGraphicsChild(c);
   b.drawn.clear();
-  if (r.physics)
-    for (cvc::physics::body_id id : b.bodies)
-      r.physics->remove_body(id);
-  b.bodies.clear();
   r.height_fields.erase(b.spec.id);
 
   const cvc::ariadne::SceneNode &n = b.spec;
@@ -1350,7 +1362,6 @@ bool draw_dataset(RealizedScene &r, SceneDataBinding &b, const std::string &stor
   using geometry_ptr = std::shared_ptr<const cvc::geometry>;
   using field_ptr = std::shared_ptr<const cvc::height_field>;
   using volume_ptr = std::shared_ptr<const cvc::volume>;
-  cvc::world::world_geometry bodies_of; // what body: puts in the physics world
   if (const world_ptr *w = boost::any_cast<world_ptr>(&obj)) {
     b.drawn = cvc::gl::add_world_geometry(*r.sg, **w, n.id + "_", group);
     const cvc::world::world_bounds wb = (*w)->bounds();
@@ -1368,9 +1379,6 @@ bool draw_dataset(RealizedScene &r, SceneDataBinding &b, const std::string &stor
             gn && c->getName() == n.id + "_terrain")
           drape_satellite(cvc::state::instance(*r.app), store, *gn, *t, n);
     }
-    if (n.body.present && r.physics)
-      for (const auto &body : cvc::physics::add_world_geometry(*r.physics, **w).bodies)
-        b.bodies.push_back(body.second);
   } else if (const field_ptr *f = boost::any_cast<field_ptr>(&obj)) {
     auto terrain =
         group->createChild<GeometryNode>(n.id + "_" + key, static_cast<const cvc::geometry &>(**f));
@@ -1380,22 +1388,10 @@ bool draw_dataset(RealizedScene &r, SceneDataBinding &b, const std::string &stor
     has_bounds = true;
     if (terrain)
       drape_satellite(cvc::state::instance(*r.app), store, *terrain, **f, n);
-    if (n.body.present && r.physics) {
-      cvc::world::geometry_item item;
-      item.name = n.id;
-      item.geometry = *f;
-      bodies_of.add(item);
-    }
   } else if (const geometry_ptr *g = boost::any_cast<geometry_ptr>(&obj)) {
     b.drawn.push_back(group->createChild<GeometryNode>(n.id + "_" + key, **g));
     mesh_bounds(**g, bounds);
     has_bounds = true;
-    if (n.body.present && r.physics) {
-      cvc::world::geometry_item item;
-      item.name = n.id;
-      item.geometry = *g;
-      bodies_of.add(item);
-    }
   } else if (const volume_ptr *v = boost::any_cast<volume_ptr>(&obj)) {
     b.drawn.push_back(group->createChild<VolumeNode>(n.id + "_" + key, **v));
   } else {
@@ -1405,10 +1401,8 @@ bool draw_dataset(RealizedScene &r, SceneDataBinding &b, const std::string &stor
                                     : "no " + n.source_item + " to draw"));
     return false;
   }
-  if (!bodies_of.items().empty())
-    for (const auto &body : cvc::physics::add_world_geometry(*r.physics, bodies_of).bodies)
-      b.bodies.push_back(body.second);
-  if (n.body.present && !r.physics)
+  // Its bodies are the scene world's to make (SceneWorld::sync, as a headless host's are).
+  if (n.body.present && !r.world)
     warn(warnings, "ari: scene node '" + n.id +
                        "': body: needs the scene's physics: block for a "
                        "dataset's bodies");
