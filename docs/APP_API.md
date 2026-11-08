@@ -933,28 +933,96 @@ std::cout << "Lock held by: " << holder << std::endl;
 
 ## Program Execution (state_exec)
 
-Three members connect an app to state_exec programs. Each is built at its first call.
+These members connect an app to state_exec programs. Each is built at its first call.
 [STATE_EXEC_DEVELOPER_GUIDE.md](STATE_EXEC_DEVELOPER_GUIDE.md#which-scheduler-runs-a-program)
-says which host and lane runs on which scheduler.
+says which host and lane runs on which scheduler, and
+[STATE_EXEC_THREADED.md](STATE_EXEC_THREADED.md) 4.12 designs the pool and its groups.
 
-- `exec_scheduler()`: the app's one `async_scheduler`. Ariadne's actions and residents,
+- `exec_scheduler()`: the app's one `async_scheduler`, group 0. Ariadne's actions and residents,
   `AppRuntime`'s verbs and the app's posting hosts (sliced tasks, net and stream intrinsics) run
   on it, one timeline for every document. Building it reads `state_exec.policy` and
-  `state_exec.process_class`, and makes the lock manager below if nothing has yet.
+  `state_exec.process_class`, and makes the lock manager below if nothing has yet. It has its own
+  cycle registry and `math.random` stream, which it binds whichever thread drives it, and draws its
+  pids from `exec_pid_source()`.
 - `exec_async_host()`: the async host for `exec_scheduler()`, which it builds first. An async
   function registered with it parks its calling process while the kernel runs on the app's
   background pool.
-- `lock_manager()`: the `with-lock` table that `exec_scheduler()`, Ariadne's `init:` lane and
-  pycvc's `Exec`s share. Made at the first call to it or to `exec_scheduler()`, which fixes its
-  mode from `state_exec.locks.threading`.
+- `lock_manager()`: the `with-lock` table that `exec_scheduler()`, Ariadne's `init:` lane,
+  pycvc's `Exec`s and every `exec_group` built on the app share. Made at the first call to it, to
+  `exec_scheduler()`, to `exec_pool()` asking for threads, or by building an `exec_group` on the
+  app, which fixes its mode from `state_exec.locks.threading`.
+- `exec_pool()` and `exec_pool(const pool_options &)` (`<cvc/core/exec_pool.h>`): the app's one
+  pool of execution groups, which pumps `exec_group`s fork-join on persistent workers and the
+  calling thread (Ariadne's frame groups from Stage 1b, pycvc's `ExecPool`, a host's own groups).
+  It is built at the first call, under its own mutex: from the `pool_options` that call gives, else
+  from the tree's `state_exec.threads` (a whole number or `auto`; the `CVC_EXEC_THREADS`
+  environment variable overrides it), `state_exec.cpu_set` (`performance` or `all`) and
+  `state_exec.deterministic`. Options apply only when the call builds the pool: once it is built, a
+  call keeps it, and one giving different options logs that they were not applied. An
+  `exec_pool(opts)` asking for threads above 0 before anything has made `lock_manager()` makes the
+  manager shared, for this app only. Workers pump only over a shared manager: if the manager is
+  already single, the pool is built with 0 threads and a log line says why. With 0 threads, or in a
+  build without threads, every pump runs on the calling thread. The pool's clamps
+  (`hardware_concurrency() - 1`, the affinity mask) and any worker that failed to start are logged
+  once.
+- `exec_pool_probe()`: the pool if it has been built, else null. It never builds it.
+- `exec_pump_frame()`: one frame's pump of the app's groups, on the host thread, outside a pump:
+  a single `exec_pool().pump_all` with a 0.1 s deadline from its entry and Ariadne's budget (200000
+  steps and 0.1 s per group) over every registered frame group, with group 0 (`exec_scheduler()`,
+  once it is built and holds a live process; never built here) pumped first on the calling thread
+  as a host-affinity group: its token taken, `drain_ingress`, `wake_awaiting` and
+  `sync_run_steps`. With no frame group registered it builds no pool and pumps group 0 alone. Then
+  `exec_pump_generation()` advances: the count of `exec_pump_frame()` calls that have finished,
+  which Ariadne's `drain_end()` reads (Stage 1b) to skip its own pump in a frame the host already
+  pumped.
+- `cvc::pump_exec_frame(sched, lanes, max_steps, max_time)` (`<cvc/core/async_lane.h>`) is a
+  different thing: one frame of one scheduler (`run_deferred()` on the lanes given, then
+  `wake_awaiting`, one unconditional `sync_step` and `sync_run`), with a render-loop budget of 20000
+  steps and 3 ms by default. The cvcGL tests drive `exec_scheduler()` with it. It pumps no group,
+  goes through no pool and does not advance `exec_pump_generation()`; the scheduler binds its own
+  registry and stream all the same.
+- `register_frame_group(group)`: have every `exec_pump_frame()` pump `group` until the returned
+  `frame_group_handle` is reset or destroyed. The handle is movable, not copyable. The group must
+  outlive it: destroy the handle first, on the host thread, outside a pump.
+- `exec_pid_source()`: the pids `exec_scheduler()` and every `exec_group` built with this app draw
+  from, so none repeats app-wide. It is made with group 0's state, counting from 1, so the app
+  scheduler's first pid is 1, as before.
 
-Settings are read once, so a host sets them before the first call to any of the three:
+A value posted to a group's scheduler (`group.sched().post_message(channel, value)`) is moved in:
+the host hands it over and keeps no reference to it, and never posts one compound value (a list or
+dict) to two groups. The handle is copied, not the list, so a list the host keeps and changes, or
+posts again, is shared with a group a worker may be pumping: a data race in a release build, which
+nothing checks in this stage. Post a fresh value each time, or a string. `exec_group::execute` of a
+`value_t` copies the value's lists and dicts itself.
+
+Settings are read once, so a host sets them before the first call to any of these:
 
 ```cpp
 cvc::app app;
 app.root()("state_exec.policy").value("priority_rr");
 app.root()("state_exec.locks.threading").value("shared");
 cvc::state_exec::async_scheduler &sched = app.exec_scheduler(); // reads both now
+```
+
+A host that pumps its own groups on the app's pool gives its pool options first, so the lock
+manager is made shared:
+
+```cpp
+cvc::app app;
+cvc::pool_options po;
+po.threads = cvc::pool_options::auto_threads;  // the performance cores less one
+cvc::exec_pool &pool = app.exec_pool(po);      // makes the lock manager shared, for this app
+
+cvc::state_exec::exec_group::options o;
+o.name = "sim";
+o.app = &app;
+cvc::state_exec::exec_group sim(std::move(o)); // its scheduler, host, registry and stream
+cvc::frame_group_handle h = app.register_frame_group(sim);
+for (;;) {
+  // ... events, posts to sim.sched() ...
+  app.exec_pump_frame();                       // group 0 and `sim`, one pump_all, 0.1 s at most
+  // ... read results, render ...
+}
 ```
 
 ## Type Registration
