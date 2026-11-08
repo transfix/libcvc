@@ -28,9 +28,9 @@ async_scheduler::async_scheduler(scheduling_policy policy)
       procs_(policy != scheduling_policy::round_robin),
       wakeup_(std::make_shared<detail::wakeup>()) {}
 
-// A group's scheduler (S1.3): its global environment is its own scope over `base`, so what is bound
-// there (environment::set_existing binds in the outermost unfrozen scope) never reaches `base`,
-// which may be frozen and shared (the builtins).
+// A group's scheduler (S1.3): its global environment is its own scope over `base`. A program's
+// `set` binds in its process's own run env (step_set_value's env->set), so nothing a program writes
+// reaches `base`, which may be frozen and shared (the builtins).
 async_scheduler::async_scheduler(scheduling_policy policy, environment_ptr base)
     : policy_(policy), evaluator_(environment::extend(std::move(base))),
       procs_(policy != scheduling_policy::round_robin),

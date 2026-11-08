@@ -54,8 +54,8 @@ class async_scheduler : public scheduler_base {
 public:
   explicit async_scheduler(scheduling_policy policy = scheduling_policy::round_robin);
   /// A group's scheduler (docs/STATE_EXEC_THREADED.md 4.2): its global environment is
-  /// environment::extend(base), so an unbound set from an env-less process lands in its own scope,
-  /// never in `base` (which may be frozen: the shared builtins).
+  /// environment::extend(base). A program's `set` binds in its process's own run env, and nothing
+  /// a program writes reaches `base` (which may be frozen: the shared builtins).
   async_scheduler(scheduling_policy policy, environment_ptr base);
   /// Destroys the lock home first (protocol 5.7), before any other member goes; then a posted
   /// command never applied gets done(false).
