@@ -1189,6 +1189,31 @@ hints to it, and every outcome is read from the manager.
   Uncontended locks across groups are immediate. A grant to a waiter in another group lands at
   that group's next pump: the next frame in fork-join mode. The spawn context gives children the
   lock intrinsics against the parent's chroot, in any group.
+  - **As built in td Stage 1a (td S1-Q1).** Every group's scheduler (an `exec_group`'s, a pycvc
+    pooled `Exec`'s) attaches to `app::lock_manager()` in the manager's own mode
+    (`lock_attach{shared}`), as the app scheduler does, so `with-lock` in a group excludes the same
+    keys app-wide; at threads 0 the groups share a single-mode manager on one thread and exchange
+    wakes through their ports (9.5).
+  - The pool's workers pump only when the app's manager is shared. The mode is still fixed when the
+    manager is made (8.3), and a host's pool options did not reach it before: now
+    `app::exec_pool(pool_options)` asking for threads above 0 before anything has made the manager
+    makes it shared, for that app only (not the process-wide `note_threaded_host()`, which would
+    leak into every later app), and `CVC_EXEC_THREADS` counts as `state_exec.threads` for `auto`.
+    If the manager is already single, the pool is built with 0 threads and pumps every group on
+    its caller, logging why once. And whichever pool pumps it, a group whose home attached to a
+    single manager is pumped on the caller of `pump_all` only (logged once per pool; a debug build
+    asserts when a pool with workers is given one), so no single manager's homes are stepped on two
+    threads. Building a group makes the manager (and logs once when that makes it single), so a
+    host gives its pool options before its first group, `exec_scheduler()` or `lock_manager()`
+    call.
+  - A group's teardown closes its lock port (`close_lock_port()`, through `has_lock_home()`, so it
+    makes no private home to close) right after it takes the group's token and before it kills
+    the group's processes, the order Stage 2's `wake(g)` needs (below); the design-time model
+    checks it (`tools/locks_model`, revision 5b's `gdestroy` configuration).
+  - td's GL-1 (a holder in one group and a waiter in another, at threads 0 and 4) and GL-2 (a grant
+    made between a group's port close and its kills is released by the waiter's kill, and the next
+    waiter is granted) test both. L4 keeps the rest of its Stage 1 row: the LG cases (13.8), and
+    LT-5's implementation-level extension to groups.
 - **Stage 2 (continuous pool).** A lock post wakes its group: the wakeup a group's scheduler shares
   with its lock port notifies by `wake(g)` (td 4.4), so a grant's latency is the post plus a wake
   when the group is parked (5-20 us, td 6.1; td gates the wake at 50 us p50 on Windows). Lock posts
@@ -1448,7 +1473,7 @@ macOS, with Emscripten building.
 | **L1b: spawn context** (~1 week) | td 4.15's single-scheduler part of B27: `spawn_context`, `make_spawn_context`, Ariadne's and pycvc's callbacks; `with-lock` in children against the parent's chroot | yes, after L1 | LK-24, LK-31; td IS-1 and IS-2 (on one scheduler, no groups); `lock.handoff` `workers=spawn`; td 5's spawn scan |
 | **L2: priority** (1-1.5 weeks) | `set-priority`, `get-priority`, floors and the spawn clamp, `parent_pid` on spawn, the `scheduler_base` virtuals, `state_exec.policy`, inheritance switched on (homes attach with their scheduler's policy; the run queue keys on `effective_priority()` through `level_key`), `inspect` fields, `thread_class`, pycvc's policy and priority API, coordinator control (with `post_control`). It uses the bench's `policy` sweep (11.2) | yes | PR, PI-1..PI-5, PI-8, PI-9, PI-11; LT-5 with priorities; `prio.set` and `lock.inherit` gates; `sched.single.*` under `priority_rr` within noise |
 | **L3: one app, several threads** (1-1.5 weeks) | shared mode (the manager mutex), `app::lock_manager()` for every scheduler, several homes, the port with `wake` and `relevel` posts on both schedulers, the sync `idle_wait` contract, pycvc `Exec`s on the app manager with `idle_timeout`, `Exec.lock_query`, Ariadne's init lane on the app manager, the bench's `locks=shared` (11.2), TSan | yes, after L1-L2 are hardened | LT; LD-5, LD-6; PI-7, PI-10; LX-5, LX-7, LX-10, LX-11 posted; LT-5 on two homes; TSan clean; `lock.uncontended` shared and `lock.cross_thread` gates; `sched.single.*`, `flood.small` and `msg.*` at `locks=shared` within 3% (and the noise) of `locks=none` in the same run (`compare --pair`, 11.2) |
-| **L4: groups** (with td Stages 1-3, ~1 week each) | a home per group, `wake(g)` on posts, the spawn context in groups, cross-group `set-priority`, `best_runnable` and pool weights, `worker_class`, `adopt`'s record rename (the protocol's `move`, protocol 9, specified, proved and model-checked first), `group_scheduler_ref`'s `locks()` and priority overrides (9.3) | no: waits for td Stages 1-3 | LT-5 with moves; LG; `mt.groups.locks`, `mt.groups.locks.isolated`, `prio.groups_weighted` |
+| **L4: groups** (with td Stages 1-3, ~1 week each) | a home per group, `wake(g)` on posts, the spawn context in groups, cross-group `set-priority`, `best_runnable` and pool weights, `worker_class`, `adopt`'s record rename (the protocol's `move`, protocol 9, specified, proved and model-checked first), `group_scheduler_ref`'s `locks()` and priority overrides (9.3) | partly: td Stage 1a built a home per group on the app's manager in its own mode, the teardown's port close, and the shared-mode hint from the app's pool options (td S1-Q1; GL-1, GL-2); the rest waits for td Stages 1-3 | LT-5 with moves; LG; `mt.groups.locks`, `mt.groups.locks.isolated`, `prio.groups_weighted` |
 | **L5: guarded subtrees** (optional) | host-declared prefixes where DSL writes need a covering X | no: on request | `native.state_set` within 2% with none declared |
 | **L6: semaphores** (optional) | `:permits N` on a key, owned permits released on end | no: on request | semaphore tests; the model check extended |
 | **L7: migration between hosts** (late) | `migrate`'s refusal of holders, `release_locks`, `locks_lost` and its raise (10.1); leases, tokens, fencing, rebind, failures (10.2), with td's Stage M | no: last; needs L1-L3 and td Stage 0 | LM; `mt.migrate` recorded |
@@ -1473,7 +1498,9 @@ noisy for a verdict, so L2's exit is not met. L3 is built (the status at the top
 added), with its tests (13.7, and the L3 cases of 13.3 to 13.6) and its cases in the sanitizer
 jobs (`docs/TESTING.md`). Its A/B (11.2, 11.3) has run in two windows: the step counts are
 unchanged, and the timing gates have no verdict (11.3), so L3's exit is not met either. L4 onward
-are not built.
+are not built, except what td's Stage 1a took from L4 under its S1-Q1 (9.2): each group's home on
+the app's manager in the manager's own mode, workers only over a shared manager, the app's pool
+options as a shared-mode hint, and the teardown's port close, with td's GL-1 and GL-2.
 
 ## 13. The test list
 
