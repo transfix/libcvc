@@ -682,6 +682,11 @@ struct FtxuiBackend::Impl {
     bool placed = false;
     bool seeded = false;
     long z = 0;
+    // A body taller than the window: the wheel scrolls it. scroll_top is its first row in view
+    // (-1: it follows the focused widget, as it does until the wheel turns over it); content_h
+    // and view_h its height and the rows that show, as of the last layout.
+    int scroll_top = -1;
+    int content_h = 0, view_h = 0;
   };
   struct Edit {
     std::string text;
@@ -740,8 +745,10 @@ struct FtxuiBackend::Impl {
   int drag_dx = 0, drag_dy = 0;
   std::map<std::string, Edit> edits;
   std::map<std::string, TextView> text_views;
-  std::string wheel_id; // the item the wheel last turned over (a text_view takes it) ...
-  int wheel_dir = 0;    // ... and which way: -1 up, +1 down
+  std::string wheel_id;  // the item the wheel last turned over (a text_view takes it) ...
+  int wheel_dir = 0;     // ... and which way: -1 up, +1 down
+  std::string wheel_win; // ... and the window it was over, which scrolls when no text_view did
+  bool wheel_turned = false, wheel_taken = false;
   std::set<std::string> blur_commit;      // fields that lost focus with an edit pending
   std::map<std::string, double> inflight; // slider value while the mouse holds it
   std::map<std::string, int> color_chan;
@@ -1214,6 +1221,34 @@ struct FtxuiBackend::Impl {
     int i = at == order.end() ? (dir > 0 ? 0 : n - 1)
                               : (static_cast<int>(at - order.begin()) + dir + n) % n;
     set_focus(order[static_cast<std::size_t>(i)]);
+    // Moved by the keys: its window follows the focus again, however the wheel left it.
+    if (const Item *it = find_item(last, focused); it && windows.count(it->win))
+      windows[it->win].scroll_top = -1;
+  }
+
+  // Scroll window `win`'s body `dir` notches (3 rows each, up < 0), from where it shows now.
+  // False when it has nothing to scroll (no such window, or all of it shows).
+  bool scroll_window(const std::string &win, int dir) {
+    const auto it = windows.find(win);
+    if (win.empty() || it == windows.end())
+      return false;
+    Win &w = it->second;
+    const int max_top = std::max(0, w.content_h - w.view_h);
+    if (w.view_h <= 0 || max_top == 0)
+      return false;
+    int top = w.scroll_top;
+    if (top < 0) { // following the focus: from the row the frame shows at its top
+      const auto body = boxes.find("wbody|" + win), view = boxes.find("wview|" + win);
+      top =
+          body != boxes.end() && view != boxes.end() ? view->second.y_min - body->second.y_min : 0;
+    }
+    w.scroll_top = std::clamp(top + 3 * dir, 0, max_top);
+    return true;
+  }
+  // A body laid out in `view_h` rows with its first row at `top` (a frame centres the focused
+  // row, so the focus goes half a view below it).
+  static fx::Element scrolled(fx::Element body, int top, int view_h) {
+    return body | fx::focusPosition(0, top + std::max(0, view_h - 1) / 2);
   }
 
   void open_menu_at(const std::string &title) {
@@ -1375,10 +1410,14 @@ struct FtxuiBackend::Impl {
         const int n = std::max(1, last.combo_n);
         combo_hi = std::clamp(combo_hi + (e.mouse == TermEvent::Mouse::WheelUp ? -1 : 1), 0, n - 1);
         consumed = true;
-      } else if (const Item *it =
-                     item_at(e.x, e.y, opt.hosted ? host_window : window_at(e.x, e.y), "")) {
-        wheel_id = it->id; // a text_view under the pointer scrolls in the walk
+      } else {
+        // A text_view under the pointer scrolls in the walk; else the window it is over (feed).
+        wheel_win = opt.hosted ? host_window : window_at(e.x, e.y);
+        const Item *it = item_at(e.x, e.y, wheel_win, "");
+        wheel_id = it ? it->id : "";
         wheel_dir = e.mouse == TermEvent::Mouse::WheelUp ? -1 : 1;
+        wheel_turned = true;
+        wheel_taken = false;
       }
       return;
     case TermEvent::Mouse::Press:
@@ -1877,6 +1916,7 @@ void FtxuiBackend::end_window() {
   // the screen's edge from where it is drawn. Content past the window's size, authored or not,
   // scrolls: the body becomes a frame that keeps the focused widget in view, with a scroll bar.
   body->ComputeRequirement();
+  const int content_h = body->requirement().min_y;
   // The window's size on one axis (0: the content's) for content needing `need` cells there,
   // including the window's frame.
   auto window_extent = [](int set, int need, int floor, int room, int lo, int hi) {
@@ -1900,6 +1940,15 @@ void FtxuiBackend::end_window() {
     win_h = window_extent(w.h, ++need_h, 3, m.term_h - w.sy, min_h, max_h);
     scroll_y = win_h && need_h > win_h;
   }
+  // The wheel's scroll, once it has turned over the window (else the frame follows the focus).
+  Impl::Win &wm = m.windows[f.id];
+  wm.content_h = content_h;
+  wm.view_h = scroll_y ? win_h - 2 - (scroll_x ? 1 : 0) : 0;
+  body = body | fx::reflect(m.boxes["wbody|" + f.id]);
+  if (scroll_y && wm.scroll_top >= 0) {
+    wm.scroll_top = std::min(wm.scroll_top, std::max(0, content_h - wm.view_h));
+    body = Impl::scrolled(body, wm.scroll_top, wm.view_h);
+  }
   if (scroll_y)
     body = body | fx::vscroll_indicator;
   if (scroll_x)
@@ -1908,6 +1957,7 @@ void FtxuiBackend::end_window() {
     body = body | (win_h ? fx::frame : fx::xframe) | fx::flex;
   else if (win_h)
     body = body | fx::yframe | fx::flex; // scrolls to keep the focused widget in view
+  body = body | fx::reflect(m.boxes["wview|" + f.id]);
   fx::Elements bar{fx::text(" " + f.title + " ") | (holds_focus ? fx::bold : fx::nothing),
                    fx::filler()};
   if (f.p_open) {
@@ -2891,6 +2941,7 @@ TextViewEvent FtxuiBackend::text_view(const char *label, const char *key, const 
   if (m.wheel_id == id) {
     step += 3 * m.wheel_dir;
     m.wheel_id.clear();
+    m.wheel_taken = true;
   }
   up = step < 0;
   const int was = std::clamp(v.top, 0, std::max(0, n - rows));
@@ -3137,6 +3188,13 @@ bool FtxuiBackend::feed(Runtime &rt, const TermEvent &ev) {
   m.consumed = false;
   m.route(ev);
   rt.render(); // the walk in which the target widget reports its edit
+  // The wheel no text_view took scrolls the window it was over, where its body overflows.
+  if (m.wheel_turned) {
+    if (!m.wheel_taken && m.scroll_window(m.wheel_win, m.wheel_dir))
+      m.use();
+    m.wheel_turned = false;
+    m.wheel_id.clear();
+  }
   // A key no widget took: Up / Down fall back to moving focus.
   if (m.ev_live && !ev.ctrl && !ev.alt && (ev.key == "Up" || ev.key == "Down")) {
     m.focus_step(ev.key == "Up" ? -1 : 1);
@@ -3206,7 +3264,21 @@ TermRows FtxuiBackend::render_window(const std::string &id, int width, int heigh
   if (b == m.last.bodies.end() || width <= 0 || height <= 0)
     return rows;
   m.body_h[id] = height;
-  fx::Elements stack{b->second.body ? b->second.body | fx::yframe : fx::emptyElement()};
+  // The wheel's scroll, as in a window of our own (end_window): the host's rows are the view.
+  fx::Element body = b->second.body;
+  if (body) {
+    body->ComputeRequirement();
+    Impl::Win &w = m.windows[id];
+    w.content_h = body->requirement().min_y;
+    w.view_h = height;
+    body = body | fx::reflect(m.boxes["wbody|" + id]);
+    if (w.scroll_top >= 0 && w.content_h > height) {
+      w.scroll_top = std::min(w.scroll_top, w.content_h - height);
+      body = Impl::scrolled(body, w.scroll_top, height);
+    }
+    body = body | fx::yframe | fx::reflect(m.boxes["wview|" + id]);
+  }
+  fx::Elements stack{body ? body : fx::emptyElement()};
   for (const fx::Element &p : b->second.popups)
     stack.push_back(p);
   fx::Element el = fx::dbox(std::move(stack));

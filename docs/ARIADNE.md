@@ -1325,7 +1325,14 @@ How each backend does it:
 - **The terminal backends** lay a window with no size out at its content's size every frame,
   and cascade new windows instead of flowing them. A window that would run off the screen stops at
   the screen's edge, and a window whose content is larger than it is (or than its `size:`) gets a
-  scroll bar. Its body scrolls to keep the focused widget in view; there is no wheel scrolling.
+  scroll bar. Its body scrolls to keep the focused widget in view. The mouse wheel over it scrolls
+  it too, 3 rows a notch, from where it shows, and stops with its last row at the bottom (a feed in
+  `ari`). A `text_view` under the pointer takes the wheel first. After a turn of the wheel the
+  window stays where the wheel left it: a click there focuses a widget without jumping to it.
+  Tab and the arrows move the focus and the window follows it again. The wheel over a window
+  that fits, or over the background, is left to the host and the document (`on_pointer:`), as
+  before. On the tvision desktop the wheel over a window's body scrolls it the same way.
+  `ariadne_ftxui_test`'s `TheWheelScrolls*` tests turn it.
   On the tvision desktop, tvision's frame holds the window, and the host sizes that frame on every
   walk, in each axis: the document's size where it gave one, else the content's. That stops when
   the user resizes the window (the frame's corner, Ctrl-F5 then Shift and the arrows, or the zoom

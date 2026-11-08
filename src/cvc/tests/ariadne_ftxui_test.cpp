@@ -791,6 +791,53 @@ TEST(AriadneFtxui, ASizedWindowScrollsOnlyWhenItsContentOverflows) {
   EXPECT_FALSE(b.shows("six")) << b.screen;
 }
 
+// §5.8 the wheel scrolls a window whose content overflows, 3 rows a notch, from under the pointer
+// (a feed in `ari`); Tab puts it back to following the focus. A window that fits leaves the wheel
+// to the host and the document.
+TEST(AriadneFtxui, TheWheelScrollsAWindowThatOverflows) {
+  REQUIRE_FTXUI();
+  std::vector<Widget> rows;
+  for (int i = 0; i < 20; ++i)
+    rows.push_back(text(std::string("r") + (i < 10 ? "0" : "") + std::to_string(i)));
+  rows.push_back(checkbox("Last", "last"));
+  Widget feed = window("Feed", rows);
+  feed.size.w = Extent{Unit::Px, 160}; // 20 columns
+  feed.size.h = Extent{Unit::Px, 128}; // 8 rows: 6 of content
+  Widget aside = window("Aside", {text("fits")});
+  aside.has_pos = true;
+  aside.pos_x = 400;
+  aside.pos_y = 32;
+  Term t(group({feed, aside}));
+  ASSERT_TRUE(t.shows("r00") && !t.shows("r06")) << t.screen;
+  int x = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, "r02", x, y));
+  const auto wheel = [&](TermEvent::Mouse m, int n) {
+    bool used = true;
+    for (int i = 0; i < n; ++i)
+      used = t.mouse(m, x, y) && used;
+    t.draw();
+    return used;
+  };
+  EXPECT_TRUE(wheel(TermEvent::Mouse::WheelDown, 1)) << "the window took the wheel";
+  EXPECT_FALSE(t.shows("r02")) << t.screen;
+  EXPECT_TRUE(t.shows("r03") && t.shows("r08")) << "three rows on\n" << t.screen;
+  wheel(TermEvent::Mouse::WheelDown, 10);
+  EXPECT_TRUE(t.shows("r19") && t.shows("[ ] Last")) << "stopped at the end\n" << t.screen;
+  EXPECT_FALSE(t.shows("r14")) << t.screen;
+  wheel(TermEvent::Mouse::WheelUp, 2);
+  EXPECT_TRUE(t.shows("r09") && !t.shows("r19")) << t.screen;
+  wheel(TermEvent::Mouse::WheelUp, 10);
+  EXPECT_TRUE(t.shows("r00")) << "back at the top\n" << t.screen;
+
+  t.key("Tab"); // the focus moves to Last: the window follows it again
+  t.draw();
+  EXPECT_TRUE(t.shows("[ ] Last") && !t.shows("r00")) << t.screen;
+
+  ASSERT_TRUE(find_cell(t.screen, "fits", x, y));
+  EXPECT_FALSE(t.mouse(TermEvent::Mouse::WheelDown, x, y))
+      << "a window that fits has nothing to scroll: the wheel is the host's";
+}
+
 TEST(AriadneFtxui, CloseButtonClosesTheWindow) {
   REQUIRE_FTXUI();
   Widget w = window("Win", {text("body")});
@@ -1152,6 +1199,31 @@ TEST(AriadneFtxuiHosted, InputGoesToTheWindowItIsFedFor) {
   t.be.feed_window(t.rt, "A", TermEvent::mouse_event(TermEvent::Mouse::Press, 1, 0));
   t.be.feed_window(t.rt, "A", TermEvent::mouse_event(TermEvent::Mouse::Release, 1, 0));
   EXPECT_EQ(val(t.app, "one"), "1");
+}
+
+// §5.8 on the tvision desktop too, the wheel scrolls a window body taller than the window.
+TEST(AriadneFtxuiHosted, TheWheelScrollsAWindowBody) {
+  REQUIRE_FTXUI();
+  std::vector<Widget> rows;
+  for (int i = 0; i < 12; ++i)
+    rows.push_back(text(std::string("r") + (i < 10 ? "0" : "") + std::to_string(i)));
+  Term t(group({window("Feed", rows)}), hosted_opts());
+  const auto first_row = [&] {
+    const TermRows r = t.be.render_window("Feed", 20, 4);
+    std::string s;
+    for (const TermCell &c : r.at(0))
+      s += c.ch;
+    return s;
+  };
+  ASSERT_EQ(first_row().substr(0, 3), "r00");
+  EXPECT_TRUE(
+      t.be.feed_window(t.rt, "Feed", TermEvent::mouse_event(TermEvent::Mouse::WheelDown, 1, 1, 0)));
+  t.draw();
+  EXPECT_EQ(first_row().substr(0, 3), "r03");
+  t.be.feed_window(t.rt, "Feed", TermEvent::mouse_event(TermEvent::Mouse::WheelDown, 1, 1, 0));
+  t.be.feed_window(t.rt, "Feed", TermEvent::mouse_event(TermEvent::Mouse::WheelDown, 1, 1, 0));
+  t.draw();
+  EXPECT_EQ(first_row().substr(0, 3), "r08") << "stopped with the last row at the bottom";
 }
 
 TEST(AriadneFtxuiHosted, MenuItemsActivateThroughTheModel) {
