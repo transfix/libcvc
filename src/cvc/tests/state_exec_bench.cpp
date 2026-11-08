@@ -68,6 +68,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cvc/ariadne/app_runtime.h>
+#include <cvc/ariadne/ariadne.h>
 #include <cvc/core/app.h>
 #include <cvc/core/async_lane.h>
 #include <cvc/core/cpu_placement.h>
@@ -91,6 +93,7 @@
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <cvc/state/state_exec/types.h>
 #include <deque>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <map>
@@ -4395,6 +4398,29 @@ void flood_groups(cvc::exec_pool &pool, const std::vector<se::exec_group *> &gs,
     out.steps += gs[k]->sched().get_stats().total_steps - steps0[k];
 }
 
+// An .ari document written for a point (AppRuntime loads files only), removed when it ends.
+struct temp_ari {
+  std::filesystem::path path;
+  temp_ari(const std::string &stem, const std::string &text) {
+    path = std::filesystem::temp_directory_path() /
+           (stem + "_" + istr(now_ns()) + "_" + std::to_string(std::random_device{}()) + ".ari");
+    std::ofstream(path) << text;
+  }
+  ~temp_ari() {
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+  }
+  temp_ari(const temp_ari &) = delete;
+  temp_ari &operator=(const temp_ari &) = delete;
+};
+
+// An AppRuntime registers its verb provider in Ariadne's process-wide registry and leaves it
+// there, emptied, when it dies. Declared before a point's documents, this clears the registry
+// after them, so providers do not pile up from point to point (nothing else here registers one).
+struct ari_providers_reset {
+  ~ari_providers_reset() { cvc::ariadne::clear_action_intrinsics(); }
+};
+
 std::vector<scenario> make_scenarios() {
   std::vector<scenario> all;
   const std::vector<std::string> both_sched = {"sync", "async"};
@@ -6569,6 +6595,178 @@ std::vector<scenario> make_scenarios() {
             .i("helper_wakes", int64_t(s1.helper_wakes - s0.helper_wakes))
             .i("effective_threads", s1.effective_threads)
             .i("rounds", int64_t(out.rounds));
+      });
+    };
+    all.push_back(std::move(sc));
+  }
+
+  // mt.ariadne_docs: D Ariadne documents on one app, one pump a frame (td 6.3, threaded Stage 1b).
+  {
+    scenario sc;
+    sc.name = "mt.ariadne_docs";
+    sc.what = "`docs` AppRuntimes on one app, each loading an eligible document (a prefix of its "
+              "own, a strict channels: block) with ariadne.exec.isolate_documents on, driven a "
+              "frame at a time: every document's drain_begin, app.exec_pump_frame, every "
+              "document's drain_end, with the app's exec_pool at t workers; frame=heavy gives "
+              "each document's on_tick a 500-iteration loop (a frame's pumps well over the "
+              "pool's 100 us inline_below), frame=small one state-incr (well under it): ns per "
+              "frame over the three calls (no backend, no render), extra.helper_wakes, "
+              "extra.worker_pumps and extra.isolated, the documents in a group of their own "
+              "(S1b's gate: small frames wake no helper; td 6.3)";
+    sc.executors = {"async"};
+    sc.sizes = {{"t", {"0", "1", "2", "4", "8"}},
+                {"docs", {"1", "2", "4", "8"}},
+                {"frame", {"heavy", "small"}},
+                {"frames", {"200"}}};
+    sc.smoke = {
+        {"t", {"0", "2"}}, {"docs", {"1", "2"}}, {"frame", {"heavy", "small"}}, {"frames", {"4"}}};
+    sc.spawns_threads = true;
+    sc.accept = [](const std::string &exec, const point_ctx &pc) {
+      const std::string frame = pc.s("frame");
+      std::string why;
+      if (frame != "heavy" && frame != "small")
+        why = "frame=" + frame + " is not heavy or small";
+      else if (!cvc::ariadne::AppRuntime::have_yaml())
+        why = "libcvc was built without yaml-cpp (no .ari loader)";
+      if (why.empty())
+        return true;
+      std::printf("  %-28s %-9s %-34s skipped: %s\n", pc.sc.name.c_str(), exec.c_str(),
+                  params_text(pc.params).c_str(), why.c_str());
+      return false;
+    };
+    sc.run = [](point_ctx &pc) {
+      const unsigned workers = static_cast<unsigned>(std::max<int64_t>(0, pc.i("t")));
+      const int64_t nd = std::max<int64_t>(1, pc.i("docs"));
+      const int64_t frames = std::max<int64_t>(1, pc.i("frames"));
+      const bool heavy = pc.s("frame") == "heavy";
+      const auto note = [&](const std::string &text) {
+        std::printf("  %-28s %-9s %-34s note: %s\n", pc.sc.name.c_str(), pc.executor.c_str(),
+                    params_text(pc.params).c_str(), text.c_str());
+      };
+      auto app = make_app();
+      // The pool first, before anything builds group 0 or the lock manager: threads above 0 make
+      // the manager shared, so the workers may pump (S1-Q1). Built under unpinned_scope.
+      pool_point pp(*app, workers, pc);
+      cvc::state &root = cvc::state::instance(*app);
+      root("ariadne.exec.isolate_documents").value(std::string("1"));
+      // Eligible (S1-Q6): a prefix of its own, a channels: block (strict lint is the default), no
+      // global channel, no oidc, no link: hole. Each tick counts itself under the prefix.
+      const std::string tick =
+          heavy ? "(begin (state-incr \"ticks\") (set i 0) (while (< i 500) (set i (+ i 1))))"
+                : "(state-incr \"ticks\")";
+      const std::string head = "meta: {min_libcvc: 3.4.0}\nchannels:\n  - box\non_tick: |\n  ";
+      const temp_ari doc("state_exec_bench_ariadne_docs",
+                         head + tick + "\nroot:\n  - text: mt.ariadne_docs\n");
+      const auto prefix = [](int64_t k) { return "bench.ari.d" + istr(k); };
+      const ari_providers_reset reset; // after the documents are gone
+      std::vector<std::unique_ptr<cvc::ariadne::AppRuntime>> docs;
+      {
+        unpinned_scope u; // what a load starts (the app's async host) floats
+        for (int64_t k = 0; k < nd; ++k) {
+          docs.push_back(std::make_unique<cvc::ariadne::AppRuntime>(*app, prefix(k)));
+          for (const std::string &w : docs.back()->load(doc.path.string()))
+            note(prefix(k) + " loaded with a warning: " + w);
+        }
+      }
+      // extra.isolated: the documents isolated_group() put in a group of their own. Below docs, the
+      // documents run in group 0 and no gate on this scenario means anything: said, never failed.
+      std::set<se::exec_group *> own;
+      std::string reason;
+      bool in_group0 = false;
+      for (const auto &d : docs) {
+        if (se::exec_group *g = d->runtime().isolated_group()) {
+          own.insert(g);
+        } else if (!in_group0) {
+          in_group0 = true;
+          reason = d->runtime().isolation_reason();
+        }
+      }
+      const auto isolated = static_cast<int64_t>(own.size());
+      if (isolated < nd)
+        note(istr(isolated) + " of " + istr(nd) + " documents isolated (" + reason +
+             "): this point's gate has nothing to judge");
+      // steps_total: the steps of the schedulers the documents run on, their groups' and group
+      // 0's when a document is in it (asking for group 0 builds it).
+      std::vector<se::async_scheduler *> scheds;
+      for (se::exec_group *g : own)
+        scheds.push_back(&g->sched());
+      if (in_group0)
+        scheds.push_back(&app->exec_scheduler());
+      const auto steps = [&] {
+        uint64_t n = 0;
+        for (se::async_scheduler *s : scheds)
+          n += s->get_stats().total_steps;
+        return n;
+      };
+      const auto frame = [&] {
+        for (const auto &d : docs)
+          d->drain_begin();
+        app->exec_pump_frame();
+        for (const auto &d : docs)
+          d->drain_end();
+      };
+      const auto ticks = [&] {
+        std::vector<int64_t> v;
+        for (int64_t k = 0; k < nd; ++k) {
+          cvc::state *n = root.findDescendant(prefix(k) + ".ticks");
+          v.push_back(n ? std::strtoll(n->value().c_str(), nullptr, 10) : 0);
+        }
+        return v;
+      };
+      const auto report_warnings = [&] {
+        for (int64_t k = 0; k < nd; ++k)
+          for (const std::string &w : docs[std::size_t(k)]->take_warnings())
+            note(prefix(k) + ": " + w);
+      };
+      // Two frames outside every meter: the residents start and take their first ticks.
+      frame();
+      frame();
+      report_warnings();
+      pc.reps([&](meter &m, rep_out &o) {
+        m.widen = false; // the workers keep their CPUs (Linux)
+        o.latency_ns.reserve(std::size_t(frames));
+        const std::vector<int64_t> before = ticks();
+        const cvc::pool_stats s0 = pp.pool.stats();
+        const uint64_t w0 = cvc::exec_pool_worker_pumps_total();
+        const uint64_t steps0 = steps();
+        const auto limit = static_cast<int64_t>(pc.cfg.timeout * 1e9);
+        int64_t ran = 0;
+        m.begin();
+        while (ran < frames) {
+          const int64_t f0 = now_ns();
+          frame(); // the region holds the three calls only: no backend, nothing rendered
+          const int64_t f1 = now_ns();
+          o.latency_ns.push_back(f1 - f0);
+          ++ran;
+          if (ran < frames && f1 - m.a.wall > limit)
+            break;
+        }
+        m.end();
+        const cvc::pool_stats s1 = pp.pool.stats();
+        const uint64_t w1 = cvc::exec_pool_worker_pumps_total();
+        const uint64_t steps1 = steps();
+        const std::vector<int64_t> after = ticks();
+        report_warnings();
+        if (ran < frames)
+          o.fail("timeout: " + istr(ran) + " of " + istr(frames) + " frames");
+        int64_t ticked = 0;
+        for (int64_t k = 0; k < nd; ++k) {
+          const int64_t d = after[std::size_t(k)] - before[std::size_t(k)];
+          ticked += d;
+          if (d < 1 || d > ran)
+            o.fail(prefix(k) + " ticked " + istr(d) + " times in " + istr(ran) + " frames");
+        }
+        o.iterations = ran; // ns_per_iter: ns per frame
+        o.steps_total = steps1 - steps0;
+        o.extra.d("ns_per_frame", double(m.wall()) / double(ran))
+            .i("helper_wakes", int64_t(s1.helper_wakes - s0.helper_wakes))
+            .i("worker_pumps", int64_t(w1 - w0))
+            .i("isolated", isolated)
+            .i("pumps", int64_t(s1.pumps - s0.pumps))
+            .i("skipped", int64_t(s1.skipped - s0.skipped))
+            .i("effective_threads", s1.effective_threads)
+            .d("ticks_per_frame", double(ticked) / double(nd * ran))
+            .i("caller_cpu", pp.caller_cpu);
       });
     };
     all.push_back(std::move(sc));

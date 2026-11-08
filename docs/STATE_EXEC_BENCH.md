@@ -149,8 +149,14 @@ over the measured reps and prints `PASS` or `FAIL`. Options:
 - `--min X --max X` together pin a value, such as a step count.
 - `--max-noise P` makes a point noisier than `P` percent `INCONCLUSIVE`.
 
-It exits 1 when a point fails, a matching point has a failed rep, or nothing matches. Otherwise it
-exits 2 when a point is inconclusive, and 0 when every point passes. Gates that are a ratio between
+A scenario whose gate can pass without judging anything names, in the runner's `GATE_GUARDS`, a
+metric each of a point's rows must hold at least at one of its params: `mt.ariadne_docs`'
+`extra.isolated` at its `docs` (every document in a group of its own). A point short of it prints
+`FAIL (vacuous: ...)`.
+
+It exits 1 when a point fails, a matching point has a failed rep or leaves the gate vacuous, or
+nothing matches. Otherwise it exits 2 when a point is inconclusive, and 0 when every point passes.
+Gates that are a ratio between
 two points (one sweep value against another) are `compare --pair` runs instead. Gates on a count
 (steps, allocations) take no noise rule.
 
@@ -215,9 +221,9 @@ so the allocation count is a Release number. With a single-config generator it e
   thread) would still inherit the pin, so on Linux the scenarios that start threads
   (`async.*`, `msg.ingress`, `mt.*`; `spawns_threads` in `--list-json`) run with the driver
   unpinned, and their records say `pin_cpu: -1`. The pool scenarios (`mt.groups`,
-  `mt.groups.flood`, `mt.state_tree`) are the exception: their `exec_pool` places its workers, the
-  region leaves them placed, and a pinned driver moves for the point to the CPU the pool keeps for
-  its caller (mt.groups, "Placement").
+  `mt.groups.flood`, `mt.state_tree`, `mt.ariadne_docs`) are the exception: their `exec_pool`
+  places its workers, the region leaves them placed, and a pinned driver moves for the point to
+  the CPU the pool keeps for its caller (mt.groups, "Placement").
 - **Keep the pinned core's SMT sibling idle.** The header and the records (`pin_sibling`) name the
   other logical CPUs on the driver's core. A busy sibling slows the driver by tens of percent and
   is a large part of the rep-to-rep spread. On Windows, keep other work off it (for example
@@ -993,6 +999,47 @@ grows while the groups do not contend (td 6.3: disjoint chrooted subtrees about 
 shared or unchrooted about 1x). Plus the pool's `pumps`, `helper_wakes`, `effective_threads` and
 `rounds`.
 
+### mt.ariadne_docs (async)
+
+Threaded execution's Stage 1b (td 4.12, 6.3; S1.md S1.14): `docs` (1, 2, 4, 8) Ariadne documents on
+one app, each an `AppRuntime` at a prefix of its own (`bench.ari.d<k>`), all loading one document
+written for the point to the temporary directory, with `ariadne.exec.isolate_documents` set to 1.
+The document is eligible for a group of its own (S1-Q6): a non-empty prefix, a `channels:` block
+(enforced in strict lint mode, the default), no `global:` channel, no oidc and no `link:` hole. A
+frame is a Stage 1 host's loop: every document's `drain_begin()`, then `app.exec_pump_frame()`,
+then every document's `drain_end()`. `t` (0, 1, 2, 4, 8) is the app's `exec_pool` workers
+(`app::exec_pool(pool_options{threads = t})`; the caller pumps as well, so unlike mt.groups' `t`
+it does not count the caller). The pool is built first, before anything builds group 0 or the lock
+manager (S1-Q1: threads above 0 make the manager shared, so the workers may pump), under
+`unpinned_scope`, with the pool scenarios' placement (mt.groups, "Placement").
+
+- `frame=heavy`: each document's `on_tick:` runs a 500-iteration loop, about 8000 steps (0.5 to 1
+  ms a document on the machine this was written on), so a frame's pumps total well over the pool's
+  `inline_below` (100 us): frames the pool spreads over its workers once the documents are
+  isolated.
+- `frame=small`: `on_tick:` is one `state-incr`, a few steps, so a frame's pumps total well under
+  it: frames the pool pumps on the caller without waking a helper (td 4.4).
+
+Each tick counts itself (`state-incr "ticks"` under the document's prefix). A rep fails when a
+document did not tick, or ticked more than once a frame. A rep is `frames` (200; smoke 4) frames;
+two frames before the reps start the residents. No backend is set and nothing is rendered, so the
+region holds only the three calls: `ns_per_iter` is ns per frame, `latency_ns` each frame's time,
+and `steps_total` the steps of the schedulers the documents run on (their groups', and group 0's
+while a document is in it). Extras:
+
+- `ns_per_frame`: as `ns_per_iter`;
+- `helper_wakes`, `pumps` and `skipped`: the pool's counters over the region (`pool_stats`), and
+  `worker_pumps`, the process-wide `exec_pool_worker_pumps_total()`'s;
+- `isolated`: how many documents `Runtime::isolated_group()` put in a group of their own. Below
+  `docs`, the point prints one `note:` line with the first such document's `isolation_reason()`,
+  and passes: its documents run in group 0, which the caller pumps, so the gate below has nothing
+  to judge there. On the S1b.0 interfaces commit (stubs) every point says `0 of N documents
+  isolated (isolated documents are not built yet)`;
+- `effective_threads`, `ticks_per_frame` (1 when every document took every frame's tick) and
+  `caller_cpu`.
+
+Where libcvc was built without yaml-cpp (no `.ari` loader) every point is skipped.
+
 ### Threaded execution's Stage 1 gates
 
 td 6.3 and S1.md section 6, on Windows (MSVC, Release) in recorded quiet windows with `--pin
@@ -1036,13 +1083,27 @@ auto`, base and candidate interleaved, two rounds of 5 reps or more ("Getting st
       --where prog=fib --metric extra.of_ceiling --min 0.9 --max-noise 10
   ```
 
+- **Small frames wake no helper** (S1b): `mt.ariadne_docs` `frame=small` wakes no helper in the
+  median rep, at every `t` and `docs`. It is run in the A/B, not in CTest, since a helper wake
+  follows the pumps' measured times:
+
+  ```sh
+  python3 tools/bench/state_exec_bench.py run --scenario mt.ariadne_docs --reps 5 \
+      --out docs.jsonl
+  python3 tools/bench/state_exec_bench.py gate docs.jsonl --scenario mt.ariadne_docs \
+      --where frame=small --metric extra.helper_wakes --max 0
+  ```
+
+  `extra.isolated` guards it: with its documents in group 0, a point pumps nothing through the
+  pool's helpers whatever its frames cost, so it would pass without judging anything. `gate`
+  therefore fails a point whose rows have `extra.isolated` below `docs` (`FAIL (vacuous:
+  extra.isolated 0 below docs 2)`), as it does on S1b.0's stubs; the gate means something once A's
+  S1.10 isolates the documents. `--stat max` holds it in every rep instead of the median one.
 - **Recorded, not gated**: `mt.groups` exceptions and cycle, `mt.groups.flood`, `mt.state_tree`,
-  `mt.independent` and `mt.multi_exec`.
+  `mt.ariadne_docs` heavy, `mt.independent` and `mt.multi_exec`.
 - **In CTest and CI**: `state_exec_bench_gates` pins `sched.single.*`'s `steps_total` through a
   group too ("Gates in CTest"), and the sanitizer jobs run `mt.groups` under gcc's TSan, clang's
   TSan and ASan with UBSan (docs/TESTING.md, "The Sanitizer Jobs").
-
-S1b adds `mt.ariadne_docs` and its gate (small frames wake no helper).
 
 ### mt.pycvc_threads (pycvc)
 

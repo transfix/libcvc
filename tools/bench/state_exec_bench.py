@@ -39,7 +39,8 @@ machine; never a pass); else 0.
 
 `gate` checks one statistic of a metric against an absolute bound on every matching point of one
 run (a gate the design states in nanoseconds, steps or allocations rather than as a change), with
-the same exit statuses.
+the same exit statuses. A point of a scenario in GATE_GUARDS whose rows show the gate would judge
+nothing (mt.ariadne_docs with fewer documents isolated than it has) fails.
 
 Standard library only.
 """
@@ -321,11 +322,35 @@ def parse_pair(text):
     return key, a, b
 
 
+# Scenarios whose gates judge nothing unless each row shows a precondition held: (metric, param),
+# the row's metric at least the row's value of the param. mt.ariadne_docs' gate (small frames wake
+# no helper, S1.md section 6) passes vacuously while its documents run in group 0, which the pool
+# never pumps on a helper: every document must be in a group of its own (extra.isolated == docs).
+GATE_GUARDS = {"mt.ariadne_docs": [("extra.isolated", "docs")]}
+
+
+def unmet_guard(rs):
+    """Why the rows of one point leave its scenario's gate vacuous (GATE_GUARDS), or ""."""
+    for metric_name, name in GATE_GUARDS.get(rs[0].get("scenario", ""), []):
+        for r in rs:
+            have, need = metric(r, metric_name), param(r, name)
+            if have is None:
+                return f"vacuous: no {metric_name}"
+            try:
+                below = need is not None and have < float(need)
+            except ValueError:
+                below = False
+            if below:
+                return f"vacuous: {metric_name} {have:g} below {name} {need}"
+    return ""
+
+
 def gate(recs, scenario, metric_name, lo=None, hi=None, stat="median", executor=None,
          where=None, max_noise=None, out=sys.stdout):
     """Check `stat` of `metric_name` over each matching point's measured reps against [lo, hi].
-    Return 1 when a point fails, a matching point has a failed rep, or nothing matches; else 2
-    when a point is inconclusive (noisier than max_noise percent); else 0."""
+    Return 1 when a point fails, a matching point has a failed rep or leaves the gate vacuous
+    (GATE_GUARDS), or nothing matches; else 2 when a point is inconclusive (noisier than
+    max_noise percent); else 0."""
     where = where or {}
     picked = [r for r in recs
               if fnmatch.fnmatchcase(r.get("scenario", ""), scenario)
@@ -346,6 +371,11 @@ def gate(recs, scenario, metric_name, lo=None, hi=None, stat="median", executor=
         label = f"  {key[0]:<28} {key[1]:<9} {key[2][:40]:<40}"
         if not all(r.get("ok", False) for r in rs):
             print(f"{label} {'':>12} {'':>7}  FAIL (a rep failed its checks)", file=out)
+            failed += 1
+            continue
+        unmet = unmet_guard(rs)
+        if unmet:
+            print(f"{label} {'':>12} {'':>7}  FAIL ({unmet})", file=out)
             failed += 1
             continue
         vals = [v for v in (metric(r, metric_name) for r in rs) if v is not None]
