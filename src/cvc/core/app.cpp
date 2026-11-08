@@ -33,7 +33,10 @@
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_host.h>
 #include <cvc/state/state_exec/async_scheduler.h>
+#include <cvc/state/state_exec/exec_group.h>
+#include <cvc/state/state_exec/heap.h>
 #include <cvc/state/state_exec/lock_manager.h>
+#include <cvc/state/state_exec/stdlib.h>
 #include <cvc/utility/utility.h>
 #include <cvc/volume/bounding_box.h>
 #include <cvc/volume/dimension.h>
@@ -59,6 +62,8 @@
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/shared_array.hpp>
 #include <boost/thread/xtime.hpp>
+#include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
@@ -160,8 +165,14 @@ void app::wait_for_threads() {
   }
 }
 
-// Group 0's own state (app.h). Stage 1 interfaces: empty and never built; S1.7 fills it.
-struct app::exec_group0_state {};
+// Group 0's own state (app.h; S1.7): the app scheduler's cycle registry and math.random stream,
+// which it binds (S1.1, S1.2), and the pids it and every exec_group of this app draw from (S1.4).
+// The registry goes last of the three, after the scheduler and its envs (declared before them).
+struct app::exec_group0_state {
+  cvc::state_exec::cycle_registry_ptr registry = cvc::state_exec::make_cycle_registry();
+  cvc::state_exec::random_stream random;
+  std::shared_ptr<std::atomic<int>> pids = std::make_shared<std::atomic<int>>(1);
+};
 
 app::app()
     : _maxPoolSize(boost::thread::hardware_concurrency() > 0 ? boost::thread::hardware_concurrency()
@@ -264,7 +275,13 @@ app::~app() {
   // once the app is gone.
   _teardownHold.emplace();
 
-  // Async calls first: their kernels run on the background pool and post to the exec scheduler,
+  // The exec pool first (S1.7, td 4.17): every group's owner has destroyed its groups by now, so no
+  // pump_all runs, and its workers stop before the async host shuts down and the background pool,
+  // which their groups' kernels ran on, closes.
+  assert(cvc::state_exec::detail::live_groups(this) == 0 && "an exec_group outlived its app");
+  _execPool.reset();
+
+  // Async calls next: their kernels run on the background pool and post to the exec scheduler,
   // so cancel them and wait for their kernels while both are still here (the pool is still open).
   // A pool with no worker (none could be created) would never run a kernel still queued, and the
   // wait would be for good: it is closed first then, which drops those kernels and ends their
@@ -1251,11 +1268,27 @@ std::string setting_text(cvc::state &root, const char *path) {
   return node ? const_cast<cvc::state *>(node)->value() : std::string();
 }
 
+// CVC_EXEC_THREADS (td 4.13, S1.6; read once): overrides the tree's state_exec.threads, for the
+// pool's size and the lock mode's auto alike, so whole suites run threaded unchanged (AR-1).
+const std::optional<std::string> &exec_threads_knob() {
+  static const std::optional<std::string> v = []() -> std::optional<std::string> {
+    const char *e = std::getenv("CVC_EXEC_THREADS");
+    return e ? std::optional<std::string>(e) : std::nullopt;
+  }();
+  return v;
+}
+
+// state_exec.threads: CVC_EXEC_THREADS when set, else the tree's.
+std::string exec_threads_text(cvc::state &root) {
+  if (const std::optional<std::string> &knob = exec_threads_knob())
+    return *knob;
+  return setting_text(root, "state_exec.threads");
+}
+
 // Whether state_exec.threads asks for worker threads (docs/STATE_EXEC_THREADED.md 4.1, 4.13): a
-// whole number above 0, or auto (hardware_concurrency() - 1 workers). Unset, as it is until the
-// threaded executor lands, or anything else: 0.
+// whole number above 0, or auto (hardware_concurrency() - 1 workers). Unset, or anything else: 0.
 bool exec_threads_above_zero(cvc::state &root) {
-  const std::string v = setting_text(root, "state_exec.threads");
+  const std::string v = exec_threads_text(root);
   if (v == "auto")
     return std::thread::hardware_concurrency() > 1;
   char *end = nullptr;
@@ -1266,8 +1299,11 @@ bool exec_threads_above_zero(cvc::state &root) {
 // The app lock manager's mode (docs/STATE_EXEC_LOCKS.md 8.3, 14.2 Q4): state_exec.locks.threading
 // single or shared as it says; auto (the default) is shared when the build has threads and either
 // state_exec.threads is above 0 or a threaded host (pycvc, at import) announced itself, else
-// single. An unknown value is auto, and sets *unknown.
-cvc::state_exec::lock_threading lock_threading_from_state(cvc::state &root, bool *unknown) {
+// single. `pool_threads`: this app's exec_pool(opts) asked for workers before the manager was made
+// (S1-Q1), which counts as threads above 0, for this app only. An unknown value is auto, and sets
+// *unknown.
+cvc::state_exec::lock_threading lock_threading_from_state(cvc::state &root, bool *unknown,
+                                                          bool pool_threads = false) {
   namespace se = cvc::state_exec;
   *unknown = false;
   const std::string v = setting_text(root, "state_exec.locks.threading");
@@ -1277,10 +1313,60 @@ cvc::state_exec::lock_threading lock_threading_from_state(cvc::state &root, bool
     return se::lock_threading::shared;
   if (!v.empty() && v != "auto")
     *unknown = true;
-  return se::threads_compiled_in &&
-                 (exec_threads_above_zero(root) || se::detail::threaded_host_noted())
+  return se::threads_compiled_in && (pool_threads || exec_threads_above_zero(root) ||
+                                     se::detail::threaded_host_noted())
              ? se::lock_threading::shared
              : se::lock_threading::single;
+}
+
+// The app's lock manager, made now in the mode the tree (and `pool_threads`) says; `note` gets
+// the warning for an unknown state_exec.locks.threading.
+std::shared_ptr<cvc::state_exec::lock_manager>
+new_app_lock_manager(cvc::state &root, bool pool_threads, std::string &note) {
+  bool unknown = false;
+  cvc::state_exec::lock_manager::options opts;
+  opts.threading = lock_threading_from_state(root, &unknown, pool_threads);
+  if (unknown)
+    note = "state_exec.locks.threading: unknown value '" +
+           setting_text(root, "state_exec.locks.threading") +
+           "' (auto, single or shared); using auto";
+  return std::make_shared<cvc::state_exec::lock_manager>(opts);
+}
+
+// The pool's options from the tree (td 4.13): state_exec.threads (CVC_EXEC_THREADS first; a whole
+// number or auto), state_exec.cpu_set (performance or all) and state_exec.deterministic. An
+// unknown value is noted and the default used.
+cvc::pool_options pool_options_from_state(cvc::state &root,
+                                          std::vector<std::pair<unsigned, std::string>> &notes) {
+  namespace se = cvc::state_exec;
+  cvc::pool_options o;
+  const std::string threads =
+      exec_threads_knob() ? *exec_threads_knob()
+                          : se::detail::setting_value(root, "state_exec.threads").value_or("");
+  if (threads == "auto") {
+    o.threads = cvc::pool_options::auto_threads;
+  } else if (!threads.empty()) {
+    char *end = nullptr;
+    const long long n = std::strtoll(threads.c_str(), &end, 10);
+    if (end == threads.c_str() + threads.size() && n >= 0 && n < 4096)
+      o.threads = static_cast<unsigned>(n);
+    else
+      notes.emplace_back(1, "state_exec.threads: unknown value '" + threads +
+                                "' (a whole number or auto); using 0");
+  }
+  const std::string cpus = se::detail::setting_value(root, "state_exec.cpu_set").value_or("");
+  if (cpus == "all")
+    o.placement = cvc::cpu_set::all;
+  else if (!cpus.empty() && cpus != "performance")
+    notes.emplace_back(1, "state_exec.cpu_set: unknown value '" + cpus +
+                              "' (performance or all); using performance");
+  const std::string det = se::detail::setting_value(root, "state_exec.deterministic").value_or("");
+  if (det == "true" || det == "1" || det == "on" || det == "yes")
+    o.deterministic = true;
+  else if (!det.empty() && det != "false" && det != "0" && det != "off" && det != "no")
+    notes.emplace_back(1, "state_exec.deterministic: unknown value '" + det +
+                              "' (true or false); using false");
+  return o;
 }
 
 } // namespace
@@ -1317,6 +1403,13 @@ cvc::state_exec::async_scheduler &app::exec_scheduler() {
       if (!threading_note.empty())
         notes.emplace_back(1, std::move(threading_note));
       _execScheduler.reset(new cvc::state_exec::async_scheduler(policy));
+      // Group 0 (S1.7): its own cycle registry and math.random stream, which it binds whoever
+      // drives it, and the pids every exec_group of this app draws from too.
+      if (!_execGroup0)
+        _execGroup0 = std::make_unique<exec_group0_state>();
+      _execScheduler->set_cycle_registry(_execGroup0->registry.get());
+      _execScheduler->set_random_stream(&_execGroup0->random);
+      _execScheduler->set_pid_source(_execGroup0->pids);
       // Wire it to this app's state root so state-watches (state-watch/on_change:)
       // resolve against the app tree. Processes are chrooted per-owner on submit.
       _execScheduler->set_watch_root(&root());
@@ -1365,14 +1458,7 @@ std::shared_ptr<cvc::state_exec::lock_manager> app::lock_manager_locked(std::str
   if (!_lockManager) {
     // The mode is chosen now and fixed (docs/STATE_EXEC_LOCKS.md 8.3). An unknown value is logged,
     // and auto used, as state_exec.policy's is.
-    bool unknown = false;
-    cvc::state_exec::lock_manager::options opts;
-    opts.threading = lock_threading_from_state(root(), &unknown);
-    if (unknown)
-      note = "state_exec.locks.threading: unknown value '" +
-             setting_text(root(), "state_exec.locks.threading") +
-             "' (auto, single or shared); using auto";
-    _lockManager = std::make_shared<cvc::state_exec::lock_manager>(opts);
+    _lockManager = new_app_lock_manager(root(), false, note);
   }
   return _lockManager;
 }
@@ -1412,16 +1498,73 @@ cvc::state_exec::async_host &app::exec_async_host() {
   return *_execAsyncHost;
 }
 
-// Stage 1 interfaces: stubs. The pool is built with the options given (the stub pool has no
-// workers), and exec_pump_frame() only advances the generation. S1.7 reads the tree's settings,
-// gives group 0 its registry and stream, and pumps the frame.
-cvc::exec_pool &app::exec_pool() { return exec_pool(pool_options{}); }
+cvc::exec_pool &app::exec_pool() {
+  if (cvc::exec_pool *pool = exec_pool_probe())
+    return *pool;
+  // From the tree (td 4.13). A host's exec_pool(opts) racing this one wins or loses the build; the
+  // loser's options are not applied (and logged), as for any later call.
+  std::vector<std::pair<unsigned, std::string>> notes;
+  pool_options opts;
+  {
+    boost::this_thread::disable_interruption keep_interrupt_pending;
+    opts = pool_options_from_state(root(), notes);
+  }
+  for (const auto &[level, text] : notes)
+    log(level, text);
+  return exec_pool(opts);
+}
 
 cvc::exec_pool &app::exec_pool(const pool_options &opts) {
-  boost::mutex::scoped_lock lock(_execPoolMutex);
-  if (!_execPool)
-    _execPool = std::make_unique<cvc::exec_pool>(opts);
-  return *_execPool;
+  std::vector<std::pair<unsigned, std::string>> notes;
+  cvc::exec_pool *pool = nullptr;
+  // As exec_scheduler(): the build reads the tree and makes the lock manager, with interruption
+  // held off, and logs once the mutexes are released.
+  std::optional<boost::this_thread::disable_interruption> keep_interrupt_pending;
+  {
+    boost::mutex::scoped_lock lock(_execPoolMutex);
+    if (_execPool) {
+      const pool_options &built = _execPool->options();
+      if (built.threads != opts.threads || built.placement != opts.placement ||
+          built.deterministic != opts.deterministic || built.inline_below != opts.inline_below)
+        notes.emplace_back(1, "exec_pool: built already, with " +
+                                  std::to_string(_execPool->threads()) +
+                                  " workers; the options given now are not applied");
+    } else {
+      keep_interrupt_pending.emplace();
+      pool_options o = opts;
+      if (o.threads > 0 && cvc::state_exec::threads_compiled_in) {
+        // Workers pump only over a shared lock manager (S1-Q1). Asked for before anything made
+        // the manager, it is made now, shared (this app only); a single one keeps every pump on
+        // the caller.
+        std::string note;
+        std::shared_ptr<cvc::state_exec::lock_manager> mgr;
+        {
+          boost::mutex::scoped_lock sched_lock(_execSchedulerMutex);
+          if (!_lockManager)
+            _lockManager = new_app_lock_manager(root(), true, note);
+          std::string pending;
+          mgr = lock_manager_locked(pending);
+          if (!pending.empty())
+            notes.emplace_back(1, std::move(pending));
+        }
+        if (!note.empty())
+          notes.emplace_back(1, std::move(note));
+        if (mgr->threading() != cvc::state_exec::lock_threading::shared) {
+          notes.emplace_back(1, "exec_pool: this app's lock manager is single "
+                                "(state_exec.locks.threading); every group is pumped on the "
+                                "calling thread");
+          o.threads = 0;
+        }
+      }
+      _execPool = std::make_unique<cvc::exec_pool>(o);
+      for (std::string &text : _execPool->take_notes())
+        notes.emplace_back(1, std::move(text));
+    }
+    pool = _execPool.get();
+  }
+  for (const auto &[level, text] : notes)
+    log(level, text);
+  return *pool;
 }
 
 cvc::exec_pool *app::exec_pool_probe() const {
@@ -1429,7 +1572,56 @@ cvc::exec_pool *app::exec_pool_probe() const {
   return _execPool.get();
 }
 
-void app::exec_pump_frame() { _execPumpGeneration.fetch_add(1, std::memory_order_acq_rel); }
+std::shared_ptr<std::atomic<int>> app::exec_pid_source() {
+  boost::mutex::scoped_lock lock(_execSchedulerMutex);
+  if (!_execGroup0)
+    _execGroup0 = std::make_unique<exec_group0_state>();
+  return _execGroup0->pids;
+}
+
+void app::exec_pump_frame() {
+  namespace se = cvc::state_exec;
+  // One frame (td 4.12, S1.7): a 0.1 s deadline from entry; group 0 on this thread first, as a
+  // host-affinity group, and the frame groups in the same pump_all; then the generation moves.
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+  static constexpr se::pump_budget kFrame{200000, 0.1}; // Ariadne's per-pump budget
+  struct advance {
+    std::atomic<std::uint64_t> &generation;
+    ~advance() { generation.fetch_add(1, std::memory_order_acq_rel); }
+  } frame_done{_execPumpGeneration};
+  std::vector<se::exec_group *> groups;
+  {
+    boost::mutex::scoped_lock lock(_execPoolMutex);
+    groups = _frameGroups;
+  }
+  // Group 0 once it is built and something uses it, as Ariadne's scheduler_to_pump gates it (tf
+  // overlay tasks and sliced tasks live there too): never built here.
+  se::async_scheduler *group0 = nullptr;
+  {
+    boost::mutex::scoped_lock lock(_execSchedulerMutex);
+    group0 = _execScheduler.get();
+  }
+  if (group0) {
+    const se::scheduler_stats s = group0->get_stats();
+    if (s.total_processes - s.terminated - s.killed - s.failed <= 0)
+      group0 = nullptr;
+  }
+  const auto pump_group0 = [group0, deadline] {
+    se::async_scheduler::pump_owner_scope token(*group0); // the token, as a group's pump takes
+    group0->drain_ingress();
+    group0->wake_awaiting();
+    const double left = std::max(
+        0.0, std::chrono::duration<double>(deadline - std::chrono::steady_clock::now()).count());
+    group0->sync_run_steps(kFrame.steps, std::min(kFrame.seconds, left));
+  };
+  if (groups.empty()) {
+    if (group0)
+      pump_group0();
+    return;
+  }
+  exec_pool().pump_all(groups, kFrame, deadline,
+                       group0 ? std::function<void()>(pump_group0) : std::function<void()>());
+}
 
 std::uint64_t app::exec_pump_generation() const {
   return _execPumpGeneration.load(std::memory_order_acquire);

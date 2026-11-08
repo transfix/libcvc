@@ -496,3 +496,79 @@ TEST(ExecPool, TwoCallersShareThePool) {
   }
 }
 
+TEST(AppExecPool, ThreadsBeforeTheLockManagerMakeItShared) {
+  cvc::app app;
+  cvc::pool_options po;
+  po.threads = 1;
+  cvc::exec_pool &pool = app.exec_pool(po);
+  EXPECT_EQ(&pool, app.exec_pool_probe());
+  EXPECT_EQ(&pool, &app.exec_pool()) << "built once";
+  if (threads_compiled_in && std::thread::hardware_concurrency() > 1) {
+    EXPECT_EQ(app.lock_manager()->threading(), lock_threading::shared);
+    EXPECT_EQ(pool.threads(), 1u);
+  }
+  // Another app is not affected (the hint is this app's, not note_threaded_host's).
+  cvc::app other;
+  EXPECT_EQ(other.exec_pool_probe(), nullptr);
+}
+
+TEST(AppExecPool, ASingleLockManagerKeepsThePoolInline) {
+  cvc::app app;
+  app.root()("state_exec.locks.threading").value(std::string("single"));
+  ASSERT_EQ(app.lock_manager()->threading(), lock_threading::single);
+  cvc::pool_options po;
+  po.threads = 2;
+  EXPECT_EQ(app.exec_pool(po).threads(), 0u);
+}
+
+TEST(AppExecPool, TheTreeSizesThePool) {
+  cvc::app app;
+  app.root()("state_exec.threads").value(std::string("1"));
+  app.root()("state_exec.cpu_set").value(std::string("all"));
+  cvc::exec_pool &pool = app.exec_pool();
+  EXPECT_EQ(pool.options().threads, 1u);
+  EXPECT_EQ(pool.options().placement, cvc::cpu_set::all);
+  EXPECT_EQ(pool.threads(),
+            threads_compiled_in && std::thread::hardware_concurrency() > 1 ? 1u : 0u);
+}
+
+TEST(AppExecPool, PumpFramePumpsGroupZeroAndFrameGroupsAndAdvances) {
+  cvc::app app;
+  exec_group g(opts_for(app, "frame"));
+  async_scheduler &zero = app.exec_scheduler();
+  const int z = zero.execute(std::string("(+ 1 2)"));
+  const int p = g.execute(std::string("(+ 3 4)"));
+  const std::uint64_t gen = app.exec_pump_generation();
+  {
+    cvc::frame_group_handle handle = app.register_frame_group(g);
+    app.exec_pump_frame();
+  }
+  EXPECT_EQ(app.exec_pump_generation(), gen + 1);
+  ASSERT_TRUE(zero.get_result(z));
+  EXPECT_EQ(to_string(*zero.get_result(z)), "3");
+  ASSERT_TRUE(finished(g, p));
+  EXPECT_EQ(result_of(g, p), "7");
+  // Unregistered: the next frame does not pump it.
+  const int q = g.execute(std::string("(+ 5 6)"));
+  app.exec_pump_frame();
+  EXPECT_FALSE(finished(g, q));
+  EXPECT_EQ(app.exec_pump_generation(), gen + 2);
+}
+
+TEST(AppExecPool, GroupsAndTheAppSchedulerShareOnePidSource) {
+  cvc::app app;
+  exec_group a(opts_for(app, "a")), b(opts_for(app, "b"));
+  std::set<int> seen;
+  std::vector<int> in_a;
+  for (int i = 0; i < 5; ++i) {
+    in_a.push_back(a.execute(std::string("1")));
+    seen.insert(in_a.back());
+    seen.insert(b.execute(std::string("1")));
+    seen.insert(app.exec_scheduler().execute(std::string("1")));
+  }
+  EXPECT_EQ(app.exec_pid_source().get(), app.exec_pid_source().get());
+  EXPECT_EQ(seen.size(), 15u) << "unique app-wide";
+  for (std::size_t i = 1; i < in_a.size(); ++i)
+    EXPECT_LT(in_a[i - 1], in_a[i]) << "increasing within a group";
+  EXPECT_EQ(app.exec_pid_source()->load(), 16) << "the next pid";
+}

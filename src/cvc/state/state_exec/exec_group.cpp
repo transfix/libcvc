@@ -167,6 +167,8 @@ exec_group::exec_group(options o) : impl_(std::make_unique<impl>()) {
   m.sched->set_cycle_registry(m.registry.get());
   m.sched->set_random_stream(&m.random);
   if (app) {
+    // Pids no other group or the app scheduler repeats (S1.4).
+    m.sched->set_pid_source(app->exec_pid_source());
     // The app's lock manager, in its own mode, as the app scheduler attaches (S1-Q1): with-lock
     // here excludes the same keys app-wide.
     const std::shared_ptr<lock_manager> locks = app->lock_manager();

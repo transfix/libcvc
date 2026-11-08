@@ -645,6 +645,10 @@ public:
   std::uint64_t exec_pump_generation() const;
   // Have exec_pump_frame() pump `group` until the handle goes. The group must outlive the handle.
   frame_group_handle register_frame_group(cvc::state_exec::exec_group &group);
+  // The pids exec_scheduler() and every exec_group built with this app draw from (td 4.5, B32), so
+  // none repeats app-wide: made with group 0's state, counting from 1, the app scheduler's first
+  // pid as before (async_scheduler::set_pid_source).
+  std::shared_ptr<std::atomic<int>> exec_pid_source();
 
   // Used to easily manage saving/restoring thread info as we
   // traverse a threads stack.
