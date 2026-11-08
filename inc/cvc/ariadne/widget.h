@@ -310,6 +310,10 @@ struct Widget {
   // deliberately general (any Text, not a demo-specific status widget) so every HUD can reuse it.
   bool has_text_color = false;
   float text_color[3] = {1.0f, 1.0f, 1.0f};
+  // §5.11 Kind::Text `emoji:`: a state path holding a map of shortcode names to picture URIs. A
+  // `:name:` in the text that the map names is drawn as that picture, one line tall, where the
+  // backend can put a picture in a line. Empty: plain text.
+  std::string emoji;
 
   // Kind::Image (§ raster viewer): the host-published image to show. `src` is a static image name;
   // a non-empty `bind` overrides it with the name held in that state key (so a combo can switch
@@ -324,6 +328,12 @@ struct Widget {
   // (`auth:`); `media_status` is a state path the widget writes loading|ready|failed to, and the
   // error to <path>.error (`status:`). `src` may also be a computed expression.
   double img_h = 0.0;
+  // `size: "N%"` (or ["N%", h]): `img_fill` > 0 makes the width that percent of the width the
+  // widget has on its line (Backend::available_width); `img_size` is then its width where the
+  // backend can't tell (a terminal). `img_max_h` > 0 (`max_height:`) keeps a picture whose height
+  // follows its shape no taller than that, narrower instead.
+  double img_fill = 0.0;
+  double img_max_h = 0.0;
   ImageFit img_fit = ImageFit::Contain;
   ImageShape img_shape = ImageShape::Rect;
   std::string media_auth;

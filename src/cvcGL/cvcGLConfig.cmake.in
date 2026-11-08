@@ -71,6 +71,10 @@ endif()
 # its link interface, so consumers must re-find it. Empty for a shared cvcGL or one built without it.
 @CVCGL_TURBOJPEG_DEP@
 
+# A static cvcGL built with ImGui's FreeType font loader (colour emoji) names Freetype::Freetype in
+# its link interface, so consumers must re-find it. Empty for a shared cvcGL or one built without it.
+@CVCGL_FREETYPE_DEP@
+
 include("${CMAKE_CURRENT_LIST_DIR}/cvcGLTargets.cmake")
 
 # WebAssembly app support: cvcgl_wasm_app(<target> ...) (cvcGLWasm.cmake, next to this file).

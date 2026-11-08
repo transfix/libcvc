@@ -397,6 +397,9 @@ int main(int argc, char **argv) {
   if (!check(fs::exists(font), "the pinned UI font is present", font.string()))
     return cvcgl_test::finish("cvcgl_ari_golden");
   cvc::gl::ImGuiOverlay::setUiFontPath(font.string()); // before any overlay is constructed
+  // stb_truetype and the pinned font alone, as the goldens were drawn: FreeType hints and
+  // antialiases differently, and the fallback fonts would add glyphs a machine has or lacks.
+  cvc::gl::ImGuiOverlay::setUiFontFallbacks(false);
 
   {
     cvc::app probe;

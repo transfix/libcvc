@@ -127,6 +127,14 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
 endif()
 
 if(EMSCRIPTEN)
+  # cvcGL's fallback fonts (src/cvcGL/fonts): a browser has no system fonts for ImGui, so each
+  # browser host embeds them where an install keeps them (<prefix>/share/libcvc/fonts), and the
+  # overlay finds them there: DejaVu Sans Mono as the UI font, Twemoji's colour emoji under it.
+  set(_arigl_font_embed "")
+  if(CVCGL_FONT_DIR AND EXISTS "${CVCGL_FONT_DIR}/Twemoji.Mozilla.ttf")
+    set(_arigl_font_embed "--embed-file=${CVCGL_FONT_DIR}@/usr/share/libcvc/fonts")
+  endif()
+
   # cyprty — arigl's browser build: the conference client. arigl built to wasm, dialing the relay
   # over a WebSocket (cvc::state_transport_ws) and rendering conference_roster.ari (control plane
   # only: room-join + room-roster). Its page, web/cyprty.html, sets CVC_ARIADNE_RELAY to
@@ -161,7 +169,8 @@ if(EMSCRIPTEN)
   set(_cyprty_components "${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne/components")
   file(GLOB _cyprty_component_files CONFIGURE_DEPENDS "${_cyprty_components}/*.ari")
   target_link_options(cyprty PRIVATE
-                      "--embed-file=${_cyprty_components}@/usr/share/libcvc/ariadne/components")
+                      "--embed-file=${_cyprty_components}@/usr/share/libcvc/ariadne/components"
+                      ${_arigl_font_embed})
   target_compile_definitions(cyprty PRIVATE CVC_ARIGL_COMPONENT_DIR="/usr/share/libcvc/ariadne")
   # Relink (re-embed) whenever the baked document or a component changes; otherwise a .ari-only
   # edit leaves the stale document embedded.
@@ -268,7 +277,7 @@ if(EMSCRIPTEN)
     # download.
     target_link_options(arigl PRIVATE
       "--embed-file=${_arigl_components}@/usr/share/libcvc/ariadne/components"
-      ${_arigl_wasm_link})
+      ${_arigl_font_embed} ${_arigl_wasm_link})
     target_compile_definitions(arigl PRIVATE
                                CVC_ARIGL_COMPONENT_DIR="/usr/share/libcvc/ariadne")
     set_property(TARGET arigl APPEND PROPERTY LINK_DEPENDS ${_arigl_component_files})
@@ -309,7 +318,7 @@ if(EMSCRIPTEN)
            OUTPUT_VARIABLE _ariglx_wasm_link)
       target_link_options(ariglx PRIVATE
         "--embed-file=${_arigl_components}@/usr/share/libcvc/ariadne/components"
-        ${_ariglx_wasm_link} -sINITIAL_MEMORY=67108864)
+        ${_arigl_font_embed} ${_ariglx_wasm_link} -sINITIAL_MEMORY=67108864)
       target_compile_definitions(ariglx PRIVATE
                                  CVC_ARIGL_COMPONENT_DIR="/usr/share/libcvc/ariadne")
       set_property(TARGET ariglx APPEND PROPERTY LINK_DEPENDS ${_arigl_component_files})
