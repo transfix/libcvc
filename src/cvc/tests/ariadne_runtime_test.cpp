@@ -10111,8 +10111,9 @@ TEST(SpawnContext, SP01_AChildOfADeletedChrootWritesTheDetachedNode) {
 // document stays in group 0 and gives a reason (its wording is not pinned), which the app's log
 // shows once, however many frames it then runs (read through system.log_output; not checked in a
 // log4cplus build). An eligible one's group is affinity::host when its host declared a
-// thread-affine prefix under it or its env holds a host_only native, else any. The decision is made
-// at load.
+// thread-affine prefix at, under or above its prefix (R1b-mid S-M2: a subscriber above it is called
+// for each of its writes), or its env holds a host_only native, else any. The decision is made at
+// load.
 TEST(AriadneFrames, EL01_IneligibleDocumentsStayInGroupZero) {
   namespace se = cvc::state_exec;
   if (!have_yaml())
@@ -10196,6 +10197,9 @@ TEST(AriadneFrames, EL01_IneligibleDocumentsStayInGroupZero) {
   expect_isolated(load("docs.el.scene", strict + text,
                        [](AppRuntime &a) { a.declare_thread_affine_prefix("docs.el.scene.view"); }),
                   "host", "a thread-affine prefix declared under it");
+  expect_isolated(load("docs.el.stage.doc", strict + text,
+                       [](AppRuntime &a) { a.declare_thread_affine_prefix("docs.el.stage"); }),
+                  "host", "a thread-affine prefix declared above it");
   register_action_intrinsics(
       [](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
         se::builtins::register_fn(env, "el01-host-verb", [](std::span<const se::value_t>) {
