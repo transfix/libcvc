@@ -1775,6 +1775,47 @@ TEST(AsyncCalls, HostShutdownStopsAStartedCall) {
   EXPECT_EQ(sp.stopped, 1);
 }
 
+// A started call's work finishes it through its host's finisher, which posts only while the host is
+// up, so a transport answering on a thread of its own as the host goes (an isolated document's
+// group's host dies with its Runtime) touches neither the host nor its scheduler. Answered while
+// the host is up, the call resumes its process; answered once the host is destroyed (the answer
+// past its cancel check already, as a racing transport's may be), nothing is posted.
+TEST(AsyncCalls, AStartedCallsFinisherPostsOnlyWhileItsHostIsUp) {
+  world w(async_sched);
+  std::vector<std::shared_ptr<async_call>> pending;
+  register_async_fn(w.env, *w.host, "far-op", [&pending](std::span<const value_t>) -> async_work {
+    async_work work;
+    work.start = [&pending](const std::shared_ptr<async_call> &call) { pending.push_back(call); };
+    return work;
+  });
+  const async_host::finisher fin = w.host->make_finisher();
+
+  const int up = w.submit("(far-op)");
+  ASSERT_TRUE(w.pump([&] { return w.waiting(up) && pending.size() == 1; }));
+  bool posted = false;
+  std::thread([&] {
+    if (pending[0]->settle(value_t(int64_t(42)), nullptr))
+      posted = fin.finish(pending[0]);
+  }).join();
+  EXPECT_TRUE(posted);
+  w.run_to_end(up);
+  ASSERT_TRUE(w.result(up));
+  EXPECT_EQ(show(*w.result(up)), "42");
+
+  const int gone = w.submit("(far-op)");
+  ASSERT_TRUE(w.pump([&] { return w.waiting(gone) && pending.size() == 2; }));
+  const std::uint64_t posts = w.async->ingress_posts_for_test();
+  w.host.reset(); // its shutdown cancels the call, then it is freed
+  EXPECT_TRUE(pending[1]->cancel_requested());
+  posted = true;
+  std::thread([&] {
+    pending[1]->settle(value_t(int64_t(7)), nullptr);
+    posted = fin.finish(pending[1]);
+  }).join();
+  EXPECT_FALSE(posted);
+  EXPECT_EQ(w.async->ingress_posts_for_test(), posts) << "nothing reached the scheduler";
+}
+
 TEST(AsyncCalls, WhereAStartedCallCantParkItsKernelRuns) {
   // No parking scheduler (the evaluators, the sync scheduler): the work's kernel, in the step.
   for_engines(recursive | stackless | sync_sched, [](unsigned e) {

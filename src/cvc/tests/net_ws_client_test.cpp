@@ -2,10 +2,16 @@
 
 #include "local_ws_server.h"
 
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cvc/net/ws_client.h>
 #include <gtest/gtest.h>
+#include <mutex>
+#include <set>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace {
 
@@ -161,6 +167,59 @@ TEST(NetWsClient, AnOversizedMessageIsAnError) {
   ASSERT_TRUE(e);
   EXPECT_EQ(e->kind, WsEvent::Kind::Error);
   EXPECT_FALSE(c->open());
+}
+
+// Two threads sending on one connection (two documents pumped on two workers) send whole messages,
+// never interleaved: libcurl takes a large message in pieces, and continues a partly sent frame
+// with the next send's bytes. The server reads only once both sends are under way, so each waits
+// for the socket in the middle of its frame.
+TEST(NetWsClient, TwoThreadsSendingOnOneConnectionSendWholeMessages) {
+  REQUIRE_WS_BACKEND();
+  std::mutex m;
+  std::condition_variable cv;
+  std::vector<std::string> got;
+  std::string failure;
+  std::atomic<bool> reading{false};
+  LocalWsServer server([&](LocalWsServer::Stream &ws) {
+    ws.read_message_max(64u << 20);
+    while (!reading)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    try {
+      for (int i = 0; i < 2; ++i) {
+        boost::beast::flat_buffer buf;
+        ws.read(buf);
+        std::lock_guard<std::mutex> lock(m);
+        got.push_back(boost::beast::buffers_to_string(buf.data()));
+        cv.notify_all();
+      }
+    } catch (const std::exception &e) {
+      std::lock_guard<std::mutex> lock(m);
+      failure = e.what();
+      cv.notify_all();
+    }
+  });
+  auto c = cvc::net::ws_connect(server.url("/"), {});
+  ASSERT_TRUE(c);
+  const std::size_t size = 4u << 20;
+  std::atomic<int> sent{0};
+  std::thread a([&] { sent += c->send_text(std::string(size, 'a')) ? 1 : 0; });
+  std::thread b([&] { sent += c->send_text(std::string(size, 'b')) ? 1 : 0; });
+  std::this_thread::sleep_for(std::chrono::milliseconds(200)); // both sends under way
+  reading = true;
+  a.join();
+  b.join();
+  EXPECT_EQ(sent.load(), 2);
+  std::unique_lock<std::mutex> lock(m);
+  cv.wait_for(lock, std::chrono::seconds(20), [&] { return got.size() == 2 || !failure.empty(); });
+  ASSERT_EQ(got.size(), 2u) << "the server read: " << (failure.empty() ? "too little" : failure);
+  std::set<char> letters;
+  for (const std::string &message : got) {
+    ASSERT_EQ(message.size(), size);
+    EXPECT_EQ(message.find_first_not_of(message[0]), std::string::npos)
+        << "a message holds another's bytes";
+    letters.insert(message[0]);
+  }
+  EXPECT_EQ(letters, (std::set<char>{'a', 'b'}));
 }
 
 // The handshake's Sec-WebSocket-Protocol line, or "" when it has none.

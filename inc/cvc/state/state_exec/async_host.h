@@ -22,7 +22,8 @@
  *
  * Work that runs by itself (a browser's fetch, which its event loop completes) returns an
  * async_work instead, whose start begins it and whose completion settles the call
- * (docs/STATE_EXEC_EXCEPTIONS.md 3.12).
+ * (docs/STATE_EXEC_EXCEPTIONS.md 3.12) and finishes it through the host's finisher
+ * (make_finisher), which stays safe to use after the host is gone.
  */
 #ifndef CVC_STATE_EXEC_ASYNC_HOST_H
 #define CVC_STATE_EXEC_ASYNC_HOST_H
@@ -33,6 +34,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <utility>
 
 namespace cvc {
 class app;
@@ -46,6 +48,9 @@ class scheduler_base;
 
 /// The executors, scheduler and in-flight calls of a host's async functions.
 class async_host {
+  // What the host's calls, kernels and finishers share with it, and outlive it holding (private).
+  struct shared_state;
+
 public:
   /// A host whose kernels run inline, in the step that calls them, charged to the process
   /// `sched` is stepping, if any (with none, a bare evaluator's: its steps only).
@@ -98,8 +103,31 @@ public:
   /// Post the outcome of an external call that has been settled; thread-safe.
   void finish(const std::shared_ptr<async_call> &call);
 
+  /// What finishes this host's calls from work that answers on a thread of its own and may do so
+  /// after the host is gone (an async_work's start: a transport's callback). Take it while the
+  /// host is up (make_finisher) and keep it with the work instead of the host. Its finish() posts
+  /// a settled call's outcome as finish() does, but under the host's lock and only while the host
+  /// has not begun to shut down: the host's shutdown waits for a post under way, and a call
+  /// answered from then on touches neither the host nor the scheduler it posts to (shutdown
+  /// cancelled the call; its outcome is dropped). Copyable; thread-safe, but not from inside the
+  /// call's on_cancel hook, which the shutdown runs under the same lock: a work checks
+  /// cancel_requested() before it settles and finishes.
+  class finisher {
+  public:
+    finisher() = default;
+    /// Post `call`'s outcome, settled already; false (nothing posted) once the host stopped.
+    bool finish(const std::shared_ptr<async_call> &call) const;
+
+  private:
+    friend class async_host;
+    explicit finisher(std::shared_ptr<shared_state> state) : state_(std::move(state)) {}
+    std::shared_ptr<shared_state> state_;
+  };
+  finisher make_finisher() const { return finisher(state_); }
+
 private:
-  struct shared_state;
+  // A finisher's finish(): the post, under the state's lock, unless the host stopped.
+  static bool finish_unless_stopped(shared_state &state, const std::shared_ptr<async_call> &call);
   // What an executor runs for a threaded call (run_kernel), and what ends the call if the
   // executor destroys it unrun instead.
   struct kernel_task;
