@@ -2363,3 +2363,28 @@ TEST(AsyncCalls, AnotherSchedulersInlineFutureIsItsValue) {
   EXPECT_EQ(brief_run(b, "(msg-recv (foreign))"), "10");
   EXPECT_EQ(brief_run(b, "(next (generator (lambda () (yield (await (foreign))))))"), "10");
 }
+
+// S1-Q2 (R1-mid S-m10): await-all checks the owner of every future in its list before it waits for
+// any entry, so a list holding another scheduler's future raises at once, even behind an entry of
+// B's own that is still running: an async call's future, or a channel's.
+TEST(AsyncCalls, AwaitAllRefusesAForeignFutureBeforeItWaits) {
+  world a(async_sched);
+  world b(async_sched);
+  value_t fut;
+  register_publish(a, fut);
+  register_channel_fns(b);
+  builtins::register_fn(b.env, "foreign", [&fut](std::span<const value_t>) { return fut; });
+  const int maker = a.submit("(begin (set f (publish (slow-op-async 1 30000))) (await f))");
+  ASSERT_TRUE(a.pump([&] { return a.waiting(maker) && is_async_future(fut); }));
+
+  for (const std::string own : {"(slow-op-async 1 30000)", "(chan-future \"c\")"}) {
+    SCOPED_TRACE(own);
+    EXPECT_EQ(brief_run(b, "(try (await-all (list " + own +
+                               " (foreign))) (catch (RuntimeError e) (get-attr e \"message\")))"),
+              kForeignFutureError);
+  }
+  EXPECT_EQ(b.p.ended, 0); // B's own call never finished, so nothing waited for it
+  EXPECT_EQ(a.async->async_calls_in_flight(), 1u);
+  EXPECT_EQ(a.info(maker).status, process_status::waiting);
+  a.async->kill(maker);
+}

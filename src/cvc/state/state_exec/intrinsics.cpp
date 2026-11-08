@@ -1087,6 +1087,12 @@ value_t intrinsic_await_all(intrinsics_context *ctx, std::span<const value_t> ar
     throw dsl_error("TypeError",
                     "await-all: expected a list of futures, got " + args[0].type_name());
   const std::vector<value_t> &items = **lp;
+  // Every future's owner first (S1-Q2): a list holding another scheduler's future raises before
+  // the call waits for, or parks on, any entry.
+  for (const value_t &f : items)
+    if (is_async_future(f))
+      if (const std::shared_ptr<detail::awaitable> call = async_call_of_future(f))
+        check_future_owner(ctx, *call);
   const int pid = ctx->sched->current_pid();
   const bool parkable = pid >= 0 && can_await();
   for (std::size_t i = 0; i < items.size(); ++i) {
@@ -1113,7 +1119,6 @@ value_t intrinsic_await_all(intrinsics_context *ctx, std::span<const value_t> ar
       throw dsl_error("RuntimeError",
                       "await-all: a call can't resume (its future was restored from a snapshot)",
                       "async");
-    check_future_owner(ctx, *call);
     if (call->finished())
       continue;
     // The first one still running: wait for it, then look at the list again.
