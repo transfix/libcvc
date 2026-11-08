@@ -8,7 +8,9 @@
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/scheduler.h>
 #include <cvc/state/state_exec/state_value_codec.h> // snapshot / restore
+#include <cvc/state/state_exec/stdlib.h>            // random_stream_scope
 #include <iterator>
+#include <optional>
 #include <stdexcept>
 #include <thread>
 
@@ -22,8 +24,6 @@ scheduler::scheduler(scheduling_policy policy)
     : policy_(policy), evaluator_(builtins::make_default_environment()),
       procs_(policy != scheduling_policy::round_robin), idle_(std::make_shared<detail::wakeup>()) {}
 
-// Stage 1 interfaces: stubs. S1.1 binds the registry and the stream on every entry; until then
-// they are stored and unused.
 void scheduler::set_cycle_registry(cycle_registry *r) { registry_ = r; }
 
 void scheduler::set_random_stream(random_stream *s) { random_ = s; }
@@ -53,6 +53,22 @@ bool scheduler::pumped_elsewhere() const noexcept {
 }
 
 namespace {
+// S1.1, as async_scheduler's: a scheduler given a registry or a random stream binds what it was
+// given on each entry that can run DSL or track, once per call; a bare one binds nothing.
+class entry_binding {
+public:
+  entry_binding(cycle_registry *r, random_stream *s) {
+    if (r)
+      registry_.emplace(r);
+    if (s)
+      random_.emplace(s);
+  }
+
+private:
+  std::optional<cycle_registry_scope> registry_;
+  std::optional<random_stream_scope> random_;
+};
+
 // S1-Q4 (td 4.1), as async_scheduler's: debug builds, or CVC_EXEC_VERIFY=1 (read once), abort on a
 // public mutator called while another thread pumps.
 #ifdef NDEBUG
@@ -531,9 +547,14 @@ scheduler::clock::time_point scheduler::now_for_step() {
 void scheduler::execute_process_step(const process_ptr &pp) {
   process &proc = *pp;
   // Between steps: free the reference cycles programs leaked, once enough piled up (heap.h).
-  // Checked every 64 steps: the check reads thread-local state.
-  if ((++cycle_check_ & 63) == 0 && cycle_collection_due()) {
-    collect_cycles();
+  // Checked every 64 steps: the check reads the registry's counters. A scheduler given a registry
+  // names it (S1.1), else the thread's own is used.
+  if ((++cycle_check_ & 63) == 0 &&
+      (registry_ ? cycle_collection_due(*registry_) : cycle_collection_due())) {
+    if (registry_)
+      collect_cycles(*registry_);
+    else
+      collect_cycles();
     chain_valid_ = false;
   }
 
@@ -696,6 +717,7 @@ void scheduler::execute_process_step(const process_ptr &pp) {
 }
 
 int scheduler::step() {
+  const entry_binding bound(registry_, random_);
   chain_valid_ = false; // called from outside a run: what ran since the last step is no step's
   return step_once();
 }
@@ -758,6 +780,7 @@ std::unordered_map<int, value_t> scheduler::run(std::optional<uint64_t> max_step
 }
 
 uint64_t scheduler::run_steps(std::optional<uint64_t> max_steps, std::optional<double> max_time) {
+  const entry_binding bound(registry_, random_);
   // A stop() from before this run is discarded. The clear comes before the release that
   // publishes the run, so a stop() made once is_running() reads true is seen (td B17).
   stop_requested_.store(false, std::memory_order_relaxed);
@@ -1251,7 +1274,11 @@ void scheduler::fail_process(process &proc, value_t exc, std::exception_ptr orig
 }
 
 void scheduler::release_if_idle(process &proc) {
-  note_process_exit(); // what it leaked is garbage now (heap.h)
+  // What it leaked is garbage now (heap.h): noted in this scheduler's registry when it has one.
+  if (registry_)
+    note_process_exit(*registry_);
+  else
+    note_process_exit();
   // A process stepping right now (one that killed itself) is released once its step is over.
   if (proc.pid != current_pid_)
     proc.release_state();
@@ -1403,6 +1430,7 @@ bool scheduler::kill(int pid) {
 
 int scheduler::restore(process_ptr proc) {
   verify_pump_owner(*this, "scheduler::restore");
+  const entry_binding bound(registry_, random_);
   // A stack that holds a lock (a lock_body with its hold, or a lock_enter woken with a grant)
   // can't be restored: no snapshot makes one, and its hold is no restored process's (protocol
   // 5.11; LW-12).
@@ -1444,6 +1472,7 @@ bool scheduler::snapshot(int pid, cvc::state &node) const {
 
 int scheduler::restore(cvc::state &node, environment_ptr natives) {
   verify_pump_owner(*this, "scheduler::restore");
+  const entry_binding bound(registry_, random_); // the decode tracks class scopes
   process_ptr proc = decode_process(node);
   rebind_natives(proc->state, natives);
   return restore(std::move(proc));

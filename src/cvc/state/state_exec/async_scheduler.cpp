@@ -10,8 +10,10 @@
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/scheduler.h>         // max_alloc_bytes_from_state
 #include <cvc/state/state_exec/state_value_codec.h> // snapshot / restore
+#include <cvc/state/state_exec/stdlib.h>            // random_stream_scope
 #include <exception>
 #include <iterator>
+#include <optional>
 #include <stdexcept>
 #include <thread>
 
@@ -26,12 +28,14 @@ async_scheduler::async_scheduler(scheduling_policy policy)
       procs_(policy != scheduling_policy::round_robin),
       wakeup_(std::make_shared<detail::wakeup>()) {}
 
-// Stage 1 interfaces: a stub, the one-argument constructor's scheduler. S1.3 extends `base`.
-async_scheduler::async_scheduler(scheduling_policy policy, environment_ptr)
-    : async_scheduler(policy) {}
+// A group's scheduler (S1.3): its global environment is its own scope over `base`, so what is bound
+// there (environment::set_existing binds in the outermost unfrozen scope) never reaches `base`,
+// which may be frozen and shared (the builtins).
+async_scheduler::async_scheduler(scheduling_policy policy, environment_ptr base)
+    : policy_(policy), evaluator_(environment::extend(std::move(base))),
+      procs_(policy != scheduling_policy::round_robin),
+      wakeup_(std::make_shared<detail::wakeup>()) {}
 
-// Stage 1 interfaces: stubs. S1.1 binds the registry and the stream on every entry; until then
-// they are stored and unused.
 void async_scheduler::set_cycle_registry(cycle_registry *r) { registry_ = r; }
 
 void async_scheduler::set_random_stream(random_stream *s) { random_ = s; }
@@ -79,6 +83,23 @@ bool async_scheduler::pumped_elsewhere() const noexcept {
 }
 
 namespace {
+// S1.1: a scheduler given a registry or a random stream binds what it was given on each entry
+// that can run DSL or track, one store and one restore per call (never per step); a bare one binds
+// nothing, as before. What it was not given stays as the caller bound it.
+class entry_binding {
+public:
+  entry_binding(cycle_registry *r, random_stream *s) {
+    if (r)
+      registry_.emplace(r);
+    if (s)
+      random_.emplace(s);
+  }
+
+private:
+  std::optional<cycle_registry_scope> registry_;
+  std::optional<random_stream_scope> random_;
+};
+
 // S1-Q4 (td 4.1): debug builds, or CVC_EXEC_VERIFY=1 (read once, as the library loads), check the
 // pump owner's rule in the public mutators. A call while another thread pumps is a host's race:
 // it aborts.
@@ -375,9 +396,14 @@ async_scheduler::clock::time_point async_scheduler::now_for_step() {
 void async_scheduler::execute_process_step(const process_ptr &pp) {
   process &proc = *pp;
   // Between steps: free the reference cycles programs leaked, once enough piled up (heap.h).
-  // Checked every 64 steps: the check reads thread-local state.
-  if ((++cycle_check_ & 63) == 0 && cycle_collection_due()) {
-    collect_cycles();
+  // Checked every 64 steps: the check reads the registry's counters. A scheduler given a registry
+  // names it (S1.1), else the thread's own is used.
+  if ((++cycle_check_ & 63) == 0 &&
+      (registry_ ? cycle_collection_due(*registry_) : cycle_collection_due())) {
+    if (registry_)
+      collect_cycles(*registry_);
+    else
+      collect_cycles();
     chain_valid_ = false;
   }
 
@@ -649,12 +675,14 @@ int async_scheduler::step_once() {
 }
 
 task<int> async_scheduler::step() {
+  const entry_binding bound(registry_, random_);
   chain_valid_ = false;
   co_return step_once();
 }
 
 uint64_t async_scheduler::run_loop(std::optional<uint64_t> max_steps,
                                    std::optional<double> max_time) {
+  const entry_binding bound(registry_, random_);
   // As the sync scheduler's run (td B17): a stop() from before this run is discarded, and one
   // made once is_running() reads true is seen.
   stop_requested_.store(false, std::memory_order_relaxed);
@@ -687,6 +715,10 @@ uint64_t async_scheduler::run_loop(std::optional<uint64_t> max_steps,
     taken += static_cast<uint64_t>(step_once());
     ++steps;
   }
+  // The idle collection (S1.1): a group's registry is collected only by its own steps, and an idle
+  // group takes none, so a run that leaves nothing runnable collects when one is due.
+  if (registry_ && !has_runnable() && cycle_collection_due(*registry_))
+    collect_cycles(*registry_);
   return taken;
 }
 
@@ -697,6 +729,7 @@ task<std::unordered_map<int, value_t>> async_scheduler::run(std::optional<uint64
 }
 
 int async_scheduler::sync_step() {
+  const entry_binding bound(registry_, random_);
   chain_valid_ = false;
   return step_once();
 }
@@ -825,6 +858,7 @@ bool async_scheduler::yield_frame(int pid) {
 }
 
 int async_scheduler::wake_awaiting() {
+  const entry_binding bound(registry_, random_);
   std::vector<process *> list;
   list.swap(woken_);
   procs_.take_awaiting(list);
@@ -933,6 +967,7 @@ void async_scheduler::post_message(const std::string &path, const value_t &msg) 
 
 void async_scheduler::drain_ingress() {
   detail::check_not_in_async_kernel("async_scheduler::drain_ingress");
+  const entry_binding bound(registry_, random_);
   // What a step does first: deliver the posts, finish the settled calls, charge the ones still
   // running, and wake the sleepers and timed waits that are due ((await f seconds)), so a driver
   // that only drains while nothing is runnable still sees them.
@@ -1240,6 +1275,7 @@ void async_scheduler::set_watch_root(cvc::state *root, boost::shared_ptr<cvc::st
 
 int async_scheduler::restore(process_ptr proc) {
   verify_pump_owner(*this, "async_scheduler::restore");
+  const entry_binding bound(registry_, random_);
   // A stack that holds a lock (a lock_body with its hold, or a lock_enter woken with a grant)
   // can't be restored: no snapshot makes one, and its hold is no restored process's (protocol
   // 5.11; LW-12).
@@ -1555,7 +1591,12 @@ void async_scheduler::fail_process(process &proc, value_t exc, std::exception_pt
 }
 
 void async_scheduler::release_if_idle(process &proc) {
-  note_process_exit(); // what it leaked is garbage now (heap.h)
+  // What it leaked is garbage now (heap.h): noted in this scheduler's registry when it has one
+  // (S1.1), so a host's kill(pid) between pumps notes the group's, not the host thread's.
+  if (registry_)
+    note_process_exit(*registry_);
+  else
+    note_process_exit();
   // A process stepping right now (one that killed itself) is released once its step is over.
   if (proc.pid != current_pid_)
     proc.release_state();
@@ -1644,6 +1685,7 @@ bool async_scheduler::snapshot(int pid, cvc::state &node) const {
 
 int async_scheduler::restore(cvc::state &node, environment_ptr natives) {
   verify_pump_owner(*this, "async_scheduler::restore");
+  const entry_binding bound(registry_, random_); // the decode tracks class scopes
   process_ptr proc = decode_process(node);
   rebind_natives(proc->state, natives);
   return restore(std::move(proc));
