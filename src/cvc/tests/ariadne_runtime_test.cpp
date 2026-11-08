@@ -1217,6 +1217,45 @@ TEST(AriadneIsolatedDocs, ALaterDocumentThatIsNotEligibleMovesToGroupZero) {
   EXPECT_EQ(se::detail::live_groups(&app), 0u);
 }
 
+// R1b-mid S-M2: a thread-affine prefix declared ABOVE the document's prefix makes its group host:
+// a write under the document emits childChanged on every ancestor, so the subscriber connected
+// there runs on whichever thread writes. Under CVC_EXEC_FORCE_MOVE an `any` group would run it on a
+// worker too.
+TEST(AriadneIsolatedDocs, AThreadAffinePrefixAboveTheDocumentMakesItHost) {
+  namespace se = cvc::state_exec;
+  isolated_env_var force("CVC_EXEC_FORCE_MOVE", "1");
+  cvc::app app;
+  isolate_documents(app, 2);
+  clear_action_intrinsics();
+  isolated_providers_cleared cleared;
+  cvc::state &root = cvc::state::instance(app);
+  root("scene.doc").value(std::string(""));
+  const std::thread::id frame_thread = std::this_thread::get_id();
+  std::mutex mu;
+  std::set<std::thread::id> slot_threads;
+  boost::signals2::scoped_connection conn =
+      root("scene").childChanged.connect([&](const std::string &) {
+        std::lock_guard<std::mutex> lock(mu);
+        slot_threads.insert(std::this_thread::get_id());
+      });
+  Runtime rt(app, "scene.doc");
+  rt.declare_thread_affine_prefix("scene"); // the host's render-thread subscriber sits at "scene"
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_channel_policy({}, {}, true, true);
+  rt.set_root(group({text("c")}));
+  rt.set_tick_program("(state-incr \"n\")");
+  se::exec_group *g = rt.isolated_group();
+  ASSERT_NE(g, nullptr) << rt.isolation_reason();
+  for (int f = 0; f < 20; ++f)
+    isolated_frame(app, rt);
+  std::lock_guard<std::mutex> lock(mu);
+  std::printf("the slot at 'scene' ran on %zu thread(s); n = %s\n", slot_threads.size(),
+              isolated_value(app, "scene.doc.n").c_str());
+  EXPECT_EQ(g->opts().affinity, se::group_affinity::host);
+  EXPECT_EQ(slot_threads, std::set<std::thread::id>{frame_thread});
+}
+
 // §4.6 input seam: set_key_program submits a resident that receives events posted via post_input,
 // reading the delivered event dict with (get-attr event ...). post_input BEFORE drain -> delivered
 // this frame (feed-before-drain contract). Keyboard events feed the key resident.

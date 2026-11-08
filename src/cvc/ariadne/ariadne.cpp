@@ -3546,8 +3546,9 @@ std::string Runtime::Impl::isolation_verdict(bool &host_affinity) const {
   // subscriber at or under its prefix (S1.11), or when a host_only provider binds anything in its
   // env, which an `any` group would leave out.
   for (const std::string &p : thread_affine_)
-    if (p == prefix || p.rfind(inside, 0) == 0)
-      host_affinity = true;
+    if (p == prefix || p.rfind(inside, 0) == 0 || p.empty() ||
+        prefix.rfind(p + cvc::state::SEPARATOR, 0) == 0) // at, under or above: a write under the
+      host_affinity = true; // document emits childChanged on every ancestor (S-M2)
   if (!host_affinity)
     host_affinity = host_only_bindings();
   return std::string();

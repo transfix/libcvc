@@ -195,9 +195,9 @@ public:
   // scene work, warnings and frame hooks come after drain_end(). drain() is both.
   void drain_begin();
   void drain_end();
-  // Declare that a subscriber this host connected under `prefix` must run on the host thread
-  // (STATE_EXEC_THREADED.md 4.8). A document whose prefix is or contains a declared one is never
-  // pumped on a worker. Call before load().
+  // Declare that a subscriber this host connected at or under `prefix` must run on the host thread
+  // (STATE_EXEC_THREADED.md 4.8). A document whose prefix is at, above or under a declared one is
+  // never pumped on a worker (a write emits childChanged on every ancestor). Call before load().
   void declare_thread_affine_prefix(const std::string &prefix);
   // Wait, without cancelling anything, until no async kernel of this document is queued or
   // running: on the app's host, and on its own group's when the document is isolated. Host thread,
