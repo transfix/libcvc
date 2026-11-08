@@ -376,7 +376,10 @@ using ActionIntrinsicProvider = std::function<void(
 void register_action_intrinsics(ActionIntrinsicProvider provider);
 // The same, with the kind of every native the provider registers (STATE_EXEC_THREADED.md 4.9): an
 // isolated document's group installs them by it. A provider installed in an `any` group must also
-// have a registration body safe to run on a worker, since a spawned child runs it there.
+// have a registration body safe to run on a worker, since a spawned child runs it there. A
+// host_proxied provider binds synchronous natives only (an async one would run its kernel inline on
+// the caller, uncharged). What a provider binds that is not a native is made fresh for each env, or
+// is immutable: two groups' programs must never share a mutable value.
 void register_action_intrinsics(ActionIntrinsicProvider provider,
                                 cvc::state_exec::provider_affinity affinity);
 // Remove all registered providers (a host tears down before its captured context dies; also for

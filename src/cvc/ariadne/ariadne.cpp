@@ -287,7 +287,9 @@ bool has_widget_type(const std::string &type) {
 // the init lane, but on the pumping thread for a spawned child, which is a worker in an `any`
 // group. So a provider an `any` group runs (`any` or `host_proxied`) has a thread-safe body.
 // A `host_proxied` provider binds synchronous natives: an async one, so wrapped, would run its
-// kernel inline on the caller (its host has no running process there), uncharged.
+// kernel inline on the caller (its host has no running process there), uncharged. What a provider
+// binds that is not a native goes into the env as it is, so it is made fresh for each env or is
+// immutable (c-m7): two groups' programs must never share a mutable value.
 namespace {
 namespace se_reg = cvc::state_exec;
 struct registered_provider {

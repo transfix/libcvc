@@ -112,8 +112,9 @@ public:
   // - (name-async) returns a future for (await f);
   // - the work is charged to the calling action's budget (ariadne.limits.action_max_steps and
   //   action_max_time).
-  // With a `done_channel`, the result is also posted there. That keeps documents that wait with
-  // (msg-recv "done_channel") working: the old nav_compute pattern.
+  // With a `done_channel`, the result is also posted there, to the calling program's group (group
+  // 0 from init:). That keeps documents that wait with (msg-recv "done_channel") working: the old
+  // nav_compute pattern.
   void register_verb(const std::string &name, std::function<void()> fn);
   void register_async_verb(const std::string &name, std::function<std::string()> work);
   void register_async_verb(const std::string &name, const std::string &done_channel,
