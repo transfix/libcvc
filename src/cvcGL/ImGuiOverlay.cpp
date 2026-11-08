@@ -214,6 +214,11 @@ EM_JS(int, cvcgl_ime_take, (const char *sel, int *out, int cap), {
 });
 // clang-format on
 #endif
+#ifdef CVC_IMGUI_FREETYPE
+#include <misc/freetype/imgui_freetype.h> // FreeType: colour glyphs (cvcpkg imgui 1.92.9+cvc.4)
+#endif
+#include "UiFonts.h" // where the fallback fonts are
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -246,6 +251,7 @@ std::string g_uiFontPath;
 const void *g_uiFontMem = nullptr;
 int g_uiFontMemLen = 0;
 bool g_uiFontMemCompressed = false;
+bool g_uiFontFallbacks = true; // FreeType and the fallback fonts (setUiFontFallbacks)
 
 // Set once ImGui's OpenGL backend has failed to initialise on a current context. Process-wide on
 // purpose: it mirrors the state of imgui's GL loader, which is itself process-global, and after
@@ -284,10 +290,11 @@ std::string find_system_font() {
   return std::string();
 }
 
-// Load the UI font in priority order (memory -> path -> $CVC_UI_FONT -> system),
-// falling back to the scalable ASCII face. An unfound/unloadable font is a logged
-// fallback, never a failure. size_pixels 0 => sized from FontSizeBase at draw time.
-void load_ui_font(ImGuiIO &io) {
+// The UI font in priority order (memory -> path -> $CVC_UI_FONT -> system -> the bundled DejaVu
+// Sans Mono), falling back to the scalable ASCII face. An unfound/unloadable font is a logged
+// fallback, never a failure. size_pixels 0 => sized from FontSizeBase at draw time. Returns the
+// file it loaded ("" for memory or the ASCII face).
+std::string load_main_font(ImGuiIO &io) {
   if (g_uiFontMem && g_uiFontMemLen > 0) {
     ImFont *f = nullptr;
     if (g_uiFontMemCompressed) {
@@ -300,7 +307,7 @@ void load_ui_font(ImGuiIO &io) {
     }
     if (f) {
       std::fprintf(stderr, "cvcGL: UI font <in-memory, %d bytes>\n", g_uiFontMemLen);
-      return;
+      return std::string();
     }
     std::fprintf(stderr, "cvcGL: in-memory UI font failed to load — trying a path/system font\n");
   }
@@ -311,17 +318,64 @@ void load_ui_font(ImGuiIO &io) {
       path = e;
   if (path.empty())
     path = find_system_font();
+  if (path.empty()) // a browser build, or a system with none of the fonts above
+    path = detail::bundled_ui_font("DejaVuSansMono.ttf");
 
   if (!path.empty()) {
     if (io.Fonts->AddFontFromFileTTF(path.c_str(), 0.0f)) {
       std::fprintf(stderr, "cvcGL: UI font %s\n", path.c_str());
-      return;
+      return path;
     }
     std::fprintf(stderr, "cvcGL: could not load UI font '%s' — using the ASCII face\n",
                  path.c_str());
   }
 
   io.Fonts->AddFontDefaultVector(); // ASCII-only fallback (Basic Latin)
+  return std::string();
+}
+
+// Merge `path` under the UI font: its glyphs show where the UI font has none. `colour`: draw its
+// colour glyphs (COLR, CBDT, sbix), which FreeType does.
+void merge_font(ImGuiIO &io, const std::string &path, bool colour) {
+  ImFontConfig cfg;
+  cfg.MergeMode = true;
+#ifdef CVC_IMGUI_FREETYPE
+  if (colour)
+    cfg.FontLoaderFlags |= ImGuiFreeTypeLoaderFlags_LoadColor;
+#else
+  (void)colour;
+#endif
+  if (io.Fonts->AddFontFromFileTTF(path.c_str(), 0.0f, &cfg))
+    std::fprintf(stderr, "cvcGL: fallback font %s\n", path.c_str());
+  else
+    std::fprintf(stderr, "cvcGL: could not load fallback font '%s'\n", path.c_str());
+}
+
+// The UI font, then (setUiFontFallbacks) the fonts it falls back on, merged under it:
+//   - DejaVu Sans Mono's arrows, symbols and box drawing (↩ ⇄ ♥ …), which most UI fonts lack;
+//   - emoji in colour: the bundled Twemoji, else the system's colour emoji font. Only where ImGui
+//     draws with FreeType (CVC_IMGUI_FREETYPE): stb_truetype draws no colour glyph, and an emoji
+//     font's are colour glyphs.
+// ImGui then rasterises everything with FreeType: a font source can't take another loader than
+// the atlas's (imgui 1.92), and FreeType is the one that draws colour.
+void load_ui_font(ImGuiIO &io) {
+#ifdef CVC_IMGUI_FREETYPE
+  if (g_uiFontFallbacks)
+    io.Fonts->SetFontLoader(ImGuiFreeType::GetFontLoader());
+#endif
+  const std::string main = load_main_font(io);
+  if (!g_uiFontFallbacks)
+    return;
+  const std::string symbols = detail::bundled_ui_font("DejaVuSansMono.ttf");
+  if (!symbols.empty() && symbols != main)
+    merge_font(io, symbols, false);
+#ifdef CVC_IMGUI_FREETYPE
+  std::string emoji = detail::bundled_ui_font("Twemoji.Mozilla.ttf");
+  if (emoji.empty())
+    emoji = detail::system_emoji_font();
+  if (!emoji.empty())
+    merge_font(io, emoji, true);
+#endif
 }
 
 // Every pointer/wheel event we route through ImGui before VTK's style sees it.
@@ -1075,6 +1129,10 @@ bool ImGuiOverlay::wantsKeyboard() const {
 
 void ImGuiOverlay::setUiFontPath(const std::string &ttfPath) { g_uiFontPath = ttfPath; }
 
+void ImGuiOverlay::setUiFontFallbacks(bool on) { g_uiFontFallbacks = on; }
+
+void ImGuiOverlay::loadUiFonts(ImGuiIO &io) { load_ui_font(io); }
+
 void ImGuiOverlay::setUiFontMemory(const void *ttf, int len, bool compressed) {
   g_uiFontMem = ttf;
   g_uiFontMemLen = len;
@@ -1094,6 +1152,8 @@ struct ImGuiOverlay::Impl {};
 ImGuiOverlay::ImGuiOverlay(SceneRenderer &) : m_impl(new Impl) {}
 ImGuiOverlay::~ImGuiOverlay() = default;
 void ImGuiOverlay::setUiFontPath(const std::string &) {}
+void ImGuiOverlay::setUiFontFallbacks(bool) {}
+void ImGuiOverlay::loadUiFonts(ImGuiIO &) {}
 void ImGuiOverlay::setUiFontMemory(const void *, int, bool) {}
 void ImGuiOverlay::setDrawCallback(std::function<void()>) {}
 void ImGuiOverlay::setSceneDrawCallback(std::function<void()>) {}
