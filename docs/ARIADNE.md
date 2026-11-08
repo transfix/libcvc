@@ -839,9 +839,10 @@ and stays within one rung of each neighbour; skirts hung from the edges two chun
 seam. The chunks share the node's one texture and take its `casts_shadow`, `shader:` and
 `material:` keys. Physics, nav and `ground:` read the full terrain. The roads shape that terrain
 rather than lie on it (`cvc::world::road_grade`): each is level across, climbs at most 12% (5% into
-a junction), changes grade gradually and stays above the water, with the ground cut or banked to
-it, so a vehicle drives them without bouncing; every street is two Humvee lanes wide, drawn as
-smooth strips with a dark yellow centre stripe. The water is a surface per terrain chunk with any
+a junction), changes grade gradually and stays above the water, keeping to a gentle hill and cutting
+through a steep one, with the ground cut or banked to it, so a vehicle drives them without
+bouncing; every street is two Humvee lanes wide, drawn as smooth strips with a dark yellow centre
+stripe. The water is a surface per terrain chunk with any
 under it (`<id>_water`), level at the water line and hidden by the terrain past the shoreline, on
 its chunk's LOD rung, coloured by the depth under it (`cvc::world::water_colour`: the bed absorbed
 red first, so the shallows read sandy, then green, then deep blue); `water: 0` leaves it out.
@@ -864,6 +865,8 @@ scene:
   lights:
     - light: sun
       rig: three_point
+      sun: true                 # the key a directional sun over the whole world, not a spot whose
+                                #   cone ends in a circle on a large ground (aimed by the focus)
       back: 0
       wash: 0                   # or { intensity, count, height }; 0 drops the downlight ring
   nodes:

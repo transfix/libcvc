@@ -65,6 +65,7 @@ struct StageLighting::Impl {
   double ambient = 0.22;
   double envI = 0.30;
   double warmth = 0.35;
+  bool sun = false; // the key and back directional, the fill and environment far off
 
   bool gizmos = false;
   bool applying = false; // re-entry guard, see apply()
@@ -123,6 +124,7 @@ void StageLighting::seedState() {
   getState("ambient").value(s.ambient);
   getState("env_intensity").value(s.envI);
   getState("warm_key").value(s.warmth);
+  getState("sun").value(s.sun ? 1 : 0);
   getState("show_gizmos").value(s.gizmos ? 1 : 0);
   getState("gizmo_beam_alpha").value(s.beamAlpha);
   getState("stage_x").value(s.cx);
@@ -147,6 +149,7 @@ void StageLighting::readAllFromState() {
     s.ambient = getState("ambient").value<double>();
     s.envI = getState("env_intensity").value<double>();
     s.warmth = getState("warm_key").value<double>();
+    s.sun = getState("sun").value<int>() != 0;
     s.gizmos = getState("show_gizmos").value<int>() != 0;
     s.beamAlpha = getState("gizmo_beam_alpha").value<double>();
     s.cx = getState("stage_x").value<double>();
@@ -331,6 +334,16 @@ void StageLighting::setWarmth(double amount) {
   getState("warm_key").value(m_impl->warmth);
   apply();
 }
+
+void StageLighting::setSun(bool on) {
+  m_impl->sun = on;
+  {
+    cvc::state_init_scope<StageLighting> quiet(*this); // see setStage
+    getState("sun").value(on ? 1 : 0);
+  }
+  apply();
+}
+bool StageLighting::sun() const { return m_impl->sun; }
 
 int StageLighting::addSpecial(double x, double y, double z, double tx, double ty, double tz,
                               double coneDeg, double intensity, double r, double g, double b) {
@@ -644,6 +657,9 @@ void StageLighting::apply() {
   // still lands mostly on it. 2.2 radii is a good compromise for the default
   // 32-degree key (tan(32) * 2.2R ~= 1.4R of coverage).
   const double dist = 2.2 * R;
+  // Under the sun the fill and the environment stand far off, so they fall as evenly over a world
+  // as the sun does instead of lighting it from a point beside the stage.
+  const double fillDist = s.sun ? std::max(dist, 60.0 * R) : dist;
 
   // Warm key / cool fill — the standard filmic split, scaled by `warmth`.
   const double w = s.warmth;
@@ -677,8 +693,13 @@ void StageLighting::apply() {
       return;
     double x, y, z;
     orbitPoint(s.cx, s.cy, s.cz, dist, az, el, x, y, z);
-    makeLight(name, cvc::gl::LightNode::Kind::Spot, x, y, z, s.cx, s.cy, s.cz, cone, r, g, b,
-              intensity);
+    // Under the sun, a directional light from the same bearing: no cone, so no edge to its light
+    // on a world wider than the stage (the gizmo still marks where the spot would hang).
+    makeLight(name, s.sun ? cvc::gl::LightNode::Kind::Directional : cvc::gl::LightNode::Kind::Spot,
+              x, y, z, s.cx, s.cy, s.cz, cone, r, g, b, intensity);
+    if (s.sun)
+      if (auto ln = std::dynamic_pointer_cast<cvc::gl::LightNode>(s.scene->getGraphics(name)))
+        ln->setDirection(az, el);
   };
 
   // Same placement as spot(), but Kind::Fill — a positional light whose cone is
@@ -690,7 +711,7 @@ void StageLighting::apply() {
     if (intensity <= 0.0)
       return;
     double x, y, z;
-    orbitPoint(s.cx, s.cy, s.cz, dist, az, el, x, y, z);
+    orbitPoint(s.cx, s.cy, s.cz, fillDist, az, el, x, y, z);
     makeLight(name, cvc::gl::LightNode::Kind::Fill, x, y, z, s.cx, s.cy, s.cz, cone, r, g, b,
               intensity);
   };
@@ -731,8 +752,8 @@ void StageLighting::apply() {
   // ENVIRONMENT — one wide, shadow-free fill from high above, so water and
   // scenery outside the cones still receive light (and so still show specular).
   if (s.envI > 0.0)
-    makeLight("stage_env", cvc::gl::LightNode::Kind::Fill, s.cx, s.cy, s.cz + 3.0 * R, s.cx, s.cy,
-              s.cz, 95.0, 0.92, 0.95, 1.0, s.envI);
+    makeLight("stage_env", cvc::gl::LightNode::Kind::Fill, s.cx, s.cy,
+              s.cz + (s.sun ? fillDist : 3.0 * R), s.cx, s.cy, s.cz, 95.0, 0.92, 0.95, 1.0, s.envI);
 
   // SPECIALS — placed and aimed by the caller.
   int specialIdx = -1;

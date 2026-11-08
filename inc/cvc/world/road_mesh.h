@@ -50,13 +50,15 @@ struct road_mesh_params {
   int pad_segments = 12;     // rim vertices of a junction pad (higher = rounder)
   double pad_lift = 0.02;    // a pad sits this far above the strips it covers
   int smooth_passes = 2;     // corner-cutting passes rounding each road's bends (0: the segments)
+  double sample_step = 4.0;  // the ground is sampled at least this often along a road (0: only at
+                             // its vertices), so a long straight follows the ground under it
   bool centerline = true;    // a centre stripe on each road at least this wide:
   double centerline_min_width = 4.5;             // (metres)
   double centerline_width = 0.15;                // the stripe's width
   double centerline_lift = 0.03;                 // above the road surface
   double centerline_rgb[3] = {0.62, 0.47, 0.10}; // dark yellow
-  double arterial_rgb[3] = {0.24, 0.24, 0.26}; // asphalt colour for major roads
-  double local_rgb[3] = {0.32, 0.32, 0.34};    // ... and for local streets (a shade lighter)
+  double arterial_rgb[3] = {0.24, 0.24, 0.26};   // asphalt colour for major roads
+  double local_rgb[3] = {0.32, 0.32, 0.34};      // ... and for local streets (a shade lighter)
 };
 
 // Extrude the network into a road-surface mesh (see the file header). `height` places the surface

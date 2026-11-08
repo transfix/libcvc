@@ -1460,8 +1460,12 @@ struct world_builder::impl {
         gp.water_level = p.water_level_m;
         gp.flat_margin = std::max(1.0, 0.75 * w.terrain->dx()); // a mesh cell past each edge
         const std::shared_ptr<const terrain_source> base = w.model->terrain_ptr();
-        std::vector<double> z = grade_road_profile(streets.roads, *base, gp);
-        graded = std::make_shared<const graded_terrain>(base, streets.roads, std::move(z), gp);
+        // Graded on nodes about a mesh cell and a half apart: a larger world's streets have
+        // segments tens of metres long, and a segment's surface is straight, so it would bridge a
+        // dip or cut a hill whole.
+        road_network dense = subdivide_roads(streets.roads, std::max(5.0, 1.5 * w.terrain->dx()));
+        std::vector<double> z = grade_road_profile(dense, *base, gp);
+        graded = std::make_shared<const graded_terrain>(base, std::move(dense), std::move(z), gp);
         w.model = std::make_shared<const world_model>(w.model->with_terrain(graded));
         regradeRaster(*graded, p, w.raster, w.grid, w.model->registry());
         heights = w.terrain->heights();

@@ -9,7 +9,7 @@
 
 #ifndef _WIN32
 
-#include "ipc_socket_path.h" // a socket path short enough for sun_path
+#include "ipc_socket_path.h"
 
 #include <atomic>
 #include <chrono>

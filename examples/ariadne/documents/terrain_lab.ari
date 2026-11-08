@@ -113,8 +113,11 @@ scene:
     # The afternoon sun: low in the west-southwest and warm, the key and the one shadow caster; a
     # cool fill keeps the shade from going black; no back light or wash. The fill, the environment
     # and the ambient are kept low so the sun carries the light: building and cloud shadows read.
+    # `sun: true` makes the key a directional sun over the whole world: as a spot its cone ended in a
+    # circle of shade on a large world zoomed out. The shadow focus above aims its map.
     - light: sun
       rig: three_point
+      sun: true
       stage: { center: [0, 0, 25], radius: 850 }
       key: { intensity: 1.3, azimuth: -60, elevation: 28, cone: 62 }
       fill: 0.15

@@ -8,7 +8,7 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-#include "ipc_socket_path.h" // a socket path short enough for sun_path
+#include "ipc_socket_path.h"
 
 #include <chrono>
 #include <cvc/core/app.h>
