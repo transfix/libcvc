@@ -233,6 +233,11 @@ const process_ptr &scheduler::no_process() {
 
 namespace detail {
 
+std::uint64_t next_scheduler_serial() noexcept {
+  static std::atomic<std::uint64_t> next{1}; // 0 is an awaitable's "no owner"
+  return next.fetch_add(1, std::memory_order_relaxed);
+}
+
 std::optional<std::string> setting_value(cvc::state &root, const std::string &path) {
   const cvc::state::state_ptr node =
       root.findDescendantShared(cvc::state::state_ptr(cvc::state::state_ptr(), &root), path);

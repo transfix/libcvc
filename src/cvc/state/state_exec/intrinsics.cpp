@@ -11,8 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/state/state.h>
-#include <cvc/state/state_exec/async_host.h>      // async calls' futures, for await/await-all
-#include <cvc/state/state_exec/async_scheduler.h> // a future's owner, against ctx->sched
+#include <cvc/state/state_exec/async_host.h> // async calls' futures, for await/await-all
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/data_job.h>
 #include <cvc/state/state_exec/detail/lock_home.h>
@@ -993,9 +992,11 @@ void park_await(intrinsics_context *ctx, int pid, const std::string &channel,
 // S1-Q2 (td 4.9): a threaded future is finished by the scheduler its completion is posted to, so
 // awaiting it from another one raises, before anything reads, parks on or waits for the call. An
 // inline future (no owner) was settled before it returned: a plain value any scheduler may read.
+// Owners are compared by serial, not address: a host can keep a future after its scheduler is
+// gone, and a later scheduler can sit at the freed address (R1-mid C-m13).
 void check_future_owner(const intrinsics_context *ctx, const detail::awaitable &call) {
-  const async_scheduler *owner = call.owner();
-  if (owner && static_cast<const scheduler_base *>(owner) != ctx->sched)
+  const std::uint64_t owner = call.owner_serial();
+  if (owner != 0 && owner != ctx->sched->serial())
     throw dsl_error("RuntimeError", kForeignFutureError, "async");
 }
 
@@ -1087,6 +1088,12 @@ value_t intrinsic_await_all(intrinsics_context *ctx, std::span<const value_t> ar
     throw dsl_error("TypeError",
                     "await-all: expected a list of futures, got " + args[0].type_name());
   const std::vector<value_t> &items = **lp;
+  // Every future's owner first (S1-Q2): a list holding another scheduler's future raises before
+  // the call waits for, or parks on, any entry.
+  for (const value_t &f : items)
+    if (is_async_future(f))
+      if (const std::shared_ptr<detail::awaitable> call = async_call_of_future(f))
+        check_future_owner(ctx, *call);
   const int pid = ctx->sched->current_pid();
   const bool parkable = pid >= 0 && can_await();
   for (std::size_t i = 0; i < items.size(); ++i) {
@@ -1113,7 +1120,6 @@ value_t intrinsic_await_all(intrinsics_context *ctx, std::span<const value_t> ar
       throw dsl_error("RuntimeError",
                       "await-all: a call can't resume (its future was restored from a snapshot)",
                       "async");
-    check_future_owner(ctx, *call);
     if (call->finished())
       continue;
     // The first one still running: wait for it, then look at the list again.

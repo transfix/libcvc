@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdio>
 #include <cvc/core/app.h>
 #include <cvc/core/async_lane.h>
@@ -29,11 +30,13 @@
 #include <gtest/gtest.h>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace cvc::state_exec;
@@ -2362,4 +2365,131 @@ TEST(AsyncCalls, AnotherSchedulersInlineFutureIsItsValue) {
   EXPECT_EQ(brief_run(b, "(await-all (list 7 (foreign)))"), "(7 10)");
   EXPECT_EQ(brief_run(b, "(msg-recv (foreign))"), "10");
   EXPECT_EQ(brief_run(b, "(next (generator (lambda () (yield (await (foreign))))))"), "10");
+}
+
+// S1-Q2 (R1-mid S-m10): await-all checks the owner of every future in its list before it waits for
+// any entry, so a list holding another scheduler's future raises at once, even behind an entry of
+// B's own that is still running: an async call's future, or a channel's.
+TEST(AsyncCalls, AwaitAllRefusesAForeignFutureBeforeItWaits) {
+  world a(async_sched);
+  world b(async_sched);
+  value_t fut;
+  register_publish(a, fut);
+  register_channel_fns(b);
+  builtins::register_fn(b.env, "foreign", [&fut](std::span<const value_t>) { return fut; });
+  const int maker = a.submit("(begin (set f (publish (slow-op-async 1 30000))) (await f))");
+  ASSERT_TRUE(a.pump([&] { return a.waiting(maker) && is_async_future(fut); }));
+
+  for (const std::string own : {"(slow-op-async 1 30000)", "(chan-future \"c\")"}) {
+    SCOPED_TRACE(own);
+    EXPECT_EQ(brief_run(b, "(try (await-all (list " + own +
+                               " (foreign))) (catch (RuntimeError e) (get-attr e \"message\")))"),
+              kForeignFutureError);
+  }
+  EXPECT_EQ(b.p.ended, 0); // B's own call never finished, so nothing waited for it
+  EXPECT_EQ(a.async->async_calls_in_flight(), 1u);
+  EXPECT_EQ(a.info(maker).status, process_status::waiting);
+  a.async->kill(maker);
+}
+
+namespace {
+
+// Storage that holds one async_scheduler, then another at the same address.
+struct reused_storage {
+  alignas(async_scheduler) std::byte bytes[sizeof(async_scheduler)];
+  async_scheduler *live = nullptr;
+  async_scheduler &make() {
+    live = new (bytes) async_scheduler();
+    return *live;
+  }
+  void destroy() {
+    if (live)
+      std::exchange(live, nullptr)->~async_scheduler();
+  }
+  ~reused_storage() { destroy(); }
+};
+
+} // namespace
+
+// S1-Q2 (R1-mid C-m13): the check compares the owner's serial, not its address. A host keeps a
+// threaded future of scheduler A past A's end, its completion never drained, and a new scheduler
+// B is built in A's storage, at A's address. A process of B awaiting the future raises, instead of
+// B finishing a call it never made and handing a gone group's result to the program.
+TEST(AsyncCalls, AFutureOfAGoneSchedulerRaisesAtItsAddress) {
+  cvc::app app;
+  cvc::state &tree = cvc::state::instance(app);
+  std::atomic<bool> release{false};
+  intrinsics_context actx, bctx;
+  environment_ptr aenv = builtins::make_default_environment();
+  environment_ptr benv = builtins::make_default_environment();
+  value_t fut;
+  const auto storage = std::make_unique<reused_storage>();
+
+  async_scheduler &a = storage->make();
+  a.set_watch_root(&tree);
+  auto host = std::make_unique<async_host>(a, &app); // dies before A
+  actx.sched = &a;
+  actx.root = &tree;
+  actx.proc = make_process();
+  register_intrinsics(aenv, &actx);
+  builtins::register_fn(aenv, "publish", [&fut](std::span<const value_t> v) -> value_t {
+    fut = v[0];
+    return v[0];
+  });
+  register_async_fn(aenv, *host, "held", [&release](std::span<const value_t>) -> async_kernel {
+    return [&release](async_call &call) -> value_t {
+      while (!release.load() && !call.cancelled())
+        std::this_thread::sleep_for(1ms);
+      return value_t(int64_t{42});
+    };
+  });
+  execute_options aopts = one_step_a_call();
+  aopts.env = aenv;
+  const int maker =
+      a.execute(std::string("(begin (set f (publish (held-async))) (await f))"), aopts);
+  const auto start = clock_type::now();
+  while (seconds_since(start) < 15.0 &&
+         !(is_async_future(fut) && a.get_process_info(maker)->status == process_status::waiting)) {
+    a.drain_ingress();
+    a.sync_run(100000, 0.02);
+  }
+  ASSERT_TRUE(is_async_future(fut));
+  const std::shared_ptr<detail::awaitable> call = async_call_of_future(fut);
+  ASSERT_NE(call, nullptr);
+  release = true;
+  host->wait_idle(); // settled and posted to A's ingress, which nothing drains
+  ASSERT_TRUE(call->finished());
+  const void *const a_address = &a;
+  const std::uint64_t a_serial = a.serial();
+  EXPECT_EQ(call->owner_serial(), a_serial);
+  host.reset();
+  storage->destroy();
+
+  async_scheduler &b = storage->make();
+  ASSERT_EQ(static_cast<const void *>(&b), a_address);
+  EXPECT_NE(b.serial(), a_serial);
+  b.set_watch_root(&tree);
+  bctx.sched = &b;
+  bctx.root = &tree;
+  bctx.proc = make_process();
+  register_intrinsics(benv, &bctx);
+  builtins::register_fn(benv, "foreign", [&fut](std::span<const value_t>) { return fut; });
+  for (const char *form :
+       {R"((try (await (foreign)) (catch (RuntimeError e) (get-attr e "message"))))",
+        R"((try (await-all (list (foreign))) (catch (RuntimeError e) (get-attr e "message"))))",
+        R"((try (msg-recv (foreign)) (catch (RuntimeError e) (get-attr e "message"))))"}) {
+    SCOPED_TRACE(form);
+    execute_options bopts;
+    bopts.env = benv;
+    const int pid = b.execute(std::string(form), bopts);
+    const auto t0 = clock_type::now();
+    while (seconds_since(t0) < 5.0 && !is_finished(b.get_process_info(pid)->status)) {
+      b.drain_ingress();
+      b.sync_run(100000, 0.02);
+    }
+    const std::optional<value_t> r = b.get_result(pid);
+    ASSERT_TRUE(r.has_value()) << b.get_exit_error(pid).value_or("no result");
+    EXPECT_EQ(show(*r), kForeignFutureError);
+    EXPECT_EQ(b.get_process_info(pid)->async_steps, 0u);
+  }
 }
