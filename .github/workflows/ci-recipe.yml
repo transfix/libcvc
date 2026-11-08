@@ -25,7 +25,7 @@ name: CI (recipe-first)
 #   * Deps are always installed with --config release: the catalog's debug
 #     coverage is partial, and a Debug libcvc links the Release, ABI-stable
 #     shared deps fine on Linux/macOS (same policy as publish-cvcpkg.yml's
-#     fetch-libcvc-deps step). Windows Debug is excluded outright — Debug
+#     fetch-cvcpkg step). Windows Debug is excluded outright — Debug
 #     libcvc against Release MSVC deps is a CRT mismatch.
 #   * The smoke-test binary needs the prefix's lib dir on the loader path:
 #     ELF RUNPATH is not transitive, and `cvcpkg build` installs libcvc.so

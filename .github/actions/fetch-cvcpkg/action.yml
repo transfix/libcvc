@@ -1,4 +1,4 @@
-name: 'Fetch libcvc-deps'
+name: 'Fetch cvcpkg'
 description: |
   Installs libcvc-deps component bundles into a CMake-ready prefix.
 
@@ -108,7 +108,7 @@ runs:
         config=$(echo "${LCD_BUILD_TYPE}" | tr '[:upper:]' '[:lower:]')
 
         if [ ! -e "${LCD_RECIPE}" ]; then
-          echo "fetch-libcvc-deps: recipe path not found: ${LCD_RECIPE}"
+          echo "fetch-cvcpkg: recipe path not found: ${LCD_RECIPE}"
           echo "path=" >> "$GITHUB_OUTPUT"
           exit 0
         fi
@@ -121,13 +121,13 @@ runs:
           --config "$config"
           --link "${LCD_LINK}"
         )
-        echo "fetch-libcvc-deps: ${cmd[*]}"
+        echo "fetch-cvcpkg: ${cmd[*]}"
         if "${cmd[@]}"; then
-          echo "fetch-libcvc-deps: installed to $prefix"
+          echo "fetch-cvcpkg: installed to $prefix"
           ls "$prefix" | head -20 || true
           echo "path=$prefix" >> "$GITHUB_OUTPUT"
         else
-          echo "fetch-libcvc-deps: install failed; falling back."
+          echo "fetch-cvcpkg: install failed; falling back."
           echo "path=" >> "$GITHUB_OUTPUT"
           exit 0
         fi
