@@ -805,8 +805,11 @@ TEST(AppExecPool, ABusyGroupZeroDoesNotStarveFrameGroups) {
 }
 
 // N1: the other direction. Two frame groups that each fill a frame, pumped on the caller
-// (threads 0, or host affinity), do not starve group 0: group 0 takes steps at least every other
-// frame, and both frame groups keep running.
+// (threads 0, or host affinity), do not starve group 0: of the k caller-pumped units (group 0 and
+// the two frame groups) each starts at least once in k frames, so group 0 never goes more than
+// k - 1 frames without a step, and both frame groups keep running. On a fast build group 0 also
+// fits beside one of them and runs every other frame; on a slow one (Debug, sanitizers) every unit
+// fills its frame and they take turns. Before N1's fix group 0 took no step for 11 frames running.
 TEST(AppExecPool, TwoBusyFrameGroupsDoNotStarveGroupZero) {
   struct cfg {
     unsigned threads;
@@ -858,7 +861,8 @@ TEST(AppExecPool, TwoBusyFrameGroupsDoNotStarveGroupZero) {
     }
     std::cout << "threads " << c.threads << ": group 0 ticks per frame: " << per_frame
               << "; spins A " << spins_a.load() << ", B " << spins_b.load() << "\n";
-    EXPECT_LE(longest_without, 1) << "threads " << c.threads << ": group 0 starved";
+    constexpr int kCallerUnits = 3; // group 0 and the two frame groups
+    EXPECT_LE(longest_without, kCallerUnits - 1) << "threads " << c.threads << ": group 0 starved";
     EXPECT_GT(spins_a.load(), 0) << "threads " << c.threads;
     EXPECT_GT(spins_b.load(), 0) << "threads " << c.threads;
     ha.reset();
