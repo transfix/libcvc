@@ -86,8 +86,9 @@ public:
   // Unlike a fire-once action `on:`, this submits ONE long-lived, owner-tagged process on the
   // app-wide scheduler that PARKS between frames (it never re-submits per frame); each drain()
   // posts it a tick to run the program once. Pass a LoadResult::on_tick_script here after loading.
-  // "" clears it (kills the resident). The resident is reaped with the Runtime (kill_owner on
-  // teardown).
+  // "" clears it (kills and reaps the resident). The resident is reaped with the Runtime
+  // (kill_owner on teardown). Host thread, outside a pump; like the other lanes' programs and the
+  // channel policy, it is read by the isolation rules, so the placement is decided again.
   void set_tick_program(std::string script);
 
   // §4.6 document-level input handlers — register a state_exec PROGRAM run per input event. Like

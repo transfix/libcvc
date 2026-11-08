@@ -9095,6 +9095,28 @@ TEST(AriadneHazards, HZ08_ForkedChildKeepsOwnerAndTeardownReapsIt) {
   EXPECT_FALSE(app.exec_scheduler().get_process_info(action).has_value()); // reaped too
 }
 
+// R1b-mid s-m1 (S1-Q8): a resident a reload stops (set_tick_program, as AppRuntime::load calls it)
+// is killed and reaped then, so nothing of the Runtime's owner is left in group 0 after teardown.
+TEST(AriadneHazards, AResidentAReloadStopsIsReaped) {
+  cvc::app app;
+  {
+    Runtime rt(app, "docs.reload");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    rt.set_tick_program("(msg-recv \"never\")");
+    for (int i = 0; i < 3; ++i)
+      rt.drain();
+    rt.set_tick_program("(msg-recv \"never.again\")"); // a reload's set_tick_program
+    for (int i = 0; i < 3; ++i)
+      rt.drain();
+    EXPECT_EQ(app.exec_scheduler().list_processes().size(), 1u); // the new resident only
+  }
+  const auto procs = app.exec_scheduler().list_processes();
+  for (const auto &p : procs)
+    std::printf("left: pid %d status %d\n", p.pid, static_cast<int>(p.status));
+  EXPECT_EQ(procs.size(), 0u) << "a process of the torn-down Runtime's owner is left in group 0";
+}
+
 // --- Stage 1b Ariadne (td 8.2) ---
 //
 // Threaded Stage 1b's Ariadne cases (S1.md section 4; td 8.5, 8.6): one pump of group 0 a frame for

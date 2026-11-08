@@ -3905,8 +3905,11 @@ void Runtime::Impl::retire_if_stopped(cvc::state_exec::async_scheduler &sched, R
 }
 
 void Runtime::Impl::stop_resident(Resident &r) {
-  if (r.pid >= 0)
-    current_sched().kill(r.pid);
+  if (r.pid >= 0) { // killed and reaped (S1-Q8): its record goes with it, on a reload too
+    cvc::state_exec::async_scheduler &sched = current_sched();
+    sched.kill(r.pid);
+    sched.reap(r.pid);
+  }
   r = Resident{};
 }
 
