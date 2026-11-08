@@ -1715,8 +1715,11 @@ jobs:
           # clang's TSan (S1-Q9), with the runner's preinstalled clang. clang links its TSan
           # runtime into each executable, and run.sh preloads the shared one, libclang_rt.tsan,
           # into the interpreter. Its own lines are Stage 1a's only.
+          # --gcc-install-dir: gcc 13's libstdc++, the gcc legs' own, not the newer 14 clang would
+          # pick, whose C++20 std::pair checks its explicit default constructor on instantiation
+          # and so rejects pair<std::string, T> inside T (ariadne::Value, net::json_lite::Value).
           - name: clang-tsan
-            flags: -fsanitize=thread
+            flags: -fsanitize=thread --gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/13
             cc: clang
             cxx: clang++
             cxx_tests: >-
@@ -1890,6 +1893,9 @@ jobs:
             clang -fsanitize=thread "$RUNNER_TEMP/tsan_check.c" -o "$RUNNER_TEMP/tsan_check"
           fi
           "$RUNNER_TEMP/tsan_check"
+          # The leg's --gcc-install-dir must name an installed gcc 13 (its libstdc++).
+          test -d /usr/lib/gcc/x86_64-linux-gnu/13 ||
+            { echo "::error::/usr/lib/gcc/x86_64-linux-gnu/13 is missing"; exit 1; }
 
       # RelWithDebInfo, for line numbers in the reports. CUDA, OpenMP and cvcGL are off: nothing
       # under test uses them, and libgomp's uninstrumented barriers would only add TSan noise.
