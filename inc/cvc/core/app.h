@@ -640,8 +640,8 @@ public:
   // outside a pump. cvc::pump_exec_frame (async_lane.h) is another driver of exec_scheduler(),
   // which does not advance the generation.
   void exec_pump_frame();
-  // How many exec_pump_frame() calls have finished: Ariadne's drain_end() skips its own pump when
-  // it moved since its drain_begin().
+  // How many exec_pump_frame() calls have finished. (Stage 1b: Ariadne's drain_end() will skip its
+  // own pump when it moved since its drain_begin(); neither exists yet.)
   std::uint64_t exec_pump_generation() const;
   // Have exec_pump_frame() pump `group` until the handle goes. The group must outlive the handle.
   frame_group_handle register_frame_group(cvc::state_exec::exec_group &group);
