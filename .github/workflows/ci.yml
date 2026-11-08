@@ -373,6 +373,8 @@ jobs:
                    src/cvc/image inc/cvc/image src/cvc/tests/image_magick_roundtrip.cpp \
                    src/cvc/state inc/cvc/state src/cvc/tests/state_exec_wasm_smoke.cpp \
                    src/cvc/core/app.cpp inc/cvc/core/app.h \
+                   src/cvc/core/exec_pool.cpp inc/cvc/core/exec_pool.h \
+                   src/cvc/core/cpu_placement.cpp inc/cvc/core/cpu_placement.h \
                    cvcpkg/recipes/libcvc \
                    .github/workflows/ci.yml | grep -q .; then
               run=false
@@ -1534,7 +1536,8 @@ jobs:
   # Threaded execution's Stage 1a (groups and the fork-join pool; S1.md sections 5 and S1.15) adds
   # exec_pool_test (state_exec_groups_test and test_pycvc_exec_pool.py came with its interface
   # commit), and SAN_BENCH runs mt.groups at t=8 groups=8: eight groups on the app's exec_pool,
-  # pumped by seven workers and the caller through fib, raises and closure cycles. A third leg,
+  # pumped by up to seven workers (the pool clamps to hardware_concurrency() - 1: three on a 4-vCPU
+  # runner) and the caller through fib, raises and closure cycles. A third leg,
   # clang-tsan, builds with the runner's own clang (S1-Q9; td 8.7's TS-1) and runs, under clang's
   # TSan, Stage 1a's binaries, the hazards binary, the async, scheduler and lock binaries,
   # mt.groups and the pycvc scripts. Every Stage 1a case (the groups, the pool, the pycvc pool and
@@ -1751,8 +1754,9 @@ jobs:
         mt.multi_exec --size t=8 --size runs=1
         mt.groups --size t=8 --size groups=8 --size runs=1
       # Stage 1a's required lines (the matrix's `required` format), the same in every leg: each
-      # case of state_exec_groups_test and exec_pool_test, K's pycvc pool cases, Y's ExecPool and
-      # pump-owner cases, and mt.groups' points.
+      # case of state_exec_groups_test and exec_pool_test (a case added to either adds its line),
+      # KO-1 and KO-2, the foreign-future cases of state_exec_async_calls_test, K's pycvc pool
+      # cases, Y's ExecPool, registry and pump-owner cases, and mt.groups' points.
       SAN_REQUIRED_S1A: |
         state_exec_groups_test: OK ] Groups.RX01_AnOptedInThreadsCyclesAreCollectedWhenItEnds
         state_exec_groups_test: OK ] Groups.RX02_AHostKillNotesTheSchedulersRegistry
@@ -1802,6 +1806,20 @@ jobs:
         exec_pool_test: OK ] AppExecPool.TheTreeSizesThePool
         exec_pool_test: OK ] AppExecPool.PumpFramePumpsGroupZeroAndFrameGroupsAndAdvances
         exec_pool_test: OK ] AppExecPool.GroupsAndTheAppSchedulerShareOnePidSource
+        exec_pool_test: OK ] ExecPool.SingleManagerGroupsStayOnTheCaller
+        exec_pool_test: OK ] AppExecPool.ABusyGroupZeroDoesNotStarveFrameGroups
+        exec_pool_test: OK ] ExecGroup.WantsPumpCountsAFrameWaiter
+        exec_pool_test: OK ] ExecPool.ThreadedCallbacksRunAfterTheJoinWithTheirRegistry
+        exec_pool_test: OK ] ExecGroup.ExecuteDefaultsTheOwner
+        exec_pool_test: OK ] AppExecPool.DeterministicModeSeedsGroupZero
+        exec_pool_test: OK ] ExecGroupDeathTest.DestroyedFromInsideItsOwnPumpAborts
+        exec_pool_test: OK ] ExecPool.FailedGroupsAreTheCallersOwn
+        state_exec_async_test: OK ] AsyncScheduler.KO01_KillOwnerSurvivesSlotsThatReapAndSubmit
+        state_exec_async_test: OK ] AsyncScheduler.KO02_AThrowingKillDoesNotStopTheRest
+        state_exec_async_calls_test: OK ] AsyncCalls.AnotherSchedulersThreadedFutureRaises
+        state_exec_async_calls_test: OK ] AsyncCalls.AnotherSchedulersInlineFutureIsItsValue
+        state_exec_async_calls_test: OK ] AsyncCalls.AwaitAllRefusesAForeignFutureBeforeItWaits
+        state_exec_async_calls_test: OK ] AsyncCalls.AFutureOfAGoneSchedulerRaisesAtItsAddress
         test_pycvc_exec_pool.py: ok: test_ar04_run_all
         test_pycvc_exec_pool.py: ok: test_is02_in_a_pooled_exec
         test_pycvc_exec_pool.py: ok: test_gr05_exec_from_short_lived_threads
@@ -1810,8 +1828,12 @@ jobs:
         test_pycvc_exec.py: ok: test_exec_pool_order_async_and_first_failure
         test_pycvc_exec.py: ok: test_exec_pool_idle_limit
         test_pycvc_exec.py: ok: test_exec_pool_close_and_calls_during_a_batch
+        test_pycvc_exec.py: ok: test_exec_pool_frame_yields_keep_a_program_alive
+        test_pycvc_exec.py: ok: test_exec_pool_size_follows_the_pools_threads
+        test_pycvc_exec.py: ok: test_exec_collect_cycles_collects_its_registry
         test_pycvc_state_exec_locks.py: ok: test_po_pump_calls_refused_while_run_pumps
         test_pycvc_state_exec_locks.py: ok: test_po_raw_pump_call_holds_the_owner
+        test_pycvc_state_exec_locks.py: ok: test_po_run_holds_the_owner_until_it_returns
         mt.groups: t=8 groups=8 prog=fib runs=1
         mt.groups: t=8 groups=8 prog=exceptions runs=1
         mt.groups: t=8 groups=8 prog=cycle runs=1

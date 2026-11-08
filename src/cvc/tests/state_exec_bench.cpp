@@ -582,9 +582,35 @@ cpu_set_t single_cpu(int cpu) {
 }
 #endif
 
-// Pin the calling (driver) thread with the library's placement (cvc/core/cpu_placement.h), which
-// the exec_pool places its workers with. `auto` is a performance core off the core logical CPU 0
-// sits on, where most interrupts land. Returns the logical CPU it is pinned to, or -1.
+// `--pin auto`'s CPU: the rule this bench has always had, so the base and candidate binaries of an
+// A/B pin the same CPU: of the CPUs in the highest efficiency class, the first by index off the
+// core logical CPU 0 is on (where most interrupts land), else the first. Not the library's
+// pin_current_thread(-1), whose CPU is the one the exec_pool keeps for its caller. -1 when the
+// platform says nothing (on Linux, no CPU is in a faster class: no cpu_capacity, no cpu_core list).
+int auto_cpu(const std::vector<cvc::logical_cpu> &cpus) {
+  unsigned best = 0;
+  int core0 = -1;
+  for (const cvc::logical_cpu &c : cpus) {
+    best = std::max(best, c.efficiency);
+    if (c.index == 0)
+      core0 = c.core;
+  }
+#if defined(__linux__)
+  if (best == 0)
+    return -1;
+#endif
+  for (const cvc::logical_cpu &c : cpus)
+    if (c.efficiency == best && (core0 < 0 || c.core != core0))
+      return c.index;
+  for (const cvc::logical_cpu &c : cpus)
+    if (c.efficiency == best)
+      return c.index;
+  return -1;
+}
+
+// Pin the calling (driver) thread through the library's placement (cvc/core/cpu_placement.h),
+// which the exec_pool places its workers with, on auto_cpu's CPU or the one given. Returns the
+// logical CPU it is pinned to, or -1.
 int pin_driver(const std::string &mode) {
   pin_state &ps = pinning();
   std::string &how = ps.how;
@@ -601,9 +627,14 @@ int pin_driver(const std::string &mode) {
       return -1;
     }
   }
+  const bool automatic = cpu < 0;
 #if defined(_WIN32)
   if (cpu >= 64) {
     how = "cpu beyond processor group 0";
+    return -1;
+  }
+  if (automatic && (cpu = auto_cpu(cvc::logical_cpus())) < 0) {
+    how = "auto: no CPU set information";
     return -1;
   }
 #elif defined(__linux__)
@@ -613,17 +644,13 @@ int pin_driver(const std::string &mode) {
   }
   ps.have_orig = true;
   std::string source = "explicit";
-  if (cpu < 0) {
-    // Where the kernel names no faster class (no cpu_capacity, no hybrid cpu_core list), the
-    // library puts every CPU in class 0, and auto pins nothing.
+  if (automatic) {
     const std::vector<cvc::logical_cpu> cpus = cvc::logical_cpus();
-    if (std::all_of(cpus.begin(), cpus.end(),
-                    [](const cvc::logical_cpu &c) { return c.efficiency == 0; })) {
+    if ((cpu = auto_cpu(cpus)) < 0) {
       how = "auto: no cpu_capacity or cpu_core list (not pinned)";
       return -1;
     }
-    std::ifstream f("/sys/devices/system/cpu/cpu" + std::to_string(cpus.front().index) +
-                    "/cpu_capacity");
+    std::ifstream f("/sys/devices/system/cpu/cpu" + std::to_string(cpu) + "/cpu_capacity");
     long capacity = -1;
     source = f >> capacity ? "auto: highest cpu_capacity" : "auto: cpu_core (hybrid P-cores)";
   }
@@ -634,26 +661,31 @@ int pin_driver(const std::string &mode) {
 #if defined(__linux__)
   how = source + (r.cpu < 0 ? " (sched_setaffinity failed)" : ""); // the words it always had
 #else
-  how = r.how;
+  // An explicit CPU to the library: auto's words are the bench's own.
+  how = automatic && r.how.rfind("explicit:", 0) == 0 ? "auto:" + r.how.substr(9) : r.how;
 #endif
   return ps.cpu;
 }
 
 // While alive, the calling thread runs on the process's whole mask, so threads it starts don't
-// inherit the driver's pin (Linux; a no-op elsewhere, where they don't).
+// inherit the driver's pin (Linux; a no-op elsewhere, where they don't). It then gives the thread
+// back the mask it found: a driver unpinned for its point (driver_unpinned_for_point) stays so.
 struct unpinned_scope {
   bool active = false;
+#if defined(__linux__)
+  cpu_set_t found{};
+#endif
   unpinned_scope() {
 #if defined(__linux__)
     const pin_state &ps = pinning();
-    if (ps.cpu >= 0 && ps.have_orig)
+    if (ps.cpu >= 0 && ps.have_orig && sched_getaffinity(0, sizeof found, &found) == 0)
       active = set_thread_mask(0, ps.orig);
 #endif
   }
   ~unpinned_scope() {
 #if defined(__linux__)
     if (active)
-      set_thread_mask(0, single_cpu(pinning().cpu));
+      set_thread_mask(0, found);
 #endif
   }
   unpinned_scope(const unpinned_scope &) = delete;
@@ -4154,10 +4186,12 @@ constexpr se::pump_budget kGroupSlice{2000000, 0.05};
 // group of the app (so threads above 0 make its lock manager shared and the workers pump, S1-Q1)
 // and before any rep's meter, under unpinned_scope (a Linux worker inherits its creator's mask and
 // reads the CPUs it places itself on from it). The pool puts worker i on
-// placement_cpus(performance)[i - 1]. A driver pinned by --pin (auto: that list's first CPU) would
-// share worker 1's CPU, so for the point the caller moves to the list's next CPU after the
-// workers' when there is one, and back after; an unpinned driver (spawns_threads on Linux, --pin
-// none) stays unpinned.
+// placement_cpus(performance)[i - 1], and keeps the list's last CPU, a performance core off CPU
+// 0's, for its caller (cpu_placement.h). A driver pinned by --pin (auto's CPU, the bench's own
+// rule, can be worker 1's) moves there for the point when no worker takes it, and back after, so
+// at every t the caller, the reference runs and mt.independent's thread 0 run on one CPU of the
+// workers' class that no worker shares. An unpinned driver (spawns_threads on Linux, --pin none)
+// stays unpinned.
 struct pool_point {
   cvc::exec_pool &pool;
   int caller_cpu = -1; // where the caller pumps for the point, or -1: floating
@@ -4166,9 +4200,9 @@ struct pool_point {
   pool_point(cvc::app &app, unsigned workers, point_ctx &pc) : pool(build(app, workers)) {
     home = caller_cpu = pc.pin_cpu;
     const std::vector<cvc::logical_cpu> cpus = cvc::placement_cpus(cvc::cpu_set::performance);
-    if (home >= 0 && pool.threads() < cpus.size() && cpus[pool.threads()].index != home) {
+    if (home >= 0 && pool.threads() < cpus.size() && cpus.back().index != home) {
       moved = true;
-      const int to = cpus[pool.threads()].index;
+      const int to = cpus.back().index;
       caller_cpu = cvc::pin_current_thread(to).cpu >= 0 ? to : home;
     }
     pc.pin_cpu = caller_cpu;
