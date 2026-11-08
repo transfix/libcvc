@@ -493,6 +493,27 @@ def test_exec_pool_frame_yields_keep_a_program_alive():
             pool.close()
 
 
+def test_exec_pool_frame_waiters_wait_for_the_frame():
+    # A program yielding a frame at a time waits for each next frame, at most about 1 ms, as
+    # Exec.run makes it, instead of being pumped again at once (the R1 skeptic's N2): over a fixed
+    # wall time its frame count stays far below a busy loop's (about 200000 a second here), at
+    # threads 0 and 2. The ceiling allows one frame each 0.2 ms; the beat gives about 300.
+    prog = ('(begin (set n 0) (set t0 (now)) (while (< (- (now) t0) 0.3) (begin (await 0) '
+            "(set n (+ n 1)))) n)")
+    ex = pycvc.Exec(pycvc.make_app())
+    ex.register_fn("now", time.monotonic)
+    print(f"  Exec.run: {ex.run(prog)} frames in 0.3 s")
+    for threads in (0, 2):
+        pool = pycvc.ExecPool(pycvc.make_app(), threads=threads, size=1)
+        try:
+            pool.register_fn("now", time.monotonic)
+            frames = int(pool.run_all([prog])[0])
+            print(f"  ExecPool(threads={threads}): {frames} frames in 0.3 s")
+            assert 0 < frames <= 1500, (threads, frames)
+        finally:
+            pool.close()
+
+
 def test_exec_pool_size_follows_the_pools_threads():
     # size defaults to the app pool's real thread count, at least 1, not to a request the pool
     # did not apply (R1-mid S-m11): here the pool was built at 0, so a later threads=4 gets one

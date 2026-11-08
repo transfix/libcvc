@@ -1284,7 +1284,8 @@ std::vector<Exec::batch_outcome> Exec::run_batch(cvc::exec_pool &pool, std::span
   static constexpr uint64_t kSliceSteps = 2000000;
   static constexpr double kSliceSeconds = 0.05;
   // With nothing runnable, the wait on one parked group, rotating, so that a completion posted to
-  // any group is seen within about this long (S1.12; Stage 2's eventcount replaces it).
+  // any group is seen within about this long (S1.12; Stage 2's eventcount replaces it). It is
+  // also the frame beat, run()'s 1 ms: a process awaiting the next frame gets one per round.
   static constexpr auto kIdleBeat = std::chrono::milliseconds(1);
   std::vector<batch_outcome> out(programs.size());
   struct slot {
@@ -1452,18 +1453,23 @@ std::vector<Exec::batch_outcome> Exec::run_batch(cvc::exec_pool &pool, std::span
           runnable = settle(s) || runnable;
       if (runnable)
         continue;
+      // Pump again at once only for what a pump would do now: a runnable process, or
+      // (wait_for_work's checks) pending ingress, a lock post, a timer due or a call to charge. A
+      // process waiting for the next frame ((await v)) waits for it, at most kIdleBeat, as run()
+      // makes it; wants_pump() counts it, and pumping it at once would spin a core (R1, N2).
       bool work = false;
       clock::time_point until = clock::now() + kIdleBeat;
       std::size_t parked = 0;
       for (slot &s : slots)
         if (s.pid >= 0) {
-          work = work || s.impl->group->wants_pump();
+          async_scheduler &sched = s.impl->sched;
+          work = work || sched.has_runnable() || sched.wait_for_work(clock::time_point::min());
           until = std::min(until, s.idle_deadline);
           ++parked;
         }
       if (work || parked == 0)
         continue;
-      // Nothing to pump: wait on one parked group, the next each time.
+      // Nothing to pump yet: wait on one parked group, the next each time.
       std::size_t k = rotate++ % parked;
       for (slot &s : slots)
         if (s.pid >= 0 && k-- == 0) {
