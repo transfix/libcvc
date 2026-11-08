@@ -14,6 +14,7 @@
 #include <functional>
 #include <memory>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace cvc {
@@ -106,6 +107,21 @@ public:
   // Tests (GR-9): take `seconds` as `group`'s last pump time, for the helper wake and the order.
   void set_last_pump_for_test(state_exec::exec_group &group, double seconds);
 
+  // pump_all with `host_first` run on the caller before anything else, as a host-affinity group's
+  // pump would be: app::exec_pump_frame() pumps group 0 (the app scheduler, which is no
+  // exec_group) with it, overlapping the workers. Its throw is rethrown after the join, as an
+  // on_complete callback's is.
+  void pump_all(std::span<state_exec::exec_group *const> groups,
+                const state_exec::pump_budget &budget,
+                std::chrono::steady_clock::time_point deadline,
+                const std::function<void()> &host_first);
+
+  // The options the pool was built with, before its clamps (threads() is what they came to).
+  const pool_options &options() const;
+  // What building the pool clamped, and the workers that failed to start, one line each, for its
+  // owner to log once (app::exec_pool() does); taken, so the next call returns none.
+  std::vector<std::string> take_notes();
+
 private:
   struct impl;
   std::unique_ptr<impl> impl_;
@@ -113,6 +129,22 @@ private:
 
 // Group pumps that ran on a worker of any pool, process-wide (AR-1).
 std::uint64_t exec_pool_worker_pumps_total();
+
+// What an exec_group uses of the pool it is pumped by (exec_group.cpp); not for hosts.
+namespace detail {
+// The pool whose worker the calling thread is, while it pumps a group for a pump_all; else null.
+// A host_proxied native queues its body there (run_on_host), and runs it inline anywhere else.
+exec_pool *worker_pool() noexcept;
+// While a worker pumps a group: queue `callback` (an on_complete call) for the pump_all's caller,
+// which runs it after the join, and return true. Anywhere else return false: run it inline.
+bool defer_on_complete(std::function<void()> callback);
+// Whether the calling thread is running a queued host_proxied body or a deferred on_complete
+// callback for a pump_all, where pump_all and destroying a group are refused (debug assertions).
+bool in_pool_callback() noexcept;
+// A group's teardown (S1.5): drop the group's entries from the host-call queue of the pump_all it
+// belongs to, unrun, waiting for one its caller is running now. Nothing when it belongs to none.
+void purge_host_calls(state_exec::exec_group &group) noexcept;
+} // namespace detail
 
 } // namespace cvc
 
