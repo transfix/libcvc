@@ -328,11 +328,38 @@ void VolumeNode::updateScalars(const std::vector<float> &data) {
     int dims[3];
     m_imageData->GetDimensions(dims);
     const size_t n = static_cast<size_t>(dims[0]) * dims[1] * dims[2];
-    if (n != data.size() || m_imageData->GetScalarType() != VTK_FLOAT)
+    if (n != data.size() || m_imageData->GetScalarType() != VTK_FLOAT ||
+        m_imageData->GetNumberOfScalarComponents() != 1)
       return; // dimensions/type must match the volume last set via setVolume()
     if (void *dst = m_imageData->GetScalarPointer())
       std::memcpy(dst, data.data(), n * sizeof(float));
     m_imageData->Modified(); // mapper re-uploads the changed field on next render
+  });
+}
+
+void VolumeNode::updateScalars(const std::vector<float> &colour,
+                               const std::vector<float> &opacity) {
+  if (!m_imageData || colour.empty() || colour.size() != opacity.size())
+    return;
+  runOnMainThread([this, colour, opacity]() { // by value, as the one-component refresh
+    int dims[3];
+    m_imageData->GetDimensions(dims);
+    const size_t n = static_cast<size_t>(dims[0]) * dims[1] * dims[2];
+    if (n != colour.size())
+      return;
+    if (m_imageData->GetScalarType() != VTK_FLOAT ||
+        m_imageData->GetNumberOfScalarComponents() != 2) {
+      m_imageData->AllocateScalars(VTK_FLOAT, 2); // keeps the dimensions, origin and spacing
+      m_volumeProperty->IndependentComponentsOff();
+    }
+    float *dst = static_cast<float *>(m_imageData->GetScalarPointer());
+    if (!dst)
+      return;
+    for (size_t k = 0; k < n; ++k) {
+      dst[2 * k] = colour[k];
+      dst[2 * k + 1] = opacity[k];
+    }
+    m_imageData->Modified();
   });
 }
 
@@ -404,6 +431,7 @@ void VolumeNode::updateImageData(const cvc::volume &vol) {
   m_imageData->SetSpacing(spacing);
   m_imageData->SetOrigin(origin);
   m_imageData->AllocateScalars(scalarType, 1);
+  m_volumeProperty->IndependentComponentsOn(); // one component (after a two-component refresh)
 
   // Copy voxel data
   void *vtkPtr = m_imageData->GetScalarPointer();

@@ -33,6 +33,7 @@
 #include <vector>
 #include <vtkAbstractVolumeMapper.h>
 #include <vtkDataSet.h>
+#include <vtkImageData.h>
 #include <vtkVolume.h>
 #include <vtkVolumeProperty.h>
 
@@ -256,6 +257,66 @@ void test_updatescalars_is_the_cheap_path() {
   std::printf("  ok: updateScalars ignores a voxel-count mismatch\n");
 }
 
+// Two values a voxel (VTK's dependent components): the first through the colour transfer function,
+// the second through the opacity one. The first two-component refresh turns the image into
+// 2-component float and independent components off; a one-component refresh then no longer
+// matches (an honest no-op), and setVolume goes back to one independent component.
+void test_two_component_refresh() {
+  cvc::app app;
+  SceneGraph sg(app);
+  const int M = 6;
+  const std::size_t NV = static_cast<std::size_t>(M) * M * M;
+  std::vector<float> f(NV, 0.5f);
+  cvc::volume v(app, reinterpret_cast<const unsigned char *>(f.data()), cvc::dimension(M, M, M),
+                cvc::Float, cvc::bounding_box(0, 0, 0, 1, 1, 1));
+  auto node = sg.addGraphics("two", v);
+  auto *vn = dynamic_cast<VolumeNode *>(node.get());
+  assert(vn != nullptr);
+  vn->setTransferFunction({0.0, 0.2, 0.3, 0.4, 1.0, 1.0, 1.0, 1.0}, {0.0, 0.0, 1.0, 0.5});
+  const auto color = vn->getTransferFunctionColorTable();
+  auto *vol = vtkVolume::SafeDownCast(vn->prop());
+  assert(vol && vol->GetProperty()->GetIndependentComponents());
+  auto image = [&]() { return vtkImageData::SafeDownCast(vol->GetMapper()->GetDataSetInput()); };
+  double origin0[3], spacing0[3];
+  image()->GetOrigin(origin0);
+  image()->GetSpacing(spacing0);
+
+  std::vector<float> light(NV), density(NV);
+  for (std::size_t k = 0; k < NV; ++k) {
+    light[k] = static_cast<float>(k % 7) / 7.0f;
+    density[k] = static_cast<float>(k % 5) / 5.0f;
+  }
+  vn->updateScalars(light, density);
+  vtkImageData *im = image();
+  assert(im->GetNumberOfScalarComponents() == 2 && im->GetScalarType() == VTK_FLOAT);
+  assert(!vol->GetProperty()->GetIndependentComponents());
+  int dims[3];
+  im->GetDimensions(dims);
+  double origin[3], spacing[3];
+  im->GetOrigin(origin);
+  im->GetSpacing(spacing);
+  assert(dims[0] == M && dims[1] == M && dims[2] == M);
+  for (int a = 0; a < 3; ++a)
+    assert(origin[a] == origin0[a] && spacing[a] == spacing0[a]);
+  const float *p = static_cast<const float *>(im->GetScalarPointer());
+  for (std::size_t k = 0; k < NV; k += 11)
+    assert(p[2 * k] == light[k] && p[2 * k + 1] == density[k]);
+  assert(vn->getTransferFunctionColorTable() == color);
+  std::printf("  ok: a two-component refresh is (colour, opacity), dependent, same grid\n");
+
+  vn->updateScalars(std::vector<float>(NV, 0.9f)); // one component: no longer this image
+  assert(image()->GetNumberOfScalarComponents() == 2 && p[1] == density[0]);
+  std::vector<float> shortA(NV - 1, 0.1f), shortB(NV - 1, 0.1f);
+  vn->updateScalars(shortA, shortB); // a voxel-count mismatch: nothing
+  assert(p[0] == light[0]);
+  std::printf("  ok: mismatched refreshes leave the two-component image alone\n");
+
+  vn->setVolume(v);
+  assert(image()->GetNumberOfScalarComponents() == 1 &&
+         vol->GetProperty()->GetIndependentComponents());
+  std::printf("  ok: setVolume goes back to one independent component\n");
+}
+
 // setVolume publishes the range as two writes (data_min, data_max), and each runs the node's
 // range handler INLINE -- which re-reads both keys. After the first write it saw the new minimum
 // beside the OLD maximum and loaded that into the node, and setVolume then wrote the stale maximum
@@ -404,6 +465,7 @@ int main() {
   test_signed_range_reaches_state();
   test_foreign_tf_write_during_own_write();
   test_tf_change_leaves_the_image_alone();
+  test_two_component_refresh();
   if (g_failures != 0) {
     std::printf("cvcgl_volume_range: %d check(s) FAILED\n", g_failures);
     return 1;
