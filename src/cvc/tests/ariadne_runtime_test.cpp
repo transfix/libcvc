@@ -1118,6 +1118,33 @@ TEST(AriadneIsolatedDocs, IdleAndWaitIdleCountTheDocumentsGroup) {
   EXPECT_TRUE(art.idle());
 }
 
+// The isolation rules read the document's init: too (S1-Q6), which AppRuntime::load runs itself:
+// a document whose init: alone calls oidc-* stays in group 0, for oidc; the same document with an
+// init: that does not is isolated.
+TEST(AriadneIsolatedDocs, AnInitThatUsesOidcKeepsTheDocumentInGroupZero) {
+  if (!have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  const auto write_doc = [](const char *name, const std::string &init) {
+    const std::filesystem::path p = std::filesystem::temp_directory_path() / name;
+    std::ofstream(p) << "meta: {min_libcvc: 3.4.0}\n"
+                        "channels: []\n"
+                        "root:\n  - text: hi\n"
+                     << "init: " << init << "\n";
+    return p.string();
+  };
+  cvc::app app;
+  isolate_documents(app, 0);
+  AppRuntime plain(app, "ui.docs.plain");
+  plain.load(write_doc("ariadne_isolated_init_plain.ari", "(state-set \"seeded\" 1)"));
+  EXPECT_NE(plain.runtime().isolated_group(), nullptr) << plain.runtime().isolation_reason();
+  AppRuntime signs_in(app, "ui.docs.oidc");
+  signs_in.load(write_doc("ariadne_isolated_init_oidc.ari",
+                          "(if (has? \"oidc-sign-in\") (oidc-sign-in \"demo\"))"));
+  EXPECT_EQ(signs_in.runtime().isolated_group(), nullptr);
+  EXPECT_NE(signs_in.runtime().isolation_reason().find("oidc"), std::string::npos)
+      << signs_in.runtime().isolation_reason();
+}
+
 // Teardown of an isolated document (S1.10): its processes, a parked action and the child it forked,
 // are killed and reaped, and its group goes with the Runtime, so a later frame pump of the app
 // finds no group of it.

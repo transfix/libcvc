@@ -904,6 +904,12 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   }
   add_host_menus(lr.root, hostMenus_);
   add_keys(lr.root, std::move(lr.keys));
+  { // what the isolation rules read beside the tree and the lanes: init: and tests:, run elsewhere
+    std::vector<std::string> elsewhere = {lr.init_script};
+    for (const auto &[name, script] : lr.tests)
+      elsewhere.push_back(script);
+    rt_.set_document_programs(std::move(elsewhere));
+  }
   rt_.set_root(std::move(lr.root)); // applied at the next frame boundary
   // Where its programs run is decided here, at load (S1-Q6): its channel policy, programs, tree
   // and this host's providers and thread-affine prefixes are all known now.
