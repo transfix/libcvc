@@ -383,6 +383,63 @@ TEST(ExecPool, RunOnHostRunsInlineOutsideAWorker) {
   EXPECT_EQ(cvc::detail::worker_pool(), nullptr);
 }
 
+TEST(ExecGroup, InstallByKind) {
+  cvc::pool_options po;
+  po.threads = 2;
+  cvc::exec_pool pool(po);
+  cvc::app app;
+  exec_group any_group(opts_for(app, "any")),
+      host_group(opts_for(app, "host", group_affinity::host));
+  std::atomic<int> proxied_calls{0};
+  std::mutex m;
+  std::set<std::thread::id> proxied_threads;
+  const native_fn proxied = [&](std::span<const value_t> args) -> value_t {
+    ++proxied_calls;
+    std::lock_guard<std::mutex> lock(m);
+    proxied_threads.insert(std::this_thread::get_id());
+    return value_t(std::get<int64_t>(args[0].v) * 2);
+  };
+  const native_fn only = [](std::span<const value_t>) -> value_t { return value_t(int64_t(7)); };
+  environment_ptr any_env = environment::extend(builtins::make_default_environment());
+  environment_ptr host_env = environment::extend(builtins::make_default_environment());
+  for (auto [g, env] : {std::pair{&any_group, any_env}, std::pair{&host_group, host_env}}) {
+    g->install(env, "proxied", proxied, provider_affinity::host_proxied);
+    g->install(env, "only", only, provider_affinity::host_only);
+  }
+  EXPECT_EQ(any_env->lookup("only"), nullptr) << "host_only is not installed in any group";
+  EXPECT_NE(host_env->lookup("only"), nullptr);
+  execute_options ae, he;
+  ae.env = any_env;
+  he.env = host_env;
+  const int a_name = any_group.execute(std::string("(only)"), ae);
+  // Lists cross as copies, and a generator body blocks its worker instead of parking.
+  const int a_proxy = any_group.execute(std::string("(proxied (car (list 21)))"), ae);
+  const int a_gen =
+      any_group.execute(std::string("(next (generator (lambda () (yield (proxied 4)))))"), ae);
+  const int h_proxy = host_group.execute(std::string("(proxied 5)"), he);
+  std::vector<exec_group *> groups{&any_group, &host_group};
+  std::vector<std::pair<exec_group *, int>> pids{
+      {&any_group, a_name}, {&any_group, a_proxy}, {&any_group, a_gen}, {&host_group, h_proxy}};
+  for (int round = 0; round < 1000; ++round) {
+    pool.set_last_pump_for_test(any_group, 1.0);
+    pool.pump_all(groups, kSteps, far_deadline());
+    bool done = true;
+    for (const auto &[g, pid] : pids)
+      done = done && finished(*g, pid);
+    if (done)
+      break;
+  }
+  for (const auto &[g, pid] : pids)
+    ASSERT_TRUE(finished(*g, pid));
+  EXPECT_NE(any_group.sched().get_exit_error(a_name).value_or(""), "") << "a NameError";
+  EXPECT_EQ(result_of(any_group, a_proxy), "42");
+  EXPECT_EQ(result_of(any_group, a_gen), "8");
+  EXPECT_EQ(result_of(host_group, h_proxy), "10");
+  EXPECT_EQ(proxied_calls.load(), 3);
+  EXPECT_EQ(proxied_threads, std::set<std::thread::id>{std::this_thread::get_id()})
+      << "a host_proxied body runs on the pump_all's caller";
+}
+
 TEST(ExecGroup, ExecuteCopiesASharedAst) {
   cvc::app app;
   exec_group a(opts_for(app, "a")), b(opts_for(app, "b"));

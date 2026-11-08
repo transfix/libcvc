@@ -331,13 +331,99 @@ int exec_group::execute(const value_t &expr, const execute_options &opts) {
   return m.sched->execute(given, o);
 }
 
+namespace {
+
+// A host_proxied native's body, run on the host thread (S1.8, td 4.9): `fn` on private copies of
+// its arguments.
+struct proxied_body {
+  native_fn fn;
+  std::vector<value_t> args;
+  value_t run(std::exception_ptr &error) const {
+    try {
+      return fn(std::span<const value_t>(args));
+    } catch (...) {
+      error = std::current_exception();
+      return nil_value;
+    }
+  }
+};
+
+// Where the calling thread is a worker of `pool`: park the calling process on the body, queued
+// for the pump_all's caller, and resume it with the body's value at the group's next pump; at a
+// point that cannot park (a generator body), block this worker until the caller has run it.
+value_t proxy_on_worker(cvc::exec_pool &pool, exec_group &group, const std::string &name,
+                        proxied_body body) {
+  if (can_await()) {
+    value_t result;
+    async_host &host = group.host();
+    const std::shared_ptr<async_call> call = host.begin_external(name, false, result);
+    pool.run_on_host([&host, call, body = std::move(body)] {
+      std::exception_ptr error;
+      value_t value = body.run(error);
+      call->settle(std::move(value), std::move(error));
+      host.finish(call);
+    });
+    return result;
+  }
+  struct rendezvous {
+    std::mutex m;
+    std::condition_variable cv;
+    bool done = false;
+    value_t value;
+    std::exception_ptr error;
+  };
+  auto meet = std::make_shared<rendezvous>();
+  pool.run_on_host([meet, body = std::move(body)] {
+    std::exception_ptr error;
+    value_t value = body.run(error);
+    std::lock_guard<std::mutex> lock(meet->m);
+    meet->value = std::move(value);
+    meet->error = std::move(error);
+    meet->done = true;
+    meet->cv.notify_all();
+  });
+  std::unique_lock<std::mutex> lock(meet->m);
+  meet->cv.wait(lock, [&] { return meet->done; });
+  if (meet->error)
+    std::rethrow_exception(meet->error);
+  return std::move(meet->value);
+}
+
+} // namespace
+
 void exec_group::install(const environment_ptr &env, const std::string &name, native_fn fn,
                          provider_affinity kind) {
-  // A host_only native is not installed in an `any` group: a call is a NameError, never a race
-  // (td 4.9). The host_proxied wrapping comes with the host-call queue (S1.8).
-  if (impl_->opts.affinity == group_affinity::any && kind == provider_affinity::host_only)
+  // In a host-affinity group every kind is installed as it is (td 4.9).
+  if (impl_->opts.affinity == group_affinity::host || kind == provider_affinity::any) {
+    builtins::register_fn(env, name, std::move(fn));
     return;
-  builtins::register_fn(env, name, std::move(fn));
+  }
+  if (kind == provider_affinity::host_only)
+    return; // not installed: a call is a NameError, never a race
+  // host_proxied: inline where the caller of the pump_all (or no pump_all) runs the step, as
+  // today, at threads 0 included; through the host-call queue on a worker.
+  auto shared_fn = std::make_shared<const native_fn>(std::move(fn));
+  exec_group *const group = this;
+  builtins::register_fn(
+      env, name, [group, name, shared_fn](std::span<const value_t> args) -> value_t {
+        cvc::exec_pool *pool = cvc::detail::worker_pool();
+        if (!pool)
+          return (*shared_fn)(args);
+        // The body reads its arguments on the host thread while this worker steps the group's
+        // other processes: it gets copies, made as deep-data work, as an async function's do.
+        auto start = [group, name, shared_fn](value_t copied) -> value_t {
+          const std::vector<value_t> &argv = *std::get<list_ptr>(copied.v);
+          cvc::exec_pool *pool = cvc::detail::worker_pool(); // the copy may end on the caller
+          if (!pool)
+            return (*shared_fn)(std::span<const value_t>(argv));
+          return proxy_on_worker(*pool, *group, name, proxied_body{*shared_fn, argv});
+        };
+        value_t argv = make_list(std::vector<value_t>(args.begin(), args.end()));
+        if (std::none_of(args.begin(), args.end(), [](const value_t &a) { return is_compound(a); }))
+          return start(std::move(argv));
+        return run_data_job(make_copy_job(std::move(argv), copy_mode::share, "host_proxied"),
+                            std::move(start));
+      });
 }
 
 bool exec_group::failed() const { return impl_->failed.load(std::memory_order_acquire); }
