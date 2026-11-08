@@ -4148,6 +4148,9 @@ bool Runtime::has(const std::string &name) const { return m_->has(name); }
 void Runtime::refresh_program_names() {
   std::lock_guard<std::mutex> lock(m_->names_mutex);
   m_->names_valid = false;
+  // A host verb or function registered since the placement may need the host thread (s-m4): the
+  // placement is decided again before the next program starts.
+  m_->placement_decided_ = false;
 }
 
 void Runtime::set_backend(Backend *backend) { m_->backend = backend; }
@@ -4181,25 +4184,36 @@ void Runtime::on(std::string event, std::function<void()> handler) {
   m_->handlers[std::move(event)] = std::move(handler);
 }
 
+// A lane's program, the channel policy and the key bindings are read by the isolation rules
+// (S1-Q6): setting one decides the placement again before the next program starts (s-m2). Host
+// thread, outside a pump (they kill residents).
 void Runtime::set_tick_program(std::string script) {
+  assert_outside_pump(m_->app);
   // Replacing the program kills any running resident so the new body starts fresh next drain.
   m_->stop_resident(m_->tick_resident_);
   m_->tick_script_ = std::move(script);
+  m_->placement_decided_ = false;
 }
 
 void Runtime::set_key_program(std::string script) {
+  assert_outside_pump(m_->app);
   m_->stop_resident(m_->key_resident_);
   m_->key_script_ = std::move(script);
+  m_->placement_decided_ = false;
 }
 
 void Runtime::set_pointer_program(std::string script) {
+  assert_outside_pump(m_->app);
   m_->stop_resident(m_->pointer_resident_);
   m_->pointer_script_ = std::move(script);
+  m_->placement_decided_ = false;
 }
 
 void Runtime::set_signal_program(std::string script) {
+  assert_outside_pump(m_->app);
   m_->stop_resident(m_->signal_resident_);
   m_->signal_script_ = std::move(script);
+  m_->placement_decided_ = false;
 }
 
 bool Runtime::has_signal_program() const { return !m_->signal_script_.empty(); }
@@ -4234,6 +4248,7 @@ void Runtime::set_channel_policy(std::vector<std::string> declared, std::vector<
   m_->channel_policy_.global = std::move(global);
   m_->channel_policy_.enforce = strict;
   m_->channel_policy_.quiet = quiet;
+  m_->placement_decided_ = false; // the isolation rules read it (s-m2)
 }
 
 void Runtime::post_input(const InputEvent &ev) {
@@ -4261,6 +4276,7 @@ void Runtime::forget_layout() { m_->forget_layout_pending = true; }
 void Runtime::set_key_bindings(std::vector<KeyBinding> bindings) {
   m_->key_bindings_ = std::move(bindings);
   m_->have_key_bindings_.store(!m_->key_bindings_.empty());
+  m_->placement_decided_ = false; // their programs are scanned too (s-m2)
 }
 
 void Runtime::Impl::run_key_bindings() {
@@ -4406,7 +4422,10 @@ std::string Runtime::isolation_reason() const {
 
 void Runtime::declare_thread_affine_prefix(const std::string &prefix) {
   m_->thread_affine_.push_back(prefix);
+  m_->placement_decided_ = false;
 }
+
+cvc::state_exec::exec_group *Runtime::current_group() const { return m_->group_.get(); }
 
 void Runtime::set_document_programs(std::vector<std::string> programs) {
   m_->document_programs_ = std::move(programs);

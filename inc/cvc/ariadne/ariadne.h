@@ -101,7 +101,8 @@ public:
   // set_key_program handles keyboard events (key_down/key_up); set_pointer_program handles mouse
   // events (mouse_move/mouse_button_*/mouse_wheel). Pass LoadResult::on_key_script /
   // on_pointer_script.
-  // "" clears it. (Widget-level on_click/on_hover are a separate path.)
+  // "" clears it. (Widget-level on_click/on_hover are a separate path.) Host thread, outside a
+  // pump, as set_tick_program.
   void set_key_program(std::string script);
   void set_pointer_program(std::string script);
 
@@ -228,6 +229,9 @@ public:
   // passes its init: (run_init) and its tests: (run_program). The isolation rules read them with
   // the document's own (S1-Q6). Each call replaces the last; before set_root.
   void set_document_programs(std::vector<std::string> programs);
+  // The group the document's programs run in now, as isolated_group() last decided, without
+  // deciding again or moving anything (AppRuntime::idle and wait_idle). Null in group 0.
+  cvc::state_exec::exec_group *current_group() const;
 
   // Drain the §4 read-lane diagnostics accumulated during render() — one message per
   // distinct failing predicate (a parse error, a runtime error, or a per-frame budget
@@ -264,7 +268,8 @@ public:
   bool has(const std::string &name) const;
   // Forget the cached program names, so has_function() / has() see verbs registered since they
   // were last asked. AppRuntime::register_verb calls it; a new register_action_intrinsics provider
-  // is noticed without it.
+  // is noticed without it. It also has the placement decided again (a host verb registered after
+  // load may need the host thread), before the next program starts.
   void refresh_program_names();
 
   // This document's per-resource scope (the se::document_scope installed on every action/resident

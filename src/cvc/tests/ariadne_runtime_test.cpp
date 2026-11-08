@@ -1255,6 +1255,24 @@ TEST(AriadneIsolatedDocs, AThreadAffinePrefixAboveTheDocumentMakesItHost) {
   EXPECT_EQ(slot_threads, std::set<std::thread::id>{frame_thread});
 }
 
+// R1b-mid s-m2: a lane's program set after the placement is read by the isolation rules too: an
+// on_tick: that waits on oidc's channel moves the document to group 0 (where oidc posts).
+TEST(AriadneIsolatedDocs, AProgramSetAfterThePlacementIsScanned) {
+  cvc::app app;
+  isolate_documents(app, 0);
+  Runtime rt(app, "docs.later");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_channel_policy({}, {}, true, true);
+  rt.set_root(group({text("d")}));
+  rt.drain();
+  ASSERT_NE(rt.isolated_group(), nullptr) << rt.isolation_reason();
+  rt.set_tick_program("(state-set \"r\" (msg-recv \"oidc#probe\"))");
+  rt.drain();
+  EXPECT_EQ(rt.isolated_group(), nullptr) << "an on_tick: on oidc's channel runs isolated";
+  EXPECT_NE(rt.isolation_reason().find("oidc"), std::string::npos) << rt.isolation_reason();
+}
+
 // R1b-mid s-m3: a stream the document opened before its placement changed goes with it: after the
 // move to group 0 a resident there hears the stream's own close, posted to where the document now
 // runs, and the old group is gone.
@@ -1347,6 +1365,67 @@ TEST(AriadneIsolatedDocs, AnEligibilityThatFlipsKeepsOneGroupAtMost) {
     std::printf("%s\n", trace.c_str());
     EXPECT_LE(most, 1u);
   }
+  EXPECT_EQ(se::detail::live_groups(&app), 0u);
+}
+
+// R1b-mid s-m4: a host verb registered after load() is bound in an isolated document as in group 0:
+// the registration has the placement decided again, and the verb, a host_only one, makes the group
+// host.
+TEST(AriadneIsolatedDocs, AHostVerbRegisteredAfterLoadIsBound) {
+  if (!have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  const std::filesystem::path doc =
+      std::filesystem::temp_directory_path() / "ariadne_isolated_late_verb.ari";
+  std::ofstream(doc) << "meta: {min_libcvc: 3.4.0}\nchannels: []\nroot:\n  - text: late\n";
+  cvc::app app;
+  isolate_documents(app, 0);
+  isolated_providers_cleared cleared;
+  AppRuntime art(app, "ui.docs.late");
+  MockBackend mb;
+  art.set_backend(mb);
+  art.load(doc.string());
+  ASSERT_NE(art.runtime().isolated_group(), nullptr) << art.runtime().isolation_reason();
+  EXPECT_EQ(art.runtime().isolated_group()->opts().affinity, cvc::state_exec::group_affinity::any);
+  int calls = 0;
+  art.register_verb("late-verb", [&] { ++calls; });
+  std::string how = "running";
+  art.run_program("(late-verb)", [&](const std::string &h) { how = h; });
+  for (int i = 0; i < 20 && how == "running"; ++i)
+    art.drain();
+  EXPECT_EQ(how, "") << "a verb registered after load is not callable in the isolated document";
+  EXPECT_EQ(calls, 1);
+  ASSERT_NE(art.runtime().isolated_group(), nullptr) << art.runtime().isolation_reason();
+  EXPECT_EQ(art.runtime().isolated_group()->opts().affinity, cvc::state_exec::group_affinity::host);
+}
+
+// R1b-mid c-m2: AppRuntime::idle() and wait_idle() decide nothing: after a set_root that would move
+// the document, neither moves it (nor builds or destroys a group); the next frame does.
+TEST(AriadneIsolatedDocs, IdleAndWaitIdleDecideNothing) {
+  if (!have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  const std::filesystem::path doc =
+      std::filesystem::temp_directory_path() / "ariadne_isolated_idle_decides.ari";
+  std::ofstream(doc) << "meta: {min_libcvc: 3.4.0}\nchannels: []\nroot:\n  - text: hi\n";
+  namespace se = cvc::state_exec;
+  cvc::app app;
+  isolate_documents(app, 0);
+  AppRuntime art(app, "ui.docs.quiet");
+  MockBackend mb;
+  art.set_backend(mb);
+  art.load(doc.string());
+  se::exec_group *first = art.runtime().isolated_group();
+  ASSERT_NE(first, nullptr) << art.runtime().isolation_reason();
+  cvc::state::instance(app)("outside.v").value(std::string("seed"));
+  Widget mount = group({text("module")});
+  mount.scope = "mod";
+  mount.links = {LinkHole{"out", "/outside.v", true}};
+  art.set_root(group({mount})); // ineligible from the next decision on
+  (void)art.idle();
+  art.wait_idle();
+  EXPECT_EQ(art.runtime().current_group(), first) << "a query moved the document";
+  EXPECT_EQ(se::detail::live_groups(&app), 1u);
+  art.drain(); // the frame decides: group 0
+  EXPECT_EQ(art.runtime().current_group(), nullptr);
   EXPECT_EQ(se::detail::live_groups(&app), 0u);
 }
 
