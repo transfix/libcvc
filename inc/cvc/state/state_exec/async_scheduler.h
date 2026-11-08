@@ -164,6 +164,8 @@ public:
   /// process group on teardown. Returns the number killed. Parked processes
   /// (sleep/msg-recv/await) are killed too, so nothing lingers after the document
   /// that owned them closes. `owner` == "" reaps the unowned group.
+  /// The live processes are taken first, so one a kill's slots submit is not killed; every kill
+  /// is tried, and the first that threw is rethrown after the rest (S1.4).
   int kill_owner(const std::string &owner);
   /// kill(pid) with `reason` as the process's exit error (get_exit_error): a pool failing a group
   /// kills its processes with "internal error" (S1.6). False for an unknown or finished pid.

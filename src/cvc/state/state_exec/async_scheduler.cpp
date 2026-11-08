@@ -716,8 +716,10 @@ uint64_t async_scheduler::run_loop(std::optional<uint64_t> max_steps,
     ++steps;
   }
   // The idle collection (S1.1): a group's registry is collected only by its own steps, and an idle
-  // group takes none, so a run that leaves nothing runnable collects when one is due.
-  if (registry_ && !has_runnable() && cycle_collection_due(*registry_))
+  // group takes none, so a run that leaves nothing runnable collects when a process ended and
+  // something was tracked since the last collection.
+  if (registry_ && !has_runnable() &&
+      (cycle_collection_idle_due(*registry_) || cycle_collection_due(*registry_)))
     collect_cycles(*registry_);
   return taken;
 }

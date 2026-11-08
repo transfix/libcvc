@@ -731,6 +731,10 @@ bool cycle_collection_due(const cycle_registry &r) {
 
 bool cycle_collection_due() { return cycle_collection_due(registry()); }
 
+bool cycle_collection_idle_due(const cycle_registry &r) {
+  return r.exit_pending && r.since_last > 0;
+}
+
 void note_process_exit(cycle_registry &r) { r.exit_pending = true; }
 
 void note_process_exit() { note_process_exit(registry()); }
