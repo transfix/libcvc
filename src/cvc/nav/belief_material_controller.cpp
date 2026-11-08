@@ -133,13 +133,16 @@ struct json_value {
   bool integer = false; // a number written with no fraction or exponent
   std::string str;
   std::vector<json_value> arr;
-  std::vector<std::pair<std::string, json_value>> obj;
+  // An object's members, keys and values in parallel (a vector of pair<string, json_value> needs
+  // json_value complete here, and clang with libstdc++ refuses it).
+  std::vector<std::string> obj_keys;
+  std::vector<json_value> obj_vals;
 
   const json_value *find(const std::string &key) const {
     const json_value *found = nullptr;
-    for (const auto &m : obj)
-      if (m.first == key)
-        found = &m.second;
+    for (std::size_t m = 0; m < obj_keys.size(); ++m)
+      if (obj_keys[m] == key)
+        found = &obj_vals[m];
     return found;
   }
 };
@@ -204,7 +207,8 @@ private:
           throw json_error();
         ++i_;
         json_value member = value(depth + 1);
-        v.obj.emplace_back(std::move(key), std::move(member));
+        v.obj_keys.push_back(std::move(key));
+        v.obj_vals.push_back(std::move(member));
         skip_ws();
         if (peek() == ',') {
           ++i_;
@@ -523,10 +527,9 @@ belief_material_contract belief_material_contract::from_meta(const std::string &
                                 "material constants are unknown");
 
   std::vector<std::string> unknown;
-  for (const auto &m : record->obj)
-    if (!is_contract_field(m.first) &&
-        std::find(unknown.begin(), unknown.end(), m.first) == unknown.end())
-      unknown.push_back(m.first);
+  for (const auto &key : record->obj_keys)
+    if (!is_contract_field(key) && std::find(unknown.begin(), unknown.end(), key) == unknown.end())
+      unknown.push_back(key);
   if (!unknown.empty()) {
     std::sort(unknown.begin(), unknown.end());
     std::string list;
