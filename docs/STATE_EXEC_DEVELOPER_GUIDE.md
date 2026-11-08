@@ -2394,7 +2394,9 @@ reads. Each is read once, when that object is built, and a later change does not
 |---------|-----------|--------|---------|
 | `state_exec.policy` | `app::exec_scheduler()` is first built; each pycvc `Exec(app)` given no policy | `round_robin`, `priority`, `priority_rr` (anything else is logged) | `round_robin` |
 | `state_exec.locks.threading` | the app's lock manager is made ([Locks](#locks-with-lock)) | `auto`, `single`, `shared` (anything else is logged and `auto` used) | `auto` |
-| `state_exec.threads` | with `state_exec.locks.threading`, by `auto` only; it starts no thread yet | a whole number, or `auto` | unset (0) |
+| `state_exec.threads` | with `state_exec.locks.threading`, by `auto`; and when the app's pool is built (`app::exec_pool()`), for its worker count, unless the host gives `pool_options` ([Execution Groups and the Pool](#execution-groups-and-the-pool)). The `CVC_EXEC_THREADS` environment variable overrides it for both | a whole number, or `auto` (anything else is logged and 0 used) | unset (0: every pump on the calling thread) |
+| `state_exec.cpu_set` | the app's pool is built, unless the host gives `pool_options` | `performance` (workers on the highest efficiency class only), `all` (anything else is logged and `performance` used) | `performance` |
+| `state_exec.deterministic` | the app's pool is built, unless the host gives `pool_options`; by `exec_pump_frame()` for group 0 when no pool exists | `true`, `1`, `on`, `yes`; `false`, `0`, `off`, `no` (anything else is logged and `false` used) | `false` |
 | `state_exec.process_class` | `app::exec_scheduler()` is first built ([THREAD_POOL.md](THREAD_POOL.md)) | `background`, `utility`, `normal` (anything else is logged and ignored) | unset (the OS's) |
 
 ---
