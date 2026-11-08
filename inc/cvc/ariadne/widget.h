@@ -231,6 +231,12 @@ struct Widget {
   std::string on_drag;
   std::string on_drag_start;
   std::string on_drag_end;
+  // on_hover_end — the pointer left the item (or the item went) this frame: a one-shot EDGE after
+  // the frames on_hover fired, with no `event`.
+  std::string on_hover_end;
+  // A Kind::Group's `hover: highlight`: the group is drawn lit while the pointer is over it. A
+  // group with on_click / on_hover / on_hover_end or this is one item (Backend::begin_item_group).
+  bool hover_highlight = false;
 
   // §4 read-lane (reactive): a state_exec predicate re-evaluated each frame; when it
   // is non-empty and evaluates falsy the widget (and its subtree) is skipped this

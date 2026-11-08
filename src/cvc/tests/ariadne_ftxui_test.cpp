@@ -902,6 +902,108 @@ TEST(AriadneFtxui, TooltipShowsForTheFocusedWidget) {
   EXPECT_TRUE(t.shows("toggles the thing")) << t.screen;
 }
 
+// §5.19 a group with on_click is one item: a click on its text is the group's, a click on its
+// button the button's; Tab reaches the group before its button, Enter fires it, and focus marks it
+// in a gutter column.
+TEST(AriadneFtxui, GroupClickCoversTheCardButNotItsButton) {
+  REQUIRE_FTXUI();
+  Widget card = group(
+      {text("Post {i}"), text("body of {i}"), button("Like", "(state-set \"liked\" \"{i}\")")});
+  card.on_click = "(state-set \"opened\" \"{i}\")";
+  card.tooltip = "Open the post";
+  card.repeat = "(state-get \"n\")";
+  Term t(group({card}));
+  cvc::state::instance(t.app)("n").value(std::string("2"));
+  const auto settle = [&] {
+    for (int i = 0; i < 50; ++i)
+      t.rt.drain();
+    t.draw();
+  };
+  t.draw();
+  ASSERT_TRUE(t.shows(" Post 1")) << "a gutter column before the card\n" << t.screen;
+  EXPECT_TRUE(t.be.capabilities().item_groups);
+
+  ASSERT_TRUE(t.click("body of 1"));
+  settle();
+  EXPECT_EQ(val(t.app, "opened"), "1");
+  EXPECT_EQ(val(t.app, "liked"), "");
+  const std::string mark = t.be.unicode_glyphs() ? "\xE2\x96\x8C" : ">";
+  EXPECT_TRUE(t.shows(mark + "body of 1")) << "the click focused the card\n" << t.screen;
+  EXPECT_TRUE(t.shows("Open the post")) << t.screen;
+
+  cvc::state::instance(t.app)("opened").value(std::string());
+  ASSERT_TRUE(t.click("[ Like ]"));
+  settle();
+  EXPECT_EQ(val(t.app, "liked"), "0");
+  EXPECT_EQ(val(t.app, "opened"), "") << "the button's click is not the card's";
+
+  t.key("Tab"); // from the first card's button to the second card
+  t.draw();
+  EXPECT_TRUE(t.shows(mark + "Post 1")) << t.screen;
+  t.key("Return");
+  settle();
+  EXPECT_EQ(val(t.app, "opened"), "1");
+  t.key("Tab"); // and on to its button
+  t.key("Return");
+  settle();
+  EXPECT_EQ(val(t.app, "liked"), "1");
+  EXPECT_EQ(val(t.app, "opened"), "1");
+}
+
+// §5.19 the innermost taker keeps a click: a picture or a line with its own on_click inside a
+// clickable group, or a clickable group inside another.
+TEST(AriadneFtxui, GroupClickGoesToTheInnermostHandler) {
+  REQUIRE_FTXUI();
+  Widget avatar = text("avatar");
+  avatar.on_click = "(state-set \"hit\" \"avatar\")";
+  Widget inner = group({text("quoted post")});
+  inner.on_click = "(state-set \"hit\" \"quote\")";
+  Widget card = group({avatar, text("card text"), inner});
+  card.on_click = "(state-set \"hit\" \"card\")";
+  Term t(group({card}));
+  const auto clicked = [&](const char *where) {
+    cvc::state::instance(t.app)("hit").value(std::string());
+    EXPECT_TRUE(t.click(where)) << where << "\n" << t.screen;
+    for (int i = 0; i < 50; ++i)
+      t.rt.drain();
+    return val(t.app, "hit");
+  };
+  EXPECT_EQ(clicked("card text"), "card");
+  EXPECT_EQ(clicked("avatar"), "avatar");
+  EXPECT_EQ(clicked("quoted post"), "quote");
+}
+
+// §5.19 hover: highlight lights a group while the pointer is over any of it; on_hover_end runs
+// once when it leaves.
+TEST(AriadneFtxui, GroupHoverHighlightsAndReportsTheEnd) {
+  REQUIRE_FTXUI();
+  Widget card = group({text("hover me"), button("Inside", "x")});
+  card.hover_highlight = true;
+  card.on_hover = "(state-set \"over\" \"1\")";
+  card.on_hover_end = "(state-set \"left\" (str (+ 1 (int (state-get \"left\")))))";
+  Term t(group({card, text("elsewhere")}));
+  cvc::state::instance(t.app)("left").value(std::string("0"));
+  const std::string bar = t.be.unicode_glyphs() ? "\xE2\x94\x82" : "|";
+  ASSERT_TRUE(t.shows(" hover me")) << t.screen;
+  int x = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, "[ Inside ]", x, y));
+  t.mouse(TermEvent::Mouse::Move, x + 2, y); // over the button inside it: the group's too
+  for (int i = 0; i < 20; ++i)
+    t.rt.drain();
+  t.draw();
+  EXPECT_TRUE(t.shows(bar + "hover me")) << t.screen;
+  EXPECT_EQ(val(t.app, "over"), "1");
+  EXPECT_EQ(val(t.app, "left"), "0");
+  ASSERT_TRUE(find_cell(t.screen, "elsewhere", x, y));
+  t.mouse(TermEvent::Mouse::Move, x, y);
+  for (int i = 0; i < 20; ++i)
+    t.rt.drain();
+  t.draw();
+  t.draw();
+  EXPECT_TRUE(t.shows(" hover me")) << t.screen;
+  EXPECT_EQ(val(t.app, "left"), "1") << "once, not every frame it is away";
+}
+
 TEST(AriadneFtxui, GridLaysCellsIntoColumns) {
   REQUIRE_FTXUI();
   Widget g = group({text("a1"), text("b1"), text("a2"), text("b2")});

@@ -182,6 +182,7 @@ ariadne::Capabilities ImGuiBackend::capabilities() const {
   c.view_embed = true; // render-to-texture views (roadmap §9.6)
   c.owns_loop = false; // guest mode: VTK's render pass drives Runtime::render()
   c.bitmap = true;     // image widgets draw as GL textures
+  c.item_groups = true;
   return c;
 }
 
@@ -930,6 +931,8 @@ bool ImGuiBackend::menu_item_action(const char *label) { return ui::MenuItemClic
 // Guarded like the other raw-ImGui calls: without imgui the overlay is inert, so no widget clicks.
 bool ImGuiBackend::item_clicked() {
 #ifdef CVC_ENABLE_IMGUI
+  if (m_groupHitId != 0 && ImGui::GetItemID() == m_groupHitId)
+    return m_groupHit; // an item group: its button's tap (end_item_group)
   return ImGui::IsItemClicked();
 #else
   return false;
@@ -941,6 +944,9 @@ bool ImGuiBackend::item_clicked() {
 // the item.
 bool ImGuiBackend::item_hovered() {
 #ifdef CVC_ENABLE_IMGUI
+  // An item group: the pointer is over it, whether or not a widget inside it is held.
+  if (m_groupHitId != 0 && ImGui::GetItemID() == m_groupHitId)
+    return ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
   return ImGui::IsItemHovered();
 #else
   return false;
@@ -1608,10 +1614,71 @@ struct ImGuiBackend::BackdropFrame {
   ImVec2 start;
   float avail_w = 0.0f, avail_h = 0.0f;
 };
+struct ImGuiBackend::ItemGroupFrame {
+  std::string id;
+  cvc::ariadne::ItemGroupOptions opts;
+  ImDrawList *dl = nullptr;
+  ImDrawListSplitter split;
+  float right = 0.0f; // the right edge of the room it started with
+};
 #else
 void ImGuiBackend::cut_window_background(float, float, float, float) {}
 struct ImGuiBackend::BackdropFrame {};
+struct ImGuiBackend::ItemGroupFrame {};
 #endif
+
+void ImGuiBackend::begin_item_group(const char *id, const cvc::ariadne::ItemGroupOptions &opts) {
+#ifdef CVC_ENABLE_IMGUI
+  auto f = std::make_shared<ItemGroupFrame>();
+  f->id = std::string("##ari_group:") + (id ? id : "");
+  f->opts = opts;
+  f->dl = ImGui::GetWindowDrawList();
+  // The content on channel 1, so the highlight, drawn on channel 0 once the area is known, is
+  // under it.
+  f->split.Split(f->dl, 2);
+  f->split.SetCurrentChannel(f->dl, 1);
+  f->right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
+  ImGui::BeginGroup();
+  m_itemGroups.push_back(std::move(f));
+#else
+  (void)id;
+  (void)opts;
+#endif
+}
+
+void ImGuiBackend::end_item_group() {
+#ifdef CVC_ENABLE_IMGUI
+  if (m_itemGroups.empty())
+    return;
+  std::shared_ptr<ItemGroupFrame> f = std::move(m_itemGroups.back());
+  m_itemGroups.pop_back();
+  ImGui::EndGroup();
+  // As wide as the room it had (a feed's card: the whole row is the post), at least its content.
+  const ImVec2 mn = ImGui::GetItemRectMin();
+  const ImVec2 mx(std::max(ImGui::GetItemRectMax().x, f->right), ImGui::GetItemRectMax().y);
+  // The group's item: a button over all of it, submitted after what it holds, so a button, a
+  // checkbox or a field in it (which took the hover first) keeps its own clicks. It takes the
+  // place EndGroup gave the group, so the layout after it is the same. A click is a tap: released
+  // over it, the pointer not dragged far (a finger scrolling the feed opens nothing). Keyboard
+  // navigation reaches it when it is focusable.
+  ImGui::SetCursorScreenPos(mn);
+  const ImGuiButtonFlags flags =
+      f->opts.focusable ? ImGuiButtonFlags_EnableNav : ImGuiButtonFlags_None;
+  const bool pressed = ImGui::InvisibleButton(
+      f->id.c_str(), ImVec2(std::max(1.0f, mx.x - mn.x), std::max(1.0f, mx.y - mn.y)), flags);
+  const float slop = ImGui::GetIO().MouseDragThreshold;
+  m_groupHitId = ImGui::GetItemID();
+  m_groupHit =
+      pressed && (!ImGui::GetIO().MouseReleased[ImGuiMouseButton_Left] ||
+                  ImGui::GetIO().MouseDragMaxDistanceSqr[ImGuiMouseButton_Left] <= slop * slop);
+  f->split.SetCurrentChannel(f->dl, 0);
+  if (f->opts.highlight && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)) {
+    const ImGuiCol col = ImGui::IsItemActive() ? ImGuiCol_HeaderActive : ImGuiCol_HeaderHovered;
+    f->dl->AddRectFilled(mn, mx, ImGui::GetColorU32(col), ImGui::GetStyle().FrameRounding);
+  }
+  f->split.Merge(f->dl);
+#endif
+}
 
 void ImGuiBackend::begin_backdrop(const cvc::ariadne::Backdrop &bd) {
 #ifdef CVC_ENABLE_IMGUI

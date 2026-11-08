@@ -42,6 +42,10 @@ const std::vector<TokenRule> &rules() {
       {{"input.mouse", "pointer input"}, [](const HostFacts &f) { return f.caps.mouse; }},
       {{"input.keyboard", "key and text input"},
        [](const HostFacts &f) { return f.caps.keyboard; }},
+      {{"ui.group_click", "a group with on_click: is one item over its whole area (a feed's "
+                          "card): a click, a tap or Enter fires it, hover: highlight lights it, "
+                          "and in a terminal Tab reaches it"},
+       [](const HostFacts &f) { return f.caps.item_groups; }},
       {{"raster.bitmap", "images in real pixels (a GL window, or a kitty or Sixel terminal)"},
        [](const HostFacts &f) { return f.caps.bitmap; }},
       {{"term", "the document is drawn in a text terminal"},

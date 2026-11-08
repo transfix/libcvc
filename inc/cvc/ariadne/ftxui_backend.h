@@ -170,6 +170,10 @@ public:
   bool item_drag_started() override;
   bool item_drag_ended() override;
   bool item_pointer(float &x, float &y, float &dx, float &dy, int &button) override;
+  // §4.6 a group that is one item: a click on its text or pictures is its own, and one with an
+  // on_click takes focus (Tab, a click), Enter or Space firing it; a gutter column marks it lit.
+  void begin_item_group(const char *id, const ItemGroupOptions &opts) override;
+  void end_item_group() override;
 
   BoolEdit menu_item_toggle(const char *label, bool current) override;
   BoolEdit checkbox(const char *label, bool current) override;

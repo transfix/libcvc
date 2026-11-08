@@ -404,7 +404,7 @@ Show it while the work runs with `visible_when`:
   clock: 1/30 s a frame), so `--frames 3` shows the spinner one step on from `--frames 1`.
 
 A backend advertises `Capabilities{windows, menubar, mouse, keyboard, color, glsl,
-view_embed, owns_loop, terminal, bitmap, kitty, sixel}`
+view_embed, owns_loop, terminal, bitmap, kitty, sixel, item_groups}`
 ([`backend.h`](../inc/cvc/ariadne/backend.h)). A document's `requires:` and `(has? ...)`
 read them through capability tokens ([§5.7](#57-requires-and-has--what-a-document-needs-from-its-host)).
 `owns_loop` distinguishes a **host-pumped**
@@ -1201,6 +1201,7 @@ entry warns. An entry is one of:
   | `gl.view` | a live render view can sit in a widget |
   | `ui.windows`, `ui.menubar`, `ui.color` | movable windows; a menu bar; coloured styling |
   | `input.mouse`, `input.keyboard` | pointer input; key and text input |
+  | `ui.group_click` | a group with `on_click:` is one item over its whole area, and `hover: highlight` lights it (§5.19); ImGui, FTXUI and tvision |
   | `raster.bitmap` | images show in real pixels (a GL window, or a kitty or Sixel terminal) |
   | `term`, `term.kitty`, `term.sixel` | a text terminal; one that speaks kitty graphics; one that draws Sixel |
   | `relay` | the document is a relay's server document, run by `arisrv --doc` (§9.7) |
@@ -2172,6 +2173,57 @@ Limits:
   camera, not the view's.
 - A view's first frame is opaque: the window's background is cut from the frame after the widget
   first draws.
+
+### 5.19 Clickable groups: `on_click:` on a group, `hover: highlight`
+
+A group with an `on_click:`, `on_hover:` or `on_hover_end:`, or with `hover: highlight`, is one
+item over its whole area. A feed's card opens its post wherever it is clicked:
+
+```yaml
+- type: group
+  repeat: (state-get "feed.items")
+  hover: highlight                          # lit while the pointer is over it
+  on_click: (state-set "view.post" "{i}")
+  on_hover_end: (state-set "feed.peek" "")
+  tooltip: Open the post
+  children:
+    - text: ""
+      bind: feed.items.{i}.text
+    - image: ""
+      bind: feed.items.{i}.media.0.url
+      on_click: (state-set "view.picture" "{i}")   # the picture's own: not the card's
+    - button: Like
+      on: (state-set "feed.items.{i}.liked" "1")  # the button's too
+```
+
+- A click on the group's text, pictures or empty space is the group's. A widget inside it that
+  takes clicks itself keeps them: a button, a checkbox, a field, or a widget with an `on_click:` of
+  its own. The innermost one wins, so a clickable group inside another keeps its clicks.
+- `on_hover:` runs every frame the pointer is over any part of the group, the widgets in it
+  included. `on_hover_end:` runs once when the pointer leaves, or when the widget stops being drawn.
+  It has no `event`. `on_hover_end:` works on any widget, not only a group.
+- A `tooltip:` shows over the whole group. In the `event` of `on_click:` and `on_hover:`, `x` and
+  `y` are measured from the group's top-left.
+- **ImGui** (arigl, the browser page): a click is a tap. It must be released over the group, and the
+  pointer must not have moved further than ImGui's drag threshold, so a finger scrolling a feed
+  opens nothing. The group's area is as wide as the room it has (a card's whole row), however
+  narrow its content. `hover: highlight` fills that area under the content with the header-hover
+  colour, or the header-active colour while it is pressed.
+- **Terminals** (FTXUI, tvision): a group with `on_click:` takes keyboard focus. Tab reaches it
+  before the widgets inside it, and Enter or Space fires it. A left click fires it and focuses it.
+  It has a one-column gutter on its left:
+  - `▌` and a grey background while it has focus;
+  - `│` while the pointer is over it, with `hover: highlight`;
+  - blank otherwise.
+
+  On a terminal with no block glyphs (the Linux console, `dumb`, `vt*`) the marks are `>` and
+  `|`. A monochrome terminal gets no grey. The gutter column is always there, so focus never shifts
+  the layout. A focused group scrolls into view like any focused widget.
+- `(has? "ui.group_click")` holds where the backend does all this (ImGui, FTXUI, tvision). On
+  another backend, a group's `on_click:` is still its last widget's.
+- In a `repeat:`, `{i}` reaches the group's handlers (§6.5). `ariadne_ftxui_test`'s
+  `GroupClick*` and `GroupHover*` tests drive a repeated card list by mouse and keyboard, and
+  `cvcgl_imgui_group_click` taps, drags and hovers one through ImGui's own input.
 
 ## 6. Composition: include / import / load
 

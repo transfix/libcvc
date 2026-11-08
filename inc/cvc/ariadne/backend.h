@@ -174,6 +174,15 @@ struct Backdrop {
   Size size;           // a group's authored size: the backdrop's area is at least this big
 };
 
+// How a group the document made one item (§4.6, Backend::begin_item_group) takes the pointer and
+// the keyboard. `focusable` (it has an `on_click:`): keyboard focus reaches it, Enter fires it, and
+// focus draws it lit. `highlight` (`hover: highlight`): it is drawn lit while the pointer is over
+// it.
+struct ItemGroupOptions {
+  bool focusable = false;
+  bool highlight = false;
+};
+
 // One piece of a line of text with pictures in it (a `text:` with `emoji:`, §5.11), handed to
 // text_runs: text, or a published image drawn one line tall in the line. `text` is also what a
 // picture says where it can't be drawn (its `:shortcode:`).
@@ -205,6 +214,7 @@ struct Capabilities {
   bool bitmap = false;     // shows images in real pixels (a GL window, or a kitty / Sixel terminal)
   bool kitty = false;      // the terminal speaks the kitty graphics protocol
   bool sixel = false;      // the terminal draws DEC Sixel
+  bool item_groups = false; // a group can be one item (begin_item_group): ui.group_click
 };
 
 // A spinner's glyph at `seconds` on a frame clock: ten braille dots a second, the cycle a terminal
@@ -419,6 +429,18 @@ public:
   // IsMouseDragging()); a mock/test backend can drive them. A disabled item reports false for both.
   virtual bool item_hovered() { return false; }
   virtual bool item_dragged() { return false; }
+  // §4.6 a group with `on_click:`, `on_hover:`, `on_hover_end:` or `hover: highlight` is ONE item:
+  // begin_item_group comes right before its children, end_item_group right after them (balanced,
+  // nested like begin_grid), and after end_item_group the group is the last item, so item_clicked,
+  // item_hovered, item_pointer and set_tooltip report it over its whole area. A widget inside it
+  // that takes its own clicks (a button, a checkbox, a field) keeps them: a click there is not the
+  // group's. `id` is stable per group instance (the core's id: or its place in the tree). Default:
+  // no bracket, so the last child drawn stays the last item.
+  virtual void begin_item_group(const char *id, const ItemGroupOptions &opts) {
+    (void)id;
+    (void)opts;
+  }
+  virtual void end_item_group() {}
   // Whether the LAST item drawn shows in its window, not scrolled out of view or clipped away. An
   // autoplaying video plays while it does (§5.13). Default true: a backend that draws everything.
   virtual bool item_visible() { return true; }

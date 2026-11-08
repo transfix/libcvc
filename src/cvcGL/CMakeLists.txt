@@ -927,6 +927,12 @@ add_test(NAME cvcgl_imgui_windows_menu COMMAND cvcgl_imgui_windows_menu)
 add_executable(cvcgl_imgui_radio test/cvcgl_imgui_radio.cpp)
 target_link_libraries(cvcgl_imgui_radio PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_radio COMMAND cvcgl_imgui_radio)
+# A group with on_click is one item (§5.19): a tap on its text is the group's, on its button the
+# button's, and a press that drags is nobody's; on_hover / on_hover_end follow the pointer. Clicked
+# through ImGui's own input. No window, no GL.
+add_executable(cvcgl_imgui_group_click test/cvcgl_imgui_group_click.cpp)
+target_link_libraries(cvcgl_imgui_group_click PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_group_click COMMAND cvcgl_imgui_group_click)
 # Scrolling with a finger (TouchScroll): a drag scrolls the window under it and a fling glides
 # against ui.scroll_friction, while sliders, fields being edited and title bars keep their drags.
 # Touches fed through ImGui's own input. No window, no GL.
