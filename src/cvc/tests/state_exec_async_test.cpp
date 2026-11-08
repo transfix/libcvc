@@ -1503,3 +1503,168 @@ TEST(AsyncSchedulerStop, HZ14_StopFromAnotherThreadEndsSyncRun) {
   EXPECT_EQ(sched.sync_run_steps(100), 100u); // it runs on
   EXPECT_TRUE(sched.kill(pid));
 }
+
+// --- Stage 1 groups (td 8.2) ---
+
+// The includes the cases below add to the file's own.
+#include <atomic>
+#include <cvc/state/state_exec/async_host.h>
+#include <memory>
+
+namespace {
+
+// kill_owner's world (S1.4): an async scheduler with an id, so the step rate a kill reads to
+// charge a cancelled call is published to the tree under state_exec.schedulers (a write whose
+// slots run then), and (hold), an async function on the app's background pool that runs until its
+// call is cancelled. Processes are submitted with the owner "doc".
+struct kill_owner_world {
+  cvc::app app;
+  cvc::state &tree = cvc::state::instance(app);
+  async_scheduler sched;
+  std::unique_ptr<async_host> host;
+  intrinsics_context ictx;
+  environment_ptr env = builtins::make_default_environment();
+
+  explicit kill_owner_world(const std::string &id) {
+    sched.set_watch_root(&tree);
+    sched.set_id(id);
+    host = std::make_unique<async_host>(sched, &app);
+    ictx.sched = &sched;
+    ictx.root = &tree;
+    ictx.proc = make_process();
+    register_intrinsics(env, &ictx);
+    register_async_fn(env, *host, "hold", [](std::span<const value_t>) -> async_kernel {
+      return [](async_call &call) -> value_t {
+        while (!call.cancelled())
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        throw std::runtime_error("hold: cancelled");
+      };
+    });
+  }
+  ~kill_owner_world() { host->shutdown(); } // before the scheduler it posts to
+
+  int submit(const std::string &script) {
+    execute_options opts;
+    opts.env = env;
+    opts.owner = "doc";
+    opts.max_time = 60.0;
+    return sched.execute(script, opts);
+  }
+  // `pid`'s status and exit error, for a failure's message.
+  std::string describe(int pid) const {
+    const auto i = sched.get_process_info(pid);
+    return "pid " + std::to_string(pid) + ": " + (i ? to_string(i->status) : "gone") + " " +
+           sched.get_exit_error(pid).value_or("");
+  }
+  std::optional<process_status> status(int pid) const {
+    const auto i = sched.get_process_info(pid);
+    return i ? std::optional<process_status>(i->status) : std::nullopt;
+  }
+  // Pump until `done()`, for at most 10 s; whether it held.
+  template <class Done> bool pump_until(Done done) {
+    const auto t0 = std::chrono::steady_clock::now();
+    while (!done()) {
+      if (std::chrono::steady_clock::now() - t0 > std::chrono::seconds(10))
+        return false;
+      sched.drain_ingress();
+      sched.sync_run_steps(100000, 0.02);
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return true;
+  }
+  // A new rate in the tree, so the next read of it publishes it.
+  void change_rate() {
+    tree("state_exec.defaults.limits.async_steps_per_cpu_ms").value(std::string("2000"));
+  }
+};
+
+} // namespace
+
+// KO-1 (S1.4): kill_owner over a snapshot. The owner has a finished process, two parked on
+// msg-recv and one parked on a (hold) call. Killing that one cancels its call and reads the rate,
+// whose publication runs a tree slot that reaps the finished process and submits another of the
+// owner's. Every process of the owner alive at the call is killed, the count is the three it
+// killed, and the process submitted during it is not among them. Before, the loop walked the live
+// process table that the slot erased from and inserted into.
+TEST(AsyncScheduler, KO01_KillOwnerSurvivesSlotsThatReapAndSubmit) {
+  kill_owner_world w("ko01");
+  const int done = w.submit("1");
+  ASSERT_TRUE(w.pump_until([&] { return w.status(done) == process_status::terminated; }));
+  const int a = w.submit(R"((begin (msg-recv "ko01.a") 1))");
+  const int b = w.submit(R"((begin (msg-recv "ko01.b") 1))");
+  const int holder = w.submit("(hold)");
+  ASSERT_TRUE(w.pump_until([&] {
+    return w.status(a) == process_status::waiting && w.status(b) == process_status::waiting &&
+           w.status(holder) == process_status::waiting;
+  })) << w.describe(a)
+      << "; " << w.describe(b) << "; " << w.describe(holder);
+  w.change_rate();
+  std::atomic<bool> armed{true};
+  bool reaped = false;
+  int submitted = -1;
+  boost::signals2::scoped_connection slot =
+      w.tree("state_exec.schedulers").childChanged.connect([&](const std::string &) {
+        if (!armed.exchange(false))
+          return;
+        reaped = w.sched.reap(done);
+        submitted = w.submit(R"((begin (msg-recv "ko01.c") 1))");
+      });
+  const int killed = w.sched.kill_owner("doc");
+  slot.disconnect();
+  EXPECT_FALSE(armed.load()) << "the rate's publication ran no slot";
+  EXPECT_TRUE(reaped);
+  EXPECT_EQ(killed, 3);
+  for (const int pid : {a, b, holder}) {
+    EXPECT_EQ(w.status(pid), process_status::killed) << "pid " << pid;
+    EXPECT_EQ(w.sched.get_exit_error(pid), "owner_reaped") << "pid " << pid;
+  }
+  EXPECT_FALSE(w.status(done).has_value()) << "the slot's reap";
+  ASSERT_GE(submitted, 0);
+  ASSERT_TRUE(w.status(submitted).has_value());
+  EXPECT_FALSE(is_finished(*w.status(submitted))) << "a process submitted during kill_owner";
+  w.sched.kill(submitted);
+}
+
+// KO-2 (S1.4): a kill that throws does not stop kill_owner. Four of the owner's processes are
+// parked on (stuck n) calls, work that never settles and whose cancel hook throws, naming n: every
+// kill throws. Every process is still killed, and the first throw (that of the first hook to run)
+// propagates. Before, the first throw ended the loop, leaving the processes after it alive.
+TEST(AsyncScheduler, KO02_AThrowingKillDoesNotStopTheRest) {
+  std::vector<std::string> thrown; // the hooks that threw, in order; outlives the world
+  kill_owner_world w("ko02");
+  register_async_fn(w.env, *w.host, "stuck", [&thrown](std::span<const value_t> a) -> async_work {
+    const std::string tag = to_string(a[0]);
+    async_work work;
+    work.start = [&thrown, tag](const std::shared_ptr<async_call> &call) {
+      call->on_cancel([&thrown, tag] {
+        thrown.push_back(tag);
+        throw std::runtime_error("ko02: the kill of " + tag + " threw");
+      });
+    };
+    return work;
+  });
+  std::vector<int> pids;
+  for (int k = 0; k < 4; ++k)
+    pids.push_back(w.submit("(stuck " + std::to_string(k) + ")"));
+  ASSERT_TRUE(w.pump_until([&] {
+    for (const int pid : pids)
+      if (w.status(pid) != process_status::waiting)
+        return false;
+    return true;
+  }));
+  std::string propagated;
+  try {
+    w.sched.kill_owner("doc");
+    ADD_FAILURE() << "kill_owner did not throw";
+  } catch (const std::runtime_error &e) {
+    propagated = e.what();
+  }
+  std::printf("KO-2: %zu kills threw\n", thrown.size());
+  ASSERT_FALSE(thrown.empty());
+  EXPECT_EQ(thrown.size(), pids.size()) << "kill_owner stopped at a throw";
+  EXPECT_EQ(propagated, "ko02: the kill of " + thrown.front() + " threw");
+  for (const int pid : pids) {
+    EXPECT_EQ(w.status(pid), process_status::killed) << w.describe(pid);
+    EXPECT_EQ(w.sched.get_exit_error(pid), "owner_reaped") << w.describe(pid);
+  }
+}
