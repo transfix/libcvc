@@ -53,21 +53,32 @@ struct value {
   double num = 0.0;
   std::string str;
   std::vector<value> arr;
-  std::vector<std::pair<std::string, value>> obj;
+  // An object's members, in order. A plain struct, not std::pair<std::string, value>: instantiating
+  // that pair while value is incomplete checks value's default constructor, whose destructor needs
+  // the pair complete, and clang with libstdc++ 14 rejects the cycle.
+  struct member;
+  std::vector<member> obj;
 
   bool is_number() const { return k == kind::number; }
   bool is_array() const { return k == kind::array; }
   bool is_object() const { return k == kind::object; }
   bool is_string() const { return k == kind::string; }
   // The member named `key` of an object, or nullptr.
-  const value *find(const std::string &key) const {
-    if (k == kind::object)
-      for (const auto &kv : obj)
-        if (kv.first == key)
-          return &kv.second;
-    return nullptr;
-  }
+  const value *find(const std::string &key) const;
 };
+
+struct value::member {
+  std::string first;
+  value second;
+};
+
+inline const value *value::find(const std::string &key) const {
+  if (k == kind::object)
+    for (const auto &kv : obj)
+      if (kv.first == key)
+        return &kv.second;
+  return nullptr;
+}
 
 namespace detail {
 struct reader {
@@ -224,7 +235,7 @@ struct reader {
         value m;
         if (!parse(m, depth + 1))
           return false;
-        v.obj.emplace_back(std::move(key), std::move(m));
+        v.obj.push_back(value::member{std::move(key), std::move(m)});
         ws();
         if (p < end && *p == ',') {
           ++p;
