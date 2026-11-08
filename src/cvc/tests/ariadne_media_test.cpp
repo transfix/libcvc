@@ -36,6 +36,14 @@
 #include <thread>
 #include <vector>
 
+#if defined(_WIN32)
+#include <process.h>
+#define CVC_GETPID() ::_getpid()
+#else
+#include <unistd.h>
+#define CVC_GETPID() ::getpid()
+#endif
+
 using namespace cvc::ariadne;
 namespace media = cvc::ariadne::media;
 using cvc_test::LocalHttpServer;
@@ -59,12 +67,16 @@ const unsigned char *px(const cvc::image &img, int x, int y) {
   return img.data() + (static_cast<std::size_t>(y) * img.width() + x) * 4;
 }
 
-// `img` encoded as `ext` (png, jpg, bmp), as the bytes a server would send.
+// `img` encoded as `ext` (png, jpg, bmp), as the bytes a server would send. The file is this
+// process's and this call's own: ctest runs the cases in separate processes at the same time, and
+// on macOS the main thread's id is the same in every one of them (its pthread_t lives in the dyld
+// shared cache), so a name from the thread id alone was one file they all wrote, read and removed.
 std::string encode(const cvc::image &img, const std::string &ext) {
+  static std::atomic<unsigned> calls{0};
   const std::filesystem::path path =
       std::filesystem::temp_directory_path() /
-      ("ariadne_media_test_" +
-       std::to_string(std::hash<std::thread::id>()(std::this_thread::get_id())) + "." + ext);
+      ("ariadne_media_test_" + std::to_string(CVC_GETPID()) + "_" +
+       std::to_string(calls.fetch_add(1, std::memory_order_relaxed)) + "." + ext);
   cvc::write_image(img, path.string(), 95);
   std::string bytes;
   { // closed before the remove: Windows won't delete a file that is open
