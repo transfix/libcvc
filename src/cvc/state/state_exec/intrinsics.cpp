@@ -11,7 +11,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/state/state.h>
-#include <cvc/state/state_exec/async_host.h> // async calls' futures, for await/await-all
+#include <cvc/state/state_exec/async_host.h>      // async calls' futures, for await/await-all
+#include <cvc/state/state_exec/async_scheduler.h> // a future's owner, against ctx->sched
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/data_job.h>
 #include <cvc/state/state_exec/detail/lock_home.h>
@@ -989,6 +990,15 @@ void park_await(intrinsics_context *ctx, int pid, const std::string &channel,
   request_await(std::move(request));
 }
 
+// S1-Q2 (td 4.9): a threaded future is finished by the scheduler its completion is posted to, so
+// awaiting it from another one raises, before anything reads, parks on or waits for the call. An
+// inline future (no owner) was settled before it returned: a plain value any scheduler may read.
+void check_future_owner(const intrinsics_context *ctx, const detail::awaitable &call) {
+  const async_scheduler *owner = call.owner();
+  if (owner && static_cast<const scheduler_base *>(owner) != ctx->sched)
+    throw dsl_error("RuntimeError", kForeignFutureError, "async");
+}
+
 // (await f [seconds]): an async call's future returns its value or raises its exception once it
 // finishes (at once if it has); a channel future, the value its producer delivers; anything
 // else, itself, after a frame. With seconds, a future that hasn't finished by then raises
@@ -1022,6 +1032,7 @@ value_t intrinsic_await(intrinsics_context *ctx, std::span<const value_t> args) 
       throw dsl_error("RuntimeError",
                       "await: the call can't resume (its future was restored from a snapshot)",
                       "async");
+    check_future_owner(ctx, *call); // msg-recv on a future comes here too
     if (call->finished())
       return call->outcome();
     const std::string channel = *future_channel_of(args[0]);
@@ -1102,6 +1113,7 @@ value_t intrinsic_await_all(intrinsics_context *ctx, std::span<const value_t> ar
       throw dsl_error("RuntimeError",
                       "await-all: a call can't resume (its future was restored from a snapshot)",
                       "async");
+    check_future_owner(ctx, *call);
     if (call->finished())
       continue;
     // The first one still running: wait for it, then look at the list again.
@@ -1661,6 +1673,7 @@ std::function<spawn_setup(const intrinsics_context &)> make_spawn_context(
           after_register = std::move(after_register)](const intrinsics_context &parent) {
     auto child = std::make_shared<intrinsics_context>();
     child->sched = parent.sched;
+    child->host = parent.host; // the same group's async host (td 4.15)
     child->root = parent.root;
     child->root_pins = parent.root_pins;
     child->tracker = parent.tracker;
