@@ -209,6 +209,10 @@ public:
   // (AppRuntime::declare_thread_affine_prefix forwards here): an isolated document whose prefix is
   // or contains it gets a host-affinity group. Before the document is loaded.
   void declare_thread_affine_prefix(const std::string &prefix);
+  // The document's programs this Runtime does not hold, which run elsewhere: AppRuntime::load
+  // passes its init: (run_init) and its tests: (run_program). The isolation rules read them with
+  // the document's own (S1-Q6). Each call replaces the last; before set_root.
+  void set_document_programs(std::vector<std::string> programs);
 
   // Drain the §4 read-lane diagnostics accumulated during render() — one message per
   // distinct failing predicate (a parse error, a runtime error, or a per-frame budget

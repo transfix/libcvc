@@ -1260,6 +1260,7 @@ struct Runtime::Impl {
   bool placement_decided_ = false;       // for the document set_root last gave
   std::string isolation_reason_ = "no document has been set yet";
   std::vector<std::string> thread_affine_; // declare_thread_affine_prefix
+  std::vector<std::string> document_programs_; // set_document_programs: init:, tests:
   // Decide where the programs run: when `submitting` (a program is about to start) or a document
   // has been set, unless that document's placement is decided already. Host thread.
   void ensure_placement(bool submitting);
@@ -3479,6 +3480,8 @@ std::string Runtime::Impl::isolation_verdict(bool &host_affinity) const {
                                                &signal_script_, &doc_functions};
   for (const KeyBinding &b : key_bindings_)
     programs.push_back(&b.on);
+  for (const std::string &p : document_programs_) // its init: and tests:, run elsewhere
+    programs.push_back(&p);
   const std::function<void(const Widget &)> collect = [&](const Widget &w) {
     for (const std::string *p : {&w.on, &w.on_click, &w.on_hover, &w.on_drag, &w.on_drag_start,
                                  &w.on_drag_end, &w.on_top, &w.init_script, &w.tick_script})
@@ -4370,6 +4373,11 @@ std::string Runtime::isolation_reason() const {
 
 void Runtime::declare_thread_affine_prefix(const std::string &prefix) {
   m_->thread_affine_.push_back(prefix);
+}
+
+void Runtime::set_document_programs(std::vector<std::string> programs) {
+  m_->document_programs_ = std::move(programs);
+  m_->placement_decided_ = false; // read when the document is placed again
 }
 
 std::vector<std::string> Runtime::take_reactive_warnings() {
