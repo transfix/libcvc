@@ -267,6 +267,7 @@ add_executable(nav_clearance_cost_test nav_clearance_cost_test.cpp)
 add_executable(nav_material_test nav_material_test.cpp)
 add_executable(nav_belief_material_test nav_belief_material_test.cpp)
 add_executable(nav_belief_material_net_test nav_belief_material_net_test.cpp)
+add_executable(nav_belief_material_controller_test nav_belief_material_controller_test.cpp)
 add_executable(nav_material_deploy_test nav_material_deploy_test.cpp)
 add_executable(nav_coef_energy_test nav_coef_energy_test.cpp)
 add_executable(nav_material_rollout_grad_test nav_material_rollout_grad_test.cpp)
@@ -473,6 +474,7 @@ set(TEST_TARGETS
   nav_material_test
   nav_belief_material_test
   nav_belief_material_net_test
+  nav_belief_material_controller_test
   nav_material_deploy_test
   nav_material_raster_test
   nav_coef_energy_test
@@ -1157,6 +1159,13 @@ target_link_libraries(nav_belief_material_test
 )
 
 target_link_libraries(nav_belief_material_net_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(nav_belief_material_controller_test
   PRIVATE
     cvc
     GTest::gtest
@@ -2388,6 +2397,7 @@ target_compile_features(nav_coef_train_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_test PRIVATE cxx_std_17)
 target_compile_features(nav_belief_material_test PRIVATE cxx_std_17)
 target_compile_features(nav_belief_material_net_test PRIVATE cxx_std_17)
+target_compile_features(nav_belief_material_controller_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_deploy_test PRIVATE cxx_std_17)
 target_compile_features(nav_coef_energy_test PRIVATE cxx_std_17)
 target_compile_features(nav_material_rollout_grad_test PRIVATE cxx_std_17)
@@ -2757,6 +2767,7 @@ cvc_discover_tests(nav_clearance_cost_test)
 cvc_discover_tests(nav_material_test)
 cvc_discover_tests(nav_belief_material_test)
 cvc_discover_tests(nav_belief_material_net_test)
+cvc_discover_tests(nav_belief_material_controller_test)
 cvc_discover_tests(nav_material_deploy_test)
 cvc_discover_tests(nav_material_raster_test)
 cvc_discover_tests(nav_coef_energy_test)
