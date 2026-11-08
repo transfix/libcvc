@@ -99,8 +99,13 @@ public:
   // Register a host verb the .ari program can call. register_verb is SYNCHRONOUS (fn runs
   // inline on the drain thread, no args/return).
   //
-  // register_async_verb makes `name` an async function on the app's async host
-  // (docs/STATE_EXEC_EXCEPTIONS.md 3):
+  // Every registration below is made on the host thread, outside a frame (not from a verb or a
+  // function while one runs). Register before load(): one registered later has the document's
+  // placement decided again before its next program (an isolated document may then move, see
+  // Runtime::isolated_group), so it is bound there as in group 0.
+  //
+  // register_async_verb makes `name` an async function on the calling program's async host (the
+  // app's, or an isolated document's group's) (docs/STATE_EXEC_EXCEPTIONS.md 3):
   // - (name) parks the calling program while `work` runs on the app's background task pool,
   //   then returns `work`'s string;
   // - an exception `work` throws raises at the call;
