@@ -26,6 +26,17 @@
 namespace cvc {
 namespace gl {
 
+namespace {
+// The node whose own pose a scene-less publishPoseMatrix is writing on this
+// thread, or null; the scope restores the outer one. Per thread, as
+// state_publisher's flushing() is: the handler that write fires runs inline
+// here, while a matrix another thread writes meanwhile (a worker-pumped
+// group's, a publisher's flush) is not the node's echo. A plain member flag
+// was read on that other thread as the node's own thread set it (a race), and
+// dropped its write (STATE_EXEC_THREADED.md 4.8).
+thread_local const GraphicsNode *t_writingPose = nullptr;
+} // namespace
+
 GraphicsNode::GraphicsNode(cvc::app &ctx, const std::string &statePath, const std::string &name)
     : SceneNode(ctx, statePath), m_name(name), m_transform(vtkSmartPointer<vtkMatrix4x4>::New()),
       m_worldMatrix(vtkSmartPointer<vtkMatrix4x4>::New()),
@@ -303,12 +314,12 @@ void GraphicsNode::publishPoseMatrix(const double matrix[16]) {
   }
   // No scene, so no publisher: write directly (the slow path, but a scene-less
   // node is not on an animation loop). The handler this fires runs inline on
-  // this thread; m_writingPose tells it the value is our own.
+  // this thread; t_writingPose tells it the value is our own.
   struct writing_scope {
-    bool &flag;
-    explicit writing_scope(bool &f) : flag(f) { flag = true; }
-    ~writing_scope() { flag = false; }
-  } writing(m_writingPose);
+    const GraphicsNode *outer = t_writingPose;
+    explicit writing_scope(const GraphicsNode *self) { t_writingPose = self; }
+    ~writing_scope() { t_writingPose = outer; }
+  } writing(this);
   cvc::state::instance(app())(m_pathMatrix).value(state_publisher::format_matrix(matrix));
 }
 
@@ -666,8 +677,9 @@ void GraphicsNode::handleStateChanged(const std::string &childState) {
     }
   }
   // A scene-less node's setPoseMatrix writing its own value (see
-  // publishPoseMatrix): the echo arrives here, inline, during that write.
-  if (childState == "matrix" && m_writingPose)
+  // publishPoseMatrix): the echo arrives here, inline, during that write, on
+  // the writing thread. Another thread's matrix meanwhile is not the echo.
+  if (childState == "matrix" && t_writingPose == this)
     return;
   // The metadata mirror is written by setMetadata and read by nobody here: it
   // changes nothing drawn, so there is nothing to marshal or redraw -- for this

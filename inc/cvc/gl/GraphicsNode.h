@@ -485,9 +485,6 @@ private:
   // A parked pose is waiting (and one apply is queued for it). Atomic so the
   // owner-thread fast path can see "nothing parked" without taking the lock.
   std::atomic<bool> m_posePending{false};
-  // True only while a scene-less node writes its own pose to state directly:
-  // the handler that write fires runs inline on this thread and is our echo.
-  bool m_writingPose = false;
 
   // Clip plumbing (owner thread). The vtkPlane objects are SHARED down the tree:
   // a descendant's renderer holds its ancestors' plane objects, so moving a plane
