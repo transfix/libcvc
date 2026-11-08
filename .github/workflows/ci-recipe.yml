@@ -90,25 +90,52 @@ jobs:
         with:
           python-version: "3.12"
 
-      # The cvcpkg CLI itself, from the same source and pin as publish-cvcpkg.yml
-      # and the cvcpkg-build-tools action: cy-pca/cvcpkg master, so builder and
-      # server/schema fixes arrive without a release cadence.
+      # The cvcpkg CLI itself: the released, packaged cvcpkg, installed the way a
+      # developer installs it (cvcpkg.org's install.sh / install.ps1, see
+      # cy-pca/cvcpkg docs/pypi-install.md), not a pip install of a git repo.
+      # The installer takes the registry's cvcpkg package for this platform and
+      # checks its sha256. Where the registry has no package at the pinned
+      # version (macOS, whose newest registry package is 2.5.1), it falls back to
+      # the checksum-verified standalone binary attached to the cvcpkg-v<version>
+      # GitHub release. The pin keeps every lane on the same cvcpkg; bump it to
+      # take a new release.
       #
-      # Not transfix/libcvc-deps: that copy stopped tracking upstream in
-      # September, and its builder still exports DYLD_LIBRARY_PATH=<prefix>/lib
-      # around every build step. dyld searches DYLD_LIBRARY_PATH by leaf name
-      # ahead of a library's install path, so the runner's Homebrew cmake bound
-      # its libiconv.2.dylib to the prefix's GNU libiconv (which exports
-      # _libiconv, not _iconv) and aborted before configure. Upstream moved the
-      # prefix to DYLD_FALLBACK_LIBRARY_PATH (cy-pca/cvcpkg#221), which only
-      # fills in what a binary cannot find at its install path or rpaths: system
-      # tools keep the system libraries and the ctest step still finds the
-      # prefix's dylibs.
-      - name: Install cvcpkg
+      # Not transfix/libcvc-deps@master, which this lane used to pip install:
+      # that copy stopped tracking upstream in September, and its builder still
+      # exports DYLD_LIBRARY_PATH=<prefix>/lib around every build step. dyld
+      # searches DYLD_LIBRARY_PATH by leaf name ahead of a library's install
+      # path, so the runner's Homebrew cmake bound its libiconv.2.dylib to the
+      # prefix's GNU libiconv (which exports _libiconv, not _iconv) and aborted
+      # before configure. cvcpkg 2.5.1+ puts the prefix on
+      # DYLD_FALLBACK_LIBRARY_PATH instead (cy-pca/cvcpkg#221), which only fills
+      # in what a binary cannot find at its install path or rpaths: system tools
+      # keep the system libraries and the ctest step still finds the prefix's
+      # dylibs.
+      - name: Install cvcpkg (POSIX)
+        if: runner.os != 'Windows'
         shell: bash
+        env:
+          CVCPKG_VERSION: "2.5.12"
+          CVCPKG_INSTALL_DIR: ${{ runner.temp }}/cvcpkg-bin
         run: |
-          pip install 'git+https://github.com/cy-pca/cvcpkg@master'
-          cvcpkg --version
+          set -euo pipefail
+          curl -fsSL https://cvcpkg.org/install.sh | sh
+          echo "$CVCPKG_INSTALL_DIR" >> "$GITHUB_PATH"
+          "$CVCPKG_INSTALL_DIR/cvcpkg" --version
+
+      - name: Install cvcpkg (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CVCPKG_VERSION: "2.5.12"
+          CVCPKG_INSTALL_DIR: ${{ runner.temp }}\cvcpkg-bin
+        run: |
+          $ErrorActionPreference = 'Stop'
+          irm https://cvcpkg.org/install.ps1 | iex
+          # install.ps1 adds the dir to the USER Path, which later steps do not
+          # read; GITHUB_PATH does.
+          Add-Content -Path $env:GITHUB_PATH -Value $env:CVCPKG_INSTALL_DIR
+          & (Join-Path $env:CVCPKG_INSTALL_DIR 'cvcpkg.exe') --version
 
       # Put cl.exe/link.exe on PATH before cvcpkg runs a recipe's build.ps1.
       # The recipes import vcvars themselves (_common/env-windows.ps1's
