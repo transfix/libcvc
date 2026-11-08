@@ -1256,6 +1256,43 @@ TEST(AriadneIsolatedDocs, AThreadAffinePrefixAboveTheDocumentMakesItHost) {
   EXPECT_EQ(slot_threads, std::set<std::thread::id>{frame_thread});
 }
 
+// R1b-mid c-m4: tearing a Runtime down inside a pump_all of the app's pool (here a host native that
+// closes another document, run in group 0 while exec_pump_frame pumps it beside an isolated
+// document's group) is refused in every build: logged, then aborted before anything is touched.
+TEST(AriadneIsolatedDocsDeathTest, ATeardownInsideAPumpIsRefused) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_DEATH(
+      {
+        cvc::app app;
+        isolate_documents(app, 0);
+        Runtime isolated(app, "docs.beside"); // makes exec_pump_frame a pump_all
+        MockBackend mb;
+        isolated.set_backend(&mb);
+        isolated.set_channel_policy({}, {}, true, true);
+        isolated.set_root(group({text("beside")}));
+        if (!isolated.isolated_group())
+          std::exit(0); // not isolated: no pump_all to be inside
+        auto victim = std::make_unique<Runtime>(app, "docs.victim");
+        victim->set_root(group({text("victim")}));
+        register_action_intrinsics([&](std::shared_ptr<cvc::state_exec::environment> env,
+                                       cvc::state_exec::intrinsics_context &) {
+          cvc::state_exec::builtins::register_fn(env, "close-victim",
+                                                 [&](std::span<const cvc::state_exec::value_t>) {
+                                                   victim.reset();
+                                                   return cvc::state_exec::value_t{};
+                                                 });
+        });
+        Runtime closer(app, ""); // no prefix: group 0, which exec_pump_frame pumps on its caller
+        closer.set_backend(&mb);
+        closer.run_program("(close-victim)", [](const std::string &) {});
+        closer.drain_begin();
+        isolated.drain_begin();
+        app.exec_pump_frame();
+        std::exit(0); // not refused
+      },
+      "");
+}
+
 // §4.6 input seam: set_key_program submits a resident that receives events posted via post_input,
 // reading the delivered event dict with (get-attr event ...). post_input BEFORE drain -> delivered
 // this frame (feed-before-drain contract). Keyboard events feed the key resident.

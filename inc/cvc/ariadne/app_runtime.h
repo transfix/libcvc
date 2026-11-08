@@ -44,6 +44,7 @@ public:
   // adapter (nullptr = no scene: a scene-bearing document warns and drops its scene).
   // `scene`, once given, must outlive this AppRuntime.
   AppRuntime(cvc::app &app, std::string prefix, SceneAdapter *scene = nullptr);
+  // Host thread, outside a pump (Runtime::~Runtime).
   ~AppRuntime();
   AppRuntime(const AppRuntime &) = delete;
   AppRuntime &operator=(const AppRuntime &) = delete;
@@ -172,7 +173,9 @@ public:
   // Load + mount a .ari document, running its init:/on_* scripts and (via the SceneAdapter,
   // if any) realizing its scene under the state prefix. Returns non-fatal warnings; THROWS
   // std::runtime_error on a fatal load (min_libcvc gate, parse error, no yaml support), and
-  // document_args_error when its arguments do not match its args: block or ask for --help.
+  // document_args_error when its arguments do not match its args: block or ask for --help. It
+  // decides where the document's programs run (Runtime::isolated_group). Host thread, outside a
+  // pump.
   std::vector<std::string> load(const std::string &path);
 
   // Whether the last load()ed document declares an args: block.
@@ -182,7 +185,8 @@ public:
   // runs each with runtime().run_program).
   const std::vector<std::pair<std::string, std::string>> &tests() const;
 
-  // Mount a programmatically-built widget tree instead of a file. Applied next frame.
+  // Mount a programmatically-built widget tree instead of a file. Applied next frame. Host thread,
+  // outside a pump (Runtime::set_root).
   void set_root(Widget root);
 
   // --- per-frame (NEUTRAL core; no draw, no dt) ---

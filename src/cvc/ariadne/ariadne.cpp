@@ -979,6 +979,23 @@ void assert_outside_pump(const cvc::app &app) {
 #endif
 }
 
+// Tearing a Runtime down and moving a document (c-m4) kill and reap on a scheduler a worker of the
+// same pump_all may be pumping, and destroy its group, which then aborts anyway: inside a pump_all
+// (a host verb that closes a document, run from exec_pump_frame's group 0, say) they are refused in
+// every build, logged and then aborted before anything is touched.
+void refuse_inside_pump(cvc::app &app, const std::string &what) noexcept {
+  const cvc::exec_pool *pool = app.exec_pool_probe();
+  if (!pool || !pool->in_pump_all())
+    return;
+  try {
+    app.log(1, "ari: " + what +
+                   " inside a pump of the app's pool: refused (host thread, outside a "
+                   "pump)");
+  } catch (...) {
+  }
+  std::abort();
+}
+
 // ariadne.exec.isolate_documents (S1-Q6): on for "1" or "true".
 bool isolate_documents_on(cvc::state &root) {
   cvc::state *node = root.findDescendant("ariadne.exec.isolate_documents");
@@ -3300,6 +3317,9 @@ void Runtime::Impl::emit_windows_menu_items() {
 std::atomic<uint64_t> Runtime::Impl::owner_seq{0};
 
 Runtime::Impl::~Impl() {
+  // Host thread, outside a pump: the kills below would race a worker on the group, and its
+  // destruction abort. Refused in every build, before anything is touched.
+  refuse_inside_pump(app, "tearing down the document at '" + prefix + "'");
   // Teardown (S1.10, S1-Q8), each step catching and logging what it throws. First close anything
   // the document left open (a (stream-open) with no (stream-close)), while the app, its state tree
   // and the document's scheduler are still alive: each owned resource's destructor runs here
@@ -4288,6 +4308,7 @@ void Runtime::set_reactive_frame_budget(double seconds) {
 }
 
 void Runtime::run_program(std::string script, std::function<void(const std::string &)> done) {
+  assert_outside_pump(m_->app); // host thread, outside a pump (c-m4)
   Impl::QueuedAction a;
   a.event = std::move(script);
   a.prefix = m_->prefix;

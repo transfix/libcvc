@@ -54,6 +54,9 @@ public:
   // path with a leading '/' is resolved app-root-absolute instead. Empty prefix
   // = binds are used as-is (app-root-relative).
   explicit Runtime(cvc::app &app, std::string prefix = std::string());
+  // Tears the document down: closes what it opened, kills and reaps its processes, and destroys
+  // its group. Host thread, outside a pump (inside an app pool's pump_all it is refused: logged,
+  // then aborted).
   ~Runtime();
 
   Runtime(const Runtime &) = delete;
@@ -156,6 +159,7 @@ public:
   // drain() calls `done` with "" for a normal finish, else why it did not finish ("failed: " an
   // uncaught exception and where it was raised, "did not complete: " a limit or a kill). Its
   // ending is reported only to `done`, never as a warning. `ari test` runs a tests: case this way.
+  // Host thread, outside a pump.
   void run_program(std::string script, std::function<void(const std::string &)> done);
 
   // Render one frame: apply any pending tree swap, then walk the tree driving the
