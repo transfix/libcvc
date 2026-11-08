@@ -231,6 +231,51 @@ if(CVC_ENABLE_IMGUI)
   endif()
 endif()
 
+# Dear ImGui's FreeType font loader, which the cvcpkg imgui bundle ships as source from
+# 1.92.9+cvc.4 (include/imgui/misc/freetype), compiled against the FreeType the hosts link anyway
+# (VTK's text): it draws colour glyphs, so the bundled emoji font (Twemoji, COLR) shows in colour.
+# Without it ImGui keeps stb_truetype, which has none, and the overlay merges no emoji font.
+set(CVC_IMGUI_FREETYPE OFF)
+if(CVC_ENABLE_IMGUI)
+  if(CVC_IMGUI_VIA_FIND)
+    set(_cvc_imgui_ft "${CVC_IMGUI_INCLUDE_DIR}/misc/freetype/imgui_freetype.cpp")
+  else()
+    set(_cvc_imgui_ft "${_cvc_imgui_inc}/misc/freetype/imgui_freetype.cpp")
+  endif()
+  if(EXISTS "${_cvc_imgui_ft}")
+    find_package(Freetype QUIET)
+    if(TARGET Freetype::Freetype)
+      target_sources(cvcGL PRIVATE "${_cvc_imgui_ft}")
+      target_link_libraries(cvcGL PRIVATE Freetype::Freetype)
+      target_compile_definitions(cvcGL PRIVATE CVC_IMGUI_FREETYPE)
+      set(CVC_IMGUI_FREETYPE ON)
+      message(STATUS "cvcGL: ImGui draws with FreeType (colour emoji)")
+    else()
+      message(STATUS "cvcGL: no FreeType -- ImGui keeps stb_truetype (no colour emoji)")
+    endif()
+  else()
+    message(STATUS "cvcGL: this imgui ships no FreeType loader -- no colour emoji")
+  endif()
+endif()
+
+# The fonts the overlay falls back on (fonts/README.md): DejaVu Sans Mono, for the symbols a UI
+# font lacks and as the browser builds' UI font, and Twemoji's colour emoji. Installed beside the
+# library's data; copied into the build tree too, where a program in <build>/bin finds them the
+# same way (<bin>/../share/libcvc/fonts).
+include(GNUInstallDirs)
+set(CVCGL_FONT_FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/fonts/DejaVuSansMono.ttf"
+    "${CMAKE_CURRENT_SOURCE_DIR}/fonts/Twemoji.Mozilla.ttf"
+    "${CMAKE_CURRENT_SOURCE_DIR}/fonts/LICENSE.DejaVu"
+    "${CMAKE_CURRENT_SOURCE_DIR}/fonts/LICENSE.Twemoji.md"
+    "${CMAKE_CURRENT_SOURCE_DIR}/fonts/README.md")
+install(FILES ${CVCGL_FONT_FILES} DESTINATION ${CMAKE_INSTALL_DATADIR}/libcvc/fonts)
+file(COPY ${CVCGL_FONT_FILES} DESTINATION "${CMAKE_BINARY_DIR}/share/libcvc/fonts")
+set(CVCGL_FONT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/fonts" CACHE INTERNAL
+    "cvcGL's fallback fonts, for the wasm hosts to embed at /usr/share/libcvc/fonts")
+target_compile_definitions(cvcGL PRIVATE
+                           CVC_GL_FONT_DIR="${CMAKE_INSTALL_FULL_DATADIR}/libcvc/fonts")
+
 # ---------------------------------------------------------------------------
 # SDL3 (optional): the input + peripheral seam — keyboard/mouse/gamepad and later
 # audio/microphone/camera — native AND WebAssembly (wasm/wasm-mt, verified with VTK).
@@ -396,6 +441,14 @@ if(_cvc_turbojpeg_tgt AND _cvcgl_type STREQUAL "STATIC_LIBRARY")
   set(CVCGL_TURBOJPEG_DEP "find_dependency(libjpeg-turbo CONFIG)")
 else()
   set(CVCGL_TURBOJPEG_DEP "")
+endif()
+
+# @CVCGL_FREETYPE_DEP@ — a find_dependency(Freetype) line iff a STATIC cvcGL linked FreeType for
+# ImGui's font loader: its export then names Freetype::Freetype; a shared cvcGL keeps it private.
+if(CVC_IMGUI_FREETYPE AND _cvcgl_type STREQUAL "STATIC_LIBRARY")
+  set(CVCGL_FREETYPE_DEP "find_dependency(Freetype)")
+else()
+  set(CVCGL_FREETYPE_DEP "")
 endif()
 
 # Substitutes @CVCGL_VTK_COMPONENTS@ (the list cvcGL links) into the config so
@@ -890,6 +943,14 @@ add_test(NAME cvcgl_imgui_media COMMAND cvcgl_imgui_media)
 add_executable(cvcgl_imgui_spinner test/cvcgl_imgui_spinner.cpp)
 target_link_libraries(cvcgl_imgui_spinner PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_spinner COMMAND cvcgl_imgui_spinner)
+# The overlay's fonts: DejaVu Sans Mono's symbols under the UI font, and Twemoji's colour emoji
+# where ImGui has 32-bit characters and FreeType (the cvcpkg imgui 1.92.9+cvc.4). No window, no GL.
+add_executable(cvcgl_imgui_fonts test/cvcgl_imgui_fonts.cpp)
+target_link_libraries(cvcgl_imgui_fonts PRIVATE cvcGL)
+if(CVC_IMGUI_FREETYPE)
+  target_compile_definitions(cvcgl_imgui_fonts PRIVATE CVC_IMGUI_FREETYPE)
+endif()
+add_test(NAME cvcgl_imgui_fonts COMMAND cvcgl_imgui_fonts)
 # text_view and message_input (§5.15) driven by synthesized keys and the wheel: Enter sends and keeps
 # the focus, Shift+Enter adds a line, the log's top asks for older lines and lines added above keep
 # it in place. No window, no GL.
