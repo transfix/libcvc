@@ -6488,7 +6488,7 @@ Value tf_seq(std::vector<Value> items) {
   return v;
 }
 
-Value tf_map(std::vector<std::pair<std::string, Value>> entries) {
+Value tf_map(std::vector<Value::Entry> entries) {
   Value v;
   v.kind = Value::Kind::Map;
   v.entries = std::move(entries);
