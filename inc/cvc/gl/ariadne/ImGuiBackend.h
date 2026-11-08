@@ -194,6 +194,9 @@ private:
     int color_pushes = 0;         // table border-colour style pushes to pop
   };
   std::vector<GridState> m_grids;
+  // Whether the next widget is a cell of a horizontal row with no col_widths (its cells side by
+  // side): a slider there leaves the cells after it their room.
+  bool in_flow_row() const { return !m_grids.empty() && m_grids.back().flow; }
 
   // §11.4 geometry persistence. The core seeds the NEXT window / grid before begin_* and reads the
   // current geometry back after. m_pendingSeed / m_pendingTracks are consumed by the next

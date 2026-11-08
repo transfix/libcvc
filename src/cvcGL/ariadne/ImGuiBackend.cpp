@@ -1050,10 +1050,22 @@ ariadne::BoolEdit ImGuiBackend::checkbox(const char *label, bool current) {
 // back into an auto-width column, which ImGui re-fits to its content each frame: the column shrank
 // to 65% of itself every frame until the 48 px floor snapped it back, so the slider never held a
 // width long enough to be dragged.
-void reserve_label_width(const char *label) {
+//
+// In a row of widgets side by side (a player's Play, seek slider and Mute) the widget takes at most
+// the 16 font sizes ImGui gives an auto-resizing window's items, so the cells after it keep their
+// room: filling the line, as in a table cell, pushed them out of the window.
+void reserve_label_width(const char *label, bool in_row) {
   const ImGuiStyle &style = ImGui::GetStyle();
   const float labelW = ImGui::CalcTextSize(label, nullptr, /*hide_text_after_double_hash=*/true).x;
   const ImGuiWindow *win = ImGui::GetCurrentWindow();
+  if (in_row) {
+    const float room = (win->Flags & ImGuiWindowFlags_AlwaysAutoResize)
+                           ? FLT_MAX
+                           : ImGui::GetContentRegionAvail().x;
+    const float fit = ImMin(room, 16.0f * ImGui::GetFontSize()) - style.ItemInnerSpacing.x - labelW;
+    ImGui::SetNextItemWidth(ImMax(fit, 48.0f));
+    return;
+  }
   // A window that fits its widgets grows to the label instead -- and shrinking the frame to the
   // window's width there would only shrink the window with it, frame after frame. It grows only as
   // far as the view's edge, though, which on a phone is near: ImGui gives such a window's widgets
@@ -1082,7 +1094,7 @@ ariadne::IntEdit ImGuiBackend::slider_int(const char *label, const char *key, in
                                           int hi) {
 #ifdef CVC_ENABLE_IMGUI
   int &v = *cache_int(key, current, ImGui::IsAnyItemActive());
-  reserve_label_width(label);
+  reserve_label_width(label, in_flow_row());
   const bool changed = ImGui::SliderInt(label, &v, lo, hi);
   const bool committed = ImGui::IsItemDeactivatedAfterEdit(); // the drag ended
   return {changed, committed, v};
@@ -1099,7 +1111,7 @@ ariadne::DoubleEdit ImGuiBackend::slider_double(const char *label, const char *k
                                                 double lo, double hi, const char *fmt) {
 #ifdef CVC_ENABLE_IMGUI
   float &v = *cache_float(key, static_cast<float>(current), ImGui::IsAnyItemActive());
-  reserve_label_width(label);
+  reserve_label_width(label, in_flow_row());
   const bool changed =
       ImGui::SliderFloat(label, &v, static_cast<float>(lo), static_cast<float>(hi), fmt);
   const bool committed = ImGui::IsItemDeactivatedAfterEdit();
@@ -1123,7 +1135,7 @@ ariadne::IndexEdit ImGuiBackend::combo(const char *label, int current_index,
 #ifdef CVC_ENABLE_IMGUI
   const int idx =
       (current_index >= 0 && current_index < static_cast<int>(options.size())) ? current_index : 0;
-  reserve_label_width(label);
+  reserve_label_width(label, in_flow_row());
   if (ImGui::BeginCombo(label, options[idx].c_str())) {
     for (std::size_t i = 0; i < options.size(); ++i) {
       const bool sel = (static_cast<int>(i) == idx);
@@ -1192,7 +1204,7 @@ ariadne::StringEdit ImGuiBackend::input_text(const char *label, const char *key,
   if (!ImGui::IsAnyItemActive())
     buf = current;
   InputTextStr ud{&buf};
-  reserve_label_width(label);
+  reserve_label_width(label, in_flow_row());
   // EnterReturnsTrue commits on Enter (a chat box's send); IsItemDeactivatedAfterEdit commits on
   // focus-leave; CallbackResize lets the std::string grow past its initial capacity as typed.
   // Password: ImGui draws a mask and refuses to copy the text out.
@@ -1447,7 +1459,7 @@ ariadne::ColorEdit ImGuiBackend::color(const char *label, const float rgb[3]) {
   e.rgb[2] = rgb[2];
 #ifdef CVC_ENABLE_IMGUI
   e.drawn = true;
-  reserve_label_width(label);
+  reserve_label_width(label, in_flow_row());
   // ColorEdit3 edits e.rgb in place and returns true on any change this frame. Commit immediately
   // (like a discrete widget) — the core writes each change, so the picker reads its own value back
   // next frame with no per-widget edit cache (a colour edit is infrequent, not a continuous drag).
