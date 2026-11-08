@@ -139,10 +139,6 @@ cycle_stats collect_cycles(cycle_registry &r);
 bool cycle_collection_due();
 /// The same for `r`.
 bool cycle_collection_due(const cycle_registry &r);
-/// Whether `r` should be collected now that its scheduler has gone idle (S1.1): a process ended
-/// and something was tracked since the last collection, with no time throttle, since an idle
-/// group takes no step that would collect it later.
-bool cycle_collection_idle_due(const cycle_registry &r);
 
 /// Note that a process ended, in the bound registry, else this thread's: what it leaked is
 /// garbage now, so a collection is due as soon as anything has been tracked since the last one
