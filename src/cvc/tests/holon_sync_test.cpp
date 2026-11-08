@@ -22,9 +22,12 @@
 #include <cvc/ariadne/avatar_sim.h>
 #include <cvc/ariadne/conference/room_avatar.h>
 #include <cvc/ariadne/conference/room_intrinsics.h>
+#include <cvc/ariadne/conference/room_rules.h>
 #include <cvc/ariadne/conference/room_scene.h>
 #include <cvc/ariadne/holon.h>
 #include <cvc/ariadne/holon_sync.h>
+#include <cvc/ariadne/section.h>     // section_epoch
+#include <cvc/ariadne/world_rules.h> // world_rules
 #include <cvc/core/app.h>
 #include <cvc/physics/body.h>
 #include <cvc/physics/types.h>
@@ -296,8 +299,8 @@ TEST(HolonSyncTest, TheEnergyPolicyAndEachReserveReachTheClient) {
   if (!server.physics())
     GTEST_SKIP() << "no Jolt backend in this build";
   cvc::ariadne::conference::seed_default_scene(server_app, room); // something to stand on
-  cvc::ariadne::avatar_energy_policy policy;
-  policy.reserve_max = 2000.0; // small, so a walk visibly spends it
+  cvc::ariadne::avatar_policy policy;
+  policy.energy.reserve_max = 2000.0; // small, so a walk visibly spends it
   cvc::ariadne::conference::write_avatar_policy(server_app, room, policy);
   cvc::ariadne::conference::room_join(a_app, room, "A");
   tp.pump_all();
@@ -336,6 +339,73 @@ TEST(HolonSyncTest, TheEnergyPolicyAndEachReserveReachTheClient) {
   }
 }
 
+// The world's rules (WD2) reach every holon through the pumps, the relay's own and the client's,
+// from the same leaves. A relay that restarts writes its sections again at revision 1, which the
+// client already holds from the old one; their new epoch is what tells them apart. A change while
+// the room runs takes effect on the tick it names, in both.
+TEST(HolonSyncTest, TheRulesReachEveryHolonAndARestartedRelaysAreTakenAfresh) {
+  namespace rc = cvc::ariadne::conference;
+  cvc::app server_app, a_app;
+  cvc::state_transport_inproc tp;
+  cvc::state_cluster_shard ss(server_app, "conf", "server");
+  cvc::state_cluster_shard as(a_app, "conf", "A");
+  for (cvc::state_cluster_shard *s : {&ss, &as}) {
+    s->attach();
+    tp.register_shard(s);
+  }
+  const std::string room = "r";
+  holon server(holon_role::server), a(holon_role::client);
+  rc::seed_default_scene(server_app, room);
+  cvc::ariadne::world_rules rules = cvc::ariadne::default_world_rules();
+  rules.policy.max_speed = 3.0;
+  rules.archetypes[0].body.height = 1.9;
+  rules.controllers[0].params["walk_speed"] = 1.5;
+  rules.physics.gravity = vec3{0.0, 0.0, -3.7};
+  rc::write_room_rules(server_app, room, rules);
+  rc::room_join(a_app, room, "A");
+  tp.pump_all();
+  const double dt = server.clock().fixed_dt();
+  const auto pump = [&] {
+    cvc::ariadne::server_pump(server, server_app, room, dt);
+    tp.pump_all();
+    cvc::ariadne::client_pump(a, a_app, room, "A", dt);
+  };
+  pump();
+  for (holon *h : {&server, &a}) {
+    EXPECT_EQ(h->rules().policy.max_speed, 3.0);
+    EXPECT_EQ(h->body().height, 1.9);
+    EXPECT_EQ(h->controller().param("walk_speed", 0.0), 1.5);
+    EXPECT_EQ(h->rules().physics.gravity.z, -3.7);
+  }
+
+  // The relay restarts: the same revision, another epoch.
+  cvc::ariadne::avatar_policy p = rules.policy;
+  p.max_speed = 2.0;
+  const std::uint64_t other = cvc::ariadne::section_epoch() ^ 1;
+  const cvc::ariadne::section_stamp restarted =
+      rc::write_avatar_policy(server_app, room, p, 0, other);
+  ASSERT_EQ(restarted.rev, a.rules_stamp(cvc::ariadne::rules_section::policy).rev)
+      << "the revision the client already holds";
+  pump();
+  EXPECT_EQ(server.rules().policy.max_speed, 2.0);
+  EXPECT_EQ(a.rules().policy.max_speed, 2.0) << "taken afresh by its epoch";
+
+  // A change while the room runs: from the tick it names, in both holons.
+  p.max_speed = 5.0;
+  const std::uint64_t at = rc::rules_activation_tick(server.tick());
+  rc::write_avatar_policy(server_app, room, p, at, other);
+  pump();
+  for (holon *h : {&server, &a}) {
+    EXPECT_EQ(h->rules_at(at - 1).policy.max_speed, 2.0);
+    EXPECT_EQ(h->rules_at(at).policy.max_speed, 5.0);
+  }
+
+  for (cvc::state_cluster_shard *s : {&ss, &as}) {
+    tp.unregister_shard(s);
+    s->detach();
+  }
+}
+
 // A relay that streams the poses (room_pose_relay) skips the tree's copy on most steps
 // (write_poses false); the reserve still goes out on those steps, since no snapshot carries it.
 TEST(HolonSyncTest, TheReserveIsWrittenOnStepsThatSkipThePoses) {
@@ -347,8 +417,8 @@ TEST(HolonSyncTest, TheReserveIsWrittenOnStepsThatSkipThePoses) {
   if (!server.physics())
     GTEST_SKIP() << "no Jolt backend in this build";
   cvc::ariadne::conference::seed_default_scene(server_app, room);
-  cvc::ariadne::avatar_energy_policy policy;
-  policy.reserve_max = 2000.0;
+  cvc::ariadne::avatar_policy policy;
+  policy.energy.reserve_max = 2000.0;
   cvc::ariadne::conference::write_avatar_policy(server_app, room, policy);
   cvc::ariadne::conference::room_join(server_app, room, "A");
   cvc::ariadne::write_intent(server_app, room, "A", avatar_intent{vec3{4.0, 0.0, 0.0}});
@@ -389,8 +459,8 @@ TEST(HolonSyncTest, AFullReserveAtRestIsNotRestamped) {
   if (!server.physics())
     GTEST_SKIP() << "no Jolt backend in this build";
   cvc::ariadne::conference::seed_default_scene(server_app, room);
-  cvc::ariadne::avatar_energy_policy policy;
-  policy.reserve_max = 2000.0;
+  cvc::ariadne::avatar_policy policy;
+  policy.energy.reserve_max = 2000.0;
   cvc::ariadne::conference::write_avatar_policy(server_app, room, policy);
   cvc::ariadne::conference::room_join(server_app, room, "A");
   const auto energy_writes = [&] {

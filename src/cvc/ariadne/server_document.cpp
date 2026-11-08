@@ -18,6 +18,7 @@
 #include <cvc/ariadne/loader.h> // load_file, register_ari_block, LoadResult
 #include <cvc/ariadne/server_document.h>
 #include <cvc/ariadne/value.h>
+#include <cvc/ariadne/world_rules.h> // register_world_block, find_world_block
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
@@ -162,6 +163,7 @@ void register_server_block() {
 ServerDocument::ServerDocument(cvc::app &app, std::string room, std::string prefix)
     : app_(app), room_(std::move(room)), rt_(app, std::move(prefix)) {
   register_server_block();
+  register_world_block();
   rt_.runtime().set_relay_document(true); // requires: [relay]
   rt_.add_load_hook([this](LoadResult &lr, const std::string &path) {
     ServerBlock b;
@@ -212,6 +214,11 @@ std::string ServerDocument::read(const std::string &path, std::vector<std::strin
   }
   block_ = std::move(b);
   scene_ = lr.scene; // the world, for a relay that publishes it before the document runs
+  has_world_ = false;
+  if (const Value *w = find_world_block(lr)) {
+    world_ = *w;
+    has_world_ = true;
+  }
   read_ = true;
   return std::string();
 }

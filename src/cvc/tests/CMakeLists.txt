@@ -146,6 +146,7 @@ add_executable(holon_sync_test holon_sync_test.cpp)
 add_executable(pose_stream_test pose_stream_test.cpp)
 add_executable(state_link_stats_test state_link_stats_test.cpp)
 add_executable(room_scene_test room_scene_test.cpp)
+add_executable(world_rules_test world_rules_test.cpp)
 add_executable(room_avatar_test room_avatar_test.cpp)
 add_executable(room_chat_test room_chat_test.cpp)
 add_executable(room_aoi_test room_aoi_test.cpp)
@@ -403,6 +404,7 @@ set(TEST_TARGETS
   pose_stream_test
   state_link_stats_test
   room_scene_test
+  world_rules_test
   room_avatar_test
   room_chat_test
   room_aoi_test
@@ -722,6 +724,9 @@ target_compile_definitions(ariadne_ftxui_test PRIVATE
   CVC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../examples")
 # room_scene_test pins the stock world documents to their C++ twins.
 target_compile_definitions(room_scene_test PRIVATE
+  CVC_ARIADNE_WORLDS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../ariadne/worlds")
+# world_rules_test pins the stock worlds' world: blocks to default_world_rules().
+target_compile_definitions(world_rules_test PRIVATE
   CVC_ARIADNE_WORLDS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../ariadne/worlds")
 
 target_link_libraries(ariadne_media_test
@@ -2034,6 +2039,13 @@ target_link_libraries(room_scene_test
     GTest::gtest_main
 )
 
+target_link_libraries(world_rules_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(room_avatar_test
   PRIVATE
     cvc
@@ -2551,6 +2563,7 @@ target_compile_features(holon_sync_test PRIVATE cxx_std_17)
 target_compile_features(pose_stream_test PRIVATE cxx_std_17)
 target_compile_features(state_link_stats_test PRIVATE cxx_std_17)
 target_compile_features(room_scene_test PRIVATE cxx_std_17)
+target_compile_features(world_rules_test PRIVATE cxx_std_20)
 target_compile_features(room_avatar_test PRIVATE cxx_std_17)
 target_compile_features(room_chat_test PRIVATE cxx_std_20)
 target_compile_features(room_aoi_test PRIVATE cxx_std_17)
@@ -3073,6 +3086,7 @@ cvc_discover_tests(holon_sync_test)
 cvc_discover_tests(pose_stream_test)
 cvc_discover_tests(state_link_stats_test)
 cvc_discover_tests(room_scene_test)
+cvc_discover_tests(world_rules_test)
 cvc_discover_tests(room_avatar_test)
 cvc_discover_tests(room_chat_test)
 cvc_discover_tests(room_aoi_test)

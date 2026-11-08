@@ -3191,7 +3191,8 @@ on_tick: |
   1. arisrv reads the `server:` block and chooses the room's world (below), before anything else
      that could fail late.
   2. It binds its ports, as it always has.
-  3. It publishes the world, in one revision, and seeds the avatar catalog and the policy.
+  3. It publishes the world, in one revision, seeds the avatar catalog, and publishes the
+     world's rules (below).
   4. It applies `--set`.
   5. It loads the document, which runs its `init:`.
 
@@ -3259,7 +3260,41 @@ on_tick: |
     (the 20 m room) or `cvc://worlds/large.ari`. `--scene` and a `--doc` with a `scene:` both
     naming it stop arisrv with 2. A stock world opens in arigl too (`arigl
     cvc://worlds/default.ari`), to see the room without a relay.
-- **Other hosts** ignore a `server:` block, with a warning.
+- **A `world:` block sets the world's rules** ([roadmap/ARIADNE_WORLDS.md](roadmap/ARIADNE_WORLDS.md)
+  WD2; [`world_rules.h`](../inc/cvc/ariadne/world_rules.h)): what every avatar moves under. The relay
+  publishes them as four sections of the room (`physics`, `avatars.archetypes`, `avatars.policy`,
+  `controllers`; [`room_rules.h`](../inc/cvc/ariadne/conference/room_rules.h)), and every holon, the
+  relay's and each client's, runs under them.
+
+  ```yaml
+  scene:
+    physics: { gravity: [0, 0, -9.80665] }   # the world's gravity
+  world:
+    avatars:
+      archetypes:                  # every avatar has the first, for now
+        person: { body: { mass: 70, width: 0.5, height: 1.7 }, controllers: [walker@1] }
+      policy:
+        max_speed: 4.0             # the veto: the fastest an intent may ask for (m/s)
+        allow_vertical: false
+        energy: { enabled: true, force_max: 840, power_max: 1200, power_rest: 300,
+                  reserve_max: 30000, transport_cost: 0.2, empty: rest, recover_fraction: 0.25 }
+    controllers:                   # walker@1 is the one kernel this build runs
+      walker@1: { kernel: walker, version: 1, params: { walk_speed: 2.0 } }
+  ```
+
+  - **Each key left out keeps the default**, which is the block above. Archetypes, when given,
+    replace the default list; controllers join it, or replace one by id.
+  - **What cannot run stops arisrv with 2**: a controller kernel this build does not have, an
+    archetype allowing a controller nobody defines, a body that is not positive, a limit that is
+    negative. A key it does not know is a warning, and so is `catalog:` (the relay seeds its own),
+    a `fixed_dt` other than the room's 1/120 s, and `materials:`.
+  - **Where they come from.** The `--doc`'s, when it has a `world:` block or is the world;
+    otherwise the stock world's, whose `world:` block states the defaults. `--avatar-energy on|off`
+    and `--avatar-empty rest|stop` override the energy policy.
+  - **When they take effect.** At start-up, from the start. A section the relay rewrites while the
+    room runs names a world tick a little ahead, and every holon switches on it; a client that hears
+    of it late re-runs its prediction from that tick.
+- **Other hosts** ignore a `server:` block, with a warning, and a `world:` block silently.
 - **Not yet:** a reload when the file changes, the network (`--net`), `on_signal:` for arisrv's
   own SIGTERM, and Python (`arisrvx`, S1).
 
