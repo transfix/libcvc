@@ -860,7 +860,7 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
   apply_clip(*node, n, sg.appContext(), bind_prefix, out.clip, warnings); // own coordinates
   warn_clip_capability(*node, n, warnings);
   if (n.body.present && n.source_data.empty()) // a data node's come with its dataset
-    bodies.push_back({&n, node}); // added once every node exists (realize_physics)
+    bodies.push_back({&n, node});              // added once every node exists (realize_physics)
   out.nodes.push_back({n.id, n.tags, node});
 
   // Children nest UNDER this node, so each child's transform is local to it.
@@ -907,6 +907,8 @@ void realize_light(SceneGraph &sg, const cvc::ariadne::SceneLight &l, RealizedSc
     }
     rig->applyPreset(preset_from(l.rig));
     // Optional per-knob tuning ON TOP of the preset (each gated so an unset knob keeps the preset).
+    if (l.has_sun)
+      rig->setSun(l.sun);
     if (l.has_key)
       rig->setKey(l.key_intensity, l.key_azimuth, l.key_elevation, l.key_cone);
     if (l.has_fill)
@@ -923,7 +925,7 @@ void realize_light(SceneGraph &sg, const cvc::ariadne::SceneLight &l, RealizedSc
       rig->setWash(l.wash, l.wash > 0.0f ? l.wash_count : 0, l.wash_height);
     // applyPreset commits its baseline; the setters above need an explicit apply() to take effect.
     if (l.has_key || l.has_fill || l.has_back || l.has_warmth || l.has_environment ||
-        l.has_rig_ambient || l.has_wash || l.has_stage)
+        l.has_rig_ambient || l.has_wash || l.has_stage || l.has_sun)
       rig->apply();
     out.rigs.push_back(std::move(rig));
     return;

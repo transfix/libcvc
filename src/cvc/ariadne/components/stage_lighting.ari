@@ -38,6 +38,9 @@ units:
         lo: 5.0
         hi: 90.0
         fmt: "%.0f"
+      - checkbox: Sun
+        bind: lighting.sun
+        tooltip: "the key is the sun: one direction over the whole world, no cone to end in a circle"
       - separator
       - text: "Fill / back / ambient"
       - slider_float: Fill

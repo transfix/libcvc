@@ -44,8 +44,10 @@
 //   4. Pose: the midpoint rule, psi1 = psi + hdt rbar, the rear axle moving with its velocity
 //      averaged over the step, (vx, vy - lr r), at the midpoint heading.
 //
-// S is float or double (the Jacobian is dual<S>). Wheel spin keeps the form: wheel speeds join the
-// twist as further momenta of a quadratic H, and Q gains their torques and longitudinal forces.
+// S is float or double (the Jacobian is dual<S>). Wheel spin keeps the form: dyn_spin_plant_dg,
+// below, adds the wheels' speeds to the twist as further momenta of a quadratic H, takes Q from
+// the plant's hook dyn_spin_ph_forces_at, and puts the wheels' rows at the step's end by default,
+// since their slip is far stiffer than the tires' sideways slip.
 
 #ifndef __CVC_NAV_DETAIL_DYN_BIKE_DG_H__
 #define __CVC_NAV_DETAIL_DYN_BIKE_DG_H__
@@ -70,6 +72,7 @@ struct dyn_dg_solve {
   double update = 0.0;    // the last update, relative to the twist's scale
   double residual = 0.0;  // |M^-1 F(v1)| at the end, length / s
   bool converged = false; // the update fell under tol
+  int secant = 0;         // Newton steps that fell back on the secant step (dyn_spin_plant_dg)
 };
 
 // J(M v) v + Q at a state: the momenta's rate, dyn_ph_rhs's, from one dyn_ph_parts_at. With both
@@ -108,6 +111,53 @@ template <class S> CVC_HD inline S dyn_dg_norm(const dyn_bike_params &p, const S
   return s_sqrt(a * a + b * b + c * c);
 }
 
+// dyn_plant's step 1, to the bit: the actuators' outputs at the step's end.
+template <class S>
+CVC_HD inline void dyn_dg_actuators(const dyn_bike_params &p, S hdt, const dyn_state<S> &s,
+                                    S delta_cmd, S a_cmd, S &delta1, S &a1) {
+  const S one = S(1);
+  const S k_steer = p.tau_steer > 0.0f ? one - s_exp(-hdt / S(p.tau_steer)) : one;
+  S step = (delta_cmd - s.delta) * k_steer;
+  if (p.steer_rate > 0.0f) {
+    const S R = S(p.steer_rate) * hdt;
+    step = R * s_tanh(step / R);
+  }
+  delta1 = s.delta + step;
+  const S k_drive = p.tau_drive > 0.0f ? one - s_exp(-hdt / S(p.tau_drive)) : one;
+  a1 = s.a + (a_cmd - s.a) * k_drive;
+}
+
+// Steps 3 and 4 on a solved twist v1: dyn_plant's speed clamp to [sp_min, vmax] and low-speed
+// blend toward the kinematic bicycle, then the pose by the midpoint rule.
+template <class S>
+CVC_HD inline void dyn_dg_finish(const dyn_bike_params &p, const bike_veh &v, const dyn_state<S> &s,
+                                 S delta1, S a1, const S v1[3], dyn_state<S> &o) {
+  const S hdt = S(v.hdt), one = S(1), half = S(0.5);
+  const S lr = S(p.lr), L = S(p.lf) + lr;
+  const S sp_min = S(v.allow_reverse ? -0.25f * v.vmax : 0.0f), vmax = S(v.vmax);
+  const S vx1 = dyn_clamp(v1[0], sp_min, vmax);
+  S vy1 = v1[1], r1 = v1[2];
+  if (p.v_blend > 0.0f) {
+    const S eps2 = S(p.eps) * S(p.eps);
+    const S w = one / (one + s_exp((s_sqrt(vx1 * vx1 + eps2) - S(p.v_blend)) / S(p.v_width)));
+    const S r_k = vx1 * s_tan(delta1) / L, vy_k = lr * r_k;
+    vy1 = vy1 + w * (vy_k - vy1);
+    r1 = r1 + w * (r_k - r1);
+  }
+  const S rbar = half * (s.r + r1);
+  const S psim = s.psi + half * hdt * rbar;
+  const S ux = half * (s.vx + vx1), uy = half * ((s.vy - lr * s.r) + (vy1 - lr * r1));
+  const S cm = s_cos(psim), sm = s_sin(psim);
+  o.x = s.x + hdt * (ux * cm - uy * sm);
+  o.y = s.y + hdt * (ux * sm + uy * cm);
+  o.psi = s.psi + hdt * rbar;
+  o.vx = vx1;
+  o.vy = vy1;
+  o.r = r1;
+  o.delta = delta1;
+  o.a = a1;
+}
+
 // One discrete-gradient step: dyn_plant's signature, plus the solve's report and controls.
 template <class S>
 CVC_HD inline void dyn_plant_dg(const dyn_bike_params &p, const bike_veh &v, const dyn_state<S> &s,
@@ -116,18 +166,11 @@ CVC_HD inline void dyn_plant_dg(const dyn_bike_params &p, const bike_veh &v, con
                                 const dyn_dg_options &opt = dyn_dg_options()) {
   typedef dual<S> D;
   const S hdt = S(v.hdt), one = S(1), half = S(0.5);
-  const S lr = S(p.lr), L = S(p.lf) + lr;
+  const S L = S(p.lf) + S(p.lr);
 
   // 1. Actuators: dyn_plant's step 1.
-  const S k_steer = p.tau_steer > 0.0f ? one - s_exp(-hdt / S(p.tau_steer)) : one;
-  S step = (delta_cmd - s.delta) * k_steer;
-  if (p.steer_rate > 0.0f) {
-    const S R = S(p.steer_rate) * hdt;
-    step = R * s_tanh(step / R);
-  }
-  const S delta1 = s.delta + step;
-  const S k_drive = p.tau_drive > 0.0f ? one - s_exp(-hdt / S(p.tau_drive)) : one;
-  const S a1 = s.a + (a_cmd - s.a) * k_drive;
+  S delta1, a1;
+  dyn_dg_actuators(p, hdt, s, delta_cmd, a_cmd, delta1, a1);
 
   // 2. The twist: Newton from v1 = v0, the actuators' outputs at the step's midpoint.
   dyn_state<S> mid = s;
@@ -218,31 +261,8 @@ CVC_HD inline void dyn_plant_dg(const dyn_bike_params &p, const bike_veh &v, con
     seen->r = v1[2];
   }
 
-  // 3. Limiters: dyn_plant's clamp and low-speed blend.
-  const S sp_min = S(v.allow_reverse ? -0.25f * v.vmax : 0.0f), vmax = S(v.vmax);
-  const S vx1 = dyn_clamp(v1[0], sp_min, vmax);
-  S vy1 = v1[1], r1 = v1[2];
-  if (p.v_blend > 0.0f) {
-    const S eps2 = S(p.eps) * S(p.eps);
-    const S w = one / (one + s_exp((s_sqrt(vx1 * vx1 + eps2) - S(p.v_blend)) / S(p.v_width)));
-    const S r_k = vx1 * s_tan(delta1) / L, vy_k = lr * r_k;
-    vy1 = vy1 + w * (vy_k - vy1);
-    r1 = r1 + w * (r_k - r1);
-  }
-
-  // 4. Pose: the midpoint rule.
-  const S rbar = half * (s.r + r1);
-  const S psim = s.psi + half * hdt * rbar;
-  const S ux = half * (s.vx + vx1), uy = half * ((s.vy - lr * s.r) + (vy1 - lr * r1));
-  const S cm = s_cos(psim), sm = s_sin(psim);
-  o.x = s.x + hdt * (ux * cm - uy * sm);
-  o.y = s.y + hdt * (ux * sm + uy * cm);
-  o.psi = s.psi + hdt * rbar;
-  o.vx = vx1;
-  o.vy = vy1;
-  o.r = r1;
-  o.delta = delta1;
-  o.a = a1;
+  // 3 and 4. Limiters and pose.
+  dyn_dg_finish(p, v, s, delta1, a1, v1, o);
 }
 
 // dyn_plant_dg's step with its books, in J: dH = supplied - dissipated + floor + grade + limiter +
@@ -277,6 +297,381 @@ dyn_plant_dg_books(const dyn_bike_params &p, const bike_veh &v, const dyn_state<
   b.dH = h1 - h0;
   b.limiter = h1 - he;
   b.residual = b.dH - (b.supplied - b.dissipated + b.floor + b.grade + b.limiter);
+}
+
+// ── With the wheels spinning: dyn_spin_plant_dg ───────────────────────────────────────────
+// dyn_spin_plant's state adds each axle's wheel speed, and its H adds their spin,
+// 1/2 (J_f om_f^2 + J_r om_r^2): still quadratic, now in e = (vx, vy, r, om_f, om_r) with
+// M = diag(m, m, Iz, J_f, J_r). The step solves
+//
+//   M (e1 - e) / h = J(M e_th) e_th + Q(e_th),   e_th = e + Theta (e1 - e),
+//
+// J and Q at e_th with the actuators at the step's midpoint: Q from dyn_spin_ph_forces_at, the hook
+// the plant exports for this step, and J from dyn_spin_ph_J. Theta = diag(1/2, 1/2, 1/2, th, th):
+// the body's rows take the midpoint, and the wheels' take theta_wheels. Then, J being skew,
+//
+//   H(e1) - H(e) = h e_th^T Q(e_th) - (th - 1/2) (J_f dom_f^2 + J_r dom_r^2)
+//
+// exactly. e_th^T Q is dyn_spin_ph_rates_at's balance, supplied - braked - dissipated - slip +
+// floor + grade (plus the wrench's power), so the books close to the solver's tolerance with one
+// more line, `scheme`, the second term. It is >= 0 for th >= 1/2 and zero at th = 1/2.
+//
+// The wheels' slip is stiff: a tire's longitudinal secant K against the wheel's spin inertia
+// gives the slip a rate lambda = K (r_w^2 / J + 1 / m) of 1e3 to 1e4 / s on the Humvee, so h lambda
+// is 60 to 600 at nav's 0.06 s step, and far more at a crawl. The midpoint rule (th = 1/2) is
+// A-stable but not L-stable: it carries that slip past its root and back nearly undamped,
+// amplification (1 - h lambda / 2) / (1 + h lambda / 2), close to -1. With th = 1 on the wheels
+// alone, the slip's amplification is about (1 - b / 2) / (1 + a + b / 2), where a = h K r_w^2 / J
+// and b = h K / m. On the Humvee a is about 120 b, so a disturbed slip settles in a step or two,
+// about as dyn_spin_plant's does (DynSpinDG.StiffWheelSlip counts the swings). The price is first
+// order in the wheels' speeds, and the books carry the damping on `scheme`. That is the default.
+// `substeps` splits hdt into equal solves; the actuators move linearly across them, each substep
+// taking its own midpoint. At th = 1/2 they tame the swing only once h lambda is near 2 (25
+// substeps of 0.06 s on the Humvee); at th = 1 they are rarely worth their cost. The limiters and
+// the pose act once, on the whole step, as in dyn_plant_dg.
+//
+// Newton's Jacobian is by forward-mode duals through one tire evaluation per direction. Past a
+// tire's peak with a stiff slip it can turn indefinite (a crawl at 0.06 s), so a Newton direction
+// that two halvings cannot make descend gives way to a secant step that always does; see the loop.
+//
+// The ground form (dyn_plant_ground's slope across the heading, gravity in H) is not in this step.
+
+// The spin step's controls. A stiff slip past a tire's peak can take more Newton steps than the
+// body alone, so the cap is 40.
+struct dyn_spin_dg_options : dyn_dg_options {
+  int substeps = 1;          // equal solves per hdt
+  double theta_wheels = 1.0; // where the wheels' rows take their rate: 0.5 the midpoint, 1 the end
+  dyn_spin_dg_options() { max_iters = 40; }
+};
+
+// J(M e) e + Q(e) at a state: dyn_spin_ph_rhs's, with `wrench` (the external port's (F_x, F_y,
+// M_z) on the body) when given.
+template <class S>
+CVC_HD inline void dyn_spin_dg_rate(const dyn_bike_params &p, const dyn_spin_state<S> &s, S grade,
+                                    const S *wrench, S f[5]) {
+  S x[5], J[5][5], Q[5];
+  dyn_spin_ph_momentum(p, s, x);
+  dyn_spin_ph_J(x, J);
+  dyn_spin_ph_forces_at(p, s, grade, Q, wrench);
+  const S e[5] = {s.b.vx, s.b.vy, s.b.r, s.om_f, s.om_r};
+  for (int i = 0; i < 5; ++i) {
+    S acc = Q[i];
+    for (int j = 0; j < 3; ++j) // the structure couples nothing to the wheels
+      acc = acc + J[i][j] * e[j];
+    f[i] = acc;
+  }
+}
+
+// The same rate from one dyn_spin_ph_parts_at, a third of the work. With each slip in its wheel's
+// frame, -R e + f_eps is the tires' forces themselves: n F_y on the body, and t F_x on the body
+// and -r_w F_x on its wheel (K sigma is F_x), less drag and rolling resistance on vx. The step's
+// Newton Jacobian takes it; its residual and its books stay on the hook, so the solution is the
+// hook's whatever this one says (DynSpinDG.TheRateIsThePortHamiltonianField holds them equal).
+template <class S>
+CVC_HD inline void dyn_spin_dg_rate_one(const dyn_bike_params &p, const dyn_spin_state<S> &s,
+                                        S grade, const S *wrench, S f[5]) {
+  dyn_spin_ph_parts<S> q;
+  dyn_spin_ph_parts_at(p, s, q);
+  const dyn_ph_parts<S> &b = q.b;
+  const S m = S(p.m), rw = S(p.r_w);
+  for (int i = 0; i < 3; ++i)
+    f[i] = b.nf[i] * b.Fyf + b.nr[i] * b.Fyr + b.tf[i] * b.Fxf + b.tr[i] * b.Fxr;
+  f[0] = f[0] + m * s.b.vy * s.b.r - b.Dx * s.b.vx - m * S(p.g) * grade;
+  f[1] = f[1] - m * s.b.vx * s.b.r;
+  f[3] = q.Tf - rw * b.Fxf;
+  f[4] = q.Tr - rw * b.Fxr;
+  if (wrench)
+    for (int i = 0; i < 3; ++i)
+      f[i] = f[i] + wrench[i];
+}
+
+template <class S> CVC_HD inline void dyn_spin_dg_set(dyn_spin_state<S> &s, const S e[5]) {
+  s.b.vx = e[0];
+  s.b.vy = e[1];
+  s.b.r = e[2];
+  s.om_f = e[3];
+  s.om_r = e[4];
+}
+
+// |M^-1 F| in length / s: the yaw row times L, the wheels' times r_w.
+template <class S> CVC_HD inline S dyn_spin_dg_norm(const dyn_bike_params &p, const S F[5]) {
+  const S L = S(p.lf) + S(p.lr), rw = S(p.r_w);
+  const S c[5] = {F[0] / S(p.m), F[1] / S(p.m), L * F[2] / S(p.Iz), rw * F[3] / S(p.J_f),
+                  rw * F[4] / S(p.J_r)};
+  S acc = S(0);
+  for (int i = 0; i < 5; ++i)
+    acc = acc + c[i] * c[i];
+  return s_sqrt(acc);
+}
+
+template <class S> CVC_HD inline double dyn_dg_abs(S x) {
+  const double d = (double)s_val(x);
+  return d < 0.0 ? -d : d;
+}
+
+// x = A^-1 b by Gaussian elimination with partial pivoting; false if A is singular.
+template <class S> CVC_HD inline bool dyn_dg_solve5(S A[5][5], S b[5], S x[5]) {
+  for (int c = 0; c < 5; ++c) {
+    int piv = c;
+    for (int r = c + 1; r < 5; ++r)
+      if (dyn_dg_abs(A[r][c]) > dyn_dg_abs(A[piv][c]))
+        piv = r;
+    if (!(dyn_dg_abs(A[piv][c]) > 0.0))
+      return false;
+    if (piv != c) {
+      for (int k = 0; k < 5; ++k) {
+        const S t = A[c][k];
+        A[c][k] = A[piv][k];
+        A[piv][k] = t;
+      }
+      const S t = b[c];
+      b[c] = b[piv];
+      b[piv] = t;
+    }
+    for (int r = c + 1; r < 5; ++r) {
+      const S f = A[r][c] / A[c][c];
+      for (int k = c; k < 5; ++k)
+        A[r][k] = A[r][k] - f * A[c][k];
+      b[r] = b[r] - f * b[c];
+    }
+  }
+  for (int r = 4; r >= 0; --r) {
+    S acc = b[r];
+    for (int k = r + 1; k < 5; ++k)
+      acc = acc - A[r][k] * x[k];
+    x[r] = acc / A[r][r];
+  }
+  return true;
+}
+
+// The spin step's books, in J: dH = supplied - braked - dissipated - slip + floor + grade + port -
+// scheme + limiter + residual. The powers are dyn_spin_ph_rates_at's at each solve's e_th, times
+// its h; port the wrench's work, h W^T v_th; scheme the wheels' rows' damping, (th - 1/2) sum J
+// dom^2 (zero at th = 1/2); limiter what the clamp and the blend changed. The residual is the
+// solves' and round-off.
+template <class S> struct dyn_spin_dg_books {
+  S dH, dissipated, slip, supplied, braked, floor, grade, port, scheme, limiter, residual;
+};
+
+// F(e1) = M (e1 - e0) - h (J e_th + Q(e_th)), e_th = e0 + Theta (e1 - e0); `mid` carries the pose
+// and the actuators, and gets e_th.
+template <class S>
+CVC_HD inline void dyn_spin_dg_residual(const dyn_bike_params &p, dyn_spin_state<S> &mid,
+                                        const S e0[5], const S e1[5], const S theta[5], S h,
+                                        S grade, const S *wrench, S F[5]) {
+  const S M[5] = {S(p.m), S(p.m), S(p.Iz), S(p.J_f), S(p.J_r)};
+  S et[5], f[5];
+  for (int i = 0; i < 5; ++i)
+    et[i] = e0[i] + theta[i] * (e1[i] - e0[i]);
+  dyn_spin_dg_set(mid, et);
+  dyn_spin_dg_rate(p, mid, grade, wrench, f);
+  for (int i = 0; i < 5; ++i)
+    F[i] = M[i] * (e1[i] - e0[i]) - h * f[i];
+}
+
+// One step: dyn_spin_plant's signature without `side`, plus the solve's report (over the substeps:
+// the Newton steps added, the worst update and residual), its controls and, when given, its books.
+template <class S>
+CVC_HD inline void dyn_spin_plant_dg(const dyn_bike_params &p, const bike_veh &v,
+                                     const dyn_spin_state<S> &s, S delta_cmd, S a_cmd, S grade,
+                                     dyn_spin_state<S> &o, dyn_step_free<S> *seen = nullptr,
+                                     const S *wrench = nullptr, dyn_dg_solve *rep = nullptr,
+                                     const dyn_spin_dg_options &opt = dyn_spin_dg_options(),
+                                     dyn_spin_dg_books<S> *books = nullptr) {
+  typedef dual<S> D;
+  const S hdt = S(v.hdt), one = S(1), half = S(0.5);
+  const S L = S(p.lf) + S(p.lr), rw = S(p.r_w);
+  const int n = opt.substeps > 0 ? opt.substeps : 1;
+  const S h = hdt / S(n), th = S(opt.theta_wheels);
+  const S theta[5] = {half, half, half, th, th};
+  const S M[5] = {S(p.m), S(p.m), S(p.Iz), S(p.J_f), S(p.J_r)};
+  const S wscale[5] = {one, one, L, rw, rw}; // each row in length / s
+  const double tol = opt.tol > 0.0 ? opt.tol : (sizeof(S) == sizeof(float) ? 1e-6 : 1e-13);
+
+  // 1. Actuators: dyn_plant's step 1.
+  S delta1, a1;
+  dyn_dg_actuators(p, hdt, s.b, delta_cmd, a_cmd, delta1, a1);
+
+  D wd[3];
+  if (wrench)
+    for (int i = 0; i < 3; ++i)
+      wd[i] = D(wrench[i]);
+  dyn_spin_dg_books<S> bk{};
+  dyn_dg_solve sol;
+  sol.converged = true;
+  S e0[5] = {s.b.vx, s.b.vy, s.b.r, s.om_f, s.om_r};
+  for (int k = 0; k < n; ++k) {
+    // 2. A substep: Newton from e1 = e0, the actuators at the substep's midpoint.
+    dyn_spin_state<S> mid = s;
+    const S frac = (S(k) + half) / S(n);
+    mid.b.delta = s.b.delta + frac * (delta1 - s.b.delta);
+    mid.b.a = s.b.a + frac * (a1 - s.b.a);
+    S e1[5], F[5];
+    for (int i = 0; i < 5; ++i)
+      e1[i] = e0[i];
+    double scale = 1.0;
+    for (int i = 0; i < 5; ++i)
+      scale += dyn_dg_abs(wscale[i] * e0[i]);
+    dyn_spin_dg_residual(p, mid, e0, e1, theta, h, grade, wrench, F);
+    S fnorm = dyn_spin_dg_norm(p, F);
+    bool converged = false;
+    double upd = 0.0;
+    int iters = 0, secants = 0;
+    for (int it = 0; it < opt.max_iters; ++it) {
+      iters = it + 1;
+      // A = dF/de1 = M - h d(rate)/d(e_th) Theta, a column per direction.
+      S A[5][5];
+      for (int j = 0; j < 5; ++j) {
+        dyn_spin_state<D> md;
+        for (int c = 0; c < dyn_spin_state<S>::size; ++c)
+          md[c] = D(mid[c]);
+        D ed[5];
+        for (int i = 0; i < 5; ++i)
+          ed[i] = D(e0[i] + theta[i] * (e1[i] - e0[i]), i == j ? one : S(0));
+        dyn_spin_dg_set(md, ed);
+        D fd[5];
+        dyn_spin_dg_rate_one<D>(p, md, D(grade), wrench ? wd : nullptr, fd);
+        for (int i = 0; i < 5; ++i)
+          A[i][j] = (i == j ? M[i] : S(0)) - h * theta[j] * fd[i].d;
+      }
+      S b[5], d[5];
+      for (int i = 0; i < 5; ++i)
+        b[i] = -F[i];
+      if (!dyn_dg_solve5(A, b, d))
+        break;
+      // Backtrack until |M^-1 F| falls (a full step near the root).
+      S t = one, xt[5], Ft[5], ft = fnorm;
+      bool took = false;
+      auto search = [&](int halvings) {
+        t = one;
+        for (int ls = 0; ls <= halvings; ++ls) {
+          for (int i = 0; i < 5; ++i)
+            xt[i] = e1[i] + t * d[i];
+          dyn_spin_dg_residual(p, mid, e0, xt, theta, h, grade, wrench, Ft);
+          ft = dyn_spin_dg_norm(p, Ft);
+          if (s_val(ft) < s_val(fnorm))
+            return true;
+          t = half * t;
+        }
+        return false;
+      };
+      double nsize = 0.0;
+      for (int i = 0; i < 5; ++i)
+        nsize += dyn_dg_abs(wscale[i] * d[i]);
+      if (nsize < 1e3 * tol * scale) {
+        // Newton's step is at round-off (what is left is its square): take it whole and stop,
+        // rather than spend a line search finding no decrease.
+        for (int i = 0; i < 5; ++i)
+          e1[i] = e1[i] + d[i];
+        dyn_spin_dg_residual(p, mid, e0, e1, theta, h, grade, wrench, F);
+        fnorm = dyn_spin_dg_norm(p, F);
+        upd = nsize / scale;
+        converged = true;
+        break;
+      }
+      // Newton's direction gets two halvings: one that needs more is climbing.
+      took = search(2);
+      if (!took) {
+        // Past a tire's peak its force falls as its slip grows, and with a stiff slip
+        // M - h dF/de can turn indefinite: Newton's direction then climbs. The secant step
+        // freezes the plant's own structure and dissipation at the iterate, M - h (J - R) Theta
+        // (dyn_spin_ph_J, dyn_spin_ph_R), and R >= 0 at every slip, so it pulls each slip
+        // toward its root, as dyn_spin_plant's implicit step does.
+        ++secants;
+        S et[5], x[5], Jm[5][5], R[5][5];
+        for (int i = 0; i < 5; ++i)
+          et[i] = e0[i] + theta[i] * (e1[i] - e0[i]);
+        dyn_spin_dg_set(mid, et);
+        dyn_spin_ph_momentum(p, mid, x);
+        dyn_spin_ph_J(x, Jm);
+        dyn_spin_ph_R(p, mid, R);
+        for (int i = 0; i < 5; ++i)
+          for (int j = 0; j < 5; ++j)
+            A[i][j] = (i == j ? M[i] : S(0)) - h * (Jm[i][j] - R[i][j]) * theta[j];
+        for (int i = 0; i < 5; ++i)
+          b[i] = -F[i];
+        if (dyn_dg_solve5(A, b, d))
+          took = search(11);
+      }
+      double size = 0.0;
+      for (int i = 0; i < 5; ++i)
+        size += dyn_dg_abs(wscale[i] * d[i]);
+      upd = (double)s_val(t) * size / scale;
+      if (!took) { // at round-off: no step lowers the residual
+        converged = upd < 1e3 * tol;
+        break;
+      }
+      for (int i = 0; i < 5; ++i) {
+        e1[i] = xt[i];
+        F[i] = Ft[i];
+      }
+      fnorm = ft;
+      if (upd < tol) {
+        converged = true;
+        break;
+      }
+    }
+    sol.iters += iters;
+    sol.secant += secants;
+    sol.update = upd > sol.update ? upd : sol.update;
+    sol.residual = dyn_dg_abs(fnorm) > sol.residual ? dyn_dg_abs(fnorm) : sol.residual;
+    sol.converged = sol.converged && converged;
+    if (books) {
+      S et[5];
+      for (int i = 0; i < 5; ++i)
+        et[i] = e0[i] + theta[i] * (e1[i] - e0[i]);
+      dyn_spin_dg_set(mid, et);
+      const dyn_spin_ph_rates<S> r = dyn_spin_ph_rates_at(p, mid, grade);
+      bk.dissipated = bk.dissipated + h * r.dissipated;
+      bk.slip = bk.slip + h * r.slip;
+      bk.supplied = bk.supplied + h * r.supplied;
+      bk.braked = bk.braked + h * r.braked;
+      bk.floor = bk.floor + h * r.floor;
+      bk.grade = bk.grade + h * r.grade;
+      if (wrench)
+        bk.port = bk.port + h * (wrench[0] * et[0] + wrench[1] * et[1] + wrench[2] * et[2]);
+      for (int i = 3; i < 5; ++i)
+        bk.scheme = bk.scheme + (theta[i] - half) * M[i] * (e1[i] - e0[i]) * (e1[i] - e0[i]);
+    }
+    for (int i = 0; i < 5; ++i)
+      e0[i] = e1[i];
+  }
+  if (rep)
+    *rep = sol;
+  if (seen) {
+    seen->vx = e0[0];
+    seen->vy = e0[1];
+    seen->r = e0[2];
+  }
+
+  // 3 and 4. Limiters and pose, on the body; the wheels keep their solved speeds.
+  dyn_dg_finish(p, v, s.b, delta1, a1, e0, o.b);
+  o.om_f = e0[3];
+  o.om_r = e0[4];
+
+  if (books) {
+    dyn_spin_state<S> e = o;
+    e.b.vx = e0[0];
+    e.b.vy = e0[1];
+    e.b.r = e0[2];
+    const S h0 = dyn_spin_ph_hamiltonian(p, s), he = dyn_spin_ph_hamiltonian(p, e),
+            h1 = dyn_spin_ph_hamiltonian(p, o);
+    bk.dH = h1 - h0;
+    bk.limiter = h1 - he;
+    bk.residual = bk.dH - (bk.supplied - bk.braked - bk.dissipated - bk.slip + bk.floor + bk.grade +
+                           bk.port - bk.scheme + bk.limiter);
+    *books = bk;
+  }
+}
+
+// dyn_spin_plant_dg's step with its books. The step is dyn_spin_plant_dg's, to the last bit.
+template <class S>
+CVC_HD inline void dyn_spin_plant_dg_books(const dyn_bike_params &p, const bike_veh &v,
+                                           const dyn_spin_state<S> &s, S delta_cmd, S a_cmd,
+                                           S grade, dyn_spin_state<S> &o, dyn_spin_dg_books<S> &b,
+                                           const S *wrench = nullptr, dyn_dg_solve *rep = nullptr,
+                                           const dyn_spin_dg_options &opt = dyn_spin_dg_options()) {
+  dyn_spin_plant_dg<S>(p, v, s, delta_cmd, a_cmd, grade, o, nullptr, wrench, rep, opt, &b);
 }
 
 } // namespace diff

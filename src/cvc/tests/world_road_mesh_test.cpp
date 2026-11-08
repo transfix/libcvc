@@ -65,6 +65,7 @@ TEST(WorldRoadMesh, EmptyNetworkGivesEmptyMesh) {
 
 TEST(WorldRoadMesh, RibbonMatchesTheRoadWidthAndLength) {
   road_mesh_params p;
+  p.sample_step = 0.0;     // vertices at the road's own points only, to count them
   p.intersections = false; // ribbon only, so the bbox is exactly the carriageway
   p.centerline = false;
   const cvc::geometry g = extrude_roads(straight_road(11.0), p);
@@ -81,6 +82,7 @@ TEST(WorldRoadMesh, RibbonMatchesTheRoadWidthAndLength) {
 
 TEST(WorldRoadMesh, FollowsTheTerrainHeight) {
   road_mesh_params p;
+  p.sample_step = 0.0; // vertices at the road's own points only, to count them
   p.intersections = false;
   p.centerline = false;
   p.lift = 0.0;
@@ -91,10 +93,29 @@ TEST(WorldRoadMesh, FollowsTheTerrainHeight) {
     EXPECT_NEAR(v[2], 0.1 * v[0], 1e-9); // every vertex sits on the ramp
 }
 
+// A long straight over a bump is sampled every sample_step metres, so the surface follows the
+// ground between the road's own points instead of bridging the bump.
+TEST(WorldRoadMesh, ALongStraightFollowsTheGroundBetweenItsPoints) {
+  road_mesh_params p;
+  p.intersections = false;
+  p.centerline = false;
+  p.lift = 0.0;
+  const auto bump = [](double x, double) { return 5.0 * std::exp(-x * x / 400.0); };
+  const cvc::geometry g = extrude_roads(straight_road(11.0), p, bump);
+  EXPECT_GE(g.const_points().size(), std::size_t(2 * (200.0 / p.sample_step + 1)));
+  double top = 0.0;
+  for (const auto &v : g.const_points()) {
+    EXPECT_NEAR(v[2], bump(v[0], v[1]), 1e-9);
+    top = std::max(top, v[2]);
+  }
+  EXPECT_GT(top, 4.5) << "the surface rises over the bump";
+}
+
 TEST(WorldRoadMesh, JunctionPadAddsGeometryAtTheCrossing) {
   road_mesh_params on, off;
   off.intersections = false;
   off.centerline = on.centerline = false;
+  off.sample_step = on.sample_step = 0.0;
   on.intersections = true;
   on.pad_segments = 12;
   const std::size_t tris_off = extrude_roads(cross_roads(), off).const_tris().size();
@@ -149,6 +170,7 @@ TEST(WorldRoadMesh, ABendIsOneMitredStrip) {
     net.segments.push_back(s);
   }
   road_mesh_params p;
+  p.sample_step = 0.0; // vertices at the road's own points only, to count them
   p.intersections = false;
   p.centerline = false;
   p.smooth_passes = 0;
@@ -179,6 +201,7 @@ TEST(WorldRoadMesh, ABendIsOneMitredStrip) {
 // short of the dead ends; a narrow lane gets none.
 TEST(WorldRoadMesh, ACentreStripeRunsDownTheRoad) {
   road_mesh_params p;
+  p.sample_step = 0.0; // vertices at the road's own points only, to count them
   p.intersections = false;
   p.centerline = true;
   const cvc::geometry g = extrude_roads(straight_road(11.0), p);
@@ -221,6 +244,7 @@ TEST(WorldRoadMesh, StripsEndOnThePadRim) {
   seg(2, 1, 11.0);
   seg(2, 3, 6.0); // the side street
   road_mesh_params p;
+  p.sample_step = 0.0; // vertices at the road's own points only, to count them
   p.centerline = false;
   p.smooth_passes = 0;
   const cvc::geometry g = extrude_roads(net, p);

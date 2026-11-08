@@ -1993,6 +1993,7 @@ scene:
   lights:
     - light: studio
       rig: three_point
+      sun: true
       stage: { center: [0, 0, 50], radius: 62 }
       key: { intensity: 1.9, azimuth: -38, elevation: 52, cone: 34 }
       fill: 0.85
@@ -2013,6 +2014,8 @@ scene:
   EXPECT_FLOAT_EQ(l.key_intensity, 1.9f);
   EXPECT_FLOAT_EQ(l.key_azimuth, -38.0f);
   EXPECT_FLOAT_EQ(l.key_cone, 34.0f);
+  EXPECT_TRUE(l.has_sun);
+  EXPECT_TRUE(l.sun);
   EXPECT_TRUE(l.has_fill);
   EXPECT_FLOAT_EQ(l.fill, 0.85f);
   EXPECT_TRUE(l.has_back);

@@ -24,6 +24,7 @@
 #include <cmath>
 #include <cvc/world/road_grade.h>
 #include <functional>
+#include <limits>
 #include <utility>
 
 namespace cvc {
@@ -44,8 +45,6 @@ double toSegment(const road_network &net, const road_segment &s, double x, doubl
   return std::hypot(ax + vx * t - x, ay + vy * t - y);
 }
 
-double smoothstep(double u) { return u * u * (3.0 - 2.0 * u); }
-
 // The most two roads' heights may differ where their level corridors are `gap` metres apart:
 // the side slope over the gap, and none where the corridors touch.
 double allowedStep(const road_grade_params &p, double gap) {
@@ -60,11 +59,13 @@ struct Link {
 };
 
 // Hold every segment to its climb (`rise`, metres end to end) and every link to its step: a pair
-// too far apart in height is drawn together, never below a floor. Sweeps until nothing moves (or
-// a sweep budget runs out).
-void limitGrade(const road_network &net, const std::vector<double> &rise,
-                const std::vector<Link> &links, const std::vector<double> &floor,
-                std::vector<double> &z) {
+// too far apart in height is drawn together, never below a floor. A climb's excess comes off its
+// top by `cutShare` and the rest off its foot. Sweeps until nothing moves (or a sweep budget runs
+// out); returns the largest move of the first sweep.
+double limitGrade(const road_network &net, const std::vector<double> &rise,
+                  const std::vector<Link> &links, const std::vector<double> &floor, double cutShare,
+                  std::vector<double> &z) {
+  double first = 0.0;
   for (int sweep = 0; sweep < 400; ++sweep) {
     double moved = 0.0;
     for (std::size_t si = 0; si < net.segments.size(); ++si) {
@@ -78,7 +79,7 @@ void limitGrade(const road_network &net, const std::vector<double> &rise,
         continue;
       const int hi = dz > 0 ? s.b : s.a, lo = dz > 0 ? s.a : s.b;
       // Split the excess: the high end down (no lower than its floor), the low end up.
-      const double down = std::min(0.5 * excess, z[hi] - floor[hi]);
+      const double down = std::min(cutShare * excess, z[hi] - floor[hi]);
       z[hi] -= down;
       z[lo] += excess - down;
       moved = std::max(moved, excess);
@@ -107,12 +108,43 @@ void limitGrade(const road_network &net, const std::vector<double> &rise,
       }
       moved = std::max(moved, excess);
     }
+    if (sweep == 0)
+      first = moved;
     if (moved < 1e-3)
-      return;
+      break;
   }
+  return first;
 }
 
 } // namespace
+
+road_network subdivide_roads(const road_network &net, double max_len) {
+  road_network out;
+  out.half = net.half;
+  out.nodes = net.nodes;
+  out.segments.reserve(net.segments.size());
+  for (const road_segment &s : net.segments) {
+    const double len = segLength(net, s);
+    const int k = max_len > 0.0 ? std::max(1, int(std::ceil(len / max_len - 1e-9))) : 1;
+    int prev = s.a;
+    for (int j = 1; j <= k; ++j) {
+      int to = s.b;
+      if (j < k) {
+        const double t = double(j) / k;
+        to = int(out.nodes.size());
+        out.nodes.push_back(road_node{net.nodes[s.a].x + (net.nodes[s.b].x - net.nodes[s.a].x) * t,
+                                      net.nodes[s.a].y + (net.nodes[s.b].y - net.nodes[s.a].y) * t,
+                                      2});
+      }
+      road_segment piece = s;
+      piece.a = prev;
+      piece.b = to;
+      out.segments.push_back(piece);
+      prev = to;
+    }
+  }
+  return out;
+}
 
 // A uniform grid of the network's segments, for the roads near a point.
 struct road_segment_grid {
@@ -255,26 +287,35 @@ std::vector<double> grade_road_profile(const road_network &net, const terrain_so
         links.push_back({int(i), s.a, s.b, t, allowedStep(p, gap)});
     }
   }
+  // The grade's change: a node's height off its neighbours' (weighted) mean is its bend; between
+  // two segments of length L, a change of grade g bends it g L / 2, so max_curvature allows
+  // max_curvature / (the sum of the weights). Only the excess moves, so the road follows ground
+  // that bends gently enough and is eased where it does not. A dead end is free to point anywhere.
   std::vector<double> next(n);
+  limitGrade(net, rise, links, floor, p.cut_share, z);
   for (int pass = 0; pass < p.smooth_passes; ++pass) {
+    double moved = 0.0;
     for (std::size_t i = 0; i < n; ++i) {
-      if (adj[i].empty()) {
-        next[i] = z[i];
+      next[i] = z[i];
+      if (adj[i].size() < 2)
         continue;
-      }
       double sum = 0.0, wsum = 0.0;
       for (const Arc &a : adj[i]) {
         sum += a.w * z[std::size_t(a.to)];
         wsum += a.w;
       }
-      const double relaxed = z[i] + p.smooth * (sum / wsum - z[i]);
-      const double held = relaxed + p.hold * (std::max(z0[i], floor[i]) - relaxed);
-      next[i] = std::max(floor[i], held);
+      const double bend = z[i] - sum / wsum, excess = std::abs(bend) - p.max_curvature / wsum;
+      if (excess <= 0.0)
+        continue;
+      next[i] = std::max(floor[i], z[i] - (bend > 0.0 ? 1.0 : -1.0) * p.smooth * excess);
+      moved = std::max(moved, std::abs(next[i] - z[i]));
     }
     z.swap(next);
-    limitGrade(net, rise, links, floor, z);
+    moved = std::max(moved, limitGrade(net, rise, links, floor, p.cut_share, z));
+    if (moved < 1e-4)
+      break;
   }
-  limitGrade(net, rise, links, floor, z);
+  limitGrade(net, rise, links, floor, p.cut_share, z);
   return z;
 }
 
@@ -322,13 +363,10 @@ double graded_terrain::sample(double x, double y) const {
   const double h0 = ground_->sample(x, y);
   if (net_.empty())
     return h0;
-  // Each road (run of segments) within reach pulls the ground toward its surface by its influence:
-  // 1 on the road and its level margin, easing to 0 across its cut or bank. A road's surface here
-  // is its nearest segment's, blended with any other of its segments within kBend of as near (the
-  // inside of a bend), so it is continuous round the bend and exact along a straight. The ground
-  // moves toward the roads' surfaces (weighted by influence, the strongest dominating) by the
-  // strongest influence, so it is continuous where two roads' reaches meet, and a road's own
-  // surface on the road.
+  // Each road (run of segments) within reach holds the ground between its cut and its bank, which
+  // meet at its surface across its level corridor and open past it. A road's surface here is its
+  // nearest segment's, blended with any other of its segments within kBend of as near (the inside
+  // of a bend), so it is continuous round the bend and exact along a straight.
   constexpr double kBend = 0.25;
   struct Near {
     int run;
@@ -346,7 +384,10 @@ double graded_terrain::sample(double x, double y) const {
     if (d < flat + p_.max_shoulder)
       near.push_back({run_[std::size_t(si)], d, road_height(si, t), flat});
   }
-  double strongest = 0.0, sum = 0.0, wsum = 0.0;
+  // The ground stays between every road's embankment (below) and cut (above): `lo` the highest
+  // bank floor, `hi` the lowest cut ceiling, each with the distance past the corridor of the road
+  // that sets it.
+  double lo = -std::numeric_limits<double>::infinity(), hi = -lo, uLo = 0.0, uHi = 0.0;
   for (std::size_t i = 0; i < near.size(); ++i) {
     // Each run once, at its first entry: its nearest distance, then its surface.
     bool seen = false;
@@ -370,24 +411,29 @@ double graded_terrain::sample(double x, double y) const {
         }
       }
     const double zr = zs / ws;
-    double a = 1.0;
-    if (dmin > flat) {
-      const double shoulder =
-          std::min(p_.max_shoulder,
-                   std::max(p_.min_shoulder, std::abs(h0 - zr) / std::max(1e-3, p_.side_slope)));
-      const double u = (dmin - flat) / shoulder;
-      if (u >= 1.0)
-        continue;
-      a = 1.0 - smoothstep(u);
+    // Past the level corridor the cut and the bank open at side_slope, steeper if they must, so
+    // they have reached the ground by max_shoulder (where the road lets go of it).
+    const double u = std::max(0.0, dmin - flat);
+    if (u >= p_.max_shoulder)
+      continue;
+    const double slope = std::max(p_.side_slope, std::abs(h0 - zr) / p_.max_shoulder);
+    const double band = slope * u;
+    if (zr - band > lo) {
+      lo = zr - band;
+      uLo = u;
     }
-    const double w = std::pow(a, 8.0); // the strongest road dominates the blend of surfaces
-    strongest = std::max(strongest, a);
-    sum += w * zr;
-    wsum += w;
+    if (zr + band < hi) {
+      hi = zr + band;
+      uHi = u;
+    }
   }
-  if (strongest <= 0.0 || wsum <= 0.0)
+  if (!std::isfinite(lo))
     return h0;
-  return h0 + strongest * (sum / wsum - h0);
+  if (lo <= hi)
+    return std::clamp(h0, lo, hi);
+  // A high road's bank and a low road's cut cross: between them, nearer the nearer road's.
+  const double wLo = 1.0 / ((uLo + 1.0) * (uLo + 1.0)), wHi = 1.0 / ((uHi + 1.0) * (uHi + 1.0));
+  return (lo * wLo + hi * wHi) / (wLo + wHi);
 }
 
 bool graded_terrain::graded_at(double x, double y) const {

@@ -8,6 +8,8 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include "ipc_socket_path.h"
+
 #include <chrono>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
@@ -26,7 +28,7 @@
 namespace {
 
 std::string make_socket_path(const std::string &label) {
-  return (std::filesystem::temp_directory_path() / ("cvc_snap_test_" + label + ".sock")).string();
+  return cvc_test::ipc_socket_path("cvc_snap_test_" + label + ".sock");
 }
 
 } // namespace
