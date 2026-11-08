@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <cvc/core/app.h>
 #include <cvc/core/cpu_placement.h>
 #include <cvc/core/exec_pool.h>
@@ -1168,4 +1169,125 @@ TEST(ExecPool, FailedGroupsOfAReusedThreadId) {
   if (!reused)
     GTEST_SKIP() << "no thread id was reused";
   EXPECT_TRUE(seen.empty()) << "a thread with a reused id read an ended thread's failed groups";
+}
+
+namespace {
+
+// CVC_EXEC_FORCE_MOVE for the pools built while it lives (a pool reads the knob when it is built).
+struct force_move_scope {
+  force_move_scope() { set("1"); }
+  ~force_move_scope() { set(nullptr); }
+  static void set(const char *v) {
+#ifdef _WIN32
+    _putenv_s("CVC_EXEC_FORCE_MOVE", v ? v : "");
+#else
+    if (v)
+      setenv("CVC_EXEC_FORCE_MOVE", v, 1);
+    else
+      unsetenv("CVC_EXEC_FORCE_MOVE");
+#endif
+  }
+};
+
+struct force_moved_call {
+  unsigned threads = 0;
+  bool returned = false;
+  double seconds = 0.0;
+  bool skipped = false;    // the call's group was skipped (its pool link)
+  int last_thread = -1;    // which thread pumped the call's group last (0: a caller)
+  std::uint64_t skips = 0; // stats().skipped across the call
+};
+
+// One CVC_EXEC_FORCE_MOVE pump_all of a group the caller pumped last, so its caller may not take
+// it and hands it to the workers, while the pool's only worker is kept 400 ms in another caller's
+// group (S1-Q11). `tight`: the call's deadline is 50 ms away, so the worker reaches it after.
+// Should pump_all never return (the hang this guards), the call's objects are leaked and its thread
+// detached, so the case fails instead of hanging the binary.
+force_moved_call run_force_moved_call(bool tight) {
+  auto *app = new cvc::app;
+  share_locks(*app); // groups pumped on workers, not kept on the caller (S1-Q1)
+  cvc::exec_pool *pool = nullptr;
+  {
+    force_move_scope knob;
+    cvc::pool_options po;
+    po.threads = 1;
+    pool = new cvc::exec_pool(po);
+  }
+  force_moved_call out;
+  out.threads = pool->threads();
+  auto napping = std::make_shared<std::atomic<bool>>(false);
+  auto *busy = new exec_group(opts_for(*app, "busy"));
+  environment_ptr env = environment::extend(builtins::make_default_environment());
+  builtins::register_fn(env, "nap", [napping](std::span<const value_t>) -> value_t {
+    napping->store(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    return value_t(int64_t(1));
+  });
+  execute_options eo;
+  eo.env = env;
+  busy->execute(std::string("(nap)"), eo);
+  auto *light = new exec_group(opts_for(*app, "light"));
+  busy->pool_link().last_thread = 0; // both last pumped by a caller (thread 0)
+  light->pool_link().last_thread = 0;
+  std::thread other([pool, busy] {
+    std::vector<exec_group *> gs{busy};
+    pool->pump_all(gs, kSteps, far_deadline());
+  });
+  while (!napping->load())
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  const auto before = pool->stats();
+  auto returned = std::make_shared<std::atomic<bool>>(false);
+  const auto t0 = clock_type::now();
+  std::thread caller([pool, light, tight, returned] {
+    std::vector<exec_group *> gs{light};
+    pool->pump_all(gs, kSteps,
+                   tight ? clock_type::now() + std::chrono::milliseconds(50) : far_deadline());
+    returned->store(true);
+  });
+  other.join(); // the worker is free again about 400 ms in
+  while (!returned->load() && clock_type::now() - t0 < std::chrono::seconds(10))
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  out.returned = returned->load();
+  out.seconds = std::chrono::duration<double>(clock_type::now() - t0).count();
+  if (!out.returned) {
+    caller.detach(); // still waiting in pump_all: everything it uses stays leaked
+    return out;
+  }
+  caller.join();
+  const auto after = pool->stats();
+  out.skipped = light->pool_link().skipped;
+  out.last_thread = light->pool_link().last_thread;
+  out.skips = after.skipped - before.skipped;
+  delete light;
+  delete busy;
+  delete pool;
+  delete app;
+  return out;
+}
+
+} // namespace
+
+// R1b-mid's force-move hang: under CVC_EXEC_FORCE_MOVE a caller may not take a group it pumped
+// last, so it waits for a worker. A worker that reached the call past its deadline skipped the
+// group and told no one, and the caller waited for ever (exec_pump_frame and Ariadne's drain hung
+// on a loaded machine). Now the caller waits no longer than its deadline and skips the group
+// itself, and a worker that skips tells it. Control: a far deadline waits for the worker and
+// pumps the group. One-sided ceiling of 10 s (rule 7); the time is printed.
+TEST(ExecPool, AForceMovedCallEndsAtItsDeadline) {
+  const force_moved_call control = run_force_moved_call(false);
+  std::cout << "far deadline: " << control.threads << " worker(s), returned " << control.returned
+            << " after " << control.seconds << " s, last thread " << control.last_thread
+            << ", skips " << control.skips << "\n";
+  if (control.threads != 1)
+    GTEST_SKIP() << "needs a pool with one worker";
+  ASSERT_TRUE(control.returned) << "pump_all with a far deadline did not return";
+  EXPECT_FALSE(control.skipped);
+  EXPECT_NE(control.last_thread, 0) << "the caller pumped a group it pumped last";
+  EXPECT_EQ(control.skips, 0u);
+  const force_moved_call tight = run_force_moved_call(true);
+  std::cout << "deadline 50 ms away: returned " << tight.returned << " after " << tight.seconds
+            << " s, last thread " << tight.last_thread << ", skips " << tight.skips << "\n";
+  ASSERT_TRUE(tight.returned) << "pump_all did not return within 10 s: its caller still waits";
+  EXPECT_TRUE(tight.skipped) << "the group was not skipped at the deadline";
+  EXPECT_EQ(tight.skips, 1u);
 }
