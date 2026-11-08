@@ -1842,6 +1842,7 @@ jobs:
         exec_pool_test: OK ] ExecGroupDeathTest.DestroyedFromACallbackOfItsCallAborts
         exec_pool_test: OK ] ExecGroupDeathTest.DestroyedFromItsOwnHostBodyAborts
         exec_pool_test: OK ] ExecPool.FailedGroupsOfAReusedThreadId
+        exec_pool_test: OK ] ExecPool.AForceMovedCallEndsAtItsDeadline
         state_exec_async_test: OK ] AsyncScheduler.KO01_KillOwnerSurvivesSlotsThatReapAndSubmit
         state_exec_async_test: OK ] AsyncScheduler.KO02_AThrowingKillDoesNotStopTheRest
         state_exec_async_calls_test: OK ] AsyncCalls.AnotherSchedulersThreadedFutureRaises
@@ -1869,8 +1870,9 @@ jobs:
       # Stage 1b's required lines (the matrix's `required` format), the same in every leg, so
       # AR-3b is required in both TSan legs: the Ariadne cases of section 4 (IS-1b, AR-1, AR-2,
       # AR-3, AR-3b, SP-1, EL-1, FF-3's init lane), HZ-8 (the teardown reap, S1-Q8; moved here
-      # from the gcc legs' lists, one copy a leg) and PIN-1's two. The lead appends A's, I's and
-      # U's new unit tests here as their branches merge.
+      # from the gcc legs' lists, one copy a leg), PIN-1's two, and the implementers' own new cases
+      # in these binaries (providers by kind, isolated documents and their moves, the init lane, a
+      # started call's finisher). A case added to them adds its line.
       SAN_REQUIRED_S1B: |
         ariadne_runtime_test: OK ] SpawnContext.IS01b_InAnIsolatedDocument
         ariadne_runtime_test: OK ] AriadneFrames.AR01_NoDocumentOptedInStaysOnTheFrameThread
@@ -1883,6 +1885,26 @@ jobs:
         ariadne_runtime_test: OK ] AriadneHazards.HZ08_ForkedChildKeepsOwnerAndTeardownReapsIt
         state_lifetime_stress_test: OK ] StateLifetime.UriStateChainsReleaseTheLeafFirst
         state_lifetime_stress_test: OK ] StateLifetime.StreamDescriptorPinsReleaseTheLeafFirst
+        ariadne_runtime_test: OK ] AriadneScheduler.DrainEndDoesNotPumpAgainAfterAFramePump
+        ariadne_runtime_test: OK ] AriadneInit.ItsCyclesAreItsOwnAndFreedWhenItEnds
+        ariadne_runtime_test: OK ] AriadneHazards.AResidentAReloadStopsIsReaped
+        ariadne_runtime_test: OK ] AriadneIsolatedDocs.ProvidersAreInstalledByTheirKind
+        ariadne_runtime_test: OK ] AriadneIsolatedDocs.IdleAndWaitIdleCountTheDocumentsGroup
+        ariadne_runtime_test: OK ] AriadneIsolatedDocs.IdleAndWaitIdleDecideNothing
+        ariadne_runtime_test: OK ] AriadneIsolatedDocs.AnInitThatUsesOidcKeepsTheDocumentInGroupZero
+        ariadne_runtime_test: OK ] AriadneIsolatedDocs.TeardownReapsItsProcessesAndDestroysItsGroup
+        ariadne_runtime_test: OK ] AriadneIsolatedDocs.ALaterDocumentThatIsNotEligibleMovesToGroupZero
+        ariadne_runtime_test: OK ] AriadneIsolatedDocs.AThreadAffinePrefixAboveTheDocumentMakesItHost
+        ariadne_runtime_test: OK ] AriadneIsolatedDocs.AProgramSetAfterThePlacementIsScanned
+        ariadne_runtime_test: OK ] AriadneIsolatedDocs.AMovedDocumentsStreamPostsWhereItNowRuns
+        ariadne_runtime_test: OK ] AriadneIsolatedDocs.AnEligibilityThatFlipsKeepsOneGroupAtMost
+        ariadne_runtime_test: OK ] AriadneIsolatedDocs.AHostVerbRegisteredAfterLoadIsBound
+        ariadne_runtime_test: OK ] AriadneIsolatedDocsDeathTest.ATeardownInsideAPumpIsRefused
+        ariadne_runtime_test: OK ] AriadneNetIntrinsics.RequestsGoThroughTheContextsHost
+        ariadne_runtime_test: OK ] AriadneNetL4.AStartedRequestKeepsTheHostItStartedOn
+        ariadne_runtime_test: OK ] AriadneStreamIntrinsics.AStreamPostsToItsOpenersGroup
+        ariadne_runtime_test: OK ] AriadneStreamIntrinsics.AStreamOfAnInlineHostPostsToGroupZero
+        state_exec_async_calls_test: OK ] AsyncCalls.AStartedCallsFinisherPostsOnlyWhileItsHostIsUp
       # The lock tests read this and run their smaller sanitizer sizes.
       CVC_LOCKS_SANITIZER: '1'
     steps:
