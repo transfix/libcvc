@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cvc/core/cpu_placement.h>
 #include <thread>
+#include <tuple>
 
 #if defined(__EMSCRIPTEN__)
 // No placement.
@@ -221,14 +222,49 @@ std::vector<logical_cpu> placement_cpus(cpu_set set) {
                               [best](const logical_cpu &c) { return c.efficiency != best; }),
                cpus.end());
   const int core0 = core_of_cpu0(cpus);
-  // The faster class first; in each class, CPUs off logical CPU 0's core before it; then by index.
-  std::stable_sort(cpus.begin(), cpus.end(), [core0](const logical_cpu &a, const logical_cpu &b) {
-    if (a.efficiency != b.efficiency)
-      return a.efficiency > b.efficiency;
-    const bool a0 = core0 >= 0 && a.core == core0, b0 = core0 >= 0 && b.core == core0;
-    return a0 != b0 ? b0 : false;
-  });
-  return cpus;
+  // Each CPU's rank on its core: 0 for the lowest-index logical CPU of the core, 1 for its first
+  // hyperthread sibling, and so on (an unknown core counts as a core of its own).
+  std::vector<int> rank(cpus.size(), 0);
+  for (std::size_t i = 0; i < cpus.size(); ++i)
+    for (std::size_t j = 0; j < cpus.size(); ++j)
+      if (cpus[i].core >= 0 && cpus[j].core == cpus[i].core && cpus[j].index < cpus[i].index)
+        ++rank[i];
+  // The driver's CPU (pin_current_thread(-1)) goes last, so a pool of fewer workers than CPUs never
+  // uses it: the first logical CPU of the fastest class's highest core other than logical CPU 0's
+  // (where most interrupts land), or of CPU 0's core when it is the only one.
+  int driver_core = -1;
+  for (const logical_cpu &c : cpus)
+    if (c.efficiency == best && c.core != core0 && c.core > driver_core)
+      driver_core = c.core;
+  if (driver_core < 0)
+    driver_core = core0;
+  std::size_t driver = cpus.size();
+  for (std::size_t i = 0; i < cpus.size(); ++i)
+    if (cpus[i].efficiency == best && rank[i] == 0 &&
+        (driver_core >= 0 ? cpus[i].core == driver_core : cpus[i].index == cpus.back().index))
+      driver = i;
+  // The faster class first; in each class one logical CPU per physical core before any
+  // hyperthread sibling, so the first workers never share a core; at each rank, logical CPU 0's
+  // core and the driver's after the others; then by index.
+  std::vector<std::size_t> order;
+  for (std::size_t i = 0; i < cpus.size(); ++i)
+    if (i != driver)
+      order.push_back(i);
+  const auto key = [&](std::size_t i) {
+    const bool on_core0 = core0 >= 0 && cpus[i].core == core0;
+    const bool on_driver = driver_core >= 0 && cpus[i].core == driver_core;
+    return std::make_tuple(-static_cast<long long>(cpus[i].efficiency), rank[i], on_driver,
+                           on_core0, cpus[i].index);
+  };
+  std::sort(order.begin(), order.end(),
+            [&](std::size_t a, std::size_t b) { return key(a) < key(b); });
+  std::vector<logical_cpu> out;
+  out.reserve(cpus.size());
+  for (std::size_t i : order)
+    out.push_back(cpus[i]);
+  if (driver < cpus.size())
+    out.push_back(cpus[driver]);
+  return out;
 }
 
 bool place_current_thread(cpu_set set, unsigned index) {
@@ -254,7 +290,8 @@ pin_result pin_current_thread(int cpu) {
   const bool automatic = cpu < 0;
   std::string unit;
   if (automatic) {
-    // A performance core off the core logical CPU 0 sits on, where most interrupts land.
+    // The performance CPU placement_cpus lists last: off the core logical CPU 0 sits on (where
+    // most interrupts land), and never used by a pool of fewer workers than CPUs.
     const std::vector<logical_cpu> cpus = placement_cpus(cpu_set::performance);
     if (cpus.empty()) {
 #if defined(_WIN32)
@@ -264,7 +301,7 @@ pin_result pin_current_thread(int cpu) {
 #endif
       return r;
     }
-    cpu = cpus.front().index;
+    cpu = cpus.back().index;
   }
   for (const logical_cpu &c : logical_cpus())
     if (c.index == cpu)

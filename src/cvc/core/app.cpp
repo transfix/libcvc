@@ -1597,19 +1597,47 @@ void app::exec_pump_frame() {
   // Group 0 once it is built and something uses it, as Ariadne's scheduler_to_pump gates it (tf
   // overlay tasks and sliced tasks live there too): never built here.
   se::async_scheduler *group0 = nullptr;
+  se::random_stream *group0_stream = nullptr;
   {
     boost::mutex::scoped_lock lock(_execSchedulerMutex);
     group0 = _execScheduler.get();
+    if (_execGroup0)
+      group0_stream = &_execGroup0->random;
   }
   if (group0) {
     const se::scheduler_stats s = group0->get_stats();
     if (s.total_processes - s.terminated - s.killed - s.failed <= 0)
       group0 = nullptr;
   }
-  const auto pump_group0 = [group0, deadline] {
+  // Deterministic mode (td 4.4) reaches group 0 as it does the frame groups: slices fixed in
+  // steps, no deadline, and its stream seeded from a fixed name. The pool's flag when there is a
+  // pool (built here when there are frame groups), else the tree's and CVC_EXEC_DETERMINISTIC.
+  cvc::exec_pool *pool = groups.empty() ? exec_pool_probe() : &exec_pool();
+  bool deterministic = false;
+  if (pool) {
+    deterministic = pool->deterministic();
+  } else if (group0) {
+    std::vector<std::pair<unsigned, std::string>> ignored;
+    const char *knob = std::getenv("CVC_EXEC_DETERMINISTIC");
+    deterministic = (knob && std::string(knob) == "1") ||
+                    pool_options_from_state(root(), ignored).deterministic;
+  }
+  if (deterministic && group0_stream && !group0_stream->seeded && !group0_stream->seed) {
+    std::uint64_t h = 14695981039346656037ull; // FNV-1a of "group0", as the pool seeds by name
+    for (const char c : std::string("group0")) {
+      h ^= static_cast<unsigned char>(c);
+      h *= 1099511628211ull;
+    }
+    group0_stream->seed = h;
+  }
+  const auto pump_group0 = [group0, deadline, deterministic] {
     se::async_scheduler::pump_owner_scope token(*group0); // the token, as a group's pump takes
     group0->drain_ingress();
     group0->wake_awaiting();
+    if (deterministic) {
+      group0->sync_run_steps(kFrame.steps, std::nullopt);
+      return;
+    }
     const double left = std::max(
         0.0, std::chrono::duration<double>(deadline - std::chrono::steady_clock::now()).count());
     group0->sync_run_steps(kFrame.steps, std::min(kFrame.seconds, left));
@@ -1619,8 +1647,8 @@ void app::exec_pump_frame() {
       pump_group0();
     return;
   }
-  exec_pool().pump_all(groups, kFrame, deadline,
-                       group0 ? std::function<void()>(pump_group0) : std::function<void()>());
+  pool->pump_all(groups, kFrame, deadline,
+                 group0 ? std::function<void()>(pump_group0) : std::function<void()>());
 }
 
 std::uint64_t app::exec_pump_generation() const {
