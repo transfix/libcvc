@@ -174,8 +174,9 @@ std::string replace_all(std::string s, const std::string &token, const std::stri
 
 // §3 repeat: deep-copy a template widget, substituting the loop-index token `{i}` with the
 // 0-based `index` in every field an instance uses to address distinct state or to display
-// (id/label/bind/on/predicates/tooltip/options). Recurses into children. (Single-level: a
-// nested `repeat` shares the same `{i}` token and is not independently indexed — a follow-up.)
+// (id/label/bind/on and the pointer handlers/predicates/tooltip/options). Recurses into children.
+// (Single-level: a nested `repeat` shares the same `{i}` token and is not independently indexed —
+// a follow-up.)
 Widget substitute_index(const Widget &w, int index) {
   const std::string idx = std::to_string(index);
   static const std::string kTok = "{i}";
@@ -184,6 +185,16 @@ Widget substitute_index(const Widget &w, int index) {
   out.label = replace_all(out.label, kTok, idx);
   out.bind = replace_all(out.bind, kTok, idx);
   out.on = replace_all(out.on, kTok, idx);
+  // §4.6 the pointer handlers, a text_view's on_top, and a message_input's hint and send label: a
+  // row's handler acts on that row (on_click: (state-set "tree.cam_{i}.open" "1")).
+  out.on_click = replace_all(out.on_click, kTok, idx);
+  out.on_hover = replace_all(out.on_hover, kTok, idx);
+  out.on_drag = replace_all(out.on_drag, kTok, idx);
+  out.on_drag_start = replace_all(out.on_drag_start, kTok, idx);
+  out.on_drag_end = replace_all(out.on_drag_end, kTok, idx);
+  out.on_top = replace_all(out.on_top, kTok, idx);
+  out.hint = replace_all(out.hint, kTok, idx);
+  out.send = replace_all(out.send, kTok, idx);
   out.visible_when = replace_all(out.visible_when, kTok, idx);
   out.enabled_when = replace_all(out.enabled_when, kTok, idx);
   out.disabled_when = replace_all(out.disabled_when, kTok, idx);

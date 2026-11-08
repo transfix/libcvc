@@ -201,6 +201,45 @@ TEST(AriadneFtxui, ButtonActionRunsOnDrain) {
   EXPECT_EQ(fired, 2);
 }
 
+// §3 repeat: `{i}` reaches a row's pointer handlers and a message field's hint, so a click or a
+// hover acts on the row it lands on.
+TEST(AriadneFtxui, RepeatedRowsHandlersSeeTheirOwnIndex) {
+  REQUIRE_FTXUI();
+  Widget row = text("row {i}");
+  row.on_click = "(state-set \"hit.{i}\" \"1\")";
+  row.on_hover = "(state-set \"over\" \"{i}\")";
+  Widget reply = message_input("Reply", "draft.{i}");
+  reply.hint = "reply to {i}";
+  reply.send = "Send {i}";
+  Widget rows = group({row, reply});
+  rows.repeat = "(state-get \"n\")";
+  cvc::app app;
+  FtxuiBackend be;
+  Runtime rt{app, ""};
+  cvc::state::instance(app)("n").value(std::string("3"));
+  rt.set_backend(&be);
+  rt.set_root(group({rows}));
+  std::string screen = be.render_to_string(rt, 80, 24);
+  const auto settle = [&] {
+    for (int i = 0; i < 50; ++i)
+      rt.drain();
+  };
+  EXPECT_NE(screen.find("reply to 2"), std::string::npos) << screen;
+  int x = 0, y = 0;
+  ASSERT_TRUE(find_cell(screen, "row 1", x, y)) << screen;
+  be.feed(rt, TermEvent::mouse_event(TermEvent::Mouse::Press, x, y));
+  be.feed(rt, TermEvent::mouse_event(TermEvent::Mouse::Release, x, y));
+  settle();
+  EXPECT_EQ(val(app, "hit.1"), "1");
+  EXPECT_EQ(val(app, "hit.0"), "");
+  EXPECT_EQ(val(app, "hit.2"), "");
+  screen = be.render_to_string(rt, 80, 24);
+  ASSERT_TRUE(find_cell(screen, "row 2", x, y)) << screen;
+  be.feed(rt, TermEvent::mouse_event(TermEvent::Mouse::Move, x, y, 0));
+  settle();
+  EXPECT_EQ(val(app, "over"), "2");
+}
+
 TEST(AriadneFtxui, SliderKeysCommitEachStep) {
   REQUIRE_FTXUI();
   Term t(group({slider_int("N", "n", 0, 10, 3)}));

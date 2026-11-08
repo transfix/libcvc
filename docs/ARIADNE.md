@@ -2383,6 +2383,13 @@ windows:
                 - { button: Reply, on: (state-set "compose.reply_to" "{i}") }
 ```
 
+Inside a `repeat:`, `{i}` is the instance's 0-based index. It is filled in wherever an instance
+names state or shows text: `id`, `label`, `bind`, `on`, the pointer handlers (`on_click`,
+`on_hover`, `on_drag`, `on_drag_start`, `on_drag_end`), a `text_view`'s `on_top`, a
+`message_input`'s `hint` and `send`, the `*_when` predicates, `tooltip`, `options`, `src`,
+`status`, `poster`, `emoji`, a `background:`'s `src`, `bind` and `status`, and a `load:` mount's
+`link:` holes. A nested `repeat:` keeps its own `{i}`: the outer index does not reach into it.
+
 Slots `note` (a row above the header), `extra` (lines under the byline, in the header's text
 column) and `body` (widgets after the body text) take more of a post's parts. A part whose key
 is empty is not drawn. The avatar is a circle `avatar_size` px across (40),
