@@ -1238,6 +1238,7 @@ entry warns. An entry is one of:
   | `input.mouse`, `input.keyboard` | pointer input; key and text input |
   | `ui.group_click` | a group with `on_click:` is one item over its whole area, and `hover: highlight` lights it (§5.19); ImGui, FTXUI and tvision |
   | `raster.bitmap` | images show in real pixels (a GL window, or a kitty or Sixel terminal) |
+  | `input.on_change` | `message_input:` takes `live: true` and `on_change:` (the draft as it is typed), and a draft the document writes while it is edited (§5.15) |
   | `term`, `term.kitty`, `term.sixel` | a text terminal; one that speaks kitty graphics; one that draws Sixel |
   | `relay` | the document is a relay's server document, run by `arisrv --doc` (§9.7) |
 
@@ -1839,6 +1840,27 @@ back (a window reopened) keeps its place.
 - **ImGui** draws one line that grows with its wrapped text up to `max_lines`, then scrolls. The
   hint is drawn over it while it is empty. A bare-name `on:` (a host handler) gets no `event`;
   give it a program.
+- **As it is typed: `live:` and `on_change:`.** `live: true` writes the draft to `bind:` at every
+  change, not only when focus leaves. `on_change:` (it implies `live`) runs each time the draft
+  changes, with `(get-attr event "text")` the draft, and once with `""` when a message is sent.
+  Keys pressed between two drains run it once, with the draft as it is then.
+
+  ```yaml
+  - message_input: "##compose"
+    bind: compose.draft
+    max_length: 4096
+    on_change: (compose-complete (get-attr event "text"))   # e.g. a #tag or @name completion
+    on: (post-send (get-attr event "text"))
+  - text: ""
+    bind: (string.join (list (str (string.length (state-get "compose.draft"))) "4096") " / ")
+  ```
+
+  A draft the document writes to `bind:` while the field is being edited is taken by the field,
+  with the cursor at its end. So `on_change:` can complete a word by writing the whole draft
+  back. A key typed in the frame before that write lands is replaced by it. Without `live:` or
+  `on_change:`, a field being edited keeps its own text, as before. `(has? "input.on_change")`
+  holds where libcvc has this. `ariadne_ftxui_test`'s `MessageFieldLiveDraftAndACompletion` and
+  `cvcgl_imgui_chat_widgets` type into one.
 
 ### 5.16 Conference chat: the chat verbs and the chat component
 

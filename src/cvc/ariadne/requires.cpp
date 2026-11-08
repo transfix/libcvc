@@ -56,6 +56,10 @@ const std::vector<TokenRule> &rules() {
        [](const HostFacts &f) { return f.caps.item_groups; }},
       {{"raster.bitmap", "images in real pixels (a GL window, or a kitty or Sixel terminal)"},
        [](const HostFacts &f) { return f.caps.bitmap; }},
+      {{"input.on_change", "message_input: takes live: true and on_change: (event.text, as it is "
+                           "typed), and takes a draft the document writes to its bind: while it is "
+                           "being edited"},
+       [](const HostFacts &) { return true; }},
       {{"term", "the document is drawn in a text terminal"},
        [](const HostFacts &f) { return f.caps.terminal; }},
       {{"term.kitty", "the terminal speaks the kitty graphics protocol"},

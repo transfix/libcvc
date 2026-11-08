@@ -1250,7 +1250,10 @@ ariadne::MessageEdit ImGuiBackend::message_input(const char *label, const char *
   ariadne::MessageEdit out;
 #ifdef CVC_ENABLE_IMGUI
   MessageField &f = m_messageFields[key];
-  if (!ImGui::IsAnyItemActive() && !f.refocus)
+  // Live (the core writes each change): a draft in state the field did not report is the
+  // document's own (a completion), which it takes even while it is being edited.
+  const bool external = o.live && current != f.reported && current != f.text;
+  if ((!ImGui::IsAnyItemActive() && !f.refocus) || external)
     f.text = current; // follow the draft in state while nothing is being edited
   const ImGuiStyle &st = ImGui::GetStyle();
   const char *end = label ? ImGui::FindRenderedTextEnd(label) : label;
@@ -1263,6 +1266,9 @@ ariadne::MessageEdit ImGuiBackend::message_input(const char *label, const char *
                       : send_w > 0.0f ? ImMax(ImGui::GetContentRegionAvail().x - send_w, 1.0f)
                                       : -FLT_MIN;
   ImGui::PushID(label ? label : "message");
+  if (external) // the field being edited shows the new text, the cursor after it
+    if (ImGuiInputTextState *s = ImGui::GetInputTextState(ImGui::GetID("##message")))
+      s->ReloadUserBufAndMoveToEnd();
   if (f.refocus) {
     ImGui::SetKeyboardFocusHere();
     f.refocus = false;
@@ -1324,6 +1330,7 @@ ariadne::MessageEdit ImGuiBackend::message_input(const char *label, const char *
     out.value = f.text;
   }
   out.changed = f.text != current;
+  f.reported = out.submitted ? std::string() : f.text;
 #else
   (void)label;
   (void)key;

@@ -302,6 +302,7 @@ private:
   struct MessageField {
     std::string text;
     bool refocus = false;
+    std::string reported; // live: the text it last reported (a draft in state otherwise is new)
   };
   std::unordered_map<std::string, MessageField> m_messageFields;
   // Per-key text views (ImGuiBackend.cpp): the layout, the scroll and the top trigger.

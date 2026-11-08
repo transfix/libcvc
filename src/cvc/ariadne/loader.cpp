@@ -223,6 +223,8 @@ const char *const kAriSchema = R"ARISCHEMA({
         "max_lines": {"type": "number"},
         "max_length": {"type": "number"},
         "send": {"type": "string"},
+        "live": {"$ref": "#/$defs/flag"},
+        "on_change": {"type": "string"},
         "hover": {"enum": ["highlight", "none"]},
         "on_hover_end": {"type": "string"},
         "options": {"type": ["array", "string"], "items": {"type": "string"}},
@@ -941,6 +943,8 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     w.max_lines = lines >= 1.0 ? static_cast<int>(lines) : 4;
     w.max_length = length >= 0.0 ? static_cast<int>(length) : 0;
     w.send = str(n, "send");
+    w.live = flag(n, "live", false);   // the draft written to bind: as it is typed
+    w.on_change = str(n, "on_change"); // ... and this run each time, event.text the draft
     return w;
   }
   if (type == "input_int") {
