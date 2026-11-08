@@ -2243,3 +2243,123 @@ TEST(AsyncCalls, HZ13_ACancelledCallWakesEveryWaiter) {
   if (!woken)
     w.async->kill(child);
 }
+
+// --- Stage 1: a future of another scheduler (S1-Q2, td 4.9) ---
+
+namespace {
+
+// (publish v): keeps v in `out` and returns it.
+void register_publish(world &w, value_t &out) {
+  builtins::register_fn(w.env, "publish", [&out](std::span<const value_t> a) -> value_t {
+    out = a[0];
+    return a[0];
+  });
+}
+
+// What `script` came to on `w`'s scheduler within 5 s: its value, or "<status>" if it didn't end.
+std::string brief_run(world &w, const std::string &script) {
+  const int pid = w.submit(script);
+  w.pump([&] { return w.finished(pid); }, 5.0);
+  if (!w.finished(pid)) {
+    const std::string status = "<" + std::string(to_string(w.info(pid).status)) + ">";
+    w.async->kill(pid);
+    return status;
+  }
+  const std::optional<value_t> r = w.result(pid);
+  return r ? show(*r) : "<" + w.async->get_exit_error(pid).value_or("no result") + ">";
+}
+
+// Each way a program awaits the future (foreign), with the RuntimeError's message as its value.
+std::vector<std::string> awaits_of_foreign(bool with_generator) {
+  std::vector<std::string> forms = {
+      R"((try (await (foreign)) (catch (RuntimeError e) (get-attr e "message"))))",
+      R"((try (await (foreign) 30) (catch (RuntimeError e) (get-attr e "message"))))",
+      R"((try (await-all (list 7 (foreign))) (catch (RuntimeError e) (get-attr e "message"))))",
+      R"((try (msg-recv (foreign)) (catch (RuntimeError e) (get-attr e "message"))))"};
+  // A generator's body can't park, so its await waits for the call there: only once it finished,
+  // or a missing check would block the step for good.
+  if (with_generator)
+    forms.push_back(R"((try (next (generator (lambda () (yield (await (foreign))))))
+                           (catch (RuntimeError e) (get-attr e "message"))))");
+  return forms;
+}
+
+} // namespace
+
+// S1-Q2: a threaded future made on scheduler A and awaited by a process of scheduler B (await,
+// await with a timeout, await-all, msg-recv on it, and a generator body's await) raises
+// RuntimeError at once, while the call runs and after it has finished but before A drained its
+// completion. A's call list is untouched: the call stays in flight on A, A's process is charged
+// nothing, and A's own await still gets the value and the charge once A drains.
+TEST(AsyncCalls, AnotherSchedulersThreadedFutureRaises) {
+  std::atomic<bool> release{false};
+  world a(async_sched);
+  world b(async_sched);
+  value_t fut;
+  register_publish(a, fut);
+  register_async_fn(a.env, *a.host, "held", [&release](std::span<const value_t>) -> async_kernel {
+    return [&release](async_call &call) -> value_t {
+      while (!release.load() && !call.cancelled())
+        std::this_thread::sleep_for(1ms);
+      return value_t(int64_t{42});
+    };
+  });
+  builtins::register_fn(b.env, "foreign", [&fut](std::span<const value_t>) { return fut; });
+
+  const int maker = a.submit("(begin (set f (publish (held-async))) (await f))", one_step_a_call());
+  ASSERT_TRUE(a.pump([&] { return a.waiting(maker) && is_async_future(fut); }));
+  const std::shared_ptr<detail::awaitable> call = async_call_of_future(fut);
+  ASSERT_NE(call, nullptr);
+  EXPECT_EQ(call->owner(), a.async.get());
+  ASSERT_EQ(a.async->async_calls_in_flight(), 1u);
+
+  const auto a_untouched = [&] {
+    EXPECT_EQ(a.async->async_calls_in_flight(), 1u);
+    EXPECT_EQ(a.info(maker).status, process_status::waiting);
+    EXPECT_EQ(a.info(maker).async_steps, 0u);
+  };
+  for (const std::string &form : awaits_of_foreign(false)) {
+    SCOPED_TRACE("running: " + form);
+    EXPECT_EQ(brief_run(b, form), kForeignFutureError);
+    a_untouched();
+  }
+  EXPECT_FALSE(call->finished());
+
+  release = true;
+  a.host->wait_idle(); // settled and posted to A's ingress, which nothing drained
+  ASSERT_TRUE(call->finished());
+  for (const std::string &form : awaits_of_foreign(true)) {
+    SCOPED_TRACE("finished: " + form);
+    EXPECT_EQ(brief_run(b, form), kForeignFutureError);
+    a_untouched();
+  }
+
+  a.run_to_end(maker);
+  EXPECT_EQ(show(*a.result(maker)), "42");
+  EXPECT_EQ(a.info(maker).async_steps, 1u);
+  EXPECT_EQ(a.async->async_calls_in_flight(), 0u);
+}
+
+// S1-Q2: an inline future (no owner: settled before it returned) is a plain value, which a process
+// of another scheduler awaits as its own, though the host that ran it is bound to A.
+TEST(AsyncCalls, AnotherSchedulersInlineFutureIsItsValue) {
+  async_options inline_calls;
+  inline_calls.where = executor::inline_call();
+  world a(async_sched, inline_calls);
+  world b(async_sched);
+  value_t fut;
+  register_publish(a, fut);
+  builtins::register_fn(b.env, "foreign", [&fut](std::span<const value_t>) { return fut; });
+
+  a.run_to_end(a.submit("(publish (slow-op-async 5 1))"));
+  ASSERT_TRUE(is_async_future(fut));
+  const std::shared_ptr<detail::awaitable> call = async_call_of_future(fut);
+  ASSERT_NE(call, nullptr);
+  EXPECT_EQ(call->owner(), nullptr);
+  ASSERT_TRUE(call->finished());
+
+  EXPECT_EQ(brief_run(b, "(await (foreign))"), "10");
+  EXPECT_EQ(brief_run(b, "(await-all (list 7 (foreign)))"), "(7 10)");
+  EXPECT_EQ(brief_run(b, "(msg-recv (foreign))"), "10");
+  EXPECT_EQ(brief_run(b, "(next (generator (lambda () (yield (await (foreign))))))"), "10");
+}
