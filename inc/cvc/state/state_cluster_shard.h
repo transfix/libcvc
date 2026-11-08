@@ -316,10 +316,30 @@ public:
     return _ctr_remote_filtered_out.load();
   }
 
+  // -------- Outbound scope (what this node sends) --------
+  //
+  // The sender's side of the interest filter. A node may hold more than it replicates: arisrv's
+  // shard observes the whole app tree, where a server document keeps its own state beside the
+  // room tree and the namespaces it publishes (ARIADNE_SCRIPTING_HOSTS.md §6.5.3).
+  //
+  // Semantics:
+  //   * add_publish_prefix(prefix) adds a path prefix, matched as add_interest's are.
+  //   * With at least one prefix, drain_local() and replay_local() return only the local
+  //     mutations under one (a delegation op always goes), and snapshot() only the entries under
+  //     one. What is held back is never sent: drain_local() still moves the publish cursor past
+  //     it, so trim_published() erases it too.
+  //   * Default: no prefixes, so everything is sent, as before.
+  //
+  // Threading: thread-safe.
+  void add_publish_prefix(std::string path_prefix);
+  std::vector<std::string> publish_prefixes() const;
+  // Whether `path` is under a publish prefix (always true with none).
+  bool path_is_published(const std::string &path) const;
+
   // Snapshot: walk the local state tree under `path_prefix` and return a vector of entries suitable
   // for initial-sync. Aliased to the transport's entry type so the shard producer and the transport
   // wire share ONE definition (including the PR4 data() payload), with no field-by-field
-  // conversion.
+  // conversion. With publish prefixes, only what is under them (the outbound scope above).
   using snapshot_entry = state_transport::snapshot_entry;
   std::vector<snapshot_entry> snapshot(const std::string &path_prefix = std::string()) const;
 
@@ -384,9 +404,12 @@ public:
 
 private:
   // Shared body of drain_local()/replay_local(): replay the journal
-  // past `after_sequence`, keep local-origin mutations, and stamp
-  // each one for the wire (cluster id, HLC time, blob offload).
-  std::vector<state_mutation> collect_local(std::uint64_t after_sequence, std::size_t max_count);
+  // past `after_sequence`, keep local-origin mutations in the
+  // outbound scope, and stamp each one for the wire (cluster id, HLC
+  // time, blob offload). `scanned`, when given, gets the sequence of
+  // the last journal entry looked at, kept or not.
+  std::vector<state_mutation> collect_local(std::uint64_t after_sequence, std::size_t max_count,
+                                            std::uint64_t *scanned = nullptr);
 
   std::string _cluster_id;
   std::string _local_node_id;
@@ -439,6 +462,8 @@ private:
   // Inbound interest filter.
   std::vector<std::string> _interests;
   bool _enforce_interest = false;
+  // Outbound scope (add_publish_prefix); empty = everything.
+  std::vector<std::string> _publish_prefixes;
 
   // Phase 8 slice 2.
   state_transport *_transport = nullptr;

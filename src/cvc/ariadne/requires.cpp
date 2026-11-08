@@ -92,6 +92,9 @@ const std::vector<TokenRule> &rules() {
        [](const HostFacts &f) { return f.oidc_redirect; }},
       {{"browser", "open-url opens the user's web browser here (not over SSH or --no-browser)"},
        [](const HostFacts &f) { return f.browser; }},
+      {{"relay", "the document is a relay's server document (arisrv --doc): server: publish:, "
+                 "the room at `room`, the world clock at sim.tick"},
+       [](const HostFacts &f) { return f.relay; }},
       // A script language's tokens answer from the engine a scripting host registered
       // (set_script_engine), not from HostFacts; the language name stands for itself here.
       {{"python", "an embedded Python runs the document's python: block"},
@@ -339,6 +342,8 @@ std::string capability_hint(const std::string &name) {
     if ((name == l.name || module_token_language(name, nullptr) == &l) &&
         !has_script_engine(l.name))
       return std::string("a document's ") + l.name + " runs in the scripting hosts, " + l.hosts;
+  if (name == "relay") // asked only of a token that does not hold
+    return "a server document runs on the relay: arisrv --doc";
   return {};
 }
 

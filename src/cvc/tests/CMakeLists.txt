@@ -13,6 +13,7 @@ add_executable(ariadne_doc_fetch_test ariadne_doc_fetch_test.cpp)
 add_executable(ariadne_scene_tf_test ariadne_scene_tf_test.cpp)
 add_executable(ariadne_runtime_test ariadne_runtime_test.cpp)
 add_executable(ariadne_scene_world_test ariadne_scene_world_test.cpp)
+add_executable(ariadne_server_document_test ariadne_server_document_test.cpp)
 add_executable(ariadne_bind_test ariadne_bind_test.cpp)
 add_executable(ariadne_ftxui_test ariadne_ftxui_test.cpp)
 add_executable(ariadne_term_graphics_test ariadne_term_graphics_test.cpp)
@@ -328,6 +329,7 @@ set(TEST_TARGETS
   ariadne_scene_tf_test
   ariadne_runtime_test
   ariadne_scene_world_test
+  ariadne_server_document_test
   ariadne_bind_test
   ariadne_ftxui_test
   ariadne_term_graphics_test
@@ -700,6 +702,13 @@ target_link_libraries(ariadne_runtime_test
 )
 
 target_link_libraries(ariadne_scene_world_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ariadne_server_document_test
   PRIVATE
     cvc
     GTest::gtest
@@ -2700,6 +2709,7 @@ cvc_discover_tests(ariadne_doc_fetch_test)
 cvc_discover_tests(ariadne_scene_tf_test)
 cvc_discover_tests(ariadne_runtime_test)
 cvc_discover_tests(ariadne_scene_world_test)
+cvc_discover_tests(ariadne_server_document_test)
 cvc_discover_tests(ariadne_ftxui_test)
 cvc_discover_tests(ariadne_term_graphics_test)
 cvc_discover_tests(ariadne_media_test)

@@ -111,7 +111,6 @@ TEST(StateTransportIpcTest, TwoEndpointConvergence) {
   tB.register_shard(&sB);
 
   // First-set-on-fresh-child is lost (adapter quirk). Set twice.
-  cvc::state::instance(aA)("k").value(std::string("init"));
   cvc::state::instance(aA)("k").value(std::string("v1"));
 
   std::size_t pumped = tA.pump_all();
@@ -266,7 +265,6 @@ TEST(StateTransportIpcTest, RoundTripSuppressedByDedup) {
   tA.register_shard(&sA);
   tB.register_shard(&sB);
 
-  cvc::state::instance(aA)("rt").value(std::string("seed"));
   cvc::state::instance(aA)("rt").value(std::string("payload"));
   tA.pump_all();
   tA.flush();
@@ -305,7 +303,6 @@ TEST(StateTransportIpcTest, CrossClusterIsolation) {
   tA.register_shard(&sA);
   tB.register_shard(&sB);
 
-  cvc::state::instance(aA)("iso").value(std::string("seed"));
   cvc::state::instance(aA)("iso").value(std::string("v"));
   tA.pump_all();
   tA.flush();
@@ -338,7 +335,6 @@ TEST(StateTransportIpcTest, LateJoinerReceivesWritesMadeBeforeItConnected) {
   tA.register_shard(&sA);
   tB.register_shard(&sB);
 
-  cvc::state::instance(aA)("late.k").value(std::string("seed"));
   cvc::state::instance(aA)("late.k").value(std::string("v1"));
 
   // The drop: drained with zero connections, cursor advanced anyway.
@@ -549,7 +545,6 @@ TEST(StateTransportIpcTest, BackfillCanBeDisabled) {
   tA.register_shard(&sA);
   tB.register_shard(&sB);
 
-  cvc::state::instance(aA)("nobf.k").value(std::string("seed"));
   cvc::state::instance(aA)("nobf.k").value(std::string("v1"));
   tA.pump_all();
   tA.flush();
@@ -586,7 +581,6 @@ TEST(StateTransportIpcTest, ThreeEndpointFanOut) {
   tB.register_shard(&sB);
   tC.register_shard(&sC);
 
-  cvc::state::instance(aA)("fan").value(std::string("seed"));
   cvc::state::instance(aA)("fan").value(std::string("hello"));
   tA.pump_all();
   tA.flush();
@@ -930,8 +924,7 @@ TEST(StateTransportIpcTest, RedundantConnectionsSendEachMutationOncePerPeer) {
   ASSERT_TRUE(
       wait_until([&] { return tA.total_received_frames() >= 2; }, std::chrono::milliseconds(2000)));
 
-  const int kCount = 32;
-  cvc::state::instance(aA)("dup.k").value(std::string("seed"));
+  const int kCount = 32; // v0's write is the fresh node's first, journaled like the rest
   for (int i = 0; i < kCount; ++i) {
     cvc::state::instance(aA)("dup.k").value("v" + std::to_string(i));
     tA.pump_all();

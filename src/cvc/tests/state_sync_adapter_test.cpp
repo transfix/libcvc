@@ -88,12 +88,58 @@ TEST(StateSyncAdapterTest, NewChildIsObservedLazily) {
   cvc::state::instance(a)(root + ".freshChild").value("hello");
 
   EXPECT_GT(adapter.observed_paths(), before);
-  // Note: the FIRST value() on a fresh child fires valueChanged
-  // *before* childChanged reaches the adapter, so that initial set
-  // is lost. A subsequent set on the now-observed child must land
-  // in the journal.
+  // The FIRST value() on a fresh child fires valueChanged before childChanged reaches the
+  // adapter, so the adapter journals the child's content when it first sees it: the initial set
+  // replicates too. A subsequent set on the now-observed child lands in the journal as usual.
+  const auto values_at = [&](const std::string &path) {
+    std::vector<std::string> out;
+    for (const auto &m : adapter.journal().snapshot())
+      if (m.path == path && m.op == cvc::state_mutation_op::set_value)
+        out.push_back(m.string_value);
+    return out;
+  };
+  EXPECT_EQ(values_at(root + ".freshChild"), (std::vector<std::string>{"hello"}));
   cvc::state::instance(a)(root + ".freshChild").value("hello2");
-  EXPECT_GE(adapter.local_mutation_count(), 1u);
+  EXPECT_EQ(values_at(root + ".freshChild"), (std::vector<std::string>{"hello", "hello2"}));
+  EXPECT_EQ(adapter.local_mutation_count(), 2u);
+}
+
+// What is first seen without content is not journaled: a node made on the way to another, or a
+// touch (set_replicated's touch-then-write, whose write is then journaled once).
+TEST(StateSyncAdapterTest, FirstSightJournalsOnlyContent) {
+  cvc::app a;
+  std::string root = unique_root("sight");
+  cvc::state::instance(a)(root).touch();
+  cvc::state_sync_adapter adapter(a, root, "nodeA");
+  adapter.attach();
+
+  cvc::state::instance(a)(root + ".a.b.c").value("deep");
+  cvc::state &t = cvc::state::instance(a)(root + ".touched");
+  t.touch();
+  t.value("after touch");
+  std::vector<std::string> paths;
+  for (const auto &m : adapter.journal().snapshot())
+    if (m.op == cvc::state_mutation_op::set_value)
+      paths.push_back(m.path + "=" + m.string_value);
+  EXPECT_EQ(paths, (std::vector<std::string>{root + ".a.b.c=deep", root + ".touched=after touch"}));
+}
+
+// A remote apply that makes a node is not journaled at first sight either (no echo).
+TEST(StateSyncAdapterTest, RemoteApplyOfAFreshNodeDoesNotFeedback) {
+  cvc::app a;
+  std::string root = unique_root("remotefresh");
+  cvc::state::instance(a)(root).touch();
+  cvc::state_sync_adapter adapter(a, root, "nodeA");
+  adapter.attach();
+
+  cvc::state_mutation m;
+  m.path = root + ".fresh.leaf";
+  m.op = cvc::state_mutation_op::set_value;
+  m.string_value = "from a peer";
+  EXPECT_TRUE(adapter.apply_remote(m));
+  EXPECT_EQ(cvc::state::instance(a)(root + ".fresh.leaf").value(), "from a peer");
+  EXPECT_EQ(adapter.local_mutation_count(), 0u);
+  EXPECT_EQ(adapter.journal().size(), 0u);
 }
 
 TEST(StateSyncAdapterTest, RemoteApplyDoesNotFeedback) {
