@@ -662,36 +662,6 @@ std::vector<group_record> solo_records(int groups, const budget_fn &budget,
   return solo;
 }
 
-// ...then all of them on a pool of `threads` workers: every group's record equals its solo run.
-void check_against_solo(const char *label, int groups, unsigned threads,
-                        const std::vector<group_record> &solo, const budget_fn &budget,
-                        const group_plan &plan, bool &no_registry_reported) {
-  pool_app w(threads);
-  std::vector<std::unique_ptr<group_world>> worlds;
-  std::vector<group_world *> raw;
-  for (int k = 0; k < groups; ++k) {
-    worlds.push_back(std::make_unique<group_world>(w, "g" + std::to_string(k), group_affinity::any,
-                                                   [&](exec_group::options &o) {
-                                                     if (plan.options)
-                                                       plan.options(k, o);
-                                                   }));
-    raw.push_back(worlds.back().get());
-    apply_plan(plan, k, *worlds.back());
-  }
-  const auto t0 = clock_type::now();
-  const std::size_t frames = pump_pooled(w, raw, budget);
-  std::printf("%s: %d groups at threads %u (effective %u): %zu frames, %.3f s\n", label, groups,
-              threads, w.effective(), frames, seconds_since(t0));
-  std::fflush(stdout);
-  for (int k = 0; k < groups; ++k) {
-    const std::string where = std::string(label) + ", " + std::to_string(groups) +
-                              " groups at threads " + std::to_string(threads) + ", group " +
-                              std::to_string(k);
-    EXPECT_TRUE(worlds[k]->done()) << where << " never ended";
-    expect_same(record(*worlds[k]), solo[k], where, no_registry_reported);
-  }
-}
-
 // Hold the caller of a pump_all inside a host-affinity group's pump until `go` is set (or
 // kCeiling passes), so the pool's workers take the call's other groups: the caller pumps the
 // host-affinity groups first (S1.6). Its one process loops, so it always has a pump to take.
@@ -712,6 +682,64 @@ struct caller_hold {
   }
   exec_group &g() { return gw->g(); }
 };
+
+// ...then all of them on a pool of `threads` workers: every group's record equals its solo run.
+// The first frame holds the caller (caller_hold) until a worker has started one of the groups'
+// pumps, so a pool with workers is shown to use them (stats().worker_pumps), whatever the pumps'
+// timing: a fresh group's last pump counts as 0 s, so without it the first frames might wake no
+// helper, and a regression that never woke one would leave the oracle green (R1-mid S-m2). The
+// hold gets its own frame and no budget of the groups': their pumps are as in the solo runs.
+void check_against_solo(const char *label, int groups, unsigned threads,
+                        const std::vector<group_record> &solo, const budget_fn &budget,
+                        const group_plan &plan, bool &no_registry_reported) {
+  pool_app w(threads);
+  const auto caller = std::this_thread::get_id();
+  caller_hold hold(w, "hold");
+  if (w.pool.threads() == 0)
+    hold.go.store(true); // no worker to wait for
+  std::vector<std::unique_ptr<group_world>> worlds;
+  std::vector<group_world *> raw;
+  for (int k = 0; k < groups; ++k) {
+    worlds.push_back(std::make_unique<group_world>(
+        w, "g" + std::to_string(k), group_affinity::any, [&](exec_group::options &o) {
+          if (plan.options)
+            plan.options(k, o);
+          o.pump_hook_for_test = [inner = o.pump_hook_for_test, &hold, caller](exec_group &g) {
+            if (std::this_thread::get_id() != caller)
+              hold.go.store(true); // a worker has a group: the caller may go on
+            if (inner)
+              inner(g);
+          };
+        }));
+    raw.push_back(worlds.back().get());
+    apply_plan(plan, k, *worlds.back());
+  }
+  const auto t0 = clock_type::now();
+  std::vector<exec_group *> first{&hold.g()};
+  w.pool.set_last_pump_for_test(hold.g(), 1e-3);
+  for (group_world *gw : raw) {
+    first.push_back(&gw->g());
+    w.pool.set_last_pump_for_test(gw->g(), 1e-3); // above inline_below: helpers are woken
+  }
+  w.pool.pump_all(first, budget(0), clock_type::now() + std::chrono::hours(1));
+  const std::size_t frames = 1 + pump_pooled(w, raw, [&](std::size_t i) { return budget(i + 1); });
+  const cvc::pool_stats stats = w.pool.stats();
+  std::printf("%s: %d groups at threads %u (effective %u): %zu frames, %llu of %llu pumps on a "
+              "worker, %.3f s\n",
+              label, groups, threads, w.effective(), frames,
+              static_cast<unsigned long long>(stats.worker_pumps),
+              static_cast<unsigned long long>(stats.pumps), seconds_since(t0));
+  std::fflush(stdout);
+  if (w.pool.threads() > 0)
+    EXPECT_GT(stats.worker_pumps, 0u) << label << ": no worker pumped a group";
+  for (int k = 0; k < groups; ++k) {
+    const std::string where = std::string(label) + ", " + std::to_string(groups) +
+                              " groups at threads " + std::to_string(threads) + ", group " +
+                              std::to_string(k);
+    EXPECT_TRUE(worlds[k]->done()) << where << " never ended";
+    expect_same(record(*worlds[k]), solo[k], where, no_registry_reported);
+  }
+}
 
 // The threads a group's pumps ran on, in order (its pump_hook_for_test records them).
 struct pump_threads {
