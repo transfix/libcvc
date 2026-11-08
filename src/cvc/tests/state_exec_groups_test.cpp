@@ -1614,9 +1614,13 @@ TEST(Groups, PA01_TwoCallersShareThePool) {
       },
       provider_affinity::host_proxied);
   const int uses = mine[0]->submit("(begin (for i (range 500) nil) (+ (proxied) 1))");
+  // Long enough that the two calls overlap. A debug build interprets several times slower: at the
+  // release length, on a busy four-CPU runner, it outran the ceiling.
+  const std::string loop = std::string("(begin (set i 0) (while (< i ") +
+                           (kDebugBuild ? "5000" : "20000") + ") (set i (+ i 1))) i)";
   for (int k = 0; k < 3; ++k) {
-    mine[k]->submit("(begin (set i 0) (while (< i 20000) (set i (+ i 1))) i)");
-    theirs[k]->submit("(begin (set i 0) (while (< i 20000) (set i (+ i 1))) i)");
+    mine[k]->submit(loop);
+    theirs[k]->submit(loop);
   }
   const auto drive = [&](std::vector<std::unique_ptr<group_world>> &worlds, bool &all_done) {
     const auto t0 = clock_type::now();
