@@ -84,7 +84,8 @@ void heap_after_step(process &proc, std::size_t allocated, uint64_t state_bytes)
 struct cycle_registry;
 
 /// Collects the registry under its own binding, then frees it: what its objects still hold is
-/// garbage by then, since its owner destroys it after its scheduler and environments.
+/// garbage by then, since its owner destroys it after its scheduler and environments. What a host
+/// still holds joins the caller's registry (the bound one, else the thread's own).
 struct cycle_registry_deleter {
   void operator()(cycle_registry *r) const noexcept;
 };
