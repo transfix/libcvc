@@ -27,6 +27,7 @@
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>
 #include <cvc/core/async_task.h> // launch_pool_task generalization test
+#include <cvc/core/exec_pool.h>  // isolated documents: the app's pool (pool_options)
 #include <cvc/core/thread_pool.h> // item 2: full type for app.computePool().parallel_for
 #include <cvc/net/browser.h>      // OIDC: a fake browser, a browser page
 #include <cvc/net/credentials.h>  // the ws-send test's CredentialStore
@@ -37,6 +38,7 @@
 #include <cvc/state/state_exec/async_host.h>      // register_async_fn on app.exec_async_host()
 #include <cvc/state/state_exec/async_scheduler.h> // exec_scheduler().post_message end-to-end test
 #include <cvc/state/state_exec/builtins.h>        // host-intrinsic seam test: register_fn
+#include <cvc/state/state_exec/exec_group.h>      // an isolated document's group
 #include <cvc/state/state_exec/heap.h>            // collect_cycles / tracked_objects
 #include <cvc/state/state_exec/intrinsics.h>      // intrinsics_context.root_path (pool-task test)
 #include <cvc/state/state_exec/lock_manager.h>    // the app lock manager (Locks.*)
@@ -897,6 +899,36 @@ TEST(AriadneScheduler, SeveralRuntimesResumeAnAwaitOncePerFrame) {
   EXPECT_EQ(cvc::state::instance(app)("pump.n").value(), "7");
 }
 
+// drain() in two halves around one app.exec_pump_frame() for every Runtime (S1.10): the frame
+// pump is the frame's only pump, so drain_end() does not pump again, and an (await #f) resumes
+// once a frame. Plain drain() still pumps by itself.
+TEST(AriadneScheduler, DrainEndDoesNotPumpAgainAfterAFramePump) {
+  cvc::app app;
+  ForeignAwaitLoop loop(app, "pump.n");
+  Runtime a(app, "a");
+  Runtime b(app, "b");
+  MockBackend ma, mb;
+  a.set_backend(&ma);
+  b.set_backend(&mb);
+  a.set_tick_program("(state-set \"ticked\" \"1\")");
+  b.set_tick_program("(state-set \"ticked\" \"1\")");
+  const std::uint64_t generation = app.exec_pump_generation();
+  for (int frame = 0; frame < 5; ++frame) {
+    a.drain_begin();
+    b.drain_begin();
+    app.exec_pump_frame();
+    a.drain_end();
+    b.drain_end();
+  }
+  EXPECT_EQ(app.exec_pump_generation(), generation + 5);
+  EXPECT_EQ(cvc::state::instance(app)("pump.n").value(), "4"); // the first frame's await parks it
+  EXPECT_EQ(cvc::state::instance(app)("a.ticked").value(), "1");
+  EXPECT_EQ(cvc::state::instance(app)("b.ticked").value(), "1");
+  for (int frame = 0; frame < 3; ++frame)
+    a.drain();
+  EXPECT_EQ(cvc::state::instance(app)("pump.n").value(), "7");
+}
+
 // A document that never touches the scheduler, in an app where nothing else did either, pumps
 // nothing and never builds it (exec_scheduler() is lazy).
 TEST(AriadneScheduler, DrainNeverBuildsAnUnusedScheduler) {
@@ -912,6 +944,250 @@ TEST(AriadneScheduler, DrainNeverBuildsAnUnusedScheduler) {
     }
   }
   EXPECT_FALSE(app.scheduler_built());
+}
+
+// --- isolated documents (ariadne.exec.isolate_documents, threaded Stage 1, S1.10) ---
+
+namespace {
+// Set an environment variable for a case (CVC_EXEC_FORCE_MOVE, which a pool reads when it is
+// built), and restore what it was.
+class isolated_env_var {
+public:
+  isolated_env_var(const char *name, const char *value) : name_(name) {
+    if (const char *old = std::getenv(name))
+      old_ = old;
+    set(value);
+  }
+  ~isolated_env_var() { set(old_ ? old_->c_str() : nullptr); }
+  isolated_env_var(const isolated_env_var &) = delete;
+  isolated_env_var &operator=(const isolated_env_var &) = delete;
+
+private:
+  void set(const char *value) {
+#ifdef _WIN32
+    _putenv_s(name_.c_str(), value ? value : "");
+#else
+    if (value)
+      setenv(name_.c_str(), value, 1);
+    else
+      unsetenv(name_.c_str());
+#endif
+  }
+  std::string name_;
+  std::optional<std::string> old_;
+};
+
+// The app's pool with `threads` workers, built before anything makes the lock manager (so it is
+// shared, S1-Q1), and documents isolated.
+void isolate_documents(cvc::app &app, unsigned threads) {
+  cvc::pool_options o;
+  o.threads = threads;
+  app.exec_pool(o);
+  cvc::state::instance(app)("ariadne.exec.isolate_documents").value(std::string("true"));
+}
+
+// One frame as a host with several Runtimes drives it (td 4.12).
+void isolated_frame(cvc::app &app, Runtime &rt) {
+  rt.drain_begin();
+  app.exec_pump_frame();
+  rt.drain_end();
+}
+
+std::string isolated_value(cvc::app &app, const std::string &path) {
+  return cvc::state::instance(app)(path).value();
+}
+
+struct isolated_providers_cleared {
+  ~isolated_providers_cleared() { clear_action_intrinsics(); } // process-global
+};
+} // namespace
+
+// In an `any` group (S1.9's install_providers): an `any` provider runs as it is, on whichever
+// thread pumps the group; a host_proxied provider's natives run on the frame's thread, and its
+// constants are bound as they are; a host_only provider (here one registered after the document's
+// group was made, which an `any` group can then have) is not installed, so its name is a
+// NameError and has? does not see it.
+TEST(AriadneIsolatedDocs, ProvidersAreInstalledByTheirKind) {
+  namespace se = cvc::state_exec;
+  isolated_env_var force("CVC_EXEC_FORCE_MOVE", "1"); // the group alternates between threads
+  cvc::app app;
+  isolate_documents(app, 2);
+  clear_action_intrinsics(); // what earlier cases left: nothing host_only binds, so `any`
+  isolated_providers_cleared cleared;
+  const std::thread::id frame_thread = std::this_thread::get_id();
+  std::mutex mu;
+  std::set<std::thread::id> any_threads, proxied_threads;
+  register_action_intrinsics(
+      [&](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+        se::builtins::register_fn(env, "probe-any", [&](std::span<const se::value_t>) {
+          std::lock_guard<std::mutex> lock(mu);
+          any_threads.insert(std::this_thread::get_id());
+          return se::value_t{};
+        });
+      },
+      se::provider_affinity::any);
+  register_action_intrinsics(
+      [&](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+        se::builtins::register_fn(env, "probe-proxied", [&](std::span<const se::value_t>) {
+          std::lock_guard<std::mutex> lock(mu);
+          proxied_threads.insert(std::this_thread::get_id());
+          return se::value_t(std::string("proxied"));
+        });
+        env->set("probe-constant", se::value_t(int64_t{42}));
+      },
+      se::provider_affinity::host_proxied);
+  Runtime rt(app, "docs.kinds");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_channel_policy({}, {}, /*strict=*/true, /*quiet=*/true);
+  rt.set_root(group({text("kinds")}));
+  rt.set_tick_program("(begin (probe-any) (state-set \"got\" (probe-proxied)) "
+                      "(state-set \"constant\" probe-constant))");
+  ASSERT_NE(rt.isolated_group(), nullptr) << rt.isolation_reason();
+  EXPECT_EQ(rt.isolation_reason(), "");
+  EXPECT_EQ(rt.isolated_group()->opts().affinity, se::group_affinity::any);
+  register_action_intrinsics(
+      [](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+        se::builtins::register_fn(env, "late-host-only",
+                                  [](std::span<const se::value_t>) { return se::value_t{}; });
+      },
+      se::provider_affinity::host_only);
+  std::string late = "running", has = "running";
+  rt.run_program("(late-host-only)", [&](const std::string &how) { late = how; });
+  rt.run_program("(state-set \"has\" (if (has? \"late-host-only\") \"yes\" \"no\"))",
+                 [&](const std::string &how) { has = how; });
+  for (int frame = 0; frame < 20; ++frame)
+    isolated_frame(app, rt);
+  EXPECT_EQ(isolated_value(app, "docs.kinds.got"), "proxied");
+  EXPECT_EQ(isolated_value(app, "docs.kinds.constant"), "42");
+  EXPECT_EQ(proxied_threads, std::set<std::thread::id>{frame_thread});
+  const unsigned threads = app.exec_pool().threads();
+  std::printf("pool threads %u; probe-any ran on %zu thread(s)\n", threads, any_threads.size());
+  if (threads > 0) // a worker pumped the group in some frames: probe-any ran there
+    EXPECT_TRUE(std::any_of(any_threads.begin(), any_threads.end(),
+                            [&](std::thread::id t) { return t != frame_thread; }));
+  EXPECT_EQ(late.rfind("failed: NameError", 0), 0u) << late;
+  EXPECT_NE(late.find("late-host-only"), std::string::npos) << late;
+  EXPECT_EQ(has, "");
+  EXPECT_EQ(isolated_value(app, "docs.kinds.has"), "no");
+}
+
+// AppRuntime::idle() and wait_idle() count an isolated document's group (S1.9): its programs'
+// async calls run on its own host, not the app's.
+TEST(AriadneIsolatedDocs, IdleAndWaitIdleCountTheDocumentsGroup) {
+  if (!have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  const std::filesystem::path doc =
+      std::filesystem::temp_directory_path() / "ariadne_isolated_idle.ari";
+  std::ofstream(doc) << "meta: {min_libcvc: 3.4.0}\n"
+                        "channels: []\n"
+                        "root:\n  - text: hi\n";
+  cvc::app app;
+  isolate_documents(app, 0);
+  // The call's wait is charged to the action: it waits here for as long as the test holds it.
+  cvc::state::instance(app)("ariadne.limits.action_max_time").value(30.0);
+  AppRuntime art(app, "ui.docs.idle");
+  std::atomic<bool> started{false}, release{false}, finished{false};
+  art.register_async_verb("hold-verb", [&] {
+    started = true;
+    while (!release)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50)); // still running when released
+    finished = true;
+    return std::string("held");
+  });
+  art.load(doc.string());
+  ASSERT_NE(art.runtime().isolated_group(), nullptr) << art.runtime().isolation_reason();
+  std::string how = "running";
+  art.run_program("(state-set \"got\" (hold-verb))", [&](const std::string &h) { how = h; });
+  for (int i = 0; i < 2500 && !started; ++i) {
+    art.drain();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  ASSERT_TRUE(started.load());
+  EXPECT_FALSE(art.idle()); // its kernel is in flight on the document's group's host
+  release = true;
+  art.wait_idle(); // waits for that kernel too
+  EXPECT_TRUE(finished.load());
+  for (int i = 0; i < 2500 && how == "running"; ++i) {
+    art.drain();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  EXPECT_EQ(how, "");
+  EXPECT_EQ(isolated_value(app, "ui.docs.idle.got"), "held");
+  EXPECT_TRUE(art.idle());
+}
+
+// Teardown of an isolated document (S1.10): its processes, a parked action and the child it forked,
+// are killed and reaped, and its group goes with the Runtime, so a later frame pump of the app
+// finds no group of it.
+TEST(AriadneIsolatedDocs, TeardownReapsItsProcessesAndDestroysItsGroup) {
+  namespace se = cvc::state_exec;
+  cvc::app app;
+  isolate_documents(app, 2);
+  {
+    Runtime rt(app, "docs.down");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    rt.set_channel_policy({"never"}, {}, true, true); // strict: the channel it waits on is declared
+    rt.set_root(group({text("down")}));
+    rt.run_program("(begin (set c (fork)) (state-set (if (= c 0) \"child\" \"parent\") \"parked\") "
+                   "(msg-recv \"never\"))",
+                   [](const std::string &) {});
+    for (int frame = 0; frame < 50 && (isolated_value(app, "docs.down.child") != "parked" ||
+                                       isolated_value(app, "docs.down.parent") != "parked");
+         ++frame)
+      isolated_frame(app, rt);
+    se::exec_group *group = rt.isolated_group();
+    ASSERT_NE(group, nullptr) << rt.isolation_reason();
+    EXPECT_EQ(isolated_value(app, "docs.down.child"), "parked");
+    EXPECT_EQ(isolated_value(app, "docs.down.parent"), "parked");
+    EXPECT_EQ(group->sched().list_processes().size(), 2u);
+    EXPECT_EQ(se::detail::live_groups(&app), 1u);
+  }
+  EXPECT_EQ(se::detail::live_groups(&app), 0u);
+  app.exec_pump_frame(); // its group is no frame group any more
+}
+
+// Isolation is decided at load, again for each document a Runtime is given (S1-Q6): a later tree
+// with a writable link: hole out of the prefix makes the document ineligible, so it moves to group
+// 0 before it is drawn. Its resident is killed and reaped in its group and starts again in group
+// 0, and the hole is planted writable, as group 0 runs on the host thread.
+TEST(AriadneIsolatedDocs, ALaterDocumentThatIsNotEligibleMovesToGroupZero) {
+  namespace se = cvc::state_exec;
+  cvc::app app;
+  isolate_documents(app, 0);
+  {
+    Runtime rt(app, "docs.move");
+    MockBackend mb;
+    rt.set_backend(&mb);
+    rt.set_channel_policy({}, {}, true, true);
+    rt.set_root(group({text("first")}));
+    rt.set_tick_program("(state-set \"ticked\" \"yes\")");
+    se::exec_group *first = rt.isolated_group();
+    ASSERT_NE(first, nullptr) << rt.isolation_reason();
+    rt.render();
+    isolated_frame(app, rt);
+    EXPECT_EQ(isolated_value(app, "docs.move.ticked"), "yes");
+    EXPECT_EQ(first->sched().list_processes().size(), 1u); // its tick resident
+    cvc::state &tree = cvc::state::instance(app);
+    tree("docs.move.ticked").value(std::string("no"));
+    tree("outside.v").value(std::string("seed")); // a write through a link needs its target
+    Widget mount = group({text("module")});
+    mount.scope = "mod";
+    mount.links = {LinkHole{"out", "/outside.v", true}};
+    rt.set_root(group({mount}));
+    rt.render(); // placed again, then drawn: the hole is planted in group 0
+    EXPECT_EQ(rt.isolated_group(), nullptr);
+    EXPECT_FALSE(rt.isolation_reason().empty());
+    EXPECT_EQ(first->sched().list_processes().size(), 0u); // kept, empty, until the Runtime goes
+    isolated_frame(app, rt);
+    EXPECT_EQ(isolated_value(app, "docs.move.ticked"), "yes"); // started again, in group 0
+    tree("docs.move.mod.out").value(std::string("written"));
+    EXPECT_EQ(isolated_value(app, "outside.v"), "written");
+    EXPECT_EQ(se::detail::live_groups(&app), 1u);
+  }
+  EXPECT_EQ(se::detail::live_groups(&app), 0u);
 }
 
 // §4.6 input seam: set_key_program submits a resident that receives events posted via post_input,
@@ -1545,6 +1821,28 @@ TEST(AriadneInit, SyntaxErrorReportedNotThrown) {
 TEST(AriadneInit, EmptyScriptIsNoop) {
   cvc::app app;
   EXPECT_TRUE(run_init(app, "ui", "", nullptr)); // no script -> success, nothing written
+}
+
+// The init lane's scheduler has a cycle registry of its own (S1.1, S1-Q3), collected when the run
+// ends: the cycles a script leaves are freed then, and none is left in the calling thread's own
+// registry, which no scheduler of the init lane would collect again.
+TEST(AriadneInit, ItsCyclesAreItsOwnAndFreedWhenItEnds) {
+  namespace se = cvc::state_exec;
+  cvc::app app;
+  se::collect_cycles(); // this thread's own registry: count from what outlives a collection
+  const std::size_t before = se::tracked_objects();
+  std::vector<std::string> errs;
+  // Each call's scope holds the closure that captured it: 64 cycles, tracked as each lambda is
+  // made.
+  ASSERT_TRUE(run_init(app, "ui.cycles",
+                       "(defun mk () (let ((g nil)) (set g (lambda () g)) g))\n"
+                       "(set i 0)\n"
+                       "(while (< i 64) (begin (mk) (set i (+ i 1))))\n"
+                       "(state-set \"made\" i)",
+                       &errs))
+      << (errs.empty() ? std::string("(no error)") : errs[0]);
+  EXPECT_EQ(cvc::state::instance(app)("ui.cycles.made").value(), "64");
+  EXPECT_EQ(se::tracked_objects(), before);
 }
 
 // --- custom widget: the backend novel-primitive escape (Backend::custom_widget) ---
@@ -8689,9 +8987,8 @@ TEST(AriadneHazards, HZ13_InitLaneAwaitsAnAppHostFuture) {
 
 // HZ-8 (td 8.1, S0.11): an action's (fork) forks the running process, and both park. The child
 // has the action as its parent and the action's owner (the Runtime's), read back from snapshots.
-// Tearing the Runtime down stops both: ~Impl's kill_owner kills them, then it reaps the action's
-// children, so the forked child leaves the table, while the action's own process stays in it,
-// killed with reason owner_reaped. (Whether teardown should reap it too is Stage 1's question.)
+// Tearing the Runtime down stops both: ~Impl's kill_owner kills them, then it reaps every process
+// of the owner, so the forked child and the action's own process both leave the table (S1-Q8).
 TEST(AriadneHazards, HZ08_ForkedChildKeepsOwnerAndTeardownReapsIt) {
   namespace se = cvc::state_exec;
   cvc::app app;
@@ -8728,9 +9025,6 @@ TEST(AriadneHazards, HZ08_ForkedChildKeepsOwnerAndTeardownReapsIt) {
     EXPECT_EQ(se::decode_process(snap_c)->owner, owner);
     EXPECT_TRUE(rt.take_reactive_warnings().empty());
   }
-  EXPECT_FALSE(app.exec_scheduler().get_process_info(child).has_value()); // reaped
-  const auto a = app.exec_scheduler().get_process_info(action);
-  ASSERT_TRUE(a.has_value());
-  EXPECT_EQ(a->status, se::process_status::killed);
-  EXPECT_EQ(a->exit_error.value_or(""), "owner_reaped");
+  EXPECT_FALSE(app.exec_scheduler().get_process_info(child).has_value());  // reaped
+  EXPECT_FALSE(app.exec_scheduler().get_process_info(action).has_value()); // reaped too
 }

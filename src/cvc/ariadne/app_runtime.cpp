@@ -17,6 +17,7 @@
 #include <cvc/state/state_exec/async_scheduler.h> // exec_scheduler().post_message
 #include <cvc/state/state_exec/builtins.h>        // register_fn
 #include <cvc/state/state_exec/exceptions.h>      // dsl_error ((quit code) checks its code)
+#include <cvc/state/state_exec/exec_group.h>      // an isolated document's group (idle, wait_idle)
 #include <cvc/state/state_exec/intrinsics.h>      // intrinsics_context, resolve_channel_key
 #include <cvc/state/state_exec/types.h>           // value_t
 #include <deque>
@@ -59,7 +60,12 @@ AppRuntime::~AppRuntime() {
 
 bool AppRuntime::idle() const {
   // The scheduler's calls in flight include those no executor runs (a request a browser's fetch
-  // answers, docs/ARIADNE.md 10.2), which the host's count of running kernels leaves out.
+  // answers, docs/ARIADNE.md 10.2), which the host's count of running kernels leaves out. An
+  // isolated document's group counts too (S1.9): its programs and calls are there, not in group 0.
+  if (cvc::state_exec::exec_group *group = rt_.isolated_group())
+    if (group->host().in_flight() != 0 || group->sched().async_calls_in_flight() != 0 ||
+        group->sched().has_runnable())
+      return false;
   return app_.exec_async_host().in_flight() == 0 &&
          app_.exec_scheduler().async_calls_in_flight() == 0 &&
          !app_.exec_scheduler().has_runnable() && !rt_.media_busy() && !oidc_busy();
@@ -387,157 +393,203 @@ void AppRuntime::ensure_intrinsics() {
   // register_action_intrinsics providers run each time a program env is built. Share the verb
   // table rather than copy it, so every verb registered so far is bound, not only the first.
   std::shared_ptr<Verbs> verbs = verbs_;
-  register_action_intrinsics([app, verbs](std::shared_ptr<cvc::state_exec::environment> env,
-                                          cvc::state_exec::intrinsics_context &ictx) {
-    namespace se = cvc::state_exec;
-    for (const auto &v : verbs->sync) {
-      std::function<void()> fn = v.second;
-      se::builtins::register_fn(env, v.first, [fn](std::span<const se::value_t>) -> se::value_t {
-        fn(); // host side effect, on the drain thread
-        return se::value_t(std::monostate{});
-      });
-    }
-    if (verbs->quit) {
-      std::function<void(int)> quit = verbs->quit;
-      se::builtins::register_fn(env, "quit", [quit](std::span<const se::value_t> args) {
-        if (args.size() > 1)
-          throw se::dsl_error("TypeError", "quit: expected an optional exit code, got " +
-                                               std::to_string(args.size()) + " args");
-        int64_t code = 0;
-        if (!args.empty()) {
-          const auto *n = std::get_if<int64_t>(&args[0].v);
-          if (!n)
-            throw se::dsl_error("TypeError",
-                                "quit: the exit code is an integer, not " + args[0].type_name());
-          if (*n < 0 || *n > 255)
-            throw se::dsl_error("ValueError",
-                                "quit: the exit code is 0..255, not " + std::to_string(*n));
-          code = *n;
+  namespace se = cvc::state_exec;
+  // Four providers, one per kind (S1-Q7, STATE_EXEC_THREADED.md 4.9): an isolated document whose
+  // group a worker may pump installs each by it.
+  // 1. The host's verbs and functions, host_only: arbitrary host code, run in the calling step.
+  register_action_intrinsics(
+      [verbs](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
+        for (const auto &v : verbs->sync) {
+          std::function<void()> fn = v.second;
+          se::builtins::register_fn(env, v.first,
+                                    [fn](std::span<const se::value_t>) -> se::value_t {
+                                      fn(); // host side effect, on the drain thread
+                                      return se::value_t(std::monostate{});
+                                    });
         }
-        quit(static_cast<int>(code)); // host side effect, on the drain thread
-        return se::value_t(std::monostate{});
-      });
-    }
-    const std::string root = ictx.root_path;
-    for (const auto &v : verbs->async) {
-      // An async function on the app's host: (name) parks the program while `work` runs on the
-      // background task pool, charged to its budget, and returns `work`'s string or raises its
-      // exception. The done channel, if any, is resolved here on the scheduler thread (a kernel
-      // never walks the state tree), and the result is posted to it too.
-      const std::string chan =
-          std::get<1>(v).empty() ? std::string() : se::resolve_channel_key(root, std::get<1>(v));
-      std::function<std::string()> work = std::get<2>(v);
-      se::register_async_fn(env, app->exec_async_host(), std::get<0>(v),
-                            [app, chan, work](std::span<const se::value_t>) -> se::async_kernel {
-                              return [app, chan, work](se::async_call &) -> se::value_t {
-                                std::string result = work();
-                                if (!chan.empty())
-                                  app->exec_scheduler().post_message(chan, se::value_t(result));
-                                return se::value_t(std::move(result));
-                              };
-                            });
-    }
-    // The (data-*) verbs (data.h), for programs in this runtime's app: (data-load NAME URI [AS
-    // [PATH]]) points the document's data.NAME at a request and starts it (the scene's nodes bound
-    // to NAME follow when it is ready), (data-reload NAME), (data-status NAME), (data-files NAME)
-    // and (data-file NAME PATH) (its bytes, or nil).
-    // The store first: it is reset when this runtime dies, and only then is `app` still ours.
-    std::shared_ptr<DataStore> store = verbs->data.lock();
-    const auto own_program = [&] { // the program's chroot (se::apply_chroot) is in our app
-      cvc::state &tree = cvc::state::instance(*app);
-      return ictx.root &&
-             ictx.root == (ictx.root_path.empty() ? &tree : tree.findDescendant(ictx.root_path));
+        for (const auto &[name, fn] : verbs->functions)
+          se::builtins::register_fn(env, name, fn); // inline on the drain thread, like a sync verb
+      },
+      se::provider_affinity::host_only);
+  // 2. (quit [code]) and the (data-*) verbs, host_proxied: quit writes quit_ and exitCode_, and the
+  // data verbs walk the tree raw (data.cpp). Its body runs on a spawned child's pumping thread,
+  // so it reads the tree only through a pinned walk.
+  register_action_intrinsics(
+      [app, verbs](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
+        if (verbs->quit) {
+          std::function<void(int)> quit = verbs->quit;
+          se::builtins::register_fn(env, "quit", [quit](std::span<const se::value_t> args) {
+            if (args.size() > 1)
+              throw se::dsl_error("TypeError", "quit: expected an optional exit code, got " +
+                                                   std::to_string(args.size()) + " args");
+            int64_t code = 0;
+            if (!args.empty()) {
+              const auto *n = std::get_if<int64_t>(&args[0].v);
+              if (!n)
+                throw se::dsl_error("TypeError", "quit: the exit code is an integer, not " +
+                                                     args[0].type_name());
+              if (*n < 0 || *n > 255)
+                throw se::dsl_error("ValueError",
+                                    "quit: the exit code is 0..255, not " + std::to_string(*n));
+              code = *n;
+            }
+            quit(static_cast<int>(code)); // host side effect, on the drain thread
+            return se::value_t(std::monostate{});
+          });
+        }
+        // The (data-*) verbs (data.h), for programs in this runtime's app: (data-load NAME URI [AS
+        // [PATH]]) points the document's data.NAME at a request and starts it (the scene's nodes
+        // bound to NAME follow when it is ready), (data-reload NAME), (data-status NAME),
+        // (data-files NAME) and (data-file NAME PATH) (its bytes, or nil).
+        // The store first: it is reset when this runtime dies, and only then is `app` still ours.
+        std::shared_ptr<DataStore> store = verbs->data.lock();
+        const auto own_program = [&] { // the program's chroot (se::apply_chroot) is in our app
+          if (!ictx.root)
+            return false;
+          cvc::state &tree = cvc::state::instance(*app);
+          if (ictx.root_path.empty())
+            return ictx.root == &tree;
+          // Pinned (td 4.8): a spawned child's env is built on its pumping thread.
+          const cvc::state::state_ptr found = tree.findDescendantShared(ictx.root_path);
+          return ictx.root == found.get();
+        };
+        if (!store || !own_program())
+          return;
+        const std::weak_ptr<DataStore> weak = store;
+        const std::string prefix = verbs->prefix, doc_dir = verbs->doc_dir;
+        const auto text = [](std::span<const se::value_t> a, std::size_t i, const char *fn) {
+          const auto *s = i < a.size() ? std::get_if<std::string>(&a[i].v) : nullptr;
+          if (!s)
+            throw se::dsl_error("TypeError", std::string(fn) + ": argument " +
+                                                 std::to_string(i + 1) + " is a string" +
+                                                 (i < a.size() ? ", not " + a[i].type_name() : ""));
+          return *s;
+        };
+        // The first argument: a dataset's name, one state key.
+        const auto name = [text](std::span<const se::value_t> a, const char *fn) {
+          const std::string s = text(a, 0, fn);
+          if (s.empty() || s.find(cvc::state::SEPARATOR) != std::string::npos)
+            throw se::dsl_error("ValueError", std::string(fn) + ": '" + s +
+                                                  "' is not a dataset name (one word, no '.')");
+          return s;
+        };
+        const auto entry = [prefix](const std::string &n) {
+          return resolve_bind(prefix, std::string(kDataRoot) + cvc::state::SEPARATOR + n);
+        };
+        const auto live = [weak](const char *fn) {
+          std::shared_ptr<DataStore> s = weak.lock();
+          if (!s)
+            throw se::dsl_error("RuntimeError", std::string(fn) + ": the document has stopped");
+          return s;
+        };
+        se::builtins::register_fn(
+            env, "data-load",
+            [live, text, name, prefix, doc_dir](std::span<const se::value_t> a) -> se::value_t {
+              if (a.size() < 2 || a.size() > 4)
+                throw se::dsl_error("TypeError", "data-load: expected NAME URI [AS [PATH]], got " +
+                                                     std::to_string(a.size()) + " args");
+              DataSpec spec;
+              spec.name = name(a, "data-load");
+              spec.uri = text(a, 1, "data-load");
+              if (a.size() > 2)
+                spec.as = text(a, 2, "data-load");
+              if (a.size() > 3)
+                spec.path = text(a, 3, "data-load");
+              spec.base = doc_dir;
+              return se::value_t(live("data-load")->bind(prefix, spec));
+            });
+        se::builtins::register_fn(
+            env, "data-reload", [live, name, entry](std::span<const se::value_t> a) -> se::value_t {
+              return se::value_t(live("data-reload")->reload(entry(name(a, "data-reload"))));
+            });
+        se::builtins::register_fn(
+            env, "data-status", [app, name, entry](std::span<const se::value_t> a) -> se::value_t {
+              return se::value_t(data_status(*app, entry(name(a, "data-status"))));
+            });
+        se::builtins::register_fn(
+            env, "data-files", [app, name, entry](std::span<const se::value_t> a) -> se::value_t {
+              auto out = std::make_shared<std::vector<se::value_t>>();
+              for (std::string &p : data_files(*app, entry(name(a, "data-files"))))
+                out->push_back(se::value_t(std::move(p)));
+              return se::value_t(out);
+            });
+        se::builtins::register_fn(
+            env, "data-file",
+            [app, text, name, entry](std::span<const se::value_t> a) -> se::value_t {
+              const DataBytes b =
+                  data_file(*app, entry(name(a, "data-file")), text(a, 1, "data-file"));
+              if (!b)
+                return se::value_t(std::monostate{});
+              return se::value_t(se::bytes_value{*b});
+            });
+      },
+      se::provider_affinity::host_proxied);
+  // Where an async verb's done channel goes (S1.9): the scheduler the program's calls park on,
+  // captured as its env is built (an isolated document's group, else group 0), or group 0 from an
+  // inline host (the init lane's, S1-Q2), as before.
+  const auto done_poster = [app](se::async_host &host) {
+    se::async_scheduler *const parks = host.parking_scheduler();
+    return [app, parks](const std::string &chan, const se::value_t &v) {
+      (parks ? *parks : app->exec_scheduler()).post_message(chan, v);
     };
-    if (store && own_program()) {
-      const std::weak_ptr<DataStore> weak = store;
-      const std::string prefix = verbs->prefix, doc_dir = verbs->doc_dir;
-      const auto text = [](std::span<const se::value_t> a, std::size_t i, const char *fn) {
-        const auto *s = i < a.size() ? std::get_if<std::string>(&a[i].v) : nullptr;
-        if (!s)
-          throw se::dsl_error("TypeError", std::string(fn) + ": argument " + std::to_string(i + 1) +
-                                               " is a string" +
-                                               (i < a.size() ? ", not " + a[i].type_name() : ""));
-        return *s;
-      };
-      // The first argument: a dataset's name, one state key.
-      const auto name = [text](std::span<const se::value_t> a, const char *fn) {
-        const std::string s = text(a, 0, fn);
-        if (s.empty() || s.find(cvc::state::SEPARATOR) != std::string::npos)
-          throw se::dsl_error("ValueError", std::string(fn) + ": '" + s +
-                                                "' is not a dataset name (one word, no '.')");
-        return s;
-      };
-      const auto entry = [prefix](const std::string &n) {
-        return resolve_bind(prefix, std::string(kDataRoot) + cvc::state::SEPARATOR + n);
-      };
-      const auto live = [weak](const char *fn) {
-        std::shared_ptr<DataStore> s = weak.lock();
-        if (!s)
-          throw se::dsl_error("RuntimeError", std::string(fn) + ": the document has stopped");
-        return s;
-      };
-      se::builtins::register_fn(
-          env, "data-load",
-          [live, text, name, prefix, doc_dir](std::span<const se::value_t> a) -> se::value_t {
-            if (a.size() < 2 || a.size() > 4)
-              throw se::dsl_error("TypeError", "data-load: expected NAME URI [AS [PATH]], got " +
-                                                   std::to_string(a.size()) + " args");
-            DataSpec spec;
-            spec.name = name(a, "data-load");
-            spec.uri = text(a, 1, "data-load");
-            if (a.size() > 2)
-              spec.as = text(a, 2, "data-load");
-            if (a.size() > 3)
-              spec.path = text(a, 3, "data-load");
-            spec.base = doc_dir;
-            return se::value_t(live("data-load")->bind(prefix, spec));
-          });
-      se::builtins::register_fn(
-          env, "data-reload", [live, name, entry](std::span<const se::value_t> a) -> se::value_t {
-            return se::value_t(live("data-reload")->reload(entry(name(a, "data-reload"))));
-          });
-      se::builtins::register_fn(
-          env, "data-status", [app, name, entry](std::span<const se::value_t> a) -> se::value_t {
-            return se::value_t(data_status(*app, entry(name(a, "data-status"))));
-          });
-      se::builtins::register_fn(
-          env, "data-files", [app, name, entry](std::span<const se::value_t> a) -> se::value_t {
-            auto out = std::make_shared<std::vector<se::value_t>>();
-            for (std::string &p : data_files(*app, entry(name(a, "data-files"))))
-              out->push_back(se::value_t(std::move(p)));
-            return se::value_t(out);
-          });
-      se::builtins::register_fn(
-          env, "data-file",
-          [app, text, name, entry](std::span<const se::value_t> a) -> se::value_t {
-            const DataBytes b =
-                data_file(*app, entry(name(a, "data-file")), text(a, 1, "data-file"));
-            if (!b)
-              return se::value_t(std::monostate{});
-            return se::value_t(se::bytes_value{*b});
-          });
-    }
-    for (const auto &[name, fn] : verbs->functions)
-      se::builtins::register_fn(env, name, fn); // inline on the drain thread, like a sync verb
-    for (const auto &[name, entry] : verbs->async_functions) {
-      const se::async_marshal &marshal = entry.second;
-      if (entry.first.empty()) {
-        se::register_async_fn(env, app->exec_async_host(), name, marshal);
-        continue;
-      }
-      // With a done channel, the kernel's value is posted there too (resolved here, as above).
-      const std::string chan = se::resolve_channel_key(root, entry.first);
-      se::async_marshal posting = [app, chan, marshal](std::span<const se::value_t> args) {
-        se::async_kernel kernel = marshal(args);
-        return se::async_kernel([app, chan, kernel](se::async_call &call) -> se::value_t {
-          se::value_t result = kernel(call);
-          app->exec_scheduler().post_message(chan, result);
-          return result;
-        });
-      };
-      se::register_async_fn(env, app->exec_async_host(), name, std::move(posting));
-    }
-  });
+  };
+  // 3. The host's async verbs, any: libcvc's own marshal, the work on the background task pool, on
+  // the program's own host (*ictx.host).
+  register_action_intrinsics(
+      [app, verbs, done_poster](std::shared_ptr<se::environment> env,
+                                se::intrinsics_context &ictx) {
+        se::async_host &host = ictx.host ? *ictx.host : app->exec_async_host();
+        const auto post = done_poster(host);
+        const std::string root = ictx.root_path;
+        for (const auto &v : verbs->async) {
+          // An async function: (name) parks the program while `work` runs on the background task
+          // pool, charged to its budget, and returns `work`'s string or raises its exception. The
+          // done channel, if any, is resolved here on the scheduler thread (a kernel never walks
+          // the state tree), and the result is posted to it too.
+          const std::string chan = std::get<1>(v).empty()
+                                       ? std::string()
+                                       : se::resolve_channel_key(root, std::get<1>(v));
+          std::function<std::string()> work = std::get<2>(v);
+          se::register_async_fn(
+              env, host, std::get<0>(v),
+              [post, chan, work](std::span<const se::value_t>) -> se::async_kernel {
+                return [post, chan, work](se::async_call &) -> se::value_t {
+                  std::string result = work();
+                  if (!chan.empty())
+                    post(chan, se::value_t(result));
+                  return se::value_t(std::move(result));
+                };
+              });
+        }
+      },
+      se::provider_affinity::any);
+  // 4. The host's async functions, host_only: the host's marshal runs in the calling step (pycvc's
+  // takes the GIL, a C++ host's is unaudited), on the program's own host.
+  register_action_intrinsics(
+      [app, verbs, done_poster](std::shared_ptr<se::environment> env,
+                                se::intrinsics_context &ictx) {
+        se::async_host &host = ictx.host ? *ictx.host : app->exec_async_host();
+        const auto post = done_poster(host);
+        for (const auto &[name, entry] : verbs->async_functions) {
+          const se::async_marshal &marshal = entry.second;
+          if (entry.first.empty()) {
+            se::register_async_fn(env, host, name, marshal);
+            continue;
+          }
+          // With a done channel, the kernel's value is posted there too (resolved here, as above).
+          const std::string chan = se::resolve_channel_key(ictx.root_path, entry.first);
+          se::async_marshal posting = [post, chan, marshal](std::span<const se::value_t> args) {
+            se::async_kernel kernel = marshal(args);
+            return se::async_kernel([post, chan, kernel](se::async_call &call) -> se::value_t {
+              se::value_t result = kernel(call);
+              post(chan, result);
+              return result;
+            });
+          };
+          se::register_async_fn(env, host, name, std::move(posting));
+        }
+      },
+      se::provider_affinity::host_only);
 }
 
 // ── requires: (roadmap §7.6) ───────────────────────────────────────────────────────────────────
@@ -843,6 +895,9 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   add_host_menus(lr.root, hostMenus_);
   add_keys(lr.root, std::move(lr.keys));
   rt_.set_root(std::move(lr.root)); // applied at the next frame boundary
+  // Where its programs run is decided here, at load (S1-Q6): its channel policy, programs, tree
+  // and this host's providers and thread-affine prefixes are all known now.
+  (void)rt_.isolated_group();
   sources_ = std::move(lr.sources);
   tests_ = std::move(lr.tests);
   stamps_ = std::move(lr.source_stamps);
@@ -859,7 +914,16 @@ void AppRuntime::set_root(Widget root) {
 // ── per-frame (neutral core) ─────────────────────────────────────────────────────────────────────
 
 void AppRuntime::drain() {
-  rt_.drain(); // run queued Ariadne actions on this thread + pump the scheduler a slice
+  drain_begin();
+  drain_end();
+}
+
+// The document's half before the app's frame pump: run queued Ariadne actions on this thread,
+// submit them and the residents, and post the frame's ticks (Runtime::drain_begin).
+void AppRuntime::drain_begin() { rt_.drain_begin(); }
+
+void AppRuntime::drain_end() {
+  rt_.drain_end(); // pump a slice (unless app.exec_pump_frame() did) and sweep
   if (scene_) {
     scene_->sync_visibility(app_); // bound visible: -> node .visible
     scene_->tick();                // volren/volslice per-frame service
@@ -871,17 +935,18 @@ void AppRuntime::drain() {
   }
 }
 
-// S1b.0 stubs: drain_end() is today's whole drain(); S1.10 splits it.
-void AppRuntime::drain_begin() {}
-void AppRuntime::drain_end() { drain(); }
-
-// S1b.0 stub: recorded; S1.10 reads the declarations at load (S1-Q6).
+// The Runtime reads the declarations when it decides where the document runs, at load (S1-Q6).
 void AppRuntime::declare_thread_affine_prefix(const std::string &prefix) {
   threadAffinePrefixes_.push_back(prefix);
+  rt_.declare_thread_affine_prefix(prefix);
 }
 
-// S1b.0 stub: the app's host only; S1.10 adds the document's group's.
-void AppRuntime::wait_idle() { app_.exec_async_host().wait_idle(); }
+// The app's host, then an isolated document's group's (S1.9), whose kernels its programs start.
+void AppRuntime::wait_idle() {
+  app_.exec_async_host().wait_idle();
+  if (cvc::state_exec::exec_group *group = rt_.isolated_group())
+    group->host().wait_idle();
+}
 
 // Keep the read-lane diagnostics for take_warnings(); the Runtime reports each one only once.
 void AppRuntime::collect_warnings() {

@@ -970,6 +970,28 @@ TEST(AriadneHostVerbs, AnAsyncVerbStillPostsToItsDoneChannel) {
       << val(app, "ui.docs.c.chan");
 }
 
+// Called from init:, an async verb runs inline on the init lane's own host (S1-Q2), which parks on
+// no scheduler, so its done channel still goes to group 0 (S1.9), where a program waiting on it
+// gets it.
+TEST(AriadneHostVerbs, AnInitLanesAsyncVerbPostsItsDoneChannelToGroupZero) {
+  REQUIRE_YAML();
+  const fs::path doc = write(test_dir("asyncinit"), "i.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "root:\n  - text: hi\n"
+                             "init: (state-set \"ran\" (init-verb))\n"
+                             "on_tick: |\n"
+                             "  (state-set \"chan\" (msg-recv \"init.done\"))\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.ai");
+  art.set_backend(be);
+  art.register_async_verb("init-verb", "init.done", [] { return std::string("from init"); });
+  art.load(doc.string());
+  EXPECT_EQ(val(app, "ui.docs.ai.ran"), "from init"); // init: ran it in load(), inline
+  EXPECT_TRUE(drain_until(art, [&] { return val(app, "ui.docs.ai.chan") == "from init"; }))
+      << val(app, "ui.docs.ai.chan");
+}
+
 // The work's exception raises at the call, where the program can catch it. It used to be lost, and
 // the channel got "".
 TEST(AriadneHostVerbs, AnAsyncVerbsErrorRaisesAtTheCall) {

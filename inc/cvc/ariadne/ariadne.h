@@ -126,8 +126,9 @@ public:
   bool has_signal_program() const;
   // Deliver `signal` to the on_signal program. Returns true when a program will handle it, false
   // when none is set (the host then applies the default). `source` says where it came from (e.g.
-  // "terminal" for a Ctrl-C keypress, "os" for a delivered signal). Thread-safe like post_input;
-  // the program runs in the next drain().
+  // "terminal" for a Ctrl-C keypress, "os" for a delivered signal). Host thread, outside a pump
+  // (it may start the program's resident; debug builds check it), like post_input; the program
+  // runs in the next drain(). A host that catches an OS signal on another thread hands it over.
   bool post_signal(const std::string &signal, const std::string &source = "host");
 
   // §12 channel enforcement (runtime backstop): install the document's channel policy so a program
@@ -144,8 +145,9 @@ public:
 
   // Feed one input event to the runtime — the host calls this each frame for every event from its
   // input source (e.g. cvc::gl::SdlInput), BEFORE drain(), so the event is delivered to the
-  // on_key/on_pointer residents this same frame (drain() drains the ingress + pumps). Thread-safe
-  // (routes through the scheduler's MPSC ingress). A no-op if no matching handler is registered.
+  // on_key/on_pointer residents this same frame (drain() drains the ingress + pumps). Host thread,
+  // outside a pump: it may start the residents, then posts to the document's scheduler's ingress
+  // (debug builds check it). A no-op if no matching handler is registered.
   void post_input(const InputEvent &ev);
 
   // Run `script` as an action program (the on: lane: the full env, writes chrooted to the
@@ -203,6 +205,10 @@ public:
   // Why the document stays in group 0: "" when it is isolated, else the first rule it failed (also
   // logged once).
   std::string isolation_reason() const;
+  // A subscriber the host connected at or under `prefix` must run on the host thread
+  // (AppRuntime::declare_thread_affine_prefix forwards here): an isolated document whose prefix is
+  // or contains it gets a host-affinity group. Before the document is loaded.
+  void declare_thread_affine_prefix(const std::string &prefix);
 
   // Drain the §4 read-lane diagnostics accumulated during render() — one message per
   // distinct failing predicate (a parse error, a runtime error, or a per-frame budget
