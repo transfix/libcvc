@@ -65,6 +65,8 @@ public:
   void text_value(const char *label, const std::string &value) override;
   void text_line_colored(const char *text, const float rgb[3]) override;
   void text_value_colored(const char *label, const std::string &value, const float rgb[3]) override;
+  // §5.11 a line with pictures in it: the runs with no gap, each picture one line tall.
+  bool text_runs(const std::vector<cvc::ariadne::TextRun> &runs, const float *rgb) override;
   void separator() override;
   void progress_bar(const char *label, float fraction, const std::string &overlay) override;
   void plot_lines(const char *label, const std::vector<float> &values, double lo, double hi,
@@ -74,6 +76,10 @@ public:
   bool menu_item_action(const char *label) override;
   bool item_clicked() override; // §4.6 widget on_click: ImGui::IsItemClicked() on the last item
   bool item_hovered() override; // §4.6 widget on_hover: ImGui::IsItemHovered() on the last item
+  bool item_visible() override; // §5.13 autoplay: ImGui::IsItemVisible() on the last item
+  // §5.11 size: "N%": GetContentRegionAvail().x in the document's px; in a window that fits its
+  // content, at least `at_least`.
+  float available_width(float at_least) const override;
   bool item_dragged() override; // §4.6 widget on_drag: IsItemActive() && IsMouseDragging() on it
   bool item_drag_started() override; // §4.6 on_drag_start: ImGui::IsItemActivated() (gesture begin)
   bool item_drag_ended() override;   // §4.6 on_drag_end: ImGui::IsItemDeactivated() (gesture end)

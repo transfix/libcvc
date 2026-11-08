@@ -1458,6 +1458,20 @@ windows:
   picture's own shape at width `w`, and its placeholder is 16:9 (1:1 for a circle) until it loads.
   The fitted picture is made at twice the box's size, where the source has the pixels, so it stays
   sharp on a HiDPI screen.
+- **Filling the width.** `size: "N%"` makes the picture that share of the width it has on its
+  line: `"100%"` is as wide as its window, or its cell of a grid, and grows and shrinks with it,
+  the picture's own shape setting the height. `size: ["N%", h]` is a box that wide and `h` tall.
+  A small picture is scaled up to the width; a large one keeps its pixels up to the cache's 2048.
+  `max_height: h` keeps a picture whose height follows its shape (a phone's portrait video, say)
+  no taller than `h`: it is drawn narrower instead. `video:` takes both too (§5.13).
+  - ImGui measures the line where the picture is drawn. A window with no `size:` is as wide as its
+    other content makes it, and at least the widget's own width (256 px for `image:`, 480 for
+    `video:`), so a window holding only the picture still has room for it. While a window is
+    resized the picture is fitted again each 64 px, and scaled in between.
+  - The terminal backends lay a window out after its widgets are drawn, so they can't measure
+    the line: there the picture is the widget's own width.
+  - The capability token `image.fill` (§5.7) says a host does this. An older host reads
+    `size: "100%"` as no size and draws the widget at its own width.
 - **Every backend draws them**, since the core publishes the fitted picture as any other image:
   ImGui as a texture, and the terminal backends as Kitty, Sixel or iTerm pixels, or half-blocks
   (§4). Hosted tvision always draws half-blocks. In half-blocks, a transparent pixel leaves its
@@ -1482,6 +1496,27 @@ windows:
   started, not sent in place (§10.2), so the frame loop goes on while it is out. The reply is
   decoded when the browser hands it over, between frames. A `file://`, `cvc://` or `state://`
   picture is read and decoded between two frames, one at a time.
+- **Pictures in a line of text: `emoji:`.** A `text:` with `emoji:` names a state key that holds
+  a map of shortcode names to picture URIs (a post's custom emoji, as a social site's API gives
+  them). Each `:name:` in the text that the map names is drawn as that picture, one line tall at
+  its own shape, in the line where the backend can put a picture there:
+
+  ```yaml
+  - text: ""
+    bind: feed.items.{i}.line          # "Shipped it :party: at 14:50:47"
+    emoji: feed.items.{i}.emoji        # {party: "https://media.example/e/12.gif"}
+  ```
+
+  - A shortcode is found as txwtf, Slack and Mastodon find one: 1 to 64 of `A-Z a-z 0-9 _ + -`
+    between two colons that aren't glued to a letter, digit or `_` outside them. So the `:50:` in
+    `14:50:47` stays part of the time, while `:a::b:` is two. The map's names are looked up as
+    written, then in lower case.
+  - A name the map doesn't have, or whose value isn't a URI, stays text. So does every shortcode
+    in a terminal backend, which can't put a picture in a line of text.
+  - The pictures load as an `image:`'s do (the host's network and its allowlist, the cache, an
+    animated GIF moving), and a picture still loading is a placeholder. Hovering a picture shows
+    its `:name:`. `{i}` in `emoji:` is substituted in a `repeat:`.
+  - The capability token `text.emoji` says a host does this.
 
 ### 5.12 Backgrounds: `background:` on a window or group
 
@@ -1563,6 +1598,14 @@ has loaded, or when it failed, nothing is drawn behind the content.
 - **The picture.** The newest frame is published as an image and drawn like one: an ImGui
   texture, or Kitty, Sixel, iTerm or half-block cells. A terminal gets at most 8 frames a
   second. Before the first frame the poster shows, else a placeholder of the box.
+  `size: "100%"` and `max_height:` (§5.11) make it as wide as its line, at the video's own shape:
+  `size: "100%"` with `max_height: 480` is a feed's video, as wide as the post, a portrait one
+  narrower.
+- **`autoplay: true`** starts it once it can, and from then on, until the user presses Play or
+  Pause (or the document writes `playing`), it plays while its picture shows: scrolled out of its
+  window's view, or its window closed, it pauses, and back in view it plays on. So a feed's
+  videos play as they scroll by, not all at once. A terminal shows the whole window, so there it
+  plays while its window is open.
 - **The state keys** live under `bind:`, or `ariadne.media.players.p<n>` without one:
 
   | key | |
@@ -1599,7 +1642,9 @@ has loaded, or when it failed, nothing is drawn behind the content.
     - A browser plays sound only after the user has clicked or typed on the page. A muted
       `autoplay` starts by itself.
     - A site serving the pages under a Content-Security-Policy adds `media-src 'self' blob:`
-      (and the media's origin when it is another).
+      (and the media's origin when it is another). Without it the element falls back to
+      `default-src`, and Chrome refuses media from another origin with "Media load rejected by
+      URL safety check", which the player's `error` shows.
 - **Over SSH** the sound would come out of the remote machine's speakers. So in an SSH session
   (`SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY` set), players say `remote` and nothing is opened.
   - "Open" runs `(open-url URL)` where the host has it, else it warns with the URL.
@@ -1608,7 +1653,8 @@ has loaded, or when it failed, nothing is drawn behind the content.
   - `--media-play always` plays anyway, and `--media-play never` never plays.
 - **Capability tokens** (§5.7): `media` means the media plays here, and `media.player` means
   the host has a player at all. `video.decorative` means `controls: false` and video URLs in
-  `image:` and `background:` are understood, and `image.animated` means GIF and WebP animate.
+  `image:` and `background:` are understood, `image.animated` means GIF and WebP animate, and
+  `image.fill` means `size: "N%"` and `max_height:` are understood.
 - A player whose widget a frame did not draw (its window closed, its item scrolled out of a
   `repeat:`) is paused at once and closed 5 s later. `ari snapshot` waits while a player is
   still loading, as it waits for pictures.

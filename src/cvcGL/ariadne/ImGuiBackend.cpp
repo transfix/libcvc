@@ -823,6 +823,40 @@ void ImGuiBackend::text_value_colored(const char *label, const std::string &valu
   std::string line = (label && *label) ? (std::string(label) + ": " + value) : value;
   ui::TextLineColored(line.c_str(), rgb[0], rgb[1], rgb[2]);
 }
+bool ImGuiBackend::text_runs(const std::vector<cvc::ariadne::TextRun> &runs, const float *rgb) {
+#ifdef CVC_ENABLE_IMGUI
+  // Each run right after the last (SameLine with no spacing), a picture as tall as a line of text
+  // at its own shape; a picture not published yet shows its text.
+  const float lh = ImGui::GetTextLineHeight();
+  if (rgb)
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(rgb[0], rgb[1], rgb[2], 1.0f));
+  ImGui::BeginGroup();
+  bool first = true;
+  for (const cvc::ariadne::TextRun &r : runs) {
+    if (!first)
+      ImGui::SameLine(0.0f, 0.0f);
+    first = false;
+    int W = 0, H = 0;
+    const unsigned int tex = r.image.empty() ? 0 : image_texture(r.image.c_str(), W, H);
+    if (tex != 0 && W > 0 && H > 0) {
+      ImGui::Image(static_cast<ImTextureID>(static_cast<std::intptr_t>(tex)),
+                   ImVec2(lh * static_cast<float>(W) / static_cast<float>(H), lh));
+      if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip))
+        ImGui::SetTooltip("%s", r.text.c_str()); // its :shortcode:
+    } else {
+      ImGui::TextUnformatted(r.text.data(), r.text.data() + r.text.size());
+    }
+  }
+  ImGui::EndGroup();
+  if (rgb)
+    ImGui::PopStyleColor();
+  return true;
+#else
+  (void)runs;
+  (void)rgb;
+  return false;
+#endif
+}
 void ImGuiBackend::separator() { ui::Separator(); }
 void ImGuiBackend::progress_bar(const char *label, float fraction, const std::string &overlay) {
 #ifdef CVC_ENABLE_IMGUI
@@ -910,6 +944,28 @@ bool ImGuiBackend::item_hovered() {
   return ImGui::IsItemHovered();
 #else
   return false;
+#endif
+}
+// §5.13 an autoplaying video plays while its picture shows: not scrolled out of its window's view.
+bool ImGuiBackend::item_visible() {
+#ifdef CVC_ENABLE_IMGUI
+  return ImGui::IsItemVisible();
+#else
+  return true;
+#endif
+}
+// §5.11 the width left on the line, in the document's px. A window that fits its content has the
+// width its widest row makes (last frame's), so a picture that takes all of it keeps it as it is;
+// `at_least` keeps a window holding little else from fitting the picture to nothing.
+float ImGuiBackend::available_width(float at_least) const {
+#ifdef CVC_ENABLE_IMGUI
+  const float scale = ui_px(1.0f);
+  const float avail = ImGui::GetContentRegionAvail().x / (scale > 0.0f ? scale : 1.0f);
+  const bool fit = (ImGui::GetCurrentWindow()->Flags & ImGuiWindowFlags_AlwaysAutoResize) != 0;
+  return fit ? ImMax(avail, at_least) : ImMax(avail, 1.0f);
+#else
+  (void)at_least;
+  return 0.0f;
 #endif
 }
 // §4.6 widget on_drag: is the last item being actively dragged this frame? IsItemActive() is true

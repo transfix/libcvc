@@ -225,7 +225,10 @@ const char *const kAriSchema = R"ARISCHEMA({
         "send": {"type": "string"},
         "options": {"type": ["array", "string"], "items": {"type": "string"}},
         "pos": {"type": "array", "items": {"type": "number"}},
-        "size": {"type": ["array", "number"], "items": {"type": ["number", "string"]}},
+        "size": {"type": ["array", "number", "string", "object"],
+                 "items": {"type": ["number", "string"]}},
+        "max_height": {"type": "number"},
+        "emoji": {"type": "string"},
         "src": {"type": "string"},
         "auth": {"type": "string"},
         "status": {"type": "string"},
@@ -610,6 +613,34 @@ Extent parse_extent(const YAML::Node &n) {
   return e;
 }
 
+// An image:'s or a player's size: (§5.11): W (a width in px; the height follows the picture),
+// "N%" (that share of the width the widget has on its line), or [W, H] (a box the picture is fitted
+// to; W may be "N%", H may be auto). `w` keeps its default where the size gives no px width: it is
+// then the width a backend that can't measure uses.
+void parse_media_size(const YAML::Node &sz, double &w, double &h, double &fill) {
+  const auto width = [&](const YAML::Node &v) {
+    const std::string s = v.IsScalar() ? v.Scalar() : std::string();
+    if (!s.empty() && s.back() == '%') {
+      try {
+        fill = std::stod(s.substr(0, s.size() - 1));
+      } catch (const std::exception &) {
+        fill = 0.0;
+      }
+      if (!(fill > 0.0))
+        fill = 0.0;
+      return;
+    }
+    w = v.as<double>(w);
+  };
+  if (sz && sz.IsSequence() && sz.size() >= 2) {
+    width(sz[0]);
+    h = sz[1].IsScalar() && sz[1].Scalar() != "auto" ? sz[1].as<double>(0.0) : 0.0;
+  } else if (sz && sz.IsScalar()) {
+    width(sz);
+    h = 0.0;
+  }
+}
+
 Size parse_size(const YAML::Node &n) {
   Size sz;
   if (!n)
@@ -768,6 +799,9 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     if (col && col.IsSequence() && col.size() >= 3)
       w = with_text_color(w, col[0].as<float>(1.0f), col[1].as<float>(1.0f),
                           col[2].as<float>(1.0f));
+    // §5.11 emoji: a state path holding a map of shortcode names to picture URIs: a `:name:` in
+    // the text that it names is drawn as that picture.
+    w.emoji = str(n, "emoji");
     return w;
   }
   if (type == "spinner") { // an activity indicator the host turns by its frame clock
@@ -951,17 +985,14 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     return w;
   }
   if (type == "image") { // a host-published image, or a picture by URI (§5.11)
-    // size: W (a width; the height follows the picture) or [W, H] (a box the picture is fitted to).
-    const YAML::Node sz = n["size"];
-    double w_px = 256.0, h_px = 0.0;
-    if (sz && sz.IsSequence() && sz.size() >= 2) {
-      w_px = sz[0].as<double>(256.0);
-      h_px = sz[1].IsScalar() && sz[1].Scalar() != "auto" ? sz[1].as<double>(0.0) : 0.0;
-    } else if (sz && sz.IsScalar()) {
-      w_px = sz.as<double>(256.0);
-    }
+    // size: W (a width; the height follows the picture), "N%" (that share of the line's width) or
+    // [W, H] (a box the picture is fitted to).
+    double w_px = 256.0, h_px = 0.0, fill = 0.0;
+    parse_media_size(n["size"], w_px, h_px, fill);
     Widget w = image_widget(label, str(n, "src"), w_px);
     w.img_h = h_px;
+    w.img_fill = fill;
+    w.img_max_h = num(n, "max_height", 0.0);
     w.bind = str(n, "bind"); // optional: the image name or URI comes from this key instead of src
     w.media_auth = str(n, "auth");
     w.media_status = str(n, "status");
@@ -985,14 +1016,8 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     w.bind = str(n, "bind");
     w.img_size = type == "video" ? 480.0 : 320.0;
     w.img_h = type == "video" ? 270.0 : 0.0;
-    const YAML::Node sz = n["size"];
-    if (sz && sz.IsSequence() && sz.size() >= 2) {
-      w.img_size = sz[0].as<double>(w.img_size);
-      w.img_h = sz[1].IsScalar() && sz[1].Scalar() != "auto" ? sz[1].as<double>(0.0) : 0.0;
-    } else if (sz && sz.IsScalar()) {
-      w.img_size = sz.as<double>(w.img_size);
-      w.img_h = 0.0;
-    }
+    parse_media_size(n["size"], w.img_size, w.img_h, w.img_fill);
+    w.img_max_h = num(n, "max_height", 0.0);
     if (has(n, "fit") && !media::parse_fit(str(n, "fit"), w.img_fit))
       ctx.warn("ari: " + type + " '" + label + "': fit: '" + str(n, "fit") +
                "' is not contain, cover or fill — using contain");
