@@ -1929,7 +1929,9 @@ jobs:
       - name: Build
         env:
           SAN_CXX_TESTS: ${{ matrix.cxx_tests || env.SAN_CXX_TESTS }}
-        run: cmake --build build --parallel --target $SAN_CXX_TESTS state_exec_bench pycvc
+        # -k 0: build on past a failing object, so one run lists every error (a new compiler leg
+        # such as clang-tsan otherwise shows them one push at a time).
+        run: cmake --build build --parallel --target $SAN_CXX_TESTS state_exec_bench pycvc -- -k 0
 
       - name: Run the suites under ${{ matrix.name }}
         shell: bash
