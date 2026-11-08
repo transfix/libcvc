@@ -284,6 +284,12 @@ Training on belief planes (B3):
   agent's `lam_soft` enters every rollout times its bit; `L_lreg` reads the head's own value.
 * The CPU and CUDA forward, backward and trainer take `C = risk_channels()` channels.
 
+Running a trained belief net as a controller (GRL-SNAM's `BeliefMaterialController`: its `meta`
+contract, robot-relative tokens, the gated `lam_soft` and the net per agent inside `sim_world`)
+is specified in
+[`roadmap/NAV-BELIEF-MATERIAL-CONTROLLER-ROADMAP.md`](roadmap/NAV-BELIEF-MATERIAL-CONTROLLER-ROADMAP.md)
+and not implemented yet.
+
 ### Choosing constants
 
 The defaults are the GRL-SNAM sim-frame values, validated behaviorally there

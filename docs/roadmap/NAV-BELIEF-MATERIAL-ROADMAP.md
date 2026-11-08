@@ -336,7 +336,9 @@ read with 2-channel strides: wrong coefficients and no error. Hence:
   the header's `unknown_risk`, `unknown_hard` and `seen_rule` with its `belief_material_params` and
   refuses a mismatch: a net trained with unknown 0 sees inputs it never trained on at unknown 0.5.
   `coef_energy_net` is not run inside `sim_world` today. Wiring it in is outside this spec, but
-  whoever does it uses this check and the §5 crop.
+  whoever does it uses this check and the §5 crop. That wiring, with GRL-SNAM's controller
+  contract, is specified in
+  [`NAV-BELIEF-MATERIAL-CONTROLLER-ROADMAP.md`](NAV-BELIEF-MATERIAL-CONTROLLER-ROADMAP.md).
 - **Torch side.** `RiskPatchEncoder(in_ch=…)` in `grl_snam/material_nav.py`, and v2 in
   `matnet_export.write_matnet` / `read_matnet`. The numpy reference `_risk_enc` already follows the
   weight's shape.
