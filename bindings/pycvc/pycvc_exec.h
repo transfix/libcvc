@@ -117,6 +117,15 @@ public:
   // second run() of the same Exec, from any thread, raises RuntimeError until the
   // first has returned. set_priority, get_priority and lock_query are the
   // exceptions: any thread may call them.
+  //
+  // The pump owner (S1-Q4): run() is its scheduler's pump owner until it
+  // quiesces. Meanwhile register_fn, register_async_fn, register_async_coro,
+  // set_parser_defaults, set_data_defaults, tracked_objects and scheduler()'s
+  // calls (all but stop, is_running and post_message) raise RuntimeError
+  // ("scheduler: another thread is pumping it") on any other thread, a kernel's
+  // included; from run()'s own thread (a registered function) they work. A
+  // run() started while another thread pumps the scheduler through one of its
+  // raw calls raises the same.
   std::string run(const std::string &src);
 
   // A process's priorities (docs/STATE_EXEC_LOCKS.md 7.4). set_priority(pid, p)
@@ -165,7 +174,7 @@ public:
 
   // Objects this Exec's cycle registry tracks (docs/STATE_EXEC_THREADED.md 4.7): its programs'
   // captured scopes and mutated containers, alive after the last collection or tracked since,
-  // whichever thread ran them.
+  // whichever thread ran them. The pump thread's, as register_fn is (run(), above).
   std::size_t tracked_objects() const;
 
 private:

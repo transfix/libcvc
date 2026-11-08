@@ -850,6 +850,102 @@ def test_pr08_run_reentered_during_the_quiesce():
     assert ex.run("(+ 1 1)") == "2"
 
 
+# ── Stage 1: the pump owner (S1-Q4) ─────────────────────────────────────
+# test_pycvc_exec_pool.py's PO-1 covers kill, register_fn, stop() and the priority calls across
+# the quiesce; these cover the pump calls' own hold and the other pump-thread calls.
+
+# What a pump-thread call raises while another thread pumps (scheduler.h's kPumpedElsewhereError).
+PUMPING = "scheduler: another thread is pumping it"
+
+
+def _pumping(fn, *args):
+    e = _raises(RuntimeError, fn, *args)
+    assert PUMPING in str(e), e
+
+
+def test_po_pump_calls_refused_while_run_pumps():
+    # While run() pumps on another thread (its program parked on msg-recv), the scheduler's pump
+    # calls, its readers and submit, and the Exec's other pump-thread calls raise; post_message
+    # still reaches the program. Once run() has returned they all work.
+    app = pycvc.make_app()
+    ex = pycvc.Exec(app)
+    sched = ex.scheduler()
+    box = {}
+    started = threading.Event()
+
+    def on_start():
+        box["pid"] = sched.current_pid()
+        started.set()
+        return True
+
+    async def coro():
+        return 1
+
+    ex.register_fn("started", on_start)
+    t, out = _in_thread("po-run", ex.run, '(begin (started) (msg-recv "po.go") 1)')
+    try:
+        assert started.wait(WAIT), "the program never started"
+        pid = box["pid"]
+        for call, args in ((sched.sync_run, ()), (sched.sync_step, ()), (sched.drain_ingress, ()),
+                           (sched.wake_awaiting, ()), (sched.wait_for_work, (0.0,)),
+                           (sched.get_process_info, (pid,)), (sched.list_processes, ()),
+                           (sched.get_result, (pid,)), (sched.execute, ("1",)),
+                           (ex.set_parser_defaults, (ex.parser_defaults(),)),
+                           (ex.set_data_defaults, (ex.data_defaults(),)),
+                           (ex.register_async_fn, ("late", lambda: 1)),
+                           (ex.register_async_coro, ("late_coro", coro)),
+                           (ex.tracked_objects, ())):
+            _pumping(call, *args)
+        _pumping(lambda: sched.max_pending_messages)
+        assert t.is_alive()
+    finally:
+        sched.post_message("po.go", "go")
+        _join(t)
+    assert out.get("value") == "1", out
+    assert sched.get_process_info(pid) is None  # run() reaped it
+    sched.drain_ingress()
+    sched.wake_awaiting()
+    assert isinstance(sched.wait_for_work(0.0), bool)
+    assert sched.sync_run() == {}
+    ex.set_parser_defaults(ex.parser_defaults())
+    ex.set_data_defaults(ex.data_defaults())
+    ex.register_async_fn("late", lambda: 41)
+    assert isinstance(ex.tracked_objects(), int)
+    assert ex.run("(+ (late) 1)") == "42"
+
+
+def test_po_raw_pump_call_holds_the_owner():
+    # A raw sync_run on another thread is the scheduler's pump owner for its call: meanwhile
+    # Exec.run, a priority call (which would act directly, no run() being active), register_fn and
+    # the raw calls raise; stop() ends the sync_run, and then they all work.
+    app = pycvc.make_app()
+    ex = pycvc.Exec(app, policy="priority_rr")
+    sched = ex.scheduler()
+    o = pycvc.execute_options()
+    o.max_time = 60.0  # a lost stop ends the sync_run here instead
+    pid = sched.execute("(while #t nil)", o)
+    t, out = _in_thread("po-sync-run", sched.sync_run)
+    try:
+        assert _wait_until(sched.is_running), "the sync_run never began"
+        _pumping(ex.run, "1")
+        _pumping(ex.set_priority, pid, 3)
+        _pumping(ex.get_priority, pid)
+        _pumping(ex.register_fn, "f", lambda: 1)
+        _pumping(sched.get_process_info, pid)
+        _pumping(sched.drain_ingress)
+        assert t.is_alive()
+    finally:
+        sched.stop()
+        _join(t)
+    assert "error" not in out, out
+    assert sched.get_process_info(pid).status == process_status.ready
+    assert ex.set_priority(pid, 3) is True
+    assert ex.get_priority(pid)["base"] == 3
+    assert sched.kill(pid) and sched.reap(pid)
+    ex.register_fn("f", lambda: 1)
+    assert ex.run("(+ (f) 2)") == "3"
+
+
 # ── L2: thread classes (PR-9) ───────────────────────────────────────────
 
 

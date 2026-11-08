@@ -347,7 +347,8 @@ included). Under `round_robin` a change is stored and reported and changes no pi
 They and `lock_query` (below) are the `Exec` calls any thread may make. `lock_query` never
 waits; these two act as follows:
 
-- With no `run()` active, they act at once.
+- With no `run()` active, they act at once, as the scheduler's pump owner (so they raise while
+  another thread pumps it through one of its raw calls, below).
 - From inside `run()` (a registered function, coroutine or callback), they act at once.
 - From another thread while `run()` pumps, the call is posted to the scheduler and
   `run()` answers it between steps; the caller waits with the GIL released. A call
@@ -363,12 +364,17 @@ thread (a kernel's included), raises `RuntimeError` until the first has returned
 `pycvc.async_scheduler` are the C++ classes, and their calls (`execute`, `kill`, `pause`,
 `resume`, `send_signal`, `fork`, `set_max_steps`, `list_processes`, `get_process_info`, ...)
 belong on the thread that steps the scheduler: inside its `run()` (a registered function or
-callback), or while nothing steps it. Nothing enforces this: from another thread, while a run
-pumps, they race it. (`Exec.kill`, `pause`, `resume` and `send_signal`, posted the way
+callback), or while nothing steps it. Each scheduler has a pump owner, the thread driving it:
+`Exec.run()` until it quiesces (its program's last step and any kill), and the scheduler's own
+`run`, `step`, `sync_run`, `sync_step`, `drain_ingress`, `wake_awaiting` and `wait_for_work` for
+their call. While another thread is the owner, every other call raises
+`RuntimeError("scheduler: another thread is pumping it")` instead of racing it, and so does a pump
+call (and `Exec.run()`) made while a raw pump call holds it; from the owner's own thread (a
+registered function) they work. (`Exec.kill`, `pause`, `resume` and `send_signal`, posted the way
 `set_priority` is, are not built yet.) Some `Exec` calls are the same: `set_parser_defaults` and
-`set_data_defaults` change its scheduler, and `register_fn`, `register_async_fn` and
-`register_async_coro` change the natives environment its programs share, so call them while no
-`run()` is pumping. The exceptions:
+`set_data_defaults` change its scheduler, `register_fn`, `register_async_fn` and
+`register_async_coro` change the natives environment its programs share, and `tracked_objects()`
+reads its cycle registry, which its steps change; they raise the same way. The exceptions:
 
 - `stop()` and `is_running()` may come from any thread. `stop()` ends the scheduler's `run()`
   or `sync_run()` at its next step boundary, and an idle sync `run()` at once; under `Exec.run()`

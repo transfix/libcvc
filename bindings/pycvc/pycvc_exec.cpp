@@ -23,6 +23,8 @@
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/lock_manager.h> // the app's lock manager (Exec::lock_query)
 #include <cvc/state/state_exec/process.h>
+#include <cvc/state/state_exec/scheduler.h> // kPumpedElsewhereError
+#include <cvc/state/state_exec/stdlib.h>    // the Exec's random_stream
 #include <cvc/state/state_exec/types.h>
 #include <deque>
 #include <mutex>
@@ -385,6 +387,14 @@ void check_not_in_other_run(const void *impl) {
     throw std::runtime_error("Exec.run is active on another thread");
 }
 
+// The Exec calls that are the pump thread's (S1-Q4, td 4.12): they change its scheduler or the
+// natives its programs share, or read what its steps change, so while another thread pumps the
+// scheduler (its run(), or a raw call's) they raise instead of racing it.
+void check_pump_thread(const async_scheduler &sched) {
+  if (sched.pumped_elsewhere())
+    throw std::runtime_error(kPumpedElsewhereError);
+}
+
 // CVC_PYCVC_TEST_QUIESCE_DELAY_MS, for PR-8's test only: milliseconds run() sleeps, holding the
 // GIL, between its quiesce and its reap's lock. 0 when unset or not a positive number.
 int test_quiesce_delay_ms() {
@@ -589,10 +599,18 @@ std::shared_ptr<PyObject> python_ref(PyObject *o) { return own_callable(o); }
 // pointer), so ictx must outlive any run — holding it here (Exec-lifetime)
 // satisfies that. Mirrors the C++ tests' make_exec_env().
 struct Exec::ExecImpl {
-  explicit ExecImpl(scheduling_policy policy) : sched(policy) {}
+  explicit ExecImpl(scheduling_policy policy) : sched(policy) {
+    sched.set_cycle_registry(registry.get());
+    sched.set_random_stream(&random);
+  }
 
   std::shared_ptr<cvc::app> app; // co-own so root/ictx stay valid for our lifetime
   cvc::state *root = nullptr;
+  // The Exec is its own group 0 (S1.12, td 4.7, 4.10): its scheduler binds this registry and
+  // random stream itself whichever thread drives it. Before `sched`, `env` and `natives`, so the
+  // registry is collected and freed after them; after `app`, whose tree what it frees may pin.
+  cycle_registry_ptr registry = make_cycle_registry();
+  random_stream random;
   // A PRIVATE async_scheduler owned by this Exec (NOT the app-wide one): it supports park/await +
   // cross-thread delivery, and isolating it means a pycvc program never races an Ariadne Runtime
   // (or another Exec) driving a shared scheduler, and its finished processes die with the Exec. An
@@ -627,9 +645,11 @@ struct Exec::ExecImpl {
   // The priority calls (docs/STATE_EXEC_LOCKS.md 7.4). control_mutex stands in for the pump
   // token: the scheduler is touched only by the thread of the active run() or, with none active,
   // by a holder of the mutex and the GIL (the GIL is what Python's own calls on the scheduler,
-  // Exec.scheduler()'s methods, hold). The GIL comes before the mutex: every thread takes the
-  // mutex with the GIL held (run() at entry, for its quiesce and its reaps, in RunGuard; a
-  // priority call), and no thread ever waits for the GIL while it holds the mutex. Nothing under
+  // Exec.scheduler()'s methods, hold). The scheduler's pump owner backs it (S1-Q4): run() holds
+  // it until its quiesce, a direct call while it holds the mutex, and Python's own calls on the
+  // scheduler raise while another thread holds it. The GIL comes before the mutex: every thread
+  // takes the mutex with the GIL held (run() at entry, for its quiesce and its reaps, in RunGuard;
+  // a priority call), and no thread ever waits for the GIL while it holds the mutex. Nothing under
   // the mutex runs Python or frees a Python object (reap() cancels its program's async calls
   // before it and frees the process after it), and a
   // priority call that waits for run() releases the GIL under the mutex and takes it back only
@@ -640,6 +660,9 @@ struct Exec::ExecImpl {
   // stays set through the quiesce.
   bool accepting_queries = false;
   std::thread::id run_thread; // the active run()'s thread
+  // The active run()'s hold of the scheduler's pump owner (S1-Q4): taken with `accepting_queries`
+  // and released with it, by the quiesce, both under control_mutex and on run()'s thread.
+  std::optional<async_scheduler::pump_owner_scope> run_pump_owner;
   // The calls waiting for the active run() to answer them between steps.
   std::deque<std::shared_ptr<priority_query>> queries;
 
@@ -656,10 +679,12 @@ struct Exec::ExecImpl {
 
   // run()'s quiesce, on every exit path, after its last step and any kill and before it waits for
   // its kernels: no call is left waiting, and from now on a call acts directly, under the mutex.
+  // The pump owner goes with it (S1-Q4), so a direct call takes it in turn.
   void quiesce() {
     std::lock_guard<std::mutex> lock(control_mutex);
     accepting_queries = false;
     answer_queries();
+    run_pump_owner.reset();
   }
 
   // run()'s reap of its program (both exit paths), under control_mutex, so a thread acting
@@ -690,7 +715,9 @@ void Exec::ExecImpl::priority_call(priority_query &q) {
   std::unique_lock<std::mutex> lock(control_mutex);
   if (!accepting_queries || std::this_thread::get_id() == run_thread) {
     // (3) No run() is active, or this is its thread (a registered function, coroutine or
-    // callback): act directly.
+    // callback): act directly, as the pump owner (S1-Q4), which raises while another thread
+    // pumps the scheduler through a raw call.
+    async_scheduler::pump_owner_scope owner(sched);
     answer(sched, q);
     return;
   }
@@ -770,6 +797,7 @@ Exec::Exec(const std::shared_ptr<cvc::app> &app, PyObject *policy, double idle_t
     return spawn_setup{environment::extend(natives), nullptr};
   };
   impl_->host = std::make_unique<cvc::state_exec::async_host>(impl_->sched, app.get());
+  impl_->ictx.host = impl_->host.get(); // its group's host (td 4.9, B30); spawned children copy it
 }
 
 Exec::~Exec() {
@@ -800,6 +828,7 @@ Exec::~Exec() {
 }
 
 void Exec::register_fn(const std::string &name, PyObject *callable) {
+  check_pump_thread(impl_->sched);
   builtins::register_fn(impl_->natives, name,
                         python_native_fn("pycvc.Exec.register_fn", name, callable));
 }
@@ -809,6 +838,7 @@ void Exec::register_async_fn(const std::string &name, PyObject *callable, bool w
   // the program while the callable runs on the app's background task pool, then resumes it with
   // the value or raises the callable's exception at the call (a PythonError). (name-async ...)
   // returns a future.
+  check_pump_thread(impl_->sched);
   cvc::state_exec::register_async_fn(
       impl_->natives, *impl_->host, name,
       python_async_marshal("pycvc.Exec.register_async_fn", name, callable, with_call));
@@ -817,6 +847,7 @@ void Exec::register_async_fn(const std::string &name, PyObject *callable, bool w
 cvc::state_exec::async_host &Exec::async_host() { return *impl_->host; }
 
 void Exec::register_async_coro(const std::string &name, PyObject *coro_fn) {
+  check_pump_thread(impl_->sched);
   if (coro_fn == nullptr || !PyCallable_Check(coro_fn))
     throw std::invalid_argument("pycvc.Exec.register_async_coro: '" + name + "' is not callable");
   // Lazily create the asyncio loop this Exec drives (once, at setup, GIL held by the caller).
@@ -887,12 +918,14 @@ std::string Exec::run(const std::string &src) {
   // loop, so reject re-entrancy up front. The test and set are under the control mutex, taken with
   // the GIL held (the one order allowed, docs/STATE_EXEC_LOCKS.md 7.4), and so is what makes this
   // run() the active one before its first step: from here another thread's priority call waits
-  // for this run() to answer it between steps.
+  // for this run() to answer it between steps. This thread is the scheduler's pump owner from
+  // here to the quiesce (S1-Q4); while another thread pumps it through a raw call, run() raises.
   {
     std::lock_guard<std::mutex> lock(impl->control_mutex);
     if (impl->running)
       throw std::runtime_error("pycvc.Exec.run: re-entrant call — a registered fn/coro must not "
                                "call run() (use a separate Exec per thread)");
+    impl->run_pump_owner.emplace(impl->sched);
     impl->running = true;
     impl->run_thread = std::this_thread::get_id();
     impl->accepting_queries = true;
@@ -1156,19 +1189,24 @@ cvc::state_exec::parse_options Exec::parser_defaults() const {
 }
 
 void Exec::set_parser_defaults(const cvc::state_exec::parse_options &defaults) {
+  check_pump_thread(impl_->sched);
   impl_->sched.set_parser_defaults(defaults);
 }
 
 cvc::state_exec::data_options Exec::data_defaults() const { return impl_->sched.data_defaults(); }
 
 void Exec::set_data_defaults(const cvc::state_exec::data_options &defaults) {
+  check_pump_thread(impl_->sched);
   impl_->sched.set_data_defaults(defaults);
 }
 
 cvc::state_exec::async_scheduler &Exec::scheduler() { return impl_->sched; }
 
-// Stage 1 interfaces: a stub reading the calling thread's registry, as pycvc.tracked_objects()
-// does. S1.12 gives the Exec a registry of its own and reads it.
-std::size_t Exec::tracked_objects() const { return cvc::state_exec::tracked_objects(); }
+// The Exec's own registry (S1.12), whichever thread ran its programs. Its steps change it, so this
+// is the pump thread's too.
+std::size_t Exec::tracked_objects() const {
+  check_pump_thread(impl_->sched);
+  return cvc::state_exec::tracked_objects(*impl_->registry);
+}
 
 } // namespace pycvc
