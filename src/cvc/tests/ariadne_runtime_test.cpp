@@ -26,8 +26,8 @@
 #include <cvc/ariadne/uri.h>               // §13.8 (fetch uri): register a custom scheme handler
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>
-#include <cvc/core/async_task.h> // launch_pool_task generalization test
-#include <cvc/core/exec_pool.h>  // Stage 1b: the app's pool, its workers' pumps (AR-1, AR-3)
+#include <cvc/core/async_task.h>  // launch_pool_task generalization test
+#include <cvc/core/exec_pool.h>   // Stage 1b: the app's pool, its workers' pumps (AR-1, AR-3)
 #include <cvc/core/thread_pool.h> // item 2: full type for app.computePool().parallel_for
 #include <cvc/net/browser.h>      // OIDC: a fake browser, a browser page
 #include <cvc/net/credentials.h>  // the ws-send test's CredentialStore
@@ -9596,9 +9596,9 @@ TEST(AriadneFrames, AR03_IsolatedDocumentsRunOnWorkers) {
 // and makes a request to a local HTTP server. The verb's kernel and the server's handler wait at
 // gates, so the test sees each call in flight: the document's group tracks it (its completion is
 // posted to the call's owner) and group 0 tracks nothing. The verb's done message and the stream's
-// "live" and "closed" posts reach a resident in the group. Group 0 holds no process, so no frame
-// drains its ingress: drained at the end, it holds no message. (No hook shows a scheduler's ingress
-// directly, so the test reads each post's effect.)
+// "live" and "closed" posts reach a resident in the group. Group 0 takes no post across the action
+// (its ingress count, ingress_posts_for_test, does not move), and drained at the end it holds no
+// message.
 TEST(AriadneFrames, AR03b_ProvidersPostToTheirGroup) {
   namespace se = cvc::state_exec;
   if (!have_yaml())
@@ -9676,6 +9676,8 @@ TEST(AriadneFrames, AR03b_ProvidersPostToTheirGroup) {
         " (state-set \"status\" (get-attr (http-get \"" + api->url("/ar3b") + "\") \"status\"))";
   program += " (state-set \"finished\" 1))";
   std::string outcome = "pending";
+  // Group 0's ingress before the action: 0 when nothing has built group 0 yet (a post would).
+  const std::uint64_t g0_posts0 = app.group0() ? app.group0()->ingress_posts_for_test() : 0;
   const auto t0 = std::chrono::steady_clock::now();
   art.run_program(program, [&](const std::string &why) { outcome = why; });
   ASSERT_TRUE(frames_until(frame, [&] { return verb_gate->arrivals() > 0; }))
@@ -9706,6 +9708,7 @@ TEST(AriadneFrames, AR03b_ProvidersPostToTheirGroup) {
   EXPECT_FALSE(net_gate->opened_by_itself()) << "the server's handler waited out its gate";
   in_flight(0, "at the end");
   if (se::async_scheduler *g0 = app.group0()) {
+    EXPECT_EQ(g0->ingress_posts_for_test(), g0_posts0) << "a post or completion went to group 0";
     g0->drain_ingress();
     EXPECT_EQ(g0->total_pending_messages(), 0u) << "a post reached group 0";
   }
