@@ -1547,6 +1547,28 @@ TEST(AriadneInit, EmptyScriptIsNoop) {
   EXPECT_TRUE(run_init(app, "ui", "", nullptr)); // no script -> success, nothing written
 }
 
+// The init lane's scheduler has a cycle registry of its own (S1.1, S1-Q3), collected when the run
+// ends: the cycles a script leaves are freed then, and none is left in the calling thread's own
+// registry, which no scheduler of the init lane would collect again.
+TEST(AriadneInit, ItsCyclesAreItsOwnAndFreedWhenItEnds) {
+  namespace se = cvc::state_exec;
+  cvc::app app;
+  se::collect_cycles(); // this thread's own registry: count from what outlives a collection
+  const std::size_t before = se::tracked_objects();
+  std::vector<std::string> errs;
+  // Each call's scope holds the closure that captured it: 64 cycles, tracked as each lambda is
+  // made.
+  ASSERT_TRUE(run_init(app, "ui.cycles",
+                       "(defun mk () (let ((g nil)) (set g (lambda () g)) g))\n"
+                       "(set i 0)\n"
+                       "(while (< i 64) (begin (mk) (set i (+ i 1))))\n"
+                       "(state-set \"made\" i)",
+                       &errs))
+      << (errs.empty() ? std::string("(no error)") : errs[0]);
+  EXPECT_EQ(cvc::state::instance(app)("ui.cycles.made").value(), "64");
+  EXPECT_EQ(se::tracked_objects(), before);
+}
+
 // --- custom widget: the backend novel-primitive escape (Backend::custom_widget) ---
 
 TEST(AriadneRuntime, CustomWidgetBackendEscapeBindsState) {

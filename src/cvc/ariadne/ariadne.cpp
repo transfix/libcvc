@@ -31,6 +31,8 @@
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/evaluator.h> // evaluation_timeout / evaluation_interrupted
 #include <cvc/state/state_exec/exceptions.h> // dsl_error (has?)
+#include <cvc/state/state_exec/exec_group.h> // install_providers: a group installs by kind
+#include <cvc/state/state_exec/heap.h>       // the init lane's own cycle registry
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/parser.h> // parse, parse_error
 #include <cvc/state/state_exec/process.h>
@@ -266,14 +268,33 @@ bool has_widget_type(const std::string &type) {
 // --- the init: block runner (state_exec) --------------------------------------
 
 // Host-contributed program-lane intrinsics registry (§ nav verbs et al.). ActionIntrinsicProvider
-// is state_exec-typed via forward-decls.
+// is state_exec-typed via forward-decls. Each provider keeps its kind (STATE_EXEC_THREADED.md 4.9,
+// S1-Q7), and install_providers puts it into a program's env by it:
+// - In group 0 (the app scheduler), in a host-affinity group, in the init lane and in the name
+//   probes, every provider runs as it is, into the env itself.
+// - In an `any` group (an isolated document the pool's workers may pump), an `any` provider runs
+//   as it is, and a `host_only` one does not run, so its names are NameErrors. A `host_proxied`
+//   one runs into a scratch scope over the env (environment::extend), so it reads the env's
+//   bindings as it would, and what it bound there is then moved into the env: each native through
+//   exec_group::install(..., host_proxied), which wraps it to run on the pump_all caller's thread
+//   (S1.8), and anything else (a constant) as it is.
+// A provider's body runs where the env is built: on the host thread for an action, a resident and
+// the init lane, but on the pumping thread for a spawned child, which is a worker in an `any`
+// group. So a provider an `any` group runs (`any` or `host_proxied`) has a thread-safe body.
+// A `host_proxied` provider binds synchronous natives: an async one, so wrapped, would run its
+// kernel inline on the caller (its host has no running process there), uncharged.
 namespace {
+namespace se_reg = cvc::state_exec;
+struct registered_provider {
+  ActionIntrinsicProvider provider;
+  se_reg::provider_affinity affinity = se_reg::provider_affinity::host_only;
+};
 std::mutex &action_intrinsics_mutex() {
   static std::mutex m;
   return m;
 }
-std::vector<ActionIntrinsicProvider> &action_intrinsics_registry() {
-  static std::vector<ActionIntrinsicProvider> v;
+std::vector<registered_provider> &action_intrinsics_registry() {
+  static std::vector<registered_provider> v;
   return v;
 }
 // Bumped by every register / clear, so a Runtime's cached program names know when to rebuild.
@@ -281,9 +302,34 @@ std::atomic<std::uint64_t> &action_intrinsics_generation() {
   static std::atomic<std::uint64_t> g{0};
   return g;
 }
-std::vector<ActionIntrinsicProvider> action_intrinsics_snapshot() {
+std::vector<registered_provider> action_intrinsics_snapshot() {
   std::lock_guard<std::mutex> lock(action_intrinsics_mutex());
   return action_intrinsics_registry();
+}
+
+// Run every registered provider into `env` for a program whose context is `ictx`, by kind when
+// `group` is an `any` group (above); null `group`: group 0, the init lane or a probe.
+void install_providers(const se_reg::environment_ptr &env, se_reg::intrinsics_context &ictx,
+                       se_reg::exec_group *group) {
+  const bool by_kind = group && group->opts().affinity == se_reg::group_affinity::any;
+  for (const registered_provider &p : action_intrinsics_snapshot()) {
+    if (!p.provider)
+      continue;
+    if (!by_kind || p.affinity == se_reg::provider_affinity::any) {
+      p.provider(env, ictx);
+      continue;
+    }
+    if (p.affinity == se_reg::provider_affinity::host_only)
+      continue;
+    const se_reg::environment_ptr scratch = se_reg::environment::extend(env);
+    p.provider(scratch, ictx);
+    for (auto &[name, value] : scratch->bindings) {
+      if (auto *fn = std::get_if<se_reg::native_fn>(&value.v))
+        group->install(env, name, std::move(*fn), se_reg::provider_affinity::host_proxied);
+      else
+        env->set(name, std::move(value));
+    }
+  }
 }
 
 // Bind (has? "name") into a program or predicate env. It answers from `has` (Runtime::has), so a
@@ -307,16 +353,15 @@ void bind_has(const std::shared_ptr<cvc::state_exec::environment> &env,
 } // namespace
 
 void register_action_intrinsics(ActionIntrinsicProvider provider) {
+  register_action_intrinsics(std::move(provider), cvc::state_exec::provider_affinity::host_only);
+}
+void register_action_intrinsics(ActionIntrinsicProvider provider,
+                                cvc::state_exec::provider_affinity affinity) {
   if (!provider)
     return;
   std::lock_guard<std::mutex> lock(action_intrinsics_mutex());
-  action_intrinsics_registry().push_back(std::move(provider));
+  action_intrinsics_registry().push_back({std::move(provider), affinity});
   ++action_intrinsics_generation();
-}
-// S1b.0 stub: the kind is not kept yet; every provider is installed as today.
-void register_action_intrinsics(ActionIntrinsicProvider provider,
-                                cvc::state_exec::provider_affinity /*affinity*/) {
-  register_action_intrinsics(std::move(provider));
 }
 void clear_action_intrinsics() {
   std::lock_guard<std::mutex> lock(action_intrinsics_mutex());
@@ -460,7 +505,12 @@ std::string run_scoped_program(cvc::app &app, const std::string &prefix, const s
   try {
     // All of these must outlive execute()+run(): the intrinsics capture &ictx by pointer. A
     // synchronous run-to-completion in this one scope satisfies that.
+    // The run's own cycle registry (S1.1, S1-Q3), which the scheduler binds: the script's cycles
+    // are collected and freed when the run ends, after the scheduler and the env. Declared first,
+    // so it goes last.
+    se::cycle_registry_ptr registry = se::make_cycle_registry();
     se::scheduler sched;
+    sched.set_cycle_registry(registry.get());
     // Its with-lock table is the app's (docs/STATE_EXEC_LOCKS.md 8.4), so a request meets the
     // residents' and actions' holds. This thread pumps it: not cross_thread. The home attaches
     // here and detaches with the scheduler, at the end of this scope.
@@ -490,9 +540,7 @@ std::string run_scoped_program(cvc::app &app, const std::string &prefix, const s
     // here, so no document: the library's callback, not Runtime::Impl::make_action_context.
     ictx.spawn_context = se::make_spawn_context(
         nullptr, [has](const se::environment_ptr &e, se::intrinsics_context &c) {
-          for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot())
-            if (p)
-              p(e, c);
+          install_providers(e, c, nullptr);
           bind_has(e, has);
         });
     se::apply_chroot(ictx, root, prefix); // scope writes under the document/mount prefix
@@ -500,10 +548,8 @@ std::string run_scoped_program(cvc::app &app, const std::string &prefix, const s
     se::register_intrinsics(env, &ictx);
     // Let a host bind extra program-lane intrinsics (nav verbs, …) into this env — AFTER the
     // standard ones, so it can add or override. Snapshot the registry so a provider is free to
-    // register/throw without holding the lock.
-    for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot())
-      if (p)
-        p(env, ictx);
+    // register/throw without holding the lock. Every kind as it is: init runs on this thread.
+    install_providers(env, ictx, nullptr);
     bind_has(env, has);
     // Bound the run so a looping or blocking script (an accidental infinite loop, or a
     // (msg-recv ...) with no sender) can never hang: cap the process (check_limits kills a runner
@@ -3163,9 +3209,7 @@ Runtime::Impl::make_action_context(const std::string &scope_prefix,
   ac->env = se::builtins::make_default_environment();
   se::register_intrinsics(ac->env, &ac->ictx);
   // Host program-lane intrinsics (nav verbs, …), AFTER the standard ones (add or override).
-  for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot())
-    if (p)
-      p(ac->env, ac->ictx);
+  install_providers(ac->env, ac->ictx, nullptr);
   bind_has(ac->env, [this](const std::string &n) { return has(n); });
   return ac;
 }
@@ -3571,9 +3615,7 @@ void Runtime::Impl::load_names() const {
   ictx.document = const_cast<se::document_scope *>(&doc_scope_);
   se::environment_ptr env = se::builtins::make_default_environment();
   se::register_intrinsics(env, &ictx);
-  for (const ActionIntrinsicProvider &p : action_intrinsics_snapshot())
-    if (p)
-      p(env, ictx);
+  install_providers(env, ictx, nullptr);
   std::set<std::string> found;
   for (const se::environment *e = env.get(); e; e = e->outer.get())
     for (const auto &kv : e->bindings)
