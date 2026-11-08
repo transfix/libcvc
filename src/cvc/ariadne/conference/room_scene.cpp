@@ -167,6 +167,7 @@ void write_rig_knobs(cvc::app &app, const std::string &base, const cvc::ariadne:
   set_knob(app, sub(base, {"wash", "intensity"}), wash, l.wash);
   set_replicated(app, sub(base, {"wash", "count"}), wash ? std::to_string(l.wash_count) : "");
   set_knob(app, sub(base, {"wash", "height"}), wash, l.wash_height);
+  set_replicated(app, sub(base, {"sun"}), rig && l.has_sun ? (l.sun ? "1" : "0") : "");
 }
 
 void read_rig_knobs(cvc::app &app, const std::string &base, cvc::ariadne::SceneLight &l) {
@@ -191,6 +192,9 @@ void read_rig_knobs(cvc::app &app, const std::string &base, cvc::ariadne::SceneL
       l.wash_count = std::atoi(count.c_str());
     get_knob(app, sub(base, {"wash", "height"}), l.wash_height);
   }
+  const std::string sun = get_s(app, sub(base, {"sun"}));
+  l.has_sun = !sun.empty();
+  l.sun = sun == "1";
 }
 
 void write_light(cvc::app &app, const std::string &base, const cvc::ariadne::SceneLight &l) {

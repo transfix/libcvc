@@ -555,6 +555,8 @@ TEST(RoomSceneTest, RigKnobsRoundTrip) {
   rig.wash = 0.4f;
   rig.wash_count = 6;
   rig.wash_height = 2.5f;
+  rig.has_sun = true;
+  rig.sun = true;
   env.lights = {rig};
   env.shadows = true;
   env.shadow_interval = 3;
@@ -566,7 +568,7 @@ TEST(RoomSceneTest, RigKnobsRoundTrip) {
   const SceneLight &l = out.lights[0];
   EXPECT_EQ(l.rig, "three_point");
   ASSERT_TRUE(l.has_stage && l.has_key && l.has_fill && l.has_back && l.has_warmth &&
-              l.has_environment && l.has_rig_ambient && l.has_wash);
+              l.has_environment && l.has_rig_ambient && l.has_wash && l.has_sun);
   expect_v3_eq(l.stage_center, rig.stage_center);
   EXPECT_FLOAT_EQ(l.stage_radius, 10.0f);
   EXPECT_FLOAT_EQ(l.key_intensity, 0.9f);
@@ -581,6 +583,7 @@ TEST(RoomSceneTest, RigKnobsRoundTrip) {
   EXPECT_FLOAT_EQ(l.wash, 0.4f);
   EXPECT_EQ(l.wash_count, 6);
   EXPECT_FLOAT_EQ(l.wash_height, 2.5f);
+  EXPECT_TRUE(l.sun);
   EXPECT_EQ(rs::read_room_scene(app, "r").shadow_interval, 3);
 
   // A plain light in its place clears them; one that never was a rig writes none.
@@ -593,7 +596,7 @@ TEST(RoomSceneTest, RigKnobsRoundTrip) {
   ASSERT_TRUE(rs::read_scene_env(app, "r", out));
   const SceneLight *was = find_light(out.lights, rig.id);
   ASSERT_NE(was, nullptr);
-  EXPECT_FALSE(was->has_stage || was->has_key || was->has_fill || was->has_wash);
+  EXPECT_FALSE(was->has_stage || was->has_key || was->has_fill || was->has_wash || was->has_sun);
   for (const std::string &leaf : leaves_under(app, rs::room_scene_path("r") + ".env.lights.lamp"))
     EXPECT_TRUE(leaf.rfind("stage", 0) != 0 && leaf != "fill" && leaf.rfind("key", 0) != 0) << leaf;
 }
@@ -639,7 +642,7 @@ scene:
   physics: { gravity: [0, 0, -9.8] }
   lights:
     - { light: sun, kind: directional, azimuth: 30, elevation: 40, intensity: 0.8 }
-    - { rig: three_point, stage: { center: [0, 0, 1], radius: 5 } }
+    - { rig: three_point, sun: true, stage: { center: [0, 0, 1], radius: 5 } }
   nodes:
     - node: floor
       source: { plane: { size: 30 } }
@@ -673,6 +676,7 @@ scene:
   EXPECT_EQ(w.env.lights[0].id, "sun");
   EXPECT_EQ(w.env.lights[1].id, "light_2");
   EXPECT_TRUE(w.env.lights[1].has_stage);
+  EXPECT_TRUE(w.env.lights[1].has_sun && w.env.lights[1].sun);
 
   std::vector<std::string> ids;
   for (const SceneNode &n : w.objects)

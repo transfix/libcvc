@@ -81,7 +81,7 @@ struct room_scene_env {
   int shadow_interval = 1;
   // Each light's explicit fields (kind, pos, target, cone, azimuth, elevation, intensity, color),
   // or a rig: preset with the tuning knobs it sets (stage, key, fill, back, warmth, environment,
-  // ambient, wash). An unset knob keeps the preset's value, as in a document.
+  // ambient, wash, sun). An unset knob keeps the preset's value, as in a document.
   std::vector<cvc::ariadne::SceneLight> lights;
 };
 
