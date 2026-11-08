@@ -21,7 +21,7 @@
 //     step a slider or cycle a combo; text fields edit in place and commit on Enter or focus loss;
 //     Esc reverts an edit or closes a popup; F10 opens the menu bar.
 //   - mouse: click to focus / activate, drag a slider, drag a window by its title bar, click [x] to
-//     close it, click a menu title to open it.
+//     close it, click a menu title to open it; the wheel scrolls a window whose content overflows.
 //   - free floating windows (capabilities().windows): placed from the authored pos/size or the
 //     persisted tree.<id>.geometry, raised on focus, z-ordered.
 //   - graphics: draw_image renders a published cvc::image. Where the terminal speaks a pixel
