@@ -51,8 +51,10 @@ if [ "$kind" = clang-tsan ]; then
   # clang links TSan's runtime into each executable, which ldd cannot see; the uninstrumented
   # interpreter needs it as a shared library, clang's libclang_rt.tsan: in its runtime directory
   # (named libclang_rt.tsan.so, or libclang_rt.tsan-<arch>.so in the older layout), else anywhere
-  # under its resource directory.
-  if ! nm "$bin/$1" 2>/dev/null | grep -q ' __tsan_init$'; then
+  # under its resource directory. Every pipeline here reads its input to the end: under pipefail
+  # a reader that stops early (grep -q, awk's exit, head) can kill the writer with SIGPIPE and
+  # fail the pipeline though it found what it looked for.
+  if ! nm "$bin/$1" 2>/dev/null | awk '$NF == "__tsan_init" { f = 1 } END { exit !f }'; then
     echo "::error::$bin/$1 has no TSan runtime linked in (not built with clang -fsanitize=thread?)"
     exit 1
   fi
@@ -66,14 +68,14 @@ if [ "$kind" = clang-tsan ]; then
   done
   if [ -z "$rt" ]; then
     res=$(clang -print-resource-dir 2>/dev/null)
-    rt=$(find "$res" -name 'libclang_rt.tsan*.so' ! -name '*cxx*' 2>/dev/null | head -n 1)
+    rt=$(find "$res" -name 'libclang_rt.tsan*.so' ! -name '*cxx*' -print -quit 2>/dev/null)
   fi
   if [ -z "$rt" ] || [ ! -f "$rt" ]; then
     echo "::error::no shared libclang_rt.tsan for the interpreter (clang's runtime dir: $dir)"
     exit 1
   fi
 else
-  rt=$(ldd "$bin/$1" | awk -v l="$lib" 'index($1, l) == 1 { print $3; exit }')
+  rt=$(ldd "$bin/$1" | awk -v l="$lib" 'index($1, l) == 1 && !f { print $3; f = 1 }')
   if [ -z "$rt" ] || [ ! -f "$rt" ]; then
     echo "::error::$bin/$1 does not link $lib"
     exit 1
@@ -82,7 +84,7 @@ fi
 echo "sanitizer runtime: $rt"
 # ASan intercepts __cxa_throw, and finds the real one when it starts. The interpreter is C, so
 # libstdc++ isn't loaded then, and pycvc's first throw failed ASan's CHECK on it: preload it too.
-cxxrt=$(ldd "$bin/$1" | awk 'index($1, "libstdc++.so") == 1 { print $3; exit }')
+cxxrt=$(ldd "$bin/$1" | awk 'index($1, "libstdc++.so") == 1 && !f { print $3; f = 1 }')
 if [ -z "$cxxrt" ] || [ ! -f "$cxxrt" ]; then
   echo "::error::$bin/$1 does not link libstdc++"
   exit 1
