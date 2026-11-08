@@ -668,7 +668,13 @@ the loader only *captures*. The host wires them:
   screen's edge), asking for the mouse's raw motion where the browser has it: a press on a
   window is the UI's, judged by where the press lands against the windows the overlay drew
   last frame (`CameraController::setUiRegions`), so a quick move onto a window and a click
-  there never takes the pointer. In drag to look, a click on the floor turns your avatar to
+  there never takes the pointer. Fly (Tab) is a spectator camera: the mouse turns the view with
+  the pointer captured, W A S D move along it, Space and Left Ctrl up and down, Left Shift
+  faster, at speeds per second of wall time (arigl's camera moves by the time between frames,
+  not its nominal 1 / 120 s step). In a browser the toggle key's own keydown takes the pointer
+  lock, where the browser grants it; until it holds, a drag turns the view and a bare move of the
+  cursor does not, and after Escape a click on the scene takes it again. The wheel's zoom glides
+  to where its notches put it (`settings.zoom_tau`, 0.15 s; 0 zooms at once on each notch). In drag to look, a click on the floor turns your avatar to
   face it and a drag on the floor keeps it facing the point under the pointer, a mouse's or a
   finger's (`CameraController::setPrimaryDragSteers`); the right button, or two fingers, turns
   the view. In conference mode under mouse look the avatar faces where the camera aims,

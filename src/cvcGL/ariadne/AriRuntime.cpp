@@ -4,6 +4,8 @@
 // that owns the neutral bundling. Only the GL-driving frame bits (input pump, camera, the
 // draw) live here.
 
+#include <algorithm>
+#include <chrono>
 #include <cvc/ariadne/ariadne.h>                // Runtime::document_scope()
 #include <cvc/ariadne/bind.h>                   // sync_scene_visibility
 #include <cvc/ariadne/stream/stream_channel.h>  // subscribe / deliver_mode
@@ -471,19 +473,30 @@ private:
 };
 } // namespace
 
+double AriRuntime::frameDt(double dt_seconds) {
+  const double now =
+      std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  const double last = lastFrameAt_;
+  lastFrameAt_ = now;
+  if (fixedClock_ || last < 0.0)
+    return dt_seconds;
+  return std::clamp(now - last, 0.0, 0.25);
+}
+
 void AriRuntime::frame(double dt_seconds) {
   FrameGuard guard(inFrame_, "frame");
+  const double moveDt = frameDt(dt_seconds); // the camera's and the views' time step
   view_->processUIEvents(); // VTK interactor -> ImGui (widget input + camera nav)
   if (inputPump_)
     inputPump_(); // the host's own input, delivered this frame
-  cam_->update(dt_seconds);
+  cam_->update(moveDt);
   static_cast<GlSceneAdapter *>(scene_.get())->set_tick_dt(fixedClock_ ? dt_seconds : -1.0);
   if (fixedClock_) { // the UI's frame clock (a spinner) advances by dt too
     app_rt_.runtime().set_frame_clock(fixedSeconds_);
     fixedSeconds_ += dt_seconds;
   }
   app_rt_.drain(); // queued Ariadne actions + scheduler slice + (via the adapter) scene sync/tick
-  views_->update(dt_seconds); // what each viewport widget's view leaves out, and its camera
+  views_->update(moveDt); // what each viewport widget's view leaves out, and its camera
 }
 
 void AriRuntime::render() {

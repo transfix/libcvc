@@ -1193,6 +1193,11 @@ add_executable(cvcgl_sdl_attach test/cvcgl_sdl_attach.cpp)
 target_link_libraries(cvcgl_sdl_attach PRIVATE cvcGL)
 add_test(NAME cvcgl_sdl_attach COMMAND cvcgl_sdl_attach)
 set_tests_properties(cvcgl_sdl_attach PROPERTIES SKIP_RETURN_CODE 77)
+# The camera on SDL's events, as arigl drives it: Tab, held W, the mouse, the wheel's glide.
+add_executable(cvcgl_camera_sdl_fly test/cvcgl_camera_sdl_fly.cpp)
+target_link_libraries(cvcgl_camera_sdl_fly PRIVATE cvcGL)
+add_test(NAME cvcgl_camera_sdl_fly COMMAND cvcgl_camera_sdl_fly)
+set_tests_properties(cvcgl_camera_sdl_fly PROPERTIES SKIP_RETURN_CODE 77)
 
 # ── JavaScript tests (node) ──
 # The browser-side pieces cvcgl_wasm_app() links into a wasm app are plain JS, tested under node
