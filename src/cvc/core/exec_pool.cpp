@@ -66,4 +66,17 @@ std::uint64_t exec_pool_worker_pumps_total() {
   return g_worker_pumps.load(std::memory_order_relaxed);
 }
 
+namespace detail {
+
+// The stub pool has no worker: nothing is queued, deferred or purged.
+exec_pool *worker_pool() noexcept { return nullptr; }
+
+bool defer_on_complete(std::function<void()>) { return false; }
+
+bool in_pool_callback() noexcept { return false; }
+
+void purge_host_calls(state_exec::exec_group &) noexcept {}
+
+} // namespace detail
+
 } // namespace cvc

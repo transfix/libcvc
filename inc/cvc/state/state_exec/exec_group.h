@@ -34,6 +34,24 @@ namespace cvc::state_exec {
 
 class async_host;
 class async_scheduler;
+struct random_stream; // stdlib.h
+
+namespace detail {
+/// What the pools keep on a group, between pumps and during a pump_all (exec_pool.cpp, S1.6); not
+/// for hosts. A pump_all's caller and its workers touch it under the pool's mutex, `call` under
+/// the pools' membership mutex, `failure` on the thread pumping the group.
+struct group_pool_link {
+  std::uint64_t seq = 0;           ///< creation order (deterministic mode; threads 0)
+  double last_pump_seconds = 0.0;  ///< its last pump's time: the LPT order and the helper wake
+  bool skipped = false;            ///< not started before its pump_all's deadline: first next time
+  int last_thread = -1;            ///< which thread pumped it last (CVC_EXEC_FORCE_MOVE)
+  void *call = nullptr;            ///< the pump_all it belongs to now, or null
+  random_stream *random = nullptr; ///< its math.random stream (seeded from its name)
+  std::string failure;             ///< what failed its last failed pump
+};
+/// The groups alive that were built with `app` (~app asserts in debug builds that none is).
+std::size_t live_groups(const cvc::app *app) noexcept;
+} // namespace detail
 
 /// Where a group may be pumped: `any` thread of the pool, or only the `host` thread (the caller
 /// of pump_all), as a group whose natives or subscribers need it is.
@@ -122,6 +140,10 @@ public:
 private:
   struct impl;
   std::unique_ptr<impl> impl_;
+
+public:
+  /// The pools' record of this group (exec_pool.cpp); not for hosts.
+  detail::group_pool_link &pool_link() noexcept;
 };
 
 } // namespace cvc::state_exec

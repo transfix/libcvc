@@ -114,6 +114,22 @@ private:
 // Group pumps that ran on a worker of any pool, process-wide (AR-1).
 std::uint64_t exec_pool_worker_pumps_total();
 
+// What an exec_group uses of the pool it is pumped by (exec_group.cpp); not for hosts.
+namespace detail {
+// The pool whose worker the calling thread is, while it pumps a group for a pump_all; else null.
+// A host_proxied native queues its body there (run_on_host), and runs it inline anywhere else.
+exec_pool *worker_pool() noexcept;
+// While a worker pumps a group: queue `callback` (an on_complete call) for the pump_all's caller,
+// which runs it after the join, and return true. Anywhere else return false: run it inline.
+bool defer_on_complete(std::function<void()> callback);
+// Whether the calling thread is running a queued host_proxied body or a deferred on_complete
+// callback for a pump_all, where pump_all and destroying a group are refused (debug assertions).
+bool in_pool_callback() noexcept;
+// A group's teardown (S1.5): drop the group's entries from the host-call queue of the pump_all it
+// belongs to, unrun, waiting for one its caller is running now. Nothing when it belongs to none.
+void purge_host_calls(state_exec::exec_group &group) noexcept;
+} // namespace detail
+
 } // namespace cvc
 
 #endif // CVC_CORE_EXEC_POOL_H
