@@ -139,7 +139,8 @@ class Compare(unittest.TestCase):
                reps("native.state_atomic", {"op": "incr", "n": 100}, [150, 151, 149]) +
                reps("native.state_atomic", {"n": 100}, [1, 1, 1]))  # neither value: left out
         res = quiet(seb.compare, run, run, ["wall_ns"], 10.0, pair=("op", "set", "incr"))
-        self.assertEqual(res, {"worse": 1, "changed": 1, "inconclusive": 0, "failed": 0})
+        self.assertEqual(res, {"worse": 1, "changed": 1, "inconclusive": 0, "failed": 0, "unpaired": 0,
+                               "pins": 0})
         res = quiet(seb.compare, run, run, ["wall_ns"], 60.0, pair=("op", "set", "incr"))
         self.assertEqual(res["changed"], 0)
 
@@ -147,7 +148,8 @@ class Compare(unittest.TestCase):
         run = (reps("flood.small", {"n": 10}, [100, 100]) +  # policy absent: rr
                reps("flood.small", {"n": 10, "policy": "priority_rr"}, [100, 100]))
         res = quiet(seb.compare, run, run, ["wall_ns"], 3.0, pair=("policy", "rr", "priority_rr"))
-        self.assertEqual(res, {"worse": 0, "changed": 0, "inconclusive": 0, "failed": 0})
+        self.assertEqual(res, {"worse": 0, "changed": 0, "inconclusive": 0, "failed": 0, "unpaired": 0,
+                               "pins": 0})
 
     def test_one_disturbed_rep_is_inconclusive(self):
         base = reps("sched.single.fib", {"n": 20}, [100, 100, 100, 100, 100])
@@ -172,7 +174,8 @@ class Compare(unittest.TestCase):
         run = (reps("native.state_get", {"n": 100, "depth": 4}, [100, 101, 99]) +  # chroot 0
                reps("native.state_get", {"n": 100, "depth": 4, "chroot": 1}, [130, 131, 129]))
         res = quiet(seb.compare, run, run, ["wall_ns"], 3.0, pair=("chroot", "0", "1"))
-        self.assertEqual(res, {"worse": 1, "changed": 1, "inconclusive": 0, "failed": 0})
+        self.assertEqual(res, {"worse": 1, "changed": 1, "inconclusive": 0, "failed": 0, "unpaired": 0,
+                               "pins": 0})
 
     def test_pair_driver_and_base_in_one_run(self):
         # Stage 1's paired points: driver=group against today's driver=spin at base=own, and the
@@ -183,10 +186,12 @@ class Compare(unittest.TestCase):
                reps("sched.single.fib", dict(p, driver="group", base="own"), [101, 102, 100]) +
                reps("sched.single.fib", dict(p, driver="group", base="frozen"), [110, 111, 109]))
         res = quiet(seb.compare, run, run, ["wall_ns"], 3.0, pair=("driver", "spin", "group"))
-        self.assertEqual(res, {"worse": 0, "changed": 0, "inconclusive": 0, "failed": 0})
+        self.assertEqual(res, {"worse": 0, "changed": 0, "inconclusive": 0, "failed": 0, "unpaired": 0,
+                               "pins": 0})
         groups = [r for r in run if r["params"]["driver"] == "group"]
         res = quiet(seb.compare, groups, groups, ["wall_ns"], 3.0, pair=("base", "own", "frozen"))
-        self.assertEqual(res, {"worse": 1, "changed": 1, "inconclusive": 0, "failed": 0})
+        self.assertEqual(res, {"worse": 1, "changed": 1, "inconclusive": 0, "failed": 0, "unpaired": 0,
+                               "pins": 0})
         # A base binary's spin points carry no base, and still pair with the group's base=own.
         old = [dict(r, params={k: v for k, v in r["params"].items() if k != "base"})
                for r in run if r["params"]["driver"] == "spin"]
@@ -194,6 +199,31 @@ class Compare(unittest.TestCase):
                     pair=("driver", "spin", "group"))
         self.assertEqual(res["failed"], 0)
         self.assertEqual(res["changed"], 0)
+
+    def test_a_pair_matching_nothing_on_one_side_fails(self):
+        # Stage 1's review (R1, M4): a --pair value that no record has (driver=bare, where the
+        # bench says spin) left the base side empty, every point "only in cand", and passed.
+        p = {"n": 100, "policy": "rr", "locks": "none"}
+        run = (reps("sched.single.fib", dict(p, driver="spin"), [100, 101, 99]) +
+               reps("sched.single.fib", dict(p, driver="group"), [101, 102, 100]))
+        res = quiet(seb.compare, run, run, ["wall_ns"], 3.0, pair=("driver", "bare", "group"))
+        self.assertEqual(res["unpaired"], 1)
+        res = quiet(seb.compare, run, run, ["wall_ns"], 3.0, pair=("base", "own", "frozn"))
+        self.assertEqual(res["unpaired"], 1)
+        res = quiet(seb.compare, run, run, ["wall_ns"], 3.0, pair=("driver", "bare", "grup"))
+        self.assertEqual(res["unpaired"], 1)  # neither value anywhere
+        res = quiet(seb.compare, run, run, ["wall_ns"], 3.0, pair=("driver", "spin", "group"))
+        self.assertEqual(res["unpaired"], 0)
+
+    def test_differing_driver_cpus_are_counted(self):
+        # R1, M2: an A/B whose binaries pinned the driver to different CPUs.
+        base = reps("sched.single.fib", {"n": 20}, [100, 100], pin_cpu=10)
+        cand = reps("sched.single.fib", {"n": 20}, [100, 100], pin_cpu=18)
+        self.assertEqual(quiet(seb.compare, base, cand, ["wall_ns"], 3.0)["pins"], 1)
+        same = reps("sched.single.fib", {"n": 20}, [100, 100], pin_cpu=10)
+        self.assertEqual(quiet(seb.compare, base, same, ["wall_ns"], 3.0)["pins"], 0)
+        unknown = reps("sched.single.fib", {"n": 20}, [100, 100])  # no pin_cpu: not compared
+        self.assertEqual(quiet(seb.compare, base, unknown, ["wall_ns"], 3.0)["pins"], 0)
 
     def test_of_ceiling_is_better_higher(self):
         def point(value):
@@ -240,6 +270,23 @@ class CompareExit(unittest.TestCase):
                               reps("msg.fanout", {"k": 10}, [1, 1]))
         self.assertEqual(self.run("compare", both, failed, "--metric", "wall_ns",
                                   "--max-noise", "3", "--fail-on-worse")[0], 1)
+
+    def test_an_unpaired_pair_exits_1(self):
+        run = self.run.write(reps("sched.single.fib", {"n": 1, "driver": "spin"}, [1, 1]) +
+                             reps("sched.single.fib", {"n": 1, "driver": "group"}, [1, 1]))
+        code, out = self.run("compare", run, run, "--pair", "driver=bare:group")
+        self.assertEqual(code, 1, out)
+        self.assertIn("has no base record at driver=bare", out)
+        self.assertEqual(self.run("compare", run, run, "--pair", "driver=spin:group")[0], 0)
+
+    def test_same_pin_fails_differing_cpus(self):
+        base = self.run.write(reps("eval.fib", {"n": 20}, [100, 100], pin_cpu=10))
+        cand = self.run.write(reps("eval.fib", {"n": 20}, [100, 100], pin_cpu=18))
+        code, out = self.run("compare", base, cand)
+        self.assertEqual(code, 0, out)  # warned only
+        self.assertIn("the driver ran on CPU 10 in base and 18 in cand", out)
+        self.assertEqual(self.run("compare", base, cand, "--same-pin")[0], 1)
+        self.assertEqual(self.run("compare", base, base, "--same-pin")[0], 0)
 
     def test_bad_pair_is_a_usage_error(self):
         f = self.run.write(reps("eval.fib", {"n": 1}, [1]))

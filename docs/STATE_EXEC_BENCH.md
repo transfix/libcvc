@@ -125,16 +125,21 @@ More `compare` rules, for gates:
   key was there before Stage 1 gave it the value `group`: its records carry `driver=spin`.)
 - **`--pair KEY=A:B`** compares the base's points whose `KEY` is `A` with the candidate's whose
   `KEY` is `B`, matched without `KEY`. Both files may be the same run: `compare run.jsonl run.jsonl
-  --pair op=set:incr` compares two points of one sweep. A point at neither value is left out.
+  --pair op=set:incr` compares two points of one sweep. A point at neither value is left out. A
+  scenario with records on one side only (a value misspelled, or never run) exits 1, whatever the
+  other options: a pair that matched nothing never passes.
+- **The driver's CPU.** A matched point whose base and candidate records ran the driver on
+  different CPUs (`pin_cpu`) gets a warning: another core, or another scheduling class on a hybrid
+  part, is a bias of the size of the gates. `--same-pin` makes it exit 1.
 - **`--max-noise P`**: a point whose noise is above `P` percent gets `INCONCLUSIVE` instead of a
   verdict. It cannot rule out a change of the size asked for.
 - **`--fail-on-change`** exits 1 on any change beyond the noise, in either direction, and on a
   failed or missing point. Use it for `steps_total`, where a drop is as wrong as a rise
   (`--fail-on-worse` would pass a drop as `better`). A base of 0 that the candidate left counts as
   a change (`CHANGED (base 0)`).
-- **Exit status:** 1 when anything fails under the rule asked for; otherwise 2 when any point is
-  `INCONCLUSIVE`; otherwise 0. An exit of 2 means repeat the run on a quieter machine. It is never
-  a pass.
+- **Exit status:** 1 when anything fails under the rule asked for (or a `--pair` leaves a scenario
+  unpaired); otherwise 2 when any point is `INCONCLUSIVE`; otherwise 0. An exit of 2 means repeat
+  the run on a quieter machine. It is never a pass.
 
 `gate RUN --scenario GLOB --metric M [--max X] [--min X]` checks an absolute bound on one run:
 for each matching point it takes a statistic (`--stat median|min|max`, default median) of `M`
@@ -188,17 +193,20 @@ so the allocation count is a Release number. With a single-config generator it e
 
 ## Getting stable numbers
 
-- **Pin the driver to a performance core.** The bench pins it with the library's placement
-  (`cvc/core/cpu_placement.h`, which the `exec_pool` places its workers with). `--pin auto` (the
-  runner's default) picks, on Windows, a CPU set with the highest `EfficiencyClass` from `GetSystemCpuSetInformation`, off the
-  core that logical CPU 0 is on (most interrupts land there), and pins the driver thread to it
-  with `SetThreadAffinityMask` and `SetThreadSelectedCpuSets`. On Linux it picks among the CPUs
-  with the highest `/sys/devices/system/cpu/cpu*/cpu_capacity` (hybrid and big.LITTLE parts), or,
-  where the kernel reports no capacities, the P-cores listed in `/sys/devices/cpu_core/cpus` (Intel
-  hybrid), skipping CPU 0 and its SMT siblings; otherwise it pins nothing. `--pin 2` pins to CPU 2
-  anywhere but macOS, which has no thread affinity. On a hybrid Intel part an unpinned driver that
-  the OS moves to an E-core runs about half as fast, which is noise far larger than most changes
-  worth measuring.
+- **Pin the driver to a performance core.** The bench reads the CPUs and pins the driver through the
+  library's placement (`cvc/core/cpu_placement.h`, which the `exec_pool` places its workers with),
+  but `--pin auto` (the runner's default) keeps the bench's own rule, so a binary from before the
+  library had it pins the same CPU and an A/B's two sides run on one core: not the library's
+  `pin_current_thread(-1)`, whose CPU is the one the pool keeps for its caller. On Windows it picks,
+  of the CPU sets with the highest `EfficiencyClass` from `GetSystemCpuSetInformation`, the first by
+  index off the core that logical CPU 0 is on (most interrupts land there), and pins the driver
+  thread to it with `SetThreadAffinityMask` and `SetThreadSelectedCpuSets`. On Linux it picks among
+  the CPUs with the highest `/sys/devices/system/cpu/cpu*/cpu_capacity` (hybrid and big.LITTLE
+  parts), or, where the kernel reports no capacities, the P-cores listed in
+  `/sys/devices/cpu_core/cpus` (Intel hybrid), skipping CPU 0 and its SMT siblings; otherwise it
+  pins nothing. `--pin 2` pins to CPU 2 anywhere but macOS, which has no thread affinity. On a
+  hybrid Intel part an unpinned driver that the OS moves to an E-core runs about half as fast, which
+  is noise far larger than most changes worth measuring.
 - **Only the driver is pinned.** The app's background threads, lanes, compute pool and the bench's
   own threads float, as they do in a real host. Windows gives a new thread the process's affinity,
   so this holds by itself. Linux gives a new thread its creator's mask, so there the bench builds
@@ -208,8 +216,8 @@ so the allocation count is a Release number. With a single-config generator it e
   (`async.*`, `msg.ingress`, `mt.*`; `spawns_threads` in `--list-json`) run with the driver
   unpinned, and their records say `pin_cpu: -1`. The pool scenarios (`mt.groups`,
   `mt.groups.flood`, `mt.state_tree`) are the exception: their `exec_pool` places its workers, the
-  region leaves them placed, and a pinned driver moves off worker 1's CPU for the point (mt.groups,
-  "Placement").
+  region leaves them placed, and a pinned driver moves for the point to the CPU the pool keeps for
+  its caller (mt.groups, "Placement").
 - **Keep the pinned core's SMT sibling idle.** The header and the records (`pin_sibling`) name the
   other logical CPUs on the driver's core. A busy sibling slows the driver by tens of percent and
   is a large part of the rep-to-rep spread. On Windows, keep other work off it (for example
@@ -896,8 +904,10 @@ driver, pumps as the pool's thread 0. Every group runs the program `runs` (5) ti
 time, each run a process of its own reaped once read: fib 18 and 2000 caught raises, as in
 mt.multi_exec, or `prog=cycle`, 2000 closure cycles (each iteration a `let` scope binding the
 lambda that captured it), so each group's cycle registry has work. The groups take the frozen
-builtins as their base (td 4.2), and env-less processes, so a group's top-level definitions
-persist from run to run, as a pooled `Exec`'s do.
+builtins as their base (td 4.2), and their processes are env-less: each run gets a scope of its
+own over the group's global env, so nothing persists from run to run (fib's `defun` binds its
+closure in that scope, a cycle a run). A pooled `Exec` runs its programs in its own env instead,
+and keeps their top-level definitions.
 
 The driver submits each group's first run, then calls `pump_all` on every group that still has a
 run, with `Exec::run`'s slice (`pump_budget{2000000, 0.05}`) and no frame deadline, until every
@@ -907,16 +917,22 @@ never read from `on_complete` (which a worker-pumped group defers to the caller)
 workers and the groups are built once a point, before any rep and outside every meter: the pool
 first, so that `threads` above 0 makes the app's lock manager shared and the workers pump (S1-Q1),
 under `unpinned_scope`. The groups are kept from rep to rep, so the pool's order and its helper
-wake (both by the groups' last pumps) are primed by the warmup rep; with `--warmup 0` the first
-rep's first round has no history and runs every group on the caller.
+wake (both by the groups' last pumps) are primed by the warmup rep. With `--warmup 0` only group
+0 has a last pump, from the reference run just before the region, and it counts toward the
+helper wake's `inline_below`, so a program longer than that wakes the helpers in the first round
+too (the sanitizer jobs' run).
 
 **Placement.** The pool puts worker i on the i-th CPU of `placement_cpus(performance)`
-(`cvc/core/cpu_placement.h`), and starts it under `unpinned_scope`. A driver pinned by `--pin`
-(`auto` pins it to that list's first CPU, worker 1's) moves for the point to the list's next CPU
-after the workers' (`extra.caller_cpu`, and `pin_cpu`), and back once the point ends; an unpinned
-driver (`--pin none`, or Linux, where `spawns_threads` points run unpinned) stays unpinned. The
-region does not widen the other threads' masks (Linux), which would undo the workers' placement.
-mt.independent's threads are placed the same way: thread 0 as the caller, thread k as worker k.
+(`cvc/core/cpu_placement.h`), and starts it under `unpinned_scope`. The list's last CPU, a
+performance core off logical CPU 0's, is the one the pool keeps for its caller: no worker of a
+pool smaller than the list takes it. A driver pinned by `--pin` (auto's CPU, the bench's own rule,
+can be worker 1's) moves there for the point when no worker takes it (`extra.caller_cpu`, and
+`pin_cpu`), and back once the point ends, so at every t the caller, the one-group reference and
+mt.independent's thread 0 run on the same CPU of the workers' class, which no worker shares. An
+unpinned driver (`--pin none`, or Linux, where `spawns_threads` points run unpinned) stays
+unpinned. The region does not widen the other threads' masks (Linux), which would undo the
+workers' placement. mt.independent's threads are placed as the pool's: thread 0 as the caller,
+thread k as worker k.
 
 A rep runs, in order: mt.independent's `ast=private` worker on one thread and then on t, with the
 pool's placement, the ceiling; one group alone, `runs` runs (the caller pumps it), the reference;
@@ -944,9 +960,9 @@ prog=fib runs=1`, and `exceptions` and `cycle`), as for mt.multi_exec.
 `n` (2000) tiny programs, flood.small's (`(+ 1 2)` and a 10-iteration loop, alternating, as
 source text read inside the process), on the app's `exec_pool` with `t - 1` workers (`t` 1, 4):
 
-- `mode=reuse`: `t` groups (`ExecPool`'s default size, its threads) built for the point and kept
-  from rep to rep; the region submits every program at once, program i to group i mod t, and pumps
-  every group in `pump_all` rounds until all have ended;
+- `mode=reuse`: `t` groups, one per pumping thread, built for the point and kept from rep to rep;
+  the region submits every program at once, program i to group i mod t, and pumps every group in
+  `pump_all` rounds until all have ended;
 - `mode=fresh`: a group per program, built inside the region, `t` at a time: the batch's groups are
   built, each given its program, pumped until done, and destroyed. A fresh group has no last pump,
   so the adaptive helper wake (under 100 us of last pumps in all, td 4.4) pumps every batch on the
@@ -985,8 +1001,11 @@ auto`, base and candidate interleaved, two rounds of 5 reps or more ("Getting st
 - **Regression** (base: master at the cut; candidate: the branch): `steps_total` unchanged on
   `eval.*`, `sched.single.*`, `flood.small` sync, `native.*`, `data.*` and `limits.*`
   (`compare --metric steps_total --threshold 0 --fail-on-change`); `sched.single.*`, `flood.*`,
-  `limits.*`, `msg.*` and `async.*` within 3 % (`compare --fail-on-worse --max-noise 3`). A base
-  binary's points match the candidate's default ones (`driver=spin`, `base=own`).
+  `limits.*`, `msg.*` and `async.*` within 3 % (`compare --fail-on-worse --max-noise 3
+  --same-pin`). A base binary's points match the candidate's default ones (`driver=spin`,
+  `base=own`). Both binaries' `--pin auto` take the same CPU (LP10 on the machine this was written
+  on); `--same-pin` refuses a compare whose sides did not, as an explicit `--pin N` for both would
+  also rule out.
 - **The pump scope** (paired, one binary): `sched.single.*` `driver=group` within 3 % of
   `driver=spin`, over two runs in reverse order; and `base=frozen` against `base=own` recorded:
 
