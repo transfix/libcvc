@@ -412,7 +412,9 @@ S1-Q2). A threaded call's future belongs to the scheduler its completion is post
 may finish it. `await`, `await-all` and `msg-recv` on a future whose owner is another scheduler
 raise `RuntimeError` "await: the future belongs to another scheduler", with `origin` `"async"`
 (`kForeignFutureError`, `stackless_evaluator.h`), before they read, park on or wait for the call:
-the call itself is untouched, and its own scheduler can still await it. An inline future (a call
+the call itself is untouched, and its own scheduler can still await it. Owners are compared by
+serial (`scheduler_base::serial()`, never reused), not by address, so a future kept after its
+scheduler is gone stays foreign to a new scheduler at the same address. An inline future (a call
 run inline, settled before it returned) has no owner and is a plain value any scheduler may read,
 so Ariadne's `init:` lane, which awaits the app host's inline futures, is unaffected. The futures
 that reach the check are those a host hands from one scheduler to another, such as one carried

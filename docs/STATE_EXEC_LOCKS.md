@@ -1200,8 +1200,12 @@ hints to it, and every outcome is read from the manager.
     makes it shared, for that app only (not the process-wide `note_threaded_host()`, which would
     leak into every later app), and `CVC_EXEC_THREADS` counts as `state_exec.threads` for `auto`.
     If the manager is already single, the pool is built with 0 threads and pumps every group on
-    its caller, logging why once. Building a group makes the manager, so a host gives its pool
-    options before its first group, `exec_scheduler()` or `lock_manager()` call.
+    its caller, logging why once. And whichever pool pumps it, a group whose home attached to a
+    single manager is pumped on the caller of `pump_all` only (logged once per pool; a debug build
+    asserts when a pool with workers is given one), so no single manager's homes are stepped on two
+    threads. Building a group makes the manager (and logs once when that makes it single), so a
+    host gives its pool options before its first group, `exec_scheduler()` or `lock_manager()`
+    call.
   - A group's teardown closes its lock port (`close_lock_port()`, through `has_lock_home()`, so it
     makes no private home to close) right after it takes the group's token and before it kills
     the group's processes, the order Stage 2's `wake(g)` needs (below); the design-time model

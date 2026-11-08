@@ -961,8 +961,10 @@ says which host and lane runs on which scheduler, and
   call keeps it, and one giving different options logs that they were not applied. An
   `exec_pool(opts)` asking for threads above 0 before anything has made `lock_manager()` makes the
   manager shared, for this app only. Workers pump only over a shared manager: if the manager is
-  already single, the pool is built with 0 threads and a log line says why. With 0 threads, or in a
-  build without threads, every pump runs on the calling thread. The pool's clamps
+  already single (building an `exec_group` on the app makes it, in a C++ host without
+  `state_exec.threads`, and logs so once), the pool is built with 0 threads and a log line says
+  why; and every pool pumps a group on a single manager on its calling thread only. With 0
+  threads, or in a build without threads, every pump runs on the calling thread. The pool's clamps
   (`hardware_concurrency() - 1`, the affinity mask) and any worker that failed to start are logged
   once.
 - `exec_pool_probe()`: the pool if it has been built, else null. It never builds it.
@@ -971,10 +973,14 @@ says which host and lane runs on which scheduler, and
   steps and 0.1 s per group) over every registered frame group, with group 0 (`exec_scheduler()`,
   once it is built and holds a live process; never built here) pumped first on the calling thread
   as a host-affinity group: its token taken, `drain_ingress`, `wake_awaiting` and
-  `sync_run_steps`. With no frame group registered it builds no pool and pumps group 0 alone. Then
-  `exec_pump_generation()` advances: the count of `exec_pump_frame()` calls that have finished,
-  which Ariadne's `drain_end()` reads (Stage 1b) to skip its own pump in a frame the host already
-  pumped.
+  `sync_run_steps`. A frame group the deadline skipped last frame starts before group 0 whenever
+  the calling thread pumps it, so a busy group 0 delays it by one frame at most. In deterministic
+  mode (the pool's, or with no pool the tree's `state_exec.deterministic` and
+  `CVC_EXEC_DETERMINISTIC`) group 0 is pumped with steps only and no deadline, and its
+  `math.random` stream is seeded from the name "group0". With no frame group registered it builds
+  no pool and pumps group 0 alone. Then `exec_pump_generation()` advances: the count of
+  `exec_pump_frame()` calls that have finished, which Ariadne's `drain_end()` reads (Stage 1b) to
+  skip its own pump in a frame the host already pumped.
 - `cvc::pump_exec_frame(sched, lanes, max_steps, max_time)` (`<cvc/core/async_lane.h>`) is a
   different thing: one frame of one scheduler (`run_deferred()` on the lanes given, then
   `wake_awaiting`, one unconditional `sync_step` and `sync_run`), with a render-loop budget of 20000

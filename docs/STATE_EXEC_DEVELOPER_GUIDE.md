@@ -887,17 +887,21 @@ while (busy())
   builds the app's: the policy from `state_exec.policy`, the app's root as its watch root (or
   `options::watch_root`), the host parser and data defaults, the app's pid source (pids stay
   unique app-wide), and the app's lock manager in the manager's own mode. Its global env is
-  `environment::extend(base)`: `options::base` (frozen, <!-- S1a-fix -->which a debug build
-  asserts), else `frozen_builtins()`, the one default environment per process, frozen, so a
-  group builds no default environment of its own. A program's `set` binds in its own run env and
-  never reaches the base. Natives of your own go in an env over the base (below).
+  `environment::extend(base)`: `options::base`, else `frozen_builtins()`, the one default
+  environment per process, frozen, so a group builds no default environment of its own. A
+  program's `set` binds in its own run env and never reaches the base. A base you share between
+  groups must be frozen, since a `set` of a name bound in an unfrozen base writes it from
+  whichever thread pumps the group; nothing checks it, and an unfrozen base one group owns is
+  fine. Natives of your own go in an env over the base (below).
 - **Affinity.** `group_affinity::any` (the default) may be pumped by any thread of the pool;
   `group_affinity::host` only by the `pump_all`'s caller, for a group whose natives or subscribers
   need the host thread.
 - **Submitting.** `exec_group::execute(script, opts)`, or `execute(value_t, opts)`, which copies
   the value's lists and dicts first (a quoted literal is the AST's own node, so two groups, and
-  your AST, never share one). <!-- S1a-fix -->A process submitted with no `owner` gets the group's
-  `options::owner`.
+  your AST, never share one). A process submitted with no `owner` gets the group's
+  `options::owner`, so `kill_owner(group.opts().owner)` reaches it. Submitting through
+  `group.sched()` directly skips all three: no copy, no owner, and an `on_complete` that runs where
+  the group is pumped.
 - **Posting.** `group.sched().post_message(channel, value)` from any thread, as on one scheduler.
   A compound value you post is handed over: keep no reference to it, and never post one value to
   two groups (a data race in a release build; nothing checks it in Stage 1).
@@ -905,22 +909,27 @@ while (busy())
   (`app.register_frame_group(group)`, which returns a handle that unregisters on reset or
   destruction) and calls `app.exec_pump_frame()` each frame: one `pump_all` of every frame group
   with a 0.1 s deadline and Ariadne's budget, with the app scheduler pumped first on the calling
-  thread (APP_API.md, "Program Execution").
+  thread, after any frame group the deadline skipped last frame, so a busy app scheduler cannot
+  starve your groups (APP_API.md, "Program Execution").
 - **Sizes and settings.** `threads` 0 (the default) pumps every group on the calling thread, in
   creation order. `pool_options::auto_threads` is the performance cores less one. Without
   `pool_options`, the pool takes `state_exec.threads`, `state_exec.cpu_set` and
   `state_exec.deterministic` from the tree when it is built; `CVC_EXEC_THREADS` overrides the
   tree's threads. Workers pump only when the app's lock manager is shared: if something made the
   manager single before the pool (an `exec_scheduler()` or `lock_manager()` call, or building a
-  group, all of which make it), the pool runs inline and logs why. <!-- S1a-fix -->A `pump_all` also
-  pumps any group whose lock manager is single on its caller, whichever pool it is.
+  group, all of which make it), the pool runs inline and logs why. Every pool pumps a group whose
+  lock home attached to a single manager on its caller only, whichever pool it is (logged once; a
+  debug build asserts when a pool with workers is given one).
 - **Destroying a group** takes its token (waiting for a pump in progress), closes its lock port,
   kills its processes, waits for its kernels, and reaps, then frees its scheduler and collects its
   registry (STATE_EXEC_THREADED.md 4.2). Destroy your groups before the app; never inside a
-  `pump_all` that holds them, nor from a native or callback the pool runs.
+  `pump_all` that holds them, nor from a native or callback the pool runs (debug assertions). From
+  inside the group's own pump (a native or an inline callback of its own process) it aborts, in
+  every build.
 - **Failures.** A C++ exception escaping a group's pump fails that group only: its processes are
   killed with the exit error "internal error", `failed()` is true, and `pool.failed_groups()` lists
-  it after the `pump_all` the calling thread made. No exception leaves a worker.
+  it after the calling thread's `pump_all` on that pool, until its next one. No exception leaves a
+  worker.
 
 #### The pump scope
 
@@ -951,7 +960,7 @@ thread is pumping it" (`kPumpedElsewhereError`) when another thread holds it.
 ```
 
 A group's pump holds its scheduler's owner as the group's token; pycvc's `Exec::run` holds its
-`Exec`'s until it quiesces, and pycvc's raw pump calls for their call, so pycvc's raw scheduler
+`Exec`'s until it returns, and pycvc's raw pump calls for their call, so pycvc's raw scheduler
 calls raise `RuntimeError` instead of racing a pump on another thread
 (`bindings/pycvc/README.md`). Debug builds, and release builds run with `CVC_EXEC_VERIFY=1`, abort
 when a scheduler's public mutator (`execute`, `kill`, `pause`, `reap`, `restore`, the priority
@@ -995,27 +1004,29 @@ and `pump_all` returns only with its queue empty. The rules that keep it deadloc
 
 - A body called by the caller itself, or with no `pump_all` pumping its group (threads 0
   included), runs inline: the caller never waits for itself.
+- The caller runs a parked process's body once its group's pump has ended, with the group's
+  registry and random stream bound; the process resumes at the group's next pump.
 - At a point that cannot park (a generator body), the worker blocks until the caller has run the
-  body; the caller is servicing its queue then, so it always gets there.
+  body; the caller runs such a body as soon as it services its queue, so it always gets there.
 - A body, and an `on_complete` callback the pool runs, must not call `pump_all` or destroy a group
   (debug assertions).
 - A group's teardown drops its queued bodies unrun (its kills have cancelled their calls).
-- Each `pump_all` has its own queue, serviced only by its caller. <!-- S1a-fix -->With two threads
-  calling `pump_all` at once, the bodies of one provider can run on both at once: a provider whose
-  state wants a single thread locks it.
+- Each `pump_all` has its own queue, serviced only by its caller: "the host thread" is the caller
+  of the body's `pump_all`. With two threads calling `pump_all` at once, the bodies of one provider
+  can run on both at once, so a provider whose state only one thread may touch serializes its
+  bodies itself.
 
-#### `on_complete` in worker-pumped groups
+#### `on_complete` in groups the pool pumps
 
-An `execute_options::on_complete` given through `exec_group::execute` for a process of a group a
-worker pumps does not run on the worker: it is queued, and the `pump_all`'s caller runs it after the
-join, group by group in the order their pumps ended, each group's in completion order. If one
-throws, the rest still run and `pump_all` rethrows the first. A group pumped on the caller (every
-group at threads 0, every host-affinity group) runs its callbacks inline in the pump, as a scheduler
-always has. <!-- S1a-fix -->In a threaded `pump_all` (threads above 0, not deterministic) every
-group's callbacks wait for the join, those of groups the caller happened to pump included. Only
-callbacks given through `exec_group::execute` are deferred: one given to `group.sched().execute`
-runs where the pump runs. The values a callback gets belong to the group, so drop them before the
-next pump. A host that wants completion without a callback reads `get_process_info` after each
+In a threaded `pump_all` (a pool with workers, not deterministic), an `execute_options::on_complete`
+given through `exec_group::execute` does not run in the pump, whichever thread pumps its group, a
+worker or the caller: it is queued, and the `pump_all`'s caller runs it after the join, group by
+group in the order their pumps ended, each group's in completion order, with the group's registry
+and random stream bound. If one throws, the rest still run and `pump_all` rethrows the first. At
+threads 0 and in deterministic mode the callbacks run inline in the pump, as a scheduler always
+has. A callback given to `group.sched().execute` instead runs where the group is pumped, inside
+the pump, on a worker included. The values a callback gets belong to the group, so drop them before
+the next pump. A host that wants completion without a callback reads `get_process_info` after each
 `pump_all`, as the bench's `mt.groups` does.
 
 #### `ExecPool` or several `Exec`s
@@ -2263,14 +2274,15 @@ reaped.
 Tracked objects live in a **cycle registry** (`cycle_registry`, `heap.h`). A scheduler given one
 (`set_cycle_registry`) binds it on every entry that can run DSL, whichever thread drives it, and
 collects it: each execution group, the app's scheduler and each pycvc `Exec` own one, and collect
-and free it after their scheduler and environments are gone; what a host still holds then joins
-the caller's registry. Everything else (bare evaluators, bare schedulers) uses the calling
-thread's own registry, as before. The no-argument `collect_cycles()`, `tracked_objects()` and
+and free it after their scheduler and environments are gone; what a host still holds then joins the
+caller's registry. Everything else (bare evaluators, bare schedulers) uses the calling thread's own
+registry, as before. The no-argument `collect_cycles()`, `tracked_objects()` and
 `cycle_collection_due()` act on the registry bound on the calling thread, else the thread's own;
-each has a form taking a registry (`tracked_objects(*sched.registry())`), and
-`cycle_registry_scope` binds one. A host that runs evaluators without a scheduler calls
-`collect_cycles()` itself, between steps; inside a step it does nothing. A thread's own registry is
-dropped, uncollected, when the thread ends, unless the thread called
+each has a form taking a registry (`tracked_objects(*sched.registry())`), and `cycle_registry_scope`
+binds one. From Python, `Exec.collect_cycles()` and `Exec.tracked_objects()` act on an `Exec`'s
+registry, and `pycvc.collect_cycles()` on the calling thread's own. A host that runs evaluators
+without a scheduler calls `collect_cycles()` itself, between steps; inside a step it does nothing. A
+thread's own registry is dropped, uncollected, when the thread ends, unless the thread called
 `collect_cycles_at_thread_exit()` once (the pool's workers do; never a Python thread or the main
 thread, whose thread-locals go after `Py_Finalize` or under the Windows loader lock).
 
