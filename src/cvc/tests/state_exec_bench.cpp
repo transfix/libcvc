@@ -120,6 +120,14 @@ namespace se = cvc::state_exec;
 // patched to send malloc, calloc and realloc through a counter (bench_alloc::install).
 // ---------------------------------------------------------------------------------------------
 
+// clang's ThreadSanitizer links its own operator new and delete into the executable, so a
+// replacement here would be a second definition: under it nothing is counted (scope "none").
+#if defined(__clang__) && defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define BENCH_ALLOC_NO_NEW_REPLACEMENT 1
+#endif
+#endif
+
 namespace bench_alloc {
 thread_local uint64_t count = 0;
 bool active = false;
@@ -227,6 +235,8 @@ void install() {
     scope = "malloc/calloc/realloc calls from non-system modules";
   }
 }
+#elif defined(BENCH_ALLOC_NO_NEW_REPLACEMENT)
+void install() {}
 #else
 void install() {
   active = true;
@@ -235,7 +245,7 @@ void install() {
 #endif
 } // namespace bench_alloc
 
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(BENCH_ALLOC_NO_NEW_REPLACEMENT)
 // The replacement every module's operator new resolves to (see above). The array forms call this
 // one by default. The nothrow form and the deletes are replaced with it, so every block it hands
 // out goes back through std::free: under ASan, whose own operator new and delete replace the

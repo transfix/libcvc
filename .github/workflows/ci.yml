@@ -1718,8 +1718,11 @@ jobs:
           # --gcc-install-dir: gcc 13's libstdc++, the gcc legs' own, not the newer 14 clang would
           # pick, so every leg builds against one library. (Either one's C++20 std::pair rejects
           # pair<std::string, T> inside T under clang, which is why such members are structs.)
+          # No ImageMagick: libcvc-deps' is built by gcc with OpenMP and its flags carry -fopenmp,
+          # which under clang emits calls into libomp, a runtime this leg does not have.
           - name: clang-tsan
             flags: -fsanitize=thread --gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/13
+            cmake_args: -DCVC_ENABLE_IMAGEMAGICK=OFF
             cc: clang
             cxx: clang++
             cxx_tests: >-
@@ -1930,7 +1933,8 @@ jobs:
             -DCVC_BUILD_PYCVC=ON \
             -DCVC_BUILD_PYCVC_GL=OFF \
             -DPython3_EXECUTABLE="$PY_PREFIX/bin/python3.12" \
-            -DSWIG_EXECUTABLE="$PY_PREFIX/bin/swig"
+            -DSWIG_EXECUTABLE="$PY_PREFIX/bin/swig" \
+            ${{ matrix.cmake_args }}
 
       - name: Build
         env:
