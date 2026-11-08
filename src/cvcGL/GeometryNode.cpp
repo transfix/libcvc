@@ -1573,6 +1573,12 @@ bool GeometryNode::hasSharedShaderInputs(const std::string &key) const {
   return m_sharedInputs.count(key) != 0;
 }
 
+std::shared_ptr<const GeometryNode::ShaderInputs>
+GeometryNode::sharedShaderInputs(const std::string &key) const {
+  const auto it = m_sharedInputs.find(key);
+  return it == m_sharedInputs.end() ? nullptr : it->second;
+}
+
 void GeometryNode::setShaderTexture(const std::string &name, vtkTextureObject *tex) {
   runOnMainThread([this, name, tex]() {
     if (tex)

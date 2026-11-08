@@ -356,9 +356,10 @@ TEST(WorldRoadGrade, ARoadIsSmoothAlongAndLevelAcross) {
   EXPECT_LE(worstGrade, p.max_grade + 1e-6);
   EXPECT_LT(worstChange, 0.25 * groundChange)
       << "the grade changes far more gently than the ground";
-  // Never far from the ground it is laid on.
+  // Never far from the ground it is laid on: through the 1.5 m bumps, a little low (roads cut
+  // more than they bank).
   for (int i : ids)
-    EXPECT_LT(std::abs(z[std::size_t(i)] - bumpy(net.nodes[std::size_t(i)].x, 0)), 2.0);
+    EXPECT_LT(std::abs(z[std::size_t(i)] - bumpy(net.nodes[std::size_t(i)].x, 0)), 2.5);
 
   // Level across: within 2 cm edge to edge, 0.3% (exactly level mid-segment, a little off
   // within a metre of a node, where the next segment blends in), where the ground tilts 30%.
@@ -429,4 +430,84 @@ TEST(WorldRoadGrade, CloseRoadsAgreeAndJunctionsAreLevel) {
   const auto steep = std::make_shared<fn_ground>([](double, double y) { return 0.5 * y; });
   const std::vector<double> zt = grade_road_profile(t, *steep, p);
   EXPECT_LE(std::abs(zt[std::size_t(up)] - zt[std::size_t(mid)]) / 10.0, p.junction_grade + 1e-6);
+}
+
+// A road keeps to a gentle hill and cuts through a steep one, taking more off the crest than it
+// raises at the foot.
+TEST(WorldRoadGrade, AGentleHillIsFollowedAndASteepOneIsCut) {
+  road_network net;
+  const std::vector<int> ids = add_road(net, -300.0, 300.0, 0.0, 100, 6.0); // 6 m segments
+  road_grade_params p;
+  // A broad 4 m rise: its grade (5%) and its bend (0.0013 per metre) are within the limits.
+  auto gentle = [](double x, double) { return 4.0 * std::exp(-x * x / 6400.0); };
+  const std::vector<double> zg = grade_road_profile(net, fn_ground(gentle), p);
+  for (int i : ids)
+    EXPECT_NEAR(zg[std::size_t(i)], gentle(net.nodes[std::size_t(i)].x, 0.0), 0.05)
+        << "followed as it is at x " << net.nodes[std::size_t(i)].x;
+  // A 30 m hill climbing up to 30%: held to 12% it is cut through, deeper at the crest than any
+  // bank at its foot.
+  auto steep = [](double x, double) { return 30.0 * std::exp(-x * x / 3600.0); };
+  const std::vector<double> zs = grade_road_profile(net, fn_ground(steep), p);
+  double cut = 0.0, fill = 0.0, worst = 0.0;
+  for (std::size_t i = 0; i < ids.size(); ++i) {
+    const double d = zs[std::size_t(ids[i])] - steep(net.nodes[std::size_t(ids[i])].x, 0.0);
+    cut = std::max(cut, -d);
+    fill = std::max(fill, d);
+    if (i > 0)
+      worst =
+          std::max(worst, std::abs(zs[std::size_t(ids[i])] - zs[std::size_t(ids[i - 1])]) / 6.0);
+  }
+  EXPECT_LE(worst, p.max_grade + 1e-6);
+  EXPECT_GT(cut, 5.0) << "the crest is cut";
+  EXPECT_LT(fill, 0.5 * cut) << "more cut at the crest than bank at the foot";
+}
+
+// Beside a road the ground keeps its own height unless it is above the cut or below the bank
+// that open at side_slope from the road's edge: a road at grade along a ridge leaves the slopes
+// either side as they are, and a road cut through a hill has the hill rise from its edge.
+TEST(WorldRoadGrade, TheGroundBesideARoadIsCutOrBankedNeverDug) {
+  road_network net;
+  add_road(net, -100.0, 100.0, 0.0, 20, 6.0);
+  road_grade_params p;
+  const double flat = 3.0 + p.flat_margin;
+  // A ridge along the road, level across its corridor and falling 40% either side of it.
+  const auto ridge = std::make_shared<fn_ground>(
+      [flat](double, double y) { return 20.0 - 0.4 * std::max(0.0, std::abs(y) - flat); });
+  const graded_terrain gr(ridge, net, std::vector<double>(net.nodes.size(), 20.0), p);
+  for (double y = flat; y < 50.0; y += 0.5)
+    EXPECT_NEAR(gr.sample(10.0, y), 20.0 - 0.4 * (y - flat), 1e-9)
+        << "the slope is untouched at " << y;
+  // The same road 10 m down in a hill: its sides climb at side_slope until they meet the hill.
+  const auto hill = std::make_shared<fn_ground>([](double, double) { return 30.0; });
+  const graded_terrain gh(hill, net, std::vector<double>(net.nodes.size(), 20.0), p);
+  EXPECT_NEAR(gh.sample(10.0, 0.0), 20.0, 1e-9);
+  EXPECT_NEAR(gh.sample(10.0, flat), 20.0, 1e-9);
+  for (double y = flat; y < 60.0; y += 0.5) {
+    const double h = gh.sample(10.0, y);
+    EXPECT_NEAR(h, std::min(30.0, 20.0 + p.side_slope * (y - flat)), 1e-9) << y;
+    EXPECT_GE(h, 20.0) << "never below the road beside it";
+  }
+}
+
+// Subdividing keeps every node where it was and splits each long segment evenly.
+TEST(WorldRoadGrade, SubdivideSplitsLongSegmentsOnly) {
+  road_network net;
+  add_road(net, 0.0, 100.0, 0.0, 2, 6.0); // two 50 m segments
+  net.segments[1].arterial = true;
+  const road_network d = subdivide_roads(net, 8.0);
+  ASSERT_EQ(d.segments.size(), 14u); // ceil(50 / 8) = 7 each
+  for (std::size_t i = 0; i < net.nodes.size(); ++i) {
+    EXPECT_EQ(d.nodes[i].x, net.nodes[i].x);
+    EXPECT_EQ(d.nodes[i].y, net.nodes[i].y);
+  }
+  int arterial = 0;
+  for (const road_segment &s : d.segments) {
+    EXPECT_LE(std::hypot(d.nodes[std::size_t(s.b)].x - d.nodes[std::size_t(s.a)].x,
+                         d.nodes[std::size_t(s.b)].y - d.nodes[std::size_t(s.a)].y),
+              8.0 + 1e-9);
+    EXPECT_EQ(s.width, 6.0);
+    arterial += s.arterial;
+  }
+  EXPECT_EQ(arterial, 7);
+  EXPECT_EQ(subdivide_roads(net, 60.0).segments.size(), 2u) << "short enough: unchanged";
 }

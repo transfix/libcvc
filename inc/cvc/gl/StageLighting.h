@@ -38,6 +38,11 @@ class SceneGraph;
 // That is the entire trick: a rig of aimed spots is both how lighting is
 // actually designed AND how you get shadow-map resolution where it counts.
 //
+// The exception is a world bigger than any stage, an outdoor terrain seen from
+// above: a spot's cone ends in a circle of shade on it. There setSun(true) makes
+// the key the sun after all, and the scene's shadow focus (SceneGraph's
+// setShadowFocus) aims its parallel map at what the camera sees, not the bounds.
+//
 // THE RIG, deliberately small — four named roles, the ones every lighting
 // tutorial starts from:
 //   KEY   the main light. Off to one side and above; makes the form and casts
@@ -56,7 +61,7 @@ class SceneGraph;
 // script and a replicated peer all drive the same rig. Keys include
 // key_intensity, key_azimuth, key_elevation, key_cone, fill_intensity,
 // back_intensity, wash_intensity, wash_count, wash_height, ambient,
-// stage_x/y/z, stage_radius, warm_key, enabled.
+// stage_x/y/z, stage_radius, warm_key, sun, enabled.
 class StageLighting : public cvc::state_object<StageLighting> {
 public:
   // Canonical: state at "<scene prefix>.lighting", lights built into `scene`.
@@ -126,6 +131,13 @@ public:
   void setAmbient(double a);
   // Tint the key warm and the fill cool, the usual filmic split. 0 = neutral.
   void setWarmth(double amount);
+  // The key (and the back) as the sun (state "sun"): a directional light from the key's azimuth
+  // and elevation over the whole world, in place of a spot whose cone ends at the stage's edge,
+  // and the fill and the environment from far off, so they fall as evenly. For an outdoor world
+  // larger than the stage; give the scene a shadow focus (shadows: focus:), or the sun's map
+  // spreads over the whole scene.
+  void setSun(bool on);
+  bool sun() const;
 
   // ---- specials ------------------------------------------------------------
   // Place a spot yourself and aim it. Returns an index you can move later.

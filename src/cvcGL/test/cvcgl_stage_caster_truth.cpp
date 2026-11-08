@@ -85,6 +85,27 @@ int main() {
         std::string(e.name) + (e.casts ? " casts" : " does NOT cast"));
   }
 
+  std::printf("== under the sun: key and back directional, still the only casters ==\n");
+  rig.setSun(true);
+  sg.processEvents();
+  for (const auto &e : kExpect) {
+    auto ln = std::dynamic_pointer_cast<cvc::gl::LightNode>(sg.getGraphics(e.name));
+    if (!ln) {
+      chk(false, std::string(e.name) + " exists under the sun");
+      continue;
+    }
+    const bool sunLit = std::string(e.name) == "stage_key" || std::string(e.name) == "stage_back";
+    chk((ln->kind() == cvc::gl::LightNode::Kind::Directional) == sunLit,
+        std::string(e.name) + (sunLit ? " is directional" : " stays positional"));
+    chk(ln->castsShadow() == e.casts,
+        std::string(e.name) + (e.casts ? " casts" : " does NOT cast") + " under the sun");
+  }
+  chk(rig.shadowCasterCount() == bakedCasters(), "the count still matches under the sun");
+  rig.setSun(false);
+  sg.processEvents();
+  if (auto key = std::dynamic_pointer_cast<cvc::gl::LightNode>(sg.getGraphics("stage_key")))
+    chk(key->kind() == cvc::gl::LightNode::Kind::Spot, "off again, the key is a spot");
+
   std::printf("\n%s (%d failure%s)\n", fails ? "FAILED" : "PASSED", fails, fails == 1 ? "" : "s");
   return fails ? 1 : 0;
 }
