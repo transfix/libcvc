@@ -5,7 +5,8 @@
 #     keeps them off the PR lanes too, and under TSan LocksStress alone outlasts run_one's hour);
 #   - every pycvc script named in SAN_PY_TESTS, with the sanitizer runtime the build linked
 #     preloaded into the interpreter, which was not built with it, except those py_skip (below)
-#     names for the sanitizer;
+#     names for the sanitizer. gcc links its runtimes as shared libraries, found with ldd; clang
+#     links TSan's into each executable, so clang-tsan preloads clang's shared one;
 #   - every state_exec_bench run in SAN_BENCH, one a line: a scenario and its --size options. It
 #     runs once (--reps 1 --warmup 0, --timeout 900 a rep), named after the scenario, with its
 #     JSON records in san-logs/<scenario>.jsonl. The bench takes no --gtest_filter.
@@ -14,17 +15,17 @@
 # log must contain: the cases the job is there for, which must not drop out unseen.
 # Exits 1 when any run failed or printed a sanitizer report, or a required line is missing.
 #
-# Usage: run.sh tsan|asan-ubsan
+# Usage: run.sh tsan|clang-tsan|asan-ubsan
 set -uo pipefail
 
-kind=${1:?usage: run.sh tsan|asan-ubsan}
+kind=${1:?usage: run.sh tsan|clang-tsan|asan-ubsan}
 here=$(cd "$(dirname "$0")" && pwd)
 bin=build/bin
 py="${PY_PREFIX:?PY_PREFIX is not set}/bin/python3.12"
 mkdir -p san-logs
 
 case "$kind" in
-  tsan)
+  tsan | clang-tsan)
     lib=libtsan
     export TSAN_OPTIONS="suppressions=$here/tsan.supp:second_deadlock_stack=1:history_size=4:exitcode=66"
     py_skip=""
@@ -40,16 +41,43 @@ case "$kind" in
     py_skip=""
     ;;
   *)
-    echo "unknown sanitizer '$kind' (tsan or asan-ubsan)" >&2
+    echo "unknown sanitizer '$kind' (tsan, clang-tsan or asan-ubsan)" >&2
     exit 2
     ;;
 esac
 
 set -- $SAN_CXX_TESTS
-rt=$(ldd "$bin/$1" | awk -v l="$lib" 'index($1, l) == 1 { print $3; exit }')
-if [ -z "$rt" ] || [ ! -f "$rt" ]; then
-  echo "::error::$bin/$1 does not link $lib"
-  exit 1
+if [ "$kind" = clang-tsan ]; then
+  # clang links TSan's runtime into each executable, which ldd cannot see; the uninstrumented
+  # interpreter needs it as a shared library, clang's libclang_rt.tsan: in its runtime directory
+  # (named libclang_rt.tsan.so, or libclang_rt.tsan-<arch>.so in the older layout), else anywhere
+  # under its resource directory.
+  if ! nm "$bin/$1" 2>/dev/null | grep -q ' __tsan_init$'; then
+    echo "::error::$bin/$1 has no TSan runtime linked in (not built with clang -fsanitize=thread?)"
+    exit 1
+  fi
+  dir=$(clang -print-runtime-dir 2>/dev/null)
+  rt=""
+  for c in "$dir/libclang_rt.tsan.so" "$dir/libclang_rt.tsan-$(uname -m).so"; do
+    if [ -f "$c" ]; then
+      rt=$c
+      break
+    fi
+  done
+  if [ -z "$rt" ]; then
+    res=$(clang -print-resource-dir 2>/dev/null)
+    rt=$(find "$res" -name 'libclang_rt.tsan*.so' ! -name '*cxx*' 2>/dev/null | head -n 1)
+  fi
+  if [ -z "$rt" ] || [ ! -f "$rt" ]; then
+    echo "::error::no shared libclang_rt.tsan for the interpreter (clang's runtime dir: $dir)"
+    exit 1
+  fi
+else
+  rt=$(ldd "$bin/$1" | awk -v l="$lib" 'index($1, l) == 1 { print $3; exit }')
+  if [ -z "$rt" ] || [ ! -f "$rt" ]; then
+    echo "::error::$bin/$1 does not link $lib"
+    exit 1
+  fi
 fi
 echo "sanitizer runtime: $rt"
 # ASan intercepts __cxa_throw, and finds the real one when it starts. The interpreter is C, so
@@ -105,7 +133,7 @@ for s in $SAN_PY_TESTS; do
       ;;
   esac
   case "$kind" in
-    tsan)
+    tsan | clang-tsan)
       run_one "$s" env LD_PRELOAD="$rt" PYTHONPATH=build/bindings/pycvc \
         "$py" "bindings/pycvc/$s"
       ;;
