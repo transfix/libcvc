@@ -13,6 +13,7 @@
 #ifndef CVC_STATE_EXEC_EXEC_GROUP_H
 #define CVC_STATE_EXEC_EXEC_GROUP_H
 
+#include <atomic>
 #include <cstdint>
 #include <cvc/core/thread_class.h>
 #include <cvc/state/state_exec/heap.h>           // cycle_registry
@@ -44,12 +45,15 @@ struct group_pool_link {
   std::uint64_t seq = 0;           ///< creation order (deterministic mode; threads 0)
   double last_pump_seconds = 0.0;  ///< its last pump's time: the LPT order and the helper wake
   bool skipped = false;            ///< not started before its pump_all's deadline: first next time
+  std::uint64_t skipped_since = 0; ///< the pump_all that first skipped it (the oldest goes first)
   int last_thread = -1;            ///< which thread pumped it last (CVC_EXEC_FORCE_MOVE)
-  void *call = nullptr;            ///< the pump_all it belongs to now, or null
+  std::atomic<void *> call{nullptr}; ///< the pump_all it belongs to now, or null
   random_stream *random = nullptr; ///< its math.random stream (seeded from its name)
   std::string failure;             ///< what failed its last failed pump
   /// Its lock home is attached to a single-mode manager (S1-Q1): every pool pumps it on the
-  /// caller of pump_all only, as a host-affinity group.
+  /// caller of pump_all only, as a host-affinity group. That keeps one pump_all's pumps of it on
+  /// one thread; a single manager also needs one thread to drive the whole app (every pump_all of
+  /// its groups, group 0's drivers, direct pumps), which the host keeps.
   bool caller_only = false;
 };
 /// The groups alive that were built with `app` (~app asserts in debug builds that none is).
@@ -86,10 +90,12 @@ public:
     group_affinity affinity = group_affinity::any;
     cvc::app *app = nullptr;           ///< its settings, lock manager, pid source and kernel pool
     cvc::state *watch_root = nullptr;  ///< null: the app's root
-    /// The scope its global env extends; null: frozen_builtins(). A base shared by several groups
-    /// must be frozen: a set of a name bound in an unfrozen base writes it, from whichever thread
-    /// pumps the group (td 4.3). An unfrozen base one group owns is allowed (the bench's
-    /// driver=group base=own), so it is not refused.
+    /// The scope its global env extends; null: frozen_builtins(). A program's set binds in its
+    /// own run env, never in the base, so a base is only read; but a native or host that writes
+    /// an unfrozen base shared by several groups writes it from whichever thread pumps each, so a
+    /// shared base should be frozen. An unfrozen base one group owns is fine (the bench's
+    /// driver=group base=own), so it is not refused. (The env a host passes as
+    /// execute_options::env is the program's, and two groups must never share one.)
     environment_ptr base;
     std::optional<std::uint64_t> seed; ///< math.random's seed; unset: random_device words
     /// Declared for L4 and Stage 2; ignored in Stage 1.
@@ -112,8 +118,9 @@ public:
   /// the token (waiting for a pump in progress), close the lock port, kill every process, shut the
   /// host down (waiting for its kernels), purge the group's host-call queue entries, reap every
   /// process. Then the host, the scheduler and its envs go, and last the registry, collected and
-  /// freed. Not inside a pump_all of the group (a debug assertion), and never from inside the
-  /// group's own pump (an inline native or callback of it): that aborts.
+  /// freed. Never while a pump_all holds the group (from that call's host bodies or callbacks,
+  /// or from another thread) nor from inside the group's own pump (an inline native or callback
+  /// of it): each aborts, in every build, since the call or the run loop would go on using it.
   ~exec_group();
   exec_group(const exec_group &) = delete;
   exec_group &operator=(const exec_group &) = delete;

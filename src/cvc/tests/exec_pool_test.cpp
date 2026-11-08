@@ -137,6 +137,26 @@ struct intrinsic_world {
   }
 };
 
+constexpr double kInf = std::numeric_limits<double>::infinity();
+
+// Keeps the caller of a pump_all inside a host-affinity group's pump until `go` is set (or 10 s
+// pass), so a worker takes the call's other groups (the caller pumps its own first); a target
+// group's pump hook sets `go`. Its one process loops, so it always has a pump.
+struct hold_caller {
+  std::atomic<bool> go{false};
+  std::unique_ptr<exec_group> g;
+  explicit hold_caller(cvc::app &app) {
+    exec_group::options o = opts_for(app, "hold", group_affinity::host);
+    o.pump_hook_for_test = [this](exec_group &) {
+      const auto t0 = clock_type::now();
+      while (!go.load() && clock_type::now() - t0 < std::chrono::seconds(10))
+        std::this_thread::yield();
+    };
+    g = std::make_unique<exec_group>(o);
+    g->execute(std::string("(while #t nil)"));
+  }
+};
+
 constexpr bool kDebugBuild =
 #ifdef NDEBUG
     false;
@@ -784,8 +804,73 @@ TEST(AppExecPool, ABusyGroupZeroDoesNotStarveFrameGroups) {
   }
 }
 
-// S-M2's pool half: a process waiting for the next frame ((await x) on a plain value) is work for
-// the next pump.
+// N1: the other direction. Two frame groups that each fill a frame, pumped on the caller
+// (threads 0, or host affinity), do not starve group 0: group 0 takes steps at least every other
+// frame, and both frame groups keep running.
+TEST(AppExecPool, TwoBusyFrameGroupsDoNotStarveGroupZero) {
+  struct cfg {
+    unsigned threads;
+    group_affinity affinity;
+  };
+  for (const cfg c : {cfg{0, group_affinity::any}, cfg{2, group_affinity::host}}) {
+    cvc::app app;
+    cvc::pool_options po;
+    po.threads = c.threads;
+    app.exec_pool(po);
+    async_scheduler &zero = app.exec_scheduler();
+    std::atomic<long> ticks{0}, spins_a{0}, spins_b{0};
+    environment_ptr env0 = environment::extend(builtins::make_default_environment());
+    builtins::register_fn(env0, "tick", [&ticks](std::span<const value_t>) -> value_t {
+      ++ticks;
+      return nil_value;
+    });
+    execute_options o0;
+    o0.env = env0;
+    const int ticker = zero.execute(std::string("(while #t (tick))"), o0);
+    const auto spin_env = [](std::atomic<long> &count) {
+      environment_ptr e = environment::extend(builtins::make_default_environment());
+      builtins::register_fn(e, "spin", [&count](std::span<const value_t>) -> value_t {
+        ++count;
+        const auto t0 = clock_type::now();
+        while (clock_type::now() - t0 < std::chrono::milliseconds(2)) {
+        }
+        return nil_value;
+      });
+      return e;
+    };
+    exec_group a(opts_for(app, "busyA", c.affinity)), b(opts_for(app, "busyB", c.affinity));
+    execute_options ea, eb;
+    ea.env = spin_env(spins_a);
+    eb.env = spin_env(spins_b);
+    const int pa = a.execute(std::string("(while #t (spin))"), ea);
+    const int pb = b.execute(std::string("(while #t (spin))"), eb);
+    cvc::frame_group_handle ha = app.register_frame_group(a);
+    cvc::frame_group_handle hb = app.register_frame_group(b);
+    std::string per_frame;
+    int longest_without = 0, run = 0;
+    for (int f = 0; f < 12; ++f) {
+      const long before = ticks.load();
+      app.exec_pump_frame();
+      const long got = ticks.load() - before;
+      per_frame += std::to_string(got) + " ";
+      run = got == 0 ? run + 1 : 0;
+      longest_without = std::max(longest_without, run);
+    }
+    std::cout << "threads " << c.threads << ": group 0 ticks per frame: " << per_frame
+              << "; spins A " << spins_a.load() << ", B " << spins_b.load() << "\n";
+    EXPECT_LE(longest_without, 1) << "threads " << c.threads << ": group 0 starved";
+    EXPECT_GT(spins_a.load(), 0) << "threads " << c.threads;
+    EXPECT_GT(spins_b.load(), 0) << "threads " << c.threads;
+    ha.reset();
+    hb.reset();
+    a.sched().kill(pa);
+    b.sched().kill(pb);
+    zero.kill(ticker);
+  }
+}
+
+// S-M2's pool half:// S-M2's pool half: a process waiting for the next frame ((await x) on a plain
+// value) is work for the next pump.
 TEST(ExecGroup, WantsPumpCountsAFrameWaiter) {
   cvc::app app;
   intrinsic_world w(app, "frames");
@@ -801,7 +886,8 @@ TEST(ExecGroup, WantsPumpCountsAFrameWaiter) {
 
 // C-m1, C-m7: in a threaded pump_all every on_complete runs after the join (a caller-pumped
 // group's too, so host code never runs beside the workers), and host bodies and callbacks run
-// with their group's registry bound.
+// with their group's registry bound. The `any` group is held to a worker (hold_caller), so its
+// host body is queued and run by the caller, not inline in its pump.
 TEST(ExecPool, ThreadedCallbacksRunAfterTheJoinWithTheirRegistry) {
   cvc::pool_options po;
   po.threads = 2;
@@ -810,11 +896,18 @@ TEST(ExecPool, ThreadedCallbacksRunAfterTheJoinWithTheirRegistry) {
     GTEST_SKIP() << "no worker on this machine";
   cvc::app app;
   share_locks(app);
-  exec_group host_group(opts_for(app, "host", group_affinity::host));
-  exec_group any_group(opts_for(app, "any"));
+  hold_caller hold(app);
   std::mutex m;
   std::uint64_t pumped_id = 0, body_id = 0;
+  std::thread::id body_thread;
   std::vector<std::pair<exec_group *, std::uint64_t>> callbacks; // current(), bound registry id
+  exec_group::options ao = opts_for(app, "any");
+  std::thread::id pumped_on;
+  ao.pump_hook_for_test = [&](exec_group &) {
+    pumped_on = std::this_thread::get_id();
+    hold.go.store(true);
+  };
+  exec_group any_group(ao);
   environment_ptr env = environment::extend(builtins::make_default_environment());
   builtins::register_fn(env, "note-id", [&](std::span<const value_t>) -> value_t {
     std::lock_guard<std::mutex> lock(m);
@@ -826,6 +919,7 @@ TEST(ExecPool, ThreadedCallbacksRunAfterTheJoinWithTheirRegistry) {
       [&](std::span<const value_t>) -> value_t {
         std::lock_guard<std::mutex> lock(m);
         body_id = bound_cycle_registry_id();
+        body_thread = std::this_thread::get_id();
         return value_t(int64_t(5));
       },
       provider_affinity::host_proxied);
@@ -837,23 +931,76 @@ TEST(ExecPool, ThreadedCallbacksRunAfterTheJoinWithTheirRegistry) {
   he.on_complete = record;
   ae.env = env;
   ae.on_complete = record;
-  host_group.execute(std::string("1"), he);
+  hold.g->execute(std::string("1"), he);
   const int pid = any_group.execute(std::string("(begin (note-id) (proxied))"), ae);
   for (int round = 0; round < 100 && !finished(any_group, pid); ++round) {
-    pool.set_last_pump_for_test(host_group, 1.0);
+    hold.go.store(false);
+    pool.set_last_pump_for_test(*hold.g, 1.0);
     pool.set_last_pump_for_test(any_group, 1.0);
-    pool.pump_all(std::vector<exec_group *>{&host_group, &any_group}, kSteps, far_deadline());
+    pool.pump_all(std::vector<exec_group *>{hold.g.get(), &any_group}, pump_budget{50, kInf},
+                  far_deadline());
   }
   ASSERT_TRUE(finished(any_group, pid));
   EXPECT_EQ(result_of(any_group, pid), "5");
-  ASSERT_EQ(callbacks.size(), 2u);
+  ASSERT_NE(pumped_on, std::this_thread::get_id()) << "the any group was pumped on the caller";
+  ASSERT_GE(callbacks.size(), 2u);
   for (const auto &[in, id] : callbacks) {
     EXPECT_EQ(in, nullptr) << "a callback ran inside a pump, beside the workers";
     EXPECT_NE(id, 0u) << "a callback ran with no registry bound";
   }
   EXPECT_NE(pumped_id, 0u);
-  if (pool.stats().worker_pumps > 0)
-    EXPECT_EQ(body_id, pumped_id) << "the host body ran without its group's registry";
+  EXPECT_EQ(body_thread, std::this_thread::get_id()) << "the host body ran off the caller";
+  EXPECT_EQ(body_id, pumped_id) << "the host body ran without its group's registry";
+}
+
+// N4: one group's host bodies run in the order they were queued. Process x parks on its call,
+// then process y blocks its worker on one inside a generator body: the caller runs x's body
+// first (y's worker being blocked, no thread pumps the group), then y's.
+TEST(ExecPool, OneGroupsHostBodiesRunInQueueOrder) {
+  cvc::pool_options po;
+  po.threads = 2;
+  cvc::exec_pool pool(po);
+  if (pool.threads() == 0)
+    GTEST_SKIP() << "no worker on this machine";
+  cvc::app app;
+  share_locks(app);
+  hold_caller hold(app);
+  std::mutex m;
+  std::vector<std::string> order;
+  std::thread::id pumped_on;
+  exec_group::options ao = opts_for(app, "fifo");
+  ao.pump_hook_for_test = [&](exec_group &) {
+    pumped_on = std::this_thread::get_id();
+    hold.go.store(true);
+  };
+  exec_group g(ao);
+  environment_ptr env = environment::extend(builtins::make_default_environment());
+  g.install(
+      env, "proxied",
+      [&](std::span<const value_t> args) -> value_t {
+        std::lock_guard<std::mutex> lock(m);
+        order.push_back(to_string(args[0]));
+        return args[0];
+      },
+      provider_affinity::host_proxied);
+  execute_options eo;
+  eo.env = env;
+  const int x = g.execute(std::string("(proxied \"x\")"), eo);
+  execute_options eo2;
+  eo2.env = environment::extend(env);
+  const int y = g.execute(
+      std::string("(begin (set gen (generator (lambda () (yield (proxied \"y\"))))) (next gen))"),
+      eo2);
+  for (int round = 0; round < 100 && !(finished(g, x) && finished(g, y)); ++round) {
+    hold.go.store(false);
+    pool.set_last_pump_for_test(*hold.g, 1.0);
+    pool.set_last_pump_for_test(g, 1.0);
+    pool.pump_all(std::vector<exec_group *>{hold.g.get(), &g}, pump_budget{1000, kInf},
+                  far_deadline());
+  }
+  ASSERT_TRUE(finished(g, x) && finished(g, y));
+  ASSERT_NE(pumped_on, std::this_thread::get_id()) << "the group was pumped on the caller";
+  EXPECT_EQ(order, (std::vector<std::string>{"\"x\"", "\"y\""}));
 }
 
 // S-m4: execute() submits with the group's owner when the options give none.
@@ -912,6 +1059,65 @@ TEST(ExecGroupDeathTest, DestroyedFromInsideItsOwnPumpAborts) {
       "destroyed from inside its own pump");
 }
 
+// N3 (and C-m10): a deferred on_complete, or a host body, that destroys a group of its own
+// pump_all aborts in every build, rather than leaving the call to use the freed group.
+TEST(ExecGroupDeathTest, DestroyedFromACallbackOfItsCallAborts) {
+  if (std::thread::hardware_concurrency() < 2)
+    GTEST_SKIP() << "the case needs a pool with a worker";
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_DEATH(
+      {
+        cvc::pool_options po;
+        po.threads = 1;
+        cvc::exec_pool pool(po);
+        cvc::app app;
+        share_locks(app);
+        auto *g = new exec_group(opts_for(app, "doomed"));
+        execute_options eo;
+        eo.on_complete = [g](value_t) { delete g; };
+        g->execute(std::string("1"), eo);
+        pool.pump_all(std::vector<exec_group *>{g}, kSteps, far_deadline());
+      },
+      "destroyed while a pump_all holds it");
+}
+
+TEST(ExecGroupDeathTest, DestroyedFromItsOwnHostBodyAborts) {
+  if (std::thread::hardware_concurrency() < 2)
+    GTEST_SKIP() << "the case needs a pool with a worker";
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_DEATH(
+      {
+        cvc::pool_options po;
+        po.threads = 2;
+        cvc::exec_pool pool(po);
+        cvc::app app;
+        share_locks(app);
+        hold_caller hold(app);
+        exec_group::options o = opts_for(app, "doomed");
+        o.pump_hook_for_test = [&](exec_group &) { hold.go.store(true); };
+        auto *g = new exec_group(o);
+        environment_ptr env = environment::extend(builtins::make_default_environment());
+        g->install(
+            env, "proxied",
+            [g](std::span<const value_t>) -> value_t {
+              delete g;
+              return nil_value;
+            },
+            provider_affinity::host_proxied);
+        execute_options eo;
+        eo.env = env;
+        g->execute(std::string("(proxied)"), eo);
+        for (int round = 0; round < 100; ++round) {
+          hold.go.store(false);
+          pool.set_last_pump_for_test(*hold.g, 1.0);
+          pool.set_last_pump_for_test(*g, 1.0);
+          pool.pump_all(std::vector<exec_group *>{hold.g.get(), g}, pump_budget{50, kInf},
+                        far_deadline());
+        }
+      },
+      "destroyed while a pump_all holds it");
+}
+
 // C-m11: failed_groups() is the calling thread's own: another thread sees none of it.
 TEST(ExecPool, FailedGroupsAreTheCallersOwn) {
   cvc::app app;
@@ -927,4 +1133,35 @@ TEST(ExecPool, FailedGroupsAreTheCallersOwn) {
   EXPECT_TRUE(seen.empty()) << "another thread read this thread's failed groups";
   cvc::exec_pool other(cvc::pool_options{});
   EXPECT_TRUE(other.failed_groups().empty());
+}
+
+// C-m11, sharper (the R1 skeptic's): a thread whose id was an ended thread's reads none of that
+// thread's failed groups. It skips when no id is reused within 5000 threads.
+TEST(ExecPool, FailedGroupsOfAReusedThreadId) {
+  cvc::app app;
+  cvc::exec_pool pool(cvc::pool_options{});
+  exec_group::options bad = opts_for(app, "bad");
+  bad.pump_hook_for_test = [](exec_group &) { throw std::runtime_error("boom"); };
+  exec_group g(bad);
+  std::vector<exec_group *> groups{&g};
+  std::thread::id first;
+  std::thread([&] {
+    first = std::this_thread::get_id();
+    pool.pump_all(groups, kSteps, far_deadline());
+  }).join();
+  bool reused = false;
+  int tries = 0;
+  std::vector<exec_group *> seen;
+  for (; tries < 5000 && !reused; ++tries)
+    std::thread([&] {
+      if (std::this_thread::get_id() == first) {
+        reused = true;
+        seen = pool.failed_groups();
+      }
+    }).join();
+  std::cout << "id reused after " << tries << " threads: " << reused << "; saw " << seen.size()
+            << " failed groups\n";
+  if (!reused)
+    GTEST_SKIP() << "no thread id was reused";
+  EXPECT_TRUE(seen.empty()) << "a thread with a reused id read an ended thread's failed groups";
 }
