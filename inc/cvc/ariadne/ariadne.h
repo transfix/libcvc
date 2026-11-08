@@ -204,8 +204,11 @@ public:
   // Whether that adapter's renderer runs the GLSL a document gives its scene (the gl.scene.shaders
   // capability; SceneAdapter::runs_shaders). AppRuntime sets it with set_scene_capable().
   void set_scene_shaders(bool on);
+  // Whether this runtime runs a relay's server document (the relay capability). ServerDocument
+  // sets it.
+  void set_relay_document(bool on);
   // The facts the capability tokens read: the backend's Capabilities (all false without a
-  // backend), set_scene_capable() and set_scene_shaders().
+  // backend), set_scene_capable(), set_scene_shaders() and set_relay_document().
   HostFacts host_facts() const;
   // What (has? "name") answers: a capability token that holds here, a function a program can
   // call (has_function), or a registered widget type. Programs and reactive expressions both have

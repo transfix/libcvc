@@ -333,6 +333,37 @@ run ends is closer to the
 0.5 ms solution than `dyn_plant`'s at 0.06 s (sliding from 12 m/s: 9.7 kJ against 10.1 kJ, where
 `dyn_plant` ends at 23.4 kJ).
 
+**With the wheels spinning** (`diff::dyn_spin_plant_dg`, opt-in; the same header and test).
+`dyn_spin_plant` adds a wheel speed per axle, and its `H` adds their spin, so `H` stays quadratic,
+now in `e = (vx, vy, r, om_f, om_r)` with `M = diag(m, m, Iz, J_f, J_r)`. The step solves
+`M (e1 - e) / h = J e_th + Q(e_th)`, with `Q` from the plant's hook `dyn_spin_ph_forces_at` (plus
+the contact's wrench, when given). The body's rows take the midpoint. The wheels' rows take
+`e_th = e + th (e1 - e)`, where `th = theta_wheels` and is 1 by default. The wheels' slip is far
+stiffer than the step: `h lambda` is 60 to 600 at 0.06 s on the Humvee. At `th = 1/2` the slip
+swings every step once disturbed. At `th = 1` it settles in a step or two, as `dyn_spin_plant`'s
+does. The books then carry the damping on one more line, `scheme = (th - 1/2) sum J dom^2 >= 0`,
+so they still close to the solver's tolerance.
+
+| Gate (the Humvee) | `th = 1` (default) | `th = 1/2` | `dyn_spin_plant` |
+|---|---|---|---|
+| Rate against `dyn_spin_ph_rhs`, 500 states at mu 0.9 and 0.3, with and without a wrench | within 8.2e-15 of m g | the same | |
+| Actuators | `dyn_spin_plant`'s to the bit, double and float | the same | |
+| Books' residual: swerve past the peak, launch and lock, swerve against a wrench; hdt 0.06 to 0.0025 s | at most 3.3e-10 J a step, 2.4e-15 to 1.4e-12 of the step's flow | the same, `scheme` 0 | a mean of 27 J (swerve) and 240 J (launch) a step at 0.06 s |
+| Error at 2 s of a turn-in, per halving of hdt, 0.04 to 0.005 s | 2.17x to 2.30x: first order (2.4e-2 at 0.04 s) | 4.09x to 4.15x: second order (5.5e-3) | 2.01x to 2.14x (0.24 at 0.04 s) |
+| The same, 2 to 0.25 ms | 2.03x to 2.14x | 4.01x to 4.05x | 2.03x to 2.14x |
+| Slip swings at one 0.06 s step: lock, spin, then coasting from 0.5, 3 and 12 m/s | 2, 0, 2, 3, 6 | 6, 0, then every step | 2, 0, 0, 1, 4 |
+| Spinning on ice at 0.06 s: the rear rim at 2 s against the 0.1 ms solution | 0.56 m/s off | 0.54 m/s | 4.98 m/s |
+| Coasting with the rims 1.5x the ground, 0.06 and 0.01 s | no step gains energy | the same | |
+| Newton steps a solve | 3 to 4 on average (at most 9, launching); 6.3 at a crawl at 0.06 s (at most 9) | 3 to 4 on average (at most 9, launching) | |
+| Cost per step, double | 12 to 13 us at 0.06 s; 5 to 7 us at 0.01 s | 6 to 9 us; 4.3 to 4.7 us | 0.4 to 0.5 us |
+
+At `th = 1/2`, substeps tame the swing only near `h lambda` of 2. With 25 substeps of 0.06 s, the
+slip swings 2, 0, 4, 0 and 0 times, at 25 times the solves; with 5, coasting still swings 98, 36
+and 8 times. So `th = 1` with one solve is the default. Past a tire's peak at a crawl, Newton's
+Jacobian can turn indefinite. A Newton direction that two halvings cannot make descend then gives
+way to a secant step built from the plant's own `J - R`, and that step always descends. The ground
+form (`dyn_plant_ground`) is not in this step.
+
 **Training through it** (`rollout_kind::dynamic`, P8b):
 
 ```cpp

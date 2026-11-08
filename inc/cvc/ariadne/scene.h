@@ -421,6 +421,10 @@ struct SceneLight {
   float wash = 0.3f;
   int wash_count = 4;
   float wash_height = 1.8f; // multiples of the stage radius
+  // sun: true — the key (and back) are the sun, directional over the whole world rather than spots
+  // on the stage; the fill and the environment come from far off, as even as daylight.
+  bool has_sun = false;
+  bool sun = false;
 };
 
 // A simulation clock for the scene (§9 — time). Declares how the authoritative

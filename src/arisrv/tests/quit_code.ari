@@ -1,0 +1,3 @@
+# A server document whose init: stops the relay with (quit 3): arisrv exits with status 3.
+meta: { name: arisrv quit code, min_libcvc: 3.7.5 }
+init: (quit 3)

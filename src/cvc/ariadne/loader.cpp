@@ -2701,6 +2701,10 @@ SceneLight parse_scene_light(const YAML::Node &n) {
     vec3(stage, "center", sl.stage_center);
     sl.stage_radius = static_cast<float>(num(stage, "radius", sl.stage_radius));
   }
+  if (n["sun"]) { // sun: true: the key is the sun (directional), not a spot on the stage
+    sl.has_sun = true;
+    sl.sun = flag(n, "sun");
+  }
   if (const YAML::Node key = n["key"]; key && key.IsMap()) {
     sl.has_key = true;
     sl.key_intensity = static_cast<float>(num(key, "intensity", sl.key_intensity));
@@ -3551,6 +3555,9 @@ LoadResult load_node(const YAML::Node &doc, const std::string &base_dir = std::s
       else if (key == "python")
         r.warnings.push_back("ari: this document's python: block needs a scripting host (arix or "
                              "ariglx); this host has no Python, so it was ignored");
+      else if (key == "server")
+        r.warnings.push_back("ari: this document's server: block is for the relay that runs it "
+                             "(arisrv --doc); this host ignored it");
     }
 
   r.ok = true;

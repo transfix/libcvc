@@ -6,6 +6,18 @@ set -euo pipefail
 : "${CVC_BUILD_DIR:?CVC_BUILD_DIR must be set}"
 : "${CVC_INSTALL_DIR:?CVC_INSTALL_DIR must be set}"
 
+# macOS: the builder puts the deps prefix's lib on DYLD_LIBRARY_PATH, which dyld searches by leaf
+# name BEFORE a library's own install path, so a prefix library shadows the system's of the same
+# name for every program this script runs. Since imagemagick cvc.25 pulled cvcpkg's GNU libiconv
+# into the prefix, Homebrew's cmake loaded it in place of /usr/lib/libiconv.2.dylib and aborted
+# (Symbol not found: _iconv; GNU names it _libiconv). DYLD_FALLBACK_LIBRARY_PATH is searched only
+# when a library is not found where it is named, so the prefix still resolves @rpath libraries and
+# the system keeps its own. The default fallback dirs are kept after it.
+if [[ "$(uname -s)" == Darwin && -n "${DYLD_LIBRARY_PATH:-}" ]]; then
+  export DYLD_FALLBACK_LIBRARY_PATH="$DYLD_LIBRARY_PATH:${DYLD_FALLBACK_LIBRARY_PATH:-$HOME/lib:/usr/local/lib:/usr/lib}"
+  unset DYLD_LIBRARY_PATH
+fi
+
 CVC_BUILD_TYPE="${CVC_BUILD_TYPE:-Release}"
 CVC_LINK="${CVC_LINK:-shared}"
 CVC_JOBS="${CVC_JOBS:-$(nproc 2>/dev/null || echo 4)}"

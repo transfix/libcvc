@@ -30,7 +30,7 @@ name: CI (recipe-first)
 #   * The smoke-test binary needs the prefix's lib dir on the loader path:
 #     ELF RUNPATH is not transitive, and `cvcpkg build` installs libcvc.so
 #     without an $ORIGIN RPATH (the relocation pass runs at pack time, not
-#     build time). LD_LIBRARY_PATH / DYLD_LIBRARY_PATH / PATH below is
+#     build time). LD_LIBRARY_PATH / DYLD_FALLBACK_LIBRARY_PATH / PATH below is
 #     load-bearing, not belt-and-braces.
 #   * This workflow does NOT yet retire the apt-based jobs in ci.yml; it
 #     runs alongside them. Retiring them (and cvc-requirements.yaml) is the
@@ -206,7 +206,9 @@ jobs:
           # Loader path is load-bearing — see header. All three variables so
           # this one step serves every OS.
           export LD_LIBRARY_PATH="$prefix/lib"
-          export DYLD_LIBRARY_PATH="$prefix/lib"
+          # macOS: the fallback path, not DYLD_LIBRARY_PATH, which would let the prefix's libraries
+          # (its GNU libiconv) shadow the system's by name (see cvcpkg/recipes/libcvc/build.sh).
+          export DYLD_FALLBACK_LIBRARY_PATH="$prefix/lib:/usr/local/lib:/usr/lib"
           export PATH="$prefix/bin:$prefix/lib:$PATH"
           ( cd "$work/build" && "$smoke" )
           echo "smoke test passed"

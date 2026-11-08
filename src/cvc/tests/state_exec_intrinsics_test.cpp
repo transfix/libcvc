@@ -577,6 +577,32 @@ TEST_F(StateTreeIntrinsicsTest, StateSetTreeWritesThroughAWritableLink) {
   EXPECT_EQ(root("target.k").value(), "v");
 }
 
+// Under a writable hole too, as state-set writes there: every hop follows the link, so the
+// subtree is the target's and replaces what it held.
+TEST_F(StateTreeIntrinsicsTest, StateSetTreeUnderAWritableLinkWritesTheTarget) {
+  cvc::state &root = cvc::state::instance(app_ctx);
+  root("target.jobs.old").value(std::string("stale"));
+  root("hole").linkTo("target", cvc::state::link_mode::transparent);
+  root("hole").setLinkWritable(true);
+  call("state-set-tree", {std::string("hole.jobs"), make_dict({{"a", value_t(int64_t{1})}})});
+  EXPECT_EQ(root("target.jobs.a").value(), "1");
+  EXPECT_EQ(root.findDescendant("target.jobs.old"), nullptr) << "the subtree is replaced";
+  EXPECT_EQ(root.findDescendant("hole.jobs"), nullptr) << "nothing on the link node's own";
+}
+
+// Under a read-only hole the write stays on the link node's own children, as state-set's does,
+// and the target is never touched.
+TEST_F(StateTreeIntrinsicsTest, StateSetTreeUnderAReadOnlyLinkStaysLocal) {
+  cvc::state &root = cvc::state::instance(app_ctx);
+  root("target.jobs.old").value(std::string("kept"));
+  root("hole").linkTo("target", cvc::state::link_mode::transparent); // read-only
+  call("state-set-tree", {std::string("hole.jobs"), make_dict({{"a", value_t(int64_t{1})}})});
+  EXPECT_EQ(root("target.jobs.old").value(), "kept");
+  EXPECT_EQ(root.findDescendant("target.jobs.a"), nullptr);
+  ASSERT_NE(root.findDescendant("hole.jobs.a"), nullptr);
+  EXPECT_EQ(root.findDescendant("hole.jobs.a")->value(), "1");
+}
+
 // ===========================================================================
 // SchedulerIntrinsicsTest
 // ===========================================================================

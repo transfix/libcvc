@@ -82,7 +82,7 @@ Checked against master 797ba4d9; the lab's rows, from "Vehicles and their naviga
 | Speed veto | Compiled in: `room_holon_config()` sets `max_speed = 4.0`. | `holon_sync.cpp` |
 | Holon | One world clock at 120 Hz. The relay simulates every avatar in Jolt. A client simulates its own avatar too, predicts it, and snaps and replays past 5 cm. Peers are kinematic, played from a buffer. Intents go up; pose snapshots come down at 60, 30 or 20 Hz depending on round-trip time. | `inc/cvc/ariadne/holon.h`, `holon_sync.h`, `room_pose_relay.cpp`, `inc/cvc/core/world_clock.h` |
 | Determinism | Jolt runs in cross-platform determinism mode. A golden state hash pins it on Windows, Linux, macOS, x86_64 and arm64, and wasm-mt (its own CI job). | `physics_world_test.cpp` (`exact_scene_hash`), `physics_parity_test.cpp`; ci.yml "physics replay (wasm-mt, node)" |
-| Documents on the server | None. arisrv is a fixed relay. S0 adds `arisrv --doc server.ari`. | ARIADNE_SCRIPTING_HOSTS.md §6.1 |
+| Documents on the server | `arisrv --doc server.ari` (S0, transfix/libcvc#1046) runs one headless: DSL programs on the relay's loop once per room step, the holon's world clock at `sim.tick`, the room read-only at `room`, `server: publish:` namespaces sent to every client, and `requires: [relay]`. It keeps the parsed `scene:` (physics and bodies included) on `ServerDocument::scene()` but doesn't run it yet, and warns so: WD1 publishes it, and §14's headless world runtime will simulate it as the holon's one physics world. | ARIADNE_SCRIPTING_HOSTS.md §6.1, §6.5.3; `inc/cvc/ariadne/server_document.h` |
 | What a document can already say | Far more than the room tree carries: `scene:` with primitives, meshes with `fit:`, heightfields, light rigs and shadows, and the custom node types `generated_world` and `cloud_sky`. `scene.physics:` gives gravity, `fixed_dt`, materials and per-node bodies (dynamic, kinematic or static; box, sphere, hull, mesh or terrain). All of it parses in core libcvc, with no GL. | `docs/ARIADNE.md` (Scene, Physics); `src/cvc/ariadne/loader.cpp` |
 | Persistence | None. The room lives in memory, and a restart re-seeds it. Only the device-key pins can go to a file. `distributed_state_config::blob_store_path` is not read. | `src/arisrv/main.cpp` (`--device-pins`); DISTRIBUTED_STATE_ROADMAP.md |
 | Scale pieces | Built but unused by the conference: hash partitioning (`state_hash_partition`, `state_cluster_shard::partition()`) and delegation leases (`state_delegation_manager`). | `inc/cvc/state/` |
@@ -139,7 +139,8 @@ same leaves. This plan generalizes that one pattern to everything that defines t
   built it.
 
 A world document, as proposed syntax. `scene:` is today's syntax; the `world:` block, the
-`conference.world` token and `room-rules-step` do not exist yet.
+`conference.world` token and `room-rules-step` do not exist yet. S0's `relay` token holds in every
+server document, and `conference.world` would build on it.
 
 ```yaml
 # world.ari -- run by the relay: arisrv --doc world.ari
@@ -583,7 +584,7 @@ GENERATED-WORLD-ROADMAP.md's.)
 | Phase | What | Depends on | Size |
 |---|---|---|---|
 | WD0 | The loose ends: `--set` after seeding, or a guard so a `--set` can't suppress the default world; the "under a sun" comment | — | S |
-| WD1 | **The world document seeds the room.** `arisrv --doc world.ari` publishes the document's `scene:` (objects, lights, shadows) through `write_scene_object` / `write_scene_env`. `cvc://worlds/default.ari` and `large.ari` replace the C++ seeds, and `--scene` names them. The light rig and shadows move from the conference document to the world document (Q1), and the conference document drops its `scene:` block. | S0 | M |
+| WD1 | **The world document seeds the room.** `arisrv --doc world.ari` publishes the document's `scene:` (objects, lights, shadows) through `write_scene_object` / `write_scene_env`. `cvc://worlds/default.ari` and `large.ari` replace the C++ seeds, and `--scene` names them. The light rig and shadows move from the conference document to the world document (Q1), and the conference document drops its `scene:` block. | S0 (met by transfix/libcvc#1046) | M |
 | WD2 | **The rules come from the document.** The physics, archetype, policy and controller sections (§3), with the activation tick. The holon and `room_view` read them instead of `avatar_body{}`, `kAvatarWidth`, `max_speed = 4.0` and the panel's "walker" literal. | WD1 | M |
 | WD3 | **Entities.** The entities table (§4); server-dynamic props and NPC bodies from the document and from server programs, simulated on the relay by L0's headless runtime; their poses on the pose stream; colliders for meshes. | WD2, L0 | L |
 | WD4 | **A controller catalog.** Kernels by `name@version`, a determinism gate per kernel, capability negotiation with an interpolation fallback; the vehicle as the second kernel. A participant picks from the archetype's list (§5k phase 3). | WD2 | L |
@@ -623,9 +624,18 @@ each builds what a WD phase needs.
 | L4 | **The gym:** reset, step, observe, reward, episode logs, headless; `pycvc_gl.cars` moves onto it. | — | M |
 
 **The first cut is WD0 + WD1** for the relay, and **L0** for the lab, which can run beside it. E0
-and E1 need neither and can start any time. WD1
-needs S0, which is next on the tracker anyway, for application services. S0's `server: publish:` namespaces (§6.5.3) should be designed with world sections in
-mind from the start.
+and E1 need neither and can start any time. WD1 needs S0, which transfix/libcvc#1046 builds with
+world sections in mind:
+
+- **One write path.** The document writes through holes in its chroot, and the relay's shard
+  sends `conf` plus the published namespaces. The world sections under `conf.rooms.<room>.*` are
+  already in that scope, so WD1 points the same mechanism at them.
+- **Revisions by hand.** A section's fields, then its `rev` last, in one program arrive in that
+  order; a test pins it. WD1's revisioned-section writer, in core for L0 to share, is sugar over
+  that.
+- **The scene is kept.** The document's parsed `scene:` stays on its runtime for the world runtime
+  to attach to.
+- **`--set`** is still applied before the seeds and the document; WD0 moves it last.
 
 ## 16. Open decisions
 
@@ -634,6 +644,8 @@ mind from the start.
   Still open: whether a viewer may lower their cost (shadow resolution, LOD, effects off) or adjust
   for accessibility (brightness, contrast). It never changes geometry or physics.
 - **Q2. Do clients ever see the world document?** Proposed: no; only the derived sections (§2).
+  S0 builds it that way: the document's own state stays under `ui.docs.arisrv`, which the relay
+  never sends.
 - **Q3. Which guest format for controllers comes first?** Proposed: native kernels now; wasm guests
   for world- and user-supplied controllers once G2 lands. DSL programs are for rules, not per-tick
   controllers, until their cost at 120 Hz per entity is measured.

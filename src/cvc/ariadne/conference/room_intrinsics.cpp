@@ -61,10 +61,10 @@ std::string participants_path(const std::string &room) {
 }
 
 // Set a leaf under the room tree so the write REPLICATES. Mirrors stream.cpp's descriptor
-// materialization: creating a node fires the childChanged that makes it observable to the
-// distributed-state adapter, but the FIRST write to a just-created node can race that attach and be
-// lost (cf. state_transport_inproc_test's "set twice"). touch() fires childChanged with no content,
-// so the value write that FOLLOWS is captured and replicates to peers.
+// materialization: touch() fires the childChanged that makes a just-created node observable to the
+// distributed-state adapter, with no content, so the value write that FOLLOWS is captured and
+// replicates to peers. (The adapter now also journals a node's content when a write first shows it
+// the node, so the first write to a fresh node replicates without the touch.)
 void set_replicated(cvc::app &app, const std::string &path, const std::string &val) {
   cvc::state &n = app.root()(path); // create/navigate
   n.touch();                        // attach the distributed observer before the value write
