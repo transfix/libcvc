@@ -10,8 +10,9 @@ name: CI (recipe-first)
 #     cvcpkg install-deps cvcpkg/recipes/libcvc --prefix ./deps
 #     cvcpkg build libcvc --recipes-dir cvcpkg/recipes --no-deps --prefix ./deps
 #
-# No apt/brew library installs; cvcpkg is the sole source of third-party
-# deps. The dependency bundles come prebuilt from the cvcpkg.org catalog
+# No apt/brew library installs, and no Homebrew at all: cvcpkg is the sole
+# source of third-party deps and of the build tools (cmake, ninja,
+# pkg-config), which go first on PATH ahead of the runner image's. The dependency bundles come prebuilt from the cvcpkg.org catalog
 # (the closure — libxml2, the ImageMagick delegates, the libtiff codecs,
 # hdf5, boost, cgal/gmp/mpfr, … — is fully published for linux; macOS and
 # Windows coverage is newer, so those lanes are continue-on-error below).
@@ -102,6 +103,12 @@ jobs:
           pip install 'git+https://github.com/cy-pca/cvcpkg@master'
           cvcpkg --version
 
+      # cmake, ninja and pkg-config from cvcpkg, first on PATH for every later
+      # step, so the recipe's build script never runs the runner image's
+      # (Homebrew's on macOS). The action checks each resolves to cvcpkg's.
+      - name: Install build tools (cvcpkg)
+        uses: ./.github/actions/cvcpkg-build-tools
+
       # Put cl.exe/link.exe on PATH before cvcpkg runs a recipe's build.ps1.
       # The recipes import vcvars themselves (_common/env-windows.ps1's
       # Import-CvcMsvcEnv), so this is belt-and-braces that also keeps this
@@ -114,7 +121,7 @@ jobs:
 
       # Install the recipe-declared dependency closure, prebuilt from the
       # cvcpkg.org catalog, into a CMake-ready prefix. Always release deps
-      # (see header). Host tools (cmake/ninja) come from the runner image.
+      # (see header). Host tools (cmake/ninja) come from cvcpkg (above).
       - name: Install dependency closure from the catalog
         shell: bash
         run: |
