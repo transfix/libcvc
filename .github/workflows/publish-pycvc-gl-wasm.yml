@@ -55,7 +55,9 @@ jobs:
 
       - name: Install the pycvc-gl wasm dep closure into the build prefix
         # cvc + cvcGL compile from source here, so their wasm build deps must be
-        # present, PLUS pycvc-gl's own (python312 / numpy / vtk / vtk-python cvc.6).
+        # present, PLUS pycvc-gl's own (python312 / numpy / vtk / vtk-python cvc.6). The newest of
+        # each: the host link takes undefined symbols as errors, so python312 must be
+        # 3.12.10+cvc.23 or later, which link-host.sh checks.
         # cvcpkg build uses this prefix as CVC_DEPS_PREFIX (the hardened flow —
         # find_package(Boost) needs boost + its cmake config present).
         #
@@ -76,6 +78,7 @@ jobs:
             --platform wasm --arch wasm32 --config release --link static \
             --no-fallback-to-source \
             || { echo "::error::failed to install pycvc-gl-cp312's wasm deps"; exit 1; }
+          grep -m1 '^  version: ' "$WASM_DEPS/share/libcvc-deps/python312/manifest.yaml"
           for p in freetype assimp imgui; do
             echo "=== install $p ==="
             cvcpkg install "$p" --prefix "$WASM_DEPS" \

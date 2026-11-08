@@ -85,6 +85,23 @@ function(cvc_ariadne_python_wasm_host target)
     message(FATAL_ERROR "${target}: no libpython3.12.a in CMAKE_FIND_ROOT_PATH "
                         "(${CMAKE_FIND_ROOT_PATH}): install python312 for wasm there")
   endif()
+  # The link takes undefined symbols as errors, so libpython3.12.a must be python312
+  # 3.12.10+cvc.23 or later: the wasm bundles before it archive pyexpat and _sha2 without their
+  # expat and HACL SHA-2 objects (cy-pca/cvcpkg#565). A recipe can't ask for that (cvcpkg's version
+  # ranges ignore the +cvc.N revision), so the bundle's manifest is read here. A prefix whose
+  # Python cvcpkg didn't install has none, and is left to the link.
+  set(_pyman "${_deps}/share/libcvc-deps/python312/manifest.yaml")
+  if(EXISTS "${_pyman}")
+    file(STRINGS "${_pyman}" _pyup REGEX "^  upstream_version: " LIMIT_COUNT 1)
+    file(STRINGS "${_pyman}" _pyrev REGEX "^  cvc_revision: " LIMIT_COUNT 1)
+    string(REGEX REPLACE "^  [a-z_]+: *" "" _pyup "${_pyup}")
+    string(REGEX REPLACE "^  [a-z_]+: *" "" _pyrev "${_pyrev}")
+    if(_pyup VERSION_LESS 3.12.10 OR (_pyup VERSION_EQUAL 3.12.10 AND _pyrev LESS 23))
+      message(FATAL_ERROR "${target}: ${_deps} has python312 ${_pyup}+cvc.${_pyrev}, whose "
+                          "libpython3.12.a lacks pyexpat's expat and _sha2's HACL objects: "
+                          "install 3.12.10+cvc.23 or later for wasm there")
+    endif()
+  endif()
   set(_stdlib "${_deps}/lib/python3.12")
   set(_site "${_stdlib}/site-packages")
   find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module)
@@ -183,12 +200,6 @@ function(cvc_ariadne_python_wasm_host target)
       target_link_libraries(${target} PRIVATE "${_deps}/lib/lib${_lib}.a")
     endif()
   endforeach()
-  # cvcpkg's python312 for wasm (3.12.10+cvc.13) archives two of its modules without the objects
-  # they call: pyexpat's bundled expat (PyExpat_XML_*) and _sha2's HACL SHA-2
-  # (python_hashlib_Hacl_Hash_SHA2_*), and it has no OpenSSL _hashlib to fall back to. So the link
-  # allows undefined symbols, as bindings/pycvc/wasm/link-host.sh does, and warns about each. A call
-  # into one aborts: xml.parsers.expat and hashlib's SHA-2 don't work in this host.
-  target_link_options(${target} PRIVATE -sERROR_ON_UNDEFINED_SYMBOLS=0 -sWARN_ON_UNDEFINED_SYMBOLS=1)
   if(_arg_VTK_BRIDGE)
     file(GLOB _vtkstatic "${_deps}/lib/_vtkmodules_static.a")
     if(NOT _vtkstatic)

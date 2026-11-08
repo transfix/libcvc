@@ -43,7 +43,7 @@ against `f88eb3dd` (v3.7.11) on 2026-11-06.
 
 | Piece | Where | State |
 |---|---|---|
-| CPython 3.12, static, for wasm | `python312` | wasm `3.12.10+cvc.13`, wasm-mt `+cvc.11` |
+| CPython 3.12, static, for wasm | `python312` | wasm and wasm-mt `3.12.10+cvc.23` (2026-11-08). Its `libpython3.12.a` has pyexpat's expat and `_sha2`'s HACL SHA-2 (cy-pca/cvcpkg#565, #567); earlier wasm bundles left them out |
 | numpy for wasm | `numpy-cp312` 2.4.6 | wasm and wasm-mt `+cvc.6` (2026-11-07). Its C extensions are relocatable wasm objects, each in a namespace of its own and listed in `share/python-wasm/numpy-cp312.inittab` (§5.5), linked statically and registered as builtins ([`link-host.sh`](../../bindings/pycvc/wasm/link-host.sh)) |
 | vtk-python for wasm | `vtk-python-cp312` 9.5.0 | wasm `+cvc.8` (rendering, IOHDF, IONetCDF); wasm-mt only `+cvc.2` |
 | pycvc + pycvc_gl for wasm | `pycvc-gl-cp312` 3.7.8 | wasm only (87 MB of static archives). [`pycvc_host.cpp`](../../bindings/pycvc/wasm/pycvc_host.cpp) embeds them with numpy and vtk-python and prints `PYCVC_VTK_BRIDGE_OK`, **under node only**: no browser, no window |
@@ -426,15 +426,19 @@ fetched before start and imported through zipimport.
 - **Tiers.** The recipe builds the lean tier, or the full tier when vtk-python's wasm build is in
   the deps prefix.
 - **The check.** ci.yml's `ariglx-web` job runs arigl-web's browser smoke on the page, with
-  arigl-web's cases and three of its own (`--pydocs src/arigl/web/test/python`):
+  arigl-web's cases and four of its own (`--pydocs src/arigl/web/test/python`):
   - a `python:` block with numpy and pycvc_gl;
+  - a block that parses XML with `xml.parsers.expat` and takes a SHA-256;
   - a Python program in place of the document;
   - a block that raises.
-- **The link allows undefined symbols** (`-sERROR_ON_UNDEFINED_SYMBOLS=0`), as link-host.sh
-  does. cvcpkg's wasm python312 (3.12.10+cvc.13) archives pyexpat and `_sha2` without the objects
-  they call: its bundled expat (52 `PyExpat_XML_*` symbols) and HACL's SHA-2 (12). It has no
-  OpenSSL `_hashlib` either. So `xml.parsers.expat` and hashlib's SHA-2 abort when called. The
-  fix belongs in the python312 recipe.
+- **The link takes undefined symbols as errors**, as link-host.sh's does. That needs python312
+  3.12.10+cvc.23 or later for wasm. The bundles before it archive pyexpat and `_sha2` without the
+  objects they call: the bundled expat (52 `PyExpat_XML_*` symbols) and HACL's SHA-2 (12). Until
+  cvc.23 both links allowed undefined symbols, and `xml.parsers.expat` and hashlib's SHA-2 aborted
+  when called. cvcpkg's version ranges ignore the `+cvc.N` revision, so the recipe can't ask for
+  cvc.23. Instead `cvc_ariadne_python_wasm_host` reads the installed bundle's manifest and stops
+  the configure on an older one. There is still no OpenSSL `_hashlib`: hashlib uses the builtin
+  `_md5`, `_sha1`, `_sha2`, `_sha3` and `_blake2`.
 
 ### 5.2 Packages in the browser
 
@@ -583,7 +587,7 @@ list narrowed to CPython's eval loop.
     define, so it can't link cvc.6.
   - A prefix with an older numpy (cvc.5) still links: the host localizes numpy itself (step 2
     below).
-- **The host link** ([`link-host.sh`](../../bindings/pycvc/wasm/link-host.sh)) works in five
+- **The host link** ([`link-host.sh`](../../bindings/pycvc/wasm/link-host.sh)) works in six
   steps:
   1. It reads every manifest in the deps prefix.
   2. It localizes copies of any numpy that ships no manifest, in a scratch directory, never in
@@ -594,6 +598,12 @@ list narrowed to CPython's eval loop.
      differ.
   4. `registrar` writes the `pycvc_register_pyext_inittab()` that `pycvc_host.cpp` calls.
   5. It links with no `--allow-multiple-definition`.
+  6. It takes undefined symbols as errors (§5.1). So it names what a CMake executable gets from
+     the targets it links: cvcGL's `libcvcMedia.a`, cvc::net's `-sFETCH=1` and `-lwebsocket.js`,
+     the WebGL 2 flags from VTK's FindOpenGL (`-sFULL_ES3=1 -sMIN_WEBGL_VERSION=2
+     -sMAX_WEBGL_VERSION=2`), and VTK RenderingUI's js-library. Until python312 cvc.23 it allowed
+     undefined symbols. That hid 44 of these beside Python's 64; the node smoke calls none of
+     them.
 
   The whole pycvc_gl host (VTK bridge, numpy, the deps' 256 archives) links that way, and its
   smoke prints `PYCVC_WASM_OK`.
@@ -1470,7 +1480,9 @@ hook is declared in the block's `hooks:`, or registered by `ari_init` through th
 2. **Asyncify with CPython** (§5.3). Measured in W1: it halves the interpreter's speed. The
    remove-list fallback restores it, once the paths that could sleep under Python are audited.
 3. **Python in a real browser.** Done in W1. ci.yml's `ariglx-web` job runs documents with Python
-   in headless Chrome, under a strict CSP, through the CDP driver from the conference work.
+   in headless Chrome, under a strict CSP, through the CDP driver from the conference work. The
+   link takes undefined symbols as errors since python312 3.12.10+cvc.23, so nothing in the module
+   is left unresolved, and `xml.parsers.expat` and hashlib's SHA-2 work in the page (§5.1).
 4. **Native packages are Linux-only.** `pycvc-cp312` and `pycvc-gl-cp312` are Linux-only on
    cvcpkg.org, so the `arix` and `ariglx` packages are too.
    - In-tree builds work elsewhere with `-DCVC_BUILD_PYCVC=ON`.
@@ -1530,7 +1542,7 @@ for it.
 | P1 | **Done** (#985, v3.7.11). The engine, `_arihost`, `Host` embedded mode, the top document's `python:` block, the `python` / `python.<module>` tokens, `run app.py` and `<host> python`, `--python-path`; `ariglx` and `arix`, native, with Linux recipes. Tests: the `arix_*` / `ariglx_*` ctests and three `AriadneRequires` cases | P0 | L |
 | P1b | The rest of P1: `run -m`; `load:`ed modules' `python:` blocks, then `--python-allow`; the `script_engine` interface; pycvc's tests through the embedded interpreter; GRL-SNAM's ports on `ariglx` | P1 | M |
 | P2 | `py_console`, then `py_editor` with jedi | P1 | M |
-| W1 | **Done** (§5.1, §5.3). `ariglx-web` wasm: the combined link, a browser smoke in headless Chrome, size and Asyncify numbers, lean vs full | P1 | L |
+| W1 | **Done** (§5.1, §5.3). `ariglx-web` wasm: the combined link, a browser smoke in headless Chrome, size and Asyncify numbers, lean vs full. Since python312 3.12.10+cvc.23 (cy-pca/cvcpkg#565, #567) its link and link-host.sh's take undefined symbols as errors, and the configure refuses an older python312 | P1 | L |
 | W2 | **Done** (cy-pca/cvcpkg#549, transfix/libcvc#1027; numpy-cp312 2.4.6+cvc.6 on cvcpkg.org for wasm and wasm-mt, 2026-11-07). The wasm C-extension convention in cvcpkg (§5.5): the rewriter and `inittab` manifests, numpy republished with them, and a host link that no longer allows duplicate extension symbols | — | S |
 | W3 | wasm-mt: vtk-python wasm-mt republished, pycvc-gl wasm-mt | W1, cy-pca/cvcpkg#109 | M |
 | W4 | Runtime package installs, plain wasm (§5.6): a `MAIN_MODULE=2` `ariglx-web` variant, `link: shared` side-module packages, `host.install`, the cvcpkg.org origin allowlist | W1, W2 | L |

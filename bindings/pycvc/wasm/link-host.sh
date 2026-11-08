@@ -27,8 +27,11 @@
 #     extensions each bundle npymath, which once needed --allow-multiple-definition;
 #     localized, they don't, and a real clash between extensions fails the link.
 #   * pycvc core is a flat module (_pycvc); pycvc_gl is a package (pycvc_gl._pycvc_gl).
-#   * libpython's _sha2 has an un-archived HACL gap -> ERROR_ON_UNDEFINED_SYMBOLS=0
-#     (harmless: the missing symbols are only reached if hashlib.sha256 is called).
+#   * Undefined symbols are errors. So the link names what a CMake executable gets from the
+#     targets it links: cvcGL's cvcMedia, cvc::net's -sFETCH=1 and -lwebsocket.js, the WebGL 2
+#     flags VTK's FindOpenGL adds, and VTK RenderingUI's js-library. And libpython3.12.a must be
+#     python312 3.12.10+cvc.23 or later: earlier wasm bundles archive pyexpat and _sha2 without
+#     their expat and HACL SHA-2 objects (cy-pca/cvcpkg#565).
 #   * cvc, cvcGL and the wrappers compile with -fexceptions (the top-level CMakeLists.txt),
 #     so this link must say it too. Without it emscripten links with exception catching
 #     off and every throw aborts ("Aborted(undefined)" in ___cxa_throw), even one a catch
@@ -45,6 +48,25 @@ PYSTD="$(dirname "$SP_DEPS")"                       # .../lib/python3.12 (stdlib
 PXA="$(find "$INST" -name '_pycvc.a' 2>/dev/null | head -1)"
 GLA="$(find "$INST" -name '_pycvc_gl.a' 2>/dev/null | head -1)"
 [ -n "$PXA" ] && [ -n "$GLA" ] || { echo "link-host: pycvc archives not found under $INST" >&2; exit 1; }
+
+# The python312 revision, from the bundle's manifest, as src/ariadne_python/ariadne_python.cmake
+# reads it (cvcpkg's version ranges ignore +cvc.N, so the recipe can't ask for it). A Python that
+# cvcpkg didn't install has no manifest, and is left to the link.
+PYMAN="$DEPS/share/libcvc-deps/python312/manifest.yaml"
+if [ -f "$PYMAN" ]; then
+    PYUP="$(sed -n 's/^  upstream_version: *//p' "$PYMAN" | head -1)"
+    PYREV="$(sed -n 's/^  cvc_revision: *//p' "$PYMAN" | head -1)"
+    case "$PYUP" in
+        3.12.[0-9]) PYOLD=1 ;;
+        3.12.10) [ "${PYREV:-0}" -ge 23 ] || PYOLD=1 ;;
+    esac
+    if [ -n "${PYOLD:-}" ]; then
+        echo "link-host: $DEPS has python312 $PYUP+cvc.$PYREV, whose libpython3.12.a lacks" \
+             "pyexpat's expat and _sha2's HACL objects: install 3.12.10+cvc.23 or later for wasm" \
+             "there" >&2
+        exit 1
+    fi
+fi
 
 # The Python C extensions, from the deps prefix's share/python-wasm/*.inittab
 # manifests: each lists a package's extensions (dotted module, renamed init symbol,
@@ -122,8 +144,11 @@ DEP_LIBS=("$DEPS"/lib/*.a)
     -Wl,--whole-archive "$PXA" "$GLA" -Wl,--no-whole-archive \
     ${VTK_WHOLE[@]+"${VTK_WHOLE[@]}"} \
     ${PYEXT_OBJS[@]+"${PYEXT_OBJS[@]}"} \
-    -Wl,--start-group "$INST"/lib/libcvc.a "$INST"/lib/libcvcGL.a "${DEP_LIBS[@]}" -Wl,--end-group \
-    -sALLOW_MEMORY_GROWTH=1 -sEXIT_RUNTIME=1 -sSTACK_SIZE=8mb -sERROR_ON_UNDEFINED_SYMBOLS=0 \
+    -Wl,--start-group "$INST"/lib/libcvc.a "$INST"/lib/libcvcGL.a "$INST"/lib/libcvcMedia.a \
+        "${DEP_LIBS[@]}" -Wl,--end-group \
+    -sALLOW_MEMORY_GROWTH=1 -sEXIT_RUNTIME=1 -sSTACK_SIZE=8mb \
+    -sFETCH=1 -lwebsocket.js -sFULL_ES3=1 -sMIN_WEBGL_VERSION=2 -sMAX_WEBGL_VERSION=2 \
+    --js-library "$DEPS/lib/vtkWebAssemblyRenderWindowInteractor.js" \
     --embed-file "${PYSTD}@/py/lib/python3.12" \
     --embed-file "$(dirname "$PXA")/pycvc.py@/py/lib/python3.12/site-packages/pycvc.py" \
     --embed-file "$(dirname "$GLA")@/py/lib/python3.12/site-packages/pycvc_gl" \
