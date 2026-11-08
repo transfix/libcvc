@@ -1543,6 +1543,16 @@ jobs:
   # mt.groups and the pycvc scripts. Every Stage 1a case (the groups, the pool, the pycvc pool and
   # pump-owner cases) and mt.groups' three points are required in all three legs: SAN_REQUIRED_S1A
   # below, which the run step appends to the leg's own `required`.
+  #
+  # Threaded execution's Stage 1b (Ariadne's half; S1.md sections 5 and S1.15) adds Ariadne to the
+  # clang leg: ariadne_runtime_test with CVC_EXEC_THREADS=4, so the app's pool has workers and its
+  # lock manager is shared (AppLockManager.*, which asserts the single manager, is filtered out),
+  # given through the leg's cxx_runs, and state_lifetime_stress_test (PIN-1's pins). The gcc legs
+  # keep running both binaries bare. Stage 1b's cases (one pump of group 0 a frame, isolated
+  # documents on the pool's workers, providers posting to their document's group, a spawned
+  # child's context, eligibility, the init lane's own host, the teardown reap, and the pins that
+  # release the leaf first) are required in all three legs: SAN_REQUIRED_S1B, appended as
+  # SAN_REQUIRED_S1A is.
   sanitizers:
     name: sanitizers / ${{ matrix.name }}
     runs-on: ubuntu-24.04
@@ -1556,9 +1566,13 @@ jobs:
           # case, or the pycvc script's "ok:" line. <run> may also be a scenario in SAN_BENCH, whose
           # line for a point is its params ("t=8 prog=fib runs=1"). Stage 0's lines, the same in
           # both gcc legs, follow the locks phases'; "(" after a name keeps it from matching a
-          # longer one. Stage 1a's are SAN_REQUIRED_S1A's, in every leg. A leg may also name its
-          # own C and C++ compilers (cc, cxx; the runner's gcc otherwise), C++ tests (cxx_tests, for
-          # SAN_CXX_TESTS) and bench runs (bench, for SAN_BENCH).
+          # longer one. Stage 1a's are SAN_REQUIRED_S1A's and Stage 1b's SAN_REQUIRED_S1B's, in
+          # every leg. A leg may also name its own C and C++ compilers (cc, cxx; the runner's gcc
+          # otherwise), C++ tests (cxx_tests, for SAN_CXX_TESTS), bench runs (bench, for SAN_BENCH)
+          # and how some of its C++ tests run (cxx_runs, run.sh's SAN_CXX_RUNS): one line a binary
+          # of its C++ tests, `<name>: [VAR=VALUE ...] [--option ...]`, whose variables are set
+          # and options passed for that binary's run alone (the others run bare). A --gtest_filter
+          # there still leaves the Stress suites out: run.sh adds *Stress* to its negative patterns.
           - name: tsan
             flags: -fsanitize=thread
             required: |
@@ -1611,7 +1625,6 @@ jobs:
               state_exec_scheduler_test: OK ] HazardsWatchRoot/0.HZ07c_AnUnchrootedWatchSetsTheRootAndPollsAreGatedPerRoot
               state_exec_scheduler_test: OK ] HazardsWatchRoot/1.HZ07c_AnUnchrootedWatchSetsTheRootAndPollsAreGatedPerRoot
               test_pycvc_state_exec_locks.py: ok: test_hz08_fork_in_exec_run
-              ariadne_runtime_test: OK ] AriadneHazards.HZ08_ForkedChildKeepsOwnerAndTeardownReapsIt
               state_exec_coordinator_test: OK ] Priority.HZ09_BusThreadControlAppliesBetweenSteps
               mt.multi_exec: t=8 prog=fib runs=1
               mt.multi_exec: t=8 prog=exceptions runs=1
@@ -1683,7 +1696,6 @@ jobs:
               state_exec_scheduler_test: OK ] HazardsWatchRoot/0.HZ07c_AnUnchrootedWatchSetsTheRootAndPollsAreGatedPerRoot
               state_exec_scheduler_test: OK ] HazardsWatchRoot/1.HZ07c_AnUnchrootedWatchSetsTheRootAndPollsAreGatedPerRoot
               test_pycvc_state_exec_locks.py: ok: test_hz08_fork_in_exec_run
-              ariadne_runtime_test: OK ] AriadneHazards.HZ08_ForkedChildKeepsOwnerAndTeardownReapsIt
               state_exec_coordinator_test: OK ] Priority.HZ09_BusThreadControlAppliesBetweenSteps
               mt.multi_exec: t=8 prog=fib runs=1
               mt.multi_exec: t=8 prog=exceptions runs=1
@@ -1714,7 +1726,9 @@ jobs:
               test_pycvc_state_exec_sched.py: ok: test_hz14_stop_from_another_thread
           # clang's TSan (S1-Q9), with the runner's preinstalled clang. clang links its TSan
           # runtime into each executable, and run.sh preloads the shared one, libclang_rt.tsan,
-          # into the interpreter. Its own lines are Stage 1a's only.
+          # into the interpreter. Its lines are Stage 1a's and 1b's only. Its Ariadne run has the
+          # app's pool at four workers (CVC_EXEC_THREADS) and so a shared lock manager, which the
+          # AppLockManager cases assert is single: they are left out (as in CTest's threads_auto).
           # --gcc-install-dir: gcc 13's libstdc++, the gcc legs' own, not the newer 14 clang would
           # pick, so every leg builds against one library. (Either one's C++20 std::pair rejects
           # pair<std::string, T> inside T under clang, which is why such members are structs.)
@@ -1729,6 +1743,9 @@ jobs:
               state_exec_groups_test exec_pool_test state_exec_hazards_test
               state_exec_scheduler_test state_exec_async_test state_exec_async_calls_test
               async_lane_test thread_pool_test state_exec_locks_test state_exec_locks_model_test
+              ariadne_runtime_test state_lifetime_stress_test
+            cxx_runs: |
+              ariadne_runtime_test: CVC_EXEC_THREADS=4 --gtest_filter=-AppLockManager.*
             bench: mt.groups --size t=8 --size groups=8 --size runs=1
     concurrency:
       group: ci-${{ github.ref }}-sanitizers-${{ matrix.name }}
@@ -1849,6 +1866,23 @@ jobs:
         mt.groups: t=8 groups=8 prog=fib runs=1
         mt.groups: t=8 groups=8 prog=exceptions runs=1
         mt.groups: t=8 groups=8 prog=cycle runs=1
+      # Stage 1b's required lines (the matrix's `required` format), the same in every leg, so
+      # AR-3b is required in both TSan legs: the Ariadne cases of section 4 (IS-1b, AR-1, AR-2,
+      # AR-3, AR-3b, SP-1, EL-1, FF-3's init lane), HZ-8 (the teardown reap, S1-Q8; moved here
+      # from the gcc legs' lists, one copy a leg) and PIN-1's two. The lead appends A's, I's and
+      # U's new unit tests here as their branches merge.
+      SAN_REQUIRED_S1B: |
+        ariadne_runtime_test: OK ] SpawnContext.IS01b_InAnIsolatedDocument
+        ariadne_runtime_test: OK ] AriadneFrames.AR01_NoDocumentOptedInStaysOnTheFrameThread
+        ariadne_runtime_test: OK ] AriadneFrames.AR02_ThreeDocumentsInGroupZeroPumpOnceAFrame
+        ariadne_runtime_test: OK ] AriadneFrames.AR03_IsolatedDocumentsRunOnWorkers
+        ariadne_runtime_test: OK ] AriadneFrames.AR03b_ProvidersPostToTheirGroup
+        ariadne_runtime_test: OK ] SpawnContext.SP01_AChildOfADeletedChrootWritesTheDetachedNode
+        ariadne_runtime_test: OK ] AriadneFrames.EL01_IneligibleDocumentsStayInGroupZero
+        ariadne_runtime_test: OK ] AriadneHazards.FF03_InitLaneRunsProviderCallsOnItsOwnHost
+        ariadne_runtime_test: OK ] AriadneHazards.HZ08_ForkedChildKeepsOwnerAndTeardownReapsIt
+        state_lifetime_stress_test: OK ] StateLifetime.UriStateChainsReleaseTheLeafFirst
+        state_lifetime_stress_test: OK ] StateLifetime.StreamDescriptorPinsReleaseTheLeafFirst
       # The lock tests read this and run their smaller sanitizer sizes.
       CVC_LOCKS_SANITIZER: '1'
     steps:
@@ -1947,10 +1981,12 @@ jobs:
         shell: bash
         env:
           SAN_CXX_TESTS: ${{ matrix.cxx_tests || env.SAN_CXX_TESTS }}
+          SAN_CXX_RUNS: ${{ matrix.cxx_runs }}
           SAN_BENCH: ${{ matrix.bench || env.SAN_BENCH }}
           SAN_REQUIRED: |
             ${{ matrix.required }}
             ${{ env.SAN_REQUIRED_S1A }}
+            ${{ env.SAN_REQUIRED_S1B }}
         run: bash .github/sanitizers/run.sh "${{ matrix.name }}"
 
       - name: Upload the sanitizer logs

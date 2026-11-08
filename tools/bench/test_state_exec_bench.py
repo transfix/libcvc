@@ -10,7 +10,8 @@
 
 The lock phases' and threaded execution's gates (docs/STATE_EXEC_BENCH.md) are decided by these
 rules: the implicit defaults that keep old records matching, --pair, the noise rule (INCONCLUSIVE,
-exit 2), the change rule (a steps_total drop fails) and gate's absolute bounds. The records of
+exit 2), the change rule (a steps_total drop fails), gate's absolute bounds and its guard against
+a vacuous pass (GATE_GUARDS). The records of
 mt_pycvc_threads.py are checked here too, without pycvc. Standard library only; CTest runs it as
 state_exec_bench_tool_test.
 """
@@ -391,6 +392,51 @@ class Gate(unittest.TestCase):
                               point(8, "cycle", [0.5, 0.5, 0.5]), *gate)
         self.assertEqual(code, 0, out)
         self.assertEqual(self.gate(eight + point(16, "fib", [0.85, 0.85, 0.85]), *gate)[0], 1)
+
+    def test_ariadne_docs_gate_needs_every_document_isolated(self):
+        # Stage 1b's gate: mt.ariadne_docs' small frames wake no helper. It holds only where every
+        # document is in a group of its own (extra.isolated == docs): in group 0 no helper is ever
+        # woken, so the gate fails as vacuous rather than passing.
+        def point(t, docs, frame, wakes, isolated):
+            out = []
+            for i, w in enumerate(wakes):
+                r = rec("mt.ariadne_docs", {"t": t, "docs": docs, "frame": frame, "frames": 200},
+                        rep=i, wall_ns=1)
+                r["extra"] = {"helper_wakes": w, "isolated": isolated, "worker_pumps": 0}
+                out.append(r)
+            return out
+        gate = ["--scenario", "mt.ariadne_docs", "--where", "frame=small", "--metric",
+                "extra.helper_wakes", "--max", "0"]
+        isolated = (point(0, 1, "small", [0, 0, 0], 1) + point(4, 8, "small", [0, 0, 0], 8) +
+                    point(4, 8, "heavy", [40, 41, 39], 8))
+        code, out = self.gate(isolated, *gate)
+        self.assertEqual(code, 0, out)
+        # Small frames that woke a helper fail: in the median rep, or in any with --stat max.
+        self.assertEqual(self.gate(isolated + point(2, 2, "small", [0, 1, 1], 2), *gate)[0], 1)
+        once = isolated + point(2, 2, "small", [0, 1, 0], 2)
+        self.assertEqual(self.gate(once, *gate)[0], 0)
+        self.assertEqual(self.gate(once, *gate, "--stat", "max")[0], 1)
+        # Documents left in group 0 (S1b.0's stubs: extra.isolated 0) make it vacuous: it fails.
+        code, out = self.gate(point(2, 2, "small", [0, 0, 0], 0), *gate)
+        self.assertEqual(code, 1, out)
+        self.assertIn("vacuous: extra.isolated 0 below docs 2", out)
+        # One rep with a document short is enough.
+        partly = point(4, 4, "small", [0, 0], 4) + point(4, 4, "small", [0], 3)[0:1]
+        partly[-1]["rep"] = 2
+        self.assertEqual(self.gate(partly, *gate)[0], 1)
+        # A record without extra.isolated (a binary before the scenario had it) cannot pass.
+        bare = point(2, 2, "small", [0, 0], 2)
+        for r in bare:
+            del r["extra"]["isolated"]
+        code, out = self.gate(bare, *gate)
+        self.assertEqual(code, 1, out)
+        self.assertIn("vacuous: no extra.isolated", out)
+        # Other scenarios' gates take no guard: a record without extra.isolated passes there.
+        other = reps("mt.groups", {"t": 8, "groups": 8, "prog": "fib", "runs": 5}, [0, 0],
+                     metric="extra.helper_wakes")
+        other = [dict(r, extra={"helper_wakes": r.pop("extra.helper_wakes")}) for r in other]
+        self.assertEqual(self.gate(other, "--scenario", "mt.groups", "--metric",
+                                   "extra.helper_wakes", "--max", "0")[0], 0)
 
 
 class MtPycvcThreads(unittest.TestCase):
