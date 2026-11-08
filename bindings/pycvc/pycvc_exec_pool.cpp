@@ -115,9 +115,9 @@ ExecPool::ExecPool(const std::shared_ptr<cvc::app> &app, PyObject *threads, PyOb
   } else {
     impl->pool = &app->exec_pool();
   }
-  // `size` defaults to `threads` (td 4.12): the one asked for, else the pool's; at least 1.
-  const unsigned n =
-      want_size ? *want_size : std::max(1u, want_threads.value_or(impl->pool->threads()));
+  // `size` defaults to `threads` (td 4.12): the pool's real count, which a request the pool did
+  // not apply (it was built already, or clamped) does not change; at least 1 (R1-mid S-m11).
+  const unsigned n = want_size ? *want_size : std::max(1u, impl->pool->threads());
   impl->execs.reserve(n);
   for (unsigned i = 0; i < n; ++i)
     impl->execs.push_back(std::unique_ptr<Exec>(

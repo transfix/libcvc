@@ -26,8 +26,8 @@ public:
   // The app has one pool (app::exec_pool()): the first caller that builds it sets its size, from
   // `threads` (an int, 0 or more), else the tree's state_exec.threads. A later different request
   // keeps the built size and logs a warning; `threads` reports the real one. `size` (an int, 1 or
-  // more) is the number of pooled Execs, `threads` by default, at least 1. Pooled Exec i is
-  // chrooted at "<prefix>.<i>", so its programs' state keys resolve under it. Top-level
+  // more) is the number of pooled Execs, the real `threads` by default, at least 1. Pooled Exec i
+  // is chrooted at "<prefix>.<i>", so its programs' state keys resolve under it. Top-level
   // definitions persist per pooled Exec, unless `fresh_env` gives each program a fresh env. A
   // program parked for `idle_timeout` seconds with nothing pending is killed, as in Exec.run.
   // Anything else, or a negative or NaN idle_timeout, raises ValueError (std::invalid_argument).

@@ -9,6 +9,7 @@
 
 #include <cstddef>
 #include <cvc/state/state_exec/data_job.h> // data_options
+#include <cvc/state/state_exec/heap.h>     // cycle_stats
 #include <cvc/state/state_exec/parser.h>   // parse_options
 #include <memory>
 #include <string>
@@ -129,9 +130,9 @@ public:
   // exceptions: any thread may call them.
   //
   // The pump owner (S1-Q4): run() is its scheduler's pump owner until it
-  // quiesces. Meanwhile register_fn, register_async_fn, register_async_coro,
-  // set_parser_defaults, set_data_defaults, tracked_objects and scheduler()'s
-  // calls (all but stop, is_running and post_message) raise RuntimeError
+  // returns. Meanwhile register_fn, register_async_fn, register_async_coro,
+  // set_parser_defaults, set_data_defaults, tracked_objects, collect_cycles and
+  // scheduler()'s calls (all but stop, is_running and post_message) raise RuntimeError
   // ("scheduler: another thread is pumping it") on any other thread, a kernel's
   // included; from run()'s own thread (a registered function) they work. A
   // run() started while another thread pumps the scheduler through one of its
@@ -186,6 +187,13 @@ public:
   // captured scopes and mutated containers, alive after the last collection or tracked since,
   // whichever thread ran them. The pump thread's, as register_fn is (run(), above).
   std::size_t tracked_objects() const;
+
+  // Collect this Exec's cycle registry now, with the GIL released, and return what it did. Its
+  // runs collect it as they go (every so many steps, and as they end, throttled); this frees its
+  // garbage at once. pycvc.collect_cycles() collects the calling thread's own registry, which an
+  // Exec's programs never use. The pump thread's, as register_fn is; from inside a step (a
+  // registered function) it does nothing.
+  cvc::state_exec::cycle_stats collect_cycles();
 
 private:
   struct ExecImpl;

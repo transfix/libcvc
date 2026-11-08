@@ -894,7 +894,7 @@ def test_po_pump_calls_refused_while_run_pumps():
                            (ex.set_data_defaults, (ex.data_defaults(),)),
                            (ex.register_async_fn, ("late", lambda: 1)),
                            (ex.register_async_coro, ("late_coro", coro)),
-                           (ex.tracked_objects, ())):
+                           (ex.tracked_objects, ()), (ex.collect_cycles, ())):
             _pumping(call, *args)
         _pumping(lambda: sched.max_pending_messages)
         assert t.is_alive()
@@ -912,6 +912,42 @@ def test_po_pump_calls_refused_while_run_pumps():
     ex.register_async_fn("late", lambda: 41)
     assert isinstance(ex.tracked_objects(), int)
     assert ex.run("(+ (late) 1)") == "42"
+
+
+def test_po_run_holds_the_owner_until_it_returns():
+    # run() stays its scheduler's pump owner through its quiesce, while it waits for its kernels
+    # and reaps (R1-mid C-m3): a raw call from another thread raises then, as during the run,
+    # while a priority call still acts directly. Once run() has returned the raw call works.
+    app = pycvc.make_app()
+    ex = pycvc.Exec(app)
+    sched = ex.scheduler()
+    gate = threading.Event()
+    ended = threading.Event()
+    box = {}
+
+    def on_end():
+        box["pid"] = sched.current_pid()
+        ended.set()
+        return True
+
+    ex.register_async_fn("hold", lambda: gate.wait(WAIT) and 1)
+    ex.register_fn("ended", on_end)
+    t, out = _in_thread("po-quiesce", ex.run, "(begin (hold-async) (ended) 7)")
+    try:
+        assert ended.wait(WAIT), "the program never ended"
+        time.sleep(0.05)  # the program has ended: run() waits for the kernel, quiesced
+        pid = box["pid"]
+        _pumping(sched.get_process_info, pid)
+        _pumping(sched.sync_run)
+        info = ex.get_priority(pid)
+        assert info is None or info["base"] == 0, info
+        assert t.is_alive()
+    finally:
+        gate.set()
+        _join(t)
+    assert out.get("value") == "7", out
+    assert sched.get_process_info(pid) is None  # run() reaped it
+    assert sched.sync_run() == {}
 
 
 def test_po_raw_pump_call_holds_the_owner():

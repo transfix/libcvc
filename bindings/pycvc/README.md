@@ -365,16 +365,17 @@ thread (a kernel's included), raises `RuntimeError` until the first has returned
 `resume`, `send_signal`, `fork`, `set_max_steps`, `list_processes`, `get_process_info`, ...)
 belong on the thread that steps the scheduler: inside its `run()` (a registered function or
 callback), or while nothing steps it. Each scheduler has a pump owner, the thread driving it:
-`Exec.run()` until it quiesces (its program's last step and any kill), and the scheduler's own
-`run`, `step`, `sync_run`, `sync_step`, `drain_ingress`, `wake_awaiting` and `wait_for_work` for
-their call. While another thread is the owner, every other call raises
+`Exec.run()` until it returns (through its wait for its kernels and its reap), and the
+scheduler's own `run`, `step`, `sync_run`, `sync_step`, `drain_ingress`, `wake_awaiting` and
+`wait_for_work` for their call. While another thread is the owner, every other call raises
 `RuntimeError("scheduler: another thread is pumping it")` instead of racing it, and so does a pump
 call (and `Exec.run()`) made while a raw pump call holds it; from the owner's own thread (a
 registered function) they work. (`Exec.kill`, `pause`, `resume` and `send_signal`, posted the way
 `set_priority` is, are not built yet.) Some `Exec` calls are the same: `set_parser_defaults` and
 `set_data_defaults` change its scheduler, `register_fn`, `register_async_fn` and
 `register_async_coro` change the natives environment its programs share, and `tracked_objects()`
-reads its cycle registry, which its steps change; they raise the same way. The exceptions:
+and `collect_cycles()` read or collect its cycle registry, which its steps change; they raise the
+same way. The exceptions:
 
 - `stop()` and `is_running()` may come from any thread. `stop()` ends the scheduler's `run()`
   or `sync_run()` at its next step boundary, and an idle sync `run()` at once; under `Exec.run()`
@@ -477,10 +478,10 @@ idle_timeout=60.0)` runs batches of programs on the app's pool of execution grou
 (`docs/STATE_EXEC_THREADED.md` 4.1, 4.12). The app has one pool, sized by whoever builds it
 first: `threads` (workers besides the calling thread), else the tree's `state_exec.threads`; a
 later different request keeps the built size and logs a warning, and `pool.threads` is the real
-count. The pool holds `size` pooled `Exec`s (`threads` by default, at least 1), each its own
-group: its own scheduler, async host, cycle registry and `math.random` stream, its natives over
-the one frozen builtins scope, and its context chrooted at `"<prefix>.<i>"`, so its programs'
-state keys, channels and lock keys resolve under it. The pooled `Exec`s are not exposed.
+count. The pool holds `size` pooled `Exec`s (the real `pool.threads` by default, at least 1),
+each its own group: its own scheduler, async host, cycle registry and `math.random` stream, its
+natives over the one frozen builtins scope, and its context chrooted at `"<prefix>.<i>"`, so its
+programs' state keys, channels and lock keys resolve under it. The pooled `Exec`s are not exposed.
 
 ```python
 pool = pycvc.ExecPool(app, threads=8)
