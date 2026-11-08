@@ -3422,6 +3422,15 @@ template <class Pred> bool pump_until(Runtime &rt, Pred pred, int budget_ms = 50
   return pred();
 }
 
+// Give every program's context `host` as its async host (ictx.host, td 4.9), as an isolated
+// document's context has its group's: a provider registered ahead of the providers under test, so
+// they see it. A test can then tell the context's host from the app's (S1.9).
+void use_host_in_contexts(cvc::state_exec::async_host *host) {
+  register_action_intrinsics(
+      [host](std::shared_ptr<cvc::state_exec::environment>,
+             cvc::state_exec::intrinsics_context &ictx) { ictx.host = host; });
+}
+
 // The spinner (Kind::Spinner): its glyph comes from the host's frame clock, never from state.
 // The braille cycle as UTF-8 bytes (a \u literal is the code page's on MSVC without /utf-8).
 const char *const kSpin[] = {"\xE2\xA0\x8B", "\xE2\xA0\x99", "\xE2\xA0\xB9", "\xE2\xA0\xB8",
@@ -5720,6 +5729,70 @@ TEST(AriadneStreamIntrinsics, OpenOnTheInitLaneFailsWithoutADocumentScope) {
   EXPECT_NE(cvc::state::instance(app)("demo.t.err").value().find("no document scope"),
             std::string::npos);
   EXPECT_EQ(cvc::state::instance(app)("demo.streams.cam0").value(), ""); // nothing was opened
+}
+
+// A stream posts to the group of the program that opened it (td 4.9, S1.9): the scheduler its
+// context's host parks on, as an isolated document's context has its group's, not the app's.
+TEST(AriadneStreamIntrinsics, AStreamPostsToItsOpenersGroup) {
+  namespace se = cvc::state_exec;
+  cvc::app app;
+  se::async_scheduler other; // the opener's group's scheduler; outlives the Runtime and its streams
+  se::async_host own(other, &app);
+  StreamActionGuard guard;
+  use_host_in_contexts(&own);
+  register_stream_intrinsics(app);
+
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button("Go", "(begin"
+                                  "  (set h (stream-open (dict \"id\" \"cam0\" \"w\" 4 \"h\" 2)))"
+                                  "  (state-set \"t.evt\" (get-attr h \"evt_channel\"))"
+                                  "  (stream-close h))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain(); // the verbs are synchronous: opened and closed in this drain
+  mb.button_click = false;
+
+  const std::string evt = cvc::state::instance(app)("t.evt").value();
+  ASSERT_EQ(evt, "streams.cam0.evt");
+  other.drain_ingress();
+  auto live = other.pop_pending_message(evt);
+  ASSERT_TRUE(live.has_value()) << "the open's event went to the opener's group";
+  EXPECT_EQ(std::get<std::string>(live->v), "live");
+  auto closed = other.pop_pending_message(evt);
+  ASSERT_TRUE(closed.has_value());
+  EXPECT_EQ(std::get<std::string>(closed->v), "closed");
+  app.exec_scheduler().drain_ingress();
+  EXPECT_EQ(app.exec_scheduler().pending_message_count(evt), 0u) << "none went to group 0";
+}
+
+// With an inline host (no parking scheduler, as on the init: lane) a stream posts to group 0.
+TEST(AriadneStreamIntrinsics, AStreamOfAnInlineHostPostsToGroupZero) {
+  namespace se = cvc::state_exec;
+  cvc::app app;
+  se::async_host inline_host; // kernels inline, parking nowhere
+  StreamActionGuard guard;
+  use_host_in_contexts(&inline_host);
+  register_stream_intrinsics(app);
+
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({button("Go", "(begin"
+                                  "  (set h (stream-open (dict \"id\" \"cam0\" \"w\" 4 \"h\" 2)))"
+                                  "  (state-set \"t.evt\" (get-attr h \"evt_channel\")))")}));
+  mb.button_click = true;
+  rt.render();
+  rt.drain();
+  mb.button_click = false;
+
+  const std::string evt = cvc::state::instance(app)("t.evt").value();
+  ASSERT_EQ(evt, "streams.cam0.evt");
+  app.exec_scheduler().drain_ingress();
+  auto live = app.exec_scheduler().pop_pending_message(evt);
+  ASSERT_TRUE(live.has_value());
+  EXPECT_EQ(std::get<std::string>(live->v), "live");
 }
 
 // ---- §10 tf_editor: the core's model / overlay / view edges, through the mock -----------------

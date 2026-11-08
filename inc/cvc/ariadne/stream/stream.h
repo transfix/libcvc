@@ -39,6 +39,10 @@ namespace cvc {
 
 class app;
 
+namespace state_exec {
+class async_scheduler; // stream_params::scheduler; <cvc/state/state_exec/async_scheduler.h>
+} // namespace state_exec
+
 namespace ariadne {
 namespace stream {
 
@@ -65,6 +69,10 @@ struct stream_params {
   std::size_t producer_working_set = 2;     // slabs reserved for the producer (double-buffer)
   std::size_t in_flight_per_subscriber = 1; // slab a consumer holds while draining/rendering
   double heartbeat_hz = 10.0;               // cap on seq-tick posts (0 => post every seq)
+  // Where the stream posts its seq and lifecycle events, from the producer thread too: the opening
+  // program's group's scheduler (its ictx.host->parking_scheduler(), STATE_EXEC_THREADED.md 4.9).
+  // Null: the app's exec scheduler (group 0), as before. It must outlive the stream.
+  cvc::state_exec::async_scheduler *scheduler = nullptr;
 };
 
 class stream {
@@ -133,6 +141,7 @@ private:
   stream(app &ctx, std::string id);
 
   app &ctx_;
+  cvc::state_exec::async_scheduler *sched_ = nullptr; // where events go (stream_params::scheduler)
   std::string id_;
   std::string scope_;  // root_path this stream was opened under
   std::string token_;  // == registry_key(scope_, id_): canonical descriptor path + registry key
@@ -144,7 +153,7 @@ private:
   std::atomic<std::int64_t> last_post_ns_{0};
   std::shared_ptr<frame_pool> pool_;
   std::unique_ptr<stream_channel> channel_;
-  std::vector<state::state_ptr> descriptor_pins_; // root-child..node ancestor pins (H1)
+  cvc::pin_vector descriptor_pins_; // root-child..node ancestor pins (H1), released leaf first
   state::handle descriptor_;
   state::handle stats_node_;
   // True only after a fully successful open(). A failed open() (token collision

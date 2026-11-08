@@ -560,6 +560,39 @@ TEST(Stream, EventHookupDeliversSeqAndLifecycleThrottled) {
   s->close();
 }
 
+// A stream posts its events to the scheduler stream_params names (its opener's group, threaded
+// Stage 1, STATE_EXEC_THREADED.md 4.9), from another thread too, and none to the app's (group 0).
+TEST(Stream, EventsGoToTheSchedulerItWasOpenedWith) {
+  cvc::app app;
+  cvc::state_exec::async_scheduler group; // outlives the stream
+  stream_params p;
+  p.id = "grp0";
+  p.format = rgba(4, 4);
+  p.heartbeat_hz = 0.0; // every seq posts
+  p.scheduler = &group;
+  auto s = stream::open(app, p);
+  ASSERT_TRUE(s);
+  std::thread producer([&] { s->post_seq(7); }); // as the producer thread posts
+  producer.join();
+  s->close();
+
+  group.drain_ingress();
+  auto live = group.pop_pending_message(s->evt_channel());
+  ASSERT_TRUE(live.has_value());
+  EXPECT_EQ(std::get<std::string>(live->v), "live");
+  auto seq = group.pop_pending_message(s->seq_channel());
+  ASSERT_TRUE(seq.has_value());
+  EXPECT_EQ(std::get<std::int64_t>(seq->v), 7);
+  auto closed = group.pop_pending_message(s->evt_channel());
+  ASSERT_TRUE(closed.has_value());
+  EXPECT_EQ(std::get<std::string>(closed->v), "closed");
+
+  auto &sched = app.exec_scheduler();
+  sched.drain_ingress();
+  EXPECT_EQ(sched.pending_message_count(s->evt_channel()), 0u);
+  EXPECT_EQ(sched.pending_message_count(s->seq_channel()), 0u);
+}
+
 TEST(Stream, ShutdownWithHeldFrameNoUseAfterFree) {
   cvc::app app;
   stream_params p;

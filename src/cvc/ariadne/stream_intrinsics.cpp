@@ -14,6 +14,7 @@
 #include <cvc/ariadne/stream/stream_channel.h>
 #include <cvc/ariadne/stream_intrinsics.h>
 #include <cvc/core/app.h>                    // exec_scheduler warm
+#include <cvc/state/state_exec/async_host.h> // ictx.host->parking_scheduler(): the caller's group
 #include <cvc/state/state_exec/builtins.h>   // register_fn
 #include <cvc/state/state_exec/intrinsics.h> // intrinsics_context
 #include <cvc/state/state_exec/types.h>      // value_t, make_dict
@@ -135,16 +136,19 @@ std::string handle_token(const se::value_t &v) {
 } // namespace
 
 void register_stream_intrinsics(cvc::app &app) {
-  app.exec_scheduler(); // warm the lazy scheduler the stream posts lifecycle/seq on
+  app.exec_scheduler(); // warm group 0's scheduler, where a stream of a group-0 document posts
 
-  register_action_intrinsics([&app](std::shared_ptr<se::environment> env,
-                                    se::intrinsics_context &ictx) {
+  auto provider = [&app](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
     const std::string root = ictx.root_path; // scope streams to the calling document (§4.1)
     se::document_scope *doc = ictx.document; // per-document owner; null on the init: lane
+    // The calling program's group: a stream posts its seq and lifecycle events there, from the
+    // producer thread too (td 4.9). Null (an inline host): group 0, the app's (stream::open).
+    se::async_scheduler *group = ictx.host ? ictx.host->parking_scheduler() : nullptr;
 
     // (stream-open OPTS) -> handle dict { ok id token seq_channel evt_channel }.
     se::builtins::register_fn(
-        env, "stream-open", [&app, root, doc](std::span<const se::value_t> args) -> se::value_t {
+        env, "stream-open",
+        [&app, root, doc, group](std::span<const se::value_t> args) -> se::value_t {
           if (!doc)
             return err("stream-open: no document scope (open a stream from an action or resident "
                        "lane, not the load-time init: lane)");
@@ -184,6 +188,7 @@ void register_stream_intrinsics(cvc::app &app) {
           p.subscriber_depth = static_cast<std::size_t>(sub_depth);
           p.expected_subscribers = static_cast<std::size_t>(exp_subs);
           p.heartbeat_hz = get_num(dict_get(d, "heartbeat_hz"), 10.0);
+          p.scheduler = group;
 
           // The codec selects the kind: "f32" (interleaved float PCM) opens an AUDIO stream —
           // rate/ch and a per-chunk frame size instead of w/h; every other codec opens a raw VIDEO
@@ -297,7 +302,11 @@ void register_stream_intrinsics(cvc::app &app) {
           const bool ok = !token.empty() && tbl->close(token);
           return se::make_dict({{"ok", se::value_t(ok)}});
         });
-  });
+  };
+  // Kind `any` (S1-Q7): the tables are mutex-guarded, the descriptors are written through pinned
+  // walks, and a stream posts to the group it was opened in. The body only reads the context and
+  // binds natives into the new env, so a spawned child may run it on a worker.
+  register_action_intrinsics(std::move(provider), se::provider_affinity::any);
 }
 
 // Cross-module accessor onto the document-owned stream table (declared in the header). Reuses the

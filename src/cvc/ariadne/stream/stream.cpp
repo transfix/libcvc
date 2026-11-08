@@ -16,7 +16,7 @@
 #include <cvc/ariadne/stream/stream_codec.h> // register_stream_data_types (stable descriptor type name)
 #include <cvc/ariadne/stream/stream_registry.h>
 #include <cvc/core/app.h>
-#include <cvc/state/state_exec/async_scheduler.h> // exec_scheduler().post_message
+#include <cvc/state/state_exec/async_scheduler.h> // post_message to the stream's scheduler
 #include <cvc/state/state_exec/intrinsics.h>      // resolve_channel_key (§12 channel scoping)
 #include <utility>
 
@@ -45,8 +45,9 @@ std::string stream::registry_key(const std::string &root_path, const std::string
 
 stream::~stream() {
   close();
-  // Release the descriptor pins/handles. The channel's dtor close()s again
-  // (idempotent). The /streams/<id> node stays in the tree, marked "closed".
+  // Release the descriptor pins/handles, the pins leaf first (a pin_vector), so each node dies with
+  // its ancestors alive. The channel's dtor close()s again (idempotent). The /streams/<id> node
+  // stays in the tree, marked "closed".
   stats_node_ = state::handle();
   descriptor_ = state::handle();
   descriptor_pins_.clear();
@@ -64,6 +65,8 @@ std::unique_ptr<stream> stream::open(app &ctx, const stream_params &p) {
     return nullptr;
 
   std::unique_ptr<stream> s(new stream(ctx, p.id));
+  // Its events go to the opening program's group (STATE_EXEC_THREADED.md 4.9), else group 0.
+  s->sched_ = p.scheduler ? p.scheduler : &ctx.exec_scheduler();
   s->scope_ = p.root_path;
   s->format_ = p.format;
   // §4.1 scoping. The registry key / descriptor path is the canonical
@@ -129,8 +132,7 @@ std::unique_ptr<stream> stream::open(app &ctx, const stream_params &p) {
 void stream::post_seq(std::int64_t seq) {
   pending_seq_.store(seq, std::memory_order_relaxed);
   if (heartbeat_ns_ <= 0) {
-    ctx_.exec_scheduler().post_message(seq_channel_,
-                                       cvc::state_exec::value_t(static_cast<int64_t>(seq)));
+    sched_->post_message(seq_channel_, cvc::state_exec::value_t(static_cast<int64_t>(seq)));
     return;
   }
   const std::int64_t now = steady_now_ns();
@@ -139,14 +141,12 @@ void stream::post_seq(std::int64_t seq) {
     return; // throttle: coalesce; the payload carries the latest seq
   if (!last_post_ns_.compare_exchange_strong(last, now, std::memory_order_relaxed))
     return; // another poster won this window
-  ctx_.exec_scheduler().post_message(
-      seq_channel_,
-      cvc::state_exec::value_t(static_cast<int64_t>(pending_seq_.load(std::memory_order_relaxed))));
+  sched_->post_message(seq_channel_, cvc::state_exec::value_t(static_cast<int64_t>(
+                                         pending_seq_.load(std::memory_order_relaxed))));
 }
 
 void stream::post_lifecycle(const char *lifecycle) {
-  ctx_.exec_scheduler().post_message(evt_channel_,
-                                     cvc::state_exec::value_t(std::string(lifecycle)));
+  sched_->post_message(evt_channel_, cvc::state_exec::value_t(std::string(lifecycle)));
 }
 
 void stream::update_stats() {
@@ -235,9 +235,8 @@ void stream::close() {
   // Flush the final seq the heartbeat throttle may have withheld, so a receiver
   // sees the last frame index before the "closed" event.
   if (pending_seq_.load(std::memory_order_relaxed) >= 0)
-    ctx_.exec_scheduler().post_message(
-        seq_channel_, cvc::state_exec::value_t(
-                          static_cast<int64_t>(pending_seq_.load(std::memory_order_relaxed))));
+    sched_->post_message(seq_channel_, cvc::state_exec::value_t(static_cast<int64_t>(
+                                           pending_seq_.load(std::memory_order_relaxed))));
   if (descriptor_) {
     try {
       descriptor_->value("closed");
