@@ -19,17 +19,18 @@
 // machinery does the setVisible. The binding holds only state-path strings (no node
 // pointer), so it can never dangle into a torn-down node.
 
-#include <chrono>                 // RealizedScene clock-drive wall-dt timestamp
-#include <cstdint>                // RealizeOptions::lod_min_tris
-#include <cvc/ariadne/bind.h>     // SceneVisibilityBinding
-#include <cvc/ariadne/loader.h>   // LoadResult / CustomRequirement (verify_scene_customs)
-#include <cvc/ariadne/scene.h>    // SceneClock (RealizedScene holds the resolved clock by value)
-#include <cvc/core/types.h>       // cvc::sdf_algorithm (sdf_volume_from_mesh)
-#include <cvc/core/world_clock.h> // tick_scene returns the frame's world_clock::step_result
+#include <chrono>                    // RealizedScene clock-drive wall-dt timestamp
+#include <cstdint>                   // RealizeOptions::lod_min_tris
+#include <cvc/ariadne/bind.h>        // SceneVisibilityBinding
+#include <cvc/ariadne/loader.h>      // LoadResult / CustomRequirement (verify_scene_customs)
+#include <cvc/ariadne/scene.h>       // SceneClock (RealizedScene holds the resolved clock by value)
+#include <cvc/ariadne/scene_world.h> // RealizedScene runs the scene's world (core libcvc)
+#include <cvc/core/types.h>          // cvc::sdf_algorithm (sdf_volume_from_mesh)
+#include <cvc/core/world_clock.h>    // tick_scene returns the frame's world_clock::step_result
 #include <cvc/core/world_clock_binding.h> // RealizedScene drives the clock through a binding
 #include <cvc/gl/StageLighting.h>         // RealizedScene owns any StageLighting rigs
 #include <cvc/gl/physics_scene_binding.h> // RealizedScene draws its bodies through one
-#include <cvc/physics/world.h>            // RealizedScene owns the scene's physics world
+#include <cvc/physics/world.h>            // RealizedScene::physics, the scene's world
 #include <functional>
 #include <map>
 #include <memory>
@@ -72,7 +73,6 @@ struct SceneDataBinding {
   std::string path;                                 // the dataset: <prefix>.data.<name>
   std::weak_ptr<GraphicsNode> group;                // the node; its children are the drawing
   std::vector<std::shared_ptr<GraphicsNode>> drawn; // those children
-  std::vector<cvc::physics::body_id> bodies;        // the bodies the dataset added (body:)
   std::string drawn_target;                         // the store node last drawn
   std::string drawn_rev;                            // and its rev then
   std::string frame_key; // frame: the main view camera's frame request (<prefix>.viewers.main...)
@@ -133,9 +133,7 @@ struct RealizedScene {
   // persists across reloads).
   cvc::ariadne::SceneClock clock; // resolved clock declaration; clock.present gates the drive
   cvc::app *app = nullptr;        // owning app (world_clock() + state) — set by realize_scene
-  std::unique_ptr<cvc::world_clock_binding> clock_binding; // made by the first tick_scene
-  std::chrono::steady_clock::time_point clock_last{}; // last tick_scene time (real-elapsed lane)
-  bool clock_primed = false;                          // false until the first tick seeds clock_last
+  std::unique_ptr<cvc::ariadne::SceneClockDriver> clock_driver; // made by the first tick_scene
 
   // shadows: { focus: camera | { follow: camera, ... } }: tick_scene re-aims the shadow maps at
   // what the renderer's camera looks at, every frame, on `sg` (set by realize_scene; the host keeps
@@ -148,21 +146,28 @@ struct RealizedScene {
   // cloud_sky: their `ground:`) samples. The node's GeometryNode holds a plain copy of the mesh.
   std::map<std::string, std::shared_ptr<const cvc::height_field>> height_fields;
 
-  // The scene's physics world (`physics:`, or the nodes' `body:`s), null without one. Its bodies
-  // are placed at their nodes' realized world poses; tick_scene steps it on app.world_clock()
-  // and draws the moving bodies through `physics_binding` (declared after the world, so it goes
-  // first). `bodies` maps node ids to their bodies.
-  std::unique_ptr<cvc::physics::world> physics;
+  // What a custom node's body: collides with, by node id, when the node makes it at run time (a
+  // generated_world's terrain and buildings): realize_physics hands it to the world, which swaps
+  // the node's bodies whenever the node bumps its revision.
+  std::map<std::string, std::shared_ptr<cvc::ariadne::SceneColliders>> colliders;
+
+  // The scene's world (`physics:`, or the nodes' `body:`s), null without one: core libcvc's
+  // cvc::ariadne::SceneWorld, the world a headless host runs for the same document. Its bodies are
+  // placed at their nodes' world poses (composed from the spec); tick_scene steps it on
+  // app.world_clock(), which publishes its telemetry under `physics.stats` (RealizeOptions::
+  // physics_key), and draws the moving bodies through `physics_binding` (declared after the world,
+  // so it goes first). `physics` is the world's physics::world. `bodies` maps node ids to the
+  // bodies the world was built with; a node's colliders and a dataset's come and go at run time,
+  // and world->bodies_of(id) has them.
+  std::unique_ptr<cvc::ariadne::SceneWorld> world;
+  cvc::physics::world *physics = nullptr;
   std::unique_ptr<cvc::gl::physics_scene_binding> physics_binding;
   std::vector<std::pair<std::string, cvc::physics::body_id>> bodies;
   // The source: { data } nodes (SceneDataBinding), rebuilt by tick_scene as their datasets load.
   std::vector<SceneDataBinding> data_nodes;
-  // The body of node `id`, or an invalid id.
+  // The body of node `id` now (the first, for a node with colliders), or an invalid id.
   cvc::physics::body_id body(const std::string &id) const {
-    for (const auto &b : bodies)
-      if (b.first == id)
-        return b.second;
-    return cvc::physics::body_id{};
+    return world ? world->body(id) : cvc::physics::body_id{};
   }
 };
 
@@ -244,6 +249,9 @@ struct RealizeOptions {
   // Where `source: { asset: <id> }` nodes get their geometry. Null: realize_scene keeps a cache of
   // its own for that one scene (each asset still read once there).
   SceneAssetCache *assets = nullptr;
+  // Where the scene's physics world publishes its telemetry (`<key>.stats.*`, resolved against the
+  // bind prefix like a widget bind). Empty: it publishes none (a document's other scenes).
+  std::string physics_key = "physics";
 };
 
 // realize_scene with options; the LOD nodes it creates are listed in RealizedScene::lod_nodes.

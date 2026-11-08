@@ -919,14 +919,43 @@ scene:
   - any other mesh as its convex hull (moving), or itself (static).
 
   `box` and `sphere` on another mesh fit its bounds, and the node's scale is baked into the shape.
-- **Placement.** Each body starts at its node's realized world pose (a nested node's included).
-- **Stepping.** `tick_scene` drives `app.world_clock()` as `clock: {}` would, then steps the world
-  by the quanta due. It draws each moving body's node at the body's pose, between the last two
-  steps, wherever the node sits in the hierarchy.
+- **Placement.** Each body starts at its node's world pose, composed from the scene's transforms
+  (a nested node's included).
+- **Stepping.** The world runs on `app.world_clock()`, driven as `clock: {}` would drive it, and
+  steps by the quanta due. With a renderer, `tick_scene` does that and draws each moving body's
+  node at the body's pose, between the last two steps, wherever the node sits in the hierarchy.
+- **Headless.** The world is core libcvc's (`cvc::ariadne::SceneWorld`,
+  [`scene_world.h`](../inc/cvc/ariadne/scene_world.h)), so it runs with no renderer too. An
+  `AppRuntime` with no `SceneAdapter` (`ari`, `ari test`, pycvc's headless `AriApp`, `arix`)
+  builds the world from the scene alone and steps it on the clock in `drain()`, on real time; a
+  paused clock with step requests, or lockstep, makes that deterministic. Nothing is drawn, and a
+  scene with no world still loads with "scene ignored". The same document reaches the same world
+  state drawn or not, bit for bit (`cvcgl_ariadne_physics`). A geometry node's body, a
+  `generated_world` node's and a data node's run headless; another custom node's needs a
+  renderer. `AppRuntime::scene_world()` is the world it runs.
+- **A generated world's body.** `body: {}` on a `generated_world` node is the world's colliders:
+  its terrain and its buildings, each a static body (`shape:` and `motion:` do not apply). The
+  world is made in core libcvc ([`scene_generated_world.h`](../inc/cvc/ariadne/scene_generated_world.h)),
+  so headless the scene's world runs the node itself: it seeds the `world.*` keys, makes the
+  world as the document says, publishes `world.stats.*`, and makes a new world at once on
+  Regenerate (or on an edit while `world.auto` is on). Drawn, cvcGL's node makes it as a sliced
+  task and hands over its colliders. Either way a new world's colliders replace the old ones.
+  `SceneWorld::generated_world(id)` is the world a headless host made: its raster, roads,
+  buildings and water.
+- **A data node's body.** `body: {}` on a `source: { data }` node collides with its dataset's
+  world, terrain or geometry once the dataset is ready, and again each time it changes. The
+  scene's world takes them, headless or drawn, and it needs the scene's `physics:` block.
+- **Made colliders stay put.** A generated world's and a dataset's colliders sit where they were
+  made: the node's transform does not move them (it warns).
+- **Telemetry.** Each step publishes `physics.stats.{tick, time, step_ms, bodies, active_bodies,
+  contact_events, saturated}` under the document's prefix, drawn or not (a `scenes:` entry's
+  under `scenes.<id>.physics.stats`).
 - **Terrain transforms.** A terrain follows its node's position but not its rotation or scale.
   Draw a ground you collide with unrotated and unscaled.
-- **Reading physics.** `RealizedScene::physics` is the world, `RealizedScene::body(id)` a node's
-  body, and `RealizedScene::height_fields` the heightfield nodes' fields.
+- **Reading physics.** `RealizedScene::physics` is the world (`RealizedScene::world` the
+  `SceneWorld` holding it), `RealizedScene::body(id)` a node's body (the first, for a node with
+  colliders; `world->bodies_of(id)` has them all), and `RealizedScene::height_fields` the
+  heightfield nodes' fields.
 - **Problems** (an unknown material, a body on a group, a fixed_dt between quanta) warn and never
   throw.
 
@@ -1201,6 +1230,7 @@ entry warns. An entry is one of:
   |---|---|
   | `gl.scene` | a scene adapter realizes `scene:` (arigl in a window or `--terminal`, the cvcGL hosts) |
   | `gl.scene.shaders` | the scene runs the document's GLSL (a node's `shader:` block); arigl in a window or `--terminal` |
+  | `scene.physics` | a scene's `physics:` and its nodes' `body:`s run, drawn or not: every host, headless ones too, in a build with Jolt. A document that needs the world but no picture lists this, not `gl.scene` |
   | `gl.ui.shaders` | the UI draws GLSL itself (`shader_canvas`): a GL window, never a terminal |
   | `gl.shaders` | both `gl.scene.shaders` and `gl.ui.shaders` |
   | `gl.view` | a live render view can sit in a widget |
@@ -2765,7 +2795,7 @@ handle ends it with exit status 128 + the signal number. Embedding the same thin
 
 ```cpp
 cvc::ariadne::FtxuiBackend backend;          // outlives the AppRuntime
-cvc::ariadne::AppRuntime rt(app, prefix);    // no SceneAdapter: a scene: is dropped
+cvc::ariadne::AppRuntime rt(app, prefix);    // no SceneAdapter: a scene: is not drawn (its world runs)
 rt.set_backend(backend);
 rt.register_quit();                          // on: quit and (quit [code])
 rt.load(path);

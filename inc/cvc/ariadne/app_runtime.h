@@ -21,6 +21,7 @@
 #include <cvc/ariadne/data.h>          // DataStore
 #include <cvc/ariadne/net_host.h>      // NetHostConfig
 #include <cvc/ariadne/scene_adapter.h> // cvc::ariadne::SceneAdapter (optional)
+#include <cvc/ariadne/scene_world.h>   // SceneWorld: a scene's world with no adapter
 #include <cvc/state/state_exec/async_call.h> // async_marshal (register_async_function)
 #include <cvc/state/state_exec/types.h>      // native_fn (register_function)
 #include <functional>
@@ -231,12 +232,21 @@ public:
   bool reload_if_changed();                 // §12.5 hot reload if a watched source changed
   static bool have_yaml();                  // can load a YAML .ari?
 
+  // The document's scene world when this runtime runs it itself: a host with no SceneAdapter (ari,
+  // ari test, pycvc's headless AriApp, arix) still runs a scene's physics and bodies, stepped on
+  // app.world_clock() by drain() and publishing `physics.stats.*` (scene_world.h). Null when an
+  // adapter realizes the scene (it runs the same world beside its drawing) or the scene has none.
+  SceneWorld *scene_world() const { return world_.get(); }
+
 private:
   void ensure_intrinsics(); // lazily install the register_action_intrinsics provider
 
   cvc::app &app_;
   std::string prefix_;
   SceneAdapter *scene_; // optional; null = no scene (terminal / no-scene backend)
+  // With no adapter: the scene's world, and the clock it runs on (scene_world()).
+  std::unique_ptr<SceneWorld> world_;
+  std::unique_ptr<SceneClockDriver> worldClock_;
   Runtime rt_;
   std::vector<std::string> componentPaths_;
   std::vector<std::string> sources_;

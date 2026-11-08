@@ -176,7 +176,11 @@ scene:
   if (out.height_fields.count("city"))
     CHECK(out.height_fields.at("city")->rows() == 3);
   CHECK(out.physics != nullptr);
-  CHECK(out.data_nodes[0].bodies.size() == 1); // the terrain, static
+  CHECK(out.world != nullptr);
+  if (out.world) { // the scene's world takes the dataset's bodies at its next sync
+    out.world->sync(&warnings);
+    CHECK(out.world->bodies_of("city").size() == 1); // the terrain, static
+  }
   // frame: true — the main view's camera was asked to frame the city's bounds.
   const std::string frame_key = prefix + ".viewers.main.camera.frame";
   const std::string framed = cvc::state::instance(app)(frame_key).value();
@@ -246,7 +250,12 @@ scene:
   CHECK(child_names(*city).size() == 1);
   if (out.height_fields.count("city"))
     CHECK(out.height_fields.at("city")->rows() == 5);
-  CHECK(out.data_nodes[0].bodies.size() == 1); // the old terrain's body went with it
+  if (out.world) { // the old terrain's body went with it
+    const std::size_t before = out.world->world().body_count();
+    out.world->sync(&warnings);
+    CHECK(out.world->bodies_of("city").size() == 1);
+    CHECK(out.world->world().body_count() == before);
+  }
   CHECK(cvc::state::instance(app)(frame_key).value() == framed); // frame: true frames only once
   if (auto terrain =
           std::dynamic_pointer_cast<cvc::gl::GeometryNode>(city->findChildByName("city_terrain")))

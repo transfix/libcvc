@@ -807,6 +807,8 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   // the same file or a host switching documents, and even when this one declares no scene.
   if (scene_)
     scene_->clear();
+  worldClock_.reset();
+  world_.reset();
   if (lr.scene.any()) {
     if (scene_) {
       std::vector<std::string> warns;
@@ -818,8 +820,25 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
       for (std::string &w : warns)
         lr.warnings.push_back(std::move(w));
     } else {
-      lr.warnings.push_back("AppRuntime.load: '" + path +
-                            "' declares a scene but no SceneAdapter is set; scene ignored");
+      // No adapter draws it, but its world runs: the physics world and its bodies, stepped on the
+      // world clock (ARIADNE_WORLDS.md section 14, "Headless first").
+      std::vector<std::string> warns;
+      world_ =
+          SceneWorld::from_scene(app_, lr.scene, prefix_, resolve_bind(prefix_, "physics"), &warns);
+      if (world_ || lr.scene.clock.present) {
+        // A physics world runs on the scene's clock, as if it declared `clock: {}`.
+        SceneClock c = lr.scene.clock;
+        c.speed_key = resolve_bind(prefix_, c.speed_key);
+        c.paused_key = resolve_bind(prefix_, c.paused_key);
+        c.time_key = resolve_bind(prefix_, c.time_key);
+        c.tick_key = resolve_bind(prefix_, c.tick_key);
+        worldClock_ = std::make_unique<SceneClockDriver>(app_, c);
+      }
+      for (std::string &w : warns)
+        lr.warnings.push_back(std::move(w));
+      if (!world_)
+        lr.warnings.push_back("AppRuntime.load: '" + path +
+                              "' declares a scene but no SceneAdapter is set; scene ignored");
     }
   } else if (scene_) {
     scene_->no_scene();
@@ -863,6 +882,22 @@ void AppRuntime::drain() {
   if (scene_) {
     scene_->sync_visibility(app_); // bound visible: -> node .visible
     scene_->tick();                // volren/volslice per-frame service
+  }
+  // No adapter: the scene's clock and world run here, on real time (a paused clock with step
+  // requests, or lockstep, makes it deterministic).
+  if (worldClock_)
+    worldClock_->drive(-1.0);
+  if (world_) {
+    try {
+      world_->follow(app_.world_clock());
+      for (std::string &w : world_->take_warnings()) // a regenerated world's, a dataset's bodies
+        pendingWarnings_.push_back(std::move(w));
+    } catch (const std::exception &e) {
+      // A clock whose quantum changed under the world: stop stepping rather than throw out of
+      // every frame.
+      pendingWarnings_.push_back(std::string("ari: physics stopped: ") + e.what());
+      world_.reset();
+    }
   }
   collect_warnings();
   for (std::size_t i = 0; i < frameHooks_.size(); ++i) {

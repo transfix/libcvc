@@ -93,7 +93,7 @@ catalog:
   - component: world_controls
     file: world_controls.ari
     unit: world_controls
-    binds: "<prefix>.{keys}.*"              # read every frame by the cvcGL generated_world realizer
+    binds: "<prefix>.{keys}.*"              # read every frame by the generated_world node, drawn or headless
     for: "a `type: generated_world` node (seed / preset / size / counts / relief / water / colour)"
     args: { keys: world, title: Terrain Lab, id: world_controls }   # defaults; keys = the node's `keys:` prop
     note: "the realizer seeds world.* from the node props; structural edits regenerate the world"
