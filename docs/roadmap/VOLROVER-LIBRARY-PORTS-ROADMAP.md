@@ -1,12 +1,17 @@
 # VolumeRover Library Ports — Roadmap (sketch)
 
-**Status:** sketch, 2026-11-07. Nothing has landed and no decisions are final; §8 lists the ones
-that need Joe. **Based on:** libcvc `origin/master @ 7a09366f` and volrover `master @ b4a172c`
-(the legacy libraries live under `src/<Lib>` and `inc/<Lib>` there).
-**Scope:** three legacy VolumeRover libraries, Skeletonization, Tiling (with its successor
-ContourTiler) and VolumeGridRover, ported into libcvc the way `mesh_lab` / `fe_lab` were: a
-headless `cvc::` API, a `cvc` CLI command, pycvc bindings and an Ariadne node type with a
-component. VolumeGridRover becomes an Ariadne component with embedded GL views.
+**Status:** sketch, 2026-11-07; revised 2026-11-08 to add GenSeg and to record that ContourTiler
+is LGPL. Nothing has landed and no decisions are final; §9 lists the ones that need Joe.
+**Based on:** libcvc `origin/master @ 7a09366f` and volrover `master @ b4a172c` (the legacy
+libraries live under `src/<Lib>` and `inc/<Lib>` there).
+**Scope:** four legacy VolumeRover libraries, ported into libcvc the way `mesh_lab` / `fe_lab`
+were: a headless `cvc::` API, a `cvc` CLI command, pycvc bindings and an Ariadne node type with
+a component.
+- Skeletonization.
+- Tiling, with its successor ContourTiler.
+- GenSeg, the seeded segmentation, with the automatic seeding from its sibling SegMed.
+- VolumeGridRover, which becomes an Ariadne component with embedded GL views and drives the
+  other three.
 **Companions:** [ARIADNE.md](../ARIADNE.md) §5.4 (custom node types), §5.5 (request keys),
 §5.18 (the `viewport` widget, `scenes:`, named cameras), §6.5 (the component library);
 [LIBIGL-GEOMETRY-FE-ROADMAP.md](LIBIGL-GEOMETRY-FE-ROADMAP.md) (the `mesh_lab` / `fe_lab`
@@ -26,24 +31,38 @@ VolUtils leftovers).
 - **Tiling** (§3) means ContourTiler, not the old `src/Tiling`. The old tiler has not been built
   since 2011 and carries a Purdue SHASTRA notice that forbids commercial use. ContourTiler
   reimplements the same 1996 algorithm for many components and is the one VolumeRover2 uses. It
-  is heavy CGAL (exact boolean ops, so GMP and MPFR). It lands as `cvc::tile_contours`,
-  `cvc tile`, and a `contour_lab` node, on a new shared `cvc::contour_stack` type.
+  is heavy CGAL (exact boolean ops, so GMP and MPFR) and LGPL like libcvc. It lands as
+  `cvc::tile_contours`, `cvc tile`, and a `contour_lab` node, on a new shared
+  `cvc::contour_stack` type.
 - **VolumeGridRover** (§4) is a rebuild, not a translation. Its Qt6 code is mostly stubs:
   contours cannot be created, and tiling, SDF and medial axis are commented out. Its GL is
   2005-era. What carries over is the design: three axis slice views, a voxel probe, point
   classes, contours drawn per object, and tiling them into surfaces. It becomes a `volume_grid`
   node plus a `volume_grid.ari` component of four embedded `viewport`s.
-- **Most of the GL viewer already exists** (§5): the `viewport` widget, tags, named cameras and
+- **GenSeg** (§5) is a small port, about 2.8k lines of LGPL code. It implements §2.2 of Bajaj,
+  Yu and Auer, *J. Struct. Biol.* 144 (2003): multi-seed fast marching, where fronts slow at
+  edges and fronts of different classes stop where they meet. VolumeGridRover's point classes
+  are its seeds. It doesn't work properly today, for these reasons:
+  - it reads its input and names its outputs through dangling `c_str()` pointers;
+  - it runs on about 25 globals;
+  - it passes results through files in the current directory, and nothing loads them back.
+
+  The port is first made to match the legacy output voxel for voxel. Then it gains the paper's
+  fully automatic seeding, which is SegMed's critical points of the diffused gradient field. It
+  lands as `cvc::segment_seeded`, `cvc segment`, and a Segmentation tab in `volume_grid`.
+- **Most of the GL viewer already exists** (§6): the `viewport` widget, tags, named cameras and
   `scenes:`. Four new pieces are needed, all reusable:
   1. an axis-aligned `volume_slice` node;
   2. a `mode: slice` orthographic camera;
   3. pointer events from a viewport into state (the open "click-to-world picking" item);
   4. overlays that stay on top of a slice.
-- **Order** (§6): three tracks can start at once, each with nothing to wait on: the
-  Skeletonization core, the ContourTiler core, and the Ariadne viewport pieces. VolumeGridRover
-  follows the viewport pieces, and its Tile button follows the tiler.
-- **Decisions for Joe** (§8): CGAL's GPL packages versus the LGPL bundle, ContourTiler's missing
-  licence header, native-only versus a wasm spike, and segmentation in or out.
+- **Order** (§7): four tracks can start at once, each with nothing to wait on: the
+  Skeletonization core, the ContourTiler core, the GenSeg core, and the Ariadne viewport pieces.
+  VolumeGridRover follows the viewport pieces. Its Tile button follows the tiler, and its
+  Segment button follows GenSeg.
+- **Decisions for Joe** (§9): CGAL's GPL packages versus the LGPL bundle, and native-only versus
+  a wasm spike. GMP and MPFR are LGPL, so they don't affect the licence question; their only
+  problem is that wasm has no build of them.
 
 ---
 
@@ -174,6 +193,8 @@ There are two legacy tilers, and only one is worth porting.
   algorithm, extended to many components with removal of intersections between components
   (the README targets neuropil "AxonsDendrites" serial-section data). It is built by default
   and reached from VolumeRover2's Tools > Contour Tiler.
+  - Licence: LGPL like libcvc (Joe, 2026-11-08). Its files carry no header, so vendoring adds
+    libcvc's.
   - Size: about 24k source and 13k header lines, tests and tools included.
   - No Qt, GL, VolMagick or GSL. Errors are exceptions, not `exit()`, apart from `smfconvert.cpp`,
     a tool file that sits in the library's source list.
@@ -185,7 +206,7 @@ There are two legacy tilers, and only one is worth porting.
 | `tile(begin, end, comp2color, options)` mutates the input slices and writes `.rawc` files; it returns nothing (`tiler.cpp:555-576`) | Takes a const `contour_stack` and returns one `cvc::geometry` per component; files only from the CLI |
 | log4cplus in 48 files: 156 `getInstance` calls, 104 function-static loggers | A shim header mapping its logger calls to libcvc's log, so each vendored file changes by one include |
 | Two `.ser` readers: the app's goes through ContourFilter's `Controls::instance()` singleton (reconfigured on every read, hard-coded ignored names, drops a whole component if one contour is non-simple); the CLI's uses tinyxml | Port the tinyxml reader into `contour_stack` I/O. ContourFilter's smoothing waits until someone needs it |
-| Exact number types for the boolean ops (`Lazy_exact_nt<Gmpz>`, `Gmpq`, `MP_Float`), so GMP and MPFR | Native only at first (§8 item 3) |
+| Exact number types for the boolean ops (`Lazy_exact_nt<Gmpz>`, `Gmpq`, `MP_Float`), so GMP and MPFR (LGPL, but with no wasm build) | Native only at first (§9 item 2) |
 | GCC-only flags baked in (`-g -pthread -frounding-math`, `-rdynamic`) | `SetupCGAL` does what is needed per compiler |
 | 12 `test_*.cpp` on CppUnitLite2, switched off (`test_intersection.cpp` alone is 2,252 lines, with expected outputs) | Converted to gtest: free regression coverage for the port |
 | `cvcraw_geometry::contours_t` stores `ContourTiler::Slice`, a reverse dependency | `cvc::contour_stack` is the shared type, and the tiler converts at its edge |
@@ -247,7 +268,7 @@ One step of the job is one slice pair of one component, so progress is real.
   - a rubber band selects, with Shift / Ctrl / Alt modifiers, and a drag moves the selection;
   - Delete removes it; the arrow keys and PageUp / PageDown step slices;
   - classes save as `.vgr` XML (loading is stubbed) and points load from `.pts`.
-- **Segmentation:** the point classes are seeds for GenSeg, run locally or over XML-RPC. It
+- **Segmentation:** the point classes are seeds for GenSeg (§5), run locally or over XML-RPC. It
   leaves `SegTmp.rawv` in the current directory, and nothing in VolumeRover2 loads it.
 - **Contours:** per-object contours on slices, with interpolation, export (`.pcd` and
   `.contour` work; `.cnt`, `.bspline` and `.matc` were never ported to Qt6) and tiling into
@@ -270,17 +291,19 @@ which is the out-of-core path. The memory-mapped readers are not even built.
 **So this port is a rebuild of what VolumeGridRover was for, not a translation of the widget.**
 None of its Qt or GL code carries over. Its data model, file formats, interaction design and a
 few algorithms do. volrover's history from before the Qt6 migration may hold the last working
-contour and tiling code. Read it before phase 7; the shallow clone used for this sketch has none
+contour and tiling code. Read it before P10; the shallow clone used for this sketch has none
 of it.
 
 **The node: `type: volume_grid`** (`inc/cvc/gl/ariadne/volume_grid_nodes.h`)
 
 - It reads `source: { file, var, time }` as a volume node does.
 - **Children:**
-  - three `volume_slice` nodes (§5 item 1), tagged `slice_xy`, `slice_xz` and `slice_zy`;
-  - per slice, overlays carrying the same tag: point-class glyphs, contour polylines, and
-    crosshairs where the other two planes cross;
-  - a `<id>_surfaces` group for tiled surfaces (tag `surfaces`).
+  - three `volume_slice` nodes (§6 item 1), tagged `slice_xy`, `slice_xz` and `slice_zy`;
+  - per slice, overlays carrying the same tag: point-class glyphs, contour polylines,
+    crosshairs where the other two planes cross, and the segmentation's labels as a
+    see-through colour layer;
+  - a `<id>_surfaces` group for tiled surfaces and segmented classes' surfaces (tag
+    `surfaces`).
 - One scene, tagged groups: the XY view shows `slice_xy`, and the 3D view shows all three planes
   with the surfaces, the classic orthoslicer.
 - Edits run in C++ in the node, where they are fast and testable. The DSL only wires widgets to
@@ -294,11 +317,12 @@ Keys under `<node>.grid.*`:
 | `slice.x`, `slice.y`, `slice.z` | voxel indices; written by the sliders, the keys and clicks |
 | `cursor.{i,j,k,x,y,z,value}` | published on hover: the probe |
 | `tool` | `navigate`, `points`, `contours`, `probe` |
-| `pick.*` | written by the views (`pick:` on the viewport, §5 item 3); the tick consumes each new pick according to `tool`: `points` toggles a point (adds one, or removes the nearest within `display.point_size` on this slice), `contours` appends to the current object's contour on this slice at its nearer end, and a Shift-drag selects with a rubber band |
+| `pick.*` | written by the views (`pick:` on the viewport, §6 item 3); the tick consumes each new pick according to `tool`: `points` toggles a point (adds one, or removes the nearest within `display.point_size` on this slice), `contours` appends to the current object's contour on this slice at its nearer end, and a Shift-drag selects with a rubber band |
 | `classes`, `classes.current` | point classes: name, colour, radius |
 | `objects`, `objects.current` | contour objects: name, colour, interpolation (`linear` or `spline`), samples |
 | `display.point_size`, `display.show_points`, `display.grey`, `display.background` | display |
-| `request` | `load`, `save_classes <f>`, `load_classes <f>`, `load_points <f>`, `save_contours <f>`, `load_contours <f>`, `delete_selected`, `tile`, `undo`, `stop` |
+| `segment.t_low`, `segment.t_high`, `segment.gamma`, `segment.seeds` (`none` for the point classes alone, `local_maxima`, `critical_points`), `segment.show`, `segment.opacity` | §5's parameters, and how the labels draw |
+| `request` | `load`, `save_classes <f>`, `load_classes <f>`, `load_points <f>`, `save_contours <f>`, `load_contours <f>`, `delete_selected`, `tile`, `segment`, `save_segments <f>`, `undo`, `stop` |
 | `busy`, `status`, `progress`, `phase` | published |
 | `<node>.transfer_function` (+ `.histogram` …) | as on every volume node, so the `tf_editor` colours the slices |
 
@@ -319,10 +343,10 @@ Keys under `<node>.grid.*`:
   - `medax.h`, a 2D medial axis through CGAL's segment Delaunay graph;
   - Kinney's b-spline fit (`bspline_fit.cpp`, not compiled today);
   - slice isolines through libcontour's 2D path, already in-tree (`cvc-mesher/contour/conplot2d`).
-- **Not in scope: segmentation.** GenSeg is 35.6k lines in `src/Segmentation`. Until it is
-  ported, VolumeGridRover saves point classes as seeds, and a later Segmentation port adds a
-  `segment` request. #123's seed generators (`criticalPntsToSeed`, `SeedProduce*`) belong with
-  it.
+- **Segment:** §5's `segment_seeded`, with the point classes as seeds. The labels show on the
+  slices in the classes' colours. Each class's surface shows in the 3D view (an isosurface of
+  its mask), and `save_segments` writes the per-class volumes the legacy left in the current
+  directory. This also finally loads the result, which VolumeRover2 never did.
 
 **The component: `volume_grid.ari`**
 
@@ -332,9 +356,12 @@ Keys under `<node>.grid.*`:
     view;
   - under each slice view, a slider bound to `grid.slice.{z,y,x}`, with the index in the
     view's caption;
-  - a side panel with tabs: Probe, Point classes (list, colour, radius, add, delete, save,
-    load), Contours (objects, colour, interpolation, samples, save, load, Tile) and Transfer
-    function (the `transfer_function_editor` unit).
+  - a side panel with tabs:
+    - Probe;
+    - Point classes: list, colour, radius, add, delete, save, load;
+    - Contours: objects, colour, interpolation, samples, save, load, Tile;
+    - Segmentation: thresholds, γ, seed mode, Segment, Stop, label opacity, save;
+    - Transfer function: the `transfer_function_editor` unit.
 - **`volume_grid_views`** and **`volume_grid_tools`:** the views alone and the panel alone, for
   a document that lays them out itself.
 - **Args:** `node`, `title`, `id`, `view_size`, `layout` (`quad`, or `tabs` like the legacy).
@@ -343,7 +370,135 @@ Keys under `<node>.grid.*`:
 
 ---
 
-## 5. Ariadne pieces VolumeGridRover needs
+## 5. Seeded segmentation (GenSeg)
+
+**What it is.** `src/Segmentation/GenSeg` is about 2.8k lines; `segment.cpp` is 1,969 of them.
+It is CVC code under the LGPL. Its headers ask users to cite the paper it implements:
+
+> C. Bajaj, Z. Yu, M. Auer, "Volumetric feature extraction and visualization of tomographic
+> molecular imaging", *Journal of Structural Biology* 144(1–2):132–143, 2003,
+> doi:10.1016/j.jsb.2003.09.037 (a PDF is on Bajaj's UT page:
+> <https://cs.utexas.edu/~bajaj/papers/2003/journal/sdarticle04.pdf>).
+
+The method is the paper's §2.2, "Boundary segmentation". GenSeg is what VolumeGridRover's
+Segmentation tab runs, with the point classes as seeds (`generalSegmentation`,
+`genseg.h:48`).
+
+**The method in the paper**
+
+- **Fast marching:** fronts grow by fast marching (‖∇T‖·F = 1) at speed F = exp(γ‖∇I‖), with
+  γ < 0, so they slow at edges.
+- **Seeds:** the critical points of the gradient field after anisotropic gradient vector
+  diffusion (§2.1, Eqs. 2–3). Maxima seed the feature group, minima seed the background, and
+  saddles are dropped. In the paper's §4, maxima below a threshold move to the background and
+  minima above one move to the feature.
+- **Stopping:** fronts of one group merge when they meet, and fronts of different groups stop
+  at their common boundary. That gives fast marching the stopping criterion it otherwise lacks.
+- **More groups:** more than two groups give multi-material segmentation.
+
+**What GenSeg does: a user-seeded, multi-class variant**
+
+1. Normalise the volume to 0–255. Take the gradient magnitude by central differences,
+   normalised to 0–255.
+2. Find automatic seeds. These are the local maxima above `t_high` of a lightly smoothed copy
+   (two passes of a 7-point average), not the paper's diffused-gradient critical points.
+3. Place each class's user seeds (the point classes) at time 0.
+4. Classify the automatic seeds. A threshold sweeps down from 255 to `t_low`, and each seed
+   takes the class whose front reaches it first through voxels above the threshold.
+5. Run multi-label fast marching from every labelled voxel through voxels above `t_low`. The
+   time step is `0.01·exp(0.12·|∇I|)`, which is the paper's speed with γ = −0.12. A voxel
+   where two classes meet is a border voxel.
+6. Write, per class, `<prefix>_subunit_<n>.rawiv`: the class's voxels with their intensity and
+   zero elsewhere. Also write the border voxels as `_indices.txt` and `_indices.pcd`.
+
+**SegMed is the paper's automatic mode.** `src/Segmentation/SegMed` is about 3.1k lines and
+cites the same paper. Its `GVF_Compute` (`GVF.cpp:69`) finds the critical points of the diffused
+gradient field, and its `Segment` marches from them into `<file>.seg.rawiv`. Nothing in
+VolumeRover2 calls it.
+
+**Why it doesn't work properly today**
+
+- **Dangling pointers:** `generalSegmentation` keeps `string(params[0]).c_str()` and
+  `string(params[4]).c_str()`, which point into temporaries destroyed at the end of each
+  statement. It then opens the input and names the outputs through them, which is undefined
+  behaviour on every run.
+- **Global state:** about 25 globals, plus an `extern VolMagick::VolumeFileInfo
+  loadedVolumeInfo` that the reader sets. Only one run at a time per process is safe.
+- **Files instead of memory:**
+  - it reads its input from a file and writes its outputs to the current directory;
+  - VolumeGridRover then regex-scans the current directory for `*_subunit_N.rawiv`, deletes
+    those files and writes `SegTmp.rawv`, which nothing loads;
+  - both worker threads read Qt widgets off the GUI thread.
+- **Error handling:** `exit(0)` when an output file can't be opened, and the critical-point list
+  leaks.
+- **Units:** thresholds are on the 0–255 normalised scale, not in the data's units.
+- **Remote mode:** a remote mode goes over XML-RPC.
+
+**API sketch** (`inc/cvc/volume/segmentation.h`)
+
+```cpp
+namespace cvc {
+enum class seed_mode { none, local_maxima /* GenSeg */, critical_points /* the paper, SegMed */ };
+struct seeded_segmentation_params {
+  double t_low = 0, t_high = 0;      // data units...
+  bool normalized_thresholds = false; // ...or the legacy 0-255 scale
+  double gamma = -0.12;               // speed F = exp(gamma * |grad I|), |grad I| on 0..255
+  seed_mode automatic = seed_mode::local_maxima;  // added to the user's seeds
+  // critical_points: diffusion iterations, k (Eq. 3), the feature / background thresholds
+};
+struct seeded_segmentation {
+  volume labels;                      // uint8: class index, or unlabelled / border
+  std::vector<volume> classes;        // the legacy _subunit_<n>: the class's voxels, zero elsewhere
+  std::vector<std::array<int, 3>> border;
+};
+seeded_segmentation segment_seeded(const volume &, const point_classes &seeds,
+                                   const seeded_segmentation_params & = {});
+std::unique_ptr<sliced_job> segment_seeded_job(volume in, point_classes seeds,
+                                               seeded_segmentation_params p, seeded_segmentation &out);
+}
+```
+
+One step of the job is a fixed number of heap pops, so a big volume marches without stalling a
+frame.
+
+**Order of work**
+
+1. **Match the legacy output.** Vendor GenSeg's marching into a context struct with in-memory
+   input and output. Keep the hand-unrolled 26-neighbour update as it is for this release.
+   - Run the legacy code once on small synthetic volumes with fixed seeds: two blobs, a blob
+     touching a shell, and a noisy one. Commit the expected label volumes.
+   - The port must match them voxel for voxel before any clean-up.
+   - Then add tests of its own: two classes never cross a gradient ridge; one seed of each class
+     in one blob splits at the ridge; two runs in one process agree.
+2. **Clean up:** compact the unrolled update, take thresholds in data units, and pick the heap.
+   The parity tests guard each change.
+3. **Add the paper's automatic mode.** Port SegMed's diffused-gradient critical points as
+   `seed_mode::critical_points`: maxima join the feature, minima the background, with the
+   paper's §4 threshold reclassification.
+   - Without a click, this gives the paper's fully automatic two-class segmentation. With point
+     classes, it gives more groups.
+   - The gradient vector diffusion lands as a shared `cvc::gradient_vector_diffusion`, since
+     SecStruct, SegMonomer and the paper's §2.3 volumetric skeletons use the same field.
+4. **Seed generators:** fold in transfix/libcvc#123's seed generators (`criticalPntsToSeed`,
+   `SeedProduce*`).
+
+**Surfaces**
+
+- **CLI:** `cvc segment in.rawiv --seeds classes.vgr --tlow 40 --thigh 200 -o out`. It writes the
+  labels volume and the per-class volumes. `--auto critical-points` runs the paper's mode with no
+  seeds file.
+- **pycvc:** `cvc.segment_seeded(...)`.
+- **Ariadne:** the Segmentation tab and the `segment` request in `volume_grid` (§4).
+
+**Not in this effort:** the virus-specific siblings SegCapsid, SegSubunit and SegMonomer, and
+SecStruct. Together they are about 30k lines. Each would reuse the fast marching core and the
+gradient vector diffusion. The paper's §2.3 volumetric skeleton (a skeleton magnitude map traced
+with Canny's hysteresis) is also a later item. It complements §2's cocone skeleton, which needs a
+surface sample rather than a volume.
+
+---
+
+## 6. Ariadne pieces VolumeGridRover needs
 
 Most of the GL-viewer work is already on master. What exists, and what is new:
 
@@ -396,32 +551,37 @@ work; items 4 and 5 are small.
 
 ---
 
-## 6. Phases
+## 7. Phases
 
 Sizes are relative: S is a PR or two, M a few, L a short series.
 
 | Phase | Size | What lands | Needs |
 |---|---|---|---|
-| P0 Groundwork | S | `cvc::contour_stack` with its readers and writers; `cvc::point_classes` with `.vgr` / `.pts`; the §8 answers; a spike building CGAL's `Delaunay_triangulation_3` for wasm-mt with `CGAL_DISABLE_GMP` and Boost.Multiprecision as the exact fallback | — |
+| P0 Groundwork | S | `cvc::contour_stack` with its readers and writers; `cvc::point_classes` with `.vgr` / `.pts`; the §9 answers; a spike building CGAL's `Delaunay_triangulation_3` for wasm-mt with `CGAL_DISABLE_GMP` and Boost.Multiprecision as the exact fallback | — |
 | P1 Skeleton core | M | Vendor into `src/cvc/geometry/skeleton/` with the shared cocone core. Add the context struct, the §2 fixes, `cvc::skeletonize` and its sliced job. gtests: a torus gives one closed strand; a thin slab one sheet; a capsule one segment; two calls in one process agree (the global-box bug); output is deterministic. Also `cvc skeleton` and pycvc | P0 decision 1 |
 | P2 Skeleton in Ariadne | S | `mesh_lab` `skeleton` request, children, mesh_tools section; a demo document with a golden image | P1 |
 | P3 Tiler core | L | Vendor into `src/cvc/geometry/tiler/` with the log4cplus shim; in-memory output, const input; its 12 tests as gtest; `cvc tile`; pycvc | P0 |
 | P4 Tiler in Ariadne | S | `contour_lab` and `contour_tiler.ari`, with a demo on a small redistributable Reconstruct series (find one) | P3 |
-| P5 Viewport pieces | M | §5: the `volume_slice` node, `mode: slice`, `input: pick` / `pick:` / `on_pick:`, overlay offset, missing widgets. Each with tests, plus an orthoslicer demo next to `volren_bunny` | — |
-| P6 volume_grid v1 | M | Navigation, probe, point classes (mark, select, move, delete, save, load), the transfer function, quad or tab layout; golden image and scripted-pick tests | P5, P0 |
-| P7 volume_grid v2 | M | Contours: draw and edit per object, linear and spline, export; `tile` puts surfaces in the 3D view | P6, P3 |
-| P8 Web and wrap-up | S–M | arigl-web for whatever is CGAL-free (volume_grid without Tile, and the rest if the P0 spike worked). Docs: ARIADNE.md §5.4 rows, INDEX.ari entries. volrover3 picks it all up through libcvc. Retire the legacy libraries from volrover `master` once parity holds, together with #123's VolUtils leftovers | P2, P4, P7 |
+| P5 Segmentation core | M | §5 steps 1–2: GenSeg vendored into `src/cvc/volume/segmentation/` with a context struct and in-memory input and output; voxel-for-voxel parity tests against committed legacy outputs, then the clean-up; `cvc segment`; pycvc. CGAL-free, so it runs on wasm | P0 (`point_classes`) |
+| P6 Paper mode | S–M | §5 steps 3–4: `cvc::gradient_vector_diffusion` and SegMed's critical-point seeds (`seed_mode::critical_points`), and #123's seed generators | P5 |
+| P7 Viewport pieces | M | §6: the `volume_slice` node, `mode: slice`, `input: pick` / `pick:` / `on_pick:`, overlay offset, missing widgets. Each with tests, plus an orthoslicer demo next to `volren_bunny` | — |
+| P8 volume_grid v1 | M | Navigation, probe, point classes (mark, select, move, delete, save, load), the transfer function, quad or tab layout; golden image and scripted-pick tests | P7, P0 |
+| P9 volume_grid v2 | M | Segmentation tab: `segment`, labels on the slices, class surfaces in the 3D view, `save_segments` | P8, P5 |
+| P10 volume_grid v3 | M | Contours: draw and edit per object, linear and spline, export; `tile` puts surfaces in the 3D view | P8, P3 |
+| P11 Web and wrap-up | S–M | arigl-web for whatever is CGAL-free (volume_grid with Segment but without Tile, and the rest if the P0 spike worked). Docs: ARIADNE.md §5.4 rows, INDEX.ari entries. volrover3 picks it all up through libcvc. Retire the legacy libraries from volrover `master` once parity holds, together with #123's VolUtils leftovers | P2, P4, P9, P10 |
 
-P1, P3 and P5 share no files and need nothing from each other, so they can run as parallel
+P1, P3, P5 and P7 share no files and need nothing from each other, so they can run as parallel
 sessions. Separate items afterwards:
 
-- a Segmentation (GenSeg) port, which becomes `volume_grid`'s `segment` request;
 - SDF2D, the 2D medial axis and contour curation;
-- TightCocone and PocketTunnel on the shared cocone core.
+- TightCocone and PocketTunnel on the shared cocone core;
+- the virus segmentations (SegCapsid, SegSubunit, SegMonomer) and SecStruct, on §5's fast
+  marching and gradient vector diffusion;
+- the paper's §2.3 volumetric skeletons.
 
 ---
 
-## 7. What is deliberately left behind
+## 8. What is deliberately left behind
 
 - **The old `src/Tiling` code:** its licence, the globals, the `exit()`s and the temp files.
   Its contour format survives as a reader.
@@ -438,40 +598,48 @@ sessions. Separate items afterwards:
   files.
 - **ContourFilter's smoothing singleton**, unless a dataset needs it.
 - **EM clustering**, compiled out today for "serious memory problems".
+- **GenSeg's XML-RPC remote mode and its file round trip.** A remote run is the node on an
+  arisrv host.
 - **Skeletonization's helix-specific strand window and its `#if 0` helix block**, unless they are
   wanted as an option; they fit better with a SecondaryStructures port.
 
 ---
 
-## 8. Decisions for Joe
+## 9. Decisions for Joe
 
-1. **CGAL's GPL packages.** Both CGAL ports use GPL-3+ packages: Skeletonization uses 3D
-   Triangulations, and ContourTiler uses 2D Boolean operations, Arrangements, constrained
-   Delaunay and the straight skeleton. libcvc already compiles CGAL's Spatial Searching (also
-   GPL) into `nav/spatial.cpp` and `project_verts.h` whenever CGAL is found, so the native
-   bundle already carries GPL CGAL code. Dropping FFTW to make the bundle LGPL-2.1 shows the
-   licence matters. The options:
+Settled on 2026-11-08: ContourTiler is LGPL like libcvc, and GenSeg is in scope (§5).
+
+1. **CGAL's GPL packages.** The ported code itself is LGPL: Skeletonization, ContourTiler,
+   GenSeg and VolumeGridRover. So are GMP and MPFR: GMP is dual LGPL-3+ / GPL-2+, MPFR is
+   LGPL-3+, and linking them leaves libcvc LGPL. What brings in the GPL is CGAL. Its kernel,
+   number types and support library are LGPL-3+, but most of its algorithm packages are GPL-3+:
+   - Skeletonization uses 3D Triangulations;
+   - ContourTiler uses 2D Boolean operations, Arrangements, constrained Delaunay and the
+     straight skeleton.
+
+   libcvc already compiles CGAL's Spatial Searching (also GPL) into `nav/spatial.cpp` and
+   `project_verts.h` whenever CGAL is found, so the native bundle already carries GPL CGAL code.
+   Dropping FFTW to make the bundle LGPL-2.1 shows the licence matters. The options:
    - (a) build the ports into libcvc when CGAL is found, as today;
    - (b) put them in a separate optional library (say `cvc_cgal`), so the core stays LGPL. The
      existing two uses could move there later.
 
-   **Recommended: (b).**
-2. **ContourTiler's licence.** Its sources carry no licence header. Skeletonization and
-   VolumeGridRover carry UT LGPL-2.1 headers. Confirm ContourTiler is UT CVC code under the same
-   terms before vendoring it.
-3. **The web.** CGAL is off on wasm today (`DISABLE_CGAL=ON`: GMP and MPFR have no wasm-mt
-   build). The options:
+   **Recommended: (b).** GenSeg needs no CGAL and stays in the core.
+2. **The web.** CGAL is off on wasm today (`DISABLE_CGAL=ON`), because GMP and MPFR have no
+   wasm-mt build. That is about availability, not licence. The options:
    - ship skeletons and tiling native-only;
    - try the P0 spike. Skeletonization needs only EPICK plus 3D Delaunay, which should build
      without GMP. ContourTiler's exact boolean ops are much harder.
 
    **Recommended:** native-only, and run the spike for Skeletonization alone.
-4. **Where the skeleton lives.** A request on `mesh_lab` needs both libigl and CGAL in the build.
+3. **Where the skeleton lives.** A request on `mesh_lab` needs both libigl and CGAL in the build.
    A small node type of its own does not. **Recommended:** `mesh_lab`. libigl is header-only, ON by
    default (`CVC_ENABLE_LIBIGL`, which turns itself off only when the packages are missing) and in
    the libcvc recipe, so a CGAL build without it is unusual.
-5. **The VolumeGridRover layout.** Four views at once (recommended), or the legacy tabs. The
+4. **The VolumeGridRover layout.** Four views at once (recommended), or the legacy tabs. The
    `layout` arg can offer both.
-6. **Segmentation.** Does GenSeg join this effort, or stay a separate item? **Recommended:**
-   separate. It is 35.6k lines, and the seeds VolumeGridRover saves are enough to start.
-7. **Names.** `volume_grid`, `contour_lab`, `volume_slice`, `cvc skeleton`, `cvc tile`.
+5. **GenSeg's default seeding.** Once the paper mode lands, should `volume_grid` default to it
+   or to GenSeg's local maxima? **Recommended:** keep GenSeg's local maxima until the paper mode
+   matches the legacy results on real maps, then switch.
+6. **Names.** `volume_grid`, `contour_lab`, `volume_slice`, `cvc::segment_seeded`,
+   `cvc skeleton`, `cvc tile`, `cvc segment`.
