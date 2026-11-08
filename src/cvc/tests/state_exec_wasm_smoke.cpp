@@ -4,22 +4,29 @@
 // section and a waiter granted once the holder lets go, then an empty lock-query. Then the same on
 // an async scheduler attached to the app's lock manager as pycvc's Exec attaches
 // (threaded_host_attach()): where there are no threads, auto mode makes that manager single and the
-// attach is accepted. It prints STATE_EXEC_WASM_OK and returns 0, or prints what failed and
-// returns 1. Built only with CVC_BUILD_STATE_EXEC_WASM_SMOKE (it runs natively too, where threads
-// are compiled in: there the single manager refuses that attach, naming
-// state_exec.locks.threading, and the sections run on a same-thread attach).
+// attach is accepted. Then the app's exec_pool at threads 0, the only size without threads
+// (threaded execution's Stage 1a): its pump_all pumps two groups inline, on this thread. It prints
+// STATE_EXEC_WASM_OK and returns 0, or prints what failed and returns 1. Built only with
+// CVC_BUILD_STATE_EXEC_WASM_SMOKE (it runs natively too, where threads are compiled in: there the
+// single manager refuses that attach, naming state_exec.locks.threading, and the sections run on a
+// same-thread attach; the pool is asked for 0 workers, so it has none there either).
 
+#include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cvc/core/app.h>
+#include <cvc/core/exec_pool.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
+#include <cvc/state/state_exec/exec_group.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/lock_manager.h>
 #include <cvc/state/state_exec/process.h>
 #include <cvc/state/state_exec/scheduler.h>
 #include <deque>
 #include <exception>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -150,11 +157,56 @@ bool run_on_app_manager() {
   return ok;
 }
 
+// The app's exec_pool at threads 0 (S1.15): two groups on the app, each with a program, pumped
+// by pump_all rounds of 1000 steps until both have ended, every pump on this thread.
+bool run_exec_pool() {
+  const char *kind = "exec_pool";
+  bool ok = true;
+  cvc::app app;
+  cvc::exec_pool &pool = app.exec_pool(cvc::pool_options{});
+  ok &= expect(pool.threads() == 0, kind,
+               "the pool has " + std::to_string(pool.threads()) + " workers, not 0");
+  se::exec_group::options oa, ob;
+  oa.name = "wasm.a";
+  oa.app = &app;
+  ob.name = "wasm.b";
+  ob.app = &app;
+  se::exec_group a(std::move(oa)), b(std::move(ob));
+  const int pa = a.execute(
+      std::string("(begin (set s 0) (set i 0) (while (< i 100) (begin (set s (+ s i)) (set i (+ i "
+                  "1)))) s)"));
+  const int pb = b.execute(std::string("(* 6 7)"));
+  const auto ended = [](se::exec_group &g, int pid) {
+    const auto info = g.sched().get_process_info(pid);
+    return info && se::is_finished(info->status);
+  };
+  const auto result = [](se::exec_group &g, int pid) {
+    const auto r = g.sched().get_result(pid);
+    return r ? se::to_string(*r) : std::string("<no result>");
+  };
+  const std::uint64_t worker_pumps = cvc::exec_pool_worker_pumps_total();
+  se::exec_group *const groups[] = {&a, &b};
+  int rounds = 0;
+  for (; rounds < 1000 && !(ended(a, pa) && ended(b, pb)); ++rounds)
+    pool.pump_all(groups, se::pump_budget{1000, std::numeric_limits<double>::infinity()},
+                  std::chrono::steady_clock::time_point::max());
+  ok &= expect(ended(a, pa) && ended(b, pb), kind, "the groups' programs did not end");
+  ok &= expect(rounds > 1, kind, "the loop ended in one 1000-step pump");
+  ok &= expect(result(a, pa) == "4950", kind, "group a returned " + result(a, pa));
+  ok &= expect(result(b, pb) == "42", kind, "group b returned " + result(b, pb));
+  ok &=
+      expect(cvc::exec_pool_worker_pumps_total() == worker_pumps, kind, "a worker pumped a group");
+  ok &= expect(pool.stats().pumps >= std::uint64_t(rounds) + 1, kind,
+               "the pool counted " + std::to_string(pool.stats().pumps) + " pumps in " +
+                   std::to_string(rounds) + " rounds");
+  return ok;
+}
+
 } // namespace
 
 int main() {
   try {
-    const bool ok = run(true) && run(false) && run_on_app_manager();
+    const bool ok = run(true) && run(false) && run_on_app_manager() && run_exec_pool();
     if (!ok)
       return 1;
     std::printf("STATE_EXEC_WASM_OK\n");

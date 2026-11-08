@@ -31,6 +31,13 @@ public:
   static void register_fn(environment_ptr env, const std::string &name, native_fn fn);
 };
 
+/// The default environment, built once per process and then frozen, so groups on any thread share
+/// it (docs/STATE_EXEC_THREADED.md 4.2). A group's global env is environment::extend() of it, so
+/// a set lands in the group's own scope: set() on this one throws. Its outer is the stdlib's
+/// shared scope. Bare schedulers, the app's and a plain pycvc Exec keep their own
+/// make_default_environment().
+environment_ptr frozen_builtins();
+
 // --- Individual built-in implementations (for direct use / testing) ---
 
 /// @name Arithmetic

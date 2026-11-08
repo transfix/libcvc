@@ -1187,6 +1187,30 @@ void stdlib_registry::register_bytes_module() {
 // Math module
 // ---------------------------------------------------------------------------
 
+namespace {
+
+thread_local random_stream *t_stream = nullptr; // random_stream_scope's
+
+// A group's engine, seeded on first use: from its seed, else from several random_device words
+// (one word, as the thread's engine takes, gives only 2^32 streams).
+std::mt19937 &stream_engine(random_stream &s) {
+  if (!s.seeded) {
+    if (s.seed) {
+      std::seed_seq seq{static_cast<std::uint32_t>(*s.seed),
+                        static_cast<std::uint32_t>(*s.seed >> 32)};
+      s.engine.seed(seq);
+    } else {
+      std::random_device rd;
+      std::seed_seq seq{rd(), rd(), rd(), rd(), rd(), rd(), rd(), rd()};
+      s.engine.seed(seq);
+    }
+    s.seeded = true;
+  }
+  return s.engine;
+}
+
+} // namespace
+
 void stdlib_registry::register_math_module() {
   register_function("math", "math.sqrt", [](std::span<const value_t> args) -> value_t {
     expect_exact(args, 1, "math.sqrt");
@@ -1276,8 +1300,11 @@ void stdlib_registry::register_math_module() {
 
   register_function("math", "math.random", [](std::span<const value_t> args) -> value_t {
     expect_exact(args, 0, "math.random");
-    static thread_local std::mt19937 gen{std::random_device{}()};
     std::uniform_real_distribution<double> dist(0.0, 1.0);
+    // The bound group's stream, whichever thread pumps the group (td 4.10); else this thread's.
+    if (random_stream *s = t_stream)
+      return value_t(dist(stream_engine(*s)));
+    static thread_local std::mt19937 gen{std::random_device{}()};
     return value_t(dist(gen));
   });
 }
@@ -1505,5 +1532,11 @@ const native_fn *stdlib_registry::lookup_qualified(const std::string &qualified_
   }
   return nullptr;
 }
+
+random_stream_scope::random_stream_scope(random_stream *s) noexcept : outer_(t_stream) {
+  t_stream = s;
+}
+
+random_stream_scope::~random_stream_scope() { t_stream = outer_; }
 
 } // namespace cvc::state_exec

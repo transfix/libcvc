@@ -57,6 +57,7 @@ if _sys.platform == "win32":
 #include "pycvc_algorithm.h"
 #include "pycvc_state.h"
 #include "pycvc_exec.h"
+#include "pycvc_exec_pool.h"
 #include <stdexcept>
 #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
 #include <numpy/arrayobject.h>
@@ -3210,12 +3211,124 @@ static void pycvc_raise_dsl_exception(const cvc::state_exec::value_t &exc,
   PYCVC_STATE_EXEC_CATCH
 }
 %enddef
-PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::scheduler::step)
-PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::scheduler::run)
-PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::async_scheduler::sync_step)
-PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::async_scheduler::sync_run)
-PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::async_scheduler::wait_for_work)
-// The evaluators, likewise.
+
+// The raw schedulers are the pump thread's (S1-Q4, bindings/pycvc/README.md): a call raises
+// RuntimeError(kPumpedElsewhereError) while another thread holds the scheduler's pump owner (an
+// Exec's run(), or one of the pump calls below). `arg1` is the wrapper's self. All but stop(),
+// is_running() and post_message(), which any thread may call.
+%{
+#include <type_traits> // std::remove_pointer_t, in the pump calls' %exception
+template <class Sched> static void pycvc_check_pump_thread(const Sched *s) {
+  if (s->pumped_elsewhere())
+    throw std::runtime_error(cvc::state_exec::kPumpedElsewhereError);
+}
+%}
+%define PYCVC_STATE_EXEC_PUMP_THREAD(NAME)
+%exception NAME {
+  try {
+    pycvc_check_pump_thread(arg1);
+    $action
+  }
+  PYCVC_STATE_EXEC_CATCH
+}
+%enddef
+// The pump calls hold the pump owner for the call (it raises as above while another thread holds
+// it). One %exception per name, since a second replaces the first: the stepping ones take the
+// owner, then release the GIL.
+%define PYCVC_STATE_EXEC_PUMP(NAME)
+%exception NAME {
+  try {
+    std::remove_pointer_t<decltype(arg1)>::pump_owner_scope pycvc_pump_owner(*arg1);
+    $action
+  }
+  PYCVC_STATE_EXEC_CATCH
+}
+%enddef
+%define PYCVC_STATE_EXEC_PUMP_NOGIL(NAME)
+%exception NAME {
+  try {
+    std::remove_pointer_t<decltype(arg1)>::pump_owner_scope pycvc_pump_owner(*arg1);
+    pycvc::gil_release pycvc_nogil;
+    $action
+  }
+  PYCVC_STATE_EXEC_CATCH
+}
+%enddef
+PYCVC_STATE_EXEC_PUMP_NOGIL(cvc::state_exec::scheduler::step)
+PYCVC_STATE_EXEC_PUMP_NOGIL(cvc::state_exec::scheduler::run)
+PYCVC_STATE_EXEC_PUMP_NOGIL(cvc::state_exec::async_scheduler::sync_step)
+PYCVC_STATE_EXEC_PUMP_NOGIL(cvc::state_exec::async_scheduler::sync_run)
+PYCVC_STATE_EXEC_PUMP_NOGIL(cvc::state_exec::async_scheduler::wait_for_work)
+PYCVC_STATE_EXEC_PUMP(cvc::state_exec::async_scheduler::drain_ingress)
+PYCVC_STATE_EXEC_PUMP(cvc::state_exec::async_scheduler::wake_awaiting)
+// Every other call of both schedulers (PYCVC_STATE_EXEC_SCHEDULER_MEMBERS and _EXTEND, and each
+// class's own), the static ones aside.
+%define PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(NAME)
+PYCVC_STATE_EXEC_PUMP_THREAD(cvc::state_exec::scheduler::NAME)
+PYCVC_STATE_EXEC_PUMP_THREAD(cvc::state_exec::async_scheduler::NAME)
+%enddef
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(current_process)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(queue_watch_event)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(execute)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(pause)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(resume)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(kill)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(fork)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(sleep)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(yield_frame)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(receive_message)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(receive_message_until)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(deliver_to_receivers)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(pending_message_count)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(total_pending_messages)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(max_pending_messages)
+// A field's accessors take an %exception only with allowexcept.
+%feature("allowexcept") cvc::state_exec::scheduler::max_pending_messages;
+%feature("allowexcept") cvc::state_exec::async_scheduler::max_pending_messages;
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(set_priority)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(get_priority)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(set_priority_checked)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(set_max_steps)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(set_max_time)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(set_max_memory)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(set_max_messages)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(set_max_message_bytes)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(send_signal)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(list_processes)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(get_process_info)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(get_results)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(get_exit_error)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(raise_exit_exception)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(get_stats)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(policy)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(process_count)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(has_runnable)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(current_pid)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(register_watch_handler)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(unregister_watch_handler)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(set_watch_root)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(async_steps_per_cpu_ms)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(restore)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(snapshot)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(get_exit_exception)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(get_result)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(pop_pending_message)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(set_lock_manager)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(set_id)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(id)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(reap)
+PYCVC_STATE_EXEC_PUMP_THREAD_BOTH(data_settings)
+PYCVC_STATE_EXEC_PUMP_THREAD(cvc::state_exec::scheduler::load_settings)
+PYCVC_STATE_EXEC_PUMP_THREAD(cvc::state_exec::scheduler::parser_settings)
+PYCVC_STATE_EXEC_PUMP_THREAD(cvc::state_exec::scheduler::max_alloc_bytes)
+PYCVC_STATE_EXEC_PUMP_THREAD(cvc::state_exec::async_scheduler::kill_owner)
+PYCVC_STATE_EXEC_PUMP_THREAD(cvc::state_exec::async_scheduler::awaiting_frame_count)
+PYCVC_STATE_EXEC_PUMP_THREAD(cvc::state_exec::async_scheduler::async_calls_in_flight)
+PYCVC_STATE_EXEC_PUMP_THREAD(cvc::state_exec::async_scheduler::set_parser_defaults)
+PYCVC_STATE_EXEC_PUMP_THREAD(cvc::state_exec::async_scheduler::parser_defaults)
+PYCVC_STATE_EXEC_PUMP_THREAD(cvc::state_exec::async_scheduler::set_data_defaults)
+PYCVC_STATE_EXEC_PUMP_THREAD(cvc::state_exec::async_scheduler::data_defaults)
+// The evaluators release the GIL as the schedulers' stepping calls do.
 PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::stackless_evaluator::step)
 PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::stackless_evaluator::run)
 PYCVC_STATE_EXEC_NOGIL(cvc::state_exec::stackless_evaluator::evaluate)
@@ -4254,8 +4367,11 @@ value_t make_future(const std::string &channel);
 std::optional<std::string> future_channel_of(const value_t &v);
 
 // ── the heap (#667, heap.h) ──
-// A process's heap share, and the per-thread reference-cycle collector, which a Python driver can
-// run between scheduler runs on the thread that ran them. Not wrapped: heap_after_step (the
+// A process's heap share, and the reference-cycle collector. collect_cycles, cycle_collection_due,
+// note_process_exit and tracked_objects act on the bound registry, else this thread's: from Python
+// that is the calling thread's own, which bare evaluators and bare schedulers track into. An Exec's
+// programs track into its own registry (Exec.tracked_objects()), as a scheduler given one does
+// whichever thread drives it (docs/STATE_EXEC_THREADED.md 4.7). Not wrapped: heap_after_step (the
 // schedulers' own per-step accounting) and track_captured_env / track_mutated (a value from
 // Python is a fresh copy, so tracking it would mean nothing; the evaluator tracks its own).
 struct heap_options {
@@ -4500,6 +4616,30 @@ def register_intrinsics(env, ctx):
 // SWIG's raw-passthrough type (the callable crosses uninspected; the .cpp
 // INCREFs and manages its lifetime).
 %include "pycvc_exec.h"
+
+// pycvc.ExecPool(app, threads=None, size=None, prefix="exec_pool", fresh_env=False,
+// idle_timeout=60.0) (docs/STATE_EXEC_THREADED.md 4.12; S1-Q5): many programs at once on the app's
+// exec_pool. Keywords, as Exec's: the constructor is one declaration. An argument it can't take
+// raises ValueError. run_all, register_fn, register_async_fn and close() are methods; threads is
+// a read-only property.
+%feature("kwargs") pycvc::ExecPool::ExecPool;
+%feature("kwargs") pycvc::ExecPool::register_async_fn;
+%exception pycvc::ExecPool::ExecPool {
+  try {
+    $action
+  } catch (const std::invalid_argument &e) {
+    SWIG_exception(SWIG_ValueError, e.what());
+  }
+  PYCVC_STATE_EXEC_CATCH
+}
+%rename(_threads) pycvc::ExecPool::threads;
+%include "pycvc_exec_pool.h"
+%extend pycvc::ExecPool {
+  %pythoncode %{
+    threads = property(lambda self: self._threads(),
+                       doc="The app pool's worker count (the real one).")
+  %}
+}
 
 // The GL-free half of a Python Ariadne host: pycvc.host_function (a Python callable as a host
 // function with arguments and a value) and pycvc.AriApp (a document's programs with no window).

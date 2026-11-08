@@ -20,14 +20,18 @@ namespace json_lite {
 
 struct Value {
   enum class Kind { null, boolean, number, string, array, object };
+  // One object member: `first` is its name, `second` its value. A plain struct, not std::pair:
+  // clang with libstdc++ in C++20 rejects a pair holding Value inside Value.
+  struct Member;
+
   Kind kind = Kind::null;
   bool b = false;
   double num = 0.0;
   bool integral = false;
   std::int64_t i = 0;
   std::string str;
-  std::vector<Value> items;                           // an array
-  std::vector<std::pair<std::string, Value>> members; // an object, in document order
+  std::vector<Value> items;    // an array
+  std::vector<Member> members; // an object, in document order
 
   bool is_object() const { return kind == Kind::object; }
   bool is_string() const { return kind == Kind::string; }
@@ -40,6 +44,14 @@ struct Value {
   std::optional<std::int64_t> int_at(const std::string &key) const;
   // The member `key` as a list of strings: an array of strings, or one string. Empty otherwise.
   std::vector<std::string> strings_at(const std::string &key) const;
+};
+
+struct Value::Member {
+  std::string first;
+  Value second;
+
+  Member() = default;
+  Member(std::string name, Value value) : first(std::move(name)), second(std::move(value)) {}
 };
 
 // Parse `text`. nullopt, with `error` saying where, when it is not one JSON value (trailing

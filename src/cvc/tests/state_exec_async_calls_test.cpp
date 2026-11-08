@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdio>
 #include <cvc/core/app.h>
 #include <cvc/core/async_lane.h>
@@ -29,11 +30,13 @@
 #include <gtest/gtest.h>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace cvc::state_exec;
@@ -2036,8 +2039,10 @@ TEST(AsyncCalls, AKillWhoseRateReadThrowsStillWakesTheForkChild) {
     world w(async_sched);
     w.async->set_id("kill_rate_throws");
     register_blind(w, started);
-    const auto [parent, child] =
+    // Plain ints, not a structured binding: clang cannot capture one in the lambdas below.
+    const std::pair<int, int> pc =
         fork_both_awaiting(w, "(blind-async 300)", wait, [&] { return started > 0; });
+    const int parent = pc.first, child = pc.second;
     ASSERT_GE(child, 0);
     (*w.tree)("state_exec.defaults.limits.async_steps_per_cpu_ms").value(std::string("2000"));
     std::atomic<bool> armed{true};
@@ -2069,8 +2074,9 @@ TEST(AsyncCalls, AThrowingCancelHookSkipsNeitherTheSettleNorTheWake) {
     std::atomic<int> started{0};
     world w(async_sched);
     register_blind_hook(w, started);
-    const auto [parent, child] =
+    const std::pair<int, int> pc =
         fork_both_awaiting(w, "(blind-hook-async 300)", "(await f)", [&] { return started > 0; });
+    const int parent = pc.first, child = pc.second;
     ASSERT_GE(child, 0);
     EXPECT_THROW(w.async->kill(parent), std::runtime_error);
     EXPECT_TRUE(pump_through_throws(w, [&] { return w.finished(child); }, 3.0));
@@ -2081,8 +2087,9 @@ TEST(AsyncCalls, AThrowingCancelHookSkipsNeitherTheSettleNorTheWake) {
     std::atomic<int> started{0};
     world w(async_sched);
     register_stuck(w, started);
-    const auto [parent, child] =
+    const std::pair<int, int> pc =
         fork_both_awaiting(w, "(stuck-async)", "(await f)", [&] { return started > 0; });
+    const int parent = pc.first, child = pc.second;
     ASSERT_GE(child, 0);
     EXPECT_THROW(w.async->kill(parent), std::runtime_error);
     EXPECT_TRUE(pump_through_throws(
@@ -2242,4 +2249,251 @@ TEST(AsyncCalls, HZ13_ACancelledCallWakesEveryWaiter) {
   EXPECT_TRUE(w.pump([&] { return w.p.cancelled_seen.load(); }, 10.0));
   if (!woken)
     w.async->kill(child);
+}
+
+// --- Stage 1: a future of another scheduler (S1-Q2, td 4.9) ---
+
+namespace {
+
+// (publish v): keeps v in `out` and returns it.
+void register_publish(world &w, value_t &out) {
+  builtins::register_fn(w.env, "publish", [&out](std::span<const value_t> a) -> value_t {
+    out = a[0];
+    return a[0];
+  });
+}
+
+// What `script` came to on `w`'s scheduler within 5 s: its value, or "<status>" if it didn't end.
+std::string brief_run(world &w, const std::string &script) {
+  const int pid = w.submit(script);
+  w.pump([&] { return w.finished(pid); }, 5.0);
+  if (!w.finished(pid)) {
+    const std::string status = "<" + std::string(to_string(w.info(pid).status)) + ">";
+    w.async->kill(pid);
+    return status;
+  }
+  const std::optional<value_t> r = w.result(pid);
+  return r ? show(*r) : "<" + w.async->get_exit_error(pid).value_or("no result") + ">";
+}
+
+// Each way a program awaits the future (foreign), with the RuntimeError's message as its value.
+std::vector<std::string> awaits_of_foreign(bool with_generator) {
+  std::vector<std::string> forms = {
+      R"((try (await (foreign)) (catch (RuntimeError e) (get-attr e "message"))))",
+      R"((try (await (foreign) 30) (catch (RuntimeError e) (get-attr e "message"))))",
+      R"((try (await-all (list 7 (foreign))) (catch (RuntimeError e) (get-attr e "message"))))",
+      R"((try (msg-recv (foreign)) (catch (RuntimeError e) (get-attr e "message"))))"};
+  // A generator's body can't park, so its await waits for the call there: only once it finished,
+  // or a missing check would block the step for good.
+  if (with_generator)
+    forms.push_back(R"((try (next (generator (lambda () (yield (await (foreign))))))
+                           (catch (RuntimeError e) (get-attr e "message"))))");
+  return forms;
+}
+
+} // namespace
+
+// S1-Q2: a threaded future made on scheduler A and awaited by a process of scheduler B (await,
+// await with a timeout, await-all, msg-recv on it, and a generator body's await) raises
+// RuntimeError at once, while the call runs and after it has finished but before A drained its
+// completion. A's call list is untouched: the call stays in flight on A, A's process is charged
+// nothing, and A's own await still gets the value and the charge once A drains.
+TEST(AsyncCalls, AnotherSchedulersThreadedFutureRaises) {
+  std::atomic<bool> release{false};
+  world a(async_sched);
+  world b(async_sched);
+  value_t fut;
+  register_publish(a, fut);
+  register_async_fn(a.env, *a.host, "held", [&release](std::span<const value_t>) -> async_kernel {
+    return [&release](async_call &call) -> value_t {
+      while (!release.load() && !call.cancelled())
+        std::this_thread::sleep_for(1ms);
+      return value_t(int64_t{42});
+    };
+  });
+  builtins::register_fn(b.env, "foreign", [&fut](std::span<const value_t>) { return fut; });
+
+  const int maker = a.submit("(begin (set f (publish (held-async))) (await f))", one_step_a_call());
+  ASSERT_TRUE(a.pump([&] { return a.waiting(maker) && is_async_future(fut); }));
+  const std::shared_ptr<detail::awaitable> call = async_call_of_future(fut);
+  ASSERT_NE(call, nullptr);
+  EXPECT_EQ(call->owner(), a.async.get());
+  ASSERT_EQ(a.async->async_calls_in_flight(), 1u);
+
+  const auto a_untouched = [&] {
+    EXPECT_EQ(a.async->async_calls_in_flight(), 1u);
+    EXPECT_EQ(a.info(maker).status, process_status::waiting);
+    EXPECT_EQ(a.info(maker).async_steps, 0u);
+  };
+  for (const std::string &form : awaits_of_foreign(false)) {
+    SCOPED_TRACE("running: " + form);
+    EXPECT_EQ(brief_run(b, form), kForeignFutureError);
+    a_untouched();
+  }
+  EXPECT_FALSE(call->finished());
+
+  release = true;
+  a.host->wait_idle(); // settled and posted to A's ingress, which nothing drained
+  ASSERT_TRUE(call->finished());
+  for (const std::string &form : awaits_of_foreign(true)) {
+    SCOPED_TRACE("finished: " + form);
+    EXPECT_EQ(brief_run(b, form), kForeignFutureError);
+    a_untouched();
+  }
+
+  a.run_to_end(maker);
+  EXPECT_EQ(show(*a.result(maker)), "42");
+  EXPECT_EQ(a.info(maker).async_steps, 1u);
+  EXPECT_EQ(a.async->async_calls_in_flight(), 0u);
+}
+
+// S1-Q2: an inline future (no owner: settled before it returned) is a plain value, which a process
+// of another scheduler awaits as its own, though the host that ran it is bound to A.
+TEST(AsyncCalls, AnotherSchedulersInlineFutureIsItsValue) {
+  async_options inline_calls;
+  inline_calls.where = executor::inline_call();
+  world a(async_sched, inline_calls);
+  world b(async_sched);
+  value_t fut;
+  register_publish(a, fut);
+  builtins::register_fn(b.env, "foreign", [&fut](std::span<const value_t>) { return fut; });
+
+  a.run_to_end(a.submit("(publish (slow-op-async 5 1))"));
+  ASSERT_TRUE(is_async_future(fut));
+  const std::shared_ptr<detail::awaitable> call = async_call_of_future(fut);
+  ASSERT_NE(call, nullptr);
+  EXPECT_EQ(call->owner(), nullptr);
+  ASSERT_TRUE(call->finished());
+
+  EXPECT_EQ(brief_run(b, "(await (foreign))"), "10");
+  EXPECT_EQ(brief_run(b, "(await-all (list 7 (foreign)))"), "(7 10)");
+  EXPECT_EQ(brief_run(b, "(msg-recv (foreign))"), "10");
+  EXPECT_EQ(brief_run(b, "(next (generator (lambda () (yield (await (foreign))))))"), "10");
+}
+
+// S1-Q2 (R1-mid S-m10): await-all checks the owner of every future in its list before it waits for
+// any entry, so a list holding another scheduler's future raises at once, even behind an entry of
+// B's own that is still running: an async call's future, or a channel's.
+TEST(AsyncCalls, AwaitAllRefusesAForeignFutureBeforeItWaits) {
+  world a(async_sched);
+  world b(async_sched);
+  value_t fut;
+  register_publish(a, fut);
+  register_channel_fns(b);
+  builtins::register_fn(b.env, "foreign", [&fut](std::span<const value_t>) { return fut; });
+  const int maker = a.submit("(begin (set f (publish (slow-op-async 1 30000))) (await f))");
+  ASSERT_TRUE(a.pump([&] { return a.waiting(maker) && is_async_future(fut); }));
+
+  for (const std::string own : {"(slow-op-async 1 30000)", "(chan-future \"c\")"}) {
+    SCOPED_TRACE(own);
+    EXPECT_EQ(brief_run(b, "(try (await-all (list " + own +
+                               " (foreign))) (catch (RuntimeError e) (get-attr e \"message\")))"),
+              kForeignFutureError);
+  }
+  EXPECT_EQ(b.p.ended, 0); // B's own call never finished, so nothing waited for it
+  EXPECT_EQ(a.async->async_calls_in_flight(), 1u);
+  EXPECT_EQ(a.info(maker).status, process_status::waiting);
+  a.async->kill(maker);
+}
+
+namespace {
+
+// Storage that holds one async_scheduler, then another at the same address.
+struct reused_storage {
+  alignas(async_scheduler) std::byte bytes[sizeof(async_scheduler)];
+  async_scheduler *live = nullptr;
+  async_scheduler &make() {
+    live = new (bytes) async_scheduler();
+    return *live;
+  }
+  void destroy() {
+    if (live)
+      std::exchange(live, nullptr)->~async_scheduler();
+  }
+  ~reused_storage() { destroy(); }
+};
+
+} // namespace
+
+// S1-Q2 (R1-mid C-m13): the check compares the owner's serial, not its address. A host keeps a
+// threaded future of scheduler A past A's end, its completion never drained, and a new scheduler
+// B is built in A's storage, at A's address. A process of B awaiting the future raises, instead of
+// B finishing a call it never made and handing a gone group's result to the program.
+TEST(AsyncCalls, AFutureOfAGoneSchedulerRaisesAtItsAddress) {
+  cvc::app app;
+  cvc::state &tree = cvc::state::instance(app);
+  std::atomic<bool> release{false};
+  intrinsics_context actx, bctx;
+  environment_ptr aenv = builtins::make_default_environment();
+  environment_ptr benv = builtins::make_default_environment();
+  value_t fut;
+  const auto storage = std::make_unique<reused_storage>();
+
+  async_scheduler &a = storage->make();
+  a.set_watch_root(&tree);
+  auto host = std::make_unique<async_host>(a, &app); // dies before A
+  actx.sched = &a;
+  actx.root = &tree;
+  actx.proc = make_process();
+  register_intrinsics(aenv, &actx);
+  builtins::register_fn(aenv, "publish", [&fut](std::span<const value_t> v) -> value_t {
+    fut = v[0];
+    return v[0];
+  });
+  register_async_fn(aenv, *host, "held", [&release](std::span<const value_t>) -> async_kernel {
+    return [&release](async_call &call) -> value_t {
+      while (!release.load() && !call.cancelled())
+        std::this_thread::sleep_for(1ms);
+      return value_t(int64_t{42});
+    };
+  });
+  execute_options aopts = one_step_a_call();
+  aopts.env = aenv;
+  const int maker =
+      a.execute(std::string("(begin (set f (publish (held-async))) (await f))"), aopts);
+  const auto start = clock_type::now();
+  while (seconds_since(start) < 15.0 &&
+         !(is_async_future(fut) && a.get_process_info(maker)->status == process_status::waiting)) {
+    a.drain_ingress();
+    a.sync_run(100000, 0.02);
+  }
+  ASSERT_TRUE(is_async_future(fut));
+  const std::shared_ptr<detail::awaitable> call = async_call_of_future(fut);
+  ASSERT_NE(call, nullptr);
+  release = true;
+  host->wait_idle(); // settled and posted to A's ingress, which nothing drains
+  ASSERT_TRUE(call->finished());
+  const void *const a_address = &a;
+  const std::uint64_t a_serial = a.serial();
+  EXPECT_EQ(call->owner_serial(), a_serial);
+  host.reset();
+  storage->destroy();
+
+  async_scheduler &b = storage->make();
+  ASSERT_EQ(static_cast<const void *>(&b), a_address);
+  EXPECT_NE(b.serial(), a_serial);
+  b.set_watch_root(&tree);
+  bctx.sched = &b;
+  bctx.root = &tree;
+  bctx.proc = make_process();
+  register_intrinsics(benv, &bctx);
+  builtins::register_fn(benv, "foreign", [&fut](std::span<const value_t>) { return fut; });
+  for (const char *form :
+       {R"((try (await (foreign)) (catch (RuntimeError e) (get-attr e "message"))))",
+        R"((try (await-all (list (foreign))) (catch (RuntimeError e) (get-attr e "message"))))",
+        R"((try (msg-recv (foreign)) (catch (RuntimeError e) (get-attr e "message"))))"}) {
+    SCOPED_TRACE(form);
+    execute_options bopts;
+    bopts.env = benv;
+    const int pid = b.execute(std::string(form), bopts);
+    const auto t0 = clock_type::now();
+    while (seconds_since(t0) < 5.0 && !is_finished(b.get_process_info(pid)->status)) {
+      b.drain_ingress();
+      b.sync_run(100000, 0.02);
+    }
+    const std::optional<value_t> r = b.get_result(pid);
+    ASSERT_TRUE(r.has_value()) << b.get_exit_error(pid).value_or("no result");
+    EXPECT_EQ(show(*r), kForeignFutureError);
+    EXPECT_EQ(b.get_process_info(pid)->async_steps, 0u);
+  }
 }

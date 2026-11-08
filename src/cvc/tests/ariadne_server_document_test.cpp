@@ -73,7 +73,7 @@ ari::Value seq(const std::vector<std::string> &items) {
   return v;
 }
 
-ari::Value map(std::vector<std::pair<std::string, ari::Value>> entries) {
+ari::Value map(std::vector<ari::Value::Entry> entries) {
   ari::Value v;
   v.kind = ari::Value::Kind::Map;
   v.entries = std::move(entries);

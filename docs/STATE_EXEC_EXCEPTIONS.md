@@ -407,6 +407,20 @@ A kernel that throws resumes the call by raising. The exception is mapped as in 
 - a Python exception becomes `PythonError` (keeping the Python exception);
 - a timeout raises `TimeoutError`.
 
+**Another scheduler's future** (threaded execution's Stage 1a; `docs/STATE_EXEC_THREADED.md` 4.9,
+S1-Q2). A threaded call's future belongs to the scheduler its completion is posted to, which alone
+may finish it. `await`, `await-all` and `msg-recv` on a future whose owner is another scheduler
+raise `RuntimeError` "await: the future belongs to another scheduler", with `origin` `"async"`
+(`kForeignFutureError`, `stackless_evaluator.h`), before they read, park on or wait for the call:
+the call itself is untouched, and its own scheduler can still await it. Owners are compared by
+serial (`scheduler_base::serial()`, never reused), not by address, so a future kept after its
+scheduler is gone stays foreign to a new scheduler at the same address. An inline future (a call
+run inline, settled before it returned) has no owner and is a plain value any scheduler may read,
+so Ariadne's `init:` lane, which awaits the app host's inline futures, is unaffected. The futures
+that reach the check are those a host hands from one scheduler to another, such as one carried
+through Python from one pycvc `Exec` to another, which before raced the first `Exec`'s scheduler
+or waited to the idle limit.
+
 The `{"__async_error__": ...}` value is gone: P3 removes it from `Exec`, and the Ariadne
 documentation is updated. A function whose result describes a failure, such as an HTTP reply
 with `ok: #f`, still returns that as a value; only a thrown error is an exception.
@@ -461,8 +475,8 @@ is dropped. Every way the future is awaited raises that error: an `await` by ano
 fork child, when the parent that made the call is killed, is woken for it), `await-all`, an
 `await` made after the cancel, and an await in a generator body, so nothing waits for such a call
 for ever. Host teardown
-(an `Exec`, an Ariadne document, the app's scheduler) cancels every in-flight kernel and waits
-for them before the scheduler goes, as `Exec` does today.
+(an `Exec`, an execution group, an Ariadne document, the app's scheduler) cancels every in-flight
+kernel and waits for them before the scheduler goes, as `Exec` does today.
 
 A kernel its executor never runs still ends its call. Once `~app` has stopped the app's
 background pool, a kernel submitted to it (`app::submitPooled` returns false), or one still in
