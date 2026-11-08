@@ -36,7 +36,9 @@ struct pool_options {
   // manager is pumped on the caller only, by any pool, logged once (and asserted in debug builds
   // when a pool with workers is given one); app::exec_pool(opts) builds an inline pool for an app
   // whose manager is single, which an exec_group built before it makes so in a C++ host without
-  // state_exec.threads (logged once).
+  // state_exec.threads (logged once). A single manager means one thread drives that app: every
+  // pump_all of its groups, group 0's drivers and any direct pump come from one host thread, which
+  // no pool can check for the host.
   unsigned threads = 0;
   // Deterministic mode (td 4.14): every group pumped on the caller in creation order, slices fixed
   // in steps, the deadline and the seconds budgets ignored, random streams seeded from the groups'
@@ -72,9 +74,11 @@ public:
   //   helps with the rest. Workers and the caller take groups from one list, longest last pump
   //   first; at 0 threads in creation order.
   // - A group starts only while `deadline` has not passed, with the smaller of budget.seconds
-  //   and the time left. A group not started counts in stats().skipped and goes first next call:
-  //   one the caller pumps starts before host_first (exec_pump_frame's group 0), so a busy
-  //   group 0 does not starve it.
+  //   and the time left. A group not started counts in stats().skipped and goes first next call,
+  //   the one skipped longest first. host_first (exec_pump_frame's group 0) counts as skipped
+  //   when it starts past the deadline, and is ordered with the caller's skipped groups: so of k
+  //   caller-pumped units that each fill a frame, each starts at least once in k frames, and
+  //   neither a busy group 0 nor busy frame groups starve the other.
   // - A group belongs to one pump_all at a time. Calls from several threads share the workers,
   //   each with its own list, host-call queue and accounting (S1-Q11).
   // - A C++ exception escaping a group's pump fails that group (failed_groups()) and kills its
@@ -109,10 +113,12 @@ public:
   //   have settled their calls as cancelled);
   // - `fn` must not call pump_all or destroy a group (a debug assertion);
   // - the host thread never blocks without servicing its queue;
-  // - the caller runs a queued `fn` once the group's pump has ended (the parked process resumes
-  //   at its next pump anyway), or at once when the worker waits for it (run_on_host_waiting),
-  //   so no other thread pumps the group meanwhile: `fn` runs with the group's registry and
-  //   stream bound;
+  // - the caller runs a queued `fn` once no other thread pumps the group: the group's pump has
+  //   ended, or its worker waits for a body it queued (run_on_host_waiting); `fn` runs with the
+  //   group's registry and stream bound. A parked process so resumes at its group's next pump,
+  //   never within the pump that parked it;
+  // - one group's bodies run in the order they were queued; bodies of different groups run as
+  //   they become runnable, not in queue order across groups;
   // - "the host thread" is the caller of that pump_all: two callers run their own queues at once.
   void run_on_host(std::function<void()> fn);
 
@@ -154,15 +160,16 @@ namespace detail {
 // The pool whose worker the calling thread is, while it pumps a group for a pump_all; else null.
 // A host_proxied native queues its body there (run_on_host), and runs it inline anywhere else.
 exec_pool *worker_pool() noexcept;
-// While a worker pumps a group: queue `callback` (an on_complete call) for the pump_all's caller,
-// which runs it after the join, and return true. Anywhere else return false: run it inline.
+// While a threaded pump_all pumps a group (on a worker, or on its caller): queue `callback` (an
+// on_complete call) for that call's caller, which runs it after the join, and return true.
+// Anywhere else (threads 0, deterministic mode, no pump_all) return false: run it inline.
 bool defer_on_complete(std::function<void()> callback);
 // Whether the calling thread is running a queued host_proxied body or a deferred on_complete
 // callback for a pump_all, where pump_all and destroying a group are refused (debug assertions).
 bool in_pool_callback() noexcept;
 // A group's teardown (S1.5): drop the group's entries from the host-call queue of the pump_all it
-// belongs to, unrun, waiting for one its caller is running now (not when the caller is the one
-// destroying it, from that body). Nothing when it belongs to none.
+// belongs to, unrun, waiting for one its caller is running now. Nothing when it belongs to none
+// (always, in practice: ~exec_group aborts while a pump_all holds its group).
 void purge_host_calls(state_exec::exec_group &group) noexcept;
 // run_on_host for a worker that then waits for `fn` to have run (a host_proxied call that cannot
 // park): the caller runs it as soon as it services the queue, while the worker is blocked.

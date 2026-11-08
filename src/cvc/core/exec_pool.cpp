@@ -42,6 +42,9 @@ namespace {
 
 std::atomic<std::uint64_t> g_worker_pumps{0};
 std::atomic<std::uint64_t> g_pool_serial{0};
+// Numbers every pump_all call, process-wide: a skipped group's (or host_first's) stamp is the call
+// that first skipped it, and the oldest stamp starts first (N1, S-M1).
+std::atomic<std::uint64_t> g_call_seq{0};
 
 // Guards every group's pool_link().call: which pump_all a group belongs to (S1-Q11), read by a
 // group's teardown to purge its host calls. Taken before a pool's mutex, never after it.
@@ -69,9 +72,10 @@ std::uint64_t name_seed(const std::string &name) {
 // One group of a pump_all.
 struct entry {
   se::exec_group *group = nullptr;
-  bool host = false;                           // the caller pumps it (host affinity, single lock)
-  bool skipped_at_start = false;               // skipped by the last call: starts first
-  bool running = false;                        // being pumped now (under the pool's mutex)
+  bool host = false;               // the caller pumps it (host affinity, single lock)
+  std::uint64_t skipped_since = 0; // skipped from that call on: starts first
+  bool running = false;            // being pumped now (under the pool's mutex)
+  bool blocked = false; // its worker waits for a host body it queued (under the pool's mutex)
   std::vector<std::function<void()>> deferred; // its on_complete calls, for after the join
   std::uint64_t finished = 0;                  // when its pump ended (the callbacks' order)
 };
@@ -123,7 +127,10 @@ struct pool_state {
   bool stopping = false;
   pool_stats stats;
   double last_host_first = 0.0; // the last host_first's time (exec_pump_frame's group 0)
-  bool single_noted = false;    // a single-manager group was kept on the caller (logged once)
+  // host_first started past the deadline from that call on (0: it did not), so it took no time:
+  // it starts first next call, as a skipped group does (N1).
+  std::uint64_t host_first_skipped_since = 0;
+  bool single_noted = false; // a single-manager group was kept on the caller (logged once)
   std::vector<std::string> notes;
   std::vector<std::unique_ptr<boost::thread>> workers;
 
@@ -132,6 +139,7 @@ struct pool_state {
 
 struct call_state {
   pool_state *pool = nullptr;
+  std::uint64_t seq = 0; // g_call_seq
   se::pump_budget budget{0, 0.0};
   clock_type::time_point deadline;
   bool timed = true;     // the deadline and the seconds budgets apply (not deterministic)
@@ -218,8 +226,12 @@ std::optional<std::size_t> take_group(pool_state &p, call_state &c, int thread, 
   if (c.remaining() == 0)
     return std::nullopt;
   if (c.timed && clock_type::now() >= c.deadline) {
-    for (std::size_t i = c.front; i < c.back; ++i)
-      c.entries[c.list[i]].group->pool_link().skipped = true;
+    for (std::size_t i = c.front; i < c.back; ++i) {
+      se::detail::group_pool_link &link = c.entries[c.list[i]].group->pool_link();
+      link.skipped = true;
+      if (!link.skipped_since)
+        link.skipped_since = c.seq;
+    }
     p.stats.skipped += c.remaining();
     c.front = c.back;
     return std::nullopt;
@@ -239,6 +251,7 @@ std::optional<std::size_t> take_group(pool_state &p, call_state &c, int thread, 
   }
   const std::size_t idx = from_back ? c.list[--c.back] : c.list[c.front++];
   c.entries[idx].group->pool_link().skipped = false;
+  c.entries[idx].group->pool_link().skipped_since = 0;
   c.entries[idx].running = true;
   ++c.running;
   return idx;
@@ -296,8 +309,8 @@ call_state *call_wanting_help(pool_state &p, int thread) {
 }
 
 void pool_state::worker_main(int index, bool p_core, bool place) {
-  // No exception leaves a worker (td 4.17): a pump's is caught in pump_entry, and anything else
-  // ends this worker with every group it took finished, so no caller waits for it.
+  // No exception leaves a worker (td 4.17): a pump's is caught in pump_entry, and pump_entry and
+  // finish_group do not throw, so a group taken is always finished; anything else ends the worker.
   try {
     detail::apply_process_class_here();
     se::collect_cycles_at_thread_exit(); // its own registry should stay empty (S1-Q3)
@@ -355,12 +368,20 @@ void run_for_group(call_state &c, se::exec_group &group, std::function<void()> &
   }
 }
 
-// Under the pool's mutex: the next queued host body the caller may run: one its worker waits
-// for, or one whose group's pump has ended (its process resumes at the next pump anyway).
+// Under the pool's mutex: the next queued host body the caller may run. A group's bodies run in
+// the order they were queued; one runs once no other thread pumps its group: the group's pump has
+// ended (its process resumes at its next pump), or its worker is blocked on a body it queued (a
+// generator body's call, run_on_host_waiting). Bodies of different groups run as they become
+// runnable, not in queue order across groups.
 std::optional<std::size_t> runnable_body(const call_state &c) {
-  for (std::size_t i = 0; i < c.queue.size(); ++i)
-    if (c.queue[i].waits || !c.queue[i].e->running)
+  for (std::size_t i = 0; i < c.queue.size(); ++i) {
+    const entry *e = c.queue[i].e;
+    bool earlier = false;
+    for (std::size_t j = 0; j < i && !earlier; ++j)
+      earlier = c.queue[j].e == e;
+    if (!earlier && (!e->running || e->blocked))
       return i;
+  }
   return std::nullopt;
 }
 
@@ -452,6 +473,7 @@ void exec_pool::pump_all(std::span<state_exec::exec_group *const> groups,
   assert(!t_callback && "pump_all from a host_proxied body or an on_complete callback");
   call_state c;
   c.pool = &p;
+  c.seq = g_call_seq.fetch_add(1, std::memory_order_relaxed) + 1;
   c.budget = budget;
   c.deadline = deadline;
   c.timed = !p.deterministic;
@@ -466,22 +488,23 @@ void exec_pool::pump_all(std::span<state_exec::exec_group *const> groups,
       if (!g)
         continue;
       se::detail::group_pool_link &link = g->pool_link();
-      if (link.call) {
-        assert(link.call == &c && "an exec_group given to two pump_all calls at once");
+      if (void *held = link.call.load(std::memory_order_relaxed)) {
+        assert(held == &c && "an exec_group given to two pump_all calls at once");
+        (void)held;
         continue; // given twice in this call, or held by another
       }
       // S1-Q1: a group on a single-mode lock manager is pumped on the caller only, whichever
       // pool this is; a pool with workers given one is a host's mistake (a debug assertion).
       if (link.caller_only && c.threaded) {
         assert(false && "a group on a single-mode lock manager given to a pool with workers");
-        if (!c.single_note && !p.single_noted)
-          c.single_note = g;
+        if (!c.single_note)
+          c.single_note = g; // logged once per pool, decided under the pool's mutex below
       }
-      link.call = &c;
+      link.call.store(&c, std::memory_order_relaxed);
       entry e;
       e.group = g;
       e.host = g->opts().affinity == se::group_affinity::host || link.caller_only;
-      e.skipped_at_start = link.skipped;
+      e.skipped_since = link.skipped ? std::max<std::uint64_t>(link.skipped_since, 1) : 0;
       c.entries.push_back(std::move(e));
     }
   }
@@ -490,7 +513,7 @@ void exec_pool::pump_all(std::span<state_exec::exec_group *const> groups,
     ~membership_end() {
       std::lock_guard<std::mutex> lock(g_membership);
       for (entry &e : c.entries)
-        e.group->pool_link().call = nullptr;
+        e.group->pool_link().call.store(nullptr, std::memory_order_relaxed);
     }
   } leave{c};
   if (p.deterministic)
@@ -508,15 +531,15 @@ void exec_pool::pump_all(std::span<state_exec::exec_group *const> groups,
   } restore{outer_caller};
 
   const auto by_creation = [&](std::size_t a, std::size_t b) {
-    const entry &ea = c.entries[a], &eb = c.entries[b];
-    if (ea.skipped_at_start != eb.skipped_at_start && !p.deterministic)
-      return ea.skipped_at_start; // skipped last time: first now
-    return ea.group->pool_link().seq < eb.group->pool_link().seq;
+    return c.entries[a].group->pool_link().seq < c.entries[b].group->pool_link().seq;
   };
   const auto run_host_first = [&] {
     if (!host_first)
       return;
     const clock_type::time_point start = clock_type::now();
+    // Started past the deadline it takes no time (exec_pump_frame's group 0 gets what the frame
+    // has left): then it is stamped as skipped and starts first next call (N1).
+    const bool late = c.timed && start >= c.deadline;
     try {
       host_first();
     } catch (...) {
@@ -525,6 +548,10 @@ void exec_pool::pump_all(std::span<state_exec::exec_group *const> groups,
     }
     std::lock_guard<std::mutex> lock(p.m);
     p.last_host_first = std::chrono::duration<double>(clock_type::now() - start).count();
+    if (!late)
+      p.host_first_skipped_since = 0;
+    else if (!p.host_first_skipped_since)
+      p.host_first_skipped_since = c.seq;
     ++p.stats.pumps;
   };
   // Pump entry `i` on the caller, if the deadline allows it (else it is skipped).
@@ -532,18 +559,62 @@ void exec_pool::pump_all(std::span<state_exec::exec_group *const> groups,
     entry &e = c.entries[i];
     {
       std::lock_guard<std::mutex> lock(p.m);
+      se::detail::group_pool_link &link = e.group->pool_link();
       if (c.timed && clock_type::now() >= c.deadline) {
-        e.group->pool_link().skipped = true;
+        link.skipped = true;
+        if (!link.skipped_since)
+          link.skipped_since = c.seq;
         ++p.stats.skipped;
         return;
       }
-      e.group->pool_link().skipped = false;
+      link.skipped = false;
+      link.skipped_since = 0;
       e.running = true;
       ++c.running;
     }
     const pumped r = pump_entry(c, e, false, this);
     std::lock_guard<std::mutex> lock(p.m);
     finish_group(p, c, e, 0, r, false);
+  };
+  // What the caller pumps itself: `mine` (in creation order) and host_first. Those skipped before
+  // go first, the one skipped longest first (host_first first on a tie), then host_first, then
+  // the rest: so with k of them that each fill a frame, each starts at least once in k frames,
+  // and neither a busy group 0 nor busy frame groups keep the other from starting (S-M1, N1).
+  // Deterministic mode skips nothing: host_first, then the rest.
+  const auto caller_runs = [&](const std::vector<std::size_t> &mine) {
+    std::uint64_t first_since = 0;
+    if (host_first && c.timed) {
+      std::lock_guard<std::mutex> lock(p.m);
+      first_since = p.host_first_skipped_since;
+    }
+    struct unit {
+      std::uint64_t since;
+      bool is_host_first;
+      std::size_t i;
+    };
+    std::vector<unit> skipped;
+    std::vector<std::size_t> rest;
+    if (first_since)
+      skipped.push_back({first_since, true, 0});
+    for (std::size_t i : mine) {
+      if (c.timed && c.entries[i].skipped_since)
+        skipped.push_back({c.entries[i].skipped_since, false, i});
+      else
+        rest.push_back(i);
+    }
+    std::stable_sort(skipped.begin(), skipped.end(), [](const unit &a, const unit &b) {
+      return a.since != b.since ? a.since < b.since : a.is_host_first && !b.is_host_first;
+    });
+    for (const unit &u : skipped) {
+      if (u.is_host_first)
+        run_host_first();
+      else
+        caller_pumps(u.i);
+    }
+    if (!first_since)
+      run_host_first();
+    for (std::size_t i : rest)
+      caller_pumps(i);
   };
 
   std::vector<std::size_t> order(c.entries.size());
@@ -552,15 +623,9 @@ void exec_pool::pump_all(std::span<state_exec::exec_group *const> groups,
 
   if (!c.threaded) {
     // Everything on the caller, in creation order (td 4.14: at threads 0 the results are
-    // deterministic mode's). The groups skipped last time start before host_first, so a busy
-    // group 0 (exec_pump_frame's) cannot keep them from starting frame after frame.
+    // deterministic mode's), the skipped ones and host_first as caller_runs orders them.
     std::sort(order.begin(), order.end(), by_creation);
-    std::size_t k = 0;
-    for (; k < order.size() && c.entries[order[k]].skipped_at_start && c.timed; ++k)
-      caller_pumps(order[k]);
-    run_host_first();
-    for (; k < order.size(); ++k)
-      caller_pumps(order[k]);
+    caller_runs(order);
   } else {
     // The host-affinity groups on the caller, in creation order; the rest on the shared list,
     // longest last pump first (LPT, td 4.4), skipped ones first.
@@ -578,8 +643,8 @@ void exec_pool::pump_all(std::span<state_exec::exec_group *const> groups,
     std::sort(host.begin(), host.end(), by_creation);
     std::sort(c.list.begin(), c.list.end(), [&](std::size_t a, std::size_t b) {
       const entry &ea = c.entries[a], &eb = c.entries[b];
-      if (ea.skipped_at_start != eb.skipped_at_start)
-        return ea.skipped_at_start;
+      if (ea.skipped_since != eb.skipped_since)
+        return ea.skipped_since && (!eb.skipped_since || ea.skipped_since < eb.skipped_since);
       const double la = ea.group->pool_link().last_pump_seconds;
       const double lb = eb.group->pool_link().last_pump_seconds;
       if (la != lb)
@@ -634,6 +699,8 @@ void exec_pool::pump_all(std::span<state_exec::exec_group *const> groups,
           lk.unlock();
           run_for_group(c, *hc.e->group, hc.fn, &lk);
           lk.lock();
+          if (hc.waits)
+            hc.e->blocked = false; // its worker resumes now
           c.running_body = nullptr;
           p.purge_cv.notify_all();
           continue;
@@ -659,27 +726,19 @@ void exec_pool::pump_all(std::span<state_exec::exec_group *const> groups,
       }
     };
     try {
-      // With no helper woken the caller is the only pumper: the groups skipped last time go
-      // first, before host_first, as at threads 0. Helpers take them beside it otherwise.
+      // The caller's own: the host-affinity groups and host_first, and, with no helper woken
+      // (the caller is then the only pumper of this call), the shared list's groups too, so
+      // their skips are ordered with host_first's as at threads 0. Helpers take the list beside
+      // the caller otherwise, skipped groups first.
+      std::vector<std::size_t> mine = host;
       if (wakes == 0) {
-        std::unique_lock<std::mutex> lk(p.m);
-        while (c.remaining() > 0 && c.entries[c.list[c.front]].skipped_at_start) {
-          const std::optional<std::size_t> idx = take_group(p, c, 0, false);
-          if (!idx)
-            break;
-          entry &e = c.entries[*idx];
-          lk.unlock();
-          const pumped r = pump_entry(c, e, false, this);
-          lk.lock();
-          finish_group(p, c, e, 0, r, false);
-        }
+        std::lock_guard<std::mutex> lock(p.m);
+        mine.insert(mine.end(), c.list.begin() + static_cast<std::ptrdiff_t>(c.front),
+                    c.list.begin() + static_cast<std::ptrdiff_t>(c.back));
+        c.front = c.back;
       }
-      std::size_t k = 0;
-      for (; k < host.size() && c.entries[host[k]].skipped_at_start; ++k)
-        caller_pumps(host[k]);
-      run_host_first();
-      for (; k < host.size(); ++k)
-        caller_pumps(host[k]);
+      std::sort(mine.begin(), mine.end(), by_creation);
+      caller_runs(mine);
       join(false);
     } catch (...) {
       join(true);
@@ -759,6 +818,8 @@ namespace {
 
 void queue_host_call(pool_state &p, worker_ctx &w, std::function<void()> fn, bool waits) {
   std::lock_guard<std::mutex> lock(p.m);
+  if (waits)
+    w.e->blocked = true; // the worker waits for this body: its group is not being pumped
   w.call->queue.push_back({w.e, waits, std::move(fn)});
   w.call->cv.notify_all();
 }
@@ -816,7 +877,7 @@ void purge_host_calls(state_exec::exec_group &group) noexcept {
     // Held across the wait: the call cannot end (its caller clears memberships under it) while
     // this waits on it.
     std::lock_guard<std::mutex> membership(g_membership);
-    auto *c = static_cast<call_state *>(group.pool_link().call);
+    auto *c = static_cast<call_state *>(group.pool_link().call.load(std::memory_order_relaxed));
     if (!c)
       return;
     std::deque<host_call> dropped; // destroyed outside the pool's lock
@@ -828,10 +889,9 @@ void purge_host_calls(state_exec::exec_group &group) noexcept {
       } else {
         ++it;
       }
-    // A body its caller runs now is waited for, unless this thread is that caller, destroying the
-    // group from inside the body (a debug assertion elsewhere): it would wait for itself.
-    if (t_caller != c)
-      c->pool->purge_cv.wait(lk, [&] { return c->running_body != &group; });
+    // A body its caller runs now is waited for. (Never this thread's own: a group of a pump_all
+    // is not destroyed from that call's bodies or callbacks, ~exec_group aborts first, N3.)
+    c->pool->purge_cv.wait(lk, [&] { return c->running_body != &group; });
     lk.unlock();
   } catch (...) {
   }

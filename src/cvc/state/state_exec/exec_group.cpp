@@ -215,9 +215,15 @@ exec_group::~exec_group() {
     std::fflush(stderr);
     std::abort();
   }
-  // Not from a host_proxied body or an on_complete callback, nor while a pump_all holds it (S1.6).
+  // Nor while a pump_all holds it (a host body or callback of that call, or another thread): the
+  // call would go on using it after the teardown (N3). That aborts, in every build, too.
+  if (m.link.call.load(std::memory_order_relaxed) != nullptr) {
+    std::fputs("exec_group: destroyed while a pump_all holds it\n", stderr);
+    std::fflush(stderr);
+    std::abort();
+  }
+  // Not from a host_proxied body or an on_complete callback at all (S1.6; a debug assertion).
   assert(!cvc::detail::in_pool_callback() && "an exec_group destroyed inside a pump_all");
-  assert(m.link.call == nullptr && "an exec_group destroyed while a pump_all holds it");
   const auto step = [&](const char *what, auto &&fn) noexcept {
     try {
       fn();
