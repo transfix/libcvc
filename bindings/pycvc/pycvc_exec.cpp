@@ -664,8 +664,9 @@ struct Exec::ExecImpl {
   // token: the scheduler is touched only by the thread of the active run() or, with none active,
   // by a holder of the mutex and the GIL (the GIL is what Python's own calls on the scheduler,
   // Exec.scheduler()'s methods, hold). The scheduler's pump owner backs it (S1-Q4): run() holds
-  // it until its quiesce, a direct call while it holds the mutex, and Python's own calls on the
-  // scheduler raise while another thread holds it. The GIL comes before the mutex: every thread
+  // it until it returns, a direct call with no run() active while it holds the mutex, and Python's
+  // own calls on the scheduler raise while another thread holds it. The GIL comes before the
+  // mutex: every thread
   // takes the mutex with the GIL held (run() at entry, for its quiesce and its reaps, in RunGuard;
   // a priority call), and no thread ever waits for the GIL while it holds the mutex. Nothing under
   // the mutex runs Python or frees a Python object (reap() cancels its program's async calls
@@ -678,8 +679,10 @@ struct Exec::ExecImpl {
   // stays set through the quiesce.
   bool accepting_queries = false;
   std::thread::id run_thread; // the active run()'s thread
-  // The active run()'s hold of the scheduler's pump owner (S1-Q4): taken with `accepting_queries`
-  // and released with it, by the quiesce, both under control_mutex and on run()'s thread.
+  // The active run()'s hold of the scheduler's pump owner (S1-Q4): taken with `running` and
+  // released with it, as run() returns, both under control_mutex and on run()'s thread. Through
+  // the quiesce, its wait for its kernels and its reap, a raw call from another thread raises as
+  // it does during the run (R1-mid C-m3).
   std::optional<async_scheduler::pump_owner_scope> run_pump_owner;
   // The calls waiting for the active run() to answer them between steps.
   std::deque<std::shared_ptr<priority_query>> queries;
@@ -697,12 +700,11 @@ struct Exec::ExecImpl {
 
   // run()'s quiesce, on every exit path, after its last step and any kill and before it waits for
   // its kernels: no call is left waiting, and from now on a call acts directly, under the mutex.
-  // The pump owner goes with it (S1-Q4), so a direct call takes it in turn.
+  // run() keeps the pump owner until it returns (run_pump_owner).
   void quiesce() {
     std::lock_guard<std::mutex> lock(control_mutex);
     accepting_queries = false;
     answer_queries();
-    run_pump_owner.reset();
   }
 
   // run()'s reap of its program (both exit paths), under control_mutex, so a thread acting
@@ -760,10 +762,16 @@ void Exec::ExecImpl::priority_call(priority_query &q) {
   // run() and Python's own calls on the scheduler alike.
   std::unique_lock<std::mutex> lock(control_mutex);
   if (!accepting_queries || std::this_thread::get_id() == run_thread) {
-    // (3) No run() is active, or this is its thread (a registered function, coroutine or
-    // callback): act directly, as the pump owner (S1-Q4), which raises while another thread
-    // pumps the scheduler through a raw call.
-    async_scheduler::pump_owner_scope owner(sched);
+    // (3) No run() is active, or it has quiesced, or this is its thread (a registered function,
+    // coroutine or callback): act directly. With no run() active the call is the pump owner
+    // (S1-Q4), so it raises while another thread pumps the scheduler through a raw call. A
+    // quiesced run() still holds the owner (R1-mid C-m3), and from its quiesce on its thread
+    // touches the scheduler only under this mutex (the reap's erase), apart from reap()'s
+    // cancel_async_calls_of, which touches only its ended program's calls; raw calls from other
+    // threads raise on the owner. So a call during the quiesce acts under the mutex alone.
+    std::optional<async_scheduler::pump_owner_scope> owner;
+    if (!running)
+      owner.emplace(sched);
     answer(sched, q);
     return;
   }
@@ -965,7 +973,8 @@ std::string Exec::run(const std::string &src) {
   // the GIL held (the one order allowed, docs/STATE_EXEC_LOCKS.md 7.4), and so is what makes this
   // run() the active one before its first step: from here another thread's priority call waits
   // for this run() to answer it between steps. This thread is the scheduler's pump owner from
-  // here to the quiesce (S1-Q4); while another thread pumps it through a raw call, run() raises.
+  // here until run() returns (S1-Q4); while another thread pumps it through a raw call, run()
+  // raises.
   {
     std::lock_guard<std::mutex> lock(impl->control_mutex);
     if (impl->running)
@@ -1000,8 +1009,10 @@ std::string Exec::run(const std::string &src) {
         PyGILState_Release(gil);
       }
       t_running_exec = outer_run;
-      // Last, under the control mutex: until here a second run() raises.
+      // Last, under the control mutex: until here a second run() raises, and the pump owner is
+      // this thread's.
       std::lock_guard<std::mutex> lock(impl->control_mutex);
+      impl->run_pump_owner.reset();
       impl->run_thread = std::thread::id();
       impl->running = false;
     }
@@ -1256,6 +1267,15 @@ std::size_t Exec::tracked_objects() const {
                                                        : *impl_->registry);
 }
 
+cvc::state_exec::cycle_stats Exec::collect_cycles() {
+  // As the pump owner (S1-Q4) for the whole collection: it raises while another thread pumps,
+  // and no run() starts meanwhile, with the GIL released while it walks.
+  async_scheduler::pump_owner_scope owner(impl_->sched);
+  cycle_registry &r = impl_->group ? *impl_->group->registry() : *impl_->registry;
+  gil_released nogil;
+  return cvc::state_exec::collect_cycles(r);
+}
+
 std::vector<Exec::batch_outcome> Exec::run_batch(cvc::exec_pool &pool, std::span<Exec *const> execs,
                                                  std::span<const std::string> programs,
                                                  bool fresh_env, const std::atomic<bool> &closing) {
@@ -1272,7 +1292,7 @@ std::vector<Exec::batch_outcome> Exec::run_batch(cvc::exec_pool &pool, std::span
     std::deque<std::size_t> queue; // its programs not started yet, in order
     std::size_t prog = 0;          // the program running
     int pid = -1;                  // its process; -1 while none runs
-    bool had_runnable = false;     // something was runnable before the round
+    bool had_runnable = false;     // something was runnable after the round's drain and wake
     clock::time_point idle_deadline{};
   };
   std::vector<slot> slots;
@@ -1412,7 +1432,14 @@ std::vector<Exec::batch_outcome> Exec::run_batch(cvc::exec_pool &pool, std::span
       groups.clear();
       for (slot &s : slots)
         if (s.pid >= 0) {
-          s.had_runnable = s.impl->sched.has_runnable();
+          // The round's drain and wake first, here between pumps, then the runnable test, as
+          // run() orders them: a process they ready (a frame-yield's await, a kernel's result) is
+          // pending work for the idle rule (R1-mid S-M2). The pump's own drain and wake then find
+          // only what arrives meanwhile.
+          async_scheduler &sched = s.impl->sched;
+          sched.drain_ingress();
+          sched.wake_awaiting();
+          s.had_runnable = sched.has_runnable();
           groups.push_back(s.impl->group.get());
         }
       if (groups.empty())
