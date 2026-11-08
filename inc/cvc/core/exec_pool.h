@@ -14,6 +14,7 @@
 #include <functional>
 #include <memory>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace cvc {
@@ -105,6 +106,21 @@ public:
 
   // Tests (GR-9): take `seconds` as `group`'s last pump time, for the helper wake and the order.
   void set_last_pump_for_test(state_exec::exec_group &group, double seconds);
+
+  // pump_all with `host_first` run on the caller before anything else, as a host-affinity group's
+  // pump would be: app::exec_pump_frame() pumps group 0 (the app scheduler, which is no
+  // exec_group) with it, overlapping the workers. Its throw is rethrown after the join, as an
+  // on_complete callback's is.
+  void pump_all(std::span<state_exec::exec_group *const> groups,
+                const state_exec::pump_budget &budget,
+                std::chrono::steady_clock::time_point deadline,
+                const std::function<void()> &host_first);
+
+  // The options the pool was built with, before its clamps (threads() is what they came to).
+  const pool_options &options() const;
+  // What building the pool clamped, and the workers that failed to start, one line each, for its
+  // owner to log once (app::exec_pool() does); taken, so the next call returns none.
+  std::vector<std::string> take_notes();
 
 private:
   struct impl;
