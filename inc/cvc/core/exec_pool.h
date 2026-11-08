@@ -31,8 +31,12 @@ struct pool_options {
   // today, and the only mode in a build without threads. auto_threads: the CPUs in the highest
   // efficiency class minus one with cpu_set::performance, hardware_concurrency() - 1 with
   // cpu_set::all. Any count is clamped to hardware_concurrency() - 1 and the affinity mask, and
-  // to 0 in a build without threads (state_exec::threads_compiled_in) or for an app whose lock
-  // manager is single (S1-Q1); each clamp is logged once, and stats() reports the result.
+  // to 0 in a build without threads (state_exec::threads_compiled_in); each clamp is noted once
+  // (take_notes), and stats() reports the result. S1-Q1: a group attached to a single-mode lock
+  // manager is pumped on the caller only, by any pool, logged once (and asserted in debug builds
+  // when a pool with workers is given one); app::exec_pool(opts) builds an inline pool for an app
+  // whose manager is single, which an exec_group built before it makes so in a C++ host without
+  // state_exec.threads (logged once).
   unsigned threads = 0;
   // Deterministic mode (td 4.14): every group pumped on the caller in creation order, slices fixed
   // in steps, the deadline and the seconds budgets ignored, random streams seeded from the groups'
@@ -64,17 +68,22 @@ public:
   exec_pool &operator=(const exec_pool &) = delete;
 
   // Pump each of `groups` once (exec_group::pump) and return when all are done (S1.6):
-  // - The caller pumps the host-affinity groups first, then helps with the rest. Workers and the
-  //   caller take groups from one list, longest last pump first; at 0 threads in creation order.
+  // - The caller pumps the host-affinity groups (and those on a single lock manager) first, then
+  //   helps with the rest. Workers and the caller take groups from one list, longest last pump
+  //   first; at 0 threads in creation order.
   // - A group starts only while `deadline` has not passed, with the smaller of budget.seconds
-  //   and the time left. A group not started counts in stats().skipped and goes first next call.
+  //   and the time left. A group not started counts in stats().skipped and goes first next call:
+  //   one the caller pumps starts before host_first (exec_pump_frame's group 0), so a busy
+  //   group 0 does not starve it.
   // - A group belongs to one pump_all at a time. Calls from several threads share the workers,
   //   each with its own list, host-call queue and accounting (S1-Q11).
   // - A C++ exception escaping a group's pump fails that group (failed_groups()) and kills its
   //   processes with "internal error"; the others finish. No exception leaves a worker.
-  // - The on_complete callbacks of a worker-pumped group run on the caller after the join, in
-  //   completion order per group; if any throws, the rest still run and the first throw is
-  //   rethrown here. A group pumped on the caller runs them inline, as today.
+  // - In a threaded pump_all (workers, not deterministic) every group's on_complete callbacks
+  //   (exec_group::execute's) run on the caller after the join, whichever thread pumped it, in
+  //   completion order per group, with the group's registry and stream bound; if any throws, the
+  //   rest still run and the first throw is rethrown here. At 0 threads and in deterministic mode
+  //   they run inline in the pump, as today. host_first's own callbacks run inline in it.
   // - It returns only with its host-call queue empty (run_on_host).
   // Not from a host_proxied body or an on_complete callback (a debug assertion).
   void pump_all(std::span<state_exec::exec_group *const> groups,
@@ -84,7 +93,9 @@ public:
   // The workers running, after the clamps (pool_options::threads). The caller pumps too.
   unsigned threads() const;
   pool_stats stats() const;
-  // The groups the last pump_all this thread called marked failed.
+  // The groups the last pump_all this thread called on this pool marked failed: raw pointers,
+  // to compare with, not to use once their owners may have destroyed them; the thread's next
+  // pump_all replaces them.
   std::vector<state_exec::exec_group *> failed_groups() const;
 
   // The host-call queue (S1.6, td 4.9): run `fn` on the thread that called the pump_all pumping
@@ -97,7 +108,12 @@ public:
   // - a group's teardown purges the group's entries without running them (its kills, before,
   //   have settled their calls as cancelled);
   // - `fn` must not call pump_all or destroy a group (a debug assertion);
-  // - the host thread never blocks without servicing its queue.
+  // - the host thread never blocks without servicing its queue;
+  // - the caller runs a queued `fn` once the group's pump has ended (the parked process resumes
+  //   at its next pump anyway), or at once when the worker waits for it (run_on_host_waiting),
+  //   so no other thread pumps the group meanwhile: `fn` runs with the group's registry and
+  //   stream bound;
+  // - "the host thread" is the caller of that pump_all: two callers run their own queues at once.
   void run_on_host(std::function<void()> fn);
 
   // Whether the calling thread is inside one of this pool's pump_all calls: as its caller (where
@@ -118,6 +134,9 @@ public:
 
   // The options the pool was built with, before its clamps (threads() is what they came to).
   const pool_options &options() const;
+  // Whether the pool runs in deterministic mode: its options' flag, or CVC_EXEC_DETERMINISTIC=1
+  // when it was built.
+  bool deterministic() const;
   // What building the pool clamped, and the workers that failed to start, one line each, for its
   // owner to log once (app::exec_pool() does); taken, so the next call returns none.
   std::vector<std::string> take_notes();
@@ -142,8 +161,12 @@ bool defer_on_complete(std::function<void()> callback);
 // callback for a pump_all, where pump_all and destroying a group are refused (debug assertions).
 bool in_pool_callback() noexcept;
 // A group's teardown (S1.5): drop the group's entries from the host-call queue of the pump_all it
-// belongs to, unrun, waiting for one its caller is running now. Nothing when it belongs to none.
+// belongs to, unrun, waiting for one its caller is running now (not when the caller is the one
+// destroying it, from that body). Nothing when it belongs to none.
 void purge_host_calls(state_exec::exec_group &group) noexcept;
+// run_on_host for a worker that then waits for `fn` to have run (a host_proxied call that cannot
+// park): the caller runs it as soon as it services the queue, while the worker is blocked.
+void run_on_host_waiting(exec_pool &pool, std::function<void()> fn);
 } // namespace detail
 
 } // namespace cvc

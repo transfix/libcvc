@@ -48,6 +48,9 @@ struct group_pool_link {
   void *call = nullptr;            ///< the pump_all it belongs to now, or null
   random_stream *random = nullptr; ///< its math.random stream (seeded from its name)
   std::string failure;             ///< what failed its last failed pump
+  /// Its lock home is attached to a single-mode manager (S1-Q1): every pool pumps it on the
+  /// caller of pump_all only, as a host-affinity group.
+  bool caller_only = false;
 };
 /// The groups alive that were built with `app` (~app asserts in debug builds that none is).
 std::size_t live_groups(const cvc::app *app) noexcept;
@@ -77,11 +80,17 @@ class exec_group {
 public:
   struct options {
     std::string name;  ///< for logs and stats; seeds the random stream in deterministic mode
-    std::string owner; ///< the owner tag of what it runs (an Ariadne Runtime's)
+    /// The owner tag of what it runs (an Ariadne Runtime's): execute() submits with it when the
+    /// execute_options give none, so kill_owner(owner) reaches the group's own submissions.
+    std::string owner;
     group_affinity affinity = group_affinity::any;
     cvc::app *app = nullptr;           ///< its settings, lock manager, pid source and kernel pool
     cvc::state *watch_root = nullptr;  ///< null: the app's root
-    environment_ptr base;              ///< the scope its global env extends; null: the builtins
+    /// The scope its global env extends; null: frozen_builtins(). A base shared by several groups
+    /// must be frozen: a set of a name bound in an unfrozen base writes it, from whichever thread
+    /// pumps the group (td 4.3). An unfrozen base one group owns is allowed (the bench's
+    /// driver=group base=own), so it is not refused.
+    environment_ptr base;
     std::optional<std::uint64_t> seed; ///< math.random's seed; unset: random_device words
     /// Declared for L4 and Stage 2; ignored in Stage 1.
     cvc::thread_class thread_class = cvc::thread_class::normal;
@@ -94,17 +103,24 @@ public:
 
   /// Build the group's scheduler as app::exec_scheduler() builds the app's: the policy from the
   /// tree, the watch root, the host parser and data defaults, the base env, the pool's pid source,
-  /// its own registry and random stream, and the app's lock manager (S1.5).
+  /// its own registry and random stream, and the app's lock manager (S1.5). That makes the
+  /// manager when nothing has yet, in the mode the tree says: a host that wants workers gives
+  /// app::exec_pool(opts) first (S1-Q1), else a single manager keeps this group, and every group
+  /// of the app, on the caller of pump_all (logged once).
   explicit exec_group(options opts);
   /// The teardown (td 4.2, S1.5), in order, each step catching and logging what it throws: take
   /// the token (waiting for a pump in progress), close the lock port, kill every process, shut the
   /// host down (waiting for its kernels), purge the group's host-call queue entries, reap every
   /// process. Then the host, the scheduler and its envs go, and last the registry, collected and
-  /// freed. Not inside a pump_all of the group (a debug assertion).
+  /// freed. Not inside a pump_all of the group (a debug assertion), and never from inside the
+  /// group's own pump (an inline native or callback of it): that aborts.
   ~exec_group();
   exec_group(const exec_group &) = delete;
   exec_group &operator=(const exec_group &) = delete;
 
+  /// The group's scheduler. A host that submits through it directly (sched().execute, restore)
+  /// gets none of execute()'s handling: an on_complete given there runs where the group is pumped,
+  /// on a pool worker included, inside the pump; the AST is not copied; no owner is defaulted.
   async_scheduler &sched();
   /// The group's async host, async_host(sched(), app), built on first use.
   async_host &host();
@@ -113,11 +129,15 @@ public:
   /// stream), then drain_ingress(), wake_awaiting() and sync_run_steps(budget), then release
   /// both.
   pump_result pump(const pump_budget &budget);
-  /// Whether a pump has work: a runnable process, a pending ingress, or a timer due.
+  /// Whether a pump has work: a runnable process, a process waiting for the next frame (the pump's
+  /// wake_awaiting readies it), a pending ingress, or a timer due.
   bool wants_pump() const;
 
-  /// Submit to the group's scheduler. The value form copies an AST that is shared elsewhere first
-  /// (td B12), so two groups never share quoted literals.
+  /// Submit to the group's scheduler, with the group's owner when `opts` names none. The value
+  /// form always copies the AST's lists and dicts (td B12), so neither another group nor the host
+  /// shares its quoted literals. An on_complete runs on the pump_all caller after the join when a
+  /// threaded pump_all pumps the group (on a worker or on the caller), inline otherwise (threads 0,
+  /// deterministic mode, no pump_all), as exec_pool::pump_all says.
   int execute(const std::string &script, const execute_options &opts = {});
   int execute(const value_t &expr, const execute_options &opts = {});
 
@@ -126,6 +146,9 @@ public:
   /// native is not bound (a call is a NameError), and a `host_proxied` one is bound as a wrapper
   /// that runs `fn` on the pump_all caller's thread through the host-call queue (inline when the
   /// calling thread is that caller), parking its process until the result comes back.
+  /// "The host thread" here is the caller of the pump_all pumping the group: two pump_all callers
+  /// (S1-Q11) run their groups' bodies at once, each on its own thread, so a provider whose state
+  /// only one thread may touch serializes its bodies itself.
   void install(const environment_ptr &env, const std::string &name, native_fn fn,
                provider_affinity kind);
 

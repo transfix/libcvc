@@ -7,6 +7,8 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
 #include <cvc/core/app.h>
 #include <cvc/core/exec_pool.h>
 #include <cvc/state/state_exec/async_host.h>
@@ -109,6 +111,14 @@ value_t copy_lists_and_dicts(const value_t &v) {
   return root;
 }
 
+// The apps a group of found the lock manager single before any exec_pool was built: logged once
+// per app (S1-Q1). An app at a reused address may miss its note.
+std::mutex g_single_noted_mutex;
+std::unordered_map<const cvc::app *, bool> &single_noted() {
+  static auto *m = new std::unordered_map<const cvc::app *, bool>;
+  return *m;
+}
+
 } // namespace
 
 std::size_t detail::live_groups(const cvc::app *app) noexcept {
@@ -171,9 +181,25 @@ exec_group::exec_group(options o) : impl_(std::make_unique<impl>()) {
     m.sched->set_pid_source(app->exec_pid_source());
     // The app's lock manager, in its own mode, as the app scheduler attaches (S1-Q1): with-lock
     // here excludes the same keys app-wide.
+    const bool pool_built = app->exec_pool_probe() != nullptr;
     const std::shared_ptr<lock_manager> locks = app->lock_manager();
     const bool shared = locks->threading() == lock_threading::shared;
     m.sched->set_lock_manager(locks, lock_attach{shared});
+    // A single manager's tables have one thread: every pool pumps this group on its caller only.
+    m.link.caller_only = !shared;
+    if (!shared && !pool_built) {
+      bool first = false;
+      {
+        std::lock_guard<std::mutex> lock(g_single_noted_mutex);
+        first = !std::exchange(single_noted()[app], true);
+      }
+      if (first)
+        note(app, 2,
+             "exec_group '" + m.opts.name +
+                 "': this app's lock manager is single, made before any " +
+                 "exec_pool asked for workers: its groups are pumped on the caller of pump_all " +
+                 "(S1-Q1; give app::exec_pool(opts) first, or set state_exec.threads)");
+    }
   }
   std::lock_guard<std::mutex> lock(g_live_mutex);
   ++live_by_app()[app];
@@ -182,6 +208,13 @@ exec_group::exec_group(options o) : impl_(std::make_unique<impl>()) {
 exec_group::~exec_group() {
   impl &m = *impl_;
   cvc::app *const app = m.opts.app;
+  // Never from inside its own pump (an inline native or callback of it): its token would nest,
+  // and the teardown would free the scheduler under its run loop. That aborts, in every build.
+  if (t_current == this) {
+    std::fputs("exec_group: destroyed from inside its own pump\n", stderr);
+    std::fflush(stderr);
+    std::abort();
+  }
   // Not from a host_proxied body or an on_complete callback, nor while a pump_all holds it (S1.6).
   assert(!cvc::detail::in_pool_callback() && "an exec_group destroyed inside a pump_all");
   assert(m.link.call == nullptr && "an exec_group destroyed while a pump_all holds it");
@@ -285,15 +318,17 @@ pump_result exec_group::pump(const pump_budget &budget) {
 
 bool exec_group::wants_pump() const {
   async_scheduler &s = *impl_->sched;
-  // A runnable process, or (wait_for_work's checks, with a deadline already passed) pending
-  // ingress, lock posts, a timer due or a call to charge.
-  return s.has_runnable() || s.wait_for_work(std::chrono::steady_clock::time_point::min());
+  // A runnable process, a process waiting for the next frame (the pump's wake_awaiting readies
+  // it), or (wait_for_work's checks, with a deadline already passed) pending ingress, lock posts,
+  // a timer due or a call to charge.
+  return s.has_runnable() || s.awaiting_frame_count() > 0 ||
+         s.wait_for_work(std::chrono::steady_clock::time_point::min());
 }
 
 namespace {
 
 // on_complete for a process of `m`'s group (S1.6, td 4.9): queued for the pump_all's caller when a
-// worker pumps the group, else run inline, as today.
+// threaded pump_all pumps the group (on a worker or on its caller), else run inline, as today.
 std::function<void(value_t)> group_on_complete(bool *threw, std::function<void(value_t)> cb) {
   return [threw, cb = std::move(cb)](value_t result) {
     if (cvc::detail::defer_on_complete([cb, result] { cb(result); }))
@@ -310,11 +345,15 @@ std::function<void(value_t)> group_on_complete(bool *threw, std::function<void(v
 } // namespace
 
 int exec_group::execute(const std::string &script, const execute_options &opts) {
-  if (!opts.on_complete)
-    return impl_->sched->execute(script, opts);
+  impl &m = *impl_;
+  if (!opts.on_complete && (!opts.owner.empty() || m.opts.owner.empty()))
+    return m.sched->execute(script, opts);
   execute_options o = opts;
-  o.on_complete = group_on_complete(&impl_->callback_threw, std::move(o.on_complete));
-  return impl_->sched->execute(script, o);
+  if (o.owner.empty())
+    o.owner = m.opts.owner; // the group's owner by default (options::owner)
+  if (o.on_complete)
+    o.on_complete = group_on_complete(&m.callback_threw, std::move(o.on_complete));
+  return m.sched->execute(script, o);
 }
 
 int exec_group::execute(const value_t &expr, const execute_options &opts) {
@@ -324,10 +363,13 @@ int exec_group::execute(const value_t &expr, const execute_options &opts) {
   // nested literal another group's process kept outlives the top's sharing (AS-1): copying always
   // is what keeps two groups, and the host's AST, from sharing one.
   const value_t given = copy_lists_and_dicts(expr);
-  if (!opts.on_complete)
+  if (!opts.on_complete && (!opts.owner.empty() || m.opts.owner.empty()))
     return m.sched->execute(given, opts);
   execute_options o = opts;
-  o.on_complete = group_on_complete(&m.callback_threw, std::move(o.on_complete));
+  if (o.owner.empty())
+    o.owner = m.opts.owner;
+  if (o.on_complete)
+    o.on_complete = group_on_complete(&m.callback_threw, std::move(o.on_complete));
   return m.sched->execute(given, o);
 }
 
@@ -373,7 +415,7 @@ value_t proxy_on_worker(cvc::exec_pool &pool, exec_group &group, const std::stri
     std::exception_ptr error;
   };
   auto meet = std::make_shared<rendezvous>();
-  pool.run_on_host([meet, body = std::move(body)] {
+  cvc::detail::run_on_host_waiting(pool, [meet, body = std::move(body)] {
     std::exception_ptr error;
     value_t value = body.run(error);
     std::lock_guard<std::mutex> lock(meet->m);

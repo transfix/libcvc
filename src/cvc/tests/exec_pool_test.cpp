@@ -15,7 +15,10 @@
 #include <cvc/state/state_exec/builtins.h>
 #include <cvc/state/state_exec/exec_group.h>
 #include <cvc/state/state_exec/heap.h>
+#include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/lock_manager.h>
+#include <cvc/state/state_exec/process.h>
+#include <cvc/state/state_exec/stdlib.h>
 #include <cvc/state/state_exec/types.h>
 #include <gtest/gtest.h>
 #include <iostream>
@@ -53,7 +56,7 @@ exec_group::options opts_for(cvc::app &app, const std::string &name,
 }
 
 // A process env with a `tid` native that records the pumping thread's id. One per group: a
-// top-level set writes the env's outermost unfrozen scope, which two groups must never share.
+// top-level set binds in the env it is given, which two groups must never share.
 struct thread_log {
   std::mutex m;
   std::vector<std::thread::id> ids;
@@ -103,6 +106,43 @@ void pump_until_done(cvc::exec_pool &pool, std::vector<exec_group *> &groups,
     pool.pump_all(groups, kSteps, far_deadline());
   }
 }
+
+// Give `app` a shared lock manager before anything makes it: a pool with workers pumps a group on
+// a single manager on its caller only (S1-Q1), and asserts so in debug builds.
+void share_locks(cvc::app &app) {
+  app.root()("state_exec.locks.threading").value(std::string("shared"));
+}
+
+// A group with the intrinsics (await, spawn, with-lock...) in an env of its own, chrooted at its
+// name on the app's tree.
+struct intrinsic_world {
+  intrinsics_context ictx;
+  environment_ptr env = environment::extend(builtins::make_default_environment());
+  std::unique_ptr<exec_group> group;
+  intrinsic_world(cvc::app &app, const std::string &name,
+                  group_affinity affinity = group_affinity::any, const std::string &chroot = "") {
+    group = std::make_unique<exec_group>(opts_for(app, name, affinity));
+    ictx.sched = &group->sched();
+    ictx.proc = make_process();
+    ictx.proc->pid = 0;
+    apply_chroot(ictx, app.root(), chroot.empty() ? name : chroot);
+    ictx.host = &group->host();
+    register_intrinsics(env, &ictx);
+  }
+  int submit(const std::string &src, std::function<void(value_t)> on_complete = {}) {
+    execute_options eo;
+    eo.env = environment::extend(env);
+    eo.on_complete = std::move(on_complete);
+    return group->execute(src, eo);
+  }
+};
+
+constexpr bool kDebugBuild =
+#ifdef NDEBUG
+    false;
+#else
+    true;
+#endif
 
 } // namespace
 
@@ -211,6 +251,7 @@ TEST(ExecPool, HeavyGroupsGoToWorkersAndHostGroupsStayOnTheCaller) {
   if (pool.threads() == 0)
     GTEST_SKIP() << "no worker on this machine";
   cvc::app app;
+  share_locks(app);
   thread_log any_log, host_log;
   std::vector<std::unique_ptr<exec_group>> owned;
   std::vector<exec_group *> groups;
@@ -258,6 +299,7 @@ TEST(ExecPool, TheHelperWakeFollowsTheLastPumps) {
   po.threads = 2;
   cvc::exec_pool pool(po);
   cvc::app app;
+  share_locks(app);
   exec_group a(opts_for(app, "a")), b(opts_for(app, "b"));
   std::vector<exec_group *> groups{&a, &b};
   for (int round = 0; round < 5; ++round) {
@@ -284,6 +326,7 @@ TEST(ExecPool, APassedDeadlineSkipsGroupsAndTheyGoFirstNextTime) {
     po.threads = threads;
     cvc::exec_pool pool(po);
     cvc::app app;
+    share_locks(app);
     std::vector<std::string> order;
     std::vector<std::unique_ptr<exec_group>> owned;
     std::vector<exec_group *> groups;
@@ -315,6 +358,7 @@ TEST(ExecPool, AnExceptionEscapingAPumpFailsOnlyItsGroup) {
     po.threads = threads;
     cvc::exec_pool pool(po);
     cvc::app app;
+    share_locks(app);
     exec_group::options bad_opts = opts_for(app, "bad");
     bad_opts.pump_hook_for_test = [](exec_group &) { throw std::runtime_error("boom"); };
     exec_group bad(bad_opts), good(opts_for(app, "good"));
@@ -347,6 +391,7 @@ TEST(ExecPool, OnCompleteOfAWorkerPumpedGroupRunsOnTheCallerAfterTheJoin) {
   if (pool.threads() == 0)
     GTEST_SKIP() << "no worker on this machine";
   cvc::app app;
+  share_locks(app);
   exec_group a(opts_for(app, "a")), b(opts_for(app, "b"));
   std::vector<exec_group *> groups{&a, &b};
   std::mutex m;
@@ -406,6 +451,7 @@ TEST(ExecGroup, InstallByKind) {
   po.threads = 2;
   cvc::exec_pool pool(po);
   cvc::app app;
+  share_locks(app);
   exec_group any_group(opts_for(app, "any")),
       host_group(opts_for(app, "host", group_affinity::host));
   std::atomic<int> proxied_calls{0};
@@ -545,6 +591,7 @@ TEST(ExecPool, TwoCallersShareThePool) {
   po.threads = 2;
   cvc::exec_pool pool(po);
   cvc::app app;
+  share_locks(app);
   std::vector<std::unique_ptr<exec_group>> owned;
   for (int i = 0; i < 4; ++i)
     owned.push_back(std::make_unique<exec_group>(opts_for(app, "g" + std::to_string(i))));
@@ -646,4 +693,217 @@ TEST(AppExecPool, GroupsAndTheAppSchedulerShareOnePidSource) {
   for (std::size_t i = 1; i < in_a.size(); ++i)
     EXPECT_LT(in_a[i - 1], in_a[i]) << "increasing within a group";
   EXPECT_EQ(app.exec_pid_source()->load(), 16) << "the next pid";
+}
+
+// --- R1-mid fixes (P) ---
+
+// C-M1 (S1-Q1): groups on a single-mode lock manager, given to a pool with workers built apart
+// from their app, are pumped on the caller only: their with-lock sections never meet on two
+// threads, and no worker pumps them.
+TEST(ExecPool, SingleManagerGroupsStayOnTheCaller) {
+  if (kDebugBuild)
+    GTEST_SKIP() << "a pool with workers given a single-manager group asserts in debug builds";
+  cvc::app app;
+  app.root()("probe.count").value(std::string("0"));
+  ASSERT_EQ(app.lock_manager()->threading(), lock_threading::single);
+  cvc::pool_options po;
+  po.threads = 4;
+  cvc::exec_pool pool(po);
+  if (pool.threads() == 0)
+    GTEST_SKIP() << "no worker on this machine";
+  thread_log log;
+  std::vector<std::unique_ptr<intrinsic_world>> worlds;
+  std::vector<exec_group *> groups;
+  std::vector<int> pids;
+  for (int i = 0; i < 6; ++i) {
+    worlds.push_back(std::make_unique<intrinsic_world>(app, "single" + std::to_string(i),
+                                                       group_affinity::any, "probe"));
+    builtins::register_fn(worlds.back()->env, "tid", [&log](std::span<const value_t>) -> value_t {
+      log.add();
+      return nil_value;
+    });
+    EXPECT_TRUE(worlds.back()->group->pool_link().caller_only);
+    groups.push_back(worlds.back()->group.get());
+    pids.push_back(worlds.back()->submit(
+        "(begin (set i 0) (while (< i 100) (begin (tid) (with-lock \"/probe\" (state-set "
+        "\"count\" (str (+ 1 (int (state-get \"count\")))))) (set i (+ i 1)))) \"done\")"));
+  }
+  for (int round = 0; round < 20000; ++round) {
+    bool all = true;
+    for (std::size_t i = 0; i < groups.size(); ++i)
+      all = all && finished(*groups[i], pids[i]);
+    if (all)
+      break;
+    for (exec_group *g : groups)
+      pool.set_last_pump_for_test(*g, 1.0);
+    pool.pump_all(groups, pump_budget{500, std::numeric_limits<double>::infinity()},
+                  far_deadline());
+  }
+  for (std::size_t i = 0; i < groups.size(); ++i)
+    EXPECT_EQ(result_of(*groups[i], pids[i]), "\"done\"");
+  EXPECT_EQ(app.root()("probe.count").value(), "600");
+  EXPECT_EQ(pool.stats().worker_pumps, 0u) << "a worker pumped a group on a single manager";
+  EXPECT_EQ(log.distinct(), std::set<std::thread::id>{std::this_thread::get_id()});
+}
+
+// S-M1: a busy group 0 in exec_pump_frame does not keep a frame group from ever starting, at
+// threads 0 and for a host-affinity frame group with workers: a group skipped last frame starts
+// before group 0.
+TEST(AppExecPool, ABusyGroupZeroDoesNotStarveFrameGroups) {
+  struct cfg {
+    unsigned threads;
+    group_affinity affinity;
+  };
+  for (const cfg c : {cfg{0, group_affinity::any}, cfg{2, group_affinity::host}}) {
+    cvc::app app;
+    cvc::pool_options po;
+    po.threads = c.threads;
+    app.exec_pool(po);
+    async_scheduler &zero = app.exec_scheduler();
+    environment_ptr env0 = environment::extend(builtins::make_default_environment());
+    builtins::register_fn(env0, "spin", [](std::span<const value_t>) -> value_t {
+      const auto t0 = clock_type::now();
+      while (clock_type::now() - t0 < std::chrono::milliseconds(2)) {
+      }
+      return nil_value;
+    });
+    execute_options o0;
+    o0.env = env0;
+    const int spinner = zero.execute(std::string("(while #t (spin))"), o0);
+    exec_group fg(opts_for(app, "frame", c.affinity));
+    const int pid = fg.execute(std::string("(begin (set i 0) (while (< i 10) (set i (+ i 1))) i)"));
+    cvc::frame_group_handle handle = app.register_frame_group(fg);
+    const auto t0 = clock_type::now();
+    for (int f = 0; f < 5 && !finished(fg, pid); ++f)
+      app.exec_pump_frame();
+    std::cout << "threads " << c.threads << ": "
+              << std::chrono::duration<double>(clock_type::now() - t0).count() << " s\n";
+    EXPECT_TRUE(finished(fg, pid)) << "threads " << c.threads << ": the frame group never ran";
+    handle.reset();
+    zero.kill(spinner);
+  }
+}
+
+// S-M2's pool half: a process waiting for the next frame ((await x) on a plain value) is work for
+// the next pump.
+TEST(ExecGroup, WantsPumpCountsAFrameWaiter) {
+  cvc::app app;
+  intrinsic_world w(app, "frames");
+  const int pid = w.submit("(begin (await 1) 2)");
+  w.group->pump(kSteps);
+  ASSERT_FALSE(finished(*w.group, pid));
+  EXPECT_EQ(w.group->sched().awaiting_frame_count(), 1u);
+  EXPECT_TRUE(w.group->wants_pump()) << "a frame waiter wants the pump that wakes it";
+  w.group->pump(kSteps);
+  ASSERT_TRUE(finished(*w.group, pid));
+  EXPECT_FALSE(w.group->wants_pump());
+}
+
+// C-m1, C-m7: in a threaded pump_all every on_complete runs after the join (a caller-pumped
+// group's too, so host code never runs beside the workers), and host bodies and callbacks run
+// with their group's registry bound.
+TEST(ExecPool, ThreadedCallbacksRunAfterTheJoinWithTheirRegistry) {
+  cvc::pool_options po;
+  po.threads = 2;
+  cvc::exec_pool pool(po);
+  if (pool.threads() == 0)
+    GTEST_SKIP() << "no worker on this machine";
+  cvc::app app;
+  share_locks(app);
+  exec_group host_group(opts_for(app, "host", group_affinity::host));
+  exec_group any_group(opts_for(app, "any"));
+  std::mutex m;
+  std::uint64_t pumped_id = 0, body_id = 0;
+  std::vector<std::pair<exec_group *, std::uint64_t>> callbacks; // current(), bound registry id
+  environment_ptr env = environment::extend(builtins::make_default_environment());
+  builtins::register_fn(env, "note-id", [&](std::span<const value_t>) -> value_t {
+    std::lock_guard<std::mutex> lock(m);
+    pumped_id = bound_cycle_registry_id();
+    return nil_value;
+  });
+  any_group.install(
+      env, "proxied",
+      [&](std::span<const value_t>) -> value_t {
+        std::lock_guard<std::mutex> lock(m);
+        body_id = bound_cycle_registry_id();
+        return value_t(int64_t(5));
+      },
+      provider_affinity::host_proxied);
+  const auto record = [&](value_t) {
+    std::lock_guard<std::mutex> lock(m);
+    callbacks.emplace_back(exec_group::current(), bound_cycle_registry_id());
+  };
+  execute_options he, ae;
+  he.on_complete = record;
+  ae.env = env;
+  ae.on_complete = record;
+  host_group.execute(std::string("1"), he);
+  const int pid = any_group.execute(std::string("(begin (note-id) (proxied))"), ae);
+  for (int round = 0; round < 100 && !finished(any_group, pid); ++round) {
+    pool.set_last_pump_for_test(host_group, 1.0);
+    pool.set_last_pump_for_test(any_group, 1.0);
+    pool.pump_all(std::vector<exec_group *>{&host_group, &any_group}, kSteps, far_deadline());
+  }
+  ASSERT_TRUE(finished(any_group, pid));
+  EXPECT_EQ(result_of(any_group, pid), "5");
+  ASSERT_EQ(callbacks.size(), 2u);
+  for (const auto &[in, id] : callbacks) {
+    EXPECT_EQ(in, nullptr) << "a callback ran inside a pump, beside the workers";
+    EXPECT_NE(id, 0u) << "a callback ran with no registry bound";
+  }
+  EXPECT_NE(pumped_id, 0u);
+  if (pool.stats().worker_pumps > 0)
+    EXPECT_EQ(body_id, pumped_id) << "the host body ran without its group's registry";
+}
+
+// S-m4: execute() submits with the group's owner when the options give none.
+TEST(ExecGroup, ExecuteDefaultsTheOwner) {
+  cvc::app app;
+  exec_group::options o = opts_for(app, "owned");
+  o.owner = "doc";
+  exec_group g(o);
+  g.execute(std::string("(begin (set i 0) (while #t (set i (+ i 1))))"));
+  execute_options mine;
+  mine.owner = "other";
+  g.execute(std::string("(begin (set i 0) (while #t (set i (+ i 1))))"), mine);
+  EXPECT_EQ(g.sched().kill_owner("doc"), 1);
+  EXPECT_EQ(g.sched().kill_owner("other"), 1);
+}
+
+// C-m9: destroying a group from inside its own pump aborts, rather than freeing the scheduler
+// under its run loop.
+TEST(ExecGroupDeathTest, DestroyedFromInsideItsOwnPumpAborts) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_DEATH(
+      {
+        cvc::app app;
+        auto *g = new exec_group(opts_for(app, "doomed"));
+        environment_ptr env = environment::extend(builtins::make_default_environment());
+        builtins::register_fn(env, "die", [g](std::span<const value_t>) -> value_t {
+          delete g;
+          return nil_value;
+        });
+        execute_options eo;
+        eo.env = env;
+        g->execute(std::string("(die)"), eo);
+        g->pump(kSteps);
+      },
+      "destroyed from inside its own pump");
+}
+
+// C-m11: failed_groups() is the calling thread's own: another thread sees none of it.
+TEST(ExecPool, FailedGroupsAreTheCallersOwn) {
+  cvc::app app;
+  cvc::exec_pool pool(cvc::pool_options{});
+  exec_group::options bad = opts_for(app, "bad");
+  bad.pump_hook_for_test = [](exec_group &) { throw std::runtime_error("boom"); };
+  exec_group g(bad);
+  std::vector<exec_group *> groups{&g};
+  pool.pump_all(groups, kSteps, far_deadline());
+  EXPECT_EQ(pool.failed_groups(), groups);
+  std::vector<exec_group *> seen{&g};
+  std::thread([&] { seen = pool.failed_groups(); }).join();
+  EXPECT_TRUE(seen.empty()) << "another thread read this thread's failed groups";
+  cvc::exec_pool other(cvc::pool_options{});
+  EXPECT_TRUE(other.failed_groups().empty());
 }
