@@ -715,6 +715,9 @@ target_link_libraries(ariadne_ftxui_test
 # Three tests load GL-free documents from the repo's examples/ tree.
 target_compile_definitions(ariadne_ftxui_test PRIVATE
   CVC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../examples")
+# room_scene_test pins the stock world documents to their C++ twins.
+target_compile_definitions(room_scene_test PRIVATE
+  CVC_ARIADNE_WORLDS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../ariadne/worlds")
 
 target_link_libraries(ariadne_media_test
   PRIVATE

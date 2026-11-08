@@ -1,0 +1,10 @@
+# A server document with no scene:, for arisrv's ctest of WD0 (ARIADNE_WORLDS.md): the relay runs
+# with --set conf.rooms.ctest.scene.rev=7 and --set conf.rooms.ctest.scene.objects.ref.transform.
+# pos.z=2. --set comes after the world, so the stock world is still seeded and the second --set
+# moves its reference box; init: checks both and stops the relay with (quit 0), else with 5.
+meta: { name: arisrv set after the world, min_libcvc: 3.7.12 }
+requires: [relay]
+init: |
+  (quit (if (and (= (state-get "room.scene.objects.ground.present") "1")
+                 (= (state-get "room.scene.objects.ref.transform.pos.z") "2"))
+            0 5))

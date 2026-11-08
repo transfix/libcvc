@@ -1611,6 +1611,12 @@ install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ariadne/components
         DESTINATION ${CMAKE_INSTALL_DATADIR}/libcvc/ariadne
         COMPONENT libcvc
         FILES_MATCHING PATTERN "*.ari")
+# The stock worlds beside them (cvc://worlds/default.ari, large.ari): what arisrv seeds a room
+# with (ARIADNE_WORLDS.md WD1).
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ariadne/worlds
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/libcvc/ariadne
+        COMPONENT libcvc
+        FILES_MATCHING PATTERN "*.ari")
 target_compile_definitions(
   cvc PRIVATE CVC_ARIADNE_DATA_DIR="${CMAKE_INSTALL_FULL_DATADIR}/libcvc/ariadne")
 

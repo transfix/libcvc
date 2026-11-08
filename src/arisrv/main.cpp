@@ -44,13 +44,15 @@
 #include <cvc/ariadne/conference/room_net.h>        // per-participant + room link-quality stats
 #include <cvc/ariadne/conference/room_pose_relay.h> // room_pose_relay (avatar pose snapshots)
 #include <cvc/ariadne/conference/room_rungs.h>      // each viewer's video rung, adapted to its link
-#include <cvc/ariadne/conference/room_scene.h>      // seed_default_scene (the shared 3D scene)
+#include <cvc/ariadne/conference/room_scene.h>      // the room's world (write_room_world)
 #include <cvc/ariadne/conference/room_write_gate.h> // bound writes: a client writes only itself
 #include <cvc/ariadne/holon.h>                      // server-authoritative avatar holon (H1)
-#include <cvc/ariadne/holon_sync.h> // server_pump: intent -> holon -> authoritative pose
-#include <cvc/ariadne/host_cli.h>   // --set KEY=VALUE, as ari and arigl take it
+#include <cvc/ariadne/holon_sync.h>      // server_pump: intent -> holon -> authoritative pose
+#include <cvc/ariadne/host_cli.h>        // --set KEY=VALUE, as ari and arigl take it
+#include <cvc/ariadne/loader.h>          // load_file: the stock world documents
 #include <cvc/ariadne/server_document.h> // --doc: the server document and what it publishes
 #include <cvc/ariadne/stream/stream_relay.h>
+#include <cvc/ariadne/uri.h> // cvc://worlds/... (register_cvc_uri_handler)
 #include <cvc/core/app.h>
 #include <cvc/media/media_router.h> // protocol-agnostic media hub (WS + gRPC + future protocols)
 #include <cvc/net/fast_lane_rtc.h>  // the unreliable lane (WebRTC data channels)
@@ -158,11 +160,14 @@ int main(int argc, char **argv) {
   //   --admission-hold-ms N      hold a joiner's bootstrap until the area of interest has its
   //                              filter, so its admit snapshot is filtered too; at most N ms, then
   //                              unfiltered (default 2000; 0 = off; only with an area of interest)
-  //   --scene default|large      the seeded scene (large: a 100 m plane of LOD meshes)
+  //   --scene default|large      the world the room starts in: cvc://worlds/default.ari (the 20 m
+  //                              room) or cvc://worlds/large.ari (a 100 m plane of LOD meshes).
+  //                              A --doc whose document has a scene: is the world instead
   // Debugging (repeatable, in order):
   //   --set KEY=VALUE            write VALUE to the state key KEY (from the app's root, e.g.
-  //                              conf.rooms.main.topic) once the room tree is up, before any
-  //                              client connects; a conf.* key reaches every client
+  //                              conf.rooms.main.topic) once the room's world and policies are
+  //                              written, so it overrides them, and before a server document's
+  //                              init:; a conf.* key reaches every client
   // Bound writes (not an S7 switch, so --s7 off leaves it on):
   //   --bind-writes on|off       each client connection speaks only as the pid of its Hello, held
   //                              by one live connection at a time, and writes only its own
@@ -240,6 +245,7 @@ int main(int argc, char **argv) {
               admissionHoldArg = "2000";
   std::string laneListen, laneAdvertise, laneMediaArg = "off";
   std::string avatarEnergyArg = "on", avatarEmptyArg = "rest";
+  bool sceneFlag = false; // --scene was given (a --doc with a scene: is the world instead)
   std::string docPath;
   bool docFlag = false;                                       // --doc was given (even with no path)
   std::vector<std::pair<std::string, std::string>> stateSets; // --set KEY=VALUE
@@ -274,9 +280,10 @@ int main(int argc, char **argv) {
       mediaDelayArg = next("");
     else if (!std::strcmp(a, "--admission-hold-ms"))
       admissionHoldArg = next("");
-    else if (!std::strcmp(a, "--scene"))
+    else if (!std::strcmp(a, "--scene")) {
       scene = next("default");
-    else if (!std::strcmp(a, "--bind-writes"))
+      sceneFlag = true;
+    } else if (!std::strcmp(a, "--bind-writes"))
       bindWritesArg = next("on");
     else if (!std::strcmp(a, "--room-token-file")) {
       roomTokenFlag = true;
@@ -461,6 +468,45 @@ int main(int argc, char **argv) {
     }
   }
 
+  // The room's world (ARIADNE_WORLDS.md WD1), chosen now so that a bad one stops the relay before
+  // it listens; it is published below, where the room is set up. A --doc whose document's scene:
+  // has nodes or lights is the world. Otherwise it is the stock world --scene names,
+  // cvc://worlds/<name>.ari, or that world's C++ twin when the file can't be found or read.
+  cvc::ariadne::register_cvc_uri_handler();
+  namespace rconf = cvc::ariadne::conference;
+  rconf::room_world world;
+  std::string worldFrom;
+  std::vector<std::string> worldWarnings;
+  const bool docWorld =
+      serverDoc && (!serverDoc->scene().nodes.empty() || !serverDoc->scene().lights.empty());
+  if (docWorld) {
+    if (sceneFlag) {
+      std::fprintf(stderr,
+                   "arisrv: --scene %s and --doc %s both name the room's world (the document has "
+                   "a scene:); drop one\n",
+                   scene.c_str(), docPath.c_str());
+      return 2;
+    }
+    world = rconf::room_world_from_scene(serverDoc->scene(), &worldWarnings);
+    worldFrom = docPath;
+  } else {
+    worldFrom = "cvc://worlds/" + scene + ".ari";
+    const cvc::ariadne::UriResult found = cvc::ariadne::resolve(worldFrom);
+    cvc::ariadne::LoadResult lr;
+    if (found.ok)
+      lr = cvc::ariadne::load_file(found.canonical);
+    if (found.ok && lr.ok) {
+      world = rconf::room_world_from_scene(lr.scene, &worldWarnings);
+      for (const std::string &w : lr.warnings)
+        worldWarnings.push_back(w);
+    } else {
+      worldWarnings.push_back(worldFrom + ": " + (found.ok ? lr.error : found.error) +
+                              "; seeding its C++ twin instead");
+      world = scene == "large" ? rconf::large_world() : rconf::default_world();
+      worldFrom += " (its C++ twin)";
+    }
+  }
+
   // Presence: when a client's connection ends -- a native (gRPC) client exits, or a browser (WS)
   // tab closes -- retract it from the room so the roster and the avatar holon do not accumulate
   // ghosts. Both transports report the departed node id the same way, on their own threads, so the
@@ -512,7 +558,6 @@ int main(int argc, char **argv) {
   shard.attach();
   shard.install_as_default();
   state_tp.register_shard(&shard);
-  cvc::ariadne::apply_state_sets(app, "", stateSets); // --set, before any client connects
 
 #if CVC_ENABLE_WS
   // WebSocket control plane + the WS<->gRPC bridge, so BROWSER (wasm) clients join the SAME room as
@@ -747,17 +792,21 @@ int main(int argc, char **argv) {
   const long netPublishSteps = std::lround(cvc::ariadne::conference::net_publish_period_s);
   const int netPublishTicks = 5 * static_cast<int>(std::max(1L, netPublishSteps));
   const auto net_start = std::chrono::steady_clock::now();
-  // The shared 3D scene (H1 slice 5, roadmap §5g): the relay is its sole writer and seeds the MVP
-  // environment (ground + a reference box under a sun) once -- or, with --scene large, a 100 m
-  // plane with a grid of meshes to walk between (what the hall preset and mesh LOD are for). The
-  // writes are local shard mutations, so the first pass of the loop below fans them to the
-  // clients, and late joiners get them in the snapshot.
-  const bool seeded = scene == "large" ? cvc::ariadne::conference::seed_large_demo_scene(app, room)
-                                       : cvc::ariadne::conference::seed_default_scene(app, room);
-  if (seeded) {
-    const auto rev = cvc::ariadne::conference::scene_revision(app, room);
-    std::printf("[arisrv] seeded the shared %s scene for room '%s' (rev %llu)\n", scene.c_str(),
-                room.c_str(), static_cast<unsigned long long>(rev));
+  // The shared 3D scene (H1 slice 5, roadmap §5g), from the world chosen above (WD1): the relay is
+  // its sole writer, and every client builds the room from it, its rig and shadows included (the
+  // look is the world's, Q1). One revision for the whole scene. The writes are local shard
+  // mutations, so the first pass of the loop below fans them to the clients, and late joiners get
+  // them in the snapshot.
+  rconf::write_room_world(app, room, world);
+  {
+    const std::size_t lights = world.env.lights.size();
+    std::printf(
+        "[arisrv] world: %s for room '%s': %zu objects, %zu light%s, shadows %s (rev %llu)\n",
+        worldFrom.c_str(), room.c_str(), world.objects.size(), lights, lights == 1 ? "" : "s",
+        world.env.shadows ? "on" : "off",
+        static_cast<unsigned long long>(rconf::scene_revision(app, room)));
+    for (const std::string &w : worldWarnings)
+      std::printf("[arisrv] world: %s\n", w.c_str());
     std::fflush(stdout);
   }
   // What an avatar may wear (room_avatar.h): the relay supplies the catalog, each participant
@@ -791,9 +840,14 @@ int main(int argc, char **argv) {
     published.enabled = aoi_relay != nullptr;
     cvc::ariadne::conference::write_aoi_params(app, room, published);
   }
-  // The server document, now that the room is up: its init: runs here, after --set and the seeds
-  // (so it can extend or override the seeded room), and its other programs on the room steps
-  // below. A load that fails stops the relay before it serves a step.
+  // --set (WD0): after the world and the room's policies, so it overrides them, and before the
+  // server document, so its ariadne.limits.* bound the document from init: on. Before WD0 it came
+  // first, so a --set of scene.rev stopped the world from being seeded and an object's leaves
+  // were overwritten by the seed. The first pass of the loop below fans it out with the rest.
+  cvc::ariadne::apply_state_sets(app, "", stateSets);
+  // The server document, now that the room is up: its init: runs here, after the world, the
+  // room's policies and --set (so it can extend or override them), and its other programs on the
+  // room steps below. A load that fails stops the relay before it serves a step.
   bool docFailed = false;
   if (serverDoc) {
     serverDoc->runtime().set_warning_listener([](const std::string &w) {
