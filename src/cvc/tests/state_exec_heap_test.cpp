@@ -15,6 +15,7 @@
 #include <cvc/state/state_exec/scheduler.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <cvc/state/state_exec/state_value_codec.h>
+#include <cvc/state/state_exec/stdlib.h>
 #include <gtest/gtest.h>
 #include <memory>
 #include <set>
@@ -451,6 +452,37 @@ TEST(CycleRegistryTest, ClosureBodiesAreSharedWithinARegistryOnly) {
   ASSERT_TRUE(a1->body_expr && a2->body_expr && b1->body_expr);
   EXPECT_EQ(a1->body_expr, a2->body_expr);
   EXPECT_NE(a1->body_expr, b1->body_expr);
+}
+
+TEST(RandomStreamTest, ASeededStreamRepeatsOnAnyThread) {
+  // S1.2: math.random draws from the bound stream, seeded on first use, so a group's sequence
+  // does not depend on which thread pumps it (td 4.10).
+  const auto draw = [](random_stream &s) {
+    random_stream_scope bind(&s);
+    auto env = builtins::make_default_environment();
+    stackless_evaluator ev(env);
+    return to_string(ev.evaluate_script("(list (math.random) (math.random) (math.random))", env));
+  };
+  random_stream a, b, c;
+  a.seed = 42;
+  b.seed = 42;
+  c.seed = 43;
+  const std::string first = draw(a);
+  EXPECT_TRUE(a.seeded);
+  EXPECT_EQ(draw(b), first);
+  EXPECT_NE(draw(c), first);
+  // Three draws here and three on another thread equal six in a row.
+  const std::string more = draw(a);
+  random_stream moved;
+  moved.seed = 42;
+  draw(moved);
+  std::string elsewhere;
+  std::thread([&] { elsewhere = draw(moved); }).join();
+  EXPECT_EQ(elsewhere, more);
+  // Unseeded, a stream seeds itself from the OS.
+  random_stream d;
+  draw(d);
+  EXPECT_TRUE(d.seeded);
 }
 
 // --- measuring a share -------------------------------------------------------------------------
