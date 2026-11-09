@@ -1,0 +1,18 @@
+# A server document with a world: block and no scene:, for arisrv's ctest of WD2 (ARIADNE_WORLDS.md):
+# the relay runs the stock world's scene under this document's rules, published as the room's rules
+# sections before init: runs, so init: reads them back through `room` and stops the relay with
+# (quit 0), or with 6 when they aren't there.
+meta: { name: arisrv world rules, min_libcvc: 3.7.12 }
+requires: [relay]
+world:
+  avatars:
+    archetypes:
+      pilot: { body: { mass: 90, width: 0.6, height: 1.9 }, controllers: [walker@1] }
+    policy:
+      max_speed: 6
+      energy: { empty: stop }
+init: |
+  (quit (if (and (= (state-get "room.avatars.archetypes.0.id") "pilot")
+                 (= (state-get "room.avatars.policy.max_speed") "6")
+                 (= (state-get "room.controllers.0.id") "walker@1"))
+            0 6))

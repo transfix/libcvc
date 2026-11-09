@@ -39,7 +39,8 @@ namespace conference {
 // -- a window, the terminal, a test -- shows the same thing.
 //
 //   look.{color, accessory}            the labels everyone draws (room_avatar.h)
-//   body, controller                   "0.50 x 0.50 x 1.70 m box, 70 kg", "walker"
+//   body, controller                   "0.50 x 0.50 x 1.70 m box, 70 kg", "walker@1": the
+//                                      room's (its rules sections, world_rules.h)
 //   policy.{budget, push, power, reserve, carrying, empty, sustains}   the relay's rule, each a
 //                                      short value ("840 N"), with what it means as
 //                                      policy.<line>_tip (for a tooltip)
@@ -90,6 +91,8 @@ private:
   avatar_energy _energy;
   avatar_energy_policy _policy;
   avatar_body _body;
+  std::string _controller;   // the avatar's controller id (world_rules.h)
+  double _gravity = 9.80665; // m/s^2: the world's, what carrying a body along is priced by
   double _speed = 0.0;
   std::string _color, _accessory;
   std::deque<double> _reserve, _power;

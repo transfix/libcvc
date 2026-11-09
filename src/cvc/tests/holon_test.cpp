@@ -23,6 +23,8 @@
 #include <cstring>
 #include <cvc/ariadne/avatar_sim.h>
 #include <cvc/ariadne/holon.h>
+#include <cvc/ariadne/section.h>     // section_stamp: the rules tests
+#include <cvc/ariadne/world_rules.h> // world_rules: the rules tests
 #include <cvc/physics/body.h>
 #include <cvc/physics/types.h>
 #include <gtest/gtest.h>
@@ -933,9 +935,9 @@ holon_config energy_config(double reserve_max, double power_rest = 300.0,
                            cvc::ariadne::avatar_energy_policy::when_empty empty =
                                cvc::ariadne::avatar_energy_policy::when_empty::rest) {
   holon_config cfg = physics_config();
-  cfg.energy.reserve_max = reserve_max;
-  cfg.energy.power_rest = power_rest;
-  cfg.energy.empty = empty;
+  cfg.rules.policy.energy.reserve_max = reserve_max;
+  cfg.rules.policy.energy.power_rest = power_rest;
+  cfg.rules.policy.energy.empty = empty;
   return cfg;
 }
 // A 400 m floor and nothing on it: room for the long walks an energy budget takes to run down
@@ -1061,7 +1063,7 @@ TEST(HolonEnergyTest, AStopPolicyHoldsAnEmptyAvatarUntilAQuarterRefills) {
 // With the budget off, only the push is limited, and the reserve stays full.
 TEST(HolonEnergyTest, WithoutABudgetOnlyThePushIsLimited) {
   holon_config cfg = energy_config(/*reserve_max=*/100.0);
-  cfg.energy.enabled = false;
+  cfg.rules.policy.energy.enabled = false;
   holon server(holon_role::server, cfg);
   if (!server.physics())
     GTEST_SKIP() << "no Jolt backend in this build";
@@ -1112,7 +1114,7 @@ TEST(HolonEnergyTest, ThePredictionSpendsLikeTheServerAndTakesItsCorrection) {
 
 TEST(HolonAuthorityTest, TheVetoCapsSpeedDropsTheVerticalAndRejectsNonFinite) {
   holon_config cfg;
-  cfg.max_speed = 3.0;
+  cfg.rules.policy.max_speed = 3.0;
   holon server(holon_role::server, cfg);
   const double nan = std::nan("");
   avatar_intent fast{vec3{30.0, 40.0, 5.0}};
@@ -1207,4 +1209,208 @@ TEST(HolonAuthorityTest, AReMassedAvatarIsHarderToPush) {
   holon client(holon_role::client, physics_config());
   client.add_participant("A", true);
   EXPECT_FALSE(client.set_mass("A", 10.0)) << "only the authority re-masses";
+}
+
+// ---- The world's rules, each from its activation tick (ARIADNE_WORLDS.md §3, WD2)
+
+namespace {
+cvc::ariadne::section_stamp stamp(std::uint64_t epoch, std::uint64_t rev, std::uint64_t at) {
+  cvc::ariadne::section_stamp s;
+  s.epoch = epoch, s.rev = rev, s.at = at;
+  return s;
+}
+cvc::ariadne::avatar_policy capped(double max_speed) {
+  cvc::ariadne::avatar_policy p;
+  p.max_speed = max_speed;
+  p.energy.enabled = false; // the push limit only: what the tests below compare is the veto
+  return p;
+}
+} // namespace
+
+// The relay switches on the tick a section names, and an intent sent before the change is held to
+// the policy in force at each step: an 8 m/s ask moves at the old 4 m/s cap until the tick, and at
+// the new 6 m/s one from it.
+TEST(HolonRulesTest, TheServerSwitchesOnTheActivationTick) {
+  holon server(holon_role::server);
+  server.add_participant("A");
+  const double dt = server.clock().fixed_dt();
+  server.set_policy(capped(4.0), stamp(1, 1, 0));
+  server.set_intent("A", avatar_intent{vec3{8.0, 0.0, 0.0}});
+  const std::uint64_t t = server.tick() + 30;
+  server.set_policy(capped(6.0), stamp(1, 2, t));
+  EXPECT_EQ(server.rules_at(t - 1).policy.max_speed, 4.0);
+  EXPECT_EQ(server.rules_at(t).policy.max_speed, 6.0);
+  EXPECT_EQ(server.rules().policy.max_speed, 4.0) << "not yet";
+  for (int i = 0; i < 59; ++i)
+    server.advance(dt);
+  // 29 steps at 4 m/s, then 30 at 6 (the tick it names is the 30th step's).
+  EXPECT_NEAR(server.state("A").position.x, (29.0 * 4.0 + 30.0 * 6.0) * dt, 1e-9);
+  EXPECT_EQ(server.rules().policy.max_speed, 6.0);
+
+  // A tick already passed: from the next one (the authority does not rewind).
+  const double before = server.state("A").position.x;
+  server.set_policy(capped(1.0), stamp(1, 3, server.tick() - 10));
+  server.advance(dt);
+  EXPECT_NEAR(server.state("A").position.x - before, 1.0 * dt, 1e-9);
+  EXPECT_EQ(server.rules_stamp(cvc::ariadne::rules_section::policy).rev, 3u);
+}
+
+// The first version of a section a holon sees, and the first of a new epoch, is in force from the
+// start; a later one of the same epoch from its tick.
+TEST(HolonRulesTest, AFirstVersionOrANewEpochIsInForceFromTheStart) {
+  holon server(holon_role::server);
+  const double dt = server.clock().fixed_dt();
+  for (int i = 0; i < 500; ++i)
+    server.advance(dt);
+  server.set_policy(capped(3.0), stamp(11, 5, 400));
+  EXPECT_EQ(server.rules_at(0).policy.max_speed, 3.0) << "what came before it is unknown";
+  server.set_policy(capped(5.0), stamp(11, 6, 600));
+  EXPECT_EQ(server.rules_at(599).policy.max_speed, 3.0);
+  EXPECT_EQ(server.rules_at(600).policy.max_speed, 5.0);
+  // A restarted relay: its schedule replaces the old one's.
+  server.set_policy(capped(2.0), stamp(12, 1, 0));
+  EXPECT_EQ(server.rules_at(0).policy.max_speed, 2.0);
+  EXPECT_EQ(server.rules_at(700).policy.max_speed, 2.0) << "the old run's change at 600 is gone";
+  // Each section is its own: the physics section's first version leaves the policy alone.
+  cvc::ariadne::world_physics moon;
+  moon.gravity = vec3{0.0, 0.0, -1.62};
+  server.set_physics(moon, stamp(12, 1, 0));
+  EXPECT_EQ(server.rules().policy.max_speed, 2.0);
+  EXPECT_EQ(server.rules().physics.gravity.z, -1.62);
+}
+
+namespace {
+// A relay and a client six frames apart each way, the client leading by its round trip, walking
+// one avatar at 4 m/s under a 4 m/s cap until frame 400. At frame 120 the relay lowers the cap to
+// 1.5 m/s from half a second ahead; the client hears of it LEARN frames later. Returns the
+// corrections the client took between the change and hearing of it, and after, and how far apart
+// the two have the avatar once it stands.
+struct policy_change_run {
+  double before = -1.0, after = -1.0, apart = -1.0;
+  bool skipped = false;
+};
+policy_change_run run_policy_change(int learn) {
+  policy_change_run out;
+  holon server(holon_role::server, physics_config());
+  holon client(holon_role::client, physics_config());
+  if (!server.physics() || !client.physics()) {
+    out.skipped = true;
+    return out;
+  }
+  server.set_statics(open_floor(), 1);
+  client.set_statics(open_floor(), 1);
+  server.add_participant("A", false, at(-80.0, 0.0));
+  client.add_participant("A", true, at(-80.0, 0.0));
+  server.set_policy(capped(4.0), stamp(7, 1, 0));
+  client.set_policy(capped(4.0), stamp(7, 1, 0));
+  constexpr int kDelay = 6;
+  client.set_lead_ticks(2 * kDelay + 2);
+  const double dt = server.clock().fixed_dt();
+  struct msg {
+    int at;
+    avatar_intent in;
+    std::uint64_t tick;
+    body_state s;
+  };
+  std::vector<msg> up, down;
+  cvc::ariadne::section_stamp slow;
+  out.before = out.after = 0.0;
+  for (int f = 0; f < 480; ++f) {
+    if (f == 10 || f == 400) { // walk, then stand (so the two are compared standing still)
+      const avatar_intent walk{vec3{f == 10 ? 4.0 : 0.0, 0.0, 0.0}};
+      client.set_intent("A", walk);
+      up.push_back({f + kDelay, walk, client.tick() + 1, {}});
+    }
+    if (f == 120) {
+      slow = stamp(7, 2, server.tick() + 60);
+      server.set_policy(capped(1.5), slow);
+    }
+    if (f == 120 + learn)
+      client.set_policy(capped(1.5), slow);
+    client.advance(dt);
+    for (auto it = up.begin(); it != up.end();)
+      if (it->at <= f) {
+        server.queue_intent("A", it->in, it->tick);
+        it = up.erase(it);
+      } else {
+        ++it;
+      }
+    server.advance(dt);
+    down.push_back({f + kDelay, {}, server.tick(), server.state("A")});
+    for (auto it = down.begin(); it != down.end();)
+      if (it->at <= f) {
+        client.apply_authoritative("A", it->s, it->tick);
+        it = down.erase(it);
+      } else {
+        ++it;
+      }
+    const vec3 c = client.take_correction("A");
+    const double jump = std::fabs(c.x) + std::fabs(c.y) + std::fabs(c.z);
+    if (f >= 120 && f < 120 + learn)
+      out.before += jump;
+    else if (f > 120 + learn + 2 * kDelay)
+      out.after += jump;
+  }
+  out.apart = std::fabs(client.state("A").position.x - server.state("A").position.x);
+  return out;
+}
+} // namespace
+
+// A client that hears of the change before its tick switches on the same tick as the relay: no
+// correction at all.
+TEST(HolonRulesTest, AClientThatHearsInTimeSwitchesWithTheRelay) {
+  const policy_change_run r = run_policy_change(/*learn=*/12);
+  if (r.skipped)
+    GTEST_SKIP() << "no Jolt backend in this build";
+  EXPECT_LT(r.before + r.after, 1e-3) << "it predicted the switch";
+  EXPECT_LT(r.apart, 0.05);
+}
+
+// One that hears after its tick has been corrected by every sample since (it predicted the old
+// cap); hearing of it, it re-runs its prediction from the tick, and agrees from then on.
+TEST(HolonRulesTest, AClientThatHearsLateReplaysFromTheActivationTick) {
+  const policy_change_run r = run_policy_change(/*learn=*/120);
+  if (r.skipped)
+    GTEST_SKIP() << "no Jolt backend in this build";
+  EXPECT_GT(r.before, 0.1) << "until then the relay's samples kept correcting it";
+  EXPECT_LT(r.after, 1e-3) << "after, it predicts what the relay does";
+  EXPECT_LT(r.apart, 0.05);
+}
+
+// A new archetype body: every avatar's is re-created where it stands, heavier and taller.
+TEST(HolonRulesTest, ANewBodyIsMadeWhereTheAvatarStands) {
+  holon server(holon_role::server, physics_config());
+  if (!server.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  server.set_statics(open_floor(), 1);
+  server.add_participant("A", false, at(2.0, 3.0));
+  run(server, 12);
+  cvc::ariadne::avatar_archetype big;
+  big.id = "big";
+  big.body = cvc::ariadne::avatar_body{140.0, 0.6, 2.0};
+  server.set_archetypes({big}, stamp(1, 1, 0));
+  EXPECT_EQ(server.body().height, 2.0);
+  run(server, 12);
+  const body_state s = server.state("A");
+  EXPECT_NEAR(s.position.x, 2.0, 1e-3);
+  EXPECT_NEAR(s.position.y, 3.0, 1e-3);
+  EXPECT_NEAR(s.position.z, 0.0, 0.02) << "it still stands on the floor";
+  server.set_intent("A", avatar_intent{vec3{3.0, 0.0, 0.0}});
+  run(server, 12); // 100 ms at 840 N: 0.6 m/s for 140 kg
+  EXPECT_NEAR(speed(server, "A"), 0.6, 0.06) << "the new body's mass";
+}
+
+// Gravity is the physics section's: an avatar dropped from 5 m falls a moon's 0.2 m in half a
+// second, not the earth's 1.2.
+TEST(HolonRulesTest, GravityIsThePhysicsSections) {
+  holon server(holon_role::server, physics_config());
+  if (!server.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  server.set_statics(open_floor(), 1);
+  cvc::ariadne::world_physics moon;
+  moon.gravity = vec3{0.0, 0.0, -1.62};
+  server.set_physics(moon, stamp(1, 1, 0));
+  server.add_participant("A", false, at(0.0, 0.0, 5.0));
+  run(server, 60);
+  EXPECT_NEAR(server.state("A").position.z, 5.0 - 0.5 * 1.62 * 0.25, 0.02);
 }

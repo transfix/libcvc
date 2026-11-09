@@ -20,6 +20,7 @@
 #include <cvc/ariadne/conference/room_chat.h>   // the chat-* verbs
 #include <cvc/ariadne/conference/room_intrinsics.h>
 #include <cvc/ariadne/conference/room_net.h> // the roster entries carry each link's quality
+#include <cvc/ariadne/conference/room_rules.h> // room-avatar: the policy (stamina)
 #include <cvc/ariadne/holon_sync.h>          // write_intent (room-set-intent verb)
 #include <cvc/core/app.h>                    // app.root()
 #include <cvc/state/state.h>               // cvc::state, SEPARATOR, findDescendant, children, value
@@ -460,14 +461,14 @@ void register_room_intrinsics(cvc::app &app) {
           const avatar_color_option *c = cat->find_color(look.color_id);
           const avatar_accessory_option *a = cat->find_accessory(look.accessory_id);
           std::string stamina;
-          avatar_energy_policy policy;
+          avatar_policy policy;
           double reserve = 0.0;
           std::uint64_t reserve_tick = 0;
-          if (read_avatar_policy(app, rh->room_id, policy) && policy.enabled &&
-              policy.reserve_max > 0.0 &&
+          if (read_avatar_policy(app, rh->room_id, policy) && policy.energy.enabled &&
+              policy.energy.reserve_max > 0.0 &&
               read_avatar_reserve(app, rh->room_id, rh->self_pid, reserve, reserve_tick))
             stamina = std::to_string(
-                static_cast<long>(std::floor(100.0 * reserve / policy.reserve_max + 0.5)));
+                static_cast<long>(std::floor(100.0 * reserve / policy.energy.reserve_max + 0.5)));
           return se::make_dict({
               {"color", se::value_t(c ? c->label : std::string())},
               {"accessory", se::value_t(a ? a->label : std::string())},

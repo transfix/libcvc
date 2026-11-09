@@ -288,6 +288,14 @@ int main() {
               near(crown[0], body[0], 1e-4) && near(crown[1], body[1], 1e-4) &&
               crown[2] > body[2] + 0.5 * rs::kAvatarHeight,
           "the hat's crown sits on top of the body");
+      // The room's archetype (its rules sections, WD2): every marker is built again on its body.
+      cvc::ariadne::avatar_archetype tall;
+      tall.body.height = 2.2;
+      h.set_archetypes({tall}, cvc::ariadne::section_stamp{1, 1, 0});
+      frames(1);
+      chk(node_xyz(sga, "avatar_A", body) && near(body[2], 0.5 * 2.2, 1e-3) &&
+              sga.getGraphics("avatar_A_part1") != nullptr,
+          "a taller archetype stands the marker taller, still wearing its hat");
 
       rs::write_avatar_choice(app, "looks", "A", rs::avatar_choice{"crimson", "none"});
       frames(20);
