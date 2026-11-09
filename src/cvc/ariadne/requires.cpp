@@ -58,6 +58,9 @@ const std::vector<TokenRule> &rules() {
       {{"ui.fullscreen", "(fullscreen ON) makes the window cover the screen: a GL window, or the "
                          "canvas in a browser; never a terminal"},
        [](const HostFacts &f) { return f.caps.fullscreen; }},
+      {{"ui.maximize", "a window's title bar has a maximize button that fills it to the screen "
+                       "under the menu bar, and back (tree.<id>.maximized)"},
+       [](const HostFacts &f) { return f.caps.maximize; }},
       {{"raster.bitmap", "images in real pixels (a GL window, or a kitty or Sixel terminal)"},
        [](const HostFacts &f) { return f.caps.bitmap; }},
       {{"input.on_change", "message_input: takes live: true and on_change: (event.text, as it is "

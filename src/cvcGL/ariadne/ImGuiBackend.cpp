@@ -187,6 +187,7 @@ ariadne::Capabilities ImGuiBackend::capabilities() const {
   c.clipboard = cvc::gl::clipboard::canCopy();
   c.fullscreen = static_cast<bool>(m_setFullscreen);
   c.fullscreen_view = true;
+  c.maximize = true;
   c.badge = true;
   return c;
 }
@@ -195,6 +196,66 @@ bool ImGuiBackend::begin_main_menu_bar() { return ui::BeginMainMenuBar(); }
 void ImGuiBackend::end_main_menu_bar() { ui::EndMainMenuBar(); }
 bool ImGuiBackend::begin_menu(const char *label) { return ui::BeginMenu(label); }
 void ImGuiBackend::end_menu() { ui::EndMenu(); }
+
+bool ImGuiBackend::next_window_maximize(bool *maximized) {
+  m_maximize = maximized;
+  return true;
+}
+
+#ifdef CVC_ENABLE_IMGUI
+namespace {
+// §5.9 the square button in a window's title bar, left of its close button (and of a collapse arrow
+// on the right): it flips *maximized. An item over the title bar, clipped to it, as ImGui's own
+// close button is, so a press on it is the button's and doesn't start a move. Restoring, it is
+// two squares. The window's last item (its title bar) is left as it was.
+void maximize_button(bool *maximized, bool has_close) {
+  ImGuiWindow *win = ImGui::GetCurrentWindow();
+  if (!win || (win->Flags & ImGuiWindowFlags_NoTitleBar))
+    return;
+  ImGuiContext &g = *GImGui;
+  const ImGuiStyle &st = g.Style;
+  const float sz = g.FontSize;
+  const ImRect bar = win->TitleBarRect();
+  float right = bar.Max.x - st.FramePadding.x;
+  if (has_close)
+    right -= sz + st.ItemInnerSpacing.x;
+  if (st.WindowMenuButtonPosition == ImGuiDir_Right && !(win->Flags & ImGuiWindowFlags_NoCollapse))
+    right -= sz + st.ItemInnerSpacing.x;
+  const ImRect bb(ImVec2(right - sz, bar.Min.y + st.FramePadding.y),
+                  ImVec2(right, bar.Min.y + st.FramePadding.y + sz));
+  const ImGuiLastItemData last = g.LastItemData;
+  ImGui::PushClipRect(bar.Min, bar.Max, false);
+  const ImGuiID id = win->GetID("#MAXIMIZE");
+  if (ImGui::ItemAdd(bb, id, nullptr, ImGuiItemFlags_NoNav)) {
+    const bool on = *maximized;
+    bool hovered = false, held = false;
+    if (ImGui::ButtonBehavior(bb, id, &hovered, &held))
+      *maximized = !on;
+    if (hovered || held)
+      win->DrawList->AddRectFilled(
+          bb.Min, bb.Max, ImGui::GetColorU32(held ? ImGuiCol_ButtonActive : ImGuiCol_ButtonHovered),
+          st.FrameRounding);
+    const ImU32 col = ImGui::GetColorU32(ImGuiCol_Text);
+    const ImVec2 c = bb.GetCenter();
+    const float r = ImMax(2.0f, sz * 0.27f), t = ImMax(1.0f, sz / 16.0f);
+    if (on) { // restore: a square behind another
+      const float o = r * 0.45f;
+      win->DrawList->AddRect(ImVec2(c.x - r + o, c.y - r - o), ImVec2(c.x + r + o, c.y + r - o),
+                             col, 0.0f, 0, t);
+      win->DrawList->AddRectFilled(ImVec2(c.x - r - o, c.y - r + o),
+                                   ImVec2(c.x + r - o, c.y + r + o),
+                                   ImGui::GetColorU32(ImGuiCol_TitleBgActive));
+      win->DrawList->AddRect(ImVec2(c.x - r - o, c.y - r + o), ImVec2(c.x + r - o, c.y + r + o),
+                             col, 0.0f, 0, t);
+    } else {
+      win->DrawList->AddRect(ImVec2(c.x - r, c.y - r), ImVec2(c.x + r, c.y + r), col, 0.0f, 0, t);
+    }
+  }
+  ImGui::PopClipRect();
+  g.LastItemData = last;
+}
+} // namespace
+#endif
 
 void ImGuiBackend::focus_next_window() {
 #ifdef CVC_ENABLE_IMGUI
@@ -217,6 +278,8 @@ struct ImGuiBackend::WindowCuts {};
 bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne::Size &size,
                                 float border, bool *p_open) {
   int pushes = 0;
+  bool *const maximize = m_maximize; // §5.9 this window's tree.<id>.maximized, when it may be
+  m_maximize = nullptr;
   // Stable ImGui identity via the "Visible title###stable.id" trick (roadmap §3.3).
   std::string name = title;
   name += "###";
@@ -247,6 +310,8 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
   const bool relaid = m_relayout && m_relaid.insert(id).second;
   ImGuiWindow *const existing = relaid ? nullptr : ImGui::FindWindowByName(name.c_str());
   const ImGuiCond once = relaid ? ImGuiCond_Always : ImGuiCond_FirstUseEver;
+  const ariadne::WindowGeom seedGeom = m_pendingSeed; // read below, then consumed
+  const bool hadSeed = m_haveSeed;
   if (relaid)
     ImGui::SetNextWindowCollapsed(false, ImGuiCond_Always);
   // §11.4: seed the window from a persisted tree.<id>.geometry when the core supplied one. A FREE
@@ -457,15 +522,46 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
     mx.x = ImMin(mx.x, ImMax(work.Max.x - at.x, fitFloor));
     mx.y = ImMin(mx.y, ImMax(work.Max.y - at.y, fitFloor));
   }
-  if (fits || size.min_w.is_set() || size.min_h.is_set() || size.max_w.is_set() ||
-      size.max_h.is_set())
+  // §5.9 maximized: the window fills the work area (under a main menu bar), neither moved nor
+  // resized there; the place and size it had before come back when it is no longer.
+  const bool maximized = maximize && *maximize;
+  if (maximized) {
+    if (!m_unmaximized.count(id)) {
+      Unmaximized u;
+      if (existing) {
+        u = Unmaximized{existing->Pos.x, existing->Pos.y, existing->SizeFull.x,
+                        existing->SizeFull.y, !fits};
+      } else if (hadSeed && seedGeom.has_pos) { // maximized from the start: what is persisted
+        const ImVec2 origin = seedGeom.authored ? work.Min : ImVec2(0.0f, 0.0f);
+        u.x = origin.x + ui_px(seedGeom.x);
+        u.y = origin.y + ui_px(seedGeom.y);
+        u.sized = seedGeom.has_size && !fits;
+        u.w = ui_px(seedGeom.w);
+        u.h = ui_px(seedGeom.h);
+      } else {
+        u.x = work.Min.x + gap;
+        u.y = work.Min.y + gap;
+      }
+      m_unmaximized[id] = u;
+    }
+    ImGui::SetNextWindowPos(work.Min, ImGuiCond_Always);
+    ImGui::SetNextWindowSize(work.GetSize(), ImGuiCond_Always);
+  } else if (auto back = m_unmaximized.find(id); back != m_unmaximized.end()) {
+    ImGui::SetNextWindowPos(ImVec2(back->second.x, back->second.y), ImGuiCond_Always);
+    if (back->second.sized)
+      ImGui::SetNextWindowSize(ImVec2(back->second.w, back->second.h), ImGuiCond_Always);
+    m_unmaximized.erase(back);
+  }
+  if (!maximized && (fits || size.min_w.is_set() || size.min_h.is_set() || size.max_w.is_set() ||
+                     size.max_h.is_set()))
     ImGui::SetNextWindowSizeConstraints(mn, mx);
   if (border >= 0.0f) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, border);
     ++pushes;
   }
-  const ImGuiWindowFlags flags =
-      ImGuiWindowFlags_HorizontalScrollbar | (fits ? ImGuiWindowFlags_AlwaysAutoResize : 0);
+  const ImGuiWindowFlags flags = ImGuiWindowFlags_HorizontalScrollbar |
+                                 (maximized ? ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize
+                                            : (fits ? ImGuiWindowFlags_AlwaysAutoResize : 0));
   // A window that cut a hole in its background last frame (a viewport widget) paints its own in
   // end_window, around this frame's cuts: ImGui's is made clear, and the content goes on a channel
   // above the one that background is drawn on.
@@ -475,6 +571,8 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
   if (cuts->paints)
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
   vis = ImGui::Begin(name.c_str(), p_open, flags);
+  if (maximize)
+    maximize_button(maximize, p_open != nullptr);
   if (cuts->paints) {
     ImGui::PopStyleColor();
     cuts->dl = ImGui::GetWindowDrawList();

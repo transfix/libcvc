@@ -1287,6 +1287,7 @@ entry warns. An entry is one of:
   | `gl.view` | a live render view can sit in a widget |
   | `ui.windows`, `ui.menubar`, `ui.color` | movable windows; a menu bar; coloured styling |
   | `ui.fullscreen` | `(fullscreen ON)` makes the window cover the screen: a GL window, or the canvas in a browser; never a terminal (§10.7) |
+  | `ui.maximize` | a window's title bar has a maximize button that fills it to the screen under the menu bar, and back (`tree.<id>.maximized`, §5.9); ImGui and FTXUI |
   | `input.mouse`, `input.keyboard` | pointer input; key and text input |
   | `ui.group_click` | a group with `on_click:` is one item over its whole area, and `hover: highlight` lights it (§5.19); ImGui, FTXUI and tvision |
   | `raster.bitmap` | images show in real pixels (a GL window, or a kitty or Sixel terminal) |
@@ -1442,6 +1443,23 @@ A window's open state is `tree.<id>.open` (default open; `<id>` is its `id:`, el
 window whose state is `0` is not drawn. A `closable: true` window has a close button that sets it
 to `0`. One that opens again is sized as §5.8 says: by its `size:` or its content, unless the user
 resized it.
+
+**Maximizing.** A window's title bar also has a maximize button, beside the collapse arrow and the
+close X.
+- **The button:** pressed, it makes the window fill the screen under the main menu bar. Pressed
+  again, the window goes back to the place and size it had.
+- **The state** is `tree.<id>.maximized`, `1` or `0`. A document may write it to maximize a window
+  or put it back.
+- **Geometry:** while a window is maximized its `tree.<id>.geometry` isn't written, so it keeps
+  where the window goes back to, across a restart too.
+- **Opting out:** `maximizable: false` on a window gives it no button; the default is `true`.
+- **By backend:**
+  - ImGui: a square, two squares while maximized. The window can't be moved or resized while
+    maximized.
+  - FTXUI: `[↑]` beside the `[x]`, `[↕]` to go back (`[^]` / `[=]` without those glyphs). The
+    window is drawn from the top-left as big as the terminal.
+  - The tvision desktop has its own zoom box (and Ctrl-F5) instead, which this key doesn't follow.
+- **The token** `ui.maximize` (§5.7) says the backend has the button.
 
 Every document gets a **Windows** menu to open such a window again, with no menu items to write:
 
