@@ -21,7 +21,7 @@
 //     step a slider or cycle a combo; text fields edit in place and commit on Enter or focus loss;
 //     Esc reverts an edit or closes a popup; F10 opens the menu bar.
 //   - mouse: click to focus / activate, drag a slider, drag a window by its title bar, click [x] to
-//     close it, click a menu title to open it.
+//     close it, click a menu title to open it; the wheel scrolls a window whose content overflows.
 //   - free floating windows (capabilities().windows): placed from the authored pos/size or the
 //     persisted tree.<id>.geometry, raised on focus, z-ordered.
 //   - graphics: draw_image renders a published cvc::image. Where the terminal speaks a pixel
@@ -170,6 +170,10 @@ public:
   bool item_drag_started() override;
   bool item_drag_ended() override;
   bool item_pointer(float &x, float &y, float &dx, float &dy, int &button) override;
+  // §4.6 a group that is one item: a click on its text or pictures is its own, and one with an
+  // on_click takes focus (Tab, a click), Enter or Space firing it; a gutter column marks it lit.
+  void begin_item_group(const char *id, const ItemGroupOptions &opts) override;
+  void end_item_group() override;
 
   BoolEdit menu_item_toggle(const char *label, bool current) override;
   BoolEdit checkbox(const char *label, bool current) override;

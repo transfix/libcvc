@@ -18,6 +18,7 @@
 #include <cvc/ariadne/conference/avatar_panel.h>
 #include <cvc/ariadne/conference/room_avatar.h>
 #include <cvc/ariadne/conference/room_intrinsics.h>
+#include <cvc/ariadne/conference/room_rules.h> // the policy section
 #include <cvc/ariadne/conference/room_write_gate.h>
 #include <cvc/ariadne/holon.h>
 #include <cvc/core/app.h>
@@ -213,13 +214,14 @@ TEST(RoomAvatar, PartsOutsideTheEnvelopeAreNotDrawn) {
       << "the two outside parts dropped, then the rest capped";
 }
 
-// The relay's policy (§5k) round-trips through the tree, bumping its revision; a reserve reads back
-// as written, in whole joules.
+// The relay's policy (§5k) round-trips through the tree, bumping its revision (room_rules.h); a
+// reserve reads back as written, in whole joules.
 TEST(RoomAvatar, ThePolicyAndAReserveRoundTrip) {
   cvc::app app;
-  cvc::ariadne::avatar_energy_policy p;
-  EXPECT_FALSE(conf::read_avatar_policy(app, "r", p)) << "none written yet";
-  EXPECT_EQ(conf::avatar_policy_revision(app, "r"), 0u);
+  cvc::ariadne::avatar_policy policy;
+  cvc::ariadne::avatar_energy_policy &p = policy.energy;
+  EXPECT_FALSE(conf::read_avatar_policy(app, "r", policy)) << "none written yet";
+  EXPECT_EQ(conf::avatar_policy_stamp(app, "r").rev, 0u);
   p.enabled = true;
   p.force_max = 600.0;
   p.power_rest = 150.0;
@@ -227,10 +229,11 @@ TEST(RoomAvatar, ThePolicyAndAReserveRoundTrip) {
   p.transport_cost = 0.25;
   p.empty = cvc::ariadne::avatar_energy_policy::when_empty::stop;
   p.recover_fraction = 0.5;
-  conf::write_avatar_policy(app, "r", p);
-  EXPECT_EQ(conf::avatar_policy_revision(app, "r"), 1u);
-  cvc::ariadne::avatar_energy_policy q;
-  ASSERT_TRUE(conf::read_avatar_policy(app, "r", q));
+  conf::write_avatar_policy(app, "r", policy);
+  EXPECT_EQ(conf::avatar_policy_stamp(app, "r").rev, 1u);
+  cvc::ariadne::avatar_policy read;
+  const cvc::ariadne::avatar_energy_policy &q = read.energy;
+  ASSERT_TRUE(conf::read_avatar_policy(app, "r", read));
   EXPECT_TRUE(q.enabled);
   EXPECT_DOUBLE_EQ(q.force_max, 600.0);
   EXPECT_DOUBLE_EQ(q.power_rest, 150.0);
@@ -239,9 +242,9 @@ TEST(RoomAvatar, ThePolicyAndAReserveRoundTrip) {
   EXPECT_EQ(q.empty, cvc::ariadne::avatar_energy_policy::when_empty::stop);
   EXPECT_DOUBLE_EQ(q.recover_fraction, 0.5);
   p.enabled = false;
-  conf::write_avatar_policy(app, "r", p);
-  EXPECT_EQ(conf::avatar_policy_revision(app, "r"), 2u);
-  ASSERT_TRUE(conf::read_avatar_policy(app, "r", q));
+  conf::write_avatar_policy(app, "r", policy);
+  EXPECT_EQ(conf::avatar_policy_stamp(app, "r").rev, 2u);
+  ASSERT_TRUE(conf::read_avatar_policy(app, "r", read));
   EXPECT_FALSE(q.enabled);
 
   double j = 0.0;
@@ -348,7 +351,7 @@ TEST(RoomAvatar, ThePanelPublishesTheBudgetLedgerAndHistory) {
   EXPECT_EQ(get("ready"), "1");
   EXPECT_EQ(get("look.color"), "Teal");
   EXPECT_EQ(get("look.accessory"), "Cap");
-  EXPECT_EQ(get("controller"), "walker");
+  EXPECT_EQ(get("controller"), "walker@1") << "the room's (its rules' default)";
   EXPECT_EQ(get("body"), "0.50 x 0.50 x 1.70 m box, 70 kg");
   EXPECT_EQ(get("policy.reserve"), "30.0 kJ");
   EXPECT_EQ(get("policy.sustains"), "2.2 m/s");

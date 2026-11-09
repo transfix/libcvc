@@ -212,6 +212,78 @@ TEST(WorldCloudLayer, TheShadowLiesAwayFromTheSun) {
   EXPECT_NEAR(by, 20.0 + 50.0 * sy / sz, 1e-9);
 }
 
+TEST(WorldCloudLayer, ACloudIsShadedByItselfAwayFromTheSun) {
+  // A cell's optical depth toward the sun: nothing on the top layer or up-sun of the cloud, more
+  // with depth into it, more on its down-sun side than its sunward one; and a morph's is the
+  // crossfade of its two variants', as its density is.
+  cloud_layer_params p = small(10.0);
+  p.coverage = 0.01;
+  p.sun_az = -60.0;
+  p.sun_el = 40.0;
+  const cloud_layer L(p);
+  const cloud_cell *one = nullptr;
+  for (const cloud_cell &c : L.cells())
+    if (c.occupied)
+      one = &c;
+  ASSERT_NE(one, nullptr);
+  const double m = 0.25;
+  std::vector<float> f, tau;
+  L.cell_field(*one, m, f);
+  L.cell_sun_tau(*one, m, tau);
+  const int n = p.n, nz = p.nz;
+  ASSERT_EQ(tau.size(), f.size());
+  for (int y = 0; y < n; ++y)
+    for (int x = 0; x < n; ++x)
+      EXPECT_EQ(tau[cvc::lsys::cloud_index(n, x, y, nz - 1)], 0.0f);
+  for (float t : tau)
+    EXPECT_GE(t, 0.0f);
+  // Deeper layers lie under more of the cloud: the layers' mean depth grows downward.
+  std::vector<double> mean(nz, 0.0);
+  for (int z = 0; z < nz; ++z) {
+    for (int y = 0; y < n; ++y)
+      for (int x = 0; x < n; ++x)
+        mean[z] += tau[cvc::lsys::cloud_index(n, x, y, z)];
+    mean[z] /= double(n) * n;
+  }
+  for (int z = 0; z + 1 < nz; ++z)
+    EXPECT_GE(mean[z] + 1e-6, mean[z + 1]) << "layer " << z;
+  EXPECT_GT(mean[0], 0.0);
+  // Inside the cloud, the half facing the sun is lit better than the half away from it.
+  double sx, sy, sz;
+  L.sun_dir(sx, sy, sz);
+  double W = 0, X = 0, Y = 0;
+  for (int z = 0; z < nz; ++z)
+    for (int y = 0; y < n; ++y)
+      for (int x = 0; x < n; ++x) {
+        const double v = f[cvc::lsys::cloud_index(n, x, y, z)];
+        W += v;
+        X += v * x;
+        Y += v * y;
+      }
+  ASSERT_GT(W, 0.0);
+  X /= W;
+  Y /= W;
+  double up = 0, upW = 0, down = 0, downW = 0;
+  for (int z = 0; z < nz; ++z)
+    for (int y = 0; y < n; ++y)
+      for (int x = 0; x < n; ++x) {
+        const std::size_t i = cvc::lsys::cloud_index(n, x, y, z);
+        if (f[i] < 0.3f)
+          continue;
+        const double toward = (x - X) * sx + (y - Y) * sy;
+        (toward > 0 ? up : down) += tau[i];
+        (toward > 0 ? upW : downW) += 1.0;
+      }
+  ASSERT_GT(upW, 0.0);
+  ASSERT_GT(downW, 0.0);
+  EXPECT_LT(up / upW, down / downW);
+  // The morph: the crossfade of the variants' depths, by the morph's weight.
+  const cloud_layer::morph_state s = L.cell_morph(*one, m);
+  const std::vector<float> &A = L.variant_sun_tau(s.a), &B = L.variant_sun_tau(s.b);
+  for (std::size_t k = 0; k < tau.size(); k += 97)
+    EXPECT_NEAR(tau[k], (1.0 - s.u) * A[k] + s.u * B[k], 1e-4);
+}
+
 TEST(WorldCloudLayer, FarDensityHonoursTheCellWeights) {
   const cloud_layer L(small());
   const int N = L.far_size(), layers = L.params().far_layers;

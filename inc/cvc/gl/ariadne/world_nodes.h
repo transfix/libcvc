@@ -50,6 +50,11 @@
 // terrain_lab's. The building library is the Austin archetypes (cvc::world::load_building_library):
 // the prop's URI, else $CVC_NAV_BUNDLE, else /bundle/buildings.glb (a wasm mount); without one the
 // city's buildings are procedural massing.
+//
+// `body: {}` on the node puts the world's colliders, its terrain and buildings, in the scene's
+// physics world, and a new world replaces them. The params, keys, requests, stats and colliders are
+// core libcvc's (cvc/ariadne/scene_generated_world.h), which a headless host runs the node with, so
+// a document's generated world and its bodies are the same drawn or not.
 
 #ifndef CVC_GL_ARIADNE_WORLD_NODES_H
 #define CVC_GL_ARIADNE_WORLD_NODES_H

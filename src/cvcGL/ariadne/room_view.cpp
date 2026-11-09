@@ -29,17 +29,16 @@ namespace {
 
 namespace rs = cvc::ariadne::conference;
 
-// An avatar marker: a 0.5 x 0.5 x 1.7 m box standing on the pose (its base at the pose's z), the
-// body every avatar has (room_avatar.h), with what it wears posed around it.
-using rs::kAvatarHeight;
-using rs::kAvatarWidth;
+// An avatar marker: a box the size of the avatars' body (the room's archetype, holon::body(); 0.5 x
+// 0.5 x 1.7 m by default) standing on the pose (its base at the pose's z), with what it wears posed
+// around it.
 // Its visor: a dark slab across the front (+X in the avatar's frame) at head height, standing
-// proud of the face so it reads from behind and the side too. Centred at kVisorOffset from the
-// marker's centre.
+// proud of the face so it reads from behind and the side too: its centre kVisorBelowTop under the
+// body's top, on its front face.
 constexpr float kVisorSize[3] = {0.14f, 0.40f, 0.16f};
-constexpr double kVisorOffset[3] = {0.5 * kAvatarWidth, 0.0, 0.5 * kAvatarHeight - 0.32};
-// A label floats this far above the pose (above the marker's top).
-constexpr double kLabelHeight = kAvatarHeight + 0.35;
+constexpr double kVisorBelowTop = 0.32;
+// A label floats this far above the body's top.
+constexpr double kLabelAboveTop = 0.35;
 
 // The LOD error budget until set_lod says otherwise: in the browser, the wasm profile, which spends
 // less of a smaller triangle and fill-rate budget.
@@ -240,6 +239,15 @@ void room_view::sync_avatars(cvc::ariadne::holon &h, double wall_dt) {
   if (!present.count(_self))
     _have_self = false;
 
+  // The room's archetype changed (its rules sections): every marker is built again on the new body.
+  if (!(h.body() == _body)) {
+    _body = h.body();
+    std::vector<std::string> built;
+    for (const auto &kv : _avatars)
+      built.push_back(kv.first);
+    for (const std::string &pid : built)
+      remove_marker(pid);
+  }
   sync_looks(pids);
   for (const std::string &pid : pids) {
     const bool self = (pid == _self);
@@ -272,7 +280,7 @@ void room_view::sync_avatars(cvc::ariadne::holon &h, double wall_dt) {
     }
     double m[16];
     // The box is centred on its origin: lift it by half its height to stand on the pose.
-    pose_matrix(p.rotation, p.position.x, p.position.y, p.position.z + 0.5 * kAvatarHeight, m);
+    pose_matrix(p.rotation, p.position.x, p.position.y, p.position.z + 0.5 * _body.height, m);
     // The marker, visor and parts move together, or (within kPoseEpsilon of the pose they show)
     // not at all.
     const auto shown = _posed.find(pid);
@@ -295,10 +303,11 @@ void room_view::sync_avatars(cvc::ariadne::holon &h, double wall_dt) {
           g->setPoseMatrix(pm);
         }
       };
-      place(visor_node_id(pid), kVisorOffset);
+      const double visor[3] = {0.5 * _body.width, 0.0, 0.5 * _body.height - kVisorBelowTop};
+      place(visor_node_id(pid), visor);
       for (std::size_t i = 0; i < parts.size(); ++i) {
         const double off[3] = {parts[i].pos[0], parts[i].pos[1],
-                               parts[i].pos[2] - 0.5 * kAvatarHeight};
+                               parts[i].pos[2] - 0.5 * _body.height};
         place(part_node_id(pid, i), off);
       }
     }
@@ -313,7 +322,8 @@ void room_view::sync_avatars(cvc::ariadne::holon &h, double wall_dt) {
       for (std::size_t i = 0; i < parts.size(); ++i)
         show(part_node_id(pid, i));
     }
-    _heads[pid] = cvc::physics::vec3{p.position.x, p.position.y, p.position.z + kLabelHeight};
+    _heads[pid] = cvc::physics::vec3{p.position.x, p.position.y,
+                                     p.position.z + _body.height + kLabelAboveTop};
   }
 }
 
@@ -347,8 +357,8 @@ void room_view::build_marker(const std::string &pid, const rs::avatar_look &look
   cvc::ariadne::SceneNode n;
   n.id = avatar_node_id(pid);
   n.source_primitive = "box";
-  n.box_size[0] = n.box_size[1] = kAvatarWidth;
-  n.box_size[2] = kAvatarHeight;
+  n.box_size[0] = n.box_size[1] = static_cast<float>(_body.width);
+  n.box_size[2] = static_cast<float>(_body.height);
   n.has_material = true;
   std::copy(look.body, look.body + 3, n.color);
   n.ambient = 0.3f;

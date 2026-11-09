@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <boost/any.hpp>
 #include <boost/thread/thread.hpp>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cvc/core/app.h>
@@ -815,6 +816,19 @@ TEST_F(ResourceIntrinsicsTest, TimeElapsed) {
   EXPECT_GE(std::get<double>(result.v), 0.0);
 }
 
+// (time-now) is the wall clock, seconds since the Unix epoch, not the program's budget clock.
+TEST_F(ResourceIntrinsicsTest, TimeNowIsTheWallClock) {
+  const double before =
+      std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+  auto result = call("time-now");
+  const double after =
+      std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+  const double now = std::get<double>(result.v);
+  EXPECT_GE(now, before);
+  EXPECT_LE(now, after);
+  EXPECT_GT(now, 1.7e9) << "past 2023: seconds since 1970, not since the program started";
+}
+
 TEST_F(ResourceIntrinsicsTest, TimeLimit) {
   auto result = call("time-limit");
   EXPECT_EQ(std::get<double>(result.v), 60.0);
@@ -1142,7 +1156,7 @@ TEST_F(RegisterIntrinsicsTest, AllResourceIntrinsicsRegistered) {
 }
 
 TEST_F(RegisterIntrinsicsTest, AllSystemIntrinsicsRegistered) {
-  for (auto &name : {"cluster-id", "node-id", "scheduler-stats"}) {
+  for (auto &name : {"cluster-id", "node-id", "scheduler-stats", "time-now"}) {
     EXPECT_NE(env->lookup(name), nullptr) << "Missing intrinsic: " << name;
   }
 }

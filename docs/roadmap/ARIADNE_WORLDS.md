@@ -77,10 +77,11 @@ Checked against master 797ba4d9; the lab's rows, from "Vehicles and their naviga
 | Client realization | `room_view` rebuilds the scene from the tree whenever `scene.rev` moves, with the same realizer a document's `scene:` uses. | `src/cvcGL/ariadne/room_view.cpp` (`sync_scene`) |
 | Physics statics | Built from the scene objects: a plane becomes a 0.2 m slab, and boxes and spheres become themselves. Meshes are skipped, so the bunnies don't collide. | `room_statics` in `src/cvc/ariadne/holon_sync.cpp` |
 | Avatar looks | A catalog the relay seeds: ten colours plus an automatic hue, and seven accessories. A participant picks from it; every client draws the pick the same way. | `default_avatar_catalog`, `seed_avatar_catalog` in `room_avatar.cpp` |
-| Body | Compiled in: `avatar_body{70 kg, 0.5 m, 1.7 m}`, duplicated as `kAvatarWidth` / `kAvatarHeight` for the accessory envelope. Not replicated. | `inc/cvc/ariadne/avatar_physics.h`; `room_avatar.h` |
-| Controller | Compiled in: the walker is "the only controller so far". The avatar panel's "walker" is a string literal. | `drive_walker` in `avatar_physics.cpp`; `avatar_panel.cpp` |
-| Energy policy | **Replicated.** The relay writes every field under `conf.rooms.<room>.avatars.policy.energy.*`, then bumps `policy.rev`, each time it starts. The relay's holon and every client's read it from the same leaves and predict under it. Only on/off and rest/stop are exposed as flags; the numbers are C++ defaults. | `write_avatar_policy` in `room_avatar.cpp`; `sync_energy_policy` in `holon_sync.cpp` |
-| Speed veto | Compiled in: `room_holon_config()` sets `max_speed = 4.0`. | `holon_sync.cpp` |
+| Body | **The world's** (WD2): its archetype's, published in `avatars.archetypes`. Every avatar has the first archetype; the holon re-creates the bodies where they stand when it changes, and `room_view` draws the markers at its size. `kAvatarWidth` / `kAvatarHeight` remain as the default person's, which the accessory envelope and the catalog are designed on. | `world_rules.h`; `room_rules.h`; `avatar_world::set_body` |
+| Controller | **The world's** (WD2): the first its archetype allows, from `controllers.*` (a kernel by name and version, and its params). This build runs one kernel, `walker@1`, and the relay refuses a world naming another. The avatar panel shows the controller's id, and arigl's walk keys ask for its `walk_speed`. | `drive_walker` in `avatar_physics.cpp`; `controller_kernel_known` in `world_rules.cpp` |
+| Energy policy | **Replicated**, a section of the world's rules since WD2: `conf.rooms.<room>.avatars.policy.{energy.*, max_speed, allow_vertical}`, stamped `{epoch, at, rev}`. The world document sets the numbers; `--avatar-energy` and `--avatar-empty` override it. | `write_avatar_policy` in `room_rules.cpp`; `sync_rules` in `holon_sync.cpp` |
+| Speed veto | **The world's** (WD2): the policy's `max_speed` and `allow_vertical`. Each step applies them under the policy in force at its tick. | `holon::veto` in `holon.cpp` |
+| Gravity | **The world's** (WD2): its scene's `physics: gravity`, published in `physics.gravity`; the walker prices carrying a body by it (it was 9.81 compiled in). | `avatar_world::set_gravity` |
 | Holon | One world clock at 120 Hz. The relay simulates every avatar in Jolt. A client simulates its own avatar too, predicts it, and snaps and replays past 5 cm. Peers are kinematic, played from a buffer. Intents go up; pose snapshots come down at 60, 30 or 20 Hz depending on round-trip time. | `inc/cvc/ariadne/holon.h`, `holon_sync.h`, `room_pose_relay.cpp`, `inc/cvc/core/world_clock.h` |
 | Determinism | Jolt runs in cross-platform determinism mode. A golden state hash pins it on Windows, Linux, macOS, x86_64 and arm64, and wasm-mt (its own CI job). | `physics_world_test.cpp` (`exact_scene_hash`), `physics_parity_test.cpp`; ci.yml "physics replay (wasm-mt, node)" |
 | Documents on the server | `arisrv --doc server.ari` (S0, transfix/libcvc#1046) runs one headless: DSL programs on the relay's loop once per room step, the holon's world clock at `sim.tick`, the room read-only at `room`, `server: publish:` namespaces sent to every client, and `requires: [relay]`. A `scene:` with nodes or lights is the room's world, which the relay publishes before `init:` runs (WD1). Its physics and bodies are kept on `ServerDocument::scene()` but not simulated yet, and the load warns so: §14's headless world runtime will simulate them as the holon's one physics world. | ARIADNE_SCRIPTING_HOSTS.md §6.1, §6.5.3; `inc/cvc/ariadne/server_document.h` |
@@ -89,10 +90,10 @@ Checked against master 797ba4d9; the lab's rows, from "Vehicles and their naviga
 | Scale pieces | Built but unused by the conference: hash partitioning (`state_hash_partition`, `state_cluster_shard::partition()`) and delegation leases (`state_delegation_manager`). | `inc/cvc/state/` |
 | Vehicles and their navigator | `cvc::nav::sim_world` runs N agents on an occupancy raster with one `coef_mlp` policy for all of them. N is fixed when it is built: agents can't be added or removed. Agents have colours and, in C++ only, a team (`set_team`, used for yielding); they have no name. | `inc/cvc/nav/sim_world.h`; `src/cvc/nav/sim_world_binding.cpp` |
 | Vehicle plants | `plant_host` puts each agent on a plant: nav's kinematic bicycle, a Jolt vehicle, the dynamic single track or the dynamic four-wheel model. Presets `vehicle_desc::humvee()` and `roboracer()` carry mass, wheelbase, track, engine and `max_speed`. | `inc/cvc/physics/plant_host.h`, `inc/cvc/physics/vehicle.h` |
-| Generated worlds in a document | The `generated_world` node builds terrain, roads, buildings, trees and water, but publishes only its height field (`RealizedScene::height_fields`), so `ground:` and bodies stand on it. Buildings, occupancy, the road graph and water stay inside the node. | `src/cvcGL/ariadne/world_nodes.cpp` |
+| Generated worlds in a document | The `generated_world` node builds terrain, roads, buildings, trees and water and publishes its height field (`RealizedScene::height_fields`), so `ground:` stands on it. **L0's second part:** the node's params, `world.*` keys, requests, stats and colliders are core libcvc (`scene_generated_world.h`); its `body:` is its terrain and buildings, replaced when it regenerates; headless, the scene's world runs the node and `SceneWorld::generated_world(id)` hands over the whole world (raster, roads, buildings, water). | `inc/cvc/ariadne/scene_generated_world.h`; `src/cvcGL/ariadne/world_nodes.cpp` |
 | World to navigator | Only in Python: the `pycvc_gl.cars` template rasterizes a city or generated world (`nav_world_rasterize`) into the navigator's planes and hands colliders to the plants. | `bindings/pycvc/pymod_gl/cars.py`; `docs/CARS.md` |
-| Physics with no rendering | None for a document. Its `scene.physics:` world and its nodes' `body:` are built only by cvcGL's scene realizer (`realize_physics`), which binds bodies to SceneGraph nodes through `physics_scene_binding`; `generated_world` is a cvcGL node too. A headless runtime (`pycvc.AriApp` and `Host(mode="headless")`, `ari`, `ari test`, arisrv) has no scene: it drops `scene:` with a warning, and a document that requires `gl.scene` doesn't load. The physics world itself (`cvc::physics::world`, Jolt), the plants and the relay's holon are core libcvc and need no GL. | `src/cvcGL/ariadne/scene_realize.cpp`; `inc/cvc/physics/world.h`; `docs/ARIADNE.md` (the headless mode) |
-| Physics stats | `physics::world_binding` writes `tick`, `step_ms`, `bodies`, `active_bodies`, `contact_events` and a snapshot to its prefix. A document's `scene.physics:` world is held directly by the realized scene, not through the binding, so it publishes none of them. | `inc/cvc/physics/world_binding.h`; `inc/cvc/gl/ariadne/scene_realize.h` |
+| Physics with no rendering | **L0's first part, built:** a document's `scene.physics:` world and its geometry nodes' `body:`s are core libcvc's `cvc::ariadne::SceneWorld` (`scene_world.h`), built from the scene alone. A headless `AppRuntime` (`ari`, `ari test`, pycvc's `AriApp`, `arix`) runs it on the world clock; cvcGL builds the same world through it and binds its nodes, and a test pins the two worlds' state hashes equal. The `scene.physics` token. L0's second part runs a `generated_world` node's body and a data node's headless too, and a test pins a generated world's state hash equal drawn and not. Still renderer-only: another custom node's body. | `inc/cvc/ariadne/scene_world.h`; `src/cvcGL/ariadne/scene_realize.cpp` |
+| Physics stats | `physics::world_binding` writes `tick`, `step_ms`, `bodies`, `active_bodies`, `contact_events` and a snapshot to its prefix. A document's scene world publishes `physics.stats.{tick, time, step_ms, bodies, active_bodies, contact_events, saturated}`, drawn or not (L0). | `inc/cvc/physics/world_binding.h`; `inc/cvc/ariadne/scene_world.h` |
 | Step and restart | `sim_transport.ari`'s Step and Restart buttons raise `sim.step` and `sim.restart` for the host to handle. The clock binding can queue steps (`request_steps`); nothing restarts a world. | `src/cvc/ariadne/components/sim_transport.ari`; `inc/cvc/core/world_clock_binding.h` |
 | Rooms | One room per relay: `arisrv --room <id>` (default `standup`). The tree is already shaped for more, `conf.rooms.<room>.*`, and the area-of-interest, avatar and scene paths all take a room id. | `src/arisrv/main.cpp`; `inc/cvc/ariadne/conference/` |
 | Conference in documents | The stock components include `room_users.ari` (the Users window) and `chat.ari`. The rest of a conference (joining, media controls, tiles, the avatar panel, the 3D room) is in the example documents `conference_roster.ari`, `conference_media.ari`, `conference_live.ari` and in C++ widgets (`room_view`, `stream_view`). | `src/cvc/ariadne/components/`; `examples/ariadne/documents/` |
@@ -102,14 +103,15 @@ Checked against master 797ba4d9; the lab's rows, from "Vehicles and their naviga
 | Views | A document's `viewport` widgets draw the scene from cameras of their own, with per-view overrides, and `scenes:` gives a viewport a scene of its own: a studio set for one vehicle costs no host code. A click in a view doesn't give a world point. | `docs/ARIADNE.md` §5.18; `src/cvcGL/ariadne/scene_views.cpp` |
 
 **What that adds up to.** The data already flows the way the ask wants: the server holds the state,
-and each client rebuilds its view and its physics from the tree. Most of the *rules*, though, are
-compiled into both binaries: the body, the controller and the speed veto. Prediction is right
-because the client and the relay run the same code, not because the relay told the client how its
+and each client rebuilds its view and its physics from the tree. Until WD2 most of the *rules* were
+compiled into both binaries: the body, the controller and the speed veto. Prediction was right
+because the client and the relay ran the same code, not because the relay told the client how its
 world works.
 
-**The energy policy is the exception, and it is the model.** It is a revisioned section the server
-writes, with its revision written last, and both the relay's holon and every client read it from the
-same leaves. This plan generalizes that one pattern to everything that defines the world.
+**The energy policy was the exception, and it was the model.** It was a revisioned section the
+server wrote, with its revision written last, and both the relay's holon and every client read it
+from the same leaves. WD2 generalized that pattern to the world's rules: the body, the controller,
+the veto and gravity are sections now too, each with an activation tick (§3).
 
 **Two loose ends, fixed by WD0:**
 
@@ -142,8 +144,9 @@ same leaves. This plan generalizes that one pattern to everything that defines t
   else the operator doesn't want sent to clients. Clients need the world, not the program that
   built it.
 
-A world document, as proposed syntax. `scene:` is today's syntax; the `world:` block, the
-`conference.world` token and `room-rules-step` do not exist yet. S0's `relay` token holds in every
+A world document, as proposed syntax. `scene:` is today's syntax, and so is the `world:` block's
+`avatars: archetypes:`, `avatars: policy:` and `controllers:` since WD2 (`world_rules.h`; `catalog:`
+is still a warning). The `conference.world` token and `room-rules-step` do not exist yet. S0's `relay` token holds in every
 server document, and `conference.world` would build on it.
 
 ```yaml
@@ -193,11 +196,11 @@ revision, written last, exactly as `avatars.policy` does today.
 |---|---|---|---|
 | scene | `scene.*` | objects, lights, shadows, background | built (objects; lights unused) |
 | world descriptor | `scene.world.*` | a generator, its params and seed (GENERATED-WORLD-ROADMAP.md G5) | planned there |
-| physics | `physics.*` | on/off, gravity, `fixed_dt`, materials; bodies per scene object | new |
-| archetypes | `avatars.archetypes.<id>.*` | body, look envelope, allowed controllers | new |
+| physics | `physics.*` | on/off, gravity, `fixed_dt`, materials; bodies per scene object | built (gravity; WD2) |
+| archetypes | `avatars.archetypes.<i>.*` | body, look envelope, allowed controllers | built (body, controllers; WD2) |
 | catalog | `avatars.catalog.*` | colours, accessories | built |
-| policy | `avatars.policy.*` | energy, `max_speed`, later per-controller limits | built (energy only) |
-| controllers | `controllers.<id>.*` | kernel or guest, version, params, content hash | new |
+| policy | `avatars.policy.*` | energy, `max_speed`, later per-controller limits | built (energy, `max_speed`, `allow_vertical`; WD2) |
+| controllers | `controllers.<i>.*` | kernel or guest, version, params, content hash | built (native kernels; WD2) |
 | entities | `entities.<id>.*` | §4 | new |
 | spawns | `spawns.*` | spawn points (position, heading, tags) and the spawn policy (§14) | new |
 | stats | `physics.stats.*` | bodies, active bodies, contacts, step time; per entity its energy and forces. Read-only, written by whoever simulates: the relay, or a local world | new |
@@ -211,10 +214,17 @@ revision, written last, exactly as `avatars.policy` does today.
 - **The relay hosts what it publishes.** An asset's URI points at the relay's own origin or a CDN it
   names. This matters once users bring assets (§6): peers never fetch from an address another user
   chose.
-- **Changes that affect the simulation carry an activation tick.** When `physics.*`, `controllers.*`,
-  an archetype or the policy changes, the section says which world-clock tick it takes effect on,
-  and the relay switches on that tick. A client that learns of it late snaps and replays from that
-  tick, which its reconcile already does. Cosmetic sections (lights, looks) apply on arrival.
+- **Changes that affect the simulation carry an activation tick** (Q4, built in WD2). When
+  `physics.*`, `controllers.*`, an archetype or the policy changes, the section says which
+  world-clock tick it takes effect on (`at`), and the relay switches on that tick. The holon keeps
+  the rules by tick, and every step, the relay's, a client's prediction and its replay, runs under
+  the rules in force at its tick. A client that learns of a change late re-runs its prediction from
+  that tick; the relay's samples correct it until then, as its reconcile always has. A change while
+  the room runs takes effect half a second ahead (`rules_activation_tick`), so clients that hear of
+  it in time switch with the relay. Cosmetic sections (lights, looks) apply on arrival.
+- **Each section carries its writer's epoch** (`section.h`), beside its revision. A restarted relay
+  writes its sections again at revision 1, which a client that outlived the old relay already holds;
+  the epoch tells them apart, and a new one replaces the old run's schedule.
 - **The relay is still the only writer.** A section is written by the relay's own code: the world
   document's programs and the script thread, through S0's `server: publish:` rule (§6.5.3).
 
@@ -589,7 +599,7 @@ GENERATED-WORLD-ROADMAP.md's.)
 |---|---|---|---|
 | WD0 | **Done** (2026-11-07). The loose ends: `--set` after seeding, or a guard so a `--set` can't suppress the default world; the "under a sun" comment. Built as `--set` after the world and the room's policies, before a server document's `init:` (§1) | — | S |
 | WD1 | **Done** (2026-11-07). **The world document seeds the room.** `arisrv --doc world.ari` publishes the document's `scene:` (objects, lights, shadows), in one revision (`write_room_world`). `cvc://worlds/default.ari` and `large.ari` replace the C++ seeds, and `--scene` names them. The light rig and shadows move from the conference document to the world document (Q1), and the conference document drops its `scene:` block. As built: the wire gained a rig's knobs and the shadows' interval; `room_world_from_scene` leaves out, with a warning, what the wire can't hold (other node types and sources, children, textures, shaders), and publishes every body as a static until WD3; `--scene` together with a `--doc` that has a `scene:` is refused; the C++ twins are the fallback | S0 (met by transfix/libcvc#1046) | M |
-| WD2 | **The rules come from the document.** The physics, archetype, policy and controller sections (§3), with the activation tick. The holon and `room_view` read them instead of `avatar_body{}`, `kAvatarWidth`, `max_speed = 4.0` and the panel's "walker" literal. | WD1 | M |
+| WD2 | **Done** (2026-11-08). **The rules come from the document.** The physics, archetype, policy and controller sections (§3), with the activation tick. The holon and `room_view` read them instead of `avatar_body{}`, `kAvatarWidth`, `max_speed = 4.0` and the panel's "walker" literal. As built: the revisioned-section writer in core (`section.h`: `{epoch, at, rev}`, the revision last); the `world:` block (`world_rules.h`), whose stock worlds' twin is `default_world_rules()`; the four sections (`room_rules.h`), lists indexed since `walker@1` is no state name; the holon's rules by tick (`holon::set_physics` and the rest), the veto applied at each step, a late client's re-run from the tick, and a body change re-creating the avatars where they stand; gravity from the scene's `physics:`; `fixed_dt` stays the room's 1/120 s (a document's other value is a warning). Every avatar has the first archetype until WD4 and WD6 let a participant pick. | WD1 | M |
 | WD3 | **Entities.** The entities table (§4); server-dynamic props and NPC bodies from the document and from server programs, simulated on the relay by L0's headless runtime; their poses on the pose stream; colliders for meshes. | WD2, L0 | L |
 | WD4 | **A controller catalog.** Kernels by `name@version`, a determinism gate per kernel, capability negotiation with an interpolation fallback; the vehicle as the second kernel. A participant picks from the archetype's list (§5k phase 3). | WD2 | L |
 | WD5 | **Generated worlds** through the world document: G5's descriptor, height-field statics on the relay. | WD1, G5 | M |
@@ -653,8 +663,8 @@ world sections in mind:
 - **Q3. Which guest format for controllers comes first?** Proposed: native kernels now; wasm guests
   for world- and user-supplied controllers once G2 lands. DSL programs are for rules, not per-tick
   controllers, until their cost at 120 Hz per entity is measured.
-- **Q4. How does a simulation change take effect mid-motion?** Proposed: at a relay-stamped
-  activation tick, with late clients replaying (§3).
+- **Q4. How does a simulation change take effect mid-motion?** **Settled 2026-11-08** (Joe: "Yes,
+  as proposed"): at a relay-stamped activation tick, with late clients replaying (§3). Built in WD2.
 - **Q5. Who hosts user assets?** Proposed: the relay or its CDN, after checking them (§3, §6).
 - **Q6. Who owns placed entities and saved state?** Proposed: the S5 principal. Open: what a guest
   without an account keeps, and for how long.

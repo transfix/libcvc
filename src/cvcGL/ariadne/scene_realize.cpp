@@ -1,10 +1,13 @@
 #include <algorithm>
+#include <array>
 #include <boost/any.hpp>
 #include <cmath>
 #include <cstddef>
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/data.h> // source: { data } — a dataset of the document's data: block
 #include <cvc/ariadne/scene.h>
+#include <cvc/ariadne/scene_geometry.h> // a node's mesh from data (core)
+#include <cvc/ariadne/scene_world.h>    // the scene's world: physics and bodies (core)
 #include <cvc/ariadne/uri.h> // §13.4 resolve a node source: URI to a local path (temp-file bridge)
 #include <cvc/core/app.h>
 #include <cvc/core/world_clock.h> // §9 time: tick_scene drives app.world_clock() for a clock: scene
@@ -70,168 +73,6 @@ cvc::ariadne::ResolvedFile resolve_source(const cvc::ariadne::SceneNode &n,
   if (!rf.ok)
     warn(warnings, "ari: scene node '" + n.id + "': " + rf.error);
   return rf;
-}
-
-// A flat quad with UP normals spanning [-size/2, +size/2]² at z=0 — the built-in `plane` primitive
-// (source: { plane: { size } }): a ground / shadow receiver that needs no asset. Colour comes from
-// the node's material (single-colour), so no per-vertex colours are baked.
-cvc::geometry make_plane(float size) {
-  cvc::geometry g;
-  const double h = 0.5 * static_cast<double>(size);
-  const double v[4][3] = {{-h, -h, 0}, {h, -h, 0}, {h, h, 0}, {-h, h, 0}};
-  for (const auto &p : v) {
-    g.points().push_back({p[0], p[1], p[2]});
-    g.normals().push_back({0, 0, 1});
-  }
-  g.tris().push_back({0, 1, 2});
-  g.tris().push_back({0, 2, 3});
-  return g;
-}
-
-// A box centred on the origin with edge lengths `size` (source: { box: { size } }): 24 vertices so
-// each face keeps its own outward normal, 12 triangles wound counter-clockwise seen from outside.
-cvc::geometry make_box(const float size[3]) {
-  cvc::geometry g;
-  const double h[3] = {0.5 * size[0], 0.5 * size[1], 0.5 * size[2]};
-  // Per face: the outward axis, its sign, and two in-face axes u, v with u x v outward, so the
-  // corners (-,-), (+,-), (+,+), (-,+) in (u, v) run counter-clockwise seen from outside.
-  const int faces[6][3] = {{0, 1, 2}, {0, 2, 1}, {1, 2, 0}, {1, 0, 2}, {2, 0, 1}, {2, 1, 0}};
-  const double corners[4][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}};
-  for (int f = 0; f < 6; ++f) {
-    const int a = faces[f][0], u = faces[f][1], v = faces[f][2];
-    const double sign = (f % 2 == 0) ? 1.0 : -1.0;
-    const auto base = static_cast<unsigned>(g.points().size());
-    for (const auto &c : corners) {
-      double p[3], n[3] = {0, 0, 0};
-      p[a] = sign * h[a];
-      p[u] = c[0] * h[u];
-      p[v] = c[1] * h[v];
-      n[a] = sign;
-      g.points().push_back({p[0], p[1], p[2]});
-      g.normals().push_back({n[0], n[1], n[2]});
-    }
-    g.tris().push_back({base, base + 1, base + 2});
-    g.tris().push_back({base, base + 2, base + 3});
-  }
-  return g;
-}
-
-// A UV sphere of `radius` about the origin (source: { sphere: { radius } }), outward normals,
-// counter-clockwise seen from outside, no degenerate triangles at the poles.
-cvc::geometry make_sphere(float radius) {
-  constexpr double kPi = 3.141592653589793;
-  constexpr unsigned kRings = 16, kSegments = 24;
-  cvc::geometry g;
-  const double r = static_cast<double>(radius);
-  for (unsigned i = 0; i <= kRings; ++i) {
-    const double th = kPi * i / kRings; // from the north pole
-    for (unsigned j = 0; j <= kSegments; ++j) {
-      const double ph = 2.0 * kPi * j / kSegments;
-      const double n[3] = {std::sin(th) * std::cos(ph), std::sin(th) * std::sin(ph), std::cos(th)};
-      g.points().push_back({r * n[0], r * n[1], r * n[2]});
-      g.normals().push_back({n[0], n[1], n[2]});
-    }
-  }
-  const unsigned row = kSegments + 1;
-  for (unsigned i = 0; i < kRings; ++i)
-    for (unsigned j = 0; j < kSegments; ++j) {
-      const unsigned a = i * row + j, b = a + row; // b: the same longitude, one ring south
-      if (i != 0)
-        g.tris().push_back({a, b, a + 1});
-      if (i + 1 != kRings)
-        g.tris().push_back({a + 1, b, b + 1});
-    }
-  return g;
-}
-
-// A procedural heightfield (source: { heightfield: {...} }), the reusable terrain primitive, as
-// the world's own cvc::height_field: a res x res grid over [-size/2, size/2]^2 in XY (row 0 at -y),
-// displaced in Z by the sum of the dome/wave layers. The field's mesh is what the node draws, so
-// the renderer, a body resting on it and a forest planted on it see one surface: each cell split
-// south-west to north-east, normals from the grid. World->[0,1]^2 UVs and optional per-vertex
-// band colours ride on the mesh. All CPU, no asset. With a generator the ground starts as that
-// cvc::world terrain (`dem_path`: its resolved .npy) and the layers add on top. Throws
-// cvc::geometry_error for a size that is not > 0, std::invalid_argument for an unknown generator.
-std::shared_ptr<cvc::height_field> make_height_field(const cvc::ariadne::SceneHeightfield &hf,
-                                                     const std::string &dem_path = std::string()) {
-  constexpr double kTwoPi = 6.283185307179586;
-  const int res = std::max(2, hf.resolution);
-  const double half = 0.5 * static_cast<double>(hf.size);
-  const double step = static_cast<double>(hf.size) / (res - 1);
-  std::shared_ptr<const cvc::world::terrain_source> ground;
-  if (!hf.generator.empty()) {
-    cvc::world::generated_world_params p;
-    p.half_m = half;
-    p.seed = static_cast<std::uint64_t>(std::max(0.0, hf.seed));
-    p.amp_m = hf.amp;
-    p.water_level_m = hf.water_level;
-    p.preset = cvc::world::world_preset_from_name(hf.preset);
-    p.terrain = hf.generator;
-    p.terrain_file = dem_path;
-    ground = cvc::world::make_terrain(p);
-  }
-
-  const auto height_at = [&](double x, double y) {
-    double h = ground ? ground->sample(x, y) : 0.0;
-    for (const cvc::ariadne::SceneHeightLayer &L : hf.layers) {
-      if (L.kind == "dome") {
-        const double r = std::sqrt(x * x + y * y);
-        const double rr = (L.radius > 0.0f) ? (r / L.radius) : 0.0;
-        h += L.amplitude * std::exp(-rr * rr);
-      } else if (L.kind == "wave") {
-        double dx = L.direction[0], dy = L.direction[1];
-        const double dl = std::sqrt(dx * dx + dy * dy);
-        if (dl > 1e-9) {
-          dx /= dl;
-          dy /= dl;
-        }
-        const double d = x * dx + y * dy;
-        const double wl = (L.wavelength != 0.0f) ? L.wavelength : 1.0;
-        h += L.amplitude * std::sin(kTwoPi * d / wl + L.phase);
-      }
-    }
-    return h;
-  };
-  const auto band_color = [&](double z) -> cvc::geometry::color_t {
-    const float *col =
-        hf.colors.back().color; // bands authored low->high; last = the "above all" cap
-    for (const cvc::ariadne::SceneHeightColorBand &b : hf.colors)
-      if (z <= b.max_height) {
-        col = b.color;
-        break;
-      }
-    return {col[0], col[1], col[2]};
-  };
-
-  std::vector<float> heights(static_cast<std::size_t>(res) * res);
-  // Each sample is a pure function of its position (a generated ground is a few million fBm
-  // samples at a 2049 grid): the rows fill in parallel.
-#ifdef CVC_USING_OPENMP
-#pragma omp parallel for schedule(static)
-#endif
-  for (int j = 0; j < res; ++j)
-    for (int i = 0; i < res; ++i)
-      heights[static_cast<std::size_t>(j) * res + i] =
-          static_cast<float>(height_at(-half + i * step, -half + j * step));
-  auto field =
-      std::make_shared<cvc::height_field>(res, res, -half, -half, step, step, std::move(heights));
-  // UVs and band colours, one per vertex. The mesh's points and triangles follow the grid; these
-  // attributes are the node's to set.
-  const double inv = 1.0 / (res - 1);
-  auto &uvs = field->uvs();
-  uvs.resize(field->num_points());
-  for (int j = 0; j < res; ++j)
-    for (int i = 0; i < res; ++i)
-      uvs[static_cast<std::size_t>(field->vertex_of(j, i))] = {i * inv, j * inv};
-  if (!hf.colors.empty()) {
-    auto &colors = field->colors();
-    colors.resize(field->num_points());
-    for (int j = 0; j < res; ++j)
-      for (int i = 0; i < res; ++i)
-        colors[static_cast<std::size_t>(field->vertex_of(j, i))] =
-            band_color(field->height_at(j, i));
-  }
-  return field;
 }
 
 // A body a node declared (`body:`), recorded while the nodes are realized and added once they all
@@ -1121,157 +962,30 @@ cvc::geometry fit_to_ground(const cvc::geometry &raw, bool up_y, float height) {
   return fit_to_ground(raw, up_y ? 'y' : 'z', false, height);
 }
 
-// Up axis y: (x, y, z) -> (x, -z, y), +90 degrees about x. Up axis x: the cyclic (x, y, z) ->
-// (y, z, x). Flip: a half turn about x, (x, y, z) -> (x, -y, -z). All proper rotations, so
-// winding and normals stay valid.
+// The rest are core libcvc's (cvc/ariadne/scene_geometry.h), so a headless host builds the same
+// bodies a window draws.
 void turn_up_point(char up, bool flip, const double in[3], double out[3]) {
-  const double x = in[0], y = in[1], z = in[2];
-  if (up == 'y') {
-    out[0] = x;
-    out[1] = -z;
-    out[2] = y;
-  } else if (up == 'x') {
-    out[0] = y;
-    out[1] = z;
-    out[2] = x;
-  } else {
-    out[0] = x;
-    out[1] = y;
-    out[2] = z;
-  }
-  if (flip) {
-    out[1] = -out[1];
-    out[2] = -out[2];
-  }
+  cvc::ariadne::turn_up_point(up, flip, in, out);
 }
 
-char fit_up_axis(const cvc::ariadne::SceneNode &n) {
-  if (n.fit_up_y || n.fit_up == "y")
-    return 'y';
-  return n.fit_up == "x" ? 'x' : 'z';
-}
+char fit_up_axis(const cvc::ariadne::SceneNode &n) { return cvc::ariadne::fit_up_axis(n); }
 
 cvc::geometry turn_up(const cvc::geometry &raw, char up, bool flip) {
-  cvc::geometry g;
-  g.copy(raw, true);
-  if ((up != 'x' && up != 'y') && !flip)
-    return g;
-  for (auto &p : g.points()) {
-    const double in[3] = {p[0], p[1], p[2]};
-    double o[3];
-    turn_up_point(up, flip, in, o);
-    p = {{o[0], o[1], o[2]}};
-  }
-  for (auto &v : g.normals()) {
-    const double in[3] = {v[0], v[1], v[2]};
-    double o[3];
-    turn_up_point(up, flip, in, o);
-    v = {{o[0], o[1], o[2]}};
-  }
-  return g;
+  return cvc::ariadne::turn_up(raw, up, flip);
 }
 
 cvc::geometry fit_to_ground(const cvc::geometry &raw, char up, bool flip, float height) {
-  const auto &P = raw.points();
-  const auto &N = raw.normals();
-  const auto &C = raw.colors();
-  const auto rot = [up, flip](double x, double y, double z, double o[3]) {
-    const double in[3] = {x, y, z};
-    turn_up_point(up, flip, in, o);
-  };
-  double lo[3] = {1e30, 1e30, 1e30}, hi[3] = {-1e30, -1e30, -1e30};
-  for (const auto &p : P) {
-    double w[3];
-    rot(p[0], p[1], p[2], w);
-    for (int k = 0; k < 3; ++k) {
-      lo[k] = std::min(lo[k], w[k]);
-      hi[k] = std::max(hi[k], w[k]);
-    }
-  }
-  const double ext = std::max({hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]});
-  const double s = ext > 0 ? static_cast<double>(height) / ext : 1.0;
-  const double cx = 0.5 * (lo[0] + hi[0]), cy = 0.5 * (lo[1] + hi[1]);
-  cvc::geometry g;
-  for (std::size_t i = 0; i < P.size(); ++i) {
-    double w[3];
-    rot(P[i][0], P[i][1], P[i][2], w);
-    g.points().push_back({(w[0] - cx) * s, (w[1] - cy) * s, (w[2] - lo[2]) * s});
-    if (i < N.size()) {
-      double nn[3];
-      rot(N[i][0], N[i][1], N[i][2], nn); // a proper rotation preserves unit length
-      g.normals().push_back({nn[0], nn[1], nn[2]});
-    }
-    if (i < C.size())
-      g.colors().push_back(C[i]);
-  }
-  for (const auto &t : raw.tris())
-    g.tris().push_back(t);
-  return g;
+  return cvc::ariadne::fit_to_ground(raw, up, flip, height);
 }
 
-// The mesh a `type: geometry` node declares: a procedural heightfield or plane, or a file/URI
-// read and then `fit:`ted. Warns and returns false when there is nothing to show.
+// The mesh a `type: geometry` node declares: core libcvc reads it (read_scene_node_geometry).
 namespace {
 
 bool read_node_geometry_and_field(SceneGraph &, const cvc::ariadne::SceneNode &n,
                                   cvc::geometry &geom,
                                   std::shared_ptr<const cvc::height_field> &field,
                                   std::vector<std::string> *warnings) {
-  if (n.has_heightfield) {
-    // A procedural displaced grid, no asset: the world's own height field, drawn as its mesh.
-    try {
-      cvc::ariadne::ResolvedFile dem; // alive while the field is made (a fetched URI's temp file)
-      if (!n.heightfield.file.empty()) {
-        dem = cvc::ariadne::resolve_to_file(n.heightfield.file, n.base_dir);
-        if (!dem.ok)
-          throw std::runtime_error("file " + dem.error);
-      }
-      std::shared_ptr<cvc::height_field> f = make_height_field(n.heightfield, dem.path);
-      geom = *f;
-      field = f;
-    } catch (const std::exception &e) {
-      warn(warnings, "ari: scene node '" + n.id + "': heightfield: " + e.what());
-      return false;
-    }
-  } else if (n.source_primitive == "plane") {
-    geom = make_plane(n.plane_size); // a procedural ground quad — no asset
-  } else if (n.source_primitive == "box") {
-    geom = make_box(n.box_size);
-  } else if (n.source_primitive == "sphere") {
-    geom = make_sphere(n.sphere_radius);
-  } else {
-    if (n.source_file.empty()) {
-      warn(warnings, "ari: scene node '" + n.id + "' (" + n.type +
-                         ") has no source (a file/URI or a { plane } primitive)");
-      return false;
-    }
-    cvc::ariadne::ResolvedFile src = resolve_source(n, warnings);
-    if (!src.ok)
-      return false;
-    try {
-      geom = cvc::read_geometry(src.path);
-    } catch (const std::exception &e) {
-      warn(warnings, "ari: scene node '" + n.id + "': " + e.what());
-      return false;
-    }
-  }
-  if (n.has_fit) {
-    // `fit:` — bake center/ground/scale (and optional Y-up→Z-up) into a LOADED mesh. A built-in
-    // primitive is already canonically placed + sized (source.plane.size), and up:y would rotate
-    // the ground quad into a vertical wall — so ignore fit on a primitive and say so.
-    if (n.has_heightfield)
-      warn(warnings, "ari: scene node '" + n.id +
-                         "': `fit` is ignored on a heightfield (already centered on z=0; size it "
-                         "via source.heightfield.size)");
-    else if (n.source_primitive.empty())
-      geom = fit_to_ground(geom, fit_up_axis(n), n.fit_flip, n.fit_height);
-    else
-      warn(warnings, "ari: scene node '" + n.id + "': `fit` is ignored on the built-in '" +
-                         n.source_primitive +
-                         "' primitive (already placed and sized; size it via source." +
-                         n.source_primitive + ")");
-  }
-  return true;
+  return cvc::ariadne::read_scene_node_geometry(n, geom, field, warnings);
 }
 
 } // namespace
@@ -1395,7 +1109,7 @@ cvc::volume load_node_volume(SceneGraph &sg, const cvc::ariadne::SceneNode &n,
                          "' is not v1, v2 or igl — using v2");
     }
     return sdf_volume_from_mesh(sg.appContext(), n.source_sdf_mesh, n.sdf_dim, n.has_fit,
-                                fit_up_axis(n), n.fit_flip, n.fit_height, alg);
+                                cvc::ariadne::fit_up_axis(n), n.fit_flip, n.fit_height, alg);
   }
   cvc::ariadne::ResolvedFile src = resolve_source(n, warnings);
   if (!src.ok)
@@ -1405,272 +1119,56 @@ cvc::volume load_node_volume(SceneGraph &sg, const cvc::ariadne::SceneNode &n,
 
 namespace {
 
-// A rigid pose and per-axis scale from a node's world matrix (row-major 4x4): the translation, the
-// rotation with each column's length divided out, and those lengths. `skewed` is set when the
-// columns are not orthogonal (a non-uniform scale under a rotated parent), which a rigid body
-// cannot follow.
-void decompose(const double m[16], cvc::physics::vec3 &t, cvc::physics::quat &q, double scale[3],
-               bool &skewed, bool &mirrored) {
-  t = {m[3], m[7], m[11]};
-  double r[3][3];
-  for (int c = 0; c < 3; ++c) {
-    const double s = std::sqrt(m[c] * m[c] + m[4 + c] * m[4 + c] + m[8 + c] * m[8 + c]);
-    scale[c] = s;
-    for (int k = 0; k < 3; ++k)
-      r[k][c] = s > 0.0 ? m[4 * k + c] / s : (k == c ? 1.0 : 0.0);
-  }
-  const auto col_dot = [&](int a, int b) {
-    return r[0][a] * r[0][b] + r[1][a] * r[1][b] + r[2][a] * r[2][b];
-  };
-  skewed = std::fabs(col_dot(0, 1)) > 1e-6 || std::fabs(col_dot(0, 2)) > 1e-6 ||
-           std::fabs(col_dot(1, 2)) > 1e-6;
-  const double det = r[0][0] * (r[1][1] * r[2][2] - r[1][2] * r[2][1]) -
-                     r[0][1] * (r[1][0] * r[2][2] - r[1][2] * r[2][0]) +
-                     r[0][2] * (r[1][0] * r[2][1] - r[1][1] * r[2][0]);
-  mirrored = det < 0.0;
-  // Shepperd's method.
-  const double tr = r[0][0] + r[1][1] + r[2][2];
-  if (tr > 0.0) {
-    const double s = std::sqrt(tr + 1.0) * 2.0;
-    q = {0.25 * s, (r[2][1] - r[1][2]) / s, (r[0][2] - r[2][0]) / s, (r[1][0] - r[0][1]) / s};
-  } else if (r[0][0] > r[1][1] && r[0][0] > r[2][2]) {
-    const double s = std::sqrt(1.0 + r[0][0] - r[1][1] - r[2][2]) * 2.0;
-    q = {(r[2][1] - r[1][2]) / s, 0.25 * s, (r[0][1] + r[1][0]) / s, (r[0][2] + r[2][0]) / s};
-  } else if (r[1][1] > r[2][2]) {
-    const double s = std::sqrt(1.0 + r[1][1] - r[0][0] - r[2][2]) * 2.0;
-    q = {(r[0][2] - r[2][0]) / s, (r[0][1] + r[1][0]) / s, 0.25 * s, (r[1][2] + r[2][1]) / s};
-  } else {
-    const double s = std::sqrt(1.0 + r[2][2] - r[0][0] - r[1][1]) * 2.0;
-    q = {(r[1][0] - r[0][1]) / s, (r[0][2] + r[2][0]) / s, (r[1][2] + r[2][1]) / s, 0.25 * s};
-  }
-  const double n = std::sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
-  q = {q.w / n, q.x / n, q.y / n, q.z / n};
-}
-
-cvc::physics::vec3 rotate(const cvc::physics::quat &q, const cvc::physics::vec3 &v) {
-  // v' = q v q*
-  const double tx = 2 * (q.y * v.z - q.z * v.y), ty = 2 * (q.z * v.x - q.x * v.z),
-               tz = 2 * (q.x * v.y - q.y * v.x);
-  return {v.x + q.w * tx + (q.y * tz - q.z * ty), v.y + q.w * ty + (q.z * tx - q.x * tz),
-          v.z + q.w * tz + (q.x * ty - q.y * tx)};
-}
-
-bool near_one(double s) { return std::fabs(s - 1.0) < 1e-6; }
-
-// The physics world a scene declares (`physics:`, or the defaults when only nodes declare `body:`),
-// and a body for every recorded node. Each body starts at its node's realized world pose; the
-// moving ones are bound to their nodes so tick_scene draws them where physics has them. Problems
-// warn (naming the node) and leave that body out; nothing here throws.
-void realize_physics(SceneGraph &sg, const cvc::ariadne::ScenePhysics &spec,
+// The scene's world, built by core libcvc (cvc::ariadne::SceneWorld) from the nodes that declared a
+// body: their specs, their world matrices from the spec (as a headless host composes them, so both
+// make the same world), the meshes the nodes already hold, the terrains' grids, the colliders a
+// custom node makes (out.colliders: a generated world's) and the data nodes' datasets (their bodies
+// come once a dataset is ready, at the world's sync). The moving bodies are bound to their nodes so
+// tick_scene draws them where physics has them. Problems warn (naming the node) and leave that body
+// out; nothing here throws.
+void realize_physics(SceneGraph &sg, const cvc::ariadne::Scene &scene,
                      const std::vector<pending_body> &pending, RealizedScene &out,
-                     std::vector<std::string> *warnings) {
-  namespace ph = cvc::physics;
-  cvc::app &app = sg.appContext();
-
-  ph::world_config cfg;
-  cfg.gravity = {spec.gravity[0], spec.gravity[1], spec.gravity[2]};
-  const bool have_jolt = ph::backend_available(ph::backend::jolt);
-  if (spec.backend == "null") {
-    cfg.backend = ph::backend::null;
-  } else if (spec.backend == "jolt" || spec.backend == "auto" || spec.backend.empty()) {
-    cfg.backend = have_jolt ? ph::backend::jolt : ph::backend::null;
-    if (!have_jolt)
-      warn(warnings, "ari: physics: this build has no Jolt; bodies are placed but never move "
-                     "(the null backend)");
-  } else {
-    cfg.backend = have_jolt ? ph::backend::jolt : ph::backend::null;
-    warn(warnings, "ari: physics: backend '" + spec.backend +
-                       "' is not auto, jolt or null; using " + ph::backend_name(cfg.backend));
-  }
-  // One physics step is a whole number of the clock's quanta (pose_tracker::follow needs that).
-  const double quantum = app.world_clock().fixed_dt();
-  double steps = 1.0;
-  if (spec.fixed_dt > 0.0) {
-    steps = std::max(1.0, std::round(spec.fixed_dt / quantum));
-    if (std::fabs(steps * quantum - spec.fixed_dt) > 1e-9)
-      warn(warnings, "ari: physics: fixed_dt " + std::to_string(spec.fixed_dt) +
-                         " s is not a whole number of the clock's " + std::to_string(quantum) +
-                         " s quanta; using " + std::to_string(steps * quantum) + " s");
-  }
-  cfg.fixed_dt = steps * quantum;
-  try {
-    out.physics = std::make_unique<ph::world>(cfg);
-  } catch (const std::exception &e) {
-    warn(warnings, std::string("ari: physics: ") + e.what());
-    return;
-  }
-  ph::world &w = *out.physics;
-  out.physics_binding = std::make_unique<physics_scene_binding>(w);
-
-  std::map<std::string, ph::material_id> materials;
-  for (const cvc::ariadne::ScenePhysicsMaterial &m : spec.materials) {
-    try {
-      materials[m.name] = w.add_material(
-          {m.name, static_cast<float>(m.friction), static_cast<float>(m.restitution)});
-    } catch (const std::exception &e) {
-      warn(warnings, "ari: physics: material '" + m.name + "': " + e.what());
-    }
-  }
-
+                     const std::string &stats_key, std::vector<std::string> *warnings) {
+  std::map<const cvc::ariadne::SceneNode *, std::array<double, 16>> matrices;
+  cvc::ariadne::scene_world_matrices(scene, matrices);
+  std::vector<cvc::ariadne::SceneBodyInput> inputs;
+  std::map<std::string, std::shared_ptr<GraphicsNode>> nodes;
   for (const pending_body &p : pending) {
-    const cvc::ariadne::SceneNode &n = *p.spec;
-    const cvc::ariadne::SceneBody &b = n.body;
-    const auto bad = [&](const std::string &m) {
-      warn(warnings, "ari: scene node '" + n.id + "': body: " + m);
-    };
-    auto gnode = std::dynamic_pointer_cast<GeometryNode>(p.node);
-    if (!gnode || !gnode->getGeometry()) {
-      bad("needs a geometry node; skipped");
-      continue;
-    }
-    const cvc::geometry &geom = *gnode->getGeometry();
-
-    // The node's realized world pose (its transform composed with every ancestor's).
-    double m[16];
-    const vtkSmartPointer<vtkMatrix4x4> wm = p.node->getWorldTransform(); // a copy, held here
-    for (int k = 0; k < 16; ++k)
-      m[k] = wm ? wm->GetElement(k / 4, k % 4) : (k % 5 == 0 ? 1.0 : 0.0);
-    ph::vec3 t;
-    ph::quat q;
-    double s[3];
-    bool skewed = false, mirrored = false;
-    decompose(m, t, q, s, skewed, mirrored);
-    if (skewed || mirrored)
-      bad(std::string("the node's world transform is ") + (skewed ? "skewed" : "mirrored") +
-          "; the body follows its rotation and per-axis scale only");
-
-    std::string motion = b.motion.empty() ? (n.has_heightfield ? "static" : "dynamic") : b.motion;
-    if (motion != "dynamic" && motion != "kinematic" && motion != "static") {
-      bad("motion '" + motion + "' is not dynamic, kinematic or static; using dynamic");
-      motion = "dynamic";
-    }
-    std::string shape = b.shape.empty() ? "auto" : b.shape;
-    if (shape == "auto")
-      shape = n.has_heightfield                ? "terrain"
-              : n.source_primitive == "box"    ? "box"
-              : n.source_primitive == "sphere" ? "sphere"
-              : n.source_primitive == "plane"  ? "plane"
-              : motion == "static"             ? "mesh"
-                                               : "hull";
-
-    ph::body_desc d;
-    d.motion = motion == "static"      ? ph::motion_type::static_
-               : motion == "kinematic" ? ph::motion_type::kinematic
-                                       : ph::motion_type::dynamic;
-    // The shape's centre in the node's (scaled) frame: the body sits there, and the node is drawn
-    // at body pose x translate(-centre) x scale.
-    ph::vec3 centre;
-    const cvc::bounding_box e = geom.extents();
-    const double half[3] = {0.5 * (e.maxx - e.minx) * s[0], 0.5 * (e.maxy - e.miny) * s[1],
-                            0.5 * (e.maxz - e.minz) * s[2]};
-    const ph::vec3 mid{0.5 * (e.minx + e.maxx) * s[0], 0.5 * (e.miny + e.maxy) * s[1],
-                       0.5 * (e.minz + e.maxz) * s[2]};
-    bool placed_by_grid = false;
-    if (shape == "terrain") {
-      auto it = out.height_fields.find(n.id);
-      if (it == out.height_fields.end()) {
-        bad("shape 'terrain' needs a heightfield source; skipped");
-        continue;
-      }
-      if (d.motion != ph::motion_type::static_)
-        bad("a terrain is static; making it static");
-      d.motion = ph::motion_type::static_;
-      const bool rotated = std::fabs(std::fabs(q.w) - 1.0) > 1e-9;
-      if (rotated || !near_one(s[0]) || !near_one(s[1]) || !near_one(s[2]))
-        bad("a terrain collides unrotated and unscaled, at the node's position; draw it without "
-            "rotation or scale so the ground you see is the ground bodies rest on");
-      std::shared_ptr<const cvc::height_field> field = it->second;
-      if (t.x != 0.0 || t.y != 0.0 || t.z != 0.0) {
-        // The same grid moved to the node's position (the field itself stays the node's own).
-        std::vector<float> h = field->heights();
-        for (float &z : h)
-          z += static_cast<float>(t.z);
-        field = std::make_shared<cvc::height_field>(field->rows(), field->cols(), field->x0() + t.x,
-                                                    field->y0() + t.y, field->dx(), field->dy(),
-                                                    std::move(h), field->cell_materials());
-      }
-      d.shape = ph::terrain{field};
-      placed_by_grid = true;
-    } else if (shape == "box") {
-      if (n.source_primitive == "box")
-        d.shape = ph::box{
-            {0.5 * n.box_size[0] * s[0], 0.5 * n.box_size[1] * s[1], 0.5 * n.box_size[2] * s[2]}};
-      else {
-        d.shape =
-            ph::box{{std::max(half[0], 1e-3), std::max(half[1], 1e-3), std::max(half[2], 1e-3)}};
-        centre = mid;
-      }
-    } else if (shape == "sphere") {
-      if (!near_one(s[1] / s[0]) || !near_one(s[2] / s[0]))
-        bad("a sphere scales uniformly; using the largest scale");
-      const double smax = std::max(s[0], std::max(s[1], s[2]));
-      if (n.source_primitive == "sphere") {
-        d.shape = ph::sphere{n.sphere_radius * smax};
-      } else {
-        d.shape = ph::sphere{std::max({half[0], half[1], half[2], 1e-3})};
-        centre = mid;
-      }
-    } else if (shape == "plane") {
-      // A thin slab under the plane, its top face on the plane.
-      const double thick = 0.05;
-      d.shape = ph::box{{0.5 * n.plane_size * s[0], 0.5 * n.plane_size * s[1], thick}};
-      centre = {0.0, 0.0, -thick};
-    } else if (shape == "hull" || shape == "mesh") {
-      if (shape == "mesh" && d.motion != ph::motion_type::static_) {
-        bad("a mesh body is static; using its convex hull");
-        shape = "hull";
-      }
-      if (shape == "hull") {
-        ph::convex_hull h;
-        for (const auto &pt : geom.const_points())
-          h.points.push_back({pt[0] * s[0], pt[1] * s[1], pt[2] * s[2]});
-        d.shape = std::move(h);
-      } else {
-        auto scaled = std::make_shared<cvc::geometry>(geom);
-        if (!near_one(s[0]) || !near_one(s[1]) || !near_one(s[2]))
-          for (auto &pt : scaled->points())
-            pt = {pt[0] * s[0], pt[1] * s[1], pt[2] * s[2]};
-        d.shape = ph::mesh{scaled};
-      }
+    cvc::ariadne::SceneBodyInput in;
+    in.spec = p.spec;
+    auto m = matrices.find(p.spec);
+    if (m != matrices.end())
+      in.world = m->second;
+    if (auto c = out.colliders.find(p.spec->id); c != out.colliders.end() && c->second) {
+      in.colliders = c->second; // a custom node's own colliders (a generated world's)
     } else {
-      bad("shape '" + shape + "' is not auto, box, sphere, hull, mesh or terrain; skipped");
-      continue;
+      auto gnode = std::dynamic_pointer_cast<GeometryNode>(p.node);
+      if (gnode && gnode->getGeometry()) // a copy-on-write copy: the buffers are shared
+        in.geometry = std::make_shared<const cvc::geometry>(*gnode->getGeometry());
     }
-
-    if (!placed_by_grid) {
-      d.position = t + rotate(q, centre);
-      d.rotation = q;
+    inputs.push_back(std::move(in));
+    nodes[p.spec->id] = p.node;
+  }
+  for (const SceneDataBinding &b : out.data_nodes) // a dataset's bodies come with the dataset
+    if (b.spec.body.present) {
+      cvc::ariadne::SceneBodyInput in;
+      in.spec = &b.spec;
+      for (const auto &m : matrices) // the node's matrix, by id (the binding holds a copy)
+        if (m.first->id == b.spec.id)
+          in.world = m.second;
+      in.data_path = b.path;
+      inputs.push_back(std::move(in));
     }
-    d.mass = b.mass;
-    d.density = b.density;
-    if (!b.material.empty()) {
-      auto mt = materials.find(b.material);
-      if (mt != materials.end())
-        d.material = mt->second;
-      else
-        bad("no physics material called '" + b.material + "'; using the default");
-    }
-    d.linear_velocity = {b.velocity[0], b.velocity[1], b.velocity[2]};
-    d.angular_velocity = {b.angular_velocity[0], b.angular_velocity[1], b.angular_velocity[2]};
-    if (b.has_linear_damping)
-      d.linear_damping = b.linear_damping;
-    if (b.has_angular_damping)
-      d.angular_damping = b.angular_damping;
-
-    ph::body_id id;
-    try {
-      id = w.add_body(d);
-    } catch (const std::exception &ex) {
-      bad(ex.what());
-      continue;
-    }
-    out.bodies.emplace_back(n.id, id);
-    if (d.motion == ph::motion_type::static_)
-      continue; // never moves: the node stays as realized
-    // body_from_visual = translate(-centre) x scale, row-major.
-    const double v[16] = {s[0], 0, 0,    -centre.x, 0, s[1], 0, -centre.y,
-                          0,    0, s[2], -centre.z, 0, 0,    0, 1};
-    out.physics_binding->bind(id, p.node, v);
+  out.world = cvc::ariadne::SceneWorld::build(sg.appContext(), scene.physics, inputs,
+                                              out.height_fields, stats_key, warnings);
+  if (!out.world)
+    return;
+  out.physics = &out.world->world();
+  out.physics_binding = std::make_unique<physics_scene_binding>(*out.physics);
+  for (const cvc::ariadne::SceneWorldBody &b : out.world->bodies()) {
+    out.bodies.emplace_back(b.node, b.id);
+    if (b.moves) // a static body never moves: the node stays as realized
+      out.physics_binding->bind(b.id, nodes[b.node], b.body_from_visual.data());
   }
 }
 
@@ -1727,7 +1225,11 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
   // physics: and the nodes' body:s, once every node (and every terrain field) exists. A physics
   // scene runs on the scene clock, so it drives app.world_clock() as `clock: {}` would.
   if (scene.physics.present || !bodies.empty()) {
-    realize_physics(sg, scene.physics, bodies, out, warnings);
+    realize_physics(sg, scene, bodies, out,
+                    opts.physics_key.empty()
+                        ? std::string()
+                        : cvc::ariadne::resolve_bind(bind_prefix, opts.physics_key),
+                    warnings);
     if (out.physics)
       out.clock.present = true;
   }
@@ -1773,24 +1275,7 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
 }
 
 cvc::world_clock_keys scene_clock_keys(const cvc::ariadne::SceneClock &clock) {
-  cvc::world_clock_keys k;
-  const std::pair<const std::string *, std::string> named[] = {{&clock.speed_key, ".speed"},
-                                                               {&clock.paused_key, ".paused"},
-                                                               {&clock.time_key, ".time"},
-                                                               {&clock.tick_key, ".tick"}};
-  for (const auto &n : named) {
-    const std::string &key = *n.first;
-    const std::string &leaf = n.second;
-    if (key.size() > leaf.size() && key.compare(key.size() - leaf.size(), leaf.size(), leaf) == 0) {
-      k = cvc::world_clock_keys::under(key.substr(0, key.size() - leaf.size()));
-      break;
-    }
-  }
-  k.speed = clock.speed_key;
-  k.paused = clock.paused_key;
-  k.time = clock.time_key;
-  k.tick = clock.tick_key;
-  return k;
+  return cvc::ariadne::scene_clock_keys(clock);
 }
 
 namespace {
@@ -1868,10 +1353,6 @@ bool draw_dataset(RealizedScene &r, SceneDataBinding &b, const std::string &stor
   for (const std::shared_ptr<GraphicsNode> &c : b.drawn)
     group->removeGraphicsChild(c);
   b.drawn.clear();
-  if (r.physics)
-    for (cvc::physics::body_id id : b.bodies)
-      r.physics->remove_body(id);
-  b.bodies.clear();
   r.height_fields.erase(b.spec.id);
 
   const cvc::ariadne::SceneNode &n = b.spec;
@@ -1881,7 +1362,6 @@ bool draw_dataset(RealizedScene &r, SceneDataBinding &b, const std::string &stor
   using geometry_ptr = std::shared_ptr<const cvc::geometry>;
   using field_ptr = std::shared_ptr<const cvc::height_field>;
   using volume_ptr = std::shared_ptr<const cvc::volume>;
-  cvc::world::world_geometry bodies_of; // what body: puts in the physics world
   if (const world_ptr *w = boost::any_cast<world_ptr>(&obj)) {
     b.drawn = cvc::gl::add_world_geometry(*r.sg, **w, n.id + "_", group);
     const cvc::world::world_bounds wb = (*w)->bounds();
@@ -1899,9 +1379,6 @@ bool draw_dataset(RealizedScene &r, SceneDataBinding &b, const std::string &stor
             gn && c->getName() == n.id + "_terrain")
           drape_satellite(cvc::state::instance(*r.app), store, *gn, *t, n);
     }
-    if (n.body.present && r.physics)
-      for (const auto &body : cvc::physics::add_world_geometry(*r.physics, **w).bodies)
-        b.bodies.push_back(body.second);
   } else if (const field_ptr *f = boost::any_cast<field_ptr>(&obj)) {
     auto terrain =
         group->createChild<GeometryNode>(n.id + "_" + key, static_cast<const cvc::geometry &>(**f));
@@ -1911,22 +1388,10 @@ bool draw_dataset(RealizedScene &r, SceneDataBinding &b, const std::string &stor
     has_bounds = true;
     if (terrain)
       drape_satellite(cvc::state::instance(*r.app), store, *terrain, **f, n);
-    if (n.body.present && r.physics) {
-      cvc::world::geometry_item item;
-      item.name = n.id;
-      item.geometry = *f;
-      bodies_of.add(item);
-    }
   } else if (const geometry_ptr *g = boost::any_cast<geometry_ptr>(&obj)) {
     b.drawn.push_back(group->createChild<GeometryNode>(n.id + "_" + key, **g));
     mesh_bounds(**g, bounds);
     has_bounds = true;
-    if (n.body.present && r.physics) {
-      cvc::world::geometry_item item;
-      item.name = n.id;
-      item.geometry = *g;
-      bodies_of.add(item);
-    }
   } else if (const volume_ptr *v = boost::any_cast<volume_ptr>(&obj)) {
     b.drawn.push_back(group->createChild<VolumeNode>(n.id + "_" + key, **v));
   } else {
@@ -1936,10 +1401,8 @@ bool draw_dataset(RealizedScene &r, SceneDataBinding &b, const std::string &stor
                                     : "no " + n.source_item + " to draw"));
     return false;
   }
-  if (!bodies_of.items().empty())
-    for (const auto &body : cvc::physics::add_world_geometry(*r.physics, bodies_of).bodies)
-      b.bodies.push_back(body.second);
-  if (n.body.present && !r.physics)
+  // Its bodies are the scene world's to make (SceneWorld::sync, as a headless host's are).
+  if (n.body.present && !r.world)
     warn(warnings, "ari: scene node '" + n.id +
                        "': body: needs the scene's physics: block for a "
                        "dataset's bodies");
@@ -2007,45 +1470,23 @@ cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *r
   // entirely untouched (prior behaviour, and no surprise double-advance when several scenes share
   // an app — the one driver is the host that owns the clock: scene).
   if (realized.clock.present && realized.app) {
-    if (!realized.clock_binding) {
-      cvc::app &app = *realized.app;
-      cvc::world_clock &wc = app.world_clock();
-      const cvc::ariadne::SceneClock &c = realized.clock;
-      // The declared initial rate and pause go on the clock before the binding exists: the binding
-      // seeds every still-unset key from the clock, so the sim_transport widget shows them on frame
-      // 0, and they stand for good on a lane the scene left unbound (an empty key). The key paths
-      // were resolved at realize time with the host bind prefix, so a sim_transport slider and this
-      // clock share one key.
-      wc.set_scale(c.scale);
-      if (c.paused)
-        wc.set_mode(cvc::world_clock::mode::paused);
-      else if (wc.current_mode() == cvc::world_clock::mode::paused)
-        wc.set_mode(cvc::world_clock::mode::live);
-      realized.clock_binding =
-          std::make_unique<cvc::world_clock_binding>(app, wc, scene_clock_keys(c));
-    }
+    if (!realized.clock_driver)
+      realized.clock_driver =
+          std::make_unique<cvc::ariadne::SceneClockDriver>(*realized.app, realized.clock);
     // Wall delta: a caller-injected fixed dt (deterministic offscreen capture) when non-negative,
     // else real elapsed since the last tick (real-time animation, no crawl under a slow frame
-    // rate).
-    double dt = wall_dt;
-    if (dt < 0.0) {
-      const auto now = std::chrono::steady_clock::now();
-      dt = realized.clock_primed ? std::chrono::duration<double>(now - realized.clock_last).count()
-                                 : 0.0;
-      realized.clock_last = now;
-      realized.clock_primed = true;
-    }
-    // pull (speed / paused / mode / lockstep / step requests), advance, push (time, tick, ...).
-    clock_step = realized.clock_binding->drive(dt);
+    // rate). Pull, advance, push.
+    clock_step = realized.clock_driver->drive(wall_dt);
   }
 
   // physics: step the world by the quanta the clock just ran, then pose the moving bodies' nodes
   // between the last two states, before the tickers (a custom tick may read a body's node).
-  if (realized.physics_binding && realized.app) {
+  if (realized.physics_binding && realized.world && realized.app) {
     cvc::world_clock &wc = realized.app->world_clock();
     try {
-      realized.physics_binding->follow(wc);
-      realized.physics_binding->present(wc, clock_step.alpha);
+      cvc::gl::physics_scene_binding &view = *realized.physics_binding;
+      realized.world->follow(wc, [&view] { view.tracker().capture(); });
+      view.present(wc, clock_step.alpha);
     } catch (const std::exception &e) {
       // A clock whose quantum changed under the world (pose_tracker::follow refuses it): stop
       // stepping rather than throw out of every frame.

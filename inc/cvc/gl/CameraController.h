@@ -253,6 +253,12 @@ public:
   void setInvertPitch(bool invert);
   void setInvertYaw(bool invert);  // horizontal look + drag, any mode ("settings.invert_yaw")
   void setPoseMirrorHz(double hz); // rate the live pose is written to state (0=off)
+  // The wheel's zoom glides to where its notches put it: each frame closes 1 - e^(-dt / tau) of
+  // the remaining ratio in update(). 0 zooms at once on each notch. Default 0.15 s; state
+  // "settings.zoom_tau". zooming() says a glide is under way.
+  void setZoomSmoothing(double tauSeconds);
+  double zoomSmoothing() const;
+  bool zooming() const;
   // Vertical field of view in degrees for this controller's camera (each viewport
   // carries its own lens). 0 (default) leaves the VTK default untouched; a value
   // is applied in perspective modes (not Map). State "settings.field_of_view".
@@ -329,6 +335,7 @@ private:
   void syncConfigToState();            // write config back (guarded against echo)
   void syncPoseToState();              // write the live pose back (guarded against echo)
   void recenterPointer();              // warp the pointer back to the centre (VTK's windows)
+  bool pointerHeld() const; // the pointer is captured now (the browser has granted its lock)
   void applyPointerCapture();          // tell the window / the browser what pointerCapture() is
   void pollPointerLock();              // the browser's pointer-lock motion and release
   void resetTrack();                   // reset cinematic smoothing (ease in from current view)

@@ -17,8 +17,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <cvc/ariadne/conference/room_avatar.h>     // the avatar policy, each reserve
+#include <cvc/ariadne/conference/room_avatar.h>     // each reserve
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_participant_path, room_roster
+#include <cvc/ariadne/conference/room_rules.h>      // the world rules sections
 #include <cvc/ariadne/conference/room_scene.h>      // read_scene_objects, scene_revision
 #include <cvc/ariadne/holon.h>                      // cvc::ariadne::holon (server_pump)
 #include <cvc/ariadne/holon_sync.h>
@@ -225,8 +226,7 @@ bool read_current_intent(cvc::app &app, const std::string &room, const std::stri
 
 holon_config room_holon_config() {
   holon_config cfg;
-  cfg.physics = true;
-  cfg.max_speed = 4.0; // twice the walk; room to add a run without loosening the veto
+  cfg.physics = true; // the rest is the room's: its rules sections (sync_rules)
   return cfg;
 }
 
@@ -282,15 +282,34 @@ void sync_statics(holon &h, cvc::app &app, const std::string &room) {
 
 namespace {
 
-// The room's avatar policy (room_avatar.h) into H, whenever its revision moves: the relay's holon
-// and each client's run under the same one, read from the same leaves.
-void sync_energy_policy(holon &h, cvc::app &app, const std::string &room) {
-  const std::uint64_t rev = conference::avatar_policy_revision(app, room);
-  if (rev == 0 || rev == h.energy_policy_revision())
-    return;
-  avatar_energy_policy p;
-  if (conference::read_avatar_policy(app, room, p))
-    h.set_energy_policy(p, rev);
+// The room's rules sections (room_rules.h) into H, each whenever its stamp moves: the relay's holon
+// and each client's run under the same ones, read from the same leaves, each from its activation
+// tick (holon::set_physics). Controllers before the archetypes that name them.
+void sync_rules(holon &h, cvc::app &app, const std::string &room) {
+  if (const section_stamp s = conference::room_physics_stamp(app, room);
+      s.written() && !s.same(h.rules_stamp(rules_section::physics))) {
+    world_physics p;
+    if (conference::read_room_physics(app, room, p))
+      h.set_physics(p, s);
+  }
+  if (const section_stamp s = conference::room_controllers_stamp(app, room);
+      s.written() && !s.same(h.rules_stamp(rules_section::controllers))) {
+    std::vector<avatar_controller> c;
+    if (conference::read_room_controllers(app, room, c))
+      h.set_controllers(c, s);
+  }
+  if (const section_stamp s = conference::avatar_archetypes_stamp(app, room);
+      s.written() && !s.same(h.rules_stamp(rules_section::archetypes))) {
+    std::vector<avatar_archetype> a;
+    if (conference::read_avatar_archetypes(app, room, a))
+      h.set_archetypes(a, s);
+  }
+  if (const section_stamp s = conference::avatar_policy_stamp(app, room);
+      s.written() && !s.same(h.rules_stamp(rules_section::policy))) {
+    avatar_policy p;
+    if (conference::read_avatar_policy(app, room, p))
+      h.set_policy(p, s);
+  }
 }
 
 // Publish PID's reserve when it has moved by half a percent of the most it can hold, when it
@@ -319,7 +338,7 @@ void write_reserve(holon &h, cvc::app &app, const std::string &room, const std::
 void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_dt, bool write_poses,
                  double pose_heartbeat_s) {
   sync_statics(h, app, room);
-  sync_energy_policy(h, app, room);
+  sync_rules(h, app, room);
   // The present participants, straight from the replicated room tree.
   const std::vector<conference::room_participant> roster = conference::room_roster(app, room);
   // Add any newcomer -- spawned on a 4 m ring around the room's origin (where the seeded
@@ -373,7 +392,7 @@ void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_d
 void client_pump(holon &h, cvc::app &app, const std::string &room, const std::string &self_pid,
                  double wall_dt) {
   sync_statics(h, app, room);
-  sync_energy_policy(h, app, room);
+  sync_rules(h, app, room);
   const std::vector<conference::room_participant> roster = conference::room_roster(app, room);
   std::set<std::string> present;
   for (const conference::room_participant &p : roster) {

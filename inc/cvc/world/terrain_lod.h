@@ -79,8 +79,12 @@ terrain_chunk make_terrain_chunk(const cvc::height_field &hf, const terrain_chun
 
 // The water over chunk `ch`, a surface per rung on that rung's samples: level at water_level_m over
 // every cell with a corner under it, so the terrain, drawn with it, hides it past the shoreline,
-// exactly where the ground rises out of the water whatever the rung. Each vertex is coloured by
-// the water column under it (water_colour). All empty when no cell of the chunk is under water.
+// exactly where the rung's ground rises out of the water. Each vertex is coloured by the water
+// column under it (water_colour) and carries the ground's texture coordinates there: drawn with
+// paint_water's texture instead, coloured by the full surface's depth per texel and transparent
+// (discarded) wherever the full surface is dry, the water ends at the full surface's shoreline
+// whatever the rung, where a coarse rung's ground dips below the water over dry land too. All
+// empty when no cell of the chunk is under water.
 // The water as a surface rather than a volume: for uniform water a closed surface gives the same
 // image (WATER-RENDERING-ROADMAP section 0), at a cost that falls with distance.
 std::vector<cvc::geometry> make_water_rungs(const cvc::height_field &hf,

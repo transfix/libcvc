@@ -1678,17 +1678,23 @@ void paintRows(const generated_world &w, surface_color mode, int T, int ty0, int
   const double jitterFreq = 1.0 / std::max(0.5, 0.35 * std::max(cellx, celly));
   std::uint16_t asphalt = 0;
   const bool hasAsphalt = reg.find("asphalt", asphalt);
-  // Under the water the ground carries the water's colour by depth: the water volume all but
-  // vanishes over the shallows, so the texture is what shows them. A light green-blue at the
-  // shoreline deepens to blue by bedDepth metres down, a grade from the sand band at 0 m out.
-  std::uint16_t shallow = 0, deep = 0;
+  // Water follows the terrain mesh, not the raster. A texel the mesh holds under the water takes
+  // the water surface's own colour for the column above it (water_colour, as make_water_rungs):
+  // a coarse LOD rung whose ground rises over a submerged texel then shows the colour its water
+  // would have had there. A dry texel is never painted as water: where its raster cells say water
+  // (the raster is ~385 cells a side whatever the world, so 26 m cells on a 10 km world, their
+  // edges warped about a cell more), they paint the shore it is on instead, sand within
+  // sandBand metres of the water and grass above. Classed from the raster, the painted shore lay
+  // tens of metres off the mesh's on a large world: a band of water colour on the dry bank.
+  std::uint16_t shallow = 0, deep = 0, sandK = 0, grassK = 0;
   const bool hasShallow = reg.find("water_shallow", shallow),
              hasDeep = reg.find("water_deep", deep);
+  const bool hasSand = reg.find("sand", sandK), hasGrass = reg.find("grass", grassK);
   auto isWater = [&](std::uint16_t k) {
     return (hasShallow && k == shallow) || (hasDeep && k == deep);
   };
-  const cvc::geometry::color_t shoreWater = {0.36, 0.52, 0.50}, deepWater = {0.09, 0.19, 0.27};
-  const double sea = w.params.water_level_m, bedDepth = 8.0;
+  const cvc::height_field *hf = w.terrain.get();
+  const double sea = w.params.water_level_m, sandBand = 0.6; // derived_class's shore band
   auto isGrass = [](std::uint16_t k) { return k == 6 || k == 7 || k == 8; }; // grass/tall/bush
   auto ease = [](double t) { return t * t * (3.0 - 2.0 * t); };
   auto cell = [&](int r, int c) { return std::size_t(r) * g.cols + c; };
@@ -1727,6 +1733,15 @@ void paintRows(const generated_world &w, surface_color mode, int T, int ty0, int
         const int r = std::min(maxr, std::max(0, int(std::lround(fy))));
         put(tx, ty, cellColor(ro, reg, cell(r, c), m, hmin, hmax));
         continue;
+      }
+      // The mesh's height at the texel (NaN off it, or over a hole): material mode's water line.
+      double h = std::numeric_limits<double>::quiet_NaN();
+      if (m == 0 && hf) {
+        h = hf->height(wx, wy);
+        if (h < sea) {
+          put(tx, ty, water_colour(sea - h));
+          continue;
+        }
       }
       int c0 = std::min(std::max(0, maxc - 1), int(std::floor(fx)));
       int r0 = std::min(std::max(0, maxr - 1), int(std::floor(fy)));
@@ -1767,12 +1782,17 @@ void paintRows(const generated_world &w, surface_color mode, int T, int ty0, int
             col[q] += wt[k] * dirt[q];
           continue;
         }
-        const std::uint16_t kk = ro.klass[at];
+        std::uint16_t kk = ro.klass[at];
         if (isWater(kk)) {
-          const double d = std::min(1.0, std::max(0.0, (sea - ro.height[at]) / bedDepth));
-          for (int q = 0; q < 3; ++q)
-            col[q] += wt[k] * (shoreWater[q] * (1.0 - d) + deepWater[q] * d);
-          continue;
+          if (std::isnan(h)) { // no mesh here: the raster's own depth
+            const cvc::geometry::color_t wc = water_colour(sea - ro.height[at]);
+            for (int q = 0; q < 3; ++q)
+              col[q] += wt[k] * wc[std::size_t(q)];
+            continue;
+          }
+          const bool beach = h - sea < sandBand; // the dry shore under a wet raster cell
+          if (beach ? hasSand : hasGrass)
+            kk = beach ? sandK : grassK;
         }
         const surface_class &sc = reg[kk];
         for (int q = 0; q < 3; ++q)
@@ -1790,6 +1810,33 @@ void paintRows(const generated_world &w, surface_color mode, int T, int ty0, int
           col[q] = col[q] * (1 - 0.5 * gfac) + dryGrass[q] * 0.5 * gfac;
       }
       put(tx, ty, col);
+    }
+  }
+}
+
+// Rows [ty0, ty1) of paint_water's T x T RGBA texture, into img (T x T x 4 bytes).
+void paintWaterRows(const generated_world &w, int T, int ty0, int ty1,
+                    std::vector<unsigned char> &img) {
+  const grid_spec &g = w.grid;
+  const cvc::height_field *hf = w.terrain.get();
+  const double sea = w.params.water_level_m;
+  const double spanx = g.max_x - g.min_x, spany = g.max_y - g.min_y;
+  const cvc::geometry::color_t shore = water_colour(0.0);
+#ifdef CVC_USING_OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+  for (int ty = ty0; ty < ty1; ++ty) {
+    const double wy = g.min_y + double(ty) / (T - 1) * spany;
+    for (int tx = 0; tx < T; ++tx) {
+      const double wx = g.min_x + double(tx) / (T - 1) * spanx;
+      const double h = hf ? hf->height(wx, wy) : std::numeric_limits<double>::quiet_NaN();
+      const bool wet = h < sea; // false off the mesh or over a hole
+      const cvc::geometry::color_t c = wet ? water_colour(sea - h) : shore;
+      const std::size_t o = (std::size_t(ty) * T + tx) * 4;
+      for (int q = 0; q < 3; ++q)
+        img[o + q] = (unsigned char)std::lround(
+            std::min(1.0, std::max(0.0, double(c[std::size_t(q)]))) * 255.0);
+      img[o + 3] = wet ? 255 : 0;
     }
   }
 }
@@ -1917,13 +1964,15 @@ std::vector<unsigned char> paint_surface(const generated_world &w, surface_color
 }
 
 surface_painter::surface_painter(const generated_world &w, surface_color mode, int size)
-    : w_(w), mode_(mode), size_(std::max(2, size)), img_(std::size_t(size_) * size_ * 3, 0) {}
+    : w_(w), mode_(mode), size_(std::max(2, size)), img_(std::size_t(size_) * size_ * 3, 0),
+      water_(std::size_t(size_) * size_ * 4, 0) {}
 
 bool surface_painter::step(std::size_t budget) {
   if (next_ < size_) {
     const int n = budget == 0 ? size_ : rowsFor(budget, size_, 1);
     const int r1 = std::min(size_, next_ + n);
     paintRows(w_, mode_, size_, next_, r1, img_);
+    paintWaterRows(w_, size_, next_, r1, water_);
     next_ = r1;
     if (next_ < size_)
       return false;
@@ -1942,6 +1991,19 @@ std::vector<unsigned char> surface_painter::take() {
   if (!done())
     throw std::logic_error("surface_painter::take: the texture is not done");
   return std::move(img_);
+}
+
+std::vector<unsigned char> surface_painter::take_water() {
+  if (!done())
+    throw std::logic_error("surface_painter::take_water: the texture is not done");
+  return std::move(water_);
+}
+
+std::vector<unsigned char> paint_water(const generated_world &w, int size) {
+  size = std::max(2, size);
+  std::vector<unsigned char> img(std::size_t(size) * size * 4, 0);
+  paintWaterRows(w, size, 0, size, img);
+  return img;
 }
 
 double water_floor(const generated_world &w) {

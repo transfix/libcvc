@@ -169,7 +169,8 @@ private:
   std::unique_ptr<cvc::gl::lod_stats> _lod_stats; // the last update's selection
   cvc::lod::quality_preset _lod_preset;
   std::map<std::string, cvc::ariadne::conference::avatar_look>
-      _avatars; // pid -> look it was built with
+      _avatars;                    // pid -> look it was built with
+  cvc::ariadne::avatar_body _body; // the body the markers were built with (holon::body())
   // pid -> the pose matrix its marker shows (sync_avatars re-poses it only once it has moved).
   std::map<std::string, std::array<double, 16>> _posed;
   // What each participant wears: the room's catalog (re-read when its revision moves) and each

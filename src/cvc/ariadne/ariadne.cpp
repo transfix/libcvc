@@ -174,8 +174,9 @@ std::string replace_all(std::string s, const std::string &token, const std::stri
 
 // §3 repeat: deep-copy a template widget, substituting the loop-index token `{i}` with the
 // 0-based `index` in every field an instance uses to address distinct state or to display
-// (id/label/bind/on/predicates/tooltip/options). Recurses into children. (Single-level: a
-// nested `repeat` shares the same `{i}` token and is not independently indexed — a follow-up.)
+// (id/label/bind/on and the pointer handlers/predicates/tooltip/options). Recurses into children.
+// (Single-level: a nested `repeat` shares the same `{i}` token and is not independently indexed —
+// a follow-up.)
 Widget substitute_index(const Widget &w, int index) {
   const std::string idx = std::to_string(index);
   static const std::string kTok = "{i}";
@@ -184,6 +185,17 @@ Widget substitute_index(const Widget &w, int index) {
   out.label = replace_all(out.label, kTok, idx);
   out.bind = replace_all(out.bind, kTok, idx);
   out.on = replace_all(out.on, kTok, idx);
+  // §4.6 the pointer handlers, a text_view's on_top, and a message_input's hint and send label: a
+  // row's handler acts on that row (on_click: (state-set "tree.cam_{i}.open" "1")).
+  out.on_click = replace_all(out.on_click, kTok, idx);
+  out.on_hover = replace_all(out.on_hover, kTok, idx);
+  out.on_drag = replace_all(out.on_drag, kTok, idx);
+  out.on_drag_start = replace_all(out.on_drag_start, kTok, idx);
+  out.on_drag_end = replace_all(out.on_drag_end, kTok, idx);
+  out.on_hover_end = replace_all(out.on_hover_end, kTok, idx);
+  out.on_top = replace_all(out.on_top, kTok, idx);
+  out.hint = replace_all(out.hint, kTok, idx);
+  out.send = replace_all(out.send, kTok, idx);
   out.visible_when = replace_all(out.visible_when, kTok, idx);
   out.enabled_when = replace_all(out.enabled_when, kTok, idx);
   out.disabled_when = replace_all(out.disabled_when, kTok, idx);
@@ -614,6 +626,8 @@ public:
         "state-root-path", "state-has-expiry", "state-is-expired",
         // JSON text to values and back: pure, sliced data steps under the allocation limit
         "json-parse", "json-encode",
+        // the wall clock (a post's "2h ago"): one read, nothing written
+        "time-now",
         // the stdlib: the pure, bounded functions (a scalar, or a result no bigger than its
         // argument), and the materializers, which do their work as sliced data steps (each
         // eval slices, see data_step_nodes_) under the per-call allocation limit. A function
@@ -1003,6 +1017,26 @@ struct Runtime::Impl {
   // Where the walk is in the tree, as child indices from the root: names an unnamed grid
   // (emit_container), so two in one window never share a backend id.
   std::vector<std::size_t> emit_path;
+  // The repeat instances the walk is inside, outermost first (emit, emit_container): with
+  // emit_path, one widget instance's identity across frames (instance_key).
+  std::vector<int> instance_path;
+  std::string instance_key() const {
+    std::string key;
+    for (const std::size_t k : emit_path)
+      key += std::to_string(k) + ".";
+    for (const int i : instance_path)
+      key += "#" + std::to_string(i);
+    return key;
+  }
+  // §4.6 on_click handlers and button presses fired so far this walk: a group fires its own
+  // on_click only when nothing inside it took the click.
+  int clicks_fired = 0;
+  // §4.6 on_hover_end: the instances (instance_key) whose item was hovered last walk and this one,
+  // with the program to run, and its scope, when the pointer leaves.
+  struct HoverEnd {
+    std::string handler, prefix, functions;
+  };
+  std::unordered_map<std::string, HoverEnd> hovered_last, hovered_now;
   // `autofocus:` widgets drawn last frame and this one, by tree position (and repeat index): one
   // takes focus when it appears, not on every frame it stays.
   std::set<std::string> autofocus_shown, autofocus_now;
@@ -1633,12 +1667,16 @@ void Runtime::Impl::emit_container(const Widget &w) {
           if (!visible(inst))
             return;
           b.grid_next_cell();
-          if (i >= 0)
+          if (i >= 0) {
             b.push_id(std::to_string(i).c_str());
+            instance_path.push_back(i);
+          }
           autofocus(inst, i);
           emit_node(inst);
-          if (i >= 0)
+          if (i >= 0) {
+            instance_path.pop_back();
             b.pop_id();
+          }
         });
         emit_path.pop_back();
       }
@@ -1718,14 +1756,18 @@ void Runtime::Impl::autofocus(const Widget &inst, int i) {
 
 void Runtime::Impl::emit(const Widget &w) {
   each_instance(w, [this](const Widget &inst, int i) {
-    if (i >= 0)
+    if (i >= 0) {
       backend->push_id(std::to_string(i).c_str()); // per-instance identity
-    if (visible(inst)) {                           // §4: a falsy visible_when hides it + subtree
+      instance_path.push_back(i);
+    }
+    if (visible(inst)) { // §4: a falsy visible_when hides it + subtree
       autofocus(inst, i);
       emit_node(inst);
     }
-    if (i >= 0)
+    if (i >= 0) {
+      instance_path.pop_back();
       backend->pop_id();
+    }
   });
 }
 
@@ -1737,6 +1779,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
   if (dis)
     b.begin_disabled();
   const char *label = w.label.c_str();
+  bool inner_click = false; // a group: something inside it took this walk's click
   switch (w.kind) {
   case Kind::Menubar:
     if (b.begin_main_menu_bar()) {
@@ -1870,20 +1913,42 @@ void Runtime::Impl::emit_node(const Widget &w) {
     break;
   }
 
-  case Kind::Group:
+  case Kind::Group: {
     // A group with an id scopes its children's identities, as a window does: two groups can each
     // hold a "Change" button.
     if (!w.id.empty())
       b.push_id(w.id.c_str());
+    // §4.6 a group with pointer handlers of its own, or `hover: highlight`, is one item over its
+    // whole area (a feed's card): named by its id:, else by its place in the tree, so two unnamed
+    // ones never share a backend id.
+    const bool item =
+        !w.on_click.empty() || !w.on_hover.empty() || !w.on_hover_end.empty() || w.hover_highlight;
+    if (item) {
+      std::string gid = w.id;
+      if (gid.empty()) {
+        gid = "~";
+        for (std::size_t i = 0; i < emit_path.size(); ++i)
+          gid += (i ? "_" : "") + std::to_string(emit_path[i]);
+      }
+      ItemGroupOptions o;
+      o.focusable = !w.on_click.empty();
+      o.highlight = w.hover_highlight;
+      b.begin_item_group(gid.c_str(), o);
+    }
+    const int clicks_before = clicks_fired;
     {
       const bool backdrop = open_backdrop(w, /*window=*/false); // §5.12
       emit_container(w); // §3.0.3b: a group honours w.layout (grid / vertical)
       if (backdrop)
         b.end_backdrop();
     }
+    inner_click = clicks_fired != clicks_before;
+    if (item)
+      b.end_item_group();
     if (!w.id.empty())
       b.pop_id();
     break;
+  }
 
   case Kind::Text:
     if (w.literal_text) {
@@ -2159,8 +2224,10 @@ void Runtime::Impl::emit_node(const Widget &w) {
   }
 
   case Kind::Button:
-    if (b.button(label))
+    if (b.button(label)) {
       enqueue(w.on);
+      ++clicks_fired; // the click is the button's, not a group's around it (§4.6)
+    }
     break;
 
   case Kind::TfEditor: {
@@ -2218,10 +2285,17 @@ void Runtime::Impl::emit_node(const Widget &w) {
     b.item_pointer(x, y, dx, dy, btn);
     enqueue_event(handler, x, y, dx, dy, btn);
   };
-  if (!w.on_click.empty() && b.item_clicked())
+  // A group's click is the innermost taker's: a widget inside it with an on_click of its own (an
+  // avatar opening a profile in a card opening a post), or a button, keeps it.
+  if (!w.on_click.empty() && !inner_click && b.item_clicked()) {
     fire_pointer(w.on_click);
+    ++clicks_fired;
+  }
   if (!w.on_hover.empty() && b.item_hovered())
     fire_pointer(w.on_hover);
+  // on_hover_end: kept while the item is hovered, run once the walk after it is not (render()).
+  if (!w.on_hover_end.empty() && b.item_hovered())
+    hovered_now[instance_key()] = HoverEnd{w.on_hover_end, current_prefix(), current_functions()};
   if (!w.on_drag.empty() && b.item_dragged())
     fire_pointer(w.on_drag);
   if (!w.on_drag_start.empty() && b.item_drag_started())
@@ -2971,11 +3045,22 @@ void Runtime::Impl::render() {
     --menubar_depth;
     backend->end_main_menu_bar();
   }
+  clicks_fired = 0;
+  instance_path.clear();
   emit(root);
   players_end_walk(); // §5.13: a player whose widget this walk did not draw stops
   backend->end_frame();
   autofocus_shown.swap(autofocus_now);
   autofocus_now.clear();
+  // §4.6 on_hover_end: an item hovered last walk and not this one (the pointer left, or the item
+  // went), in its own scope.
+  for (const auto &[key, h] : hovered_last)
+    if (!hovered_now.count(key)) {
+      queued_events.push_back({h.handler, h.prefix});
+      queued_events.back().functions = h.functions;
+    }
+  hovered_last.swap(hovered_now);
+  hovered_now.clear();
 }
 
 void Runtime::Impl::plan_windows_menu() {

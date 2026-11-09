@@ -418,6 +418,8 @@ int main() {
     };
     check(moved(eye, eye2), "a drag in the sim view turns its camera");
     check(!moved(mainEye, mainEye2), "a drag in the sim view leaves the main camera alone");
+    // At once: a glide still under way would move the sim view during the checks below.
+    sim.camera().setZoomSmoothing(0.0);
     io.AddMouseWheelEvent(0.0f, 2.0f);
     rt.step(kDt);
     rt.step(kDt);
