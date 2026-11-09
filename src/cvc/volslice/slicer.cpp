@@ -251,5 +251,40 @@ slice_geometry compute_slices(const mat4 &local_to_clip, const box3d &box,
   return out;
 }
 
+slice_geometry compute_slices_at(const vec3d &eye, const vec3d &forward, const box3d &box,
+                                 const std::vector<double> &distances, const slice_params &params) {
+  slice_geometry out;
+  const double flen =
+      std::sqrt(forward.x * forward.x + forward.y * forward.y + forward.z * forward.z);
+  if (flen == 0.0)
+    throw volslice_error("compute_slices_at: zero view direction");
+  const vec3d dim{box.max.x - box.min.x, box.max.y - box.min.y, box.max.z - box.min.z};
+  const double longest = std::fmax(dim.x, std::fmax(dim.y, dim.z));
+  if (longest <= 0.0)
+    return out;
+  const vec3d ratio{dim.x / longest, dim.y / longest, dim.z / longest};
+  const vec3d center{(box.min.x + box.max.x) * 0.5, (box.min.y + box.max.y) * 0.5,
+                     (box.min.z + box.max.z) * 0.5};
+  // As in compute_slices, the normal points back toward the eye. A local point p is
+  // longest * p_ratio + center, so the plane forward.(p - eye) = s is n.p_ratio + d = 0 with
+  // d = (s + n.(center - eye)) / longest.
+  const vec3d n{-forward.x / flen, -forward.y / flen, -forward.z / flen};
+  const double nc = n.x * (center.x - eye.x) + n.y * (center.y - eye.y) + n.z * (center.z - eye.z);
+  double tex[8 * 3];
+  for (int i = 0; i < 8; ++i) {
+    tex[i * 3 + 0] = kTexCoords[i * 3 + 0] < 0.5 ? params.tex_min.x : params.tex_max.x;
+    tex[i * 3 + 1] = kTexCoords[i * 3 + 1] < 0.5 ? params.tex_min.y : params.tex_max.y;
+    tex[i * 3 + 2] = kTexCoords[i * 3 + 2] < 0.5 ? params.tex_min.z : params.tex_max.z;
+  }
+  for (double s : distances)
+    clip_plane(out, ratio, tex, n, (s + nc) / longest);
+  for (std::size_t i = 0; i < out.positions.size(); i += 3) {
+    out.positions[i + 0] = static_cast<float>(out.positions[i + 0] * longest + center.x);
+    out.positions[i + 1] = static_cast<float>(out.positions[i + 1] * longest + center.y);
+    out.positions[i + 2] = static_cast<float>(out.positions[i + 2] * longest + center.z);
+  }
+  return out;
+}
+
 } // namespace volslice
 } // namespace cvc

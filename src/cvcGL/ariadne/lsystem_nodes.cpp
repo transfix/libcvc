@@ -43,6 +43,7 @@
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/lsys/forest.h>
 #include <cvc/lsys/water.h>
+#include <cvc/volslice/slicer.h>
 #include <cvc/volume/bounding_box.h>
 #include <cvc/volume/volume.h>
 #include <cvc/world/cloud_layer.h>
@@ -424,15 +425,16 @@ std::shared_ptr<GraphicsNode> realize_wave_sea(SceneGraph &sg, const ari::SceneN
 // ─────────────────────── the sky: a world-scale cloud deck (cvc::world::cloud_layer)
 // ─────────────────────── A few L-system cumulus maps scattered over a periodic grid of cells that
 // covers the ground (cloud_layer.h). The clouds nearest the camera are drawn by a small pool of
-// VolumeNodes, the rest by one mesh of translucent horizontal shells sampling a coarse opacity
-// texture; a cloud passing between the two crossfades. The deck's shade is a periodic mask that the
-// receivers' shaders read by world position and apply to the direct light alone, so a ground keeps
-// its own texture. Which cells hold a cloud evolves on the world clock (the layer's cellular
-// automaton, coupled to the ground's windward flanks); a cloud coming or going fades, and its
-// volume, its shell slices and its shade all take the same weight. The clouds are lit by the sun
-// they shade the ground from: a near volume's colour is the sunlight left after its own cloud's
-// optical depth toward the sun (cloud_layer::cell_sun_tau), a far shell's after the whole deck's,
-// so the tops are white and the undersides and the down-sun flanks grey.
+// VolumeNodes, the rest by one mesh of view-aligned slices sampling a coarse opacity texture (the
+// far slices, also called the shells below); a cloud passing between the two crossfades. The
+// deck's shade is a periodic mask that the receivers' shaders read by world position and apply to
+// the direct light alone, so a ground keeps its own texture. Which cells hold a cloud evolves on
+// the world clock (the layer's cellular automaton, coupled to the ground's windward flanks); a
+// cloud coming or going fades, and its volume, its shell slices and its shade all take the same
+// weight. The clouds are lit by the sun they shade the ground from: a near volume's colour is the
+// sunlight left after its own cloud's optical depth toward the sun (cloud_layer::cell_sun_tau), a
+// far shell's after the whole deck's, so the tops are white and the undersides and the down-sun
+// flanks grey.
 constexpr int SKY_N = 60, SKY_NZ = 28;
 constexpr double SKY_BASE = 74.0, SKY_TOP = 122.0, SKY_HALF = 150.0;
 constexpr double CLOUD_DRIFT = 3.0;    // m/s along the wind at drift 1
@@ -455,7 +457,11 @@ constexpr int REFRESH = 60;        // frames between shade and far composites (t
 constexpr int SLICES = 8;          // frames a composite's cells, then its rows, are spread over
 constexpr int AREA_STRIDE = 60;    // frames between looks at the ground's extent
 constexpr int FADE_FRAMES = 45;    // a cloud's near <-> far crossfade
-constexpr double FAR_REACH = 4000.0;    // how far past the ground the far shells reach, metres
+constexpr double FAR_REACH = 4000.0;      // how far past the ground the far clouds reach, metres
+constexpr int FAR_SLICES = 64;            // the far slices, at most (farSliceDistances)
+constexpr double FAR_SLICE_GROWTH = 0.06; // each far slice at least this much further than the last
+constexpr double FAR_SLICE_START = 0.1;   // the nearest far slice, in cloud half-widths
+constexpr double FAR_SLAB_REACH = 1.5;    // a far slab's longest run along a ray, over its depth
 const char *CLOUD_INPUTS = "cloud_sky"; // the shared shader inputs' key on a mesh
 
 // Where the deck's code goes in a lit mesh's fragment shader (vertexVC is there whenever a mesh
@@ -492,13 +498,17 @@ float cloudShade(vec3 pVC) {
 const char *SHADE_SUM =
     "vec4(ambientColor + cloudShade(vertexVC.xyz) * (diffuse + specular), opacity)";
 
-// The far shells: each fragment reads its slice of the coarse opacity and turns it into the
-// slice's optical depth along the view ray (as the volume would integrate it), takes the volumes'
-// colour ramp by the sunlight that reaches it (cloudRamp, cloudSun below), thins out toward the
-// horizon and with distance from the camera (cloudFar = camera xy, fade start, fade end) and
-// leaves out what a near volume draws (cloudCutK = its cloud's centre xy, half-width, weight).
-// cloudFarZ = (deck base, 1 / deck depth, a slice's vertical optical depth at full opacity,
-// camera z).
+// The far clouds are drawn as a volume is by slicing (cvc::volslice, VolSliceNode): planes facing
+// the camera, cut to the deck's box and blended back to front. They are spaced with distance from
+// the camera (each a fixed fraction further than the last), since the deck is kilometres wide and
+// the detail that matters is near. A slice stands for the slab of deck behind it, up to the next
+// slice: each fragment marches its view ray across that slab through the coarse opacity, sums the
+// optical depth (as the volume would integrate it), takes the volumes' colour ramp by the sunlight
+// that reaches each sample (cloudRamp, cloudSun below), thins out with distance from the camera
+// (cloudFar = camera xy, fade start, fade end) and leaves out what a near volume draws (cloudCutK =
+// its cloud's centre xy, half-width, weight). cloudFarZ = (deck base, 1 / deck depth, the optical
+// depth per metre at full opacity, camera z); cloudView = (the view direction, the slab's depth
+// over its slice's distance).
 std::string rampGlsl(); // the colour ramp the near volumes look up (skyTransfer), in GLSL
 std::string shellDec() {
   std::string s = R"(//VTK::Light::Dec
@@ -507,10 +517,9 @@ uniform mat4 cloudVCWC;
 uniform vec4 cloudXf;
 uniform vec4 cloudFar;
 uniform vec4 cloudFarZ;
-uniform float cloudFarL;
+uniform vec4 cloudView;
 uniform vec4 cloudSun;
-const int CLOUD_SAMPLES = 6;
-const float CLOUD_SEG = 24.0;
+const int CLOUD_SAMPLES = 6; // a slab's samples at most, about 4 per deck depth of its run
 )";
   s += "const int CLOUD_LIGHT_SAMPLES = " + std::to_string(LIGHT_SAMPLES) + ";\n";
   s += rampGlsl();
@@ -522,27 +531,41 @@ const float CLOUD_SEG = 24.0;
 }
 vec4 cloudShell(vec3 pVC) {
   vec3 w = (cloudVCWC * vec4(pVC, 1.0)).xyz;
-  // A slice stands for the slab of deck around it: march the view ray across that slab (at most
-  // CLOUD_SEG slabs' depth of it) and sum its optical depth, so the slices join up into one cloud
-  // however edge-on they are seen, instead of parting into bands; the last degrees fade into haze.
-  vec3 v = normalize(w - vec3(cloudFar.xy, cloudFarZ.w));
-  float mu = abs(v.z);
-  float slab = 1.0 / (cloudFarZ.y * cloudFarL);
-  float seg = min(slab / max(mu, 1e-3), CLOUD_SEG * slab);
+  // The slab behind this slice, along the view ray: its depth along the view direction is
+  // cloudView.w times the slice's distance, and the ray crosses it obliquely off the centre.
+  vec3 e = vec3(cloudFar.xy, cloudFarZ.w);
+  vec3 v = normalize(w - e);
+  float seg = dot(w - e, cloudView.xyz) * cloudView.w / max(dot(v, cloudView.xyz), 0.05);
+  // Only the stretch of it inside the deck holds cloud: march that (the slice may lie above or
+  // below the deck, farSliceMesh).
+  float t0 = 0.0, t1 = seg;
+  if (abs(v.z) > 1e-5) {
+    float ta = (cloudFarZ.x - w.z) / v.z, tb = (cloudFarZ.x + 1.0 / cloudFarZ.y - w.z) / v.z;
+    t0 = max(t0, min(ta, tb));
+    t1 = min(t1, max(ta, tb));
+  } else if (w.z < cloudFarZ.x || w.z > cloudFarZ.x + 1.0 / cloudFarZ.y) {
+    t1 = t0;
+  }
+  if (t1 <= t0)
+    return vec4(0.0);
+  float run = t1 - t0;
   // The sunlight. Each march sample that holds cloud marches on toward the sun to the deck's top
   // through the coarse opacity (the whole deck's, so a cloud up-sun shades this one too), as the
   // near volumes' self-shade does through their own map; cloudSun = (the sun's direction, the
   // light's optical depth per metre of a far byte at 255). The samples are composited front to
-  // back, so a pixel takes the light where its ray meets the cloud, which moves smoothly from
-  // pixel to pixel: one light per slice would band, each slice a step darker than the one above.
-  float d = 0.0, tr = 1.0;
+  // back, so a pixel takes the light where its ray meets the cloud.
+  float tr = 1.0;
   vec3 lit = vec3(0.0);
-  float stepK = cloudFarZ.z * seg / (slab * float(CLOUD_SAMPLES));
+  // Samples by the run: far out a slab can span a whole cloud, whose sunlit top must still come
+  // first; near, a slab is a few metres and one sample does.
+  float ns = clamp(ceil(4.0 * run * cloudFarZ.y), 1.0, float(CLOUD_SAMPLES));
+  float stepK = cloudFarZ.z * run / ns;
   for (int i = 0; i < CLOUD_SAMPLES; ++i) {
-    vec3 q = w + v * seg * ((float(i) + 0.5) / float(CLOUD_SAMPLES) - 0.5);
-    float hq = clamp((q.z - cloudFarZ.x) * cloudFarZ.y, 0.0, 1.0);
-    float dq = texture(cloudFarTex, vec3((q.xy - cloudXf.xy) * cloudXf.z, hq)).r;
-    d += dq;
+    if (float(i) >= ns)
+      break;
+    vec3 q = w + v * (t0 + run * (float(i) + 0.5) / ns);
+    float hz = clamp((q.z - cloudFarZ.x) * cloudFarZ.y, 0.0, 1.0);
+    float dq = texture(cloudFarTex, vec3((q.xy - cloudXf.xy) * cloudXf.z, hz)).r;
     if (dq < 0.004)
       continue;
     float tq = 0.0;
@@ -560,8 +583,7 @@ vec4 cloudShell(vec3 pVC) {
     tr *= 1.0 - ai;
   }
   vec3 c = tr < 0.9999 ? lit / (1.0 - tr) : cloudRamp(1.0);
-  d /= float(CLOUD_SAMPLES);
-  float a = (1.0 - exp(-cloudFarZ.z * d * seg / slab)) * smoothstep(0.0, 0.03, mu);
+  float a = 1.0 - tr;
   a *= 1.0 - smoothstep(cloudFar.z, cloudFar.w, length(w.xy - cloudFar.xy));
 )";
   for (int k = 0; k < MAX_NEAR; ++k)
@@ -610,29 +632,58 @@ std::string rampGlsl() {
          ";\n}\n";
 }
 
-// One horizontal quad per far slice, at the slice's middle, `reach` around (cx, cy), in the order
-// they blend far to near from a camera with `below` slices under it: those above it from the top
-// down, then those under it from the bottom up. The clouds are lit from above, their slices
-// whiter with height, so a camera over the deck must see the top slice last.
-cvc::geometry shellMesh(const cvc::world::cloud_layer &L, double cx, double cy, double reach,
-                        int below) {
-  cvc::geometry g;
+// The far slices' distances from a camera at `eye` looking along `fwd` (unit) at the deck's box
+// `reach` around (cx, cy), far to near: from FAR_SLICE_START cloud half-widths out to the box's
+// farthest corner, each a fixed fraction (the growth, returned) further than the last, at most
+// FAR_SLICES of them; the slab behind each reaches to the next one out.
+double farSliceDistances(const cvc::world::cloud_layer &L, double cx, double cy, double reach,
+                         const double eye[3], const double fwd[3], std::vector<double> &out) {
+  out.clear();
   const cvc::world::cloud_layer_params &p = L.params();
-  below = std::clamp(below, 0, p.far_layers);
-  std::vector<int> order;
-  for (int k = p.far_layers - 1; k >= below; --k)
-    order.push_back(k);
-  for (int k = 0; k < below; ++k)
-    order.push_back(k);
-  for (int k : order) {
-    const double z = p.base + (k + 0.5) * (p.top - p.base) / p.far_layers;
-    const auto v = static_cast<cvc::geometry::index_t>(g.points().size());
-    g.points().push_back({cx - reach, cy - reach, z});
-    g.points().push_back({cx + reach, cy - reach, z});
-    g.points().push_back({cx + reach, cy + reach, z});
-    g.points().push_back({cx - reach, cy + reach, z});
-    g.tris().push_back({v, v + 1, v + 2});
-    g.tris().push_back({v, v + 2, v + 3});
+  double far = 0.0;
+  for (int c = 0; c < 8; ++c) {
+    const double x = cx + ((c & 1) ? reach : -reach), y = cy + ((c & 2) ? reach : -reach),
+                 z = (c & 4) ? p.top : p.base;
+    far = std::max(far, (x - eye[0]) * fwd[0] + (y - eye[1]) * fwd[1] + (z - eye[2]) * fwd[2]);
+  }
+  const double s0 = FAR_SLICE_START * p.extent;
+  if (far <= s0)
+    return FAR_SLICE_GROWTH;
+  const double g =
+      std::max(FAR_SLICE_GROWTH, std::exp(std::log(far / s0) / double(FAR_SLICES)) - 1.0);
+  for (double s = s0; s < far; s *= 1.0 + g)
+    out.push_back(s);
+  std::reverse(out.begin(), out.end());
+  return g;
+}
+
+// The far slices for that camera: the planes at those distances, cut to the deck's box
+// (cvc::volslice::compute_slices_at, VolSliceNode's slicing), as one mesh drawn back to front.
+// Each is cut taller than the deck by its slab's depth (FAR_SLAB_REACH of it): from above, a plane
+// facing the camera crosses the thin deck in a narrow band, and far out a ray can enter the deck
+// before the next plane and leave it past this one. Its slab still holds that stretch of deck, so
+// the plane must reach the ray where the slab begins, above or below the deck.
+cvc::geometry farSliceMesh(const cvc::world::cloud_layer &L, double cx, double cy, double reach,
+                           const double eye[3], const double fwd[3], double &growth) {
+  const cvc::world::cloud_layer_params &p = L.params();
+  std::vector<double> dist;
+  growth = farSliceDistances(L, cx, cy, reach, eye, fwd, dist);
+  cvc::geometry g;
+  for (double d : dist) {
+    const double pad = FAR_SLAB_REACH * growth * d;
+    cvc::volslice::box3d box;
+    box.min = {cx - reach, cy - reach, p.base - pad};
+    box.max = {cx + reach, cy + reach, p.top + pad};
+    const cvc::volslice::slice_geometry s = cvc::volslice::compute_slices_at(
+        {eye[0], eye[1], eye[2]}, {fwd[0], fwd[1], fwd[2]}, box, std::vector<double>{d});
+    const auto base = static_cast<cvc::geometry::index_t>(g.points().size());
+    for (std::size_t v = 0; v < s.vertices(); ++v)
+      g.points().push_back({s.positions[v * 3], s.positions[v * 3 + 1], s.positions[v * 3 + 2]});
+    for (std::size_t k = 0; k < s.planes(); ++k) {
+      const auto o = base + static_cast<cvc::geometry::index_t>(s.fan_offset[k]);
+      for (std::uint32_t t = 1; t + 1 < s.fan_count[k]; ++t)
+        g.tris().push_back({o, o + t, o + t + 1});
+    }
   }
   return g;
 }
@@ -660,15 +711,17 @@ struct SkyRT {
   const float *reliefData = nullptr;
   std::size_t reliefSize = 0;
   double windX = 1.0, windY = 0.0; // the wind's heading
-  // The near volumes draw clouds within `reach` around the ground's centre (ox, oy): the ground's
-  // half-width plus the horizon. The pattern's period is wider than that by a cloud on each side,
-  // so one copy of each of those clouds is drawn: the one nearest the centre. The far shells reach
-  // further, `farReach` around it, where the pattern repeats.
+  // The pattern covers `reach` around the ground's centre (ox, oy): the ground's half-width plus
+  // the horizon; its period is wider than that by a cloud on each side. The far slices reach
+  // further, `farReach` around it, where the pattern repeats, and the near volumes draw the copies
+  // nearest the camera (camX, camY) out there: a camera at the ground's edge or past it is beside
+  // copies of the clouds, not the ones over the ground, and those must be the volumes.
   double ox = 0.0, oy = 0.0, area = 0.0, horizon = 0.0, reach = 0.0, farReach = 0.0;
+  double camX = 0.0, camY = 0.0;
   double farHorizon = FAR_REACH;
   double shadeK = 0.1, shadeFloor = SHADE_FLOOR;
   double lightK = 0.0; // the self-shade: optical depth per (opacity x metre) toward the sun
-  double farK = 1.0; // a far slice's vertical optical depth at the table's largest opacity
+  double farK = 1.0;   // the far deck's optical depth per metre at the table's largest opacity
   struct Near {
     std::weak_ptr<VolumeNode> node;
     int cell = -1;  // the cell drawn, or -1
@@ -679,7 +732,10 @@ struct SkyRT {
   std::vector<Near> near;
   int nextMorph = 0;
   std::weak_ptr<GeometryNode> shells;
-  int shellsBelow = 0; // the far slices under the camera the shells' mesh is ordered for
+  // The camera (eye, view direction) the far slices were cut for, and their growth; none yet.
+  std::array<double, 6> slicedFor{};
+  double sliceGrowth = 0.0;
+  bool sliced = false;
   std::shared_ptr<GeometryNode::ShaderInputs> inputs;
   // Two of each, uploaded in turn, so an upload never waits on the GPU drawing the other.
   vtkSmartPointer<vtkTextureObject> shadeTex[2], farTex[2];
@@ -695,21 +751,16 @@ struct SkyRT {
   bool shadeWas = false;
 };
 
-// How many far slices lie under a camera at height z (the shells' blend order, shellMesh).
-int slicesBelow(const cvc::world::cloud_layer &L, double z) {
-  const cvc::world::cloud_layer_params &p = L.params();
-  const double dz = (p.top - p.base) / p.far_layers;
-  return std::clamp(int(std::ceil((z - p.base) / dz - 0.5)), 0, p.far_layers);
-}
-
 // The world xy of a cell's cloud: its pattern centre moved by the wind, the periodic copy nearest
-// the deck's centre.
+// the camera (held to the far slices' box, where the pattern is drawn).
 void cloudCentre(const SkyRT &r, const cvc::world::cloud_cell &c, double &wx, double &wy) {
   const double P = r.layer->period_m();
+  const double rx = std::clamp(r.camX, r.ox - r.farReach, r.ox + r.farReach);
+  const double ry = std::clamp(r.camY, r.oy - r.farReach, r.oy + r.farReach);
   wx = c.cx + r.driftX;
   wy = c.cy + r.driftY;
-  wx += P * std::round((r.ox - wx) / P);
-  wy += P * std::round((r.oy - wy) / P);
+  wx += P * std::round((rx - wx) / P);
+  wy += P * std::round((ry - wy) / P);
 }
 
 // The ground's centre and half-width (its height field's box).
@@ -734,8 +785,7 @@ void layDeck(SkyRT &r) {
   r.snap = true;
   r.fresh = true;
   r.shade.phase = r.far.phase = 0;
-  if (auto sh = r.shells.lock())
-    sh->setGeometry(shellMesh(*r.layer, r.ox, r.oy, r.farReach, r.shellsBelow));
+  r.sliced = false; // the far slices are cut again for the new box
 }
 
 // Give the layer the ground's relief for its orographic coupling, when it is new or regenerated;
@@ -765,25 +815,35 @@ void wireReceivers(SkyRT &r, GraphicsNode &g) {
       wireReceivers(r, *c);
 }
 
-// VTK draws the volume layer in the renderer's prop order, and the shells draw in it
-// (GeometryNode::setDrawWithVolumes). Keep that order [the scene's other props..., the shells, the
-// near volumes...]: the shells over the water, the near clouds over the shells. A node shown again
-// rejoins the renderer at the end (SceneNode::setVisible), so the order drifts: when it has,
-// move the shells, then each near volume in the renderer, to the end.
-void orderDeck(SkyRT &r, vtkRenderer *ren) {
+// VTK draws the volume layer in the renderer's prop order, and the far slices draw in it
+// (GeometryNode::setDrawWithVolumes), each blended over what is drawn before it. Keep that order
+// [the scene's other props..., the far slices, the near volumes far to near from the eye]: the far
+// clouds over the water, the near clouds over the far ones, and of two near clouds the nearer over
+// the other. A node shown again rejoins the renderer at the end (SceneNode::setVisible), and the
+// near clouds' distances change as the camera moves: when the order is off, move the far slices,
+// then each near volume from the farthest, to the end. Two near clouds at much the same distance
+// (within NEAR_ORDER_SLACK) count as in order, so they do not trade places frame after frame.
+constexpr double NEAR_ORDER_SLACK = 0.05;
+void orderDeck(SkyRT &r, vtkRenderer *ren, const double eye[3]) {
   auto sh = r.shells.lock();
   vtkProp *sp = sh ? sh->prop() : nullptr;
   vtkPropCollection *props = ren->GetViewProps();
   if (!sp || !props->IsItemPresent(sp))
     return;
-  std::vector<vtkProp *> nearProps;
+  std::vector<std::pair<double, vtkProp *>> nearProps; // (distance from the eye, prop)
   for (const SkyRT::Near &v : r.near)
     if (auto vn = v.node.lock())
-      if (vtkProp *p = vn->prop(); p && props->IsItemPresent(p))
-        nearProps.push_back(p);
-  // In order: the shells, then nothing but near volumes after them.
+      if (vtkProp *p = vn->prop(); p && props->IsItemPresent(p)) {
+        const double *b = p->GetBounds();
+        const double c[3] = {0.5 * (b[0] + b[1]), 0.5 * (b[2] + b[3]), 0.5 * (b[4] + b[5])};
+        nearProps.emplace_back(std::sqrt((c[0] - eye[0]) * (c[0] - eye[0]) +
+                                         (c[1] - eye[1]) * (c[1] - eye[1]) +
+                                         (c[2] - eye[2]) * (c[2] - eye[2])),
+                               p);
+      }
+  // In order: the far slices, then nothing but the near volumes, far to near.
+  std::vector<double> after;
   bool seen = false, ok = true;
-  std::size_t after = 0;
   vtkCollectionSimpleIterator it;
   props->InitTraversal(it);
   while (vtkProp *p = props->GetNextProp(it)) {
@@ -791,19 +851,29 @@ void orderDeck(SkyRT &r, vtkRenderer *ren) {
       seen = true;
       continue;
     }
-    const bool isNear = std::find(nearProps.begin(), nearProps.end(), p) != nearProps.end();
-    if (seen && !isNear)
+    if (!seen)
+      continue;
+    const auto n =
+        std::find_if(nearProps.begin(), nearProps.end(),
+                     [p](const std::pair<double, vtkProp *> &e) { return e.second == p; });
+    if (n == nearProps.end())
       ok = false;
-    if (seen && isNear)
-      ++after;
+    else
+      after.push_back(n->first);
   }
-  if (ok && after == nearProps.size())
+  for (std::size_t k = 1; ok && k < after.size(); ++k)
+    ok = after[k] <= after[k - 1] * (1.0 + NEAR_ORDER_SLACK);
+  if (ok && after.size() == nearProps.size())
     return;
+  std::sort(nearProps.begin(), nearProps.end(),
+            [](const std::pair<double, vtkProp *> &a, const std::pair<double, vtkProp *> &b) {
+              return a.first > b.first;
+            });
   ren->RemoveViewProp(sp);
   ren->AddViewProp(sp);
-  for (vtkProp *p : nearProps) {
-    ren->RemoveViewProp(p);
-    ren->AddViewProp(p);
+  for (const auto &e : nearProps) {
+    ren->RemoveViewProp(e.second);
+    ren->AddViewProp(e.second);
   }
 }
 
@@ -837,11 +907,16 @@ void setNearWeight(const SkyRT &r, SkyRT::Near &v) {
 
 // The near volumes go to the clouds nearest the camera (a cloud already drawn counts a little
 // nearer, so two at much the same distance do not trade places), held or still fading out; the
-// others are far shells.
-void assignNear(SkyRT &r, double camx, double camy, double camz) {
+// others are far slices. A cloud wholly out of the camera's view (`fwd`, its unit direction;
+// `halfView`, the half-angle of its view's diagonal, radians) counts OUT_OF_VIEW_FACTOR times as
+// far, so the volumes go to the clouds it sees; VIEW_MARGIN more of a turn still counts as seen.
+constexpr double OUT_OF_VIEW_FACTOR = 4.0;
+constexpr double VIEW_MARGIN = 0.26; // radians, about 15 degrees
+void assignNear(SkyRT &r, double camx, double camy, double camz, const double fwd[3],
+                double halfView) {
   const cvc::world::cloud_layer &L = *r.layer;
   const double zc = 0.5 * (L.params().base + L.params().top);
-  const double out = L.params().extent + r.reach; // a cloud wholly past the deck's edge: not drawn
+  const double out = L.params().extent + r.farReach; // a cloud wholly past the deck: not drawn
   std::vector<std::pair<double, int>> order;
   for (std::size_t k = 0; k < L.cells().size(); ++k) {
     const cvc::world::cloud_cell &c = L.cells()[k];
@@ -853,6 +928,13 @@ void assignNear(SkyRT &r, double camx, double camy, double camz) {
       continue;
     double d = std::sqrt((wx - camx) * (wx - camx) + (wy - camy) * (wy - camy) +
                          (zc - camz) * (zc - camz));
+    if (d > 1.5 * L.params().extent) {
+      const double c = std::clamp(
+          ((wx - camx) * fwd[0] + (wy - camy) * fwd[1] + (zc - camz) * fwd[2]) / d, -1.0, 1.0);
+      const double size = std::asin(std::min(1.0, 1.5 * L.params().extent / d));
+      if (std::acos(c) - size > halfView + VIEW_MARGIN)
+        d *= OUT_OF_VIEW_FACTOR;
+    }
     for (const SkyRT::Near &v : r.near)
       if (v.cell == int(k) && !v.leaving)
         d *= 0.8;
@@ -931,17 +1013,16 @@ bool stepComposite(Composite &c, long f, double morph, bool now, std::size_t cel
 // (more nodes that take the shade), area (the half-width to cover; default the ground's, else
 // half), extent (a cloud's half-width), base and top (the deck's heights), spacing (cell size),
 // coverage (the share of cells with a cloud), variants, seed, sun_az / sun_el (the light the
-// clouds are lit from and cast along: the scene's key), near (volumes, at most 8), layers (far
-// shells), horizon (how far past the ground the near volumes draw clouds; by default a cloud's
-// half-width or the shadow's throw: they are in the scene's bounds, which the camera fits and
-// clips to), far_reach (how far past the ground the far shells reach; 4 km by default, out of the
-// bounds),
-// shade_k / shade_floor (the shade's strength and its darkest), light_k (the clouds' own shade:
-// optical depth per metre of opacity toward the sun; 0 lights them evenly), shadow (0 starts the
-// shade off),
-// wind_az (the heading the wind blows toward, degrees as sun_az: 90, the default, is +x), evolve
-// (the weather's rate: 0 holds the clouds where they are), orographic (how strongly windward
-// flanks gather cloud: 0 none, 1 the default) and fade (seconds a cloud takes to come or go).
+// clouds are lit from and cast along: the scene's key), near (volumes, at most 8), layers (the far
+// opacity's levels), horizon (how far past the ground the near volumes draw clouds; by default a
+// cloud's half-width or the shadow's throw: they are in the scene's bounds, which the camera fits
+// and clips to), far_reach (how far past the ground the far clouds reach; 4 km by default, out of
+// the bounds), shade_k / shade_floor (the shade's strength and its darkest), light_k (the clouds'
+// own shade: optical depth per metre of opacity toward the sun; 0 lights them evenly), shadow (0
+// starts the shade off), wind_az (the heading the wind blows toward, degrees as sun_az: 90, the
+// default, is +x), evolve (the weather's rate: 0 holds the clouds where they are), orographic (how
+// strongly windward flanks gather cloud: 0 none, 1 the default) and fade (seconds a cloud takes to
+// come or go).
 std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::SceneNode &n,
                                                 GraphicsNode *parent, RealizedScene &out,
                                                 std::vector<std::string> *warnings) {
@@ -1007,7 +1088,7 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
   // the ground's shade, the volume's thin outskirts read as solid from the side, and a cloud that
   // looks solid should grey the far side of itself like one (terrain_lab's deck: about 0.3).
   rt->lightK = std::max(0.0, n.props.num("light_k", LIGHT_GAIN * 1.1 / unit));
-  rt->farK = 1.1 * rt->layer->opacity_max() * (p.top - p.base) / p.far_layers / unit;
+  rt->farK = 1.1 * rt->layer->opacity_max() / unit;
 
   // The near volumes: the first carries the node's id. Each spans one cloud's map, placed each
   // frame where the wind has taken its cloud; hidden while it draws none.
@@ -1042,7 +1123,7 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
     setNearWeight(*rt, rt->near.back());
   }
 
-  // The far shells: one mesh, drawn translucent over everything the near volumes do not draw.
+  // The far slices: one mesh, drawn translucent over everything the near volumes do not draw.
   rt->inputs = std::make_shared<GeometryNode::ShaderInputs>();
   {
     const std::string id = n.id + "_far";
@@ -1064,8 +1145,7 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
       // Out of the bounds the camera fits and clips to, so the shells can reach the horizon; a
       // vertex past the far plane is drawn on it (its depth only: where it lands on screen, and
       // the world point the fragments read, are unchanged).
-      shells->setUseBounds(false);
-      shells->setGeometry(shellMesh(*rt->layer, rt->ox, rt->oy, rt->farReach, rt->shellsBelow));
+      shells->setUseBounds(false); // the slices are cut for the camera each frame it moves
       shells->addVertexShaderReplacement("//VTK::PositionVC::Impl", SHELL_CLAMP);
       shells->setSharedShaderInputs(CLOUD_INPUTS, rt->inputs);
       shells->setVisible(false); // until its opacity is on the GPU
@@ -1146,20 +1226,35 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
 
     if (!ren || !ren->IsActiveCameraCreated())
       return;
-    orderDeck(r, ren);
     vtkCamera *cam = ren->GetActiveCamera();
-    double cp[3];
+    double cp[3], fp[3];
     cam->GetPosition(cp);
-    // The shells blend far to near: re-order them when the camera crosses a slice.
-    if (const int below = slicesBelow(L, cp[2]); below != r.shellsBelow) {
-      r.shellsBelow = below;
-      if (auto sh = r.shells.lock())
-        sh->setGeometry(shellMesh(L, r.ox, r.oy, r.farReach, below));
+    cam->GetFocalPoint(fp);
+    r.camX = cp[0]; // the near volumes draw the clouds' copies nearest the camera (cloudCentre)
+    r.camY = cp[1];
+    // The far slices face the camera: cut them again whenever it moves or turns.
+    double fwd[3] = {fp[0] - cp[0], fp[1] - cp[1], fp[2] - cp[2]};
+    if (const double fl = std::sqrt(fwd[0] * fwd[0] + fwd[1] * fwd[1] + fwd[2] * fwd[2]);
+        fl > 0.0) {
+      const std::array<double, 6> now{cp[0], cp[1], cp[2], fwd[0] / fl, fwd[1] / fl, fwd[2] / fl};
+      if (!r.sliced || now != r.slicedFor) {
+        r.sliced = true;
+        r.slicedFor = now;
+        if (auto sh = r.shells.lock())
+          sh->setGeometry(
+              farSliceMesh(L, r.ox, r.oy, r.farReach, now.data(), now.data() + 3, r.sliceGrowth));
+      }
     }
 
     // The near volumes: who draws what, the fades, one morph refresh per stride.
     if (r.snap || f % STRIDE == 0) {
-      assignNear(r, cp[0], cp[1], cp[2]);
+      // The view's diagonal half-angle, from its vertical one and the window's aspect.
+      int *sz = ren->GetSize();
+      const double aspect = sz && sz[1] > 0 ? double(sz[0]) / sz[1] : 1.0;
+      const double halfView =
+          std::atan(std::tan(0.5 * cam->GetViewAngle() * 3.14159265358979323846 / 180.0) *
+                    std::sqrt(1.0 + aspect * aspect));
+      assignNear(r, cp[0], cp[1], cp[2], r.slicedFor.data() + 3, halfView);
       for (SkyRT::Near &v : r.near) {
         if (v.cell < 0)
           continue;
@@ -1196,6 +1291,8 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
       }
       in.f4["cloudCut" + std::to_string(k)] = cut;
     }
+    // Once the near clouds are placed (one shown this frame rejoined the renderer at the end).
+    orderDeck(r, ren, cp);
 
     // The GPU side: the shade and the far opacity, re-composited a share a frame as the clouds
     // morph (all at once on the first frame and after a new layout).
@@ -1272,7 +1369,8 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
     in.f3["cloudSunR"] = {float(sx / sz), float(sy / sz), 0.0f};
     in.f["cloudShadeOn"] = shadeOn && in.tex.count("cloudShadeTex") ? 1.0f : 0.0f;
     in.f4["cloudFar"] = {float(cp[0]), float(cp[1]), float(0.5 * r.farReach), float(r.farReach)};
-    in.f["cloudFarL"] = float(p.far_layers);
+    in.f4["cloudView"] = {float(r.slicedFor[3]), float(r.slicedFor[4]), float(r.slicedFor[5]),
+                          float(r.sliceGrowth)};
     in.f4["cloudSun"] = {float(sx), float(sy), float(sz),
                          float(FAR_LIGHT * r.lightK * L.opacity_max())};
     in.f4["cloudFarZ"] = {float(p.base), float(1.0 / (p.top - p.base)), float(r.farK),
