@@ -404,10 +404,11 @@ bool detectTouchDevice() {
 #endif
 }
 
-// The UI size a touch device starts at: a laptop's UI a quarter larger, in the display's logical
-// pixels -- 20 px text, and with the touch slop a button's hit area about 38 px tall (a fingertip
-// wants 40 or so), on a phone too.
-constexpr float kTouchUiScale = 1.25f;
+// The UI size a touch device starts at: 100%, a laptop's UI in the display's logical pixels -- 16
+// px text, and with the touch slop a button's hit area about 30 px tall. It was 125%, which on a
+// phone made the text of a UI-only document (a feed) too big; the Controls window's UI size changes
+// it.
+constexpr float kTouchUiScale = 1.0f;
 
 // A phone's view: under this many logical pixels on its short side, the panels start hidden.
 constexpr float kPhoneShortSide = 500.0f;
@@ -538,6 +539,8 @@ struct ImGuiOverlay::Impl {
   bool panelsOpen = true;               // the floating toggle drives this
   bool showToggle = true;               // draw the floating show/hide button
   bool sizedOnce = false;               // first frame with a real DisplaySize
+  bool phoneHides = true; // a phone's view starts with the panels hidden (setPhoneHidesPanels)
+  bool phoneHid = false;  // ... and they are hidden for that, not by the user's choice
   std::unique_ptr<UiSettings> settings; // the state mirror
   bool applyingState = false;           // re-entry guard
   bool frameOpen = false;
@@ -627,8 +630,9 @@ struct ImGuiOverlay::Impl {
       sizedOnce = true;
       const float shortSide =
           io.DisplaySize.x < io.DisplaySize.y ? io.DisplaySize.x : io.DisplaySize.y;
-      if (shortSide / pixelRatio < kPhoneShortSide) {
+      if (phoneHides && panelsOpen && shortSide / pixelRatio < kPhoneShortSide) {
         panelsOpen = false;
+        phoneHid = true;
         syncSettings(); // as the button's change is: ui.panels_open says what shows
       }
     }
@@ -642,8 +646,10 @@ struct ImGuiOverlay::Impl {
       const float d = 34.0f * (appliedScale > 0.0f ? appliedScale : 1.0f);
       const bool was = panelsOpen;
       floatingCircleToggle("##cvcgl_ui_toggle", &panelsOpen, d, panelsOpen ? "X" : "=");
-      if (panelsOpen != was)
-        syncSettings(); // the button is a setting change like any other
+      if (panelsOpen != was) {
+        phoneHid = false; // the user's now
+        syncSettings();   // the button is a setting change like any other
+      }
     }
     if (draw && panelsOpen)
       draw();
@@ -1113,8 +1119,18 @@ void ImGuiOverlay::setToggleButtonEnabled(bool on) {
 bool ImGuiOverlay::toggleButtonEnabled() const { return m_impl->showToggle; }
 void ImGuiOverlay::setPanelsOpen(bool on) {
   m_impl->panelsOpen = on;
+  m_impl->phoneHid = false;
   m_impl->syncSettings();
 }
+void ImGuiOverlay::setPhoneHidesPanels(bool on) {
+  m_impl->phoneHides = on;
+  if (!on && m_impl->phoneHid) { // hidden for being a phone, and the user hasn't chosen since
+    m_impl->panelsOpen = true;
+    m_impl->phoneHid = false;
+    m_impl->syncSettings();
+  }
+}
+bool ImGuiOverlay::phoneHidesPanels() const { return m_impl->phoneHides; }
 bool ImGuiOverlay::panelsOpen() const { return m_impl->panelsOpen; }
 void ImGuiOverlay::attachCamera(CameraController &cam) { m_impl->cam = &cam; }
 void ImGuiOverlay::setVisible(bool on) {
@@ -1187,6 +1203,8 @@ void ImGuiOverlay::setToggleButtonEnabled(bool) {}
 bool ImGuiOverlay::toggleButtonEnabled() const { return false; }
 void ImGuiOverlay::setPanelsOpen(bool) {}
 bool ImGuiOverlay::panelsOpen() const { return true; }
+void ImGuiOverlay::setPhoneHidesPanels(bool) {}
+bool ImGuiOverlay::phoneHidesPanels() const { return false; }
 bool ImGuiOverlay::wantsMouse() const { return false; }
 bool ImGuiOverlay::wantsKeyboard() const { return false; }
 
