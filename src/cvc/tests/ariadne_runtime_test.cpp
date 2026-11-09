@@ -10278,7 +10278,8 @@ TEST(AriadneFrames, AR02_ThreeDocumentsInGroupZeroPumpOnceAFrame) {
 // AR-3 (td 8.6; S1.10): four eligible isolated documents at 4 workers, each with a busy resident (a
 // fixed loop each tick), through drain_begin, exec_pump_frame, drain_end. The residents step on at
 // least two threads (an `any` native records them) and workers pump; render never begins inside a
-// pump_all; a quick action completes in the frame it was submitted in; and one document's ps,
+// pump_all; a quick action completes in the frame it was submitted in, or in the next when the
+// frame's deadline skipped its group (td 4.10); and one document's ps,
 // inspect and kill do not see another's processes (td 5 item 11). The render check here cannot
 // fail: this test calls render() itself, between pump_alls. The latch S1.10 asks for is
 // assert_outside_pump in Runtime::Impl::render (ariadne.cpp), a debug-build assertion: Release
@@ -10365,13 +10366,34 @@ TEST(AriadneFrames, AR03_IsolatedDocumentsRunOnWorkers) {
     EXPECT_EQ(backends[i]->in_pump, 0) << prefix(i) << " rendered inside a pump_all";
   }
 
-  // A quick action completes in its drain.
+  // A quick action completes in its drain (td 4.11 item 7) when the frame started its group. With
+  // more groups than pumping threads and pumps that outlast the frame's 0.1 s deadline (a Debug
+  // build on a 3-core runner: 2 workers and the caller for 4 busy groups), the deadline skips the
+  // group that would start last (td 4.10); it starts first next frame, and its action completes
+  // then. pool_link().skipped, read after the pump_all, names the groups this frame did not start.
   for (auto &d : docs)
     d->run_program("(state-set \"quick\" (+ 1 2))");
   frame();
-  for (int i = 0; i < kDocs; ++i)
+  std::vector<int> skipped;
+  for (int i = 0; i < kDocs; ++i) {
+    if (docs[i]->runtime().isolated_group()->pool_link().skipped) {
+      skipped.push_back(i);
+      continue;
+    }
     EXPECT_EQ(found_value(app, prefix(i) + ".quick"), "3")
         << prefix(i) << "'s quick action did not complete in its drain";
+  }
+  EXPECT_LT(skipped.size(), static_cast<std::size_t>(kDocs)) << "the frame started no group";
+  if (!skipped.empty()) {
+    std::printf("AR-3: the frame's deadline skipped %zu of %d groups; their actions complete in "
+                "the next frame\n",
+                skipped.size(), kDocs);
+    frame();
+    for (int i : skipped)
+      EXPECT_EQ(found_value(app, prefix(i) + ".quick"), "3")
+          << prefix(i) << "'s group was skipped, and its quick action did not complete in the "
+          << "next frame, which starts it first";
+  }
 
   // ps, inspect and kill see only the document's own group (td 5 item 11). Pids stay unique.
   std::vector<int> pids;

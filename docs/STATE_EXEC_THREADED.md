@@ -1698,12 +1698,15 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
 6. An `await` crosses exactly one frame. `wake_awaiting` runs once per group per pump, and a
    multi-document host pumps once per frame (B29).
 7. A quick Ariadne action completes within its drain, and render never runs during a fork-join
-   pump. As built in Stage 1b, one exception: in an isolated `any` document whose group a worker
-   pumps, an action that calls a `host_proxied` verb (`quit`, the `data-*` verbs, `open-url`, the
-   room and chat verbs; oidc's never run there, S1-Q6) parks at the call, and the frame's caller
-   runs the verb after the group's pump, so the action resumes at the group's next pump: it
-   completes a frame later. When the frame's thread pumps that group (a lone isolated document
-   under `drain()`, usually, 4.12), the verb runs inline, as in group 0.
+   pump. That holds for a group the frame starts: with more groups than pumping threads and
+   pumps that outlast the frame's deadline, a group not started by then is skipped (4.10), starts
+   first next frame, and its action completes then. As built in Stage 1b, one more exception: in
+   an isolated `any` document whose group a worker pumps, an action that calls a `host_proxied`
+   verb (`quit`, the `data-*` verbs, `open-url`, the room and chat verbs; oidc's never run there,
+   S1-Q6) parks at the call, and the frame's caller runs the verb after the group's pump, so the
+   action resumes at the group's next pump: it completes a frame later. When the frame's thread
+   pumps that group (a lone isolated document under `drain()`, usually, 4.12), the verb runs
+   inline, as in group 0.
 8. State-tree writes are atomic per node, as today.
 9. `print` writes whole lines: it formats the line outside any lock (a list argument's in its
    data job), then writes it with its newline in one `std::cout.write` under one process-wide
@@ -3461,7 +3464,7 @@ it until it returns.
 |---|---|---|---|
 | AR-1 | 1b | the Ariadne host and runtime suites with `CVC_EXEC_THREADS=auto` and no document opted in (CTest `ariadne_runtime_test_threads_auto`, `ariadne_host_test_threads_auto`, `AppLockManager.*` filtered out); and three documents in group 0 at threads `auto` running an `init:` script, tick residents, actions, a spawned child and an await through `drain_begin` / `exec_pump_frame` / `drain_end` (`AriadneFrames.AR01_NoDocumentOptedInStaysOnTheFrameThread`) | both suites pass; an `any` probe native in every lane ran on the frame thread only, and `exec_pool_worker_pumps_total()` did not move |
 | AR-2 | 1b | 3 documents in group 0 via `drain_begin` / `exec_pump_frame` / `drain_end`; an action `(await (slow-op-async))` whose call ends between two Runtimes' `drain_end`s (`AriadneFrames.AR02_ThreeDocumentsInGroupZeroPumpOnceAFrame`) | resumes exactly one frame later, at the next frame's pump, not in a later `drain_end` of its frame; another component's `(await #f)` loop advances once a frame |
-| AR-3 | 1b | 4 eligible isolated documents, each with a busy resident, threads 4 (`AriadneFrames.AR03_IsolatedDocumentsRunOnWorkers`) | residents step on at least two threads and workers pump; no frame begins inside a `pump_all` (the test renders between pumps itself, so that check cannot fail: the real latch is render's debug assertion, compiled out of Release builds); a quick action completes in its drain; one document's `ps` lists none of the others' processes, and its `inspect` and `kill` of another's pid are refused; pids are unique |
+| AR-3 | 1b | 4 eligible isolated documents, each with a busy resident, threads 4 (`AriadneFrames.AR03_IsolatedDocumentsRunOnWorkers`) | residents step on at least two threads and workers pump; no frame begins inside a `pump_all` (the test renders between pumps itself, so that check cannot fail: the real latch is render's debug assertion, compiled out of Release builds); a quick action completes in its drain, or in the next frame when the frame's deadline skipped its group (4.10: a Debug build on a 3-core runner, 2 workers and the caller for 4 busy groups); one document's `ps` lists none of the others' processes, and its `inspect` and `kill` of another's pid are refused; pids are unique |
 | AR-3b | 1b | an isolated `any` document at threads 4 under `CVC_EXEC_FORCE_MOVE`: an AppRuntime async verb with a done channel, a stream opened, posted to from a producer thread and closed, and a request to the suite's local HTTP server, each call held at a gate (`AriadneFrames.AR03b_ProvidersPostToTheirGroup`; required in both TSan legs) | each call is tracked by the document's group, never group 0; the done message, the stream's `live` and `closed` and the producer's seq reach a resident in the group; group 0's ingress count does not move across the action (`ingress_posts_for_test`), and it holds no message; a worker pumped the group, and an `any` probe in the action ran off the frame thread |
 | AR-4 | 1a | `pycvc.ExecPool(app, threads=8).run_all` of 64 fib programs; the same with a Python native; `fresh_env=True` (`test_ar04_run_all`) | correct results; with the native, at most one Python call at a time (a counter in the native); a fresh env per program. Scaling is recorded by the bench (`mt.groups`), not asserted |
 | AR-5 | 3 | a document with `parallel_actions: 4`, 8 actions in one frame | actions ran on several threads; each completed in its drain; `doc_scope_` verbs ran on the host thread |
