@@ -3036,6 +3036,10 @@ late-registration rule: the document moves once nothing of it runs, or at its ne
 then `Runtime::start_process` refuses a process with natives of its own. An activation runs in
 the document's group, and `ScriptLane::stop` and `running` reach it there.
 
+An exported call (`ScriptLane::export_activation`) parks the calling program on the program's own
+host, its group's when the document is isolated. The activation then finishes the call through
+that same host.
+
 **Adding verbs.** A host adds its own natives to the documents' programs with a provider,
 `register_action_intrinsics(provider, affinity)` ([`ariadne.h`](../inc/cvc/ariadne/ariadne.h)),
 called once at setup, before the first load. A provider runs each time a program's env is built and
@@ -3522,6 +3526,42 @@ stdlib and the pure-Python packages.
 - **No `xml.parsers.expat` and no SHA-2 in `hashlib`.** cvcpkg's wasm python312 ships without the
   objects they need, so a call into either aborts the page. That includes `hashlib.sha256()`
   and `random.seed()` with a string.
+
+**A document's `wasm:` block: WebAssembly guests.** An `arix` or `ariglx` built where wasmtime's
+C API is found (the cvcpkg `wasmtime` package; [`src/ariadne_wasm`](../src/ariadne_wasm/wasm_engine.h))
+also runs a compiled plugin, a guest, from any language that compiles to WebAssembly. Natively
+only, so far: the browser and the BSDs come later (roadmap/ARIADNE_SCRIPTING_HOSTS.md §8, G2–G3).
+
+```yaml
+requires: [wasm]
+wasm:
+  module: scorer.wasm            # beside the document; a .wat file is compiled from text
+  export: [score_route, {name: rank, as: rank-routes}]
+  hooks: {on_tick: tick, on: {replan: replan}, watch: {route: route_changed}}
+  imports: [state.read, call]    # narrows what the guest's calls reach
+  limits: {memory_mb: 32}
+```
+
+- **Exports.** Each is a function of the document: `(score_route r)` runs the guest's export as an
+  activation on the app's scheduler, a slice of fuel at a time, while the calling program waits.
+  `(score_route-async r)` returns a future. A call from `init:`, which can't wait, raises
+  `RuntimeError`: call the guest from an `on:` program, a resident or a test.
+- **Hooks.** `on_tick` runs an export at the end of every frame, one at a time; `on: {event:
+  export}` runs one when a button or menu item fires `event`; `watch: {path: export}` runs one when
+  the value under the document's prefix changes. Each gets the event as its one argument.
+- **What a guest can reach.** Its `call` import calls any function a program of the document can
+  call, under the document's prefix and locks: the state functions, the host's functions, the
+  document's `functions:`. `imports:` narrows that to the groups named (`state.read`, `state.write`,
+  `msg`, `net`, `call` for the rest); a call outside them fails with a `PermissionError`.
+- **Limits.** A guest's work is charged to its activation as DSL steps
+  (`ariadne.limits.wasm_gas_per_step`, 1000 units of fuel a step), so the action caps (§2.2) bound
+  it. The guests share `ariadne.limits.wasm_frame_budget` (0.008 s) of each frame, and its memory
+  is at most `ariadne.limits.wasm_max_memory` (256 MiB), which `limits: {memory_mb}` may lower. An
+  instance runs one call at a time; others wait their turn.
+- **Errors.** A trap, or the guest's `fail`, is a `WasmError` the document can catch; its `trap`
+  says what happened.
+- **The ABI** a guest is written to (values as CBOR in its memory, `ari_alloc`, the `call`,
+  `reply`, `yield` and `fail` imports) is in [`wasm_engine.h`](../src/ariadne_wasm/wasm_engine.h).
 
 ### 9.7 A server document: `arisrv --doc`
 

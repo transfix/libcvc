@@ -680,7 +680,7 @@ like `exec_scheduler()`, 4.12):
 **What a group shares with other groups.** Only frozen or immutable data:
 - the frozen stdlib scope;
 - the process-wide frozen builtins scope (below);
-- the 17 built-in exception class dicts, read-only since Stage 0 (5 item 1);
+- the 18 built-in exception class dicts, read-only since Stage 0 (5 item 1);
 - strings, numbers and bytes, which the variant holds by value (`types.h:154-155`);
 - read-only `data_object` payloads ([`docs/STATE_EXEC_EXCEPTIONS.md`](STATE_EXEC_EXCEPTIONS.md)
   3.7);
@@ -1506,12 +1506,13 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
 
 | Provider | Natives | Kind | Why |
 |---|---|---|---|
-| AppRuntime (`AppRuntime::ensure_intrinsics`; six providers, registered in the order the one provider bound them before, so a name two of them bind resolves as it did, the later one winning: `AriadneHostVerbs.ANameTwoTablesBindResolvesInTheirOrder`) | 1. the host's verbs (`register_verb`) | `host_only` | arbitrary host code, run in the calling step |
+| AppRuntime (`AppRuntime::ensure_intrinsics`; seven providers, registered in the order the one provider bound them before, so a name two of them bind resolves as it did, the later one winning: `AriadneHostVerbs.ANameTwoTablesBindResolvesInTheirOrder`) | 1. the host's verbs (`register_verb`) | `host_only` | arbitrary host code, run in the calling step |
 | | 2. `(quit [code])` (`register_quit`) | `host_proxied` | it writes the AppRuntime's close request and exit code |
 | | 3. the host's async verbs (`register_async_verb`) | `any` | libcvc's own marshal on `*ictx.host`; the work runs on the app's background pool; the done channel goes to the calling program's group |
 | | 4. `data-load`, `data-reload`, `data-status`, `data-files`, `data-file` | `host_proxied` | they walk the tree raw (`data.cpp`); the body binds them only for a program of its own app, which it checks through a pinned walk |
 | | 5. the host's functions (`register_function`) | `host_only` | the host's code, run in the calling step; pycvc's take the GIL |
 | | 6. the host's async functions (`register_async_function`) | `host_only` | the host's marshal runs in the calling step (pycvc's takes the GIL; a C++ host's is unaudited), on `*ictx.host` |
+| | 7. the host's async work functions (`register_async_work_function`; a script lane's `export_activation`, master's #1093) | `host_only` | the work's start runs in the calling step (an exported call starts its activation there, `Runtime::start_process`), on `*ictx.host`; it finishes the call through the host it was made on (`async_host::starting`) |
 | net (`register_net_intrinsics`) | `http-get`, `http-request`, `fetch` (and their `-async` forms), `ws-*`, `net-allowed?`, `net-auth-*` | `any` | the kernels run on the app's background pool and complete on their call's scheduler; the WebSocket table and each connection's sends lock; the policy is immutable once the host made it; and the credential store locks: every `CredentialStore` member that reads or writes its entries, bindings or renewers holds its mutex, so `net-allowed?` and `net-auth-*` need no host thread (`net-auth-forget` and `-clear` do blocking file I/O on whatever thread pumps: a cost, not a race) |
 | | `open-url` | `host_proxied` | it opens a tab in the user's browser |
 | streams (`register_stream_intrinsics`) | `stream-open`, `stream-info`, `stream-close` | `any` | mutex-guarded tables; descriptors written through pinned walks; a stream posts to the group it was opened in |
@@ -2034,6 +2035,16 @@ and 9.1).
   warns) while the document still runs in an `any` group, which happens only when the declaration
   came after its programs started. The declaration follows the late-registration rule below.
   `ScriptLane::stop` and `running` reach the document's group (`current_group()`), not group 0.
+  - **Exported calls.** An exported call (`ScriptLane::export_activation`, #1093) is a host async
+    work function: AppRuntime's seventh provider, `host_only`, on the calling program's own host.
+  - **Its start runs in the calling step,** on the host thread. It starts the activation there, so
+    `start_process` may run from inside a pump of the document's group 0 or host group, and has no
+    `assert_outside_pump`.
+  - **It finishes on the host it was made on** (`async_host::starting()`), through that host's
+    finisher, which posts nothing once the host has shut down. Finishing through another host
+    would forget the call by a slot of the wrong host's list.
+  - **Covered by** `ScriptEngineTest.AnIsolatedDocumentsExportedCallFinishesOnItsGroup` and
+    `AsyncCalls.AStartSeesTheHostItWasMadeOn`.
   `ScriptEngineTest.AnIsolatedDocumentThatUsesAnEngineRunsOnTheHostThread` and
   `ScriptEngineTest.AProcessWithNativesIsRefusedInAWorkersGroup` (`ariadne_script_engine_test`)
   cover it.
@@ -2645,8 +2656,9 @@ hardened: nothing here uses groups, and a cross-host restore is not an in-proces
 Each item says when it applies. "Always" items land whether or not a host enables threads.
 
 1. **Always (Stage 0, built): built-in exception classes are read-only.**
-   - All 17 built-in class dicts: the 13 this design started from, the locks track's
-     `LockError`, `DeadlockError` and `PermissionError`, and `AssertionError`. Each is one per OS
+   - All 18 built-in class dicts: the 13 this design started from, the locks track's
+     `LockError`, `DeadlockError` and `PermissionError`, `AssertionError`, and the wasm guests'
+     `WasmError`. Each is one per OS
      process, shared by every environment (`exceptions.cpp`, `classes()`).
    - `set-attr` and `del-attr` on one raise `TypeError` "set-attr: built-in class is read-only:
      ValueError" ("del-attr: ..." likewise), and the C++ `set_field` raises `TypeError` "built-in
@@ -2893,7 +2905,7 @@ changes:
   aborted within about a second (`HttpRequest::cancelled`, 4.9), where it used to run on to the
   reply or its timeout, with its result dropped. The browser's fetch is unchanged.
 
-AppRuntime's names resolve as before (its six providers keep the one provider's binding order,
+AppRuntime's names resolve as before (its seven providers keep the one provider's binding order,
 4.9), error texts and warnings are unchanged, and the new log lines come only with the setting on
 or from a teardown step that throws.
 
@@ -3221,7 +3233,7 @@ audit and the thread-affine declarations; `uri_state`'s and streams' pin vectors
     reap; retired groups (`destroy_idle_retired_groups`) and late registrations
     (`nothing_running`); the host-thread asserts (`assert_outside_pump`) and the refusal by a held
     group (`refuse_if_held`);
-  - `app_runtime.h`/`app_runtime.cpp`: six providers by kind, in the old binding order; done
+  - `app_runtime.h`/`app_runtime.cpp`: seven providers by kind, in the old binding order; done
     channels on the calling program's group; `drain_begin`, `drain_end`,
     `declare_thread_affine_prefix`, `wait_idle`; `idle()` counting the document's group; `load()`
     handing over `init:` and `tests:` and deciding the placement; the verb table's lock;
@@ -3790,7 +3802,7 @@ Stage 1's plan added twelve decisions, which the user approved as recommended on
 - **S1-Q7. The kind of each native and subscriber** (built in Stage 1b, 4.8, 4.9). Kinds are
   registered per provider, so AppRuntime's provider splits in four and net's in two; a doubtful one
   is `host_only` or not thread-safe; S1.md's table records each. As built, AppRuntime's four kinds
-  are six providers, which keep the one provider's binding order.
+  are seven providers, which keep the one provider's binding order.
 - **S1-Q8. Ariadne's teardown reaps the action processes** (built in Stage 1b, 4.17), its own
   included (S0.11's question; HZ-8), and a resident a reload stops is reaped then.
 - **S1-Q9. The clang TSan job (TS-1)** is a third leg of the sanitizer job, `clang-tsan`, with the

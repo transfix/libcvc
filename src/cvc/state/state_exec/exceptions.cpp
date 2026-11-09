@@ -53,9 +53,9 @@ struct exception_init {
 struct builtin_classes {
   std::vector<std::string> names; // parents before children
   std::unordered_map<std::string, dict_ptr> by_name;
-  // The dicts' addresses, sorted, for is_builtin_class_dict. The 17 stay separate allocations:
+  // The dicts' addresses, sorted, for is_builtin_class_dict. The 18 stay separate allocations:
   // one block would merge their use counts for the collector and the heap share.
-  std::array<const void *, 17> sorted{};
+  std::array<const void *, 18> sorted{};
 };
 
 // Built once per process and never freed: they are shared by every environment for the life of
@@ -64,15 +64,15 @@ const builtin_classes &classes() {
   static const builtin_classes *built = [] {
     auto *c = new builtin_classes;
     const std::pair<const char *, const char *> hierarchy[] = {
-        {"Exception", nullptr},          {"RuntimeError", "Exception"},
-        {"TypeError", "Exception"},      {"ValueError", "Exception"},
-        {"NameError", "Exception"},      {"KeyError", "Exception"},
-        {"IndexError", "Exception"},     {"ArithmeticError", "Exception"},
-        {"MemoryError", "Exception"},    {"ParseError", "Exception"},
-        {"TimeoutError", "Exception"},   {"NativeError", "RuntimeError"},
-        {"PythonError", "RuntimeError"}, {"LockError", "RuntimeError"},
-        {"DeadlockError", "LockError"},  {"PermissionError", "Exception"},
-        {"AssertionError", "Exception"},
+        {"Exception", nullptr},           {"RuntimeError", "Exception"},
+        {"TypeError", "Exception"},       {"ValueError", "Exception"},
+        {"NameError", "Exception"},       {"KeyError", "Exception"},
+        {"IndexError", "Exception"},      {"ArithmeticError", "Exception"},
+        {"MemoryError", "Exception"},     {"ParseError", "Exception"},
+        {"TimeoutError", "Exception"},    {"NativeError", "RuntimeError"},
+        {"PythonError", "RuntimeError"},  {"WasmError", "RuntimeError"},
+        {"LockError", "RuntimeError"},    {"DeadlockError", "LockError"},
+        {"PermissionError", "Exception"}, {"AssertionError", "Exception"},
     };
     static_assert(std::extent_v<decltype(hierarchy)> == std::tuple_size_v<decltype(c->sorted)>);
     std::size_t at = 0;

@@ -102,8 +102,14 @@ public:
   /// (or, `future`, return a future). Its run time isn't charged (it runs on no executor
   /// thread of the host's). Throws RuntimeError where the process can't park.
   std::shared_ptr<async_call> begin_external(const std::string &name, bool future, value_t &result);
-  /// Post the outcome of an external call that has been settled; thread-safe.
+  /// Post the outcome of an external call that has been settled; thread-safe. Through the host the
+  /// call was made on: another host would forget the call by a slot of this host's list.
   void finish(const std::shared_ptr<async_call> &call);
+
+  /// The host whose call(name, work, ...) is running an async_work's start on this thread, else
+  /// null. A start whose marshal was made without a host (a function registered once and bound
+  /// into many hosts' envs) finishes its call through this one (make_finisher).
+  static async_host *starting();
 
   /// What finishes this host's calls from work that answers on a thread of its own and may do so
   /// after the host is gone (an async_work's start: a transport's callback). Take it while the

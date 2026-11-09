@@ -80,6 +80,7 @@ AppRuntime::~AppRuntime() {
     std::swap(dropped.data, verbs_->data);
     std::swap(dropped.functions, verbs_->functions);
     std::swap(dropped.async_functions, verbs_->async_functions);
+    std::swap(dropped.async_work_functions, verbs_->async_work_functions);
   }
   if (netEnabled_)
     disable_net(); // its provider holds app_ by reference
@@ -407,6 +408,16 @@ void AppRuntime::register_async_function(const std::string &name,
   rt_.refresh_program_names();
 }
 
+void AppRuntime::register_async_work_function(const std::string &name,
+                                              cvc::state_exec::async_work_marshal marshal) {
+  {
+    std::lock_guard<std::mutex> lock(verbs_mutex());
+    std::swap(verbs_->async_work_functions[name], marshal); // the replaced one goes after the lock
+  }
+  ensure_intrinsics();
+  rt_.refresh_program_names();
+}
+
 void AppRuntime::run_program(std::string script, std::function<void(const std::string &)> done) {
   rt_.run_program(std::move(script), done ? std::move(done) : [](const std::string &) {});
 }
@@ -500,7 +511,7 @@ void AppRuntime::ensure_intrinsics() {
   // table rather than copy it, so every verb registered so far is bound, not only the first.
   std::shared_ptr<Verbs> verbs = verbs_;
   namespace se = cvc::state_exec;
-  // Six providers, in the order the one provider bound them before (S1-Q7, STATE_EXEC_THREADED.md
+  // Seven providers, in the order the one provider bound them before (S1-Q7, STATE_EXEC_THREADED.md
   // 4.9), so a name two of them bind resolves as it did, the later one winning; an isolated
   // document whose group a worker may pump installs each by its kind.
   // 1. The host's verbs, host_only: arbitrary host code, run in the calling step.
@@ -734,6 +745,22 @@ void AppRuntime::ensure_intrinsics() {
           };
           se::register_async_fn(env, host, name, std::move(posting));
         }
+      },
+      se::provider_affinity::host_only);
+  // 7. The host's async work functions (register_async_work_function), host_only: their start
+  // runs in the calling step (an exported script call starts its activation there,
+  // Runtime::start_process), on the program's own host, where the call parks; the work finishes
+  // the call through that host (async_host::starting).
+  register_action_intrinsics(
+      [app, verbs](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
+        se::async_host &host = ictx.host ? *ictx.host : app->exec_async_host();
+        std::map<std::string, se::async_work_marshal> work;
+        {
+          std::lock_guard<std::mutex> lock(verbs_mutex());
+          work = verbs->async_work_functions;
+        }
+        for (const auto &[name, marshal] : work)
+          se::register_async_fn(env, host, name, marshal);
       },
       se::provider_affinity::host_only);
 }

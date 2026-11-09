@@ -4771,7 +4771,9 @@ void Runtime::run_program(std::string script, std::function<void(const std::stri
 
 int Runtime::start_process(LaneProcess p) {
   namespace se = cvc::state_exec;
-  assert_outside_pump(m_->app); // it submits to the document's group, a worker's while it pumps
+  // Host thread, from a step too: an exported script call and an on: hook start their activations
+  // from the calling step, which in a document that uses an engine runs on the host thread (its
+  // group 0 or host-affinity group, pumped by the frame's caller). So no assert_outside_pump.
   // Natives of its own are host code run inline (a scripting engine's activation): the document
   // stays on the host thread. Decided now when nothing of it runs (ensure_placement), else it is
   // refused until then, since an `any` group's worker would run them.

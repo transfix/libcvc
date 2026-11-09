@@ -210,7 +210,8 @@ public:
   // runs host code inline, so it declares require_host_thread first, and it is refused while the
   // document still runs in an isolated `any` group (see require_host_thread). Returns the pid;
   // throws (a syntax error in p.program, that refusal) when it can't start. Host thread, outside a
-  // pump.
+  // pump or from a step of the document's own group 0 or host-affinity group (an exported call,
+  // an on: hook), never a worker.
   int start_process(LaneProcess p);
 
   // Render one frame: apply any pending tree swap, then walk the tree driving the

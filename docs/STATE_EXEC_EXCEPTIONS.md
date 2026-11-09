@@ -163,6 +163,7 @@ All 17 are bound in every default environment, and all are read-only (below).
 | `TimeoutError` | `Exception` | an async call or `await` that ran past its timeout |
 | `NativeError` | `RuntimeError` | a C++ exception of any other type; `native_type` names it |
 | `PythonError` | `RuntimeError` | a Python exception from a registered Python function; `python_type` names it |
+| `WasmError` | `RuntimeError` | a WebAssembly guest's trap (docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md §8.5); `trap` says which |
 | `LockError` | `RuntimeError` | a `with-lock` refused: `reason` is `"upgrade"`, `"handler"`, `"generator"`, `"fork"`, `"no process"`, `"cannot wait here"` or `"restore"`; `key` and `mode` name the request (docs/STATE_EXEC_LOCKS.md 4.1) |
 | `DeadlockError` | `LockError` | a `with-lock` whose wait would close a cycle; `cycle` lists its edges, `{pid key}` each |
 | `PermissionError` | `Exception` | a `/` lock key (app-global) where the channel policy doesn't allow it; `set-priority` raising a process past its floor or the caller's; `pid` and `priority` name the request (docs/STATE_EXEC_LOCKS.md 7.2) |
