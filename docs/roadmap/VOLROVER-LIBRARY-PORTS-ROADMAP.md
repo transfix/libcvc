@@ -18,7 +18,9 @@
 
 Revised on 2026-11-09 for Joe's "make them resumable like we have for the FEM routines": every
 long routine is a resumable stepper. It runs on the Ariadne scheduler in slices, publishes its
-progress for a progress bar, and stays interactive on one thread (§1.9).
+progress for a progress bar, and stays interactive on one thread (§1.9). Also on 2026-11-09, for
+Joe's "remove the legacy xmlrpc ... since we are switching to arisrv": libcvc's XML-RPC goes,
+arisrv replaces it, and so do the legacy remote modes and F2Dock's XML-RPC server (§1.10).
 
 Nothing of the ports has landed. §9 lists the decisions still open.
 **Based on:** libcvc `origin/master @ 921c4254` (§1's facts) and `@ 7a09366f` (the rest),
@@ -96,6 +98,9 @@ node type with a component, native and wasm.
     thread, and in pool chunks where there are threads. It publishes `progress` and `phase` for a
     progress bar, and stops at its next step. The blocking function runs the stepper to the end,
     so both give the same result.
+  - **No XML-RPC** (§1.10). libcvc's `cvc::xmlrpc`, the vendored XmlRpc++, `cvc server` /
+    `cvc client` and every legacy remote mode go. Remote state and remote compute are arisrv's:
+    its state transports, `room-call` and the job service.
 - **Skeletonization** (§2) is a clean port of about 8k lines of LGPL-2.1 code.
   - Its only heavy dependency was CGAL's 3D Delaunay (GPL). Reentrant Qhull replaces it, behind
     a small tetrahedral complex that presents the calls the cocone code makes.
@@ -366,7 +371,7 @@ nondeterministic and disturbs any other `rand()` user.
 
 **The hardest moves** (the audit's judgement):
 - the state startup hooks and their static-initialisation registrars (`xmlrpc` starts itself
-  through one);
+  through one, which goes with XML-RPC itself, §1.10);
 - the URI resolver, whose `resolve()` / `resolve_async()` / `resolve_to_file()` are app-free and
   called from about 66 places in Ariadne and cvcGL;
 - the geometry, model and image I/O, whose `read_geometry(filename)`, `read_model(filename)` and
@@ -727,6 +732,47 @@ The DSL's `-start` forms publish the same keys under their target (§1.6).
 - a frame-time run of the node's demo in cooperative mode: the frame loop keeps drawing while
   the job runs, and no frame gives the job more than `slice_ms` plus the port's worst indivisible
   piece.
+
+### 1.10 No XML-RPC (settled 2026-11-09)
+
+**The rule (Joe, 2026-11-09):** remove the legacy XML-RPC, and F2Dock's server's use of it, since
+the network side is moving to arisrv. No port brings an XML-RPC mode back.
+
+**What libcvc has today.** It is built only with `CVC_USING_XMLRPC` (off by default, and off in
+the cvcpkg recipes), but parts of it reach every build:
+- the vendored XmlRpc++ (`src/xmlrpc`, `inc/xmlrpc`, about 2.8k lines);
+- `cvc::xmlrpc`: `xmlrpc_server.cpp` serves `cvcstate_get_value`, `cvcstate_set_json`,
+  `cvcstate_get_children` and the like, on a thread started from the `__system.xmlrpc` keys, and
+  `xmlrpc_client.cpp` calls them;
+- `cvc server` and `cvc client` in the CLI, and the `XmlRpcServerTerminate` exception;
+- in every build, `cvc/utility/utility.h` includes `<xmlrpc/XmlRpc.h>` and declares
+  `XmlRpcValue`-returning call helpers, `XMLRPC_DEFAULT_PORT` (23196) and
+  `get_xmlrpc_host_and_port`. That is why the SDK always installs `inc/xmlrpc`.
+
+**Who uses it**
+- F2Dock's `F2DockServer`, which serves TexMol's `F2DockClient` (the TexMol plan's §3.1).
+- VolumeRover2's GenSeg remote mode (§5).
+- Before removal, a search of the downstream repos (volrover3, F2Dock, TexMol, cypkg, nicotina,
+  the examples) confirms there is no other user.
+
+**What replaces it.** What XML-RPC did is all on arisrv now:
+- reading and writing another process's state: arisrv's state replication and transports
+  (WebSocket, gRPC);
+- calling a method on a server: `room-call` (ARIADNE_SCRIPTING_HOSTS S2);
+- running remote compute: `cvc::jobs` (the TexMol plan's §5), whose kinds are this plan's
+  steppers.
+
+**When**
+- The removal is part of the 4.0 break (§9 item 3), because `utility.h`'s helpers and the
+  installed `inc/xmlrpc` headers are public API. It goes in P0a's state-startup group: the
+  `xmlrpc` startup registrar is deleted, not converted.
+- F2Dock's side follows the TexMol plan. The service runs the legacy engine executable, which
+  never touched XML-RPC, and `F2DockServer` is retired (its F3). F2Dock then builds against a
+  libcvc without `cvc::xmlrpc`.
+
+**Checked by** T15's grep, extended: no `XmlRpc` header or symbol in libcvc, cvcGL, pycvc or the
+CLI. The removal PR deletes `utility_test`'s XML-RPC cases and the CLI and build docs' sections
+(CLI_GUIDE.md, FULL_BUILD_CVCPKG.md, TESTING.md).
 
 ---
 
@@ -1396,7 +1442,7 @@ not as follow-ups.
 
 | Phase | Size | What lands | Needs |
 |---|---|---|---|
-| P0a libcvc under the app | XL | Every item of §1.3's audit (152 objects, and the `thread_local`s that keep state) moved onto `cvc::app` (or the `AppRuntime`), each subsystem its own PR with a two-apps test. In order: (1) the file I/O registries, fixing the duplicated handlers (volume first, whose API already takes the app, then geometry, model, image); (2) Ariadne's registries and cells (action intrinsics, node types and shader presets, widgets, `.ari` blocks, data decoders, URI schemes and caps, net and OIDC hosts, media player factory and policy); (3) state's startup hooks and static-init registrars (xmlrpc's auto-start becomes explicit), the compression registry, `state_volume_codec`'s per-thread app; (4) `cvc::net`, cvcGL's static configuration, the world generators; (5) state_exec's ids and persistent `thread_local`s, core's counters; (6) CUDA and the process-wide list (§9 item 5). The public functions that reached a process-wide table take the app (§9 item 3). The object-file scan in CI starts with the audit's list as its allowlist and ends with only §9 item 5's | — |
+| P0a libcvc under the app | XL | Every item of §1.3's audit (152 objects, and the `thread_local`s that keep state) moved onto `cvc::app` (or the `AppRuntime`), each subsystem its own PR with a two-apps test. In order: (1) the file I/O registries, fixing the duplicated handlers (volume first, whose API already takes the app, then geometry, model, image); (2) Ariadne's registries and cells (action intrinsics, node types and shader presets, widgets, `.ari` blocks, data decoders, URI schemes and caps, net and OIDC hosts, media player factory and policy); (3) state's startup hooks and static-init registrars (xmlrpc's auto-start is deleted with XML-RPC, §1.10), the compression registry, `state_volume_codec`'s per-thread app; (4) `cvc::net`, cvcGL's static configuration, the world generators; (5) state_exec's ids and persistent `thread_local`s, core's counters; (6) CUDA and the process-wide list (§9 item 5). The public functions that reached a process-wide table take the app (§9 item 3). The object-file scan in CI starts with the audit's list as its allowlist and ends with only §9 item 5's | — |
 | P0b Shared pieces | M | `cvc::param_table` (§1.5), with its state, property, CLI, pycvc and DSL generators and its own T8 tests; `cvc::result_job<R>`, the adapter from any stepper to `sliced_job` (§1.4, §1.9); a helper that publishes §1.9's node keys from a task, and the generic `-start` / `-async` / waiting intrinsic forms plus `job.cancel` (§1.6), so each port only registers its stepper; the T7 harness (budgets 1, 64, random and 0, the slowest-step record, the cooperative frame-time run); pycvc's generic `result_job` wrapper; the `ports (wasm-mt, node)` CI lane (§1.8); `tools/volrover-goldens/` (builds the legacy libraries at a pinned volrover sha and writes the T1 goldens) | — |
 | P0c Permissive libraries | M | Qhull (wasm and wasm-mt) and Clipper2 as cvcpkg packages, in cy-pca/cvcpkg#578, open; CDT (with its `static const` fix) and Shewchuk's predicates vendored in `src/cvc/third_party`. Each with its notice in `THIRD_PARTY_NOTICES.md`, the singleton scan clean, a smoke test natively and under node, and its first `cgal_ab_test` rows (T16) | — |
 | P0d Shared types | S | `cvc::contour_stack` and `cvc::point_classes`, with readers and writers registered on the app, their parameter tables, intrinsics (`contours.*`, `point-classes.*`, `params.*`), pycvc, and T6, T8, T9, T11 and T14 | P0a, P0b |
@@ -1450,8 +1496,10 @@ not as follow-ups.
   with its smoothing, unless a dataset needs the smoothing. If one does, it is ported without the
   singleton.
 - **EM clustering**, compiled out today for "serious memory problems".
-- **GenSeg's XML-RPC remote mode and its file round trip.** A remote run is the node on an arisrv
-  host.
+- **GenSeg's XML-RPC remote mode and its file round trip.** A remote run is a `segment.seeded`
+  job on an arisrv host (§1.10).
+- **libcvc's XML-RPC** (§1.10): `cvc::xmlrpc`, the vendored XmlRpc++, `cvc server` / `cvc client`,
+  `utility.h`'s XML-RPC helpers, and the `__system.xmlrpc` keys.
 - **Skeletonization's helix-specific strand window and its `#if 0` helix block.** The window
   becomes an off-by-default parameter. The block fits better with a SecondaryStructures port.
 
@@ -1476,6 +1524,8 @@ not as follow-ups.
 - Every long routine is a resumable stepper, as the FEM solves are. It runs on the scheduler in
   slices with progress for the UI, and stays interactive on one thread. An Ariadne action starts
   one with a `-start` intrinsic under the default limits (§1.6, §1.9).
+- No XML-RPC: libcvc's goes in the 4.0 break, and arisrv's transports, `room-call` and job
+  service replace it (§1.10).
 
 **Still open**
 

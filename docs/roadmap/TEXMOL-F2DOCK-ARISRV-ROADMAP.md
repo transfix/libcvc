@@ -111,22 +111,22 @@ twins in different rooms with different scenes, in the conference mode cyprty us
       can run a pipeline itself.
 - **TexMol talks to the server** as arimol, through the room: subscribe, submit, watch progress,
   and see results appear in the room's scene for everyone in it.
-  - The legacy TexMol `F2DockClient` (XML-RPC, a 37-argument `Submit`) gets a shim only if the
-    Qt app has to keep working (§9 item 4).
+  - The legacy TexMol `F2DockClient` (XML-RPC, a 37-argument `Submit`) is retired, with no
+    shim. XML-RPC leaves F2Dock and libcvc altogether (§1 item 6, settled 2026-11-09).
 - **Order** (§8):
   - The VolumeRover plan's P0a (libcvc under the app) comes first, because many rooms in one
     process is exactly where process-wide state breaks.
   - Then the arisrvx stages the services need: S1, S2, S5, S6, as cyconv's D14 orders them.
   - Then rooms, room features, the job service and the scene format, in parallel with the library
     ports.
-- **Decisions for Joe** (§9): native C++ job service vs Python-only, rooms per process, the legacy
-  F2Dock client, MolSurf / PDB2PQR in-process, the arisrvx order, and names.
+- **Decisions for Joe** (§9): native C++ job service vs Python-only, rooms per process, MolSurf /
+  PDB2PQR in-process, the arisrvx order, and names. The legacy F2Dock client is settled: retired.
 
 ---
 
 ## 1. What this plan adds to the VolumeRover plan's rules
 
-Every port here follows the VolumeRover plan's §1 as written. Five additions:
+Every port here follows the VolumeRover plan's §1 as written. Six additions:
 
 1. **Molecular types in libcvc.** Molecules, quadrature points, F2D / PQR / PDB readers, and
    molecular scene node types go in libcvc, as cyconv's D10 (SDK-15) recommends. Then arimol,
@@ -152,6 +152,19 @@ Every port here follows the VolumeRover plan's §1 as written. Five additions:
    - `libf2dock` against the legacy F2Dock executable;
    - each TexMol port against its TexMol original;
    - with the same split between exact agreement and agreement by tolerance.
+6. **No XML-RPC** (Joe, 2026-11-09: "remove the legacy xmlrpc and f2dock server's usage of xmlrpc
+   since we are switching to arisrv"). arisrv carries everything XML-RPC did:
+   - the room's state replication for status;
+   - `room-call` for calls;
+   - `cvc::jobs` for submitting, watching and cancelling work (§5).
+
+   So:
+   - `F2DockServer` is retired once F3's service runs (§3.2);
+   - TexMol's `F2DockClient` transport is retired with no shim (§9 item 4);
+   - libcvc drops `cvc::xmlrpc` and the vendored XmlRpc++ in its 4.0 break (the VolumeRover plan's
+     §1.10).
+
+   Nothing here adds an XML-RPC endpoint, including for backward compatibility.
 
 ---
 
@@ -453,6 +466,12 @@ This is the VolumeRover plan's T16, with the legacy program as side A.
   executable in a worker process, as cyconv's §9.3 describes.
 - After that, it runs `libf2dock` in-process or in a worker, by configuration.
 - GB-Rerank becomes a second kind, `dock.rerank`, on the same results.
+- **The XML-RPC server is retired** (§1 item 6).
+  - Once the service runs, `F2DockServer`, with its shell-script runner and job markers, is
+    deleted from transfix/F2Dock, along with F2Dock's build dependency on libcvc's `cvc::xmlrpc`.
+  - The engine executable never used XML-RPC, so the worker form is unaffected.
+  - Legacy result files still load into arimol through T4's `.out` parser. Legacy clients do
+    not reconnect.
 
 **F4, `cvc::dock`.** When `libf2dock` has settled, its implementation moves into libcvc behind the
 same API (cyconv's D12). Then the browser's arimol, the server and every host share one engine,
@@ -714,7 +733,7 @@ Sizes: S is a PR or two, M a few, L a short series, XL a longer one.
 | R1 Many rooms | L | `room_host`, the lobby, run-time rooms, bound reads per room, real `room-join` wiring, room parameters for arigl and arigl-web | VolumeRover P0a, S6 |
 | R2 Room features | M | `presence` / `avatars` / `media` / `scene` / `compute` (CF1), workspaces with no holon or media (SDK-19) | R1 |
 | R3 Science scenes | L | Room scene sections for volumes, molecules, port geometry and `data:` sources, assets by hash (AD1), fetch by need (AD2) | R1, M0 |
-| F3 Docking service | M | `dock` and `dock.rerank` kinds: legacy executable in a worker first, then `libf2dock` | J1, F1 for in-process |
+| F3 Docking service | M | `dock` and `dock.rerank` kinds: legacy executable in a worker first, then `libf2dock`; then `F2DockServer` and F2Dock's `cvc::xmlrpc` dependency deleted (§1 item 6) | J1, F1 for in-process |
 | C1 cyprty rooms | M | The lobby and the docking lab, volume lab and twin rooms, a relay past S0 / WD1, the page's room parameter | R2, R3, J1, F3 |
 | F4 `cvc::dock` | L | `libf2dock`'s implementation inside libcvc, docking intrinsics, the browser's arimol docking in wasm, single-threaded (cooperative) and wasm-mt (threaded) | F2, M0 |
 
@@ -744,12 +763,9 @@ Sizes: S is a PR or two, M a few, L a short series, XL a longer one.
    crashes actually come from.
 3. **The arisrvx order.** cyconv's D14 is S0 → S1 → S2 + S5 + S6 → S7. This plan needs the same,
    with R1 right after S6. Confirm D14.
-4. **The legacy TexMol `F2DockClient`.** Keep the Qt app docking against the new service through
-   an XML-RPC shim that maps the 37-argument `Submit` onto `jobs.submit("dock", …)`? Or retire it
-   for arimol?
-
-   **Recommended:** retire it. arimol replaces it, and the shim would preserve a protocol with no
-   auth.
+4. **The legacy TexMol `F2DockClient`. Settled 2026-11-09: retired, with no XML-RPC shim.** Joe
+   asked for XML-RPC to go altogether (§1 item 6), and arimol replaces the client. Its Qt-free
+   parameter structs, `.inp` writers and `.out` parser still come over (T4).
 5. **Input preparation in-process.** Bring MolSurf's F2D and QUAD generation into libcvc (§3.2),
    and replace PDB2PQR (Python) with a native step or a worker kind?
 
