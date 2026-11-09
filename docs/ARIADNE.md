@@ -984,6 +984,19 @@ scene:
   state drawn or not, bit for bit (`cvcgl_ariadne_physics`). A geometry node's body, a
   `generated_world` node's and a data node's run headless; another custom node's needs a
   renderer. `AppRuntime::scene_world()` is the world it runs.
+- **Step and restart.** Every `AppRuntime` handles `sim.step` and `sim.restart`, the bare-name
+  events `sim_transport.ari`'s Step and Restart buttons raise; a host's own `on("sim.step", ...)`
+  replaces them.
+  - `sim.step` (`AppRuntime::step_world(n)`) adds one to the scene clock's step key
+    (`<prefix>.sim.step` by default), and the clock runs that many more quanta, paused or not.
+  - `sim.restart` (`AppRuntime::restart_world()`) puts `app.world_clock()` back to tick 0 and
+    rebuilds the scene's world as the document built it (`SceneWorld::restart`, headless or
+    drawn): the same world object, with every body back where its node put it and at rest unless
+    it declared a velocity. A generated world keeps the world it has now, and the drawn bodies are
+    bound to their nodes again. Stepping a restarted world gives the same state as stepping a world
+    loaded fresh (`ariadne_scene_world_test`, `cvcgl_ariadne_physics`). It then adds one to
+    `<prefix>.sim.restarts`, so a program or a host can reset state of its own.
+  - pycvc's `AriApp` has `step_world(n)` and `restart_world()`.
 - **A generated world's body.** `body: {}` on a `generated_world` node is the world's colliders:
   its terrain and its buildings, each a static body (`shape:` and `motion:` do not apply). The
   world is made in core libcvc ([`scene_generated_world.h`](../inc/cvc/ariadne/scene_generated_world.h)),

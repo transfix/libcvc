@@ -94,7 +94,7 @@ Checked against master 797ba4d9; the lab's rows, from "Vehicles and their naviga
 | World to navigator | Only in Python: the `pycvc_gl.cars` template rasterizes a city or generated world (`nav_world_rasterize`) into the navigator's planes and hands colliders to the plants. | `bindings/pycvc/pymod_gl/cars.py`; `docs/CARS.md` |
 | Physics with no rendering | **L0's first part, built:** a document's `scene.physics:` world and its geometry nodes' `body:`s are core libcvc's `cvc::ariadne::SceneWorld` (`scene_world.h`), built from the scene alone. A headless `AppRuntime` (`ari`, `ari test`, pycvc's `AriApp`, `arix`) runs it on the world clock; cvcGL builds the same world through it and binds its nodes, and a test pins the two worlds' state hashes equal. The `scene.physics` token. L0's second part runs a `generated_world` node's body and a data node's headless too, and a test pins a generated world's state hash equal drawn and not. Still renderer-only: another custom node's body. | `inc/cvc/ariadne/scene_world.h`; `src/cvcGL/ariadne/scene_realize.cpp` |
 | Physics stats | `physics::world_binding` writes `tick`, `step_ms`, `bodies`, `active_bodies`, `contact_events` and a snapshot to its prefix. A document's scene world publishes `physics.stats.{tick, time, step_ms, bodies, active_bodies, contact_events, saturated}`, drawn or not (L0). | `inc/cvc/physics/world_binding.h`; `inc/cvc/ariadne/scene_world.h` |
-| Step and restart | `sim_transport.ari`'s Step and Restart buttons raise `sim.step` and `sim.restart` for the host to handle. The clock binding can queue steps (`request_steps`); nothing restarts a world. | `src/cvc/ariadne/components/sim_transport.ari`; `inc/cvc/core/world_clock_binding.h` |
+| Step and restart | `sim_transport.ari`'s Step and Restart buttons raise `sim.step` and `sim.restart`. **Built in (L0):** every `AppRuntime` handles them. A step runs one more quantum on the scene's clock, and a restart puts the clock back to tick 0 and rebuilds the scene's world as the document built it (`SceneWorld::restart`, headless and drawn), which then steps as a fresh world; `<prefix>.sim.restarts` counts restarts. A host may replace either. | `src/cvc/ariadne/components/sim_transport.ari`; `inc/cvc/core/world_clock_binding.h` |
 | Rooms | One room per relay: `arisrv --room <id>` (default `standup`). The tree is already shaped for more, `conf.rooms.<room>.*`, and the area-of-interest, avatar and scene paths all take a room id. | `src/arisrv/main.cpp`; `inc/cvc/ariadne/conference/` |
 | Conference in documents | The stock components include `room_users.ari` (the Users window) and `chat.ari`. The rest of a conference (joining, media controls, tiles, the avatar panel, the 3D room) is in the example documents `conference_roster.ari`, `conference_media.ari`, `conference_live.ari` and in C++ widgets (`room_view`, `stream_view`). | `src/cvc/ariadne/components/`; `examples/ariadne/documents/` |
 | Feature detection | A document's `requires:` names host features (`gl.scene`, `net`, `media.player`, ...) and the host says whether it has them. Nothing asks the *server* what it offers. | `src/cvc/ariadne/requires.cpp` |
@@ -595,7 +595,8 @@ headless; the same document opens in arigl to watch one.
 - `generated_world` gives the runtime its whole world (buildings, occupancy, road graph, water),
   not only the height field, and the world-to-navigator glue moves from Python to C++.
 - The document's physics publishes `physics.stats.*`.
-- Built-in handlers for `sim.step` and `sim.restart`.
+- Built-in handlers for `sim.step` and `sim.restart`. *(Built: `AppRuntime::step_world` /
+  `restart_world`, `SceneWorld::restart`.)*
 - A viewport click gives a world point (a ray against the scene, or the ground's height field).
 
 ## 15. Phases

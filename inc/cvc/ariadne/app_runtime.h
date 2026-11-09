@@ -265,6 +265,22 @@ public:
   // adapter realizes the scene (it runs the same world beside its drawing) or the scene has none.
   SceneWorld *scene_world() const { return world_.get(); }
 
+  // The built-in sim.step and sim.restart (sim_transport.ari's Step and Restart buttons, and any
+  // document's bare `on: sim.step` / `on: sim.restart`), which the constructor registers. A host's
+  // own on("sim.step", ...) or on("sim.restart", ...) replaces them.
+  //
+  // step_world(n): n more quanta on the scene's clock, through its step key (<prefix>.sim.step by
+  // default; world_clock_binding), so it works the same whether this runtime drives the clock or an
+  // adapter does, paused or not. Nothing happens for a document with no scene.
+  void step_world(std::uint64_t n = 1);
+  // restart_world(): the world clock back to tick 0 (world_clock::reset), and the scene's world
+  // rebuilt as the document built it (SceneWorld::restart, here or through the adapter), so a
+  // restarted world steps as a fresh one. Then it adds one to the restart counter beside the step
+  // key (<prefix>.sim.restarts), which a program or a host watches to reset its own state.
+  // Problems warn (take_warnings). False when there was no world to rebuild (the clock and the
+  // counter still restart).
+  bool restart_world();
+
 private:
   void ensure_intrinsics(); // lazily install the register_action_intrinsics provider
 
@@ -274,6 +290,9 @@ private:
   // With no adapter: the scene's world, and the clock it runs on (scene_world()).
   std::unique_ptr<SceneWorld> world_;
   std::unique_ptr<SceneClockDriver> worldClock_;
+  // The scene clock's step key and the restart counter beside it (step_world, restart_world);
+  // empty for a document with no scene.
+  std::string stepKey_, restartsKey_;
   // use_script_engine: each engine, its lane, and whether it has run a block since its last unload.
   // Before rt_, so the lanes outlive the document's processes: an activation is cancelled while
   // its engine and lane are still there.

@@ -74,6 +74,14 @@ public:
   // AppRuntime::drain(). A no-op until something has been realized.
   virtual void sync_visibility(cvc::app &app) = 0;
 
+  // Rebuild the realized scene's world as realize() made it (sim.restart; SceneWorld::restart),
+  // with the bodies it draws bound again. AppRuntime::restart_world() has reset the clock to tick
+  // 0 first. False when the adapter has no world to rebuild, which is the default.
+  virtual bool restart(std::vector<std::string> *warns) {
+    (void)warns;
+    return false;
+  }
+
   // Per-frame scene service (volume-render/slice tickers, …). Called once per
   // AppRuntime::drain(), after sync_visibility(). A no-op until something has been
   // realized.
