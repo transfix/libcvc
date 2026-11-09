@@ -1,6 +1,9 @@
 # TexMol Libraries, libf2dock, and arisrv as a Many-Room Compute and Scene Server — Roadmap (sketch)
 
-**Status:** sketch, 2026-11-09. Nothing has landed. §9 lists the decisions that need Joe.
+**Status:** sketch, 2026-11-09, merged as transfix/libcvc#1090. Nothing has landed. §9 lists the
+decisions that need Joe. Revised the same day for Joe's "make them resumable like we have for the
+FEM routines": every long routine here, docking included, is a resumable stepper that runs on the
+scheduler in slices with progress for the UI, interactive on one thread (§1 item 2, §2.6, §3.2).
 **Asked for (Joe, 2026-11-09):** port TexMol's legacy libraries; port the F2Dock server to arisrv
 and Ariadne documents, with TexMol talking to it; consider conference mode for this; make arisrv
 general for TexMol and VolumeRover compute tasks; and load scientific visualizations and digital
@@ -80,7 +83,8 @@ twins in different rooms with different scenes, in the conference mode cyprty us
     - A client's parameter text can name any file the server user can read or write.
   - **The plan follows cyconv's D12:**
     1. bug fixes in place (F0);
-    2. then `libf2dock`, a reentrant library with a context, a parameter table, progress by
+    2. then `libf2dock`, a reentrant library with a context, a parameter table, a resumable
+       stepper (sliced within a rotation, so it runs even on single-threaded wasm), progress by
        rotation, cancel, and results by value (F1);
     3. an A/B against the legacy executable (F2);
     4. then the service on the job layer (F3);
@@ -128,8 +132,12 @@ Every port here follows the VolumeRover plan's §1 as written. Five additions:
    molecular scene node types go in libcvc, as cyconv's D10 (SDK-15) recommends. Then arimol,
    aridock, the server and the browser share one implementation. Readers are I/O handlers
    registered on the app, as the VolumeRover plan's §1.3 requires.
-2. **Long work is a `result_job`,** as the VolumeRover plan's P0b defines it. **A job that can run
-   on a server is also a `cvc::jobs` kind** (§5):
+2. **Long work is a resumable stepper behind a `result_job`,** as the VolumeRover plan's §1.9 and
+   P0b define them. It does `step(budget)` in small units, with every phase sliced, and its
+   blocking function is the stepper run to the end. So a local app, a browser tab on
+   single-threaded wasm and a server all run the same code: cooperatively a few milliseconds a
+   frame, or in pool chunks. They publish the same `progress` and `phase`, and a Stop lands at the
+   next step. **A job that can run on a server is also a `cvc::jobs` kind** (§5):
    - its parameter table is the job's spec;
    - its progress and phase are the job's;
    - its result struct is what the job stores.
@@ -255,6 +263,24 @@ intrinsics, a job kind, and Ariadne components, wasm included.
 - **Job kinds.** Every port is a job kind (§5): `mol.surface`, `mol.blur`, `mol.hls`,
   `mol.pockets`, `mol.characteristics`, `dock.interface`, `mol.tunnels`, `mol.secondary`. TexMol's
   batch commands map onto them.
+- **Resumable** (the VolumeRover plan's §1.9). Each port's stepper, and the unit it counts:
+  - **PDBParser:** reading, a record per unit, so a large assembly loads without a stall.
+  - **Blurmaps:**
+    - the Gaussian-blob density, an atom's splat per unit (split into blocks of voxels for a
+      large blob radius);
+    - the multilevel blur, a voxel per unit;
+    - the surfaces, SAS and skin regions, through libcvc's isosurface and SDF steppers;
+    - `F2dGenerator`, a grid voxel per unit.
+  - **HLevelSet:** the B-spline coefficient fit and each level-set iteration, a voxel of the
+    narrow band per unit. The iteration count is a parameter, and the progress note says which
+    iteration it is on.
+  - **Pocket:** on `sdf_stepper` and libcvc's isosurface stepper, which are resumable already.
+  - **Docking analysis:** building the octrees, an atom per unit; the filters and statistics, an
+    atom pair or contact per unit.
+  - **PocketTunnel, SecondaryStructures:** the cocone core's stepper, as the VolumeRover plan's
+    skeleton.
+  - **Curvatures, ColorSurfaceByFunction:** a surface vertex per unit, and for the Coulomb sum a
+    vertex against a block of atoms.
 
 ---
 
@@ -367,23 +393,48 @@ VolumeRover plan's §1.4 shape:
   - a seeded generator;
   - the grids, plans and filters, and per-worker scratch;
   - a cancel flag, progress counters and a warnings sink.
-- **The job:** `std::unique_ptr<result_job<dock_result>> dock_job(inputs, params)`.
-  - Phases: validate, setup, rotation scan, merge and cluster, pose filtering, rerank.
-  - **The progress unit is one rotation,** counted by the cursor, so pruned rotations count too.
-  - Cancel is checked between rotations and between filtered poses.
+- **The stepper and the job:** `dock_stepper`, and
+  `std::unique_ptr<result_job<dock_result>> dock_job(inputs, params)` around it (the VolumeRover
+  plan's §1.9).
+  - Phases: validate, setup (the receptor's grids, a voxel per unit), rotation scan, merge and
+    cluster, pose filtering, rerank.
+  - **Progress counts rotations,** by the cursor, so pruned rotations count too. **A step is far
+    smaller than a rotation.** One rotation is a sequence of sliced sub-phases:
+    1. rotating the ligand's grid, a plane per unit;
+    2. the forward 3D FFT as three passes of 1D transforms, each pass over a slab of planes, a line
+       per unit (PocketFFT transforms any axis of any sub-block);
+    3. the multiply, a plane per unit;
+    4. the backward FFT, the same way;
+    5. the peak scan, a plane per unit;
+    6. the on-the-fly filters, a peak per unit.
+
+    The pose queue, the rotation cursor and the half-done rotation's buffers belong to the
+    stepper, so a step can stop anywhere in that sequence and the next one carries on.
+  - One 120³ transform takes 0.046 s, so one pass over one plane is about a tenth of a
+    millisecond (an estimate F1 measures). A 4 ms slice holds dozens of them.
+  - Cancel lands at the next step, inside a rotation, not only between rotations.
 - **Results by value:** poses (rank, score and its components, a 3×4 transform, conformation,
   RMSD) and statistics. The legacy `.out` writer becomes a separate function.
 - **Threads:** raw pthreads give way to `app.computePool()`, with stable worker indices for the
-  per-worker scratch the filters index by thread.
+  per-worker scratch the filters index by thread. In threaded mode a chunk runs several rotations
+  side by side on the pool, each worker on its own rotation. In cooperative mode one rotation at
+  a time is sliced as above. Both feed the same pose queue, so with the deterministic cutoff
+  (below) the results don't depend on the mode.
 - **No exits:** `exit()` becomes exceptions, and the `printf`s become the warnings sink and
   `app.log()`.
 - **Determinism:** the adaptive pseudo-Gsol cutoff is shared by all workers, so with more than one
   thread its result can depend on scheduling (unverified). F1 makes it per-job, and offers a
   deterministic variant that does not depend on thread order. That variant is new behaviour,
   compared by tolerance, not exactly.
-- **Wasm:** a rotation costs 0.5–1.8 s natively, far too coarse to slice on single-threaded wasm.
-  So `libf2dock` targets wasm-mt only, where it runs on the pool as natively. Browser memory caps
-  the thread count (about 0.4 GB each).
+- **Wasm:** a rotation costs 0.5–1.8 s natively, far too long for one frame, which is why a step
+  is a slice of a rotation, not a whole one.
+  - **Single-threaded wasm** runs `libf2dock` cooperatively, a rotation in hundreds of slices,
+    with the page interactive throughout. It is slow there: the goldens' 54 rotations take 65–99 s
+    on one native thread, and wasm is slower still. So it suits small rotation sets, rescoring
+    and demos, and production runs go to the server.
+  - It needs one worker's memory: about 0.2 GB shared plus 0.4 GB of scratch at numFreq 120,
+    inside wasm32's 4 GB.
+  - **wasm-mt** runs it threaded, as natively, with browser memory capping the thread count.
 - **Licence:** `ElementInformation.h` is on the default path (hydrophobicity, pseudo-Gsol), and
   its relicensing from GPL has no record. It and `libmol` wait on UT's rulings (cyconv's D13). If
   the ruling goes the wrong way, the hydrophobicity table is rebuilt from its published source
@@ -543,7 +594,10 @@ runs on"). This plan puts it in libcvc, so arisrv, `arisrvx`, the CLI and local 
   TexMol kinds (§2).
 - **The spec** is the port's parameter table, plus inputs given as blob hashes or room assets.
 - **The result type** is the port's result struct, stored in pages.
-- **The executor** is in-process (a `result_job` on the server's pool) or a worker process.
+- **The executor** is in-process or a worker process. In-process, it runs the kind's stepper as a
+  sliced task (the VolumeRover plan's §1.9): threaded on a server, and cooperative in a
+  single-threaded host such as a browser tab running a job locally. `on_progress` becomes the
+  `jobs.<id>.progress` and `phase` writes.
 - **The limits:** time, memory, concurrency, and a quota per principal.
 
 **What a job publishes.** Per room, scoped by S6 to the jobs a principal may see:
@@ -596,7 +650,8 @@ per cyconv's §9.3.
 **Native or Python** (§9 item 1).
 - cyconv's design puts the F2Dock service in Python on `arisrvx`, which keeps FastAPI natural.
 - This plan puts the job layer in C++ in libcvc, so plain `arisrv`, the CLI and the browser have
-  it with no Python, and wasm-mt hosts can run jobs locally under the same schema.
+  it with no Python, and wasm hosts, single-threaded ones included, can run jobs locally under
+  the same schema.
 - Python services register kinds on the same layer. **Recommended:** the C++ layer, with Python
   kinds on it; cyconv's F2Dock package becomes a set of kinds rather than its own service.
 
@@ -650,10 +705,10 @@ Sizes: S is a PR or two, M a few, L a short series, XL a longer one.
 | T5 Tunnels and secondary structure | M | PocketTunnel and SecondaryStructures on the cocone core | VolumeRover P1, UT on SecondaryStructures' licence |
 | T6 Small pieces | S | Curvatures, ColorSurfaceByFunction, the DX volume reader | T1 |
 | F0 F2Dock fixes | S–M | §3.2 F0, in transfix/F2Dock | — |
-| F1 `libf2dock` | L | §3.2 F1 | F0 |
+| F1 `libf2dock` | L | §3.2 F1, with `dock_stepper` sliced within a rotation (T7 natively and under node, single-threaded included) | F0 |
 | F2 F2Dock A/B | S | §3.2 F2 | F1 |
 | M0 Molecular types | M | Molecules, F2D / PQR / PDB / QUAD readers on the app, molecule scene nodes (cyconv's SDK-15) | VolumeRover P0a |
-| J0 `cvc::jobs` core | M | Kinds, specs from parameter tables, in-process executor on `result_job`, the published `jobs.*` layout, the store; works in a local app and the CLI with no server | VolumeRover P0b |
+| J0 `cvc::jobs` core | M | Kinds, specs from parameter tables, in-process executor running each kind's stepper as a sliced task (`result_job`), the published `jobs.*` layout, the store; works in a local app and the CLI with no server | VolumeRover P0b |
 | S1, S2, S5, S6 | per ARIADNE_SCRIPTING_HOSTS | `arisrvx` and FastAPI; `room-call` and `relay: subscribe:`; principals; read scope (cyconv's D14 order) | VolumeRover P0a |
 | J1 Jobs on the server | M | `room-call` and FastAPI fronts on J0, worker processes, uploads by hash (SDK-17), the job panel component | J0, S2, S5, S6 |
 | R1 Many rooms | L | `room_host`, the lobby, run-time rooms, bound reads per room, real `room-join` wiring, room parameters for arigl and arigl-web | VolumeRover P0a, S6 |
@@ -661,7 +716,7 @@ Sizes: S is a PR or two, M a few, L a short series, XL a longer one.
 | R3 Science scenes | L | Room scene sections for volumes, molecules, port geometry and `data:` sources, assets by hash (AD1), fetch by need (AD2) | R1, M0 |
 | F3 Docking service | M | `dock` and `dock.rerank` kinds: legacy executable in a worker first, then `libf2dock` | J1, F1 for in-process |
 | C1 cyprty rooms | M | The lobby and the docking lab, volume lab and twin rooms, a relay past S0 / WD1, the page's room parameter | R2, R3, J1, F3 |
-| F4 `cvc::dock` | L | `libf2dock`'s implementation inside libcvc, docking intrinsics, the browser's arimol docking in wasm-mt | F2, M0 |
+| F4 `cvc::dock` | L | `libf2dock`'s implementation inside libcvc, docking intrinsics, the browser's arimol docking in wasm, single-threaded (cooperative) and wasm-mt (threaded) | F2, M0 |
 
 **Parallel tracks.**
 - F0–F2 run in the F2Dock repo, beside everything else.
