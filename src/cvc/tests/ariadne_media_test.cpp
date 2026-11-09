@@ -2133,6 +2133,80 @@ TEST(AriadneReactiveBudget, ASkippedPredicateKeepsLastFramesAnswer) {
   }
 }
 
+// A skip is the budget's, not the document's: never a warning, whatever skipped (a predicate, a
+// computed text, a tooltip, combo options, a repeat count), on the first frame or later. Each keeps
+// last frame's value, or its fail-safe one where it never ran.
+TEST(AriadneReactiveBudget, ASkipIsNeverAWarning) {
+  cvc::app app;
+  LoadResult lr =
+      load_string("windows:\n"
+                  "  - window: W\n"
+                  "    children:\n"
+                  "      - text: card\n"
+                  "        visible_when: (= (state-get \"s.show\") \"1\")\n"
+                  "        tooltip: (state-get \"s.tip\")\n"
+                  "      - text: ago\n"
+                  "        bind: (string.join (list \"posted\" (state-get \"s.ago\")) \" \")\n"
+                  "      - text: row {i}\n"
+                  "        repeat: (state-get \"s.n\")\n"
+                  "      - combo: pick\n"
+                  "        bind: s.pick\n"
+                  "        options: (list \"a\" (state-get \"s.opt\"))\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  cvc::state &root = cvc::state::instance(app);
+  root("s.show").value(std::string("1"));
+  root("s.tip").value(std::string("open it"));
+  root("s.ago").value(std::string("2h"));
+  root("s.n").value(std::string("2"));
+  root("s.opt").value(std::string("b"));
+  Runtime rt(app);
+  ImageBackend b;
+  rt.set_backend(&b);
+  rt.set_reactive_frame_budget(0.0); // every read-lane expression skips, from the first frame
+  rt.set_root(std::move(lr.root));
+  const auto has_text = [&](const std::string &t) {
+    return std::find(b.texts.begin(), b.texts.end(), t) != b.texts.end();
+  };
+  const auto has_tip = [&](const std::string &t) {
+    return std::find(b.tooltips.begin(), b.tooltips.end(), t) != b.tooltips.end();
+  };
+  rt.render();
+  rt.render();
+  EXPECT_TRUE(rt.take_reactive_warnings().empty()) << "a skip is not a warning";
+  EXPECT_GT(rt.reactive_skip_count(), 0u);
+  EXPECT_FALSE(has_text("card")) << "never ran: fail-safe hidden";
+  EXPECT_FALSE(has_text("row 0")) << "never ran: a count of 0";
+  EXPECT_TRUE(has_text("ago=")) << "never ran: empty text";
+
+  rt.set_reactive_frame_budget(0.030);
+  rt.render();
+  EXPECT_TRUE(has_text("card"));
+  EXPECT_TRUE(has_tip("open it"));
+  EXPECT_TRUE(has_text("ago=posted 2h"));
+  EXPECT_TRUE(has_text("row 1") && !has_text("row 2"));
+
+  // Skipped again, with the state moved on: last frame's values, and still no warning.
+  rt.set_reactive_frame_budget(0.0);
+  root("s.show").value(std::string("0"));
+  root("s.tip").value(std::string("changed"));
+  root("s.ago").value(std::string("3h"));
+  root("s.n").value(std::string("5"));
+  rt.render();
+  EXPECT_TRUE(has_text("card"));
+  EXPECT_TRUE(has_tip("open it"));
+  EXPECT_TRUE(has_text("ago=posted 2h"));
+  EXPECT_TRUE(has_text("row 1") && !has_text("row 2"));
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+
+  // A broken expression still warns, once.
+  rt.set_reactive_frame_budget(0.030);
+  root("s.n").value(std::string("not a number"));
+  rt.render();
+  const std::vector<std::string> warned = rt.take_reactive_warnings();
+  ASSERT_EQ(warned.size(), 1u);
+  EXPECT_NE(warned[0].find("integer"), std::string::npos) << warned[0];
+}
+
 TEST(MediaParse, VideoUris) {
   EXPECT_TRUE(media::is_video_uri("https://x.test/a.MP4"));
   EXPECT_TRUE(media::is_video_uri("https://x.test/a.webm?sig=1#t=2"));

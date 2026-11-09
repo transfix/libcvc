@@ -224,10 +224,15 @@ public:
   double frame_clock() const;
 
   // The time a frame's read-lane expressions (visible_when, enabled_when, computed binds) may take
-  // together, from the next render() on (default 0.030 s). Past it the rest skip that frame: a
-  // visible_when or enabled_when keeps the value it had last frame (hidden or disabled where it
-  // never had one), so a slow frame doesn't flicker the widgets at the end of a long list.
+  // together, from the next render() on (default 0.030 s). Past it the rest skip that frame: each
+  // keeps the value it had last frame (a predicate, a computed text, combo options, a repeat
+  // count), or its fail-safe one where it never had one (hidden, disabled, empty, 0), so a slow
+  // frame doesn't flicker the widgets at the end of a long list. A skip is not the document's
+  // fault, so it is never a reactive warning.
   void set_reactive_frame_budget(double seconds);
+  // How many read-lane evaluations the frame budget has skipped since this Runtime was made: a
+  // diagnostic (a host may log it), never a warning.
+  std::uint64_t reactive_skip_count() const;
 
   // Run every queued action event's handler, then clear the queue. Call once per
   // frame in the host loop, BEFORE your sim tick and OUTSIDE render().
@@ -242,8 +247,8 @@ public:
   void drain();
 
   // Drain the §4 read-lane diagnostics accumulated during render() — one message per
-  // distinct failing predicate (a parse error, a runtime error, or a per-frame budget
-  // overrun).
+  // distinct failing predicate (a parse error, a runtime error, or a step / time cap overrun;
+  // not a per-frame budget skip, see set_reactive_frame_budget).
   // De-duplicated for the Runtime's lifetime, so a broken predicate warns ONCE however
   // many frames it renders. Empty when everything evaluated cleanly. The host may log
   // these (e.g. after the first frame); ignoring them is safe — the walk already

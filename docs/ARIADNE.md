@@ -157,8 +157,15 @@ stepped on the host thread with the script, so a busy request is as `:timeout 0`
 | per-frame aggregate | `kFrameBudgetSeconds` | `30 ms` |
 
 The frame budget resets at the top of each frame, so *N* widgets cannot jointly stall a
-frame — once the aggregate is spent, remaining predicates degrade fail-safe for that
-frame only.
+frame. Once the aggregate is spent, the rest are skipped for that frame only:
+
+- Each skipped expression keeps the value it had last frame: a `visible_when`, an `enabled_when`,
+  a computed `bind:` or text, a `tooltip`, combo `options` or a `repeat:` count.
+- One that never ran yet takes its fail-safe value instead: hidden, disabled, empty or 0.
+- A skip isn't the document's fault, so it is never a reactive warning (`take_reactive_warnings`,
+  the web pages' `ariadneWarning`). A real 10-post feed decoding pictures in wasm can spend the
+  budget on its first frames.
+- `Runtime::reactive_skip_count()` counts the skips, for a host that wants to log them.
 
 > These are the as-built numbers. Roadmap §7.4 still cites an older `CAP=50000` / 2 ms;
 > trust the code.
