@@ -41,6 +41,7 @@
 #include <cstdint>
 #include <cvc/ariadne/avatar_sim.h>             // avatar_intent
 #include <cvc/ariadne/conference/room_avatar.h> // avatar_catalog, avatar_look
+#include <cvc/ariadne/section.h>                // section_stamp
 #include <cvc/lod/select.h>                     // quality_preset
 #include <cvc/physics/types.h>      // vec3
 #include <map>
@@ -127,8 +128,9 @@ public:
   // no-op without CVC_ENABLE_IMGUI.
   void draw_labels() const;
 
-  // The room scene revision currently realized (0 = none yet).
-  std::uint64_t realized_revision() const { return _realized_rev; }
+  // The stamp of the room scene currently realized (rev 0 = none yet). It re-realizes when the
+  // tree's is not the same(): a new revision, or a restarted relay's under a new epoch.
+  const cvc::ariadne::section_stamp &realized_stamp() const { return _realized_stamp; }
 
   // Non-fatal realize warnings since the last call (a missing mesh, ...), then cleared.
   std::vector<std::string> take_warnings();
@@ -160,7 +162,7 @@ private:
   SceneRenderer &_view;
   cvc::app &_app;
   std::string _room, _self, _prefix;
-  std::uint64_t _realized_rev = 0;
+  cvc::ariadne::section_stamp _realized_stamp;
   std::unique_ptr<RealizedScene> _realized; // owns the scene's light rigs while shown
   std::vector<std::string> _scene_ids;      // the realized room nodes + lights, to remove
   // The mesh objects' pyramids, across re-realizes. It holds the nodes weakly and starts its build
