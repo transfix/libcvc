@@ -1196,6 +1196,10 @@ struct Runtime::Impl {
     std::string script;                            // the program's text, to say which one failed
   };
   std::unordered_map<int, std::shared_ptr<ActionContext>> live_actions_;
+  // Runtime::start_process while the sweep walks live_actions_ (a done that starts the next one):
+  // joined to them once the walk is over.
+  bool sweeping_actions_ = false;
+  std::vector<std::pair<int, std::shared_ptr<ActionContext>>> started_in_sweep_;
   // Pids of the children actions and residents spawned (spawn_child), reaped once they finish.
   std::vector<int> spawned_children_;
   bool used_scheduler_ = false; // did we ever submit to the app scheduler? (gate teardown reap)
@@ -3602,6 +3606,7 @@ void Runtime::Impl::pump_and_sweep_actions(cvc::state_exec::async_scheduler &sch
     sched.reap(pid);
     return true;
   };
+  sweeping_actions_ = true;
   for (auto it = live_actions_.begin(); it != live_actions_.end();) {
     ActionContext &ac = *it->second;
     if (!ac.ended)
@@ -3614,6 +3619,10 @@ void Runtime::Impl::pump_and_sweep_actions(cvc::state_exec::async_scheduler &sch
     else
       ++it;
   }
+  sweeping_actions_ = false;
+  for (auto &[pid, ac] : started_in_sweep_)
+    live_actions_[pid] = std::move(ac);
+  started_in_sweep_.clear();
   // Spawned children, and what they and the residents fork: a finished one's process would keep
   // its context (an environment with every intrinsic) for the app's life.
   std::erase_if(spawned_children_, [&](int pid) { return reap_ended(pid, "spawned program"); });
@@ -4063,6 +4072,60 @@ void Runtime::run_program(std::string script, std::function<void(const std::stri
   a.done = std::move(done);
   a.functions = m_->doc_functions;
   m_->queued_events.push_back(std::move(a));
+}
+
+int Runtime::start_process(LaneProcess p) {
+  namespace se = cvc::state_exec;
+  auto &sched = m_->app.exec_scheduler();
+  cvc::state &root = cvc::state::instance(m_->app);
+  const bool action = p.lane == ProgramLane::action;
+  // A process's own cap only lowers its lane's; 0 is no cap.
+  const auto lower = [](auto lane, auto own) {
+    return lane == 0 ? own : own == 0 ? lane : std::min(lane, own);
+  };
+  std::shared_ptr<Impl::ActionContext> ac = m_->make_action_context(
+      p.scope.empty() ? m_->prefix : p.scope,
+      action ? std::optional<double>(action_lock_timeout(root)) : std::nullopt);
+  ac->ictx.spawn_context = [this](const se::intrinsics_context &parent) {
+    return m_->spawn_child(parent);
+  };
+  ac->ictx.on_child = [raw = ac.get()](int pid) { raw->children.push_back(pid); };
+  ac->done = std::move(p.done); // without one, the sweep warns of a failure as it does an action's
+  ac->script = p.name;
+  se::environment_ptr env = ac->env;
+  if (p.extend) {
+    env = se::environment::extend(ac->env);
+    p.extend(env, ac->ictx);
+  }
+  se::execute_options opts;
+  opts.name = p.name;
+  opts.env = env;
+  opts.owner = m_->owner_; // reaped with the document, by ~Impl's kill_owner
+  opts.priority = p.priority;
+  if (action) {
+    opts.max_steps = lower(action_max_steps(root), p.max_steps);
+    opts.max_time = lower(action_max_time(root), p.max_time);
+    opts.max_memory = lower(action_max_memory(root), p.max_memory);
+  } else {
+    opts.max_steps = p.max_steps;
+    opts.max_time = p.max_time;
+    opts.max_memory = p.max_memory;
+    opts.max_step_time = resident_max_step_time(root);
+  }
+  // §6.6 in the document's own scope, its functions first, as an action has them.
+  const bool own_scope = p.scope.empty() || p.scope == m_->prefix;
+  const int pid = sched.execute(own_scope ? m_->doc_functions + p.program : p.program, opts);
+  if (m_->sweeping_actions_) // from a done the sweep is calling: not into the map it walks
+    m_->started_in_sweep_.emplace_back(pid, std::move(ac));
+  else
+    m_->live_actions_[pid] = std::move(ac); // swept, and its done told, as an action's is
+  return pid;
+}
+
+std::uint64_t exec_frame(cvc::app &app) {
+  const std::shared_ptr<exec_pump_clock> clock = pump_clock_of(app);
+  std::lock_guard<std::mutex> lock(clock->mutex);
+  return clock->frames;
 }
 
 void Runtime::drain() {

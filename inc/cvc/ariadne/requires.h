@@ -59,13 +59,10 @@ bool is_capability_token(const std::string &name);
 // Does this host have capability `name`? False for a name that is not a token.
 bool capability_holds(const std::string &name, const HostFacts &facts);
 
-// The script engine a scripting host embeds (arix and ariglx embed Python: src/ariadne_python).
-// `language` is its token (`python`), and `has_module(m)` answers `<language>.<m>`: whether module
-// m is importable. Process-wide, like the interpreter: a host sets it once the interpreter is up
-// and clears it (has_module = nullptr) before the interpreter goes. Every other host answers false
-// for both tokens.
-void set_script_engine(const std::string &language,
-                       std::function<bool(const std::string &module)> has_module);
+// Whether a script engine for `language` (its token, `python`) is registered in this process
+// (register_script_engine, script_engine.h): arix and ariglx register Python's
+// (src/ariadne_python) once the interpreter is up, and unregister it before it goes. The engine's
+// has_module(m) answers `<language>.<m>`. Every other host answers false for both tokens.
 bool has_script_engine(const std::string &language);
 
 // What to tell the author when this host lacks `name`, beyond its name: for a script language's
