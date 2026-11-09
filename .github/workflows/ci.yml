@@ -1891,6 +1891,7 @@ jobs:
         ariadne_runtime_test: OK ] AriadneIsolatedDocs.ProvidersAreInstalledByTheirKind
         ariadne_runtime_test: OK ] AriadneIsolatedDocs.IdleAndWaitIdleCountTheDocumentsGroup
         ariadne_runtime_test: OK ] AriadneIsolatedDocs.IdleAndWaitIdleDecideNothing
+        ariadne_runtime_test: OK ] AriadneIsolatedDocs.IdleAndWaitIdleCountARetiredGroupsCalls
         ariadne_runtime_test: OK ] AriadneIsolatedDocs.AnInitThatUsesOidcKeepsTheDocumentInGroupZero
         ariadne_runtime_test: OK ] AriadneIsolatedDocs.TeardownReapsItsProcessesAndDestroysItsGroup
         ariadne_runtime_test: OK ] AriadneIsolatedDocs.ALaterDocumentThatIsNotEligibleMovesToGroupZero

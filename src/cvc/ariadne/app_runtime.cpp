@@ -82,11 +82,14 @@ bool AppRuntime::idle() const {
   // The scheduler's calls in flight include those no executor runs (a request a browser's fetch
   // answers, docs/ARIADNE.md 10.2), which the host's count of running kernels leaves out. An
   // isolated document's group counts too (S1.9): its programs and calls are there, not in group 0.
-  // The group as it is (current_group): a query decides nothing and moves nothing (c-m2).
+  // The group as it is (current_group): a query decides nothing and moves nothing (c-m2). A group
+  // a move retired counts while its kernels run (its scheduler is not pumped again).
   if (cvc::state_exec::exec_group *group = rt_.current_group())
     if (group->host().in_flight() != 0 || group->sched().async_calls_in_flight() != 0 ||
         group->sched().has_runnable())
       return false;
+  if (rt_.retired_calls_in_flight() != 0)
+    return false;
   return app_.exec_async_host().in_flight() == 0 &&
          app_.exec_scheduler().async_calls_in_flight() == 0 &&
          !app_.exec_scheduler().has_runnable() && !rt_.media_busy() && !oidc_busy();
@@ -1025,11 +1028,13 @@ void AppRuntime::declare_thread_affine_prefix(const std::string &prefix) {
   rt_.declare_thread_affine_prefix(prefix);
 }
 
-// The app's host, then an isolated document's group's (S1.9), whose kernels its programs start.
+// The app's host, then an isolated document's group's (S1.9), whose kernels its programs start,
+// then those of the groups a move retired.
 void AppRuntime::wait_idle() {
   app_.exec_async_host().wait_idle();
   if (cvc::state_exec::exec_group *group = rt_.current_group()) // decides nothing (c-m2)
     group->host().wait_idle();
+  rt_.wait_retired_calls();
 }
 
 // Keep the read-lane diagnostics for take_warnings(); the Runtime reports each one only once.

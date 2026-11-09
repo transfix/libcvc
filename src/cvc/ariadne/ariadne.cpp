@@ -4516,6 +4516,20 @@ void Runtime::declare_thread_affine_prefix(const std::string &prefix) {
 
 cvc::state_exec::exec_group *Runtime::current_group() const { return m_->group_.get(); }
 
+std::size_t Runtime::retired_calls_in_flight() const {
+  std::size_t n = 0;
+  for (const Impl::RetiredGroup &r : m_->retired_groups_)
+    if (r.group)
+      n += r.group->host().in_flight();
+  return n;
+}
+
+void Runtime::wait_retired_calls() {
+  for (Impl::RetiredGroup &r : m_->retired_groups_)
+    if (r.group)
+      r.group->host().wait_idle();
+}
+
 void Runtime::set_document_programs(std::vector<std::string> programs) {
   m_->document_programs_ = std::move(programs);
   m_->placement_decided_ = false; // read when the document is placed again

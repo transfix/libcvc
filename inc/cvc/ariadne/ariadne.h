@@ -21,6 +21,7 @@
 // This is the P0 slice; the full contract (dynamic-DOM reconcile, expressions,
 // scene binding, validation) is docs/roadmap/CVCGL-UI-DSL-ROADMAP.md.
 
+#include <cstddef>
 #include <cvc/ariadne/input.h> // InputEvent — Runtime::post_input feeds on_key/on_pointer (§4.6)
 #include <cvc/ariadne/keys.h>  // KeyBinding — set_key_bindings
 #include <cvc/ariadne/requires.h> // HostFacts — what this host provides (requires:, has?)
@@ -238,6 +239,12 @@ public:
   // The group the document's programs run in now, as isolated_group() last decided, without
   // deciding again or moving anything (AppRuntime::idle and wait_idle). Null in group 0.
   cvc::state_exec::exec_group *current_group() const;
+  // The kernels still running in the groups a move retired (each goes at a drain once its count
+  // is 0), and a wait until they have all ended: AppRuntime::idle and wait_idle count them too,
+  // so a host does not let go of what an async function uses while one still runs. Host thread;
+  // neither decides nor destroys anything.
+  std::size_t retired_calls_in_flight() const;
+  void wait_retired_calls();
 
   // Drain the §4 read-lane diagnostics accumulated during render() — one message per
   // distinct failing predicate (a parse error, a runtime error, or a per-frame budget

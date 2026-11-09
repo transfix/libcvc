@@ -1121,6 +1121,54 @@ TEST(AriadneIsolatedDocs, IdleAndWaitIdleCountTheDocumentsGroup) {
   EXPECT_TRUE(art.idle());
 }
 
+// A group a move retired still counts for AppRuntime::idle() and wait_idle() while its kernel
+// runs: a host waiting before it lets go of what an async function uses waits for that kernel
+// too. The move here is a thread-affine declaration over the running document (any to host).
+TEST(AriadneIsolatedDocs, IdleAndWaitIdleCountARetiredGroupsCalls) {
+  if (!have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  const std::filesystem::path doc =
+      std::filesystem::temp_directory_path() / "ariadne_isolated_idle_retired.ari";
+  std::ofstream(doc) << "meta: {min_libcvc: 3.4.0}\n"
+                        "channels: []\n"
+                        "root:\n  - text: hi\n";
+  cvc::app app;
+  isolate_documents(app, 0);
+  cvc::state::instance(app)("ariadne.limits.action_max_time").value(30.0);
+  AppRuntime art(app, "ui.docs.retired");
+  std::atomic<bool> started{false}, release{false}, finished{false};
+  art.register_async_verb("hold-verb", [&] {
+    started = true;
+    while (!release)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50)); // still running when released
+    finished = true;
+    return std::string("held");
+  });
+  art.load(doc.string());
+  ASSERT_NE(art.runtime().isolated_group(), nullptr) << art.runtime().isolation_reason();
+  std::string how = "running";
+  art.run_program("(state-set \"got\" (hold-verb))", [&](const std::string &h) { how = h; });
+  for (int i = 0; i < 2500 && !started; ++i) {
+    art.drain();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  ASSERT_TRUE(started.load());
+  art.declare_thread_affine_prefix("ui.docs.retired");
+  art.drain(); // the move: the first group is retired, its kernel still running
+  ASSERT_NE(art.runtime().isolated_group(), nullptr);
+  EXPECT_EQ(art.runtime().isolated_group()->opts().affinity, cvc::state_exec::group_affinity::host);
+  EXPECT_EQ(how, "did not complete: the document moved to another group");
+  EXPECT_EQ(cvc::state_exec::detail::live_groups(&app), 2u);
+  EXPECT_FALSE(art.idle()) << "a retired group's kernel is running";
+  release = true;
+  art.wait_idle(); // waits for the retired group's kernel too
+  EXPECT_TRUE(finished.load()) << "wait_idle returned while a retired group's kernel ran";
+  art.drain(); // the retired group goes now
+  EXPECT_EQ(cvc::state_exec::detail::live_groups(&app), 1u);
+  EXPECT_TRUE(art.idle());
+}
+
 // The isolation rules read the document's init: too (S1-Q6), which AppRuntime::load runs itself:
 // a document whose init: alone calls oidc-* stays in group 0, for oidc; the same document with an
 // init: that does not is isolated.
