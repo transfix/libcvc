@@ -1682,7 +1682,7 @@ has loaded, or when it failed, nothing is drawn behind the content.
   size: [480, 270]                      # the picture's box; fit: as image: takes it
   bind: feed.items.{i}.player           # the player's state keys (below)
   autoplay: false
-  loop: false
+  loop: false                           # where the Loop box starts
   muted: false
 - audio: voice note                     # the same, with no picture
   src: https://media.example/p/10.opus
@@ -1694,8 +1694,12 @@ has loaded, or when it failed, nothing is drawn behind the content.
   (it makes no sound there). `shape: circle` and `fit:` apply to its frames, and `status:` (as
   `image:` takes it) holds its state. A video URL in `image:` or `background:` is one of these.
 - **The controls** are drawn with the widgets every backend has: Play / Pause, a seek slider
-  with `m:ss / m:ss` as its value, and Mute. "Open" is added where the media can't play here.
+  with `m:ss / m:ss` as its value, Mute and Loop. "Open" is added where the media can't play here.
   They look and work the same in ImGui, FTXUI and tvision.
+- **Loop** starts checked when `loop: true`. Unchecking it lets the player stop at the end from
+  then on, and checking it makes it start again there. A new `src:` for the same widget (a
+  repeat's row showing another post) starts as the box is. With `controls: false` there is no box,
+  and `loop:` (true by default there) is how it plays.
 - **The picture.** The newest frame is published as an image and drawn like one: an ImGui
   texture, or Kitty, Sixel, iTerm or half-block cells. A terminal gets at most 8 frames a
   second. Before the first frame the poster shows, else a placeholder of the box.
@@ -1716,6 +1720,7 @@ has loaded, or when it failed, nothing is drawn behind the content.
   | `position`, `duration` | seconds (position at most 4 times a second while playing) |
   | `seek` | write seconds to seek; it is emptied once done |
   | `muted` | `1` / `0`; write it to mute |
+  | `loop` | `1` / `0`, the Loop box; written from the start, and a document writes it to change it |
   | `error` | why it failed, or why it plays elsewhere |
 
 - **A host plays them only if it has a player.**
