@@ -167,6 +167,31 @@ frame. Once the aggregate is spent, the rest are skipped for that frame only:
   budget on its first frames.
 - `Runtime::reactive_skip_count()` counts the skips, for a host that wants to log them.
 
+**The read lane keeps its results.** An expression that ran is kept with what it read: the state
+paths its readers named (`state-get`, `state-exists`, `state-children`, `state-data-get`,
+`state-json`) and the `(has? …)` answers it got. The next frame reuses it without running it,
+until one of these happens:
+
+- something is written to a path it read, or to an ancestor or a descendant of one (so a
+  `state-set-tree` that replaces a subtree counts);
+- a name it asked `has?` about answers otherwise (each name is asked once a frame).
+
+What it builds on:
+
+- The writes are seen through the state tree's own change signal, from any thread: an action, a
+  host, a network reply.
+- A write that leaves a value as it was signals nothing, so it changes nothing.
+- A frame that wrote nothing runs no expression, and one that wrote a post's like count runs the
+  expressions that read it.
+- Results are kept per scope and per expression text, so each `{i}` row of a `repeat:` is its
+  own.
+- An expression that read `(time-now)`, an expiry (`state-is-expired`, `state-has-expiry`) or a
+  node through a link is never kept: it runs every frame, as before.
+- A kept result isn't run, so the frame budget never skips it. Only what runs counts against the
+  30 ms.
+- A result no frame used for 300 frames is dropped.
+- `Runtime::reactive_eval_count()` counts the expressions that ran, for a host or a test.
+
 > These are the as-built numbers. Roadmap §7.4 still cites an older `CAP=50000` / 2 ms;
 > trust the code.
 

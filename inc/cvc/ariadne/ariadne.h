@@ -233,6 +233,10 @@ public:
   // How many read-lane evaluations the frame budget has skipped since this Runtime was made: a
   // diagnostic (a host may log it), never a warning.
   std::uint64_t reactive_skip_count() const;
+  // How many read-lane expressions have run since this Runtime was made. A result reused from the
+  // cache (§2.1: nothing it read was written since) is not counted, so a frame that wrote nothing
+  // adds none.
+  std::uint64_t reactive_eval_count() const;
 
   // Run every queued action event's handler, then clear the queue. Call once per
   // frame in the host loop, BEFORE your sim tick and OUTSIDE render().
