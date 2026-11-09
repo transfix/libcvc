@@ -101,9 +101,9 @@ public:
   //
   // Every registration below is made on the host thread, outside a frame (not from a verb or a
   // function while one runs). Register before load(), or before the first frame: one registered
-  // once the document's programs run binds in an isolated document at its next load (until then a
-  // host_only one is a NameError there; see Runtime::isolated_group), as in group 0 it binds at
-  // once.
+  // once the document's programs run binds in an isolated document the first time nothing of it
+  // runs, at the latest at its next load (until then a host_only one is a NameError there; see
+  // Runtime::isolated_group), as in group 0 it binds at once.
   //
   // register_async_verb makes `name` an async function on the calling program's async host (the
   // app's, or an isolated document's group's) (docs/STATE_EXEC_EXCEPTIONS.md 3):

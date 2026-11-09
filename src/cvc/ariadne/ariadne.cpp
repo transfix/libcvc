@@ -1284,7 +1284,7 @@ struct Runtime::Impl {
   bool document_set_ = false;            // set_root has given it a document
   bool placement_decided_ = false;       // for the document set_root last gave
   std::string isolation_reason_ = "no document has been set yet";
-  std::vector<std::string> thread_affine_; // declare_thread_affine_prefix
+  std::vector<std::string> thread_affine_;     // declare_thread_affine_prefix
   std::vector<std::string> document_programs_; // set_document_programs: init:, tests:
   // Decide where the programs run: when `submitting` (a program is about to start) or a document
   // has been set, unless that document's placement is decided already. Host thread.
@@ -3458,8 +3458,8 @@ void Runtime::Impl::ensure_placement(bool submitting) {
         late_noted_ = true;
         app.log(1, "ari: the document at '" + prefix +
                        "' started its programs before a host function or provider was registered: "
-                       "it binds at the document's next load (until then a host_only one is a "
-                       "NameError in its isolated group)");
+                       "it binds once nothing of the document runs, or at its next load (until "
+                       "then a host_only one is a NameError in its isolated group)");
       }
       return;
     }

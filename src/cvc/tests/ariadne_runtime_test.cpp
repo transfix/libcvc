@@ -27,8 +27,8 @@
 #include <cvc/ariadne/uri.h>               // §13.8 (fetch uri): register a custom scheme handler
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>
-#include <cvc/core/async_task.h>  // launch_pool_task generalization test
-#include <cvc/core/exec_pool.h>   // Stage 1b: the app's pool, its workers' pumps (AR-1, AR-3)
+#include <cvc/core/async_task.h> // launch_pool_task generalization test
+#include <cvc/core/exec_pool.h>  // Stage 1b: the app's pool, its workers' pumps (AR-1, AR-3)
 #include <cvc/core/thread_pool.h> // item 2: full type for app.computePool().parallel_for
 #include <cvc/net/browser.h>      // OIDC: a fake browser, a browser page
 #include <cvc/net/credentials.h>  // the ws-send test's CredentialStore

@@ -212,10 +212,11 @@ public:
   // group 0, the app scheduler. Decided at load (AppRuntime::load asks at its end), and again,
   // before the next program starts or the next frame is drawn, after a set_root, a lane's program,
   // the channel policy, the key bindings or a thread-affine prefix change. A host verb or provider
-  // registered later (refresh_program_names, register_action_intrinsics) has it decided again only
-  // while nothing of the document runs (before its first frame, say); otherwise at its next
-  // restart (a load, set_root, a lane's program), and until then a host_only name registered late
-  // is a NameError in an isolated `any` group (logged once). When the answer changes the document
+  // registered later (refresh_program_names, register_action_intrinsics) has it decided again the
+  // first time nothing of the document runs (before its first frame, or a frame with no resident,
+  // child or action left), at the latest at its next restart (a load, set_root, a lane's program);
+  // until then a host_only name registered late is a NameError in an isolated `any` group (logged
+  // once). When the answer changes the document
   // moves: its actions, spawned children and residents are killed and reaped where they ran, a
   // run_program caller is told "did not complete: the document moved to another group", the
   // residents start again in the new place, and the streams the document owns post there from then
