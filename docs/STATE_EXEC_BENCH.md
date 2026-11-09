@@ -149,13 +149,22 @@ over the measured reps and prints `PASS` or `FAIL`. Options:
 - `--min X --max X` together pin a value, such as a step count.
 - `--max-noise P` makes a point noisier than `P` percent `INCONCLUSIVE`.
 
-A scenario whose gate can pass without judging anything names, in the runner's `GATE_GUARDS`, a
-metric each of a point's rows must hold at least at one of its params: `mt.ariadne_docs`'
-`extra.isolated` at its `docs` (every document in a group of its own). A point short of it prints
-`FAIL (vacuous: ...)`.
+A scenario whose gate could pass without judging anything has an entry in the runner's
+`GATE_GUARDS`, for the metrics it names (`mt.ariadne_docs`' `extra.helper_wakes`,
+`extra.wakes_per_frame` and `extra.worker_pumps`):
 
-It exits 1 when a point fails, a matching point has a failed rep or leaves the gate vacuous, or
-nothing matches. Otherwise it exits 2 when a point is inconclusive, and 0 when every point passes.
+- **vacuous**: metrics each row must hold at least at one of its params, else the point prints
+  `FAIL (vacuous: ...)`. For `mt.ariadne_docs`, `extra.isolated` and `extra.any_groups` at `docs`:
+  every document in an `any` group of its own;
+- **n/a**: a point whose rows all have a metric at 0 (`extra.wakeable`: no helper to wake) prints
+  `n/a`, counted neither as a pass nor as a failure. A gate where every point is n/a fails;
+- **control**: the same run's points matching a `where` that could be judged (`frame=heavy` with
+  `extra.wakeable` above 0) must have a metric's median at least a bound (`extra.worker_pumps` at
+  least 1), else the gate fails: a pool whose helpers never pump would pass small frames too.
+
+It exits 1 when a point fails, a matching point has a failed rep or leaves the gate vacuous,
+nothing matches, every point is n/a, or a control fails. Otherwise it exits 2 when a point is
+inconclusive, and 0 when every judged point passes.
 Gates that are a ratio between
 two points (one sweep value against another) are `compare --pair` runs instead. Gates on a count
 (steps, allocations) take no noise rule.
@@ -1017,8 +1026,13 @@ manager (S1-Q1: threads above 0 make the manager shared, so the workers may pump
   ms a document on the machine this was written on), so a frame's pumps total well over the pool's
   `inline_below` (100 us): frames the pool spreads over its workers once the documents are
   isolated.
-- `frame=small`: `on_tick:` is one `state-incr`, a few steps, so a frame's pumps total well under
-  it: frames the pool pumps on the caller without waking a helper (td 4.4).
+- `frame=small`: `on_tick:` is one `state-incr`, a few steps, so a frame's pumps total under it:
+  frames the pool pumps on the caller without waking a helper (td 4.4). The margin is not wide. A
+  whole small frame (both drain halves and the pump) took, at the median, about 6 us at `docs=1`,
+  12 us at 2, 22 us at 4 and 43 us at 8 (58 us at the 99th percentile), on the machine this was
+  written on with other work running: about 2x under 100 us at `docs=8`. The wake follows the
+  groups' last pump times, so one pump the OS deschedules for 100 us wakes a helper in the next
+  frame; slow frames up to about 0.5 ms were seen. Hence the gate's median of five reps below.
 
 Each tick counts itself (`state-incr "ticks"` under the document's prefix). A rep fails when a
 document did not tick, or ticked more than once a frame. A rep is `frames` (200; smoke 4) frames;
@@ -1029,12 +1043,18 @@ while a document is in it). Extras:
 
 - `ns_per_frame`: as `ns_per_iter`;
 - `helper_wakes`, `pumps` and `skipped`: the pool's counters over the region (`pool_stats`), and
-  `worker_pumps`, the process-wide `exec_pool_worker_pumps_total()`'s;
-- `isolated`: how many documents `Runtime::isolated_group()` put in a group of their own. Below
-  `docs`, the point prints one `note:` line with the first such document's `isolation_reason()`,
-  and passes: its documents run in group 0, which the caller pumps, so the gate below has nothing
-  to judge there. On the S1b.0 interfaces commit (stubs) every point says `0 of N documents
-  isolated (isolated documents are not built yet)`;
+  `wakes_per_frame`, `helper_wakes` over the frames; `worker_pumps`, the process-wide
+  `exec_pool_worker_pumps_total()`'s;
+- `isolated` and `any_groups`: the documents in a group of their own, and in an `any`-affinity one,
+  read after each rep from `Runtime::current_group()` (a rep in which a document moved fails). The
+  caller pumps group 0 and host-affinity groups itself, so documents outside `any` groups wake no
+  helper. Where fewer than `docs` documents got an `any` group at load, the point prints one
+  `note:` line, with the first `isolation_reason()` when a document stayed in group 0, and passes;
+- `wakeable`: the most helpers a frame could wake, as `exec_pool`'s adaptive wake counts them once
+  the last pumps total `inline_below`: `min(any_groups - caller_takes, effective_threads)`, where
+  `caller_takes` is 1 unless a host-affinity group or group 0 (while a process lives in it) joins
+  `exec_pump_frame`'s `pump_all`, the caller then taking that and leaving every `any` group to the
+  list. 0 at `t=0` and, with every document isolated, at `docs=1`;
 - `effective_threads`, `ticks_per_frame` (1 when every document took every frame's tick) and
   `caller_cpu`.
 
@@ -1084,8 +1104,9 @@ auto`, base and candidate interleaved, two rounds of 5 reps or more ("Getting st
   ```
 
 - **Small frames wake no helper** (S1b): `mt.ariadne_docs` `frame=small` wakes no helper in the
-  median rep, at every `t` and `docs`. It is run in the A/B, not in CTest, since a helper wake
-  follows the pumps' measured times:
+  median rep of a `--reps 5` (or more) run in the quiet window, at every point that could wake
+  one. It is never judged on `--smoke`, whose single 4-frame rep fails on one descheduled pump,
+  and it is not a CTest gate, since a wake follows the pumps' measured times:
 
   ```sh
   python3 tools/bench/state_exec_bench.py run --scenario mt.ariadne_docs --reps 5 \
@@ -1094,13 +1115,29 @@ auto`, base and candidate interleaved, two rounds of 5 reps or more ("Getting st
       --where frame=small --metric extra.helper_wakes --max 0
   ```
 
-  `extra.isolated` guards it: with its documents in group 0, a point pumps nothing through the
-  pool's helpers whatever its frames cost, so it would pass without judging anything. `gate`
-  therefore fails a point whose rows have `extra.isolated` below `docs` (`FAIL (vacuous:
-  extra.isolated 0 below docs 2)`), as it does on S1b.0's stubs; the gate means something once A's
-  S1.10 isolates the documents. `--stat max` holds it in every rep instead of the median one.
+  `GATE_GUARDS` keeps it from passing without judging anything ("Runner options"). A point whose
+  documents are not all in `any` groups of their own fails as vacuous (`FAIL (vacuous:
+  extra.any_groups 2 below docs 4)`): the caller pumps them, and they never wake a helper. A point
+  that can wake no helper (`extra.wakeable` 0: `t=0`, or `docs=1`, whose lone group the caller
+  takes) prints `n/a`, so of the default sweep's 20 small points the 12 at `t>=1` and `docs>=2`
+  are judged. The run's heavy points that could wake a helper are its control: each must show
+  `extra.worker_pumps` at least 1 in the median rep, else the gate fails, since a pool whose
+  helpers never pump passes small frames too; the run must therefore hold heavy points (the
+  default sizes do). The margin at `docs=8` is thin (the small frames above), so even the median
+  has failed there on a busy machine, with one wake in 200 frames in three reps of five: the gate
+  needs the quiet window. `--stat max`, a wake in no rep, is more load-sensitive still: one
+  descheduled pump in 1000 frames fails it, and it failed 3 of 20 points in one of two runs on a
+  busy machine. `--metric extra.wakes_per_frame --max 0.02` reads the same rule as a rate (a
+  helper woken every frame, the rule broken, is 1) and holds through such stalls; it is recorded,
+  not the gate, which S1.md section 6 states as no wake.
+- **S1b's A/B** (base: master with S1a, the cut of S1b; candidate: the S1b branch):
+  - the regression family above, `msg.*` and `async.*` included (S1b changed the ingress and
+    completion posts), at the same pin (`--same-pin`);
+  - the small-frames gate, on the candidate alone: the base binary has no `mt.ariadne_docs`;
+  - `mt.ariadne_docs` heavy, recorded;
+  - the pump scope and scaling gates, optional: their code is S1a's, unchanged.
 - **Recorded, not gated**: `mt.groups` exceptions and cycle, `mt.groups.flood`, `mt.state_tree`,
-  `mt.ariadne_docs` heavy, `mt.independent` and `mt.multi_exec`.
+  `mt.ariadne_docs` heavy and its `wakes_per_frame`, `mt.independent` and `mt.multi_exec`.
 - **In CTest and CI**: `state_exec_bench_gates` pins `sched.single.*`'s `steps_total` through a
   group too ("Gates in CTest"), and the sanitizer jobs run `mt.groups` under gcc's TSan, clang's
   TSan and ASan with UBSan (docs/TESTING.md, "The Sanitizer Jobs").

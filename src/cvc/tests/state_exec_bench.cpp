@@ -6609,10 +6609,11 @@ std::vector<scenario> make_scenarios() {
               "frame at a time: every document's drain_begin, app.exec_pump_frame, every "
               "document's drain_end, with the app's exec_pool at t workers; frame=heavy gives "
               "each document's on_tick a 500-iteration loop (a frame's pumps well over the "
-              "pool's 100 us inline_below), frame=small one state-incr (well under it): ns per "
+              "pool's 100 us inline_below), frame=small one state-incr (under it): ns per "
               "frame over the three calls (no backend, no render), extra.helper_wakes, "
-              "extra.worker_pumps and extra.isolated, the documents in a group of their own "
-              "(S1b's gate: small frames wake no helper; td 6.3)";
+              "extra.worker_pumps, extra.isolated and extra.any_groups (the documents in a group "
+              "of their own, and in an `any` one) and extra.wakeable, the most helpers a frame "
+              "could wake (S1b's gate: small frames wake no helper; td 6.3)";
     sc.executors = {"async"};
     sc.sizes = {{"t", {"0", "1", "2", "4", "8"}},
                 {"docs", {"1", "2", "4", "8"}},
@@ -6668,31 +6669,33 @@ std::vector<scenario> make_scenarios() {
             note(prefix(k) + " loaded with a warning: " + w);
         }
       }
-      // extra.isolated: the documents isolated_group() put in a group of their own. Below docs, the
-      // documents run in group 0 and no gate on this scenario means anything: said, never failed.
-      std::set<se::exec_group *> own;
+      // Where each document runs: its group, or null for group 0. Decided at load (isolated_group,
+      // said here when a document stays in group 0 or gets a host-affinity group, never failed),
+      // then read after each rep without deciding again (current_group), for the extras.
       std::string reason;
-      bool in_group0 = false;
+      int64_t any_at_load = 0;
       for (const auto &d : docs) {
-        if (se::exec_group *g = d->runtime().isolated_group()) {
-          own.insert(g);
-        } else if (!in_group0) {
-          in_group0 = true;
+        if (se::exec_group *g = d->runtime().isolated_group())
+          any_at_load += g->opts().affinity == se::group_affinity::any ? 1 : 0;
+        else if (reason.empty())
           reason = d->runtime().isolation_reason();
-        }
       }
-      const auto isolated = static_cast<int64_t>(own.size());
-      if (isolated < nd)
-        note(istr(isolated) + " of " + istr(nd) + " documents isolated (" + reason +
-             "): this point's gate has nothing to judge");
+      if (any_at_load < nd)
+        note(istr(any_at_load) + " of " + istr(nd) + " documents in an `any` group of their own" +
+             (reason.empty() ? std::string(" (the rest are host-affinity)") : " (" + reason + ")") +
+             ": this point cannot judge the small-frames gate");
+      const auto placement = [&] {
+        std::vector<se::exec_group *> v;
+        for (const auto &d : docs)
+          v.push_back(d->runtime().current_group());
+        return v;
+      };
       // steps_total: the steps of the schedulers the documents run on, their groups' and group
-      // 0's when a document is in it (asking for group 0 builds it).
-      std::vector<se::async_scheduler *> scheds;
-      for (se::exec_group *g : own)
-        scheds.push_back(&g->sched());
-      if (in_group0)
-        scheds.push_back(&app->exec_scheduler());
-      const auto steps = [&] {
+      // 0's when a document is in it (load() has built group 0 already).
+      const auto steps = [&](const std::vector<se::exec_group *> &where) {
+        std::set<se::async_scheduler *> scheds;
+        for (se::exec_group *g : where)
+          scheds.insert(g ? &g->sched() : &app->exec_scheduler());
         uint64_t n = 0;
         for (se::async_scheduler *s : scheds)
           n += s->get_stats().total_steps;
@@ -6728,7 +6731,8 @@ std::vector<scenario> make_scenarios() {
         const std::vector<int64_t> before = ticks();
         const cvc::pool_stats s0 = pp.pool.stats();
         const uint64_t w0 = cvc::exec_pool_worker_pumps_total();
-        const uint64_t steps0 = steps();
+        const std::vector<se::exec_group *> where0 = placement();
+        const uint64_t steps0 = steps(where0);
         const auto limit = static_cast<int64_t>(pc.cfg.timeout * 1e9);
         int64_t ran = 0;
         m.begin();
@@ -6744,11 +6748,38 @@ std::vector<scenario> make_scenarios() {
         m.end();
         const cvc::pool_stats s1 = pp.pool.stats();
         const uint64_t w1 = cvc::exec_pool_worker_pumps_total();
-        const uint64_t steps1 = steps();
+        const std::vector<se::exec_group *> where1 = placement();
+        const bool moved = where1 != where0; // a group left behind may be gone: not counted
+        const uint64_t steps1 = moved ? steps0 : steps(where1);
         const std::vector<int64_t> after = ticks();
         report_warnings();
         if (ran < frames)
           o.fail("timeout: " + istr(ran) + " of " + istr(frames) + " frames");
+        if (moved)
+          o.fail("a document moved to another group during the rep");
+        // The placement after the rep: the documents in a group of their own, those in an `any`
+        // one, and whether a host-affinity group or group 0 joins exec_pump_frame's pump_all
+        // (group 0 does while a process lives in it). exec_pool's adaptive wake, once the last
+        // pumps total inline_below, wakes min(any - caller_takes, workers) helpers, caller_takes
+        // being 1 when neither does (the caller takes an `any` group itself): extra.wakeable.
+        std::set<se::exec_group *> own, any;
+        bool host_in_call = false;
+        for (se::exec_group *g : where1) {
+          if (!g)
+            continue;
+          own.insert(g);
+          if (g->opts().affinity == se::group_affinity::any)
+            any.insert(g);
+          else
+            host_in_call = true;
+        }
+        const se::scheduler_stats g0 = app->exec_scheduler().get_stats();
+        if (g0.total_processes - g0.terminated - g0.killed - g0.failed > 0)
+          host_in_call = true;
+        const auto any_groups = static_cast<int64_t>(any.size());
+        const int64_t workers_now = int64_t(s1.effective_threads);
+        const int64_t wakeable =
+            any_groups == 0 ? 0 : std::min(any_groups - (host_in_call ? 0 : 1), workers_now);
         int64_t ticked = 0;
         for (int64_t k = 0; k < nd; ++k) {
           const int64_t d = after[std::size_t(k)] - before[std::size_t(k)];
@@ -6758,10 +6789,14 @@ std::vector<scenario> make_scenarios() {
         }
         o.iterations = ran; // ns_per_iter: ns per frame
         o.steps_total = steps1 - steps0;
+        const auto wakes = int64_t(s1.helper_wakes - s0.helper_wakes);
         o.extra.d("ns_per_frame", double(m.wall()) / double(ran))
-            .i("helper_wakes", int64_t(s1.helper_wakes - s0.helper_wakes))
+            .i("helper_wakes", wakes)
+            .d("wakes_per_frame", double(wakes) / double(ran))
             .i("worker_pumps", int64_t(w1 - w0))
-            .i("isolated", isolated)
+            .i("isolated", static_cast<int64_t>(own.size()))
+            .i("any_groups", any_groups)
+            .i("wakeable", std::max<int64_t>(0, wakeable))
             .i("pumps", int64_t(s1.pumps - s0.pumps))
             .i("skipped", int64_t(s1.skipped - s0.skipped))
             .i("effective_threads", s1.effective_threads)
