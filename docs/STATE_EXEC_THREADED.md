@@ -1421,7 +1421,10 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
     means group 0, `stream::open`), and the stream posts its seq and lifecycle events there, from
     its producer thread too, under a per-stream mutex. `room-subscribe`'s proxy stream opens on the
     caller's group; the host-side bridge and relay streams, and the public `room_subscribe`, stay
-    on group 0. A document that moves takes its open streams along (`stream::retarget`, 4.12).
+    on group 0. Every stream opened with a document's scheduler is owned by the document's stream
+    table (`stream-open`'s, and the proxy through `own_document_stream`), so a document that moves
+    takes the streams it owns along, whatever scope each was opened under, and no other owner's
+    (`retarget_document_streams`, 4.12).
   - Net: a request's completion goes to its call's own scheduler, its host's; a started request
     (a transport that answers by itself) keeps its host's finisher, not the host (below).
   - The Runtime's own tick, key, pointer and signal posts go to the scheduler its programs run on
@@ -1536,6 +1539,10 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
   - A host has no way to give AppRuntime's own verbs and functions a kind other than the table's:
     one that wants an `any` verb registers its own provider with `register_action_intrinsics(...,
     any)`, as `nav_compute` does (a follow-up, 7).
+  - A provider, or an AppRuntime verb or function, registered after a document's programs have
+    started is bound in an isolated `any` group only from the document's next restart, if it is
+    `host_only` (4.12, "Late registrations"); an `any` or `host_proxied` one binds in the next env
+    built, since `install_providers` reads the registry each time.
 - **A started call's finisher.** Work that answers by itself (an `async_work` whose `start` hands
   the call to a transport, which settles it from its own thread: net's started requests, a
   started `fetch`) keeps its host's finisher (`async_host::make_finisher()`), never the host.
@@ -1544,9 +1551,26 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
   stopped flag under that lock. So a transport answering as an isolated document's group goes
   touches neither the group's host nor its scheduler, and the shutdown has cancelled the call.
   The lock order is the host's state lock, then the scheduler's ingress lock. A work checks
-  `cancel_requested()` before it settles, and never finishes from inside the call's `on_cancel`
-  hook, which the shutdown runs under the same lock
+  `cancel_requested()` before it settles, so a cancelled call keeps the outcome its cancel gave it
   (`AsyncCalls.AStartedCallsFinisherPostsOnlyWhileItsHostIsUp`).
+  - The shutdown (`async_host::shutdown`) sets `stopped` and takes the live calls under that lock,
+    releases it, cancels them, so their `on_cancel` hooks run outside it, then waits under the lock
+    for the running kernels (R1b skeptic m6). A hook may therefore wait for a thread that is
+    finishing the call through a finisher (an abort that joins its transport's thread): that thread
+    gets the lock, sees `stopped` and posts nothing
+    (`AsyncCalls.AShutdownsCancelHookMayWaitForAThreadInTheFinisher`).
+- **A cancelled request stops its transfer** (R1b skeptic m1). `cvc::net::HttpRequest::cancelled`
+  is a predicate asked before a request is made and about once a second while it is in flight
+  (the curl backend's progress callback); once it returns true the transfer is aborted and the
+  reply is a transport failure, "cvc::net: cancelled". `cvc::net::HttpCancelScope` sets the same
+  predicate for every request a thread sends while it lives, for requests built by code that takes
+  no request options (`fetch`'s URI handlers, a credential's renewal). Net's blocking kernels,
+  `http_kernel` and `uri_fetch_kernel`, hold one over their call's `cancel_requested()`. A kill
+  (`cancel_async_calls`) and a host's shutdown both cancel the call, so either ends the transfer
+  in about a second, not at the server's reply or the request's timeout (30 s by default): a
+  teardown that waits for its group's kernels waits that long at most for a request. The
+  browser's fetch ignores the predicate (`AriadneNetHost.ACancelledRequestStopsItsTransfer`,
+  `NetCurlBackend.ACancelledRequestStopsItsTransfer`).
 - **Whole WebSocket frames.** `ws-send` is `any`, so two documents on two workers may send on one
   connection at once (a handle is app-global). A connection sends one frame at a time, whole: its
   send lock is held across the frame (a close's too), while its handle lock is still taken per
@@ -1939,18 +1963,26 @@ and 9.1).
   thread, between pumps, never inside a `pump_all` of the app's pool (from a native, an
   `on_complete` callback or a `host_proxied` body): `drain_begin` and the sweep; render, which
   starts mount ticks, runs mount `init:`s and, in its reconcile, kills residents; `set_root` and
-  `AppRuntime::load`; `set_tick/key/pointer/signal_program`; `run_program`; `post_input` and
-  `post_signal`, which may start their residents, then post; the placement and its moves; and the
-  destructors. The headers say so of each. `post_input` and `post_signal` used to be called
-  thread-safe: a host that catches an OS signal on another thread hands it to the host thread.
+  `AppRuntime::load`; `set_tick/key/pointer/signal_program`; `post_input` and `post_signal`, which
+  may start their residents, then post; the placement and its moves; and the destructors. The
+  headers say so of each. `post_input` and `post_signal` used to be called thread-safe: a host that
+  catches an OS signal on another thread hands it to the host thread. `run_program` is a host-thread
+  call too, but it only queues the program for the next `drain_begin`, so it is safe inside a pump.
   - Debug builds assert it (`assert_outside_pump`: no `pump_all` of the app's pool on this thread,
     read through `exec_pool_probe()`, which never builds the pool) in render, `post_input`,
-    `post_signal`, `set_*_program` and `run_program`. Render's is AR-3's latch.
-  - Tearing a Runtime down, and moving a document, are refused inside a `pump_all` in every build
-    (`refuse_inside_pump`: logged, then aborted, before anything is touched): their kills would
-    race a worker on the group, and the group's destruction would abort anyway. A host verb that
-    closes or reloads another document, run in group 0 while `exec_pump_frame` pumps it beside an
-    isolated document, is the case (`AriadneIsolatedDocsDeathTest.ATeardownInsideAPumpIsRefused`).
+    `post_signal` and `set_*_program`, the calls that start or kill. Render's is AR-3's latch.
+  - Tearing a Runtime down, and moving a document out of its group, are refused while a `pump_all`
+    of the app's pool holds that group, from any thread, in every build (`refuse_if_held`: the
+    group's `pool_link().call` is set from the `pump_all`'s entry until it returns; the refusal is
+    printed on stderr and logged, then the process aborts, before anything is touched): their kills
+    would race a worker on the group, and the group's destruction would abort anyway. A host verb
+    that closes or reloads an isolated document, run in group 0 while the same `exec_pump_frame`
+    pumps that document's group, is the case
+    (`AriadneIsolatedDocsDeathTest.ATeardownInsideAPumpIsRefused`), and so is a teardown on another
+    thread while the frame's pump holds the group
+    (`ATeardownFromAnotherThreadWhileAPumpHoldsItsGroupIsRefused`). A group-0 document's teardown or
+    move is never refused, nor one whose group no pump holds: a host group's native may tear down a
+    group-0 document that never ran (`TearingDownAnUnpumpedDocumentInsideAPumpIsAllowed`).
 - **Isolated documents** (`ariadne.exec.isolate_documents`, opt-in, S1-Q6). The setting is read
   from the app's tree (on for `1` or `true`, in any case) each time the placement is decided. With
   it on, the Runtime gives its document an `exec_group` of its own (name and owner the Runtime's
@@ -1994,43 +2026,70 @@ and 9.1).
   `isolated_group()`, once the document's programs, channel policy and tree, and its host's
   providers and declarations, are set), and again, before the next program starts, the next frame
   is drawn or the next `drain_begin` runs, after any of: `set_root`, a lane's program
-  (`set_*_program`), `set_document_programs`, `set_channel_policy`, `set_key_bindings`,
-  `declare_thread_affine_prefix`, or a host verb registered since (`refresh_program_names`, which
-  AppRuntime's registrations call). A Runtime given no document decides when its first program
+  (`set_*_program`), `set_document_programs`, `set_channel_policy`, `set_key_bindings` or
+  `declare_thread_affine_prefix`. A Runtime given no document decides when its first program
   starts. `isolated_group()` and `isolation_reason()` decide if that is open; `current_group()`
   returns what was last decided and decides nothing, and `AppRuntime::idle()` and `wait_idle()` use
   it, so a query never builds, moves or destroys a group.
+- **Late registrations** (R1b skeptic m3). A host verb or provider registered after the placement
+  makes it stale, by either path: AppRuntime's `register_*` (through `refresh_program_names`), or
+  `register_action_intrinsics` (the providers' registry moves past the generation the placement
+  read). A stale placement is decided again, at the same points, only while nothing of the
+  document runs where it runs (`nothing_running`: no live action, started resident or mount tick,
+  nor spawned child), so a move would kill nothing: a registration between `load()` and the first
+  frame, after an `init:` too, still moves the document (to a `host` group, for a host verb) and
+  binds the name (`AHostVerbRegisteredBeforeTheFirstFrameIsBound`). Otherwise it waits for the
+  document's next restart (a load, `set_root` or `set_*_program`, which kill and restart anyway);
+  until then a late `host_only` name is a NameError in the document's `any` group, and the app's
+  log says once per placement that the document "started its programs before a host function or
+  provider was registered: it binds at the document's next load"
+  (`AHostVerbRegisteredWhileItRunsBindsAtTheNextLoad`). In group 0 and in a `host` group every
+  kind is installed as it is, so a late name binds in the next env built there.
 - **A move** (a placement change). When the answer changes (group 0 against a group, or the group's
-  affinity) the document moves, on the host thread (refused inside a pump, above):
+  affinity) the document moves, on the host thread (refused while a pump holds its group, above):
   1. its actions, the children they spawned or forked, its residents and its mount ticks are
      killed and reaped where they ran, and a `run_program` caller whose program had not ended is
      told "did not complete: the document moved to another group";
   2. the old group stops being a frame group, and a new group is made and registered if the
      document is eligible;
-  3. its open streams are re-pointed at the new scheduler (`stream::retarget`: every live stream
-     of the app opened at or under the document's prefix that posts to the old scheduler, each
-     under its own lock, so no post to the old one is in flight once it returns);
-  4. the old group is destroyed at once, so a document has one group at most;
+  3. the streams the document owns (its stream table) are re-pointed at the new scheduler
+     (`retarget_document_streams`, under the table's lock, through each stream's
+     `stream::retarget(from, to)`, under the stream's own lock, so no post to the old scheduler is
+     in flight once it returns), whatever scope each was opened under, and no other owner's
+     stream: a group-0 document nested under the moving one keeps its own
+     (`AMoveLeavesANestedDocumentsStreamAlone`,
+     `AStreamTheDocumentOwnsFollowsItsMoveWhateverItsScope`).
+     If re-pointing throws, the document's streams are closed (`close_document_streams`, and if
+     that throws too, its resources are dropped, `doc_scope_.clear()`): none is left naming the old
+     place;
+  4. the old group is retired, not destroyed: unregistered and unpumped, it keeps the contexts
+     taken from it, and a later `drain_begin` destroys it once its host has no kernel in flight
+     (`host().in_flight()` 0), so a move never waits for the old group's calls
+     (`AMoveDoesNotWaitForTheOldGroupsCalls`). Only its own kernels' completions can post to it
+     then: its processes are gone, no stream names it, the Runtime posts to the new place, and its
+     host-call queue is empty outside a pump. `AppRuntime::idle()` and `wait_idle()` do not count
+     it. `~Impl` destroys any retired group left, which may wait for its kernels, as a teardown
+     does (4.17);
   5. the residents and mount ticks start again in the new place at the next drain.
 
-  The moved processes' contexts stay with the Runtime until it goes. In group 0 an action and its
-  children survive a reload; a move kills them, which includes a host verb registered after
-  `load()` that moves a running `any` document to a `host` group (register before `load()`).
+  The contexts taken from group 0 stay with the Runtime until it goes, for a process a failed kill
+  left there. In group 0 an action and its children survive a reload; a move kills them.
 - **AppRuntime's registrations** (`register_verb`, `register_async_verb`, `register_function`,
   `register_async_function`, `register_quit`) are made on the host thread, outside a frame, and
-  before `load()`: one made later has the placement decided again before the next program, so the
-  name is bound in the document as it is in group 0. AppRuntime's verb table is read by its
-  providers' bodies, which a spawned child in an `any` group runs on a worker, and written by the
-  registrations, `load()` and the destructor, all under one process-wide lock; a body copies what
-  it binds under the lock and binds unlocked, and no callable a host gave is destroyed under it
-  (pycvc's take the GIL as they go).
+  before `load()` or before the first frame: a `host_only` one (a verb or function) made once the
+  document's programs run binds in an isolated `any` document at its next load ("Late
+  registrations", above), where in group 0 it binds at once. AppRuntime's verb table is read by its providers' bodies, which a spawned child in an `any`
+  group runs on a worker, and written by the registrations, `load()` and the destructor, all under
+  one process-wide lock; a body copies what it binds under the lock and binds unlocked, and no
+  callable a host gave is destroyed under it (pycvc's take the GIL as they go).
 - **One isolated document.** A host with one Runtime that opts in may keep calling `drain()`: its
   `drain_end` pumps the document's group through `pump_all` itself. A lone group with nothing else
   in the call is pumped by the caller (no helper is woken for it, 4.4), so one isolated document
   runs on the frame's thread as before, and gains a worker only beside other work in an
   `exec_pump_frame`; several isolated documents spread over the workers. `CVC_EXEC_FORCE_MOVE`
   puts even a lone group on a worker (IS-1b, AR-3b).
-- **Teardown** destroys the group after the Runtime's own kills and reaps (4.17), and, in Stage 3,
+- **Teardown** destroys the group after the Runtime's own kills and reaps, then any group a move
+  retired (4.17), and, in Stage 3,
   after `pool.kill_owner` when spawn groups hold the document's children.
 - **The reactive lane** runs its own evaluator on the render thread under `park_forbidden_scope`
   (`ReactiveEngine`). It never touches a group and is unchanged.
@@ -2437,8 +2496,8 @@ the judges' corrections. It is recorded here so the earlier stages do not close 
 | A group destroyed while pumping | Destruction takes the token, waiting for the pump; kernels in flight are waited for. Each teardown step catches and logs what it throws, so a kill or a lock release that throws (a Stage 0 follow-up) never terminates the process (4.2). Destroying a group inside a `pump_all` that holds it, or from a body or callback the pool runs, is a debug assertion; from inside its own pump (a native or inline callback of its own process) it aborts in every build |
 | A worker that fails to start | The pool runs with the workers that started, and notes each failure for its owner to log (`take_notes`; `app::exec_pool` logs them); the caller always pumps |
 | Under `CVC_EXEC_FORCE_MOVE`, no worker reaches a call's groups before its deadline | The caller, which may not take a group it pumped last, waits for the workers no longer than the deadline, then skips those groups itself, and a worker that skips them tells it (4.4): the frame ends on time, and the skipped groups go first next frame |
-| Teardown of an Ariadne Runtime (`~Runtime`; built in Stage 1b, S1.10, S1-Q8) | On the host thread, outside a pump: inside a `pump_all` of the app's pool it is refused in every build, logged and then aborted before anything is touched (4.12). In this order, each step catching and logging what it throws: (1) the document's resources close (`doc_scope_.clear()`: a stream marks its descriptor closed and posts its last seq and "closed" to the scheduler it names); (2) on the scheduler its processes run on (its group's, else group 0's if it ever used it), `kill_owner` of the Runtime's owner tag, then a reap of every process the Runtime knows of, its actions' own processes included: the actions and the children they forked, the spawned children, the residents and the mount ticks (S1-Q8: a killed record left in group 0 was a leak whose context was already gone; HZ-8); (3) its frame registration, then its group, whose own teardown (4.2) kills, shuts its host down and reaps whatever is left. The group goes first of the Runtime's members, before the channel policy and the document scope its processes' contexts point at. Why this order: an open stream holds the group's scheduler and posts to it, from its producer thread too, so the streams close while the group lives; a started net call holds the group's host's finisher, and the host's shutdown, after the kills, cancels it before the scheduler goes (4.9). A resident a reload or a mount reconcile stops is killed and reaped then (`stop_resident`), so nothing of the Runtime's owner is left in group 0 (`AriadneHazards.AResidentAReloadStopsIsReaped`) |
-| A document moved (its placement changed) while its programs run | Its processes are killed and reaped where they ran, a `run_program` caller whose program had not ended is told "did not complete: the document moved to another group", its residents start again in the new place, its streams are re-pointed there, and the old group goes at once (4.12) |
+| Teardown of an Ariadne Runtime (`~Runtime`; built in Stage 1b, S1.10, S1-Q8) | On the host thread, outside a pump: while a `pump_all` of the app's pool holds the document's group it is refused in every build, from any thread, printed and logged and then aborted before anything is touched (`refuse_if_held`, 4.12); a group-0 document's, or one whose group no pump holds, goes ahead. In this order, each step catching and logging what it throws: (1) the document's resources close (`doc_scope_.clear()`: a stream marks its descriptor closed and posts its last seq and "closed" to the scheduler it names); (2) on the scheduler its processes run on (its group's, else group 0's if it ever used it), `kill_owner` of the Runtime's owner tag, then a reap of every process the Runtime knows of, its actions' own processes included: the actions and the children they forked, the spawned children, the residents and the mount ticks (S1-Q8: a killed record left in group 0 was a leak whose context was already gone; HZ-8); (3) its frame registration, then its group, whose own teardown (4.2) kills, shuts its host down and reaps whatever is left, and then any group a move retired, each waiting for its kernels (a cancelled http request ends its transfer within about a second, 4.9). The group goes first of the Runtime's members, before the channel policy and the document scope its processes' contexts point at. Why this order: an open stream holds the group's scheduler and posts to it, from its producer thread too, so the streams close while the group lives; a started net call holds the group's host's finisher, and the host's shutdown, after the kills, cancels it before the scheduler goes (4.9). A resident a reload or a mount reconcile stops is killed and reaped then (`stop_resident`), so nothing of the Runtime's owner is left in group 0 (`AriadneHazards.AResidentAReloadStopsIsReaped`) |
+| A document moved (its placement changed) while its programs run | Its processes are killed and reaped where they ran, a `run_program` caller whose program had not ended is told "did not complete: the document moved to another group", its residents start again in the new place, the streams it owns are re-pointed there (closed if that fails), and the old group is retired: unpumped at once, destroyed at a later `drain_begin` once its kernels have ended, so the move does not wait for them (4.12) |
 | Teardown of the app | The groups' owners destroy them first; the pool owns none, and `~app` asserts in debug builds that none is left. Then `~app` destroys the pool, whose workers stop after their current pumps, before the app's async host shuts down and its background pool, which ran the groups' kernels, closes |
 
 ### 4.18 Every blocker, resolved
@@ -2671,9 +2730,12 @@ Each item says when it applies. "Always" items land whether or not a host enable
     - In an `any` group a worker pumps, an action that calls a `host_proxied` verb completes a
       frame later (4.11 item 7), and `has?` answers from the frame's snapshot (4.9).
     - A change of its placement (a reload that makes it eligible or not, a program, the channel
-      policy, a declaration or a late host verb) kills and reaps what it runs, tells a
-      `run_program` caller, and restarts its residents in the new place; in group 0 an action
-      survives a reload.
+      policy, the key bindings, a declaration, or a host verb or provider registered before its
+      programs started) kills and reaps what it runs, tells a `run_program` caller, and restarts
+      its residents in the new place; in group 0 an action survives a reload.
+    - A `host_only` host verb, function or provider registered once its programs run is a
+      NameError in its `any` group until its next load (logged once), where in group 0 it binds at
+      once.
     - Pids stay unique app-wide.
 12. **Opt-in (Stage 2 router): cross-group messages.**
     - A message to a channel homed in another group arrives at that group's next drain.
@@ -2797,6 +2859,10 @@ changes:
 - **`post_input` and `post_signal` are host-thread calls** (S1.10): their header called them
   thread-safe, and a debug build now asserts they run outside a pump (4.12). Every shipped caller
   calls them from its frame thread.
+- **A cancelled request stops its transfer** (R1b skeptic m1): an `http-get`, `http-request`, or
+  `fetch` of an http(s) URI, whose program is killed, or whose host shuts down, has its transfer
+  aborted within about a second (`HttpRequest::cancelled`, 4.9), where it used to run on to the
+  reply or its timeout, with its result dropped. The browser's fetch is unchanged.
 
 AppRuntime's names resolve as before (its six providers keep the one provider's binding order,
 4.9), error texts and warnings are unchanged, and the new log lines come only with the setting on
@@ -3123,18 +3189,23 @@ audit and the thread-affine declarations; `uri_state`'s and streams' pin vectors
     `kill_and_reap`), `isolated_group`, `isolation_reason`, `current_group`,
     `declare_thread_affine_prefix`, `set_document_programs`; `has?`'s snapshot for an `any` group;
     `spawn_child` from the parent's context; the teardown's order and reap, and `stop_resident`'s
-    reap; the host-thread asserts (`assert_outside_pump`) and refusals (`refuse_inside_pump`);
+    reap; retired groups (`destroy_idle_retired_groups`) and late registrations
+    (`nothing_running`); the host-thread asserts (`assert_outside_pump`) and the refusal by a held
+    group (`refuse_if_held`);
   - `app_runtime.h`/`app_runtime.cpp`: six providers by kind, in the old binding order; done
     channels on the calling program's group; `drain_begin`, `drain_end`,
     `declare_thread_affine_prefix`, `wait_idle`; `idle()` counting the document's group; `load()`
     handing over `init:` and `tests:` and deciding the placement; the verb table's lock;
   - `intrinsics.h` (the provider rules), `async_scheduler.h`/`.cpp` (`ingress_posts_for_test`, for
-    AR-3b), `async_host.h`/`.cpp` (`finisher`, `make_finisher`);
+    AR-3b), `async_host.h`/`.cpp` (`finisher`, `make_finisher`; a shutdown that runs its calls'
+    cancel hooks outside its lock);
   - `net_intrinsics.h`/`.cpp`: two providers by kind on `*ictx.host`, a started request keeping its
-    host's finisher; `ws_client.cpp`: a frame sent whole;
-  - `stream.h`/`stream.cpp`: `stream_params::scheduler`, posts under a per-stream lock,
-    `stream::retarget` over a list of live streams, the descriptor pins a `cvc::pin_vector`;
-    `stream_intrinsics.cpp`: `any`, posting to the opener's group;
+    host's finisher, the kernels' cancel scope; `http_client.h`/`.cpp`, `http_client_curl.cpp`:
+    `HttpRequest::cancelled` and `HttpCancelScope`; `ws_client.cpp`: a frame sent whole;
+  - `stream.h`/`stream.cpp`: `stream_params::scheduler`, posts under a per-stream lock, the member
+    `stream::retarget(from, to)`, the descriptor pins a `cvc::pin_vector`;
+    `stream_intrinsics.h`/`.cpp`: `any`, posting to the opener's group;
+    `retarget_document_streams` and `close_document_streams` over a document's stream table;
   - `room_intrinsics.cpp`, `room_media_intrinsics.cpp` (a subscribed proxy on the caller's group),
     `oidc_host.cpp`: `host_proxied`;
   - `uri_state.cpp`: its chains are `cvc::pin_vector`s;
@@ -3173,8 +3244,6 @@ audit and the thread-affine declarations; `uri_state`'s and streams' pin vectors
     other hosts' verbs (pre-existing cross-binding; conservative, R1b-mid s-m5);
   - no host API declares a host verb's or function's kind other than `host_only`: a host that
     wants an `any` verb registers a provider of its own (4.9);
-  - `stream::retarget` matches a document's streams by scope and old scheduler, so a group-0
-    document nested under a moving document's prefix has its streams moved too;
   - the subscriber audit's (4.8): `state_sync_adapter`'s pinned walks and atomic `_attached`;
     the settings classes and render-thread subscribers moving out of arigl's document prefix;
     volren's and volslice's settings; `state_object`'s teardown against a slot on another thread,
@@ -3404,26 +3473,52 @@ Beside the rows above:
 The implementers' own cases, beside the code's existing tests:
 - `ariadne_runtime_test.cpp`: `AriadneScheduler.DrainEndDoesNotPumpAgainAfterAFramePump`;
   `AriadneIsolatedDocs.ProvidersAreInstalledByTheirKind` (an `any` native on a worker, a
-  `host_proxied` one on the frame thread and its constant bound, a late `host_only` one a
-  `NameError` that `has?` does not see), `IdleAndWaitIdleCountTheDocumentsGroup`,
+  `host_proxied` one on the frame thread and its constant bound, and a `host_only` one,
+  registered while the document's tick resident runs, a `NameError` that `has?` does not see),
+  `IdleAndWaitIdleCountTheDocumentsGroup`,
   `AnInitThatUsesOidcKeepsTheDocumentInGroupZero`, `TeardownReapsItsProcessesAndDestroysItsGroup`,
   `ALaterDocumentThatIsNotEligibleMovesToGroupZero`,
   `AThreadAffinePrefixAboveTheDocumentMakesItHost`, `AProgramSetAfterThePlacementIsScanned`,
   `AMovedDocumentsStreamPostsWhereItNowRuns`, `AnEligibilityThatFlipsKeepsOneGroupAtMost`,
-  `AHostVerbRegisteredAfterLoadIsBound`, `IdleAndWaitIdleDecideNothing`, and
-  `AriadneIsolatedDocsDeathTest.ATeardownInsideAPumpIsRefused`;
+  `IdleAndWaitIdleDecideNothing`; with the skeptic round's fixes,
+  `AMoveLeavesANestedDocumentsStreamAlone` (a group-0 document nested under a moving one keeps its
+  stream on group 0, and after the mover's teardown the stream still names group 0),
+  `AStreamTheDocumentOwnsFollowsItsMoveWhateverItsScope` (a proxy the document owns, with its
+  publisher's scope, follows the move), `AMoveDoesNotWaitForTheOldGroupsCalls` (the move returns
+  while the old group's 1.5 s kernel runs, the action is told it moved, and the retired group goes
+  at a drain once the kernel has ended), `AHostVerbRegisteredWhileItRunsBindsAtTheNextLoad` (a verb
+  registered while a resident runs does not move the document: a parked action finishes, the verb
+  is a `NameError` in the `any` group, and the next load binds it, the group then `host`) and
+  `AHostVerbRegisteredBeforeTheFirstFrameIsBound` (renamed from
+  `AHostVerbRegisteredAfterLoadIsBound`: before the first frame the registration still moves the
+  document to a `host` group and binds the verb); and `AriadneIsolatedDocsDeathTest`'s
+  `ATeardownInsideAPumpIsRefused` (the victim an isolated document whose group the same
+  `exec_pump_frame` holds; the death prints "refused"),
+  `ATeardownFromAnotherThreadWhileAPumpHoldsItsGroupIsRefused` and
+  `TearingDownAnUnpumpedDocumentInsideAPumpIsAllowed` (a host group's native tearing down a
+  never-run group-0 document inside the pump exits cleanly);
   `AriadneInit.ItsCyclesAreItsOwnAndFreedWhenItEnds`;
   `AriadneNetIntrinsics.RequestsGoThroughTheContextsHost`;
   `AriadneNetL4.AStartedRequestKeepsTheHostItStartedOn`;
   `AriadneStreamIntrinsics.AStreamPostsToItsOpenersGroup` and
-  `AStreamOfAnInlineHostPostsToGroupZero`; `AriadneHazards.AResidentAReloadStopsIsReaped`.
+  `AStreamOfAnInlineHostPostsToGroupZero`; `AriadneHazards.AResidentAReloadStopsIsReaped`;
+  `AriadneNetHost.ACancelledRequestStopsItsTransfer` (an `http-get` to a server that stalls 12 s:
+  its host's shutdown, and a kill, end the kernel in about a second).
 - `ariadne_host_test.cpp`: `AriadneHostVerbs.AnInitLanesAsyncVerbPostsItsDoneChannelToGroupZero`
   and `ANameTwoTablesBindResolvesInTheirOrder`.
 - `stream_test.cpp`: `Stream.EventsGoToTheSchedulerItWasOpenedWith` (from another thread too).
 - `state_exec_async_calls_test.cpp`: `AsyncCalls.AStartedCallsFinisherPostsOnlyWhileItsHostIsUp`
-  (the guard checked directly; the race itself is not deterministic).
+  (the guard checked directly; the race itself is not deterministic) and
+  `AsyncCalls.AShutdownsCancelHookMayWaitForAThreadInTheFinisher` (a hook that waits up to 5 s for
+  a thread finishing the call through the finisher ends in time, and nothing is posted).
+- `net_http_client_test.cpp`: `NetCurlBackend.ACancelledRequestStopsItsTransfer` (against a server
+  that never answers, a request whose predicate, then whose thread's `HttpCancelScope`, turns true
+  ends about a second later with "cvc::net: cancelled", not at its 8 s timeout; one cancelled
+  before it goes is never made).
 - `net_ws_client_test.cpp`: `NetWsClient.TwoThreadsSendingOnOneConnectionSendWholeMessages`.
-- `exec_pool_test.cpp`: `ExecPool.AForceMovedCallEndsAtItsDeadline`.
+- `exec_pool_test.cpp`: `ExecPool.AForceMovedCallEndsAtItsDeadline`, which times the call in its
+  own caller's thread: it must end within half the busy worker's nap, at its deadline, not when
+  the worker comes.
 - cvcGL's `cvcgl_unattached_node_thread`:
   `test_another_threads_matrix_during_the_nodes_own_pose_write_is_not_its_echo` (4.8).
 

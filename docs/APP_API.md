@@ -1070,12 +1070,20 @@ document's own when the app tree's `ariadne.exec.isolate_documents` isolates it
   document is queued or running: on `exec_async_host()`, and on its group's host when the document
   is isolated. It reads the group the document is in now (`Runtime::current_group()`) and decides
   nothing, so it never builds, moves or destroys a group. `AppRuntime::idle()` counts the group's
-  calls and runnable processes the same way. Host thread, outside a frame.
-- Every one of these, like `load()`, `set_root()`, the `set_*_program` calls, `run_program`,
-  `post_input`, `post_signal` and the destructors, is a host-thread call made outside a pump: never
-  from a native, a callback or a host verb that the app's pool runs. Tearing a Runtime down, or
-  moving its document, inside a `pump_all` of the app's pool is refused in every build (logged,
-  then the process aborts).
+  calls and runnable processes the same way. Neither counts a group a move retired: its kernels end
+  on their own, a later `drain_begin` destroys it then, and the Runtime's destructor waits for
+  them. Host thread, outside a frame.
+- Every one of these, like `load()`, `set_root()`, the `set_*_program` calls, `post_input`,
+  `post_signal` and the destructors, is a host-thread call made outside a pump: never from a
+  native, a callback or a host verb that the app's pool runs (`run_program` only queues, so it may
+  be called from inside one). Tearing a Runtime down, or moving its document out of its group,
+  while a `pump_all` of the app's pool holds that group is refused in every build, from any thread
+  (printed and logged, then the process aborts); a document in group 0, or one whose group no pump
+  holds, is not refused.
+- **Registrations.** An `AppRuntime`'s verbs and functions, and providers
+  (`register_action_intrinsics`), are registered before `load()` or before the first frame. One
+  registered once the document's programs run does not move an isolated document: a late
+  `host_only` name is a `NameError` in its `any` group until its next load (logged once).
 
 ```cpp
 cvc::app app;
