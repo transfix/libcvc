@@ -55,8 +55,8 @@ public:
   // = binds are used as-is (app-root-relative).
   explicit Runtime(cvc::app &app, std::string prefix = std::string());
   // Tears the document down: closes what it opened, kills and reaps its processes, and destroys
-  // its group. Host thread, outside a pump (inside an app pool's pump_all it is refused: logged,
-  // then aborted).
+  // its group (waiting for that group's kernels). Host thread, outside a pump: while a pump_all of
+  // the app's pool holds its group it is refused, from any thread (logged, then aborted).
   ~Runtime();
 
   Runtime(const Runtime &) = delete;
@@ -210,11 +210,17 @@ public:
   // (pumped on a worker, or on the host thread when its affinity is host); null when they run in
   // group 0, the app scheduler. Decided at load (AppRuntime::load asks at its end), and again,
   // before the next program starts or the next frame is drawn, after a set_root, a lane's program,
-  // the channel policy, the key bindings or the host's verbs change (refresh_program_names). When
-  // the answer changes the document moves: its actions, spawned children and residents are killed
-  // and reaped where they ran, a run_program caller is told "did not complete: the document moved
-  // to another group", the residents start again in the new place, its open streams post there
-  // from then on, and an old group is destroyed. Host thread, outside a pump.
+  // the channel policy, the key bindings or a thread-affine prefix change. A host verb or provider
+  // registered later (refresh_program_names, register_action_intrinsics) has it decided again only
+  // while nothing of the document runs (before its first frame, say); otherwise at its next
+  // restart (a load, set_root, a lane's program), and until then a host_only name registered late
+  // is a NameError in an isolated `any` group (logged once). When the answer changes the document
+  // moves: its actions, spawned children and residents are killed and reaped where they ran, a
+  // run_program caller is told "did not complete: the document moved to another group", the
+  // residents start again in the new place, and the streams the document owns post there from then
+  // on; an old group is unregistered at once and destroyed once its calls have ended, so a move
+  // does not wait for them. A move out of a group a pump_all holds is refused (logged, then
+  // aborted). Host thread, outside a pump.
   cvc::state_exec::exec_group *isolated_group() const;
   // Why the document stays in group 0: "" when it is isolated, else the first rule it failed
   // (logged when it changes, with the setting on).
@@ -268,8 +274,8 @@ public:
   bool has(const std::string &name) const;
   // Forget the cached program names, so has_function() / has() see verbs registered since they
   // were last asked. AppRuntime::register_verb calls it; a new register_action_intrinsics provider
-  // is noticed without it. It also has the placement decided again (a host verb registered after
-  // load may need the host thread), before the next program starts.
+  // is noticed without it. Like a new provider, it has the placement decided again while nothing
+  // of the document runs, else at its next restart (isolated_group).
   void refresh_program_names();
 
   // This document's per-resource scope (the se::document_scope installed on every action/resident

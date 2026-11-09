@@ -43,8 +43,9 @@
 namespace cvc {
 class app;
 namespace state_exec {
+class async_scheduler;
 class document_scope;
-}
+} // namespace state_exec
 namespace ariadne {
 namespace stream {
 class stream;
@@ -69,6 +70,17 @@ stream::stream *document_stream(cvc::state_exec::document_scope *doc, const std:
 // can consume it.
 std::string own_document_stream(cvc::state_exec::document_scope *doc,
                                 std::unique_ptr<cvc::ariadne::stream::stream> s);
+
+// Re-point every stream DOC's table owns that posts to FROM at TO (stream::retarget), and return
+// how many: an isolated document whose programs move to another scheduler takes the streams it owns
+// along, whatever scope each was opened under (a room-subscribe proxy carries its publisher's), and
+// no other owner's. Host thread, between pumps.
+std::size_t retarget_document_streams(cvc::state_exec::document_scope *doc,
+                                      cvc::state_exec::async_scheduler *from,
+                                      cvc::state_exec::async_scheduler *to);
+// Close and drop every stream DOC's table owns (as its teardown does), when they cannot be
+// re-pointed: none may be left naming a scheduler that goes. Host thread, between pumps.
+void close_document_streams(cvc::state_exec::document_scope *doc);
 
 } // namespace ariadne
 } // namespace cvc
