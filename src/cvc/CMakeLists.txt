@@ -2135,6 +2135,23 @@ endif()
 # libcvc does not use CGAL. Its two former uses (nav/spatial.cpp, geometry/project_verts) were
 # CGAL's Spatial Searching, a GPL-3+ package; both use the vendored nanoflann (BSD-2-Clause) now,
 # so cvc links neither CGAL nor, through it, GMP and MPFR. DISABLE_CGAL is accepted and ignored.
+#
+# Linking CGAL::CGAL PUBLIC also put CGAL's compiler flags (CGAL_setup_CGAL_flags) on cvc's
+# interface, so every target that links cvc got them: the tests, cvcGL, pycvc and consumers.
+# They are kept here, unchanged, so dropping CGAL changes no build flag and no floating-point
+# behaviour:
+# - MSVC: /bigobj, without which the largest test TUs exceed COFF's section limit (C1128 in
+#   ariadne_runtime_test.cpp); /fp:strict and /fp:except-; and the two _SCL_SECURE defines.
+# - GCC: -frounding-math (SetupCGAL.cmake added it too).
+# Whether libcvc wants strict floating point for its own sake is a separate question.
+if(MSVC)
+  target_compile_options(cvc PUBLIC $<$<COMPILE_LANGUAGE:CXX>:/bigobj>
+                                    $<$<COMPILE_LANGUAGE:CXX>:/fp:strict>
+                                    $<$<COMPILE_LANGUAGE:CXX>:/fp:except->)
+  target_compile_definitions(cvc PUBLIC _SCL_SECURE_NO_DEPRECATE _SCL_SECURE_NO_WARNINGS)
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  target_compile_options(cvc PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-frounding-math>)
+endif()
 
 # Setup dependencies
 SetupBoost(cvc)
