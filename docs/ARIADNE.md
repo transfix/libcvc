@@ -863,9 +863,12 @@ a junction), changes grade gradually and stays above the water, keeping to a gen
 through a steep one, with the ground cut or banked to it, so a vehicle drives them without
 bouncing; every street is two Humvee lanes wide, drawn as smooth strips with a dark yellow centre
 stripe. The water is a surface per terrain chunk with any
-under it (`<id>_water`), level at the water line and hidden by the terrain past the shoreline, on
-its chunk's LOD rung, coloured by the depth under it (`cvc::world::water_colour`: the bed absorbed
-red first, so the shallows read sandy, then green, then deep blue); `water: 0` leaves it out.
+under it (`<id>_water`), level at the water line on its chunk's LOD rung, coloured by the depth
+under it (`cvc::world::water_colour`: the bed absorbed red first, so the shallows read sandy, then
+green, then deep blue) from one texture over the world (`cvc::world::paint_water`) that is clear
+wherever the full terrain mesh is dry, so the water ends at the mesh's own shoreline at every rung;
+the ground's texture paints the water's colour where the mesh is under it, so a coarse rung's
+ground that rises over a lake still reads as lake. `water: 0` leaves it out.
 
 **The fast render path.** A big static world draws fast when it is a few merged meshes and its
 shadow maps are re-baked rarely and spent where the camera looks. These keys say so

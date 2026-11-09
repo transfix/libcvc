@@ -1285,17 +1285,26 @@ int main() {
         "generated_world added its merged props / buildings / foliage meshes beside it");
     {
       // The water: a surface ladder per wet chunk under world_water, on its chunk's rungs, opaque,
-      // casting no shadow, coloured by depth.
+      // casting no shadow, coloured by depth from the water's texture (world::paint_water: clear
+      // over dry ground, so a coarse rung's cells end at the mesh's shore), which one empty mesh
+      // beside them holds and every rung shares.
       int wet = 0;
-      bool styled = true;
-      if (auto g = sg.getGraphics("world_water"))
+      bool styled = true, textured = true;
+      std::shared_ptr<cvc::gl::GeometryNode> holder;
+      if (auto g = sg.getGraphics("world_water")) {
+        holder = std::dynamic_pointer_cast<cvc::gl::GeometryNode>(g->findChildByName("texture"));
         for (const auto &c : g->getGraphicsChildren())
           if (auto l = std::dynamic_pointer_cast<cvc::gl::LodGraphicsNode>(c)) {
             ++wet;
             styled = styled && l->rungCount() == 5 && !l->rung(0)->castsShadow();
+            for (int k = 0; k < l->rungCount(); ++k)
+              textured = textured && l->rung(k)->hasTexture();
           }
+      }
       chk(wet > 0 && styled,
           "generated_world drew its water as surface ladders on the chunk rungs");
+      chk(holder && holder->hasTexture() && holder->textureWidth() > 0 && textured,
+          "every water rung is drawn with the water's one shared texture");
     }
     chk(realized.height_fields.count("world") == 1,
         "generated_world published its ground (ground: world stands on it)");

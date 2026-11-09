@@ -830,6 +830,109 @@ TEST(WorldGenerated, WaterRungsCoverTheWetCells) {
     EXPECT_TRUE(g.const_tris().empty());
 }
 
+// The water's texture follows the terrain mesh texel by texel: opaque and the column's colour where
+// the mesh is under the water, clear where it is dry. A coarse rung's water cells, drawn whole,
+// reach over dry ground wherever their corners straddle the shore (the lake over grass on a large
+// world); their texture coordinates land on clear texels there, which the renderer discards, so
+// the water ends at the mesh's own shore whatever the rung.
+TEST(WorldGenerated, TheWaterTextureEndsTheWaterAtTheMeshShore) {
+  const generated_world w = generate_world(small_world());
+  const cvc::height_field &hf = *w.terrain;
+  const double sea = w.params.water_level_m;
+  const int T = 257;
+  const std::vector<unsigned char> img = paint_water(w, T);
+  ASSERT_EQ(img.size(), std::size_t(T) * T * 4);
+  const grid_spec &g = w.grid;
+  auto texelX = [&](int tx) { return g.min_x + double(tx) / (T - 1) * (g.max_x - g.min_x); };
+  auto texelY = [&](int ty) { return g.min_y + double(ty) / (T - 1) * (g.max_y - g.min_y); };
+  int wetTexels = 0, dryTexels = 0;
+  for (int ty = 0; ty < T; ++ty)
+    for (int tx = 0; tx < T; ++tx) {
+      const double h = hf.height(texelX(tx), texelY(ty));
+      const unsigned char *px = &img[(std::size_t(ty) * T + tx) * 4];
+      if (h < sea) {
+        ++wetTexels;
+        ASSERT_EQ(px[3], 255) << tx << "," << ty;
+        const cvc::geometry::color_t c = water_colour(sea - h);
+        for (int q = 0; q < 3; ++q)
+          EXPECT_NEAR(px[q], c[std::size_t(q)] * 255.0, 1.0);
+      } else {
+        ++dryTexels;
+        ASSERT_EQ(px[3], 0) << tx << "," << ty;
+      }
+    }
+  EXPECT_GT(wetTexels, 500);
+  EXPECT_GT(dryTexels, 500);
+
+  // The coarsest rung's water, sampled across each triangle: where its point's texel lies over dry
+  // mesh the texture is clear there (and there are such points: the whole cells spill), where it
+  // lies over wet mesh, opaque. The texel found from the point's (u, v) is the point's own.
+  const double texel = (g.max_x - g.min_x) / (T - 1);
+  int spill = 0, inside = 0;
+  for (const terrain_chunk &ch : w.terrain_chunks) {
+    if (ch.water.empty() || ch.water.back().const_tris().empty())
+      continue;
+    const cvc::geometry &wg = ch.water.back();
+    const auto &P = wg.const_points();
+    const auto &UV = wg.const_uvs();
+    ASSERT_EQ(UV.size(), P.size());
+    for (const auto &t : wg.const_tris())
+      for (int a = 0; a <= 6; ++a)
+        for (int b = 0; a + b <= 6; ++b) {
+          const double l1 = a / 6.0, l2 = b / 6.0, l0 = 1.0 - l1 - l2;
+          const double x = l0 * P[t[0]][0] + l1 * P[t[1]][0] + l2 * P[t[2]][0];
+          const double y = l0 * P[t[0]][1] + l1 * P[t[1]][1] + l2 * P[t[2]][1];
+          const double u = l0 * UV[t[0]][0] + l1 * UV[t[1]][0] + l2 * UV[t[2]][0];
+          const double v = l0 * UV[t[0]][1] + l1 * UV[t[1]][1] + l2 * UV[t[2]][1];
+          const int tx = int(std::lround(u * (T - 1))), ty = int(std::lround(v * (T - 1)));
+          ASSERT_LE(std::abs(texelX(tx) - x), 0.5 * texel + 1e-6);
+          ASSERT_LE(std::abs(texelY(ty) - y), 0.5 * texel + 1e-6);
+          const bool wet = hf.height(texelX(tx), texelY(ty)) < sea;
+          (wet ? inside : spill) += 1;
+          EXPECT_EQ(img[(std::size_t(ty) * T + tx) * 4 + 3], wet ? 255 : 0);
+        }
+  }
+  EXPECT_GT(spill, 100) << "the coarse rung's whole cells reach over dry ground";
+  EXPECT_GT(inside, 100);
+}
+
+// The ground's texture paints the water by the terrain mesh, not the raster: the raster is a fixed
+// number of cells a side (26 m cells on a 10 km world), so classed from it the painted shore lay
+// tens of metres off the mesh's, a band of water colour on the dry bank. Under the water a texel
+// takes the water's own colour for the column (what a coarse rung's ground shows where it rises
+// over the lake); a dry texel is never painted as water.
+TEST(WorldGenerated, ThePaintedShoreFollowsTheMesh) {
+  generated_world_params p = small_world();
+  p.raster_n = 33; // 12.5 m raster cells over the mesh's 3.1 m: a large world's ratio
+  const generated_world w = generate_world(p);
+  const cvc::height_field &hf = *w.terrain;
+  const double sea = w.params.water_level_m;
+  const int T = 257;
+  const std::vector<unsigned char> img = paint_surface(w, surface_color::material, T);
+  const grid_spec &g = w.grid;
+  int wet = 0, dryNearWater = 0;
+  for (int ty = 0; ty < T; ++ty)
+    for (int tx = 0; tx < T; ++tx) {
+      const double x = g.min_x + double(tx) / (T - 1) * (g.max_x - g.min_x);
+      const double y = g.min_y + double(ty) / (T - 1) * (g.max_y - g.min_y);
+      const double h = hf.height(x, y);
+      const unsigned char *px = &img[(std::size_t(ty) * T + tx) * 3];
+      if (h < sea) {
+        ++wet;
+        const cvc::geometry::color_t c = water_colour(sea - h);
+        for (int q = 0; q < 3; ++q)
+          ASSERT_NEAR(px[q], c[std::size_t(q)] * 255.0, 1.5) << tx << "," << ty;
+      } else {
+        // No water's blue-green on dry ground: every land colour has blue at most a little over
+        // red; the old shore paint was 0.36, 0.52, 0.50.
+        dryNearWater += h < sea + 3.0;
+        ASSERT_LT(int(px[2]) - int(px[0]), 16) << tx << "," << ty << " h " << h;
+      }
+    }
+  EXPECT_GT(wet, 500);
+  EXPECT_GT(dryNearWater, 200);
+}
+
 // Every point of the generated world under the water has a water surface over it.
 TEST(WorldGenerated, TheWaterIsDrawnWhereverItIs) {
   const generated_world w = generate_world(small_world());

@@ -2493,7 +2493,9 @@ jobs:
           $url = "https://github.com/pal1000/mesa-dist-win/releases/download/$tag/mesa3d-$tag-release-msvc.7z"
           $want = 'c6e90c3117233b66f7816df05026a5fb0f88eaf7829bd07a1724b981487ec0bb'
           $arc = Join-Path $env:RUNNER_TEMP 'mesa.7z'
-          Invoke-WebRequest -Uri $url -OutFile $arc
+          # GitHub's release download answers 5xx now and then (a "Unicorn!"
+          # page failed a whole 30-minute job once), so retry before failing.
+          Invoke-WebRequest -Uri $url -OutFile $arc -MaximumRetryCount 5 -RetryIntervalSec 15
           $got = (Get-FileHash -Algorithm SHA256 -Path $arc).Hash.ToLower()
           if ($got -ne $want) {
             Write-Host "::error::mesa3d $tag checksum mismatch. expected $want got $got"
