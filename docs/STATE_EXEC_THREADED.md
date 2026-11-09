@@ -1664,7 +1664,9 @@ stop flags since Stage 0. The same queue carries `set_priority`. As built, on bo
   discarded by the next run. The sync `stop()` also notifies the idle wait, so it is no longer
   async-signal-safe (the notify takes a lock on POSIX). It takes its own reference to that
   wakeup before it stores the flag, so the scheduler may be destroyed as soon as `run()` returns,
-  while `stop()` is still notifying. The async run loop never waits, so its `stop()` notifies
+  while `stop()` is still notifying. The run reads the flag with acquire, pairing with `stop()`'s
+  release store, so that store happens before the destruction (a relaxed read left the two
+  unordered, and clang-tsan reported the race). The async run loop never waits, so its `stop()` notifies
   nothing.
 - **`post_control`'s kinds** are `kill` (reason `killed_by_user`), `pause`, `resume`, `signal`
   (`"SIGKILL"` kills) and `set_priority`, each the direct call's host path, unchecked, and

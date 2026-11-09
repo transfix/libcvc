@@ -809,7 +809,9 @@ uint64_t scheduler::run_steps(std::optional<uint64_t> max_steps, std::optional<d
     budget->start();
   }
 
-  while (!stop_requested_.load(std::memory_order_relaxed)) {
+  // The flag is read with acquire, here and in idle_wait: a run that ends on stop() returns to an
+  // owner that may destroy the scheduler at once, and the acquire puts stop()'s store before that.
+  while (!stop_requested_.load(std::memory_order_acquire)) {
     // Commands posted from other threads first (S0.7): a resume may make the only process
     // runnable, and a kill may end the last one.
     if (controls_waiting_.load(std::memory_order_acquire) != 0)
@@ -873,7 +875,7 @@ bool scheduler::idle_wait(std::optional<uint64_t> max_steps, uint64_t &steps, ti
            (home_ && home_->port_pending());
   };
   for (clock::time_point t = now;
-       !stop_requested_.load(std::memory_order_relaxed) && t < until && !posted();
+       !stop_requested_.load(std::memory_order_acquire) && t < until && !posted();
        t = clock::now()) {
     const clock::time_point slice = until - t > kStopCheck ? t + kStopCheck : until;
     idle_->wait_until(slice, for_timer && slice == until);
