@@ -1189,6 +1189,9 @@ Most of the GL-viewer work is already on master. What exists, and what is new:
    - `on_pick:` runs an action program with those keys set, so tools can be written in the DSL.
    - This is the "click-to-world picking in a viewport" item already on the libcvc list (L0d).
      Build it once, here.
+   - *Built for orbit views (L0d):* `input: pick`, `pick:` (`x`, `y`, `z`, `hit`, `node`, `button`,
+     `mods`, `phase`, `view`, `seq`) and `on_pick:`. The slice mode's `{i,j,k}` and `value` come
+     with the slice camera mode.
 4. **Overlays that stay on top of a slice:** point glyphs, polylines and crosshairs drawn as child
    geometry nodes of the slice, with a coincident-topology offset (or a later render layer) so
    they never z-fight the textured quad. `point_size` / `line_width` already exist as override

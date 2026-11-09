@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cvc/ariadne/bind.h> // resolve_bind, write: where a pick lands
 #include <cvc/ariadne/widget.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/GraphicsNode.h>
@@ -34,6 +35,7 @@
 #include <vector>
 #include <vtkActor.h>
 #include <vtkCamera.h>
+#include <vtkCellPicker.h>
 #include <vtkCommand.h>
 #include <vtkMapper.h>
 #include <vtkMatrix4x4.h>
@@ -175,6 +177,12 @@ struct SceneViews::View {
   std::string shadow_built;                                  // ... and in which mode
   vtkSmartPointer<vtkRenderPass> shadow_pass;
   bool input = true;   // drags and the wheel move its camera
+  // input: pick: the left button picks instead of turning the camera, writing where it landed
+  // under pick_key (absolute) and raising on_pick.
+  bool pick = false;
+  std::string pick_key, on_pick;
+  bool picking = false; // a left press that picks is down
+  long pick_seq = 0;
   bool drawn = false;  // a widget drew it this frame
   bool framed = false; // its camera has been framed on what it shows
   double region[4] = {-1.0, -1.0, -1.0, -1.0};
@@ -684,6 +692,106 @@ void SceneViews::bind_camera(View &v, const std::string &name) {
   v.camera = bound;
 }
 
+bool SceneViews::pick_at(View &v, double x, double y, PickHit &hit) const {
+  hit = PickHit{};
+  vtkRenderer *ren = v.vp ? v.vp->renderer() : nullptr;
+  if (!ren)
+    return false;
+  // What the scene's nodes draw, each node's own props by prop, and an override's stand-in by its
+  // original's: the pick sees only these, never the chrome (grid, axes, bounds).
+  std::unordered_map<vtkProp *, std::string> node_of;
+  SceneSlot slot;
+  if (scenes_ && scenes_(v.scene, slot) && slot.realized)
+    for (const RealizedScene::TaggedNode &t : slot.realized->nodes) {
+      std::unordered_set<vtkProp *> own;
+      collect(t.node.lock(), own, false);
+      for (vtkProp *p : own)
+        node_of.emplace(p, t.id);
+    }
+  for (const auto &t : v.twins) {
+    const auto it = node_of.find(t.first);
+    if (it == node_of.end())
+      continue;
+    if (t.second.actor)
+      node_of.emplace(t.second.actor.GetPointer(), it->second);
+    if (t.second.volume)
+      node_of.emplace(t.second.volume.GetPointer(), it->second);
+  }
+  // A real geometry hit test, as SceneRenderer::pickWorld: a miss over empty space is a miss.
+  vtkNew<vtkCellPicker> picker;
+  picker->SetTolerance(0.0005);
+  picker->PickFromListOn();
+  vtkPropCollection *props = ren->GetViewProps();
+  vtkCollectionSimpleIterator it;
+  props->InitTraversal(it);
+  int listed = 0;
+  while (vtkProp *p = props->GetNextProp(it))
+    if (node_of.count(p)) {
+      picker->AddPickList(p);
+      ++listed;
+    }
+  if (listed == 0 || !picker->Pick(x, y, 0.0, ren) || picker->GetCellId() < 0)
+    return false;
+  picker->GetPickPosition(hit.world);
+  hit.hit = true;
+  if (vtkProp *prop = picker->GetViewProp()) {
+    const auto n = node_of.find(prop);
+    if (n != node_of.end())
+      hit.node = n->second;
+  }
+  return true;
+}
+
+void SceneViews::pick(View &v, const char *phase, ari::CustomEdit &edit) {
+#ifdef CVC_ENABLE_IMGUI
+  const ImGuiIO &io = ImGui::GetIO();
+  // The pointer in VTK display coordinates: framebuffer pixels from the lower left.
+  const double x = io.MousePos.x * io.DisplayFramebufferScale.x;
+  const double y = (io.DisplaySize.y - io.MousePos.y) * io.DisplayFramebufferScale.y;
+  PickHit hit;
+  pick_at(v, x, y, hit);
+  std::string mods;
+  for (const auto &[on, name] : {std::pair<bool, const char *>{io.KeyShift, "shift"},
+                                 {io.KeyCtrl, "ctrl"},
+                                 {io.KeyAlt, "alt"},
+                                 {io.KeySuper, "super"}})
+    if (on)
+      mods += (mods.empty() ? "" : ",") + std::string(name);
+  const auto num = [](double d) {
+    char b[64];
+    std::snprintf(b, sizeof b, "%.9g", d);
+    return std::string(b);
+  };
+  std::vector<std::pair<std::string, std::string>> f = {{"x", hit.hit ? num(hit.world[0]) : ""},
+                                                        {"y", hit.hit ? num(hit.world[1]) : ""},
+                                                        {"z", hit.hit ? num(hit.world[2]) : ""},
+                                                        {"hit", hit.hit ? "1" : "0"},
+                                                        {"node", hit.node},
+                                                        {"button", "1"},
+                                                        {"mods", mods},
+                                                        {"phase", phase},
+                                                        {"view", v.name},
+                                                        {"seq", std::to_string(++v.pick_seq)}};
+  SceneSlot slot;
+  if (!v.pick_key.empty() && scenes_ && scenes_(v.scene, slot) && slot.sg) {
+    cvc::app &app = slot.sg->appContext();
+    for (const auto &kv : f) // seq last: a watcher on it sees the rest written
+      ari::write<std::string>(app, v.pick_key + "." + kv.first, kv.second);
+  }
+  if (!v.on_pick.empty()) {
+    edit.fire = v.on_pick;
+    edit.fields = std::move(f);
+  }
+#else
+  (void)v, (void)phase, (void)edit;
+#endif
+}
+
+bool SceneViews::pick(const std::string &view, double x, double y, PickHit &hit) const {
+  const auto it = views_.find(view);
+  return it != views_.end() && pick_at(*it->second, x, y, hit);
+}
+
 CameraController &SceneViews::controller(View &v) {
   if (v.camera == "main" && main_)
     return *main_;
@@ -1012,7 +1120,17 @@ void SceneViews::register_widget() {
           v->show = tag_list(&bound);
         }
         v->chrome = w.props.flag("chrome", true);
-        v->input = w.props.flag("input", true);
+        // input: true (drags turn the camera) | false | pick (the left button picks).
+        v->pick = w.props.str("input") == "pick";
+        v->input = v->pick || w.props.flag("input", true);
+        v->on_pick = w.props.str("on_pick");
+        v->pick_key.clear();
+        if (v->pick) {
+          SceneSlot slot;
+          if (scenes_ && scenes_(v->scene, slot) && slot.sg)
+            v->pick_key = ari::resolve_bind(slot.sg->getStatePrefix(),
+                                            w.props.str("pick", "viewers." + name + ".pick"));
+        }
         // Its camera: `camera: <id>` draws from a named camera (or `main`); otherwise its own,
         // which `mode:` (orbit | fly | map | track), `track:`, `azimuth:`, `elevation:` and `zoom:`
         // start. `camera: orbit` and the like name a mode, as #1005 spelled it.
@@ -1109,40 +1227,51 @@ void SceneViews::register_widget() {
           dl->AddRect(r.Min, r.Max, ImGui::GetColorU32(ImGuiCol_NavHighlight), 0.0f, 0,
                       ImGui::IsItemActive() ? 2.0f * unit : 1.0f * unit);
 
-        // Its camera: a drag orbits (the middle or right button pans), the wheel zooms.
+        // Its camera: a drag orbits (the middle or right button pans), the wheel zooms. With input:
+        // pick, the left button picks instead.
+        ari::CustomEdit edit;
         if (v->input) {
           cvc::gl::keepTouchDrag(); // a finger's drag here turns the camera, not the window
           CameraController &cam = controller(*v);
           const ImGuiIO &io = ImGui::GetIO();
           if (ImGui::IsItemHovered() && io.MouseWheel != 0.0f)
             cam.mouseWheel(io.MouseWheel);
-          if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+          if (!v->pick && ImGui::IsItemHovered() &&
+              ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
             v->framed = false; // back to where it started (a named camera, for all its views)
             auto it = cameras_.find(v->camera);
             if (it != cameras_.end())
               it->second->framed = false;
           }
+          const bool moved_ptr = io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f;
           if (ImGui::IsItemActivated()) {
-            if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            if (ImGui::IsMouseDown(ImGuiMouseButton_Left) && v->pick) {
+              v->picking = true;
+              pick(*v, "down", edit);
+            } else if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
               cam.beginDrag();
               v->dragging = true;
             } else {
               cam.beginPan();
               v->panning = true;
             }
+          } else if (v->picking && ImGui::IsItemActive() && moved_ptr) {
+            pick(*v, "drag", edit);
           }
-          if (ImGui::IsItemActive() && (io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f))
+          if (ImGui::IsItemActive() && moved_ptr && (v->dragging || v->panning))
             cam.mouseLook(static_cast<int>(std::lround(io.MouseDelta.x)),
                           -static_cast<int>(std::lround(io.MouseDelta.y))); // VTK's y is up
           if (ImGui::IsItemDeactivated()) {
-            if (v->panning)
+            if (v->picking)
+              pick(*v, "up", edit);
+            else if (v->panning)
               cam.endPan();
             else if (v->dragging)
               cam.endDrag();
-            v->dragging = v->panning = false;
+            v->dragging = v->panning = v->picking = false;
           }
         }
-        return {};
+        return edit;
       });
 #endif
 }

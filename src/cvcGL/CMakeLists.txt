@@ -1054,6 +1054,15 @@ if(NOT EMSCRIPTEN)
   add_test(NAME cvcgl_ariadne_views COMMAND cvcgl_ariadne_views)
 endif()
 
+# Click-to-world picking in a viewport: an `input: pick` view's left button picks what it draws,
+# writes where it landed under its `pick:` key and raises `on_pick:`. Offscreen; skips where
+# nothing rasterises unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_pick test/cvcgl_ariadne_pick.cpp)
+  target_link_libraries(cvcgl_ariadne_pick PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_pick COMMAND cvcgl_ariadne_pick)
+endif()
+
 # A document's assets (read once, shared buffers) and its scenes: of their own (each a SceneGraph
 # with its own viewport, mirrored by the viewports that name it), and main_view: show. Offscreen;
 # the AriRuntime part skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.

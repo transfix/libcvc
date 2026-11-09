@@ -108,6 +108,10 @@ struct CustomEdit {
   bool changed = false;
   bool committed = false;
   std::string value;
+  // An event the widget raises this frame (a program, or a bare name for a host handler), and the
+  // fields a program reads from its `event` dict (a viewport's on_pick:). Empty: none.
+  std::string fire;
+  std::vector<std::pair<std::string, std::string>> fields;
 };
 // An RGB colour edit (§ G7). `drawn` is the backend's signal that it actually rendered a colour
 // widget (false on a backend that has none — the core then shows the value as text). `rgb` is the
