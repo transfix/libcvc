@@ -933,6 +933,11 @@ add_test(NAME cvcgl_imgui_radio COMMAND cvcgl_imgui_radio)
 add_executable(cvcgl_imgui_group_click test/cvcgl_imgui_group_click.cpp)
 target_link_libraries(cvcgl_imgui_group_click PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_group_click COMMAND cvcgl_imgui_group_click)
+# A picture with fullscreen: true (§5.13): a tap asks the host's handler for the window's
+# fullscreen and shows the picture alone, as wide as the view; Esc puts both back. No window, no GL.
+add_executable(cvcgl_imgui_fullscreen test/cvcgl_imgui_fullscreen.cpp)
+target_link_libraries(cvcgl_imgui_fullscreen PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_fullscreen COMMAND cvcgl_imgui_fullscreen)
 # Scrolling with a finger (TouchScroll): a drag scrolls the window under it and a fling glides
 # against ui.scroll_friction, while sliders, fields being edited and title bars keep their drags.
 # Touches fed through ImGui's own input. No window, no GL.

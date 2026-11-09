@@ -413,7 +413,8 @@ Show it while the work runs with `visible_when`:
   clock: 1/30 s a frame), so `--frames 3` shows the spinner one step on from `--frames 1`.
 
 A backend advertises `Capabilities{windows, menubar, mouse, keyboard, color, glsl,
-view_embed, owns_loop, terminal, bitmap, kitty, sixel, item_groups}`
+view_embed, owns_loop, terminal, bitmap, kitty, sixel, item_groups, clipboard, fullscreen,
+fullscreen_view}`
 ([`backend.h`](../inc/cvc/ariadne/backend.h)). A document's `requires:` and `(has? ...)`
 read them through capability tokens ([§5.7](#57-requires-and-has--what-a-document-needs-from-its-host)).
 `owns_loop` distinguishes a **host-pumped**
@@ -1253,11 +1254,13 @@ entry warns. An entry is one of:
   | `gl.shaders` | both `gl.scene.shaders` and `gl.ui.shaders` |
   | `gl.view` | a live render view can sit in a widget |
   | `ui.windows`, `ui.menubar`, `ui.color` | movable windows; a menu bar; coloured styling |
+  | `ui.fullscreen` | `(fullscreen ON)` makes the window cover the screen: a GL window, or the canvas in a browser; never a terminal (§10.7) |
   | `input.mouse`, `input.keyboard` | pointer input; key and text input |
   | `ui.group_click` | a group with `on_click:` is one item over its whole area, and `hover: highlight` lights it (§5.19); ImGui, FTXUI and tvision |
   | `raster.bitmap` | images show in real pixels (a GL window, or a kitty or Sixel terminal) |
   | `term`, `term.kitty`, `term.sixel` | a text terminal; one that speaks kitty graphics; one that draws Sixel |
   | `relay` | the document is a relay's server document, run by `arisrv --doc` (§9.7) |
+  | `image.fullscreen` | `fullscreen: true` on `image:` and `video:` shows the picture alone, filling the window or the terminal (§5.13) |
 
   GLSL runs in two places, and they are separate facts. The scene's shaders run in the
   scene adapter's renderer (`SceneAdapter::runs_shaders`), the UI's in the backend
@@ -1549,6 +1552,8 @@ windows:
   rule web clients use for avatars) in an `image:` plays as a decorative video (§5.13): looping,
   silent, fitted and shaped like the picture would be. Without a player it is the placeholder,
   and `status:` says `unsupported` (or `remote`, `failed`) where a picture would say `ready`.
+- **`fullscreen: true`**: a click on the picture shows it alone, filling the window (or the
+  terminal), until Esc (§5.13).
 - **The capability token `image.url`** (§5.7) holds in every host that does this, so a document
   for older hosts too gates its pictures with `(has? "image.url")` or
   `requires: [{name: image.url, optional: true}]` and draws its own placeholder elsewhere (an
@@ -1721,11 +1726,51 @@ has loaded, or when it failed, nothing is drawn behind the content.
   - `--media-play always` plays anyway, and `--media-play never` never plays.
 - **Capability tokens** (§5.7): `media` means the media plays here, and `media.player` means
   the host has a player at all. `video.decorative` means `controls: false` and video URLs in
-  `image:` and `background:` are understood, `image.animated` means GIF and WebP animate, and
-  `image.fill` means `size: "N%"` and `max_height:` are understood.
+  `image:` and `background:` are understood, `image.animated` means GIF and WebP animate,
+  `image.fill` means `size: "N%"` and `max_height:` are understood, and `image.fullscreen` means
+  `fullscreen: true` is (below).
 - A player whose widget a frame did not draw (its window closed, its item scrolled out of a
   `repeat:`) is paused at once and closed 5 s later. `ari snapshot` waits while a player is
   still loading, as it waits for pictures.
+
+**Fullscreen.** `fullscreen: true` on a `video:` adds a Full screen button to its controls, and on
+an `image:` makes a click on the picture do the same. The picture is then shown alone, in place of
+the whole document: no windows, no menu bar, a black background, the picture as large as fits with
+its shape kept, and a video's controls along the bottom with Exit full screen in place of Full
+screen.
+
+```yaml
+- image: ""
+  bind: feed.items.{i}.media.0.url
+  size: ["100%", 0]
+  fullscreen: true                      # a click shows it alone, filling the window
+- video: clip
+  src: https://media.example/p/9.webm
+  bind: post.player
+  fullscreen: true                      # a Full screen button; post.player.fullscreen says 1 or 0
+```
+
+- **Leaving.** Esc, Exit full screen, or a click on the picture closes the view, and the document
+  is drawn as it was. A new document (or a reload) closes it too.
+- **The window.** In a GL window (`arigl`) the OS window goes fullscreen with the view, borderless
+  at the desktop's mode, and goes back when the view closes. In a browser page the canvas goes
+  fullscreen (`requestFullscreen`). The browser allows that only within the click's user
+  activation, which still holds the frame after the click. The browser's own Esc ends its
+  fullscreen without the page seeing a key, so the view closes when the page leaves fullscreen.
+- **A terminal** (FTXUI) has no window to resize, so the view fills the terminal. Tab reaches a
+  picture with `fullscreen: true`, and Enter shows it. The tvision desktop owns its screen, so
+  there `fullscreen: true` changes nothing: the picture is drawn as without it, and a video has no
+  Full screen button.
+- **The player** is the same one, so a video keeps playing from where it was. Its frames are
+  decoded for the view's size while it shows (`Player::set_frame_box`), and for the widget's own
+  box again after it.
+- **`<bind>.fullscreen`** (a `video:` with `bind:`) is `1` while the view shows it and `0`
+  otherwise. Write `1` to open the view and `0` to close it.
+- A click on a fullscreen picture inside a clickable group (§5.19) is the picture's, not the
+  group's.
+- Tokens (§5.7): `image.fullscreen` holds where the view opens (ImGui, FTXUI), and
+  `ui.fullscreen` where the window can cover the screen as well (ImGui in a window or a browser).
+  `(fullscreen ON)` (§10.7) does the window alone, for the whole document.
 
 ### 5.14 On a phone: UI size, hiding windows, the system keyboard
 
@@ -3874,6 +3919,50 @@ to try a document against by hand.
 UI, and the document should show it. The URL's origin must be one the host allows (§10.3), since a
 page opened in a browser carries whatever its URL says; anything else, and a scheme other than
 http(s), raises. One URL a second at most. It needs the network on, like the other verbs here.
+
+### 10.7 The clipboard and the window: `clipboard-set` and `fullscreen`
+
+Two verbs a document's programs call on the host's surface, for a "Copy link" button or a full
+screen view. The backend answers them, so they work the same in every host built on it.
+
+```yaml
+- button: Copy link
+  visible_when: (has? "clipboard-set")
+  on: (clipboard-set (state-get "post.url"))
+- button: Full screen
+  visible_when: (has? "ui.fullscreen")
+  on: (fullscreen (not (fullscreen)))
+```
+
+- **`(clipboard-set TEXT)`** puts TEXT on the system clipboard and returns `#t`, or `#f` when the
+  host refused. `(has? "clipboard-set")` says whether the host has a clipboard at all. The verb is
+  only bound where it does. The backends:
+  - **ImGui** (`arigl`): `cvc::gl::clipboard::set`, which is SDL's clipboard (Wayland included),
+    or the platform's under VTK's own window.
+  - **The arigl-web page**: `navigator.clipboard.writeText`. The browser writes only within a user
+    activation: the click (or key) that ran the action has one, since an action runs a frame
+    after the click and the activation lasts longer than that. Safari is the strictest. The write
+    is asynchronous, so `#t` means it was asked for.
+  - **FTXUI** (`ari`): an OSC 52 escape (`ESC ] 52 ; c ; base64 BEL`), written after the drain
+    that ran it. The terminal does the copy, so over SSH it lands on the user's own clipboard.
+    Most terminals take it: kitty, WezTerm, foot, Alacritty, iTerm2, Windows Terminal, and
+    xterm with `allowWindowOps`. tmux needs `set -g set-clipboard on`. A terminal that ignores it
+    says nothing, so `#t` means the escape was sent. More than 1 MiB of text is refused (`#f`).
+    `FtxuiBackend::take_clipboard()` hands the escapes to a headless driver.
+  - **The ari.html page** (xterm.js): the page answers the escape with
+    `navigator.clipboard.writeText`, as arigl-web does.
+  - **tvision** (`ari run --backend tvision`): tvision's `TClipboard`. On Windows that is the
+    system clipboard. On Unix it uses `wl-copy`, `xsel` or `xclip` when there is a display, else an
+    OSC 52 escape.
+- **`(fullscreen ON)`** makes the window cover the screen (`ON` truthy) or not, and returns `#t`
+  when the host did, or asked the browser to. **`(fullscreen)`** says whether it covers the screen
+  now. In a GL window it is the OS window, borderless at the desktop's mode. In the browser it is
+  the canvas, and only within a click's user activation, as above. A terminal has no such window:
+  both forms return `#f` there, and `(has? "ui.fullscreen")` is false. The verb is bound
+  everywhere, so a program can call it without asking first. The whole document stays as it is,
+  only larger. For one picture or video shown alone, use `fullscreen: true` on it (§5.13).
+- `ariadne_ftxui_test`'s `ClipboardSetIsAnOsc52Escape`, `cvcgl_imgui_fullscreen` and
+  `MediaPlayer.AFullscreenVideoIsShownAloneAndComesBack` check them.
 
 ---
 

@@ -14,9 +14,9 @@
 #include <cvc/gl/CameraController.h>            // cam.update / frameBounds
 #include <cvc/gl/GeometryNode.h>                // GeometryNode (gl-bind-stream target)
 #include <cvc/gl/ImGuiOverlay.h>                // overlay draw callback
-#include <cvc/gl/SceneGraph.h>    // scene().computeGraphicsBounds()/appContext()/prefix
-#include <cvc/gl/SceneRenderer.h> // view.render()/processUIEvents()/renderer()/windowClosed()
-#include <cvc/gl/Viewport.h>      // a scenes: entry's own viewport
+#include <cvc/gl/SceneGraph.h>      // scene().computeGraphicsBounds()/appContext()/prefix
+#include <cvc/gl/SceneRenderer.h>   // view.render()/processUIEvents()/renderer()/windowClosed()
+#include <cvc/gl/Viewport.h>        // a scenes: entry's own viewport
 #include <cvc/gl/ViewportManager.h> // ... added beside the main one
 #include <cvc/gl/ariadne/AriRuntime.h>
 #include <cvc/gl/ariadne/bundles.h>                // register_streaming / register_window_widgets
@@ -33,7 +33,41 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
-#include <vtkRenderer.h> // the scene background: a gradient reaches the renderer directly
+#include <vtkRenderWindow.h> // (fullscreen ON): the window covers the screen
+#include <vtkRenderer.h>     // the scene background: a gradient reaches the renderer directly
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#ifdef CVC_ENABLE_SDL
+#include "../SdlWindow.h" // the canvas cvcGL's SDL window draws into
+#endif
+
+// clang-format off: JavaScript bodies
+// The canvas covers the screen (requestFullscreen), or the page leaves fullscreen: 0 when the
+// browser has no such call. A browser grants it only within a user's activation (a click a frame
+// ago has it), and says no by rejecting the promise, which is_fullscreen then shows.
+EM_JS(int, cvcgl_canvas_fullscreen, (const char *selector, int on), {
+  var c = document.querySelector(UTF8ToString(selector));
+  try {
+    if (on) {
+      var req = c && (c.requestFullscreen || c.webkitRequestFullscreen);
+      if (!req)
+        return 0;
+      var p = req.call(c);
+      if (p && p.catch)
+        p.catch(function() {});
+    } else if (document.fullscreenElement || document.webkitFullscreenElement) {
+      (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+    }
+    return 1;
+  } catch (e) {
+    return 0;
+  }
+});
+EM_JS(int, cvcgl_canvas_is_fullscreen, (), {
+  return document.fullscreenElement || document.webkitFullscreenElement ? 1 : 0;
+});
+// clang-format on
+#endif
 
 namespace cvc {
 namespace gl {
@@ -322,6 +356,34 @@ AriRuntime::AriRuntime(SceneRenderer &view, CameraController &cam, ImGuiOverlay 
   // declared before app_rt_, so the Runtime it points at is destroyed first.
   app_rt_.set_backend(backend_);
   backend_.install(app_rt_.runtime(), *overlay_);
+  // (fullscreen ON) and the §5.13 fullscreen view: the window covers the screen. Natively the VTK
+  // window (cvcGL's SDL window: the desktop's mode, borderless); in a browser the canvas, through
+  // requestFullscreen, which the page grants within the click's user activation.
+  backend_.set_fullscreen_handler(
+      [this](bool on) {
+        vtkRenderWindow *w = view_->renderWindow();
+#ifdef __EMSCRIPTEN__
+        const char *canvas = "#canvas";
+#ifdef CVC_ENABLE_SDL
+        if (const SdlGLRenderWindow *sdl = SdlGLRenderWindow::SafeDownCast(w))
+          canvas = sdl->GetCanvasSelector();
+#endif
+        return cvcgl_canvas_fullscreen(canvas, on ? 1 : 0) != 0;
+#else
+        if (!w || w->GetOffScreenRendering()) // a snapshot keeps its size
+          return false;
+        w->SetFullScreen(on ? 1 : 0);
+        return true;
+#endif
+      },
+      [this] {
+#ifdef __EMSCRIPTEN__
+        return cvcgl_canvas_is_fullscreen() != 0;
+#else
+        vtkRenderWindow *w = view_->renderWindow();
+        return w && w->GetFullScreen() != 0;
+#endif
+      });
 
   // `type: viewport`: a view of the scene in a window. The draw callback hides, once the walk is
   // done, any view whose widget was not drawn this frame.

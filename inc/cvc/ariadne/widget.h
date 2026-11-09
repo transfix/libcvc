@@ -357,6 +357,9 @@ struct Widget {
   bool loop = false;
   bool muted = false;
   bool controls = true; // false: a decorative picture, no controls (autoplay/loop/muted default on)
+  // `fullscreen: true` on an image: or a video:: a click on the picture (a video's Full screen
+  // button) shows it alone, filling the window, until Esc.
+  bool fullscreen_control = false;
 
   // Kind::Progress: the bar is the number at `bind` placed in [lo, hi] (clamped); `overlay` is a
   // state path (or a computed expression) whose text is drawn over the bar, else the percent.

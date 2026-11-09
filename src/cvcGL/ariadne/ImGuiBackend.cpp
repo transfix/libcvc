@@ -15,6 +15,7 @@
 #include <cmath> // fmod: the arc's turn
 #include <cstring>
 #include <cvc/ariadne/ariadne.h>
+#include <cvc/gl/Clipboard.h>    // set_clipboard
 #include <cvc/gl/ImGuiBinding.h> // cvc::gl::ui::*
 #include <cvc/gl/ImGuiOverlay.h>
 #include <cvc/gl/TouchScroll.h> // keepTouchDrag: a widget with on_drag: keeps its drag
@@ -183,6 +184,9 @@ ariadne::Capabilities ImGuiBackend::capabilities() const {
   c.owns_loop = false; // guest mode: VTK's render pass drives Runtime::render()
   c.bitmap = true;     // image widgets draw as GL textures
   c.item_groups = true;
+  c.clipboard = cvc::gl::clipboard::canCopy();
+  c.fullscreen = static_cast<bool>(m_setFullscreen);
+  c.fullscreen_view = true;
   return c;
 }
 
@@ -1626,6 +1630,50 @@ void ImGuiBackend::cut_window_background(float, float, float, float) {}
 struct ImGuiBackend::BackdropFrame {};
 struct ImGuiBackend::ItemGroupFrame {};
 #endif
+
+bool ImGuiBackend::set_clipboard(const std::string &text) { return cvc::gl::clipboard::set(text); }
+
+void ImGuiBackend::set_fullscreen_handler(std::function<bool(bool)> set, std::function<bool()> is) {
+  m_setFullscreen = std::move(set);
+  m_isFullscreen = std::move(is);
+}
+bool ImGuiBackend::set_fullscreen(bool on) { return m_setFullscreen && m_setFullscreen(on); }
+bool ImGuiBackend::is_fullscreen() const { return m_isFullscreen && m_isFullscreen(); }
+
+cvc::ariadne::FullscreenView ImGuiBackend::begin_fullscreen_view() {
+  cvc::ariadne::FullscreenView v;
+#ifdef CVC_ENABLE_IMGUI
+  const ImGuiViewport *vp = ImGui::GetMainViewport();
+  ImGui::SetNextWindowPos(vp->Pos);
+  ImGui::SetNextWindowSize(vp->Size);
+  ImGui::SetNextWindowFocus(); // over everything, and the keys are its
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+  ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(0, 0, 0, 255));
+  ImGui::Begin("##ari_fullscreen", nullptr,
+               ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollWithMouse);
+  ImGui::PopStyleColor();
+  ImGui::PopStyleVar(2);
+  m_inFullscreenView = true;
+  const float scale = ui_px(1.0f) > 0.0f ? ui_px(1.0f) : 1.0f;
+  const ImVec2 avail = ImGui::GetContentRegionAvail();
+  v.shown = true;
+  v.w = avail.x / scale;
+  v.h = avail.y / scale;
+  v.controls_h = ImGui::GetFrameHeightWithSpacing() / scale;
+  v.exit = ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+#endif
+  return v;
+}
+
+void ImGuiBackend::end_fullscreen_view() {
+#ifdef CVC_ENABLE_IMGUI
+  if (m_inFullscreenView)
+    ImGui::End();
+  m_inFullscreenView = false;
+#endif
+}
 
 void ImGuiBackend::begin_item_group(const char *id, const cvc::ariadne::ItemGroupOptions &opts) {
 #ifdef CVC_ENABLE_IMGUI

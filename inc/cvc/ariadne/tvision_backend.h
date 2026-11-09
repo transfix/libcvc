@@ -32,6 +32,9 @@ public:
   explicit TvisionBackend(Options opts); // opts.hosted is forced on
 
   Capabilities capabilities() const override;
+  // (clipboard-set TEXT): tvision's TClipboard (the Windows clipboard; on Unix wl-copy, xsel or
+  // xclip, else an OSC 52 escape).
+  bool set_clipboard(const std::string &text) override;
 
   // Run the tvision desktop on the terminal until a quit (Alt-X, a quit action, should_close) or an
   // interrupt the document does not handle; the same RunOptions and signal routing as

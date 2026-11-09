@@ -574,7 +574,17 @@ struct FtxuiBackend::Impl {
 
   // A container being filled during the walk.
   struct Frame {
-    enum class Type { Root, Menubar, Menu, InlineMenu, Window, Grid, Backdrop, ItemGroup };
+    enum class Type {
+      Root,
+      Menubar,
+      Menu,
+      InlineMenu,
+      Window,
+      Grid,
+      Backdrop,
+      ItemGroup,
+      Fullscreen
+    };
     Type type = Type::Root;
     fx::Elements items;
     std::vector<fx::Elements> cells; // Grid: one list per cell
@@ -662,7 +672,8 @@ struct FtxuiBackend::Impl {
   fx::Element menubar;
   fx::Element root = fx::text("");
   std::string tooltip;
-  std::string last_item; // the leaf emitted last (item_* queries, set_tooltip)
+  std::string clipboard_out;            // OSC 52 escapes clipboard-set queued, for run() to write
+  std::string last_item;                // the leaf emitted last (item_* queries, set_tooltip)
   std::vector<std::string> item_groups; // the item groups open in the walk, innermost last
   // The last item group closed, and whether this walk's press or key fired it (item_clicked).
   std::string group_hit_id;
@@ -1682,7 +1693,9 @@ Capabilities FtxuiBackend::capabilities() const {
   c.kitty = m_->term_gfx.kitty;
   c.sixel = m_->term_gfx.sixel;
   c.bitmap = m_->pixels();
-  c.item_groups = true; // begin_item_group: focusable, lit in a gutter
+  c.item_groups = true;                // begin_item_group: focusable, lit in a gutter
+  c.clipboard = !m_->opt.hosted;       // OSC 52 (a hosted backend's host has its own)
+  c.fullscreen_view = !m_->opt.hosted; // a layer over the screen (tvision's desktop owns it)
   return c;
 }
 
@@ -2364,6 +2377,59 @@ void FtxuiBackend::begin_item_group(const char *id, const ItemGroupOptions &opts
   }
   m.item_groups.push_back(f.id);
   m.stack.push_back(std::move(f));
+}
+
+// A terminal takes a clipboard escape of any size it likes; a link fits many times over, and a
+// payload past this is more likely a mistake than something to copy.
+constexpr std::size_t kMaxClipboard = 1 << 20;
+
+bool FtxuiBackend::set_clipboard(const std::string &text) {
+  Impl &m = *m_;
+  if (m.opt.hosted || text.size() > kMaxClipboard)
+    return false;
+  m.clipboard_out += gfx::osc52_copy(text);
+  return true;
+}
+
+std::string FtxuiBackend::take_clipboard() {
+  std::string out;
+  out.swap(m_->clipboard_out);
+  return out;
+}
+
+FullscreenView FtxuiBackend::begin_fullscreen_view() {
+  Impl &m = *m_;
+  Impl::Frame f;
+  f.type = Impl::Frame::Type::Fullscreen;
+  m.stack.push_back(std::move(f));
+  FullscreenView v;
+  if (m.opt.hosted)
+    return v;
+  v.shown = true;
+  // The screen less a column each side (draw_image's widest picture), in the document's px.
+  v.w = static_cast<float>(std::max(1, m.term_w - 2) * m.opt.cell_px_w);
+  v.h = static_cast<float>(std::max(1, m.term_h) * m.opt.cell_px_h);
+  v.controls_h = static_cast<float>(m.opt.cell_px_h);
+  if (m.ev_live && m.ev.kind == TermEvent::Kind::Key && m.ev.key == "Escape") {
+    m.use();
+    v.exit = true;
+  }
+  return v;
+}
+
+void FtxuiBackend::end_fullscreen_view() {
+  Impl &m = *m_;
+  if (m.stack.empty() || m.top().type != Impl::Frame::Type::Fullscreen)
+    return;
+  Impl::Frame f = m.pop();
+  if (m.opt.hosted)
+    return;
+  // Over everything, the screen cleared under it: the picture centred, its controls below it.
+  fx::Element el = f.items.empty() ? fx::emptyElement() : fx::vbox(std::move(f.items));
+  el = fx::vbox({fx::filler(), el | fx::hcenter, fx::filler()}) |
+       fx::size(fx::WIDTH, fx::EQUAL, std::max(1, m.term_w)) |
+       fx::size(fx::HEIGHT, fx::EQUAL, std::max(1, m.term_h)) | fx::clear_under;
+  m.layers.push_back({m.z_top + 1, place(isolated(std::move(el)), 0, 0)});
 }
 
 void FtxuiBackend::end_item_group() {
@@ -3713,6 +3779,10 @@ FtxuiBackend::run_loop(Runtime &rt, const RunOptions &opts, const std::function<
         }
     if (drain)
       drain(); // queued actions run here, off the walk (§7.2)
+    if (const std::string copy = m.clipboard_out; !copy.empty()) { // (clipboard-set ...): OSC 52
+      m.clipboard_out.clear();
+      std::cout << copy << std::flush;
+    }
     if (should_close && should_close())
       screen.Exit();
     if (loop.HasQuitted())
@@ -3821,6 +3891,10 @@ bool FtxuiBackend::item_clicked() { return false; }
 bool FtxuiBackend::item_hovered() { return false; }
 void FtxuiBackend::begin_item_group(const char *, const ItemGroupOptions &) {}
 void FtxuiBackend::end_item_group() {}
+bool FtxuiBackend::set_clipboard(const std::string &) { return false; }
+std::string FtxuiBackend::take_clipboard() { return {}; }
+FullscreenView FtxuiBackend::begin_fullscreen_view() { return {}; }
+void FtxuiBackend::end_fullscreen_view() {}
 bool FtxuiBackend::item_dragged() { return false; }
 bool FtxuiBackend::item_drag_started() { return false; }
 bool FtxuiBackend::item_drag_ended() { return false; }

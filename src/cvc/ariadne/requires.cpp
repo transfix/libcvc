@@ -54,6 +54,9 @@ const std::vector<TokenRule> &rules() {
                           "card): a click, a tap or Enter fires it, hover: highlight lights it, "
                           "and in a terminal Tab reaches it"},
        [](const HostFacts &f) { return f.caps.item_groups; }},
+      {{"ui.fullscreen", "(fullscreen ON) makes the window cover the screen: a GL window, or the "
+                         "canvas in a browser; never a terminal"},
+       [](const HostFacts &f) { return f.caps.fullscreen; }},
       {{"raster.bitmap", "images in real pixels (a GL window, or a kitty or Sixel terminal)"},
        [](const HostFacts &f) { return f.caps.bitmap; }},
       {{"term", "the document is drawn in a text terminal"},
@@ -79,6 +82,10 @@ const std::vector<TokenRule> &rules() {
       {{"image.fill", "image: and video: take size: \"N%\" (that share of the line's width, as "
                       "wide as the window where the backend can measure it) and max_height:"},
        [](const HostFacts &) { return true; }},
+      {{"image.fullscreen", "image: and video: take fullscreen: true: a click on the picture (a "
+                            "video's Full screen button) shows it alone, filling the window or the "
+                            "terminal, until Esc (not on the tvision desktop)"},
+       [](const HostFacts &f) { return f.caps.fullscreen_view; }},
       {{"text.emoji", "text: takes emoji: (a map of :shortcode: names to picture URIs), drawn "
                       "in the line where the backend can put a picture there"},
        [](const HostFacts &) { return true; }},

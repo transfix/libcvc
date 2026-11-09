@@ -239,6 +239,7 @@ const char *const kAriSchema = R"ARISCHEMA({
         "background": {"type": ["string", "object"]},
         "poster": {"type": "string"},
         "controls": {"$ref": "#/$defs/flag"},
+        "fullscreen": {"$ref": "#/$defs/flag"},
         "autoplay": {"$ref": "#/$defs/flag"},
         "loop": {"$ref": "#/$defs/flag"},
         "muted": {"$ref": "#/$defs/flag"},
@@ -1006,6 +1007,7 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
                "' is not rect or circle — using rect");
     if (!w.media_auth.empty() && !w.src.empty() && w.src[0] != '(' && !media::is_uri(w.src))
       ctx.warn("ari: image '" + label + "': auth: is for a picture by URL (src: https://...)");
+    w.fullscreen_control = flag(n, "fullscreen", false); // §5.13 a click shows it alone
     return w;
   }
   if (type == "video" || type == "audio") { // §5.13 a player: a source, controls, state keys
@@ -1033,6 +1035,9 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
       ctx.warn("ari: " + type + " '" + label + "': shape: '" + str(n, "shape") +
                "' is not rect or circle — using rect");
     w.media_status = str(n, "status");
+    w.fullscreen_control = flag(n, "fullscreen", false); // §5.13 a Full screen button
+    if (w.fullscreen_control && w.kind == Kind::Audio)
+      ctx.warn("ari: audio '" + label + "': fullscreen: is for a picture (image:, video:)");
     if (w.src.empty())
       ctx.warn("ari: " + type + " '" + label + "' has no src: — it plays nothing");
     return w;

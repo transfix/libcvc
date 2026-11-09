@@ -284,6 +284,11 @@ std::string kitty_placeholder(int row, int col) {
   return s;
 }
 
+std::string osc52_copy(const std::string &text) {
+  return "\x1b]52;c;" +
+         base64_encode(reinterpret_cast<const unsigned char *>(text.data()), text.size()) + "\x07";
+}
+
 std::string base64_encode(const unsigned char *d, std::size_t n) {
   static const char kAlphabet[] =
       "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

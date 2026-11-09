@@ -174,6 +174,14 @@ public:
   // on_click takes focus (Tab, a click), Enter or Space firing it; a gutter column marks it lit.
   void begin_item_group(const char *id, const ItemGroupOptions &opts) override;
   void end_item_group() override;
+  // (clipboard-set TEXT): an OSC 52 escape, which run() writes after the drain that ran it (the
+  // terminal decides; take_clipboard() is it, headless). Hosted: none (TvisionBackend has its own).
+  bool set_clipboard(const std::string &text) override;
+  std::string take_clipboard();
+  // §5.13 the fullscreen view: a layer over the whole screen (Esc leaves). Not hosted: tvision's
+  // desktop owns the screen there.
+  FullscreenView begin_fullscreen_view() override;
+  void end_fullscreen_view() override;
 
   BoolEdit menu_item_toggle(const char *label, bool current) override;
   BoolEdit checkbox(const char *label, bool current) override;
