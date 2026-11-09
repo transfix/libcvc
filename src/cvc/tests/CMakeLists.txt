@@ -3331,6 +3331,11 @@ foreach(_cvc_target IN LISTS TEST_TARGETS)
   endif()
 endforeach()
 
+# A deep document's load and draw: an 8 MB stack on Windows, as the hosts have
+# (CMake/CvcHostStack.cmake); ariadne_loader_test loads one nested 40 levels deep.
+include("${CMAKE_CURRENT_LIST_DIR}/../../../CMake/CvcHostStack.cmake")
+cvc_document_host_stack(${TEST_TARGETS})
+
 # Optional: Add a custom target to run all tests
 add_custom_target(check
   COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure

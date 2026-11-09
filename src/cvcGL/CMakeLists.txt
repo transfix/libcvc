@@ -1386,3 +1386,9 @@ if(CVC_BUILD_EXAMPLES)
   add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../examples"
                    "${CMAKE_CURRENT_BINARY_DIR}/examples")
 endif()
+
+# The tests that load documents through AriRuntime: an 8 MB stack on Windows, as the hosts have
+# (CMake/CvcHostStack.cmake). Names not built here are skipped.
+include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcHostStack.cmake")
+cvc_document_host_stack(cvcgl_ariadne_realize cvcgl_ari_switch cvcgl_ari_golden cvcgl_ariadne_views
+                        cvcgl_ariadne_scenes)

@@ -61,6 +61,9 @@ endif()
 # Installed bin/arisrv finds libcvc and its dependencies in ../lib (CMake/CvcInstallRpath.cmake).
 include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcInstallRpath.cmake")
 cvc_set_install_rpath(arisrv bin)
+# A server document's load: an 8 MB stack on Windows, as on Linux (CMake/CvcHostStack.cmake).
+include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcHostStack.cmake")
+cvc_document_host_stack(arisrv)
 install(TARGETS arisrv RUNTIME DESTINATION bin COMPONENT arisrv)
 
 # `arisrv_aoi_bench`: a headless load bench for the relay's area of interest — a relay built as
