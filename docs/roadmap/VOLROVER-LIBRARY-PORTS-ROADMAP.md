@@ -1,21 +1,28 @@
 # VolumeRover Library Ports — Roadmap (sketch)
 
-**Status:** sketch, 2026-11-07, first merged as transfix/libcvc#1057. Revised 2026-11-08: GenSeg
-added and ContourTiler recorded as LGPL. Then Joe's rules for every port were added (§1.2–§1.7):
-- the GPL-licensed parts go in a separate library;
-- no singletons;
-- an API that pycvc can wrap;
-- far more unit tests;
-- every parameter and every piece of data on the state tree;
-- DSL intrinsics.
+**Status:** sketch, 2026-11-07, first merged as transfix/libcvc#1057. Revised three times on
+2026-11-08:
+1. GenSeg added, and ContourTiler recorded as LGPL.
+2. Joe's rules for every port added (§1.2–§1.7): no singletons, an API pycvc wraps, far more
+   unit tests, every parameter and piece of data on the state tree, DSL intrinsics, and
+   (then) a separate library for GPL code.
+3. Joe's answers:
+   - **no GPL code at all:** permissive libraries replace every GPL CGAL package (§1.2), so there
+     is no GPL library and no `-gpl` package, and libcvc's own GPL CGAL use is already gone
+     (transfix/libcvc#1080);
+   - **wasm from the first PR** of every phase (§1.8);
+   - **everything under an app context, no singletons anywhere in libcvc** (§1.3), done before
+     the ports;
+   - VolumeGridRover keeps the legacy view switch (§4);
+   - GenSeg's default seeding as recommended (§5).
 
-Nothing has landed. §9 lists the decisions still open.
-**Based on:** libcvc `origin/master @ 921c4254` (the state tree, state_exec, pycvc and registry
-facts in §1) and `@ 7a09366f` (the rest), and volrover `master @ b4a172c` (the legacy libraries
-live under `src/<Lib>` and `inc/<Lib>` there).
+Nothing of the ports has landed. §9 lists the decisions still open.
+**Based on:** libcvc `origin/master @ 921c4254` (§1's facts) and `@ 7a09366f` (the rest),
+transfix/libcvc#1080 (libcvc without CGAL), and volrover `master @ b4a172c` (the legacy
+libraries live under `src/<Lib>` and `inc/<Lib>` there).
 **Scope:** four legacy VolumeRover libraries, ported into libcvc the way `mesh_lab` / `fe_lab`
-were: a headless `cvc::` API, a CLI command, pycvc bindings, DSL intrinsics and an Ariadne node
-type with a component.
+were: a headless `cvc::` API, a `cvc` CLI command, pycvc bindings, DSL intrinsics and an Ariadne
+node type with a component, native and wasm.
 - Skeletonization.
 - Tiling, with its successor ContourTiler.
 - GenSeg, the seeded segmentation, with the automatic seeding from its sibling SegMed.
@@ -37,62 +44,70 @@ type with a component.
 
 ## 0. Summary
 
-- **Rules every port follows** (§1, new in this revision):
-  - **The GPL-licensed parts go in a separate library** (settled, §1.2). The library is
-    `cvc_gpl`, with `cvcgl_gpl` for its Ariadne node types and `pycvc_gpl` for its bindings.
-    Skeletonization and ContourTiler land there, because the CGAL packages they use are GPL.
-    libcvc, cvcGL and pycvc stay LGPL, and they never link the GPL libraries. GenSeg,
-    VolumeGridRover and the shared types stay in libcvc.
-  - **No singletons** (§1.3): no mutable global, static, `instance()` or hidden registry in a
-    port, vendored code included. A CI scan of the object files checks this, and so do tests
-    that run two jobs at once.
-    - The legacy code has plenty to remove: Skeletonization's global bounding box, ContourTiler's
-      log4cplus loggers and `Controls::instance()`, and GenSeg's 25 globals.
-    - The libcvc extension points the ports register with are process-wide statics today:
-      Ariadne's node-type and intrinsic registries and the file I/O handler maps. P0 gives each
-      a per-app form.
-  - **One API shape** (§1.4):
-    - free functions on value types;
-    - a params struct and a result struct;
-    - a job that owns its result;
-    - exceptions, never `exit()`.
+- **Rules every port follows** (§1):
+  - **No GPL code** (settled, §1.2). CGAL's kernel, 2D polygons and number types are LGPL, but
+    every CGAL algorithm package these ports use is GPL. Permissive libraries replace all of
+    them:
+    - reentrant Qhull for 3D Delaunay;
+    - Clipper2 for polygon Booleans, offsets and Minkowski sums;
+    - CDT for 2D constrained Delaunay;
+    - Boost.Polygon's segment Voronoi diagram for the medial axis;
+    - Shewchuk's robust predicates;
+    - Eigen for least squares.
 
-    SWIG wraps the header itself, so pycvc has the same names.
-  - **The state tree holds everything** (§1.5):
-    - Every parameter is a key. Each params struct is declared once in a parameter table, which
-      also gives the defaults, the units and ranges as state properties, the CLI flags, the
-      Python keywords and the DSL dict keys.
-    - Inputs and results sit on the data channel at documented keys. The GPL nodes read the LGPL
-      nodes' data there, so neither library links the other.
+    So no port uses CGAL at all, there is no GPL library, and no `-gpl` package is needed. libcvc
+    itself already dropped CGAL: transfix/libcvc#1080 replaced its two GPL uses (Spatial
+    Searching) with nanoflann.
+  - **No singletons, anywhere in libcvc** (§1.3). Everything lives under a `cvc::app` or in
+    objects the caller owns.
+    - In the ports: Skeletonization's global bounding box, ContourTiler's log4cplus loggers and
+      `Controls::instance()`, and GenSeg's 25 globals all go.
+    - In libcvc itself: a full audit lists its process-wide state, including Ariadne's node-type
+      and intrinsic registries and the file I/O handler maps. P0a moves all of it under the app,
+      before any port lands.
+    - A CI scan of the object files and two-at-once tests keep it that way.
+  - **One API shape** (§1.4): free functions on value types, a params struct and a result
+    struct, a job that owns its result, exceptions. SWIG wraps the header itself, so pycvc has
+    the same names.
+  - **The state tree holds everything** (§1.5). Every parameter is a key, declared once in a
+    parameter table that also gives the defaults, units and ranges, the CLI flags, the Python
+    keywords and the DSL dict keys. Inputs and results sit on the data channel at documented
+    keys.
   - **DSL intrinsics** (§1.6): each port's operations are state_exec async functions, such as
-    `skeleton.compute`, `tiler.tile` and `segment.seeded`. Scripts, pycvc's `Exec` and Ariadne
-    hosts can call them.
-  - **Tests** (§1.7): a fixed matrix of 14 kinds of test per port. It runs from legacy parity
-    and exact topology through concurrency, jobs, state round trips and I/O corpora to the DSL,
-    pycvc, the CLI and the licence boundary.
-- **Skeletonization** (§2) is a clean port.
-  - It is about 8k lines of LGPL-2.1 code whose only real dependency is CGAL's 3D Delaunay. It
-    needs its global state removed, a few bug fixes, and its sheets kept rather than dropped.
-  - It lands in `cvc_gpl` as `cvc::skeletonize`, `cvc-gpl skeleton` and `skeleton.compute`, and
-    as a `skeleton` node that reads a `mesh_lab` node's geometry from the state tree.
+    `skeleton.compute`, `tiler.tile` and `segment.seeded`.
+  - **Tests** (§1.7): a fixed matrix of 16 kinds of test per port, from legacy parity and exact
+    topology through concurrency, jobs, state round trips and I/O corpora to the DSL, pycvc, the
+    CLI, wasm, the licence check and an A/B of every replacement against the CGAL code it
+    replaces (`tools/cgal_ab`, started in transfix/libcvc#1080).
+  - **Wasm from the start** (§1.8): every library a port uses builds for wasm-mt, and every
+    phase's tests run under node in CI from its first PR. The browser demo comes with the node
+    type, not in a later web phase.
+- **Skeletonization** (§2) is a clean port of about 8k lines of LGPL-2.1 code.
+  - Its only heavy dependency was CGAL's 3D Delaunay (GPL). Reentrant Qhull replaces it, behind
+    a small tetrahedral complex that presents the calls the cocone code makes.
+  - It needs its global state removed, a few bug fixes, and its sheets kept rather than dropped.
+  - It lands as `cvc::skeletonize`, `cvc skeleton`, `skeleton.compute`, and a `skeleton`
+    request on `mesh_lab`.
   - Its cocone code is copied almost verbatim in TightCocone, PocketTunnel and Curation, so it
     becomes one shared `cvc::cocone` core.
 - **Tiling** (§3) means ContourTiler, not the old `src/Tiling`.
   - The old tiler has not been built since 2011, and it carries a Purdue SHASTRA notice that
     forbids commercial use.
-  - ContourTiler reimplements the same 1996 algorithm for many components, and it is the one
-    VolumeRover2 uses. It is heavy CGAL, using exact boolean ops and so GMP and MPFR, and it is
-    LGPL like libcvc.
-  - It lands in `cvc_gpl` as `cvc::tile_contours`, `cvc-gpl tile`, `tiler.tile` and a
-    `contour_lab` node. The shared `cvc::contour_stack` type it builds on stays in libcvc.
+  - ContourTiler (LGPL) reimplements the same 1996 algorithm for many components. It is the
+    biggest job here: it uses about 60 CGAL headers, most of them GPL packages and exact GMP
+    number types.
+  - The port swaps that layer for a small planar-geometry module of libcvc's own: integer
+    coordinates, exact predicates, Clipper2, CDT and a Boost.Polygon medial axis. The tiler logic
+    stays as it was.
+  - It lands as `cvc::tile_contours`, `cvc tile`, `tiler.tile`, and a `contour_lab` node, on a
+    shared `cvc::contour_stack` type.
 - **VolumeGridRover** (§4) is a rebuild, not a translation.
   - Its Qt6 code is mostly stubs: contours cannot be created, and tiling, SDF and the medial
     axis are commented out. Its GL is 2005-era.
-  - What carries over is the design: three axis slice views, a voxel probe, point classes,
-    contours drawn per object, and tiling them into surfaces.
-  - It becomes a `volume_grid` node plus a `volume_grid.ari` component of four embedded
-    `viewport`s. It is LGPL, and it reaches the tiler only through a `contour_lab` node and the
-    state tree.
+  - What carries over is the design: XY, XZ and ZY slice views with the legacy switch between
+    them, a voxel probe, point classes, contours drawn per object, and tiling them into surfaces.
+  - It becomes a `volume_grid` node plus a `volume_grid.ari` component of embedded `viewport`s:
+    one slice view with the XY / XZ / ZY switch beside a 3D view by default, or all four at once.
 - **GenSeg** (§5) is a small port, about 2.8k lines of LGPL code. It implements §2.2 of Bajaj,
   Yu and Auer, *J. Struct. Biol.* 144 (2003): multi-seed fast marching, where fronts slow at
   edges and fronts of different classes stop where they meet. VolumeGridRover's point classes
@@ -103,8 +118,10 @@ type with a component.
     - it passes results through files in the current directory, and nothing loads them back.
   - The port is first made to match the legacy output voxel for voxel. Then it gains the paper's
     fully automatic seeding: SegMed's critical points of the diffused gradient field.
-  - It lands in libcvc as `cvc::segment_seeded`, `cvc segment` and `segment.seeded`, plus a
-    Segmentation tab in `volume_grid`.
+  - `volume_grid` keeps GenSeg's local maxima as the default seeding until the paper mode
+    matches the legacy results on real maps.
+  - It lands as `cvc::segment_seeded`, `cvc segment` and `segment.seeded`, plus a Segmentation
+    tab in `volume_grid`.
 - **Most of the GL viewer already exists** (§6): the `viewport` widget, tags, named cameras and
   `scenes:`. Four new pieces are needed, all reusable:
   1. an axis-aligned `volume_slice` node;
@@ -112,19 +129,22 @@ type with a component.
   3. pointer events from a viewport into state (the open "click-to-world picking" item);
   4. overlays that stay on top of a slice.
 - **Order** (§7):
-  - P0 is larger now. It builds the shared pieces the rules need: the parameter table, the
-    result-owning job, per-app registries, the GPL library targets, the singleton scan, the
-    pycvc job wrapper and the legacy-goldens script.
+  - P0a moves all of libcvc's process-wide state under the app.
+  - P0b builds the shared pieces: the parameter table, the result-owning job, the pycvc job
+    wrapper, the singleton scan and the legacy-goldens script.
+  - P0c brings in the permissive libraries, each built for wasm-mt and checked for singletons.
+  - P0d adds the shared contour and point-class types.
   - Then four tracks can start at once: the Skeletonization core, the ContourTiler core, the
     GenSeg core and the Ariadne viewport pieces.
   - VolumeGridRover follows the viewport pieces. Its Tile button follows the tiler, and its
     Segment button follows GenSeg.
 - **Decisions for Joe** (§9):
-  - the web;
-  - the existing GPL CGAL uses in libcvc;
-  - whether every existing caller moves off the process-wide registries now or later;
-  - GPL packaging;
-  - the layout, the seeding default and the names.
+  - how the new libraries arrive (done as recommended in cy-pca/cvcpkg#578);
+  - how close ContourTiler must match its legacy output;
+  - the API break P0a needs (4.0);
+  - names;
+  - what may stay process-wide (signal traps, SDL's event queue, curl / ImageMagick / Jolt / HDF5
+    init, CUDA device state).
 
 ---
 
@@ -133,88 +153,216 @@ type with a component.
 ### 1.1 Layers
 
 The `mesh_lab` / `fe_lab` work set the pattern. Each library lands as up to six layers, and each
-layer is useful on its own. "GPL" below means the layer lives in the separate GPL library (§1.2)
-because the code uses a GPL CGAL package.
+layer is useful on its own. Every layer builds and runs on wasm-mt as well as natively (§1.8).
 
 | Layer | Where | What it is |
 |---|---|---|
-| 1. Core | libcvc: `src/cvc/<area>/<lib>/` behind `inc/cvc/<area>/<lib>.h`. GPL: `src/cvc_gpl/<lib>/` behind `inc/cvc/gpl/<lib>.h` | A headless `cvc::` API in the §1.4 shape, on `cvc::volume` / `cvc::geometry`. No Qt, no GL, no singletons (§1.3), no `exit()`, no files read or written inside the algorithm. Long jobs are `cvc::sliced_job`s ([`sliced_task.h`](../../inc/cvc/core/sliced_task.h)), so they run cancellable and with progress on the background pool natively, and a few ms a frame on single-threaded wasm. |
-| 2. CLI | `src/cvc-cli/main.cpp` (`cvc`); GPL: `cvc-gpl` (§9 item 4) | One subcommand per library (`cvc segment`, `cvc-gpl skeleton`, `cvc-gpl tile`), with the legacy executables' options kept as aliases. Flags and help come from the parameter table (§1.5). |
-| 3. Python | `bindings/pycvc` (`pycvc`); GPL: `pycvc_gpl` | SWIG wraps the public header (§1.4), so the C++ names carry over. |
+| 1. Core | `src/cvc/<area>/<lib>/` behind `inc/cvc/<area>/<lib>.h` | A headless `cvc::` API in the §1.4 shape, on `cvc::volume` / `cvc::geometry`. No Qt, no GL, no GPL code (§1.2), no singletons (§1.3), no `exit()`, no files read or written inside the algorithm. Long jobs are `cvc::sliced_job`s ([`sliced_task.h`](../../inc/cvc/core/sliced_task.h)), so they run cancellable and with progress on the background pool natively, and a few ms a frame on single-threaded wasm. |
+| 2. CLI | `src/cvc-cli/main.cpp` | One `cvc` subcommand per library (`cvc skeleton`, `cvc tile`, `cvc segment`), with the legacy executables' options kept as aliases. Flags and help come from the parameter table (§1.5). |
+| 3. Python | `bindings/pycvc` | SWIG wraps the public header (§1.4), so the C++ names carry over. |
 | 4. DSL intrinsics | Registered on the app (§1.6) | Async functions for `cvc exec`, pycvc's `Exec`, arisrv programs and Ariadne hosts. |
-| 5. Node type | `src/cvcGL/ariadne/` + `inc/cvc/gl/ariadne/`; GPL: `cvcgl_gpl` | A custom scene node, registered on the app (§1.3). It owns its data, runs the core on its own `cvc::async_lane` or the state_exec scheduler, keeps its parameters and data on the state tree (§1.5), and publishes `busy`, `status`, `progress` and `phase`. Commands are a `request` key (ARIADNE.md §5.5). |
+| 5. Node type | `src/cvcGL/ariadne/` + `inc/cvc/gl/ariadne/` | A custom scene node, registered on the app (§1.3). It owns its data, runs the core on its own `cvc::async_lane` or the state_exec scheduler, keeps its parameters and data on the state tree (§1.5), and publishes `busy`, `status`, `progress` and `phase`. Commands are a `request` key (ARIADNE.md §5.5). |
 | 6. Component | `src/cvc/ariadne/components/<name>.ari` + an `INDEX.ari` entry | A window that binds those keys, so a document drives the node with no host C++. It takes the args `node`, `title` and `id`, like every node-scoped component since b2f54578. |
 
-### 1.2 The GPL-licensed parts: a separate library (settled 2026-11-08)
+### 1.2 No GPL code: permissive libraries replace CGAL (settled 2026-11-08)
 
-**Why.** The ported code itself is LGPL: Skeletonization, ContourTiler, GenSeg, SegMed and
-VolumeGridRover. So are GMP and MPFR: GMP is dual LGPL-3+ / GPL-2+, MPFR is LGPL-3+, and linking
-them leaves libcvc LGPL. What brings in the GPL is CGAL. Its kernel, number types and support
-library are LGPL-3+, but most of its algorithm packages are GPL-3+:
-- Skeletonization uses 3D Triangulations;
-- ContourTiler uses 2D Boolean operations, Arrangements, constrained Delaunay and the straight
-  skeleton.
+**Why CGAL can't stay.** CGAL's kernel, 2D polygons and number types are LGPL-3+. Every CGAL
+algorithm package these ports use is GPL-3+ (CGAL's package overview):
+- 3D Triangulations and the 3D Triangulation Data Structure;
+- 2D Triangulations, including constrained Delaunay;
+- 2D Regularized Boolean Set-Operations;
+- 2D Arrangements and 2D Intersection of Curves (the sweep line);
+- 2D Straight Skeleton and Polygon Offsetting;
+- 2D Minkowski Sums;
+- 2D Polygon Partitioning;
+- the Linear and Quadratic Programming Solver;
+- dD Spatial Searching;
+- 2D Boolean Operations on Nef Polygons.
 
-Dropping FFTW to make the bundle LGPL-2.1 shows the licence matters. So any code that includes a
-GPL CGAL package goes in a library of its own, and libcvc stays LGPL.
+GMP and MPFR are LGPL, so they never made anything GPL, but they have no wasm-mt build, so the
+exact number types (`Gmpz`, `Gmpq`, `Lazy_exact_nt`) block wasm. libcvc is LGPL-2.1, and its
+headers say "version 2.1" with no "or later". So the ports drop even CGAL's LGPL-3+ kernel, and
+libcvc keeps no CGAL at all. transfix/libcvc#1080 already did this for libcvc itself: its only
+CGAL use was Spatial Searching (`nav/spatial.cpp`, `geometry/project_verts.h`), now nanoflann.
 
-**What goes where**
+**The replacements**
 
-| | libcvc, cvcGL, pycvc (LGPL) | `cvc_gpl`, `cvcgl_gpl`, `pycvc_gpl` (GPL-3+ as built) |
-|---|---|---|
-| Core | GenSeg and SegMed (`segment_seeded`, `gradient_vector_diffusion`, the fast marching), `contour_stack`, `point_classes`, their I/O, `param_table`, `result_job` | the shared cocone core, `skeletonize`, `tile_contours`; later TightCocone, PocketTunnel, SDF2D and the 2D medial axis |
-| CLI | `cvc segment`, contour and point-class conversion | `cvc-gpl skeleton`, `cvc-gpl tile` |
-| Python | `pycvc` | `pycvc_gpl`, which uses pycvc's types through SWIG's `%import` |
-| DSL | `segment.*`, `contours.*`, `point-classes.*`, `params.*` | `skeleton.*`, `tiler.*` |
-| Ariadne | `volume_slice`, `volume_grid`, `mode: slice`, picking | the `skeleton` and `contour_lab` node types and their components |
+| Need | CGAL (licence) | Replacement (licence) | Notes |
+|---|---|---|---|
+| 3D Delaunay, for Skeletonization's cocone | `Delaunay_triangulation_3` + TDS_3 (GPL) | Reentrant Qhull, `libqhull_r` (Qhull licence, permissive) | All state lives in one `qhT` per call, so no singletons. cvcpkg's qhull 8.0.2 gains wasm and wasm-mt in cy-pca/cvcpkg#578. Run as `d Qbb Qt Qz`: measured on a cube's corners plus its centre, that gives the exact 12 tetrahedra, while `QJ` or `Qt` alone add flat slivers (15–22 tetrahedra), and `QJ` with `QR0` varies from run to run (its seed is the clock). |
+| Tetrahedral complex | TDS_3 (GPL) | `cvc::tet_complex`, new: cells, neighbours, mirror indices, the infinite cells of the hull, circumcentres | A small adapter presents the subset of the `Delaunay_triangulation_3` API the vendored cocone code calls, so that code changes little. |
+| 2D polygon Booleans | Boolean set ops, Nef polygons (GPL) | Clipper2 2.0.1 (Boost Software Licence 1.0) | Exact on `int64` coordinates. New cvcpkg recipe for every platform, wasm and wasm-mt included (cy-pca/cvcpkg#578). 2.0 also triangulates polygons with holes (`clipper.triangulation.h`), but it takes no interior constraint segments, so CDT stays for the medial-axis fill. |
+| Polygon offsets, Minkowski sums | Straight skeleton offsetting, Minkowski sums (GPL) | Clipper2 `InflatePaths`, `MinkowskiSum` | |
+| 2D constrained / plain Delaunay | 2D Triangulations (GPL) | CDT 2.0.1, `artem-ogre/CDT` (MPL-2.0, header-only, vendored) | Its robust predicates are William Lenthe's (BSD-3). MPL-2.0 is file-level copyleft: the CDT files stay MPL-2.0, which is compatible with LGPL code around them. Its one mutable static, a never-written `static double log2_constant` (`Triangulation.hpp:2337`), becomes `static const` in the vendored copy. |
+| Convex partition | 2D Polygon Partitioning (GPL) | CDT triangles, merged by Hertel–Mehlhorn where convex pieces are needed | |
+| Medial axis of untiled regions | Straight skeleton (GPL) | Boost.Polygon's segment Voronoi diagram (Boost Software Licence; Boost is already a dependency) | A true medial axis, not the straight skeleton's approximation of one, so the output differs from the legacy (§3, §9 item 2). Its input is `int32`, on the same snapping grid. |
+| Segment intersections, arrangements | Arrangements, the sweep line (GPL) | Boost.Geometry (Boost Software Licence) turns and self-intersection checks, or a small sweep on the exact predicates | Contours are small, so the simple one first. |
+| Natural-neighbour interpolation, Sibson gradients, QP | Interpolation, the QP solver (GPL) | Sibson coordinates on CDT's Delaunay, Eigen least squares (MPL-2.0; already a dependency with libigl) | Only `interp.cpp`, 150 lines. |
+| Exact predicates and numbers | `Gmpz`, `Gmpq`, `Lazy_exact_nt`, `MP_Float` (LGPL, and GMP) | Integer coordinates on a fixed grid, plus Shewchuk's robust predicates (public domain) | No GMP, so wasm builds. |
+| k-nearest neighbours, if a port needs them | Spatial Searching (GPL) | nanoflann (BSD-2-Clause), already vendored by #1080 | |
 
-**Rules**
+**Considered and rejected**
+- **Geogram** (BSD-3) has fast, exact, parallel 3D Delaunay and 2D CDT, and it builds with
+  Emscripten. But it needs `GEO::initialize()`, which sets up process-wide logger, command-line
+  and factory singletons. That breaks §1.3.
+- **TetGen** is AGPL-3.
+- **Shewchuk's Triangle** forbids commercial use.
+- **VTK's Delaunay** classes are not robust on degenerate input, and VTK keeps process-wide
+  factories.
+- **The C++ straight-skeleton codes** found (Surfer2, monos) are GPL-3. No permissive C++
+  straight skeleton turned up, which is why the medial axis comes from a Voronoi diagram.
 
-- **One direction only.** `cvc_gpl` links libcvc, never the reverse. Nothing in libcvc, cvcGL or
-  pycvc includes a GPL-library header.
-- **The compiler enforces it.** The LGPL targets compile with `CGAL_LICENSE_ERROR` defined, so
-  including a GPL CGAL package there is a compile error. These are CGAL's licence-check macros;
-  check that the CGAL version cvcpkg ships honours them.
-  - This goes on the new port directories at once.
-  - It goes on all of libcvc once the two existing GPL uses are dealt with (§9 item 2).
-  - A CI lane also builds with `CVC_ENABLE_GPL=OFF`.
-- **No link between the Ariadne libraries.** The Ariadne nodes reach each other's data only
-  through the state tree.
-  - `volume_grid` never calls the tiler. It publishes its contours at a data key, and a
-    `contour_lab` node configured with `source: { node: <grid id> }` tiles them (§4).
-  - A `skeleton` node reads a `mesh_lab` node's geometry the same way.
-  - A host that wants the GPL nodes calls `register_cvcgl_gpl_extensions(app)`.
-- **Licence notices.** The vendored sources keep their LGPL headers. `cvc_gpl` as built is
-  GPL-3+ because of CGAL. `src/cvc_gpl/` carries a COPYING and a README that say so.
-- **Builds.** `CVC_ENABLE_GPL` turns the GPL libraries on. It is on by default where CGAL is
-  found and off on wasm, where CGAL is off anyway. How releases ship them is §9 item 4.
-- **Existing GPL code in libcvc.** libcvc already compiles CGAL's Spatial Searching (also GPL)
-  into `nav/spatial.cpp` and `project_verts.h` whenever CGAL is found. Those two either move
-  into `cvc_gpl` or switch to a permissive k-nearest-neighbour search (§9 item 2).
+**Rules for every third-party library a port brings in**
+- Its licence is permissive or file-level copyleft (BSD, MIT, Boost, MPL-2.0, Qhull's). Never GPL
+  or AGPL, and never "non-commercial".
+- It builds for wasm-mt.
+- It holds no mutable process-wide state, checked with the same scan as libcvc's own code (§1.3).
+- It gets an entry in `THIRD_PARTY_NOTICES.md`, with its notice.
+- It arrives either as a cvcpkg package or vendored privately under `src/cvc/third_party/` (as
+  nanoflann is), never through an installed header (§9 item 1).
 
-### 1.3 No singletons
+**The A/B against CGAL.** Every replacement is checked against the CGAL code it replaces, on the
+same inputs, for results and for time.
+- **Where it lives.** `tools/cgal_ab/` holds an optional test executable, `cgal_ab_test`, built
+  only with `-DCVC_BUILD_CGAL_AB=ON`. It links CGAL, so as built it is GPL-3+: it is never
+  installed, packaged or shipped, and libcvc itself still never links CGAL.
+- **CI.** The `cgal-ab` job builds it natively on Linux whenever the compared code changes, and
+  posts the PASS / FAIL and TIME lines to the job summary.
+- **Seams.** Each port keeps the boundary between its algorithm and the replaced library narrow,
+  so the A/B can drive the same algorithm from both sides:
+  - Skeletonization's cocone code runs on `cvc::tet_complex`. The A/B builds one from Qhull and one
+    from CGAL's `Delaunay_triangulation_3`, then compares the two triangulations (same tetrahedra in
+    general position, empty circumspheres), the skeletons from each, and the times.
+  - The tiler's `cvc::planar` operations (Booleans, offsets, constrained triangulation, medial
+    axis) each get a CGAL counterpart in the harness. Results are compared by area, topology and
+    Hausdorff distance, since the medial axis and the straight skeleton differ by design.
+- **Already done.** transfix/libcvc#1080 started the harness with libcvc's own two replacements.
+  Locally (Windows, CGAL 6.0.1), all checks pass:
+  - nanoflann's fixed-radius neighbours equal CGAL's Kd_tree in all 15 cases (uniform, lattice
+    with exact boundary distances, a clump with duplicates), 1.1–2.1× faster;
+  - the nearest-vertex projection with k = 10 lands at CGAL's exact AABB closest distance on every
+    query (a sphere's random and near-surface points, a sliver strip), 1.1–2.6× faster.
 
-**The rule.** A port holds no mutable state outside the objects its caller owns. None of these
-may appear anywhere in a port, vendored code included:
+**If something can't be replaced after all.** The earlier plan stays as the fallback: a separate
+`cvc_gpl` library that libcvc never links, `CGAL_LICENSE_ERROR` on the LGPL targets, the GPL
+nodes reaching the LGPL ones only through the state tree, and `-gpl` packages. Nothing in this
+plan needs it.
+
+### 1.3 No singletons, anywhere in libcvc
+
+**The rule.** All state lives under a `cvc::app` or in objects the caller owns. This holds for
+libcvc, cvcGL, pycvc, the ports and every library they bring in. None of these may appear:
 
 - namespace-scope or class-static mutable variables;
 - function-local `static` variables, unless they are constant tables initialised from constants;
 - `instance()` / `getInstance()` accessors, and registries reached without an `app`;
 - `thread_local` used to carry context past a function's arguments;
-- `srand` / `rand`, an unseeded `std::random_device`, or CGAL's `get_default_random()`;
-- static counters (debug file numbering), static caches;
+- `srand` / `rand`, an unseeded `std::random_device`, or any process-global random generator;
+- static counters (debug file numbering, id generators), static caches;
 - the current working directory (no relative-path writes), or environment variables read inside
   an algorithm.
 
 **What replaces them**
+- **Registries, caches and counters** become members of `cvc::app` (or, for Ariadne, of its
+  `AppRuntime`), and the functions that reach them take the app.
+- **Each port's legacy globals** go into a context struct per call or per job
+  (`skeleton_context`, `tiler_context`, `genseg_context`).
+- **Random number generators** live in the context, seeded from a `seed` parameter.
+- **The `cvc::app`** comes in explicitly. Volumes and geometry already hold their `app&`.
+- **Logging** goes to `app.log()`, or into a result's `warnings`.
 
-- A context struct per call or per job (`skeleton_context`, `tiler_context`, `genseg_context`).
-  The entry point creates it, and it holds everything the legacy code kept globally.
-- Random number generators live in the context, seeded from a `seed` parameter.
-- The `cvc::app` comes in explicitly. Volumes and geometry already hold their `app&`.
-- Logging goes to `app.log()`, or into the result's `warnings`.
+The state tree already works this way. libcvc 3.1.0 removed the global `cvcapp` / `cvcstate`
+macros and the zero-arg `app::instance()` / `state::instance()`, and every root comes from its
+`app`. What survived that release is below.
 
-**What has to go, per port**
+**libcvc's process-wide state today** (audit of master, 2026-11-08). The audit swept
+`src/cvc`, `src/cvcGL`, `inc/cvc`, `src/cvc-cli` and pycvc's C++, without the tests and examples.
+Its full list, with every file and line, is P0a's checklist.
+
+| Subsystem | Mutable objects | of them locks | `thread_local`s |
+|---|---|---|---|
+| ariadne | 47 | 14 | 1 |
+| cvcGL | 28 | 4 | 6 |
+| state_exec | 15 | 3 | 30 |
+| state | 11 | 2 | 4 |
+| net | 9 | 2 | 0 |
+| core | 8 | 1 | 9 |
+| image | 5 | 1 | 0 |
+| model, volren (CUDA included) | 4 each | 1 (volren) | 0 |
+| geometry, processing, pycvc | 3 each | 1 (pycvc) | 2 (pycvc) |
+| volume, nav, world, cli | 2 each | 1 (volume) | 3 (nav), 3 (world) |
+| xmlrpc, lod, physics, tf | 1 each | 1 (physics) | 2 (physics) |
+| ph, media | 0 | 0 | 1, 2 |
+| **total** | **152** | **31** | **63** |
+
+In vendored code, one is in use: LBIE's octree reseeds the C library's global generator with
+`srand(time(NULL))` (`cvc-mesher/LBIE/octree.cpp:5502`), so mesh-quality improvement is
+nondeterministic and disturbs any other `rand()` user.
+
+**What the audit found beyond style.** These are bugs, and they go first:
+1. **Duplicated handlers.** Every `cvc::app` constructor (`app.cpp:177`, through
+   `registerDefaultHandlers`) inserts a fresh set of handler objects into the process-global volume
+   and geometry I/O maps, with no lock and no de-duplication. The per-thread apps in
+   `state_volume_codec.cpp` do it too.
+2. **Registries hold callbacks bound to one app.** Action-intrinsic providers capture an `app*`;
+   URI handlers capture one app's state root (`state://` and the cached `http` handler); the net
+   and OIDC host cells hold one app. The last app to register wins, and the captures dangle once
+   that app is gone. No library code calls `clear_action_intrinsics`, so the stateless cvcGL
+   providers pile up, one set per `AriRuntime`.
+3. **Stale per-app tables.** Some per-app tables are process maps keyed by `app*` that are never
+   erased when the app dies: `stream_registry`, `exec_group`'s `single_noted` and `tf_binding`'s
+   `seed_memory`. A new app at a reused address inherits the old one's entries.
+
+**The groups, and what P0a does with each**
+- **Registries:** node types, shader presets, widgets, `.ari` blocks, data decoders, action
+  intrinsics, URI schemes, the volume / geometry / model / image I/O handlers, terrain and city
+  generators, the player factory, script engines, the state startup hooks and the compression
+  codecs. Each becomes a member of `cvc::app` (or of `AppRuntime`), and the free registration and
+  lookup functions take the app.
+- **Per-app side tables keyed by `app*`:** data stores, stream registries, cluster shards, live
+  groups, tf bindings. They become plain app members.
+- **Configuration cells:** the net and OIDC hosts, the HTTP client and options provider, the play
+  policy, the URL opener and notice, browser hooks, resolver byte caps, the threaded-host flag,
+  ImGui font settings, and the VTK mapper policies. They move onto the app, or onto the object
+  they configure.
+- **Caches:** generated-world building libraries, the HTTP single-flight table, shader sources,
+  pycvc's interned names. They become app members. A cache of immutable content is shared only by
+  passing it in explicitly.
+- **Counters and ids:** sequence numbers, owner tags, scheduler and registry serials. Each moves
+  to the object that hands it out (the app, a scheduler, a cycle registry). An evaluator that runs
+  without an app gets its ids from its scheduler or registry.
+- **Random generators:** `rand()` in smoothing, the net verbs' and `math.random`'s thread-local
+  engines, LBIE's `srand`. Each becomes an engine in its owning object, seeded from a parameter.
+- **`thread_local`s:** per-thread scratch buffers (nav, world, ph, TurboJPEG handles) and
+  scope-bound re-entrancy guards hold nothing between calls, so they stay (§9 item 5). The ones
+  that keep state across calls or carry context implicitly move:
+  - the per-thread `cvc::app` in `state_volume_codec.cpp` (the codec signature gains an app);
+  - state_exec's per-thread cycle registry and its caches keyed by registry id;
+  - the per-thread failure records;
+  - `math.random`'s fallback engine.
+- **Resources the process holds once:** signal dispositions, process priority, the environment and
+  working directory, SDL's event queue and its window and timer routes, the X11 clipboard
+  connection, curl / ImageMagick / Jolt / HDF5 / gRPC global initialisation and locks, and the
+  CUDA devices' constant tables and memory. libcvc can't make these per app.
+  - They go on one documented list (§9 item 5).
+  - Each is wrapped so that libcvc keeps no state of its own about it beyond what the resource
+    demands (a reference count, a lock).
+  - Environment and working-directory writes go away where they can: `web_document`'s `chdir`
+    becomes an explicit base directory.
+
+**The hardest moves** (the audit's judgement):
+- the state startup hooks and their static-initialisation registrars (`xmlrpc` starts itself
+  through one);
+- the URI resolver, whose `resolve()` / `resolve_async()` / `resolve_to_file()` are app-free and
+  called from about 66 places in Ariadne and cvcGL;
+- the geometry, model and image I/O, whose `read_geometry(filename)`, `read_model(filename)` and
+  `image::load(path)` take no app and are used by pycvc, the CLI and cvcGL;
+- `cvc::net`'s client and browser cells;
+- the CUDA caches, where per-app copies would duplicate device memory;
+- state_exec's ids and per-thread fallbacks, which sit on hot paths, where evaluators are meant to
+  work without an app.
+
+**What the ports bring, and what goes**
 
 | Port | Singletons and globals in the legacy code |
 |---|---|
@@ -225,38 +373,23 @@ may appear anywhere in a port, vendored code included:
 | VolumeGridRover | nothing carries over; its `QSettings` cache directory and temp files stay behind |
 
 ContourTiler's logging goes through a shim whose logger is a member of `tiler_context`. Each
-vendored function that logs gets the context passed in. That is a mechanical change across the
-48 files. Trace output nobody needs can be compiled out instead.
-
-**libcvc's side.** The state tree already works this way: the zero-arg `state::instance()` was
-removed, and every root comes from its `app` (STATE_API.md, "Per-app state roots"). But the
-extension points the ports register with are still process-wide statics:
-
-- Ariadne's node-type registry: `register_scene_node_type`, the function-static
-  `node_registry()` in `scene_realize.cpp`. This is so even though `register_cvcgl_extensions`
-  takes an `app&`.
-- Ariadne's action-intrinsic providers: `register_action_intrinsics`, a function-static vector in
-  `ariadne.cpp`.
-- The volume and geometry file I/O handler maps: `volume_file_io::handlerMap()` and
-  `geometry_file_io::get_handlers()`, both function-local statics. This is so even though
-  `register_rawiv_io(app&)` and its siblings take an `app&`.
-
-P0 gives each of these a per-app form, on `cvc::app` or, for Ariadne, its `AppRuntime`. The ports
-register only there. Moving the existing callers off the process-wide forms is a separate cleanup
-(§9 item 3).
+vendored function that logs gets the context passed in, which is a mechanical change across the
+48 files. Trace output nobody needs is compiled out instead.
 
 **How it is checked**
-
-- **A CI scan of the object files.** For each port's objects, list the writable data symbols:
-  `nm` on Linux, the `.data` / `.bss` symbols, including function-local statics and their guard
-  variables. Fail on any that is not on a short reviewed allowlist, such as CGAL's or Boost's
-  own. This catches what a grep misses: a static inside a macro, or a vendored template.
+- **A CI scan of the object files, for all of libcvc.** For every object of libcvc, cvcGL,
+  pycvc and the vendored libraries, list the writable data symbols: `nm` on Linux, the `.data` /
+  `.bss` symbols, including function-local statics and their guard variables. Fail on any that
+  is not on the allowlist.
+  - The allowlist starts as the audit's list. As P0a lands it shrinks to §9 item 5's short list
+    of resources the process itself holds once. A new entry needs a reason in review.
+  - This catches what a grep misses: a static inside a macro, or a vendored template.
 - **Concurrency tests** (§1.7 T6): two jobs with different parameters on two threads give exactly
   what each gives alone, under the TSan lane (`sanitizers / tsan`).
 - **Order tests:** running A then B, B then A, and each alone all give the same answers. This
   catches leftover state such as the bounding box.
-- **Two apps:** two `cvc::app`s in one process, each with its own nodes and registrations, never
-  see each other's.
+- **Two apps:** two `cvc::app`s in one process, each with its own node types, intrinsics, I/O
+  handlers and documents, never see each other's. Every subsystem P0a moves gets such a test.
 
 ### 1.4 The API
 
@@ -274,9 +407,8 @@ register only there. Moving the existing callers off the process-wide forms is a
     `validate()` returns a list of what is wrong, not just a bool.
 - **A result struct** of values: volumes, geometry, vectors, a `warnings` list and timings.
 - **A job:** `std::unique_ptr<result_job<R>> f_job(input, params)`.
-  - `cvc::result_job<R>` (P0) is a `sliced_job` that owns its input (shared, read-only) and its
-    result, read with `result()` once `done()`. The earlier sketch's `out` reference parameter
-    is gone.
+  - `cvc::result_job<R>` (P0b) is a `sliced_job` that owns its input (shared, read-only) and its
+    result, read with `result()` once `done()`.
   - The blocking function is the job run to the end, so the two can't drift apart.
 - **Errors** are exceptions derived from `std::runtime_error`. The message says what was wrong
   with the input, for example `segment_seeded: seed (12, 40, 7) is outside the 64x64x32 volume`.
@@ -302,14 +434,14 @@ register only there. Moving the existing callers off the process-wide forms is a
   volumes already do.
 - **The GIL** is released for the computation (`gil_release`, as in `pycvc_algorithm` and
   state_exec), so other Python threads keep running.
-- **Jobs.** `sliced_job` isn't wrapped today. P0 wraps `result_job<R>` once, generically, with
-  `step`, `done`, `cancel`, `progress`, `phase`, `status` and `result`. That makes every port's
-  job usable from Python with progress and cancel, beside the DSL async functions available from
-  an `Exec`.
+- **Jobs.** `sliced_job` isn't wrapped today. P0b wraps `result_job<R>` once, generically, with
+  `step`, `done`, `cancel`, `progress`, `phase`, `status` and `result`.
 - **State.** `from_state` and `to_state` take a `pycvc.State`, following the parity doc's rule
   that tree arguments are `State`s.
 - **No current app.** pycvc already has no module-global current app (`pycvc_context.h`), and
   the ports add none.
+- **The browser.** pycvc-gl's wasm build (`pycvc-gl-cp312`) gets the same bindings, so a notebook
+  in the browser calls the ports too.
 
 ### 1.5 Parameters and data on the state tree
 
@@ -320,7 +452,7 @@ see and set the same things. Nothing lives only in a C++ member or a widget.
 **The parameter table.** `mesh_lab` today seeds and reads each key by hand: one
 `seed_num(a, base, "smooth.iterations", ...)` per key in `mesh_nodes.cpp`. So each parameter's
 name, default and type are written in three places: the struct, the seed call and the read. The
-ports instead declare each params struct once, as a table (`inc/cvc/core/param_table.h`, P0):
+ports instead declare each params struct once, as a table (`inc/cvc/core/param_table.h`, P0b):
 
 ```cpp
 template <> struct param_table<seeded_segmentation_params> {
@@ -336,7 +468,7 @@ template <> struct param_table<seeded_segmentation_params> {
 };
 ```
 
-Boost.Describe would do as the reflection underneath, if cvcpkg's Boost has it (1.77+). From one
+Boost.Describe would do as the reflection underneath; cvcpkg's Boost 1.86 has it. From one
 table, generic code gives:
 - **`to_state(p, node)` and `from_state(node)`:** one key per field under the node, for example
   `<node>.grid.segment.t_low`.
@@ -356,13 +488,12 @@ table, generic code gives:
 
 | Node | Values (keys) | Data channel |
 |---|---|---|
-| `skeleton` | params, `source.node`, `info.strands`, `info.sheets`, warnings | `<node>.skeleton.strands`, `<node>.skeleton.sheets` (geometry) |
+| `mesh_lab` (skeleton request) | `mesh_ops.skeleton.*` params, `info.strands`, `info.sheets`, warnings | `<node>.skeleton.strands`, `<node>.skeleton.sheets` (geometry) |
 | `contour_lab` | params, `source.node`, each component's name, colour and visibility | `<node>.tiler.contours` (`contour_stack`), `<node>.tiler.surfaces.<component>` (geometry) |
-| `volume_grid` | params, slice indices, cursor, tool; class and object metadata (name, colour, radius) as lists a `repeat:` can bind | `<node>.grid.volume`, `<node>.grid.points` (`point_classes`), `<node>.grid.contours` (`contour_stack`), `<node>.grid.segment.labels`, `<node>.grid.segment.classes` |
+| `volume_grid` | params, `view`, slice indices, cursor, tool; class and object metadata (name, colour, radius) as lists a `repeat:` can bind | `<node>.grid.volume`, `<node>.grid.points` (`point_classes`), `<node>.grid.contours` (`contour_stack`), `<node>.grid.segment.labels`, `<node>.grid.segment.classes`, `<node>.grid.surfaces.<object>` |
 
-Nodes read their inputs from the tree too. A node with `source: { node: <id> }` reads that node's
-documented data key. That is how the GPL nodes use the LGPL nodes' data without either library
-linking the other.
+Nodes can read their inputs from the tree too: a node with `source: { node: <id> }` reads that
+node's documented data key, so `contour_lab` can tile a `volume_grid`'s contours.
 
 **When the tree is read and written.** The core algorithm never touches the tree. A job reads its
 parameters when it starts, on the scheduler thread, and writes its results when it is done, in
@@ -383,17 +514,17 @@ changed while a job runs applies to the next run, and `status` says so.
 - `call.post` sends progress to `<name>.progress`;
 - killing the process cancels the job.
 
-**Proposed intrinsics** (module-prefixed like the standard library; names are §9 item 7):
+**Proposed intrinsics** (module-prefixed like the standard library; names are §9 item 4):
 
-| Intrinsic | Library | Does |
-|---|---|---|
-| `(skeleton.compute g [params])` | GPL | Skeleton of a geometry. Returns a dict of `strands` and `sheets` data objects and `warnings` |
-| `(tiler.tile stack [params])` | GPL | Tiles a `contour_stack`. Returns a dict from component name to geometry |
-| `(segment.seeded vol classes [params])` | libcvc | §5's segmentation. Returns a dict of `labels`, `classes` and `border` |
-| `(segment.critical-points vol [params])` | libcvc | The paper's seeds as a two-class `point_classes` |
-| `(contours.read path)`, `(contours.write stack path)` | libcvc | `contour_stack` I/O, any format §3 lists |
-| `(point-classes.read path)`, `(point-classes.write pc path)`, `(point-classes.add pc class i j k)` | libcvc | Point-class I/O and edits. These are small, so they are plain synchronous natives |
-| `(params.defaults name)`, `(params.check name dict)` | libcvc | Defaults and validation from a parameter table, synchronous |
+| Intrinsic | Does |
+|---|---|
+| `(skeleton.compute g [params])` | Skeleton of a geometry. Returns a dict of `strands` and `sheets` data objects and `warnings` |
+| `(tiler.tile stack [params])` | Tiles a `contour_stack`. Returns a dict from component name to geometry |
+| `(segment.seeded vol classes [params])` | §5's segmentation. Returns a dict of `labels`, `classes` and `border` |
+| `(segment.critical-points vol [params])` | The paper's seeds as a two-class `point_classes` |
+| `(contours.read path)`, `(contours.write stack path)` | `contour_stack` I/O, any format §3 lists |
+| `(point-classes.read path)`, `(point-classes.write pc path)`, `(point-classes.add pc class i j k)` | Point-class I/O and edits. These are small, so they are plain synchronous natives |
+| `(params.defaults name)`, `(params.check name dict)` | Defaults and validation from a parameter table, synchronous |
 
 **Arguments and results**
 - An input is a data object (from `state-data-get`) or a state path string such as
@@ -401,10 +532,9 @@ changed while a job runs applies to the next run, and `status` says so.
 - Parameters are a dict, or a state path to a parameter subtree read through the table.
 - Results are fresh data objects. The program stores them with `state-data-set`.
 
-**Registration.** Each library has one function that takes the app and an environment:
-`cvc::register_segmentation_intrinsics(app, env)` and `cvc::gpl::register_intrinsics(app, env)`.
-Every host gets them: `cvc exec`, the app's exec scheduler, pycvc's `Exec`, and Ariadne's lanes
-through the per-app provider list (§1.3).
+**Registration.** One function per port takes the app and an environment, for example
+`cvc::register_segmentation_intrinsics(app, env)`. Every host gets them: `cvc exec`, the app's
+exec scheduler, pycvc's `Exec`, and Ariadne's lanes through the app's own provider list (§1.3).
 
 **Budgets in Ariadne.** An Ariadne action runs with `ariadne.limits.action_max_time` (0.1 s) and
 `action_max_steps` (5000). An async call's run time counts against `max_time`. So a skeleton or a
@@ -423,16 +553,16 @@ writes (`pick.*`, `request`), and a DSL program can already script them by writi
 ### 1.7 Tests
 
 **The rule.** Every port lands with every row of this matrix that applies to it. A phase isn't
-done until its rows pass on Linux, Windows and macOS. The new test executables join the sanitizer
-lanes' `SAN_CXX_TESTS` list, so they also run under the `tsan` and `asan-ubsan` lanes.
+done until its rows pass on Linux, Windows, macOS and wasm-mt. The new test executables join the
+sanitizer lanes' `SAN_CXX_TESTS` list, so they also run under the `tsan` and `asan-ubsan` lanes.
 
 | # | Kind | What it checks | Examples |
 |---|---|---|---|
-| T1 | Legacy parity | The port's output equals the legacy library's on committed inputs. The legacy runs are scripted (`tools/volrover-goldens/`, at a pinned volrover sha), so the goldens can be regenerated | GenSeg labels voxel for voxel; skeleton strand and sheet counts, with vertices to 1e-9; tiler meshes equal after sorting the vertices |
-| T2 | Units | Each internal piece on its own | cocone poles, the medial-axis filter, U1 clustering; tiler correspondence, branching, intersection removal; the fast-marching heap order, the 26-neighbour update, the gradient |
+| T1 | Legacy parity | The port's output equals the legacy library's on committed inputs. The legacy runs are scripted (`tools/volrover-goldens/`, at a pinned volrover sha, built with its own CGAL: GPL code runs there to make test data, and none of it is linked into libcvc), so the goldens can be regenerated | GenSeg labels voxel for voxel; skeleton strand and sheet counts, with vertices to 1e-9 on inputs in general position; tiler surfaces by topology and Hausdorff distance (§3) |
+| T2 | Units | Each internal piece on its own | `tet_complex` against brute-force Delaunay checks (empty circumspheres); cocone poles, the medial-axis filter, U1 clustering; the planar module's predicates, snapping, Booleans and medial axis; tiler correspondence and branching; the fast-marching heap order, the 26-neighbour update, the gradient |
 | T3 | Known shapes | Exact topology on synthetic inputs | a torus gives one closed strand; a slab one sheet; a capsule one segment; two cylinders' contours give two genus-0 tubes; two blobs give two labels |
 | T4 | Invariants | Properties that hold for any input, over seeded generated inputs | the skeleton is unchanged by rigid motion and point order; a tiled surface is closed and manifold, does not intersect itself, and has every vertex on a contour plane; every labelled voxel connects to a seed of its class through voxels above `t_low`; labels never cross a ridge |
-| T5 | Bad input | Exceptions with useful messages; never a crash or an exit | empty input, one point, coplanar points, one slice, an open or self-intersecting contour, no seeds, a seed outside the volume, a constant volume, NaN voxels, the wrong voxel type |
+| T5 | Bad input | Exceptions with useful messages; never a crash or an exit | empty input, one point, coplanar and cospherical points, one slice, an open or self-intersecting contour, no seeds, a seed outside the volume, a constant volume, NaN voxels, the wrong voxel type |
 | T6 | No singletons | §1.3 | two threads with different parameters give the same results as each alone (TSan); A then B equals B then A equals each alone; two apps in one process |
 | T7 | Jobs | A sliced job matches the blocking call at step budgets of 1, 64 and unbounded. A cancel in each phase leaves no result and no leak (ASan). Progress rises monotonically within [0, 1], and the phases are named | |
 | T8 | State tree | For every field, struct to tree to struct round-trips. Defaults are seeded, properties written, and a bad value reported. A node's request produces its result at the documented data keys, with `status` | |
@@ -441,23 +571,41 @@ lanes' `SAN_CXX_TESTS` list, so they also run under the `tsan` and `asan-ubsan` 
 | T11 | pycvc | Each function and params class from Python: keywords, numpy views, another Python thread running during the call (GIL released), and a job cancel | |
 | T12 | CLI | Each subcommand on sample input, the legacy flag aliases, and the outputs read back | |
 | T13 | Ariadne | A golden image per demo document; scripted picks through state writes (`volume_grid`); headless runs | |
-| T14 | Licence boundary | libcvc, cvcGL and pycvc build with `CVC_ENABLE_GPL=OFF`; `CGAL_LICENSE_ERROR` is set on the LGPL targets; the object-file scan passes | |
+| T14 | Wasm | T1–T10 run as wasm-mt gtest binaries under node; the node type's demo document runs in arigl-web under headless Chrome | |
+| T15 | Licence | Every library in the port's dependency closure has a permissive or MPL-2.0 licence, and a notice in `THIRD_PARTY_NOTICES.md`; no CGAL header is included anywhere in libcvc, cvcGL or pycvc (a grep in CI; `tools/cgal_ab` is the one place allowed) | |
+| T16 | A/B against CGAL | The port's replacements against the CGAL code they replace, on the same inputs, in `cgal_ab_test` (§1.2): results compared exactly where they must agree and by tolerance where they differ by design, and both sides timed | Qhull vs `Delaunay_triangulation_3` and the skeletons built on each; `cvc::planar` vs CGAL's Booleans, offsets, CDT and straight skeleton, and the tiled surfaces from each |
 
 ContourTiler's 12 switched-off CppUnitLite2 tests, with their expected outputs, are converted to
 gtest and count toward T1 and T2. `test_intersection.cpp` alone is 2,252 lines.
 
-### 1.8 How the legacy code goes in
+### 1.8 Wasm from the start
 
-This is done as for `geometry/SDF` and `geometry/cvc-mesher`.
+**The rule.** Every port builds for wasm-mt (the `wasm32-emscripten`, `-pthread` target that
+libcvc, arigl-web and the libcvc-examples-web gallery use) from its first PR, and its tests run
+there in CI (T14). There is no later web phase.
 
-- Vendor the legacy sources mostly as they are, under a subdirectory with its own
-  `.clang-format` (off). Put a small adapter between them and libcvc's types, like
-  `cvc-mesher/VolMagickCompat.h` and `LBIE/geoframe_adapter.cpp`. The public header is new, small
-  and in libcvc's style (§1.4).
-- Replace the legacy globals with the context struct (§1.3) before anything else, so that the
-  parity tests (T1) run against code that can already run twice at once.
-- Drop the legacy file formats from the algorithm path. Readers and writers become libcvc I/O
-  handlers, registered per app (§1.3), and the algorithm takes in-memory types.
+**Why this is possible now.**
+- With CGAL gone (§1.2), nothing in the ports needs GMP or MPFR, which have no wasm-mt build.
+- The replacements are plain C or C++, and none of them needs threads or a filesystem.
+- GenSeg was always CGAL-free.
+
+**What it takes**
+- **A wasm-mt build of every new library.** cy-pca/cvcpkg#578 adds wasm and wasm-mt to qhull, and
+  a new clipper2 recipe for every platform, wasm and wasm-mt included. CDT, Shewchuk's predicates
+  and nanoflann are header-only and vendored, so they need no build of their own.
+  - Checked locally with emsdk: both libraries build for wasm-mt with `-pthread`.
+  - A smoke program linking them, with CDT, runs under node 22. Qhull's cube-plus-centre gives
+    12 tetrahedra, and two triangulations on two threads equal the sequential ones (13,040 and
+    19,597 tetrahedra). Clipper2's union, intersection, difference, offset and Minkowski sum give
+    the expected areas. CDT triangulates a constrained square into 4 triangles.
+- **A `ports (wasm-mt, node)` CI lane**, modelled on the existing `physics replay (wasm-mt,
+  node)` lane: build libcvc for wasm-mt and each port's gtest binaries, then run them under
+  node.
+- **Each node type's demo** in the arigl-web lane (headless Chrome), with its golden image.
+- **Sliced jobs** are what make the long runs usable on single-threaded wasm: a few ms a frame.
+  Wasm-mt runs them on the pool as natively.
+- **The browser pycvc** (`pycvc-gl-cp312`, wasm) gets the bindings in the same PR as native
+  pycvc.
 
 ---
 
@@ -476,11 +624,30 @@ cloud. It then runs:
 6. U2, a graph turned into polylines (the strands);
 7. clean-up (`star`, sort by area, drop small clusters).
 
-The result is `Simple_skel`: line strips plus polygons, each vertex with a colour. The only heavy
-dependency is CGAL: EPICK plus `Delaunay_triangulation_3`, a GPL package, so it goes in `cvc_gpl`
-(§1.2). There is no Qt (its CMake calls `SetupQt()` for nothing), and no GL, GSL or VolMagick. No
-paper is cited in the code. The Dey–Goswami cocone and Goswami–Dey–Bajaj unstable-manifold
-lineage is inferred.
+The result is `Simple_skel`: line strips plus polygons, each vertex with a colour. Its CGAL use
+is EPICK plus `Delaunay_triangulation_3` with custom vertex and cell bases. There is no Qt (its
+CMake calls `SetupQt()` for nothing), and no GL, GSL or VolMagick. No paper is cited in the code.
+The Dey–Goswami cocone and Goswami–Dey–Bajaj unstable-manifold lineage is inferred.
+
+**Without CGAL** (§1.2)
+- **The triangulation:** reentrant Qhull's Delaunay of the points, run as `d Qbb Qt Qz`, which is
+  deterministic.
+  - On a cube's corners plus its centre that gives the exact 12 tetrahedra.
+  - Joggling (`QJ`) adds flat slivers and is seeded from the clock. Slivers put Voronoi vertices
+    far away, which is what the cocone and medial axis must not see.
+  - `tet_complex` still flags any near-flat cell. The A/B against `Delaunay_triangulation_3` (T16)
+    decides on real degenerate samples whether that is enough.
+- **`cvc::tet_complex`** holds it: cells with their four vertices and four neighbours, the mirror
+  index across each facet, infinite cells closing the convex hull, per-cell and per-facet flag
+  arrays (the legacy cell base's fields), and cached circumcentres (the Voronoi vertices).
+- **An adapter** gives the vendored cocone code the handles and calls it uses (`vertex(i)`,
+  `neighbor(i)`, `mirror_index`, `is_infinite`, `finite_cells`, `incident_cells`, `dual`), so
+  the 7.9k lines change little.
+- **Exact predicates** (orientation, insphere) come from Shewchuk's code, and the few
+  constructions use doubles, as EPICK did.
+- **Parity:** on inputs in general position, Qhull and CGAL give the same Delaunay, so T1 holds
+  exactly. On degenerate inputs (cospherical grid samples) they may break ties differently, so T1
+  compares topology there.
 
 **What the port fixes on the way in**
 
@@ -506,11 +673,11 @@ lineage is inferred.
 
 **One cocone core, not four.** Skeletonization's `tcocone.cpp`, `robust_cc.cpp`, `intersect.cpp`
 and `init.cpp` differ from the copies in TightCocone, PocketTunnel and Curation by 10–25 lines
-each. Port them once, as an internal `cvc::cocone` module in `cvc_gpl`. A later TightCocone port
-(surface reconstruction from points) and PocketTunnel then reuse it, rather than vendoring a
+each. Port them once, as an internal `cvc::cocone` module on `tet_complex`. A later TightCocone
+port (surface reconstruction from points) and PocketTunnel then reuse it, rather than vendoring a
 fifth copy.
 
-**API sketch** (`inc/cvc/gpl/skeleton.h`)
+**API sketch** (`inc/cvc/geometry/skeleton.h`)
 
 ```cpp
 namespace cvc {
@@ -537,32 +704,31 @@ The defaults match the legacy `Parameters` (`Skeletonization.h:42-54`) and the d
 
 **Surfaces**
 
-- **CLI:** `cvc-gpl skeleton in.{off,ply,raw,rawc} -o out.{vtk,raw} [--robust ...]`. The legacy
+- **CLI:** `cvc skeleton in.{off,ply,raw,rawc} -o out.{vtk,raw} [--robust ...]`. The legacy
   tool's flags (`-r -bbr -mr -hc -thif -thff -plc -medth -medr`, from `main.cpp.unused`) are
   accepted as aliases.
-- **pycvc:** `pycvc_gpl.skeletonize(geom, robust=True, ...)` and `skeletonize_job`.
+- **pycvc:** `pycvc.skeletonize(geom, robust=True, ...)` and `skeletonize_job`.
 - **DSL:** `(skeleton.compute g params)`.
-- **Ariadne:** a `skeleton` node type in `cvcgl_gpl`.
-  - It reads its input from `source: { node: <mesh_lab id> }`, through that node's geometry data
-    key, or from `source: { file }`.
-  - Its parameters live under `<node>.skeleton.*`, and its results on the data channel (§1.5).
+- **Ariadne:** a `skeleton` request on `mesh_lab`.
+  - Its parameters live under `<node>.mesh_ops.skeleton.*`, and its results on the data channel
+    (§1.5).
   - It adds two children, `<id>_strands` and `<id>_sheets`, tagged `skeleton`, so a `viewport`
     can show the skeleton alone.
-  - Its component, `skeleton.ari`, is listed only where the node type is registered. Check how
-    the component index gates a component on a node type.
-  - A volume reaches it through an isosurface, as `fe_lab` does today.
-  - It is a node of its own, not a request on `mesh_lab`, because `mesh_lab` is in LGPL cvcGL.
+  - `mesh_tools.ari` gains a Skeleton section. A volume reaches it through an isosurface, as
+    `fe_lab` does today.
+  - The previous revision made it a node of its own only to keep GPL code out of cvcGL. That
+    reason is gone.
 
 **Tests** (§1.7)
 
 | Row | Cases |
 |---|---|
-| T1 | strand and sheet counts and vertices against the legacy library on three committed point clouds |
-| T2 | poles, cocone flags, medial-axis filter, U1 clustering and U2 strands, one at a time |
+| T1 | strand and sheet counts and vertices against the legacy library on three committed point clouds in general position; topology on one cospherical grid sample |
+| T2 | `tet_complex` (every circumsphere empty, neighbours and mirror indices consistent, the hull closed by infinite cells); poles, cocone flags, the medial-axis filter, U1 clustering and U2 strands, one at a time |
 | T3 | torus, slab, capsule, and two spheres joined by a rod |
 | T4 | unchanged by rigid motion and point order |
-| T5 | fewer than four points, coplanar and collinear points, duplicates |
-| T6–T14 | as the matrix |
+| T5 | fewer than four points, coplanar, collinear and cospherical points, duplicates |
+| T6–T16 | as the matrix |
 
 ---
 
@@ -585,25 +751,59 @@ There are two legacy tilers, and only one is worth porting.
   README targets neuropil "AxonsDendrites" serial-section data). It is built by default and
   reached from VolumeRover2's Tools > Contour Tiler.
   - Licence: LGPL like libcvc (Joe, 2026-11-08). Its files carry no header, so vendoring adds
-    libcvc's. It uses GPL CGAL packages, so it goes in `cvc_gpl` (§1.2).
+    libcvc's.
   - Size: about 24k source and 13k header lines, tests and tools included.
   - No Qt, GL, VolMagick or GSL. Errors are exceptions, not `exit()`, apart from
     `smfconvert.cpp`, a tool file that sits in the library's source list.
 
-**ContourTiler's rough edges, and what the port does with them**
+**ContourTiler's CGAL, and what replaces it.** This is the largest single job in the plan. The
+library includes about 60 different CGAL headers, and its basic types (`Point_2`, `Polygon_2`,
+`Polygon_with_holes_2`) come from CGAL's kernel throughout. The GPL packages are concentrated in
+a few files:
+
+| Files | CGAL used | Replacement |
+|---|---|---|
+| `skeleton.cpp` (1,185 lines: `medial_axis_stable`, `triangulate_to_medial_axis`, the untiled regions) | Straight skeleton, offset builder, CDT, partition, natural neighbours, Delaunay 2D | Boost.Polygon medial axis; CDT; Hertel–Mehlhorn |
+| `interp.cpp` (150 lines) | Natural-neighbour coordinates, Sibson gradient fitting, the QP solver | Sibson coordinates on CDT's Delaunay; Eigen least squares |
+| `offset_polygon.cpp`, `minkowski.cpp` | Straight-skeleton offsets, Minkowski sums, approximated offsets | Clipper2 `InflatePaths`, `MinkowskiSum` |
+| `polygon_utils.cpp`, `augment.cpp`, `contour_utils.h` | CDT, partition, sweep line, arrangements | CDT; Boost.Geometry turns or a small sweep |
+| `arrange_polygons.cpp`, `polygon_difference.cpp`, `polygon_intersection.cpp`, `Hierarchy.h` | Boolean set ops on `Lazy_exact_nt<Gmpz>` | Clipper2 on `int64` |
+| `common.h`, `CGAL_hash.h`, `bso_rational_nt.h` | Kernels: Cartesian, EPECK with sqrt, Nef's extended kernels, `Gmpq`, `MP_Float` | The planar module's types |
+| everything | `Point_2/3`, `Segment_2/3`, `Polygon_2`, `Bbox_2` (LGPL) | The planar module's types |
+
+**The plan: a planar-geometry module, then the tiler on top.**
+1. **`cvc::planar`** (`src/cvc/geometry/planar/`), new and small:
+   - points on a fixed `int64` grid, with a per-stack scale and origin chosen from the stack's
+     bounding box, so every contour vertex snaps exactly once;
+   - Shewchuk's orientation and in-circle predicates;
+   - polygons and polygons with holes;
+   - Clipper2 Booleans and offsets;
+   - CDT triangulation;
+   - the Boost.Polygon medial axis, sampled to polylines;
+   - Sibson interpolation;
+   - its own T2 tests against brute force.
+2. **ContourTiler vendored on top of it.** Its typedefs in `common.h` point at `cvc::planar`
+   types, and the GPL calls in the files above are rewritten. The tiler logic itself
+   (correspondence, tiling regions, branching, intersection removal) stays as it was.
+3. **Parity.** The medial axis replaces the straight skeleton, and integers replace exact
+   rationals, so the untiled regions' fill and the intersection removal can differ slightly from
+   the legacy. T1 therefore compares surfaces by topology (genus and components per surface) and
+   by Hausdorff distance below a tolerance. Tiles away from untiled regions should match exactly.
+   §9 item 2 asks whether that is enough.
+
+**ContourTiler's other rough edges, and what the port does with them**
 
 | As it is | In libcvc |
 |---|---|
 | `tile(begin, end, comp2color, options)` mutates the input slices and writes `.rawc` files; it returns nothing (`tiler.cpp:555-576`) | Takes a const `contour_stack` and returns one `cvc::geometry` per component; files only from the CLI |
 | log4cplus in 48 files: 156 `getInstance` calls, 104 function-static loggers | A shim whose logger is a member of `tiler_context`, passed to the functions that log (§1.3); no process-wide logger |
 | Two `.ser` readers. The app's goes through ContourFilter's `Controls::instance()` singleton, which is reconfigured on every read, has hard-coded ignored names, and drops a whole component if one contour is non-simple. The CLI's uses tinyxml | Port the tinyxml reader into `contour_stack` I/O. The singleton stays behind. ContourFilter's smoothing waits until someone needs it |
-| Exact number types for the boolean ops (`Lazy_exact_nt<Gmpz>`, `Gmpq`, `MP_Float`), so GMP and MPFR (LGPL, but with no wasm build) | Native only at first (§9 item 1) |
-| GCC-only flags baked in (`-g -pthread -frounding-math`, `-rdynamic`) | `SetupCGAL` does what is needed per compiler |
-| 12 `test_*.cpp` on CppUnitLite2, switched off (`test_intersection.cpp` alone is 2,252 lines, with expected outputs) | Converted to gtest: T1 and T2 coverage for free |
-| `cvcraw_geometry::contours_t` stores `ContourTiler::Slice`, a reverse dependency | `cvc::contour_stack`, in libcvc, is the shared type, and the tiler converts at its edge |
+| GCC-only flags baked in (`-g -pthread -frounding-math`, `-rdynamic`) | Gone with CGAL |
+| 12 `test_*.cpp` on CppUnitLite2, switched off (`test_intersection.cpp` alone is 2,252 lines, with expected outputs) | Converted to gtest: T1 and T2 coverage for free, with tolerances where §3's parity note applies |
+| `cvcraw_geometry::contours_t` stores `ContourTiler::Slice`, a reverse dependency | `cvc::contour_stack` is the shared type, and the tiler converts at its edge |
 | Static counters for debug file names, and `_otv.g` / `_verts.g` debug outputs | Dropped, or a `debug_dir` parameter |
 
-**The shared contour type** (`inc/cvc/geometry/contours.h`, in libcvc), used by the tiler and by
+**The shared contour type** (`inc/cvc/geometry/contours.h`), used by the tiler and by
 VolumeGridRover:
 
 - slices keyed by z index, with a z spacing (the legacy hard-codes 0.05 in
@@ -614,10 +814,10 @@ VolumeGridRover:
   `.pts`.
 - **Writers:** Tao Ju's `.contour` (ctr2suf), `.pcd`, and a libcvc-native file for
   VolumeGridRover sessions.
-- I/O handlers registered per app (§1.3), with `contours.read` / `contours.write` intrinsics
+- I/O handlers registered on the app (§1.3), with `contours.read` / `contours.write` intrinsics
   and T9 corpora.
 
-**API sketch** (`inc/cvc/gpl/tiler.h`)
+**API sketch** (`inc/cvc/geometry/tiler.h`)
 
 ```cpp
 namespace cvc {
@@ -641,13 +841,13 @@ One step of the job is one slice pair of one component, so progress is real.
 
 **Surfaces**
 
-- **CLI:** `cvc-gpl tile in.ser -o outdir`, keeping `cl_parse`'s flags. The VolumeRover2 dialog
-  passes them as free text, by default `-C 0.01 -e 1e-15 -o raw`.
-- **pycvc:** `pycvc_gpl.tile_contours(stack, ...)` and `tile_contours_job`.
+- **CLI:** `cvc tile in.ser -o outdir`, keeping `cl_parse`'s flags. The VolumeRover2 dialog passes
+  them as free text, by default `-C 0.01 -e 1e-15 -o raw`.
+- **pycvc:** `pycvc.tile_contours(stack, ...)` and `tile_contours_job`.
 - **DSL:** `(tiler.tile stack params)`.
-- **Ariadne:** a `contour_lab` node type in `cvcgl_gpl`.
+- **Ariadne:** a `contour_lab` node type.
   - Its input is a file (`source: { file }`), or another node's contours from the state tree
-    (`source: { node: <volume_grid id> }`, which reads `<grid>.grid.contours`).
+    (`source: { node: <id> }`).
   - It draws a stack's contours as polylines in their component colours (tag `contours`). On a
     `tile` request it adds the surfaces as children (tag `tiles`).
   - Its keys live under `<node>.tiler.*`, and its surfaces on the data channel.
@@ -658,12 +858,12 @@ One step of the job is one slice pair of one component, so progress is real.
 
 | Row | Cases |
 |---|---|
-| T1–T2 | the 12 converted legacy tests; meshes against the legacy library on two committed `.ser` series |
+| T1–T2 | the 12 converted legacy tests; surfaces against the legacy library on two committed `.ser` series, by topology and Hausdorff distance; `cvc::planar` against brute force |
 | T3 | a cylinder stack gives a genus-0 tube; a branching Y gives one surface; two touching components with `remove_intersections` give two disjoint surfaces |
 | T4 | closed and manifold, no self-intersection, every vertex on a contour plane, volume within 2% of the prism estimate |
-| T5 | one slice, empty slices, an open contour, a self-intersecting contour, reversed orientation |
+| T5 | one slice, empty slices, an open contour, a self-intersecting contour, reversed orientation, coordinates at the edge of the snapping grid |
 | T9 | every `contour_stack` format round-trips; a Reconstruct series reads |
-| T6–T14 | as the matrix |
+| T6–T16 | as the matrix |
 
 ---
 
@@ -671,9 +871,10 @@ One step of the job is one slice pair of one component, so progress is real.
 
 **What the legacy tool is today.** It is a 7,002-line `VolumeGridRover.cpp`.
 
-- **Views:** XY, XZ and ZY slice views shown one at a time in tabs. Each is a `SliceCanvas` (a
-  QGLViewer) with an orthographic camera, no rotation, middle-button zoom, a depth slider and
-  Reset View.
+- **Views:** XY, XZ and ZY slice views, one at a time. A tab widget (`m_SliceCanvasTab` in
+  `VolumeGridRoverBase.ui`, tabs "XY", "XZ" and "ZY") switches between them, and the widget docks
+  beside VolumeRover's main 3D view. Each tab is a `SliceCanvas` (a QGLViewer) with an
+  orthographic camera, no rotation, middle-button zoom, a depth slider and Reset View.
 - **Probe:** hovering fills a probe with the voxel's index, object coordinates, RGBA and value.
 - **Point classes:**
   - double-click toggles a point;
@@ -700,12 +901,12 @@ program (paletted and SGI colour-table fallbacks), immediate-mode quads, `gluDis
 which is the out-of-core path. The memory-mapped readers are not even built.
 
 **So this port is a rebuild of what VolumeGridRover was for, not a translation of the widget.**
-None of its Qt or GL code carries over. Its data model, file formats, interaction design and a
-few algorithms do. volrover's history from before the Qt6 migration may hold the last working
-contour and tiling code. Read it before P10; the shallow clone used for this sketch has none of
-it.
+None of its Qt or GL code carries over. Its data model, file formats, interaction design (the view
+switch included) and a few algorithms do. volrover's history from before the Qt6 migration may
+hold the last working contour and tiling code. Read it before P10; the shallow clone used for
+this sketch has none of it.
 
-**The node: `type: volume_grid`** (`inc/cvc/gl/ariadne/volume_grid_nodes.h`, in LGPL cvcGL)
+**The node: `type: volume_grid`** (`inc/cvc/gl/ariadne/volume_grid_nodes.h`)
 
 - It reads `source: { file, var, time }` as a volume node does.
 - **Children:**
@@ -713,8 +914,7 @@ it.
   - per slice, overlays carrying the same tag: point-class glyphs, contour polylines, crosshairs
     where the other two planes cross, and the segmentation's labels as a see-through colour
     layer;
-  - a `<id>_surfaces` group for the segmented classes' surfaces (tag `surfaces`). Tiled surfaces
-    come from the `contour_lab` node and carry the same tag.
+  - a `<id>_surfaces` group for tiled surfaces and segmented classes' surfaces (tag `surfaces`).
 - One scene, tagged groups: the XY view shows `slice_xy`, and the 3D view shows all three planes
   with the surfaces, the classic orthoslicer.
 - Edits run in C++ in the node, where they are fast and testable. The DSL only wires widgets to
@@ -727,6 +927,7 @@ their units and ranges as properties. Bulk data is on the data channel:
 | Key | Meaning |
 |---|---|
 | `source.file`, `source.var`, `source.time` | what `load` reads; `info.dims`, `info.min`, `info.max` and `info.span` are published |
+| `view` | which slice the switch shows: `xy`, `xz` or `zy` (the legacy tabs); a document, the DSL or pycvc can set it |
 | `slice.x`, `slice.y`, `slice.z` | voxel indices; written by the sliders, the keys and clicks |
 | `cursor.{i,j,k,x,y,z,value}` | published on hover: the probe |
 | `tool` | `navigate`, `points`, `contours`, `probe` |
@@ -734,31 +935,28 @@ their units and ranges as properties. Bulk data is on the data channel:
 | `classes`, `classes.current` | point-class metadata: name, colour, radius, as a list a `repeat:` can bind |
 | `objects`, `objects.current` | contour-object metadata: name, colour, interpolation (`linear` or `spline`), samples |
 | `display.point_size`, `display.show_points`, `display.grey`, `display.background` | display (a parameter table) |
-| `segment.t_low`, `segment.t_high`, `segment.gamma`, `segment.seeds` (`none` for the point classes alone, `local_maxima`, `critical_points`), `segment.show`, `segment.opacity` | §5's parameters, from `param_table<seeded_segmentation_params>`, and how the labels draw |
-| `request` | `load`, `save_classes <f>`, `load_classes <f>`, `load_points <f>`, `save_contours <f>`, `load_contours <f>`, `delete_selected`, `segment`, `save_segments <f>`, `save_session <f>`, `load_session <f>`, `undo`, `stop` |
+| `segment.t_low`, `segment.t_high`, `segment.gamma`, `segment.seeds` (`local_maxima`, the default; `critical_points`; `none` for the point classes alone), `segment.show`, `segment.opacity` | §5's parameters, from `param_table<seeded_segmentation_params>`, and how the labels draw |
+| `tile.*` | §3's parameters, from `param_table<tile_params>` |
+| `request` | `load`, `save_classes <f>`, `load_classes <f>`, `load_points <f>`, `save_contours <f>`, `load_contours <f>`, `delete_selected`, `tile`, `segment`, `save_segments <f>`, `save_session <f>`, `load_session <f>`, `undo`, `stop` |
 | `busy`, `status`, `progress`, `phase` | published |
-| data: `volume`, `points`, `contours`, `segment.labels`, `segment.classes` | the loaded volume, the `point_classes`, the `contour_stack`, the segmentation's results (§1.5) |
+| data: `volume`, `points`, `contours`, `segment.labels`, `segment.classes`, `surfaces.<object>` | the loaded volume, the `point_classes`, the `contour_stack`, the segmentation's and the tiler's results (§1.5) |
 | `<node>.transfer_function` (+ `.histogram` …) | as on every volume node, so the `tf_editor` colours the slices |
 
 **Data and algorithms**
 
-- **Point classes:** a small `cvc::point_classes` type in libcvc (classes × voxel points, per
-  variable and timestep), with `.vgr` read and write and a `.pts` reader. The legacy `.vgr` form
-  is `<pointclassdoc><pointclass name color variable timestep><point>"x y z"</point>`. The
-  points live on the data channel; the class metadata are keys.
+- **Point classes:** a small `cvc::point_classes` type (classes × voxel points, per variable and
+  timestep), with `.vgr` read and write and a `.pts` reader. The legacy `.vgr` form is
+  `<pointclassdoc><pointclass name color variable timestep><point>"x y z"</point>`. The points
+  live on the data channel; the class metadata are keys.
 - **Contours:** the §3 `contour_stack`, one component per object.
-- **Splines:** the legacy resampled with GSL splines every frame. libcvc does not link GSL on
-  wasm, so use a small natural-cubic or Catmull-Rom spline in libcvc, computed when a contour
-  changes.
-- **Tile, through the state tree.** `volume_grid` is LGPL and never links the tiler (§1.2). The
-  `volume_grid` component takes a `tiler:` arg naming a `contour_lab` node whose source is this
-  grid. When the arg is given, the component shows a Tile button that writes `request: tile` to
-  that node. The surfaces appear in the 3D view in the objects' colours. This finally wires up the
-  `tilingComplete` the legacy declared and never emitted.
-- **Ported later, on demand:**
-  - SDF2D, the 2D signed distance of contour polygons (CGAL k-nearest-neighbour search, so GPL),
-    for a "show SDF" overlay;
-  - `medax.h`, a 2D medial axis through CGAL's segment Delaunay graph (GPL);
+- **Splines:** the legacy resampled with GSL splines every frame. Use a small natural-cubic or
+  Catmull-Rom spline in libcvc instead, computed when a contour changes, so wasm needs no GSL.
+- **Tile:** the §3 tiler on the drawn objects. The surfaces appear in the 3D view in the objects'
+  colours. This finally wires up the `tilingComplete` the legacy declared and never emitted.
+- **Ported later, on demand, on §1.2's libraries:**
+  - SDF2D, the 2D signed distance of contour polygons (nanoflann for the nearest edges), for a
+    "show SDF" overlay;
+  - `medax.h`, a 2D medial axis, from `cvc::planar`'s Boost.Polygon medial axis;
   - Kinney's b-spline fit (`bspline_fit.cpp`, not compiled today);
   - slice isolines through libcontour's 2D path, already in-tree (`cvc-mesher/contour/conplot2d`).
 - **Segment:** §5's `segment_seeded`, with the point classes as seeds.
@@ -771,33 +969,33 @@ their units and ranges as properties. Bulk data is on the data channel:
 
 - **`volume_grid`:** one window holding:
   - the tool as radio buttons;
-  - a 2×2 grid of viewports: XY, XZ and ZY in `mode: slice` with `input: pick`, and a 3D orbit
-    view;
-  - under each slice view, a slider bound to `grid.slice.{z,y,x}`, with the index in the view's
-    caption;
+  - **the views, in one of two layouts** (the `layout` arg):
+    - **`switch`** (the default, as the legacy): one slice viewport in `mode: slice` with
+      `input: pick`, under an XY / XZ / ZY switch bound to `grid.view`, beside a 3D orbit view;
+    - **`quad`**: XY, XZ and ZY slice viewports and the 3D view in a 2×2 grid, all at once.
+  - under each slice view, a slider bound to its axis's `grid.slice.*`, with the index in the
+    view's caption;
   - a side panel with tabs:
     - Probe;
     - Point classes: list, colour, radius, add, delete, save, load;
-    - Contours: objects, colour, interpolation, samples, save, load, and Tile when `tiler:` is
-      given;
+    - Contours: objects, colour, interpolation, samples, save, load, Tile;
     - Segmentation: thresholds, γ, seed mode, Segment, Stop, label opacity, save;
     - Transfer function: the `transfer_function_editor` unit.
   - Slider ranges and labels come from the keys' properties (§1.5), not from the component.
 - **`volume_grid_views`** and **`volume_grid_tools`:** the views alone and the panel alone, for a
   document that lays them out itself.
-- **Args:** `node`, `title`, `id`, `view_size`, `layout` (`quad`, or `tabs` like the legacy),
-  `tiler`.
-- **Demo:** `examples/ariadne/documents/volume_grid.ari` on a shipped volume, with a golden image
-  and an interaction test that scripts picks through state writes. A second demo adds a
-  `contour_lab` for Tile, where the GPL extensions are built.
+- **Args:** `node`, `title`, `id`, `view_size`, `layout` (`switch` or `quad`).
+- **Demo:** `examples/ariadne/documents/volume_grid.ari` on a shipped volume, natively and in
+  arigl-web, with a golden image per layout and an interaction test that scripts picks and the
+  view switch through state writes.
 
 ---
 
 ## 5. Seeded segmentation (GenSeg)
 
 **What it is.** `src/Segmentation/GenSeg` is about 2.8k lines; `segment.cpp` is 1,969 of them. It
-is CVC code under the LGPL, uses no CGAL, and so stays in libcvc. Its headers ask users to cite
-the paper it implements:
+is CVC code under the LGPL and uses no CGAL. Its headers ask users to cite the paper it
+implements:
 
 > C. Bajaj, Z. Yu, M. Auer, "Volumetric feature extraction and visualization of tomographic
 > molecular imaging", *Journal of Structural Biology* 144(1–2):132–143, 2003,
@@ -867,7 +1065,8 @@ struct seeded_segmentation_params {   // + param_table<seeded_segmentation_param
   double t_low = 0, t_high = 0;      // data units...
   bool normalized_thresholds = false; // ...or the legacy 0-255 scale
   double gamma = -0.12;               // speed F = exp(gamma * |grad I|), |grad I| on 0..255
-  seed_mode automatic = seed_mode::local_maxima;  // added to the user's seeds
+  seed_mode automatic = seed_mode::local_maxima;  // added to the user's seeds; the default stays
+                                                  // local_maxima until the paper mode matches
   // critical_points: diffusion iterations, k (Eq. 3), the feature / background thresholds
 };
 struct seeded_segmentation {
@@ -894,7 +1093,7 @@ frame.
    - Run the legacy code once on small synthetic volumes with fixed seeds: two blobs, a blob
      touching a shell, and a noisy one. The `tools/volrover-goldens/` script does this and
      commits the expected label volumes.
-   - The port must match them voxel for voxel before any clean-up.
+   - The port must match them voxel for voxel, natively and on wasm, before any clean-up.
 2. **Clean up:** compact the unrolled update, take thresholds in data units, and pick the heap.
    The parity tests guard each change.
 3. **Add the paper's automatic mode.** Audit SegMed for singletons (§1.3), then port its
@@ -907,6 +1106,9 @@ frame.
      SecStruct, SegMonomer and the paper's §2.3 volumetric skeletons use the same field.
 4. **Seed generators:** fold in transfix/libcvc#123's seed generators (`criticalPntsToSeed`,
    `SeedProduce*`).
+5. **The default seeding** (settled 2026-11-08): `volume_grid` and the CLI keep GenSeg's local
+   maxima until the paper mode matches the legacy results on real maps. Then the default switches
+   to `critical_points`, in its own PR, with the comparison in its description.
 
 **Surfaces**
 
@@ -927,7 +1129,7 @@ frame.
 | T3 | two blobs give two labels; one seed of each class in one blob splits at the ridge; a shell around a blob gives two nested labels |
 | T4 | every labelled voxel connects to a seed of its class through voxels above `t_low`; no label crosses a ridge above `t_high`; border voxels touch two classes |
 | T5 | no seeds, a seed outside the volume, a seed below `t_low`, a constant volume, NaN voxels, every voxel type |
-| T6–T13 | as the matrix |
+| T6–T16 | as the matrix |
 
 **Not in this effort:** the virus-specific siblings SegCapsid, SegSubunit and SegMonomer, and
 SecStruct. Together they are about 30k lines. Each would reuse the fast-marching core and the
@@ -954,7 +1156,7 @@ Most of the GL-viewer work is already on master. What exists, and what is new:
   It is a mirror viewport of the main one, drawn in a rect cut out of the window's background,
   so it scrolls and clips with its window. `scene_view.ari` is it in a window of its own.
 - **Custom node types** with request keys and sliced jobs (`mesh_nodes.cpp` is the template).
-  The ports register theirs through the per-app registry P0 adds (§1.3).
+  After P0a they register on the app, not in a process-wide table (§1.3).
 - **The transfer function editor** (`tf_editor`, `transfer_function_editor` unit). Every volume
   node already publishes its model, histogram, contour spectrum and contour tree, so a volume
   grid node gets the colour map editor for free.
@@ -971,9 +1173,10 @@ Most of the GL-viewer work is already on master. What exists, and what is new:
    - Today the only axis-aligned cut is fe_lab's `<id>_slice`, an FE field on tetrahedra.
      `volslice` slices face the camera, which is a different thing.
    - Useful on its own: the classic three-plane orthoslicer next to a `volren`.
-2. **A slice camera mode for the viewport** (`mode: slice`, `axis: x | y | z`): parallel
-   projection looking down the axis, no rotation; drag pans, the wheel zooms about the pointer,
-   and double-click refits the slice.
+2. **A slice camera mode for the viewport** (`mode: slice`, `axis: x | y | z`, the axis bindable
+   to a key so one viewport can follow the view switch): parallel projection looking down the
+   axis, no rotation; drag pans, the wheel zooms about the pointer, and double-click refits the
+   slice.
    - `mode: map` is a top-down view along z only, and it orbits, so it is not enough.
    - The camera controller already has the parallel-projection plumbing for `map`.
 3. **Pointer events from a viewport to state** (`input: pick`, `pick: <key>`, `on_pick:`). A click
@@ -992,52 +1195,58 @@ Most of the GL-viewer work is already on master. What exists, and what is new:
    fields.
 5. **Widgets the side panel needs** (check each against the backend before planning around it):
    a list bound to a state array with add and remove (the `repeat:` the card component uses), a
-   colour picker for a class colour, and radio buttons for the tool. Anything missing is a small
-   ImGui widget in `ImGuiBackend.cpp` with an FTXUI placeholder.
+   colour picker for a class colour, radio buttons for the tool, and a tab bar or segmented
+   buttons bound to a key for the view switch. Anything missing is a small ImGui widget in
+   `ImGuiBackend.cpp` with an FTXUI placeholder.
 
 Items 2 and 3 are the critical path for VolumeGridRover. Item 1 is the bulk of the rendering
-work. Items 4 and 5 are small.
+work. Items 4 and 5 are small. All of them run in arigl-web too.
 
 ---
 
 ## 7. Phases
 
-Sizes are relative: S is a PR or two, M a few, L a short series. Every phase lands with its
-§1.7 rows, its pycvc bindings and its DSL intrinsics, not as follow-ups.
+Sizes are relative: S is a PR or two, M a few, L a short series, XL a longer one. Every phase
+lands with its §1.7 rows, its pycvc bindings, its DSL intrinsics and its wasm-mt build and tests,
+not as follow-ups.
 
 | Phase | Size | What lands | Needs |
 |---|---|---|---|
-| P0a Shared pieces | M | `cvc::param_table` (§1.5), with its state, property, CLI, pycvc and DSL generators and its own T8 tests; `cvc::result_job<R>` (§1.4); per-app registries for Ariadne node types, action intrinsics and the volume / geometry I/O handlers (§1.3), used by new code; pycvc's generic `result_job` wrapper; the object-file singleton scan in CI; `tools/volrover-goldens/` (builds the legacy libraries at a pinned volrover sha and writes the T1 goldens) | — |
-| P0b GPL library | S | The `cvc_gpl`, `cvcgl_gpl` and `pycvc_gpl` targets and `cvc-gpl` behind `CVC_ENABLE_GPL`; `CGAL_LICENSE_ERROR` on the new LGPL directories; a CI lane with `CVC_ENABLE_GPL=OFF` (T14); COPYING and README; the packaging chosen in §9 item 4 | — |
-| P0c Shared types | S | `cvc::contour_stack` and `cvc::point_classes`, with readers and writers registered per app, their parameter tables, intrinsics (`contours.*`, `point-classes.*`, `params.*`), pycvc, and T6, T8, T9 and T11; a spike building CGAL's `Delaunay_triangulation_3` for wasm-mt with `CGAL_DISABLE_GMP`, and Boost.Multiprecision as the exact fallback | P0a |
-| P1 Skeleton core | M | In `cvc_gpl`: vendor into `src/cvc_gpl/skeleton/` with the shared cocone core and `skeleton_context`; the §2 fixes; `cvc::skeletonize` and its job; `cvc-gpl skeleton`; `pycvc_gpl`; `skeleton.compute`; §2's tests | P0a, P0b |
-| P2 Skeleton in Ariadne | S | The `skeleton` node in `cvcgl_gpl` reading a `mesh_lab` node from the state tree; `skeleton.ari`; a demo document with a golden image | P1 |
-| P3 Tiler core | L | In `cvc_gpl`: vendor into `src/cvc_gpl/tiler/` with the context-held logger; in-memory output, const input; its 12 tests as gtest; `cvc-gpl tile`; `pycvc_gpl`; `tiler.tile`; §3's tests | P0a, P0b, P0c |
-| P4 Tiler in Ariadne | S | `contour_lab` in `cvcgl_gpl`, reading a file or another node's contours, and `contour_tiler.ari`, with a demo on a small redistributable Reconstruct series (find one) | P3 |
-| P5 Segmentation core | M | §5 steps 1–2: GenSeg vendored into `src/cvc/volume/segmentation/` with `genseg_context` and in-memory input and output; voxel-for-voxel parity, then the clean-up; `cvc segment`; pycvc; `segment.seeded`; §5's tests. CGAL-free, so it runs on wasm | P0a, P0c |
-| P6 Paper mode | S–M | §5 steps 3–4: the SegMed audit, `cvc::gradient_vector_diffusion`, `seed_mode::critical_points` and `critical_point_seeds`, `segment.critical-points`, and #123's seed generators | P5 |
-| P7 Viewport pieces | M | §6: the `volume_slice` node, `mode: slice`, `input: pick` / `pick:` / `on_pick:`, the overlay offset, the missing widgets. Each with tests, plus an orthoslicer demo next to `volren_bunny` | P0a (registries) |
-| P8 volume_grid v1 | M | Navigation, probe, point classes (mark, select, move, delete, save, load), sessions, the transfer function, quad or tab layout; parameters from tables and data on the data channel; golden image and scripted-pick tests; two grids in one document (T6) | P7, P0c |
+| P0a libcvc under the app | XL | Every item of §1.3's audit (152 objects, and the `thread_local`s that keep state) moved onto `cvc::app` (or the `AppRuntime`), each subsystem its own PR with a two-apps test. In order: (1) the file I/O registries, fixing the duplicated handlers (volume first, whose API already takes the app, then geometry, model, image); (2) Ariadne's registries and cells (action intrinsics, node types and shader presets, widgets, `.ari` blocks, data decoders, URI schemes and caps, net and OIDC hosts, media player factory and policy); (3) state's startup hooks and static-init registrars (xmlrpc's auto-start becomes explicit), the compression registry, `state_volume_codec`'s per-thread app; (4) `cvc::net`, cvcGL's static configuration, the world generators; (5) state_exec's ids and persistent `thread_local`s, core's counters; (6) CUDA and the process-wide list (§9 item 5). The public functions that reached a process-wide table take the app (§9 item 3). The object-file scan in CI starts with the audit's list as its allowlist and ends with only §9 item 5's | — |
+| P0b Shared pieces | M | `cvc::param_table` (§1.5), with its state, property, CLI, pycvc and DSL generators and its own T8 tests; `cvc::result_job<R>` (§1.4); pycvc's generic `result_job` wrapper; the `ports (wasm-mt, node)` CI lane (§1.8); `tools/volrover-goldens/` (builds the legacy libraries at a pinned volrover sha and writes the T1 goldens) | — |
+| P0c Permissive libraries | M | Qhull (wasm and wasm-mt) and Clipper2 as cvcpkg packages, in cy-pca/cvcpkg#578, open; CDT (with its `static const` fix) and Shewchuk's predicates vendored in `src/cvc/third_party`. Each with its notice in `THIRD_PARTY_NOTICES.md`, the singleton scan clean, a smoke test natively and under node, and its first `cgal_ab_test` rows (T16) | — |
+| P0d Shared types | S | `cvc::contour_stack` and `cvc::point_classes`, with readers and writers registered on the app, their parameter tables, intrinsics (`contours.*`, `point-classes.*`, `params.*`), pycvc, and T6, T8, T9, T11 and T14 | P0a, P0b |
+| P1 Skeleton core | M | `cvc::tet_complex` on Qhull with its adapter; vendor into `src/cvc/geometry/skeleton/` with the shared cocone core and `skeleton_context`; the §2 fixes; `cvc::skeletonize` and its job; `cvc skeleton`; pycvc; `skeleton.compute`; §2's tests | P0a–P0c |
+| P2 Skeleton in Ariadne | S | The `mesh_lab` `skeleton` request, children and `mesh_tools` section; a demo document with a golden image, native and in arigl-web | P1 |
+| P3a Planar module | M | `cvc::planar`: the snapping grid, predicates, polygons, Clipper2 Booleans and offsets, CDT, the Boost.Polygon medial axis, Sibson interpolation; T2 against brute force | P0c |
+| P3b Tiler core | L | Vendor ContourTiler into `src/cvc/geometry/tiler/` on `cvc::planar`, with the context-held logger; in-memory output, const input; its 12 tests as gtest; `cvc tile`; pycvc; `tiler.tile`; §3's tests | P3a, P0d |
+| P4 Tiler in Ariadne | S | `contour_lab`, reading a file or another node's contours, and `contour_tiler.ari`, with a demo on a small redistributable Reconstruct series (find one), native and in arigl-web | P3b |
+| P5 Segmentation core | M | §5 steps 1–2: GenSeg vendored into `src/cvc/volume/segmentation/` with `genseg_context` and in-memory input and output; voxel-for-voxel parity, then the clean-up; `cvc segment`; pycvc; `segment.seeded`; §5's tests | P0a, P0b, P0d |
+| P6 Paper mode | S–M | §5 steps 3–4: the SegMed audit, `cvc::gradient_vector_diffusion`, `seed_mode::critical_points` and `critical_point_seeds`, `segment.critical-points`, and #123's seed generators. The default-seeding switch is its own later PR (§5 step 5) | P5 |
+| P7 Viewport pieces | M | §6: the `volume_slice` node, `mode: slice` with a bindable axis, `input: pick` / `pick:` / `on_pick:`, the overlay offset, the missing widgets. Each with tests, plus an orthoslicer demo next to `volren_bunny`, native and in arigl-web | P0a |
+| P8 volume_grid v1 | M | Navigation, the view switch and the quad layout, probe, point classes (mark, select, move, delete, save, load), sessions, the transfer function; parameters from tables and data on the data channel; golden images and scripted-pick tests; two grids in one document (T6) | P7, P0d |
 | P9 volume_grid v2 | M | Segmentation tab: `segment`, labels on the slices, class surfaces in the 3D view, `save_segments` | P8, P5 |
-| P10 volume_grid v3 | M | Contours: draw and edit per object, linear and spline, export, published at `grid.contours`; the `tiler:` arg and Tile through a `contour_lab` | P8, P4 |
-| P11 Web and wrap-up | S–M | arigl-web for the LGPL side (`volume_grid` with Segment but without Tile), and the GPL side only if the P0c spike worked and §9 item 1 allows it. Docs: ARIADNE.md §5.4 rows, INDEX.ari entries, the generated parameter tables. volrover3 picks it all up through libcvc. Retire the legacy libraries from volrover `master` once parity holds, together with #123's VolUtils leftovers | P2, P4, P9, P10 |
+| P10 volume_grid v3 | M | Contours: draw and edit per object, linear and spline, export; `tile` puts surfaces in the 3D view | P8, P3b |
+| P11 Wrap-up | S | Docs: ARIADNE.md §5.4 rows, INDEX.ari entries, the generated parameter tables. volrover3 picks it all up through libcvc. Retire the legacy libraries from volrover `master` once parity holds, together with #123's VolUtils leftovers | P2, P4, P9, P10 |
 
-**Parallel tracks.** Once P0 is in, P1, P3, P5 and P7 share no files and need nothing from each
-other, so they can run as parallel sessions. P0a, P0b and P0c can also overlap: P0c only needs
-P0a's parameter table.
+**Parallel tracks.**
+- P0a, P0b and P0c touch different files, so they can run at once. P0d follows P0a and P0b.
+- Once P0 is in, P1, P3a, P5 and P7 share no files and need nothing from each other, so they can
+  run as parallel sessions. P3b follows P3a.
 
 **Separate items afterwards:**
-- SDF2D, the 2D medial axis and contour curation, in `cvc_gpl`;
-- TightCocone and PocketTunnel on the shared cocone core, in `cvc_gpl`;
+- SDF2D and contour curation;
+- TightCocone and PocketTunnel on the shared cocone core;
 - the virus segmentations (SegCapsid, SegSubunit, SegMonomer) and SecStruct, on §5's fast
   marching and gradient vector diffusion;
-- the paper's §2.3 volumetric skeletons;
-- moving existing callers off the process-wide registries (§9 item 3).
+- the paper's §2.3 volumetric skeletons.
 
 ---
 
 ## 8. What is deliberately left behind
 
+- **CGAL, in every form**, and with it GMP and MPFR (§1.2). The legacy builds in
+  `tools/volrover-goldens/` still use it to make test data; nothing in libcvc links it.
 - **The old `src/Tiling` code:** its licence, the globals, the `exit()`s and the temp files. Its
   contour format survives as a reader.
 - **All of VolumeGridRover's Qt and GL:**
@@ -1045,6 +1254,8 @@ P0a's parameter table.
     table), immediate mode, `GL_SELECT` picking;
   - the `QThread` workers that read widgets off the GUI thread;
   - the `QSettings` cache directory and the temp files in the current directory.
+
+  Its view switch, though, carries over (§4).
 - **The memory-mapped readers** (`MappedVolumeFile`, `lfmap.c`), which are not built today.
   Region reads of one slice cover the same need, and a small cache of recent slices, owned by the
   node, covers scrubbing.
@@ -1065,52 +1276,61 @@ P0a's parameter table.
 ## 9. Decisions for Joe
 
 **Settled on 2026-11-08**
-- ContourTiler is LGPL like libcvc.
-- GenSeg is in scope (§5).
-- The GPL-licensed parts go in a separate library (§1.2).
-- Every port has no singletons (§1.3) and an API pycvc wraps (§1.4).
-- Every port keeps its parameters and data on the state tree (§1.5), has DSL intrinsics (§1.6),
-  and carries the §1.7 tests.
+- ContourTiler is LGPL like libcvc, and GenSeg is in scope (§5).
+- Every port has no singletons, an API pycvc wraps, its parameters and data on the state tree, DSL
+  intrinsics and the §1.7 tests (§1.3–§1.7).
+- No GPL code: permissive libraries replace CGAL's GPL packages, so there is no GPL library and no
+  `-gpl` package (§1.2). libcvc's own GPL CGAL use is gone (transfix/libcvc#1080).
+- Wasm from the first PR of every phase (§1.8).
+- Everything under an app context, in all of libcvc, before the ports (§1.3, P0a).
+- VolumeGridRover keeps the legacy XY / XZ / ZY switch as its default layout, with `quad` as the
+  other (§4).
+- `volume_grid` keeps GenSeg's local maxima as its default seeding until the paper mode matches
+  the legacy results on real maps (§5).
 
 **Still open**
 
-1. **The web.** CGAL is off on wasm today (`DISABLE_CGAL=ON`), because GMP and MPFR have no
-   wasm-mt build. That is about availability, not licence. A web build of the GPL side would be
-   a GPL web bundle of its own. The options:
-   - ship skeletons and tiling native-only;
-   - try the P0c spike. Skeletonization needs only EPICK plus 3D Delaunay, which should build
-     without GMP. ContourTiler's exact boolean ops are much harder.
-
-   **Recommended:** native-only, and run the spike for Skeletonization alone.
-2. **libcvc's existing GPL CGAL uses.** `nav/spatial.cpp` and `project_verts.h` use CGAL's
-   Spatial Searching (GPL) whenever CGAL is found. The options:
-   - (a) move them into `cvc_gpl`;
-   - (b) replace them with a permissive k-nearest-neighbour search, such as nanoflann (BSD;
-     check that it is in cvcpkg).
-
-   **Recommended: (b).** nav is core and shouldn't need the GPL library. Then
-   `CGAL_LICENSE_ERROR` can go on all of libcvc. This is its own PR, independent of the ports.
-3. **The process-wide registries.** P0a adds per-app forms of Ariadne's node-type and intrinsic
-   registries and of the I/O handler maps, and the ports use only those. Should every existing
-   caller move too, in this effort? **Recommended:** later, as its own PR series. The existing
-   callers keep working, and the ports never touch the process-wide forms.
-4. **GPL packaging.** The existing packages stay LGPL. The options for the GPL side:
-   - (a) a `libcvc-gpl` cvcpkg package with `cvc_gpl`, `cvcgl_gpl`, `pycvc_gpl`, the `cvc-gpl`
-     CLI, and an `arigl-gpl` that registers the GPL node types;
-   - (b) one build switch that links the GPL libraries into `cvc` and `arigl` themselves, which
-     makes those binaries GPL in that build.
-
-   **Recommended: (a).** Distinct names for distinct licences, so nobody ships GPL code under an
-   LGPL package by accident.
-5. **The VolumeGridRover layout.** Four views at once (recommended), or the legacy tabs. The
-   `layout` arg can offer both.
-6. **GenSeg's default seeding.** Once the paper mode lands, should `volume_grid` default to it or
-   to GenSeg's local maxima? **Recommended:** keep GenSeg's local maxima until the paper mode
-   matches the legacy results on real maps, then switch.
-7. **Names.**
-   - Libraries and tools: `cvc_gpl`, `cvcgl_gpl`, `pycvc_gpl`, `cvc-gpl`, `arigl-gpl`.
-   - Node types: `volume_grid`, `contour_lab`, `volume_slice`, `skeleton`.
+1. **How the new libraries arrive.** Each is a cvcpkg package (with a wasm-mt build) or vendored
+   privately under `src/cvc/third_party/`, as nanoflann is. Done as recommended, so say if you
+   want otherwise:
+   - cvcpkg packages for the compiled libraries, Qhull and Clipper2 (cy-pca/cvcpkg#578);
+   - vendoring for header-only code: CDT, Shewchuk's predicates and nanoflann.
+2. **How close ContourTiler must match the legacy.** The medial axis replaces the straight
+   skeleton, and integer coordinates replace exact rationals, so untiled regions can fill
+   slightly differently (§3). **Recommended:** T1 by topology and a Hausdorff tolerance, exact
+   away from untiled regions. If exact parity matters for some dataset, say which.
+3. **The API break P0a needs.** Public free functions that reach a process-wide table today gain
+   an app parameter, and the old forms go. That covers `register_scene_node_type`,
+   `register_action_intrinsics`, `register_widget_type`, `register_uri_handler` and `resolve()`,
+   `read_geometry(filename)`, `read_model(filename)`, `image::load(path)`, `send(req)`, and the
+   rest of §1.3's audit. No wrapper keeps a hidden global alive, because that would be a
+   singleton.
+   **Recommended:** a breaking release (4.0), with the downstream callers (volrover3, cypkg,
+   nicotina, the examples, ari and arigl) updated in the same series.
+4. **Names.**
+   - Node types: `volume_grid`, `contour_lab`, `volume_slice`.
    - Functions: `cvc::skeletonize`, `cvc::tile_contours`, `cvc::segment_seeded`,
      `cvc::critical_point_seeds`.
-   - Commands: `cvc segment`, `cvc-gpl skeleton`, `cvc-gpl tile`.
+   - Modules: `cvc::tet_complex`, `cvc::planar`, `cvc::cocone`.
+   - Commands: `cvc skeleton`, `cvc tile`, `cvc segment`.
    - The intrinsics in §1.6.
+5. **What may stay process-wide.** Some state belongs to the process, not to libcvc, so no app can
+   own it:
+   - signal dispositions and process priority;
+   - the environment and working directory;
+   - SDL's single event queue and its window and timer routes;
+   - the X11 clipboard connection;
+   - curl's, ImageMagick's, Jolt's, HDF5's and gRPC's global initialisation and locks;
+   - CUDA's per-device constant tables and memory.
+
+   Separately, some `thread_local`s keep nothing between calls: scratch buffers and re-entrancy
+   guards.
+
+   **Recommended:**
+   - A short documented list, the scan's only allowlist, of exactly these process resources, each
+     wrapped so that libcvc keeps nothing of its own about it beyond a reference count or a lock.
+   - Per-thread scratch and scope-bound guards are allowed. Every other `thread_local` moves.
+   - The CUDA volume cache becomes per device, owned by whichever object owns the device (not
+     duplicated per app), and it is on the list.
+   - Writes to the environment or the working directory go wherever an explicit argument can
+     replace them.
