@@ -1336,10 +1336,11 @@ and handles fill in.
   - `with_lock`;
   - `call`, for any function the lane can call;
   - `hook`, `set_priority` and `log`;
-  - `gas`, the check the install-time transform inserts (§8.5).
+  - `gas`, the check the install-time transform inserts (§8.5);
+  - the calls on host objects' handles (§8.4.1).
 - **No pointers into the host.** A guest reaches state only through those imports.
-- **Bulk data.** A volume or a mesh is copied between memories. That's fine for control logic. A
-  host-owned blob API that reads in chunks comes when a guest needs one.
+- **Bulk data goes by handle** (§8.4.1). A volume or a mesh stays on the host. The guest copies only
+  the part it reads.
 - **WIT later.** The interface is also written in WIT, so a component-model adapter can come later.
   Not yet:
   - wasmtime's C API still has gaps in the component model, including the async half
@@ -1348,6 +1349,62 @@ and handles fill in.
   - the browser needs jco's generated JavaScript.
 
   WASI 0.3 (async, streams) was ratified in 2026-06.
+
+#### 8.4.1 Host objects: handles, and copies of only what is read
+
+A guest gets a host object (a volume, a mesh, a heightfield, a city bundle) as a handle, not as
+its bytes, and reads only the parts it asks for. The DSL already works this way. On a node holding
+a host object, `(state-data-get path)` returns an opaque `data_object`, a shared pointer to the
+payload, and copies nothing. The objects a `data:` block decodes (`mesh`, `heightfield`, `volume`,
+`city_bundle`) sit on such nodes. pycvc gets the same objects as SWIG wrappers.
+
+- **Handles in place of values.**
+  - A value crossing to the guest that holds a `data_object` crosses as a handle: a CBOR integer
+    under a tag of its own.
+  - The instance's handle table keeps the object by shared pointer. So a guest pins the version it
+    was handed, even if a reload or a writer replaces the node meanwhile. The voxels are
+    copy-on-write, so a pinned volume costs no copy.
+  - Each handle carries a generation, so a guest can't forge a handle, or use one after it is gone.
+  - `handle_drop` lets one go. The table goes with the instance.
+  - A handle the guest passes back (to `call`, `state_data_set`, a reply) is the object itself on
+    the host side.
+- **Metadata costs nothing to read.** `data_info(h)` returns a small CBOR map: the type, the
+  dimensions and voxel type, the bounding box, the vertex and face counts. No data moves.
+- **Reads copy only the region asked for, straight into the guest's memory.** The bulk goes as raw
+  typed arrays, not CBOR:
+  - `volume_read(h, box, lod, dst, len)`: a sub-box, a slab or a brick;
+  - `volume_sample(h, points, dst)`: values at the given points;
+  - `mesh_read(h, attribute, range, dst)`: a range of `positions`, `normals` or `indices`;
+  - `heightfield_read(h, rect, dst)`.
+
+  The guest allocates `dst` (`ari_alloc`). The host writes into it in place:
+  `wasmtime_memory_data` and a `memcpy` natively, and a typed array's `set` on the guest's
+  `memory.buffer` in the browser.
+- **Writes and new objects.** `volume_write(h, box, src)` writes a region. `volume_new(dims, type)`
+  returns the handle of a new volume, which the guest publishes with `state_data_set(path, h)`.
+  Copy-on-write means a write clones only what it touches.
+- **Operations on the host.** A guest can pass handles to host functions through `call`, as a DSL
+  program passes `data_object`s: an isosurface, a resample, a filter, returning a handle to the
+  result. Then the data never enters the guest's memory, and the guest only orchestrates. That is
+  most of what a control-logic guest over large data needs.
+- **Cost and slices.**
+  - Each read or write is one import call, so a large read can be split across slices.
+  - It is charged by the byte, at `data_job`'s rate (a node of work per `kDataNodeBytes`, 256
+    bytes). So a bulk copy counts against the activation's gas cap and the frame budget like any
+    other work.
+- **Access.**
+  - A guest gets a handle only through `state_get` or `state_data_get` under the lane's chroot, or
+    from a function it may call. So a handle grants nothing the document's prefix and `link:` holes
+    don't.
+  - `imports:` narrows the calls on handles with the `data.read` and `data.write` groups (§8.6).
+- **The floor.** Core wasm can't read host memory in place: a module sees only its own linear
+  memory. Exposing a host buffer as an imported memory would make it writable by the guest, and
+  would mean keeping volumes in wasm memories. So a guest that reads data copies the region it
+  reads, and the handle keeps that cost to what it asks for.
+- **The other way round.** A guest buffer passed to a host call as a pointer and a length is read
+  in place for that call. The host doesn't keep the pointer: `memory.grow` can move the memory.
+- **Phases.** The handle table, `data_info` and the readers come with G1's ABI. The writers,
+  `volume_new` and more object kinds can follow as guests need them.
 
 ### 8.5 Scheduling and limits
 
@@ -1494,7 +1551,8 @@ started it. It gets exactly what a DSL program there gets.
   - To give a guest a few named parts of a document, mount it in a module and link exactly those.
 - **Narrowing.**
   - The block's `imports:` names the groups a guest gets: `state.read`, `state.write`, `msg`,
-    `lock`, `call` and `net`.
+    `lock`, `call`, `net`, and `data.read` / `data.write` for the calls on host objects' handles
+    (§8.4.1).
   - An import outside them is linked to a stub that raises `PermissionError`, so a guest fails
     closed, and the manifest check (§8.8) says which import it lacked.
   - Narrowing never widens: a group the lane doesn't have stays out.
@@ -1602,8 +1660,10 @@ hook is declared in the block's `hooks:`, or registered by `ari_init` through th
    republishes every side-module package.
 10. **Dynamic loading with threads** is experimental in Emscripten, so wasm-mt gets no C-extension
     installs. Revisit when Pyodide or CPython supports the combination.
-11. **Guest data copies** (§8.4). Every value crosses between memories. Measure with a volume-sized
-    payload before promising guests for data processing.
+11. **Guest data copies** (§8.4.1). Host objects cross as handles, and a guest copies only the
+    regions it reads. What is left to measure is the cost of a read: a volume-sized sweep in
+    bricks, from wasmtime and from the browser, against the same sweep in the DSL and in pycvc.
+    Measure it before promising guests for data processing.
 12. **Where the wasm runtime lives** (§8.2). WAMR is small: cvcpkg's static build is a 355 KB
     archive, so it could go into the stock hosts. wasmtime is far larger and belongs in the `x`
     hosts. One runtime everywhere, or the choice per host?
