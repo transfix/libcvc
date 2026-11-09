@@ -2645,6 +2645,20 @@ endif()
 # image_magick_roundtrip_test.js`, ci.yml's ari-wasm job). Natively, image_test covers this.
 # state_exec_wasm_smoke: with-lock where there are no threads (locks plan L1.12), a plain main()
 # that prints STATE_EXEC_WASM_OK; node runs it in ci.yml's ari-wasm job (no pthreads).
+# cgal_ab_test: libcvc's permissive geometry A/B against the CGAL code it replaced
+# (tools/cgal_ab/README.md). libcvc never links CGAL; this test does, so as built it is GPL-3+ and
+# is never installed or packaged. Only on request, and only natively (ci.yml's cgal-ab job).
+option(CVC_BUILD_CGAL_AB "Build cgal_ab_test, the A/B of libcvc's nanoflann paths against CGAL (needs CGAL)" OFF)
+if(CVC_BUILD_CGAL_AB)
+  find_package(CGAL CONFIG REQUIRED)
+  add_executable(cgal_ab_test ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/cgal_ab/cgal_ab.cpp)
+  target_link_libraries(cgal_ab_test PRIVATE cvc CGAL::CGAL)
+  target_compile_features(cgal_ab_test PRIVATE cxx_std_17)
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(cgal_ab_test PRIVATE -frounding-math) # CGAL's interval arithmetic
+  endif()
+endif()
+
 option(CVC_BUILD_STATE_EXEC_WASM_SMOKE "Build state_exec_wasm_smoke (with-lock without threads)" OFF)
 if(CVC_BUILD_STATE_EXEC_WASM_SMOKE)
   add_executable(state_exec_wasm_smoke tests/state_exec_wasm_smoke.cpp)

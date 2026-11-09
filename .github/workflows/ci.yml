@@ -333,6 +333,89 @@ jobs:
           # 77 (no cross-platform-deterministic Jolt) fails here too: the job exists to compare.
           "$node" build-wasm/bin/physics_replay_test.js src/cvc/tests/data/physics_replay_trace.json
 
+  # libcvc's permissive geometry A/B against the CGAL code it replaced (tools/cgal_ab/README.md):
+  # nanoflann's fixed-radius neighbours must equal CGAL's Kd_tree exactly, and the projection onto
+  # triangles is checked against CGAL's exact AABB closest point. libcvc itself never links CGAL;
+  # this native test executable does, and it is never installed or packaged. Only when the code it
+  # compares, its build or this file changed.
+  cgal-ab:
+    name: CGAL A/B (permissive geometry vs CGAL)
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: ci-${{ github.ref }}-cgal-ab
+      cancel-in-progress: true
+    defaults:
+      run:
+        shell: bash
+    env:
+      AB_DEPS: ${{ github.workspace }}/ab-deps
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Did the compared code change?
+        id: paths
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          run=true
+          if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ] \
+             && git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            if ! git diff --name-only "$base" HEAD -- src/cvc/nav/spatial.cpp inc/cvc/nav/grid_nav.h \
+                   src/cvc/geometry/project_verts.cpp inc/cvc/geometry/project_verts.h \
+                   src/cvc/third_party tools/cgal_ab CMakeLists.txt src/cvc/CMakeLists.txt CMake \
+                   .github/workflows/ci.yml | grep -q .; then
+              run=false
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "compared code changed: $run"
+
+      - name: Install cvcpkg, cmake/ninja, and boost, pegtl, CGAL, GMP and MPFR
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          curl -fsSL https://cvcpkg.org/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          cvcpkg install cmake ninja --prefix "$RUNNER_TEMP/tools" --config release --link shared
+          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+          mkdir -p "$AB_DEPS"
+          for p in boost pegtl cgal gmp mpfr; do
+            echo "=== $p ==="
+            cvcpkg install "$p" --prefix "$AB_DEPS" --config release --link shared \
+              --no-fallback-to-source 2>&1 | tail -3
+          done
+
+      - name: Build libcvc (minimal) and cgal_ab_test
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          cmake -G Ninja -S . -B build-ab -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$AB_DEPS" -DCVC_BUILD_TESTS=OFF -DCVC_BUILD_CGAL_AB=ON \
+            -DCVC_ENABLE_CUDA=OFF -DCVC_BUILD_CLI=OFF -DCVC_BUILD_ARI=OFF -DCVC_BUILD_ARIGL=OFF \
+            -DCVC_BUILD_ARISRV=OFF -DCVC_ENABLE_GRPC=OFF -DCVC_ENABLE_OPENMP=OFF \
+            -DCVC_USING_HDF5=OFF -DCVC_USING_IMOD_MRC=OFF -DCVC_ENABLE_IMAGEMAGICK=OFF \
+            -DCVC_ENABLE_FFTW=OFF -DCVC_FFT_PROVIDER=none -DCVC_ENABLE_ASSIMP=OFF \
+            -DCVC_ENABLE_MESHER=OFF -DCVC_ENABLE_SDF=OFF -DCVC_ENABLE_LIBIGL=OFF \
+            -DCVC_BUILD_LSYS_TOOLS=OFF -DCVC_BUILD_CVCGL=OFF -DCVC_BUILD_EXAMPLES=OFF \
+            -DCVC_BUILD_PYCVC=OFF
+          cmake --build build-ab --target cgal_ab_test -j"$(nproc)"
+
+      - name: Run the A/B
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          export LD_LIBRARY_PATH="$AB_DEPS/lib:${LD_LIBRARY_PATH:-}"
+          build-ab/bin/cgal_ab_test | tee cgal_ab.txt
+          {
+            echo "### CGAL A/B"
+            echo '```'
+            cat cgal_ab.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # ari in the browser (roadmap §16.4): the FTXUI terminal backend built for single-threaded wasm,
   # the target the gh-pages gallery serves (no COOP/COEP there). Builds the `ari` web target
   # (ari.js/ari.wasm + the xterm.js page, terminal_tour.ari baked in), then runs the same module
