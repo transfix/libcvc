@@ -68,6 +68,40 @@ int main() {
     chk((open == 1) == v.open,
         std::string(v.what) + (v.open ? ": the panels start open" : ": the panels start hidden"));
   }
+
+  // A document with no scene is all panels (AriRuntime turns the rule off for it): on a phone
+  // they start shown. Turned off after the first frame hid them, they come back, unless the user
+  // has chosen since.
+  if (!fails) {
+    cvc::app app;
+    cvc::gl::SceneGraph sg(app, "panels");
+    cvc::gl::SceneRenderer view(sg, 1170, 2400, /*offscreen=*/true, "panels");
+    cvc::gl::ImGuiOverlay ui(view);
+    ui.setPixelRatio(3.0f);
+    ui.setVisible(true);
+    chk(ui.phoneHidesPanels(), "a phone hides the panels by default");
+    ui.setPhoneHidesPanels(false);
+    for (int frame = 0; frame < 3; ++frame)
+      view.render();
+    chk(ui.panelsOpen(), "a phone with no scene: the panels start open");
+  }
+  if (!fails) {
+    cvc::app app;
+    cvc::gl::SceneGraph sg(app, "panels");
+    cvc::gl::SceneRenderer view(sg, 1170, 2400, /*offscreen=*/true, "panels");
+    cvc::gl::ImGuiOverlay ui(view);
+    ui.setPixelRatio(3.0f);
+    ui.setVisible(true);
+    for (int frame = 0; frame < 3; ++frame)
+      view.render();
+    chk(!ui.panelsOpen(), "a phone: hidden at the first frame");
+    ui.setPhoneHidesPanels(false); // the document, loaded after, has no scene
+    chk(ui.panelsOpen(), "the rule turned off afterwards: shown again");
+    ui.setPanelsOpen(false); // the user hides them
+    ui.setPhoneHidesPanels(true);
+    ui.setPhoneHidesPanels(false);
+    chk(!ui.panelsOpen(), "the user's choice stands");
+  }
   std::printf("cvcgl_imgui_panels_start: %s\n", fails ? "FAILED" : "PASSED");
   return fails ? 1 : 0;
 }

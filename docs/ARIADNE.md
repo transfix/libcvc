@@ -1781,14 +1781,17 @@ this for every one.
 - **UI size.** The UI is sized in logical pixels (CSS pixels in a browser) times the UI size,
   times the display's pixel ratio. A phone's canvas is about three device pixels to the CSS
   pixel, so without the ratio its UI would come out a third of its size. The UI size starts at
-  1.25 on a touch device and 1 with a mouse, and is the state key
+  1 (100%), on a touch device as with a mouse (touch mode widens the hit areas instead), and is
+  the state key
   `<scene>.viewers.<viewer>.ui.scale` (arigl's: `ui.docs.ari.viewers.main.ui.scale`). The
   Controls window offers it as **UI size** (75% to 200%), under *Display* above the keys, for any
   host that calls `AppRuntime::set_host_ui_size`. A new size takes effect at the next frame, and
   the open windows grow or shrink with it. It holds for the run.
-- **Hiding windows.** On a view whose short side is under 500 logical pixels the panels start
-  hidden, and a round button in the bottom-right corner shows and hides them all (the menu bar
-  too), so the scene is never buried. The button stays above every window, even one dragged over
+- **Hiding windows.** On a view whose short side is under 500 logical pixels the panels of a
+  document with a `scene:` start hidden, and a round button in the bottom-right corner shows and
+  hides them all (the menu bar too), so the scene is never buried. A document with no scene (a
+  feed, a form) is all panels, so they start shown (`ImGuiOverlay::setPhoneHidesPanels`, which
+  arigl's `AriRuntime::load` sets). The button stays above every window, even one dragged over
   its corner. A window collapses to its title bar with the arrow at the title's left (or a double
   tap on the title), closes with its X when it is `closable:`, and comes back from the View or
   Windows menu (§5.9). On a touch screen a window moves by its title bar only, so a finger that
