@@ -407,6 +407,7 @@ set(SOURCE_FILES
   nav/coef_train.cpp
   nav/belief_occupancy.cpp
   nav/belief_material.cpp
+  nav/policy_library.cpp
   nav/sim_world.cpp
   nav/yield.cpp
   nav/sim_world_binding.cpp
