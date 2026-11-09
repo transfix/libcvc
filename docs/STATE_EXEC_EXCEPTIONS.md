@@ -158,7 +158,7 @@ All 17 are bound in every default environment, and all are read-only (below).
 | `KeyError` | `Exception` | a missing dict key or attribute, where the operation requires one |
 | `IndexError` | `Exception` | an index out of range, `std::out_of_range` |
 | `ArithmeticError` | `Exception` | division by zero, overflow |
-| `MemoryError` | `Exception` | a native call refused by the per-call allocation limit (`eval_alloc_check`) |
+| `MemoryError` | `Exception` | a native call refused by the per-call allocation limit (`eval_alloc_check`); a WebAssembly guest that trapped with its memory at its limit (`origin` `"wasm"`) |
 | `ParseError` | `Exception` | `eval` or `parse` of bad source; adds `line` and `col` |
 | `TimeoutError` | `Exception` | an async call or `await` that ran past its timeout |
 | `NativeError` | `RuntimeError` | a C++ exception of any other type; `native_type` names it |

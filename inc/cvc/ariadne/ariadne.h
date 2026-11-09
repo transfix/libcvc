@@ -56,7 +56,10 @@ enum class ProgramLane {
   action,
   // A resident's (on_tick:, on_key: ...; §13.8): no total, ariadne.limits.resident_max_step_time
   // for each step, and no with-lock default.
-  resident
+  resident,
+  // The init: lane's: 10 million steps and 5 s, for work a load does (a guest's ari_init), and
+  // the action's with-lock default.
+  init
 };
 
 // A program a host extension runs as one of the document's own (Runtime::start_process): a
@@ -199,6 +202,12 @@ public:
   // before its pump. Returns the pid; throws (a syntax error in p.program) when it can't start.
   int start_process(LaneProcess p);
 
+  // Pump app.exec_scheduler() one bounded slice and sweep this document's processes, as drain()
+  // does after its handlers and residents, and nothing more: for a host extension that has to
+  // wait for a process of its own outside the frame loop (ScriptLane::run). Each call starts the
+  // next app frame, as a drain's pump does. Never call it from inside a step of that scheduler.
+  void pump();
+
   // Render one frame: apply any pending tree swap, then walk the tree driving the
   // Backend and binding cvc::state. Called by the active backend (from the host
   // render pass, or the backend's own loop). A pure reader of state that only
@@ -215,10 +224,19 @@ public:
   double frame_clock() const;
 
   // The time a frame's read-lane expressions (visible_when, enabled_when, computed binds) may take
-  // together, from the next render() on (default 0.030 s). Past it the rest skip that frame: a
-  // visible_when or enabled_when keeps the value it had last frame (hidden or disabled where it
-  // never had one), so a slow frame doesn't flicker the widgets at the end of a long list.
+  // together, from the next render() on (default 0.030 s). Past it the rest skip that frame: each
+  // keeps the value it had last frame (a predicate, a computed text, combo options, a repeat
+  // count), or its fail-safe one where it never had one (hidden, disabled, empty, 0), so a slow
+  // frame doesn't flicker the widgets at the end of a long list. A skip is not the document's
+  // fault, so it is never a reactive warning.
   void set_reactive_frame_budget(double seconds);
+  // How many read-lane evaluations the frame budget has skipped since this Runtime was made: a
+  // diagnostic (a host may log it), never a warning.
+  std::uint64_t reactive_skip_count() const;
+  // How many read-lane expressions have run since this Runtime was made. A result reused from the
+  // cache (§2.1: nothing it read was written since) is not counted, so a frame that wrote nothing
+  // adds none.
+  std::uint64_t reactive_eval_count() const;
 
   // Run every queued action event's handler, then clear the queue. Call once per
   // frame in the host loop, BEFORE your sim tick and OUTSIDE render().
@@ -233,8 +251,8 @@ public:
   void drain();
 
   // Drain the §4 read-lane diagnostics accumulated during render() — one message per
-  // distinct failing predicate (a parse error, a runtime error, or a per-frame budget
-  // overrun).
+  // distinct failing predicate (a parse error, a runtime error, or a step / time cap overrun;
+  // not a per-frame budget skip, see set_reactive_frame_budget).
   // De-duplicated for the Runtime's lifetime, so a broken predicate warns ONCE however
   // many frames it renders. Empty when everything evaluated cleanly. The host may log
   // these (e.g. after the first frame); ignoring them is safe — the walk already

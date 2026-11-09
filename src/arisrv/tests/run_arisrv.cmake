@@ -1,8 +1,8 @@
 # Run arisrv as a ctest checks it (src/arisrv/CMakeLists.txt): `cmake -DARISRV=<binary>
-# -DARGS=<a@@b@@...> -DSTATUS=<n> [-DEXPECT1=<regex> ...] -P run_arisrv.cmake`. The run must end
-# with exit status STATUS, and its output (stdout, then stderr) match each EXPECTn. The output is
-# printed either way, so the test's SKIP_REGULAR_EXPRESSION sees it. ARGS separates arguments with
-# "@@", since a ";" would split the -D value.
+# -DARGS=<a@@b@@...> -DSTATUS=<n> [-DEXPECT1=<regex> ...] [-DREJECT=<regex>] -P run_arisrv.cmake`.
+# The run must end with exit status STATUS, and its output (stdout, then stderr) match each EXPECTn
+# and not REJECT. The output is printed either way, so the test's SKIP_REGULAR_EXPRESSION sees it.
+# ARGS separates arguments with "@@", since a ";" would split the -D value.
 string(REPLACE "@@" ";" _args "${ARGS}")
 execute_process(COMMAND "${ARISRV}" ${_args}
                 RESULT_VARIABLE _status OUTPUT_VARIABLE _out ERROR_VARIABLE _err TIMEOUT 60)
@@ -16,3 +16,6 @@ foreach(_n RANGE 1 3)
     message(FATAL_ERROR "arisrv's output does not match: ${EXPECT${_n}}")
   endif()
 endforeach()
+if(DEFINED REJECT AND _all MATCHES "${REJECT}")
+  message(FATAL_ERROR "arisrv's output matches what it must not: ${REJECT}")
+endif()

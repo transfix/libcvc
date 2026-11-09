@@ -171,9 +171,9 @@ public:
   // (a window's size:, a column's width) with it. 1.0 is the UI at its own size
   // in the display's logical pixels (CSS pixels in a browser): the overlay
   // multiplies it by the pixel ratio below, so a phone's dense screen gets the
-  // same physical size as a laptop's. Defaults to 1.0 with a mouse and 1.25 on
-  // a touch device (detected in the browser via ontouchstart / maxTouchPoints),
-  // because widgets sized for a cursor are hard to hit with a fingertip. It is
+  // same physical size as a laptop's. Defaults to 1.0, with a mouse and on a
+  // touch device alike (detected in the browser via ontouchstart /
+  // maxTouchPoints; touch mode widens the hit areas instead). It is
   // the state key "<scene>.viewers.<viewer>.ui.scale", which AppRuntime's
   // Controls window offers as "UI size" (arigl). A change takes effect at the
   // next frame and scales the open windows with it.
@@ -236,13 +236,20 @@ public:
   // just want to look at it. On by default, and on a device with no keyboard it
   // is the only practical way to get the UI back, so it stays above the windows
   // even when one is dragged over its corner. The panels start hidden when the
-  // view's short side is under 500 logical pixels (a phone).
+  // view's short side is under 500 logical pixels (a phone), so a 3D scene is not
+  // buried, unless setPhoneHidesPanels(false).
   void setToggleButtonEnabled(bool on);
   bool toggleButtonEnabled() const;
   // Whether the panels (your draw callback) are currently shown. The button
   // flips this; you may drive it yourself as well.
   void setPanelsOpen(bool on);
   bool panelsOpen() const;
+  // Whether a phone's view starts with the panels hidden (on by default). A UI-only document has
+  // no scene for its panels to bury, so AriRuntime turns it off for a document without one.
+  // Turned off after the first frame hid them, it shows them again, unless the user (or
+  // setPanelsOpen) has chosen since.
+  void setPhoneHidesPanels(bool on);
+  bool phoneHidesPanels() const;
 
 private:
   struct Impl;

@@ -1,6 +1,7 @@
 # A document with a WebAssembly guest, as `arix test` runs it (ctest arix_wasm_block): the guest's
-# exports called from the document's programs, a call back into the document's state, a guest that
-# yields the frame, a trap the document catches as a WasmError, and the wasm token. Stock ari
+# ari_init at load, a call from init:, its exports called from the document's programs, a call back
+# into the document's state, a guest that yields the frame, a trap the document catches as a
+# WasmError, and the wasm token. Stock ari
 # refuses it (ctest ari_wasm_needs_arix): requires: [wasm] needs a scripting host.
 
 meta:
@@ -13,10 +14,17 @@ wasm:
   module: guest.wat
   export: [echo, get-x, nap, boom]
 
+init: |
+  (state-set "x" "early")
+  (state-set "from_init" (get-x))
+
 root:
   - text: wasm block
 
 tests:
+  setup: |
+    (assert (= (state-get "booted") "yes") "the guest's ari_init ran at load")
+    (assert (= (state-get "from_init") "early") "init: called the guest")
   calls: |
     (assert (= (echo 1 "a") (list 1 "a")) "an export's value")
   state: |

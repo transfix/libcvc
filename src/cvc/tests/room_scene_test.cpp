@@ -25,6 +25,7 @@
 #include <cvc/ariadne/holon_sync.h> // room_statics
 #include <cvc/ariadne/loader.h>     // load_string, load_file: world documents
 #include <cvc/ariadne/scene.h>
+#include <cvc/ariadne/section.h> // section_epoch, section_stamp
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
@@ -460,8 +461,9 @@ TEST(RoomSceneTest, RoomStaticsIgnoreMeshes) {
   EXPECT_DOUBLE_EQ(cube.center.z, 0.5);
 }
 
-// The default seed is what it always was: the same two objects, the same leaves (no fit), the
-// same revision -- the live 20 m room does not change with the large scene's arrival.
+// The default seed is what it always was: the same two objects, the same leaves (no fit; each
+// stamped with its run's epoch), the same revision -- the live 20 m room does not change with the
+// large scene's arrival.
 TEST(RoomSceneTest, DefaultSceneUnchanged) {
   cvc::app app;
   ASSERT_TRUE(rs::seed_default_scene(app, "r"));
@@ -479,7 +481,8 @@ TEST(RoomSceneTest, DefaultSceneUnchanged) {
   EXPECT_FLOAT_EQ(ref->position[2], 0.5f);
   EXPECT_FALSE(ground->has_fit || ref->has_fit);
 
-  const std::set<std::string> expected = {"material.ambient",
+  const std::set<std::string> expected = {"epoch",
+                                          "material.ambient",
                                           "material.color.b",
                                           "material.color.g",
                                           "material.color.r",
@@ -628,6 +631,104 @@ TEST(RoomSceneTest, RoomWorldIsOneRevision) {
   bad.objects[0].id = "a.b";
   EXPECT_THROW(rs::write_room_world(app, "r", bad), std::invalid_argument);
   EXPECT_EQ(rs::scene_revision(app, "r"), 2u);
+}
+
+// The scene is stamped with its writer's epoch, so a restarted relay's revision 1 is not the one a
+// client kept from the old relay. Its `at` is always 0: the scene applies on arrival.
+TEST(RoomSceneTest, TheSceneCarriesItsWritersEpoch) {
+  cvc::app app;
+  EXPECT_FALSE(rs::scene_stamp(app, "r").written());
+  const cvc::ariadne::section_stamp first = rs::write_room_world(app, "r", rs::default_world());
+  EXPECT_EQ(first.epoch, cvc::ariadne::section_epoch());
+  EXPECT_EQ(first.rev, 1u);
+  EXPECT_EQ(first.at, 0u);
+  EXPECT_TRUE(rs::scene_stamp(app, "r").same(first));
+  rs::remove_scene_object(app, "r", "ref");
+  EXPECT_EQ(rs::scene_stamp(app, "r").epoch, first.epoch);
+  EXPECT_EQ(rs::scene_revision(app, "r"), 2u) << "the same run counts on";
+
+  const std::uint64_t other = cvc::ariadne::section_epoch() ^ 1;
+  const cvc::ariadne::section_stamp restarted =
+      rs::write_room_world(app, "r", rs::default_world(), other);
+  EXPECT_EQ(restarted.epoch, other);
+  EXPECT_EQ(restarted.rev, 1u) << "another run starts again at 1";
+  EXPECT_FALSE(restarted.same(first));
+  EXPECT_TRUE(rs::scene_stamp(app, "r").same(restarted));
+}
+
+namespace {
+// What a client holds once a relay's scene reaches it: a snapshot ingest writes every leaf the
+// relay has and deletes none, so what an earlier relay wrote stays beside it.
+void ingest_scene(cvc::app &relay, cvc::app &client, const std::string &room) {
+  const std::string base = rs::room_scene_path(room);
+  for (const auto &kv : leaf_values(relay, base))
+    client.root()(base + cvc::state::SEPARATOR + kv.first).value(kv.second);
+}
+} // namespace
+
+// A client that outlived a relay keeps that relay's entries, and a restarted relay with another
+// world never soft-removes the ones it has no id for: it never knew them. The reader takes only the
+// scene's own run -- the objects, lights and fits stamped with its epoch -- and never a plain
+// light's rig knobs, which only an earlier light under the same id can have left.
+TEST(RoomSceneTest, AnOldRelaysEntriesAreNotRead) {
+  cvc::app client, old_relay, new_relay;
+  rs::room_world before = rs::default_world(); // ground, ref, lit by room_rig
+  SceneNode pillar = before.objects[1];
+  pillar.id = "pillar";
+  pillar.position[0] = 4.0f;
+  SceneNode statue;
+  statue.id = "statue";
+  statue.source_file = "x.bunny";
+  statue.has_fit = true;
+  statue.fit_height = 2.0f;
+  before.objects.push_back(pillar);
+  before.objects.push_back(statue);
+  SceneLight spot;
+  spot.id = "spot";
+  spot.rig = "three_point";
+  spot.has_key = true;
+  spot.key_intensity = 2.0f;
+  SceneLight lamp;
+  lamp.id = "lamp";
+  before.env.lights.push_back(spot);
+  before.env.lights.push_back(lamp);
+  rs::write_room_world(old_relay, "r", before);
+  ingest_scene(old_relay, client, "r");
+  ASSERT_EQ(rs::read_scene_objects(client, "r").size(), 4u);
+  ASSERT_EQ(cvc::ariadne::room_statics(client, "r").size(), 3u) << "ground, ref, pillar";
+
+  // The relay restarts with another world: no pillar, the statue unfitted, no lamp, and a plain
+  // light under the rig's old id.
+  rs::room_world after = rs::default_world();
+  statue.has_fit = false;
+  after.objects.push_back(statue);
+  SceneLight plain;
+  plain.id = "spot";
+  after.env.lights.push_back(plain);
+  const cvc::ariadne::section_stamp restarted =
+      rs::write_room_world(new_relay, "r", after, cvc::ariadne::section_epoch() ^ 1);
+  ASSERT_EQ(restarted.rev, 1u);
+  ingest_scene(new_relay, client, "r");
+  ASSERT_EQ(client.root().findDescendant(object_path("r", "pillar") + ".present")->value(), "1")
+      << "the old relay's pillar is still in the client's tree";
+
+  EXPECT_TRUE(rs::scene_stamp(client, "r").same(restarted));
+  const std::vector<SceneNode> objs = rs::read_scene_objects(client, "r");
+  ASSERT_EQ(objs.size(), 3u);
+  EXPECT_EQ(find_node(objs, "pillar"), nullptr) << "the old relay's object is not read";
+  const SceneNode *s = find_node(objs, "statue");
+  ASSERT_NE(s, nullptr);
+  EXPECT_FALSE(s->has_fit) << "nor the old statue's fit";
+  EXPECT_EQ(cvc::ariadne::room_statics(client, "r").size(), 2u) << "ground and ref";
+  rs::room_scene_env env;
+  ASSERT_TRUE(rs::read_scene_env(client, "r", env));
+  ASSERT_EQ(env.lights.size(), 2u);
+  EXPECT_EQ(find_light(env.lights, "lamp"), nullptr) << "nor its light";
+  const SceneLight *l = find_light(env.lights, "spot");
+  ASSERT_NE(l, nullptr);
+  EXPECT_TRUE(l->rig.empty());
+  EXPECT_FALSE(l->has_key) << "nor the knobs of the rig that had the id";
+  EXPECT_NE(find_light(env.lights, "room_rig"), nullptr);
 }
 
 // What a document's scene: becomes on the room's wire, and what it leaves out, with a warning.

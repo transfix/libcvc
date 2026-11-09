@@ -20,7 +20,7 @@
 #include <cvc/ariadne/conference/room_avatar.h>     // each reserve
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_participant_path, room_roster
 #include <cvc/ariadne/conference/room_rules.h>      // the world rules sections
-#include <cvc/ariadne/conference/room_scene.h>      // read_scene_objects, scene_revision
+#include <cvc/ariadne/conference/room_scene.h>      // read_scene_objects, scene_stamp
 #include <cvc/ariadne/holon.h>                      // cvc::ariadne::holon (server_pump)
 #include <cvc/ariadne/holon_sync.h>
 #include <cvc/core/app.h>
@@ -270,13 +270,14 @@ std::vector<avatar_static> room_statics(cvc::app &app, const std::string &room) 
 }
 
 namespace {
-// Physics: reload the statics when the room scene changed (its revision moved).
+// Physics: reload the statics when the room scene changed (its stamp moved: a new revision, or a
+// restarted relay's revision 1 under a new epoch).
 void sync_statics(holon &h, cvc::app &app, const std::string &room) {
   if (!h.physics())
     return;
-  const std::uint64_t rev = conference::scene_revision(app, room);
-  if (rev != 0 && rev != h.statics_revision())
-    h.set_statics(room_statics(app, room), rev);
+  const section_stamp s = conference::scene_stamp(app, room);
+  if (s.written() && !s.same(h.statics_stamp()))
+    h.set_statics(room_statics(app, room), s);
 }
 } // namespace
 

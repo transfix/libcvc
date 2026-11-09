@@ -63,4 +63,9 @@
     (call $pack (local.get $p) (i32.const 1)))
   (func (export "self") (param i32 i32) (result i64)
     (call $ask (i32.const 144) (i32.const 4) (i32.const 96) (i32.const 1)))
+  ;; At every load: (state-set "booted" "yes") through the host, refused or not (imports:).
+  (data (i32.const 176) "\82\66booted\63yes")
+  (func (export "ari_init") (param i32 i32) (result i64)
+    (drop (call $call (i32.const 48) (i32.const 9) (i32.const 176) (i32.const 12)))
+    (i64.const 0))
 )

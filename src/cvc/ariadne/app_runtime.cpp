@@ -366,8 +366,9 @@ void AppRuntime::register_async_function(const std::string &name,
 }
 
 void AppRuntime::register_async_work_function(const std::string &name,
-                                              cvc::state_exec::async_work_marshal marshal) {
-  verbs_->async_work_functions[name] = std::move(marshal);
+                                              cvc::state_exec::async_work_marshal marshal,
+                                              cvc::state_exec::native_fn blocking) {
+  verbs_->async_work_functions[name] = {std::move(marshal), std::move(blocking)};
   ensure_intrinsics();
   rt_.refresh_program_names();
 }
@@ -608,8 +609,17 @@ void AppRuntime::ensure_intrinsics() {
       };
       se::register_async_fn(env, app->exec_async_host(), name, std::move(posting));
     }
-    for (const auto &[name, marshal] : verbs->async_work_functions)
-      se::register_async_fn(env, app->exec_async_host(), name, marshal);
+    // A lane on the app's scheduler (an action, a resident) gets the async function, where the
+    // program parks; one on a scheduler of its own (init:) gets the blocking form, when there is
+    // one: there the program can't park. (Only with some: the provider of a runtime that has gone
+    // binds nothing, and its app may be gone too.)
+    const bool parks = !verbs->async_work_functions.empty() &&
+                       ictx.sched == static_cast<se::scheduler_base *>(&app->exec_scheduler());
+    for (const auto &[name, entry] : verbs->async_work_functions) {
+      se::register_async_fn(env, app->exec_async_host(), name, entry.first);
+      if (!parks && entry.second)
+        se::builtins::register_fn(env, name, entry.second);
+    }
   });
 }
 

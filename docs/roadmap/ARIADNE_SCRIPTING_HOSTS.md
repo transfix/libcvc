@@ -5,6 +5,10 @@ Status:
   natively, with Linux packages on cvcpkg.org. §3 and §4 describe what shipped and mark what
   didn't. The user-facing reference is [ARIADNE.md](../ARIADNE.md) §9.6.
 - **S0 shipped** in transfix/libcvc#1046: `arisrv --doc` and `server: publish:` (§6.1, §6.5.3).
+- **S1 is built** in transfix/libcvc#1081: `arisrvx`, the operator's Python beside the relay on a
+  script thread with one asyncio loop, `serve_asgi` and `--http-listen`, lifespan and graceful
+  shutdown, `arisrvx check`, and its recipe (§6.2, §6.5.1, §6.5.2, §6.5.9). The reference is
+  ARIADNE.md §9.8.
 - **P1b's engine interface shipped:** `ScriptEngine` and its lane, with Python moved onto it
   (§3.1, §8.3). It is what G1 and L1 plug into.
 - **G1's first part: WebAssembly guests natively on wasmtime,** in `arix` and `ariglx`
@@ -19,7 +23,8 @@ Status:
 Python can *host* a document: `pycvc_gl.ariadne.Host` (#985) lets `python app.py` open a window,
 load a `.ari` document and give it Python functions to call. Since P1 the other direction works
 natively. In `arix` and `ariglx` a document can carry Python, and a Python program can be the
-host's entry point. Still missing: Python on arisrv. arisrv runs DSL server documents (S0).
+host's entry point. arisrv runs DSL server documents (S0), and `arisrvx` runs the operator's Python
+beside the relay (S1).
 
 This roadmap adds host variants that embed a CPython interpreter, with pycvc, pycvc_gl, numpy
 and the science packages, natively and in one WebAssembly module:
@@ -114,7 +119,8 @@ As built in P1 (#985):
     There is no separate library.
 - **Building.**
   - `-DCVC_BUILD_PYCVC=ON` in-tree, or `-DARI_WITH_PYTHON=ON` / `-DARIGL_WITH_PYTHON=ON` for a
-    standalone recipe build, adds the `arix` / `ariglx` targets.
+    standalone recipe build, adds the `arix` / `ariglx` targets. `-DARISRV_WITH_PYTHON=ON` adds
+    `arisrvx`, in-tree too, since it needs no pycvc (S1).
   - In-tree, a target is skipped when Python's Development.Embed isn't found. With
     `-DARI_WITH_PYTHON=ON` / `-DARIGL_WITH_PYTHON=ON`, a missing Development.Embed is a configure
     error.
@@ -159,7 +165,7 @@ defined:
 |---|---|---|---|
 | `ariglx` | `arigl` | the engine, libpython | `python312`, `numpy-cp312`, `pycvc-cp312`, `pycvc-gl-cp312` |
 | `arix` | `ari` | the engine, libpython | `python312`, `numpy-cp312`, `pycvc-cp312`; a Python program also needs `pycvc-gl-cp312`, since `Host` is pycvc_gl's |
-| `arisrvx` | `arisrv` | not built (S1) | |
+| `arisrvx` | `arisrv` | the engine with its server part (`cvc_ariadne_python_host(arisrvx SERVER)`: `pycvc.ariadne` built in, the ServerLink), libpython | `python312`; for its apps, `fastapi-cp312`, `uvicorn-cp312` and the rest of §6.5's stack. No pycvc |
 
 Natively `ariglx` links the prefix's shared `libcvc`, `libcvcGL` and `libpython3.12`, and imports
 pycvc and pycvc_gl from the prefix's site-packages; `arix` links `libcvc` and `libpython3.12`. So
@@ -226,7 +232,7 @@ modules aren't sub-interpreter safe. VolRover3 reached the same conclusion
 - `(has? "python")` works as for any token, and `ari info` lists the tokens under its
   capabilities.
 - On a stock host, a document that requires `python` fails with an error naming the scripting
-  hosts, arix or ariglx.
+  hosts, arix, ariglx or arisrvx.
 - A stock host ignores a `python:` block, with a warning.
 
 ### 4.2 The `python:` block
@@ -741,6 +747,13 @@ relay publishes it before `init:` runs.
 - **Operator code is trusted**, as the operator's own process: the server document's `python:`
   block, or `arisrvx --python main.py`.
 
+**As built in S1** (transfix/libcvc#1081): `arisrvx --python main.py`. The program runs on a script
+thread with one asyncio loop (§6.5.1), and the relay's tree is reached only through a `ServerLink`
+([`server_link.h`](../../src/ariadne_python/server_link.h)) that the relay applies on its own
+thread. A server document's `python:` block is refused in arisrvx, not run: its functions would
+be called from the document's programs, on the relay's loop. It waits for S2, where exports run
+on the script thread.
+
 ### 6.3 Code from clients, three tiers
 
 Clients are untrusted. In order of preference:
@@ -879,6 +892,28 @@ in the host's prefix, and the embedded interpreter finds them there (§3.1). No 
 - **One interpreter, one GIL.** This is unchanged from §3.3. The relay's own threads never take
   the GIL.
 
+**As built in S1** (transfix/libcvc#1081):
+
+- **The thread.** arisrvx boots CPython on its main thread (`EngineConfig::server`), then runs the
+  program on a `std::thread` of its own through `Engine::serve`, which calls the built-in
+  `pycvc.ariadne._serve_program`. That creates the loop, makes it the thread's current one, runs
+  `main.py` as `__main__`, and runs the loop if the program didn't.
+- **Relay to Python** goes through the ServerLink's event queue. A Python waker thread blocks in
+  `_arihost.next_event()` with the GIL released and hands each event to the loop with
+  `call_soon_threadsafe`, so the relay only pushes onto a queue and never takes the GIL. In S1 the
+  one event is `shutdown`. S2's calls and S5's authentication ride the same queue.
+- **Python to relay.** The writes queue on the ServerLink, coalesced per path. A write replaces a
+  queued one it makes moot and moves to the back, so writes land in the order of each path's last
+  write: a section's fields, then its `rev`. `set_tree` supersedes what is queued under it, and
+  is applied as `(state-set-tree)` does it, changing only what differs. The relay applies them
+  at the top of each room step (60 Hz), ahead of the server document's programs, which read them
+  in the same step. `--script-write-budget` is in bytes a step (paths plus texts), 65536 by
+  default (about 3.9 MB/s), and 0 for none. The first write of a step always goes.
+- **Reads** (`host.get`, `get_tree`) read the relay's tree in place, pinned (td 4.8), so a
+  program's own write shows a step later.
+- **Not in S1:** `--script-slow-ms`. A sync export is S2's, and the warning names one, so it comes
+  with them.
+
 #### 6.5.2 Serving an ASGI app (part of S1)
 
 ```python
@@ -910,6 +945,37 @@ host.run()                             # until SIGTERM; then ASGI shutdown, then
 - `--http-listen ADDR:PORT` is a shorthand for scripts that export one `app` and don't call
   `serve_asgi` themselves: `arisrvx --python main.py --http-listen 127.0.0.1:8780` serves
   `main.app`.
+
+**As built in S1** (transfix/libcvc#1081; the reference is ARIADNE.md §9.8):
+
+- **Where `pycvc.ariadne` lives.** It is [`ariadne_server.py`](../../src/ariadne_python/ariadne_server.py).
+  arisrvx builds it in and imports it at boot as `pycvc.ariadne`, so it needs no pycvc; without a
+  pycvc beside it, a stand-in `pycvc` module holds it. pycvc installs the same file as
+  `_pycvc_ariadne.py`, and its import registers it as `pycvc.ariadne` unless the host's copy is
+  already there. Under plain `python`, `Host` keeps its tree in a pycvc app of its own.
+- **Signals.** `serve_asgi` uses a `uvicorn.Server` whose `capture_signals` does nothing, so uvicorn
+  installs no handler whichever thread it runs on. Under plain `python` on the main thread,
+  `run()` takes SIGINT and SIGTERM itself.
+- **Startup.** The relay waits for the program before it binds anything. The program reports
+  `ready` once every ASGI server has started (lifespan startup, then the bind), or that one failed.
+  A failure, or a program that ends before it serves, stops arisrvx with the program's status
+  (1 when that is 0), its traceback and uvicorn's log on stderr, and the relay never listens. A
+  stop that comes before the program serves stops it there too.
+- **A failed startup is caught inside its task.** uvicorn 0.53.0 ends a failed lifespan startup or
+  bind with `sys.exit(3)`. Raised in a task of its own, asyncio re-raises a SystemExit out of the
+  loop, which would stop every task on it (risk 16), so `serve_asgi`'s task catches it.
+- **Stopping.** On SIGTERM or SIGINT the relay posts `shutdown` and keeps stepping while the program
+  stops. Each server stops accepting and drains, within `timeout_graceful_shutdown`, which is set
+  from `--shutdown-timeout` unless the program sets it, and runs its app's shutdown. The servers
+  still running 2 s after the timeout are forced, and the loop's other tasks cancelled. The relay
+  applies the program's last writes, publishes them and stops. If the program has not ended by
+  the timeout plus 5 s, arisrvx exits without finalizing Python.
+- **The exit status.** `host.stop(code)`, or a server that ends by itself after it started (0, or 1
+  if it raised), stops the relay with that status, as `(quit code)` does.
+- **Logging.** uvicorn's `log_config` defaults to None, so its loggers reach the host's handler:
+  `[arisrvx] <logger>: <level>: <message>` on stderr, unless the program configures logging first.
+- **`--http-listen`** serves the program's `app` from its globals, both when the program calls
+  `host.run()` itself and when the host runs the loop after it returns.
 
 #### 6.5.3 Server-published subtrees (part of S0)
 
@@ -1107,7 +1173,11 @@ def scope(principal):
 
 - **Checking before starting.** `arisrvx check main.py` imports the script without serving.
   It reports missing modules (`requires: [python.fastapi, python.uvicorn]` in the server
-  document works as in §4.1), ports that are already bound, and flag errors.
+  document works as in §4.1), ports that are already bound, and flag errors. *As built in S1:*
+  it takes the relay's flags after the program, loads the `--doc` (its `requires:` and `init:`),
+  runs the program as `__main__` with `serve_asgi` recording and `host.run()` returning at once,
+  then binds and releases each fixed port (the relay's, `--http-listen` and every `serve_asgi`).
+  It exits 1 on a problem and 2 on a bad flag.
 - **Logs.**
   - Python's `logging` goes to stderr in the relay's format, which journald collects under
     systemd.
@@ -1272,18 +1342,34 @@ init: (state-set "score" (score_route (state-get "route")))
   - in `arix` and `ariglx` where wasmtime is found (`-DARI_WITH_WASM` / `-DARIGL_WITH_WASM` make
     it required), and CI's `package-linux` installs it. Tests: `ariadne_wasm_test`, the
     `arix_wasm_block` and `ari_wasm_needs_arix` ctests.
+- **G1's second part, built:** `ScriptLane::run` runs an activation to its end now, pumping
+  the app's scheduler a frame at a time (`Runtime::pump`), under `ProgramLane::init`'s caps for
+  a load's work. A guest's `ari_init` runs that way at every load, before the document's `init:`.
+  An export called from `init:` (which runs on a scheduler of its own and can't park) runs that
+  way in the call: the provider binds the export's blocking form where the lane's scheduler isn't
+  the app's.
+- **G1's third part, built:** host objects by handle, the reading half of §8.4.1.
+  - A value holding a `data_object` crosses as a handle under CBOR tag `0x61726968` ("arih"), and
+    a handle the guest hands back is the object again.
+  - The instance's table pins the object it was handed until `handle_drop`. Each slot has a
+    generation, so a dropped handle names nothing.
+  - `data_info`, `volume_read` (a box, every 2^lod-th voxel), `volume_sample`, `mesh_read` and
+    `heightfield_read` copy only what they're asked for into the guest's memory, at a step per
+    `kDataNodeBytes` moved.
+  - `imports:` gains `data.read` and `data.write`.
+  - A trap with the guest's memory at its limit is a `MemoryError`: a `memory.grow` past it gives
+    the guest -1, and the guest gave up.
 - **Left for G1:**
   - a guest export called from inside a program as that program's own sliced native call, charged
-    to it, and calls from `init:`, which can't park today;
+    to it (a call parks the program on an activation of its own);
   - a pump budget that counts the slices' steps, not the picks;
   - waiting for the instance through the lock manager (its timeouts and priority inheritance) in
     place of a frame at a time, and the `RecursionError` for indirect re-entry, which today only
     the callers' caps end;
   - the key, pointer, signal and message hooks, which need the residents' channels to fan out;
-  - `MemoryError` at a refused `memory.grow` (the limiter refuses it, and the guest sees -1);
-  - the dedicated state imports as fast paths beside `call`, and §8.4.1's handles;
-  - `ari_init` on the `init:` lane's caps, a host option for `state_exec.policy`, and `pure`
-    exports on the read lane;
+  - the dedicated state imports as fast paths beside `call`, and §8.4.1's writes
+    (`volume_write`, `volume_new`) and the `data.write` group they need;
+  - a host option for `state_exec.policy`, and `pure` exports on the read lane;
   - wasmtime in the `arix` / `ariglx` cvcpkg recipes.
 
 **The wasm runtimes.** A `cvc::ariadne::wasm_runtime` interface, behind G1's engine, covers:
@@ -1354,6 +1440,22 @@ and handles fill in.
 
 #### 8.4.1 Host objects: handles, and copies of only what is read
 
+**As G1's third part builds it** (`wasm_engine.h`): the reading half, natively on wasmtime.
+- A `data_object` crosses as tag `0x61726968` ("arih") over an unsigned integer, the slot's
+  generation in its high 32 bits.
+- The instance's table holds at most 65,536 live handles.
+- The readers take their region as plain integers, with `h` an i64 and the rest i32s, and return
+  the bytes written or, as `call` does, minus the length of an error for `reply()`:
+  - `volume_read(h, x, y, z, nx, ny, nz, lod, dst, len)`, in the volume's own voxel type;
+  - `volume_sample(h, points, n, dst, len)`, f64 points in, f64 values out;
+  - `mesh_read(h, attr_ptr, attr_len, first, count, dst, len)`, the attribute's name in the
+    guest's memory: `positions` or `normals` as f64 triples, and `indices`, `quads` or `lines` as
+    u32s;
+  - `heightfield_read(h, row, col, rows, cols, dst, len)`, in f32s.
+- `data_info` knows volumes, meshes and heightfields. Any other object (a `city_bundle`) gives only
+  its type name.
+- **Not yet:** the writers and `volume_new`, the dedicated state imports, and the browser's path.
+
 A guest gets a host object (a volume, a mesh, a heightfield, a city bundle) as a handle, not as
 its bytes, and reads only the parts it asks for. The DSL already works this way. On a node holding
 a host object, `(state-data-get path)` returns an opaque `data_object`, a shared pointer to the
@@ -1405,8 +1507,8 @@ payload, and copies nothing. The objects a `data:` block decodes (`mesh`, `heigh
   reads, and the handle keeps that cost to what it asks for.
 - **The other way round.** A guest buffer passed to a host call as a pointer and a length is read
   in place for that call. The host doesn't keep the pointer: `memory.grow` can move the memory.
-- **Phases.** The handle table, `data_info` and the readers come with G1's ABI. The writers,
-  `volume_new` and more object kinds can follow as guests need them.
+- **Phases.** The handle table, `data_info` and the readers came with G1's third part. The
+  writers, `volume_new` and more object kinds can follow as guests need them.
 
 ### 8.5 Scheduling and limits
 
@@ -1483,7 +1585,8 @@ are. A document can lower them for its guests, never raise them.
 - **Errors.**
   - Running out of gas or time kills the activation, and the drain reports it as it reports a DSL
     action's step limit (ARIADNE.md §2.4).
-  - A refused `memory.grow` is a `MemoryError`.
+  - A refused `memory.grow` gives the guest -1. A trap with the memory at its limit (the guest
+    gave up) is a `MemoryError`.
   - A trap is a `WasmError`, which a calling program's `try` can catch.
 
 **Many guests at once, without choking a frame.**
@@ -1680,7 +1783,17 @@ hook is declared in the block's `hooks:`, or registered by `ari_init` through th
 16. **Uvicorn inside an embedded interpreter** (§6.5.2). Confirm on the pinned uvicorn
     (0.53.0) that `Server.serve()` off the main thread installs no signal handlers. Also confirm
     that `asyncio`'s default loop on the script thread coexists with the relay's own threads.
-    Test it in S1 before relying on it.
+    Test it in S1 before relying on it. **Tested in S1** (2026-11-08, cvcpkg's python312 3.12.10,
+    uvicorn 0.53.0, FastAPI 0.141.1, Starlette 1.7.0, on Windows; Linux in CI):
+    - `capture_signals` returns at once off the main thread: SIGINT, SIGTERM and SIGBREAK keep
+      their handlers, and the wakeup fd is untouched. The lifespan runs on the script thread, the
+      requests are served there, and a graceful stop with a request in flight takes about 0.2 s.
+    - **A finding:** a failed startup (a lifespan that raises, a port that is taken) ends with
+      `sys.exit(3)`. When `serve()` is a task of its own, asyncio re-raises that SystemExit out of
+      `run_until_complete` and every other task on the loop dies with it. `serve_asgi` catches it
+      inside the task's own coroutine, and the other tasks run on.
+    - arisrvx's tests serve FastAPI beside a live relay (its gRPC and WebSocket threads), and
+      `serve_asgi`'s server never installs signal handlers on any thread.
 17. **Sync exports stall everyone** (§6.5.1). One interpreter means one slow sync handler delays
     HTTP and room-call alike. The `--script-slow-ms` warning makes this visible, but it is a
     convention, not a guarantee. Services should be async throughout.
@@ -1714,15 +1827,15 @@ for it.
 | D1 | GRL-SNAM in the browser: torch-free inference, a demo page | W1 | M |
 | D2 | VolRover gap audit, then VolRover as an Ariadne app | P2 | L |
 | S0 | **Done** (transfix/libcvc#1046). Server documents in stock arisrv (`--doc`), plus the `server: publish:` namespaces (§6.1, §6.5.3): `ServerDocument`, the shard's outbound scope, the area of interest subscribed to it, the read-only `room` hole, the holon's world clock at `sim.tick`, the parsed `scene:` kept for the world runtime (with a warning that it is not simulated), `requires: [relay]`, `(quit)` as arisrv's exit status, `state-set-tree` through writable links on every hop, and first writes to fresh nodes journaled. Tests: `ServerBlockTest`, `ServerDocumentTest`, `StatePublishScopeTest`, `RoomRelayLoopbackTest.ServerDocumentPublishesItsNamespaceOnly`, the rev-before-fields order, the `arisrv_doc_*` ctests, `ari_server_block_ignored` and `ari_server_document_needs_relay` | — | M |
-| S1 | `arisrvx`: the engine on a script thread with an asyncio loop, operator Python (§6.5.1); `serve_asgi` / `--http-listen`, lifespan and graceful shutdown (§6.5.2); `arisrvx check`; the `arisrvx` recipe | S0, P1 | M |
-| S2 | `room-call`: functions clients may call, with `ctx` (principal, progress, idempotency key, deadline), role gates and `CallError` (§6.5.5); the `relay:` block and `--relay` join mode in `ari` and the `x` hosts, and transport security for native clients (§6.5.7) | S1 | M |
+| S1 | **Done** (transfix/libcvc#1081). `arisrvx`: the engine on a script thread with an asyncio loop, operator Python (§6.5.1); `serve_asgi` / `--http-listen`, lifespan and graceful shutdown (§6.5.2); `arisrvx check`; the `arisrvx` recipe. As built: `pycvc.ariadne` built in (and shipped with pycvc for plain `python`), the ServerLink (writes coalesced per path in last-write order, `--script-write-budget`, the relay's events through a waker thread), the relay listening only once the ASGI apps have started, a stop that drains the program before the relay, `arisrvx python`, a server document's `python:` block refused, risk 16 tested. Tests: `ServerLinkTest`, the `arisrvx_*` ctests (serve, program, http_listen, startup_fails, check, check_missing_module, doc_python_refused, python_interpreter), `arisrv_python_needs_arisrvx`, `pycvc_ariadne_server`. `--script-slow-ms` moved to S2 | S0, P1 | M |
+| S2 | `room-call`: functions clients may call, with `ctx` (principal, progress, idempotency key, deadline), role gates and `CallError` (§6.5.5); the `relay:` block and `--relay` join mode in `ari` and the `x` hosts, and transport security for native clients (§6.5.7); `--script-slow-ms` (§6.5.1); a server document's `python:` block, its exports run on the script thread (§6.2) | S1 | M |
 | S3 | Client DSL programs | S0 | S |
 | S4 | Restricted client Python in worker processes | S2 | L |
 | S5 | The `authenticate` hook and principals: bound writes, room-call and rate limits keyed by principal; `host.disconnect` (§6.5.4) | S1 | S |
 | S6 | Bound reads: `read_scope`, the per-connection prefix filter, `refresh_scope` (§6.5.6) | S5 | M |
 | S7 | `ServerHarness` for plain `python`, and the end-to-end CI test (§6.5.8) | S2, S5 | S |
 | L1 | Lua bindings (SWIG), the Lua engine in the `x` hosts, Lua for client code on `arisrvx` | the engine interface (P1b, done) | L |
-| G1 | WebAssembly guests natively on wasmtime (§8.2–8.7), as a `ScriptEngine` on P1b's interface. **First part done** (§8.3): the runtime interface and its wasmtime backend, the `wasm:` block, the ABI with `call`/`reply`/`yield`/`fail`, exports as parked calls (`ScriptLane::export_activation`), fuel as steps under the lane's caps, the frame budget, one activation per instance, `imports:` narrowing, the `on_tick`/`on:`/`watch` hooks, `WasmError`, in `arix` and `ariglx`. **Left:** in-program sliced calls and calls from `init:`; the pump budget counting slice steps; the lock manager for the instance; the key, pointer, signal and message hooks; `MemoryError`; the state imports and handles (§8.4.1); `ari_init`; a host option for `state_exec.policy`; wasmtime in the recipes | the engine interface (P1b, done) | L |
+| G1 | WebAssembly guests natively on wasmtime (§8.2–8.7), as a `ScriptEngine` on P1b's interface. **First part done** (§8.3): the runtime interface and its wasmtime backend, the `wasm:` block, the ABI with `call`/`reply`/`yield`/`fail`, exports as parked calls (`ScriptLane::export_activation`), fuel as steps under the lane's caps, the frame budget, one activation per instance, `imports:` narrowing, the `on_tick`/`on:`/`watch` hooks, `WasmError`, in `arix` and `ariglx`. **Second part done:** `ari_init` at load and calls from `init:` (`ScriptLane::run`). **Third part done:** host objects by handle, read a region at a time (§8.4.1), and `MemoryError`. **Left:** in-program sliced calls; the pump budget counting slice steps; the lock manager for the instance; the key, pointer, signal and message hooks; the state imports and §8.4.1's writes; a host option for `state_exec.policy`; wasmtime in the recipes | the engine interface (P1b, done) | L |
 | G2 | The install-time transform (§8.5: gas injection, built through cvcpkg's Rust crates; Asyncify) and the browser backend: the same slices, limits, access and hooks in a single-threaded page | G1 | L |
 | G3 | The WAMR backend, on G2's transform: guests on the BSDs | G2 | S |
 | G4 | Client guests on `arisrvx` (§6.3, §8.6), with the optional Worker backstop in the browser | G1, S2 | M |

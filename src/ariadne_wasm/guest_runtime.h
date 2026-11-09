@@ -44,13 +44,15 @@ struct PendingImport {
   std::int64_t value = 0;
 };
 
-// The host's side of one import, in module "ari". Its parameters are i32s, widened, and it returns
-// an i64 or nothing. A sync import answers at once; an async one returns the PendingImport the
-// guest waits on (null: answered at once with `value`). Either may set `trap` to trap the guest.
+// The host's side of one import, in module "ari". Its parameters are i32s (or i64s, as `wide`
+// marks them), widened, and it returns an i64 or nothing. A sync import answers at once; an async
+// one returns the PendingImport the guest waits on (null: answered at once with `value`). Either
+// may set `trap` to trap the guest.
 struct Import {
   std::string name;
   int params = 0;
-  bool returns = false; // an i64
+  std::uint32_t wide = 0; // bit i set: parameter i is an i64 (a handle)
+  bool returns = false;   // an i64
   std::function<std::int64_t(GuestMemory &, std::span<const std::int64_t>, std::string &trap)> sync;
   std::function<std::shared_ptr<PendingImport>(GuestMemory &, std::span<const std::int64_t>,
                                                std::string &trap)>
@@ -66,6 +68,9 @@ public:
   virtual bool has_export(const std::string &name) const = 0;
   // The guest's exported memory ("memory"), between calls. Empty without one.
   virtual std::span<std::uint8_t> memory() = 0;
+  // Whether the memory is as large as the instance's limit lets it grow: a memory.grow past it was
+  // refused (the guest saw -1).
+  virtual bool memory_at_limit() = 0;
   // Start a call of export `name` with i32/i64 arguments (as the export takes them); nothing runs
   // until the call is polled. Null with `error` set when there is no such export.
   virtual std::unique_ptr<Call> start(const std::string &name, std::vector<std::int64_t> args,

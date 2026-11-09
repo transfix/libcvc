@@ -2133,6 +2133,276 @@ TEST(AriadneReactiveBudget, ASkippedPredicateKeepsLastFramesAnswer) {
   }
 }
 
+// A skip is the budget's, not the document's: never a warning, whatever skipped (a predicate, a
+// computed text, a tooltip, combo options, a repeat count), on the first frame or later. Each keeps
+// last frame's value, or its fail-safe one where it never ran.
+TEST(AriadneReactiveBudget, ASkipIsNeverAWarning) {
+  cvc::app app;
+  LoadResult lr =
+      load_string("windows:\n"
+                  "  - window: W\n"
+                  "    children:\n"
+                  "      - text: card\n"
+                  "        visible_when: (= (state-get \"s.show\") \"1\")\n"
+                  "        tooltip: (state-get \"s.tip\")\n"
+                  "      - text: ago\n"
+                  "        bind: (string.join (list \"posted\" (state-get \"s.ago\")) \" \")\n"
+                  "      - text: row {i}\n"
+                  "        repeat: (state-get \"s.n\")\n"
+                  "      - combo: pick\n"
+                  "        bind: s.pick\n"
+                  "        options: (list \"a\" (state-get \"s.opt\"))\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  cvc::state &root = cvc::state::instance(app);
+  root("s.show").value(std::string("1"));
+  root("s.tip").value(std::string("open it"));
+  root("s.ago").value(std::string("2h"));
+  root("s.n").value(std::string("2"));
+  root("s.opt").value(std::string("b"));
+  Runtime rt(app);
+  ImageBackend b;
+  rt.set_backend(&b);
+  rt.set_reactive_frame_budget(0.0); // every read-lane expression skips, from the first frame
+  rt.set_root(std::move(lr.root));
+  const auto has_text = [&](const std::string &t) {
+    return std::find(b.texts.begin(), b.texts.end(), t) != b.texts.end();
+  };
+  const auto has_tip = [&](const std::string &t) {
+    return std::find(b.tooltips.begin(), b.tooltips.end(), t) != b.tooltips.end();
+  };
+  rt.render();
+  rt.render();
+  EXPECT_TRUE(rt.take_reactive_warnings().empty()) << "a skip is not a warning";
+  EXPECT_GT(rt.reactive_skip_count(), 0u);
+  EXPECT_FALSE(has_text("card")) << "never ran: fail-safe hidden";
+  EXPECT_FALSE(has_text("row 0")) << "never ran: a count of 0";
+  EXPECT_TRUE(has_text("ago=")) << "never ran: empty text";
+
+  rt.set_reactive_frame_budget(0.030);
+  rt.render();
+  EXPECT_TRUE(has_text("card"));
+  EXPECT_TRUE(has_tip("open it"));
+  EXPECT_TRUE(has_text("ago=posted 2h"));
+  EXPECT_TRUE(has_text("row 1") && !has_text("row 2"));
+
+  // Skipped again, with the state moved on: last frame's values, and still no warning.
+  rt.set_reactive_frame_budget(0.0);
+  root("s.show").value(std::string("0"));
+  root("s.tip").value(std::string("changed"));
+  root("s.ago").value(std::string("3h"));
+  root("s.n").value(std::string("5"));
+  rt.render();
+  EXPECT_TRUE(has_text("card"));
+  EXPECT_TRUE(has_tip("open it"));
+  EXPECT_TRUE(has_text("ago=posted 2h"));
+  EXPECT_TRUE(has_text("row 1") && !has_text("row 2"));
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+
+  // A broken expression still warns, once.
+  rt.set_reactive_frame_budget(0.030);
+  root("s.n").value(std::string("not a number"));
+  rt.render();
+  const std::vector<std::string> warned = rt.take_reactive_warnings();
+  ASSERT_EQ(warned.size(), 1u);
+  EXPECT_NE(warned[0].find("integer"), std::string::npos) << warned[0];
+}
+
+// §2.1 the read lane's cache: an expression is run again only when something it read was written
+// (the path, an ancestor or a descendant), or a (has? …) it asked answers otherwise; one that read
+// the clock, or a node through a link, runs every frame.
+namespace {
+
+struct CacheDoc {
+  cvc::app app;
+  Runtime rt{app};
+  ImageBackend b;
+  explicit CacheDoc(const std::string &doc) {
+    LoadResult lr = load_string(doc);
+    EXPECT_TRUE(lr.ok) << lr.error;
+    rt.set_backend(&b);
+    rt.set_root(std::move(lr.root));
+  }
+  void set(const std::string &k, const std::string &v) { cvc::state::instance(app)(k).value(v); }
+  bool shows(const std::string &t) const {
+    return std::find(b.texts.begin(), b.texts.end(), t) != b.texts.end();
+  }
+  std::uint64_t runs() const { return rt.reactive_eval_count(); }
+};
+
+} // namespace
+
+TEST(AriadneReactiveCache, AFrameThatWroteNothingRunsNothing) {
+  CacheDoc d("windows:\n"
+             "  - window: W\n"
+             "    children:\n"
+             "      - text: card\n"
+             "        visible_when: (= (state-get \"s.show\") \"1\")\n"
+             "        tooltip: (state-get \"s.tip\")\n"
+             "      - text: ago\n"
+             "        bind: (string.join (list \"posted\" (state-get \"s.ago\")) \" \")\n"
+             "      - text: row {i}\n"
+             "        repeat: (state-get \"s.n\")\n"
+             "        visible_when: (!= (state-get \"s.hide.{i}\") \"1\")\n");
+  d.set("s.show", "1");
+  d.set("s.tip", "open it");
+  d.set("s.ago", "2h");
+  d.set("s.n", "3");
+  d.rt.render();
+  const std::uint64_t first = d.runs();
+  EXPECT_GE(first, 6u); // the predicate, the tooltip, the text, the count and three rows
+  EXPECT_TRUE(d.shows("ago=posted 2h"));
+  for (int f = 0; f < 5; ++f)
+    d.rt.render();
+  EXPECT_EQ(d.runs(), first) << "nothing written: every value is last frame's";
+  EXPECT_TRUE(d.shows("card") && d.shows("row 2") && d.shows("ago=posted 2h"));
+}
+
+TEST(AriadneReactiveCache, AWriteRerunsWhatReadItAndNothingElse) {
+  CacheDoc d("windows:\n"
+             "  - window: W\n"
+             "    children:\n"
+             "      - text: a\n"
+             "        bind: (state-get \"s.a\")\n"
+             "      - text: b\n"
+             "        bind: (str (length (state-children \"s.b\")))\n");
+  d.set("s.a", "1");
+  d.set("s.b.x", "1");
+  d.rt.render();
+  std::uint64_t n = d.runs();
+  EXPECT_TRUE(d.shows("a=1") && d.shows("b=1"));
+
+  d.set("s.a", "2"); // the path itself
+  d.rt.render();
+  EXPECT_EQ(d.runs(), n + 1);
+  EXPECT_TRUE(d.shows("a=2") && d.shows("b=1"));
+  n = d.runs();
+
+  d.set("s.b.y", "1"); // under a path read
+  d.rt.render();
+  EXPECT_EQ(d.runs(), n + 1);
+  EXPECT_TRUE(d.shows("b=2"));
+  n = d.runs();
+
+  d.set("s", "whole"); // an ancestor of both
+  d.rt.render();
+  EXPECT_EQ(d.runs(), n + 2);
+  n = d.runs();
+
+  d.set("other.place", "1"); // nothing read
+  d.set("s.a", "2");         // and a write of the value it had: no change, no signal
+  d.rt.render();
+  EXPECT_EQ(d.runs(), n);
+
+  std::thread([&] { d.set("s.a", "3"); }).join(); // another thread's write
+  d.rt.render();
+  EXPECT_EQ(d.runs(), n + 1);
+  EXPECT_TRUE(d.shows("a=3"));
+}
+
+TEST(AriadneReactiveCache, TheClockAndALinkStayLive) {
+  CacheDoc d("windows:\n"
+             "  - window: W\n"
+             "    children:\n"
+             "      - text: now\n"
+             "        bind: (str (> (time-now) 0))\n"
+             "      - text: linked\n"
+             "        bind: (state-get \"s.link\")\n"
+             "      - text: still\n"
+             "        bind: (state-get \"s.still\")\n");
+  d.set("s.target", "t1");
+  d.set("s.still", "x");
+  cvc::state::instance(d.app)("s.link").linkTo("s.target", cvc::state::link_mode::transparent);
+  d.rt.render();
+  EXPECT_TRUE(d.shows("now=#t") && d.shows("linked=t1")) << ::testing::PrintToString(d.b.texts);
+  const std::uint64_t n = d.runs();
+  d.rt.render();
+  d.rt.render();
+  EXPECT_EQ(d.runs(), n + 4) << "the clock and the link run each frame; the rest is kept";
+  d.set("s.target", "t2"); // signalled under the target's path, not the link's
+  d.rt.render();
+  EXPECT_TRUE(d.shows("linked=t2"));
+}
+
+TEST(AriadneReactiveCache, ARepeatsRowsAreKeptApart) {
+  CacheDoc d("windows:\n"
+             "  - window: W\n"
+             "    children:\n"
+             "      - text: row {i}\n"
+             "        repeat: (state-get \"s.n\")\n"
+             "        bind: (state-get \"s.items.{i}\")\n");
+  d.set("s.n", "3");
+  for (int i = 0; i < 3; ++i)
+    d.set("s.items." + std::to_string(i), "v" + std::to_string(i));
+  d.rt.render();
+  EXPECT_TRUE(d.shows("row 0=v0") && d.shows("row 1=v1") && d.shows("row 2=v2"));
+  const std::uint64_t n = d.runs();
+  d.set("s.items.1", "changed");
+  d.rt.render();
+  EXPECT_EQ(d.runs(), n + 1) << "row 1 alone";
+  EXPECT_TRUE(d.shows("row 0=v0") && d.shows("row 1=changed") && d.shows("row 2=v2"));
+}
+
+// A cached result is not run, so the frame budget never skips it; only what runs counts.
+TEST(AriadneReactiveCache, AKeptResultIsNeverSkipped) {
+  CacheDoc d("windows:\n"
+             "  - window: W\n"
+             "    children:\n"
+             "      - text: a\n"
+             "        bind: (state-get \"s.a\")\n"
+             "      - text: b\n"
+             "        bind: (state-get \"s.b\")\n");
+  d.set("s.a", "1");
+  d.set("s.b", "1");
+  d.rt.render();
+  d.rt.set_reactive_frame_budget(0.0);
+  d.rt.render();
+  EXPECT_EQ(d.rt.reactive_skip_count(), 0u);
+  EXPECT_TRUE(d.shows("a=1") && d.shows("b=1"));
+  d.set("s.a", "2");
+  d.rt.render();
+  EXPECT_EQ(d.rt.reactive_skip_count(), 1u) << "only the one that had to run";
+  EXPECT_TRUE(d.shows("a=1") && d.shows("b=1")) << "skipped: last frame's value";
+  d.rt.set_reactive_frame_budget(0.030);
+  d.rt.render();
+  EXPECT_TRUE(d.shows("a=2"));
+  EXPECT_TRUE(d.rt.take_reactive_warnings().empty());
+}
+
+// A (has? …) answer is part of what a result read: the backend answering otherwise runs it again.
+TEST(AriadneReactiveCache, AChangedHasAnswerRerunsIt) {
+  struct Caps : ImageBackend {
+    bool fs = false;
+    Capabilities capabilities() const override {
+      Capabilities c = ImageBackend::capabilities();
+      c.fullscreen = fs;
+      return c;
+    }
+  };
+  cvc::app app;
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    children:\n"
+                              "      - text: fs\n"
+                              "        bind: (if (has? \"ui.fullscreen\") \"yes\" \"no\")\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  Caps b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  const auto shows = [&](const char *t) {
+    return std::find(b.texts.begin(), b.texts.end(), t) != b.texts.end();
+  };
+  rt.render();
+  EXPECT_TRUE(shows("fs=no"));
+  const std::uint64_t n = rt.reactive_eval_count();
+  rt.render();
+  EXPECT_EQ(rt.reactive_eval_count(), n);
+  b.fs = true;
+  rt.render();
+  EXPECT_EQ(rt.reactive_eval_count(), n + 1);
+  EXPECT_TRUE(shows("fs=yes"));
+}
+
 TEST(MediaParse, VideoUris) {
   EXPECT_TRUE(media::is_video_uri("https://x.test/a.MP4"));
   EXPECT_TRUE(media::is_video_uri("https://x.test/a.webm?sig=1#t=2"));

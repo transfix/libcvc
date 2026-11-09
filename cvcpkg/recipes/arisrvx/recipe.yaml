@@ -1,0 +1,62 @@
+schema_version: 1
+recipe:
+  name: arisrvx
+  upstream_version: "3.7.13"
+  cvc_revision: 1
+  maintainer: "cvcpkg group"
+  maintainer_email: "info@cvcpkg.org"
+  maintainer_url: "https://cvcpkg.org"
+  description: "arisrvx — arisrv, the headless Ariadne relay, with an embedded Python (CPython 3.12): `arisrvx --python main.py [relay flags]` runs the operator's program beside the relay, on a script thread of its own with one asyncio loop that serves its ASGI apps (FastAPI on uvicorn, `pycvc.ariadne.serve_asgi`) and writes the room tree through the relay, which never runs Python. The apps start before the relay listens; SIGTERM shuts them down gracefully, then the relay. `arisrvx check main.py` runs the program without serving and checks its modules and ports; `arisrvx python` is the embedded interpreter. Every arisrv flag works the same. Install the ASGI stack beside it: cvcpkg install arisrvx fastapi-cp312 uvicorn-cp312."
+  homepage: https://github.com/transfix/libcvc
+  license: LGPL-2.1-only
+  tags: [conference, server, relay, python, scripting, asgi, cli, tools]
+
+# `arisrvx` is arisrv built with src/ariadne_python's engine and its server part
+# (docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md §6.5), its OWN package so that arisrv stays Python-free:
+# it builds src/arisrv standalone with -DARISRV_WITH_PYTHON=ON against the installed libcvc SDK and
+# this prefix's python312, and installs just bin/arisrvx. arisrv's own recipe is unchanged.
+#
+# At run time it finds its Python beside it: <prefix>/lib/python3.12 (the python312 runtime dep),
+# with what that interpreter's site-packages holds. pycvc.ariadne (Host, serve_asgi) is built into
+# arisrvx, so it needs no pycvc-cp312; a program's ASGI stack (fastapi-cp312, uvicorn-cp312, ...) is
+# the operator's to install, and `arisrvx check main.py` names what is missing.
+#
+# Built against the libcvc of its own tree (the relay moves with every release), so publish it
+# with that libcvc, as arisrv is.
+#
+# Platforms: linux, beside arix in publish-cvcpkg.yml's cp312 column. Needing no pycvc, macOS and
+# Windows can follow arisrv's there (on Windows python312's DLLs are in bin/ since cy-pca/cvcpkg#542).
+
+source:
+  # Co-located with the libcvc source tree; build.sh points cmake at src/arisrv.
+  # `path` is counted from cvcpkg/recipes/_vendored/, where `cvcpkg build`
+  # looks first, so `../../..` is the libcvc repo root (CVC_SOURCE_DIR).
+  type: vendored
+  path: ../../..
+
+patches: []
+
+depends:
+  build:
+    - name: libcvc
+    # libpython3.12 and its headers, the interpreter arisrvx embeds.
+    - name: python312
+  runtime:
+    - name: libcvc
+    - name: python312
+  host_tools:
+    - cmake
+    - ninja
+
+build:
+  matrix:
+    - platform: linux
+      script: build.sh
+
+package:
+  # Just the `arisrvx` executable (bin/arisrvx). No cmake package config: arisrvx is an application.
+  files:
+    - bin/arisrvx
+
+abi:
+  cxx_std: 20

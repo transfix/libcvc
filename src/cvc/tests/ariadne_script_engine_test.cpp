@@ -607,7 +607,7 @@ TEST_F(ScriptEngineTest, AnActivationEndsWithStopOrItsDocument) {
 
 // export_activation: a function whose calls are activations. A program calling it parks until its
 // activation finishes and gets its result; the -async form returns a future; a failure raises at
-// the call with its own class; and where the caller can't park (init:) the call raises.
+// the call with its own class; and where the caller can't park (init:) the call runs it to its end.
 TEST_F(ScriptEngineTest, AnExportedCallParksOnItsActivation) {
   REQUIRE_YAML();
   cvc::app app;
@@ -657,8 +657,56 @@ TEST_F(ScriptEngineTest, AnExportedCallParksOnItsActivation) {
                                                 "root:\n"
                                                 "  - text: hi\n")
                            .string()));
-  EXPECT_TRUE(any_contains(warns, "init:")) << "init: can't park on an activation";
-  EXPECT_NE(val(app, "ui.se.i"), "2");
+  EXPECT_FALSE(any_contains(warns, "init:")) << "init: runs the activation to its end";
+  EXPECT_EQ(val(app, "ui.se.i"), "2");
+}
+
+// run(): an activation to its end now, the app's scheduler pumped a frame at a time (so a yield
+// passes), under the lane's caps; the init lane's let it do more than an action could.
+TEST_F(ScriptEngineTest, RunFinishesAnActivationNow) {
+  cvc::app app;
+  AppRuntime art(app, "ui.se");
+  ScriptLane &lane = art.use_script_engine(engine);
+  auto yields = std::make_shared<ScriptedActivation>([](ScriptSlice &s, int n) {
+    if (n < 3)
+      s.yield_frame();
+    else
+      s.finish(se::value_t(std::int64_t(5)));
+  });
+  ActivationOutcome out = lane.run(yields, {});
+  EXPECT_TRUE(out.ok) << out.error;
+  EXPECT_EQ(int_of(out.value), 5);
+  EXPECT_EQ(yields->steps, 4);
+
+  const auto heavy = [] {
+    return std::make_shared<ScriptedActivation>([](ScriptSlice &s, int n) {
+      s.charge(1000);
+      if (n == 19)
+        s.finish(); // 20000 steps: over an action's 5000, under init's 10 million
+    });
+  };
+  ActivationOptions action;
+  out = lane.run(heavy(), action);
+  EXPECT_FALSE(out.ok);
+  EXPECT_NE(out.error.find("max_steps_exceeded"), std::string::npos) << out.error;
+  ActivationOptions init;
+  init.lane = ProgramLane::init;
+  out = lane.run(heavy(), init);
+  EXPECT_TRUE(out.ok) << out.error;
+
+  // From inside a step of the app's scheduler it would re-enter it: refused, with the reason.
+  bool refused = false;
+  auto outer = std::make_shared<ScriptedActivation>([&](ScriptSlice &s, int) {
+    try {
+      lane.run(std::make_shared<ScriptedActivation>([](ScriptSlice &t, int) { t.finish(); }), {});
+    } catch (const std::exception &e) {
+      refused = std::string(e.what()).find("inside a step") != std::string::npos;
+    }
+    s.finish();
+  });
+  out = lane.run(outer, {});
+  EXPECT_TRUE(out.ok) << out.error;
+  EXPECT_TRUE(refused);
 }
 
 // on_event: an on: event the document fires (here a key binding's) is delivered to the
