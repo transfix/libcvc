@@ -1365,6 +1365,18 @@ jobs:
           "$py_prefix/bin/swig" -version | head -3
           echo "PY_PREFIX=$py_prefix" >> "$GITHUB_ENV"
 
+      # arisrv and arisrvx need the gRPC transports (their relay's state and media
+      # planes are gRPC; WebSocket alone does not link them). In a prefix of its own,
+      # as package-linux's enable_grpc lanes provision it: grpc's closure carries its
+      # own zlib, openssl and protobuf.
+      - name: Provision gRPC via cvcpkg (for arisrv and arisrvx)
+        shell: bash
+        run: |
+          set -euo pipefail
+          grpc_prefix="$RUNNER_TEMP/grpc-prefix"
+          cvcpkg install grpc protobuf --prefix "$grpc_prefix" --config release --link shared
+          echo "GRPC_PREFIX=$grpc_prefix" >> "$GITHUB_ENV"
+
       # cvcGL needs VTK, and xorgproto for the FindX11 that its find_package(VTK)
       # re-runs; imgui makes ImGuiOverlay real rather than an inert stub. See the
       # VTK step in package-linux.
@@ -1396,13 +1408,14 @@ jobs:
           echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_PREFIX_PATH="$deps;$PY_PREFIX" \
+            -DCMAKE_PREFIX_PATH="$deps;$PY_PREFIX;$GRPC_PREFIX" \
             -DCVC_BUILD_TESTS=ON \
             -DCVC_BUILD_CVCGL=ON \
             -DCVC_ENABLE_CUDA=OFF \
             -DCVC_BUILD_PYCVC=ON \
             -DCVC_BUILD_PYCVC_GL=ON \
             -DCVC_PYCVCGL_VTK_BRIDGE=OFF \
+            -DCVC_ENABLE_GRPC=ON \
             -DCVC_ENABLE_WS=ON \
             -DPython3_EXECUTABLE="$PY_PREFIX/bin/python3.12" \
             -DSWIG_EXECUTABLE="$PY_PREFIX/bin/swig"
