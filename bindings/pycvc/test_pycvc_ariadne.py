@@ -192,6 +192,28 @@ check(how is not None and "did not complete" in how, f"the default caps stop a s
 rt.wait_idle()
 del rt
 
+# ── sim.step / sim.restart: the built-in Step and Restart ──────────────────────────────────────
+world_doc = os.path.join(tmp, "world.ari")
+with open(world_doc, "w", encoding="utf-8") as f:
+    f.write("scene:\n  clock: { paused: true }\n  physics: {}\n  nodes:\n"
+            "    - node: crate\n      source: { box: { size: [1, 1, 1] } }\n"
+            "      transform: { position: [0, 0, 4] }\n      body: { mass: 10 }\n")
+app, rt = make("w")
+rt.load(world_doc)
+rt.step(1.0 / 60.0)  # the world anchors on the paused clock
+rt.step_world(12)
+rt.step(1.0 / 60.0)
+check(pycvc.state_get(app, "w.sim.step") == "12", "step_world bumps the scene clock's step key")
+ticks = pycvc.state_get(app, "w.physics.stats.tick")
+check(ticks not in ("", "0"), f"the paused world ran the requested steps ({ticks!r})")
+check(rt.restart_world(), "restart_world rebuilds the world")
+check(pycvc.state_get(app, "w.sim.restarts") == "1", "and counts the restart")
+rt.step(1.0 / 60.0)
+rt.step_world(12)
+rt.step(1.0 / 60.0)
+check(pycvc.state_get(app, "w.physics.stats.tick") == ticks, "a restarted world steps as before")
+del rt
+
 # ── host_function's own checks ──────────────────────────────────────────────────────────────────
 for bad, kw in ((42, {}), (len, {"with_call": True}), (len, {"done_channel": "x"})):
     try:

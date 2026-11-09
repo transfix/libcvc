@@ -13,6 +13,8 @@
 #include <cvc/ariadne/requires.h> // requires:, free_heads (what a document needs from its host)
 #include <cvc/ariadne/uri.h>      // register_cvc_uri_handler
 #include <cvc/core/app.h>
+#include <cvc/core/world_clock_binding.h> // world_clock_keys (the scene clock's step key)
+#include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_host.h>      // register_async_fn
 #include <cvc/state/state_exec/async_scheduler.h> // exec_scheduler().post_message
 #include <cvc/state/state_exec/builtins.h>        // register_fn
@@ -44,6 +46,33 @@ AppRuntime::AppRuntime(cvc::app &app, std::string prefix, SceneAdapter *scene)
   rt_.set_scene_shaders(scene_ && scene_->runs_shaders()); // gl.scene.shaders
   verbs_->data = data_;
   verbs_->prefix = prefix_;
+  // sim_transport.ari's Step and Restart, for every host; a host's own handler replaces these.
+  rt_.on("sim.step", [this] { step_world(1); });
+  rt_.on("sim.restart", [this] { restart_world(); });
+}
+
+void AppRuntime::step_world(std::uint64_t n) {
+  if (stepKey_.empty() || n == 0)
+    return;
+  write<long long>(app_, stepKey_,
+                   read_or<long long>(app_, stepKey_, 0) + static_cast<long long>(n));
+}
+
+bool AppRuntime::restart_world() {
+  app_.world_clock().reset();
+  std::vector<std::string> warns;
+  bool rebuilt = false;
+  if (world_) {
+    world_->restart(&warns);
+    rebuilt = true;
+  } else if (scene_) {
+    rebuilt = scene_->restart(&warns);
+  }
+  for (std::string &w : warns)
+    pendingWarnings_.push_back(std::move(w));
+  if (!restartsKey_.empty())
+    write<long long>(app_, restartsKey_, read_or<long long>(app_, restartsKey_, 0) + 1);
+  return rebuilt;
 }
 
 AppRuntime::~AppRuntime() {
@@ -809,7 +838,21 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
     scene_->clear();
   worldClock_.reset();
   world_.reset();
+  stepKey_.clear();
+  restartsKey_.clear();
   if (lr.scene.any()) {
+    // The scene clock's keys, resolved as its driver resolves them (here or in the adapter).
+    SceneClock c = lr.scene.clock;
+    c.speed_key = resolve_bind(prefix_, c.speed_key);
+    c.paused_key = resolve_bind(prefix_, c.paused_key);
+    c.time_key = resolve_bind(prefix_, c.time_key);
+    c.tick_key = resolve_bind(prefix_, c.tick_key);
+    stepKey_ = scene_clock_keys(c).step;
+    const std::string leaf = std::string(cvc::state::SEPARATOR) + "step";
+    if (stepKey_.size() > leaf.size() &&
+        stepKey_.compare(stepKey_.size() - leaf.size(), leaf.size(), leaf) == 0)
+      restartsKey_ =
+          stepKey_.substr(0, stepKey_.size() - leaf.size()) + cvc::state::SEPARATOR + "restarts";
     if (scene_) {
       std::vector<std::string> warns;
       if (scene_->verify(lr, &warns)) { // a missing required node custom: no half-built scene

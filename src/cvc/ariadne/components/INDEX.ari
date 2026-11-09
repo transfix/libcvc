@@ -60,10 +60,10 @@ catalog:
   - component: sim_transport
     file: sim_transport.ari
     unit: sim_transport
-    binds: "<prefix>.sim.{paused,speed}"         # host reads these; sim.step/sim.restart are host verbs
+    binds: "<prefix>.sim.{paused,speed}"         # the clock reads these; sim.step/sim.restart are built in
     for: "pause/speed/step/restart of a host sim loop"
     args: []
-    verbs: [sim.step, sim.restart]         # bare-name on: -> Runtime::on host handlers
+    verbs: [sim.step, sim.restart]         # bare-name on: AppRuntime's own, or a host's Runtime::on
   - component: raster_view
     file: raster_view.ari
     unit: raster_view

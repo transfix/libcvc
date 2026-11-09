@@ -242,6 +242,10 @@ public:
       ari::sync_scene_visibility(app, s->realized.visibility);
   }
 
+  bool restart(std::vector<std::string> *warns) override {
+    return haveScene_ && restart_scene_world(realized_, warns);
+  }
+
   void tick() override {
     if (haveScene_) // declarative stream / volren / volslice service, and the scene clock
       tick_scene(realized_, view_->renderer(), tick_dt_);
