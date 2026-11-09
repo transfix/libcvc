@@ -227,14 +227,23 @@ public:
   // while the activation `make` returns runs on the scheduler, as an action of the document, and
   // returns what it finished with, or raises what it failed with (a step's exception with its own
   // class; a cap or a kill as a RuntimeError). The parked time counts against the caller's caps,
-  // as any async call's does. (name-async ...) returns a future. A call from where the program
-  // can't park (a reactive slot) raises RuntimeError. When the calling process goes first, the
-  // activation stops at its next slice.
+  // as any async call's does. (name-async ...) returns a future. Where the caller can't park
+  // (init:, which runs on a scheduler of its own), the call runs the activation to its end there
+  // (run), and raises RuntimeError where that would re-enter the app's scheduler. When the
+  // calling process goes first, the activation stops at its next slice.
   void export_activation(const std::string &name, ScriptCall make, ActivationOptions options = {});
 
   // Start an activation now: the next pump runs its first slice (the drain's, when called before
   // the drain pumps: from an on: handler, or a hook). Returns its pid; throws when it can't start.
   int start(std::shared_ptr<ScriptActivation> activation, ActivationOptions options);
+  // Run an activation to its end now: start it, then pump the app's scheduler (Runtime::pump)
+  // until it ends, a frame per pump. For work that can't wait for the frame loop: a guest's
+  // ari_init at load, a call from init:. Under options.lane's caps (ProgramLane::init's for a
+  // load's work), and at most `max_seconds` of wall time, past which it is stopped. Returns how it
+  // ended (options.on_done hears it too). Throws RuntimeError from inside a step of the app's
+  // scheduler, which it would have to re-enter.
+  ActivationOutcome run(std::shared_ptr<ScriptActivation> activation, ActivationOptions options,
+                        double max_seconds = 30.0);
   // Stop one: its process is killed, and its on_done hears "did not complete: killed".
   void stop(int pid);
   // Whether its process is still running.

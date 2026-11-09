@@ -28,7 +28,12 @@
 //       reply(dst: i32): copy the last call's result, or its error's text, to dst.
 //       yield(): give the frame back; the call goes on in the next one.
 //       fail(ptr, len: i32): end the activation with a WasmError, the text its message.
-//   - `_initialize`, when exported, runs once after instantiation (a WASI reactor's setup).
+//   - `_initialize`, when exported, runs once after instantiation (a WASI reactor's setup), with
+//     no host to call.
+//   - `ari_init`, when exported, runs at every load as an activation (it may call the host), to
+//     its end, under the init: lane's caps, before the document's init:. A failure fails the load.
+//
+// An export called from init: (which can't wait) runs to its end there.
 //
 // Limits: a slice is ariadne.limits.wasm_slice_steps (64) DSL steps at
 // ariadne.limits.wasm_gas_per_step (1000) units of wasmtime fuel each, and what a slice uses is

@@ -1254,9 +1254,15 @@ init: (state-set "score" (score_route (state-get "route")))
   - in `arix` and `ariglx` where wasmtime is found (`-DARI_WITH_WASM` / `-DARIGL_WITH_WASM` make
     it required), and CI's `package-linux` installs it. Tests: `ariadne_wasm_test`, the
     `arix_wasm_block` and `ari_wasm_needs_arix` ctests.
+- **G1's second part, built:** `ScriptLane::run` runs an activation to its end now, pumping
+  the app's scheduler a frame at a time (`Runtime::pump`), under `ProgramLane::init`'s caps for
+  a load's work. A guest's `ari_init` runs that way at every load, before the document's `init:`.
+  An export called from `init:` (which runs on a scheduler of its own and can't park) runs that
+  way in the call: the provider binds the export's blocking form where the lane's scheduler isn't
+  the app's.
 - **Left for G1:**
   - a guest export called from inside a program as that program's own sliced native call, charged
-    to it, and calls from `init:`, which can't park today;
+    to it (a call parks the program on an activation of its own);
   - a pump budget that counts the slices' steps, not the picks;
   - waiting for the instance through the lock manager (its timeouts and priority inheritance) in
     place of a frame at a time, and the `RecursionError` for indirect re-entry, which today only
@@ -1264,8 +1270,7 @@ init: (state-set "score" (score_route (state-get "route")))
   - the key, pointer, signal and message hooks, which need the residents' channels to fan out;
   - `MemoryError` at a refused `memory.grow` (the limiter refuses it, and the guest sees -1);
   - the dedicated state imports as fast paths beside `call`, and §8.4.1's handles;
-  - `ari_init` on the `init:` lane's caps, a host option for `state_exec.policy`, and `pure`
-    exports on the read lane;
+  - a host option for `state_exec.policy`, and `pure` exports on the read lane;
   - wasmtime in the `arix` / `ariglx` cvcpkg recipes.
 
 **The wasm runtimes.** A `cvc::ariadne::wasm_runtime` interface, behind G1's engine, covers:
@@ -1642,7 +1647,7 @@ for it.
 | S6 | Bound reads: `read_scope`, the per-connection prefix filter, `refresh_scope` (§6.5.6) | S5 | M |
 | S7 | `ServerHarness` for plain `python`, and the end-to-end CI test (§6.5.8) | S2, S5 | S |
 | L1 | Lua bindings (SWIG), the Lua engine in the `x` hosts, Lua for client code on `arisrvx` | the engine interface (P1b, done) | L |
-| G1 | WebAssembly guests natively on wasmtime (§8.2–8.7), as a `ScriptEngine` on P1b's interface. **First part done** (§8.3): the runtime interface and its wasmtime backend, the `wasm:` block, the ABI with `call`/`reply`/`yield`/`fail`, exports as parked calls (`ScriptLane::export_activation`), fuel as steps under the lane's caps, the frame budget, one activation per instance, `imports:` narrowing, the `on_tick`/`on:`/`watch` hooks, `WasmError`, in `arix` and `ariglx`. **Left:** in-program sliced calls and calls from `init:`; the pump budget counting slice steps; the lock manager for the instance; the key, pointer, signal and message hooks; `MemoryError`; the state imports and handles (§8.4.1); `ari_init`; a host option for `state_exec.policy`; wasmtime in the recipes | the engine interface (P1b, done) | L |
+| G1 | WebAssembly guests natively on wasmtime (§8.2–8.7), as a `ScriptEngine` on P1b's interface. **First part done** (§8.3): the runtime interface and its wasmtime backend, the `wasm:` block, the ABI with `call`/`reply`/`yield`/`fail`, exports as parked calls (`ScriptLane::export_activation`), fuel as steps under the lane's caps, the frame budget, one activation per instance, `imports:` narrowing, the `on_tick`/`on:`/`watch` hooks, `WasmError`, in `arix` and `ariglx`. **Second part done:** `ari_init` at load and calls from `init:` (`ScriptLane::run`). **Left:** in-program sliced calls; the pump budget counting slice steps; the lock manager for the instance; the key, pointer, signal and message hooks; `MemoryError`; the state imports and handles (§8.4.1); a host option for `state_exec.policy`; wasmtime in the recipes | the engine interface (P1b, done) | L |
 | G2 | The install-time transform (§8.5: gas injection, built through cvcpkg's Rust crates; Asyncify) and the browser backend: the same slices, limits, access and hooks in a single-threaded page | G1 | L |
 | G3 | The WAMR backend, on G2's transform: guests on the BSDs | G2 | S |
 | G4 | Client guests on `arisrvx` (§6.3, §8.6), with the optional Worker backstop in the browser | G1, S2 | M |
