@@ -440,11 +440,22 @@ async_host::~async_host() { shutdown(); }
 void async_host::add_lane(const std::string &name, cvc::async_lane &lane) { lanes_[name] = &lane; }
 
 void async_host::shutdown() {
+  // Stopped, and the live calls taken, under the lock; cancelled outside it. A call's on_cancel
+  // hook may wait for its work's own thread, which may be in a finisher waiting for this lock: it
+  // gets it, sees `stopped`, and posts nothing.
+  std::vector<std::shared_ptr<async_call>> live;
+  {
+    std::lock_guard<std::mutex> lk(state_->m);
+    state_->stopped.store(true, std::memory_order_release);
+    live.reserve(state_->calls.size());
+    for (const std::weak_ptr<async_call> &w : state_->calls)
+      if (std::shared_ptr<async_call> call = w.lock())
+        live.push_back(std::move(call));
+  }
+  for (const std::shared_ptr<async_call> &call : live)
+    call->cancel();
+  live.clear();
   std::unique_lock<std::mutex> lk(state_->m);
-  state_->stopped.store(true, std::memory_order_release);
-  for (const std::weak_ptr<async_call> &w : state_->calls)
-    if (std::shared_ptr<async_call> call = w.lock())
-      call->cancel();
   state_->idle.wait(lk, [this] { return state_->running == 0; });
   state_->calls.clear();
 }
