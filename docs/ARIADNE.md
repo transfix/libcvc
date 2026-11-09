@@ -806,8 +806,9 @@ but its colours do not.
 
 **Clouds.** `cloud_sky` draws a deck of drifting, slowly changing L-system cumulus over its
 `ground:` node's extent (followed live): the clouds nearest the camera as volumes (`near:`), the
-rest as one coarse volume drawn by view-aligned slices, as `VolSlice` draws a volume: planes facing
-the camera, cut to the deck and blended back to front, spaced wider with distance (at most 64).
+rest as one coarse volume drawn by a `VolSliceNode` (the `volslice` renderer): planes facing the
+camera, cut to the deck and blended back to front, spaced wider with distance (at most 64), with the
+clouds' own lighting as its sample shader (docs/VOLSLICE_API.md, "Distance slicing").
 The near volumes go to the clouds nearest the camera that it can see (the deck's pattern repeats
 out to `far_reach`, so past the ground's edge they are the copies beside the camera), and they draw
 after the far ones, farthest first, so a nearer cloud always covers a farther one. The weather

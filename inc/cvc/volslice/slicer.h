@@ -82,7 +82,7 @@ slice_geometry compute_slices(const mat4 &local_to_clip, const box3d &box,
 // Throws cvc::volslice_error if `forward` is zero.
 slice_geometry compute_slices_at(const vec3d &eye, const vec3d &forward, const box3d &box,
                                  const std::vector<double> &distances,
-                                 const slice_params &params = {});
+                                 const slice_params &params = slice_params());
 
 } // namespace volslice
 } // namespace cvc
