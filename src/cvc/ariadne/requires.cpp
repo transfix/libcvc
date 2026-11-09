@@ -90,6 +90,10 @@ const std::vector<TokenRule> &rules() {
                             "video's Full screen button) shows it alone, filling the window or the "
                             "terminal, until Esc (not on the tvision desktop)"},
        [](const HostFacts &f) { return f.caps.fullscreen_view; }},
+      {{"image.badge", "image: and video: take badge: (a text, or an expression giving one), "
+                       "drawn over the picture with it dimmed, a media grid's \"+3\" (a terminal "
+                       "puts it on the line under the picture)"},
+       [](const HostFacts &f) { return f.caps.badge; }},
       {{"text.emoji", "text: takes emoji: (a map of :shortcode: names to picture URIs), drawn "
                       "in the line where the backend can put a picture there"},
        [](const HostFacts &) { return true; }},

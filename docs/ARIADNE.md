@@ -1262,6 +1262,7 @@ entry warns. An entry is one of:
   | `term`, `term.kitty`, `term.sixel` | a text terminal; one that speaks kitty graphics; one that draws Sixel |
   | `relay` | the document is a relay's server document, run by `arisrv --doc` (§9.7) |
   | `image.fullscreen` | `fullscreen: true` on `image:` and `video:` shows the picture alone, filling the window or the terminal (§5.13) |
+  | `image.badge` | `badge:` on `image:` and `video:` shows a label over the picture, dimmed under it, or on the line under it in a terminal (§5.11) |
 
   GLSL runs in two places, and they are separate facts. The scene's shaders run in the
   scene adapter's renderer (`SceneAdapter::runs_shaders`), the UI's in the backend
@@ -1555,6 +1556,32 @@ windows:
   and `status:` says `unsupported` (or `remote`, `failed`) where a picture would say `ready`.
 - **`fullscreen: true`**: a click on the picture shows it alone, filling the window (or the
   terminal), until Esc (§5.13).
+- **`badge:`** is a label shown over the picture, with the picture dimmed under it. A media
+  grid shows "+3" this way on its last tile, for the pictures it leaves out:
+
+  ```yaml
+  - image: ""
+    repeat: (state-get "post.tiles")   # the tiles shown, 4 at most
+    bind: post.media.{i}.url
+    size: [120, 120]
+    fit: cover
+    badge: (if (= "{i}" "3") (state-get "post.more") "")   # "+3" on the last, or ""
+  ```
+
+  - It is literal text, or an expression (`(...)`) giving it, which can use `{i}` in a
+    `repeat:`. An empty text shows nothing, and the picture isn't dimmed.
+  - It isn't `overlay:`, which is a widget type: on a host before this one, an `image:` with an
+    `overlay:` key is read as an overlay window.
+  - The picture stays the item, so its `on_click:`, hover and tooltip are its own.
+  - ImGui draws the text centred on the picture, a third of its height (within one and four
+    lines of text, and narrower than the picture). A click on the label is a click on the
+    picture.
+  - A terminal (FTXUI, tvision) can't draw over a picture's cells, so it puts the text in bold on
+    the line under the picture, centred to its width. That line isn't part of the picture's
+    click, but a clickable group around the picture (§5.19) takes a click on it.
+  - It isn't drawn in the fullscreen view (§5.13), where the picture is shown alone.
+  - `(has? "image.badge")` (§5.7) says the backend shows it. Where it doesn't (an older host),
+    a document can put a "+3 more" caption under the grid instead.
 - **The capability token `image.url`** (§5.7) holds in every host that does this, so a document
   for older hosts too gates its pictures with `(has? "image.url")` or
   `requires: [{name: image.url, optional: true}]` and draws its own placeholder elsewhere (an
@@ -1728,8 +1755,9 @@ has loaded, or when it failed, nothing is drawn behind the content.
 - **Capability tokens** (§5.7): `media` means the media plays here, and `media.player` means
   the host has a player at all. `video.decorative` means `controls: false` and video URLs in
   `image:` and `background:` are understood, `image.animated` means GIF and WebP animate,
-  `image.fill` means `size: "N%"` and `max_height:` are understood, and `image.fullscreen` means
-  `fullscreen: true` is (below).
+  `image.fill` means `size: "N%"` and `max_height:` are understood, `image.fullscreen` means
+  `fullscreen: true` is (below), and `image.badge` means `badge:` is (§5.11). A video's
+  `badge:` is drawn over its frames, above the controls.
 - A player whose widget a frame did not draw (its window closed, its item scrolled out of a
   `repeat:`) is paused at once and closed 5 s later. `ari snapshot` waits while a player is
   still loading, as it waits for pictures.
@@ -2565,9 +2593,10 @@ windows:
 Inside a `repeat:`, `{i}` is the instance's 0-based index. It is filled in wherever an instance
 names state or shows text: `id`, `label`, `bind`, `on`, the pointer handlers (`on_click`,
 `on_hover`, `on_drag`, `on_drag_start`, `on_drag_end`), a `text_view`'s `on_top`, a
-`message_input`'s `hint` and `send`, the `*_when` predicates, `tooltip`, `options`, `src`,
-`status`, `poster`, `emoji`, a `background:`'s `src`, `bind` and `status`, and a `load:` mount's
-`link:` holes. A nested `repeat:` keeps its own `{i}`: the outer index does not reach into it.
+`message_input`'s `hint` and `send`, the `*_when` predicates, `tooltip`, `badge`, `options`,
+`src`, `status`, `poster`, `emoji`, a `background:`'s `src`, `bind` and `status`, and a `load:`
+mount's `link:` holes. A nested `repeat:` keeps its own `{i}`: the outer index does not reach
+into it.
 
 Slots `note` (a row above the header), `extra` (lines under the byline, in the header's text
 column) and `body` (widgets after the body text) take more of a post's parts. A part whose key

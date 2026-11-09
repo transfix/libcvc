@@ -406,6 +406,7 @@ struct ImageBackend : Backend {
     backdrops.clear();
     buttons.clear();
     slider_formats.clear();
+    badges.clear();
   }
   bool begin_main_menu_bar() override { return false; }
   void end_main_menu_bar() override {}
@@ -421,6 +422,10 @@ struct ImageBackend : Backend {
   void grid_next_cell() override {}
   void end_grid() override {}
   void set_tooltip(const char *t) override { tooltips.push_back(t ? t : ""); }
+  std::vector<std::string> badges; // "<the picture drawn last>=<its badge>", this frame
+  void item_badge(const char *t) override {
+    badges.push_back((drawn.empty() ? std::string() : drawn.back()) + "=" + t);
+  }
   void text_line(const char *t) override { texts.push_back(t); }
   void text_value(const char *l, const std::string &v) override {
     texts.push_back(std::string(l) + "=" + v);
@@ -1337,6 +1342,112 @@ TEST(MediaPlayer, AFullscreenVideoIsShownAloneAndComesBack) {
   rt.render();
   rt.render();
   EXPECT_NE(std::find(b.texts.begin(), b.texts.end(), "the rest of the window"), b.texts.end());
+}
+
+// §5.11 badge: on image: and video: is their label; on audio: (no picture) it is warned about,
+// and a progress bar's overlay: stays its caption path.
+TEST(MediaBadge, TheLoaderReadsItOnPictures) {
+  LoadResult lr = load_string("windows:\n"
+                              "  - window: W\n"
+                              "    children:\n"
+                              "      - image: tile\n"
+                              "        src: photo\n"
+                              "        badge: \"+3\"\n"
+                              "      - video: clip\n"
+                              "        src: https://x.test/a.mp4\n"
+                              "        badge: (state-get \"more\")\n"
+                              "      - audio: voice\n"
+                              "        src: https://x.test/a.opus\n"
+                              "        badge: x\n"
+                              "      - progress: done\n"
+                              "        bind: job.done\n"
+                              "        overlay: job.label\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  const Widget &win = lr.root.children.at(0);
+  ASSERT_EQ(win.children.size(), 4u);
+  EXPECT_EQ(win.children[0].kind, Kind::Image);
+  EXPECT_EQ(win.children[0].badge, "+3");
+  EXPECT_EQ(win.children[1].kind, Kind::Video);
+  EXPECT_EQ(win.children[1].badge, "(state-get \"more\")");
+  EXPECT_EQ(win.children[2].kind, Kind::Audio);
+  EXPECT_EQ(win.children[3].kind, Kind::Progress);
+  EXPECT_EQ(win.children[3].overlay, "job.label");
+  int warned = 0;
+  for (const std::string &w : lr.warnings) {
+    EXPECT_EQ(w.find("unknown"), std::string::npos) << w;
+    if (w.find("badge") != std::string::npos) {
+      ++warned;
+      EXPECT_NE(w.find("audio 'voice': badge: is for a picture"), std::string::npos) << w;
+    }
+  }
+  EXPECT_EQ(warned, 1);
+}
+
+// A media grid's tiles: each row's badge is its own ({i}), an empty one draws nothing, and a
+// literal is shown as it is.
+TEST(MediaBadge, EachTileOfAGridHasItsOwn) {
+  cvc::app app;
+  LoadResult lr =
+      load_string("windows:\n"
+                  "  - window: W\n"
+                  "    children:\n"
+                  "      - image: \"\"\n"
+                  "        repeat: (state-get \"post.tiles\")\n"
+                  "        bind: post.media.{i}.url\n"
+                  "        size: [120, 120]\n"
+                  "        badge: (if (= \"{i}\" \"3\") (state-get \"post.more\") \"\")\n"
+                  "      - image: album\n"
+                  "        src: cover\n"
+                  "        badge: Album\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  cvc::state &root = cvc::state::instance(app);
+  root("post.tiles").value(std::string("4"));
+  root("post.more").value(std::string("+3"));
+  for (int i = 0; i < 4; ++i)
+    root("post.media." + std::to_string(i) + ".url").value("t" + std::to_string(i));
+  Runtime rt(app);
+  ImageBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  EXPECT_EQ(b.badges, (std::vector<std::string>{"t3=+3", "cover=Album"}));
+  EXPECT_FALSE(rt.has("image.badge")) << "a backend that doesn't show it says so";
+
+  root("post.more").value(std::string());
+  rt.render();
+  EXPECT_EQ(b.badges, (std::vector<std::string>{"cover=Album"}));
+}
+
+// A video's badge is drawn over its frames (before the controls), and not in the fullscreen
+// view, where the picture is shown alone.
+TEST(MediaBadge, AVideoHasItOverItsFramesButNotInTheView) {
+  FakeFactory ff;
+  media::set_play_policy(media::PlayPolicy::Always);
+  cvc::app app;
+  LoadResult lr = load_string(std::string(kPlayerDoc) + "        fullscreen: true\n" +
+                              "        badge: \"+2\"\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  FullscreenBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  ASSERT_EQ(b.badges.size(), 1u);
+  EXPECT_EQ(b.badges[0], "media:placeholder:loading:160x90=+2");
+  ASSERT_EQ(ff.made.size(), 1u);
+  {
+    std::lock_guard<std::mutex> l(ff.made[0]->mu);
+    ff.made[0]->state = media::PlayerState::Ready;
+  }
+  b.click = "Full screen";
+  rt.render();
+  rt.render();
+  ASSERT_GE(b.views, 1);
+  EXPECT_TRUE(b.badges.empty()) << "alone in the view";
+  b.click = "Exit full screen";
+  rt.render();
+  rt.render();
+  EXPECT_EQ(b.badges.size(), 1u);
 }
 
 TEST(MediaPlayer, AutoplayAndAFailure) {
