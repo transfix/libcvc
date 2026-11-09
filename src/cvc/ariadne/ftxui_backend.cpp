@@ -608,6 +608,10 @@ struct FtxuiBackend::Impl {
         items.push_back(std::move(e));
       }
     }
+    fx::Element *last() { // the element added last, or null
+      fx::Elements *v = type == Type::Grid ? (cells.empty() ? nullptr : &cells.back()) : &items;
+      return v && !v->empty() ? &v->back() : nullptr;
+    }
   };
 
   // A draggable boundary between two grid tracks: `index` is the track after it (rows of a row
@@ -676,6 +680,7 @@ struct FtxuiBackend::Impl {
   std::string tooltip;
   std::string clipboard_out;            // OSC 52 escapes clipboard-set queued, for run() to write
   std::string last_item;                // the leaf emitted last (item_* queries, set_tooltip)
+  int last_picture_cols = 0;            // that leaf's width in columns, when it is a picture
   std::vector<std::string> item_groups; // the item groups open in the walk, innermost last
   // The last item group closed, and whether this walk's press or key fired it (item_clicked).
   std::string group_hit_id;
@@ -946,6 +951,7 @@ struct FtxuiBackend::Impl {
     add(el | fx::reflect(boxes[id]));
     walk.items.push_back(std::move(it));
     last_item = id;
+    last_picture_cols = 0;
   }
 
   // The focused widget takes the pending key event `name` (consuming it).
@@ -1707,6 +1713,7 @@ Capabilities FtxuiBackend::capabilities() const {
   c.clipboard = !m_->opt.hosted;       // OSC 52 (a hosted backend's host has its own)
   c.fullscreen_view = !m_->opt.hosted; // a layer over the screen (tvision's desktop owns it)
   c.maximize = !m_->opt.hosted;        // a window's [^] (tvision's zoom box is its own)
+  c.badge = true;                      // on the line under the picture
   return c;
 }
 
@@ -2374,6 +2381,19 @@ bool FtxuiBackend::next_window_maximize(bool *maximized) {
     return false; // the host's window chrome: tvision's zoom box
   m_->pending_max = maximized;
   return true;
+}
+
+void FtxuiBackend::item_badge(const char *text) {
+  Impl &m = *m_;
+  if (!text || !*text || m.stack.empty())
+    return;
+  fx::Element *last = m.top().last();
+  if (!last)
+    return;
+  // Centred to the picture's columns, by hand: a size(WIDTH, EQUAL) box is two columns wider.
+  const int pad = std::max(0, (m.last_picture_cols - fx::string_width(text)) / 2);
+  fx::Element label = fx::hbox({fx::text(std::string(pad, ' ')), fx::text(text) | fx::bold});
+  *last = fx::vbox({*last, label}); // the picture keeps its reflected box: still the item
 }
 
 void FtxuiBackend::set_tooltip(const char *text) {
@@ -3336,6 +3356,7 @@ bool FtxuiBackend::draw_image(const char *name, float width) {
     const std::string id = m.uid("img|");
     m.leaf(id, false,
            std::make_shared<PixelImage>(m.pixel_image(id, p, p.px, cols, rows, m.mode())));
+    m.last_picture_cols = cols;
     return true;
   }
   const int rows =
@@ -3348,6 +3369,7 @@ bool FtxuiBackend::draw_image(const char *name, float width) {
   }
   m.leaf(m.uid("img|"), false,
          std::make_shared<HalfBlockImage>(p.scaled, cols, rows, m.opt.image_color, p.scaled_alpha));
+  m.last_picture_cols = cols;
   return true;
 }
 
@@ -3932,6 +3954,7 @@ void FtxuiBackend::begin_disabled() {}
 void FtxuiBackend::end_disabled() {}
 void FtxuiBackend::set_tooltip(const char *) {}
 bool FtxuiBackend::next_window_maximize(bool *) { return false; }
+void FtxuiBackend::item_badge(const char *) {}
 void FtxuiBackend::text_line(const char *) {}
 void FtxuiBackend::text_value(const char *, const std::string &) {}
 void FtxuiBackend::text_line_colored(const char *, const float[3]) {}

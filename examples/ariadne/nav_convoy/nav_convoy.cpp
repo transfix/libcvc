@@ -158,8 +158,12 @@ int main(int argc, char **argv) {
     redraw = true;
   });
   rt.on("sim.step", [&] {
-    if (realized.clock_binding)
-      realized.clock_binding->request_steps(1);
+    // The scene's clock driver reads <prefix>.sim.step as a request counter: each increment runs
+    // one quantum on the next tick_scene (before the first tick there is nothing to step yet).
+    if (!realized.clock_driver)
+      return;
+    const std::string stepKey = cvc::gl::ariadne::scene_clock_keys(realized.clock).step;
+    ari::write<long long>(app, stepKey, ari::read_or<long long>(app, stepKey, 0) + 1);
   });
   rt.on("camera.recenter", [&] {
     if (!sceneBounds.isNull())

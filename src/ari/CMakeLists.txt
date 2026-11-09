@@ -33,6 +33,9 @@ endif()
 # Installed bin/ari finds libcvc and its dependencies in ../lib (CMake/CvcInstallRpath.cmake).
 include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcInstallRpath.cmake")
 cvc_set_install_rpath(ari bin)
+# A deep document's load and draw: an 8 MB stack on Windows, as on Linux (CMake/CvcHostStack.cmake).
+include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcHostStack.cmake")
+cvc_document_host_stack(ari)
 install(TARGETS ari RUNTIME DESTINATION bin COMPONENT ari)
 
 # ari-media: the same ari with cvcMedia linked, so it plays sound through SDL3's audio subsystem
@@ -52,6 +55,7 @@ if(NOT EMSCRIPTEN AND (TARGET cvcMedia OR ARI_WITH_MEDIA))
   target_link_libraries(ari-media PRIVATE cvcMedia)
   target_compile_definitions(ari-media PRIVATE ARI_MEDIA=1)
   cvc_set_install_rpath(ari-media bin)
+  cvc_document_host_stack(ari-media)
   install(TARGETS ari-media RUNTIME DESTINATION bin COMPONENT ari)
 endif()
 
@@ -72,7 +76,16 @@ if(NOT EMSCRIPTEN AND (CVC_BUILD_PYCVC OR ARI_WITH_PYTHON))
       target_link_libraries(arix PRIVATE cvc)
     endif()
     cvc_ariadne_python_host(arix)
+    # ... with WebAssembly guests where wasmtime's C API is found (src/ariadne_wasm); with
+    # -DARI_WITH_WASM=ON a missing one is a configure error.
+    option(ARI_WITH_WASM "arix requires WebAssembly guests (wasmtime's C API)" OFF)
+    include("${CMAKE_CURRENT_LIST_DIR}/../ariadne_wasm/ariadne_wasm.cmake")
+    cvc_find_ariadne_wasm(ARI_WITH_WASM)
+    if(CVC_ARIADNE_WASM_FOUND)
+      cvc_ariadne_wasm_host(arix INSTALL)
+    endif()
     cvc_set_install_rpath(arix bin)
+    cvc_document_host_stack(arix)
     install(TARGETS arix RUNTIME DESTINATION bin COMPONENT arix)
 
     # ctest, in-tree: a document's python: block (arix test), a Python program in place of the
@@ -99,6 +112,16 @@ if(NOT EMSCRIPTEN AND (CVC_BUILD_PYCVC OR ARI_WITH_PYTHON))
                            PASS_REGULAR_EXPRESSION "scripting hosts, arix or ariglx")
       cvc_ariadne_python_test_properties(arix_python_block arix_python_program arix_python_error
                                          arix_python_interpreter)
+      # A document with a WebAssembly guest (arix test), and stock ari's answer to one.
+      if(CVC_ARIADNE_WASM_FOUND)
+        add_test(NAME arix_wasm_block COMMAND arix test "${CVC_ARIADNE_WASM_TESTS}/wasm_block.ari")
+        add_test(NAME ari_wasm_needs_arix COMMAND ari check "${CVC_ARIADNE_WASM_TESTS}/wasm_block.ari")
+        set_tests_properties(ari_wasm_needs_arix PROPERTIES
+                             PASS_REGULAR_EXPRESSION "scripting hosts, arix or ariglx")
+        cvc_ariadne_python_test_properties(arix_wasm_block)
+        set_tests_properties(arix_wasm_block ari_wasm_needs_arix PROPERTIES
+                             SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
+      endif()
       set_tests_properties(arix_python_block arix_python_program arix_python_error
                            ari_python_needs_arix PROPERTIES
                            SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
@@ -433,6 +456,7 @@ if(EMSCRIPTEN)
       target_link_libraries(ari_tvision PRIVATE cvc)
     endif()
     target_compile_definitions(ari_tvision PRIVATE CVC_ARI_WASM_BACKEND="tvision")
+    cvc_document_host_stack(ari_tvision)
     ari_wasm_page(ari_tvision "ari · tvision"
       "drag a window by its title · F10 menu · F6 next window · Alt-X quits"
       -sEXPORTED_FUNCTIONS=_main,_ftxui_on_resize,_tvision_set_screen_size)

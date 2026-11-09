@@ -2,6 +2,7 @@
 // program calls; AppRuntime::load applies both.
 
 #include <cvc/ariadne/requires.h>
+#include <cvc/ariadne/script_engine.h> // the engines a scripting host registered
 #include <cvc/physics/backend.h> // scene.physics: is there an engine
 #include <cvc/state/state_exec/parser.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
@@ -93,6 +94,10 @@ const std::vector<TokenRule> &rules() {
                             "video's Full screen button) shows it alone, filling the window or the "
                             "terminal, until Esc (not on the tvision desktop)"},
        [](const HostFacts &f) { return f.caps.fullscreen_view; }},
+      {{"image.badge", "image: and video: take badge: (a text, or an expression giving one), "
+                       "drawn over the picture with it dimmed, a media grid's \"+3\" (a terminal "
+                       "puts it on the line under the picture)"},
+       [](const HostFacts &f) { return f.caps.badge; }},
       {{"text.emoji", "text: takes emoji: (a map of :shortcode: names to picture URIs), drawn "
                       "in the line where the backend can put a picture there"},
        [](const HostFacts &) { return true; }},
@@ -120,23 +125,15 @@ const std::vector<TokenRule> &rules() {
                  "the room at `room`, the world clock at sim.tick"},
        [](const HostFacts &f) { return f.relay; }},
       // A script language's tokens answer from the engine a scripting host registered
-      // (set_script_engine), not from HostFacts; the language name stands for itself here.
+      // (register_script_engine), not from HostFacts; the language name stands for itself here.
       {{"python", "an embedded Python runs the document's python: block"},
        [](const HostFacts &) { return has_script_engine("python"); }},
       {{"python.<module>", "<module> is importable in the embedded Python (python.numpy, ...)"},
        [](const HostFacts &) { return false; }},
+      {{"wasm", "an embedded WebAssembly runtime runs the document's wasm: block (guests)"},
+       [](const HostFacts &) { return has_script_engine("wasm"); }},
   };
   return kRules;
-}
-
-// The script engines the host embeds, by language (set_script_engine).
-std::mutex &engines_mutex() {
-  static std::mutex m;
-  return m;
-}
-std::map<std::string, std::function<bool(const std::string &)>> &engines() {
-  static std::map<std::string, std::function<bool(const std::string &)>> e;
-  return e;
 }
 
 // The script languages a document can ask for, and the hosts that run each.
@@ -144,7 +141,8 @@ struct ScriptLanguage {
   const char *name;
   const char *hosts;
 };
-constexpr ScriptLanguage kScriptLanguages[] = {{"python", "arix or ariglx"}};
+constexpr ScriptLanguage kScriptLanguages[] = {{"python", "arix or ariglx"},
+                                               {"wasm", "arix or ariglx"}};
 
 // `name`'s language when it is "<language>.<module>" with a module, else nullptr.
 const ScriptLanguage *module_token_language(const std::string &name, std::string *module) {
@@ -334,31 +332,15 @@ bool is_capability_token(const std::string &name) {
 bool capability_holds(const std::string &name, const HostFacts &facts) {
   std::string module;
   if (const ScriptLanguage *l = module_token_language(name, &module)) {
-    std::function<bool(const std::string &)> has_module;
-    {
-      std::lock_guard<std::mutex> lock(engines_mutex());
-      auto it = engines().find(l->name);
-      if (it != engines().end())
-        has_module = it->second;
-    }
-    return has_module && has_module(module); // outside the lock: it may take the engine's own
+    const std::shared_ptr<ScriptEngine> engine = find_script_engine(l->name);
+    return engine && engine->has_module(module); // outside the registry's lock: it may take its own
   }
   const TokenRule *r = find_rule(name);
   return r && r->holds(facts);
 }
 
-void set_script_engine(const std::string &language,
-                       std::function<bool(const std::string &module)> has_module) {
-  std::lock_guard<std::mutex> lock(engines_mutex());
-  if (has_module)
-    engines()[language] = std::move(has_module);
-  else
-    engines().erase(language);
-}
-
 bool has_script_engine(const std::string &language) {
-  std::lock_guard<std::mutex> lock(engines_mutex());
-  return engines().count(language) != 0;
+  return find_script_engine(language) != nullptr;
 }
 
 std::string capability_hint(const std::string &name) {

@@ -188,6 +188,7 @@ ariadne::Capabilities ImGuiBackend::capabilities() const {
   c.fullscreen = static_cast<bool>(m_setFullscreen);
   c.fullscreen_view = true;
   c.maximize = true;
+  c.badge = true;
   return c;
 }
 
@@ -908,6 +909,32 @@ void ImGuiBackend::set_tooltip(const char *text) {
   (void)text;
 #endif
 }
+void ImGuiBackend::item_badge(const char *text) {
+#ifdef CVC_ENABLE_IMGUI
+  // Over the item just drawn (a picture), on the window's draw list, so the picture stays the item:
+  // the picture dimmed, the text centred on it, a third of its height (within one and four lines
+  // of text, and narrower than the picture).
+  const ImVec2 a = ImGui::GetItemRectMin(), z = ImGui::GetItemRectMax();
+  const float w = z.x - a.x, h = z.y - a.y;
+  if (!text || !*text || !(w > 0.0f) || !(h > 0.0f))
+    return;
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+  dl->AddRectFilled(a, z, IM_COL32(0, 0, 0, 140));
+  ImFont *font = ImGui::GetFont();
+  const float line = ImGui::GetFontSize();
+  float size = std::clamp(h / 3.0f, line, 4.0f * line);
+  ImVec2 ts = font->CalcTextSizeA(size, FLT_MAX, 0.0f, text);
+  if (ts.x > 0.9f * w) {
+    size = std::max(0.5f * line, size * 0.9f * w / ts.x);
+    ts = font->CalcTextSizeA(size, FLT_MAX, 0.0f, text);
+  }
+  dl->AddText(font, size, ImVec2(a.x + (w - ts.x) * 0.5f, a.y + (h - ts.y) * 0.5f),
+              IM_COL32(255, 255, 255, 255), text);
+#else
+  (void)text;
+#endif
+}
+
 void ImGuiBackend::push_id(const char *id) { ui::PushId(id); }
 void ImGuiBackend::pop_id() { ui::PopId(); }
 

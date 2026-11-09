@@ -851,7 +851,7 @@ namespace {
 
 using class_entries = dict_ptr::element_type;
 
-// The 17 built-in class dicts are one per OS process (td 5 item 1), so a case that changed one
+// The 18 built-in class dicts are one per OS process (td 5 item 1), so a case that changed one
 // would change it for every later test in this binary. Each case runs under this guard, which puts
 // them back as they were: on a build where they are still writable, one failure doesn't spread.
 class builtin_classes_restored {
@@ -932,10 +932,10 @@ TEST(BuiltinClasses, HZ01_BuiltinClassDictsAreReadOnly) {
   for (const program_case &c : cases)
     expect_case_restoring(c);
 
-  // From C++: set_field on each of the 17 throws the same TypeError and leaves the dict as it was.
+  // From C++: set_field on each of the 18 throws the same TypeError and leaves the dict as it was.
   builtin_classes_restored guard;
   const std::vector<std::string> &names = exception_class_names();
-  EXPECT_EQ(names.size(), 17u);
+  EXPECT_EQ(names.size(), 18u);
   for (const std::string &name : names) {
     SCOPED_TRACE(name);
     const dict_ptr cls = exception_class(name);

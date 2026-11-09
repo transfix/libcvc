@@ -1727,6 +1727,77 @@ TEST(AriadneFtxui, AFullscreenPictureFillsTheTerminalUntilEsc) {
   EXPECT_TRUE(t.shows("elsewhere")) << "and a click on it comes back\n" << t.screen;
 }
 
+// §5.11 badge: on a picture, in a terminal: bold on the line under it, centred to the picture's
+// width, the picture still the item (its click); an empty one adds no line.
+TEST(AriadneFtxui, APicturesBadgeIsTheLineUnderIt) {
+  REQUIRE_FTXUI();
+  const std::vector<unsigned char> white(4 * 4 * 3, 255);
+  cvc::image img(4, 4, cvc::image::pixel_format::RGB, cvc::image::data_type::u8, white.data());
+  FtxuiBackend::Options o;
+  o.image_color = FtxuiBackend::Options::ImageColor::Mono;
+  Widget tile = image_widget("tile", "photo", 96.0);
+  tile.repeat = "(state-get \"n\")";
+  tile.badge = "(if (= \"{i}\" \"1\") (state-get \"more\") \"\")";
+  tile.on_click = "(state-set \"opened\" \"{i}\")";
+  Term t(group({tile, text("after")}), o);
+  cvc::state::instance(t.app)("n").value(std::string("2"));
+  cvc::state::instance(t.app)("more").value(std::string("+3"));
+  t.be.set_image("photo", img);
+  t.draw();
+  EXPECT_TRUE(t.be.capabilities().badge);
+  EXPECT_TRUE(t.rt.has("image.badge"));
+
+  std::vector<std::string> rows;
+  for (std::size_t at = 0; at < t.screen.size();) {
+    const std::size_t nl = std::min(t.screen.find('\n', at), t.screen.size());
+    rows.push_back(t.screen.substr(at, nl - at));
+    at = nl + 1;
+  }
+  int label = -1, after = -1, last_pic = -1;
+  for (int r = 0; r < static_cast<int>(rows.size()); ++r) {
+    if (rows[r].find("+3") != std::string::npos)
+      label = r;
+    if (rows[r].find("after") != std::string::npos && after < 0)
+      after = r;
+    if (rows[r].find("@@") != std::string::npos)
+      last_pic = r;
+  }
+  ASSERT_GE(label, 0) << t.screen;
+  ASSERT_GE(last_pic, 0) << t.screen;
+  EXPECT_EQ(label, last_pic + 1) << "the line under the second tile\n" << t.screen;
+  EXPECT_EQ(after, label + 1) << t.screen;
+  const std::size_t x0 = rows[last_pic].find('@');
+  const std::size_t cols = rows[last_pic].find_last_of('@') - x0 + 1;
+  const std::size_t lx = rows[label].find("+3");
+  EXPECT_LE(std::max(lx - x0, (x0 + cols) - (lx + 2)) - std::min(lx - x0, (x0 + cols) - (lx + 2)),
+            1u)
+      << "centred under the " << cols << " columns of the picture\n"
+      << t.screen;
+
+  t.mouse(TermEvent::Mouse::Press, static_cast<int>(x0), last_pic); // the second tile
+  t.mouse(TermEvent::Mouse::Release, static_cast<int>(x0), last_pic);
+  for (int i = 0; i < 50; ++i)
+    t.rt.drain();
+  EXPECT_EQ(val(t.app, "opened"), "1") << "the picture keeps its click";
+
+  cvc::state::instance(t.app)("more").value(std::string());
+  t.draw();
+  EXPECT_FALSE(t.shows("+3")) << t.screen;
+
+  // In a clickable card, a click on the label is the card's.
+  Widget pic = image_widget("tile", "photo", 96.0);
+  pic.badge = "+3";
+  Widget card = group({pic, text("the post")});
+  card.on_click = "(state-set \"card\" \"1\")";
+  Term c(group({card}), o);
+  c.be.set_image("photo", img);
+  c.draw();
+  ASSERT_TRUE(c.click("+3")) << c.screen;
+  for (int i = 0; i < 50; ++i)
+    c.rt.drain();
+  EXPECT_EQ(val(c.app, "card"), "1") << c.screen;
+}
+
 // (clipboard-set TEXT) in a terminal is an OSC 52 escape, written after the drain that ran it;
 // (fullscreen ON) answers #f, a terminal having no window to make cover the screen.
 TEST(AriadneFtxui, ClipboardSetIsAnOsc52Escape) {

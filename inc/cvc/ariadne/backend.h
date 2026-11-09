@@ -223,6 +223,7 @@ struct Capabilities {
   bool fullscreen = false;      // set_fullscreen makes the window cover the screen: ui.fullscreen
   bool fullscreen_view = false; // begin_fullscreen_view shows a picture alone: image.fullscreen
   bool maximize = false;        // next_window_maximize fills a window to the screen: ui.maximize
+  bool badge = false;           // item_badge shows a picture's label: image.badge
 };
 
 // The fullscreen view's area (Backend::begin_fullscreen_view): `shown` false where the backend has
@@ -357,6 +358,11 @@ public:
   // immediately after a widget's primitive. Non-pure NO-OP default so a backend with no
   // tooltip concept still compiles; ImGuiBackend maps it to a hover-gated ImGui::SetTooltip.
   virtual void set_tooltip(const char *text) {}
+  // §5.11 `badge:` on a picture: TEXT shown over the item just drawn (its picture dimmed under
+  // it), a media grid's "+3" on its last tile. The picture stays the last item, so its on_click,
+  // hover and tooltip are its own. Capabilities::badge says the backend shows it; the ImGui one
+  // draws over the picture, a terminal one on the line under it. Default: not shown.
+  virtual void item_badge(const char *text) { (void)text; }
   // `autofocus:`: the next widget drawn takes keyboard focus (if it cannot, the next one that can).
   // The core calls it once when such a widget appears. Default: no keyboard focus to move.
   virtual void focus_next_widget() {}

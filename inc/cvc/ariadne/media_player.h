@@ -74,6 +74,8 @@ public:
     (void)w;
     (void)h;
   }
+  // Start again at the end, or stop there (the Loop box, <bind>.loop). Default: as it was made.
+  virtual void set_loop(bool loop) { (void)loop; }
 };
 
 using PlayerFactory = std::function<std::unique_ptr<Player>(const PlayerSource &src)>;

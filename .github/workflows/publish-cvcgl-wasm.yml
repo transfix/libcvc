@@ -100,7 +100,7 @@ jobs:
           # yaml-cpp + ftxui: Ariadne's .ari loader and terminal backend. Both are optional at
           # configure time and compile to stubs without them, which is what every wasm-mt libcvc
           # before this shipped (no .ari loading at all).
-          for p in zlib bzip2 xz zstd libpng libjpeg-turbo tiff freetype libwebp libxml2 lerc assimp imagemagick boost imgui sdl3 vtk pegtl joltphysics yaml-cpp ftxui; do
+          for p in zlib bzip2 xz zstd libpng libjpeg-turbo tiff freetype libwebp libxml2 lerc assimp imagemagick boost imgui-w32 sdl3 vtk pegtl joltphysics yaml-cpp ftxui; do
             echo "=== $p ==="
             cvcpkg install "$p" --prefix "$WASM_DEPS" \
               --platform wasm-mt --arch wasm32 --config release --link static \

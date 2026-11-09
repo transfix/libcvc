@@ -1,0 +1,37 @@
+# ariglx-web's browser smoke (arigl_web_smoke.mjs --pydocs): the stdlib modules whose C code
+# cvcpkg's wasm python312 left out of libpython3.12.a before 3.12.10+cvc.23, while the link allowed
+# undefined symbols: pyexpat's expat, and _sha2's HACL SHA-2 behind hashlib.sha256 and random.seed
+# with a string. A call into either aborted the page.
+
+meta:
+  name: python stdlib in the page
+  min_libcvc: 3.7.11
+
+requires: [python]
+
+python:
+  source: |
+    import hashlib
+    import random
+    import sys
+    import xml.parsers.expat
+
+    @export
+    def stdlib_report():
+        names = []
+        p = xml.parsers.expat.ParserCreate()
+        p.StartElementHandler = lambda name, attrs: names.append(name)
+        p.Parse("<a><b/><c/></a>", True)
+        digest = hashlib.sha256(b"abc").hexdigest()[:16]
+        random.seed("ariglx-web")
+        draw = random.randint(0, 999)
+        print(f"ariglx-web: expat {','.join(names)}, sha256 {digest}, seeded draw {draw}",
+              file=sys.stderr)
+        return digest
+
+init: |
+  (state-set "digest" (str (stdlib_report)))
+
+root:
+  - text: digest
+    bind: digest

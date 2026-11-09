@@ -363,6 +363,9 @@ struct Widget {
   // `fullscreen: true` on an image: or a video:: a click on the picture (a video's Full screen
   // button) shows it alone, filling the window, until Esc.
   bool fullscreen_control = false;
+  // `badge:` on an image: or a video: (§5.11): a text (or an expression giving one) drawn over the
+  // picture, dimmed under it: a media grid's "+3" on its last tile.
+  std::string badge;
 
   // Kind::Progress: the bar is the number at `bind` placed in [lo, hi] (clamped); `overlay` is a
   // state path (or a computed expression) whose text is drawn over the bar, else the percent.
