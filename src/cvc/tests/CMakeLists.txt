@@ -779,6 +779,23 @@ target_link_libraries(ariadne_script_engine_test
     GTest::gtest_main
 )
 
+# The wasm engine (src/ariadne_wasm; docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md §8, phase G1), where
+# wasmtime's C API is found (the cvcpkg `wasmtime` package on CMAKE_PREFIX_PATH): WebAssembly
+# guests in documents, from WAT text the test writes.
+include("${PROJECT_SOURCE_DIR}/src/ariadne_wasm/ariadne_wasm.cmake")
+cvc_find_ariadne_wasm(OFF)
+if(CVC_ARIADNE_WASM_FOUND)
+  add_executable(ariadne_wasm_test ariadne_wasm_test.cpp)
+  cvc_ariadne_wasm_host(ariadne_wasm_test)
+  target_link_libraries(ariadne_wasm_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
+  list(APPEND TEST_TARGETS ariadne_wasm_test)
+endif()
+
 target_link_libraries(ariadne_stream_view_test
   PRIVATE
     cvc
@@ -2781,6 +2798,9 @@ cvc_discover_tests(ariadne_media_test)
 cvc_discover_tests(ariadne_host_test)
 cvc_discover_tests(ariadne_requires_test)
 cvc_discover_tests(ariadne_script_engine_test)
+if(TARGET ariadne_wasm_test)
+  cvc_discover_tests(ariadne_wasm_test)
+endif()
 cvc_discover_tests(ariadne_stream_view_test)
 cvc_discover_tests(ariadne_bind_test)
 cvc_discover_tests(x11_macro_headers_test)

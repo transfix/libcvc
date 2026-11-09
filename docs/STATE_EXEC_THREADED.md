@@ -677,7 +677,7 @@ like `exec_scheduler()`, 4.12):
 **What a group shares with other groups.** Only frozen or immutable data:
 - the frozen stdlib scope;
 - the process-wide frozen builtins scope (below);
-- the 17 built-in exception class dicts, read-only since Stage 0 (5 item 1);
+- the 18 built-in exception class dicts, read-only since Stage 0 (5 item 1);
 - strings, numbers and bytes, which the variant holds by value (`types.h:154-155`);
 - read-only `data_object` payloads ([`docs/STATE_EXEC_EXCEPTIONS.md`](STATE_EXEC_EXCEPTIONS.md)
   3.7);
@@ -2241,8 +2241,9 @@ hardened: nothing here uses groups, and a cross-host restore is not an in-proces
 Each item says when it applies. "Always" items land whether or not a host enables threads.
 
 1. **Always (Stage 0, built): built-in exception classes are read-only.**
-   - All 17 built-in class dicts: the 13 this design started from, the locks track's
-     `LockError`, `DeadlockError` and `PermissionError`, and `AssertionError`. Each is one per OS
+   - All 18 built-in class dicts: the 13 this design started from, the locks track's
+     `LockError`, `DeadlockError` and `PermissionError`, `AssertionError`, and the wasm guests'
+     `WasmError`. Each is one per OS
      process, shared by every environment (`exceptions.cpp`, `classes()`).
    - `set-attr` and `del-attr` on one raise `TypeError` "set-attr: built-in class is read-only:
      ValueError" ("del-attr: ..." likewise), and the C++ `set_field` raises `TypeError` "built-in

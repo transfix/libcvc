@@ -60,6 +60,7 @@ AppRuntime::~AppRuntime() {
   verbs_->data.reset();
   verbs_->functions.clear();
   verbs_->async_functions.clear();
+  verbs_->async_work_functions.clear();
   if (netEnabled_)
     disable_net(); // its provider holds app_ by reference
 }
@@ -364,6 +365,13 @@ void AppRuntime::register_async_function(const std::string &name,
   rt_.refresh_program_names();
 }
 
+void AppRuntime::register_async_work_function(const std::string &name,
+                                              cvc::state_exec::async_work_marshal marshal) {
+  verbs_->async_work_functions[name] = std::move(marshal);
+  ensure_intrinsics();
+  rt_.refresh_program_names();
+}
+
 void AppRuntime::run_program(std::string script, std::function<void(const std::string &)> done) {
   rt_.run_program(std::move(script), done ? std::move(done) : [](const std::string &) {});
 }
@@ -600,6 +608,8 @@ void AppRuntime::ensure_intrinsics() {
       };
       se::register_async_fn(env, app->exec_async_host(), name, std::move(posting));
     }
+    for (const auto &[name, marshal] : verbs->async_work_functions)
+      se::register_async_fn(env, app->exec_async_host(), name, marshal);
   });
 }
 
