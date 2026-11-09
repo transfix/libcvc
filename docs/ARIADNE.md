@@ -33,7 +33,7 @@ unfamiliar; every binding, computed field, and handler in an `.ari` document is 
 
 ## 1. The Runtime
 
-`cvc::ariadne::Runtime` ([`inc/cvc/ariadne/ariadne.h:41`](../inc/cvc/ariadne/ariadne.h))
+`cvc::ariadne::Runtime` ([`inc/cvc/ariadne/ariadne.h`](../inc/cvc/ariadne/ariadne.h))
 is the **backend-neutral** host for a single `.ari` document. It is pure libcvc: it
 has no ImGui, VTK, or terminal knowledge. It owns exactly three things:
 
@@ -82,10 +82,13 @@ What steps each kind of program is fixed in code; no setting or flag changes it:
   a scheduler (§2.1);
 - actions, residents and the children they spawn: the app-wide `async_scheduler`,
   `app.exec_scheduler()`, shared by every document the app hosts and pumped by `Runtime::drain()`
-  (§2.2);
+  (§2.2), or, for a document the app tree's `ariadne.exec.isolate_documents` puts in a group of its
+  own, that group's scheduler (§2.5);
 - `init:`: a private synchronous scheduler, run to completion on the loading thread (at most 10
   million steps and 5 s), always `round_robin`, locking on the app's lock manager without ever
-  waiting ("Locks in the other lanes" below).
+  waiting ("Locks in the other lanes" below). It has an async host of its own, which runs an async
+  verb's work inline and charges it to the script's process; a done channel it posts goes to the
+  app scheduler.
 
 The developer guide's "Which Scheduler Runs a Program"
 ([STATE_EXEC_DEVELOPER_GUIDE.md](STATE_EXEC_DEVELOPER_GUIDE.md#which-scheduler-runs-a-program))
@@ -95,18 +98,19 @@ has the same table for every host, with the settings that apply and when they ar
 
 Reactive slots — `visible_when`, `enabled_when` / `disabled_when`, computed `bind` /
 `text`, `tooltip`, `options`, `repeat.count` — run in a long-lived stackless evaluator
-(`class ReactiveEngine`, [`ariadne.cpp:385`](../src/cvc/ariadne/ariadne.cpp)) over a
+(`class ReactiveEngine`, [`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)) over a
 **default-deny** environment:
 
 - The value allowlist admits arithmetic, coercion, logic, and side-effect-free state
-  *readers* only (`kAllowed`, [`ariadne.cpp:417`](../src/cvc/ariadne/ariadne.cpp)), plus
-  `(has? "name")`, which asks what the host provides
+  *readers* only (`kAllowed`, in `ReactiveEngine`'s constructor,
+  [`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)), plus `(has? "name")`, which asks what the
+  host provides
   ([§5.7](#57-requires-and-has--what-a-document-needs-from-its-host)). `json-parse` and
   `json-encode` are on it ([§10.4](#104-json-replies)); `str-concat` is not, so a computed
   label joins its parts with `string.join`.
 - The special-form gate admits only `if / begin / let / while / for / lambda / defun /
-  set / return / quote / yield / break / and / or` (`kAllowedForms`,
-  [`ariadne.cpp:433`](../src/cvc/ariadne/ariadne.cpp)).
+  set / return / quote / yield / break / and / or` (`kAllowedForms`, in the same constructor,
+  [`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)).
 
 Nothing that writes state, schedules, watches, sends messages, or does I/O is
 reachable. That includes the atomic updates `state-incr`, `state-cas` and `state-swap`: they
@@ -114,8 +118,8 @@ write, so they are not on the allowlist (actions may use them). Nor is `with-loc
 (docs/STATE_EXEC_LOCKS.md): a reactive slot that names it fails safe like any other
 off-allowlist symbol. An off-allowlist symbol does not error loudly — it **fails safe**: the slot
 degrades to hidden / disabled / empty / last-good value and the frame records a
-one-shot warning (`take_reactive_warnings`,
-[`ariadne.cpp:1682`](../src/cvc/ariadne/ariadne.cpp)). state_exec is always built (there is
+one-shot warning (`Runtime::take_reactive_warnings`,
+[`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)). state_exec is always built (there is
 no build option to drop it), so the engine is always present.
 
 **Locks in the other lanes.** An action may use `with-lock`. One that names no `:timeout` gives up
@@ -133,13 +137,17 @@ the document.
 **Spawned children.** A child an action or a resident `spawn`s runs in the document's scope, as
 its parent does: the intrinsics, the host's program-lane intrinsics and `(has? ...)`; its writes
 and channel keys under its parent's prefix; the document's channel policy and resources; and its
-parent's lock default, so an action's child gives up after `ariadne.exec.lock_timeout` too. It
-keeps the document's owner, so it is reaped with the document. A child an `init:` script spawns
-runs under the script's prefix with the same intrinsics and never waits for a lock either: it is
-stepped on the host thread with the script, so a busy request is as `:timeout 0` there too.
+parent's lock default, so an action's child gives up after `ariadne.exec.lock_timeout` too. Its
+context is made from its parent's (`Runtime::Impl::spawn_child`), not looked up again by path: it
+runs on its parent's scheduler (an isolated document's group, §2.5), and a child of a chroot that
+was deleted meanwhile writes into the detached node its parent still holds, never a new node at the
+old path. It keeps the document's owner, so it is reaped with the document. A child an `init:`
+script spawns runs under the script's prefix with the same intrinsics and never waits for a lock
+either: it is stepped on the host thread with the script, so a busy request is as `:timeout 0`
+there too.
 
-**The read lane never parks.** It is bounded three ways
-([`ariadne.cpp:603`](../src/cvc/ariadne/ariadne.cpp)):
+**The read lane never parks.** It is bounded three ways (`ReactiveEngine`'s constants,
+[`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)):
 
 | bound | constant | value |
 |-------|----------|-------|
@@ -160,8 +168,10 @@ Fire-once handlers (`on:` on a button, a menu item's program, or a bound widget'
 after each committed write: a checkbox or menu tick, a combo or radio pick, a slider's drag end
 or key step, a text field's Enter, a colour edit) and the resident
 handlers (`on_tick` / `on_key` / `on_pointer`) run in the action lane, on the
-**app-wide scheduler** (`app.exec_scheduler()`), **off** the render walk, inside
-`Runtime::drain()` ([`ariadne.cpp:1642`](../src/cvc/ariadne/ariadne.cpp)).
+**app-wide scheduler** (`app.exec_scheduler()`, or an isolated document's own group, §2.5),
+**off** the render walk, inside `Runtime::drain()`
+([`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)): its first half, `drain_begin()`, submits
+them, and its second, `drain_end()`, pumps the scheduler a slice and sweeps (§9.1).
 
 That scheduler's policy is the app tree's `state_exec.policy` (`round_robin`, `priority` or
 `priority_rr`), read once, when `app.exec_scheduler()` is first built, and fixed from then on; an
@@ -176,10 +186,11 @@ app's lock manager is `single` unless pycvc is loaded in the same process (devel
 "Single and shared mode"). A host that embeds Ariadne sets them on the app tree before its first
 `AppRuntime::register_quit`, `register_verb` or `enable_net`, each of which builds the scheduler.
 
-A fire-once handler is *submitted* (`submit_action`,
-[`ariadne.cpp:1375`](../src/cvc/ariadne/ariadne.cpp)) with the full default environment
+A fire-once handler is *submitted* (`Runtime::Impl::submit_action`,
+[`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)) with the full default environment
 plus host intrinsics, its writes chrooted to the action's mount prefix (§7), under
-per-activation caps ([`ariadne.cpp:1382`](../src/cvc/ariadne/ariadne.cpp)):
+per-activation caps (`action_max_steps`, `action_max_time` and `action_max_memory`, read by
+`submit_action`):
 
 | bound | source | value |
 |-------|--------|-------|
@@ -200,7 +211,7 @@ raises the caps. An action that runs out is killed, and the kernel sees `cancell
 The memory budget covers the action's state-tree writes and its
 measured share of the values it holds (developer guide §7), and it bounds each native call's
 allocations: state_exec's per-step allocation limit takes what is left of `max_memory`
-(developer guide §11, "Allocation limit"). A finished action's process is reaped from the app
+(developer guide §11, "Allocation limit"). A finished action's process is reaped from its
 scheduler when the drain sweeps it, and what it left in reference cycles (a function it defined,
 say) is freed by the cycle collector.
 
@@ -212,7 +223,7 @@ A quick action completes within that drain. An action that `await`s, `sleep`s, o
 
 `on_tick` / `on_key` / `on_pointer` / `on_signal` each become **one** long-lived, owner-tagged
 process, wrapped by the runtime as `(while t (let ((event (msg-recv "chan"))) body))`
-(`ensure_resident`, [`ariadne.cpp:1458`](../src/cvc/ariadne/ariadne.cpp)):
+(`Runtime::Impl::ensure_resident`, [`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)):
 
 - **tick** is woken once per drain (coalesced — you get one tick per frame, not a
   backlog).
@@ -233,7 +244,9 @@ counted up to a sixteenth of that half. So a native step that the OS deschedules
 half the cap itself before it is killed. Single-threaded wasm has no thread CPU clock: there,
 `thread_cpu_seconds` is the steady clock, so on a loaded machine a step that checks often (a big
 `collect`, decoding a large reply) is charged for its waits too, up to a sixteenth of the half per
-check. That is why its default is higher. On teardown, residents are reaped as a group by their owner tag.
+check. That is why its default is higher. On teardown, residents are killed as a group by their
+owner tag and reaped, with the document's actions and their children; a resident that a reload
+stops (its program set again) is killed and reaped then.
 
 **A resident that stops is restarted.** A killed one (its step cap, or a syntax error read inside
 it) or a failed one (an exception it didn't catch) is reported once per message (§2.4). Then it
@@ -318,23 +331,80 @@ on_key: |
     (catch (e) (state-set "ui.last_error" (get-attr e "message"))))
 ```
 
+### 2.5 Documents in groups of their own (`isolate_documents`)
+
+A host with several documents can run each in an execution group of its own, which the app's pool
+may pump on a worker thread while the frame's thread pumps the others
+([STATE_EXEC_THREADED.md](STATE_EXEC_THREADED.md) 4.12). It is the host's choice, not the
+document's: the app tree's `ariadne.exec.isolate_documents` (`1` or `true`) turns it on, and the
+app's pool needs workers (`state_exec.threads`, or the host's pool options) for a group to leave
+the frame's thread at all. With it off, the default, every document's actions and residents run
+on `app.exec_scheduler()`, as above.
+
+**What keeps a document in group 0.** With the setting on, a document gets a group of its own only
+when it passes every rule below, in this order. The first rule it fails is its reason: the host
+reads it from `Runtime::isolation_reason()`, and the app's log shows it once
+(`ari: the document at '<prefix>' runs in group 0: <reason>`).
+
+1. Its prefix is not empty (it does not run at the app root).
+2. It has a `channels:` block, enforced in strict lint mode, which is the default once the block is
+   there (`lint: channels: warn` or `off` keeps the document in group 0): only that proves it uses
+   no app-global channel (§8).
+3. No channel in it is `global: true`.
+4. None of its programs names a `/` channel in a literal: `(msg-send "/x" ...)`, `(msg-recv
+   "/x")` or `(msg-pending "/x")`. Every program counts: the lanes, the key bindings, `functions:`,
+   every widget's `on:`, `on_click`, `on_hover`, `on_drag*` and `on_top`, each module's `init:`,
+   `on_tick:` and functions, and the document's own `init:` and `tests:`. That is more than the
+   load's channel lint reads, which skips the widgets' event handlers.
+5. It uses no oidc: no `oidc-*` call and no `"oidc#..."` channel, since a sign-in's end is posted
+   where the app's other programs run.
+6. No writable `link:` hole of a module points outside the document's prefix (a read-only one, or
+   one inside, is fine).
+
+A document that passes runs in its group. Its group is pumped on the frame's thread all the same
+when its host declared a thread-affine subscriber at, above or under its prefix (`arigl` declares
+its scene prefix, which is the document's own, so every arigl document stays on the frame's
+thread), or when its programs can call a host verb or function that must run on the host thread
+(`AppRuntime::register_verb`, `register_function`, `register_async_function`, a Python host's
+functions; §9.1). Otherwise the pool's workers may pump it.
+
+**What changes for a document in its own group.**
+- Its actions, residents and the children they spawn run in the group, and every message the
+  runtime posts it (ticks, keys, pointer events, signals) goes there. Its streams post their events
+  there, and its async calls complete there.
+- It gets its own budget per frame (200000 steps and 0.1 s), not a share of the app's.
+- `ps`, `inspect` and `kill` see only its own processes; pids stay unique across the app.
+- When a worker pumps it, an action that calls a verb the host must run itself (`quit`, the
+  `data-*` verbs, `open-url`, the room and chat verbs) parks at the call and resumes at the next
+  frame, so it completes a frame later. `(has? ...)` there answers from what the frame's start saw.
+
+**When it moves.** Where a document runs is decided when it loads, and again after anything that
+rule reads changes: a reload or a new tree, a lane's program, the channel policy, the key bindings,
+a host's declaration, or a host verb registered after the load. If the answer changes, the document
+moves: its actions and the children they spawned, and its residents, are killed where they ran (a
+host's `run_program` caller is told "did not complete: the document moved to another group"), its
+residents start again in the new place at the next frame, and its open streams follow it. In group
+0, an action survives a reload; across a move it does not. What it wrote to state stays.
+
 ---
 
 ## 3. The per-frame (deferred-intent) contract
 
-`Impl::render` ([`ariadne.cpp:1324`](../src/cvc/ariadne/ariadne.cpp)) is a **pure
+`Runtime::Impl::render` ([`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)) is a **pure
 reader**. This is the load-bearing discipline of the whole system:
 
 1. **At frame top**, any pending tree swap (from `set_root`) is applied *before any node
    is emitted* — this is the single reconcile/commit boundary. Budgets reset here.
 2. **The walk emits widgets and reads state.** Handlers never run mid-walk: a clicked
-   button or menu item does `enqueue(w.on)`
-   ([`ariadne.cpp:1101`](../src/cvc/ariadne/ariadne.cpp)); a widget `on_click` /
-   `on_hover` / `on_drag` does `enqueue_event`
-   ([`ariadne.cpp:1278`](../src/cvc/ariadne/ariadne.cpp)). `enqueue` captures the
+   button or menu item does `enqueue(w.on)` (`Runtime::Impl::emit_node`,
+   [`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)); a widget `on_click` / `on_hover` /
+   `on_drag` does `enqueue_event`
+   ([`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)). `enqueue` captures the
    current mount prefix, so a mounted fragment's handler writes its own subtree.
 3. **`drain()` runs the queued intents on the *next* frame**, then pumps the scheduler
-   and residents.
+   and residents: `drain_begin()` runs them and submits the programs, and `drain_end()`, or the
+   host's one `app.exec_pump_frame()` for all its Runtimes between the two, pumps (§9.1).
+   Render runs on the host thread between pumps, never inside one: a debug build asserts it.
 
 The consequence — the **one-frame-latency** rule — is that the render walk *cannot cause
 a state change that it then reacts to within the same frame*. A click enqueued this
@@ -2513,9 +2583,9 @@ Same rule, different prefix string — pick the one your host wants; nothing els
 `Widget::scope` ([`widget.h`](../inc/cvc/ariadne/widget.h)) is a relative segment. When
 the runtime emits a container it computes `sub_prefix = resolve_bind(parent_prefix,
 scope)`, pushes it (RAII `ScopeGuard`), and resolves the children against it
-([`ariadne.cpp:961`](../src/cvc/ariadne/ariadne.cpp)). A mount's *own* reactive fields
-(e.g. its `visible_when`) stay in the **parent** scope — they are evaluated before the
-push. A repeated mount gets `includes.<as>.<i>` per instance.
+(`Runtime::Impl::emit_container`, [`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)). A mount's
+*own* reactive fields (e.g. its `visible_when`) stay in the **parent** scope — they are evaluated
+before the push. A repeated mount gets `includes.<as>.<i>` per instance.
 
 ### 7.4 Default-deny and `link:` holes
 
@@ -2524,7 +2594,7 @@ A mounted module is sandboxed to its sub-prefix. Access to the parent's state is
 
 - scalar `name: target` grants read-write;
 - map `name: {to:, mode: ro|rw}` **fails closed** — only an exact `"rw"` mode is
-  writable ([`loader.cpp:1038`](../src/cvc/ariadne/loader.cpp)); anything else is
+  writable (`expand_load`, [`loader.cpp`](../src/cvc/ariadne/loader.cpp)); anything else is
   read-only. A hole whose name starts with `/` is rejected.
 
 At reconcile, `wire_holes` ([`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)) plants a
@@ -2573,7 +2643,7 @@ implicitly.
 
 Message channels (`msg-send` / `msg-recv` / `msg-pending`) are **chrooted per document,
 exactly like state**. The rule is `resolve_channel_key(root_path, channel)`
-([`intrinsics.cpp:884`](../src/cvc/state/state_exec/intrinsics.cpp)):
+([`intrinsics.cpp`](../src/cvc/state/state_exec/intrinsics.cpp)):
 
 - channel contains `#` → used verbatim (these are runtime-internal tick/key/pointer
   channels, and are policy-exempt);
@@ -2585,7 +2655,7 @@ exactly like state**. The rule is `resolve_channel_key(root_path, channel)`
 Cross-scope sharing reuses the §7 hole mechanism: a mount's `channels:` grant lowers into
 a transparent link under the reserved `channels.` subtree, and `resolve_channel` follows
 the link's **target string** — a channel key is a redirect, so the target node need not
-exist ([`intrinsics.cpp:672`](../src/cvc/state/state_exec/intrinsics.cpp)).
+exist (`resolve_channel`, [`intrinsics.cpp`](../src/cvc/state/state_exec/intrinsics.cpp)).
 
 ### 8.1 Authoring surface
 
@@ -2606,11 +2676,11 @@ documents that declare one.
 Both key off `lint.channels`:
 
 - **Load-time static lint** (`lint_channels`,
-  [`loader.cpp:1684`](../src/cvc/ariadne/loader.cpp)) walks each program lane's AST for
+  [`loader.cpp`](../src/cvc/ariadne/loader.cpp)) walks each program lane's AST for
   `(msg-* "literal")` calls, skips `#`-channels, and errors or warns on an undeclared
   channel. A `/`-prefixed reference must match a channel declared `global: true`.
 - **Runtime backstop** (`Runtime::set_channel_policy`,
-  [`ariadne.h:86`](../inc/cvc/ariadne/ariadne.h)) catches an undeclared *dynamic* channel
+  [`ariadne.h`](../inc/cvc/ariadne/ariadne.h)) catches an undeclared *dynamic* channel
   name (one the static lint could not see), fail-safe, exempting `#`-channels and
   grant-linked channels. The host feeds the policy from the `LoadResult`.
 
@@ -2709,6 +2779,78 @@ if (lr.has_channels_block)
 //   processUIEvents → cam.update → rt.drain() → sync_scene_visibility → tick_scene
 //   view.render()  (fires rt.render() via the overlay callback)
 ```
+
+**One pump a frame for several documents.** `drain()` is two halves, `drain_begin()` (the frame's
+host work: the queued events and key bindings, the actions and residents submitted, the frame's
+tick posted) and `drain_end()` (a pump of the document's scheduler, then the sweep of what
+finished). A host with one Runtime calls `drain()`. A host with several calls `drain_begin()` on
+each, then `app.exec_pump_frame()` once, then `drain_end()` on each: that one call pumps the app
+scheduler once and every isolated document's group (§2.5), in one fork-join pump of the app's pool
+with a 0.1 s deadline, and each `drain_end()` sees that the frame was pumped
+(`app.exec_pump_generation()` moved since its `drain_begin()`) and only sweeps. `AppRuntime` has
+the same pair, with its scene work, warnings and frame hooks after `drain_end()`:
+
+```cpp
+for (auto &d : docs) d->drain_begin();   // AppRuntime or Runtime
+app.exec_pump_frame();                   // group 0 once, and every document's group
+for (auto &d : docs) d->drain_end();
+for (auto &d : docs) d->runtime().render(); // or the backend's draw, between pumps
+```
+
+With several documents on `app.exec_scheduler()` this is what makes the app scheduler's budget
+200000 steps a frame, not 200000 per document. Calling `drain()` on one Runtime and the split on
+another would pump a document's group twice a frame: a host picks one. To put documents on the
+pool's workers, the host builds the app's pool with workers before anything builds the app
+scheduler or the lock manager (`app.exec_pool(opts)` first, or `state_exec.threads` in the tree;
+[STATE_EXEC_THREADED.md](STATE_EXEC_THREADED.md) 4.13) and sets `ariadne.exec.isolate_documents`;
+`Runtime::isolated_group()` (null in group 0) and `isolation_reason()` say what happened to each
+document. A host with one isolated document can keep calling `drain()`, whose `drain_end()` then
+pumps the document's group through the pool itself (on the frame's thread, as nothing else is in
+that pump).
+
+**The host thread.** A Runtime's host calls are made on the host thread, between pumps, never
+from inside one (from a native, a callback or a host verb that the app's pool runs): `render`,
+`drain`/`drain_begin`/`drain_end`, `set_root`, `AppRuntime::load`, the `set_*_program` calls,
+`set_channel_policy`, `run_program`, `post_input`, `post_signal`, and the destructors. `post_input`
+and `post_signal` may start their residents before they post, so a host that catches an OS signal
+on another thread hands it to the host thread first. Debug builds assert it in `render`,
+`post_input`, `post_signal`, the `set_*_program` calls and `run_program`. Destroying a Runtime, or
+a change that moves its document (§2.5), inside a pump of the app's pool is refused in every build:
+it is logged, then the process aborts, before anything is touched. So a host verb that would close
+or reload another document records the request instead, and the host acts on it after the frame.
+
+**Thread-affine subscribers.** A host that connects a state subscriber which must run on the host
+thread (a renderer's camera, a HUD) under, at or above a document's prefix declares it before
+`load()`: `AppRuntime::declare_thread_affine_prefix(prefix)` (it forwards to
+`Runtime::declare_thread_affine_prefix`). An isolated document is then pumped on the host thread
+when a declared prefix is at, above or under its own: a write under the document emits
+`childChanged` on every ancestor, so a subscriber above it hears every write too. `AriRuntime`
+declares its scene prefix.
+
+**Adding verbs.** A host adds its own natives to the documents' programs with a provider,
+`register_action_intrinsics(provider, affinity)` ([`ariadne.h`](../inc/cvc/ariadne/ariadne.h)),
+called once at setup, before the first load. A provider runs each time a program's env is built and
+binds natives into it. Its kind (`cvc::state_exec::provider_affinity`) says where those natives may
+run in an isolated document's group that a worker pumps:
+
+| Kind | In an isolated `any` group | Choose it when |
+|---|---|---|
+| `any` | bound as it is, run on whatever thread pumps the group | the native touches only its arguments, its own context, thread-safe tables, and the tree through `cvc::state`'s pinned lookups; an async function registered on `*ictx.host`, whose kernel runs on the background pool, qualifies |
+| `host_proxied` | wrapped: on a worker its process parks, the native runs on the frame's thread after the group's pump, and the program resumes at the next frame | the native touches host state that only one thread may (a UI, a raw tree walk, process-global tables); it must be synchronous |
+| `host_only` (the one-argument form's kind) | not bound: a call is a `NameError`; a document whose env would hold one is pumped on the host thread instead | the native needs the host thread itself (GL, SDL, a GIL-holding callback) or nobody has audited it |
+
+In the app scheduler, and in a group pumped on the host thread, every kind is bound as it is. A
+provider's body itself runs where the env is built, which for a spawned child in an `any` group is a
+worker: an `any` or `host_proxied` provider reads only its context and its own thread-safe state,
+and binds what it binds into the new env. A value it binds that is not a native is made fresh for
+each env, or is immutable. A provider that posts a message for a program (a done channel, an event)
+posts it to `ictx.host->parking_scheduler()`, the program's group, or to `app.exec_scheduler()`
+only when that is null (the `init:` lane), never to `app.exec_scheduler()` directly; and registers
+its async functions on `*ictx.host`, which every lane sets
+([STATE_EXEC_DEVELOPER_GUIDE.md](STATE_EXEC_DEVELOPER_GUIDE.md#ariadne-providers), "Ariadne
+providers").
+`AppRuntime::register_verb`, `register_function` and `register_async_function` are `host_only`, and
+`register_async_verb` is `any`; register them, too, before `load()`.
 
 ### 9.2 In a terminal (`ari`, `FtxuiBackend`)
 
@@ -2936,8 +3078,8 @@ the host's `name` (`Host(name=...)`, `"ari"` by default).
 `host.function(name)` and `host.async_function(name)` make a Python callable a function the
 document's programs call with arguments (`pycvc.host_function` builds it; values convert as
 `pycvc.Exec`'s do, §10.1). A synchronous function runs inline in the frame. An async one is an
-async function on the app's async host
-([STATE_EXEC_EXCEPTIONS.md](STATE_EXEC_EXCEPTIONS.md) section 3): its program parks while it
+async function on the calling program's async host (the app's, or an isolated document's group's,
+§2.5; [STATE_EXEC_EXCEPTIONS.md](STATE_EXEC_EXCEPTIONS.md) section 3): its program parks while it
 runs on the app's background task pool, `(name-async ...)` returns a future,
 `with_call=True` passes the call first (`call.cancelled()`, `call.post(value)`), and
 `done_channel` also posts its value there. Their exceptions are the document's: the call raises
@@ -2974,7 +3116,9 @@ while the frame does. A callback may read and write state and queue programs, bu
 frame: `step()`, `run()`, `frame()` or `render()` from inside one raises `RuntimeError`
 (`AriRuntime` refuses it too), and `load()` from inside one waits for the frame to end.
 `close()` waits for the async functions still running, so a long one should watch
-`call.cancelled()`.
+`call.cancelled()`. Python functions are `host_only` host functions (§9.1), so a document that can
+call one never runs on a pool worker: with `ariadne.exec.isolate_documents` on, its group is pumped
+on the frame's thread, where the function takes the GIL back for its call.
 
 **Errors.** An exception in an `on()` handler, an `on_frame` hook or a `watch` callback is raised
 from the `step()`/`run()` that ran it. A function's is the document's (above); one it does not
@@ -3865,6 +4009,15 @@ below (G17–G21 in the internal gap report) are tracked for reconciliation.
 - **No DSL-visible future from the pycvc async layer.** Both `register_async_fn` and
   `register_async_coro` self-park; there is no gather/join to launch *N* Python async
   calls concurrently from one process (the net verbs' `-async` futures do offer this).
+- **Documents in groups of their own gain nothing in the shipped hosts yet** (§2.5). `ari` and
+  `arigl` drive one document each with `drain()`, and an arigl document stays on the frame's
+  thread: its camera, touch, lighting, HUD and settings subscribers sit under its prefix and assume
+  the render thread ([STATE_EXEC_THREADED.md](STATE_EXEC_THREADED.md) 4.8). Two more limits, for a
+  host that makes several documents: every `AppRuntime`'s host verbs and functions are bound into
+  every document's programs (the provider registry is process-global), so one `AppRuntime` with a
+  host verb keeps all its siblings' documents on the frame's thread; and `AppRuntime` has no way
+  to mark a host verb as safe off the host thread, so a host that wants one registers its own
+  provider as `any` (§9.1).
 
 ---
 

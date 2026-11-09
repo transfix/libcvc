@@ -1,12 +1,13 @@
 # state_exec: running programs on several threads
 
 Status: design, adopted 2026-10-26 with the decisions in section 9.2. Stage 0, the process-global
-hazard fixes (section 7), is built. Stage 1 is built in two parts (S1-Q12): Stage 1a, the
-execution groups, the fork-join pool and pycvc's `ExecPool`, is built; Stage 1b, Ariadne's half
-(one pump per frame, isolated documents, providers on the caller's group, the subscriber audit),
-is not, and neither are the later stages. Tracked in the `state-exec-perf` workstream, as its
-third track. The first two are the benchmark suite (transfix/libcvc#834) and the single-thread
-optimizations (branches `perf/sched`, `perf/async` and `perf/eval`).
+hazard fixes (section 7), is built. Stage 1 is built, in two parts (S1-Q12): Stage 1a, the
+execution groups, the fork-join pool and pycvc's `ExecPool`; and Stage 1b, Ariadne's half (one
+pump per frame, isolated documents, providers and posts on the caller's group, the init lane's
+own host, the teardown reap, the subscriber audit). The later stages are not built. Tracked in the
+`state-exec-perf` workstream, as its third track. The first two are the benchmark suite
+(transfix/libcvc#834) and the single-thread optimizations (branches `perf/sched`, `perf/async` and
+`perf/eval`).
 
 Locks on the state tree and process priority changes are designed in
 [`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md). Section 4.19 says how they behave across groups,
@@ -40,8 +41,10 @@ input had been truncated. With all five judged, the decision changed (section 3.
   budgets and `math.random`, 4.12's `exec_group`, `exec_pool`, app and pycvc parts, 4.13, 4.14,
   4.17, 5 items 7-9, 6.3, 7's Stage 1 entry and 8's Stage 1 cases) also describes the code as
   built, naming functions. Its plan, with the twelve decisions the user approved on 2026-11-07
-  (S1-Q1 to S1-Q12, listed in 9.2), is `threaded-impl/S1.md`. Stage 1b's Ariadne text (4.8, 4.9's
-  provider sites, 4.11 item 7, 4.12's Ariadne part, 5 items 10 and 11) is still the design.
+  (S1-Q1 to S1-Q12, listed in 9.2), is `threaded-impl/S1.md`. Stage 1b's Ariadne text (4.6's
+  Stage 1, 4.8, 4.9's providers and posts, 4.11 item 7, 4.12's Ariadne part, 4.15's spawn
+  context in Ariadne, 4.17's Runtime teardown, 5 items 10 and 11, 7's Stage 1b entry and 8's
+  Stage 1b cases) describes the code as built too, naming functions.
 - **The benchmark suite** and its documentation are `src/cvc/tests/state_exec_bench.cpp` and
   `docs/STATE_EXEC_BENCH.md`, on master since #834 (bc4761bf); this design was first written
   against the `feat/state-exec-bench` branch.
@@ -669,7 +672,7 @@ like `exec_scheduler()`, 4.12):
 | Group 0 | `app::exec_scheduler()` itself; for pycvc, each plain `Exec`'s private scheduler. Neither is an `exec_group`: each has its own registry and random stream, which its scheduler binds (the app's in `app::exec_group0_state`, declared before the scheduler and its async host so it goes after both; an `Exec`'s in its `ExecImpl`, before its scheduler and envs), and `app::exec_pump_frame()` pumps the app's as a host-affinity group (4.12) | host |
 | A host's group | a C++ host: `exec_group(options)`, pumped by `app.exec_pool().pump_all(...)`, or registered as a frame group (`app::register_frame_group`) for `exec_pump_frame` (Stage 1a) | as its options say |
 | An `ExecPool` group | `pycvc.ExecPool` (Stage 1a): one per pooled `Exec`, owned by it | `any` |
-| A document group | an Ariadne `Runtime` with `ariadne.exec.isolate_documents` on (Stage 1b) | `any`, or `host` if the document's env holds a host-only native (4.9) |
+| A document group | an Ariadne `Runtime` whose document `ariadne.exec.isolate_documents` isolates (Stage 1b, 4.12), registered as a frame group | `host` when the document's env holds a `host_only` native or its host declared a thread-affine prefix at, above or under its prefix (4.8); else `any` |
 | A job group | `exec_coordinator::submit_local` with a pool attached (Stage 2) | `any` |
 | A spawn group | the pool, for `spawn-isolated` children (Stage 3); up to `threads` per owner, made lazily | `any` |
 | An action group | an Ariadne document with `ariadne.exec.parallel_actions: k` (Stage 3) | `any` |
@@ -826,7 +829,8 @@ run queue keys on a process's effective priority (its base, or a lock-inheritanc
   - one `thread_cpu_seconds()` read if the process charges CPU time.
 - **Once per step:** `step()`, `++steps` with an exact `max_steps` compare, a status check, and a
   clock read every 16th step.
-- A process with `max_step_time` (Ariadne residents, `ariadne.cpp:1792`) keeps its guard per step.
+- A process with `max_step_time` (Ariadne residents, `Runtime::Impl::ensure_resident`) keeps its
+  guard per step.
 - `slice_steps = 1` is today's round robin exactly, and stays the default. Hosts opt in to longer
   runs (Q10).
 - A contended `with-lock` parks, which ends the run. An uncontended one does not, so a lock holder
@@ -864,7 +868,13 @@ run queue keys on a process's effective priority (its base, or a lock-inheritanc
   - A typical Ariadne frame (one or two short actions and a few parked residents) therefore never
     wakes a helper.
 - **`CVC_EXEC_FORCE_MOVE=1`** (read when a pool is built) gives each group to a thread other than
-  the one that pumped it last, every pump, waking a helper per group up to the pool's size.
+  the one that pumped it last, every pump, waking a helper per group up to the pool's size. A
+  caller left with only groups it pumped last hands them to the workers and waits for them no
+  longer than the call's deadline (in waits of at most a second, so a far deadline is never handed
+  to the condition variable whole), then skips those no worker started; a worker that reaches the
+  call past its deadline skips its groups and tells the caller. Before Stage 1b's fix that worker
+  told no one, and under load a frame (`exec_pump_frame`, an isolated document's `drain()`) could
+  wait for ever (`ExecPool.AForceMovedCallEndsAtItsDeadline`).
 
 **Stage 2: continuous pumping.** Groups are `attach`ed to the pool.
 - **The group state word** follows the Akka and CAF mailbox pattern:
@@ -1010,20 +1020,30 @@ the exit error (the pool's "internal error", 4.17). Stage 2's `pool.kill_owner(o
 kill to every group that has a process of that owner, then waits until each group has applied it.
 - In fork-join mode the wait pumps those groups' ingress inline.
 - Ariadne calls it before freeing the action contexts that intrinsics point at (`ictx.document`,
-  `ictx.channels`; `ariadne.cpp:1656, 1768`). Without the acknowledgement, a child in another group
-  could still run against a freed context.
-- A document's own group is simply destroyed (section 4.2).
+  `ictx.channels`, which `Runtime::Impl::make_action_context` points at the Runtime's document
+  scope and channel policy). Without the acknowledgement, a child in another group could still run
+  against a freed context.
+- A document's own group is simply destroyed (section 4.2), after the Runtime's own kills and
+  reaps (4.17, "Teardown of an Ariadne Runtime").
 
 ### 4.6 Messaging between groups
 
 **Inside a group:** unchanged. Delivery is immediate, broadcast reaches every waiter with one
 shared envelope, and the pending FIFO keeps its cap of 1024 (`async_scheduler.h:105`).
 
-**Stage 1: no router.** A document opts into its own group only if it uses no app-global channels.
-- Its channels then all resolve under its chroot (`resolve_channel_key`, `intrinsics.cpp:1138-1146`).
-- Its channel policy says whether it uses global keys (`app_runtime.cpp:244`).
-- The host posts it receives (tick, key, pointer, signal, stream and async results) go to its group
-  through `ictx.sched` and `ictx.host` (B30, section 4.12).
+**Stage 1: no router** (built in Stage 1b). A document gets a group of its own only if it uses no
+app-global channel (S1-Q6; the rules are in 4.12):
+- Only a `channels:` block enforced in strict lint mode proves that, so it needs one, with no
+  `global: true` entry, and no program of it may name a `/` channel in a literal. A channel key it
+  computes at run time is checked by the channel policy (`Runtime::set_channel_policy`'s
+  `enforce`), which refuses an undeclared one, a `/` key included.
+- Its channels then all resolve under its prefix (`resolve_channel_key`), as its state keys do.
+- A `#` key is never scoped, so oidc's `"oidc#NAME"`, posted to group 0, would never reach the
+  document's group: a document that uses oidc stays in group 0.
+- The host posts it receives go to its group: the Runtime's tick, key, pointer and signal posts
+  (`post_tick`, `deliver_input`, `post_signal`) go to the scheduler its programs run on, and its
+  providers post to the calling program's group: async verbs' done channels, streams' events and
+  net completions (4.9).
 
 **Stage 2: channel homes.**
 - **Each resolved channel key has one home group.** The home is the group that registered the
@@ -1203,9 +1223,14 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
   - Chains are released leaf first, so a node held in one dies while its ancestors live (a
     dying node's `destroyed()` slot may walk `_parent`). The context's `root_pins`, the jobs'
     chains and a link resolution's `target_pins` are `cvc::pin_vector`s (`state.h`), which drop
-    their pins from the back when they go, are cleared or are assigned over. A hold on a single
-    node does not keep that rule: a `state-get`'s read, `state-json`'s node or a watch entry's
-    root can outlive an ancestor that another thread unlinked meanwhile.
+    their pins from the back when they go, are cleared or are assigned over. Stage 1b made two
+    more so (S1.9, S1.11; PIN-1): a stream's descriptor pins, and `uri_state.cpp`'s chains
+    (`chain` in both lookups, and `effective::pins`, declared before `effective::node`, so the
+    node goes first and then its chain, leaf first; a followed link's node and chain are released
+    explicitly in that order). They are reachable without groups: `state_resolve` may run on a
+    compute-pool worker. A hold on a single node does not keep that rule: a `state-get`'s
+    read, `state-json`'s node or a watch entry's root can outlive an ancestor that another thread
+    unlinked meanwhile.
   - `msg-send` holds its node and that node's chain across `sendMessage`, whose link path reads
     the pinned walk's path and whose non-link path reads `fullName()` up the held chain.
     `sendMessage` itself is unchanged.
@@ -1223,8 +1248,13 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
   - Host code outside `intrinsics.cpp` still walks raw: Ariadne's settings reads and holes
     (`ariadne.cpp`), `doc_args.cpp`, `app.cpp`'s settings read, `state_value_codec.cpp`'s
     snapshot walks, the conference natives (`room_intrinsics.cpp`, `room_media_intrinsics.cpp`),
-    `holon` replication and `oidc_host.cpp`. They are left for Stage 1's provider classification
-    (4.9).
+    `holon` replication and `oidc_host.cpp`. As built in Stage 1b, none of it runs on a worker:
+    Ariadne reads its settings and plants its holes on the host thread (`drain_begin`, the
+    submissions, render's reconcile), and the conference, oidc and `data-*` natives are
+    `host_proxied`, so in an `any` group they run on the `pump_all`'s caller (4.9). A provider
+    body a worker may run (a spawned child's, 4.15) walks pinned or not at all: AppRuntime's
+    `data-*` provider checks its program's chroot through `findDescendantShared`. A stream's
+    descriptor chain is a `cvc::pin_vector` (`stream::descriptor_pins_`), released leaf first.
 - **A pinned chroot** (D's graft). The context holds its root and every ancestor up to the tree's
   root (`intrinsics_context::root_pins`, `back()` is `root`). `apply_chroot` pins them once; a
   host that assigns `ictx.root` directly is pinned on the context's first state intrinsic
@@ -1275,15 +1305,84 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
     watches or calls in flight. The slot's counter is atomic. With G groups watching the app root,
     every write calls G slots. Since Stage 0 each distinct watch root gets its own slot, so a
     chrooted watch's slot sits on its chroot, and a write calls only the slots on its ancestors.
-- **signals2 subscribers** (B15) run on the writing thread (`state.h:308-331`).
-  - **Who is affected.** A group pumped by a worker moves its writes' subscribers onto that worker.
-    The known subscribers on DSL-written subtrees are `room_net` and `holon_sync` replication,
-    `uri_http_cache`, and cvcGL's `state_object` handlers.
-  - **Rule.** A document group gets `affinity::any` only when its subtree's subscribers are
-    declared thread-safe. Otherwise it is `affinity::host`: still its own group, but pumped by the
-    host thread.
-  - **The audit** of those subscribers is part of Stage 1, and its outcome decides how many
-    documents can leave the host thread (Q7).
+- **signals2 subscribers** (B15) run on the writing thread (`state.h`'s signal members).
+  - **How one runs.** A write emits on the thread that writes: `valueChanged`, then `childChanged`
+    on the parent and every ancestor above it, with no node mutex held while the slots run. A
+    `cvc::state_object<T>` connects its own node's `childChanged` in its constructor, so the
+    thread that builds one connects it, and with instance threading off (every subscriber below
+    that is a `state_object` turns it off) its `handleStateChanged` runs inline on the writing
+    thread. So a group a worker pumps runs, on that worker, every subscriber connected at, under
+    or above a node its programs write. In arigl the scene prefix is the document's prefix, so
+    the camera, touch, lighting, HUD and settings subscribers sit under the document.
+  - **Rule** (as built in Stage 1b, S1-Q6). An isolated document's group is `affinity::host`,
+    pumped on the host thread, when its host declared a thread-affine subscriber at, above or
+    under the document's prefix (a subscriber above it is called for each of its writes; R1b-mid
+    S-M2), or when its env holds a `host_only` native (4.9). Otherwise it is `affinity::any`.
+  - **Declarations.** `AppRuntime::declare_thread_affine_prefix(prefix)` (it forwards to
+    `Runtime::declare_thread_affine_prefix`) records a prefix under which the host connected a
+    subscriber that must run on the host thread; the Runtime reads its declarations whenever it
+    decides where the document runs (4.12), so a host declares before `load()`, and a later
+    declaration has the placement decided again. An empty prefix (the root) covers every document.
+    `AriRuntime` declares its scene prefix before any load, so every arigl document's group is
+    `host` (S1-Q6), until the subscribers below move out of the document's prefix or marshal.
+  - **The audit** (S1-Q7, S1.11), every subscriber on a subtree a document group's programs can
+    write:
+
+| Subscriber | Connects | Kind (S1-Q7) | Verdict (S1.11) | Why |
+|---|---|---|---|---|
+| `state_sync_adapter` (replication) | each attached node, all seven signals | not thread-safe | confirmed not thread-safe; its header's "Thread-safe" is qualified, no code change | its slots re-walk from the root with raw, creating lookups (`state::instance(ctx)(path)`; so do `attach`, `attach_node` and `apply_remote`), and read `_attached`, which is written under `_mutex`, unlocked. In Stage 1 only host-thread writers reach the subtree it observes (`conf.*`: the room natives, which are `host_proxied`, and host code); arigl applies remote mutations in its frame's transport pump, on the host thread |
+| cvcGL `SceneNode` family (`SceneNode`, `GeometryNode`, `GridNode`, `AxisNode`, `LightNode`, ...) | `state_object`, instance threading off | thread-safe (marshals) | thread-safe | each key's work goes through `runOnMainThread` (posted through the scene's locked event sink, or held for the node's own thread when it has no scene); `LightNode` marshals all of it |
+| `GraphicsNode::handleStateChanged` | as above | reviewed in S1.11 | thread-safe after one fix | its echo checks run on the writing thread before it marshals; one was a race, now fixed (below) |
+| `CameraController` | `state_object`, threading off | not thread-safe | not thread-safe; debug home-thread assert | `readAllFromState` and `applyToCamera` on a `vtkCamera`, into unlocked `Impl` fields the render loop's `update()` reads; its atomic self-write flag would drop a foreign write that lands during a self-write as an echo |
+| `TouchGestures` | the same | not thread-safe | not thread-safe; assert | `readAllFromState` into unlocked `Impl` fields the event handlers read |
+| `StageLighting` | the same | not thread-safe | not thread-safe; assert | `apply()` rebuilds light nodes; its re-entry flag is a plain `bool` |
+| `FpsHud`, `ScreenTextHud` | the same | not thread-safe | not thread-safe; assert | `apply()` / `applyToActor` on a `vtkTextActor` |
+| `ShadowSettings` (built by `SceneGraph::syncShadowState`) | the same | not thread-safe until reviewed | not thread-safe; assert | it writes its value, unlocked, on the writing thread while `get()`/`set()` use it on the owner thread (`SceneGraph`'s apply itself marshals); the "replicated peer, script thread" path its comment names now fails the debug assert, as S1-Q7 decided |
+| `UiSettings` (built by `ImGuiOverlay`), `ViewportLayout` (built by `Viewport`) | the same | not thread-safe until reviewed | not thread-safe; assert | a plain re-entry `bool`; their apply callbacks write the overlay's fields, or call `vtkRenderer::SetViewport`/`SetLayer`/`SetDraw`, on the writing thread |
+| volren `state_settings` (`VolRenNode`) | the same | not thread-safe until reviewed | kept "until reviewed"; nearly thread-safe; no assert (not in S1.11's files) | a snapshot under its own mutex, then `VolRenNode`'s apply takes its config mutex but calls `ownBoundsChanged()`, which reads two plain `bool`s (`m_showBBox`, `m_clipChildren`) before it marshals |
+| volslice `state_settings` (`VolSliceNode`) | the same | not thread-safe until reviewed | not thread-safe; no assert | `VolSliceNode`'s apply increments a plain `m_settingsVersion` the render path reads |
+| physics `world_binding` | the prefix node's `childChanged` | thread-safe | confirmed | a thread-local check of its own writes, then a store to an atomic flag held by `shared_ptr` |
+| pycvc `state_observer` | the root's `childChanged` | thread-safe, with the GIL rule | confirmed | it takes the GIL on the writing thread and checks a liveness flag; so a Python host releases the GIL across `exec_pump_frame` and `run_all` (4.12) |
+
+  - **Also checked** (S1.md section 0, item 17): `room_net.cpp`, `holon_sync.cpp`, `holon.cpp` and
+    `uri_http_cache.cpp` connect no state signal. The library's other state-signal slots are the
+    watch roots' change counters (atomic), xmlrpc's monitor on `__system.xmlrpc` (not a DSL
+    subtree), `data.cpp`'s slot on the root's `destroyed`, and the generic `state::value(callback)`
+    and `state_future`. No `state_object` subclass exists outside cvcGL and volren/volslice.
+  - **The debug home-thread asserts** (S1.11). Each not-thread-safe cvcGL subscriber above
+    (`CameraController`, `TouchGestures`, `StageLighting`, `FpsHud`, `ScreenTextHud`,
+    `ShadowSettings`, `UiSettings`, `ViewportLayout`) records the thread that built it, so the
+    thread that connected it, and asserts it on the first line of `handleStateChanged`, before any
+    echo check: "`<Class>`: a state change off its render thread (STATE_EXEC_THREADED.md 4.8)". The
+    member is unconditional (in the `Impl` of the five pimpl classes, in `Settings.h` for the
+    three settings classes), so a Debug app and a Release library agree on the layout; only the
+    assert depends on `NDEBUG`. Release builds compile them out; CI's Debug cvcGL jobs
+    (`package-linux`, `package-macos`) check them. No existing test writes one of these subtrees
+    from another thread.
+  - **`GraphicsNode::handleStateChanged`** runs on the writing thread and, before it marshals,
+    checks three things:
+    - its own publisher's echo of `position`/`matrix`: `state_publisher::flushing()` is
+      thread-local, so on a worker, which is in no flush, it is null and nothing more runs; in a
+      flush, the scene outlives it (`~SceneGraph` joins its publisher's worker first). Safe;
+    - its own scene-less pose write: a plain `bool` member, set by the node's thread around its
+      write in `publishPoseMatrix` and read on whatever thread wrote, was a data race, and a
+      foreign `matrix` write that read it `true` was dropped as the node's echo, leaving node and
+      tree apart. Fixed: the mark is the writing thread's (`thread_local const GraphicsNode
+      *t_writingPose`, set and restored by a scope in `publishPoseMatrix`, checked as
+      `t_writingPose == this`), as `state_publisher` marks its flush; another thread's write goes
+      to `runOnMainThread`. Test: `cvcgl_unattached_node_thread`'s
+      `test_another_threads_matrix_during_the_nodes_own_pose_write_is_not_its_echo`, which failed
+      before;
+    - its metadata mirror, which reads only its argument. Safe.
+  - **Follow-ups** (recorded, not built): `state_sync_adapter` walks pinned in its slots and
+    `apply_remote`, with an atomic `_attached`, before a worker-pumped group may write the subtree
+    it observes; the settings classes and the five render-thread subscribers move out of the
+    document's prefix (or marshal like the `SceneNode` family) before an arigl document can be
+    `any`; the racy reads in volren's and volslice's settings above are fixed before those are
+    called thread-safe; and `state_object`'s teardown against a slot running on another
+    thread (signals2's disconnect does not wait for it), which also covers a narrow pre-existing
+    read in `GraphicsNode`'s publisher check when two scenes mirror one prefix and one is
+    destroyed on its owner thread while the other's publisher flushes a path the node mirrors.
 
 ### 4.9 Async host, ingress and host-thread natives
 
@@ -1295,17 +1394,42 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
     right group.
 - **`intrinsics_context` gains `async_host *host`** (B30). Stage 1a appended the field (the
   context stays an aggregate), `make_spawn_context` copies it to a child with `sched`, and pycvc's
-  `Exec` sets it to its own host or its group's. Stage 1b moves Ariadne's providers onto it: they
-  register their async functions on `ictx.host` and post to `ictx.sched`, instead of
-  `app.exec_async_host()` and `app.exec_scheduler()`:
-  - `app_runtime.cpp:96-101`;
-  - `net_intrinsics.cpp:268-276`;
-  - `stream_intrinsics.cpp:138`;
-  - the cvcGL verbs.
+  `Exec` sets it to its own host or its group's. Stage 1b sets it in every Ariadne context, so a
+  provider registers its async functions on `*ictx.host`, never on `app.exec_async_host()`:
+  - an action's and a resident's (`Runtime::Impl::make_action_context`): the document's group's
+    host (`exec_group::host()`) when the document is isolated (4.12), else the app's; a child they
+    spawn copies its parent's (`spawn_child`, 4.15);
+  - the init lane's (`run_scoped_program`): an inline host of its own, `async_host
+    init_host(&sched)` over the lane's private sync scheduler, declared after it so it goes first
+    (S1-Q2). A provider's async functions run inline there, as before, but are now charged to
+    init's own process, where nobody was charged before (FF-3's init case). The lane's
+    scheduler also has a cycle registry of its own, which the run collects and frees when it ends
+    (`AriadneInit.ItsCyclesAreItsOwnAndFreedWhenItEnds`);
+  - the env the name probes build (`Runtime::Impl::probe_env`, for `has?`, `requires:` and the
+    placement's `host_only` check): an inline host, never called.
+- **Posts go to the calling program's group** (B30, S1.9). A provider posts where the calling
+  program's host parks its calls, `ictx.host->parking_scheduler()`, read when the env is built: an
+  isolated document's group, else group 0. An inline host parks nowhere (the init lane's), and
+  then the post goes to group 0, `app.exec_scheduler()`. Nothing posts to `app.exec_scheduler()`
+  on a program's behalf otherwise:
+  - AppRuntime's done channels (`register_async_verb(name, done_channel, work)`,
+    `register_async_function(name, marshal, done_channel)`): the kernel posts its value to the
+    channel, resolved under the program's root when the env is built, on the calling program's
+    group; from `init:`, on group 0, where a program waiting on it hears it
+    (`AriadneHostVerbs.AnInitLanesAsyncVerbPostsItsDoneChannelToGroupZero`).
+  - Streams: `stream-open` gives the stream its opener's group (`stream_params::scheduler`; null
+    means group 0, `stream::open`), and the stream posts its seq and lifecycle events there, from
+    its producer thread too, under a per-stream mutex. `room-subscribe`'s proxy stream opens on the
+    caller's group; the host-side bridge and relay streams, and the public `room_subscribe`, stay
+    on group 0. A document that moves takes its open streams along (`stream::retarget`, 4.12).
+  - Net: a request's completion goes to its call's own scheduler, its host's; a started request
+    (a transport that answers by itself) keeps its host's finisher, not the host (below).
+  - The Runtime's own tick, key, pointer and signal posts go to the scheduler its programs run on
+    (`post_tick`, `deliver_input`, `post_signal`).
+  - oidc's flow end, `"oidc#NAME"`, still goes to group 0 (`Session::set_status`): a document that
+    uses oidc is never isolated (S1-Q6).
 
-  Streams capture `ictx.sched` when they open (`stream/stream.cpp:132-148, 238`). The Runtime posts
-  tick, key, pointer and signal messages to its group (`ariadne.cpp:1810-1811, 1843, 1967`). For a
-  document that stays in group 0 these are the same objects as today.
+  For a document in group 0 these are the same host and scheduler as before Stage 1b.
 - **Futures cannot leave their group.**
   - Messages carry strings and bytes only.
   - The isolating copy refuses futures at any depth (4.3).
@@ -1344,23 +1468,91 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
       value any scheduler may read (FF-2).
     - Ariadne's `init:` lane awaits the app host's futures on its private sync scheduler. During
       init the app scheduler has no current process, so each of those calls runs inline and comes
-      back settled with no owner: the check passes it, and HZ-13 keeps passing. Stage 1b gives the
-      lane an inline host of its own, which charges its calls to init's process (S1-Q2).
+      back settled with no owner: the check passes it, and HZ-13 (whose provider registers on the
+      app's host) keeps passing. Stage 1b gave the lane an inline host of its own as `ictx.host`,
+      so a provider that registers on `*ictx.host` runs its calls inline there, charged to init's
+      process (S1-Q2; FF-3's init case).
     - It closes a race reachable before Stage 1: a future carried through Python from one pycvc
       `Exec` to another and awaited there ran the first `Exec`'s `finish_async_call` on the
       second's thread, or waited to the idle limit. Now it raises at once (FF-1, FF-3).
 - **The step rate** for charging is read again only when the tree changed (`perf/sched`).
 - **Host-thread natives** (B22). A host registers each intrinsic provider with a kind,
   `provider_affinity` (`intrinsics.h`): `any`, `host_proxied` or `host_only`. Each provider's owner
-  decides its kind; S1-Q7 records the decisions for Ariadne's providers, which Stage 1b registers.
-  Stage 1a built the mechanism: `exec_group::install(env, name, fn, kind)` binds a native into one
-  of the group's envs by its kind.
+  decides its kind; S1-Q7 records the decisions for Ariadne's providers, which Stage 1b registers
+  (below). Stage 1a built the mechanism: `exec_group::install(env, name, fn, kind)` binds a native
+  into one of the group's envs by its kind.
 
 | Kind | In group 0 or a host-affinity group | In an `any` group |
 |---|---|---|
 | `any` | installed as it is | installed as it is; it runs on whatever thread pumps the group, so it touches only its own context, thread-safe tables and the tree through pinned lookups |
 | `host_proxied` | installed as it is | installed as a wrapper. On the `pump_all`'s caller, at threads 0, or with no `pump_all` active, the body runs inline, as today. On a worker the process parks through `begin_external`, and the body goes onto the call's host-call queue with copies of its arguments (a share-mode copy, made as the process's deep-data work when one is compound); the caller runs it once the group's pump has ended, and the result comes back as a completion at the group's next pump |
-| `host_only` (Stage 1b's default for host-registered providers) | installed as it is | not installed: a call is a NameError at any thread count, never a race. A document whose env needs one is `affinity::host` |
+| `host_only` (the one-argument `register_action_intrinsics`'s kind) | installed as it is | not installed: a call is a NameError at any thread count, never a race, and `has?` does not see it. A document whose env would hold one is `affinity::host` (4.12) |
+
+- **Ariadne's providers** (built in Stage 1b, S1-Q7, S1.9). `register_action_intrinsics(provider,
+  affinity)` (`ariadne.h`) adds a provider of the program lanes' natives with its kind to the
+  process-global registry; the one-argument form registers it `host_only`. Where an env is built,
+  `install_providers` (`ariadne.cpp`) runs the registered providers in registration order:
+  - in group 0, in a host-affinity group, in the init lane and in the name probes, each runs as it
+    is, into the env;
+  - in an `any` group, an `any` provider runs as it is and a `host_only` one does not run; a
+    `host_proxied` one runs into a scratch scope over the env (`environment::extend`, so it reads
+    the env's bindings as it would), and what it bound there is moved into the env: each native
+    through `exec_group::install(..., host_proxied)`, anything else (a constant) as it is.
+
+  As built, by provider:
+
+| Provider | Natives | Kind | Why |
+|---|---|---|---|
+| AppRuntime (`AppRuntime::ensure_intrinsics`; six providers, registered in the order the one provider bound them before, so a name two of them bind resolves as it did, the later one winning: `AriadneHostVerbs.ANameTwoTablesBindResolvesInTheirOrder`) | 1. the host's verbs (`register_verb`) | `host_only` | arbitrary host code, run in the calling step |
+| | 2. `(quit [code])` (`register_quit`) | `host_proxied` | it writes the AppRuntime's close request and exit code |
+| | 3. the host's async verbs (`register_async_verb`) | `any` | libcvc's own marshal on `*ictx.host`; the work runs on the app's background pool; the done channel goes to the calling program's group |
+| | 4. `data-load`, `data-reload`, `data-status`, `data-files`, `data-file` | `host_proxied` | they walk the tree raw (`data.cpp`); the body binds them only for a program of its own app, which it checks through a pinned walk |
+| | 5. the host's functions (`register_function`) | `host_only` | the host's code, run in the calling step; pycvc's take the GIL |
+| | 6. the host's async functions (`register_async_function`) | `host_only` | the host's marshal runs in the calling step (pycvc's takes the GIL; a C++ host's is unaudited), on `*ictx.host` |
+| net (`register_net_intrinsics`) | `http-get`, `http-request`, `fetch` (and their `-async` forms), `ws-*`, `net-allowed?`, `net-auth-*` | `any` | the kernels run on the app's background pool and complete on their call's scheduler; the WebSocket table and each connection's sends lock; the policy is immutable once the host made it; and the credential store locks: every `CredentialStore` member that reads or writes its entries, bindings or renewers holds its mutex, so `net-allowed?` and `net-auth-*` need no host thread (`net-auth-forget` and `-clear` do blocking file I/O on whatever thread pumps: a cost, not a race) |
+| | `open-url` | `host_proxied` | it opens a tab in the user's browser |
+| streams (`register_stream_intrinsics`) | `stream-open`, `stream-info`, `stream-close` | `any` | mutex-guarded tables; descriptors written through pinned walks; a stream posts to the group it was opened in |
+| room (`register_room_intrinsics`) | `room-*` and `chat-*` | `host_proxied` | they write the app-global room tree raw, and use a room's chat client outside the room table's lock |
+| room-media (`register_room_media_intrinsics`) | `room-publish`, `room-subscribe` | `host_proxied` | they write the room tree raw and drive the bridge; a subscribed proxy posts to the caller's group |
+| oidc (`enable_oidc`) | `oidc-*` | `host_proxied` | process-global sessions, stepped by `pump_oidc` on the host thread; a document that uses oidc stays in group 0 (S1-Q6) |
+| `nav_compute` (the example) | `nav-step` | `any` | its marshal touches nothing, and its kernel runs on the background pool |
+| cvcGL media and stream verbs (`media_verbs.cpp`, `stream_verbs.cpp`) | `stream-capture-camera`, `stream-capture-audio`, `stream-play-audio`, `stream-set-muted`, `gl-bind-stream` | `host_only` (one-argument form) | SDL's camera and audio on their owner thread, GL on the render thread |
+
+- **Provider rules.**
+  - A provider's body runs where the env is built: on the host thread for an action, a resident,
+    the init lane and the probes, but on the pumping thread for a spawned child (4.15), which is a
+    worker in an `any` group. So a provider an `any` group runs (`any` or `host_proxied`) has a
+    thread-safe body: every body above reads only its context, what it captured (immutable, atomic,
+    weak or locked state) and AppRuntime's verb table, under that table's lock (4.12), and binds
+    natives into the new env.
+  - A `host_proxied` provider binds synchronous natives only: an async one, wrapped, would run its
+    kernel inline on the caller, where its host has no running process, uncharged.
+  - What a provider binds that is not a native goes into an `any` group's env as it is, so it is
+    made fresh for each env, or is immutable: two groups' programs must never share a mutable value
+    (invariant G, 4.3). No shipped provider binds one.
+  - `has?` in an `any` group, which a worker may pump, answers from what `drain_begin` snapshotted
+    on the host thread (the host's facts, and the names the providers bind there by kind), read
+    under the Runtime's names lock; elsewhere it answers live.
+  - A host has no way to give AppRuntime's own verbs and functions a kind other than the table's:
+    one that wants an `any` verb registers its own provider with `register_action_intrinsics(...,
+    any)`, as `nav_compute` does (a follow-up, 7).
+- **A started call's finisher.** Work that answers by itself (an `async_work` whose `start` hands
+  the call to a transport, which settles it from its own thread: net's started requests, a
+  started `fetch`) keeps its host's finisher (`async_host::make_finisher()`), never the host.
+  `finisher::finish` posts a settled call's outcome as `async_host::finish` does, but under the
+  host's state lock and only while the host has not begun to shut down; the shutdown sets its
+  stopped flag under that lock. So a transport answering as an isolated document's group goes
+  touches neither the group's host nor its scheduler, and the shutdown has cancelled the call.
+  The lock order is the host's state lock, then the scheduler's ingress lock. A work checks
+  `cancel_requested()` before it settles, and never finishes from inside the call's `on_cancel`
+  hook, which the shutdown runs under the same lock
+  (`AsyncCalls.AStartedCallsFinisherPostsOnlyWhileItsHostIsUp`).
+- **Whole WebSocket frames.** `ws-send` is `any`, so two documents on two workers may send on one
+  connection at once (a handle is app-global). A connection sends one frame at a time, whole: its
+  send lock is held across the frame (a close's too), while its handle lock is still taken per
+  chunk so the reader goes on receiving between them; libcurl continues a partly sent frame with
+  the next send's bytes, so messages used to interleave
+  (`NetWsClient.TwoThreadsSendingOnOneConnectionSendWholeMessages`).
 
 - **The host-call queue** (`exec_pool::run_on_host`):
   - A body queued on a worker goes onto the queue of the `pump_all` call pumping the worker's
@@ -1451,9 +1643,10 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
     skipped in one frame starts first in the next, before group 0 whenever the caller pumps it
     (4.4), so a busy group 0 delays a frame group by one frame at most, at threads 0 and for
     host-affinity groups as well.
-- **Ariadne's budget changes meaning only for documents that opt in.** Today 200000 steps and 0.1 s
-  cover every document together, once per `Runtime::drain`. An isolated document gets its own
-  200000 and 0.1 s per frame (section 5).
+- **Ariadne's budget changes meaning only for hosts that opt in** (built in Stage 1b). With plain
+  `drain()`, 200000 steps and 0.1 s cover every document in group 0 together, once per
+  `Runtime::drain`; a host that calls `exec_pump_frame` gives group 0 one such pump a frame (5
+  item 10); and an isolated document gets its own 200000 and 0.1 s per frame (5 item 11).
 - **Hybrid CPUs.** A step on an E-core is about 1.6x slower, so `max_time` and Ariadne's 0.1 s
   action cap burn faster there. Step budgets are unaffected. P-core placement first (4.4).
 - **`math.random`** (B26; built in Stage 1a). It draws from the `random_stream` (`stdlib.h`) bound
@@ -1479,7 +1672,12 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
 6. An `await` crosses exactly one frame. `wake_awaiting` runs once per group per pump, and a
    multi-document host pumps once per frame (B29).
 7. A quick Ariadne action completes within its drain, and render never runs during a fork-join
-   pump.
+   pump. As built in Stage 1b, one exception: in an isolated `any` document whose group a worker
+   pumps, an action that calls a `host_proxied` verb (`quit`, the `data-*` verbs, `open-url`, the
+   room and chat verbs; oidc's never run there, S1-Q6) parks at the call, and the frame's caller
+   runs the verb after the group's pump, so the action resumes at the group's next pump: it
+   completes a frame later. When the frame's thread pumps that group (a lone isolated document
+   under `drain()`, usually, 4.12), the verb runs inline, as in group 0.
 8. State-tree writes are atomic per node, as today.
 9. `print` writes whole lines: it formats the line outside any lock (a list argument's in its
    data job), then writes it with its newline in one `std::cout.write` under one process-wide
@@ -1703,36 +1901,143 @@ out first, and otherwise it waits for a timer, a lock post or the end of its tim
 `run(N)` frame pump still returns on time ([`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) 6.1,
 9.2).
 
-**Ariadne.**
-- **One pump per frame** (Stage 1, B29). `Runtime::drain()` splits in two, and `drain()` stays
-  `drain_begin()` followed by `drain_end()`:
-  - `drain_begin()` takes queued events, submits actions, residents and ticks, and makes the
-    frame's posts. It does not pump.
-  - `drain_end()` pumps the runtime's groups unless `app.exec_pump_frame()` has run since this
-    Runtime's `drain_begin()` (the app keeps a pump generation counter), then sweeps
-    (`ariadne.cpp:1709-1757`).
-- **Hosts with several Runtimes.** They call `drain_begin` on each, then `app.exec_pump_frame()`
-  once, then `drain_end` on each. That one call pumps group 0 once (`drain_ingress`,
-  `wake_awaiting`, `sync_run`) and every isolated document group, through `pump_all` with the
-  0.1 s frame deadline.
-  - With several documents in group 0 this makes "an await crosses exactly one frame" true.
-  - The shipped hosts drive one Runtime each (`src/arigl/main.cpp:1660`, `src/ari/main.cpp:292`).
-    For them `drain()` is exactly today's.
-- **Isolated documents** (`ariadne.exec.isolate_documents`, opt-in). The Runtime owns an
-  `exec_group` instead of using `app.exec_scheduler()` (`ariadne.cpp:1644, 1690, 1757, 1810`).
-  - `submit_action` and `ensure_resident` use its scheduler and set `ictx.sched` and `ictx.host`.
-  - Teardown destroys the group (4.2), after `pool.kill_owner` when spawn groups hold the document's
-    children (Stage 3).
-  - **Conditions:**
-    - no app-global channels until Stage 2;
-    - its providers classified (4.9);
-    - its subtree's subscribers declared thread-safe, or the group is `affinity::host`.
+**Ariadne** (built in Stage 1b; `ariadne.h`, `app_runtime.h`; [`docs/ARIADNE.md`](ARIADNE.md) 2.5
+and 9.1).
+- **The drain in two halves** (B29, S1.10). `Runtime::drain()` is `drain_begin()` followed by
+  `drain_end()`:
+  - `drain_begin()` is the frame's host work. It notes the app's pump generation
+    (`app.exec_pump_generation()`), decides where the document runs if that is open (below),
+    takes a step of a sign-in in progress (`pump_oidc`), runs the key bindings and the queued
+    events (a program action is submitted, a bare event name runs the host's C++ handler), starts
+    the tick resident and posts it the frame's tick, starts the input residents, and, for an `any`
+    group, snapshots what `has?` answers from (4.9). It does not pump.
+  - `drain_end()` is the pump half, then the sweep. It pumps (`Runtime::Impl::pump_frame`) unless
+    `app.exec_pump_generation()` moved since this Runtime's `drain_begin()`, that is, unless the
+    host called `app.exec_pump_frame()` in between; then it sweeps the finished actions, residents
+    and children where the document's processes run. `drain_end()` alone runs `drain_begin()`
+    first.
+  - `drain()`'s pump is what it was, plus the document's group: group 0 a bounded slice
+    (`drain_ingress`; `wake_awaiting` once per app frame however many Runtimes drain, through
+    `starts_frame()` and the app's pump clock, which stay for this path; `sync_run(200000, 0.1)`)
+    when this Runtime used group 0 or any process lives on it, never building it otherwise; then
+    the document's group, if it has one, through `app.exec_pool().pump_all` with the same budget
+    and a 0.1 s deadline. So a host with one Runtime that opts in keeps calling `drain()`.
+- **Hosts with several Runtimes** call `drain_begin()` on each, then `app.exec_pump_frame()` once,
+  then `drain_end()` on each (`AppRuntime::drain_begin` and `drain_end` too, which do the scene
+  work, the warnings and the frame hooks after `drain_end`). That one call is the frame's only
+  pump: group 0 once, on the calling thread (its token, `drain_ingress`, `wake_awaiting`,
+  `sync_run_steps` with 200000 steps and what is left of the 0.1 s), and every isolated document's
+  group, which its Runtime registered as a frame group, in one `pump_all` ("The app", above).
+  - Group 0 gets one `sync_run` a frame instead of one per Runtime: its budget is 200000 steps a
+    frame, not N x 200000, and with several documents in it an await crosses exactly one frame
+    (AR-2; 5 item 10).
+  - A host does one or the other: `drain()` on one Runtime beside the split on another pumps a
+    registered group twice a frame.
+  - The shipped hosts (`ari`, `arigl`, `AriRuntime`) drive one Runtime each with `drain()`, which
+    is exactly what it was for them.
+- **Host-thread calls** (S1.10). What a Runtime does to its document's scheduler runs on the host
+  thread, between pumps, never inside a `pump_all` of the app's pool (from a native, an
+  `on_complete` callback or a `host_proxied` body): `drain_begin` and the sweep; render, which
+  starts mount ticks, runs mount `init:`s and, in its reconcile, kills residents; `set_root` and
+  `AppRuntime::load`; `set_tick/key/pointer/signal_program`; `run_program`; `post_input` and
+  `post_signal`, which may start their residents, then post; the placement and its moves; and the
+  destructors. The headers say so of each. `post_input` and `post_signal` used to be called
+  thread-safe: a host that catches an OS signal on another thread hands it to the host thread.
+  - Debug builds assert it (`assert_outside_pump`: no `pump_all` of the app's pool on this thread,
+    read through `exec_pool_probe()`, which never builds the pool) in render, `post_input`,
+    `post_signal`, `set_*_program` and `run_program`. Render's is AR-3's latch.
+  - Tearing a Runtime down, and moving a document, are refused inside a `pump_all` in every build
+    (`refuse_inside_pump`: logged, then aborted, before anything is touched): their kills would
+    race a worker on the group, and the group's destruction would abort anyway. A host verb that
+    closes or reloads another document, run in group 0 while `exec_pump_frame` pumps it beside an
+    isolated document, is the case (`AriadneIsolatedDocsDeathTest.ATeardownInsideAPumpIsRefused`).
+- **Isolated documents** (`ariadne.exec.isolate_documents`, opt-in, S1-Q6). The setting is read
+  from the app's tree (on for `1` or `true`, in any case) each time the placement is decided. With
+  it on, the Runtime gives its document an `exec_group` of its own (name and owner the Runtime's
+  owner tag, built on the app) and registers it as a frame group, when the document passes every
+  rule, checked in this order (`Runtime::Impl::isolation_verdict`):
+  1. a non-empty prefix;
+  2. an enforced channel policy: a `channels:` block in strict lint mode (the default for a
+     document with one; `AppRuntime::load` passes the mode to `set_channel_policy`);
+  3. no `global: true` channel;
+  4. no static `/` reference: no program of the document names a `/` channel as the string-literal
+     first argument of a `msg-send`, `msg-recv` or `msg-pending`. The programs read are its lanes,
+     its key bindings and functions, every widget's `on:`, `on_click`, `on_hover`, `on_drag`,
+     `on_drag_start`, `on_drag_end` and `on_top`, each mount's `init:`, `on_tick:` and functions,
+     and the `init:` and `tests:` that `AppRuntime::load` runs elsewhere and hands over
+     (`set_document_programs`): more lanes than the loader's channel lint reads;
+  5. no oidc: no literal `"oidc#..."` channel and no free `oidc-*` call (`free_heads`) in those
+     programs, since oidc posts its flow's end to group 0;
+  6. no writable `link:` hole whose target, resolved against its mount's parent scope, leaves the
+     prefix (a read-only hole, or one inside, is fine).
+
+  A program that does not parse is skipped there (its error shows when it runs). A document that
+  fails a rule stays in group 0, and the first rule it failed is its reason:
+  `Runtime::isolation_reason()` returns it (`""` when isolated), and with the setting on the
+  app's log shows it when it changes (so once while it stays the same, however many frames the
+  document runs). A provider that throws in the probe keeps the document in group 0 too, and so
+  does a group that could not be made.
+- **The group's affinity.** `host`, so pumped on the frame's thread (the `pump_all`'s caller), when
+  its host declared a thread-affine prefix at, under or above the document's prefix, the root's
+  empty prefix included (4.8), or when a `host_only` provider binds anything in an action's env
+  (`host_only_bindings`, which runs the providers in a probe env: an AppRuntime with a host verb
+  or function, for one). Otherwise `any`, which the pool's workers may pump. In arigl every
+  document is `host`: `AriRuntime` declares its scene prefix, the document's own.
+- **What goes to the group.** Every process the Runtime starts runs in its group, and every post
+  and kill goes there: its actions and residents (`make_action_context` gives them the group's
+  scheduler and host), the children they spawn (4.15), its tick, key, pointer and signal posts,
+  `stop_resident`, and the teardown's kills. Its settings reads stay on the host thread. Its
+  providers are installed by kind (4.9), so a `host_proxied` verb on a worker completes a frame
+  later (4.11 item 7). Its programs see only the group: `ps`, `inspect` and `kill` reach only the
+  document's own processes (5 item 11), and pids stay unique app-wide.
+- **When it is decided** (`ensure_placement`). At load (`AppRuntime::load` asks, through
+  `isolated_group()`, once the document's programs, channel policy and tree, and its host's
+  providers and declarations, are set), and again, before the next program starts, the next frame
+  is drawn or the next `drain_begin` runs, after any of: `set_root`, a lane's program
+  (`set_*_program`), `set_document_programs`, `set_channel_policy`, `set_key_bindings`,
+  `declare_thread_affine_prefix`, or a host verb registered since (`refresh_program_names`, which
+  AppRuntime's registrations call). A Runtime given no document decides when its first program
+  starts. `isolated_group()` and `isolation_reason()` decide if that is open; `current_group()`
+  returns what was last decided and decides nothing, and `AppRuntime::idle()` and `wait_idle()` use
+  it, so a query never builds, moves or destroys a group.
+- **A move** (a placement change). When the answer changes (group 0 against a group, or the group's
+  affinity) the document moves, on the host thread (refused inside a pump, above):
+  1. its actions, the children they spawned or forked, its residents and its mount ticks are
+     killed and reaped where they ran, and a `run_program` caller whose program had not ended is
+     told "did not complete: the document moved to another group";
+  2. the old group stops being a frame group, and a new group is made and registered if the
+     document is eligible;
+  3. its open streams are re-pointed at the new scheduler (`stream::retarget`: every live stream
+     of the app opened at or under the document's prefix that posts to the old scheduler, each
+     under its own lock, so no post to the old one is in flight once it returns);
+  4. the old group is destroyed at once, so a document has one group at most;
+  5. the residents and mount ticks start again in the new place at the next drain.
+
+  The moved processes' contexts stay with the Runtime until it goes. In group 0 an action and its
+  children survive a reload; a move kills them, which includes a host verb registered after
+  `load()` that moves a running `any` document to a `host` group (register before `load()`).
+- **AppRuntime's registrations** (`register_verb`, `register_async_verb`, `register_function`,
+  `register_async_function`, `register_quit`) are made on the host thread, outside a frame, and
+  before `load()`: one made later has the placement decided again before the next program, so the
+  name is bound in the document as it is in group 0. AppRuntime's verb table is read by its
+  providers' bodies, which a spawned child in an `any` group runs on a worker, and written by the
+  registrations, `load()` and the destructor, all under one process-wide lock; a body copies what
+  it binds under the lock and binds unlocked, and no callable a host gave is destroyed under it
+  (pycvc's take the GIL as they go).
+- **One isolated document.** A host with one Runtime that opts in may keep calling `drain()`: its
+  `drain_end` pumps the document's group through `pump_all` itself. A lone group with nothing else
+  in the call is pumped by the caller (no helper is woken for it, 4.4), so one isolated document
+  runs on the frame's thread as before, and gains a worker only beside other work in an
+  `exec_pump_frame`; several isolated documents spread over the workers. `CVC_EXEC_FORCE_MOVE`
+  puts even a lone group on a worker (IS-1b, AR-3b).
+- **Teardown** destroys the group after the Runtime's own kills and reaps (4.17), and, in Stage 3,
+  after `pool.kill_owner` when spawn groups hold the document's children.
 - **The reactive lane** runs its own evaluator on the render thread under `park_forbidden_scope`
-  (`ariadne.cpp:670-690`). It never touches a group and is unchanged.
+  (`ReactiveEngine`). It never touches a group and is unchanged.
 - **Parallel actions** (Stage 3, `ariadne.exec.parallel_actions: k`).
   - A document gets k action groups beside its resident group. Fire-once actions are placed
     least-loaded across them.
-  - Actions already get their own env and context (`ariadne.cpp:1646-1676`), so an action placed in
+  - Actions already get their own env and context (`make_action_context`), so an action placed in
     another group needs no copy.
   - The cost is that actions from one frame may run at the same time, so their state writes within
     a frame are in no fixed order.
@@ -1927,7 +2232,7 @@ whichever pool pumps it.
 | Host | How it opts in | Stage |
 |---|---|---|
 | C++ embedder | make `exec_group`s; `app.exec_pool(opts).pump_all(...)`, or `register_frame_group` and `exec_pump_frame`; `attach` in Stage 2 | 1a, 2 |
-| Ariadne, several documents | `state_exec.threads: auto`, `ariadne.exec.isolate_documents: true` | 1b |
+| Ariadne, several documents | `state_exec.threads: auto` (or `app.exec_pool(opts)` first), `ariadne.exec.isolate_documents: true`, and each frame `drain_begin` / `app.exec_pump_frame()` / `drain_end` (4.12) | 1b |
 | Ariadne, one document | `ariadne.exec.parallel_actions: k`; programs use `spawn-isolated` | 3 |
 | pycvc | `pycvc.ExecPool(app, threads=8).run_all(...)`; several `Exec`s on several threads | 1a (0) |
 | `exec_coordinator` | `attach_pool` | 2 |
@@ -1942,9 +2247,9 @@ group automatically (D's `auto_spawn` is not taken; Q4).
   lock mode's `auto` alike, so a whole suite runs threaded unchanged (AR-1). Read once per
   process. It does not override a host's `pool_options` (`ExecPool(threads=0)` stays 0).
 - `CVC_EXEC_DETERMINISTIC=1`: deterministic mode (4.4). Read when a pool is built.
-- `CVC_EXEC_FORCE_MOVE=1`: every group is pumped by a different thread on each pump (4.4); in
-  Stage 3, every movable process moves every K pumps. Read when a pool is built, so a test sets it
-  for the pool it builds.
+- `CVC_EXEC_FORCE_MOVE=1`: every group is pumped by a different thread on each pump (4.4), a lone
+  isolated Ariadne document's included; in Stage 3, every movable process moves every K pumps.
+  Read when a pool is built, so a test sets it for the pool it builds.
 - `CVC_EXEC_VERIFY=1`: in Stage 1, the pump owner's check in the schedulers' public mutators in a
   release build (4.1; debug builds always check). Read once, when the library loads. Boundary
   tagging and isolation walks (4.3) are not built yet.
@@ -2000,7 +2305,18 @@ no groups. Stage 1 then only extends it to groups and adds what follows from the
     and `lock_wait_allowed`, so a child an Ariadne init script spawns, stepped on the host
     thread, never waits for a lock either. The child records the parent's pid and inherits its
     priority floor ([`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) 5.5, 5.8, 7.2).
-- **Ariadne's callback** also re-applies the action intrinsic providers and sets `document`.
+- **Ariadne's callback** (`Runtime::Impl::spawn_child`; as built in Stage 1b, S1.10) builds the
+  child's context from its parent's, by value and nothing by path: its `sched` and `host` (so the
+  child runs in its parent's group, and its async calls go to that group's host), its `root`,
+  `root_pins` and `root_path`, `uid`, cluster and node ids, `channels` (the document's policy),
+  `document` (its resource scope), both lock fields and `spawn_context` (grandchildren get one
+  too). It walks no tree, so it is safe on the pumping thread, which is a worker in an `any`
+  group. It then builds the child's env as an action's (`finish_context`: the intrinsics, the
+  providers by kind for the parent's group, `has?`), and records the child so the drain reaps it
+  once it ends; the child keeps the document's owner, so the teardown's `kill_owner` reaches it.
+  So a child of a deleted chroot keeps writing its parent's detached node, as the library's
+  default does, and makes no node at the old path (SP-1). Before, it re-chrooted by path, through
+  `make_action_context`, which made a new node there.
 - **pycvc's callback** gives the child `extend(natives)`.
   - `natives` is a new scope holding the `Exec`'s registered natives.
   - `impl_->env` becomes `extend(natives)`, so the REPL's top-level definitions still persist
@@ -2010,7 +2326,7 @@ no groups. Stage 1 then only extends it to groups and adds what follows from the
   `spawn-isolated` child's exit status for `inspect`.
 
 **`(fork)`** (B28, landed with the locks track's L1, #862) forks the running process,
-`current_pid()`, not `ctx->pid`, which hosts leave at -1 (Ariadne, `ariadne.cpp:1645-1660`) or 0
+`current_pid()`, not `ctx->pid`, which hosts leave at -1 (Ariadne's `make_action_context`) or 0
 (pycvc, `pycvc_exec.cpp:416`). The child copies `owner` (`async_scheduler.cpp:957-976` copies
 everything else), so `kill_owner` reaches it.
 
@@ -2112,7 +2428,7 @@ the judges' corrections. It is recorded here so the earlier stages do not close 
 | A worker blocked in an inline kernel or `call->wait` | Holds its group only; long-step monitor; optional compensating worker (4.9) |
 | A host-only native called in a worker-pumped group | Impossible by construction: not installed, so a NameError. A `host_proxied` body runs on the `pump_all`'s caller by construction (`run_on_host`) |
 | A host posts one compound value to two groups (invariant G broken) | A data race in a release build; TSan in CI. The host API documents a posted value as moved in (4.12). Stage 1 has no `CVC_EXEC_VERIFY` tagging, and `exec_group::execute(value_t)` copies the AST's lists and dicts itself |
-| A subscriber assumed the main thread but its document was declared `any` | A data race in the host's code. Mitigated by the audit and by `host_only` as the default |
+| A subscriber assumed the main thread but its document was declared `any` | A data race in the host's code. Mitigated by the audit, the host's thread-affine declarations, `host_only` as the default, and the debug home-thread asserts of cvcGL's render-thread subscribers (4.8) |
 | Cross-group ingress full | `msg-send` returns `{status: "error", reason: "ingress full"}`; `post_message` returns false; counted per group |
 | A remote waiter vanishes with a delivery in flight | Requeued at the home (4.6); counted |
 | A lock holder killed or failed, alone or with its group | Its locks are released when the kill is applied, before `release_if_idle`; an X holder whose section had started is marked abandoned for the next exclusive holder ([`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) 5.6) |
@@ -2120,6 +2436,9 @@ the judges' corrections. It is recorded here so the earlier stages do not close 
 | A lock deadlock across groups | `DeadlockError` in the request that closes the cycle, when it blocks: the check runs under the lock manager's mutex over every group's holds and waiters, so it is exact |
 | A group destroyed while pumping | Destruction takes the token, waiting for the pump; kernels in flight are waited for. Each teardown step catches and logs what it throws, so a kill or a lock release that throws (a Stage 0 follow-up) never terminates the process (4.2). Destroying a group inside a `pump_all` that holds it, or from a body or callback the pool runs, is a debug assertion; from inside its own pump (a native or inline callback of its own process) it aborts in every build |
 | A worker that fails to start | The pool runs with the workers that started, and notes each failure for its owner to log (`take_notes`; `app::exec_pool` logs them); the caller always pumps |
+| Under `CVC_EXEC_FORCE_MOVE`, no worker reaches a call's groups before its deadline | The caller, which may not take a group it pumped last, waits for the workers no longer than the deadline, then skips those groups itself, and a worker that skips them tells it (4.4): the frame ends on time, and the skipped groups go first next frame |
+| Teardown of an Ariadne Runtime (`~Runtime`; built in Stage 1b, S1.10, S1-Q8) | On the host thread, outside a pump: inside a `pump_all` of the app's pool it is refused in every build, logged and then aborted before anything is touched (4.12). In this order, each step catching and logging what it throws: (1) the document's resources close (`doc_scope_.clear()`: a stream marks its descriptor closed and posts its last seq and "closed" to the scheduler it names); (2) on the scheduler its processes run on (its group's, else group 0's if it ever used it), `kill_owner` of the Runtime's owner tag, then a reap of every process the Runtime knows of, its actions' own processes included: the actions and the children they forked, the spawned children, the residents and the mount ticks (S1-Q8: a killed record left in group 0 was a leak whose context was already gone; HZ-8); (3) its frame registration, then its group, whose own teardown (4.2) kills, shuts its host down and reaps whatever is left. The group goes first of the Runtime's members, before the channel policy and the document scope its processes' contexts point at. Why this order: an open stream holds the group's scheduler and posts to it, from its producer thread too, so the streams close while the group lives; a started net call holds the group's host's finisher, and the host's shutdown, after the kills, cancels it before the scheduler goes (4.9). A resident a reload or a mount reconcile stops is killed and reaped then (`stop_resident`), so nothing of the Runtime's owner is left in group 0 (`AriadneHazards.AResidentAReloadStopsIsReaped`) |
+| A document moved (its placement changed) while its programs run | Its processes are killed and reaped where they ran, a `run_program` caller whose program had not ended is told "did not complete: the document moved to another group", its residents start again in the new place, its streams are re-pointed there, and the old group goes at once (4.12) |
 | Teardown of the app | The groups' owners destroy them first; the pool owns none, and `~app` asserts in debug builds that none is left. Then `~app` destroys the pool, whose workers stop after their current pumps, before the app's async host shuts down and its background pool, which ran the groups' kernels, closes |
 
 ### 4.18 Every blocker, resolved
@@ -2140,22 +2459,22 @@ the judges' corrections. It is recorded here so the earlier stages do not close 
 | B12 | `exec_group::execute(value_t)` copies the AST's lists and dicts; generators cannot cross (isolating copy) | 4.3, 4.12; Stage 1a |
 | B13 | Per-watch root | 4.8; Stage 0 |
 | B14 | Pinned lookups and a pinned chroot; `state-delete` erases one node | 4.8; Stage 0 |
-| B15 | `affinity::host` unless the subtree's subscribers are declared thread-safe; audit | 4.8; Stage 1 |
+| B15 | `affinity::host` when the host declared a thread-affine prefix at, above or under the document (`AriRuntime` declares its scene), or its env holds a `host_only` native; the audit, with debug home-thread asserts in cvcGL's render-thread subscribers | 4.8; Stage 1b |
 | B16 | One frozen builtins scope (`frozen_builtins()`), extended per group | 4.2; Stage 1a |
 | B17 | Atomic stop flags; `post_control` on both schedulers; `exec_coordinator` uses it | 4.5, 4.12; Stage 0 |
 | B18 | Futures cannot leave their group (isolating copy, messages are strings); `finish_async_call` idempotent, every waiter woken; the foreign-future check raises on another scheduler's threaded future | 4.9; Stage 0 (the check: Stage 1a) |
 | B19 | `perf/sched`'s `wait_for_work`; Stage 2's group state word and pool eventcount | 4.4; Stage 2 |
 | B20 | Only the reactive lane arms it, on the host thread; Stage 4: in the step context | 4.12; 4.16 |
 | B21 | Blocks one worker only; long-step monitor; optional compensating worker | 4.9; Stage 2 |
-| B22 | Provider kinds `any`, `host_proxied`, `host_only` (`exec_group::install`); host-call queue; `affinity::host` groups | 4.9; Stage 1a (Ariadne's providers: Stage 1b) |
+| B22 | Provider kinds `any`, `host_proxied`, `host_only` (`exec_group::install`); host-call queue; `affinity::host` groups; Ariadne's providers registered by kind and installed by it (`register_action_intrinsics(provider, affinity)`) | 4.9; Stage 1a (Ariadne's providers: Stage 1b) |
 | B23 | `perf/async` | 2.4 |
 | B24 | `perf/async` | 2.4 |
 | B25 | Per-process parsing; a shared AST copied at submit; class dicts frozen and measured (`mt.groups` raise/catch); per-group copies if contention shows (Q2) | 4.3, 6; Stage 1 |
 | B26 | Random stream per group, bound by its scheduler; line-atomic `print` | 4.10, 4.11; Stage 1a (`print`: Stage 0) |
-| B27 | Spawn context with a default; Ariadne's and pycvc's callbacks | 4.15; Stage 1 (its single-scheduler part landed with the locks track's L1b, which passes IS-1 and IS-2 on one scheduler; Stage 1 re-runs them in groups) |
+| B27 | Spawn context with a default; Ariadne's and pycvc's callbacks; Ariadne's builds the child from its parent's context | 4.15; Stage 1 (Ariadne's in groups: Stage 1b; its single-scheduler part landed with the locks track's L1b, which passes IS-1 and IS-2 on one scheduler; Stage 1 re-runs them in groups) |
 | B28 | `(fork)` forks `current_pid()`; the child keeps `owner` | 4.15; landed with the locks track's L1 |
-| B29 | `drain_begin` / `exec_pump_frame` / `drain_end` | 4.12; Stage 1 |
-| B30 | `ictx.host` and `ictx.sched` at every posting and async-function site | 4.9; Stage 1 |
+| B29 | `drain_begin` / `exec_pump_frame` / `drain_end` | 4.12; Stage 1b |
+| B30 | `ictx.host` in every Ariadne context and at every async-function site; posts to `ictx.host->parking_scheduler()`, else group 0 | 4.9; Stage 1a (the field), Stage 1b (Ariadne) |
 | B31 | Movable processes resolve their scheduler, host and tracker through `exec_group::current()` | 4.15; Stage 3 |
 | B32 | One pid source per app, for group 0 and every group; `adopt` keeps the pid | 4.5, 4.15; Stage 1a, 3 |
 
@@ -2336,13 +2655,25 @@ Each item says when it applies. "Always" items land whether or not a host enable
    on the `pump_all`'s caller after the join in a threaded `pump_all`, whichever thread pumped
    their group, and a throw among them is rethrown once all have run (4.9). At threads 0 and in
    deterministic mode they run inline, as today; so do the app scheduler's and pycvc's `Exec`'s.
-10. **Opt-in (several Runtimes and `exec_pump_frame`): the shared scheduler is pumped once per
-    frame.** Today it is pumped once per document. With several documents an `await` now crosses
-    exactly one frame; before, it could resume within the same frame.
-11. **Opt-in (`isolate_documents`): an isolated document runs in its own scheduler.**
+10. **Opt-in (several Runtimes and `exec_pump_frame`; built in Stage 1b): the shared scheduler is
+    pumped once per frame.** Its `wake_awaiting` half was already true before Stage 1: with
+    plain `drain()`, `starts_frame()` and the app's pump clock wake the awaiting processes once per
+    app frame however many Runtimes drain, so an `await` already crossed exactly one frame
+    (`SeveralRuntimesResumeAnAwaitOncePerFrame`), and that path is unchanged. What
+    `drain_begin` / `exec_pump_frame` / `drain_end` changes is the step budget: group 0 gets one
+    `sync_run` a frame, 200000 steps, instead of one per Runtime, N x 200000 (AR-2).
+11. **Opt-in (`isolate_documents`; built in Stage 1b): an isolated document runs in its own
+    scheduler** (4.12).
     - Its pump budget is 200000 steps and 0.1 s per frame, of its own.
-    - Its `ps`, `kill` and `inspect` no longer see other documents' processes.
-    - Its natives and subscribers may run on a worker thread, if declared `any`.
+    - Its `ps`, `kill` and `inspect` see only its own group's processes, not other documents'
+      (AR-3).
+    - Its natives and subscribers may run on a worker thread, if its group is `any`.
+    - In an `any` group a worker pumps, an action that calls a `host_proxied` verb completes a
+      frame later (4.11 item 7), and `has?` answers from the frame's snapshot (4.9).
+    - A change of its placement (a reload that makes it eligible or not, a program, the channel
+      policy, a declaration or a late host verb) kills and reaps what it runs, tells a
+      `run_program` caller, and restarts its residents in the new place; in group 0 an action
+      survives a reload.
     - Pids stay unique app-wide.
 12. **Opt-in (Stage 2 router): cross-group messages.**
     - A message to a channel homed in another group arrives at that group's next drain.
@@ -2376,7 +2707,7 @@ Each item says when it applies. "Always" items land whether or not a host enable
     - a host env used as the global env;
     - strict priority within a group;
     - every host API that exists today, apart from `exec_coordinator`'s asynchronous contract
-      and Stage 1a's always-on changes (both below).
+      and Stage 1a's and Stage 1b's always-on changes (all below).
 
 **Hosts (Stage 0, built): `exec_coordinator`'s asynchronous contract** (4.12; S0-Q2, S0-Q3).
 `migrate()` returns `{true, -1, target, ""}` once it has posted the migration, and a failure shows
@@ -2451,6 +2782,42 @@ head):
 - Trees that set `state_exec.threads`: only the `AppLockManager` tests.
 - `kill_owner` callers: none throws from a kill.
 
+**Always (Stage 1b, built)** (S1.md section 1). With `ariadne.exec.isolate_documents` off and no
+host calling `exec_pump_frame`, Ariadne runs every document in group 0 as before, with these
+changes:
+- **The init lane charges its async calls to init's process** (S1-Q2): a provider that registers
+  on `*ictx.host` runs its async functions inline on the lane's own host, charged to init's
+  process, where nobody was charged before. Their done channels still post to group 0, and the
+  lane's cycles are collected and freed when the run ends (4.9).
+- **Teardown reaps every process of the Runtime's owner** (S1-Q8): the actions' own processes too,
+  which used to stay in group 0's table, killed (HZ-8), and a resident a reload or a mount
+  reconcile stops is reaped when it is stopped (4.17).
+- **A spawned child takes its context from its parent's** (S1.10): a child of a deleted chroot
+  writes its parent's detached node instead of making a node at the old path (4.15, SP-1).
+- **`post_input` and `post_signal` are host-thread calls** (S1.10): their header called them
+  thread-safe, and a debug build now asserts they run outside a pump (4.12). Every shipped caller
+  calls them from its frame thread.
+
+AppRuntime's names resolve as before (its six providers keep the one provider's binding order,
+4.9), error texts and warnings are unchanged, and the new log lines come only with the setting on
+or from a teardown step that throws.
+
+**Step counts (Stage 1b).** Every existing program takes the steps it took before, except an
+`init:` script's async calls, now charged to init's process (no shipped document has one). The
+reworked test is HZ-8, whose Ariadne case now expects the action's own process reaped too.
+
+**Compatibility scan (Stage 1b)**, at master 5878932d (S1.md section 8; the PR repeats it at its
+head):
+- `init:` scripts calling async verbs: none. The five shipped documents that call async verbs
+  (`oidc_sign_in.ari`, `nav_compute.ari`, `l4_frames.ari`, `net_probe.ari`, `oidc_probe.ari`) call
+  them from actions.
+- Hosts that drive several Runtimes with `drain()`: none shipped;
+  `SeveralRuntimesResumeAnAwaitOncePerFrame` keeps its behaviour.
+- Tests or hosts relying on a torn-down Runtime's killed actions staying in the table: HZ-8's
+  Ariadne case, reworked.
+- A spawned child of a deleted chroot relied on to write at the old path: none.
+- Trees that set `ariadne.exec.isolate_documents`: none ship.
+
 ## 6. Expected performance
 
 ### 6.1 The data points
@@ -2510,7 +2877,7 @@ or refute it.
 | `mt.groups` | 1a | `groups` (8, 16) `exec_group`s over the frozen builtins on the app's pool, fork-join, `t` (1, 2, 4, 8, 16) pumping threads (`t - 1` workers and the caller); each group runs `prog` (fib, exceptions, or `cycle`: closure cycles) `runs` (5) times, completion read from process info after each round, not from `on_complete`. As built (Stage 2 adds continuous mode) | `extra.speedup` against one group alone through the pool, `extra.of_ceiling` against `mt.independent` in the same rep with the pool's placement, the pool's `pumps`, `helper_wakes`, `worker_pumps`, `skipped` and `effective_threads` |
 | `mt.groups.flood` | 1a | `n` (2000) tiny programs on the app's pool at `t` 1 and 4, through `t` reused groups (`mode=reuse`) or a group per program built and destroyed in the region (`mode=fresh`). The `ExecPool` twin, a pycvc script, is not written yet | `programs_per_s`, `extra.group_setup_ns`, `extra.group_teardown_ns` |
 | `mt.pycvc_threads` | 0 | T Python threads, one `Exec` each. As built, a standard-library script (`tools/bench/mt_pycvc_threads.py`) writing the bench's records, not pytest-benchmark; recorded, not gated | speedup |
-| `mt.ariadne_docs` | 1b | D Runtimes with heavy residents, and D small documents, through `drain_begin` / `exec_pump_frame` / `drain_end`, threads 0-8 | frame DSL time, `extra.helper_wakes` |
+| `mt.ariadne_docs` | 1b | `docs` (1, 2, 4, 8) `AppRuntime`s on one app, each at its own prefix, loading one eligible document with `ariadne.exec.isolate_documents` on, through `drain_begin` / `exec_pump_frame` / `drain_end`, at `t` (0, 1, 2, 4, 8) pool workers besides the caller; `frame=heavy` (each tick about 8000 steps) and `frame=small` (one `state-incr`). As built ([`STATE_EXEC_BENCH.md`](STATE_EXEC_BENCH.md)) | ns per frame, the pool's `helper_wakes`, `pumps` and `skipped`, `worker_pumps`, and `extra.isolated` (documents in a group of their own), which guards the small-frame gate from passing vacuously |
 | `mt.cross_group_msg` | 2 | pingpong within one group and across two; fan-out from one dispatcher to k groups; broadcast to waiters in k groups | ns per message, wake latency percentiles |
 | `mt.state_tree` | 1a | `state-get`/`state-set` loops from G (1, 2, 4, 8) groups, a pumping thread each, on disjoint and on shared subtrees, chrooted and not, at depths 1 and 4 | ns per op against G (`extra.ns_per_op`, `extra.group_ns_per_op`) |
 | `mt.groups.async` | 2 | async kernels from G groups, `wait_for_work` drivers | completion latency, calls/s |
@@ -2575,7 +2942,7 @@ Stage 0 has not landed (its L2). Stage M comes last.
 | Stage | Content | Builds on | Done when |
 |---|---|---|---|
 | 0 | Process-global hazard fixes; no threads added | `perf/async` (pool), `perf/sched` (ingress flag) | HZ cases pass; TSan clean on `mt.multi_exec` |
-| 1 | 1a (built): `exec_group`, a fork-join `exec_pool`, registry and random stream per group, lightweight groups, pid source, pump owner, the foreign-future check, provider kinds, `ExecPool`. 1b: host natives classified, Ariadne one pump per frame and isolated documents, the spawn context in Ariadne's groups | Stage 0 | GR, IS-1, IS-2 and AR-1 to AR-4 pass; Stage 1 gate |
+| 1 | 1a (built): `exec_group`, a fork-join `exec_pool`, registry and random stream per group, lightweight groups, pid source, pump owner, the foreign-future check, provider kinds, `ExecPool`. 1b (built): host natives classified, Ariadne one pump per frame and isolated documents, the spawn context in Ariadne's groups | Stage 0 | GR, IS-1, IS-2 and AR-1 to AR-4 pass; Stage 1 gate |
 | 2 | Continuous pool with wakeups, router with channel homes, cross-group control, published info, bounded ingress, split kernel pools, `exec_coordinator` on the pool | Stage 1; `perf/sched` (timer heap, `wait_for_work`) | PL, MS and AR-7 pass; Stage 2 gate |
 | 3 | `spawn-isolated`, spawn groups, movable processes and moves, Ariadne parallel actions | Stage 2 | IS-3 to IS-10, AR-5 and AR-6 pass; Stage 3 gate |
 | S | Slices in today's `async_scheduler`, single-threaded | `perf/sched` (direct step, one clock reading) | SL pass; Stage S gate |
@@ -2742,13 +3109,76 @@ reviews and A/B.
   race now gets a `RuntimeError`; a host whose app made a single lock manager before its pool gets
   an inline pool and a log line.
 
-**Stage 1b** (not built): Ariadne's providers on `ictx.host` split by kind (S1-Q7), the init lane
-on an inline host of its own (S1-Q2), `drain_begin`/`drain_end` and one pump per frame, isolated
-documents with S1-Q6's eligibility, `spawn_child` from its parent's context, the teardown reap
-(S1-Q8), the subscriber audit and declarations, `uri_state`'s and streams' pin vectors; IS-1, AR-1
-to AR-3b, SP-1, EL-1, HZ-8's rework, FF-3's init half, PIN-1; `mt.ariadne_docs`.
+**Stage 1b** (built): Ariadne's providers on `ictx.host`, registered by kind (S1-Q7), with posts
+on the caller's group; the init lane on an inline host of its own (S1-Q2); `drain_begin` /
+`drain_end` and one pump per frame; isolated documents with S1-Q6's eligibility, their placement
+and its moves; `spawn_child` from its parent's context; the teardown reap (S1-Q8); the subscriber
+audit and the thread-affine declarations; `uri_state`'s and streams' pin vectors; `mt.ariadne_docs`.
+- **Files:**
+  - `ariadne.h`/`ariadne.cpp`: `Runtime::drain_begin`, `drain_end` (`pump_frame`,
+    `sweep_actions`); `register_action_intrinsics(provider, affinity)`, the registry keeping each
+    provider's kind, and `install_providers`; the init lane's inline host and cycle registry
+    (`run_scoped_program`); `ictx.host` in every context; isolated documents
+    (`ensure_placement`, `isolation_verdict`, `host_only_bindings`, `probe_env`, `move_out`,
+    `kill_and_reap`), `isolated_group`, `isolation_reason`, `current_group`,
+    `declare_thread_affine_prefix`, `set_document_programs`; `has?`'s snapshot for an `any` group;
+    `spawn_child` from the parent's context; the teardown's order and reap, and `stop_resident`'s
+    reap; the host-thread asserts (`assert_outside_pump`) and refusals (`refuse_inside_pump`);
+  - `app_runtime.h`/`app_runtime.cpp`: six providers by kind, in the old binding order; done
+    channels on the calling program's group; `drain_begin`, `drain_end`,
+    `declare_thread_affine_prefix`, `wait_idle`; `idle()` counting the document's group; `load()`
+    handing over `init:` and `tests:` and deciding the placement; the verb table's lock;
+  - `intrinsics.h` (the provider rules), `async_scheduler.h`/`.cpp` (`ingress_posts_for_test`, for
+    AR-3b), `async_host.h`/`.cpp` (`finisher`, `make_finisher`);
+  - `net_intrinsics.h`/`.cpp`: two providers by kind on `*ictx.host`, a started request keeping its
+    host's finisher; `ws_client.cpp`: a frame sent whole;
+  - `stream.h`/`stream.cpp`: `stream_params::scheduler`, posts under a per-stream lock,
+    `stream::retarget` over a list of live streams, the descriptor pins a `cvc::pin_vector`;
+    `stream_intrinsics.cpp`: `any`, posting to the opener's group;
+  - `room_intrinsics.cpp`, `room_media_intrinsics.cpp` (a subscribed proxy on the caller's group),
+    `oidc_host.cpp`: `host_proxied`;
+  - `uri_state.cpp`: its chains are `cvc::pin_vector`s;
+  - `exec_pool.cpp`: a force-moved call ends at its deadline (4.4);
+  - `state_sync_adapter.h`/`.cpp`: what is not thread-safe, in comments;
+  - cvcGL: `AriRuntime.h`/`.cpp` (the scene prefix declared, `wait_idle` through
+    `AppRuntime::wait_idle`); the debug home-thread asserts (`CameraController.cpp`,
+    `TouchGestures.cpp`, `StageLighting.cpp`, `FpsHud.cpp`, `ScreenTextHud.cpp`, `Settings.h`,
+    `Settings.cpp`); `GraphicsNode.h`/`.cpp` (the pose mark, thread-local);
+  - `examples/ariadne/nav_compute/nav_compute.cpp`: `any`, on `*ictx.host`;
+  - `bindings/pycvc/pycvc_ariadne.i`: `AriApp.wait_idle` through `AppRuntime::wait_idle`;
+  - the bench (`state_exec_bench.cpp`'s `mt.ariadne_docs`, `tools/bench`'s gate guard
+    `GATE_GUARDS`) and [`STATE_EXEC_BENCH.md`](STATE_EXEC_BENCH.md);
+  - CI: the CTest entries `ariadne_runtime_test_threads_auto` and `ariadne_host_test_threads_auto`
+    (AR-1: both suites again with `CVC_EXEC_THREADS=auto`, `AppLockManager.*` filtered out); the
+    sanitizer jobs' `SAN_REQUIRED_S1B`, required in every leg; the clang leg runs
+    `state_lifetime_stress_test` and `ariadne_runtime_test`, the latter at `CVC_EXEC_THREADS=4`
+    with `AppLockManager.*` filtered out (its `cxx_runs`, `run.sh`'s `SAN_CXX_RUNS`);
+    [`TESTING.md`](TESTING.md);
+  - docs: this document, [`ARIADNE.md`](ARIADNE.md),
+    [`STATE_EXEC_DEVELOPER_GUIDE.md`](STATE_EXEC_DEVELOPER_GUIDE.md), [`APP_API.md`](APP_API.md),
+    and the pycvc README's `AriApp` passage.
+- **Tests:** IS-1b, AR-1, AR-2, AR-3, AR-3b, SP-1, EL-1, FF-3's init case, HZ-8's rework and
+  PIN-1 (section 8), and the implementers' own cases beside the code's existing tests (8.6).
+- **Exit:** these pass; every Ariadne, cvcGL and pycvc suite passes on Windows, Linux and macOS
+  with step counts unchanged (5, "Step counts (Stage 1b)"); the three sanitizer legs are clean
+  with every Stage 1b line found; with `ariadne.exec.isolate_documents` off and no host calling
+  `exec_pump_frame`, nothing runs on a worker (AR-1); `mt.ariadne_docs`' small frames wake no
+  helper, or the gate is recorded as no verdict with the owner's agreement.
 - **Risk:** the surprises are host natives and subscribers that assume the main thread. Any
-  doubtful one defaults to `host_only` or not thread-safe.
+  doubtful one defaults to `host_only` or not thread-safe, and arigl's documents stay `host`.
+- **Follow-ups** (recorded, not built):
+  - every AppRuntime's verbs bind into every Runtime's env (the process-global registry; only the
+    `data-*` provider checks its program is its own), so a host with several AppRuntimes, one of
+    which registered a host verb or function, makes every isolated document `host`: affinity counts
+    other hosts' verbs (pre-existing cross-binding; conservative, R1b-mid s-m5);
+  - no host API declares a host verb's or function's kind other than `host_only`: a host that
+    wants an `any` verb registers a provider of its own (4.9);
+  - `stream::retarget` matches a document's streams by scope and old scheduler, so a group-0
+    document nested under a moving document's prefix has its streams moved too;
+  - the subscriber audit's (4.8): `state_sync_adapter`'s pinned walks and atomic `_attached`;
+    the settings classes and render-thread subscribers moving out of arigl's document prefix;
+    volren's and volslice's settings; `state_object`'s teardown against a slot on another thread,
+    which covers the two-scenes read in `GraphicsNode`.
 
 **Stage 2: continuous pool, router and control** (3-4 weeks).
 - **Files:**
@@ -2836,7 +3266,7 @@ Linux clang. Each stage turns its cases into gtest and pytest cases with these I
 | HZ-5 | `state-delete` of a node while a sibling has expired but not been swept | only the node is gone |
 | HZ-6 | one thread loops `state-delete` and re-create of a node while another `state-get`s its siblings (ASan, TSan) | no use after free, no race |
 | HZ-7 | a chrooted process calls `state-watch`; then a process is submitted | its settings are read from the host's watch root |
-| HZ-8 | `(fork)` in a pycvc program and in an Ariadne action | the running process forks: both continue, with 0 and the child's pid; the child has the parent's `owner`; `kill_owner` reaps it. `kill_owner` exists on the async scheduler only, so the reaping half is checked there, under pycvc's `Exec` and Ariadne's app scheduler (both schedulers' fork is covered by `LocksReview.ForkInAStepReturnsZeroInTheChild` and `Locks.LW06_Fork`). As built, the Ariadne case's teardown reaps the forked child, and leaves the action's own process in the table, killed with `owner_reaped`; S1-Q8 decided that teardown reaps it too, in Stage 1b |
+| HZ-8 | `(fork)` in a pycvc program and in an Ariadne action | the running process forks: both continue, with 0 and the child's pid; the child has the parent's `owner`; `kill_owner` reaps it. `kill_owner` exists on the async scheduler only, so the reaping half is checked there, under pycvc's `Exec` and Ariadne's app scheduler (both schedulers' fork is covered by `LocksReview.ForkInAStepReturnsZeroInTheChild` and `Locks.LW06_Fork`). As built in Stage 0, the Ariadne case's teardown reaped the forked child and left the action's own process in the table, killed with `owner_reaped`; S1-Q8 decided that teardown reaps it too, and Stage 1b reworked the case (`AriadneHazards.HZ08_ForkedChildKeepsOwnerAndTeardownReapsIt`): after teardown the forked child and the action's own process are both gone |
 | HZ-9 | `exec_coordinator` control messages on a bus thread while the scheduler runs (TSan) | no race; the commands apply between steps |
 | HZ-10 | `mt.multi_exec` at 8 threads under TSan | clean |
 | HZ-11 | two `pycvc.Exec`s on two Python threads, raising and catching built-in exceptions and using `state-data-set` (Linux TSan) | correct results, clean |
@@ -2873,7 +3303,7 @@ time. Timing assertions are one-sided, with generous ceilings; no name says "Str
 | PO-2 | the pump owner (`PO02_TheOwnerRule`) | a scope nests on one thread; another thread's is refused while one is held; a sync scheduler pumped from successive threads works |
 | FF-1 | a threaded future of scheduler A awaited from B, through `await`, `await-all` and `msg-recv` (`FF01_AnotherSchedulersFutureRaises`; S1-Q2) | `RuntimeError` with S1-Q2's text at once; A's call list untouched, and A's own await gets the value |
 | FF-2 | an inline future awaited from another scheduler (`FF02_AnInlineFutureIsAValue`) | its value |
-| FF-3 | `Exec` B awaiting `Exec` A's threaded future (`test_ff03_future_across_execs_raises`); the init lane's `HZ13_InitLaneAwaitsAnAppHostFuture` (Stage 1b's half) | raises at once instead of waiting to its idle limit; the init lane still gives `(21 21 6)` |
+| FF-3 | `Exec` B awaiting `Exec` A's threaded future (`test_ff03_future_across_execs_raises`); Stage 1b's init case, a new one beside an unchanged HZ-13 (`AriadneHazards.FF03_InitLaneRunsProviderCallsOnItsOwnHost`): a provider registering on `*ictx.host`, from `init:`, awaits a future twice and calls the function once | raises at once instead of waiting to its idle limit; the init lane gives `(21 21 6)`, its providers saw a host that is neither null, nor the app's, nor one that parks, and `(budget-usage)` in init's process counts its 2 calls, a step each at least |
 | GL-1 | a holder in group A and a waiter in group B on one key, at threads 0 (single manager) and 4 (shared) (`GL01_TwoGroupsExcludeOneKey`; S1-Q1) | B waits; once A releases, B is granted at its next pump |
 | GL-2 | group B destroyed with a waiter while A holds; `teardown_hook_for_test` releases A between B's port close and its kills (`GL02_TeardownClosesThePortBeforeItsKills`) | B's waiter's kill releases the grant, and group C's waiter is granted |
 | KO-1 | the step rate's publication during `kill_owner` fires a tree slot that reaps one of the owner's processes and submits another (`AsyncScheduler.KO01_KillOwnerSurvivesSlotsThatReapAndSubmit`) | every process of the owner alive at the call is killed; the count is right |
@@ -2934,7 +3364,7 @@ it until it returns.
 
 | ID | Situation | Result |
 |---|---|---|
-| IS-1 | an Ariadne action `spawn`s a child that `msg-send`s on a document channel and `state-set`s (Stage 1) | the message reaches a resident; the write lands under the document's prefix; `kill_owner` reaps the child |
+| IS-1 | an Ariadne action `spawn`s a child that `msg-send`s on a document channel and `state-set`s (Stage 1); Stage 1b's IS-1b, the same in an isolated document's group under `CVC_EXEC_FORCE_MOVE`, so workers pump it (`SpawnContext.IS01b_InAnIsolatedDocument`) | the message reaches a resident; the write lands under the document's prefix; `kill_owner` reaps the child. In IS-1b also: a worker pumped the group, the child is in the group and not in group 0, nothing is written outside the prefix, and the group goes with the document |
 | IS-2 | a pycvc program `spawn`s a child that calls a registered Python function (Stage 1; Stage 1a re-runs it in a pooled `Exec`, `test_is02_in_a_pooled_exec`) | the child calls it; the parent's top-level definitions persist across `run()`, and in a pooled `Exec` across its programs |
 | IS-3 | `(spawn-isolated "fib" ... (list 1 2))` | runs in a spawn group on another thread; `args` is a copy; it reports by message |
 | IS-4 | `spawn-isolated` with an argument holding a closure | `runtime_error` naming the closure; no child |
@@ -2949,13 +3379,53 @@ it until it returns.
 
 | ID | Stage | Situation | Result |
 |---|---|---|---|
-| AR-1 | 1b | the Ariadne host and runtime suites with `state_exec.threads: auto` and no document opted in | pass; every action and resident steps on the frame thread |
-| AR-2 | 1b | 3 documents in group 0 via `drain_begin` / `exec_pump_frame` / `drain_end`; an action `(await (slow-op-async))` | resumes exactly one frame later; group 0 pumped once a frame |
-| AR-3 | 1b | 4 isolated documents, each with a busy resident, threads 4 | residents step on different threads; render runs only outside pumps (a debug latch); a quick action completes in its drain |
+| AR-1 | 1b | the Ariadne host and runtime suites with `CVC_EXEC_THREADS=auto` and no document opted in (CTest `ariadne_runtime_test_threads_auto`, `ariadne_host_test_threads_auto`, `AppLockManager.*` filtered out); and three documents in group 0 at threads `auto` running an `init:` script, tick residents, actions, a spawned child and an await through `drain_begin` / `exec_pump_frame` / `drain_end` (`AriadneFrames.AR01_NoDocumentOptedInStaysOnTheFrameThread`) | both suites pass; an `any` probe native in every lane ran on the frame thread only, and `exec_pool_worker_pumps_total()` did not move |
+| AR-2 | 1b | 3 documents in group 0 via `drain_begin` / `exec_pump_frame` / `drain_end`; an action `(await (slow-op-async))` whose call ends between two Runtimes' `drain_end`s (`AriadneFrames.AR02_ThreeDocumentsInGroupZeroPumpOnceAFrame`) | resumes exactly one frame later, at the next frame's pump, not in a later `drain_end` of its frame; another component's `(await #f)` loop advances once a frame |
+| AR-3 | 1b | 4 eligible isolated documents, each with a busy resident, threads 4 (`AriadneFrames.AR03_IsolatedDocumentsRunOnWorkers`) | residents step on at least two threads and workers pump; no frame begins inside a `pump_all` (the test renders between pumps itself, so that check cannot fail: the real latch is render's debug assertion, compiled out of Release builds); a quick action completes in its drain; one document's `ps` lists none of the others' processes, and its `inspect` and `kill` of another's pid are refused; pids are unique |
+| AR-3b | 1b | an isolated `any` document at threads 4 under `CVC_EXEC_FORCE_MOVE`: an AppRuntime async verb with a done channel, a stream opened, posted to from a producer thread and closed, and a request to the suite's local HTTP server, each call held at a gate (`AriadneFrames.AR03b_ProvidersPostToTheirGroup`; required in both TSan legs) | each call is tracked by the document's group, never group 0; the done message, the stream's `live` and `closed` and the producer's seq reach a resident in the group; group 0's ingress count does not move across the action (`ingress_posts_for_test`), and it holds no message; a worker pumped the group, and an `any` probe in the action ran off the frame thread |
 | AR-4 | 1a | `pycvc.ExecPool(app, threads=8).run_all` of 64 fib programs; the same with a Python native; `fresh_env=True` (`test_ar04_run_all`) | correct results; with the native, at most one Python call at a time (a counter in the native); a fresh env per program. Scaling is recorded by the bench (`mt.groups`), not asserted |
 | AR-5 | 3 | a document with `parallel_actions: 4`, 8 actions in one frame | actions ran on several threads; each completed in its drain; `doc_scope_` verbs ran on the host thread |
 | AR-6 | 3 | a pycvc `Exec` program spawning 8 isolated children that report by message | correct; children on several threads; `Exec.run` wakes on their messages |
 | AR-7 | 2 | `exec_coordinator` with a pool attached: 16 local jobs | each in a job group; results correct; control from a bus thread is TSan-clean |
+
+As built in Stage 1b: the Ariadne cases are in `ariadne_runtime_test.cpp` (the section's own at its
+end, under `// --- Stage 1b Ariadne (td 8.2) ---`; HZ-8's rework beside HZ-8), and PIN-1 is in
+`state_lifetime_stress_test.cpp`. All of them and HZ-8 are required lines in every sanitizer leg
+(`SAN_REQUIRED_S1B`), and so are the implementers' cases below in `ariadne_runtime_test` and
+`state_exec_async_calls_test` (`ExecPool.AForceMovedCallEndsAtItsDeadline` is in Stage 1a's list).
+Beside the rows above:
+
+| ID | Situation | Result |
+|---|---|---|
+| SP-1 | a resident's chroot is unlinked (`state::removeChild`), then it spawns a child that writes (`SpawnContext.SP01_AChildOfADeletedChrootWritesTheDetachedNode`; S1.10, 4.15) | the write lands in the detached node the resident's context holds; no node is made at the old path |
+| EL-1 | with `isolate_documents` on, documents breaking each rule of S1-Q6 (no `channels:` block, `lint: channels: warn`, a `global: true` channel, a writable hole leaving the prefix, a static `/` reference in a button's `on_click`, the empty prefix, oidc), and eligible ones (plain, a writable hole inside, a read-only hole leaving, a thread-affine prefix declared under and above, a `host_only` native in the env) (`AriadneFrames.EL01_IneligibleDocumentsStayInGroupZero`) | each ineligible one stays in group 0 with a reason, logged once over its frames (read through `system.log_output`; not checked in a log4cplus build); the `/` reason names the channel; each eligible one gets a group, `host` for the declarations and the native, else `any` |
+| PIN-1 | modelled on Stage 0's `ContextRootPinsReleaseTheChrootFirst` (`StateLifetime.UriStateChainsReleaseTheLeafFirst`, `StateLifetime.StreamDescriptorPinsReleaseTheLeafFirst`) | a `destroyed()` slot on the leaf sees its ancestors alive |
+
+The implementers' own cases, beside the code's existing tests:
+- `ariadne_runtime_test.cpp`: `AriadneScheduler.DrainEndDoesNotPumpAgainAfterAFramePump`;
+  `AriadneIsolatedDocs.ProvidersAreInstalledByTheirKind` (an `any` native on a worker, a
+  `host_proxied` one on the frame thread and its constant bound, a late `host_only` one a
+  `NameError` that `has?` does not see), `IdleAndWaitIdleCountTheDocumentsGroup`,
+  `AnInitThatUsesOidcKeepsTheDocumentInGroupZero`, `TeardownReapsItsProcessesAndDestroysItsGroup`,
+  `ALaterDocumentThatIsNotEligibleMovesToGroupZero`,
+  `AThreadAffinePrefixAboveTheDocumentMakesItHost`, `AProgramSetAfterThePlacementIsScanned`,
+  `AMovedDocumentsStreamPostsWhereItNowRuns`, `AnEligibilityThatFlipsKeepsOneGroupAtMost`,
+  `AHostVerbRegisteredAfterLoadIsBound`, `IdleAndWaitIdleDecideNothing`, and
+  `AriadneIsolatedDocsDeathTest.ATeardownInsideAPumpIsRefused`;
+  `AriadneInit.ItsCyclesAreItsOwnAndFreedWhenItEnds`;
+  `AriadneNetIntrinsics.RequestsGoThroughTheContextsHost`;
+  `AriadneNetL4.AStartedRequestKeepsTheHostItStartedOn`;
+  `AriadneStreamIntrinsics.AStreamPostsToItsOpenersGroup` and
+  `AStreamOfAnInlineHostPostsToGroupZero`; `AriadneHazards.AResidentAReloadStopsIsReaped`.
+- `ariadne_host_test.cpp`: `AriadneHostVerbs.AnInitLanesAsyncVerbPostsItsDoneChannelToGroupZero`
+  and `ANameTwoTablesBindResolvesInTheirOrder`.
+- `stream_test.cpp`: `Stream.EventsGoToTheSchedulerItWasOpenedWith` (from another thread too).
+- `state_exec_async_calls_test.cpp`: `AsyncCalls.AStartedCallsFinisherPostsOnlyWhileItsHostIsUp`
+  (the guard checked directly; the race itself is not deterministic).
+- `net_ws_client_test.cpp`: `NetWsClient.TwoThreadsSendingOnOneConnectionSendWholeMessages`.
+- `exec_pool_test.cpp`: `ExecPool.AForceMovedCallEndsAtItsDeadline`.
+- cvcGL's `cvcgl_unattached_node_thread`:
+  `test_another_threads_matrix_during_the_nodes_own_pose_write_is_not_its_echo` (4.8).
 
 ### 8.7 Sanitizers (TS)
 
@@ -3167,7 +3637,7 @@ Stage 1's plan added twelve decisions, which the user approved as recommended on
   owner is not the awaiting scheduler raises `RuntimeError` "await: the future belongs to another
   scheduler"; an inline future is a value and exempt. The init lane gets an inline host of its own,
   which charges its async verbs to init's process, and its done channels still post to group 0
-  (Stage 1b). The check closes the pycvc cross-`Exec` race (4.9).
+  (built in Stage 1b). The check closes the pycvc cross-`Exec` race (4.9).
 - **S1-Q3. The registry a thread leaves when it ends.** Every group owns its registry and collects
   and frees it after its scheduler and envs. A thread's own registry is collected at its exit only
   if the thread opted in (`collect_cycles_at_thread_exit()`): the pool's workers and test threads
@@ -3182,16 +3652,19 @@ Stage 1's plan added twelve decisions, which the user approved as recommended on
   prefix="exec_pool", fresh_env=False, idle_timeout=60.0)` on the app's one pool, sized by whoever
   builds it first; pooled `Exec` i chrooted at `<prefix>.<i>`; `run_all`, `register_fn`,
   `register_async_fn`, `threads` and `close()` the whole API (4.12).
-- **S1-Q6. Which documents may leave the host thread** (Stage 1b): with
+- **S1-Q6. Which documents may leave the host thread** (built in Stage 1b, 4.12): with
   `ariadne.exec.isolate_documents` on, only a document with a prefix, a strict `channels:` block
   with no global channel or static `/` reference, no oidc and no writable `link:` hole leaving its
   prefix; `affinity::host` when its env holds a `host_only` native or its host declared a
-  thread-affine subscriber under its prefix.
-- **S1-Q7. The kind of each native and subscriber.** Kinds are registered per provider, so
-  AppRuntime's provider splits in four and net's in two; a doubtful one is `host_only` or not
-  thread-safe; S1.md's table records each (Stage 1b).
-- **S1-Q8. Ariadne's teardown reaps the action processes** (Stage 1b), its own included (S0.11's
-  question; HZ-8).
+  thread-affine subscriber under its prefix. As built, a declared prefix at or above the
+  document's counts too, since a write emits `childChanged` on every ancestor (R1b-mid S-M2), and
+  the placement is decided again after each change it reads.
+- **S1-Q7. The kind of each native and subscriber** (built in Stage 1b, 4.8, 4.9). Kinds are
+  registered per provider, so AppRuntime's provider splits in four and net's in two; a doubtful one
+  is `host_only` or not thread-safe; S1.md's table records each. As built, AppRuntime's four kinds
+  are six providers, which keep the one provider's binding order.
+- **S1-Q8. Ariadne's teardown reaps the action processes** (built in Stage 1b, 4.17), its own
+  included (S0.11's question; HZ-8), and a resident a reload stops is reaped then.
 - **S1-Q9. The clang TSan job (TS-1)** is a third leg of the sanitizer job, `clang-tsan`, with the
   runner's clang; TS-2's MSVC ASan and TS-3's `CVC_EXEC_VERIFY` runs are local and recorded in the
   PR (8.7).
