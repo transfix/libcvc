@@ -5112,8 +5112,9 @@ TEST(AriadneNetHost, ANetworkWaitIsNotTheActionsBudget) {
 
 // An http-get's kernel stops its transfer once its call is cancelled. A host's shutdown cancels its
 // calls, then waits for their kernels, as an isolated document's group's teardown does: against a
-// server that stalls 12 s, it returns in about a second. A kill cancels the call too (td 4.9's
-// cancel_async_calls), and the app host's kernel ends as soon.
+// server that stalls 20 s, it returns in about a second. A kill cancels the call too (td 4.9's
+// cancel_async_calls), and the app host's kernel ends as soon. The ceilings leave room for a
+// loaded machine, where libcurl's once-a-second check can come seconds late.
 TEST(AriadneNetHost, ACancelledRequestStopsItsTransfer) {
   if (!cvc::net::have_http_backend())
     GTEST_SKIP() << "libcvc built without an HTTP backend";
@@ -5125,7 +5126,7 @@ TEST(AriadneNetHost, ACancelledRequestStopsItsTransfer) {
   LocalHttpServer api([&](const LocalHttpServer::Request &) {
     const int n = ++asked;
     std::unique_lock<std::mutex> lock(m);
-    cv.wait_for(lock, std::chrono::seconds(12), [&] { return released >= n; });
+    cv.wait_for(lock, std::chrono::seconds(20), [&] { return released >= n; });
     return LocalHttpServer::Reply{200, {}, "late"};
   });
   const auto release = [&](int upto) {
@@ -5175,15 +5176,15 @@ TEST(AriadneNetHost, ACancelledRequestStopsItsTransfer) {
     EXPECT_TRUE(pump_until(rt, [&] { return asked.load() == 2; }));
   } // ~Runtime kills the action, which cancels its call
   const auto t1 = std::chrono::steady_clock::now();
-  while (app.exec_async_host().in_flight() > 0 && seconds_since(t1) < 10.0)
+  while (app.exec_async_host().in_flight() > 0 && seconds_since(t1) < 15.0)
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   kill_took = seconds_since(t1);
   left = app.exec_async_host().in_flight();
   release(2);
   std::printf("[ cancel ] shutdown %.3f s, kill to idle %.3f s\n", shutdown_took, kill_took);
-  EXPECT_LT(shutdown_took, 5.0) << "the shutdown waited for the server";
+  EXPECT_LT(shutdown_took, 8.0) << "the shutdown waited for the server";
   EXPECT_EQ(left, 0u) << "the killed action's transfer ran on";
-  EXPECT_LT(kill_took, 5.0);
+  EXPECT_LT(kill_took, 8.0);
 }
 
 TEST(AriadneNetHost, AuthGoesOnlyToAnOriginTheCredentialIsBoundTo) {

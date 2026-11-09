@@ -1197,10 +1197,16 @@ struct force_moved_call {
   bool returned = false;
   double seconds = 0.0;      // until the case saw it return (the busy worker's nap included)
   double call_seconds = 0.0; // the call's own pump_all, timed in its caller thread
+  double busy_after = 0.0;   // how long the worker still napped once the call began
   bool skipped = false;      // the call's group was skipped (its pool link)
   int last_thread = -1;      // which thread pumped the call's group last (0: a caller)
   std::uint64_t skips = 0;   // stats().skipped across the call
 };
+
+std::int64_t now_ns() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(clock_type::now().time_since_epoch())
+      .count();
+}
 
 // One CVC_EXEC_FORCE_MOVE pump_all of a group the caller pumped last, so its caller may not take
 // it and hands it to the workers, while the pool's only worker is kept kForceMoveNap in another
@@ -1221,11 +1227,13 @@ force_moved_call run_force_moved_call(bool tight) {
   force_moved_call out;
   out.threads = pool->threads();
   auto napping = std::make_shared<std::atomic<bool>>(false);
+  auto nap_end = std::make_shared<std::atomic<std::int64_t>>(0);
   auto *busy = new exec_group(opts_for(*app, "busy"));
   environment_ptr env = environment::extend(builtins::make_default_environment());
-  builtins::register_fn(env, "nap", [napping](std::span<const value_t>) -> value_t {
+  builtins::register_fn(env, "nap", [napping, nap_end](std::span<const value_t>) -> value_t {
     napping->store(true);
     std::this_thread::sleep_for(kForceMoveNap);
+    nap_end->store(now_ns());
     return value_t(int64_t(1));
   });
   execute_options eo;
@@ -1243,15 +1251,20 @@ force_moved_call run_force_moved_call(bool tight) {
   const auto before = pool->stats();
   auto returned = std::make_shared<std::atomic<bool>>(false);
   auto call_seconds = std::make_shared<std::atomic<double>>(0.0);
+  auto call_start = std::make_shared<std::atomic<std::int64_t>>(0);
   const auto t0 = clock_type::now();
-  std::thread caller([pool, light, tight, returned, call_seconds] {
+  std::thread caller([pool, light, tight, returned, call_seconds, call_start] {
     std::vector<exec_group *> gs{light};
     const auto c0 = clock_type::now();
+    call_start->store(now_ns());
     pool->pump_all(gs, kSteps, tight ? c0 + std::chrono::milliseconds(50) : far_deadline());
     call_seconds->store(std::chrono::duration<double>(clock_type::now() - c0).count());
     returned->store(true);
   });
   other.join(); // the worker is free again kForceMoveNap in
+  // A loaded machine may start the caller thread late, even after the nap (seen once): the
+  // worker was then free for the call, and the case says nothing about the deadline.
+  out.busy_after = static_cast<double>(nap_end->load() - call_start->load()) * 1e-9;
   while (!returned->load() && clock_type::now() - t0 < std::chrono::seconds(10))
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   out.returned = returned->load();
@@ -1283,6 +1296,8 @@ force_moved_call run_force_moved_call(bool tight) {
 // before the busy worker is free (a worker-side skip alone would end it only then, R1b skeptic
 // m7). Control: a far deadline waits for the worker and pumps the group. One-sided ceilings: 10 s
 // for a return at all (rule 7), half the worker's nap for the tight call; the times are printed.
+// The tight call counts only when the worker napped on for over half its nap after the call
+// began (a caller thread started late on a loaded machine is tried again, up to five times).
 TEST(ExecPool, AForceMovedCallEndsAtItsDeadline) {
   const force_moved_call control = run_force_moved_call(false);
   std::cout << "far deadline: " << control.threads << " worker(s), returned " << control.returned
@@ -1294,12 +1309,21 @@ TEST(ExecPool, AForceMovedCallEndsAtItsDeadline) {
   EXPECT_FALSE(control.skipped);
   EXPECT_NE(control.last_thread, 0) << "the caller pumped a group it pumped last";
   EXPECT_EQ(control.skips, 0u);
-  const force_moved_call tight = run_force_moved_call(true);
-  std::cout << "deadline 50 ms away: returned " << tight.returned << " after " << tight.seconds
-            << " s (the call " << tight.call_seconds << " s), last thread " << tight.last_thread
-            << ", skips " << tight.skips << "\n";
-  ASSERT_TRUE(tight.returned) << "pump_all did not return within 10 s: its caller still waits";
-  EXPECT_LT(tight.call_seconds, std::chrono::duration<double>(kForceMoveNap).count() / 2)
+  const double half_nap = std::chrono::duration<double>(kForceMoveNap).count() / 2;
+  force_moved_call tight;
+  for (int attempt = 1; attempt <= 5; ++attempt) {
+    tight = run_force_moved_call(true);
+    std::cout << "deadline 50 ms away: returned " << tight.returned << " after " << tight.seconds
+              << " s (the call " << tight.call_seconds << " s, the worker busy " << tight.busy_after
+              << " s after it began), last thread " << tight.last_thread << ", skips "
+              << tight.skips << "\n";
+    ASSERT_TRUE(tight.returned) << "pump_all did not return within 10 s: its caller still waits";
+    if (tight.busy_after > half_nap + 0.1)
+      break;
+  }
+  if (tight.busy_after <= half_nap + 0.1)
+    GTEST_SKIP() << "the caller thread started too late five times: the machine is too loaded";
+  EXPECT_LT(tight.call_seconds, half_nap)
       << "the call ended when the busy worker came, not at its deadline";
   EXPECT_TRUE(tight.skipped) << "the group was not skipped at the deadline";
   EXPECT_EQ(tight.skips, 1u);

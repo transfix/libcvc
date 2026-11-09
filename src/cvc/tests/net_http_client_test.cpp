@@ -291,7 +291,7 @@ TEST(NetCurlBackend, TransportFailureIsErrorNotThrow) {
 
 namespace {
 // Binds an OS-assigned port on 127.0.0.1, accepts ONE connection, reads its request, and answers
-// nothing until released (or 12 s pass): a request to it stalls in the middle of its transfer.
+// nothing until released (or 40 s pass): a request to it stalls in the middle of its transfer.
 class StallingServer {
 public:
   StallingServer()
@@ -309,7 +309,7 @@ public:
       asked_ = true;
       {
         std::unique_lock<std::mutex> lock(mutex_);
-        cv_.wait_for(lock, std::chrono::seconds(12), [this] { return released_; });
+        cv_.wait_for(lock, std::chrono::seconds(40), [this] { return released_; });
       }
       const std::string reply =
           "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nlate";
@@ -355,7 +355,9 @@ TEST(NetCurlBackend, ACancelledRequestStopsItsTransfer) {
     std::atomic<bool> cancel{false};
     HttpRequest req;
     req.url = server.url();
-    req.timeout_secs = 8;
+    // Far past the cancel: on a loaded machine libcurl's once-a-second check can come seconds late
+    // (seen once: the 8 s it had then ran out 3.7 s after the cancel, the sender starved).
+    req.timeout_secs = 30;
     if (!scoped)
       req.cancelled = [&cancel] { return cancel.load(); };
     HttpResponse r;
@@ -378,7 +380,7 @@ TEST(NetCurlBackend, ACancelledRequestStopsItsTransfer) {
     std::printf("[ cancel ] the transfer ended %.3f s after its cancel\n", took);
     EXPECT_FALSE(r.ok);
     EXPECT_EQ(r.error, "cvc::net: cancelled");
-    EXPECT_LT(took, 5.0) << "the transfer ran on to the server's reply or its timeout";
+    EXPECT_LT(took, 10.0) << "the transfer ran on to the server's reply or its timeout";
   }
   HttpRequest early;
   early.url = "http://127.0.0.1:1/never"; // nothing listens: a request made would fail to connect
