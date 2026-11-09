@@ -916,7 +916,7 @@ jobs:
           # context, here on Xvfb) and the SdlInput / capture seam, as the shipped cvcgl
           # recipe has them. Without it cvcGL falls back to VTK's window and
           # cvcgl_sdl_attach skips.
-          cvcpkg install imgui sdl3 --prefix "$prefix" --config release --link shared
+          cvcpkg install imgui-w32 sdl3 --prefix "$prefix" --config release --link shared
 
       # tmux, for ari_run_json_feed_ftxui / _tvision (src/ari/CMakeLists.txt): each runs `ari run`
       # in a 100x30 tmux pane and compares what that backend drew (tests/run_in_tmux_test.sh), the
@@ -1365,7 +1365,7 @@ jobs:
       # cvcGL needs VTK, and xorgproto for the FindX11 that its find_package(VTK)
       # re-runs; imgui makes ImGuiOverlay real rather than an inert stub. See the
       # VTK step in package-linux.
-      - name: Install VTK and imgui for cvcGL (cvcpkg)
+      - name: Install VTK and imgui-w32 for cvcGL (cvcpkg)
         shell: bash
         run: |
           set -euo pipefail
@@ -1374,7 +1374,7 @@ jobs:
           else
             deps="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
           fi
-          cvcpkg install vtk xorgproto imgui --prefix "$deps" --config release --link shared
+          cvcpkg install vtk xorgproto imgui-w32 --prefix "$deps" --config release --link shared
 
       - name: Configure
         shell: bash
@@ -2048,7 +2048,7 @@ jobs:
           # .ari loader): without them cvcgl_ari_golden has nothing to render
           # (docs/ARIADNE.md section 12). sdl3: cvcGL's onscreen window (Cocoa through
           # SDL). See the Linux job's VTK step.
-          cvcpkg install imgui yaml-cpp sdl3 --prefix "$prefix" --config release --link shared
+          cvcpkg install imgui-w32 yaml-cpp sdl3 --prefix "$prefix" --config release --link shared
 
       # gRPC probe: provision grpc+protobuf (shared) for the enable_grpc matrix entry, as on Linux.
       - name: Provision gRPC via cvcpkg
@@ -2345,8 +2345,8 @@ jobs:
           # imgui (cvcGL's ImGui overlay + the Ariadne ImGui backend) and yaml-cpp (the
           # .ari loader): without them cvcgl_ari_golden has nothing to render
           # (docs/ARIADNE.md section 12). sdl3: cvcGL's onscreen window (see the Linux job).
-          cvcpkg install imgui yaml-cpp sdl3 --prefix "$prefix" --config release --link shared
-          if ($LASTEXITCODE -ne 0) { throw "cvcpkg install imgui yaml-cpp sdl3 failed ($LASTEXITCODE)" }
+          cvcpkg install imgui-w32 yaml-cpp sdl3 --prefix "$prefix" --config release --link shared
+          if ($LASTEXITCODE -ne 0) { throw "cvcpkg install imgui-w32 yaml-cpp sdl3 failed ($LASTEXITCODE)" }
 
       # gRPC probe: provision grpc+protobuf (shared) for the enable_grpc matrix entry, as on Linux.
       - name: Provision gRPC via cvcpkg (Windows)

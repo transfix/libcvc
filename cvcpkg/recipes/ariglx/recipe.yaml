@@ -45,7 +45,7 @@ depends:
     # what cvcGL links.
     - name: vtk
     # cvcGL's export links imgui and SDL3::SDL3 (cvcgl's runtime deps).
-    - name: imgui
+    - name: imgui-w32
     - name: sdl3
     # libpython3.12 and its headers, the interpreter ariglx embeds.
     - name: python312
@@ -53,7 +53,7 @@ depends:
     - name: libcvc
     - name: cvcgl
     - name: vtk
-    - name: imgui
+    - name: imgui-w32
     - name: sdl3
     - name: python312
     - name: pycvc-cp312

@@ -868,7 +868,7 @@ jobs:
           # cvcGLConfig.cmake, so no path leaks into cvcGLTargets.cmake. Built into
           # its own prefix and joined only here.
           IMGUI="$GITHUB_WORKSPACE/prefix-imgui-cvcgl"
-          cvcpkg install imgui --prefix "$IMGUI"
+          cvcpkg install imgui-w32 --prefix "$IMGUI"
           # SDL3 backs the cvcGL input+peripheral seam (CVC_ENABLE_SDL). Like imgui
           # it is a declared cvcgl dep but NOT part of libcvc's install-deps closure
           # (libcvc doesn't depend on sdl3), so it must be installed explicitly here
@@ -995,7 +995,7 @@ jobs:
           # now $<BUILD_INTERFACE>-guarded too, but keeping the prefixes separate
           # means the SDK bundle cannot regress even if the guard is lost.)
           IMGUI="$GITHUB_WORKSPACE/prefix-imgui"
-          cvcpkg install imgui --prefix "$IMGUI"
+          cvcpkg install imgui-w32 --prefix "$IMGUI"
           export CVC_SOURCE_DIR="$GITHUB_WORKSPACE"
           export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-libcvc-examples"
           export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-libcvc-examples"
@@ -1288,7 +1288,7 @@ jobs:
           # config re-finds on the consumer's prefix, so anything linking it needs
           # imgui there, even though pycvc-gl doesn't use the overlay itself.
           IMGUI="$GITHUB_WORKSPACE/prefix-imgui-pycvcgl"
-          cvcpkg install imgui --prefix "$IMGUI"
+          cvcpkg install imgui-w32 --prefix "$IMGUI"
           # Likewise cvcgl now links SDL3::SDL3 (CVC_ENABLE_SDL) and emits
           # find_dependency(SDL3) into cvcGLConfig.cmake, so the find_package(cvcGL)
           # pulled in by linking stage-cvcgl below needs sdl3 on the prefix too --
@@ -1585,7 +1585,7 @@ jobs:
           # Dear ImGui powers the cvcGL overlay — build the SDK WITH it (see the
           # Linux step's note; the imgui export is relocatable, so no path leaks).
           $imgui = "$env:GITHUB_WORKSPACE/prefix-imgui-cvcgl"
-          cvcpkg install imgui --prefix "$imgui" --config release --link shared
+          cvcpkg install imgui-w32 --prefix "$imgui" --config release --link shared
           # SDL3 backs the cvcGL input+peripheral seam (CVC_ENABLE_SDL) -- a declared
           # cvcgl dep that isn't in libcvc's install-deps closure, so install it here
           # or find_package(SDL3) fails and the SDK degrades to the VTK fallback. The
@@ -1720,7 +1720,7 @@ jobs:
           # re-creates imgui::imgui by header/lib from THIS prefix list ($imgui) —
           # it no longer assumes imgui is co-installed in stage-cvcgl.
           $imgui = "$env:GITHUB_WORKSPACE/prefix-imgui-pycvcgl"
-          cvcpkg install imgui --prefix "$imgui" --config release --link shared
+          cvcpkg install imgui-w32 --prefix "$imgui" --config release --link shared
           # cvcgl now links SDL3::SDL3 (CVC_ENABLE_SDL) + emits find_dependency(SDL3),
           # so find_package(cvcGL) via stage-cvcgl below needs sdl3 on the prefix too.
           $sdl3 = "$env:GITHUB_WORKSPACE/prefix-sdl3-pycvcgl"
