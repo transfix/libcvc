@@ -686,8 +686,9 @@ public:
     bool skipped = false; // not evaluated: the frame's budget was spent (not a broken predicate)
   };
   struct StringOutcome {
-    std::string value; // display string, or the caller's `dflt` on any failure
-    std::string error; // empty on success; a diagnostic otherwise
+    std::string value;    // display string, or the caller's `dflt` on any failure
+    std::string error;    // empty on success; a diagnostic otherwise
+    bool skipped = false; // not evaluated: the frame's budget was spent
   };
 
   // Evaluate `src` as a boolean predicate (visible_when / enabled_when / …). Fail-safe: a
@@ -704,13 +705,14 @@ public:
   StringOutcome eval_string(const std::string &src, const std::string &dflt) {
     const RawOutcome o = eval_raw(src);
     if (!o.error.empty())
-      return {dflt, o.error};
+      return {dflt, o.error, o.skipped};
     return {display_string(o.value), std::string()};
   }
 
   struct StringListOutcome {
     std::vector<std::string> value; // empty on failure or a non-list/nil result
     std::string error;              // empty on success
+    bool skipped = false;           // not evaluated: the frame's budget was spent
   };
 
   // Evaluate `src` and coerce a LIST result to display strings (computed combo options). A
@@ -720,7 +722,7 @@ public:
   StringListOutcome eval_string_list(const std::string &src) {
     const RawOutcome o = eval_raw(src);
     if (!o.error.empty())
-      return {{}, o.error};
+      return {{}, o.error, o.skipped};
     std::vector<std::string> out;
     if (auto *l = std::get_if<se::list_ptr>(&o.value.v)) {
       if (*l)
@@ -736,8 +738,9 @@ public:
   }
 
   struct IntOutcome {
-    int64_t value;     // the caller's `dflt` on any failure
-    std::string error; // empty on success
+    int64_t value;        // the caller's `dflt` on any failure
+    std::string error;    // empty on success
+    bool skipped = false; // not evaluated: the frame's budget was spent
   };
 
   // Evaluate `src` and coerce the result to an integer (a repeat count). int as-is, double
@@ -745,7 +748,7 @@ public:
   IntOutcome eval_int(const std::string &src, int64_t dflt) {
     const RawOutcome o = eval_raw(src);
     if (!o.error.empty())
-      return {dflt, o.error};
+      return {dflt, o.error, o.skipped};
     if (auto *i = std::get_if<int64_t>(&o.value.v))
       return {*i, std::string()};
     if (auto *d = std::get_if<double>(&o.value.v)) {
@@ -1481,7 +1484,13 @@ struct Runtime::Impl {
   // A visible_when / enabled_when / disabled_when predicate's value: `dflt` when it is broken
   // (warned once), and last frame's value when this frame's budget ran out before it.
   bool predicate(const std::string &src, bool dflt);
+  // §2.1 a read-lane expression the frame's budget skipped is not the document's fault, so it is
+  // never a warning: it keeps the value it had last frame, or its fail-safe one where it never
+  // ran. These hold each expression's last value; `reactive_skips` counts the skips.
   std::unordered_map<std::string, bool> last_good_predicate;
+  std::unordered_map<std::string, std::string> last_good_text;
+  std::unordered_map<std::string, std::vector<std::string>> last_good_options;
+  std::uint64_t reactive_skips = 0;
   // §4 read-lane: is `w` disabled (greyed, non-interactive) this frame? True when
   // enabled_when is falsy OR disabled_when is truthy. Fail-safe DISABLED on a broken
   // predicate.
@@ -1508,10 +1517,11 @@ bool Runtime::Impl::predicate(const std::string &src, bool dflt) {
   const ReactiveEngine::Outcome o = ensure_reactive().eval_bool(src, dflt);
   if (o.skipped) {
     // The frame's budget ran out before it (a slow frame in wasm, a big feed): keep last frame's
-    // answer rather than hide or disable the widget for a frame, which flickers it.
+    // answer rather than hide or disable the widget for a frame, which flickers it; never ran, the
+    // fail-safe one. No warning: the document did nothing wrong.
+    ++reactive_skips;
     const auto it = last_good_predicate.find(src);
-    if (it != last_good_predicate.end())
-      return it->second;
+    return it != last_good_predicate.end() ? it->second : dflt;
   }
   if (!o.error.empty())
     warn_once(o.error);
@@ -1538,34 +1548,72 @@ bool Runtime::Impl::disabled(const Widget &w) {
   return false;
 }
 
+namespace {
+
+// Remember `v` as `key`'s last value, copying only when it changed.
+template <class Map, class V> void keep_last(Map &m, const std::string &key, const V &v) {
+  auto it = m.find(key);
+  if (it == m.end())
+    m.emplace(key, v);
+  else if (!(it->second == v))
+    it->second = v;
+}
+
+} // namespace
+
 std::string Runtime::Impl::eval_text(const std::string &expr) {
   const ReactiveEngine::StringOutcome o =
       ensure_reactive().eval_string(expr, /*dflt=*/std::string());
+  if (o.skipped) { // last frame's text (none: empty), not a warning
+    ++reactive_skips;
+    const auto it = last_good_text.find(expr);
+    return it != last_good_text.end() ? it->second : std::string();
+  }
   if (!o.error.empty())
     warn_once(o.error);
+  else
+    keep_last(last_good_text, expr, o.value);
   return o.value;
 }
 
 std::string Runtime::Impl::eval_text_or_literal(const std::string &expr) {
   const ReactiveEngine::StringOutcome o =
       ensure_reactive().eval_string(expr, /*dflt=*/std::string());
+  if (o.skipped) { // last frame's text (none: empty), not the expression's own text
+    ++reactive_skips;
+    const auto it = last_good_text.find(expr);
+    return it != last_good_text.end() ? it->second : std::string();
+  }
   // Success -> the computed value; failure -> the literal verbatim (no warning: a tooltip that
   // starts with '(' is far more likely plain text than a broken expression).
-  return o.error.empty() ? o.value : expr;
+  if (!o.error.empty())
+    return expr;
+  keep_last(last_good_text, expr, o.value);
+  return o.value;
 }
 
 std::vector<std::string> Runtime::Impl::eval_options(const std::string &expr) {
   const ReactiveEngine::StringListOutcome o = ensure_reactive().eval_string_list(expr);
+  if (o.skipped) { // last frame's options (none: empty), not a warning
+    ++reactive_skips;
+    const auto it = last_good_options.find(expr);
+    return it != last_good_options.end() ? it->second : std::vector<std::string>();
+  }
   if (!o.error.empty())
     warn_once(o.error);
+  else
+    keep_last(last_good_options, expr, o.value);
   return o.value;
 }
 
 int Runtime::Impl::eval_count(const std::string &expr) {
   constexpr int64_t kMaxRepeat = 4096; // a UI with thousands of repeated widgets is pathological
   const ReactiveEngine::IntOutcome o = ensure_reactive().eval_int(expr, /*dflt=*/0);
-  if (!o.error.empty()) {
+  if (o.skipped)
+    ++reactive_skips; // the budget's, not the document's: no warning
+  else if (!o.error.empty())
     warn_once(o.error);
+  if (!o.error.empty()) {
     // The eval fail-safed (budget exhausted / broken). Rather than collapse the repeated list to 0
     // this frame, reuse the last count this expression yielded successfully (if any) — a transient
     // skip then leaves the roster/peer-window list unchanged instead of blinking empty. With no
@@ -4052,6 +4100,8 @@ void Runtime::render() { m_->render(); }
 
 void Runtime::set_frame_clock(std::optional<double> seconds) { m_->pinned_clock = seconds; }
 double Runtime::frame_clock() const { return m_->frame_t; }
+std::uint64_t Runtime::reactive_skip_count() const { return m_->reactive_skips; }
+
 void Runtime::set_reactive_frame_budget(double seconds) {
   m_->reactive_budget = seconds > 0.0 ? seconds : 0.0;
 }
