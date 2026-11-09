@@ -109,7 +109,7 @@ if(NOT EMSCRIPTEN AND (CVC_BUILD_PYCVC OR ARI_WITH_PYTHON))
       set_tests_properties(arix_python_interpreter PROPERTIES PASS_REGULAR_EXPRESSION "arix False")
       add_test(NAME ari_python_needs_arix COMMAND ari check "${_pyt}/python_block.ari")
       set_tests_properties(ari_python_needs_arix PROPERTIES
-                           PASS_REGULAR_EXPRESSION "scripting hosts, arix or ariglx")
+                           PASS_REGULAR_EXPRESSION "scripting hosts, arix, ariglx or arisrvx")
       cvc_ariadne_python_test_properties(arix_python_block arix_python_program arix_python_error
                                          arix_python_interpreter)
       # A document with a WebAssembly guest (arix test), and stock ari's answer to one.

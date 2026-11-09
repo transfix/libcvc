@@ -165,8 +165,40 @@ there too.
 | per-frame aggregate | `kFrameBudgetSeconds` | `30 ms` |
 
 The frame budget resets at the top of each frame, so *N* widgets cannot jointly stall a
-frame — once the aggregate is spent, remaining predicates degrade fail-safe for that
-frame only.
+frame. Once the aggregate is spent, the rest are skipped for that frame only:
+
+- Each skipped expression keeps the value it had last frame: a `visible_when`, an `enabled_when`,
+  a computed `bind:` or text, a `tooltip`, combo `options` or a `repeat:` count.
+- One that never ran yet takes its fail-safe value instead: hidden, disabled, empty or 0.
+- A skip isn't the document's fault, so it is never a reactive warning (`take_reactive_warnings`,
+  the web pages' `ariadneWarning`). A real 10-post feed decoding pictures in wasm can spend the
+  budget on its first frames.
+- `Runtime::reactive_skip_count()` counts the skips, for a host that wants to log them.
+
+**The read lane keeps its results.** An expression that ran is kept with what it read: the state
+paths its readers named (`state-get`, `state-exists`, `state-children`, `state-data-get`,
+`state-json`) and the `(has? …)` answers it got. The next frame reuses it without running it,
+until one of these happens:
+
+- something is written to a path it read, or to an ancestor or a descendant of one (so a
+  `state-set-tree` that replaces a subtree counts);
+- a name it asked `has?` about answers otherwise (each name is asked once a frame).
+
+What it builds on:
+
+- The writes are seen through the state tree's own change signal, from any thread: an action, a
+  host, a network reply.
+- A write that leaves a value as it was signals nothing, so it changes nothing.
+- A frame that wrote nothing runs no expression, and one that wrote a post's like count runs the
+  expressions that read it.
+- Results are kept per scope and per expression text, so each `{i}` row of a `repeat:` is its
+  own.
+- An expression that read `(time-now)`, an expiry (`state-is-expired`, `state-has-expiry`) or a
+  node through a link is never kept: it runs every frame, as before.
+- A kept result isn't run, so the frame budget never skips it. Only what runs counts against the
+  30 ms.
+- A result no frame used for 300 frames is dropped.
+- `Runtime::reactive_eval_count()` counts the expressions that ran, for a host or a test.
 
 > These are the as-built numbers. Roadmap §7.4 still cites an older `CAP=50000` / 2 ms;
 > trust the code.
@@ -2936,12 +2968,16 @@ document path is the document's (§5.6):
 | `arigl` | libcvc + cvcGL (VTK, ImGui) | in a real window, or `--terminal` with its scene rendered behind the widgets | [`src/arigl`](../src/arigl/main.cpp) |
 | `arisrv` | libcvc + gRPC + WebSocket | headless, as a server (the conference relay + WS↔gRPC bridge); with `--doc`, a server document on the relay (§9.7) | [`src/arisrv`](../src/arisrv/main.cpp) |
 | `arix`, `ariglx` | `ari`, `arigl` + an embedded CPython (pycvc, pycvc_gl, numpy) | as `ari` and `arigl`, plus a document's `python:` block and a Python program in place of the document (§9.6) | [`src/ariadne_python`](../src/ariadne_python/python_engine.h) |
+| `arisrvx` | `arisrv` + an embedded CPython | as `arisrv`, plus the operator's Python program beside the relay, serving ASGI apps on a script thread of its own (§9.8) | [`src/arisrv`](../src/arisrv/main.cpp), [`src/ariadne_python`](../src/ariadne_python/server_link.h) |
 
 Each is its own cvcpkg package, built from its recipe in [`cvcpkg/recipes`](../cvcpkg/recipes)
 against the installed libcvc: `cvcpkg install ari`, `cvcpkg install arigl`, and for a room's
 server `cvcpkg install arisrv` (linux, macOS and windows). arisrv's transports, its Jolt avatars
 and its libjpeg-turbo video rungs are libcvc's, so it needs a libcvc built with them: every
-libcvc after 3.7.8 is, and arisrv's standalone configure refuses an SDK with neither transport.
+libcvc after 3.7.8 is. Its planes are gRPC, with WebSocket on top for browser clients, so it needs
+`CVC_ENABLE_GRPC`. A libcvc build without gRPC leaves arisrv out and says so, and arisrv's
+standalone configure refuses an SDK without gRPC. For a build of your own, gRPC comes from cvcpkg:
+`cvcpkg install grpc protobuf --prefix <p>`, with `<p>` on `CMAKE_PREFIX_PATH`.
 
 ```
 arigl run      [--terminal] [flags] doc.ari [document args...]
@@ -3593,15 +3629,22 @@ wasm:
   call, under the document's prefix and locks: the state functions, the host's functions, the
   document's `functions:`. `imports:` narrows that to the groups named (`state.read`, `state.write`,
   `msg`, `net`, `call` for the rest); a call outside them fails with a `PermissionError`.
+- **Host objects by handle.** A volume, a mesh or a height field a program passes (from
+  `state-data-get`, or a `data:` block's node) reaches the guest as a handle, not its bytes. The
+  guest asks for its sizes (`data_info`) and copies only the region it reads (`volume_read`,
+  `volume_sample`, `mesh_read`, `heightfield_read`) into its own memory, at a step per 256 bytes.
+  A handle it hands back, as a result or a call's argument, is the object again. `imports:`
+  without `data.read` refuses these calls.
 - **Limits.** A guest's work is charged to its activation as DSL steps
   (`ariadne.limits.wasm_gas_per_step`, 1000 units of fuel a step), so the action caps (§2.2) bound
   it. The guests share `ariadne.limits.wasm_frame_budget` (0.008 s) of each frame, and its memory
   is at most `ariadne.limits.wasm_max_memory` (256 MiB), which `limits: {memory_mb}` may lower. An
   instance runs one call at a time; others wait their turn.
 - **Errors.** A trap, or the guest's `fail`, is a `WasmError` the document can catch; its `trap`
-  says what happened.
+  says what happened. A trap with the guest's memory at its limit is a `MemoryError`.
 - **The ABI** a guest is written to (values as CBOR in its memory, `ari_alloc`, the `call`,
-  `reply`, `yield` and `fail` imports) is in [`wasm_engine.h`](../src/ariadne_wasm/wasm_engine.h).
+  `reply`, `yield` and `fail` imports, and the data calls on handles) is in
+  [`wasm_engine.h`](../src/ariadne_wasm/wasm_engine.h).
 
 ### 9.7 A server document: `arisrv --doc`
 
@@ -3731,7 +3774,71 @@ on_tick: |
     of it late re-runs its prediction from that tick.
 - **Other hosts** ignore a `server:` block, with a warning, and a `world:` block silently.
 - **Not yet:** a reload when the file changes, the network (`--net`), `on_signal:` for arisrv's
-  own SIGTERM, and Python (`arisrvx`, S1).
+  own SIGTERM, and a `python:` block in the server document itself (arisrvx runs the operator's
+  Python beside the relay instead, §9.8).
+
+### 9.8 Python beside the relay: `arisrvx`
+
+`arisrvx` is arisrv with an embedded CPython 3.12 ([`server_link.h`](../src/ariadne_python/server_link.h),
+[`ariadne_server.py`](../src/ariadne_python/ariadne_server.py); the plan is
+[roadmap/ARIADNE_SCRIPTING_HOSTS.md](roadmap/ARIADNE_SCRIPTING_HOSTS.md) §6.5). `arisrvx --python
+main.py [relay flags]` runs the operator's program next to the relay, for a service with an HTTP
+API for programs and live state for Ariadne clients:
+
+```python
+# main.py, run as: arisrvx --python main.py --doc server.ari [relay flags]
+from fastapi import FastAPI
+from pycvc.ariadne import Host, serve_asgi
+
+app = FastAPI()
+host = Host()                       # the relay's tree and the script thread's loop
+
+@app.post("/jobs/{name}")
+async def start(name: str):
+    host.set_tree(f"svc.jobs.{name}", {"state": "queued"})   # svc is the document's publish:
+    return {"ok": True}
+
+serve_asgi(app, host="127.0.0.1", port=8780)
+host.run()                          # until SIGTERM; the app's shutdown, then the relay
+```
+
+- **The script thread.** The program runs on a thread of its own with one asyncio loop
+  (`host.loop`), which serves its ASGI apps (uvicorn) and its tasks. The relay never runs Python,
+  never takes the GIL and never waits on the program: a sync handler holds up only the loop.
+- **Writes.** `host.set`, `set_tree` and `set_series` (as `pycvc_gl.ariadne.Host`'s) take paths
+  from the tree's root and are queued. The relay applies them on its next room step (60 Hz), ahead
+  of the server document's programs, coalesced per path and in the order of each path's last write
+  (a section's fields, then its `rev`). `--script-write-budget N` caps a step at N bytes (65536 by
+  default; 0 for none); the rest wait for the steps after, in order, and one write larger than the
+  cap still lands. `set_tree` writes as `(state-set-tree)` does: only what changed, and the
+  children it doesn't name are removed. Clients receive what the server document publishes
+  (`server: publish:`, §9.7), which needs `--bind-writes on`.
+- **Reads.** `host.get`, `get_tree` and the rest read the relay's tree as it is, so a write of the
+  program's own shows a step later.
+- **Startup.** The program starts before anything listens. The relay listens once its ASGI apps have
+  started (their lifespan startup and their bind); one that fails stops arisrvx with 1 and its
+  traceback, before it listens. A program that returns without `host.run()` has its loop run by the
+  host. `--http-listen ADDR:PORT` serves the program's `app` for a program that doesn't call
+  `serve_asgi`.
+- **Stopping.** On SIGTERM or SIGINT the relay keeps running while the program shuts down: each
+  ASGI server stops accepting, finishes its requests within `--shutdown-timeout` (10 s), and runs
+  its app's shutdown; the loop's other tasks are cancelled. Its last writes go out, and then the
+  relay stops. `host.stop(code)`, or an ASGI server that ends by itself, stops the relay too, with
+  that exit status. The host owns signals: uvicorn installs none.
+- **Logging.** Python's `logging`, uvicorn's included, goes to stderr as `[arisrvx] <logger>:
+  <level>: <message>`, unless the program sets up its own.
+- **`arisrvx check main.py [relay flags]`** loads the server document (its `requires:`, which take
+  `python.fastapi` and the like, §9.6) and runs the program without serving. It reports a missing
+  module, an `--http-listen` with no `app`, and a port that is taken (the relay's and the apps'),
+  and exits 1 on any of them, 2 on a bad flag.
+- **`arisrvx python [args]`** is the embedded interpreter as a plain python3.
+- **A server document's `python:` block** is refused, since its functions would run on the
+  relay's loop. Functions clients call (`room-call`) are S2.
+- **Under plain `python`** the same program runs: `pycvc.ariadne` ships with pycvc, `Host` keeps a
+  tree of its own, writes land at once, and `run()` takes SIGINT and SIGTERM itself. arisrvx has
+  the module built in and needs no pycvc.
+- **Packages.** `cvcpkg install arisrvx fastapi-cp312 uvicorn-cp312` (Linux). Stock arisrv refuses
+  the Python flags and names arisrvx.
 
 ---
 

@@ -1,0 +1,12 @@
+# The server document beside tests/service.py (ctest arisrvx_serve): it publishes svc, which the
+# Python program writes through the relay, and on each room step answers its selftest: once
+# svc.selftest says the 40 items are queued, it writes their count back as svc.doc_saw, which the
+# program waits to read. The relay runs on loopback ports, and no client joins.
+meta: { name: arisrvx service document, min_libcvc: 3.7.13 }
+requires: [relay, python]
+server:
+  publish: [svc]
+on_tick: |
+  (if (= (state-get "svc.selftest") "writes-queued")
+      (state-set "svc.doc_saw" (state-get "svc.items"))
+      #f)

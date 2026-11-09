@@ -1347,7 +1347,15 @@ if(CVC_ENABLE_GRPC OR CVC_ENABLE_WS)
   set(_proto_grpc_h  "${_proto_out_dir}/state_transport.grpc.pb.h")
 
   if(CVC_ENABLE_GRPC)
-    find_package(gRPC CONFIG REQUIRED)
+    find_package(gRPC CONFIG QUIET)
+    if(NOT gRPC_FOUND)
+      message(FATAL_ERROR
+        "CVC_ENABLE_GRPC=ON but gRPC was not found (its CMake package, gRPCConfig.cmake).\n"
+        "  Get it from cvcpkg: cvcpkg install grpc protobuf --prefix <p> --link shared,\n"
+        "  then add <p> to CMAKE_PREFIX_PATH (a prefix of its own: grpc's closure carries its\n"
+        "  own zlib, openssl and protobuf). Or configure with -DCVC_ENABLE_GRPC=OFF, which\n"
+        "  also leaves out arisrv, the conference relay.")
+    endif()
 
     # Locate grpc_cpp_plugin executable.
     if(TARGET gRPC::grpc_cpp_plugin)
@@ -2620,8 +2628,8 @@ if(CVC_BUILD_LSYS_TOOLS)
 endif()
 
 # The Ariadne conference RELAY moved to src/arisrv (the `arisrv` target, wired from
-# src/CMakeLists.txt when CVC_ENABLE_GRPC or CVC_ENABLE_WS is on) — it gained a WebSocket
-# control plane + a WS<->gRPC bridge, so it is no longer gRPC-only.
+# src/CMakeLists.txt when CVC_ENABLE_GRPC is on). Its planes are gRPC; with CVC_ENABLE_WS it also
+# takes browser clients over WebSocket, bridged onto them.
 
 # Windows-specific batch file
 if(WIN32)

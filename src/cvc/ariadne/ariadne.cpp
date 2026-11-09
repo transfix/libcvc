@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <boost/signals2/connection.hpp> // the read-lane cache's watch on the state tree
 #include <cassert>
 #include <cctype>
 #include <charconv>
@@ -646,6 +647,12 @@ namespace se = cvc::state_exec;
 //
 // state-get keys are prefix-relative (the context is chroot'd to the document prefix),
 // so `(state-get "demo.n")` reads the SAME key a widget `bind: demo.n` resolves to.
+//
+// §2.1 results are cached: an expression that ran is kept with the state paths it read and the
+// (has? …) answers it got, and it is reused, not run, until a write lands on one of those paths (or
+// on an ancestor or a descendant of one), or one of those names answers otherwise. An expression
+// that read the clock, an expiry, or a node through a link is never kept. The writes are seen
+// through the tree root's childChanged, on whatever thread made them.
 class ReactiveEngine {
 public:
   // `has` answers (has? "name") in predicates (Runtime::has); empty leaves it unbound.
@@ -713,7 +720,15 @@ public:
     for (const char *name : kAllowed)
       if (const se::value_t *v = full->lookup(name))
         env_->set(name, *v);
-    bind_has(env_, has); // pure and bounded: a capability / name lookup
+    // pure and bounded: a capability / name lookup, answered once a frame per name, and noted
+    if (has) {
+      has_ = has;
+      bind_has(env_, [this](const std::string &name) { return has_answer(name); });
+    }
+    watch_reads();
+    scope_ = &cache_[root_path_];
+    watch_ =
+        root.childChanged.connect([log = writes_](const std::string &path) { log->note(path); });
     ev_ = std::make_unique<se::stackless_evaluator>(env_);
     // Special-form gate: allow control flow, binding, functions, literals and loops (all
     // step-capped or bounded); DENY the code-generation / object-graph forms. Static so the
@@ -728,12 +743,19 @@ public:
 
   // Reset the per-FRAME aggregate budget — call once at the top of each render frame,
   // before the walk. Once the frame's cumulative predicate-eval time is spent, the
-  // remaining predicates this frame skip evaluation and degrade fail-safe (hidden) with a
-  // one-time warning, so N reactive widgets cannot together stall the frame.
+  // remaining predicates this frame skip evaluation, and the Runtime keeps their last value,
+  // so N reactive widgets cannot together stall the frame. A cached result is not run, so it
+  // costs the budget nothing.
   void begin_frame(double budget_seconds = kFrameBudgetSeconds) {
     frame_ = se::time_budget(budget_seconds);
     resolve_data_settings();
+    has_frame_.clear();
+    if (++frame_no_ % kSweepFrames == 0)
+      sweep();
   }
+
+  // How many expressions ran (a result reused from the cache is not one), since it was made.
+  std::uint64_t evaluations() const { return evaluated_; }
 
   // §12: re-chroot the read-lane to `path` so a mounted fragment's predicates read state
   // relative to its own sub-prefix, exactly as its widget binds resolve there. The evaluator,
@@ -744,6 +766,7 @@ public:
       return;
     se::apply_chroot(ctx_, cvc::state::instance(app), path);
     root_path_ = path;
+    scope_ = &cache_[root_path_]; // unordered_map: the element stays where it is
   }
 
   struct Outcome {
@@ -752,8 +775,9 @@ public:
     bool skipped = false; // not evaluated: the frame's budget was spent (not a broken predicate)
   };
   struct StringOutcome {
-    std::string value; // display string, or the caller's `dflt` on any failure
-    std::string error; // empty on success; a diagnostic otherwise
+    std::string value;    // display string, or the caller's `dflt` on any failure
+    std::string error;    // empty on success; a diagnostic otherwise
+    bool skipped = false; // not evaluated: the frame's budget was spent
   };
 
   // Evaluate `src` as a boolean predicate (visible_when / enabled_when / …). Fail-safe: a
@@ -770,13 +794,14 @@ public:
   StringOutcome eval_string(const std::string &src, const std::string &dflt) {
     const RawOutcome o = eval_raw(src);
     if (!o.error.empty())
-      return {dflt, o.error};
+      return {dflt, o.error, o.skipped};
     return {display_string(o.value), std::string()};
   }
 
   struct StringListOutcome {
     std::vector<std::string> value; // empty on failure or a non-list/nil result
     std::string error;              // empty on success
+    bool skipped = false;           // not evaluated: the frame's budget was spent
   };
 
   // Evaluate `src` and coerce a LIST result to display strings (computed combo options). A
@@ -786,7 +811,7 @@ public:
   StringListOutcome eval_string_list(const std::string &src) {
     const RawOutcome o = eval_raw(src);
     if (!o.error.empty())
-      return {{}, o.error};
+      return {{}, o.error, o.skipped};
     std::vector<std::string> out;
     if (auto *l = std::get_if<se::list_ptr>(&o.value.v)) {
       if (*l)
@@ -802,8 +827,9 @@ public:
   }
 
   struct IntOutcome {
-    int64_t value;     // the caller's `dflt` on any failure
-    std::string error; // empty on success
+    int64_t value;        // the caller's `dflt` on any failure
+    std::string error;    // empty on success
+    bool skipped = false; // not evaluated: the frame's budget was spent
   };
 
   // Evaluate `src` and coerce the result to an integer (a repeat count). int as-is, double
@@ -811,7 +837,7 @@ public:
   IntOutcome eval_int(const std::string &src, int64_t dflt) {
     const RawOutcome o = eval_raw(src);
     if (!o.error.empty())
-      return {dflt, o.error};
+      return {dflt, o.error, o.skipped};
     if (auto *i = std::get_if<int64_t>(&o.value.v))
       return {*i, std::string()};
     if (auto *d = std::get_if<double>(&o.value.v)) {
@@ -844,6 +870,15 @@ private:
     const se::value_t *expr = compile(src);
     if (!expr)
       return {{}, "ari: reactive expr parse error in \"" + src + "\""};
+    sync_writes();
+    const auto hit = scope_->find(src);
+    if (hit != scope_->end()) {
+      if (fresh(hit->second)) { // nothing it read was written: last time's result
+        hit->second.used = frame_no_;
+        return {hit->second.value, std::string()};
+      }
+      scope_->erase(hit);
+    }
     const double remaining = frame_.remaining();
     if (remaining <= 0.0)
       return {{}, "ari: reactive expr \"" + src + "\" skipped — per-frame budget exhausted", true};
@@ -852,6 +887,14 @@ private:
       const se::evaluator_state &st;
       ~charge_frame() { frame.stop(st.stats.get_step_count()); }
     };
+    Reads reads; // what it reads, noted by the readers' wrappers
+    rec_ = &reads;
+    struct stop_noting {
+      Reads *&rec;
+      ~stop_noting() { rec = nullptr; }
+    } const stop{rec_};
+    const std::uint64_t made_at = gen_;
+    ++evaluated_;
     try {
       se::evaluator_state st = ev_->create_state(*expr);
       st.data_step_nodes = data_step_nodes_;
@@ -863,6 +906,8 @@ private:
       se::value_t r = ev_->run(st, kMaxSteps, std::min(kMaxSeconds, remaining));
       if (!st.done) // step cap: run() returns nil with done==false
         return {{}, "ari: reactive expr \"" + src + "\" exceeded the eval budget (step cap)"};
+      if (!reads.live)
+        keep(src, r, std::move(reads), made_at);
       return {std::move(r), std::string()};
     } catch (const se::evaluation_timeout &) {
       return {{}, "ari: reactive expr \"" + src + "\" exceeded the eval budget (time cap)"};
@@ -911,6 +956,195 @@ private:
     if (data_step_nodes_ == 0)
       data_step_nodes_ = host.step_nodes;
   }
+
+  // ---- §2.1 the result cache ----------------------------------------------------------------
+
+  // What one evaluation read: the state paths (absolute, normalized; a whole scope as its root),
+  // the (has? …) names it asked and their answers, and whether it read something no write signals
+  // (the clock, an expiry, a node through a link), which makes its result one not to keep.
+  struct Reads {
+    std::vector<std::string> paths;
+    std::vector<std::pair<std::string, bool>> asked;
+    bool live = false;
+  };
+  struct Cached {
+    se::value_t value;
+    Reads reads;
+    std::uint64_t gen = 0;  // the write generation it was made at
+    std::uint64_t used = 0; // the frame it was last used in
+  };
+
+  // The paths written since the frame thread last looked, noted on the writer's thread.
+  struct WriteLog {
+    std::mutex mu;
+    std::vector<std::string> paths;
+    bool overflow = false; // more than kMaxPendingWrites: every result is stale
+    std::atomic<std::uint64_t> count{0};
+    void note(const std::string &path) {
+      std::lock_guard<std::mutex> lock(mu);
+      if (paths.size() < kMaxPendingWrites)
+        paths.push_back(path);
+      else
+        overflow = true;
+      count.fetch_add(1, std::memory_order_release);
+    }
+  };
+
+  // Wrap each state reader to note the path it reads, and the clock and expiry readers to mark a
+  // result live (never kept). One bound here but not as a plain native can't be wrapped: an
+  // expression that names it is never kept.
+  void watch_reads() {
+    const auto wrap = [this](const char *name, bool live) {
+      const se::value_t *v = env_->lookup(name);
+      if (!v)
+        return; // not bound here: nothing to note
+      const se::native_fn *fn = std::get_if<se::native_fn>(&v->v);
+      if (!fn) {
+        unwatched_.emplace_back(name);
+        return;
+      }
+      se::native_fn inner = *fn;
+      env_->set(name, se::value_t(se::native_fn(
+                          [this, inner, live](std::span<const se::value_t> args) -> se::value_t {
+                            if (rec_) {
+                              if (live)
+                                rec_->live = true;
+                              else
+                                note_read(args);
+                            }
+                            return inner(args);
+                          })));
+    };
+    for (const char *name :
+         {"state-get", "state-exists", "state-children", "state-data-get", "state-json"})
+      wrap(name, false);
+    for (const char *name : {"time-now", "state-is-expired", "state-has-expiry"})
+      wrap(name, true);
+  }
+
+  // A reader's path, absolute: under the scope; no path (or not a string) reads the whole scope.
+  // A read through a link sees the target, whose writes are signalled under the target's own
+  // path, so such a result is not kept.
+  void note_read(std::span<const se::value_t> args) {
+    const std::string *rel = args.empty() ? nullptr : std::get_if<std::string>(&args[0].v);
+    if (rel && !rel->empty() && ctx_.root) {
+      std::vector<cvc::state::state_ptr> chain;
+      ctx_.root->findThroughLinksShared(*rel, &chain);
+      for (const cvc::state::state_ptr &n : chain)
+        if (n && n->isLink()) {
+          rec_->live = true;
+          return;
+        }
+    }
+    const std::string path = !rel || rel->empty() ? root_path_
+                             : root_path_.empty() ? *rel
+                                                  : root_path_ + "." + *rel;
+    rec_->paths.push_back(cvc::state::normalize_path(path));
+  }
+
+  // (has? NAME), asked once a frame per name; an evaluation notes what it asked.
+  bool has_answer(const std::string &name) {
+    const auto it = has_frame_.find(name);
+    const bool v = it != has_frame_.end() ? it->second : (has_frame_[name] = has_(name));
+    if (rec_)
+      rec_->asked.emplace_back(name, v);
+    return v;
+  }
+
+  // The writes since the last look, as generations: a written path's own (node_gen_), and the
+  // newest write at or under each path (sub_gen_, the root's "" included).
+  void sync_writes() {
+    if (writes_->count.load(std::memory_order_acquire) == writes_seen_)
+      return;
+    std::vector<std::string> paths;
+    bool overflow = false;
+    {
+      std::lock_guard<std::mutex> lock(writes_->mu);
+      paths.swap(writes_->paths);
+      overflow = writes_->overflow;
+      writes_->overflow = false;
+      writes_seen_ = writes_->count.load(std::memory_order_relaxed);
+    }
+    ++gen_;
+    if (overflow || node_gen_.size() + sub_gen_.size() > kMaxWriteKeys) {
+      node_gen_.clear();
+      sub_gen_.clear();
+      all_gen_ = gen_; // every result made before now is stale
+      return;
+    }
+    for (const std::string &p : paths) {
+      node_gen_[p] = gen_;
+      sub_gen_[p] = gen_;
+      for (std::size_t i = p.rfind('.'); i != std::string::npos && i > 0; i = p.rfind('.', i - 1))
+        sub_gen_[p.substr(0, i)] = gen_;
+      sub_gen_[std::string()] = gen_;
+    }
+  }
+
+  // Whether `c` is what running it now would give: no write since on what it read (the path, an
+  // ancestor or a descendant), and the same (has? …) answers.
+  bool fresh(const Cached &c) {
+    for (const auto &[name, v] : c.reads.asked)
+      if (has_answer(name) != v)
+        return false;
+    if (c.gen == gen_)
+      return true;
+    if (c.gen < all_gen_)
+      return false;
+    const auto newer = [&](const std::unordered_map<std::string, std::uint64_t> &m,
+                           const std::string &key) {
+      const auto it = m.find(key);
+      return it != m.end() && it->second > c.gen;
+    };
+    for (const std::string &r : c.reads.paths) {
+      if (newer(sub_gen_, r))
+        return false;
+      for (std::size_t i = r.rfind('.'); i != std::string::npos && i > 0; i = r.rfind('.', i - 1))
+        if (newer(node_gen_, r.substr(0, i)))
+          return false;
+    }
+    return true;
+  }
+
+  void keep(const std::string &src, const se::value_t &v, Reads reads, std::uint64_t made_at) {
+    for (const std::string &name : unwatched_)
+      if (src.find(name) != std::string::npos)
+        return; // it may have read what no wrapper noted
+    std::sort(reads.paths.begin(), reads.paths.end());
+    reads.paths.erase(std::unique(reads.paths.begin(), reads.paths.end()), reads.paths.end());
+    Cached &c = (*scope_)[src];
+    c.value = v;
+    c.reads = std::move(reads);
+    c.gen = made_at;
+    c.used = frame_no_;
+  }
+
+  // Drop the results no frame used for kSweepFrames (a repeat's rows scrolled away, a closed
+  // window), and the scopes left empty (not the current one).
+  void sweep() {
+    for (auto s = cache_.begin(); s != cache_.end();) {
+      for (auto it = s->second.begin(); it != s->second.end();)
+        it = frame_no_ - it->second.used > kSweepFrames ? s->second.erase(it) : std::next(it);
+      s = s->second.empty() && &s->second != scope_ ? cache_.erase(s) : std::next(s);
+    }
+  }
+
+  static constexpr std::size_t kMaxPendingWrites = 4096; // more in one frame: all stale
+  static constexpr std::size_t kMaxWriteKeys = 65536;    // more paths written: start over
+  static constexpr std::uint64_t kSweepFrames = 300;
+
+  std::function<bool(const std::string &)> has_;
+  std::unordered_map<std::string, bool> has_frame_; // this frame's (has? …) answers
+  std::vector<std::string> unwatched_;              // readers bound but not wrapped
+  // scope -> expression source -> result
+  std::unordered_map<std::string, std::unordered_map<std::string, Cached>> cache_;
+  std::unordered_map<std::string, Cached> *scope_ = nullptr; // the current scope's
+  std::shared_ptr<WriteLog> writes_ = std::make_shared<WriteLog>();
+  boost::signals2::scoped_connection watch_;
+  std::uint64_t writes_seen_ = 0, gen_ = 0, all_gen_ = 0;
+  std::unordered_map<std::string, std::uint64_t> node_gen_, sub_gen_;
+  Reads *rec_ = nullptr; // the evaluation running now, noting what it reads
+  std::uint64_t frame_no_ = 0, evaluated_ = 0;
 
   static constexpr uint64_t kMaxSteps = 100'000; // per-eval step cap (a predicate is tiny)
   static constexpr double kMaxSeconds = 0.005;   // per-eval time cap (5 ms)
@@ -1730,7 +1964,13 @@ struct Runtime::Impl {
   // A visible_when / enabled_when / disabled_when predicate's value: `dflt` when it is broken
   // (warned once), and last frame's value when this frame's budget ran out before it.
   bool predicate(const std::string &src, bool dflt);
+  // §2.1 a read-lane expression the frame's budget skipped is not the document's fault, so it is
+  // never a warning: it keeps the value it had last frame, or its fail-safe one where it never
+  // ran. These hold each expression's last value; `reactive_skips` counts the skips.
   std::unordered_map<std::string, bool> last_good_predicate;
+  std::unordered_map<std::string, std::string> last_good_text;
+  std::unordered_map<std::string, std::vector<std::string>> last_good_options;
+  std::uint64_t reactive_skips = 0;
   // §4 read-lane: is `w` disabled (greyed, non-interactive) this frame? True when
   // enabled_when is falsy OR disabled_when is truthy. Fail-safe DISABLED on a broken
   // predicate.
@@ -1757,10 +1997,11 @@ bool Runtime::Impl::predicate(const std::string &src, bool dflt) {
   const ReactiveEngine::Outcome o = ensure_reactive().eval_bool(src, dflt);
   if (o.skipped) {
     // The frame's budget ran out before it (a slow frame in wasm, a big feed): keep last frame's
-    // answer rather than hide or disable the widget for a frame, which flickers it.
+    // answer rather than hide or disable the widget for a frame, which flickers it; never ran, the
+    // fail-safe one. No warning: the document did nothing wrong.
+    ++reactive_skips;
     const auto it = last_good_predicate.find(src);
-    if (it != last_good_predicate.end())
-      return it->second;
+    return it != last_good_predicate.end() ? it->second : dflt;
   }
   if (!o.error.empty())
     warn_once(o.error);
@@ -1787,34 +2028,72 @@ bool Runtime::Impl::disabled(const Widget &w) {
   return false;
 }
 
+namespace {
+
+// Remember `v` as `key`'s last value, copying only when it changed.
+template <class Map, class V> void keep_last(Map &m, const std::string &key, const V &v) {
+  auto it = m.find(key);
+  if (it == m.end())
+    m.emplace(key, v);
+  else if (!(it->second == v))
+    it->second = v;
+}
+
+} // namespace
+
 std::string Runtime::Impl::eval_text(const std::string &expr) {
   const ReactiveEngine::StringOutcome o =
       ensure_reactive().eval_string(expr, /*dflt=*/std::string());
+  if (o.skipped) { // last frame's text (none: empty), not a warning
+    ++reactive_skips;
+    const auto it = last_good_text.find(expr);
+    return it != last_good_text.end() ? it->second : std::string();
+  }
   if (!o.error.empty())
     warn_once(o.error);
+  else
+    keep_last(last_good_text, expr, o.value);
   return o.value;
 }
 
 std::string Runtime::Impl::eval_text_or_literal(const std::string &expr) {
   const ReactiveEngine::StringOutcome o =
       ensure_reactive().eval_string(expr, /*dflt=*/std::string());
+  if (o.skipped) { // last frame's text (none: empty), not the expression's own text
+    ++reactive_skips;
+    const auto it = last_good_text.find(expr);
+    return it != last_good_text.end() ? it->second : std::string();
+  }
   // Success -> the computed value; failure -> the literal verbatim (no warning: a tooltip that
   // starts with '(' is far more likely plain text than a broken expression).
-  return o.error.empty() ? o.value : expr;
+  if (!o.error.empty())
+    return expr;
+  keep_last(last_good_text, expr, o.value);
+  return o.value;
 }
 
 std::vector<std::string> Runtime::Impl::eval_options(const std::string &expr) {
   const ReactiveEngine::StringListOutcome o = ensure_reactive().eval_string_list(expr);
+  if (o.skipped) { // last frame's options (none: empty), not a warning
+    ++reactive_skips;
+    const auto it = last_good_options.find(expr);
+    return it != last_good_options.end() ? it->second : std::vector<std::string>();
+  }
   if (!o.error.empty())
     warn_once(o.error);
+  else
+    keep_last(last_good_options, expr, o.value);
   return o.value;
 }
 
 int Runtime::Impl::eval_count(const std::string &expr) {
   constexpr int64_t kMaxRepeat = 4096; // a UI with thousands of repeated widgets is pathological
   const ReactiveEngine::IntOutcome o = ensure_reactive().eval_int(expr, /*dflt=*/0);
-  if (!o.error.empty()) {
+  if (o.skipped)
+    ++reactive_skips; // the budget's, not the document's: no warning
+  else if (!o.error.empty())
     warn_once(o.error);
+  if (!o.error.empty()) {
     // The eval fail-safed (budget exhausted / broken). Rather than collapse the repeated list to 0
     // this frame, reuse the last count this expression yielded successfully (if any) — a transient
     // skip then leaves the roster/peer-window list unchanged instead of blinking empty. With no
@@ -4813,6 +5092,12 @@ void Runtime::render() { m_->render(); }
 
 void Runtime::set_frame_clock(std::optional<double> seconds) { m_->pinned_clock = seconds; }
 double Runtime::frame_clock() const { return m_->frame_t; }
+std::uint64_t Runtime::reactive_skip_count() const { return m_->reactive_skips; }
+
+std::uint64_t Runtime::reactive_eval_count() const {
+  return m_->reactive ? m_->reactive->evaluations() : 0;
+}
+
 void Runtime::set_reactive_frame_budget(double seconds) {
   m_->reactive_budget = seconds > 0.0 ? seconds : 0.0;
 }

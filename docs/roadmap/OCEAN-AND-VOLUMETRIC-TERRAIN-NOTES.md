@@ -1,5 +1,7 @@
 # External Ocean Water & Volumetric Terrain — Feasibility Companion
 
+**Next (2026-11-09):** [`OCEAN-AND-WEATHER-ROADMAP.md`](OCEAN-AND-WEATHER-ROADMAP.md) carries the ported FFT ocean forward: waves that react to shores, a deterministic CPU wave model that cvc::physics floats bodies on, interactive wakes and boats, wind, rain and storms, the rest of the ABYSSAL port, and an Ariadne `water` node for terrain_lab.ari in local and arisrv scenes.
+
 **Status:** feasibility notes, revision 1 — companion to `WATER-RENDERING-ROADMAP.md`, `LSYSTEM-LABORATORY-ROADMAP.md`, and `VISIBILITY-AND-LOD-ROADMAP.md`. Not authoritative over them; where this note and a roadmap disagree, the roadmap wins and this note is the thing to correct.
 **Scope:** two questions raised together — (A) can we integrate the *ABYSSAL* WebGL FFT-ocean (`github.com/Token-Gremlin/natural-disasters`) into cvcGL, "via WASM"? (B) should terrain and onshore water become tetrahedral meshes, can an L-system build terrain tets, and can terrain be deformable under the new LOD?
 **Provenance markers:** **[R]** cited from an in-tree roadmap with section/line. **[C]** read directly from cvcGL/libcvc source with file:line. **[X]** read from the external ABYSSAL source (via summarizer — *not* byte-exact; verify before porting). **[P]** projection/derivation, not an independent cvcGL measurement. **[E]** estimate.
