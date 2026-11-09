@@ -196,6 +196,7 @@ Widget substitute_index(const Widget &w, int index) {
   out.on_top = replace_all(out.on_top, kTok, idx);
   out.hint = replace_all(out.hint, kTok, idx);
   out.send = replace_all(out.send, kTok, idx);
+  out.on_change = replace_all(out.on_change, kTok, idx);
   out.visible_when = replace_all(out.visible_when, kTok, idx);
   out.enabled_when = replace_all(out.enabled_when, kTok, idx);
   out.disabled_when = replace_all(out.disabled_when, kTok, idx);
@@ -1009,6 +1010,9 @@ struct Runtime::Impl {
     std::function<void(const std::string &)> done;
     // §6.6 the functions of the scope it was started in (a FunctionScope prelude), run first.
     std::string functions;
+    // A latest-only handler's key (on_change: its draft's path): a later one with the same key
+    // replaces it while it waits for the drain.
+    std::string coalesce;
   };
   std::vector<QueuedAction> queued_events;
 
@@ -1402,6 +1406,20 @@ struct Runtime::Impl {
       queued_events.push_back({event, current_prefix(), true, x, y, dx, dy, button});
       queued_events.back().functions = current_functions();
     }
+  }
+  // As enqueue_fields, but only the latest for `key` (a message field's draft path) waits for the
+  // drain (on_change: a burst of keys between two drains runs it once, with the draft as it is).
+  void enqueue_latest(const std::string &key, const std::string &event,
+                      std::vector<std::pair<std::string, std::string>> fields) {
+    if (event.empty())
+      return;
+    for (QueuedAction &q : queued_events)
+      if (q.coalesce == key && q.event == event) {
+        q.event_fields = std::move(fields);
+        return;
+      }
+    enqueue_fields(event, std::move(fields));
+    queued_events.back().coalesce = key;
   }
   // Enqueue a handler whose program gets an `event` dict of FIELDS (strings).
   void enqueue_fields(const std::string &event,
@@ -2143,10 +2161,15 @@ void Runtime::Impl::emit_node(const Widget &w) {
     o.max_lines = w.max_lines;
     o.max_length = w.max_length;
     o.send = w.send;
+    o.live = w.live || !w.on_change.empty();
     const MessageEdit e = b.message_input(label, path.c_str(), cur, o);
     if (e.submitted) {
       write<std::string>(app, path, std::string()); // sent: the draft is done with
       enqueue_fields(w.on, {{"text", e.value}});    // a program reads (get-attr event "text")
+      enqueue_latest(path, w.on_change, {{"text", std::string()}});
+    } else if (o.live && e.changed) {
+      write<std::string>(app, path, e.value);                 // live: the draft as it is typed
+      enqueue_latest(path, w.on_change, {{"text", e.value}}); // keys between drains: the last
     } else if (e.committed) {
       write<std::string>(app, path, e.value); // focus left: keep the draft
     }

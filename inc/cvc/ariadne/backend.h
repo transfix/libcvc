@@ -80,6 +80,10 @@ struct MessageInputOptions {
   int max_lines = 4;     // the field grows to this many lines, then scrolls
   int max_length = 0;    // bytes; 0: no cap
   std::string send;      // a button beside the field that sends it, so labelled ("" none)
+  // The core writes the draft to state as it changes (`live: true`, `on_change:`): a value in state
+  // the field did not report since is the document's own (a completion), and the field takes it,
+  // the cursor at its end, even while it is being edited.
+  bool live = false;
 };
 
 // What the core hands a backend to draw a text buffer (Kind::TextView).

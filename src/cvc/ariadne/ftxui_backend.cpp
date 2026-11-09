@@ -709,6 +709,7 @@ struct FtxuiBackend::Impl {
   struct Edit {
     std::string text;
     std::size_t cursor = 0; // byte offset, on a UTF-8 boundary
+    std::string reported;   // a live message field: the text it last reported (message_input)
   };
   // A text_view's wrapped rows and scroll.
   struct TextView {
@@ -2934,6 +2935,13 @@ MessageEdit FtxuiBackend::message_input(const char *label, const char *key,
   const auto fits = [&](const std::string &t, std::size_t add) {
     return opts.max_length <= 0 || t.size() + add <= static_cast<std::size_t>(opts.max_length);
   };
+  // Live (the core writes each change): a draft in state this field did not report is the
+  // document's own, a completion, which it takes, the cursor at its end.
+  if (opts.live && it != m.edits.end() && current != it->second.reported &&
+      current != it->second.text) {
+    it->second.text = current;
+    it->second.cursor = current.size();
+  }
   if (m.blur_commit.erase(id)) {
     if (it != m.edits.end()) { // focus left with a draft: keep it
       e.value = it->second.text;
@@ -3006,6 +3014,8 @@ MessageEdit FtxuiBackend::message_input(const char *label, const char *key,
     e.value = it->second.text;
     e.changed = e.value != current;
   }
+  if (it != m.edits.end())
+    it->second.reported = e.submitted ? std::string() : e.value;
   // "label: [text]", a line per line of the text, the cursor an inverted cell while focused; the
   // hint, dimmed, while it is empty and not focused.
   const bool focused = m.has_focus(id);

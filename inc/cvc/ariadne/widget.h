@@ -384,6 +384,12 @@ struct Widget {
   int max_lines = 4;
   int max_length = 0;
   std::string send;
+  // `live: true`: the draft is written to `bind` as it changes, not only when focus leaves.
+  // `on_change` (an event name or a program, implies live): runs each time it changes, with
+  // `event.text` the draft, so a document can count it or complete a #tag in it (write the
+  // completed draft to `bind`: the field takes it).
+  bool live = false;
+  std::string on_change;
 
   // §12 module mount (load:): when non-empty, this widget is a MOUNT POINT — a relative
   // state-path segment (e.g. "includes.stats") appended to the enclosing scope, so its whole

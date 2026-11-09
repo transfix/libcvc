@@ -562,6 +562,37 @@ TEST(AriadneFtxui, MessageFieldSendsOnEnterAndTakesNewLines) {
   EXPECT_EQ(val(u.app, "one"), "ab") << "multiline: false takes no new line";
 }
 
+// §5.15 on_change: the draft reaches bind: as it is typed, and on_change runs with event.text each
+// time; a draft the document writes there (a completed #tag) is taken by the field being edited,
+// the cursor at its end.
+TEST(AriadneFtxui, MessageFieldLiveDraftAndACompletion) {
+  REQUIRE_FTXUI();
+  Widget msg = message_input("Say", "draft", "(state-set \"sent\" (get-attr event \"text\"))");
+  msg.on_change = "(state-set \"count\" (str (string.length (get-attr event \"text\"))))";
+  Term t(group({msg, checkbox("X", "x")}));
+  const auto settle = [&] {
+    for (int i = 0; i < 50; ++i)
+      t.rt.drain();
+  };
+  t.key("Tab");
+  t.type("#cv");
+  settle();
+  EXPECT_EQ(val(t.app, "draft"), "#cv") << "written as it is typed, the focus still there";
+  EXPECT_EQ(val(t.app, "count"), "3");
+  cvc::state::instance(t.app)("draft").value(std::string("#cvc ")); // the document completes it
+  t.draw();
+  EXPECT_TRUE(t.shows("Say: [#cvc ")) << t.screen;
+  t.type("ok");
+  settle();
+  EXPECT_EQ(val(t.app, "draft"), "#cvc ok");
+  EXPECT_EQ(val(t.app, "count"), "7");
+  t.key("Return");
+  settle();
+  EXPECT_EQ(val(t.app, "sent"), "#cvc ok");
+  EXPECT_EQ(val(t.app, "draft"), "");
+  EXPECT_EQ(val(t.app, "count"), "0") << "a sent draft is an empty one";
+}
+
 // A text view shows the last rows of its text, scrolls with the keys and the wheel, keeps what is
 // in view when lines are added above it, and reports the top (on_top) once the user gets there. A
 // long line wraps at the view's width; the gutter shows which way there is more.
