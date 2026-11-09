@@ -242,7 +242,7 @@ const char *const kAriSchema = R"ARISCHEMA({
         "poster": {"type": "string"},
         "controls": {"$ref": "#/$defs/flag"},
         "fullscreen": {"$ref": "#/$defs/flag"},
-        "badge": {"type": "string"},
+        "badge": {"type": ["string", "number"]},
         "autoplay": {"$ref": "#/$defs/flag"},
         "loop": {"$ref": "#/$defs/flag"},
         "muted": {"$ref": "#/$defs/flag"},
